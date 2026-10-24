@@ -123,7 +123,14 @@ func (e *EditTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 	if e == nil {
 		return nil
 	}
-	return newLocalCoreRuntimeWith(ctx, &e.sandboxPolicy, nil)
+	runtime := newLocalCoreRuntimeWith(ctx, &e.sandboxPolicy, nil)
+	// Carry the tool's own version-control probe into the runtime: a host (or a
+	// test) that decides where `.backups/` is wanted must actually be consulted,
+	// otherwise the seam silently does nothing.
+	if local, ok := runtime.(*localCoreRuntime); ok && e.insideGitWorkTree != nil {
+		local.insideGitWorkTree = e.insideGitWorkTree
+	}
+	return runtime
 }
 
 // CoreRuntime exposes apply_patch's sandbox as a toolcore.Runtime.
@@ -399,7 +406,10 @@ func (r *localCoreRuntime) CheckMutation(tool, absPath string, raw []byte, hasEx
 	if inspectErr == nil {
 		currentRevision = state.Revision
 	}
-	refusal := staleWriteFailure(absPath, currentRevision, verdict.LastRecord, true)
+	// Only write takes expected_sha256. Advertising it from another tool would
+	// send the caller into a retry loop with an argument that tool ignores.
+	supportsExplicitRevision := tool == "write"
+	refusal := staleWriteFailure(absPath, currentRevision, verdict.LastRecord, supportsExplicitRevision)
 	return toolkit.ResultFromToolkit(refusal), nil
 }
 

@@ -155,7 +155,7 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 	summary.Files = len(mutatedPaths)
 	message := summary.message()
 	if strings.TrimSpace(combinedPatch) != "" {
-		message = formatEditSuccessContent(message, combinedPatch)
+		message = mutatecore.FormatEditSuccessContent(message, combinedPatch)
 	}
 
 	return &toolkit.ToolResult{

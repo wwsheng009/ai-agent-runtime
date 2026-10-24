@@ -47,7 +47,16 @@ func Inspect(path string, maxBytes int64) (State, error) {
 		return state, errorf(CodeUnsupported, "pass a regular file", "target is not a regular file (%s): %s", fileModeReason(info.Mode()), path)
 	}
 	if maxBytes > 0 && info.Size() > maxBytes {
-		return state, errorf(CodeUnsupported, "split the file or raise the configured limit", "file size %d exceeds limit %d: %s", info.Size(), maxBytes, path)
+		return state, &Error{
+			Code:       CodeUnsupported,
+			Message:    fmt.Sprintf("file size %d exceeds limit %d: %s", info.Size(), maxBytes, path),
+			NextAction: "split the file or raise the configured limit",
+			Metadata: map[string]any{
+				"failure_class":  "file_too_large",
+				"file_size":      info.Size(),
+				"max_file_bytes": maxBytes,
+			},
+		}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -287,12 +296,23 @@ type EditOptions struct {
 type EditResult struct {
 	Path         string
 	Replacements int
-	OldContent   string
-	NewContent   string
-	Encoding     Encoding
-	SizeBefore   int64
-	SizeAfter    int64
+	// Occurrences is how many times the matched text appears in the file. A
+	// caller that asked for the first N of several wants to know the total.
+	Occurrences int
+	// MatchedNew is the replacement text as it was written, including the file's
+	// own line-ending style. A caller that wants to show the edited region uses
+	// it to locate the change in the new content.
+	MatchedNew string
+	OldContent string
+	NewContent string
+	Encoding   Encoding
+	SizeBefore int64
+	SizeAfter  int64
 }
+
+// EditMaxFileBytes bounds the file an in-place edit will read. Past it the
+// recovery route is a streaming tool, not a bigger buffer.
+const EditMaxFileBytes = 10 * 1024 * 1024
 
 // Edit replaces an exact string. Ambiguous matches are refused unless the
 // caller explicitly chooses replace_all or a replacement_count.
@@ -307,7 +327,7 @@ func Edit(path, oldString, newString string, opts EditOptions) (EditResult, erro
 		return EditResult{}, errorf(CodeInvalidArgument, "pass a positive replacement_count", "replacement_count must be greater than 0")
 	}
 	if opts.MaxBytes == 0 {
-		opts.MaxBytes = 10 * 1024 * 1024
+		opts.MaxBytes = EditMaxFileBytes
 	}
 	state, err := Inspect(path, opts.MaxBytes)
 	if err != nil {
@@ -320,16 +340,30 @@ func Edit(path, oldString, newString string, opts EditOptions) (EditResult, erro
 		return EditResult{}, errorf(CodeUnsupported, "edit only accepts text files", "target looks binary: %s", path)
 	}
 	text := state.Text
-	matchedOld, matchedNew := editMatch(text, oldString, newString)
-	count := strings.Count(text, matchedOld)
-	if count == 0 {
+	matchedOld, matchedNew, matched := MatchEditStrings(text, oldString, newString)
+	if !matched {
+		// The model's old_string is not in the file even after the recovery
+		// ladder. Returning the closest current lines lets it rebuild the value
+		// without another read round-trip.
+		diagnostic := BuildEditOldStringNotFoundError(text, oldString)
+		metadata := map[string]any{"file_path": path, "failure_class": "stale_context"}
+		if snippet, startLine := FindClosestEditSnippetWithLine(
+			NormalizeLineEndings(text), NormalizeLineEndings(oldString),
+		); snippet != "" && startLine > 0 {
+			metadata["suggested_view_offset"] = startLine - 1
+			metadata["suggested_view_limit"] = 40
+			metadata["current_snippet"] = snippet
+			metadata["current_snippet_start_line"] = startLine
+		}
 		return EditResult{}, &Error{
 			Code:       CodeStaleContext,
-			Message:    "old_string not found after CRLF/LF normalization; re-read the file and copy the exact current text",
-			NextAction: "re-read the file, copy the current lines, and rebuild old_string; do not retry the same value",
-			Metadata:   map[string]any{"file_path": path},
+			Message:    diagnostic,
+			NextAction: StaleEditContextNextAction(),
+			Metadata:   metadata,
 		}
 	}
+	count := strings.Count(text, matchedOld)
+	occurrences := count
 	replacements := 1
 	if opts.ReplaceAll {
 		replacements = count
@@ -339,11 +373,20 @@ func Edit(path, oldString, newString string, opts EditOptions) (EditResult, erro
 			replacements = count
 		}
 	} else if count > 1 {
+		lines := EditOccurrenceLineNumbers(text, matchedOld, EditAmbiguousLineSample)
 		return EditResult{}, &Error{
-			Code:       CodeInvalidArgument,
-			Message:    fmt.Sprintf("old_string occurs %d times; add surrounding context or set replace_all/replacement_count", count),
-			NextAction: "include more surrounding context to make the match unique",
-			Metadata:   map[string]any{"file_path": path, "occurrences": count},
+			Code: CodeInvalidArgument,
+			Message: fmt.Sprintf(
+				"ambiguous edit: old_string 命中 %d 处（行 %s），未做替换。请增加上下文让 old_string 唯一，或显式传 replace_all=true / replacement_count=N。",
+				count, FormatEditOccurrenceLines(lines, count),
+			),
+			NextAction: "ambiguous old_string: extend old_string with surrounding context until it is unique, or pass replace_all=true / replacement_count=N explicitly. Do not retry the same ambiguous old_string unchanged.",
+			Metadata: map[string]any{
+				"file_path":        path,
+				"failure_class":    "ambiguous_edit",
+				"occurrences":      count,
+				"occurrence_lines": lines,
+			},
 		}
 	}
 	updated := text
@@ -360,7 +403,7 @@ func Edit(path, oldString, newString string, opts EditOptions) (EditResult, erro
 	}
 	encoded := Encode(updated, encoding)
 	if updated == text {
-		return EditResult{Path: path, Replacements: replacements, OldContent: text, NewContent: updated, Encoding: encoding, SizeBefore: state.Size, SizeAfter: state.Size}, nil
+		return EditResult{Path: path, Replacements: replacements, Occurrences: occurrences, MatchedNew: matchedNew, OldContent: text, NewContent: updated, Encoding: encoding, SizeBefore: state.Size, SizeAfter: state.Size}, nil
 	}
 	if err := WriteAtomic(path, encoded, opts.Mode); err != nil {
 		return EditResult{}, err
@@ -368,28 +411,14 @@ func Edit(path, oldString, newString string, opts EditOptions) (EditResult, erro
 	return EditResult{
 		Path:         path,
 		Replacements: replacements,
+		Occurrences:  occurrences,
+		MatchedNew:   matchedNew,
 		OldContent:   text,
 		NewContent:   updated,
 		Encoding:     encoding,
 		SizeBefore:   state.Size,
 		SizeAfter:    int64(len(encoded)),
 	}, nil
-}
-
-// editMatch tries the exact pair, then the CRLF/LF variants of old_string.
-// The returned new string uses the same line-ending shape as the matched old
-// string so a CRLF file is not half-converted.
-func editMatch(text, oldString, newString string) (string, string) {
-	if strings.Contains(text, oldString) {
-		return oldString, newString
-	}
-	if strings.Contains(text, strings.ReplaceAll(oldString, "\r\n", "\n")) {
-		return strings.ReplaceAll(oldString, "\r\n", "\n"), strings.ReplaceAll(newString, "\r\n", "\n")
-	}
-	if strings.Contains(text, strings.ReplaceAll(oldString, "\n", "\r\n")) {
-		return strings.ReplaceAll(oldString, "\n", "\r\n"), strings.ReplaceAll(newString, "\n", "\r\n")
-	}
-	return oldString, newString
 }
 
 func contextError(ctx context.Context) error {

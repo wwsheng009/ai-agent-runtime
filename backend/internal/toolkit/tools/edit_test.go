@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 )
 
 func TestEditTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
@@ -563,7 +565,7 @@ func TestFindClosestEditSnippetWithLine_AnchorsOnLaterDistinctiveLine(t *testing
 		"\treturn 1",
 		"}",
 	}, "\n")
-	snippet, start := findClosestEditSnippetWithLine(content, old)
+	snippet, start := mutatecore.FindClosestEditSnippetWithLine(content, old)
 	if start < 6 {
 		t.Fatalf("expected tightened anchor near HelloWorld block, got start=%d snippet=%q", start, snippet)
 	}
@@ -604,7 +606,7 @@ func TestFindClosestEditSnippetWithLine_TokenFallbackWhenFirstLineGone(t *testin
 		"          selector_id: custom-tool-call-namespace",
 		"          operator: exists",
 	}, "\n")
-	snippet, start := findClosestEditSnippetWithLine(content, old)
+	snippet, start := mutatecore.FindClosestEditSnippetWithLine(content, old)
 	if snippet == "" || start <= 0 {
 		t.Fatalf("expected token-fallback closest snippet, got start=%d snippet=%q", start, snippet)
 	}
@@ -702,14 +704,12 @@ func TestEditTool_BackupsInSameSecondAreNotOverwritten(t *testing.T) {
 	if err := os.WriteFile(target, []byte("v0"), 0o644); err != nil {
 		t.Fatalf("write target: %v", err)
 	}
-	tool := NewEditTool()
-
 	// 备份名时间戳只到秒：旧实现同秒内第二次备份会用同一路径 + O_TRUNC
 	// 静默覆盖上一份回滚点。连续取多份快照，断言每份都落在新文件且内容完好。
 	seen := make(map[string]string, 8)
 	for i := 0; i < 8; i++ {
 		content := []byte(fmt.Sprintf("snapshot-%d", i))
-		path, err := tool.createBackup(target, content)
+		path, err := mutatecore.CreateBackup(target, mutatecore.BackupDirName, content)
 		if err != nil {
 			t.Fatalf("createBackup #%d: %v", i, err)
 		}
@@ -810,5 +810,39 @@ func TestEditTool_CreatesBackupOutsideGitWorkTree(t *testing.T) {
 	}
 	if string(got) != "old" {
 		t.Fatalf("backup content = %q, want %q", got, "old")
+	}
+}
+
+// TestEditTool_HonoursInjectedVersionControlProbe is the guard for the seam
+// itself: the probe claims the directory IS version controlled, the opposite of
+// what the default would decide for a temp dir, so a runtime that ignored the
+// injection would still write a backup and fail here.
+func TestEditTool_HonoursInjectedVersionControlProbe(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	tool.insideGitWorkTree = func(string) bool { return true }
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "sample.txt",
+		"old_string": "old",
+		"new_string": "new",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if got, ok := result.Metadata["backup_path"]; ok {
+		t.Fatalf("版本库内不应写本地备份，backup_path=%v", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".backups")); !os.IsNotExist(statErr) {
+		t.Fatalf("probe said version-controlled, so no .backups/ must be created (err=%v)", statErr)
 	}
 }

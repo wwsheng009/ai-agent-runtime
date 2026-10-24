@@ -325,30 +325,69 @@ func (h *editHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	oldString, _ := call.Args["old_string"].(string)
 	if oldString == "" {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "pass a non-empty old_string", fmt.Errorf("old_string is required")), nil
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass a non-empty old_string",
+			fmt.Errorf("old_string 参数缺失或无效")), nil
 	}
 	newString, _ := call.Args["new_string"].(string)
+	if _, present := call.Args["new_string"]; !present {
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass new_string",
+			fmt.Errorf("new_string 参数缺失或无效")), nil
+	}
 	replaceAll, _ := call.Args["replace_all"].(bool)
 	replacementCount := 0
+	replacementCountSet := false
 	if _, present := call.Args["replacement_count"]; present {
+		replacementCountSet = true
 		replacementCount = intArg(call, "replacement_count", 0)
-		if replacementCount <= 0 {
-			return toolcore.Error(toolcore.ErrInvalidArgument, "pass a positive replacement_count",
-				fmt.Errorf("replacement_count must be greater than 0")), nil
+		if replaceAll && replacementCount > 0 {
+			return toolcore.Error(toolcore.ErrInvalidArgument,
+				"choose replace_all or replacement_count",
+				fmt.Errorf("replace_all 与 replacement_count 互斥：请二选一（replace_all=true 替换全部，或 replacement_count=N 只替换前 N 处）")), nil
 		}
-	}
-	if replaceAll && replacementCount > 0 {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "choose replace_all or replacement_count",
-			fmt.Errorf("replace_all and replacement_count are mutually exclusive")), nil
-	}
-	target, failure := authorizeWrite(call, rawPath)
-	if failure != nil {
-		return failure, nil
+		if replacementCount <= 0 {
+			return toolcore.Error(toolcore.ErrInvalidArgument,
+				"pass a positive replacement_count",
+				fmt.Errorf("replacement_count 必须大于 0（收到 %d）", replacementCount)), nil
+		}
 	}
 	if message := ValidateInlinePayload(h.def.Name,
 		InlineField{Name: "old_string", Value: oldString},
 		InlineField{Name: "new_string", Value: newString}); message != "" {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "split the edit into smaller targets", fmt.Errorf("%s", message)), nil
+	}
+	// Edit only ever modifies an existing file. Resolving first and reporting a
+	// missing target with its candidate beats "create the parent directory
+	// first", which describes a write the caller never asked for.
+	target, resolveFailure := resolveWriteTarget(call, rawPath)
+	if resolveFailure != nil {
+		return resolveFailure, nil
+	}
+	if _, statErr := os.Stat(target); statErr != nil && os.IsNotExist(statErr) {
+		message := fmt.Errorf("读取文件失败: %s", rawPath)
+		if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
+			if hint := hinter.PathHint(rawPath); hint != "" {
+				message = fmt.Errorf("读取文件失败: %s\n%s", rawPath, hint)
+			}
+		}
+		return toolcore.Error(toolcore.ErrNotFound, "verify the path with view or ls", message), nil
+	}
+	if ext := DocumentExtensionRefusal(target); ext != "" {
+		content, code := DocumentRefusalContent(h.def.Name, "以文本编辑", target, ext)
+		return &toolcore.Result{
+			Success:    false,
+			OutputKind: toolcore.KindText,
+			Content:    content,
+			ErrorCode:  code,
+			Err:        fmt.Errorf("%s", content),
+			Metadata: map[string]any{
+				"file_path":          displayPath(call, target),
+				"document_refused":   true,
+				"document_extension": ext,
+			},
+		}, nil
+	}
+	if _, failure := authorizeWrite(call, rawPath); failure != nil {
+		return failure, nil
 	}
 	guardResult, readState := checkMutationGuard(call, h.def.Name, target, false)
 	if guardResult != nil {
@@ -381,18 +420,37 @@ func (h *editHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			observer.FileMutated(h.def.Name, target, raw)
 		}
 	}
+	// The unified diff is the cheapest proof that the requested edit is the edit
+	// that landed, and it costs one string bounded by the caller's own payload.
+	patch := UnifiedDiff(display, result.OldContent, result.NewContent)
+	message := fmt.Sprintf("Replaced %d occurrence(s) in %s (%d -> %d bytes).", result.Replacements, display, result.SizeBefore, result.SizeAfter)
+	successMetadata := map[string]any{
+		"file_path":     display,
+		"replacements":  result.Replacements,
+		"occurrences":   result.Occurrences,
+		"bytes_before":  result.SizeBefore,
+		"bytes_after":   result.SizeAfter,
+		"encoding":      result.Encoding.String(),
+		"mutated_paths": []string{display},
+	}
+	if replacementCountSet {
+		successMetadata["replacement_count"] = replacementCount
+	}
+	if patch != "" {
+		successMetadata["patch"] = patch
+		message = FormatEditSuccessContent(message, patch)
+	}
+	// The edited region, quoted with its line numbers: a caller verifying the
+	// change should not need a second read to see what it looks like now.
+	if snippet, startLine := FindClosestEditSnippetWithLine(result.NewContent, result.MatchedNew); snippet != "" && startLine > 0 {
+		successMetadata["edited_snippet"] = FormatEditClosestLines(snippet, startLine)
+		successMetadata["edited_snippet_start_line"] = startLine
+	}
 	return shapeResult(call, h.def.Name, &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
-		Content:    fmt.Sprintf("Replaced %d occurrence(s) in %s (%d -> %d bytes).", result.Replacements, display, result.SizeBefore, result.SizeAfter),
-		Metadata: mergeMetadata(map[string]any{
-			"file_path":     display,
-			"replacements":  result.Replacements,
-			"bytes_before":  result.SizeBefore,
-			"bytes_after":   result.SizeAfter,
-			"encoding":      result.Encoding.String(),
-			"mutated_paths": []string{display},
-		}, readState, backupPath),
+		Content:    message,
+		Metadata:   mergeMetadata(successMetadata, readState, backupPath),
 	})
 }
 
@@ -706,6 +764,19 @@ func mutationFailure(err error) *toolcore.Result {
 	if nextAction != "" {
 		content += fmt.Sprintf(" (next: %s)", nextAction)
 	}
+	// A classified mutation failure can carry structured evidence (which lines
+	// matched, how large the file was). Dropping it would leave the caller with
+	// prose where the tool had facts.
+	metadata := map[string]any{}
+	var coded *Error
+	if errors.As(err, &coded) {
+		for key, value := range coded.Metadata {
+			metadata[key] = value
+		}
+	}
+	if len(metadata) == 0 {
+		metadata = nil
+	}
 	// A precondition failure is not a generic mutation error: callers assert on
 	// it (runtimeerrors.ErrWritePrecondition) to decide whether to re-read and
 	// retry. Carry the stable identity alongside the code so that check keeps
@@ -722,6 +793,7 @@ func mutationFailure(err error) *toolcore.Result {
 		Content:    content,
 		ErrorCode:  code,
 		NextAction: nextAction,
+		Metadata:   metadata,
 		// The legacy MCP projection renders Result.Err when it is non-nil, so
 		// carry the classified text here instead of the bare mutatecore message.
 		Err: cause,

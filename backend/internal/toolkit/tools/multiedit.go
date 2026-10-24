@@ -9,6 +9,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -256,9 +257,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 
 	// 按顺序应用每个编辑操作
 	for i, edit := range edits {
-		matchedOld, matchedNew, ok := matchEditStrings(result, edit.OldString, edit.NewString)
+		matchedOld, matchedNew, ok := mutatecore.MatchEditStrings(result, edit.OldString, edit.NewString)
 		if !ok {
-			errText := buildEditOldStringNotFoundError(result, edit.OldString).Error()
+			errText := mutatecore.BuildEditOldStringNotFoundError(result, edit.OldString)
 			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: %s", i, errText))
 			ref := truncateDiagnosticText(edit.OldString, 60)
 			if row := toolresult.FailedItemMap(toolresult.IntPtr(i), filePath, ref, errText); row != nil {
@@ -304,9 +305,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		// stale context: re-view and rebuild, never blind-retry the same payload.
 		if len(failedEdits) > 0 {
 			meta["failure_class"] = "stale_context"
-			if closest, startLine := findClosestEditSnippetWithLine(
-				normalizeEditLineEndings(originalContent),
-				normalizeEditLineEndings(edits[0].OldString),
+			if closest, startLine := mutatecore.FindClosestEditSnippetWithLine(
+				mutatecore.NormalizeLineEndings(originalContent),
+				mutatecore.NormalizeLineEndings(edits[0].OldString),
 			); closest != "" && startLine > 0 {
 				meta["suggested_view_offset"] = startLine - 1
 				meta["suggested_view_limit"] = 40
@@ -316,7 +317,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			return toolResultFailureWithCode(
 				fmt.Errorf("%s", detail),
 				string(runtimeerrors.ErrToolStaleContext),
-				staleEditContextNextAction(),
+				mutatecore.StaleEditContextNextAction(),
 				meta,
 			), nil
 		}

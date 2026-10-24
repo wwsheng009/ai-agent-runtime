@@ -108,7 +108,10 @@ func TestEditRejectsAmbiguousMatch(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected ambiguous edit to fail")
 	}
-	if !strings.Contains(textContent(result), "occurs 2 times") {
+	// One edit tool, one wording: the remote surface now reports the same
+	// ambiguity diagnostic the local tool has always produced, including the hit
+	// line numbers.
+	if !strings.Contains(textContent(result), "命中 2 处") {
 		t.Fatalf("unexpected error: %s", textContent(result))
 	}
 	assertFile(t, filepath.Join(root, "dup.txt"), "x\nx\n")
