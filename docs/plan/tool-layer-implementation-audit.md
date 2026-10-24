@@ -390,6 +390,15 @@
   `files_without_matches` 别名，已补。最终声明 59 个、未实现 0 个。
   固化为 `remotetools/grep_schema_audit_test.go` 三条断言，并验证过它们确实能失败
   （注入一个假参数名后审计立即报错）。
+  **审计推广到全部常驻 remote 工具（2026-10-24）**：同一方法覆盖 grep/glob/view/ls
+  四个默认注册的工具，全部通过（59/4/5/2 个参数，未实现 0）。测试重构到
+  `remotetools/tool_schema_audit_test.go`，取代原先的 grep 专用文件。
+  过程中暴露四个方法论陷阱并逐一修正：必须按 receiver 选函数（同一文件里有
+  `globHandler.Execute` 与 `grepHandler.Execute`）；必须把接收整个参数 map 的 helper
+  列入扫描（view 的 Execute 自己不读参数）；只有 `args[...]`/`call.Args[...]` 的索引
+  才算读取（`metadata["k"]=v` 是输出字段）；不能把"写入不算读取"当全局规则
+  （同一键可能既读又写）。`shell`/`job_*`/`artifact_read` 默认不注册，不在
+  tools/list 覆盖面内。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

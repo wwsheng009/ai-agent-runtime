@@ -137,3 +137,50 @@ handler 接受但 remote 未声明）。已补上。
 
 **这些测试被验证过确实能抓到问题**：临时注入一个不存在的参数名，
 审计立即报告「flagged 1 unread param」。测试不是摆设。
+
+---
+
+# 推广到其余 remote 工具
+
+同一套方法（tools/list × AST）推广到 remote 的全部常驻工具。
+
+## 关键实现细节（都是踩过的坑）
+
+1. **按 receiver 选函数，而不是按名字。**
+   `searchcore/handler.go` 里同时有 `globHandler.Execute` 和 `grepHandler.Execute`，
+   只按名字匹配会永远只命中第一个，于是 glob 的审计会拿 grep 的读取集合去比对。
+
+2. **必须把「接收整个参数 map 的 helper」列进扫描目标。**
+   `view` 的 `Execute` 自己不读参数，全部经 `viewRequests`/`hasFilesArg`；
+   第一次扫描读集合是 0，直接被识破。补上 helper 后 5/5 匹配。
+
+3. **只把参数 map 的索引算作读取。**
+   `metadata["stats_requested"] = true` 是**输出字段**，
+   最初的扫描把它当成输入，于是报「handler 读了但 schema 没声明」——
+   一个假阳性。现在按基础标识符判断：只有 `args[...]` / `call.Args[...]` 才算读取。
+
+4. **不要用 `rg args["key"] = x` 这种「写入不算读取」的全局规则。**
+   同一个键可能既被读取又被写入（如 `metadata` 里回填输入值），
+   按变量名区分才是对的。
+
+## 结果
+
+| 工具 | 声明参数 | 状态 |
+|---|---|---|
+| `remote_dev__grep` | 59 | 全部有实现 |
+| `remote_dev__glob` | 4 | 全部有实现 |
+| `remote_dev__view` | 5 | 全部有实现 |
+| `remote_dev__ls` | 2 | 全部有实现 |
+
+`shell` / `job_*` / `artifact_read` 默认不注册（需配置启用），不在本次
+tools/list 覆盖面内；它们的 schema 由 `remotetools` 包内构造，属于另一类审计对象。
+
+## 固化为
+
+`internal/remotetools/tool_schema_audit_test.go`：
+- `TestRemoteToolSchemasOnlyDeclareImplementedParams`（4 个子用例，每工具一条）
+- `TestRemoteToolSchemasExposeWhatHandlersRead`
+- `TestRemoteGrepSchemaAliasesAreDeclared`
+- `TestSchemaAuditDetectsUnreadParam`（守卫审计本身：注入假参数必须被抓到）
+
+旧的 grep 专用文件已被它取代，避免同一逻辑存在两份。
