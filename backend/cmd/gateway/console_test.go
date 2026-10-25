@@ -45,6 +45,25 @@ func TestConsoleServesAssets(t *testing.T) {
 	}
 }
 
+// TestConsoleNativeNotificationBridge guards the Tauri integration: WebView2
+// rejects Web Push subscriptions, so the app must route fresh attention events
+// through the native notification API instead.
+func TestConsoleNativeNotificationBridge(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		"function nativeNotificationApi()",
+		"window.__TAURI__.notification",
+		"function sendNativeNotification(",
+		"function nativeAttentionNotification(",
+		"nativeAttentionNotification(node, session)",
+		"aicli-gw-native-notify",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing native notification bridge hook %q", needle)
+		}
+	}
+}
+
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {
 	rec := getConsole("/some/spa/route")
 	if rec.Code != http.StatusOK {

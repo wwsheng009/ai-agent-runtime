@@ -29,7 +29,10 @@ type pushNotifier struct {
 	manager *push.Manager
 	// ntfy is the secondary channel (nil when disabled). Web Push and ntfy are
 	// independent: ntfy still fires when no browser has subscribed.
-	ntfy    *ntfy.Sender
+	ntfy *ntfy.Sender
+	// appPush is the native App channel (nil when no relay/provider is
+	// configured). It is deliberately separate from Web Push and ntfy.
+	appPush *channels.AppPush
 	baseURL string
 	// presence suppresses pushes for sessions a console client is watching.
 	// 接口而非具体登记表（docs/bots/12 §4 G1）：测试可注入可翻转实现，
@@ -43,6 +46,10 @@ type pushNotifier struct {
 	// preferences 是三级通知偏好（global/session/channel；nil = 无偏好）。
 	// 由 main.go 从 <data-dir>/notify-prefs.json 装载（缺失 = 行为不变）。
 	preferences notify.PreferenceStore
+	// normalChannels 是 --notify-normal-channels 的解析结果。为空时保持
+	// D6 单主通道（webpush）；非空时 normal 按列表投递，供 ntfy/AppPush
+	// 等通道显式接收 completed/waiting。
+	normalChannels []string
 
 	// coalesceWindow merges low-priority notifications arriving close together
 	// (0 disables coalescing). quietHours mutes low-priority notifications.
@@ -120,7 +127,7 @@ type pendingNotification struct {
 // observe diffs the current attention states against the previous snapshot and
 // notifies for each newly-attentive session.
 func (p *pushNotifier) observe(nodes []*tunnel.Node) {
-	if p == nil || (p.manager == nil && !p.ntfyEnabled()) {
+	if p == nil || (p.manager == nil && !p.ntfyEnabled() && !p.appPushEnabled()) {
 		return
 	}
 	p.mu.Lock()
@@ -190,6 +197,39 @@ func (p *pushNotifier) ntfyEnabled() bool {
 	return p != nil && p.ntfy != nil && p.ntfy.Enabled()
 }
 
+// appPushEnabled reports whether a native App channel and relay are configured.
+// It must be part of the observe/dispatch wake-up gates: an App-only gateway may
+// have neither Web Push nor ntfy enabled and must still deliver attention events.
+func (p *pushNotifier) appPushEnabled() bool {
+	return p != nil && p.appPush != nil && p.appPush.Enabled()
+}
+
+func (p *pushNotifier) appPushDeviceCount() int {
+	if !p.appPushEnabled() {
+		return 0
+	}
+	return len(p.appPush.Store.List())
+}
+
+// parseChannelList 解析逗号分隔的通道名，去空、去重并保持顺序。
+// 供 --notify-normal-channels 使用；语义与 Dispatcher.SetNormalChannels 对齐。
+func parseChannelList(spec string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, part := range strings.Split(spec, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
 // ntfyMessage 保留为通道适配器映射的薄包装（cmd/gateway 既有测试引用；
 // 实现已收敛到 channels.NtfyMessage）。
 func ntfyMessage(n push.Notification) ntfy.Message {
@@ -206,12 +246,15 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	if p.dispatcher != nil {
 		return p.dispatcher
 	}
-	chans := make([]notify.Channel, 0, 2)
+	chans := make([]notify.Channel, 0, 3)
 	if p.manager != nil {
 		chans = append(chans, &channels.WebPush{Manager: p.manager})
 	}
 	if p.ntfy != nil {
 		chans = append(chans, &channels.Ntfy{Sender: p.ntfy})
+	}
+	if p.appPush != nil && p.appPush.Enabled() {
+		chans = append(chans, p.appPush)
 	}
 	if len(chans) == 0 {
 		return nil
@@ -226,6 +269,7 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	// clear→re-arm 场景依赖此点）；G1 的 Suppressed 回滚语义同前。
 	d.SetPrimary("webpush")
 	d.SetPreferences(p.preferences)
+	d.SetNormalChannels(p.normalChannels...)
 	// 在场门下沉到内核（docs/bots/10 §5 S4a）：登记表即 Presence 权威。
 	// observe 的 seen 前置检查仍是"跳过且不记 seen → 补推一次"的语义门；
 	// 这里兜住未自行前置检查的生产者（内核门同样不认领去重键）。
@@ -255,8 +299,12 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 	if dispatcher == nil {
 		return
 	}
-	if p.manager != nil && p.manager.Store().Count() == 0 && !(p.ntfy != nil && p.ntfy.Enabled()) {
-		// Without subscribers the dispatch below silently delivers nothing, which
+	webPushSubscribers := 0
+	if p.manager != nil {
+		webPushSubscribers = p.manager.Store().Count()
+	}
+	if webPushSubscribers == 0 && !p.ntfyEnabled() && p.appPushDeviceCount() == 0 {
+		// Without recipients the dispatch below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
 		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(items), p.baseURL)
 	}

@@ -119,8 +119,11 @@ agent 侧订阅本地事件总线，按下表更新会话状态并（可选）�
 2. **控制台 SSE**：`/api/events` 推送 `session.updated` / `notify`，驱动徽标、收件箱、toast（[07](./07-console.md) §5.4）。
 3. **Web Push**（移动端后台）：仅在**无活跃控制台会话**或**页面不可见**时推送；点击直达 `/s/{session_id}/web/`。
 4. **ntfy 第二通道**（可选，`--ntfy-url`/`--ntfy-topic`，见 [10-runbook.md](./10-runbook.md) §14）：
-   与 Web Push **并行扇出**，互不阻塞；高优先 → `priority=5` + `warning`，低优先 → `priority=3`，
-   点击打开对应会话。用于 Web Push 不可达的场景（国内 Android 的 FCM、WNS 通道异常等），
+   高优先（approval/question/error）与 Web Push **并行扇出**；普通通知默认仍走
+   Web Push 主通道。若要让 completed/waiting 也进入 ntfy，显式配置
+   `--notify-normal-channels webpush,ntfy`（见 [gateway-app/02](../gateway-app/02-notification-routing.md)）。
+   高优先 → `priority=5` + `warning`，普通 → `priority=3`，点击打开对应会话。
+   用于 Web Push 不可达的场景（国内 Android 的 FCM、WNS 通道异常等），
    或在手机端直接以 ntfy 作为主要提醒方式。
 5. **抑制（presence）**：若某控制台客户端**正打开该会话**（心跳/SSE 订阅标记），则不 toast、不推送（用户已在看）。
 6. **去重与合并**：
@@ -128,6 +131,9 @@ agent 侧订阅本地事件总线，按下表更新会话状态并（可选）�
    - 时间窗合并同类（如连续多次 `completed` 合并为"N 个会话已完成"）；
    - 与 [05-wan-and-mobile.md](./05-wan-and-mobile.md) §2.5 一致。
 7. **优先级与免打扰**：`approval`/`question` 高优先（可穿透免打扰）；`completed` 可静音/批量。
+8. **AppPush 原生通道**：App 通过 `/api/app/devices` 注册 APNs/FCM/UnifiedPush
+   token；网关经受信任 relay webhook 投递。详见
+   [gateway-app/06](../gateway-app/06-apppush-relay.md)。
 
 ---
 
@@ -231,9 +237,9 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | presence 主动释放 | `cmd/gateway/presence.go`、`console/app.js` | 新增 `POST /api/presence/release`（`{all:true}` 或 `{node_id,session_id}`）；页面 `visibilitychange(hidden)` / `pagehide` 时用 keepalive 释放，切后台后不再被 presence 抑制最长 90s |
 | 订阅自愈 | `console/sw.js` | 处理 `pushsubscriptionchange`：浏览器轮换/失效 endpoint 后自动重新订阅并回传网关（upsert），不再静默失联 |
 | 移动端可发现性与权限 | `console/app.js`、`console/index.html`、`console/manifest.webmanifest`、`console/*.png` | 点击手势内先 `Notification.requestPermission()`（iOS 要求）；HTTP 非安全上下文 / iOS 未安装 / 权限被拒绝均给出显性原因；A2HS 与 `beforeinstallprompt` 安装引导；`/api/push/test` 测试通知按钮；PNG 图标（192/512/180/apple-touch-icon + 通知 badge），修复 SVG 图标在系统通知中不显示的问题 |
-| **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；`pushNotifier` 向 Web Push 与 ntfy **并行扇出**（一个通道失败不影响另一个，Web Push 关闭时 ntfy 仍独立投递）；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click` 指向会话深链；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
+| **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；high 向 Web Push 与 ntfy **并行扇出**，normal 默认走 Web Push 主通道，可用 `--notify-normal-channels webpush,ntfy` 显式扩展；Web Push 关闭时 ntfy 仍独立投递；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click` 指向会话深链；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
 
-**通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时，向所有已配置通道（Web Push + ntfy）各投递一次。因此：
+**通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时，向当前优先级选中的通道投递一次（high 全扇出；normal 为显式列表或 Web Push 主通道）。因此：
 
 - 同一注意力状态**重复上报不会重复推送**（等价 `dedup_key` 的粗粒度实现）；
 - 状态被清除（`attention` 变空）后再进入注意力，会**再次**通知。

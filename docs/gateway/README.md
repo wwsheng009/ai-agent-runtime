@@ -68,6 +68,7 @@
 | [13-connection-control-tasks.md](./13-connection-control-tasks.md) | 连接控制面实现任务清单（文件级改动点 + 测试点 + PR 序列 + DoD） |
 | [14-implementation-record.md](./14-implementation-record.md) | 实现记录：落地状态、运行方式、命令/API 参考、测试、已知缺口 |
 | [15-multi-instance-architecture.md](./15-multi-instance-architecture.md) | 多实例架构与实例间通讯：现状（主备无协议）、防双写与共享协调、归属路由、分级改进与核实 |
+| [gateway-app/](../gateway-app/README.md) | 全网页 App 专项：Tauri 2 容器、原生通知、ntfy 路由修复与实施计划 |
 
 ---
 
@@ -117,3 +118,4 @@
 11. 已实现的落地状态与运行方式见 [14-implementation-record.md](./14-implementation-record.md)；
 12. 多实例（主备/双活）边界与改进见 [15-multi-instance-architecture.md](./15-multi-instance-architecture.md)；
 13. 排期与验收见 [06-implementation-plan.md](./06-implementation-plan.md)。
+14. 全网页 App 与原生通知见 [gateway-app/README.md](../gateway-app/README.md)。

@@ -3426,6 +3426,10 @@
   }
 
   function showAttentionToast(node, session) {
+    // The Tauri shell cannot use Web Push (WebView2 rejects subscribe()).
+    // Deliver the OS notification from the same fresh-attention edge that
+    // drives the in-page toast; gateway presence handles server-side dedup.
+    nativeAttentionNotification(node, session);
     // The "open" affordance is a real button, so the toast is usable without a
     // mouse; clicking anywhere on the toast is no longer the only entry point.
     pushToast(
@@ -3537,11 +3541,84 @@
       navigator.standalone === true;
   }
 
+  /* ── Tauri native notifications ─────────────────────────────── */
+
+  // The desktop/mobile shell loads this page in a WebView. WebView2 exposes
+  // PushManager but rejects subscribe(), so system notifications must go
+  // through Tauri's native notification bridge.
+  function nativeNotificationApi() {
+    return (window.__TAURI__ && window.__TAURI__.notification) || null;
+  }
+
+  function readNativeNotifyPref() {
+    try { return localStorage.getItem("aicli-gw-native-notify"); } catch (e) { return null; }
+  }
+
+  function writeNativeNotifyPref(enabled) {
+    try { localStorage.setItem("aicli-gw-native-notify", enabled ? "1" : "0"); } catch (e) {}
+  }
+
+  // Default: follow the OS permission. An explicit local "0" disables app-side
+  // sends without trying to revoke a system permission from JS.
+  function nativeNotificationsEnabled(granted) {
+    var pref = readNativeNotifyPref();
+    if (pref === "0") { return false; }
+    if (pref === "1") { return true; }
+    return !!granted;
+  }
+
+  function enableNativeNotifications() {
+    var api = nativeNotificationApi();
+    if (!api) { return Promise.resolve(); }
+    return Promise.resolve(api.isPermissionGranted()).then(function (granted) {
+      if (granted) { return "granted"; }
+      return api.requestPermission();
+    }).then(function (state) {
+      if (state !== "granted") {
+        throw new Error("应用通知权限未授予（当前：" + state + "）。请在系统设置中允许通知后重试。");
+      }
+      writeNativeNotifyPref(true);
+    });
+  }
+
+  function disableNativeNotifications() {
+    // The OS permission cannot be revoked from JS; this only disables sends.
+    writeNativeNotifyPref(false);
+    return Promise.resolve();
+  }
+
+  function sendNativeNotification(title, body, extra) {
+    var api = nativeNotificationApi();
+    if (!api) { return Promise.resolve(false); }
+    return Promise.resolve(api.isPermissionGranted()).then(function (granted) {
+      if (!granted || !nativeNotificationsEnabled(granted)) { return false; }
+      return Promise.resolve(api.sendNotification({
+        title: title,
+        body: body,
+        extra: extra || {},
+      })).then(function () { return true; });
+    }).catch(function () { return false; });
+  }
+
+  function nativeAttentionNotification(node, session) {
+    if (!nativeNotificationApi()) { return; }
+    sendNativeNotification(
+      (node.name || node.node_id) + " · " + sessionLabelOf(session),
+      attentionLabel(session.attention),
+      {
+        node_id: node.node_id,
+        session_id: session.session_id,
+        attention: session.attention,
+      }
+    );
+  }
+
   // pushEnvironment explains whether Web Push can work here and, when it
   // cannot, why. The reason is surfaced in the toggle tooltip and in error
   // toasts instead of silently hiding the button: on plain HTTP or in an iOS
   // Safari tab the user previously saw no notification affordance at all.
   function pushEnvironment() {
+    if (nativeNotificationApi()) { return { ok: true, native: true }; }
     if (window.isSecureContext === false) {
       return { ok: false, reason: "当前地址不是 HTTPS（安全上下文），浏览器禁用了 Service Worker 与推送。请改用 https:// 访问网关，或用 --tls-cert/--tls-key 让网关直接提供 TLS。" };
     }
@@ -3598,6 +3675,22 @@
     if (!btn) { return; }
     btn.hidden = !authedState;
     if (!authedState) { return; }
+    var nativeApi = nativeNotificationApi();
+    if (nativeApi) {
+      btn.title = "使用 Tauri 系统原生通知";
+      Promise.resolve(nativeApi.isPermissionGranted()).then(function (granted) {
+        var enabled = nativeNotificationsEnabled(granted);
+        setPushLabel(enabled ? "关闭应用通知" : "开启应用通知");
+        if (test) { test.hidden = !enabled; }
+        if (!granted) {
+          btn.title = "尚未授予应用通知权限：点击开启并在系统设置中允许通知。";
+        }
+      }).catch(function () {
+        setPushLabel("开启应用通知");
+        if (test) { test.hidden = true; }
+      });
+      return;
+    }
     var env = pushEnvironment();
     if (!env.ok) {
       setPushLabel(env.needsInstall ? "先安装到主屏幕" : "通知不可用");
@@ -3697,6 +3790,7 @@
   // called synchronously, before any async work (config fetch,
   // serviceWorker.ready, ...).
   function enablePush() {
+    if (nativeNotificationApi()) { return enableNativeNotifications(); }
     var env = pushEnvironment();
     if (!env.ok) { return Promise.reject(new Error(env.reason)); }
     var permission;
@@ -3742,6 +3836,7 @@
   }
 
   function disablePush() {
+    if (nativeNotificationApi()) { return disableNativeNotifications(); }
     if (!pushRegistration) { return Promise.resolve(); }
     return pushRegistration.pushManager.getSubscription().then(function (sub) {
       if (!sub) { return; }
@@ -3877,6 +3972,27 @@
   var pushBusy = false;
   el("push-toggle").addEventListener("click", function () {
     if (pushBusy) { return; }
+    if (nativeNotificationApi()) {
+      var nativeDisabling = el("push-toggle-label").textContent.indexOf("关闭") !== -1;
+      pushBusy = true;
+      setPushLabel(nativeDisabling ? "关闭中…" : "开启中…");
+      var nativeBtn = el("push-toggle");
+      nativeBtn.disabled = true;
+      Promise.resolve(nativeDisabling ? disableNativeNotifications() : enableNativeNotifications())
+        .then(function () {
+          refreshPushState();
+          notify(nativeDisabling ? "已关闭应用通知" : "已开启应用通知", "ok");
+        })
+        .catch(function (err) {
+          refreshPushState();
+          notify("应用通知操作失败：" + (err && err.message ? err.message : "请检查系统通知权限"), "error");
+        })
+        .finally(function () {
+          pushBusy = false;
+          nativeBtn.disabled = false;
+        });
+      return;
+    }
     // The click handler is the only entry point for enabling: it must stay
     // synchronous up to Notification.requestPermission() (see enablePush).
     var env = pushEnvironment();
@@ -3918,6 +4034,18 @@
   var pushTest = el("push-test");
   if (pushTest) {
     pushTest.addEventListener("click", function () {
+      if (nativeNotificationApi()) {
+        var nativeIdle = pushTest.textContent;
+        pushTest.disabled = true;
+        pushTest.textContent = "发送中…";
+        sendNativeNotification("aicli-gateway", "应用通知测试成功").then(function (ok) {
+          notify(ok ? "已发送应用通知" : "应用通知未开启或权限未授予", ok ? "ok" : "error");
+        }).finally(function () {
+          pushTest.disabled = false;
+          pushTest.textContent = nativeIdle;
+        });
+        return;
+      }
       var idleText = pushTest.textContent;
       pushTest.disabled = true;
       // The API waits for the push service round trip (usually 0.5–3s), so
@@ -4335,7 +4463,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=44").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=45").catch(function () {});
     });
   }
 

@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/appdevice"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
@@ -31,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify/channels"
 )
 
 // gatewayMetrics holds simple process counters exposed at /api/metrics.
@@ -161,6 +164,15 @@ func isLoopbackListen(listen string) bool {
 	return ip.IsLoopback()
 }
 
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // usage prints the grouped, annotated flag reference (docs/gateway/
 // 14-implementation-record.md §2). The Go default lists flags alphabetically
 // with one-line texts; operators need the lifecycle around them too.
@@ -181,6 +193,7 @@ State (under --data-dir, loaded once at startup — edit only while stopped):
   devices.json   device tokens (issue via the console API, shown once)
   vapid.key      Web Push identity, 0600, auto-created
   push.json      push subscriptions
+  app-devices.json  native app push tokens, 0600
   registry.json  node registry snapshot; restored as stale entries on start
   audit.log      append-only security audit trail
 
@@ -224,11 +237,14 @@ func run() int {
 		ntfyURL         = flag.String("ntfy-url", "", "ntfy server base URL for the secondary notification channel (empty disables), e.g. https://ntfy.sh")
 		ntfyTopic       = flag.String("ntfy-topic", "", "ntfy topic to publish notifications to (required with --ntfy-url)")
 		ntfyToken       = flag.String("ntfy-token", "", "ntfy access token (Bearer) for protected topics; prefer the --config flagfile for secrets")
+		appPushURL      = flag.String("app-push-relay-url", "", "trusted relay webhook for native app notifications (empty disables apppush); receives device tokens and notification metadata")
+		appPushToken    = flag.String("app-push-relay-token", "", "bearer token for --app-push-relay-url; prefer the --config flagfile for secrets")
 		vapidSubject    = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
 		presenceTTL     = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
 		presenceSources = flag.String("presence-sources", "console,host", "enabled presence sources: console,host (comma separated; host = agent-reported foreground viewer, docs/bots/10)")
 		coalesceWindow  = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
 		quietHours      = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
+		normalChannels  = flag.String("notify-normal-channels", "", "comma-separated channels for normal notifications (completed/waiting), e.g. webpush,ntfy; empty keeps the D6 single primary channel (webpush)")
 		eventTick       = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
 		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
 		// without owner password and without any device token" — the combination
@@ -321,6 +337,11 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "gateway: failed to open device store: %v\n", err)
 		return 1
 	}
+	appDevices, err := appdevice.Open(filepath.Join(*dataDir, "app-devices.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: failed to open app device store: %v\n", err)
+		return 1
+	}
 	// Safety refusal (docs/gateway/04-security.md): a non-loopback listener with
 	// neither an owner password nor any device-token path is an unauthenticated
 	// public exposure — refuse it instead of silently starting. Loopback keeps
@@ -374,6 +395,60 @@ func run() int {
 	var connectorIMMainChannel func(nodeID, sessionID, kind string) bool
 	if ntfySender.Enabled() {
 		fmt.Fprintf(os.Stderr, "gateway: ntfy channel enabled: %s topic=%s\n", strings.TrimRight(*ntfyURL, "/"), ntfySender.Topic())
+	}
+	if raw := strings.TrimSpace(*appPushURL); raw != "" {
+		parsed, parseErr := url.Parse(raw)
+		if parseErr != nil || parsed.Host == "" {
+			fmt.Fprintf(os.Stderr, "gateway: invalid --app-push-relay-url %q: %v\n", raw, parseErr)
+			return 1
+		}
+		if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+			fmt.Fprintln(os.Stderr, "gateway: --app-push-relay-url must use HTTPS (HTTP is allowed only for loopback development)")
+			return 1
+		}
+		notifier.appPush = &channels.AppPush{
+			Store:  appDevices,
+			Sender: channels.NewWebhookSender(raw, *appPushToken),
+		}
+		fmt.Fprintf(os.Stderr, "gateway: apppush channel enabled: %s\n", raw)
+	}
+	notifier.normalChannels = parseChannelList(*normalChannels)
+	if len(notifier.normalChannels) > 0 {
+		fmt.Fprintf(os.Stderr, "gateway: normal notification channels: %s\n", strings.Join(notifier.normalChannels, ","))
+		for _, name := range notifier.normalChannels {
+			switch name {
+			case "webpush":
+				if pushManager == nil {
+					fmt.Fprintln(os.Stderr, "gateway: WARNING: normal channel webpush is configured but Web Push is disabled")
+				}
+			case "ntfy":
+				if !ntfySender.Enabled() {
+					fmt.Fprintln(os.Stderr, "gateway: WARNING: normal channel ntfy is configured but --ntfy-url/--ntfy-topic is incomplete")
+				}
+			case "apppush":
+				if notifier.appPush == nil || !notifier.appPush.Enabled() {
+					fmt.Fprintln(os.Stderr, "gateway: WARNING: normal channel apppush is configured but no --app-push-relay-url is set")
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "gateway: WARNING: unknown normal notification channel %q (ignored)\n", name)
+			}
+		}
+	}
+	if ntfySender.Enabled() && pushManager != nil {
+		if len(notifier.normalChannels) == 0 {
+			fmt.Fprintln(os.Stderr, "gateway: ntfy receives high-priority notifications only; set --notify-normal-channels webpush,ntfy for completed/waiting")
+		} else {
+			hasNtfy := false
+			for _, name := range notifier.normalChannels {
+				if name == "ntfy" {
+					hasNtfy = true
+					break
+				}
+			}
+			if !hasNtfy {
+				fmt.Fprintln(os.Stderr, "gateway: WARNING: ntfy is enabled but absent from --notify-normal-channels; completed/waiting will not go to ntfy")
+			}
+		}
 	}
 	quietRanges, quietErr := notify.ParseQuietHours(*quietHours)
 	if quietErr != nil {
@@ -562,6 +637,7 @@ func run() int {
 			"proxy_requests_total": metrics.proxy.Load(),
 			"nodes":                registry.Count(),
 			"devices":              devices.Count(),
+			"app_devices":          appDevices.Count(),
 			"push_subscriptions":   pushSubscriptionCount(pushManager),
 			"presence_entries":     presence.Count(),
 		})
@@ -721,6 +797,10 @@ func run() int {
 	router.Handle("/api/push/subscriptions", owner.RequireSession(handlePushSubscriptions(pushManager)))
 	router.Handle("/api/push/unsubscribe", owner.RequireSession(handlePushUnsubscribe(pushManager)))
 	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager, ntfySender)))
+	// Native App push-token registry (owner-protected). Registration is kept
+	// separate from the agent tunnel token store.
+	router.Handle("/api/app/devices", owner.RequireSession(handleAppDevices(appDevices))).Methods(http.MethodGet, http.MethodPost)
+	router.Handle("/api/app/devices/{id}", owner.RequireSession(handleAppDeviceDelete(appDevices))).Methods(http.MethodDelete)
 	// Presence: the console reports the session it is viewing so the gateway can
 	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
 	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)

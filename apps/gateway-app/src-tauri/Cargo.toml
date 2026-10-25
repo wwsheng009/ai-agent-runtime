@@ -1,0 +1,38 @@
+[package]
+name = "aicli-gateway-app"
+version = "0.1.0"
+description = "aicli-gateway full-web desktop shell"
+authors = ["aicli"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "aicli_gateway_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+
+# This is a small shell, so prefer build reliability on 16GB Windows hosts over
+# LTO/codegen-units=1. The app still strips symbols in release builds.
+[profile.release]
+codegen-units = 16
+lto = false
+opt-level = 2
+panic = "abort"
+strip = true

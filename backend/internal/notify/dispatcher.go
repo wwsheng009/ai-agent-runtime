@@ -61,10 +61,13 @@ type Dispatcher struct {
 	channels []Channel
 	byName   map[string]Channel
 	primary  string
-	clock    func() time.Time
-	logf     func(string, ...any)
-	prefs    PreferenceStore
-	presence Presence
+	// normalChannels 是显式配置的 normal 通道列表。为空时沿用 D6 的
+	// 单主通道行为；非空时按列表顺序投递（去重、忽略未注册通道）。
+	normalChannels []string
+	clock          func() time.Time
+	logf           func(string, ...any)
+	prefs          PreferenceStore
+	presence       Presence
 	// quietHours/coalesceWindow 是免打扰与合并策略（docs/bots/12 §3 D3）：
 	// 静默窗口内 low/normal 事件被永久丢弃（回执 Muted，不认领键——宿主
 	// 去重快照已记，静默期后不补推）；合并窗口把 normal 事件按 attention
@@ -92,6 +95,18 @@ func NewDispatcher(ledger Ledger, channels ...Channel) *Dispatcher {
 
 // SetPrimary 指定 normal 优先级的主通道（缺省 = 首个注册通道）。
 func (d *Dispatcher) SetPrimary(name string) { d.primary = strings.TrimSpace(name) }
+
+// SetNormalChannels 指定 normal 优先级的显式通道列表。列表为空时保持
+// D6 的单主通道语义；非空时按顺序投递并自动去重。未注册的通道名会被
+// 忽略并记录日志，避免配置漂移导致整个通道面静默失效。
+func (d *Dispatcher) SetNormalChannels(names ...string) {
+	d.normalChannels = d.normalChannels[:0]
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			d.normalChannels = append(d.normalChannels, name)
+		}
+	}
+}
 
 // SetLogger 注入短路/失败日志（可 nil）。
 func (d *Dispatcher) SetLogger(logf func(string, ...any)) { d.logf = logf }
@@ -252,13 +267,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
 	return d.deliver(ctx, ev)
 }
 
-// targetsFor 实现 06 D6 的通道选择：high=全部通道扇出（跨通道去重保证不重复
-// 打扰）；normal=主通道单发；low/零值=仅收件箱通道（未注册则不投递，仅记账）。
+// targetsFor 实现通道选择：high=全部通道扇出；normal=显式列表，未配置时
+// 回退 D6 单主通道；low/零值=仅收件箱通道（未注册则不投递，仅记账）。
 func (d *Dispatcher) targetsFor(p Priority) []Channel {
 	switch p {
 	case PriorityHigh:
 		return append([]Channel(nil), d.channels...)
 	case PriorityNormal:
+		if channels := d.configuredNormalTargets(); len(channels) > 0 {
+			return channels
+		}
 		if d.primary != "" {
 			if ch, ok := d.byName[d.primary]; ok {
 				return []Channel{ch}
@@ -274,6 +292,31 @@ func (d *Dispatcher) targetsFor(p Priority) []Channel {
 		}
 		return nil
 	}
+}
+
+// configuredNormalTargets 解析 normalChannels。空配置返回 nil，让调用方
+// 回退到 D6 主通道；未注册通道逐个告警后跳过。
+func (d *Dispatcher) configuredNormalTargets() []Channel {
+	if len(d.normalChannels) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.normalChannels))
+	out := make([]Channel, 0, len(d.normalChannels))
+	for _, name := range d.normalChannels {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		ch, ok := d.byName[name]
+		if !ok {
+			if d.logf != nil {
+				d.logf("notify dispatcher: normal channel %q is not registered, ignore", name)
+			}
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
 }
 
 func (d *Dispatcher) now() time.Time {

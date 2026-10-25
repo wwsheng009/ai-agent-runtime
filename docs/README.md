@@ -32,6 +32,7 @@ Main sections:
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `bots/` - IM 通道接入专题（飞书/QQ/微信/Telegram）：需求分析、连接器核心方案、三宿主接入与前端 schema 配置、从 codex-server 的移植路线（入口见 `bots/README.md`）
+- `gateway-app/` - 网关全网页 App 专题：Tauri 2 WebView 容器、原生通知桥、ntfy 路由修复、跨端实施与运维（入口见 `gateway-app/README.md`）
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
 - `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`

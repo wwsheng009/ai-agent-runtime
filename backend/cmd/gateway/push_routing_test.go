@@ -21,6 +21,17 @@ func waitNtfy(ch chan map[string]any, d time.Duration) bool {
 	}
 }
 
+func TestParseChannelList(t *testing.T) {
+	got := parseChannelList(" webpush, ntfy,webpush, , ")
+	want := []string{"webpush", "ntfy"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("parseChannelList = %v, want %v", got, want)
+	}
+	if empty := parseChannelList(" , "); len(empty) != 0 {
+		t.Fatalf("empty spec = %v", empty)
+	}
+}
+
 // TestPushNotifierRoutingD6：切片二切流后的 D6 路由——normal（completed）只走
 // 主通道（webpush），不再附带 ntfy；high（approval）保持全通道扇出。
 func TestPushNotifierRoutingD6(t *testing.T) {
@@ -65,6 +76,49 @@ func TestPushNotifierRoutingD6(t *testing.T) {
 	}
 	if !waitNtfy(ntfyHits, 2*time.Second) {
 		t.Fatal("high 应扇出到 ntfy")
+	}
+}
+
+// TestPushNotifierConfiguredNormalChannels：显式配置后 normal 也可投递到
+// ntfy，解决“完成类通知永远进不了 ntfy”的静默丢失；high 行为不变。
+func TestPushNotifierConfiguredNormalChannels(t *testing.T) {
+	webHits := make(chan struct{}, 8)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webHits <- struct{}{}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer web.Close()
+
+	ntfyHits := make(chan map[string]any, 4)
+	nsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ntfyHits <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer nsrv.Close()
+
+	n := testNotifier(t, web.URL+"/sub")
+	n.ntfy = ntfy.NewSender(nsrv.URL, "topic-normal", "")
+	n.normalChannels = []string{"webpush", "ntfy"}
+
+	n.observe([]*tunnel.Node{{
+		NodeID:   "n1",
+		Sessions: []wire.SessionSummary{{SessionID: "s1", Title: "A", Attention: "completed"}},
+	}})
+	if !waitHit(webHits, 2*time.Second) {
+		t.Fatal("configured normal 应投递到 webpush")
+	}
+	if !waitNtfy(ntfyHits, 2*time.Second) {
+		t.Fatal("configured normal 应投递到 ntfy")
+	}
+
+	n.observe([]*tunnel.Node{{
+		NodeID:   "n1",
+		Sessions: []wire.SessionSummary{{SessionID: "s2", Title: "B", Attention: "approval"}},
+	}})
+	if !waitHit(webHits, 2*time.Second) || !waitNtfy(ntfyHits, 2*time.Second) {
+		t.Fatal("high 应保持 webpush+ntfy 扇出")
 	}
 }
 

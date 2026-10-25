@@ -353,10 +353,11 @@ ACME（Let's Encrypt，http-01）与按 Host 路由都在 Edge 侧完成；控�
 |----|----|
 | 服务 | `ntfy`（deb 安装，systemd），配置 `/etc/ntfy/server.yml`：`listen-http: 127.0.0.1:2586`、`base-url: https://ntfy.ttai.online`、`cache-file: /var/lib/ntfy/cache.db`、`behind-proxy: true` |
 | 入口 | `ntfy.ttai.online`（CF 代理）→ edge 路由组 `ntfy` → `127.0.0.1:2586`；组内 `health.ready_path: "/v1/health"`（默认 `/health/ready` 会 404 导致组不 ready） |
-| 网关发布 | `--ntfy-url http://127.0.0.1:2586 --ntfy-topic aicli-gateway-0bf5wo3tkd`（走本机回环，不依赖 CF） |
+| 网关发布 | `--ntfy-url http://127.0.0.1:2586 --ntfy-topic aicli-gateway-0bf5wo3tkd`（走本机回环，不依赖 CF）；若需 completed/waiting 也进 ntfy，加 `--notify-normal-channels webpush,ntfy` |
 | 客户端订阅 | 服务器 `https://ntfy.ttai.online` + topic `aicli-gateway-0bf5wo3tkd`（Android 需开 Instant delivery） |
 
 高优先（approval/question/error）→ `priority=5` + `warning` 标签，其余 `priority=3`；点击打开对应会话。
+默认 normal 仍只走 Web Push；只有配置 `--notify-normal-channels webpush,ntfy` 时完成类通知才进入 ntfy。
 `POST /api/push/test` 返回 `channels.webpush / channels.ntfy` 明细；控制台"发送测试通知"会展示各通道结果。
 当前 ntfy 未启用鉴权（topic 名即口令）；如需访问控制再启用 `auth-*` 并用 `--ntfy-token`。
 
@@ -378,6 +379,18 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 - **备份**：`/etc/ntfy/server.yml`（`/var/lib/ntfy/cache.db` 是消息缓存，可丢）；
 - **故障**：`NO_READY_BACKEND_GROUP` → 检查 edge 中该组的 `health.ready_path: "/v1/health"`；
   收不到消息 → 先 `curl 127.0.0.1:2586/v1/health`，再排 edge 路由与 CF 代理。
+
+**AppPush（原生 App）**：App 设备 token 存在 `<data-dir>/app-devices.json`（0600），
+通过受信任 relay 投递：
+
+```text
+--app-push-relay-url https://relay.example.com/push
+--app-push-relay-token <token>
+--notify-normal-channels apppush,webpush,ntfy
+```
+
+relay 契约与设备注册 API 见
+[gateway-app/06-apppush-relay.md](../gateway-app/06-apppush-relay.md)。
 
 **通知偏好（可选）**：`<data-dir>/notify-prefs.json`（gateway 启动时装载；改动需重启）——
 三级键 `global` / `session:<id>` / `channel:<name>`，字段 `muted`、`min_priority`

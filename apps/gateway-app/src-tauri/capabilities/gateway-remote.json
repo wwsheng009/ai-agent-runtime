@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/remote-schema.json",
+  "identifier": "gateway-remote",
+  "description": "Allow the trusted gateway web UI to use native notification APIs only",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://aicli.ttai.online"]
+  },
+  "permissions": ["notification:default"]
+}

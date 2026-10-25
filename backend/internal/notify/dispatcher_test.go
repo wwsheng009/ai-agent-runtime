@@ -74,6 +74,52 @@ func TestDispatcherNormalGoesToPrimaryOnly(t *testing.T) {
 	}
 }
 
+// TestDispatcherNormalUsesConfiguredChannels：显式 normal 列表覆盖 D6 的
+// 单主通道；列表内重复项去重，未注册通道忽略并记录日志。
+func TestDispatcherNormalUsesConfiguredChannels(t *testing.T) {
+	im := &notifyTestChannel{name: "im"}
+	web := &notifyTestChannel{name: "webpush"}
+	ntfy := &notifyTestChannel{name: "ntfy"}
+	d := NewDispatcher(NewMemoryLedger(16), im, web, ntfy)
+	d.SetPrimary("webpush")
+	d.SetNormalChannels("webpush", "ntfy", "ntfy", "missing")
+	var logs []string
+	d.SetLogger(func(format string, args ...any) {
+		logs = append(logs, format)
+	})
+
+	if _, err := d.Dispatch(context.Background(), EventFor("completion", "k-configured", notifyTestNote("done"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(im.calls) != 0 {
+		t.Fatalf("im 不在 normal 列表，calls=%d", len(im.calls))
+	}
+	if len(web.calls) != 1 || len(ntfy.calls) != 1 {
+		t.Fatalf("normal 应投递到 webpush+ntfy：web=%d ntfy=%d", len(web.calls), len(ntfy.calls))
+	}
+	if len(logs) != 1 {
+		t.Fatalf("未注册通道应记录一次日志，got %d: %v", len(logs), logs)
+	}
+}
+
+// TestDispatcherNormalEmptyConfigurationKeepsPrimary：清空显式列表后恢复
+// D6 单主通道，确保新增配置不改变既有默认行为。
+func TestDispatcherNormalEmptyConfigurationKeepsPrimary(t *testing.T) {
+	web := &notifyTestChannel{name: "webpush"}
+	ntfy := &notifyTestChannel{name: "ntfy"}
+	d := NewDispatcher(NewMemoryLedger(16), web, ntfy)
+	d.SetPrimary("webpush")
+	d.SetNormalChannels("webpush", "ntfy")
+	d.SetNormalChannels()
+
+	if _, err := d.Dispatch(context.Background(), EventFor("completed", "k-empty", notifyTestNote("done"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.calls) != 1 || len(ntfy.calls) != 0 {
+		t.Fatalf("清空配置后应只走主通道：web=%d ntfy=%d", len(web.calls), len(ntfy.calls))
+	}
+}
+
 // TestDispatcherLowGoesToInboxOnlyWhenRegistered：low 仅收件箱（未注册则不投递、仅记账）。
 func TestDispatcherLowGoesToInboxOnlyWhenRegistered(t *testing.T) {
 	web := &notifyTestChannel{name: "webpush"}
