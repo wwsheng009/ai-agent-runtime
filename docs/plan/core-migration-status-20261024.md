@@ -808,4 +808,59 @@ core 原来把**调用方明确给的小 limit 抬到 1024**，而本地是原�
 
 本轮（view + artifact_read）新增的 core 扩展接口一共四个：`SymbolResolver`、
 `ContentRenderer`、`ReadObserver`（`ReadWindow`）、`ArtifactOriginProvider` 之外的
-`ArtifactChunk.SourceTool*` 字段。它们全部遵循同一条分工：**策略在 core，宿主状态/能力在面**。
+`ArtifactChunk.SourceTool*` 字段。它们全部遵循同一条分工：**策略在 core，宿主状态/能力在面**。## 最后一处债务：`grep` 的 legacy 路径（已量化、已登记，待分批搬完）
+
+`artifact_read` 收敛后，`grep` 是**唯一还有两套实现**的工具。这一轮没有再动行为，而是把债务
+变成可数的东西——因为「还有多少」之前只存在于一堵 schema 声明和那个静默回退的路由开关里。
+
+### 现在的确切形状
+
+本地 `GrepTool.Execute` 先问 `executeCoreSearch`：调用里**每一个参数**都在
+`coreSearchParams`（53 个）里，且不是 `only_matching` + context 这个组合，就跑共享 handler；
+否则回退到本地旧实现。
+
+本地 schema 声明 **96 个参数**，其中 **41 个只有 legacy 路径服务**。这一轮新增
+`internal/toolkit/tools/grep_legacy_register_test.go` 把它冻成登记表，**双向**卡住：
+
+- 新声明一个 core 还不支持的参数 → 测试红（债务不能悄悄变大）；
+- 共享 handler 开始支持某个参数（或路由集合加进去）→ 测试也红（登记表必须跟着改，
+  否则两张表会各说各话）。
+
+同一个文件还单独钉住了**唯一一条不是参数的例外**：`only_matching` + context
+——searchcore 拒绝这个组合，本地历来接受它，所以在共享 handler 实现这个组合之前，
+该调用必须留在 legacy 路径。它是「一套实现」上的一个洞，单独写出来免得被当成参数问题。
+
+### 41 个参数分三组（决定移植顺序）
+
+1. **表现层 / 空操作标记**（约 18 个）：`color`、`heading`/`no_heading`、
+   `line_number`/`no_line_number`、`with_filename`/`no_filename`、`null`/`null_data`、
+   `pretty`、`text`、`binary`、`line_buffered` 系列、`field_context_separator`、
+   `path_separator`、`context_separator`/`no_context_separator`。
+   本地旧实现把它们**消费掉并记为 ignored**（`isNoOpRGFlag` / `consumeNoOpRGFlag`），
+   因为工具自己的输出形状已经满足它们（永远是 `path:line:content`）。移植成本最低：
+   共享 handler 只需接受并如实报告为 ignored（元数据 `ignored_rg_args`）。
+2. **rg 引擎/输出语义标记**（约 18 个）：`pcre2`、`engine`、`auto_hybrid_regex`、
+   `multiline`、`multiline_dotall`、`replace`、`json`、`json_output`、`follow`、`crlf`、
+   `sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`head_limit`、`no_config`、
+   `type_add`/`type_clear`。
+   这些需要 runtime 已经暴露的 ripgrep 通道（`searchcore.RipgrepStream`）以及各自的输出语义与
+   测试，逐个搬。
+3. **逃生口**：`rg_args`、`passthru`。它们的语义就是「镜像 rg 自己的解析器」，本地那套
+   解析器（`parseRGCompatArgs` 及其 5 个 helper）是唯一实现，应当整体平移进 core，
+   而不是重写。
+
+顺序：**1 → 3 → 2**。第 1 组是纯接受/忽略，风险最低；第 3 组是整段平移（和
+`edit`/`apply_patch` 同一种做法）；第 2 组每个标记都要自己的语义与测试，所以放最后。
+
+提交：`5d353b4e`（仅登记，无行为变更）。
+
+## 现状（2026-10-25）
+
+| 工具 | 状态 |
+|---|---|
+| `write` / `append_write` / `edit` / `apply_patch` / `view` / `artifact_read` / `glob` / `ls` | 一套实现、两个执行位置 |
+| `grep` | **核心参数集（53 个）已收敛**；41 个参数 + `only_matching`+context 组合仍在本地旧实现上，已登记、已排序 |
+
+`grep` 的债清完之后，「工具层一套实现」这件事就没有已知例外了；剩下的只有
+`toolexec/preflight` 的路径治愈与工具级治愈是否合并这一条**跨工具的分层问题**
+（见 view 第四节），它不影响「同一个工具只有一套实现」。
