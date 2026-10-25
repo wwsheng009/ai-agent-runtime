@@ -131,6 +131,39 @@ func TestConsoleNotificationLocateWired(t *testing.T) {
 	}
 }
 
+// TestConsoleApprovalQuestionInline pins the in-console approval/question UX:
+// ids come from the node SSE (connected pending_* / approval_requested /
+// question_asked) and decisions go back through POST /web/api/input with the
+// node's own contract. The session list itself must not expose node-id or
+// session-id anymore (both live in the detail dialog).
+func TestConsoleApprovalQuestionInline(t *testing.T) {
+	index := readConsoleAsset(t, "index.html")
+	for _, needle := range []string{
+		`id="chat-interactive"`, `id="ci-approve"`, `id="ci-deny"`,
+		`id="ci-answer-form"`, `id="ci-answer-input"`, `id="sd-node-id"`,
+	} {
+		if !strings.Contains(index, needle) {
+			t.Fatalf("index.html is missing %q", needle)
+		}
+	}
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		"function chatSendApprovalDecision(",
+		`{ type: "approval", request_id: requestID, allow: !!allow }`,
+		"function chatSendQuestionAnswer(",
+		`{ type: "question_answer", question_id: questionID, answer: text }`,
+		"d.pending_approval", "d.pending_question",
+		"function nodeDisplayName(", "data-attend",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing %q", needle)
+		}
+	}
+	if strings.Contains(app, `card.querySelector(".s-id-code")`) {
+		t.Fatal("session list still renders the session id; it must live in the detail dialog")
+	}
+}
+
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {
 	rec := getConsole("/some/spa/route")
 	if rec.Code != http.StatusOK {

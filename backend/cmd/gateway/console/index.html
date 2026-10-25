@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=50">
+<link rel="stylesheet" href="./style.css?v=51">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -367,6 +367,10 @@
         <span class="detail-value" id="sd-node"></span>
       </div>
       <div class="detail-row">
+        <span class="detail-label">节点 ID</span>
+        <span class="detail-value detail-id"><code id="sd-node-id"></code></span>
+      </div>
+      <div class="detail-row">
         <span class="detail-label">状态</span>
         <span class="detail-value" id="sd-state"></span>
       </div>
@@ -449,6 +453,30 @@
       </div>
     </div>
     <div class="chat-notice" id="chat-notice" hidden></div>
+    <!-- 审批 / 提问交互区：SSE connected/approval_requested/question_asked 驱动。
+         批准/拒绝走 POST /web/api/input {type:"approval"}；回答走
+         {type:"question_answer"}，与节点原版 Web 客户端同一契约。 -->
+    <section class="chat-interactive" id="chat-interactive" hidden aria-live="polite">
+      <div class="ci-head">
+        <span class="ci-kind" id="ci-kind"></span>
+        <span class="ci-title" id="ci-title"></span>
+        <button class="btn ghost sm" id="ci-detail-toggle" type="button" hidden>显示详情</button>
+      </div>
+      <div class="ci-prompt" id="ci-prompt"></div>
+      <pre class="ci-detail" id="ci-detail" hidden></pre>
+      <div class="ci-actions" id="ci-actions" hidden>
+        <button class="btn primary sm" id="ci-approve" type="button">批准</button>
+        <button class="btn danger sm" id="ci-deny" type="button">拒绝</button>
+      </div>
+      <div class="ci-suggestions" id="ci-suggestions" hidden></div>
+      <form class="ci-answer" id="ci-answer-form" hidden>
+        <textarea class="chat-input" id="ci-answer-input" rows="1"
+                  placeholder="输入回答…（Enter 提交，Shift+Enter 换行）"
+                  aria-label="回答该提问" enterkeyhint="send"></textarea>
+        <button class="btn primary sm" id="ci-answer-submit" type="submit">提交回答</button>
+        <span class="chat-hint" id="ci-answer-hint" role="status" hidden></span>
+      </form>
+    </section>
     <div class="chat-older" id="chat-older" hidden>
       <button class="btn ghost sm chat-icon-btn" id="chat-older-btn" type="button"
               aria-label="加载更早消息" title="加载更早消息">
@@ -485,6 +513,6 @@
   </div>
 </div>
 
-<script src="./app.js?v=50"></script>
+<script src="./app.js?v=51"></script>
 </body>
 </html>
