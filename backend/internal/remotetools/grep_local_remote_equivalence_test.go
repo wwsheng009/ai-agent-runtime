@@ -39,6 +39,7 @@ func TestLocalCoreRuntimeAgreesWithRemoteGrep(t *testing.T) {
 	for path, content := range map[string]string{
 		"a.go":        "needle a\nmiss\n",
 		"b.txt":       "needle b\nneedle again\n",
+		"c.md":        "needle md\n",
 		"nested/c.go": "needle c\n",
 	} {
 		full := filepath.Join(root, filepath.FromSlash(path))
@@ -72,6 +73,8 @@ func TestLocalCoreRuntimeAgreesWithRemoteGrep(t *testing.T) {
 		{"stats", map[string]interface{}{"pattern": "needle", "stats": true}},
 		{"max count", map[string]interface{}{"pattern": "needle", "max_count": 1}},
 		{"type filter", map[string]interface{}{"pattern": "needle", "type": "go"}},
+		{"type add", map[string]interface{}{"pattern": "needle", "type": "doc", "type_add": "doc:*.md"}},
+		{"type clear", map[string]interface{}{"pattern": "needle", "type": "go", "type_add": "go:*.txt", "type_clear": "go"}},
 		{"paths", map[string]interface{}{"pattern": "needle", "paths": []interface{}{"nested", "."}, "glob": "*.go"}},
 	}
 

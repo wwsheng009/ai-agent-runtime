@@ -20,18 +20,19 @@ import (
 //     multiline_dotall, replace, json, json_output, follow, crlf, sort*, ...):
 //     they need the ripgrep seam the runtime already exposes, plus their own
 //     output semantics and tests;
-//   - escape hatches (rg_args, passthru) and type set edits (type_add/type_clear):
-//     the raw-argument path deliberately mirrors rg's own parser.
+//   - escape hatches (rg_args, passthru): the raw-argument path deliberately
+//     mirrors rg's own parser.
 //
 // The test below fails when a schema parameter appears without core support, so
 // the list cannot grow unnoticed; it also fails when the shared handler starts
 // honoring one of these, so the register has to be kept honest in both
 // directions.
 //
-// The presentation group has already moved: those 18 keys are core-covered now.
+// The presentation group and the type set edits (type_add/type_clear) have
+// already moved: they are core-covered now.
 var grepLegacyOnlyParams = []string{
 	"no_sort_files", "passthru", "rg_args", "sort",
-	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",
+	"sort_files", "sort_reverse", "sortr",
 }
 
 func TestGrepLegacyOnlyParamsAreRegistered(t *testing.T) {
@@ -94,6 +95,24 @@ func TestGrepOnlyMatchingWithContextRunsOnTheSharedHandler(t *testing.T) {
 	} {
 		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
 			t.Fatalf("the shared handler must answer %v; the legacy path is retired for it", args)
+		}
+	}
+}
+
+// TestGrepTypeSetEditsRunOnTheSharedHandler pins the batch that moved the type
+// table edits: a call that only changes type definitions must be answered by
+// searchcore on every host, not by the ripgrep-owning legacy path.
+func TestGrepTypeSetEditsRunOnTheSharedHandler(t *testing.T) {
+	tool := NewGrepTool()
+	tool.SetBasePath(t.TempDir())
+	for _, args := range []map[string]interface{}{
+		{"pattern": "needle", "type_add": "doc:*.md"},
+		{"pattern": "needle", "type_add": []interface{}{"go:*.gold"}},
+		{"pattern": "needle", "type_clear": "cpp"},
+		{"pattern": "needle", "type": "doc", "type_add": "doc:*.md", "type_clear": "doc"},
+	} {
+		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
+			t.Fatalf("the shared handler must answer %v; the legacy path no longer owns type definitions", args)
 		}
 	}
 }

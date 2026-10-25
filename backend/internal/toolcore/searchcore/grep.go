@@ -194,6 +194,14 @@ type GrepOptions struct {
 	// protection), ripgrep is asked for its own flag, so the flag is never the
 	// one thing a host without rg cannot do.
 	Follow bool
+	// TypeAdd / TypeClear modify the file-type table for this call. Both are
+	// resolved by the shared core into include/exclude globs, exactly like
+	// Type/TypeNot, so both engines search the same set: type_add extends (or
+	// defines) a type, type_clear removes a definition, and clearing wins when
+	// the same name appears in both - the order the local tool has always sent
+	// to ripgrep. No engine is handed the flags themselves.
+	TypeAdd   []string
+	TypeClear []string
 	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
 	// rendered page. It is a request for *that* format, so it needs the engine
 	// that emits it: the walker has no event stream to pass through, and the
@@ -334,7 +342,10 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if len(excludeFromGlobs) > 0 {
 		opts.Exclude = append(append([]string{}, opts.Exclude...), excludeFromGlobs...)
 	}
-	includeGlobs, excludeGlobs := EffectiveGrepFilters(opts)
+	includeGlobs, excludeGlobs, err := EffectiveGrepFilters(opts)
+	if err != nil {
+		return GrepResult{}, err
+	}
 	includeFilter, err := newGrepGlobFilterWithCase(includeGlobs, opts.GlobCaseInsensitive)
 	if err != nil {
 		return GrepResult{}, err

@@ -43,7 +43,8 @@ var auditAccessors = map[string]bool{
 	"stringArg": true, "boolArg": true, "intArg": true, "intArgOK": true,
 	"stringArgAny": true, "GrepGlobListFromArgs": true,
 	"GrepPathListFromArgs": true, "GrepPatternsFromArgs": true,
-	"argSlice": true, "argString": true,
+	"grepTypeListFromArgs": true,
+	"argSlice":             true, "argString": true,
 }
 
 // scanEntries returns every argument key the given functions read, whether

@@ -513,8 +513,8 @@ func newGrepTool(name string) *GrepTool {
 				"type":        "string",
 				"description": "兼容 rg 的 --type-not/-T：排除某类文件类型，例如 test/py/go。",
 			},
-			"type_add":    stringOrStringArraySchema("兼容 rg 的 --type-add：添加自定义文件类型规则，例如 type_add='foo:*.foo'。该能力当前仅在可用 ripgrep/rg 时支持；可传单个字符串或字符串数组。"),
-			"type_clear":  stringOrStringArraySchema("兼容 rg 的 --type-clear：清除内置/自定义文件类型规则，例如 type_clear='foo'。该能力当前仅在可用 ripgrep/rg 时支持；可传单个字符串或字符串数组。"),
+			"type_add":    stringOrStringArraySchema("兼容 rg 的 --type-add：按 name:glob 添加自定义文件类型，例如 type_add='foo:*.foo'，也可在已有类型上追加 glob（go:*.gold）。类型规则由共享核心解析成 include/exclude glob，ripgrep 与内置 walker 两个引擎结果一致；可传单个字符串或字符串数组。"),
+			"type_clear":  stringOrStringArraySchema("兼容 rg 的 --type-clear：按名称清除内置/自定义文件类型规则，例如 type_clear='foo'。清除后该名称按未知类型回退为 *.<name>；同名同时出现在 type_add 与 type_clear 时以清除为准。规则由共享核心解析，两个引擎结果一致；可传单个字符串或字符串数组。"),
 			"ignore_file": stringOrStringArraySchema("兼容 rg 的 --ignore-file：额外指定 ignore 文件列表。grep 会尽量接受这种熟悉写法；当 rg 可用时会透传给 rg。"),
 			"ignore_file_case_insensitive": map[string]interface{}{
 				"type":        "boolean",

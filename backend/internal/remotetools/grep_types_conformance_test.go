@@ -14,8 +14,11 @@ func grepTypeTree(t *testing.T) string {
 	root := t.TempDir()
 	for path, content := range map[string]string{
 		"a.go":         "needle go\n",
+		"a.gold":       "needle gold\n",
+		"a.md":         "needle md\n",
 		"b.py":         "needle py\n",
 		"e.txt":        "needle text\n",
+		"nested/d.cpp": "needle cpp\n",
 		"nested/c.go":  "needle nested go\n",
 		"nested/d.hpp": "needle header\n",
 	} {
@@ -52,12 +55,19 @@ func TestRemoteGrepTypeFiltersMatchWalker(t *testing.T) {
 		{
 			name: "type cpp expands to several globs",
 			opts: searchcore.GrepOptions{Pattern: "needle", Type: "cpp"},
-			want: []string{"nested/d.hpp:1:needle header"},
+			want: []string{"nested/d.cpp:1:needle cpp", "nested/d.hpp:1:needle header"},
 		},
 		{
 			name: "type_not removes a type",
 			opts: searchcore.GrepOptions{Pattern: "needle", TypeNot: "go"},
-			want: []string{"b.py:1:needle py", "e.txt:1:needle text", "nested/d.hpp:1:needle header"},
+			want: []string{
+				"a.gold:1:needle gold",
+				"a.md:1:needle md",
+				"b.py:1:needle py",
+				"e.txt:1:needle text",
+				"nested/d.cpp:1:needle cpp",
+				"nested/d.hpp:1:needle header",
+			},
 		},
 		{
 			name: "type is a union with include",
@@ -69,6 +79,21 @@ func TestRemoteGrepTypeFiltersMatchWalker(t *testing.T) {
 			opts:         searchcore.GrepOptions{Pattern: "needle", Type: "we[i]rd"},
 			want:         nil,
 			expectWalker: true,
+		},
+		{
+			name: "type_add defines a type on both engines",
+			opts: searchcore.GrepOptions{Pattern: "needle", Type: "doc", TypeAdd: []string{"doc:*.md"}},
+			want: []string{"a.md:1:needle md"},
+		},
+		{
+			name: "type_add extends a built-in type on both engines",
+			opts: searchcore.GrepOptions{Pattern: "needle", Type: "go", TypeAdd: []string{"go:*.gold"}},
+			want: []string{"a.go:1:needle go", "a.gold:1:needle gold", "nested/c.go:1:needle nested go"},
+		},
+		{
+			name: "type_clear removes the extra globs on both engines",
+			opts: searchcore.GrepOptions{Pattern: "needle", Type: "cpp", TypeClear: []string{"cpp"}},
+			want: []string{"nested/d.cpp:1:needle cpp"},
 		},
 	}
 

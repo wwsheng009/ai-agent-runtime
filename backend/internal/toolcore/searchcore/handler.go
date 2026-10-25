@@ -422,6 +422,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		NoConfig:                  boolArg(call.Args, "no_config"),
 		NoConfigSet:               argPresent(call.Args, "no_config"),
 		Replace:                   stringArg(call.Args, "replace"),
+		TypeAdd:                   grepTypeListFromArgs(call.Args, "type_add"),
+		TypeClear:                 grepTypeListFromArgs(call.Args, "type_clear"),
 		JSONOutput:                boolArg(call.Args, "json", "json_output"),
 		ContextSeparator:          strings.TrimSpace(stringArg(call.Args, "context_separator")),
 		ContextSeparatorSet:       argPresent(call.Args, "context_separator") || boolArg(call.Args, "no_context_separator"),
@@ -443,6 +445,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	if options.Limit > GrepUnlimitedPageSize {
 		options.Limit = GrepUnlimitedPageSize
+	}
+	// Type definitions are resolved by the shared core, not forwarded to an
+	// engine, so a malformed spelling is the same argument error on every host.
+	if err := validateGrepTypeDefinitions(options); err != nil {
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"pass type_add as name:glob (for example foo:*.foo)", err), nil
 	}
 
 	engine := "walker"
@@ -538,7 +546,9 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if options.JSONOutput {
 		outputFormat = "rg_passthrough"
 	}
-	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
+	// Validated above, so the error is unreachable here; the fallback keeps the
+	// metadata truthful if that ever changes.
+	includeGlobs, excludeGlobs, _ := EffectiveGrepFilters(options)
 	// Effective patterns include every line of the pattern files; report what
 	// was actually searched rather than only the direct spellings.
 	effectivePatterns := patterns
@@ -572,6 +582,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"invert_match":         options.InvertMatch,
 		"type":                 options.Type,
 		"type_not":             options.TypeNot,
+		"type_add":             append([]string{}, options.TypeAdd...),
+		"type_clear":           append([]string{}, options.TypeClear...),
 		"max_count":            options.MaxCount,
 		"max_count_explicit":   options.MaxCountSet,
 		"only_matching":        options.OnlyMatching,
@@ -1207,5 +1219,44 @@ func grepMaxFileSizeFromArgs(args map[string]any) (int64, *toolcore.Result) {
 		return int64(value), nil
 	default:
 		return 0, nil
+	}
+}
+
+// grepTypeListFromArgs reads the type-add/clear spellings: one string or a list
+// of strings, trimmed but never comma-split - the commas in `foo:*.foo,*.bar`
+// are part of the definition. No path resolution is done because these are rule
+// strings, not files that need anchors.
+func grepTypeListFromArgs(args map[string]any, key string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	switch value := args[key].(type) {
+	case []string:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if s, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return out
+	case string:
+		// A scalar is one definition, never a comma-split list: the commas in
+		// `foo:*.foo,*.bar` belong to the definition itself.
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	default:
+		return nil
 	}
 }

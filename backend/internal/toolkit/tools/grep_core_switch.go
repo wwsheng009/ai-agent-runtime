@@ -21,6 +21,10 @@ var coreSearchParams = map[string]bool{
 	"word": true, "word_regexp": true, "line_regexp": true, "invert_match": true,
 	"limit": true, "offset": true,
 	"type": true, "file_type": true, "type_not": true,
+	// Type definitions are resolved by the shared core into the same glob
+	// filters as type/type_not, on both engines, so they belong here rather
+	// than on the ripgrep-owned legacy path.
+	"type_add": true, "type_clear": true,
 	"mode": true, "files_with_matches": true, "count": true,
 	"files_without_match": true, "files_without_matches": true,
 	"max_count": true, "max_depth": true, "max_filesize": true,

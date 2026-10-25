@@ -1304,3 +1304,34 @@ rg 的汇总事件报的是 `searches` / `searches_with_match`，**从来没有 
 
 登记表：10 → 9。剩余：`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、
 `type_add`/`type_clear`、`rg_args`。
+
+## `type_add` / `type_clear` 已收敛：类型规则由共享核解析，两个引擎同一结果（2026-10-25）
+
+### 为什么不能「透传给 rg」
+如果 `type_add` 只在有 rg 时透传、walker 忽略，那么同一个调用会因为运行环境不同而搜索不同的文件集——
+正是「一套功能、运行在不同环境」要消掉的东西。这里采用和 `type`/`type_not` 完全相同的做法：
+**共享核持有一张每次调用生效的类型表**，把类型名解析成 include/exclude glob 后交给引擎；
+rg 与 walker 都只消费解析后的 glob，谁也不再看 `--type-add`/`--type-clear`。
+
+### 语义（以本地既有行为为准）
+- `type_add` 的每一项是 `name:glob[,glob...]`；名字不存在时新增，已存在时**追加** glob（与 rg 的 `--type-add` 一致）；
+- `type_clear` 按名字删除定义；**同名同时出现在 add 与 clear 时以 clear 为准**——这正是本地旧 argv 的顺序
+  （先 `--type-add` 后 `--type-clear`），不是新拍的行为；
+- 被清除（或从未定义）的名字用于 `type`/`type_not` 时仍按既有契约回退为 `*.<name>`，不会变成「不过滤」；
+- 非法的 `type_add`（缺冒号、空名字、空 glob）在引擎启动前就被拒绝，错误码 `INVALID_ARGUMENT`，
+  不会再出现「有 rg 时报错、没 rg 时静默搜别的」；
+- `type_add`/`type_clear` 进入本地 `coreSearchParams`，正常调用不再落到 legacy；只有显式 `rg_args`/`passthru`
+  这类逃生口仍走旧路径（它们本来就是 rg 解析器的镜像）。
+
+### 两个面的声明同步
+- remote schema 补上 `type_add`/`type_clear`（此前只有本地 schema 有）；
+- 本地 schema 去掉「仅在可用 ripgrep/rg 时支持」的旧文案，改为共享核解析、两引擎一致；
+- metadata 无条件发布 `type_add`/`type_clear`（与本地旧路径一致），`include_patterns`/`exclude_patterns`
+  仍是解析后的生效数量。
+
+### 证据
+- searchcore：新增/追加热类型、单个定义多 glob、`type_not` 走扩展表、clear 删除多 glob 类型、
+  add+clear 同名的优先级、四种非法定义；handler 级断言 metadata；
+- remotetools 对拍：`type_add`、扩展内置类型、`type_clear` 三组在 walker 与真实 rg 上得到同一文件集；
+  本地/remote 同源等价性测试新增 `type_add` 与 `type_clear` 两个调用；
+- 登记表：9 → 7。剩余：`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、`rg_args`。

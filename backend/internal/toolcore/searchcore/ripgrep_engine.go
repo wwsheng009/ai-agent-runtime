@@ -497,7 +497,10 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	// the walker's basename/relative matching only agree on the simple forms
 	// safeRipgrepGlob accepts. Anything else takes the walker so one filter
 	// language serves both paths.
-	includeGlobs, excludeGlobs := EffectiveGrepFilters(opts)
+	includeGlobs, excludeGlobs, err := EffectiveGrepFilters(opts)
+	if err != nil {
+		return GrepResult{}, false, err
+	}
 	for _, pattern := range append(append([]string{}, includeGlobs...), excludeGlobs...) {
 		if !safeRipgrepGlob(pattern) {
 			return GrepResult{}, false, nil
