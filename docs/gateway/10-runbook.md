@@ -516,5 +516,25 @@ relay 契约与设备注册 API 见
 > `mode=rule` / `GLOBAL=DIRECT`。回滚点：`/opt/aicli-gateway/gateway.bak-20261025-140810`
 > （`cp -p … gateway && systemctl restart aicli-gateway`）。
 
+> **部署记录（2026-10-25 第七笔，通知链路修复 v47）**：HEAD `2ba529eb`，raw sha256
+> `cb868fda…8ccdc8a92e`（18,432,898 字节）；1MB×18 分块上传 + sha 门禁 → 备份
+> `gateway.bak-20261025-143355` → 替换重启。验证：服务 active、`/proc/<pid>/exe` sha 与本地
+> 构建一致、公网 CF `app.js?v=47`/`style.css?v=47`/`sw.js` CACHE v47、
+> `/api/notify/policy` 未认证 401、重启日志无 error/panic。
+>
+> **本笔修复的两个真实故障**：
+> ① 控制台 **v40 多视图重构把 `trackAttention` 的全部调用点丢了**（只剩函数定义），
+> 导致 fresh attention → toast / Tauri 原生通知整条链路从不执行；已在 `renderAll` 与增量
+> `patchSession` 恢复调用，并加 `TestConsoleAttentionTrackingWired` 资产回归门禁。
+> ② 服务端 normal（completed/waiting）默认只走 Web Push，而 `push.json` 订阅数为 0，
+> ntfy 只收 high → 手机端收不到完成类通知；已在 unit 追加
+> `--notify-normal-channels webpush,ntfy`（unit 备份
+> `aicli-gateway.service.bak-20261025-142415`）并重启，日志确认
+> `normal notification channels: webpush,ntfy`。
+> 桌面端实测（CDP 向运行中的 WebView 注入合成 session 增量）：Windows 通知历史出现
+> `node-… · 通知链路测试 / 出错` 与 `… · 通知链路测试2 / 已完成` 两条真实事件，
+> 证明修复链路端到端生效。语义提醒：App 重载后的**首屏只做 seed**，已存在的注意力不补弹，
+> 只有加载后的新变化才通知；需要 Web Push 的设备要在控制台重新「开启通知」建立订阅。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

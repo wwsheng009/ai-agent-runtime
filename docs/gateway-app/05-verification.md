@@ -205,6 +205,30 @@ GET  /sw.js                               → CACHE aicli-gateway-shell-v46
 Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 App 生效
 （真机弹窗验证见 §5）。
 
+## 4.3 通知链路修复（v47，端到端实测）
+
+“真实注意力没有通知”由两个叠加故障造成：
+
+1. 控制台 **v40 多视图重构丢了 `trackAttention` 的全部调用点**（只剩函数定义）——
+   fresh attention 不再触发 toast 与 Tauri 原生通知，只有首屏 seed；
+2. 网关 normal（completed/waiting）默认只走 Web Push，而 `push.json` 订阅数为 0，
+   ntfy 只收 high —— 手机端收不到完成类通知。
+
+修复与验证：
+
+- 控制台在 `renderAll` 与增量 `patchSession` 恢复调用，资源版本 v47，新增
+  `TestConsoleAttentionTrackingWired` 防回归；
+- 服务端 unit 追加 `--notify-normal-channels webpush,ntfy`（unit 备份
+  `aicli-gateway.service.bak-20261025-142415`），日志确认
+  `normal notification channels: webpush,ntfy`；
+- 部署 HEAD `2ba529eb`，sha256 `cb868fda…8ccdc8a92e`，备份
+  `gateway.bak-20261025-143355`；
+- 桌面端用 CDP 向运行中的 WebView 注入合成 session 增量，Windows 通知历史实测出现
+  `node-… · 通知链路测试 / 出错`、`… · 通知链路测试2 / 已完成` 两条真实事件。
+
+语义提醒：App 重载后的首屏只做 seed（已存在的注意力不补弹，只有加载后的新变化通知）；
+浏览器 / PWA 需要重新“开启通知”建立 Web Push 订阅，桌面 App 走原生桥不依赖订阅。
+
 ## 5. 尚未验证
 
 - 聊天面板发送、文件上传/下载、软键盘与返回手势（移动端）。
