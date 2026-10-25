@@ -947,4 +947,50 @@ remote 的 grep 参数（`remotetools/registry.go:176` 起约 400 行）与本�
 然后是第 2 组（19 个 rg 引擎/输出语义标记：`pcre2`、`engine`、`auto_hybrid_regex`、`multiline`、
 `multiline_dotall`、`replace`、`json`、`json_output`、`follow`、`crlf`、`sort*`、`head_limit`、
 `no_config`、`type_add`、`type_clear`、`context_separator`、`no_context_separator`），
-以及 `only_matching` + context 那个组合。这些需要 ripgrep 通道与各自的输出语义，逐个搬。
+以及 `only_matching` + context 那个组合。这些需要 ripgrep 通道与各自的输出语义，逐个搬。## grep legacy 第 2 批（引擎选择）已完成（2026-10-25）
+
+`pcre2`、`engine`、`auto_hybrid_regex`、`multiline`、`multiline_dotall` 五个参数进共享 handler。
+**legacy-only 从 23 降到 18。**
+
+### 顺带修掉一个真缺陷
+
+**「显式要求 ripgrep 的模式先被 Go regexp 拒了」**：core 原先的顺序是「先跑 walker，再让引擎覆盖」
+——而 `pcre2: true` + lookaround 模式（`foo(?!bar)`，PCRE 合法、Go regexp 非法）会在 walker 编译处
+直接失败，引擎根本轮不到。本地一直是对的（要求 rg 时先交给 rg，否则报错），并在注释里写明了原因。
+现在 core 也是：`RequiresRipgrep()` 为真时**先问引擎**；引擎跑不了（主机没 rg）才像本地一样退回 walker。
+
+顺带把「要不要 rg」变成**派生**而不是并列字段：`RequiresRipgrep()` 由五个标记算出来，
+`engine=default`/留空明确不算（这也和本地的 `requiresRipgrepForEngine` 一致），避免两个真相源。
+`requires_ripgrep` 元数据由 handler 发布——因为它就是做决定的那一方。
+
+### 一次必要的词汇收敛（有先例可依，不是我拍的）
+
+改路由后立刻暴露：同一个 `engine` 元数据，本地旧路径说 `builtin`/`rg`，core 说
+`walker`/`ripgrep`。两边都有测试钉住。判断依据是**已经收敛的兄弟工具**：本地 `glob`
+（早就跑在共享 handler 上）测试里断言的就是 `walker`/`ripgrep`。
+也就是说本地面自己就不一致，而收敛后的那个工具用的是共享词汇——所以退役的是 grep 旧路径的
+`builtin`/`rg`，三处本地断言随之更新，每处都写了理由。
+
+### 证据
+
+新增 searchcore 套件用假 searcher 驱动，钉住三件事：① 引擎被先问、且收到了 flags；
+② **Go regexp 拒绝的模式在引擎可用时仍被回答**（就是上面那个缺陷）；③ 没有 ripgrep 的主机
+退回 walker。`RequiresRipgrep()` 另有表驱动测试，包含「`engine=default` 不算要求 rg」。
+
+`go build` / `go vet` 干净；`toolcore`、`toolkit`、`remotetools`、`tools`、`agent`、`toolexec` 全绿。
+提交：`a9e7593f`。
+
+### 剩下的 18 个 + 1 个组合
+
+`rg_args`、`passthru`、`replace`、`json`、`json_output`、`follow`、`crlf`、`no_config`、
+`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`head_limit`、
+`context_separator`/`no_context_separator`、`type_add`/`type_clear`，以及
+`only_matching` + context。
+
+**排序修正**：之前写「1 → 3 → 2」，把 `rg_args` 排在第二。这一轮证明那是错的——
+`rg_args` 把 raw 参数解析成**选项字段**（`-P` → PCRE2、`-U` → multiline、`--engine` → engine…），
+而那些字段现在才刚有 5 个；`-r/--replace`、`--json`、`-L/--follow` 的目标字段还不存在。
+所以正确顺序是：**先把第 2 组剩下的语义字段补齐，最后再平移 `rg_args` 解析器**（约 600 行，
+整段平移）。剩下的 18 个里，`no_config` 值得单独记一笔：共享引擎的 base args 里**本来就有**
+`--no-config`，所以 `no_config: true` 在共享路径上已经是既有行为，但 `false`（要求读配置文件）
+在共享路径上无法兑现——这类「本地能、共享不能」的语义差异必须在搬之前定清楚，不能顺手当空操作。
