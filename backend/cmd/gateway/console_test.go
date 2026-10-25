@@ -162,6 +162,12 @@ func TestConsoleApprovalQuestionInline(t *testing.T) {
 	if strings.Contains(app, `card.querySelector(".s-id-code")`) {
 		t.Fatal("session list still renders the session id; it must live in the detail dialog")
 	}
+	if strings.Contains(app, "setText(titleEl, question.question_id") {
+		t.Fatal("question bar still exposes the raw question id in its title")
+	}
+	if !strings.Contains(app, `nodeDisplayName(node) + " · " + (node.kind || "agent")`) {
+		t.Fatal("chat panel header must use nodeDisplayName; raw node ids belong to the detail dialog")
+	}
 }
 
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {

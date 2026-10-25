@@ -2497,7 +2497,9 @@
       chatInteractiveHint("", "");
     } else {
       setText(kindEl, "提问");
-      setText(titleEl, question.question_id || "");
+      // 交互条不暴露 question_id：id 只走数据面（question_answer 用它回执），
+      // 界面保留「提问」+ 题面 + 建议/自由输入即可。
+      setText(titleEl, "");
       setText(promptEl, question.prompt || "");
       if (detail) { detail.hidden = true; detail.textContent = ""; }
       if (toggle) { toggle.hidden = true; }
@@ -2817,7 +2819,7 @@
     var canInput = chatCanInput(node);
     setText(el("chat-modal-title"), sessionLabelOf(session));
     setText(el("chat-modal-sub"),
-      (node.name || node.node_id) + " · " + (node.kind || "agent") +
+      nodeDisplayName(node) + " · " + (node.kind || "agent") +
       " · " + stateLabelOf(session));
     var host = el("chat-list");
     if (host) { host.innerHTML = ""; }
@@ -5177,7 +5179,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=51").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=52").catch(function () {});
     });
   }
 
