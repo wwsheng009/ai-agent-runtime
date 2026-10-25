@@ -57,8 +57,13 @@ func TestGrepTool_WindowsJunctionSubtreeSearchedByDefault(t *testing.T) {
 	require.True(t, result.Success, "execute must succeed: %v", result.Error)
 	content := result.Content
 	require.Contains(t, content, "receipt")
+	// The file column is a slash path on every surface (the shared core
+	// normalizes it, and so did the legacy walker's own display rules).
+	// Assert on the basename so the check stays about the junction subtree
+	// being searched rather than about a host-specific separator.
 	require.True(t,
-		strings.Contains(content, "link\\note.md") || strings.Contains(content, "real\\note.md"),
+		strings.Contains(content, "link/note.md") || strings.Contains(content, "real/note.md") ||
+			strings.Contains(content, "link\\note.md") || strings.Contains(content, "real\\note.md"),
 		"expected junction/real subtree match, got: %s", content)
 
 	// 显式 follow=false 保持 rg 缺省语义（junction 可被跳过，不报错即可）。

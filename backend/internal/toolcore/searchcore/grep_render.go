@@ -50,6 +50,16 @@ func (in grepRenderInputs) displayPathFor(file string) string {
 				return in.paths.Relative(file)
 			}
 			rel := in.paths.Relative(file)
+			// A root the workspace cannot describe (outside it, or on a
+			// different volume) comes back as an absolute path. Joining that
+			// with the file's own absolute path produced
+			// `C:/root/C:/root/a.txt` - a path that resolves nowhere. The
+			// file's own spelling is already the honest answer there.
+			if filepath.IsAbs(label) || filepath.IsAbs(rel) {
+				// Normalized to slashes like every other path this tool
+				// prints: the file column is a slash path on every surface.
+				return filepath.ToSlash(rel)
+			}
 			if strings.HasPrefix(rel, label+"/") {
 				return rel
 			}
