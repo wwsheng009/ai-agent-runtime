@@ -567,5 +567,32 @@ relay 契约与设备注册 API 见
 > 仍按节点 `kind` 指向 `/web/`（v48 行为不变）。
 > 回滚：网关 `gateway.bak-20261025-162557`；桌面壳需重新安装上一枚 exe。
 
+> **部署记录（2026-10-25 第十笔，会话列表去 id + 审批/回答内联 v51/v52）**：控制台
+> HEAD `dd9fd66a`（v51）+ `96edba02`（v52 微调），两次均从干净 worktree 构建
+> （linux/amd64、trimpath），sha256 分别 `e161c0dc…6352e3e` / `4a6f8adb…d488ec`；
+> 备份 `gateway.bak-20261025-165652` / `gateway.bak-20261025-170423`，替换重启后
+> `/proc/<pid>/exe` sha 与本地一致，公网 `app.js?v=52`、`sw.js` CACHE
+> `aicli-gateway-shell-v52`、`/api/notify/policy` 401、health 200。
+>
+> **本笔改动**：① 会话列表不再显示 node-id / session-id（两个 id 收进「详情」弹窗的
+> 「会话 ID」/「节点 ID」行；无名节点回退「本机 agent」/「runtime-server 节点」类型
+> 标签）；② 卡片主操作按会话注意力升级：attention=approval/question 且节点具备
+> screen+events+input 能力时显示「审批 / 回答」，点击打开站内会话面板并聚焦交互区；
+> ③ 交互区复用节点原版 Web 契约（SSE `connected.pending_*`、`approval_requested`、
+> `question_asked`；决议走 `POST /n/{node}/web/api/input`，body 为
+> `{type:"approval",request_id,allow}` / `{type:"question_answer",question_id,answer}`），
+> 不跳转、不开原版 Web；④ v52 微调：提问条不再把 `question_id` 当标题显示，面板头部
+> 改用节点显示名（避免无名节点回退成裸 node-id）。
+>
+> **验证（CDP 驱动运行中的 WebView）**：列表 21 张卡片 `idNodes=0`、正文无裸
+> `node-…`/`session_…`；注入 attention=approval 会话后卡片显示「审批」、面板头部
+> 「本机 agent · aicli · 审查中」；`approval_requested` 渲染「待审批工具 shell」+
+> 批准/拒绝 + 参数详情，点拒绝提交**单条** `POST /web/api/input`
+> `{"type":"approval","request_id":…,"allow":false}`（探针 id 无真实审批，节点按幂等
+> 返回 `resolved`，未产生实际决议）；`question_asked` 渲染建议按钮 + 自由回答且文本
+> 不泄漏 question_id，点建议提交 `{"type":"question_answer",…}`，`question_answered`
+> 后交互条收起；详情弹窗仍显示节点 ID 与会话 ID。
+> 回滚：`gateway.bak-20261025-165652`（v51）或 `gateway.bak-20261025-170423`（v52）。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

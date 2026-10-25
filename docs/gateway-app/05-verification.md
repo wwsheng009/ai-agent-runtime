@@ -232,6 +232,13 @@ Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 
   `aicli-gateway-locate` 事件；控制台切到会话视图、放宽筛选/搜索、必要时补拉快照，
   再滚动 + 脉冲 + 聚焦目标卡片。CDP 实测从 `#dashboard` 派发真实 node/session →
   hash `#sessions`、会话视图可见、目标卡片 `card-updated` 且获得焦点、位于视口内。
+- v51/v52 追加：会话列表去掉 node-id / session-id（两者收进「详情」弹窗），卡片主操作
+  升级为站内「审批 / 回答」。CDP 实测（运行中 WebView）：列表 21 张卡片
+  `idNodes=0`、正文无裸 `node-…`/`session_…`；注入 attention=approval 会话 → 卡片
+  显示「审批」、面板头部「本机 agent · aicli · 审查中」；审批条渲染工具名/参数/批准/
+  拒绝并提交 `POST /web/api/input {"type":"approval",…}`（探针 request_id，节点幂等
+  返回 `resolved`）；提问条渲染建议并提交 `{"type":"question_answer",…}`，`question_answered`
+  后收起；详情弹窗保留节点 ID 与会话 ID。
 
 语义提醒：App 重载后的首屏只做 seed（已存在的注意力不补弹，只有加载后的新变化通知）；
 浏览器 / PWA 需要重新“开启通知”建立 Web Push 订阅，桌面 App 走原生桥不依赖订阅。
@@ -244,6 +251,8 @@ Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 
 - iOS/Android 真机构建与商店签名。
 - 控制台 v45 部署后的“真实 attention → 系统通知”真机验证。
 - 控制台 v46 部署后的“策略关闭 completed → App 不弹窗”真机验证。
+- 真实挂起审批/提问在站内交互条上的人工闭环（v51/v52 用合成 SSE 帧 + 真实节点
+  `/web/api/input` 探针完成了链路验证；核对真实审批仍建议对照节点原版 Web）。
 
 这些属于 Phase 3/4，不应在本轮标记为完成。
 
