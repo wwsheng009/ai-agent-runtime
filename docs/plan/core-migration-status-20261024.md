@@ -863,4 +863,49 @@ core 原来把**调用方明确给的小 limit 抬到 1024**，而本地是原�
 
 `grep` 的债清完之后，「工具层一套实现」这件事就没有已知例外了；剩下的只有
 `toolexec/preflight` 的路径治愈与工具级治愈是否合并这一条**跨工具的分层问题**
-（见 view 第四节），它不影响「同一个工具只有一套实现」。
+（见 view 第四节），它不影响「同一个工具只有一套实现」。## grep legacy 第一批（第 1 组）的作业单
+
+分析已完成，下一轮可以直接照单执行。
+
+### 要搬的 18 个参数
+
+它们全是「接受并忽略」，因为工具自己稳定的输出骨架已经满足它们：
+
+```
+line_number, no_line_number, with_filename, no_filename,
+heading, no_heading, pretty, text, binary,
+line_buffered, no_line_buffered, block_buffered, no_block_buffered,
+null, null_data,
+field_context_separator（字符串）, path_separator（字符串）, color（字符串）
+```
+
+本地把这件事集中在 `grep.go:3121 collectIgnoredPresentationParams(params)`：布尔为真时记 `name`，
+字符串非空时记 `name=value`，去重后放进 `opts.ignoredPresentation`，最终以元数据键
+**`ignored_presentation`**（`grep.go:6160`）出现在结果里。注意它是**无条件发布**的（没有忽略项时是空列表）。
+
+### 三个（其实是四个）改动点
+
+1. **`searchcore`**：`GrepOptions` 加 `IgnoredPresentation []string`；参数解析处调用一个
+   **原样平移**的 `collectIgnoredPresentationParams`（与本地同一份拼写规则）；
+   结果元数据加 `ignored_presentation`。平移而不是重写——它是一张拼写表，重写必然漏项。
+2. **remote 的 grep schema**（`remotetools/registry.go`）：补上这 18 个属性的声明，否则
+   `tool_schema_audit_test` 的「handler 读了但 schema 没声明」会红（这些不是按能力裁掉的参数，
+   不能用 `filtered` 豁免——remote 完全能兑现它们，因为它们是空操作）。
+3. **本地路由集合**（`grep_core_switch.go` 的 `coreSearchParams`）：加这 18 个键。
+4. **登记表**（`grep_legacy_register_test.go` 的 `grepLegacyOnlyParams`）：删掉这 18 项。
+   `TestGrepCoreSwitchCoversEveryRegisteredParam` 会在两处不同步时直接报出参数名。
+
+验收：`TestGrepLegacyOnlyParamsAreRegistered` 自动核对新集合；`searchcore` 新增一个测试，
+断言「bool 真值记 `name`、空字符串不记、`color=never` 记 `color=never`、无忽略项时发布空列表」。
+
+### 顺带记下另一条同轴债务：remote 的 grep schema 是本地 schema 的平行副本
+
+remote 的 grep 参数（`remotetools/registry.go:176` 起约 400 行）与本地 `grep.go` 的声明是
+**两份手写文本**，只是被 `tool_schema_audit_test` 从行为上对齐。这与「一套代码」是同一个病，
+只是发生在 schema 轴：view 已经用 `viewcore.Schema()` 做到了「一份声明」，grep 还没有。
+
+等 41 个参数搬完（第 1、3、2 组都结束），这 400 行副本自然会消失——那时本地与 remote 应当
+像 view 一样共享**同一份** grep schema（`searchcore.GrepParameters()`），而不是各写一份。
+在那之前不值得先动它：参数集正在变，先抽公共声明会把搬运动作放大一倍。
+
+提交：`5d353b4e`（登记）、`5b5ead65`（文档）。
