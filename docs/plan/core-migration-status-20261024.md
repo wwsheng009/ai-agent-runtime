@@ -744,4 +744,68 @@ schema **故意不声明**它（没有索引，声明的代价是「收了再拒
 
 view 是最后一块「大」的重复实现。剩下的 `artifact_read` 是本地一份、core 一份
 （`NewArtifactReadHandler` 只被 remote 用），量级小得多，做法相同：平移 + 翻转 + 对拍。
-另外 `grep` 的 legacy 兜底分支（`rg_args` / `pattern_file` 之外的参数组合）仍未收敛或删除。
+另外 `grep` 的 legacy 兜底分支（`rg_args` / `pattern_file` 之外的参数组合）仍未收敛或删除。## artifact_read 已收敛（2026-10-25）：本地 `Execute` 翻到共享 handler
+
+最后一个重复实现。本地工具自己读会话 artifact store（scope、哨兵错误、解引用指标、
+按 rune 对齐的分页），core handler 走 store 无关的 sink 并渲染另一种页面。
+
+### 这是一次「定契约」而不是「猜契约」
+
+两边的**页面形状**是真实的契约冲突，各自都有测试钉住：
+
+- **本地**：`artifact art_… | tool=shell | total_bytes=N | window=[a,b) | eof=… | next_offset=N | tool_call_id=…` + 空行 + 窗口字节。续读靠头部写明的 `next_offset`。
+- **remote**：**纯窗口字节**，续读靠元数据 `suggested_next_offset`；`artifact_page_test.go` 的注释明确写着「响应大小必须等于请求大小，这正是 next_offset 算术可信的原因」，并用 `offset += len(chunk)` 逐页重组。
+
+决定性理由是「以本地为准」之外还有一条：**成功的工具结果到达模型的是正文，remote 的元数据模型根本看不到**。纯字节方案下模型无法知道下一段该从哪里读（它没法自己数字节）；头部方案把 `next_offset` 直接写在正文里。代价已记录进测试：remote 的分页测试现在按页面写明的 offset 走，而不是按自己量出来的长度。
+
+### 搬运
+
+- **core**：`artifact_handler.go` 渲染本地那套头部与元数据
+  （`artifact_source_id` / `tool_name` / `total_bytes` / `window_offset` / `window_bytes` /
+  `eof` / `has_full_bytes` / `next_offset` / `source_tool_call_id`），窗口起点取自
+  `ArtifactChunk.Offset`（sink 对齐过窗口时，页面如实报告真实起点），并接受粘贴的
+  指针尾巴（从任意字符串里提取 `art_<32hex>`）。
+- `toolcore.ArtifactChunk` 新增 `SourceTool` / `SourceToolCallID`：advisory，让头部能写出
+  捕获来源；sink 报不出来就留空，头部写 `unknown` 而不是编一个名字。
+- **本地**：`localArtifactSink` 从会话 store 服务共享 handler，并保住本地历来强制执行的全部
+  规则——读取范围（本会话或直接父会话）、无归属/越界的 fail-closed 答案、store 损坏的修复
+  路线、解引用指标、以及「一页不切开 rune、且至少推进一个 rune」。store 的哨兵错误以
+  `toolcore.CodedError` 跨边界，失败类别不会被压成统一的 INVALID_ARGUMENT。
+- 本地 `artifact_read.go` 现在 **172 行**：schema、一条「完全没给 id」的 miss 指标、以及委托。
+
+### 新 core 测试抓到的一处分歧
+
+core 原来把**调用方明确给的小 limit 抬到 1024**，而本地是原样尊重（下限只作用于
+由预算推出的最大值）。「故意只读 40 字节」现在真的返回 40 字节。
+
+### 证据
+
+- **本地 artifact 套件一行未改、全部通过**——这就是「页面形状没有搬家」的证据；
+- **remote artifact 套件按共享形状更新后全绿**，含逐字节重组的分页遍历；
+- 新增 `toolcore/artifact_handler_test.go`：用假 sink 钉住页面契约——头部字段、
+  EOF 页不给续读承诺、粘贴的指针尾巴能解析、sink 的 `CodedError` 保留类别与恢复路线；
+- `go build` / `go vet` 干净；`toolcore`、`toolkit`、`remotetools`、`tools`、`agent`、
+  `toolexec`、`artifact` 全绿。
+
+提交：`926ca74b`。
+
+## 工具层收敛现状（2026-10-25，最终）
+
+| 工具 | 本地 | remote | 状态 |
+|---|---|---|---|
+| `grep` / `glob` / `ls` | 共享 handler | 共享 handler | 已收敛（grep 仍留 legacy 兜底分支，见下） |
+| `write` / `append_write` | 共享 handler | 共享 handler | 已收敛 |
+| `edit` / `apply_patch` | 共享 handler | 共享 handler | 已收敛 |
+| `view` | 共享 handler | 共享 handler | 已收敛 |
+| `artifact_read` | 共享 handler | 共享 handler | **已收敛（本轮）** |
+
+**所有文件/搜索/归档工具现在都是「一套实现、两个执行位置」。** 剩下的两处已知遗留：
+
+1. **`grep` 的 legacy 兜底分支**：`rg_args` / `pattern_file` 之外的参数组合仍走本地旧实现。
+   要么搬进 `searchcore`，要么删掉、让 schema 只声明真正实现的那部分（按用户约束应搬进 core）。
+2. **`internal/toolexec/preflight` 的路径治愈**与工具级治愈是两层（见 view 第四节），
+   是否合并属于跨工具的上层问题。
+
+本轮（view + artifact_read）新增的 core 扩展接口一共四个：`SymbolResolver`、
+`ContentRenderer`、`ReadObserver`（`ReadWindow`）、`ArtifactOriginProvider` 之外的
+`ArtifactChunk.SourceTool*` 字段。它们全部遵循同一条分工：**策略在 core，宿主状态/能力在面**。
