@@ -64,7 +64,10 @@ d.SetPrimary("webpush")
 - 为空/未配置：沿用 D6 单主通道。
 - 配置后：normal 按列表顺序投递；未知通道启动时告警并忽略。
 - `high` / `low` 行为不变。
-- 通道偏好（`notify-prefs.json`）仍然生效。
+- 通知策略（`notify-policy.json`，控制台「通知设置」页 `#notifications`）
+  仍然生效：`muted` / `min_priority` / `allow_kinds` / `quiet_hours` 在网关
+  外发路径生效，`allow_kinds` 与 quiet hours 同时由控制台原生通知桥读取，
+  因此桌面 App 关闭「已完成 / 等待中」后不会再弹原生通知。
 
 推荐部署值：
 

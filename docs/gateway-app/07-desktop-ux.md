@@ -80,6 +80,29 @@ Linux:   XDG autostart
   WebView 导航到外部站点。
 - 通知正文仍只包含节点、会话标题和 attention 标签，不含聊天正文。
 
+### 5.1 通知策略（独立配置页）
+
+控制台侧边栏新增「通知设置」独立页面：
+
+```text
+{gateway}/#notifications
+```
+
+页面数据来自 owner 保护的 `GET/PUT /api/notify/policy`（持久化到
+`<data-dir>/notify-policy.json`，保存即热加载，无需重启）。页面可控制：
+
+- 总开关、最低优先级（low/normal/high）、免打扰时段；
+- 各 kind 开关（待审批 / 待回答 / 出错 / 已完成 / 等待中）；
+- 通道开关（Web Push / ntfy / 原生 App，未配置通道置灰）；
+- 会话级覆盖（单会话静音 / 提高优先级门槛）。
+
+桌面 App 的原生通知桥 `nativeAttentionNotification` 在
+`window.__TAURI__.notification.sendNotification` 之前先按同一份策略过滤
+（`allow_kinds`、`min_priority`、`quiet_hours`、会话级静音），因此关闭
+「已完成」后，App 内也不会再为 `completed` 弹系统通知。策略未加载时
+fail-open（保持原有行为），本机总开关仍由侧边栏「开启/关闭应用通知」与
+系统通知权限控制。
+
 ## 6. 本地状态与日志
 
 桌面偏好文件：

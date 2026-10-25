@@ -16,6 +16,13 @@
   var sessionFilterKind = "online";
   var sessionSort = "activity";
   var authedState = false;
+  // 通知策略（GET/PUT /api/notify/policy）：notifyPolicy 是生效值（原生通知
+  // 桥据此过滤），notifyPolicyDraft 是「通知设置」页未保存的编辑副本。
+  var notifyPolicy = null;
+  var notifyPolicyMeta = null;
+  var notifyPolicyDraft = null;
+  var notifyPolicyLoaded = false;
+  var notifyPolicyLoading = null;
 
   var attentionPriority = { approval: 0, question: 1, error: 2, completed: 3, waiting: 4 };
 
@@ -137,6 +144,10 @@
       el("password").setAttribute("aria-invalid", "false");
       el("password").focus();
       pushConfig = null; // re-read gateway push config on the next login
+      notifyPolicy = null;
+      notifyPolicyMeta = null;
+      notifyPolicyDraft = null;
+      notifyPolicyLoaded = false;
     }
     refreshPushState();
     renderInstallHint();
@@ -150,6 +161,7 @@
     nodes: "节点",
     tokens: "设备令牌",
     connectors: "连接器",
+    notifications: "通知设置",
   };
 
   function currentView() {
@@ -172,6 +184,11 @@
     // Connectors are a lazy view: only hit /api/connectors when the tab is open
     // (the management plane may legitimately be unwired → 403/503 page state).
     if (view === "connectors") { loadConnectors(false); }
+    // 通知设置同样是惰性视图：只在打开时拉取策略，避免每次登录多一个请求。
+    if (view === "notifications") {
+      loadNotifyPolicy();
+      if (notifyPolicyLoaded) { renderNotifyPolicy(); }
+    }
     closeSidebar();
   }
 
@@ -1916,6 +1933,7 @@
     renderActivityFeed(nodes);
     renderNodeLists(nodes);
     renderSessionTable(nodes);
+    if (currentView() === "notifications") { renderNotifyPolicySessions(); }
   }
 
   /* ─────────────────────── rendering: devices ────────────────── */
@@ -3602,6 +3620,10 @@
 
   function nativeAttentionNotification(node, session) {
     if (!nativeNotificationApi()) { return; }
+    // 策略门（GET /api/notify/policy）：服务端 notify-policy.json 里被关闭的
+    // kind / 免打扰 / 会话级静音在这里拦截，避免只改网关配置却仍被 App 弹窗
+    // 打扰。策略未加载时保持原行为（fail-open），防止网络失败吞掉全部通知。
+    if (!notifyPolicyAllowsAttention(session.attention, session.session_id)) { return; }
     sendNativeNotification(
       (node.name || node.node_id) + " · " + sessionLabelOf(session),
       attentionLabel(session.attention),
@@ -3611,6 +3633,361 @@
         attention: session.attention,
       }
     );
+  }
+
+  /* ────────────── 通知设置页 / 通知策略（GET-PUT API） ────────── */
+
+  // 词表兜底：正常取 /api/notify/policy 的 meta.kinds（与网关登记表同源）。
+  var NOTIFY_KIND_FALLBACK = [
+    { kind: "approval", label: "待审批", priority: "high" },
+    { kind: "question", label: "待回答", priority: "high" },
+    { kind: "error", label: "出错", priority: "high" },
+    { kind: "completed", label: "已完成", priority: "normal" },
+    { kind: "waiting", label: "等待中", priority: "normal" },
+  ];
+
+  function notifyNormalizeKind(kind) {
+    return kind === "completion" ? "completed" : String(kind || "");
+  }
+
+  function notifyKindPriority(kind) {
+    kind = notifyNormalizeKind(kind);
+    if (kind === "approval" || kind === "question" || kind === "error") { return "high"; }
+    return "normal";
+  }
+
+  function notifyPriorityRank(priority) {
+    if (priority === "high") { return 2; }
+    if (priority === "normal") { return 1; }
+    return 0;
+  }
+
+  function notifyParseQuietHours(list) {
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (item) {
+      var m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(String(item || ""));
+      if (!m) { return; }
+      var start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+      var end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+      if (start === end) { return; }
+      out.push([start, end]);
+    });
+    return out;
+  }
+
+  function notifyInQuietHours(ranges, now) {
+    var minutes = now.getHours() * 60 + now.getMinutes();
+    for (var i = 0; i < ranges.length; i++) {
+      var start = ranges[i][0], end = ranges[i][1];
+      if (start < end) {
+        if (minutes >= start && minutes < end) { return true; }
+      } else if (minutes >= start || minutes < end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // notifyPolicyAllowsAttention 是控制台侧的策略判定（与服务端
+  // notify.Preference 的字段级覆盖同序：global → session → channel）。
+  // 策略未加载时返回 true，保持既有行为，避免一次网络失败把原生通知
+  // 全部静默。
+  function notifyPolicyAllowsAttention(kind, sessionID) {
+    if (!kind) { return false; }
+    if (!notifyPolicy) { return true; }
+    var global = notifyPolicy.global || {};
+    if (global.muted === true) { return false; }
+    var session = (notifyPolicy.sessions || {})[sessionID] || {};
+    if (session.muted === true) { return false; }
+    var priority = notifyKindPriority(kind);
+    var minPriority = session.min_priority || global.min_priority || "low";
+    if (notifyPriorityRank(priority) < notifyPriorityRank(minPriority)) { return false; }
+    var kinds = session.allow_kinds != null ? session.allow_kinds : global.allow_kinds;
+    if (kinds != null) {
+      var allowed = false;
+      for (var i = 0; i < kinds.length; i++) {
+        if (notifyNormalizeKind(kinds[i]) === notifyNormalizeKind(kind)) { allowed = true; break; }
+      }
+      if (!allowed) { return false; }
+    }
+    var quiet = session.quiet_hours != null ? session.quiet_hours : global.quiet_hours;
+    if (priority !== "high" && notifyInQuietHours(notifyParseQuietHours(quiet), new Date())) {
+      return false;
+    }
+    return true;
+  }
+
+  function cloneJSON(value) {
+    try { return JSON.parse(JSON.stringify(value || {})); } catch (e) { return {}; }
+  }
+
+  function notifyPolicyKindsMeta() {
+    if (notifyPolicyMeta && Array.isArray(notifyPolicyMeta.kinds) && notifyPolicyMeta.kinds.length) {
+      return notifyPolicyMeta.kinds;
+    }
+    return NOTIFY_KIND_FALLBACK;
+  }
+
+  function notifyPolicyChannelRows() {
+    return (notifyPolicyMeta && Array.isArray(notifyPolicyMeta.channels)) ? notifyPolicyMeta.channels : [];
+  }
+
+  function loadNotifyPolicy(force) {
+    if (notifyPolicyLoading) { return notifyPolicyLoading; }
+    if (notifyPolicyLoaded && !force) { return Promise.resolve(notifyPolicy); }
+    notifyPolicyLoading = apiJSON("/api/notify/policy").then(function (r) {
+      if (r.res.status === 401) { setAuthed(false); return notifyPolicy; }
+      if (!r.res.ok || !r.body || !r.body.policy) {
+        throw new Error("HTTP " + r.res.status + (r.body && r.body.error ? " " + r.body.error : ""));
+      }
+      notifyPolicy = r.body.policy;
+      notifyPolicyMeta = r.body.meta || {};
+      notifyPolicyDraft = cloneJSON(notifyPolicy);
+      notifyPolicyLoaded = true;
+      renderNotifyPolicy();
+      return notifyPolicy;
+    }).catch(function (err) {
+      if (currentView() === "notifications") {
+        notify("通知策略读取失败：" + (err && err.message ? err.message : err), "error");
+      }
+      return notifyPolicy;
+    });
+    var pending = notifyPolicyLoading;
+    pending.finally(function () { if (notifyPolicyLoading === pending) { notifyPolicyLoading = null; } });
+    return pending;
+  }
+
+  function setNotifyStatus(text) {
+    var status = el("notify-status");
+    if (!status) { return; }
+    status.textContent = text || "";
+    status.hidden = !text;
+  }
+
+  function renderNotifyPolicy() {
+    if (!notifyPolicyDraft) { return; }
+    var global = notifyPolicyDraft.global || {};
+    var enabled = el("notify-global-enabled");
+    if (enabled) { enabled.checked = global.muted !== true; }
+    var min = el("notify-min-priority");
+    if (min) { min.value = global.min_priority || "normal"; }
+    var quiet = el("notify-quiet-hours");
+    if (quiet) { quiet.value = (global.quiet_hours || []).join(", "); }
+    var source = el("notify-policy-source");
+    if (source) {
+      var meta = notifyPolicyMeta || {};
+      var labels = { file: "策略文件", legacy: "旧偏好回退", "default": "默认值" };
+      source.textContent = labels[meta.source] || "策略";
+      source.title = meta.path || "";
+      source.hidden = false;
+    }
+    renderNotifyPolicyKinds();
+    renderNotifyPolicyChannels();
+    renderNotifyPolicySessions();
+  }
+
+  function renderNotifyPolicyKinds() {
+    var host = el("notify-kinds");
+    if (!host || !notifyPolicyDraft) { return; }
+    host.textContent = "";
+    var global = notifyPolicyDraft.global || {};
+    var allow = global.allow_kinds;
+    notifyPolicyKindsMeta().forEach(function (spec) {
+      var label = document.createElement("label");
+      label.className = "check-line notify-kind";
+      var input = document.createElement("input");
+      input.type = "checkbox";
+      input.setAttribute("data-notify-kind", spec.kind);
+      if (allow == null) {
+        input.checked = true;
+      } else {
+        input.checked = allow.some(function (kind) {
+          return notifyNormalizeKind(kind) === notifyNormalizeKind(spec.kind);
+        });
+      }
+      input.addEventListener("change", function () {
+        notifyPolicyDraft.global = notifyPolicyDraft.global || {};
+        notifyPolicyDraft.global.allow_kinds = collectCheckedNotifyKinds();
+      });
+      var text = document.createElement("span");
+      text.textContent = spec.label + "（" + (spec.priority || notifyKindPriority(spec.kind)) + "）";
+      label.appendChild(input);
+      label.appendChild(text);
+      host.appendChild(label);
+    });
+  }
+
+  function collectCheckedNotifyKinds() {
+    var out = [];
+    document.querySelectorAll("#notify-kinds input[data-notify-kind]").forEach(function (input) {
+      if (input.checked) { out.push(input.getAttribute("data-notify-kind")); }
+    });
+    return out;
+  }
+
+  function renderNotifyPolicyChannels() {
+    var host = el("notify-channels");
+    if (!host || !notifyPolicyDraft) { return; }
+    host.textContent = "";
+    var rows = notifyPolicyChannelRows();
+    if (!rows.length) {
+      var empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "后端未报告可用通道。";
+      host.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (row) {
+      var label = document.createElement("label");
+      label.className = "check-line notify-channel" + (row.available ? "" : " disabled");
+      var input = document.createElement("input");
+      input.type = "checkbox";
+      input.disabled = !row.available;
+      var entry = (notifyPolicyDraft.channels || {})[row.name] || {};
+      input.checked = entry.muted !== true;
+      input.addEventListener("change", function () {
+        notifyPolicyDraft.channels = notifyPolicyDraft.channels || {};
+        if (input.checked) {
+          delete notifyPolicyDraft.channels[row.name];
+        } else {
+          notifyPolicyDraft.channels[row.name] = { muted: true };
+        }
+      });
+      var text = document.createElement("span");
+      text.textContent = row.label + (row.available ? "" : "（未配置）");
+      label.appendChild(input);
+      label.appendChild(text);
+      host.appendChild(label);
+    });
+  }
+
+  function notifyPolicySessionRows() {
+    var rows = [];
+    (lastNodes || []).forEach(function (node) {
+      (node.sessions || []).forEach(function (session) {
+        if (session && session.session_id) { rows.push({ node: node, session: session }); }
+      });
+    });
+    rows.sort(function (a, b) {
+      var pa = attentionPriority[a.session.attention] != null ? attentionPriority[a.session.attention] : 9;
+      var pb = attentionPriority[b.session.attention] != null ? attentionPriority[b.session.attention] : 9;
+      if (pa !== pb) { return pa - pb; }
+      return String(a.session.title || "").localeCompare(String(b.session.title || ""));
+    });
+    return rows.slice(0, 100);
+  }
+
+  function renderNotifyPolicySessions() {
+    var host = el("notify-session-list");
+    if (!host || !notifyPolicyDraft) { return; }
+    // 正在编辑时不要被 SSE 刷新打断焦点/滚动。
+    if (host.contains(document.activeElement)) { return; }
+    host.textContent = "";
+    var rows = notifyPolicySessionRows();
+    var empty = el("notify-session-empty");
+    if (empty) { empty.hidden = rows.length > 0; }
+    var count = el("notify-session-count");
+    if (count) {
+      count.textContent = rows.length + " 个会话";
+      count.hidden = rows.length === 0;
+    }
+    var sessions = notifyPolicyDraft.sessions || {};
+    rows.forEach(function (item) {
+      var sessionID = item.session.session_id;
+      var override = sessions[sessionID] || {};
+      var row = document.createElement("div");
+      row.className = "notify-session-row";
+      var name = document.createElement("span");
+      name.className = "notify-session-name";
+      name.textContent = (item.node.name || item.node.node_id) + " · " + sessionLabelOf(item.session);
+      row.appendChild(name);
+
+      var mute = document.createElement("label");
+      mute.className = "check-line";
+      var muteInput = document.createElement("input");
+      muteInput.type = "checkbox";
+      muteInput.checked = override.muted === true;
+      muteInput.addEventListener("change", function () {
+        updateNotifySessionOverride(sessionID, "muted", muteInput.checked ? true : null);
+      });
+      var muteText = document.createElement("span");
+      muteText.textContent = "静音";
+      mute.appendChild(muteInput);
+      mute.appendChild(muteText);
+      row.appendChild(mute);
+
+      var select = document.createElement("select");
+      select.className = "select sm";
+      select.setAttribute("aria-label", "该会话的最低通知优先级");
+      [["", "默认"], ["low", "low"], ["normal", "normal"], ["high", "high"]].forEach(function (opt) {
+        var option = document.createElement("option");
+        option.value = opt[0];
+        option.textContent = opt[1];
+        select.appendChild(option);
+      });
+      select.value = override.min_priority || "";
+      select.addEventListener("change", function () {
+        updateNotifySessionOverride(sessionID, "min_priority", select.value || null);
+      });
+      row.appendChild(select);
+      host.appendChild(row);
+    });
+  }
+
+  function updateNotifySessionOverride(sessionID, field, value) {
+    notifyPolicyDraft.sessions = notifyPolicyDraft.sessions || {};
+    var entry = notifyPolicyDraft.sessions[sessionID] || {};
+    if (value == null) {
+      delete entry[field];
+    } else {
+      entry[field] = value;
+    }
+    if (entry.muted == null && !entry.min_priority && entry.allow_kinds == null) {
+      delete notifyPolicyDraft.sessions[sessionID];
+    } else {
+      notifyPolicyDraft.sessions[sessionID] = entry;
+    }
+  }
+
+  function saveNotifyPolicy() {
+    if (!notifyPolicyDraft) { return; }
+    var payload = cloneJSON(notifyPolicyDraft);
+    payload.version = 1;
+    var btn = el("notify-save");
+    if (btn) { btn.disabled = true; }
+    setNotifyStatus("保存中…");
+    apiJSON("/api/notify/policy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (r) {
+      if (r.res.status === 401) { setAuthed(false); return; }
+      if (!r.res.ok) {
+        throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status));
+      }
+      notifyPolicy = r.body.policy;
+      notifyPolicyMeta = r.body.meta || notifyPolicyMeta;
+      notifyPolicyDraft = cloneJSON(notifyPolicy);
+      notifyPolicyLoaded = true;
+      renderNotifyPolicy();
+      notify("通知策略已保存并立即生效", "ok");
+    }).catch(function (err) {
+      notify("保存策略失败：" + (err && err.message ? err.message : err), "error");
+    }).finally(function () {
+      if (btn) { btn.disabled = false; }
+      setNotifyStatus("");
+    });
+  }
+
+  function resetNotifyPolicyDraft() {
+    var defaults = (notifyPolicyMeta && notifyPolicyMeta.defaults) || {
+      muted: false,
+      min_priority: "normal",
+      allow_kinds: ["approval", "question", "error", "completed", "waiting"],
+    };
+    notifyPolicyDraft = { version: 1, global: cloneJSON(defaults), sessions: {}, channels: {} };
+    renderNotifyPolicy();
+    notify("已恢复默认值，点击「保存策略」后生效", "ok");
   }
 
   // pushEnvironment explains whether Web Push can work here and, when it
@@ -4449,6 +4826,52 @@
     if (ev && ev.prompt) { ev.prompt(); }
   });
 
+  /* ─────────────────── 通知设置页交互 ───────────────────────── */
+
+  function ensureNotifyDraft() {
+    notifyPolicyDraft = notifyPolicyDraft || { version: 1, global: {}, sessions: {}, channels: {} };
+    notifyPolicyDraft.global = notifyPolicyDraft.global || {};
+    return notifyPolicyDraft;
+  }
+
+  var notifyEnabledInput = el("notify-global-enabled");
+  if (notifyEnabledInput) {
+    notifyEnabledInput.addEventListener("change", function () {
+      ensureNotifyDraft().global.muted = !notifyEnabledInput.checked;
+    });
+  }
+  var notifyMinInput = el("notify-min-priority");
+  if (notifyMinInput) {
+    notifyMinInput.addEventListener("change", function () {
+      ensureNotifyDraft().global.min_priority = notifyMinInput.value;
+    });
+  }
+  var notifyQuietInput = el("notify-quiet-hours");
+  if (notifyQuietInput) {
+    notifyQuietInput.addEventListener("change", function () {
+      var ranges = [];
+      String(notifyQuietInput.value || "").split(",").forEach(function (part) {
+        part = part.trim();
+        if (part) { ranges.push(part); }
+      });
+      ensureNotifyDraft().global.quiet_hours = ranges;
+    });
+  }
+  var notifySaveBtn = el("notify-save");
+  if (notifySaveBtn) { notifySaveBtn.addEventListener("click", saveNotifyPolicy); }
+  var notifyResetBtn = el("notify-reset");
+  if (notifyResetBtn) { notifyResetBtn.addEventListener("click", resetNotifyPolicyDraft); }
+  var notifyTestBtn = el("notify-test");
+  if (notifyTestBtn) {
+    notifyTestBtn.addEventListener("click", function () {
+      var sidebarTest = el("push-test");
+      if (!sidebarTest) { return; }
+      notifyTestBtn.disabled = true;
+      sidebarTest.click();
+      setTimeout(function () { notifyTestBtn.disabled = false; }, 1500);
+    });
+  }
+
   /* ─────────────────────── boot ──────────────────────────────── */
 
   if ("serviceWorker" in navigator) {
@@ -4463,7 +4886,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=45").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=46").catch(function () {});
     });
   }
 
@@ -4477,7 +4900,10 @@
   // the probe authenticated, so a fresh visitor emits a single 401 (the
   // probe itself) in the console instead of two.
   loadNodes().then(function () {
-    if (authedState) { loadDevices(); }
+    if (authedState) {
+      loadDevices();
+      loadNotifyPolicy();
+    }
   });
   renderInstallHint();
   refreshPushState();

@@ -57,10 +57,41 @@ func TestConsoleNativeNotificationBridge(t *testing.T) {
 		"function nativeAttentionNotification(",
 		"nativeAttentionNotification(node, session)",
 		"aicli-gw-native-notify",
+		// 原生通知桥必须经过网关通知策略（否则关闭 kind 后 App 仍会弹窗）。
+		"notifyPolicyAllowsAttention(session.attention, session.session_id)",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing native notification bridge hook %q", needle)
 		}
+	}
+}
+
+// TestConsoleNotifyPolicyAsset guards the standalone 通知设置 page and its
+// data plane: the nav entry/view must exist, and the GET/PUT path plus draft
+// state must survive refactors (a missing id leaves the page silently empty).
+func TestConsoleNotifyPolicyAsset(t *testing.T) {
+	index := readConsoleAsset(t, "index.html")
+	for _, needle := range []string{
+		`data-view="notifications"`, `id="notify-global-enabled"`,
+		`id="notify-kinds"`, `id="notify-channels"`,
+		`id="notify-session-list"`, `id="notify-save"`,
+	} {
+		if !strings.Contains(index, needle) {
+			t.Fatalf("index.html is missing %q", needle)
+		}
+	}
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		`"/api/notify/policy"`, "function loadNotifyPolicy(", "function saveNotifyPolicy(",
+		"function renderNotifyPolicy(", "notifications: \"通知设置\"",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing notification policy hook %q", needle)
+		}
+	}
+	style := readConsoleAsset(t, "style.css")
+	if !strings.Contains(style, ".notify-session-row") {
+		t.Fatal("style.css is missing .notify-session-row")
 	}
 }
 

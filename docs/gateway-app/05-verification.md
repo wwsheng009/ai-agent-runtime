@@ -166,6 +166,43 @@ ok
 控制台 v45 后，这条桥接才会在真实 App 里生效。部署前，线上仍运行旧
 `app.js`，不会触发原生 attention 通知。
 
+## 4.2 通知策略与独立配置页（v46）
+
+本轮新增 `<data-dir>/notify-policy.json` + owner 保护的
+`GET/PUT /api/notify/policy` + 控制台独立「通知设置」页，并让原生通知桥
+先读策略再弹窗。
+
+单测（干净 HEAD worktree + 本轮改动；工作区因无关 stash 冲突不可整体编译）：
+
+```text
+go test ./internal/notify/... -count=1
+ok  github.com/wwsheng009/ai-agent-runtime/internal/notify
+ok  github.com/wwsheng009/ai-agent-runtime/internal/notify/channels
+
+go test ./cmd/gateway -count=1
+ok  github.com/wwsheng009/ai-agent-runtime/cmd/gateway
+
+go vet ./cmd/gateway ./internal/notify/...
+ok
+```
+
+真实进程 API 冒烟（临时 data-dir、127.0.0.1:2599、owner 登录）：
+
+```text
+POST /api/auth/login                      → 200
+GET  /api/notify/policy                   → 200 meta.source=default, 5 kinds, 3 channel rows
+PUT  /api/notify/policy                   → 200 meta.source=file；落盘 notify-policy.json
+外部改文件 allow_kinds/quiet_hours         → 下一次 GET 立即读到新值（热加载，无重启）
+写入非法 JSON                              → GET warning=parse ...；policy 仍为最后一次成功值
+GET  /                                    → index.html 含 data-view="notifications"
+GET  /app.js                              → 含 /api/notify/policy 与 notifyPolicyAllowsAttention
+GET  /sw.js                               → CACHE aicli-gateway-shell-v46
+```
+
+注意：Tauri App 加载线上控制台，需部署 v46（`app.js?v=46` /
+`style.css?v=46` / `sw.js` CACHE v46）后，独立配置页与策略门才会在真实
+App 内生效。
+
 ## 5. 尚未验证
 
 - 聊天面板发送、文件上传/下载、软键盘与返回手势（移动端）。
@@ -173,6 +210,7 @@ ok
 - APNs/FCM/UnifiedPush 真实凭据与后台投递。
 - iOS/Android 真机构建与商店签名。
 - 控制台 v45 部署后的“真实 attention → 系统通知”真机验证。
+- 控制台 v46 部署后的“策略关闭 completed → App 不弹窗”真机验证。
 
 这些属于 Phase 3/4，不应在本轮标记为完成。
 

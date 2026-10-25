@@ -106,3 +106,67 @@ func TestDispatcherPreferenceGating(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestPreferenceKindWhitelist 锁定 kind 白名单的字段级覆盖与别名归一：
+// global 限制 → session/channel 可覆盖；nil = 不限，空集 = 全禁。
+func TestPreferenceKindWhitelist(t *testing.T) {
+	s := NewMemoryPreferenceStore()
+	s.Set(GlobalScope(), Preference{AllowKinds: NewKindSet([]string{"approval"})})
+	if !s.Resolve("s1", "webpush").AllowsEvent(PriorityHigh, "approval") {
+		t.Fatal("global 白名单应放行 approval")
+	}
+	if s.Resolve("s1", "webpush").AllowsEvent(PriorityNormal, "completed") {
+		t.Fatal("global 白名单应拦截 completed")
+	}
+
+	s.Set(SessionScope("s1"), Preference{AllowKinds: NewKindSet([]string{"completed"})})
+	if !s.Resolve("s1", "webpush").AllowsEvent(PriorityNormal, "completed") {
+		t.Fatal("session 白名单应覆盖 global")
+	}
+	if s.Resolve("s1", "webpush").AllowsEvent(PriorityHigh, "approval") {
+		t.Fatal("session 覆盖后 approval 应被拦截")
+	}
+
+	s.Set(ChannelScope("ntfy"), Preference{AllowKinds: NewKindSet([]string{"approval"})})
+	if !s.Resolve("s1", "ntfy").AllowsKind("approval") {
+		t.Fatal("channel 白名单应覆盖 session")
+	}
+	if s.Resolve("s1", "ntfy").AllowsKind("completed") {
+		t.Fatal("channel 覆盖后 completed 应被拦截")
+	}
+
+	all := NewMemoryPreferenceStore()
+	all.Set(GlobalScope(), Preference{AllowKinds: NewKindSet([]string{"completion"})})
+	if !all.Resolve("", "webpush").AllowsKind("completed") {
+		t.Fatal("completion/completed 别名应归一")
+	}
+
+	none := NewMemoryPreferenceStore()
+	none.Set(GlobalScope(), Preference{AllowKinds: NewKindSet(nil)})
+	if none.Resolve("", "webpush").AllowsKind("approval") {
+		t.Fatal("显式空集应禁止全部 kind")
+	}
+}
+
+// TestDispatcherKindWhitelistGating 锁定 Dispatcher 通道级 kind 门控：
+// 白名单外的 kind 记 Skipped、不投递；白名单内正常。
+func TestDispatcherKindWhitelistGating(t *testing.T) {
+	web := &notifyTestChannel{name: "webpush"}
+	d := NewDispatcher(nil, web)
+	prefs := NewMemoryPreferenceStore()
+	prefs.Set(GlobalScope(), Preference{AllowKinds: NewKindSet([]string{"approval"})})
+	d.SetPreferences(prefs)
+
+	if _, err := d.Dispatch(context.Background(), EventFor("approval", "k-allow", notifyTestNote("a"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.calls) != 1 {
+		t.Fatal("approval 应投递")
+	}
+	if _, err := d.Dispatch(context.Background(), EventFor("completed", "k-deny", notifyTestNote("c"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.calls) != 1 {
+		t.Fatal("completed 被 kind 白名单拦截，不应投递")
+	}
+}

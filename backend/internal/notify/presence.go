@@ -29,12 +29,27 @@ func (f PresenceFunc) Active(nodeID, sessionID string) bool {
 }
 
 // SetPresence 注入在场权威（nil = 关闭在场门，行为不变）。
-func (d *Dispatcher) SetPresence(p Presence) { d.presence = p }
+func (d *Dispatcher) SetPresence(p Presence) {
+	d.cfgMu.Lock()
+	d.presence = p
+	d.cfgMu.Unlock()
+}
+
+// currentPresence 返回当前在场权威（热加载安全读口）。
+func (d *Dispatcher) currentPresence() Presence {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.presence
+}
 
 // presenceActive 是门禁判定：未注入、或事件缺少 node/session 定位时不做在场门
 // ——缺定位无法判定，按"不在场"保守放行，宁可多推一次也不误吞通知。
 func (d *Dispatcher) presenceActive(ev Event) bool {
-	if d == nil || d.presence == nil {
+	if d == nil {
+		return false
+	}
+	presence := d.currentPresence()
+	if presence == nil {
 		return false
 	}
 	node := strings.TrimSpace(ev.Node)
@@ -42,5 +57,5 @@ func (d *Dispatcher) presenceActive(ev Event) bool {
 	if node == "" || session == "" {
 		return false
 	}
-	return d.presence.Active(node, session)
+	return presence.Active(node, session)
 }

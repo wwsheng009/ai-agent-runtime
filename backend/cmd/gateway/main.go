@@ -380,12 +380,16 @@ func run() int {
 		return 1
 	}
 	notifier.ntfy = ntfySender
-	// 通知偏好（可选文件；06 §1 D6 三级键）：缺失/无偏好 = 行为不变。
-	if prefs, prefsErr := loadNotifyPreferences(filepath.Join(*dataDir, "notify-prefs.json")); prefsErr != nil {
-		fmt.Fprintf(os.Stderr, "gateway: WARNING: notify preferences ignored: %v\n", prefsErr)
-	} else {
-		notifier.preferences = prefs
+	// 通知策略（可选文件；热加载，见 notify_policy.go）：notify-policy.json
+	// 优先；缺失时只读回退旧 notify-prefs.json（PUT 保存后不再读取旧文件）。
+	policySource := newNotifyPolicySource(
+		filepath.Join(*dataDir, "notify-policy.json"),
+		filepath.Join(*dataDir, "notify-prefs.json"),
+	)
+	if policyErr := policySource.Load(); policyErr != nil {
+		fmt.Fprintf(os.Stderr, "gateway: WARNING: notify policy ignored: %v\n", policyErr)
 	}
+	notifier.policy = policySource
 	// connectorAttentionHook 在下方 setupGatewayConnectors 装配后赋值（var 预声明：
 	// tunnel OnSessionTransition 闭包先于 connectors setup 构造，靠闭包捕获变量
 	// 实现构造期后接线；装配失败时保持 nil，transition 回调 nil 检查兜底）。
@@ -456,7 +460,9 @@ func run() int {
 		return 1
 	}
 	notifier.coalesceWindow = *coalesceWindow
+	notifier.baseQuietHours = quietRanges
 	notifier.quietHours = quietRanges
+	notifier.applyPolicy()
 	// Registry persistence (docs/gateway/08-notifications.md §10.2): restore the
 	// last-known snapshot (marked stale) so the console keeps node/session/attention
 	// rows and restarts do not re-push old attention, then persist changes going
@@ -797,6 +803,22 @@ func run() int {
 	router.Handle("/api/push/subscriptions", owner.RequireSession(handlePushSubscriptions(pushManager)))
 	router.Handle("/api/push/unsubscribe", owner.RequireSession(handlePushUnsubscribe(pushManager)))
 	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager, ntfySender)))
+	// 通知策略（owner 保护，热加载；控制台「通知设置」页的数据面）。
+	policyMeta := func() notifyPolicyMeta {
+		return notifyPolicyMeta{
+			Source:     policySource.SourceLabel(),
+			Path:       policySource.Path(),
+			LegacyPath: policySource.LegacyPath(),
+			Channels: []notifyChannelMeta{
+				{Name: "webpush", Label: "Web Push / PWA", Available: pushManager != nil},
+				{Name: "ntfy", Label: "ntfy", Available: ntfySender.Enabled()},
+				{Name: "apppush", Label: "原生 App", Available: notifier.appPush != nil && notifier.appPush.Enabled()},
+			},
+		}
+	}
+	router.Handle("/api/notify/policy", owner.RequireSession(handleNotifyPolicy(policySource, policyMeta, func() {
+		notifier.applyPolicy()
+	}))).Methods(http.MethodGet, http.MethodPut)
 	// Native App push-token registry (owner-protected). Registration is kept
 	// separate from the agent tunnel token store.
 	router.Handle("/api/app/devices", owner.RequireSession(handleAppDevices(appDevices))).Methods(http.MethodGet, http.MethodPost)

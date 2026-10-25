@@ -252,6 +252,10 @@
 - 去重：同一会话同一注意力状态在时间窗内只提醒一次。
 - 完整的**通知/注意力模型**（事件→`attention` 映射、`NOTIFY` 帧、presence 抑制、免打扰）见
   [08-notifications.md](./08-notifications.md)；控制台只消费网关聚合结果，不直接解析本地事件。
+- **独立「通知设置」页**（`#notifications`）：kind 开关 / 最低优先级 / 免打扰时段 /
+  通道 / 会话级覆盖，数据面为 owner 保护的 `GET/PUT /api/notify/policy`，保存即热加载；
+  桌面 App 的原生通知桥同样先读该策略再弹窗（[gateway-app/02](../gateway-app/02-notification-routing.md)、
+  [gateway-app/07](../gateway-app/07-desktop-ux.md) §5.1）。
 
 ### 5.5 错误态（必须显式，不静默）
 

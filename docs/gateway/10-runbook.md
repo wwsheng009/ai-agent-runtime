@@ -392,12 +392,30 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 relay 契约与设备注册 API 见
 [gateway-app/06-apppush-relay.md](../gateway-app/06-apppush-relay.md)。
 
-**通知偏好（可选）**：`<data-dir>/notify-prefs.json`（gateway 启动时装载；改动需重启）——
-三级键 `global` / `session:<id>` / `channel:<name>`，字段 `muted`、`min_priority`
-（high|normal|low），更具体层级**字段级**覆盖（如全局静音 + `channel:webpush` 显式
-解除）。示例：`{"scopes":[{"scope":"channel:ntfy","muted":true}]}`（关闭 ntfy 外发）；
-全局维护窗口：`{"scopes":[{"scope":"global","muted":true}]}`。非法 scope/值 → 启动
-告警并整体忽略（行为不变）。
+**通知策略（可选，热加载）**：`<data-dir>/notify-policy.json` 是唯一写入口，
+控制台「通知设置」页（`#notifications`）写入，也可手改文件（gateway 每次
+`observe` 前检查 mtime/size，改动**无需重启**）。owner 保护的
+`GET/PUT /api/notify/policy` 返回/保存同一份策略。三级键 `global` /
+`sessions.<id>` / `channels.<name>`，字段 `muted`、`min_priority`
+（high|normal|low）、`allow_kinds`（kind 白名单；空数组 = 全禁）、
+`quiet_hours`（仅 global，`HH:MM-HH:MM` 数组）；更具体层级**字段级**覆盖：
+
+```json
+{
+  "version": 1,
+  "global": { "muted": false, "min_priority": "normal",
+              "allow_kinds": ["approval", "question", "error"],
+              "quiet_hours": ["22:00-08:00"] },
+  "sessions": { "s-123": { "muted": true } },
+  "channels": { "ntfy": { "muted": true } }
+}
+```
+
+要点：`allow_kinds` 在 observe 阶段就拦截被关闭的 kind（仍记入去重快照，
+不回溯补发）；`--notify-quiet-hours` 是基线，策略显式给出 `global.quiet_hours`
+时被替换（空数组 = 清空）。旧的 `<data-dir>/notify-prefs.json` 仍**只读**
+兼容：`notify-policy.json` 缺失时按旧三级键回退展示/生效，首次 PUT 保存后
+不再读取旧文件。非法策略文件保留最后一次成功策略并在日志告警（不会清空）。
 
 **edge 配置变更纪律**（2026-10-12 事故教训）：
 1. 改完先 `cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml` 再重启；

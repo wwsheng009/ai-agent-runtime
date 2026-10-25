@@ -649,6 +649,47 @@ a.stat:hover {
 /* 连接器页说明文案（最小列表页，见 index.html data-view="connectors"） */
 .connectors-hint { color: var(--fg-muted); font-size: 12.5px; line-height: 1.6; margin: 0 0 10px; }
 
+/* ── 通知设置页（data-view="notifications"） ─────────────────── */
+
+.notify-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px; align-items: end;
+}
+.notify-grid .field { max-width: 440px; }
+.notify-grid .filter-input { flex: 1 1 auto; min-width: 0; max-width: none; }
+
+.check-line {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13.5px; color: var(--fg); cursor: pointer;
+  min-height: var(--ctl-h-sm);
+}
+.check-line input[type="checkbox"] {
+  width: 16px; height: 16px; padding: 0; margin: 0;
+  accent-color: var(--accent-solid);
+  flex: 0 0 auto;
+}
+.check-line.disabled { color: var(--fg-faint); cursor: default; }
+
+.notify-kinds, .notify-channels {
+  display: flex; flex-wrap: wrap; gap: 10px 18px;
+}
+.notify-kind span, .notify-channel span { white-space: nowrap; }
+
+.notify-session-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.notify-session-name {
+  flex: 1 1 220px; min-width: 0;
+  font-size: 13px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notify-session-row .select { flex: 0 0 auto; }
+.select.sm { height: var(--ctl-h-sm); font-size: 12.5px; padding: 0 8px; }
+
 .filter-input { flex: 0 1 260px; min-width: 200px; max-width: 320px; }
 
 .seg {

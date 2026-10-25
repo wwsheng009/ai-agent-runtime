@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=45">
+<link rel="stylesheet" href="./style.css?v=46">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -57,6 +57,9 @@
       </a>
       <a class="nav-item" href="#connectors" data-view="connectors">
         <span class="nav-ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6Z"/><path d="M12 18v4"/></svg></span><span>连接器</span>
+      </a>
+      <a class="nav-item" href="#notifications" data-view="notifications">
+        <span class="nav-ico" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span>通知设置</span>
       </a>
     </nav>
 
@@ -225,6 +228,67 @@
             </div>
             <div id="connectors-list" class="list"></div>
           </section>
+        </section>
+
+        <!-- 通知设置（独立页面）：策略数据面 GET/PUT /api/notify/policy；
+             原生通知桥与服务端推送都按这里的 allow_kinds / min_priority /
+             quiet_hours / 通道开关生效。 -->
+        <section class="view" data-view="notifications" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>通知策略</h2>
+              <span class="badge" id="notify-policy-source" hidden></span>
+            </div>
+            <p class="connectors-hint" id="notify-policy-hint">
+              控制哪些注意力会触发通知、后台推送走哪些通道，以及桌面 App 是否弹出。策略保存在网关、保存后立即生效；原生通知仍受系统通知权限与侧边栏的本机开关约束。
+            </p>
+            <div class="notify-grid">
+              <div class="field">
+                <span class="field-label">总开关</span>
+                <label class="check-line"><input type="checkbox" id="notify-global-enabled"> 启用通知</label>
+              </div>
+              <div class="field">
+                <label class="field-label" for="notify-min-priority">最低优先级</label>
+                <select id="notify-min-priority" class="select">
+                  <option value="low">low（全部）</option>
+                  <option value="normal">normal（默认）</option>
+                  <option value="high">high（仅待审批 / 待回答 / 出错）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="field-label" for="notify-quiet-hours">免打扰时段（本地时间，逗号分隔）</label>
+                <input id="notify-quiet-hours" class="filter-input" type="text" placeholder="22:00-08:00" autocomplete="off">
+              </div>
+            </div>
+            <p class="connectors-hint">免打扰只静音 normal 类（已完成 / 等待中）；待审批 / 待回答 / 出错始终穿透。</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><h2>哪些消息触发通知</h2></div>
+            <div class="notify-kinds" id="notify-kinds"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><h2>通道</h2></div>
+            <div class="notify-channels" id="notify-channels"></div>
+            <p class="connectors-hint">未配置的通道不可用；关闭通道只影响网关外发（Web Push / ntfy / AppPush），桌面 App 的本机弹窗受上方总开关与 kind 开关控制。</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>会话级覆盖</h2>
+              <span class="badge" id="notify-session-count" hidden></span>
+            </div>
+            <div id="notify-session-list" class="list"></div>
+            <p class="empty" id="notify-session-empty" hidden>暂无已知会话；会话上报后这里会出现可单独静音或提高门槛的条目。</p>
+          </section>
+
+          <div class="toolbar">
+            <button id="notify-save" type="button" class="btn primary sm">保存策略</button>
+            <button id="notify-reset" type="button" class="btn ghost sm">恢复默认值</button>
+            <button id="notify-test" type="button" class="btn ghost sm">发送测试通知</button>
+            <span class="badge" id="notify-status" hidden></span>
+          </div>
         </section>
 
       </div>
@@ -421,6 +485,6 @@
   </div>
 </div>
 
-<script src="./app.js?v=45"></script>
+<script src="./app.js?v=46"></script>
 </body>
 </html>

@@ -46,6 +46,15 @@ type pushNotifier struct {
 	// preferences 是三级通知偏好（global/session/channel；nil = 无偏好）。
 	// 由 main.go 从 <data-dir>/notify-prefs.json 装载（缺失 = 行为不变）。
 	preferences notify.PreferenceStore
+	// policy 是通知策略热加载源（<data-dir>/notify-policy.json；缺失时只读
+	// 回退旧 notify-prefs.json）。每次 observe 前增量重读；PUT API 保存后
+	// 立即应用。nil = 无策略源（测试/旧装配）。
+	policy *notifyPolicySource
+	// baseQuietHours 是 --notify-quiet-hours 的解析结果；策略显式给出
+	// global.quiet_hours 时被替换（空数组 = 清空）。
+	baseQuietHours []notify.QuietRange
+	// policyErr 去重策略装载告警，避免每次 observe 刷日志。
+	policyErr string
 	// normalChannels 是 --notify-normal-channels 的解析结果。为空时保持
 	// D6 单主通道（webpush）；非空时 normal 按列表投递，供 ntfy/AppPush
 	// 等通道显式接收 completed/waiting。
@@ -130,10 +139,14 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 	if p == nil || (p.manager == nil && !p.ntfyEnabled() && !p.appPushEnabled()) {
 		return
 	}
+	// 策略热加载：stat 一次策略文件，变化才重读并热替换偏好/免打扰。
+	p.applyPolicy()
 	p.mu.Lock()
 	next := make(map[string]string)
 	var immediate []pendingNotification
 	var batched []pendingNotification
+	prefs := p.preferences
+	policyChannels := p.policyChannelNames()
 	for _, node := range nodes {
 		for _, sess := range node.Sessions {
 			attention := strings.TrimSpace(sess.Attention)
@@ -153,6 +166,12 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				continue
 			}
 			next[key] = attention
+			// kind 白名单（notify-policy.json allow_kinds）：被策略排除的
+			// kind 不生成通知，但仍写入 seen 快照——策略相对"当前注意力"
+			// 不回溯，重新打开开关后只通知后续变化，避免开关瞬间补发洪水。
+			if !kindAllowedByPolicy(prefs, policyChannels, sess.SessionID, attention) {
+				continue
+			}
 			if prev, ok := p.seen[key]; ok && prev == attention {
 				continue
 			}
@@ -190,6 +209,93 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 	p.mu.Unlock()
 
 	p.dispatch(immediate)
+}
+
+// applyPolicy 增量热加载策略文件并热替换 Dispatcher 的偏好/免打扰。
+// 非法文件保留最后一次成功策略（source 语义），只记录一次告警。
+func (p *pushNotifier) applyPolicy() {
+	if p == nil || p.policy == nil {
+		return
+	}
+	prefs, quiet, quietSet, err := p.policy.Effective()
+	if err != nil {
+		p.mu.Lock()
+		msg := err.Error()
+		if p.policyErr != msg {
+			p.policyErr = msg
+			log.Printf("push: notify policy ignored: %v", err)
+		}
+		p.mu.Unlock()
+		return
+	}
+	merged := p.baseQuietHours
+	if quietSet {
+		merged = quiet
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.policyErr != "" {
+		p.policyErr = ""
+		log.Printf("push: notify policy reloaded")
+	}
+	prefsChanged := p.preferences != prefs
+	quietChanged := !equalQuietRanges(p.quietHours, merged)
+	if !prefsChanged && !quietChanged {
+		return
+	}
+	p.preferences = prefs
+	p.quietHours = merged
+	if p.dispatcher != nil {
+		p.dispatcher.SetPreferences(prefs)
+		p.dispatcher.SetQuietHours(merged)
+	}
+}
+
+// policyChannelNames 返回当前已启用通道名（kind 白名单的通道级覆盖判定）。
+func (p *pushNotifier) policyChannelNames() []string {
+	var names []string
+	if p.manager != nil {
+		names = append(names, "webpush")
+	}
+	if p.ntfyEnabled() {
+		names = append(names, "ntfy")
+	}
+	if p.appPushEnabled() {
+		names = append(names, "apppush")
+	}
+	return names
+}
+
+// kindAllowedByPolicy 按 global→session→channel 字段级覆盖判定 kind 是否
+// 可能被任一启用通道放行。通道级 allow_kinds 可覆盖全局/会话级限制，因此
+// 任一层级允许都保留事件，交给 Dispatcher 的通道门精确裁剪。
+func kindAllowedByPolicy(prefs notify.PreferenceStore, channels []string, sessionID, kind string) bool {
+	if prefs == nil {
+		return true
+	}
+	if prefs.Resolve(sessionID, "").AllowsKind(kind) {
+		return true
+	}
+	for _, name := range channels {
+		if prefs.Resolve(sessionID, name).AllowsKind(kind) {
+			return true
+		}
+	}
+	return false
+}
+
+// equalQuietRanges 比较免打扰窗口集合（热加载只在真正变化时触碰 Dispatcher，
+// 避免每次 observe 都写 Dispatcher 的共享配置）。
+func equalQuietRanges(a, b []notify.QuietRange) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ntfyEnabled reports whether the secondary channel is configured.

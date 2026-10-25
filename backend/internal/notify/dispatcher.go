@@ -68,6 +68,9 @@ type Dispatcher struct {
 	logf           func(string, ...any)
 	prefs          PreferenceStore
 	presence       Presence
+	// cfgMu 保护可在运行期热替换的策略字段（prefs/presence/quietHours，
+	// 如 gateway 的通知策略热加载）。通道面/channels 在装配后固定，不纳入。
+	cfgMu sync.RWMutex
 	// quietHours/coalesceWindow 是免打扰与合并策略（docs/bots/12 §3 D3）：
 	// 静默窗口内 low/normal 事件被永久丢弃（回执 Muted，不认领键——宿主
 	// 去重快照已记，静默期后不补推）；合并窗口把 normal 事件按 attention
@@ -111,11 +114,33 @@ func (d *Dispatcher) SetNormalChannels(names ...string) {
 // SetLogger 注入短路/失败日志（可 nil）。
 func (d *Dispatcher) SetLogger(logf func(string, ...any)) { d.logf = logf }
 
-// SetPreferences 注入偏好存储（nil = 无偏好，行为不变）。
-func (d *Dispatcher) SetPreferences(prefs PreferenceStore) { d.prefs = prefs }
+// SetPreferences 注入偏好存储（nil = 无偏好，行为不变）。热加载安全。
+func (d *Dispatcher) SetPreferences(prefs PreferenceStore) {
+	d.cfgMu.Lock()
+	d.prefs = prefs
+	d.cfgMu.Unlock()
+}
 
 // SetQuietHours 注入免打扰窗口（空 = 不禁音）。仅作用于 low/normal。
-func (d *Dispatcher) SetQuietHours(ranges []QuietRange) { d.quietHours = ranges }
+func (d *Dispatcher) SetQuietHours(ranges []QuietRange) {
+	d.cfgMu.Lock()
+	d.quietHours = append([]QuietRange(nil), ranges...)
+	d.cfgMu.Unlock()
+}
+
+// preferenceStore 返回当前偏好存储（热加载安全读口）。
+func (d *Dispatcher) preferenceStore() PreferenceStore {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.prefs
+}
+
+// quietRanges 返回当前免打扰窗口副本（热加载安全读口）。
+func (d *Dispatcher) quietRanges() []QuietRange {
+	d.cfgMu.RLock()
+	defer d.cfgMu.RUnlock()
+	return d.quietHours
+}
 
 // SetCoalesceWindow 注入合并窗口（0 = 不合并）。仅作用于 normal。
 func (d *Dispatcher) SetCoalesceWindow(window time.Duration) {
@@ -127,10 +152,11 @@ func (d *Dispatcher) SetCoalesceClock(now func() time.Time) { d.coalesceNow = no
 
 // Muted 报告当前时刻该优先级是否落入静默窗口（high 恒 false——穿透）。
 func (d *Dispatcher) Muted(p Priority) bool {
-	if p >= PriorityHigh || len(d.quietHours) == 0 {
+	ranges := d.quietRanges()
+	if p >= PriorityHigh || len(ranges) == 0 {
 		return false
 	}
-	return InQuietHours(d.quietHours, d.coalesceClockNow())
+	return InQuietHours(ranges, d.coalesceClockNow())
 }
 
 func (d *Dispatcher) coalesceClockNow() time.Time {
@@ -206,8 +232,9 @@ func (d *Dispatcher) deliver(ctx context.Context, ev Event) (Receipt, error) {
 	}
 	receipt := Receipt{Key: key, At: d.now()}
 	var errs []error
+	prefs := d.preferenceStore()
 	for _, ch := range d.targetsFor(ev.Priority) {
-		if d.prefs != nil && !d.prefs.Resolve(ev.Session, ch.Name()).Allows(ev.Priority) {
+		if prefs != nil && !prefs.Resolve(ev.Session, ch.Name()).AllowsEvent(ev.Priority, ev.Kind) {
 			receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{Channel: ch.Name(), Skipped: true})
 			continue
 		}
