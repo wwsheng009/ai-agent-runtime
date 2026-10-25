@@ -415,6 +415,25 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		NoConfigSet:               argPresent(call.Args, "no_config"),
 		Replace:                   stringArg(call.Args, "replace"),
 		JSONOutput:                boolArg(call.Args, "json", "json_output"),
+		ContextSeparator:          strings.TrimSpace(stringArg(call.Args, "context_separator")),
+		ContextSeparatorSet:       argPresent(call.Args, "context_separator") || boolArg(call.Args, "no_context_separator"),
+		NoContextSeparator:        boolArg(call.Args, "no_context_separator"),
+	}
+	// head_limit is the local spelling of the page size. An explicit 0 means "no
+	// page cap" there (up to the safety ceiling), and when both spellings appear
+	// it wins: it is the only one that has ever meant "this page's size" on that
+	// surface. The ceiling applies to either spelling, so limit and head_limit
+	// cannot describe two different maximums.
+	headLimit, headLimitSet := intArgOK(call.Args, "head_limit")
+	if headLimitSet {
+		if headLimit <= 0 {
+			options.Limit = GrepUnlimitedPageSize
+		} else {
+			options.Limit = headLimit
+		}
+	}
+	if options.Limit > GrepUnlimitedPageSize {
+		options.Limit = GrepUnlimitedPageSize
 	}
 
 	engine := "walker"
@@ -570,7 +589,16 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// flags below was set, or a non-default engine was requested.
 		"requires_ripgrep": options.RequiresRipgrep(),
 		"limit":            options.Limit,
-		"hidden_files":     options.IncludeHidden,
+		// One concept, two spellings: the value is the effective page size
+		// whichever spelling produced it, and head_limit_explicit says whether
+		// the local spelling was the one that did.
+		"head_limit":          options.Limit,
+		"head_limit_explicit": headLimitSet,
+		// The effective separator: "--" when nothing was asked, the caller's
+		// string, or empty under no_context_separator - what actually printed.
+		"context_separator":    grepContextSeparator(options),
+		"no_context_separator": options.NoContextSeparator,
+		"hidden_files":         options.IncludeHidden,
 		// `ignore_files` is the "is ignore handling on" bit on this surface;
 		// the path list lives in ignore_files_list. The local tool uses the
 		// same key for the list instead - a long-standing mismatch, left as-is

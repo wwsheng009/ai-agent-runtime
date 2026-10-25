@@ -11,6 +11,11 @@ import (
 const (
 	DefaultGrepLimit = 200
 	MaxGrepLineBytes = 2048
+	// GrepUnlimitedPageSize is what an explicit "no page cap" resolves to. The
+	// local tool has always read head_limit=0 that way (unlimited up to a safety
+	// ceiling), and the same ceiling bounds both spellings of the page size here,
+	// so one rule serves limit and head_limit.
+	GrepUnlimitedPageSize = 5000
 )
 
 type GrepOptions struct {
@@ -174,6 +179,14 @@ type GrepOptions struct {
 	// re-expanded from it), while the walker expands the same template through
 	// Go's regexp - so a host without rg keeps the ability instead of losing it.
 	Replace string
+	// ContextSeparator / ContextSeparatorSet / NoContextSeparator carry the
+	// `context_separator` / `no_context_separator` request. The separator is
+	// rendered by the shared renderer rather than passed to ripgrep: the walker
+	// has no such flag to forward, and one renderer for both engines is what
+	// keeps the group boundaries identical there.
+	ContextSeparator    string
+	ContextSeparatorSet bool
+	NoContextSeparator  bool
 	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
 	// rendered page. It is a request for *that* format, so it needs the engine
 	// that emits it: the walker has no event stream to pass through, and the

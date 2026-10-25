@@ -154,10 +154,11 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter,
 			in.options.OnlyMatching, in.options.Replace != "")
 		page.contextLines = len(expanded)
+		separator := grepContextSeparator(in.options)
 		printedAny := false
 		for _, line := range expanded {
-			if line.GroupStart && printedAny {
-				lines = append(lines, "--")
+			if line.GroupStart && printedAny && separator != "" {
+				lines = append(lines, separator)
 			}
 			display := in.displayPathFor(line.File)
 			if line.IsMatch {
@@ -237,6 +238,20 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 
 	page.content = content
 	return page
+}
+
+// grepContextSeparator is the string printed between two context groups: rg's
+// default "--", a caller-supplied string, or nothing under no_context_separator.
+// An empty value counts as "not set" - the local tool passed nothing to rg in
+// that case, which left rg's own default in place.
+func grepContextSeparator(opts GrepOptions) string {
+	if opts.NoContextSeparator {
+		return ""
+	}
+	if opts.ContextSeparatorSet && opts.ContextSeparator != "" {
+		return opts.ContextSeparator
+	}
+	return "--"
 }
 
 // renderGrepJSONPage turns the collected event lines into the page for json

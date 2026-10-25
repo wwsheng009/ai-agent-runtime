@@ -564,6 +564,18 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容别名；等价于 json=true（同一实现、同一输出）。",
 			},
+			"head_limit": map[string]interface{}{
+				"type":        "integer",
+				"description": "本次返回的匹配行上限（分页页大小）：本地拼写，与 limit 是同一个概念，两个拼写同时出现时以 head_limit 为准。缺省沿用 limit/内置上限；0 表示不限（仍受 5000 条安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。本地与 remote 使用同一实现。",
+			},
+			"context_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。默认仍为 `--`；空字符串视为未设置（保持默认）。分隔符由共享渲染器输出，ripgrep 与内置 walker 两个引擎因此天然一致。本地与 remote 使用同一实现。",
+			},
+			"no_context_separator": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串；与 context_separator 同时出现时以本开关为准。本地与 remote 使用同一实现。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

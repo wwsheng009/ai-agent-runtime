@@ -66,6 +66,11 @@ var coreSearchParams = map[string]bool{
 	// owns that format end to end (window, path translation, stats) and reports
 	// the missing engine plainly instead of rendering something else.
 	"json": true, "json_output": true,
+	// Paging and context presentation: the page size has two spellings that mean
+	// one thing, and the group separator is rendered by the shared renderer, so
+	// both engines print the same boundaries.
+	"head_limit":        true,
+	"context_separator": true, "no_context_separator": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the

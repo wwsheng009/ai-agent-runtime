@@ -1250,4 +1250,30 @@ rg 的汇总事件报的是 `searches` / `searches_with_match`，**从来没有 
   其余断言（metadata 键、stats 字段）**未改测试即通过**——说明核心确实复现了本地契约。
 
 登记表：15 → 13。剩余：`rg_args`、`passthru`、`follow`、`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、
-`head_limit`、`context_separator`/`no_context_separator`、`type_add`/`type_clear`。
+`head_limit`、`context_separator`/`no_context_separator`、`type_add`/`type_clear`。## `context_separator` / `no_context_separator` / `head_limit` 已收敛（2026-10-25）
+
+### 分隔符改由共享渲染器输出
+本地把 `--context-separator` 交给 rg；walker 根本没有对应旗标，所以「交给 rg」就等于「两个引擎不一致」。
+现在分隔符由**唯一的渲染器**打印（`grepContextSeparator`）：
+
+- 默认 `--`（rg 的默认值）；
+- `context_separator` 给字符串 → 用它；空/纯空白视为未设置（与本地一致：那时本地什么都不传给 rg，rg 用默认）；
+- `no_context_separator` → 不打印，且**优先于**给定的字符串（本地也是这个优先级）；
+- metadata 发布**生效值**（默认 `--` / 自定义串 / 关闭时为空串），而不是原请求。
+
+### 页大小的两个拼写合成一个概念
+`head_limit` 是本地拼写、`limit` 是 core/remote 拼写，本质都是「本页给多少条」：
+
+- 同时出现时 `head_limit` 优先（只有它在本地面一直表示页大小）；
+- `head_limit: 0` = 不限，解析为安全上限 5000（本地一直如此，不是「回落到默认页」）；
+- 该上限对 `limit` 同样生效，因此两个拼写不可能描述两个不同的最大值；
+- metadata：`limit` 与 `head_limit` 同为生效页大小，`head_limit_explicit` 说明用的是哪个拼写。
+
+### 证据
+- searchcore：默认 / 自定义 / 空白 / 关闭四种分隔符用例（断言分隔符**独占一行**、两个文件都仍在页里、metadata 是生效值）；
+- `head_limit` 的页大小、与 `limit` 同时出现时的优先级、`0` 不回落到默认页、两个拼写同受 5000 上限；
+- `toolcore/...`、`remotetools`、`toolkit/tools`（29.6s）全绿；本地那条
+  `TestGrepTool_ContextSeparatorBuiltin`（无 rg 场景）**未改即通过**——它现在跑的就是共享渲染器。
+
+登记表：13 → 10。剩余：`follow`（需 walker 也实现链接跟随 + 环保护，独立一批）、
+`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、`type_add`/`type_clear`、`rg_args`。
