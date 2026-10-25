@@ -993,4 +993,36 @@ remote 的 grep 参数（`remotetools/registry.go:176` 起约 400 行）与本�
 所以正确顺序是：**先把第 2 组剩下的语义字段补齐，最后再平移 `rg_args` 解析器**（约 600 行，
 整段平移）。剩下的 18 个里，`no_config` 值得单独记一笔：共享引擎的 base args 里**本来就有**
 `--no-config`，所以 `no_config: true` 在共享路径上已经是既有行为，但 `false`（要求读配置文件）
-在共享路径上无法兑现——这类「本地能、共享不能」的语义差异必须在搬之前定清楚，不能顺手当空操作。
+在共享路径上无法兑现——这类「本地能、共享不能」的语义差异必须在搬之前定清楚，不能顺手当空操作。## grep legacy 第 3 批（crlf）已完成（2026-10-25）
+
+**legacy-only：41 → 23 → 18 → 17。**
+
+### 这一批的推理比代码重要
+
+`crlf` 要求 ripgrep 把 CRLF 当成行结束符。**内置 walker 本来就是这么做的**（它的读取器会去掉 CR），
+所以这个开关的存在意义是「让两个引擎一致」：不传时 ripgrep 会把 CR 留在行内容里，同一个文件在
+两个引擎下渲染结果不同。因此它属于 `RequiresRipgrep`（与本地旧实现的判定一致），引擎侧追加 `--crlf`。
+
+### 第 2 组剩下的**不能**这样成批搬（分头记下，免得下次重新发现）
+
+| 参数 | 为什么不能当「加个 flag」处理 |
+|---|---|
+| `sort` / `sortr` / `sort_files` / `no_sort_files` | 与**契约**冲突而不是与 flag 冲突：引擎强制 `--sort path` 且**每个 root 起一个进程**，才让分页与 walker 的逐 root 遍历完全一致。用户选的排序键是跨 root 的全局序，兑现它就得放弃「确定性分页」或「每 root 一进程」二者之一。 |
+| `json` / `json_output` | 是**输出形状模式**（透传 rg 的原始事件流），不是又一个开关。 |
+| `context_separator` / `no_context_separator` | 改变上下文分组的**渲染**方式。 |
+| `follow` | 需要 walker 真的跟随符号链接目录，**并且**带上本地那套「Windows junction 默认跟随」的宿主策略。 |
+| `no_config` | **不对称**：`true` 已经是引擎的既有行为（base args 里就有 `--no-config`），而 `false` 要求读配置文件，正是共享引擎刻意不做的事。搬它需要先决定「确定性」怎么办，不是映射一个 flag。 |
+| `replace` / `head_limit` / `type_add` / `type_clear` | 各自带语义（替换输出、页上限、类型表增删），需要逐个设计。 |
+| `only_matching` + context | core 自己的拒绝文案写着「not combined by the shared core yet」——这是最后一个非参数形态的洞，需要两个引擎 + 渲染器一起改。 |
+
+顺序建议：`only_matching`+context（一个行为，跨引擎+渲染器）→ `replace` / `json`（引擎输出模式）
+→ `sort*`（要先定分页契约）→ `follow`（先定宿主策略）→ `no_config`（先定确定性）→
+`type_add`/`type_clear` / `head_limit` / `context_separator*` → 最后整段平移 `rg_args` 解析器。
+
+### 工作区状态提醒
+
+本轮提交时发现工作区里出现了**不是本方案产生的改动**（`cmd/gateway/*`、`internal/notify/*`、
+新增 `apps/`、`docs/gateway-app/`）——有另一个执行者正在同一个工作区上工作。本次提交只包含本方案
+的 7 个文件（显式列路径，没有用 `git add -A`）；那些改动留在工作区未动。
+
+提交：`3615a97c`。
