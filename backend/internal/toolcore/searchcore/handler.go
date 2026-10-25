@@ -413,6 +413,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		CRLF:                      boolArg(call.Args, "crlf"),
 		NoConfig:                  boolArg(call.Args, "no_config"),
 		NoConfigSet:               argPresent(call.Args, "no_config"),
+		Replace:                   stringArg(call.Args, "replace"),
 	}
 
 	engine := "walker"
@@ -559,7 +560,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// The effective value, not the requested one: unset means the engine told
 		// ripgrep not to read its configuration, and publishing the request would
 		// describe the opposite of what ran.
-		"no_config":             !options.NoConfigSet || options.NoConfig,
+		"no_config": !options.NoConfigSet || options.NoConfig,
+		// The template the engines substituted with; empty means no replacement
+		// was asked for, which is exactly how the call ran.
+		"replace":               options.Replace,
 		"count_matches":         options.CountMatches,
 		"glob_case_insensitive": options.GlobCaseInsensitive,
 		// Presentation-only rg flags the caller set are reported, always: the

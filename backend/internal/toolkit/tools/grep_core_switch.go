@@ -58,6 +58,10 @@ var coreSearchParams = map[string]bool{
 	// `no_config` is a three-state request (unset / true / false), so the shared
 	// handler reads presence as well as value; the default stays deterministic.
 	"no_config": true,
+	// `replace` is implemented by both engines - ripgrep substitutes with its
+	// own -r, the walker expands the same template through Go's regexp - so it
+	// is a shared capability rather than an rg-only flag.
+	"replace": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the

@@ -46,7 +46,12 @@ type grepContextWindow struct {
 // line shows its fragments and the surrounding lines still show whole lines -
 // exactly what `rg -o -C` prints. Every fragment on the line is its own entry,
 // and the entries stay adjacent so a renderer does not separate them.
-func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching bool) []GrepContextLine {
+//
+// hitTextFromEngine makes the engine's text authoritative for matched lines: a
+// replacement rewrites them, so re-reading the file would print the
+// pre-substitution line and silently undo the request. Context lines still come
+// from the file, exactly like `rg -r`, which substitutes matched lines only.
+func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching, hitTextFromEngine bool) []GrepContextLine {
 	before = ClampGrepContextLines(before)
 	after = ClampGrepContextLines(after)
 	out := make([]GrepContextLine, 0, len(matches))
@@ -64,13 +69,13 @@ func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching bool
 		for j < len(matches) && matches[j].File == file {
 			j++
 		}
-		expandGrepContextFile(reader, matches[i:j], file, before, after, onlyMatching, &out)
+		expandGrepContextFile(reader, matches[i:j], file, before, after, onlyMatching, hitTextFromEngine, &out)
 		i = j
 	}
 	return out
 }
 
-func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, onlyMatching bool, out *[]GrepContextLine) {
+func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, onlyMatching, hitTextFromEngine bool, out *[]GrepContextLine) {
 	windows := make([]grepContextWindow, 0, len(matches))
 	for _, match := range matches {
 		start := match.Line - before
@@ -125,9 +130,10 @@ func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string,
 		if matchIdx < len(matches) && lineNo == matches[matchIdx].Line {
 			isMatch = true
 		}
-		if isMatch && onlyMatching {
-			// The matched line carries fragments; every fragment on it is one
-			// entry, and they share a line number on purpose.
+		if isMatch && (onlyMatching || hitTextFromEngine) {
+			// The matched line carries its own text - fragments under
+			// only_matching, the substituted line under a replacement. Every
+			// entry on the line shares its line number on purpose.
 			for matchIdx < len(matches) && matches[matchIdx].Line == lineNo {
 				appendGrepContextLine(out, file, lineNo, matches[matchIdx].Text, true)
 				matchIdx++

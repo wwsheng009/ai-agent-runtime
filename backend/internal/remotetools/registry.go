@@ -552,6 +552,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --no-config：禁止 ripgrep 读取自身配置（RIPGREP_CONFIG_PATH 指向的文件）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。内置 walker 引擎从不读取 rg 配置，本地与 remote 使用同一实现。",
 			},
+			"replace": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）后输出；只有命中行被替换，上下文行保持原文。ripgrep 可用时由 rg 自己执行替换（语义与 rg 完全一致），不可用时由内置 walker 用 Go 正则按同一契约展开。本地与 remote 使用同一实现。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

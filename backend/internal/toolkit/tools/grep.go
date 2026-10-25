@@ -395,7 +395,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"replace": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --replace/-r：输出替换后的文本；该能力当前仅在可用 ripgrep/rg 时支持。",
+				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）后输出；只有命中行被替换，上下文行保持原文。ripgrep 可用时由 rg 自己执行替换（语义与 rg 完全一致），不可用时由内置 walker 用 Go 正则按同一契约展开。本地与 remote 使用同一实现。",
 			},
 			"passthru": map[string]interface{}{
 				"type":        "boolean",

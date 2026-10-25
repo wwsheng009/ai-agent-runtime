@@ -167,6 +167,13 @@ type GrepOptions struct {
 	// deterministic default) from "false" (allow the config).
 	NoConfig    bool
 	NoConfigSet bool
+	// Replace is the rg --replace/-r template. A non-empty template switches the
+	// rendered content to the substituted text, and both engines implement it:
+	// ripgrep is asked to substitute by itself (its JSON event stream carries
+	// match offsets but no capture-group offsets, so `$1`/`${name}` cannot be
+	// re-expanded from it), while the walker expands the same template through
+	// Go's regexp - so a host without rg keeps the ability instead of losing it.
+	Replace string
 }
 
 // RequiresRipgrep reports whether this request needs the ripgrep engine rather
@@ -378,12 +385,23 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			// Fragments are the output unit when only_matching is on. Invert
 			// keeps whole lines, exactly like rg -o -v.
 			if opts.OnlyMatching && !opts.InvertMatch && mode != GrepModeFiles {
-				for _, loc := range compiled.FindAllIndex(display, -1) {
+				displayText := string(display)
+				// Submatch indices, not plain match indices: the template may
+				// reference capture groups, and ExpandString needs their offsets.
+				for _, loc := range compiled.FindAllStringSubmatchIndex(displayText, -1) {
+					fragment := displayText[loc[0]:loc[1]]
+					if opts.Replace != "" {
+						// rg prints one substituted fragment per match; Go's
+						// ExpandString applies the same `$1`/`${name}` template
+						// to the same offsets, which is how both engines answer
+						// this call under one contract.
+						fragment = string(compiled.ExpandString(nil, opts.Replace, displayText, loc))
+					}
 					result.Matches = append(result.Matches, GrepMatch{
 						File:   path,
 						Line:   lineNo,
 						Column: loc[0] + 1,
-						Text:   sanitizeGrepNulText(string(display[loc[0]:loc[1]])),
+						Text:   sanitizeGrepNulText(fragment),
 					})
 					if GrepPageComplete(result.Matches, mode, opts) {
 						return filepath.SkipAll
@@ -398,11 +416,16 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 						column = loc[0] + 1
 					}
 				}
+				lineText := string(display)
+				if opts.Replace != "" && !opts.InvertMatch {
+					// Invert has no match to substitute, exactly like rg -v -r.
+					lineText = compiled.ReplaceAllString(lineText, opts.Replace)
+				}
 				result.Matches = append(result.Matches, GrepMatch{
 					File:   path,
 					Line:   lineNo,
 					Column: column,
-					Text:   sanitizeGrepNulText(string(display)),
+					Text:   sanitizeGrepNulText(lineText),
 				})
 			}
 			fileLines++

@@ -895,3 +895,29 @@ func TestRemoteGrepIgnoreOverMCP(t *testing.T) {
 		t.Fatalf("an explicit ignore_file stacks on .gitignore (both stay ignored):\n%s", stacked)
 	}
 }
+
+// TestRemoteGrepReplaceOverMCP proves the replacement travels the whole remote
+// path. It is a shared-core capability rather than a host feature, so the answer
+// must not depend on a ripgrep binary being installed on the target machine.
+func TestRemoteGrepReplaceOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "rep.txt"), []byte("foo123\nbar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	out := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": `foo(\d+)`, "path": "rep.txt", "replace": "num:$1",
+	})
+	if !strings.Contains(out, "num:123") {
+		t.Fatalf("the substituted text must reach the client:\n%s", out)
+	}
+	if strings.Contains(out, "foo123") {
+		t.Fatalf("the pre-substitution line must not reach the client:\n%s", out)
+	}
+}

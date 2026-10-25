@@ -536,11 +536,37 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.Unrestricted >= 3 {
 		args = append(args, "--text")
 	}
+	// Invert keeps whole lines (rg -o -v) and files mode only needs existence,
+	// so the flag is passed only where fragments are the output unit.
+	onlyMatching := opts.OnlyMatching && !opts.InvertMatch &&
+		mode != GrepModeFiles && mode != GrepModeFilesWithout
+	// replaceOutput makes ripgrep substitute by itself. Its JSON event stream
+	// reports match offsets but no capture-group offsets, so `$1`/`${name}`
+	// cannot be re-expanded from it; the text mode keeps rg's own replacement as
+	// the single implementation, and the parse below turns its output back into
+	// the same GrepMatch shape every other mode produces.
+	replaceOutput := opts.Replace != "" && mode == GrepModeContent
+	// The JSON mode always reports the fragment offset under --only-matching,
+	// and a whole-line match carries one only when the caller asked for it, so
+	// the text mode asks rg for exactly the same columns.
+	wantColumn := opts.Column || onlyMatching
 	if mode == GrepModeFilesWithout {
 		// rg ignores --json in this mode and prints plain paths, so the stats
 		// block is the only structured evidence available. It arrives after
 		// the paths; the parser below separates it from them.
 		args = append(args, "--stats", "--files-without-match")
+	} else if replaceOutput {
+		// --null terminates the printed path with a NUL byte, which is what
+		// makes this line parse unambiguous: a path may contain a colon of its
+		// own (C:\... on Windows), so the usual path:line: separator cannot be
+		// trusted to split in the right place.
+		args = append(args,
+			"--null", "--line-number", "--with-filename",
+			"--color=never", "--no-heading",
+			"--replace", opts.Replace)
+		if wantColumn {
+			args = append(args, "--column")
+		}
 	} else {
 		args = append(args, "--json")
 	}
@@ -664,10 +690,6 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.MaxCountSet {
 		args = append(args, "--max-count", strconv.Itoa(opts.MaxCount))
 	}
-	// Invert keeps whole lines (rg -o -v) and files mode only needs existence,
-	// so the flag is passed only where fragments are the output unit.
-	onlyMatching := opts.OnlyMatching && !opts.InvertMatch &&
-		mode != GrepModeFiles && mode != GrepModeFilesWithout
 	if onlyMatching {
 		args = append(args, "--only-matching")
 	}
@@ -707,6 +729,17 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 
 	truncated := false
 	streamErr := e.stream()(ctx, args, "", func(line []byte) bool {
+		if replaceOutput {
+			rawPath, lineNo, column, text, ok := parseRipgrepReplaceLine(line, wantColumn)
+			if !ok {
+				return true
+			}
+			if appendRipgrepMatch(opts, mode, globMatcher, baseDir, rawPath, lineNo, column, text, &result) {
+				truncated = true
+				return false
+			}
+			return true
+		}
 		var event rgJSONEvent
 		if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
 			return true
@@ -715,13 +748,6 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		case "summary":
 			result.FilesScanned = event.Data.Stats.FilesSearched
 		case "match":
-			matchPath := filepath.FromSlash(event.Data.Path.Text)
-			if !filepath.IsAbs(matchPath) {
-				matchPath = filepath.Join(baseDir, matchPath)
-			}
-			if globMatcher != nil && !globMatcher.matches(matchPath) {
-				return true
-			}
 			var text string
 			switch {
 			case event.Data.Lines.Bytes != nil:
@@ -734,52 +760,26 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 				text = *event.Data.Lines.Text
 			}
 			// lineText keeps the raw line (trailing newline included) because
-			// submatch offsets point into it; text is the display form.
+			// submatch offsets point into it; the display form is the shared
+			// normalization every output mode feeds.
 			lineText := text
-			text = strings.TrimSuffix(strings.TrimSuffix(text, "\n"), "\r")
-			if !utf8.ValidString(text) {
-				return true
-			}
-			if len(text) > MaxGrepLineBytes {
-				text = text[:MaxGrepLineBytes] + "…"
-			}
-			// A raw NUL must never reach the caller: it truncates the string in
-			// most clients and hides everything after it.
-			text = sanitizeGrepNulText(text)
 			if onlyMatching && len(event.Data.Submatches) > 0 {
 				for _, sub := range event.Data.Submatches {
 					if sub.Start < 0 || sub.End > len(lineText) || sub.Start >= sub.End {
 						continue
 					}
-					fragment := strings.TrimSuffix(strings.TrimSuffix(lineText[sub.Start:sub.End], "\n"), "\r")
-					if !utf8.ValidString(fragment) {
-						continue
-					}
-					if len(fragment) > MaxGrepLineBytes {
-						fragment = fragment[:MaxGrepLineBytes] + "…"
-					}
-					result.Matches = append(result.Matches, GrepMatch{
-						File:   matchPath,
-						Line:   event.Data.LineNumber,
-						Column: sub.Start + 1,
-						Text:   sanitizeGrepNulText(fragment),
-					})
-					if GrepPageComplete(result.Matches, mode, opts) {
+					if appendRipgrepMatch(opts, mode, globMatcher, baseDir, event.Data.Path.Text,
+						event.Data.LineNumber, sub.Start+1, lineText[sub.Start:sub.End], &result) {
 						truncated = true
 						return false
 					}
 				}
 				return true
 			}
-			result.Matches = append(result.Matches, GrepMatch{
-				File:   matchPath,
-				Line:   event.Data.LineNumber,
-				Column: grepLineColumn(opts, lineText, event.Data.Submatches),
-				Text:   text,
-			})
 			// Stop one page entry past the page so Truncated/has_more stays
 			// accurate; the shared window then slices the raw list down.
-			if GrepPageComplete(result.Matches, mode, opts) {
+			if appendRipgrepMatch(opts, mode, globMatcher, baseDir, event.Data.Path.Text,
+				event.Data.LineNumber, grepLineColumn(opts, lineText, event.Data.Submatches), text, &result) {
 				truncated = true
 				return false
 			}
@@ -922,6 +922,87 @@ func grepLineColumn(opts GrepOptions, lineText string, submatches []rgSubmatch) 
 		return 0
 	}
 	return start + 1
+}
+
+// normalizeGrepEngineText is the one text contract every ripgrep output mode
+// feeds: drop the trailing newline, reject invalid UTF-8, cap the line and keep
+// a raw NUL away from the caller - which truncates the string in most clients
+// and hides everything after it.
+func normalizeGrepEngineText(text string) (string, bool) {
+	text = strings.TrimSuffix(strings.TrimSuffix(text, "\n"), "\r")
+	if !utf8.ValidString(text) {
+		return "", false
+	}
+	if len(text) > MaxGrepLineBytes {
+		text = text[:MaxGrepLineBytes] + "…"
+	}
+	return sanitizeGrepNulText(text), true
+}
+
+// appendRipgrepMatch records one match the way both output modes must: resolve
+// the printed path, apply the caller's glob filter, shape the text like every
+// other engine, then report whether the page is complete. The caller stops the
+// stream on true, so Truncated/has_more stay accurate.
+func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFilter, baseDir, rawPath string, lineNo, column int, text string, result *GrepResult) bool {
+	matchPath := filepath.FromSlash(rawPath)
+	if !filepath.IsAbs(matchPath) {
+		matchPath = filepath.Join(baseDir, matchPath)
+	}
+	if globMatcher != nil && !globMatcher.matches(matchPath) {
+		return false
+	}
+	display, ok := normalizeGrepEngineText(text)
+	if !ok {
+		return false
+	}
+	result.Matches = append(result.Matches, GrepMatch{
+		File:   matchPath,
+		Line:   lineNo,
+		Column: column,
+		Text:   display,
+	})
+	return GrepPageComplete(result.Matches, mode, opts)
+}
+
+// parseRipgrepReplaceLine splits one `rg --null` content line from the
+// replacement mode: the path ends at the NUL byte ripgrep writes after it, then
+// `line:` (or `line:column:` when --column was asked for) precedes the text
+// ripgrep substituted. The NUL is what makes the split unambiguous - a path may
+// contain a colon of its own.
+func parseRipgrepReplaceLine(line []byte, wantColumn bool) (rawPath string, lineNo, column int, text string, ok bool) {
+	nul := bytes.IndexByte(line, 0)
+	if nul <= 0 {
+		return "", 0, 0, "", false
+	}
+	rawPath = string(line[:nul])
+	rest := string(line[nul+1:])
+	lineNo, rest, ok = cutRipgrepIntField(rest)
+	if !ok {
+		return "", 0, 0, "", false
+	}
+	if wantColumn {
+		column, rest, ok = cutRipgrepIntField(rest)
+		if !ok {
+			return "", 0, 0, "", false
+		}
+	}
+	return rawPath, lineNo, column, rest, true
+}
+
+// cutRipgrepIntField reads a leading decimal field terminated by a colon.
+func cutRipgrepIntField(raw string) (int, string, bool) {
+	i := 0
+	for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(raw) || raw[i] != ':' {
+		return 0, raw, false
+	}
+	value, err := strconv.Atoi(raw[:i])
+	if err != nil {
+		return 0, raw, false
+	}
+	return value, raw[i+1:], true
 }
 
 func safeRipgrepGlob(pattern string) bool {

@@ -148,7 +148,10 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		}
 		page.renderedFiles = len(in.result.Files)
 	case in.contextBefore > 0 || in.contextAfter > 0:
-		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter, in.options.OnlyMatching)
+		// A replacement rewrites the matched line, so the engine's text has to
+		// win over the re-read line or the substitution would be undone here.
+		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter,
+			in.options.OnlyMatching, in.options.Replace != "")
 		page.contextLines = len(expanded)
 		printedAny := false
 		for _, line := range expanded {

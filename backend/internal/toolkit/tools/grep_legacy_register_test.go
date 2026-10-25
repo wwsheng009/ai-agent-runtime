@@ -34,7 +34,7 @@ var grepLegacyOnlyParams = []string{
 	"follow", "head_limit",
 	"json", "json_output",
 	"no_context_separator",
-	"no_sort_files", "passthru", "replace", "rg_args", "sort",
+	"no_sort_files", "passthru", "rg_args", "sort",
 	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",
 }
 

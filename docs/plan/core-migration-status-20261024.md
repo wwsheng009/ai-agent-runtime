@@ -1177,4 +1177,43 @@ flag 想改的恰恰是那两条保证。
 - `TestGrepNoConfigRequestReachesTheEngineAndTheMetadata`：请求 → 引擎选项 → metadata 生效值
   三个环节全过一遍（「未设置」时若发布原请求，会描述出与实跑相反的事实）；
 - 定向构建 + `go vet` 干净；`toolcore/...`、`remotetools`、`toolkit/tools` 整包回归全绿
-  （`toolkit/tools` 69s，含登记表两个方向的断言）。
+  （`toolkit/tools` 69s，含登记表两个方向的断言）。## `replace` 已收敛：两个引擎都实现替换（2026-10-25）
+
+### 为什么不能沿用 JSON 模式（实测，rg 14.1.0）
+
+- `rg --json -r X pat` 与 `rg --json pat` 输出**完全相同**；
+- `--json` 的每个 match 事件只带整段匹配的 `start/end`，**没有捕获组偏移**；
+- 因此共享引擎无法从 JSON 里重算 `$1`/`${name}`——真想重算就是自造第二套替换语义，
+  而且 `$1Y` 按「最长名字」解析这类细节必然走偏（rg 与 Go 在这点上恰好一致，但那是巧合不是契约）。
+
+结论：替换必须由**执行替换的一方**完成——这正是本地参考实现的做法（本地把 `--replace` 交给 rg）。
+
+### 落地
+
+- `GrepOptions.Replace`；`mode == content` 时 ripgrep 路径切到「替换输出模式」：
+  `--null --line-number --with-filename --color=never --no-heading --replace <tpl>`（不再 `--json`），
+  基准 flag（`--no-config --threads 1 --sort path`）与每 root 一进程照旧；
+- `--null` 让路径以 NUL 结束，`path\0line[:col]:text` 的切分因此**无歧义**（Windows 路径自带冒号）；
+- walker **同样实现**替换（Go `ExpandString` / `ReplaceAllString`），没有 rg 的机器不丢能力——
+  这与「核心必须完整实现」一致，也就不再需要「缺 rg 就报错」的分支；
+- 列语义对齐：`only_matching` 一律向 rg 要 `--column`（JSON 模式在片段上总是给列号），
+  整行匹配只按调用方要求取列；
+- 上下文渲染：`ExpandGrepContext` 新增「命中行以引擎文本为准」。带替换时命中行为替换后文本、
+  上下文行仍来自文件——与 `rg -r -C` 一致（只有命中行被替换）；
+- 顺带把 ripgrep 两种输出模式的文本整形抽成 `normalizeGrepEngineText` / `appendRipgrepMatch`：
+  路径解析、glob 过滤、文本整形、收满页即停只写一份。
+
+### 证据
+
+- walker 替换（整行 / 片段）；
+- **两引擎一致性**：同一 fixture、同一次调用，用真实 rg 跑 ripgrep 路径，逐字段比较 walker 与
+  ripgrep 的行号 / 列号 / 文本（`TestReplaceAgreesBetweenEngines`）——这类测试正是「一套功能、
+  两个执行位置」的守门人；
+- argv 契约：替换模式必须出现 `--null` / `--replace`，必须**没有** `--json`，基准 flag 必须还在；
+- 解析器：NUL 切分、含冒号的 Windows 路径、`line:col:` 前缀、文本自身形如前缀的情形；
+- handler 路由 + metadata + 上下文渲染（命中行为替换文本、上下文行为原文，且原文不得残留）；
+- remote MCP 对拍（不依赖目标机是否装了 rg）。
+
+登记表：41 → 15。剩余 15 个：`rg_args`、`passthru`、`json`、`json_output`、`follow`、
+`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`head_limit`、
+`context_separator`/`no_context_separator`、`type_add`/`type_clear`。
