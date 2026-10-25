@@ -567,12 +567,13 @@ relay 契约与设备注册 API 见
 > 仍按节点 `kind` 指向 `/web/`（v48 行为不变）。
 > 回滚：网关 `gateway.bak-20261025-162557`；桌面壳需重新安装上一枚 exe。
 
-> **部署记录（2026-10-25 第十笔，会话列表去 id + 审批/回答内联 v51/v52）**：控制台
-> HEAD `dd9fd66a`（v51）+ `96edba02`（v52 微调），两次均从干净 worktree 构建
-> （linux/amd64、trimpath），sha256 分别 `e161c0dc…6352e3e` / `4a6f8adb…d488ec`；
-> 备份 `gateway.bak-20261025-165652` / `gateway.bak-20261025-170423`，替换重启后
-> `/proc/<pid>/exe` sha 与本地一致，公网 `app.js?v=52`、`sw.js` CACHE
-> `aicli-gateway-shell-v52`、`/api/notify/policy` 401、health 200。
+> **部署记录（2026-10-25 第十笔，会话列表去 id + 审批/回答内联 v51–v53）**：控制台
+> HEAD `dd9fd66a`（v51）+ `96edba02`（v52 微调）+ `15cec015`（v53 无标题回退），三次均
+> 从干净 worktree 构建（linux/amd64、trimpath），sha256 分别 `e161c0dc…6352e3e` /
+> `4a6f8adb…d488ec` / `c3a5e01c…18736178`；备份 `gateway.bak-20261025-165652` /
+> `gateway.bak-20261025-170423` / `gateway.bak-20261025-170930`，替换重启后
+> `/proc/<pid>/exe` sha 与本地一致，公网 `app.js?v=53`、`sw.js` CACHE
+> `aicli-gateway-shell-v53`、`/api/notify/policy` 401、health 200。
 >
 > **本笔改动**：① 会话列表不再显示 node-id / session-id（两个 id 收进「详情」弹窗的
 > 「会话 ID」/「节点 ID」行；无名节点回退「本机 agent」/「runtime-server 节点」类型
@@ -582,7 +583,8 @@ relay 契约与设备注册 API 见
 > `question_asked`；决议走 `POST /n/{node}/web/api/input`，body 为
 > `{type:"approval",request_id,allow}` / `{type:"question_answer",question_id,answer}`），
 > 不跳转、不开原版 Web；④ v52 微调：提问条不再把 `question_id` 当标题显示，面板头部
-> 改用节点显示名（避免无名节点回退成裸 node-id）。
+> 改用节点显示名（避免无名节点回退成裸 node-id）；⑤ v53：无标题会话的标题回退由裸
+> `session_id` 改为「未命名会话」。
 >
 > **验证（CDP 驱动运行中的 WebView）**：列表 21 张卡片 `idNodes=0`、正文无裸
 > `node-…`/`session_…`；注入 attention=approval 会话后卡片显示「审批」、面板头部
@@ -591,8 +593,9 @@ relay 契约与设备注册 API 见
 > `{"type":"approval","request_id":…,"allow":false}`（探针 id 无真实审批，节点按幂等
 > 返回 `resolved`，未产生实际决议）；`question_asked` 渲染建议按钮 + 自由回答且文本
 > 不泄漏 question_id，点建议提交 `{"type":"question_answer",…}`，`question_answered`
-> 后交互条收起；详情弹窗仍显示节点 ID 与会话 ID。
-> 回滚：`gateway.bak-20261025-165652`（v51）或 `gateway.bak-20261025-170423`（v52）。
+> 后交互条收起；详情弹窗仍显示节点 ID 与会话 ID；v53 追加：注入无标题会话 → 卡片标题
+> 「未命名会话」、列表 0 处裸 id。
+> 回滚：`gateway.bak-20261025-170930` = v52、`…170423` = v51、`…165652` = v50。
 
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

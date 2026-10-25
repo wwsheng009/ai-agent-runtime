@@ -238,7 +238,8 @@ Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 
   显示「审批」、面板头部「本机 agent · aicli · 审查中」；审批条渲染工具名/参数/批准/
   拒绝并提交 `POST /web/api/input {"type":"approval",…}`（探针 request_id，节点幂等
   返回 `resolved`）；提问条渲染建议并提交 `{"type":"question_answer",…}`，`question_answered`
-  后收起；详情弹窗保留节点 ID 与会话 ID。
+  后收起；详情弹窗保留节点 ID 与会话 ID。v53 追加：注入**无标题**会话 → 卡片标题为
+  「未命名会话」（不再回退裸 session_id），列表 0 处裸 id。
 
 语义提醒：App 重载后的首屏只做 seed（已存在的注意力不补弹，只有加载后的新变化通知）；
 浏览器 / PWA 需要重新“开启通知”建立 Web Push 订阅，桌面 App 走原生桥不依赖订阅。
