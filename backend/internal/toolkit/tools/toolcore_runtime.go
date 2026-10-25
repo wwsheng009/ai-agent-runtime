@@ -38,6 +38,9 @@ type localCoreRuntime struct {
 	// contentRenderer is the tool's non-text renderer (image, notebook, document).
 	// The shared handler asks it before reading text and keeps the bookkeeping.
 	contentRenderer toolcore.ContentRenderer
+	// artifactSink is the session's artifact store, when this runtime serves a
+	// tool that reads archived captures.
+	artifactSink toolcore.ArtifactSink
 	// insideGitWorkTree reports whether a directory is covered by version
 	// control. A work tree already holds the pre-edit content, so the local host
 	// does not ask for a `.backups/` copy there.
@@ -642,7 +645,12 @@ func corePermissionOp(op toolcore.Operation) runtimeexecutor.PermissionOp {
 func (r *localCoreRuntime) Commands() toolcore.CommandPolicy { return nil }
 func (r *localCoreRuntime) Env() toolcore.EnvProvider        { return nil }
 func (r *localCoreRuntime) Output() toolcore.OutputShaper    { return nil }
-func (r *localCoreRuntime) Artifacts() toolcore.ArtifactSink { return nil }
-func (r *localCoreRuntime) Sessions() toolcore.SessionState  { return nil }
-func (r *localCoreRuntime) Clock() toolcore.Clock            { return nil }
-func (r *localCoreRuntime) IDs() toolcore.IDGenerator        { return nil }
+func (r *localCoreRuntime) Artifacts() toolcore.ArtifactSink {
+	if r == nil {
+		return nil
+	}
+	return r.artifactSink
+}
+func (r *localCoreRuntime) Sessions() toolcore.SessionState { return nil }
+func (r *localCoreRuntime) Clock() toolcore.Clock           { return nil }
+func (r *localCoreRuntime) IDs() toolcore.IDGenerator       { return nil }

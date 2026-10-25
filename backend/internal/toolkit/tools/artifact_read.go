@@ -3,16 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
-	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -27,11 +23,6 @@ const (
 	// unusually small; the tool still returns a useful window.
 	artifactReadMinLimitBytes = 1024
 )
-
-// artifactReadIDPattern matches the artifact record id namespace
-// (art_<32 hex>) anywhere in a caller-supplied string, so a model may paste the
-// whole pointer tail ("art_… size=… kind=…") instead of the bare id.
-var artifactReadIDPattern = regexp.MustCompile(`(?i)art_[0-9a-f]{32}`)
 
 // ArtifactReadTool 读取归档的工具结果原文（`Full raw output artifact_id: art_…` 指针的目标）。
 type ArtifactReadTool struct {
@@ -100,147 +91,41 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 		return artifactReadFailure("artifact_read 参数格式无效"), nil
 	}
 
-	id := normalizeArtifactReadID(p.ArtifactID)
-	if id == "" {
+	// The miss metric for a call that names no id at all is recorded here: the
+	// shared handler owns the rejection now and it has no metric sink, while every
+	// store/scope miss is reported by the sink itself.
+	if strings.TrimSpace(p.ArtifactID) == "" {
 		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonBadArgs)
-		return artifactReadFailure("artifact_id 不能为空：请传入工具结果末尾指针行中的 art_<32位hex> id"), nil
 	}
-
-	store := toolctx.ArtifactStore(ctx)
-	if store == nil {
-		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNoStore)
-		return artifactReadFailure("artifact store 不可用：artifact_read 只能在运行时 agent 循环内执行"), nil
-	}
-
-	scope, scoped := toolctx.ArtifactReadScope(ctx)
-	if !scoped {
-		// Older hosts bind only the session id. Fall back to self-only rather
-		// than unrestricted: a missing scope must never widen the read boundary.
-		if active := toolctx.SessionID(ctx); active != "" {
-			scope = artifact.ReadScope{SessionIDs: map[string]bool{active: true}}
-			scoped = true
-		}
-	}
-	if !scoped {
-		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonBadArgs)
-		return artifactReadFailure("artifact_read 需要会话上下文：无法确定读取范围"), nil
-	}
-
-	record, err := store.GetOwned(ctx, id, scope)
+	result, err := toolcore.NewArtifactReadHandler(a.coreDefinition()).Execute(ctx, &toolcore.Call{
+		Args:    params,
+		Runtime: a.CoreRuntime(ctx),
+	})
 	if err != nil {
-		switch {
-		case errors.Is(err, artifact.ErrArtifactReadOutOfScope):
-			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonCrossSession)
-			return artifactReadFailure(fmt.Sprintf(
-				"artifact %s 不属于当前会话或父会话的读取范围；只能解引用本会话或直接父会话产生的指针：%v",
-				id, err,
-			)), nil
-		case errors.Is(err, artifact.ErrArtifactReadUnscoped):
-			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonUnscoped)
-			return artifactReadFailure(fmt.Sprintf(
-				"artifact %s 缺少会话归属，已拒绝读取（fail-closed）", id,
-			)), nil
-		}
-		if sqliteutil.IsCorruptError(err) {
-			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonStoreCorrupt)
-			return artifactReadFailure(fmt.Sprintf(
-				"artifact store 已损坏，已拒绝读取；请先运行 `aicli storage compact --target artifacts --dry-run` 做只读确认，保留原库后按修复流程处理：%v",
-				err)), nil
-		}
-		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
-		return artifactReadFailure(fmt.Sprintf("读取 artifact 失败: %v", err)), nil
+		return nil, err
 	}
-	if record == nil {
-		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
-		return artifactReadFailure(fmt.Sprintf("artifact not found: %s", id)), nil
-	}
+	return localizeErrorCode(toolkit.ResultToToolkit(result)), nil
+}
 
-	content := record.Content
-	total := len(content)
+// coreDefinition is the shared handler's view of this tool.
+func (a *ArtifactReadTool) coreDefinition() toolcore.Definition {
+	return toolcore.Definition{
+		Name:                "artifact_read",
+		Version:             a.Version(),
+		DefaultOutputBudget: artifactOutputBudgetBytes,
+	}
+}
 
-	offset := p.Offset
-	if offset < 0 {
-		offset = 0
+// CoreRuntime binds the session's artifact store as a toolcore.Runtime, so the
+// shared artifact_read handler can run locally with the same scope rules the
+// local tool has always enforced.
+func (a *ArtifactReadTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	runtime := newLocalCoreRuntimeWith(ctx, nil, nil)
+	if local, ok := runtime.(*localCoreRuntime); ok {
+		runtime := localArtifactSink{ctx: ctx}
+		local.artifactSink = runtime
 	}
-	if offset > total {
-		offset = total
-	}
-	limit := p.Limit
-	if limit <= 0 {
-		limit = artifactReadDefaultLimitBytes()
-	}
-	if maxLimit := artifactReadMaxLimitBytes(); limit > maxLimit {
-		limit = maxLimit
-	}
-
-	start := artifactRuneStartAtOrBefore(content, offset)
-	end := artifactRuneStartAtOrBefore(content, offset+limit)
-	if end < start {
-		end = start
-	}
-	// O-1: dereference call distribution (first vs followup hop) and returned
-	// window size — the followup ratio approximates average dereference hops.
-	observability.RecordToolArtifactDeref(offset > 0)
-	observability.RecordToolOutputBytes(observability.MetricToolArtifactDerefBytes, observability.ArchiveLayerGateway, end-start)
-	// A tiny limit that lands mid-rune can snap back onto the window start and
-	// stall the page chain; always advance at least one full rune.
-	if end <= start && start < total {
-		if _, size := utf8.DecodeRuneInString(content[start:]); size > 0 {
-			end = start + size
-		}
-	}
-	if end > total {
-		end = total
-	}
-	window := content[start:end]
-	eof := end >= total
-
-	var builder strings.Builder
-	fmt.Fprintf(
-		&builder,
-		"artifact %s | tool=%s | total_bytes=%d | window=[%d,%d) | eof=%t",
-		record.ID, artifactReadToolLabel(record.ToolName), total, start, end, eof,
-	)
-	if !eof {
-		fmt.Fprintf(&builder, " | next_offset=%d", end)
-	}
-	if record.ToolCallID != "" {
-		builder.WriteString(" | tool_call_id=")
-		builder.WriteString(record.ToolCallID)
-	}
-	builder.WriteString("\n\n")
-	builder.WriteString(window)
-
-	metadata := map[string]interface{}{
-		"artifact_source_id":      record.ID,
-		"artifact_tool_name":      record.ToolName,
-		"artifact_total_bytes":    total,
-		"artifact_window_offset":  start,
-		"artifact_window_bytes":   len(window),
-		"artifact_eof":            eof,
-		"artifact_has_full_bytes": true,
-		// This tool owns its window: every page is sized against
-		// artifactOutputBudgetBytes (window+header <= budget) and it publishes
-		// its own continuation contract (artifact_eof / artifact_next_offset).
-		// Declare both the render-layer (L4) opt-out and the window itself, so
-		// the page is never folded - and if the opt-out is ever lost, L4 still
-		// folds at this tool's window instead of the layer backstop.
-		toolresult.MetadataSkipRenderTruncationKey: true,
-		toolresult.MetadataModelVisibleBudgetKey:   artifactOutputBudgetBytes,
-	}
-	if !eof {
-		metadata["artifact_next_offset"] = end
-	}
-	if record.ToolCallID != "" {
-		metadata["artifact_source_tool_call_id"] = record.ToolCallID
-	}
-
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    builder.String(),
-		Metadata:   metadata,
-	}, nil
+	return runtime
 }
 
 // artifactReadDefaultLimitBytes resolves the default page size: the full
@@ -260,19 +145,6 @@ func artifactReadMaxLimitBytes() int {
 	return limit
 }
 
-// normalizeArtifactReadID accepts either a bare id or a pasted pointer tail and
-// returns the art_<32hex> token when one is present.
-func normalizeArtifactReadID(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if match := artifactReadIDPattern.FindString(trimmed); match != "" {
-		return strings.ToLower(match)
-	}
-	return strings.Trim(trimmed, "`\"'<>;,.")
-}
-
 // artifactRuneStartAtOrBefore snaps a byte index back to the nearest UTF-8 rune
 // boundary so windows never split a multi-byte character.
 func artifactRuneStartAtOrBefore(content string, index int) int {
@@ -286,13 +158,6 @@ func artifactRuneStartAtOrBefore(content string, index int) int {
 		index--
 	}
 	return index
-}
-
-func artifactReadToolLabel(toolName string) string {
-	if label := strings.TrimSpace(toolName); label != "" {
-		return label
-	}
-	return "unknown"
 }
 
 func artifactReadFailure(message string) *toolkit.ToolResult {

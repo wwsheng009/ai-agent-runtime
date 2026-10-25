@@ -1,7 +1,9 @@
 package remotetools_test
 
 import (
+	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +24,43 @@ func newArtifactConfig(t *testing.T, root string, modelVisibleCap int) *remoteto
 		t.Fatalf("normalize: %v", err)
 	}
 	return cfg
+}
+
+// artifactPage splits a rendered page into its header and its window. Every page
+// carries "artifact … | window=[a,b) | eof=… | next_offset=N", a blank line,
+// then the bytes: the header is what a model pages with, since a successful
+// result reaches the model as its body and a model cannot count bytes.
+func artifactPage(t *testing.T, body string) (header, window string) {
+	t.Helper()
+	idx := strings.Index(body, "\n\n")
+	if idx < 0 {
+		t.Fatalf("page has no header separator:\n%s", body)
+	}
+	return body[:idx], body[idx+2:]
+}
+
+// artifactNextOffset reads the continuation offset the page states, and reports
+// whether another page exists.
+func artifactNextOffset(t *testing.T, header string) (int, bool) {
+	t.Helper()
+	if strings.Contains(header, "eof=true") {
+		return 0, false
+	}
+	const marker = "next_offset="
+	idx := strings.Index(header, marker)
+	if idx < 0 {
+		t.Fatalf("a non-EOF page must state next_offset:\n%s", header)
+	}
+	rest := header[idx+len(marker):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	value, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		t.Fatalf("unparsable next_offset %q:\n%s", rest[:end], header)
+	}
+	return value, true
 }
 
 // TestRemoteArtifactReadPageIsNotFolded is the regression guard for a real
@@ -53,22 +92,31 @@ func TestRemoteArtifactReadPageIsNotFolded(t *testing.T) {
 	}
 	id := extractArtifactID(t, body)
 
-	// A page that fits asks for exactly what it gets.
+	// A page that fits asks for exactly what it gets. The header is framing, not
+	// data: the window behind it holds exactly the requested bytes.
 	small := callTool(t, ctx, session, "remote_dev__artifact_read", map[string]interface{}{
 		"artifact_id": id, "offset": 0, "limit": 4096,
 	})
-	if len(small) != 4096 {
-		t.Fatalf("requested 4096 bytes, got %d - the page was reshaped", len(small))
+	header, window := artifactPage(t, small)
+	if len(window) != 4096 {
+		t.Fatalf("requested 4096 bytes, got a %d-byte window - the page was reshaped", len(window))
 	}
-	if strings.Contains(small, "bytes omitted") {
-		t.Fatalf("an artifact page must never be folded:\n%s", small)
+	if !strings.Contains(header, "window=[0,4096)") {
+		t.Fatalf("the header must state the window it delivered, got:\n%s", header)
+	}
+	if _, ok := artifactNextOffset(t, header); !ok {
+		t.Fatal("a 4096-byte page of a larger capture must state where to continue")
+	}
+	if strings.Contains(window, "bytes omitted") {
+		t.Fatalf("an artifact page must never be folded:\n%s", window)
 	}
 }
 
 // TestRemoteArtifactReadHonoursItsOwnWindow pins the upper bound: a request for
 // more than the tool's window returns the window, not a folded head+tail slice
-// of it. The response size must equal the requested size whenever the request
-// fits, which is what makes next_offset arithmetic trustworthy.
+// of it. The delivered window must equal the clamped size whenever the request
+// fits, and the header must state it - that is what makes the next_offset a
+// pager follows trustworthy.
 func TestRemoteArtifactReadHonoursItsOwnWindow(t *testing.T) {
 	root := t.TempDir()
 	// 8 KiB model window -> artifact window is also 8 KiB, so a 32 KiB request
@@ -92,11 +140,15 @@ func TestRemoteArtifactReadHonoursItsOwnWindow(t *testing.T) {
 	huge := callTool(t, ctx, session, "remote_dev__artifact_read", map[string]interface{}{
 		"artifact_id": id, "offset": 0, "limit": 32 * 1024,
 	})
-	if len(huge) != 8*1024-512 {
-		t.Fatalf("expected a %d-byte clamped page, got %d", 8*1024-512, len(huge))
+	header, window := artifactPage(t, huge)
+	if len(window) != 8*1024-512 {
+		t.Fatalf("expected a %d-byte clamped window, got %d", 8*1024-512, len(window))
 	}
-	if strings.Contains(huge, "bytes omitted") {
-		t.Fatalf("a clamped page must not be folded:\n%s", huge)
+	if !strings.Contains(header, fmt.Sprintf("window=[0,%d)", 8*1024-512)) {
+		t.Fatalf("the header must state the clamped window, got:\n%s", header)
+	}
+	if strings.Contains(window, "bytes omitted") {
+		t.Fatalf("a clamped page must not be folded:\n%s", window)
 	}
 }
 
@@ -132,11 +184,15 @@ func TestRemoteArtifactReadPagesCoverEveryByte(t *testing.T) {
 		if chunk == "" {
 			break
 		}
-		reassembled.WriteString(chunk)
-		offset += len(chunk)
-		if offset >= captureBytes {
+		header, window := artifactPage(t, chunk)
+		reassembled.WriteString(window)
+		next, more := artifactNextOffset(t, header)
+		if !more {
 			break
 		}
+		// The page states where to continue, so the walk never has to infer an
+		// offset from a length it would have to measure itself.
+		offset = next
 	}
 	if got := reassembled.Len(); got != captureBytes {
 		t.Fatalf("paged %d bytes, capture holds %d - pages skipped or duplicated data", got, captureBytes)

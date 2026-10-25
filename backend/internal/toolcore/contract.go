@@ -347,6 +347,13 @@ type ArtifactChunk struct {
 	Size   int64
 	Offset int64
 	EOF    bool
+
+	// SourceTool / SourceToolCallID name the capture this record holds, when the
+	// sink knows them. They are advisory metadata for the page header: a sink
+	// that cannot report them leaves them empty and the page says "unknown"
+	// rather than inventing an origin.
+	SourceTool       string
+	SourceToolCallID string
 }
 
 type SessionState interface {

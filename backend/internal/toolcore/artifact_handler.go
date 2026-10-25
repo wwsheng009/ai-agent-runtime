@@ -3,6 +3,7 @@ package toolcore
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -66,6 +67,10 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 	if strings.HasPrefix(refValue, "remote:") {
 		return artifactFailure(ErrArtifactScopeDenied, "pass the bare art_… id", fmt.Errorf("remote namespace is not accepted by a target-internal artifact_read")), nil
 	}
+	// A model often pastes the whole pointer tail ("art_… size=… kind=…")
+	// instead of the bare id; the token is extracted the same way the builtin
+	// tool has always done it, so both surfaces accept the same spellings.
+	refValue = normalizeArtifactID(refValue)
 	if !ValidArtifactID(refValue) {
 		return artifactFailure(ErrInvalidArgument, "pass the art_… id from the tool output", fmt.Errorf("invalid artifact id: %q", refValue)), nil
 	}
@@ -86,15 +91,16 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 	}
 	// The page size is this tool's own contract, bounded here rather than by the
 	// output shaper: a page must fit the artifact window together with its
-	// metadata, and a caller asking for more gets the largest page that still
-	// does. Without this the request and the response disagree about how many
-	// bytes a page holds, which is exactly what breaks paging.
-	limit := intArg(call.Args, "limit", artifactReadMaxLimit(call))
+	// framing, and a caller asking for more gets the largest page that still
+	// does. An explicit small limit is honored as-is - a caller asking for 40
+	// bytes wants 40 bytes, and the floor below belongs to the budget-derived
+	// maximum, not to the request (the builtin tool has always read it that way).
+	limit := intArg(call.Args, "limit", 0)
+	if limit <= 0 {
+		limit = artifactReadMaxLimit(call)
+	}
 	if maxLimit := artifactReadMaxLimit(call); limit > maxLimit {
 		limit = maxLimit
-	}
-	if limit < artifactReadMinLimitBytes {
-		limit = artifactReadMinLimitBytes
 	}
 	chunk, err := call.Runtime.Artifacts().Open(ctx, ref, offset, limit)
 	if err != nil {
@@ -108,32 +114,59 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 		}
 		return artifactFailure(code, nextAction, err), nil
 	}
+
+	// The page is rendered the way the builtin tool has always rendered it: a
+	// self-describing header, then the window itself. The header is what a model
+	// pages with - a successful result reaches the model as its body, so the
+	// window bounds, the total size and the continuation offset must be in the
+	// text, not only in metadata a remote model never sees.
+	start := int(chunk.Offset)
+	end := start + len(chunk.Data)
+	total := int(chunk.Size)
+	var builder strings.Builder
+	fmt.Fprintf(
+		&builder,
+		"artifact %s | tool=%s | total_bytes=%d | window=[%d,%d) | eof=%t",
+		ref.ID, artifactToolLabel(chunk.SourceTool), total, start, end, chunk.EOF,
+	)
+	if !chunk.EOF {
+		fmt.Fprintf(&builder, " | next_offset=%d", end)
+	}
+	if chunk.SourceToolCallID != "" {
+		builder.WriteString(" | tool_call_id=")
+		builder.WriteString(chunk.SourceToolCallID)
+	}
+	builder.WriteString("\n\n")
+	builder.WriteString(string(chunk.Data))
+
 	metadata := map[string]any{
-		"artifact_id":  ref.ID,
-		"offset":       offset,
-		"bytes":        len(chunk.Data),
-		"total_bytes":  chunk.Size,
-		"eof":          chunk.EOF,
-		"is_truncated": !chunk.EOF,
+		"artifact_source_id":     ref.ID,
+		"artifact_tool_name":     chunk.SourceTool,
+		"artifact_total_bytes":   total,
+		"artifact_window_offset": start,
+		"artifact_window_bytes":  len(chunk.Data),
+		"artifact_eof":           chunk.EOF,
+		// The record holds the complete capture: this is a page of it, not a
+		// truncated copy, so a caller may keep paging to the end.
+		"artifact_has_full_bytes": true,
+		// This tool owns its window: every page is sized against its own budget and
+		// it publishes its own continuation contract (artifact_eof /
+		// artifact_next_offset). Declare the render-layer opt-out and the window
+		// itself, so the page is never folded - and if the opt-out is ever lost,
+		// the render layer still folds at this tool's window, not at the backstop.
+		keySkipRenderTruncation: true,
+		keyModelVisibleBudget:   artifactReadBudgetBytes,
 	}
 	if !chunk.EOF {
-		metadata["suggested_next_offset"] = offset + len(chunk.Data)
+		metadata["artifact_next_offset"] = end
 	}
-	// This tool owns its window: publish the page size it actually used and
-	// declare the render-layer opt-out, so the body is not folded a second time.
-	// The continuation offset then always describes bytes the caller received.
-	metadata["artifact_window_bytes"] = len(chunk.Data)
-	metadata["artifact_window_limit"] = limit
-	metadata["artifact_eof"] = chunk.EOF
-	if !chunk.EOF {
-		metadata["artifact_next_offset"] = offset + len(chunk.Data)
+	if chunk.SourceToolCallID != "" {
+		metadata["artifact_source_tool_call_id"] = chunk.SourceToolCallID
 	}
-	metadata[keySkipRenderTruncation] = true
-	metadata[keyModelVisibleBudget] = artifactReadBudgetBytes
 	result := &Result{
 		Success:    true,
 		OutputKind: KindText,
-		Content:    string(chunk.Data),
+		Content:    builder.String(),
 		Metadata:   metadata,
 	}
 	if shaper := call.Runtime.Output(); shaper != nil {
@@ -146,6 +179,34 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 		}
 	}
 	return result, nil
+}
+
+// artifactToolLabel names the capture's origin in the page header. A sink that
+// cannot report the source tool leaves it empty and the header says "unknown"
+// rather than inventing a name.
+func artifactToolLabel(toolName string) string {
+	if label := strings.TrimSpace(toolName); label != "" {
+		return label
+	}
+	return "unknown"
+}
+
+// artifactIDPattern matches the artifact record id namespace (art_<32 hex>)
+// anywhere in a caller-supplied string, so a model may paste the whole pointer
+// tail ("art_… size=… kind=…") instead of the bare id.
+var artifactPointerIDPattern = regexp.MustCompile(`(?i)art_[0-9a-f]{32}`)
+
+// normalizeArtifactID accepts either a bare id or a pasted pointer tail and
+// returns the art_<32hex> token when one is present.
+func normalizeArtifactID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if match := artifactPointerIDPattern.FindString(trimmed); match != "" {
+		return strings.ToLower(match)
+	}
+	return strings.Trim(trimmed, "`\"'<>;,.")
 }
 
 func stringArg(args map[string]any, key string) string {
