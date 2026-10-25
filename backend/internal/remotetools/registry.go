@@ -524,6 +524,26 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "string",
 				"description": "兼容 rg 的 --color；grep 输出不含 ANSI 颜色，该参数被接受但不改变输出。",
 			},
+			"pcre2": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --pcre2/-P：用 PCRE2 引擎匹配（支持 lookaround、反向引用）。该能力需要 ripgrep：目标主机上没有 rg 时按内置引擎的既有行为处理（PCRE 专有语法会在编译期报错）。",
+			},
+			"engine": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --engine；default（或留空）走内置引擎且不需要 rg，其他取值（pcre2、auto-hybrid-regex 等）需要 ripgrep。",
+			},
+			"auto_hybrid_regex": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --auto-hybrid-regex：模式含 PCRE 专有语法时自动切到 PCRE2。该能力需要 ripgrep。",
+			},
+			"multiline": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --multiline/-U：允许模式跨行匹配。该能力需要 ripgrep；没有 rg 时退回内置逐行引擎。",
+			},
+			"multiline_dotall": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --multiline-dotall：多行模式下让 . 匹配换行。该能力需要 ripgrep。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

@@ -403,7 +403,11 @@ func TestGrepTool_DefaultEngineFallsBackWhenRipgrepUnavailable(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("expected success, got error %v", result.Error)
 			}
-			if result.Metadata["engine"] != "builtin" {
+			// The pure-Go engine is called "walker" by the shared handler, which is
+			// also the word the builtin glob tool already publishes for it: engine
+			// names are one shared vocabulary, and grep's older "builtin" spelling
+			// disappears with the legacy path.
+			if result.Metadata["engine"] != "walker" {
 				t.Fatalf("expected builtin engine fallback, got %#v", result.Metadata["engine"])
 			}
 			if result.Metadata["requires_ripgrep"] != false {
@@ -1571,7 +1575,10 @@ func TestGrepTool_RgArgsCompatibilityBuiltin(t *testing.T) {
 	if result.Metadata["before_context"] != 1 || result.Metadata["after_context"] != 1 {
 		t.Fatalf("expected before/after context metadata to be 1, got %#v", result.Metadata)
 	}
-	if result.Metadata["engine"] != "builtin" {
+	// "walker" is the shared engine name for the pure-Go engine (the builtin
+	// glob tool already publishes it); grep's older "builtin" spelling retires
+	// with the legacy path.
+	if result.Metadata["engine"] != "walker" {
 		t.Fatalf("expected builtin engine, got %#v", result.Metadata["engine"])
 	}
 }

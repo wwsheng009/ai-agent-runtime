@@ -50,6 +50,11 @@ var coreSearchParams = map[string]bool{
 	"block_buffered": true, "no_block_buffered": true,
 	"null": true, "null_data": true,
 	"field_context_separator": true, "path_separator": true, "color": true,
+	// Engine selection: ripgrep-only capabilities. The shared handler reads them
+	// and dispatches to the engine first, so a PCRE pattern is not handed to Go's
+	// regexp before ripgrep gets its turn.
+	"pcre2": true, "engine": true, "auto_hybrid_regex": true,
+	"multiline": true, "multiline_dotall": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the

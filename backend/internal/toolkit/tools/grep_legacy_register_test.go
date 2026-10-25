@@ -30,11 +30,11 @@ import (
 //
 // The presentation group has already moved: those 18 keys are core-covered now.
 var grepLegacyOnlyParams = []string{
-	"auto_hybrid_regex", "context_separator",
-	"crlf", "engine", "follow", "head_limit",
-	"json", "json_output", "multiline", "multiline_dotall",
+	"context_separator",
+	"crlf", "follow", "head_limit",
+	"json", "json_output",
 	"no_config", "no_context_separator",
-	"no_sort_files", "passthru", "pcre2", "replace", "rg_args", "sort",
+	"no_sort_files", "passthru", "replace", "rg_args", "sort",
 	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",
 }
 

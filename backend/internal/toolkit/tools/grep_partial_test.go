@@ -42,8 +42,8 @@ func TestGrepRipgrepKeepsPartialOutputOnTimeout(t *testing.T) {
 	if !strings.Contains(result.Content, "结果不完整") || !strings.Contains(result.Content, "不要原样重试同一查询") {
 		t.Fatalf("expected incompleteness notice, got %q", result.Content)
 	}
-	if engine, _ := result.Metadata["engine"].(string); engine != "rg" {
-		t.Fatalf("expected engine=rg, got %#v", result.Metadata["engine"])
+	if engine, _ := result.Metadata["engine"].(string); engine != "ripgrep" {
+		t.Fatalf("expected engine=ripgrep, got %#v", result.Metadata["engine"])
 	}
 }
 

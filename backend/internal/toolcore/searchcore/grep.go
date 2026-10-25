@@ -147,6 +147,34 @@ type GrepOptions struct {
 	// are reported so a caller can see that its rg spelling was understood and
 	// deliberately ignored rather than silently dropped.
 	IgnoredPresentation []string
+	// Engine selection. A non-default engine (PCRE2, auto-hybrid-regex) and
+	// multiline matching are ripgrep-only capabilities: the pure-Go walker cannot
+	// reproduce them, so a call that asks for one has to reach ripgrep first.
+	Pcre2           bool
+	Engine          string
+	AutoHybridRegex bool
+	Multiline       bool
+	MultilineDotall bool
+}
+
+// RequiresRipgrep reports whether this request needs the ripgrep engine rather
+// than the pure-Go walker. The distinction decides the dispatch order, not just
+// the args: Go's regexp rejects patterns ripgrep accepts (lookaround,
+// backreferences), so for such a call the walker must not get a turn first.
+func (o GrepOptions) RequiresRipgrep() bool {
+	return o.Pcre2 || o.Multiline || o.MultilineDotall || o.AutoHybridRegex ||
+		requiresRipgrepForEngine(o.Engine)
+}
+
+// requiresRipgrepForEngine mirrors rg's own default: an unset or "default"
+// engine is the built-in one, anything else is ripgrep's.
+func requiresRipgrepForEngine(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default":
+		return false
+	default:
+		return true
+	}
 }
 
 type GrepMatch struct {

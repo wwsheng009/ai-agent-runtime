@@ -474,6 +474,24 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	}
 
 	args := ripgrepBaseArgs()
+	// Engine selection is ripgrep's own business: the walker cannot express PCRE2
+	// features or multiline semantics, which is why a call asking for them is
+	// dispatched here first instead of being compiled with Go's regexp.
+	if opts.Pcre2 {
+		args = append(args, "--pcre2")
+	}
+	if strings.TrimSpace(opts.Engine) != "" && requiresRipgrepForEngine(opts.Engine) {
+		args = append(args, "--engine", strings.TrimSpace(opts.Engine))
+	}
+	if opts.AutoHybridRegex {
+		args = append(args, "--auto-hybrid-regex")
+	}
+	if opts.Multiline {
+		args = append(args, "--multiline")
+	}
+	if opts.MultilineDotall {
+		args = append(args, "--multiline-dotall")
+	}
 	// Binary handling follows the walker: the default behaves like ripgrep's own
 	// default (a NUL byte ends the search for that file), and only the top
 	// unrestricted level lets ripgrep look past it.

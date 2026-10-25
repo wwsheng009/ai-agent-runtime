@@ -410,6 +410,11 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		MaxFileBytes:              captureLimit(call),
 		Offset:                    intArg(call.Args, "offset", 0),
 		IgnoredPresentation:       collectIgnoredPresentationParams(call.Args),
+		Pcre2:                     boolArg(call.Args, "pcre2"),
+		Engine:                    stringArg(call.Args, "engine"),
+		AutoHybridRegex:           boolArg(call.Args, "auto_hybrid_regex"),
+		Multiline:                 boolArg(call.Args, "multiline"),
+		MultilineDotall:           boolArg(call.Args, "multiline_dotall"),
 	}
 
 	engine := "walker"
@@ -419,12 +424,31 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return toolcore.Error(toolcore.ErrInvalidArgument,
 			"fix the ignore_file path or pass no_messages to skip unreadable ones", err), nil
 	}
-	result, grepErr := Grep(ctx, options)
-	if searcher, ok := call.Runtime.(Searcher); ok {
-		if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
-			result = rgResult
-			grepErr = nil
-			engine = "ripgrep"
+	// A request that needs ripgrep is answered by ripgrep first. Go's regexp
+	// rejects patterns ripgrep accepts (lookaround, backreferences), so running
+	// the walker first would fail a call the engine can serve. When the engine
+	// cannot run at all, the fallback is the walker - which is exactly what the
+	// builtin tool does when no rg is on PATH.
+	var result GrepResult
+	var grepErr error
+	usedEngine := false
+	if options.RequiresRipgrep() {
+		if searcher, ok := call.Runtime.(Searcher); ok {
+			if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
+				result, grepErr, engine, usedEngine = rgResult, nil, "ripgrep", true
+			}
+		}
+	}
+	if !usedEngine {
+		result, grepErr = Grep(ctx, options)
+		if !options.RequiresRipgrep() {
+			if searcher, ok := call.Runtime.(Searcher); ok {
+				if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
+					result = rgResult
+					grepErr = nil
+					engine = "ripgrep"
+				}
+			}
 		}
 	}
 	if grepErr != nil {
@@ -514,8 +538,11 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"has_more":             result.Truncated,
 		"engine":               engine,
 		"engine_name":          engine,
-		"limit":                options.Limit,
-		"hidden_files":         options.IncludeHidden,
+		// Published by the handler because the handler is what decides: one of the
+		// flags below was set, or a non-default engine was requested.
+		"requires_ripgrep": options.RequiresRipgrep(),
+		"limit":            options.Limit,
+		"hidden_files":     options.IncludeHidden,
 		// `ignore_files` is the "is ignore handling on" bit on this surface;
 		// the path list lives in ignore_files_list. The local tool uses the
 		// same key for the list instead - a long-standing mismatch, left as-is

@@ -12,7 +12,9 @@ func annotateSearchBackend(metadata map[string]interface{}, engine, command, bin
 	}
 	engine = strings.TrimSpace(engine)
 	if engine == "" {
-		engine = "builtin"
+		// The shared engine vocabulary: "walker" for the pure-Go engine, which is
+		// the word the builtin glob tool already publishes.
+		engine = "walker"
 	}
 	metadata["engine"] = engine
 	metadata["execution_backend"] = engine

@@ -3510,17 +3510,17 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 			}
 			return nil, false, nil
 		}
-		return stampGrepPageStop(buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg", rgPath), pageStopped), true, nil
+		return stampGrepPageStop(buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "ripgrep", rgPath), pageStopped), true, nil
 	}
 	if stopErr != nil {
 		reason := grepInterruptionReason(stopErr, ctx)
 		result := stampGrepPageStop(buildGrepResultWithEngine(
-			opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath,
+			opts, allLines, totalMatchCount, truncated, aggregatedStats, "ripgrep", rgPath,
 			grepPartialNotice(reason, len(allLines)),
 		), pageStopped)
 		return markGrepPartial(result, reason, grepInterruptionTimedOut(stopErr, ctx)), true, nil
 	}
-	return stampGrepPageStop(buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath), pageStopped), true, nil
+	return stampGrepPageStop(buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "ripgrep", rgPath), pageStopped), true, nil
 }
 
 // grepCollectHardCap 是分页抓取的安全上限：head_limit=0（不限）或深分页也不会
@@ -6077,9 +6077,11 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		}
 	}
 
-	engine := "builtin"
+	engine := "walker"
 	if opts != nil {
-		// engine will be set to "rg" by the caller if rg was used
+		// "walker" is the shared engine name the builtin glob tool already uses
+		// for the pure-Go engine; buildGrepResultWithEngine overrides it with
+		// "ripgrep" when rg actually ran.
 	}
 
 	metadata := map[string]interface{}{

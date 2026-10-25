@@ -29,8 +29,8 @@ func TestGrepTool_PCREPatternRoutesToRipgrepBeforeGoCompile(t *testing.T) {
 	if result == nil || !result.Success {
 		t.Fatalf("expected rg-backed success, got %+v", result)
 	}
-	if engine, _ := result.Metadata["engine"].(string); engine != "rg" {
-		t.Fatalf("expected engine=rg, got %#v", result.Metadata["engine"])
+	if engine, _ := result.Metadata["engine"].(string); engine != "ripgrep" {
+		t.Fatalf("expected engine=ripgrep, got %#v", result.Metadata["engine"])
 	}
 	if !containsGrepArg(gotArgs, "--pcre2") {
 		t.Fatalf("expected --pcre2 in rg args, got %#v", gotArgs)
