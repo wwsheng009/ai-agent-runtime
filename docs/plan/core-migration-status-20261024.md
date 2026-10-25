@@ -908,4 +908,43 @@ remote 的 grep 参数（`remotetools/registry.go:176` 起约 400 行）与本�
 像 view 一样共享**同一份** grep schema（`searchcore.GrepParameters()`），而不是各写一份。
 在那之前不值得先动它：参数集正在变，先抽公共声明会把搬运动作放大一倍。
 
-提交：`5d353b4e`（登记）、`5b5ead65`（文档）。
+提交：`5d353b4e`（登记）、`5b5ead65`（文档）。## grep legacy 第 1 组已完成（2026-10-25）：表现层空操作标记
+
+按上一节的作业单执行完毕。**legacy-only 参数从 41 变成 23**，而且这个数字现在是测试算出来的
+（登记表 + 路由集合双向核对），不是手数的。
+
+### 搬了什么
+
+- **`searchcore`** 读取这 18 个拼写，并**无条件**发布 `metadata.ignored_presentation`——
+  空列表本身就是一句话：「你要的输出形状本来就是现在的形状」。
+- **`collectIgnoredPresentationParams` 是原样平移**，不是重写。两个细节重写必然会漏：
+  `""`/`''` 占位符表示「没传」，以及只有布尔**真值**才算请求。
+- 它还刻意**逐条字面读取**（`args["line_number"]` …）而不是走一张键表：schema 审计走的是
+  真实的参数读取，用豁免表把读不到的键登记成「间接读取」恰好会盖住它要抓的东西。
+- **remote schema** 声明这 18 个（它完全能兑现——它们本来就是空操作），审计的扫描清单加上
+  这个新读取函数。
+- 本地路由集合加 18 个键；登记表删 18 项。
+
+### 证据
+
+- `searchcore` 新增测试双向钉住契约：没设任何标记时是空列表；设了一整族时**逐项、按既有顺序**
+  都在；并且**设与不设标记的页面逐字节相同**（这就是「接受但不改变输出」的证据）。
+- 登记测试确认路由集合与登记表一致（`TestGrepCoreSwitchCoversEveryRegisteredParam` 抓到了我
+  第一次漏删的 3 个键：`block_buffered` / `no_block_buffered` / `pretty`）。
+- remote schema 审计两个方向重新全绿（第一版 `indirect` 豁免被我自己否掉了，改成字面读取）。
+- `go build` / `go vet` 干净；`toolcore`、`toolkit`、`remotetools`、`tools`、`agent`、
+  `toolexec`、`toolbroker` 全绿。
+
+提交：`601b30ab`。
+
+### 剩下的 23 个 + 1 个组合
+
+下一个批次是**第 3 组（逃生口）**：`rg_args` + `passthru`。它们的语义就是镜像 rg 自己的解析器，
+本地那套（`parseRGCompatArgs` + `consumeNoOpRGFlag` + `applyRGBooleanFlag` + `parseRGFlagWithValue`
++ `applyRGFlagValue` + `parseRGShortFlagCluster`，约 600 行）是唯一实现，应当**整段平移**进
+`searchcore`——和 `edit`/`apply_patch` 一样，不重写。
+
+然后是第 2 组（19 个 rg 引擎/输出语义标记：`pcre2`、`engine`、`auto_hybrid_regex`、`multiline`、
+`multiline_dotall`、`replace`、`json`、`json_output`、`follow`、`crlf`、`sort*`、`head_limit`、
+`no_config`、`type_add`、`type_clear`、`context_separator`、`no_context_separator`），
+以及 `only_matching` + context 那个组合。这些需要 ripgrep 通道与各自的输出语义，逐个搬。
