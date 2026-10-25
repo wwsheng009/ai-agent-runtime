@@ -24,6 +24,7 @@
 ```text
 显示主窗口
 隐藏到托盘
+返回控制台
 重新加载控制台
 发送测试通知
 ────────────────
@@ -68,7 +69,11 @@ Linux:   XDG autostart
 
 所有 Tauri 原生通知都注册了统一 action handler：
 
-- 点击通知：唤醒并聚焦主窗口。
+- 点击通知：打开（或复用并聚焦）**独立会话窗口**；主窗口（控制台）保持原页面与
+  导航上下文，不再被 `navigate` 覆盖。新窗口与主窗口共享同一 WebView2 数据目录
+  （owner Cookie 生效），同一 URL 已打开时只导航并聚焦，不重复开窗。
+- 窗口创建失败或 `extra.url` 缺失（旧版通知）时才回退：显示主窗口并导航到该 URL；
+  此后可用托盘菜单「返回控制台」把主窗口带回控制台首页（新增的兜底入口）。
 - 若通知 `extra` 含同主机 `url`（控制台 v48 起始终携带），优先导航到该 URL：
 
   ```text
@@ -79,7 +84,7 @@ Linux:   XDG autostart
   反代只放行节点注册的 route（aicli 节点的 Web UI 在 `/web/`），旧深链
   `{gateway}/n/{node_id}/?session=…` 会被 403 `route not allowed`；网关侧
   Web Push / ntfy 的 `click` 同样按注册表 `kind` 生成正确前缀。
-- 仅当 `extra.url` 缺失（旧版通知）时才退回按 `node_id` / `session_id` 拼
+- 旧版通知（无 `extra.url`）会退回按 `node_id` / `session_id` 拼
   `/n/{node_id}/?session=…`；这类历史通知在 aicli 节点上点击仍可能 403，
   重新打开 App 后产生的新通知不受影响。
 - 只允许网关主机和 HTTPS（loopback 开发可用 HTTP），防止通知载荷把
@@ -170,7 +175,7 @@ started minimized to system tray
 - [x] 第二次启动唤醒已有窗口
 - [x] 窗口尺寸/位置恢复
 - [x] 开机启动开关使用系统真实状态
-- [x] 通知点击唤醒窗口
+- [x] 通知点击打开独立会话窗口，主窗口保持控制台（不覆盖、无需返回导航）
 - [x] 通知带 node/session 时导航到会话
 - [x] 关闭到托盘提示只出现一次
 - [ ] Windows 安装包下的通知点击与开机启动待实机复验

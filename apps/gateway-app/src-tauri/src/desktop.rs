@@ -8,7 +8,7 @@ use std::{
     },
 };
 use tauri::{
-    AppHandle, Manager, WebviewWindow, WindowEvent,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -18,6 +18,7 @@ use tauri_plugin_notification::{ActionPerformed, NotificationExt};
 const TRAY_ID: &str = "aicli-gateway-tray";
 const MENU_SHOW: &str = "tray.show";
 const MENU_HIDE: &str = "tray.hide";
+const MENU_HOME: &str = "tray.home";
 const MENU_RELOAD: &str = "tray.reload";
 const MENU_TEST_NOTIFICATION: &str = "tray.test-notification";
 const MENU_AUTOSTART: &str = "tray.autostart";
@@ -172,6 +173,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let show_item = MenuItem::with_id(app, MENU_SHOW, "显示主窗口", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, MENU_HIDE, "隐藏到托盘", true, None::<&str>)?;
+    let home_item = MenuItem::with_id(app, MENU_HOME, "返回控制台", true, None::<&str>)?;
     let reload_item = MenuItem::with_id(app, MENU_RELOAD, "重新加载控制台", true, None::<&str>)?;
     let test_item = MenuItem::with_id(
         app,
@@ -205,6 +207,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         &[
             &show_item,
             &hide_item,
+            &home_item,
             &reload_item,
             &test_item,
             &separator_one,
@@ -259,12 +262,28 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             hide_main_window(app);
             crate::log_startup("window hidden from tray menu");
         }
+        MENU_HOME => return_to_console(app),
         MENU_RELOAD => reload_main_window(app),
         MENU_TEST_NOTIFICATION => send_test_notification(app),
         MENU_AUTOSTART => toggle_autostart(app),
         MENU_CLOSE_TO_TRAY => toggle_close_to_tray(app),
         MENU_QUIT => quit_app(app),
         _ => {}
+    }
+}
+
+// return_to_console 是兜底入口：任何情况下都把主窗口带回控制台首页，
+// 避免旧的“主窗口被会话页覆盖”状态无法恢复。
+fn return_to_console(app: &AppHandle) {
+    show_main_window(app);
+    let Ok(base) = crate::gateway_url() else {
+        crate::log_startup("return to console failed: gateway URL unavailable");
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(err) = window.navigate(base) {
+            crate::log_startup(&format!("return to console failed: {err:?}"));
+        }
     }
 }
 
@@ -351,14 +370,11 @@ fn init_notification_actions(app: &AppHandle) {
         .notification()
         .on_action(move |action: &ActionPerformed| {
             crate::log_startup(&format!("notification action: {}", action.action_id()));
-            show_main_window(&app_handle);
-            if let Some(target) = notification_target(action) {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    crate::log_startup(&format!("notification deep link: {target}"));
-                    if let Err(err) = window.navigate(target) {
-                        crate::log_startup(&format!("notification deep link failed: {err:?}"));
-                    }
-                }
+            match notification_target(action) {
+                // 通知点击开独立会话窗口：主窗口保留控制台与导航上下文，
+                // 不再被 navigate 覆盖（旧行为会让桌面端“只有会话页、无返回”）。
+                Some(target) => open_notification_window(&app_handle, &target),
+                None => show_main_window(&app_handle),
             }
         })
     {
@@ -407,6 +423,73 @@ fn notification_target_from_extra(
         target.query_pairs_mut().append_pair("session", session);
     }
     Some(target)
+}
+
+// notification_window_label 用 URL 哈希生成稳定窗口标签（Tauri 标签只允许
+// 字母/数字/-/_/./:/）：同一会话重复点击复用窗口，而不是越开越多。
+fn notification_window_label(target: &tauri::Url) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target.as_str().hash(&mut hasher);
+    format!("deep-{:016x}", hasher.finish())
+}
+
+// open_notification_window 在独立窗口里打开通知深链：
+//   · 主窗口（控制台）保持原 URL，不再被通知点击覆盖；
+//   · 同一 URL 已有窗口则复用、导航并聚焦；
+//   · 新窗口沿用主窗口的 WebView2 数据目录（owner Cookie 共享）；
+//   · 只允许网关主机；创建失败才回退到主窗口导航。
+fn open_notification_window(app: &AppHandle, target: &tauri::Url) {
+    let Some(base) = crate::gateway_url().ok() else {
+        fallback_navigate_main(app, target);
+        return;
+    };
+    let Some(host) = base.host_str().map(str::to_string) else {
+        fallback_navigate_main(app, target);
+        return;
+    };
+    if !crate::is_allowed_navigation(target, &host) {
+        crate::log_startup(&format!("notification deep link denied: {target}"));
+        show_main_window(app);
+        return;
+    }
+    let label = notification_window_label(target);
+    if let Some(window) = app.get_webview_window(&label) {
+        crate::log_startup(&format!("notification window reused: {label}"));
+        let _ = window.navigate(target.clone());
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let nav_host = host.clone();
+    let builder =
+        WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(target.clone()))
+            .title("aicli-gateway · 会话")
+            .inner_size(1200.0, 900.0)
+            .min_inner_size(800.0, 600.0)
+            .on_navigation(move |url| crate::is_allowed_navigation(url, &nav_host));
+    match builder.build() {
+        Ok(window) => {
+            crate::log_startup(&format!("notification window opened: {label} {target}"));
+            let _ = window.set_focus();
+        }
+        Err(err) => {
+            crate::log_startup(&format!("notification window failed: {err:?}"));
+            fallback_navigate_main(app, target);
+        }
+    }
+}
+
+// fallback_navigate_main 只在独立窗口创建失败时使用；此时才把主窗口带到前台
+// 并导航（会失去控制台上下文，但好过点击无反应）。
+fn fallback_navigate_main(app: &AppHandle, target: &tauri::Url) {
+    show_main_window(app);
+    if let Some(window) = app.get_webview_window("main") {
+        crate::log_startup(&format!("notification deep link fallback: {target}"));
+        if let Err(err) = window.navigate(target.clone()) {
+            crate::log_startup(&format!("notification deep link failed: {err:?}"));
+        }
+    }
 }
 
 fn show_close_hint_once(app: &AppHandle) {
@@ -516,5 +599,24 @@ mod tests {
                 .as_str(),
             "https://aicli.ttai.online/n/node-1/?session=session-2"
         );
+    }
+
+    #[test]
+    fn notification_window_label_is_stable_and_safe() {
+        let url: tauri::Url = "https://aicli.ttai.online/n/node-1/web/?session=session-2"
+            .parse()
+            .unwrap();
+        let label = notification_window_label(&url);
+        assert_eq!(label, notification_window_label(&url));
+        assert!(label.starts_with("deep-"));
+        assert!(
+            label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+        );
+        let other: tauri::Url = "https://aicli.ttai.online/n/node-1/web/?session=session-3"
+            .parse()
+            .unwrap();
+        assert_ne!(label, notification_window_label(&other));
     }
 }
