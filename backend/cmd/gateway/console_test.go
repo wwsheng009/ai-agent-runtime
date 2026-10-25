@@ -168,6 +168,12 @@ func TestConsoleApprovalQuestionInline(t *testing.T) {
 	if !strings.Contains(app, `nodeDisplayName(node) + " · " + (node.kind || "agent")`) {
 		t.Fatal("chat panel header must use nodeDisplayName; raw node ids belong to the detail dialog")
 	}
+	if strings.Contains(app, "return session.title || session.session_id") {
+		t.Fatal("session label still falls back to the raw session id; use 未命名会话")
+	}
+	if !strings.Contains(app, `return title || "未命名会话"`) {
+		t.Fatal("session label fallback 未命名会话 is missing")
+	}
 }
 
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {

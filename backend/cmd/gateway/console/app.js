@@ -611,8 +611,11 @@
     return !!presenceTargets[nodeID + "|" + (sessionID || "")];
   }
 
+  // sessionLabelOf 给列表 / 面板一句人类可读的标题：会话没有标题时回退「未命名会话」，
+  // 绝不回退裸 session_id（两个 id 只出现在「详情」弹窗里）。
   function sessionLabelOf(session) {
-    return session.title || session.session_id;
+    var title = session && session.title ? String(session.title).trim() : "";
+    return title || "未命名会话";
   }
 
   // nodeDisplayName 只给人类可读名：会话列表不暴露 node-id；无名字时退回类型
@@ -5179,7 +5182,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=52").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=53").catch(function () {});
     });
   }
 
