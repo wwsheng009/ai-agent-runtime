@@ -225,6 +225,9 @@ Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 
   `gateway.bak-20261025-143355`；
 - 桌面端用 CDP 向运行中的 WebView 注入合成 session 增量，Windows 通知历史实测出现
   `node-… · 通知链路测试 / 出错`、`… · 通知链路测试2 / 已完成` 两条真实事件。
+- v48 追加：通知点击深链按节点 kind 生成。生产实测同一 aicli 节点旧路径
+  `/n/{node}/?session=…` 返回 403 `route not allowed`、新路径
+  `/n/{node}/web/?session=…` 返回 200；CDP 捕获原生通知 `extra.url` 为该新路径。
 
 语义提醒：App 重载后的首屏只做 seed（已存在的注意力不补弹，只有加载后的新变化通知）；
 浏览器 / PWA 需要重新“开启通知”建立 Web Push 订阅，桌面 App 走原生桥不依赖订阅。

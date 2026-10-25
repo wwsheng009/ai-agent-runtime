@@ -536,5 +536,21 @@ relay 契约与设备注册 API 见
 > 证明修复链路端到端生效。语义提醒：App 重载后的**首屏只做 seed**，已存在的注意力不补弹，
 > 只有加载后的新变化才通知；需要 Web Push 的设备要在控制台重新「开启通知」建立订阅。
 
+> **部署记录（2026-10-25 第八笔，通知点击深链修复 v48）**：HEAD `0d85ce56`，raw sha256
+> `42a75131…34af810c`（18,433,290 字节）；1MB×18 分块上传 + sha 门禁 → 备份
+> `gateway.bak-20261025-145753` → 替换重启。验证：服务 active、`/proc/<pid>/exe` sha 与
+> 本地一致、公网 `app.js?v=48`/`style.css?v=48`/`sw.js` CACHE v48、
+> `/api/notify/policy` 401、normal 通道仍为 `webpush,ntfy`。
+>
+> **本笔修复**：通知点击原先导航到 `/n/{node}/?session=…`，但 aicli 节点的 route
+> allowlist 只放行 `/web/`，反代返回 403 `route not allowed`。修复：
+> ① 控制台原生通知 `extra` 增加绝对 `url`（`sessionOpenTarget`：aicli `/web/`、
+> runtime-server `/`）；② 网关 Web Push / ntfy 的 `click` 改为按注册表 `kind`
+> 生成（`push.go sessionURL` + `nodeKind` 注入）。生产实测同一节点旧路径 403、
+> 新路径 200；CDP 捕获的通知 `extra.url` =
+> `https://aicli.ttai.online/n/node-65154dc8e4d85c0a/web/?session=…`。
+> 提醒：v48 之前产生的历史通知 `extra` 没有 url，点击仍可能 403；重开 App 后的
+> 新通知正常。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

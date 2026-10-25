@@ -69,13 +69,19 @@ Linux:   XDG autostart
 所有 Tauri 原生通知都注册了统一 action handler：
 
 - 点击通知：唤醒并聚焦主窗口。
-- 若通知 `extra` 含 `node_id` / `session_id`，导航到：
+- 若通知 `extra` 含同主机 `url`（控制台 v48 起始终携带），优先导航到该 URL：
 
   ```text
-  {gateway}/n/{node_id}/?session={session_id}
+  aicli:          {gateway}/n/{node_id}/web/?session={session_id}
+  runtime-server: {gateway}/n/{node_id}/
   ```
 
-- 若通知 `extra` 含同主机 `url`，优先使用该 URL。
+  反代只放行节点注册的 route（aicli 节点的 Web UI 在 `/web/`），旧深链
+  `{gateway}/n/{node_id}/?session=…` 会被 403 `route not allowed`；网关侧
+  Web Push / ntfy 的 `click` 同样按注册表 `kind` 生成正确前缀。
+- 仅当 `extra.url` 缺失（旧版通知）时才退回按 `node_id` / `session_id` 拼
+  `/n/{node_id}/?session=…`；这类历史通知在 aicli 节点上点击仍可能 403，
+  重新打开 App 后产生的新通知不受影响。
 - 只允许网关主机和 HTTPS（loopback 开发可用 HTTP），防止通知载荷把
   WebView 导航到外部站点。
 - 通知正文仍只包含节点、会话标题和 attention 标签，不含聊天正文。
