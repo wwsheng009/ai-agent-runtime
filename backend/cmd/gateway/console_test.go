@@ -113,6 +113,24 @@ func TestConsoleAttentionTrackingWired(t *testing.T) {
 	}
 }
 
+// TestConsoleNotificationLocateWired pins the desktop notification UX: clicking a
+// toast must only locate the session inside the console (switch view, relax
+// filters, scroll + pulse), never navigate to the session web UI.
+func TestConsoleNotificationLocateWired(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		`"aicli-gateway-locate"`,
+		"function locateSession(",
+		"flushPendingLocate()",
+		`sessionFilterKind = "all"`,
+		"card-updated",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing notification locate hook %q", needle)
+		}
+	}
+}
+
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {
 	rec := getConsole("/some/spa/route")
 	if rec.Code != http.StatusOK {

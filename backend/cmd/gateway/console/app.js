@@ -217,6 +217,8 @@
       setAuthed(true);
       lastNodes = (r.body && r.body.nodes) || [];
       renderAll(lastNodes);
+      // 登录/刷新完成后补做通知定位请求（事件可能早于快照到达）。
+      flushPendingLocate();
       subscribeEvents();
     }).finally(function () {
       if (views) { views.removeAttribute("aria-busy"); }
@@ -502,21 +504,60 @@
 
   // Click-through: reveal the session row (switching to 全部 when the current
   // filter hides it) and pulse it so the operator lands on the right card.
-  function locateSession(nodeID, sessionID) {
-    var selector = '.session-card[data-draft-key="' + nodeID + "|" + sessionID + '"]';
-    var card = document.querySelector(selector);
-    if (!card) {
-      sessionFilterKind = "all";
-      syncFilterControls();
-      saveSessionPrefs();
-      renderSessionTable(lastNodes);
-      card = document.querySelector(selector);
-      if (!card) { notify("未在列表中找到该会话（可能已过期或已移除）", "error"); return; }
-    }
+  // 通知点击（Tauri 事件）与事件条点击共用这一入口：只做站内定位，不导航到
+  // 会话 Web UI。
+  function sessionCardSelector(nodeID, sessionID) {
+    return '.session-card[data-draft-key="' + nodeID + "|" + sessionID + '"]';
+  }
+
+  function pulseSessionCard(card) {
     if (card.scrollIntoView) { card.scrollIntoView({ block: "center" }); }
     card.classList.remove("card-updated");
     void card.offsetWidth; // restart the pulse animation
     card.classList.add("card-updated");
+    if (card.focus) {
+      try { card.focus({ preventScroll: true }); } catch (err) { /* focus options unsupported */ }
+    }
+  }
+
+  function locateSession(nodeID, sessionID) {
+    if (!nodeID || !sessionID) { return; }
+    if (currentView() !== "sessions") { navigate("sessions"); }
+    var selector = sessionCardSelector(nodeID, sessionID);
+    var card = document.querySelector(selector);
+    if (card) { pulseSessionCard(card); return; }
+    // 当前筛选/搜索把它藏起来了：放宽为“全部 + 空搜索”后重排一次。
+    sessionFilterKind = "all";
+    sessionFilterText = "";
+    if (el("session-filter")) { el("session-filter").value = ""; }
+    syncFilterControls();
+    saveSessionPrefs();
+    renderSessionTable(lastNodes);
+    card = document.querySelector(selector);
+    if (card) { pulseSessionCard(card); return; }
+    // 未知/新会话（例如通知先于快照到达）：补拉一次快照再试。
+    loadNodes().then(function () {
+      var retry = document.querySelector(selector);
+      if (retry) { pulseSessionCard(retry); return; }
+      notify("未在列表中找到该会话（可能已过期或已移除）", "error");
+    });
+  }
+
+  // 桌面壳点击通知时只派发定位事件（不 navigate、不开新窗口）。页面不在会话
+  // 视图、未登录或快照未就绪时先记下目标，登录/加载完成后补做。
+  var pendingLocate = null;
+  window.addEventListener("aicli-gateway-locate", function (event) {
+    var detail = (event && event.detail) || {};
+    if (!detail.node_id || !detail.session_id) { return; }
+    pendingLocate = { nodeID: String(detail.node_id), sessionID: String(detail.session_id) };
+    if (authedState) { flushPendingLocate(); }
+  });
+
+  function flushPendingLocate() {
+    if (!pendingLocate || !authedState) { return; }
+    var target = pendingLocate;
+    pendingLocate = null;
+    locateSession(target.nodeID, target.sessionID);
   }
 
   // Expired chips are pruned by the 5s tick (labels advance via setRelTime).
@@ -4900,7 +4941,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=48").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=49").catch(function () {});
     });
   }
 

@@ -8,7 +8,7 @@ use std::{
     },
 };
 use tauri::{
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, WebviewWindow, WindowEvent,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -370,10 +370,10 @@ fn init_notification_actions(app: &AppHandle) {
         .notification()
         .on_action(move |action: &ActionPerformed| {
             crate::log_startup(&format!("notification action: {}", action.action_id()));
-            match notification_target(action) {
-                // 通知点击开独立会话窗口：主窗口保留控制台与导航上下文，
-                // 不再被 navigate 覆盖（旧行为会让桌面端“只有会话页、无返回”）。
-                Some(target) => open_notification_window(&app_handle, &target),
+            match notification_locator(action) {
+                // 桌面通知点击只做站内定位：聚焦主窗口并向控制台派发定位事件，
+                // 不 navigate、不开新窗口，也不跳转会话 Web UI。
+                Some((node, session)) => locate_session_in_console(&app_handle, &node, &session),
                 None => show_main_window(&app_handle),
             }
         })
@@ -382,122 +382,70 @@ fn init_notification_actions(app: &AppHandle) {
     }
 }
 
-fn notification_target(action: &ActionPerformed) -> Option<tauri::Url> {
+// notification_locator 从通知 extra 提取站内定位目标（node_id + session_id）。
+// 桌面通知不再解析/导航到会话 Web UI；extra.url 只用于解析旧版本载荷。
+fn notification_locator(action: &ActionPerformed) -> Option<(String, String)> {
     let notification = action.notification()?;
-    let base = crate::gateway_url().ok()?;
-    notification_target_from_extra(&base, notification.extra())
+    notification_locator_from_extra(notification.extra())
 }
 
-fn notification_target_from_extra(
-    base: &tauri::Url,
+fn notification_locator_from_extra(
     extra: &std::collections::HashMap<String, serde_json::Value>,
-) -> Option<tauri::Url> {
-    let host = base.host_str()?.to_string();
-
-    if let Some(raw) = extra.get("url").and_then(serde_json::Value::as_str) {
-        if let Ok(candidate) = raw.parse::<tauri::Url>() {
-            if crate::is_allowed_navigation(&candidate, &host) {
-                return Some(candidate);
-            }
-        }
-    }
-
+) -> Option<(String, String)> {
     let node = extra
         .get("node_id")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let session = extra
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let mut target = base.clone();
-    target.set_path("/");
-    {
-        let mut segments = target.path_segments_mut().ok()?;
-        segments.clear().push("n").push(node).push("");
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(node) = node {
+        let session = extra
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        return Some((node, session));
     }
-    if let Some(session) = session {
-        target.query_pairs_mut().append_pair("session", session);
+    // 旧通知可能只带 url：从 /n/{node}/web/?session=... 解析定位目标。
+    let raw = extra.get("url").and_then(serde_json::Value::as_str)?;
+    let url = raw.parse::<tauri::Url>().ok()?;
+    let mut segments = url.path_segments()?;
+    if segments.next()? != "n" {
+        return None;
     }
-    Some(target)
+    let node = segments.next()?.to_string();
+    if node.is_empty() {
+        return None;
+    }
+    let session = url
+        .query_pairs()
+        .find(|(key, _)| key == "session")
+        .map(|(_, value)| value.to_string())
+        .unwrap_or_default();
+    Some((node, session))
 }
 
-// notification_window_label 用 URL 哈希生成稳定窗口标签（Tauri 标签只允许
-// 字母/数字/-/_/./:/）：同一会话重复点击复用窗口，而不是越开越多。
-fn notification_window_label(target: &tauri::Url) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    target.as_str().hash(&mut hasher);
-    format!("deep-{:016x}", hasher.finish())
+// locate_event_script 生成注入脚本：只派发定位事件，由控制台决定 UI 行为
+// （切到会话视图、清筛选、滚动并脉冲高亮），不产生任何导航。
+fn locate_event_script(node_id: &str, session_id: &str) -> String {
+    let detail = serde_json::json!({ "node_id": node_id, "session_id": session_id });
+    format!(
+        "window.dispatchEvent(new CustomEvent(\"aicli-gateway-locate\", {{ detail: {detail} }}));"
+    )
 }
 
-// open_notification_window 在独立窗口里打开通知深链：
-//   · 主窗口（控制台）保持原 URL，不再被通知点击覆盖；
-//   · 同一 URL 已有窗口则复用、导航并聚焦；
-//   · 新窗口沿用主窗口的 WebView2 数据目录（owner Cookie 共享）；
-//   · 只允许网关主机；创建失败才回退到主窗口导航。
-fn open_notification_window(app: &AppHandle, target: &tauri::Url) {
-    let Some(base) = crate::gateway_url().ok() else {
-        fallback_navigate_main(app, target);
-        return;
-    };
-    let Some(host) = base.host_str().map(str::to_string) else {
-        fallback_navigate_main(app, target);
-        return;
-    };
-    if !crate::is_allowed_navigation(target, &host) {
-        crate::log_startup(&format!("notification deep link denied: {target}"));
-        show_main_window(app);
-        return;
-    }
-    let label = notification_window_label(target);
-    if let Some(window) = app.get_webview_window(&label) {
-        crate::log_startup(&format!("notification window reused: {label}"));
-        let _ = window.navigate(target.clone());
-        let _ = window.show();
-        let _ = window.set_focus();
-        return;
-    }
-    let nav_host = host.clone();
-    let mut builder =
-        WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(target.clone()))
-            .title("aicli-gateway · 会话")
-            .inner_size(1200.0, 900.0)
-            .min_inner_size(800.0, 600.0)
-            .on_navigation(move |url| crate::is_allowed_navigation(url, &nav_host));
-    // 必须与主窗口使用同一 WebView2 数据目录（同一 environment），否则新窗口
-    // 是独立 cookie 容器，代理请求没有 owner Cookie → 401 unauthorized。
-    if let Some(dir) = crate::resolve_webview_data_dir() {
-        crate::log_startup(&format!(
-            "notification window webview data dir: {}",
-            dir.display()
-        ));
-        builder = builder.data_directory(dir);
-    }
-    match builder.build() {
-        Ok(window) => {
-            crate::log_startup(&format!("notification window opened: {label} {target}"));
-            let _ = window.set_focus();
-        }
-        Err(err) => {
-            crate::log_startup(&format!("notification window failed: {err:?}"));
-            fallback_navigate_main(app, target);
-        }
-    }
-}
-
-// fallback_navigate_main 只在独立窗口创建失败时使用；此时才把主窗口带到前台
-// 并导航（会失去控制台上下文，但好过点击无反应）。
-fn fallback_navigate_main(app: &AppHandle, target: &tauri::Url) {
+fn locate_session_in_console(app: &AppHandle, node_id: &str, session_id: &str) {
     show_main_window(app);
-    if let Some(window) = app.get_webview_window("main") {
-        crate::log_startup(&format!("notification deep link fallback: {target}"));
-        if let Err(err) = window.navigate(target.clone()) {
-            crate::log_startup(&format!("notification deep link failed: {err:?}"));
-        }
+    let Some(window) = app.get_webview_window("main") else {
+        crate::log_startup("notification locate skipped: main window missing");
+        return;
+    };
+    crate::log_startup(&format!(
+        "notification locate: node={node_id} session={session_id}"
+    ));
+    if let Err(err) = window.eval(&locate_event_script(node_id, session_id)) {
+        crate::log_startup(&format!("notification locate eval failed: {err:?}"));
     }
 }
 
@@ -567,65 +515,46 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn gateway() -> tauri::Url {
-        "https://aicli.ttai.online/".parse().unwrap()
-    }
-
     fn extra(value: serde_json::Value) -> HashMap<String, serde_json::Value> {
         value.as_object().unwrap().clone().into_iter().collect()
     }
 
     #[test]
-    fn notification_target_builds_session_link() {
+    fn notification_locator_prefers_extra_ids() {
         let extra = extra(serde_json::json!({
             "node_id": "node-1",
             "session_id": "session-2"
         }));
         assert_eq!(
-            notification_target_from_extra(&gateway(), &extra)
-                .unwrap()
-                .as_str(),
-            "https://aicli.ttai.online/n/node-1/?session=session-2"
+            notification_locator_from_extra(&extra),
+            Some(("node-1".to_string(), "session-2".to_string()))
         );
     }
 
     #[test]
-    fn notification_target_rejects_external_url() {
+    fn notification_locator_parses_legacy_url() {
         let extra = extra(serde_json::json!({
-            "url": "https://evil.example/session"
-        }));
-        assert!(notification_target_from_extra(&gateway(), &extra).is_none());
-    }
-
-    #[test]
-    fn notification_target_accepts_same_gateway_url() {
-        let extra = extra(serde_json::json!({
-            "url": "https://aicli.ttai.online/n/node-1/?session=session-2"
+            "url": "https://aicli.ttai.online/n/node-9/web/?session=session-8"
         }));
         assert_eq!(
-            notification_target_from_extra(&gateway(), &extra)
-                .unwrap()
-                .as_str(),
-            "https://aicli.ttai.online/n/node-1/?session=session-2"
+            notification_locator_from_extra(&extra),
+            Some(("node-9".to_string(), "session-8".to_string()))
         );
     }
 
     #[test]
-    fn notification_window_label_is_stable_and_safe() {
-        let url: tauri::Url = "https://aicli.ttai.online/n/node-1/web/?session=session-2"
-            .parse()
-            .unwrap();
-        let label = notification_window_label(&url);
-        assert_eq!(label, notification_window_label(&url));
-        assert!(label.starts_with("deep-"));
-        assert!(
-            label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
-        );
-        let other: tauri::Url = "https://aicli.ttai.online/n/node-1/web/?session=session-3"
-            .parse()
-            .unwrap();
-        assert_ne!(label, notification_window_label(&other));
+    fn notification_locator_rejects_missing_target() {
+        let extra = extra(serde_json::json!({
+            "attention": "error"
+        }));
+        assert!(notification_locator_from_extra(&extra).is_none());
+    }
+
+    #[test]
+    fn locate_event_script_targets_console_and_escapes_ids() {
+        let script = locate_event_script("node-1", "session-\"2\"");
+        assert!(script.contains("aicli-gateway-locate"));
+        assert!(script.contains("node-1"));
+        assert!(script.contains(r#"session-\"2\""#));
     }
 }
