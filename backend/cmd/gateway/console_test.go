@@ -95,6 +95,20 @@ func TestConsoleNotifyPolicyAsset(t *testing.T) {
 	}
 }
 
+// TestConsoleAttentionTrackingWired pins the fresh-attention edge: trackAttention
+// must be called from both the full snapshot path and the incremental session
+// patch path. The v40 refactor dropped every call site, which silently disabled
+// the toast and the Tauri native notification bridge for real attention events
+// (only the first load seeded, so nothing ever fired).
+func TestConsoleAttentionTrackingWired(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{"trackAttention(nodes);", "trackAttention(lastNodes);"} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing fresh-attention call %q", needle)
+		}
+	}
+}
+
 func TestConsoleFallsBackToIndexForUnknownRoutes(t *testing.T) {
 	rec := getConsole("/some/spa/route")
 	if rec.Code != http.StatusOK {

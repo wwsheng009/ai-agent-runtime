@@ -550,6 +550,9 @@
     updateStats(lastNodes);
     renderInbox(lastNodes);
     renderSessionTable(lastNodes);
+    // 增量 session 事件也要走 fresh-attention 检测：网关对注意力变化先推
+    // 单会话增量；漏掉这一调用会让 toast/原生通知延迟到下一次全量快照。
+    trackAttention(lastNodes);
   }
 
   /* ─────────────────────── derived helpers ───────────────────── */
@@ -1927,6 +1930,9 @@
   }
 
   function renderAll(nodes) {
+    // v40 重构丢了这里的调用，导致 trackAttention（fresh attention →
+    // toast/原生通知）整条链路从不执行；恢复并加控制台资产测试防回归。
+    trackAttention(nodes);
     updateStats(nodes);
     renderInbox(nodes);
     renderAttentionBreakdown(nodes);
@@ -4886,7 +4892,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=46").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=47").catch(function () {});
     });
   }
 
