@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -288,7 +289,29 @@ type GrepResult struct {
 	// mode. Collected only on this path, because only here is the stream itself
 	// part of the answer.
 	JSONStats GrepJSONStats
+	// TimedOut marks a page that stopped at this call's own search budget.
+	// The collected matches are real; the caller just cannot read them as a
+	// complete answer, which is why it is reported separately from Truncated
+	// (the page-size/byte window) and is not an error.
+	TimedOut bool
 }
+
+// GrepSearchBudget bounds one pure-Go walker search, exactly as
+// GlobSearchBudget bounds glob. Without it a large tree has no deadline at
+// all: the walker traverses and reads every admitted file, so a slow search
+// hangs the call instead of returning the page it already has. Expiry keeps
+// what was collected and marks it TimedOut.
+//
+// A variable rather than a constant so a test can bound a search without
+// waiting out twenty seconds; nothing else writes it.
+var GrepSearchBudget = 20 * time.Second
+
+// GrepBudgetAfterVisits, when positive, ends the walk after that many visited
+// files have been read instead of after the clock budget. It exists so a test
+// can exercise "the budget expired mid-walk, keep what was collected"
+// deterministically: a wall-clock budget is inherently racy on a machine whose
+// speed is unknown. Zero restores the real clock budget.
+var GrepBudgetAfterVisits = 0
 
 // GrepJSONStats is the subset of ripgrep's summary event the shared tool
 // publishes, named exactly as ripgrep names it.
@@ -381,6 +404,15 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	var result GrepResult
 	roots := grepRoots(opts)
+	// The walker gets its own budget. Caller cancellation still propagates
+	// untouched: WithTimeout wraps ctx, so an already-cancelled parent keeps
+	// reporting its own error and expiry of this budget alone is TimedOut.
+	walkCtx := ctx
+	if walkCtx == nil {
+		walkCtx = context.Background()
+	}
+	budgetCtx, cancelBudget := context.WithTimeout(walkCtx, GrepSearchBudget)
+	defer cancelBudget()
 	if len(roots) == 1 {
 		if info, statErr := os.Stat(roots[0]); statErr == nil && info.Mode().IsRegular() {
 			result.SingleFile = true
@@ -391,9 +423,30 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	// have no matching line, so matches are not collected and the page check
 	// counts proven files instead.
 	filesWithout := mode == GrepModeFilesWithout
+	// visits counts files handed to visit() when the visit-count budget
+	// override is active; zero otherwise and unused.
+	visits := 0
 	visit := func(root string, rules *grepIgnoreRules, path string) error {
-		if ctx != nil && ctx.Err() != nil {
-			return ctx.Err()
+		if budgetCtx.Err() != nil {
+			// Caller cancellation keeps propagating as an error: the parent
+			// asked to stop, so it is told the walk stopped. Only *this*
+			// budget expiring is a partial page - the search ran out of its
+			// own time, so what it collected is still real evidence.
+			if parentErr := walkCtx.Err(); parentErr != nil {
+				return parentErr
+			}
+			result.TimedOut = true
+			return filepath.SkipAll
+		}
+		// The visit-count stand-in for the clock budget. It runs the same
+		// outcome - stop, keep what was collected, mark TimedOut - so a test
+		// does not have to race a wall clock to prove a partial page survives.
+		if GrepBudgetAfterVisits > 0 {
+			if visits >= GrepBudgetAfterVisits {
+				result.TimedOut = true
+				return filepath.SkipAll
+			}
+			visits++
 		}
 		// The explicit root may be a symlink that the surface adapter already
 		// resolved and verified. Links discovered during traversal are rejected

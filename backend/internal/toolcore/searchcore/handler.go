@@ -469,32 +469,24 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return toolcore.Error(toolcore.ErrInvalidArgument,
 			"fix the ignore_file path or pass no_messages to skip unreadable ones", err), nil
 	}
-	// A request that needs ripgrep is answered by ripgrep first. Go's regexp
-	// rejects patterns ripgrep accepts (lookaround, backreferences), so running
-	// the walker first would fail a call the engine can serve. When the engine
-	// cannot run at all, the fallback is the walker - which is exactly what the
-	// builtin tool does when no rg is on PATH.
+	// ripgrep answers first whenever it is bound. It is the authoritative
+	// engine on this host, and running the walker ahead of it would traverse
+	// and read the whole tree only to throw that work away the moment
+	// ripgrep replies: measured on this repo the walker alone was ~65% of the
+	// call, and its result was discarded either way. The walker still runs
+	// when ripgrep is not bound, and when ripgrep ran and failed its result is
+	// kept exactly like before - an rg error leaves the walker's page in place
+	// rather than failing the call.
 	var result GrepResult
 	var grepErr error
 	usedEngine := false
-	if options.RequiresRipgrep() {
-		if searcher, ok := call.Runtime.(Searcher); ok {
-			if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
-				result, grepErr, engine, usedEngine = rgResult, nil, "ripgrep", true
-			}
+	if searcher, ok := call.Runtime.(Searcher); ok {
+		if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
+			result, grepErr, engine, usedEngine = rgResult, nil, "ripgrep", true
 		}
 	}
 	if !usedEngine {
 		result, grepErr = Grep(ctx, options)
-		if !options.RequiresRipgrep() {
-			if searcher, ok := call.Runtime.(Searcher); ok {
-				if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
-					result = rgResult
-					grepErr = nil
-					engine = "ripgrep"
-				}
-			}
-		}
 	}
 	if grepErr != nil {
 		if ctx != nil && ctx.Err() != nil {
@@ -631,9 +623,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"context_lines":        page.contextLines,
 		"offset":               options.Offset,
 		"next_offset":          options.Offset + pageEntries,
-		"has_more":             result.Truncated,
-		"engine":               engine,
-		"engine_name":          engine,
+		// The walker's own search budget. Reported so a partial page reads as
+		// one: the matches are real, the answer is just not complete.
+		"timed_out":   result.TimedOut,
+		"has_more":    result.Truncated,
+		"engine":      engine,
+		"engine_name": engine,
 		// Published by the handler because the handler is what decides: one of the
 		// flags below was set, or a non-default engine was requested.
 		"requires_ripgrep": options.RequiresRipgrep(),
