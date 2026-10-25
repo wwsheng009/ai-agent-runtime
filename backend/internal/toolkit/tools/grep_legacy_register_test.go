@@ -32,7 +32,6 @@ import (
 var grepLegacyOnlyParams = []string{
 	"context_separator",
 	"follow", "head_limit",
-	"json", "json_output",
 	"no_context_separator",
 	"no_sort_files", "passthru", "rg_args", "sort",
 	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",

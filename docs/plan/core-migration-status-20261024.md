@@ -1216,4 +1216,38 @@ flag 想改的恰恰是那两条保证。
 
 登记表：41 → 15。剩余 15 个：`rg_args`、`passthru`、`json`、`json_output`、`follow`、
 `sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`head_limit`、
-`context_separator`/`no_context_separator`、`type_add`/`type_clear`。
+`context_separator`/`no_context_separator`、`type_add`/`type_clear`。## `json` / `json_output` 已收敛（2026-10-25）
+
+### 契约（以本地为准，已用测试钉住）
+- 输出 = **ripgrep 原始事件行**（begin/match/context/end/summary），逐字节透传；
+- 分页单位是**事件行**（不是匹配）：`limit` 是这一页给多少行事件，`offset` 从第几行起；
+- 输出必须始终是可解析的 JSON Lines，因此**不追加任何提示文本**（旧实现同样在 json 下关掉分页提示）；
+- metadata：`json`、`normalized_output=false`、`output_format="rg_passthrough"`、`json_output_requested=true`，
+  以及 rg 汇总事件里的计数。
+
+### 落地
+- `GrepOptions.JSONOutput`；引擎在 json 模式下把**已经解析过的那些事件行原样收集**
+  （`GrepResult.JSONEvents` + 每行的绝对路径），收满 `offset+limit+1` 行即停（多收一行作为 has_more 证据），
+  并累计汇总计数；
+- handler 负责**路径改写**：事件里的 path 换成该面统一的显示路径（单文件=文件名、多根=根标签前缀、
+  否则工作区相对/必要时绝对），其余字节一律不动——于是 json 与普通渲染对同一个文件给出同一条路径；
+- `json` 进入 `RequiresRipgrep()`：要「rg 的事件流」就得先问引擎；引擎不在时**明确报错**（指名 ripgrep 与 json），
+  绝不降级成别的文本。旧实现此时同样是报错，这里只是把措辞换成「缺什么 + 怎么办」。
+
+### 顺带修掉一个真实字段错配
+rg 的汇总事件报的是 `searches` / `searches_with_match`，**从来没有 `files_searched` 字段**；
+而核心一直按 `files_searched` 读，于是真实 rg 下 `files_scanned` 恒为 0。
+现在按 rg 的真实字段读（`searches`→files_searched、`searches_with_match`→files_with_matches），
+并沿用本地一直发布的字段名。这是 json 收敛过程中被测试抓出来的既有缺陷，不是新引入的分歧。
+
+### 证据
+- searchcore：json 页保持 JSON Lines（无提示）、按行分页、has_more/next_offset 正确、path 改写为显示路径、
+  改写器的四类用例（普通相对路径 / 含转义的 Windows 路径 / 已是显示路径 / 无 path 的 summary）、
+  引擎侧收集原始行 + argv 仍含 `--json` + 汇总计数、**无 rg 时 fail-closed**（错误指名引擎，
+  且绝不把别的东西当 JSON 流返回）；
+- remote MCP 对拍：装了 rg 时客户端拿到合法事件流且无提示；没装时跳过（fail-closed 路径在 searchcore 钉住）；
+- 本地包此前钉住 legacy 行为的 5 个测试按核心契约更新（错误措辞、stub 改为按 argv 里的 root 区分进程），
+  其余断言（metadata 键、stats 字段）**未改测试即通过**——说明核心确实复现了本地契约。
+
+登记表：15 → 13。剩余：`rg_args`、`passthru`、`follow`、`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、
+`head_limit`、`context_separator`/`no_context_separator`、`type_add`/`type_clear`。

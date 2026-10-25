@@ -415,11 +415,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"json": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --json：返回 rg 风格 JSON Lines 事件流（begin/match/context/end/summary）。该能力当前仅在可用 ripgrep/rg 时支持；启用后结果会按 rg 原始语义透传，不再规范化为 path:line[:column]: content。",
+				"description": "兼容 rg 的 --json：返回 ripgrep 原始 JSON Lines 事件流（begin/match/context/end/summary），不再规范化为 path:line[:column]: content。事件行原样透传，只有事件里的 path 会按本工具的显示路径约定改写；分页以「事件行」为单位，输出保持可解析（不追加任何提示文本）；metadata.stats 直接给出 rg 汇总事件里的计数。该格式本身就是 ripgrep 的产物，因此没有可用 rg 时会明确报错而不是降级成别的文本。本地与 remote 使用同一实现。",
 			},
 			"json_output": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容别名；等价于 json=true，用于按 rg --json 心智请求 JSON Lines 输出。",
+				"description": "兼容别名；等价于 json=true（同一实现、同一输出）。",
 			},
 			"follow": map[string]interface{}{
 				"type":        "boolean",

@@ -62,6 +62,10 @@ var coreSearchParams = map[string]bool{
 	// own -r, the walker expands the same template through Go's regexp - so it
 	// is a shared capability rather than an rg-only flag.
 	"replace": true,
+	// json/json_output ask for ripgrep's own event stream. The shared handler
+	// owns that format end to end (window, path translation, stats) and reports
+	// the missing engine plainly instead of rendering something else.
+	"json": true, "json_output": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the

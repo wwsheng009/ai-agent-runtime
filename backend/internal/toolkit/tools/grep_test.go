@@ -3407,11 +3407,13 @@ func TestGrepTool_JSONRequiresRipgrepWhenUnavailable(t *testing.T) {
 	if result.Success {
 		t.Fatalf("expected json output to fail cleanly without rg")
 	}
-	if !strings.Contains(result.Error.Error(), "仅 ripgrep/rg 支持") {
-		t.Fatalf("expected clear rg-only json error, got %v", result.Error)
+	// The shared handler owns this failure now: it names the missing engine and
+	// the flag, instead of the legacy feature-list wording the old path used.
+	if !strings.Contains(result.Error.Error(), "ripgrep") {
+		t.Fatalf("expected a clear missing-engine error, got %v", result.Error)
 	}
-	if !strings.Contains(result.Error.Error(), "json/--json") {
-		t.Fatalf("expected json requirement to appear in error, got %v", result.Error)
+	if !strings.Contains(result.Error.Error(), "json") {
+		t.Fatalf("expected the json flag to appear in error, got %v", result.Error)
 	}
 }
 
@@ -3501,13 +3503,15 @@ func TestGrepTool_JSONMultiPathRewritesRelativeJSONPaths(t *testing.T) {
 		return "rg", nil
 	}
 	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
-		switch workingDir {
+		// The shared engine runs one process per root and passes the root as the
+		// argument, so the stub keys off argv like a real rg invocation does.
+		switch args[len(args)-1] {
 		case leftDir:
 			return []byte("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"a.txt\"},\"lines\":{\"text\":\"foo\\n\"},\"line_number\":1,\"absolute_offset\":0,\"submatches\":[{\"match\":{\"text\":\"foo\"},\"start\":0,\"end\":3}]}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":120,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
 		case rightDir:
 			return []byte("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"b.txt\"},\"lines\":{\"text\":\"foo\\n\"},\"line_number\":1,\"absolute_offset\":0,\"submatches\":[{\"match\":{\"text\":\"foo\"},\"start\":0,\"end\":3}]}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":120,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
 		default:
-			t.Fatalf("unexpected working dir %q", workingDir)
+			t.Fatalf("unexpected search root %q in %v", args[len(args)-1], args)
 			return nil, nil
 		}
 	}
@@ -3574,13 +3578,15 @@ func TestGrepTool_JSONEventFlowRewritesBeginContextEndPaths(t *testing.T) {
 		return "rg", nil
 	}
 	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
-		switch workingDir {
+		// The shared engine runs one process per root and passes the root as the
+		// argument, so the stub keys off argv like a real rg invocation does.
+		switch args[len(args)-1] {
 		case leftDir:
 			return []byte("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"a.txt\"}}}\n{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"a.txt\"},\"lines\":{\"text\":\"ctx\\n\"},\"line_number\":1}}\n{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"a.txt\"}}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":0,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
 		case rightDir:
 			return []byte("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"b.txt\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"b.txt\"},\"lines\":{\"text\":\"foo\\n\"},\"line_number\":1,\"absolute_offset\":0,\"submatches\":[{\"match\":{\"text\":\"foo\"},\"start\":0,\"end\":3}]}}\n{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"b.txt\"}}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":120,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
 		default:
-			t.Fatalf("unexpected working dir %q", workingDir)
+			t.Fatalf("unexpected search root %q in %v", args[len(args)-1], args)
 			return nil, nil
 		}
 	}

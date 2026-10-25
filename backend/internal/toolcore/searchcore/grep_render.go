@@ -1,6 +1,7 @@
 package searchcore
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -236,6 +237,91 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 
 	page.content = content
 	return page
+}
+
+// renderGrepJSONPage turns the collected event lines into the page for json
+// output: a slice of ripgrep's own stream, with each event's path rewritten to
+// the surface's display path so a client reads the same path it would read in
+// the rendered page. The payload stays parseable JSON Lines - nothing is
+// appended to it - and the window is counted in lines, which is the unit the
+// caller receives.
+func renderGrepJSONPage(in grepRenderInputs) grepPage {
+	page := grepPage{}
+	if in.result == nil {
+		return page
+	}
+	lines := in.result.JSONEvents
+	paths := in.result.JSONEventPaths
+	offset := in.options.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := in.options.Limit
+	if limit < 1 {
+		limit = DefaultGrepLimit
+	}
+	start := offset
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	selected := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		line := lines[i]
+		if i < len(paths) && paths[i] != "" {
+			line = rewriteGrepJSONPath(line, in.displayPathFor(paths[i]))
+		}
+		selected = append(selected, line)
+	}
+	page.content = strings.Join(selected, "\n")
+	page.renderedLines = len(selected)
+	page.matchCount = in.result.JSONStats.Matches
+	if len(lines) > end {
+		// Lines arrived past the page: has_more is true, and the next offset is
+		// where this page stopped.
+		in.result.Truncated = true
+	}
+	return page
+}
+
+// rewriteGrepJSONPath replaces the `"path":{"text":...}` value of one event line
+// with the surface's display path. Everything else in the line is kept exactly
+// as ripgrep wrote it, so a caller can still compare the stream with rg's own
+// output - only the path is translated into the convention every other output
+// shape of this tool uses.
+func rewriteGrepJSONPath(line, display string) string {
+	if display == "" {
+		return line
+	}
+	var event rgJSONEvent
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return line
+	}
+	old := event.Data.Path.Text
+	if old == "" || old == display {
+		return line
+	}
+	anchor := strings.Index(line, `"path"`)
+	if anchor < 0 {
+		return line
+	}
+	textAt := strings.Index(line[anchor:], `"text":`)
+	if textAt < 0 {
+		return line
+	}
+	valueAt := anchor + textAt + len(`"text":`)
+	encodedOld, err := json.Marshal(old)
+	if err != nil || !strings.HasPrefix(line[valueAt:], string(encodedOld)) {
+		return line
+	}
+	encodedNew, err := json.Marshal(display)
+	if err != nil {
+		return line
+	}
+	return line[:valueAt] + string(encodedNew) + line[valueAt+len(encodedOld):]
 }
 
 // GrepRenderBudget exposes the shared in-tool byte window so surfaces can

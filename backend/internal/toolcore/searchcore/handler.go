@@ -414,6 +414,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		NoConfig:                  boolArg(call.Args, "no_config"),
 		NoConfigSet:               argPresent(call.Args, "no_config"),
 		Replace:                   stringArg(call.Args, "replace"),
+		JSONOutput:                boolArg(call.Args, "json", "json_output"),
 	}
 
 	engine := "walker"
@@ -457,8 +458,17 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the regex/glob syntax and narrow the path",
 			fmt.Errorf("grep %q in %s: %v", strings.Join(patterns, " | "), rootLabel, grepErr)), nil
 	}
+	// json output is ripgrep's own event format: there is no stream to pass
+	// through when the engine could not run, and answering with rendered text
+	// under a key that promised JSON Lines is precisely the silent swap this
+	// forbids. Say what is missing instead of degrading quietly.
+	if options.JSONOutput && engine != "ripgrep" {
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"install ripgrep (rg) to use json/json_output, or drop the flag and read the rendered page",
+			fmt.Errorf("grep json output needs the ripgrep engine, which is unavailable on this host")), nil
+	}
 
-	page := renderGrepPage(grepRenderInputs{
+	renderInputs := grepRenderInputs{
 		paths:         paths,
 		result:        &result,
 		options:       options,
@@ -467,7 +477,13 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		mode:          mode,
 		contextBefore: contextBefore,
 		contextAfter:  contextAfter,
-	})
+	}
+	page := renderGrepPage(renderInputs)
+	if options.JSONOutput {
+		// The stream itself is the page: it is sliced by lines and kept
+		// parseable, so no paging notice can be appended to it.
+		page = renderGrepJSONPage(renderInputs)
+	}
 	pageMatches := len(result.Matches)
 	pageEntries := len(result.Matches)
 	switch mode {
@@ -484,6 +500,16 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		}
 		pageEntries = len(result.Files)
 	}
+	if options.JSONOutput {
+		// The page unit is a stream line, and the counters come from ripgrep's
+		// own summary events - the same evidence the stream carries.
+		pageMatches = result.JSONStats.Matches
+		pageEntries = page.renderedLines
+	}
+	outputFormat := "normalized_text"
+	if options.JSONOutput {
+		outputFormat = "rg_passthrough"
+	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
 	// Effective patterns include every line of the pattern files; report what
 	// was actually searched rather than only the direct spellings.
@@ -494,18 +520,21 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		}
 	}
 	metadata := map[string]any{
-		"pattern":              strings.Join(effectivePatterns, " | "),
-		"patterns":             effectivePatterns,
-		"pattern_files":        grepPatternFilesLabels(paths, options.PatternFiles),
-		"pattern_count":        len(effectivePatterns),
-		"pattern_source":       grepPatternSourceFor(patterns, len(options.PatternFiles) > 0),
-		"case_mode":            grepCaseMode(options),
-		"mode":                 string(mode),
-		"path":                 rootLabel,
-		"paths":                grepRootLabels(paths, roots),
-		"search_scope_count":   len(roots),
-		"search_scope_kind":    grepScopeKind(roots),
-		"normalized_output":    true,
+		"pattern":            strings.Join(effectivePatterns, " | "),
+		"patterns":           effectivePatterns,
+		"pattern_files":      grepPatternFilesLabels(paths, options.PatternFiles),
+		"pattern_count":      len(effectivePatterns),
+		"pattern_source":     grepPatternSourceFor(patterns, len(options.PatternFiles) > 0),
+		"case_mode":          grepCaseMode(options),
+		"mode":               string(mode),
+		"path":               rootLabel,
+		"paths":              grepRootLabels(paths, roots),
+		"search_scope_count": len(roots),
+		"search_scope_kind":  grepScopeKind(roots),
+		// json output is ripgrep's own stream, passed through: normalization is
+		// exactly what did not happen there, and the caller can see which of the
+		// two shapes it received.
+		"normalized_output":    !options.JSONOutput,
 		"match_count":          pageMatches,
 		"matches":              pageMatches,
 		"files":                len(result.Files),
@@ -564,6 +593,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// The template the engines substituted with; empty means no replacement
 		// was asked for, which is exactly how the call ran.
 		"replace":               options.Replace,
+		"json":                  options.JSONOutput,
+		"output_format":         outputFormat,
 		"count_matches":         options.CountMatches,
 		"glob_case_insensitive": options.GlobCaseInsensitive,
 		// Presentation-only rg flags the caller set are reported, always: the
@@ -583,7 +614,21 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"hidden":             options.IncludeHidden,
 		"unrestricted_level": options.Unrestricted,
 	}
-	if boolArg(call.Args, "stats") {
+	if options.JSONOutput {
+		// The counters ripgrep itself reported travel with the stream; publish
+		// them without a separate stats request, exactly like the local tool,
+		// and under the names it has always used (ripgrep calls the file
+		// counters searches/searches_with_match).
+		metadata["stats"] = map[string]any{
+			"matches":            result.JSONStats.Matches,
+			"matched_lines":      result.JSONStats.MatchedLines,
+			"files_with_matches": result.JSONStats.FilesWithMatches,
+			"files_searched":     result.JSONStats.FilesSearched,
+			"bytes_searched":     result.JSONStats.BytesSearched,
+			"bytes_printed":      result.JSONStats.BytesPrinted,
+		}
+		metadata["json_output_requested"] = true
+	} else if boolArg(call.Args, "stats") {
 		// Page-level statistics, not a whole-search summary: see GrepStats.
 		summary := SummarizeGrepResult(result)
 		summary.BytesPrinted = len(page.content)

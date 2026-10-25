@@ -174,6 +174,12 @@ type GrepOptions struct {
 	// re-expanded from it), while the walker expands the same template through
 	// Go's regexp - so a host without rg keeps the ability instead of losing it.
 	Replace string
+	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
+	// rendered page. It is a request for *that* format, so it needs the engine
+	// that emits it: the walker has no event stream to pass through, and the
+	// handler reports that plainly rather than returning some other text under a
+	// key that promises JSON.
+	JSONOutput bool
 }
 
 // RequiresRipgrep reports whether this request needs the ripgrep engine rather
@@ -182,7 +188,7 @@ type GrepOptions struct {
 // backreferences), so for such a call the walker must not get a turn first.
 func (o GrepOptions) RequiresRipgrep() bool {
 	return o.Pcre2 || o.Multiline || o.MultilineDotall || o.AutoHybridRegex || o.CRLF ||
-		requiresRipgrepForEngine(o.Engine)
+		o.JSONOutput || requiresRipgrepForEngine(o.Engine)
 }
 
 // requiresRipgrepForEngine mirrors rg's own default: an unset or "default"
@@ -218,6 +224,29 @@ type GrepResult struct {
 	FilesScanned int
 	SingleFile   bool
 	Truncated    bool
+	// JSONEvents carries the raw event lines when the caller asked for json
+	// output, and JSONEventPaths the absolute path each line describes ("" for
+	// events that carry none, such as the summary). The page is a prefix of the
+	// stream, so it stays parseable JSON Lines - which is also why the paths are
+	// rewritten by the handler instead of being rendered away here.
+	JSONEvents     []string
+	JSONEventPaths []string
+	// JSONStats sums the run's summary events: the counters ripgrep itself
+	// reported, which is the same evidence the local tool published for this
+	// mode. Collected only on this path, because only here is the stream itself
+	// part of the answer.
+	JSONStats GrepJSONStats
+}
+
+// GrepJSONStats is the subset of ripgrep's summary event the shared tool
+// publishes, named exactly as ripgrep names it.
+type GrepJSONStats struct {
+	Matches          int
+	MatchedLines     int
+	FilesSearched    int
+	FilesWithMatches int
+	BytesSearched    int64
+	BytesPrinted     int64
 }
 
 // Grep searches an authorized path with a bounded line reader. Binary-looking

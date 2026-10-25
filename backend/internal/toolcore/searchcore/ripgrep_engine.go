@@ -378,14 +378,22 @@ func (e Ripgrep) Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, 
 		}
 		return CountDistinctGrepFiles(matches)
 	}
+	// The page unit decides what "collected" means, and json changes it: the
+	// caller receives stream lines, so a line - not a match - is what fills and
+	// completes the page there.
+	pageUnits := func(combined GrepResult) int {
+		switch {
+		case mode == GrepModeFilesWithout:
+			return len(combined.Files)
+		case mode == GrepModeContent && opts.JSONOutput:
+			return len(combined.JSONEvents)
+		default:
+			return collected(combined.Matches)
+		}
+	}
 	combined := GrepResult{}
 	for _, root := range roots {
-		remaining := needed - collected(combined.Matches)
-		if mode == GrepModeFilesWithout {
-			// The page unit is the proven no-match file, so the per-root
-			// budget and the completion test count files, not matches.
-			remaining = needed - len(combined.Files)
-		}
+		remaining := needed - pageUnits(combined)
 		if remaining < 1 {
 			break
 		}
@@ -406,7 +414,15 @@ func (e Ripgrep) Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, 
 		combined.FilesScanned += page.FilesScanned
 		combined.Matches = append(combined.Matches, page.Matches...)
 		combined.Files = append(combined.Files, page.Files...)
-		if GrepResultPageComplete(&combined, mode, opts) {
+		combined.JSONEvents = append(combined.JSONEvents, page.JSONEvents...)
+		combined.JSONEventPaths = append(combined.JSONEventPaths, page.JSONEventPaths...)
+		combined.JSONStats.Matches += page.JSONStats.Matches
+		combined.JSONStats.MatchedLines += page.JSONStats.MatchedLines
+		combined.JSONStats.FilesSearched += page.JSONStats.FilesSearched
+		combined.JSONStats.FilesWithMatches += page.JSONStats.FilesWithMatches
+		combined.JSONStats.BytesSearched += page.JSONStats.BytesSearched
+		combined.JSONStats.BytesPrinted += page.JSONStats.BytesPrinted
+		if pageUnits(combined) >= needed {
 			break
 		}
 	}
@@ -550,6 +566,15 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	// and a whole-line match carries one only when the caller asked for it, so
 	// the text mode asks rg for exactly the same columns.
 	wantColumn := opts.Column || onlyMatching
+	// jsonOutput hands ripgrep's own event stream to the caller. The page unit is
+	// then a stream line, not a match - one matching line arrives as several
+	// events - so the engine stops one line past the page and the handler slices
+	// what arrived, exactly like the local tool's json window.
+	jsonOutput := opts.JSONOutput
+	jsonLineBudget := 0
+	if jsonOutput {
+		jsonLineBudget = opts.Offset + opts.Limit
+	}
 	if mode == GrepModeFilesWithout {
 		// rg ignores --json in this mode and prints plain paths, so the stats
 		// block is the only structured evidence available. It arrives after
@@ -740,13 +765,32 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			}
 			return true
 		}
+		if jsonOutput {
+			event := collectRipgrepJSONEvent(&result, line, baseDir)
+			if event.Type == "summary" {
+				result.JSONStats.Matches += event.Data.Stats.Matches
+				result.JSONStats.MatchedLines += event.Data.Stats.MatchedLines
+				result.JSONStats.FilesSearched += event.Data.Stats.searchedFiles()
+				result.JSONStats.FilesWithMatches += event.Data.Stats.SearchesWithMatch
+				result.JSONStats.BytesSearched += event.Data.Stats.BytesSearched
+				result.JSONStats.BytesPrinted += event.Data.Stats.BytesPrinted
+				result.FilesScanned += event.Data.Stats.searchedFiles()
+			}
+			// One line past the page is the evidence that more existed; the
+			// handler slices the page out of what arrived.
+			if len(result.JSONEvents) > jsonLineBudget {
+				truncated = true
+				return false
+			}
+			return true
+		}
 		var event rgJSONEvent
 		if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
 			return true
 		}
 		switch event.Type {
 		case "summary":
-			result.FilesScanned = event.Data.Stats.FilesSearched
+			result.FilesScanned = event.Data.Stats.searchedFiles()
 		case "match":
 			var text string
 			switch {
@@ -944,10 +988,7 @@ func normalizeGrepEngineText(text string) (string, bool) {
 // other engine, then report whether the page is complete. The caller stops the
 // stream on true, so Truncated/has_more stay accurate.
 func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFilter, baseDir, rawPath string, lineNo, column int, text string, result *GrepResult) bool {
-	matchPath := filepath.FromSlash(rawPath)
-	if !filepath.IsAbs(matchPath) {
-		matchPath = filepath.Join(baseDir, matchPath)
-	}
+	matchPath := resolveRipgrepPath(rawPath, baseDir)
 	if globMatcher != nil && !globMatcher.matches(matchPath) {
 		return false
 	}
@@ -962,6 +1003,34 @@ func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFi
 		Text:   display,
 	})
 	return GrepPageComplete(result.Matches, mode, opts)
+}
+
+// resolveRipgrepPath turns a printed path into an absolute one: ripgrep echoes
+// a relative path when it was given a relative root (the single-root case), and
+// every consumer downstream works in absolute paths.
+func resolveRipgrepPath(rawPath, baseDir string) string {
+	matchPath := filepath.FromSlash(rawPath)
+	if !filepath.IsAbs(matchPath) {
+		matchPath = filepath.Join(baseDir, matchPath)
+	}
+	return matchPath
+}
+
+// collectRipgrepJSONEvent records one raw event line together with the absolute
+// path it describes ("" for events that carry none, such as the summary), so the
+// handler can rewrite it into the surface's display path without reparsing the
+// stream. The line itself is kept byte-for-byte: json output is a passthrough,
+// and reformatting it would change what the caller receives.
+func collectRipgrepJSONEvent(result *GrepResult, line []byte, baseDir string) rgJSONEvent {
+	var event rgJSONEvent
+	_ = json.Unmarshal(line, &event)
+	result.JSONEvents = append(result.JSONEvents, string(line))
+	path := ""
+	if event.Data.Path.Text != "" {
+		path = resolveRipgrepPath(event.Data.Path.Text, baseDir)
+	}
+	result.JSONEventPaths = append(result.JSONEventPaths, path)
+	return event
 }
 
 // parseRipgrepReplaceLine splits one `rg --null` content line from the
@@ -1035,10 +1104,31 @@ type rgJSONEvent struct {
 		// with --only-matching; offsets are byte positions into the raw line
 		// (including its trailing newline).
 		Submatches []rgSubmatch `json:"submatches"`
-		Stats      struct {
-			FilesSearched int `json:"files_searched"`
-		} `json:"stats"`
+		Stats      rgJSONStats  `json:"stats"`
 	} `json:"data"`
+}
+
+// rgJSONStats is the counter block ripgrep puts in its summary event. It reports
+// "searches"/"searches_with_match" rather than naming files, which is why the
+// tool publishes them under the names callers already read.
+type rgJSONStats struct {
+	FilesSearched     int   `json:"files_searched"`
+	Searches          int   `json:"searches"`
+	SearchesWithMatch int   `json:"searches_with_match"`
+	Matches           int   `json:"matches"`
+	MatchedLines      int   `json:"matched_lines"`
+	BytesSearched     int64 `json:"bytes_searched"`
+	BytesPrinted      int64 `json:"bytes_printed"`
+}
+
+// searchedFiles is the count ripgrep actually reports: its summary has no
+// "files_searched" field, so "searches" is the same fact under ripgrep's own
+// name.
+func (s rgJSONStats) searchedFiles() int {
+	if s.Searches > 0 {
+		return s.Searches
+	}
+	return s.FilesSearched
 }
 
 // rgSubmatch is one match location inside a line, in byte offsets.
