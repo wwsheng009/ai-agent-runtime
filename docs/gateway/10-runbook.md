@@ -500,5 +500,21 @@ relay 契约与设备注册 API 见
 > 校验并连通（plink 独立报出的 ed25519 指纹与缓存条目一致，已交叉验证）。不要为了绕过它而
 > 长期使用 `StrictHostKeyChecking=no`。
 
+> **部署记录（2026-10-25 第六笔，通知策略 + 独立「通知设置」页 v46）**：HEAD `8914e759`
+> （通知策略提交；`-trimpath` linux/amd64），raw sha256 `a0a85967…c3c527c`
+> （18,432,898 字节）；1MB×18 分块上传 → 服务端 `cat` 拼装 + sha256 门禁 → 备份
+> `gateway.bak-20261025-140810` → 替换重启。验证：服务 active、`/proc/<pid>/exe` sha 与
+> 本地构建**逐位一致**、本机 `/api/health` 200、公网 CF `index.html` 发
+> `app.js?v=46`/`style.css?v=46`、`app.js?v=46` 含 `notifyPolicyAllowsAttention` 与
+> `/api/notify/policy`、`sw.js` CACHE `v46`、未认证 `GET /api/notify/policy` 返回 401
+> （owner 保护生效）、重启日志零 error/panic（仅既有 tunnel 断连记录与本次 shutdown 记录）。
+>
+> **本笔运维注意（代理 22 端口）**：本机 Clash Verge（`verge-mihomo`）在 **rule 模式**下，
+> `CONNECT 192.210.174.189:22` 无可达响应（隧道建立后无 SSH banner）；切到
+> **global 模式**（`PATCH /configs {"mode":"global"}` + `GLOBAL → CF官方优选5`）后，
+> 同一 CONNECT 返回 `SSH-2.0-OpenSSH_9.6p1 Ubuntu`，部署完成已还原
+> `mode=rule` / `GLOBAL=DIRECT`。回滚点：`/opt/aicli-gateway/gateway.bak-20261025-140810`
+> （`cp -p … gateway && systemctl restart aicli-gateway`）。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

@@ -199,9 +199,11 @@ GET  /app.js                              → 含 /api/notify/policy 与 notifyP
 GET  /sw.js                               → CACHE aicli-gateway-shell-v46
 ```
 
-注意：Tauri App 加载线上控制台，需部署 v46（`app.js?v=46` /
-`style.css?v=46` / `sw.js` CACHE v46）后，独立配置页与策略门才会在真实
-App 内生效。
+**已部署（2026-10-25，HEAD `8914e759`，sha256 `a0a85967…c3c527c`，备份
+`gateway.bak-20261025-140810`）**：公网 `app.js?v=46` / `style.css?v=46` /
+`sw.js` CACHE v46 已生效，未认证 `GET /api/notify/policy` 返回 401；
+Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 App 生效
+（真机弹窗验证见 §5）。
 
 ## 5. 尚未验证
 
