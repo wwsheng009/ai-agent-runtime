@@ -3,6 +3,7 @@ package remotetools_test
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,12 +11,40 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
+// bigCaptureCommand produces a >100 KiB capture with one command and no shell
+// metacharacters. POSIX targets have `seq`; Windows has no seq on PATH, so the
+// equivalent cmd.exe for-loop is used - the pattern every other Windows-aware
+// fixture in this package follows.
+func bigCaptureCommand() string {
+	if runtime.GOOS == "windows" {
+		return `for /l %i in (1,1,20000) do @echo %i`
+	}
+	return "seq 1 20000"
+}
+
+// bigCaptureAllowlist returns the allowlist entry bigCaptureCommand needs.
+func bigCaptureAllowlist() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"for"}
+	}
+	return []string{"seq"}
+}
+
+// bigCaptureBytes is the size of bigCaptureCommand's output on this platform.
+// POSIX: 20000 lines of digits plus LF. Windows: the same digits plus CRLF.
+func bigCaptureBytes() int {
+	if runtime.GOOS == "windows" {
+		return 128894
+	}
+	return 108894
+}
+
 // newArtifactConfig builds an ops config whose shell output folds into an
 // artifact. modelVisibleCap bounds the shell body (so archiving happens) and
 // also caps the artifact window, which is the interaction under test.
 func newArtifactConfig(t *testing.T, root string, modelVisibleCap int) *remotetools.Config {
 	t.Helper()
-	cfg := newOpsConfig(t, root, []string{"seq"})
+	cfg := newOpsConfig(t, root, bigCaptureAllowlist())
 	cfg.Artifacts.Root = filepath.Join(t.TempDir(), "artifacts")
 	cfg.Artifacts.MaxBytes = 8 << 20
 	cfg.Limits.ModelVisibleCap = modelVisibleCap
@@ -85,7 +114,7 @@ func TestRemoteArtifactReadPageIsNotFolded(t *testing.T) {
 	session, ctx := startTestSession(t, server)
 
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "seq 1 20000",
+		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "artifact_read") {
 		t.Skipf("no artifact pointer produced; shell body:\n%s", body)
@@ -130,7 +159,7 @@ func TestRemoteArtifactReadHonoursItsOwnWindow(t *testing.T) {
 	session, ctx := startTestSession(t, server)
 
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "seq 1 20000",
+		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "artifact_read") {
 		t.Skipf("no artifact pointer produced; shell body:\n%s", body)
@@ -166,9 +195,9 @@ func TestRemoteArtifactReadPagesCoverEveryByte(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	const captureBytes = 108894 // "seq 1 20000" | wc -c
+	captureBytes := bigCaptureBytes()
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "seq 1 20000",
+		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "artifact_read") {
 		t.Skipf("no artifact pointer produced; shell body:\n%s", body)
@@ -210,7 +239,7 @@ func TestRemoteArtifactReadPagesCoverEveryByte(t *testing.T) {
 // with offsets into data that was never written.
 func TestRemoteShellWithoutStoreDoesNotPromiseArtifact(t *testing.T) {
 	root := t.TempDir()
-	cfg := newOpsConfig(t, root, []string{"seq"})
+	cfg := newOpsConfig(t, root, bigCaptureAllowlist())
 	cfg.Limits.ModelVisibleCap = 1024 // force a fold
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -230,7 +259,7 @@ func TestRemoteShellWithoutStoreDoesNotPromiseArtifact(t *testing.T) {
 	}
 
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "seq 1 20000",
+		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "output window") {
 		t.Skipf("capture was not folded; body:\n%s", body)
@@ -260,7 +289,7 @@ func TestRemoteShellFoldedOutputPointsAtArtifact(t *testing.T) {
 	session, ctx := startTestSession(t, server)
 
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "seq 1 20000",
+		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "output window") {
 		t.Skipf("capture was not folded; shell body:\n%s", body)

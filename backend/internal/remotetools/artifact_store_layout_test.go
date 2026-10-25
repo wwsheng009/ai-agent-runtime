@@ -2,6 +2,7 @@ package remotetools_test
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -47,15 +48,25 @@ func TestArtifactStoreLayoutIsOneFilePerPayload(t *testing.T) {
 		t.Fatalf("stored size = %d, want %d", info.Size(), len("hello world"))
 	}
 	// The capture may contain secrets from a shell command; it must not be
-	// world-readable.
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// world-readable. POSIX pins the exact 0600 the store requests. Windows
+	// has no mode bits - ACLs govern access and Go reports 0666 for every
+	// writable file and 0444 for read-only ones. The store's chmod(0600)
+	// maps to "clear the read-only attribute" there, so the only property
+	// Go can observe is that the file stayed in the writable 0666 form
+	// rather than being flipped to read-only.
+	perm := info.Mode().Perm()
+	if runtime.GOOS == "windows" {
+		if perm != 0o666 {
+			t.Fatalf("artifact file mode = %o, want 666 (Go's canonical writable form on windows)", perm)
+		}
+	} else if perm != 0o600 {
 		t.Fatalf("artifact file mode = %o, want 600", perm)
 	}
 	dirInfo, err := os.Stat(dir)
 	if err != nil {
 		t.Fatalf("Stat root: %v", err)
 	}
-	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+	if perm := dirInfo.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o700 {
 		t.Fatalf("artifact root mode = %o, want 700", perm)
 	}
 }

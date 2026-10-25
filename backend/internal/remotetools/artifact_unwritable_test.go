@@ -3,6 +3,7 @@ package remotetools_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +16,12 @@ import (
 func TestRemoteArtifactRootUnwritableFailsAtStartup(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root bypasses permission checks")
+	}
+	if runtime.GOOS == "windows" {
+		// Windows honours only the read-only attribute on directories, not
+		// the POSIX mode bits, so a chmod-500 parent still accepts directory
+		// creation and the premise of this test does not exist here.
+		t.Skip("windows ignores directory mode bits; the unwritable-root premise needs POSIX permissions")
 	}
 	parent := t.TempDir()
 	if err := os.Chmod(parent, 0o500); err != nil {
@@ -64,6 +71,12 @@ func TestRemoteShellArchiveFailureCarriesStableCode(t *testing.T) {
 
 	// Take write access away after startup, which is the realistic failure:
 	// a volume goes read-only or a directory is repointed.
+	if runtime.GOOS == "windows" {
+		// Windows honours only the read-only attribute on directories, not
+		// the POSIX mode bits, so a chmod-500 directory still accepts writes
+		// and the premise of this test does not exist on this platform.
+		t.Skip("windows ignores directory mode bits; the unwritable-root premise needs POSIX permissions")
+	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Skipf("chmod: %v", err)
 	}
