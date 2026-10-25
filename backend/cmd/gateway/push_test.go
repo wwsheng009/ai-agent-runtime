@@ -197,11 +197,35 @@ func TestPushNotifierFansOutToNtfyWithoutWebPush(t *testing.T) {
 		if got["topic"] != "aicli-gateway" || got["priority"] != float64(5) {
 			t.Fatalf("ntfy payload = %v", got)
 		}
-		if got["click"] != "https://gw.example.com/n/n1/?session=s1" {
+		// aicli 节点的 Web UI 在 /web/；/n/{node}/?session= 会被
+		// route allowlist 403（"route not allowed"）。
+		if got["click"] != "https://gw.example.com/n/n1/web/?session=s1" {
 			t.Fatalf("click = %v", got["click"])
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("expected an ntfy delivery")
+	}
+}
+
+// TestPushNotifierSessionURLUsesNodeKindWebBase 锁定通知点击深链：aicli 节点
+// 走 /web/（route allowlist 只放行该前缀），runtime-server 走根路径 /。
+// 旧实现永远拼 /n/{node}/?session=，点击必 403 "route not allowed"。
+func TestPushNotifierSessionURLUsesNodeKindWebBase(t *testing.T) {
+	n := newPushNotifier(nil, "https://gw.example.com", nil)
+	if got := n.sessionURL("n1", "s1"); got != "https://gw.example.com/n/n1/web/?session=s1" {
+		t.Fatalf("aicli click = %q", got)
+	}
+	if got := n.sessionURL("n1", ""); got != "https://gw.example.com/n/n1/web/" {
+		t.Fatalf("aicli no-session click = %q", got)
+	}
+	n.nodeKind = func(id string) string {
+		if id == "rs1" {
+			return "runtime-server"
+		}
+		return "aicli"
+	}
+	if got := n.sessionURL("rs1", "s1"); got != "https://gw.example.com/n/rs1/" {
+		t.Fatalf("runtime-server click = %q", got)
 	}
 }
 

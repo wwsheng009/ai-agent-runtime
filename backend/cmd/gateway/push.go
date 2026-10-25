@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,10 @@ type pushNotifier struct {
 	baseQuietHours []notify.QuietRange
 	// policyErr 去重策略装载告警，避免每次 observe 刷日志。
 	policyErr string
+	// nodeKind 查询注册表里的节点类型：aicli 的 Web UI 挂在 /web/，
+	// runtime-server SPA 在根路径 /。通知 click / 原生跳转必须按 kind 生成，
+	// 否则会被反代 route allowlist 403（"route not allowed"）。
+	nodeKind func(nodeID string) string
 	// normalChannels 是 --notify-normal-channels 的解析结果。为空时保持
 	// D6 单主通道（webpush）；非空时 normal 按列表投递，供 ntfy/AppPush
 	// 等通道显式接收 completed/waiting。
@@ -456,9 +461,14 @@ func (p *pushNotifier) sessionURL(nodeID, sessionID string) string {
 	if p.baseURL == "" {
 		return ""
 	}
-	u := p.baseURL + "/n/" + nodeID + "/"
-	if sessionID != "" {
-		u += "?session=" + sessionID
+	webPath := "/web/"
+	if p.nodeKind != nil && strings.TrimSpace(p.nodeKind(nodeID)) == "runtime-server" {
+		webPath = "/"
+	}
+	u := p.baseURL + "/n/" + url.PathEscape(nodeID) + webPath
+	// runtime-server 自己维护会话路由；只有 aicli 微前端支持 ?session= 深链。
+	if sessionID != "" && webPath != "/" {
+		u += "?session=" + url.QueryEscape(sessionID)
 	}
 	return u
 }

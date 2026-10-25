@@ -3630,14 +3630,22 @@
     // kind / 免打扰 / 会话级静音在这里拦截，避免只改网关配置却仍被 App 弹窗
     // 打扰。策略未加载时保持原行为（fail-open），防止网络失败吞掉全部通知。
     if (!notifyPolicyAllowsAttention(session.attention, session.session_id)) { return; }
+    var extra = {
+      node_id: node.node_id,
+      session_id: session.session_id,
+      attention: session.attention,
+    };
+    // 点击深链：aicli 节点必须是 /n/{node}/web/?session=…（route allowlist 只
+    // 放行 /web），runtime-server 才是 /n/{node}/。缺 url 时桌面壳会自行拼
+    // /n/{node}/?session=… 并被反代 403（"route not allowed"），所以这里显式
+    // 带上控制台同源的绝对 URL。
+    try {
+      extra.url = new URL(sessionOpenTarget(node, session.session_id), location.origin).toString();
+    } catch (err) { /* URL 构造失败时退回桌面壳的 node/session 兜底拼装 */ }
     sendNativeNotification(
       (node.name || node.node_id) + " · " + sessionLabelOf(session),
       attentionLabel(session.attention),
-      {
-        node_id: node.node_id,
-        session_id: session.session_id,
-        attention: session.attention,
-      }
+      extra
     );
   }
 
@@ -4892,7 +4900,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=47").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=48").catch(function () {});
     });
   }
 

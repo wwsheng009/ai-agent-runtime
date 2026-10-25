@@ -374,6 +374,14 @@ func run() int {
 		}
 	}
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
+	// 通知点击深链按节点 kind 生成（aicli → /web/、runtime-server → /），
+	// 否则反代 route allowlist 会 403 "route not allowed"（push.go sessionURL）。
+	notifier.nodeKind = func(id string) string {
+		if node, ok := registry.Get(id); ok {
+			return node.Kind
+		}
+		return ""
+	}
 	ntfySender := ntfy.NewSender(*ntfyURL, *ntfyTopic, *ntfyToken)
 	if *ntfyURL != "" && !ntfySender.Enabled() {
 		fmt.Fprintln(os.Stderr, "gateway: --ntfy-url requires --ntfy-topic (and a valid base URL)")

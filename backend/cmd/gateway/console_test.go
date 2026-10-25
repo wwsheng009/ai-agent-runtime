@@ -59,6 +59,10 @@ func TestConsoleNativeNotificationBridge(t *testing.T) {
 		"aicli-gw-native-notify",
 		// 原生通知桥必须经过网关通知策略（否则关闭 kind 后 App 仍会弹窗）。
 		"notifyPolicyAllowsAttention(session.attention, session.session_id)",
+		// 点击深链必须带正确的节点 Web 前缀（aicli=/web/），否则反代 403
+		// "route not allowed"。
+		"sessionOpenTarget(node, session.session_id)",
+		"extra.url",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing native notification bridge hook %q", needle)
