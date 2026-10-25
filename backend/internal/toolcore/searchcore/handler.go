@@ -409,6 +409,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Limit:                     intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:              captureLimit(call),
 		Offset:                    intArg(call.Args, "offset", 0),
+		IgnoredPresentation:       collectIgnoredPresentationParams(call.Args),
 	}
 
 	engine := "walker"
@@ -532,6 +533,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"no_messages":           options.NoMessages,
 		"count_matches":         options.CountMatches,
 		"glob_case_insensitive": options.GlobCaseInsensitive,
+		// Presentation-only rg flags the caller set are reported, always: the
+		// empty list is the statement "your output shape was already the one you
+		// asked for", which is information a caller would otherwise have to guess.
+		"ignored_presentation": append([]string{}, options.IgnoredPresentation...),
 		// Report the flag as off when the list it modifies was discarded:
 		// claiming it is on would describe an effect that cannot happen.
 		"ignore_file_case_insensitive": options.IgnoreFileCaseInsensitive &&
@@ -928,6 +933,106 @@ func grepIgnoreFilesLabels(paths toolcore.PathResolver, files []string) []string
 		labels = append(labels, paths.Relative(file))
 	}
 	return labels
+}
+
+// collectIgnoredPresentationParams reports which presentation-only rg flags the
+// caller set, in the order the builtin tool has always reported them.
+//
+// These flags are accepted so a model can use the ripgrep spelling it knows, and
+// they change nothing: the tool's output is always "path:line:content" with a
+// stable skeleton. Reporting them is the honest half - a caller sees that its
+// option was understood and deliberately not applied, instead of wondering
+// whether it was dropped by accident.
+func collectIgnoredPresentationParams(args map[string]any) []string {
+	flags := make([]string, 0, 8)
+	// Literal reads, not a key table: the schema audit walks real argument reads,
+	// and an exemption list would hide exactly what it exists to catch. This is
+	// the builtin's own function, moved rather than rewritten.
+	if value, ok := args["line_number"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "line_number")
+	}
+	if value, ok := args["heading"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "heading")
+	}
+	if value, ok := args["no_heading"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "no_heading")
+	}
+	if value, ok := args["with_filename"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "with_filename")
+	}
+	if value, ok := args["no_line_number"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "no_line_number")
+	}
+	if value, ok := args["no_filename"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "no_filename")
+	}
+	if value, ok := args["pretty"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "pretty")
+	}
+	if value, ok := args["line_buffered"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "line_buffered")
+	}
+	if value, ok := args["no_line_buffered"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "no_line_buffered")
+	}
+	if value, ok := args["block_buffered"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "block_buffered")
+	}
+	if value, ok := args["no_block_buffered"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "no_block_buffered")
+	}
+	if value, ok := args["null"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "null")
+	}
+	if value, ok := args["null_data"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "null_data")
+	}
+	if value, ok := args["field_context_separator"].(string); ok {
+		if trimmed := strings.TrimSpace(value); trimmed != "" && !isQuotedEmptyPlaceholder(trimmed) {
+			flags = appendGrepUniqueString(flags, "field_context_separator="+trimmed)
+		}
+	}
+	if value, ok := args["path_separator"].(string); ok {
+		if trimmed := strings.TrimSpace(value); trimmed != "" && !isQuotedEmptyPlaceholder(trimmed) {
+			flags = appendGrepUniqueString(flags, "path_separator="+trimmed)
+		}
+	}
+	if value, ok := args["color"].(string); ok {
+		if trimmed := strings.TrimSpace(value); trimmed != "" && !isQuotedEmptyPlaceholder(trimmed) {
+			flags = appendGrepUniqueString(flags, "color="+trimmed)
+		}
+	}
+	if value, ok := args["text"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "text")
+	}
+	if value, ok := args["binary"].(bool); ok && value {
+		flags = appendGrepUniqueString(flags, "binary")
+	}
+	return flags
+}
+
+// isQuotedEmptyPlaceholder reports the `""` / `”` spelling a model writes to
+// mean "the slot is here, leave it alone". The builtin treats it as not passed.
+func isQuotedEmptyPlaceholder(value string) bool {
+	switch strings.TrimSpace(value) {
+	case `""`, `''`:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendGrepUniqueString(values []string, raw string) []string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 // boolArg reports whether any of the listed spellings is set to true.

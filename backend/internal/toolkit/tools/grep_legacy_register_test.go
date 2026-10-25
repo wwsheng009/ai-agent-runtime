@@ -14,10 +14,8 @@ import (
 // stops holding for that call. The three groups have very different costs, which
 // is why they are listed together but ported in order:
 //
-//   - presentation/no-op flags (color, heading, line_number, null, pretty,
-//     text, binary, buffering, separators, ...): the tool's own output shape
-//     already satisfies them, so the shared handler only has to accept and
-//     report them as ignored;
+//   - presentation/no-op flags: the tool's own output shape already satisfies
+//     them, so the shared handler only has to accept and report them as ignored;
 //   - rg-engine flags (pcre2, engine, auto_hybrid_regex, multiline,
 //     multiline_dotall, replace, json, json_output, follow, crlf, sort*, ...):
 //     they need the ripgrep seam the runtime already exposes, plus their own
@@ -29,16 +27,15 @@ import (
 // the list cannot grow unnoticed; it also fails when the shared handler starts
 // honoring one of these, so the register has to be kept honest in both
 // directions.
+//
+// The presentation group has already moved: those 18 keys are core-covered now.
 var grepLegacyOnlyParams = []string{
-	"auto_hybrid_regex", "binary", "block_buffered", "color", "context_separator",
-	"crlf", "engine", "field_context_separator", "follow", "head_limit",
-	"heading", "json", "json_output", "line_buffered", "line_number",
-	"multiline", "multiline_dotall", "no_block_buffered", "no_config",
-	"no_context_separator", "no_filename", "no_heading", "no_line_buffered",
-	"no_line_number", "no_sort_files", "null", "null_data", "passthru",
-	"path_separator", "pcre2", "pretty", "replace", "rg_args", "sort",
-	"sort_files", "sort_reverse", "sortr", "text", "type_add", "type_clear",
-	"with_filename",
+	"auto_hybrid_regex", "context_separator",
+	"crlf", "engine", "follow", "head_limit",
+	"json", "json_output", "multiline", "multiline_dotall",
+	"no_config", "no_context_separator",
+	"no_sort_files", "passthru", "pcre2", "replace", "rg_args", "sort",
+	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",
 }
 
 func TestGrepLegacyOnlyParamsAreRegistered(t *testing.T) {

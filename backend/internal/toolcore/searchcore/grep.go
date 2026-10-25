@@ -141,6 +141,12 @@ type GrepOptions struct {
 	// Offset skips the first N matches before applying Limit. It is the
 	// pagination cursor shared by local and remote grep.
 	Offset int
+	// IgnoredPresentation lists the presentation-only rg flags the caller set
+	// (line numbers, headings, colours, buffering, NUL separators, ...). The
+	// tool's output shape already satisfies them, so they change nothing; they
+	// are reported so a caller can see that its rg spelling was understood and
+	// deliberately ignored rather than silently dropped.
+	IgnoredPresentation []string
 }
 
 type GrepMatch struct {

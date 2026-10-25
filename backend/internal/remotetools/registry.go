@@ -447,6 +447,83 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --no-messages：跳过不可读的显式 ignore_file 而不报错。默认（false）下，调用方显式指定的 ignore_file 读不到会直接失败——静默丢弃会改变规则集却不告知。按惯例发现的 .gitignore/.ignore/全局 ignore 文件始终可选，不受该开关影响。",
 			},
+			// Presentation-only rg spellings. They are accepted so a model can
+			// write the flag it knows, and they change nothing: grep's output is
+			// always "path:line:content" with one stable skeleton. Which ones were
+			// set is reported back in metadata.ignored_presentation, so "understood
+			// and deliberately not applied" never looks like "dropped".
+			"line_number": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --line-number/-n；grep 输出默认就带行号，因此该参数仅作为熟悉写法接受，不改变输出骨架。",
+			},
+			"no_line_number": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-line-number/-N；grep 的行号是稳定骨架的一部分，该参数被接受但不改变输出。",
+			},
+			"with_filename": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --with-filename/-H；grep 默认在每条匹配前给出路径，该参数被接受但不改变输出。",
+			},
+			"no_filename": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-filename；grep 的路径前缀是稳定骨架的一部分，该参数被接受但不改变输出。",
+			},
+			"heading": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --heading；grep 使用逐行 path:line:content 骨架，该参数被接受但不改变输出。",
+			},
+			"no_heading": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-heading；grep 本来就不分组显示，该参数被接受但不改变输出。",
+			},
+			"pretty": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --pretty；grep 输出是模型可读的稳定文本而非终端美化格式，该参数被接受但不改变输出。",
+			},
+			"text": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 -a/--text：把二进制文件当文本搜索。二进制处理由共享引擎自己的规则决定（见 binary），该参数被接受但不改变输出。",
+			},
+			"binary": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --binary：允许在二进制文件中搜索。启用后是否命中由共享引擎的二进制检测决定，该参数本身不改变输出骨架。",
+			},
+			"line_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --line-buffered；grep 一次性返回完整窗口而不是流式逐行输出，该参数被接受但不改变输出。",
+			},
+			"no_line_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-line-buffered；grep 不流式输出，该参数被接受但不改变输出。",
+			},
+			"block_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --block-buffered；缓冲策略属于 rg 进程行为，grep 的输出窗口与它无关，该参数被接受但不改变输出。",
+			},
+			"no_block_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-block-buffered；grep 不依赖缓冲开关，该参数被接受但不改变输出。",
+			},
+			"null": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --null（NUL 分隔路径）；grep 为了保持稳定文本骨架会将该参数视为兼容提示。",
+			},
+			"null_data": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --null-data（NUL 作为输入记录分隔）；grep 按行解析文本，该参数被接受但不改变输出。",
+			},
+			"field_context_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --field-context-separator；grep 的上下文行使用固定分隔骨架，该参数被接受但不改变输出。",
+			},
+			"path_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --path-separator；grep 始终输出工作区相对路径，该参数被接受但不改变输出。",
+			},
+			"color": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --color；grep 输出不含 ANSI 颜色，该参数被接受但不改变输出。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

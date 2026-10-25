@@ -212,6 +212,9 @@ func grepAudit() schemaAudit {
 			{file: searchHandlerPath(), name: "grepRootsFromArgs"},
 			{file: searchHandlerPath(), name: "grepContextFromArgs"},
 			{file: searchHandlerPath(), name: "grepMaxFileSizeFromArgs"},
+			// Presentation-only rg spellings are read here: they change nothing, and
+			// the audit still wants their reads covered by code it visits.
+			{file: searchHandlerPath(), name: "collectIgnoredPresentationParams"},
 		},
 		indirect: map[string]string{
 			"patterns": "read inside GrepPatternsFromArgs, which takes the whole map",

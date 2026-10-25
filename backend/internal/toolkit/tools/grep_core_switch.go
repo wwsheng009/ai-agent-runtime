@@ -38,6 +38,18 @@ var coreSearchParams = map[string]bool{
 	"glob_case_insensitive":        true,
 	"ignore_file_case_insensitive": true,
 	"ignore_file":                  true, "ignore_files": true,
+	// Presentation-only rg spellings: the shared handler accepts them and reports
+	// which ones were set in metadata.ignored_presentation. They change nothing,
+	// which is exactly why they belong on the shared code path - a no-op has no
+	// business being the one thing a second implementation owns.
+	"line_number": true, "no_line_number": true,
+	"with_filename": true, "no_filename": true,
+	"heading": true, "no_heading": true,
+	"pretty": true, "text": true, "binary": true,
+	"line_buffered": true, "no_line_buffered": true,
+	"block_buffered": true, "no_block_buffered": true,
+	"null": true, "null_data": true,
+	"field_context_separator": true, "path_separator": true, "color": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the
