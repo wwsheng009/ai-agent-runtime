@@ -1069,4 +1069,73 @@ context 的实现方式本来就选对了：`ExpandGrepContext` **通过共享�
 `docs/README.md`、新增 `apps/`、`docs/gateway-app/`）。两次提交都只显式列了本方案的文件；
 另外 `gofmt -l -w <目录>` 又一次顺手重排了 `internal/remotetools/` 里 7 个**本来就未格式化**的文件
 （`audit.go`、`metrics.go`、`platform.go`、`roots.go`、几个 `_test.go`），已用 `git checkout --` 全部还原。
-教训重复了一次：**`gofmt -w` 只列具体文件，永远不要给目录**。
+教训重复了一次：**`gofmt -w` 只列具体文件，永远不要给目录**。## 关于剩下 17 个参数的**实测发现**：它们都撞在同一堵墙上
+
+提交 `b59d9bbb`（本次先落一个「把结构约束钉住」的测试，下面说为什么）。
+
+### 实测（`rg` 14.1.0 就在本机，所以这次不是推测）
+
+```
+$ rg --json foo a.txt
+{"type":"match","data":{...,"lines":{"text":"foo bar foo\n"},"submatches":[{"match":{"text":"foo"},...}]}}
+
+$ rg --json -r BAR foo a.txt      # ← 完全一样
+{"type":"match","data":{...,"lines":{"text":"foo bar foo\n"},"submatches":[{"match":{"text":"foo"},...}]}}
+```
+
+**`-r` 对 `--json` 输出没有任何影响**。而内置年仅的实现默认走**纯文本**输出（`--json` 只在
+`json: true` 时才加），所以 `replace` 在那里能用；共享引擎**始终**用 `--json` 解析，所以在 core 里
+`-r` 等于无效。
+
+### 三次撞墙，同一堵墙
+
+我们连续三次发现「这个参数搬不动」，而原因每次都一样——**内置旧的 rg 使用模型与共享引擎的模型
+在结构上不同**：
+
+| 参数 | 与哪条结构冲突 |
+|---|---|
+| `sort*` | 引擎**每个 root 起一个进程**且强制 `--sort path`（为了让分页与 walker 的逐 root 遍历一致） |
+| `replace` | 引擎**始终** `--json`（为了拿结构化事件），而 `-r` 在 json 模式下不可见 |
+| `json` / `json_output` | 反过来：它要的就是**单进程原始事件流透传**，与「每 root 一进程 + 解析后渲染」冲突 |
+| `no_config` | 引擎**始终** `--no-config`（确定性），而 `false` 要求读配置 |
+
+这四条不是懒，是**结构**：共享引擎为了「两个引擎渲染同一页 + 分页确定」才这么设计的，而这些
+flag 想改的恰恰是那两条保证。
+
+### 因此我把结构约束钉成了测试（`b59d9bbb`）
+
+- `ripgrepBaseArgs()` = `--no-config --threads 1 --sort path`，逐字节断言；
+- **每个 root 一个进程**，用一个记录调用的注入 stream 断言；
+- 顺带补上一个**真实的覆盖缺口**：此前引擎选择类 flag 只测到「searcher 收到了选项」，
+  从没测到「ripgrep 真的被要求了」——现在直接断言 argv（`--pcre2` / `--engine pcre2` /
+  `--auto-hybrid-regex` / `--multiline` / `--multiline-dotall` / `--crlf`），
+  以及引擎仍然在要 `--json`（它结构化契约的基础）。
+
+有了这些断言，任何「为了搬某个 flag 而改动引擎模型」的尝试都会立刻红，并指出它要放弃的是哪条保证。
+
+### 剩下的选择（需要你定）
+
+17 个参数现在只有两条路，**没有第三条**：
+
+**A．按「一个实现只能声明它能兑现的东西」把它们从本地 schema 撤下**（保留已经收敛的 77 个参数）。
+- 优点：与用户既定原则一致（「如果远程不支持，不是应该不声明这个参数吗」）；端口面立刻变成
+  「所有工具一套实现、一套 schema」；这 17 个拼写本来就是「给熟悉 rg 的模型用的兼容糖」，
+  真正被依赖的（`type`/`glob`/`include`/`context`/`files_with_matches`/`stats`/`column`/
+  `only_matching`/`max_count`/`max_depth`/`max_filesize`/`ignore_file*`/`hidden`/`no_ignore*`）
+  都已经在共享实现里。
+- 代价：本地模型不能再写 `rg_args: ["-P"]` 这类调用（会得到「参数未知」）；`pcre2` 有等价替代
+  （已收敛的 `pcre2` / `engine` / `multiline*` 在共享路径上可用 ✓ 所以这部分不受影响）。
+
+**B．为它们各建一条「旁路」**（例如给引擎加一个纯文本输出模式、一个单进程原始透传模式）。
+- 代价：正是我们花了一整轮移除的那种「第二条路径」；而且要放弃或参数化「每 root 一进程」/
+  「始终 --json」这两条现有保证，需要重做它们的测试。
+
+**我建议 A**，理由：这 17 个里真正有语义价值的（`pcre2`/`engine`/`multiline*`/`crlf`）**已经搬完了**；
+剩下的大多是纯 CLI 外观（buffering 已按空操作搬完，`sort*`/`json*`/`replace`/`head_limit`/
+`context_separator*`/`type_add`/`type_clear`/`no_config`/`follow`/`passthru`/`rg_args`）。
+而 `rg_args`/`passthru` 本质是「我要用 rg 的原生参数」——那与「一套实现、两个执行位置」在概念上
+就是冲突的：**它们要求的是「在本地跑 rg 的另一个前端」**。
+
+如果选 A，剩下 17 个参数从本地 schema 删除、登记表清零、文档收尾，这轮收敛就结束了；
+如果选 B，我会先针对 `sort*` 或 `json*` 中的**一个**做设计稿（说清要放弃哪条保证、测试怎么改），
+再动手。
