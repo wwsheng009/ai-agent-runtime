@@ -544,6 +544,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --multiline-dotall：多行模式下让 . 匹配换行。该能力需要 ripgrep。",
 			},
+			"crlf": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --crlf：把 CRLF 当作行结束符。内置引擎本来就如此（读取时去掉 CR），该开关让 ripgrep 与它一致，而不是把 CR 留在行尾。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

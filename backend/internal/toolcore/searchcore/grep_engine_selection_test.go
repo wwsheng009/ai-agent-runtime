@@ -108,6 +108,11 @@ func TestGrepEngineSelectionReachesRipgrep(t *testing.T) {
 			args: map[string]any{"pattern": "needle", "auto_hybrid_regex": true},
 			want: func(o GrepOptions) bool { return o.AutoHybridRegex && o.RequiresRipgrep() },
 		},
+		{
+			name: "crlf",
+			args: map[string]any{"pattern": "needle", "crlf": true},
+			want: func(o GrepOptions) bool { return o.CRLF && o.RequiresRipgrep() },
+		},
 	}
 
 	for _, tc := range cases {
@@ -185,6 +190,7 @@ func TestGrepRequiresRipgrepIsDerivedFromTheFlags(t *testing.T) {
 		{"multiline", GrepOptions{Multiline: true}, true},
 		{"multiline dotall", GrepOptions{MultilineDotall: true}, true},
 		{"auto hybrid", GrepOptions{AutoHybridRegex: true}, true},
+		{"crlf", GrepOptions{CRLF: true}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

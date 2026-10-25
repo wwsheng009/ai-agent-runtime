@@ -492,6 +492,12 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.MultilineDotall {
 		args = append(args, "--multiline-dotall")
 	}
+	if opts.CRLF {
+		// The walker's reader trims the CR; ripgrep keeps it in the line unless
+		// told otherwise, which would make the same file render differently on
+		// the two engines.
+		args = append(args, "--crlf")
+	}
 	// Binary handling follows the walker: the default behaves like ripgrep's own
 	// default (a NUL byte ends the search for that file), and only the top
 	// unrestricted level lets ripgrep look past it.

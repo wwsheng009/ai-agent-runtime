@@ -155,6 +155,10 @@ type GrepOptions struct {
 	AutoHybridRegex bool
 	Multiline       bool
 	MultilineDotall bool
+	// CRLF asks ripgrep to treat CRLF as the line terminator. The pure-Go walker
+	// already does that (its reader trims the CR), so this flag exists to make the
+	// two engines agree instead of differing by an invisible byte.
+	CRLF bool
 }
 
 // RequiresRipgrep reports whether this request needs the ripgrep engine rather
@@ -162,7 +166,7 @@ type GrepOptions struct {
 // the args: Go's regexp rejects patterns ripgrep accepts (lookaround,
 // backreferences), so for such a call the walker must not get a turn first.
 func (o GrepOptions) RequiresRipgrep() bool {
-	return o.Pcre2 || o.Multiline || o.MultilineDotall || o.AutoHybridRegex ||
+	return o.Pcre2 || o.Multiline || o.MultilineDotall || o.AutoHybridRegex || o.CRLF ||
 		requiresRipgrepForEngine(o.Engine)
 }
 

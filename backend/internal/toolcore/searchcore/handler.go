@@ -415,6 +415,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		AutoHybridRegex:           boolArg(call.Args, "auto_hybrid_regex"),
 		Multiline:                 boolArg(call.Args, "multiline"),
 		MultilineDotall:           boolArg(call.Args, "multiline_dotall"),
+		CRLF:                      boolArg(call.Args, "crlf"),
 	}
 
 	engine := "walker"

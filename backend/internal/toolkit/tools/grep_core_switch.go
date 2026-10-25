@@ -54,7 +54,7 @@ var coreSearchParams = map[string]bool{
 	// and dispatches to the engine first, so a PCRE pattern is not handed to Go's
 	// regexp before ripgrep gets its turn.
 	"pcre2": true, "engine": true, "auto_hybrid_regex": true,
-	"multiline": true, "multiline_dotall": true,
+	"multiline": true, "multiline_dotall": true, "crlf": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the
