@@ -1025,4 +1025,48 @@ remote 的 grep 参数（`remotetools/registry.go:176` 起约 400 行）与本�
 新增 `apps/`、`docs/gateway-app/`）——有另一个执行者正在同一个工作区上工作。本次提交只包含本方案
 的 7 个文件（显式列路径，没有用 `git add -A`）；那些改动留在工作区未动。
 
-提交：`3615a97c`。
+提交：`3615a97c`。## grep 的最后一个非参数洞：`only_matching` + context 已收敛（2026-10-25）
+
+提交 `caed6a36`。**「一套实现」在 grep 上不再有行为形态的洞**——剩下的全是参数。
+
+### 为什么它是个「洞」而不是参数问题
+
+共享 handler 原先直接拒绝这个组合（文案是「not combined by the shared core yet」），
+于是本地把**这一个组合**路由到 legacy 路径。也就是说：同一个调用，两个面给出不同答案。
+
+### 为什么修起来比预想的小
+
+context 的实现方式本来就选对了：`ExpandGrepContext` **通过共享行读取器重读被匹配的文件**
+来生成上下文行（特意不让 ripgrep 传 `--context`，这样两个引擎不可能渲染出不同窗口）。
+所以冲突点只有一处——**被匹配的那一行**：它原先从文件重读出来按整行渲染，而
+`only_matching` 要求那一行显示**片段**。这正是 `rg -o -C` 的行为。
+
+改动：
+- `ExpandGrepContext` 收 `onlyMatching`：命中行按**每个片段一条**输出（并且要**吃光同一行的所有匹配**，
+  否则游标会落后），窗口内其余行仍整行输出。片段文本与列号来自引擎已经产出的 match，
+  所以两个引擎天然一致。
+- `startsGrepContextGroup` 把**同一行的两条**视为同一个块：否则同一行的第二个片段会被标成新分组，
+  渲染时会在同一行的两半之间打印 `--` 分隔符——凭空造出一个并不存在的间隔。
+- 删掉 handler 的拒绝分支与本地路由里的那条分支；原先「钉住 legacy 路由」的登记测试，
+  现在变成「钉住共享路径」的测试。
+
+### 证据
+
+- 纯函数级：逐条钉住 `ExpandGrepContext` 的输出（命中行是片段、周围是整行、`GroupStart` 只在第一条为真）；
+- handler 级：断言渲染出的 `path>line: 片段` / `path line: 整行` 两种形状；
+- remote MCP 对拍测试：原先断言「必须失败」，现在断言「两种输出单位同页共存」；
+- `go build` / `go vet` 干净；`toolcore`、`toolkit`、`remotetools`、`tools`、`agent`、`toolexec` 全绿。
+
+### 剩下的（全部是参数，17 个）
+
+`rg_args`、`passthru`、`replace`、`json`、`json_output`、`follow`、`no_config`、
+`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`head_limit`、
+`context_separator`/`no_context_separator`、`type_add`/`type_clear`。
+按上一节的分头结论逐个来：`replace` / `json`（引擎输出模式）→ `sort*`（先定分页契约）→
+`follow`（先定宿主策略）→ `no_config`（先定确定性）→ 其余 → 最后整段平移 `rg_args` 解析器。
+
+**本轮工作区又一次出现非本方案的改动**（`cmd/gateway/*`、`internal/notify/*`、`docs/gateway/*`、
+`docs/README.md`、新增 `apps/`、`docs/gateway-app/`）。两次提交都只显式列了本方案的文件；
+另外 `gofmt -l -w <目录>` 又一次顺手重排了 `internal/remotetools/` 里 7 个**本来就未格式化**的文件
+（`audit.go`、`metrics.go`、`platform.go`、`roots.go`、几个 `_test.go`），已用 `git checkout --` 全部还原。
+教训重复了一次：**`gofmt -w` 只列具体文件，永远不要给目录**。
