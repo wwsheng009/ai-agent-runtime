@@ -1,0 +1,115 @@
+package tools
+
+import (
+	"sort"
+	"testing"
+)
+
+// grepLegacyOnlyParams is the frozen list of parameters the grep schema
+// declares but only the local legacy path serves today.
+//
+// It is a debt register, not a design: every entry below is a parameter the
+// shared handler (searchcore) does not honor yet, so a call that uses it falls
+// back to the local implementation and the "one tool, one implementation" rule
+// stops holding for that call. The three groups have very different costs, which
+// is why they are listed together but ported in order:
+//
+//   - presentation/no-op flags (color, heading, line_number, null, pretty,
+//     text, binary, buffering, separators, ...): the tool's own output shape
+//     already satisfies them, so the shared handler only has to accept and
+//     report them as ignored;
+//   - rg-engine flags (pcre2, engine, auto_hybrid_regex, multiline,
+//     multiline_dotall, replace, json, json_output, follow, crlf, sort*, ...):
+//     they need the ripgrep seam the runtime already exposes, plus their own
+//     output semantics and tests;
+//   - escape hatches (rg_args, passthru) and type set edits (type_add/type_clear):
+//     the raw-argument path deliberately mirrors rg's own parser.
+//
+// The test below fails when a schema parameter appears without core support, so
+// the list cannot grow unnoticed; it also fails when the shared handler starts
+// honoring one of these, so the register has to be kept honest in both
+// directions.
+var grepLegacyOnlyParams = []string{
+	"auto_hybrid_regex", "binary", "block_buffered", "color", "context_separator",
+	"crlf", "engine", "field_context_separator", "follow", "head_limit",
+	"heading", "json", "json_output", "line_buffered", "line_number",
+	"multiline", "multiline_dotall", "no_block_buffered", "no_config",
+	"no_context_separator", "no_filename", "no_heading", "no_line_buffered",
+	"no_line_number", "no_sort_files", "null", "null_data", "passthru",
+	"path_separator", "pcre2", "pretty", "replace", "rg_args", "sort",
+	"sort_files", "sort_reverse", "sortr", "text", "type_add", "type_clear",
+	"with_filename",
+}
+
+func TestGrepLegacyOnlyParamsAreRegistered(t *testing.T) {
+	schema := NewGrepTool().Parameters()
+	props, ok := schema["properties"].(map[string]interface{})
+	if !ok || len(props) == 0 {
+		t.Fatalf("grep schema has no properties: %#v", schema)
+	}
+
+	legacy := make([]string, 0, len(props))
+	for key := range props {
+		if !coreSearchParams[key] {
+			legacy = append(legacy, key)
+		}
+	}
+	sort.Strings(legacy)
+
+	want := append([]string(nil), grepLegacyOnlyParams...)
+	sort.Strings(want)
+
+	if len(legacy) != len(want) {
+		t.Fatalf("legacy-only parameter set changed:\n got %d: %v\nwant %d: %v\n"+
+			"Port the parameter into searchcore (or drop it from the schema) and "+
+			"update the register in the same change - a schema that offers what only "+
+			"one surface honors is the drift this list exists to catch.",
+			len(legacy), legacy, len(want), want)
+	}
+	for i := range legacy {
+		if legacy[i] != want[i] {
+			t.Fatalf("legacy-only parameter %q is not in the register (or the register is stale):\n got %v\nwant %v",
+				legacy[i], legacy, want)
+		}
+	}
+}
+
+// TestGrepCoreSwitchCoversEveryRegisteredParam is the other direction: a
+// parameter the shared handler does honor must not be left behind on the legacy
+// path, or the same call would be answered by two implementations again.
+func TestGrepCoreSwitchCoversEveryRegisteredParam(t *testing.T) {
+	registered := make(map[string]bool, len(grepLegacyOnlyParams))
+	for _, key := range grepLegacyOnlyParams {
+		registered[key] = true
+	}
+	for key := range coreSearchParams {
+		if registered[key] {
+			t.Fatalf("parameter %q is covered by the core switch and still listed as legacy-only: "+
+				"remove it from grepLegacyOnlyParams so the two lists describe one reality", key)
+		}
+	}
+}
+
+// TestGrepOnlyMatchingWithContextStaysOnTheLegacyPath records the one behavioural
+// route that is not a parameter: searchcore rejects only_matching combined with
+// context, and the local tool has always accepted it. Until the shared handler
+// implements the mix, the combination must route to the legacy path - and this
+// assertion is the reminder that "one implementation" has this hole in it.
+func TestGrepOnlyMatchingWithContextStaysOnTheLegacyPath(t *testing.T) {
+	tool := NewGrepTool()
+	if _, handled := tool.executeCoreSearch(t.Context(), map[string]interface{}{
+		"pattern":       "needle",
+		"only_matching": true,
+		"context":       2,
+	}); handled {
+		t.Fatal("only_matching with context must stay on the legacy path until searchcore implements the mix")
+	}
+	// The same call without the context mix is core-served: the exclusion above
+	// is a combination rule, not a parameter rule.
+	if _, handled := tool.executeCoreSearch(t.Context(), map[string]interface{}{
+		"pattern":       "needle",
+		"only_matching": true,
+	}); !handled {
+		t.Fatal("only_matching alone must run on the shared handler")
+	}
+}
