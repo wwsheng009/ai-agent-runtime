@@ -462,12 +462,21 @@ fn open_notification_window(app: &AppHandle, target: &tauri::Url) {
         return;
     }
     let nav_host = host.clone();
-    let builder =
+    let mut builder =
         WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(target.clone()))
             .title("aicli-gateway · 会话")
             .inner_size(1200.0, 900.0)
             .min_inner_size(800.0, 600.0)
             .on_navigation(move |url| crate::is_allowed_navigation(url, &nav_host));
+    // 必须与主窗口使用同一 WebView2 数据目录（同一 environment），否则新窗口
+    // 是独立 cookie 容器，代理请求没有 owner Cookie → 401 unauthorized。
+    if let Some(dir) = crate::resolve_webview_data_dir() {
+        crate::log_startup(&format!(
+            "notification window webview data dir: {}",
+            dir.display()
+        ));
+        builder = builder.data_directory(dir);
+    }
     match builder.build() {
         Ok(window) => {
             crate::log_startup(&format!("notification window opened: {label} {target}"));

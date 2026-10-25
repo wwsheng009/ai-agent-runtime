@@ -71,7 +71,9 @@ Linux:   XDG autostart
 
 - 点击通知：打开（或复用并聚焦）**独立会话窗口**；主窗口（控制台）保持原页面与
   导航上下文，不再被 `navigate` 覆盖。新窗口与主窗口共享同一 WebView2 数据目录
-  （owner Cookie 生效），同一 URL 已打开时只导航并聚焦，不重复开窗。
+  （owner Cookie 生效；构建新窗口时必须同样传 `resolve_webview_data_dir()`，否则
+  是独立 cookie 容器，代理请求会返回 401 `unauthorized`），同一 URL 已打开时只导航
+  并聚焦，不重复开窗。
 - 窗口创建失败或 `extra.url` 缺失（旧版通知）时才回退：显示主窗口并导航到该 URL；
   此后可用托盘菜单「返回控制台」把主窗口带回控制台首页（新增的兜底入口）。
 - 若通知 `extra` 含同主机 `url`（控制台 v48 起始终携带），优先导航到该 URL：
