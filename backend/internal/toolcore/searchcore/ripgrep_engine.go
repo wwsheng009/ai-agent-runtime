@@ -552,6 +552,11 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.Unrestricted >= 3 {
 		args = append(args, "--text")
 	}
+	if opts.Follow {
+		// The walker follows the links itself, so the flag means the same tree on
+		// both engines rather than "only ripgrep can do this".
+		args = append(args, "--follow")
+	}
 	// Invert keeps whole lines (rg -o -v) and files mode only needs existence,
 	// so the flag is passed only where fragments are the output unit.
 	onlyMatching := opts.OnlyMatching && !opts.InvertMatch &&

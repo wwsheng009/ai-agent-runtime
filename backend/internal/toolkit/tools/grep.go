@@ -423,7 +423,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"follow": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索。该能力当前仅在可用 ripgrep/rg 时支持；无 rg 时会明确提示。",
+				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现，与 rg 一致），链接到文件则搜索该文件。环保护比 rg 更强：某个目录已被一个链接带到过，就不再被第二个链接带过去（互指链接必然终止；同一目标被多个链接指向时只搜索一次——rg 会把两条路径各搜一次）。Windows 上未显式指定时默认跟随 NTFS junction（沿用本工具既有默认；显式 follow=false 可关闭）。ripgrep 与内置 walker 两个引擎都实现，本地与 remote 使用同一实现。",
 			},
 			"column": map[string]interface{}{
 				"type":        "boolean",

@@ -30,7 +30,6 @@ import (
 //
 // The presentation group has already moved: those 18 keys are core-covered now.
 var grepLegacyOnlyParams = []string{
-	"follow",
 	"no_sort_files", "passthru", "rg_args", "sort",
 	"sort_files", "sort_reverse", "sortr", "type_add", "type_clear",
 }

@@ -71,6 +71,9 @@ var coreSearchParams = map[string]bool{
 	// both engines print the same boundaries.
 	"head_limit":        true,
 	"context_separator": true, "no_context_separator": true,
+	// follow is implemented by both engines: ripgrep gets --follow, the walker
+	// walks the links itself (cycle-protected), plus the Windows junction default.
+	"follow": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the

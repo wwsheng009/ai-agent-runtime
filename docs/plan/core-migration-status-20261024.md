@@ -1276,4 +1276,31 @@ rg 的汇总事件报的是 `searches` / `searches_with_match`，**从来没有 
   `TestGrepTool_ContextSeparatorBuiltin`（无 rg 场景）**未改即通过**——它现在跑的就是共享渲染器。
 
 登记表：13 → 10。剩余：`follow`（需 walker 也实现链接跟随 + 环保护，独立一批）、
-`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、`type_add`/`type_clear`、`rg_args`。
+`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、`type_add`/`type_clear`、`rg_args`。## `follow` 已收敛：walker 也实现链接跟随（2026-10-25）
+
+### 为什么它不能只交给 rg
+本地把显式 `follow` 当 rg-only 能力（缺 rg 直接报错），而 walker 在遍历中对链接**一律跳过**（连文件链接都不读）。
+若照旧，`follow` 就会是「只有装了 rg 的机器才有的功能」——正是既定原则要消掉的东西。于是 walker 自己实现跟随：
+
+- `walkGrepFollowing`：`filepath.WalkDir` 的等价遍历，但链接解析为目录时**下钻**（按链接自身路径呈现，与 rg 一致），
+  链接解析为文件时当普通文件搜索；非 follow 时仍是原样的 `filepath.WalkDir`（沙箱规则不变：默认不读根外的目标）；
+- **终止性由我们保证**：某个目录已被一个链接带到过，就不再被第二个链接带过去。实测 rg 14.1.0 的 `--follow`
+  会把指向同一目录的两条链接各搜一次，且只拒绝"指向祖先"的链接（a↔b 互指它会一直递归到 OS 放弃）。
+  我们的规则更强，代价是同一目录被两条链接指向时只出现一条路径——这一取舍写进了 schema 描述与代码注释；
+- `follow` 进入 `RequiresRipgrep()` 的条件被移除（不是"不需要 rg"，而是"两个引擎都能做"）；
+- Windows 的 junction 默认跟随也被搬进共享 handler（未显式指定 + Windows → follow=true），
+  因为"遍历不进 junction 子树"这件事在两个执行位置上是同一个事实；
+- rg 侧照旧透传 `--follow`，于是同一调用在两个引擎上搜的是同一棵树。
+
+### 证据
+- walker：默认不跟随（根外目标不读）；`Follow: true` 时经**目录链接**与**文件链接**都能命中，且路径按链接自身呈现；
+  指回根的链接环终止且文件只访问一次；两条链接指向同一目录只搜一次（记录这一取舍）；
+- 引擎：`--follow` 确实出现在 argv；
+- handler：请求 → 引擎选项 → metadata.follow 全链路；
+- 本地那个「follow 在无 rg 时必须报错」的测试被改写为它的后继：同一调用现在**成功**，engine=walker，
+  两个 flag 都在 metadata 里——这正是本次收敛要的结果；
+- 结构化 rg-only 矩阵里的两个 follow 用例改为断言 `requires_ripgrep=false`（能力不再依赖 rg）；
+- `toolcore/...`、`remotetools`、`toolkit/tools` 全绿；`go vet` 干净。
+
+登记表：10 → 9。剩余：`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、
+`type_add`/`type_clear`、`rg_args`。

@@ -4682,7 +4682,12 @@ func TestGrepTool_RgArgsFollowAndOneFileSystemTranslateToRipgrep(t *testing.T) {
 	}
 }
 
-func TestGrepTool_FollowRequiresRipgrepWhenUnavailable(t *testing.T) {
+// TestGrepTool_FollowRunsOnTheSharedCoreWithoutRipgrep is the successor of
+// TestGrepTool_FollowRequiresRipgrepWhenUnavailable: that call used to fail
+// because follow was an rg-only flag, and the shared core now implements it in
+// the walker too - so the same call succeeds on a host without rg, which is the
+// point of having one implementation.
+func TestGrepTool_FollowRunsOnTheSharedCoreWithoutRipgrep(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("foo\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -4702,17 +4707,17 @@ func TestGrepTool_FollowRequiresRipgrepWhenUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Success {
-		t.Fatalf("expected follow to fail cleanly without rg")
+	if !result.Success {
+		t.Fatalf("the walker must serve follow/one_file_system without rg, got %v", result.Error)
 	}
-	if !strings.Contains(result.Error.Error(), "仅 ripgrep/rg 支持") {
-		t.Fatalf("expected clear rg-only follow error, got %v", result.Error)
+	if result.Metadata["engine"] != "walker" {
+		t.Fatalf("engine = %#v, want the pure-Go walker", result.Metadata["engine"])
 	}
-	if !strings.Contains(result.Error.Error(), "follow") {
-		t.Fatalf("expected follow requirement to appear in error, got %v", result.Error)
+	if result.Metadata["follow"] != true || result.Metadata["one_file_system"] != true {
+		t.Fatalf("both flags must still be reported: %#v", result.Metadata)
 	}
-	if !strings.Contains(result.Error.Error(), "one_file_system") {
-		t.Fatalf("expected combined one_file_system requirement to appear in error, got %v", result.Error)
+	if !strings.Contains(result.Content, "foo") {
+		t.Fatalf("the walker answer must carry the match:\n%s", result.Content)
 	}
 }
 
@@ -4788,13 +4793,15 @@ func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
 			wantArgs: []string{"--follow"},
 			assertions: func(t *testing.T, result *toolkit.ToolResult) {
 				t.Helper()
-				if result.Metadata["follow"] != true || result.Metadata["requires_ripgrep"] != true {
-					t.Fatalf("expected follow metadata to be true and require rg, got %#v", result.Metadata)
+				// follow no longer requires rg: the walker follows the links too,
+				// so the same call is served on a host without the engine.
+				if result.Metadata["follow"] != true || result.Metadata["requires_ripgrep"] != false {
+					t.Fatalf("expected follow metadata true and no rg requirement, got %#v", result.Metadata)
 				}
 			},
 		},
 		{
-			name: "follow plus one_file_system emits both rg-only flags",
+			name: "follow plus one_file_system emits both flags",
 			params: map[string]interface{}{
 				"pattern":         "needle",
 				"path":            tmpDir,
@@ -4804,8 +4811,9 @@ func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
 			wantArgs: []string{"--follow", "--one-file-system"},
 			assertions: func(t *testing.T, result *toolkit.ToolResult) {
 				t.Helper()
-				if result.Metadata["follow"] != true || result.Metadata["one_file_system"] != true || result.Metadata["requires_ripgrep"] != true {
-					t.Fatalf("expected follow/one_file_system metadata to require rg, got %#v", result.Metadata)
+				if result.Metadata["follow"] != true || result.Metadata["one_file_system"] != true ||
+					result.Metadata["requires_ripgrep"] != false {
+					t.Fatalf("expected both flags reported without an rg requirement, got %#v", result.Metadata)
 				}
 			},
 		},

@@ -3,6 +3,7 @@ package searchcore
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,12 @@ type GrepOptions struct {
 	ContextSeparator    string
 	ContextSeparatorSet bool
 	NoContextSeparator  bool
+	// Follow makes the traversal descend through links that resolve to
+	// directories and search links that resolve to files - rg's --follow. Both
+	// engines implement it: the walker follows the links itself (with cycle
+	// protection), ripgrep is asked for its own flag, so the flag is never the
+	// one thing a host without rg cannot do.
+	Follow bool
 	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
 	// rendered page. It is a request for *that* format, so it needs the engine
 	// that emits it: the walker has no event stream to pass through, and the
@@ -506,13 +513,15 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				}
 				rootDevice = identity
 			}
-			walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			onEntry := func(path string, entry os.DirEntry, err error) error {
 				if err != nil {
 					return nil
 				}
-				// File symlinks are not followed: a link inside the workspace must
-				// not read a target outside the admitted roots.
-				if entry.Type()&os.ModeSymlink != 0 {
+				// Links discovered during traversal are not followed by default: a
+				// link inside the workspace must not read a target outside the
+				// admitted roots. follow=true is the caller accepting that walk,
+				// exactly like `rg -L`, and both engines then see the same tree.
+				if entry.Type()&os.ModeSymlink != 0 && !opts.Follow {
 					return nil
 				}
 				if entry.IsDir() {
@@ -558,7 +567,8 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					return nil
 				}
 				return visit(root, rules, path)
-			})
+			}
+			walkErr := grepWalkRoot(root, opts.Follow, onEntry)
 			if walkErr != nil && walkErr != filepath.SkipAll {
 				return GrepResult{}, walkErr
 			}
@@ -572,6 +582,113 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	ApplyGrepPageWindow(&result, mode, opts)
 	return result, nil
+}
+
+// grepWalkRoot walks one search root. Without follow this is exactly
+// filepath.WalkDir; with follow the traversal also descends through links that
+// resolve to directories, which is what `rg --follow` does - and a link cycle
+// terminates instead of recursing forever.
+func grepWalkRoot(root string, follow bool, onEntry func(path string, entry os.DirEntry, err error) error) error {
+	if !follow {
+		return filepath.WalkDir(root, onEntry)
+	}
+	return walkGrepFollowing(root, onEntry)
+}
+
+// walkGrepFollowing is filepath.WalkDir with links followed: a link that
+// resolves to a directory is descended into (under the link's own path, which
+// is the path ripgrep prints too), and a link that resolves to a file is offered
+// like any other file.
+//
+// Termination is ours and is deliberately stronger than `rg --follow`: a
+// directory a link already led to is not followed twice, so mutual links (a->b,
+// b->a) terminate instead of growing the path until the OS gives up, and two
+// links to one directory are searched once. The cost of that guarantee is that
+// a duplicate target stops producing a second path - observed against rg 14.1.0,
+// which prints both paths and only refuses links that point at an ancestor.
+func walkGrepFollowing(root string, onEntry func(path string, entry os.DirEntry, err error) error) error {
+	rootInfo, statErr := os.Stat(root)
+	if statErr != nil {
+		// Match WalkDir: report the error to the callback and stop.
+		return onEntry(root, nil, statErr)
+	}
+	seen := map[string]bool{}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		seen[resolved] = true
+	}
+	if err := onEntry(root, fs.FileInfoToDirEntry(rootInfo), nil); err != nil {
+		if err == filepath.SkipAll {
+			return err
+		}
+		if err == filepath.SkipDir {
+			return nil
+		}
+		return err
+	}
+	if !rootInfo.IsDir() {
+		return nil
+	}
+
+	type dirFrame struct {
+		dir     string
+		entries []os.DirEntry
+		index   int
+	}
+	stack := []*dirFrame{{dir: root}}
+	for len(stack) > 0 {
+		frame := stack[len(stack)-1]
+		if frame.entries == nil {
+			entries, readErr := os.ReadDir(frame.dir)
+			if readErr != nil {
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			frame.entries = entries
+		}
+		if frame.index >= len(frame.entries) {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		entry := frame.entries[frame.index]
+		frame.index++
+		path := filepath.Join(frame.dir, entry.Name())
+
+		isDir := entry.IsDir()
+		if entry.Type()&os.ModeSymlink != 0 {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				continue
+			}
+			if info.IsDir() {
+				resolved, resolveErr := filepath.EvalSymlinks(path)
+				if resolveErr != nil || seen[resolved] {
+					continue
+				}
+				seen[resolved] = true
+				isDir = true
+				entry = fs.FileInfoToDirEntry(info)
+			}
+		}
+
+		if err := onEntry(path, entry, nil); err != nil {
+			switch {
+			case err == filepath.SkipAll:
+				return err
+			case err == filepath.SkipDir && isDir:
+				continue
+			case err == filepath.SkipDir:
+				// WalkDir's rule for a file entry: skip the rest of this directory.
+				frame.index = len(frame.entries)
+				continue
+			default:
+				return err
+			}
+		}
+		if isDir {
+			stack = append(stack, &dirFrame{dir: path})
+		}
+	}
+	return nil
 }
 
 // GrepPatternsWithFiles returns the effective pattern list: the direct
