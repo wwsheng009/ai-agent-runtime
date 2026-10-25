@@ -38,12 +38,15 @@ var (
 	// 与会话数决定（都是小规模目录），解析后的结构体很小，不做容量淘汰。
 	nodeFileCache    sync.Map // string -> nodeFileCacheEntry
 	bindingFileCache sync.Map // string -> bindingCacheEntry
+	// fileStat is an internal seam for tests that need to assert the dead-node
+	// fast path performs no Stat at all.
+	fileStat = os.Stat
 )
 
 // statKeyFor 返回文件当前 stat；失败时 ok=false，调用方应走未缓存的原始路径
 // 以保留原有的错误语义（文件不存在 / 不可读）。
 func statKeyFor(path string) (fileStatKey, bool) {
-	info, err := os.Stat(path)
+	info, err := fileStat(path)
 	if err != nil {
 		return fileStatKey{}, false
 	}

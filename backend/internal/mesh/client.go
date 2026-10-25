@@ -40,6 +40,7 @@ type PeerTarget struct {
 	WorkspacePath string
 	SessionID     string
 	State         string
+	heartbeatAt   time.Time
 }
 
 // PeerTargetOptions tunes peer discovery (§6.2).
@@ -53,6 +54,10 @@ type PeerTargetOptions struct {
 	// PreferWorkspace lists same-workspace peers first when over the cap (§6.2:
 	// 超过阈值时优先订阅同工作区 + 最近活跃的 N 个，其余靠轮询).
 	PreferWorkspace string
+	// Now / HeartbeatTTL override the liveness clock for the direct scan path
+	// (zero uses NowUTC / DefaultHeartbeatTTL).
+	Now          time.Time
+	HeartbeatTTL time.Duration
 }
 
 // PeerTargetsFromView derives the subscription set from the aggregated view.
@@ -62,10 +67,6 @@ type PeerTargetOptions struct {
 // from the in-process record — it is never marshalled (§9.1 / M7).
 func PeerTargetsFromView(view MeshView, opts PeerTargetOptions) []PeerTarget {
 	selfID := strings.TrimSpace(opts.SelfNodeID)
-	maxPeers := opts.MaxPeers
-	if maxPeers <= 0 {
-		maxPeers = DefaultFaninMaxPeers
-	}
 	targets := make([]PeerTarget, 0, len(view.Nodes))
 	for _, node := range view.Nodes {
 		nodeID := strings.TrimSpace(node.NodeID)
@@ -90,6 +91,9 @@ func PeerTargetsFromView(view MeshView, opts PeerTargetOptions) []PeerTarget {
 			BaseURL: baseURL,
 			State:   string(node.State),
 		}
+		if node.HeartbeatAt != nil {
+			target.heartbeatAt = *node.HeartbeatAt
+		}
 		if node.Workspace != nil {
 			target.WorkspacePath = strings.TrimSpace(node.Workspace.Path)
 		}
@@ -101,6 +105,70 @@ func PeerTargetsFromView(view MeshView, opts PeerTargetOptions) []PeerTarget {
 		}
 		targets = append(targets, target)
 	}
+	return sortAndCapPeerTargets(targets, opts)
+}
+
+// PeerTargets derives the subscription set directly from node records without
+// building a full MeshView. Peer sync only needs endpoint/token/capabilities;
+// it must not pay for bindings, workspace groups, ownership or full sorting of
+// every historical node. The same tolerant reader and liveness rules apply.
+func PeerTargets(paths Paths, opts PeerTargetOptions) []PeerTarget {
+	now := opts.Now
+	if now.IsZero() {
+		now = NowUTC()
+	}
+	heartbeatTTL := opts.HeartbeatTTL
+	if heartbeatTTL <= 0 {
+		heartbeatTTL = DefaultHeartbeatTTL
+	}
+	selfID := strings.TrimSpace(opts.SelfNodeID)
+	files := ListNodeFiles(paths)
+	targets := make([]PeerTarget, 0, 8)
+	for _, file := range files {
+		record := file.Record
+		if record == nil {
+			continue
+		}
+		nodeID := strings.TrimSpace(record.NodeID)
+		if nodeID == "" || nodeID == selfID {
+			continue
+		}
+		state := effectiveNodeState(file.State, record, now, heartbeatTTL)
+		if !opts.IncludeStale && state != NodeStateLive {
+			continue
+		}
+		if record.Endpoint == nil || !record.Endpoint.Loopback {
+			continue
+		}
+		baseURL := strings.TrimSpace(record.Endpoint.BaseURL)
+		if baseURL == "" || !recordAdvertisesEvents(record) {
+			continue
+		}
+		target := PeerTarget{
+			NodeID:      nodeID,
+			BaseURL:     baseURL,
+			State:       string(state),
+			heartbeatAt: record.Liveness.HeartbeatAt,
+		}
+		if record.Workspace != nil {
+			target.WorkspacePath = strings.TrimSpace(record.Workspace.Path)
+		}
+		if record.Session != nil {
+			target.SessionID = strings.TrimSpace(record.Session.ID)
+		}
+		if record.Auth != nil {
+			target.Token = strings.TrimSpace(record.Auth.Token)
+		}
+		targets = append(targets, target)
+	}
+	return sortAndCapPeerTargets(targets, opts)
+}
+
+func sortAndCapPeerTargets(targets []PeerTarget, opts PeerTargetOptions) []PeerTarget {
+	maxPeers := opts.MaxPeers
+	if maxPeers <= 0 {
+		maxPeers = DefaultFaninMaxPeers
+	}
 	// 同工作区优先、最近活跃优先：只影响「超上限时谁被订阅」，不影响可见性。
 	sort.SliceStable(targets, func(i, j int) bool {
 		if opts.PreferWorkspace != "" {
@@ -110,8 +178,8 @@ func PeerTargetsFromView(view MeshView, opts PeerTargetOptions) []PeerTarget {
 				return left
 			}
 		}
-		leftActive := heartbeatRank(view, targets[i].NodeID)
-		rightActive := heartbeatRank(view, targets[j].NodeID)
+		leftActive := targets[i].heartbeatAt.Unix()
+		rightActive := targets[j].heartbeatAt.Unix()
 		if leftActive != rightActive {
 			return leftActive > rightActive
 		}
@@ -128,23 +196,19 @@ func nodeAdvertisesEvents(node NodeView) bool {
 	if node.Record == nil {
 		return false
 	}
-	for _, capability := range node.Record.Capabilities {
+	return recordAdvertisesEvents(node.Record)
+}
+
+func recordAdvertisesEvents(record *NodeRecord) bool {
+	if record == nil {
+		return false
+	}
+	for _, capability := range record.Capabilities {
 		if strings.EqualFold(strings.TrimSpace(capability), "events") {
 			return true
 		}
 	}
 	return false
-}
-
-// heartbeatRank orders peers by recency (higher = more recent).
-func heartbeatRank(view MeshView, nodeID string) int64 {
-	for _, node := range view.Nodes {
-		if strings.TrimSpace(node.NodeID) != nodeID || node.HeartbeatAt == nil {
-			continue
-		}
-		return node.HeartbeatAt.Unix()
-	}
-	return 0
 }
 
 // SubscriberConfig configures the peer SSE subscriber.
@@ -672,8 +736,10 @@ func (h *Host) StartPeerSync(cfg PeerSyncConfig) *Subscriber {
 
 	go func() {
 		sync := func() {
-			view := BuildView(paths, ViewOptions{SelfNodeID: selfID})
-			targets := PeerTargetsFromView(view, PeerTargetOptions{
+			// 发现只需要 endpoint/token/capabilities：直接读节点档案，
+			// 不构造完整 MeshView（不 join binding、不聚合 workspace/ownership）。
+			// 历史节点由 ListNodeFiles 的 dead-process 快路径跳过。
+			targets := PeerTargets(paths, PeerTargetOptions{
 				SelfNodeID:      selfID,
 				MaxPeers:        cfg.MaxPeers,
 				IncludeStale:    cfg.IncludeStale,

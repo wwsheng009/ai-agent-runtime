@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeRawBinding writes a binding file verbatim so the tolerant-reader rules
@@ -76,6 +77,57 @@ func TestBindingRoundTrip(t *testing.T) {
 	}
 	if version, _ := decoded["schema_version"].(float64); int(version) != SchemaVersion {
 		t.Fatalf("schema_version = %v, want %d", decoded["schema_version"], SchemaVersion)
+	}
+}
+
+// TestLoadBindingForViewUsesBoundedTTL 锁定 BuildView 专用 binding 缓存：
+// TTL 内复用，TTL 后重新 Stat/读取；写路径主动失效由 TestBindingRoundTrip
+// 与 BuildView 集成用例覆盖。
+func TestLoadBindingForViewUsesBoundedTTL(t *testing.T) {
+	resetMeshFileCaches()
+	paths := testPaths(t)
+	const sessionID = "session_view_cache"
+	now := time.Now().UTC()
+
+	if err := SaveBinding(paths, SessionBinding{
+		SchemaVersion: SchemaVersion,
+		SessionID:     sessionID,
+		Preferred:     &BindingAddr{Host: "127.0.0.1", Port: 55124},
+	}); err != nil {
+		t.Fatalf("SaveBinding: %v", err)
+	}
+	first, ok := loadBindingForView(paths, sessionID, now, time.Minute)
+	if !ok || first.Preferred == nil || first.Preferred.Port != 55124 {
+		t.Fatalf("first view binding = %+v ok=%v", first, ok)
+	}
+
+	// 本进程写路径必须主动失效 view 缓存。
+	if err := SaveBinding(paths, SessionBinding{
+		SchemaVersion: SchemaVersion,
+		SessionID:     sessionID,
+		Preferred:     &BindingAddr{Host: "127.0.0.1", Port: 55125},
+	}); err != nil {
+		t.Fatalf("SaveBinding refresh: %v", err)
+	}
+	invalidated, ok := loadBindingForView(paths, sessionID, now.Add(10*time.Second), time.Minute)
+	if !ok || invalidated.Preferred == nil || invalidated.Preferred.Port != 55125 {
+		t.Fatalf("local SaveBinding must invalidate view cache: %+v ok=%v", invalidated, ok)
+	}
+
+	// 绕过写路径直接落盘（模拟另一个进程）：TTL 内必须仍读缓存。
+	writeRawBinding(t, paths, sessionID,
+		`{"schema_version":2,"session_id":"session_view_cache","preferred":{"host":"127.0.0.1","port":55126}}`)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(paths.BindingPath(sessionID), future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	cached, ok := loadBindingForView(paths, sessionID, now.Add(30*time.Second), time.Minute)
+	if !ok || cached.Preferred == nil || cached.Preferred.Port != 55125 {
+		t.Fatalf("within TTL must use cache: %+v ok=%v", cached, ok)
+	}
+	refreshed, ok := loadBindingForView(paths, sessionID, now.Add(2*time.Minute), time.Minute)
+	if !ok || refreshed.Preferred == nil || refreshed.Preferred.Port != 55126 {
+		t.Fatalf("after TTL must refresh: %+v ok=%v", refreshed, ok)
 	}
 }
 

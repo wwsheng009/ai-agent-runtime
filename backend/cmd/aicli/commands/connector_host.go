@@ -1288,6 +1288,10 @@ func aicliForwardAttentionToPeers(logf func(format string, args ...any)) func(co
 			if kind != connectors.MeshPeerKindAICLI && kind != connectors.MeshPeerKindRuntimeServer {
 				continue
 			}
+			token := ""
+			if node.Record != nil && node.Record.Auth != nil {
+				token = strings.TrimSpace(node.Record.Auth.Token)
+			}
 			go func(baseURL, token, nodeID string) {
 				httpReq, err := http.NewRequest(http.MethodPost,
 					strings.TrimRight(baseURL, "/")+"/api/connectors/attention", bytes.NewReader(payload))
@@ -1310,12 +1314,7 @@ func aicliForwardAttentionToPeers(logf func(format string, args ...any)) func(co
 				if resp.StatusCode != http.StatusOK && logf != nil {
 					logf("connector attention forward to %s: HTTP %d", nodeID, resp.StatusCode)
 				}
-			}(node.Endpoint.BaseURL, aicliMeshPeerToken(node.NodeID), node.NodeID)
+			}(node.Endpoint.BaseURL, token, node.NodeID)
 		}
 	}
-}
-
-func aicliMeshPeerToken(nodeID string) string {
-	_, token := aicliMeshPeerLookup(nodeID)
-	return token
 }

@@ -13,12 +13,20 @@ import (
 
 // resetMeshFileCaches 清空解析缓存，用于「冷读」对照与测试隔离。
 func resetMeshFileCaches() {
+	nodeLivenessCache.Range(func(key, _ interface{}) bool {
+		nodeLivenessCache.Delete(key)
+		return true
+	})
 	nodeFileCache.Range(func(key, _ interface{}) bool {
 		nodeFileCache.Delete(key)
 		return true
 	})
 	bindingFileCache.Range(func(key, _ interface{}) bool {
 		bindingFileCache.Delete(key)
+		return true
+	})
+	bindingViewCache.Range(func(key, _ interface{}) bool {
+		bindingViewCache.Delete(key)
 		return true
 	})
 }
@@ -103,6 +111,67 @@ func TestLoadBindingCacheInvalidatesOnRewrite(t *testing.T) {
 	second, ok := LoadBinding(paths, "session-1")
 	require.True(t, ok)
 	require.Equal(t, 60002, second.Preferred.Port, "改写后必须重新读盘")
+}
+
+func TestNodeProcessAliveCachesDeadResultAndInvalidates(t *testing.T) {
+	resetMeshFileCaches()
+	previous := processAliveProbe
+	t.Cleanup(func() { processAliveProbe = previous })
+	calls := 0
+	processAliveProbe = func(int) bool {
+		calls++
+		return false
+	}
+
+	if nodeProcessAlive("node-dead", 4242) {
+		t.Fatal("fake dead pid reported alive")
+	}
+	if nodeProcessAlive("node-dead", 4242) {
+		t.Fatal("fake dead pid reported alive")
+	}
+	if calls != 1 {
+		t.Fatalf("dead liveness probe calls=%d, want 1 (cached)", calls)
+	}
+	invalidateNodeProcessLiveness("node-dead")
+	if nodeProcessAlive("node-dead", 4242) {
+		t.Fatal("fake dead pid reported alive")
+	}
+	if calls != 2 {
+		t.Fatalf("invalidated liveness must re-probe: calls=%d, want 2", calls)
+	}
+}
+
+func TestListNodeFilesSkipsStatForKnownDeadNode(t *testing.T) {
+	resetMeshFileCaches()
+	previousProbe := processAliveProbe
+	previousStat := fileStat
+	t.Cleanup(func() {
+		processAliveProbe = previousProbe
+		fileStat = previousStat
+	})
+	processAliveProbe = func(int) bool { return false }
+
+	paths := testPaths(t)
+	now := NowUTC()
+	writeViewNode(t, paths, viewNodeRecord("node-dead", 4242, now, "", ""))
+	// 第一次 BuildView 读取并缓存节点文件，同时把 PID 判定为 dead。
+	view := BuildView(paths, ViewOptions{Now: now})
+	if len(view.Nodes) != 1 || view.Nodes[0].State != NodeStateStale {
+		t.Fatalf("first view = %+v, want one stale node", view.Nodes)
+	}
+
+	statCalls := 0
+	fileStat = func(path string) (os.FileInfo, error) {
+		statCalls++
+		return os.Stat(path)
+	}
+	files := ListNodeFiles(paths)
+	if len(files) != 1 || files[0].Record == nil || files[0].Record.NodeID != "node-dead" {
+		t.Fatalf("fast list = %+v, want cached node-dead", files)
+	}
+	if statCalls != 0 {
+		t.Fatalf("known-dead node must skip Stat, got %d calls", statCalls)
+	}
 }
 
 // seedMeshBenchDir 构造 nodes×1 的 mesh 目录（每个节点带 binding）。

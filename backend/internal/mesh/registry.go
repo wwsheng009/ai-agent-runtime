@@ -172,7 +172,13 @@ func WriteNodeRecord(paths Paths, record NodeRecord) error {
 		return fmt.Errorf("mesh: encode node record: %w", err)
 	}
 	data = append(data, '\n')
-	return writeFileAtomic(path, data, 0o600)
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
+		return err
+	}
+	// 本进程刚写过心跳/状态：下一次扫描必须重新探测，不能被旧的 dead 缓存
+	// 或上次缓存的 NodeFile 挡住。
+	invalidateNodeProcessLiveness(record.NodeID)
+	return nil
 }
 
 // DeleteNodeRecord removes this node's record file. A missing file is not an
@@ -185,6 +191,7 @@ func DeleteNodeRecord(paths Paths, nodeID string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("mesh: delete node record: %w", err)
 	}
+	invalidateNodeProcessLiveness(nodeID)
 	return nil
 }
 
@@ -268,7 +275,18 @@ func ListNodeFiles(paths Paths) []NodeFile {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		files = append(files, ReadNodeFile(filepath.Join(paths.Nodes, entry.Name())))
+		path := filepath.Join(paths.Nodes, entry.Name())
+		// 已证明进程死亡的节点档案不会再复活（重启使用新的 NodeID），因此
+		// 可以直接复用上次解析结果，跳过 os.Stat + ReadFile + json.Unmarshal。
+		// 新出现的节点/仍存活的节点仍走 ReadNodeFile，保证心跳与状态及时更新。
+		if cached, found := nodeFileCache.Load(path); found {
+			file := cached.(nodeFileCacheEntry).file
+			if file.Record != nil && !nodeProcessAlive(file.Record.NodeID, file.Record.PID) {
+				files = append(files, file)
+				continue
+			}
+		}
+		files = append(files, ReadNodeFile(path))
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files

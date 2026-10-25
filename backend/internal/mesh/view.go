@@ -433,7 +433,7 @@ func buildNodeView(paths Paths, file NodeFile, now time.Time, heartbeatTTL time.
 			ActivatedAt: session.ActivatedAt,
 			OrphanedBy:  orphanedBy,
 		}
-		if binding, ok := LoadBinding(paths, session.ID); ok {
+		if binding, ok := loadBindingForView(paths, session.ID, now, DefaultBindingViewTTL); ok {
 			node.Binding = &binding
 		}
 	}
@@ -465,7 +465,7 @@ func effectiveNodeState(declared NodeState, record *NodeRecord, now time.Time, h
 	if record == nil {
 		return NodeStateUnknown
 	}
-	if !processAlive(record.PID) {
+	if !nodeProcessAlive(record.NodeID, record.PID) {
 		return NodeStateStale
 	}
 	heartbeat := record.Liveness.HeartbeatAt

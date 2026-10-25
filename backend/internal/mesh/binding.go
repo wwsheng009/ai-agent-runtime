@@ -127,7 +127,12 @@ func SaveBinding(paths Paths, binding SessionBinding) error {
 		return fmt.Errorf("mesh: encode binding: %w", err)
 	}
 	data = append(data, '\n')
-	return writeFileAtomic(path, data, 0o644)
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
+		return err
+	}
+	// BuildView 的短 TTL 缓存必须立即失效，保证本进程刚激活的会话端口可见。
+	invalidateBindingViewCache(path)
+	return nil
 }
 
 // TouchBinding publishes update.SessionID's binding: the preferred address plus
