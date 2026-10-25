@@ -522,7 +522,12 @@
 
   function locateSession(nodeID, sessionID) {
     if (!nodeID || !sessionID) { return; }
-    if (currentView() !== "sessions") { navigate("sessions"); }
+    if (currentView() !== "sessions") {
+      navigate("sessions");
+      // hashchange 是异步的；立即 applyRoute，保证随后的滚动/聚焦发生在
+      // 已可见的会话视图上（对 hidden 容器调用 scrollIntoView 是无效的）。
+      applyRoute();
+    }
     var selector = sessionCardSelector(nodeID, sessionID);
     var card = document.querySelector(selector);
     if (card) { pulseSessionCard(card); return; }
@@ -4941,7 +4946,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=49").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=50").catch(function () {});
     });
   }
 
