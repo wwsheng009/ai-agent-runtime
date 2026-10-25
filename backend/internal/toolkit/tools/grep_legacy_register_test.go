@@ -17,9 +17,9 @@ import (
 //   - presentation/no-op flags: the tool's own output shape already satisfies
 //     them, so the shared handler only has to accept and report them as ignored;
 //   - rg-engine flags (pcre2, engine, auto_hybrid_regex, multiline,
-//     multiline_dotall, replace, json, json_output, follow, crlf, sort*, ...):
-//     they need the ripgrep seam the runtime already exposes, plus their own
-//     output semantics and tests;
+//     multiline_dotall, replace, json, json_output, follow, crlf): they need
+//     the ripgrep seam the runtime already exposes, plus their own output
+//     semantics and tests;
 //   - escape hatches (rg_args, passthru): the raw-argument path deliberately
 //     mirrors rg's own parser.
 //
@@ -28,11 +28,11 @@ import (
 // honoring one of these, so the register has to be kept honest in both
 // directions.
 //
-// The presentation group and the type set edits (type_add/type_clear) have
+// The presentation group, the type set edits (type_add/type_clear) and the
+// ordering group (sort/sortr/sort_reverse/sort_files/no_sort_files) have
 // already moved: they are core-covered now.
 var grepLegacyOnlyParams = []string{
-	"no_sort_files", "passthru", "rg_args", "sort",
-	"sort_files", "sort_reverse", "sortr",
+	"passthru", "rg_args",
 }
 
 func TestGrepLegacyOnlyParamsAreRegistered(t *testing.T) {
@@ -113,6 +113,26 @@ func TestGrepTypeSetEditsRunOnTheSharedHandler(t *testing.T) {
 	} {
 		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
 			t.Fatalf("the shared handler must answer %v; the legacy path no longer owns type definitions", args)
+		}
+	}
+}
+
+// TestGrepSortSpellingsRunOnTheSharedHandler pins the ordering group the same
+// way: every spelling resolves in searchcore, so a host with ripgrep and one
+// without answer the call with the same order.
+func TestGrepSortSpellingsRunOnTheSharedHandler(t *testing.T) {
+	tool := NewGrepTool()
+	tool.SetBasePath(t.TempDir())
+	for _, args := range []map[string]interface{}{
+		{"pattern": "needle", "sort": "path"},
+		{"pattern": "needle", "sortr": "modified"},
+		{"pattern": "needle", "sort_reverse": "path"},
+		{"pattern": "needle", "sort_files": true},
+		{"pattern": "needle", "sort_files": false},
+		{"pattern": "needle", "no_sort_files": true},
+	} {
+		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
+			t.Fatalf("the shared handler must answer %v; the legacy path no longer owns ordering", args)
 		}
 	}
 }

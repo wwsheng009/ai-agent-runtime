@@ -1335,3 +1335,41 @@ rg 与 walker 都只消费解析后的 glob，谁也不再看 `--type-add`/`--ty
 - remotetools 对拍：`type_add`、扩展内置类型、`type_clear` 三组在 walker 与真实 rg 上得到同一文件集；
   本地/remote 同源等价性测试新增 `type_add` 与 `type_clear` 两个调用；
 - 登记表：9 → 7。剩余：`sort`/`sortr`/`sort_reverse`/`sort_files`/`no_sort_files`、`passthru`、`rg_args`。
+
+## 排序组已收敛：`sort` / `sortr` / `sort_reverse` / `sort_files` / `no_sort_files`（2026-10-25）
+
+### 结构冲突的解法
+引擎原先固定 `--sort path`，且 walker 是**流式扫描**（收满一页即停）。排序键如果只透传给 rg，
+没有 rg 的主机就只能得到另一种顺序——又变成「按环境区分功能」。这次把排序变成共享核的**扫描前阶段**：
+
+- `GrepOptions.SortKey` + `SortReverse` + `SortSet`；
+- walker 只在**显式请求排序**时先收集本 root 的候选文件（内存 O(本 root 文件数)），排序后再扫描；
+  未请求排序时仍是原来的流式路径，内存不随文件总量线性增长；
+- 排序**按 root 分别进行**，root 之间保持调用方给出的顺序——与引擎「每 root 一进程」的分页契约一致；
+- 时间键（modified/accessed/created）由平台文件实现读取：Linux 用 `Stat_t.Atim/Ctim`，
+  Windows 用 `Win32FileAttributeData.LastAccessTime/CreationTime`；其它平台明确报「当前平台不可用」，
+  并让引擎先接手（Runtime 能力缺失，不是共享引擎少功能）；
+- 平局按 root 相对路径升序兜底，两个方向都稳定且可复现。
+
+### rg 侧
+`ripgrepSearchArgs` 在请求排序时**移除** base 的 `--sort path`，改为一条 `--sort <key>` 或
+`--sortr <key>`；未请求时 base argv 逐字节不变（原有确定性契约测试继续通过）。
+显式「不排序」（`sort_files=false` / `no_sort_files=true` 清除 path 排序）必须表达为 `--sort none`，
+否则 base 的 `--sort path` 会悄悄把它覆盖掉——这正是共享引擎与旧实现最容易被忽略的差别。
+
+### 语义（与本地旧实现对齐）
+- 优先级：`sort` → `sortr`/`sort_reverse`（后者优先）→ `sort_files` → `no_sort_files`；
+- `sort_files`：true = `sort=path`，false = 不排序（显式）；
+- `no_sort_files`：只取消 path 排序；对 modified/accessed/created 无影响；单独出现且没有 path 排序时
+  不改变默认行为（不会误发 `--sort none`）；
+- `sort: none` 是显式「不保证顺序」，与「未设置」（默认 path）区分开；
+- metadata 与本地一致：`sort` 是生效键（反向时为空），`sortr` 仅在反向时给出键，`sort_files`
+  是 path 升序的生效状态；`no_sort_files` 不单独发布。
+
+### 证据
+- searchcore：path/modified 双向顺序、排序先于分页（offset=1 取第二个文件）、五种拼写的优先级矩阵、
+  非法键、metadata、rg argv（默认/正向/反向/none/显式不排序）；
+- 平台：Linux 与 Windows 都断言 atime/ctime 可读；
+- remotetools 对拍：path/modified 双向在 walker 与真实 rg 上顺序一致（顺序断言使用不会排序的 helper）；
+- 本地/remote 同源等价性：新增 sort path / sortr path / sort modified / sort_files 四个调用；
+- 登记表：7 → 2。剩余：`passthru`、`rg_args`。

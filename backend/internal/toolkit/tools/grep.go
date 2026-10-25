@@ -542,11 +542,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"sort": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sort。常用值如 path/modified/accessed/created/none；内置回退引擎原生支持 path 排序，其它时间类排序需要 rg。",
+				"description": "兼容 rg 的 --sort：按文件顺序排序（none/path/modified/accessed/created）。排序由共享核心执行，ripgrep 与内置 walker 两个引擎结果一致；没有 rg 时 walker 也支持时间排序（平台缺少对应时间戳时会明确报错，不会静默换序）。",
 			},
 			"sortr": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sortr（倒序排序）。常用值如 path/modified/accessed/created/none；内置回退引擎原生支持 path 倒序，其它时间类排序需要 rg。",
+				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列。排序由共享核心执行，两个引擎结果一致；与 sort 同时出现时 sortr 优先。",
 			},
 			"sort_reverse": map[string]interface{}{
 				"type":        "string",
@@ -554,11 +554,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --sort-files。true 时等价于 sort=path；grep 会保持稳定路径排序输出。",
+				"description": "兼容 rg 的 --sort-files。true 时等价于 sort=path，false 表示不排序；与 sort/sortr 同时出现时以本参数为准。排序由共享核心执行，两个引擎结果一致。",
 			},
 			"no_sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-sort-files。仅用于抵消 sort_files/--sort-files 这类熟悉写法；默认输出本就不是强制路径排序。",
+				"description": "兼容 rg 的 --no-sort-files：取消 path 排序（等价于 sort_files=false 的路径部分）；若排序键是 modified/accessed/created 则不受影响。共享核心执行，两个引擎结果一致。",
 			},
 			"max_depth": map[string]interface{}{
 				"type":        "integer",

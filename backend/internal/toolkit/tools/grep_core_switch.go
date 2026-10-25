@@ -25,6 +25,11 @@ var coreSearchParams = map[string]bool{
 	// filters as type/type_not, on both engines, so they belong here rather
 	// than on the ripgrep-owned legacy path.
 	"type_add": true, "type_clear": true,
+	// Ordering is resolved by the shared core (and implemented by both
+	// engines), so the schema spellings no longer belong to the ripgrep-owned
+	// legacy path.
+	"sort": true, "sortr": true, "sort_reverse": true,
+	"sort_files": true, "no_sort_files": true,
 	"mode": true, "files_with_matches": true, "count": true,
 	"files_without_match": true, "files_without_matches": true,
 	"max_count": true, "max_depth": true, "max_filesize": true,

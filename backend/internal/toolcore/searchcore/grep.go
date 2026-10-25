@@ -202,6 +202,19 @@ type GrepOptions struct {
 	// to ripgrep. No engine is handed the flags themselves.
 	TypeAdd   []string
 	TypeClear []string
+	// SortKey / SortReverse choose the file order before paging. Empty means
+	// the engine's deterministic default (path ascending); "none" explicitly
+	// leaves the order unspecified. The walker collects candidates and sorts
+	// them only when a key is requested, so the default streaming path keeps
+	// its bounded memory. Both engines use the same key, which keeps the page
+	// boundaries identical on a host with ripgrep and one without.
+	SortKey     string
+	SortReverse bool
+	// SortSet distinguishes "the caller did not ask" from "the caller asked
+	// for no sort". The first keeps the deterministic default (path); the
+	// second must reach the engine as an explicit `--sort none`, otherwise the
+	// base `--sort path` would silently override the request.
+	SortSet bool
 	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
 	// rendered page. It is a request for *that* format, so it needs the engine
 	// that emits it: the walker has no event stream to pass through, and the
@@ -216,7 +229,7 @@ type GrepOptions struct {
 // backreferences), so for such a call the walker must not get a turn first.
 func (o GrepOptions) RequiresRipgrep() bool {
 	return o.Pcre2 || o.Multiline || o.MultilineDotall || o.AutoHybridRegex || o.CRLF ||
-		o.JSONOutput || requiresRipgrepForEngine(o.Engine)
+		o.JSONOutput || requiresRipgrepForEngine(o.Engine) || !grepSortKeySupported(o.SortKey)
 }
 
 // requiresRipgrepForEngine mirrors rg's own default: an unset or "default"
@@ -505,6 +518,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		return nil
 	}
 
+	// Sorting is opt-in: the default path streams and stops as soon as the page
+	// is complete, so its memory stays bounded. A requested key is the caller
+	// accepting that one root's candidate list has to be materialized first.
+	sortKey := strings.TrimSpace(opts.SortKey)
+	sortRequested := opts.SortSet && sortKey != "" && sortKey != "none"
 	for _, root := range roots {
 		rules := newGrepIgnoreRules(newGrepIgnorePolicy(opts), root)
 		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
@@ -514,6 +532,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				}
 			}
 		} else {
+			var sortCandidates []grepSortCandidate
 			rootDevice := ""
 			if opts.OneFileSystem {
 				// The root itself is always searched: the boundary only stops
@@ -577,11 +596,29 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				if globMatcher != nil && !globMatcher.matches(relativeGrepCandidate(root, path)) {
 					return nil
 				}
+				if sortRequested {
+					sortCandidates = append(sortCandidates, grepSortCandidate{root: root, rules: rules, path: path})
+					return nil
+				}
 				return visit(root, rules, path)
 			}
 			walkErr := grepWalkRoot(root, opts.Follow, onEntry)
 			if walkErr != nil && walkErr != filepath.SkipAll {
 				return GrepResult{}, walkErr
+			}
+			if sortRequested {
+				ordered, sortErr := sortGrepCandidates(sortCandidates, opts.SortKey, opts.SortReverse)
+				if sortErr != nil {
+					return GrepResult{}, sortErr
+				}
+				for _, candidate := range ordered {
+					if err := visit(candidate.root, candidate.rules, candidate.path); err != nil {
+						if err == filepath.SkipAll {
+							break
+						}
+						return GrepResult{}, err
+					}
+				}
 			}
 		}
 		// Every root after the page is complete would only be scanned to be

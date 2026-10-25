@@ -5187,8 +5187,14 @@ func TestGrepTool_StructuredSortFamilyTranslateToRipgrep(t *testing.T) {
 				}
 			}
 			if tc.name == "no_sort_files clears structured path ordering" {
-				if strings.Contains(argsStr, "--sort") || strings.Contains(argsStr, "--sortr") {
-					t.Fatalf("expected no_sort_files to remove sort flags, got %v", gotArgs)
+				// The shared engine starts from a deterministic "--sort path"
+				// base, so "no sorting" is expressed by overriding it with
+				// --sort none rather than dropping the flag entirely.
+				if !strings.Contains(argsStr, "--sort none") {
+					t.Fatalf("expected no_sort_files to request --sort none, got %v", gotArgs)
+				}
+				if strings.Contains(argsStr, "--sort path") || strings.Contains(argsStr, "--sortr") {
+					t.Fatalf("no_sort_files must not leave a path order behind, got %v", gotArgs)
 				}
 			}
 			if tc.assertions != nil {

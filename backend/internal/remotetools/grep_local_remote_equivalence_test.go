@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
@@ -50,6 +51,19 @@ func TestLocalCoreRuntimeAgreesWithRemoteGrep(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Modified-time ordering must be a total order with no tie, or the two
+	// engines could legitimately disagree on the tie-break.
+	stamps := map[string]time.Time{
+		"a.go":        time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		"b.txt":       time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC),
+		"c.md":        time.Date(2020, 1, 3, 0, 0, 0, 0, time.UTC),
+		"nested/c.go": time.Date(2020, 1, 4, 0, 0, 0, 0, time.UTC),
+	}
+	for path, stamp := range stamps {
+		if err := os.Chtimes(filepath.Join(root, filepath.FromSlash(path)), stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
 	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -75,6 +89,10 @@ func TestLocalCoreRuntimeAgreesWithRemoteGrep(t *testing.T) {
 		{"type filter", map[string]interface{}{"pattern": "needle", "type": "go"}},
 		{"type add", map[string]interface{}{"pattern": "needle", "type": "doc", "type_add": "doc:*.md"}},
 		{"type clear", map[string]interface{}{"pattern": "needle", "type": "go", "type_add": "go:*.txt", "type_clear": "go"}},
+		{"sort path", map[string]interface{}{"pattern": "needle", "sort": "path"}},
+		{"sort reverse path", map[string]interface{}{"pattern": "needle", "sortr": "path"}},
+		{"sort modified", map[string]interface{}{"pattern": "needle", "sort": "modified"}},
+		{"sort files", map[string]interface{}{"pattern": "needle", "sort_files": true}},
 		{"paths", map[string]interface{}{"pattern": "needle", "paths": []interface{}{"nested", "."}, "glob": "*.go"}},
 	}
 

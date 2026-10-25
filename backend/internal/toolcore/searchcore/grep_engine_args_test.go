@@ -38,9 +38,10 @@ func captureRipgrep(t *testing.T, path string, fn func(engine Ripgrep) (GrepResu
 // invocation carries, because the remaining ports keep running into them:
 // --no-config makes a search independent of the user's ripgrep config,
 // --threads 1 keeps ordering stable, and --sort path makes the engine's page
-// compose like the walker's root-by-root walk. A port that needs a different
-// ordering (a user-chosen sort key, or a raw passthrough with one process) is
-// asking to give one of these up, which is why they are asserted here.
+// compose like the walker's root-by-root walk. A user-chosen sort key replaces
+// the --sort pair but keeps the other two flags and the root-by-root process
+// model; a raw passthrough that needs one process for several roots would give
+// one of them up, which is why the base stays asserted here.
 func TestRipgrepBaseArgsAreTheDeterminismContract(t *testing.T) {
 	want := []string{"--no-config", "--threads", "1", "--sort", "path"}
 	if got := ripgrepBaseArgs(); !reflect.DeepEqual(got, want) {

@@ -151,15 +151,38 @@ const ripgrepNoConfigFlag = "--no-config"
 // and both explicit values are honored, so the capability is not lost either way.
 func ripgrepSearchArgs(opts GrepOptions) []string {
 	base := ripgrepBaseArgs()
-	if !(opts.NoConfigSet && !opts.NoConfig) {
-		return base
-	}
-	args := make([]string, 0, len(base))
+	// A requested sort replaces the base "--sort path" pair rather than being
+	// appended after it. Both spellings let ripgrep's last flag win, but one
+	// pair in argv is one fact to read - and the default stays byte-identical.
+	replaceSort := opts.SortSet
+	args := make([]string, 0, len(base)+2)
+	skipSortValue := false
 	for _, arg := range base {
-		if arg == ripgrepNoConfigFlag {
+		if skipSortValue {
+			skipSortValue = false
+			continue
+		}
+		if opts.NoConfigSet && !opts.NoConfig && arg == ripgrepNoConfigFlag {
+			continue
+		}
+		if replaceSort && arg == "--sort" {
+			skipSortValue = true
 			continue
 		}
 		args = append(args, arg)
+	}
+	if replaceSort {
+		key := strings.TrimSpace(opts.SortKey)
+		if key == "" {
+			// Explicitly no sorting: the base --sort path was removed, and
+			// "none" states that the order is intentionally unspecified.
+			key = "none"
+		}
+		flag := "--sort"
+		if opts.SortReverse {
+			flag = "--sortr"
+		}
+		args = append(args, flag, key)
 	}
 	return args
 }

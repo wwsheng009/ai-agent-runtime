@@ -430,6 +430,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		NoContextSeparator:        boolArg(call.Args, "no_context_separator"),
 		Follow:                    follow,
 	}
+	sortKey, sortReverse, sortSet, sortFailure := grepSortFromArgs(call.Args)
+	if sortFailure != nil {
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"use none/path/modified/accessed/created for sort/sortr", sortFailure), nil
+	}
+	options.SortKey = sortKey
+	options.SortReverse = sortReverse
+	options.SortSet = sortSet
 	// head_limit is the local spelling of the page size. An explicit 0 means "no
 	// page cap" there (up to the safety ceiling), and when both spellings appear
 	// it wins: it is the only one that has ever meant "this page's size" on that
@@ -546,6 +554,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if options.JSONOutput {
 		outputFormat = "rg_passthrough"
 	}
+	sortReverseLabel := ""
+	if options.SortReverse {
+		sortReverseLabel = options.SortKey
+	}
+	sortLabel := options.SortKey
+	if !options.SortSet || options.SortReverse {
+		sortLabel = ""
+	}
 	// Validated above, so the error is unreachable here; the fallback keeps the
 	// metadata truthful if that ever changes.
 	includeGlobs, excludeGlobs, _ := EffectiveGrepFilters(options)
@@ -572,18 +588,25 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// json output is ripgrep's own stream, passed through: normalization is
 		// exactly what did not happen there, and the caller can see which of the
 		// two shapes it received.
-		"normalized_output":    !options.JSONOutput,
-		"match_count":          pageMatches,
-		"matches":              pageMatches,
-		"files":                len(result.Files),
-		"files_scanned":        result.FilesScanned,
-		"single_file":          result.SingleFile,
-		"is_truncated":         result.Truncated,
-		"invert_match":         options.InvertMatch,
-		"type":                 options.Type,
-		"type_not":             options.TypeNot,
-		"type_add":             append([]string{}, options.TypeAdd...),
-		"type_clear":           append([]string{}, options.TypeClear...),
+		"normalized_output": !options.JSONOutput,
+		"match_count":       pageMatches,
+		"matches":           pageMatches,
+		"files":             len(result.Files),
+		"files_scanned":     result.FilesScanned,
+		"single_file":       result.SingleFile,
+		"is_truncated":      result.Truncated,
+		"invert_match":      options.InvertMatch,
+		"type":              options.Type,
+		"type_not":          options.TypeNot,
+		"type_add":          append([]string{}, options.TypeAdd...),
+		"type_clear":        append([]string{}, options.TypeClear...),
+		// One ordering, two spellings: `sort` is the effective key and `sortr`
+		// repeats it only when the order is reversed. `sort_files` is the
+		// shortcut's effective state, not the raw request, exactly like the
+		// local surface has always reported it.
+		"sort":                 sortLabel,
+		"sortr":                sortReverseLabel,
+		"sort_files":           options.SortKey == "path" && !options.SortReverse,
 		"max_count":            options.MaxCount,
 		"max_count_explicit":   options.MaxCountSet,
 		"only_matching":        options.OnlyMatching,
@@ -1220,6 +1243,38 @@ func grepMaxFileSizeFromArgs(args map[string]any) (int64, *toolcore.Result) {
 	default:
 		return 0, nil
 	}
+}
+
+// grepSortFromArgs resolves the five ordering spellings into one effective
+// order. Precedence mirrors the local tool: sort, then sortr/sort_reverse,
+// then sort_files, then no_sort_files (which only cancels a path order).
+func grepSortFromArgs(args map[string]any) (key string, reverse, set bool, err error) {
+	if raw := stringArg(args, "sort"); raw != "" {
+		normalized, err := NormalizeGrepSortKey(raw)
+		if err != nil {
+			return "", false, false, err
+		}
+		key, reverse, set = normalized, false, true
+	}
+	if raw := stringArgAny(args, "sortr", "sort_reverse"); raw != "" {
+		normalized, err := NormalizeGrepSortKey(raw)
+		if err != nil {
+			return "", false, false, err
+		}
+		key, reverse, set = normalized, true, true
+	}
+	if argPresent(args, "sort_files") {
+		set = true
+		if boolArg(args, "sort_files") {
+			key, reverse = "path", false
+		} else {
+			key, reverse = "", false
+		}
+	}
+	if argPresent(args, "no_sort_files") && boolArg(args, "no_sort_files") && key == "path" {
+		key, reverse, set = "", false, true
+	}
+	return key, reverse, set, nil
 }
 
 // grepTypeListFromArgs reads the type-add/clear spellings: one string or a list

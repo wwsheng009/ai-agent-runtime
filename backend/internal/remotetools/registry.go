@@ -277,6 +277,26 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				},
 				"description": "兼容 rg 的 --type-clear：按名称清除内置/自定义文件类型规则，例如 foo。清除后该名称按未知类型回退为 *.<name>；同名同时出现在 type_add 与 type_clear 时以清除为准。规则由共享核心解析，ripgrep 与内置 walker 两个引擎结果一致，本地与 remote 使用同一实现。可传单个字符串或字符串数组。",
 			},
+			"sort": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --sort：按文件顺序排序（none/path/modified/accessed/created）。排序由共享核心执行，ripgrep 与内置 walker 两个引擎结果一致；没有 rg 时 walker 也支持时间排序（平台缺少对应时间戳时会明确报错）。本地与 remote 使用同一实现。",
+			},
+			"sortr": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列；与 sort 同时出现时 sortr 优先。共享核心执行，两个引擎结果一致。",
+			},
+			"sort_reverse": map[string]interface{}{
+				"type":        "string",
+				"description": "sortr 的兼容别名，两者等价。",
+			},
+			"sort_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --sort-files：true 等价于 sort=path，false 表示不排序；与 sort/sortr 同时出现时以本参数为准。共享核心执行，两个引擎结果一致。",
+			},
+			"no_sort_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-sort-files：取消 path 排序；若排序键是 modified/accessed/created 则不受影响。共享核心执行，两个引擎结果一致。",
+			},
 			"case_insensitive": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容别名；等价于 ignore_case=true。",
