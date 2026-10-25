@@ -552,5 +552,20 @@ relay 契约与设备注册 API 见
 > 提醒：v48 之前产生的历史通知 `extra` 没有 url，点击仍可能 403；重开 App 后的
 > 新通知正常。
 
+> **部署记录（2026-10-25 第九笔，通知点击改为站内定位 v50 + 桌面壳）**：网关
+> HEAD `07530876`（控制台 v50），raw sha256 `b88bb31d…032f45b1`；1MB 分块上传 + sha
+> 门禁 → 备份 `gateway.bak-20261025-162557` → 重启。桌面壳（Tauri，exe sha256
+> `f7e5aafb…5c361173`）改为：点击通知**只聚焦主窗口并派发
+> `aicli-gateway-locate` 事件**——不再导航到会话 Web UI、不再开独立窗口。控制台收到
+> 事件后切到会话视图、放宽筛选/搜索、必要时补拉一次快照，再滚动 + 脉冲高亮 + 聚焦
+> 目标卡片。验证：CDP 从 `#dashboard` 派发真实 node/session → hash `#sessions`、
+> 会话视图可见、目标卡片 `card-updated` 且 `document.activeElement` 为该卡片、
+> 位于视口内；线上 `app.js?v=50`/`sw.js` CACHE v50、`/api/notify/policy` 401、
+> health 200。流程中 v49（sha `5a3bee3f…`，备份 `gateway.bak-20261025-160424`）存活约
+> 20 分钟即被 v50 取代；关键差异是定位时先同步 `applyRoute()` 再滚动（hashchange 异步，
+> 对 hidden 容器 `scrollIntoView` 无效）。浏览器 / PWA 的 Web Push / ntfy `click` URL
+> 仍按节点 `kind` 指向 `/web/`（v48 行为不变）。
+> 回滚：网关 `gateway.bak-20261025-162557`；桌面壳需重新安装上一枚 exe。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

@@ -228,6 +228,10 @@ Tauri App 从线上控制台加载，独立配置页与策略门现已对真实 
 - v48 追加：通知点击深链按节点 kind 生成。生产实测同一 aicli 节点旧路径
   `/n/{node}/?session=…` 返回 403 `route not allowed`、新路径
   `/n/{node}/web/?session=…` 返回 200；CDP 捕获原生通知 `extra.url` 为该新路径。
+- v50 追加：桌面通知点击改为**站内定位**（不再导航/开窗）。Tauri 壳聚焦主窗口并派发
+  `aicli-gateway-locate` 事件；控制台切到会话视图、放宽筛选/搜索、必要时补拉快照，
+  再滚动 + 脉冲 + 聚焦目标卡片。CDP 实测从 `#dashboard` 派发真实 node/session →
+  hash `#sessions`、会话视图可见、目标卡片 `card-updated` 且获得焦点、位于视口内。
 
 语义提醒：App 重载后的首屏只做 seed（已存在的注意力不补弹，只有加载后的新变化通知）；
 浏览器 / PWA 需要重新“开启通知”建立 Web Push 订阅，桌面 App 走原生桥不依赖订阅。
