@@ -87,26 +87,17 @@ func TestGrepCoreSwitchCoversEveryRegisteredParam(t *testing.T) {
 	}
 }
 
-// TestGrepOnlyMatchingWithContextStaysOnTheLegacyPath records the one behavioural
-// route that is not a parameter: searchcore rejects only_matching combined with
-// context, and the local tool has always accepted it. Until the shared handler
-// implements the mix, the combination must route to the legacy path - and this
-// assertion is the reminder that "one implementation" has this hole in it.
-func TestGrepOnlyMatchingWithContextStaysOnTheLegacyPath(t *testing.T) {
+// TestGrepOnlyMatchingWithContextRunsOnTheSharedHandler records that the last
+// behavioural hole is closed: the combination used to route to the legacy path
+// because the shared handler rejected it, and it now renders `rg -o -C` there.
+func TestGrepOnlyMatchingWithContextRunsOnTheSharedHandler(t *testing.T) {
 	tool := NewGrepTool()
-	if _, handled := tool.executeCoreSearch(t.Context(), map[string]interface{}{
-		"pattern":       "needle",
-		"only_matching": true,
-		"context":       2,
-	}); handled {
-		t.Fatal("only_matching with context must stay on the legacy path until searchcore implements the mix")
-	}
-	// The same call without the context mix is core-served: the exclusion above
-	// is a combination rule, not a parameter rule.
-	if _, handled := tool.executeCoreSearch(t.Context(), map[string]interface{}{
-		"pattern":       "needle",
-		"only_matching": true,
-	}); !handled {
-		t.Fatal("only_matching alone must run on the shared handler")
+	for _, args := range []map[string]interface{}{
+		{"pattern": "needle", "only_matching": true, "context": 2},
+		{"pattern": "needle", "only_matching": true},
+	} {
+		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
+			t.Fatalf("the shared handler must answer %v; the legacy path is retired for it", args)
+		}
 	}
 }

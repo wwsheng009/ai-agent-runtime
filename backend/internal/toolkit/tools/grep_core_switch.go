@@ -65,12 +65,6 @@ func (g *GrepTool) executeCoreSearch(ctx context.Context, params map[string]inte
 			return nil, false
 		}
 	}
-	if boolParamValue(params, "only_matching") &&
-		(intParamValue(params, "context") > 0 || intParamValue(params, "before_context") > 0 || intParamValue(params, "after_context") > 0) {
-		// The core rejects this combination; the legacy path accepts it, so
-		// route it there until the core implements the mix.
-		return nil, false
-	}
 	converted, err := executeCoreSearchTool(ctx, g, params)
 	if err != nil || converted == nil {
 		return nil, false

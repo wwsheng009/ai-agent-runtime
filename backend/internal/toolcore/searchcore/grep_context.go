@@ -36,12 +36,17 @@ type grepContextWindow struct {
 }
 
 // ExpandGrepContext turns the windowed match list into the display lines of
-// each match's context window. It is engine-independent by construction:
-// context lines are produced by re-reading the matched files through the same
+// each match's context window. It is engine-independent by construction: context
+// lines are produced by re-reading the matched files through the same
 // bounded line reader the walker uses, so ripgrep never has to pass
 // --context and the two engines cannot render different windows. A match that
 // falls inside an earlier match's window is not duplicated.
-func ExpandGrepContext(matches []GrepMatch, before, after int) []GrepContextLine {
+//
+// onlyMatching is the one place the two output units meet: with it a matched
+// line shows its fragments and the surrounding lines still show whole lines -
+// exactly what `rg -o -C` prints. Every fragment on the line is its own entry,
+// and the entries stay adjacent so a renderer does not separate them.
+func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching bool) []GrepContextLine {
 	before = ClampGrepContextLines(before)
 	after = ClampGrepContextLines(after)
 	out := make([]GrepContextLine, 0, len(matches))
@@ -59,13 +64,13 @@ func ExpandGrepContext(matches []GrepMatch, before, after int) []GrepContextLine
 		for j < len(matches) && matches[j].File == file {
 			j++
 		}
-		expandGrepContextFile(reader, matches[i:j], file, before, after, &out)
+		expandGrepContextFile(reader, matches[i:j], file, before, after, onlyMatching, &out)
 		i = j
 	}
 	return out
 }
 
-func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, out *[]GrepContextLine) {
+func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, onlyMatching bool, out *[]GrepContextLine) {
 	windows := make([]grepContextWindow, 0, len(matches))
 	for _, match := range matches {
 		start := match.Line - before
@@ -119,6 +124,17 @@ func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string,
 		isMatch := false
 		if matchIdx < len(matches) && lineNo == matches[matchIdx].Line {
 			isMatch = true
+		}
+		if isMatch && onlyMatching {
+			// The matched line carries fragments; every fragment on it is one
+			// entry, and they share a line number on purpose.
+			for matchIdx < len(matches) && matches[matchIdx].Line == lineNo {
+				appendGrepContextLine(out, file, lineNo, matches[matchIdx].Text, true)
+				matchIdx++
+			}
+			continue
+		}
+		if isMatch {
 			matchIdx++
 		}
 		appendGrepContextLine(out, file, lineNo, string(display), isMatch)
@@ -135,10 +151,17 @@ func appendGrepContextLine(out *[]GrepContextLine, file string, line int, text s
 	})
 }
 
+// startsGrepContextGroup reports whether a line begins a new context block. Two
+// entries on the same line are one block: with only_matching a line contributes
+// several fragments, and a separator between them would invent a gap that is not
+// there.
 func startsGrepContextGroup(out []GrepContextLine, file string, line int) bool {
 	if len(out) == 0 {
 		return true
 	}
 	last := out[len(out)-1]
-	return last.File != file || line != last.Line+1
+	if last.File != file {
+		return true
+	}
+	return line != last.Line && line != last.Line+1
 }

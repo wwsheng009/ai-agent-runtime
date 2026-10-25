@@ -320,6 +320,9 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		maxCount = 0
 	}
 	onlyMatching := boolArg(call.Args, "only_matching")
+	// Fragment output and a context window are one page shape, not two:
+	// `rg -o -C` prints the matched line's fragments and whole lines around
+	// them, which is exactly what ExpandGrepContext now renders.
 	// count_matches is "count occurrences instead of lines". In count mode the
 	// fragment unit already produces exactly that arithmetic, so it folds into
 	// OnlyMatching instead of becoming a separate counting rule. Outside count
@@ -353,14 +356,6 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return ignoreFailure, nil
 	}
 	contextBefore, contextAfter := grepContextFromArgs(call.Args)
-	if onlyMatching && (contextBefore > 0 || contextAfter > 0) {
-		// Reporting the conflict beats silently dropping one of the two
-		// parameters: the fragment output unit and the line-window expansion
-		// cannot both own the same line.
-		return toolcore.Error(toolcore.ErrInvalidArgument,
-			"drop context or only_matching: fragment output and context windows are not combined by the shared core yet",
-			fmt.Errorf("only_matching 与 context 不能同时使用")), nil
-	}
 	options := GrepOptions{
 		Patterns:                  patterns,
 		PatternFiles:              patternFiles,

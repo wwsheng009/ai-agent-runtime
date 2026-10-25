@@ -46,7 +46,7 @@ func TestExpandGrepContextWindowsAndGroups(t *testing.T) {
 		{File: file, Line: 7, Text: "MATCH7"},
 	}
 
-	got := ExpandGrepContext(matches, 1, 1)
+	got := ExpandGrepContext(matches, 1, 1, false)
 	want := []GrepContextLine{
 		contextLine(file, 2, "l2", false, true),
 		contextLine(file, 3, "MATCH3", true, false),
@@ -65,7 +65,7 @@ func TestExpandGrepContextMergesOverlappingWindows(t *testing.T) {
 		{File: file, Line: 4, Text: "M4"},
 	}
 
-	got := ExpandGrepContext(matches, 1, 1)
+	got := ExpandGrepContext(matches, 1, 1, false)
 	want := []GrepContextLine{
 		contextLine(file, 2, "l2", false, true),
 		contextLine(file, 3, "M3", true, false),
@@ -83,7 +83,7 @@ func TestExpandGrepContextClampsBeforeContext(t *testing.T) {
 	file := writePatternFixture(t, "long.txt", content)
 	matches := []GrepMatch{{File: file, Line: 20, Text: "l20"}}
 
-	got := ExpandGrepContext(matches, 99, 0)
+	got := ExpandGrepContext(matches, 99, 0, false)
 	if len(got) != MaxGrepContextLines+1 {
 		t.Fatalf("clamped window should cover %d lines, got %d: %s",
 			MaxGrepContextLines+1, len(got), formatContextLines(got))
@@ -103,7 +103,7 @@ func TestExpandGrepContextWithoutContextPassesThroughMatches(t *testing.T) {
 		{File: file, Line: 5, Text: "M5"},
 	}
 
-	got := ExpandGrepContext(matches, 0, 0)
+	got := ExpandGrepContext(matches, 0, 0, false)
 	want := []GrepContextLine{
 		contextLine(file, 2, "M2", true, true),
 		contextLine(file, 5, "M5", true, true),
@@ -119,7 +119,7 @@ func TestExpandGrepContextStartsNewGroupPerFile(t *testing.T) {
 		{File: second, Line: 2, Text: "M2"},
 	}
 
-	got := ExpandGrepContext(matches, 0, 1)
+	got := ExpandGrepContext(matches, 0, 1, false)
 	want := []GrepContextLine{
 		contextLine(first, 2, "M1", true, true),
 		contextLine(first, 3, "b", false, false),

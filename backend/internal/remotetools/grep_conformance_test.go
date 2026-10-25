@@ -339,9 +339,9 @@ func callToolExpectingError(t *testing.T, ctx context.Context, session *mcp.Clie
 }
 
 // TestRemoteGrepOnlyMatchingOverMCP proves the fragment flag survives schema
-// validation, renders `path:line:column:fragment`, and that the unsupported
-// only_matching+context combination fails loudly instead of silently dropping
-// one of the two parameters.
+// validation and renders `path:line:column:fragment`. The only_matching+context
+// combination used to be refused ("not combined by the shared core yet"); it now
+// renders `rg -o -C` - fragments for the matched line, whole lines around it.
 func TestRemoteGrepOnlyMatchingOverMCP(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("foo bar foo\nother\n"), 0o644); err != nil {
@@ -364,11 +364,14 @@ func TestRemoteGrepOnlyMatchingOverMCP(t *testing.T) {
 		t.Fatalf("only_matching must not print whole lines:\n%s", fragments)
 	}
 
-	conflict := callToolExpectingError(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+	mixed := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "foo", "only_matching": true, "context": 1,
 	})
-	if !strings.Contains(conflict, "only_matching") || !strings.Contains(conflict, "context") {
-		t.Fatalf("the conflict message should name both parameters:\n%s", conflict)
+	if !strings.Contains(mixed, "a.txt>1: foo") {
+		t.Fatalf("the matched line must show fragments:\n%s", mixed)
+	}
+	if !strings.Contains(mixed, "a.txt 2: other") {
+		t.Fatalf("the context line must show the whole line:\n%s", mixed)
 	}
 }
 

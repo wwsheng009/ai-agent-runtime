@@ -148,7 +148,7 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		}
 		page.renderedFiles = len(in.result.Files)
 	case in.contextBefore > 0 || in.contextAfter > 0:
-		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter)
+		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter, in.options.OnlyMatching)
 		page.contextLines = len(expanded)
 		printedAny := false
 		for _, line := range expanded {
