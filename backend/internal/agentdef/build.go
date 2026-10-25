@@ -154,6 +154,12 @@ func BuildBinding(def *Definition) (*Binding, error) {
 	case "off", "workspace", "strict":
 		sandbox["mode"] = clone.Sandbox
 	}
+	// Explicit read_only wins over the sandbox-derived default, so a role can
+	// keep the read-only tool surface while dropping the workspace-only path
+	// jail (sandbox removed) — or re-add read-only alongside any sandbox mode.
+	if clone.ReadOnly != nil {
+		readOnly = clone.ReadOnly
+	}
 
 	promptText := clone.Body
 	if clone.Description != "" && clone.PromptMode == PromptModeExtend {

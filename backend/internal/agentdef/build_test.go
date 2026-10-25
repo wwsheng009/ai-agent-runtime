@@ -86,3 +86,57 @@ func TestBuildBinding_ProfileCannotDefaultToBypassPermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, runtimepolicy.ModePlan, binding.PermissionMode)
 }
+
+// read_only 与 sandbox 解耦（2026-10）：sandbox: read-only 仍派生只读工具面，
+// 但显式 read_only 覆盖派生值，使角色可以「只读工具面 + 无路径监狱」——
+// 这是 builtin explore 的形态，也是子代理跨项目读取与父代理对齐的基础。
+func TestBuildBindingReadOnlyDecoupledFromSandbox(t *testing.T) {
+	// 兼容路径：sandbox: read-only 仍隐含 ReadOnly + read-only 沙箱。
+	legacy := &Definition{Name: "legacy", Sandbox: "read-only", Source: SourceBuiltin}
+	binding, err := BuildBinding(legacy)
+	require.NoError(t, err)
+	require.NotNil(t, binding.ReadOnly)
+	assert.True(t, *binding.ReadOnly)
+	assert.Equal(t, "read-only", binding.Sandbox["mode"])
+
+	// 显式 read_only: true 且无 sandbox：只读工具面成立，但不物化路径沙箱。
+	explorer := &Definition{Name: "explorer", ReadOnly: readOnlyTrue(), Source: SourceBuiltin}
+	binding, err = BuildBinding(explorer)
+	require.NoError(t, err)
+	require.NotNil(t, binding.ReadOnly)
+	assert.True(t, *binding.ReadOnly)
+	assert.Empty(t, binding.Sandbox)
+
+	// 显式 read_only: false 压过 sandbox: read-only 的派生（显式声明优先）。
+	writable := &Definition{Name: "writable", Sandbox: "read-only", ReadOnly: func() *bool { v := false; return &v }(), Source: SourceBuiltin}
+	binding, err = BuildBinding(writable)
+	require.NoError(t, err)
+	require.NotNil(t, binding.ReadOnly)
+	assert.False(t, *binding.ReadOnly)
+	assert.Equal(t, "read-only", binding.Sandbox["mode"], "sandbox mode stays for path bounds")
+}
+
+// TestBuiltinExploreReadOnlyWithoutSandboxJail 钉住内建 explore 的目标形态：
+// 只读工具面保留（含 plan 默认），但不再物化 workspace-only 路径沙箱，
+// 使子代理的路径边界与父代理一致（§4.5 门禁 + 会话准入），除非项目/用户
+// def 显式声明 sandbox 收窄。
+func TestBuiltinExploreReadOnlyWithoutSandboxJail(t *testing.T) {
+	var explore *Definition
+	for _, def := range BuiltinDefinitions() {
+		if def.Name == "explore" {
+			explore = def
+			break
+		}
+	}
+	require.NotNil(t, explore)
+	assert.Empty(t, explore.Sandbox)
+	require.NotNil(t, explore.ReadOnly)
+	assert.True(t, *explore.ReadOnly)
+
+	binding, err := BuildBinding(explore)
+	require.NoError(t, err)
+	require.NotNil(t, binding.ReadOnly)
+	assert.True(t, *binding.ReadOnly)
+	assert.Empty(t, binding.Sandbox, "builtin explore must not materialize a path sandbox")
+	assert.Equal(t, runtimepolicy.ModePlan, binding.PermissionMode)
+}

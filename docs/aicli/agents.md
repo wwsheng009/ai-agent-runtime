@@ -78,6 +78,7 @@ Do not mutate the workspace.
 | `promptMode` | `extend`（追加）或 `full`（替换 role 段） |
 | `completionRequirement` | `none` 或 `complete_task`（worker 需 outcome） |
 | `sandbox` | 应用层 profile：`off` / `workspace` / `read-only` / `strict`（见下） |
+| `read_only` | 显式只读工具面（写型工具移除并硬拒、shell 走只读白名单），独立于 `sandbox`；`sandbox: read-only` 仍隐含它（兼容）。需要只读工具面但不要「仅工作区」路径监狱的角色直接声明 `read_only: true` 且省略 `sandbox`（builtin `explore` 即此形态） |
 | `skills` | 可选 skill id 白名单；空 = 走全局 skills route（非空时投影到 session `ProfileSkillSelection.Allowlist`） |
 | `model` / `provider` | 可选覆盖 |
 | `reasoningEffort` | `none` / `low` / `medium` / `high` / `xhigh` / `max`。未知档位在**加载期**丢弃并记 warning（文件仍加载），运行期再由 modelrouting 按解析出的模型校验/回退 |
@@ -93,8 +94,10 @@ Do not mutate the workspace.
 | --- | --- |
 | `off` | 不启用 sandbox 路径/网络/命令限制 |
 | `workspace` | 仅允许访问 session workspace 路径（可写） |
-| `read-only` | workspace 路径只读 + tool ReadOnly + 危险命令 deny；`explore` 默认；未显式 `permissionMode` 时可投影为 plan |
+| `read-only` | workspace 路径只读 + tool ReadOnly + 危险命令 deny；未显式 `permissionMode` 时可投影为 plan |
 | `strict` | read-only + 阻断网络 + 更严命令/env 限制 |
+
+> 内置 `explore` 角色自 2026-10 起不再默认 `sandbox: read-only`，改为 `read_only: true`（只读工具面保留，路径边界随会话准入与父代理一致）。需要恢复路径监狱的项目 def 显式声明 `sandbox: read-only` 即可覆盖内置默认。
 
 workspace root 尚未可知时会 **显式降级并告警**（stderr/log），不会静默宣称已 enforce。chat session 与子 agent 在 workspace 确定后会再次 materialize path bounds。
 

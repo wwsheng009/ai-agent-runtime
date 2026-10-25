@@ -51,6 +51,12 @@ type Definition struct {
 	PromptMode            PromptMode            `yaml:"promptMode,omitempty" json:"promptMode,omitempty"`
 	CompletionRequirement CompletionRequirement `yaml:"completionRequirement,omitempty" json:"completionRequirement,omitempty"`
 	Sandbox               string                `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// ReadOnly pins the tool-surface read-only flag (write-like tools removed
+	// and denied, shell restricted to the read-only allow table) independently
+	// of the path sandbox. `sandbox: read-only` keeps implying it for
+	// backwards compatibility; a role that only wants the read-only surface
+	// without the workspace-only path jail declares read_only directly.
+	ReadOnly *bool `yaml:"read_only,omitempty" json:"read_only,omitempty"`
 	// MaxTurns caps the agent loop for runs of this role. 0 = inherit the
 	// runtime/session default (CommandCode-compatible maxTurns semantics).
 	MaxTurns int `yaml:"maxTurns,omitempty" json:"max_turns,omitempty"`

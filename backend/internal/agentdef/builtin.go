@@ -5,6 +5,11 @@ package agentdef
 // and management surfaces must make the override visible.
 var ReservedAgentNames = []string{"explore", "plan", "general"}
 
+func readOnlyTrue() *bool {
+	v := true
+	return &v
+}
+
 // IsReservedAgentName reports whether name (normalized) is a built-in role id.
 func IsReservedAgentName(name string) bool {
 	normalized := normalizeAgentName(name)
@@ -28,7 +33,11 @@ func BuiltinDefinitions() []*Definition {
 			PermissionMode:        "plan",
 			PromptMode:            PromptModeExtend,
 			CompletionRequirement: CompletionNone,
-			Sandbox:               "read-only",
+			// Read-only tool surface without the workspace-only path jail: the
+			// role keeps write-like tools denied, but path access follows the
+			// session's external-directory admission (§4.5) like the parent.
+			// Explicit sandbox configs on user/project overrides re-narrow it.
+			ReadOnly:              readOnlyTrue(),
 			Body:                  "You are a read-only explorer. Prefer view/grep/glob/ls. Use shell only for read-only commands. Do not mutate the workspace.",
 			SourcePath:            "builtin:explore",
 			Source:                SourceBuiltin,
