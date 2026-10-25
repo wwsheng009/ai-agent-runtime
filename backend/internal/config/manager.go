@@ -304,7 +304,8 @@ type ResidencyConfig struct {
 	// T10-4 起默认值为 true，若用 bool 则显式 `enabled: false` 与省略无法区分，
 	// 回退开关会失效（这正是我们在回退演练里修过的一类"静默 no-op"）。
 	Enabled *bool `yaml:"enabled" json:"enabled,omitempty"`
-	// EvictPrefix 同理：默认 false，显式 true 才开启逐出（canary 开关）。
+	// EvictPrefix 同理：默认 true（超过驻留预算自动逐出已交付前缀）；
+	// 显式 false 可退回“只窗口化、不逐出”的保守档。
 	EvictPrefix        *bool   `yaml:"evictPrefix" json:"evictPrefix,omitempty"`
 	MaxResidentCells   int     `yaml:"maxResidentCells" json:"maxResidentCells"`
 	MaxResidentRows    int     `yaml:"maxResidentRows" json:"maxResidentRows"`

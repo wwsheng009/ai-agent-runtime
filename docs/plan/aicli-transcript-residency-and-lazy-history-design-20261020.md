@@ -545,8 +545,8 @@ pager / resize / 回到冷区
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `ui.residency.enabled` | `false` | 总开关（灰度） |
-| `ui.residency.evictPrefix` | `false` | 允许逐出（Stage 3 前保持 false） |
+| `ui.residency.enabled` | `true` | 总开关（显式 false 可回退） |
+| `ui.residency.evictPrefix` | `true` | 越过 high-water 自动逐出；显式 false 为只窗口化档 |
 | `ui.residency.maxResidentCells` | `512` | L1 上限 |
 | `ui.residency.maxResidentRows` | `4096` | L1 行上限 |
 | `ui.residency.maxResidentMiB` | `32` | L1 字节上限 |
@@ -877,8 +877,8 @@ open/scroll(pager):
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `ui.residency.enabled` | `false` | 总开关（灰度） |
-| `ui.residency.evictPrefix` | `false` | 逐出开关；Spike 通过前保持 false |
+| `ui.residency.enabled` | `true` | 总开关（显式 false 可回退） |
+| `ui.residency.evictPrefix` | `true` | 逐出开关；越过 high-water 自动逐出，显式 false 可关闭 |
 | `ui.residency.maxResidentCells` | `512` | L1 cell 上限 |
 | `ui.residency.maxResidentRows` | `4096` | L1 行上限 |
 | `ui.residency.maxResidentMiB` | `24` | L1 字节上限 |
@@ -968,7 +968,7 @@ pager 首屏 ≤1 帧；冷页回填 p95 ≤50ms；`rematerialize_failures == 0`
 | P1 默认值/门禁/开放问题 | §15.1、§16、§17 |
 
 > 审查报告：`docs/plan/aicli-transcript-residency-and-lazy-history-design-20261020-review.md`。
-> 实施顺序：Spike-1..4 → P0 项落码（§14.1–§14.6）→ Stage 3 灰度（`evictPrefix=true`）→ Stage 4 默认开启。
+> 实施顺序：Spike-1..4 → P0 项落码（§14.1–§14.6）→ Stage 3 灰度（`evictPrefix=true`）→ Stage 4 默认开启（自动高水位逐出）。
 >
 > **实施任务清单与验证计划**：`docs/plan/aicli-transcript-residency-implementation-tasks-20261020.md`
 > （T0–T10 任务分解、R1–R8 实机 ConPTY 用例矩阵、里程碑硬门禁与证据登记表）。

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"math"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -289,6 +290,11 @@ func (b *chatRuntimeEventBridge) applySceneTrimPolicyLocked() int {
 			policy.LastReason = "prefix_window_exceeded"
 		}
 		ui.NoteTranscriptResidencyEviction(persisted)
+		// 大批历史已收敛到驻留窗口：异步归还 Go 保留的空闲堆。只在整个
+		// 前缀已经缩到 keep 以内时触发，避免每批 256 个 cell 都做全局 GC。
+		if total-persisted <= keep && policy.TrimmedCells+persisted >= 2048 {
+			scheduleChatTranscriptMemoryReclaim()
+		}
 
 		// T10（A）：把同一批写穿成功的 cell 记入冷区账本，供 pager 冷区读回
 		// 与 status 的 index 分区（prefix_fence / fold_target）使用。
@@ -316,22 +322,34 @@ func (b *chatRuntimeEventBridge) ensureSceneTrimPolicy() {
 		return
 	}
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || !runtime.Options.Enabled || runtime.Store == nil {
+	if runtime == nil || !runtime.Options.Enabled {
 		return
 	}
-	// §15.1 保守档：`evictPrefix=false`（默认）表示"只窗口化、不逐出"。
-	// 若在这里也装上裁剪策略，enabled=true 就会静默打开逐出——与配置语义不符，
-	// 也让灰度开关失效（T10 的 canary 正是靠它分批放量）。
+	// 显式 `evictPrefix=false` 表示"只窗口化、不逐出"。
 	if !runtime.Options.EvictPrefix {
+		return
+	}
+	// 自动逐出只在越过 high-water 后启动。短会话既不装策略，也不创建
+	// session_cells.sqlite；长会话才进入写穿/冷区路径。
+	keep := runtime.Options.MaxResidentCells
+	if keep <= 0 {
+		keep = 512
+	}
+	trigger := int(math.Ceil(float64(keep) * runtime.Options.EvictHighWater))
+	if trigger < keep {
+		trigger = keep
+	}
+	total := b.renderScene.Len()
+	if total <= trigger {
 		return
 	}
 	sessionID := strings.TrimSpace(b.session.RuntimeSession.ID)
 	if sessionID == "" {
 		return
 	}
-	keep := runtime.Options.MaxResidentCells
-	if keep <= 0 {
-		keep = 512
+	store := runtime.ensureStore()
+	if store == nil {
+		return
 	}
 	batch := keep / 2
 	if batch < 32 {
@@ -344,10 +362,10 @@ func (b *chatRuntimeEventBridge) ensureSceneTrimPolicy() {
 		RowsPerGen:    0, // 真实行数由 residency 账本在逐出路径固化
 		Generation:    1,
 		SessionID:     sessionID,
-		Store:         runtime.Store,
+		Store:         store,
 		// 冷区账本与裁剪策略同源（同一 store/会话）：pager 冷区读回与 status
 		// 的 index 分区都以它为准。
-		Residency: ui.NewTranscriptResidency(runtime.Policy, runtime.Store, sessionID),
+		Residency: ui.NewTranscriptResidency(runtime.Policy, store, sessionID),
 	}
 }
 

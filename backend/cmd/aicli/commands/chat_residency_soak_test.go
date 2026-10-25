@@ -55,12 +55,13 @@ func TestResidencySoak(t *testing.T) {
 	cfg.UI.Residency.EvictPrefix = boolPtr(true)
 	cfg.UI.Residency.MaxResidentCells = keep
 	applyTranscriptResidencyConfig(cfg, dir)
-	if runtime := currentTranscriptResidencyRuntime(); runtime == nil || runtime.Store == nil {
+	if runtime := currentTranscriptResidencyRuntime(); runtime == nil || runtime.ensureStore() == nil {
 		t.Fatalf("residency 运行时未就绪：%+v", runtime)
 	}
 
 	sessionID := "r8-soak"
-	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}})
+	// 先越过 high-water（512×1.25=640），自动路径才会安装裁剪策略并打开 store。
+	bridge := newSceneTrimTestBridgeWithSession(t, 700, sessionID)
 	bridge.applyChangeSet(&encoding.ChangeSet{})
 	if bridge.sceneTrimPolicy == nil {
 		t.Fatal("裁剪策略未安装")
@@ -86,7 +87,7 @@ func TestResidencySoak(t *testing.T) {
 
 	started := time.Now()
 	deadline := started.Add(time.Duration(minutes) * time.Minute)
-	nextCellID := scene.CellID(1)
+	nextCellID := scene.CellID(701)
 	samples := make([]sample, 0, minutes*4)
 	// 追加节奏：每 500ms 追加 20 个 cell（≈40 cells/s）。30 分钟 ≈ 72k cells，
 	// 远超设计里 20k cells 的量级，足以暴露"驻留随总量增长"的回归。
@@ -180,16 +181,16 @@ func TestResidencySoak(t *testing.T) {
 	}
 
 	report := map[string]any{
-		"task":             "R8 residency soak",
-		"started_at":       started.UTC().Format(time.RFC3339),
-		"minutes":          minutes,
-		"keep_cells":       keep,
-		"samples":          samples,
-		"failures":         failures,
-		"verdict":          verdictOf(failures),
-		"final_residency":  lastStats,
-		"appended_cells":   nextCellID - 1,
-		"sample_count":     len(samples),
+		"task":            "R8 residency soak",
+		"started_at":      started.UTC().Format(time.RFC3339),
+		"minutes":         minutes,
+		"keep_cells":      keep,
+		"samples":         samples,
+		"failures":        failures,
+		"verdict":         verdictOf(failures),
+		"final_residency": lastStats,
+		"appended_cells":  nextCellID - 1,
+		"sample_count":    len(samples),
 	}
 	raw, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

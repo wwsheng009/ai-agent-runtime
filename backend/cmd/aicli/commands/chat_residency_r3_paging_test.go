@@ -103,7 +103,7 @@ func TestResidencyMultiPageLoadKeepsOrderAndEvictsDeliveredPrefix(t *testing.T) 
 	cfg.UI.Residency.MaxResidentCells = 16
 	applyTranscriptResidencyConfig(cfg, dir)
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || runtime.Store == nil {
+	if runtime == nil || runtime.ensureStore() == nil {
 		t.Fatalf("residency 运行时未就绪：%+v", runtime)
 	}
 
@@ -112,13 +112,13 @@ func TestResidencyMultiPageLoadKeepsOrderAndEvictsDeliveredPrefix(t *testing.T) 
 	// ensureSceneTrimPolicy 需要可解析的 sessionID 才写穿/裁剪（无 ID 属刻意
 	// fail-closed）；本用例注入 loaded 会话作为运行时会话。
 	chatSession.RuntimeSession = session
-	// 首轮 apply 安装裁剪策略（ensureSceneTrimPolicy），随后才能注入交付事实。
+	// 把完整历史作为已交付内容装载进场景（等价于 resume 后的 canonical seed）。
+	// 必须先有超过 high-water 的场景，ensureSceneTrimPolicy 才会安装策略。
+	seedSceneFromMessages(t, bridge, chatSession.resumeHistorySnapshot())
 	bridge.applyChangeSet(&encoding.ChangeSet{})
 	if bridge.sceneTrimPolicy == nil {
 		t.Fatal("residency 启用 + evictPrefix 时 bridge 应自动安装裁剪策略")
 	}
-	// 把完整历史作为已交付内容装载进场景（等价于 resume 后的 canonical seed）。
-	seedSceneFromMessages(t, bridge, chatSession.resumeHistorySnapshot())
 
 	// 本用例没有 uiActor（不是交互渲染进程），交付事实无法从账本判定。
 	// 生产里"多页装载完成"的等价事实是：所有页都已交付 → 全部 cell 已交付。

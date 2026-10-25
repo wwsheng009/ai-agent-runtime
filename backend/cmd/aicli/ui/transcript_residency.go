@@ -11,12 +11,9 @@ import (
 // 设计文档：docs/plan/aicli-transcript-residency-and-lazy-history-design-20261020.md
 // 权威规范：§14（四层驻留/双代账本/写穿物化/流式装载）、§15（配置与观测）
 //
-// 本文件在 T0 阶段只提供：
-//  1. 启动期选项（默认全部关闭 → 任何行为路径都不读取它，故与引入前逐字节一致）；
-//  2. 计数器与统计快照（/debug/chat/status#app_state.residency 的数据源）。
-//
-// T3–T5 会在此之上填充真实的驻留/索引/逐出/回填计数；在此之前快照返回零值，
-// 由 Note* 入口保留计数能力（当前无调用点）。
+// 本文件提供启动期选项、计数器与统计快照
+// （/debug/chat/status#app_state.residency 的数据源）。S4 起窗口化与自动
+// 逐出默认开启；显式 enabled/evictPrefix=false 可回退。
 
 // TranscriptResidencyOptions 是驻留降级的启动期配置（§15.1）。
 type TranscriptResidencyOptions struct {
@@ -42,30 +39,34 @@ const (
 	residencyDefaultViewportMarginRows = 2
 	residencyDefaultHysteresisCells    = 128
 	residencyDefaultEvictHighWater     = 1.25
-	residencyDefaultPageCells          = 256
-	residencyDefaultPageMiB            = 2
-	residencyDefaultPrefetchPages      = 2
-	residencyDefaultBodyStore          = "sqlite"
+	// residencyDefaultEvictPrefix 在 S4 默认开启自动逐出：超过驻留预算后，
+	// 已交付的历史 cell 会写穿冷区并移出内存。显式
+	// `ui.residency.evictPrefix: false` 仍可退回“只窗口化、不逐出”。
+	residencyDefaultEvictPrefix   = true
+	residencyDefaultPageCells     = 256
+	residencyDefaultPageMiB       = 2
+	residencyDefaultPrefetchPages = 2
+	residencyDefaultBodyStore     = "sqlite"
 
 	residencyStatsNote = "T8b-5：计数来自真实路径（bridge 写穿裁剪 / 回填 / sqlite 写穿 store）；" +
 		"resident/cold/memory 分区由端点现场补充；当前不可归因的子系统列在 unavailable。"
 )
 
-// DefaultTranscriptResidencyOptions 返回默认选项（T10-4 起：总开关默认开启）。
+// DefaultTranscriptResidencyOptions 返回默认选项（S4：窗口化与自动逐出默认开启）。
 //
 // 分层默认（§15.1）：
 //   - Enabled=true：窗口化布局/帧（始终生效）、§15.1 缓存预算（16/8/8 MiB）、
 //     调试端点缺省窗口都属于"零风险"档，默认打开；
-//   - EvictPrefix=false：**逐出仍是独立灰度开关**。逐出会真正把数据移出驻留
-//     窗口（虽已写穿到 sqlite 且可读回），它需要 canary 放量，不应随总开关
-//     一起静默生效（否则"关掉逐出"这个保守档就不存在了）。
+//   - EvictPrefix=true：超过 MaxResidentCells 后自动把已交付前缀写穿冷区并从
+//     Scene 移出。逐出不是删除：正文在 session_cells.sqlite，Ctrl+T/pager 会
+//     从冷区读回；显式 false 可退回"只窗口化、不逐出"的保守档。
 //
 // 已验证的默认开启收益：帧合成分配 -99.4%（5000 cells）、调试端点只算窗口、
 // 三类布局缓存不再无界增长；这些都不改变 transcript 的输出字节。
 func DefaultTranscriptResidencyOptions() TranscriptResidencyOptions {
 	return TranscriptResidencyOptions{
 		Enabled:            true,
-		EvictPrefix:        false,
+		EvictPrefix:        residencyDefaultEvictPrefix,
 		MaxResidentCells:   residencyDefaultMaxResidentCells,
 		MaxResidentRows:    residencyDefaultMaxResidentRows,
 		MaxResidentMiB:     residencyDefaultMaxResidentMiB,
@@ -93,6 +94,11 @@ func DisabledTranscriptResidencyOptions() TranscriptResidencyOptions {
 // 「未配置」，负值视为配置错误（与 SessionsConfig 的宽容口径一致：不报错、取默认）。
 func clampTranscriptResidencyOptions(opts TranscriptResidencyOptions) TranscriptResidencyOptions {
 	defaults := DefaultTranscriptResidencyOptions()
+	if !opts.Enabled {
+		// 总开关关闭时逐出必须一并归零：否则 options/status 会暴露一个
+		// “enabled=false 但 evict_prefix=true”的矛盾档位。
+		opts.EvictPrefix = false
+	}
 	if opts.MaxResidentCells <= 0 {
 		opts.MaxResidentCells = defaults.MaxResidentCells
 	}

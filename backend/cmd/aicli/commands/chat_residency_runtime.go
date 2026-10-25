@@ -3,6 +3,7 @@ package commands
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -11,11 +12,11 @@ import (
 // chat_residency_runtime.go —— T8b-1：residency 运行时接线（进程级）。
 //
 // 语义：
-//   - 默认 nil（未启用）→ 所有接线为空操作，行为与引入前逐字节一致；
-//   - 启用但**不逐出**（evictPrefix=false，T10-4 后的默认）→ **不打开 store**。
-//     "只窗口化"档不需要写穿目标；提前建库会让每个纯聊天会话都落一个
-//     session_cells.sqlite（默认开启后实测：大量测试因文件句柄未释放而清理失败）。
-//   - 启用且逐出（evictPrefix=true）→ 在会话目录打开写穿 store（session_cells.sqlite）；
+//   - 未启用 → 所有接线为空操作；
+//   - 启用但不逐出（evictPrefix=false）→ 不打开 store（只窗口化）；
+//   - 启用且逐出（evictPrefix=true）→ 不立即建库，等 Scene 超过 resident
+//     high-water（默认 512×1.25=640 cells）时再惰性打开 session_cells.sqlite。
+//     短会话因此没有额外文件，长会话才承担写穿成本；
 //   - 打开失败/目录不可用 → fail-closed：保留 runtime 记录错误，但 Store=nil，
 //     任何写穿路径（scene trim / 冷区记账）都不会被安装；
 //   - 生命周期与进程一致；会话切换由各消费者按 SessionID 隔离。
@@ -30,6 +31,11 @@ type transcriptResidencyRuntime struct {
 	// 也包含刻意的惰性跳过（evictPrefix=false / bodyStore=off）。消费方据此
 	// 区分"降级"与"正常未启用写穿"，不要把前者当成故障。
 	StoreErr string
+	// StoreLazy 表示逐出已启用但尚未越过 resident high-water，store 还没有打开。
+	// 这是正常状态，不是故障。
+	StoreLazy bool
+
+	storeMu sync.Mutex
 }
 
 var transcriptResidencyRuntimeState atomic.Pointer[transcriptResidencyRuntime]
@@ -39,19 +45,15 @@ func installTranscriptResidencyRuntime(opts ui.TranscriptResidencyOptions, sessi
 	if !opts.Enabled {
 		// 替换/回退时先关闭旧 store：只清指针会让 sqlite 句柄泄漏
 		// （回退演练实测：TempDir 清理时报 file in use）。
-		if previous := transcriptResidencyRuntimeState.Load(); previous != nil && previous.Store != nil {
-			if closer, ok := previous.Store.(interface{ Close() error }); ok {
-				_ = closer.Close()
-			}
+		if previous := transcriptResidencyRuntimeState.Load(); previous != nil {
+			previous.closeStore()
 		}
 		transcriptResidencyRuntimeState.Store(nil)
 		return nil
 	}
 	// 重复安装（配置热更新）同样先关旧 store，避免句柄泄漏与文件锁冲突。
-	if previous := transcriptResidencyRuntimeState.Load(); previous != nil && previous.Store != nil {
-		if closer, ok := previous.Store.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
+	if previous := transcriptResidencyRuntimeState.Load(); previous != nil {
+		previous.closeStore()
 	}
 	runtime := &transcriptResidencyRuntime{
 		Options:    opts,
@@ -63,7 +65,6 @@ func installTranscriptResidencyRuntime(opts ui.TranscriptResidencyOptions, sessi
 		transcriptResidencyRuntimeState.Store(runtime)
 		return runtime
 	}
-	// 惰性 store（T10-4）：不逐出就不需要写穿目标。默认档因此完全不碰磁盘。
 	if !opts.EvictPrefix {
 		runtime.StoreErr = "evictPrefix=false（只窗口化；写穿 store 未打开）"
 		transcriptResidencyRuntimeState.Store(runtime)
@@ -74,15 +75,9 @@ func installTranscriptResidencyRuntime(opts ui.TranscriptResidencyOptions, sessi
 		transcriptResidencyRuntimeState.Store(runtime)
 		return runtime
 	}
-	path := filepath.Join(sessionDir, "session_cells.sqlite")
-	store, err := openSQLiteCellBodyStore(path)
-	if err != nil {
-		runtime.StoreErr = err.Error()
-		transcriptResidencyRuntimeState.Store(runtime)
-		return runtime
-	}
-	runtime.Store = store
-	runtime.StorePath = path
+	// 长会话才需要写穿：等 ensureSceneTrimPolicy 发现 resident 超过 high-water
+	// 后调用 ensureStore。这样不会给每个短会话创建 session_cells.sqlite。
+	runtime.StoreLazy = true
 	transcriptResidencyRuntimeState.Store(runtime)
 	return runtime
 }
@@ -92,13 +87,75 @@ func currentTranscriptResidencyRuntime() *transcriptResidencyRuntime {
 	return transcriptResidencyRuntimeState.Load()
 }
 
+// ensureStore 在首次真正需要逐出时打开写穿库。并发调用只打开一次。
+func (r *transcriptResidencyRuntime) ensureStore() ui.CellBodyStore {
+	if r == nil {
+		return nil
+	}
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	if r.Store != nil {
+		return r.Store
+	}
+	if r.StoreErr != "" && !r.StoreLazy {
+		// 已经明确不可用（bodyStore=off / 目录缺失 / 打开失败）：保持 fail-closed，
+		// 不在每个 changeset 上重复尝试。
+		return nil
+	}
+	if !r.Options.Enabled || !r.Options.EvictPrefix {
+		return nil
+	}
+	if strings.TrimSpace(r.SessionDir) == "" {
+		r.StoreErr = "session dir unavailable"
+		r.StoreLazy = false
+		return nil
+	}
+	path := filepath.Join(r.SessionDir, "session_cells.sqlite")
+	store, err := openSQLiteCellBodyStore(path)
+	if err != nil {
+		r.StoreErr = err.Error()
+		r.StoreLazy = false
+		return nil
+	}
+	r.Store = store
+	r.StorePath = path
+	r.StoreErr = ""
+	r.StoreLazy = false
+	return store
+}
+
+func (r *transcriptResidencyRuntime) storeSnapshot() (ui.CellBodyStore, string, string, bool) {
+	if r == nil {
+		return nil, "", "", false
+	}
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	return r.Store, r.StorePath, r.StoreErr, r.StoreLazy
+}
+
+func (r *transcriptResidencyRuntime) closeStore() {
+	if r == nil {
+		return
+	}
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	if r.Store != nil {
+		if closer, ok := r.Store.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}
+	r.Store = nil
+	r.StorePath = ""
+}
+
 // transcriptResidencyRuntimeStatus 是状态投影（T8b-5 的前置口径）。
 func transcriptResidencyRuntimeStatus() (enabled bool, storePath string, storeErr string) {
 	runtime := currentTranscriptResidencyRuntime()
 	if runtime == nil {
 		return false, "", ""
 	}
-	return true, runtime.StorePath, runtime.StoreErr
+	_, path, errText, _ := runtime.storeSnapshot()
+	return true, path, errText
 }
 
 // transcriptResidencyRuntimeEnabled 报告进程级 residency 是否已启用。调试端点

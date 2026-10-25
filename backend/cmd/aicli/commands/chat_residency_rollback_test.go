@@ -26,7 +26,7 @@ func TestResidencyRollbackReturnsToLegacyShape(t *testing.T) {
 	on.UI.Residency.EvictPrefix = boolPtr(true)
 	on.UI.Residency.MaxResidentCells = 4
 	applyTranscriptResidencyConfig(on, dir)
-	if runtime := currentTranscriptResidencyRuntime(); runtime == nil || runtime.Store == nil {
+	if runtime := currentTranscriptResidencyRuntime(); runtime == nil || runtime.ensureStore() == nil {
 		t.Fatalf("开启后运行时未就绪：%+v", runtime)
 	}
 	bridge := newSceneTrimTestBridgeWithSession(t, 40, "t10-rollback")

@@ -1009,17 +1009,35 @@ func (s *ChatSession) clearResumeHistory() {
 }
 
 // appendResumeHistoryMessage 跟随 live 消息追加展示历史；只有已经装载过
-// canonical 展示历史时才追加（保持与旧实现的 nil 语义一致）。
+// canonical 展示历史时才追加（保持与旧实现的 nil 语义一致）。超过保留上限
+// 后按 slack 批量裁剪：长任务不会把 live 消息无限累积在展示快照里。
 func (s *ChatSession) appendResumeHistoryMessage(message runtimetypes.Message) {
 	if s == nil {
 		return
 	}
 	s.resumeHistoryMu.Lock()
-	defer s.resumeHistoryMu.Unlock()
 	if s.ResumeHistory == nil {
+		s.resumeHistoryMu.Unlock()
 		return
 	}
 	s.ResumeHistory = append(s.ResumeHistory, *message.Clone())
+	shouldTrim := s.resumeHistoryReplayBackendAvailable() &&
+		len(s.ResumeHistory) > resumeHistoryRetainedAfterDelivery+resumeHistoryLiveTrimSlack
+	s.resumeHistoryMu.Unlock()
+	if shouldTrim {
+		trimResumeHistoryAfterDelivery(s)
+	}
+}
+
+// resumeHistoryReplayBackendAvailable 报告裁剪后的完整历史是否能从存储重新
+// 分页读回。/history 的重放依赖这条能力；没有分页后端时不能做 live 裁剪，
+// 否则保留窗口外的消息会成为唯一副本并永久丢失。
+func (s *ChatSession) resumeHistoryReplayBackendAvailable() bool {
+	if s == nil || s.SessionManager == nil {
+		return false
+	}
+	_, ok := s.SessionManager.GetStorage().(runtimechat.SessionStorageHistoryPager)
+	return ok
 }
 
 // prependResumeHistoryPages 把「较新页 → 较早页」的页集合展平为时间升序后
@@ -1368,6 +1386,10 @@ func completeDeferredResumeHistoryLoad(session *ChatSession, pages int, err erro
 // 需要完整历史时不再依赖这份缓存：refreshResumeHistoryForReplay 会从存储按页
 // 重新读取（复用 GetHistoryPage 分页链路），因此裁剪不改变任何用户可见内容。
 const resumeHistoryRetainedAfterDelivery = 512
+
+// resumeHistoryLiveTrimSlack 给 live 追加留出少量余量：超过
+// retained+slack 才搬一次窗口，避免每来一条消息都复制 512 条记录。
+const resumeHistoryLiveTrimSlack = 128
 
 // trimResumeHistoryAfterDelivery 在装载交付完成后把展示历史裁剪到固定上限，
 // 消除「屏幕 400 行、内存 18k 条」的数量级脱钩。

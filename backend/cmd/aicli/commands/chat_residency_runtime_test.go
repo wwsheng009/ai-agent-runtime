@@ -13,16 +13,14 @@ import (
 )
 
 // chat_residency_runtime_test.go —— T8b-1/T8b-2 契约：
-// 默认关闭零副作用；启用时打开写穿 store 并套用 §15.1 默认预算；
+// 默认自动逐出+惰性 store；越过 high-water 才打开写穿库并套用 §15.1 默认预算；
 // bodyStore=off / 目录不可用 → fail-closed；bridge 自动安装裁剪策略。
 
 // shutdownResidencyRuntimeForTest 关闭并清空运行时（store 必须先关，
 // 否则 TempDir 清理会因文件仍被占用而失败）。
 func shutdownResidencyRuntimeForTest() {
-	if runtime := currentTranscriptResidencyRuntime(); runtime != nil && runtime.Store != nil {
-		if closer, ok := runtime.Store.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
+	if runtime := currentTranscriptResidencyRuntime(); runtime != nil {
+		runtime.closeStore()
 	}
 	transcriptResidencyRuntimeState.Store(nil)
 }
@@ -40,11 +38,13 @@ func TestResidencyRuntimeDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
 	resetResidencyRuntimeForTest(t)
 	applyTranscriptResidencyConfig(nil, dir)
-	// T10-4：未配置（nil）→ 走默认值 = 总开关开启，但逐出不开启。
+	// 未配置（nil）→ 走默认值：总开关与自动逐出都开启，store 惰性等待 high-water。
 	if runtime := currentTranscriptResidencyRuntime(); runtime == nil {
 		t.Fatal("默认必须安装 residency 运行时")
-	} else if runtime.Options.EvictPrefix {
-		t.Fatalf("默认不得开启逐出：%+v", runtime.Options)
+	} else if !runtime.Options.EvictPrefix {
+		t.Fatalf("默认必须允许自动逐出：%+v", runtime.Options)
+	} else if store, path, errText, lazy := runtime.storeSnapshot(); store != nil || path != "" || errText != "" || !lazy {
+		t.Fatalf("默认启动期不得打开 store：path=%q err=%q lazy=%v", path, errText, lazy)
 	}
 	if budgets := ui.LayoutCacheBudgetsSnapshot(); budgets != (ui.LayoutCacheBudgets{CellRowsMiB: 16, HistoryPlanMiB: 8, FoldOmissionMiB: 8}) {
 		t.Fatalf("默认应套用 §15.1 预算：%+v", budgets)
@@ -72,18 +72,24 @@ func TestResidencyRuntimeDisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestResidencyRuntimeEnabledOpensStoreAndAppliesDefaults(t *testing.T) {
+func TestResidencyRuntimeEnabledDefersStoreUntilHighWater(t *testing.T) {
 	dir := t.TempDir()
 	resetResidencyRuntimeForTest(t)
 	cfg := &runtimecfg.RuntimeConfig{}
 	cfg.UI.Residency.Enabled = boolPtr(true)
-	// 写穿 store 只在逐出开启时惰性打开（T10-4）。
 	cfg.UI.Residency.EvictPrefix = boolPtr(true)
 	applyTranscriptResidencyConfig(cfg, dir)
 
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || runtime.Store == nil {
-		t.Fatalf("启用时 store 必须打开：%+v", runtime)
+	if runtime == nil {
+		t.Fatal("启用时 runtime 必须存在")
+	}
+	if store, path, errText, lazy := runtime.storeSnapshot(); store != nil || path != "" || errText != "" || !lazy {
+		t.Fatalf("启动期应保持惰性：path=%q err=%q lazy=%v", path, errText, lazy)
+	}
+	store := runtime.ensureStore()
+	if store == nil {
+		t.Fatalf("high-water 首次使用时必须打开 store：%+v", runtime)
 	}
 	wantPath := filepath.Join(dir, "session_cells.sqlite")
 	if runtime.StorePath != wantPath {
@@ -142,15 +148,16 @@ func TestBridgeAutoInstallsSceneTrimPolicyFromRuntime(t *testing.T) {
 	resetResidencyRuntimeForTest(t)
 	cfg := &runtimecfg.RuntimeConfig{}
 	cfg.UI.Residency.Enabled = boolPtr(true)
-	// 逐出策略只有显式开启 evictPrefix 才会安装（§15.1 保守档语义）。
+	// 本用例显式开启逐出；默认配置也会自动越过 high-water 后开启。
 	cfg.UI.Residency.EvictPrefix = boolPtr(true)
 	applyTranscriptResidencyConfig(cfg, dir)
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || runtime.Store == nil {
-		t.Fatalf("前置条件失败：%+v", runtime)
+	if runtime == nil {
+		t.Fatal("前置条件失败：residency runtime 缺失")
 	}
 
-	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "t8b-session"}})
+	// 越过 high-water 才安装策略（并惰性打开 store）。
+	bridge := newSceneTrimTestBridgeWithSession(t, 700, "t8b-session")
 	bridge.applyChangeSet(&encoding.ChangeSet{})
 	policy := bridge.sceneTrimPolicy
 	if policy == nil || !policy.Enabled {
@@ -177,10 +184,8 @@ func TestBridgeAutoInstallsSceneTrimPolicyFromRuntime(t *testing.T) {
 	}
 }
 
-// TestResidencyEvictPrefixFalseKeepsSceneWhole 锁定 §15.1 的保守档语义：
-// `evictPrefix=false`（默认）时 residency 只做窗口化/写穿准备，**不得逐出**。
-// 逐出能力由 evictPrefix 显式开启（灰度开关）；否则"默认关闭的逐出"会随
-// enabled=true 静默生效，与配置语义不符。
+// TestResidencyEvictPrefixFalseKeepsSceneWhole 锁定保守档语义：
+// 显式 `evictPrefix=false` 时 residency 只做窗口化，**不得逐出**。
 func TestResidencyEvictPrefixFalseKeepsSceneWhole(t *testing.T) {
 	// 两个独立 store 目录：先建目录再注册清理（与 T8b 测试同一顺序约定）。
 	offDir := t.TempDir()
@@ -195,8 +200,8 @@ func TestResidencyEvictPrefixFalseKeepsSceneWhole(t *testing.T) {
 	shutdownResidencyRuntimeForTest()
 	cfg := &runtimecfg.RuntimeConfig{}
 	cfg.UI.Residency.Enabled = boolPtr(true)
+	cfg.UI.Residency.EvictPrefix = boolPtr(false)
 	cfg.UI.Residency.MaxResidentCells = 4
-	// evictPrefix 未设置 = false（默认保守档）。
 	applyTranscriptResidencyConfig(cfg, offDir)
 
 	bridge := newSceneTrimTestBridge(t, 40)

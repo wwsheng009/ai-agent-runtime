@@ -405,11 +405,11 @@ func driveChatTTYConPTYResidencyPrefix(t *testing.T, session *ChatSession, scrip
 	cfg := &runtimecfg.RuntimeConfig{}
 	cfg.UI.Residency.Enabled = boolPtr(true)
 	cfg.UI.Residency.MaxResidentCells = script.ResidencyKeep
-	// §15.1 保守档：只有显式开启 evictPrefix 才会安装写穿裁剪策略。
+	// 本用例显式开启 evictPrefix（默认也会在越过 high-water 后自动开启）。
 	cfg.UI.Residency.EvictPrefix = boolPtr(true)
 	applyTranscriptResidencyConfig(cfg, dir)
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || runtime.Store == nil {
+	if runtime == nil || runtime.ensureStore() == nil {
 		t.Fatalf("T8b-6: residency 运行时未就绪：%+v", runtime)
 	}
 

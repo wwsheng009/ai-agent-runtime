@@ -16,14 +16,14 @@ func resetTranscriptResidencyForTest(t *testing.T) {
 	})
 }
 
-// TestTranscriptResidencyDefaults T10-4：总开关默认开启，逐出默认关闭（canary）。
+// TestTranscriptResidencyDefaults：S4 起窗口化与自动逐出默认开启。
 func TestTranscriptResidencyDefaults(t *testing.T) {
 	opts := DefaultTranscriptResidencyOptions()
 	if !opts.Enabled {
-		t.Fatal("T10-4 起总开关默认必须开启")
+		t.Fatal("总开关默认必须开启")
 	}
-	if opts.EvictPrefix {
-		t.Fatal("逐出必须保持默认关闭（独立灰度开关）")
+	if !opts.EvictPrefix {
+		t.Fatal("自动逐出默认必须开启；显式 false 才进入只窗口化档")
 	}
 	// 显式关闭档必须真的关掉两者（回退入口）。
 	disabled := DisabledTranscriptResidencyOptions()

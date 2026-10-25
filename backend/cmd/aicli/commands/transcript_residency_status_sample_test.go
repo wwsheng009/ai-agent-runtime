@@ -29,7 +29,7 @@ func TestResidencyStatusSampleEvidence(t *testing.T) {
 	applyTranscriptResidencyConfig(cfg, dir)
 
 	runtime := currentTranscriptResidencyRuntime()
-	if runtime == nil || runtime.Store == nil {
+	if runtime == nil || runtime.ensureStore() == nil {
 		t.Fatalf("residency 运行时/store 未就绪：%+v", runtime)
 	}
 	keep := runtime.Options.MaxResidentCells

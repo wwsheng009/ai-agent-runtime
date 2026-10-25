@@ -97,6 +97,48 @@ func TestTrimResumeHistoryKeepsWindowWhenAlreadySmall(t *testing.T) {
 	require.Zero(t, trimCount)
 }
 
+// TestAppendResumeHistoryMessageTrimsLiveGrowth 锁定长任务的 live 追加也受
+// 保留上限约束，而不是只在装载完成时裁剪一次。
+func TestAppendResumeHistoryMessageTrimsLiveGrowth(t *testing.T) {
+	storage := &pagerCapableMemoryStorage{InMemoryStorage: runtimechat.NewInMemoryStorage()}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             time.Hour,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	t.Cleanup(manager.Stop)
+	session := &ChatSession{SessionManager: manager}
+	history := make([]runtimetypes.Message, 0, resumeHistoryRetainedAfterDelivery)
+	for index := 0; index < resumeHistoryRetainedAfterDelivery; index++ {
+		history = append(history, *runtimetypes.NewUserMessage(fmt.Sprintf("seed %d", index)))
+	}
+	session.setResumeHistory(history)
+
+	for index := 0; index <= resumeHistoryLiveTrimSlack; index++ {
+		session.appendResumeHistoryMessage(*runtimetypes.NewAssistantMessage(fmt.Sprintf("live %d", index)))
+	}
+
+	displayed := session.resumeHistorySnapshot()
+	require.Len(t, displayed, resumeHistoryRetainedAfterDelivery,
+		"live 追加越过 retained+slack 后必须批量裁剪")
+	require.Equal(t, fmt.Sprintf("live %d", resumeHistoryLiveTrimSlack), displayed[len(displayed)-1].Content)
+	require.True(t, session.resumeHistoryTruncated())
+	trimCount, _ := resumeHistoryTrimStats(session)
+	require.Equal(t, uint64(1), trimCount)
+}
+
+// pagerCapableMemoryStorage 给 live 裁剪测试提供“完整历史可重新分页读回”
+// 的最小能力声明；实际分页内容本用例不消费。
+type pagerCapableMemoryStorage struct {
+	*runtimechat.InMemoryStorage
+}
+
+func (p *pagerCapableMemoryStorage) GetMessagePage(
+	_ context.Context, _ string, _, _ int,
+) (*runtimechat.SessionHistoryPage, error) {
+	return &runtimechat.SessionHistoryPage{}, nil
+}
+
 // TestTrimResumeHistoryAlignsToTurnBoundary 锁定裁剪边界：不得把保留窗口的
 // 起点落在 tool 结果中间，否则重放会把半截 tool 链画成孤立行。
 func TestTrimResumeHistoryAlignsToTurnBoundary(t *testing.T) {

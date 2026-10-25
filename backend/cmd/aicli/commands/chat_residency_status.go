@@ -37,17 +37,21 @@ func chatResidencyStatsForSession(session *ChatSession, state *ui.UIControllerSt
 	stats := ui.TranscriptResidencyStatsSnapshot()
 
 	if runtime := currentTranscriptResidencyRuntime(); runtime != nil {
-		if runtime.StorePath != "" {
+		store, storePath, storeErr, storeLazy := runtime.storeSnapshot()
+		if storePath != "" {
 			stats.Sources = append(stats.Sources, "runtime.store")
+		}
+		if storeLazy {
+			stats.Sources = append(stats.Sources, "body_store.lazy_until_high_water")
 		}
 		// StoreErr 既包含真实故障，也包含刻意的惰性跳过（evictPrefix=false）。
 		// 只有前者才登记 unavailable；后者属于正常档位，附在 sources 里说明即可。
-		if runtime.StoreErr != "" && runtime.Store == nil && runtime.Options.EvictPrefix {
-			stats.Unavailable = append(stats.Unavailable, "body_store: "+runtime.StoreErr)
-		} else if runtime.StoreErr != "" && runtime.Store == nil {
-			stats.Sources = append(stats.Sources, "body_store.lazy_off: "+runtime.StoreErr)
+		if storeErr != "" && store == nil && runtime.Options.EvictPrefix && !storeLazy {
+			stats.Unavailable = append(stats.Unavailable, "body_store: "+storeErr)
+		} else if storeErr != "" && store == nil {
+			stats.Sources = append(stats.Sources, "body_store.lazy_off: "+storeErr)
 		}
-		if counter, ok := runtime.Store.(residencyBodyStoreCounter); ok {
+		if counter, ok := store.(residencyBodyStoreCounter); ok {
 			storeStats := counter.Stats()
 			stats.BodyStore = &ui.TranscriptResidencyBodyStoreStats{
 				Puts:      storeStats.Puts,
