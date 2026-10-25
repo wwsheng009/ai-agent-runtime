@@ -139,6 +139,31 @@ func ripgrepBaseArgs() []string {
 	}
 }
 
+// ripgrepNoConfigFlag names the determinism flag that a caller may explicitly
+// opt out of.
+const ripgrepNoConfigFlag = "--no-config"
+
+// ripgrepSearchArgs is ripgrepBaseArgs as one grep invocation uses it. The only
+// base flag a caller can turn off is --no-config: `no_config=false` asks ripgrep
+// to read its own configuration, which is a request this engine honors by not
+// passing the flag. The default stays deterministic on purpose - a shared tool
+// must not answer differently on two machines because one has a ~/.ripgreprc -
+// and both explicit values are honored, so the capability is not lost either way.
+func ripgrepSearchArgs(opts GrepOptions) []string {
+	base := ripgrepBaseArgs()
+	if !(opts.NoConfigSet && !opts.NoConfig) {
+		return base
+	}
+	args := make([]string, 0, len(base))
+	for _, arg := range base {
+		if arg == ripgrepNoConfigFlag {
+			continue
+		}
+		args = append(args, arg)
+	}
+	return args
+}
+
 // Glob implements the Searcher contract with ripgrep's file listing.
 func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, error) {
 	if !e.Available() {
@@ -473,7 +498,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		}
 	}
 
-	args := ripgrepBaseArgs()
+	args := ripgrepSearchArgs(opts)
 	// Engine selection is ripgrep's own business: the walker cannot express PCRE2
 	// features or multiline semantics, which is why a call asking for them is
 	// dispatched here first instead of being compiled with Go's regexp.

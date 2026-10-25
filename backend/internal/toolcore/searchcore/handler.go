@@ -411,6 +411,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Multiline:                 boolArg(call.Args, "multiline"),
 		MultilineDotall:           boolArg(call.Args, "multiline_dotall"),
 		CRLF:                      boolArg(call.Args, "crlf"),
+		NoConfig:                  boolArg(call.Args, "no_config"),
+		NoConfigSet:               argPresent(call.Args, "no_config"),
 	}
 
 	engine := "walker"
@@ -544,16 +546,20 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// same key for the list instead - a long-standing mismatch, left as-is
 		// here because changing either side breaks existing readers. The
 		// convergence work tracks it rather than silently repurposing a key.
-		"ignore_files":          !options.NoIgnore,
-		"ignore_files_list":     grepIgnoreFilesLabels(paths, options.IgnoreFiles),
-		"ignore_file_count":     len(options.IgnoreFiles),
-		"no_ignore":             options.NoIgnore,
-		"no_ignore_parent":      options.NoIgnoreParent,
-		"no_ignore_vcs":         options.NoIgnoreVCS,
-		"no_ignore_dot":         options.NoIgnoreDot,
-		"no_ignore_global":      options.NoIgnoreGlobal,
-		"no_ignore_files":       options.NoIgnoreFiles,
-		"no_messages":           options.NoMessages,
+		"ignore_files":      !options.NoIgnore,
+		"ignore_files_list": grepIgnoreFilesLabels(paths, options.IgnoreFiles),
+		"ignore_file_count": len(options.IgnoreFiles),
+		"no_ignore":         options.NoIgnore,
+		"no_ignore_parent":  options.NoIgnoreParent,
+		"no_ignore_vcs":     options.NoIgnoreVCS,
+		"no_ignore_dot":     options.NoIgnoreDot,
+		"no_ignore_global":  options.NoIgnoreGlobal,
+		"no_ignore_files":   options.NoIgnoreFiles,
+		"no_messages":       options.NoMessages,
+		// The effective value, not the requested one: unset means the engine told
+		// ripgrep not to read its configuration, and publishing the request would
+		// describe the opposite of what ran.
+		"no_config":             !options.NoConfigSet || options.NoConfig,
 		"count_matches":         options.CountMatches,
 		"glob_case_insensitive": options.GlobCaseInsensitive,
 		// Presentation-only rg flags the caller set are reported, always: the
@@ -1056,6 +1062,16 @@ func appendGrepUniqueString(values []string, raw string) []string {
 		}
 	}
 	return append(values, value)
+}
+
+// argPresent reports whether the caller passed the key at all, which is how a
+// boolean needs three states: unset, true and false.
+func argPresent(args map[string]any, key string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	_, ok := args[key]
+	return ok
 }
 
 // boolArg reports whether any of the listed spellings is set to true.

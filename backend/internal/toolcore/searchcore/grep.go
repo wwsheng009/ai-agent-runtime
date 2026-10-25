@@ -159,6 +159,14 @@ type GrepOptions struct {
 	// already does that (its reader trims the CR), so this flag exists to make the
 	// two engines agree instead of differing by an invisible byte.
 	CRLF bool
+	// NoConfig / NoConfigSet carry the `no_config` request. The engine asks
+	// ripgrep not to read its own configuration by default - a shared tool must
+	// not answer differently on two machines because one has a ~/.ripgreprc - and
+	// `no_config=false` is the caller explicitly asking for that inheritance, so
+	// the flag is simply not passed. NoConfigSet distinguishes "unset" (keep the
+	// deterministic default) from "false" (allow the config).
+	NoConfig    bool
+	NoConfigSet bool
 }
 
 // RequiresRipgrep reports whether this request needs the ripgrep engine rather

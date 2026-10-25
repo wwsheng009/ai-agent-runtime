@@ -548,6 +548,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --crlf：把 CRLF 当作行结束符。内置引擎本来就如此（读取时去掉 CR），该开关让 ripgrep 与它一致，而不是把 CR 留在行尾。",
 			},
+			"no_config": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-config：禁止 ripgrep 读取自身配置（RIPGREP_CONFIG_PATH 指向的文件）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。内置 walker 引擎从不读取 rg 配置，本地与 remote 使用同一实现。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

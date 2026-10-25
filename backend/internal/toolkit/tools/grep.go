@@ -649,7 +649,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"no_config": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-config：禁止读取 ripgrep 配置文件。grep 回退引擎本身不读取 rg 配置，因此该参数主要用于和 rg 心智对齐，并在 rg 可用时透传。",
+				"description": "兼容 rg 的 --no-config：禁止 ripgrep 读取自身配置（RIPGREP_CONFIG_PATH 指向的文件）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。内置 walker 引擎从不读取 rg 配置，本地与 remote 使用同一实现。",
 			},
 			"one_file_system": map[string]interface{}{
 				"type":        "boolean",

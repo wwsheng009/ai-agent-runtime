@@ -55,6 +55,9 @@ var coreSearchParams = map[string]bool{
 	// regexp before ripgrep gets its turn.
 	"pcre2": true, "engine": true, "auto_hybrid_regex": true,
 	"multiline": true, "multiline_dotall": true, "crlf": true,
+	// `no_config` is a three-state request (unset / true / false), so the shared
+	// handler reads presence as well as value; the default stays deterministic.
+	"no_config": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the
