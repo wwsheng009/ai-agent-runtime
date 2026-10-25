@@ -70,6 +70,19 @@ func GrepPageComplete(matches []GrepMatch, mode GrepMode, opts GrepOptions) bool
 	return CountDistinctGrepFiles(matches) > offset+limit
 }
 
+// countGrepMatchEntries counts real matches, excluding passthru context
+// entries. The page window counts entries (that is what the caller pages
+// through), while match_count is the engine's finding.
+func countGrepMatchEntries(matches []GrepMatch) int {
+	count := 0
+	for _, match := range matches {
+		if !match.IsContext {
+			count++
+		}
+	}
+	return count
+}
+
 // CountDistinctGrepFiles counts the files represented in the match list.
 // Matches must be grouped by file, which every engine guarantees (the walker
 // visits file by file, ripgrep streams in path-sorted order, and the multi-root

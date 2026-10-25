@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -215,6 +216,12 @@ type GrepOptions struct {
 	// second must reach the engine as an explicit `--sort none`, otherwise the
 	// base `--sort path` would silently override the request.
 	SortSet bool
+	// Passthru prints every line of every searched file, not only the matches:
+	// matching lines keep the match shape and non-matching lines become context
+	// entries. It applies to content mode only, exactly like rg --passthru
+	// (files/count modes ignore it). Both engines implement it, so a host
+	// without ripgrep keeps the whole-file output.
+	Passthru bool
 	// JSONOutput asks for ripgrep's own JSON Lines event stream instead of the
 	// rendered page. It is a request for *that* format, so it needs the engine
 	// that emits it: the walker has no event stream to pass through, and the
@@ -253,6 +260,10 @@ type GrepMatch struct {
 	// Text is the raw line or fragment. Rendering applies trim/max_columns to
 	// a copy, so the raw text stays available for counting and metadata.
 	Text string
+	// IsContext marks a non-matching line that passthru included. It is only
+	// ever set when Passthru is on and the mode is content; every other entry
+	// is a real match and counts as one.
+	IsContext bool
 }
 
 type GrepResult struct {
@@ -433,6 +444,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		reader.reset(file)
 		fileLines := 0
 		hasMatch := false
+		passthru := opts.Passthru && mode == GrepModeContent
 		for {
 			lineNo, text, truncated, ok := reader.next()
 			if !ok {
@@ -442,69 +454,41 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if !validUTF8(display) {
 				return nil
 			}
-			matched := compiled.Match(display)
-			if matched == opts.InvertMatch {
+			selected := compiled.Match(display) != opts.InvertMatch
+			if selected {
+				hasMatch = true
+			}
+			if filesWithout {
+				// One selected line is enough to prove the file belongs on the
+				// other side; the rest of it does not need reading.
+				if selected {
+					break
+				}
 				continue
 			}
-			hasMatch = true
-			if filesWithout {
-				// One matching line is enough to prove the file belongs on the
-				// other side; the rest of it does not need reading.
-				break
+			if passthru {
+				// max_count caps the number of *matching* lines, but passthru
+				// keeps printing the whole file; lines selected after the cap
+				// become context, exactly like rg --passthru -m N.
+				capped := opts.MaxCountSet && fileLines >= opts.MaxCount
+				if appendGrepLineEntries(&result, compiled, opts, mode, path, lineNo, display, !selected || capped) {
+					return filepath.SkipAll
+				}
+				if selected && !capped {
+					fileLines++
+				}
+				continue
+			}
+			if !selected {
+				continue
 			}
 			if opts.MaxCountSet && fileLines >= opts.MaxCount {
 				break
 			}
-			// Fragments are the output unit when only_matching is on. Invert
-			// keeps whole lines, exactly like rg -o -v.
-			if opts.OnlyMatching && !opts.InvertMatch && mode != GrepModeFiles {
-				displayText := string(display)
-				// Submatch indices, not plain match indices: the template may
-				// reference capture groups, and ExpandString needs their offsets.
-				for _, loc := range compiled.FindAllStringSubmatchIndex(displayText, -1) {
-					fragment := displayText[loc[0]:loc[1]]
-					if opts.Replace != "" {
-						// rg prints one substituted fragment per match; Go's
-						// ExpandString applies the same `$1`/`${name}` template
-						// to the same offsets, which is how both engines answer
-						// this call under one contract.
-						fragment = string(compiled.ExpandString(nil, opts.Replace, displayText, loc))
-					}
-					result.Matches = append(result.Matches, GrepMatch{
-						File:   path,
-						Line:   lineNo,
-						Column: loc[0] + 1,
-						Text:   sanitizeGrepNulText(fragment),
-					})
-					if GrepPageComplete(result.Matches, mode, opts) {
-						return filepath.SkipAll
-					}
-				}
-			} else {
-				// Column is computed on the original line, so Trim can drop the
-				// indentation without moving the reported position.
-				column := 0
-				if opts.Column && !opts.InvertMatch {
-					if loc := compiled.FindIndex(display); len(loc) == 2 {
-						column = loc[0] + 1
-					}
-				}
-				lineText := string(display)
-				if opts.Replace != "" && !opts.InvertMatch {
-					// Invert has no match to substitute, exactly like rg -v -r.
-					lineText = compiled.ReplaceAllString(lineText, opts.Replace)
-				}
-				result.Matches = append(result.Matches, GrepMatch{
-					File:   path,
-					Line:   lineNo,
-					Column: column,
-					Text:   sanitizeGrepNulText(lineText),
-				})
-			}
-			fileLines++
-			if GrepPageComplete(result.Matches, mode, opts) {
+			if appendGrepLineEntries(&result, compiled, opts, mode, path, lineNo, display, false) {
 				return filepath.SkipAll
 			}
+			fileLines++
 		}
 		if filesWithout {
 			if hasMatch {
@@ -630,6 +614,70 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	ApplyGrepPageWindow(&result, mode, opts)
 	return result, nil
+}
+
+// appendGrepLineEntries appends one scanned line in the shape the caller asked
+// for. isContext is the passthru case: the line did not match (or the file's
+// match cap was already reached), so it is kept as a context entry instead.
+// The return value reports that the page is complete, which lets the caller stop
+// the walk exactly one entry past the page.
+func appendGrepLineEntries(result *GrepResult, compiled *regexp.Regexp, opts GrepOptions, mode GrepMode, path string, lineNo int, display []byte, isContext bool) bool {
+	if isContext {
+		result.Matches = append(result.Matches, GrepMatch{
+			File:      path,
+			Line:      lineNo,
+			Text:      sanitizeGrepNulText(string(display)),
+			IsContext: true,
+		})
+		return GrepPageComplete(result.Matches, mode, opts)
+	}
+	// Fragments are the output unit when only_matching is on. Invert keeps
+	// whole lines, exactly like rg -o -v.
+	if opts.OnlyMatching && !opts.InvertMatch && mode != GrepModeFiles {
+		displayText := string(display)
+		// Submatch indices, not plain match indices: the template may reference
+		// capture groups, and ExpandString needs their offsets.
+		for _, loc := range compiled.FindAllStringSubmatchIndex(displayText, -1) {
+			fragment := displayText[loc[0]:loc[1]]
+			if opts.Replace != "" {
+				// rg prints one substituted fragment per match; Go's
+				// ExpandString applies the same `$1`/`${name}` template to the
+				// same offsets, which is how both engines answer this call under
+				// one contract.
+				fragment = string(compiled.ExpandString(nil, opts.Replace, displayText, loc))
+			}
+			result.Matches = append(result.Matches, GrepMatch{
+				File:   path,
+				Line:   lineNo,
+				Column: loc[0] + 1,
+				Text:   sanitizeGrepNulText(fragment),
+			})
+			if GrepPageComplete(result.Matches, mode, opts) {
+				return true
+			}
+		}
+		return false
+	}
+	// Column is computed on the original line, so Trim can drop the indentation
+	// without moving the reported position.
+	column := 0
+	if opts.Column && !opts.InvertMatch {
+		if loc := compiled.FindIndex(display); len(loc) == 2 {
+			column = loc[0] + 1
+		}
+	}
+	lineText := string(display)
+	if opts.Replace != "" && !opts.InvertMatch {
+		// Invert has no match to substitute, exactly like rg -v -r.
+		lineText = compiled.ReplaceAllString(lineText, opts.Replace)
+	}
+	result.Matches = append(result.Matches, GrepMatch{
+		File:   path,
+		Line:   lineNo,
+		Column: column,
+		Text:   sanitizeGrepNulText(lineText),
+	})
+	return GrepPageComplete(result.Matches, mode, opts)
 }
 
 // grepWalkRoot walks one search root. Without follow this is exactly

@@ -3696,16 +3696,13 @@ func TestGrepTool_StructuredRgOnlyFlagMatrixTranslateToRipgrep(t *testing.T) {
 			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
 		}
 	}
-	for _, want := range []string{"--type-add foo:*.foo", "--type-clear foo"} {
-		if !strings.Contains(argsStr, want) {
-			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
-		}
+	// Type definitions are resolved by the shared core into globs; the raw
+	// --type-add/--type-clear flags never reach ripgrep anymore.
+	if strings.Contains(argsStr, "--type-add") || strings.Contains(argsStr, "--type-clear") {
+		t.Fatalf("type definitions must not be forwarded to rg, got %v", gotArgs)
 	}
 	if result.Metadata["requires_ripgrep"] != true {
 		t.Fatalf("expected structured rg-only flags to require rg, got %#v", result.Metadata["requires_ripgrep"])
-	}
-	if !strings.Contains(strings.Join(result.Metadata["rg_only_args"].([]string), " "), "--pcre2") {
-		t.Fatalf("expected rg_only_args metadata to record rg-only passthrough args, got %#v", result.Metadata["rg_only_args"])
 	}
 	if got, ok := result.Metadata["type_add"].([]string); !ok || len(got) != 1 || got[0] != "foo:*.foo" {
 		t.Fatalf("expected type_add metadata to capture structured value, got %#v", result.Metadata["type_add"])

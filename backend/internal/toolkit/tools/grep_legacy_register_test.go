@@ -20,7 +20,7 @@ import (
 //     multiline_dotall, replace, json, json_output, follow, crlf): they need
 //     the ripgrep seam the runtime already exposes, plus their own output
 //     semantics and tests;
-//   - escape hatches (rg_args, passthru): the raw-argument path deliberately
+//   - the escape hatch (rg_args): the raw-argument path deliberately
 //     mirrors rg's own parser.
 //
 // The test below fails when a schema parameter appears without core support, so
@@ -28,11 +28,11 @@ import (
 // honoring one of these, so the register has to be kept honest in both
 // directions.
 //
-// The presentation group, the type set edits (type_add/type_clear) and the
-// ordering group (sort/sortr/sort_reverse/sort_files/no_sort_files) have
-// already moved: they are core-covered now.
+// Everything else - the presentation group, the type set edits
+// (type_add/type_clear), the ordering group and passthru - has already moved:
+// those keys are core-covered now.
 var grepLegacyOnlyParams = []string{
-	"passthru", "rg_args",
+	"rg_args",
 }
 
 func TestGrepLegacyOnlyParamsAreRegistered(t *testing.T) {
@@ -134,5 +134,19 @@ func TestGrepSortSpellingsRunOnTheSharedHandler(t *testing.T) {
 		if _, handled := tool.executeCoreSearch(t.Context(), args); !handled {
 			t.Fatalf("the shared handler must answer %v; the legacy path no longer owns ordering", args)
 		}
+	}
+}
+
+// TestGrepPassthruRunsOnTheSharedHandler: passthru used to be the last
+// non-rg_args key keeping a call on the legacy path. It is a whole-file output
+// mode now, implemented by searchcore on both engines.
+func TestGrepPassthruRunsOnTheSharedHandler(t *testing.T) {
+	tool := NewGrepTool()
+	tool.SetBasePath(t.TempDir())
+	if _, handled := tool.executeCoreSearch(t.Context(), map[string]interface{}{
+		"pattern":  "needle",
+		"passthru": true,
+	}); !handled {
+		t.Fatal("the shared handler must answer passthru; the legacy path no longer owns it")
 	}
 }

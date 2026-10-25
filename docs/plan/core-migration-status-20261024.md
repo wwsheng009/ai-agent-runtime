@@ -1373,3 +1373,31 @@ rg 与 walker 都只消费解析后的 glob，谁也不再看 `--type-add`/`--ty
 - remotetools 对拍：path/modified 双向在 walker 与真实 rg 上顺序一致（顺序断言使用不会排序的 helper）；
 - 本地/remote 同源等价性：新增 sort path / sortr path / sort modified / sort_files 四个调用；
 - 登记表：7 → 2。剩余：`passthru`、`rg_args`。
+
+## `passthru` 已收敛：整文件输出由共享核实现（2026-10-25）
+
+### 为什么不能只交给 rg
+`--passthru` 此前是 legacy 的最后一个非 `rg_args` 参数：没有 rg 的机器上它直接报「需要 ripgrep」。
+但它的语义是「content 模式下输出所有行，匹配行带匹配标记、未匹配行作为上下文」——这是**输出形状**，
+不是 rg 的专有能力。walker 自己读文件，本来就能做到。
+
+### 落地
+- `GrepOptions.Passthru` + `GrepMatch.IsContext`：walker 每行都产出条目，未选中的行（或 `max_count`
+  已用尽后仍匹配的行）标为 context；
+- 渲染：`path>line:` 匹配 / `path line:` 上下文，与 context 模式的既有骨架一致；**不插 `--` 分隔符**——
+  这些行天然连续，插分隔符会凭空造出不存在的分组；
+- `metadata.match_count` 只数真匹配（`countGrepMatchEntries`），分页单位仍是行；
+- 引擎侧传 `--passthru`，并新增 `context` 事件解析（`ripgrepJSONEventText`）与 text 模式下
+  `path\x00<line>-text` 的解析（`parseRipgrepReplaceLine` 现在返回 isContext）；
+- **一个组合必须留给 walker**：`passthru` + 显式 `max_count`。实测 rg 会在达到 `-m N` 后停止读该文件，
+  于是文件尾部再也到不了（rg 14.1.0 实测：`-m 1` 只打印到匹配行）。而 walker 会继续把剩余行作为上下文
+  读完——这才符合「cap 是匹配上限，不是读取上限」。所以这一组引擎明确 `return false` 让 walker 接手，
+  对拍测试钉住「rg 必须拒绝」。
+
+### 证据
+- searchcore：全文件行序与标记、replace/invert/max_count、only_matching 片段 + 整行上下文、
+  非 content 模式忽略、handler 渲染与 match_count、分页 offset；
+- 引擎：text 与 json 两条解析路径（含带冒号路径）；
+- remotetools 对拍：plain/replace/invert/only_matching 在 walker 与真实 rg 上逐行一致；max_count 组断言 rg 拒绝；
+- 本地/remote 同源等价性：新增 `passthru` 调用；
+- 登记表：2 → **1**。剩余只有 `rg_args`（rg 解析器镜像，最后一批整段平移）。

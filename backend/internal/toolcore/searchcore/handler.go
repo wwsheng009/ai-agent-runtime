@@ -429,6 +429,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		ContextSeparatorSet:       argPresent(call.Args, "context_separator") || boolArg(call.Args, "no_context_separator"),
 		NoContextSeparator:        boolArg(call.Args, "no_context_separator"),
 		Follow:                    follow,
+		Passthru:                  boolArg(call.Args, "passthru"),
 	}
 	sortKey, sortReverse, sortSet, sortFailure := grepSortFromArgs(call.Args)
 	if sortFailure != nil {
@@ -537,6 +538,9 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		pageMatches = 0
 		pageEntries = len(result.Files)
 	case GrepModeContent:
+		// Passthru pages carry context entries too, but metadata.match_count is
+		// what the engine actually matched, not the page's line count.
+		pageMatches = countGrepMatchEntries(result.Matches)
 	default:
 		pageMatches = 0
 		for _, entry := range result.Files {
@@ -607,6 +611,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"sort":                 sortLabel,
 		"sortr":                sortReverseLabel,
 		"sort_files":           options.SortKey == "path" && !options.SortReverse,
+		"passthru":             options.Passthru,
 		"max_count":            options.MaxCount,
 		"max_count_explicit":   options.MaxCountSet,
 		"only_matching":        options.OnlyMatching,

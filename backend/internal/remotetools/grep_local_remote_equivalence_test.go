@@ -93,6 +93,7 @@ func TestLocalCoreRuntimeAgreesWithRemoteGrep(t *testing.T) {
 		{"sort reverse path", map[string]interface{}{"pattern": "needle", "sortr": "path"}},
 		{"sort modified", map[string]interface{}{"pattern": "needle", "sort": "modified"}},
 		{"sort files", map[string]interface{}{"pattern": "needle", "sort_files": true}},
+		{"passthru", map[string]interface{}{"pattern": "needle", "passthru": true}},
 		{"paths", map[string]interface{}{"pattern": "needle", "paths": []interface{}{"nested", "."}, "glob": "*.go"}},
 	}
 

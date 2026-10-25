@@ -166,13 +166,14 @@ func TestRipgrepReplacementModeAsksForTextOutput(t *testing.T) {
 // whose own colon must not be mistaken for the line separator.
 func TestRipgrepReplacementParsesNullDelimitedLines(t *testing.T) {
 	cases := []struct {
-		name       string
-		line       string
-		wantColumn bool
-		wantPath   string
-		wantLine   int
-		wantCol    int
-		wantText   string
+		name        string
+		line        string
+		wantColumn  bool
+		wantPath    string
+		wantLine    int
+		wantCol     int
+		wantText    string
+		wantContext bool
 	}{
 		{
 			name: "plain", line: "/tmp/rep.txt\x001:num:123",
@@ -192,12 +193,31 @@ func TestRipgrepReplacementParsesNullDelimitedLines(t *testing.T) {
 			line:     "/tmp/rep.txt\x001:2:3: kept",
 			wantPath: "/tmp/rep.txt", wantLine: 1, wantText: "2:3: kept",
 		},
+		{
+			name:        "a passthru context line uses the dash separator",
+			line:        "/tmp/rep.txt\x002-neighbour",
+			wantPath:    "/tmp/rep.txt",
+			wantLine:    2,
+			wantText:    "neighbour",
+			wantContext: true,
+		},
+		{
+			name:        "a passthru context line keeps its own colons",
+			line:        "C:\\work\\rep.txt\x002-num:9",
+			wantPath:    "C:\\work\\rep.txt",
+			wantLine:    2,
+			wantText:    "num:9",
+			wantContext: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path, lineNo, column, text, ok := parseRipgrepReplaceLine([]byte(tc.line), tc.wantColumn)
+			path, lineNo, column, text, isContext, ok := parseRipgrepReplaceLine([]byte(tc.line), tc.wantColumn)
 			if !ok {
 				t.Fatalf("the line %q must parse", tc.line)
+			}
+			if isContext != tc.wantContext {
+				t.Fatalf("parsed isContext=%v, want %v", isContext, tc.wantContext)
 			}
 			if path != tc.wantPath || lineNo != tc.wantLine || column != tc.wantCol || text != tc.wantText {
 				t.Fatalf("parsed path=%q line=%d column=%d text=%q, want %q/%d/%d/%q",

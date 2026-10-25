@@ -265,7 +265,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 						"items": map[string]interface{}{"type": "string"},
 					},
 				},
-				"description": "兼容 rg 的 --type-add：按 name:glob 添加自定义文件类型，例如 foo:*.foo，也可在已有类型上追加 glob（go:*.gold）。规则由共享核心解析成 include/exclude glob，ripgrep 与内置 walker 两个引擎结果一致，本地与 remote 使用同一实现。可传单个字符串或字符串数组。",
+				"description": "兼容 rg 的 --type-add：name:glob，例如 foo:*.foo；可在已有类型上追加 glob。可传字符串或字符串数组。",
 			},
 			"type_clear": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
@@ -275,15 +275,15 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 						"items": map[string]interface{}{"type": "string"},
 					},
 				},
-				"description": "兼容 rg 的 --type-clear：按名称清除内置/自定义文件类型规则，例如 foo。清除后该名称按未知类型回退为 *.<name>；同名同时出现在 type_add 与 type_clear 时以清除为准。规则由共享核心解析，ripgrep 与内置 walker 两个引擎结果一致，本地与 remote 使用同一实现。可传单个字符串或字符串数组。",
+				"description": "兼容 rg 的 --type-clear：按名称移除类型定义，例如 foo；与 type_add 同名时以清除为准，清除后的名称按未知类型回退为 *.<name>。可传字符串或字符串数组。",
 			},
 			"sort": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sort：按文件顺序排序（none/path/modified/accessed/created）。排序由共享核心执行，ripgrep 与内置 walker 两个引擎结果一致；没有 rg 时 walker 也支持时间排序（平台缺少对应时间戳时会明确报错）。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --sort：none/path/modified/accessed/created。",
 			},
 			"sortr": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列；与 sort 同时出现时 sortr 优先。共享核心执行，两个引擎结果一致。",
+				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列；与 sort 同时出现时 sortr 优先。",
 			},
 			"sort_reverse": map[string]interface{}{
 				"type":        "string",
@@ -291,11 +291,11 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			},
 			"sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --sort-files：true 等价于 sort=path，false 表示不排序；与 sort/sortr 同时出现时以本参数为准。共享核心执行，两个引擎结果一致。",
+				"description": "兼容 rg 的 --sort-files：true 等价于 sort=path，false 关闭排序。",
 			},
 			"no_sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-sort-files：取消 path 排序；若排序键是 modified/accessed/created 则不受影响。共享核心执行，两个引擎结果一致。",
+				"description": "兼容 rg 的 --no-sort-files：取消 path 排序；modified/accessed/created 不受影响。",
 			},
 			"case_insensitive": map[string]interface{}{
 				"type":        "boolean",
@@ -418,7 +418,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			},
 			"only_matching": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --only-matching/-o：每个匹配片段单独输出一行，格式 path:line:column:fragment。与 invert_match 同用时回退为整行内容（同 rg -o -v）；count 模式下计数变为匹配次数（同 rg -o -c）；files 模式不受影响；与 context 不能同时使用（会显式报错，共享核心暂不支持该组合）。",
+				"description": "兼容 rg 的 --only-matching/-o：每个匹配片段单独输出一行，格式 path:line:column:fragment。与 invert_match 同用时回退为整行内容（同 rg -o -v）；count 模式下计数变为匹配次数（同 rg -o -c）；files 模式不受影响；可与 context 同用（同 rg -o -C：命中行输出片段，窗口内其余行整行）。",
 			},
 			"column": map[string]interface{}{
 				"type":        "boolean",
@@ -590,35 +590,39 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			},
 			"no_config": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-config：禁止 ripgrep 读取自身配置（RIPGREP_CONFIG_PATH 指向的文件）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。内置 walker 引擎从不读取 rg 配置，本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --no-config：禁止读取 ripgrep 配置（RIPGREP_CONFIG_PATH）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。",
 			},
 			"replace": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）后输出；只有命中行被替换，上下文行保持原文。ripgrep 可用时由 rg 自己执行替换（语义与 rg 完全一致），不可用时由内置 walker 用 Go 正则按同一契约展开。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）；只有命中行被替换，上下文行保持原文。",
+			},
+			"passthru": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --passthru：content 模式下输出所有行，匹配行带匹配标记、未匹配行作为上下文；files/count/files_without 模式忽略该参数。",
 			},
 			"json": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --json：返回 ripgrep 原始 JSON Lines 事件流（begin/match/context/end/summary），不再规范化为 path:line[:column]: content。事件行原样透传，只有事件里的 path 会按本工具的显示路径约定改写；分页以「事件行」为单位，输出保持可解析（不追加任何提示文本）；metadata.stats 直接给出 rg 汇总事件里的计数。该格式本身就是 ripgrep 的产物，因此没有可用 rg 时会明确报错而不是降级成别的文本。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --json：返回 ripgrep 原始 JSON Lines 事件流（begin/match/context/end/summary），不再规范化为 path:line[:column]: content。事件行原样透传，只有事件里的 path 会按本工具的显示路径约定改写；分页以「事件行」为单位，输出保持可解析（不追加任何提示文本）；metadata.stats 直接给出 rg 汇总事件里的计数。没有可用 rg 时会明确报错，而不是降级成别的文本。",
 			},
 			"json_output": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容别名；等价于 json=true（同一实现、同一输出）。",
+				"description": "兼容别名；等价于 json=true。",
 			},
 			"head_limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "本次返回的匹配行上限（分页页大小）：本地拼写，与 limit 是同一个概念，两个拼写同时出现时以 head_limit 为准。缺省沿用 limit/内置上限；0 表示不限（仍受 5000 条安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。本地与 remote 使用同一实现。",
+				"description": "本次返回的匹配行上限（分页页大小）：本地拼写，与 limit 是同一个概念，两个拼写同时出现时以 head_limit 为准。缺省沿用 limit/内置上限；0 表示不限（仍受 5000 条安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。",
 			},
 			"context_separator": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。默认仍为 `--`；空字符串视为未设置（保持默认）。分隔符由共享渲染器输出，ripgrep 与内置 walker 两个引擎因此天然一致。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。默认仍为 `--`；空字符串视为未设置（保持默认）。",
 			},
 			"no_context_separator": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串；与 context_separator 同时出现时以本开关为准。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串；与 context_separator 同时出现时以本开关为准。",
 			},
 			"follow": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现，与 rg 一致），链接到文件则搜索该文件。环保护比 rg 更强：某个目录已被一个链接带到过，就不再被第二个链接带过去（互指链接必然终止；同一目标被多个链接指向时只搜索一次——rg 会把两条路径各搜一次）。Windows 上未显式指定时默认跟随 NTFS junction（沿用本工具既有默认；显式 follow=false 可关闭）。ripgrep 与内置 walker 两个引擎都实现，本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现），链接到文件则搜索该文件。环保护比 rg 更强：同一目录不会被第二个链接重复带入（互指链接必然终止；同一目标被多个链接指向时只搜索一次）。Windows 上未显式指定时默认跟随 NTFS junction；显式 follow=false 可关闭。",
 			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{

@@ -30,7 +30,10 @@ var coreSearchParams = map[string]bool{
 	// legacy path.
 	"sort": true, "sortr": true, "sort_reverse": true,
 	"sort_files": true, "no_sort_files": true,
-	"mode": true, "files_with_matches": true, "count": true,
+	// passthru is implemented by both engines (whole-file output with match and
+	// context markers), so it is no longer an rg-only escape hatch.
+	"passthru": true,
+	"mode":     true, "files_with_matches": true, "count": true,
 	"files_without_match": true, "files_without_matches": true,
 	"max_count": true, "max_depth": true, "max_filesize": true,
 	"one_file_system": true,

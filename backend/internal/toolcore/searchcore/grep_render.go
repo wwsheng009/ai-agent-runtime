@@ -148,6 +148,19 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 			lines = append(lines, fmt.Sprintf("%s:%d", in.displayPathFor(entry.File), entry.Count))
 		}
 		page.renderedFiles = len(in.result.Files)
+	case in.options.Passthru:
+		// Passthru is the whole file in the context presentation: the match
+		// marker distinguishes the selected lines, and neighbours keep the
+		// established context shape. No `--` separators: the lines are
+		// contiguous by construction, so a group boundary would be invented.
+		for _, item := range in.result.Matches {
+			display := in.displayPathFor(item.File)
+			if item.IsContext {
+				lines = append(lines, fmt.Sprintf("%s %d: %s", display, item.Line, in.renderText(item.Text)))
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s>%d: %s", display, item.Line, in.renderText(item.Text)))
+		}
 	case in.contextBefore > 0 || in.contextAfter > 0:
 		// A replacement rewrites the matched line, so the engine's text has to
 		// win over the re-read line or the substitution would be undone here.

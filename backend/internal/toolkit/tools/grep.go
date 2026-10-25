@@ -395,11 +395,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"replace": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）后输出；只有命中行被替换，上下文行保持原文。ripgrep 可用时由 rg 自己执行替换（语义与 rg 完全一致），不可用时由内置 walker 用 Go 正则按同一契约展开。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --replace/-r：把命中文本替换为给定模板（支持 $1/${name} 捕获组引用）；只有命中行被替换，上下文行保持原文。",
 			},
 			"passthru": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --passthru：在上下文中穿透输出未匹配行；该能力当前仅在可用 ripgrep/rg 时支持。",
+				"description": "兼容 rg 的 --passthru：content 模式下输出所有行，匹配行带匹配标记、未匹配行作为上下文；files/count/files_without 模式忽略该参数。",
 			},
 			"crlf": map[string]interface{}{
 				"type":        "boolean",
@@ -415,15 +415,15 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"json": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --json：返回 ripgrep 原始 JSON Lines 事件流（begin/match/context/end/summary），不再规范化为 path:line[:column]: content。事件行原样透传，只有事件里的 path 会按本工具的显示路径约定改写；分页以「事件行」为单位，输出保持可解析（不追加任何提示文本）；metadata.stats 直接给出 rg 汇总事件里的计数。该格式本身就是 ripgrep 的产物，因此没有可用 rg 时会明确报错而不是降级成别的文本。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --json：返回 ripgrep 原始 JSON Lines 事件流（begin/match/context/end/summary），不再规范化为 path:line[:column]: content。事件行原样透传，只有事件里的 path 会按本工具的显示路径约定改写；分页以「事件行」为单位，输出保持可解析（不追加任何提示文本）；metadata.stats 直接给出 rg 汇总事件里的计数。没有可用 rg 时会明确报错，而不是降级成别的文本。",
 			},
 			"json_output": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容别名；等价于 json=true（同一实现、同一输出）。",
+				"description": "兼容别名；等价于 json=true。",
 			},
 			"follow": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现，与 rg 一致），链接到文件则搜索该文件。环保护比 rg 更强：某个目录已被一个链接带到过，就不再被第二个链接带过去（互指链接必然终止；同一目标被多个链接指向时只搜索一次——rg 会把两条路径各搜一次）。Windows 上未显式指定时默认跟随 NTFS junction（沿用本工具既有默认；显式 follow=false 可关闭）。ripgrep 与内置 walker 两个引擎都实现，本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现），链接到文件则搜索该文件。环保护比 rg 更强：同一目录不会被第二个链接重复带入（互指链接必然终止；同一目标被多个链接指向时只搜索一次）。Windows 上未显式指定时默认跟随 NTFS junction；显式 follow=false 可关闭。",
 			},
 			"column": map[string]interface{}{
 				"type":        "boolean",
@@ -471,11 +471,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"context_separator": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。默认仍为 `--`；空字符串视为未设置（保持默认）。分隔符由共享渲染器输出，ripgrep 与内置 walker 两个引擎因此天然一致。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。默认仍为 `--`；空字符串视为未设置（保持默认）。",
 			},
 			"no_context_separator": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串；与 context_separator 同时出现时以本开关为准。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串；与 context_separator 同时出现时以本开关为准。",
 			},
 			"max_columns": map[string]interface{}{
 				"type":        "integer",
@@ -513,8 +513,8 @@ func newGrepTool(name string) *GrepTool {
 				"type":        "string",
 				"description": "兼容 rg 的 --type-not/-T：排除某类文件类型，例如 test/py/go。",
 			},
-			"type_add":    stringOrStringArraySchema("兼容 rg 的 --type-add：按 name:glob 添加自定义文件类型，例如 type_add='foo:*.foo'，也可在已有类型上追加 glob（go:*.gold）。类型规则由共享核心解析成 include/exclude glob，ripgrep 与内置 walker 两个引擎结果一致；可传单个字符串或字符串数组。"),
-			"type_clear":  stringOrStringArraySchema("兼容 rg 的 --type-clear：按名称清除内置/自定义文件类型规则，例如 type_clear='foo'。清除后该名称按未知类型回退为 *.<name>；同名同时出现在 type_add 与 type_clear 时以清除为准。规则由共享核心解析，两个引擎结果一致；可传单个字符串或字符串数组。"),
+			"type_add":    stringOrStringArraySchema("兼容 rg 的 --type-add：name:glob，例如 foo:*.foo；可在已有类型上追加 glob。可传字符串或字符串数组。"),
+			"type_clear":  stringOrStringArraySchema("兼容 rg 的 --type-clear：按名称移除类型定义，例如 foo；与 type_add 同名时以清除为准，清除后的名称按未知类型回退为 *.<name>。可传字符串或字符串数组。"),
 			"ignore_file": stringOrStringArraySchema("兼容 rg 的 --ignore-file：额外指定 ignore 文件列表。grep 会尽量接受这种熟悉写法；当 rg 可用时会透传给 rg。"),
 			"ignore_file_case_insensitive": map[string]interface{}{
 				"type":        "boolean",
@@ -542,11 +542,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"sort": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sort：按文件顺序排序（none/path/modified/accessed/created）。排序由共享核心执行，ripgrep 与内置 walker 两个引擎结果一致；没有 rg 时 walker 也支持时间排序（平台缺少对应时间戳时会明确报错，不会静默换序）。",
+				"description": "兼容 rg 的 --sort：none/path/modified/accessed/created。",
 			},
 			"sortr": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列。排序由共享核心执行，两个引擎结果一致；与 sort 同时出现时 sortr 优先。",
+				"description": "兼容 rg 的 --sortr：与 sort 相同的键，但按倒序排列；与 sort 同时出现时 sortr 优先。",
 			},
 			"sort_reverse": map[string]interface{}{
 				"type":        "string",
@@ -554,11 +554,11 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --sort-files。true 时等价于 sort=path，false 表示不排序；与 sort/sortr 同时出现时以本参数为准。排序由共享核心执行，两个引擎结果一致。",
+				"description": "兼容 rg 的 --sort-files：true 等价于 sort=path，false 关闭排序。",
 			},
 			"no_sort_files": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-sort-files：取消 path 排序（等价于 sort_files=false 的路径部分）；若排序键是 modified/accessed/created 则不受影响。共享核心执行，两个引擎结果一致。",
+				"description": "兼容 rg 的 --no-sort-files：取消 path 排序；modified/accessed/created 不受影响。",
 			},
 			"max_depth": map[string]interface{}{
 				"type":        "integer",
@@ -570,7 +570,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"head_limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "本次返回的匹配行上限（分页页大小）：本地拼写，与 limit 是同一个概念，两个拼写同时出现时以 head_limit 为准。缺省沿用 limit/内置上限；0 表示不限（仍受 5000 条安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。本地与 remote 使用同一实现。",
+				"description": "本次返回的匹配行上限（分页页大小）：本地拼写，与 limit 是同一个概念，两个拼写同时出现时以 head_limit 为准。缺省沿用 limit/内置上限；0 表示不限（仍受 5000 条安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
@@ -645,19 +645,19 @@ func newGrepTool(name string) *GrepTool {
 				"type":        "integer",
 				"minimum":     0,
 				"maximum":     3,
-				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 语义层级：0=默认，1=不读 ignore 文件（仍跳过 hidden），2=同时搜索 hidden 文件/目录，3=同时搜索含 NUL 字节的二进制文件（越过 NUL 继续匹配；输出中的 NUL 显示为 ␀，保证可读）。no_hidden 优先于该层级的隐藏步骤；no_ignore=true 等价于层级 1。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 语义层级：0=默认，1=不读 ignore 文件（仍跳过 hidden），2=同时搜索 hidden 文件/目录，3=同时搜索含 NUL 字节的二进制文件（越过 NUL 继续匹配；输出中的 NUL 显示为 ␀，保证可读）。no_hidden 优先于该层级的隐藏步骤；no_ignore=true 等价于层级 1。",
 			},
 			"no_config": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-config：禁止 ripgrep 读取自身配置（RIPGREP_CONFIG_PATH 指向的文件）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。内置 walker 引擎从不读取 rg 配置，本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --no-config：禁止读取 ripgrep 配置（RIPGREP_CONFIG_PATH）。默认即为「不读配置」，因此 true 与省略等价；只有显式 false 才表示允许继承本机 rg 配置。",
 			},
 			"one_file_system": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --one-file-system：递归时不再下降进入其它文件系统（挂载点），但调用方显式给出的搜索根始终会被搜索。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --one-file-system：递归时不再下降进入其它文件系统（挂载点），但调用方显式给出的搜索根始终会被搜索。",
 			},
 			"no_messages": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-messages：跳过不可读的显式 ignore_file 而不报错。默认（false）下，显式指定的 ignore_file 读不到会直接失败——静默丢弃会改变规则集却不告知。按惯例发现的 .gitignore/.ignore/全局 ignore 文件始终可选，不受该开关影响。本地与 remote 使用同一实现。",
+				"description": "兼容 rg 的 --no-messages：跳过不可读的显式 ignore_file 而不报错。默认（false）下，显式指定的 ignore_file 读不到会直接失败。按惯例发现的 .gitignore/.ignore/全局 ignore 文件始终可选，不受该开关影响。",
 			},
 			"rg_args": map[string]interface{}{
 				"type": "array",

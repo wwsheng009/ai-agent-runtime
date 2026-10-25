@@ -606,6 +606,12 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if jsonOutput {
 		jsonLineBudget = opts.Offset + opts.Limit
 	}
+	// --passthru turns the stream into the whole file, with non-matching lines
+	// as context events (json) or `path<sep>line<sep>text` lines (text mode).
+	// files/count modes ignore it, exactly like rg.
+	if opts.Passthru && mode == GrepModeContent {
+		args = append(args, "--passthru")
+	}
 	if mode == GrepModeFilesWithout {
 		// rg ignores --json in this mode and prints plain paths, so the stats
 		// block is the only structured evidence available. It arrives after
@@ -746,6 +752,14 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.MaxCountSet {
 		args = append(args, "--max-count", strconv.Itoa(opts.MaxCount))
 	}
+	// rg stops reading a file once its match cap is reached, so under
+	// --passthru the lines after the last match of that file never arrive. The
+	// walker keeps reading them as context (rg -m 0/-v aside, a cap is a match
+	// cap, not a read cap). The walker is therefore the engine that implements
+	// this combination.
+	if opts.Passthru && mode == GrepModeContent && opts.MaxCountSet {
+		return GrepResult{}, false, nil
+	}
 	if onlyMatching {
 		args = append(args, "--only-matching")
 	}
@@ -786,8 +800,15 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	truncated := false
 	streamErr := e.stream()(ctx, args, "", func(line []byte) bool {
 		if replaceOutput {
-			rawPath, lineNo, column, text, ok := parseRipgrepReplaceLine(line, wantColumn)
+			rawPath, lineNo, column, text, isContext, ok := parseRipgrepReplaceLine(line, wantColumn)
 			if !ok {
+				return true
+			}
+			if isContext {
+				if appendRipgrepContext(opts, mode, globMatcher, baseDir, rawPath, lineNo, text, &result) {
+					truncated = true
+					return false
+				}
 				return true
 			}
 			if appendRipgrepMatch(opts, mode, globMatcher, baseDir, rawPath, lineNo, column, text, &result) {
@@ -823,16 +844,9 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		case "summary":
 			result.FilesScanned = event.Data.Stats.searchedFiles()
 		case "match":
-			var text string
-			switch {
-			case event.Data.Lines.Bytes != nil:
-				raw, decodeErr := base64.StdEncoding.DecodeString(*event.Data.Lines.Bytes)
-				if decodeErr != nil {
-					return true
-				}
-				text = string(raw)
-			case event.Data.Lines.Text != nil:
-				text = *event.Data.Lines.Text
+			text, ok := ripgrepJSONEventText(event)
+			if !ok {
+				return true
 			}
 			// lineText keeps the raw line (trailing newline included) because
 			// submatch offsets point into it; the display form is the shared
@@ -855,6 +869,22 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			// accurate; the shared window then slices the raw list down.
 			if appendRipgrepMatch(opts, mode, globMatcher, baseDir, event.Data.Path.Text,
 				event.Data.LineNumber, grepLineColumn(opts, lineText, event.Data.Submatches), text, &result) {
+				truncated = true
+				return false
+			}
+		case "context":
+			// Context events only arrive when --passthru asked for them: the
+			// shared engine never passes --context (the walker expands context
+			// from the matched files instead).
+			if !opts.Passthru {
+				return true
+			}
+			text, ok := ripgrepJSONEventText(event)
+			if !ok {
+				return true
+			}
+			if appendRipgrepContext(opts, mode, globMatcher, baseDir, event.Data.Path.Text,
+				event.Data.LineNumber, text, &result) {
 				truncated = true
 				return false
 			}
@@ -1036,6 +1066,44 @@ func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFi
 	return GrepPageComplete(result.Matches, mode, opts)
 }
 
+// appendRipgrepContext records one non-matching passthru line. The path and
+// text normalization are the same as a match; the entry is marked context so
+// the renderer and the match counters can tell them apart.
+func appendRipgrepContext(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFilter, baseDir, rawPath string, lineNo int, text string, result *GrepResult) bool {
+	matchPath := resolveRipgrepPath(rawPath, baseDir)
+	if globMatcher != nil && !globMatcher.matches(matchPath) {
+		return false
+	}
+	display, ok := normalizeGrepEngineText(text)
+	if !ok {
+		return false
+	}
+	result.Matches = append(result.Matches, GrepMatch{
+		File:      matchPath,
+		Line:      lineNo,
+		Text:      display,
+		IsContext: true,
+	})
+	return GrepPageComplete(result.Matches, mode, opts)
+}
+
+// ripgrepJSONEventText decodes the line payload shared by match and context
+// events. rg sends UTF-8 text when it can and base64 when it cannot.
+func ripgrepJSONEventText(event rgJSONEvent) (string, bool) {
+	switch {
+	case event.Data.Lines.Bytes != nil:
+		raw, err := base64.StdEncoding.DecodeString(*event.Data.Lines.Bytes)
+		if err != nil {
+			return "", false
+		}
+		return string(raw), true
+	case event.Data.Lines.Text != nil:
+		return *event.Data.Lines.Text, true
+	default:
+		return "", false
+	}
+}
+
 // resolveRipgrepPath turns a printed path into an absolute one: ripgrep echoes
 // a relative path when it was given a relative root (the single-root case), and
 // every consumer downstream works in absolute paths.
@@ -1067,42 +1135,47 @@ func collectRipgrepJSONEvent(result *GrepResult, line []byte, baseDir string) rg
 // parseRipgrepReplaceLine splits one `rg --null` content line from the
 // replacement mode: the path ends at the NUL byte ripgrep writes after it, then
 // `line:` (or `line:column:` when --column was asked for) precedes the text
-// ripgrep substituted. The NUL is what makes the split unambiguous - a path may
-// contain a colon of its own.
-func parseRipgrepReplaceLine(line []byte, wantColumn bool) (rawPath string, lineNo, column int, text string, ok bool) {
+// ripgrep substituted. A passthru context line uses `line-text` and carries no
+// column; that separator is what tells the two apart. The NUL is what makes the
+// split unambiguous - a path may contain a colon of its own.
+func parseRipgrepReplaceLine(line []byte, wantColumn bool) (rawPath string, lineNo, column int, text string, isContext, ok bool) {
 	nul := bytes.IndexByte(line, 0)
 	if nul <= 0 {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
 	}
 	rawPath = string(line[:nul])
 	rest := string(line[nul+1:])
-	lineNo, rest, ok = cutRipgrepIntField(rest)
+	lineNo, separator, rest, ok := cutRipgrepIntFieldSep(rest)
 	if !ok {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
+	}
+	if separator == '-' {
+		return rawPath, lineNo, 0, rest, true, true
 	}
 	if wantColumn {
-		column, rest, ok = cutRipgrepIntField(rest)
-		if !ok {
-			return "", 0, 0, "", false
+		column, separator, rest, ok = cutRipgrepIntFieldSep(rest)
+		if !ok || separator != ':' {
+			return "", 0, 0, "", false, false
 		}
 	}
-	return rawPath, lineNo, column, rest, true
+	return rawPath, lineNo, column, rest, false, true
 }
 
-// cutRipgrepIntField reads a leading decimal field terminated by a colon.
-func cutRipgrepIntField(raw string) (int, string, bool) {
+// cutRipgrepIntFieldSep reads a leading decimal field terminated by ':' or '-'
+// and returns the separator that followed it.
+func cutRipgrepIntFieldSep(raw string) (int, byte, string, bool) {
 	i := 0
 	for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
 		i++
 	}
-	if i == 0 || i >= len(raw) || raw[i] != ':' {
-		return 0, raw, false
+	if i == 0 || i >= len(raw) || (raw[i] != ':' && raw[i] != '-') {
+		return 0, 0, raw, false
 	}
 	value, err := strconv.Atoi(raw[:i])
 	if err != nil {
-		return 0, raw, false
+		return 0, 0, raw, false
 	}
-	return value, raw[i+1:], true
+	return value, raw[i], raw[i+1:], true
 }
 
 func safeRipgrepGlob(pattern string) bool {
