@@ -88,6 +88,23 @@ agent 侧订阅本地事件总线，按下表更新会话状态并（可选）�
 
 **优先级**（当多个并存时取最高）：`approval`/`question` > `error` > `completed` > `waiting` > `none`。
 
+**状态文案的待处理明细（2026-10-25）**：`attention=approval|question` 期间，宿主的单行状态镜像
+（`status_text`）在粗粒度文案后附上**待处理条目的一行身份**——审批取工具名
+（`Waiting for approval: shell_exec`）、提问取问题正文首行（`Waiting for answer: 是否继续部署？`），
+均已压为单行、有界（≤96 显示宽）。交互路径由优先提示的 stage 明细产出；**Web/远程接管路径**
+（控制台没有读者、决议经 `/web/api/input` 回流）没有 stage 投影，由事件桥直接补写同一份文案并
+同步一帧。控制台卡片因此在列表页就能看出"待处理的是什么"，不必打开会话面板。
+
+**决议收口的清理时机**：`approval_resolved` / `question_answered` 到达即清挂起 attention
+（会话级观测，必须在 **turn 归属闸门之前**执行——两者的载荷不带 `turn_id`，闸门会把 active-run
+期间的它们整批丢弃，徽标就只能等回合结束的 `EndTurn` 收走；同 2026-10-11 `llm.request.*` 的
+教训）。交互路径自己也会清（幂等），该收口主要保证 **Web/远程决议**路径的徽标立即消失；
+runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attention.go`。
+
+边界：**通知正文**（Web Push / ntfy / AppPush）仍只含"节点 + attention 标签"——推送在注意力
+翻转的同一帧派生，而明细随稍后的状态帧到达，二者不是同一帧；把明细并入推送需要先调整宿主的
+帧顺序（未做，见 §10.2 思路）。
+
 ---
 
 ## 4. 协议扩展
@@ -250,6 +267,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 项 | 说明 |
 |----|------|
 | 多实例 HA（双活） | **主备热切换（active/passive）已支持**：GOAWAY 优雅下线广播 + agent 自动重连（2/5/10/30s 退避）+ 注册表快照恢复（stale）+ 机器稳定 node id（同 ID 替换 stale 条目），见 [10-runbook.md](./10-runbook.md) §13。剩余为**双活（active/active）**：presence 与推送去重为单进程内存状态，需共享存储（如 Redis）+ 节点归属路由 + SSE 广播层；当前单实例与主备部署均不受影响 |
+| 推送正文带待处理明细 | §3 的"状态文案待处理明细"已进控制台卡片，但 Web Push / ntfy 正文仍只有"节点 + attention"。要让推送也带上「shell_exec」需先把宿主的**帧顺序**调整为"先投影明细、再同步 attention+status 的同一帧"（当前 `setGatewayAttention` 先于 `askApproval` 投影）；改序会同时影响 TUI 输入模式切换时序，需专门评估 |
 
 > 说明：推送链路已**端到端打通**（agent 上报 → 网关注册表 → 去重/合并/免打扰 → VAPID 加密投递 →
 > Service Worker 展示 → 控制台徽标/toast/收件箱），各段均有单测；§3/§5/§9 的增强项（`NOTIFY` 帧、

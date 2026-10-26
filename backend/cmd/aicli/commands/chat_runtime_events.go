@@ -989,7 +989,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if unifiedInteractiveOutputMustFailClosed(session) {
 				return chatApprovalAnswer{}, fmt.Errorf("unified terminal session is unavailable")
 			}
-			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval)
+			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval, approvalStageDetail(approval))
 			defer restoreStage()
 			lines := make([]string, 0, 10)
 			suspension, notice := suspendPendingInteractiveInputForPriorityPrompt(session, "审批提示")
@@ -1071,7 +1071,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if unifiedInteractiveOutputMustFailClosed(session) {
 				return "", fmt.Errorf("unified terminal session is unavailable")
 			}
-			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer)
+			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer, oneLineStatusDetail(prompt))
 			defer restoreStage()
 			normalizedSuggestions := normalizedQuestionSuggestions(suggestions)
 			lines := make([]string, 0, len(normalizedSuggestions)+3)
@@ -1106,7 +1106,11 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	return bridge
 }
 
-func pushChatComposerAgentStage(session *ChatSession, stage chatAgentStage) func() {
+// pushChatComposerAgentStage 把优先提示（审批/提问）投影为会话 stage，可选
+// detail 一并进入 surface 状态明细：网关侧据此把「待审批/待回答」从裸徽标
+// 变成"待审批：shell_exec"（docs/gateway/08-notifications.md §3），远程控制台
+// 的会话卡片不必打开面板就能判断要处理什么。空 detail 保持原有行为。
+func pushChatComposerAgentStage(session *ChatSession, stage chatAgentStage, detail ...string) func() {
 	if session == nil || session.Interaction == nil {
 		return func() {}
 	}
@@ -1121,13 +1125,31 @@ func pushChatComposerAgentStage(session *ChatSession, stage chatAgentStage) func
 	interaction := session.Interaction
 	previousStage := interaction.AgentStage()
 	previousDetail := interaction.AgentStageDetail()
-	interaction.SetAgentStage(stage)
+	if len(detail) > 0 && strings.TrimSpace(detail[0]) != "" {
+		interaction.SetAgentStageDetail(stage, detail[0])
+	} else {
+		interaction.SetAgentStage(stage)
+	}
 	return func() {
 		if interaction.AgentStage() == stage {
 			interaction.SetAgentStageDetail(previousStage, previousDetail)
 		}
 		restoreInputMode()
 	}
+}
+
+// approvalStageDetail 提取审批提示的一行身份（工具名）作为 stage 明细。
+func approvalStageDetail(approval *runtimechat.ApprovalRequest) string {
+	if approval == nil {
+		return ""
+	}
+	return strings.TrimSpace(approval.ToolName)
+}
+
+// oneLineStatusDetail 把多行提示（问题正文）压成单行：StatusText 的契约是
+// 单行镜像，换行会让网关侧渲染与匹配行为不确定。
+func oneLineStatusDetail(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func (b *chatRuntimeEventBridge) start() {
@@ -6390,6 +6412,16 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	// bar on the local estimate while the provider counted 261K/262K).
 	b.applyLLMRequestStatus(event)
 	b.applySessionCompactStatus(event)
+	// 网关 attention 的决议收口同理必须在 turn 归属闸门之前：resolved/answered
+	// 载荷不带 turn_id（approvalResolvedEventPayload），闸门会把 active-run 期间
+	// 的它们整批丢弃（豁免名单只有 requested/asked）——徽标就永远清不掉，直到
+	// 回合结束才被 EndTurn 收走。交互路径自己也会清（幂等）；Web/远程决议路径
+	// 只有这里清理（docs/gateway/08-notifications.md §3：决议 → attention 清空）。
+	if event.Type == runtimechat.EventApprovalResolved {
+		clearGatewayAttentionIfSet(b.session, event.SessionID, gatewayAttentionApproval)
+	} else if event.Type == runtimechat.EventQuestionAnswered {
+		clearGatewayAttentionIfSet(b.session, event.SessionID, gatewayAttentionQuestion)
+	}
 	if b.shouldSuppressMismatchedPrimaryTurnEvent(event) {
 		if isChatRenderDataPlaneSuppressedEvent(event.Type) {
 			// Mirror/diagnostic events (aicli.chat.dynamic_status, input.queue.*,
@@ -6594,6 +6626,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			// 面板却永不渲染，只有日志能区分"面板被跳过"与"事件被丢弃"。
 			b.writeLateRuntimeDebugThrottled(event, fmt.Sprintf("[runtime-event] interactive prompt deferred to web input capture type=%q session_id=%q request_id=%q",
 				event.Type, event.SessionID, requestID))
+			// 交互路径的「Waiting for approval: <工具>」由 stage 明细产出；这条
+			// 路径没有 stage 投影，直接补写同一份文案并同步一帧（attention 与
+			// 明细同帧到达），让控制台卡片在 Web 接管的等待期间也显示具体工具。
+			if projectGatewayPendingDetail(event.SessionID, gatewayAttentionApproval, approvalStageDetail(approval)) {
+				syncChatGatewaySession(b.session)
+			}
 			return
 		}
 		if !b.approvalStillPending(event.SessionID, requestID) {
@@ -6680,6 +6718,10 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			// 并把事件处理 worker 钉死（见 externalInputCaptureOwnsInput 注释）。
 			// 提问已由 actor 状态投影到 Web 的 pending_question，回答经
 			// /web/api/input 回流，这里不阻塞、也不代替 Web 作答。
+			// 与审批路径同口径：补写「Waiting for answer: <问题首行>」明细。
+			if projectGatewayPendingDetail(event.SessionID, gatewayAttentionQuestion, prompt) {
+				syncChatGatewaySession(b.session)
+			}
 			return
 		}
 		if !b.questionStillPending(event.SessionID, questionID) {

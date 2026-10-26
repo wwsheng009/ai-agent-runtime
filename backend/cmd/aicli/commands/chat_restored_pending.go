@@ -265,7 +265,7 @@ func projectRestoredPendingQuestion(session *ChatSession, question *runtimechat.
 		lines:       lines,
 		promptLine:  promptLine,
 		suspension:  suspension,
-		restoreFan:  pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer),
+		restoreFan:  pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer, oneLineStatusDetail(snapshot.Prompt)),
 	}
 	pending.cleanupBody = showRestoredPendingPromptBody(session, lines, promptLine)
 	setRestoredPendingPrompt(session, pending)
@@ -319,7 +319,7 @@ func projectRestoredPendingApproval(session *ChatSession, approval *runtimechat.
 		lines:      lines,
 		promptLine: promptLine,
 		suspension: suspension,
-		restoreFan: pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval),
+		restoreFan: pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval, snapshot.ToolName),
 	}
 	pending.cleanupBody = showRestoredPendingPromptBody(session, lines, promptLine)
 	setRestoredPendingPrompt(session, pending)

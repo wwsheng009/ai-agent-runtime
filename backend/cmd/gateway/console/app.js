@@ -10,6 +10,11 @@
   var seenAttention = {};
   var attentionSeeded = false;
   var readAttention = {};
+  // 已读注意力（点击打开过的待处理）跨刷新保留，短 TTL 自动过期：一小时内
+  // 刷新页面不再把处理过的待办重新弹回 inbox；TTL 保证误标的旧条目会自然
+  // 回流（服务端 attention 还在时会重新出现在 seenAttention 检测里）。
+  var READ_ATTENTION_KEY = "aicli-gw-read-attention";
+  var READ_ATTENTION_TTL_MS = 60 * 60 * 1000;
   var presenceTargets = {};
   var sessionFilterText = "";
   // 默认只显示在线会话：离线快照收进「离线」筛选，避免主列表被旧数据占满。
@@ -603,6 +608,24 @@
 
   /* ─────────────────────── derived helpers ───────────────────── */
 
+  function loadReadAttention() {
+    try {
+      var raw = JSON.parse(localStorage.getItem(READ_ATTENTION_KEY) || "null");
+      if (!raw || typeof raw !== "object") { return; }
+      var now = Date.now();
+      Object.keys(raw).forEach(function (key) {
+        var ts = typeof raw[key] === "number" ? raw[key] : 0;
+        if (ts && now - ts < READ_ATTENTION_TTL_MS) { readAttention[key] = ts; }
+      });
+    } catch (err) { /* storage unavailable */ }
+  }
+
+  function saveReadAttention() {
+    try {
+      localStorage.setItem(READ_ATTENTION_KEY, JSON.stringify(readAttention));
+    } catch (err) { /* storage unavailable */ }
+  }
+
   function attentionKey(node, session) {
     return node.node_id + "|" + session.session_id + "|" + session.attention;
   }
@@ -780,8 +803,10 @@
     if (sessionFilterKind === "offline" && !item.node.stale) { return false; }
     if (sessionFilterText) {
       var q = sessionFilterText.toLowerCase();
-      var hay = ((s.title || "") + " " + (s.preview || "") + " " + (s.last_message || "") + " " +
-        (s.status_text || "") + " " + s.session_id).toLowerCase();
+      // 节点显示名一起参与匹配："找 laptop 上那个会话"是高频搜索意图；
+      // 节点 id（裸 uuid）不参与，避免常见子串误命中。
+      var hay = (nodeDisplayName(item.node) + " " + (s.title || "") + " " + (s.preview || "") + " " +
+        (s.last_message || "") + " " + (s.status_text || "") + " " + s.session_id).toLowerCase();
       if (hay.indexOf(q) === -1) { return false; }
     }
     return true;
@@ -1789,9 +1814,14 @@
       b.className = "att-badge att-" + item.session.attention;
       b.hidden = false;
       row.querySelector(".card-meta").textContent = item.node.node_id;
-      row.addEventListener("click", function () { openSession(item.node, item.session); });
+      row.addEventListener("click", function () {
+        // 待办行点击与卡片「审批 / 回答」同语义：能面板内打开就聚焦交互区。
+        openSessionInline(item.node, item.session, chatFocusOptsFor(item.session));
+      });
       list.appendChild(row);
     });
+    // 面板头部的「下一条待处理」按钮随同一份 inbox 数据刷新（面板关闭时自隐藏）。
+    chatUpdateNextPending();
   }
 
   /* ─────────────────────── rendering: nodes ──────────────────── */
@@ -1849,7 +1879,7 @@
         }
         row.querySelector("button").addEventListener("click", function (e) {
           e.stopPropagation();
-          openSession(node, session);
+          openSessionInline(node, session);
         });
         sessionsHost.appendChild(row);
       });
@@ -1992,7 +2022,7 @@
         when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
         (fresh ? " · 刚刚" : "");
       if (fresh) { row.classList.add("fresh"); }
-      row.addEventListener("click", function () { openSession(item.node, s); });
+      row.addEventListener("click", function () { openSessionInline(item.node, s); });
       host.appendChild(row);
     });
     var win = el("activity-window");
@@ -2145,6 +2175,20 @@
     window.open(target, "_blank");
   }
 
+  // openSessionInline 是仪表盘行（需要处理 / 最近活动 / 节点会话行）的统一
+  // 打开入口：节点支持站内面板时留在本页（手机上不开新标签、不打断列表），
+  // 否则落回 openSession 的既有流程（新标签 / 移动同标签跳转）。判定与卡片
+  // 「会话」按钮完全一致（chatPanelSupported）——无 input 能力的节点也能开
+  // 只读面板；需要能作答的历史入口（审批/回答）另有 chatCanInput 门槛。
+  function openSessionInline(node, session, opts) {
+    if (!node) { return; }
+    if (chatPanelSupported(node, session)) {
+      openSessionChat(node, session, opts);
+      return;
+    }
+    openSession(node, session);
+  }
+
   function isMobileViewport() {
     return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 860px)").matches;
   }
@@ -2163,7 +2207,8 @@
 
   function markRead(node, session) {
     if (!node || !session || !session.attention) { return; }
-    readAttention[attentionKey(node, session)] = true;
+    readAttention[attentionKey(node, session)] = Date.now();
+    saveReadAttention();
     renderInbox(lastNodes);
     updateStats(lastNodes);
     renderSessionTable(lastNodes);
@@ -2422,6 +2467,98 @@
     return !!(node && !node.stale && (node.capabilities || []).indexOf("input") !== -1);
   }
 
+  /* ── 「下一条待处理」流转（孤立的审批清理循环）────────────────────
+     面板一次只显示一条会话；逐个清掉待审批/待回答时，用户此前必须关闭面板、
+     回列表、再找下一条。这两个函数把这条循环收进面板：头部常驻按钮 + 处理完
+     一条后的流转 toast，目标都取自同一份 inboxItems（未读注意力，按注意力
+     优先级排序），并显式跳过当前面板会话。 */
+
+  // pendingQueue 返回除当前面板会话外的待处理队列（未读、未离线）。
+  // 排序在 inboxItems 的注意力优先级之上做一次稳定分组：能面板内直接完成的
+  // 条目（有 screen+events；审批/提问还须有 input）排前，「下一条」因此总是
+  // 优先落回面板；只能外部打开的条目仍保留在队列里（计数不撒谎）。
+  function chatQueueRank(item) {
+    if (!chatPanelSupported(item.node, item.session)) { return 1; }
+    var att = item.session.attention;
+    if ((att === "approval" || att === "question") && !chatCanInput(item.node)) { return 1; }
+    return 0;
+  }
+
+  function pendingQueue() {
+    var st = chatState;
+    var items = inboxItems(lastNodes);
+    if (st) {
+      items = items.filter(function (item) {
+        return !(item.node.node_id === st.node.node_id &&
+          item.session.session_id === st.session.session_id);
+      });
+    }
+    // Array.prototype.sort 在现代引擎是稳定的：同组内保持注意力优先级顺序。
+    return items.sort(function (a, b) { return chatQueueRank(a) - chatQueueRank(b); });
+  }
+
+  // chatUpdateNextPending 刷新头部「下一条待处理」按钮：队列为空时隐藏，
+  // 否则显示剩余条数。任何数据刷新（renderInbox）与面板开合都会走到这里。
+  function chatUpdateNextPending() {
+    var btn = el("chat-next-pending");
+    if (!btn) { return; }
+    var st = chatState;
+    if (!st) { btn.hidden = true; return; }
+    var queue = pendingQueue();
+    if (!queue.length) { btn.hidden = true; return; }
+    btn.hidden = false;
+    var label = el("chat-next-pending-label");
+    if (label) {
+      label.textContent = queue.length > 1
+        ? "下一条待处理（" + queue.length + "）"
+        : "下一条待处理";
+    }
+    var tip = "下一条待处理：" + sessionLabelOf(queue[0].session) +
+      " · " + (queue[0].node.name || queue[0].node.node_id) +
+      "（" + attentionLabel(queue[0].session.attention) + "）";
+    btn.title = tip;
+    btn.setAttribute("aria-label", tip);
+  }
+
+  // chatSwitchTo 在面板内切换到另一条会话：复用既有一对生命周期函数
+  // （close 断流/释放 presence/归还焦点，open 全新连接），不产生第二套状态。
+  // 目标节点无法站内打开时落回外部流程且不关闭当前面板（用户可自行决定）。
+  function chatSwitchTo(node, session, opts) {
+    if (!node || !session) { return; }
+    if (!chatPanelSupported(node, session)) {
+      openSession(node, session);
+      return;
+    }
+    closeSessionChat();
+    openSessionChat(node, session, opts);
+  }
+
+  // chatFocusOptsFor 目标带待审批/待回答时，切换后聚焦交互区（与卡片
+  // 「审批 / 回答」按钮同一语义）；其余注意力只打开面板不抢焦点。
+  function chatFocusOptsFor(session) {
+    if (session && (session.attention === "approval" || session.attention === "question")) {
+      return { focusInteractive: true };
+    }
+    return null;
+  }
+
+  // chatOfferNextPending 在审批/提问被处理掉的瞬间，把下一条待处理作为
+  // 可点击流转呈现——「处理完这条，接着处理下一条」不必回列表找。
+  function chatOfferNextPending() {
+    var queue = pendingQueue();
+    if (!queue.length) { chatUpdateNextPending(); return; }
+    var next = queue[0];
+    chatUpdateNextPending();
+    pushToast("已处理 · 下一条待处理：" +
+      (next.node.name || next.node.node_id) + " · " + sessionLabelOf(next.session) +
+      "（" + attentionLabel(next.session.attention) + "）", null, {
+      label: "打开",
+      run: function () {
+        chatSwitchTo(next.node, next.session, chatFocusOptsFor(next.session));
+      },
+    });
+  }
+
   function chatEmptyLive() {
     return { streaming: false, done: false, assistant: "", reasoning: "", tool: "", images: [] };
   }
@@ -2464,6 +2601,43 @@
     hint.className = "chat-hint" + (kind ? " is-" + kind : "");
   }
 
+  // chatRenderApprovalArgs 把审批参数渲染成「键: 值」行，而不是一整坨缩进 JSON：
+  // 手机上的审批决策要一眼看清每个参数是什么；嵌套值保持 pretty-print，超长值
+  // 截到 400 字符（悬停看全文）。非对象/解析失败的参数保持原文，绝不吞信息。
+  function chatRenderApprovalArgs(target, rawArgs) {
+    if (!target) { return; }
+    target.textContent = "";
+    var value = rawArgs;
+    if (typeof value === "string") {
+      try { value = JSON.parse(value); } catch (err) { value = rawArgs; }
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      setText(target, typeof value === "string" ? value : (JSON.stringify(value, null, 2) || ""));
+      return;
+    }
+    Object.keys(value).forEach(function (key) {
+      var row = document.createElement("div");
+      row.className = "ci-arg-row";
+      var k = document.createElement("span");
+      k.className = "ci-arg-key";
+      k.textContent = key;
+      var v = document.createElement("span");
+      v.className = "ci-arg-val";
+      var item = value[key];
+      var text = typeof item === "string" ? item : JSON.stringify(item, null, 2);
+      if (text == null) { text = String(item); }
+      if (text.length > 400) {
+        v.textContent = text.slice(0, 400) + "…";
+        v.title = text;
+      } else {
+        v.textContent = text;
+      }
+      row.appendChild(k);
+      row.appendChild(v);
+      target.appendChild(row);
+    });
+  }
+
   function chatRenderInteractive() {
     var box = el("chat-interactive");
     if (!box) { return; }
@@ -2487,11 +2661,16 @@
       setText(kindEl, "待审批工具");
       setText(titleEl, approval.tool_name || "?");
       setText(promptEl, approval.prompt || "");
+      chatRenderApprovalArgs(detail, approval.arguments);
       var args = approval.arguments;
-      if (args && typeof args === "object") { args = JSON.stringify(args, null, 2); }
-      setText(detail, args || "");
-      detail.hidden = !args;
-      if (toggle) { toggle.hidden = !args; toggle.textContent = "显示详情"; }
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch (err) { /* keep raw string */ }
+      }
+      var hasArgs = !!(args && (typeof args !== "object" || Object.keys(args).length));
+      if (detail) { detail.hidden = !hasArgs; }
+      // 参数默认可见（审批决策的直接依据），标签跟随当前可见性——旧实现固定
+      // 写「显示详情」而内容已展开，第一次点击标签与动作相反。
+      if (toggle) { toggle.hidden = !hasArgs; toggle.textContent = (detail && detail.hidden) ? "显示详情" : "隐藏详情"; }
       if (actions) { actions.hidden = false; }
       if (el("ci-approve")) { el("ci-approve").disabled = false; }
       if (el("ci-deny")) { el("ci-deny").disabled = false; }
@@ -2885,6 +3064,7 @@
     chatFetchScreen(CHAT_PAGE_LIMIT);
     chatLoadStatusBar();
     chatConnect();
+    chatUpdateNextPending();
   }
 
   // ── 数据面：快照 / 渲染 ──────────────────────────────────────
@@ -3308,6 +3488,7 @@
     chatDisconnect();
     chatState = null;
     chatRenderInteractive();
+    chatUpdateNextPending();
     delete presenceTargets[st.node.node_id + "|" + st.session.session_id];
     sendPresence();
     var host = el("chat-list");
@@ -3566,14 +3747,19 @@
         chatRenderInteractive();
         break;
       case "approval_resolved":
+        // 只有本面板确实展示过这条待办时才提示「下一条」；重复/迟到的帧只刷新按钮。
+        var hadApproval = !!st.pendingApproval;
         st.pendingApproval = null;
         chatRenderInteractive();
         chatScheduleRefresh();
+        if (hadApproval) { chatOfferNextPending(); } else { chatUpdateNextPending(); }
         break;
       case "question_answered":
+        var hadQuestion = !!st.pendingQuestion;
         st.pendingQuestion = null;
         chatRenderInteractive();
         chatScheduleRefresh();
+        if (hadQuestion) { chatOfferNextPending(); } else { chatUpdateNextPending(); }
         break;
       case "error":
         chatSetStatus("连接异常", "down");
@@ -3715,7 +3901,7 @@
         var key = attentionKey(node, session);
         current[key] = true;
         if (isWatching(node.node_id, session.session_id)) {
-          readAttention[key] = true;
+          readAttention[key] = Date.now();
           return;
         }
         if (!seenAttention[key]) { fresh.push({ node: node, session: session }); }
@@ -3725,6 +3911,8 @@
     Object.keys(readAttention).forEach(function (k) {
       if (!current[k]) { delete readAttention[k]; }
     });
+    // attentionKey 清理后落盘：服务端已消解的条目不留在存储里无限增长。
+    saveReadAttention();
     seenAttention = current;
     attentionSeeded = true;
     if (!seeded) { return; }
@@ -4858,7 +5046,10 @@
   syncMdToggle();
 
   // Keyboard model: "/" focuses the search, ↑/↓ (or j/k) walks the session
-  // cards, Enter opens the focused card's detail dialog, Space toggles 展开.
+  // cards, Enter opens the focused card's detail dialog, Space toggles 展开,
+  // and c/o/a act on the focused card (面板 / 外部打开 / 审批·回答) — the same
+  // three destinations as the card buttons, so the high-frequency opens no
+  // longer require Tab-ing through the action row.
   document.addEventListener("keydown", function (e) {
     // 任一模态打开时不接管快捷键：会话面板里有输入框与滚动区，全局的 "/" 聚焦、
     // ↑/↓ 走卡片在这里都不该生效（另一条 typing 守卫只挡输入类元素）。
@@ -4877,6 +5068,33 @@
     var cards = Array.prototype.slice.call(document.querySelectorAll(".session-card"));
     if (!cards.length) { return; }
     var current = target && target.closest ? target.closest(".session-card") : null;
+    // 卡片动作键：必须无修饰键（Ctrl+C 复制 / Ctrl+O 打开文件不能被劫持），
+    // 且只作用于获得焦点的卡片——先 j/k 选中、再 c/o/a 动作。
+    if (current && target === current && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      var action = e.key === "c" || e.key === "o" || e.key === "a";
+      var cardItem = action ? findSessionByKey(current.getAttribute("data-draft-key")) : null;
+      if (cardItem) {
+        e.preventDefault();
+        if (e.key === "c") {
+          // 会话面板（不支持时与行点击一致地落回外部打开）。
+          openSessionInline(cardItem.node, cardItem.session, chatFocusOptsFor(cardItem.session));
+          return;
+        }
+        if (e.key === "o") {
+          openSession(cardItem.node, cardItem.session);
+          return;
+        }
+        // a = 审批 / 回答：与卡片 data-attend 按钮同一可用性门槛；不可用时
+        // 不动作（按钮此时同样是隐藏的，不给"为什么没反应"的歧义）。
+        var att = cardItem.session.attention;
+        if ((att === "approval" || att === "question") &&
+            chatPanelSupported(cardItem.node, cardItem.session) &&
+            chatCanInput(cardItem.node)) {
+          openSessionChat(cardItem.node, cardItem.session, { focusInteractive: true });
+        }
+        return;
+      }
+    }
     var idx = current ? cards.indexOf(current) : -1;
     var next = null;
     if (e.key === "ArrowDown" || e.key === "j") {
@@ -4950,6 +5168,16 @@
     });
     el("chat-jump-latest").addEventListener("click", function () { chatScrollToBottom(true); });
     el("chat-older-btn").addEventListener("click", chatLoadOlder);
+    // 头部「下一条待处理」：面板内直接流转到下一条待审批/待回答，不必回列表。
+    // 元素缺失时静默跳过（PWA 可能缓存了没有该按钮的旧 index.html）。
+    var nextPendingBtn = el("chat-next-pending");
+    if (nextPendingBtn) {
+      nextPendingBtn.addEventListener("click", function () {
+        var queue = pendingQueue();
+        if (!queue.length) { chatUpdateNextPending(); return; }
+        chatSwitchTo(queue[0].node, queue[0].session, chatFocusOptsFor(queue[0].session));
+      });
+    }
     el("chat-form").addEventListener("submit", function (e) {
       e.preventDefault();
       chatSend();
@@ -5063,7 +5291,8 @@
     });
   });
 
-  // Deep-link: #sessions?attention=1 preselects the attention filter
+  // Deep-link: #sessions?attention=1 preselects the attention filter,
+  // #sessions?running=1 the running filter (dashboard stat cards link here).
   function applyHashParams() {
     var h = window.location.hash || "";
     var q = h.indexOf("?");
@@ -5071,6 +5300,10 @@
     var params = new URLSearchParams(h.slice(q + 1));
     if (params.get("attention")) {
       sessionFilterKind = "attention";
+      syncFilterControls();
+    }
+    if (params.get("running")) {
+      sessionFilterKind = "running";
       syncFilterControls();
     }
   }
@@ -5182,11 +5415,12 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=53").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=54").catch(function () {});
     });
   }
 
   loadSessionPrefs();
+  loadReadAttention();
   syncFilterControls();
   syncTailToggle();
   syncMdToggle();

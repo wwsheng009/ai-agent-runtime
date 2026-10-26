@@ -37,9 +37,9 @@ func gatewaySurfaceStatusFor(s chatSurfaceStatus, inputMode chatInputMode) (stri
 	}
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
-		return wire.SessionStateReview, "Waiting for approval"
+		return wire.SessionStateReview, statusTextWithDetail("Waiting for approval", s.detail)
 	case chatInputModeAnswer:
-		return wire.SessionStateWaiting, "Waiting for answer"
+		return wire.SessionStateWaiting, statusTextWithDetail("Waiting for answer", s.detail)
 	case chatInputModeSelection:
 		return wire.SessionStateWaiting, "Selecting an option"
 	case chatInputModeConfirmation:
@@ -61,11 +61,72 @@ func gatewaySurfaceStatusFor(s chatSurfaceStatus, inputMode chatInputMode) (stri
 	case chatSurfaceStatusThinking, chatSurfaceStatusPlanning:
 		return wire.SessionStateThinking, action
 	case chatSurfaceStatusApproval:
-		return wire.SessionStateReview, action
-	case chatSurfaceStatusAnswer, chatSurfaceStatusWaiting:
+		return wire.SessionStateReview, statusTextWithDetail(action, s.detail)
+	case chatSurfaceStatusAnswer:
+		return wire.SessionStateWaiting, statusTextWithDetail(action, s.detail)
+	case chatSurfaceStatusWaiting:
 		return wire.SessionStateWaiting, action
 	}
 	return "", ""
+}
+
+// statusTextWithDetail 把待处理条目的一行身份（审批工具名 / 问题正文，调用方
+// 已压为单行且有界）附加到粗粒度等待文案后："Waiting for approval: shell_exec"。
+// 远程控制台据此在会话卡片上显示待处理的具体内容；空 detail 保持原样
+// （非交互路径与旧流程不带明细）。
+func statusTextWithDetail(base, detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return base
+	}
+	return base + ": " + detail
+}
+
+// projectGatewayPendingDetail 为非交互（Web/远程接管）路径补写网关投影的等待
+// 文案：交互路径由 stage 明细自然产出「Waiting for approval: <tool>」，Web 路径
+// 没有 stage 投影，这里在同一 store 上直接落同一份文案（调用方随后补推一帧
+// SESSION_UPDATE，让 attention 与明细同帧到达）。仅当当前 attention 与期望一致
+// 且文案尚未带明细时写入；返回是否实际写入。
+func projectGatewayPendingDetail(sessionID, attention, detail string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	attention = strings.TrimSpace(attention)
+	detail = compactStatusValue(oneLineStatusDetail(detail), chatAgentStageDetailMaxWidth)
+	if sessionID == "" || detail == "" {
+		return false
+	}
+	base, state := "", ""
+	switch attention {
+	case gatewayAttentionApproval:
+		base, state = "Waiting for approval", wire.SessionStateReview
+	case gatewayAttentionQuestion:
+		base, state = "Waiting for answer", wire.SessionStateWaiting
+	default:
+		return false
+	}
+	st := gatewaySessionStateFor(sessionID)
+	if st.Attention != attention || strings.HasPrefix(strings.TrimSpace(st.StatusText), base+":") {
+		return false
+	}
+	now := time.Now()
+	return gatewayAttentionStore.SetSurface(sessionID, state, statusTextWithDetail(base, detail), now, now)
+}
+
+// clearGatewayAttentionIfSet 清掉指定会话的挂起 attention（仅当仍等于期望值），
+// 并在实际变化时补推一帧 SESSION_UPDATE。用于决议事件（approval_resolved /
+// question_answered）：交互路径自己会清（幂等），Web/远程决议路径此前无人清理，
+// 徽标会一直挂到回合结束（docs/gateway/08-notifications.md §3 要求决议即清）。
+func clearGatewayAttentionIfSet(session *ChatSession, sessionID, attention string) {
+	sessionID = strings.TrimSpace(sessionID)
+	attention = strings.TrimSpace(attention)
+	if sessionID == "" || attention == "" {
+		return
+	}
+	if gatewaySessionStateFor(sessionID).Attention != attention {
+		return
+	}
+	if setGatewayAttention(sessionID, "") {
+		syncChatGatewaySession(session)
+	}
 }
 
 // gatewayParkedStatusText is the one-line activity mirror for a parked managed

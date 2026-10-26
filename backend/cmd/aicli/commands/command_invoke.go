@@ -586,7 +586,7 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 		RiskLevel:  req.RiskLevel,
 		ExpiresAt:  req.ExpiresAt,
 	}
-	restoreStage := pushChatComposerAgentStage(h.session, chatAgentStageAwaitingApproval)
+	restoreStage := pushChatComposerAgentStage(h.session, chatAgentStageAwaitingApproval, approval.ToolName)
 	defer restoreStage()
 
 	lines := make([]string, 0, 12)

@@ -154,10 +154,16 @@ func TestConsoleApprovalQuestionInline(t *testing.T) {
 		`{ type: "question_answer", question_id: questionID, answer: text }`,
 		"d.pending_approval", "d.pending_question",
 		"function nodeDisplayName(", "data-attend",
+		// 审批参数按「键: 值」行渲染（手机可读性），原始 JSON 兜底。
+		"function chatRenderApprovalArgs(",
+		"ci-arg-row",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing %q", needle)
 		}
+	}
+	if !strings.Contains(readConsoleAsset(t, "style.css"), ".ci-arg-row {") {
+		t.Fatal("style.css is missing .ci-arg-row (approval args table)")
 	}
 	if strings.Contains(app, `card.querySelector(".s-id-code")`) {
 		t.Fatal("session list still renders the session id; it must live in the detail dialog")
@@ -173,6 +179,133 @@ func TestConsoleApprovalQuestionInline(t *testing.T) {
 	}
 	if !strings.Contains(app, `return title || "未命名会话"`) {
 		t.Fatal("session label fallback 未命名会话 is missing")
+	}
+}
+
+// TestConsoleNextPendingFlowAsset pins the in-panel 「下一条待处理」 flow: the
+// header button must exist, the queue must exclude the currently open session,
+// and both lifecycle ends (open/close) plus the resolved handlers must refresh
+// it. Wiring failures here are silent at runtime (a hidden button is
+// indistinguishable from an empty queue), which is exactly why the asset
+// contract is tested.
+func TestConsoleNextPendingFlowAsset(t *testing.T) {
+	index := readConsoleAsset(t, "index.html")
+	for _, needle := range []string{
+		`id="chat-next-pending"`, `id="chat-next-pending-label"`,
+	} {
+		if !strings.Contains(index, needle) {
+			t.Fatalf("index.html is missing %q", needle)
+		}
+	}
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		"function pendingQueue(",
+		"function chatUpdateNextPending(",
+		"function chatSwitchTo(",
+		"function chatOfferNextPending(",
+		// The queue must skip the currently open session, or "下一条" would
+		// offer to reopen the panel the user is already looking at.
+		"item.session.session_id === st.session.session_id",
+		// Offer only when this panel actually displayed the resolved item;
+		// duplicate/late frames must not re-toast.
+		"chatOfferNextPending(); } else { chatUpdateNextPending(); }",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing next-pending hook %q", needle)
+		}
+	}
+	// Both panel lifecycle ends refresh the button; missing either leaves a
+	// stale count (open) or a visible button over a closed panel (close).
+	openAt := strings.Index(app, "function openSessionChat(")
+	closeAt := strings.Index(app, "function closeSessionChat(")
+	if openAt < 0 || closeAt < 0 {
+		t.Fatal("app.js: session chat lifecycle functions not found")
+	}
+	openBody := app[openAt:]
+	if cut := strings.Index(openBody, "// ── 数据面：快照 / 渲染"); cut >= 0 {
+		openBody = openBody[:cut]
+	}
+	closeBody := app[closeAt:]
+	if cut := strings.Index(closeBody, "// ── 实时面：SSE 增量"); cut >= 0 {
+		closeBody = closeBody[:cut]
+	}
+	if !strings.Contains(openBody, "chatUpdateNextPending();") {
+		t.Fatal("openSessionChat must refresh the next-pending button")
+	}
+	if !strings.Contains(closeBody, "chatUpdateNextPending();") {
+		t.Fatal("closeSessionChat must refresh (hide) the next-pending button")
+	}
+	// The click handler must guard the element (PWA may cache an older
+	// index.html without the button; see the subagent-toggle precedent).
+	if !strings.Contains(app, `var nextPendingBtn = el("chat-next-pending");`) {
+		t.Fatal("chat-next-pending click handler must guard element existence")
+	}
+	// renderInbox is the single data-refresh path for the count.
+	if !strings.Contains(app, "// 面板头部的「下一条待处理」按钮随同一份 inbox 数据刷新（面板关闭时自隐藏）。") {
+		t.Fatal("renderInbox must refresh the next-pending button with the inbox data")
+	}
+}
+
+// TestConsoleRowClickAndKeyShortcuts pins the unified open semantics: dashboard
+// rows (需要处理 / 最近活动 / 节点会话行) go through openSessionInline which
+// prefers the in-page panel, and the focused-card keyboard model exposes c/o/a
+// for the same three destinations. Either wiring failing is silent at runtime.
+func TestConsoleRowClickAndKeyShortcuts(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		"function openSessionInline(",
+		"openSessionInline(item.node, item.session, chatFocusOptsFor(item.session));",
+		"openSessionInline(item.node, s);",
+		"openSessionInline(node, session);",
+		// Keyboard: c/o/a act on the focused card, never with modifiers
+		// (Ctrl+C / Ctrl+O must stay browser-native).
+		`var action = e.key === "c" || e.key === "o" || e.key === "a";`,
+		"!e.ctrlKey && !e.metaKey && !e.altKey",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing %q", needle)
+		}
+	}
+}
+
+// TestConsoleReadAttentionPersistence pins the cross-refresh read state:
+// markRead persists, boot re-loads with a TTL prune, and trackAttention saves
+// after its cleanup sweep. A dropped call site is silent (handled to-dos pop
+// back after every reload).
+func TestConsoleReadAttentionPersistence(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		`var READ_ATTENTION_KEY = "aicli-gw-read-attention";`,
+		"function loadReadAttention(",
+		"function saveReadAttention(",
+		"loadReadAttention();",
+		"readAttention[attentionKey(node, session)] = Date.now();",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing %q", needle)
+		}
+	}
+	if strings.Contains(app, "readAttention[attentionKey(node, session)] = true;") {
+		t.Fatal("markRead must store a timestamp (TTL), not a bare true")
+	}
+}
+
+// TestConsoleDashboardStatDeepLinks pins the dashboard stat-card destinations:
+// 在线节点 must land on #nodes (it used to point at the plain sessions list),
+// 活跃会话 carries the running filter, and the param must preselect it.
+func TestConsoleDashboardStatDeepLinks(t *testing.T) {
+	index := readConsoleAsset(t, "index.html")
+	for _, needle := range []string{
+		`<a class="stat" href="#nodes"><span class="stat-num" id="stat-online">`,
+		`<a class="stat" href="#sessions?running=1"><span class="stat-num" id="stat-sessions">`,
+	} {
+		if !strings.Contains(index, needle) {
+			t.Fatalf("index.html is missing %q", needle)
+		}
+	}
+	app := readConsoleAsset(t, "app.js")
+	if !strings.Contains(app, `sessionFilterKind = "running";`) {
+		t.Fatal("app.js must preselect the running filter for #sessions?running=1")
 	}
 }
 

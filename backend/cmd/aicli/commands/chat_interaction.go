@@ -3126,9 +3126,11 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() chatSurfaceStat
 	case chatAgentStageToolRunning:
 		return chatSurfaceStatus{kind: chatSurfaceStatusTool, detail: c.agentStageDetail}
 	case chatAgentStageAwaitingApproval:
-		return chatSurfaceStatus{kind: chatSurfaceStatusApproval}
+		// detail 携带待审批工具名：TUI 渲染不受影响（审批行有自己的固定
+		// 文案），但网关投影据此拼出「Waiting for approval: <tool>」。
+		return chatSurfaceStatus{kind: chatSurfaceStatusApproval, detail: c.agentStageDetail}
 	case chatAgentStageAwaitingAnswer:
-		return chatSurfaceStatus{kind: chatSurfaceStatusAnswer}
+		return chatSurfaceStatus{kind: chatSurfaceStatusAnswer, detail: c.agentStageDetail}
 	case chatAgentStageStopping:
 		return chatSurfaceStatus{kind: chatSurfaceStatusStopping}
 	}

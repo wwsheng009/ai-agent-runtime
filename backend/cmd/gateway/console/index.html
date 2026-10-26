@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=53">
+<link rel="stylesheet" href="./style.css?v=54">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -121,9 +121,9 @@
         <!-- 仪表盘 -->
         <section class="view" data-view="dashboard">
           <div class="stats">
-            <a class="stat" href="#sessions"><span class="stat-num" id="stat-online">0</span><span class="stat-label">在线节点</span></a>
+            <a class="stat" href="#nodes"><span class="stat-num" id="stat-online">0</span><span class="stat-label">在线节点</span></a>
             <a class="stat" href="#nodes"><span class="stat-num" id="stat-offline">0</span><span class="stat-label">离线快照</span></a>
-            <a class="stat" href="#sessions"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">活跃会话</span></a>
+            <a class="stat" href="#sessions?running=1"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">活跃会话</span></a>
             <a class="stat attention" href="#sessions?attention=1" aria-live="polite"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
           </div>
 
@@ -442,6 +442,11 @@
           <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
           <span class="chat-action-label">跳到最新</span>
         </button>
+        <button class="btn ghost sm chat-icon-btn" id="chat-next-pending" type="button" hidden
+                aria-label="下一条待处理" title="下一条待处理">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+          <span class="chat-action-label" id="chat-next-pending-label">下一条待处理</span>
+        </button>
         <button class="btn ghost sm chat-icon-btn" id="chat-modal-open" type="button"
                 aria-label="打开原版 Web" title="打开原版 Web">
           <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
@@ -463,7 +468,7 @@
         <button class="btn ghost sm" id="ci-detail-toggle" type="button" hidden>显示详情</button>
       </div>
       <div class="ci-prompt" id="ci-prompt"></div>
-      <pre class="ci-detail" id="ci-detail" hidden></pre>
+      <div class="ci-detail" id="ci-detail" hidden aria-label="审批参数"></div>
       <div class="ci-actions" id="ci-actions" hidden>
         <button class="btn primary sm" id="ci-approve" type="button">批准</button>
         <button class="btn danger sm" id="ci-deny" type="button">拒绝</button>
@@ -513,6 +518,6 @@
   </div>
 </div>
 
-<script src="./app.js?v=53"></script>
+<script src="./app.js?v=54"></script>
 </body>
 </html>

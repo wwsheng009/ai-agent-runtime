@@ -21,6 +21,45 @@ func TestGatewaySurfaceStatusParkedProjectsWaiting(t *testing.T) {
 	}
 }
 
+// TestGatewaySurfaceStatusCarriesPendingDetail pins the attention-detail
+// convention: a pending approval/question carries its one-line identity (tool
+// name / question excerpt) in the stage detail, and the gateway status text
+// appends it — "Waiting for approval: shell_exec" — so the remote console card
+// shows WHAT is waiting without opening the panel. Empty detail must keep the
+// plain text (non-interactive paths and older flows). Both dispatch branches
+// (inputMode-first and kind-fallback) must append.
+func TestGatewaySurfaceStatusCarriesPendingDetail(t *testing.T) {
+	if _, text := gatewaySurfaceStatusFor(chatSurfaceStatus{kind: chatSurfaceStatusApproval}, chatInputModeApproval); text != "Waiting for approval" {
+		t.Fatalf("bare approval text = %q, want the plain mirror", text)
+	}
+	state, text := gatewaySurfaceStatusFor(
+		chatSurfaceStatus{kind: chatSurfaceStatusApproval, detail: "shell_exec"}, chatInputModeApproval)
+	if state != "review" || text != "Waiting for approval: shell_exec" {
+		t.Fatalf("approval detail = (%q,%q)", state, text)
+	}
+	state, text = gatewaySurfaceStatusFor(
+		chatSurfaceStatus{kind: chatSurfaceStatusAnswer, detail: "是否继续部署？"}, chatInputModeAnswer)
+	if state != "waiting" || text != "Waiting for answer: 是否继续部署？" {
+		t.Fatalf("answer detail = (%q,%q)", state, text)
+	}
+	// kind-fallback branch (inputMode=chat but the surface already says approval,
+	// e.g. the same-tick window before the input mode push lands).
+	state, text = gatewaySurfaceStatusFor(
+		chatSurfaceStatus{kind: chatSurfaceStatusApproval, detail: "shell_exec"}, chatInputModeChat)
+	if state != "review" || text != "Waiting for approval: shell_exec" {
+		t.Fatalf("approval kind-fallback = (%q,%q)", state, text)
+	}
+	// The question path collapses multi-line prompts to one line before the push.
+	if got := oneLineStatusDetail("第一行\n第二行  压缩"); got != "第一行 第二行 压缩" {
+		t.Fatalf("oneLineStatusDetail = %q", got)
+	}
+	// approvalStageDetail tolerates a nil request (defensive: the hook is a
+	// public seam and other hosts may pass nothing).
+	if got := approvalStageDetail(nil); got != "" {
+		t.Fatalf("nil approval detail = %q", got)
+	}
+}
+
 // TestGatewayAttentionParkedTurnKeepsWaiting pins the run-end finisher carve-out:
 // a run that ends while the durable parked record still exists must NOT be
 // projected as completed (that would badge the console "已完成" and push

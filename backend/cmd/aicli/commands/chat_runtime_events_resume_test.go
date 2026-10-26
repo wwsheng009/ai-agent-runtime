@@ -233,6 +233,91 @@ func TestChatRuntimeEventBridge_ExternalInputCaptureSkipsConsolePrompt(t *testin
 	}
 }
 
+// TestChatRuntimeEventBridge_WebCaptureDetailAndResolveClear pins the Web-接管
+// 路径的网关投影完整性（2026-10-25）：
+//
+//  1. 等待期间补写待处理明细——Web 路径没有 stage 投影，此前控制台卡片只有
+//     粗粒度 attention，看不出在等哪个工具/哪条问题；
+//  2. 决议事件（Web/远程端处理）到达即清徽标——此前该路径无人清理，attention
+//     会一直挂到回合结束，与 docs/gateway/08-notifications.md §3 的
+//     approval_resolved / question_answered → attention 清空矛盾。
+func TestChatRuntimeEventBridge_WebCaptureDetailAndResolveClear(t *testing.T) {
+	session := &ChatSession{}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(string) {}
+	prompted := make(chan string, 2)
+	bridge.askApproval = func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error) {
+		prompted <- "approval"
+		return chatApprovalAnswer{}, errChatInteractivePromptResolvedElsewhere
+	}
+	bridge.askQuestion = func(string, []string, bool) (string, error) {
+		prompted <- "question"
+		return "", errChatInteractivePromptResolvedElsewhere
+	}
+	session.InputQueue.setWebInputCaptureActive(true)
+
+	const sessionID = "session-web-detail-1"
+	t.Cleanup(func() { gatewayAttentionStore.Clear(sessionID) })
+	// 生产常态：活动回合 + 完整 turn 归属。resolved/answered 载荷不带 turn_id，
+	// 若清理挂在 turn 归属闸门之后会被整批丢弃——徽标一直挂到回合结束（本用例
+	// 的第二个断言即此回归的探针）。
+	bridge.setPrimarySessionID(sessionID)
+	bridge.renderMu.Lock()
+	bridge.runStarted = true
+	bridge.runActive = true
+	bridge.activeTurnID = "turn-detail-1"
+	bridge.renderMu.Unlock()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"request_id": "r-detail-1",
+			"tool_name":  "shell_exec",
+			"reason":     "需要执行命令",
+		},
+	})
+	select {
+	case got := <-prompted:
+		t.Fatalf("console prompt %q must not run while a web capture owns the input", got)
+	default:
+	}
+	st := gatewaySessionStateFor(sessionID)
+	require.Equal(t, gatewayAttentionApproval, st.Attention, "approval attention must be projected")
+	require.Equal(t, "Waiting for approval: shell_exec", st.StatusText,
+		"the web-capture path must project the pending tool detail")
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalResolved,
+		SessionID: sessionID,
+		Payload:   map[string]interface{}{"request_id": "r-detail-1", "allowed": true},
+	})
+	require.Empty(t, gatewaySessionStateFor(sessionID).Attention,
+		"a resolve arriving from the web path must clear the badge immediately")
+
+	// Question 同口径：等待时带问题首行（多行压单行），回答后立即清。
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"question_id": "q-detail-1",
+			"prompt":      "是否继续部署？\n第二行不应出现",
+		},
+	})
+	st = gatewaySessionStateFor(sessionID)
+	require.Equal(t, gatewayAttentionQuestion, st.Attention)
+	require.Equal(t, "Waiting for answer: 是否继续部署？ 第二行不应出现", st.StatusText,
+		"question detail must be collapsed to one line")
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAnswered,
+		SessionID: sessionID,
+		Payload:   map[string]interface{}{"question_id": "q-detail-1", "answer": "继续"},
+	})
+	require.Empty(t, gatewaySessionStateFor(sessionID).Attention,
+		"an answer arriving from the web path must clear the badge immediately")
+}
+
 // TestChatRuntimeEventBridge_ConsoleForegroundReleasesWebCapture pins the
 // 2026-10-13 latch fix (session_20261013175416_O9Ughlac). A web injection set
 // webCaptureActive and nothing in the codebase ever cleared it, so the console
