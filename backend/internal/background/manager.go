@@ -3302,8 +3302,23 @@ func (m *Manager) readOutputFromLog(path, jobID string, status JobStatus, exitCo
 	if limit <= 0 {
 		limit = m.config.MaxOutputBytes
 	}
-	buf := make([]byte, limit)
-	n, _ := file.Read(buf)
+	// 按剩余可读字节数分配，而不是按 limit 全额分配。
+	// 生产 pprof 显示这里每读一次输出就 make([]byte, limit)（默认 1MB），
+	// 而绝大多数 job 在轮询时点只有几 KB 新输出——分配量与读取量严重脱节。
+	// 与 newOutputBuffer 的惰性扩容同理：先按文件实际剩余大小定容。
+	remaining := int64(limit)
+	if info, statErr := file.Stat(); statErr == nil {
+		if avail := info.Size() - offset; avail >= 0 {
+			if avail < remaining {
+				remaining = avail
+			}
+		}
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	buf := make([]byte, remaining)
+	n, _ := io.ReadFull(file, buf)
 	nextOffset := offset + int64(n)
 	return TaskOutputResult{
 		JobID:      jobID,

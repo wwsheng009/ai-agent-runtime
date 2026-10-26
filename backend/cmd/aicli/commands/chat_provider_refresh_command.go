@@ -370,7 +370,9 @@ func refreshChatSessionAfterProviderModelRefresh(session *ChatSession, updated [
 	if session == nil {
 		return nil
 	}
-	if err := reloadChatConfigForModelCommand(session); err != nil {
+	// 本函数紧接着自身刚落盘的写入，指纹守卫可能因 mtime 精度/同一纳秒窗口
+	// 而误判为"未变化"，因此显式强制重读。
+	if err := reloadChatConfigForModelCommandForced(session); err != nil {
 		return fmt.Errorf("provider 模型列表已更新，但重载会话配置失败: %w", err)
 	}
 	active := strings.TrimSpace(currentModelCommandProvider(session))

@@ -6,7 +6,38 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// sseScannerBufPool 复用 ScanSSEFrames 的 scanner 起始缓冲。
+//
+// 生产 pprof 显示该函数每次调用 make([]byte, 0, 1024*1024)，而 bufio.Scanner
+// 只在遇到超长行时才 grow 到上限——单个 SSE 事件通常只有几百字节。每次 LLM
+// 流式响应都会走这里，长会话下累计 640MB+ 分配。池化后常态分配降为 0。
+var sseScannerBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, sseScannerStartBytes)
+		return &buf
+	},
+}
+
+const (
+	sseScannerStartBytes   = 64 * 1024
+	sseScannerMaxBytes     = 20 * 1024 * 1024
+	maxPooledSSEScannerBuf = 1024 * 1024
+)
+
+func acquireSSEScannerBuf() *[]byte {
+	return sseScannerBufPool.Get().(*[]byte)
+}
+
+func releaseSSEScannerBuf(buf *[]byte) {
+	if buf == nil || cap(*buf) > maxPooledSSEScannerBuf {
+		return
+	}
+	*buf = (*buf)[:0]
+	sseScannerBufPool.Put(buf)
+}
 
 // SSEFrame is one fully assembled Server-Sent Events frame. Data contains all
 // data fields joined with newlines, as required by the SSE specification.
@@ -26,7 +57,9 @@ func ScanSSEFrames(reader io.Reader, handle func(SSEFrame) (bool, error)) error 
 	}
 
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 20*1024*1024)
+	buf := acquireSSEScannerBuf()
+	scanner.Buffer(*buf, sseScannerMaxBytes)
+	defer releaseSSEScannerBuf(buf)
 	frame := SSEFrame{}
 	dataLines := make([]string, 0, 1)
 	hasFields := false

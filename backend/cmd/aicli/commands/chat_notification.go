@@ -69,10 +69,15 @@ type chatTitleNotifier struct {
 	snapshot              chatTitleSnapshot
 	nextID                uint64
 	lastGoalStatusSegment string
-	wake                  chan struct{}
-	done                  chan struct{}
-	stopped               chan struct{}
-	close                 sync.Once
+	// lastRendered 缓存上一次渲染出的标题字符串（及其 frame），用于跳过
+	// 重复渲染的写入。见 renderTitleDeduped。
+	lastRendered      string
+	lastRenderedFrame int
+	lastRenderedValid bool
+	wake              chan struct{}
+	done              chan struct{}
+	stopped           chan struct{}
+	close             sync.Once
 }
 
 func newChatTitleNotifier(output chatTitleOutput, options chatTitleOptions, session *ChatSession) *chatTitleNotifier {
@@ -271,9 +276,16 @@ func (n *chatTitleNotifier) run() {
 	frame := 0
 	for {
 		snapshot := n.currentSnapshot()
-		if _, err := n.output.Set(renderChatTerminalTitle(snapshot, frame)); err != nil {
-			logpkg.Debugf("failed to update chat terminal title: %v", err)
-			return
+		// 内存优化（churn）：动画 tick 每 100–160ms 触发一次，
+		// renderChatTerminalTitle 会为快照重建整个标题字符串。TerminalTitleWriter
+		// 本身有去重，但去重发生在渲染之后——这里先按渲染结果去重，避免
+		// 为每帧都付出一次字符串构造与 sanitize 的分配成本。
+		title := n.renderTitleDeduped(snapshot, frame)
+		if title != nil {
+			if _, err := n.output.Set(*title); err != nil {
+				logpkg.Debugf("failed to update chat terminal title: %v", err)
+				return
+			}
 		}
 		// Codex refreshes the goal indicator on a time tick while a turn is
 		// running so "Pursuing goal (Ns)" advances without waiting for events.
@@ -301,6 +313,30 @@ func (n *chatTitleNotifier) run() {
 			frame++
 		}
 	}
+}
+
+// renderTitleDeduped 渲染标题并与上一次渲染结果比对。
+// 返回 nil 表示标题与上次一致，调用方应跳过写入。
+//
+// 注意：这里缓存的是「渲染结果」而非快照，因为渲染还依赖动画 frame；
+// 缓存键同时包含 frame，保证动画帧推进时不会被误判为重复。
+func (n *chatTitleNotifier) renderTitleDeduped(snapshot chatTitleSnapshot, frame int) *string {
+	if n == nil {
+		return nil
+	}
+	title := renderChatTerminalTitle(snapshot, frame)
+	n.mu.Lock()
+	unchanged := n.lastRenderedValid && n.lastRenderedFrame == frame && n.lastRendered == title
+	if !unchanged {
+		n.lastRendered = title
+		n.lastRenderedFrame = frame
+		n.lastRenderedValid = true
+	}
+	n.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+	return &title
 }
 
 // refreshGoalStatusIndicatorForTimeTick updates the composer status line while

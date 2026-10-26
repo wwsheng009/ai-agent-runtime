@@ -95,7 +95,9 @@ func (s *Service) Preview(ctx context.Context, req PreviewRequest) (*Preview, er
 
 	limit := s.previewTextLimit(req.MaxBytes)
 	truncated := info.Size() > limit
-	head, readErr := readHead(target.Abs, limit)
+	// 与 internal/background 的任务输出读取同理：按文件实际可读字节定容，
+	// 而不是一律按 limit 全额分配（预览 limit 可达数百 KB，而多数文件更小）。
+	head, readErr := readHead(target.Abs, previewReadSize(info.Size(), limit))
 	if readErr != nil {
 		return nil, readFileError(readErr, target)
 	}
@@ -177,6 +179,18 @@ func readHead(absPath string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	return buffer[:read], nil
+}
+
+// previewReadSize 返回 readHead 实际应分配的字节数：文件更小则按文件大小，
+// 否则按 limit。调用方已持有 Stat 结果，无需在 readHead 内重复 Stat。
+func previewReadSize(fileSize, limit int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	if fileSize >= 0 && fileSize < limit {
+		return fileSize
+	}
+	return limit
 }
 
 // trimIncompleteTail 去掉末尾被截断切开的 UTF-8 序列，避免把「截断」误判为「非法 UTF-8」。

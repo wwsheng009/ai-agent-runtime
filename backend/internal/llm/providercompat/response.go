@@ -15,6 +15,36 @@ import (
 
 const assistantReasoningDetailsKey = "reasoning_details"
 
+// streamScannerBufPool 复用 NormalizeStreamReadCloser 内 SSE 扫描的起始缓冲。
+//
+// 该 goroutine 每个流式响应启动一次，原实现 make([]byte, 0, 1024*1024) 让每次
+// 都按最坏情况付 1MB 分配，而 bufio.Scanner 只在遇到超长行时才 grow 到上限。
+// 池化后常态分配降为 0；只回收未 grow 过头的缓冲，避免池长期钉住大块内存。
+var streamScannerBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, streamScannerStartBytes)
+		return &buf
+	},
+}
+
+const (
+	streamScannerStartBytes   = 64 * 1024
+	streamScannerMaxBytes     = 20 * 1024 * 1024
+	maxPooledStreamScannerBuf = 1024 * 1024
+)
+
+func acquireStreamScannerBuf() *[]byte {
+	return streamScannerBufPool.Get().(*[]byte)
+}
+
+func releaseStreamScannerBuf(buf *[]byte) {
+	if buf == nil || cap(*buf) > maxPooledStreamScannerBuf {
+		return
+	}
+	*buf = (*buf)[:0]
+	streamScannerBufPool.Put(buf)
+}
+
 // NormalizeProcessResult applies provider-specific fixes to a protocol-parsed
 // process result.
 func (c Chain) NormalizeProcessResult(result *llmadapter.ProcessResult) *llmadapter.ProcessResult {
@@ -108,7 +138,12 @@ func NormalizeStreamReadCloser(ctx Context, reader io.Reader) io.ReadCloser {
 	result := &normalizedStreamReadCloser{PipeReader: pipeReader, source: closerFor(reader)}
 	go func() {
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 20*1024*1024)
+		// 与 internal/llm/adapter 的 SSE 扫描同理：起始缓冲按最坏情况
+		// 预分配 1MB 会在每个流式响应上白付一次分配（Scanner 只在遇到超长
+		// 行时才 grow）。这里池化 64KB 起始缓冲。
+		buf := acquireStreamScannerBuf()
+		scanner.Buffer(*buf, streamScannerMaxBytes)
+		defer releaseStreamScannerBuf(buf)
 		// P1-6：SSE 允许一个事件用多行 data:（以空行分隔事件，多行按规范用
 		// \n 拼接）。逐行归一化在多行事件上必然失效——每一行都不是完整 JSON，
 		// 兼容转换被跳过，原生对象参数随后在聚合层被丢弃成 {}。这里按「事件」

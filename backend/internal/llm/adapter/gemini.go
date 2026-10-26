@@ -394,8 +394,9 @@ func (a *GeminiAdapter) handleStreamResponse(respBody io.Reader, callbacks Strea
 	state := NewGeminiStreamState()
 
 	scanner := bufio.NewScanner(respBody)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 20*1024*1024) // 最大 20MB
+	buf := acquireSSEScannerBuf()
+	scanner.Buffer(*buf, sseScannerMaxBytes) // 最大 20MB
+	defer releaseSSEScannerBuf(buf)
 
 	for scanner.Scan() {
 		line := scanner.Text()

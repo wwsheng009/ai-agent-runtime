@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -646,4 +647,95 @@ aicli:
 		t.Fatalf("InitGlobalConfig: %v", err)
 	}
 	return cfg, cfgPath
+}
+
+// TestReloadChatConfigForModelCommandSkipsWhenFingerprintUnchanged 覆盖内存
+// 优化守卫：指纹已建立且磁盘配置未变化时，重载必须被跳过。
+//
+// /web/api/runtime 之类的端点每次 HTTP 请求都会调用
+// reloadChatConfigForModelCommand，若无守卫则每个请求都要走一次完整的分层
+// 读取 + preset 合并 + YAML 反序列化（实测累计分配达数十 GB）。
+func TestReloadChatConfigForModelCommandSkipsWhenFingerprintUnchanged(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("providers:\n  items:\n    alpha:\n      enabled: true\n      protocol: openai\n      default_model: alpha-model\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := agentconfig.InitGlobalConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	session := &ChatSession{Config: cfg}
+	rememberChatConfigFingerprint(session, cfgPath)
+	if session.configFingerprint == "" {
+		t.Fatal("expected a config fingerprint baseline to be recorded")
+	}
+
+	// 第一次调用：指纹相同 -> 必须跳过，Config 指针保持不变。
+	before := session.Config
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		t.Fatalf("reloadChatConfigForModelCommand: %v", err)
+	}
+	if session.Config != before {
+		t.Fatal("expected reload to be skipped when the config fingerprint is unchanged")
+	}
+}
+
+// TestReloadChatConfigForModelCommandReloadsWhenFileChanged 是上一条的反面：
+// 磁盘配置变化后守卫必须放行，不能让会话永久停在旧配置上。
+func TestReloadChatConfigForModelCommandReloadsWhenFileChanged(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	original := "providers:\n  items:\n    alpha:\n      enabled: true\n      protocol: openai\n      default_model: alpha-model\n"
+	if err := os.WriteFile(cfgPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := agentconfig.InitGlobalConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	session := &ChatSession{Config: cfg}
+	rememberChatConfigFingerprint(session, cfgPath)
+
+	updated := "providers:\n  items:\n    alpha:\n      enabled: true\n      protocol: openai\n      default_model: changed-model\n"
+	if err := os.WriteFile(cfgPath, []byte(updated), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	// 保证 mtime 必然推进（部分文件系统 mtime 精度较粗）。
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(cfgPath, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	before := session.Config
+	if err := reloadChatConfigForModelCommand(session); err != nil {
+		t.Fatalf("reloadChatConfigForModelCommand: %v", err)
+	}
+	if session.Config == before {
+		t.Fatal("expected reload to happen after the config file changed")
+	}
+	if got := strings.TrimSpace(session.Config.Providers.Items["alpha"].DefaultModel); got != "changed-model" {
+		t.Fatalf("expected reloaded default_model %q, got %q", "changed-model", got)
+	}
+}
+
+// TestReloadChatConfigForModelCommandForcedIgnoresGuard 覆盖写路径：紧跟自身
+// 落盘的调用必须强制重读，不能被指纹守卫跳过。
+func TestReloadChatConfigForModelCommandForcedIgnoresGuard(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("providers:\n  items:\n    alpha:\n      enabled: true\n      protocol: openai\n      default_model: alpha-model\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := agentconfig.InitGlobalConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	session := &ChatSession{Config: cfg}
+	rememberChatConfigFingerprint(session, cfgPath)
+
+	before := session.Config
+	if err := reloadChatConfigForModelCommandForced(session); err != nil {
+		t.Fatalf("reloadChatConfigForModelCommandForced: %v", err)
+	}
+	if session.Config == before {
+		t.Fatal("expected forced reload to bypass the fingerprint guard")
+	}
 }

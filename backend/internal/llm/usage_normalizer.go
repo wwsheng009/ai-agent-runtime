@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -14,6 +15,38 @@ const (
 	usageSourceProviderReported = "provider_reported"
 	usageSourceLocalEstimate    = "local_estimate"
 )
+
+// usageScannerBufPool 复用 extractUsageFromSSEPayload 的 scanner 起始缓冲。
+//
+// 生产 pprof 显示该函数每处理一个响应体就 make([]byte, 0, 1MB) 作为扫描起始
+// 缓冲，而 bufio.Scanner 只在遇到超长行时才会真正 grow 到上限——绝大多数
+// usage 事件只有几百字节。长会话下这一行独占 0.6GB 累计分配。池化后常态
+// 分配降为 0；只回收容量不超过 maxPooledUsageScannerBuf 的缓冲，避免池长期
+// 钉住被 grow 过的大块内存。
+var usageScannerBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, usageScannerStartBytes)
+		return &buf
+	},
+}
+
+const (
+	usageScannerStartBytes   = 64 * 1024
+	usageScannerMaxBytes     = 20 * 1024 * 1024
+	maxPooledUsageScannerBuf = 1024 * 1024
+)
+
+func acquireUsageScannerBuf() *[]byte {
+	return usageScannerBufPool.Get().(*[]byte)
+}
+
+func releaseUsageScannerBuf(buf *[]byte) {
+	if buf == nil || cap(*buf) > maxPooledUsageScannerBuf {
+		return
+	}
+	*buf = (*buf)[:0]
+	usageScannerBufPool.Put(buf)
+}
 
 // ExtractTokenUsageFromResponseBody 从上游响应体中提取统一后的 token usage。
 // 它会处理常见的顶层 usage、嵌套 response.usage、Gemini usageMetadata，
@@ -134,8 +167,9 @@ func looksLikeSSEPayload(body []byte) bool {
 
 func extractUsageFromSSEPayload(body []byte) *types.TokenUsage {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 20*1024*1024)
+	buf := acquireUsageScannerBuf()
+	scanner.Buffer(*buf, usageScannerMaxBytes)
+	defer releaseUsageScannerBuf(buf)
 
 	// 跨事件合并原始 usage 后一次性归一化。不能逐事件归一化再取最后一个事件：
 	// Anthropic 流式把 input_tokens/cache_* 放在 message_start、把累计

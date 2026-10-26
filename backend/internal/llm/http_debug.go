@@ -82,6 +82,31 @@ func WithHTTPDebugReporter(ctx context.Context, reporter HTTPDebugReporter) cont
 	return context.WithValue(ctx, httpDebugReporterContextKey{}, reporter)
 }
 
+// httpDebugActive reports whether ctx carries an HTTP debug reporter.
+//
+// 生产 pprof 依据：buildHTTPDebugRequestMetadata 会对整个请求体做至多 6 次
+// JSON 编码（canonicalHTTPDebugValueSHA256：request / messages / input /
+// tools / instructions / cache_surface），而它是在 reportHTTPDebug 的**实参
+// 位置**求值的——reportHTTPDebug 内部发现没有 reporter 就立即 return，此时
+// 编码开销已经白付。长会话实测该路径独占 runLoop 累计分配的 75%（8.46GB）。
+// 调用方应在构造这类昂贵字段前先查这个开关。
+func httpDebugActive(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	reporter, _ := ctx.Value(httpDebugReporterContextKey{}).(HTTPDebugReporter)
+	return reporter != nil
+}
+
+// buildHTTPDebugRequestMetadataActive 仅在有 reporter 时计算请求指纹；
+// 无监听者时返回 nil，避免为一次注定被丢弃的事件编码整个请求体。
+func buildHTTPDebugRequestMetadataActive(ctx context.Context, metadata map[string]interface{}, protocol, profile string, requestBody map[string]interface{}) map[string]interface{} {
+	if !httpDebugActive(ctx) {
+		return nil
+	}
+	return buildHTTPDebugRequestMetadata(metadata, protocol, profile, requestBody)
+}
+
 func reportHTTPDebug(ctx context.Context, event HTTPDebugEvent) {
 	if ctx == nil {
 		return

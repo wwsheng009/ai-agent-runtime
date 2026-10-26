@@ -152,7 +152,25 @@ func consumeModelCommandValue(tokens []string, index int) (string, int, error) {
 // existing in-memory config. An existing file, however, is authoritative: a
 // parse/validation error is returned instead of silently switching with stale
 // provider data.
+//
+// 内存优化（churn）：配置重载会走完整的分层读取 + preset 合并 + YAML
+// 反序列化，单次调用即可产生数 MB 的临时分配。/web/api/runtime 这类端点
+// 每次 HTTP 请求都会调用本函数，实测累计分配量可达数十 GB，把 GC 推到
+// 软内存上限附近，进而抬高 RSS。这里用会话已记录的配置文件指纹
+// （path+mtime+size，分层模式覆盖所有层）做守卫：指纹未变说明磁盘内容与
+// 内存 Config 同源，直接跳过重载。/model 等显式需要重读的调用点可通过
+// reloadChatConfigForModelCommandForced 绕过守卫。
 func reloadChatConfigForModelCommand(session *ChatSession) error {
+	return reloadChatConfigForModelCommandWithOptions(session, false)
+}
+
+// reloadChatConfigForModelCommandForced 忽略指纹守卫，强制重读配置文件。
+// 用于调用方已知配置刚被自身改动（例如 /model 的写路径已落盘）的场景。
+func reloadChatConfigForModelCommandForced(session *ChatSession) error {
+	return reloadChatConfigForModelCommandWithOptions(session, true)
+}
+
+func reloadChatConfigForModelCommandWithOptions(session *ChatSession, force bool) error {
 	if session == nil || session.Config == nil {
 		return nil
 	}
@@ -161,6 +179,22 @@ func reloadChatConfigForModelCommand(session *ChatSession) error {
 	if configPath == "" {
 		return nil
 	}
+	// 守卫仅在已有可信基线时生效：指纹为空（旧会话/测试直接构造）时必须
+	// 重载一次以建立基线，否则会永远把当前文件内容误判为"未变化"。
+	if !force && session.configFingerprint != "" {
+		fingerprint, err := chatConfigFingerprintForPath(configPath)
+		if err != nil {
+			// 指纹检查失败不阻断：退回原来的无条件重载语义。
+			return reloadChatConfigForModelCommandUnlocked(session, configPath)
+		}
+		if fingerprint != "" && fingerprint == session.configFingerprint {
+			return nil
+		}
+	}
+	return reloadChatConfigForModelCommandUnlocked(session, configPath)
+}
+
+func reloadChatConfigForModelCommandUnlocked(session *ChatSession, configPath string) error {
 	info, err := os.Stat(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {

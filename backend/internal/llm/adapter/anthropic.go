@@ -525,8 +525,9 @@ func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, callbacks St
 	state := NewAnthropicStreamState()
 
 	scanner := bufio.NewScanner(respBody)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 20*1024*1024) // 最大 20MB
+	buf := acquireSSEScannerBuf()
+	scanner.Buffer(*buf, sseScannerMaxBytes) // 最大 20MB
+	defer releaseSSEScannerBuf(buf)
 
 	var currentEvent string
 

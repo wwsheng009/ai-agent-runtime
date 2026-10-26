@@ -316,7 +316,8 @@ func chatWebRefreshSessionConfig() {
 	if session == nil {
 		return
 	}
-	_ = reloadChatConfigForModelCommand(session)
+	// 紧跟自身写盘：强制重读，避免指纹守卫跳过刚写入的变更。
+	_ = reloadChatConfigForModelCommandForced(session)
 	refreshChatWebSessionConfigFromRuntime(session)
 }
 
