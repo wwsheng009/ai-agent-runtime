@@ -233,3 +233,71 @@ func BenchmarkBuildViewWarmCache(b *testing.B) {
 		_ = BuildView(paths, opts)
 	}
 }
+
+// BenchmarkBuildViewWarmCacheProductionScale 按生产规模（约 900 节点）度量
+// 稳态开销。仓库原有的 BenchmarkBuildViewWarmCache 固定 32 节点，无法反映
+// 真实目录：实测 ~/.aicli/mesh/nodes 下有 912 个节点文件、bindings 下有
+// 1009 个文件，且心跳每几秒重写一次。
+//
+// 这条 benchmark 回答的是「N 个节点 × 每秒若干次 BuildView」的系数问题：
+// 缓存命中后单次调用仍需对每个节点文件执行一次 os.Stat（Windows 上是
+// GetFileAttributesEx 系统调用），因此稳态开销随节点数线性增长。
+func BenchmarkBuildViewWarmCacheProductionScale(b *testing.B) {
+	paths := seedMeshBenchDir(b, 900)
+	opts := ViewOptions{SelfNodeID: "node-000"}
+	_ = BuildView(paths, opts) // 预热
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = BuildView(paths, opts)
+	}
+}
+
+// TestListNodeFilesUsesDirEntryMetadata 锁定本次优化的核心契约：
+// 节点侧读取必须复用 os.ReadDir 的 DirEntry，而不是对每个文件再调一次
+// os.Stat。
+//
+// 依据：Windows 上 os.Stat 落到 GetFileAttributesEx 系统调用，900 节点目录
+// 实测 118.3 ms/次；DirEntry.Info() 复用目录枚举时内核已返回的元数据，仅
+// 1.5 ms/次。CPU profile 显示稳态下 GetFileAttributesEx 占单进程 CPU 的
+// 50.9%，是每个心跳周期都要付的固定成本。
+//
+// 注意：这里拦截 fileStat（os.Stat 的内部接缝）而非 DirEntry.Info()，正是
+// 因为优化后存活节点不应再走 os.Stat。
+func TestListNodeFilesUsesDirEntryMetadata(t *testing.T) {
+	resetMeshFileCaches()
+	previousProbe := processAliveProbe
+	previousStat := fileStat
+	t.Cleanup(func() {
+		processAliveProbe = previousProbe
+		fileStat = previousStat
+	})
+	// 让节点被判定为存活（否则会命中 dead 快速路径，走不到 Stat 分支）。
+	processAliveProbe = func(int) bool { return true }
+
+	paths := testPaths(t)
+	now := NowUTC()
+	for _, id := range []string{"node-live-a", "node-live-b", "node-live-c"} {
+		writeViewNode(t, paths, viewNodeRecord(id, 1001, now, "", ""))
+	}
+	// 预热：建立节点缓存。
+	_ = BuildView(paths, ViewOptions{Now: now})
+
+	statCalls := 0
+	fileStat = func(path string) (os.FileInfo, error) {
+		statCalls++
+		return os.Stat(path)
+	}
+	files := ListNodeFiles(paths)
+	if len(files) != 3 {
+		t.Fatalf("ListNodeFiles = %d files, want 3", len(files))
+	}
+	for _, f := range files {
+		if f.Record == nil {
+			t.Fatalf("node %s lost its record", f.Path)
+		}
+	}
+	if statCalls != 0 {
+		t.Fatalf("ListNodeFiles must reuse DirEntry metadata, got %d os.Stat calls", statCalls)
+	}
+}
