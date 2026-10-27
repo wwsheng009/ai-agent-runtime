@@ -136,7 +136,11 @@ type Usage struct {
 	UncachedInputTokens   int  `json:"uncached_input_tokens,omitempty"`
 	CacheReadReported     bool `json:"cache_read_reported,omitempty"`
 	CacheCreationReported bool `json:"cache_creation_reported,omitempty"`
-	ReasoningTokens       int  `json:"reasoning_tokens,omitempty"`
+	// CacheMissTokens / CacheMissReported：provider 显式上报的 miss 计数与
+	// 「是否显式给出该字段」（见 types.TokenUsage 同名注释）。
+	CacheMissTokens   int  `json:"cache_miss_tokens,omitempty"`
+	CacheMissReported bool `json:"cache_miss_reported,omitempty"`
+	ReasoningTokens   int  `json:"reasoning_tokens,omitempty"`
 }
 
 // ChatChunk 聊天流式响应块

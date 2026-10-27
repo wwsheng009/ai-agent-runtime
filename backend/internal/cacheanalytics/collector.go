@@ -372,6 +372,8 @@ func (c *Collector) publishRecordFinished(record *CacheRequestRecord) {
 // 载荷特征（loop.go:1834-1870）：usage_prompt/completion/total 与
 // usage_cache_read_reported 在 Usage!=nil 时必写（零值也写）；
 // cache_read/creation/cached/reasoning 仅在 >0 时写；无 creation_reported 字段。
+// miss 计数（§6.4）：usage_cache_miss_tokens 仅在 >0 时写，
+// usage_cache_miss_reported 在 provider 显式给出 miss 字段时写。
 func buildUsage(payload map[string]interface{}) *CacheUsage {
 	promptPresent := false
 	if _, ok := payloadInt64(payload, "usage_prompt_tokens"); ok {
@@ -399,16 +401,21 @@ func buildUsage(payload map[string]interface{}) *CacheUsage {
 	usage.CacheReadReported = payloadBool(payload, "usage_cache_read_reported")
 	// 载荷无 creation_reported 字段：tokens>0 即视为已上报（零值省略语义）。
 	usage.CacheCreationReported = usage.CacheCreationTokens > 0
+	usage.CacheMissTokens = payloadInt64OrZero(payload, "usage_cache_miss_tokens")
+	usage.CacheMissReported = payloadBool(payload, "usage_cache_miss_reported")
 	return usage
 }
 
-// classifyCacheStatus 缓存状态归类（§4.2 顺序：error→hit→write→reported_zero→not_reported）。
+// classifyCacheStatus 缓存状态归类（§4.2 顺序：error→hit→write→confirmed_miss→reported_zero→not_reported）。
 func classifyCacheStatus(usage *CacheUsage, usageSource string) string {
 	switch {
 	case usage.CacheReadTokens > 0:
 		return CacheStatusHit
 	case usage.CacheCreationTokens > 0:
 		return CacheStatusWrite
+	case usage.CacheReadReported && usage.CacheMissReported && usage.CacheMissTokens > 0:
+		// 读字段已上报为 0 且 provider 显式计数了未命中：确认 miss，而非缺省零值。
+		return CacheStatusConfirmedMiss
 	case usage.CacheReadReported:
 		return CacheStatusReportedZero
 	default:

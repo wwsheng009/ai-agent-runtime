@@ -5239,6 +5239,7 @@ func TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage(t *testi
 		wantStatus   string
 		wantRatio    bool
 		wantReported bool
+		wantMiss     bool
 	}{
 		{
 			name: "reported zero",
@@ -5251,6 +5252,21 @@ func TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage(t *testi
 			wantStatus:   "reported_zero",
 			wantRatio:    true,
 			wantReported: true,
+		},
+		{
+			name: "confirmed miss",
+			usage: &types.TokenUsage{
+				PromptTokens:      1000,
+				CompletionTokens:  100,
+				TotalTokens:       1100,
+				CacheReadReported: true,
+				CacheMissReported: true,
+				CacheMissTokens:   1000,
+			},
+			wantStatus:   "confirmed_miss",
+			wantRatio:    true,
+			wantReported: true,
+			wantMiss:     true,
 		},
 		{
 			name: "not reported",
@@ -5303,6 +5319,13 @@ func TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage(t *testi
 			require.Equal(t, tt.wantReported, payload["usage_cache_read_reported"])
 			_, ratioPresent := payload["usage_cache_hit_ratio"]
 			require.Equal(t, tt.wantRatio, ratioPresent)
+			if tt.wantMiss {
+				require.Equal(t, tt.usage.CacheMissTokens, payload["usage_cache_miss_tokens"])
+				require.Equal(t, true, payload["usage_cache_miss_reported"])
+			} else {
+				_, missTokensPresent := payload["usage_cache_miss_tokens"]
+				require.False(t, missTokensPresent)
+			}
 		})
 	}
 }

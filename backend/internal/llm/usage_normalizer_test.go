@@ -182,6 +182,45 @@ func TestResolveUnifiedTokenUsage_DeepSeekCacheHitAndMissTokens(t *testing.T) {
 	require.Equal(t, 6, usage.UncachedInputTokens)
 }
 
+// DeepSeek 显式给出 miss 计数（全未命中样本）：CacheMissReported/CacheMissTokens
+// 保留"显式上报"证据，供 cache 状态把 confirmed_miss 与缺省零值分层（§6.4）。
+func TestResolveUnifiedTokenUsage_DeepSeekMissReported(t *testing.T) {
+	usage, _ := resolveUnifiedTokenUsage(
+		"openai",
+		[]byte(`{"usage":{"prompt_tokens":113475,"completion_tokens":2582,"total_tokens":116057,"prompt_tokens_details":{"cached_tokens":0},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":113475}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("openai"),
+	)
+	require.NotNil(t, usage)
+	require.True(t, usage.CacheReadReported)
+	require.True(t, usage.CacheMissReported)
+	require.Equal(t, 113475, usage.CacheMissTokens)
+	require.Equal(t, 0, usage.CacheReadTokens)
+	mapped := TokenUsageToMap(usage)
+	require.Equal(t, 113475, mapped["cache_miss_tokens"])
+	require.Equal(t, true, mapped["cache_miss_reported"])
+}
+
+// OpenAI 未给 miss 字段时，uncached 仍按「输入总量 - 命中」推导，但不得把
+// 推导值标记成 provider 确认的 miss（§6.4：缺省零值不伪装成真实 miss）。
+func TestResolveUnifiedTokenUsage_OpenAIDerivedUncachedIsNotMissReported(t *testing.T) {
+	usage, _ := resolveUnifiedTokenUsage(
+		"openai",
+		[]byte(`{"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010,"prompt_tokens_details":{"cached_tokens":0}}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("openai"),
+	)
+	require.NotNil(t, usage)
+	require.True(t, usage.CacheReadReported)
+	require.False(t, usage.CacheMissReported)
+	require.Equal(t, 0, usage.CacheMissTokens)
+	require.Equal(t, 1000, usage.UncachedInputTokens)
+}
+
 func TestResolveUnifiedTokenUsage_AnthropicInputTokensAreAlreadyUncached(t *testing.T) {
 	usage, _ := resolveUnifiedTokenUsage(
 		"anthropic",

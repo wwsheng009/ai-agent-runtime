@@ -142,6 +142,7 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
   COALESCE(MAX(started_at_unix_nano), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'hit' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'write' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN cache_status = 'confirmed_miss' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'reported_zero' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'not_reported' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'error' THEN 1 ELSE 0 END), 0),
@@ -167,17 +168,17 @@ FROM usage_requests WHERE ` + scope
 		return overview, nil
 	}
 	var (
-		total, withUsage, cacheReported                    int
-		prompt, completion, totalTokens                    int64
-		cacheRead, cacheCreation, uncachedInput, reasoning int64
-		inputTotalSum                                      int64
-		windowFrom, windowTo                               int64
-		hit, write, reportedZero, notReported, errCnt      int
-		hitRatio                                           sql.NullFloat64
-		avgDurationMS                                      int64
-		durationSamples                                    int
-		avgFirstTokenMS                                    int64
-		firstTokenSamples                                  int
+		total, withUsage, cacheReported                              int
+		prompt, completion, totalTokens                              int64
+		cacheRead, cacheCreation, uncachedInput, reasoning           int64
+		inputTotalSum                                                int64
+		windowFrom, windowTo                                         int64
+		hit, write, confirmedMiss, reportedZero, notReported, errCnt int
+		hitRatio                                                     sql.NullFloat64
+		avgDurationMS                                                int64
+		durationSamples                                              int
+		avgFirstTokenMS                                              int64
+		firstTokenSamples                                            int
 	)
 	if err := rows.Scan(
 		&total, &withUsage, &cacheReported,
@@ -187,7 +188,7 @@ FROM usage_requests WHERE ` + scope
 		&cacheRead, &cacheCreation, &uncachedInput, &inputTotalSum,
 		&reasoning,
 		&windowFrom, &windowTo,
-		&hit, &write, &reportedZero, &notReported, &errCnt,
+		&hit, &write, &confirmedMiss, &reportedZero, &notReported, &errCnt,
 		&hitRatio,
 		&avgDurationMS, &durationSamples,
 		&avgFirstTokenMS, &firstTokenSamples,
@@ -230,11 +231,12 @@ FROM usage_requests WHERE ` + scope
 		overview.CacheWriteRatio = &ratio
 	}
 	overview.CacheStatusDistribution = cacheanalytics.CacheStatusDistribution{
-		Hit:          hit,
-		Write:        write,
-		ReportedZero: reportedZero,
-		NotReported:  notReported,
-		Error:        errCnt,
+		Hit:           hit,
+		Write:         write,
+		ConfirmedMiss: confirmedMiss,
+		ReportedZero:  reportedZero,
+		NotReported:   notReported,
+		Error:         errCnt,
 	}
 	overview.DurationSamples = durationSamples
 	overview.AverageDurationMS = avgDurationMS

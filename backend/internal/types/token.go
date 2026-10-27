@@ -23,7 +23,14 @@ type TokenUsage struct {
 	InputTotalTokens      int  `json:"input_total_tokens,omitempty" yaml:"input_total_tokens,omitempty"`
 	CacheReadReported     bool `json:"cache_read_reported,omitempty" yaml:"cache_read_reported,omitempty"`
 	CacheCreationReported bool `json:"cache_creation_reported,omitempty" yaml:"cache_creation_reported,omitempty"`
-	ReasoningTokens       int  `json:"reasoning_tokens,omitempty" yaml:"reasoning_tokens,omitempty"`
+	// CacheMissTokens 是 provider 显式上报的未命中缓存 token 数（如 DeepSeek
+	// prompt_cache_miss_tokens）。与 UncachedInputTokens 的推导口径不同：后者
+	// 可能由「输入总量 - 命中量」推算，这里只承载 provider 主动报出的 miss 计数。
+	CacheMissTokens int `json:"cache_miss_tokens,omitempty" yaml:"cache_miss_tokens,omitempty"`
+	// CacheMissReported 表示 provider 显式给出了 miss 计数字段（即使值为 0）。
+	// 用于把「确认的未命中」与缺省零值区分开（§6.4：避免把缺省零值伪装成真实 miss）。
+	CacheMissReported bool `json:"cache_miss_reported,omitempty" yaml:"cache_miss_reported,omitempty"`
+	ReasoningTokens   int  `json:"reasoning_tokens,omitempty" yaml:"reasoning_tokens,omitempty"`
 }
 
 // Clone 克隆 TokenUsage
@@ -43,6 +50,8 @@ func (u *TokenUsage) Clone() *TokenUsage {
 		InputTotalTokens:      u.InputTotalTokens,
 		CacheReadReported:     u.CacheReadReported,
 		CacheCreationReported: u.CacheCreationReported,
+		CacheMissTokens:       u.CacheMissTokens,
+		CacheMissReported:     u.CacheMissReported,
 		ReasoningTokens:       u.ReasoningTokens,
 	}
 }
@@ -62,6 +71,8 @@ func (u *TokenUsage) Add(other *TokenUsage) {
 	u.InputTotalTokens += other.InputTotalTokens
 	u.CacheReadReported = u.CacheReadReported || other.CacheReadReported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
+	u.CacheMissTokens += other.CacheMissTokens
+	u.CacheMissReported = u.CacheMissReported || other.CacheMissReported
 	u.ReasoningTokens += other.ReasoningTokens
 	if other.UsageSource != "" {
 		switch {
@@ -78,7 +89,7 @@ func (u *TokenUsage) IsZero() bool {
 	if u == nil {
 		return true
 	}
-	return u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 && u.CachedTokens == 0 && u.CacheReadTokens == 0 && u.CacheCreationTokens == 0 && u.UncachedInputTokens == 0 && u.ReasoningTokens == 0
+	return u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 && u.CachedTokens == 0 && u.CacheReadTokens == 0 && u.CacheCreationTokens == 0 && u.CacheMissTokens == 0 && u.UncachedInputTokens == 0 && u.ReasoningTokens == 0
 }
 
 // InputTotal 返回输入总量（含缓存读写的完整口径），用于命中率等比率分母。

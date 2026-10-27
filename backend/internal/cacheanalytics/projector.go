@@ -104,6 +104,7 @@ func (a *projectorAggregates) merge(other projectorAggregates) {
 	a.sumCacheCreationReported += other.sumCacheCreationReported
 	a.dist.Hit += other.dist.Hit
 	a.dist.Write += other.dist.Write
+	a.dist.ConfirmedMiss += other.dist.ConfirmedMiss
 	a.dist.ReportedZero += other.dist.ReportedZero
 	a.dist.NotReported += other.dist.NotReported
 	a.dist.Error += other.dist.Error
@@ -115,6 +116,8 @@ func (d *CacheStatusDistribution) add(status string) {
 		d.Hit++
 	case CacheStatusWrite:
 		d.Write++
+	case CacheStatusConfirmedMiss:
+		d.ConfirmedMiss++
 	case CacheStatusReportedZero:
 		d.ReportedZero++
 	case CacheStatusNotReported:
@@ -133,6 +136,10 @@ func (d *CacheStatusDistribution) remove(status string) {
 	case CacheStatusWrite:
 		if d.Write > 0 {
 			d.Write--
+		}
+	case CacheStatusConfirmedMiss:
+		if d.ConfirmedMiss > 0 {
+			d.ConfirmedMiss--
 		}
 	case CacheStatusReportedZero:
 		if d.ReportedZero > 0 {

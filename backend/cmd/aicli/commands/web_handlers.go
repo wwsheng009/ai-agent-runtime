@@ -2062,7 +2062,7 @@ func chatWebSSEFieldsFor(busEvent string) []webSSEFieldSpec {
 			webSSEFieldSpec{Name: "provider", Type: "string", Description: "provider 名"},
 			webSSEFieldSpec{Name: "model", Type: "string", Description: "模型名"},
 			webSSEFieldSpec{Name: "status", Type: "string", Description: "请求终态（success/error）"},
-			webSSEFieldSpec{Name: "cache_status", Type: "string", Description: "缓存状态（hit/write/reported_zero/not_reported/error）"},
+			webSSEFieldSpec{Name: "cache_status", Type: "string", Description: "缓存状态（hit/write/confirmed_miss/reported_zero/not_reported/error）"},
 			webSSEFieldSpec{Name: "cache_hit_ratio", Type: "number", Description: "缓存命中率（未上报时缺省）"},
 			webSSEFieldSpec{Name: "cache_write_ratio", Type: "number", Description: "缓存写入率（未上报时缺省）"},
 			webSSEFieldSpec{Name: "duration_ms", Type: "integer", Description: "请求耗时（毫秒）"},

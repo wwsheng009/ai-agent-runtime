@@ -5416,6 +5416,8 @@ func copyLocalAgentCompletionPayload(target map[string]interface{}, payload map[
 		"usage_uncached_input_tokens",
 		"usage_input_total_tokens",
 		"usage_cache_read_reported",
+		"usage_cache_miss_tokens",
+		"usage_cache_miss_reported",
 		"usage_cache_status",
 		"usage_reasoning_tokens",
 	} {

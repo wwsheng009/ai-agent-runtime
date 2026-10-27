@@ -312,6 +312,8 @@ func usageCacheStatusLabel(status string) string {
 		return "命中"
 	case cacheanalytics.CacheStatusWrite:
 		return "写入"
+	case cacheanalytics.CacheStatusConfirmedMiss:
+		return "确认未命中"
 	case cacheanalytics.CacheStatusReportedZero:
 		return "未命中"
 	case cacheanalytics.CacheStatusNotReported:
@@ -340,8 +342,8 @@ func renderUsageCacheOverview(src cacheanalytics.Source, sessionID string) []str
 	header += "）"
 	dist := overview.CacheStatusDistribution
 	lines := []string{header}
-	lines = append(lines, fmt.Sprintf("  请求总数: %d   命中: %d   写入: %d   未命中: %d   未上报（未知）: %d   错误: %d",
-		overview.RequestsTotal, dist.Hit, dist.Write, dist.ReportedZero, dist.NotReported, dist.Error))
+	lines = append(lines, fmt.Sprintf("  请求总数: %d   命中: %d   写入: %d   确认未命中: %d   未命中: %d   未上报（未知）: %d   错误: %d",
+		overview.RequestsTotal, dist.Hit, dist.Write, dist.ConfirmedMiss, dist.ReportedZero, dist.NotReported, dist.Error))
 	lines = append(lines, fmt.Sprintf("  输入 token: %s（缓存读取 %s / 缓存写入 %s）",
 		formatTokenCount(overview.Tokens.PromptTokens),
 		formatTokenCount(overview.Tokens.CacheReadTokens),

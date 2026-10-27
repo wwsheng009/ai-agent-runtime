@@ -11,13 +11,13 @@ import (
 )
 
 const (
-	AgentMailboxMessageKind           = agentcontrol.MailboxKindAgentMessage
-	AgentMailboxFollowupKind          = agentcontrol.MailboxKindFollowupTask
-	AgentMailboxMessageType           = agentcontrol.MessageTypeAgentMessage
-	AgentMailboxFollowupMessageType   = agentcontrol.MessageTypeFollowupTask
-	AgentMailboxMessageAction         = agentcontrol.ActionAgentMessage
-	AgentMailboxFollowupAction        = agentcontrol.ActionAgentFollowupTask
-	AgentMailboxWorkflow              = agentcontrol.WorkflowSpawnAgent
+	AgentMailboxMessageKind         = agentcontrol.MailboxKindAgentMessage
+	AgentMailboxFollowupKind        = agentcontrol.MailboxKindFollowupTask
+	AgentMailboxMessageType         = agentcontrol.MessageTypeAgentMessage
+	AgentMailboxFollowupMessageType = agentcontrol.MessageTypeFollowupTask
+	AgentMailboxMessageAction       = agentcontrol.ActionAgentMessage
+	AgentMailboxFollowupAction      = agentcontrol.ActionAgentFollowupTask
+	AgentMailboxWorkflow            = agentcontrol.WorkflowSpawnAgent
 	// AgentMailboxBatchWorkflow 是批量委派（subagent_spawn_batch）的持久化 workflow
 	// 标签。它属于 workflow 标签族（{spawn_agent, spawn_team}，见
 	// agentcontrol/envelope.go），不是工具身份：值会落库到
@@ -133,6 +133,8 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			"usage_uncached_input_tokens",
 			"usage_input_total_tokens",
 			"usage_cache_read_reported",
+			"usage_cache_miss_tokens",
+			"usage_cache_miss_reported",
 			"usage_cache_status",
 			"usage_reasoning_tokens",
 			// §2.4-1 kill/cancel salvage: the chat actor attaches the bounded

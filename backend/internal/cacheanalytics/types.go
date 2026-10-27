@@ -44,6 +44,11 @@ const (
 	CacheStatusHit = "hit"
 	// CacheStatusWrite 写入缓存（creation > 0 且 read == 0）。
 	CacheStatusWrite = "write"
+	// CacheStatusConfirmedMiss provider 显式计数的未命中：cache_read == 0 已上报
+	// 且 provider 主动给出未命中 token 数（如 DeepSeek prompt_cache_miss_tokens）。
+	// 与 reported_zero 的区别：后者只是"读字段上报为 0"，可能是缺省零值或缓存
+	// 未启用；confirmed_miss 是 provider 自己确认并计数的 miss（§6.4）。
+	CacheStatusConfirmedMiss = "confirmed_miss"
 	// CacheStatusReportedZero provider 显式上报但命中为 0。
 	CacheStatusReportedZero = "reported_zero"
 	// CacheStatusNotReported provider 未上报缓存字段（不污染命中率）。
@@ -94,7 +99,12 @@ type CacheUsage struct {
 	InputTotalTokens      int64 `json:"input_total_tokens,omitempty"`
 	CacheReadReported     bool  `json:"cache_read_reported"`
 	CacheCreationReported bool  `json:"cache_creation_reported"`
-	ReasoningTokens       int64 `json:"reasoning_tokens"`
+	// CacheMissTokens / CacheMissReported 是 provider 显式上报的未命中计数与
+	// "是否显式给出该字段"（见 types.TokenUsage 同名注释）。用于 confirmed_miss
+	// 分层；缺省零值不算确认未命中。
+	CacheMissTokens   int64 `json:"cache_miss_tokens,omitempty"`
+	CacheMissReported bool  `json:"cache_miss_reported,omitempty"`
+	ReasoningTokens   int64 `json:"reasoning_tokens"`
 }
 
 // InputTotal 返回输入总量（含缓存读写的完整口径），用于命中率等比率分母。
@@ -205,11 +215,12 @@ type CacheRequestRecord struct {
 
 // CacheStatusDistribution 缓存状态分布（overview 直接画饼）。
 type CacheStatusDistribution struct {
-	Hit          int `json:"hit"`
-	Write        int `json:"write"`
-	ReportedZero int `json:"reported_zero"`
-	NotReported  int `json:"not_reported"`
-	Error        int `json:"error"`
+	Hit           int `json:"hit"`
+	Write         int `json:"write"`
+	ConfirmedMiss int `json:"confirmed_miss"`
+	ReportedZero  int `json:"reported_zero"`
+	NotReported   int `json:"not_reported"`
+	Error         int `json:"error"`
 }
 
 // CoverageInfo 数据覆盖情况（自报观测洞，UI 必须可见）。

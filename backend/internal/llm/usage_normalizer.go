@@ -104,6 +104,12 @@ func TokenUsageToMap(usage *types.TokenUsage) map[string]interface{} {
 	if usage.CacheCreationReported {
 		result["cache_creation_reported"] = true
 	}
+	if usage.CacheMissTokens > 0 {
+		result["cache_miss_tokens"] = usage.CacheMissTokens
+	}
+	if usage.CacheMissReported {
+		result["cache_miss_reported"] = true
+	}
 	if usage.ReasoningTokens > 0 {
 		result["reasoning_tokens"] = usage.ReasoningTokens
 	}
@@ -412,6 +418,10 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		raw["prompt_cache_miss_tokens"],
 		promptDetails["prompt_cache_miss_tokens"],
 	)
+	// provider 显式给出 miss 计数字段（即使值为 0）：缺省零值（字段缺失）与
+	// 显式零区分开，供缓存状态把 confirmed_miss 与 reported_zero 分层（§6.4）。
+	cacheMissReported := hasAnyMapKey(raw, "prompt_cache_miss_tokens") ||
+		hasAnyMapKey(promptDetails, "prompt_cache_miss_tokens")
 	cacheReadInputTokens := firstPositiveInt(
 		raw["cache_read_input_tokens"],
 		raw["cacheReadInputTokens"],
@@ -488,6 +498,8 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		InputTotalTokens:      inputTotalTokens,
 		CacheReadReported:     cacheReadReported,
 		CacheCreationReported: cacheCreationReported,
+		CacheMissTokens:       explicitUncachedInputTokens,
+		CacheMissReported:     cacheMissReported,
 		ReasoningTokens:       reasoningTokens,
 	}
 }
@@ -588,6 +600,8 @@ func chatUsageFromTokenUsage(usage *types.TokenUsage) Usage {
 		UncachedInputTokens:   usage.UncachedInputTokens,
 		CacheReadReported:     usage.CacheReadReported,
 		CacheCreationReported: usage.CacheCreationReported,
+		CacheMissTokens:       usage.CacheMissTokens,
+		CacheMissReported:     usage.CacheMissReported,
 		ReasoningTokens:       usage.ReasoningTokens,
 	}
 }

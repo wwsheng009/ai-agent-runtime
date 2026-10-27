@@ -145,7 +145,7 @@ func TestRenderUsageCacheOverview_PartialHeader(t *testing.T) {
 		CacheHitRatio:   ratioPtr(0.5),
 		CacheWriteRatio: ratioPtr(0.0093),
 		CacheStatusDistribution: cacheanalytics.CacheStatusDistribution{
-			Hit: 300, Write: 150, ReportedZero: 100, NotReported: 40, Error: 10,
+			Hit: 300, Write: 150, ConfirmedMiss: 7, ReportedZero: 100, NotReported: 40, Error: 10,
 		},
 		Coverage: cacheanalytics.CoverageInfo{Partial: true},
 	}
@@ -160,6 +160,9 @@ func TestRenderUsageCacheOverview_PartialHeader(t *testing.T) {
 	}
 	if !strings.Contains(joined, "未上报（未知）: 40") || !strings.Contains(joined, "未命中: 100") {
 		t.Fatalf("not_reported/reported_zero missing:\n%s", joined)
+	}
+	if !strings.Contains(joined, "确认未命中: 7") {
+		t.Fatalf("confirmed_miss missing:\n%s", joined)
 	}
 	// 千分位（§6.4 示例 128,400）。
 	if !strings.Contains(joined, "128,400") {

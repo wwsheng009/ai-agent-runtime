@@ -3290,6 +3290,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if response.Usage.UncachedInputTokens > 0 {
 			finishedPayload["usage_uncached_input_tokens"] = response.Usage.UncachedInputTokens
 		}
+		if response.Usage.CacheMissTokens > 0 {
+			finishedPayload["usage_cache_miss_tokens"] = response.Usage.CacheMissTokens
+		}
+		if response.Usage.CacheMissReported {
+			finishedPayload["usage_cache_miss_reported"] = true
+		}
 		if response.Usage.InputTotalTokens > 0 {
 			finishedPayload["usage_input_total_tokens"] = response.Usage.InputTotalTokens
 		}
@@ -3304,6 +3310,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		switch {
 		case response.Usage.CachedTokens > 0:
 			finishedPayload["usage_cache_status"] = "hit"
+		case cacheReadReported && response.Usage.CacheMissReported && response.Usage.CacheMissTokens > 0:
+			// provider 显式计数的未命中：与缺省零值（reported_zero）分层（§6.4）。
+			finishedPayload["usage_cache_status"] = "confirmed_miss"
 		case cacheReadReported:
 			finishedPayload["usage_cache_status"] = "reported_zero"
 		case usageSource == "local_estimate":
@@ -7097,6 +7106,12 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		}
 		if result.Usage.UncachedInputTokens > 0 {
 			completedPayload["usage_uncached_input_tokens"] = result.Usage.UncachedInputTokens
+		}
+		if result.Usage.CacheMissTokens > 0 {
+			completedPayload["usage_cache_miss_tokens"] = result.Usage.CacheMissTokens
+		}
+		if result.Usage.CacheMissReported {
+			completedPayload["usage_cache_miss_reported"] = true
 		}
 		if result.Usage.InputTotalTokens > 0 {
 			completedPayload["usage_input_total_tokens"] = result.Usage.InputTotalTokens
