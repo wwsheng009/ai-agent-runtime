@@ -55,7 +55,14 @@ type SubagentCompletion struct {
 	StartedAt        time.Time
 	CompletedAt      time.Time
 	UsageTotalTokens int64
-	Source           string
+	// CancelSource/RetrySkipped/PartialOutput（attempt 观测增量列，§6.1-1/§6.1-2）：
+	// 取消来源分层（如 provider_timeout）与"未重试原因"（如
+	// retry_skipped_deadline_budget / max_attempts_reached），以及失败 attempt
+	// 是否保留了部分产出；载荷缺失时分别为空串/false（不猜测）。
+	CancelSource  string
+	RetrySkipped  string
+	PartialOutput bool
+	Source        string
 	// Conflict 报告 success 与 status 语义冲突（按 D4 以 success 为准）。
 	Conflict bool
 }
@@ -75,6 +82,8 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 		ErrorCode:       firstPayloadString(payload, "error_code"),
 		RetryReason:     firstPayloadString(payload, "retry_reason"),
 		RetryAdvice:     firstPayloadString(payload, "retry_advice"),
+		CancelSource:    firstPayloadString(payload, "cancel_source"),
+		RetrySkipped:    firstPayloadString(payload, "retry_skipped"),
 		Source:          firstPayloadString(payload, "source"),
 	}
 	if normalized.ParentSessionID == "" {
@@ -151,6 +160,7 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 	normalized.FailureCategory = failureCategory
 
 	normalized.ReadOnly, normalized.ReadOnlyKnown = payloadBoolValue(payload, "read_only")
+	normalized.PartialOutput, _ = payloadBoolValue(payload, "partial_output")
 	normalized.Attempt = payloadInt(payload, "attempt")
 	if normalized.Attempt <= 0 {
 		normalized.Attempt = 1

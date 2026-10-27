@@ -162,6 +162,9 @@ func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 		"max_attempts":      2,
 		"success":           false,
 		"status":            "failed",
+		"cancel_source":     "provider_timeout",
+		"retry_skipped":     "max_attempts_reached",
+		"partial_output":    true,
 	}, at.Add(1100*time.Millisecond))
 
 	stats, err := store.SubagentStats(SubagentStatsQuery{SessionID: "session-batch"})
@@ -177,6 +180,10 @@ func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 	}
 	if stat.ConflictCount != 1 {
 		t.Fatalf("中间尝试应计入 conflict_count，实际 %d", stat.ConflictCount)
+	}
+	if stat.CancelSource != "provider_timeout" || stat.RetrySkipped != "max_attempts_reached" || !stat.PartialOutput {
+		t.Fatalf("attempt 观测增量列未合并进读取面: cancel=%q skipped=%q partial=%v",
+			stat.CancelSource, stat.RetrySkipped, stat.PartialOutput)
 	}
 }
 

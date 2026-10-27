@@ -84,6 +84,12 @@ type SubagentStat struct {
 	Attempt          int    `json:"attempt"`
 	MaxAttempts      int    `json:"max_attempts"`
 	RetryReason      string `json:"retry_reason,omitempty"`
+	// CancelSource/RetrySkipped/PartialOutput（attempt 观测增量列，§6.1-1/§6.1-2）：
+	// 取消来源分层（如 provider_timeout）、未重试原因（如
+	// retry_skipped_deadline_budget）与失败 attempt 是否保留部分产出。
+	CancelSource     string `json:"cancel_source,omitempty"`
+	RetrySkipped     string `json:"retry_skipped,omitempty"`
+	PartialOutput    bool   `json:"partial_output,omitempty"`
 	DurationMS       int64  `json:"duration_ms"`
 	UsageTotalTokens int64  `json:"usage_total_tokens"`
 	// BudgetTokens 是该子代理任务声明的 token 预算（0 = 未声明，§4.2）；
@@ -407,14 +413,19 @@ func (s *Store) SubagentStats(q SubagentStatsQuery) (SubagentStatsResult, error)
 	batchIDExpr := s.columnExpr("usage_subagents", "batch_id")
 	taskTypeExpr := s.columnExpr("usage_subagents", "task_type")
 	taskSubjectExpr := s.columnExpr("usage_subagents", "task_subject")
+	cancelSourceExpr := s.columnExpr("usage_subagents", "cancel_source")
+	retrySkippedExpr := s.columnExpr("usage_subagents", "retry_skipped")
+	// partial_output 是 INTEGER 列：旧库缺列时 columnExpr 返回 ''，必须 CAST 成
+	// INTEGER 才能扫进 int（SQLite 把 '' 转 0），否则整条 stats 查询报错。
+	partialOutputExpr := "CAST(" + s.columnExpr("usage_subagents", "partial_output") + " AS INTEGER)"
 	rows, ok, err := s.query(fmt.Sprintf(`
 SELECT subagent_id, parent_session_id, %s, child_session_id, role, %s, %s, read_only, source, success, completion_reason,
-       failure_category, error_code, attempt, max_attempts, retry_reason, duration_ms,
+       failure_category, error_code, attempt, max_attempts, retry_reason, %s, %s, %s, duration_ms,
        usage_total_tokens, budget_tokens, conflict_count, completed_at_unix_nano
 FROM usage_subagents
 WHERE %s
 ORDER BY completed_at_unix_nano DESC, subagent_id ASC
-LIMIT ?`, batchIDExpr, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
+LIMIT ?`, batchIDExpr, taskTypeExpr, taskSubjectExpr, cancelSourceExpr, retrySkippedExpr, partialOutputExpr, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
 	if err != nil {
 		return result, fmt.Errorf("query subagent stats: %w", err)
 	}
@@ -427,17 +438,19 @@ LIMIT ?`, batchIDExpr, taskTypeExpr, taskSubjectExpr, where), append(args, norma
 			stat          SubagentStat
 			successFlag   *int
 			readOnlyFlag  int
+			partialFlag   int
 			completedNano int64
 		)
 		if err := rows.Scan(
 			&stat.SubagentID, &stat.ParentSessionID, &stat.BatchID, &stat.ChildSessionID, &stat.Role, &stat.TaskType, &stat.TaskSubject, &readOnlyFlag, &stat.Source,
 			&successFlag, &stat.CompletionReason, &stat.FailureCategory, &stat.ErrorCode,
-			&stat.Attempt, &stat.MaxAttempts, &stat.RetryReason, &stat.DurationMS,
+			&stat.Attempt, &stat.MaxAttempts, &stat.RetryReason, &stat.CancelSource, &stat.RetrySkipped, &partialFlag, &stat.DurationMS,
 			&stat.UsageTotalTokens, &stat.BudgetTokens, &stat.ConflictCount, &completedNano,
 		); err != nil {
 			return result, fmt.Errorf("scan subagent stats: %w", err)
 		}
 		stat.ReadOnly = readOnlyFlag != 0
+		stat.PartialOutput = partialFlag != 0
 		stat.BudgetExceeded = stat.BudgetTokens > 0 && stat.UsageTotalTokens > stat.BudgetTokens
 		if successFlag != nil {
 			flag := *successFlag == 1

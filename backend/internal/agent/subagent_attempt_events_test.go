@@ -17,6 +17,79 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// attemptEventRig 是 attempt 事件端到端用例的共享装置：agent/调度器/批次协调器
+// （detached worker 里真实跑子任务）+ 事件采集 + 批次终态通道。
+type attemptEventRig struct {
+	agent    *Agent
+	terminal chan BatchTerminalLifecycle
+	mu       sync.Mutex
+	events   []recordedLifecycleEvent
+}
+
+type recordedLifecycleEvent struct {
+	eventType string
+	payload   map[string]interface{}
+}
+
+func newAttemptEventRig(t *testing.T) *attemptEventRig {
+	t.Helper()
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     4,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+	rig := &attemptEventRig{agent: agent, terminal: make(chan BatchTerminalLifecycle, 1)}
+	bus := runtimeevents.NewBus()
+	bus.Subscribe("", func(event runtimeevents.Event) {
+		switch event.Type {
+		case runtimeevents.EventSubagentAttemptStarted, runtimeevents.EventSubagentAttemptFinished, "subagent.completed":
+			rig.mu.Lock()
+			rig.events = append(rig.events, recordedLifecycleEvent{eventType: event.Type, payload: event.Payload})
+			rig.mu.Unlock()
+		}
+	})
+	agent.SetEventBus(bus)
+	agent.SetSubagentScheduler(NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 2, MaxDepth: 1}))
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
+	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
+		rig.terminal <- event
+		return nil
+	})
+	return rig
+}
+
+// waitTerminal 等待 detached 批次投影终态，确保事件已全部写入。
+func (r *attemptEventRig) waitTerminal(t *testing.T) {
+	t.Helper()
+	select {
+	case event := <-r.terminal:
+		require.Equal(t, subagentbatch.ExecutionModeBackground, event.ExecutionMode)
+	case <-time.After(10 * time.Second):
+		t.Fatal("expected the detached batch to reach a terminal projection")
+	}
+}
+
+// snapshot 返回当前已采集的事件副本（带锁）。
+func (r *attemptEventRig) snapshot() []recordedLifecycleEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedLifecycleEvent(nil), r.events...)
+}
+
 // TestSchedulerEmitsAttemptLifecycleEvents 锁定 §6.1-4（行动文档 P0）：任务级
 // attempt 的成对 started/finished 事件。归属父会话、带 attempt 序号与
 // 时序/预算/usage/partial 字段，供 request/attempt/task 三层对账；started 不得
@@ -163,48 +236,7 @@ func (p *firstChildFailureProvider) callCount() int {
 // 一条**任务终态 subagent.completed（成功，attempt=2）；中间尝试不再发
 // subagent.completed（§6.1-4 过渡期已闭合）。
 func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
-	agent := &Agent{
-		config: &Config{
-			Name:         "test-agent",
-			Model:        "test-provider",
-			MaxSteps:     4,
-			SystemPrompt: "You are a helpful assistant.",
-		},
-		skillRouter: &skill.Router{},
-		skillExec:   &skill.Executor{},
-		mcpManager:  &MockMCPManager{},
-	}
-	bus := runtimeevents.NewBus()
-	var mu sync.Mutex
-	type lifecycleEvent struct {
-		eventType string
-		payload   map[string]interface{}
-	}
-	var collected []lifecycleEvent
-	bus.Subscribe("", func(event runtimeevents.Event) {
-		switch event.Type {
-		case runtimeevents.EventSubagentAttemptStarted, runtimeevents.EventSubagentAttemptFinished, "subagent.completed":
-			mu.Lock()
-			collected = append(collected, lifecycleEvent{eventType: event.Type, payload: event.Payload})
-			mu.Unlock()
-		}
-	})
-	agent.SetEventBus(bus)
-	agent.SetSubagentScheduler(NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 2, MaxDepth: 1}))
-	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
-		Path: filepath.Join(t.TempDir(), "batches.db"),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = batchStore.Close() })
-	terminal := make(chan BatchTerminalLifecycle, 1)
-	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
-		Store:     batchStore,
-		Scheduler: agent.GetSubagentScheduler(),
-	}))
-	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
-		terminal <- event
-		return nil
-	})
+	rig := newAttemptEventRig(t)
 
 	llmRuntime := llm.NewLLMRuntime(nil)
 	// 关掉 runtime 层重试：每次任务 attempt 恰好一次 provider 调用；否则
@@ -249,7 +281,7 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	}
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
 
-	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+	loop := NewReActLoop(rig.agent, llmRuntime, &LoopReActConfig{
 		MaxSteps:        4,
 		EnableThought:   true,
 		EnableToolCalls: true,
@@ -258,16 +290,9 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.Success)
 
-	select {
-	case event := <-terminal:
-		require.Equal(t, subagentbatch.ExecutionModeBackground, event.ExecutionMode)
-	case <-time.After(10 * time.Second):
-		t.Fatal("expected the detached batch to reach a terminal projection")
-	}
+	rig.waitTerminal(t)
 
-	mu.Lock()
-	events := append([]lifecycleEvent(nil), collected...)
-	mu.Unlock()
+	events := rig.snapshot()
 
 	var startedAttempts []int
 	finishedByAttempt := map[int]map[string]interface{}{}
@@ -319,4 +344,117 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 
 	require.Equal(t, 2, provider.callCount(),
 		"每次任务 attempt 恰一次 provider 调用（runtime 重试已关闭）：1 次失败 + 1 次成功")
+}
+
+// alwaysFailingChildProvider 让所有子请求在 provider 层失败（注入含 deadline 的
+// provider 超时文本），用于锁定终态 cancel_source=provider_timeout 与
+// retry_skipped 的可见性。
+type alwaysFailingChildProvider struct {
+	*roleRoutingLLMProvider
+	mu      sync.Mutex
+	calls   int
+	errText string
+}
+
+func (p *alwaysFailingChildProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	if !isSubagentChildRequest(req) {
+		return p.roleRoutingLLMProvider.Call(ctx, req)
+	}
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return nil, errors.New(p.errText)
+}
+
+func (p *alwaysFailingChildProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout 锁定 §8.1 验收：
+// provider 超时（文本含 deadline）连续失败时，attempt 1/2 成对可见，且终态事件
+// 给出可区分的 cancel_source=provider_timeout 与
+// retry_skipped=max_attempts_reached（不是只留下 Retryable=true）。
+func TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout(t *testing.T) {
+	rig := newAttemptEventRig(t)
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	llmRuntime.UpdateRetryConfig(0, llm.RetryTuning{}, nil)
+	baseProvider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will delegate.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{
+						Name: "spawn_subagents",
+						Args: map[string]interface{}{
+							"agents": []interface{}{
+								map[string]interface{}{
+									"id":        "child-1",
+									"goal":      "Inspect logs",
+									"read_only": true,
+								},
+							},
+						},
+					},
+				},
+			},
+			{Content: "Final answer from parent.", Model: "test-model"},
+		},
+	}
+	provider := &alwaysFailingChildProvider{
+		roleRoutingLLMProvider: &roleRoutingLLMProvider{SequenceLLMProvider: baseProvider},
+		errText:                "UPSTREAM_UNAVAILABLE: provider call failed: context deadline exceeded (attempt-timeout test)",
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(rig.agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        4,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	_, err := loop.Run(context.Background(), "Find the root cause.")
+	require.NoError(t, err)
+	rig.waitTerminal(t)
+
+	events := rig.snapshot()
+	var startedAttempts []int
+	finishedByAttempt := map[int]map[string]interface{}{}
+	var completedEvents []map[string]interface{}
+	for _, event := range events {
+		switch event.eventType {
+		case runtimeevents.EventSubagentAttemptStarted:
+			if attempt, ok := event.payload["attempt"].(int); ok {
+				startedAttempts = append(startedAttempts, attempt)
+			}
+		case runtimeevents.EventSubagentAttemptFinished:
+			if attempt, ok := event.payload["attempt"].(int); ok {
+				finishedByAttempt[attempt] = event.payload
+			}
+		case "subagent.completed":
+			completedEvents = append(completedEvents, event.payload)
+		}
+	}
+
+	require.ElementsMatch(t, []int{1, 2}, startedAttempts, "两次失败 attempt 都应有 started 事件")
+	first := finishedByAttempt[1]
+	require.NotNil(t, first, "attempt 1 必须有 finished 事件")
+	require.Equal(t, false, first["success"])
+	require.Equal(t, true, first["intermediate_attempt"])
+	second := finishedByAttempt[2]
+	require.NotNil(t, second, "attempt 2 必须有 finished 事件")
+	require.Equal(t, false, second["success"])
+	require.Equal(t, false, second["intermediate_attempt"])
+
+	require.Len(t, completedEvents, 1, "任务只发一条终态 subagent.completed")
+	final := completedEvents[0]
+	require.Equal(t, false, final["success"])
+	require.Equal(t, 2, final["attempt"])
+	require.Equal(t, "provider_timeout", final["cancel_source"], "provider 文本超时必须与 task/batch deadline 区分")
+	require.Equal(t, "max_attempts_reached", final["retry_skipped"], "达到上限的跳过原因必须可读")
+	require.Equal(t, "timeout", final["failure_category"])
+	require.Equal(t, 2, provider.callCount(), "每次 attempt 恰一次 provider 调用")
 }

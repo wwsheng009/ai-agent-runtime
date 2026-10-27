@@ -338,9 +338,10 @@ func (c *collector) onSubagentCompleted(event runtimeevents.Event) {
 	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_subagents (
   subagent_id, parent_session_id, batch_id, child_session_id, role, task_type, task_subject, read_only, success, completion_reason,
-  failure_category, error_code, attempt, max_attempts, retry_reason, id_synthesized, duration_ms,
+  failure_category, error_code, attempt, max_attempts, retry_reason, cancel_source, retry_skipped, partial_output,
+  id_synthesized, duration_ms,
   started_at_unix_nano, completed_at_unix_nano, usage_total_tokens, budget_tokens, source, conflict_count, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(subagent_id, parent_session_id, batch_id) DO UPDATE SET
   child_session_id = CASE WHEN excluded.child_session_id <> '' THEN excluded.child_session_id ELSE usage_subagents.child_session_id END,
   role = CASE WHEN excluded.role <> '' THEN excluded.role ELSE usage_subagents.role END,
@@ -360,6 +361,9 @@ ON CONFLICT(subagent_id, parent_session_id, batch_id) DO UPDATE SET
   attempt = MAX(usage_subagents.attempt, excluded.attempt),
   max_attempts = MAX(usage_subagents.max_attempts, excluded.max_attempts),
   retry_reason = CASE WHEN excluded.retry_reason <> '' THEN excluded.retry_reason ELSE usage_subagents.retry_reason END,
+  cancel_source = CASE WHEN excluded.cancel_source <> '' THEN excluded.cancel_source ELSE usage_subagents.cancel_source END,
+  retry_skipped = CASE WHEN excluded.retry_skipped <> '' THEN excluded.retry_skipped ELSE usage_subagents.retry_skipped END,
+  partial_output = MAX(usage_subagents.partial_output, excluded.partial_output),
   id_synthesized = MAX(usage_subagents.id_synthesized, excluded.id_synthesized),
   duration_ms = CASE WHEN excluded.duration_ms > 0 THEN excluded.duration_ms ELSE usage_subagents.duration_ms END,
   started_at_unix_nano = CASE WHEN usage_subagents.started_at_unix_nano = 0 THEN excluded.started_at_unix_nano ELSE usage_subagents.started_at_unix_nano END,
@@ -384,6 +388,9 @@ ON CONFLICT(subagent_id, parent_session_id, batch_id) DO UPDATE SET
 		normalized.Attempt,
 		normalized.MaxAttempts,
 		normalized.RetryReason,
+		normalized.CancelSource,
+		normalized.RetrySkipped,
+		boolToInt(normalized.PartialOutput),
 		idSynthesized,
 		normalized.DurationMS,
 		normalized.StartedAt.UnixNano(),

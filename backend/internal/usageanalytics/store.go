@@ -389,6 +389,9 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   attempt                 INTEGER NOT NULL DEFAULT 1,
   max_attempts            INTEGER NOT NULL DEFAULT 1,
   retry_reason            TEXT NOT NULL DEFAULT '',
+  cancel_source           TEXT NOT NULL DEFAULT '',
+  retry_skipped           TEXT NOT NULL DEFAULT '',
+  partial_output          INTEGER NOT NULL DEFAULT 0,
   id_synthesized          INTEGER NOT NULL DEFAULT 0,
   duration_ms             INTEGER NOT NULL DEFAULT 0,
   started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
@@ -724,6 +727,31 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			`CREATE INDEX IF NOT EXISTS idx_usage_sessions_parent ON usage_sessions(parent_session_id)`,
 		} {
 			if _, err := s.db.Exec(statement); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
+	// 增量列（§6.1-4 收口 / §6.3）：usage_subagents 补 cancel_source /
+	// retry_skipped / partial_output——取消来源分层、未重试原因与"失败但保留部分
+	// 产出"必须可查询（此前只在 record_json 里）。老库幂等迁移，与新库 DDL
+	// 同源；只读库不改库，读路径按列存在性退化（见 query_v2.go 的 columnExpr）。
+	if !s.readOnly {
+		for _, column := range []string{"cancel_source", "retry_skipped"} {
+			exists, err := s.hasColumn("usage_subagents", column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err := s.db.Exec("ALTER TABLE usage_subagents ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+		if hasPartial, err := s.hasColumn("usage_subagents", "partial_output"); err != nil {
+			return err
+		} else if !hasPartial {
+			if _, err := s.db.Exec("ALTER TABLE usage_subagents ADD COLUMN partial_output INTEGER NOT NULL DEFAULT 0"); err != nil {
 				return fmt.Errorf("migrate usage analytics db: %w", err)
 			}
 		}
