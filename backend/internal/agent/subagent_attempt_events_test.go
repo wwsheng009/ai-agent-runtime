@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -8,7 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -120,4 +125,199 @@ func TestSchedulerEmitsAttemptLifecycleEvents(t *testing.T) {
 	duration, ok := finishedPayload["duration_ms"].(int64)
 	require.True(t, ok, "duration_ms 必须是 int64")
 	require.Greater(t, duration, int64(0), "duration_ms 应可从 attempt started_at 推导")
+}
+
+// firstChildFailureProvider 让第一次子请求在 provider 层直接失败（注入瞬时
+// 错误），之后放行到脚本化成功响应。配合 MaxRetries=0 的 runtime（每次任务
+// attempt 恰好一次 provider 调用），任务级 attempt 2 必然发生。
+type firstChildFailureProvider struct {
+	*roleRoutingLLMProvider
+	mu         sync.Mutex
+	childCalls int
+	errText    string
+}
+
+func (p *firstChildFailureProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	if !isSubagentChildRequest(req) {
+		return p.roleRoutingLLMProvider.Call(ctx, req)
+	}
+	p.mu.Lock()
+	p.childCalls++
+	fail := p.childCalls == 1
+	p.mu.Unlock()
+	if fail {
+		return nil, errors.New(p.errText)
+	}
+	return p.roleRoutingLLMProvider.Call(ctx, req)
+}
+
+func (p *firstChildFailureProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.childCalls
+}
+
+// TestSubagentAttemptEventsPairOnTransientRetry 锁定 §6.1（行动文档 P0）验收：
+// 注入第一次子请求 UPSTREAM_UNAVAILABLE 后，事件流必须可见 attempt 1（中间
+// 失败、retryable）与 attempt 2（终态成功）的成对 started/finished，以及任务
+// 终态 subagent.completed（成功，attempt=2）；过渡期中间尝试的 legacy
+// subagent.completed（intermediate_attempt=true）同样可见。
+func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     4,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+	bus := runtimeevents.NewBus()
+	var mu sync.Mutex
+	type lifecycleEvent struct {
+		eventType string
+		payload   map[string]interface{}
+	}
+	var collected []lifecycleEvent
+	bus.Subscribe("", func(event runtimeevents.Event) {
+		switch event.Type {
+		case runtimeevents.EventSubagentAttemptStarted, runtimeevents.EventSubagentAttemptFinished, "subagent.completed":
+			mu.Lock()
+			collected = append(collected, lifecycleEvent{eventType: event.Type, payload: event.Payload})
+			mu.Unlock()
+		}
+	})
+	agent.SetEventBus(bus)
+	agent.SetSubagentScheduler(NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 2, MaxDepth: 1}))
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	terminal := make(chan BatchTerminalLifecycle, 1)
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
+	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
+		terminal <- event
+		return nil
+	})
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	// 关掉 runtime 层重试：每次任务 attempt 恰好一次 provider 调用；否则
+	// provider 层重试会吃掉 attempt 2 的成功响应，任务级重试无法被观测。
+	llmRuntime.UpdateRetryConfig(0, llm.RetryTuning{}, nil)
+	baseProvider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will delegate.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{
+						Name: "spawn_subagents",
+						Args: map[string]interface{}{
+							"agents": []interface{}{
+								map[string]interface{}{
+									"id":        "child-1",
+									"goal":      "Inspect logs",
+									"read_only": true,
+								},
+							},
+						},
+					},
+				},
+			},
+			{Content: "Final answer from parent.", Model: "test-model"},
+		},
+	}
+	provider := &firstChildFailureProvider{
+		roleRoutingLLMProvider: &roleRoutingLLMProvider{
+			SequenceLLMProvider: baseProvider,
+			childResponses: []*llm.LLMResponse{
+				{
+					Content: "Recovered child answer.",
+					Model:   "test-model",
+					Usage:   &types.TokenUsage{PromptTokens: 30, CompletionTokens: 5, TotalTokens: 35},
+				},
+			},
+		},
+		errText: "UPSTREAM_UNAVAILABLE: injected transient child failure (attempt-1 retry test)",
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        4,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	result, err := loop.Run(context.Background(), "Find the root cause.")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+
+	select {
+	case event := <-terminal:
+		require.Equal(t, subagentbatch.ExecutionModeBackground, event.ExecutionMode)
+	case <-time.After(10 * time.Second):
+		t.Fatal("expected the detached batch to reach a terminal projection")
+	}
+
+	mu.Lock()
+	events := append([]lifecycleEvent(nil), collected...)
+	mu.Unlock()
+
+	var startedAttempts []int
+	finishedByAttempt := map[int]map[string]interface{}{}
+	var legacyIntermediate, finalCompleted map[string]interface{}
+	for _, event := range events {
+		switch event.eventType {
+		case runtimeevents.EventSubagentAttemptStarted:
+			if attempt, ok := event.payload["attempt"].(int); ok {
+				startedAttempts = append(startedAttempts, attempt)
+			}
+		case runtimeevents.EventSubagentAttemptFinished:
+			if attempt, ok := event.payload["attempt"].(int); ok {
+				finishedByAttempt[attempt] = event.payload
+			}
+		case "subagent.completed":
+			if intermediate, _ := event.payload["intermediate_attempt"].(bool); intermediate {
+				legacyIntermediate = event.payload
+			} else {
+				finalCompleted = event.payload
+			}
+		}
+	}
+	require.ElementsMatch(t, []int{1, 2}, startedAttempts,
+		"attempt 1 与 attempt 2 都应有 started 事件；实际 %v（provider 调用 %d 次）",
+		startedAttempts, provider.callCount())
+
+	first := finishedByAttempt[1]
+	require.NotNil(t, first, "attempt 1 必须有 finished 事件")
+	require.Equal(t, false, first["success"])
+	require.Equal(t, true, first["intermediate_attempt"], "attempt 1 是中间尝试（后面还有 attempt 2）")
+	require.Equal(t, "failed", first["status"])
+	require.Equal(t, "provider_error", first["failure_category"])
+	require.Equal(t, true, first["retryable"])
+	require.Equal(t, "", first["retry_skipped"], "transient 失败且预算充足时不应有跳过原因")
+	require.NotEmpty(t, first["attempt_started_at"])
+	require.Equal(t, 2, first["max_attempts"])
+
+	second := finishedByAttempt[2]
+	require.NotNil(t, second, "attempt 2 必须有 finished 事件")
+	require.Equal(t, true, second["success"])
+	require.Equal(t, false, second["intermediate_attempt"], "attempt 2 是终态尝试")
+	require.Equal(t, "completed", second["status"])
+	require.Equal(t, 35, second["usage_total_tokens"], "attempt 2 的用量应随 finished 事件携带")
+
+	require.NotNil(t, legacyIntermediate, "过渡期中间尝试的 legacy subagent.completed 仍应可见")
+	require.Equal(t, 1, legacyIntermediate["attempt"])
+	require.NotNil(t, finalCompleted, "任务终态 subagent.completed 必须可见")
+	require.Equal(t, true, finalCompleted["success"])
+	require.Equal(t, 2, finalCompleted["attempt"])
+
+	require.Equal(t, 2, provider.callCount(),
+		"每次任务 attempt 恰一次 provider 调用（runtime 重试已关闭）：1 次失败 + 1 次成功")
 }
