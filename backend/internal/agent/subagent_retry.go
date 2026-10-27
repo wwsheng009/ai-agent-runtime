@@ -303,8 +303,11 @@ func (s *SubagentScheduler) maxAttemptsPerTask() int {
 	}
 }
 
-// emitSubagentAttemptEvent 为一次中间失败尝试发 subagent.completed
+// emitSubagentAttemptEvent 为一次中间失败尝试发 subagent.attempt.finished
 // （attempt 可见，intermediate_attempt=true 供分析侧计入 conflict_count）。
+// §6.1-4 过渡期已闭合（2026-10-27）：task 终态只由 subagent.completed 表达，
+// 中间尝试不再借用该事件名；usageanalytics 已订阅 attempt.finished 承载原
+// conflict/attempt 合并语义。
 func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	childSessionID string,
 	options SubagentRunOptions,
@@ -329,43 +332,6 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	if result != nil {
 		attemptUsage = result.Usage
 	}
-	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
-		"subagent_id":             task.ID,
-		"role":                    task.Role,
-		"task_type":               task.TaskType,
-		"task_subject":            task.TaskSubject,
-		"read_only":               task.ReadOnly,
-		"success":                 false,
-		"status":                  "failed",
-		"completion_reason":       subagentCompletionReason(false, disposition),
-		"failure_category":        disposition.Category,
-		"error_code":              disposition.ErrorCode,
-		"retryable":               disposition.Retryable,
-		"attempt":                 attempt,
-		"max_attempts":            maxAttempts,
-		"retry_reason":            disposition.Category,
-		"intermediate_attempt":    true,
-		"source":                  "scheduler",
-		"batch_id":                options.BatchID,
-		"error":                   errText,
-		"budget_tokens":           task.BudgetTokens,
-		"parent_session_id":       options.ParentSessionID,
-		"parent_tool_call_id":     options.ParentToolCallID,
-		"child_agent_name":        childAgentName,
-		"trace_id":                options.TraceID,
-		"partial_output":          hasSubagentPartialOutput(result),
-		"usage_total_tokens":      usageTotal(attemptUsage),
-		"usage_prompt_tokens":     usagePrompt(attemptUsage),
-		"usage_completion_tokens": usageCompletion(attemptUsage),
-		"usage_cache_read_tokens": usageCacheRead(attemptUsage),
-		"attempt_started_at":      rfc3339OrEmptyTime(timing.StartedAt),
-		"attempt_deadline":        rfc3339OrEmptyTime(timing.Deadline),
-		"batch_deadline":          rfc3339OrEmptyTime(timing.BatchDeadline),
-		"retry_budget_ms":         timing.RetryBudgetMS,
-	}, spec.Decision))
-	// §6.1-4（行动文档 P0）：过渡期双发——subagent.completed（intermediate_attempt
-	// =true）保留给既有 ingest/UI，同时补发成对的 subagent.attempt.finished；
-	// 待 usageanalytics ingest 迁移到 attempt.finished 后移除前者（收尾项）。
 	partialFindings, partialPatches := subagentPartialCounts(task, result)
 	s.emitSubagentAttemptFinished(options, task, childSessionID, childAgentName, spec, attempt, maxAttempts, timing, subagentAttemptOutcome{
 		Success:              false,

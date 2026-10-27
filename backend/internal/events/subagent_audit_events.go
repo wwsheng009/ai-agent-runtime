@@ -70,9 +70,9 @@ const (
 	// 归属**父会话**（与 route.resolved 同档 A+D）：attempt 级对账必须能从父会话
 	// 事件流事后重建；单任务 attempt ≤ max_attempts（封顶 5），落盘量有上界。
 	//
-	// 过渡期：subagent.completed 的中间尝试发射（intermediate_attempt=true）仍
-	// 保留，供既有 ingest/UI 消费；待 usageanalytics ingest 迁移到 attempt.finished
-	// 后移除（§6.1-4 收尾项）。
+	// 收口记录（2026-10-27）：subagent.completed 仅表示 task 最终终态；中间尝试
+	// 只发本事件。usageanalytics 已订阅 attempt.finished 承载原 conflict/attempt
+	// 合并语义，过渡期双发已移除。
 	EventSubagentAttemptStarted  = "subagent.attempt.started"
 	EventSubagentAttemptFinished = "subagent.attempt.finished"
 )

@@ -31,6 +31,12 @@ const (
 	// parent_session_id/subagent_id）：collector 据此学习 child→parent 映射，
 	// 作为 llm.request.* 载荷与宿主 lookup 都缺失时的父链兜底。
 	EventSubagentStarted = "subagent.started"
+	// EventSubagentAttemptFinished 是任务级 attempt 的成对终态事件（scheduler
+	// 发射，§6.1-4）。载荷契约与 subagent.completed 同源（success/status/
+	// failure_category/usage/attempt/...），中间尝试带 intermediate_attempt=true；
+	// 过渡期收口后 subagent.completed 只表示 task 最终终态，attempt 级事实由
+	// 本事件承载（conflict/attempt 合并语义与旧口径一致）。
+	EventSubagentAttemptFinished = "subagent.attempt.finished"
 )
 
 // maxLineageDepth 父链向上回溯的深度上限（防环/防异常链）。
@@ -109,7 +115,7 @@ type collector struct {
 	// 事件学习到的 child→父链映射（mu 保护），作为第三优先级兜底。
 	lineage SessionLineageLookup
 	learned map[string]SessionLineage
-	now    func() time.Time
+	now     func() time.Time
 
 	mu       sync.Mutex
 	inflight map[string]*inflightRequest
@@ -149,6 +155,7 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 		EventAssistantMessage, EventSessionStart, EventSessionEnd, EventSessionInterrupted,
 		EventToolRequested, EventToolCompleted, EventSubagentCompleted,
 		EventSubagentStarted,
+		EventSubagentAttemptFinished,
 		// 路由切换观测（主 Agent / 子 Agent）：常量取 internal/events 的权威定义，
 		// 避免此处再抄一份字面量。
 		runtimeevents.EventSubagentRouteResolved,
@@ -208,6 +215,9 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		c.onSubagentCompleted(event)
 		c.learnSubagentLineage(event)
 	case EventSubagentStarted:
+		c.learnSubagentLineage(event)
+	case EventSubagentAttemptFinished:
+		c.onSubagentCompleted(event)
 		c.learnSubagentLineage(event)
 	case runtimeevents.EventSubagentRouteResolved:
 		c.onSubagentRouteResolved(event)
@@ -592,7 +602,7 @@ func (c *collector) rememberLineage(sessionID string, lineage SessionLineage) {
 // 自身为准（宿主 lookup > subagent.* 学习映射），最后才退回请求级归因；自指父值
 // （parent=自身）按顶层处理——父会话在子代理在途期间替子代理代跑的请求带
 // parent_session_id=自身/subagent_id=子会话，这些是请求级标注，绝不能写进父会话
-// 自己的行：否则根会话会被列表过滤（s.parent_session_id = ''）漏掉，会话视图的
+// 自己的行：否则根会话会被列表过滤（s.parent_session_id = ”）漏掉，会话视图的
 // rollup 口径也会退化为"仅自身"（2026-10-09 实测父行 parent=自身）。
 func (c *collector) sessionLineageMeta(sessionID string, meta SessionMeta, requestLineage SessionLineage) SessionMeta {
 	sessionID = strings.TrimSpace(sessionID)

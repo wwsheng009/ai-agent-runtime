@@ -23,6 +23,17 @@ func publishSubagentCompleted(t *testing.T, bus *runtimeevents.Bus, payload map[
 	})
 }
 
+// publishSubagentAttemptFinished 发一条 subagent.attempt.finished 事件（§6.1-4）。
+func publishSubagentAttemptFinished(t *testing.T, bus *runtimeevents.Bus, payload map[string]interface{}, at time.Time) {
+	t.Helper()
+	bus.Publish(runtimeevents.Event{
+		Type:      EventSubagentAttemptFinished,
+		SessionID: "session-batch",
+		Payload:   payload,
+		Timestamp: at,
+	})
+}
+
 // TestSubagentCompletionBatchIDKeepsBatchesSeparate 锁定 v8 迁移的根因修复：
 // subagent_id 在模型省略 id 时按批次内序号合成（subagent_1…），同一父会话的
 // 第二个 subagent_spawn_batch 批次会复用同一批 id。旧主键
@@ -107,7 +118,9 @@ func TestSubagentCompletionBatchIDKeepsBatchesSeparate(t *testing.T) {
 
 // TestSubagentCompletionSameBatchStillMergesAttempts 保证加入 batch_id 没有
 // 破坏同一次运行的多次 attempt 合并：中间尝试（intermediate_attempt）与终态
-// 属于同一批次，必须并成一行并由 MAX(attempt) 收敛。
+// 属于同一批次，必须并成一行并由 MAX(attempt) 收敛。§6.1-4 收口后的真实序列：
+// 中间尝试只在 attempt.finished 上（intermediate_attempt=true），终态 attempt
+// 由 attempt.finished + 任务级 subagent.completed 共同表达。
 func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 	store, err := Open(Config{Path: filepath.Join(t.TempDir(), "usage_analytics.sqlite")})
 	if err != nil {
@@ -121,7 +134,7 @@ func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 	defer collector.close()
 
 	at := time.Date(2026, 10, 2, 12, 54, 0, 0, time.UTC)
-	publishSubagentCompleted(t, bus, map[string]interface{}{
+	publishSubagentAttemptFinished(t, bus, map[string]interface{}{
 		"subagent_id":          "subagent_1",
 		"parent_session_id":    "session-batch",
 		"batch_id":             "batch_A",
@@ -130,8 +143,9 @@ func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 		"intermediate_attempt": true,
 		"success":              false,
 		"status":               "failed",
+		"failure_category":     "provider_error",
 	}, at)
-	publishSubagentCompleted(t, bus, map[string]interface{}{
+	publishSubagentAttemptFinished(t, bus, map[string]interface{}{
 		"subagent_id":       "subagent_1",
 		"parent_session_id": "session-batch",
 		"batch_id":          "batch_A",
@@ -140,6 +154,15 @@ func TestSubagentCompletionSameBatchStillMergesAttempts(t *testing.T) {
 		"success":           false,
 		"status":            "failed",
 	}, at.Add(time.Second))
+	publishSubagentCompleted(t, bus, map[string]interface{}{
+		"subagent_id":       "subagent_1",
+		"parent_session_id": "session-batch",
+		"batch_id":          "batch_A",
+		"attempt":           2,
+		"max_attempts":      2,
+		"success":           false,
+		"status":            "failed",
+	}, at.Add(1100*time.Millisecond))
 
 	stats, err := store.SubagentStats(SubagentStatsQuery{SessionID: "session-batch"})
 	if err != nil {

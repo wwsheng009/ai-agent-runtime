@@ -22,7 +22,8 @@ const (
 	SubagentSourceAgentController = "agent_controller"
 )
 
-// SubagentCompletion 是 subagent.completed 事件归一化后的载荷契约（D4/§5.2）。
+// SubagentCompletion 是子代理完成/尝试完成事件归一化后的载荷契约（D4/§5.2）：
+// 覆盖 subagent.completed（task 终态）与 subagent.attempt.finished（attempt 终态）。
 //
 // 两个生产者（agent/scheduler 写 success bool；api/skills 镜像写 status string）
 // 与 ingest 读取侧共用这一处归一化实现；历史数据缺字段时以 unknown 单列，
@@ -104,8 +105,9 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 
 	success, hasSuccess := payloadBool(payload, "success")
 	status := strings.ToLower(firstPayloadString(payload, "status", "completion_reason"))
-	// 中间重试尝试（§6.2 的 attempt 事件）在分析侧按 conflict_count 计，
-	// 不作为最终结果；最终结果由最后一次尝试覆盖。
+	// 中间重试尝试（subagent.attempt.finished 且 intermediate_attempt=true，
+	// §6.1-4）在分析侧按 conflict_count 计，不作为最终结果；最终结果由最后一次
+	// attempt / 任务终态覆盖。
 	if intermediate, hasIntermediate := payloadBoolValue(payload, "intermediate_attempt"); hasIntermediate && intermediate {
 		normalized.Conflict = true
 	}

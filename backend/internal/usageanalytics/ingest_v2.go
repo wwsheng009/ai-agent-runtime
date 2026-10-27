@@ -302,6 +302,9 @@ ON CONFLICT(tool_call_id) DO UPDATE SET
 }
 
 // onSubagentCompleted 归一化写入 usage_subagents（幂等合并，§5.2 / 批次 2.2）。
+// 输入含 subagent.completed（task 终态）与 subagent.attempt.finished（每次
+// attempt 终态）：同一次运行的多个 attempt 并成一行、attempt 取 MAX，中间尝试
+// （intermediate_attempt=true）计入 conflict_count。
 func (c *collector) onSubagentCompleted(event runtimeevents.Event) {
 	normalized, ok := NormalizeSubagentCompletion(event)
 	if !ok {

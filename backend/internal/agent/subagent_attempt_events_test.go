@@ -159,9 +159,9 @@ func (p *firstChildFailureProvider) callCount() int {
 
 // TestSubagentAttemptEventsPairOnTransientRetry 锁定 §6.1（行动文档 P0）验收：
 // 注入第一次子请求 UPSTREAM_UNAVAILABLE 后，事件流必须可见 attempt 1（中间
-// 失败、retryable）与 attempt 2（终态成功）的成对 started/finished，以及任务
-// 终态 subagent.completed（成功，attempt=2）；过渡期中间尝试的 legacy
-// subagent.completed（intermediate_attempt=true）同样可见。
+// 失败、retryable）与 attempt 2（终态成功）的成对 started/finished，以及**唯一
+// 一条**任务终态 subagent.completed（成功，attempt=2）；中间尝试不再发
+// subagent.completed（§6.1-4 过渡期已闭合）。
 func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
@@ -271,7 +271,7 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 
 	var startedAttempts []int
 	finishedByAttempt := map[int]map[string]interface{}{}
-	var legacyIntermediate, finalCompleted map[string]interface{}
+	var completedEvents []map[string]interface{}
 	for _, event := range events {
 		switch event.eventType {
 		case runtimeevents.EventSubagentAttemptStarted:
@@ -283,11 +283,7 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 				finishedByAttempt[attempt] = event.payload
 			}
 		case "subagent.completed":
-			if intermediate, _ := event.payload["intermediate_attempt"].(bool); intermediate {
-				legacyIntermediate = event.payload
-			} else {
-				finalCompleted = event.payload
-			}
+			completedEvents = append(completedEvents, event.payload)
 		}
 	}
 	require.ElementsMatch(t, []int{1, 2}, startedAttempts,
@@ -312,11 +308,14 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	require.Equal(t, "completed", second["status"])
 	require.Equal(t, 35, second["usage_total_tokens"], "attempt 2 的用量应随 finished 事件携带")
 
-	require.NotNil(t, legacyIntermediate, "过渡期中间尝试的 legacy subagent.completed 仍应可见")
-	require.Equal(t, 1, legacyIntermediate["attempt"])
-	require.NotNil(t, finalCompleted, "任务终态 subagent.completed 必须可见")
+	require.Len(t, completedEvents, 1,
+		"§6.1-4 过渡期已闭合：中间尝试不再发 subagent.completed，任务只发一条终态")
+	finalCompleted := completedEvents[0]
 	require.Equal(t, true, finalCompleted["success"])
 	require.Equal(t, 2, finalCompleted["attempt"])
+	if intermediate, ok := finalCompleted["intermediate_attempt"].(bool); ok {
+		require.False(t, intermediate, "终态 subagent.completed 不得带 intermediate 标记")
+	}
 
 	require.Equal(t, 2, provider.callCount(),
 		"每次任务 attempt 恰一次 provider 调用（runtime 重试已关闭）：1 次失败 + 1 次成功")
