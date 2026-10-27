@@ -206,7 +206,9 @@ func (s *Spec) TargetName() string {
 	if s == nil {
 		return "remote"
 	}
-	if s.Transport == TransportSSHStdio {
+	// ssh-stdio and envd both identify a target by host; the other transports
+	// carry the host inside URL.
+	if s.Transport == TransportSSHStdio || s.Transport == TransportEnvD {
 		if s.Host != "" {
 			return sanitizeServerName(s.Host)
 		}

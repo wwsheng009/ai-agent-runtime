@@ -257,3 +257,31 @@ func TestExpandSpecEnvDRequiresAbsoluteWorkspace(t *testing.T) {
 		t.Errorf("error = %v, want it to demand an absolute workspace", err)
 	}
 }
+
+// TestEnvDTargetNameUsesHost pins the name the tool prefix derives from.
+//
+// The registry builds "remote_<name>" and the bridge appends "__<tool>". Before
+// this was fixed, an envd spec fell through TargetName's URL branch, produced the
+// literal name "remote", and real tool calls arrived as "remote_remote__view"
+// (observed in a live run on 2026-10-28) — neither readable nor unique per host.
+func TestEnvDTargetNameUsesHost(t *testing.T) {
+	spec, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if got := spec.TargetName(); got != "10-0-0-9" {
+		t.Fatalf("TargetName = %q, want 10-0-0-9", got)
+	}
+	expanded, err := spec.Expand()
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	for name, cfg := range expanded.Servers {
+		if name != "10-0-0-9" {
+			t.Errorf("server name = %q, want the host-derived name", name)
+		}
+		if !strings.Contains(strings.Join(cfg.Args, " "), "--tool-prefix remote_10-0-0-9") {
+			t.Errorf("args = %q, want --tool-prefix remote_10-0-0-9", cfg.Args)
+		}
+	}
+}
