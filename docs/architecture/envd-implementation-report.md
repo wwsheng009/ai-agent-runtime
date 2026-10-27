@@ -257,7 +257,7 @@ envd://user@10.0.0.9:51000/srv/app    # 显式端口 + workspace
 ```
 
 - `user` 是**目标机上的系统用户**（envd 用它执行）；
-- token 从环境变量取（默认 `AICLI_ENVD_TOKEN`，可用 `token_env=` 指定变量名），**不写进 spec**；
+- token 从环境变量取（默认 `AICLI_ENVD_TOKEN`，可用 `token_env=` 指定变量名），**不写进 spec**，作为 `X-Access-Token` 头发送（envd 未启用令牌时该头被忽略）；
 - workspace 来自 spec 路径，也可用 target 配置覆盖。
 
 > 注（2026-10-28）：envd 目标的 workspace **必须为绝对路径**；无 spec 路径且 target 覆盖也未给出时默认 `.`，展开会直接报错；bridge 启动时同样校验（fail-closed）。
@@ -328,7 +328,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 ### 8.2 复核期间新增的修复
 
 - **工具名前缀**：bridge 产出的工具名改为 `prefix__name`（双下划线），与 `remotetools` 的前缀形式一致（对 §4.5 遗留项的实现侧修正）。
-- **token 传递**：新增 `token_env` query 参数与 `remotetargets.DefaultEnvDTokenEnv` 常量；内联 `?token=` 被**明确拒绝**（实现只接受环境变量名）。
+- **token 传递**：新增 `token_env` query 参数与 `remotetargets.DefaultEnvDTokenEnv` 常量；内联 `?token=` 被**明确拒绝**（实现只接受环境变量名）；token 以 `X-Access-Token` 头发送，envd 经 `/init` 安装访问令牌后即以该头为唯一凭证（2026-10-28 实测确认）。
 - **信号退出状态**：进程因信号终止时按 `128 + signum` 解析退出码，不再误报 0。
 - **workspace 必须为绝对路径**：envd 目标的 workspace 为相对路径时，`Expand` 阶段直接报错；bridge 启动时也做同样校验，默认 `.` 会 fail-closed。
 

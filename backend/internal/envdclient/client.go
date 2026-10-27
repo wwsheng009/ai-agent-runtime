@@ -34,6 +34,11 @@ const (
 	protocolVersionHeader = "Connect-Protocol-Version"
 	protocolVersion       = "1"
 
+	// accessTokenHeader is the header envd enforces once an access token has been
+	// installed through POST /init. Until then the daemon is open to any client
+	// that can reach its port.
+	accessTokenHeader = "X-Access-Token"
+
 	// defaultTimeout bounds a unary call. Streaming calls are deliberately not
 	// bounded by it: a client-side deadline would kill a long-running process.
 	defaultTimeout = 30 * time.Second
@@ -54,12 +59,20 @@ type Config struct {
 	// than the token, which is why guessing extra token headers does not help.
 	User string
 
-	// Password is the Basic auth password, i.e. envd's access token.
+	// Password is the Basic auth password slot.
 	//
-	// When envd runs with auth disabled it ignores this entirely, so an empty
-	// password is valid there — but then anything that can reach the port can run
-	// commands. Leave it set whenever the port is reachable beyond loopback.
+	// envd's Basic middleware only maps the *user*; it ignores this value. It is
+	// kept for servers that sit behind a proxy which validates the slot itself.
 	Password string
+
+	// AccessToken is envd's access token, sent as X-Access-Token on every call.
+	//
+	// envd enforces the token only after it has been installed (POST /init), so
+	// this may be empty for an untokened daemon. Once a token is set, every path
+	// except GET /health and the /files endpoints answers 401 without it, which
+	// is the difference between "LAN-reachable execution daemon" and "open
+	// remote shell".
+	AccessToken string
 
 	// HTTPClient overrides the default client. Supplying one is how a caller adds
 	// a private CA, a client certificate, or custom retry behaviour.
@@ -79,11 +92,12 @@ type Config struct {
 // It is safe for concurrent use: every method builds its own request rather than
 // mutating shared state.
 type Client struct {
-	base string
-	user string
-	pass string
-	hc   *http.Client
-	tmo  time.Duration
+	base  string
+	user  string
+	pass  string
+	token string
+	hc    *http.Client
+	tmo   time.Duration
 }
 
 // Dial validates the configuration and returns a client.
@@ -122,7 +136,14 @@ func Dial(cfg Config) (*Client, error) {
 		}
 	}
 
-	return &Client{base: base, user: user, pass: cfg.Password, hc: hc, tmo: tmo}, nil
+	return &Client{
+		base:  base,
+		user:  user,
+		pass:  cfg.Password,
+		token: strings.TrimSpace(cfg.AccessToken),
+		hc:    hc,
+		tmo:   tmo,
+	}, nil
 }
 
 // normalizeAddr turns a config address into a base URL string.
@@ -171,6 +192,9 @@ func (c *Client) User() string {
 // applyHeaders sets the Basic credential envd uses to choose the executing user.
 func (c *Client) applyHeaders(req *http.Request) {
 	req.SetBasicAuth(c.user, c.pass)
+	if c.token != "" {
+		req.Header.Set(accessTokenHeader, c.token)
+	}
 }
 
 // methodURL builds the endpoint for one RPC, e.g. /process.Process/Start.

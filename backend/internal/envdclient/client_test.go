@@ -305,6 +305,61 @@ func TestDialRequiresUser(t *testing.T) {
 	}
 }
 
+// roundTripFunc adapts a function to http.RoundTripper so a test can inspect the
+// outgoing request without a network.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestAccessTokenHeader covers the hardening header.
+//
+// envd only enforces X-Access-Token after a token has been installed via
+// /init, and an untokened daemon is an open remote shell for anyone who can
+// reach its port — so the client must send the header exactly when configured.
+func TestAccessTokenHeader(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{"token set", "secret-token", "secret-token"},
+		{"token empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotToken, gotUser string
+			hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotToken = r.Header.Get(accessTokenHeader)
+				gotUser, _, _ = r.BasicAuth()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"cpu_count":1}`)),
+				}, nil
+			})}
+
+			client, err := Dial(Config{
+				Addr:        "127.0.0.1:49983",
+				User:        "n9e",
+				AccessToken: tc.token,
+				HTTPClient:  hc,
+			})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			if _, err := client.Metrics(context.Background()); err != nil {
+				t.Fatalf("Metrics: %v", err)
+			}
+			if gotToken != tc.want {
+				t.Fatalf("%s = %q, want %q", accessTokenHeader, gotToken, tc.want)
+			}
+			if gotUser != "n9e" {
+				t.Fatalf("Basic user = %q, want n9e", gotUser)
+			}
+		})
+	}
+}
+
 // liveClient builds a client from the environment, or skips.
 //
 // The live tests are the ones that matter most: everything else here validates
@@ -320,7 +375,7 @@ func liveClient(t *testing.T) *Client {
 	if user == "" {
 		user = "user"
 	}
-	client, err := Dial(Config{Addr: addr, User: user, Password: os.Getenv("ENVD_TEST_TOKEN"), Timeout: 20 * time.Second})
+	client, err := Dial(Config{Addr: addr, User: user, AccessToken: os.Getenv("ENVD_TEST_TOKEN"), Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

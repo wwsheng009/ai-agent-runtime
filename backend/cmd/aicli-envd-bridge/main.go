@@ -294,7 +294,7 @@ func main() {
 		addr      = flag.String("addr", "127.0.0.1:49983", "envd address as host:port")
 		user      = flag.String("user", "", "OS user envd executes as (sent as HTTP Basic user)")
 		workspace = flag.String("workspace", "", "workspace directory that bounds all paths")
-		tokenEnv  = flag.String("token-env", "AICLI_ENVD_TOKEN", "environment variable holding the envd access token")
+		tokenEnv  = flag.String("token-env", "AICLI_ENVD_TOKEN", "environment variable holding the envd access token, sent as X-Access-Token")
 		allowRoot = multiFlag{}
 		prof      = flag.String("profile", "readonly", "tool profile: readonly|standard|ops")
 		prefix    = flag.String("tool-prefix", "", "prefix applied to exposed tool names")
@@ -326,7 +326,10 @@ func main() {
 	cfg := envdclient.Config{Addr: *addr, User: *user}
 	if *tokenEnv != "" {
 		if token := os.Getenv(*tokenEnv); token != "" {
-			cfg.Password = token
+			// The token travels in the X-Access-Token header, which is what envd
+			// actually enforces once /init has installed one. The Basic password
+			// slot is ignored by envd, so nothing is put there.
+			cfg.AccessToken = token
 		}
 	}
 	if *caFile != "" {

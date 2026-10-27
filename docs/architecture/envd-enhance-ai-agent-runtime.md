@@ -199,7 +199,7 @@ envd://<host>:49983?workspace=/home/user/project&token_env=AICLI_ENVD_TOKEN#ops
 
 解析落在 `remotetargets/spec.go` 的 `ParseSpec`，与现有 `http://` / `ssh://` 分支并列。`Depth` 语义保持不变，`DefaultSpecPort` 对 envd 取 `49983`。
 
-> **实现口径（2026-10-28）**：token 只接受**环境变量名**（`token_env=<NAME>`，默认 `AICLI_ENVD_TOKEN`）；内联写法 `?token=<t>` 会被**拒绝**。
+> **实现口径（2026-10-28）**：token 只接受**环境变量名**（`token_env=<NAME>`，默认 `AICLI_ENVD_TOKEN`）；内联写法 `?token=<t>` 会被**拒绝**；该 token 以 `X-Access-Token` 头发送，envd 经 `/init` 安装访问令牌后强制校验（未启用令牌时该头被忽略）。
 
 > 安全对齐：token 与 `registry.go` 注释的要求一致 —— 属于凭据，必须走环境变量或独立 secret 源，不进 `mcp.yaml`。
 
