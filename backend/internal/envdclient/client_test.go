@@ -502,8 +502,16 @@ func TestLiveBadUserIsUnauthenticated(t *testing.T) {
 		t.Skip("set ENVD_TEST_ADDR to run live tests")
 	}
 	// An empty user is rejected locally by Dial, so use a client built directly to
-	// exercise the server path.
-	client := &Client{base: mustNormalize(t, addr), user: "", hc: httpClientFor(t), tmo: 20 * time.Second}
+	// exercise the server path. The access token (when the target has one) still
+	// travels, otherwise the token check would answer first and hide the user
+	// check this test exists for.
+	client := &Client{
+		base:  mustNormalize(t, addr),
+		user:  "",
+		token: strings.TrimSpace(os.Getenv("ENVD_TEST_TOKEN")),
+		hc:    httpClientFor(t),
+		tmo:   20 * time.Second,
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
