@@ -220,6 +220,67 @@ func subagentRemainingMS(ctx context.Context) int64 {
 	return remaining
 }
 
+// subagentRetryBudgetMS 返回扣除 backoff 后仍可用于下一次 attempt 的毫秒
+// 预算；0 表示没有可观测的 deadline 或预算已不足。与
+// subagentRetryBudgetAvailable 的 remaining > backoff 放行口径一致；无
+// deadline 时重试仍会被放行，此字段只表达"可观测到的剩余预算"（§6.1-1）。
+func subagentRetryBudgetMS(ctx context.Context, backoff time.Duration) int64 {
+	remaining := subagentRemainingMS(ctx)
+	if remaining <= 0 {
+		return 0
+	}
+	if budget := remaining - backoff.Milliseconds(); budget > 0 {
+		return budget
+	}
+	return 0
+}
+
+// contextDeadlinePtr 返回 ctx 的 deadline 绝对时刻；nil 表示未配置（不可观测）。
+func contextDeadlinePtr(ctx context.Context) *time.Time {
+	if ctx == nil {
+		return nil
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		return &deadline
+	}
+	return nil
+}
+
+// subagentAttemptTiming 是一次 attempt 的时序与预算观测快照（§6.1-1）。
+// StartedAt/Deadline/BatchDeadline 为 nil 表示不可观测（未配置或未起跑）；
+// RetryBudgetMS 为 0 表示不可观测或预算已不足。
+type subagentAttemptTiming struct {
+	StartedAt     *time.Time
+	Deadline      *time.Time
+	BatchDeadline *time.Time
+	RetryBudgetMS int64
+}
+
+// captureSubagentAttemptTiming 从 attempt 起跑时刻与 parent/child 上下文做
+// 一次性快照：Deadline 取 route timeout（childCtx），BatchDeadline 取父级
+// batch 上下文；RetryBudgetMS 用同一 backoff 公式推导。
+func captureSubagentAttemptTiming(startedAt time.Time, parentCtx, childCtx context.Context, backoff time.Duration) subagentAttemptTiming {
+	timing := subagentAttemptTiming{
+		Deadline:      contextDeadlinePtr(childCtx),
+		BatchDeadline: contextDeadlinePtr(parentCtx),
+	}
+	if !startedAt.IsZero() {
+		value := startedAt
+		timing.StartedAt = &value
+	}
+	timing.RetryBudgetMS = subagentRetryBudgetMS(childCtx, backoff)
+	return timing
+}
+
+// rfc3339OrEmptyTime 把可空时刻渲染为 UTC RFC3339；nil/零值返回空串，让
+// 读取侧区分"未观测"与"已观测"（与 remaining_ms 的 0 语义一致）。
+func rfc3339OrEmptyTime(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
 // maxAttemptsPerTask 归一化任务级重试上限：0 → 默认 2；1 → 关闭；
 // 上限封顶 5（避免配置失误造成无界重试放大）。
 func (s *SubagentScheduler) maxAttemptsPerTask() int {
@@ -252,6 +313,7 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	disposition SubagentFailureDisposition,
 	runErr error,
 	result *Result,
+	timing subagentAttemptTiming,
 ) {
 	if s == nil || s.parent == nil {
 		return
@@ -293,5 +355,9 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 		"usage_prompt_tokens":     usagePrompt(attemptUsage),
 		"usage_completion_tokens": usageCompletion(attemptUsage),
 		"usage_cache_read_tokens": usageCacheRead(attemptUsage),
+		"attempt_started_at":      rfc3339OrEmptyTime(timing.StartedAt),
+		"attempt_deadline":        rfc3339OrEmptyTime(timing.Deadline),
+		"batch_deadline":          rfc3339OrEmptyTime(timing.BatchDeadline),
+		"retry_budget_ms":         timing.RetryBudgetMS,
 	}, spec.Decision))
 }

@@ -172,6 +172,15 @@ type SubagentResult struct {
 	// 的 deadline 或已经耗尽。它与 RetrySkipped 配合使用，避免只看
 	// max_attempts 无法判断是否还有机会重试。
 	RemainingMS int64 `json:"remaining_ms,omitempty" yaml:"remaining_ms,omitempty"`
+	// §6.1-1（行动文档 P0）：attempt 时序与重试预算观测，回答"第二次为什么
+	// 没有执行"。AttemptStartedAt 是最后一次 attempt 的起跑时刻；
+	// AttemptDeadline/BatchDeadline 是 route timeout 与父 batch 上下文的绝对
+	// deadline（nil = 未配置，不可观测）；RetryBudgetMS 是按同一放行公式扣除
+	// backoff 后剩余的毫秒预算（0 = 不可观测或已不足）。
+	AttemptStartedAt *time.Time `json:"attempt_started_at,omitempty" yaml:"attempt_started_at,omitempty"`
+	AttemptDeadline  *time.Time `json:"attempt_deadline,omitempty" yaml:"attempt_deadline,omitempty"`
+	BatchDeadline    *time.Time `json:"batch_deadline,omitempty" yaml:"batch_deadline,omitempty"`
+	RetryBudgetMS    int64      `json:"retry_budget_ms,omitempty" yaml:"retry_budget_ms,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -1126,6 +1135,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		runErr         error
 		disposition    SubagentFailureDisposition
 		usageByAttempt []*types.TokenUsage
+		// lastAttemptStartedAt 是最后一次 attempt 的起跑时刻（§6.1-1）。
+		lastAttemptStartedAt time.Time
 	)
 	// lastResult 跟踪最后一次非空 result（即便最终 runErr!=nil），供失败
 	// 分支取回部分产出（§6.2）。
@@ -1139,6 +1150,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		// 开工路由审计（G1）：每次 attempt 一行、归属父会话、带 attempt 序号。
 		// 发射点在 loop.run 之前，保证「跑没跑到终态」都有账。
 		s.emitSubagentRouteResolved(options, task, spec, childSessionID, childConfig.Name, attempt, maxAttempts)
+		attemptStartedAt := time.Now()
+		lastAttemptStartedAt = attemptStartedAt
 		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
 			TraceID:   options.TraceID,
 			SessionID: childSessionID,
@@ -1196,7 +1209,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		}
 		// 中间尝试也留完成事件（attempt 可见），标记 intermediate_attempt：
 		// 分析侧按 conflict_count 统计而不把中间失败当最终结果。
-		s.emitSubagentAttemptEvent(childSessionID, options, task, childConfig.Name, spec, attempt, maxAttempts, disposition, runErr, result)
+		s.emitSubagentAttemptEvent(childSessionID, options, task, childConfig.Name, spec, attempt, maxAttempts, disposition, runErr, result,
+			captureSubagentAttemptTiming(attemptStartedAt, ctx, childCtx, backoff))
 		if !sleepWithContext(childCtx, backoff) {
 			if childCtx.Err() != nil {
 				lastRetrySkipped = retrySkipReason(task, disposition, attempt, maxAttempts, childCtx.Err())
@@ -1212,6 +1226,12 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	if attempt > maxAttempts {
 		attempt = maxAttempts
 	}
+	// §6.1-1（行动文档 P0）：把最后一次 attempt 的时序与重试预算固化成终态
+	// 观测（成功/失败分支共用）。backoff 按同一公式从 attempt 序号推导，与
+	// subagentRetryBudgetAvailable 的放行口径一致；无 deadline 时字段保持
+	// 不可观测（nil/0），不伪造成"零预算"。
+	lastTiming := captureSubagentAttemptTiming(lastAttemptStartedAt, ctx, childCtx,
+		subagentRetryBackoff(attempt, defaultSubagentRetryBaseDelay, defaultSubagentRetryMaxDelay))
 	if runErr != nil {
 		retryAdvice := SubagentRetryAdvice(disposition.Category, task.ReadOnly)
 		// §6.1（行动文档 P0）：取消来源分层。childCtx 由 route timeout 取消时，
@@ -1245,6 +1265,11 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			CancelSource: cancelSource,
 			RetrySkipped: lastRetrySkipped,
 			RemainingMS:  subagentRemainingMS(childCtx),
+			// §6.1-1（P0）：attempt 时序 + 重试预算观测。
+			AttemptStartedAt: lastTiming.StartedAt,
+			AttemptDeadline:  lastTiming.Deadline,
+			BatchDeadline:    lastTiming.BatchDeadline,
+			RetryBudgetMS:    lastTiming.RetryBudgetMS,
 		}
 		// §6.2（P0）：失败 attempt 仍可能产出部分结构化结果。即使 runErr!=nil，
 		// loop.run 往往已经回填了 Usage 与 Observations（provider 拿到响应后在
@@ -1292,6 +1317,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"retry_skipped":           report.RetrySkipped,
 			"remaining_ms":            report.RemainingMS,
 			"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
+			"attempt_started_at":      rfc3339OrEmptyTime(report.AttemptStartedAt),
+			"attempt_deadline":        rfc3339OrEmptyTime(report.AttemptDeadline),
+			"batch_deadline":          rfc3339OrEmptyTime(report.BatchDeadline),
+			"retry_budget_ms":         report.RetryBudgetMS,
 		}, spec.Decision))
 		if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 			payload := mergeRouteAuditPayload(map[string]interface{}{
@@ -1328,6 +1357,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 				"retry_skipped":           report.RetrySkipped,
 				"remaining_ms":            report.RemainingMS,
 				"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
+				"attempt_started_at":      rfc3339OrEmptyTime(report.AttemptStartedAt),
+				"attempt_deadline":        rfc3339OrEmptyTime(report.AttemptDeadline),
+				"batch_deadline":          rfc3339OrEmptyTime(report.BatchDeadline),
+				"retry_budget_ms":         report.RetryBudgetMS,
 			}, spec.Decision)
 			hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 		}
@@ -1353,6 +1386,11 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		MaxAttempts:           maxAttempts,
 		RetryReason:           retryReason,
 		RemainingMS:           subagentRemainingMS(childCtx),
+		// §6.1-1（P0）：attempt 时序 + 重试预算观测（成功分支同样保留）。
+		AttemptStartedAt: lastTiming.StartedAt,
+		AttemptDeadline:  lastTiming.Deadline,
+		BatchDeadline:    lastTiming.BatchDeadline,
+		RetryBudgetMS:    lastTiming.RetryBudgetMS,
 	}
 	applySubagentResultOutput(&report, &task, result)
 	if result.Error != "" {
@@ -1406,6 +1444,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		"usage_cache_read_tokens": usageCacheRead(report.Usage),
 		"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
 		"remaining_ms":            report.RemainingMS,
+		"attempt_started_at":      rfc3339OrEmptyTime(report.AttemptStartedAt),
+		"attempt_deadline":        rfc3339OrEmptyTime(report.AttemptDeadline),
+		"batch_deadline":          rfc3339OrEmptyTime(report.BatchDeadline),
+		"retry_budget_ms":         report.RetryBudgetMS,
 		"trace_id":                options.TraceID,
 	}, spec.Decision))
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
@@ -1437,6 +1479,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"usage_cache_read_tokens": usageCacheRead(report.Usage),
 			"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
 			"remaining_ms":            report.RemainingMS,
+			"attempt_started_at":      rfc3339OrEmptyTime(report.AttemptStartedAt),
+			"attempt_deadline":        rfc3339OrEmptyTime(report.AttemptDeadline),
+			"batch_deadline":          rfc3339OrEmptyTime(report.BatchDeadline),
+			"retry_budget_ms":         report.RetryBudgetMS,
 			"trace_id":                options.TraceID,
 		}, spec.Decision)
 		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,5 +172,99 @@ func TestSubagentRetryBudgetAvailable(t *testing.T) {
 	defer cancel()
 	if subagentRetryBudgetAvailable(ctx, time.Hour) {
 		t.Fatal("retry must be skipped when backoff exceeds remaining deadline")
+	}
+}
+
+// TestSubagentRetryBudgetMS 锁定 §6.1-1：扣除 backoff 后剩余的毫秒预算；
+// 0 表示不可观测（无 deadline）或预算已不足，与放行口径一致。
+func TestSubagentRetryBudgetMS(t *testing.T) {
+	if got := subagentRetryBudgetMS(context.Background(), time.Second); got != 0 {
+		t.Fatalf("context without deadline must stay unobservable, got %d", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if got := subagentRetryBudgetMS(ctx, time.Second); got <= 0 || got > time.Hour.Milliseconds() {
+		t.Fatalf("budget out of range: %d", got)
+	}
+	expired, cancelExpired := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancelExpired()
+	// 等 deadline 真正过期：cancel 不会缩短 Deadline()，只有到期后
+	// remaining 才会归零（这条断言防止把 cancel 误读成预算耗尽）。
+	<-expired.Done()
+	if got := subagentRetryBudgetMS(expired, 0); got != 0 {
+		t.Fatalf("expired context must report zero budget, got %d", got)
+	}
+}
+
+// TestCaptureSubagentAttemptTiming 锁定 §6.1-1：时序快照从 parent/child
+// 上下文取 deadline 绝对时刻；route timeout 缺失时保持不可观测（nil/0），
+// 不伪造成"零预算"。
+func TestCaptureSubagentAttemptTiming(t *testing.T) {
+	startedAt := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	parentCtx, cancelParent := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelParent()
+	childCtx, cancelChild := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancelChild()
+
+	timing := captureSubagentAttemptTiming(startedAt, parentCtx, childCtx, time.Second)
+	if timing.StartedAt == nil || !timing.StartedAt.Equal(startedAt) {
+		t.Fatalf("started_at not captured: %#v", timing.StartedAt)
+	}
+	if timing.Deadline == nil || timing.BatchDeadline == nil {
+		t.Fatalf("deadlines must be captured from contexts: %+v", timing)
+	}
+	if timing.RetryBudgetMS <= 0 {
+		t.Fatalf("retry budget must be positive under a 30s child deadline: %+v", timing)
+	}
+
+	none := captureSubagentAttemptTiming(time.Time{}, context.Background(), context.Background(), time.Second)
+	if none.StartedAt != nil || none.Deadline != nil || none.BatchDeadline != nil || none.RetryBudgetMS != 0 {
+		t.Fatalf("missing observations must stay nil/zero: %+v", none)
+	}
+}
+
+// TestRFC3339OrEmptyTime 区分"未观测"（nil/零值 → 空串）与"已观测"。
+func TestRFC3339OrEmptyTime(t *testing.T) {
+	if got := rfc3339OrEmptyTime(nil); got != "" {
+		t.Fatalf("nil must render empty, got %q", got)
+	}
+	zero := time.Time{}
+	if got := rfc3339OrEmptyTime(&zero); got != "" {
+		t.Fatalf("zero value must render empty, got %q", got)
+	}
+	at := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	if got := rfc3339OrEmptyTime(&at); got != "2026-10-27T12:00:00Z" {
+		t.Fatalf("unexpected rendering: %q", got)
+	}
+}
+
+// TestSubagentResultAttemptTimingFields 锁定 §6.1-1 字段进入任务结果投影：
+// 分析侧可按 attempt_started_at/attempt_deadline/batch_deadline/retry_budget_ms
+// 对账"第二次为什么没有执行"。
+func TestSubagentResultAttemptTimingFields(t *testing.T) {
+	started := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	deadline := started.Add(30 * time.Second)
+	report := SubagentResult{
+		ID:               "timing-task",
+		AttemptStartedAt: &started,
+		AttemptDeadline:  &deadline,
+		RetryBudgetMS:    4321,
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"attempt_started_at":"2026-10-27T12:00:00Z"`,
+		`"attempt_deadline":"2026-10-27T12:00:30Z"`,
+		`"retry_budget_ms":4321`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s in %s", want, text)
+		}
+	}
+	if strings.Contains(text, `"batch_deadline"`) {
+		t.Fatalf("nil batch deadline must stay omitted: %s", text)
 	}
 }
