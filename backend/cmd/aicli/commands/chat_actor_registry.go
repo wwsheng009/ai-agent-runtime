@@ -737,6 +737,12 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		return nil, err
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, parentSessionID)
+	// §6.5/§6.4：direct spawn 的 context receipt——与 batch 路径同字段名同语义；
+	// 请求/生效模式、父历史注入事实、快照条数/指纹与父会话 prompt-cache key
+	// 落子会话上下文（完成镜像与分析侧据此复用同一组字段）。
+	for key, value := range localSpawnContextReceipt(parentSession, parentSessionID, forkMode, childSession.GetMessages()) {
+		childSession.SetContext(key, value)
+	}
 	// 子代理身份：创建时铸造唯一 agent id 并落进子会话上下文，使 agent 身份成为
 	// 显式可读的一等字段，而不是靠「agent_id == session_id」的隐式约定反推；
 	// 同时把父代理的 agent 身份带进子会话（父 session id 只标识执行容器，
@@ -1427,6 +1433,9 @@ func (r *localActorRegistry) handleLocalChildTerminal(ctx context.Context, paren
 	// Keep worktree after completion so parent can apply/discard explicitly.
 	// subagent_close still cleans remaining worktrees.
 	annotateLocalSpawnWorktreeCompletion(ctx, r, childSession, payload)
+	// §6.5/§6.4：spawn 时的 context receipt 转发进完成镜像载荷（direct 路径与
+	// batch 路径在分析侧同字段可查）。
+	copyLocalSpawnReceiptToPayload(childSession, payload)
 	completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(ctx, parentSessionID, childSessionID, childPath, childType, eventType, payload)
 	payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 	// 启动重放只收敛 durable 账本：用户 hook 是 live 副作用，重放不得二次触发。

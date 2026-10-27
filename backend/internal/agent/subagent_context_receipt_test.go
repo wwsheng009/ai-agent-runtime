@@ -162,3 +162,22 @@ func TestReActLoopStampsParentPromptCacheKeyOnChildRequests(t *testing.T) {
 	_, hasKey := provider2.requests[0].Metadata["parent_prompt_cache_key"]
 	require.False(t, hasKey, "empty parent key must not be stamped")
 }
+
+// TestExportedReceiptSurface 锁定宿主复用面（§6.4/§6.5）：导出助手与内部实现
+// 同源——commands 的 direct spawn 依赖它们构造与 batch 路径同字段名的 receipt。
+func TestExportedReceiptSurface(t *testing.T) {
+	snapshot := forkFixture()
+	if ForkSnapshotHash(snapshot) != forkSnapshotHash(snapshot) {
+		t.Fatal("exported hash must match the internal implementation")
+	}
+	receipt := SubagentContextReceipt("", 3)
+	if receipt["requested_context"] != SubagentContextModeFresh || receipt["effective_context"] != SubagentContextModeFork {
+		t.Fatalf("exported receipt mismatch: %+v", receipt)
+	}
+	if receipt["parent_history_injected"] != true || receipt["fork_snapshot_messages"] != 3 {
+		t.Fatalf("exported receipt injection facts mismatch: %+v", receipt)
+	}
+	if got := SubagentParentPromptCacheKey("s-1", func() int { return 2 }); got != "s-1#prompt-cache-epoch-2" {
+		t.Fatalf("exported parent key mismatch: %q", got)
+	}
+}

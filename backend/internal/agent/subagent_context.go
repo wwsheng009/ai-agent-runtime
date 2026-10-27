@@ -37,6 +37,14 @@ const (
 	subagentContextModeFork  = "fork"
 )
 
+// SubagentContextModeFresh / SubagentContextModeFork 是 context_mode 的稳定取值
+// 的导出面（与事件/载荷同源）：宿主侧（commands 的 direct spawn）需要构造同一
+// 组 receipt 字段，禁止各写一份字面量。
+const (
+	SubagentContextModeFresh = subagentContextModeFresh
+	SubagentContextModeFork  = subagentContextModeFork
+)
+
 // MaxForkSnapshotTokens fork 快照的 token 上限（对齐单轮预算的保守缺省）。
 // 宿主可经 agents.fork.maxSnapshotTokens 覆盖（装配层接线）；0 用缺省。
 const MaxForkSnapshotTokens = 96_000
@@ -227,4 +235,23 @@ func subagentParentPromptCacheKey(sessionID string, epochProvider func() int) st
 		epoch = 0
 	}
 	return promptCacheKeyForEpoch(sessionID, epoch)
+}
+
+// ForkSnapshotHash 是 forkSnapshotHash 的导出面：direct spawn 等宿主需要与 batch
+// 路径同源的快照指纹（§6.4/§6.5），避免在宿主机各写一套哈希口径。
+func ForkSnapshotHash(messages []types.Message) string {
+	return forkSnapshotHash(messages)
+}
+
+// SubagentContextReceipt 是 context receipt 的导出面（§6.5）：requested 为空按
+// fresh；effective 仅当快照条数 > 0 才是 fork（请求 fork 但快照为空 → fresh，
+// 与 batch 路径同口径）。
+func SubagentContextReceipt(requestedContext string, snapshotMessages int) map[string]interface{} {
+	return subagentContextReceipt(SubagentTask{Context: requestedContext}, snapshotMessages)
+}
+
+// SubagentParentPromptCacheKey 是 subagentParentPromptCacheKey 的导出面（§6.4）：
+// spawn 时刻父会话 prompt-cache key；父会话/epoch 未知为空串（不猜测）。
+func SubagentParentPromptCacheKey(sessionID string, epochProvider func() int) string {
+	return subagentParentPromptCacheKey(sessionID, epochProvider)
 }
