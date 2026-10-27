@@ -209,7 +209,10 @@ type firstChildFailureProvider struct {
 	mu         sync.Mutex
 	childCalls int
 	attempts   []int
-	errText    string
+	// observed 记录每一次子请求（含被注入失败、未下发到内层 provider 的那次）：
+	// 断言"重试复用失败尝试的前缀"必须能看到失败请求本身。
+	observed []*llm.LLMRequest
+	errText  string
 }
 
 func (p *firstChildFailureProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
@@ -221,6 +224,7 @@ func (p *firstChildFailureProvider) Call(ctx context.Context, req *llm.LLMReques
 	if attempt, ok := req.Metadata["task_attempt"].(int); ok {
 		p.attempts = append(p.attempts, attempt)
 	}
+	p.observed = append(p.observed, cloneLLMRequest(req))
 	fail := p.childCalls == 1
 	p.mu.Unlock()
 	if fail {
@@ -240,6 +244,14 @@ func (p *firstChildFailureProvider) observedAttempts() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]int(nil), p.attempts...)
+}
+
+// observedChildRequests 返回每次子请求的克隆（含被注入失败的那次），按到达
+// 顺序与 observedAttempts 一一对应。
+func (p *firstChildFailureProvider) observedChildRequests() []*llm.LLMRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*llm.LLMRequest(nil), p.observed...)
 }
 
 // TestSubagentAttemptEventsPairOnTransientRetry 锁定 §6.1（行动文档 P0）验收：
