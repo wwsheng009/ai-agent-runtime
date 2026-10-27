@@ -527,7 +527,7 @@ backend/internal/cacheanalytics/*
 
 - [ ] fresh/fork/resume 的 cache lineage 字段完整；（fresh/fork 已具备 `context_mode`/`fork_snapshot_hash`/`parent_prompt_cache_key`；resume 模式当前不存在）
 - [x] parent key、child key、epoch、fingerprint 可从 request event 关联；（4ab293f3 + 既有 `prompt_cache_key`/epoch/fingerprint）
-- [ ] provider 报告 cached=0 时能区分 `reported_zero` 与 `confirmed_miss`；（未实现：缺 confirmed_miss 语义）
+- [x] provider 报告 cached=0 时能区分 `reported_zero` 与 `confirmed_miss`；（`bf7a6b0a`：`CacheMissReported/CacheMissTokens` 仅在 provider 显式给出 miss 字段时置位，六档分类 + 分布列 + `/usage`「确认未命中」标签；「输入总量 − 命中」推导值不伪装成确认 miss）
 - [x] prompt history replacement 必须递增 epoch，并验证旧 key 不被重用；（a1b7022c：epoch 持久化防回退 + 单测）
 - [ ] 同一个 child 的 retry 是否复用预期前缀有明确 provider-specific 测试；（未做）
 - [ ] 不同 child 并发时不会因错误共享 key 产生 cache 污染。（key 以 child session 独立命名、无错误共享；缺专项并发测试）
@@ -606,6 +606,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `99dfadd6` | 本文件 §8 勾选更新与 §13 实施复核记录 | 文档 |
 | `221d3c22` | direct spawn 的 context receipt 与父 key 接线（§6.5/§6.4 统一） | §6.5 / §8.3 |
 | `ab6a830e` | usage_unavailable_reason 与 task_attempt 对账列（§8.2 收尾） | §8.2 |
+| `bf7a6b0a` | confirmed_miss 状态分层与 provider miss 计数（§6.4/§8.4） | §6.4 / §8.4 |
 
 ### 13.2 逐条对照（§6）
 
@@ -616,7 +617,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - **§6.1-5 预算语义**：**未定稿**——建议维持"最多 N 次尝试"（跳过原因已可观测）；"至少一次"需产品决策与 batch 起始预留预算。
 - **§6.2 失败 usage/部分产出**：`applySubagentResultOutput` 统一收口 + 跨 attempt 聚合 + partial 计数（`9a06910a`/`ac970024`）。
 - **§6.3 统一 analytics**：usageanalytics 增 `cancel_source/retry_skipped/partial_output` 列（含幂等迁移与读取面）；cacheanalytics 增 `context_mode/fork_snapshot_hash/parent_prompt_cache_key`；`batch_id/task_id/attempt` 既有。四层状态分列（request/attempt/task/batch）仍建议在查询侧显式化。
-- **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss/request_error` 枚举细分与 provider-specific 前缀实验**未做**。
+- **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss` 状态分层（`bf7a6b0a`）：六档 `hit`/`write`/`confirmed_miss`/`reported_zero`/`not_reported`/`error`，`CacheMissReported` 仅在 provider 显式给出 miss 字段（如 DeepSeek `prompt_cache_miss_tokens`）时置位，「输入总量 − 命中」推导值不伪装成确认 miss；`request_error` 命名未采纳（保留 `error` 枚举 + `usage_unavailable_reason=request_error`），provider-specific 前缀实验**未做**。
 - **§6.5 context receipt**：`requested_context/effective_context/parent_history_injected/fork_snapshot_messages/fork_snapshot_hash` 入 route.resolved（`0b71fb31`）；capability/refusal 字段部分既有（`capability_refusals`）；direct spawn 与 batch 的 receipt 已同字段名统一（direct 落子会话上下文并转发进完成镜像，`221d3c22`）。
 - **§6.6 只读工具面**：既有能力已覆盖（schema 层剥离、确定性 tool_error 分类、边界横幅、连续拒绝硬停）；本轮未改。
 - **§6.7 stall/渲染诊断**：stall 事件保持轻量（2026-10-24 产品决策移除软提醒）；render suppression 字段未扩。**未做**。
@@ -626,11 +627,12 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 安静窗口多包全绿记录：`internal/agent`、`internal/events`、`internal/runtimeobserve`、`internal/cacheanalytics`、`internal/usageanalytics`（各提交信息内含时长与 exit code）。
 - 关键 E2E：`TestSubagentAttemptEventsPairOnTransientRetry`（attempt 1 失败 → attempt 2 成功，provider 恰 2 次调用）；`TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout`（`cancel_source=provider_timeout` + `retry_skipped=max_attempts_reached`）；`TestReActLoop_Run_EmitsRuntimeEvents`（端到端事件流含 attempt 成对）。
 - 迁移回归：`TestStoreMigrateAddsSubagentAttemptColumns`（降级删列 → 重开补列 → 写读）。
+- cache 状态分层：`TestBuildTerminalRecordClassifiesConfirmedMiss`（确认 miss 与 reported_zero 边界五档）、`TestCacheStatusDistributionAccountsConfirmedMiss`、`TestCacheSourceOverviewCacheStatusDistributionAlignsWithSQL`（六档 SQL 列序对齐）、`TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage`（载荷层 confirmed_miss）、`TestResolveUnifiedTokenUsage_DeepSeekMissReported` / `..._OpenAIDerivedUncachedIsNotMissReported`（显式上报 vs 推导不伪装）。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
-2. `confirmed_miss` 枚举细分（`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
+2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
 3. batch 路径的 `last:N` fork 参数（receipt/parent key 统一已在 `221d3c22` 落地）。
 4. provider response-header guard 的 retry budget 专项用例；task/batch deadline 档的 E2E 注入。
 5. `resume` cache lineage 模式当前实现不存在（§8.4 对应项保留未勾选）。
