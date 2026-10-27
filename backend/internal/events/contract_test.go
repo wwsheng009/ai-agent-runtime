@@ -256,6 +256,9 @@ func TestSubagentAuditEventChannelRegistrations(t *testing.T) {
 		{"batch_timed_out", events.EventSubagentBatchTimedOut, dualChannel},
 		{"batch_orphaned", events.EventSubagentBatchOrphaned, dualChannel},
 		{"suspension_unavailable", events.EventSubagentSuspensionUnavailable, dualChannel},
+		// §6.1-4（行动文档 P0）：任务级 attempt 成对生命周期与 route.resolved 同档 A+D。
+		{"attempt_started", events.EventSubagentAttemptStarted, dualChannel},
+		{"attempt_finished", events.EventSubagentAttemptFinished, dualChannel},
 	}
 	for _, tc := range cases {
 		if strings.TrimSpace(tc.eventType) == "" || tc.eventType != strings.TrimSpace(tc.eventType) {

@@ -175,6 +175,13 @@ var runtimeEventContracts = []Contract{
 	{Type: EventSubagentBatchTimedOut, Channels: ChannelSessionStore | ChannelTailOnly},
 	{Type: EventSubagentBatchOrphaned, Channels: ChannelSessionStore | ChannelTailOnly},
 
+	// §6.1-4（行动文档 P0）：任务级 attempt 成对生命周期（常量见
+	// subagent_audit_events.go）。与 route.resolved 同档 A+D：attempt 级成本/
+	// 取消/重试轨迹必须能按父会话事件流事后重建（request/attempt/task 三层对账）；
+	// 落盘量有天然上界（每任务 ≤ max_attempts×2 条，封顶 10 条）。
+	{Type: EventSubagentAttemptStarted, Channels: ChannelSessionStore | ChannelTailOnly},
+	{Type: EventSubagentAttemptFinished, Channels: ChannelSessionStore | ChannelTailOnly},
+
 	// 挂起不可用的降级告警（方案 §6.13 / I9；常量见 subagent_audit_events.go）。
 	// 走 A+D 与批次失败态同理：它是"能力降级"的边沿信号，既要落盘供事后解释
 	// "这个会话为什么不再挂起"，也要在回合末尾巴帧里让用户看到——降级本身是

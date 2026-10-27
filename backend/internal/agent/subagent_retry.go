@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -248,12 +249,13 @@ func contextDeadlinePtr(ctx context.Context) *time.Time {
 
 // subagentAttemptTiming 是一次 attempt 的时序与预算观测快照（§6.1-1）。
 // StartedAt/Deadline/BatchDeadline 为 nil 表示不可观测（未配置或未起跑）；
-// RetryBudgetMS 为 0 表示不可观测或预算已不足。
+// RetryBudgetMS/RemainingMS 为 0 表示不可观测或已耗尽。
 type subagentAttemptTiming struct {
 	StartedAt     *time.Time
 	Deadline      *time.Time
 	BatchDeadline *time.Time
 	RetryBudgetMS int64
+	RemainingMS   int64
 }
 
 // captureSubagentAttemptTiming 从 attempt 起跑时刻与 parent/child 上下文做
@@ -269,6 +271,7 @@ func captureSubagentAttemptTiming(startedAt time.Time, parentCtx, childCtx conte
 		timing.StartedAt = &value
 	}
 	timing.RetryBudgetMS = subagentRetryBudgetMS(childCtx, backoff)
+	timing.RemainingMS = subagentRemainingMS(childCtx)
 	return timing
 }
 
@@ -360,4 +363,130 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 		"batch_deadline":          rfc3339OrEmptyTime(timing.BatchDeadline),
 		"retry_budget_ms":         timing.RetryBudgetMS,
 	}, spec.Decision))
+	// §6.1-4（行动文档 P0）：过渡期双发——subagent.completed（intermediate_attempt
+	// =true）保留给既有 ingest/UI，同时补发成对的 subagent.attempt.finished；
+	// 待 usageanalytics ingest 迁移到 attempt.finished 后移除前者（收尾项）。
+	partialFindings, partialPatches := subagentPartialCounts(task, result)
+	s.emitSubagentAttemptFinished(options, task, childSessionID, childAgentName, spec, attempt, maxAttempts, timing, subagentAttemptOutcome{
+		Success:              false,
+		Status:               "failed",
+		CompletionReason:     subagentCompletionReason(false, disposition),
+		FailureCategory:      disposition.Category,
+		ErrorCode:            disposition.ErrorCode,
+		ErrorText:            errText,
+		Retryable:            disposition.Retryable,
+		RetryReason:          disposition.Category,
+		Intermediate:         true,
+		Usage:                attemptUsage,
+		PartialOutput:        hasSubagentPartialOutput(result),
+		PartialFindingsCount: partialFindings,
+		PartialPatchCount:    partialPatches,
+		RemainingMS:          timing.RemainingMS,
+	})
+}
+
+// subagentAttemptOutcome 是一次 attempt 的终态摘要（§6.1-4）。
+type subagentAttemptOutcome struct {
+	Success              bool
+	Status               string
+	CompletionReason     string
+	FailureCategory      string
+	ErrorCode            string
+	ErrorText            string
+	Retryable            bool
+	RetryReason          string
+	RetryAdvice          string
+	RetrySkipped         string
+	CancelSource         string
+	Intermediate         bool
+	Usage                *types.TokenUsage
+	PartialOutput        bool
+	PartialFindingsCount int
+	PartialPatchCount    int
+	RemainingMS          int64
+}
+
+// subagentPartialCounts 按只读/写语义统计 attempt 已收集的部分产出数量。
+func subagentPartialCounts(task SubagentTask, result *Result) (findings, patches int) {
+	if result == nil {
+		return 0, 0
+	}
+	if task.ReadOnly {
+		return len(collectFindings(result.Observations)), 0
+	}
+	return 0, len(collectPatches(result.Observations))
+}
+
+// subagentAttemptLifecycleBase 组装 attempt 成对事件的公共字段（§6.1-4）：
+// 归属父会话，child_session_id 与时序/预算字段随载荷携带，供 request/attempt/
+// task 三层对账。
+func subagentAttemptLifecycleBase(task SubagentTask, options SubagentRunOptions, childSessionID, childAgentName string, attempt, maxAttempts int, timing subagentAttemptTiming) map[string]interface{} {
+	base := map[string]interface{}{
+		"subagent_id":         task.ID,
+		"role":                task.Role,
+		"task_type":           task.TaskType,
+		"task_subject":        task.TaskSubject,
+		"read_only":           task.ReadOnly,
+		"attempt":             attempt,
+		"max_attempts":        maxAttempts,
+		"source":              "scheduler",
+		"parent_session_id":   options.ParentSessionID,
+		"parent_tool_call_id": options.ParentToolCallID,
+		"child_session_id":    childSessionID,
+		"child_agent_name":    childAgentName,
+		"trace_id":            options.TraceID,
+		"attempt_started_at":  rfc3339OrEmptyTime(timing.StartedAt),
+		"attempt_deadline":    rfc3339OrEmptyTime(timing.Deadline),
+		"batch_deadline":      rfc3339OrEmptyTime(timing.BatchDeadline),
+		"retry_budget_ms":     timing.RetryBudgetMS,
+		"remaining_ms":        timing.RemainingMS,
+	}
+	if options.BatchID != "" {
+		base["batch_id"] = options.BatchID
+	}
+	return base
+}
+
+// emitSubagentAttemptStarted 发射一次 attempt 的 started 事件（§6.1-4）。
+func (s *SubagentScheduler) emitSubagentAttemptStarted(options SubagentRunOptions, task SubagentTask, childSessionID, childAgentName string, spec ChildAgentSpec, attempt, maxAttempts int, timing subagentAttemptTiming) {
+	if s == nil || s.parent == nil {
+		return
+	}
+	s.parent.emitRuntimeEvent(runtimeevents.EventSubagentAttemptStarted, options.ParentSessionID, "",
+		mergeRouteAuditPayload(subagentAttemptLifecycleBase(task, options, childSessionID, childAgentName, attempt, maxAttempts, timing), spec.Decision))
+}
+
+// emitSubagentAttemptFinished 发射一次 attempt 的 finished 事件（§6.1-4）。
+// 字段与 subagent.completed 的任务级口径同源（success/status/completion_reason/
+// usage/partial/cancel/retry）；intermediate 标记"后面还有下一次尝试"。
+func (s *SubagentScheduler) emitSubagentAttemptFinished(options SubagentRunOptions, task SubagentTask, childSessionID, childAgentName string, spec ChildAgentSpec, attempt, maxAttempts int, timing subagentAttemptTiming, outcome subagentAttemptOutcome) {
+	if s == nil || s.parent == nil {
+		return
+	}
+	payload := subagentAttemptLifecycleBase(task, options, childSessionID, childAgentName, attempt, maxAttempts, timing)
+	payload["success"] = outcome.Success
+	payload["status"] = outcome.Status
+	payload["completion_reason"] = outcome.CompletionReason
+	payload["failure_category"] = outcome.FailureCategory
+	payload["error_code"] = outcome.ErrorCode
+	payload["error"] = outcome.ErrorText
+	payload["retryable"] = outcome.Retryable
+	payload["retry_reason"] = outcome.RetryReason
+	payload["retry_advice"] = outcome.RetryAdvice
+	payload["retry_skipped"] = outcome.RetrySkipped
+	payload["cancel_source"] = outcome.CancelSource
+	payload["intermediate_attempt"] = outcome.Intermediate
+	payload["usage_total_tokens"] = usageTotal(outcome.Usage)
+	payload["usage_prompt_tokens"] = usagePrompt(outcome.Usage)
+	payload["usage_completion_tokens"] = usageCompletion(outcome.Usage)
+	payload["usage_cache_read_tokens"] = usageCacheRead(outcome.Usage)
+	payload["partial_output"] = outcome.PartialOutput
+	payload["partial_findings_count"] = outcome.PartialFindingsCount
+	payload["partial_patch_count"] = outcome.PartialPatchCount
+	payload["remaining_ms"] = outcome.RemainingMS
+	if timing.StartedAt != nil {
+		payload["duration_ms"] = time.Since(*timing.StartedAt).Milliseconds()
+	}
+	s.parent.emitRuntimeEvent(runtimeevents.EventSubagentAttemptFinished, options.ParentSessionID, "",
+		mergeRouteAuditPayload(payload, spec.Decision))
 }

@@ -60,4 +60,19 @@ const (
 	// 每次 (session, reason) 只发一次（见 agent.reportSuspensionDegraded 的去重），
 	// 落盘量有天然上界。
 	EventSubagentSuspensionUnavailable = "subagent.suspension.unavailable"
+
+	// EventSubagentAttemptStarted / EventSubagentAttemptFinished：任务级 attempt 的
+	// 成对生命周期（§6.1-4，行动文档 P0）。此前"中间失败"与"最终失败"共用
+	// subagent.completed（中间靠 intermediate_attempt 标记），attempt 级成本/
+	// 取消/重试轨迹无法直接聚合；成对事件把 attempt 1..N 的执行事实独立出来：
+	//   started：每次 attempt 起跑（attempt 序号、时序与重试预算观测）；
+	//   finished：每次 attempt 终态（usage/partial/cancel_source/retry_skipped）。
+	// 归属**父会话**（与 route.resolved 同档 A+D）：attempt 级对账必须能从父会话
+	// 事件流事后重建；单任务 attempt ≤ max_attempts（封顶 5），落盘量有上界。
+	//
+	// 过渡期：subagent.completed 的中间尝试发射（intermediate_attempt=true）仍
+	// 保留，供既有 ingest/UI 消费；待 usageanalytics ingest 迁移到 attempt.finished
+	// 后移除（§6.1-4 收尾项）。
+	EventSubagentAttemptStarted  = "subagent.attempt.started"
+	EventSubagentAttemptFinished = "subagent.attempt.finished"
 )

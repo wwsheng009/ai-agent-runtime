@@ -5577,6 +5577,9 @@ func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {
 	assert.Contains(t, collectedTypes, "subagent.batch.started")
 	assert.Contains(t, collectedTypes, "subagent.started")
 	assert.Contains(t, collectedTypes, "subagent.completed")
+	// §6.1-4（行动文档 P0）：attempt 成对生命周期必须能从端到端事件流看到。
+	assert.Contains(t, collectedTypes, "subagent.attempt.started")
+	assert.Contains(t, collectedTypes, "subagent.attempt.finished")
 	assert.Contains(t, collectedTypes, "tool.reduced")
 	require.NotEmpty(t, parentTurnTraceIDs)
 	for _, traceID := range parentTurnTraceIDs {

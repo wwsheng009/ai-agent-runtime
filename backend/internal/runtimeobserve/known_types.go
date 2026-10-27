@@ -240,9 +240,10 @@ func buildKnownEventTypes() map[string]bool {
 		"llm.prompt_cache.breaker_tripped",         // events.EventLLMPromptCacheBreakerTripped（agent/loop.go:2202）
 	)
 
-	// 来源 9：子代理路由审计与批次失败态终态，以及扫描门禁收编的历史裸字面量
-	// （见文件头说明）。前 5 条的常量定义在 internal/events/subagent_audit_events.go；
-	// 其余类型是 internal/agent 里以裸字面量发射、经 SA-G2 门禁强制登记的类型。
+	// 来源 9：子代理路由审计、attempt 成对生命周期与批次失败态终态，以及扫描门禁
+	// 收编的历史裸字面量（见文件头说明）。具名常量定义在
+	// internal/events/subagent_audit_events.go；其余类型是 internal/agent 里以裸
+	// 字面量发射、经 SA-G2 门禁强制登记的类型。
 	add(
 		"subagent.route.resolved",              // events.EventSubagentRouteResolved（agent/subagent_route_audit.go）
 		"subagent.batch.failed",                // events.EventSubagentBatchFailed（agent/subagent_batch_coordinator.go）
@@ -250,6 +251,8 @@ func buildKnownEventTypes() map[string]bool {
 		"subagent.batch.timed_out",             // events.EventSubagentBatchTimedOut
 		"subagent.batch.orphaned",              // events.EventSubagentBatchOrphaned
 		"subagent.suspension.unavailable",      // events.EventSubagentSuspensionUnavailable（agent/suspension_gate.go，I9 降级告警）
+		"subagent.attempt.started",             // events.EventSubagentAttemptStarted（agent/subagent_retry.go，§6.1-4）
+		"subagent.attempt.finished",            // events.EventSubagentAttemptFinished（agent/subagent_retry.go，§6.1-4）
 		"completion.requirement_recovery",      // agent/loop.go
 		"context.preflight.started",            // agent/loop.go
 		"context.preflight.compacted",          // agent/loop.go

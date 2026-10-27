@@ -1152,6 +1152,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		s.emitSubagentRouteResolved(options, task, spec, childSessionID, childConfig.Name, attempt, maxAttempts)
 		attemptStartedAt := time.Now()
 		lastAttemptStartedAt = attemptStartedAt
+		// §6.1-4（行动文档 P0）：attempt 成对生命周期的 started 侧（归属父会话）。
+		s.emitSubagentAttemptStarted(options, task, childSessionID, childConfig.Name, spec, attempt, maxAttempts,
+			captureSubagentAttemptTiming(attemptStartedAt, ctx, childCtx,
+				subagentRetryBackoff(attempt, defaultSubagentRetryBaseDelay, defaultSubagentRetryMaxDelay)))
 		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
 			TraceID:   options.TraceID,
 			SessionID: childSessionID,
@@ -1282,6 +1286,25 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			report.UsageByAttempt = usageByAttempt
 			applySubagentResultOutput(&report, &task, lastResult)
 		}
+		// §6.1-4（行动文档 P0）：attempt 成对生命周期的 finished 侧（终态 attempt）。
+		s.emitSubagentAttemptFinished(options, task, childSessionID, childConfig.Name, spec, attempt, maxAttempts, lastTiming, subagentAttemptOutcome{
+			Success:              false,
+			Status:               "failed",
+			CompletionReason:     subagentCompletionReason(false, disposition),
+			FailureCategory:      disposition.Category,
+			ErrorCode:            disposition.ErrorCode,
+			ErrorText:            runErr.Error(),
+			Retryable:            disposition.Retryable,
+			RetryReason:          retryReason,
+			RetryAdvice:          retryAdvice,
+			RetrySkipped:         report.RetrySkipped,
+			CancelSource:         report.CancelSource,
+			Usage:                report.Usage,
+			PartialOutput:        report.PartialOutput,
+			PartialFindingsCount: report.PartialFindingsCount,
+			PartialPatchCount:    report.PartialPatchCount,
+			RemainingMS:          report.RemainingMS,
+		})
 		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
 			"role":                task.Role,
@@ -1416,6 +1439,23 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		report.RetryAdvice = SubagentRetryAdvice(disposition.Category, task.ReadOnly)
 		completionReason = subagentCompletionReason(false, disposition)
 	}
+	// §6.1-4（行动文档 P0）：attempt 成对生命周期的 finished 侧（成功/预算耗尽终态）。
+	s.emitSubagentAttemptFinished(options, task, childSessionID, childConfig.Name, spec, attempt, maxAttempts, lastTiming, subagentAttemptOutcome{
+		Success:              report.Success,
+		Status:               statusAliasForCompletionReason(completionReason, report.Success),
+		CompletionReason:     completionReason,
+		FailureCategory:      report.FailureCategory,
+		ErrorCode:            report.ErrorCode,
+		ErrorText:            report.Error,
+		Retryable:            report.Retryable,
+		RetryReason:          retryReason,
+		RetryAdvice:          report.RetryAdvice,
+		Usage:                report.Usage,
+		PartialOutput:        report.PartialOutput,
+		PartialFindingsCount: report.PartialFindingsCount,
+		PartialPatchCount:    report.PartialPatchCount,
+		RemainingMS:          report.RemainingMS,
+	})
 	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 		"subagent_id":             task.ID,
 		"role":                    task.Role,
