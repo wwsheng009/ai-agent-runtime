@@ -8862,10 +8862,8 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
 		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
 	}
-	executionModeDescription := "Deprecated and optional — omit it. Dispatch is always asynchronous; the legacy values wait|sync stay accepted for compatibility but no longer block the parent turn."
 	if !suspensionAvailable {
 		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so a parked turn cannot be resumed after a crash. The dispatch still returns a batch handle and the host projects one degradation warning."
-		executionModeDescription = "Deprecated and optional — omit it. Dispatch is always asynchronous, but this session does not support supervised suspension (当前会话不支持托管挂起): the parked turn cannot be resumed after a restart. Legacy wait|sync stay accepted and no longer block the parent turn."
 	}
 	definition := types.ToolDefinition{
 		Name:        SpawnSubagentsToolName,
@@ -8873,10 +8871,6 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"execution_mode": map[string]interface{}{
-					"type":        "string",
-					"description": executionModeDescription,
-				},
 				"wait_timeout_sec": map[string]interface{}{
 					"type":        "integer",
 					"description": "Optional batch deadline (seconds) for background batches; defaults to the coordinator deadline when unset.",
