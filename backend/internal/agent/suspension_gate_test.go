@@ -250,20 +250,16 @@ func TestSpawnSubagentsDescriptionStatesSuspensionAvailability(t *testing.T) {
 	require.Contains(t, degraded.Description, "当前会话不支持托管挂起")
 	properties, ok := degraded.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
-	mode, ok := properties["execution_mode"].(map[string]interface{})
-	require.True(t, ok)
-	require.Contains(t, mode["description"], "当前会话不支持托管挂起")
+	require.NotContains(t, properties, "execution_mode",
+		"execution_mode was removed from the model-visible schema; legacy values remain parser-compatible only")
 
 	durable := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
 	require.NotContains(t, durable.Description, "当前会话不支持托管挂起")
 	require.Contains(t, durable.Description, "Dispatch is asynchronous")
 	durableProperties, ok := durable.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
-	durableMode, ok := durableProperties["execution_mode"].(map[string]interface{})
-	require.True(t, ok)
-	// P3 / C4-1: the parameter is deprecated and no longer offers a choice.
-	require.Contains(t, durableMode["description"], "Deprecated")
-	require.NotContains(t, durableMode, "enum")
+	require.NotContains(t, durableProperties, "execution_mode",
+		"execution_mode was removed from the model-visible schema; legacy values remain parser-compatible only")
 }
 
 // TestExecutionModeLegacyValuesStayReadableAndWarn pins AC-P3-1a/b (P3 / C4-1):
