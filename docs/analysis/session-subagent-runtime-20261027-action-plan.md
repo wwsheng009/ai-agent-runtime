@@ -520,7 +520,7 @@ backend/internal/cacheanalytics/*
 - [x] capability 开启时只注入父级已完成、配平、去 system 的快照；（subagent_context_test：system 剥离/深拷贝冻结/首轮等价 fresh）
 - [x] 父会话后续新增消息不会改变已创建 child 的 snapshot hash；（0b71fb31：forkSnapshotHash 稳定性 + 冻结深拷贝测试）
 - [x] snapshot 超过 96,000 token 时整体拒绝，不静默截断；（既有测试 + 结构化 next_action 拒绝）
-- [ ] direct spawn 与 batch spawn 对 `none/all/last:N` 的语义一致；（receipt/parent key 已统一（221d3c22）；`last:N` 在 batch 路径仍无对应参数，语义一致性未完全达成）
+- [x] direct spawn 与 batch spawn 对 `none/all/last:N` 的语义一致；（`859651b9`：batch 侧新增 `fork_messages` 窗口参数 = direct `fork_turns=N` 同语义「最近 N 条消息」（配平后、token 上限前截窗）；`fresh`/`none` 与 `context=""` 等价、`fork`/`all` 全量；receipt/parent key 统一（221d3c22））
 - [x] `inherit_parent_when_missing` 只影响路由缺省，不影响 history/context mode。（源码语义与既有测试口径未变）
 
 ### 8.4 Cache
@@ -607,6 +607,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `221d3c22` | direct spawn 的 context receipt 与父 key 接线（§6.5/§6.4 统一） | §6.5 / §8.3 |
 | `ab6a830e` | usage_unavailable_reason 与 task_attempt 对账列（§8.2 收尾） | §8.2 |
 | `bf7a6b0a` | confirmed_miss 状态分层与 provider miss 计数（§6.4/§8.4） | §6.4 / §8.4 |
+| `859651b9` | batch 路径 fork 窗口 `fork_messages`（§8.3 direct/batch 语义一致） | §8.3 |
 
 ### 13.2 逐条对照（§6）
 
@@ -628,12 +629,13 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 关键 E2E：`TestSubagentAttemptEventsPairOnTransientRetry`（attempt 1 失败 → attempt 2 成功，provider 恰 2 次调用）；`TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout`（`cancel_source=provider_timeout` + `retry_skipped=max_attempts_reached`）；`TestReActLoop_Run_EmitsRuntimeEvents`（端到端事件流含 attempt 成对）。
 - 迁移回归：`TestStoreMigrateAddsSubagentAttemptColumns`（降级删列 → 重开补列 → 写读）。
 - cache 状态分层：`TestBuildTerminalRecordClassifiesConfirmedMiss`（确认 miss 与 reported_zero 边界五档）、`TestCacheStatusDistributionAccountsConfirmedMiss`、`TestCacheSourceOverviewCacheStatusDistributionAlignsWithSQL`（六档 SQL 列序对齐）、`TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage`（载荷层 confirmed_miss）、`TestResolveUnifiedTokenUsage_DeepSeekMissReported` / `..._OpenAIDerivedUncachedIsNotMissReported`（显式上报 vs 推导不伪装）。
+- batch fork 窗口：`TestBuildForkHistoryWithWindowKeepsMostRecentCompletedMessages`（截窗 = 最近 N 条 / 窗口≥长度等价全量）、`...AppliesBeforeTokenCeiling`（窗口先于上限：缩小窗口可让全量超限的父历史通过）、`TestBuildForkHistoryForTaskAppliesForkMessages`（任务字段接线）、`TestSubagentContextReceipt`（请求窗口与实际注入条数分离）、decode 三档（接受数值/拒收「有窗口无 fork」/非正值 warning + 字符串拒绝）、`TestBatchTaskSpecRoundTripPreservesForkContext`（durable spec 往返 + 旧 spec 字节兼容）。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
-3. batch 路径的 `last:N` fork 参数（receipt/parent key 统一已在 `221d3c22` 落地）。
+3. §8.4 的两项 cache 专项测试：同一 child retry 的前缀复用（provider-specific）与并发 child 的 cache 污染对照（`859651b9` 已闭环 batch 侧 `last:N` 窗口与 durable replay 降级）。
 4. provider response-header guard 的 retry budget 专项用例；task/batch deadline 档的 E2E 注入。
 5. `resume` cache lineage 模式当前实现不存在（§8.4 对应项保留未勾选）。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
@@ -641,4 +643,5 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.5 备注
 
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
+- 观察（未修，超出本行动范围）：`subagentbatch.TaskSpec` 仍只往返部分任务字段（`WritePaths`/`ReportSchema`/`HandoffIn`/`AgentType`/`MaxTurns` 与只读过滤审计未入 spec）；这些字段在「幂等 admission replay」窗口内同样不随 durable spec 重建。本轮只补齐 fork 语义必需的 `Context`/`ForkMessages`。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
