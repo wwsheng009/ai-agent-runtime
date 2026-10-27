@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -86,4 +88,77 @@ func TestEmitSubagentRouteResolvedCarriesForkReceipt(t *testing.T) {
 	require.Equal(t, true, receipt["parent_history_injected"])
 	require.Equal(t, len(forkFixture()), receipt["fork_snapshot_messages"])
 	require.Equal(t, forkSnapshotHash(forkFixture()), receipt["fork_snapshot_hash"])
+}
+
+// TestSubagentParentPromptCacheKeyDerivation 锁定 §6.4：父 key 由 spawn 时刻父
+// epoch 派生；父会话或 epoch 不可观时为空串（不猜测）。
+func TestSubagentParentPromptCacheKeyDerivation(t *testing.T) {
+	if got := subagentParentPromptCacheKey("", func() int { return 3 }); got != "" {
+		t.Fatalf("empty parent session must stay empty, got %q", got)
+	}
+	if got := subagentParentPromptCacheKey("parent-1", nil); got != "" {
+		t.Fatalf("unknown epoch provider must stay empty, got %q", got)
+	}
+	if got := subagentParentPromptCacheKey("parent-1", func() int { return 0 }); got != "parent-1" {
+		t.Fatalf("epoch 0 must degrade to the bare session id, got %q", got)
+	}
+	if got := subagentParentPromptCacheKey("parent-1", func() int { return 3 }); got != "parent-1#prompt-cache-epoch-3" {
+		t.Fatalf("unexpected parent key: %q", got)
+	}
+}
+
+// TestReActLoopStampsParentPromptCacheKeyOnChildRequests 锁定 §6.4 接线：
+// loopRunOptions.ParentPromptCacheKey 必须进入子请求 metadata（随 llm.request.*
+// 载荷落库）。有值时携带，缺省不产生该键。
+func TestReActLoopStampsParentPromptCacheKeyOnChildRequests(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name:      "parent-key-provider",
+		responses: []*llm.LLMResponse{{Content: "done", Model: "test-model", Usage: &types.TokenUsage{}}},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("parent-key-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name:         "parent-key-child",
+		Provider:     "parent-key-provider",
+		Model:        "test-model",
+		SystemPrompt: "You are a worker.",
+	}, nil, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        2,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	_, err := loop.run(context.Background(), "do the work", loopRunOptions{
+		TraceID:              "trace-parent-key",
+		IncludePrompt:        true,
+		SubagentID:           "sub-1",
+		ParentPromptCacheKey: "parent-session#prompt-cache-epoch-3",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, provider.requests)
+	require.Equal(t, "parent-session#prompt-cache-epoch-3", provider.requests[0].Metadata["parent_prompt_cache_key"])
+
+	// 缺省（空串）不得产生该 metadata 键：读取侧把"未携带"与"空值"分开。
+	provider2 := &SequenceLLMProvider{
+		name:      "parent-key-provider",
+		responses: []*llm.LLMResponse{{Content: "done", Model: "test-model", Usage: &types.TokenUsage{}}},
+	}
+	llmRuntime2 := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime2.RegisterProvider("parent-key-provider", provider2))
+	agent2 := NewAgentWithLLM(&Config{
+		Name:         "parent-key-child-2",
+		Provider:     "parent-key-provider",
+		Model:        "test-model",
+		SystemPrompt: "You are a worker.",
+	}, nil, llmRuntime2)
+	loop2 := NewReActLoop(agent2, llmRuntime2, &LoopReActConfig{MaxSteps: 2, EnableThought: true, EnableToolCalls: true})
+	_, err = loop2.run(context.Background(), "do the work", loopRunOptions{
+		TraceID:       "trace-parent-key-2",
+		IncludePrompt: true,
+		SubagentID:    "sub-1",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, provider2.requests)
+	_, hasKey := provider2.requests[0].Metadata["parent_prompt_cache_key"]
+	require.False(t, hasKey, "empty parent key must not be stamped")
 }

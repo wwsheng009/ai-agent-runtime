@@ -246,6 +246,11 @@ type ReActLoop struct {
 	// §6.5）。随 llm.request.started 载荷与请求 metadata 落库，供 context
 	// receipt 与 cache lineage 对账。
 	runContextMode string
+	// runParentPromptCacheKey 是本次 run 携带的父会话 prompt-cache key（§6.4）。
+	runParentPromptCacheKey string
+	// currentPromptCacheEpoch 暴露运行中的本地 epoch（run 内推进实时可见），
+	// 供 spawn 派发生成 parent_prompt_cache_key；run 外为 nil。
+	currentPromptCacheEpoch func() int
 	// stopHookContinued marks that this run already continued because a Stop
 	// hook blocked finishing. Codex exposes this as stop_hook_active so a hook
 	// can avoid blocking forever.
@@ -316,6 +321,9 @@ type loopRunOptions struct {
 	// ForkAudit 非 nil 时在首个组装请求上审计继承快照的前缀保持性
 	// （P2-1' G3）；由调度器仅为 fork 子级首尝试设置。
 	ForkAudit *ForkAuditSpec
+	// ParentPromptCacheKey 是父会话 spawn 时刻的 prompt-cache key（§6.4 父/子
+	// key 对账）；空串不携带。
+	ParentPromptCacheKey string
 }
 
 // HistorySession 描述 ReActLoop 运行时需要的最小 session 能力。
@@ -680,6 +688,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.forkAudit = options.ForkAudit
 	loop.forkAuditDone = false
 	loop.runContextMode = resolveRunContextMode(options)
+	loop.runParentPromptCacheKey = strings.TrimSpace(options.ParentPromptCacheKey)
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
 	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
@@ -929,6 +938,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if promptCacheEpoch < 0 {
 		promptCacheEpoch = 0
 	}
+	// §6.4：spawn 派发需要父会话"当前世代"的 key；闭包捕获运行中的本地 epoch，
+	// run 内推进（压缩/前缀重写）实时可见；run 结束清空避免跨 run 读到陈旧值。
+	loop.currentPromptCacheEpoch = func() int { return promptCacheEpoch }
+	defer func() { loop.currentPromptCacheEpoch = nil }()
 	// The durable prompt-cache generation must never regress. Run-local advances
 	// (pre-turn / mid-turn compaction, prefix-rewrite epoch breaks) are persisted
 	// through the same session context the run resumed from; without this they
@@ -2828,6 +2841,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if mode := loop.runContextMode; mode != "" {
 		req.Metadata[contextModeKey] = mode
 		requestPayload[contextModeKey] = mode
+	}
+	// §6.4：父会话 prompt-cache key（有值时携带），供父/子 key 对账。
+	if key := loop.runParentPromptCacheKey; key != "" {
+		req.Metadata["parent_prompt_cache_key"] = key
+		requestPayload["parent_prompt_cache_key"] = key
 	}
 	addRemainingBudgetMetadata(requestPayload, remainingBudget)
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
@@ -8611,6 +8629,8 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 		ParentToolCallID: tc.ID,
 		RootScopeID:      sessionID,
 		Depth:            depth + 1,
+		// §6.4：派发时刻的父会话 prompt-cache key（run 内 epoch 闭包实时取值）。
+		ParentPromptCacheKey: subagentParentPromptCacheKey(sessionID, loop.currentPromptCacheEpoch),
 		// P3 / C4-1：派发只有异步语义，落账一律 background。旧调用方传的
 		// wait/sync 不再进入账本：supervision 的 batch 查询按 background 过滤
 		// （batch_progress.go / 协调器），记旧值会让这些批次对巡检不可见。

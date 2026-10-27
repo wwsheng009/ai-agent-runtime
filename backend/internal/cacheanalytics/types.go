@@ -170,13 +170,16 @@ type CacheRequestRecord struct {
 	// ContextMode / ForkSnapshotHash（§6.4/§6.5，additive 字段）：子代理请求的
 	// 上下文模式（fresh/fork）与 fork 快照稳定指纹；空串 = 主 Agent 请求或历史
 	// 记录未观测。
-	ContextMode        string `json:"context_mode,omitempty"`
-	ForkSnapshotHash   string `json:"fork_snapshot_hash,omitempty"`
-	UserMessageID      string `json:"user_message_id,omitempty"`
-	AssistantMessageID string `json:"assistant_message_id,omitempty"`
-	ProviderRequestID  string `json:"provider_request_id,omitempty"`
-	ErrorCategory      string `json:"error_category,omitempty"`
-	CorrelationSource  string `json:"correlation_source,omitempty"`
+	ContextMode      string `json:"context_mode,omitempty"`
+	ForkSnapshotHash string `json:"fork_snapshot_hash,omitempty"`
+	// ParentPromptCacheKey（§6.4，additive）：spawn 时刻父会话的 prompt-cache
+	// key，供父/子 key 对账；空串 = 未携带（历史记录 / 未知父 epoch）。
+	ParentPromptCacheKey string `json:"parent_prompt_cache_key,omitempty"`
+	UserMessageID        string `json:"user_message_id,omitempty"`
+	AssistantMessageID   string `json:"assistant_message_id,omitempty"`
+	ProviderRequestID    string `json:"provider_request_id,omitempty"`
+	ErrorCategory        string `json:"error_category,omitempty"`
+	CorrelationSource    string `json:"correlation_source,omitempty"`
 	// TerminalSeen 标记本次请求是否观测到上游终结信号（finish_reason / 完成事件 /
 	// [DONE]）。与「是否被截断」分开记录（P0-2）：没有终结信号又拿到半截参数 =
 	// 传输中断；有终结信号但参数非法 = 模型退化，两者恢复路径不同。

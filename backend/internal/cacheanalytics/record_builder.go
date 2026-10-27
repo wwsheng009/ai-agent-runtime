@@ -46,6 +46,9 @@ type TerminalRecordInput struct {
 	// 模式（fresh/fork）与 fork 快照稳定指纹；空串表示未观测。
 	ContextMode      string
 	ForkSnapshotHash string
+	// ParentPromptCacheKey（§6.4）：spawn 时刻父会话的 prompt-cache key；空串
+	// 表示未观测。
+	ParentPromptCacheKey string
 	// Payload 是 llm.request.finished 的事件载荷（success/error_code/usage_*）。
 	Payload map[string]interface{}
 	// Interrupted 标记会话/进程终止时仍未终态的 in-flight 请求（§16.1 边界 3）。
@@ -90,6 +93,7 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.ForkPrefixKeptMessages = in.ForkPrefixKeptMessages
 	record.ContextMode = firstNonEmptyString(in.ContextMode, payloadString(payload, "context_mode"))
 	record.ForkSnapshotHash = firstNonEmptyString(in.ForkSnapshotHash, payloadString(payload, "fork_snapshot_hash"))
+	record.ParentPromptCacheKey = firstNonEmptyString(in.ParentPromptCacheKey, payloadString(payload, "parent_prompt_cache_key"))
 	// 上下文事实先于错误分支提取：失败请求（如上下文超限被拒）同样携带窗口与预算，
 	// 前端仍能显示"已用 / 窗口 / 预算"。interrupted 兜底路径没有载荷，保持 0。
 	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")

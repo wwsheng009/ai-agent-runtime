@@ -212,3 +212,19 @@ func subagentContextReceipt(task SubagentTask, snapshotMessages int) map[string]
 		"fork_snapshot_messages":  snapshotMessages,
 	}
 }
+
+// subagentParentPromptCacheKey 生成父会话 spawn 时刻的 prompt-cache key（§6.4
+// 父/子 key 对账）：epoch 未知（无 provider）或父会话为空时返回空串（不猜测，
+// 子请求不携带该键）；epoch<=0 与 promptCacheKeyForEpoch 同口径退化为裸
+// sessionID。
+func subagentParentPromptCacheKey(sessionID string, epochProvider func() int) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || epochProvider == nil {
+		return ""
+	}
+	epoch := epochProvider()
+	if epoch < 0 {
+		epoch = 0
+	}
+	return promptCacheKeyForEpoch(sessionID, epoch)
+}

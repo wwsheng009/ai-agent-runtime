@@ -269,6 +269,10 @@ type SubagentRunOptions struct {
 	ParentSessionID  string
 	ParentToolCallID string
 	Depth            int
+	// ParentPromptCacheKey 是 spawn 时刻父会话的 prompt-cache key（§6.4：父/子
+	// key 对账）。host 在派发时用父 epoch 生成；未知为空串（不猜测），子请求
+	// 仅在有值时携带 parent_prompt_cache_key。
+	ParentPromptCacheKey string
 	// BatchID 是 durable 批次的 id（sync 路径为本次调用的批次 id；无批次上下文时
 	// 为空）。仅用于 subagent.route.resolved 的审计载荷，使路由决策可按批次归集；
 	// 不影响调度、限流或投递语义。
@@ -1170,6 +1174,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			// Fork 快照（P2-1'）：一次性注入父级已完成轮次；fresh 任务为 nil。
 			// scheduler 路径不挂 PersistHistory，快照不落子会话持久层。
 			History: spec.ForkHistory,
+			// 父会话 prompt-cache key（§6.4）：随子请求载荷落库，供父子 key 对账。
+			ParentPromptCacheKey: options.ParentPromptCacheKey,
 			// 结构化回执契约（P1-2'）：report_schema 请求时 loop 注入
 			// submit_report 工具，接受的回执 JSON 成为结果 Output，下方
 			// 的 decode 路径据此回填 HandoffOut。

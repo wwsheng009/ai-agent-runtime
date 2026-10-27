@@ -35,9 +35,12 @@ type BatchStartOptions struct {
 	ParentToolCallID string
 	RootScopeID      string
 	Depth            int
-	ExecutionMode    subagentbatch.ExecutionMode
-	IdempotencyKey   string
-	BatchDeadline    time.Time
+	// ParentPromptCacheKey 是派发时刻父会话的 prompt-cache key（§6.4），透传到
+	// 子代理运行选项供父/子 key 对账；空串表示父 epoch 不可观测。
+	ParentPromptCacheKey string
+	ExecutionMode        subagentbatch.ExecutionMode
+	IdempotencyKey       string
+	BatchDeadline        time.Time
 }
 
 // BatchEmitter publishes a host-neutral lifecycle event. The loop wires it to
@@ -1456,6 +1459,8 @@ func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, bat
 		ParentToolCallID: opts.ParentToolCallID,
 		Depth:            opts.Depth,
 		BatchID:          batchID,
+		// §6.4：父会话 prompt-cache key 随批次选项透传（StartBackground 时刻生成）。
+		ParentPromptCacheKey: opts.ParentPromptCacheKey,
 		OnTaskEvent: func(taskID, event string) {
 			c.recordTaskEvent(ctx, batchID, taskID, event, progressWriteback)
 		},

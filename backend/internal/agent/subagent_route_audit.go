@@ -110,6 +110,10 @@ func (s *SubagentScheduler) emitSubagentRouteResolved(options SubagentRunOptions
 	if len(spec.ForkHistory) > 0 {
 		base[forkSnapshotHashKey] = forkSnapshotHash(spec.ForkHistory)
 	}
+	// §6.4：父会话 prompt-cache key（派发时刻），供父/子 key 对账。
+	if options.ParentPromptCacheKey != "" {
+		base["parent_prompt_cache_key"] = options.ParentPromptCacheKey
+	}
 	if options.BatchID != "" {
 		base["batch_id"] = options.BatchID
 	}
