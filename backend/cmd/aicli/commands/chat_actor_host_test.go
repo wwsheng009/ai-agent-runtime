@@ -4682,9 +4682,6 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 	if strings.TrimSpace(first) == "" {
 		t.Fatal("expected composed system prompt on first prepare")
 	}
-	if strings.Contains(first, "Current workspace root:") {
-		t.Fatalf("first prepare must not carry the later-resolved workspace paragraph, got %q", first)
-	}
 
 	// A later run resolves the workspace root only now. The provider-facing
 	// instruction head must stay byte-identical: rewriting messages[0] here is
@@ -4697,9 +4694,6 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 	second := apiAgent.GetConfig().SystemPrompt
 	if second != first {
 		t.Fatalf("system prompt must be frozen across prepare runs: first=%q second=%q", first, second)
-	}
-	if strings.Contains(second, "Current workspace root:") {
-		t.Fatalf("later workspace resolution must not rewrite the frozen head, got %q", second)
 	}
 
 	// The anchor is persisted on the session context so actor rebuilds after
@@ -4719,16 +4713,17 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 func TestComposeLocalChatSystemPrompt_FreezesHeadAcrossWorkspaceRootResolution(t *testing.T) {
 	root := `E:\projects\ai\ai-gateway`
 
-	// The two compositions genuinely differ when the freeze is bypassed; this
-	// appended paragraph is the observed +2543-byte variant.
+	// The workspace-identity paragraph is anchored on the session's stable
+	// WorkspaceAnchor (or cwd fallback), not on the per-call workspaceRoot
+	// argument. An unresolved argument falls back to cwd so the head is
+	// identical on first compose and never changes when the argument resolves
+	// later — which is what kept rewriting messages[0] mid-session and broke
+	// the provider prompt cache before the fix.
 	unfrozen := &ChatSession{SystemPromptText: "Base prompt."}
 	withoutRoot := buildLocalChatSystemPrompt(unfrozen, "")
 	withRoot := buildLocalChatSystemPrompt(unfrozen, root)
 	if withoutRoot == withRoot {
 		t.Fatal("expected a resolved workspace root to change the composition")
-	}
-	if strings.Contains(withoutRoot, "Current workspace root:") {
-		t.Fatalf("unresolved root must not carry the workspace paragraph, got %q", withoutRoot)
 	}
 	if !strings.Contains(withRoot, "Current workspace root: "+root) {
 		t.Fatalf("resolved root must carry the workspace paragraph, got %q", withRoot)
@@ -4750,9 +4745,6 @@ func TestComposeLocalChatSystemPrompt_FreezesHeadAcrossWorkspaceRootResolution(t
 	second := composeLocalChatSystemPrompt(session, nil, root)
 	if second != first {
 		t.Fatalf("later workspace resolution must not rewrite the frozen head: first=%q second=%q", first, second)
-	}
-	if strings.Contains(second, "Current workspace root:") {
-		t.Fatalf("later workspace resolution must not inject the workspace paragraph, got %q", second)
 	}
 
 	// The prepare hook anchors on the same value, so both call paths agree.

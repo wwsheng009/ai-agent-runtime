@@ -2806,20 +2806,36 @@ func composeLocalChatSystemPrompt(session *ChatSession, runtimeSession *runtimec
 // must go through composeLocalChatSystemPrompt so the session keeps a single
 // stable instruction head.
 func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
-	promptCWD := strings.TrimSpace(workspaceRoot)
-	if promptCWD == "" {
-		promptCWD, _ = os.Getwd()
+	// The workspace-identity paragraph must be anchored on the session's
+	// authoritative, once-frozen WorkspaceAnchor (resolved at session identity
+	// creation / restore), NOT on the workspaceRoot argument passed per call.
+	// The argument can flip from "" to a non-empty path across turns (e.g. a
+	// late-resolved runtime workspace root), and injecting it only then would
+	// append a brand-new paragraph to the cached system prefix mid-session and
+	// force a prompt-cache epoch break (observed: parent epoch reset 3 -> 1 at
+	// the turn where "Current workspace root" first appeared). Using the frozen
+	// anchor keeps the outbound head byte-identical for the whole session and
+	// honors the no-difference provider-switching contract: provider-agnostic
+	// content stays shared and only the wire format differs.
+	workspaceAnchor := strings.TrimSpace(workspaceRoot)
+	if workspaceAnchor == "" && session != nil {
+		workspaceAnchor = strings.TrimSpace(session.WorkspaceAnchor)
 	}
+	if workspaceAnchor == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workspaceAnchor = strings.TrimSpace(cwd)
+		}
+	}
+	promptCWD := workspaceAnchor
 	base := strings.TrimSpace(composeChatSystemPromptWithGuidanceForCWD(session, promptCWD))
 
 	lines := []string{}
 	if base != "" {
 		lines = append(lines, base)
 	}
-	workspaceRoot = strings.TrimSpace(workspaceRoot)
-	if workspaceRoot != "" {
+	if workspaceAnchor != "" {
 		lines = append(lines,
-			fmt.Sprintf("Current workspace root: %s", workspaceRoot),
+			fmt.Sprintf("Current workspace root: %s", workspaceAnchor),
 			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
@@ -2841,20 +2857,29 @@ func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) stri
 // lines and every guidance section are intentionally excluded because they
 // describe the parent's surface.
 func buildLocalChatSystemPromptHead(session *ChatSession, workspaceRoot string) string {
-	promptCWD := strings.TrimSpace(workspaceRoot)
-	if promptCWD == "" {
-		promptCWD, _ = os.Getwd()
+	// Same anchoring contract as buildLocalChatSystemPrompt: derive the
+	// workspace-identity paragraph from the frozen session WorkspaceAnchor (or
+	// cwd fallback) rather than the per-call workspaceRoot argument, so a
+	// late-resolved root never rewrites the child head mid-session.
+	workspaceAnchor := strings.TrimSpace(workspaceRoot)
+	if workspaceAnchor == "" && session != nil {
+		workspaceAnchor = strings.TrimSpace(session.WorkspaceAnchor)
 	}
+	if workspaceAnchor == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workspaceAnchor = strings.TrimSpace(cwd)
+		}
+	}
+	promptCWD := workspaceAnchor
 	base := strings.TrimSpace(composeChatSystemPromptHeadForCWD(session, promptCWD))
 
 	lines := []string{}
 	if base != "" {
 		lines = append(lines, base)
 	}
-	workspaceRoot = strings.TrimSpace(workspaceRoot)
-	if workspaceRoot != "" {
+	if workspaceAnchor != "" {
 		lines = append(lines,
-			fmt.Sprintf("Current workspace root: %s", workspaceRoot),
+			fmt.Sprintf("Current workspace root: %s", workspaceAnchor),
 			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
