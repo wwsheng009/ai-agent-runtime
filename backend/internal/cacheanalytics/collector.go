@@ -53,6 +53,10 @@ type inflightRequest struct {
 	forkSnapshotMessages   int
 	forkSnapshotTokens     int
 	forkPrefixKeptMessages int
+	// contextMode / forkSnapshotHash（§6.4/§6.5 lineage 增量字段）：子代理运行的
+	// 上下文模式与 fork 快照稳定指纹；主 Agent 请求为空串。
+	contextMode      string
+	forkSnapshotHash string
 }
 
 // Collector 订阅 runtime EventBus，把 llm.request.* 事件投影为
@@ -227,6 +231,8 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 	inflight.forkSnapshotMessages = payloadInt(payload, "fork_snapshot_messages")
 	inflight.forkSnapshotTokens = payloadInt(payload, "fork_snapshot_tokens")
 	inflight.forkPrefixKeptMessages = payloadInt(payload, "fork_prefix_kept_messages")
+	inflight.contextMode = payloadString(payload, "context_mode")
+	inflight.forkSnapshotHash = payloadString(payload, "fork_snapshot_hash")
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
 	c.mu.Unlock()
@@ -306,6 +312,8 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		ForkSnapshotMessages:   inflight.forkSnapshotMessages,
 		ForkSnapshotTokens:     inflight.forkSnapshotTokens,
 		ForkPrefixKeptMessages: inflight.forkPrefixKeptMessages,
+		ContextMode:            inflight.contextMode,
+		ForkSnapshotHash:       inflight.forkSnapshotHash,
 	})
 	c.projector.append(&record)
 	c.publishRecordFinished(&record)

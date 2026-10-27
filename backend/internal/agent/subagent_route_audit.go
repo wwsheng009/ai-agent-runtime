@@ -102,6 +102,14 @@ func (s *SubagentScheduler) emitSubagentRouteResolved(options SubagentRunOptions
 		}
 		base["capability_refusals"] = refusals
 	}
+	// §6.5 context receipt：requested/effective 分离 + 注入事实 + 快照指纹，
+	// 让"请求了什么模式、实际注入了多少父历史"从父会话事件流可反查。
+	for key, value := range subagentContextReceipt(task, len(spec.ForkHistory)) {
+		base[key] = value
+	}
+	if len(spec.ForkHistory) > 0 {
+		base[forkSnapshotHashKey] = forkSnapshotHash(spec.ForkHistory)
+	}
 	if options.BatchID != "" {
 		base["batch_id"] = options.BatchID
 	}

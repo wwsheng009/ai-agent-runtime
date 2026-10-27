@@ -163,15 +163,20 @@ type CacheRequestRecord struct {
 	// additive 字段）。ForkPrefixPreserved 为 nil = 非 fork 首请求（未观测）；
 	// true = 继承快照在最终装配前缀中仍连续完整；false = 被装配改写
 	// （kept 给出缩水后的连续保持长度）。
-	ForkPrefixPreserved    *bool  `json:"fork_prefix_preserved,omitempty"`
-	ForkSnapshotMessages   int    `json:"fork_snapshot_messages,omitempty"`
-	ForkSnapshotTokens     int    `json:"fork_snapshot_tokens,omitempty"`
-	ForkPrefixKeptMessages int    `json:"fork_prefix_kept_messages,omitempty"`
-	UserMessageID          string `json:"user_message_id,omitempty"`
-	AssistantMessageID     string `json:"assistant_message_id,omitempty"`
-	ProviderRequestID      string `json:"provider_request_id,omitempty"`
-	ErrorCategory          string `json:"error_category,omitempty"`
-	CorrelationSource      string `json:"correlation_source,omitempty"`
+	ForkPrefixPreserved    *bool `json:"fork_prefix_preserved,omitempty"`
+	ForkSnapshotMessages   int   `json:"fork_snapshot_messages,omitempty"`
+	ForkSnapshotTokens     int   `json:"fork_snapshot_tokens,omitempty"`
+	ForkPrefixKeptMessages int   `json:"fork_prefix_kept_messages,omitempty"`
+	// ContextMode / ForkSnapshotHash（§6.4/§6.5，additive 字段）：子代理请求的
+	// 上下文模式（fresh/fork）与 fork 快照稳定指纹；空串 = 主 Agent 请求或历史
+	// 记录未观测。
+	ContextMode        string `json:"context_mode,omitempty"`
+	ForkSnapshotHash   string `json:"fork_snapshot_hash,omitempty"`
+	UserMessageID      string `json:"user_message_id,omitempty"`
+	AssistantMessageID string `json:"assistant_message_id,omitempty"`
+	ProviderRequestID  string `json:"provider_request_id,omitempty"`
+	ErrorCategory      string `json:"error_category,omitempty"`
+	CorrelationSource  string `json:"correlation_source,omitempty"`
 	// TerminalSeen 标记本次请求是否观测到上游终结信号（finish_reason / 完成事件 /
 	// [DONE]）。与「是否被截断」分开记录（P0-2）：没有终结信号又拿到半截参数 =
 	// 传输中断；有终结信号但参数非法 = 模型退化，两者恢复路径不同。

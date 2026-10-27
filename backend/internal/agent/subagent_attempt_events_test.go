@@ -48,7 +48,8 @@ func newAttemptEventRig(t *testing.T) *attemptEventRig {
 	bus := runtimeevents.NewBus()
 	bus.Subscribe("", func(event runtimeevents.Event) {
 		switch event.Type {
-		case runtimeevents.EventSubagentAttemptStarted, runtimeevents.EventSubagentAttemptFinished, "subagent.completed":
+		case runtimeevents.EventSubagentAttemptStarted, runtimeevents.EventSubagentAttemptFinished,
+			runtimeevents.EventSubagentRouteResolved, "subagent.completed":
 			rig.mu.Lock()
 			rig.events = append(rig.events, recordedLifecycleEvent{eventType: event.Type, payload: event.Payload})
 			rig.mu.Unlock()
@@ -341,6 +342,18 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	if intermediate, ok := finalCompleted["intermediate_attempt"].(bool); ok {
 		require.False(t, intermediate, "终态 subagent.completed 不得带 intermediate 标记")
 	}
+
+	var routeReceipt map[string]interface{}
+	for _, event := range events {
+		if event.eventType == runtimeevents.EventSubagentRouteResolved {
+			routeReceipt = event.payload
+			break
+		}
+	}
+	require.NotNil(t, routeReceipt, "route.resolved 必须携带 context receipt（§6.5）")
+	require.Equal(t, "fresh", routeReceipt["requested_context"])
+	require.Equal(t, "fresh", routeReceipt["effective_context"])
+	require.Equal(t, false, routeReceipt["parent_history_injected"])
 
 	require.Equal(t, 2, provider.callCount(),
 		"每次任务 attempt 恰一次 provider 调用（runtime 重试已关闭）：1 次失败 + 1 次成功")

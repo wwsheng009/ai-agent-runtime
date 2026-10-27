@@ -242,6 +242,10 @@ type ReActLoop struct {
 	// 结果盖进请求 metadata。生命周期等于一次 run()。
 	forkAudit     *ForkAuditSpec
 	forkAuditDone bool
+	// runContextMode 是本次 run 的子代理上下文模式（fresh/fork；主 Agent 为空，
+	// §6.5）。随 llm.request.started 载荷与请求 metadata 落库，供 context
+	// receipt 与 cache lineage 对账。
+	runContextMode string
 	// stopHookContinued marks that this run already continued because a Stop
 	// hook blocked finishing. Codex exposes this as stop_hook_active so a hook
 	// can avoid blocking forever.
@@ -675,6 +679,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// Fork 前缀审计（P2-1'）：同样按 run 重置，重试不自带上一 attempt 的结果。
 	loop.forkAudit = options.ForkAudit
 	loop.forkAuditDone = false
+	loop.runContextMode = resolveRunContextMode(options)
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
 	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
@@ -2818,6 +2823,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if lineage.SubagentID != "" {
 			requestPayload["subagent_id"] = lineage.SubagentID
 		}
+	}
+	// §6.5：子代理运行的上下文模式显式化（fresh/fork；主 Agent 不携带该键）。
+	if mode := loop.runContextMode; mode != "" {
+		req.Metadata[contextModeKey] = mode
+		requestPayload[contextModeKey] = mode
 	}
 	addRemainingBudgetMetadata(requestPayload, remainingBudget)
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {

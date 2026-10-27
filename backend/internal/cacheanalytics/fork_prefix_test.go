@@ -29,12 +29,17 @@ func TestBuildTerminalRecordCarriesForkPrefixAudit(t *testing.T) {
 		ForkSnapshotMessages:   12,
 		ForkSnapshotTokens:     3400,
 		ForkPrefixKeptMessages: 12,
+		ContextMode:            "fork",
+		ForkSnapshotHash:       "0123456789abcdef",
 	})
 	if record.ForkPrefixPreserved == nil || !*record.ForkPrefixPreserved {
 		t.Fatalf("fork audit preserved flag must be carried, got %#v", record.ForkPrefixPreserved)
 	}
 	if record.ForkSnapshotMessages != 12 || record.ForkSnapshotTokens != 3400 || record.ForkPrefixKeptMessages != 12 {
 		t.Fatalf("fork audit sizes must be carried, got %+v", record)
+	}
+	if record.ContextMode != "fork" || record.ForkSnapshotHash != "0123456789abcdef" {
+		t.Fatalf("context lineage fields must be carried, got %+v", record)
 	}
 
 	// record_json 存储路径：JSON 往返保真（cache_requests 镜像表直接序列化）。
@@ -51,6 +56,9 @@ func TestBuildTerminalRecordCarriesForkPrefixAudit(t *testing.T) {
 	}
 	if decoded.ForkSnapshotTokens != 3400 || decoded.ForkPrefixKeptMessages != 12 {
 		t.Fatalf("roundtrip lost fork sizes: %+v", decoded)
+	}
+	if decoded.ContextMode != "fork" || decoded.ForkSnapshotHash != "0123456789abcdef" {
+		t.Fatalf("roundtrip lost context lineage: %+v", decoded)
 	}
 }
 
@@ -72,6 +80,9 @@ func TestBuildTerminalRecordOmitsUnobservedForkAudit(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "fork_prefix_preserved") {
 		t.Fatalf("unobserved fork audit must not emit JSON keys, got %s", encoded)
+	}
+	if strings.Contains(string(encoded), "context_mode") || strings.Contains(string(encoded), "fork_snapshot_hash") {
+		t.Fatalf("unobserved context lineage must not emit JSON keys, got %s", encoded)
 	}
 
 	// 显式 false（被装配改写）必须保留为观测值，而不是折叠成未观测。

@@ -34,6 +34,10 @@ const (
 	forkSnapshotMessagesKey   = "fork_snapshot_messages"
 	forkSnapshotTokensKey     = "fork_snapshot_tokens"
 	forkPrefixKeptMessagesKey = "fork_prefix_kept_messages"
+	// forkSnapshotHashKey / contextModeKey（§6.4/§6.5）：fork 快照稳定指纹与
+	// 子代理运行的上下文模式，随 llm.request.* 载荷进入 cache analytics。
+	forkSnapshotHashKey = "fork_snapshot_hash"
+	contextModeKey      = "context_mode"
 )
 
 // forkPrefixStats 是一次前缀保持性检查的结果。
@@ -46,6 +50,8 @@ type forkPrefixStats struct {
 	// keptMessages 是最终装配消息中仍然连续保持的快照前缀长度
 	//（preserved=true 时等于 snapshotMessages；部分改写时给出缩水程度）。
 	keptMessages int
+	// snapshotHash 是快照的稳定指纹（§6.4 lineage：同一快照跨 attempt/请求一致）。
+	snapshotHash string
 }
 
 // metadata 把审计结果摊成请求 metadata / 事件载荷键值。
@@ -55,6 +61,7 @@ func (s forkPrefixStats) metadata() map[string]interface{} {
 		forkSnapshotMessagesKey:   s.snapshotMessages,
 		forkSnapshotTokensKey:     s.snapshotTokens,
 		forkPrefixKeptMessagesKey: s.keptMessages,
+		forkSnapshotHashKey:       s.snapshotHash,
 	}
 }
 
@@ -71,6 +78,7 @@ func evaluateForkPrefixPreservation(snapshot, managed []types.Message, countToke
 		counter = forkSnapshotFallbackTokens
 	}
 	stats.snapshotTokens = counter(snapshot)
+	stats.snapshotHash = forkSnapshotHash(snapshot)
 	if len(managed) == 0 {
 		return stats
 	}

@@ -20,11 +20,21 @@ package agent
 //      fresh——不静默截断历史（避免子级看到半截上下文却不知道）。
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
+
+// subagentContextMode 常量：context_mode 的稳定取值（§6.5）。
+const (
+	subagentContextModeFresh = "fresh"
+	subagentContextModeFork  = "fork"
 )
 
 // MaxForkSnapshotTokens fork 快照的 token 上限（对齐单轮预算的保守缺省）。
@@ -139,4 +149,66 @@ func subagentTasksRequestFork(tasks []SubagentTask) bool {
 		}
 	}
 	return false
+}
+
+// forkSnapshotHash 计算 fork 快照的稳定指纹（§6.4 cache lineage / §6.5 receipt）：
+// 逐消息按 role + content + content_parts + tool_calls + tool_call_id 规整后做
+// SHA-256，取前 16 位十六进制。同一冻结快照字节级稳定（父会话后续追加轮次不
+// 改变已取走的快照）；无快照返回空串，让读取侧把"未 fork"与"空快照"分开表达。
+func forkSnapshotHash(messages []types.Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	hasher := sha256.New()
+	for _, message := range messages {
+		io.WriteString(hasher, strings.ToLower(strings.TrimSpace(message.Role)))
+		io.WriteString(hasher, "\x00")
+		io.WriteString(hasher, message.Content)
+		io.WriteString(hasher, "\x01")
+		if encoded, err := json.Marshal(message.ContentParts); err == nil {
+			hasher.Write(encoded)
+		}
+		io.WriteString(hasher, "\x02")
+		if encoded, err := json.Marshal(message.ToolCalls); err == nil {
+			hasher.Write(encoded)
+		}
+		io.WriteString(hasher, "\x03")
+		io.WriteString(hasher, strings.TrimSpace(message.ToolCallID))
+		io.WriteString(hasher, "\x04")
+	}
+	return hex.EncodeToString(hasher.Sum(nil))[:16]
+}
+
+// resolveRunContextMode 解析一次 child run 的上下文模式：fork = 注入了父历史
+// 快照；fresh = 无历史（含"请求 fork 但快照为空/首轮无历史"的等价 fresh）。
+// 主 Agent 运行（无 subagent lineage）返回空串：该维度只属于子代理运行。
+func resolveRunContextMode(options loopRunOptions) string {
+	if strings.TrimSpace(options.SubagentID) == "" {
+		return ""
+	}
+	if len(options.History) > 0 {
+		return subagentContextModeFork
+	}
+	return subagentContextModeFresh
+}
+
+// subagentContextReceipt 组装 spawn 审计的 context receipt（§6.5）：requested
+// （任务请求的模式，空按 fresh）与 effective（快照非空才是 fork）分离，显式
+// 给出 parent_history_injected，供"看起来继承了但模型不记得父对话"类问题事后
+// 可查。
+func subagentContextReceipt(task SubagentTask, snapshotMessages int) map[string]interface{} {
+	requested := strings.TrimSpace(task.Context)
+	if requested == "" {
+		requested = subagentContextModeFresh
+	}
+	effective := subagentContextModeFresh
+	if snapshotMessages > 0 {
+		effective = subagentContextModeFork
+	}
+	return map[string]interface{}{
+		"requested_context":       requested,
+		"effective_context":       effective,
+		"parent_history_injected": snapshotMessages > 0,
+		"fork_snapshot_messages":  snapshotMessages,
+	}
 }
