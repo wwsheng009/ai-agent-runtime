@@ -509,9 +509,9 @@ backend/internal/cacheanalytics/*
 
 - [x] `runErr != nil` 且 `result != nil` 时，父回执包含 usage；（ac970024：applySubagentResultOutput + 跨 attempt 聚合，单测锁定）
 - [x] failed task 的 findings/patches/artifact refs 保留；（同上；partial_* 字段贯通终态事件与 SubagentStop hook）
-- [ ] 每个 attempt 的 usage 可按 `llm_request_id` 对账；（部分：`usage_by_attempt` 事件与 usage_subagents 收敛已落地；request↔attempt 的显式关联列仍缺）
+- [x] 每个 attempt 的 usage 可按 `llm_request_id` 对账；（`usage_by_attempt` 事件（ac970024）+ 调度 attempt 盖进请求 metadata 与载荷、cache 记录新增 `task_attempt` 列（ab6a830e），request↔attempt 可直接关联）
 - [x] task failure 不再把成本聚合成 0；（失败分支取回 Usage + usage_by_attempt，单测 TestApplySubagentResultOutput*）
-- [ ] cache error request 没有 usage 时显示 `usage_unavailable_reason`，不写成真实零消耗。（未实现）
+- [x] cache error request 没有 usage 时显示 `usage_unavailable_reason`，不写成真实零消耗；（ab6a830e：`request_error`/`usage_not_reported` 三档 + 空串语义，单测锁定）
 
 ### 8.3 Fresh/fork context
 
@@ -520,7 +520,7 @@ backend/internal/cacheanalytics/*
 - [x] capability 开启时只注入父级已完成、配平、去 system 的快照；（subagent_context_test：system 剥离/深拷贝冻结/首轮等价 fresh）
 - [x] 父会话后续新增消息不会改变已创建 child 的 snapshot hash；（0b71fb31：forkSnapshotHash 稳定性 + 冻结深拷贝测试）
 - [x] snapshot 超过 96,000 token 时整体拒绝，不静默截断；（既有测试 + 结构化 next_action 拒绝）
-- [ ] direct spawn 与 batch spawn 对 `none/all/last:N` 的语义一致；（未统一：direct 路径的 context receipt/parent key 尚未接线）
+- [ ] direct spawn 与 batch spawn 对 `none/all/last:N` 的语义一致；（receipt/parent key 已统一（221d3c22）；`last:N` 在 batch 路径仍无对应参数，语义一致性未完全达成）
 - [x] `inherit_parent_when_missing` 只影响路由缺省，不影响 history/context mode。（源码语义与既有测试口径未变）
 
 ### 8.4 Cache
@@ -603,6 +603,9 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `91ebd018` | usageanalytics attempt 观测增量列（cancel_source/retry_skipped/partial_output）与 provider 超时 E2E | §6.3 / §8.1 |
 | `0b71fb31` | context receipt 与 fork 快照指纹（§6.4/§6.5） | §6.4 / §6.5 |
 | `4ab293f3` | parent_prompt_cache_key 贯通（§6.4 父/子 key 对账） | §6.4 |
+| `99dfadd6` | 本文件 §8 勾选更新与 §13 实施复核记录 | 文档 |
+| `221d3c22` | direct spawn 的 context receipt 与父 key 接线（§6.5/§6.4 统一） | §6.5 / §8.3 |
+| `ab6a830e` | usage_unavailable_reason 与 task_attempt 对账列（§8.2 收尾） | §8.2 |
 
 ### 13.2 逐条对照（§6）
 
@@ -614,7 +617,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - **§6.2 失败 usage/部分产出**：`applySubagentResultOutput` 统一收口 + 跨 attempt 聚合 + partial 计数（`9a06910a`/`ac970024`）。
 - **§6.3 统一 analytics**：usageanalytics 增 `cancel_source/retry_skipped/partial_output` 列（含幂等迁移与读取面）；cacheanalytics 增 `context_mode/fork_snapshot_hash/parent_prompt_cache_key`；`batch_id/task_id/attempt` 既有。四层状态分列（request/attempt/task/batch）仍建议在查询侧显式化。
 - **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss/request_error` 枚举细分与 provider-specific 前缀实验**未做**。
-- **§6.5 context receipt**：`requested_context/effective_context/parent_history_injected/fork_snapshot_messages/fork_snapshot_hash` 入 route.resolved（`0b71fb31`）；capability/refusal 字段部分既有（`capability_refusals`）；direct spawn 与 batch 的统一 receipt **未贯通**。
+- **§6.5 context receipt**：`requested_context/effective_context/parent_history_injected/fork_snapshot_messages/fork_snapshot_hash` 入 route.resolved（`0b71fb31`）；capability/refusal 字段部分既有（`capability_refusals`）；direct spawn 与 batch 的 receipt 已同字段名统一（direct 落子会话上下文并转发进完成镜像，`221d3c22`）。
 - **§6.6 只读工具面**：既有能力已覆盖（schema 层剥离、确定性 tool_error 分类、边界横幅、连续拒绝硬停）；本轮未改。
 - **§6.7 stall/渲染诊断**：stall 事件保持轻量（2026-10-24 产品决策移除软提醒）；render suppression 字段未扩。**未做**。
 
@@ -627,10 +630,11 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
-2. `usage_unavailable_reason`、`confirmed_miss/request_error` 细分、`llm_request_id ↔ attempt` 显式关联列。
-3. direct spawn（chat_actor_registry）与 batch 的 context receipt / parent key 统一接线。
+2. `confirmed_miss` 枚举细分（`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
+3. batch 路径的 `last:N` fork 参数（receipt/parent key 统一已在 `221d3c22` 落地）。
 4. provider response-header guard 的 retry budget 专项用例；task/batch deadline 档的 E2E 注入。
 5. `resume` cache lineage 模式当前实现不存在（§8.4 对应项保留未勾选）。
+6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
 
 ### 13.5 备注
 
