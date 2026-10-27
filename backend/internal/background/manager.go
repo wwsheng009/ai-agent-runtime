@@ -3170,8 +3170,10 @@ func buildShellCommand(ctx context.Context, command string) *exec.Cmd {
 	shell := runtimeexecutor.DefaultUserShell()
 	shellArgs := shell.DeriveExecArgs(command, false)
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
-	// 注入 resolver 选定的 rg 目录，保证后台命令内可直接调用 rg。
-	cmd.Env = runtimeexecutor.WithResolvedRipgrepPath(os.Environ())
+	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
+	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
+	// captured background output is unstyled before it reaches the model.
+	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(os.Environ()))
 	return cmd
 }
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,19 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	launch.Workdir = opts.Workdir
 	launch.Env = opts.Env
+	// A nil Env means "inherit the parent environment" (Go exec.Cmd semantics).
+	// Materialize it first so NeutralizeConsoleStylingEnv keeps every inherited
+	// variable and only overrides the styling-related ones, rather than
+	// collapsing the environment to just the neutralized baseline.
+	if launch.Env == nil {
+		launch.Env = os.Environ()
+	}
+	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
+	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat so captured output is
+	// unstyled before any Prepare hook (bwrap, sudo, sandbox) can wrap it. The
+	// PowerShell UTF-8 payload directive is applied separately below and
+	// intentionally left intact.
+	launch.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(launch.Env)
 	// PowerShell's UTF-8 directive belongs to the shell payload, so it must be
 	// applied before a Prepare hook can wrap the launch (bwrap, sudo, ...).
 	launch.Args = prefixPowerShellArgs(launch.Args, shell, launch.Command)

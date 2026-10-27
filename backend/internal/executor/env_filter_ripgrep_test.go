@@ -96,6 +96,99 @@ func TestWithResolvedRipgrepPathPrependsResolverDir(t *testing.T) {
 	}
 }
 
+func TestNeutralizeConsoleStylingEnvForcesNoColorBaseline(t *testing.T) {
+	env := []string{
+		"HOME=/home/u",
+		"PATH=/usr/bin:/bin",
+		// Host values that would otherwise enable styling in a captured pipe.
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"NO_COLOR=",
+		"PAGER=less",
+		"GIT_PAGER=less",
+		"CLICOLOR=1",
+		"CLICOLOR_FORCE=1",
+	}
+	out := NeutralizeConsoleStylingEnv(env)
+
+	want := map[string]string{
+		"NO_COLOR":       "1",
+		"TERM":           "dumb",
+		"COLORTERM":      "",
+		"PAGER":          "cat",
+		"GIT_PAGER":      "cat",
+		"GH_PAGER":       "cat",
+		"CLICOLOR":       "",
+		"CLICOLOR_FORCE": "",
+	}
+	got := map[string]string{}
+	for _, entry := range out {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if _, ok := want[parts[0]]; ok {
+			got[parts[0]] = parts[1]
+		}
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("neutralized %s = %q, want %q (env=%#v)", k, got[k], v, out)
+		}
+	}
+	// Each styling var must appear exactly once (forced value wins, not appended).
+	for k := range want {
+		count := 0
+		for _, entry := range out {
+			if strings.HasPrefix(entry, k+"=") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly one %s entry, got %d (env=%#v)", k, count, out)
+		}
+	}
+	// Unrelated variables must survive intact.
+	if joined := strings.Join(out, "\n"); !strings.Contains(joined, "HOME=/home/u") || !strings.Contains(joined, "PATH=/usr/bin:/bin") {
+		t.Fatalf("unrelated env entries dropped: %#v", out)
+	}
+}
+
+func TestNeutralizeConsoleStylingEnvIdempotentAndPreservesValues(t *testing.T) {
+	// Stress: applying twice (e.g. shellexec.Run + a nested wrapper) must not
+	// grow the environment or flip values.
+	first := NeutralizeConsoleStylingEnv([]string{"A=1"})
+	second := NeutralizeConsoleStylingEnv(first)
+	if strings.Join(second, "\x00") != strings.Join(first, "\x00") {
+		t.Fatalf("not idempotent:\n first=%#v\nsecond=%#v", first, second)
+	}
+	// Forced styling vars are present with their neutralized values and are
+	// unique (forced value wins, not appended).
+	want := map[string]string{
+		"NO_COLOR": "1", "TERM": "dumb", "COLORTERM": "", "PAGER": "cat",
+		"GIT_PAGER": "cat", "GH_PAGER": "cat", "CLICOLOR": "", "CLICOLOR_FORCE": "",
+	}
+	for k, v := range want {
+		count, gotV := 0, ""
+		for _, entry := range second {
+			if strings.HasPrefix(entry, k+"=") {
+				count++
+				gotV = strings.TrimPrefix(entry, k+"=")
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly one %s entry, got %d in %#v", k, count, second)
+		}
+		if gotV != v {
+			t.Fatalf("neutralized %s = %q, want %q in %#v", k, gotV, v, second)
+		}
+	}
+	// User variables that do not collide are preserved.
+	if !containsEntry(second, "A=1") {
+		t.Fatalf("preserved user var A=1 dropped: %#v", second)
+	}
+}
+
 func writeRipgrepFixture(t *testing.T, path string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -121,4 +214,13 @@ func envPathEntry(t *testing.T, env []string) string {
 	}
 	t.Fatalf("PATH entry missing in %#v", env)
 	return ""
+}
+
+func containsEntry(env []string, entry string) bool {
+	for _, e := range env {
+		if e == entry {
+			return true
+		}
+	}
+	return false
 }

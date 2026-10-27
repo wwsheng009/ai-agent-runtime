@@ -123,6 +123,74 @@ func pathListContainsDir(pathValue, dir string) bool {
 	return false
 }
 
+// NeutralizeConsoleStylingEnv forces the child process into a non-interactive,
+// unstyled baseline so its captured output is safe for model consumption.
+//
+// This mirrors Codex's UNIFIED_EXEC_ENV approach (codex-rs/core/src/
+// unified_exec/process_manager.rs): prevent console styling at the source by
+// injecting a fixed environment, instead of post-hoc scrubbing ANSI bytes from
+// already-captured output. The captured bytes are what the model reads, so
+// killing color/pager chrome upstream keeps the model input clean while
+// preserving UTF-8 (PowerShell's [Console]::OutputEncoding directive is owned
+// by the shell payload and is unaffected here).
+//
+// Mirroring Codex:
+//   - NO_COLOR=1: honour the no-color.org convention, most CLIs then skip color.
+//   - TERM=dumb: tell programs they drive a "dumb" terminal, disabling color,
+//     cursor movement and other terminal capabilities.
+//   - COLORTERM="": remove the true-color capability hint so 24-bit escapes are
+//     never emitted.
+//   - PAGER=cat / GIT_PAGER=cat / GH_PAGER=cat: replace less-style pagers (which
+//     add reverse-video status lines / progress chrome) with a straight pass-through.
+//
+// Clearing CLICOLOR / CLICOLOR_FORCE prevents the BSD "color if on a tty" family
+// from emitting color into a captured pipe.
+func NeutralizeConsoleStylingEnv(env []string) []string {
+	// Forced values. Empty value means "clear this variable" so callers cannot
+	// re-enable styling by inheriting a host value.
+	neutralized := []struct {
+		key   string
+		value string
+	}{
+		{"NO_COLOR", "1"},
+		{"TERM", "dumb"},
+		{"COLORTERM", ""},
+		{"PAGER", "cat"},
+		{"GIT_PAGER", "cat"},
+		{"GH_PAGER", "cat"},
+		{"CLICOLOR", ""},
+		{"CLICOLOR_FORCE", ""},
+	}
+	// Seed from the input, dropping any entry whose key collides with a forced
+	// variable. Case-insensitive on Windows, exact elsewhere (os/exec semantics).
+	normalized := make([]string, 0, len(env)+len(neutralized))
+	for _, entry := range env {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) == 0 {
+			continue
+		}
+		skip := false
+		for _, n := range neutralized {
+			if runtime.GOOS == "windows" {
+				if strings.EqualFold(parts[0], n.key) {
+					skip = true
+					break
+				}
+			} else if parts[0] == n.key {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			normalized = append(normalized, entry)
+		}
+	}
+	for _, n := range neutralized {
+		normalized = append(normalized, n.key+"="+n.value)
+	}
+	return normalized
+}
+
 // WithResolvedRipgrepPath prepends the resolver-selected ripgrep directory to
 // PATH so child shells can run plain `rg` even when the binary is not on the
 // parent PATH. It is a no-op when rg is unresolvable, the resolved file is not
