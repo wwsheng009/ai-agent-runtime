@@ -43,6 +43,9 @@ func TestSpawnSubagentsSchemaFollowsSchedulerCapabilities(t *testing.T) {
 		if _, ok := props["report_schema"]; ok {
 			t.Fatal("report_schema must stay out of the schema until output schema is granted")
 		}
+		if _, ok := props["fork_messages"]; ok {
+			t.Fatal("fork_messages must stay out of the schema until fork_context is granted")
+		}
 	})
 
 	t.Run("granted caps surface context and report_schema", func(t *testing.T) {
@@ -60,5 +63,9 @@ func TestSpawnSubagentsSchemaFollowsSchedulerCapabilities(t *testing.T) {
 		if _, ok := props["report_schema"]; !ok {
 			t.Fatal("granted output schema must surface the report_schema field")
 		}
+		forkMessagesField, ok := props["fork_messages"].(map[string]interface{})
+		require.True(t, ok, "granted fork_context must surface the fork_messages window")
+		require.Equal(t, "integer", forkMessagesField["type"])
+		require.Equal(t, 1, forkMessagesField["minimum"])
 	})
 }

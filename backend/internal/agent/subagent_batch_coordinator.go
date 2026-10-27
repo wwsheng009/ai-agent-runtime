@@ -2466,6 +2466,11 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 		TimeoutSec:            t.TimeoutSec,
 		ReadOnly:              t.ReadOnly,
 		CompletionRequirement: t.CompletionRequirement,
+		// Context/ForkMessages 必须进 durable spec：幂等 admission replay 用
+		// loadDurableTasks 从 spec 重建任务，丢弃它们会把 fork（含 last:N 窗口）
+		// 静默降级为 fresh。
+		Context:      t.Context,
+		ForkMessages: t.ForkMessages,
 	}
 }
 
@@ -2505,6 +2510,8 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 		TimeoutSec:            spec.TimeoutSec,
 		ReadOnly:              spec.ReadOnly,
 		CompletionRequirement: spec.CompletionRequirement,
+		Context:               spec.Context,
+		ForkMessages:          spec.ForkMessages,
 	}
 }
 

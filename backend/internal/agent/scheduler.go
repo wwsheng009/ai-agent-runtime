@@ -81,6 +81,11 @@ type SubagentTask struct {
 	// Fork requests are rejected at capability admission until the fork
 	// capability is granted (capabilities.go Negotiate).
 	Context string `json:"context,omitempty" yaml:"context,omitempty"`
+	// ForkMessages bounds a fork snapshot to the most recent N messages of the
+	// parent's completed-turn history（batch 路径对 direct spawn `fork_turns=N`
+	// 的等价参数，单位同为「最近 N 条消息」）。0 = 全量快照。仅在
+	// Context="fork" 时有效；其他组合在 decode 准入期直接拒绝。
+	ForkMessages int `json:"fork_messages,omitempty" yaml:"fork_messages,omitempty"`
 	// ReportSchema optionally requests a structured final report from the
 	// child (P1-2' submit_report contract). Object-rooted JSON Schema.
 	// Rejected at capability admission while OutputSchema is not granted.

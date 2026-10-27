@@ -172,6 +172,13 @@ type TaskSpec struct {
 	TimeoutSec            int         `json:"timeout_sec,omitempty"`
 	ReadOnly              bool        `json:"read_only,omitempty"`
 	CompletionRequirement string      `json:"completion_requirement,omitempty"`
+	// Context/ForkMessages carry the fork request across durable replay:
+	// idempotent admission replay (loadDurableTasks) reconstructs the
+	// scheduler-facing tasks from these specs, so dropping them would silently
+	// degrade a fork（含 last:N 窗口）任务为 fresh。omitempty 保证旧 spec
+	// 字节级兼容（空 context = fresh，与改动前行为一致）。
+	Context      string `json:"context,omitempty"`
+	ForkMessages int    `json:"fork_messages,omitempty"`
 }
 
 // Epoch returns a displayable task id (stable for idempotency).

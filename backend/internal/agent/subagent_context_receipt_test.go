@@ -63,6 +63,19 @@ func TestSubagentContextReceipt(t *testing.T) {
 	if receipt["requested_context"] != "fork" || receipt["effective_context"] != "fresh" {
 		t.Fatalf("empty fork snapshot must degrade to fresh effective: %+v", receipt)
 	}
+
+	// §8.3 窗口：请求了 fork_messages 时 receipt 同时给出窗口与实际注入条数
+	//（requested 窗口 ≠ 实际条数：配平/上限仍会计入）。
+	windowedTask := SubagentTask{ID: "t-fork-window", Context: SubagentContextFork, ForkMessages: 20}
+	receipt = subagentContextReceipt(windowedTask, 18)
+	if receipt["fork_messages"] != 20 || receipt["fork_snapshot_messages"] != 18 {
+		t.Fatalf("windowed fork receipt must separate requested window from injected count: %+v", receipt)
+	}
+	// 未请求窗口时不出现该键（"未请求" ≠ "窗口=0"）。
+	receipt = subagentContextReceipt(forkTask, 12)
+	if _, ok := receipt["fork_messages"]; ok {
+		t.Fatalf("unrequested window must not fabricate fork_messages: %+v", receipt)
+	}
 }
 
 // TestEmitSubagentRouteResolvedCarriesForkReceipt 锁定 §6.5 emit 接线：fork 任务

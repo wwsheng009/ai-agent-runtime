@@ -466,3 +466,66 @@ func TestDecodeSubagentTasksRejectsBlankWritePathsItem(t *testing.T) {
 		t.Fatalf("error %q does not name write_paths", message)
 	}
 }
+
+// §8.3：batch 侧 fork 窗口参数（fork_messages）——direct spawn fork_turns=N 的
+// 等价形态，仅与 context="fork" 组合有效。
+func TestDecodeSubagentTasksAcceptsForkMessagesWindow(t *testing.T) {
+	tasks, err := decodeSubagentTasks(subagentDecodeArgs(map[string]interface{}{
+		"id":            "windowed",
+		"goal":          "summarize the recent decisions",
+		"context":       "fork",
+		"fork_messages": float64(20), // JSON 数字到达解码层时是 float64
+	}))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Context != SubagentContextFork || tasks[0].ForkMessages != 20 {
+		t.Fatalf("windowed fork task = %+v", tasks)
+	}
+	// int 直接构造（内部调用路径）同义。
+	tasks, err = decodeSubagentTasks(subagentDecodeArgs(map[string]interface{}{
+		"id": "windowed-int", "goal": "g", "context": "fork", "fork_messages": 7,
+	}))
+	if err != nil || len(tasks) != 1 || tasks[0].ForkMessages != 7 {
+		t.Fatalf("int window = %+v (%v)", tasks, err)
+	}
+}
+
+func TestDecodeSubagentTasksRejectsForkMessagesWithoutForkContext(t *testing.T) {
+	// 「有窗口却没有 fork」是语义矛盾：拒绝而不是静默丢弃（否则调用方以为
+	// 窗口生效，实际拿到的是 fresh）。
+	message := decodeSubagentTasksError(t, subagentDecodeArgs(map[string]interface{}{
+		"id":            "fresh-with-window",
+		"goal":          "g",
+		"context":       "fresh",
+		"fork_messages": 20,
+	}))
+	for _, want := range []string{"fork_messages=20", "next_action=set_context_to_fork_or_drop_fork_messages"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not mention %q", message, want)
+		}
+	}
+}
+
+func TestDecodeSubagentTasksSanitizesForkMessagesRange(t *testing.T) {
+	// 非正值沿用既有数值旋钮口径：降级为全量并留 route warning。
+	tasks, err := decodeSubagentTasks(subagentDecodeArgs(map[string]interface{}{
+		"id": "zero-window", "goal": "g", "context": "fork", "fork_messages": -3,
+	}))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ForkMessages != 0 {
+		t.Fatalf("non-positive window must degrade to the full snapshot, got %+v", tasks)
+	}
+	if joined := strings.Join(tasks[0].RouteWarnings, "|"); !strings.Contains(joined, "fork_messages_ignored_non_positive") {
+		t.Fatalf("non-positive window must leave a route warning, got %q", joined)
+	}
+	// 字符串（非 JSON 数字）直接拒绝：与 budget_tokens/timeout 同口径。
+	message := decodeSubagentTasksError(t, subagentDecodeArgs(map[string]interface{}{
+		"id": "string-window", "goal": "g", "context": "fork", "fork_messages": "20",
+	}))
+	if !strings.Contains(message, `"fork_messages"`) || !strings.Contains(message, "JSON number") {
+		t.Fatalf("string window must be rejected with the standard type error, got %q", message)
+	}
+}

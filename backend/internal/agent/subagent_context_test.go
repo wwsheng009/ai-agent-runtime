@@ -154,3 +154,60 @@ func TestBuildForkHistoryForTaskHonorsConfiguredCeiling(t *testing.T) {
 		t.Fatalf("oversize error must carry next_action, got %v", err)
 	}
 }
+
+// TestBuildForkHistoryWithWindowKeepsMostRecentCompletedMessages 锁定 §8.3：
+// batch 侧 fork 窗口（task.ForkMessages，等价 direct spawn fork_turns=N）以
+// 「消息条数」为单位，且窗口作用于配平后的已完成轮次。
+func TestBuildForkHistoryWithWindowKeepsMostRecentCompletedMessages(t *testing.T) {
+	// 配平后为 [u1 a1 u2 a2]（system 与进行中 user 均已剔除）。
+	windowed, err := BuildForkHistoryWithWindow(forkFixture(), nil, 0, 2)
+	if err != nil {
+		t.Fatalf("windowed fork must build: %v", err)
+	}
+	if len(windowed) != 2 ||
+		windowed[0].Content != "now check the api layer" ||
+		windowed[1].Content != "the api layer is thin" {
+		t.Fatalf("window must keep the most recent 2 completed messages, got %+v", windowed)
+	}
+	full, err := BuildForkHistory(forkFixture(), nil, 0)
+	if err != nil {
+		t.Fatalf("full fork must build: %v", err)
+	}
+	// 窗口 ≥ 快照长度时等价全量；lastMessages<=0 与 BuildForkHistory 同义。
+	for _, window := range []int{0, 99} {
+		got, err := BuildForkHistoryWithWindow(forkFixture(), nil, 0, window)
+		if err != nil || len(got) != len(full) {
+			t.Fatalf("window=%d must equal the full snapshot (%d messages), got %d (%v)", window, len(full), len(got), err)
+		}
+	}
+}
+
+// TestBuildForkHistoryWithWindowAppliesBeforeTokenCeiling 锁定调用序：窗口先于
+// 上限校验——缩小窗口必须能让「全量超限」的父历史合法通过，否则 last:N 对大
+// 历史会话永远不可用。
+func TestBuildForkHistoryWithWindowAppliesBeforeTokenCeiling(t *testing.T) {
+	perMessage := func(messages []types.Message) int { return len(messages) * 50 }
+	if _, err := BuildForkHistory(forkFixture(), perMessage, 100); err == nil {
+		t.Fatal("full snapshot (4 messages / 200 tokens) must exceed the 100-token ceiling")
+	}
+	windowed, err := BuildForkHistoryWithWindow(forkFixture(), perMessage, 100, 2)
+	if err != nil {
+		t.Fatalf("windowed snapshot (2 messages / 100 tokens) must fit the ceiling: %v", err)
+	}
+	if len(windowed) != 2 {
+		t.Fatalf("windowed snapshot = %d messages, want 2", len(windowed))
+	}
+}
+
+// TestBuildForkHistoryForTaskAppliesForkMessages 锁定 task→快照接线：窗口从任务
+// 字段透传到 batch 侧唯一的快照构建入口。
+func TestBuildForkHistoryForTaskAppliesForkMessages(t *testing.T) {
+	task := SubagentTask{ID: "forker", Goal: "g", Context: SubagentContextFork, ForkMessages: 2}
+	history, err := buildForkHistoryForTask(SubagentRunOptions{ParentHistory: forkFixture()}, task, nil, 0)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(history) != 2 || history[len(history)-1].Content != "the api layer is thin" {
+		t.Fatalf("fork_messages=2 must keep the most recent 2 messages, got %+v", history)
+	}
+}

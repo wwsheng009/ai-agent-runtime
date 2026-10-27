@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -782,4 +783,34 @@ func containsEvent(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestBatchTaskSpecRoundTripPreservesForkContext 锁定 §8.3：fork（含 last:N
+// 窗口）必须穿过 durable spec 的序列化往返——幂等 admission replay 走
+// taskToBatchSpec → spec JSON → subagentTaskFromBatchSpec 重建任务，字段在
+// 任一侧丢失都会把 fork 静默降级为 fresh。
+func TestBatchTaskSpecRoundTripPreservesForkContext(t *testing.T) {
+	task := SubagentTask{ID: "t-window", Goal: "g", Context: SubagentContextFork, ForkMessages: 20}
+	spec := taskToBatchSpec(task, "t-window")
+	blob, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	var decoded subagentbatch.TaskSpec
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+	restored := subagentTaskFromBatchSpec(subagentbatch.SubagentTaskRecord{TaskID: "t-window"}, decoded)
+	if restored.Context != SubagentContextFork || restored.ForkMessages != 20 {
+		t.Fatalf("restored task = %+v, want context=fork fork_messages=20", restored)
+	}
+	// 未请求 fork 的任务不产生新键（旧 spec 字节级兼容）。
+	plain := taskToBatchSpec(SubagentTask{ID: "t-plain", Goal: "g"}, "t-plain")
+	plainBlob, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("marshal plain spec: %v", err)
+	}
+	if strings.Contains(string(plainBlob), "fork_messages") || strings.Contains(string(plainBlob), `"context"`) {
+		t.Fatalf("fresh task spec must not grow fork keys: %s", plainBlob)
+	}
 }

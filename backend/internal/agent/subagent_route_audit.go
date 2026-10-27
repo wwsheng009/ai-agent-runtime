@@ -89,6 +89,10 @@ func (s *SubagentScheduler) emitSubagentRouteResolved(options SubagentRunOptions
 	if task.Context != "" {
 		base["context"] = task.Context
 	}
+	if task.ForkMessages > 0 {
+		// 窗口请求同样入审计：fork 全量还是 last:N 是 cache/上下文成本的关键差异。
+		base["fork_messages"] = task.ForkMessages
+	}
 	if task.ReportSchema != nil {
 		base["report_schema"] = true
 	}

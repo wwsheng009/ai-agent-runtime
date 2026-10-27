@@ -97,9 +97,26 @@ func forkBalancedPrefix(messages []types.Message) []types.Message {
 //
 // 返回错误仅在快照超限时：整体拒绝（建议 fresh），绝不静默截断。
 func BuildForkHistory(parentMessages []types.Message, countTokens func([]types.Message) int, maxSnapshotTokens int) ([]types.Message, error) {
+	return buildForkHistoryWithWindow(parentMessages, countTokens, maxSnapshotTokens, 0)
+}
+
+// BuildForkHistoryWithWindow 是 BuildForkHistory 的窗口版本：lastMessages > 0
+// 时只注入配平后快照中最近的 N 条消息（batch 路径 `fork_messages` 与 direct
+// spawn `fork_turns=N` 的同一语义，单位都是消息条数）。窗口在 token 上限校验
+// **之前**生效：缩小窗口可以让「全量超限」的父历史在窗口内合法通过。窗口起点
+// 可能落在 assistant 消息上（与 direct spawn 的 GetRecentMessages 一致——它同样
+// 不保证从 user 开始）。lastMessages<=0 与 BuildForkHistory 完全同义。
+func BuildForkHistoryWithWindow(parentMessages []types.Message, countTokens func([]types.Message) int, maxSnapshotTokens, lastMessages int) ([]types.Message, error) {
+	return buildForkHistoryWithWindow(parentMessages, countTokens, maxSnapshotTokens, lastMessages)
+}
+
+func buildForkHistoryWithWindow(parentMessages []types.Message, countTokens func([]types.Message) int, maxSnapshotTokens, lastMessages int) ([]types.Message, error) {
 	prefix := forkBalancedPrefix(parentMessages)
 	if len(prefix) == 0 {
 		return nil, nil
+	}
+	if lastMessages > 0 && len(prefix) > lastMessages {
+		prefix = prefix[len(prefix)-lastMessages:]
 	}
 	limit := forkSnapshotTokenLimit(maxSnapshotTokens)
 	// 无运行时时用保守回退估算：token 上限在任何宿主上都必须生效，
@@ -213,12 +230,18 @@ func subagentContextReceipt(task SubagentTask, snapshotMessages int) map[string]
 	if snapshotMessages > 0 {
 		effective = subagentContextModeFork
 	}
-	return map[string]interface{}{
+	receipt := map[string]interface{}{
 		"requested_context":       requested,
 		"effective_context":       effective,
 		"parent_history_injected": snapshotMessages > 0,
 		"fork_snapshot_messages":  snapshotMessages,
 	}
+	if task.ForkMessages > 0 {
+		// 请求的窗口（最近 N 条）与实际注入条数分离：窗口请求不保证条数
+		// （配平/上限仍会计入），两者都对账才不产生"看起来继承了多少"歧义。
+		receipt["fork_messages"] = task.ForkMessages
+	}
+	return receipt
 }
 
 // subagentParentPromptCacheKey 生成父会话 spawn 时刻的 prompt-cache key（§6.4

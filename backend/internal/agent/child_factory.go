@@ -203,6 +203,8 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 // history is an actionable error, never a silent fresh fallback. Oversize
 // snapshots fail the child build the same way (G5: refuse, don't truncate);
 // maxSnapshotTokens 0 selects the runtime default.
+// task.ForkMessages>0 时只注入配平后快照的最近 N 条（与 direct spawn
+// fork_turns=N 同语义；窗口先于 token 上限生效）。
 func buildForkHistoryForTask(options SubagentRunOptions, task SubagentTask, runtime *llm.LLMRuntime, maxSnapshotTokens int) ([]types.Message, error) {
 	if strings.TrimSpace(task.Context) != SubagentContextFork {
 		return nil, nil
@@ -213,7 +215,7 @@ func buildForkHistoryForTask(options SubagentRunOptions, task SubagentTask, runt
 			task.ID,
 		)
 	}
-	return BuildForkHistory(options.ParentHistory, forkSnapshotRuntimeTokens(runtime), maxSnapshotTokens)
+	return BuildForkHistoryWithWindow(options.ParentHistory, forkSnapshotRuntimeTokens(runtime), maxSnapshotTokens, task.ForkMessages)
 }
 
 func childSubagentSchedulerConfig(parentScheduler *SubagentScheduler, config SubagentSchedulerConfig) SubagentSchedulerConfig {

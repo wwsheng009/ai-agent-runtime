@@ -7870,6 +7870,27 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if task.Context != "" && task.Context != SubagentContextFresh && task.Context != SubagentContextFork {
 			return nil, fmt.Errorf("subagent_spawn_batch agent %d has invalid context %q (expected \"fresh\" or \"fork\")", index, task.Context)
 		}
+		// fork_messages（§8.3）：batch 路径对 direct spawn fork_turns=N 的等价窗口
+		// 参数。数值卫生沿用既有 per-task 数值旋钮口径（非正/非数值降级为 0 =
+		// 全量并留 warning）；但「有窗口却没有 fork」是语义矛盾，直接拒绝而不是
+		// 静默丢弃——否则调用方以为窗口生效，实际拿到的是 fresh。
+		if raw, ok := item["fork_messages"]; ok && raw != nil {
+			forkMessages, forkWarning := sanitizeDecodedSubagentOptionRange("fork_messages", raw)
+			if forkWarning != "" {
+				routeWarnings = append(routeWarnings, forkWarning)
+				// task 字面量在本块之前已构造，warning 必须回写才能随任务传递。
+				task.RouteWarnings = routeWarnings
+			}
+			if forkMessages > 0 {
+				if task.Context != SubagentContextFork {
+					return nil, fmt.Errorf(
+						"subagent_spawn_batch agent %d sets fork_messages=%d without context=\"fork\"; next_action=set_context_to_fork_or_drop_fork_messages",
+						index, forkMessages,
+					)
+				}
+				task.ForkMessages = forkMessages
+			}
+		}
 		if raw, ok := item["report_schema"]; ok && raw != nil {
 			schema, ok := raw.(map[string]interface{})
 			if !ok {
@@ -8041,6 +8062,7 @@ var decodedSubagentFieldTypes = []struct {
 	{"budget_tokens", subagentFieldNumber},
 	{"timeout", subagentFieldNumber},
 	{"max_turns", subagentFieldNumber},
+	{"fork_messages", subagentFieldNumber},
 	{"read_only", subagentFieldBool},
 	{"tools_whitelist", subagentFieldArray},
 	{"depends_on", subagentFieldArray},
@@ -9049,6 +9071,11 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 			"type":        "string",
 			"enum":        []string{"fresh", "fork"},
 			"description": "fresh (default) starts the child with no conversation history; the task must be self-contained. fork seeds the child with a one-time snapshot of this conversation's completed turns (it does not see the current in-flight turn). Fork children always inherit this route — provider/model overrides are rejected.",
+		}
+		agentsItems["fork_messages"] = map[string]interface{}{
+			"type":        "integer",
+			"minimum":     1,
+			"description": "Optional: with context=\"fork\", seed the child with only the most recent N messages of the completed-turn snapshot (same N semantics as the session-level fork_turns=N knob). The window is applied before the snapshot token ceiling, so a reduced window can succeed where a full fork is refused. Omit for the full snapshot.",
 		}
 	}
 	// handoff_in 与 OutputSchema 同进退：handoff 是结构化通道的一部分，
