@@ -208,6 +208,7 @@ type firstChildFailureProvider struct {
 	*roleRoutingLLMProvider
 	mu         sync.Mutex
 	childCalls int
+	attempts   []int
 	errText    string
 }
 
@@ -217,6 +218,9 @@ func (p *firstChildFailureProvider) Call(ctx context.Context, req *llm.LLMReques
 	}
 	p.mu.Lock()
 	p.childCalls++
+	if attempt, ok := req.Metadata["task_attempt"].(int); ok {
+		p.attempts = append(p.attempts, attempt)
+	}
 	fail := p.childCalls == 1
 	p.mu.Unlock()
 	if fail {
@@ -229,6 +233,13 @@ func (p *firstChildFailureProvider) callCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.childCalls
+}
+
+// observedAttempts 返回每次子请求携带的调度 attempt 序号（含失败调用）。
+func (p *firstChildFailureProvider) observedAttempts() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.attempts...)
 }
 
 // TestSubagentAttemptEventsPairOnTransientRetry 锁定 §6.1（行动文档 P0）验收：
@@ -354,6 +365,9 @@ func TestSubagentAttemptEventsPairOnTransientRetry(t *testing.T) {
 	require.Equal(t, "fresh", routeReceipt["requested_context"])
 	require.Equal(t, "fresh", routeReceipt["effective_context"])
 	require.Equal(t, false, routeReceipt["parent_history_injected"])
+	// provider 层在每次子请求（含被注入失败的那次）看到的调度 attempt 序号（§8.2）。
+	require.Equal(t, []int{1, 2}, provider.observedAttempts(),
+		"每次子请求必须携带调度 attempt 序号（task_attempt），request↔attempt 可对账")
 
 	require.Equal(t, 2, provider.callCount(),
 		"每次任务 attempt 恰一次 provider 调用（runtime 重试已关闭）：1 次失败 + 1 次成功")

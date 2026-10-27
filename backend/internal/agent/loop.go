@@ -248,6 +248,8 @@ type ReActLoop struct {
 	runContextMode string
 	// runParentPromptCacheKey 是本次 run 携带的父会话 prompt-cache key（§6.4）。
 	runParentPromptCacheKey string
+	// runTaskAttempt 是本次 run 的调度 attempt 序号（§8.2 对账列）。
+	runTaskAttempt int
 	// currentPromptCacheEpoch 暴露运行中的本地 epoch（run 内推进实时可见），
 	// 供 spawn 派发生成 parent_prompt_cache_key；run 外为 nil。
 	currentPromptCacheEpoch func() int
@@ -324,6 +326,9 @@ type loopRunOptions struct {
 	// ParentPromptCacheKey 是父会话 spawn 时刻的 prompt-cache key（§6.4 父/子
 	// key 对账）；空串不携带。
 	ParentPromptCacheKey string
+	// TaskAttempt 是调度 attempt 序号（§8.2：request↔attempt 对账）；0 = 主
+	// Agent 或单次运行（不携带）。
+	TaskAttempt int
 }
 
 // HistorySession 描述 ReActLoop 运行时需要的最小 session 能力。
@@ -689,6 +694,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.forkAuditDone = false
 	loop.runContextMode = resolveRunContextMode(options)
 	loop.runParentPromptCacheKey = strings.TrimSpace(options.ParentPromptCacheKey)
+	loop.runTaskAttempt = options.TaskAttempt
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
 	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
@@ -2846,6 +2852,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if key := loop.runParentPromptCacheKey; key != "" {
 		req.Metadata["parent_prompt_cache_key"] = key
 		requestPayload["parent_prompt_cache_key"] = key
+	}
+	// §8.2：调度 attempt 序号（>0 时携带），llm.request.* 载荷据此按 attempt 对账。
+	if loop.runTaskAttempt > 0 {
+		req.Metadata["task_attempt"] = loop.runTaskAttempt
+		requestPayload["task_attempt"] = loop.runTaskAttempt
 	}
 	addRemainingBudgetMetadata(requestPayload, remainingBudget)
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {

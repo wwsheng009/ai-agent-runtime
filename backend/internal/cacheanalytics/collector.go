@@ -59,6 +59,8 @@ type inflightRequest struct {
 	forkSnapshotHash string
 	// parentPromptCacheKey 是父会话 spawn 时刻的 prompt-cache key（§6.4）。
 	parentPromptCacheKey string
+	// taskAttempt 是调度 attempt 序号（§8.2 对账列）；0 = 未观测。
+	taskAttempt int
 }
 
 // Collector 订阅 runtime EventBus，把 llm.request.* 事件投影为
@@ -236,6 +238,7 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 	inflight.contextMode = payloadString(payload, "context_mode")
 	inflight.forkSnapshotHash = payloadString(payload, "fork_snapshot_hash")
 	inflight.parentPromptCacheKey = payloadString(payload, "parent_prompt_cache_key")
+	inflight.taskAttempt = payloadInt(payload, "task_attempt")
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
 	c.mu.Unlock()
@@ -318,6 +321,7 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		ContextMode:            inflight.contextMode,
 		ForkSnapshotHash:       inflight.forkSnapshotHash,
 		ParentPromptCacheKey:   inflight.parentPromptCacheKey,
+		TaskAttempt:            inflight.taskAttempt,
 	})
 	c.projector.append(&record)
 	c.publishRecordFinished(&record)

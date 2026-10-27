@@ -49,6 +49,8 @@ type TerminalRecordInput struct {
 	// ParentPromptCacheKey（§6.4）：spawn 时刻父会话的 prompt-cache key；空串
 	// 表示未观测。
 	ParentPromptCacheKey string
+	// TaskAttempt（§8.2）是调度 attempt 序号；0 表示未观测（主 Agent / 单次运行）。
+	TaskAttempt int
 	// Payload 是 llm.request.finished 的事件载荷（success/error_code/usage_*）。
 	Payload map[string]interface{}
 	// Interrupted 标记会话/进程终止时仍未终态的 in-flight 请求（§16.1 边界 3）。
@@ -94,6 +96,11 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.ContextMode = firstNonEmptyString(in.ContextMode, payloadString(payload, "context_mode"))
 	record.ForkSnapshotHash = firstNonEmptyString(in.ForkSnapshotHash, payloadString(payload, "fork_snapshot_hash"))
 	record.ParentPromptCacheKey = firstNonEmptyString(in.ParentPromptCacheKey, payloadString(payload, "parent_prompt_cache_key"))
+	if in.TaskAttempt > 0 {
+		record.TaskAttempt = in.TaskAttempt
+	} else if taskAttempt := payloadInt(payload, "task_attempt"); taskAttempt > 0 {
+		record.TaskAttempt = taskAttempt
+	}
 	// 上下文事实先于错误分支提取：失败请求（如上下文超限被拒）同样携带窗口与预算，
 	// 前端仍能显示"已用 / 窗口 / 预算"。interrupted 兜底路径没有载荷，保持 0。
 	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")
@@ -108,11 +115,16 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.CancelSource = payloadString(payload, "cancel_source")
 	record.CancelCause = payloadString(payload, "cancel_cause")
 	record.CancelReason = payloadString(payload, "cancel_reason")
+	// §8.2（行动文档）：error request 没有 usage 时显式给出"用量不可用"的
+	// 原因，避免读取侧把缺省零值当成真实零消耗。档位在下方终态分支按
+	// request_error（error/interrupted）与 usage_not_reported（成功但 provider
+	// 未上报）落值；有完整 usage 或历史记录保持空串。
 
 	if in.Interrupted {
 		record.Status = RequestStatusError
 		record.ErrorCategory = errorCategoryInterrupted
 		record.CacheStatus = CacheStatusError
+		record.UsageUnavailableReason = "request_error"
 		return record
 	}
 	if !payloadBool(payload, "success") {
@@ -122,12 +134,14 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 			record.ErrorCategory = "error"
 		}
 		record.CacheStatus = CacheStatusError
+		record.UsageUnavailableReason = "request_error"
 		return record
 	}
 	record.Status = RequestStatusSuccess
 	usage := buildUsage(payload)
 	if usage == nil {
 		record.CacheStatus = CacheStatusNotReported
+		record.UsageUnavailableReason = "usage_not_reported"
 		return record
 	}
 	record.Usage = usage

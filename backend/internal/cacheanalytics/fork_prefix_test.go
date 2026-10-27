@@ -32,6 +32,7 @@ func TestBuildTerminalRecordCarriesForkPrefixAudit(t *testing.T) {
 		ContextMode:            "fork",
 		ForkSnapshotHash:       "0123456789abcdef",
 		ParentPromptCacheKey:   "parent-1#prompt-cache-epoch-2",
+		TaskAttempt:            2,
 	})
 	if record.ForkPrefixPreserved == nil || !*record.ForkPrefixPreserved {
 		t.Fatalf("fork audit preserved flag must be carried, got %#v", record.ForkPrefixPreserved)
@@ -44,6 +45,9 @@ func TestBuildTerminalRecordCarriesForkPrefixAudit(t *testing.T) {
 	}
 	if record.ParentPromptCacheKey != "parent-1#prompt-cache-epoch-2" {
 		t.Fatalf("parent prompt cache key must be carried, got %+v", record)
+	}
+	if record.TaskAttempt != 2 {
+		t.Fatalf("task attempt must be carried, got %+v", record)
 	}
 
 	// record_json 存储路径：JSON 往返保真（cache_requests 镜像表直接序列化）。
@@ -66,6 +70,9 @@ func TestBuildTerminalRecordCarriesForkPrefixAudit(t *testing.T) {
 	}
 	if decoded.ParentPromptCacheKey != "parent-1#prompt-cache-epoch-2" {
 		t.Fatalf("roundtrip lost parent prompt cache key: %+v", decoded)
+	}
+	if decoded.TaskAttempt != 2 {
+		t.Fatalf("roundtrip lost task attempt: %+v", decoded)
 	}
 }
 
@@ -93,6 +100,13 @@ func TestBuildTerminalRecordOmitsUnobservedForkAudit(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "parent_prompt_cache_key") {
 		t.Fatalf("unobserved parent prompt cache key must not emit JSON keys, got %s", encoded)
+	}
+	if strings.Contains(string(encoded), "task_attempt") {
+		t.Fatalf("unobserved task attempt must not emit JSON keys, got %s", encoded)
+	}
+	// 成功但无 usage 明细：必须显式标注原因，而不是伪装成真实零消耗（§8.2）。
+	if record.UsageUnavailableReason != "usage_not_reported" {
+		t.Fatalf("success without usage must carry usage_not_reported, got %q", record.UsageUnavailableReason)
 	}
 
 	// 显式 false（被装配改写）必须保留为观测值，而不是折叠成未观测。

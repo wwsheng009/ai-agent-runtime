@@ -175,11 +175,14 @@ type CacheRequestRecord struct {
 	// ParentPromptCacheKey（§6.4，additive）：spawn 时刻父会话的 prompt-cache
 	// key，供父/子 key 对账；空串 = 未携带（历史记录 / 未知父 epoch）。
 	ParentPromptCacheKey string `json:"parent_prompt_cache_key,omitempty"`
-	UserMessageID        string `json:"user_message_id,omitempty"`
-	AssistantMessageID   string `json:"assistant_message_id,omitempty"`
-	ProviderRequestID    string `json:"provider_request_id,omitempty"`
-	ErrorCategory        string `json:"error_category,omitempty"`
-	CorrelationSource    string `json:"correlation_source,omitempty"`
+	// TaskAttempt（§8.2，additive）：调度 attempt 序号，request↔attempt 对账列；
+	// 0 = 未观测（主 Agent 请求或单次运行）。
+	TaskAttempt        int    `json:"task_attempt,omitempty"`
+	UserMessageID      string `json:"user_message_id,omitempty"`
+	AssistantMessageID string `json:"assistant_message_id,omitempty"`
+	ProviderRequestID  string `json:"provider_request_id,omitempty"`
+	ErrorCategory      string `json:"error_category,omitempty"`
+	CorrelationSource  string `json:"correlation_source,omitempty"`
 	// TerminalSeen 标记本次请求是否观测到上游终结信号（finish_reason / 完成事件 /
 	// [DONE]）。与「是否被截断」分开记录（P0-2）：没有终结信号又拿到半截参数 =
 	// 传输中断；有终结信号但参数非法 = 模型退化，两者恢复路径不同。
@@ -193,6 +196,11 @@ type CacheRequestRecord struct {
 	CancelSource string `json:"cancel_source,omitempty"`
 	CancelCause  string `json:"cancel_cause,omitempty"`
 	CancelReason string `json:"cancel_reason,omitempty"`
+	// UsageUnavailableReason（§8.2，additive）：请求没有 usage 时说明为什么——
+	//   request_error      请求失败（error/interrupted），usage 不可用；
+	//   usage_not_reported 请求成功但 provider 未上报 usage 明细。
+	// 空串 = 有完整 usage 或历史记录未观测；读取侧不得把缺省零值当成真实零消耗。
+	UsageUnavailableReason string `json:"usage_unavailable_reason,omitempty"`
 }
 
 // CacheStatusDistribution 缓存状态分布（overview 直接画饼）。

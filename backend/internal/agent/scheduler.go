@@ -1176,6 +1176,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			History: spec.ForkHistory,
 			// 父会话 prompt-cache key（§6.4）：随子请求载荷落库，供父子 key 对账。
 			ParentPromptCacheKey: options.ParentPromptCacheKey,
+			// §8.2：调度 attempt 序号随子请求落库，request↔attempt 可对账。
+			TaskAttempt: attempt,
 			// 结构化回执契约（P1-2'）：report_schema 请求时 loop 注入
 			// submit_report 工具，接受的回执 JSON 成为结果 Output，下方
 			// 的 decode 路径据此回填 HandoffOut。
