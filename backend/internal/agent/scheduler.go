@@ -145,6 +145,28 @@ type SubagentResult struct {
 	// （report_schema 契约，P1-2'）。提交时已做契约校验（required /
 	// additionalProperties）；这里原样承载 schema 定义的任意字段集。
 	StructuredReport map[string]interface{} `json:"structured_report,omitempty" yaml:"structured_report,omitempty"`
+	// §6.2（行动文档 P0）：失败 attempt 仍可能产出部分结构化结果（usage、
+	// findings/patches/observations）。默认失败分支会静默丢弃，导致分析侧
+	// 把"有消耗、有部分产出的失败"聚合为 cost=0、output=0。以下字段用于
+	// 把"失败但有部分产出"与"彻底未运行"区分开，供父代理继续消费中间结果。
+	// PartialOutput=true 表示 runErr!=nil 时仍从 result 取回了 usage/观察。
+	PartialOutput bool `json:"partial_output,omitempty" yaml:"partial_output,omitempty"`
+	// PartialFindingsCount / PartialPatchCount 是失败 attempt 已收集的观察数量，
+	// 与 Success=false 同时出现时说明父代理有可消费的中间证据。
+	PartialFindingsCount int `json:"partial_findings_count,omitempty" yaml:"partial_findings_count,omitempty"`
+	PartialPatchCount    int `json:"partial_patch_count,omitempty" yaml:"partial_patch_count,omitempty"`
+	// UsageByAttempt 把每个 attempt 的用量按序号保留，便于按 request/attempt
+	// ID 与 provider 侧 analytics 对账，避免 terminal failure 把成本清零。
+	UsageByAttempt []*types.TokenUsage `json:"usage_by_attempt,omitempty" yaml:"usage_by_attempt,omitempty"`
+	// §6.1（行动文档 P0）：取消来源分层。childCtx 因 route timeout 触发时记
+	// task_timeout；父会话取消记 parent_cancel；其余按 runErr 文本兜底。用于
+	// 把"batch deadline / task route timeout / provider 取消"区分开，避免 batch
+	// timeout 吞掉 task 的真实取消源。空白表示非取消类失败。
+	CancelSource string `json:"cancel_source,omitempty" yaml:"cancel_source,omitempty"`
+	// RetrySkipped 解释为何没有发生后续 attempt：deadline 预算不足（最典型）、
+	// 非只读任务、非瞬时类别或已达上限。空白表示"本就该只跑一次"，非空时
+	// 与 Retryable=true 不能同时误导父代理以为会重派。
+	RetrySkipped string `json:"retry_skipped,omitempty" yaml:"retry_skipped,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -1092,10 +1114,19 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	attempt := 0
 	retryReason := ""
 	var (
-		result      *Result
-		runErr      error
-		disposition SubagentFailureDisposition
+		result         *Result
+		runErr         error
+		disposition    SubagentFailureDisposition
+		usageByAttempt []*types.TokenUsage
 	)
+	// lastResult 跟踪最后一次非空 result（即便最终 runErr!=nil），供失败
+	// 分支取回部分产出（§6.2）。
+	lastResult := result
+	// lastRetrySkipped 记录最后一次"本可重试却跳过"的原因（§6.1）：最终
+	// 报告据此把 Retryable=true 与"实际没有 attempt 2"这对矛盾讲清楚。
+	lastRetrySkipped := ""
+	// cancelSource 是最终取消来源分层（§6.1）：route timeout / parent cancel / 其他。
+	cancelSource := ""
 	for attempt = 1; attempt <= maxAttempts; attempt++ {
 		// 开工路由审计（G1）：每次 attempt 一行、归属父会话、带 attempt 序号。
 		// 发射点在 loop.run 之前，保证「跑没跑到终态」都有账。
@@ -1122,10 +1153,30 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			// 重新注入同一快照，重复审计无增量价值）。
 			ForkAudit: forkAuditSpecForTask(task, spec.ForkHistory, attempt),
 		})
+		if result != nil {
+			lastResult = result
+			if result.Usage != nil {
+				usageByAttempt = append(usageByAttempt, result.Usage.Clone())
+			} else {
+				usageByAttempt = append(usageByAttempt, nil)
+			}
+		} else {
+			usageByAttempt = append(usageByAttempt, nil)
+		}
 		if runErr == nil {
 			break
 		}
 		disposition = ClassifySubagentFailure(runErr)
+		// §6.1（行动文档 P0）：把"为什么没有第二次 attempt"记下来。只读 +
+		// 瞬时类别 + 还有预算时 shouldAutoRetry 才会返回 true；其余情况都算
+		// 主动跳过，不能只保留 Retryable=true 让父代理以为会重派。
+		retrySkipped := ""
+		if !shouldAutoRetrySubagentTask(task, disposition, attempt, maxAttempts, childCtx.Err()) {
+			retrySkipped = retrySkipReason(task, disposition, attempt, maxAttempts, childCtx.Err())
+		}
+		if retrySkipped != "" {
+			lastRetrySkipped = retrySkipped
+		}
 		if !shouldAutoRetrySubagentTask(task, disposition, attempt, maxAttempts, childCtx.Err()) {
 			break
 		}
@@ -1142,6 +1193,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	}
 	if runErr != nil {
 		retryAdvice := SubagentRetryAdvice(disposition.Category, task.ReadOnly)
+		// §6.1（行动文档 P0）：取消来源分层。childCtx 由 route timeout 取消时，
+		// 即使 runErr 文本没写 deadline，也记 task_timeout，避免 batch timeout
+		// 把 task 的真实取消源吞掉；父会话取消记 parent_cancel；其余空白。
+		cancelSource = subagentCancelSource(childCtx, runErr)
 		// 写任务只给建议，不自动重派（§6.2）。
 		report := SubagentResult{
 			ID:                    task.ID,
@@ -1163,6 +1218,29 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			MaxAttempts:           maxAttempts,
 			RetryReason:           retryReason,
 			RetryAdvice:           retryAdvice,
+			// §6.1（行动文档 P0）：取消来源与重试跳过原因，使"Retryable=true 但
+			// 实际没有 attempt 2"这一组合不再误导父代理/运维。
+			CancelSource: cancelSource,
+			RetrySkipped: lastRetrySkipped,
+		}
+		// §6.2（P0）：失败 attempt 仍可能产出部分结构化结果。即使 runErr!=nil，
+		// loop.run 往往已经回填了 Usage 与 Observations（provider 拿到响应后在
+		// 收尾/工具阶段才失败）。这里从最后一次非空 result 取回，避免把"有消耗、
+		// 有部分产出"的失败聚合成 cost=0、output=0，并让父代理继续消费中间证据。
+		// 注意：report.Error 已在字面量里设为 runErr.Error()（终态失败原因），
+		// 这里不再用 lastResult.Error 覆盖，避免把 deadline 等真实取消源掩掉。
+		if lastResult != nil {
+			report.Usage = lastResult.Usage
+			report.UsageByAttempt = usageByAttempt
+			report.Contract = lastResult.Contract.Clone()
+			if task.ReadOnly {
+				report.Findings = collectFindings(lastResult.Observations)
+			} else {
+				report.Patches = collectPatches(lastResult.Observations)
+			}
+			report.PartialOutput = true
+			report.PartialFindingsCount = len(report.Findings)
+			report.PartialPatchCount = len(report.Patches)
 		}
 		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
@@ -1187,31 +1265,50 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"parent_tool_call_id": options.ParentToolCallID,
 			"child_agent_name":    childConfig.Name,
 			"trace_id":            options.TraceID,
+			// §6.2（P0）：失败仍可携带部分产出，与分析侧口径对齐。
+			"partial_output":          report.PartialOutput,
+			"partial_findings_count":  report.PartialFindingsCount,
+			"partial_patch_count":     report.PartialPatchCount,
+			"usage_total_tokens":      usageTotal(report.Usage),
+			"usage_prompt_tokens":     usagePrompt(report.Usage),
+			"usage_completion_tokens": usageCompletion(report.Usage),
+			"usage_cache_read_tokens": usageCacheRead(report.Usage),
+			"cancel_source":           report.CancelSource,
+			"retry_skipped":           report.RetrySkipped,
 		}, spec.Decision))
 		if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 			payload := mergeRouteAuditPayload(map[string]interface{}{
-				"agent_id":            task.ID,
-				"agent_type":          task.Role,
-				"hook_event_name":     "SubagentStop",
-				"subagent_id":         task.ID,
-				"role":                task.Role,
-				"read_only":           task.ReadOnly,
-				"success":             false,
-				"status":              "failed",
-				"completion_reason":   subagentCompletionReason(false, disposition),
-				"failure_category":    disposition.Category,
-				"error_code":          disposition.ErrorCode,
-				"attempt":             attempt,
-				"max_attempts":        maxAttempts,
-				"retry_reason":        retryReason,
-				"retry_advice":        retryAdvice,
-				"error":               runErr.Error(),
-				"budget_tokens":       task.BudgetTokens,
-				"parent_session_id":   options.ParentSessionID,
-				"parent_tool_call_id": options.ParentToolCallID,
-				"child_session_id":    childSessionID,
-				"child_agent_name":    childConfig.Name,
-				"trace_id":            options.TraceID,
+				"agent_id":                task.ID,
+				"agent_type":              task.Role,
+				"hook_event_name":         "SubagentStop",
+				"subagent_id":             task.ID,
+				"role":                    task.Role,
+				"read_only":               task.ReadOnly,
+				"success":                 false,
+				"status":                  "failed",
+				"completion_reason":       subagentCompletionReason(false, disposition),
+				"failure_category":        disposition.Category,
+				"error_code":              disposition.ErrorCode,
+				"attempt":                 attempt,
+				"max_attempts":            maxAttempts,
+				"retry_reason":            retryReason,
+				"retry_advice":            retryAdvice,
+				"error":                   runErr.Error(),
+				"budget_tokens":           task.BudgetTokens,
+				"parent_session_id":       options.ParentSessionID,
+				"parent_tool_call_id":     options.ParentToolCallID,
+				"child_session_id":        childSessionID,
+				"child_agent_name":        childConfig.Name,
+				"trace_id":                options.TraceID,
+				"partial_output":          report.PartialOutput,
+				"partial_findings_count":  report.PartialFindingsCount,
+				"partial_patch_count":     report.PartialPatchCount,
+				"usage_total_tokens":      usageTotal(report.Usage),
+				"usage_prompt_tokens":     usagePrompt(report.Usage),
+				"usage_completion_tokens": usageCompletion(report.Usage),
+				"usage_cache_read_tokens": usageCacheRead(report.Usage),
+				"cancel_source":           report.CancelSource,
+				"retry_skipped":           report.RetrySkipped,
 			}, spec.Decision)
 			hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 		}
@@ -1301,55 +1398,61 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		completionReason = subagentCompletionReason(false, disposition)
 	}
 	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
-		"subagent_id":         task.ID,
-		"role":                task.Role,
-		"read_only":           task.ReadOnly,
-		"success":             report.Success,
-		"status":              statusAliasForCompletionReason(completionReason, report.Success),
-		"completion_reason":   completionReason,
-		"failure_category":    report.FailureCategory,
-		"error_code":          report.ErrorCode,
-		"retryable":           report.Retryable,
-		"retry_advice":        report.RetryAdvice,
-		"attempt":             attempt,
-		"max_attempts":        maxAttempts,
-		"retry_reason":        retryReason,
-		"source":              "scheduler",
-		"batch_id":            options.BatchID,
-		"error":               report.Error,
-		"budget_tokens":       task.BudgetTokens,
-		"duration_ms":         elapsedMS(startedAt),
-		"parent_session_id":   options.ParentSessionID,
-		"parent_tool_call_id": options.ParentToolCallID,
-		"child_agent_name":    childConfig.Name,
-		"usage_total_tokens":  usageTotal(report.Usage),
-		"trace_id":            options.TraceID,
+		"subagent_id":             task.ID,
+		"role":                    task.Role,
+		"read_only":               task.ReadOnly,
+		"success":                 report.Success,
+		"status":                  statusAliasForCompletionReason(completionReason, report.Success),
+		"completion_reason":       completionReason,
+		"failure_category":        report.FailureCategory,
+		"error_code":              report.ErrorCode,
+		"retryable":               report.Retryable,
+		"retry_advice":            report.RetryAdvice,
+		"attempt":                 attempt,
+		"max_attempts":            maxAttempts,
+		"retry_reason":            retryReason,
+		"source":                  "scheduler",
+		"batch_id":                options.BatchID,
+		"error":                   report.Error,
+		"budget_tokens":           task.BudgetTokens,
+		"duration_ms":             elapsedMS(startedAt),
+		"parent_session_id":       options.ParentSessionID,
+		"parent_tool_call_id":     options.ParentToolCallID,
+		"child_agent_name":        childConfig.Name,
+		"usage_total_tokens":      usageTotal(report.Usage),
+		"usage_prompt_tokens":     usagePrompt(report.Usage),
+		"usage_completion_tokens": usageCompletion(report.Usage),
+		"usage_cache_read_tokens": usageCacheRead(report.Usage),
+		"trace_id":                options.TraceID,
 	}, spec.Decision))
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 		payload := mergeRouteAuditPayload(map[string]interface{}{
-			"agent_id":            task.ID,
-			"agent_type":          task.Role,
-			"hook_event_name":     "SubagentStop",
-			"subagent_id":         task.ID,
-			"role":                task.Role,
-			"read_only":           task.ReadOnly,
-			"success":             report.Success,
-			"status":              statusAliasForCompletionReason(completionReason, report.Success),
-			"completion_reason":   completionReason,
-			"failure_category":    report.FailureCategory,
-			"error_code":          report.ErrorCode,
-			"attempt":             attempt,
-			"max_attempts":        maxAttempts,
-			"retry_reason":        retryReason,
-			"retry_advice":        report.RetryAdvice,
-			"error":               report.Error,
-			"budget_tokens":       task.BudgetTokens,
-			"parent_session_id":   options.ParentSessionID,
-			"parent_tool_call_id": options.ParentToolCallID,
-			"child_session_id":    childSessionID,
-			"child_agent_name":    childConfig.Name,
-			"usage_total_tokens":  usageTotal(report.Usage),
-			"trace_id":            options.TraceID,
+			"agent_id":                task.ID,
+			"agent_type":              task.Role,
+			"hook_event_name":         "SubagentStop",
+			"subagent_id":             task.ID,
+			"role":                    task.Role,
+			"read_only":               task.ReadOnly,
+			"success":                 report.Success,
+			"status":                  statusAliasForCompletionReason(completionReason, report.Success),
+			"completion_reason":       completionReason,
+			"failure_category":        report.FailureCategory,
+			"error_code":              report.ErrorCode,
+			"attempt":                 attempt,
+			"max_attempts":            maxAttempts,
+			"retry_reason":            retryReason,
+			"retry_advice":            report.RetryAdvice,
+			"error":                   report.Error,
+			"budget_tokens":           task.BudgetTokens,
+			"parent_session_id":       options.ParentSessionID,
+			"parent_tool_call_id":     options.ParentToolCallID,
+			"child_session_id":        childSessionID,
+			"child_agent_name":        childConfig.Name,
+			"usage_total_tokens":      usageTotal(report.Usage),
+			"usage_prompt_tokens":     usagePrompt(report.Usage),
+			"usage_completion_tokens": usageCompletion(report.Usage),
+			"usage_cache_read_tokens": usageCacheRead(report.Usage),
+			"trace_id":                options.TraceID,
 		}, spec.Decision)
 		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 	}
@@ -2331,4 +2434,64 @@ func usageTotal(usage *types.TokenUsage) int {
 		return 0
 	}
 	return usage.TotalTokens
+}
+
+func usagePrompt(usage *types.TokenUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.PromptTokens
+}
+
+func usageCompletion(usage *types.TokenUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.CompletionTokens
+}
+
+func usageCacheRead(usage *types.TokenUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.CacheReadTokens
+}
+
+// retrySkipReason 解释某次 attempt 失败后"没有发生后续 attempt"的原因（§6.1）。
+// 不把"本来就只该跑一次"算作跳过（空白），只在确实具备重试资格却因约束没重跑时
+// 给出可读原因：非只读任务 / 非瞬时类别 / 已到上限 / route 超时预算耗尽。
+func retrySkipReason(task SubagentTask, disposition SubagentFailureDisposition, attempt, maxAttempts int, ctxErr error) string {
+	if attempt >= maxAttempts {
+		return "max_attempts_reached"
+	}
+	if !task.ReadOnly {
+		return "write_task_no_auto_retry"
+	}
+	if !disposition.Retryable {
+		return "non_transient_failure"
+	}
+	if ctxErr != nil {
+		return "retry_skipped_deadline_budget"
+	}
+	return ""
+}
+
+// subagentCancelSource 把最终取消来源分层（§6.1）：route timeout / parent cancel /
+// 其他。childCtx 由 route timeout 建立，一旦其 Err()==context.DeadlineExceeded，
+// 即便 runErr 文本未含 deadline，也优先标 task_timeout，避免 batch timeout 吞掉
+// task 的真实取消源；父会话取消记 parent_cancel。
+func subagentCancelSource(childCtx context.Context, runErr error) string {
+	if childCtx != nil && childCtx.Err() == context.DeadlineExceeded {
+		return "task_timeout"
+	}
+	if runErr != nil {
+		text := strings.ToLower(runErr.Error())
+		if strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "deadline") {
+			return "task_timeout"
+		}
+		if strings.Contains(text, "context canceled") || strings.Contains(text, "operation was canceled") {
+			return "parent_cancel"
+		}
+	}
+	return ""
 }
