@@ -924,6 +924,23 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if promptCacheEpoch < 0 {
 		promptCacheEpoch = 0
 	}
+	// The durable prompt-cache generation must never regress. Run-local advances
+	// (pre-turn / mid-turn compaction, prefix-rewrite epoch breaks) are persisted
+	// through the same session context the run resumed from; without this they
+	// were visible only in request metadata, so the next run restarted at the
+	// stale value and reused a "session#prompt-cache-epoch-N" key for *different*
+	// prefix bytes (observed: a turn at generation 3 followed by a turn issuing
+	// #prompt-cache-epoch-1 again with a rewritten prefix). Best-effort: a failed
+	// write only costs a future cache miss, so it is recorded on the agent
+	// instead of aborting the run.
+	persistPromptCacheEpoch := func(epoch int) {
+		if options.PersistPromptCacheEpoch == nil || epoch <= 0 {
+			return
+		}
+		if persistErr := options.PersistPromptCacheEpoch(epoch); persistErr != nil && loop.agent != nil {
+			loop.agent.AddError(fmt.Sprintf("persist prompt cache epoch %d failed: %v", epoch, persistErr))
+		}
+	}
 	sessionCompactionRecoveryStep := 0
 	sessionCompactionRecoveryInputs := make(map[string]struct{})
 	lastToolPromptFingerprint := ""
@@ -1068,6 +1085,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			} else if compacted {
 				promptBuilder = NewMessageBuilder(compactedHistory)
 				promptCacheEpoch++
+				persistPromptCacheEpoch(promptCacheEpoch)
 				totalUsage.Add(compactUsage)
 				result.Usage = totalUsage.Clone()
 				if options.BudgetTokens > 0 && compactUsage != nil {
@@ -1096,6 +1114,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget, promptCacheEpoch)
 		if nextEpoch, ok := promptCacheEpochFromAction(action); ok && nextEpoch > promptCacheEpoch {
 			promptCacheEpoch = nextEpoch
+			persistPromptCacheEpoch(promptCacheEpoch)
 		}
 		if err != nil {
 			// P0-3 item 4：失败步骤里被重放/丢弃尝试的 provider 上报用量同样计入
@@ -1723,6 +1742,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		} else if compacted {
 			promptBuilder = NewMessageBuilder(compactedHistory)
 			promptCacheEpoch++
+			persistPromptCacheEpoch(promptCacheEpoch)
 			totalUsage.Add(compactUsage)
 			result.Usage = totalUsage.Clone()
 			if options.BudgetTokens > 0 && compactUsage != nil {

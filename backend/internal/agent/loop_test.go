@@ -2199,6 +2199,79 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 	require.Equal(t, "已完成分析。", messages[5].Content)
 }
 
+// TestReActLoop_RunWithSession_PersistsPromptCacheEpochAdvance pins the durable
+// prompt-cache generation contract: a run-local epoch advance (here the
+// active-turn replay compaction break) must be written back to the session, so
+// the next run resumes at the advanced generation. Before the fix the advance
+// existed only in request metadata, so a following turn restarted from the
+// stale value and reused "session#prompt-cache-epoch-1" for *different* prefix
+// bytes (observed on disk: a turn at generation 3 followed by a turn issuing
+// #prompt-cache-epoch-1 again with a rewritten prefix).
+func TestReActLoop_RunWithSession_PersistsPromptCacheEpochAdvance(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看一次日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "继续查看最新日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "已完成分析。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         3,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    1200,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	session := &testContextHistorySession{
+		testHistorySession: newTestHistorySession("session-persist-epoch"),
+		context:            map[string]interface{}{},
+	}
+
+	result, err := loop.RunWithSession(context.Background(), "继续处理", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, provider.requests, 3)
+	require.Equal(t, 1, intValue(provider.requests[2].Metadata["prompt_cache_epoch"]))
+	require.Equal(
+		t,
+		1,
+		sessionPromptCacheEpoch(session),
+		"the advanced cache generation must be persisted on the session",
+	)
+}
+
 func TestReActLoop_MidTurnSemanticCompactionContinuesWithoutReplacingDurableHistory(t *testing.T) {
 	largeResult := "ROOT_CAUSE_CONFIRMED\n" + strings.Repeat("verified tool evidence line\n", 500)
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
