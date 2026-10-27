@@ -22,6 +22,17 @@ const (
 // DefaultSpecPort is the port aicli-remote-tools serves on by default.
 const DefaultSpecPort = 18765
 
+// DefaultEnvDPort is the port envd listens on by default.
+//
+// It differs from DefaultSpecPort because it is not ours to choose: envd is a
+// third-party daemon that already picked 49983, and a spec that made the caller
+// repeat it would be noise.
+const DefaultEnvDPort = 49983
+
+// DefaultEnvDTokenEnv is the environment variable the envd bridge reads the
+// access token from when a spec does not name one via ?token_env=NAME.
+const DefaultEnvDTokenEnv = "AICLI_ENVD_TOKEN"
+
 // Spec is the parsed form of the one-argument remote target syntax.
 //
 // It exists because the full remoteTargets + mcp.yaml pair is the right shape for
@@ -42,9 +53,9 @@ type Spec struct {
 	URL string
 
 	// SSH fields.
-	Host   string
-	User   string
-	Port   int
+	Host string
+	User string
+	Port int
 	// Workspace is the remote directory the target serves. Empty means "let the
 	// remote server decide" (its own --workspace / config default).
 	Workspace string
@@ -53,6 +64,21 @@ type Spec struct {
 	Binary string
 	// IdentityFile is the SSH private key. Empty falls back to ssh-agent/defaults.
 	IdentityFile string
+
+	// EnvDTokenEnv names the local environment variable holding the envd access
+	// token, used as the HTTP Basic password. Empty falls back to
+	// DefaultEnvDTokenEnv. When that variable is also unset, envd is assumed to be
+	// running with auth disabled, which is only acceptable on a loopback or
+	// firewalled port.
+	//
+	// The token lives in an environment variable rather than in the spec string
+	// for the same reason SSH credentials do: a spec is pasted into shell history
+	// and into issue reports, and a secret in either is a leak.
+	//
+	// The name is EnvDTokenEnv rather than TokenEnv because Spec already has a
+	// TokenEnv method for the aicli-remote-tools bearer token; a field of that name
+	// would collide with it.
+	EnvDTokenEnv string
 }
 
 // ParseSpec parses the compact remote target syntax.
@@ -60,6 +86,11 @@ type Spec struct {
 // Grammar:
 //
 //	<scheme>://[user@]host[:port][/path][#depth][?workspace=...&binary=...&identity=...]
+//
+// envd targets additionally accept ?token_env=NAME, naming the environment
+// variable the bridge reads the access token from. An inline ?token= is refused:
+// a spec is pasted into shell history and issue reports, and a secret in either is
+// a leak.
 //
 // The query keys mirror the fields of SSHConfig / RemoteConfig that are commonly
 // non-default; everything else keeps its documented default.
@@ -110,8 +141,33 @@ func ParseSpec(raw string) (*Spec, error) {
 		if path := strings.TrimSpace(parsed.Path); path != "" && path != "/" {
 			spec.Workspace = path
 		}
+	case "envd":
+		spec.Transport = TransportEnvD
+		if strings.TrimSpace(parsed.Hostname()) == "" {
+			return nil, fmt.Errorf("remote spec %q has no host", raw)
+		}
+		spec.Host = parsed.Hostname()
+		// envd resolves the executing account from HTTP Basic credentials, so the
+		// user here is the OS user envd should run as, not an SSH login name. It is
+		// reused rather than duplicated because it means the same thing to the
+		// operator: "who runs the work on that box".
+		spec.User = parsed.User.Username()
+		if portText := parsed.Port(); portText != "" {
+			port, convErr := strconv.Atoi(portText)
+			if convErr != nil || port <= 0 || port > 65535 {
+				return nil, fmt.Errorf("remote spec %q has an invalid port %q", raw, portText)
+			}
+			spec.Port = port
+		} else {
+			spec.Port = DefaultEnvDPort
+		}
+		// `envd://host/srv/app` carries the working directory as the path, matching
+		// the ssh:// form.
+		if path := strings.TrimSpace(parsed.Path); path != "" && path != "/" {
+			spec.Workspace = path
+		}
 	default:
-		return nil, fmt.Errorf("remote spec %q must start with http://, https:// or ssh://", raw)
+		return nil, fmt.Errorf("remote spec %q must start with http://, https://, ssh:// or envd://", raw)
 	}
 
 	if depthToken != "" {
@@ -129,6 +185,12 @@ func ParseSpec(raw string) (*Spec, error) {
 		spec.Workspace = firstNonEmpty(query.Get("workspace"), spec.Workspace)
 		spec.Binary = query.Get("binary")
 		spec.IdentityFile = query.Get("identity")
+		if spec.Transport == TransportEnvD {
+			if query.Has("token") {
+				return nil, fmt.Errorf("remote spec %q carries an inline token; envd tokens must come from an environment variable (use ?token_env=NAME)", raw)
+			}
+			spec.EnvDTokenEnv = strings.TrimSpace(query.Get("token_env"))
+		}
 	}
 	return spec, nil
 }
@@ -185,9 +247,9 @@ func (s *Spec) Expand() (*Expanded, error) {
 	target := Target{
 		Transport: s.Transport,
 		Remote: RemoteConfig{
-			Workspace:   s.Workspace,
-			ToolPrefix:  prefix,
-			Profile:     string(s.Depth),
+			Workspace:        s.Workspace,
+			ToolPrefix:       prefix,
+			Profile:          string(s.Depth),
 			DescriptionStyle: "explicit",
 		},
 	}
@@ -205,6 +267,25 @@ func (s *Spec) Expand() (*Expanded, error) {
 			IdentityFile: s.IdentityFile,
 		}
 		target.Remote.Binary = s.Binary
+	case TransportEnvD:
+		// envd carries the host, the executing user and the port the same way an
+		// SSH target does, so they travel in the SSH block rather than a parallel
+		// one. Reusing the fields keeps the config surface small and keeps the
+		// "who runs the work, on which box" question answered in one place.
+		//
+		// Binary names the local bridge to launch, not a program on the target:
+		// envd speaks Connect-RPC, not MCP, so it can only be reached through an
+		// adapter. Registry.expandOne turns this into a stdio MCP entry.
+		target.SSH = SSHConfig{
+			Host: s.Host,
+			User: s.User,
+			Port: s.Port,
+		}
+		target.Remote.Binary = s.Binary
+		// Empty falls back to the bridge's own default so the generated entry
+		// names the environment variable explicitly instead of relying on an
+		// implicit one.
+		target.Remote.TokenEnv = firstNonEmpty(s.EnvDTokenEnv, DefaultEnvDTokenEnv)
 	default:
 		return nil, fmt.Errorf("unsupported transport %q", s.Transport)
 	}

@@ -231,6 +231,15 @@ jobs:
           AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check ls --json > /dev/null
           AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check gc --json > /dev/null
 
+      # envd bridge gate: the bridge must build and its envd transport
+      # (envdclient + remotetargets) must keep unit tests green before release.
+      - name: Verify aicli-envd-bridge build and envd transport tests
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/aicli-envd-bridge-check ./cmd/aicli-envd-bridge
+          go test ./internal/envdclient/... ./internal/remotetargets/... -count=1
+
       # E4 hard gate: render packages must be green before any release.
       # 历史注记：早期 Phase 0/C0 曾有 4 个 band-scrollback 语义测试「设计上
       # 必红」，该基线已被后续修复消除，本 gate 现在是真实硬门禁（本地与 CI
@@ -370,6 +379,7 @@ jobs:
           LDFLAGS="-s -w -X main.version=${{ steps.ver.outputs.version }} -X main.buildTime=${{ steps.ver.outputs.build_time }}"
           echo "Building ${ARTIFACT} with ldflags: ${LDFLAGS}"
           go build -trimpath -ldflags "${LDFLAGS}" -o "${OUTDIR}/${ARTIFACT}" ${CMD_PATH}
+          go build -trimpath -ldflags "${LDFLAGS}" -o "${OUTDIR}/aicli-envd-bridge-${GOOS}-${GOARCH}${EXT}" ./cmd/aicli-envd-bridge
           ls -lh "${OUTDIR}/${ARTIFACT}"
 
       - name: Bundle verified ripgrep
@@ -396,6 +406,7 @@ jobs:
           BASENAME="${BIN_NAME}-${VERSION}-${GOOS}-${GOARCH}"
           mkdir -p dist/release/codex-path
           cp "dist/${BIN}" "dist/release/${BIN_NAME}${EXT}"
+          cp "dist/aicli-envd-bridge-${GOOS}-${GOARCH}${EXT}" "dist/release/aicli-envd-bridge${EXT}"
           cp "dist/rg/rg${EXT}" "dist/release/codex-path/rg${EXT}"
           # 复制可选的 README / LICENSE（如果存在）
           [ -f README.md ] && cp README.md dist/release/ || true

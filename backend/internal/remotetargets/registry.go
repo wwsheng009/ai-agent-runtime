@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,6 +28,25 @@ const (
 	TransportSSHStdio = "ssh-stdio"
 	TransportSSHHTTP  = "ssh-http"
 	TransportHTTP     = "http"
+
+	// TransportEnvD reaches a target through envd, the Connect-RPC daemon from
+	// E2B that runs on the target itself.
+	//
+	// It sits at the same level as the other three on purpose: envd is not a new
+	// layer, it is another way to cross the gap between this machine and the
+	// target. It does not, however, inherit the remote tool server's enforcement
+	// the way the other transports do: envd speaks no MCP, so a local bridge
+	// (aicli-envd-bridge) is the MCP entry and the only place path and profile
+	// policy can be applied. The bridge re-implements that subset itself;
+	// remotetools' audit records and its command policy are not in this path, and
+	// the expansion below reports the missing checks as a warning.
+	//
+	// The trade is explicit. Compared with ssh-stdio, envd gives up the remote
+	// tool server's own path jail and command filtering, and gains streaming
+	// process output, a pty, directory watches and host metrics. Because it gives
+	// up the jail, the caller must enforce path and command policy before reaching
+	// envdclient; envd itself will run whatever it is told.
+	TransportEnvD = "envd"
 )
 
 // Target is one remote server declaration.
@@ -331,8 +351,69 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 					serverName, profile))
 		}
 
+	case TransportEnvD:
+		// envd does not speak MCP, so the MCP server entry cannot point at it
+		// directly. The entry launches a local bridge that speaks MCP over stdio
+		// and translates each tool call into an envd Connect-RPC call.
+		//
+		// The bridge is where path and command policy is enforced. envd performs no
+		// path checks and no command filtering of its own, so if the bridge simply
+		// forwarded requests the target would be reachable without the jail that
+		// every other transport gets from aicli-remote-tools.
+		host := strings.TrimSpace(target.SSH.Host)
+		if host == "" {
+			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("ssh.host is required for transport envd")
+		}
+		bridge := strings.TrimSpace(target.Remote.Binary)
+		if bridge == "" {
+			bridge = "aicli-envd-bridge"
+		}
+		port := target.SSH.Port
+		if port <= 0 {
+			port = DefaultEnvDPort
+		}
+		// envd reads the executing user from HTTP Basic credentials and rejects a
+		// request without one, so a target with no user cannot work at all. Failing
+		// here beats a 401 at the first tool call.
+		if strings.TrimSpace(target.SSH.User) == "" {
+			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("ssh.user is required for transport envd (envd takes the executing user from HTTP Basic credentials)")
+		}
+		// The bridge's jail is a prefix comparison over cleaned paths, so it can
+		// only anchor an absolute directory. "." (the default Expand applies to an
+		// empty workspace) would make every path look like it escapes the fence or,
+		// worse, silently widen it; fail during expansion instead.
+		if !path.IsAbs(workspace) {
+			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("remote.workspace %q must be an absolute path for transport envd (envd performs no path checks, so a relative workspace cannot bound anything; use envd://user@host:49983/abs/path)", workspace)
+		}
+
+		args := []string{
+			"--addr", fmt.Sprintf("%s:%d", host, port),
+			"--user", strings.TrimSpace(target.SSH.User),
+			"--workspace", workspace,
+			"--tool-prefix", prefix,
+			"--profile", orDefault(target.Remote.Profile, "readonly"),
+		}
+		if len(target.Remote.AllowedRoots) > 0 {
+			for _, root := range target.Remote.AllowedRoots {
+				args = append(args, "--allow-root", strings.TrimSpace(root))
+			}
+		}
+		if tokenEnv := strings.TrimSpace(target.Remote.TokenEnv); tokenEnv != "" {
+			args = append(args, "--token-env", tokenEnv)
+		}
+		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
+			args = append(args, "--ca-file", strings.TrimSpace(target.Remote.TLS.CAFile))
+		}
+
+		cfg.Type = "stdio"
+		cfg.Command = bridge
+		cfg.Args = args
+		warnings = append(warnings,
+			fmt.Sprintf("target %q: envd performs no path or command checks; the bridge enforces workspace %q and profile %q locally",
+				serverName, workspace, orDefault(target.Remote.Profile, "readonly")))
+
 	default:
-		return mcpconfig.MCPConfig{}, nil, fmt.Errorf("unknown transport %q (want ssh-stdio|ssh-http|http)", target.Transport)
+		return mcpconfig.MCPConfig{}, nil, fmt.Errorf("unknown transport %q (want ssh-stdio|ssh-http|http|envd)", target.Transport)
 	}
 
 	// TLS material applies to both http transports. It is validated here rather
