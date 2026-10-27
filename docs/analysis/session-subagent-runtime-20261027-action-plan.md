@@ -529,8 +529,8 @@ backend/internal/cacheanalytics/*
 - [x] parent key、child key、epoch、fingerprint 可从 request event 关联；（4ab293f3 + 既有 `prompt_cache_key`/epoch/fingerprint）
 - [x] provider 报告 cached=0 时能区分 `reported_zero` 与 `confirmed_miss`；（`bf7a6b0a`：`CacheMissReported/CacheMissTokens` 仅在 provider 显式给出 miss 字段时置位，六档分类 + 分布列 + `/usage`「确认未命中」标签；「输入总量 − 命中」推导值不伪装成确认 miss）
 - [x] prompt history replacement 必须递增 epoch，并验证旧 key 不被重用；（a1b7022c：epoch 持久化防回退 + 单测）
-- [ ] 同一个 child 的 retry 是否复用预期前缀有明确 provider-specific 测试；（未做）
-- [ ] 不同 child 并发时不会因错误共享 key 产生 cache 污染。（key 以 child session 独立命名、无错误共享；缺专项并发测试）
+- [x] 同一个 child 的 retry 是否复用预期前缀有明确 provider-specific 测试；（`2c2f3104`：`TestSubagentRetryReusesExpectedCachePrefix`——attempt 1 注入瞬时失败 → attempt 2 复用同 `prompt_cache_key`/epoch、`messages`/`tools` 逐项一致、provider/model 一致，且 attempt 2 的缓存命中（`usage_cache_read_tokens`）计入任务回执；provider 侧请求体字节稳定性另见 llm 包 `TestProviderRetryWidenedMaxTokensKeepsCachePrefix`（扩容重试不得改写信封前缀，并行线程在途））
+- [x] 不同 child 并发时不会因错误共享 key 产生 cache 污染。（`2c2f3104`：`TestConcurrentChildrenKeepDistinctCacheKeys`——同批两个目标文字完全相同的 read_only child 各自持有按 `subagent_<task>_<uuid>` 派生的 cache key，互不相同且不等于父会话 key：按 session 而非内容隔离）
 
 ## 9. 运行参数和灰度建议
 
@@ -608,6 +608,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `ab6a830e` | usage_unavailable_reason 与 task_attempt 对账列（§8.2 收尾） | §8.2 |
 | `bf7a6b0a` | confirmed_miss 状态分层与 provider miss 计数（§6.4/§8.4） | §6.4 / §8.4 |
 | `859651b9` | batch 路径 fork 窗口 `fork_messages`（§8.3 direct/batch 语义一致） | §8.3 |
+| `2c2f3104` | §8.4 cache 专项：重试前缀复用 + 并发 child key 隔离 | §8.4 |
 
 ### 13.2 逐条对照（§6）
 
@@ -630,12 +631,13 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 迁移回归：`TestStoreMigrateAddsSubagentAttemptColumns`（降级删列 → 重开补列 → 写读）。
 - cache 状态分层：`TestBuildTerminalRecordClassifiesConfirmedMiss`（确认 miss 与 reported_zero 边界五档）、`TestCacheStatusDistributionAccountsConfirmedMiss`、`TestCacheSourceOverviewCacheStatusDistributionAlignsWithSQL`（六档 SQL 列序对齐）、`TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage`（载荷层 confirmed_miss）、`TestResolveUnifiedTokenUsage_DeepSeekMissReported` / `..._OpenAIDerivedUncachedIsNotMissReported`（显式上报 vs 推导不伪装）。
 - batch fork 窗口：`TestBuildForkHistoryWithWindowKeepsMostRecentCompletedMessages`（截窗 = 最近 N 条 / 窗口≥长度等价全量）、`...AppliesBeforeTokenCeiling`（窗口先于上限：缩小窗口可让全量超限的父历史通过）、`TestBuildForkHistoryForTaskAppliesForkMessages`（任务字段接线）、`TestSubagentContextReceipt`（请求窗口与实际注入条数分离）、decode 三档（接受数值/拒收「有窗口无 fork」/非正值 warning + 字符串拒绝）、`TestBatchTaskSpecRoundTripPreservesForkContext`（durable spec 往返 + 旧 spec 字节兼容）。
+- cache 前缀专项（`2c2f3104`，agent 全包 22.338s）：`TestSubagentRetryReusesExpectedCachePrefix`（attempt 1 失败 → attempt 2 同 key/epoch + messages/tools/provider/model 一致 + 命中计入回执）、`TestConcurrentChildrenKeepDistinctCacheKeys`（同目标并发 child 的 key 按 session 隔离且不等于父 key）。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
-3. §8.4 的两项 cache 专项测试：同一 child retry 的前缀复用（provider-specific）与并发 child 的 cache 污染对照（`859651b9` 已闭环 batch 侧 `last:N` 窗口与 durable replay 降级）。
+3. §8.4 仅余「fresh/fork/resume 的 cache lineage 字段完整」（resume 模式不存在）与 provider-specific 前缀对照实验（并入第 2 项）；两项 cache 专项（retry 前缀复用 + 并发 child key 隔离）已闭环（`2c2f3104`）。
 4. provider response-header guard 的 retry budget 专项用例；task/batch deadline 档的 E2E 注入。
 5. `resume` cache lineage 模式当前实现不存在（§8.4 对应项保留未勾选）。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
