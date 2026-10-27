@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -46,25 +47,33 @@ func TestRetrySkipReason(t *testing.T) {
 // 优先标 task_timeout，父会话取消标 parent_cancel；避免在 runErr 文本未含 deadline
 // 时被 batch timeout 吞掉真实取消源。
 func TestSubagentCancelSource(t *testing.T) {
-	timeoutCtx, cancel := context.WithTimeout(context.Background(), 0)
-	defer cancel()
-	// 立即触发 deadline。
-	<-timeoutCtx.Done()
+	taskTimeoutCtx, cancelTask := context.WithTimeoutCause(context.Background(), 0, subagentTaskDeadlineCause)
+	defer cancelTask()
+	<-taskTimeoutCtx.Done()
+	batchTimeoutCtx, cancelBatch := context.WithTimeout(context.Background(), 0)
+	defer cancelBatch()
+	<-batchTimeoutCtx.Done()
+	batchChildCtx, cancelBatchChild := context.WithTimeoutCause(batchTimeoutCtx, time.Hour, subagentTaskDeadlineCause)
+	defer cancelBatchChild()
+	parentCancelCtx, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
 
 	cases := []struct {
-		name   string
-		ctx    context.Context
-		runErr error
-		want   string
+		name      string
+		parentCtx context.Context
+		childCtx  context.Context
+		runErr    error
+		want      string
 	}{
-		{"route 超时上下文优先", timeoutCtx, nil, "task_timeout"},
-		{"deadline 文本", nil, errors.New("context deadline exceeded while awaiting headers"), "task_timeout"},
-		{"父会话取消", nil, errors.New("operation was canceled"), "parent_cancel"},
-		{"普通工具错误无取消源", nil, errors.New("tool not allowed for this agent: write"), ""},
+		{"route 超时上下文优先", context.Background(), taskTimeoutCtx, nil, "task_timeout"},
+		{"batch deadline 不误报 task timeout", batchTimeoutCtx, batchChildCtx, nil, "batch_deadline"},
+		{"provider deadline", nil, nil, context.DeadlineExceeded, "provider_timeout"},
+		{"父会话取消", parentCancelCtx, parentCancelCtx, nil, "parent_cancel"},
+		{"普通工具错误无取消源", nil, nil, errors.New("tool not allowed for this agent: write"), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := subagentCancelSource(tc.ctx, tc.runErr)
+			got := subagentCancelSource(tc.parentCtx, tc.childCtx, tc.runErr)
 			if got != tc.want {
 				t.Fatalf("subagentCancelSource = %q, want %q", got, tc.want)
 			}
@@ -109,5 +118,57 @@ func TestSubagentResultPartialOutputFields(t *testing.T) {
 	if writeResult.PartialFindingsCount != 0 || writeResult.PartialPatchCount != 1 {
 		t.Fatalf("失败写任务应只计 patches: findings=%d patches=%d",
 			writeResult.PartialFindingsCount, writeResult.PartialPatchCount)
+	}
+}
+
+func TestAggregateSubagentAttemptUsageSumsAllAttempts(t *testing.T) {
+	total := aggregateSubagentAttemptUsage([]*types.TokenUsage{
+		{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CacheReadTokens: 4},
+		nil,
+		{PromptTokens: 20, CompletionTokens: 3, TotalTokens: 23, CacheReadTokens: 5},
+	})
+	if total == nil {
+		t.Fatal("expected aggregate usage")
+	}
+	if total.PromptTokens != 30 || total.CompletionTokens != 5 ||
+		total.TotalTokens != 35 || total.CacheReadTokens != 9 {
+		t.Fatalf("attempt usage was not summed: %+v", total)
+	}
+}
+
+func TestApplySubagentResultOutputPreservesTextAndOnlyMarksRealPartialOutput(t *testing.T) {
+	task := SubagentTask{ID: "read", ReadOnly: true}
+	report := SubagentResult{ID: task.ID, Success: false, Summary: "provider error"}
+	applySubagentResultOutput(&report, &task, &Result{
+		Success: false,
+		Output:  "evidence collected before failure",
+		Usage:   &types.TokenUsage{TotalTokens: 7},
+		Observations: []types.Observation{{
+			Output:  "finding",
+			Success: true,
+		}},
+	})
+	if report.Summary != "evidence collected before failure" {
+		t.Fatalf("partial text was lost: %q", report.Summary)
+	}
+	if !report.PartialOutput || report.PartialFindingsCount != 1 {
+		t.Fatalf("partial output was not surfaced: %+v", report)
+	}
+
+	empty := SubagentResult{ID: task.ID, Success: false}
+	applySubagentResultOutput(&empty, &task, &Result{Success: false})
+	if empty.PartialOutput {
+		t.Fatal("empty failed result must not be marked partial_output")
+	}
+}
+
+func TestSubagentRetryBudgetAvailable(t *testing.T) {
+	if !subagentRetryBudgetAvailable(context.Background(), time.Hour) {
+		t.Fatal("context without deadline should permit a bounded retry")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if subagentRetryBudgetAvailable(ctx, time.Hour) {
+		t.Fatal("retry must be skipped when backoff exceeds remaining deadline")
 	}
 }

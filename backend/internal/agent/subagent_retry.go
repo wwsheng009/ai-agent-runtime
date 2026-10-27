@@ -2,12 +2,20 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// subagentTaskDeadlineCause is attached only to the scheduler-owned task
+// timeout. A parent batch context may also end with DeadlineExceeded, but that
+// must remain observable as batch_deadline rather than being mislabeled as the
+// child task's own timeout.
+var subagentTaskDeadlineCause = errors.New("subagent task deadline exceeded")
 
 // SubagentFailureDisposition 是一次子代理失败的稳定分类结果（方案 D5/§6.1）。
 type SubagentFailureDisposition struct {
@@ -182,6 +190,36 @@ func sleepWithContext(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
+// subagentRetryBudgetAvailable prevents starting a retry when the task has
+// less time left than the backoff itself. It is intentionally conservative:
+// the provider call still owns its own timeout, but sleeping through the
+// remaining task deadline can never produce a useful second attempt.
+func subagentRetryBudgetAvailable(ctx context.Context, backoff time.Duration) bool {
+	if ctx == nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) > backoff
+}
+
+func subagentRemainingMS(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
 // maxAttemptsPerTask 归一化任务级重试上限：0 → 默认 2；1 → 关闭；
 // 上限封顶 5（避免配置失误造成无界重试放大）。
 func (s *SubagentScheduler) maxAttemptsPerTask() int {
@@ -213,6 +251,7 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	maxAttempts int,
 	disposition SubagentFailureDisposition,
 	runErr error,
+	result *Result,
 ) {
 	if s == nil || s.parent == nil {
 		return
@@ -221,29 +260,38 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	if runErr != nil {
 		errText = runErr.Error()
 	}
+	attemptUsage := (*types.TokenUsage)(nil)
+	if result != nil {
+		attemptUsage = result.Usage
+	}
 	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
-		"subagent_id":          task.ID,
-		"role":                 task.Role,
-		"task_type":            task.TaskType,
-		"task_subject":         task.TaskSubject,
-		"read_only":            task.ReadOnly,
-		"success":              false,
-		"status":               "failed",
-		"completion_reason":    subagentCompletionReason(false, disposition),
-		"failure_category":     disposition.Category,
-		"error_code":           disposition.ErrorCode,
-		"retryable":            disposition.Retryable,
-		"attempt":              attempt,
-		"max_attempts":         maxAttempts,
-		"retry_reason":         disposition.Category,
-		"intermediate_attempt": true,
-		"source":               "scheduler",
-		"batch_id":             options.BatchID,
-		"error":                errText,
-		"budget_tokens":        task.BudgetTokens,
-		"parent_session_id":    options.ParentSessionID,
-		"parent_tool_call_id":  options.ParentToolCallID,
-		"child_agent_name":     childAgentName,
-		"trace_id":             options.TraceID,
+		"subagent_id":             task.ID,
+		"role":                    task.Role,
+		"task_type":               task.TaskType,
+		"task_subject":            task.TaskSubject,
+		"read_only":               task.ReadOnly,
+		"success":                 false,
+		"status":                  "failed",
+		"completion_reason":       subagentCompletionReason(false, disposition),
+		"failure_category":        disposition.Category,
+		"error_code":              disposition.ErrorCode,
+		"retryable":               disposition.Retryable,
+		"attempt":                 attempt,
+		"max_attempts":            maxAttempts,
+		"retry_reason":            disposition.Category,
+		"intermediate_attempt":    true,
+		"source":                  "scheduler",
+		"batch_id":                options.BatchID,
+		"error":                   errText,
+		"budget_tokens":           task.BudgetTokens,
+		"parent_session_id":       options.ParentSessionID,
+		"parent_tool_call_id":     options.ParentToolCallID,
+		"child_agent_name":        childAgentName,
+		"trace_id":                options.TraceID,
+		"partial_output":          hasSubagentPartialOutput(result),
+		"usage_total_tokens":      usageTotal(attemptUsage),
+		"usage_prompt_tokens":     usagePrompt(attemptUsage),
+		"usage_completion_tokens": usageCompletion(attemptUsage),
+		"usage_cache_read_tokens": usageCacheRead(attemptUsage),
 	}, spec.Decision))
 }

@@ -149,14 +149,15 @@ type SubagentResult struct {
 	// findings/patches/observations）。默认失败分支会静默丢弃，导致分析侧
 	// 把"有消耗、有部分产出的失败"聚合为 cost=0、output=0。以下字段用于
 	// 把"失败但有部分产出"与"彻底未运行"区分开，供父代理继续消费中间结果。
-	// PartialOutput=true 表示 runErr!=nil 时仍从 result 取回了 usage/观察。
+	// PartialOutput=true 表示失败 result 仍包含可消费的 usage、文本或观察；
+	// 不要求 runErr 非 nil，因为 loop.run 的预算/探索限制可能以 result 失败返回。
 	PartialOutput bool `json:"partial_output,omitempty" yaml:"partial_output,omitempty"`
 	// PartialFindingsCount / PartialPatchCount 是失败 attempt 已收集的观察数量，
 	// 与 Success=false 同时出现时说明父代理有可消费的中间证据。
 	PartialFindingsCount int `json:"partial_findings_count,omitempty" yaml:"partial_findings_count,omitempty"`
 	PartialPatchCount    int `json:"partial_patch_count,omitempty" yaml:"partial_patch_count,omitempty"`
-	// UsageByAttempt 把每个 attempt 的用量按序号保留，便于按 request/attempt
-	// ID 与 provider 侧 analytics 对账，避免 terminal failure 把成本清零。
+	// UsageByAttempt 按调度 attempt 顺序保留各次 loop 的累计用量；attempt 字段
+	// 在 usage_by_attempt 事件投影中显式输出，避免重试链只留下最后一次用量。
 	UsageByAttempt []*types.TokenUsage `json:"usage_by_attempt,omitempty" yaml:"usage_by_attempt,omitempty"`
 	// §6.1（行动文档 P0）：取消来源分层。childCtx 因 route timeout 触发时记
 	// task_timeout；父会话取消记 parent_cancel；其余按 runErr 文本兜底。用于
@@ -167,6 +168,10 @@ type SubagentResult struct {
 	// 非只读任务、非瞬时类别或已达上限。空白表示"本就该只跑一次"，非空时
 	// 与 Retryable=true 不能同时误导父代理以为会重派。
 	RetrySkipped string `json:"retry_skipped,omitempty" yaml:"retry_skipped,omitempty"`
+	// RemainingMS 是终态时任务上下文剩余的 deadline 预算；0 表示没有可观测
+	// 的 deadline 或已经耗尽。它与 RetrySkipped 配合使用，避免只看
+	// max_attempts 无法判断是否还有机会重试。
+	RemainingMS int64 `json:"remaining_ms,omitempty" yaml:"remaining_ms,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -1053,7 +1058,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	childCtx := ctx
 	var cancel context.CancelFunc
 	if spec.Decision.Timeout > 0 {
-		childCtx, cancel = context.WithTimeout(ctx, spec.Decision.Timeout)
+		// 用独立 cause 标记任务自己的 deadline。这样父 batch deadline 先到时，
+		// child context 虽然同样会返回 DeadlineExceeded，收尾仍能区分
+		// task_timeout 与 batch_deadline。
+		childCtx, cancel = context.WithTimeoutCause(ctx, spec.Decision.Timeout, subagentTaskDeadlineCause)
 		defer cancel()
 	}
 	task = spec.Task
@@ -1181,10 +1189,23 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			break
 		}
 		retryReason = disposition.Category
+		backoff := subagentRetryBackoff(attempt, defaultSubagentRetryBaseDelay, defaultSubagentRetryMaxDelay)
+		if !subagentRetryBudgetAvailable(childCtx, backoff) {
+			lastRetrySkipped = "retry_skipped_deadline_budget"
+			break
+		}
 		// 中间尝试也留完成事件（attempt 可见），标记 intermediate_attempt：
 		// 分析侧按 conflict_count 统计而不把中间失败当最终结果。
-		s.emitSubagentAttemptEvent(childSessionID, options, task, childConfig.Name, spec, attempt, maxAttempts, disposition, runErr)
-		if !sleepWithContext(childCtx, subagentRetryBackoff(attempt, defaultSubagentRetryBaseDelay, defaultSubagentRetryMaxDelay)) {
+		s.emitSubagentAttemptEvent(childSessionID, options, task, childConfig.Name, spec, attempt, maxAttempts, disposition, runErr, result)
+		if !sleepWithContext(childCtx, backoff) {
+			if childCtx.Err() != nil {
+				lastRetrySkipped = retrySkipReason(task, disposition, attempt, maxAttempts, childCtx.Err())
+				if lastRetrySkipped == "" {
+					lastRetrySkipped = "retry_interrupted"
+				}
+			} else {
+				lastRetrySkipped = "retry_interrupted"
+			}
 			break
 		}
 	}
@@ -1196,7 +1217,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		// §6.1（行动文档 P0）：取消来源分层。childCtx 由 route timeout 取消时，
 		// 即使 runErr 文本没写 deadline，也记 task_timeout，避免 batch timeout
 		// 把 task 的真实取消源吞掉；父会话取消记 parent_cancel；其余空白。
-		cancelSource = subagentCancelSource(childCtx, runErr)
+		cancelSource = subagentCancelSource(ctx, childCtx, runErr)
+		attemptUsage := aggregateSubagentAttemptUsage(usageByAttempt)
 		// 写任务只给建议，不自动重派（§6.2）。
 		report := SubagentResult{
 			ID:                    task.ID,
@@ -1222,6 +1244,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			// 实际没有 attempt 2"这一组合不再误导父代理/运维。
 			CancelSource: cancelSource,
 			RetrySkipped: lastRetrySkipped,
+			RemainingMS:  subagentRemainingMS(childCtx),
 		}
 		// §6.2（P0）：失败 attempt 仍可能产出部分结构化结果。即使 runErr!=nil，
 		// loop.run 往往已经回填了 Usage 与 Observations（provider 拿到响应后在
@@ -1230,17 +1253,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		// 注意：report.Error 已在字面量里设为 runErr.Error()（终态失败原因），
 		// 这里不再用 lastResult.Error 覆盖，避免把 deadline 等真实取消源掩掉。
 		if lastResult != nil {
-			report.Usage = lastResult.Usage
+			report.Usage = attemptUsage
 			report.UsageByAttempt = usageByAttempt
-			report.Contract = lastResult.Contract.Clone()
-			if task.ReadOnly {
-				report.Findings = collectFindings(lastResult.Observations)
-			} else {
-				report.Patches = collectPatches(lastResult.Observations)
-			}
-			report.PartialOutput = true
-			report.PartialFindingsCount = len(report.Findings)
-			report.PartialPatchCount = len(report.Patches)
+			applySubagentResultOutput(&report, &task, lastResult)
 		}
 		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
@@ -1275,6 +1290,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"usage_cache_read_tokens": usageCacheRead(report.Usage),
 			"cancel_source":           report.CancelSource,
 			"retry_skipped":           report.RetrySkipped,
+			"remaining_ms":            report.RemainingMS,
+			"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
 		}, spec.Decision))
 		if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 			payload := mergeRouteAuditPayload(map[string]interface{}{
@@ -1309,6 +1326,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 				"usage_cache_read_tokens": usageCacheRead(report.Usage),
 				"cancel_source":           report.CancelSource,
 				"retry_skipped":           report.RetrySkipped,
+				"remaining_ms":            report.RemainingMS,
+				"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
 			}, spec.Decision)
 			hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 		}
@@ -1327,57 +1346,19 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		BudgetTokens:          task.BudgetTokens,
 		Success:               result.Success,
 		Summary:               result.Output,
-		Usage:                 result.Usage,
+		Usage:                 aggregateSubagentAttemptUsage(usageByAttempt),
+		UsageByAttempt:        usageByAttempt,
 		Contract:              result.Contract.Clone(),
 		Attempt:               attempt,
 		MaxAttempts:           maxAttempts,
 		RetryReason:           retryReason,
+		RemainingMS:           subagentRemainingMS(childCtx),
 	}
-	if task.ReadOnly {
-		report.Findings = collectFindings(result.Observations)
-	} else {
-		report.Patches = collectPatches(result.Observations)
-	}
+	applySubagentResultOutput(&report, &task, result)
 	if result.Error != "" {
 		report.Error = result.Error
 	}
-	// Handoff contract (P1-2'): structured output delivered through the
-	// submit_report contract (report_schema) or the handoff relay channel.
-	// - ReportSchema != nil: the accepted submission is captured verbatim as
-	//   StructuredReport (validated at submit time against required /
-	//   additionalProperties; absence degrades to a route warning).
-	// - HandoffIn != nil: the round relay additionally decodes the strict
-	//   handoff state machine into HandoffOut; an invalid handoff degrades to
-	//   a route warning instead of failing the run — the rest of the child's
-	//   output may still be valid. Admission-time capability negotiation stays
-	//   the hard boundary; output validation is the degrade boundary.
-	//
-	// Warnings attach to the task's RouteWarnings so they surface through the
-	// same route-receipt channel as the other dispatch-side warnings (the
-	// receipt is rebuilt after the decision; appending to the task keeps both
-	// event payloads and the parent-facing receipt on one source).
-	if task.ReportSchema != nil || task.HandoffIn != nil {
-		candidate := decodeHandoffCandidate(result.Output)
-		if task.ReportSchema != nil {
-			if candidate.raw == nil {
-				task.RouteWarnings = append(task.RouteWarnings,
-					"report_contract_missing: the child finished without submitting a structured report via submit_report; its text output is preserved")
-				report.Route = subagentRouteReceiptFromTask(task)
-			} else {
-				report.StructuredReport = cloneInterfaceMap(candidate.raw)
-			}
-		}
-		if task.HandoffIn != nil && candidate.raw != nil {
-			handoff, err := DecodeHandoff(candidate.raw, candidate.status, 0)
-			if err != nil {
-				warning := "handoff_invalid:" + err.Error()
-				task.RouteWarnings = append(task.RouteWarnings, warning)
-				report.Route = subagentRouteReceiptFromTask(task)
-			} else {
-				report.HandoffOut = &handoff
-			}
-		}
-	}
+	applySubagentStructuredOutput(&report, &task, result.Output)
 	// §6.3（部分实施）：预算/上下文耗尽时保留已收集的 Findings/Patches
 	//（上面已按只读/写任务分别收集），并把 completion_reason 标注为
 	// budget_exceeded / context_overflow，供分析侧把"有部分产出"的失败单列；
@@ -1423,6 +1404,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		"usage_prompt_tokens":     usagePrompt(report.Usage),
 		"usage_completion_tokens": usageCompletion(report.Usage),
 		"usage_cache_read_tokens": usageCacheRead(report.Usage),
+		"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
+		"remaining_ms":            report.RemainingMS,
 		"trace_id":                options.TraceID,
 	}, spec.Decision))
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
@@ -1452,6 +1435,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"usage_prompt_tokens":     usagePrompt(report.Usage),
 			"usage_completion_tokens": usageCompletion(report.Usage),
 			"usage_cache_read_tokens": usageCacheRead(report.Usage),
+			"usage_by_attempt":        usageByAttemptPayload(report.UsageByAttempt),
+			"remaining_ms":            report.RemainingMS,
 			"trace_id":                options.TraceID,
 		}, spec.Decision)
 		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
@@ -1466,6 +1451,80 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// applySubagentResultOutput copies every useful part of a child Result into
+// the parent-facing receipt. It is deliberately shared by the runErr and
+// result.Success=false paths: loop.run can return a non-success Result with a
+// nil error for budget, exploration, or tool-limit exits.
+func applySubagentResultOutput(report *SubagentResult, task *SubagentTask, result *Result) {
+	if report == nil || task == nil || result == nil {
+		return
+	}
+	if output := strings.TrimSpace(result.Output); output != "" {
+		report.Summary = result.Output
+	}
+	report.Contract = result.Contract.Clone()
+	if task.ReadOnly {
+		report.Findings = collectFindings(result.Observations)
+	} else {
+		report.Patches = collectPatches(result.Observations)
+	}
+	if !report.Success {
+		report.PartialFindingsCount = len(report.Findings)
+		report.PartialPatchCount = len(report.Patches)
+		report.PartialOutput = hasSubagentPartialOutput(result)
+	}
+	applySubagentStructuredOutput(report, task, result.Output)
+}
+
+func hasSubagentPartialOutput(result *Result) bool {
+	if result == nil {
+		return false
+	}
+	if strings.TrimSpace(result.Output) != "" || len(result.Observations) > 0 {
+		return true
+	}
+	if result.Usage != nil && !result.Usage.IsZero() {
+		return true
+	}
+	if contract := result.Contract; contract != nil {
+		return strings.TrimSpace(contract.Summary) != "" ||
+			len(contract.Findings) > 0 ||
+			len(contract.Changes) > 0 ||
+			len(contract.Artifacts) > 0 ||
+			len(contract.Evidence) > 0
+	}
+	return false
+}
+
+// applySubagentStructuredOutput preserves report_schema and handoff output on
+// both successful and failed child runs. A provider/tool error after submit_report
+// must not erase an already accepted structured handoff.
+func applySubagentStructuredOutput(report *SubagentResult, task *SubagentTask, output string) {
+	if report == nil || task == nil || (task.ReportSchema == nil && task.HandoffIn == nil) {
+		return
+	}
+	candidate := decodeHandoffCandidate(output)
+	if task.ReportSchema != nil {
+		if candidate.raw == nil {
+			task.RouteWarnings = append(task.RouteWarnings,
+				"report_contract_missing: the child finished without submitting a structured report via submit_report; its text output is preserved")
+			report.Route = subagentRouteReceiptFromTask(*task)
+		} else {
+			report.StructuredReport = cloneInterfaceMap(candidate.raw)
+		}
+	}
+	if task.HandoffIn != nil && candidate.raw != nil {
+		handoff, err := DecodeHandoff(candidate.raw, candidate.status, 0)
+		if err != nil {
+			warning := "handoff_invalid:" + err.Error()
+			task.RouteWarnings = append(task.RouteWarnings, warning)
+			report.Route = subagentRouteReceiptFromTask(*task)
+		} else {
+			report.HandoffOut = &handoff
+		}
+	}
 }
 
 func collectFindings(observations []types.Observation) []string {
@@ -2457,6 +2516,44 @@ func usageCacheRead(usage *types.TokenUsage) int {
 	return usage.CacheReadTokens
 }
 
+// aggregateSubagentAttemptUsage returns the task-level cost across all
+// provider attempts. A retry is a new provider request, so replacing the
+// previous usage with the last result under-reports cost whenever attempt 1
+// consumed tokens before attempt 2 succeeded or failed.
+func aggregateSubagentAttemptUsage(attempts []*types.TokenUsage) *types.TokenUsage {
+	var total *types.TokenUsage
+	for _, attempt := range attempts {
+		if attempt == nil {
+			continue
+		}
+		if total == nil {
+			total = &types.TokenUsage{}
+		}
+		total.Add(attempt)
+	}
+	return total
+}
+
+func usageByAttemptPayload(attempts []*types.TokenUsage) []map[string]interface{} {
+	if len(attempts) == 0 {
+		return nil
+	}
+	payload := make([]map[string]interface{}, 0, len(attempts))
+	for index, usage := range attempts {
+		entry := map[string]interface{}{"attempt": index + 1}
+		if usage != nil {
+			entry["prompt_tokens"] = usage.PromptTokens
+			entry["completion_tokens"] = usage.CompletionTokens
+			entry["total_tokens"] = usage.TotalTokens
+			entry["cache_read_tokens"] = usage.CacheReadTokens
+			entry["cache_creation_tokens"] = usage.CacheCreationTokens
+			entry["reasoning_tokens"] = usage.ReasoningTokens
+		}
+		payload = append(payload, entry)
+	}
+	return payload
+}
+
 // retrySkipReason 解释某次 attempt 失败后"没有发生后续 attempt"的原因（§6.1）。
 // 不把"本来就只该跑一次"算作跳过（空白），只在确实具备重试资格却因约束没重跑时
 // 给出可读原因：非只读任务 / 非瞬时类别 / 已到上限 / route 超时预算耗尽。
@@ -2470,27 +2567,50 @@ func retrySkipReason(task SubagentTask, disposition SubagentFailureDisposition, 
 	if !disposition.Retryable {
 		return "non_transient_failure"
 	}
-	if ctxErr != nil {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
 		return "retry_skipped_deadline_budget"
+	}
+	if errors.Is(ctxErr, context.Canceled) {
+		return "retry_skipped_parent_cancel"
 	}
 	return ""
 }
 
-// subagentCancelSource 把最终取消来源分层（§6.1）：route timeout / parent cancel /
-// 其他。childCtx 由 route timeout 建立，一旦其 Err()==context.DeadlineExceeded，
-// 即便 runErr 文本未含 deadline，也优先标 task_timeout，避免 batch timeout 吞掉
-// task 的真实取消源；父会话取消记 parent_cancel。
-func subagentCancelSource(childCtx context.Context, runErr error) string {
-	if childCtx != nil && childCtx.Err() == context.DeadlineExceeded {
+// subagentCancelSource 把最终取消来源分层：task timeout、batch deadline、
+// parent cancel 与 provider 自身的 timeout/cancel。优先使用 context cause；
+// 错误文本只作为 provider 没有保留原始 cause 时的最后兜底。
+func subagentCancelSource(parentCtx, childCtx context.Context, runErr error) string {
+	if childCtx != nil && errors.Is(context.Cause(childCtx), subagentTaskDeadlineCause) {
 		return "task_timeout"
+	}
+	if parentCtx != nil && parentCtx.Err() != nil {
+		if errors.Is(context.Cause(parentCtx), context.DeadlineExceeded) ||
+			errors.Is(parentCtx.Err(), context.DeadlineExceeded) {
+			return "batch_deadline"
+		}
+		return "parent_cancel"
+	}
+	if childCtx != nil {
+		switch {
+		case errors.Is(context.Cause(childCtx), context.DeadlineExceeded):
+			return "batch_deadline"
+		case errors.Is(context.Cause(childCtx), context.Canceled):
+			return "parent_cancel"
+		}
 	}
 	if runErr != nil {
 		text := strings.ToLower(runErr.Error())
 		if strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "deadline") {
-			return "task_timeout"
+			return "provider_timeout"
 		}
 		if strings.Contains(text, "context canceled") || strings.Contains(text, "operation was canceled") {
-			return "parent_cancel"
+			return "provider_cancel"
+		}
+		if errors.Is(runErr, context.DeadlineExceeded) {
+			return "provider_timeout"
+		}
+		if errors.Is(runErr, context.Canceled) {
+			return "provider_cancel"
 		}
 	}
 	return ""
