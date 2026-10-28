@@ -17,7 +17,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,24 +30,130 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
-// envdStub stands in for the envd daemon.
+// envdStub stands in for the envd daemon: the filesystem unary family, the
+// process stream, and /metrics. Handlers run on their own goroutines, so all
+// state is guarded by mu.
 type envdStub struct {
 	server *httptest.Server
+	mu     sync.Mutex
 	// files maps a canonical target-side path to its content.
 	files map[string]string
 	// links maps a path to what a target-side realpath would report for it;
 	// this is how a symlink escape is simulated.
 	links map[string]string
-	// Counters let a test prove the jail refused before envd was contacted.
+	// dirs pins explicit ListDir responses for a path; absent paths fall back to
+	// synthesizing one level from files.
+	dirs map[string][]map[string]any
+	// metricsBody is the raw /metrics response.
+	metricsBody string
+
 	statCalls    atomic.Int64
 	processCalls atomic.Int64
+	removed      []string
+	moved        [][2]string
+	created      []string
+}
+
+func (s *envdStub) content(target string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.files[target]
+	return value, ok
+}
+
+func (s *envdStub) put(target, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files[target] = value
+}
+
+func (s *envdStub) history() (removed []string, moved [][2]string, created []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.removed...), append([][2]string(nil), s.moved...), append([]string(nil), s.created...)
+}
+
+// isDir reports whether the stub treats a path as a directory.
+func (s *envdStub) isDir(target string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.dirs[target]; ok {
+		return true
+	}
+	for candidate := range s.files {
+		if strings.HasPrefix(candidate, target+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// entriesFor returns the ListDir payload for one path: an explicit pin when set,
+// otherwise one synthesized level from the file map.
+func (s *envdStub) entriesFor(target string) []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pinned, ok := s.dirs[target]; ok {
+		return append([]map[string]any(nil), pinned...)
+	}
+	seen := map[string]bool{}
+	var out []map[string]any
+	prefix := target + "/"
+	for candidate, content := range s.files {
+		if !strings.HasPrefix(candidate, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(candidate, prefix)
+		if rest == "" || strings.Contains(rest, "/") {
+			continue
+		}
+		if seen[rest] {
+			continue
+		}
+		seen[rest] = true
+		out = append(out, map[string]any{
+			"name":        rest,
+			"path":        candidate,
+			"type":        "FILE_TYPE_FILE",
+			"size":        fmt.Sprintf("%d", len(content)),
+			"mode":        420,
+			"permissions": "-rw-r--r--",
+			"owner":       "dev",
+			"group":       "dev",
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return fmt.Sprint(out[i]["name"]) < fmt.Sprint(out[j]["name"])
+	})
+	return out
 }
 
 func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 	t.Helper()
 
-	stub := &envdStub{files: files, links: links}
+	stub := &envdStub{
+		files:       map[string]string{},
+		links:       map[string]string{},
+		dirs:        map[string][]map[string]any{},
+		metricsBody: `{"ts":1,"cpu_count":4,"mem_total":4294967296,"mem_used":1073741824,"disk_used":2097152,"disk_total":10737418240}`,
+	}
+	for key, value := range files {
+		stub.files[key] = value
+	}
+	for key, value := range links {
+		stub.links[key] = value
+	}
 	mux := http.NewServeMux()
+
+	writeJSON := func(w http.ResponseWriter, payload any) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(payload)
+	}
+	writeConnectError := func(w http.ResponseWriter, status int, code, message string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"code":%q,"message":%q}`, code, message)
+	}
 
 	mux.HandleFunc("/filesystem.Filesystem/Stat", func(w http.ResponseWriter, r *http.Request) {
 		stub.statCalls.Add(1)
@@ -54,27 +162,93 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &in)
-		content, ok := stub.files[in.Path]
-		if !ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprint(w, `{"code":"not_found","message":"no such file"}`)
+		if stub.isDir(in.Path) {
+			writeJSON(w, map[string]any{"entry": map[string]any{
+				"name": base(in.Path), "path": in.Path, "type": "FILE_TYPE_DIRECTORY",
+				"size": "4096", "mode": 511, "permissions": "drwxr-xr-x",
+			}})
 			return
 		}
-		response := map[string]any{
-			"entry": map[string]any{
-				"name":        base(in.Path),
-				"path":        in.Path,
-				"type":        "FILE_TYPE_FILE",
-				"size":        fmt.Sprintf("%d", len(content)),
-				"mode":        420,
-				"permissions": "-rw-r--r--",
-				"owner":       "dev",
-				"group":       "dev",
-			},
+		content, ok := stub.content(in.Path)
+		if !ok {
+			writeConnectError(w, http.StatusNotFound, "not_found", "no such file")
+			return
 		}
+		writeJSON(w, map[string]any{"entry": map[string]any{
+			"name": base(in.Path), "path": in.Path, "type": "FILE_TYPE_FILE",
+			"size": fmt.Sprintf("%d", len(content)), "mode": 420, "permissions": "-rw-r--r--",
+			"owner": "dev", "group": "dev",
+		}})
+	})
+
+	mux.HandleFunc("/filesystem.Filesystem/ListDir", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Path  string `json:"path"`
+			Depth uint32 `json:"depth"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &in)
+		writeJSON(w, map[string]any{"entries": stub.entriesFor(in.Path)})
+	})
+
+	mux.HandleFunc("/filesystem.Filesystem/MakeDir", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Path string `json:"path"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &in)
+		if stub.isDir(in.Path) {
+			writeConnectError(w, http.StatusBadRequest, "already_exists", "path already exists")
+			return
+		}
+		stub.mu.Lock()
+		stub.created = append(stub.created, in.Path)
+		stub.dirs[in.Path] = []map[string]any{}
+		stub.mu.Unlock()
+		writeJSON(w, map[string]any{})
+	})
+
+	mux.HandleFunc("/filesystem.Filesystem/Remove", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Path string `json:"path"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &in)
+		_, isFile := stub.content(in.Path)
+		if !isFile && !stub.isDir(in.Path) {
+			writeConnectError(w, http.StatusNotFound, "not_found", "no such path")
+			return
+		}
+		stub.mu.Lock()
+		stub.removed = append(stub.removed, in.Path)
+		delete(stub.files, in.Path)
+		delete(stub.dirs, in.Path)
+		stub.mu.Unlock()
+		writeJSON(w, map[string]any{})
+	})
+
+	mux.HandleFunc("/filesystem.Filesystem/Move", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Source      string `json:"source"`
+			Destination string `json:"destination"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &in)
+		if _, ok := stub.content(in.Source); !ok {
+			writeConnectError(w, http.StatusNotFound, "not_found", "no such source")
+			return
+		}
+		stub.mu.Lock()
+		stub.moved = append(stub.moved, [2]string{in.Source, in.Destination})
+		stub.files[in.Destination] = stub.files[in.Source]
+		delete(stub.files, in.Source)
+		stub.mu.Unlock()
+		writeJSON(w, map[string]any{})
+	})
+
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
+		_, _ = fmt.Fprint(w, stub.metricsBody)
 	})
 
 	mux.HandleFunc("/process.Process/Start", func(w http.ResponseWriter, r *http.Request) {
@@ -89,28 +263,88 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		_ = json.Unmarshal(payload, &req)
 
 		w.Header().Set("Content-Type", "application/connect+json")
+		arg := func(index int) string {
+			if index < 0 || index >= len(req.Process.Args) {
+				return ""
+			}
+			return req.Process.Args[index]
+		}
 		last := func() string {
 			if len(req.Process.Args) == 0 {
 				return ""
 			}
 			return req.Process.Args[len(req.Process.Args)-1]
 		}
+
 		switch req.Process.Cmd {
 		case "/bin/sh":
-			// The path canonicalizer: report the link target when one is mapped.
-			target := last()
-			resolved := target
-			if link, ok := stub.links[target]; ok {
-				resolved = link
+			// The argv shape is ["-c", script, label, args...]: the label says
+			// which synthetic operation this invocation stands for.
+			switch arg(2) {
+			case "aicli-envd-resolve":
+				target := last()
+				resolved := target
+				stub.mu.Lock()
+				if link, ok := stub.links[target]; ok {
+					resolved = link
+				}
+				stub.mu.Unlock()
+				writeProcessStream(t, w, []byte(resolved+"\n"), nil, 0)
+			case "aicli-envd-grep":
+				pattern, root := arg(3), arg(4)
+				stub.mu.Lock()
+				var matches []string
+				for candidate, content := range stub.files {
+					if !strings.HasPrefix(candidate, root) {
+						continue
+					}
+					for number, line := range strings.Split(content, "\n") {
+						if strings.Contains(line, pattern) {
+							matches = append(matches, fmt.Sprintf("%s:%d:%s", candidate, number+1, line))
+							break
+						}
+					}
+				}
+				stub.mu.Unlock()
+				sort.Strings(matches)
+				out := strings.Join(matches, "\n")
+				if out != "" {
+					out += "\n"
+				}
+				out += "__TOOL__=rg\n"
+				writeProcessStream(t, w, []byte(out), nil, 0)
+			case "aicli-envd-write":
+				stub.put(arg(3), arg(4))
+				writeProcessStream(t, w, nil, nil, 0)
+			default:
+				writeProcessStream(t, w, nil, []byte("stub: unexpected shell script\n"), 127)
 			}
-			writeProcessStream(t, w, []byte(resolved+"\n"), nil, 0)
 		case "/bin/cat":
-			content, ok := stub.files[last()]
+			content, ok := stub.content(last())
 			if !ok {
 				writeProcessStream(t, w, nil, []byte("cat: no such file\n"), 1)
 				return
 			}
 			writeProcessStream(t, w, []byte(content), nil, 0)
+		case "/usr/bin/find":
+			root, pattern := arg(0), arg(2)
+			stub.mu.Lock()
+			var hits []string
+			for candidate := range stub.files {
+				if !strings.HasPrefix(candidate, root+"/") {
+					continue
+				}
+				if matchesBaseGlob(base(candidate), pattern) {
+					hits = append(hits, candidate)
+				}
+			}
+			stub.mu.Unlock()
+			sort.Strings(hits)
+			if len(hits) == 0 {
+				writeProcessStream(t, w, nil, nil, 0)
+				return
+			}
+			writeProcessStream(t, w, []byte(strings.Join(hits, "\n")+"\n"), nil, 0)
 		default:
 			writeProcessStream(t, w, nil, []byte("stub: unexpected command "+req.Process.Cmd+"\n"), 127)
 		}
@@ -119,6 +353,17 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
 	return stub
+}
+
+// matchesBaseGlob implements the tiny subset of base-name globbing the find stub
+// needs: "*.ext" and exact names.
+func matchesBaseGlob(name, pattern string) bool {
+	switch {
+	case strings.HasPrefix(pattern, "*"):
+		return strings.HasSuffix(name, strings.TrimPrefix(pattern, "*"))
+	default:
+		return name == pattern
+	}
 }
 
 // base returns the last slash-separated element of a target-side path.
@@ -230,21 +475,65 @@ func TestEnvDNormalizeValidatesTargetSideInvariants(t *testing.T) {
 	})
 }
 
-// TestEnvDServerExposesPrefixedView proves the slice reaches the MCP surface:
-// the envd backend registers into the shared registry and the shared prefix
-// rewriting produces the same name shape as the ssh/http transports.
-func TestEnvDServerExposesPrefixedView(t *testing.T) {
+// TestEnvDServerTierSurface pins the档位 table the merge plan promised: a shared
+// name means the same thing on both backends, and envd-only tools join the same
+// ladder instead of defining a second one.
+func TestEnvDServerTierSurface(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{"/srv/app/README.md": "# hello envd\n"}, nil)
-	server, err := remotetools.NewServer(newEnvDConfig(stub.server.URL), "envd")
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer server.Close()
 
-	names := server.ToolNames()
-	if len(names) != 1 || names[0] != "remote_envd__view" {
-		t.Fatalf("tool names = %v, want exactly [remote_envd__view]", names)
-	}
+	t.Run("readonly", func(t *testing.T) {
+		server, err := remotetools.NewServer(newEnvDConfig(stub.server.URL), "envd")
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		defer server.Close()
+		want := []string{
+			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
+			"remote_envd__ls", "remote_envd__view",
+		}
+		got := server.ToolNames()
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("readonly surface = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("standard adds the file mutation surface", func(t *testing.T) {
+		cfg := newEnvDConfig(stub.server.URL)
+		cfg.Profile = remotetools.ProfileStandard
+		server, err := remotetools.NewServer(cfg, "envd")
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		defer server.Close()
+		want := []string{
+			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
+			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move", "remote_envd__remove",
+			"remote_envd__view", "remote_envd__write",
+		}
+		got := server.ToolNames()
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("standard surface = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("readOnly override drops mutations", func(t *testing.T) {
+		cfg := newEnvDConfig(stub.server.URL)
+		cfg.Profile = remotetools.ProfileOps
+		cfg.ReadOnly = true
+		server, err := remotetools.NewServer(cfg, "envd")
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		defer server.Close()
+		for _, name := range server.ToolNames() {
+			if strings.HasSuffix(name, "__write") || strings.HasSuffix(name, "__remove") ||
+				strings.HasSuffix(name, "__mkdir") || strings.HasSuffix(name, "__move") {
+				t.Fatalf("readOnly override leaked a mutation tool: %v", server.ToolNames())
+			}
+		}
+	})
 }
 
 func connectEnvDServer(t *testing.T, server *remotetools.Server) (*mcp.ClientSession, context.Context) {
@@ -282,8 +571,14 @@ func TestEnvDViewReadsThroughTheStub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 1 || tools.Tools[0].Name != "remote_envd__view" {
-		t.Fatalf("tools = %d, want exactly one remote_envd__view", len(tools.Tools))
+	var hasView bool
+	for _, declared := range tools.Tools {
+		if declared.Name == "remote_envd__view" {
+			hasView = true
+		}
+	}
+	if !hasView {
+		t.Fatalf("tools missing remote_envd__view: %d advertised", len(tools.Tools))
 	}
 
 	// The local spelling (file_path) and the bridge spelling (path) both work.

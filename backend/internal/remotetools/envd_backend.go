@@ -264,6 +264,51 @@ func (be *envdBackend) resolvePath(ctx context.Context, raw string) (string, err
 	return resolved, nil
 }
 
+// protectedRoot reports whether a path is one of the jail roots themselves.
+// Removing or renaming a root is never a file-level operation.
+func (be *envdBackend) protectedRoot(candidate string) bool {
+	candidate = path.Clean(candidate)
+	for _, root := range append([]string{be.workspace}, be.roots...) {
+		if candidate == path.Clean(root) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveMutationPath prepares a path for unlink or rename.
+//
+// The final component is deliberately not followed: removing or renaming a
+// symlink acts on the link itself. The parent is resolved and checked, because an
+// intermediate symlink (workspace/link/file) would otherwise redirect the
+// operation outside the jail.
+func (be *envdBackend) resolveMutationPath(ctx context.Context, raw string) (string, error) {
+	lexical, err := be.lexicalResolve(raw)
+	if err != nil {
+		return "", err
+	}
+	if be.protectedRoot(lexical) {
+		return "", newToolError(CodePathDenied, "target a path inside the workspace",
+			"refusing to mutate protected root %q", lexical)
+	}
+	parent := path.Dir(lexical)
+	name := path.Base(lexical)
+	resolvedParent, err := be.canonicalize(ctx, parent)
+	if err != nil {
+		return "", err
+	}
+	if !be.insideJail(resolvedParent) {
+		return "", newToolError(CodePathDenied, "use a path inside the configured workspace",
+			"path %q resolves through %q, outside the workspace %q and the allowed roots", raw, resolvedParent, be.workspace)
+	}
+	target := path.Join(resolvedParent, name)
+	if !be.insideJail(target) {
+		return "", newToolError(CodePathDenied, "use a path inside the configured workspace",
+			"path %q resolves to %q, outside the workspace %q and the allowed roots", raw, target, be.workspace)
+	}
+	return target, nil
+}
+
 // run executes one argv command on the target with cwd set to the workspace.
 func (be *envdBackend) run(ctx context.Context, cmd string, args []string) (stdout, stderr []byte, code int32, err error) {
 	if be == nil || be.client == nil {
@@ -391,13 +436,81 @@ func envdStringParam(params map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+// envdExtensionTiers pins the tools that exist only on the envd backend to the
+// tier they belong to.
+//
+// This table is the whole of the backend-specific policy: a shared name means
+// exactly what cfg.enabledTools() says it means, and an extension joins the same
+// readonly subset ⊂ standard ⊂ ops ladder. Keeping it to a name→tier map is what
+// prevents a second profile system from growing next to the shared one.
+var envdExtensionTiers = map[string]Profile{
+	ToolHostMetrics: ProfileReadonly, // capacity read, no side effects
+	ToolMkdir:       ProfileStandard,
+	ToolRemove:      ProfileStandard,
+	ToolMove:        ProfileStandard,
+}
+
+// profileRank orders the tiers; custom is handled separately because it is an
+// explicit list rather than a rung.
+func profileRank(p Profile) int {
+	switch p {
+	case ProfileReadonly:
+		return 0
+	case ProfileStandard:
+		return 1
+	case ProfileOps:
+		return 2
+	default:
+		return -1
+	}
+}
+
+// envdToolEnabled decides whether the envd backend exposes one tool name.
+//
+// ReadOnly is a hard override on both sources, matching the shared rule that a
+// misconfigured ops profile cannot expose a mutation tool when the operator asked
+// for read-only.
+func envdToolEnabled(cfg *Config, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, enabled := range cfg.enabledTools() {
+		if enabled == name {
+			return true
+		}
+	}
+	tier, ok := envdExtensionTiers[name]
+	if !ok || cfg.ReadOnly {
+		return false
+	}
+	if cfg.Profile == ProfileCustom {
+		// A custom profile is an exact list; an extension must be named in it.
+		for _, listed := range cfg.Tools {
+			if strings.TrimSpace(listed) == name {
+				return true
+			}
+		}
+		return false
+	}
+	for _, listed := range cfg.Tools {
+		if strings.TrimSpace(listed) == name {
+			return profileRank(cfg.Profile) >= profileRank(tier)
+		}
+	}
+	if len(cfg.Tools) > 0 {
+		// An explicit tool list narrows every surface, extensions included.
+		return false
+	}
+	return profileRank(cfg.Profile) >= profileRank(tier)
+}
+
 // buildEnvDRegistry constructs the tool registry for the envd backend.
 //
-// Gating uses the shared cfg.enabledTools() ladder, so a profile value means
-// the same thing on both backends; a tool the envd backend has not implemented
-// yet is simply not a candidate. Names are rewritten by the same
-// newPrefixedTool wrapper, which is what keeps a remote tool from ever
-// colliding with a local builtin.
+// Gating goes through envdToolEnabled, so a profile value means the same thing on
+// both backends and the envd-only tools join the same ladder as declared tiers.
+// A tool the backend has not implemented yet is simply not a candidate. Names are
+// rewritten by the same newPrefixedTool wrapper, which is what keeps a remote tool
+// from ever colliding with a local builtin.
 func buildEnvDRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if cfg == nil || workspace == nil {
 		return nil, fmt.Errorf("config and workspace are required")
@@ -406,14 +519,10 @@ func buildEnvDRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) 
 	if err != nil {
 		return nil, err
 	}
-	enabled := map[string]bool{}
-	for _, name := range cfg.enabledTools() {
-		enabled[name] = true
-	}
 	base := remoteToolBase{cfg: cfg, workspace: workspace}
 	registry := toolkit.NewRegistry()
 	for _, spec := range envdToolSpecs(base) {
-		if !enabled[spec.name] {
+		if !envdToolEnabled(cfg, spec.name) {
 			continue
 		}
 		tool := &envdTool{spec: spec, backend: backend, description: spec.description}
@@ -426,12 +535,12 @@ func buildEnvDRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) 
 
 // envdToolSpecs lists what the envd backend can serve today.
 //
-// M0 is a vertical slice: `view` only, because what must be proven is the
-// wiring (gating, jail, audit wrapper, output budget) rather than breadth. M2
-// appends the migrated bridge tools and M3 the edit family; both are additions
-// to this list, not new plumbing.
+// M0 was a vertical slice (`view` only) to prove the wiring. M2 appends the
+// migrated file surface; the process surface (shell, pty_*), watch_dir and the
+// edit family land in later steps, each as data in these tables rather than new
+// plumbing.
 func envdToolSpecs(base remoteToolBase) []envdToolSpec {
-	return []envdToolSpec{
+	return append([]envdToolSpec{
 		{
 			name:        ToolView,
 			description: base.describe("Read one file from the envd target as text. Paths resolve inside the workspace and symlinks are canonicalized on the target. There is no line windowing on this surface yet, so a file above the read limit is refused rather than half-read."),
@@ -451,7 +560,7 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 			},
 			call: envdView,
 		},
-	}
+	}, envdFileToolSpecs(base)...)
 }
 
 // envdView reads a file through envd.
