@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**部分已落地（v4）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；**v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）**。剩余项见 §13 末尾两条。
+- 状态：**部分已落地（v5）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；**v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）**。剩余项见 §13 末尾两条。
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -541,15 +541,25 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 - `envd_failure_test.go` 的 `error_code`/`failure_class` 断言整体上移到共享核，成为跨后端的"错误契约"测试；
 - `chat_remote_*_test.go` 系列（他人当前有未提交改动，**我只读不改**）作为端到端 surface 回归。
 
-### 7.4 反漂移静态检查（可执行、可进 CI）
+### 7.4 反漂移静态检查（**已上线**：`backend/internal/driftguard`，随 `make test` 运行）
 
-三条用脚本落地，放在 `backend/scripts/`（与既有 audit 脚本同族）：
+原计划把三条检查写成 `backend/scripts/` 下的脚本。实现时改了主意，**原因必须记下来**：本仓库已有先例把结构性不变式做成普通测试（Makefile 里写明 `make test` 会跑 `cmd/contractgen` 的 `TestGeneratedFileIsUpToDate`，这正是生成物可信的原因）。需要有人"记得跑"的检查等于没有检查。因此三条现在是 `go test ./...` 里的测试，入口零新增。
 
-1. **搬家完整性**：四个核目录（`viewcore`/`lscore`/`searchcore`/`mutatecore`）内 `os.(ReadFile|WriteFile|Stat|Open|Create|Remove|MkdirAll|Rename|ReadDir)` 计数必须为 0（阶段表里写明当前值，逐段下降）。
-2. **禁止后端分支**：核目录内禁止出现字面量 `"envd"`（除注释与测试）。
-3. **能力判断单点**：`Capabilities()` 的调用点在核目录内出现次数 ≤ 约定阈值（每类需求一处），超出即评审拦截。
+已落地的三条：
 
-这三条把 §4.1 三条纪律从"口头承诺"变成 CI 事实，是**本方案不退化的唯一保障**，优先级高于任何功能交付。
+1. **`TestSharedCoresDoNotAddHostFilesystemCalls`（棘轮）**：四个核目录内直接 `os.*` 文件系统调用的基线为**实测** `viewcore 5 / lscore 1 / searchcore 24 / mutatecore 27 = 57`；加上 `internal/tools/code_index_resolver.go` 的 3 处正好 60，与 §3.1 用 grep 得到的数字吻合。**两种独立方法得出同一数字**，这条基线才可信。计数用 AST（`go/ast`）而非正则：正则会把注释与字符串里的 `os.ReadFile` 也数进去，一个因别人改注释而报假回归的守卫一周内就会被关掉。
+   - 超出基线 → 失败；**低于基线也失败**（要求把基线写下去），否则上限一直悬在那里，下一次重新加回调用无人报错。
+   - 扫描目录不存在或不是目录 → 报错而不是返回 0："静默量不到东西"的守卫会永远绿。
+2. **`TestSharedCoresNeverBranchOnBackendNames`（硬零）**：核目录内不得出现 `"envd"` / `"ssh"` / `"http"` / `"local"` 字符串字面量（注释里的散文不算，因为有 AST）。当前四个核均为 0。
+3. **`TestCapabilityDecisionsStayCentralized`（当前上限 0）**：核目录内 `Capabilities()` 调用点必须为 0——seam 落地后也只允许集中在一个 resolver 里，抬高上限必须写明那个 helper 的名字。
+
+**守卫本身也被测试**（另外 6 个用例）：字符串/注释里的提及、别名导入（`aux "os"`）、`os.Getenv`、`*_test.go` 均不得被计数；一个决策被复制到两处必须数出 2。守门人数错了比不设更糟。
+
+**反向验证**：临时往 `mutatecore/atomic.go` 加一个 `os.Stat` 探针，检查确实变红（"28 calls, 1 above the recorded baseline of 27"）；回退后 `git diff` 为空且全绿。不经反向验证的守卫等于未验证。
+
+辅助工具 `backend/scripts/drift_measure.go`（`//go:build ignore`）：`go run ./scripts/drift_measure.go` 打印当前计数与各调用点，用于**诚实地下调基线**，而不是改一个猜的数字。
+
+这三条把 §4.1 的四条纪律从"口头承诺"变成 `go test` 事实，是**本方案不退化的唯一保障**，优先级高于任何功能交付。
 
 ---
 
@@ -606,7 +616,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 1. 在 `tool-layer-abstraction-design-20261022.md` 的 §16.1 风险 3 与 Phase 2/3 处加一行交叉引用（指向本文），把"远程后续通过接口适配"这句占位**兑现成接口定义**。
 2. 在 `aicli-envd-bridge-merge-plan-20261028.md` §8.9 后追加一节，把"envd 文件面独立实现"标记为**过渡态，偿还计划见本文**。
-3. 立 `backend/scripts/` 的三个 §7.4 检查（可先只跑检查 1 的“计数下降”报表，不作硬门）。
+3. ✅ **已完成**：§7.4 的三条反漂移检查已作为 `backend/internal/driftguard` 测试上线（随 `make test` / `go test ./...` 自动执行，无需额外 CI 步骤）。原写的是“先只跑报表、不作硬门”，实际落地为**硬门**：它们只会因新增违规而红，不会拦截现有代码（基线即现状），因此没有“先软后硬”的必要。
 4. 在 `docs/architecture/envd-capabilities.md` 补一节 **`GET/POST /files`（HTTP，非 Connect-RPC）**，记录本轮实测：header token 即可、`Accept-Ranges`/206/416、无 ETag、`Last-Modified` 为请求时间、0.2.11 无 gzip、`POST` 的 `EnsureDirs` 自动建父目录、**无 jail 且以 envd 进程身份读**。它今天只列了 RPC 与 `/health`、`/metrics`，**遗漏了这个最重要的文件通道**。
 5. 顺手更正 `docs/architecture/envd-source-and-rebuild.md:133` 的 clone 地址：本轮实测 `e2b-dev/infra` 与 `e2b-dev/runtime` 是**同一代码库的跳转**（API 响应里 `html_url` 指向 `e2b-dev/runtime`），两个都可用，文档建议写 `runtime` 并注一个重定向备注，避免后人怀疑找错仓。
 6. **凭据卫生（建议立即做）**：本轮为跑 spike 使用了 sudo 口令与 envd 访问令牌，两者均未回显、未落盘、远端临时产物已清零，但口令已进入会话记录——建议**换发 envd 令牌**（改 `/etc/envd/envd.env` → `systemctl restart envd` → `/init` 重装，步骤见 `docs/aicli/envd-selfhost-deploy.md` §令牌引导）并更换 sudo 口令。
