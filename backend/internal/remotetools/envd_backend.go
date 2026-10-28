@@ -37,6 +37,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
+// Two write scripts, chosen by the tool's own contract. Content is always "$2"
+// and the path "$1", so no caller data is ever quoted into the script.
+const (
+	envdWriteScript      = `set -e; printf '%s' "$2" > "$1"`
+	envdWriteMkdirScript = `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
+)
+
 // envdBackend holds one envd connection plus the jail applied before every call.
 type envdBackend struct {
 	cfg       *Config
@@ -349,14 +356,32 @@ func (be *envdBackend) workspaceRelative(target string) string {
 // WriteFile RPC, so content travels as one argv element and argv cannot carry a
 // NUL byte. The refusal names the reason and the alternative rather than letting
 // the write land truncated.
-func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte) (int64, *toolkit.ToolResult) {
+//
+// createParents mirrors the SHARED per-tool contract rather than this backend's
+// convenience: `write`/`append_write` refuse a missing parent (mutatecore
+// ValidateWriteTarget), while `apply_patch` add creates it. A single auto-mkdir
+// for every write would make the same tool behave two ways depending on the
+// transport, which is the drift this merge exists to remove.
+func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte, createParents bool) (int64, *toolkit.ToolResult) {
 	if strings.IndexByte(string(encoded), 0) >= 0 {
 		return 0, envdErrorResult("cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use a UTF-8 payload or shell for binary content", target)
 	}
 	if len(encoded) > envdMaxWriteBytes {
 		return 0, envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
 	}
-	script := `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
+	script := envdWriteScript
+	if createParents {
+		script = envdWriteMkdirScript
+	} else if parent := path.Dir(target); parent != "/" && parent != be.workspace {
+		// Refuse exactly like the local surface: no silent directory creation.
+		if _, statErr := be.client.Stat(ctx, parent); statErr != nil {
+			if !errorsAsConnectCode(statErr, "not_found") {
+				return 0, envdErrorResult("%s", describeEnvDError(statErr, parent))
+			}
+			return 0, envdErrorResult("%v", newToolError(CodeNotFound, "create the parent directory first",
+				"parent directory does not exist: %s", parent))
+		}
+	}
 	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-write", target, string(encoded)})
 	if err != nil {
 		return 0, envdErrorResult("write %s: %v", target, err)

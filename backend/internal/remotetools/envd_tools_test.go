@@ -118,6 +118,8 @@ func TestEnvDWriteThenViewRoundTrip(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{}, nil)
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
+	// The shared contract: write does not create directories, mkdir does.
+	callTool(t, ctx, session, "remote_envd__mkdir", map[string]interface{}{"path": "sub"})
 	wrote := callTool(t, ctx, session, "remote_envd__write", map[string]interface{}{
 		"path": "sub/hello.txt", "content": "abc",
 	})
@@ -131,6 +133,33 @@ func TestEnvDWriteThenViewRoundTrip(t *testing.T) {
 	got := callTool(t, ctx, session, "remote_envd__view", map[string]interface{}{"file_path": "sub/hello.txt"})
 	if got != "abc" {
 		t.Fatalf("read back = %q, want abc", got)
+	}
+}
+
+// Same-name tools must mean the same thing on both transports: the local surface
+// refuses a missing parent instead of silently creating directories.
+func TestEnvDWriteRefusesMissingParent(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+
+	before := stub.processCalls.Load()
+	statBefore := stub.statCalls.Load()
+	refused := callEnvDExpectError(t, ctx, session, "remote_envd__write", map[string]interface{}{
+		"path": "nodir/deep.txt", "content": "x",
+	})
+	if !strings.Contains(refused, "parent directory does not exist") {
+		t.Fatalf("missing-parent refusal = %q", refused)
+	}
+	// Only the jail's realpath and the parent probe may have run; the write script
+	// must not have, and nothing may have landed.
+	if after := stub.processCalls.Load(); after != before+1 {
+		t.Fatalf("expected only the jail realpath call, got %d -> %d", before, after)
+	}
+	if after := stub.statCalls.Load(); after < statBefore {
+		t.Fatalf("stat calls went backwards: %d -> %d", statBefore, after)
+	}
+	if _, ok := stub.content("/srv/app/nodir/deep.txt"); ok {
+		t.Fatal("the refused write landed anyway")
 	}
 }
 

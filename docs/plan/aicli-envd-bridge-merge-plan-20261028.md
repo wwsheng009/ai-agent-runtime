@@ -237,6 +237,18 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **结论：收编后的 envd 后端在真机功能完整，且原厂 ssh 面未受影响（同一二进制、同一外壳）。** 遗留：`StreamInput`（client-streaming，需 HTTP/2）仍不暴露；symlink jail 的 TOCTOU 限制沿用收编前状态（实施报告 §8.3）。
 
+### 8.8 ssh 面活测与一处跨后端语义修正（2026-10-28）
+
+**同一二进制在目标机跑 local 后端**（`ssh -T … /home/n9e/bin/aicli-remote-tools serve --stdio …`，MCP stdio 真机往返）**15/15 通过**：`tools/list` = 9 个共享面工具（`view ls glob grep write edit append_write apply_patch shell`，**不含** envd 专属扩展，档位语义一致得到实证）；`write→view→edit→回读→append→apply_patch→回读→grep→glob→ls→shell` 全链路正确，越界路径 `PATH_DENIED`、未授权命令 `COMMAND_DENIED`。收编对原厂 ssh 路径零回归。
+
+**活测暴露的真实分歧（已修）**：`write` / `append_write` 在**父目录不存在**时，local 后端拒绝（`NOT_FOUND: parent directory does not exist`），而 envd 后端因脚本内 `mkdir -p` 会静默建目录——同名工具两种语义，正是本次收编要消灭的漂移。
+
+- 修正：`storeBytes` 增加 `createParents` 参数并拆成两条脚本（`envdWriteScript` / `envdWriteMkdirScript`）；`write`/`append_write`/`edit` 传 `false`（缺父目录即按同一措辞拒绝，且不发写命令），`apply_patch` 的新增/改名与回滚传 `true`（local 侧 patch 本就 `CreateParents=true`）。
+- 顺带消除重复：`envdWrite` 不再自持写脚本，统一走 `storeBytes`（NUL/上限/写后 stat 确认单一实现）。
+- 测试：新增 `TestEnvDWriteRefusesMissingParent`（断言拒绝措辞、只发生 jail realpath 一次调用、无落盘）；`write` 回读用例改为先 `mkdir`。
+
+**仍存的表面差异（明确记录，不掩饰）**：`view` 在 envd 侧返回原文（无行号/窗口/折叠元数据，工具描述已声明），local 侧返回带 `1: ` 行号与截断元数据；`edit` 的成功摘要措辞两侧不同（`Edited …: N replacement(s)` 与 `Replaced N occurrence(s)`）；`write` 上限取共享 `Limits.CaptureLimit`（2 MiB）而 bridge 原为 1 MiB。统一这些渲染需把共享核的读/渲染路径做成可插 I/O seam（§3 的远期项），不在本次收编范围。
+
 - 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
 
 > 说明：§8.1–§8.7 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。

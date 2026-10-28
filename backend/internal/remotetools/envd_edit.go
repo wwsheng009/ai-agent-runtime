@@ -91,7 +91,7 @@ func (be *envdBackend) store(ctx context.Context, target, text string, enc mutat
 		writeEncoding = enc
 	}
 	encoded := mutatecore.Encode(text, writeEncoding)
-	sizeAfter, refusal := be.storeBytes(ctx, target, encoded)
+	sizeAfter, refusal := be.storeBytes(ctx, target, encoded, false)
 	if refusal != nil {
 		return 0, refusal
 	}

@@ -288,19 +288,13 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 	if err != nil {
 		return envdErrorResult("%v", err), nil
 	}
-	script := `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
-	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-write", target, content})
-	if err != nil {
-		return envdErrorResult("write %s: %v", target, err), nil
+	// createParents=false matches the shared write contract: a missing parent is a
+	// refusal, not a silent mkdir (apply_patch add is the tool that creates trees).
+	sizeAfter, refusal := be.storeBytes(ctx, target, []byte(content), false)
+	if refusal != nil {
+		return refusal, nil
 	}
-	if code != 0 {
-		return envdErrorResult("write %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr))), nil
-	}
-	entry, statErr := be.client.Stat(ctx, target)
-	if statErr != nil {
-		return envdTextResult(fmt.Sprintf("wrote %s (%d bytes requested; size not verified: %v)", target, len(content), statErr)), nil
-	}
-	return envdTextResult(fmt.Sprintf("wrote %s (%d bytes on disk)", target, entry.SizeBytes())), nil
+	return envdTextResult(fmt.Sprintf("wrote %s (%d bytes on disk)", target, sizeAfter)), nil
 }
 
 // envdMkdir creates a directory. An existing directory is reported as such
