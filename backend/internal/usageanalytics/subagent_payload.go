@@ -147,7 +147,17 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 
 	failureCategory := llm.NormalizeFailureCategory(firstPayloadString(payload, "failure_category"))
 	if failureCategory == "" {
-		failureCategory = llm.FailureCategoryFromErrorCode(normalized.ErrorCode)
+		// 注意：FailureCategoryFromErrorCode("") 返回 unknown（非空串），必须仅在
+		// error_code 给出可分类结果（非空且非 unknown）时才采用，否则会短路状态兜底。
+		if mapped := llm.FailureCategoryFromErrorCode(normalized.ErrorCode); mapped != "" && mapped != llm.FailureCategoryUnknown {
+			failureCategory = mapped
+		}
+	}
+	if failureCategory == "" {
+		// 状态语义兜底（§13.7 观察收敛）：控制面/用户停止的轻量子代理此前落
+		// unknown，把"主动关闭"混进真实失败。stopped 别名无法区分 cancelled 与
+		// interrupted，取更保守的 cancelled（不可自动重试）。
+		failureCategory = failureCategoryFromCompletionStatus(status)
 	}
 	if failureCategory == "" {
 		failureCategory = llm.FailureCategoryUnknown
@@ -220,7 +230,19 @@ func NormalizeSubagentCompletionPayload(payload map[string]interface{}, statusHi
 	// 才按事件来源推断，避免这里用默认值把生产者标错。
 	if !success {
 		if strings.TrimSpace(payloadString(payload, "failure_category")) == "" {
-			category := llm.FailureCategoryFromErrorCode(payloadString(payload, "error_code"))
+			// FailureCategoryFromErrorCode("") 返回 unknown；只在 error_code 给出可
+			// 分类结果时采用，避免短路下面的状态语义兜底。
+			category := ""
+			if code := strings.TrimSpace(payloadString(payload, "error_code")); code != "" {
+				if mapped := llm.FailureCategoryFromErrorCode(code); mapped != "" && mapped != llm.FailureCategoryUnknown {
+					category = mapped
+				}
+			}
+			if category == "" {
+				// 状态语义兜底：stopped/cancelled → cancelled（控制面停止不是真实
+				// 故障）；timeout → timeout。其余才落 unknown（无细节，不猜测）。
+				category = failureCategoryFromCompletionStatus(status)
+			}
 			if category == "" {
 				category = llm.FailureCategoryUnknown
 			}
@@ -249,6 +271,24 @@ func completionReasonFromStatus(status string) string {
 		return SubagentCompletionFailed
 	default:
 		return SubagentCompletionUnknown
+	}
+}
+
+// failureCategoryFromCompletionStatus 在缺少显式分类与 error_code 时，按状态
+// 语义给出可解释的最小分类（§13.7）：
+//   - stopped / interrupted / cancelled → cancelled（控制面或用户停止；
+//     stopped 别名无法区分两者，取不可自动重试的 cancelled，避免把主动关闭
+//     当成可重试故障）；
+//   - timeout / timed_out → timeout（状态本身已声明超时）；
+//   - 其余（failed/error/unknown…）→ ""（交给调用方回落 unknown，不猜测）。
+func failureCategoryFromCompletionStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "stopped", "interrupted", "canceled", "cancelled":
+		return llm.FailureCategoryCancelled
+	case "timeout", "timed_out":
+		return llm.FailureCategoryTimeout
+	default:
+		return ""
 	}
 }
 
