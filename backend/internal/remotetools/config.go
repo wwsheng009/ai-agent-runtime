@@ -295,9 +295,18 @@ func DefaultConfig() *Config {
 		Profile:          ProfileReadonly,
 		DescriptionStyle: "compact",
 		Limits: Limits{
-			MaxOutputBytes:     DefaultMaxOutputBytes,
-			MaxBytesPerCall:    DefaultMaxBytesPerCall,
-			CaptureLimit:       DefaultMaxBytesPerCall,
+			MaxOutputBytes:  DefaultMaxOutputBytes,
+			MaxBytesPerCall: DefaultMaxBytesPerCall,
+			// CaptureLimit is deliberately left zero here.
+			//
+			// Normalize derives it from MaxBytesPerCall when it is unset, and every
+			// read path (envd view/grep, the ssh/http runtime) prefers CaptureLimit
+			// over MaxBytesPerCall. Pre-filling it here made that derivation dead code,
+			// so an operator's explicit `limits.maxBytesPerCall` - from a config file or
+			// from --max-bytes-per-call, including the value aicli expands from a
+			// target's Limits block - was silently ignored by read tools: the default
+			// ceiling kept applying. Keeping it zero is what makes one knob work.
+			CaptureLimit:       0,
 			ModelVisibleCap:    DefaultModelVisibleCap,
 			CommandTimeout:     Duration{120 * time.Second},
 			MaxConcurrentCalls: 8,

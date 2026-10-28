@@ -235,11 +235,10 @@ func TestEnvDViewStillRefusesOversizedFiles(t *testing.T) {
 	big := strings.Repeat("x", 4096)
 	stub := newEnvdStub(t, map[string]string{"/srv/app/big.txt": big}, nil)
 	cfg := newEnvDConfig(stub.server.URL)
-	// CaptureLimit is the pre-fold ceiling and takes precedence over
-	// MaxBytesPerCall for read tools, so a test that wants a small view limit has
-	// to set it (normalize fills CaptureLimit from MaxBytesPerCall only when it is
-	// unset, and DefaultConfig already sets it).
-	cfg.Limits.CaptureLimit = 64
+	// One knob must be enough: this is the operator-facing setting aicli expands
+	// from a target's Limits block (--max-bytes-per-call). Before Normalize derived
+	// CaptureLimit from it, the ceiling stayed at the compiled default and read
+	// tools ignored whatever the operator asked for.
 	cfg.Limits.MaxBytesPerCall = 64
 	server, err := remotetools.NewServer(cfg, "envd")
 	if err != nil {
