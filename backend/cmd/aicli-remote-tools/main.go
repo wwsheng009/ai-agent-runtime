@@ -101,6 +101,7 @@ envd backend options (serve --stdio --backend envd):
   --token-env <name>        Env var holding the X-Access-Token value
   --ca-file <pem>           CA bundle verifying a TLS envd endpoint (switches a bare host:port to https://)
   --call-timeout <dur>      Per-call deadline (default 10m)
+  --no-envd-files           Read via spawned processes only, never envd's native /files endpoint
 
 The envd backend runs on THIS machine and reaches the target over Connect-RPC:
 --workspace is a path on the target (absolute POSIX), the jail is enforced
@@ -163,6 +164,7 @@ type serveFlags struct {
 	envdTokenEnv string
 	envdCAFile   string
 	envdTimeout  string
+	envdNoFiles  bool
 
 	allowCommands    stringListFlag
 	denyCommands     stringListFlag
@@ -211,6 +213,10 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.envdTokenEnv, "token-env", "", "env var holding the envd access token (backend envd)")
 	fs.StringVar(&flags.envdCAFile, "ca-file", "", "PEM CA bundle verifying a TLS envd endpoint (backend envd)")
 	fs.StringVar(&flags.envdTimeout, "call-timeout", "", "per-call deadline as a Go duration, e.g. 30m (backend envd; default 10m)")
+	// The native file endpoint is preferred, but it reads as the daemon user; an
+	// operator must be able to refuse that difference without a rebuild, and a
+	// live test must be able to force the other channel to prove both agree.
+	fs.BoolVar(&flags.envdNoFiles, "no-envd-files", false, "read files through spawned processes only; never use envd's native /files endpoint (backend envd)")
 
 	// Command policy. These repeat, so a value may contain spaces ("git status")
 	// without a comma-joining ambiguity; the envd expansion emits them in the
@@ -343,6 +349,9 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 			return nil, fmt.Errorf("invalid --call-timeout %q (want a positive Go duration such as 30m)", raw)
 		}
 		cfg.EnvD.CallTimeout = remotetools.Duration{Duration: parsed}
+	}
+	if flags.envdNoFiles {
+		cfg.EnvD.FilesChannelDisabled = true
 	}
 	cfg.Shell.AllowedCommands = append(cfg.Shell.AllowedCommands, flags.allowCommands...)
 	cfg.Shell.DeniedCommands = append(cfg.Shell.DeniedCommands, flags.denyCommands...)

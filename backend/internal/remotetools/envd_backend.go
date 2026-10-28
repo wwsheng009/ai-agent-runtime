@@ -42,6 +42,28 @@ import (
 const (
 	envdWriteScript      = `set -e; printf '%s' "$2" > "$1"`
 	envdWriteMkdirScript = `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
+	// envdReadableScript asks the target kernel whether THIS user may open the
+	// path. It exists because envd's /files endpoint opens files as the daemon
+	// process (commonly root), while the process channel runs as cfg.User: serving
+	// /files bytes without this check would let remote_x__view read files that
+	// remote_x__shell cannot, which is a privilege difference and also a difference
+	// from the local backend, where os.Open is refused by the kernel. Measured on a
+	// live 0.2.11: GET /files?path=/etc/shadow returned 200 while the same user got
+	// `Permission denied` locally.
+	//
+	// The answer comes from the kernel rather than from mode bits we reinterpret
+	// here, because a Go copy of POSIX ownership, group and ACL rules would be a
+	// second, wrong implementation of that decision.
+	envdReadableScript = `set -e; if test -r "$1"; then exit 0; else echo "cannot open $1" >&2; exit 1; fi`
+)
+
+// envdReadChannel* name the transport that actually moved the bytes, published
+// as result metadata. envdGrep already reports which engine ran because the two
+// dialects differ; a read channel is the same kind of fact, and a caller must be
+// able to tell "native endpoint" from "fell back to cat" without reading prose.
+const (
+	envdReadChannelFiles   = "files"
+	envdReadChannelProcess = "process"
 )
 
 // envdBackend holds one envd connection plus the jail applied before every call.
@@ -59,6 +81,16 @@ type envdBackend struct {
 	// them and are torn down by Server.Close.
 	sessionMu sync.Mutex
 	sessions  map[uint32]*envdPtySession
+
+	// The native /files channel is probed once, not per read: a deployment
+	// without it (no route, a proxy that strips X-Access-Token, an uninstalled
+	// token) should degrade on the first call and say why, rather than pay a
+	// failing request for every file. filesNote keeps the reason so the fallback
+	// stays visible in the result metadata instead of becoming silent.
+	filesMu     sync.Mutex
+	filesKnown  bool
+	filesUsable bool
+	filesNote   string
 }
 
 // newEnvDBackend dials envd from the normalized configuration.
@@ -703,8 +735,20 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 
 // envdView reads a file through envd.
 //
-// envd exposes no ReadFile RPC (探测返回 404，见 envd-implementation-report.md
-// §2.4），所以读取通过进程完成；路径先过 jail 再用规范路径操作。
+// Two channels can move bytes here, and which one answers is published as
+// read_channel so a caller can tell them apart rather than guess from prose -
+// the same reason envdGrep publishes which engine ran:
+//
+//   - envd's native GET /files (see internal/envdclient/files.go) is preferred:
+//     it is a real HTTP transfer with Range support, so no shell, no argv, no
+//     exit-code interpretation and no locale in the middle.
+//   - `/bin/cat` through the process channel is the fallback for deployments
+//     where that endpoint is not usable, and it is what this surface did before
+//     the channel existed.
+//
+// Either way the path first passes the jail, and only a file the TARGET USER may
+// open is served: /files reads as the daemon user, so without that gate the same
+// tool would see more through one channel than through the other.
 func envdView(ctx context.Context, be *envdBackend, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	raw := envdStringParam(params, "file_path", "path")
 	if raw == "" {
@@ -725,12 +769,164 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 	if size := entry.SizeBytes(); size > int64(limit) {
 		return envdErrorResult("%s is %d bytes, above the %d byte view limit; read it with a narrower tool or shell", target, size, limit), nil
 	}
+	if refusal := be.refuseIfTargetCannotRead(ctx, target, entry); refusal != nil {
+		return refusal, nil
+	}
+
+	data, channel, note, readErr := be.readLimited(ctx, target, int64(limit))
+	if readErr != nil {
+		return envdErrorResult("%s", readErr.Error()), nil
+	}
+	result := envdTextResult(string(data))
+	metadata := map[string]interface{}{"read_channel": channel}
+	if note != "" {
+		metadata["read_channel_note"] = note
+	}
+	result.Metadata = metadata
+	return result, nil
+}
+
+// refuseIfTargetCannotRead returns a refusal when the user this backend acts as
+// cannot open the path, or nil when it may be served.
+//
+// World-readable files skip the probe: the answer is already certain, and 0644 is
+// the common case in a source tree, so the check costs nothing there. Everything
+// else (0640 root:adm inside /var/log, 0600 files of another user) is asked of the
+// kernel on the target, which is the only place that knows the real uid, groups and
+// ACLs.
+func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target string, entry envdclient.Entry) *toolkit.ToolResult {
+	if be == nil || be.client == nil {
+		return nil
+	}
+	if entry.Mode&0o777&0o004 != 0 {
+		return nil
+	}
+	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", envdReadableScript, "aicli-envd-readable", target})
+	if err != nil {
+		// An inconclusive probe must not become a free pass: report the failure
+		// instead of serving bytes we cannot prove are allowed.
+		return envdErrorResult("cannot confirm read permission for %s: %v", target, err)
+	}
+	if code == 0 {
+		return nil
+	}
+	detail := strings.TrimSpace(string(stderr))
+	if detail == "" {
+		detail = fmt.Sprintf("exit %d", code)
+	}
+	// The mode and owner come from the Stat this call already made, so the refusal
+	// says why the file is unreachable without another round trip: "permission
+	// denied" alone leaves the reader guessing whether it is ownership, a group, or
+	// an ACL.
+	owner := strings.TrimSpace(entry.Owner)
+	if owner == "" {
+		owner = "?"
+	}
+	group := strings.TrimSpace(entry.Group)
+	if group == "" {
+		group = "?"
+	}
+	return envdFailureMeta(CodeInvalidArgument, map[string]interface{}{
+		"file_path": target,
+	}, "permission denied reading %s: user %s cannot open it (%s %s:%s; %s)", target, be.client.User(), entry.Permissions, owner, group, detail)
+}
+
+// readLimited fetches at most maxBytes of one file, preferring the native
+// /files channel and falling back to /bin/cat only when that channel is known
+// unusable.
+//
+// A path-level answer from /files (no such file, is a directory) is reported as
+// the refusal it is; it does not trigger a retry through the other channel, since
+// re-asking the same question differently is how a real error turns into a
+// surprising empty result.
+func (be *envdBackend) readLimited(ctx context.Context, target string, maxBytes int64) ([]byte, string, string, error) {
+	usable, note := be.filesChannelUsable(ctx)
+	if usable {
+		read, err := be.client.ReadFile(ctx, target, maxBytes)
+		switch {
+		case err == nil:
+			return read.Data, envdReadChannelFiles, "", nil
+		case envdclient.IsFilesChannelIssue(err):
+			be.markFilesUnusable(err)
+			// Fall through to the process channel with the reason attached.
+		default:
+			return nil, envdReadChannelFiles, "", fmt.Errorf("%s", describeFilesError(err, target))
+		}
+	}
+
 	stdout, stderr, code, err := be.run(ctx, "/bin/cat", []string{target})
 	if err != nil {
-		return envdErrorResult("read %s: %v", target, err), nil
+		return nil, envdReadChannelProcess, note, fmt.Errorf("read %s: %w", target, err)
 	}
 	if code != 0 {
-		return envdErrorResult("read %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr))), nil
+		return nil, envdReadChannelProcess, note, fmt.Errorf("read %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
 	}
-	return envdTextResult(string(stdout)), nil
+	if maxBytes > 0 && int64(len(stdout)) > maxBytes {
+		stdout = stdout[:maxBytes]
+	}
+	return stdout, envdReadChannelProcess, note, nil
+}
+
+// filesChannelUsable probes the native endpoint once and reports the cached
+// verdict plus the reason it is unusable, if any.
+func (be *envdBackend) filesChannelUsable(ctx context.Context) (bool, string) {
+	if be == nil || be.client == nil {
+		return false, "no envd client"
+	}
+	if be.cfg != nil && be.cfg.EnvD.FilesChannelDisabled {
+		// An explicit refusal is not a failure: report it as the reason, and never
+		// probe, so an operator who turned the endpoint off sees no request for it.
+		return false, "disabled by configuration"
+	}
+	be.filesMu.Lock()
+	defer be.filesMu.Unlock()
+	if be.filesKnown {
+		return be.filesUsable, be.filesNote
+	}
+	err := be.client.ProbeFiles(ctx)
+	be.filesKnown = true
+	be.filesUsable = err == nil
+	if err != nil {
+		be.filesNote = err.Error()
+		return false, be.filesNote
+	}
+	return true, ""
+}
+
+// markFilesUnusable records that the native endpoint stopped working, so later
+// reads go straight to the process channel instead of failing once per file.
+func (be *envdBackend) markFilesUnusable(err error) {
+	if be == nil {
+		return
+	}
+	be.filesMu.Lock()
+	defer be.filesMu.Unlock()
+	be.filesKnown = true
+	be.filesUsable = false
+	be.filesNote = err.Error()
+}
+
+// describeFilesError renders one /files failure in this surface's house style:
+// what was asked, and what the target answered. The typed error drives control
+// flow; its package-qualified text is not something a model should have to read
+// to understand a refusal.
+func describeFilesError(err error, target string) string {
+	var filesErr *envdclient.FilesError
+	if errors.As(err, &filesErr) {
+		switch filesErr.Code {
+		case envdclient.FilesNotFound:
+			return fmt.Sprintf("path %s does not exist", target)
+		case envdclient.FilesIsDirectory:
+			return fmt.Sprintf("%s is a directory; use ls to list it", target)
+		case envdclient.FilesUnauthorized:
+			return fmt.Sprintf("envd refused the file channel for %s: the access token was not accepted", target)
+		case envdclient.FilesChannelMissing:
+			return fmt.Sprintf("envd exposes no file channel for %s", target)
+		case envdclient.FilesRangeUnsatisfiable:
+			return fmt.Sprintf("the requested window is beyond the end of %s", target)
+		default:
+			return fmt.Sprintf("read %s: envd answered http %d: %s", target, filesErr.Status, filesErr.Message)
+		}
+	}
+	return fmt.Sprintf("read %s: %v", target, err)
 }

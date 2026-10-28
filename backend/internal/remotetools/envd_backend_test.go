@@ -47,11 +47,30 @@ type envdStub struct {
 	// metricsBody is the raw /metrics response.
 	metricsBody string
 
+	// filesUnavailable flips the native endpoint off, modelling a deployment where
+	// it is not routed (or a proxy that strips the token header): the answer then
+	// is the mux's plain 404, which is the only reply that justifies the fallback.
+	filesUnavailable bool
+	// unreadable lists paths the TARGET USER may not open. The endpoint still
+	// serves them, because envd's /files opens files as the daemon user; that
+	// asymmetry is exactly what the read gate exists to close.
+	unreadable map[string]bool
+	// modes pins the permission bits Stat reports, so the gate's world-readable
+	// fast path is testable.
+	modes map[string]uint32
+	// filesLog records one entry per /files request: "path range=<header>".
+	filesLog []string
+
 	statCalls    atomic.Int64
 	processCalls atomic.Int64
-	removed      []string
-	moved        [][2]string
-	created      []string
+	// catCalls and readableChecks count the two specific process-channel calls, so
+	// a test can assert "no cat was needed" without subtracting the jail's own
+	// target-side canonicalization, which spawns once per resolved path.
+	catCalls       atomic.Int64
+	readableChecks atomic.Int64
+	removed        []string
+	moved          [][2]string
+	created        []string
 	// controls records process control RPCs (SendInput/SendSignal/Update) with
 	// their request bodies.
 	controls []string
@@ -62,6 +81,72 @@ func (s *envdStub) controlLog() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.controls...)
+}
+
+// canRead answers the way the target kernel would for the executing user.
+func (s *envdStub) canRead(target string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.unreadable[target]
+}
+
+// filesRequests copies the recorded /files requests.
+func (s *envdStub) filesRequests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.filesLog...)
+}
+
+// disableFiles models an environment without the native endpoint.
+func (s *envdStub) disableFiles() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.filesUnavailable = true
+}
+
+// markUnreadable declares that the executing user may not open a path.
+func (s *envdStub) markUnreadable(target string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unreadable == nil {
+		s.unreadable = map[string]bool{}
+	}
+	s.unreadable[target] = true
+}
+
+// pinMode sets the permission bits Stat reports for one path.
+func (s *envdStub) pinMode(target string, mode uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modes == nil {
+		s.modes = map[string]uint32{}
+	}
+	s.modes[target] = mode
+}
+
+func (s *envdStub) modeFor(target string) (uint32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mode, ok := s.modes[target]
+	return mode, ok
+}
+
+// envdStubPermissions renders the textual form Stat reports for a pinned mode,
+// so a test that pins 0o640 sees "-rw-r-----" the way the daemon would answer.
+func envdStubPermissions(mode uint32) string {
+	const units = "rwx"
+	text := []byte{'-'}
+	for class := 2; class >= 0; class-- {
+		for bit := 2; bit >= 0; bit-- {
+			if mode&(1<<uint(class*3+bit)) != 0 {
+				// bit 2 is the read position, so it maps to units[0].
+				text = append(text, units[2-bit])
+			} else {
+				text = append(text, '-')
+			}
+		}
+	}
+	return string(text)
 }
 
 func (s *envdStub) content(target string) (string, bool) {
@@ -184,9 +269,14 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 			writeConnectError(w, http.StatusNotFound, "not_found", "no such file")
 			return
 		}
+		mode, permissions := uint32(420), "-rw-r--r--"
+		if pinned, ok := stub.modeFor(in.Path); ok {
+			mode = pinned
+			permissions = envdStubPermissions(pinned)
+		}
 		writeJSON(w, map[string]any{"entry": map[string]any{
 			"name": base(in.Path), "path": in.Path, "type": "FILE_TYPE_FILE",
-			"size": fmt.Sprintf("%d", len(content)), "mode": 420, "permissions": "-rw-r--r--",
+			"size": fmt.Sprintf("%d", len(content)), "mode": mode, "permissions": permissions,
 			"owner": "dev", "group": "dev",
 		}})
 	})
@@ -280,6 +370,55 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		_, _ = fmt.Fprint(w, stub.metricsBody)
 	})
 
+	// The native file endpoint. Its measured shape (envd 0.2.11): JSON 404 for a
+	// missing path, 400 mentioning "is a directory", 206 with Content-Range for a
+	// byte range, and - deliberately - no permission check, because the daemon
+	// opens files as itself rather than as the requesting user.
+	mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("path")
+		username := r.URL.Query().Get("username")
+		requested := r.Header.Get("Range")
+		stub.mu.Lock()
+		stub.filesLog = append(stub.filesLog, target+" range="+requested)
+		unavailable := stub.filesUnavailable
+		stub.mu.Unlock()
+
+		if unavailable {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("404 page not found\n"))
+			return
+		}
+		if username == "" {
+			_, _ = w.Write([]byte("Query argument username is required, but not found"))
+			return
+		}
+		if stub.isDir(target) {
+			writeConnectError(w, http.StatusBadRequest, "invalid_argument", fmt.Sprintf("path '%s' is a directory", target))
+			return
+		}
+		content, ok := stub.content(target)
+		if !ok {
+			writeConnectError(w, http.StatusNotFound, "not_found", fmt.Sprintf("path '%s' does not exist", target))
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		if requested != "" && len(content) > 0 {
+			var start, end int
+			if _, err := fmt.Sscanf(requested, "bytes=%d-%d", &start, &end); err == nil && start < len(content) {
+				if end >= len(content) {
+					end = len(content) - 1
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte(content[start : end+1]))
+				return
+			}
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		_, _ = w.Write([]byte(content))
+	})
+
 	mux.HandleFunc("/process.Process/Start", func(w http.ResponseWriter, r *http.Request) {
 		stub.processCalls.Add(1)
 		body, _ := io.ReadAll(r.Body)
@@ -345,12 +484,23 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 			case "aicli-envd-write":
 				stub.put(arg(3), arg(4))
 				writeProcessStream(t, w, nil, nil, 0)
+			case "aicli-envd-readable":
+				// `test -r "$1"`, answered by the stub the way the target kernel
+				// would: exit 1 with a permission complaint when the executing user
+				// cannot open the path.
+				stub.readableChecks.Add(1)
+				if stub.canRead(arg(3)) {
+					writeProcessStream(t, w, nil, nil, 0)
+					return
+				}
+				writeProcessStream(t, w, nil, []byte(fmt.Sprintf("sh: 1: test: cannot open %s: Permission denied\n", arg(3))), 1)
 			default:
 				// No label means a caller-supplied command (the shell tool), not one
 				// of the backend's internal fixed scripts.
 				writeProcessStream(t, w, []byte("ran: "+strings.Join(req.Process.Args[1:], " ")+"\n"), nil, 0)
 			}
 		case "/bin/cat":
+			stub.catCalls.Add(1)
 			content, ok := stub.content(last())
 			if !ok {
 				writeProcessStream(t, w, nil, []byte("cat: no such file\n"), 1)

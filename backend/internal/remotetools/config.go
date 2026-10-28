@@ -71,6 +71,17 @@ type EnvDConfig struct {
 	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
 	// CallTimeout bounds one tool call. Zero uses envdDefaultCallTimeout.
 	CallTimeout Duration `yaml:"callTimeout,omitempty" json:"callTimeout,omitempty"`
+	// FilesChannelDisabled turns off envd's native GET /files endpoint, forcing
+	// every read through the process channel.
+	//
+	// It exists as an operator kill switch rather than as a feature flag: the
+	// endpoint is preferred (it needs no shell, no argv, no exit-code reading),
+	// but it opens files as the DAEMON user instead of the requesting one, so a
+	// deployment that cannot accept that difference - or that hits an envd build
+	// where the channel misbehaves - must be able to switch it off without
+	// rebuilding. The zero value means enabled, so an old config file keeps
+	// working and cannot accidentally disable it.
+	FilesChannelDisabled bool `yaml:"filesChannelDisabled,omitempty" json:"filesChannelDisabled,omitempty"`
 }
 
 // Limits bounds one remote invocation so a single call cannot exhaust the
