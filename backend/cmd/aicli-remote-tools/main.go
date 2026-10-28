@@ -121,6 +121,20 @@ Examples:
 `, version)
 }
 
+// stringListFlag collects a repeatable flag into a list.
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	*s = append(*s, trimmed)
+	return nil
+}
+
 // serveFlags is the flag set shared by serve/doctor/tools.
 type serveFlags struct {
 	configPath    string
@@ -149,6 +163,12 @@ type serveFlags struct {
 	envdTokenEnv string
 	envdCAFile   string
 	envdTimeout  string
+
+	allowCommands    stringListFlag
+	denyCommands     stringListFlag
+	allowCommandPats stringListFlag
+	denyCommandPats  stringListFlag
+	denyMetachars    bool
 
 	stdio     bool
 	http      bool
@@ -191,6 +211,15 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.envdTokenEnv, "token-env", "", "env var holding the envd access token (backend envd)")
 	fs.StringVar(&flags.envdCAFile, "ca-file", "", "PEM CA bundle verifying a TLS envd endpoint (backend envd)")
 	fs.StringVar(&flags.envdTimeout, "call-timeout", "", "per-call deadline as a Go duration, e.g. 30m (backend envd; default 10m)")
+
+	// Command policy. These repeat, so a value may contain spaces ("git status")
+	// without a comma-joining ambiguity; the envd expansion emits them in the
+	// same shape the standalone bridge accepted.
+	fs.Var(&flags.allowCommands, "allow-command", "repeatable exact command/argv-prefix allow (empty allowlist is fail-closed)")
+	fs.Var(&flags.denyCommands, "deny-command", "repeatable exact command deny, always wins over the allowlist")
+	fs.Var(&flags.allowCommandPats, "allow-command-pattern", "repeatable whole-command wildcard allowlist (* and ?)")
+	fs.Var(&flags.denyCommandPats, "deny-command-pattern", "repeatable whole-command wildcard denylist")
+	fs.BoolVar(&flags.denyMetachars, "deny-shell-metachars", true, "refuse commands containing shell metacharacters so an allowed binary cannot be chained")
 
 	fs.BoolVar(&flags.stdio, "stdio", false, "serve MCP over stdin/stdout")
 	fs.BoolVar(&flags.http, "http", false, "serve MCP over Streamable HTTP")
@@ -315,6 +344,11 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 		}
 		cfg.EnvD.CallTimeout = remotetools.Duration{Duration: parsed}
 	}
+	cfg.Shell.AllowedCommands = append(cfg.Shell.AllowedCommands, flags.allowCommands...)
+	cfg.Shell.DeniedCommands = append(cfg.Shell.DeniedCommands, flags.denyCommands...)
+	cfg.Shell.AllowedCommandPatterns = append(cfg.Shell.AllowedCommandPatterns, flags.allowCommandPats...)
+	cfg.Shell.DeniedCommandPatterns = append(cfg.Shell.DeniedCommandPatterns, flags.denyCommandPats...)
+	cfg.Shell.DenyShellMetachars = flags.denyMetachars
 	return cfg, nil
 }
 

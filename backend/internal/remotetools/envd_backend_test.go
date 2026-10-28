@@ -246,6 +246,12 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		writeJSON(w, map[string]any{})
 	})
 
+	mux.HandleFunc("/filesystem.Filesystem/WatchDir", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/connect+json")
+		writeEnvDFrame(t, w, map[string]any{"start": map[string]any{}})
+		writeEnvDFrame(t, w, map[string]any{"filesystem": map[string]any{"name": "probe.txt", "type": "EVENT_TYPE_CREATE"}})
+	})
+
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, stub.metricsBody)
@@ -317,7 +323,9 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 				stub.put(arg(3), arg(4))
 				writeProcessStream(t, w, nil, nil, 0)
 			default:
-				writeProcessStream(t, w, nil, []byte("stub: unexpected shell script\n"), 127)
+				// No label means a caller-supplied command (the shell tool), not one
+				// of the backend's internal fixed scripts.
+				writeProcessStream(t, w, []byte("ran: "+strings.Join(req.Process.Args[1:], " ")+"\n"), nil, 0)
 			}
 		case "/bin/cat":
 			content, ok := stub.content(last())
@@ -489,7 +497,7 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		defer server.Close()
 		want := []string{
 			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
-			"remote_envd__ls", "remote_envd__view",
+			"remote_envd__ls", "remote_envd__view", "remote_envd__watch_dir",
 		}
 		got := server.ToolNames()
 		sort.Strings(got)
@@ -510,12 +518,30 @@ func TestEnvDServerTierSurface(t *testing.T) {
 			"remote_envd__append_write", "remote_envd__apply_patch", "remote_envd__edit",
 			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
 			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move",
-			"remote_envd__remove", "remote_envd__view", "remote_envd__write",
+			"remote_envd__remove", "remote_envd__view", "remote_envd__watch_dir",
+			"remote_envd__write",
 		}
 		got := server.ToolNames()
 		sort.Strings(got)
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("standard surface = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ops adds the command surface", func(t *testing.T) {
+		cfg := newEnvDConfig(stub.server.URL)
+		cfg.Profile = remotetools.ProfileOps
+		cfg.Shell.AllowedCommands = []string{"echo"}
+		server, err := remotetools.NewServer(cfg, "envd")
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		defer server.Close()
+		if !containsName(server.ToolNames(), "remote_envd__shell") {
+			t.Fatalf("ops surface missing shell: %v", server.ToolNames())
+		}
+		if containsName(server.ToolNames(), "remote_envd__pty_start") {
+			t.Fatalf("ops surfaced a tool the backend does not implement yet: %v", server.ToolNames())
 		}
 	})
 
@@ -537,6 +563,16 @@ func TestEnvDServerTierSurface(t *testing.T) {
 			}
 		}
 	})
+}
+
+// containsName reports whether one exposed tool name is present.
+func containsName(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func connectEnvDServer(t *testing.T, server *remotetools.Server) (*mcp.ClientSession, context.Context) {

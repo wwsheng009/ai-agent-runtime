@@ -43,6 +43,9 @@ type envdBackend struct {
 	workspace string   // target-side absolute workspace
 	roots     []string // extra absolute roots, workspace excluded (it is implicit)
 	timeout   time.Duration
+	// commands is the SHARED command policy (same implementation as ssh/http):
+	// envd filters nothing, so every shell/pty command is checked here first.
+	commands *CommandPolicy
 }
 
 // newEnvDBackend dials envd from the normalized configuration.
@@ -88,6 +91,15 @@ func newEnvDBackend(cfg *Config) (*envdBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("envd backend: %w", err)
 	}
+	commands, err := NewCommandPolicy(cfg.Shell, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("envd backend: invalid command policy: %w", err)
+	}
+	if cfg.Profile == ProfileOps && len(cfg.Shell.AllowedCommands)+len(cfg.Shell.AllowedCommandPatterns) == 0 {
+		// Fail-closed either way, but say it at startup instead of letting the
+		// first shell call discover it.
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: profile ops but no allowed commands configured; shell and pty_start will refuse every command (fail-closed)\n")
+	}
 	extra := make([]string, 0, len(cfg.AllowedRoots))
 	for _, root := range cfg.AllowedRoots {
 		cleaned := path.Clean(strings.TrimSpace(root))
@@ -101,6 +113,7 @@ func newEnvDBackend(cfg *Config) (*envdBackend, error) {
 		workspace: cfg.Workspace,
 		roots:     extra,
 		timeout:   timeout,
+		commands:  commands,
 	}, nil
 }
 
@@ -488,6 +501,7 @@ func envdStringParam(params map[string]interface{}, keys ...string) string {
 // prevents a second profile system from growing next to the shared one.
 var envdExtensionTiers = map[string]Profile{
 	ToolHostMetrics: ProfileReadonly, // capacity read, no side effects
+	ToolWatchDir:    ProfileReadonly, // watching is read-only semantics
 	ToolMkdir:       ProfileStandard,
 	ToolRemove:      ProfileStandard,
 	ToolMove:        ProfileStandard,
@@ -603,7 +617,7 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 			},
 			call: envdView,
 		},
-	}, append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base))...)
+	}, append(append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base)), envdProcessToolSpecs(base)...)...)
 }
 
 // envdView reads a file through envd.
