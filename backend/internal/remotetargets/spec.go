@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // SpecDepth selects the capability grant of a spec-derived target.
@@ -94,6 +96,18 @@ type Spec struct {
 	// Setting it also switches the generated bridge address to https://, which is
 	// what enables HTTP/2 and the client-streaming RPCs.
 	CAFile string
+
+	// Command policy for an envd target. These travel as repeated query keys
+	// (allow_command, allow_command_pattern, deny_command,
+	// deny_command_pattern) and feed the same ShellConfig used by
+	// aicli-remote-tools. An empty allowlist is fail-closed.
+	AllowedCommands        []string
+	AllowedCommandPatterns []string
+	DeniedCommands         []string
+	DeniedCommandPatterns  []string
+	// AllowShellMetachars opts out of the default refusal of pipes, redirection,
+	// substitution and command sequencing.
+	AllowShellMetachars bool
 }
 
 // ParseSpec parses the compact remote target syntax.
@@ -115,6 +129,11 @@ type Spec struct {
 //
 // envd targets also accept ?ca_file=<local-pem> to verify a TLS endpoint; the
 // generated bridge address becomes https:// and negotiates HTTP/2.
+//
+// envd targets also accept repeated ?allow_command=, ?allow_command_pattern=,
+// ?deny_command= and ?deny_command_pattern= values; they use the same matching
+// rules as aicli-remote-tools' shell block. ?allow_shell_metachars=true is the
+// explicit opt-out from the metacharacter refusal. Values must be URL-encoded.
 //
 // The query keys mirror the fields of SSHConfig / RemoteConfig that are commonly
 // non-default; everything else keeps its documented default.
@@ -217,6 +236,17 @@ func ParseSpec(raw string) (*Spec, error) {
 			spec.CallTimeout = strings.TrimSpace(query.Get("call_timeout"))
 			spec.AuditLog = strings.TrimSpace(query.Get("audit_log"))
 			spec.CAFile = strings.TrimSpace(query.Get("ca_file"))
+			spec.AllowedCommands = append([]string(nil), query["allow_command"]...)
+			spec.AllowedCommandPatterns = append([]string(nil), query["allow_command_pattern"]...)
+			spec.DeniedCommands = append([]string(nil), query["deny_command"]...)
+			spec.DeniedCommandPatterns = append([]string(nil), query["deny_command_pattern"]...)
+			if value := strings.TrimSpace(query.Get("allow_shell_metachars")); value != "" {
+				allowed, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("remote spec %q has an invalid allow_shell_metachars value %q", raw, value)
+				}
+				spec.AllowShellMetachars = allowed
+			}
 		}
 	}
 	return spec, nil
@@ -313,6 +343,17 @@ func (s *Spec) Expand() (*Expanded, error) {
 		target.Remote.Binary = s.Binary
 		target.Remote.CallTimeout = s.CallTimeout
 		target.Remote.AuditLog = s.AuditLog
+		if len(s.AllowedCommands) > 0 || len(s.AllowedCommandPatterns) > 0 ||
+			len(s.DeniedCommands) > 0 || len(s.DeniedCommandPatterns) > 0 ||
+			s.AllowShellMetachars {
+			target.Remote.Shell = &remotetools.ShellConfig{
+				AllowedCommands:        append([]string(nil), s.AllowedCommands...),
+				AllowedCommandPatterns: append([]string(nil), s.AllowedCommandPatterns...),
+				DeniedCommands:         append([]string(nil), s.DeniedCommands...),
+				DeniedCommandPatterns:  append([]string(nil), s.DeniedCommandPatterns...),
+				DenyShellMetachars:     !s.AllowShellMetachars,
+			}
+		}
 		if s.CAFile != "" {
 			target.Remote.TLS = &TLSFiles{CAFile: s.CAFile}
 		}

@@ -330,9 +330,10 @@ func (b *bridge) toolMove(ctx context.Context, args json.RawMessage) callResult 
 
 // toolShell runs a command.
 //
-// envd applies no command filtering at all, so this is reachable only under the ops
-// profile. The working directory is resolved through the jail, because a command
-// that starts outside the workspace could read and write anything the user can.
+// envd applies no command filtering at all, so the bridge enforces the shared
+// command policy before forwarding anything. The working directory is resolved
+// through the jail, because a command that starts outside the workspace could read
+// and write anything the user can.
 func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult {
 	var in struct {
 		Command string `json:"command"`
@@ -343,6 +344,10 @@ func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return errorResult("command is required")
+	}
+	rule, err := b.commands.CheckCommand(in.Command)
+	if err != nil {
+		return errorResult("command denied (%s): %v", rule, err)
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {

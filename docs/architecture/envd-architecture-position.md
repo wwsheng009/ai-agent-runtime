@@ -235,8 +235,8 @@ remotetools → { ssh-stdio | ssh-http | http | envd }
 
 **后果**
 
-- path jail、Profile 分级、输出上限（`Limits` 的等价物）在 **bridge 内重新实现**，不再是对 `remotetools` 外壳的复用；
-- `remotetools` 的 `audit` / `Limits` / 命令白名单**不在 envd 路径上**：走 envd 的调用不写 remotetools 审计，也没有命令白名单（envd 侧同样没有）；
+- path jail、Profile 分级、输出上限（`Limits` 的等价物）在 **bridge 内重新实现**；但**命令授权已复用** `remotetools.CommandPolicy`，不再是两套 allowlist；
+- `remotetools` 的 `audit` / `Limits` 仍未直接复用：bridge 有自己的 opt-in JSONL 元数据审计和 1 MiB 写入/输出上限；命令白名单、metachar 拒绝与 destructive 分类已覆盖 `shell` / `pty_start`；
 - `registry` 展开 envd 条目时会**输出 warning**，声明 envd 不做这些检查（见 implementation report §3.3 `TestExpandOneEnvDBridge`）。
 
 **受影响章节**：§2 代码结构图、§3 第 2–4 与 9–10 步、§5「放法 E」、§7 速查表中涉及 `remotetools` 的行，均以本节为准。

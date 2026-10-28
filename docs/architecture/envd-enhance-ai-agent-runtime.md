@@ -257,7 +257,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 
 **注意 `prefixedTool` 机制**：`registry.go` 已用前缀（如 `remote__view`）避免远端工具与本地内建撞名。envd 传输必须沿用同一前缀策略，否则 `tools.Manager` 会静默丢弃远端同名工具。
 
-> **实际落地（2026-10-28）**：envd 传输**没有**按本节做成 `remotetools` 的适配器 —— 实际是 `remotetargets` 把 `envd://` 展开为指向本地 `aicli-envd-bridge`（MCP stdio）的条目；Profile、jail、输出上限在 bridge 内重新实现，`remotetools` 的 audit / Limits / 命令白名单不在 envd 路径上。详见 `envd-implementation-report.md`。
+> **实际落地（2026-10-28）**：envd 传输**没有**按本节做成 `remotetools` 的完整适配器 —— 实际是 `remotetargets` 把 `envd://` 展开为指向本地 `aicli-envd-bridge`（MCP stdio）的条目；Profile、jail、输出上限在 bridge 内实现。**命令授权已复用** `remotetools.CommandPolicy`（`shell` / `pty_start`），audit 仍是 bridge 自己的 opt-in JSONL。详见 `envd-implementation-report.md`。
 
 ### 4.4 权限模型对齐
 
@@ -272,7 +272,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 
 **红线：如果只做「把请求转发给 envd」而不做前置校验，等于绕过整个 SandboxConfig。这是本方案唯一的高危实现错误。**
 
-> **实际落地（2026-10-28）**：envd 路径只有 bridge 内的 jail / Profile / 输出上限；本表的命令白名单与会话审计**未**落到 envd 路径（bridge 未接入 `remotetools` 外壳）。本表是设计意图，偏差见 §4.3 注与 `envd-implementation-report.md` §2.1 / §8.3。
+> **实际落地（2026-10-28）**：envd 路径的 jail / Profile / 输出上限在 bridge 内实现；命令白名单已通过共享 `remotetools.CommandPolicy` 落到 `shell` / `pty_start`（空 allowlist fail-closed），会话审计为 bridge 的 opt-in JSONL、非 `remotetools.audit`。偏差见 §4.3 注与 `envd-implementation-report.md` §2.1 / §8.3。
 
 ---
 

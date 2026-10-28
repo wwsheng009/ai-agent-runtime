@@ -172,7 +172,7 @@ curl -s --cacert /etc/envd/tls.crt -o /dev/null -w '%{http_code}\n' -H "X-Access
 | 令牌 | `X-Access-Token` 头（TLS 内传输） | 按需轮换；不要写进 spec，使用环境变量 |
 | 运行身份 | envd 以 root 运行，Basic user 决定命令身份 | 需要可用 root 启动；可选实验：以普通用户运行（未验证） |
 | 日志 | 默认 `info` + 本地脱敏补丁：`process_start` 只记录可执行文件与参数个数，stdout/stderr、请求体不落 journal | 排障时才临时设 `ENVD_LOG_LEVEL=debug`（会记录参数与输出，含文件内容，慎用） |
-| 审计/命令策略 | bridge 只有 jail/profile/输出上限 | 见报告 §8.3；按需补 audit 与命令白名单 |
+| 审计/命令策略 | bridge 有 jail/profile/输出上限；命令执行复用 `remotetools.CommandPolicy`（fail-closed）；审计为 opt-in JSONL | 必须配置 `remote.shell.allowedCommands` 或 `allow_command=`，否则 `shell`/`pty_start` 全拒绝；审计路径见 §5.2 |
 
 防火墙脚本（节选）：
 
@@ -199,7 +199,7 @@ export AICLI_ENVD_TOKEN='<token>'
 
 # 单串目标：workspace 必须是绝对路径；binary 指向本机 bridge；ca_file 指向目标机 tls.crt
 aicli chat --remote \
-  'envd://n9e@10.0.0.9:49983/home/n9e?binary=C:\tools\aicli-envd-bridge.exe&ca_file=C:\tools\envd-ca.crt&call_timeout=30m#ops' \
+  'envd://n9e@10.0.0.9:49983/home/n9e?binary=C:\tools\aicli-envd-bridge.exe&ca_file=C:\tools\envd-ca.crt&call_timeout=30m&allow_command=uptime#ops' \
   --prompt "在远端执行 uptime"
 ```
 
@@ -220,6 +220,16 @@ remoteTargets:
       toolPrefix: remote_10-0-0-9
       tokenEnv: AICLI_ENVD_TOKEN
       callTimeout: 30m
+      shell:
+        allowedCommands:
+          - uptime
+          - host-inspect.sh
+          - chmod
+        allowedCommandPatterns:
+          - "deploy238_*.sh"
+        deniedCommands:
+          - rm
+        denyShellMetachars: true
       tls:
         caFile: C:\tools\envd-ca.crt
 ```
@@ -229,6 +239,24 @@ remoteTargets:
 - `write` 单次内容硬上限 **1 MiB**（argv 限制）；更大文件请分片或走 `shell`。
 - `SendInput` / `SendSignal` / `UpdatePty` 是 unary RPC，HTTP/1.1 也可用；TLS 只用于加密与 HTTP/2。
 - ops 档额外提供 **5 个交互式 PTY 工具**：`pty_start` / `pty_write` / `pty_read` / `pty_resize` / `pty_close`；输出保留尾部 256 KiB，`pty_read` 的 `wait_ms` 上限 30s。
+
+**命令执行是 fail-closed 的**：`shell` 与 `pty_start` 在 bridge 内走与
+`aicli-remote-tools` 相同的 `CommandPolicy`（deny > 非空 allowlist > shell
+metachar 拒绝 > destructive 分类）。没有配置任何 `allowedCommands` /
+`allowedCommandPatterns` 时，每次执行都会被拒绝，而不会因为 `profile: ops`
+直接放行。
+
+- YAML 里省略 `denyShellMetachars` 时默认为 **true**；如确需管道/重定向，
+  显式写 `denyShellMetachars: false`。
+- 单串写法用重复的 `allow_command=` / `allow_command_pattern=` /
+  `deny_command=` / `deny_command_pattern=` 传入；值里的空格必须 URL 编码
+  （例如 `allow_command=git%20status`），`allow_shell_metachars=true` 才关闭
+  metachar 检查。
+- 命令条目按 argv[0] 的 basename 匹配：允许 `/bin/sh` 要写 `sh`，
+  允许 `~/.local/bin/host-inspect.sh` 要写 `host-inspect.sh`；带参数的条目
+  按 argv 前缀匹配（如 `git status`）。
+- `pty_start` 只检查**启动命令**；进入交互式 shell 后，`pty_write` 不再逐条
+  过滤。除非确实需要交互会话，不要把 `bash`/`sh` 放进 allowlist。
 
 ```text
 remote_<prefix>__pty_start  {"command":"/bin/sh"}
@@ -278,6 +306,10 @@ envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl
 | `401` + `no user specified` | 请求未带 Basic user | 目标 user 必须是目标机系统用户 |
 | `401` + `unauthorized access` | 令牌缺失/错误 | 设置 `AICLI_ENVD_TOKEN`；确认 `/init` 已执行 |
 | `/init` 返回 409 | 进程内已有不同令牌 | `systemctl restart envd` 后重新引导 |
+| `COMMAND_DENIED` + `fail-closed` | 没有配置命令 allowlist | 在 `remote.shell.allowedCommands` 或 `?allow_command=` 中添加命令/argv 前缀 |
+| `policy:not-allowed` | 命令不在 allowlist | 添加精确命令或 `allowedCommandPatterns`；不要用 `*` 图省事 |
+| `policy:metachars` | 命令含管道/重定向/替换/顺序执行 | 拆成单条命令，或显式 `denyShellMetachars: false`（不推荐） |
+| `policy:destructive` | 被共享 destructive 分类器拦截 | 在目标机人工执行，或调整业务脚本 |
 | `no pty session with pid ...` | 会话已关闭或 bridge 重启 | 重新 `pty_start`；会话状态只在当前 bridge 进程内 |
 | TLS 握手失败 / `x509: certificate is valid for ...` | 证书 SAN 不含实际连接地址 | 重签证书，把客户端连接用的 IP/DNS 加入 SAN |
 | 日志刷 `socat: executable file not found` | envd 的 port-forwarder 需要 socat + 169.254.0.21 | 普通服务器属预期噪音，可忽略；不要为此安装 socat |

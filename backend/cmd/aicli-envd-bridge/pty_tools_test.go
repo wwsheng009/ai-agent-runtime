@@ -82,6 +82,7 @@ func TestPtyStartReadClose(t *testing.T) {
 		profile:   profileOps,
 		timeout:   5 * time.Second,
 		sessions:  make(map[uint32]*ptySession),
+		commands:  testCommandPolicy(t, "bash"),
 	}
 	ctx := context.Background()
 
@@ -136,6 +137,7 @@ func TestPtyWriteResize(t *testing.T) {
 		profile:   profileOps,
 		timeout:   5 * time.Second,
 		sessions:  make(map[uint32]*ptySession),
+		commands:  testCommandPolicy(t, "bash"),
 	}
 	ctx := context.Background()
 
@@ -181,9 +183,31 @@ func TestPtyToolsAreOpsOnly(t *testing.T) {
 	}
 }
 
+// TestPtyStartUsesCommandPolicy proves an interactive session cannot be started
+// through a command the bridge does not allow, before any envd call.
+func TestPtyStartUsesCommandPolicy(t *testing.T) {
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		sessions:  make(map[uint32]*ptySession),
+		commands:  testCommandPolicy(t, "echo"),
+	}
+	res := b.callTool(context.Background(), "pty_start", json.RawMessage(`{"command":"bash"}`))
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "policy:not-allowed") {
+		t.Fatalf("pty_start = %+v, want a command-policy refusal", res)
+	}
+}
+
 // TestPtyUnknownSession covers the pid guard.
 func TestPtyUnknownSession(t *testing.T) {
-	b := &bridge{workspace: "/srv/app", profile: profileOps, timeout: time.Second, sessions: make(map[uint32]*ptySession)}
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		sessions:  make(map[uint32]*ptySession),
+		commands:  testCommandPolicy(t, "bash"),
+	}
 	for _, tool := range []string{"pty_write", "pty_read", "pty_resize", "pty_close"} {
 		res := b.callTool(context.Background(), tool, json.RawMessage(`{"pid":99,"data":"x","cols":80,"rows":24}`))
 		if !res.IsError || !strings.Contains(res.Content[0].Text, "no pty session") {
@@ -195,7 +219,13 @@ func TestPtyUnknownSession(t *testing.T) {
 // TestPtyStartRejectsJailEscape proves the cwd goes through the same jail as
 // shell, before any envd call (the bridge has no client here).
 func TestPtyStartRejectsJailEscape(t *testing.T) {
-	b := &bridge{workspace: "/srv/app", profile: profileOps, timeout: time.Second, sessions: make(map[uint32]*ptySession)}
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		sessions:  make(map[uint32]*ptySession),
+		commands:  testCommandPolicy(t, "bash"),
+	}
 	res := b.callTool(context.Background(), "pty_start", json.RawMessage(`{"command":"bash","cwd":"../../etc"}`))
 	if !res.IsError || !strings.Contains(res.Content[0].Text, "outside the workspace") {
 		t.Fatalf("pty_start = %+v, want a jail error", res)

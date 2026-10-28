@@ -140,8 +140,9 @@ func (s *ptySession) close() {
 
 // toolPtyStart starts an interactive pty session.
 //
-// The command runs through /bin/sh -c under the ops profile; envd performs no
-// command filtering, so this tool is gated exactly like shell.
+// The initial command runs through /bin/sh -c and is checked by the same command
+// policy as shell. Once an interactive shell is running, pty_write is not filtered:
+// do not allowlist a shell unless the session itself is intended.
 func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callResult {
 	var in struct {
 		Command string `json:"command"`
@@ -154,6 +155,10 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 	}
 	if strings.TrimSpace(in.Command) == "" {
 		return errorResult("command is required")
+	}
+	rule, err := b.commands.CheckCommand(in.Command)
+	if err != nil {
+		return errorResult("command denied (%s): %v", rule, err)
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {
@@ -375,7 +380,8 @@ func init() {
 	toolDefs["pty_start"] = toolDef{
 		Name: "pty_start",
 		Description: "Start an interactive process under a pty (ops only). The command runs via /bin/sh -c; " +
-			"envd performs no command filtering. Returns a pid for pty_write/pty_read/pty_resize/pty_close.",
+			"the bridge applies its command allowlist, while input sent later via pty_write is not filtered. " +
+			"Returns a pid for pty_write/pty_read/pty_resize/pty_close.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

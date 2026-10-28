@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // testBridge returns a configured bridge without a client.
@@ -26,6 +27,35 @@ func testBridge(p profile, prefix string) *bridge {
 		prefix:    prefix,
 		profile:   p,
 		timeout:   5 * time.Second,
+	}
+}
+
+// testCommandPolicy builds the shared policy with exactly the listed argv
+// prefixes. Metacharacter rejection stays on, matching the bridge default.
+func testCommandPolicy(t *testing.T, allowed ...string) *remotetools.CommandPolicy {
+	t.Helper()
+	policy, err := remotetools.NewCommandPolicy(remotetools.ShellConfig{
+		AllowedCommands:    allowed,
+		DenyShellMetachars: true,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("NewCommandPolicy: %v", err)
+	}
+	return policy
+}
+
+// TestStringListFlagPreservesCommandText ensures command entries are not passed
+// through path.Clean (which would rewrite double spaces and glob characters).
+func TestStringListFlagPreservesCommandText(t *testing.T) {
+	var flag stringListFlag
+	if err := flag.Set("git  status"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := flag.Set("  host-*.sh  "); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := strings.Join(flag, "|"); got != "git  status|host-*.sh" {
+		t.Fatalf("flag = %q, want the command text preserved", got)
 	}
 }
 
@@ -217,7 +247,13 @@ func TestShellRunThroughFakeEnvD(t *testing.T) {
 		})
 	})
 
-	b := &bridge{client: client, workspace: "/srv/app", profile: profileOps, timeout: 5 * time.Second}
+	b := &bridge{
+		client:    client,
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   5 * time.Second,
+		commands:  testCommandPolicy(t, "echo"),
+	}
 	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"echo echoed"}`))
 	if res.IsError {
 		t.Fatalf("shell reported an error: %+v", res)
@@ -225,6 +261,78 @@ func TestShellRunThroughFakeEnvD(t *testing.T) {
 	text := res.Content[0].Text
 	if !strings.Contains(text, "echoed") || !strings.Contains(text, "[exit 0]") {
 		t.Fatalf("shell output = %q, want the stdout and the exit status", text)
+	}
+}
+
+// TestShellCommandPolicyFailClosed pins the default: the ops profile alone is not
+// enough to run a command. envd has no filter, so an empty allowlist must deny.
+func TestShellCommandPolicyFailClosed(t *testing.T) {
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		commands:  testCommandPolicy(t),
+	}
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"id"}`))
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "fail-closed") {
+		t.Fatalf("shell = %+v, want a fail-closed policy error", res)
+	}
+}
+
+// TestShellCommandPolicyDenies proves an unlisted command never reaches envd.
+func TestShellCommandPolicyDenies(t *testing.T) {
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		commands:  testCommandPolicy(t, "echo"),
+	}
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"id"}`))
+	if !res.IsError {
+		t.Fatalf("unlisted command was accepted: %+v", res)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "policy:not-allowed") || !strings.Contains(text, "COMMAND_DENIED") {
+		t.Fatalf("error = %q, want the not-allowed rule and error code", text)
+	}
+}
+
+// TestShellCommandPolicyDenyWins checks that a deny entry overrides a broader
+// allow entry, matching aicli-remote-tools.
+func TestShellCommandPolicyDenyWins(t *testing.T) {
+	policy, err := remotetools.NewCommandPolicy(remotetools.ShellConfig{
+		AllowedCommands:    []string{"echo"},
+		DeniedCommands:     []string{"echo secret"},
+		DenyShellMetachars: true,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("NewCommandPolicy: %v", err)
+	}
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		commands:  policy,
+	}
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"echo secret"}`))
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "deniedCommands:echo secret") {
+		t.Fatalf("shell = %+v, want the deny rule to win", res)
+	}
+}
+
+// TestShellCommandPolicyRejectsMetachars covers the envd-specific risk: the
+// command is handed to /bin/sh -c, so a chained command must be refused even when
+// its first word is allowed.
+func TestShellCommandPolicyRejectsMetachars(t *testing.T) {
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		commands:  testCommandPolicy(t, "echo"),
+	}
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"echo ok; id"}`))
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "policy:metachars") {
+		t.Fatalf("shell = %+v, want a metacharacter refusal", res)
 	}
 }
 
@@ -321,6 +429,7 @@ func TestCallTimeoutAbortsSlowCall(t *testing.T) {
 		workspace: "/srv/app",
 		profile:   profileOps,
 		timeout:   60 * time.Millisecond,
+		commands:  testCommandPolicy(t, "sleep"),
 	}
 
 	started := time.Now()

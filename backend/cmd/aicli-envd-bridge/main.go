@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // profile decides which tools are exposed, mirroring the aicli-remote-tools tiers.
@@ -81,6 +82,7 @@ type bridge struct {
 	profile   profile
 	timeout   time.Duration
 	audit     *auditLog
+	commands  *remotetools.CommandPolicy
 
 	sessionMu sync.Mutex
 	sessions  map[uint32]*ptySession
@@ -230,7 +232,8 @@ var toolDefs = map[string]toolDef{
 	"shell": {
 		Name: "shell",
 		Description: "Run a command on the envd target and return its stdout, stderr and exit code. " +
-			"envd adds no command filtering, so this is gated to the ops profile only.",
+			"The command must match the bridge's allowlist; envd itself adds no filtering. " +
+			"Gated to the ops profile only.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -306,8 +309,17 @@ func main() {
 		caFile      = flag.String("ca-file", "", "CA bundle for a TLS envd endpoint")
 		callTimeout = flag.Duration("call-timeout", 10*time.Minute, "maximum duration of one tool call; streaming shell runs are bounded by it")
 		auditPath   = flag.String("audit-log", "", "append one JSONL record per tool call to this file (contents are never logged)")
+		allowCmd    = stringListFlag{}
+		allowCmdPat = stringListFlag{}
+		denyCmd     = stringListFlag{}
+		denyCmdPat  = stringListFlag{}
+		denyMeta    = flag.Bool("deny-shell-metachars", true, "reject shell commands containing pipes, redirection, substitution or sequencing")
 	)
 	flag.Var(&allowRoot, "allow-root", "additional directory outside the workspace that may be accessed; repeatable")
+	flag.Var(&allowCmd, "allow-command", "command or argv prefix allowed for shell/pty_start; repeatable; empty denies every command")
+	flag.Var(&allowCmdPat, "allow-command-pattern", "whole-command wildcard allowlist entry (* and ?); repeatable")
+	flag.Var(&denyCmd, "deny-command", "command or argv prefix always denied; repeatable")
+	flag.Var(&denyCmdPat, "deny-command-pattern", "whole-command wildcard denylist entry (* and ?); repeatable")
 	flag.Parse()
 
 	if strings.TrimSpace(*user) == "" {
@@ -332,6 +344,27 @@ func main() {
 	if *callTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "aicli-envd-bridge: --call-timeout must be a positive duration")
 		os.Exit(2)
+	}
+	commandPolicy, err := remotetools.NewCommandPolicy(remotetools.ShellConfig{
+		AllowedCommands:        allowCmd,
+		AllowedCommandPatterns: allowCmdPat,
+		DeniedCommands:         denyCmd,
+		DeniedCommandPatterns:  denyCmdPat,
+		DenyShellMetachars:     *denyMeta,
+	}, *callTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aicli-envd-bridge: invalid command policy: %v\n", err)
+		os.Exit(2)
+	}
+	bridgeProfile := profile(strings.ToLower(strings.TrimSpace(*prof)))
+	switch bridgeProfile {
+	case profileReadonly, profileStandard, profileOps:
+	default:
+		fmt.Fprintf(os.Stderr, "aicli-envd-bridge: unknown --profile %q (want readonly|standard|ops)\n", *prof)
+		os.Exit(2)
+	}
+	if bridgeProfile == profileOps && len(allowCmd) == 0 && len(allowCmdPat) == 0 {
+		fmt.Fprintln(os.Stderr, "aicli-envd-bridge: warning: profile ops but no --allow-command/--allow-command-pattern; shell and pty_start will refuse every command (fail-closed)")
 	}
 	audit, err := openOptionalAudit(*auditPath)
 	if err != nil {
@@ -371,9 +404,10 @@ func main() {
 		workspace: bridgeWorkspace,
 		roots:     allowRoot,
 		prefix:    *prefix,
-		profile:   profile(strings.ToLower(strings.TrimSpace(*prof))),
+		profile:   bridgeProfile,
 		timeout:   *callTimeout,
 		audit:     audit,
+		commands:  commandPolicy,
 		sessions:  make(map[uint32]*ptySession),
 	}
 	defer b.closeAllSessions()
@@ -399,6 +433,21 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(value string) error {
 	if strings.TrimSpace(value) != "" {
 		*m = append(*m, path.Clean(value))
+	}
+	return nil
+}
+
+// stringListFlag collects repeatable strings verbatim.
+//
+// It is separate from multiFlag because command patterns must not be passed
+// through path.Clean: "git  status" and "host-*.sh" would be rewritten.
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringListFlag) Set(value string) error {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		*s = append(*s, trimmed)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,8 @@ import (
 
 // TestManagerHermeticEnvD drives the built bridge through the real MCP manager
 // against a stub envd, so CI covers config load → child process → MCP handshake
-// → tool call without external infrastructure.
+// → tool call without external infrastructure. It uses the ops profile so the
+// generated --allow-command flag is exercised as well.
 func TestManagerHermeticEnvD(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -40,6 +42,15 @@ func TestManagerHermeticEnvD(t *testing.T) {
 		case "/metrics":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"ts":1,"cpu_count":4,"mem_total":1073741824,"mem_used":536870912,"available":536870912,"disk_used":1048576,"disk_total":10737418240}`)
+		case "/process.Process/Start":
+			w.Header().Set("Content-Type", "application/connect+json")
+			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}})
+			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
+				"stdout": base64.StdEncoding.EncodeToString([]byte("policy-ok\n")),
+			}}})
+			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
+				"exited": true, "status": "exit status 0",
+			}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -51,7 +62,7 @@ func TestManagerHermeticEnvD(t *testing.T) {
   "mcpServers": {
     "envdtest": {
       "command": %q,
-      "args": ["--addr", %q, "--user", "n9e", "--workspace", "/tmp/work", "--profile", "readonly", "--tool-prefix", "remote_envd"],
+      "args": ["--addr", %q, "--user", "n9e", "--workspace", "/tmp/work", "--profile", "ops", "--allow-command", "echo", "--tool-prefix", "remote_envd"],
       "env": {},
       "disabled": false,
       "enabled": true,
@@ -79,7 +90,7 @@ func TestManagerHermeticEnvD(t *testing.T) {
 	if len(tools) == 0 {
 		t.Fatal("manager exposed no tools")
 	}
-	var metricsTool string
+	var metricsTool, shellTool string
 	for _, tool := range tools {
 		name := tool.Tool.Name
 		if !strings.HasPrefix(name, "remote_envd__") {
@@ -88,9 +99,15 @@ func TestManagerHermeticEnvD(t *testing.T) {
 		if strings.HasSuffix(name, "__host_metrics") {
 			metricsTool = name
 		}
+		if strings.HasSuffix(name, "__shell") {
+			shellTool = name
+		}
 	}
 	if metricsTool == "" {
 		t.Fatal("host_metrics was not exposed")
+	}
+	if shellTool == "" {
+		t.Fatal("shell was not exposed under the ops profile")
 	}
 
 	res, err := mgr.CallTool(context.Background(), "envdtest", metricsTool, map[string]any{})
@@ -102,5 +119,16 @@ func TestManagerHermeticEnvD(t *testing.T) {
 	}
 	if text := res.Content[0].Text; !strings.Contains(text, "cpus: 4") {
 		t.Fatalf("output = %q, want the stub CPU count", text)
+	}
+
+	res, err = mgr.CallTool(context.Background(), "envdtest", shellTool, map[string]any{"command": "echo policy-ok"})
+	if err != nil {
+		t.Fatalf("CallTool shell: %v", err)
+	}
+	if res == nil || len(res.Content) == 0 {
+		t.Fatal("shell returned no content")
+	}
+	if text := res.Content[0].Text; !strings.Contains(text, "policy-ok") || !strings.Contains(text, "[exit 0]") {
+		t.Fatalf("shell output = %q, want the stub stdout and exit status", text)
 	}
 }

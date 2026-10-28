@@ -1,6 +1,8 @@
 package remotetargets
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -369,6 +371,125 @@ func TestParseSpecEnvDCAFile(t *testing.T) {
 	}
 	if !strings.Contains(args, "--ca-file /tmp/envd-ca.pem") {
 		t.Errorf("args = %q, want --ca-file", args)
+	}
+}
+
+// TestParseSpecEnvDCommandPolicy covers the spec spelling of the shared shell
+// policy. Repeated query keys are how one string can carry more than one rule.
+func TestParseSpecEnvDCommandPolicy(t *testing.T) {
+	spec, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app" +
+		"?allow_command=uptime" +
+		"&allow_command=host-inspect.sh" +
+		"&allow_command_pattern=deploy238_*.sh" +
+		"&deny_command=rm" +
+		"&deny_command_pattern=sudo%20*" +
+		"&allow_shell_metachars=true")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if got := strings.Join(spec.AllowedCommands, ","); got != "uptime,host-inspect.sh" {
+		t.Errorf("AllowedCommands = %q, want uptime,host-inspect.sh", got)
+	}
+	if got := strings.Join(spec.AllowedCommandPatterns, ","); got != "deploy238_*.sh" {
+		t.Errorf("AllowedCommandPatterns = %q", got)
+	}
+	if got := strings.Join(spec.DeniedCommands, ","); got != "rm" {
+		t.Errorf("DeniedCommands = %q", got)
+	}
+	if got := strings.Join(spec.DeniedCommandPatterns, ","); got != "sudo *" {
+		t.Errorf("DeniedCommandPatterns = %q", got)
+	}
+	if !spec.AllowShellMetachars {
+		t.Error("AllowShellMetachars = false, want true")
+	}
+
+	expanded, err := spec.Expand()
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	var args string
+	for _, cfg := range expanded.Servers {
+		args = strings.Join(cfg.Args, " ")
+	}
+	for _, want := range []string{
+		"--allow-command uptime",
+		"--allow-command host-inspect.sh",
+		"--allow-command-pattern deploy238_*.sh",
+		"--deny-command rm",
+		"--deny-command-pattern sudo *",
+		"--deny-shell-metachars=false",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("args = %q, want %q", args, want)
+		}
+	}
+}
+
+// TestParseSpecEnvDCommandPolicyRejectsBadBool keeps a typo from silently
+// falling back to the safe default while the operator believes metachars are
+// allowed.
+func TestParseSpecEnvDCommandPolicyRejectsBadBool(t *testing.T) {
+	_, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app?allow_shell_metachars=yes-please")
+	if err == nil {
+		t.Fatal("ParseSpec accepted a non-boolean allow_shell_metachars")
+	}
+}
+
+// TestExpandOneEnvDWarnsWhenOpsHasNoAllowlist makes the fail-closed default
+// visible during expansion, not only at the first shell call.
+func TestExpandOneEnvDWarnsWhenOpsHasNoAllowlist(t *testing.T) {
+	_, warnings, err := expandOne("envdtest", Target{
+		Transport: TransportEnvD,
+		SSH:       SSHConfig{Host: "10.0.0.9", Port: DefaultEnvDPort, User: "dev"},
+		Remote:    RemoteConfig{Profile: "ops", Workspace: "/srv/app"},
+	})
+	if err != nil {
+		t.Fatalf("expandOne: %v", err)
+	}
+	var mentioned bool
+	for _, warning := range warnings {
+		if strings.Contains(warning, "fail-closed") && strings.Contains(warning, "allowedCommands") {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
+		t.Fatalf("warnings = %v, want a fail-closed shell warning", warnings)
+	}
+}
+
+// TestLoadFileShellPolicyDefaultsDenyMetachars proves a YAML shell block that
+// omits denyShellMetachars still gets the safe default before it reaches the
+// bridge, where a false value would allow `allowed; anything`.
+func TestLoadFileShellPolicyDefaultsDenyMetachars(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "remote-targets.yaml")
+	body := `remoteTargets:
+  envdtest:
+    transport: envd
+    ssh:
+      host: 10.0.0.9
+      user: dev
+      port: 49983
+    remote:
+      workspace: /srv/app
+      profile: ops
+      shell:
+        allowedCommands: [uptime]
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+	expanded, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	server := expanded.Servers["envdtest"]
+	joined := strings.Join(server.Args, " ")
+	if !strings.Contains(joined, "--allow-command uptime") {
+		t.Errorf("args = %q, want the allowed command", joined)
+	}
+	if !strings.Contains(joined, "--deny-shell-metachars=true") {
+		t.Errorf("args = %q, want the safe metachar default", joined)
 	}
 }
 

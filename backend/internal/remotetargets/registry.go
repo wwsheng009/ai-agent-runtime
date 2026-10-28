@@ -22,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // Transport kinds.
@@ -38,9 +39,9 @@ const (
 	// target. It does not, however, inherit the remote tool server's enforcement
 	// the way the other transports do: envd speaks no MCP, so a local bridge
 	// (aicli-envd-bridge) is the MCP entry and the only place path and profile
-	// policy can be applied. The bridge re-implements that subset itself;
-	// remotetools' audit records and its command policy are not in this path, and
-	// the expansion below reports the missing checks as a warning.
+	// policy can be applied. The bridge implements the path jail itself and uses
+	// remotetools.CommandPolicy for command authorization, so both transports
+	// share one allowlist implementation.
 	//
 	// The trade is explicit. Compared with ssh-stdio, envd gives up the remote
 	// tool server's own path jail and command filtering, and gains streaming
@@ -85,6 +86,15 @@ type RemoteConfig struct {
 	AllowedRoots []string `yaml:"allowedRoots,omitempty" json:"allowedRoots,omitempty"`
 	// Profile selects the exposed tool family.
 	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// Shell carries command authorization for targets that execute commands.
+	// It uses the same shape as aicli-remote-tools' shell block: envd is
+	// fail-closed and will not run a command unless it matches this policy (or
+	// one of the spec query parameters that populate it).
+	//
+	// For ssh-stdio the block is forwarded to the target-side server; for http
+	// transports the already-running server owns its policy and this block is
+	// reported as ignored.
+	Shell *remotetools.ShellConfig `yaml:"shell,omitempty" json:"shell,omitempty"`
 	// ToolPrefix is prepended to every tool name.
 	ToolPrefix string `yaml:"toolPrefix" json:"toolPrefix"`
 	// Listen is the daemon address for the http transports.
@@ -266,6 +276,19 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 	}
 	var warnings []string
 
+	// Validate the shared shell policy during expansion, so a malformed pattern
+	// fails before the bridge is launched on the first tool call.
+	if target.Remote.Shell != nil {
+		if _, err := remotetools.NewCommandPolicy(*target.Remote.Shell, 0); err != nil {
+			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("remote.shell: %w", err)
+		}
+	}
+	if target.Remote.Shell != nil && (transport == TransportHTTP || transport == TransportSSHHTTP) {
+		warnings = append(warnings,
+			fmt.Sprintf("target %q: remote.shell is ignored for transport %s; the running server owns its command policy",
+				serverName, transport))
+	}
+
 	switch transport {
 	case TransportSSHStdio:
 		if strings.TrimSpace(target.SSH.Host) == "" {
@@ -286,6 +309,9 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		}
 		if len(target.Remote.AllowedRoots) > 0 {
 			remoteConfig["allowedRoots"] = target.Remote.AllowedRoots
+		}
+		if target.Remote.Shell != nil {
+			remoteConfig["shell"] = target.Remote.Shell
 		}
 		encoded, err := encodeRemoteConfig(remoteConfig)
 		if err != nil {
@@ -413,6 +439,26 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 				args = append(args, "--allow-root", strings.TrimSpace(root))
 			}
 		}
+		if shell := target.Remote.Shell; shell != nil {
+			for _, command := range shell.AllowedCommands {
+				args = append(args, "--allow-command", command)
+			}
+			for _, pattern := range shell.AllowedCommandPatterns {
+				args = append(args, "--allow-command-pattern", pattern)
+			}
+			for _, command := range shell.DeniedCommands {
+				args = append(args, "--deny-command", command)
+			}
+			for _, pattern := range shell.DeniedCommandPatterns {
+				args = append(args, "--deny-command-pattern", pattern)
+			}
+			args = append(args, fmt.Sprintf("--deny-shell-metachars=%t", shell.DenyShellMetachars))
+			if len(shell.EnvAllowlist) > 0 {
+				warnings = append(warnings,
+					fmt.Sprintf("target %q: remote.shell.envAllowlist is not applied to envd; envd only supports adding explicit envs",
+						serverName))
+			}
+		}
 		if tokenEnv := strings.TrimSpace(target.Remote.TokenEnv); tokenEnv != "" {
 			args = append(args, "--token-env", tokenEnv)
 		}
@@ -434,11 +480,26 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		cfg.Command = bridge
 		cfg.Args = args
 		warnings = append(warnings,
-			fmt.Sprintf("target %q: envd performs no path or command checks; the bridge enforces workspace %q and profile %q locally",
+			fmt.Sprintf("target %q: envd performs no path or command checks; the bridge enforces workspace %q, profile %q and the shell allowlist locally",
 				serverName, workspace, orDefault(target.Remote.Profile, "readonly")))
 
 	default:
 		return mcpconfig.MCPConfig{}, nil, fmt.Errorf("unknown transport %q (want ssh-stdio|ssh-http|http|envd)", target.Transport)
+	}
+
+	// The remote command policy is fail-closed. An ops target with no allowlist
+	// can start, but every shell/pty_start call will be refused; say so during
+	// expansion instead of letting the first tool call discover it.
+	if transport == TransportEnvD || transport == TransportSSHStdio {
+		allowed := 0
+		if target.Remote.Shell != nil {
+			allowed = len(target.Remote.Shell.AllowedCommands) + len(target.Remote.Shell.AllowedCommandPatterns)
+		}
+		if orDefault(target.Remote.Profile, "readonly") == "ops" && allowed == 0 {
+			warnings = append(warnings,
+				fmt.Sprintf("target %q: profile ops but remote.shell.allowedCommands/allowedCommandPatterns is empty; shell and pty_start will refuse every command (fail-closed)",
+					serverName))
+		}
 	}
 
 	// TLS material applies to both http transports. It is validated here rather

@@ -1,6 +1,7 @@
 package remotetargets_test
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetargets"
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // writeTempDeclaration drops a declaration body into a throwaway directory and
@@ -78,6 +80,46 @@ func TestExpandSSHStdio(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--config-b64") {
 		t.Fatal("expected --config-b64 in args")
+	}
+}
+
+// TestExpandSSHStdioForwardsShellPolicy keeps the one-policy promise: a shell
+// block on the target declaration must reach the remote server instead of being
+// silently dropped when the transport is ssh-stdio.
+func TestExpandSSHStdioForwardsShellPolicy(t *testing.T) {
+	file := remotetargets.File{RemoteTargets: map[string]remotetargets.Target{
+		"dev": {
+			Transport: remotetargets.TransportSSHStdio,
+			SSH:       remotetargets.SSHConfig{Host: "dev.internal", User: "deploy"},
+			Remote: remotetargets.RemoteConfig{
+				Workspace:  "/srv/app",
+				Profile:    "ops",
+				ToolPrefix: "remote_dev",
+				Shell:      &remotetools.ShellConfig{AllowedCommands: []string{"uptime"}, DenyShellMetachars: true},
+			},
+		},
+	}}
+	expanded, err := remotetargets.Expand(file)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	args := expanded.Servers["dev"].Args
+	var encoded string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--config-b64" {
+			encoded = args[i+1]
+			break
+		}
+	}
+	if encoded == "" {
+		t.Fatalf("args = %v, want --config-b64", args)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !strings.Contains(string(decoded), `"shell":{"allowedCommands":["uptime"]`) {
+		t.Fatalf("config = %s, want the shell policy", decoded)
 	}
 }
 

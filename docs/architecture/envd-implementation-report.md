@@ -354,6 +354,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
 - **进程控制协议修正**：`SendSignal` / `SendInput` / `Update` 从误判的 client-streaming 改为 **unary**，请求体按 protobuf 修正（`signal` 枚举、`input.stdin` / `input.pty`、`pty.size`）；新增 `SendPtyInput`；`ProcessEvent.pty` 按 **bytes** 解码；`StartRequest` 支持 `pty.size` 并移除不存在的 `stdin` 字段。
 - **交互式 PTY 会话工具**：bridge 新增 `pty_start` / `pty_write` / `pty_read` / `pty_resize` / `pty_close`（仅 ops 档），会话输出尾部缓冲 256 KiB，`pty_read` 支持 `wait_ms`（上限 30s），`pty_close` 发送 SIGTERM 并移除会话；真实 envd 冒烟通过。
+- **命令白名单复用（不再做两套）**：`remotetools` 抽出可复用的 `CommandPolicy`（deny > 非空 allowlist > shell metachar > destructive 分类），envd bridge 的 `shell` 与 `pty_start` 直接调用同一实现；bridge 新增 `--allow-command*` / `--deny-command*` / `--deny-shell-metachars`，`remoteTargets` 的 `remote.shell` 与 `envd://...?allow_command=...` 走同一份 `ShellConfig`。空 allowlist 为 **fail-closed**；YAML 省略 `denyShellMetachars` 时默认为 true。
 - **TLS 与 ca_file（已实机验证）**：本地补丁为 envd 增加 `-tls-cert` / `-tls-key`，Go 的 `ListenAndServeTLS` 自动协商 HTTP/2；spec 新增 `?ca_file=`，`remote.tls.caFile` 存在时 registry 生成 `https://` 地址并透传 `--ca-file`。
 - **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、进程控制 unary 请求体（signal/stdin/pty/size）、PTY 输出解码与启动配置、请求参数校验、bridge 的调用超时用例。
 - **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
@@ -361,7 +362,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 ### 8.3 保留的限制
 
 - **symlink 可绕过文本级 jail**：jail 只做 `path.Clean` + 前缀匹配，bridge 无法在本地解析远端软链；
-- **审计为 opt-in、命令白名单仍缺失**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；envd 路径仍没有 remotetools 的命令白名单（envd 侧同样没有）；
+- **审计仍为 opt-in、命令策略已接入但边界明确**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；命令执行已复用 `remotetools.CommandPolicy`，但 `pty_start` 只检查启动命令，进入交互式 shell 后 `pty_write` 不逐条过滤；`shell.envAllowlist` 未应用到 envd（envd 仅支持附加 envs）；
 - **无法做 envd 版本校验**：envd 没有版本端点；
 - **TLS / HTTP/2 已在真实 envd 上验证**（自签证书 + SAN；控制类 RPC 本身不需要 HTTP/2）；仅 `StreamInput`（client-streaming）仍未暴露；
 - **写入硬上限 1 MiB**（承接 §4.3）；
@@ -382,12 +383,13 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - TLS：自签证书 SAN 覆盖 `127.0.0.1` / `172.18.3.238` / `localhost`，unit 以 `-tls-cert/-tls-key` 启动；令牌引导脚本改用 `https://127.0.0.1:49983/init --cacert`。
 - live 集成测试 **10/10 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUser / **StdinRoundTrip / SignalTermination / PTYRoundTrip** / WatchDir）。
 - 交互会话冒烟：bridge 暴露 **15** 个工具（10 + 5 个 pty）；`pty_start` → `pty_write` → `pty_read`（输出 `it-works`）→ `pty_resize` → `pty_close` 全部 PASS。
+- 命令策略 live 冒烟（TLS）：`echo policy-ok` 放行；`id` 返回 `policy:not-allowed`；`echo secret` 被 `deniedCommands` 拦截；`echo ok; id` 返回 `policy:metachars`；允许 `sh` 后 `pty_start` / `pty_read` 返回 `policy-pty`。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**78 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 33、bridge 19）。
+- 离线回归：**89 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 38、bridge 25；共享策略包 `remotetools` 另为 **162 PASS / 3 SKIP**）。
 
 ### 9.2 aicli agent 真实巡检场景
 
-- 方式：`aicli chat --no-interactive --remote 'envd://n9e@<host>:49983/home/n9e?binary=<bridge>#ops'`，`--permission-mode bypass_permissions`，仅使用远端 envd 工具（未使用本地 shell/文件工具）。
+- 方式：`aicli chat --no-interactive --remote 'envd://n9e@<host>:49983/home/n9e?binary=<bridge>&allow_command=<cmd>#ops'`，`--permission-mode bypass_permissions`，仅使用远端 envd 工具（未使用本地 shell/文件工具）。命令白名单接入后，需要把巡检脚本加入 `allow_command`（或改用 YAML 的 `remote.shell`）。
 - 运行：275 s，`session_20261028074725_2JIY3hBU`，provider workbuddy / deepseek-v4.1-flash（reasoning=max），消耗 **1,019,489 tokens**。
 - 交付：远程报告 `/home/n9e/reports/n9e-inspection-20261028-0750.md`（14,049 字节），经 envd `view` 回读校验并通过 bridge 取回本地。
 - 关键发现：4 核负载 `3.02/3.34/3.08`；`n9e v2` 迁移 `Error 1091` + 6–8 s 慢 SQL + `17001` 被旧实例占用导致 panic，且 `n9e.service` 在 `20091` 端口冲突下反复重启失败；系统 `degraded`（`systemd-networkd-wait-online`）；`syslog` 4.74 GiB 且持续增长。

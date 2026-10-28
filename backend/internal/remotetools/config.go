@@ -116,6 +116,23 @@ type ShellConfig struct {
 	EnvAllowlist []string `yaml:"envAllowlist" json:"envAllowlist"`
 }
 
+// UnmarshalYAML keeps the safe default when a shell block omits
+// denyShellMetachars.
+//
+// The zero value of a bool is false, which would silently allow piping an
+// allowed binary into an arbitrary command. DefaultConfig sets this field to
+// true, but a nested block decoded into a fresh struct (as remoteTargets does)
+// would otherwise lose that default.
+func (s *ShellConfig) UnmarshalYAML(value *yaml.Node) error {
+	type plain ShellConfig
+	decoded := plain{DenyShellMetachars: true}
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*s = ShellConfig(decoded)
+	return nil
+}
+
 // HTTPConfig describes the daemon listener.
 type HTTPConfig struct {
 	// Listen is host:port. Non-loopback addresses require a token.
