@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -90,6 +91,10 @@ type RemoteConfig struct {
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
 	// TokenEnv names the local environment variable holding the bearer token.
 	TokenEnv string `yaml:"tokenEnv,omitempty" json:"tokenEnv,omitempty"`
+	// CallTimeout is the envd bridge's per-call deadline as a Go duration string
+	// ("30m"). Empty uses the bridge default (10m). Only the envd transport
+	// consumes it.
+	CallTimeout string `yaml:"callTimeout,omitempty" json:"callTimeout,omitempty"`
 	// DescriptionStyle is compact|explicit.
 	DescriptionStyle string `yaml:"descriptionStyle,omitempty" json:"descriptionStyle,omitempty"`
 	// TLS carries the client-certificate material for the http transports.
@@ -400,6 +405,13 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		}
 		if tokenEnv := strings.TrimSpace(target.Remote.TokenEnv); tokenEnv != "" {
 			args = append(args, "--token-env", tokenEnv)
+		}
+		if raw := strings.TrimSpace(target.Remote.CallTimeout); raw != "" {
+			timeout, err := time.ParseDuration(raw)
+			if err != nil || timeout <= 0 {
+				return mcpconfig.MCPConfig{}, nil, fmt.Errorf("remote.callTimeout %q must be a positive Go duration such as 30m", raw)
+			}
+			args = append(args, "--call-timeout", raw)
 		}
 		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
 			args = append(args, "--ca-file", strings.TrimSpace(target.Remote.TLS.CAFile))

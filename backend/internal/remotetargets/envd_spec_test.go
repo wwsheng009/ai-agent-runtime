@@ -285,3 +285,41 @@ func TestEnvDTargetNameUsesHost(t *testing.T) {
 		}
 	}
 }
+
+// TestParseSpecEnvDCallTimeout covers the per-call deadline override.
+func TestParseSpecEnvDCallTimeout(t *testing.T) {
+	spec, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app?call_timeout=30m")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if spec.CallTimeout != "30m" {
+		t.Fatalf("CallTimeout = %q, want 30m", spec.CallTimeout)
+	}
+	expanded, err := spec.Expand()
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	var args string
+	for _, cfg := range expanded.Servers {
+		args = strings.Join(cfg.Args, " ")
+	}
+	if !strings.Contains(args, "--call-timeout 30m") {
+		t.Fatalf("args = %q, want --call-timeout 30m", args)
+	}
+}
+
+// TestExpandOneEnvDRejectsInvalidCallTimeout pins the fail-closed parse: a
+// malformed duration must not silently fall back to the default.
+func TestExpandOneEnvDRejectsInvalidCallTimeout(t *testing.T) {
+	_, _, err := expandOne("envdtest", Target{
+		Transport: TransportEnvD,
+		SSH:       SSHConfig{Host: "10.0.0.9", Port: DefaultEnvDPort, User: "dev"},
+		Remote:    RemoteConfig{Profile: "ops", Workspace: "/srv/app", CallTimeout: "soon"},
+	})
+	if err == nil {
+		t.Fatal("expandOne accepted an invalid call timeout")
+	}
+	if !strings.Contains(err.Error(), "callTimeout") {
+		t.Errorf("error = %v, want it to name callTimeout", err)
+	}
+}

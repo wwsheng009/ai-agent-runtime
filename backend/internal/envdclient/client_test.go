@@ -3,10 +3,12 @@ package envdclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -357,6 +359,76 @@ func TestAccessTokenHeader(t *testing.T) {
 				t.Fatalf("Basic user = %q, want n9e", gotUser)
 			}
 		})
+	}
+}
+
+// TestAppendLimited pins the retention helper's edge cases.
+func TestAppendLimited(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial string
+		chunk   string
+		limit   int
+		want    string
+	}{
+		{"under limit", "ab", "cd", 10, "abcd"},
+		{"exactly full", "ab", "cd", 4, "abcd"},
+		{"chunk clipped", "ab", "cdef", 4, "abcd"},
+		{"already full", "abcd", "ef", 4, "abcd"},
+		{"no cap", "ab", "cd", 0, "abcd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(appendLimited([]byte(tc.initial), []byte(tc.chunk), tc.limit))
+			if got != tc.want {
+				t.Fatalf("appendLimited(%q, %q, %d) = %q, want %q", tc.initial, tc.chunk, tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunCapsBufferedOutput pins the memory bound: a chatty process must not make
+// Run retain without limit, and the exit status must still be reported after the
+// excess output is discarded.
+func TestRunCapsBufferedOutput(t *testing.T) {
+	const chunkSize = 1 << 20
+	encoded := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", chunkSize)))
+
+	var body bytes.Buffer
+	writeFrame := func(v any) {
+		frame, err := EncodeJSONFrame(v)
+		if err != nil {
+			t.Fatalf("EncodeJSONFrame: %v", err)
+		}
+		body.Write(frame)
+	}
+	writeFrame(map[string]any{"event": map[string]any{"start": map[string]any{"pid": 1}}})
+	for i := 0; i < 10; i++ {
+		writeFrame(map[string]any{"event": map[string]any{"data": map[string]any{"stdout": encoded}}})
+	}
+	writeFrame(map[string]any{"event": map[string]any{"end": map[string]any{"exited": true, "status": "exit status 0"}}})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/connect+json")
+		_, _ = w.Write(body.Bytes())
+	}))
+	defer srv.Close()
+
+	client, err := Dial(Config{Addr: srv.URL, User: "n9e"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	stdout, _, code, err := client.Run(context.Background(), StartRequest{
+		Process: ProcessConfig{Cmd: "/bin/echo"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(stdout) != DefaultMaxBufferedOutput {
+		t.Fatalf("retained %d bytes, want the %d byte cap", len(stdout), DefaultMaxBufferedOutput)
 	}
 }
 

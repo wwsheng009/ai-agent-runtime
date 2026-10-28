@@ -384,9 +384,16 @@ func (b *bridge) toolMetrics(ctx context.Context) callResult {
 	if err != nil {
 		return errorResult("metrics: %v", err)
 	}
-	return textResult("envd %s\ncpus: %d\nmemory: %d MiB total, %d MiB used\nmemory available: %d MiB\ndisk: %d MiB used of %d MiB",
+	// Some envd builds omit `available` from /metrics; printing 0 MiB would read
+	// as "no memory free" instead of "not reported".
+	available := "n/a"
+	if metrics.MemAvailable > 0 {
+		available = fmt.Sprintf("%d MiB", metrics.MemAvailable>>20)
+	}
+	return textResult("envd %s\ncpus: %d\nmemory: %d MiB total, %d MiB used\nmemory available: %s\ndisk: %d MiB used of %d MiB",
 		b.client.Addr(), metrics.CPUCount,
-		metrics.MemTotal>>20, metrics.MemUsed>>20, metrics.MemAvailable>>20,
+		metrics.MemTotal>>20, metrics.MemUsed>>20,
+		available,
 		metrics.DiskUsed>>20, metrics.DiskTotal>>20)
 }
 

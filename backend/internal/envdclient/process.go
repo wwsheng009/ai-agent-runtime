@@ -299,6 +299,11 @@ func (c *Client) Start(ctx context.Context, req StartRequest) (*StreamReader, er
 // This is the convenience path for the non-interactive case. It does not trim
 // output; the caller applies its own limit, because a tool layer's output cap is
 // a policy decision that belongs above this package.
+//
+// Retention is still bounded: a process may emit unbounded output, and letting
+// that turn into unbounded caller memory is a footgun rather than a policy
+// choice. Each stream keeps at most DefaultMaxBufferedOutput bytes; the rest is
+// discarded while the stream keeps draining, so the exit status stays correct.
 func (c *Client) Run(ctx context.Context, req StartRequest) (stdout, stderr []byte, exitCode int32, err error) {
 	stream, err := c.Start(ctx, req)
 	if err != nil {
@@ -318,12 +323,37 @@ func (c *Client) Run(ctx context.Context, req StartRequest) (stdout, stderr []by
 		}
 		switch event.Kind {
 		case EventData:
-			stdout = append(stdout, event.Stdout...)
-			stderr = append(stderr, event.Stderr...)
+			stdout = appendLimited(stdout, event.Stdout, DefaultMaxBufferedOutput)
+			stderr = appendLimited(stderr, event.Stderr, DefaultMaxBufferedOutput)
 		case EventEnd:
 			return stdout, stderr, event.End.ExitStatus(), nil
 		}
 	}
+}
+
+// DefaultMaxBufferedOutput caps the bytes Run retains per stream.
+//
+// It is deliberately far above any tool-layer output cap (the bridge shows
+// 400 KiB and refuses to view more than 1 MiB): this is a memory safety bound,
+// not a presentation choice.
+const DefaultMaxBufferedOutput = 8 << 20
+
+// appendLimited appends chunk without growing dst past limit.
+//
+// A non-positive limit means "no cap" so callers that really need everything can
+// still ask for it; Run itself always passes DefaultMaxBufferedOutput.
+func appendLimited(dst, chunk []byte, limit int) []byte {
+	if limit <= 0 {
+		return append(dst, chunk...)
+	}
+	if len(dst) >= limit {
+		return dst
+	}
+	remaining := limit - len(dst)
+	if len(chunk) > remaining {
+		chunk = chunk[:remaining]
+	}
+	return append(dst, chunk...)
 }
 
 // ProcessInfo is one entry from process.Process/List.

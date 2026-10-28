@@ -79,6 +79,11 @@ type Spec struct {
 	// TokenEnv method for the aicli-remote-tools bearer token; a field of that name
 	// would collide with it.
 	EnvDTokenEnv string
+
+	// CallTimeout is the envd bridge's per-call deadline as a Go duration string
+	// ("30m"). Empty keeps the bridge default. It is part of the spec because
+	// long migrations and backups are normal operations, not an edge case.
+	CallTimeout string
 }
 
 // ParseSpec parses the compact remote target syntax.
@@ -91,6 +96,9 @@ type Spec struct {
 // variable the bridge reads the access token from. An inline ?token= is refused:
 // a spec is pasted into shell history and issue reports, and a secret in either is
 // a leak.
+//
+// envd targets also accept ?call_timeout=<duration> (for example 30m) to override
+// the bridge's per-call deadline.
 //
 // The query keys mirror the fields of SSHConfig / RemoteConfig that are commonly
 // non-default; everything else keeps its documented default.
@@ -190,6 +198,7 @@ func ParseSpec(raw string) (*Spec, error) {
 				return nil, fmt.Errorf("remote spec %q carries an inline token; envd tokens must come from an environment variable (use ?token_env=NAME)", raw)
 			}
 			spec.EnvDTokenEnv = strings.TrimSpace(query.Get("token_env"))
+			spec.CallTimeout = strings.TrimSpace(query.Get("call_timeout"))
 		}
 	}
 	return spec, nil
@@ -284,6 +293,7 @@ func (s *Spec) Expand() (*Expanded, error) {
 			Port: s.Port,
 		}
 		target.Remote.Binary = s.Binary
+		target.Remote.CallTimeout = s.CallTimeout
 		// Empty falls back to the bridge's own default so the generated entry
 		// names the environment variable explicitly instead of relying on an
 		// implicit one.

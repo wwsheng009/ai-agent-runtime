@@ -291,14 +291,15 @@ func errorResult(format string, args ...any) callResult {
 
 func main() {
 	var (
-		addr      = flag.String("addr", "127.0.0.1:49983", "envd address as host:port")
-		user      = flag.String("user", "", "OS user envd executes as (sent as HTTP Basic user)")
-		workspace = flag.String("workspace", "", "workspace directory that bounds all paths")
-		tokenEnv  = flag.String("token-env", "AICLI_ENVD_TOKEN", "environment variable holding the envd access token, sent as X-Access-Token")
-		allowRoot = multiFlag{}
-		prof      = flag.String("profile", "readonly", "tool profile: readonly|standard|ops")
-		prefix    = flag.String("tool-prefix", "", "prefix applied to exposed tool names")
-		caFile    = flag.String("ca-file", "", "CA bundle for a TLS envd endpoint")
+		addr        = flag.String("addr", "127.0.0.1:49983", "envd address as host:port")
+		user        = flag.String("user", "", "OS user envd executes as (sent as HTTP Basic user)")
+		workspace   = flag.String("workspace", "", "workspace directory that bounds all paths")
+		tokenEnv    = flag.String("token-env", "AICLI_ENVD_TOKEN", "environment variable holding the envd access token, sent as X-Access-Token")
+		allowRoot   = multiFlag{}
+		prof        = flag.String("profile", "readonly", "tool profile: readonly|standard|ops")
+		prefix      = flag.String("tool-prefix", "", "prefix applied to exposed tool names")
+		caFile      = flag.String("ca-file", "", "CA bundle for a TLS envd endpoint")
+		callTimeout = flag.Duration("call-timeout", 10*time.Minute, "maximum duration of one tool call; streaming shell runs are bounded by it")
 	)
 	flag.Var(&allowRoot, "allow-root", "additional directory outside the workspace that may be accessed; repeatable")
 	flag.Parse()
@@ -321,6 +322,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "aicli-envd-bridge: --allow-root %q must be an absolute path\n", root)
 			os.Exit(2)
 		}
+	}
+	if *callTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "aicli-envd-bridge: --call-timeout must be a positive duration")
+		os.Exit(2)
 	}
 
 	cfg := envdclient.Config{Addr: *addr, User: *user}
@@ -353,7 +358,7 @@ func main() {
 		roots:     allowRoot,
 		prefix:    *prefix,
 		profile:   profile(strings.ToLower(strings.TrimSpace(*prof))),
-		timeout:   60 * time.Second,
+		timeout:   *callTimeout,
 	}
 
 	// A signal must not leave the target running a half-finished command, so the
@@ -528,8 +533,10 @@ func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage
 	_ = def
 
 	// Every call gets its own deadline so a wedged target cannot block the agent
-	// loop forever. Streaming shell runs are bounded by the same value on purpose:
-	// an unbounded call here would be indistinguishable from a hang.
+	// loop forever. The value is configurable (--call-timeout) because real
+	// operations such as migrations routinely outlive the old 60s default;
+	// streaming shell runs are bounded by it too, since an unbounded call is
+	// indistinguishable from a hang.
 	callCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 

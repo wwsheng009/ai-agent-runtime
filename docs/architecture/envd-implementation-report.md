@@ -331,6 +331,10 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **token 传递**：新增 `token_env` query 参数与 `remotetargets.DefaultEnvDTokenEnv` 常量；内联 `?token=` 被**明确拒绝**（实现只接受环境变量名）；token 以 `X-Access-Token` 头发送，envd 经 `/init` 安装访问令牌后即以该头为唯一凭证（2026-10-28 实测确认）。
 - **信号退出状态**：进程因信号终止时按 `128 + signum` 解析退出码，不再误报 0。
 - **workspace 必须为绝对路径**：envd 目标的 workspace 为相对路径时，`Expand` 阶段直接报错；bridge 启动时也做同样校验，默认 `.` 会 fail-closed。
+- **调用超时可配置**：bridge 新增 `--call-timeout`（默认 10m，取代硬编码 60s）；spec 支持 `?call_timeout=30m`，`remote.callTimeout` 透传并在 `Expand` 阶段校验，非法值 fail-closed。
+- **输出内存上限**：`envdclient.Run` 每流最多保留 8 MiB（`DefaultMaxBufferedOutput`），超出部分丢弃但继续消费流，避免远端大输出撑爆 bridge 进程。
+- **目标名/前缀**：`Spec.TargetName()` 覆盖 envd（取 `sanitize(host)`）；真实巡检暴露的 `remote_remote__*` 前缀已修复为 `remote_<host>__*`（提交 `4a9492f9`）。
+- **metrics 展示**：旧版 envd 缺失 `available` 字段时显示 `n/a`，不再误报 `0 MiB`。
 
 ### 8.3 保留的限制
 
@@ -340,6 +344,32 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **TLS / HTTP/2 未真机验证**（承接 §4.1）；
 - **写入硬上限 1 MiB**（承接 §4.3）；
 - **watch 事件结构未确认**（承接 §4.2）。
+
+---
+
+## 9. 真实部署与业务场景验证（2026-10-28）
+
+> 操作手册见 `docs/aicli/envd-selfhost-deploy.md`。本节只记录结果与证据。
+
+### 9.1 目标机部署
+
+- Ubuntu 24.04.2 LTS / 4 vCPU / 32 GiB；envd 0.2.11，由公开提交 `fcf15acb` 交叉编译（静态 ELF，sha256 `1688…fb67`）。
+- systemd 常驻 + `/init` 访问令牌（`/etc/envd/envd.env`，600 root）+ `ExecStartPost` 重启自动重装；令牌轮换 = 改 env 文件后重启。
+- iptables 仅放行回环与运维工作站（`/32`）：实测临时移除放行后客户端访问超时，恢复后 401/200 语义正确；回环始终 204。
+- live 集成测试 **6/6 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUserIsUnauthenticated）。
+- 离线回归：**59 PASS / 0 FAIL / 6 SKIP**（envdclient 18、remotetargets 30、bridge 10，含子用例）。
+
+### 9.2 aicli agent 真实巡检场景
+
+- 方式：`aicli chat --no-interactive --remote 'envd://n9e@<host>:49983/home/n9e?binary=<bridge>#ops'`，`--permission-mode bypass_permissions`，仅使用远端 envd 工具（未使用本地 shell/文件工具）。
+- 运行：275 s，`session_20261028074725_2JIY3hBU`，provider workbuddy / deepseek-v4.1-flash（reasoning=max），消耗 **1,019,489 tokens**。
+- 交付：远程报告 `/home/n9e/reports/n9e-inspection-20261028-0750.md`（14,049 字节），经 envd `view` 回读校验并通过 bridge 取回本地。
+- 关键发现：4 核负载 `3.02/3.34/3.08`；`n9e v2` 迁移 `Error 1091` + 6–8 s 慢 SQL + `17001` 被旧实例占用导致 panic；系统 `degraded`（`systemd-networkd-wait-online`）；`syslog` 4.74 GiB 且持续增长。
+- 暴露缺陷：工具前缀退化为 `remote_remote__*`；已修复并加回归测试（见 §8.2）。
+
+### 9.3 成本提示
+
+- 单次巡检约 102 万 tokens，主要来自 reasoning=max 与多轮命令编排。日常巡检建议：固定采集脚本 + 低 reasoning/预算门控，agent 仅做分析与写报告。
 
 ---
 

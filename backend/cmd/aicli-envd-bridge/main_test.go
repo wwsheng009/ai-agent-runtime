@@ -237,6 +237,9 @@ func TestMetricsThroughFakeEnvD(t *testing.T) {
 	if text := res.Content[0].Text; !strings.Contains(text, "cpus: 2") {
 		t.Fatalf("host_metrics output = %q, want the CPU count", text)
 	}
+	if text := res.Content[0].Text; !strings.Contains(text, "memory available: 512 MiB") {
+		t.Fatalf("host_metrics output = %q, want the reported available memory", text)
+	}
 }
 
 // fakeEnvDClient serves the two endpoints the bridge uses, so tool calls can be
