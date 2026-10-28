@@ -69,6 +69,9 @@ type buildResult struct {
 	registry  *toolkit.Registry
 	jobs      *JobManager
 	artifacts *ArtifactStore
+	// envd is set only by the envd backend; it holds the connection (and, from
+	// M2 on, the live pty sessions) that Close must release.
+	envd *envdBackend
 }
 
 // buildRegistry constructs the exposed tool registry for this configuration.

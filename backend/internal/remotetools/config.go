@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,6 +39,39 @@ const (
 	// ProfileCustom exposes exactly the configured tool allowlist.
 	ProfileCustom Profile = "custom"
 )
+
+// Backend selects where this server process executes its tools.
+//
+// local is the existing shape: the server runs on the machine whose files it
+// touches (launched over ssh, or a long-lived daemon), and the shared tool
+// cores act on the local filesystem directly. envd inverts the placement:
+// the server runs here and every operation crosses Connect-RPC to the envd
+// daemon on the target. envd performs no path checks and no command
+// filtering, so the backend enforces its own jail before each call.
+type Backend string
+
+const (
+	// BackendLocal executes against this machine's filesystem and processes.
+	BackendLocal Backend = "local"
+	// BackendEnvD executes against a remote envd daemon (see EnvDConfig).
+	BackendEnvD Backend = "envd"
+)
+
+// EnvDConfig addresses the envd daemon for BackendEnvD.
+type EnvDConfig struct {
+	// Addr is the envd endpoint: "host:port" or a URL with an explicit scheme.
+	Addr string `yaml:"addr,omitempty" json:"addr,omitempty"`
+	// User is the OS user envd executes as; envd reads it from HTTP Basic
+	// credentials and rejects a request without one.
+	User string `yaml:"user,omitempty" json:"user,omitempty"`
+	// TokenEnv names the local environment variable holding the access token
+	// sent as X-Access-Token. The token itself never travels in a config file.
+	TokenEnv string `yaml:"tokenEnv,omitempty" json:"tokenEnv,omitempty"`
+	// CAFile verifies a TLS envd endpoint.
+	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
+	// CallTimeout bounds one tool call. Zero uses envdDefaultCallTimeout.
+	CallTimeout Duration `yaml:"callTimeout,omitempty" json:"callTimeout,omitempty"`
+}
 
 // Limits bounds one remote invocation so a single call cannot exhaust the
 // target machine or the model context.
@@ -172,6 +206,10 @@ type AuditConfig struct {
 	CommandPreviewBytes int `yaml:"commandPreviewBytes" json:"commandPreviewBytes"`
 }
 
+// envdDefaultCallTimeout bounds one envd tool call when no explicit timeout is
+// configured. It matches the bridge default it replaces.
+const envdDefaultCallTimeout = 10 * time.Minute
+
 // JobsConfig describes the background job store.
 //
 // Root is required to enable the job_* tools: a job record and its output must
@@ -226,6 +264,10 @@ type Config struct {
 	// Transport is the serving transport ("stdio" or "http"), stamped into audit
 	// records. It is set by the entrypoint, not by the config file.
 	Transport string `yaml:"-" json:"-"`
+	// Backend selects where tools execute. Empty means local.
+	Backend Backend `yaml:"backend,omitempty" json:"backend,omitempty"`
+	// EnvD addresses the envd daemon when Backend is envd.
+	EnvD EnvDConfig `yaml:"envd,omitempty" json:"envd,omitempty"`
 
 	Limits Limits      `yaml:"limits" json:"limits"`
 	Shell  ShellConfig `yaml:"shell" json:"shell"`
@@ -314,44 +356,59 @@ func (c *Config) Normalize() error {
 	default:
 		return fmt.Errorf("unknown profile %q (want readonly|standard|ops|custom)", c.Profile)
 	}
+	c.Backend = Backend(strings.ToLower(strings.TrimSpace(string(c.Backend))))
+	if c.Backend == "" {
+		c.Backend = BackendLocal
+	}
+	switch c.Backend {
+	case BackendLocal, BackendEnvD:
+	default:
+		return fmt.Errorf("unknown backend %q (want local|envd)", c.Backend)
+	}
 
 	workspace := strings.TrimSpace(c.Workspace)
 	if workspace == "" {
 		return fmt.Errorf("workspace is required")
 	}
-	absWorkspace, err := filepath.Abs(workspace)
-	if err != nil {
-		return fmt.Errorf("resolve workspace %q: %w", workspace, err)
-	}
-	c.Workspace = filepath.Clean(absWorkspace)
-	if info, statErr := os.Stat(c.Workspace); statErr != nil {
-		return fmt.Errorf("workspace %q is not accessible: %w", c.Workspace, statErr)
-	} else if !info.IsDir() {
-		return fmt.Errorf("workspace %q is not a directory", c.Workspace)
-	}
+	if c.Backend == BackendEnvD {
+		if err := c.normalizeEnvD(workspace); err != nil {
+			return err
+		}
+	} else {
+		absWorkspace, err := filepath.Abs(workspace)
+		if err != nil {
+			return fmt.Errorf("resolve workspace %q: %w", workspace, err)
+		}
+		c.Workspace = filepath.Clean(absWorkspace)
+		if info, statErr := os.Stat(c.Workspace); statErr != nil {
+			return fmt.Errorf("workspace %q is not accessible: %w", c.Workspace, statErr)
+		} else if !info.IsDir() {
+			return fmt.Errorf("workspace %q is not a directory", c.Workspace)
+		}
 
-	// The workspace is always an admitted root; every other root must be
-	// absolute so a relative entry cannot silently follow the process CWD.
-	roots := make([]string, 0, len(c.AllowedRoots)+1)
-	seen := map[string]bool{c.Workspace: true}
-	roots = append(roots, c.Workspace)
-	for _, root := range c.AllowedRoots {
-		trimmed := strings.TrimSpace(root)
-		if trimmed == "" {
-			continue
+		// The workspace is always an admitted root; every other root must be
+		// absolute so a relative entry cannot silently follow the process CWD.
+		roots := make([]string, 0, len(c.AllowedRoots)+1)
+		seen := map[string]bool{c.Workspace: true}
+		roots = append(roots, c.Workspace)
+		for _, root := range c.AllowedRoots {
+			trimmed := strings.TrimSpace(root)
+			if trimmed == "" {
+				continue
+			}
+			abs, absErr := filepath.Abs(trimmed)
+			if absErr != nil {
+				return fmt.Errorf("resolve allowed root %q: %w", trimmed, absErr)
+			}
+			abs = filepath.Clean(abs)
+			if seen[abs] {
+				continue
+			}
+			seen[abs] = true
+			roots = append(roots, abs)
 		}
-		abs, absErr := filepath.Abs(trimmed)
-		if absErr != nil {
-			return fmt.Errorf("resolve allowed root %q: %w", trimmed, absErr)
-		}
-		abs = filepath.Clean(abs)
-		if seen[abs] {
-			continue
-		}
-		seen[abs] = true
-		roots = append(roots, abs)
+		c.AllowedRoots = roots
 	}
-	c.AllowedRoots = roots
 
 	c.ToolPrefix = strings.TrimSpace(c.ToolPrefix)
 	if c.ToolPrefix != "" && !isPortableToolPrefix(c.ToolPrefix) {
@@ -449,6 +506,58 @@ func (c *Config) Normalize() error {
 	if c.HTTP.AccessLogMaxBackups < 0 {
 		return fmt.Errorf("http.accessLogMaxBackups must not be negative")
 	}
+	return nil
+}
+
+// normalizeEnvD validates the envd backend's own invariants.
+//
+// Two things differ from the local backend and both are load-bearing:
+//
+//  1. The workspace lives on the TARGET, so it must never be resolved through
+//     the host filesystem: filepath.Abs/Clean on a Windows host would rewrite
+//     "/srv/app" into a drive-prefixed backslash path that envd cannot read.
+//     Only slash-based path operations are used here.
+//  2. A relative workspace bounds nothing (envd checks no paths of its own), so
+//     it is refused during normalization rather than at the first tool call.
+func (c *Config) normalizeEnvD(workspace string) error {
+	if !path.IsAbs(workspace) {
+		return fmt.Errorf("envd workspace %q must be an absolute POSIX path (envd performs no path checks, so a relative workspace cannot bound anything)", workspace)
+	}
+	c.Workspace = path.Clean(workspace)
+	addr := strings.TrimSpace(c.EnvD.Addr)
+	if addr == "" {
+		return fmt.Errorf("backend envd requires envd.addr (--addr)")
+	}
+	user := strings.TrimSpace(c.EnvD.User)
+	if user == "" {
+		return fmt.Errorf("backend envd requires envd.user (--user): envd takes the executing user from HTTP Basic credentials")
+	}
+	c.EnvD.Addr = addr
+	c.EnvD.User = user
+	// envd is reached from this machine; the daemon transport belongs to the
+	// target-side server and cannot serve an envd backend.
+	if strings.EqualFold(strings.TrimSpace(c.Transport), "http") {
+		return fmt.Errorf("backend envd supports only the stdio transport")
+	}
+	roots := make([]string, 0, len(c.AllowedRoots)+1)
+	seen := map[string]bool{c.Workspace: true}
+	roots = append(roots, c.Workspace)
+	for _, root := range c.AllowedRoots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		if !path.IsAbs(trimmed) {
+			return fmt.Errorf("envd allowed root %q must be an absolute POSIX path", trimmed)
+		}
+		cleaned := path.Clean(trimmed)
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		roots = append(roots, cleaned)
+	}
+	c.AllowedRoots = roots
 	return nil
 }
 

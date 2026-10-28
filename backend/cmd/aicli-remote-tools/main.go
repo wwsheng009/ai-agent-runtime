@@ -95,6 +95,18 @@ HTTP options:
   --http-access-log <file>  NDJSON request log (includes 401s; no Authorization header)
   --tls-cert <file> --tls-key <file>
 
+envd backend options (serve --stdio --backend envd):
+  --addr <host:port|url>    envd endpoint (required)
+  --user <name>             OS user envd executes as (required; envd reads it from HTTP Basic credentials)
+  --token-env <name>        Env var holding the X-Access-Token value
+  --ca-file <pem>           CA bundle verifying a TLS envd endpoint (switches a bare host:port to https://)
+  --call-timeout <dur>      Per-call deadline (default 10m)
+
+The envd backend runs on THIS machine and reaches the target over Connect-RPC:
+--workspace is a path on the target (absolute POSIX), the jail is enforced
+against paths canonicalized on the target, and only the stdio transport is
+available. envd performs no path or command checks of its own.
+
 Examples:
   # SSH stdio (local side: ssh-client --stdio ...)
   aicli-remote-tools serve --stdio --workspace /srv/app --tool-prefix remote_dev
@@ -102,6 +114,10 @@ Examples:
   # HTTP daemon bound to loopback, reached through an SSH local forward
   AICLI_REMOTE_TOKEN=$(openssl rand -hex 32) \
     aicli-remote-tools serve --http --workspace /srv/app --tool-prefix remote_dev
+
+  # envd target (no server binary on the target; envd runs there)
+  aicli-remote-tools serve --stdio --backend envd \
+    --addr 10.0.0.9:49983 --user dev --workspace /srv/app --tool-prefix remote_dev
 `, version)
 }
 
@@ -126,6 +142,13 @@ type serveFlags struct {
 	artifactMax   int
 	allowPatterns string
 	denyPatterns  string
+
+	backend      string
+	envdAddr     string
+	envdUser     string
+	envdTokenEnv string
+	envdCAFile   string
+	envdTimeout  string
 
 	stdio     bool
 	http      bool
@@ -161,6 +184,13 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.IntVar(&flags.artifactMax, "artifacts-max-bytes", 0, "per-artifact size limit")
 	fs.StringVar(&flags.allowPatterns, "allowed-command-patterns", "", "comma-separated whole-command wildcard allowlist (* and ?)")
 	fs.StringVar(&flags.denyPatterns, "denied-command-patterns", "", "comma-separated whole-command wildcard denylist (* and ?)")
+
+	fs.StringVar(&flags.backend, "backend", "", "execution backend: local (default) | envd (reach a remote envd daemon over Connect-RPC)")
+	fs.StringVar(&flags.envdAddr, "addr", "", "envd endpoint: host:port or URL (backend envd)")
+	fs.StringVar(&flags.envdUser, "user", "", "OS user envd executes as (backend envd; envd reads it from HTTP Basic credentials)")
+	fs.StringVar(&flags.envdTokenEnv, "token-env", "", "env var holding the envd access token (backend envd)")
+	fs.StringVar(&flags.envdCAFile, "ca-file", "", "PEM CA bundle verifying a TLS envd endpoint (backend envd)")
+	fs.StringVar(&flags.envdTimeout, "call-timeout", "", "per-call deadline as a Go duration, e.g. 30m (backend envd; default 10m)")
 
 	fs.BoolVar(&flags.stdio, "stdio", false, "serve MCP over stdin/stdout")
 	fs.BoolVar(&flags.http, "http", false, "serve MCP over Streamable HTTP")
@@ -262,6 +292,28 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.accessLog != "" {
 		cfg.HTTP.AccessLog = flags.accessLog
+	}
+	if raw := strings.TrimSpace(flags.backend); raw != "" {
+		cfg.Backend = remotetools.Backend(strings.ToLower(raw))
+	}
+	if flags.envdAddr != "" {
+		cfg.EnvD.Addr = strings.TrimSpace(flags.envdAddr)
+	}
+	if flags.envdUser != "" {
+		cfg.EnvD.User = strings.TrimSpace(flags.envdUser)
+	}
+	if flags.envdTokenEnv != "" {
+		cfg.EnvD.TokenEnv = strings.TrimSpace(flags.envdTokenEnv)
+	}
+	if flags.envdCAFile != "" {
+		cfg.EnvD.CAFile = strings.TrimSpace(flags.envdCAFile)
+	}
+	if raw := strings.TrimSpace(flags.envdTimeout); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("invalid --call-timeout %q (want a positive Go duration such as 30m)", raw)
+		}
+		cfg.EnvD.CallTimeout = remotetools.Duration{Duration: parsed}
 	}
 	return cfg, nil
 }

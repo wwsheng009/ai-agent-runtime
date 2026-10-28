@@ -49,6 +49,8 @@ type Server struct {
 	// slots bounds concurrent MCP requests in HTTP mode. A streaming tool call
 	// holds its slot until the response completes.
 	slots chan struct{}
+	// envd is the envd execution backend; nil for the local backend.
+	envd *envdBackend
 }
 
 // NewServer builds the service and validates the tool surface invariants.
@@ -60,11 +62,32 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 	if err := cfg.Normalize(); err != nil {
 		return nil, err
 	}
-	workspace, err := NewWorkspace(cfg.Workspace, cfg.AllowedRoots)
-	if err != nil {
-		return nil, err
+	// The two backends share everything downstream of this point — registry
+	// shape, prefix rewriting, the audit wrapper, the roots decorator — and
+	// differ only in where files and processes actually live.
+	var (
+		workspace *Workspace
+		built     *buildResult
+		err       error
+	)
+	switch cfg.Backend {
+	case BackendEnvD:
+		// The workspace is on the TARGET: describe it without probing the local
+		// filesystem (NewWorkspace would stat this machine, not the target), and
+		// let the backend enforce its own target-side jail.
+		workspace = &Workspace{
+			root:         cfg.Workspace,
+			allowedRoots: cfg.EffectiveAllowedRoots(),
+			platform:     currentPlatform(),
+		}
+		built, err = buildEnvDRegistry(cfg, workspace)
+	default:
+		workspace, err = NewWorkspace(cfg.Workspace, cfg.AllowedRoots)
+		if err != nil {
+			return nil, err
+		}
+		built, err = buildRegistry(cfg, workspace)
 	}
-	built, err := buildRegistry(cfg, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +134,7 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 		token:     token,
 		principal: principal,
 		slots:     slots,
+		envd:      built.envd,
 	}, nil
 }
 
