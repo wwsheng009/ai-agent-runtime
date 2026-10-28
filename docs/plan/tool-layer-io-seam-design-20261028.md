@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**待评审（v3）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）与一个无关配置缺陷（`--max-bytes-per-call` 对读工具无效）
+- 状态：**部分已落地（v4）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；**v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）**。剩余项见 §13 末尾两条。
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -408,17 +408,17 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 6. **新增：多区间会返回 `multipart/byteranges`（实测 368B）**——客户端**只发单区间**，不要自己解 multipart。
 7. **新增：416 （越尾）必须映射为核侧的可诊断错误**，不能当 5xx 抛（实测 `content-range: bytes */3814`）。
 
-**验收**：R0 与本地 `viewcore` 逐字节对拍（§7.2），样本集从 9 类缩至：二进制/NUL / 超长行 / 空文件 / 目录(400) / 不存在(404) / 越尾(416) / jail 内越权文件（§3.5 闸门用例）七类——**行数少了，但安例反而多了一个安全项**。
+**验收**：R0 与本地 `viewcore` 逐字节对拍（§7.2），样本集从 9 类缩至：二进制/NUL / 超长行 / 空文件 / 目录(400) / 不存在(404) / 越尾(416) / jail 内越权文件（§3.5 闸门用例）七类——**条数少了，但反而多了一个安全项**。
 
-### 5.3 `grep`：最接近"免费"的真增量
+### 5.3 `grep`：最接近"免费"的真增量（**已落地 `29d6e334`**）
 
-1. **逐块消费**（传输增量）：把 `envdGrep` 从 `client.Run` 改为 `client.Start` + `Recv`，按块累积、达到上限即停。**改动很小，收益确定**。
-2. **上限早停**（计算增量）：
-   - `rg -m/--max-count`（每文件上限）与核的"总命中上限"语义**不等价**——不能直接换写，需在核里保留总上限判定，远端只做粗限；
-   - 管道 `| head -n N` 触发 SIGPIPE 使 `rg` 早退（**今天已隐式在用**），但退出码变成 SIGPIPE 语义，需在结果里区分"截断"与"无更多匹配"——核已有 `OutputShaper`/截断标注，属同一族；
-   - 精确终止：记住 `Start` 返回的 pid，达上限后 `SendSignal`（`process.go:417-420`，实测路由存在）。
-3. **结构化流**：`rg --json` 可边到边解析行号/列/文本，与 `searchcore` 的结果模型对齐度高于解析纯文本；⚠️ 但目标机 `rg` 版本不可控（`envd-capabilities.md` 已记录版本探测待做），必须**能力探测 + 回落**，且引擎归属仍要对外公布（`BackendReporter`，`envd_tools.go:227-229` 的既有动机）。
-4. **参数面缺口**（§8.9 登记项）：`glob`/`type`/`-i`/多 `patterns` 在远端方言下的映射仍未补齐。这些是**语义补齐**，与增量正交，但两者都落在同一段代码上——建议合并到 Phase 2.5b 一起消除（§6）。
+1. **逐块消费**（传输增量）：✅ 已实现——`envdGrep` 从 `client.Run` 改为 `client.Start` + `Recv`（`envd_backend.go` 的 `runCapped`），按帧累积、达上限即停。
+   ⚠️ 一个只有真机才暴露的细节：停止读取**不等于**遵守上限。输出以帧到达，单帧可以远超上限，首版因此返回了 4210 字节（cap=512）；必须在返回前把缓冲剪到 `capBytes`。
+2. **上限早停**（计算增量）：✅ 已实现，但**用的是取消 ctx + 关闭流**而不是下面设想的两种做法——`process.go` 对 `Start` 的文档写明"cancel ctx 是受支持的停止方式，envd 在流客户端消失时回收子进程"，比另发一次 `SendSignal` 少一个往返。真机验证早停确实发生（桩侧把后续写失败记为 `streamCut`）。
+   - `rg -m/--max-count`（每文件上限）与核的"总命中上限"语义**不等价**，因此没有采用——保留核侧的字节/命中预算作为唯一上限来源；
+   - **更正一处旧断言**：本文 v1 与对话早期我说过"`| head -n N` 触发 SIGPIPE 使 `rg` 早退，今天已隐式在用"。核对代码后这是**错的**：envd 的 grep 脚本里没有任何管道，那是我从假设当成了事实。截断语义现在由 `runCapped` 明确产出（`is_truncated` + 一行说明），不依赖 SIGPIPE 的退出码歧义。
+3. **结构化流**（未做）：`rg --json` 可边到边解析行号/列/文本，与 `searchcore` 结果模型对齐度高于解析纯文本；⚠️ 但目标机 `rg` 版本不可控（`envd-capabilities.md` 已记录版本探测待做），必须**能力探测 + 回落**，且引擎归属仍要对外公布。本轮已把引擎标记 `__TOOL__=` **移到输出的首行**：截断发生在流中间时，尾部标记会连同它描述的那段结果一起丢失，而 rg 与 `grep -rnI` 的 pattern 方言不同——引擎归属必须在截断后仍然可知；标记缺失时如实报 `unknown`，不猜。
+4. **参数面缺口**（§8.9 登记项，未做）：`glob`/`type`/`-i`/多 `patterns` 在远端方言下的映射仍未补齐。这些是**语义补齐**，与增量正交，但两者落在同一段代码上——建议合并到 Phase 2.5b 一起消除（§6）。
 
 ### 5.4 `/files` 路线（**U1 已解决**：2026-10-28 C-1 spike，源码 + 真机双向确证）
 
@@ -587,7 +587,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 | ~~N0b~~ | ✅ **已完成**（`a8ec5aaf`）：可读性闸门——`test -r "$1"` 由目标内核回答，仅对非 world-readable 探测 | — | 核侧 `refuseIfTargetCannotRead`（`envd_backend.go`） | `Access` 前置闸门，**不下沉**（纪律 4） |
 | ~~N0~~ | ✅ **已完成**（`a8ec5aaf`）：`view` 走 `GET /files` 单区间 `Range` | — | `envdclient/files.go` + `readLimited` | 可直接作为 `envdAccess.Read/RandomRead` 的实现体 |
 | N1 | ~~`view` 远端窗口（`sed`/`dd` 造窗）~~ | — | — | **作废**：降为 R0 不可用时的回落，不单独立项 |
-| N2 | `grep` 流式消费 + 上限早停（`Run`→`Start`+`Recv`，达上限 `SendSignal`） | 0.5 天 | `envdGrep`（`envd_tools.go:227+`） | 迁入 `envdAccess` 的 `ExecStreamer` |
+| ~~N2~~ | ✅ **已完成**（`29d6e334`）：`grep` 流式消费 + 上限早停 | — | `envd_backend.go` `runCapped` + `envdGrep` | `envdAccess` 的 `ExecStreamer` 形状 |
 | ~~N3~~ | `/files` 签名调研 | — | — | **已完成**（本轮 C-1，结论见 §5.4） |
 
 执行顺序：~~N0b → N0~~（**均已完成，见 §13**）→ **N2（`grep` 流式 + 早停，下一个）** → 写侧 `POST /files`（必须与 `missing_parent` 前置检查同批）。各项独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。本轮已验证：`readLimited`/`refuseIfTargetCannotRead` 就是 `envdAccess.Read` + 闸门的形状。
@@ -613,7 +613,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 ---
 
-## 13. 落地记录（2026-10-28 本轮：`a8ec5aaf`）
+## 13. 落地记录（2026-10-28：`a8ec5aaf` + `552bf850` + `29d6e334`）
 
 **交付**：`envdclient/files.go`（`/files` 通道 + 探测 + `FilesError` 分类）、`envdView` 改为“jail → Stat → 尺寸/目录门 → 可读性闸门 → readLimited（优先 `/files`，不可用则 `/bin/cat`）”、`--no-envd-files` kill switch、`scripts/envd_live_verify.go` 真机差分驱动。
 
@@ -634,11 +634,32 @@ PASS channel parity: 213 bytes identical through /files and through /bin/cat
 ALL CHECKS PASSED
 ```
 
-第三条把 `/etc` 临时参加 `--allowed-roots`，**目的是绕过 jail 单独测闸门**：证明“守护进程能读而目标用户不能读”的文件会被拒且从未取用。13 个工具与 §3.4 档位表一致（standard 档未因本改动变化）。
+第三条把 `/etc` 临时加入 `--allowed-roots`，**目的是绕过 jail 单独测闸门**：证明“守护进程能读而目标用户不能读”的文件会被拒且从未取用。13 个工具与 §3.4 档位表一致（standard 档未因本改动变化）。
 
-**本轮发现的一个无关缺陷（待你定是否修）**：`--max-bytes-per-call N` 对读工具**静默无效**。`main.go:286` 只写 `Limits.MaxBytesPerCall`，而 `DefaultConfig`（`config.go:300`）已将 `CaptureLimit` 填为非零，于是 `config.go:450` 的 `if CaptureLimit <= 0` 永不触发，而 `envdBackend.viewLimit()` 优先读 `CaptureLimit`。证据：本提交的尺寸门测试必须显式设 `CaptureLimit` 才生效（已在测试注释里记下这个坑）。建议修法：显式传入该 flag 时同时覆盖 `CaptureLimit`（或在 normalize 里区分“用户显式设置”与“默认值”）——因为它改的是一个已文档化 flag 的含义，且不局限于 envd 分支，所以没放进本提交。该缺陷影响 ssh/http 后端的 `Limits` 解读，**不属于 seam 范围，但会误导任何调尺寸的人**。
+**第二轮：grep 流式与上限（`29d6e334` + `552bf850`）的同一驱动输出**：
 
-**仍未关掉 §8.9 的那个缺口**：envd 的 `view` 仍无 `offset`/`limit` 行窗口（描述里还自认“no line windowing on this surface”）。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”，成本明显变小；写侧 `POST /files`（破 1 MiB argv）与 `edit`/`apply_patch` 的读仍走 `cat`，应与 `missing_parent` 前置检查同批做。
+```
+PASS capped grep: engine reported and truncation disclosed (612 bytes returned under the 512 cap)
+```
+
+这一行本身带出一个只有真机才能发现的缺陷：首版只做到“累计 ≥ 上限就停止读取”，
+而 envd 的输出来自**帧**，单帧可以远超上限，于是 cap=512 时实际返回了 **4210 字节**。
+“被末帧超出的捕获上限”不是上限——修正为返回前把缓冲剪到 `capBytes`（stderr 同样收口）。
+该防线经过**反向验证**：临时撤掉剪枝那行，测试确实变红（573 > 512）；不依赖时序的
+socket 早停仅作日志证据，不作断言。
+
+**曾发现的一处配置缺陷（历史记录，已由 `552bf850` 修）**：`--max-bytes-per-call N` 对读工具**静默无效**。`main.go:286` 只写 `Limits.MaxBytesPerCall`，而 `DefaultConfig`（`config.go:300`）已将 `CaptureLimit` 填为非零，于是 `config.go:450` 的 `if CaptureLimit <= 0` 永不触发，而 `envdBackend.viewLimit()` 优先读 `CaptureLimit`。证据：本提交的尺寸门测试必须显式设 `CaptureLimit` 才生效（已在测试注释里记下这个坑）。建议修法：显式传入该 flag 时同时覆盖 `CaptureLimit`（或在 normalize 里区分“用户显式设置”与“默认值”）——因为它改的是一个已文档化 flag 的含义，且不局限于 envd 分支，所以没放进本提交。该缺陷影响 ssh/http 后端的 `Limits` 解读，**不属于 seam 范围，但会误导任何调尺寸的人**。
+
+**与描述不符的一处实现选择**：N2 原写“达上限 `SendSignal`”，实现用的是**取消 ctx + 关闭流**。原因：`process.go` 对 `Start` 的文档就是“cancel ctx 是受支持的停止方式，envd 在流客户端消失时回收子进程”——这比“再发一个 unary RPC”少一次往返，不会变成“我们已经读够了，还要另发一道命令告诉对面停下”。`SendSignal` 仍然可用于未来需要区分“用户主动结束”与“读够了”的场景。
+
+**上一轮记录的配置缺陷：已修（`552bf850`）**。修法不是“flag 到来时联动覆盖 `CaptureLimit`”，而是把 `DefaultConfig` 里预填的 `CaptureLimit` 改回 0，让 `Normalize` 里本来就写好的“未设则从 `MaxBytesPerCall` 派生”分支能够触发——因为错的是“未设”被默认值伪装成“已设”，而不是优先级本身。所有读取点本来就有 `if CaptureLimit > 0` 的兑底，所以未调 `Normalize` 的构造路径行为不变。
+
+⚠️ **这是一个对外可见的行为变更**：过去把 `limits.maxBytesPerCall` 设得比默认值小的部署（包括 aicli 从 target `Limits` 块展开出的 `--max-bytes-per-call`），读工具**现在真的会按那个值收紧**。这正是该设置本来的含义，但发版说明应当点一句。
+
+**仍未关掉 §8.9 的缺口**（两项，彼此独立）：
+
+1. envd 的 `view` 仍无 `offset`/`limit` 行窗口（描述里还自认“no line windowing on this surface”）。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”。
+2. 写侧：`POST /files` 可破 1 MiB argv 上限，但 `upload.go:59` 的 `EnsureDirs` 会自动建父目录，**必须与 `missing_parent` 前置检查同批做**（否则 `36caf76f` 的语义会被通道差消灭）；`edit`/`apply_patch` 的读仍走 `cat`，属于同一批。
 
 ---
 
