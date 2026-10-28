@@ -503,7 +503,7 @@ backend/internal/cacheanalytics/*
 - [x] 剩余预算不足时不盲目重试，事件明确记录跳过原因；（单测：`retry_skipped_deadline_budget` / TestSubagentRetryBudgetAvailable|BudgetMS；`retry_skipped` 字段贯通终态事件与 hook）
 - [x] `max_attempts=2` 的报表能区分“上限为 2”和“实际执行 2 次”；（`subagent.attempt.started/finished` 成对事件 + usage_subagents 的 attempt/max_attempts 收敛）
 - [x] batch timeout、task timeout、provider timeout 的 `cancel_source` 可区分；（provider 档 E2E：TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout；task/batch/parent 档单测：TestSubagentCancelSource）
-- [x] provider response-header guard 不会静默吞掉 task deadline 之前的 retry budget。（`4fa3ddc5`：真实 provider + 挂起上游两档 E2E——① guard 快速失败后 attempt 2 仍在 0.34s 内执行并成功（`retryable=true`、`retry_skipped` 空、`cancel_source` 空、`remaining_ms` 仍 >10s，远小于 30s 任务 deadline）；② 上游持续挂起时显式 `max_attempts_reached` 收口、不误报 `task_timeout`；provider 侧机制由 llm 包 streak/transport-budget 用例固定。连接清理观察见 §13.5）
+- [x] provider response-header guard 不会静默吞掉 task deadline 之前的 retry budget。（`4fa3ddc5`：真实 provider + 挂起上游两档 E2E——① guard 快速失败后 attempt 2 仍在 0.34s 内执行并成功（`retryable=true`、`retry_skipped` 空、`cancel_source` 空、`remaining_ms` 仍 >10s，远小于 30s 任务 deadline）；② 上游持续挂起时显式 `max_attempts_reached` 收口、不误报 `task_timeout`；provider 侧机制由 llm 包 streak/transport-budget 用例固定。连接清理观察见 §13.5，`70710169` 三档探针已复核为断开）
 
 ### 8.2 Usage/partial output
 
@@ -610,9 +610,16 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `859651b9` | batch 路径 fork 窗口 `fork_messages`（§8.3 direct/batch 语义一致） | §8.3 |
 | `2c2f3104` | §8.4 cache 专项：重试前缀复用 + 并发 child key 隔离 | §8.4 |
 | `0bebe723` | task/batch deadline 档 E2E 注入与取消归因 | §8.1 / §6.1-3 |
+| `3bf797d6` | 2026-10-28 跨包扫尾回归证据记录（§13.3） | 文档 |
 | `8c152f4d` | resume cache lineage 窄读法：标签接线 + 三宿主打标 + 分析字段 | §8.4 / §13.6 |
+| `cca461ae` | resume cache lineage 窄读法口径与 §8.4 收口（§13.6） | 文档 |
 | `4fa3ddc5` | provider header-guard 专项：任务级重试预算保留 + 显式收口两档 E2E | §8.1 |
+| `9c2b769c` | §8.1 header-guard 专项收口（§8 全部勾选） | 文档 |
 | `00061925` | TaskSpec 定义面字段完整往返（§13.5 观察收口） | §13.5 |
+| `d855e085` | §13.7 §6.1-5 首轮数据依据 + TaskSpec 往返收口记录 | 文档 |
+| `d96486a4` | 状态语义失败分类：控制面停止不再落 `unknown`（归因 cancelled/timeout 兜底） | §6.2 / §13.7 |
+| `cefc641a` | fork 可缓存前缀对照实验：同快照/同 route 下工具面不同即前缀身份不同；`fork_snapshot_hash` 只描述父快照 | §6.4 / §8.4 |
+| `70710169` | provider header-guard 超时连接拆除三档探针（h1 流式/非流式 + h2） | §13.5 |
 
 ### 13.2 逐条对照（§6）
 
@@ -641,13 +648,16 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - resume 标签窄读法（`8c152f4d`）：`TestRunWithSessionCarriesCacheLineageResume`（带标记/未标记/未知值三档接线）、`TestCollectorCarriesCacheLineageMode`（started → 记录 additive 字段）、`TestStampResumeCacheLineageInSession`（有历史打标并回写 / 空会话 / 读失败 / 写失败四档）、`TestRestoreChatPersistenceState_...`（CLI 打标 + 空会话负例）；回归：agent 25.863s / cacheanalytics 2.273s / runtimeapi 94.609s / commands resume 子集 7.214s。
 - header-guard 专项（`4fa3ddc5`，agent 全包 27.635s）：`TestHeaderGuardFailureKeepsTaskRetryBudget`（真实 provider + 挂起上游：attempt 1 guard 失败 → attempt 2 在 0.34s 内成功，预算保留四断言全过）、`TestHeaderGuardExhaustionIsExplicitNotSilent`（持续挂起 → 显式 `max_attempts_reached`、不误报 `task_timeout`，0.49s）。
 - TaskSpec 定义面往返（`00061925`，agent 23.482s / subagentbatch 2.098s）：`TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields`（8 个新字段在序列化字节面可见 + 逐项还原 + 别名安全）；既有 fork/旧 spec 兼容用例保持通过。
+- 失败分类口径（`d96486a4`，usageanalytics 全包 4.766s）：`TestNormalizeSubagentCompletionPayloadStatusCategory`（写侧八档：`error_code` 映射仅非 `unknown` 才采用，`stopped/interrupted/canceled/cancelled` → `cancelled`、`timeout/timed_out` → `timeout`，其余保持 `unknown` 不猜测）+ `TestNormalizeSubagentCompletionStatusCategory`（读侧三档同规则）。
+- fork 前缀对照（`cefc641a`，agent 全包 25.244s）：`TestForkChildPrefixIdentityControls`——c1/c2 同构 fork child 首请求 messages/tools/provider/model 逐项一致（可缓存前缀只是前提，实验读工具面差异）；c3 仅工具面不同 → 前缀身份不同；c4 fresh 不含父历史；四者 `prompt_cache_key` 互异且同批共同携带父 epoch key。
+- header-guard 连接拆除复核（`70710169`，llm 全包 25.168s）：`TestProviderHeaderGuardTimeoutDisconnectsHungUpUpstream`（h1 非流式/流式：裸 TCP 监听器直接观察到客户端断开，且仅在 guard 触发后发生）+ `TestProviderHeaderGuardDisconnectAppliesToHTTP2`（h2：guard 超时 → RST_STREAM → 服务端 request context 取消）；三档合计 0.21s，3s 观察窗未触及。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板——**首轮数据依据已产出（§13.7）**：建议本轮维持"最多 N 次"，并把"≥20 条调度器+只读+瞬时失败样本后复算 `retry_skipped` 分布"设为升级语义的前置观测门槛。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
 3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
-4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）。
+4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）；连接拆除复核见 §13.5（`70710169`，泄漏已证伪）。
 5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
 
@@ -656,7 +666,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
 - 已修（`00061925`）：`subagentbatch.TaskSpec` 定义面字段完整往返——新增 `agent_type/max_turns/write_paths/read_only_source/read_only_filtered_tools/report_schema/report_schema_granted/handoff_in`（`HandoffSpec` 镜像五键，避免 import 环）；幂等 admission replay 不再把约束静默放宽（agentdef 收窄、步数上限、写者并集）或让契约缺失。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
-- 观察（待 provider 层复核，`4fa3ddc5` 附带证据）：header-guard 超时后，测试装置侧 `httptest.Server.Close` 曾等待 ≥1 分钟仍未结束——服务端 2 条 TCP 连接保持 active，且其 request context 未被取消（首次诊断时 handler 阻塞在 `<-r.Context().Done()` 直至 test 超时，goroutine dump 已留档于该次运行输出）。请 llm 包侧复核：guard 超时时客户端 transport 是否按预期断开/归还连接（涉及 `ResponseHeaderTimeout` 触发路径与 HTTP/2 变体）。测试装置已改用有界睡眠规避该不确定性，不影响 §8.1 结论。
+- 已复核（`70710169`，2026-10-28）：header-guard 超时后连接/流是否拆除——**三档探针全部通过，"半开连接泄漏"疑点证伪**——① HTTP/1.1 非流式 0.11s、② HTTP/1.1 流式 0.10s（裸 TCP 监听器直接观察到客户端断开：`io.Copy` 以 EOF 终结）；③ HTTP/2 0.10s（`doRequest` + `EnableHTTP2` TLS 服务器：guard 超时 → 客户端 RST_STREAM → 服务端 request context 取消）。此前 `httptest.Server.Close` 悬挂 ≥1 分钟的机理在**装置侧**：Go 的 `Close` 只强关 `StateIdle`/`StateNew` 连接，`StateActive`（请求在途）会一直等 `s.wg.Wait()`（源码 `net/http/httptest/server.go:470-525`）——观察到的「2 条 active 连接 + ctx 未取消」正是请求仍在 guard 窗口内在途的语义，非产品缺陷。装置规约：挂起上游类测试在 `Close` 前先 `CloseClientConnections()`（本轮探针即按此清理）；不影响 §8.1 结论。
 
 ### 13.6 resume cache lineage 口径（2026-10-28 拍板：窄读法）
 
@@ -710,3 +720,4 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 2. **维持"最多 N 次"并写入报表口径**（`retry_skipped` 已把"为什么没有第二次"变成可读事实）。
 3. **前置观测门槛**：当 `source=scheduler` + `read_only=1` + 瞬时分类的失败样本累计 ≥20 条后，复算 `retry_skipped` 分布（重点看 `retry_skipped_deadline_budget` 占比）与"重试后成功率"，再定语义。
 4. 顺带观察（非本项）：失败分类 `unknown` 占 46%（91/197），主要来自轻量子代理的停止/关闭路径；若分析侧需区分"用户主动关闭 vs 真实失败"，应另立小项。
+5. **已收口（`d96486a4`）**：上述顺带观察已落地为失败分类口径修复——`error_code` 缺失或映射为 `unknown` 时，按完成状态语义兜底（`stopped/interrupted/canceled/cancelled` → `cancelled`，`timeout/timed_out` → `timeout`），读写两侧同规则；"用户/父级主动关闭"不再混入 `unknown`。
