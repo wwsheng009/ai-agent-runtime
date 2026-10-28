@@ -98,6 +98,12 @@ type SessionSummary struct {
 	// time. The console shows it as "同步 x 前" (freshness of the upload path,
 	// distinct from UpdatedAt = content time).
 	SyncedAt time.Time `json:"synced_at,omitempty"`
+	// LaunchCommand 是在本宿主机重放该会话的启动命令（已脱敏，绝不含令牌），
+	// 让控制台能解释「这个按钮到底会跑什么」。工作目录用已有的 Workspace 承载。
+	LaunchCommand string `json:"launch_command,omitempty"`
+	// MeshWindow 描述本进程在这台机器上的 mesh 窗口身份（node_id · pid · 端点），
+	// mesh 未启用时为空。它只含身份，不含写令牌。
+	MeshWindow string `json:"mesh_window,omitempty"`
 	// StateChangedAt / AttentionChangedAt are stamped by the GATEWAY when the
 	// respective field transitions to a new value (either source: session
 	// update or heartbeat digest). Agents never set them; the console renders

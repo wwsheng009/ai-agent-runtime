@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -382,6 +383,19 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	if session.Config != nil {
 		if configFile := strings.TrimSpace(session.Config.ConfigFilePath); configFile != "" {
 			sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ConfigFile, configFile, sessionmeta.LegacyAICLIConfigFile)
+		}
+	}
+	// 启动参数（launch_*）：本进程没有 argv 快照时保持旧记录，绝不删除——
+	// 会话列表/gateway 拉起窗口要靠它重放，而「嵌入调用没有快照」不等于「用户
+	// 从没带过参数」。写入本身按 Instance 去重，同一进程内反复 sync 只覆盖一条。
+	if session.LaunchInvocation != nil {
+		applyLaunchInvocationToContext(runtimeSession.Metadata.Context, session.LaunchInvocation, time.Now())
+		if command := strings.TrimSpace(formatLaunchCommand(
+			session.LaunchInvocation.Binary,
+			strings.TrimSpace(runtimeSession.ID),
+			session.LaunchInvocation.Flags,
+		)); command != "" {
+			sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.LaunchCommand, command, sessionmeta.LegacyAICLILaunchCommand)
 		}
 	}
 	selectedAgentTarget := strings.TrimSpace(ctx.SelectedAgentTarget)

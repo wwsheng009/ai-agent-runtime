@@ -53,6 +53,13 @@ func main() {
 		os.Exit(consoleBootstrap.ExitCode)
 	}
 
+	// 启动参数快照：必须在配置解析与 cobra 改写 os.Args（prependDefaultChatCommand
+	// 会把 `aicli --yolo` 补成 `aicli chat --yolo`）之前抓取。会话列表要能在另一个
+	// 终端里把会话按原样重新拉起、gateway/mesh 要能在管理端「拉起窗口」，用的都是
+	// 这一份 argv（脱敏后随会话 metadata 持久化，见 commands/launch_invocation.go）。
+	// 位置在 console-host 自重启之后：真正干活的进程记录它自己实际收到的参数。
+	commands.SetLaunchInvocation(os.Args[1:])
+
 	// 加载 .env 文件：显式 --config/-c 所在目录优先，其后按当前
 	// build profile 的默认配置目录顺序查找。
 	envPaths := config.StartupDotEnvSearchPaths(os.Args[1:], config.DefaultConfigSearchPaths())

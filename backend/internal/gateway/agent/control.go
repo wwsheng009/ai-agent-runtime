@@ -89,6 +89,18 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithWindowAction 注册窗口动作执行器：控制台在管理端点「在新终端打开 / 恢复 /
+// 关闭 / 新建」时，动作经 HEARTBEAT_ACK 的 Pending 下发，由这里在宿主本机执行。
+//
+// 执行器被**串行**调用（单执行器 goroutine），实现里可以直接开进程或调 mesh 编排，
+// 不必自己加锁；它跑在心跳读循环之外，因此不能无限阻塞——那会拖住整条连接。
+// 不注册即本节点不执行窗口动作（Pending 里的 window:* 被忽略，旧行为逐字节不变）。
+func WithWindowAction(handler func(WindowAction)) Option {
+	return func(c *Controller) {
+		c.cfg.windowHandler = handler
+	}
+}
+
 // Controller owns the connection state machine. All exported methods are safe
 // for concurrent use. Connect/Disconnect/Reconnect are serialised through the
 // mutex; the blocking dial runs outside the lock so Status stays responsive.
@@ -120,13 +132,33 @@ type Controller struct {
 	watchMu     sync.Mutex
 	watchSet    map[string]struct{}
 	watchGating bool
+
+	// 窗口动作（控制台点「在新终端打开 / 恢复 / 关闭」）。windowHandler 在 New 之后
+	// 只读；queue/dropped 由 windowMu 保护。
+	windowMu      sync.Mutex
+	windowQueue   chan WindowAction
+	windowDropped int
+	windowHandled int
 }
+
+// WindowAction 是一条来自 HEARTBEAT_ACK Pending 的窗口动作。
+type WindowAction struct {
+	// Kind 是 wire.WindowAction* 之一（open-terminal|resume|new|close）。
+	Kind string
+	// SessionID 是目标会话；Kind=new 时为空。
+	SessionID string
+}
+
+// windowActionQueueDepth 是本机待执行窗口动作的缓冲深度。执行器（开终端、停节点）
+// 是慢操作，绝不能占用 WS 读循环；缓冲满时丢弃并计数，而不是无限堆积。
+const windowActionQueueDepth = 8
 
 // ApplyPending consumes control actions from a HEARTBEAT_ACK. Gating actions:
 //
 //	tail-gating:on     the gateway participates in watch gating
 //	watch:<sessionID>  enable live-tail pushes for the session
 //	unwatch:<sessionID> disable them
+//	window:<kind>[:<sessionID>]  在本机执行一次窗口动作（见 WithWindowAction）
 //
 // Unknown actions are ignored (forward compatibility).
 func (c *Controller) ApplyPending(actions []string) {
@@ -149,6 +181,63 @@ func (c *Controller) ApplyPending(actions []string) {
 			}
 		case strings.HasPrefix(action, "unwatch:"):
 			delete(c.watchSet, strings.TrimSpace(strings.TrimPrefix(action, "unwatch:")))
+		case strings.HasPrefix(action, wire.WindowActionPrefix):
+			// 只排队，不在 watchMu 里执行：开一个终端或等进程退出可以花上秒级，
+			// 而这里是心跳读循环。
+			if kind, sessionID, ok := wire.ParseWindowAction(action); ok {
+				c.enqueueWindowAction(WindowAction{Kind: kind, SessionID: sessionID})
+			}
+		}
+	}
+}
+
+// enqueueWindowAction 把一条窗口动作交给本机单执行器。缓冲满时丢弃并计数
+// （WindowActionStats），宁可漏一次操作也不让心跳循环被拖住。
+func (c *Controller) enqueueWindowAction(action WindowAction) {
+	c.windowMu.Lock()
+	defer c.windowMu.Unlock()
+	if c.cfg.windowHandler == nil {
+		return
+	}
+	if c.windowQueue == nil {
+		c.windowQueue = make(chan WindowAction, windowActionQueueDepth)
+		go runWindowActionQueue(c.windowQueue, c.windowQueueStats, c.cfg.windowHandler)
+	}
+	select {
+	case c.windowQueue <- action:
+	default:
+		c.windowDropped++
+	}
+}
+
+// windowQueueStats 回写执行/丢弃计数（在 windowMu 内调用）。
+func (c *Controller) windowQueueStats(deltaHandled, deltaDropped int) {
+	c.windowMu.Lock()
+	c.windowHandled += deltaHandled
+	c.windowDropped += deltaDropped
+	c.windowMu.Unlock()
+}
+
+// WindowActionStats 报告本机已执行 / 已丢弃的窗口动作数（/gateway 状态展示用）。
+func (c *Controller) WindowActionStats() (handled, dropped int) {
+	if c == nil {
+		return 0, 0
+	}
+	c.windowMu.Lock()
+	defer c.windowMu.Unlock()
+	return c.windowHandled, c.windowDropped
+}
+
+// runWindowActionQueue 是窗口动作的单执行器：串行消费，避免两个动作同时对同一个
+// 会话开两个窗口（open 与 resume 并发到达时最容易撞上）。
+func runWindowActionQueue(queue <-chan WindowAction, stats func(handled, dropped int), handler func(WindowAction)) {
+	if handler == nil {
+		return
+	}
+	for action := range queue {
+		handler(action)
+		if stats != nil {
+			stats(1, 0)
 		}
 	}
 }

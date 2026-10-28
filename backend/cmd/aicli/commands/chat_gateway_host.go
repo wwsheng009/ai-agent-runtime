@@ -61,6 +61,11 @@ func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *
 		// so the advertised capability must reflect the current target.
 		effectiveRoutes, effectiveCapabilities := chatGatewayEffectiveRegistration(
 			routes, chatGatewayForwardConfig().LocalBaseURL)
+		// 窗口能力位（控制台据此显示「新终端 / 恢复 / 关闭」按钮）：只有本机**真的**
+		// 探测到可用终端后端才通告。能力位是承诺——通告了却开不出窗口，比不通告更糟。
+		if chatGatewayWindowActionsAvailable() {
+			effectiveCapabilities = append(effectiveCapabilities, gatewayCapabilityWindowActions)
+		}
 		return wire.Register{
 			NodeID:     nodeID,
 			Kind:       "aicli",
@@ -106,6 +111,12 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 		// （notify.Presence 契约测试锚点）；切换会话后旧会话随 reconcile 移出
 		// 列表，其 host 在场由 TTL 自然失效。
 		Viewing: chatSessionViewing(session),
+		// 本机窗口事实（控制台据此解释并执行「在新终端打开 / 恢复 / 关闭」）：
+		// 工作目录、脱敏后的重放命令、mesh 窗口身份。三者都是宿主本机事实，
+		// 老网关收到会直接忽略（JSON 结构体字段增加是向后兼容的）。
+		Workspace:     chatGatewayWorkspaceInfo(session),
+		LaunchCommand: launchCommandForSession(session.RuntimeSession, launchInvocationFromRuntimeSession(session.RuntimeSession)),
+		MeshWindow:    chatGatewayMeshWindow(session),
 	}
 	// Overlay the shared state projection (state/attention/busy/status text);
 	// the store defaults to idle/running so both hosts report the same baseline.
@@ -309,7 +320,13 @@ func attachChatGateway(session *ChatSession) {
 	if !cfg.Enabled {
 		return
 	}
-	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg, chatGatewayRoutes(session), session))
+	// 窗口动作执行器：控制台点「在新终端打开 / 恢复 / 关闭 / 新建」时，动作经
+	// HEARTBEAT_ACK 下发并在**本机**执行（见 chat_gateway_window.go）。
+	controller := gatewayagent.NewController(
+		cfg,
+		chatGatewayRegisterFunc(cfg, chatGatewayRoutes(session), session),
+		gatewayagent.WithWindowAction(chatGatewayWindowHandler(session)),
+	)
 	// Point the agent at this process's loopback web server (recorded by
 	// cmd/aicli once it is listening) before the auto-connect dial.
 	controller.SetForward(chatGatewayForwardConfig())

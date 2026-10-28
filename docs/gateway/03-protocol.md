@@ -184,6 +184,25 @@ agent 上报的同名字段会被覆盖，保证始终是服务器时钟。控�
 agent 在收到 `tail-gating:on` 之前保持 **P1-a 的无门控行为**（始终推尾流），之后仅推 watch 集合内的会话；
 旧 agent 不消费 pending ⇒ 始终推尾流（安全降级，无行为破坏）。
 
+**窗口动作（`window:*`）**：控制台可以对某个会话请求「在节点本机的新终端里打开 / 恢复 / 关闭」，
+或为该节点「新建一个会话窗口」。它复用同一条 pending 通道，因此网关**从不入站连接节点**：
+
+```
+POST /api/nodes/{node_id}/sessions/{session_id}/window?action=open-terminal|resume|close
+POST /api/nodes/{node_id}/window?action=new
+→ 排进该节点的窗口动作队列（有界 16、同「动作+会话」去重）
+→ 下一次 HEARTBEAT_ACK.pending 携带 `window:<action>:<session_id>`
+→ agent 在本机串行执行（termopen 开终端 / mesh 停止编排）
+```
+
+- 动作词表与解析只在 `internal/gateway/wire` 定义一处（`WindowActionName` / `ParseWindowAction`），
+  网关与 agent 共用，杜绝「一边发 `window:close` 一边只认 `win:close`」的静默失配；
+- **只有活连接才接受排队**：节点离线返回 409，绝不把一条「关闭」留到几小时后某次无关的重连上执行；
+- 202 只表示「已排进队列」，不表示窗口已经开出来——执行结果由节点下一次上报体现；
+- agent 侧只有在本机探测到可用终端后端时才在 REGISTER 里通告能力位 `window-actions`
+  （控制台据此显示按钮，见 07-console §4.2）；未注册执行器的旧 agent 忽略该前缀（前向兼容）；
+- 无论成功或被拒都写审计事件 `window_action`（节点、动作、会话、拒绝原因）。
+
 ### 3.5 通知（NOTIFY）与注意力（attention）
 
 - **状态**（持久）：`attention` 随 `SESSION_UPDATE` 上报/对账，控制台据此重建徽标与收件箱；

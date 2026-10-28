@@ -81,6 +81,10 @@ type Server struct {
 	notifyMu   sync.Mutex
 	notifySeen map[string]struct{}
 
+	// windowActions 是「控制台 → 节点」的待下发窗口动作队列（随 HEARTBEAT_ACK
+	// 的 Pending 交付，见 actions.go）。
+	windowActions *windowActionQueue
+
 	// persist debounces registry snapshots (nil when persistence is disabled).
 	persist *persister
 }
@@ -100,12 +104,13 @@ func NewServer(cfg Config) *Server {
 		upgrader = *cfg.Upgrader
 	}
 	return &Server{
-		cfg:        cfg,
-		registry:   registry,
-		upgrader:   upgrader,
-		sessions:   make(map[string]*session),
-		notifySeen: make(map[string]struct{}),
-		persist:    NewPersister(registry, cfg.DataDir, 0),
+		cfg:           cfg,
+		registry:      registry,
+		upgrader:      upgrader,
+		sessions:      make(map[string]*session),
+		notifySeen:    make(map[string]struct{}),
+		windowActions: newWindowActionQueue(),
+		persist:       NewPersister(registry, cfg.DataDir, 0),
 	}
 }
 
@@ -124,6 +129,8 @@ func (s *Server) unregisterSession(nodeID string, sess *session) {
 		delete(s.sessions, nodeID)
 	}
 	s.sessMu.Unlock()
+	// 断连即丢弃待下发窗口动作：过期的「关闭/拉起」绝不允许在重连后突然生效。
+	s.windowActions.forget(nodeID)
 }
 
 // session returns the live connection for a node.
@@ -379,6 +386,11 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 				actions, next := watchActions(desired, watchSent)
 				watchSent = next
 				ack.Pending = append(ack.Pending, actions...)
+			}
+			// 窗口动作（控制台点「在新终端打开 / 恢复 / 关闭」）与 watch 走同一条
+			// ack 通道：节点在下次心跳时执行；旧 agent 不认识 window:* 会直接忽略。
+			if pending := s.windowActions.drain(nodeID); len(pending) > 0 {
+				ack.Pending = append(ack.Pending, pending...)
 			}
 			if err := sess.writeJSON(wire.TypeHeartbeatAck, 0, ack); err != nil {
 				return err

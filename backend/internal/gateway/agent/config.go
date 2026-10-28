@@ -61,6 +61,12 @@ type Config struct {
 	// CONNECT or SOCKS5 proxy (e.g. socks5://127.0.0.1:1080). Applies only to
 	// the tunnel; reverse-proxy traffic to the local loopback is unaffected.
 	ProxyURL string `json:"proxy_url,omitempty"`
+
+	// windowHandler 执行控制台下发到本节点的窗口动作（在新终端打开 / 恢复 /
+	// 关闭 / 新建）。它由宿主在装配控制器时注入（WithWindowAction）：不参与
+	// JSON 序列化（函数持久化没有意义，也不该落进偏好文件），nil 表示本节点
+	// 不执行窗口动作，Pending 里的 window:* 一律忽略。
+	windowHandler func(WindowAction)
 }
 
 // Mode values reported by Status.Mode.

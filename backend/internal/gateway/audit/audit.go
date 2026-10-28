@@ -24,6 +24,10 @@ const (
 	TypeNodeRemoved        = "node_removed"
 	TypeSessionRemoved     = "session_removed"
 	TypeDeviceDeleted      = "device_deleted"
+	// TypeWindowAction 记录控制台对某个会话窗口下发的动作（在新终端打开 /
+	// 恢复 / 关闭 / 新建）。动作本身在节点上执行，网关只记录「谁在什么时候
+	// 要求发生了什么」——被拒绝的排队请求同样要留痕，否则排查不到。
+	TypeWindowAction = "window_action"
 )
 
 // Event is one audit record.

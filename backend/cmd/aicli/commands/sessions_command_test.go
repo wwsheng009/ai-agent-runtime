@@ -227,8 +227,10 @@ func TestSessionsCommandTextOutputScopesToCurrentWorkspace(t *testing.T) {
 	dirIndex := strings.Index(row, currentWorkspace)
 	briefIndex := strings.Index(row, "会话 2")
 	require.GreaterOrEqual(t, idIndex, 0, "文本列表必须给出可直接 resume 的 session id")
-	require.True(t, dirIndex > idIndex && briefIndex > dirIndex,
-		"字段顺序必须是 时间 · session ID · 目录 · 简要：%q", row)
+	// 顺序是「时间 · 会话 ID · 描述 · 目录」：描述是「这条会话是什么」的第一答案，
+	// 必须排在目录之前；目录作为跨目录（--all）时的定位兜底留在末尾。
+	require.True(t, briefIndex > idIndex && dirIndex > briefIndex,
+		"字段顺序必须是 时间 · session ID · 简要 · 目录：%q", row)
 
 	require.NotContains(t, out, "轮次=", "控制台不得再输出轮次/消息数等诊断字段")
 	require.NotContains(t, out, "消息=")

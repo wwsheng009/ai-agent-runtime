@@ -643,6 +643,13 @@ func run() int {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "node": nodeID, "session": sessionID})
 	}))).Methods(http.MethodDelete)
+	// 窗口动作（控制台 → 该节点本机执行）：在新终端里打开 / 恢复 / 关闭某个会话，
+	// 或新建一个会话窗口。动作排进队列，随该节点下一次 HEARTBEAT_ACK 的 Pending
+	// 下发（与 watch/unwatch 同形）；节点离线时 409，绝不排队到下次无关的重连上
+	// 再执行。docs/gateway/03-protocol.md。
+	windowActionRoute := owner.RequireSession(handleNodeWindowAction(server, auditLog, resolver.ClientIP))
+	router.Handle("/api/nodes/{node_id}/sessions/{session_id}/window", windowActionRoute).Methods(http.MethodPost)
+	router.Handle("/api/nodes/{node_id}/window", windowActionRoute).Methods(http.MethodPost)
 	router.Handle("/api/metrics", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"requests_total":       metrics.requests.Load(),

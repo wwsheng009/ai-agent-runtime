@@ -22,6 +22,10 @@ const ResumeCommandLongHelp = `恢复历史 chat 会话并进入交互式对话�
   - aicli resume --list-sessions 列出可筛选的会话后退出
   - 恢复后停在等待输入状态：上一进程遗留的团队执行会停放为 paused（保留可恢复的
     团队壳），不会在启动阶段自动继续执行；发送下一条消息即可继续对话
+  - aicli resume <session-id> --detach 不接管当前终端：在新的分离终端窗口里按该
+    会话记录下来的启动参数（--web/--yolo/--debug…）重新打开它，本进程打印结果后
+    退出；省略 ID 时取范围内最近一个可恢复会话。终端后端自动探测，可用 --terminal
+    或 AICLI_TERMINAL 覆盖（与 aicli sessions 的「在新终端里打开」同一执行体）
 
 可继续使用 chat 的 provider/model/profile/permission 等 flags。
 chat 内也可用 /resume、/sessions、/load 继续切换会话。
@@ -39,6 +43,8 @@ const ResumeCommandExampleHelp = `  aicli resume                              # 
   aicli resume --list-sessions              # 默认仅列出当前工作目录的会话
   aicli resume --list-sessions --cwd=false  # 列出全部工作目录的会话
   aicli resume --list-sessions --session-query review
+  aicli resume session_xxx --detach         # 在新终端窗口里打开该会话后退出
+  aicli resume --detach --terminal kitty    # 最近会话 + 指定终端后端
   aicli resume --provider openai --model gpt-4.1
   aicli resume session_xxx --stream
   aicli chat --resume                       # 兼容写法
@@ -55,6 +61,14 @@ func NewResumeCommand(getCfg func() *config.Config) *cobra.Command {
 		Example: ResumeCommandExampleHelp,
 		Args:    cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			if detach, _ := cmd.Flags().GetBool("detach"); detach {
+				// 「在新终端里打开」是入口级动作：本进程只负责定位会话并拉起窗口，
+				// 不进入 chat，也不启动 provider/actor/工具面。
+				if err := runResumeDetachCommand(cmd, args, getCfg()); err != nil {
+					exitCommandError("resume", "text", err, nil)
+				}
+				return
+			}
 			if err := applyResumeCommandArgs(cmd, args); err != nil {
 				exitCommandError("resume", "json", err, nil)
 			}
@@ -62,6 +76,11 @@ func NewResumeCommand(getCfg func() *config.Config) *cobra.Command {
 		},
 	}
 	registerChatFlags(cmd)
+	// detach/terminal 只属于顶层 resume：它们改变「进程要不要自己变成会话宿主」，
+	// 与 chat 的会话契约无关，因此不进 registerChatFlags（否则会污染 chat/acp/exec
+	// 全套入口，并把 --detach 变成每个入口都要解释一遍的旗标）。
+	cmd.Flags().Bool("detach", false, "不恢复进当前终端：在新的分离终端窗口里打开该会话（缺 ID 时取范围内最近一个可恢复会话）")
+	cmd.Flags().String("terminal", "", "配合 --detach：终端后端覆盖（后端名或终端程序路径；默认自动探测，也可用 AICLI_TERMINAL）")
 	return cmd
 }
 

@@ -92,6 +92,18 @@ type FullScreenListOptions struct {
 	// SearchDebounce overrides the quiet period before a changed query reloads
 	// the first page (default 180ms). Zero keeps the default.
 	SearchDebounce time.Duration
+
+	// InitialIndex 指定「重新开屏后光标应停在哪一条」，取值是 Options.Items 的
+	// 原始下标（不是可见位置，因为搜索会过滤掉行）。
+	//
+	// 为什么需要它：调用方常常在动作完成后重开同一张列表（例如会话列表里执行完
+	// 「在新终端打开」）。光标每次都回到第一行，用户就丢了「我刚操作的是哪一条」
+	// 的位置感，列表越长越明显。
+	//
+	// 语义是**保守**的：默认 0 与历史行为逐字一致（既有选择器全部不用改）；指定
+	// 的下标若已被搜索过滤掉、已删除或越界，则保持默认第一行——宁可回到起点，
+	// 也不要把光标停到一条「谁也不是」的行上，那比复位更难解释。
+	InitialIndex int
 }
 
 // FullScreenListResult identifies the selected original item index.
@@ -270,6 +282,9 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 	dirty := true
 	lastWidth, lastHeight := -1, -1
 	lastNotifiedIndex := -2 // force initial OnSelectionChanged
+	// 首帧按 InitialIndex 播种一次光标；只在首帧做——用户之后的上下键是明确意图，
+	// 不能被这个初始值反复拽回去。
+	initialCursorSeeded := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return FullScreenListResult{}, editorKey{}, err
@@ -293,6 +308,10 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		var matches []int
 		if !options.FreeTextMode {
 			matches = fullScreenListMatches(options.Items, state.query)
+			if !initialCursorSeeded {
+				initialCursorSeeded = true
+				seedFullScreenListInitialCursor(&state, options.Items, matches, options.InitialIndex)
+			}
 			state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
 		}
 		if pager != nil {
@@ -623,6 +642,25 @@ func (state *fullScreenListState) clampToEnabled(items []FullScreenListItem, mat
 	state.clamp(len(matches), pageSize)
 	state.snapToEnabled(items, matches, 1)
 	state.clamp(len(matches), pageSize)
+}
+
+// seedFullScreenListInitialCursor 把光标放到「原始下标 initialIndex 那一条」在当前
+// 可见结果里的位置。initialIndex 是 options.Items 的下标，而 state.selected 是
+// matches 的下标，两者必须经过一次映射——直接赋值会在有搜索过滤时停错行。
+//
+// 命中不了（该项被过滤掉 / 已删除 / 下标越界 / 被 Disabled 吸附逻辑挪走）时保持
+// 默认第一行：光标停在一个不存在的行上比复位更难解释。可见性不用操心，紧随其后
+// 的 clamp 会把窗口滚动到选中行。
+func seedFullScreenListInitialCursor(state *fullScreenListState, items []FullScreenListItem, matches []int, initialIndex int) {
+	if state == nil || initialIndex < 0 || initialIndex >= len(items) || len(matches) == 0 {
+		return
+	}
+	for position, itemIndex := range matches {
+		if itemIndex == initialIndex {
+			state.selected = position
+			return
+		}
+	}
 }
 
 func (state *fullScreenListState) snapToEnabled(items []FullScreenListItem, matches []int, direction int) {
