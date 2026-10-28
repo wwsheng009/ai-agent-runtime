@@ -187,36 +187,55 @@ func (c *Client) Move(ctx context.Context, source, destination string) error {
 	}, nil)
 }
 
-// WatchEvent is one filesystem change notification.
+// WatchEvent is one frame from filesystem.Filesystem/WatchDir.
 //
-// The exact payload shape of envd's WatchDir stream was not captured reliably
-// during implementation: the stream stays open until cancelled, so a probe that
-// reads the whole body only ever observes a timeout. Rather than invent field
-// names, this type keeps the raw JSON and exposes the handful of names that are
-// conventional across inotify wrappers, leaving Raw as the source of truth.
-// Callers that act on watch events should inspect Raw.
+// Wire shape confirmed against envd 0.2.11 on 2026-10-28:
+//
+//	{"start":{}}
+//	{"filesystem":{"name":"probe.txt","type":"EVENT_TYPE_CREATE"}}
+//
+// The first frame is a stream handshake. For change events Name is the entry's
+// base name relative to the watched directory and Type is envd's event label
+// (EVENT_TYPE_CREATE was observed; other labels may exist). Raw is always
+// retained, so a future envd that adds fields does not require a client change.
 type WatchEvent struct {
-	// Name is the changed entry's base name, when present.
-	Name string `json:"name,omitempty"`
-	// Path is the changed entry's full path, when present.
-	Path string `json:"path,omitempty"`
-	// Op is the operation label, when present.
-	Op string `json:"op,omitempty"`
-	// Type is the entry kind, when present.
-	Type string `json:"type,omitempty"`
+	// Start is true for the initial handshake frame.
+	Start bool
+
+	// Name is the changed entry's base name, relative to the watched directory.
+	Name string
+
+	// Type is envd's event label, for example EVENT_TYPE_CREATE.
+	Type string
+
 	// Raw is the original frame.
 	Raw json.RawMessage `json:"-"`
 }
 
-// UnmarshalJSON decodes a watch event and retains the raw payload.
+// UnmarshalJSON decodes a watch frame and retains the raw payload.
 func (w *WatchEvent) UnmarshalJSON(payload []byte) error {
 	w.Raw = append(w.Raw[:0], payload...)
-	type watchAlias WatchEvent
-	var alias watchAlias
-	if err := json.Unmarshal(payload, &alias); err != nil {
+	w.Start = false
+	w.Name = ""
+	w.Type = ""
+
+	var wire struct {
+		Start      json.RawMessage `json:"start,omitempty"`
+		Filesystem *struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"filesystem,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
 		return err
 	}
-	*w = WatchEvent(alias)
+	if len(wire.Start) > 0 {
+		w.Start = true
+	}
+	if wire.Filesystem != nil {
+		w.Name = wire.Filesystem.Name
+		w.Type = wire.Filesystem.Type
+	}
 	w.Raw = append(w.Raw[:0], payload...)
 	return nil
 }

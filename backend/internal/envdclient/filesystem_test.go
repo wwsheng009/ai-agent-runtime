@@ -42,17 +42,21 @@ func newFilesystemStub(t *testing.T) (*httptest.Server, *[]filesystemCall) {
 		case "/filesystem.Filesystem/MakeDir", "/filesystem.Filesystem/Remove", "/filesystem.Filesystem/Move":
 			_, _ = io.WriteString(w, `{}`)
 		case "/filesystem.Filesystem/WatchDir":
-			frame, err := EncodeJSONFrame(map[string]any{
-				"name": "a.txt",
-				"path": "/srv/app/a.txt",
-				"op":   "write",
+			start, err := EncodeJSONFrame(map[string]any{"start": map[string]any{}})
+			if err != nil {
+				t.Errorf("EncodeJSONFrame: %v", err)
+				return
+			}
+			event, err := EncodeJSONFrame(map[string]any{
+				"filesystem": map[string]any{"name": "a.txt", "type": "EVENT_TYPE_CREATE"},
 			})
 			if err != nil {
 				t.Errorf("EncodeJSONFrame: %v", err)
 				return
 			}
 			w.Header().Set("Content-Type", "application/connect+json")
-			_, _ = w.Write(frame)
+			_, _ = w.Write(start)
+			_, _ = w.Write(event)
 			_, _ = w.Write(EncodeFrame(flagEndStream, []byte("{}")))
 		default:
 			http.NotFound(w, r)
@@ -137,10 +141,16 @@ func TestWatchDirDecodesEventFrames(t *testing.T) {
 
 	var event WatchEvent
 	if err := stream.Recv(&event); err != nil {
-		t.Fatalf("Recv: %v", err)
+		t.Fatalf("Recv(start): %v", err)
 	}
-	if event.Name != "a.txt" || event.Path != "/srv/app/a.txt" || event.Op != "write" {
-		t.Fatalf("event = %+v, want the stub event", event)
+	if !event.Start {
+		t.Fatalf("first frame = %+v, want the start handshake", event)
+	}
+	if err := stream.Recv(&event); err != nil {
+		t.Fatalf("Recv(event): %v", err)
+	}
+	if event.Start || event.Name != "a.txt" || event.Type != "EVENT_TYPE_CREATE" {
+		t.Fatalf("event = %+v, want the confirmed filesystem frame", event)
 	}
 	if len(event.Raw) == 0 {
 		t.Fatal("Raw payload is empty, want the original frame")

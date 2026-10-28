@@ -217,11 +217,18 @@ shell "id -un; pwd"           → 真实用户与工作目录
 
 **解法**：给 envd 配 TLS（`--ca-file` + `Config.TLS`），HTTP/2 会自动协商。这条路径代码已就绪，但**未在真机验证过**（沙箱内 envd 是明文）。
 
-### 4.2 WatchDir 事件结构未确认
+### 4.2 WatchDir 事件结构（2026-10-28 实测确认）
 
-`WatchDir` 是长流，读到超时只能证明连接保持，**拿不到事件体的字段名**。`WatchEvent` 因此保留 `Raw`，只暴露约定的 `Name`/`Path`/`Op`/`Type`，注释里写明「以 Raw 为准」。
+实测帧序列（envd 0.2.11，监听目录内创建文件）：
 
-**未暴露 `watch` 工具**：结构不确定时不对外提供工具，比提供一个会瞎报的工具好。
+```json
+{"start":{}}
+{"filesystem":{"name":"probe.txt","type":"EVENT_TYPE_CREATE"}}
+```
+
+`WatchEvent` 相应暴露 `Start` / `Name` / `Type`，并保留 `Raw`；`Name` 是相对被监听目录的 basename。目前只观测到 `EVENT_TYPE_CREATE`，其余标签仍以 `Raw` 为准。
+
+**暂未暴露 `watch` 工具**：事件流是长连接，不适合一次性工具调用；原 P2 的「接入知识层重索引」另行设计。
 
 ### 4.3 写入上限 1 MiB
 
@@ -340,6 +347,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
 - **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、client-streaming 的 HTTP/2 守卫与 HTTP/2/TLS 成功路径（SendSignal/SendInput/UpdatePty 请求体校验）、请求参数校验、bridge 的调用超时用例。
+- **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
 
 ### 8.3 保留的限制
 
@@ -348,7 +356,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **无法做 envd 版本校验**：envd 没有版本端点；
 - **TLS / HTTP/2 已用 httptest 覆盖（含 client-streaming 成功路径），但未在真实 envd 上验证**（承接 §4.1）；
 - **写入硬上限 1 MiB**（承接 §4.3）；
-- **watch 事件结构未确认**（承接 §4.2）。
+- **WatchDir 仅确认 CREATE 一类事件**：结构已确认（§4.2），其余事件标签未逐一实测；未暴露 `watch` 工具。
 
 ---
 
