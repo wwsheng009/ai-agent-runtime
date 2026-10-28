@@ -529,7 +529,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
 	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
@@ -790,7 +790,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
 	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
@@ -1096,7 +1096,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
 	scopeGatewayPromptCacheKey(requestBody, selected, protocol, adapterRequest.Model)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}

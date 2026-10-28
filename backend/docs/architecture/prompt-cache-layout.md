@@ -163,6 +163,25 @@ think() step N
 Standalone / embedded agent runs without a chat actor still get an **in-memory
 turn snapshot** for multi-step turns.
 
+## Wire body field order (retry-stable prefix)
+
+`MarshalProviderRequestBody` (`backend/internal/llm/request_body_marshal.go`)
+serializes every provider/gateway/cmd-side chat request body with a cache-friendly key
+order: content fields first (`messages` / `input` / `contents`, `system` /
+`systemInstruction` / `instructions`, `tools` / `functions`), then all
+remaining keys sorted. Volatile knobs —
+`max_tokens` above all — therefore sit **after** the reusable content prefix.
+
+Why: `encoding/json` emits map keys alphabetically, which placed `max_tokens`
+(and its retry rewrites: reasoning-only escalation 8k→16k→32k→64k, provider
+ceiling recovery) before `messages`. A widened retry then diverged at byte 14
+and the provider lost the entire cached prefix
+(`session_20261028063206_ZW5KbyLq` seq4→7/7→8, both attempts `cached=0`).
+With the stable order the same widening keeps the full messages+tools prefix:
+live `cn:hy3` / `workbuddy` probe — attempt 1 `max_tokens=8000` rejected as
+reasoning-only, attempt 2 `max_tokens=16000`; first 130,363 bytes
+byte-identical, provider reported 88,128 / 88,206 cached tokens.
+
 ## Do not regress
 
 1. **Fact ledger after history** — never prepend dynamic fact content.
@@ -180,6 +199,12 @@ turn snapshot** for multi-step turns.
    - `TestReActLoop_Run_FreezesToolSurfaceForEntireTurn`
    - `TestBuildKeepsConversationPrefixStableWhenFactLedgerInjected`
    - `TestBuildDoesNotPrependFactLedgerBeforeHistory`
+6. **Content prefix before volatile knobs** — `marshalProviderRequestBody`
+   (`backend/internal/llm/request_body_marshal.go`) must serialize
+   `messages`/`input`/`contents`, `system`, `tools`/`functions` before the
+   remaining keys, so `max_tokens` retry escalation cannot rewrite the cached
+   prefix; keep `TestMarshalProviderRequestBody_*` and
+   `TestProviderRetryWidenedMaxTokensKeepsCachePrefix` green.
 
 ## Verification
 

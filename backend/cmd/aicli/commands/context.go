@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
@@ -324,7 +325,7 @@ func sendContextRequest(cfg *config.Config, provider config.Provider, llmAdapter
 	fullURL := buildProviderURL(provider, llmAdapter.GetAPIPath(), modelName)
 
 	// 序列化请求体
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := runtimellm.MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}

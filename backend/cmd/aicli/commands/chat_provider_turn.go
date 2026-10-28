@@ -3,7 +3,6 @@ package commands
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,7 +48,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	requestBody = prepareChatSessionRequestBody(session, requestBody)
 	requestContextTokens := countChatContextTokensForMessages(session, req.Messages)
 
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := runtimellm.MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}

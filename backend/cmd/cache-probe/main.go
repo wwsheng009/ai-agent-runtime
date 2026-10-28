@@ -4,8 +4,8 @@
 // versus a tool-array append.
 //
 // Rounds:
-//   1) baseline send #1 (cold)            2) identical resend (cache hit?)
-//   3) system guidance section swapped    4) one tool appended
+//  1. baseline send #1 (cold)            2) identical resend (cache hit?)
+//  3. system guidance section swapped    4) one tool appended
 //
 // Usage: go run ./cmd/cache-probe -provider workbuddy -model cn:glm-5.3-flash [-rounds 4]
 package main
@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
 type usage struct {
@@ -204,7 +206,7 @@ func send(url, apiKey, model, system string, tools []tool, userMsg string) usage
 	if len(tools) > 0 {
 		payload["tools"] = tools
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := runtimellm.MarshalProviderRequestBody(payload)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "marshal:", err)
 		os.Exit(1)

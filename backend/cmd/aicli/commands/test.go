@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
@@ -94,7 +95,7 @@ func runTestCommand(cfg *config.Config, providerFlag, modelFlag string, opts tes
 
 	requestBody := ctx.Adapter.BuildRequest(requestConfig)
 	requestBody = prepareProviderRequestBody(ctx.ProviderName, ctx.Provider, ctx.Model, requestBody)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := runtimellm.MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, details, fmt.Errorf("failed to marshal request body: %w", err)
 	}

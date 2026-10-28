@@ -624,7 +624,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
@@ -887,7 +887,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request body: %w", err)
 	}
@@ -1451,7 +1451,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		requestBody := p.adapter.BuildRequest(adapterRequest)
 		requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 		propagatePromptCacheKey(requestBody, chatReq.Metadata, p.config.Type)
-		bodyBytes, err := json.Marshal(requestBody)
+		bodyBytes, err := MarshalProviderRequestBody(requestBody)
 		if err != nil {
 			return adapter.RequestConfig{}, nil, nil, nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}

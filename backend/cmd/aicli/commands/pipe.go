@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
@@ -256,7 +257,7 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 	requestBody := session.Adapter.BuildRequest(config)
 	requestBody = preparePipeSessionRequestBody(session, requestBody)
 
-	bodyBytes, err := json.Marshal(requestBody)
+	bodyBytes, err := runtimellm.MarshalProviderRequestBody(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
