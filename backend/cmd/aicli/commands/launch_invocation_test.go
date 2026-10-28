@@ -197,6 +197,89 @@ func TestLaunchInvocationSurvivesJSONRoundTrip(t *testing.T) {
 	require.Nil(t, launchInvocationFromContext(nil))
 }
 
+// TestPlainRelaunchKeepsRecordedLaunchArgs 锁住「重启会话时参数能被恢复」这条主线语义：
+//
+// 场景（真实使用中最常见）：用户先 `aicli chat --web --yolo` 开了会话；之后只敲
+// `aicli resume session_x`（一个旗标都没带）。恢复路径本身就会 sync（会话装载、
+// 首个 turn、退出收尾都是写入点），如果写入是「整体覆盖」，这份 launch_args 会被
+// 空集合抹掉，下一次「在新终端里打开」就退化成裸 resume —— 用户当初的 --web --yolo
+// 就永久丢了。
+//
+// 期望：本次没带的旗标**继承**会话已记录的那份；本次带了的按旗标名覆盖。
+func TestPlainRelaunchKeepsRecordedLaunchArgs(t *testing.T) {
+	ctx := map[string]interface{}{}
+	first := &launchInvocationRecord{
+		Instance: "1@x", Entry: "chat",
+		Flags:      []string{"--web", "--yolo", "-m", "gpt-4.1"},
+		RawArgv:    []string{"chat", "--web", "--yolo", "-m", "gpt-4.1"},
+		RecordedAt: time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC),
+	}
+	applyLaunchInvocationToContext(ctx, first, first.RecordedAt)
+	require.Equal(t, []string{"--web", "--yolo", "-m", "gpt-4.1"}, launchStringListKey(ctx, sessionmeta.LaunchArgs))
+
+	// 第二次启动：只敲了 aicli resume <id>，没有任何旗标。
+	second := &launchInvocationRecord{
+		Instance: "2@y", Entry: "resume",
+		RawArgv:    []string{"resume", "session_1"},
+		RecordedAt: first.RecordedAt.Add(time.Hour),
+	}
+	applyLaunchInvocationToContext(ctx, second, second.RecordedAt)
+
+	require.Equal(t, []string{"--web", "--yolo", "-m", "gpt-4.1"}, launchStringListKey(ctx, sessionmeta.LaunchArgs),
+		"未带旗标的重启必须继承已记录的启动参数")
+	// 审计面仍要说真话：这一次到底只敲了 resume <id>。
+	require.Equal(t, []string{"resume", "session_1"}, launchStringListKey(ctx, sessionmeta.LaunchArgv))
+	history := launchHistoryEntriesFromContext(ctx)
+	require.Len(t, history, 2)
+	require.Empty(t, launchStringList(history[0]["flags"]), "历史里那条必须如实反映「什么都没带」")
+}
+
+// TestRelaunchFlagsOverrideInheritedByName 锁住合并规则：同名旗标新的赢（含
+// --model 与 -m 的短名归一、--web 被 --web=false 关掉），不同名的保留，且重复
+// apply 不再增长（同一进程每次 sync 都会重写）。
+func TestRelaunchFlagsOverrideInheritedByName(t *testing.T) {
+	chat := launchInvocationTestCommand()
+	ctx := map[string]interface{}{}
+	base := &launchInvocationRecord{Instance: "1@x", Entry: "chat"}
+	applyLaunchInvocationToContext(ctx, &launchInvocationRecord{
+		Instance: "1@x", Entry: "chat",
+		Flags:   []string{"--web", "-m", "gpt-4.1", "--yolo"},
+		RawArgv: []string{"chat", "--web", "-m", "gpt-4.1", "--yolo"},
+	}, time.Now())
+
+	// 新进程显式换了模型、关掉了 web，其余继承。
+	next := newLaunchInvocationRecordForTest(chat, []string{"resume", "session_1", "--web=false", "-m", "claude-sonnet"})
+	applyLaunchInvocationToContext(ctx, next, next.RecordedAt)
+	merged := launchStringListKey(ctx, sessionmeta.LaunchArgs)
+	require.Equal(t, []string{"--web=false", "-m", "claude-sonnet", "--yolo"}, merged,
+		"同名覆盖（-m/--model 归一到同一旗标名），未提到的 --yolo 继承")
+
+	// 幂等：同一记录反复 sync 不得让参数表增长或漂移。
+	before := append([]string(nil), merged...)
+	applyLaunchInvocationToContext(ctx, next, next.RecordedAt)
+	require.Equal(t, before, launchStringListKey(ctx, sessionmeta.LaunchArgs))
+	_ = base
+}
+
+// TestBrandNewSessionRecordsOnlyOwnFlags：全新会话没有可继承的记录，行为等同直记本次。
+func TestBrandNewSessionRecordsOnlyOwnFlags(t *testing.T) {
+	ctx := map[string]interface{}{}
+	record := &launchInvocationRecord{
+		Instance: "9@z", Entry: "chat",
+		Flags: []string{"--debug"}, RawArgv: []string{"chat", "--debug"},
+	}
+	applyLaunchInvocationToContext(ctx, record, time.Now())
+	require.Equal(t, []string{"--debug"}, launchStringListKey(ctx, sessionmeta.LaunchArgs))
+}
+
+// newLaunchInvocationRecordForTest 注入 argv 快照后构造记录，并带上合并所需的短名表。
+func newLaunchInvocationRecordForTest(cmd *cobra.Command, argv []string) *launchInvocationRecord {
+	previous := LaunchInvocationArgv()
+	defer SetLaunchInvocation(previous)
+	SetLaunchInvocation(argv)
+	return newLaunchInvocationRecord(cmd)
+}
+
 func TestSessionRelaunchArgsAndDisplayCommand(t *testing.T) {
 	require.Equal(t, []string{"resume", "session_1", "--web", "--yolo"}, sessionRelaunchArgs("session_1", []string{"--web", "--yolo"}))
 	require.Nil(t, sessionRelaunchArgs("  ", []string{"--web"}))

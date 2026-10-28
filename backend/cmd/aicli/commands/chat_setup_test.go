@@ -363,6 +363,47 @@ func TestPrintChatExitResumeHint_SkipsNonResumableSessions(t *testing.T) {
 	}
 }
 
+// TestPrintChatExitResumeHintCarriesRecordedLaunchArgs 锁住「重启时能再次拿到参数」
+// 的最后一环：退出提示那句必须带上会话记录的有效旗标。
+//
+// 场景刻意是「上一轮带了 --web --yolo -m，这一轮只敲了 resume <id>」——这时提示里
+// 仍要给出全部三个参数，否则用户复制的就是一次降级重启。
+func TestPrintChatExitResumeHintCarriesRecordedLaunchArgs(t *testing.T) {
+	stored := map[string]interface{}{}
+	require.True(t, applyLaunchInvocationToContext(stored, &launchInvocationRecord{
+		Instance:   "1@x",
+		Entry:      "chat",
+		Flags:      []string{"--web", "--yolo", "-m", "gpt-4.1"},
+		RawArgv:    []string{"chat", "--web", "--yolo", "-m", "gpt-4.1"},
+		RecordedAt: time.Now(),
+	}, time.Now()))
+
+	runtimeSession := &runtimechat.Session{ID: "session_hint"}
+	runtimeSession.Metadata.Context = stored
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		// 本次进程一个旗标都没带：读取端要把已记录的那份合回来。
+		LaunchInvocation: &launchInvocationRecord{Instance: "2@y", Entry: "resume"},
+	}
+
+	output := captureStdout(t, func() { printChatExitResumeHint(session) })
+	if !strings.Contains(output, "aicli resume session_hint --web --yolo -m gpt-4.1") {
+		t.Fatalf("退出提示必须带上记录的启动参数，got %q", output)
+	}
+}
+
+// 没有记录时逐字保持历史输出（多一个空格都会打断依赖这行文案的脚本与测试）。
+func TestPrintChatExitResumeHintWithoutRecordIsUnchanged(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "session_plain"}}
+	output := captureStdout(t, func() { printChatExitResumeHint(session) })
+	if !strings.Contains(output, "aicli resume session_plain\n") {
+		t.Fatalf("无记录时的提示必须保持原样，got %q", output)
+	}
+	if strings.Contains(output, "session_plain ") {
+		t.Fatalf("不得留下尾随空格，got %q", output)
+	}
+}
+
 func TestPresentChatSession_WritesStartupPreambleAndSkillsToStderr(t *testing.T) {
 	session := &ChatSession{
 		ProviderName:   "codex_ee",

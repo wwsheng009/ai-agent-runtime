@@ -1124,6 +1124,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationWarning", Kind: "fmt.Print", Count: 1},
 		{File: "chat_http.go", Func: "emitRetryNotice", Kind: "fmt.Print", Count: 1},
 		{File: "chat_http_debug.go", Func: "newRuntimeHTTPDebugReporter", Kind: "fmt.Fprint(os.Std*)", Count: 2},
+		// 网关窗口动作的诊断兜底：优先 NotifyChatDiagnostic（投动态栏），只有本进程
+		// 没有存活渲染面（headless / 兼容模式）时才落 stderr——那条路径上没人拥有画面，
+		// 与 loadRuntimeToolConfig 的告警回退同一套约定。
+		{File: "chat_gateway_window.go", Func: "notifyGatewayWindowDiagnostic", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_image_command.go", Func: "handleImageGenerationCommand", Kind: "fmt.Print", Count: 4},
 		{File: "chat_interaction.go", Func: "clearPromptDisplayRows", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_interaction.go", Func: "method writeFormatLocked", Kind: "ui.WriteTerminal*", Count: 1},

@@ -102,6 +102,30 @@ type launchInvocationRecord struct {
 	Cwd string
 	// RecordedAt 是本次启动的记录时刻。
 	RecordedAt time.Time
+
+	// flagMeta 是构造本次记录时从 cobra 拿到的旗标形态知识（布尔名表 + 短名→长名）。
+	// 合并继承旗标时要靠它判断一个 token 是否吃值，以及 -m 与 --model 是同一个旗标；
+	// 手工构造的记录为 nil，合并退化为「下一个 token 不以 - 开头就当值」的启发式。
+	flagMeta *launchFlagMeta
+}
+
+// launchFlagMeta 是旗标分类的可序列化快照（不持有 cobra 对象，避免记录被命令树生命周期绑住）。
+type launchFlagMeta struct {
+	boolNames   map[string]bool
+	shortToLong map[string]string
+}
+
+func newLaunchFlagMeta(index launchFlagIndex) *launchFlagMeta {
+	meta := &launchFlagMeta{boolNames: map[string]bool{}, shortToLong: map[string]string{}}
+	for name, kind := range index.long {
+		if kind == launchFlagBool {
+			meta.boolNames[name] = true
+		}
+	}
+	for short, spec := range index.short {
+		meta.shortToLong[short] = spec.Name
+	}
+	return meta
 }
 
 // launchInvocationCapture 是本进程的启动快照。只在 main 顶部写一次，之后全是读；
@@ -169,7 +193,8 @@ func newLaunchInvocationRecord(cmd *cobra.Command) *launchInvocationRecord {
 	if len(argv) == 0 {
 		return nil
 	}
-	split := splitLaunchArgv(argv, newLaunchFlagIndex(cmd))
+	flagIndex := newLaunchFlagIndex(cmd)
+	split := splitLaunchArgv(argv, flagIndex)
 	binary, cwd := currentLaunchBinaryAndCwd()
 	return &launchInvocationRecord{
 		Instance:   launchProcessInstanceID(),
@@ -179,6 +204,7 @@ func newLaunchInvocationRecord(cmd *cobra.Command) *launchInvocationRecord {
 		Binary:     binary,
 		Cwd:        cwd,
 		RecordedAt: time.Now(),
+		flagMeta:   newLaunchFlagMeta(flagIndex),
 	}
 }
 
@@ -503,7 +529,9 @@ func applyLaunchInvocationToContext(ctx map[string]interface{}, record *launchIn
 		}
 		record.RecordedAt = now
 	}
-	sessionmeta.Set(ctx, sessionmeta.LaunchArgs, append([]string(nil), record.Flags...), sessionmeta.LegacyAICLILaunchArgs)
+	sessionmeta.Set(ctx, sessionmeta.LaunchArgs, mergeLaunchFlags(
+		launchStringListKey(ctx, sessionmeta.LaunchArgs), record.Flags, record.flagMeta,
+	), sessionmeta.LegacyAICLILaunchArgs)
 	sessionmeta.Set(ctx, sessionmeta.LaunchArgv, append([]string(nil), record.RawArgv...), sessionmeta.LegacyAICLILaunchArgv)
 	sessionmeta.Set(ctx, sessionmeta.LaunchEntry, launchEntryOrDefault(record.Entry), sessionmeta.LegacyAICLILaunchEntry)
 	sessionmeta.Set(ctx, sessionmeta.LaunchInstance, record.Instance, sessionmeta.LegacyAICLILaunchInstance)
@@ -611,6 +639,141 @@ func launchInvocationFromContext(ctx map[string]interface{}) *launchInvocationRe
 	return record
 }
 
+// launchFlagEntry 是「一个旗标 + 它的值」的最小结构：合并必须以条目为单位，
+// 否则 `--model gpt-4.1` 会被拆成两个独立 token 参与去重，把值当成孤立旗标。
+type launchFlagEntry struct {
+	// Key 是归一后的旗标名（短名按 flagMeta 换成长名；组合短名簇整簇为一个 Key）。
+	Key    string
+	Tokens []string
+}
+
+// parseLaunchFlagEntries 把旗标 token 序列切成条目。
+//
+// 有 flagMeta 时按 cobra 的元数据判断是否吃值（`--yolo` 不吃、`-m x` 吃一个）；
+// 没有元数据（手工构造的记录）才退化为「下一个 token 不以 - 开头就当值」的启发式。
+// 无法识别的 token 原样成条（Key 用自身），保证合并永远不会把未知旗标丢掉。
+func parseLaunchFlagEntries(tokens []string, meta *launchFlagMeta) []launchFlagEntry {
+	entries := make([]launchFlagEntry, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		token := strings.TrimSpace(tokens[i])
+		if token == "" {
+			continue
+		}
+		if !strings.HasPrefix(token, "-") {
+			// 落单的值 token（上游解析异常时）：挂到上一条目上，别让它单独成条。
+			if len(entries) > 0 {
+				entries[len(entries)-1].Tokens = append(entries[len(entries)-1].Tokens, token)
+				continue
+			}
+			entries = append(entries, launchFlagEntry{Key: token, Tokens: []string{token}})
+			continue
+		}
+		entry := launchFlagEntry{Key: token, Tokens: []string{token}}
+		name := strings.TrimPrefix(strings.TrimPrefix(token, "-"), "-")
+		hasInline := false
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			name, hasInline = name[:eq], true
+		}
+		switch {
+		case strings.HasPrefix(token, "--"):
+			entry.Key = name
+			// 长名旗标：布尔或内联值都自带完整语义，否则吃下一个 token。
+			if hasInline || (meta != nil && meta.boolNames[name]) {
+				entries = append(entries, entry)
+				continue
+			}
+			if meta == nil && i+1 < len(tokens) && strings.HasPrefix(strings.TrimSpace(tokens[i+1]), "-") {
+				entries = append(entries, entry)
+				continue
+			}
+		case len(name) == 1:
+			if meta != nil {
+				if long, ok := meta.shortToLong[name]; ok {
+					entry.Key = long
+					name = long
+				}
+			}
+			if meta != nil && meta.boolNames[name] {
+				entries = append(entries, entry)
+				continue
+			}
+			if meta == nil && i+1 < len(tokens) && strings.HasPrefix(strings.TrimSpace(tokens[i+1]), "-") {
+				entries = append(entries, entry)
+				continue
+			}
+		default:
+			// 组合短名簇（-sm）：整簇一个 Key；只有启发式能判断它是否还带外置值。
+			if meta != nil {
+				entries = append(entries, entry)
+				continue
+			}
+		}
+		if i+1 < len(tokens) {
+			if value := strings.TrimSpace(tokens[i+1]); value != "" {
+				entry.Tokens = append(entry.Tokens, value)
+				i++
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// mergeLaunchFlags 把本次启动传入的旗标叠在会话已记录的那份上。
+//
+// 规则（都是为了让「重启会话」不丢参数，同时让「这次明确说了什么」说了算）：
+//   - 同名旗标：新的**替换**旧的，并留在旧的位置上（列表顺序稳定，反复 sync 不漂移）；
+//   - 本次没提的旗标：继承；
+//   - 本次新增的旗标：追加在尾部 —— 万一短名与长名没被归一到同一个 Key（例如
+//     旧记录存了 `--model x` 而本次传 `-m y`），pflag 的「后者覆盖前者」也仍然让
+//     本次的值生效，不会因为去重失败而给出错的结果。
+//
+// 幂等性由「同名就地替换」保证：同一记录反复写入既不会增长也不会换序。
+func mergeLaunchFlags(inherited, current []string, meta *launchFlagMeta) []string {
+	currentEntries := parseLaunchFlagEntries(current, meta)
+	inheritedEntries := parseLaunchFlagEntries(inherited, meta)
+	if len(currentEntries) == 0 {
+		return tokensOfLaunchEntries(inheritedEntries)
+	}
+	used := make(map[string]bool, len(currentEntries))
+	merged := make([]launchFlagEntry, 0, len(inheritedEntries)+len(currentEntries))
+	for _, entry := range inheritedEntries {
+		if replacement, ok := findLaunchEntry(currentEntries, entry.Key); ok {
+			if !used[entry.Key] {
+				used[entry.Key] = true
+				merged = append(merged, replacement)
+			}
+			continue
+		}
+		merged = append(merged, entry)
+	}
+	for _, entry := range currentEntries {
+		if used[entry.Key] {
+			continue
+		}
+		used[entry.Key] = true
+		merged = append(merged, entry)
+	}
+	return tokensOfLaunchEntries(merged)
+}
+
+func findLaunchEntry(entries []launchFlagEntry, key string) (launchFlagEntry, bool) {
+	for _, entry := range entries {
+		if entry.Key == key {
+			return entry, true
+		}
+	}
+	return launchFlagEntry{}, false
+}
+
+func tokensOfLaunchEntries(entries []launchFlagEntry) []string {
+	tokens := make([]string, 0, len(entries)*2)
+	for _, entry := range entries {
+		tokens = append(tokens, entry.Tokens...)
+	}
+	return tokens
+}
+
 // launchStringList 把一个元数据值读成规范化字符串切片。
 //
 // 为什么不借道「按 key 取」的通用读取器：这里既要读 context 顶层键（launch_args），
@@ -670,6 +833,26 @@ func launchStringListKey(ctx map[string]interface{}, key string) []string {
 		return nil
 	}
 	return launchStringList(value)
+}
+
+// effectiveSessionLaunchFlags 返回「现在重放这个会话会用的旗标」：会话已记录的那份
+// 叠加本次进程真正传入的那份（同名覆盖）。
+//
+// 为什么在读取时再合一次，而不是直接读 launch_args：写入发生在 sync 里，而退出提示
+// 与收尾 sync 同处一条关闭链上，先后顺序不该改变给用户的那句命令。合并本身幂等，
+// 因此无论刚没刚 sync 过，得到的都是同一份有效参数。
+func effectiveSessionLaunchFlags(session *ChatSession) []string {
+	if session == nil {
+		return nil
+	}
+	stored := []string(nil)
+	if session.RuntimeSession != nil {
+		stored = launchStringListKey(session.RuntimeSession.Metadata.Context, sessionmeta.LaunchArgs)
+	}
+	if session.LaunchInvocation == nil {
+		return stored
+	}
+	return mergeLaunchFlags(stored, session.LaunchInvocation.Flags, session.LaunchInvocation.flagMeta)
 }
 
 // launchInvocationFromRuntimeSession 从会话元数据读回启动记录（旧会话没有记录时

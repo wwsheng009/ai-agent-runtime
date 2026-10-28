@@ -947,7 +947,22 @@ func printChatExitResumeHint(session *ChatSession) {
 	if sessionID == "" {
 		return
 	}
-	fmt.Printf("\n下次可使用以下命令恢复当前会话：\n  aicli resume %s\n", sessionID)
+	// 带上会话记录的启动参数：不带它们的话，这句提示会把用户当初的
+	// --web / --yolo / -m ... 静默丢掉（复制粘贴就是一次降级重启）。参数集合取
+	// 「有效值」而不是「本次传入值」：只 `aicli resume <id>` 重启一轮后仍要能拿回
+	// 全部参数。敏感旗标由记录阶段就排除在外，不会顺着这句 echo 到屏幕上。
+	flags := effectiveSessionLaunchFlags(session)
+	quoted := make([]string, 0, len(flags))
+	for _, flag := range flags {
+		if text := strings.TrimSpace(flag); text != "" {
+			quoted = append(quoted, quoteLaunchToken(text))
+		}
+	}
+	suffix := ""
+	if len(quoted) > 0 {
+		suffix = " " + strings.Join(quoted, " ")
+	}
+	fmt.Printf("\n下次可使用以下命令恢复当前会话：\n  aicli resume %s%s\n", sessionID, suffix)
 }
 
 func restoreLocalRuntimeHostTeamState(session *ChatSession) {
