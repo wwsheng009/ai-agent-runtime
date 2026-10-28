@@ -92,6 +92,8 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 | **M4** | 测试迁移与回归：bridge 现有 4 个测试文件改指新入口；`TestManagerHermeticEnvD` 适配；`remotetools` 全套回归；契约/等价测试扩展 | 1.5–2.5 天 |
 | **M5**（可选） | `cmd/aicli-envd-bridge` 保留为兼容 shim（转发到新入口并打印弃用提示） | +0.5 天 |
 
+> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2），剩余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
+
 合计：**5.5–10.5 人日**（单人、含测试；±50%，M0 完成后收敛区间）。
 
 ## 5. 验收门（全部通过才宣告完成）
@@ -148,6 +150,22 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 5. **`remotetargets` 展开未切换**（按计划"先保留 bridge 兼容"）：envd 条目仍指向 `aicli-envd-bridge`；切换点连同 `--allow-command*` 等 flag 对齐一并在 M4 完成。
 
 **接入面不确定性已消除**：M2（全量搬迁）、M3（编辑三件套）可直接按 §3/§4 推进，无需再做探测。
+
+### 8.2 M2 文件面已完成（2026-10-28）
+
+**落地内容**：`envd_tools.go` 迁入 8 个工具体（`ls/glob/grep/write/mkdir/remove/move/host_metrics`）；`envd_backend.go` 补 mutation jail（`resolveMutationPath`/`protectedRoot`）与档位门禁；测试桩扩展为覆盖 filesystem unary 全家 + 进程流式。
+
+**档位挂点定稿**（§7 风险项的实现答案）：新增 `envdExtensionTiers`（name→Profile 映射）+ `envdToolEnabled` 统一门禁。扩展工具沿用共享的 `readonly ⊂ standard ⊂ ops` 词汇，`ReadOnly` 硬覆盖与显式 `--tools` 收窄对两条后端一致生效——**没有**出现第二套档位系统。实测档位面：readonly 5 个、standard 9 个（edit 三件套尚未迁入，见 M3）。
+
+**验证**：envd 后端累计 14 个用例全绿（M0 4 + 本轮 10）；`remotetools` 全量 52.1s 通过；`remotetargets` / `cmd/aicli-envd-bridge` 通过；vet / gofmt 干净。新增断言类型：越权在**联系 envd 之前**拒绝（glob 搜索根、超限 write、remove 保护根、move 目的端）与 write→view 真回读闭环。
+
+**口径补充**：
+
+- `write` 仍保留 **1 MiB** argv 上限（§6 约束不变）；`view` 上限走共享 `Limits.CaptureLimit`（默认 2 MiB）。
+- `ls` 用 `ListDir(depth)` 原生递归参数，排序/格式化仍在本端（与 bridge 语义一致）。
+- `glob`/`grep` 依旧依赖目标机 `find` / `rg`→`grep` 回落（grep 回报所用引擎）。
+
+**剩余**：`shell`（含 `--allow-command*` flag 接入，命令授权已共享 `CommandPolicy`）、`pty_*`、`watch_dir` → M2 收尾；`edit/append_write/apply_patch` → M3；`remotetargets` 展开切换 → M4。
 
 - 实施结论：（M1–M5 完成后继续回填：实际耗时 / 偏差 / 遗留项）
 
