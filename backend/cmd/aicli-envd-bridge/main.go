@@ -52,13 +52,13 @@ func (p profile) allows(tool string) bool {
 	switch p {
 	case profileReadonly:
 		switch tool {
-		case "view", "ls", "glob", "grep", "host_metrics":
+		case "view", "ls", "glob", "grep", "host_metrics", "watch_dir":
 			return true
 		}
 		return false
 	case profileStandard:
 		switch tool {
-		case "view", "ls", "glob", "grep", "host_metrics", "write", "mkdir", "remove", "move":
+		case "view", "ls", "glob", "grep", "host_metrics", "watch_dir", "write", "mkdir", "remove", "move":
 			return true
 		}
 		return false
@@ -243,6 +243,20 @@ var toolDefs = map[string]toolDef{
 		Name:        "host_metrics",
 		Description: "Report CPU count, memory and disk totals for the envd target.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	},
+	"watch_dir": {
+		Name: "watch_dir",
+		Description: "Watch a directory on the envd target for a bounded window and return change events. " +
+			"The stream exists only for this call; call again for another window.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":       stringProp("Directory path, absolute or relative to the workspace"),
+				"wait_ms":    map[string]any{"type": "integer", "description": "How long to wait for events (default 5000, max 30000)"},
+				"max_events": map[string]any{"type": "integer", "description": "Maximum change events to return (default 50, max 500)"},
+			},
+			"required": []string{"path"},
+		},
 	},
 }
 
@@ -658,6 +672,8 @@ func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage
 		return b.toolShell(callCtx, args)
 	case "host_metrics":
 		return b.toolMetrics(callCtx)
+	case "watch_dir":
+		return b.toolWatchDir(callCtx, args)
 	case "pty_start":
 		return b.toolPtyStart(callCtx, args)
 	case "pty_write":

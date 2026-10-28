@@ -164,10 +164,12 @@ func TestProfileAllows(t *testing.T) {
 	}{
 		{profileReadonly, "view", true},
 		{profileReadonly, "host_metrics", true},
+		{profileReadonly, "watch_dir", true},
 		{profileReadonly, "write", false},
 		{profileReadonly, "shell", false},
 		{profileStandard, "write", true},
 		{profileStandard, "move", true},
+		{profileStandard, "watch_dir", true},
 		{profileStandard, "shell", false},
 		{profileStandard, "pty_start", false},
 		{profileOps, "shell", true},
@@ -190,9 +192,9 @@ func TestToolListRespectsProfileAndPrefix(t *testing.T) {
 		profile profile
 		count   int
 	}{
-		{profileReadonly, 5},
-		{profileStandard, 9},
-		{profileOps, 15},
+		{profileReadonly, 6},
+		{profileStandard, 10},
+		{profileOps, 16},
 	}
 	for _, tc := range cases {
 		b := testBridge(tc.profile, "remote_10-0-0-9")
