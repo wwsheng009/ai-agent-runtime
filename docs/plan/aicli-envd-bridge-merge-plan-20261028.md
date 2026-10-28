@@ -88,11 +88,11 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 | **M0** ✅ | 垂直切片：`view` 单工具走通 `--backend envd`（含 jail + audit + MCP 级 e2e），收敛接入面不确定性——**已完成，结论见 §8** | 0.5 天（实测相符） |
 | **M1** ✅ | 骨架：`Config` 增加 backend/envd 字段；`serveFlags` 增加 `--backend / --addr / --user / --token-env / --ca-file / --call-timeout`；`NewServer` 按 backend 分叉（stdio-only、跳过本地 Workspace 校验）——**随 M0 一并完成**（见 §8.1） | 0.5–1.5 天（实测 0） |
 | **M2** | 全量搬迁：16 工具体 + jail/watch/pty + `toolkit.Tool` 适配器 + audit/Limits 接线 | 2.5–4 天 |
-| **M3** 🟡 | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试——**已完成 edit/append_write**，剩 `apply_patch`（见 §8.3） | 1–2.5 天 |
+| **M3** ✅ | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试——**全部完成**（§8.3、§8.4） | 1–2.5 天（实测相符） |
 | **M4** | 测试迁移与回归：bridge 现有 4 个测试文件改指新入口；`TestManagerHermeticEnvD` 适配；`remotetools` 全套回归；契约/等价测试扩展 | 1.5–2.5 天 |
 | **M5**（可选） | `cmd/aicli-envd-bridge` 保留为兼容 shim（转发到新入口并打印弃用提示） | +0.5 天 |
 
-> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2）；M3 已完成 `edit`/`append_write`，剩 `apply_patch`（§8.3）。M2 尚余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
+> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2）；M3 全部完成（§8.3、§8.4）——**envd 的 standard 档已与原厂一致**。M2 尚余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
 
 合计：**5.5–10.5 人日**（单人、含测试；±50%，M0 完成后收敛区间）。
 
@@ -179,7 +179,30 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **验证**：envd 后端累计 23 个用例全绿（M0 5 + M2 9 + M3 9）；`remotetools` 全量 45.2s 通过；`remotetargets` / `cmd/aicli-envd-bridge` 通过；vet / gofmt 干净（`go vet` 当场抓到一处 `%d` 参数顺序错误，已修）。实测档位面：readonly 5 / **standard 11**（edit、append_write 已就位）。
 
-**剩余**：`apply_patch`（复用 `ParsePatch`+`ApplyHunks`）→ M3 收尾；`shell` / `pty_*` / `watch_dir` → M2 收尾；`remotetargets` 展开切换 → M4。
+**剩余**：见 §8.4 末尾（M2 收尾与 M4）。
+
+### 8.4 M3 已完成 apply_patch（2026-10-28）
+
+**结论：envd 的 `standard` 档已与原厂对齐**——共享核心面 `view/ls/glob/grep + write/edit/append_write/apply_patch` 全部到位，另有 envd 扩展 `host_metrics/mkdir/remove/move`（standard 计 12 个工具）。
+
+**实现方式**：`envd_patch.go` 只做**编排**，补丁语言全数复用纯函数（`ParsePatch`、`ApplyHunks`、`UnifiedDiff`、`PatchSummaryMessage`、`FormatEditSuccessContent`、`PatchNotFoundMessage`、`DocumentExtensionRefusal`、`SanitizePatchPath`）。`mutatecore.PatchResult` 字段全导出，因此渲染层直接复用、结果文本与本地/ssh 面同形。`ApplyPatch` 本身**不可用**：`PatchBindings` 有 `Write/Remove` seam 却没有 Read seam（读走 `Inspect` 的 `os.ReadFile`），在 envd 上会读本地写远端——正是本次收编要消除的混合作用域错误。
+
+**编排守住三条规则**：
+
+1. **预授权**：所有路径先过 jail（delete 与 move 源用 mutation jail，其余用 canonical jail），任一越界则整个补丁不执行；
+2. **事务回滚**：已落地的写/建/删记入日志，后续失败时逆序撤销（含删掉本补丁刚创建的文件）；
+3. **移动与新增的拒绝规则**：改名不得覆盖已存在目标；add 遇不同内容拒绝、遇相同内容视为回放。
+
+**过程中修正的两个真实缺陷**（均由测试抓出）：
+
+- 纯改名（`*** Move to:` 无 hunk）被送去调 `ApplyHunks`，而它对空 hunk 列表是故意报错的 → 改为仅在 `len(Hunks) > 0` 时应用。
+- 写入逻辑若按原状会在 edit 与补丁编排里各一份 → 抽出 `storeBytes`（NUL 检查、上限、写后 stat 确认为单一实现），`store` 退化为其包装。
+
+**验证**：envd 后端累计 **31 个用例全绿**（M0 5 + M2 9 + M3 17）；`remotetools` 全量 35.4s 通过；`remotetargets` / bridge 通过；vet / gofmt 干净。排序类断言含：stale hunk 后本补丁新建的文件已消失且目标字节未变；越界路径使同一补丁的**内侧文件也未被改**。
+
+**限制**：与 edit 同源——内容经 argv，含 NUL（BOM/UTF-16）一律拒绝并说明替代路径。
+
+**剩余**：M2 收尾（`shell` + `--allow-command*`、`pty_*`、`watch_dir`）；M4（`remotetargets` 展开切换 + bridge 测试迁移）。
 
 - 实施结论：（M1–M5 完成后继续回填：实际耗时 / 偏差 / 遗留项）
 
