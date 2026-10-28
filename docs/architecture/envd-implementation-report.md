@@ -205,17 +205,23 @@ shell "id -un; pwd"           → 真实用户与工作目录
 
 ## 4. 已知限制（不要当成已解决）
 
-### 4.1 明文 envd 只支持 HTTP/1.1
+### 4.1 进程控制是 unary，不需要 HTTP/2（2026-10-28 更正）
 
-`SendInput` / `SendSignal` / `UpdatePty` 是 client-streaming，需要 HTTP/2。沙箱内 h2c 协商失败（实际仍是 HTTP/1.1），服务端对这些方法返回 **501**。
+早期探测把 `SendInput` / `SendSignal` / `Update` 误判为 client-streaming：探测请求用了
+`application/connect+json` 流式内容类型，服务端返回 **415**，被解读成“需要 HTTP/2”。
+对照 envd 生成代码并在真实环境复测后确认：
 
-客户端**显式检测** `ProtoMajor()` 并返回可操作错误，而不是挂起：
+- `SendSignal` / `SendInput` / `Update` 是 **unary** RPC，普通 HTTP/1.1 即可；415 是内容类型用错。
+- 只有 `StreamInput` 是 client-streaming、需要 HTTP/2（本客户端未暴露）。
+- 请求字段按 protobuf 而非猜测：`{"process":{"pid":N},"signal":"SIGNAL_SIGTERM"}`、
+  `{"input":{"stdin":"<b64>"}}`（PTY 进程用 `{"input":{"pty":"<b64>"}}`）、
+  `{"pty":{"size":{"rows":R,"cols":C}}}`。
+- `ProcessEvent` 的 pty 输出是 **base64 bytes**，不是 fd；`StartRequest` 的 pty 配置是 `pty.size`，且没有 `stdin` 字段。
 
-> `envdclient: SendInput requires HTTP/2 but the connection negotiated HTTP/1; enable TLS or use an h2c-capable transport`
+2026-10-28 在真实 envd（TLS）上实测通过：**stdin 往返、SIGTERM 终止（exit 143）、PTY 启动 + pty 写入 + resize**。
 
-**影响**：交互式 stdin（REPL）、信号中断、PTY resize 目前不可用。桥接因此没有暴露 `stdin` 类工具。
-
-**解法**：给 envd 配 TLS（`--ca-file` + `Config.TLS`），HTTP/2 会自动协商。这条路径代码已就绪，但**未在真机验证过**（沙箱内 envd 是明文）。
+> 早期“明文只支持 HTTP/1.1、stdin/PTY 不可用”的结论作废。TLS 仍建议启用（加密 + HTTP/2），但不再是这些控制调用的前提。
+> 服务器端 TLS 由本地补丁的 `-tls-cert` / `-tls-key` 参数提供（见部署手册）。
 
 ### 4.2 WatchDir 事件结构（2026-10-28 实测确认）
 
@@ -346,7 +352,9 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **envd 日志脱敏（本地补丁）**：`scripts/envd/patches/0001-redact-process-logs.patch` 将默认级别降为 info，`process_start` 只记录可执行文件与参数个数，stdout/stderr 与 unary 请求体降为 debug；实测写入唯一标记后 journald 中 marker/请求体/stdout 命中均为 0。
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
-- **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、client-streaming 的 HTTP/2 守卫与 HTTP/2/TLS 成功路径（SendSignal/SendInput/UpdatePty 请求体校验）、请求参数校验、bridge 的调用超时用例。
+- **进程控制协议修正**：`SendSignal` / `SendInput` / `Update` 从误判的 client-streaming 改为 **unary**，请求体按 protobuf 修正（`signal` 枚举、`input.stdin` / `input.pty`、`pty.size`）；新增 `SendPtyInput`；`ProcessEvent.pty` 按 **bytes** 解码；`StartRequest` 支持 `pty.size` 并移除不存在的 `stdin` 字段。
+- **TLS 与 ca_file（已实机验证）**：本地补丁为 envd 增加 `-tls-cert` / `-tls-key`，Go 的 `ListenAndServeTLS` 自动协商 HTTP/2；spec 新增 `?ca_file=`，`remote.tls.caFile` 存在时 registry 生成 `https://` 地址并透传 `--ca-file`。
+- **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、进程控制 unary 请求体（signal/stdin/pty/size）、PTY 输出解码与启动配置、请求参数校验、bridge 的调用超时用例。
 - **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
 
 ### 8.3 保留的限制
@@ -354,7 +362,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **symlink 可绕过文本级 jail**：jail 只做 `path.Clean` + 前缀匹配，bridge 无法在本地解析远端软链；
 - **审计为 opt-in、命令白名单仍缺失**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；envd 路径仍没有 remotetools 的命令白名单（envd 侧同样没有）；
 - **无法做 envd 版本校验**：envd 没有版本端点；
-- **TLS / HTTP/2 已用 httptest 覆盖（含 client-streaming 成功路径），但未在真实 envd 上验证**（承接 §4.1）；
+- **TLS / HTTP/2 已在真实 envd 上验证**（自签证书 + SAN；控制类 RPC 本身不需要 HTTP/2）；仅 `StreamInput`（client-streaming）仍未暴露；
 - **写入硬上限 1 MiB**（承接 §4.3）；
 - **WatchDir 仅确认 CREATE 一类事件**：结构已确认（§4.2），其余事件标签未逐一实测；未暴露 `watch` 工具。
 
@@ -370,9 +378,10 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - systemd 常驻 + `/init` 访问令牌（`/etc/envd/envd.env`，600 root）+ `ExecStartPost` 重启自动重装；令牌轮换 = 改 env 文件后重启。
 - iptables 仅放行回环与运维工作站（`/32`）：实测临时移除放行后客户端访问超时，恢复后 401/200 语义正确；回环始终 204。
 - 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
-- live 集成测试 **6/6 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUserIsUnauthenticated）。
+- TLS：自签证书 SAN 覆盖 `127.0.0.1` / `172.18.3.238` / `localhost`，unit 以 `-tls-cert/-tls-key` 启动；令牌引导脚本改用 `https://127.0.0.1:49983/init --cacert`。
+- live 集成测试 **10/10 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUser / **StdinRoundTrip / SignalTermination / PTYRoundTrip** / WatchDir）。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**70 PASS / 0 FAIL / 6 SKIP**（envdclient 25、remotetargets 31、bridge 14）。
+- 离线回归：**73 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 33、bridge 14）。
 
 ### 9.2 aicli agent 真实巡检场景
 

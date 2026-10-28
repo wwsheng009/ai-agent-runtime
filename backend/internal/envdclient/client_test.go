@@ -3,6 +3,8 @@ package envdclient
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -441,17 +443,41 @@ func liveClient(t *testing.T) *Client {
 	t.Helper()
 	addr := os.Getenv("ENVD_TEST_ADDR")
 	if addr == "" {
-		t.Skip("set ENVD_TEST_ADDR (and optionally ENVD_TEST_USER) to run live tests")
+		t.Skip("set ENVD_TEST_ADDR (and optionally ENVD_TEST_USER / ENVD_TEST_TOKEN / ENVD_TEST_CA_FILE) to run live tests")
 	}
 	user := os.Getenv("ENVD_TEST_USER")
 	if user == "" {
 		user = "user"
 	}
-	client, err := Dial(Config{Addr: addr, User: user, AccessToken: os.Getenv("ENVD_TEST_TOKEN"), Timeout: 20 * time.Second})
+	client, err := Dial(Config{
+		Addr:        addr,
+		User:        user,
+		AccessToken: os.Getenv("ENVD_TEST_TOKEN"),
+		TLS:         liveTLSConfig(t),
+		Timeout:     20 * time.Second,
+	})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	return client
+}
+
+// liveTLSConfig returns a trust pool for ENVD_TEST_CA_FILE, or nil for plaintext.
+func liveTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+	caFile := strings.TrimSpace(os.Getenv("ENVD_TEST_CA_FILE"))
+	if caFile == "" {
+		return nil
+	}
+	pemBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		t.Fatalf("read ENVD_TEST_CA_FILE: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		t.Fatalf("ENVD_TEST_CA_FILE %q contains no certificates", caFile)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 }
 
 // TestLiveMetrics proves reachability and that the metrics payload decodes.
@@ -612,7 +638,7 @@ func mustNormalize(t *testing.T, addr string) string {
 // Client directly.
 func httpClientFor(t *testing.T) *http.Client {
 	t.Helper()
-	client, err := Dial(Config{Addr: "127.0.0.1:1", User: "user"})
+	client, err := Dial(Config{Addr: "127.0.0.1:1", User: "user", TLS: liveTLSConfig(t)})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

@@ -395,8 +395,14 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("remote.workspace %q must be an absolute path for transport envd (envd performs no path checks, so a relative workspace cannot bound anything; use envd://user@host:49983/abs/path)", workspace)
 		}
 
+		// A TLS target must be addressed as https:// so the bridge's client
+		// negotiates HTTPS (and therefore HTTP/2 for client-streaming RPCs).
+		addr := fmt.Sprintf("%s:%d", host, port)
+		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
+			addr = "https://" + addr
+		}
 		args := []string{
-			"--addr", fmt.Sprintf("%s:%d", host, port),
+			"--addr", addr,
 			"--user", strings.TrimSpace(target.SSH.User),
 			"--workspace", workspace,
 			"--tool-prefix", prefix,

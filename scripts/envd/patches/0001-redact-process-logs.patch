@@ -97,3 +97,57 @@ index 93ebe48e..9c41c46c 100644
  		Msg(fmt.Sprintf("Process with pid %d started", p.cmd.Process.Pid))
  
  	return uint32(p.cmd.Process.Pid), nil
+diff --git a/packages/envd/main.go b/packages/envd/main.go
+index 1e349c5e..5afda73a 100644
+--- a/packages/envd/main.go
++++ b/packages/envd/main.go
+@@ -44,6 +44,11 @@ var (
+ 
+ 	isNotFC bool
+ 	port    int64
++	// tlsCertFile/tlsKeyFile enable HTTPS. Go's ListenAndServeTLS negotiates
++	// HTTP/2 automatically, which is what the client-streaming RPCs
++	// (SendInput/SendSignal/Update) require.
++	tlsCertFile string
++	tlsKeyFile  string
+ 
+ 	versionFlag  bool
+ 	commitFlag   bool
+@@ -86,6 +91,20 @@ func parseFlags() {
+ 		"a command to run on the daemon start",
+ 	)
+ 
++	flag.StringVar(
++		&tlsCertFile,
++		"tls-cert",
++		"",
++		"path to a TLS certificate; enables HTTPS with HTTP/2",
++	)
++
++	flag.StringVar(
++		&tlsKeyFile,
++		"tls-key",
++		"",
++		"path to the TLS private key",
++	)
++
+ 	flag.Parse()
+ }
+ 
+@@ -203,7 +222,15 @@ func main() {
+ 
+ 	go portScanner.ScanAndBroadcast()
+ 
+-	err := s.ListenAndServe()
++	var err error
++	if tlsCertFile != "" || tlsKeyFile != "" {
++		if tlsCertFile == "" || tlsKeyFile == "" {
++			log.Fatalf("both -tls-cert and -tls-key are required to enable TLS")
++		}
++		err = s.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
++	} else {
++		err = s.ListenAndServe()
++	}
+ 	if err != nil {
+ 		log.Fatalf("error starting server: %v", err)
+ 	}

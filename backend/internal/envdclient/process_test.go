@@ -2,13 +2,11 @@ package envdclient
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -42,24 +40,6 @@ func TestListDecodesProcesses(t *testing.T) {
 	}
 }
 
-// TestSendBidiRequiresHTTP2 pins the actionable error for client-streaming
-// methods on a plaintext HTTP/1.1 connection.
-func TestSendBidiRequiresHTTP2(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	client, err := Dial(Config{Addr: srv.URL, User: "n9e"})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	err = client.SendSignal(context.Background(), 42, "SIGTERM")
-	if err == nil || !strings.Contains(err.Error(), "requires HTTP/2") {
-		t.Fatalf("SendSignal error = %v, want the HTTP/2 requirement", err)
-	}
-}
-
 // TestProcessRequestValidation covers the local guards that avoid pointless
 // network calls.
 func TestProcessRequestValidation(t *testing.T) {
@@ -72,6 +52,9 @@ func TestProcessRequestValidation(t *testing.T) {
 	if err := client.SendSignal(ctx, 1, ""); err == nil {
 		t.Fatal("SendSignal accepted an empty signal")
 	}
+	if err := client.SendSignal(ctx, 1, "SIGUSR1"); err == nil {
+		t.Fatal("SendSignal accepted an unsupported signal")
+	}
 	if err := client.SendInput(ctx, 1, nil); err != nil {
 		t.Fatalf("SendInput with no bytes = %v, want nil", err)
 	}
@@ -80,36 +63,29 @@ func TestProcessRequestValidation(t *testing.T) {
 	}
 }
 
-// TestClientStreamingOverHTTP2 covers the success path of the client-streaming
-// methods: with HTTP/2 negotiated, the request frame must carry the expected
-// payload and a clean end-stream must decode as success.
-func TestClientStreamingOverHTTP2(t *testing.T) {
+// TestProcessControlUnary pins the wire shape of the control RPCs.
+//
+// These three are unary (not client-streaming): they work over plain HTTP/1.1,
+// and the field layout follows the protobuf messages, not the guessed nested
+// form the first implementation used.
+func TestProcessControlUnary(t *testing.T) {
 	var bodies []map[string]any
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		frame, err := ReadFrame(r.Body)
-		if err != nil {
-			t.Errorf("ReadFrame(%s): %v", r.URL.Path, err)
-			http.Error(w, "bad frame", http.StatusBadRequest)
-			return
-		}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := io.ReadAll(r.Body)
 		var body map[string]any
-		if err := json.Unmarshal(frame.Payload, &body); err != nil {
+		if err := json.Unmarshal(payload, &body); err != nil {
 			t.Errorf("decode %s request: %v", r.URL.Path, err)
 		}
 		bodies = append(bodies, body)
-
-		w.Header().Set("Content-Type", "application/connect+json")
-		_, _ = w.Write(EncodeFrame(flagEndStream, []byte("{}")))
+		if contentType := r.Header.Get("Content-Type"); contentType != "application/json" {
+			t.Errorf("%s content-type = %q, want application/json", r.URL.Path, contentType)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
 	}))
-	srv.EnableHTTP2 = true
-	srv.StartTLS()
 	defer srv.Close()
 
-	client, err := Dial(Config{
-		Addr: srv.URL,
-		User: "n9e",
-		TLS:  &tls.Config{InsecureSkipVerify: true},
-	})
+	client, err := Dial(Config{Addr: srv.URL, User: "n9e"})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -124,22 +100,79 @@ func TestClientStreamingOverHTTP2(t *testing.T) {
 	if err := client.UpdatePty(ctx, 42, 80, 24); err != nil {
 		t.Fatalf("UpdatePty: %v", err)
 	}
+	if err := client.SendPtyInput(ctx, 42, []byte("hi")); err != nil {
+		t.Fatalf("SendPtyInput: %v", err)
+	}
 
-	if len(bodies) != 3 {
-		t.Fatalf("recorded %d request bodies, want 3", len(bodies))
+	if len(bodies) != 4 {
+		t.Fatalf("recorded %d request bodies, want 4", len(bodies))
 	}
-	signal := bodies[0]["process"].(map[string]any)
-	if signal["pid"] != float64(42) || signal["signal"] != "SIGTERM" {
-		t.Errorf("SendSignal body = %v, want pid 42 / SIGTERM", signal)
+
+	signalBody := bodies[0]
+	if signalBody["signal"] != "SIGNAL_SIGTERM" {
+		t.Errorf("SendSignal signal = %v, want SIGNAL_SIGTERM", signalBody["signal"])
 	}
-	input := bodies[1]["process"].(map[string]any)
-	inputData := input["input"].(map[string]any)
-	if decoded, err := base64.StdEncoding.DecodeString(inputData["data"].(string)); err != nil || string(decoded) != "hello" {
-		t.Errorf("SendInput data = %v (decoded %q, err %v), want hello", inputData["data"], decoded, err)
+	if pid := signalBody["process"].(map[string]any)["pid"]; pid != float64(42) {
+		t.Errorf("SendSignal pid = %v, want 42", pid)
 	}
-	pty := bodies[2]["process"].(map[string]any)
-	ptySize := pty["pty"].(map[string]any)
-	if ptySize["cols"] != float64(80) || ptySize["rows"] != float64(24) {
-		t.Errorf("UpdatePty body = %v, want 80x24", ptySize)
+
+	inputBody := bodies[1]
+	if pid := inputBody["process"].(map[string]any)["pid"]; pid != float64(42) {
+		t.Errorf("SendInput pid = %v, want 42", pid)
+	}
+	encoded := inputBody["input"].(map[string]any)["stdin"].(string)
+	if decoded, err := base64.StdEncoding.DecodeString(encoded); err != nil || string(decoded) != "hello" {
+		t.Errorf("SendInput stdin = %q (decoded %q, err %v), want hello", encoded, decoded, err)
+	}
+
+	updateBody := bodies[2]
+	size := updateBody["pty"].(map[string]any)["size"].(map[string]any)
+	if size["cols"] != float64(80) || size["rows"] != float64(24) {
+		t.Errorf("UpdatePty size = %v, want 80x24", size)
+	}
+
+	ptyInput := bodies[3]["input"].(map[string]any)["pty"].(string)
+	if decoded, err := base64.StdEncoding.DecodeString(ptyInput); err != nil || string(decoded) != "hi" {
+		t.Errorf("SendPtyInput pty = %q (decoded %q, err %v), want hi", ptyInput, decoded, err)
+	}
+}
+
+// TestProcessEventPtyData covers the pty arm of the data event: it is base64
+// bytes, not a file descriptor.
+func TestProcessEventPtyData(t *testing.T) {
+	var event ProcessEvent
+	if err := json.Unmarshal([]byte(`{"event":{"data":{"pty":"cHR5LW91dHB1dAo="}}}`), &event); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if event.Kind != EventData {
+		t.Fatalf("kind = %v, want data", event.Kind)
+	}
+	if string(event.Pty) != "pty-output\n" {
+		t.Fatalf("pty = %q, want pty-output\\n", event.Pty)
+	}
+	if len(event.Stdout) != 0 || len(event.Stderr) != 0 {
+		t.Fatalf("stdout/stderr = %q/%q, want empty", event.Stdout, event.Stderr)
+	}
+}
+
+// TestStartRequestPtyShape pins the start payload for a pty process.
+func TestStartRequestPtyShape(t *testing.T) {
+	payload, err := json.Marshal(StartRequest{
+		Process: ProcessConfig{Cmd: "/bin/sh"},
+		Pty:     &PTY{Size: &PTYSize{Cols: 80, Rows: 24}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	size := body["pty"].(map[string]any)["size"].(map[string]any)
+	if size["cols"] != float64(80) || size["rows"] != float64(24) {
+		t.Fatalf("pty size = %v, want 80x24", size)
+	}
+	if _, ok := body["stdin"]; ok {
+		t.Fatalf("start payload still carries stdin: %v", body)
 	}
 }

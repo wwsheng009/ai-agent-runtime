@@ -24,7 +24,7 @@ envd :49983
 │   ├── List           枚举进程
 │   ├── Connect        接入已有进程的 I/O（流式）
 │   ├── StreamInput    流式写 stdin（可用）
-│   ├── SendInput      写 stdin（已定义，返回 415/501）
+│   ├── SendInput      写 stdin（unary，HTTP/1.1 可用）
 │   ├── SendSignal     发信号（SIGTERM / SIGKILL）
 │   └── Update         更新进程属性（pty 的 cols/rows）
 │
@@ -47,10 +47,10 @@ envd :49983
 | `process.Process/Start` | 200 | ✅ 可用（流式） |
 | `process.Process/Connect` | 200 | ✅ 可用（流式） |
 | `process.Process/StreamInput` | 200 | ✅ 可用（流式） |
-| `process.Process/List` | 415 | ✅ 存在（需流式头） |
-| `process.Process/SendInput` | 415 | ✅ 存在 |
-| `process.Process/SendSignal` | 415 | ✅ 存在 |
-| `process.Process/Update` | 415 | ✅ 存在 |
+| `process.Process/List` | 415 | ✅ 存在（unary；探测用错 Content-Type） |
+| `process.Process/SendInput` | 415 | ✅ 存在（unary） |
+| `process.Process/SendSignal` | 415 | ✅ 存在（unary） |
+| `process.Process/Update` | 415 | ✅ 存在（unary） |
 | `filesystem.Filesystem/WatchDir` | 200 | ✅ 可用（流式） |
 | `filesystem.Filesystem/ListDir` | 415 | ✅ 存在 |
 | `filesystem.Filesystem/Stat` | 415 | ✅ 存在 |
@@ -62,6 +62,11 @@ envd :49983
 | `filesystem.Filesystem/RemoveWatcher` | 415 | ✅ 存在 |
 
 > `415` 不代表方法不存在，而是 Connect 协议要求正确的流式 Content-Type 与分帧体。它证明**路由已注册**。
+
+> **2026-10-28 更正**：`List` / `SendInput` / `SendSignal` / `Update` 实际是 **unary** RPC；
+> 上表的 415 来自探测时使用了流式 `Content-Type`。改用 `application/json` 后它们在 HTTP/1.1
+> 下即可用，已由真实 envd 验证（stdin 往返、SIGTERM、PTY resize）。只有 `StreamInput` 是
+> client-streaming、需要 HTTP/2。
 
 ---
 
@@ -118,7 +123,7 @@ SIGNAL_UNSPECIFIED   默认
 
 ### 2.4 Update —— 窗口尺寸调整
 
-`Update` 配合 `cols` / `rows` 字段，是**终端尺寸变更**接口。这是 PTY 会话的标配：前端窗口变化时，通过它通知后端调整 `$COLUMNS` / `$LINES`，否则 `vim`、`top` 会排版错乱。
+`Update` 是**终端尺寸变更**接口，请求形状为 `{"process":{...},"pty":{"size":{"rows":R,"cols":C}}}`。这是 PTY 会话的标配：前端窗口变化时，通过它通知后端调整 `$COLUMNS` / `$LINES`，否则 `vim`、`top` 会排版错乱。
 
 > 这条能力反向证明了**交互式终端是真实支持的一等场景**，不是事后补丁。
 

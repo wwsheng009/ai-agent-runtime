@@ -89,6 +89,11 @@ type Spec struct {
 	// tool call to. Empty disables auditing. It never contains argument or result
 	// payloads.
 	AuditLog string
+
+	// CAFile is the local PEM bundle used to verify the envd TLS certificate.
+	// Setting it also switches the generated bridge address to https://, which is
+	// what enables HTTP/2 and the client-streaming RPCs.
+	CAFile string
 }
 
 // ParseSpec parses the compact remote target syntax.
@@ -107,6 +112,9 @@ type Spec struct {
 //
 // envd targets also accept ?audit_log=<local-path> to enable the bridge's JSONL
 // audit trail (metadata only).
+//
+// envd targets also accept ?ca_file=<local-pem> to verify a TLS endpoint; the
+// generated bridge address becomes https:// and negotiates HTTP/2.
 //
 // The query keys mirror the fields of SSHConfig / RemoteConfig that are commonly
 // non-default; everything else keeps its documented default.
@@ -208,6 +216,7 @@ func ParseSpec(raw string) (*Spec, error) {
 			spec.EnvDTokenEnv = strings.TrimSpace(query.Get("token_env"))
 			spec.CallTimeout = strings.TrimSpace(query.Get("call_timeout"))
 			spec.AuditLog = strings.TrimSpace(query.Get("audit_log"))
+			spec.CAFile = strings.TrimSpace(query.Get("ca_file"))
 		}
 	}
 	return spec, nil
@@ -304,6 +313,9 @@ func (s *Spec) Expand() (*Expanded, error) {
 		target.Remote.Binary = s.Binary
 		target.Remote.CallTimeout = s.CallTimeout
 		target.Remote.AuditLog = s.AuditLog
+		if s.CAFile != "" {
+			target.Remote.TLS = &TLSFiles{CAFile: s.CAFile}
+		}
 		// Empty falls back to the bridge's own default so the generated entry
 		// names the environment variable explicitly instead of relying on an
 		// implicit one.

@@ -33,14 +33,27 @@ type ProcessConfig struct {
 	Cwd string `json:"cwd,omitempty"`
 }
 
+// PTYSize is the terminal size used when starting or resizing a pty.
+type PTYSize struct {
+	Cols uint32 `json:"cols,omitempty"`
+	Rows uint32 `json:"rows,omitempty"`
+}
+
+// PTY configures a pseudo-terminal at process start.
+//
+// envd creates a stdin pipe for every process, so SendInput works without any
+// extra start flag.
+type PTY struct {
+	Size *PTYSize `json:"size,omitempty"`
+}
+
 // StartRequest is the body of process.Process/Start.
 type StartRequest struct {
 	// Process is the command to run.
 	Process ProcessConfig `json:"process"`
 
-	// Stdin keeps stdin open so Input can be sent later. It requires HTTP/2 on
-	// the transport; see StreamReader.ProtoMajor.
-	Stdin bool `json:"stdin,omitempty"`
+	// Pty starts the process under a pseudo-terminal of this size.
+	Pty *PTY `json:"pty,omitempty"`
 
 	// Tag labels the process so a caller can find it again in List output.
 	Tag string `json:"tag,omitempty"`
@@ -206,8 +219,8 @@ type ProcessEvent struct {
 	Stdout []byte
 	Stderr []byte
 
-	// PtyFd is the pty index when the child ran under a pty.
-	PtyFd int32
+	// Pty holds decoded pty output when the child runs under a pty.
+	Pty []byte
 
 	// Raw keeps the original frame so a caller can log an arm this client does
 	// not model instead of silently dropping it.
@@ -221,7 +234,7 @@ type wireEvent struct {
 		Data  *struct {
 			Stdout string `json:"stdout,omitempty"`
 			Stderr string `json:"stderr,omitempty"`
-			Pty    int32  `json:"pty,omitempty"`
+			Pty    string `json:"pty,omitempty"`
 		} `json:"data,omitempty"`
 		End *EndEvent `json:"end,omitempty"`
 	} `json:"event,omitempty"`
@@ -245,7 +258,6 @@ func (e *ProcessEvent) UnmarshalJSON(payload []byte) error {
 		e.Start = wire.Event.Start
 	case wire.Event.Data != nil:
 		e.Kind = EventData
-		e.PtyFd = wire.Event.Data.Pty
 		if wire.Event.Data.Stdout != "" {
 			decoded, err := base64.StdEncoding.DecodeString(wire.Event.Data.Stdout)
 			if err != nil {
@@ -259,6 +271,13 @@ func (e *ProcessEvent) UnmarshalJSON(payload []byte) error {
 				return fmt.Errorf("envdclient: decode base64 stderr: %w", err)
 			}
 			e.Stderr = decoded
+		}
+		if wire.Event.Data.Pty != "" {
+			decoded, err := base64.StdEncoding.DecodeString(wire.Event.Data.Pty)
+			if err != nil {
+				return fmt.Errorf("envdclient: decode base64 pty: %w", err)
+			}
+			e.Pty = decoded
 		}
 	case wire.Event.End != nil:
 		e.Kind = EventEnd
@@ -380,66 +399,74 @@ func (c *Client) List(ctx context.Context) ([]ProcessInfo, error) {
 	return resp.Processes, nil
 }
 
-// sendBidi reports the HTTP/2 requirement honestly rather than pretending to
-// support a call the transport cannot carry.
+// signalEnum maps a caller's signal name to envd's protobuf enum.
 //
-// envd exposes SendInput / SendSignal / Update as client-streaming methods. Over
-// plaintext HTTP/1.1 the server answers 501, so this checks the negotiated
-// protocol first and returns an actionable error instead of a confusing status.
-func (c *Client) sendBidi(ctx context.Context, method string, body any) error {
-	stream, err := c.Stream(ctx, processService, method, body)
-	if err != nil {
-		return err
+// The wire field is an enum, so "SIGTERM" must travel as "SIGNAL_SIGTERM".
+// Accepting both spellings keeps the call site readable.
+func signalEnum(signal string) (string, error) {
+	switch strings.ToUpper(strings.TrimSpace(signal)) {
+	case "SIGTERM", "SIGNAL_SIGTERM", "TERM":
+		return "SIGNAL_SIGTERM", nil
+	case "SIGKILL", "SIGNAL_SIGKILL", "KILL":
+		return "SIGNAL_SIGKILL", nil
+	default:
+		return "", fmt.Errorf("envdclient: unsupported signal %q (want SIGTERM or SIGKILL)", signal)
 	}
-	defer func() { _ = stream.Close() }()
-	if proto := stream.ProtoMajor(); proto < 2 {
-		return fmt.Errorf("envdclient: %s requires HTTP/2 but the connection negotiated HTTP/%d; enable TLS or use an h2c-capable transport", method, proto)
-	}
-	var event ProcessEvent
-	if err := stream.Recv(&event); err != nil && err != io.EOF {
-		return err
-	}
-	return nil
 }
 
 // SendSignal delivers a signal to a running process.
 //
-// Requires HTTP/2.
+// This is a unary RPC; it works over HTTP/1.1 as well as HTTP/2.
 func (c *Client) SendSignal(ctx context.Context, pid uint32, signal string) error {
-	if signal == "" {
-		return fmt.Errorf("envdclient: SendSignal requires a signal name such as SIGTERM")
+	name, err := signalEnum(signal)
+	if err != nil {
+		return err
 	}
-	return c.sendBidi(ctx, "SendSignal", map[string]any{
-		"process": map[string]any{"pid": pid, "signal": signal},
-	})
+	return c.doUnary(ctx, processService, "SendSignal", map[string]any{
+		"process": map[string]any{"pid": pid},
+		"signal":  name,
+	}, nil)
 }
 
 // SendInput writes bytes to a process's stdin.
 //
-// Requires a stdin-enabled process (StartRequest.Stdin) and HTTP/2.
+// The payload follows the ProcessInput oneof: {"input":{"stdin":"<base64>"}}.
+// envd creates a stdin pipe for every process, so no extra start flag is needed.
+// This is a unary RPC; it works over HTTP/1.1 as well as HTTP/2.
 func (c *Client) SendInput(ctx context.Context, pid uint32, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	return c.sendBidi(ctx, "SendInput", map[string]any{
-		"process": map[string]any{
-			"pid":   pid,
-			"input": map[string]any{"data": base64.StdEncoding.EncodeToString(data)},
-		},
-	})
+	return c.doUnary(ctx, processService, "SendInput", map[string]any{
+		"process": map[string]any{"pid": pid},
+		"input":   map[string]any{"stdin": base64.StdEncoding.EncodeToString(data)},
+	}, nil)
+}
+
+// SendPtyInput writes bytes to a process running under a pty.
+//
+// envd rejects stdin writes for pty processes ("tty assigned to process"), so pty
+// input must use the other arm of the ProcessInput oneof.
+func (c *Client) SendPtyInput(ctx context.Context, pid uint32, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	return c.doUnary(ctx, processService, "SendInput", map[string]any{
+		"process": map[string]any{"pid": pid},
+		"input":   map[string]any{"pty": base64.StdEncoding.EncodeToString(data)},
+	}, nil)
 }
 
 // UpdatePty resizes a process's pty.
 //
-// Requires HTTP/2.
+// The wire shape is {"process":{...},"pty":{"size":{"rows":R,"cols":C}}}.
+// This is a unary RPC; it works over HTTP/1.1 as well as HTTP/2.
 func (c *Client) UpdatePty(ctx context.Context, pid uint32, cols, rows uint32) error {
 	if cols == 0 || rows == 0 {
 		return fmt.Errorf("envdclient: UpdatePty requires non-zero cols and rows")
 	}
-	return c.sendBidi(ctx, "Update", map[string]any{
-		"process": map[string]any{
-			"pid": pid,
-			"pty": map[string]any{"cols": cols, "rows": rows},
-		},
-	})
+	return c.doUnary(ctx, processService, "Update", map[string]any{
+		"process": map[string]any{"pid": pid},
+		"pty":     map[string]any{"size": map[string]any{"rows": rows, "cols": cols}},
+	}, nil)
 }

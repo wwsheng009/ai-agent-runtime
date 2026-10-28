@@ -345,3 +345,53 @@ func TestParseSpecEnvDAuditLog(t *testing.T) {
 		t.Fatalf("args = %q, want --audit-log /tmp/envd-audit.jsonl", args)
 	}
 }
+
+// TestParseSpecEnvDCAFile covers the TLS switch: a CA file makes the bridge
+// address https:// (HTTP/2) instead of plain host:port.
+func TestParseSpecEnvDCAFile(t *testing.T) {
+	spec, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app?ca_file=/tmp/envd-ca.pem")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if spec.CAFile != "/tmp/envd-ca.pem" {
+		t.Fatalf("CAFile = %q, want /tmp/envd-ca.pem", spec.CAFile)
+	}
+	expanded, err := spec.Expand()
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	var args string
+	for _, cfg := range expanded.Servers {
+		args = strings.Join(cfg.Args, " ")
+	}
+	if !strings.Contains(args, "--addr https://10.0.0.9:49983") {
+		t.Errorf("args = %q, want an https address", args)
+	}
+	if !strings.Contains(args, "--ca-file /tmp/envd-ca.pem") {
+		t.Errorf("args = %q, want --ca-file", args)
+	}
+}
+
+// TestExpandOneEnvDTLSUsesHTTPS covers a YAML target that sets tls.caFile
+// directly, without going through ParseSpec.
+func TestExpandOneEnvDTLSUsesHTTPS(t *testing.T) {
+	cfg, _, err := expandOne("envdtest", Target{
+		Transport: TransportEnvD,
+		SSH:       SSHConfig{Host: "10.0.0.9", Port: DefaultEnvDPort, User: "dev"},
+		Remote: RemoteConfig{
+			Profile:   "readonly",
+			Workspace: "/srv/app",
+			TLS:       &TLSFiles{CAFile: "/tmp/envd-ca.pem"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expandOne: %v", err)
+	}
+	joined := strings.Join(cfg.Args, " ")
+	if !strings.Contains(joined, "--addr https://10.0.0.9:49983") {
+		t.Errorf("args = %q, want an https address", joined)
+	}
+	if !strings.Contains(joined, "--ca-file /tmp/envd-ca.pem") {
+		t.Errorf("args = %q, want --ca-file", joined)
+	}
+}

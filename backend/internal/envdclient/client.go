@@ -78,9 +78,9 @@ type Config struct {
 	// a private CA, a client certificate, or custom retry behaviour.
 	HTTPClient *http.Client
 
-	// TLS enables HTTPS. With TLS, HTTP/2 is negotiated automatically and envd's
-	// client-streaming methods (SendInput, SendSignal, Update) become usable;
-	// plaintext envd only offers HTTP/1.1, where those answer 501.
+	// TLS enables HTTPS (and HTTP/2 negotiation). SendInput/SendSignal/Update are
+	// unary and work over either protocol; only the client-streaming StreamInput
+	// RPC (not exposed here) would require HTTP/2.
 	TLS *tls.Config
 
 	// Timeout bounds each unary call. Zero uses defaultTimeout.
@@ -339,8 +339,8 @@ func (c *Client) Stream(ctx context.Context, service, method string, request any
 
 // ProtoMajor reports the negotiated HTTP version.
 //
-// A caller that needs envd's client-streaming methods should check for 2 first,
-// because plaintext envd only speaks HTTP/1.1 there.
+// Only the client-streaming StreamInput RPC would require HTTP/2; the process
+// control calls (SendInput/SendSignal/Update) are unary.
 func (s *StreamReader) ProtoMajor() int {
 	if s == nil || s.resp == nil {
 		return 0

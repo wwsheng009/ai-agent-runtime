@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,12 +33,25 @@ func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
 		t.Skip("set AICLI_ENVD_TEST_BRIDGE, ENVD_TEST_ADDR, ENVD_TEST_USER and ENVD_TEST_WORKSPACE to run")
 	}
 
+	args := []string{
+		"--addr", addr,
+		"--user", user,
+		"--workspace", workspace,
+		"--profile", "readonly",
+		"--tool-prefix", "remote_envd",
+	}
+	if caFile := strings.TrimSpace(os.Getenv("ENVD_TEST_CA_FILE")); caFile != "" {
+		args = append(args, "--ca-file", caFile)
+	}
+	argsJSON, err := json.Marshal(args)
+	require.NoError(t, err)
+
 	configPath := filepath.Join(t.TempDir(), "envd-mcp.json")
 	config := fmt.Sprintf(`{
   "mcpServers": {
     "envdtest": {
       "command": %q,
-      "args": ["--addr", %q, "--user", %q, "--workspace", %q, "--profile", "readonly", "--tool-prefix", "remote_envd"],
+      "args": %s,
       "env": {"AICLI_ENVD_TOKEN": %q},
       "enabled": true,
       "type": "stdio",
@@ -49,7 +63,7 @@ func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
     "healthCheckInterval": "1m",
     "connectTimeout": "15s"
   }
-}`, bridge, addr, user, workspace, os.Getenv("ENVD_TEST_TOKEN"))
+}`, bridge, argsJSON, os.Getenv("ENVD_TEST_TOKEN"))
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o644))
 
 	mgr := NewManager()
