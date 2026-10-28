@@ -54,11 +54,13 @@ func main() {
 	grepPath := flag.String("grep-path", "", "root to search, for the capped-grep check")
 	grepPattern := flag.String("grep-pattern", "root", "pattern for the capped-grep check")
 	grepCap := flag.Int("grep-cap-bytes", 512, "per-call payload cap used to prove early stop")
+	writePath := flag.String("write-path", "", "absolute target path to write for the fidelity check (removed afterwards)")
+	forbiddenPath := flag.String("forbidden-path", "", "absolute target path the user may not write but the daemon can")
 	flag.Parse()
 
 	token := strings.TrimSpace(os.Getenv(*tokenEnv))
-	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" || *grepPath == "" {
-		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable, -secret and -grep-path are required"))
+	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" || *grepPath == "" || *writePath == "" {
+		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable, -secret, -grep-path and -write-path are required"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -128,6 +130,46 @@ func main() {
 		fmt.Printf("PASS capped grep: results fit under the cap without truncation (%d bytes)\n", len(search))
 	}
 	capped.close()
+
+	// The write channel: content no longer travels as argv, so a payload past the
+	// 1 MiB argv ceiling is simply a write - and it must arrive byte for byte. The
+	// proof does not go through our own tools: the driver reads the file back from
+	// the target's disk as the target user.
+	written := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, *roots, false, 0)
+	defer written.close()
+	// The fidelity check must not leave a 4 MB file behind on the target.
+	defer func() { _ = os.Remove(*writePath) }()
+	payload := strings.Repeat("tricky%%payload\\$(not-a-cmd) é行\n", 70000)
+	if _, err := written.call(ctx, *prefix+"__write", map[string]interface{}{
+		"path": *writePath, "content": payload,
+	}); err != nil {
+		fail("large write", err)
+	}
+	landed, err := os.ReadFile(*writePath)
+	if err != nil {
+		fail("read the written file back from the target disk", err)
+	}
+	if string(landed) != payload {
+		fail("write fidelity", fmt.Errorf("asked for %d bytes, the disk holds %d", len(payload), len(landed)))
+	}
+	fmt.Printf("PASS large write: %d bytes landed unchanged (the argv ceiling no longer applies)\n", len(landed))
+
+	// And the gate: the daemon could write this path, the target user cannot.
+	// Whether the file survived is checked by the caller with root, because reading
+	// it is exactly what this user may not do.
+	if *forbiddenPath != "" {
+		refusal, refusalErr := written.call(ctx, *prefix+"__write", map[string]interface{}{
+			"path": *forbiddenPath, "content": "pwned\n",
+		})
+		if refusalErr == nil {
+			fail("write gate", fmt.Errorf("the write to %s SUCCEEDED: %s", *forbiddenPath, firstChars(refusal, 200)))
+		}
+		if !strings.Contains(refusalErr.Error(), "permission denied writing") {
+			fail("write gate wording", fmt.Errorf("expected a permission refusal, got: %v", refusalErr))
+		}
+		fmt.Printf("PASS write gate: %s refused (%v)\n", *forbiddenPath, refusalErr)
+	}
+	written.close()
 
 	fmt.Println("ALL CHECKS PASSED")
 }

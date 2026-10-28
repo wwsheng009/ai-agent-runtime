@@ -320,9 +320,10 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 		return envdErrorResult("path is required"), nil
 	}
 	content, _ := params["content"].(string)
-	if len(content) > envdMaxWriteBytes {
-		return envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell",
-			len(content), envdMaxWriteBytes), nil
+	// Checked before the path is resolved: a write that cannot be carried by any
+	// available channel must not touch the target at all.
+	if refusal := be.refuseOversizedProcessWrite(ctx, len(content)); refusal != nil {
+		return refusal, nil
 	}
 	target, resolveErr := be.resolvePath(ctx, raw)
 	if resolveErr != nil {
@@ -341,11 +342,16 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 	}
 	// createParents=false matches the shared write contract: a missing parent is a
 	// refusal, not a silent mkdir (apply_patch add is the tool that creates trees).
-	sizeAfter, refusal := be.storeBytes(ctx, target, []byte(content), false)
+	sizeAfter, channel, refusal := be.storeBytes(ctx, target, []byte(content), false)
 	if refusal != nil {
 		return refusal, nil
 	}
-	return envdTextResult(fmt.Sprintf("%s %s (%d bytes).", verb, be.workspaceRelative(target), sizeAfter)), nil
+	result := envdTextResult(fmt.Sprintf("%s %s (%d bytes).", verb, be.workspaceRelative(target), sizeAfter))
+	// Which channel moved the bytes is observable, not guessed: the ceiling a
+	// refusal reports depends on it, and envdGrep already publishes its engine for
+	// the same reason.
+	result.Metadata = map[string]interface{}{"write_channel": channel}
+	return result, nil
 }
 
 // envdMkdir creates a directory. An existing directory is reported as such

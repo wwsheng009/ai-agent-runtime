@@ -2,7 +2,9 @@ package envdclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -282,6 +284,165 @@ func TestFilesURLKeepsPathVerbatim(t *testing.T) {
 		}
 		if string(read.Data) != "ok" {
 			t.Fatalf("read %q got %q", target, read.Data)
+		}
+	}
+}
+
+// --- the write side of the channel ---
+
+type writeStub struct {
+	server *httptest.Server
+	// landed records what actually reached the "disk" per path.
+	landed map[string]string
+	// fields records every multipart field name seen, to prove the client uses
+	// exactly "file" (anything else is silently skipped by envd).
+	fields []string
+	// echoList decides what the 200 response lists. envd 0.2.11 lists nothing at
+	// all when it skipped every part, and the client must not call that a success.
+	echoList bool
+	// rejectMultipart answers like 0.2.11 does to a raw body upload.
+	rejectMultipart bool
+}
+
+func newWriteStub(t *testing.T) *writeStub {
+	t.Helper()
+	stub := &writeStub{landed: map[string]string{}, echoList: true}
+	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != FilesPath || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		reader, err := r.MultipartReader()
+		if err != nil {
+			// Measured on 0.2.11: a raw application/octet-stream body is answered
+			// with a 500 multipart parse error, not a 415.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprintf(w, `{"code":500,"message":"error parsing multipart form: %v"}`, err)
+			return
+		}
+		target := r.URL.Query().Get("path")
+		type entry struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		}
+		written := []entry{}
+		for {
+			part, partErr := reader.NextPart()
+			if partErr != nil {
+				break
+			}
+			body, _ := io.ReadAll(part)
+			_ = part.Close()
+			stub.fields = append(stub.fields, part.FormName())
+			if part.FormName() != "file" {
+				continue
+			}
+			if stub.rejectMultipart {
+				continue
+			}
+			stub.landed[target] = string(body)
+			if stub.echoList {
+				written = append(written, entry{Path: target, Name: target, Type: "file"})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(written)
+	}))
+	t.Cleanup(stub.server.Close)
+	return stub
+}
+
+func writeClient(t *testing.T, stub *writeStub) *Client {
+	t.Helper()
+	client, err := Dial(Config{Addr: stub.server.URL, User: "n9e", AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return client
+}
+
+func TestWriteFileUsesTheFileFieldName(t *testing.T) {
+	stub := newWriteStub(t)
+	if err := writeClient(t, stub).WriteFile(context.Background(), "/srv/app/note.txt", []byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if stub.landed["/srv/app/note.txt"] != "hello" {
+		t.Fatalf("landed = %v", stub.landed)
+	}
+	if len(stub.fields) != 1 || stub.fields[0] != "file" {
+		t.Fatalf("multipart fields = %v, want exactly [file]: envd skips anything else and still answers 200", stub.fields)
+	}
+}
+
+// Bytes must arrive unchanged: content is a stream here, never an argv element.
+func TestWriteFileSendsBytesVerbatim(t *testing.T) {
+	payload := "100%% sure\tbackslash \\ $(no-substitution) and a é"
+	stub := newWriteStub(t)
+	if err := writeClient(t, stub).WriteFile(context.Background(), "/srv/app/x", []byte(payload)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := stub.landed["/srv/app/x"]; got != payload {
+		t.Fatalf("bytes changed:\n got %q\nwant %q", got, payload)
+	}
+}
+
+// The trap this client exists to survive: 200, an empty list, nothing written.
+func TestWriteFileRejectsSilentNoOp(t *testing.T) {
+	stub := newWriteStub(t)
+	stub.echoList = false
+	err := writeClient(t, stub).WriteFile(context.Background(), "/srv/app/ghost", []byte("x"))
+	if err == nil {
+		t.Fatal("a write that listed nothing must not be reported as success")
+	}
+	if !IsFilesCode(err, FilesNothingWritten) {
+		t.Fatalf("want nothing_written, got %v", err)
+	}
+	if IsFilesChannelIssue(err) {
+		t.Fatal("a dropped write is about the write, not the channel: no silent fallback")
+	}
+}
+
+func TestWriteFileMapsChannelFailures(t *testing.T) {
+	t.Run("unauthorized", func(t *testing.T) {
+		stub := newWriteStub(t)
+		stub.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":401,"message":"missing signature query parameter"}`))
+		})
+		err := writeClient(t, stub).WriteFile(context.Background(), "/a", []byte("x"))
+		if !IsFilesCode(err, FilesUnauthorized) || !IsFilesChannelIssue(err) {
+			t.Fatalf("want an unauthorized channel issue, got %v", err)
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		stub := newWriteStub(t)
+		stub.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":400,"message":"path '/a' is a directory"}`))
+		})
+		err := writeClient(t, stub).WriteFile(context.Background(), "/a", []byte("x"))
+		if !IsFilesCode(err, FilesIsDirectory) {
+			t.Fatalf("want is_directory, got %v", err)
+		}
+	})
+}
+
+func TestPathBase(t *testing.T) {
+	cases := map[string]string{
+		"/srv/app/note.txt": "note.txt",
+		"/srv/app/":         "app",
+		"note.txt":          "note.txt",
+		"/":                 "file",
+		"":                  "file",
+	}
+	for input, want := range cases {
+		if got := pathBase(input); got != want {
+			t.Fatalf("pathBase(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

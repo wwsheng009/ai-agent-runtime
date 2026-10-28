@@ -55,11 +55,21 @@ type envdStub struct {
 	// serves them, because envd's /files opens files as the daemon user; that
 	// asymmetry is exactly what the read gate exists to close.
 	unreadable map[string]bool
+	// unwritable lists paths the target user may not create or replace, for the
+	// same reason on the write side.
+	unwritable map[string]bool
 	// modes pins the permission bits Stat reports, so the gate's world-readable
 	// fast path is testable.
 	modes map[string]uint32
+	// owners pins the owner name Stat reports for a path.
+	owners map[string]string
 	// filesLog records one entry per /files request: "path range=<header>".
 	filesLog []string
+	// writeDropsSilently reproduces the protocol trap measured on 0.2.11: envd
+	// answers a write whose multipart field is not exactly "file" with 200 and an
+	// empty list, writing nothing. A client that trusts the status code reports a
+	// successful write that never happened.
+	writeDropsSilently bool
 	// grepFrames splits the stubbed search output into N data frames, so a test can
 	// tell "the client stopped reading early" apart from "the client drained
 	// everything and trimmed the string". streamCut records that a later write
@@ -74,6 +84,7 @@ type envdStub struct {
 	// target-side canonicalization, which spawns once per resolved path.
 	catCalls       atomic.Int64
 	readableChecks atomic.Int64
+	writableChecks atomic.Int64
 	removed        []string
 	moved          [][2]string
 	created        []string
@@ -118,6 +129,61 @@ func (s *envdStub) markUnreadable(target string) {
 		s.unreadable = map[string]bool{}
 	}
 	s.unreadable[target] = true
+}
+
+// markUnwritable declares that the executing user may not create or replace a path.
+func (s *envdStub) markUnwritable(target string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unwritable == nil {
+		s.unwritable = map[string]bool{}
+	}
+	s.unwritable[target] = true
+}
+
+// silentlyDropWrites turns the stub into the "200 [] but nothing landed" server,
+// so the client's write verification is exercised against the failure mode that
+// actually exists rather than against a friendly invention.
+func (s *envdStub) silentlyDropWrites() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writeDropsSilently = true
+}
+
+// dropsWrites reports whether the stub is in the silent-drop mode above.
+func (s *envdStub) dropsWrites() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeDropsSilently
+}
+
+// canWrite answers the way the target kernel would for the executing user.
+func (s *envdStub) canWrite(target string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.unwritable[target]
+}
+
+// ownerOf returns the owner Stat reports for a path: the pinned one when set, the
+// stub's default user otherwise.
+func (s *envdStub) ownerOf(target string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if owner, ok := s.owners[target]; ok {
+		return owner
+	}
+	return "dev"
+}
+
+// pinOwner sets the owner Stat reports for a path, so the write gate's
+// "certainly yes" fast path (own directory, own file) is testable.
+func (s *envdStub) pinOwner(target, owner string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owners == nil {
+		s.owners = map[string]string{}
+	}
+	s.owners[target] = owner
 }
 
 // pinMode sets the permission bits Stat reports for one path.
@@ -179,6 +245,12 @@ func (s *envdStub) isDir(target string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.dirs[target]; ok {
+		return true
+	}
+	// The workspace root exists as a directory on every target; a stub that says
+	// otherwise would make the write gate's "owned directory" fast path unreachable
+	// and hide a real cost (one spawned probe per new file).
+	if target == "/srv/app" || target == "/" {
 		return true
 	}
 	for candidate := range s.files {
@@ -267,6 +339,7 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 			writeJSON(w, map[string]any{"entry": map[string]any{
 				"name": base(in.Path), "path": in.Path, "type": "FILE_TYPE_DIRECTORY",
 				"size": "4096", "mode": 511, "permissions": "drwxr-xr-x",
+				"owner": stub.ownerOf(in.Path), "group": stub.ownerOf(in.Path),
 			}})
 			return
 		}
@@ -283,7 +356,7 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		writeJSON(w, map[string]any{"entry": map[string]any{
 			"name": base(in.Path), "path": in.Path, "type": "FILE_TYPE_FILE",
 			"size": fmt.Sprintf("%d", len(content)), "mode": mode, "permissions": permissions,
-			"owner": "dev", "group": "dev",
+			"owner": stub.ownerOf(in.Path), "group": stub.ownerOf(in.Path),
 		}})
 	})
 
@@ -399,6 +472,55 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 			_, _ = w.Write([]byte("Query argument username is required, but not found"))
 			return
 		}
+
+		if r.Method == http.MethodPost {
+			// Multipart only: the deployed 0.2.11 rejects a raw body, and the part
+			// field must be exactly "file" or nothing is written while the answer is
+			// still 200 with an empty list. Both shapes are measured, and both are
+			// reproduced here so the client's checks are exercised against the real
+			// protocol rather than a convenient invention.
+			reader, readerErr := r.MultipartReader()
+			if readerErr != nil {
+				writeConnectError(w, http.StatusInternalServerError, "internal", fmt.Sprintf("error parsing multipart form: %v", readerErr))
+				return
+			}
+			if stub.isDir(target) {
+				writeConnectError(w, http.StatusBadRequest, "invalid_argument", fmt.Sprintf("path '%s' is a directory", target))
+				return
+			}
+			written := []map[string]any{}
+			for {
+				part, partErr := reader.NextPart()
+				if partErr == io.EOF {
+					break
+				}
+				if partErr != nil {
+					writeConnectError(w, http.StatusInternalServerError, "internal", fmt.Sprintf("error reading form: %v", partErr))
+					return
+				}
+				if part.FormName() != "file" {
+					_ = part.Close()
+					continue
+				}
+				body, readErr := io.ReadAll(part)
+				_ = part.Close()
+				if readErr != nil {
+					writeConnectError(w, http.StatusInternalServerError, "internal", readErr.Error())
+					return
+				}
+				if stub.dropsWrites() {
+					// Accepted, listed nothing, wrote nothing.
+					continue
+				}
+				// The daemon writes as itself: an unwritable-for-the-user path still
+				// lands here, which is why the gate must run before this call.
+				stub.put(target, string(body))
+				written = append(written, map[string]any{"name": base(target), "path": target, "type": "file"})
+			}
+			writeJSON(w, written)
+			return
+		}
+
 		if stub.isDir(target) {
 			writeConnectError(w, http.StatusBadRequest, "invalid_argument", fmt.Sprintf("path '%s' is a directory", target))
 			return
@@ -518,6 +640,15 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 			case "aicli-envd-write":
 				stub.put(arg(3), arg(4))
 				writeProcessStream(t, w, nil, nil, 0)
+			case "aicli-envd-writable":
+				// The write gate's `test -w`, answered as the kernel would for the
+				// executing user - not as the daemon, which could write anyway.
+				stub.writableChecks.Add(1)
+				if stub.canWrite(arg(3)) {
+					writeProcessStream(t, w, nil, nil, 0)
+					return
+				}
+				writeProcessStream(t, w, nil, []byte(fmt.Sprintf("cannot write %s\n", arg(3))), 1)
 			case "aicli-envd-readable":
 				// `test -r "$1"`, answered by the stub the way the target kernel
 				// would: exit 1 with a permission complaint when the executing user

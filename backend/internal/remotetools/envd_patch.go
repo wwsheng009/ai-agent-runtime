@@ -197,7 +197,7 @@ func (a *envdPatchApplier) applyAdd(ctx context.Context, plan envdPatchPlan) *to
 		}
 		return envdErrorResult("cannot add %s: the file already exists with different content (use an update hunk instead)", plan.target)
 	}
-	written, refusal := a.backend.storeBytes(ctx, plan.target, mutatecore.Encode(body, mutatecore.UTF8), true)
+	written, _, refusal := a.backend.storeBytes(ctx, plan.target, mutatecore.Encode(body, mutatecore.UTF8), true)
 	if refusal != nil {
 		return refusal
 	}
@@ -246,7 +246,7 @@ func (a *envdPatchApplier) applyUpdate(ctx context.Context, plan envdPatchPlan) 
 			return envdErrorResult("cannot move %s -> %s: the destination already exists", plan.target, plan.moveTarget)
 		}
 		encoded := mutatecore.Encode(updated, state.enc)
-		written, refusal := a.backend.storeBytes(ctx, plan.moveTarget, encoded, true)
+		written, _, refusal := a.backend.storeBytes(ctx, plan.moveTarget, encoded, true)
 		if refusal != nil {
 			return refusal
 		}
@@ -270,7 +270,7 @@ func (a *envdPatchApplier) applyUpdate(ctx context.Context, plan envdPatchPlan) 
 		return nil // replay: the hunk describes an already-applied change
 	}
 	encoded := mutatecore.Encode(updated, state.enc)
-	written, refusal := a.backend.storeBytes(ctx, plan.target, encoded, true)
+	written, _, refusal := a.backend.storeBytes(ctx, plan.target, encoded, true)
 	if refusal != nil {
 		return refusal
 	}
@@ -323,7 +323,7 @@ func (a *envdPatchApplier) rollback(ctx context.Context) string {
 	}
 	for i := len(a.undo.restores) - 1; i >= 0; i-- {
 		entry := a.undo.restores[i]
-		if _, refusal := a.backend.storeBytes(ctx, entry.path, entry.raw, true); refusal != nil {
+		if _, _, refusal := a.backend.storeBytes(ctx, entry.path, entry.raw, true); refusal != nil {
 			problems = append(problems, fmt.Sprintf("restore %s: %s", entry.path, envdResultText(refusal)))
 		}
 	}

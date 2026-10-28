@@ -56,6 +56,22 @@ const (
 	// here, because a Go copy of POSIX ownership, group and ACL rules would be a
 	// second, wrong implementation of that decision.
 	envdReadableScript = `set -e; if test -r "$1"; then exit 0; else echo "cannot open $1" >&2; exit 1; fi`
+	// envdWritableScript asks whether THIS user may put these bytes at this path.
+	// It walks up to the nearest existing ancestor first, because writing a new
+	// file is a permission question about the directory, not about the file, and
+	// apply_patch legitimately creates trees that do not exist yet.
+	//
+	// Same reason as the read gate: envd opens the destination as the daemon user
+	// (measured: root), so without this check remote_x__write could overwrite a
+	// file that remote_x__shell could not - the write direction of the same
+	// asymmetry, and the worse one.
+	envdWritableScript = `set -e; p="$1"; while [ ! -e "$p" ] && [ "$p" != "/" ]; do p=$(dirname -- "$p"); done; if test -w "$p"; then exit 0; else echo "cannot write $p" >&2; exit 1; fi`
+)
+
+// envdWriteChannel* name the transport that moved the written bytes.
+const (
+	envdWriteChannelFiles   = "files"
+	envdWriteChannelProcess = "process"
 )
 
 // envdReadChannel* name the transport that actually moved the bytes, published
@@ -395,43 +411,149 @@ func (be *envdBackend) workspaceRelative(target string) string {
 // ValidateWriteTarget), while `apply_patch` add creates it. A single auto-mkdir
 // for every write would make the same tool behave two ways depending on the
 // transport, which is the drift this merge exists to remove.
-func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte, createParents bool) (int64, *toolkit.ToolResult) {
+// refuseOversizedProcessWrite reports a write that the only available channel
+// cannot carry, or nil when the write may proceed.
+//
+// One function owns this rule. The ceiling is the argv limit of the process
+// channel - the operating system's, not a policy choice - so it applies only when
+// the native endpoint is unavailable; with /files there is no argv involved and a
+// 2 MiB payload is simply a write.
+//
+// It is also called BEFORE the path is resolved, which keeps a write that is
+// certain to fail from touching the target at all. That invariant was tested
+// before this existed, and re-deriving it in each tool is how two limits with two
+// messages appear for one setting.
+func (be *envdBackend) refuseOversizedProcessWrite(ctx context.Context, size int) *toolkit.ToolResult {
+	if size <= envdMaxWriteBytes {
+		return nil
+	}
+	if usable, _ := be.filesChannelUsable(ctx); usable {
+		return nil
+	}
+	return envdFailureMeta("UNSUPPORTED", map[string]interface{}{
+		"failure_class":  "payload_too_large",
+		"file_size":      size,
+		"max_file_bytes": envdMaxWriteBytes,
+	}, "content is %d bytes, above the %d byte write limit; split the file or use shell", size, envdMaxWriteBytes)
+}
+
+func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte, createParents bool) (int64, string, *toolkit.ToolResult) {
+	// knownParent carries the directory entry when the caller already had to look
+	// it up, so the write gate can answer the common case without a process spawn.
+	var knownParent *envdclient.Entry
 	if strings.IndexByte(string(encoded), 0) >= 0 {
-		return 0, envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_payload", "file_path": target},
-			"cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use a UTF-8 payload or shell for binary content", target)
+		return 0, "", envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_payload", "file_path": target},
+			"cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one refuses. Use a UTF-8 payload or shell for binary content", target)
 	}
-	if len(encoded) > envdMaxWriteBytes {
-		return 0, envdFailureMeta("UNSUPPORTED", map[string]interface{}{
-			"failure_class":  "payload_too_large",
-			"file_size":      len(encoded),
-			"max_file_bytes": envdMaxWriteBytes,
-		}, "content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
+	if refusal := be.refuseOversizedProcessWrite(ctx, len(encoded)); refusal != nil {
+		return 0, "", refusal
 	}
+	if parent := path.Dir(target); !createParents && parent != "/" && parent != be.workspace {
+		// Refuse exactly like the local surface: no silent directory creation.
+		// This matters more now that the native channel exists, because envd's own
+		// upload handler calls EnsureDirs and would happily create the tree.
+		if entry, statErr := be.client.Stat(ctx, parent); statErr != nil {
+			if !errorsAsConnectCode(statErr, "not_found") {
+				return 0, "", envdErrorResult("%s", describeEnvDError(statErr, parent))
+			}
+			return 0, "", envdToolError(newToolError(CodeNotFound, "create the parent directory first",
+				"parent directory does not exist: %s", parent))
+		} else {
+			knownParent = &entry
+		}
+	}
+
+	if usable, _ := be.filesChannelUsable(ctx); usable {
+		if refusal := be.refuseIfTargetCannotWrite(ctx, target, knownParent); refusal != nil {
+			return 0, envdWriteChannelFiles, refusal
+		}
+		err := be.client.WriteFile(ctx, target, encoded)
+		switch {
+		case err == nil:
+			entry, statErr := be.client.Stat(ctx, target)
+			if statErr != nil {
+				return int64(len(encoded)), envdWriteChannelFiles, envdErrorResult("write %s landed but size could not be confirmed: %v", target, statErr)
+			}
+			return entry.SizeBytes(), envdWriteChannelFiles, nil
+		case envdclient.IsFilesChannelIssue(err):
+			// Remember it once, then fall through to the process channel.
+			be.markFilesUnusable(err)
+		default:
+			return 0, envdWriteChannelFiles, envdErrorResult("%s", describeFilesError(err, target))
+		}
+	}
+
+	// The process channel carries content as one argv element; the rule lives in
+	// refuseOversizedProcessWrite, which already ran before the path was resolved
+	// and again here for callers that come straight to storeBytes.
 	script := envdWriteScript
 	if createParents {
 		script = envdWriteMkdirScript
-	} else if parent := path.Dir(target); parent != "/" && parent != be.workspace {
-		// Refuse exactly like the local surface: no silent directory creation.
-		if _, statErr := be.client.Stat(ctx, parent); statErr != nil {
-			if !errorsAsConnectCode(statErr, "not_found") {
-				return 0, envdErrorResult("%s", describeEnvDError(statErr, parent))
-			}
-			return 0, envdToolError(newToolError(CodeNotFound, "create the parent directory first",
-				"parent directory does not exist: %s", parent))
-		}
 	}
 	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-write", target, string(encoded)})
 	if err != nil {
-		return 0, envdErrorResult("write %s: %v", target, err)
+		return 0, envdWriteChannelProcess, envdErrorResult("write %s: %v", target, err)
 	}
 	if code != 0 {
-		return 0, envdErrorResult("write %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
+		return 0, envdWriteChannelProcess, envdErrorResult("write %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
 	}
 	entry, statErr := be.client.Stat(ctx, target)
 	if statErr != nil {
-		return int64(len(encoded)), envdErrorResult("write %s landed but size could not be confirmed: %v", target, statErr)
+		return int64(len(encoded)), envdWriteChannelProcess, envdErrorResult("write %s landed but size could not be confirmed: %v", target, statErr)
 	}
-	return entry.SizeBytes(), nil
+	return entry.SizeBytes(), envdWriteChannelProcess, nil
+}
+
+// refuseIfTargetCannotWrite returns a refusal when the user this backend acts as
+// could not create or replace this path, or nil when the write may proceed.
+//
+// The fast path is deliberately one-sided: it skips the probe only when the answer
+// is certainly yes (the target, or its directory, is owned by this user with the
+// relevant bits set). Anything uncertain goes to the target kernel, which is the
+// only place that knows the real uid, groups and ACLs. Ownership is compared by
+// name because envd reports both the owner name and the mode.
+func (be *envdBackend) refuseIfTargetCannotWrite(ctx context.Context, target string, knownParent *envdclient.Entry) *toolkit.ToolResult {
+	if be == nil || be.client == nil {
+		return nil
+	}
+	user := be.client.User()
+	if entry, err := be.client.Stat(ctx, target); err == nil {
+		if entry.Owner == user && entry.Mode&0o777&0o200 != 0 {
+			return nil
+		}
+	} else if !errorsAsConnectCode(err, "not_found") {
+		return envdErrorResult("%s", describeEnvDError(err, target))
+	} else if knownParent == nil {
+		// The file is new: creating it is a question about the directory, and one
+		// Stat answers it for the overwhelmingly common case (my own workspace),
+		// which is what keeps apply_patch from spawning a probe per file.
+		if parent, statErr := be.client.Stat(ctx, path.Dir(target)); statErr == nil {
+			knownParent = &parent
+		} else if !errorsAsConnectCode(statErr, "not_found") {
+			return envdErrorResult("%s", describeEnvDError(statErr, path.Dir(target)))
+		}
+	}
+	if knownParent != nil && knownParent.Owner == user &&
+		knownParent.Mode&0o777&(0o200|0o100) == (0o200|0o100) {
+		// A directory the user owns and may write and traverse: creation is certain.
+		return nil
+	}
+	// Either the path does not exist yet or the cheap proof failed: ask the kernel,
+	// which also resolves the "write into a directory" case.
+	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", envdWritableScript, "aicli-envd-writable", target})
+	if err != nil {
+		return envdErrorResult("cannot confirm write permission for %s: %v", target, err)
+	}
+	if code == 0 {
+		return nil
+	}
+	detail := strings.TrimSpace(string(stderr))
+	if detail == "" {
+		detail = fmt.Sprintf("exit %d", code)
+	}
+	return envdFailureMeta(CodeInvalidArgument, map[string]interface{}{
+		"file_path": target,
+	}, "permission denied writing %s: user %s cannot create or replace it (%s)", target, user, detail)
 }
 
 // run executes one argv command on the target with cwd set to the workspace.

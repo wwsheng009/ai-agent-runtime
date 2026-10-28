@@ -95,7 +95,11 @@ func (be *envdBackend) store(ctx context.Context, target, text string, enc mutat
 		writeEncoding = enc
 	}
 	encoded := mutatecore.Encode(text, writeEncoding)
-	sizeAfter, refusal := be.storeBytes(ctx, target, encoded, false)
+	// The write channel is not surfaced on this surface: an edit rewrites bytes the
+	// caller already described, so which transport carried them changes nothing the
+	// model can act on, unlike `write` where the ceiling (and therefore the refusal
+	// text) depends on it. storeBytes still applies the same gate on both paths.
+	sizeAfter, _, refusal := be.storeBytes(ctx, target, encoded, false)
 	if refusal != nil {
 		return 0, refusal
 	}

@@ -163,8 +163,43 @@ func TestEnvDWriteRefusesMissingParent(t *testing.T) {
 	}
 }
 
-func TestEnvDWriteRejectsOversizedContentBeforeAnyCall(t *testing.T) {
+// The native channel lifted the argv ceiling: content no longer travels as one
+// command-line argument, so a file larger than 1 MiB is a write, not a refusal.
+// The bytes must land unchanged and no process may be spawned to do it.
+func TestEnvDWriteSendsLargeContentThroughNativeChannel(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+
+	payload := strings.Repeat("a", (1<<20)+1)
+	wrote := callTool(t, ctx, session, "remote_envd__write", map[string]interface{}{
+		"path": "big.txt", "content": payload,
+	})
+	if !strings.Contains(wrote, "Created big.txt") || !strings.Contains(wrote, "1048577 bytes") {
+		t.Fatalf("large write = %q", wrote)
+	}
+	landed, ok := stub.content("/srv/app/big.txt")
+	if !ok {
+		t.Fatal("the large write did not land")
+	}
+	if landed != payload {
+		t.Fatalf("content changed in transit: wrote %d bytes, stored %d", len(payload), len(landed))
+	}
+	if stub.catCalls.Load() != 0 {
+		t.Fatalf("process calls = %d, want the native channel to carry the bytes", stub.catCalls.Load())
+	}
+	// One documented ceiling, enforced once: with the channel available the argv
+	// limit must not appear at all, and the tool must not have run a shell command
+	// to test that.
+	if calls := stub.writableChecks.Load(); calls != 0 {
+		t.Fatalf("write gate probes = %d, want the owned-workspace fast path to answer without a spawn", calls)
+	}
+}
+
+// On the fallback the old guarantee still holds, and it still holds BEFORE the
+// command runs: a refusal must not leave a half-written file behind.
+func TestEnvDWriteRejectsOversizedContentOnProcessFallback(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{}, nil)
+	stub.disableFiles()
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	before := stub.processCalls.Load()
@@ -174,8 +209,11 @@ func TestEnvDWriteRejectsOversizedContentBeforeAnyCall(t *testing.T) {
 	if !strings.Contains(refused, "write limit") {
 		t.Fatalf("oversized write text = %q", refused)
 	}
+	if _, ok := stub.content("/srv/app/big.txt"); ok {
+		t.Fatal("the refused write landed anyway")
+	}
 	if after := stub.processCalls.Load(); after != before {
-		t.Fatalf("oversized write still reached envd: %d -> %d", before, after)
+		t.Fatalf("oversized write still reached the target: %d -> %d", before, after)
 	}
 }
 

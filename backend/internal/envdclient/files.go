@@ -1,10 +1,13 @@
 package envdclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -67,6 +70,14 @@ const (
 	// beyond the file). Only a byte range past EOF produces this; a prefix
 	// request whose end runs past EOF is clamped to the file instead.
 	FilesRangeUnsatisfiable FilesErrorCode = "range_unsatisfiable"
+	// FilesNothingWritten: the write was answered 2xx but the response listed no
+	// file, so nothing landed. This is not paranoia: the deployed envd skips any
+	// multipart part whose field is not exactly "file" and still answers
+	// `200 []`, so a mistyped field name is a silent failure. Measured on 0.2.11
+	// (field "file" wrote the file; field "files" returned 200 with an empty list
+	// and no file on disk). Reporting this as an error is what keeps a broken
+	// upload from looking like a successful write.
+	FilesNothingWritten FilesErrorCode = "nothing_written"
 	// FilesTransport: the request did not complete.
 	FilesTransport FilesErrorCode = "transport"
 )
@@ -276,6 +287,99 @@ func parseContentRangeTotal(header string) int64 {
 		return -1
 	}
 	return parsed
+}
+
+// WriteFile stores one file through POST /files.
+//
+// Multipart, deliberately, and not the raw `application/octet-stream` body the
+// current upstream source also accepts: the deployed 0.2.11 parses every POST as
+// multipart and answers a raw body with
+// `500 error parsing multipart form: request Content-Type isn't multipart/form-data`
+// (measured). An implementation has to follow the artifact that runs, not the
+// newer branch.
+//
+// The part field must be named exactly "file". envd's handlePart skips any other
+// field name and the daemon still answers `200 []`, so a mistyped field would be
+// reported as a successful write that wrote nothing; the response is therefore
+// checked and FilesNothingWritten raised when no path comes back.
+//
+// What this channel buys over the process channel: content never becomes an argv
+// element, so there is no `%`-escaping ambiguity, no NUL/argv size limit (the
+// spawned path is capped at 1 MiB by argv itself), and no shell exit code to
+// interpret. The bytes that leave here are the bytes that land.
+func (c *Client) WriteFile(ctx context.Context, path string, data []byte) error {
+	reqCtx, cancel := context.WithTimeout(ctx, c.tmo)
+	defer cancel()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", pathBase(path))
+	if err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+	if _, err := part.Write(data); err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+	if err := writer.Close(); err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.filesURL(path), &body)
+	if err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+	c.applyHeaders(req)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return classifyFilesReply(resp.StatusCode, resp.Header.Get("Content-Type"), responseBody, path)
+	}
+
+	// 2xx is not proof of a write: check the manifest the daemon returns.
+	var entries []struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(responseBody, &entries); err != nil {
+		return &FilesError{Code: FilesNothingWritten, Path: path, Status: resp.StatusCode, Message: strings.TrimSpace(string(responseBody))}
+	}
+	for _, entry := range entries {
+		if entry.Path == path || entry.Name == pathBase(path) {
+			return nil
+		}
+	}
+	return &FilesError{
+		Code:    FilesNothingWritten,
+		Path:    path,
+		Status:  resp.StatusCode,
+		Message: fmt.Sprintf("envd accepted the upload but listed %d file(s): %s", len(entries), strings.TrimSpace(string(responseBody))),
+	}
+}
+
+// pathBase is path.Base for target-side absolute paths, which always use slashes.
+func pathBase(value string) string {
+	trimmed := strings.TrimRight(value, "/")
+	if index := strings.LastIndex(trimmed, "/"); index >= 0 {
+		if trimmed[index+1:] == "" {
+			return "file"
+		}
+		return trimmed[index+1:]
+	}
+	if trimmed == "" {
+		return "file"
+	}
+	return trimmed
 }
 
 // ProbeFiles asks for one path that cannot exist and classifies the answer.
