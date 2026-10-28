@@ -1495,6 +1495,9 @@
       '<button class="btn ghost sm" type="button" data-detail>详情</button>' +
       '<button class="btn ghost sm" type="button" data-chat hidden>会话</button>' +
       '<button class="btn ghost sm" type="button" data-open>打开</button>' +
+      '<button class="btn ghost sm" type="button" data-window-open hidden title="在该节点本机的新终端窗口里打开此会话（带它当初的启动参数）">新终端</button>' +
+      '<button class="btn ghost sm" type="button" data-window-resume hidden title="让该会话在节点本机重新跑起来（无窗口则新开一个）">恢复</button>' +
+      '<button class="btn danger sm" type="button" data-window-close hidden title="关闭节点本机上的这个会话窗口（等同在窗口里敲 /exit）">关窗口</button>' +
       '<button class="btn danger sm" type="button" data-remove hidden>移除</button>' +
       '</div>' +
       '<div class="s-live" hidden title="实时输出（最后一行），点击展开完整尾流"></div>' +
@@ -1582,6 +1585,24 @@
       tailFollow[card.getAttribute("data-draft-key")] = atBottom;
       card.__syncFollowBtn();
     });
+    // 窗口动作（新终端 / 恢复 / 关窗口）：控制台 → 网关排队 → 节点下一次心跳
+    // 取走 → 在节点那台机器上执行。202 只代表「已排进队列」，提示必须如实说明
+    // 投递时机——谎称窗口已打开，操作者就会对着空桌面找原因。
+    var windowActions = [
+      { selector: "[data-window-open]", kind: "open-terminal", done: "已排队：该节点下一个心跳会在本机新终端里打开此会话", confirm: null },
+      { selector: "[data-window-resume]", kind: "resume", done: "已排队：该节点下一个心跳会恢复此会话", confirm: null },
+      { selector: "[data-window-close]", kind: "close", done: "已排队：该节点下一个心跳会关闭此窗口", confirm: "关闭该会话在本机的窗口进程？\n（等同在窗口里敲 /exit：会话会正常保存。）" }
+    ];
+    windowActions.forEach(function (action) {
+      var btn = card.querySelector(action.selector);
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var it = card.__item;
+        if (!it || btn.disabled) { return; }
+        if (action.confirm && !window.confirm(action.confirm)) { return; }
+        requestWindowAction(it.node, it.session, action.kind, action.done);
+      });
+    });
     var rmBtn = card.querySelector("[data-remove]");
     rmBtn.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -1594,6 +1615,17 @@
         .catch(function (err) { notify("移除失败：" + err, "error"); });
     });
     return card;
+  }
+
+  // requestWindowAction 把一条窗口动作排给节点，并把「排队成功」与「执行成功」
+  // 分开表达（网关只保证投递，执行结果要等节点自己的下一次上报才可见）。
+  function requestWindowAction(node, session, kind, doneText) {
+    var path = "/api/nodes/" + encodeURIComponent(node.node_id) +
+      "/sessions/" + encodeURIComponent(session.session_id) +
+      "/window?action=" + encodeURIComponent(kind);
+    api(path, { method: "POST" })
+      .then(function () { notify(doneText, "ok"); })
+      .catch(function (err) { notify("窗口动作失败：" + err, "error"); });
   }
   // updateSessionCard patches one card to match the latest snapshot: text is
   // written only when it changed, visibility flips via `hidden`, and the live
@@ -1766,6 +1798,20 @@
       openBtn.title = node.stale ? "节点离线，无法打开" : "节点未提供本地 Web 服务（aicli 需以 --web 启动），无法打开";
     }
     card.querySelector("[data-remove]").hidden = !node.stale;
+    // 窗口动作按钮：只在该节点自己通告了 window-actions（本机有可用终端）时出现。
+    // 子代理行不独立拥有窗口——它是父进程里的一个任务，所以恒不显示。
+    var canWindow = windowActionsSupported(node) && !isSubagentSession(s);
+    card.querySelector("[data-window-open]").hidden = !canWindow;
+    card.querySelector("[data-window-resume]").hidden = !canWindow;
+    card.querySelector("[data-window-close]").hidden = !canWindow;
+    // 「新终端」的落点与命令要能被看到：这两个字段是 agent 上报的本机事实
+    // （工作目录错了或命令不对，操作者在按钮按下前就能发现）。
+    var windowTitle = canWindow
+      ? "窗口将在该节点本机执行" + (s.workspace ? "\n工作目录：" + s.workspace : "") +
+          (s.launch_command ? "\n启动命令：" + s.launch_command : "") +
+          (s.mesh_window ? "\n当前窗口：" + s.mesh_window : "")
+      : "该节点未提供本机窗口能力";
+    card.querySelector("[data-window-open]").title = windowTitle;
     // 会话面板入口：只有能给出 transcript + 实时流的节点才有意义（详见
     // chatPanelSupported），其余节点保持隐藏——用户不会点进一个必然失败的面板。
     card.querySelector("[data-chat]").hidden = !chatPanelSupported(node, s);
@@ -2128,6 +2174,19 @@
       var route = routes[i];
       if (route === "/" || route === want) { return true; }
       if (route.indexOf(want + "/") === 0) { return true; }
+    }
+    return false;
+  }
+
+  // windowActionsSupported 报告该节点能否在**它自己那台机器上**开关会话窗口。
+  // 判据是节点通告的 window-actions 能力位：agent 只有在本机真的探测到可用终端
+  // 后端（Windows Terminal / 新控制台 / gnome-terminal…）时才通告它。这跟
+  // nodeHasWebUI 同一个道理——能力位是承诺，控制台不该提供一个必然落空的按钮。
+  function windowActionsSupported(node) {
+    if (!node || node.stale) { return false; }
+    var caps = node.capabilities || [];
+    for (var i = 0; i < caps.length; i++) {
+      if (caps[i] === "window-actions") { return true; }
     }
     return false;
   }

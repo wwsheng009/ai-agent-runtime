@@ -234,8 +234,8 @@ func envdEdit(ctx context.Context, be *envdBackend, params map[string]interface{
 		return refusal, nil
 	}
 	diff := mutatecore.UnifiedDiff(be.workspaceRelative(target), text, updated)
-	summary := fmt.Sprintf("Edited %s: %d replacement(s) in %s, %d bytes on disk",
-		target, replacements, be.workspaceRelative(target), sizeAfter)
+	summary := fmt.Sprintf("Replaced %d occurrence(s) in %s (%d -> %d bytes).",
+		replacements, be.workspaceRelative(target), state.size, sizeAfter)
 	return envdTextResult(mutatecore.FormatEditSuccessContent(summary, diff)), nil
 }
 
@@ -315,5 +315,10 @@ func envdAppend(ctx context.Context, be *envdBackend, params map[string]interfac
 	if refusal != nil {
 		return refusal, nil
 	}
-	return envdTextResult(fmt.Sprintf("%s: appended %d bytes to %s (%d bytes on disk)", action, len(content), target, sizeAfter)), nil
+	result := envdTextResult(fmt.Sprintf("Appended %d bytes to %s (total %d bytes).", len(content), target, sizeAfter))
+	// The branch that ran is reported as metadata rather than in the sentence, so
+	// the common reply reads exactly like the local surface while the detail stays
+	// available to a caller that needs it.
+	result.Metadata = map[string]interface{}{"action": action}
+	return result, nil
 }

@@ -249,6 +249,20 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **仍存的表面差异（明确记录，不掩饰）**：`view` 在 envd 侧返回原文（无行号/窗口/折叠元数据，工具描述已声明），local 侧返回带 `1: ` 行号与截断元数据；`edit` 的成功摘要措辞两侧不同（`Edited …: N replacement(s)` 与 `Replaced N occurrence(s)`）；`write` 上限取共享 `Limits.CaptureLimit`（2 MiB）而 bridge 原为 1 MiB。统一这些渲染需把共享核的读/渲染路径做成可插 I/O seam（§3 的远期项），不在本次收编范围。
 
+### 8.9 结果文案对齐 local 面（2026-10-28）
+
+以真机 ssh-stdio 实测到的 local 文案为基准（不靠猜），消除同名工具的回复差异：
+
+| 工具 | envd 现在与 local 同形 |
+|---|---|
+| `write` | `Created <相对路径> (<n> bytes).` / `Updated …`（Created/Updated 由目标机 `Stat` 判定；目录目标拒绝） |
+| `edit` | `Replaced N occurrence(s) in <相对路径> (<before> -> <after> bytes).` + 共享 `文件差异` 代码块 |
+| `append_write` | `Appended <n> bytes to <路径> (total <n> bytes).`；`create_first_chunk` 等分支改由 `Metadata.action` 承载 |
+
+顺带：`write` 不再多花一次 `cat`（此前为回读尺寸而 Stat+写+Stat，现为判定存在性的单次 Stat + 写后 Stat 确认落盘）。
+
+**渲染层仍存差异（未修，需 I/O seam 决策）**：`view` 行号/窗口/折叠元数据、`grep`/`glob` 的完整参数面（`patterns/include/exclude/mode/offset/limit` 等）、结构化错误 `Metadata`（`failure_class`、`occurrence_lines`）。这些不是文案问题，而是能力面问题，属 §3 远期 seam 改造范围。
+
 - 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
 
 > 说明：§8.1–§8.7 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。

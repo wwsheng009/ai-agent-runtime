@@ -272,12 +272,18 @@ type ChatSession struct {
 	SessionDir                      string                       // 会话存储目录
 	Ephemeral                       bool                         // 会话仅驻留内存，不写入会话文件
 	SessionFilter                   ChatSessionListFilter        // 会话列表筛选条件
-	NoInteractive                   bool                         // 是否为非交互模式
-	JSONOutput                      bool                         // 是否输出 JSON
-	JSONEnvelope                    bool                         // JSON 输出是否使用 envelope
-	KeyHandler                      *ui.KeyHandler               // 键盘事件处理器（ESC 键中断）
-	MCPEnabled                      bool                         // 是否启用 MCP
-	MCPStatus                       *MCPStatus                   // MCP 状态
+	// LaunchInvocation 是本进程启动这次会话时用户命令行上的参数快照（脱敏）。
+	// 由 HandleChat 在 bootstrap 之后、后台能力面装载之前写一次，之后只读；
+	// syncChatRuntimeContext 把它落进会话 metadata（launch_* 键），会话列表与
+	// gateway/mesh 的「在新终端里拉起会话」都从这里取重放参数。nil = 本次调用
+	// 没有 argv 快照（嵌入调用/测试直入 HandleChat），此时保持已持久化的旧记录。
+	LaunchInvocation *launchInvocationRecord
+	NoInteractive    bool           // 是否为非交互模式
+	JSONOutput       bool           // 是否输出 JSON
+	JSONEnvelope     bool           // JSON 输出是否使用 envelope
+	KeyHandler       *ui.KeyHandler // 键盘事件处理器（ESC 键中断）
+	MCPEnabled       bool           // 是否启用 MCP
+	MCPStatus        *MCPStatus     // MCP 状态
 	// MCPSessionOverrides 是会话级 MCP 启停覆盖（server 名 → 期望启用状态）。
 	// 仅内存、不落盘：只影响本会话工具面（/mcp enable|disable <name> --session）。
 	// nil 表示无覆盖（全部跟随全局/进程态）。
@@ -1005,6 +1011,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
 	startupTiming.mark("bootstrap")
+	// 启动参数快照落进会话（真正写盘发生在下一次 sync，见
+	// syncChatRuntimeContext）。必须排在 startCapabilities 之前：能力面装载会起
+	// 后台 goroutine，而 LaunchInvocation 是「启动写一次、之后只读」的字段。
+	session.LaunchInvocation = newLaunchInvocationRecord(cmd)
 	// 能力面（工具 / skills / runtime host / supervision）不再挡在首帧之前：
 	// 实测这三段发现型调用占首帧前 ~98% 的时间，而产物只在真正发起 turn 时才被
 	// 需要。这里只**安装门控**（首帧后立刻提交也能被 await 捕获），真正启动在

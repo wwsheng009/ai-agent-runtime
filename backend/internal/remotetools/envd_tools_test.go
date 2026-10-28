@@ -123,9 +123,9 @@ func TestEnvDWriteThenViewRoundTrip(t *testing.T) {
 	wrote := callTool(t, ctx, session, "remote_envd__write", map[string]interface{}{
 		"path": "sub/hello.txt", "content": "abc",
 	})
-	// The size is confirmed from the target rather than trusted from the write.
-	if !strings.Contains(wrote, "wrote /srv/app/sub/hello.txt (3 bytes on disk)") {
-		t.Fatalf("write result = %q", wrote)
+	// The local spelling of write's reply is shared across transports.
+	if !strings.Contains(wrote, "Created sub/hello.txt (3 bytes).") {
+		t.Fatalf("write result = %q, want the shared Created wording", wrote)
 	}
 	if _, ok := stub.content("/srv/app/sub/hello.txt"); !ok {
 		t.Fatal("the stub never received the write")

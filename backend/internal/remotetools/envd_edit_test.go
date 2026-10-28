@@ -21,7 +21,8 @@ func TestEnvDEditReplacesUniqueMatch(t *testing.T) {
 		"old_string": "func main() {}",
 		"new_string": "func main() {\n\tprintln(\"hi\")\n}",
 	})
-	if !strings.Contains(got, "1 replacement(s)") {
+	// The reply reads exactly like the local surface's edit result.
+	if !strings.Contains(got, "Replaced 1 occurrence(s) in main.go") {
 		t.Fatalf("edit result = %q", got)
 	}
 	// The diff is produced by the shared unified-diff layer, not a second one.
@@ -59,7 +60,7 @@ func TestEnvDEditRefusesAmbiguousMatchAndWritesNothing(t *testing.T) {
 	all := callTool(t, ctx, session, "remote_envd__edit", map[string]interface{}{
 		"file_path": "a.txt", "old_string": "x", "new_string": "y", "replace_all": true,
 	})
-	if !strings.Contains(all, "2 replacement(s)") {
+	if !strings.Contains(all, "Replaced 2 occurrence(s)") {
 		t.Fatalf("replace_all result = %q", all)
 	}
 	if content, _ := stub.content("/srv/app/a.txt"); content != "y\ny\n" {
@@ -119,7 +120,7 @@ func TestEnvDAppendCreatesByDefaultLikeTheSharedContract(t *testing.T) {
 	got := callTool(t, ctx, session, "remote_envd__append_write", map[string]interface{}{
 		"file_path": "new.log", "content": "first\n",
 	})
-	if !strings.Contains(got, "create_first_chunk") && !strings.Contains(got, "append") {
+	if !strings.Contains(got, "Appended 6 bytes to") && !strings.Contains(got, "Appended") {
 		t.Fatalf("append result = %q", got)
 	}
 	if content, _ := stub.content("/srv/app/new.log"); content != "first\n" {
@@ -146,7 +147,7 @@ func TestEnvDAppendIsReplaySafe(t *testing.T) {
 	first := callTool(t, ctx, session, "remote_envd__append_write", map[string]interface{}{
 		"file_path": "log.txt", "content": "c", "expected_offset": 2,
 	})
-	if !strings.Contains(first, "appended 1 bytes") {
+	if !strings.Contains(first, "Appended 1 bytes to") {
 		t.Fatalf("first append = %q", first)
 	}
 	if content, _ := stub.content("/srv/app/log.txt"); content != "abc" {

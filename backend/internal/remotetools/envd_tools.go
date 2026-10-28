@@ -284,9 +284,20 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 		return envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell",
 			len(content), envdMaxWriteBytes), nil
 	}
-	target, err := be.resolvePath(ctx, raw)
-	if err != nil {
-		return envdErrorResult("%v", err), nil
+	target, resolveErr := be.resolvePath(ctx, raw)
+	if resolveErr != nil {
+		return envdErrorResult("%v", resolveErr), nil
+	}
+	// Created vs Updated is decided from the target, like the local surface does,
+	// so the same tool answers the same way on either transport.
+	verb := "Created"
+	if entry, statErr := be.client.Stat(ctx, target); statErr == nil {
+		if entry.IsDir() {
+			return envdErrorResult("target is a directory: %s", target), nil
+		}
+		verb = "Updated"
+	} else if !errorsAsConnectCode(statErr, "not_found") {
+		return envdErrorResult("%s", describeEnvDError(statErr, target)), nil
 	}
 	// createParents=false matches the shared write contract: a missing parent is a
 	// refusal, not a silent mkdir (apply_patch add is the tool that creates trees).
@@ -294,7 +305,7 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 	if refusal != nil {
 		return refusal, nil
 	}
-	return envdTextResult(fmt.Sprintf("wrote %s (%d bytes on disk)", target, sizeAfter)), nil
+	return envdTextResult(fmt.Sprintf("%s %s (%d bytes).", verb, be.workspaceRelative(target), sizeAfter)), nil
 }
 
 // envdMkdir creates a directory. An existing directory is reported as such

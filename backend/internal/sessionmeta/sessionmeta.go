@@ -68,6 +68,28 @@ const (
 	// silently rewrite the cached prefix).
 	SystemPromptFrozen = "system_prompt_frozen"
 
+	// LaunchArgs 是本次启动进程传入的「可重放」旗标 token（已剔除会话目标、
+	// 一次性输入与敏感值）。会话列表要能在另一个终端里以同样的启动参数重新
+	// 打开同一个会话，靠的就是这一份（见 cmd/aicli/commands/launch_invocation.go）。
+	LaunchArgs = "launch_args"
+	// LaunchArgv 是用户原始调用参数（含子命令，敏感值已脱敏为 ***），只用于
+	// 展示与审计：它不做「可重放」保证，重放一律走 LaunchArgs。
+	LaunchArgv = "launch_argv"
+	// LaunchCommand 是给人类复制粘贴的单行启动命令（含 aicli 与实参会话 ID）。
+	LaunchCommand = "launch_command"
+	// LaunchCwd/LaunchBinary 记录启动时的工作目录与可执行文件路径：新终端必须
+	// 在同一个工作目录里启动，否则会话的工作区锚点会漂移。
+	LaunchCwd    = "launch_cwd"
+	LaunchBinary = "launch_binary"
+	// LaunchEntry 是启动子命令（chat|resume|acp|exec…），决定重放时用哪个入口。
+	LaunchEntry = "launch_entry"
+	// LaunchInstance 是进程实例标识（pid+启动纳秒），用于同一进程内多次 sync
+	// 时幂等覆盖而不是把启动记录重复累积进 LaunchHistory。
+	LaunchInstance   = "launch_instance"
+	LaunchRecordedAt = "launch_recorded_at"
+	// LaunchHistory 是有界的历次启动记录（最新在前），供会话列表详情展示。
+	LaunchHistory = "launch_history"
+
 	LegacyAICLIProviderName       = "aicli_provider_name"
 	LegacyAICLIProviderProtocol   = "aicli_protocol"
 	LegacyAICLIModel              = "aicli_model"
@@ -96,6 +118,16 @@ const (
 	// LegacyAICLIRoutingOverride 是会话级 Agent 路由覆盖（方案 §3.4）：
 	// JSON 字符串形式的 AICLISessionRoutingOverride，随会话 metadata 持久化。
 	LegacyAICLIRoutingOverride = "aicli_routing_override"
+
+	LegacyAICLILaunchArgs       = "aicli_launch_args"
+	LegacyAICLILaunchArgv       = "aicli_launch_argv"
+	LegacyAICLILaunchCommand    = "aicli_launch_command"
+	LegacyAICLILaunchCwd        = "aicli_launch_cwd"
+	LegacyAICLILaunchBinary     = "aicli_launch_binary"
+	LegacyAICLILaunchEntry      = "aicli_launch_entry"
+	LegacyAICLILaunchInstance   = "aicli_launch_instance"
+	LegacyAICLILaunchRecordedAt = "aicli_launch_recorded_at"
+	LegacyAICLILaunchHistory    = "aicli_launch_history"
 
 	LegacyAPIProfileReference = "profile_reference"
 )
@@ -126,6 +158,15 @@ var legacyToCanonical = map[string]string{
 	LegacyAICLIActiveTeamTaskID:   ActiveTeamTaskID,
 	LegacyAICLISelectedAgent:      SelectedAgent,
 	LegacyAICLIConfigFile:         ConfigFile,
+	LegacyAICLILaunchArgs:         LaunchArgs,
+	LegacyAICLILaunchArgv:         LaunchArgv,
+	LegacyAICLILaunchCommand:      LaunchCommand,
+	LegacyAICLILaunchCwd:          LaunchCwd,
+	LegacyAICLILaunchBinary:       LaunchBinary,
+	LegacyAICLILaunchEntry:        LaunchEntry,
+	LegacyAICLILaunchInstance:     LaunchInstance,
+	LegacyAICLILaunchRecordedAt:   LaunchRecordedAt,
+	LegacyAICLILaunchHistory:      LaunchHistory,
 	LegacyAPIProfileReference:     ProfileRef,
 }
 
@@ -156,6 +197,15 @@ var canonicalToLegacy = map[string][]string{
 	ActiveTeamTaskID:   {LegacyAICLIActiveTeamTaskID},
 	SelectedAgent:      {LegacyAICLISelectedAgent},
 	ConfigFile:         {LegacyAICLIConfigFile},
+	LaunchArgs:         {LegacyAICLILaunchArgs},
+	LaunchArgv:         {LegacyAICLILaunchArgv},
+	LaunchCommand:      {LegacyAICLILaunchCommand},
+	LaunchCwd:          {LegacyAICLILaunchCwd},
+	LaunchBinary:       {LegacyAICLILaunchBinary},
+	LaunchEntry:        {LegacyAICLILaunchEntry},
+	LaunchInstance:     {LegacyAICLILaunchInstance},
+	LaunchRecordedAt:   {LegacyAICLILaunchRecordedAt},
+	LaunchHistory:      {LegacyAICLILaunchHistory},
 }
 
 func CanonicalKey(key string) string {
