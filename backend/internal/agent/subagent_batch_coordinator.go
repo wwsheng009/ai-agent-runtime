@@ -2482,6 +2482,10 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 		ReportSchema:          cloneInterfaceMap(t.ReportSchema),
 		ReportSchemaGranted:   t.ReportSchemaGranted,
 		HandoffIn:             handoffToBatchSpec(t.HandoffIn),
+		// 解码期路由告警（agentdef 绑定失败、被拒 fork 窗口、写者串行化提示）
+		// 必须进 durable spec：spawn 期决策以它们为种子并进入父级路由回执，
+		// replay 丢失会让回执/审计静默失去证据（§13.5 完整性审计收口）。
+		RouteWarnings: append([]string(nil), t.RouteWarnings...),
 	}
 }
 
@@ -2559,6 +2563,7 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 		ReportSchema:          cloneInterfaceMap(spec.ReportSchema),
 		ReportSchemaGranted:   spec.ReportSchemaGranted,
 		HandoffIn:             handoffFromBatchSpec(spec.HandoffIn),
+		RouteWarnings:         append([]string(nil), spec.RouteWarnings...),
 	}
 }
 

@@ -203,6 +203,14 @@ type TaskSpec struct {
 	ReportSchema          map[string]interface{} `json:"report_schema,omitempty"`
 	ReportSchemaGranted   bool                   `json:"report_schema_granted,omitempty"`
 	HandoffIn             *HandoffSpec           `json:"handoff_in,omitempty"`
+	// RouteWarnings persists decode-time route diagnostics (agentdef binding
+	// failures, rejected fork windows, writer serialization advisories). The
+	// spawn-time route decision seeds from these warnings (modelrouting
+	// Resolver preserves task.Warnings in order), so dropping them on replay
+	// would silently strip the parent-visible route receipt/audit of its
+	// evidence（§13.5 完整性审计收口）。omitempty keeps old specs
+	// byte-compatible.
+	RouteWarnings []string `json:"route_warnings,omitempty"`
 }
 
 // Epoch returns a displayable task id (stable for idempotency).

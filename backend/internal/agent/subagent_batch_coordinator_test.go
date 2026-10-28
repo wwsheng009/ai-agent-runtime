@@ -845,6 +845,7 @@ func TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields(t *testing.T) {
 			NextSteps: []string{"merge to main"},
 			Blocker:   "",
 		},
+		RouteWarnings: []string{"agentdef_warning:legacy-binding", "fork_messages_ignored_non_positive"},
 	}
 
 	spec := taskToBatchSpec(task, task.ID)
@@ -853,6 +854,7 @@ func TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields(t *testing.T) {
 	for _, key := range []string{
 		"agent_type", "max_turns", "write_paths", "read_only_source",
 		"read_only_filtered_tools", "report_schema", "report_schema_granted", "handoff_in",
+		"route_warnings",
 	} {
 		require.Contains(t, string(blob), `"`+key+`"`, "durable spec 必须携带定义面字段 %s", key)
 	}
@@ -869,8 +871,17 @@ func TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields(t *testing.T) {
 	require.Equal(t, task.ReportSchemaGranted, restored.ReportSchemaGranted)
 	require.NotNil(t, restored.HandoffIn)
 	require.Equal(t, *task.HandoffIn, *restored.HandoffIn)
+	require.Equal(t, task.RouteWarnings, restored.RouteWarnings)
 
 	// 别名安全：还原侧拿到的是副本，改写不影响 spec 快照。
 	spec.WritePaths[0] = "mutated"
+	spec.RouteWarnings[0] = "mutated-warning"
 	require.Equal(t, "backend/internal/agent", restored.WritePaths[0])
+	require.Equal(t, "agentdef_warning:legacy-binding", restored.RouteWarnings[0])
+
+	// 旧 spec 字节兼容：无告警任务不得增长 route_warnings 键。
+	plain := taskToBatchSpec(SubagentTask{ID: "t-plain-warnings", Goal: "g"}, "t-plain-warnings")
+	plainBlob, err := json.Marshal(plain)
+	require.NoError(t, err)
+	require.NotContains(t, string(plainBlob), "route_warnings", "无告警任务 spec 不得新增键")
 }
