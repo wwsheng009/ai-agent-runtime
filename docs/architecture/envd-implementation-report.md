@@ -355,13 +355,14 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **进程控制协议修正**：`SendSignal` / `SendInput` / `Update` 从误判的 client-streaming 改为 **unary**，请求体按 protobuf 修正（`signal` 枚举、`input.stdin` / `input.pty`、`pty.size`）；新增 `SendPtyInput`；`ProcessEvent.pty` 按 **bytes** 解码；`StartRequest` 支持 `pty.size` 并移除不存在的 `stdin` 字段。
 - **交互式 PTY 会话工具**：bridge 新增 `pty_start` / `pty_write` / `pty_read` / `pty_resize` / `pty_close`（仅 ops 档），会话输出尾部缓冲 256 KiB，`pty_read` 支持 `wait_ms`（上限 30s），`pty_close` 发送 SIGTERM 并移除会话；真实 envd 冒烟通过。
 - **命令白名单复用（不再做两套）**：`remotetools` 抽出可复用的 `CommandPolicy`（deny > 非空 allowlist > shell metachar > destructive 分类），envd bridge 的 `shell` 与 `pty_start` 直接调用同一实现；bridge 新增 `--allow-command*` / `--deny-command*` / `--deny-shell-metachars`，`remoteTargets` 的 `remote.shell` 与 `envd://...?allow_command=...` 走同一份 `ShellConfig`。空 allowlist 为 **fail-closed**；YAML 省略 `denyShellMetachars` 时默认为 true。
+- **目标侧 symlink jail**：`resolve` 的文本级检查之外，所有文件工具先通过目标机 `realpath -m`（缺失时回退到最近存在祖先的 `readlink -f`）解析规范路径，再检查是否仍在 workspace/allowed roots 内；实际读写使用规范路径而不是原始路径。`remove`/`move` 只解析父目录，允许删除/移动 symlink 本身但阻止中间 symlink 逃逸；workspace/allowed root 本身拒绝删除/移动。真实 envd 已验证：`/home/n9e/link -> /tmp` 的 `view`/`write` 被拒绝，workspace 内的 symlink 可读，删除指向 `/tmp` 的 symlink 不会删除目标文件；删除包含外部 symlink 的目录时，外部目标文件也未受影响（`RemoveAll` 不跟随子链接）。
 - **TLS 与 ca_file（已实机验证）**：本地补丁为 envd 增加 `-tls-cert` / `-tls-key`，Go 的 `ListenAndServeTLS` 自动协商 HTTP/2；spec 新增 `?ca_file=`，`remote.tls.caFile` 存在时 registry 生成 `https://` 地址并透传 `--ca-file`。
 - **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、进程控制 unary 请求体（signal/stdin/pty/size）、PTY 输出解码与启动配置、请求参数校验、bridge 的调用超时用例。
 - **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
 
 ### 8.3 保留的限制
 
-- **symlink 可绕过文本级 jail**：jail 只做 `path.Clean` + 前缀匹配，bridge 无法在本地解析远端软链；
+- **symlink jail 已补，仍有 TOCTOU**：路径在目标机规范化后才能通过检查，实际操作用规范路径；但检查与操作之间仍存在竞态，且 bind mount 不在 `realpath` 可见范围内。目标机缺少 `realpath` 与 `readlink -f` 时文件工具 fail-closed；
 - **审计仍为 opt-in、命令策略已接入但边界明确**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；命令执行已复用 `remotetools.CommandPolicy`，但 `pty_start` 只检查启动命令，进入交互式 shell 后 `pty_write` 不逐条过滤；`shell.envAllowlist` 未应用到 envd（envd 仅支持附加 envs）；
 - **无法做 envd 版本校验**：envd 没有版本端点；
 - **TLS / HTTP/2 已在真实 envd 上验证**（自签证书 + SAN；控制类 RPC 本身不需要 HTTP/2）；仅 `StreamInput`（client-streaming）仍未暴露；
@@ -384,8 +385,9 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - live 集成测试 **10/10 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUser / **StdinRoundTrip / SignalTermination / PTYRoundTrip** / WatchDir）。
 - 交互会话冒烟：bridge 暴露 **15** 个工具（10 + 5 个 pty）；`pty_start` → `pty_write` → `pty_read`（输出 `it-works`）→ `pty_resize` → `pty_close` 全部 PASS。
 - 命令策略 live 冒烟（TLS）：`echo policy-ok` 放行；`id` 返回 `policy:not-allowed`；`echo secret` 被 `deniedCommands` 拦截；`echo ok; id` 返回 `policy:metachars`；允许 `sh` 后 `pty_start` / `pty_read` 返回 `policy-pty`。
+- symlink jail live 冒烟（TLS）：`view` workspace 内外链 → `outside the workspace`；workspace 内链 → `jail-ok`；`write` 经外链 → 拒绝且目标文件未创建；`remove` 外链本身成功，`/tmp` 目标仍在；`remove(".")` → `protected root`；删除含外链子目录的 workspace 目录也未影响 `/tmp` 文件。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**89 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 38、bridge 25；共享策略包 `remotetools` 另为 **162 PASS / 3 SKIP**）。
+- 离线回归：**94 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 38、bridge 30；共享策略包 `remotetools` 另为 **162 PASS / 3 SKIP**）。
 
 ### 9.2 aicli agent 真实巡检场景
 

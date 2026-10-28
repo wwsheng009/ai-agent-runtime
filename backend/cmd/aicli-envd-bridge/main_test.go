@@ -44,6 +44,70 @@ func testCommandPolicy(t *testing.T, allowed ...string) *remotetools.CommandPoli
 	return policy
 }
 
+// fakeResolveClient answers the bridge's path-resolution process call with one
+// fixed canonical path.
+func fakeResolveClient(t *testing.T, resolved string) *envdclient.Client {
+	t.Helper()
+	return fakeEnvDClient(t, func(w http.ResponseWriter) {
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 7}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
+			"stdout": base64.StdEncoding.EncodeToString([]byte(resolved + "\n")),
+		}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
+			"exited": true, "status": "exit status 0",
+		}}})
+	})
+}
+
+// fakeResolveClientMap answers resolution calls by target path. Unlike
+// fakeResolveClient it can distinguish "resolve the parent" from "resolve the
+// final component", which is the contract mutation paths depend on.
+func fakeResolveClientMap(t *testing.T, resolutions map[string]string) *envdclient.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/process.Process/Start" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		idx := bytes.IndexByte(body, '{')
+		var req struct {
+			Process struct {
+				Args []string `json:"args"`
+			} `json:"process"`
+		}
+		if idx < 0 || json.Unmarshal(body[idx:], &req) != nil || len(req.Process.Args) < 4 {
+			http.Error(w, "bad resolve request", http.StatusBadRequest)
+			return
+		}
+		target := req.Process.Args[len(req.Process.Args)-1]
+		resolved, ok := resolutions[target]
+		if !ok {
+			http.Error(w, "unexpected resolve target "+target, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/connect+json")
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 7}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
+			"stdout": base64.StdEncoding.EncodeToString([]byte(resolved + "\n")),
+		}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
+			"exited": true, "status": "exit status 0",
+		}}})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := envdclient.Dial(envdclient.Config{Addr: srv.URL, User: "user"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	return client
+}
+
 // TestStringListFlagPreservesCommandText ensures command entries are not passed
 // through path.Clean (which would rewrite double spaces and glob characters).
 func TestStringListFlagPreservesCommandText(t *testing.T) {
@@ -163,6 +227,7 @@ func TestResolveJail(t *testing.T) {
 		{"allowed root", "/srv/data/f", "/srv/data/f", false},
 		{"allowed root prefix", "/srv/database", "", true},
 		{"empty path", "   ", "", true},
+		{"newline in path", "sub/\nfile", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,6 +245,87 @@ func TestResolveJail(t *testing.T) {
 				t.Fatalf("resolve(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolvePathRejectsSymlinkEscape covers the gap a lexical jail cannot see:
+// the target resolves the in-workspace path to /etc, so the operation must stop
+// before any read.
+func TestResolvePathRejectsSymlinkEscape(t *testing.T) {
+	b := &bridge{
+		client:    fakeResolveClient(t, "/etc"),
+		workspace: "/srv/app",
+		timeout:   5 * time.Second,
+	}
+	got, err := b.resolvePath(context.Background(), "link/passwd")
+	if err == nil {
+		t.Fatalf("resolvePath = %q, want a symlink-escape error", got)
+	}
+	if !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("error = %v, want it to name the workspace fence", err)
+	}
+}
+
+// TestResolvePathUsesCanonicalTarget proves the operation receives the resolved
+// path, not the original lexical one.
+func TestResolvePathUsesCanonicalTarget(t *testing.T) {
+	b := &bridge{
+		client:    fakeResolveClient(t, "/srv/app/real/file"),
+		workspace: "/srv/app",
+		timeout:   5 * time.Second,
+	}
+	got, err := b.resolvePath(context.Background(), "link")
+	if err != nil {
+		t.Fatalf("resolvePath: %v", err)
+	}
+	if got != "/srv/app/real/file" {
+		t.Fatalf("resolvePath = %q, want the canonical target", got)
+	}
+}
+
+// TestResolveMutationRejectsIntermediateSymlink covers remove/move: the final
+// component may be a symlink, but a symlink in a parent component must not
+// redirect the operation outside.
+func TestResolveMutationRejectsIntermediateSymlink(t *testing.T) {
+	b := &bridge{
+		client:    fakeResolveClient(t, "/etc"),
+		workspace: "/srv/app",
+		timeout:   5 * time.Second,
+	}
+	got, err := b.resolveMutationPath(context.Background(), "link/file")
+	if err == nil {
+		t.Fatalf("resolveMutationPath = %q, want an escape error", got)
+	}
+	if !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("error = %v, want it to name the workspace fence", err)
+	}
+}
+
+// TestResolveMutationAllowsFinalSymlink locks the unlink/rename semantics: the
+// final component is a link to be removed or renamed, so only its parent is
+// resolved. The fake fails if the implementation asks it to resolve /srv/app/link.
+func TestResolveMutationAllowsFinalSymlink(t *testing.T) {
+	b := &bridge{
+		client:    fakeResolveClientMap(t, map[string]string{"/srv/app": "/srv/app"}),
+		workspace: "/srv/app",
+		timeout:   5 * time.Second,
+	}
+	got, err := b.resolveMutationPath(context.Background(), "link")
+	if err != nil {
+		t.Fatalf("resolveMutationPath: %v", err)
+	}
+	if got != "/srv/app/link" {
+		t.Fatalf("resolveMutationPath = %q, want the link path unchanged", got)
+	}
+}
+
+// TestRemoveProtectsWorkspaceRoot prevents a model from deleting the jail root
+// through the filesystem tool.
+func TestRemoveProtectsWorkspaceRoot(t *testing.T) {
+	b := testBridge(profileStandard, "")
+	res := b.callTool(context.Background(), "remove", json.RawMessage(`{"path":"."}`))
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "protected root") {
+		t.Fatalf("remove(.) = %+v, want a protected-root refusal", res)
 	}
 }
 

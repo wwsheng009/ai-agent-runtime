@@ -272,7 +272,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 
 **红线：如果只做「把请求转发给 envd」而不做前置校验，等于绕过整个 SandboxConfig。这是本方案唯一的高危实现错误。**
 
-> **实际落地（2026-10-28）**：envd 路径的 jail / Profile / 输出上限在 bridge 内实现；命令白名单已通过共享 `remotetools.CommandPolicy` 落到 `shell` / `pty_start`（空 allowlist fail-closed），会话审计为 bridge 的 opt-in JSONL、非 `remotetools.audit`。偏差见 §4.3 注与 `envd-implementation-report.md` §2.1 / §8.3。
+> **实际落地（2026-10-28）**：envd 路径的 jail / Profile / 输出上限在 bridge 内实现；文件路径先经目标机 `realpath`/`readlink -f` 规范化再比对 jail（symlink 逃逸已堵）；命令白名单已通过共享 `remotetools.CommandPolicy` 落到 `shell` / `pty_start`（空 allowlist fail-closed），会话审计为 bridge 的 opt-in JSONL、非 `remotetools.audit`。偏差见 §4.3 注与 `envd-implementation-report.md` §2.1 / §8.3。
 
 ---
 

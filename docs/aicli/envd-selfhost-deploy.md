@@ -172,6 +172,7 @@ curl -s --cacert /etc/envd/tls.crt -o /dev/null -w '%{http_code}\n' -H "X-Access
 | 令牌 | `X-Access-Token` 头（TLS 内传输） | 按需轮换；不要写进 spec，使用环境变量 |
 | 运行身份 | envd 以 root 运行，Basic user 决定命令身份 | 需要可用 root 启动；可选实验：以普通用户运行（未验证） |
 | 日志 | 默认 `info` + 本地脱敏补丁：`process_start` 只记录可执行文件与参数个数，stdout/stderr、请求体不落 journal | 排障时才临时设 `ENVD_LOG_LEVEL=debug`（会记录参数与输出，含文件内容，慎用） |
+| 路径围栏 | bridge 文本 jail + 目标机 `realpath -m`（或 `readlink -f`）规范化；读写使用规范路径；`remove`/`move` 检查父目录 | 目标机需有 `realpath` 或 `readlink -f`；bind mount 与检查/操作竞态仍需目标机侧控制 |
 | 审计/命令策略 | bridge 有 jail/profile/输出上限；命令执行复用 `remotetools.CommandPolicy`（fail-closed）；审计为 opt-in JSONL | 必须配置 `remote.shell.allowedCommands` 或 `allow_command=`，否则 `shell`/`pty_start` 全拒绝；审计路径见 §5.2 |
 
 防火墙脚本（节选）：
@@ -255,6 +256,10 @@ metachar 拒绝 > destructive 分类）。没有配置任何 `allowedCommands` /
 - 命令条目按 argv[0] 的 basename 匹配：允许 `/bin/sh` 要写 `sh`，
   允许 `~/.local/bin/host-inspect.sh` 要写 `host-inspect.sh`；带参数的条目
   按 argv 前缀匹配（如 `git status`）。
+- 文件工具的路径围栏在目标机解析 symlink：`view`/`ls`/`glob`/`grep`/`write`/`mkdir`
+  使用规范路径，`remove`/`move` 只解析父目录（因此可以删除/移动 symlink 本身）。
+  每次文件工具调用会多一次轻量 `realpath` 进程调用；workspace/allowed root 本身
+  禁止删除/移动。
 - `pty_start` 只检查**启动命令**；进入交互式 shell 后，`pty_write` 不再逐条
   过滤。除非确实需要交互会话，不要把 `bash`/`sh` 放进 allowlist。
 
@@ -310,6 +315,10 @@ envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl
 | `policy:not-allowed` | 命令不在 allowlist | 添加精确命令或 `allowedCommandPatterns`；不要用 `*` 图省事 |
 | `policy:metachars` | 命令含管道/重定向/替换/顺序执行 | 拆成单条命令，或显式 `denyShellMetachars: false`（不推荐） |
 | `policy:destructive` | 被共享 destructive 分类器拦截 | 在目标机人工执行，或调整业务脚本 |
+| `resolve ... failed` / `returned ""` | 目标机缺少 `realpath` 和 `readlink -f`，或 symlink 循环 | 安装 coreutils；检查目标链接；bridge 对解析失败 fail-closed |
+| `resolves to ... outside the workspace` | 路径经 symlink 指向 workspace 外 | 改用 workspace 内真实路径；这是路径围栏的预期结果 |
+| 连 workspace 内的普通路径也报 `outside` | `remote.workspace`/`allowedRoots` 本身是 symlink，规范路径与声明路径不一致 | 在配置里使用目标机 `realpath` 后的真实路径 |
+| `refusing to mutate protected root` | 试图删除/移动 workspace 或 allowed root 本身 | 对根内的具体文件/目录操作 |
 | `no pty session with pid ...` | 会话已关闭或 bridge 重启 | 重新 `pty_start`；会话状态只在当前 bridge 进程内 |
 | TLS 握手失败 / `x509: certificate is valid for ...` | 证书 SAN 不含实际连接地址 | 重签证书，把客户端连接用的 IP/DNS 加入 SAN |
 | 日志刷 `socat: executable file not found` | envd 的 port-forwarder 需要 socat + 169.254.0.21 | 普通服务器属预期噪音，可忽略；不要为此安装 socat |

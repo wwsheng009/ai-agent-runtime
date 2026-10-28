@@ -36,7 +36,7 @@ func (b *bridge) toolView(ctx context.Context, args json.RawMessage) callResult 
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	target, err := b.resolve(in.Path)
+	target, err := b.resolvePath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -76,7 +76,7 @@ func (b *bridge) toolLs(ctx context.Context, args json.RawMessage) callResult {
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	target, err := b.resolve(in.Path)
+	target, err := b.resolvePath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -127,7 +127,7 @@ func (b *bridge) toolGlob(ctx context.Context, args json.RawMessage) callResult 
 	if strings.TrimSpace(in.Pattern) == "" {
 		return errorResult("pattern is required")
 	}
-	root, err := b.resolve(in.Path)
+	root, err := b.resolvePath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -170,7 +170,7 @@ func (b *bridge) toolGrep(ctx context.Context, args json.RawMessage) callResult 
 	if strings.TrimSpace(in.Pattern) == "" {
 		return errorResult("pattern is required")
 	}
-	root, err := b.resolve(in.Path)
+	root, err := b.resolvePath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -230,12 +230,12 @@ func (b *bridge) toolWrite(ctx context.Context, args json.RawMessage) callResult
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	target, err := b.resolve(in.Path)
-	if err != nil {
-		return errorResult("%v", err)
-	}
 	if len(in.Content) > maxWriteBytes {
 		return errorResult("content is %d bytes, above the %d byte write limit; split the file or use shell", len(in.Content), maxWriteBytes)
+	}
+	target, err := b.resolvePath(ctx, in.Path)
+	if err != nil {
+		return errorResult("%v", err)
 	}
 
 	script := `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
@@ -270,7 +270,7 @@ func (b *bridge) toolMkdir(ctx context.Context, args json.RawMessage) callResult
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	target, err := b.resolve(in.Path)
+	target, err := b.resolvePath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -292,7 +292,7 @@ func (b *bridge) toolRemove(ctx context.Context, args json.RawMessage) callResul
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	target, err := b.resolve(in.Path)
+	target, err := b.resolveMutationPath(ctx, in.Path)
 	if err != nil {
 		return errorResult("%v", err)
 	}
@@ -314,11 +314,11 @@ func (b *bridge) toolMove(ctx context.Context, args json.RawMessage) callResult 
 	if err := decodeArgs(args, &in); err != nil {
 		return errorResult("invalid arguments: %v", err)
 	}
-	source, err := b.resolve(in.Source)
+	source, err := b.resolveMutationPath(ctx, in.Source)
 	if err != nil {
 		return errorResult("source: %v", err)
 	}
-	destination, err := b.resolve(in.Destination)
+	destination, err := b.resolveMutationPath(ctx, in.Destination)
 	if err != nil {
 		return errorResult("destination: %v", err)
 	}
@@ -351,7 +351,7 @@ func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {
-		resolved, err := b.resolve(in.Cwd)
+		resolved, err := b.resolvePath(ctx, in.Cwd)
 		if err != nil {
 			return errorResult("cwd: %v", err)
 		}

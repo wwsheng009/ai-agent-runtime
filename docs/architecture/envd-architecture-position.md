@@ -235,7 +235,7 @@ remotetools → { ssh-stdio | ssh-http | http | envd }
 
 **后果**
 
-- path jail、Profile 分级、输出上限（`Limits` 的等价物）在 **bridge 内重新实现**；但**命令授权已复用** `remotetools.CommandPolicy`，不再是两套 allowlist；
+- path jail、Profile 分级、输出上限（`Limits` 的等价物）在 **bridge 内实现**；文件路径在目标机经 `realpath`/`readlink -f` 规范化后再比对 jail，堵住了文本级围栏可被 symlink 绕过的问题；**命令授权已复用** `remotetools.CommandPolicy`，不再是两套 allowlist；
 - `remotetools` 的 `audit` / `Limits` 仍未直接复用：bridge 有自己的 opt-in JSONL 元数据审计和 1 MiB 写入/输出上限；命令白名单、metachar 拒绝与 destructive 分类已覆盖 `shell` / `pty_start`；
 - `registry` 展开 envd 条目时会**输出 warning**，声明 envd 不做这些检查（见 implementation report §3.3 `TestExpandOneEnvDBridge`）。
 

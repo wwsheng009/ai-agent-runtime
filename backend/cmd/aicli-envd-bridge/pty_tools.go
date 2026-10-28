@@ -162,7 +162,7 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {
-		resolved, err := b.resolve(in.Cwd)
+		resolved, err := b.resolvePath(ctx, in.Cwd)
 		if err != nil {
 			return errorResult("cwd: %v", err)
 		}

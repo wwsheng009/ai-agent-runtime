@@ -102,6 +102,9 @@ func (b *bridge) resolve(raw string) (string, error) {
 	if requested == "" {
 		return "", errors.New("path is required")
 	}
+	if strings.ContainsAny(requested, "\x00\r\n") {
+		return "", errors.New("path must not contain NUL or newlines")
+	}
 	var candidate string
 	if path.IsAbs(requested) {
 		candidate = path.Clean(requested)
@@ -109,15 +112,8 @@ func (b *bridge) resolve(raw string) (string, error) {
 		candidate = path.Clean(path.Join(b.workspace, requested))
 	}
 
-	allowed := append([]string{b.workspace}, b.roots...)
-	for _, root := range allowed {
-		cleanRoot := path.Clean(root)
-		if cleanRoot == "" {
-			continue
-		}
-		if candidate == cleanRoot || strings.HasPrefix(candidate, cleanRoot+"/") {
-			return candidate, nil
-		}
+	if b.isInsideJail(candidate) {
+		return candidate, nil
 	}
 	return "", fmt.Errorf("path %q is outside the workspace %q and the allowed roots", requested, b.workspace)
 }
