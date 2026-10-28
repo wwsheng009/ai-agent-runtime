@@ -507,8 +507,9 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		}
 		defer server.Close()
 		want := []string{
-			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
-			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move", "remote_envd__remove",
+			"remote_envd__append_write", "remote_envd__edit", "remote_envd__glob",
+			"remote_envd__grep", "remote_envd__host_metrics", "remote_envd__ls",
+			"remote_envd__mkdir", "remote_envd__move", "remote_envd__remove",
 			"remote_envd__view", "remote_envd__write",
 		}
 		got := server.ToolNames()
@@ -529,7 +530,8 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		defer server.Close()
 		for _, name := range server.ToolNames() {
 			if strings.HasSuffix(name, "__write") || strings.HasSuffix(name, "__remove") ||
-				strings.HasSuffix(name, "__mkdir") || strings.HasSuffix(name, "__move") {
+				strings.HasSuffix(name, "__mkdir") || strings.HasSuffix(name, "__move") ||
+				strings.HasSuffix(name, "__edit") || strings.HasSuffix(name, "__append_write") {
 				t.Fatalf("readOnly override leaked a mutation tool: %v", server.ToolNames())
 			}
 		}

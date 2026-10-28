@@ -309,6 +309,20 @@ func (be *envdBackend) resolveMutationPath(ctx context.Context, raw string) (str
 	return target, nil
 }
 
+// workspaceRelative renders a canonical target path the way the tool layer
+// presents paths: relative to the workspace when it sits under it.
+func (be *envdBackend) workspaceRelative(target string) string {
+	cleaned := path.Clean(target)
+	root := path.Clean(be.workspace)
+	if cleaned == root {
+		return "."
+	}
+	if strings.HasPrefix(cleaned, root+"/") {
+		return strings.TrimPrefix(cleaned, root+"/")
+	}
+	return cleaned
+}
+
 // run executes one argv command on the target with cwd set to the workspace.
 func (be *envdBackend) run(ctx context.Context, cmd string, args []string) (stdout, stderr []byte, code int32, err error) {
 	if be == nil || be.client == nil {
@@ -560,7 +574,7 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 			},
 			call: envdView,
 		},
-	}, envdFileToolSpecs(base)...)
+	}, append(envdFileToolSpecs(base), envdEditToolSpecs(base)...)...)
 }
 
 // envdView reads a file through envd.
