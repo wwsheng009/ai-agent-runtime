@@ -612,6 +612,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `0bebe723` | task/batch deadline 档 E2E 注入与取消归因 | §8.1 / §6.1-3 |
 | `8c152f4d` | resume cache lineage 窄读法：标签接线 + 三宿主打标 + 分析字段 | §8.4 / §13.6 |
 | `4fa3ddc5` | provider header-guard 专项：任务级重试预算保留 + 显式收口两档 E2E | §8.1 |
+| `00061925` | TaskSpec 定义面字段完整往返（§13.5 观察收口） | §13.5 |
 
 ### 13.2 逐条对照（§6）
 
@@ -619,7 +620,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - **§6.1-2 retry 预算闸门**：`subagentRetryBudgetAvailable` + `retrySkipReason`（`retry_skipped_deadline_budget`/`max_attempts_reached`/`write_task_no_auto_retry`/`non_transient_failure`/`retry_skipped_parent_cancel`）落事件与报表（`ac970024`）。
 - **§6.1-3 cancel_source 分层**：`task_timeout/batch_deadline/parent_cancel/provider_timeout/provider_cancel`（context cause 优先；`ac970024`）；provider 档 E2E（`91ebd018`）；task/batch 档 E2E（`0bebe723`：真实 `TimeoutSec=1`/`BatchDeadline=+1s` 注入 → 归因精确命中、`retry_skipped_*` 显式记录、批次终态 failed/timed_out 各自可解释）。
 - **§6.1-4 成对 attempt 事件**：常量 → 契约注册（A+D）→ known 目录 → 发射点（started/finished）→ ingest 订阅 → 过渡期收口（`faeb6d8d`/`66457451`）；`subagent.completed` 自此只表示 task 终态。
-- **§6.1-5 预算语义**：**未定稿**——建议维持"最多 N 次尝试"（跳过原因已可观测）；"至少一次"需产品决策与 batch 起始预留预算。
+- **§6.1-5 预算语义**：**未定稿**——建议维持"最多 N 次尝试"（跳过原因已可观测）；"至少一次"需产品决策与 batch 起始预留预算。首轮数据抽样见 §13.7（收益上限 ≈ 21% 的失败，样本不足，暂不升级语义，设观测门槛后复算）。
 - **§6.2 失败 usage/部分产出**：`applySubagentResultOutput` 统一收口 + 跨 attempt 聚合 + partial 计数（`9a06910a`/`ac970024`）。
 - **§6.3 统一 analytics**：usageanalytics 增 `cancel_source/retry_skipped/partial_output` 列（含幂等迁移与读取面）；cacheanalytics 增 `context_mode/fork_snapshot_hash/parent_prompt_cache_key`；`batch_id/task_id/attempt` 既有。四层状态分列（request/attempt/task/batch）仍建议在查询侧显式化。
 - **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss` 状态分层（`bf7a6b0a`）：六档 `hit`/`write`/`confirmed_miss`/`reported_zero`/`not_reported`/`error`，`CacheMissReported` 仅在 provider 显式给出 miss 字段（如 DeepSeek `prompt_cache_miss_tokens`）时置位，「输入总量 − 命中」推导值不伪装成确认 miss；`request_error` 命名未采纳（保留 `error` 枚举 + `usage_unavailable_reason=request_error`），provider-specific 前缀实验**未做**。
@@ -639,10 +640,11 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - deadline 档 E2E（`0bebe723`，agent 全包 23.906s）：`TestTaskDeadlineE2EAttributionAndRetryGate`（1s 任务 deadline → `cancel_source=task_timeout` + `retry_skipped_*` + provider 恰 1 次调用 + 批次 failed）、`TestBatchDeadlineE2EAttribution`（1s 批次 deadline → `cancel_source=batch_deadline` + 批次 timed_out）；两例任务行均为 `failed_with_result`（取消仍保留可回收报告）。
 - resume 标签窄读法（`8c152f4d`）：`TestRunWithSessionCarriesCacheLineageResume`（带标记/未标记/未知值三档接线）、`TestCollectorCarriesCacheLineageMode`（started → 记录 additive 字段）、`TestStampResumeCacheLineageInSession`（有历史打标并回写 / 空会话 / 读失败 / 写失败四档）、`TestRestoreChatPersistenceState_...`（CLI 打标 + 空会话负例）；回归：agent 25.863s / cacheanalytics 2.273s / runtimeapi 94.609s / commands resume 子集 7.214s。
 - header-guard 专项（`4fa3ddc5`，agent 全包 27.635s）：`TestHeaderGuardFailureKeepsTaskRetryBudget`（真实 provider + 挂起上游：attempt 1 guard 失败 → attempt 2 在 0.34s 内成功，预算保留四断言全过）、`TestHeaderGuardExhaustionIsExplicitNotSilent`（持续挂起 → 显式 `max_attempts_reached`、不误报 `task_timeout`，0.49s）。
+- TaskSpec 定义面往返（`00061925`，agent 23.482s / subagentbatch 2.098s）：`TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields`（8 个新字段在序列化字节面可见 + 逐项还原 + 别名安全）；既有 fork/旧 spec 兼容用例保持通过。
 
 ### 13.4 未完成项与建议
 
-1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
+1. **§6.1-5 预算语义**：待产品拍板——**首轮数据依据已产出（§13.7）**：建议本轮维持"最多 N 次"，并把"≥20 条调度器+只读+瞬时失败样本后复算 `retry_skipped` 分布"设为升级语义的前置观测门槛。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
 3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
 4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）。
@@ -652,7 +654,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.5 备注
 
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
-- 观察（未修，超出本行动范围）：`subagentbatch.TaskSpec` 仍只往返部分任务字段（`WritePaths`/`ReportSchema`/`HandoffIn`/`AgentType`/`MaxTurns` 与只读过滤审计未入 spec）；这些字段在「幂等 admission replay」窗口内同样不随 durable spec 重建。本轮只补齐 fork 语义必需的 `Context`/`ForkMessages`。
+- 已修（`00061925`）：`subagentbatch.TaskSpec` 定义面字段完整往返——新增 `agent_type/max_turns/write_paths/read_only_source/read_only_filtered_tools/report_schema/report_schema_granted/handoff_in`（`HandoffSpec` 镜像五键，避免 import 环）；幂等 admission replay 不再把约束静默放宽（agentdef 收窄、步数上限、写者并集）或让契约缺失。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
 - 观察（待 provider 层复核，`4fa3ddc5` 附带证据）：header-guard 超时后，测试装置侧 `httptest.Server.Close` 曾等待 ≥1 分钟仍未结束——服务端 2 条 TCP 连接保持 active，且其 request context 未被取消（首次诊断时 handler 阻塞在 `<-r.Context().Done()` 直至 test 超时，goroutine dump 已留档于该次运行输出）。请 llm 包侧复核：guard 超时时客户端 transport 是否按预期断开/归还连接（涉及 `ResponseHeaderTimeout` 触发路径与 HTTP/2 变体）。测试装置已改用有界睡眠规避该不确定性，不影响 §8.1 结论。
 
@@ -681,3 +683,30 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 2. 打标必须回写存储（actor/executor 每轮从 store 重载会话）；写失败只告警、不阻塞 resume；
 3. loop 只认已知取值，未知字符串一律按未观测处理（不猜测、不外传任意标签）；
 4. 零行为变更：不动缓存键/epoch/任何执行路径；标签仅进入 cache analytics 记录（`CacheLineageMode`，record_json additive 字段）。
+
+### 13.7 §6.1-5 数据依据（2026-10-28 首轮抽样）
+
+**数据源**：本机统一分析库 `~/.aicli/sessions/runtime/usage_analytics.sqlite`（只读打开，2.0 GB；`usage_subagents` 表 426 行，跨 10-10 → 10-28）。探针脚本 `tmp/retry_skip_probe{,2,3}.py`（gitignore，可复跑）。
+
+**全量指标**：
+
+| 指标 | 值 |
+|---|---|
+| 失败总数 / 占比 | 197 / 426 = **46.2%** |
+| 失败且 `attempt ≤ 1` | 194（98.5%） |
+| 失败分类 Top | `unknown` 91、`timeout` 42、`provider_error` 26、`tool_error` 17、`cancelled` 16、`rate_limited` 3、`context_overflow` 1、`budget_exceeded` 1 |
+| 瞬时类失败（timeout+provider_error+rate_limited） | 71（失败的 36.0%），其中只读 45 |
+| **只读+瞬时+attempt≤1（"至少一次"收益上限）** | **42（失败的 21.3%）** |
+| 写任务失败（设计上不自动重试） | 95 |
+| `retry_skipped` / `cancel_source` 非空 | 0 / 0 |
+
+**近 14 天（28 行）**：失败 18（64.3%，小样本），**瞬时类失败 0**——近期失败全部为 `unknown` 分类且 `source=agent_controller`（轻量直派子代理的停止/关闭路径），**不经过调度器重试闸门**。
+
+**"retry_skipped 全空"的正解（`record_json` 直查）**：最新的调度器成功行已携带 `context_mode/fork_snapshot_hash/parent_prompt_cache_key`（构建足够新），但近期**没有调度器档失败样本**（14 天内 scheduler 失败 = 0），直派失败本就不产生 `retry_skipped` → "0 条跳过记录"是**样本构成**所致，而非字段未落地；待调度器档失败样本出现即可验证。
+
+**结论与建议**：
+
+1. **暂不升级为"至少一次"**：收益上限仅 42/197（21%），且其中 timeout 型占多数（provider 挂起/deadline 压力下重试成功率存疑）；升级还需 batch 起始预算预留，并须先定义写任务重试的重复副作用对策。
+2. **维持"最多 N 次"并写入报表口径**（`retry_skipped` 已把"为什么没有第二次"变成可读事实）。
+3. **前置观测门槛**：当 `source=scheduler` + `read_only=1` + 瞬时分类的失败样本累计 ≥20 条后，复算 `retry_skipped` 分布（重点看 `retry_skipped_deadline_budget` 占比）与"重试后成功率"，再定语义。
+4. 顺带观察（非本项）：失败分类 `unknown` 占 46%（91/197），主要来自轻量子代理的停止/关闭路径；若分析侧需区分"用户主动关闭 vs 真实失败"，应另立小项。
