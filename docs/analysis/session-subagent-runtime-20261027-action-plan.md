@@ -634,7 +634,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - **§6.1-5 预算语义**：**未定稿**——建议维持"最多 N 次尝试"（跳过原因已可观测）；"至少一次"需产品决策与 batch 起始预留预算。首轮数据抽样见 §13.7（收益上限 ≈ 21% 的失败，样本不足，暂不升级语义，设观测门槛后复算）。
 - **§6.2 失败 usage/部分产出**：`applySubagentResultOutput` 统一收口 + 跨 attempt 聚合 + partial 计数（`9a06910a`/`ac970024`）。
 - **§6.3 统一 analytics**：usageanalytics 增 `cancel_source/retry_skipped/partial_output` 列（含幂等迁移与读取面）；cacheanalytics 增 `context_mode/fork_snapshot_hash/parent_prompt_cache_key`；`batch_id/task_id/attempt` 既有。四层状态分列（request/attempt/task/batch）仍建议在查询侧显式化。
-- **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss` 状态分层（`bf7a6b0a`）：六档 `hit`/`write`/`confirmed_miss`/`reported_zero`/`not_reported`/`error`，`CacheMissReported` 仅在 provider 显式给出 miss 字段（如 DeepSeek `prompt_cache_miss_tokens`）时置位，「输入总量 − 命中」推导值不伪装成确认 miss；`request_error` 命名未采纳（保留 `error` 枚举 + `usage_unavailable_reason=request_error`），provider-specific 前缀实验**未做**。
+- **§6.4 cache lineage**：`context_mode`（fresh/fork）、`fork_snapshot_hash`（冻结快照稳定指纹）、`parent_prompt_cache_key`（spawn 时刻父 epoch 派生）、epoch 持久化防回退（`0b71fb31`/`4ab293f3`/`a1b7022c`）；`confirmed_miss` 状态分层（`bf7a6b0a`）：六档 `hit`/`write`/`confirmed_miss`/`reported_zero`/`not_reported`/`error`，`CacheMissReported` 仅在 provider 显式给出 miss 字段（如 DeepSeek `prompt_cache_miss_tokens`）时置位，「输入总量 − 命中」推导值不伪装成确认 miss；`request_error` 命名未采纳（保留 `error` 枚举 + `usage_unavailable_reason=request_error`），provider-specific 前缀实验已做并闭环（§13.8：显式 key 不分区、按内容前缀复用；DeepSeek 全矩阵 + GLM 双点交叉）。
 - **§6.5 context receipt**：`requested_context/effective_context/parent_history_injected/fork_snapshot_messages/fork_snapshot_hash` 入 route.resolved（`0b71fb31`）；capability/refusal 字段部分既有（`capability_refusals`）；direct spawn 与 batch 的 receipt 已同字段名统一（direct 落子会话上下文并转发进完成镜像，`221d3c22`）。
 - **§6.6 只读工具面**：既有能力已覆盖（schema 层剥离、确定性 tool_error 分类、边界横幅、连续拒绝硬停）；本轮未改。
 - **§6.7 stall/渲染诊断**：stall 事件保持轻量（2026-10-24 产品决策移除软提醒）；render suppression 字段未扩。**未做**。
@@ -660,8 +660,8 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板——**首轮数据依据已产出（§13.7）**：建议本轮维持"最多 N 次"，并把"≥20 条调度器+只读+瞬时失败样本后复算 `retry_skipped` 分布"设为升级语义的前置观测门槛。
-2. `request_error` 命名**已收口：不采纳**（存储枚举保持 `error`，读取侧以 `usage_unavailable_reason=request_error` 表达，见 §13.2）；`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地。仅余 provider-specific 前缀对照实验——需真实 provider 计费调用（验证"不同显式 cache key 下是否按内容前缀复用 KV"），超出本地确定性测试范围，保留为外部待办、不阻塞本行动项。
-3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
+2. `request_error` 命名**已收口：不采纳**（存储枚举保持 `error`，读取侧以 `usage_unavailable_reason=request_error` 表达，见 §13.2）；`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地。仅余 provider-specific 前缀对照实验——需真实 provider 计费调用（验证"不同显式 cache key 下是否按内容前缀复用 KV"），provider-specific 前缀对照实验**已闭环（2026-10-28，§13.8）**——确需真实 provider 调用，已按最小矩阵执行（合计 ≈0.31 credit）：显式 `prompt_cache_key` 变更（无 key→K1、K1→K2）不阻断内容前缀命中，负控（异前缀同 key）0 命中 → provider 按内容前缀复用、显式 key 不构成分区。
+3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；provider-specific 前缀对照实验已闭环（并入第 2 项，§13.8）——§8.4 验收清单至此无外部遗留。
 4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）；连接拆除复核见 §13.5（`70710169`，泄漏已证伪）。
 5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
@@ -731,3 +731,31 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 6. **修复的生效面与投影（`d96486a4`，本机 197 失败行只读复算）**：全部失败行 `record_json` 已带显式分类，故**读取侧重推不改历史**（旧列不回填）。91 条 `unknown` 拆分：**82 条 `status=failed`**（`ClassifySubagentFailure` 对 nil/无细节错误的显式 unknown，按"不猜测"保留——真实失败但缺 error 细节，值得源侧补料）+ **9 条 `status=stopped`**（旧归一化产物）。归一化在生产者镜像（CLI `chat_actor_registry.go:1425` / runtime-server `session_runtime_support.go:1159`）与 ingest 两处共用同一实现，且 `record_json` 存的就是归一化后的 payload；因此**新样本**中「状态∈stopped 族/timeout 且分类为空」的失败将分别计为 `cancelled`/`timeout`（9 条那类不再落 `unknown`），82 条那类保持 `unknown`。
 
 7. **写入链完整性核对（`216e730e`，与 §13.5 审计同批）**：`agent_controller` 完成的镜像载荷字段白名单（CLI `copyLocalAgentCompletionPayload` / runtime-server `copyAgentCompletionPayload`）**不含** `failure_category`，且该事件型载荷无法经其它注解路径注入——故写侧归一化是这些行 `failure_category` 的唯一盖章者，生产者不可能预盖 `unknown` 短路状态兜底（据此修正第 6 条的一处归因：82 条 `unknown` 由旧写侧归一化的空 `error_code` 短路（`FailureCategoryFromErrorCode("")→unknown`）盖章，而非 `ClassifySubagentFailure` 产物；「9 条那类不再落 unknown」的结论不变）。读取侧物化列由同一归一化规则派生（`NormalizeSubagentCompletion`），读写两侧零分裂。状态别名集与生产者 `isStoppedSessionStatusText`（`stopped/interrupted/canceled/cancelled`）完全重合；全量扫描无 `kill/abort/term/expire` 类状态（`status ∈ {failed, stopped}`），16 条 `cancelled` 行 `error_code` 均为 `USER_CANCELLED`（经 `FailureCategoryFromErrorCode` 命中），`cancel_source` 无冲突语义。
+
+### 13.8 provider prompt-cache 前缀对照实验（2026-10-28，§13.4-2 闭环）
+
+**问题**：provider 是否会在**不同显式 `prompt_cache_key`** 下仍按**内容前缀**复用 KV cache（即 per-session/epoch 派生 key 会不会把可复用前缀切碎）。
+
+**方法**：最小矩阵 5 调用（run-nonce 自包含前缀 P≈2.5k tokens；`c0` 无 key → `c1` K1 → `c2` K2 → `c3` 异前缀 P2+K1（负控）→ `c4` K1 复测）。通道＝本机默认网关 `workbuddy`（`127.0.0.1:7863`，openai 协议，即生产链路本身）；脚本 `tmp/cache_prefix_exp3.py`（gitignore，可复跑；密钥仅从本机配置解析、不回显）。
+
+| 调用 | key | prompt | cache hit | cache miss | credit |
+|---|---|---|---|---|---|
+| **DeepSeek 上游**（`cn:deepseek-v4-flash`，证据 `tmp/cache_prefix_exp3_workbuddy_5967a7be.json`） |||||
+| c0 | 无 | 2482 | 0 | 2482 | 0.11 |
+| c1 | K1 | 2482 | **2304** | 178 | 0.01 |
+| c2 | **K2（换 key）** | 2482 | **2304** | 178 | 0.01 |
+| c3 | K1 + 异前缀 P2 | 2482 | 0 | 2482 | 0.11 |
+| c4 | K1 复测 | 2482 | **2304** | 178 | 0.01 |
+| **GLM 上游**（`cn:glm-5.3-flash`；网关中途掉线，3/5 可复算） |||||
+| c0 | 无 | 2736 | 0 | 2736 | 0.04 |
+| c1 | K1 | 2736 | **2688** | 48 | 0.01 |
+| c2 | **K2（换 key）** | 2736 | **2688** | 48 | 0.01 |
+
+**结论**：
+
+1. **按内容前缀复用，显式 key 不分区**：两上游上「无 key→K1」「K1→K2」均保持命中（DeepSeek 2304、GLM 2688）；负控（同 key 异前缀）0 命中 → 命中由内容前缀决定，`prompt_cache_key` 变更既不破坏复用、也不提供隔离。
+2. **块粒度对齐**：命中 2304=64×36、2688=64×42，均为 64-token 块（未命中余量 178/48 为不足一块的尾部+问句），与上游块缓存粒度一致。
+3. 与 §6.4/§8.4 前缀身份结论不冲突：key 只影响 provider 的路由提示（若支持），**内容前缀复用照常**；`fork_snapshot_hash`/`parent_prompt_cache_key` 仍是观测口径而非隔离保证。
+4. 通道观测面：默认网关**全量透传**上游缓存字段（`prompt_cache_hit_tokens`/`prompt_cache_miss_tokens`/`cached_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`/`prompt_tokens_details.cached_tokens`）→ §6.4 观测面无缺口。
+
+**边界**：单通道（默认网关）+ 两上游（DeepSeek/GLM 系）× 单模型；实验为端到端观测（网关是否转发 key 不在可观测面内，对「运行时下发 key」的语义结论充分）；实验期间 `global:` 池不可用（`no_healthy_account`），矩阵在 `cn:` 池执行；GLM 档因网关进程掉线缺负控/复测两格（结论由 DeepSeek 全矩阵 + GLM 双点交叉支撑）。总成本 ≈0.31 credit。
