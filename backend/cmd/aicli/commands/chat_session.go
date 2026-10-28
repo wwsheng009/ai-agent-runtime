@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -159,6 +160,26 @@ func loadRequestedRuntimeSessionWithFilter(ctx context.Context, manager *runtime
 		return nil, err
 	}
 	return session, nil
+}
+
+// stampResumeCacheLineage 给「从持久化历史续接」的运行时会话打 cache lineage
+// 标签（§8.4 窄读法）：resume 表示本次运行续接的是持久化会话，其前缀缓存 key
+// 连续性由 session id + 持久化 epoch 既有机制保证（本标签不改变任何行为）。
+// 两条纪律：
+//   - 只在确有对话历史时打标——空会话没有可续接的前缀，贴 resume 标签是误导；
+//   - 必须回写存储——actor/executor 每轮从 store 重新加载会话，只改内存副本
+//     会在下一轮丢失标签。回写失败只丢标签（best-effort 告警），不影响恢复。
+func stampResumeCacheLineage(session *ChatSession, runtimeSession *runtimechat.Session) {
+	if runtimeSession == nil || len(runtimeSession.GetMessages()) == 0 {
+		return
+	}
+	runtimeSession.SetContext(agent.CacheLineageModeSessionContextKey, agent.CacheLineageModeResume)
+	if session == nil || session.SessionManager == nil {
+		return
+	}
+	if err := session.SessionManager.Update(context.Background(), runtimeSession); err != nil {
+		warnIfChatSessionSyncFails(session, "persist cache lineage resume stamp", err)
+	}
 }
 
 func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *runtimechat.Session) error {
@@ -514,6 +535,7 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if err != nil {
 		return failLoad(err)
 	}
+	stampResumeCacheLineage(session, runtimeSession)
 	// 与 loadRequestedRuntimeSessionWithFilter 保持一致：/resume、/load 按显式
 	// ID 切换时不校验用户归属，否则 web/server 平面创建的会话在 CLI 无法续接。
 	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
@@ -1523,6 +1545,7 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 	if err != nil {
 		return failResume(err)
 	}
+	stampResumeCacheLineage(session, runtimeSession)
 	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
 		return failResume(err)
 	}

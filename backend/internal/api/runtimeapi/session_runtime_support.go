@@ -3660,6 +3660,40 @@ func (c *sessionAgentController) rejectAPIBatchTaskMessageTarget(ctx context.Con
 	return toolbroker.AgentBatchTaskNotMessageableError(toolName, target, batchID, task.TaskID)
 }
 
+// resumeLineageSessionStore 是 cache lineage 打标需要的最小会话存储面。
+type resumeLineageSessionStore interface {
+	Get(ctx context.Context, sessionID string) (*chat.Session, error)
+	Update(ctx context.Context, session *chat.Session) error
+}
+
+// stampResumeCacheLineageInSession 给「从持久化历史续接」的会话打 resume 标签
+// （§8.4 窄读法）：只在确有对话历史时打标并回写——空会话没有可续接的前缀，贴
+// resume 就是误导；批子代理会话不落 SessionStore 时读取失败自然跳过。标签不
+// 改变任何行为（缓存键/epoch 不动）；回写失败只走 warn、不影响 resume。
+func stampResumeCacheLineageInSession(ctx context.Context, store resumeLineageSessionStore, sessionID string, warn func(error)) {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	session, err := store.Get(ctx, sessionID)
+	if err != nil || session == nil || len(session.GetMessages()) == 0 {
+		return
+	}
+	session.SetContext(agent.CacheLineageModeSessionContextKey, agent.CacheLineageModeResume)
+	if err := store.Update(ctx, session); err != nil && warn != nil {
+		warn(err)
+	}
+}
+
+// stampResumeCacheLineage 是控制面接线：handler 的 sessionManager 满足最小面。
+func (c *sessionAgentController) stampResumeCacheLineage(ctx context.Context, sessionID string) {
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return
+	}
+	stampResumeCacheLineageInSession(ctx, c.handler.sessionManager, sessionID, func(err error) {
+		logger.Warnf("api subagent resume: persist cache lineage resume stamp for %s failed: %v", strings.TrimSpace(sessionID), err)
+	})
+}
+
 func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -3670,6 +3704,9 @@ func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (
 		return nil, err
 	}
 	sessionID = resolvedSessionID
+	// §8.4 窄读法：resume 是「从持久化历史续接」的入口，先打 cache lineage 标签
+	//（仅当存储里有可续接历史），再重建 actor——随后各轮请求据此携带 resume。
+	c.stampResumeCacheLineage(ctx, sessionID)
 	if _, err := c.handler.getSessionHub().GetOrCreate(sessionID); err != nil {
 		return nil, err
 	}

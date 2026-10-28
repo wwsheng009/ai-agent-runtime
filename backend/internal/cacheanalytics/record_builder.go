@@ -49,6 +49,9 @@ type TerminalRecordInput struct {
 	// ParentPromptCacheKey（§6.4）：spawn 时刻父会话的 prompt-cache key；空串
 	// 表示未观测。
 	ParentPromptCacheKey string
+	// CacheLineageMode（§8.4 窄读法）：resume = 本次运行续接持久化会话；
+	// 空串表示未观测。
+	CacheLineageMode string
 	// TaskAttempt（§8.2）是调度 attempt 序号；0 表示未观测（主 Agent / 单次运行）。
 	TaskAttempt int
 	// Payload 是 llm.request.finished 的事件载荷（success/error_code/usage_*）。
@@ -96,6 +99,7 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.ContextMode = firstNonEmptyString(in.ContextMode, payloadString(payload, "context_mode"))
 	record.ForkSnapshotHash = firstNonEmptyString(in.ForkSnapshotHash, payloadString(payload, "fork_snapshot_hash"))
 	record.ParentPromptCacheKey = firstNonEmptyString(in.ParentPromptCacheKey, payloadString(payload, "parent_prompt_cache_key"))
+	record.CacheLineageMode = firstNonEmptyString(in.CacheLineageMode, payloadString(payload, "cache_lineage_mode"))
 	if in.TaskAttempt > 0 {
 		record.TaskAttempt = in.TaskAttempt
 	} else if taskAttempt := payloadInt(payload, "task_attempt"); taskAttempt > 0 {

@@ -603,6 +603,26 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 		t.Fatalf("expected missing explicit context usage to restore as zero, got ctx=%d window=%d turn=%d",
 			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
 	}
+	// §8.4 窄读法：从持久化历史续接的运行时会话带 resume 标签（有历史才打标）。
+	if value, ok := runtimeSession.GetContext(agent.CacheLineageModeSessionContextKey); !ok || value != agent.CacheLineageModeResume {
+		t.Fatalf("restored runtime session cache lineage = %v/%v, want resume", value, ok)
+	}
+}
+
+// TestRestoreChatPersistenceState_EmptySessionNotStampedAsResume 锁定 §8.4 窄读法
+// 的诚实边界：空会话（没有可续接的前缀）不得被贴 resume 标签——否则分析侧会把
+// 「无历史的全新会话」误读成「续接命中失败」。
+func TestRestoreChatPersistenceState_EmptySessionNotStampedAsResume(t *testing.T) {
+	empty := runtimechat.NewSession("tester")
+	session := &ChatSession{}
+	if err := restoreChatPersistenceState(session, &chatPersistenceState{
+		loadedRuntimeSession: empty,
+	}, &chatCommandOptions{}); err != nil {
+		t.Fatalf("restoreChatPersistenceState: %v", err)
+	}
+	if _, ok := empty.GetContext(agent.CacheLineageModeSessionContextKey); ok {
+		t.Fatal("empty restored session must not be stamped as resume")
+	}
 }
 
 // TestRestoreChatPersistenceState_DisarmsActiveGoal 锁定 G4 的启动期覆盖：

@@ -182,6 +182,10 @@ type CacheRequestRecord struct {
 	// 记录未观测。
 	ContextMode      string `json:"context_mode,omitempty"`
 	ForkSnapshotHash string `json:"fork_snapshot_hash,omitempty"`
+	// CacheLineageMode（§8.4 窄读法，additive 字段）：resume = 本次运行续接的是
+	// 持久化会话（chat/exec resume、subagent_resume）；空串 = 未观测。
+	// fresh/fork 的 spawn 语义由 ContextMode 承载，两字段互补。
+	CacheLineageMode string `json:"cache_lineage_mode,omitempty"`
 	// ParentPromptCacheKey（§6.4，additive）：spawn 时刻父会话的 prompt-cache
 	// key，供父/子 key 对账；空串 = 未携带（历史记录 / 未知父 epoch）。
 	ParentPromptCacheKey string `json:"parent_prompt_cache_key,omitempty"`

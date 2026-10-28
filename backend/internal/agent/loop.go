@@ -248,6 +248,9 @@ type ReActLoop struct {
 	runContextMode string
 	// runParentPromptCacheKey 是本次 run 携带的父会话 prompt-cache key（§6.4）。
 	runParentPromptCacheKey string
+	// runCacheLineageMode 是本次 run 的 cache lineage 标签（§8.4 窄读法）：
+	// resume = 续接持久化会话；空 = 未观测（fresh/fork 由 context_mode 承载）。
+	runCacheLineageMode string
 	// runTaskAttempt 是本次 run 的调度 attempt 序号（§8.2 对账列）。
 	runTaskAttempt int
 	// currentPromptCacheEpoch 暴露运行中的本地 epoch（run 内推进实时可见），
@@ -326,6 +329,10 @@ type loopRunOptions struct {
 	// ParentPromptCacheKey 是父会话 spawn 时刻的 prompt-cache key（§6.4 父/子
 	// key 对账）；空串不携带。
 	ParentPromptCacheKey string
+	// CacheLineageMode 是本次运行的 cache lineage 标签（§8.4 窄读法）：
+	// CacheLineageModeResume = 续接持久化会话；空 = 未观测（fresh/fork 的
+	// spawn 语义由 context_mode 承载，两字段互补，不重复表达）。
+	CacheLineageMode string
 	// TaskAttempt 是调度 attempt 序号（§8.2：request↔attempt 对账）；0 = 主
 	// Agent 或单次运行（不携带）。
 	TaskAttempt int
@@ -352,6 +359,17 @@ type historySessionContextWriter interface {
 // example an explicit session compact command) must advance this value before
 // persisting the replacement history.
 const PromptCacheEpochSessionContextKey = "aicli.prompt_cache_epoch"
+
+// CacheLineageModeSessionContextKey 是会话级 cache lineage 标记（§8.4 窄读法，
+// 2026-10-28 拍板）：宿主在「从持久化历史续接会话」时写入
+// CacheLineageModeResume，RunWithSession/ContinueWithSession 读取后随请求
+// metadata 与 llm.request.* 载荷落库。纯分析标签：不改变缓存键/epoch/任何行为
+// （key 连续性由 session id + 持久化 epoch 既有机制保证）。
+const CacheLineageModeSessionContextKey = "aicli.cache_lineage_mode"
+
+// CacheLineageModeResume 是 cache_lineage_mode 当前唯一取值：本次运行续接的是
+// 持久化会话（chat/exec resume、subagent_resume 等历史续接路径）。
+const CacheLineageModeResume = "resume"
 
 // noteProgress 上报一次进度 tick（方案 §5.4 / P0-1）。契约：尽力而为、
 // 快速返回；回调失败不得冒泡为 turn 失败。
@@ -569,6 +587,7 @@ func (loop *ReActLoop) RunWithSession(ctx context.Context, prompt string, sessio
 		History:          session.GetMessages(),
 		IncludePrompt:    includePrompt,
 		PromptCacheEpoch: sessionPromptCacheEpoch(session),
+		CacheLineageMode: sessionCacheLineageMode(session),
 		PersistHistory: func(messages []types.Message) error {
 			durable := stripSystemMessages(messages)
 			session.ReplaceHistory(durable)
@@ -595,6 +614,7 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 		History:          session.GetMessages(),
 		IncludePrompt:    false,
 		PromptCacheEpoch: sessionPromptCacheEpoch(session),
+		CacheLineageMode: sessionCacheLineageMode(session),
 		PersistHistory: func(messages []types.Message) error {
 			durable := stripSystemMessages(messages)
 			session.ReplaceHistory(durable)
@@ -667,6 +687,25 @@ func setSessionPromptCacheEpoch(session HistorySession, epoch int) {
 	writer.SetContext(PromptCacheEpochSessionContextKey, epoch)
 }
 
+// sessionCacheLineageMode 读取宿主写入的 cache lineage 标记（§8.4 窄读法）。
+// 仅接受已知取值（resume）；缺失、类型不符或未知值一律返回空串（未观测），
+// 不猜测、不把任意字符串当标签外传。
+func sessionCacheLineageMode(session HistorySession) string {
+	reader, ok := session.(historySessionContextReader)
+	if !ok {
+		return ""
+	}
+	raw, ok := reader.GetContext(CacheLineageModeSessionContextKey)
+	if !ok {
+		return ""
+	}
+	value, _ := raw.(string)
+	if strings.TrimSpace(value) != CacheLineageModeResume {
+		return ""
+	}
+	return CacheLineageModeResume
+}
+
 func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOptions) (result *Result, runErr error) {
 	defer func() {
 		if result != nil {
@@ -694,6 +733,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.forkAuditDone = false
 	loop.runContextMode = resolveRunContextMode(options)
 	loop.runParentPromptCacheKey = strings.TrimSpace(options.ParentPromptCacheKey)
+	loop.runCacheLineageMode = strings.TrimSpace(options.CacheLineageMode)
 	loop.runTaskAttempt = options.TaskAttempt
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
@@ -2847,6 +2887,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if mode := loop.runContextMode; mode != "" {
 		req.Metadata[contextModeKey] = mode
 		requestPayload[contextModeKey] = mode
+	}
+	// §8.4（窄读法）：续接持久化会话的运行携带 cache_lineage_mode=resume；
+	// fresh/fork 的 spawn 语义仍由 context_mode 承载（两字段互补）。
+	if mode := loop.runCacheLineageMode; mode != "" {
+		req.Metadata[cacheLineageModeKey] = mode
+		requestPayload[cacheLineageModeKey] = mode
 	}
 	// §6.4：父会话 prompt-cache key（有值时携带），供父/子 key 对账。
 	if key := loop.runParentPromptCacheKey; key != "" {

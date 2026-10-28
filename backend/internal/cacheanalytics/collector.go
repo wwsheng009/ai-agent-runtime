@@ -59,6 +59,9 @@ type inflightRequest struct {
 	forkSnapshotHash string
 	// parentPromptCacheKey 是父会话 spawn 时刻的 prompt-cache key（§6.4）。
 	parentPromptCacheKey string
+	// cacheLineageMode 是本次运行的 cache lineage 标签（§8.4 窄读法）：
+	// resume = 续接持久化会话；空串 = 未观测。
+	cacheLineageMode string
 	// taskAttempt 是调度 attempt 序号（§8.2 对账列）；0 = 未观测。
 	taskAttempt int
 }
@@ -238,6 +241,7 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 	inflight.contextMode = payloadString(payload, "context_mode")
 	inflight.forkSnapshotHash = payloadString(payload, "fork_snapshot_hash")
 	inflight.parentPromptCacheKey = payloadString(payload, "parent_prompt_cache_key")
+	inflight.cacheLineageMode = payloadString(payload, "cache_lineage_mode")
 	inflight.taskAttempt = payloadInt(payload, "task_attempt")
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
@@ -321,6 +325,7 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		ContextMode:            inflight.contextMode,
 		ForkSnapshotHash:       inflight.forkSnapshotHash,
 		ParentPromptCacheKey:   inflight.parentPromptCacheKey,
+		CacheLineageMode:       inflight.cacheLineageMode,
 		TaskAttempt:            inflight.taskAttempt,
 	})
 	c.projector.append(&record)

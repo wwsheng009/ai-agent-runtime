@@ -38,6 +38,9 @@ const (
 	// 子代理运行的上下文模式，随 llm.request.* 载荷进入 cache analytics。
 	forkSnapshotHashKey = "fork_snapshot_hash"
 	contextModeKey      = "context_mode"
+	// cacheLineageModeKey（§8.4 窄读法）：续接持久化会话时携带
+	// cache_lineage_mode=resume，随 llm.request.* 载荷进入 cache analytics。
+	cacheLineageModeKey = "cache_lineage_mode"
 )
 
 // forkPrefixStats 是一次前缀保持性检查的结果。
