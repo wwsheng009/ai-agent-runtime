@@ -87,12 +87,12 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 |---|---|---|
 | **M0** ✅ | 垂直切片：`view` 单工具走通 `--backend envd`（含 jail + audit + MCP 级 e2e），收敛接入面不确定性——**已完成，结论见 §8** | 0.5 天（实测相符） |
 | **M1** ✅ | 骨架：`Config` 增加 backend/envd 字段；`serveFlags` 增加 `--backend / --addr / --user / --token-env / --ca-file / --call-timeout`；`NewServer` 按 backend 分叉（stdio-only、跳过本地 Workspace 校验）——**随 M0 一并完成**（见 §8.1） | 0.5–1.5 天（实测 0） |
-| **M2** | 全量搬迁：16 工具体 + jail/watch/pty + `toolkit.Tool` 适配器 + audit/Limits 接线 | 2.5–4 天 |
+| **M2** ✅ | 全量搬迁：16 工具体 + jail/watch/pty + `toolkit.Tool` 适配器 + audit/Limits 接线——**已全部完成**（§8.2、§8.5） | 2.5–4 天（实测相符） |
 | **M3** ✅ | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试——**全部完成**（§8.3、§8.4） | 1–2.5 天（实测相符） |
 | **M4** | 测试迁移与回归：bridge 现有 4 个测试文件改指新入口；`TestManagerHermeticEnvD` 适配；`remotetools` 全套回归；契约/等价测试扩展 | 1.5–2.5 天 |
 | **M5**（可选） | `cmd/aicli-envd-bridge` 保留为兼容 shim（转发到新入口并打印弃用提示） | +0.5 天 |
 
-> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2）；M3 全部完成（§8.3、§8.4）——**envd 的 standard 档已与原厂一致**。M2 尚余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
+> **进度（2026-10-28）**：M0/M1（§8.1）、M2（§8.2 文件面 + §8.5 进程与交互面）、M3（§8.3、§8.4）**全部完成**——envd 后端工具面已覆盖并超过 bridge（readonly 6 / standard 13 / ops 19），与厂家的 standard 档语义一致。**只剩 M4**：展开切换 + 测试迁移 + 删除 bridge（按决策不留 shim）。
 
 合计：**5.5–10.5 人日**（单人、含测试；±50%，M0 完成后收敛区间）。
 
@@ -204,7 +204,22 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **剩余**：M2 收尾（`shell` + `--allow-command*`、`pty_*`、`watch_dir`）；M4（`remotetargets` 展开切换 + bridge 测试迁移）。
 
-- 实施结论：（M1–M5 完成后继续回填：实际耗时 / 偏差 / 遗留项）
+### 8.5 M2 已全部完成（2026-10-28）
+
+**工具面收尾**：进程与交互面迁入后，envd 后端覆盖并超过 bridge 全部能力——实测 `tools --backend envd --profile ops` 输出 **19 个工具**（readonly 6 / standard 13 / ops 19）。
+
+- `shell`：命令走共享 `CommandPolicy`（deny > 非空 allowlist > metachar > destructive），cwd 同样过 jail；ops 无任何 allow 规则时启动即告警（行为仍 fail-closed）。
+- `watch_dir`：把无终态的 WatchDir 流收敛为一次性有界窗口（`wait_ms` / `max_events`，返回前必关流）。
+- `pty_*`：会话跨调用存活（后台 context + pump），输出尾部有界 256 KiB，`Server.Close` 统一拆除；`pty_start` 过策略且首事件在调用截止内读取；描述明写“进入交互后 `pty_write` 不逐条过滤”，不暗示后端给不了的保证。
+- flag 面新增 `--allow-command / --deny-command / --allow-command-pattern / --deny-command-pattern / --deny-shell-metachars`，语法与原 bridge 一致，为 M4 展开切换铺路。
+
+**扩展档位表再确认**：`shell` 走共享阶梯（`ToolShell` 属 ops），`watch_dir` 与 `pty_*` 作为 readonly / ops 扩展入同一张 `envdExtensionTiers`——依旧没有第二套档位词汇。
+
+**与并行会话的冲突处理（过程记录）**：`envd_backend_test.go` 内一条由并行会话先前写入的断言（“ops 不应暴露 `pty_start`”）随本次实现失效，已改为对 ops 全工具面做**精确等值断言**（保留原意图：档位只能宣告确实实现的工具）。此外本轮验证一度被 `internal/contextmgr` 的在写不可编译状态阻塞（测试二进制依赖它），等待其恢复后才完成验证——未提交未经验证的代码。
+
+**验证**：envd 后端累计 **46 个用例全绿**；`remotetools` 全量 46.6s 通过；`remotetargets` / bridge 通过；vet / gofmt 干净。提交：M2 文件面 `06e87afe` 与进程/交互面 `ef56417c`。
+
+- 实施结论：（M4 完成后继续回填：实际耗时 / 偏差 / 遗留项）
 
 ---
 
