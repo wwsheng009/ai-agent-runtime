@@ -348,7 +348,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **输出内存上限**：`envdclient.Run` 每流最多保留 8 MiB（`DefaultMaxBufferedOutput`），超出部分丢弃但继续消费流，避免远端大输出撑爆 bridge 进程。
 - **目标名/前缀**：`Spec.TargetName()` 覆盖 envd（取 `sanitize(host)`）；真实巡检暴露的 `remote_remote__*` 前缀已修复为 `remote_<host>__*`（提交 `4a9492f9`）。
 - **metrics 展示**：旧版 envd 缺失 `available` 字段时显示 `n/a`，不再误报 `0 MiB`。
-- **审计日志（opt-in）**：bridge 新增 `--audit-log`，spec `?audit_log=`、`remote.auditLog` 透传；每次调用写一行 JSONL 元数据（ts/tool/profile/ok/duration_ms/argument_bytes/target/user），**不记录参数与结果内容**，测试锁定不泄漏。
+- **审计日志（opt-in）**：bridge 新增 `--audit-log`，spec `?audit_log=`、`remote.auditLog` 透传；每次调用写一行 JSONL 元数据（ts/tool/profile/ok/duration_ms/argument_bytes/target/user），命令类调用额外写 `policy_rule`、`exit_code`、`output_bytes`（`shell`）或 `policy_rule`（`pty_start`），**不记录参数与结果内容**，测试锁定不泄漏。
 - **envd 日志脱敏（本地补丁）**：`scripts/envd/patches/0001-redact-process-logs.patch` 将默认级别降为 info，`process_start` 只记录可执行文件与参数个数，stdout/stderr 与 unary 请求体降为 debug；实测写入唯一标记后 journald 中 marker/请求体/stdout 命中均为 0。
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
@@ -387,7 +387,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - 命令策略 live 冒烟（TLS）：`echo policy-ok` 放行；`id` 返回 `policy:not-allowed`；`echo secret` 被 `deniedCommands` 拦截；`echo ok; id` 返回 `policy:metachars`；允许 `sh` 后 `pty_start` / `pty_read` 返回 `policy-pty`。
 - symlink jail live 冒烟（TLS）：`view` workspace 内外链 → `outside the workspace`；workspace 内链 → `jail-ok`；`write` 经外链 → 拒绝且目标文件未创建；`remove` 外链本身成功，`/tmp` 目标仍在；`remove(".")` → `protected root`；删除含外链子目录的 workspace 目录也未影响 `/tmp` 文件。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**94 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 38、bridge 30；共享策略包 `remotetools` 另为 **162 PASS / 3 SKIP**）。
+- 离线回归：**96 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 38、bridge 32；共享策略包 `remotetools` 另为 **162 PASS / 3 SKIP**）。
 
 ### 9.2 aicli agent 真实巡检场景
 

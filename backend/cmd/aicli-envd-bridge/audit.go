@@ -22,6 +22,11 @@ type auditEntry struct {
 	ArgumentBytes int    `json:"argument_bytes"`
 	Target        string `json:"target,omitempty"`
 	User          string `json:"user,omitempty"`
+	// PolicyRule names the command-policy decision for shell/pty_start, for
+	// example "allowedCommands:echo" or "policy:not-allowed".
+	PolicyRule  string `json:"policy_rule,omitempty"`
+	ExitCode    *int   `json:"exit_code,omitempty"`
+	OutputBytes int    `json:"output_bytes,omitempty"`
 }
 
 // auditLog appends one JSON object per line to a file.

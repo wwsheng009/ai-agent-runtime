@@ -299,7 +299,8 @@ envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl
 ```
 
 - 每次 `tools/call` 追加一行 JSON：`ts / tool / profile / ok / duration_ms /
-  argument_bytes / target / user`。
+  argument_bytes / target / user`；命令类调用额外记录 `policy_rule`、
+  `exit_code`、`output_bytes`（`shell`）或 `policy_rule`（`pty_start`）。
 - **只记录元数据**：参数内容与返回内容不写入审计（避免把文件正文、命令输出复制进日志）。
 - 审计文件由 bridge 以 0600 创建/追加；写入失败会打到 bridge stderr，但不会失败工具调用。
 

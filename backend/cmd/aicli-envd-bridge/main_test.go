@@ -559,6 +559,77 @@ func TestAuditMarksSuccessfulCalls(t *testing.T) {
 	}
 }
 
+// TestAuditRecordsShellPolicyAndExit locks the command-policy and exit metadata
+// contract: enough to explain a decision, without command output or arguments.
+func TestAuditRecordsShellPolicyAndExit(t *testing.T) {
+	client := fakeEnvDClient(t, func(w http.ResponseWriter) {
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
+			"stdout": base64.StdEncoding.EncodeToString([]byte("ok\n")),
+		}}})
+		writeConnectFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
+			"exited": true, "status": "exit status 0",
+		}}})
+	})
+	var buf bytes.Buffer
+	b := &bridge{
+		client:    client,
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   5 * time.Second,
+		commands:  testCommandPolicy(t, "echo"),
+		audit:     newAuditLogWriter(&buf),
+	}
+	if res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"echo ok"}`)); res.IsError {
+		t.Fatalf("shell failed: %+v", res)
+	}
+
+	line := strings.TrimSpace(buf.String())
+	var entry auditEntry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("decode audit line: %v", err)
+	}
+	if !entry.OK || entry.PolicyRule != "allowedCommands:echo" {
+		t.Fatalf("entry = %+v, want an allowed echo rule", entry)
+	}
+	if entry.ExitCode == nil || *entry.ExitCode != 0 {
+		t.Fatalf("exit_code = %v, want 0", entry.ExitCode)
+	}
+	if entry.OutputBytes != len("ok\n") {
+		t.Fatalf("output_bytes = %d, want %d", entry.OutputBytes, len("ok\n"))
+	}
+	if strings.Contains(line, "echo ok") || strings.Contains(line, `"ok\n"`) {
+		t.Fatalf("audit log leaked command or output content: %s", line)
+	}
+}
+
+// TestAuditRecordsDeniedPolicyRule proves a refused command is auditable without
+// reaching envd.
+func TestAuditRecordsDeniedPolicyRule(t *testing.T) {
+	var buf bytes.Buffer
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   time.Second,
+		commands:  testCommandPolicy(t, "echo"),
+		audit:     newAuditLogWriter(&buf),
+	}
+	if res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"id"}`)); !res.IsError {
+		t.Fatalf("shell was allowed: %+v", res)
+	}
+
+	var entry auditEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &entry); err != nil {
+		t.Fatalf("decode audit line: %v", err)
+	}
+	if entry.OK || entry.PolicyRule != "policy:not-allowed" {
+		t.Fatalf("entry = %+v, want a denied policy rule", entry)
+	}
+	if entry.ExitCode != nil || entry.OutputBytes != 0 {
+		t.Fatalf("entry = %+v, want no exit/output for a denied command", entry)
+	}
+}
+
 // TestCallTimeoutAbortsSlowCall proves the per-call deadline also bounds a
 // streaming tool call, not only unary requests.
 func TestCallTimeoutAbortsSlowCall(t *testing.T) {

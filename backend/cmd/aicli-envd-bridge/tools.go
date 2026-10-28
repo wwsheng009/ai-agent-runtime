@@ -347,7 +347,9 @@ func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult
 	}
 	rule, err := b.commands.CheckCommand(in.Command)
 	if err != nil {
-		return errorResult("command denied (%s): %v", rule, err)
+		res := errorResult("command denied (%s): %v", rule, err)
+		res.audit.PolicyRule = rule
+		return res
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {
@@ -366,7 +368,9 @@ func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult
 		},
 	})
 	if err != nil {
-		return errorResult("shell: %v", err)
+		res := errorResult("shell: %v", err)
+		res.audit.PolicyRule = rule
+		return res
 	}
 
 	var sb strings.Builder
@@ -380,7 +384,12 @@ func (b *bridge) toolShell(ctx context.Context, args json.RawMessage) callResult
 		fmt.Fprintf(&sb, "[stderr]\n%s", truncate(string(stderr), maxOutputText))
 	}
 	fmt.Fprintf(&sb, "\n[exit %d]", code)
-	return textResult("%s", sb.String())
+	res := textResult("%s", sb.String())
+	res.audit.PolicyRule = rule
+	exitCode := int(code)
+	res.audit.ExitCode = &exitCode
+	res.audit.OutputBytes = len(stdout) + len(stderr)
+	return res
 }
 
 // toolMetrics reports host capacity.

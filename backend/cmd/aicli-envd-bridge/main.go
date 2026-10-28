@@ -281,6 +281,17 @@ type textContent struct {
 type callResult struct {
 	Content []textContent `json:"content"`
 	IsError bool          `json:"isError,omitempty"`
+	// audit is metadata for the local audit sink. It is unexported, so it never
+	// reaches the MCP response.
+	audit commandAudit
+}
+
+// commandAudit carries the command-policy and exit metadata that the audit sink
+// records without duplicating command output.
+type commandAudit struct {
+	PolicyRule  string
+	ExitCode    *int
+	OutputBytes int
 }
 
 // textResult builds a successful text result.
@@ -595,6 +606,9 @@ func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage
 				OK:            !out.IsError,
 				DurationMS:    time.Since(started).Milliseconds(),
 				ArgumentBytes: len(args),
+				PolicyRule:    out.audit.PolicyRule,
+				ExitCode:      out.audit.ExitCode,
+				OutputBytes:   out.audit.OutputBytes,
 			}
 			if b.client != nil {
 				entry.Target = b.client.Addr()

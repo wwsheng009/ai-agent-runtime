@@ -158,7 +158,9 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 	}
 	rule, err := b.commands.CheckCommand(in.Command)
 	if err != nil {
-		return errorResult("command denied (%s): %v", rule, err)
+		res := errorResult("command denied (%s): %v", rule, err)
+		res.audit.PolicyRule = rule
+		return res
 	}
 	cwd := b.workspace
 	if strings.TrimSpace(in.Cwd) != "" {
@@ -190,7 +192,9 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 	})
 	if err != nil {
 		cancel()
-		return errorResult("pty_start: %v", err)
+		res := errorResult("pty_start: %v", err)
+		res.audit.PolicyRule = rule
+		return res
 	}
 
 	// Read the start event with the caller's deadline, then hand the stream to the
@@ -211,17 +215,23 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 	case <-ctx.Done():
 		cancel()
 		_ = stream.Close()
-		return errorResult("pty_start: %v", ctx.Err())
+		res := errorResult("pty_start: %v", ctx.Err())
+		res.audit.PolicyRule = rule
+		return res
 	case first := <-firstCh:
 		if first.err != nil {
 			cancel()
 			_ = stream.Close()
-			return errorResult("pty_start: %v", first.err)
+			res := errorResult("pty_start: %v", first.err)
+			res.audit.PolicyRule = rule
+			return res
 		}
 		if first.event.Kind != envdclient.EventStart || first.event.Start == nil {
 			cancel()
 			_ = stream.Close()
-			return errorResult("pty_start: expected a start event, got %v", first.event.Kind)
+			res := errorResult("pty_start: expected a start event, got %v", first.event.Kind)
+			res.audit.PolicyRule = rule
+			return res
 		}
 		pid := first.event.Start.Pid
 		session := newPtySession(pid, stream, cancel)
@@ -229,7 +239,9 @@ func (b *bridge) toolPtyStart(ctx context.Context, args json.RawMessage) callRes
 		b.sessions[pid] = session
 		b.sessionMu.Unlock()
 		go session.pump()
-		return textResult("session started: pid=%d (pty_write/pty_read/pty_resize/pty_close)", pid)
+		res := textResult("session started: pid=%d (pty_write/pty_read/pty_resize/pty_close)", pid)
+		res.audit.PolicyRule = rule
+		return res
 	}
 }
 
