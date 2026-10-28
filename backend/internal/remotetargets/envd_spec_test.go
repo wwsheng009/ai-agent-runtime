@@ -323,3 +323,25 @@ func TestExpandOneEnvDRejectsInvalidCallTimeout(t *testing.T) {
 		t.Errorf("error = %v, want it to name callTimeout", err)
 	}
 }
+
+// TestParseSpecEnvDAuditLog covers the local audit path override.
+func TestParseSpecEnvDAuditLog(t *testing.T) {
+	spec, err := ParseSpec("envd://user@10.0.0.9:49983/srv/app?audit_log=/tmp/envd-audit.jsonl")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if spec.AuditLog != "/tmp/envd-audit.jsonl" {
+		t.Fatalf("AuditLog = %q, want /tmp/envd-audit.jsonl", spec.AuditLog)
+	}
+	expanded, err := spec.Expand()
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	var args string
+	for _, cfg := range expanded.Servers {
+		args = strings.Join(cfg.Args, " ")
+	}
+	if !strings.Contains(args, "--audit-log /tmp/envd-audit.jsonl") {
+		t.Fatalf("args = %q, want --audit-log /tmp/envd-audit.jsonl", args)
+	}
+}

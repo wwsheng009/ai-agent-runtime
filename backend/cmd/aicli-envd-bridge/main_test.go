@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -239,6 +240,66 @@ func TestMetricsThroughFakeEnvD(t *testing.T) {
 	}
 	if text := res.Content[0].Text; !strings.Contains(text, "memory available: 512 MiB") {
 		t.Fatalf("host_metrics output = %q, want the reported available memory", text)
+	}
+}
+
+// TestAuditRecordsMetadataOnly locks the audit contract: one JSON object per
+// call, and never the argument payload (which can contain file bodies or
+// commands the operator would not want duplicated into a log).
+func TestAuditRecordsMetadataOnly(t *testing.T) {
+	var buf bytes.Buffer
+	b := &bridge{
+		workspace: "/srv/app",
+		profile:   profileReadonly,
+		timeout:   5 * time.Second,
+		audit:     newAuditLogWriter(&buf),
+	}
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"echo do-not-log"}`))
+	if !res.IsError {
+		t.Fatalf("shell was allowed under readonly: %+v", res)
+	}
+
+	line := strings.TrimSpace(buf.String())
+	if strings.Contains(line, "do-not-log") {
+		t.Fatalf("audit log leaked argument content: %s", line)
+	}
+	var entry auditEntry
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatalf("decode audit line %q: %v", line, err)
+	}
+	if entry.Tool != "shell" || entry.Profile != "readonly" || entry.OK {
+		t.Fatalf("entry = %+v, want a failed shell call under readonly", entry)
+	}
+	if entry.ArgumentBytes == 0 || entry.Timestamp == "" {
+		t.Fatalf("entry = %+v, want argument size and timestamp", entry)
+	}
+}
+
+// TestAuditMarksSuccessfulCalls proves the ok flag and target identity follow the
+// result the model saw.
+func TestAuditMarksSuccessfulCalls(t *testing.T) {
+	client := fakeEnvDClient(t, nil)
+	var buf bytes.Buffer
+	b := &bridge{
+		client:    client,
+		workspace: "/srv/app",
+		profile:   profileReadonly,
+		timeout:   5 * time.Second,
+		audit:     newAuditLogWriter(&buf),
+	}
+	if res := b.callTool(context.Background(), "host_metrics", json.RawMessage(`{}`)); res.IsError {
+		t.Fatalf("host_metrics failed: %+v", res)
+	}
+
+	var entry auditEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &entry); err != nil {
+		t.Fatalf("decode audit line: %v", err)
+	}
+	if !entry.OK || entry.Tool != "host_metrics" {
+		t.Fatalf("entry = %+v, want a successful host_metrics call", entry)
+	}
+	if entry.Target == "" || entry.User != "user" {
+		t.Fatalf("entry = %+v, want the target address and executing user", entry)
 	}
 }
 

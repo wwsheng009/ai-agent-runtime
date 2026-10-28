@@ -335,11 +335,14 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **输出内存上限**：`envdclient.Run` 每流最多保留 8 MiB（`DefaultMaxBufferedOutput`），超出部分丢弃但继续消费流，避免远端大输出撑爆 bridge 进程。
 - **目标名/前缀**：`Spec.TargetName()` 覆盖 envd（取 `sanitize(host)`）；真实巡检暴露的 `remote_remote__*` 前缀已修复为 `remote_<host>__*`（提交 `4a9492f9`）。
 - **metrics 展示**：旧版 envd 缺失 `available` 字段时显示 `n/a`，不再误报 `0 MiB`。
+- **审计日志（opt-in）**：bridge 新增 `--audit-log`，spec `?audit_log=`、`remote.auditLog` 透传；每次调用写一行 JSONL 元数据（ts/tool/profile/ok/duration_ms/argument_bytes/target/user），**不记录参数与结果内容**，测试锁定不泄漏。
+- **envd 日志脱敏（本地补丁）**：`scripts/envd/patches/0001-redact-process-logs.patch` 将默认级别降为 info，`process_start` 只记录可执行文件与参数个数，stdout/stderr 与 unary 请求体降为 debug；实测写入唯一标记后 journald 中 marker/请求体/stdout 命中均为 0。
+- **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 
 ### 8.3 保留的限制
 
 - **symlink 可绕过文本级 jail**：jail 只做 `path.Clean` + 前缀匹配，bridge 无法在本地解析远端软链；
-- **无 `remotetools` 的 audit 与命令白名单**（envd 路径不经过 remotetools 外壳，见 §2.1）；
+- **审计为 opt-in、命令白名单仍缺失**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；envd 路径仍没有 remotetools 的命令白名单（envd 侧同样没有）；
 - **无法做 envd 版本校验**：envd 没有版本端点；
 - **TLS / HTTP/2 未真机验证**（承接 §4.1）；
 - **写入硬上限 1 MiB**（承接 §4.3）；
@@ -356,15 +359,16 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - Ubuntu 24.04.2 LTS / 4 vCPU / 32 GiB；envd 0.2.11，由公开提交 `fcf15acb` 交叉编译（静态 ELF，sha256 `1688…fb67`）。
 - systemd 常驻 + `/init` 访问令牌（`/etc/envd/envd.env`，600 root）+ `ExecStartPost` 重启自动重装；令牌轮换 = 改 env 文件后重启。
 - iptables 仅放行回环与运维工作站（`/32`）：实测临时移除放行后客户端访问超时，恢复后 401/200 语义正确；回环始终 204。
+- 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
 - live 集成测试 **6/6 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUserIsUnauthenticated）。
-- 离线回归：**59 PASS / 0 FAIL / 6 SKIP**（envdclient 18、remotetargets 30、bridge 10，含子用例）。
+- 离线回归：**62 PASS / 0 FAIL / 6 SKIP**（envdclient 19、remotetargets 31、bridge 12）。
 
 ### 9.2 aicli agent 真实巡检场景
 
 - 方式：`aicli chat --no-interactive --remote 'envd://n9e@<host>:49983/home/n9e?binary=<bridge>#ops'`，`--permission-mode bypass_permissions`，仅使用远端 envd 工具（未使用本地 shell/文件工具）。
 - 运行：275 s，`session_20261028074725_2JIY3hBU`，provider workbuddy / deepseek-v4.1-flash（reasoning=max），消耗 **1,019,489 tokens**。
 - 交付：远程报告 `/home/n9e/reports/n9e-inspection-20261028-0750.md`（14,049 字节），经 envd `view` 回读校验并通过 bridge 取回本地。
-- 关键发现：4 核负载 `3.02/3.34/3.08`；`n9e v2` 迁移 `Error 1091` + 6–8 s 慢 SQL + `17001` 被旧实例占用导致 panic；系统 `degraded`（`systemd-networkd-wait-online`）；`syslog` 4.74 GiB 且持续增长。
+- 关键发现：4 核负载 `3.02/3.34/3.08`；`n9e v2` 迁移 `Error 1091` + 6–8 s 慢 SQL + `17001` 被旧实例占用导致 panic，且 `n9e.service` 在 `20091` 端口冲突下反复重启失败；系统 `degraded`（`systemd-networkd-wait-online`）；`syslog` 4.74 GiB 且持续增长。
 - 暴露缺陷：工具前缀退化为 `remote_remote__*`；已修复并加回归测试（见 §8.2）。
 
 ### 9.3 成本提示

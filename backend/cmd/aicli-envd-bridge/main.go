@@ -79,6 +79,7 @@ type bridge struct {
 	prefix    string
 	profile   profile
 	timeout   time.Duration
+	audit     *auditLog
 }
 
 // resolve maps a caller-supplied path into the jail.
@@ -300,6 +301,7 @@ func main() {
 		prefix      = flag.String("tool-prefix", "", "prefix applied to exposed tool names")
 		caFile      = flag.String("ca-file", "", "CA bundle for a TLS envd endpoint")
 		callTimeout = flag.Duration("call-timeout", 10*time.Minute, "maximum duration of one tool call; streaming shell runs are bounded by it")
+		auditPath   = flag.String("audit-log", "", "append one JSONL record per tool call to this file (contents are never logged)")
 	)
 	flag.Var(&allowRoot, "allow-root", "additional directory outside the workspace that may be accessed; repeatable")
 	flag.Parse()
@@ -326,6 +328,14 @@ func main() {
 	if *callTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "aicli-envd-bridge: --call-timeout must be a positive duration")
 		os.Exit(2)
+	}
+	audit, err := openOptionalAudit(*auditPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aicli-envd-bridge: open audit log: %v\n", err)
+		os.Exit(2)
+	}
+	if audit != nil {
+		defer func() { _ = audit.Close() }()
 	}
 
 	cfg := envdclient.Config{Addr: *addr, User: *user}
@@ -359,6 +369,7 @@ func main() {
 		prefix:    *prefix,
 		profile:   profile(strings.ToLower(strings.TrimSpace(*prof))),
 		timeout:   *callTimeout,
+		audit:     audit,
 	}
 
 	// A signal must not leave the target running a half-finished command, so the
@@ -520,8 +531,29 @@ func (b *bridge) unprefixed(name string) string {
 }
 
 // callTool validates the profile, then dispatches to the implementation.
-func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage) callResult {
+func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage) (out callResult) {
 	base := b.unprefixed(name)
+	started := time.Now()
+	if b.audit != nil {
+		// Record metadata only. The deferred call runs after the switch assigns
+		// the result, so the ok flag reflects what the model was told.
+		defer func() {
+			entry := auditEntry{
+				Tool:          base,
+				Profile:       string(b.profile),
+				OK:            !out.IsError,
+				DurationMS:    time.Since(started).Milliseconds(),
+				ArgumentBytes: len(args),
+			}
+			if b.client != nil {
+				entry.Target = b.client.Addr()
+				entry.User = b.client.User()
+			}
+			if err := b.audit.record(entry); err != nil {
+				fmt.Fprintf(os.Stderr, "aicli-envd-bridge: audit log: %v\n", err)
+			}
+		}()
+	}
 
 	def, known := toolDefs[base]
 	if !known {

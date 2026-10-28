@@ -53,10 +53,15 @@ use (
 )
 EOF
 
+cd ..
+# 本地加固补丁：默认 info 日志、process_start 不记录 argv、stdout/stderr 与
+# 请求体不落 journal（详见 §4“日志”）
+git apply /path/to/ai-agent-runtime/scripts/envd/patches/0001-redact-process-logs.patch
+
 cd packages/envd
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 GOPROXY=https://goproxy.cn,direct GOSUMDB=off \
-go build -trimpath -ldflags "-s -w -X main.commitSHA=fcf15acb" -o envd .
+go build -trimpath -ldflags "-s -w -X main.commitSHA=fcf15acb+logsafe" -o envd .
 ```
 
 > 网络受限环境可把 `GOPROXY` 换成可达的镜像；`goproxy.cn` 在本次两类环境均可达。
@@ -79,6 +84,7 @@ go build -trimpath -ldflags "-s -w -X main.commitSHA=fcf15acb" -o envd .
 [Service]
 Type=simple
 EnvironmentFile=/etc/envd/envd.env
+Environment=ENVD_LOG_LEVEL=info
 ExecStartPre=/usr/local/sbin/envd-firewall.sh
 ExecStart=/usr/local/bin/envd -isnotfc -port 49983
 ExecStartPost=-/usr/local/sbin/envd-init-token.sh
@@ -147,6 +153,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "X-Access-Token: $ENVD_ACCESS_TOKEN"
 | 网络 | 仅放行回环 + 运维工作站（`iptables` 由 unit 幂等应用） | 换工作站/网段时编辑 `ALLOW` 列表并重启 unit；也可改用 SSH 隧道 |
 | 令牌 | `X-Access-Token` 头；明文 HTTP | 同网段传输可接受；跨网段建议 SSH 隧道或前置 TLS 代理 |
 | 运行身份 | envd 以 root 运行，Basic user 决定命令身份 | 需要可用 root 启动；可选实验：以普通用户运行（未验证） |
+| 日志 | 默认 `info` + 本地脱敏补丁：`process_start` 只记录可执行文件与参数个数，stdout/stderr、请求体不落 journal | 排障时才临时设 `ENVD_LOG_LEVEL=debug`（会记录参数与输出，含文件内容，慎用） |
 | 审计/命令策略 | bridge 只有 jail/profile/输出上限 | 见报告 §8.3；按需补 audit 与命令白名单 |
 
 防火墙脚本（节选）：
@@ -200,6 +207,38 @@ remoteTargets:
 - 工具名前缀：`<toolPrefix或remote_<host>>__<tool>`，例如 `remote_10-0-0-9__view`。
 - 每个工具调用的默认上限是 **10 分钟**；长任务用 `?call_timeout=30m` 或 `remote.callTimeout` 覆盖。
 - `write` 单次内容硬上限 **1 MiB**（argv 限制）；更大文件请分片或走 `shell`。
+
+### 5.1 低成本巡检（推荐）
+
+把确定性采集固化成目标机脚本，agent 只做分析与写报告：
+
+1. **部署（一次）**：用 `remote_<prefix>__write` 把 `scripts/envd/host-inspect.sh` 写入
+   `.local/bin/host-inspect.sh`，再用 `remote_<prefix>__shell` 执行
+   `chmod +x ~/.local/bin/host-inspect.sh`。
+2. **每次巡检**：单次 `remote_<prefix>__shell` 调用 `~/.local/bin/host-inspect.sh`，
+   把固定格式输出交给模型总结；建议配合
+   `--reasoning-effort low --budget-tokens 20000`。
+3. **效果**：实测单次调用返回约 3–10 KiB（取决于是否含 syslog 摘要），
+   相比自由编排（一次巡检约 102 万 tokens）可降一个数量级。
+
+脚本只读：不修改服务、不清理日志；`syslog` 不可读时回退 `sg adm`。
+
+### 5.2 审计日志（opt-in）
+
+```bash
+# 单串写法
+envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl#ops
+```
+
+```yaml
+    remote:
+      auditLog: C:\logs\envd-audit.jsonl
+```
+
+- 每次 `tools/call` 追加一行 JSON：`ts / tool / profile / ok / duration_ms /
+  argument_bytes / target / user`。
+- **只记录元数据**：参数内容与返回内容不写入审计（避免把文件正文、命令输出复制进日志）。
+- 审计文件由 bridge 以 0600 创建/追加；写入失败会打到 bridge stderr，但不会失败工具调用。
 
 ## 6. 运维与排障
 

@@ -1,0 +1,99 @@
+diff --git a/packages/envd/internal/logs/bufferedEvents.go b/packages/envd/internal/logs/bufferedEvents.go
+index 7e7da48f..f4e02db8 100644
+--- a/packages/envd/internal/logs/bufferedEvents.go
++++ b/packages/envd/internal/logs/bufferedEvents.go
+@@ -18,7 +18,7 @@ func LogBufferedDataEvents(dataCh <-chan []byte, logger *zerolog.Logger, eventTy
+ 	var buffer []byte
+ 	defer func() {
+ 		if len(buffer) > 0 {
+-			logger.Info().Str(eventType, string(buffer)).Msg("Streaming process event (flush)")
++			logger.Debug().Str(eventType, string(buffer)).Msg("Streaming process event (flush)")
+ 		}
+ 	}()
+ 
+@@ -26,7 +26,7 @@ func LogBufferedDataEvents(dataCh <-chan []byte, logger *zerolog.Logger, eventTy
+ 		select {
+ 		case <-timer.C:
+ 			if len(buffer) > 0 {
+-				logger.Info().Str(eventType, string(buffer)).Msg("Streaming process event")
++				logger.Debug().Str(eventType, string(buffer)).Msg("Streaming process event")
+ 				buffer = nil
+ 			}
+ 		case data, ok := <-dataCh:
+@@ -37,7 +37,7 @@ func LogBufferedDataEvents(dataCh <-chan []byte, logger *zerolog.Logger, eventTy
+ 			buffer = append(buffer, data...)
+ 
+ 			if len(buffer) >= defaultMaxBufferSize {
+-				logger.Info().Str(eventType, string(buffer)).Msg("Streaming process event")
++				logger.Debug().Str(eventType, string(buffer)).Msg("Streaming process event")
+ 				buffer = nil
+ 
+ 				continue
+diff --git a/packages/envd/internal/logs/interceptor.go b/packages/envd/internal/logs/interceptor.go
+index 5a2c6f7f..8b595f1c 100644
+--- a/packages/envd/internal/logs/interceptor.go
++++ b/packages/envd/internal/logs/interceptor.go
+@@ -60,8 +60,9 @@ func NewUnaryLogInterceptor(logger *zerolog.Logger) connect.UnaryInterceptorFunc
+ 
+ 			res, err := next(ctx, req)
+ 
+-			l := logger.
+-				Err(err).
++			// Successful unary calls are routine (every Stat/ListDir); logging their
++			// payload at info would fill the journal and duplicate file paths.
++			l := getErrDebugLogEvent(logger, err).
+ 				Str("method", DefaultHTTPMethod+" "+req.Spec().Procedure).
+ 				Str(string(OperationIDKey), ctx.Value(OperationIDKey).(string))
+ 
+diff --git a/packages/envd/internal/logs/logger.go b/packages/envd/internal/logs/logger.go
+index 4d8fbaab..23cc2acb 100644
+--- a/packages/envd/internal/logs/logger.go
++++ b/packages/envd/internal/logs/logger.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"io"
+ 	"os"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/rs/zerolog"
+@@ -24,12 +25,22 @@ func NewLogger(ctx context.Context, isNotFC bool, mmdsChan <-chan *host.MMDSOpts
+ 		exporters = append(exporters, exporter.NewHTTPLogsExporter(ctx, isNotFC, mmdsChan), os.Stdout)
+ 	}
+ 
++	// Request payloads can contain file bodies (the bridge's write tool passes
++	// content as an argv element), so debug must not be the default. Operators can
++	// still opt in explicitly with ENVD_LOG_LEVEL=debug.
++	level := zerolog.InfoLevel
++	if raw := strings.TrimSpace(os.Getenv("ENVD_LOG_LEVEL")); raw != "" {
++		if parsed, err := zerolog.ParseLevel(raw); err == nil {
++			level = parsed
++		}
++	}
++
+ 	l := zerolog.
+ 		New(io.MultiWriter(exporters...)).
+ 		With().
+ 		Timestamp().
+ 		Logger().
+-		Level(zerolog.DebugLevel)
++		Level(level)
+ 
+ 	return &l
+ }
+diff --git a/packages/envd/internal/services/process/handler/handler.go b/packages/envd/internal/services/process/handler/handler.go
+index 93ebe48e..9c41c46c 100644
+--- a/packages/envd/internal/services/process/handler/handler.go
++++ b/packages/envd/internal/services/process/handler/handler.go
+@@ -354,7 +354,10 @@ func (p *Handler) Start() (uint32, error) {
+ 		Info().
+ 		Str("event_type", "process_start").
+ 		Int("pid", p.cmd.Process.Pid).
+-		Str("command", p.cmd.String()).
++		// argv can carry file bodies or secrets (the envd bridge's write tool
++		// sends content as an argument), so log the executable and arity only.
++		Str("command", p.cmd.Path).
++		Int("args_count", len(p.cmd.Args)).
+ 		Msg(fmt.Sprintf("Process with pid %d started", p.cmd.Process.Pid))
+ 
+ 	return uint32(p.cmd.Process.Pid), nil

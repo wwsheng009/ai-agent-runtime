@@ -84,6 +84,11 @@ type Spec struct {
 	// ("30m"). Empty keeps the bridge default. It is part of the spec because
 	// long migrations and backups are normal operations, not an edge case.
 	CallTimeout string
+
+	// AuditLog is the local file the bridge appends one JSONL metadata record per
+	// tool call to. Empty disables auditing. It never contains argument or result
+	// payloads.
+	AuditLog string
 }
 
 // ParseSpec parses the compact remote target syntax.
@@ -99,6 +104,9 @@ type Spec struct {
 //
 // envd targets also accept ?call_timeout=<duration> (for example 30m) to override
 // the bridge's per-call deadline.
+//
+// envd targets also accept ?audit_log=<local-path> to enable the bridge's JSONL
+// audit trail (metadata only).
 //
 // The query keys mirror the fields of SSHConfig / RemoteConfig that are commonly
 // non-default; everything else keeps its documented default.
@@ -199,6 +207,7 @@ func ParseSpec(raw string) (*Spec, error) {
 			}
 			spec.EnvDTokenEnv = strings.TrimSpace(query.Get("token_env"))
 			spec.CallTimeout = strings.TrimSpace(query.Get("call_timeout"))
+			spec.AuditLog = strings.TrimSpace(query.Get("audit_log"))
 		}
 	}
 	return spec, nil
@@ -294,6 +303,7 @@ func (s *Spec) Expand() (*Expanded, error) {
 		}
 		target.Remote.Binary = s.Binary
 		target.Remote.CallTimeout = s.CallTimeout
+		target.Remote.AuditLog = s.AuditLog
 		// Empty falls back to the bridge's own default so the generated entry
 		// names the environment variable explicitly instead of relying on an
 		// implicit one.

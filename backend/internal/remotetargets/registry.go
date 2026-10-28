@@ -95,6 +95,10 @@ type RemoteConfig struct {
 	// ("30m"). Empty uses the bridge default (10m). Only the envd transport
 	// consumes it.
 	CallTimeout string `yaml:"callTimeout,omitempty" json:"callTimeout,omitempty"`
+	// AuditLog is the local path the envd bridge appends its JSONL tool-call audit
+	// to. Empty disables auditing. Only the envd transport consumes it; the file
+	// lives on this machine, not on the target.
+	AuditLog string `yaml:"auditLog,omitempty" json:"auditLog,omitempty"`
 	// DescriptionStyle is compact|explicit.
 	DescriptionStyle string `yaml:"descriptionStyle,omitempty" json:"descriptionStyle,omitempty"`
 	// TLS carries the client-certificate material for the http transports.
@@ -412,6 +416,9 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 				return mcpconfig.MCPConfig{}, nil, fmt.Errorf("remote.callTimeout %q must be a positive Go duration such as 30m", raw)
 			}
 			args = append(args, "--call-timeout", raw)
+		}
+		if auditLog := strings.TrimSpace(target.Remote.AuditLog); auditLog != "" {
+			args = append(args, "--audit-log", auditLog)
 		}
 		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
 			args = append(args, "--ca-file", strings.TrimSpace(target.Remote.TLS.CAFile))
