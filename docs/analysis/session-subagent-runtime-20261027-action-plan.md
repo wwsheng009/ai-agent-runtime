@@ -620,6 +620,10 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `d96486a4` | 状态语义失败分类：控制面停止不再落 `unknown`（归因 cancelled/timeout 兜底） | §6.2 / §13.7 |
 | `cefc641a` | fork 可缓存前缀对照实验：同快照/同 route 下工具面不同即前缀身份不同；`fork_snapshot_hash` 只描述父快照 | §6.4 / §8.4 |
 | `70710169` | provider header-guard 超时连接拆除三档探针（h1 流式/非流式 + h2） | §13.5 |
+| `277030f6` | 连接拆除复核收口 + 提交链补齐（§13.3/§13.5 同步） | 文档 |
+| `dd5b3e83` | §13.7 失败分类修复的生效面与投影（197 失败行只读复算） | 文档 |
+| `047b65d9` | §13.4-2 命名决策收口：`request_error` 不采纳 | 文档 |
+| `216e730e` | TaskSpec 持久化解码期路由告警 `route_warnings`（完整性审计收口，见 §13.5） | §13.5 |
 
 ### 13.2 逐条对照（§6）
 
@@ -650,7 +654,8 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - TaskSpec 定义面往返（`00061925`，agent 23.482s / subagentbatch 2.098s）：`TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields`（8 个新字段在序列化字节面可见 + 逐项还原 + 别名安全）；既有 fork/旧 spec 兼容用例保持通过。
 - 失败分类口径（`d96486a4`，usageanalytics 全包 4.766s）：`TestNormalizeSubagentCompletionPayloadStatusCategory`（写侧八档：`error_code` 映射仅非 `unknown` 才采用，`stopped/interrupted/canceled/cancelled` → `cancelled`、`timeout/timed_out` → `timeout`，其余保持 `unknown` 不猜测）+ `TestNormalizeSubagentCompletionStatusCategory`（读侧三档同规则）。
 - fork 前缀对照（`cefc641a`，agent 全包 25.244s）：`TestForkChildPrefixIdentityControls`——c1/c2 同构 fork child 首请求 messages/tools/provider/model 逐项一致（可缓存前缀只是前提，实验读工具面差异）；c3 仅工具面不同 → 前缀身份不同；c4 fresh 不含父历史；四者 `prompt_cache_key` 互异且同批共同携带父 epoch key。
-- header-guard 连接拆除复核（`70710169`，llm 全包 25.168s）：`TestProviderHeaderGuardTimeoutDisconnectsHungUpUpstream`（h1 非流式/流式：裸 TCP 监听器直接观察到客户端断开，且仅在 guard 触发后发生）+ `TestProviderHeaderGuardDisconnectAppliesToHTTP2`（h2：guard 超时 → RST_STREAM → 服务端 request context 取消）；三档合计 0.21s，3s 观察窗未触及。
+- header-guard 连接拆除复核（`70710169`，llm 全包 25.168s）：`TestProviderHeaderGuardTimeoutDisconnectsHungUpUpstream`（h1 非流式/流式：裸 TCP 监听器直接观察到客户端断开，且仅在 guard 触发后发生）+ `TestProviderHeaderGuardDisconnectAppliesToHTTP2`（h2：guard 超时 → RST_STREAM → 服务端 request context 取消）；各档 0.10–0.11s（h1 用例自带合计 0.21s = 非流式 0.11s + 流式 0.10s；h2 单档 0.10–0.11s，2026-10-28 复跑），3s 观察窗未触及。
+- TaskSpec 完整性审计收口（`216e730e`）：`SubagentTask` 30 字段 = 28 经 spec 往返 + 2 个派生字段有意不持久化（`CapabilityRefusals`/`RoutingSource`，判定依据见 §13.5）；`RouteWarnings` 补齐为 `route_warnings` 键 + 往返测试扩展（序列化可见/逐项还原/别名安全/无告警不增键）。聚焦往返测试通过（agent 4.238s）；四包全量回归：llm 24.669s / agent 26.991s / usageanalytics 8.382s / subagentbatch 2.058s，exit 0。
 
 ### 13.4 未完成项与建议
 
@@ -666,6 +671,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
 - 已修（`00061925`）：`subagentbatch.TaskSpec` 定义面字段完整往返——新增 `agent_type/max_turns/write_paths/read_only_source/read_only_filtered_tools/report_schema/report_schema_granted/handoff_in`（`HandoffSpec` 镜像五键，避免 import 环）；幂等 admission replay 不再把约束静默放宽（agentdef 收窄、步数上限、写者并集）或让契约缺失。
+- 已修（`216e730e`，完整性审计收口）：`RouteWarnings` 持久化。审计方法＝逐字段比对 `SubagentTask`（30 字段）与 spec 往返面，并对 3 个 `json:"-"` 内部字段逐一判定能否派生：`CapabilityRefusals`（`prepareTasks` 准入产物；拒绝即整批失败，durable spec 不承载该失败，replay 必重算）与 `RoutingSource`（仅 spawn 期 `taskWithRouteDecision` 写入，子提示 `BuildSubagentPrompt` 在决策后构建）判定为「派生不持久化」；`RouteWarnings` 为唯一真实缺口——解码期告警（agentdef 绑定失败、被拒 fork 窗口、写者串行化提示）经 `subagentTaskRouteHint` 进 `modelrouting` Resolver（`resolver.go:35` 保序并入 `task.Warnings`），再进入父级路由回执与 `subagent.route.resolved` 审计面；replay 丢失会让父级回执静默失去证据。现以 `route_warnings`（omitempty）随 spec 往返，旧 spec 字节兼容。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
 - 已复核（`70710169`，2026-10-28）：header-guard 超时后连接/流是否拆除——**三档探针全部通过，"半开连接泄漏"疑点证伪**——① HTTP/1.1 非流式 0.11s、② HTTP/1.1 流式 0.10s（裸 TCP 监听器直接观察到客户端断开：`io.Copy` 以 EOF 终结）；③ HTTP/2 0.10s（`doRequest` + `EnableHTTP2` TLS 服务器：guard 超时 → 客户端 RST_STREAM → 服务端 request context 取消）。此前 `httptest.Server.Close` 悬挂 ≥1 分钟的机理在**装置侧**：Go 的 `Close` 只强关 `StateIdle`/`StateNew` 连接，`StateActive`（请求在途）会一直等 `s.wg.Wait()`（源码 `net/http/httptest/server.go:470-525`）——观察到的「2 条 active 连接 + ctx 未取消」正是请求仍在 guard 窗口内在途的语义，非产品缺陷。装置规约：挂起上游类测试在 `Close` 前先 `CloseClientConnections()`（本轮探针即按此清理）；不影响 §8.1 结论。
 
@@ -723,3 +729,5 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 4. 顺带观察（非本项）：失败分类 `unknown` 占 46%（91/197），主要来自轻量子代理的停止/关闭路径；若分析侧需区分"用户主动关闭 vs 真实失败"，应另立小项（更精确拆分见第 6 条）。
 5. **已收口（`d96486a4`）**：上述顺带观察已落地为失败分类口径修复——`error_code` 缺失或映射为 `unknown` 时，按完成状态语义兜底（`stopped/interrupted/canceled/cancelled` → `cancelled`，`timeout/timed_out` → `timeout`），读写两侧同规则；"用户/父级主动关闭"不再混入 `unknown`。
 6. **修复的生效面与投影（`d96486a4`，本机 197 失败行只读复算）**：全部失败行 `record_json` 已带显式分类，故**读取侧重推不改历史**（旧列不回填）。91 条 `unknown` 拆分：**82 条 `status=failed`**（`ClassifySubagentFailure` 对 nil/无细节错误的显式 unknown，按"不猜测"保留——真实失败但缺 error 细节，值得源侧补料）+ **9 条 `status=stopped`**（旧归一化产物）。归一化在生产者镜像（CLI `chat_actor_registry.go:1425` / runtime-server `session_runtime_support.go:1159`）与 ingest 两处共用同一实现，且 `record_json` 存的就是归一化后的 payload；因此**新样本**中「状态∈stopped 族/timeout 且分类为空」的失败将分别计为 `cancelled`/`timeout`（9 条那类不再落 `unknown`），82 条那类保持 `unknown`。
+
+7. **写入链完整性核对（`216e730e`，与 §13.5 审计同批）**：`agent_controller` 完成的镜像载荷字段白名单（CLI `copyLocalAgentCompletionPayload` / runtime-server `copyAgentCompletionPayload`）**不含** `failure_category`，且该事件型载荷无法经其它注解路径注入——故写侧归一化是这些行 `failure_category` 的唯一盖章者，生产者不可能预盖 `unknown` 短路状态兜底（据此修正第 6 条的一处归因：82 条 `unknown` 由旧写侧归一化的空 `error_code` 短路（`FailureCategoryFromErrorCode("")→unknown`）盖章，而非 `ClassifySubagentFailure` 产物；「9 条那类不再落 unknown」的结论不变）。读取侧物化列由同一归一化规则派生（`NormalizeSubagentCompletion`），读写两侧零分裂。状态别名集与生产者 `isStoppedSessionStatusText`（`stopped/interrupted/canceled/cancelled`）完全重合；全量扫描无 `kill/abort/term/expire` 类状态（`status ∈ {failed, stopped}`），16 条 `cancelled` 行 `error_code` 均为 `USER_CANCELLED`（经 `FailureCategoryFromErrorCode` 命中），`cancel_source` 无冲突语义。
