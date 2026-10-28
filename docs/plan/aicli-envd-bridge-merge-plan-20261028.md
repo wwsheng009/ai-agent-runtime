@@ -226,9 +226,20 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 - **删除**：`backend/cmd/aicli-envd-bridge`（10 文件）已 `git rm`；`Makefile` 目标 `aicli-envd-bridge` 改为 `aicli-remote-tools`（同时修正 `clean`）；`aicli chat --remote` 帮助文本与部署手册、架构文档同步。
 - **验证**：`remotetargets` / `remotetools` / `cmd/aicli-remote-tools` / `internal/mcp/manager` 全部通过；manager 级 hermetic 实测暴露 **19 个工具**（均带 `remote_envd__` 前缀）并跑通 `host_metrics` / `shell` 与策略拒绝。`go build ./...` 的全仓构建受本机页面文件不足限制（无关大包 OOM），不影响上述包。
 
+### 8.7 真机活测通过（2026-10-28，验收门 6 关闭）
+
+对真实 envd 目标（`n9e@172.18.3.238:49983`，TLS + 访问令牌）以 MCP stdio 直驱收编后的 `aicli-remote-tools serve --stdio --backend envd`：
+
+- 握手 `protocolVersion=2025-06-18`，`tools/list` 返回 **19 个** `remote_n9e__*` 工具（ops 档）。
+- 文件与编辑面 **19/19 通过**：`host_metrics`（真实 4 cpus / 32 GiB）、`ls`（149 条真实目录项）、`mkdir`、`write`（12 字节并经 Stat 回读确认）、`view`、`edit`（1 replacement + 统一 diff，回读确认落盘）、`append_write`（21 字节）、`apply_patch`（hunk 命中，输出中文摘要与 diff）、`glob`（远端 `find`）、`grep`（**目标机无 rg，回落 grep 并回报 `searched with grep`**）、`move`、`shell`（允许项执行成功、`id` 被 `policy:not-allowed` 拒绝）、越界路径 `PATH_DENIED`、`watch_dir` 有界窗口、`pty_start` 未授权命令拒绝、清理 `remove` 全部通过。
+- 交互面另跑 **6/6 通过**：`pty_start sh`（pid=127744）→ `pty_write` 送 `printf` → `pty_read` 收到真实 shell 提示符与输出 → `pty_resize 120x40` → `pty_close` → 关闭后再读被拒。
+- 事后核对：目标机探针目录已删除、无残留会话；本机临时 CA 与脚本、仓库根构建产物均已清理。
+
+**结论：收编后的 envd 后端在真机功能完整，且原厂 ssh 面未受影响（同一二进制、同一外壳）。** 遗留：`StreamInput`（client-streaming，需 HTTP/2）仍不暴露；symlink jail 的 TOCTOU 限制沿用收编前状态（实施报告 §8.3）。
+
 - 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
 
-> 说明：§8.1–§8.6 为本计划的执行记录（含实测结果与偏差）。
+> 说明：§8.1–§8.7 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
 
 ---
 
