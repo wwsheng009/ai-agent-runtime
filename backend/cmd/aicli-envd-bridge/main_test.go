@@ -303,6 +303,38 @@ func TestAuditMarksSuccessfulCalls(t *testing.T) {
 	}
 }
 
+// TestCallTimeoutAbortsSlowCall proves the per-call deadline also bounds a
+// streaming tool call, not only unary requests.
+func TestCallTimeoutAbortsSlowCall(t *testing.T) {
+	client := fakeEnvDClient(t, func(w http.ResponseWriter) {
+		// Flush headers so Run reaches Recv, then stall past the deadline.
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(400 * time.Millisecond)
+	})
+	b := &bridge{
+		client:    client,
+		workspace: "/srv/app",
+		profile:   profileOps,
+		timeout:   60 * time.Millisecond,
+	}
+
+	started := time.Now()
+	res := b.callTool(context.Background(), "shell", json.RawMessage(`{"command":"sleep 5"}`))
+	elapsed := time.Since(started)
+	if !res.IsError {
+		t.Fatalf("slow call was not aborted: %+v", res)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("call took %v, want it bounded by the 60ms deadline", elapsed)
+	}
+	if text := strings.ToLower(res.Content[0].Text); !strings.Contains(text, "deadline") {
+		t.Fatalf("error = %q, want a deadline error", res.Content[0].Text)
+	}
+}
+
 // fakeEnvDClient serves the two endpoints the bridge uses, so tool calls can be
 // tested without a real envd. startHandler, when non-nil, writes the framed
 // response body for process.Process/Start.

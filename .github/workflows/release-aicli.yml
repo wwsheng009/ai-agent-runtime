@@ -238,7 +238,7 @@ jobs:
         run: |
           set -euo pipefail
           go build -trimpath -o /tmp/aicli-envd-bridge-check ./cmd/aicli-envd-bridge
-          go test ./internal/envdclient/... ./internal/remotetargets/... -count=1
+          go test ./internal/envdclient/... ./internal/remotetargets/... ./cmd/aicli-envd-bridge/... -count=1
 
       # E4 hard gate: render packages must be green before any release.
       # 历史注记：早期 Phase 0/C0 曾有 4 个 band-scrollback 语义测试「设计上
