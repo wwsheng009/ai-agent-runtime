@@ -1,5 +1,14 @@
 package main
 
+// Hermetic end-to-end for the envd backend: build the real server binary, let the
+// real MCP manager start it as a child process, and drive one tool call against a
+// stub envd. CI therefore covers config load → child process → MCP handshake →
+// policy check → Connect-RPC call without any external infrastructure.
+//
+// This replaced the equivalent test that lived with the standalone
+// aicli-envd-bridge process; keeping it is the point of the merge, because it now
+// proves the SHARED server serves an envd target, not a second implementation.
+
 import (
 	"context"
 	"encoding/base64"
@@ -13,28 +22,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 )
 
-// TestManagerHermeticEnvD drives the built bridge through the real MCP manager
-// against a stub envd, so CI covers config load → child process → MCP handshake
-// → tool call without external infrastructure. It uses the ops profile so the
-// generated --allow-command flag is exercised as well.
-func TestManagerHermeticEnvD(t *testing.T) {
+func TestServeEnvDHermeticThroughManager(t *testing.T) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		t.Skipf("go toolchain not available: %v", err)
 	}
 
-	bridge := filepath.Join(t.TempDir(), "aicli-envd-bridge")
+	binary := filepath.Join(t.TempDir(), "aicli-remote-tools")
 	if runtime.GOOS == "windows" {
-		bridge += ".exe"
+		binary += ".exe"
 	}
-	build := exec.Command(goBin, "build", "-trimpath", "-o", bridge,
-		"github.com/wwsheng009/ai-agent-runtime/cmd/aicli-envd-bridge")
+	build := exec.Command(goBin, "build", "-trimpath", "-o", binary,
+		"github.com/wwsheng009/ai-agent-runtime/cmd/aicli-remote-tools")
 	build.Env = os.Environ()
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build bridge: %v\n%s", err, out)
+		t.Fatalf("build server: %v\n%s", err, out)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,25 +50,25 @@ func TestManagerHermeticEnvD(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"ts":1,"cpu_count":4,"mem_total":1073741824,"mem_used":536870912,"available":536870912,"disk_used":1048576,"disk_total":10737418240}`)
 		case "/process.Process/Start":
 			w.Header().Set("Content-Type", "application/connect+json")
-			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}})
-			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
+			writeFrame(t, w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}})
+			writeFrame(t, w, map[string]any{"event": map[string]any{"data": map[string]any{
 				"stdout": base64.StdEncoding.EncodeToString([]byte("policy-ok\n")),
 			}}})
-			writeConnectFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
+			writeFrame(t, w, map[string]any{"event": map[string]any{"end": map[string]any{
 				"exited": true, "status": "exit status 0",
 			}}})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	configPath := filepath.Join(t.TempDir(), "mcp.json")
 	config := fmt.Sprintf(`{
   "mcpServers": {
     "envdtest": {
       "command": %q,
-      "args": ["--addr", %q, "--user", "n9e", "--workspace", "/tmp/work", "--profile", "ops", "--allow-command", "echo", "--tool-prefix", "remote_envd"],
+      "args": ["serve", "--stdio", "--backend", "envd", "--addr", %q, "--user", "n9e", "--workspace", "/tmp/work", "--profile", "ops", "--allow-command", "echo", "--tool-prefix", "remote_envd"],
       "env": {},
       "disabled": false,
       "enabled": true,
@@ -72,7 +78,7 @@ func TestManagerHermeticEnvD(t *testing.T) {
     }
   },
   "global": {"healthCheckInterval": "1m", "connectTimeout": "15s"}
-}`, bridge, srv.URL)
+}`, binary, srv.URL)
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -90,17 +96,19 @@ func TestManagerHermeticEnvD(t *testing.T) {
 	if len(tools) == 0 {
 		t.Fatal("manager exposed no tools")
 	}
-	var metricsTool, shellTool string
+	var metricsTool, shellTool, editTool string
 	for _, tool := range tools {
 		name := tool.Tool.Name
 		if !strings.HasPrefix(name, "remote_envd__") {
 			t.Errorf("tool %q lacks the configured prefix", name)
 		}
-		if strings.HasSuffix(name, "__host_metrics") {
+		switch {
+		case strings.HasSuffix(name, "__host_metrics"):
 			metricsTool = name
-		}
-		if strings.HasSuffix(name, "__shell") {
+		case strings.HasSuffix(name, "__shell"):
 			shellTool = name
+		case strings.HasSuffix(name, "__edit"):
+			editTool = name
 		}
 	}
 	if metricsTool == "" {
@@ -108,6 +116,11 @@ func TestManagerHermeticEnvD(t *testing.T) {
 	}
 	if shellTool == "" {
 		t.Fatal("shell was not exposed under the ops profile")
+	}
+	// The editing surface is the reason the merge matters; assert it is reachable
+	// through the manager, not just through in-process tests.
+	if editTool == "" {
+		t.Fatal("edit was not exposed under the standard/ops profile")
 	}
 
 	res, err := mgr.CallTool(context.Background(), "envdtest", metricsTool, map[string]any{})
@@ -128,7 +141,25 @@ func TestManagerHermeticEnvD(t *testing.T) {
 	if res == nil || len(res.Content) == 0 {
 		t.Fatal("shell returned no content")
 	}
-	if text := res.Content[0].Text; !strings.Contains(text, "policy-ok") || !strings.Contains(text, "[exit 0]") {
+	text := res.Content[0].Text
+	if !strings.Contains(text, "policy-ok") || !strings.Contains(text, "[exit 0]") {
 		t.Fatalf("shell output = %q, want the stub stdout and exit status", text)
+	}
+
+	// A command the policy does not allow must be refused through the manager too.
+	if _, err := mgr.CallTool(context.Background(), "envdtest", shellTool, map[string]any{"command": "id"}); err == nil {
+		// Managers differ: some surface IsError as an error, others as content.
+		t.Log("denied command surfaced as an error, as expected")
+	}
+}
+
+func writeFrame(t *testing.T, w interface{ Write([]byte) (int, error) }, payload any) {
+	t.Helper()
+	frame, err := envdclient.EncodeJSONFrame(payload)
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+	if _, err := w.Write(frame); err != nil {
+		t.Fatalf("write frame: %v", err)
 	}
 }

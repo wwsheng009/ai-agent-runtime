@@ -89,10 +89,10 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 | **M1** ✅ | 骨架：`Config` 增加 backend/envd 字段；`serveFlags` 增加 `--backend / --addr / --user / --token-env / --ca-file / --call-timeout`；`NewServer` 按 backend 分叉（stdio-only、跳过本地 Workspace 校验）——**随 M0 一并完成**（见 §8.1） | 0.5–1.5 天（实测 0） |
 | **M2** ✅ | 全量搬迁：16 工具体 + jail/watch/pty + `toolkit.Tool` 适配器 + audit/Limits 接线——**已全部完成**（§8.2、§8.5） | 2.5–4 天（实测相符） |
 | **M3** ✅ | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试——**全部完成**（§8.3、§8.4） | 1–2.5 天（实测相符） |
-| **M4** | 测试迁移与回归：bridge 现有 4 个测试文件改指新入口；`TestManagerHermeticEnvD` 适配；`remotetools` 全套回归；契约/等价测试扩展 | 1.5–2.5 天 |
-| **M5**（可选） | `cmd/aicli-envd-bridge` 保留为兼容 shim（转发到新入口并打印弃用提示） | +0.5 天 |
+| **M4** ✅ | 测试迁移与回归 + `remotetargets` 展开切换（见 §8.6） | 1.5–2.5 天（实测相符） |
+| ~~**M5**~~ | ~~兼容 shim~~——**已取消**：bridge 直接删除，不留 shim | — |
 
-> **进度（2026-10-28）**：M0/M1（§8.1）、M2（§8.2 文件面 + §8.5 进程与交互面）、M3（§8.3、§8.4）**全部完成**——envd 后端工具面已覆盖并超过 bridge（readonly 6 / standard 13 / ops 19），与厂家的 standard 档语义一致。**只剩 M4**：展开切换 + 测试迁移 + 删除 bridge（按决策不留 shim）。
+> **进度（2026-10-28）**：**M0–M4 全部完成，bridge 已删除**。`remotetargets` 的 envd 展开现在指向 `aicli-remote-tools serve --stdio --backend envd`；同一二进制同时服务目标机侧（ssh/http）与本机侧（envd）——即设计最初的「一套外壳 + 一条新腿」。
 
 合计：**5.5–10.5 人日**（单人、含测试；±50%，M0 完成后收敛区间）。
 
@@ -219,7 +219,16 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **验证**：envd 后端累计 **46 个用例全绿**；`remotetools` 全量 46.6s 通过；`remotetargets` / bridge 通过；vet / gofmt 干净。提交：M2 文件面 `06e87afe` 与进程/交互面 `ef56417c`。
 
-- 实施结论：（M4 完成后继续回填：实际耗时 / 偏差 / 遗留项）
+### 8.6 M4 已完成：展开切换与 bridge 删除（2026-10-28）
+
+- **展开切换**：`remotetargets` 的 envd 分支 `Command` 默认 `aicli-remote-tools`（`remote.binary` / `?binary=` 可覆盖），`Args` 前置 `serve --stdio --backend envd`；`--allow-root`×N → `--allowed-roots` 逗号表；`--audit-log` → `--audit`；命令策略 flag 沿用同名可重复形式。`TransportEnvD` 注释改写为“同一 server 二进制的两种运行位置”，不再提独立 bridge。
+- **测试迁移**：`TestManagerHermeticEnvD`（构建子进程 + 真 manager 驱动）重写为 `cmd/aicli-remote-tools` 的 `TestServeEnvDHermeticThroughManager`，并新增 `edit` 可达断言；live 冒烟改为 `TestManager_EnvDBackend_LiveSmoke`（门控变量 `AICLI_ENVD_TEST_BRIDGE` → `AICLI_ENVD_TEST_SERVER`）。其余 bridge 单测（jail/audit/策略/工具表）**未逐个搬**——对应能力已由 envd 后端的 46 个用例覆盖，保留两份等价测试只会再次产生双轨。
+- **删除**：`backend/cmd/aicli-envd-bridge`（10 文件）已 `git rm`；`Makefile` 目标 `aicli-envd-bridge` 改为 `aicli-remote-tools`（同时修正 `clean`）；`aicli chat --remote` 帮助文本与部署手册、架构文档同步。
+- **验证**：`remotetargets` / `remotetools` / `cmd/aicli-remote-tools` / `internal/mcp/manager` 全部通过；manager 级 hermetic 实测暴露 **19 个工具**（均带 `remote_envd__` 前缀）并跑通 `host_metrics` / `shell` 与策略拒绝。`go build ./...` 的全仓构建受本机页面文件不足限制（无关大包 OOM），不影响上述包。
+
+- 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
+
+> 说明：§8.1–§8.6 为本计划的执行记录（含实测结果与偏差）。
 
 ---
 

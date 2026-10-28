@@ -26,6 +26,8 @@ envd 的 Connect-RPC 客户端。**纯标准库**，不引入 protobuf 运行时
 
 ### 1.2 新增：`cmd/aicli-envd-bridge`（2 个文件）
 
+> **已过时（2026-10-28 收编）**：本节的独立 bridge 进程已删除，能力迁入 `aicli-remote-tools serve --stdio --backend envd`（`internal/remotetools/envd_*.go`），并补齐了 bridge 没有的 `edit/append_write/apply_patch`。本节保留为历史实施记录；现状见 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md` §8.6。
+
 MCP stdio ↔ envd Connect-RPC 桥接进程。**这是必要的，不是可选抽象**：envd 不讲 MCP，无法直接登记为 MCP server 条目。
 
 | 文件 | 职责 |
@@ -284,7 +286,7 @@ envd://user@10.0.0.9:51000/srv/app    # 显式端口 + workspace
 
 ```bash
 cd backend
-go build ./cmd/aicli-envd-bridge     # 桥接（需在 PATH 或配置 Remote.Binary 指向）
+go build ./cmd/aicli-remote-tools    # 已收编：envd 与 ssh/http 共用此二进制（历史命令 ./cmd/aicli-envd-bridge 已于 2026-10-28 删除）
 ```
 
 ### 5.4 直接运行桥接（调试）

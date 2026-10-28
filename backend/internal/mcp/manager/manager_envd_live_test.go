@@ -12,28 +12,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestManager_EnvDBridge_LiveSmoke drives the real aicli-envd-bridge through the
-// MCP manager against a real envd target. It is the manager-level e2e that unit
-// tests cannot cover: config load → child process spawn → MCP handshake → tool
-// call.
+// TestManager_EnvDBackend_LiveSmoke drives the real envd backend (aicli-remote-tools
+// serve --stdio --backend envd) through the MCP manager against a real envd target.
+// It is the manager-level e2e that unit tests cannot cover: config load → child
+// process spawn → MCP handshake → tool call.
 //
-// Gated because it needs both a built bridge binary and a reachable envd:
+// Gated because it needs both a built server binary and a reachable envd:
 //
-//	AICLI_ENVD_TEST_BRIDGE  absolute path to aicli-envd-bridge(.exe)
-//	ENVD_TEST_ADDR          envd host:port (e.g. 10.0.0.9:49983)
-//	ENVD_TEST_USER          OS user envd executes as (e.g. n9e)
-//	ENVD_TEST_WORKSPACE     absolute workspace on the target (e.g. /home/n9e)
-//	ENVD_TEST_TOKEN         access token (optional when envd has none)
-func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
-	bridge := strings.TrimSpace(os.Getenv("AICLI_ENVD_TEST_BRIDGE"))
+//	AICLI_ENVD_TEST_SERVER    absolute path to aicli-remote-tools(.exe)
+//	ENVD_TEST_ADDR            envd host:port (e.g. 10.0.0.9:49983)
+//	ENVD_TEST_USER            OS user envd executes as (e.g. n9e)
+//	ENVD_TEST_WORKSPACE       absolute workspace on the target (e.g. /home/n9e)
+//	ENVD_TEST_TOKEN           access token (optional when envd has none)
+func TestManager_EnvDBackend_LiveSmoke(t *testing.T) {
+	server := strings.TrimSpace(os.Getenv("AICLI_ENVD_TEST_SERVER"))
 	addr := strings.TrimSpace(os.Getenv("ENVD_TEST_ADDR"))
 	user := strings.TrimSpace(os.Getenv("ENVD_TEST_USER"))
 	workspace := strings.TrimSpace(os.Getenv("ENVD_TEST_WORKSPACE"))
-	if bridge == "" || addr == "" || user == "" || workspace == "" {
-		t.Skip("set AICLI_ENVD_TEST_BRIDGE, ENVD_TEST_ADDR, ENVD_TEST_USER and ENVD_TEST_WORKSPACE to run")
+	if server == "" || addr == "" || user == "" || workspace == "" {
+		t.Skip("set AICLI_ENVD_TEST_SERVER, ENVD_TEST_ADDR, ENVD_TEST_USER and ENVD_TEST_WORKSPACE to run")
 	}
 
 	args := []string{
+		"serve", "--stdio", "--backend", "envd",
 		"--addr", addr,
 		"--user", user,
 		"--workspace", workspace,
@@ -63,7 +64,7 @@ func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
     "healthCheckInterval": "1m",
     "connectTimeout": "15s"
   }
-}`, bridge, argsJSON, os.Getenv("ENVD_TEST_TOKEN"))
+}`, server, argsJSON, os.Getenv("ENVD_TEST_TOKEN"))
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o644))
 
 	mgr := NewManager()
@@ -72,7 +73,7 @@ func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
 	t.Cleanup(func() { _ = mgr.Stop() })
 
 	tools := mgr.ListTools()
-	require.NotEmpty(t, tools, "bridge exposed no tools")
+	require.NotEmpty(t, tools, "envd backend exposed no tools")
 
 	var lsTool string
 	for _, tool := range tools {
@@ -83,7 +84,7 @@ func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
 			lsTool = name
 		}
 	}
-	require.NotEmpty(t, lsTool, "bridge did not expose an ls tool")
+	require.NotEmpty(t, lsTool, "envd backend did not expose an ls tool")
 
 	result, err := mgr.CallTool(context.Background(), "envdtest", lsTool, map[string]interface{}{"path": "."})
 	require.NoError(t, err)

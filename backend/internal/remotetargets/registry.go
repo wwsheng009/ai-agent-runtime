@@ -36,18 +36,15 @@ const (
 	//
 	// It sits at the same level as the other three on purpose: envd is not a new
 	// layer, it is another way to cross the gap between this machine and the
-	// target. It does not, however, inherit the remote tool server's enforcement
-	// the way the other transports do: envd speaks no MCP, so a local bridge
-	// (aicli-envd-bridge) is the MCP entry and the only place path and profile
-	// policy can be applied. The bridge implements the path jail itself and uses
-	// remotetools.CommandPolicy for command authorization, so both transports
-	// share one allowlist implementation.
+	// target. The difference is WHERE the server process runs: ssh/http launch
+	// aicli-remote-tools on the target, so the tool server and the files share a
+	// machine; an envd target has only the daemon, so the same binary runs here
+	// with `serve --stdio --backend envd` and performs its I/O over Connect-RPC.
 	//
-	// The trade is explicit. Compared with ssh-stdio, envd gives up the remote
-	// tool server's own path jail and command filtering, and gains streaming
-	// process output, a pty, directory watches and host metrics. Because it gives
-	// up the jail, the caller must enforce path and command policy before reaching
-	// envdclient; envd itself will run whatever it is told.
+	// Because envd applies no path checks and no command filtering, the envd
+	// backend enforces the jail, the profile ladder and the shared
+	// remotetools.CommandPolicy before any call reaches the daemon — one policy
+	// implementation for both backends.
 	TransportEnvD = "envd"
 )
 
@@ -399,9 +396,9 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		if host == "" {
 			return mcpconfig.MCPConfig{}, nil, fmt.Errorf("ssh.host is required for transport envd")
 		}
-		bridge := strings.TrimSpace(target.Remote.Binary)
-		if bridge == "" {
-			bridge = "aicli-envd-bridge"
+		server := strings.TrimSpace(target.Remote.Binary)
+		if server == "" {
+			server = "aicli-remote-tools"
 		}
 		port := target.SSH.Port
 		if port <= 0 {
@@ -427,7 +424,11 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
 			addr = "https://" + addr
 		}
+		// One binary serves both execution backends: the envd mode runs here and
+		// reaches the target over Connect-RPC, while ssh/http targets keep running
+		// the same server on the target itself.
 		args := []string{
+			"serve", "--stdio", "--backend", "envd",
 			"--addr", addr,
 			"--user", strings.TrimSpace(target.SSH.User),
 			"--workspace", workspace,
@@ -435,8 +436,14 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 			"--profile", orDefault(target.Remote.Profile, "readonly"),
 		}
 		if len(target.Remote.AllowedRoots) > 0 {
+			roots := make([]string, 0, len(target.Remote.AllowedRoots))
 			for _, root := range target.Remote.AllowedRoots {
-				args = append(args, "--allow-root", strings.TrimSpace(root))
+				if trimmed := strings.TrimSpace(root); trimmed != "" {
+					roots = append(roots, trimmed)
+				}
+			}
+			if len(roots) > 0 {
+				args = append(args, "--allowed-roots", strings.Join(roots, ","))
 			}
 		}
 		if shell := target.Remote.Shell; shell != nil {
@@ -470,17 +477,17 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 			args = append(args, "--call-timeout", raw)
 		}
 		if auditLog := strings.TrimSpace(target.Remote.AuditLog); auditLog != "" {
-			args = append(args, "--audit-log", auditLog)
+			args = append(args, "--audit", auditLog)
 		}
 		if target.Remote.TLS != nil && strings.TrimSpace(target.Remote.TLS.CAFile) != "" {
 			args = append(args, "--ca-file", strings.TrimSpace(target.Remote.TLS.CAFile))
 		}
 
 		cfg.Type = "stdio"
-		cfg.Command = bridge
+		cfg.Command = server
 		cfg.Args = args
 		warnings = append(warnings,
-			fmt.Sprintf("target %q: envd performs no path or command checks; the bridge enforces workspace %q, profile %q and the shell allowlist locally",
+			fmt.Sprintf("target %q: envd performs no path or command checks; the local server enforces workspace %q, profile %q and the shell allowlist before every envd call",
 				serverName, workspace, orDefault(target.Remote.Profile, "readonly")))
 
 	default:

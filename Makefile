@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli aicli-console aicli-mesh aicli-envd-bridge install-aicli uninstall-aicli package-server contract contract-check
+.PHONY: build test lint tidy clean aicli aicli-console aicli-mesh aicli-remote-tools install-aicli uninstall-aicli package-server contract contract-check
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -10,8 +10,8 @@ CONSOLE_BIN_NAME := aicli-console
 CONSOLE_CMD_PATH := ./cmd/aicli-console
 MESH_BIN_NAME := aicli-mesh
 MESH_CMD_PATH := ./cmd/aicli-mesh
-ENVD_BRIDGE_BIN_NAME := aicli-envd-bridge
-ENVD_BRIDGE_CMD_PATH := ./cmd/aicli-envd-bridge
+REMOTE_TOOLS_BIN_NAME := aicli-remote-tools
+REMOTE_TOOLS_CMD_PATH := ./cmd/aicli-remote-tools
 VERSION     ?= $(shell cat VERSION 2>/dev/null || echo dev)
 # 在不同平台拿到一个 ISO-8601 的构建时间（GNU date / BusyBox / git bash 都支持 -u）
 BUILD_TIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -34,9 +34,10 @@ aicli-console:
 aicli-mesh:
 	cd $(BACKEND_DIR) && go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o ../$(MESH_BIN_NAME) $(MESH_CMD_PATH)
 
-# 构建 envd 桥接 CLI（aicli-envd-bridge：把 envd 目标以 MCP over stdio 暴露给 aicli）。
-aicli-envd-bridge:
-	cd $(BACKEND_DIR) && go build -trimpath -ldflags "$(LDFLAGS)" -o ../$(ENVD_BRIDGE_BIN_NAME) $(ENVD_BRIDGE_CMD_PATH)
+# 构建远端工具服务 CLI（aicli-remote-tools：目标机侧的 ssh/http 服务，以及本机侧的
+# envd 后端 serve --stdio --backend envd）。
+aicli-remote-tools:
+	cd $(BACKEND_DIR) && go build -trimpath -ldflags "$(LDFLAGS)" -o ../$(REMOTE_TOOLS_BIN_NAME) $(REMOTE_TOOLS_CMD_PATH)
 
 # 安装 aicli 到 $GOBIN（默认 $(go env GOPATH)/bin）
 # 该目录通常已在用户 PATH 中，跨平台一致；可通过 GOBIN=/your/dir make install-aicli 覆盖
@@ -76,7 +77,7 @@ tidy:
 
 clean:
 	cd $(BACKEND_DIR) && go clean ./...
-	rm -f $(BIN_NAME) $(BIN_NAME).exe $(CONSOLE_BIN_NAME) $(CONSOLE_BIN_NAME).exe $(ENVD_BRIDGE_BIN_NAME) $(ENVD_BRIDGE_BIN_NAME).exe
+	rm -f $(BIN_NAME) $(BIN_NAME).exe $(CONSOLE_BIN_NAME) $(CONSOLE_BIN_NAME).exe $(REMOTE_TOOLS_BIN_NAME) $(REMOTE_TOOLS_BIN_NAME).exe
 
 frontend-install:
 	cd $(FRONTEND_DIR) && pnpm install

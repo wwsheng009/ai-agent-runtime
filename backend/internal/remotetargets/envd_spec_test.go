@@ -157,7 +157,7 @@ func TestExpandOneEnvDBridge(t *testing.T) {
 		t.Fatal("MCP Command is empty, want the bridge binary")
 	}
 	if strings.Contains(cfg.Command, "10.0.0.9") {
-		t.Errorf("MCP Command = %q, want a local bridge binary, not the remote host", cfg.Command)
+		t.Errorf("MCP Command = %q, want a local server binary, not the remote host", cfg.Command)
 	}
 	joined := strings.Join(cfg.Args, " ")
 	if !strings.Contains(joined, "10.0.0.9:49983") && !strings.Contains(joined, "10.0.0.9:49983 ") {
@@ -343,8 +343,8 @@ func TestParseSpecEnvDAuditLog(t *testing.T) {
 	for _, cfg := range expanded.Servers {
 		args = strings.Join(cfg.Args, " ")
 	}
-	if !strings.Contains(args, "--audit-log /tmp/envd-audit.jsonl") {
-		t.Fatalf("args = %q, want --audit-log /tmp/envd-audit.jsonl", args)
+	if !strings.Contains(args, "--audit /tmp/envd-audit.jsonl") {
+		t.Fatalf("args = %q, want --audit /tmp/envd-audit.jsonl", args)
 	}
 }
 

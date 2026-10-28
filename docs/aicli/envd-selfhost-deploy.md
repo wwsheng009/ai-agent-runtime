@@ -12,15 +12,15 @@
 本机 aicli / agent
   │  MCP over stdio
   ▼
-aicli-envd-bridge（本机进程：MCP ↔ Connect-RPC）
+aicli-remote-tools serve --stdio --backend envd（本机进程：MCP ↔ Connect-RPC）
   │  HTTP Basic user + X-Access-Token
   ▼
 envd :49983（目标机，systemd 守护，root 运行）
   └─ 以 Basic user 身份 fork 进程 / 文件操作 / metrics
 ```
 
-- **envd 只装在目标机**；本机只需要 `aicli-envd-bridge`。
-- envd 不做路径围栏与命令过滤：路径 jail、profile、输出上限由 bridge 在本地执行。
+- **envd 只装在目标机**；本机只需要 `aicli-remote-tools`（与 ssh/http 用的是**同一个** 二进制，只是运行位置不同）。
+- envd 不做路径围栏与命令过滤：路径 jail、profile、输出上限与命令策略由本机 envd 后端在调用 envd 前执行（命令策略与 ssh/http 面共用同一实现）。
 - 令牌（`X-Access-Token`）只在 `/init` 安装后生效；未安装时端口是**无鉴权**的。
 
 ## 2. 已验证产物（2026-10-28）
@@ -200,7 +200,7 @@ export AICLI_ENVD_TOKEN='<token>'
 
 # 单串目标：workspace 必须是绝对路径；binary 指向本机 bridge；ca_file 指向目标机 tls.crt
 aicli chat --remote \
-  'envd://n9e@10.0.0.9:49983/home/n9e?binary=C:\tools\aicli-envd-bridge.exe&ca_file=C:\tools\envd-ca.crt&call_timeout=30m&allow_command=uptime#ops' \
+  'envd://n9e@10.0.0.9:49983/home/n9e?binary=C:\tools\aicli-remote-tools.exe&ca_file=C:\tools\envd-ca.crt&call_timeout=30m&allow_command=uptime#ops' \
   --prompt "在远端执行 uptime"
 ```
 
@@ -215,7 +215,7 @@ remoteTargets:
       user: n9e
       port: 49983
     remote:
-      binary: C:\tools\aicli-envd-bridge.exe
+      binary: C:\tools\aicli-remote-tools.exe
       workspace: /home/n9e
       profile: ops
       toolPrefix: remote_10-0-0-9

@@ -372,7 +372,7 @@ go version -m /usr/bin/envd | head
 
 §4.3/§4.4「实际落地」注中记录的偏差（envd 未做成 remotetools 的可复用适配器、外壳由 bridge 重写、edit 三件套缺失）进入**收敛**：
 
-- **形态**：`aicli-remote-tools serve --stdio --backend envd`（本机运行、以 Connect-RPC 为腿；仅 stdio）。`cmd/aicli-envd-bridge` 退役（过渡期可留兼容 shim）。
+- **形态**：`aicli-remote-tools serve --stdio --backend envd`（本机运行、以 Connect-RPC 为腿；仅 stdio）。**已执行**：`cmd/aicli-envd-bridge` 已删除（不留兼容 shim），`remotetargets` 展开已指向新入口；详见 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md` §8.6。
 - **一份外壳**：MCP 循环 / Profile 档位 / audit / Limits / CommandPolicy / prefix·registry 全部来自 `remotetools`；执行后端两条（local-os / envd）。envd 专属的执行实现（目标侧 realpath jail、spawn `find`/`rg` 的合成、PTY 会话）保留在 envd 后端内——即本节上方 §4.3 表的原始形态。
 - **工具面对齐**：`standard` 档位补 `edit/append_write/apply_patch`（与 ssh/http 同语义）；envd 扩展（mkdir/remove/move、host_metrics/watch_dir、pty_*）按计划文档 §2 档位表归位；档位计数 6/13/19（现为 6/10/16）。
 - **对 §9 的澄清**：第 1 条「给 `remotetools` 加一个 envd 传输适配器」的落地形态确定为「**同一个 server 二进制 + `--backend envd` 执行后端**」——envd 不是第四种监听传输，而是 stdio 载体 + envd 执行后端。

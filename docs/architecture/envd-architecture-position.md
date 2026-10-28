@@ -245,7 +245,7 @@ remotetools → { ssh-stdio | ssh-http | http | envd }
 
 ## 9. 收敛决策（2026-10-28）
 
-§8 记录的偏差进入收敛：`aicli-envd-bridge` 的能力将并入 `aicli-remote-tools`（新增 `serve --stdio --backend envd`，本机运行、以 Connect-RPC 为腿；仅 stdio）。
+§8 记录的偏差已完成收敛：`aicli-envd-bridge` 的能力已并入 `aicli-remote-tools`（新增 `serve --stdio --backend envd`，本机运行、以 Connect-RPC 为腿；仅 stdio），独立 bridge 进程**已删除**（不留 shim），`remotetargets` 的 envd 展开已指向新入口。
 
 收敛后「envd 是 remotetools 的第四条腿」在**外壳层面**成立——MCP 循环 / Profile 档位 / 审计 / Limits / CommandPolicy / prefix 一份，执行后端两条（local-os / envd）；envd 专属的执行实现（目标侧 realpath jail、spawn `find`/`rg` 的合成、PTY 会话）保留在 envd 后端内。
 
