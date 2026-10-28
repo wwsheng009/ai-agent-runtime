@@ -323,6 +323,35 @@ func (be *envdBackend) workspaceRelative(target string) string {
 	return cleaned
 }
 
+// storeBytes writes bytes to a jailed path through envd, then confirms the landed
+// byte count.
+//
+// The NUL check is a property of the transport, not a policy choice: envd has no
+// WriteFile RPC, so content travels as one argv element and argv cannot carry a
+// NUL byte. The refusal names the reason and the alternative rather than letting
+// the write land truncated.
+func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte) (int64, *toolkit.ToolResult) {
+	if strings.IndexByte(string(encoded), 0) >= 0 {
+		return 0, envdErrorResult("cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use a UTF-8 payload or shell for binary content", target)
+	}
+	if len(encoded) > envdMaxWriteBytes {
+		return 0, envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
+	}
+	script := `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
+	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-write", target, string(encoded)})
+	if err != nil {
+		return 0, envdErrorResult("write %s: %v", target, err)
+	}
+	if code != 0 {
+		return 0, envdErrorResult("write %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
+	}
+	entry, statErr := be.client.Stat(ctx, target)
+	if statErr != nil {
+		return int64(len(encoded)), envdErrorResult("write %s landed but size could not be confirmed: %v", target, statErr)
+	}
+	return entry.SizeBytes(), nil
+}
+
 // run executes one argv command on the target with cwd set to the workspace.
 func (be *envdBackend) run(ctx context.Context, cmd string, args []string) (stdout, stderr []byte, code int32, err error) {
 	if be == nil || be.client == nil {
@@ -574,7 +603,7 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 			},
 			call: envdView,
 		},
-	}, append(envdFileToolSpecs(base), envdEditToolSpecs(base)...)...)
+	}, append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base))...)
 }
 
 // envdView reads a file through envd.

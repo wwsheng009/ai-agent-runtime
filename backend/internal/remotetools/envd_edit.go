@@ -91,25 +91,11 @@ func (be *envdBackend) store(ctx context.Context, target, text string, enc mutat
 		writeEncoding = enc
 	}
 	encoded := mutatecore.Encode(text, writeEncoding)
-	if strings.IndexByte(string(encoded), 0) >= 0 {
-		return 0, envdErrorResult("cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use write for a UTF-8 payload or shell for binary content", target)
+	sizeAfter, refusal := be.storeBytes(ctx, target, encoded)
+	if refusal != nil {
+		return 0, refusal
 	}
-	if len(encoded) > envdMaxWriteBytes {
-		return 0, envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
-	}
-	script := `set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf '%s' "$2" > "$1"`
-	_, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-write", target, string(encoded)})
-	if err != nil {
-		return 0, envdErrorResult("write %s: %v", target, err)
-	}
-	if code != 0 {
-		return 0, envdErrorResult("write %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
-	}
-	entry, statErr := be.client.Stat(ctx, target)
-	if statErr != nil {
-		return int64(len(encoded)), envdErrorResult("write %s landed but size could not be confirmed: %v", target, statErr)
-	}
-	return entry.SizeBytes(), nil
+	return sizeAfter, nil
 }
 
 // envdEditParams reads one string parameter that must be present verbatim.
