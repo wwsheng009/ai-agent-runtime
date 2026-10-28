@@ -88,11 +88,11 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 | **M0** ✅ | 垂直切片：`view` 单工具走通 `--backend envd`（含 jail + audit + MCP 级 e2e），收敛接入面不确定性——**已完成，结论见 §8** | 0.5 天（实测相符） |
 | **M1** ✅ | 骨架：`Config` 增加 backend/envd 字段；`serveFlags` 增加 `--backend / --addr / --user / --token-env / --ca-file / --call-timeout`；`NewServer` 按 backend 分叉（stdio-only、跳过本地 Workspace 校验）——**随 M0 一并完成**（见 §8.1） | 0.5–1.5 天（实测 0） |
 | **M2** | 全量搬迁：16 工具体 + jail/watch/pty + `toolkit.Tool` 适配器 + audit/Limits 接线 | 2.5–4 天 |
-| **M3** | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试 | 1–2.5 天 |
+| **M3** 🟡 | `edit/append_write/apply_patch` + schema/描述/错误码对齐 + 测试——**已完成 edit/append_write**，剩 `apply_patch`（见 §8.3） | 1–2.5 天 |
 | **M4** | 测试迁移与回归：bridge 现有 4 个测试文件改指新入口；`TestManagerHermeticEnvD` 适配；`remotetools` 全套回归；契约/等价测试扩展 | 1.5–2.5 天 |
 | **M5**（可选） | `cmd/aicli-envd-bridge` 保留为兼容 shim（转发到新入口并打印弃用提示） | +0.5 天 |
 
-> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2），剩余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
+> **进度（2026-10-28）**：M0/M1 完成（§8.1）；M2 文件面完成 8 个工具 + mutation jail（§8.2）；M3 已完成 `edit`/`append_write`，剩 `apply_patch`（§8.3）。M2 尚余 `shell`（需命令策略 flag）、`pty_*`（会话态）、`watch_dir`。
 
 合计：**5.5–10.5 人日**（单人、含测试；±50%，M0 完成后收敛区间）。
 
@@ -166,6 +166,20 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 - `glob`/`grep` 依旧依赖目标机 `find` / `rg`→`grep` 回落（grep 回报所用引擎）。
 
 **剩余**：`shell`（含 `--allow-command*` flag 接入，命令授权已共享 `CommandPolicy`）、`pty_*`、`watch_dir` → M2 收尾；`edit/append_write/apply_patch` → M3；`remotetargets` 展开切换 → M4。
+
+### 8.3 M3 编辑两件套已完成（2026-10-28）
+
+**关键发现（降低后续成本）**：共享核的**编辑语义是纯函数层**——`MatchEditStrings`、`EditOccurrenceLineNumbers`、`BuildEditOldStringNotFoundError`、`FindClosestEditSnippetWithLine`、`Decode/Encode`、`LooksBinary`、`UnifiedDiff`、`FormatEditSuccessContent`，以及 `ParsePatch` + `ApplyHunks`；只有 `Inspect/Write/Append/Edit` 这几个入口把 I/O 与语义绑在一起。因此 envd 侧**只重写 I/O、语义直接调用纯函数层**，不存在第二套编辑规则。`apply_patch` 同理可复用 `ParsePatch`+`ApplyHunks`，成本远低于 §4 的估时。
+
+**落地内容**：`envd_edit.go`（`load`/`store` 两个 I/O 原语 + `envdEdit`/`envdAppend` + `envdEditToolSpecs`）。schema 直接发布 `mutatecore.EditParameters()` / `AppendParameters()`，**不另写一份**。
+
+**语义对齐明细**：歧义拒绝（含命中行数与 `replace_all`/`replacement_count` 逃生阀）、stale-context 诊断附当前最近片段与 `next_action`、二进制拒绝、文件必须存在、`create_if_missing` **默认 true**（与共享契约一致，envd 不更严）、`expected_offset` 回放检测与前置条件失败不写入、diff 由共享 `UnifiedDiff` 产出。测试逐项锁定，且断言**拒绝后目标字节不变**。
+
+**新增限制（明说，不沉默）**：argv 不能携带 NUL 字节，因此 **BOM/UTF-16 文件在 envd 侧拒绝编辑**（本地核可经 `WriteAtomic` 往返），提示改用 `write`（UTF-8）或 `shell`。这是传输约束，非策略选择。
+
+**验证**：envd 后端累计 23 个用例全绿（M0 5 + M2 9 + M3 9）；`remotetools` 全量 45.2s 通过；`remotetargets` / `cmd/aicli-envd-bridge` 通过；vet / gofmt 干净（`go vet` 当场抓到一处 `%d` 参数顺序错误，已修）。实测档位面：readonly 5 / **standard 11**（edit、append_write 已就位）。
+
+**剩余**：`apply_patch`（复用 `ParsePatch`+`ApplyHunks`）→ M3 收尾；`shell` / `pty_*` / `watch_dir` → M2 收尾；`remotetargets` 展开切换 → M4。
 
 - 实施结论：（M1–M5 完成后继续回填：实际耗时 / 偏差 / 遗留项）
 
