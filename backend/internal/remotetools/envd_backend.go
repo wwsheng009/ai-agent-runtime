@@ -29,6 +29,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
@@ -46,6 +47,11 @@ type envdBackend struct {
 	// commands is the SHARED command policy (same implementation as ssh/http):
 	// envd filters nothing, so every shell/pty command is checked here first.
 	commands *CommandPolicy
+
+	// sessions holds live pty sessions; they outlive the tool call that created
+	// them and are torn down by Server.Close.
+	sessionMu sync.Mutex
+	sessions  map[uint32]*envdPtySession
 }
 
 // newEnvDBackend dials envd from the normalized configuration.
@@ -505,6 +511,13 @@ var envdExtensionTiers = map[string]Profile{
 	ToolMkdir:       ProfileStandard,
 	ToolRemove:      ProfileStandard,
 	ToolMove:        ProfileStandard,
+	// The interactive surface is ops-only: it starts a process and then lets the
+	// session run without per-line filtering.
+	ToolPtyStart:  ProfileOps,
+	ToolPtyWrite:  ProfileOps,
+	ToolPtyRead:   ProfileOps,
+	ToolPtyResize: ProfileOps,
+	ToolPtyClose:  ProfileOps,
 }
 
 // profileRank orders the tiers; custom is handled separately because it is an
@@ -617,7 +630,7 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 			},
 			call: envdView,
 		},
-	}, append(append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base)), envdProcessToolSpecs(base)...)...)
+	}, append(append(append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base)), envdProcessToolSpecs(base)...), envdPtyToolSpecs(base)...)...)
 }
 
 // envdView reads a file through envd.

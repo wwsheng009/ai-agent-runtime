@@ -52,6 +52,16 @@ type envdStub struct {
 	removed      []string
 	moved        [][2]string
 	created      []string
+	// controls records process control RPCs (SendInput/SendSignal/Update) with
+	// their request bodies.
+	controls []string
+}
+
+// controlLog returns a copy of the recorded process control calls.
+func (s *envdStub) controlLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.controls...)
 }
 
 func (s *envdStub) content(target string) (string, bool) {
@@ -251,6 +261,19 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 		writeEnvDFrame(t, w, map[string]any{"start": map[string]any{}})
 		writeEnvDFrame(t, w, map[string]any{"filesystem": map[string]any{"name": "probe.txt", "type": "EVENT_TYPE_CREATE"}})
 	})
+
+	// Process control RPCs (unary): record what was sent so a test can assert the
+	// pty session actually drove the target.
+	for _, method := range []string{"SendInput", "SendSignal", "Update"} {
+		name := method
+		mux.HandleFunc("/process.Process/"+name, func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			stub.mu.Lock()
+			stub.controls = append(stub.controls, name+" "+strings.TrimSpace(string(body)))
+			stub.mu.Unlock()
+			writeJSON(w, map[string]any{})
+		})
+	}
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -528,7 +551,7 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		}
 	})
 
-	t.Run("ops adds the command surface", func(t *testing.T) {
+	t.Run("ops adds the process and interactive surface", func(t *testing.T) {
 		cfg := newEnvDConfig(stub.server.URL)
 		cfg.Profile = remotetools.ProfileOps
 		cfg.Shell.AllowedCommands = []string{"echo"}
@@ -537,11 +560,21 @@ func TestEnvDServerTierSurface(t *testing.T) {
 			t.Fatalf("NewServer: %v", err)
 		}
 		defer server.Close()
-		if !containsName(server.ToolNames(), "remote_envd__shell") {
-			t.Fatalf("ops surface missing shell: %v", server.ToolNames())
+		// The full ops surface, asserted exactly: a tier may only advertise tools
+		// this backend actually implements.
+		want := []string{
+			"remote_envd__append_write", "remote_envd__apply_patch", "remote_envd__edit",
+			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
+			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move",
+			"remote_envd__pty_close", "remote_envd__pty_read", "remote_envd__pty_resize",
+			"remote_envd__pty_start", "remote_envd__pty_write", "remote_envd__remove",
+			"remote_envd__shell", "remote_envd__view", "remote_envd__watch_dir",
+			"remote_envd__write",
 		}
-		if containsName(server.ToolNames(), "remote_envd__pty_start") {
-			t.Fatalf("ops surfaced a tool the backend does not implement yet: %v", server.ToolNames())
+		got := server.ToolNames()
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("ops surface = %v, want %v", got, want)
 		}
 	})
 

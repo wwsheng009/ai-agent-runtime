@@ -177,6 +177,11 @@ func (s *Server) Close() error {
 	if s.jobs != nil {
 		s.jobs.Close()
 	}
+	// Same reasoning for envd pty sessions: the process runs on the target, and
+	// the stream plus its pump goroutine must die with this server.
+	if s.envd != nil {
+		s.envd.closeAllSessions()
+	}
 	var errs []error
 	if s.access != nil {
 		if err := s.access.Close(); err != nil {
