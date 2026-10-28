@@ -339,14 +339,14 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **envd 日志脱敏（本地补丁）**：`scripts/envd/patches/0001-redact-process-logs.patch` 将默认级别降为 info，`process_start` 只记录可执行文件与参数个数，stdout/stderr 与 unary 请求体降为 debug；实测写入唯一标记后 journald 中 marker/请求体/stdout 命中均为 0。
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
-- **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、client-streaming 的 HTTP/2 守卫、请求参数校验、bridge 的调用超时用例。
+- **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、client-streaming 的 HTTP/2 守卫与 HTTP/2/TLS 成功路径（SendSignal/SendInput/UpdatePty 请求体校验）、请求参数校验、bridge 的调用超时用例。
 
 ### 8.3 保留的限制
 
 - **symlink 可绕过文本级 jail**：jail 只做 `path.Clean` + 前缀匹配，bridge 无法在本地解析远端软链；
 - **审计为 opt-in、命令白名单仍缺失**：bridge 可写 JSONL 元数据审计（见 §8.2），默认关闭；envd 路径仍没有 remotetools 的命令白名单（envd 侧同样没有）；
 - **无法做 envd 版本校验**：envd 没有版本端点；
-- **TLS / HTTP/2 未真机验证**（承接 §4.1）；
+- **TLS / HTTP/2 已用 httptest 覆盖（含 client-streaming 成功路径），但未在真实 envd 上验证**（承接 §4.1）；
 - **写入硬上限 1 MiB**（承接 §4.3）；
 - **watch 事件结构未确认**（承接 §4.2）。
 
@@ -364,7 +364,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
 - live 集成测试 **6/6 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUserIsUnauthenticated）。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**69 PASS / 0 FAIL / 6 SKIP**（envdclient 24、remotetargets 31、bridge 14）。
+- 离线回归：**70 PASS / 0 FAIL / 6 SKIP**（envdclient 25、remotetargets 31、bridge 14）。
 
 ### 9.2 aicli agent 真实巡检场景
 
