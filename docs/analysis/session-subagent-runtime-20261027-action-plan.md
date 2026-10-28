@@ -628,6 +628,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.3 验收证据（§8）
 
 - 安静窗口多包全绿记录：`internal/agent`、`internal/events`、`internal/runtimeobserve`、`internal/cacheanalytics`、`internal/usageanalytics`（各提交信息内含时长与 exit code）。
+- 2026-10-28 扫尾回归（`-p 1` + `GOGC=40`，覆盖 confirmed_miss/fork 窗口/spec 往返/deadline E2E 三批改动的跨包面）：`internal/events` 3.732s、`internal/runtimeobserve` 1.044s、`internal/cacheanalytics` 1.388s、`internal/usageanalytics` 5.416s、`internal/subagentbatch` 0.909s、`internal/agent` 全包 22.020s、`cmd/aicli/commands` 聚焦（usage 渲染 + spawn receipt；`-vet=off` 因并行线程 `internal/remotetargets` vet 依赖在途）3.294s——全部 exit 0，无环境异常（磁盘 C 11.8GB / E 12.3GB）。
 - 关键 E2E：`TestSubagentAttemptEventsPairOnTransientRetry`（attempt 1 失败 → attempt 2 成功，provider 恰 2 次调用）；`TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout`（`cancel_source=provider_timeout` + `retry_skipped=max_attempts_reached`）；`TestReActLoop_Run_EmitsRuntimeEvents`（端到端事件流含 attempt 成对）。
 - 迁移回归：`TestStoreMigrateAddsSubagentAttemptColumns`（降级删列 → 重开补列 → 写读）。
 - cache 状态分层：`TestBuildTerminalRecordClassifiesConfirmedMiss`（确认 miss 与 reported_zero 边界五档）、`TestCacheStatusDistributionAccountsConfirmedMiss`、`TestCacheSourceOverviewCacheStatusDistributionAlignsWithSQL`（六档 SQL 列序对齐）、`TestReActLoop_Run_DistinguishesZeroAndUnreportedProviderCacheUsage`（载荷层 confirmed_miss）、`TestResolveUnifiedTokenUsage_DeepSeekMissReported` / `..._OpenAIDerivedUncachedIsNotMissReported`（显式上报 vs 推导不伪装）。
