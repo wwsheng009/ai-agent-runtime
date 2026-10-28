@@ -2471,6 +2471,45 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 		// 静默降级为 fresh。
 		Context:      t.Context,
 		ForkMessages: t.ForkMessages,
+		// §13.5 观察收口：任务定义面必须完整进 durable spec——replay 后约束不得
+		// 静默放宽（agentdef 收窄、步数上限、写者并集）或让契约缺失（回执 schema、
+		// handoff 载荷）。
+		AgentType:             t.AgentType,
+		MaxTurns:              t.MaxTurns,
+		WritePaths:            append([]string(nil), t.WritePaths...),
+		ReadOnlySource:        t.ReadOnlySource,
+		ReadOnlyFilteredTools: append([]string(nil), t.ReadOnlyFilteredTools...),
+		ReportSchema:          cloneInterfaceMap(t.ReportSchema),
+		ReportSchemaGranted:   t.ReportSchemaGranted,
+		HandoffIn:             handoffToBatchSpec(t.HandoffIn),
+	}
+}
+
+// handoffToBatchSpec / handoffFromBatchSpec 在 agent.Handoff 与可持久化的
+// subagentbatch.HandoffSpec 之间搬运五键契约（nil 安全；切片复制避免别名）。
+func handoffToBatchSpec(in *Handoff) *subagentbatch.HandoffSpec {
+	if in == nil {
+		return nil
+	}
+	return &subagentbatch.HandoffSpec{
+		Status:    string(in.Status),
+		Summary:   in.Summary,
+		Evidence:  append([]string(nil), in.Evidence...),
+		NextSteps: append([]string(nil), in.NextSteps...),
+		Blocker:   in.Blocker,
+	}
+}
+
+func handoffFromBatchSpec(in *subagentbatch.HandoffSpec) *Handoff {
+	if in == nil {
+		return nil
+	}
+	return &Handoff{
+		Status:    HandoffStatus(in.Status),
+		Summary:   in.Summary,
+		Evidence:  append([]string(nil), in.Evidence...),
+		NextSteps: append([]string(nil), in.NextSteps...),
+		Blocker:   in.Blocker,
 	}
 }
 
@@ -2512,6 +2551,14 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 		CompletionRequirement: spec.CompletionRequirement,
 		Context:               spec.Context,
 		ForkMessages:          spec.ForkMessages,
+		AgentType:             spec.AgentType,
+		MaxTurns:              spec.MaxTurns,
+		WritePaths:            append([]string(nil), spec.WritePaths...),
+		ReadOnlySource:        spec.ReadOnlySource,
+		ReadOnlyFilteredTools: append([]string(nil), spec.ReadOnlyFilteredTools...),
+		ReportSchema:          cloneInterfaceMap(spec.ReportSchema),
+		ReportSchemaGranted:   spec.ReportSchemaGranted,
+		HandoffIn:             handoffFromBatchSpec(spec.HandoffIn),
 	}
 }
 

@@ -147,6 +147,18 @@ type PatchSpec struct {
 	ArtifactRefs       []string `json:"artifact_refs,omitempty"`
 }
 
+// HandoffSpec is the durable, portable representation of the normalized
+// handoff payload carried into a child task（writer→verifier relay）。agent 包
+// 的 Handoff 不能直接进 durable spec：agent 依赖 subagentbatch（反向引用会
+// 形成 import 环），故按 PatchSpec 同款模式在本包镜像五键契约。
+type HandoffSpec struct {
+	Status    string   `json:"status,omitempty"`
+	Summary   string   `json:"summary,omitempty"`
+	Evidence  []string `json:"evidence,omitempty"`
+	NextSteps []string `json:"next_steps,omitempty"`
+	Blocker   string   `json:"blocker,omitempty"`
+}
+
 // TaskSpec is the durable snapshot of one child task definition. Prompts and
 // full tool arguments are intentionally NOT part of the lifecycle schema; they
 // remain in the calling runtime.
@@ -179,6 +191,18 @@ type TaskSpec struct {
 	// 字节级兼容（空 context = fresh，与改动前行为一致）。
 	Context      string `json:"context,omitempty"`
 	ForkMessages int    `json:"fork_messages,omitempty"`
+	// 以下字段补齐「幂等 admission replay 重建任务」所需的定义面（§13.5 观察
+	// 收口）：丢失会把约束静默放宽（AgentType 不再按 agentdef 收窄、MaxTurns 回
+	// 会话默认、WritePaths 退化为整工作区）或让契约缺失（ReportSchema/HandoffIn）。
+	// 全部 omitempty：旧 spec 仍字节级兼容。
+	AgentType             string                 `json:"agent_type,omitempty"`
+	MaxTurns              int                    `json:"max_turns,omitempty"`
+	WritePaths            []string               `json:"write_paths,omitempty"`
+	ReadOnlySource        string                 `json:"read_only_source,omitempty"`
+	ReadOnlyFilteredTools []string               `json:"read_only_filtered_tools,omitempty"`
+	ReportSchema          map[string]interface{} `json:"report_schema,omitempty"`
+	ReportSchemaGranted   bool                   `json:"report_schema_granted,omitempty"`
+	HandoffIn             *HandoffSpec           `json:"handoff_in,omitempty"`
 }
 
 // Epoch returns a displayable task id (stable for idempotency).

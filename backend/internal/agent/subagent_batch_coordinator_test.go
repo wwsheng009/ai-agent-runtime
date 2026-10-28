@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
@@ -813,4 +815,62 @@ func TestBatchTaskSpecRoundTripPreservesForkContext(t *testing.T) {
 	if strings.Contains(string(plainBlob), "fork_messages") || strings.Contains(string(plainBlob), `"context"`) {
 		t.Fatalf("fresh task spec must not grow fork keys: %s", plainBlob)
 	}
+}
+
+// TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields 锁定 §13.5 观察收口：
+// 幂等 admission replay 重建任务所依赖的完整定义面——agentdef 引用、步数上限、
+// 写者并集、只读审计（来源/被剥离工具）、结构化回执契约与 handoff 载荷——必须
+// 逐项穿过 durable spec 的序列化往返，否则 replay 会把约束静默放宽或让契约缺失。
+func TestBatchTaskSpecRoundTripPreservesTaskDefinitionFields(t *testing.T) {
+	task := SubagentTask{
+		ID:                    "t-defined",
+		Role:                  "writer",
+		Goal:                  "apply the verified patch",
+		AgentType:             "code-writer",
+		MaxTurns:              7,
+		ReadOnly:              true, // 便于携带只读审计字段（真实场景多为写任务）
+		WritePaths:            []string{"backend/internal/agent", "docs/analysis"},
+		ReadOnlySource:        "agentdef:code-writer",
+		ReadOnlyFilteredTools: []string{"edit", "write"},
+		ReportSchema: map[string]interface{}{
+			"type":       "object",
+			"required":   []interface{}{"summary"},
+			"properties": map[string]interface{}{"summary": map[string]interface{}{"type": "string"}},
+		},
+		ReportSchemaGranted: true,
+		HandoffIn: &Handoff{
+			Status:    HandoffComplete,
+			Summary:   "patch verified in the previous round",
+			Evidence:  []string{"go test ./internal/agent/ 通过", "diff 覆盖 3 个文件"},
+			NextSteps: []string{"merge to main"},
+			Blocker:   "",
+		},
+	}
+
+	spec := taskToBatchSpec(task, task.ID)
+	blob, err := json.Marshal(spec)
+	require.NoError(t, err)
+	for _, key := range []string{
+		"agent_type", "max_turns", "write_paths", "read_only_source",
+		"read_only_filtered_tools", "report_schema", "report_schema_granted", "handoff_in",
+	} {
+		require.Contains(t, string(blob), `"`+key+`"`, "durable spec 必须携带定义面字段 %s", key)
+	}
+	var decoded subagentbatch.TaskSpec
+	require.NoError(t, json.Unmarshal(blob, &decoded))
+
+	restored := subagentTaskFromBatchSpec(subagentbatch.SubagentTaskRecord{TaskID: task.ID}, decoded)
+	require.Equal(t, task.AgentType, restored.AgentType)
+	require.Equal(t, task.MaxTurns, restored.MaxTurns)
+	require.Equal(t, task.WritePaths, restored.WritePaths)
+	require.Equal(t, task.ReadOnlySource, restored.ReadOnlySource)
+	require.Equal(t, task.ReadOnlyFilteredTools, restored.ReadOnlyFilteredTools)
+	require.Equal(t, task.ReportSchema, restored.ReportSchema)
+	require.Equal(t, task.ReportSchemaGranted, restored.ReportSchemaGranted)
+	require.NotNil(t, restored.HandoffIn)
+	require.Equal(t, *task.HandoffIn, *restored.HandoffIn)
+
+	// 别名安全：还原侧拿到的是副本，改写不影响 spec 快照。
+	spec.WritePaths[0] = "mutated"
+	require.Equal(t, "backend/internal/agent", restored.WritePaths[0])
 }
