@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**待评审（v1 草案）**
+- 状态：**待评审（v2）**——v1 为结构草案；v2 已把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**，并新增 §3.5 安全发现（v1 中关于 `/files` 的一处推断错已被实测推翻，见 §3.2 修正记录）
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -28,11 +28,11 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 层 | envd 实测能力 | 结论 |
 |---|---|---|
 | 传输层 | `process.Process/Start` 是 server-streaming（`Start/Data/End/KeepAlive`），`StreamReader.Recv` 已在 `pty`/`watch_dir` 使用 | **已具备**，只是 `client.Run()` 把流攒完（且 `DefaultMaxBufferedOutput = 8 MiB` 以上丢弃） |
-| 计算层 | `filesystem.*` 无 `ReadFile/WriteFile`、无字节区间；但可在目标机跑 `sed -n 'A,Bp'` / `tail -c +N` / `dd` | **grep 可早停、view 可让目标机算窗口**；envd 本身不提供随机读 |
+| 计算层 | `filesystem.*` 无 ReadFile/WriteFile/区间读；**但 `GET /files` 提供真随机读**（实测 `Range` → 206 逐字节精确）；`process` 可跑 `rg`/`sed` | **view 已可 O(窗口) 而非 O(文件)**；grep 可早停。远端 `sed` 造窗降为回落路径 |
 | 呈现层 | MCP 一次调用一个结果 | 真"边跑边显示"需 progress notification 贯通，**是另一条工程线**，与 envd 无关 |
-| 新发现 | `GET /files` 路由存在，实测 `400 username required` → 带 `username` 后 **`401 missing signature query parameter`** | envd 唯一的原生文件传输端点，**签名可用则解锁真流式读 + 破 1 MiB argv 写上限**；算法未验证，列为调研项 |
+| **`/files`（已 spike）** | header token 即可（不需签名）；200/206/416/400/404 全部实测；`POST` 无 argv 上限 | ✅ **`Access.Read/Write` 的首选通道**；但 `Last-Modified` 是请求时间、无 ETag、gzip 在 0.2.11 不生效（**条件读不可用**），且**无 jail 且以 root 身份读**（§3.5） |
 
-推荐顺序：**先做 §10 三个近项（不需等 seam）→ 并行调研 `/files` 签名 → 再按 §6 分五段落 seam**，每段独立可回滚。
+推荐顺序：**先做 §10 近项（N0 已因 spike 提前成立）→ 按 §6 分五段落 seam**；每段独立可回滚。**另：§3.5 的可读性闸门是安全项，优先级高于性能项。**
 
 ---
 
@@ -156,16 +156,20 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 移动 | `Move`（:180） | ✅ | `Access.Rename` 原生 |
 | 事件流 | `WatchDir`（:248，返回 `*StreamReader`） | ✅ 已用于 `watch_dir` | 流式原语可用 |
 | watcher 管理 | `CreateWatcher`/`GetWatcherEvents`/`RemoveWatcher` | ✅ 路由存在 | — |
-| **读文件字节** | 无 | ❌ **不存在**（实现报告 §2.4 探测 404；`envd_tools.go:8-9` 记录"reads run `cat`"） | `Access.Read` 必须靠 spawn 进程 |
-| **写文件字节** | 无 | ❌ **不存在**（"writes run `printf` 内容作位置参数"，因此受 argv 上限 `envdMaxWriteBytes = 1<<20`） | `Access.Write` 有 **1 MiB 硬上限** |
-| **字节区间读** | 无 | ❌ | `RandomRead` 能力位为 false（原生）；可用远端 `sed`/`tail` 模拟 |
+| **读文件字节** | `GET /files`（HTTP，非 RPC） | ✅ **原生存在**（`download.go:19`）；`filesystem.*` 仍无 ReadFile，故今天走 `cat` | `Access.Read` 首选 `/files`，`process+cat` 降为回落 |
+| **写文件字节** | `POST /files`（multipart） | ✅ **原生存在**（`upload.go`）；今天走 `printf` + argv 上限 `envdMaxWriteBytes = 1<<20` | `Access.Write` 经 `/files` **不再受 argv 上限** |
+| **字节区间读** | `GET /files` + `Range` | ✅ **实测 206 且逐字节精确**（§3.3） | `RandomRead` 在 envd 上**为 true**（探测得，非硬编码） |
+| 条件读（304/ETag） | `GET /files` + `If-*` | ❌ **不可用**：`Last-Modified` 回的是**请求时间**，`ETag` 不发（§3.3 实测） | 禁止把 revision 建立在 `Last-Modified` 上，仍用内容哈希 |
+| 传输压缩 | `Accept-Encoding: gzip` | ❌ 部署版 **0.2.11 不生效**（`main` 分支源码已有该路径） | 能力必须探测，不得假设版本 |
 | 进程执行 | `process.Process/Start`（`process.go:308` 返回 `*StreamReader`） | ✅ server-streaming | `Access.Stream` 原生可用 |
 | 缓冲执行 | `Client.Run`（:326） | ✅ 但 `DefaultMaxBufferedOutput = 8<<20`，超出**丢弃且继续消费**（:324-326,345-346,353-358） | 今天的 `grep`/`view` 走这条 → **不增量** |
 | 提前终止 | `SendSignal`（:417-420）、`Update`、`Connect` | ✅ unary | 早停能力齐备 |
 | 交互式输入 | `StreamInput`（client-streaming，需 HTTP/2） | ⚠️ 客户端未支持 | 不影响本方案 |
-| **`GET /files`** | 未在客户端封装 | ⚠️ **实测存在**（见 §3.3） | 潜在真流式读/大文件写路径 |
+| **`GET/POST /files`** | 未在客户端封装（`envdclient` 内零引用） | ✅ **实测可用**（header token 即可，见 §3.3） | envd 唯一的原生文件通道，**`Access.Read/Write` 的首选实现** |
 
-> 修正记录：`CreateSymlink`/`GetFilesHash` 在 `envd-capabilities.md` 的实测表中**没有**出现，因此**不得作为本方案任何设计前提**。若后续需要 symlink 能力，先补真机探测再落文档。
+> 修正记录（两条，均为我自己写错后被实测推翻）：
+> 1. `CreateSymlink`/`GetFilesHash` 在 `envd-capabilities.md` 的实测表中**没有**出现，因此**不得作为本方案任何设计前提**。
+> 2. 本文 v1 曾写"`/files` 不吃 `X-Access-Token`，吃签名查询参数"——**错了**，那是只观察到"未认证 → 401"得出的误推断。`auth.go:116-123` 与本轮真机都证明**头里带令牌直接放行**，签名只是预签名 URL 用的替代路径（§3.3）。
 
 ### 3.3 `GET /files` 探测原始记录（2026-10-28）
 
@@ -179,11 +183,33 @@ https://172.18.3.238:49983/content                     -> 401
 https://172.18.3.238:49983/download                    -> 401
 ```
 
-三点结论：
+以上是**阶段一（外部、未认证）**的记录，它只能证明“路由存在 + 非开放”。**阶段二（真机 spike，已认证）**于同日完成，这才是本方案的依据：
 
-1. `/files` **路由已注册**（400 参数校验先于鉴权），且**不吃 `X-Access-Token`**，吃的是**签名查询参数**——与 `envdclient/client.go:68-75` 注释完全吻合（"every path except `GET /health` and the `/files` endpoints answers 401 without it"）。
-2. **不是安全洞**：未签名一律 401，我未能（也不会尝试）绕过签名读取文件。
-3. **是能力钥匙**：envd 唯一的原生文件传输通道。若签名可本地计算，则 `view` 获得真流式/区间读、`write` 破 1 MiB argv 上限；若不可计算，本方案其余部分照常推进（列为 §11 未决问题 U1）。
+### 3.3.1 C-1 spike 结果（envd **0.2.11** @ `172.18.3.238:49983`，全程只读，产物已清理）
+
+| 探针 | 结果 | 判定 |
+|---|---|---|
+| `GET /files?path=/home/n9e/.bashrc&username=n9e` + `X-Access-Token` 头 | **200**，3814B，`accept-ranges: bytes` | ✅ **签名不需要**（`auth.go:116-123` 实证） |
+| 裸 curl（无任何令牌）/ 空值头 / 错误令牌 | 均 **401** | ✅ 不是开放通道 |
+| `Range: bytes=0-9` | **206** `content-range: bytes 0-9/3814`，10B，**与 `head -c 10` 逐字节一致** | ✅ 真随机读 |
+| 尾窗 64B / 中窗 37-52 | 206 `3750-3813/3814`、`37-52/3814`，均 **EXACT-MATCH** | ✅ 任意窗口 |
+| **10 MiB 文件**取头/中/尾各 1 KiB | 三次 206，**每次只传 1024B** | ✅ **`view` 成本从 O(文件) 降到 O(窗口)** |
+| `Range: bytes=99999-100100`（越尾） | **416** `content-range: bytes */3814` | ✅ 可映射为核侧错误码 |
+| `Range: bytes=0-9,20-29`（多区间） | 206 `multipart/byteranges; boundary=…`，368B | ⚠️ 客户端**只用单区间** |
+| 目录 / 不存在 | **400** / **404**（json body） | ✅ 与现有 `view` 拒目录、`missing_file` 语义一致 |
+| `ETag` / `If-None-Match` | **不发 ETag**；空标签请求返回 200 全量 | ❌ 条件读不可用 |
+| `If-Modified-Since: 2099` | 304；但 `Last-Modified` 为**请求时间**（相隔 2s 两次探测分别为 14:20:32 / 14:20:34，而文件真实 mtime 是 2025-04-20） | ❌ **真实客户端永远拿不到 304** |
+| `Accept-Encoding: gzip` | 200 identity，3814B（`file` 判为 ASCII text） | ❌ 0.2.11 不压缩 |
+| `POST /files` 新建 / 同名覆盖 | 200 / 内容变为新值（`O_TRUNC`，`upload.go:95`） | ✅ **无 1 MiB argv 上限** |
+| `POST /files` 父目录不存在 | **200 + 自动建父目录**（`EnsureDirs`，`upload.go:59`） | ⚠️ 必须核侧先拦，否则 `36caf76f` 的 `missing_parent` 语义会被通道差消灭 |
+| `username=nosuchuser` | 401 `error looking up user` | ℹ️ 仅用于 `~` 展开与写入 chown |
+| `/files/?path=…`（尾斜杠） | 404 `404 page not found`（19B） | ℹ️ 路由无重定向，客户端 URL 要写死 `/files` |
+
+### 3.3.2 阶段二推翻的三条结论（包括本文 v1 的一条自错）
+
+1. **U1 关闭**：`/files` **用我们已有的 `X-Access-Token` 头就能用**；签名（`auth.go:88-105`，`v1_` + SHA256(`path:operation:username:token`[`:exp`])）是预签名 URL 用的替代路径。**客户端不应自己实现签名**——上游用 `subtle.ConstantTimeCompare`（:155），自研版很容易在这个细节上退化，而 header token 已足够。
+2. **原结论“`/files` 不吃 access token”是错的**：我当时只观察到“未认证就 401”就反推了。本轮裸 curl/空头/错令牌都是 401，带令牌是 200，**不存在开放文件读**。
+3. **区间/流式读真的能省带宽，但“条件读省带宽”省不了**：因为 `Last-Modified` 不是文件 mtime。**不得把缓存/并发检测建在 `Last-Modified` 上**，仍用内容哈希（`Reviser`）。
 
 ### 3.4 档位与工具面一致性（收编成果，作为 seam 的约束保留）
 
@@ -193,6 +219,28 @@ https://172.18.3.238:49983/download                    -> 401
 | ssh / local（同一二进制，实测 15/15） | — | 8（`view ls glob grep write edit append_write apply_patch`） | 9（+`shell`） |
 
 `remote_x__{view,ls,glob,grep,host_metrics,watch_dir}` / `{write,edit,append_write,apply_patch,mkdir,remove,move}` / `{shell,pty_start,pty_write,pty_read,pty_resize,pty_close}`。**seam 改造不得改变这张表**——工具名、档位归属、schema 是对外契约，`Access` 只是内部落点。
+
+### 3.5 真机安全发现（必须成为 `Access` 的边界条件）
+
+本轮最重的发现不是性能，而是**权限非对称**：
+
+```
+GET /files?path=/etc/shadow&username=n9e   -> 200, 1401 bytes      # envd 以自身进程身份（root）读
+n9e@target$ head -c 1 /etc/shadow          -> Permission denied    # 目标用户本身读不了
+GET /files?path=/etc/shadow&username=root  -> 200, 1401 bytes      # username 不造成降权
+```
+
+配合两个已确认的上游事实：`auth.go:27-32` 把 `GET/files`、`POST/files` 列入 `authExcludedPaths`（中间件不拦，由 handler 内 `validateSigning` 兜底）；`permissions/path.go:38` 对绝对路径**直通返回，无任何 jail**。
+
+**四条结论（写进设计，不可讨论）：**
+
+1. **`/files` 只能做核内实现细节**，绝不暴露为工具、绝不接受 raw path：`Access` 收到的必须是**已过 jail 的已解析目标**（与 §4.1 纪律 1/4 一致）。
+2. **必须加“目标用户可读性闸门”**（原 U7，本轮定为**做**）：否则同一个 `view` 工具经 `/files` 能看到 `shell` 工具看不到的文件，这是**相对提权**。实现上**绝不在 Go 里重实现 POSIX 权限判定**（易错且遇 ACL/组/namespace 就错），而是用**内核自己回答**：`process.Start(["/usr/bin/test", "-r", <已解析路径>])` 作为目标用户跑，退出码非 0 则拒。为控制往返成本：仅在（a）`/files` 通道且（b）`Stat` 的 mode 显示存在拒绝可能时才探测，并按目录缓存结论。
+   ⚠️ 本项**不是假想风险**：目标机上 `~/.aicli/remote-238.yaml` 的 `allowedRoots` 就含 `/var/log`，那里大量文件是 `0640 root:<group>`，`n9e` 读不到——**jail 内就会发生**。
+3. **沿用上游的 fail-closed 姿态**：`401 envd not initialized`（`auth.go:65-81`，live-upgrade pre-init 窗口故意把 `/files` 排除在允许列表外）一律视为后端不可用并**回落 `process` 通道**，绝不静默返回空。
+4. **令牌与日志卫生**：`/files` 的 URL 含 `path`/`username`，审计与日志**只记方法 + 状态码 + 长度**，不记完整 URL、不记令牌；本轮探针已做到（令牌只存在于目标机 shell 变量与 600 权限的 curl 配置文件，全程未回显）。
+
+另需记一笔**已测得的具体偏差**（§8.9 式登记，不糊合）：`POST /files` 的 `EnsureDirs` 会自动建父目录，与 local 面的 `missing_parent` 拒语义不同。**该差异必须在核侧消除**（进 `Access` 前先查父目录），不得依赖传输层行为。
 
 ---
 
@@ -205,6 +253,7 @@ https://172.18.3.238:49983/download                    -> 401
 1. **`Access` 只表达**能力，不表达**策略。** 接口里没有 tier、没有 permission、没有 tool name。策略（档位、jail 判定、权限、预算、折叠）全部留在核与既有 adapter。违反这条 = 第二套策略，直接否决。
 2. **核内禁止 `if backend == "envd"`。** 唯一允许的分支是**能力位判断**，且同一判断在核里**只允许出现一次**（收进 `resolveCapability()` 一类函数，其余调用点读结论）。用 lint/评审清单把这条变成可检查项（§7.4）。
 3. **共享 conformance 套件跑两个实现。** 同一张用例表，`localAccess` 与 `envdAccess` 都必须全绿；不一致要么改实现，要么显式登记为差异并写进文档（沿用 §8.9 纪律，但登记项应随 seam 推进**单调减少**）。
+4. **策略绝不沉入 `Access`：jail、目标用户可读性闸门、档位、尺寸门全部在核侧先行。**（§3.5）`Access` 只接受已解析、已过闸的目标，因此它无法成为越权通道——本轮实测的 `/etc/shadow` 提权风险就是这条纪律存在的理由。
 
 ### 4.2 接口定义
 
@@ -241,14 +290,19 @@ type Access interface {
 }
 
 type Capability struct {
-    RandomRead      bool  // 能否只取 [off, off+n)（local: pread；envd 原生: 否）
+    RandomRead      bool  // 能否只取 [off, off+n)（local: pread；envd: `GET /files` + `Range`，实测 206 精确）
     AtomicReplace   bool  // 能否同目录 rename 替换（local: 是；envd printf 重定向: 否）
     NativeAppend    bool  // 能否不读回就追加（envd: printf >> 是）
     StreamingExec   bool  // 能否 spawn 进程并流式取字节（envd: 是，pty/shell 已在用）
     Watch           bool  // 事件流（envd: 是）
-    MaxWriteBytes   int64 // 0 = 无上限；envd 当前为 1<<20（argv 限制，非策略）
+    MaxWriteBytes   int64 // 0 = 无上限；`/files` 通道：0（实测 POST 无 argv 上限）；`process+printf` 回落：1<<20
     MaxReadBytes    int64 // 核侧尺寸门，实现可更低
+    ConditionalRead bool  // 能否用 If-* 做 304（envd 0.2.11: **false**，Last-Modified 是请求时间且不发 ETag）
+    GzipEncoding    bool  // 能否 `Accept-Encoding: gzip`（envd 0.2.11: **false**，实测不生效）
 }
+
+// ⚠️ 以上位**必须由探测得出，不得按版本号硬编码**。`ConditionalRead`/`GzipEncoding`
+// 在部署版 0.2.11 与 `main` 分支源码之间已经存在差异（§3.3.2），版本推导必错。
 
 // —— 可选能力：沿用 Searcher 的“不实现即降级”模式，不塞进主接口 ——
 type RandomAccessor interface {
@@ -273,7 +327,7 @@ type Watcher interface {
 
 | 核的需求 | `RandomRead=true` | `RandomRead=false, StreamingExec=true` | 两者都无 |
 |---|---|---|---|
-| `view` 带 offset/limit | `pread` 直接取窗口 | 远端 `sed -n 'A,Bp'` / `tail -c +N` 取窗口（§5.2） | 整读 + 核侧 clamp（**今天的行为**） |
+| `view` 带 offset/limit | local: `pread`；envd: `GET /files` 单区间 `Range`（**实测 206 逐字节精确**） | 回落：远端 `sed -n 'A,Bp'` / `dd skip` 造窗（**仅 `/files` 不可用时**） | 整读 + 核侧 clamp（**今天的行为**） |
 | `view` 大文件（超尺寸门） | 只读头 + 采样判二进制 | 远端读头（`head -c`）+ 采样 | 整读后判定，或按今天直接拒 |
 | `grep` 命中上限 | 本地 walker 自限（已有） | 远端 `rg -m` / 达到上限后 `SendSignal`（§5.3） | 缓冲全量（**今天的行为**） |
 | `write` > `MaxWriteBytes` | 不适用 | 明确拒 `payload_too_large` + `max_file_bytes`（**已实现**，`8ec067cb`） | — |
@@ -293,7 +347,7 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 
 - **注入方式**：给 `Runtime` 增加可选扩展 `AccessProvider interface { FileAccess() Access }`。**未实现即取 `localAccess`**——这意味着迁移可以逐核推进，未改造的核行为字节级不变，回滚只需删掉一行注入（§6 每段的回滚点都建立在此）。
 - **`localAccess` 不是新写的抽象层，是搬家**：把 `os.ReadFile` → `localAccess.Read`，逐点替换，不改语义。搬家后核内应当 `rg '\bos\.(ReadFile|WriteFile|Stat|MkdirAll|Rename|Remove|ReadDir)'` 在四个核目录下**只剩 0 处**（这条可以直接作为验收门）。
-- **`envdAccess` 的组成**：`Stat/ListDir/MakeDir/Remove/Move/WatchDir` → 原生 RPC；`Read/Write` → `process.Start` + `cat`/`printf`（保持"内容作位置参数、绝不拼接"的现有纪律，`envd_backend.go:41-45`）；`RandomRead` 若 §5.2 验证通过则实现为远端窗口，否则能力位置 false。
+- **`envdAccess` 的组成（`/files` 优先，`process` 回落）**：`Stat/ListDir/MakeDir/Remove/Move/WatchDir` → 原生 RPC；`Read/RandomRead` → `GET /files` 单区间 `Range`（探测 206 可用）→ 失败则 `process.Start` + `cat`；`Write` → `POST /files`（multipart，**破 1 MiB argv 上限**）→ 失败则 `printf` 且保留 argv 上限报错；**进入 `/files` 前必须已完成 jail + 父目录检查 + 可读性闸门**（§3.5、§4.1 纪律 4），保持"内容永不拼接进脚本、只走 multipart 字段或位置参数"的现有纪律（`envd_backend.go:41-45`）。
 - **不动的部分**：`envd_process.go`、`envd_pty.go`（进程面本就是 `ExecStreamer` 的实现来源）、`toolcoreoutput` 折叠、`envdExtensionTiers`、所有 schema 与文案。
 
 ### 4.5 收益核算（按行数）
@@ -312,7 +366,7 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 - ❌ 不抽 artifact store / session store（`ArtifactSink`、`ExtensionStore` 保持原样，它们是宿主态，不是文件视图）。
 - ❌ 不覆盖 `internal/tools/code_index_resolver.go` 的 3 处 `os.*`（索引器是宿主本地进程，语义上不属于工具 I/O 面）。
 - ❌ 不把 `Access` 暴露到 MCP schema 层（对模型不可见）。
-- ❌ 不承诺 `Range`/HTTP 语义或 `If-Match`（除非 §11 U1 的 `/files` 路线成立，那也是实现细节，不进接口）。
+- ❌ 不把 HTTP 语义放进接口：`Access` 不出现 `Range`/`Content-Range`/状态码/ETag 字样（`/files` 是 `envdAccess` 的内部实现细节，换成 gRPC 流也不影响上层；§3.3 已证实 `Range` 可用，但这仍不进接口）。
 - ❌ 不改工具名、档位归属、schema、输出文案（§3.4 那张表是硬约束）。
 
 ---
@@ -326,32 +380,33 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 | 层 | 定义 | envd 现状（实测） | 结论 |
 |---|---|---|---|
 | **传输增量** | 结果是否能在目标机产出时就到达客户端 | ✅ `process.Start` 返回 `*StreamReader`（`process.go:308`），`Recv` 逐事件；`Data{stdout,stderr,pty}`/`End`/`KeepAlive` 已在 `pty_*`、`watch_dir` 用过 | **能力已在**，是我们主动放弃了它 |
-| **计算增量** | 目标机是否只处理被请求的那部分数据 | ⚠️ `filesystem` 无区间读；但可以在目标机跑 `sed`/`tail`/`rg` | **要靠"让目标机算窗口"实现**，不是靠 envd 提供随机读 |
+| **计算增量** | 目标机是否只处理被请求的那部分数据 | ✅ `GET /files` + 单区间 `Range`（**实测 10 MiB 文件只传 1024B**）；另有 `process` 可跑远端 `rg`/`sed` | **envd 本身就能做到计算增量**（靠 HTTP 区间读），不需我们造窗口 |
 | **呈现增量** | 模型/TUI 能否边到达边看到 | ❌ MCP 语义是"一次调用一个结果" | 与 envd 无关，需要 progress notification 贯通 manager/渲染层，**独立工程线** |
 
 今天我们实际落在最差组合上：`remote_x__view`/`grep` 走 `Client.Run`（`process.go:326`），它**把整条流攒完再返回**，且 `DefaultMaxBufferedOutput = 8 MiB` 之后**丢弃但仍继续消费**（:324-326, 345-346）。也就是说：**传输是流式的，被我们的缓冲层吃掉了。**
 
-### 5.2 `view`：可行路线与语义陷阱
+### 5.2 `view`：路线已被 C-1 spike 重新排序（v1 的 R1→升为现 **R0** 主路径；v1 的 R2/R3→降为现 R1/R2 回落）
 
-**候选配方（按优先级）**
+**候选配方（按实测后的优先级）**
 
 | # | 配方 | 得到什么 | 代价 | 状态 |
 |---|---|---|---|---|
-| R1 | `/files` 签名下载（若可本地算签名） | 真流式 + 可能 `Range` | 依赖未验证的签名算法 | ❓ 待调研（§11 U1） |
-| R2 | 行窗口：远端 `sed -n 'A,Bp' -- "$1"` | 与本地 `offset`/`limit` **天然对齐**（行语义） | 一次 spawn；无 `rg` 依赖 | 未实现，**可立刻做** |
-| R3 | 字节窗口：`tail -c +N -- "$1"` 再 `head -c M`；或 `dd bs=1 skip=N count=M` | 大文件抽样、二进制判定用 | 行/字节需换算 | 未实现，可立刻做 |
-| R4 | 现状：远端 `cat` 整文件 | 简单、已知可靠 | 2 MiB 门拒大文件、大仓库慢 | ✅ 在用 |
+| **R0** | **`GET /files` + 单区间 `Range`（header token）** | **真随机读**：O(窗口) 传输、`Content-Range` 带总长度、越界给 416、目录 400、不存在 404 | 需客户端封装一个 HTTP 通道（非 Connect-RPC） | ✅ **本轮已实测可用** |
+| R1 | 行窗口：远端 `sed -n 'A,Bp' -- "$1"` | 无 HTTP 依赖时的行语义 | 一次 spawn；行/字节换算 | ⬇️ **降为回落**（仅 R0 不可用时） |
+| R2 | 字节窗口：`tail -c +N` / `dd bs=1 skip= count=` | 抽样与二进制判定 | 行/字节换算 | ⬇️ **降为回落** |
+| R3 | 现状：远端 `cat` 整文件 | 简单、已知可靠 | 2 MiB 门拒大文件、大仓库慢 | ✅ 在用（仍作兵底） |
 
-**R2/R3 必须做对的语义清单**（任一条不核对就是新漂移源）：
+**因为 R0 成立，§5.2 的语义陷阱清单从“九类”收收敛为三类**（这是把窗口从 shell 回到 HTTP 的最大收益：**不再由目标机的文本工具决定行/字节语义**）：
 
-1. **行区间 ≠ 字节区间**：`sed -n '100,140p'` 的行号以 `\n` 计，而核的 `offset` 语义建立在"解码后的行序列"上。CRLF 文件在 Go 侧与 `sed` 侧行数一致，但 **UTF-16/BOM** 文件不一致（`mutatecore.DetectEncoding`/`Decode` 能处理，`sed` 不能）→ 编码非 UTF-8 时必须回落到 R4 整读。
-2. **末行无换行**：`sed` 对 EOF 无 `\n` 的最后一行行为与 Go `strings.Split` 不同，需对拍。
-3. **二进制/NUL**：`sed` 在 NUL 上行为不可依赖 → 判定必须走 `Stat` 尺寸 + 头部采样（R3），且用 `LooksBinary`（纯函数，已有）。
-4. **行长度 clamp**：核的长行处理在**解码之后**；远端窗口给的是原始字节，必须保证 clamp 仍在核里做（**不许在 envd 侧折叠**，`envd_tools.go:12-13` 的既有纪律）。
-5. **symlink / jail**：仍走 `be.resolvePath` 一次，窗口命令只收**已解析的绝对路径**，且**只做位置参数**（`"$1"`），绝不拼接用户数据（现有脚本常量 `envd_backend.go:43-45` 就是这个模式）。
-6. **`view` 的 batch/files 语义**：批量读多文件时，窗口配方要么每文件一次 spawn（往返爆炸），要么在核侧决定"batch 一律整读"——这是**能力位判断该写在核里**的又一个例子（§4.3）。
+1. ~~行区间 ≠ 字节区间~~ → **消失**：`Range` 给字节，行/解码/clamp 全在核里做，与 local 同一套代码。
+2. ~~`sed` 对 CRLF/BOM/UTF-16/无末换行的行为需对拍~~ → **消失**：不再产生第二套行语义。
+3. **保留：二进制/NUL 判定**仍须 `Stat` 尺寸 + 头部采样 + `LooksBinary`（纯函数），**不得让 `sed`/`file` 决定**。
+4. **保留：行长度 clamp 与输出折叠仍在核里**（`envd_tools.go:12-13` 既有纪律，不因换通道而变）。
+5. **保留：jail / 可读性闸门 / 父目录检查在进 `/files` 前完成**（§3.5）——**这是换通道后新增的唯一语义义务**。
+6. **新增：多区间会返回 `multipart/byteranges`（实测 368B）**——客户端**只发单区间**，不要自己解 multipart。
+7. **新增：416 （越尾）必须映射为核侧的可诊断错误**，不能当 5xx 抛（实测 `content-range: bytes */3814`）。
 
-**验收**：R2 必须与本地 `viewcore` 逐字节对拍（§7.2 差分对拍），覆盖 CRLF / UTF-8 BOM / UTF-16 / 无末换行 / NUL / 超长行 / 空文件 / 目录 / 不存在 / jail 越界 9 类样本。
+**验收**：R0 与本地 `viewcore` 逐字节对拍（§7.2），样本集从 9 类缩至：二进制/NUL / 超长行 / 空文件 / 目录(400) / 不存在(404) / 越尾(416) / jail 内越权文件（§3.5 闸门用例）七类——**行数少了，但安例反而多了一个安全项**。
 
 ### 5.3 `grep`：最接近"免费"的真增量
 
@@ -363,19 +418,20 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 3. **结构化流**：`rg --json` 可边到边解析行号/列/文本，与 `searchcore` 的结果模型对齐度高于解析纯文本；⚠️ 但目标机 `rg` 版本不可控（`envd-capabilities.md` 已记录版本探测待做），必须**能力探测 + 回落**，且引擎归属仍要对外公布（`BackendReporter`，`envd_tools.go:227-229` 的既有动机）。
 4. **参数面缺口**（§8.9 登记项）：`glob`/`type`/`-i`/多 `patterns` 在远端方言下的映射仍未补齐。这些是**语义补齐**，与增量正交，但两者都落在同一段代码上——建议合并到 Phase 2.5b 一起消除（§6）。
 
-### 5.4 `/files` 路线的调研任务（U1，0.5–1 天，纯只读）
+### 5.4 `/files` 路线（**U1 已解决**：2026-10-28 C-1 spike，源码 + 真机双向确证）
 
-需要回答三个问题，且**答案必须来自源码或真机，不许推测**：
+原三个调研问题现在都有答案：
 
-1. 签名派生方式：输入包含哪些字段（path / username / op / 过期时间），HMAC 密钥来源是 access token 还是 envd 内部密钥。→ 从 E2B `runtime` 源码（我们有 `fcf15acb` 的构建记录，见 `envd-source-and-rebuild.md`）定位。
-2. 是否支持 `Range`/分块，以及 `GET` 之外是否有 `PUT`（决定能否破 1 MiB argv 写上限）。
-3. 与 jail 的关系：`/files` 是否受 access token 之外的路径约束？若它能绕过我们的 `--allowed-roots` 语义，**则一律不启用**（安全优先于性能）。
+1. **签名派生方式** → `auth.go:88-105`：`v1_` + SHA256(`path:operation:username:token`[`:exp`])，即**共享密钥普通哈希，不是 HMAC**。**但我们不需要它**：`auth.go:116-123` 先看 `X-Access-Token` 头，匹配即 `return nil`；真机实测带令牌头 → **200**。**结论：客户端不实现签名**（上游用 `subtle.ConstantTimeCompare`，自研易在该细节上退化），签名仅用于“递给第三方的短时 URL”。
+2. **`Range`/分块与写通道** → `download.go:123-172` 显式处理 `Range`/`If-Range`/`If-Modified-Since`/`If-None-Match` 并交给 `http.ServeContent`；真机 **206 逐字节精确**，越尾给 416。写侧是 `POST`（非 `PUT`）：multipart + `O_TRUNC` + chown（`upload.go:95,83`）→ **破 1 MiB argv 上限**；但 `EnsureDirs`（:59）会自动建父目录，**必须核侧先拦**（§3.5）。
+3. **与 jail 的关系** → **无 jail**：`permissions/path.go:38-39` 对绝对路径直通返回；真机 `path=/etc/shadow&username=n9e` → **200（1401B）**，而同用户本地 `head -c 1 /etc/shadow` → **Permission denied**。原定“**若绕过 `--allowed-roots` 则一律不启用**”这个条件**已触发**。
 
-产出：一段可复现的真机探测记录 + 是否值得把它做成 `envdAccess.Read/Write` 的决策；若启用，`RandomRead`/`MaxWriteBytes` 能力位随之变化，**上层零改动**（这正是 seam 的价值验证点）。
+产出与**启用方式的修正**：不启用 ≠ 安全；**不启用则我们永远只能用 root 降不到权的 `shell` 看文件，而 `/files` 仍然存在**——真正的控点在客户端。因此：**默认启用 `/files`，但“jail + 可读性闸门 + 父目录检查”三道在核侧先行，闸门不过就拒**（U6/U7 已定，见 §11）。能力位随之变为 `RandomRead=true`/`MaxWriteBytes=0`；`ConditionalRead=false`/`GzipEncoding=false` **仍由探测得出**，不得写死。**上层零改动**——这正是 seam 的价值验证点。
 
 ### 5.5 不要向用户承诺的东西
 
-- 不承诺"envd 支持随机读"——它不支持，我们是在目标机上**算**窗口。
+- ~~不承诺"envd 支持随机读"~~ → **本轮已实测支持**（`GET /files` + 单区间 `Range` → 206，与 `head -c`/`tail -c`/`dd` 逐字节一致）。仍不承诺的是：**envd 提供原生字节级区间 RPC**——`filesystem.*` 里就是没有，随机读来自 HTTP 通道。
+- 不承诺**条件读能省带宽**：实测 `Last-Modified` 是请求时间、`ETag` 不发 → 304 在真实客户端下不可达（§3.3.1）。
 - 不承诺"结果会流式出现在 TUI"——那是 §11 U3（progress notification 贯通），独立评审。
 - 不承诺 `grep` 在 envd 与 local 上返回**完全相同**的字节：方言差异（`rg` vs `grep -rnI`）必须继续对外公布，直到有硬证据一致。
 
@@ -402,7 +458,7 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
   1. `remotetools/envd_access.go` 实现 `Stat`/`ReadDir`/`Read`（RPC + `cat`），`Capabilities` 如实声明（`RandomRead=false`、`StreamingExec=true`、`Watch=true`）；
   2. `searchcore` 的 25 处 `os.*` 搬入 `localAccess`（含 `grep_ignore.go` 的 ignore 读取、`ripgrep_engine.go` 的 runner）；
   3. envd 的 `view`/`ls`/`glob`/`grep` **改走共享核**，删除对应的 envd 自实现；
-  4. 若 §5.2 R2/R3 对拍通过：为 envd 提供 `RandomAccessor`（远端窗口）；若未通过，本段先只做整读，窗口留到 4.5。
+  4. **已由 C-1 spike 定案**：`RandomAccessor` 走 `GET /files` + 单区间 `Range`（§5.2 R0），**不进 `Access` 接口**（属实现细节，§4.6）；`sed`/`dd` 窗口降为通道不可用时的回落。本段**同时必须交付 §3.5 的可读性闸门（U7）与父目录前置检查**，它们与本项同批提交，不得先上性能后补安全。
 - 验收门：
   - envd 侧 `remote_x__{view,ls,glob,grep}` 输出与共享核 conformance 对拍一致（差异按 §8.9 登记，目标：登记项数量 ≤ 现状）；
   - grep 流式改造后**大目录扫描字节量显著下降**（给出前后 `Run` vs `Start` 的实测抓取字节数）；
@@ -426,9 +482,9 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 - 回滚点：过渡开关在此段**删除**（此后 envd 写侧只有一条路径）。
 - 成本：**4–5 天**。
 
-### Phase 4.5 —— 执行/流式统一（可选，取决于 U1/U3）
+### Phase 4.5 —— 执行/流式统一（可选，取决于 U3；原“取决于 U1”已失效——U1 由 C-1 定案）
 
-- 交付：`ExecStreamer` 归一到 `Access` 家族（`envd_process.go`/`envd_pty.go` 保留为传输实现，但由核统一决定超时/取消/信号）；`grep` 早停精确化（`SendSignal`）；若 `/files` 签名可用，`envdAccess.Read/Write` 升级为原生通道。
+- 交付：`ExecStreamer` 归一到 `Access` 家族（`envd_process.go`/`envd_pty.go` 保留为传输实现，但由核统一决定超时/取消/信号）；`grep` 早停精确化（`SendSignal`）。~~若 `/files` 签名可用，`envdAccess.Read/Write` 升级为原生通道~~ → **该项已提前到 Phase 2.5b/3.5b**（C-1 已证实 header token 即可，不需签名），本段不再承担。
 - 验收门：pty 面 6/6 不回归；shell 输出 8 MiB 丢弃行为改为**显式截断标注**（不再静默丢）。
 - 成本：**3–5 天**（可拆到后续迭代，不阻塞前四段价值）。
 
@@ -436,8 +492,9 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 
 ```
 2.5a ──▶ 2.5b ──▶ 3.5a ──▶ 3.5b ──▶ (4.5)
-              └── 可与 U1(/files 调研) 并行 ──┘
-§10 三个近项可插在 2.5a 之后任意时刻，独立提交
+         └─ 本段已含 N0 的 /files 区间读与 N0b 闸门（原 U1 调研项已由 C-1 定案）
+§10 近项顺序：**N0b（安全闸门）→ N0（/files 区间读）→ N2（grep 流式）**；
+它们可插在 2.5a 之后任意时刻，各自独立提交；完成后再进 2.5b 就是“把已验证的逻辑搬家”。
 ```
 
 `3.5a` 与 `2.5b` 互不依赖（不同核），若有并行算力可交错，但**写侧搬家必须在 envd 只读接入之后**，否则同时改两套实现体会撞车。
@@ -474,6 +531,8 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 同一棵 fixture 树（≥ 9 类样本：CRLF / UTF-8 BOM / UTF-16 / 无末换行 / 含 NUL / 超长行 / 空文件 / 符号链接 / 越界路径），对每个工具分别跑 local 与 envd，比较**归一化后的结果结构**（content + metadata 同名键），差异必须命中"已登记差异表"，否则失败。登记表随阶段推进单调收缩。
 
+> 换用 `/files` 后这些样本**仍然必要**，但用途变了：CRLF/BOM/UTF-16 不再牵涉远端 `sed` 的行语义（窗口由 HTTP 给字节，解码全在核里），它们现在验的是**整读解码一致性**；另新增两类必测：jail 内越权文件（§3.5 闸门）与 416 越尾错误映射。
+
 ### 7.3 等价性回归（现有资产复用）
 
 - `mutatecore` 纯函数已有充分单测 → seam 后**继续直接测纯函数**，不因接口化而削弱；
@@ -499,11 +558,12 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 | R1 | **抽象本身成为第二套词汇**（有人往 `Access` 里塞 tier/权限） | 接口评审缺失 | §4.1 纪律 1 写进验收门；`Access` 参数不出现 tool name/tier 类型 | 低 |
 | R2 | **核内长出一堆 `if cap.X` 分支**，比今天的两套实现更难读 | 降级判断散落 | §7.4 检查 3（能力判断单点）+ §4.3 矩阵作为唯一权威 | 中 |
 | R3 | 搬家过程中**悄悄改语义**（尤其 `WriteAtomic` 的 rename 时序、`backup.go` 的落点） | 人手替换 os 调用 | 2.5a/3.5a 要求**现有单测一字不改通过**；改动只允许"搬家 + 传参" | 低 |
-| R4 | envd 侧改造后**性能变差**（多一次 spawn 取窗口，往返成本高于一次 `cat`） | R2/R3 窗口配方用于小文件 | 核侧规则：**小文件一律整读**（阈值由 `Capability.MaxReadBytes` + 核预算决定），窗口只在大文件生效；上线前实测每类样本往返次数 | 中 |
-| R5 | `/files` 路线**不可用**（签名算不出，或它绕过我们的 jail） | U1 调研结果 | 方案不依赖它：§5.2 R2/R3 + §5.3 全部可独立成立 | 低 |
+| R4 | envd 侧改造后**性能变差**（往返次数上升而字节并未减少） | 小文件走 `/files` Range 仍是一次 HTTP 往返；回落路径多一次 spawn | 核侧规则：**小文件一律整读**（阈值由 `Capability.MaxReadBytes` + 核预算定）；上线前实测“(往返数, 抓取字节数)”对比基线（§7.4 可扩展为第 4 检查） | 中 |
+| R5 | `/files` 在**某些部署**不可用（未装令牌 / 前置反代剥 `X-Access-Token` 头 / 版本无该路由 / mTLS 环境） | 非本机部署差异（本轮只证了一台） | 探测 + **显式降级**（U6）：`RandomRead=false`、`MaxWriteBytes=1<<20`，走 `process` 通道；**绝不静默降级** | 低 |
 | R6 | 真机活测不可复现/凭据缺失导致验收卡住 | 目标机变更 | 桩套件（fake envd）在 CI 必跑，真机 gated；沿用 `scripts/remotetools_e2e.go` 既有模式 | 中 |
 | R7 | **与他人未提交改动冲突**（当前工作区有 35+ 个未提交文件，含 `chat_remote_*`） | 并行会话 | 本方案只碰 `toolcore/*`、`remotetools/envd_*`、`scripts/`；**不碰** `cmd/aicli/commands/*`、`gateway/console/*`、`docs/user-guide/aicli-remote-tools.md` | 低 |
 | R8 | 过渡开关（2.5b 的双路径）忘记删除 → **第三套实现** | 3.5b 未收口 | 2.5b 明确"此开关在 3.5b 删除"，并加入 §7.4 检查 | 高（必须盯） |
+| **R9** | **`/files` 以 root 身份读，造成 `view` 与 `shell` 的权限非对称（相对提权）** | 已实测触发（§3.5：`/etc/shadow` → 200） | **U7 闸门（必做）+ 纪律 4（策略不下沉）**；conformance 新增“jail 内越权文件”用例；日志只记方法/状态/长度 | 中（闸门上线即降为低） |
 
 ## 9. 成本汇总
 
@@ -514,7 +574,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 | Phase 3.5a | 3–4 天 | 13 | 写核可插 I/O |
 | Phase 3.5b | 4–5 天 | 18 | **漂移终结，删除 ≥600 行 envd 自实现** |
 | Phase 4.5 | 3–5 天 | 23 | 执行面统一、8 MiB 静默丢弃修正、可选 `/files` |
-| §10 近项 | 1.5–2.5 天 | — | 不等 seam 的即时收益 |
+| §10 近项（N0b 安全闸门 + N0 `/files` 区间读 + N2 grep 流式） | 2–3 天 | — | 不等 seam 的即时收益，**且含一个安全项** |
 
 对照：`tool-layer-abstraction-design-20261022.md` 成本表（行 2275–2276）Phase 2 与 Phase 3 各 3–5 天已完成。**seam 的总成本约等于把 Phase 2+3 再做一遍的 2 倍**，收益是把"远程适配"从人肉对齐变成结构保证——这与我们已经付出的两次漂移修复（`36caf76f`、`b65918eb`）相比，仍是正收益，因为那类修复会**持续发生**。
 
@@ -522,15 +582,19 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 | # | 项 | 成本 | 落点 | seam 后归属 |
 |---|---|---|---|---|
-| N1 | `view` 远端窗口（§5.2 R2/R3 + 9 类样本对拍） | 0.5–1 天 | `remotetools/envd_tools.go` | 迁入 `envdAccess.RandomRead` |
+| **N0** | **`envdAccess.Read` 走 `GET /files` 单区间 `Range`**（C-1 已证实可行，取代原 N1 的 `sed` 窗口） | 1–1.5 天 | 新 `envdclient/files_http.go` + `remotetools/envd_tools.go` | 直接就是 `envdAccess.Read/RandomRead` |
+| **N0b** | **可读性闸门**（§3.5-2：`process.Start` 跑 `test -r`，按目录缓存）——**安全项，优先级高于 N0** | 0.5–1 天 | 核侧（进 `Access` 前） | `Access` 前置闸门，不下沉 |
+| N1 | ~~`view` 远端窗口（`sed`/`dd` 造窗）~~ | — | — | **作废**：降为 R0 不可用时的回落，不单独立项 |
 | N2 | `grep` 流式消费 + 上限早停（`Run`→`Start`+`Recv`，达上限 `SendSignal`） | 0.5 天 | `envdGrep`（`envd_tools.go:227+`） | 迁入 `envdAccess` 的 `ExecStreamer` |
-| N3 | `/files` 签名调研（§5.4 三问，只读探测） | 0.5–1 天 | 无代码，产出记录进本文 §11 U1 | 决定 `envdAccess.Read/Write` 是否升级 |
+| ~~N3~~ | `/files` 签名调研 | — | — | **已完成**（本轮 C-1，结论见 §5.4） |
 
-三项各自独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。
+执行顺序：**N0b → N0 → N2**（先把安全门堵住，再拿性能）。各项独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。
 
 ## 11. 未决问题（需要拍板，本文不替决策）
 
-- **U1 `/files` 签名可否本地计算？** 若可，是否引入原生读写通道；若它绕过 `--allowed-roots` 语义，**默认不启用**。→ N3 调研后定。
+- ~~**U1 `/files` 签名可否本地计算？**~~ → **已关闭**（§5.4）：不需签名，header token 即可；无 jail，因此启用方式改为“核侧三道先行闸门”。
+- **U6（已定）`/files` 通道的启停与回落策略**：采用**默认启用 + 探测降级**——启动时用一个越界路径探测（预期 404/401）确立通道存在，后续单次请求失败即在该次降级到 `process` 并记录原因；**不做隐式静默降级**（否则错误会被掉包成“文件为空”一类误读）。理由：开关默认关 = 继承已知次优路径；探测失败就关掉整个通道 = 把偶发 5xx 放大成能力丧失。
+- **U7（已定）是否加“目标用户可读性闸门”**：**加**。`/files` 以 envd 进程身份（实测 root）读文件，与 `shell`/`process` 通道（以目标用户身份执行）存在**权限非对称 = 相对提权**；不闸门则 `view` 能看到 `shell` 看不到的文件（§3.5）。做法：`process.Start(["/usr/bin/test","-r",<已解析路径>])` 让**内核自己回答**，绝不在 Go 里重实现 POSIX 位/ACL/组判定；仅在 mode 显示可能拒时探测，并按目录缓存。
 - **U2 是否接受 2.5b 的过渡双路径（一版）？** 不接受则 2.5b/3.5b 合并为一次大改（回滚粒度变粗，R8 风险消失但风险集中）。
 - **U3 呈现层增量（progress notification 贯通到 manager/TUI）是否立项？** 与 envd 无关，独立评审；不立项则本文的"增量"只到计算/传输层为止。
 - **U4 `grep` 参数面缺口（§8.9：`glob`/`type`/`-i`/多 patterns 的远端方言映射）是否并入 2.5b？** 同一段代码，建议并入，代价 +1–2 天。
@@ -540,7 +604,10 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 1. 在 `tool-layer-abstraction-design-20261022.md` 的 §16.1 风险 3 与 Phase 2/3 处加一行交叉引用（指向本文），把"远程后续通过接口适配"这句占位**兑现成接口定义**。
 2. 在 `aicli-envd-bridge-merge-plan-20261028.md` §8.9 后追加一节，把"envd 文件面独立实现"标记为**过渡态，偿还计划见本文**。
-3. 立 `backend/scripts/` 的三个 §7.4 检查（可先只跑检查 1 的"计数下降"报表，不作硬门）。
+3. 立 `backend/scripts/` 的三个 §7.4 检查（可先只跑检查 1 的“计数下降”报表，不作硬门）。
+4. 在 `docs/architecture/envd-capabilities.md` 补一节 **`GET/POST /files`（HTTP，非 Connect-RPC）**，记录本轮实测：header token 即可、`Accept-Ranges`/206/416、无 ETag、`Last-Modified` 为请求时间、0.2.11 无 gzip、`POST` 的 `EnsureDirs` 自动建父目录、**无 jail 且以 envd 进程身份读**。它今天只列了 RPC 与 `/health`、`/metrics`，**遗漏了这个最重要的文件通道**。
+5. 顺手更正 `docs/architecture/envd-source-and-rebuild.md:133` 的 clone 地址：本轮实测 `e2b-dev/infra` 与 `e2b-dev/runtime` 是**同一代码库的跳转**（API 响应里 `html_url` 指向 `e2b-dev/runtime`），两个都可用，文档建议写 `runtime` 并注一个重定向备注，避免后人怀疑找错仓。
+6. **凭据卫生（建议立即做）**：本轮为跑 spike 使用了 sudo 口令与 envd 访问令牌，两者均未回显、未落盘、远端临时产物已清零，但口令已进入会话记录——建议**换发 envd 令牌**（改 `/etc/envd/envd.env` → `systemctl restart envd` → `/init` 重装，步骤见 `docs/aicli/envd-selfhost-deploy.md` §令牌引导）并更换 sudo 口令。
 
 ---
 
@@ -563,6 +630,18 @@ rg -n 'DefaultMaxBufferedOutput|func \(c \*Client\) (Start|Run|SendSignal)' inte
 
 # 3.3 /files 探测
 curl -sk "https://<target>:49983/files?path=/etc/hostname&username=<user>" -o - -w "`nCODE=%{http_code}"
+
+# 3.3.1 C-1 spike（只读；令牌建议只在目标机原地取用，避免外流）
+T='<envd 访问令牌>'                       # 或：sudo cat /etc/envd/envd.env | sed -nE 's/^ENVD_ACCESS_TOKEN=//p'
+B="https://127.0.0.1:49983/files"; F=/home/n9e/.bashrc; U=n9e
+curl -sk -D - -H "X-Access-Token: $T" "$B?path=$F&username=$U" -o /dev/null   # 期望 200 + accept-ranges: bytes
+curl -sk -D - -H "X-Access-Token: $T" -H 'Range: bytes=0-9' "$B?path=$F&username=$U" | head -4   # 期望 206 + content-range: bytes 0-9/3814
+#   区间精确性对拍：把 body 与 `head -c 10 $F` 做 cmp -s（本轮已 EXACT-MATCH）
+#   越尾：-H 'Range: bytes=99999-100100' → 期望 416 + content-range: bytes */N
+#   多区间：-H 'Range: bytes=0-9,20-29' → 期望 multipart/byteranges（客户端只用单区间）
+#   条件读陷阱：-H 'If-Modified-Since: <未来时间>' 得 304，但连发两次对比 last-modified 会看到它是请求时间
+#   大文件成本：10MiB 文件取 1KiB 区间，核对 size_download == 1024
+#   安全非对称：GET path=/etc/shadow（200）与同用户本地 `head -c 1 /etc/shadow`（Permission denied）对比
 
 # 4.4 现存唯一后端分支（seam 的落点）
 # internal/remotetools/server.go:66-90  “differ only in where files and processes actually live”
