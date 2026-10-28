@@ -32,6 +32,11 @@ MCP stdio ↔ envd Connect-RPC 桥接进程。**这是必要的，不是可选�
 |---|---|
 | `main.go` | 参数解析、MCP JSON-RPC 循环、profile 分级、**路径 jail（`resolve`）**、工具清单 |
 | `tools.go` | 10 个工具实现 + TLS 加载 + 错误翻译 |
+| `watch_tools.go` | `watch_dir` 有界窗口目录监控（拥有 WatchDir 流一次调用，窗口结束/达上限即关闭） |
+| `jail.go` | 目标侧 symlink 解析（`resolveScript`）与路径围栏（`resolvePath` / `resolveMutationPath`） |
+| `audit.go` | opt-in JSONL 元数据审计（不记录参数与结果内容） |
+| `pty_tools.go` | 交互式 PTY 会话工具（ops 档） |
+| `manager_hermetic_test.go` | 内置构建 bridge + 桩 envd 的 manager 级 e2e |
 
 ### 1.3 修改：`internal/remotetargets`（2 个文件）
 
@@ -121,11 +126,11 @@ sh -c 'set -e; d=$(dirname -- "$1"); [ -d "$d" ] || mkdir -p -- "$d"; printf "%s
 
 | profile | 暴露工具 |
 |---|---|
-| `readonly` | view, ls, glob, grep, host_metrics |
+| `readonly` | view, ls, glob, grep, host_metrics, watch_dir |
 | `standard` | + write, mkdir, remove, move |
-| `ops` | + shell |
+| `ops` | + shell, pty_start, pty_write, pty_read, pty_resize, pty_close |
 
-`shell` 只在 `ops`，因为 envd 侧**没有任何命令过滤**。
+`watch_dir` 归 readonly 及以上（监控是只读语义）。`shell` 只在 `ops`，因为 envd 侧**没有任何命令过滤**。`watch_dir` / `pty_*` 不计入“10 个工具”的旧口径（那是 `tools.go` 内的工具数），`toolDefs` 实际工具面随 profile 累积。
 
 ---
 
@@ -234,19 +239,19 @@ shell "id -un; pwd"           → 真实用户与工作目录
 
 `WatchEvent` 相应暴露 `Start` / `Name` / `Type`，并保留 `Raw`；`Name` 是相对被监听目录的 basename。目前只观测到 `EVENT_TYPE_CREATE`，其余标签仍以 `Raw` 为准。
 
-**暂未暴露 `watch` 工具**：事件流是长连接，不适合一次性工具调用；原 P2 的「接入知识层重索引」另行设计。
+**已暴露 `watch_dir` 工具（2026-10-28）**：`watch_dir` 拥有 WatchDir 流一次调用——`wait_ms`（默认 5000 / 上限 30000）窗口内累计至多 `max_events`（默认 50 / 上限 500）个事件后关闭流，避免长连接残留 goroutine；窗口内无事件返回「no change events」而非报错。这把长连接收敛成一次性工具调用，适合 Agent 轮询式观察目录变更；连续监控需重复调用。`watch_dir` 已纳入 `readonly` / `standard` / `ops`，路径同样经 `resolvePath` 围栏。原 P2「接入知识层重索引」仍另行设计。
 
 ### 4.3 写入上限 1 MiB
 
 受 argv 限制。超限明确报错并建议改用 `shell`。若需大文件写入，正确解法是启用 TLS/HTTP2 后走 stdin。
 
-### 4.4 没有整模块回归
+### 4.4 整模块回归
 
-见 3.1 说明。合入后应在本机（go1.26 + 有网络）跑一次 `go test ./...`。
+2026-10-27 实施时本机无网络、桩 yaml 不含运行时行为，只跑了 envd 相关单测。2026-10-28 复核已补 `TestManagerHermeticEnvD`（内置构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），CI 的 envd gate 同步运行 bridge 包测试，前缀形式已在真实 manager 下验证（见 §8.2 / §4.5）。
 
-### 4.5 未做：工具名前缀的实际注册
+### 4.5 工具名前缀已验证注册
 
-`--tool-prefix` 已透传，桥接会在 `tools/list` 里返回带前缀的名字。但**未验证 `tools.Manager` 是否接受**这一前缀形式（需要整模块运行）。当前默认不传前缀（空字符串）。
+`--tool-prefix` 透传到桥接，`tools/list` 返回 `prefix__name`（双下划线，与 `remotetools` 一致）。**已由 `TestManagerHermeticEnvD` 端到端验证** `tools.Manager` 接受该前缀形式：配置 `remote_envd` 前缀后，暴露的全部工具名以 `remote_envd__` 开头，`host_metrics` / `shell` 均按前缀名成功调用。当前默认不传前缀（空字符串），裸名与带前缀名都接受。
 
 ---
 
@@ -306,9 +311,10 @@ aicli-envd-bridge \
 - [x] 4 个 remotetargets envd 测试通过
 - [x] 端到端真机验证通过
 - [x] 路径穿越与越界 cwd 均被拒
-- [ ] **待办**：本机 go1.26 环境跑 `go test ./...` 全量回归
-- [ ] **待办**：TLS/HTTP2 路径真机验证（解锁 stdin/signal/pty）
-- [ ] **待办**：确认 `tools.Manager` 对 prefixed tool 名的处理
+- [x] 本机 `go test ./...` 相关包回归（`envdclient` / `remotetargets` / `aicli-envd-bridge` / `remotetools` 全绿；受内存/网络限制未跑无关大包）
+- [x] TLS/HTTP2 路径真机验证（解锁 stdin/signal/pty；`TestManagerHermeticEnvD` 用 ops profile 验证 shell 策略）
+- [x] 确认 `tools.Manager` 接受 prefixed tool 名（`TestManagerHermeticEnvD` 端到端验证）
+- [x] `watch_dir` 工具已暴露（有界窗口目录监控，纳入 readonly/standard/ops）
 
 ---
 
@@ -359,6 +365,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **TLS 与 ca_file（已实机验证）**：本地补丁为 envd 增加 `-tls-cert` / `-tls-key`，Go 的 `ListenAndServeTLS` 自动协商 HTTP/2；spec 新增 `?ca_file=`，`remote.tls.caFile` 存在时 registry 生成 `https://` 地址并透传 `--ca-file`。
 - **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、进程控制 unary 请求体（signal/stdin/pty/size）、PTY 输出解码与启动配置、请求参数校验、bridge 的调用超时用例。
 - **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
+- **`watch_dir` 工具暴露（2026-10-28）**：`watch_tools.go` 新增 `toolWatchDir`，把 WatchDir 长连接收敛成一次性有界窗口调用——`wait_ms`（默认 5000 / 上限 30000）内累计至多 `max_events`（默认 50 / 上限 500）个事件后关闭流，避免残留 goroutine；无事件返回「no change events」而非报错，超时按 bounded window 处理。路径经 `resolvePath` 围栏，纳入 `readonly` / `standard` / `ops`（仅 readonly 及以上，监控为只读语义）。新增 5 个测试（事件 / max_events / 超时 / 流关闭 / 路径围栏逃逸拒绝）；`TestProfileAllows` 工具计数相应更新为 6 / 10 / 16。
 
 ### 8.3 保留的限制
 
@@ -367,7 +374,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **无法做 envd 版本校验**：envd 没有版本端点；
 - **TLS / HTTP/2 已在真实 envd 上验证**（自签证书 + SAN；控制类 RPC 本身不需要 HTTP/2）；仅 `StreamInput`（client-streaming）仍未暴露；
 - **写入硬上限 1 MiB**（承接 §4.3）；
-- **WatchDir 仅确认 CREATE 一类事件**：结构已确认（§4.2），其余事件标签未逐一实测；未暴露 `watch` 工具。
+- **WatchDir 仅确认 CREATE 一类事件**：结构已确认（§4.2），其余事件标签未逐一实测；`watch_dir` 工具已暴露（§4.2 修正），以有界窗口一次性调用呈现事件流。
 
 ---
 
@@ -383,7 +390,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
 - TLS：自签证书 SAN 覆盖 `127.0.0.1` / `172.18.3.238` / `localhost`，unit 以 `-tls-cert/-tls-key` 启动；令牌引导脚本改用 `https://127.0.0.1:49983/init --cacert`。
 - live 集成测试 **10/10 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUser / **StdinRoundTrip / SignalTermination / PTYRoundTrip** / WatchDir）。
-- 交互会话冒烟：bridge 暴露 **15** 个工具（10 + 5 个 pty）；`pty_start` → `pty_write` → `pty_read`（输出 `it-works`）→ `pty_resize` → `pty_close` 全部 PASS。
+- 交互会话冒烟（2026-10-28 初次，`watch_dir` 尚未加入）：bridge 暴露 **15** 个工具（10 + 5 个 pty）；`pty_start` → `pty_write` → `pty_read`（输出 `it-works`）→ `pty_resize` → `pty_close` 全部 PASS。加入 `watch_dir` 后 readonly/standard/ops 工具面分别为 6 / 10 / 16（见 §2.7）。
 - 命令策略 live 冒烟（TLS）：`echo policy-ok` 放行；`id` 返回 `policy:not-allowed`；`echo secret` 被 `deniedCommands` 拦截；`echo ok; id` 返回 `policy:metachars`；允许 `sh` 后 `pty_start` / `pty_read` 返回 `policy-pty`。
 - symlink jail live 冒烟（TLS）：`view` workspace 内外链 → `outside the workspace`；workspace 内链 → `jail-ok`；`write` 经外链 → 拒绝且目标文件未创建；`remove` 外链本身成功，`/tmp` 目标仍在；`remove(".")` → `protected root`；删除含外链子目录的 workspace 目录也未影响 `/tmp` 文件。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
