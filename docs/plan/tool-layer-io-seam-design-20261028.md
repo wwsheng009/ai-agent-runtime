@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**待评审（v2）**——v1 为结构草案；v2 已把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**，并新增 §3.5 安全发现（v1 中关于 `/files` 的一处推断错已被实测推翻，见 §3.2 修正记录）
+- 状态：**待评审（v3）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）与一个无关配置缺陷（`--max-bytes-per-call` 对读工具无效）
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -32,7 +32,9 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 呈现层 | MCP 一次调用一个结果 | 真"边跑边显示"需 progress notification 贯通，**是另一条工程线**，与 envd 无关 |
 | **`/files`（已 spike）** | header token 即可（不需签名）；200/206/416/400/404 全部实测；`POST` 无 argv 上限 | ✅ **`Access.Read/Write` 的首选通道**；但 `Last-Modified` 是请求时间、无 ETag、gzip 在 0.2.11 不生效（**条件读不可用**），且**无 jail 且以 root 身份读**（§3.5） |
 
-推荐顺序：**先做 §10 近项（N0 已因 spike 提前成立）→ 按 §6 分五段落 seam**；每段独立可回滚。**另：§3.5 的可读性闸门是安全项，优先级高于性能项。**
+推荐顺序：**§10 近项（N0b+N0 已交付）→ N2 → 写侧 → 再按 §6 分五段落 seam**；每段独立可回滚。**§3.5 的可读性闸门是安全项，优先级高于性能项——它与通道同批交付。**
+
+**进度的事实修正（v2 写下的顺序有误）**：N0b 不能先于 N0 交——单独先交闸门会留下一段**没有消费者的死代码**（今天 `cat` 已受内核约束，无提权可堵），先交通道则先上提权。因此两者已**同批落地**（`a8ec5aaf`，真机差分见 §13）。
 
 ---
 
@@ -582,18 +584,18 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 
 | # | 项 | 成本 | 落点 | seam 后归属 |
 |---|---|---|---|---|
-| **N0** | **`envdAccess.Read` 走 `GET /files` 单区间 `Range`**（C-1 已证实可行，取代原 N1 的 `sed` 窗口） | 1–1.5 天 | 新 `envdclient/files_http.go` + `remotetools/envd_tools.go` | 直接就是 `envdAccess.Read/RandomRead` |
-| **N0b** | **可读性闸门**（§3.5-2：`process.Start` 跑 `test -r`，按目录缓存）——**安全项，优先级高于 N0** | 0.5–1 天 | 核侧（进 `Access` 前） | `Access` 前置闸门，不下沉 |
+| ~~N0b~~ | ✅ **已完成**（`a8ec5aaf`）：可读性闸门——`test -r "$1"` 由目标内核回答，仅对非 world-readable 探测 | — | 核侧 `refuseIfTargetCannotRead`（`envd_backend.go`） | `Access` 前置闸门，**不下沉**（纪律 4） |
+| ~~N0~~ | ✅ **已完成**（`a8ec5aaf`）：`view` 走 `GET /files` 单区间 `Range` | — | `envdclient/files.go` + `readLimited` | 可直接作为 `envdAccess.Read/RandomRead` 的实现体 |
 | N1 | ~~`view` 远端窗口（`sed`/`dd` 造窗）~~ | — | — | **作废**：降为 R0 不可用时的回落，不单独立项 |
 | N2 | `grep` 流式消费 + 上限早停（`Run`→`Start`+`Recv`，达上限 `SendSignal`） | 0.5 天 | `envdGrep`（`envd_tools.go:227+`） | 迁入 `envdAccess` 的 `ExecStreamer` |
 | ~~N3~~ | `/files` 签名调研 | — | — | **已完成**（本轮 C-1，结论见 §5.4） |
 
-执行顺序：**N0b → N0 → N2**（先把安全门堵住，再拿性能）。各项独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。
+执行顺序：~~N0b → N0~~（**均已完成，见 §13**）→ **N2（`grep` 流式 + 早停，下一个）** → 写侧 `POST /files`（必须与 `missing_parent` 前置检查同批）。各项独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。本轮已验证：`readLimited`/`refuseIfTargetCannotRead` 就是 `envdAccess.Read` + 闸门的形状。
 
 ## 11. 未决问题（需要拍板，本文不替决策）
 
 - ~~**U1 `/files` 签名可否本地计算？**~~ → **已关闭**（§5.4）：不需签名，header token 即可；无 jail，因此启用方式改为“核侧三道先行闸门”。
-- **U6（已定）`/files` 通道的启停与回落策略**：采用**默认启用 + 探测降级**——启动时用一个越界路径探测（预期 404/401）确立通道存在，后续单次请求失败即在该次降级到 `process` 并记录原因；**不做隐式静默降级**（否则错误会被掉包成“文件为空”一类误读）。理由：开关默认关 = 继承已知次优路径；探测失败就关掉整个通道 = 把偶发 5xx 放大成能力丧失。
+- **U6（已定 + 已落地 `a8ec5aaf`）`/files` 通道的启停与回落策略**：实现为“默认启用 + 探测一次缓存 + 显式降级带原因”，并额外交付了运维 kill switch `--no-envd-files` / `EnvDConfig.FilesChannelDisabled`（零值为启用，旧配置不会意外关闭）。降级不静默：失败原因进 `read_channel_note`。实际搬运字节的通道以 `metadata.read_channel=files|process` 公布，沿用 `envdGrep` 公布引擎的同一条纪律。
 - **U7（已定）是否加“目标用户可读性闸门”**：**加**。`/files` 以 envd 进程身份（实测 root）读文件，与 `shell`/`process` 通道（以目标用户身份执行）存在**权限非对称 = 相对提权**；不闸门则 `view` 能看到 `shell` 看不到的文件（§3.5）。做法：`process.Start(["/usr/bin/test","-r",<已解析路径>])` 让**内核自己回答**，绝不在 Go 里重实现 POSIX 位/ACL/组判定；仅在 mode 显示可能拒时探测，并按目录缓存。
 - **U2 是否接受 2.5b 的过渡双路径（一版）？** 不接受则 2.5b/3.5b 合并为一次大改（回滚粒度变粗，R8 风险消失但风险集中）。
 - **U3 呈现层增量（progress notification 贯通到 manager/TUI）是否立项？** 与 envd 无关，独立评审；不立项则本文的"增量"只到计算/传输层为止。
@@ -608,6 +610,35 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 4. 在 `docs/architecture/envd-capabilities.md` 补一节 **`GET/POST /files`（HTTP，非 Connect-RPC）**，记录本轮实测：header token 即可、`Accept-Ranges`/206/416、无 ETag、`Last-Modified` 为请求时间、0.2.11 无 gzip、`POST` 的 `EnsureDirs` 自动建父目录、**无 jail 且以 envd 进程身份读**。它今天只列了 RPC 与 `/health`、`/metrics`，**遗漏了这个最重要的文件通道**。
 5. 顺手更正 `docs/architecture/envd-source-and-rebuild.md:133` 的 clone 地址：本轮实测 `e2b-dev/infra` 与 `e2b-dev/runtime` 是**同一代码库的跳转**（API 响应里 `html_url` 指向 `e2b-dev/runtime`），两个都可用，文档建议写 `runtime` 并注一个重定向备注，避免后人怀疑找错仓。
 6. **凭据卫生（建议立即做）**：本轮为跑 spike 使用了 sudo 口令与 envd 访问令牌，两者均未回显、未落盘、远端临时产物已清零，但口令已进入会话记录——建议**换发 envd 令牌**（改 `/etc/envd/envd.env` → `systemctl restart envd` → `/init` 重装，步骤见 `docs/aicli/envd-selfhost-deploy.md` §令牌引导）并更换 sudo 口令。
+
+---
+
+## 13. 落地记录（2026-10-28 本轮：`a8ec5aaf`）
+
+**交付**：`envdclient/files.go`（`/files` 通道 + 探测 + `FilesError` 分类）、`envdView` 改为“jail → Stat → 尺寸/目录门 → 可读性闸门 → readLimited（优先 `/files`，不可用则 `/bin/cat`）”、`--no-envd-files` kill switch、`scripts/envd_live_verify.go` 真机差分驱动。
+
+**关键设计执行细节**（与本文原稿不同或原稿未预见）：
+
+1. **N0b 与 N0 必须同批交付**。原计划把闸门排在通道之前，但单独先交闸门会留下一段**没有消费者的死代码**（今天 `cat` 已受内核约束，没有提权可堵）；而先交通道就是先上提权。所以两者一次提交，测试断言“被闸门拒的路径**从不出现在 `/files` 请求里**”。
+2. **文件级失败不重试到另一条通道**：JSON 404 与 mux 404 必须**分开编码**（`FilesNotFound` vs `FilesChannelMissing`），否则“此文件不存在”会被当成“端点不可用”而去走 `cat`，把真实错误裹成意外结果。
+3. **探测必须缓存**：一次后端实例一次，否则每次读都先交一个失败请求的费。
+4. **测试用精确计数器而非总数**：jail 第二阶段本来就会 spawn 一次 `resolve`，用 `processCalls` 断言“没有起进程”会得出错误结论——这一点在开发中被测试当场抓到，改为 `catCalls` / `readableChecks` 两个具名计数器。
+
+**真机差分（envd 0.2.11，二进制交叉编译到目标机原地跑，TLS 用真 CA 校验，令牌与证书未离开目标机，产物已清零）**：
+
+```
+PASS native-channel run: 13 tools advertised under prefix "remote_live"
+PASS native read: /home/n9e/.ssh/authorized_keys (213 bytes)      # 0600 自有：探测放行 + /files 服务
+PASS permission gate: permission denied reading /etc/shadow: user n9e cannot open it (-rw-r----- root:shadow; cannot open /etc/shadow)
+PASS channel parity: 213 bytes identical through /files and through /bin/cat
+ALL CHECKS PASSED
+```
+
+第三条把 `/etc` 临时参加 `--allowed-roots`，**目的是绕过 jail 单独测闸门**：证明“守护进程能读而目标用户不能读”的文件会被拒且从未取用。13 个工具与 §3.4 档位表一致（standard 档未因本改动变化）。
+
+**本轮发现的一个无关缺陷（待你定是否修）**：`--max-bytes-per-call N` 对读工具**静默无效**。`main.go:286` 只写 `Limits.MaxBytesPerCall`，而 `DefaultConfig`（`config.go:300`）已将 `CaptureLimit` 填为非零，于是 `config.go:450` 的 `if CaptureLimit <= 0` 永不触发，而 `envdBackend.viewLimit()` 优先读 `CaptureLimit`。证据：本提交的尺寸门测试必须显式设 `CaptureLimit` 才生效（已在测试注释里记下这个坑）。建议修法：显式传入该 flag 时同时覆盖 `CaptureLimit`（或在 normalize 里区分“用户显式设置”与“默认值”）——因为它改的是一个已文档化 flag 的含义，且不局限于 envd 分支，所以没放进本提交。该缺陷影响 ssh/http 后端的 `Limits` 解读，**不属于 seam 范围，但会误导任何调尺寸的人**。
+
+**仍未关掉 §8.9 的那个缺口**：envd 的 `view` 仍无 `offset`/`limit` 行窗口（描述里还自认“no line windowing on this surface”）。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”，成本明显变小；写侧 `POST /files`（破 1 MiB argv）与 `edit`/`apply_patch` 的读仍走 `cat`，应与 `missing_parent` 前置检查同批做。
 
 ---
 
