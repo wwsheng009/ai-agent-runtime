@@ -624,6 +624,8 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `dd5b3e83` | §13.7 失败分类修复的生效面与投影（197 失败行只读复算） | 文档 |
 | `047b65d9` | §13.4-2 命名决策收口：`request_error` 不采纳 | 文档 |
 | `216e730e` | TaskSpec 持久化解码期路由告警 `route_warnings`（完整性审计收口，见 §13.5） | §13.5 |
+| `7d3a3504` | TaskSpec 完整性审计收口（§13.1/13.3/13.5/13.7 同步） | 文档 |
+| `ab6b4b71` | §13.8 provider prompt-cache 前缀对照实验闭环（§13.4-2/§6.4） | 文档 |
 
 ### 13.2 逐条对照（§6）
 
