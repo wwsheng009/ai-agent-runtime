@@ -503,7 +503,7 @@ backend/internal/cacheanalytics/*
 - [x] 剩余预算不足时不盲目重试，事件明确记录跳过原因；（单测：`retry_skipped_deadline_budget` / TestSubagentRetryBudgetAvailable|BudgetMS；`retry_skipped` 字段贯通终态事件与 hook）
 - [x] `max_attempts=2` 的报表能区分“上限为 2”和“实际执行 2 次”；（`subagent.attempt.started/finished` 成对事件 + usage_subagents 的 attempt/max_attempts 收敛）
 - [x] batch timeout、task timeout、provider timeout 的 `cancel_source` 可区分；（provider 档 E2E：TestSubagentAttemptCancelSourceAndRetrySkipOnProviderTimeout；task/batch/parent 档单测：TestSubagentCancelSource）
-- [ ] provider response-header guard 不会静默吞掉 task deadline 之前的 retry budget。（待验证：需 provider 头超时专项用例；本轮未改 provider 层语义）
+- [x] provider response-header guard 不会静默吞掉 task deadline 之前的 retry budget。（`4fa3ddc5`：真实 provider + 挂起上游两档 E2E——① guard 快速失败后 attempt 2 仍在 0.34s 内执行并成功（`retryable=true`、`retry_skipped` 空、`cancel_source` 空、`remaining_ms` 仍 >10s，远小于 30s 任务 deadline）；② 上游持续挂起时显式 `max_attempts_reached` 收口、不误报 `task_timeout`；provider 侧机制由 llm 包 streak/transport-budget 用例固定。连接清理观察见 §13.5）
 
 ### 8.2 Usage/partial output
 
@@ -611,6 +611,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `2c2f3104` | §8.4 cache 专项：重试前缀复用 + 并发 child key 隔离 | §8.4 |
 | `0bebe723` | task/batch deadline 档 E2E 注入与取消归因 | §8.1 / §6.1-3 |
 | `8c152f4d` | resume cache lineage 窄读法：标签接线 + 三宿主打标 + 分析字段 | §8.4 / §13.6 |
+| `4fa3ddc5` | provider header-guard 专项：任务级重试预算保留 + 显式收口两档 E2E | §8.1 |
 
 ### 13.2 逐条对照（§6）
 
@@ -637,13 +638,14 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - cache 前缀专项（`2c2f3104`，agent 全包 22.338s）：`TestSubagentRetryReusesExpectedCachePrefix`（attempt 1 失败 → attempt 2 同 key/epoch + messages/tools/provider/model 一致 + 命中计入回执）、`TestConcurrentChildrenKeepDistinctCacheKeys`（同目标并发 child 的 key 按 session 隔离且不等于父 key）。
 - deadline 档 E2E（`0bebe723`，agent 全包 23.906s）：`TestTaskDeadlineE2EAttributionAndRetryGate`（1s 任务 deadline → `cancel_source=task_timeout` + `retry_skipped_*` + provider 恰 1 次调用 + 批次 failed）、`TestBatchDeadlineE2EAttribution`（1s 批次 deadline → `cancel_source=batch_deadline` + 批次 timed_out）；两例任务行均为 `failed_with_result`（取消仍保留可回收报告）。
 - resume 标签窄读法（`8c152f4d`）：`TestRunWithSessionCarriesCacheLineageResume`（带标记/未标记/未知值三档接线）、`TestCollectorCarriesCacheLineageMode`（started → 记录 additive 字段）、`TestStampResumeCacheLineageInSession`（有历史打标并回写 / 空会话 / 读失败 / 写失败四档）、`TestRestoreChatPersistenceState_...`（CLI 打标 + 空会话负例）；回归：agent 25.863s / cacheanalytics 2.273s / runtimeapi 94.609s / commands resume 子集 7.214s。
+- header-guard 专项（`4fa3ddc5`，agent 全包 27.635s）：`TestHeaderGuardFailureKeepsTaskRetryBudget`（真实 provider + 挂起上游：attempt 1 guard 失败 → attempt 2 在 0.34s 内成功，预算保留四断言全过）、`TestHeaderGuardExhaustionIsExplicitNotSilent`（持续挂起 → 显式 `max_attempts_reached`、不误报 `task_timeout`，0.49s）。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
 3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
-4. provider response-header guard 的 retry budget 专项用例（未做；依赖 provider 层语义，llm 包并行线程在途）；task/batch deadline 档 E2E 已闭环（`0bebe723`）。
+4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）。
 5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
 
@@ -652,6 +654,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
 - 观察（未修，超出本行动范围）：`subagentbatch.TaskSpec` 仍只往返部分任务字段（`WritePaths`/`ReportSchema`/`HandoffIn`/`AgentType`/`MaxTurns` 与只读过滤审计未入 spec）；这些字段在「幂等 admission replay」窗口内同样不随 durable spec 重建。本轮只补齐 fork 语义必需的 `Context`/`ForkMessages`。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
+- 观察（待 provider 层复核，`4fa3ddc5` 附带证据）：header-guard 超时后，测试装置侧 `httptest.Server.Close` 曾等待 ≥1 分钟仍未结束——服务端 2 条 TCP 连接保持 active，且其 request context 未被取消（首次诊断时 handler 阻塞在 `<-r.Context().Done()` 直至 test 超时，goroutine dump 已留档于该次运行输出）。请 llm 包侧复核：guard 超时时客户端 transport 是否按预期断开/归还连接（涉及 `ResponseHeaderTimeout` 触发路径与 HTTP/2 变体）。测试装置已改用有界睡眠规避该不确定性，不影响 §8.1 结论。
 
 ### 13.6 resume cache lineage 口径（2026-10-28 拍板：窄读法）
 
