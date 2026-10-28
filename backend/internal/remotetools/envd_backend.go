@@ -364,10 +364,15 @@ func (be *envdBackend) workspaceRelative(target string) string {
 // transport, which is the drift this merge exists to remove.
 func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte, createParents bool) (int64, *toolkit.ToolResult) {
 	if strings.IndexByte(string(encoded), 0) >= 0 {
-		return 0, envdErrorResult("cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use a UTF-8 payload or shell for binary content", target)
+		return 0, envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_payload", "file_path": target},
+			"cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one carries content as one argv element. Use a UTF-8 payload or shell for binary content", target)
 	}
 	if len(encoded) > envdMaxWriteBytes {
-		return 0, envdErrorResult("content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
+		return 0, envdFailureMeta("UNSUPPORTED", map[string]interface{}{
+			"failure_class":  "payload_too_large",
+			"file_size":      len(encoded),
+			"max_file_bytes": envdMaxWriteBytes,
+		}, "content is %d bytes, above the %d byte write limit; split the file or use shell", len(encoded), envdMaxWriteBytes)
 	}
 	script := envdWriteScript
 	if createParents {
@@ -378,7 +383,7 @@ func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []
 			if !errorsAsConnectCode(statErr, "not_found") {
 				return 0, envdErrorResult("%s", describeEnvDError(statErr, parent))
 			}
-			return 0, envdErrorResult("%v", newToolError(CodeNotFound, "create the parent directory first",
+			return 0, envdToolError(newToolError(CodeNotFound, "create the parent directory first",
 				"parent directory does not exist: %s", parent))
 		}
 	}
@@ -506,6 +511,44 @@ func envdTextResult(content string) *toolkit.ToolResult {
 func envdErrorResult(format string, args ...interface{}) *toolkit.ToolResult {
 	message := fmt.Sprintf(format, args...)
 	return &toolkit.ToolResult{Success: false, Content: message, Error: errors.New(message)}
+}
+
+// envdFailure is a refusal that also carries the machine-readable fields the
+// local surface publishes (code plus failure_class and its companions).
+//
+// The text stays complete on its own: a model reads it, a caller branches on the
+// metadata. Without these keys an agent that reacts to, say, an ambiguous edit by
+// reading `failure_class` would behave differently per transport, which is the
+// same drift the merge exists to remove.
+func envdFailure(code, format string, args ...interface{}) *toolkit.ToolResult {
+	return envdFailureMeta(code, nil, format, args...)
+}
+
+// envdFailureMeta builds a refusal with caller-supplied metadata.
+func envdFailureMeta(code string, meta map[string]interface{}, format string, args ...interface{}) *toolkit.ToolResult {
+	message := fmt.Sprintf(format, args...)
+	result := &toolkit.ToolResult{Success: false, Content: message, Error: errors.New(message)}
+	if code != "" {
+		if meta == nil {
+			meta = map[string]interface{}{}
+		}
+		meta["error_code"] = code
+	}
+	if len(meta) > 0 {
+		result.Metadata = meta
+	}
+	return result
+}
+
+// envdToolError renders an internal ToolError the way the local surface prints it
+// (`CODE: message (next: ...)`) while also publishing the code as metadata, so a
+// caller can branch on it instead of pattern-matching prose.
+func envdToolError(err error) *toolkit.ToolResult {
+	var toolErr *ToolError
+	if errors.As(err, &toolErr) {
+		return envdFailureMeta(toolErr.Code, nil, "%v", err)
+	}
+	return envdErrorResult("%v", err)
 }
 
 // envdStringParam reads the first non-empty string among the named keys. The

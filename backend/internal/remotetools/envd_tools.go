@@ -286,7 +286,7 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 	}
 	target, resolveErr := be.resolvePath(ctx, raw)
 	if resolveErr != nil {
-		return envdErrorResult("%v", resolveErr), nil
+		return envdToolError(resolveErr), nil
 	}
 	// Created vs Updated is decided from the target, like the local surface does,
 	// so the same tool answers the same way on either transport.

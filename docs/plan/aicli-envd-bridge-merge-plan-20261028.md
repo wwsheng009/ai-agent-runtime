@@ -261,7 +261,9 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 顺带：`write` 不再多花一次 `cat`（此前为回读尺寸而 Stat+写+Stat，现为判定存在性的单次 Stat + 写后 Stat 确认落盘）。
 
-**渲染层仍存差异（未修，需 I/O seam 决策）**：`view` 行号/窗口/折叠元数据、`grep`/`glob` 的完整参数面（`patterns/include/exclude/mode/offset/limit` 等）、结构化错误 `Metadata`（`failure_class`、`occurrence_lines`）。这些不是文案问题，而是能力面问题，属 §3 远期 seam 改造范围。
+**渲染层仍存差异（未修，需 I/O seam 决策）**：`view` 行号/窗口/折叠元数据、`grep`/`glob` 的完整参数面（`patterns/include/exclude/mode/offset/limit` 等）。属能力面差异，需 §3 远期 seam 改造。
+
+**已补：结构化错误 metadata（2026-10-28）**——拒绝不再只有散文。envd 侧按 local 同名键发布 `error_code` 与 `failure_class` 及伴随字段：`ambiguous_edit`（`occurrences`/`occurrence_lines`/`file_path`）、`stale_context`、`missing_file`、`binary_target`、`file_too_large`（`file_size`/`max_file_bytes`）、`payload_too_large`、`binary_payload`、`missing_parent`，以及 jail 的 `PATH_DENIED`（`envdToolError` 从 `ToolError` 取码，文本仍是 `CODE: msg (next: …)` 原样）。非 `ToolError` 不会被编造错误码；辅助函数有独立单测。
 
 - 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
 

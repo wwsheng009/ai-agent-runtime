@@ -64,7 +64,11 @@ func (be *envdBackend) load(ctx context.Context, target string, maxBytes int64) 
 	}
 	size := entry.SizeBytes()
 	if maxBytes > 0 && size > maxBytes {
-		return nil, envdErrorResult("file size %d exceeds limit %d: %s (split the file or raise the configured limit)", size, maxBytes, target)
+		return nil, envdFailureMeta("UNSUPPORTED", map[string]interface{}{
+			"failure_class":  "file_too_large",
+			"file_size":      size,
+			"max_file_bytes": maxBytes,
+		}, "file size %d exceeds limit %d: %s (split the file or raise the configured limit)", size, maxBytes, target)
 	}
 	stdout, stderr, code, err := be.run(ctx, "/bin/cat", []string{target})
 	if err != nil {
@@ -180,10 +184,12 @@ func envdEdit(ctx context.Context, be *envdBackend, params map[string]interface{
 		return refusal, nil
 	}
 	if !state.exists {
-		return envdErrorResult("file not found: %s (verify the path with view or ls)", target), nil
+		return envdFailureMeta("NOT_FOUND", map[string]interface{}{"failure_class": "missing_file", "file_path": target},
+			"file not found: %s (verify the path with view or ls)", target), nil
 	}
 	if mutatecore.LooksBinary(state.raw) {
-		return envdErrorResult("target looks binary: %s (edit only accepts text files)", target), nil
+		return envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_target", "file_path": target},
+			"target looks binary: %s (edit only accepts text files)", target), nil
 	}
 
 	text := state.text
@@ -197,7 +203,10 @@ func envdEdit(ctx context.Context, be *envdBackend, params map[string]interface{
 			diagnostic += fmt.Sprintf("\n最接近的当前内容（第 %d 行附近，可直接据此重建 old_string）:\n%s",
 				startLine, mutatecore.FormatEditClosestLines(snippet, startLine))
 		}
-		return envdErrorResult("%s\nnext_action: %s", diagnostic, mutatecore.StaleEditContextNextAction()), nil
+		return envdFailureMeta("STALE_CONTEXT", map[string]interface{}{
+			"failure_class": "stale_context",
+			"file_path":     target,
+		}, "%s\nnext_action: %s", diagnostic, mutatecore.StaleEditContextNextAction()), nil
 	}
 
 	occurrences := strings.Count(text, matchedOld)
@@ -212,7 +221,12 @@ func envdEdit(ctx context.Context, be *envdBackend, params map[string]interface{
 		}
 	case occurrences > 1:
 		lines := mutatecore.EditOccurrenceLineNumbers(text, matchedOld, mutatecore.EditAmbiguousLineSample)
-		return envdErrorResult("ambiguous edit: old_string 命中 %d 处（行 %s），未做替换。请增加上下文让 old_string 唯一，或显式传 replace_all=true / replacement_count=N。\nnext_action: ambiguous old_string: extend old_string with surrounding context until it is unique, or pass replace_all=true / replacement_count=N explicitly. Do not retry the same ambiguous old_string unchanged.",
+		return envdFailureMeta("INVALID_ARGUMENT", map[string]interface{}{
+			"failure_class":    "ambiguous_edit",
+			"file_path":        target,
+			"occurrences":      occurrences,
+			"occurrence_lines": lines,
+		}, "ambiguous edit: old_string 命中 %d 处（行 %s），未做替换。请增加上下文让 old_string 唯一，或显式传 replace_all=true / replacement_count=N。\nnext_action: ambiguous old_string: extend old_string with surrounding context until it is unique, or pass replace_all=true / replacement_count=N explicitly. Do not retry the same ambiguous old_string unchanged.",
 			occurrences, mutatecore.FormatEditOccurrenceLines(lines, occurrences)), nil
 	}
 
