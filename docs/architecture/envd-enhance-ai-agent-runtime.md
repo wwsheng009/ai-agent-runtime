@@ -257,7 +257,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 
 **注意 `prefixedTool` 机制**：`registry.go` 已用前缀（如 `remote__view`）避免远端工具与本地内建撞名。envd 传输必须沿用同一前缀策略，否则 `tools.Manager` 会静默丢弃远端同名工具。
 
-> **实际落地（2026-10-28）**：envd 传输**没有**按本节做成 `remotetools` 的完整适配器 —— 实际是 `remotetargets` 把 `envd://` 展开为指向本地 `aicli-envd-bridge`（MCP stdio）的条目；Profile、jail、输出上限在 bridge 内实现。**命令授权已复用** `remotetools.CommandPolicy`（`shell` / `pty_start`），audit 仍是 bridge 自己的 opt-in JSONL。详见 `envd-implementation-report.md`。
+> **实际落地（2026-10-28）**：envd 传输**没有**按本节做成 `remotetools` 的完整适配器 —— 实际是 `remotetargets` 把 `envd://` 展开为指向本地 `aicli-envd-bridge`（MCP stdio）的条目；Profile、jail、输出上限在 bridge 内实现。**命令授权已复用** `remotetools.CommandPolicy`（`shell` / `pty_start`），audit 仍是 bridge 自己的 opt-in JSONL。详见 `envd-implementation-report.md`；**收敛计划（2026-10-28 决策）见本文 §10 与 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md`。**
 
 ### 4.4 权限模型对齐
 
@@ -365,6 +365,18 @@ go version -m /usr/bin/envd | head
 - **不做什么**：不替换 `executor.SandboxConfig`，不替换 `audit.go`，不替换 `mesh` 的租约与发现。
 - **最大风险**：忘了 envd 不做路径围栏，导致策略层被绕过。
 - **第一步**：P0 只读打通，用 `curl` 把 filesystem 写端点验清楚再动手写 `write`。
+
+---
+
+## 10. 收敛计划（2026-10-28 决策）
+
+§4.3/§4.4「实际落地」注中记录的偏差（envd 未做成 remotetools 的可复用适配器、外壳由 bridge 重写、edit 三件套缺失）进入**收敛**：
+
+- **形态**：`aicli-remote-tools serve --stdio --backend envd`（本机运行、以 Connect-RPC 为腿；仅 stdio）。`cmd/aicli-envd-bridge` 退役（过渡期可留兼容 shim）。
+- **一份外壳**：MCP 循环 / Profile 档位 / audit / Limits / CommandPolicy / prefix·registry 全部来自 `remotetools`；执行后端两条（local-os / envd）。envd 专属的执行实现（目标侧 realpath jail、spawn `find`/`rg` 的合成、PTY 会话）保留在 envd 后端内——即本节上方 §4.3 表的原始形态。
+- **工具面对齐**：`standard` 档位补 `edit/append_write/apply_patch`（与 ssh/http 同语义）；envd 扩展（mkdir/remove/move、host_metrics/watch_dir、pty_*）按计划文档 §2 档位表归位；档位计数 6/13/19（现为 6/10/16）。
+- **对 §9 的澄清**：第 1 条「给 `remotetools` 加一个 envd 传输适配器」的落地形态确定为「**同一个 server 二进制 + `--backend envd` 执行后端**」——envd 不是第四种监听传输，而是 stdio 载体 + envd 执行后端。
+- **迁移步骤、验收门与估时**：见 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md`（M0–M5，估 5.5–10.5 人日，M0 后收敛）。
 
 ---
 

@@ -320,7 +320,7 @@ aicli-envd-bridge \
 
 ## 7. 一句话总结
 
-按设计实施了，但在实施中**用真实 envd 推翻了三个设计假设**（鉴权方式、写文件方式、事件字段名），并按实测结果落地；`envd` 现在是 `remotetargets` 的第四种传输，策略由本地桥接进程强制，envd 只负责执行。
+**口径修正（2026-10-28）**：接入位置与安全红线**按设计实施**——`envd` 是 `remotetargets` 的第四种传输，策略前置校验、envd 只负责执行；实施中**用真实 envd 推翻了三个设计假设**（鉴权方式、写文件方式、事件字段名），并按实测结果落地。但设计 §4.3「复用 remotetools 外壳（Profile/Limits/audit 自动生效）」**未按设计**：实际由独立进程 `aicli-envd-bridge` 承担，外壳被重写、仅共享 `remotetools.CommandPolicy`；定位稿 §8 记录为「未采纳放法 E」。**收敛计划**见 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md`。
 
 ---
 

@@ -243,4 +243,16 @@ remotetools → { ssh-stdio | ssh-http | http | envd }
 
 ---
 
+## 9. 收敛决策（2026-10-28）
+
+§8 记录的偏差进入收敛：`aicli-envd-bridge` 的能力将并入 `aicli-remote-tools`（新增 `serve --stdio --backend envd`，本机运行、以 Connect-RPC 为腿；仅 stdio）。
+
+收敛后「envd 是 remotetools 的第四条腿」在**外壳层面**成立——MCP 循环 / Profile 档位 / 审计 / Limits / CommandPolicy / prefix 一份，执行后端两条（local-os / envd）；envd 专属的执行实现（目标侧 realpath jail、spawn `find`/`rg` 的合成、PTY 会话）保留在 envd 后端内。
+
+§8「后果」段描述的是**收编完成前**的现状；收编完成后以本节形态为准。
+
+计划与验收门见 `docs/plan/aicli-envd-bridge-merge-plan-20261028.md`。
+
+---
+
 *代码结构引用自本地仓库 `ai-agent-runtime` v0.5.0 实测读取。*
