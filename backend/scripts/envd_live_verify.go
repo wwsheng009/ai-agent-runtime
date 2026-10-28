@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,17 +51,21 @@ func main() {
 	readable := flag.String("readable", "", "workspace-relative file both channels must agree on")
 	secret := flag.String("secret", "", "file inside an allowed root that the requesting user cannot open")
 	roots := flag.String("allowed-roots", "", "comma-separated extra absolute roots, so a jail-internal unreadable file can be named")
+	grepPath := flag.String("grep-path", "", "root to search, for the capped-grep check")
+	grepPattern := flag.String("grep-pattern", "root", "pattern for the capped-grep check")
+	grepCap := flag.Int("grep-cap-bytes", 512, "per-call payload cap used to prove early stop")
 	flag.Parse()
 
 	token := strings.TrimSpace(os.Getenv(*tokenEnv))
-	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" {
-		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable and -secret are required"))
+	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" || *grepPath == "" {
+		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable, -secret and -grep-path are required"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
-	native := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, *roots, false)
+	native := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, *roots, false, 0)
+	defer native.close()
 	defer native.close()
 	defer native.close()
 	tools, err := native.session.ListTools(ctx, nil)
@@ -87,7 +92,8 @@ func main() {
 	}
 	native.close()
 
-	forced := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, *roots, true)
+	forced := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, *roots, true, 0)
+	defer forced.close()
 	defer forced.close()
 	defer forced.close()
 	viaProcess, err := forced.view(ctx, *readable)
@@ -100,7 +106,38 @@ func main() {
 	fmt.Printf("PASS channel parity: %d bytes identical through /files and through /bin/cat\n", len(viaNative))
 	forced.close()
 
+	// The capped grep: one documented knob must actually bound the read, and a
+	// search that stops early must still say which engine produced the matches.
+	grepRoots := *roots
+	if grepRoots != "" {
+		grepRoots += ","
+	}
+	grepRoots += *grepPath
+	capped := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, *prefix, grepRoots, true, *grepCap)
+	defer capped.close()
+	search, searchErr := capped.call(ctx, *prefix+"__grep", map[string]interface{}{"path": *grepPath, "pattern": *grepPattern})
+	if searchErr != nil {
+		fail("grep under the byte cap", searchErr)
+	}
+	if !strings.Contains(search, "searched with ") {
+		fail("grep engine", fmt.Errorf("engine line missing from a capped search: %q", firstChars(search, 300)))
+	}
+	if strings.Contains(search, "stopped at ") {
+		fmt.Printf("PASS capped grep: engine reported and truncation disclosed (%d bytes returned under the %d cap)\n", len(search), *grepCap)
+	} else {
+		fmt.Printf("PASS capped grep: results fit under the cap without truncation (%d bytes)\n", len(search))
+	}
+	capped.close()
+
 	fmt.Println("ALL CHECKS PASSED")
+}
+
+// firstChars keeps a failure message short without dumping a whole search result.
+func firstChars(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 type liveRun struct {
@@ -111,7 +148,7 @@ type liveRun struct {
 	stderr  *strings.Builder
 }
 
-func serve(ctx context.Context, binary, addr, user, workspace, caFile, token, prefix, roots string, noFiles bool) *liveRun {
+func serve(ctx context.Context, binary, addr, user, workspace, caFile, token, prefix, roots string, noFiles bool, maxBytes int) *liveRun {
 	args := []string{
 		"serve", "--stdio", "--backend", "envd",
 		"--addr", addr,
@@ -129,6 +166,11 @@ func serve(ctx context.Context, binary, addr, user, workspace, caFile, token, pr
 		// that contains files this user cannot open is what makes the check real
 		// rather than a re-test of the jail.
 		args = append(args, "--allowed-roots", roots)
+	}
+	if maxBytes > 0 {
+		// The one documented knob. Before Normalize derived CaptureLimit from it,
+		// read tools silently ignored whatever an operator set here.
+		args = append(args, "--max-bytes-per-call", strconv.Itoa(maxBytes))
 	}
 	if noFiles {
 		args = append(args, "--no-envd-files")
@@ -168,9 +210,16 @@ func serve(ctx context.Context, binary, addr, user, workspace, caFile, token, pr
 // view calls the prefixed view tool and returns its text, with the refusal as the
 // error so the caller cannot mistake a denial for an empty file.
 func (r *liveRun) view(ctx context.Context, target string) (string, error) {
+	return r.call(ctx, r.prefix+"__view", map[string]interface{}{"file_path": target})
+}
+
+// call runs one tool and turns an MCP error result into a Go error, because a
+// refusal and an empty result are different facts and a check must not confuse
+// them.
+func (r *liveRun) call(ctx context.Context, tool string, args map[string]interface{}) (string, error) {
 	result, err := r.session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      r.prefix + "__view",
-		Arguments: map[string]interface{}{"file_path": target},
+		Name:      tool,
+		Arguments: args,
 	})
 	if err != nil {
 		return "", fmt.Errorf("%w (server stderr: %s)", err, r.stderr.String())

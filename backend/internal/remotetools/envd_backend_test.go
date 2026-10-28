@@ -60,6 +60,12 @@ type envdStub struct {
 	modes map[string]uint32
 	// filesLog records one entry per /files request: "path range=<header>".
 	filesLog []string
+	// grepFrames splits the stubbed search output into N data frames, so a test can
+	// tell "the client stopped reading early" apart from "the client drained
+	// everything and trimmed the string". streamCut records that a later write
+	// failed, which is exactly what happens when the reader cancels.
+	grepFrames int
+	streamCut  atomic.Bool
 
 	statCalls    atomic.Int64
 	processCalls atomic.Int64
@@ -473,14 +479,42 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 						}
 					}
 				}
+				frames := stub.grepFrames
 				stub.mu.Unlock()
 				sort.Strings(matches)
 				out := strings.Join(matches, "\n")
 				if out != "" {
 					out += "\n"
 				}
-				out += "__TOOL__=rg\n"
-				writeProcessStream(t, w, []byte(out), nil, 0)
+				// The engine marker goes first, the way the real script does it: a
+				// capped read must still report which dialect produced it.
+				if frames > 0 {
+					cut := false
+					if !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 9}}}) {
+						cut = true
+					}
+					marker := base64.StdEncoding.EncodeToString([]byte("__TOOL__=rg\n"))
+					if !cut && !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": marker}}}) {
+						cut = true
+					}
+					for index := 0; index < frames && !cut; index++ {
+						chunk := fmt.Sprintf("/srv/app/f%d.md:1:%s\n", index, strings.Repeat("x", 64))
+						encoded := base64.StdEncoding.EncodeToString([]byte(chunk))
+						if !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": encoded}}}) {
+							cut = true
+						}
+					}
+					if !cut && !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"end": map[string]any{"exited": true, "status": "exit status 0"}}}) {
+						cut = true
+					}
+					if cut {
+						// The reader stopped consuming: that is the whole point of a
+						// capped search, and it is what a test must be able to see.
+						stub.streamCut.Store(true)
+					}
+					return
+				}
+				writeProcessStream(t, w, []byte("__TOOL__=rg\n"+out), nil, 0)
 			case "aicli-envd-write":
 				stub.put(arg(3), arg(4))
 				writeProcessStream(t, w, nil, nil, 0)
@@ -578,13 +612,26 @@ func writeProcessStream(t *testing.T, w io.Writer, stdout, stderr []byte, code i
 
 func writeEnvDFrame(t *testing.T, w io.Writer, payload any) {
 	t.Helper()
+	if !writeEnvDFrameSoft(w, payload) {
+		t.Fatalf("write frame: stream closed by the client")
+	}
+}
+
+// writeEnvDFrameSoft writes one frame and reports whether it landed. A failed
+// write is not a stub bug: it means the reader stopped consuming, which is the
+// behaviour a capped search is supposed to produce.
+func writeEnvDFrameSoft(w io.Writer, payload any) bool {
 	frame, err := envdclient.EncodeJSONFrame(payload)
 	if err != nil {
-		t.Fatalf("encode frame: %v", err)
+		return false
 	}
 	if _, err := w.Write(frame); err != nil {
-		t.Fatalf("write frame: %v", err)
+		return false
 	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return true
 }
 
 // newEnvDConfig builds the smallest valid envd-backend config.

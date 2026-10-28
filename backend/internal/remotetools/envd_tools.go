@@ -224,9 +224,22 @@ func envdGlob(ctx context.Context, be *envdBackend, params map[string]interface{
 	return envdTextResult(strings.Join(lines, "\n")), nil
 }
 
-// envdGrep searches file contents. One shell invocation chooses the engine and
-// runs it, so the fallback costs no extra round trip, and the chosen engine is
-// reported: silently switching tools changes the dialect of the pattern.
+// envdGrepEnginePrefix marks which engine the one-shot shell choice picked.
+//
+// It is echoed BEFORE the search runs, not after it: a capped read can stop in
+// the middle of a large result set, and a marker at the end would be lost with
+// the results it describes. Reported engine is not decoration - rg and grep -rnI
+// speak different pattern dialects - so the answer must survive truncation.
+const envdGrepEnginePrefix = "__TOOL__="
+
+// envdGrep searches file contents. One shell invocation chooses the engine, and
+// the chosen engine is reported: silently switching tools changes the dialect of
+// the pattern.
+//
+// Output is consumed as a stream and stopped at the surface's own byte ceiling,
+// so a recursive scan costs the window rather than the whole tree - and the
+// search actually halts on the target instead of running to completion behind a
+// buffer that would have discarded the tail anyway.
 func envdGrep(ctx context.Context, be *envdBackend, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	pattern := envdStringParam(params, "pattern")
 	if pattern == "" {
@@ -245,29 +258,56 @@ func envdGrep(ctx context.Context, be *envdBackend, params map[string]interface{
 	if err != nil {
 		return envdErrorResult("%v", err), nil
 	}
-	script := `if command -v rg >/dev/null 2>&1; then ` +
-		`rg --line-number --no-heading --color never --max-columns 400 -e "$1" "$2" 2>&1; ` +
-		`echo "__TOOL__=rg"; ` +
-		`else grep -rnI --color=never -e "$1" "$2" 2>&1; echo "__TOOL__=grep"; fi`
-	stdout, stderr, code, err := be.run(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-grep", pattern, target})
+	// Pattern and path stay positional ("$1", "$2"): no caller data is ever quoted
+	// into the script.
+	script := `if command -v rg >/dev/null 2>&1; then echo "` + envdGrepEnginePrefix + `rg"; rg --line-number --no-heading --color never --max-columns 400 -e "$1" "$2" 2>&1; ` +
+		`else echo "` + envdGrepEnginePrefix + `grep"; grep -rnI --color=never -e "$1" "$2" 2>&1; fi`
+
+	limit := be.viewLimit()
+	stdout, stderr, code, truncated, err := be.runCapped(ctx, "/bin/sh", []string{"-c", script, "aicli-envd-grep", pattern, target}, limit)
 	if err != nil {
 		return envdErrorResult("grep %s: %v", target, err), nil
 	}
-	out := string(stdout)
-	engine := "rg"
-	if idx := strings.LastIndex(out, "__TOOL__="); idx >= 0 {
-		engine = strings.TrimSpace(out[idx+len("__TOOL__="):])
-		out = out[:idx]
-	}
+
+	out, engine := splitEnvdEngineMarker(string(stdout))
 	out = strings.TrimRight(out, "\n")
-	// grep and rg both exit 1 for "no match", which is not a failure.
-	if code != 0 && code != 1 && out == "" {
+
+	// A stopped search has no exit status on purpose, and it is not a failure.
+	if !truncated && code != 0 && code != 1 && out == "" {
 		return envdErrorResult("grep failed (exit %d): %s", code, strings.TrimSpace(string(stderr))), nil
 	}
-	if strings.TrimSpace(out) == "" {
+	if strings.TrimSpace(out) == "" && !truncated {
 		return envdTextResult(fmt.Sprintf("no matches for %q under %s (searched with %s)", pattern, target, engine)), nil
 	}
-	return envdTextResult(fmt.Sprintf("searched with %s\n%s", engine, out)), nil
+
+	content := fmt.Sprintf("searched with %s\n%s", engine, out)
+	metadata := map[string]interface{}{"execution_backend": engine}
+	if truncated {
+		// Say so plainly: a capped list reads like a complete one otherwise. The
+		// surface has no paging parameters yet, so the only honest next step is a
+		// narrower search.
+		content += fmt.Sprintf("\n(stopped at %d bytes: this is not the full match set, narrow the path or pattern to see more)", limit)
+		metadata["is_truncated"] = true
+	}
+	result := envdTextResult(content)
+	result.Metadata = metadata
+	return result, nil
+}
+
+// splitEnvdEngineMarker removes the engine line and reports the engine it named.
+// An absent marker is reported as "unknown" rather than guessed: the two engines
+// differ in dialect, and inventing one would be worse than admitting the loss.
+func splitEnvdEngineMarker(out string) (rest, engine string) {
+	if !strings.HasPrefix(out, envdGrepEnginePrefix) {
+		return out, "unknown"
+	}
+	line := out
+	if newline := strings.Index(out, "\n"); newline >= 0 {
+		line, rest = out[:newline], out[newline+1:]
+	} else {
+		rest = ""
+	}
+	return rest, strings.TrimSpace(strings.TrimPrefix(line, envdGrepEnginePrefix))
 }
 
 // envdWrite writes a file. Content arrives as "$2", so no caller data is ever

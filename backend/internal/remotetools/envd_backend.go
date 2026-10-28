@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -441,6 +442,74 @@ func (be *envdBackend) run(ctx context.Context, cmd string, args []string) (stdo
 	return be.client.Run(ctx, envdclient.StartRequest{
 		Process: envdclient.ProcessConfig{Cmd: cmd, Args: args, Cwd: be.workspace},
 	})
+}
+
+// runCapped streams one command and stops at a byte ceiling instead of
+// buffering to completion.
+//
+// Why this exists: Client.Run drains the whole stream and keeps at most
+// DefaultMaxBufferedOutput bytes per stream, discarding the rest. For a recursive
+// grep on a big tree that means paying for the entire scan (and silently losing
+// its tail) when the surface was only ever going to show a bounded window. Here
+// the reader stops as soon as the window is full and cancels the context, which
+// envd treats as the supported way to end a run: the daemon reaps the child when
+// its stream client disappears, so a capped search also stops doing work on the
+// target rather than just hiding its output.
+//
+// truncated reports that decision, and code is then -1 because no end event ever
+// arrives: the process was stopped on purpose, which is not a failure and must not
+// be reported as one.
+func (be *envdBackend) runCapped(ctx context.Context, cmd string, args []string, capBytes int) (stdout, stderr []byte, code int32, truncated bool, err error) {
+	if be == nil || be.client == nil {
+		return nil, nil, -1, false, errors.New("envd client is not configured")
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	// Deferred so every exit path releases the derived context: the early-stop
+	// branch below cancels explicitly for promptness, and cancel is idempotent.
+	defer cancel()
+	stream, err := be.client.Start(runCtx, envdclient.StartRequest{
+		Process: envdclient.ProcessConfig{Cmd: cmd, Args: args, Cwd: be.workspace},
+	})
+	if err != nil {
+		return nil, nil, -1, false, err
+	}
+	defer func() { _ = stream.Close() }()
+
+	for {
+		var event envdclient.ProcessEvent
+		if recvErr := stream.Recv(&event); recvErr != nil {
+			if truncated {
+				// We stopped it; the missing end event is expected.
+				return stdout, stderr, -1, true, nil
+			}
+			if errors.Is(recvErr, io.EOF) {
+				return stdout, stderr, -1, false, errors.New("envd process stream ended without an exit event")
+			}
+			return stdout, stderr, -1, false, recvErr
+		}
+		switch event.Kind {
+		case envdclient.EventData:
+			stdout = append(stdout, event.Stdout...)
+			stderr = append(stderr, event.Stderr...)
+			if capBytes > 0 && len(stdout) >= capBytes {
+				// Trim to the ceiling, not merely stop reading: envd delivers output in
+				// frames, so one frame can land far past the limit, and a capture ceiling
+				// that is exceeded by whatever the last frame happened to carry is not a
+				// ceiling. (Measured live: a 512-byte cap returned 4210 bytes until this
+				// line existed.)
+				stdout = stdout[:capBytes]
+				if capBytes > 0 && len(stderr) > capBytes {
+					stderr = stderr[:capBytes]
+				}
+				truncated = true
+				cancel()
+				_ = stream.Close()
+				return stdout, stderr, -1, true, nil
+			}
+		case envdclient.EventEnd:
+			return stdout, stderr, event.End.ExitStatus(), false, nil
+		}
+	}
 }
 
 // viewLimit is the payload ceiling for one remote read. It reuses the same
