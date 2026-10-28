@@ -655,7 +655,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板——**首轮数据依据已产出（§13.7）**：建议本轮维持"最多 N 次"，并把"≥20 条调度器+只读+瞬时失败样本后复算 `retry_skipped` 分布"设为升级语义的前置观测门槛。
-2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
+2. `request_error` 命名**已收口：不采纳**（存储枚举保持 `error`，读取侧以 `usage_unavailable_reason=request_error` 表达，见 §13.2）；`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地。仅余 provider-specific 前缀对照实验——需真实 provider 计费调用（验证"不同显式 cache key 下是否按内容前缀复用 KV"），超出本地确定性测试范围，保留为外部待办、不阻塞本行动项。
 3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
 4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）；连接拆除复核见 §13.5（`70710169`，泄漏已证伪）。
 5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
