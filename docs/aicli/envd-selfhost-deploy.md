@@ -273,4 +273,5 @@ iptables -D INPUT -p tcp --dport 49983 -j DROP
 - 令牌：`/init` 204；重启后自动重装；无令牌 401 / 有令牌 200 / health 204。
 - 防火墙：临时移除放行后工作站访问超时（000），恢复后 204；回环始终 204。
 - 集成测试：`ENVD_TEST_ADDR=<host>:49983 ENVD_TEST_USER=n9e ENVD_TEST_TOKEN=<token> go test -run '^TestLive' ./internal/envdclient/...` → 6/6 PASS。
+- manager 级 e2e：`AICLI_ENVD_TEST_BRIDGE=<bridge> ENVD_TEST_ADDR=<host>:49983 ENVD_TEST_USER=n9e ENVD_TEST_WORKSPACE=/home/n9e ENVD_TEST_TOKEN=<token> go test -run TestManager_EnvDBridge_LiveSmoke ./internal/mcp/manager/...` → PASS。
 - bridge 冒烟 + aicli agent 真实巡检：见 `docs/architecture/envd-implementation-report.md` §9。

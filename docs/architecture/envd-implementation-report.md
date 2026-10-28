@@ -338,6 +338,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **审计日志（opt-in）**：bridge 新增 `--audit-log`，spec `?audit_log=`、`remote.auditLog` 透传；每次调用写一行 JSONL 元数据（ts/tool/profile/ok/duration_ms/argument_bytes/target/user），**不记录参数与结果内容**，测试锁定不泄漏。
 - **envd 日志脱敏（本地补丁）**：`scripts/envd/patches/0001-redact-process-logs.patch` 将默认级别降为 info，`process_start` 只记录可执行文件与参数个数，stdout/stderr 与 unary 请求体降为 debug；实测写入唯一标记后 journald 中 marker/请求体/stdout 命中均为 0。
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
+- **manager 级 e2e**：新增 `TestManager_EnvDBridge_LiveSmoke`（默认 SKIP），设 `AICLI_ENVD_TEST_BRIDGE` / `ENVD_TEST_*` 后验证 MCP 配置加载 → bridge 子进程 → 工具列表（`remote_envd__*`）→ 实际调用。
 
 ### 8.3 保留的限制
 
@@ -361,6 +362,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - iptables 仅放行回环与运维工作站（`/32`）：实测临时移除放行后客户端访问超时，恢复后 401/200 语义正确；回环始终 204。
 - 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
 - live 集成测试 **6/6 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUserIsUnauthenticated）。
+- manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
 - 离线回归：**62 PASS / 0 FAIL / 6 SKIP**（envdclient 19、remotetargets 31、bridge 12）。
 
 ### 9.2 aicli agent 真实巡检场景

@@ -1,0 +1,79 @@
+package manager
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// TestManager_EnvDBridge_LiveSmoke drives the real aicli-envd-bridge through the
+// MCP manager against a real envd target. It is the manager-level e2e that unit
+// tests cannot cover: config load → child process spawn → MCP handshake → tool
+// call.
+//
+// Gated because it needs both a built bridge binary and a reachable envd:
+//
+//	AICLI_ENVD_TEST_BRIDGE  absolute path to aicli-envd-bridge(.exe)
+//	ENVD_TEST_ADDR          envd host:port (e.g. 10.0.0.9:49983)
+//	ENVD_TEST_USER          OS user envd executes as (e.g. n9e)
+//	ENVD_TEST_WORKSPACE     absolute workspace on the target (e.g. /home/n9e)
+//	ENVD_TEST_TOKEN         access token (optional when envd has none)
+func TestManager_EnvDBridge_LiveSmoke(t *testing.T) {
+	bridge := strings.TrimSpace(os.Getenv("AICLI_ENVD_TEST_BRIDGE"))
+	addr := strings.TrimSpace(os.Getenv("ENVD_TEST_ADDR"))
+	user := strings.TrimSpace(os.Getenv("ENVD_TEST_USER"))
+	workspace := strings.TrimSpace(os.Getenv("ENVD_TEST_WORKSPACE"))
+	if bridge == "" || addr == "" || user == "" || workspace == "" {
+		t.Skip("set AICLI_ENVD_TEST_BRIDGE, ENVD_TEST_ADDR, ENVD_TEST_USER and ENVD_TEST_WORKSPACE to run")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "envd-mcp.json")
+	config := fmt.Sprintf(`{
+  "mcpServers": {
+    "envdtest": {
+      "command": %q,
+      "args": ["--addr", %q, "--user", %q, "--workspace", %q, "--profile", "readonly", "--tool-prefix", "remote_envd"],
+      "env": {"AICLI_ENVD_TOKEN": %q},
+      "enabled": true,
+      "type": "stdio",
+      "timeout": "30s",
+      "maxRetry": 1
+    }
+  },
+  "global": {
+    "healthCheckInterval": "1m",
+    "connectTimeout": "15s"
+  }
+}`, bridge, addr, user, workspace, os.Getenv("ENVD_TEST_TOKEN"))
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o644))
+
+	mgr := NewManager()
+	require.NoError(t, mgr.LoadConfig(configPath))
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { _ = mgr.Stop() })
+
+	tools := mgr.ListTools()
+	require.NotEmpty(t, tools, "bridge exposed no tools")
+
+	var lsTool string
+	for _, tool := range tools {
+		name := tool.Tool.Name
+		require.True(t, strings.HasPrefix(name, "remote_envd__"),
+			"tool %q should carry the configured prefix", name)
+		if strings.HasSuffix(name, "__ls") {
+			lsTool = name
+		}
+	}
+	require.NotEmpty(t, lsTool, "bridge did not expose an ls tool")
+
+	result, err := mgr.CallTool(context.Background(), "envdtest", lsTool, map[string]interface{}{"path": "."})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.Content)
+	t.Logf("%s returned %d content block(s), first: %.200s", lsTool, len(result.Content), result.Content[0].Text)
+}
