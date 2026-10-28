@@ -353,6 +353,7 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - **低成本巡检模板**：新增 `scripts/envd/host-inspect.sh`；单次 shell 调用返回固定格式巡检数据（实测 3–10 KiB），避免自由编排的高 token 成本。
 - **manager 级 e2e**：新增默认运行的 `TestManagerHermeticEnvD`（测试内构建 bridge + 桩 envd，覆盖配置加载 → 子进程 → MCP 握手 → 工具调用），以及可选 live 版本 `TestManager_EnvDBridge_LiveSmoke`；CI 的 envd gate 同步运行 bridge 包测试。
 - **进程控制协议修正**：`SendSignal` / `SendInput` / `Update` 从误判的 client-streaming 改为 **unary**，请求体按 protobuf 修正（`signal` 枚举、`input.stdin` / `input.pty`、`pty.size`）；新增 `SendPtyInput`；`ProcessEvent.pty` 按 **bytes** 解码；`StartRequest` 支持 `pty.size` 并移除不存在的 `stdin` 字段。
+- **交互式 PTY 会话工具**：bridge 新增 `pty_start` / `pty_write` / `pty_read` / `pty_resize` / `pty_close`（仅 ops 档），会话输出尾部缓冲 256 KiB，`pty_read` 支持 `wait_ms`（上限 30s），`pty_close` 发送 SIGTERM 并移除会话；真实 envd 冒烟通过。
 - **TLS 与 ca_file（已实机验证）**：本地补丁为 envd 增加 `-tls-cert` / `-tls-key`，Go 的 `ListenAndServeTLS` 自动协商 HTTP/2；spec 新增 `?ca_file=`，`remote.tls.caFile` 存在时 registry 生成 `https://` 地址并透传 `--ca-file`。
 - **离线覆盖补齐**：filesystem 全部 unary（Stat/ListDir/MakeDir/Remove/Move）与 `WatchDir` 流帧、process `List`、进程控制 unary 请求体（signal/stdin/pty/size）、PTY 输出解码与启动配置、请求参数校验、bridge 的调用超时用例。
 - **WatchDir 结构确认**：真实 envd 抓到 `{"start":{}}` + `{"filesystem":{"name","type"}}`；`WatchEvent` 改为 `Start/Name/Type/Raw`，离线 stub 与 live 用例同步断言。
@@ -380,8 +381,9 @@ gofmt -l（envdclient / bridge / remotetargets 相关文件） → 干净
 - 本地加固补丁（日志脱敏）随构建应用：`scripts/envd/patches/0001-redact-process-logs.patch`；写入唯一标记后 journald 中 marker / `"request"` / `"event_type":"stdout"` 命中均为 **0**。
 - TLS：自签证书 SAN 覆盖 `127.0.0.1` / `172.18.3.238` / `localhost`，unit 以 `-tls-cert/-tls-key` 启动；令牌引导脚本改用 `https://127.0.0.1:49983/init --cacert`。
 - live 集成测试 **10/10 PASS**（Metrics / RunEcho / RunExitCode / StatAndList / NotFound / BadUser / **StdinRoundTrip / SignalTermination / PTYRoundTrip** / WatchDir）。
+- 交互会话冒烟：bridge 暴露 **15** 个工具（10 + 5 个 pty）；`pty_start` → `pty_write` → `pty_read`（输出 `it-works`）→ `pty_resize` → `pty_close` 全部 PASS。
 - manager 级 live e2e：**PASS**（`mcp/manager` 加载配置 → 启动 bridge → 5 个只读工具 → `remote_envd__ls` 返回真实目录）。
-- 离线回归：**73 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 33、bridge 14）。
+- 离线回归：**78 PASS / 0 FAIL / 10 SKIP**（envdclient 26、remotetargets 33、bridge 19）。
 
 ### 9.2 aicli agent 真实巡检场景
 

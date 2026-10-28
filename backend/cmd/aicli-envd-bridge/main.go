@@ -27,6 +27,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -80,6 +81,9 @@ type bridge struct {
 	profile   profile
 	timeout   time.Duration
 	audit     *auditLog
+
+	sessionMu sync.Mutex
+	sessions  map[uint32]*ptySession
 }
 
 // resolve maps a caller-supplied path into the jail.
@@ -370,7 +374,9 @@ func main() {
 		profile:   profile(strings.ToLower(strings.TrimSpace(*prof))),
 		timeout:   *callTimeout,
 		audit:     audit,
+		sessions:  make(map[uint32]*ptySession),
 	}
+	defer b.closeAllSessions()
 
 	// A signal must not leave the target running a half-finished command, so the
 	// context is cancelled and the loop drains before exiting.
@@ -593,6 +599,16 @@ func (b *bridge) callTool(ctx context.Context, name string, args json.RawMessage
 		return b.toolShell(callCtx, args)
 	case "host_metrics":
 		return b.toolMetrics(callCtx)
+	case "pty_start":
+		return b.toolPtyStart(callCtx, args)
+	case "pty_write":
+		return b.toolPtyWrite(callCtx, args)
+	case "pty_read":
+		return b.toolPtyRead(callCtx, args)
+	case "pty_resize":
+		return b.toolPtyResize(callCtx, args)
+	case "pty_close":
+		return b.toolPtyClose(callCtx, args)
 	default:
 		return errorResult("tool %q is not implemented", base)
 	}

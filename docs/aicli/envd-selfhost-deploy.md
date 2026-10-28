@@ -228,6 +228,15 @@ remoteTargets:
 - 每个工具调用的默认上限是 **10 分钟**；长任务用 `?call_timeout=30m` 或 `remote.callTimeout` 覆盖。
 - `write` 单次内容硬上限 **1 MiB**（argv 限制）；更大文件请分片或走 `shell`。
 - `SendInput` / `SendSignal` / `UpdatePty` 是 unary RPC，HTTP/1.1 也可用；TLS 只用于加密与 HTTP/2。
+- ops 档额外提供 **5 个交互式 PTY 工具**：`pty_start` / `pty_write` / `pty_read` / `pty_resize` / `pty_close`；输出保留尾部 256 KiB，`pty_read` 的 `wait_ms` 上限 30s。
+
+```text
+remote_<prefix>__pty_start  {"command":"/bin/sh"}
+remote_<prefix>__pty_write  {"pid":123,"data":"ls\n"}
+remote_<prefix>__pty_read   {"pid":123,"wait_ms":1000}
+remote_<prefix>__pty_resize {"pid":123,"cols":120,"rows":40}
+remote_<prefix>__pty_close  {"pid":123}
+```
 
 ### 5.1 低成本巡检（推荐）
 
@@ -269,6 +278,7 @@ envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl
 | `401` + `no user specified` | 请求未带 Basic user | 目标 user 必须是目标机系统用户 |
 | `401` + `unauthorized access` | 令牌缺失/错误 | 设置 `AICLI_ENVD_TOKEN`；确认 `/init` 已执行 |
 | `/init` 返回 409 | 进程内已有不同令牌 | `systemctl restart envd` 后重新引导 |
+| `no pty session with pid ...` | 会话已关闭或 bridge 重启 | 重新 `pty_start`；会话状态只在当前 bridge 进程内 |
 | TLS 握手失败 / `x509: certificate is valid for ...` | 证书 SAN 不含实际连接地址 | 重签证书，把客户端连接用的 IP/DNS 加入 SAN |
 | 日志刷 `socat: executable file not found` | envd 的 port-forwarder 需要 socat + 169.254.0.21 | 普通服务器属预期噪音，可忽略；不要为此安装 socat |
 | 长命令在中途失败 | 调用超时（默认 10m） | 提高 `callTimeout` 或拆分任务 |

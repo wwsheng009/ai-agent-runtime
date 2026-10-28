@@ -75,7 +75,9 @@ func TestProfileAllows(t *testing.T) {
 		{profileStandard, "write", true},
 		{profileStandard, "move", true},
 		{profileStandard, "shell", false},
+		{profileStandard, "pty_start", false},
 		{profileOps, "shell", true},
+		{profileOps, "pty_start", true},
 		{profileOps, "view", true},
 		{profileOps, "no_such_tool", false},
 		{profile("nonsense"), "view", false},
@@ -96,7 +98,7 @@ func TestToolListRespectsProfileAndPrefix(t *testing.T) {
 	}{
 		{profileReadonly, 5},
 		{profileStandard, 9},
-		{profileOps, 10},
+		{profileOps, 15},
 	}
 	for _, tc := range cases {
 		b := testBridge(tc.profile, "remote_10-0-0-9")
