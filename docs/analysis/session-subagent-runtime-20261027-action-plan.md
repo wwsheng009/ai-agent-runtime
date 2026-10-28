@@ -525,7 +525,7 @@ backend/internal/cacheanalytics/*
 
 ### 8.4 Cache
 
-- [ ] fresh/fork/resume 的 cache lineage 字段完整；（fresh/fork 已具备 `context_mode`/`fork_snapshot_hash`/`parent_prompt_cache_key`；resume 模式当前不存在）
+- [x] fresh/fork/resume 的 cache lineage 字段完整；（fresh/fork 具备 `context_mode`/`fork_snapshot_hash`/`parent_prompt_cache_key`；resume 按 2026-10-28 拍板的**窄读法**落地为标签：`cache_lineage_mode=resume`（`8c152f4d`，口径见 §13.6）——不新增 spawn 模式）
 - [x] parent key、child key、epoch、fingerprint 可从 request event 关联；（4ab293f3 + 既有 `prompt_cache_key`/epoch/fingerprint）
 - [x] provider 报告 cached=0 时能区分 `reported_zero` 与 `confirmed_miss`；（`bf7a6b0a`：`CacheMissReported/CacheMissTokens` 仅在 provider 显式给出 miss 字段时置位，六档分类 + 分布列 + `/usage`「确认未命中」标签；「输入总量 − 命中」推导值不伪装成确认 miss）
 - [x] prompt history replacement 必须递增 epoch，并验证旧 key 不被重用；（a1b7022c：epoch 持久化防回退 + 单测）
@@ -610,6 +610,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 | `859651b9` | batch 路径 fork 窗口 `fork_messages`（§8.3 direct/batch 语义一致） | §8.3 |
 | `2c2f3104` | §8.4 cache 专项：重试前缀复用 + 并发 child key 隔离 | §8.4 |
 | `0bebe723` | task/batch deadline 档 E2E 注入与取消归因 | §8.1 / §6.1-3 |
+| `8c152f4d` | resume cache lineage 窄读法：标签接线 + 三宿主打标 + 分析字段 | §8.4 / §13.6 |
 
 ### 13.2 逐条对照（§6）
 
@@ -635,14 +636,15 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - batch fork 窗口：`TestBuildForkHistoryWithWindowKeepsMostRecentCompletedMessages`（截窗 = 最近 N 条 / 窗口≥长度等价全量）、`...AppliesBeforeTokenCeiling`（窗口先于上限：缩小窗口可让全量超限的父历史通过）、`TestBuildForkHistoryForTaskAppliesForkMessages`（任务字段接线）、`TestSubagentContextReceipt`（请求窗口与实际注入条数分离）、decode 三档（接受数值/拒收「有窗口无 fork」/非正值 warning + 字符串拒绝）、`TestBatchTaskSpecRoundTripPreservesForkContext`（durable spec 往返 + 旧 spec 字节兼容）。
 - cache 前缀专项（`2c2f3104`，agent 全包 22.338s）：`TestSubagentRetryReusesExpectedCachePrefix`（attempt 1 失败 → attempt 2 同 key/epoch + messages/tools/provider/model 一致 + 命中计入回执）、`TestConcurrentChildrenKeepDistinctCacheKeys`（同目标并发 child 的 key 按 session 隔离且不等于父 key）。
 - deadline 档 E2E（`0bebe723`，agent 全包 23.906s）：`TestTaskDeadlineE2EAttributionAndRetryGate`（1s 任务 deadline → `cancel_source=task_timeout` + `retry_skipped_*` + provider 恰 1 次调用 + 批次 failed）、`TestBatchDeadlineE2EAttribution`（1s 批次 deadline → `cancel_source=batch_deadline` + 批次 timed_out）；两例任务行均为 `failed_with_result`（取消仍保留可回收报告）。
+- resume 标签窄读法（`8c152f4d`）：`TestRunWithSessionCarriesCacheLineageResume`（带标记/未标记/未知值三档接线）、`TestCollectorCarriesCacheLineageMode`（started → 记录 additive 字段）、`TestStampResumeCacheLineageInSession`（有历史打标并回写 / 空会话 / 读失败 / 写失败四档）、`TestRestoreChatPersistenceState_...`（CLI 打标 + 空会话负例）；回归：agent 25.863s / cacheanalytics 2.273s / runtimeapi 94.609s / commands resume 子集 7.214s。
 
 ### 13.4 未完成项与建议
 
 1. **§6.1-5 预算语义**：待产品拍板（建议维持现状并写入报表口径）。
 2. `request_error` 命名决策与 provider-specific 前缀对照实验（`confirmed_miss` 枚举细分已在 `bf7a6b0a` 落地，`usage_unavailable_reason` 与 `task_attempt` 关联列已在 `ab6a830e` 落地）。
-3. §8.4 仅余「fresh/fork/resume 的 cache lineage 字段完整」（resume 模式不存在）与 provider-specific 前缀对照实验（并入第 2 项）；两项 cache 专项（retry 前缀复用 + 并发 child key 隔离）已闭环（`2c2f3104`）。
+3. §8.4 验收清单现已全部勾选（resume 字段完整按窄读法闭环：`8c152f4d`；两项 cache 专项：`2c2f3104`）；仅余 provider-specific 前缀对照实验（并入第 2 项）。
 4. provider response-header guard 的 retry budget 专项用例（未做；依赖 provider 层语义，llm 包并行线程在途）；task/batch deadline 档 E2E 已闭环（`0bebe723`）。
-5. `resume` cache lineage 模式当前实现不存在（§8.4 对应项保留未勾选）。
+5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
 
 ### 13.5 备注
@@ -650,3 +652,29 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 - 复核同时确认：`subagent.completed` 的中间态消费面已按 §6.1-4 收口迁移；bus 摘要 `SubagentCompleted` 计数从"尝试数"回归"任务数"。
 - 观察（未修，超出本行动范围）：`subagentbatch.TaskSpec` 仍只往返部分任务字段（`WritePaths`/`ReportSchema`/`HandoffIn`/`AgentType`/`MaxTurns` 与只读过滤审计未入 spec）；这些字段在「幂等 admission replay」窗口内同样不随 durable spec 重建。本轮只补齐 fork 语义必需的 `Context`/`ForkMessages`。
 - 工作区其他并行线程（envd / sandbox / remote-tools 文档与代码）不在本行动文档范围内，未在任何提交中触碰。
+
+### 13.6 resume cache lineage 口径（2026-10-28 拍板：窄读法）
+
+**决策**：`resume` 不新增为 spawn context 模式；它作为**既有续写路径的 lineage 标签**落地（`8c152f4d`）。依据：§8.4 的审计目标是"解释命中/未命中"，标签即可达成；新增 `context=resume`（子代理接着另一个会话的历史跑）会打开跨会话历史复用面——越权读取他人会话历史、与目标会话共享缓存命名空间造成错误复用两类风险都需产品级定义，而当前 fork 已覆盖"子代理需要父上下文"的主场景，无观测证据支持该扩展。
+
+**字段关系（互补，不重复表达）**：
+
+| 字段 | 取值 | 语义 | 生产者 |
+|---|---|---|---|
+| `context_mode` | `fresh` / `fork` | 子代理 spawn 的上下文来源（空历史 / 父快照） | 调度器（既有） |
+| `cache_lineage_mode` | `resume` | 本次运行续接的是持久化会话；前缀 key 连续性由 session id + 持久化 epoch 既有机制保证 | 宿主在续写入口打标，loop 读取并随 `llm.request.started` 发射 |
+
+**三条续写路径与打标点**：
+
+| 路径 | 打标点 | 条件 |
+|---|---|---|
+| CLI 启动期 `--session` / `--resume` / 启动选择器 | `restoreChatPersistenceState` | 会话确有持久历史 |
+| CLI 会话内 `/resume`、`/load`（latest / picker / 按 ID） | `loadRuntimeConversation` / `resumeLatestRuntimeConversation` | 同上 |
+| 控制面子代理 `subagent_resume` | `sessionAgentController.Resume` | 存储在 SessionStore 且有条目（批子代理不落 store 时 naturally no-op） |
+
+**诚实边界（写死为纪律，均有测试锁定）**：
+
+1. 只在确有持久化历史时打标——空会话贴 resume 会把"全新会话"误读成"续接未命中"；
+2. 打标必须回写存储（actor/executor 每轮从 store 重载会话）；写失败只告警、不阻塞 resume；
+3. loop 只认已知取值，未知字符串一律按未观测处理（不猜测、不外传任意标签）；
+4. 零行为变更：不动缓存键/epoch/任何执行路径；标签仅进入 cache analytics 记录（`CacheLineageMode`，record_json additive 字段）。
