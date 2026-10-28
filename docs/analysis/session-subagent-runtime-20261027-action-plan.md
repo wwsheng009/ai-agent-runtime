@@ -660,6 +660,7 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 4. provider response-header guard 专项已闭环（`4fa3ddc5`：任务级重试预算保留 + 持续挂起的显式收口两档）；task/batch deadline 档 E2E 亦已闭环（`0bebe723`）；连接拆除复核见 §13.5（`70710169`，泄漏已证伪）。
 5. `resume` 已按**窄读法**以标签口径落地（`8c152f4d`，口径见 §13.6）；「resume 作为 spawn 模式」经 2026-10-28 拍板明确**不做**——重启需先产品级定义越权读取与缓存命名空间错误共享两类风险。
 6. §8.2 的 `request↔attempt` 与 `usage_unavailable_reason` 两项已闭环（`ab6a830e`，见 §8 勾选）。
+7. 观察项（新，来自 §13.7 第 6 条数据）：82 条 `failed/agent_controller` 显式 `unknown` 失败缺可归因 error 细节——待源侧（轻量子代理失败/关闭路径）补 error 文本或 `error_code` 后再评估分类覆盖率。
 
 ### 13.5 备注
 
@@ -719,5 +720,6 @@ docs/analysis/session-subagent-runtime-20261027-action-plan.md
 1. **暂不升级为"至少一次"**：收益上限仅 42/197（21%），且其中 timeout 型占多数（provider 挂起/deadline 压力下重试成功率存疑）；升级还需 batch 起始预算预留，并须先定义写任务重试的重复副作用对策。
 2. **维持"最多 N 次"并写入报表口径**（`retry_skipped` 已把"为什么没有第二次"变成可读事实）。
 3. **前置观测门槛**：当 `source=scheduler` + `read_only=1` + 瞬时分类的失败样本累计 ≥20 条后，复算 `retry_skipped` 分布（重点看 `retry_skipped_deadline_budget` 占比）与"重试后成功率"，再定语义。
-4. 顺带观察（非本项）：失败分类 `unknown` 占 46%（91/197），主要来自轻量子代理的停止/关闭路径；若分析侧需区分"用户主动关闭 vs 真实失败"，应另立小项。
+4. 顺带观察（非本项）：失败分类 `unknown` 占 46%（91/197），主要来自轻量子代理的停止/关闭路径；若分析侧需区分"用户主动关闭 vs 真实失败"，应另立小项（更精确拆分见第 6 条）。
 5. **已收口（`d96486a4`）**：上述顺带观察已落地为失败分类口径修复——`error_code` 缺失或映射为 `unknown` 时，按完成状态语义兜底（`stopped/interrupted/canceled/cancelled` → `cancelled`，`timeout/timed_out` → `timeout`），读写两侧同规则；"用户/父级主动关闭"不再混入 `unknown`。
+6. **修复的生效面与投影（`d96486a4`，本机 197 失败行只读复算）**：全部失败行 `record_json` 已带显式分类，故**读取侧重推不改历史**（旧列不回填）。91 条 `unknown` 拆分：**82 条 `status=failed`**（`ClassifySubagentFailure` 对 nil/无细节错误的显式 unknown，按"不猜测"保留——真实失败但缺 error 细节，值得源侧补料）+ **9 条 `status=stopped`**（旧归一化产物）。归一化在生产者镜像（CLI `chat_actor_registry.go:1425` / runtime-server `session_runtime_support.go:1159`）与 ingest 两处共用同一实现，且 `record_json` 存的就是归一化后的 payload；因此**新样本**中「状态∈stopped 族/timeout 且分类为空」的失败将分别计为 `cancelled`/`timeout`（9 条那类不再落 `unknown`），82 条那类保持 `unknown`。
