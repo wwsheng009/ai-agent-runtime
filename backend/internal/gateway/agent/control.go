@@ -22,6 +22,13 @@ type Conn interface {
 	Close() error
 }
 
+// MountReporter is implemented by connections that can report the gateway's
+// mount registration outcome (the WebSocket tunnel does). Optional: older
+// transports simply leave Status.Mounts empty.
+type MountReporter interface {
+	Mounts() []MountStatus
+}
+
 // DialFunc establishes a tunnel connection. It is the single seam between the
 // state machine and the transport, which keeps this package standard-library
 // only and trivially testable.
@@ -397,6 +404,11 @@ func (c *Controller) connect(ctx context.Context, mode string) error {
 	c.conn = conn
 	c.status.NodeID = conn.NodeID()
 	c.status.ConsoleURL = conn.ConsoleURL()
+	if reporter, ok := conn.(MountReporter); ok {
+		c.status.Mounts = reporter.Mounts()
+	} else {
+		c.status.Mounts = nil
+	}
 	c.status.ConnectedAt = c.now()
 	c.status.LastHeartbeat = c.now()
 	c.status.LastError = ""
@@ -504,6 +516,7 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 	defer c.mu.Unlock()
 	c.status.NodeID = ""
 	c.status.ConsoleURL = ""
+	c.status.Mounts = nil
 	c.status.ConnectedAt = time.Time{}
 	if c.state == StateDisconnecting {
 		c.transition(StateDisconnected)
@@ -536,6 +549,7 @@ func (c *Controller) HandleConnectionLost(code, message string, retryable bool) 
 	}
 	c.status.NodeID = ""
 	c.status.ConsoleURL = ""
+	c.status.Mounts = nil
 	c.status.ConnectedAt = time.Time{}
 	c.status.ErrorCode = code
 	c.status.LastError = message

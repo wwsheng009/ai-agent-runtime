@@ -28,6 +28,17 @@ const (
 	// 恢复 / 关闭 / 新建）。动作本身在节点上执行，网关只记录「谁在什么时候
 	// 要求发生了什么」——被拒绝的排队请求同样要留痕，否则排查不到。
 	TypeWindowAction = "window_action"
+	// MCP mount events (docs/gateway/16-mcp-mount-tunnel.md). Only routing and
+	// credential metadata is recorded: never the local upstream token, the
+	// request body or tool arguments.
+	TypeMountRegistered   = "mount_registered"
+	TypeMountRejected     = "mount_rejected"
+	TypeMountRemoved      = "mount_removed"
+	TypeMountDisabled     = "mount_disabled"
+	TypeMountEnabled      = "mount_enabled"
+	TypeMountTokenCreated = "mount_token_created"
+	TypeMountTokenRevoked = "mount_token_revoked"
+	TypeMountRequest      = "mount_request"
 )
 
 // Event is one audit record.
@@ -98,6 +109,30 @@ func (l *Log) Entries(limit int) []Event {
 	out := make([]Event, 0, limit)
 	for i := count - 1; i >= 0 && len(out) < limit; i-- {
 		out = append(out, l.events[i])
+	}
+	return out
+}
+
+// Filter returns the most recent events matching keep, newest first. It is the
+// bounded alternative to fetching Entries(0) and filtering in the caller: the
+// limit applies to matches, not to the raw ring.
+func (l *Log) Filter(limit int, keep func(Event) bool) []Event {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := len(l.events)
+	if limit <= 0 || limit > count {
+		limit = count
+	}
+	out := make([]Event, 0, limit)
+	for i := count - 1; i >= 0 && len(out) < limit; i-- {
+		event := l.events[i]
+		if keep != nil && !keep(event) {
+			continue
+		}
+		out = append(out, event)
 	}
 	return out
 }

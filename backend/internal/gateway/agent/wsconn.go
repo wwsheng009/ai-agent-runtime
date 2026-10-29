@@ -187,6 +187,7 @@ type wsConn struct {
 
 	nodeID     string
 	consoleURL string
+	mounts     []MountStatus
 
 	heartbeatInterval time.Duration
 	register          RegisterFunc
@@ -221,6 +222,24 @@ type wsConn struct {
 
 func (c *wsConn) NodeID() string     { return c.nodeID }
 func (c *wsConn) ConsoleURL() string { return c.consoleURL }
+
+// Mounts implements MountReporter: the gateway's accepted/rejected mount
+// declarations for this connection.
+func (c *wsConn) Mounts() []MountStatus {
+	return append([]MountStatus(nil), c.mounts...)
+}
+
+// mountStatusesFromAck flattens the registration ack into the status shape.
+func mountStatusesFromAck(ack wire.RegisterAck) []MountStatus {
+	out := make([]MountStatus, 0, len(ack.AcceptedMounts)+len(ack.RejectedMounts))
+	for _, accepted := range ack.AcceptedMounts {
+		out = append(out, MountStatus{Slug: accepted.Slug, PublicURL: accepted.PublicURL})
+	}
+	for _, rejected := range ack.RejectedMounts {
+		out = append(out, MountStatus{Slug: rejected.Slug, Rejected: true, Reason: rejected.Reason})
+	}
+	return out
+}
 
 // Done exposes the connection death channel so the controller's auto-reconnect
 // watcher can detect GOAWAY / network loss (docs/gateway/12-connection-control.md).
@@ -315,6 +334,7 @@ func (c *wsConn) handshake(ctx context.Context, agentVersion string, cfg Config)
 	}
 	c.nodeID = ack.NodeID
 	c.consoleURL = ack.ConsoleURL
+	c.mounts = mountStatusesFromAck(ack)
 
 	_ = c.ws.SetReadDeadline(time.Time{})
 	return nil

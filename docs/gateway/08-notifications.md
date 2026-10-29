@@ -81,7 +81,7 @@ agent 侧订阅本地事件总线，按下表更新会话状态并（可选）�
 | `session_start` / `session_end` | — | — | 会话增删 | — |
 | 失败（`stop_failure` / run 失败） | error | **error** | ✅ | "「<会话>」执行失败" |
 
-`attention` 是**状态**（持久于注册表，控制台据此显示徽标/收件箱）；**通知**是**事件**（瞬时，用于 toast / Web Push），两者分离：
+`attention` 是**状态**（持久于注册表，会话卡片展示全部取值）；**通知**是**事件**（瞬时，用于 toast / Web Push），两者分离。控制台的徽标、收件箱和「需处理」筛选只使用可操作子集 `approval | question | error`；`completed | waiting` 仍保留为卡片状态、通知和活动记录，但不进入待办。
 
 - 状态：`SESSION_UPDATE{op:upsert, session:{...,attention}}`（已有，[03](./03-protocol.md) §3.4）；
 - 事件：新增 `NOTIFY` 帧（见 §4）。
@@ -248,14 +248,14 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | agent（runtime-server）上报 | `internal/api/runtimeapi/gateway_attention.go`、`gateway_handlers.go` | 订阅运行时事件总线：`agent.turn.started/finished`、`approval_requested/resolved`、`question_asked/answered`、`session_end/interrupted` → `attention`/`busy`；`EnableGatewayAttention()` 在启动装配时调用 |
 | 通知策略（合并/免打扰） | `cmd/gateway/push.go`、`notify_policy.go` | 低优先（`completed`/`waiting`）按 `--notify-coalesce-window`（默认 30s）合并为"N 个会话已完成"；`--notify-quiet-hours`（`HH:MM-HH:MM`，本地时间）内静音低优先；`approval`/`question`/`error` 高优先立即投递并穿透免打扰 |
 | `NOTIFY` 帧 | `internal/gateway/wire/messages.go`、`tunnel/notify.go`、`agent/controller.go` | 新增 `Notify`（`kind`/`priority`/`title`/`dedup_key`/`ts`）；agent 在 turn 边界/事件变化时随 `SESSION_UPDATE` 一并上报；网关按 `dedup_key` 去重并更新注册表 `attention`（不覆盖 `SESSION_UPDATE` 其它字段） |
-| 控制台聚合收件箱 | `cmd/gateway/console/{index.html,app.js,style.css}` | "待处理"聚合视图（按优先级排序 + 计数）；打开会话即标记已读（presence 即已读联动），注意力再次变化后重新出现 |
+| 控制台聚合收件箱 | `cmd/gateway/console/{index.html,app.js,style.css}` | "待处理"聚合视图只收 `approval/question/error`（按优先级排序 + 计数）；`completed/waiting` 只进卡片/通知/活动。打开会话即标记已读（presence 即已读联动），注意力再次变化后重新出现 |
 | 注册表持久化 | `tunnel/registry.go`、`tunnel/persist.go`、`cmd/gateway/main.go` | 注册表防抖快照到 `data/registry.json`（0600，默认 2s 合并窗口，退出时强制落盘）；重启恢复为 **stale** 条目（控制台显示"离线（快照）"），agent 重连（同 NodeID）即替换为 live；快照同时种子化推送去重快照，重启不会重推旧注意力；断开清理只删除自己的注册条目（比较 LastHeartbeat），避免覆盖重连后的 live 条目 |
 | 投递分级与重试 | `internal/gateway/push/sender.go`、`cmd/gateway/push.go` | `Notification.Urgency/TTL` 映射为 RFC 8030 请求头：`approval`/`question`/`error` → `Urgency: high` + TTL 10min（避免 Android Doze 把高优先提醒压到维护窗口），`completed`/`waiting` → `normal` + TTL 1h；429/5xx/网络失败退避重试（尊重 `Retry-After`），401/403 归为 `ErrRejected` 并记日志（VAPID 不一致不再静默失效） |
 | presence 主动释放 | `cmd/gateway/presence.go`、`console/app.js` | 新增 `POST /api/presence/release`（`{all:true}` 或 `{node_id,session_id}`）；页面 `visibilitychange(hidden)` / `pagehide` 时用 keepalive 释放，切后台后不再被 presence 抑制最长 90s |
 | 订阅自愈 | `console/sw.js` | 处理 `pushsubscriptionchange`：浏览器轮换/失效 endpoint 后自动重新订阅并回传网关（upsert），不再静默失联 |
 | 移动端可发现性与权限 | `console/app.js`、`console/index.html`、`console/manifest.webmanifest`、`console/*.png` | 点击手势内先 `Notification.requestPermission()`（iOS 要求）；HTTP 非安全上下文 / iOS 未安装 / 权限被拒绝均给出显性原因；A2HS 与 `beforeinstallprompt` 安装引导；`/api/push/test` 测试通知按钮；PNG 图标（192/512/180/apple-touch-icon + 通知 badge），修复 SVG 图标在系统通知中不显示的问题 |
 | **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；high 向 Web Push 与 ntfy **并行扇出**，normal 默认走 Web Push 主通道，可用 `--notify-normal-channels webpush,ntfy` 显式扩展；Web Push 关闭时 ntfy 仍独立投递；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click` 指向会话深链；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
-| **通知策略（独立配置页）** | `cmd/gateway/{notify_policy.go,notify_api.go,push.go,main.go}`、`internal/notify/{prefs.go,dispatcher.go}`、`console/{index.html,app.js,style.css}` | 新增 `<data-dir>/notify-policy.json`（`global`/`sessions`/`channels` 三级，字段 `muted`/`min_priority`/`allow_kinds`/`quiet_hours`），owner 保护的 `GET/PUT /api/notify/policy`，保存后**立即热加载**（无需重启）；`allow_kinds` 在 observe 阶段拦截被关闭的 kind（仍记入去重快照，不回溯补发）；控制台新增独立「通知设置」页（`#notifications`），原生通知桥 `nativeAttentionNotification` 先读策略再决定是否弹窗；`--notify-quiet-hours` 作为基线，策略显式给出 `global.quiet_hours` 时被替换（空数组 = 清空） |
+| **通知策略（独立配置页）** | `cmd/gateway/{notify_policy.go,notify_api.go,push.go,main.go}`、`internal/notify/{prefs.go,dispatcher.go}`、`console/{index.html,app.js,style.css}` | 新增 `<data-dir>/notify-policy.json`（`global`/`sessions`/`channels` 三级，字段 `muted`/`min_priority`/`allow_kinds`/`quiet_hours`），owner 保护的 `GET/PUT /api/notify/policy`，保存后**立即热加载**（无需重启）；`allow_kinds` 在 observe 阶段拦截被关闭的 kind（仍记入去重快照，不回溯补发）；控制台新增独立「通知设置」页（`#notifications`），结果导向范围/开始-结束时段校验/未保存拦截/固定保存条/会话覆盖搜索分组/未配置通道说明均已落地，原生通知桥 `nativeAttentionNotification` 先读策略再决定是否弹窗；`--notify-quiet-hours` 作为基线，策略显式给出 `global.quiet_hours` 时被替换（空数组 = 清空） |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时，向当前优先级选中的通道投递一次（high 全扇出；normal 为显式列表或 Web Push 主通道）。因此：
 

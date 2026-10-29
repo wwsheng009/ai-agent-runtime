@@ -28,10 +28,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/mcpmount"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
 	"github.com/wwsheng009/ai-agent-runtime/internal/notify/channels"
 )
@@ -42,6 +44,9 @@ type gatewayMetrics struct {
 	rateLimited atomic.Int64
 	proxy       atomic.Int64
 	banned      atomic.Int64
+	// MCP mounts (docs/gateway/16-mcp-mount-tunnel.md).
+	mountRequests   atomic.Int64
+	mountAuthFailed atomic.Int64
 }
 
 // hubEvent is one signal for a console SSE subscriber: either "full" (reload
@@ -251,6 +256,11 @@ func run() int {
 		// that publishes an unauthenticated console AND an open agent tunnel to
 		// the network. Defaults stay dev-friendly on loopback.
 		allowUnprotected = flag.Bool("allow-unprotected", false, "start even when listening non-loopback with no owner password and no device token (overrides the safety refusal)")
+		// MCP mounts (docs/gateway/16-mcp-mount-tunnel.md). The public endpoints
+		// are always mount-token authenticated, even when owner auth is disabled.
+		mountPathStyle = flag.String("mount-path-style", "m", "public path style for MCP mounts: \"m\" (/m/{slug}/...) or \"root\" (/{slug}/...)")
+		mountTokenTTL  = flag.Duration("mount-token-ttl", 90*24*time.Hour, "default lifetime of an issued mount token")
+		proxyMaxBody   = flag.Int64("proxy-max-request-body", 8<<20, "buffered request body cap for reverse-proxied requests in bytes (MCP tool calls need more than the historical 1 MiB)")
 	)
 	// Parse the (possibly "serve"-stripped) argument list after all flags are
 	// registered, so the documented "gateway serve --flag ..." spelling works.
@@ -487,13 +497,38 @@ func run() int {
 			presence.TouchSource(presenceSourceHost, nodeID, sessionID, false)
 		}
 	}
+	// mountManagerRef is assigned right after the tunnel server exists (the
+	// handler needs it as its Proxy). The callbacks cannot fire before the HTTP
+	// server starts, so a nil check is only a startup-ordering guard.
+	var mountManagerRef *mountManager
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
 		PublicBaseURL:        *publicBaseURL,
 		Registry:             registry,
 		DataDir:              *dataDir,
+		MaxProxyRequestBody:  *proxyMaxBody,
 		Authenticate:         deviceAuth(devices.Store, *deviceToken),
+		OnMountsPrepare: func(nodeID, nodeStable string, routes []string, mounts []wire.MountSpec) ([]wire.MountAck, []wire.MountAck) {
+			if mountManagerRef == nil {
+				rejected := make([]wire.MountAck, 0, len(mounts))
+				for _, mount := range mounts {
+					rejected = append(rejected, wire.MountAck{Slug: mount.Slug, Reason: "mounts_unavailable"})
+				}
+				return nil, rejected
+			}
+			return mountManagerRef.prepareMounts(nodeID, nodeStable, routes, mounts)
+		},
+		OnMountsActivate: func(nodeID, nodeStable string) {
+			if mountManagerRef != nil {
+				mountManagerRef.activateMounts(nodeID, nodeStable)
+			}
+		},
+		OnMountsDeactivate: func(nodeID, nodeStable string) {
+			if mountManagerRef != nil {
+				mountManagerRef.deactivateMounts(nodeID, nodeStable)
+			}
+		},
 		OnRouteDenied: func(r *http.Request) {
 			bans.Record(resolver.ClientIP(r))
 		},
@@ -527,6 +562,28 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
 	})
+
+	mounts, err := newMountManager(
+		*dataDir,
+		*mountPathStyle,
+		*publicBaseURL,
+		*mountTokenTTL,
+		server,
+		server.HasSession,
+		&metrics,
+		auditLog,
+		func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
+		},
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: %v\n", err)
+		return 1
+	}
+	mountManagerRef = mounts
+	if restored := mounts.registry.Count(); restored > 0 {
+		fmt.Fprintf(os.Stderr, "gateway: restored %d MCP mounts (%d live)\n", restored, mounts.registry.CountLive())
+	}
 
 	router := mux.NewRouter()
 	router.Handle("/gw/agent", limited(server))
@@ -671,7 +728,30 @@ func run() int {
 				limit = n
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"events": auditLog.Entries(limit)})
+		if limit > 2000 {
+			limit = 2000
+		}
+		typePrefix := strings.TrimSpace(r.URL.Query().Get("type"))
+		query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+		errorsOnly := r.URL.Query().Get("errors") == "1"
+		events := auditLog.Filter(limit, func(event audit.Event) bool {
+			if typePrefix != "" && !strings.HasPrefix(event.Type, typePrefix) {
+				return false
+			}
+			if errorsOnly && event.Result == "" {
+				return false
+			}
+			if query != "" {
+				haystack := strings.ToLower(strings.Join([]string{
+					event.Type, event.Actor, event.Result, event.IP, event.Detail,
+				}, " "))
+				if !strings.Contains(haystack, query) {
+					return false
+				}
+			}
+			return true
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
 	}))).Methods(http.MethodGet)
 	// Live registry events for the console (owner-protected SSE).
 	router.Handle("/api/events", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -849,7 +929,7 @@ func run() int {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()), pushSubscriptionCount(pushManager))
+		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()), pushSubscriptionCount(pushManager), mounts.registry.Count(), mounts.registry.CountLive())
 	})
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
 	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -861,6 +941,27 @@ func run() int {
 		}
 		server.ServeProxy(w, r, nodeID, path)
 	}))))
+	// MCP mounts: public endpoints authenticated by a mount token, never by the
+	// owner cookie. They intentionally bypass owner.RequireSession so
+	// programmatic MCP clients (which have no cookie) can call them; a disabled
+	// owner password must not open this namespace.
+	mountServe := http.HandlerFunc(mounts.serveMounts)
+	if mounts.style == mcpmount.PathStyleRoot {
+		router.MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+			return mounts.matchesRootPath(r.URL.Path)
+		}).Handler(limited(mountServe))
+	} else {
+		router.Handle("/m/{slug}", limited(mountServe))
+		router.PathPrefix("/m/{slug}/").Handler(limited(mountServe))
+	}
+	// Mount administration (owner session, same shape as /api/devices).
+	router.Handle("/api/mounts", owner.RequireSession(http.HandlerFunc(mounts.handleList))).Methods(http.MethodGet)
+	router.Handle("/api/mounts/logs", owner.RequireSession(http.HandlerFunc(mounts.handleLogs))).Methods(http.MethodGet)
+	router.Handle("/api/mounts/{slug}", owner.RequireSession(http.HandlerFunc(mounts.handleDelete))).Methods(http.MethodDelete)
+	router.Handle("/api/mounts/{slug}/tokens", owner.RequireSession(http.HandlerFunc(mounts.handleTokens)))
+	router.Handle("/api/mounts/{slug}/tokens/{id}", owner.RequireSession(http.HandlerFunc(mounts.handleTokenDelete))).Methods(http.MethodDelete)
+	router.Handle("/api/mounts/{slug}/disable", owner.RequireSession(http.HandlerFunc(mounts.handleDisable))).Methods(http.MethodPost)
+	router.Handle("/api/mounts/{slug}/enable", owner.RequireSession(http.HandlerFunc(mounts.handleEnable))).Methods(http.MethodPost)
 	// Connectors host wiring (docs/bots/03-host-integration.md §6/§7): JSON store
 	// under --data-dir, owner-session auth for the management API, public
 	// webhooks verified by each provider. Registered before the console "/"
@@ -992,7 +1093,7 @@ func authorizeMetrics(r *http.Request, token string) bool {
 }
 
 // writePrometheusMetrics renders the process counters in Prometheus text format.
-func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, devices, activeBans, pushSubs int) {
+func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, devices, activeBans, pushSubs, mounts, liveMounts int) {
 	write := func(name, help, typ string, value int64) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, value)
 	}
@@ -1004,4 +1105,8 @@ func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, dev
 	write("aicli_gateway_devices", "Device tokens.", "gauge", int64(devices))
 	write("aicli_gateway_active_bans", "Active bans.", "gauge", int64(activeBans))
 	write("aicli_gateway_push_subscriptions", "Stored Web Push subscriptions.", "gauge", int64(pushSubs))
+	write("aicli_gateway_mount_requests_total", "Requests to the MCP mount namespace.", "counter", m.mountRequests.Load())
+	write("aicli_gateway_mount_auth_failures_total", "Mount requests rejected by authentication or scope.", "counter", m.mountAuthFailed.Load())
+	write("aicli_gateway_mounts_registered", "Registered MCP mounts (live and stale).", "gauge", int64(mounts))
+	write("aicli_gateway_mounts_live", "MCP mounts backed by a live node.", "gauge", int64(liveMounts))
 }

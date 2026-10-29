@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,8 @@ func run(args []string) int {
 	switch args[0] {
 	case "serve":
 		return runServe(args[1:])
+	case "init":
+		return runInit(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
 	case "tools":
@@ -62,8 +65,9 @@ func printUsage(w *os.File) {
 	fmt.Fprintf(w, `aicli-remote-tools %s - remote tool server (MCP over stdio or Streamable HTTP)
 
 Usage:
+  aicli-remote-tools init   [options]           # write a ready-to-run config + token
   aicli-remote-tools serve  --stdio [options]   # SSH transport (one process per connection)
-  aicli-remote-tools serve  --http  [options]   # daemon transport (loopback by default)
+  aicli-remote-tools serve  --http  [options]   # daemon transport (loopback by default; implied when omitted)
   aicli-remote-tools doctor [options]           # self-check and effective settings
   aicli-remote-tools tools  [options]           # list the exposed tool names
 
@@ -89,11 +93,34 @@ Common options:
   --artifacts-max-bytes <n> Per-artifact size limit (default 67108864)
 
 HTTP options:
-  --http-listen <addr>      Listen address (default 127.0.0.1:18765)
+  --http-listen <addr>      Listen address (default 127.0.0.1:18765; 127.0.0.1:0 = random)
   --http-path <path>        MCP endpoint path (default /mcp)
   --http-token-env <name>   Env var holding the bearer token (default AICLI_REMOTE_TOKEN)
+  --http-token-file <file>  Read the bearer token from a 0600 file (preferred; overrides the env var)
   --http-access-log <file>  NDJSON request log (includes 401s; no Authorization header)
   --tls-cert <file> --tls-key <file>
+
+Gateway mount options (serve --http):
+  --gateway-url <url>            aicli-gateway endpoint, e.g. https://aicli.ttai.online
+  --gateway-from-aicli           Reuse the gateway.* section aicli/the TUI already persisted
+  --gateway-aicli-config <file>  Explicit aicli config file for the above (empty = layered defaults)
+  --gateway-token-file <file>    Device token file (0600), preferred over the env var
+  --gateway-token-env <name>     Env var holding the device token (default AICLI_GATEWAY_TOKEN)
+  --gateway-proxy-url <url>      Proxy for the agent→gateway tunnel (e.g. http://127.0.0.1:10810)
+  --instance <id>                Per-instance identity/label (derives instances/<id>/mount-id)
+  --gateway-name <name>          Node name shown in the gateway console
+  --gateway-self-name <name>     Mount name for this server's own endpoint (default self)
+  --gateway-self-slug <slug>     Pin the public path segment
+  --gateway-identity-file <file> Persisted mount identity (default ~/.aicli/data/gateway-agent/mount-id)
+  --gateway-no-mount-self        Publish only --mount entries
+  --mount name=<id>,upstream=<url>[,token_file=<f>][,token_env=<NAME>][,slug=<slug>]
+                                 Repeatable: publish another local MCP endpoint
+
+First-run behaviour:
+  a bare 'serve' creates ~/.aicli/remote-tools/config.yaml + mcp.token on first
+  run and reuses aicli's persisted gateway.* when present.
+  --no-auto-init                 skip creating the default config/token
+  --no-gateway                   ignore aicli's gateway config (stay local)
 
 envd backend options (serve --stdio --backend envd):
   --addr <host:port|url>    envd endpoint (required)
@@ -109,6 +136,14 @@ against paths canonicalized on the target, and only the stdio transport is
 available. envd performs no path or command checks of its own.
 
 Examples:
+  # Just run it in the directory you want to expose. First run auto-creates
+  # ~/.aicli/remote-tools/{config.yaml,mcp.token} and reuses aicli's gateway.
+  cd D:\work
+  aicli-remote-tools serve
+
+  # Explicit one-time setup (same result, with reviewable output):
+  aicli-remote-tools init --workspace D:\work
+
   # SSH stdio (local side: ssh-client --stdio ...)
   aicli-remote-tools serve --stdio --workspace /srv/app --tool-prefix remote_dev
 
@@ -140,6 +175,7 @@ func (s *stringListFlag) Set(value string) error {
 type serveFlags struct {
 	configPath    string
 	configB64     string
+	configSource  string
 	workspace     string
 	allowedRoots  string
 	profile       string
@@ -177,11 +213,102 @@ type serveFlags struct {
 	listen    string
 	httpPath  string
 	tokenEnv  string
+	tokenFile string
 	tlsCert   string
 	tlsKey    string
 	accessLog string
 
+	noAutoInit bool
+	noGateway  bool
+
+	gatewayURL       string
+	gatewayTokenEnv  string
+	gatewayTokenFile string
+	gatewayFromAICLI bool
+	gatewayAICLICfg  string
+	gatewayProxyURL  string
+	instance         string
+	gatewayName      string
+	gatewayPathStyle string
+	gatewaySelfName  string
+	gatewaySelfSlug  string
+	gatewayIdentity  string
+	noMountSelf      bool
+	gatewayMounts    gatewayMountFlag
+
 	jsonOut bool
+}
+
+// gatewayMountFlag collects repeatable --mount specs:
+//
+//	--mount name=prod,upstream=http://127.0.0.1:18766/mcp,token_env=AICLI_TOKEN
+type gatewayMountFlag []remotetools.GatewayMountConfig
+
+func (f *gatewayMountFlag) String() string {
+	parts := make([]string, 0, len(*f))
+	for _, mount := range *f {
+		parts = append(parts, mount.Name+"="+mount.Upstream)
+	}
+	return strings.Join(parts, ";")
+}
+
+func (f *gatewayMountFlag) Set(value string) error {
+	entry := remotetools.GatewayMountConfig{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, raw, ok := strings.Cut(part, "=")
+		if !ok {
+			return fmt.Errorf("--mount entry %q must be key=value", part)
+		}
+		key, raw = strings.ToLower(strings.TrimSpace(key)), strings.TrimSpace(raw)
+		switch key {
+		case "name":
+			entry.Name = raw
+		case "slug":
+			entry.Slug = raw
+		case "upstream":
+			entry.Upstream = raw
+		case "token_env", "token-env":
+			entry.TokenEnv = raw
+		case "token_file", "token-file":
+			entry.TokenFile = raw
+		case "auth", "auth_type", "auth-type":
+			entry.AuthType = raw
+		case "header":
+			entry.Header = raw
+		case "timeout":
+			parsed, err := time.ParseDuration(raw)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("--mount timeout %q must be a positive duration", raw)
+			}
+			entry.Timeout = remotetools.Duration{Duration: parsed}
+		case "max_body", "max-body":
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("--mount max_body %q must be a positive integer", raw)
+			}
+			entry.MaxBodyBytes = parsed
+		case "max_concurrency", "max-concurrency":
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("--mount max_concurrency %q must be a positive integer", raw)
+			}
+			entry.MaxConcurren = parsed
+		default:
+			return fmt.Errorf("--mount has unknown key %q", key)
+		}
+	}
+	if entry.Upstream == "" {
+		return fmt.Errorf("--mount needs upstream=<url>")
+	}
+	if entry.Name == "" {
+		return fmt.Errorf("--mount needs name=<id>")
+	}
+	*f = append(*f, entry)
+	return nil
 }
 
 func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
@@ -189,6 +316,8 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&flags.configPath, "config", "", "YAML config file")
 	fs.StringVar(&flags.configB64, "config-b64", "", "base64-encoded JSON config (overrides --config)")
+	fs.BoolVar(&flags.noAutoInit, "no-auto-init", false, "do not create the default config/token on first run")
+	fs.BoolVar(&flags.noGateway, "no-gateway", false, "ignore aicli's persisted gateway config (stay local)")
 	fs.StringVar(&flags.workspace, "workspace", "", "workspace root (required unless set in config)")
 	fs.StringVar(&flags.allowedRoots, "allowed-roots", "", "comma-separated extra absolute roots")
 	fs.StringVar(&flags.profile, "profile", "", "readonly|standard|ops|custom")
@@ -232,9 +361,25 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.listen, "http-listen", "", "HTTP listen address")
 	fs.StringVar(&flags.httpPath, "http-path", "", "HTTP endpoint path")
 	fs.StringVar(&flags.tokenEnv, "http-token-env", "", "env var holding the bearer token")
+	fs.StringVar(&flags.tokenFile, "http-token-file", "", "0600 file holding the bearer token (preferred over --http-token-env)")
 	fs.StringVar(&flags.tlsCert, "tls-cert", "", "TLS certificate file")
 	fs.StringVar(&flags.tlsKey, "tls-key", "", "TLS private key file")
 	fs.StringVar(&flags.accessLog, "http-access-log", "", "NDJSON HTTP access log path")
+
+	fs.StringVar(&flags.gatewayURL, "gateway-url", "", "aicli-gateway endpoint (wss:// or https://)")
+	fs.StringVar(&flags.gatewayTokenEnv, "gateway-token-env", "", "env var holding the gateway device token (default AICLI_GATEWAY_TOKEN)")
+	fs.StringVar(&flags.gatewayTokenFile, "gateway-token-file", "", "0600 file holding the gateway device token (preferred over --gateway-token-env)")
+	fs.BoolVar(&flags.gatewayFromAICLI, "gateway-from-aicli", false, "reuse the gateway.* connection settings aicli/the TUI already persisted")
+	fs.StringVar(&flags.gatewayAICLICfg, "gateway-aicli-config", "", "explicit aicli config file for --gateway-from-aicli (empty = layered defaults)")
+	fs.StringVar(&flags.gatewayProxyURL, "gateway-proxy-url", "", "proxy for the agent→gateway tunnel, e.g. http://127.0.0.1:10810")
+	fs.StringVar(&flags.instance, "instance", "", "per-instance identity/label (derives instances/<id>/mount-id and default names)")
+	fs.StringVar(&flags.gatewayName, "gateway-name", "", "node name shown in the gateway console")
+	fs.StringVar(&flags.gatewayPathStyle, "gateway-path-style", "", "public path style: m (/m/{slug}/...) or root (/{slug}/...)")
+	fs.StringVar(&flags.gatewaySelfName, "gateway-self-name", "", "mount name for this server's own endpoint (default self)")
+	fs.StringVar(&flags.gatewaySelfSlug, "gateway-self-slug", "", "pinned public slug for this server's own endpoint")
+	fs.StringVar(&flags.gatewayIdentity, "gateway-identity-file", "", "path of the persisted mount identity (default ~/.aicli/data/gateway-agent/mount-id)")
+	fs.BoolVar(&flags.noMountSelf, "gateway-no-mount-self", false, "do not publish this server's own endpoint (publish only --mount entries)")
+	fs.Var(&flags.gatewayMounts, "mount", "publish an extra local MCP endpoint: name=...,upstream=http://127.0.0.1:PORT/mcp[,token_env=...]")
 
 	fs.BoolVar(&flags.jsonOut, "json", false, "machine-readable output (doctor/tools)")
 	return fs
@@ -255,6 +400,14 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 			return nil, err
 		}
 		cfg = loaded
+		flags.configSource = strings.TrimSpace(flags.configPath)
+	} else if found := remotetools.FindConfigFile(); found != "" {
+		loaded, err := remotetools.LoadConfigFile(found)
+		if err != nil {
+			return nil, err
+		}
+		cfg = loaded
+		flags.configSource = found
 	} else {
 		cfg = remotetools.DefaultConfig()
 	}
@@ -319,6 +472,9 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	if flags.tokenEnv != "" {
 		cfg.HTTP.TokenEnv = flags.tokenEnv
 	}
+	if flags.tokenFile != "" {
+		cfg.HTTP.TokenFile = flags.tokenFile
+	}
 	if flags.tlsCert != "" {
 		cfg.HTTP.TLSCert = flags.tlsCert
 	}
@@ -327,6 +483,63 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.accessLog != "" {
 		cfg.HTTP.AccessLog = flags.accessLog
+	}
+	if flags.gatewayURL != "" {
+		cfg.Gateway.URL = flags.gatewayURL
+	}
+	if flags.gatewayTokenEnv != "" {
+		cfg.Gateway.TokenEnv = flags.gatewayTokenEnv
+	}
+	if flags.gatewayTokenFile != "" {
+		cfg.Gateway.TokenFile = flags.gatewayTokenFile
+	}
+	if flags.gatewayFromAICLI {
+		enabled := true
+		cfg.Gateway.UseAICLIConfig = &enabled
+	}
+	if flags.gatewayAICLICfg != "" {
+		cfg.Gateway.AICLIConfigFile = flags.gatewayAICLICfg
+	}
+	if flags.gatewayProxyURL != "" {
+		cfg.Gateway.ProxyURL = flags.gatewayProxyURL
+	}
+	if flags.gatewayName != "" {
+		cfg.Gateway.Name = flags.gatewayName
+	}
+	if flags.gatewayPathStyle != "" {
+		cfg.Gateway.PathStyle = flags.gatewayPathStyle
+	}
+	if flags.gatewaySelfName != "" {
+		cfg.Gateway.SelfName = flags.gatewaySelfName
+	}
+	if flags.gatewaySelfSlug != "" {
+		cfg.Gateway.SelfSlug = flags.gatewaySelfSlug
+	}
+	if flags.gatewayIdentity != "" {
+		cfg.Gateway.IdentityFile = flags.gatewayIdentity
+	}
+	if raw := strings.TrimSpace(flags.instance); raw != "" {
+		// A CLI instance is the shorthand: it owns the identity path and the
+		// default mount/node labels unless the operator explicitly overrode a
+		// field with its dedicated flag. Clearing config values here prevents a
+		// shared config's identityFile/selfName from silently defeating it.
+		cfg.Gateway.Instance = raw
+		if flags.gatewayIdentity == "" {
+			cfg.Gateway.IdentityFile = ""
+		}
+		if flags.gatewaySelfName == "" {
+			cfg.Gateway.SelfName = ""
+		}
+		if flags.gatewayName == "" {
+			cfg.Gateway.Name = ""
+		}
+	}
+	if flags.noMountSelf {
+		disabled := false
+		cfg.Gateway.MountSelf = &disabled
+	}
+	if len(flags.gatewayMounts) > 0 {
+		cfg.Gateway.Mounts = append(cfg.Gateway.Mounts, flags.gatewayMounts...)
 	}
 	if raw := strings.TrimSpace(flags.backend); raw != "" {
 		cfg.Backend = remotetools.Backend(strings.ToLower(raw))
@@ -367,9 +580,15 @@ func runServe(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if flags.stdio == flags.http {
-		fmt.Fprintln(os.Stderr, "aicli-remote-tools: exactly one of --stdio or --http is required")
+	if flags.stdio && flags.http {
+		fmt.Fprintln(os.Stderr, "aicli-remote-tools: --stdio and --http are mutually exclusive")
 		return 2
+	}
+	if !flags.stdio && !flags.http {
+		// Config-first flow: `init` writes an HTTP daemon config, and a bare
+		// `serve` should not need a second flag. SSH stdio stays explicit.
+		flags.http = true
+		fmt.Fprintln(os.Stderr, "aicli-remote-tools: no transport flag; defaulting to --http (use --stdio for SSH stdio)")
 	}
 
 	// The remote server keeps its own config loader (YAML/base64/target policy),
@@ -380,10 +599,22 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: %v\n", err)
 		return 1
 	}
+	if strings.TrimSpace(flags.instance) == "" &&
+		cfg.Gateway.Instance == "" &&
+		cfg.Gateway.IdentityFile == "" &&
+		cfg.Gateway.SelfName == "" {
+		// Default serve behaviour: one identity per workspace. The first
+		// workspace may claim the legacy shared identity (normalizeGateway
+		// decides); later workspaces get an auto-<hash> instance.
+		cfg.Gateway.AutoInstance = true
+	}
 	if flags.stdio {
 		cfg.Transport = "stdio"
 	} else {
 		cfg.Transport = "http"
+		// A bare `serve` sets itself up on first run: default token, config
+		// file, and (when present) the gateway connection aicli already knows.
+		applyAutoInit(cfg, flags)
 	}
 	return remoteServe(cfg, flags.stdio)
 }
@@ -417,6 +648,11 @@ func remoteServe(cfg *remotetools.Config, stdio bool) int {
 			return 1
 		}
 		return 0
+	}
+	// Gateway mounts are an enhancement: a failure here (missing token, bad
+	// identity path) must leave the local HTTP transport working unchanged.
+	if err := server.EnableGateway(ctx, cfg.Gateway); err != nil {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: gateway disabled: %v\n", err)
 	}
 	if err := server.RunHTTP(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: http server failed: %v\n", err)

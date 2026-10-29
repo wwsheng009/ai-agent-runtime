@@ -51,6 +51,20 @@ type Server struct {
 	slots chan struct{}
 	// envd is the envd execution backend; nil for the local backend.
 	envd *envdBackend
+	// Gateway mount wiring (docs/gateway/16-mcp-mount-tunnel.md). gatewayStart
+	// runs once the HTTP listener is bound so the self mount advertises the real
+	// address; gatewayClose tears the tunnel down with the server.
+	gatewayCfg      GatewayConfig
+	gatewayIdentity string
+	// gatewayToken is resolved once at EnableGateway time (file preferred over
+	// environment) and reused for every dial; re-reading per reconnect would
+	// make a rotated file ambiguous.
+	gatewayToken string
+	gatewayStart func(localAddr string) error
+	gatewayClose func()
+	// instanceLock is held for the process lifetime so two services cannot
+	// silently share one mount identity (and fight over the same public slug).
+	instanceLock *os.File
 }
 
 // NewServer builds the service and validates the tool surface invariants.
@@ -107,9 +121,10 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 		_ = audit.Close()
 		return nil, err
 	}
-	token := ""
-	if cfg.HTTP.TokenEnv != "" {
-		token = strings.TrimSpace(os.Getenv(cfg.HTTP.TokenEnv))
+	token, err := ResolveSecret("http.tokenFile", cfg.HTTP.TokenEnv, cfg.HTTP.TokenFile)
+	if err != nil {
+		_ = audit.Close()
+		return nil, err
 	}
 	principal := principalFor(cfg, token)
 	metrics := NewMetrics()
@@ -171,6 +186,13 @@ func transportOf(cfg *Config) string {
 func (s *Server) Close() error {
 	if s == nil {
 		return nil
+	}
+	if s.gatewayClose != nil {
+		s.gatewayClose()
+	}
+	if s.instanceLock != nil {
+		_ = s.instanceLock.Close()
+		s.instanceLock = nil
 	}
 	// Running jobs are children of this process: leaving them behind after the
 	// daemon stops would orphan a build on the target.
@@ -312,6 +334,13 @@ func (s *Server) RunHTTPWithListener(ctx context.Context, onListening func(addr 
 	if onListening != nil {
 		onListening(listener.Addr().String())
 	}
+	if s.gatewayStart != nil {
+		// Best-effort: an unreachable gateway must not take the local HTTP
+		// transport down (design invariant 4).
+		if err := s.gatewayStart(listener.Addr().String()); err != nil {
+			fmt.Fprintf(os.Stderr, "aicli-remote-tools: gateway mounts disabled: %v\n", err)
+		}
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -320,8 +349,9 @@ func (s *Server) RunHTTPWithListener(ctx context.Context, onListening func(addr 
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Fprintf(os.Stderr, "aicli-remote-tools: http transport on %s%s workspace=%s tools=%s\n",
-		s.cfg.HTTP.Listen, s.cfg.HTTP.Path, s.workspace.Root(), strings.Join(s.ToolNames(), ","))
+	// Report the bound address, not the configured one: `--http-listen
+	// 127.0.0.1:0` picks a free port and clients need the real number.
+	s.printHTTPBanner(listener.Addr().String())
 
 	if s.cfg.HTTP.TLSCert != "" && s.cfg.HTTP.TLSKey != "" {
 		err := server.ServeTLS(listener, s.cfg.HTTP.TLSCert, s.cfg.HTTP.TLSKey)

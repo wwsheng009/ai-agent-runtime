@@ -146,26 +146,93 @@ const (
 
 // Register is the node self-description sent after WELCOME (A→G, stream 0).
 type Register struct {
-	NodeID       string           `json:"node_id,omitempty"`
-	Kind         string           `json:"kind,omitempty"`
-	Name         string           `json:"name,omitempty"`
-	DeviceName   string           `json:"device_name,omitempty"`
-	Version      string           `json:"version,omitempty"`
-	BuildTime    string           `json:"build_time,omitempty"`
-	OS           string           `json:"os,omitempty"`
-	Arch         string           `json:"arch,omitempty"`
-	Capabilities []string         `json:"capabilities,omitempty"`
-	Workspace    *WorkspaceInfo   `json:"workspace,omitempty"`
-	Routes       []string         `json:"routes,omitempty"`
-	Sessions     []SessionSummary `json:"sessions,omitempty"`
+	NodeID       string   `json:"node_id,omitempty"`
+	Kind         string   `json:"kind,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	DeviceName   string   `json:"device_name,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	BuildTime    string   `json:"build_time,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Arch         string   `json:"arch,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	// NodeStable is the node's persisted identity. Unlike NodeID it survives
+	// restarts, so mount slugs derived from it keep their public URL.
+	NodeStable string           `json:"node_stable,omitempty"`
+	Workspace  *WorkspaceInfo   `json:"workspace,omitempty"`
+	Routes     []string         `json:"routes,omitempty"`
+	Sessions   []SessionSummary `json:"sessions,omitempty"`
+	// Mounts declares the locally hosted MCP endpoints this node offers through
+	// the gateway's mount namespace (docs/gateway/16-mcp-mount-tunnel.md).
+	// Additive: gateways that predate mounts ignore the field, and nodes that do
+	// not host MCP endpoints leave it empty.
+	Mounts []MountSpec `json:"mounts,omitempty"`
 }
 
 // RegisterAck confirms the node registration (G→A, stream 0).
 type RegisterAck struct {
-	NodeID         string   `json:"node_id"`
-	ConsoleURL     string   `json:"console_url,omitempty"`
-	AcceptedRoutes []string `json:"accepted_routes,omitempty"`
-	RejectedRoutes []string `json:"rejected_routes,omitempty"`
+	NodeID         string     `json:"node_id"`
+	ConsoleURL     string     `json:"console_url,omitempty"`
+	AcceptedRoutes []string   `json:"accepted_routes,omitempty"`
+	RejectedRoutes []string   `json:"rejected_routes,omitempty"`
+	AcceptedMounts []MountAck `json:"accepted_mounts,omitempty"`
+	RejectedMounts []MountAck `json:"rejected_mounts,omitempty"`
+}
+
+// MountSpec is one locally hosted MCP endpoint a node publishes through the
+// gateway. Upstream is interpreted on the node only: the gateway never dials
+// it, so it may name a loopback port or an internal host.
+type MountSpec struct {
+	// ID is stable within the node (defaults to Name). It is the other half of
+	// the mount identity that derives Slug.
+	ID string `json:"id"`
+	// Name is the human-readable label; it also feeds slug derivation when Slug
+	// is empty.
+	Name string `json:"name,omitempty"`
+	// Slug pins the public path segment. Empty asks the gateway to derive it.
+	Slug     string       `json:"slug,omitempty"`
+	Kind     string       `json:"kind,omitempty"`
+	Upstream string       `json:"upstream"`
+	Auth     *MountAuth   `json:"auth,omitempty"`
+	Limits   *MountLimits `json:"limits,omitempty"`
+	Labels   *MountLabels `json:"labels,omitempty"`
+}
+
+// MountAuth describes how the node authenticates to its local MCP endpoint.
+// Only the environment variable NAME travels; the secret stays on the node.
+type MountAuth struct {
+	// Type is "bearer" (default), "header" or "none".
+	Type string `json:"type,omitempty"`
+	// TokenEnv names the local environment variable holding the credential.
+	TokenEnv string `json:"token_env,omitempty"`
+	// Header overrides the request header for Type "header" (default
+	// "Authorization").
+	Header string `json:"header,omitempty"`
+}
+
+// MountLimits bounds one mount's request body, call duration and in-flight
+// requests. Zero values mean "use the gateway defaults".
+type MountLimits struct {
+	MaxBodyBytes   int64 `json:"max_body_bytes,omitempty"`
+	TimeoutSec     int   `json:"timeout_sec,omitempty"`
+	MaxConcurrency int   `json:"max_concurrency,omitempty"`
+}
+
+// MountLabels carries display-only metadata for the console. It is never used
+// for routing or authorization.
+type MountLabels struct {
+	Profile    string `json:"profile,omitempty"`
+	ToolPrefix string `json:"tool_prefix,omitempty"`
+	TargetName string `json:"target_name,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
+}
+
+// MountAck reports one mount's registration outcome. PublicURL is populated for
+// accepted mounts only; Reason carries a stable machine-readable code for
+// rejected ones (for example "mount_slug_conflict").
+type MountAck struct {
+	Slug      string `json:"slug"`
+	PublicURL string `json:"public_url,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // LoadInfo is the optional load section of a heartbeat.

@@ -16,7 +16,10 @@ import (
 
 // Node is a registered agent node.
 type Node struct {
-	NodeID        string                `json:"node_id"`
+	NodeID string `json:"node_id"`
+	// NodeStable is the node's persisted identity (survives restarts), used as
+	// the first half of a mount identity. Empty for agents that predate mounts.
+	NodeStable    string                `json:"node_stable,omitempty"`
 	Kind          string                `json:"kind,omitempty"`
 	Name          string                `json:"name,omitempty"`
 	DeviceName    string                `json:"device_name,omitempty"`
@@ -25,6 +28,7 @@ type Node struct {
 	Arch          string                `json:"arch,omitempty"`
 	Capabilities  []string              `json:"capabilities,omitempty"`
 	Routes        []string              `json:"routes,omitempty"`
+	Mounts        []wire.MountSpec      `json:"mounts,omitempty"`
 	Sessions      []wire.SessionSummary `json:"sessions,omitempty"`
 	RemoteAddr    string                `json:"remote_addr,omitempty"`
 	RegisteredAt  time.Time             `json:"registered_at"`

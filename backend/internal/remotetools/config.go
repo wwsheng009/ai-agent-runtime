@@ -187,6 +187,10 @@ type HTTPConfig struct {
 	// TokenEnv names the environment variable holding the bearer token. The
 	// token is never read from the command line or written to logs.
 	TokenEnv string `yaml:"tokenEnv" json:"tokenEnv"`
+	// TokenFile reads the bearer token from a 0600 file once at startup. It
+	// takes precedence over TokenEnv and is the recommended shape for a
+	// long-lived daemon (no shell profile, no exported environment).
+	TokenFile string `yaml:"tokenFile,omitempty" json:"tokenFile,omitempty"`
 	// TLSCert / TLSKey enable HTTPS when both are set.
 	TLSCert string `yaml:"tlsCert" json:"tlsCert"`
 	TLSKey  string `yaml:"tlsKey" json:"tlsKey"`
@@ -285,6 +289,9 @@ type Config struct {
 	HTTP   HTTPConfig  `yaml:"http" json:"http"`
 	Audit  AuditConfig `yaml:"audit" json:"audit"`
 	Jobs   JobsConfig  `yaml:"jobs" json:"jobs"`
+	// Gateway publishes this server's MCP endpoint(s) through aicli-gateway
+	// (docs/gateway/16-mcp-mount-tunnel.md). Empty URL disables it.
+	Gateway GatewayConfig `yaml:"gateway" json:"gateway"`
 	// Artifacts stores full captures of folded tool output.
 	Artifacts ArtifactConfig `yaml:"artifacts" json:"artifacts"`
 }
@@ -315,7 +322,6 @@ func DefaultConfig() *Config {
 			DenyShellMetachars: true,
 		},
 		HTTP: HTTPConfig{
-			Listen:   "127.0.0.1:18765",
 			Path:     "/mcp",
 			TokenEnv: "AICLI_REMOTE_TOKEN",
 		},
@@ -388,7 +394,14 @@ func (c *Config) Normalize() error {
 
 	workspace := strings.TrimSpace(c.Workspace)
 	if workspace == "" {
-		return fmt.Errorf("workspace is required")
+		// Local backend: default to the current directory, which is what the
+		// operator just ran `serve` from. envd still requires an explicit
+		// absolute target path (it lives on another machine).
+		if c.Backend == BackendEnvD {
+			return fmt.Errorf("workspace is required for the envd backend")
+		}
+		workspace = "."
+		c.Workspace = workspace
 	}
 	if c.Backend == BackendEnvD {
 		if err := c.normalizeEnvD(workspace); err != nil {
@@ -492,6 +505,7 @@ func (c *Config) Normalize() error {
 	if c.HTTP.TokenEnv == "" {
 		c.HTTP.TokenEnv = "AICLI_REMOTE_TOKEN"
 	}
+	c.HTTP.TokenFile = strings.TrimSpace(c.HTTP.TokenFile)
 	if (strings.TrimSpace(c.HTTP.TLSCert) == "") != (strings.TrimSpace(c.HTTP.TLSKey) == "") {
 		return fmt.Errorf("tlsCert and tlsKey must be set together")
 	}
@@ -525,6 +539,20 @@ func (c *Config) Normalize() error {
 	}
 	if c.HTTP.AccessLogMaxBackups < 0 {
 		return fmt.Errorf("http.accessLogMaxBackups must not be negative")
+	}
+	if err := c.normalizeGateway(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.HTTP.Listen) == "" {
+		// A published mount does not care which loopback port it uses (the
+		// gateway forwards to the bound address from the listener callback), so
+		// pick a free port and let two nodes coexist on one machine. Local-only
+		// servers keep the stable documented port for client configs.
+		if strings.TrimSpace(c.Gateway.URL) != "" || c.Gateway.useAICLIConfig() {
+			c.HTTP.Listen = "127.0.0.1:0"
+		} else {
+			c.HTTP.Listen = "127.0.0.1:18765"
+		}
 	}
 	return nil
 }

@@ -2,6 +2,16 @@ package agent
 
 import "time"
 
+// MountStatus is the gateway's registration outcome for one MCP mount
+// (docs/gateway/16-mcp-mount-tunnel.md). PublicURL is empty when the gateway has
+// no --public-base-url configured.
+type MountStatus struct {
+	Slug      string `json:"slug"`
+	PublicURL string `json:"public_url,omitempty"`
+	Rejected  bool   `json:"rejected,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 // Status is a read-only snapshot of the agent's connection state. It is the
 // single shape rendered by the aicli `/gateway status` command and by the
 // runtime-server GET /api/runtime/gateway/status endpoint, so the two control
@@ -36,6 +46,9 @@ type Status struct {
 	OperatorDisconnected bool `json:"operator_disconnected"`
 	// TokenHint is a non-secret fingerprint of the configured token.
 	TokenHint string `json:"token_hint,omitempty"`
+	// Mounts reports the gateway's accepted/rejected mount declarations for the
+	// current connection. Empty for hosts that publish no mounts.
+	Mounts []MountStatus `json:"mounts,omitempty"`
 }
 
 // Connected reports whether the agent currently holds a live registration.

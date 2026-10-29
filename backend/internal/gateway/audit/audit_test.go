@@ -56,3 +56,28 @@ func TestLogPersistsToFile(t *testing.T) {
 		t.Fatalf("audit file missing event: %s", data)
 	}
 }
+
+func TestLogFilterAppliesLimitAfterMatching(t *testing.T) {
+	log := New(100, "")
+	base := time.Unix(1_700_000_000, 0)
+	log.now = func() time.Time { return base }
+	log.Record(Event{Type: TypeMountRequest, Detail: "aaaaaaaa 401"})
+	log.Record(Event{Type: TypeTunnelConnected, Detail: "node-1"})
+	log.Record(Event{Type: TypeMountRequest, Detail: "bbbbbbbb 502"})
+	log.Record(Event{Type: TypeMountRegistered, Detail: "cccccccc"})
+
+	got := log.Filter(2, func(event Event) bool {
+		return strings.HasPrefix(event.Type, "mount")
+	})
+	if len(got) != 2 {
+		t.Fatalf("Filter returned %d events, want 2", len(got))
+	}
+	if got[0].Type != TypeMountRegistered || got[1].Type != TypeMountRequest {
+		t.Fatalf("Filter order = %s, %s; want newest mount events", got[0].Type, got[1].Type)
+	}
+
+	all := log.Filter(0, nil)
+	if len(all) != 4 || all[0].Type != TypeMountRegistered {
+		t.Fatalf("Filter(nil) = %+v, want all 4 newest first", all)
+	}
+}

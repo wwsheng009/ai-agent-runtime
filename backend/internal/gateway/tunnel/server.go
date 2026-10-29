@@ -63,6 +63,21 @@ type Config struct {
 	// DataDir enables registry persistence (registry.json under DataDir,
 	// debounced). Empty disables persistence. Optional.
 	DataDir string
+	// MaxProxyRequestBody overrides the buffered request body cap for reverse
+	// proxied requests (default 1 MiB). MCP mounts raise this because tool calls
+	// legitimately carry large payloads.
+	MaxProxyRequestBody int64
+	// OnMountsPrepare validates and records the mounts a node declares. It runs
+	// before REGISTER_ACK is written, so implementations must insert records as
+	// stale: the session is not registered yet and nothing may be routed.
+	// accepted/rejected are echoed in the ack. Optional.
+	OnMountsPrepare func(nodeID, nodeStable string, routes []string, mounts []wire.MountSpec) (accepted, rejected []wire.MountAck)
+	// OnMountsActivate runs after the session is registered and marks the node's
+	// mounts live. Optional.
+	OnMountsActivate func(nodeID, nodeStable string)
+	// OnMountsDeactivate runs when the connection ends and marks the node's
+	// mounts stale so their public URLs stay reserved (502, never 404). Optional.
+	OnMountsDeactivate func(nodeID, nodeStable string)
 	// Upgrader overrides the WebSocket upgrader (tests).
 	Upgrader *websocket.Upgrader
 }
@@ -144,6 +159,13 @@ func (s *Server) session(nodeID string) (*session, bool) {
 // Registry returns the node registry.
 func (s *Server) Registry() *Registry { return s.registry }
 
+// HasSession reports whether nodeID currently has a live tunnel connection.
+// Mount routing uses it to answer 502 before entering ServeProxy.
+func (s *Server) HasSession(nodeID string) bool {
+	_, ok := s.session(strings.TrimSpace(nodeID))
+	return ok
+}
+
 // PersistSnapshot forces a registry snapshot write (used on shutdown, after the
 // debounced scheduled write has been cancelled or not yet fired). No-op when
 // persistence is disabled.
@@ -199,6 +221,27 @@ func (s *Server) logf(format string, args ...any) {
 func (s *Server) notifyRegistryChanged() {
 	if s.cfg.OnRegistryChanged != nil {
 		s.cfg.OnRegistryChanged()
+	}
+}
+
+// prepareMounts reports the node's mount registration outcome. The callback is
+// optional: gateways without mount support simply ignore the register field.
+func (s *Server) prepareMounts(nodeID, nodeStable string, routes []string, mounts []wire.MountSpec) ([]wire.MountAck, []wire.MountAck) {
+	if s.cfg.OnMountsPrepare == nil || len(mounts) == 0 {
+		return nil, nil
+	}
+	return s.cfg.OnMountsPrepare(nodeID, nodeStable, routes, mounts)
+}
+
+func (s *Server) activateMounts(nodeID, nodeStable string) {
+	if s.cfg.OnMountsActivate != nil {
+		s.cfg.OnMountsActivate(nodeID, nodeStable)
+	}
+}
+
+func (s *Server) deactivateMounts(nodeID, nodeStable string) {
+	if s.cfg.OnMountsDeactivate != nil {
+		s.cfg.OnMountsDeactivate(nodeID, nodeStable)
 	}
 }
 
@@ -275,6 +318,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	nodeID := s.assignNodeID(reg)
 	node := &Node{
 		NodeID:        nodeID,
+		NodeStable:    reg.NodeStable,
 		Kind:          reg.Kind,
 		Name:          reg.Name,
 		DeviceName:    reg.DeviceName,
@@ -283,6 +327,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		Arch:          reg.Arch,
 		Capabilities:  reg.Capabilities,
 		Routes:        reg.Routes,
+		Mounts:        reg.Mounts,
 		Sessions:      reg.Sessions,
 		RemoteAddr:    remoteAddr(r),
 		RegisteredAt:  nowUTC(),
@@ -309,16 +354,22 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	// REGISTER_ACK 必须先于会话入表写出：agent 握手把 REGISTER_ACK 视为
 	// REGISTER 的紧接回复（wsconn 握手会拒绝其它类型的首帧），而会话一旦
 	// 入表，代理 goroutine 就可能向同一连接写 STREAM_OPEN。
+	// 挂载登记同样必须先于 ACK（回执要携带 accepted/rejected），此时只落
+	// stale 记录：会话尚未入表，任何路由都必须失败而不是打到空连接上。
+	acceptedMounts, rejectedMounts := s.prepareMounts(nodeID, node.NodeStable, reg.Routes, reg.Mounts)
 	if err := sess.writeJSON(wire.TypeRegisterAck, 0, wire.RegisterAck{
 		NodeID:         nodeID,
 		ConsoleURL:     s.consoleURL(nodeID),
 		AcceptedRoutes: reg.Routes,
+		AcceptedMounts: acceptedMounts,
+		RejectedMounts: rejectedMounts,
 	}); err != nil {
 		return err
 	}
 	s.registerSession(nodeID, sess)
 	defer func() {
 		s.unregisterSession(nodeID, sess)
+		s.deactivateMounts(nodeID, node.NodeStable)
 		sess.closeAll("node_offline", "agent connection closed")
 	}()
 
@@ -327,6 +378,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	// ServeProxy 会返回一次假的 502 "node offline"（CI 高负载下曾以
 	// TestProxyLargeResponse 0.22s 快速失败的形式出现）。
 	s.registry.Upsert(node)
+	s.activateMounts(nodeID, node.NodeStable)
 	s.emitPresence(nodeID, node.Sessions)
 	s.notifyRegistryChangedAndPersist()
 

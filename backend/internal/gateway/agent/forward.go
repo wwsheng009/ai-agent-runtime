@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -20,20 +21,91 @@ type ForwardConfig struct {
 	// LocalToken, when set, is injected as X-AICLI-Token. The local write token
 	// never leaves the machine; it is added here, not by the gateway.
 	LocalToken string
+	// Mounts maps gateway mount slugs to local MCP endpoints
+	// (docs/gateway/16-mcp-mount-tunnel.md). A stream carrying X-AICLI-Mount
+	// resolves here instead of LocalBaseURL; an unknown slug fails closed.
+	Mounts []MountForward
+	// Getenv resolves mount credentials. nil uses os.Getenv. Tests inject it so
+	// no real environment variable has to carry a secret.
+	Getenv func(string) string
 	// Client overrides the HTTP client (tests).
 	Client *http.Client
 	// MaxBodyBytes bounds a buffered request body (default 1 MiB).
 	MaxBodyBytes int64
 }
 
+// MountForward is one locally hosted MCP endpoint reachable through the gateway.
+type MountForward struct {
+	// Slug is the public path segment the gateway routes to this mount.
+	Slug string
+	// BaseURL is the local origin, e.g. http://127.0.0.1:18765.
+	BaseURL string
+	// StripPrefix is optional: a path prefix the agent removes before dialing
+	// the local endpoint. Empty means the gateway already stripped its
+	// namespace and the request path is the local path.
+	StripPrefix string
+	// AuthType is "bearer" (default), "header" or "none".
+	AuthType string
+	// TokenEnv names the local environment variable holding the credential.
+	// Only the name travels over the wire; the value stays on this machine.
+	TokenEnv string
+	// TokenValue is a credential the host already resolved (for example from a
+	// 0600 token file). It takes precedence over TokenEnv and is never
+	// serialized into a registry or status payload.
+	TokenValue string
+	// Header overrides the injected header for AuthType "header".
+	Header string
+	// Timeout bounds one forwarded call; zero uses defaultForwardTimeout.
+	Timeout time.Duration
+	// MaxBodyBytes overrides the buffered request body cap for this mount.
+	MaxBodyBytes int64
+}
+
+// mountHeader carries the mount slug inside the tunnel. The gateway overwrites
+// any client-supplied value, exactly like X-Forwarded-Prefix.
+const mountHeader = "X-AICLI-Mount"
+
+// defaultForwardTimeout bounds one forwarded call for the default target.
+const defaultForwardTimeout = 5 * time.Minute
+
 // defaultMaxForwardBody bounds a buffered request body.
 const defaultMaxForwardBody = 1 << 20
+
+// forwardError carries a STREAM_RESET code so the gateway can render an
+// actionable message instead of a generic 502.
+type forwardError struct {
+	code    string
+	message string
+}
+
+func (e *forwardError) Error() string { return e.message }
+
+func errorCode(err error) (string, string) {
+	if forwarded, ok := err.(*forwardError); ok {
+		return forwarded.code, forwarded.message
+	}
+	return "bad_request", err.Error()
+}
+
+// streamTarget is the resolved upstream for one inbound stream.
+type streamTarget struct {
+	baseURL     string
+	path        string
+	headerName  string
+	headerValue string
+	timeout     time.Duration
+	maxBody     int64
+	// mount is the slug when this stream was routed through a mount; empty for
+	// the default (non-mount) forwarding target.
+	mount string
+}
 
 // inboundStream assembles a gateway-initiated request until STREAM_END.
 type inboundStream struct {
 	open   wire.StreamOpen
 	body   []byte
 	cancel context.CancelFunc
+	target streamTarget
 }
 
 func (c *wsConn) handleStreamOpen(id uint32, frame wire.Frame) {
@@ -42,12 +114,18 @@ func (c *wsConn) handleStreamOpen(id uint32, frame wire.Frame) {
 		_ = c.resetStream(id, "bad_stream_open", err.Error())
 		return
 	}
+	target, err := c.resolveStreamTarget(open)
+	if err != nil {
+		code, message := errorCode(err)
+		_ = c.resetStream(id, code, message)
+		return
+	}
 	_, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	if c.streams == nil {
 		c.streams = make(map[uint32]*inboundStream)
 	}
-	c.streams[id] = &inboundStream{open: open, cancel: cancel}
+	c.streams[id] = &inboundStream{open: open, cancel: cancel, target: target}
 	c.mu.Unlock()
 
 	c.flowMu.Lock()
@@ -100,7 +178,10 @@ func (c *wsConn) handleStreamData(id uint32, frame wire.Frame) {
 	if in == nil {
 		return
 	}
-	max := c.forward.MaxBodyBytes
+	max := in.target.maxBody
+	if max <= 0 {
+		max = c.forward.MaxBodyBytes
+	}
 	if max <= 0 {
 		max = defaultMaxForwardBody
 	}
@@ -138,18 +219,25 @@ func (c *wsConn) handleStreamReset(id uint32) {
 // forwardStream performs the local HTTP request and streams the response back
 // as STREAM_DATA/STREAM_END frames.
 func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
-	base := strings.TrimRight(strings.TrimSpace(c.forward.LocalBaseURL), "/")
+	base := strings.TrimRight(strings.TrimSpace(in.target.baseURL), "/")
+	if base == "" {
+		base = strings.TrimRight(strings.TrimSpace(c.forward.LocalBaseURL), "/")
+	}
 	if base == "" {
 		_ = c.resetStream(id, "no_local_base", "agent has no local base url")
 		return
 	}
-	target, err := joinLocalURL(base, in.open.Path)
+	target, err := joinLocalURL(base, in.target.path)
 	if err != nil {
 		_ = c.resetStream(id, "bad_path", err.Error())
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	timeout := in.target.timeout
+	if timeout <= 0 {
+		timeout = defaultForwardTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var body io.Reader
@@ -162,8 +250,15 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 		return
 	}
 	copyForwardRequestHeaders(req.Header, in.open.Headers)
-	if token := strings.TrimSpace(c.forward.LocalToken); token != "" {
-		req.Header.Set("X-AICLI-Token", token)
+	if in.target.headerName != "" && in.target.headerValue != "" {
+		req.Header.Set(in.target.headerName, in.target.headerValue)
+	} else if in.target.mount == "" {
+		// Default target (runtime-server / web UI): keep the historical local
+		// write-token injection. Mount streams never receive it.
+		token := strings.TrimSpace(c.forward.LocalToken)
+		if token != "" {
+			req.Header.Set("X-AICLI-Token", token)
+		}
 	}
 	// Rewrite Origin/Referer to the local service origin: the browser speaks to
 	// the gateway, so a forwarded Origin points at the gateway while the local
@@ -275,6 +370,175 @@ func joinLocalURL(base, path string) (string, error) {
 	return out, nil
 }
 
+// resolveStreamTarget maps one STREAM_OPEN to its local upstream.
+//
+// The mount header is authoritative: a stream that names an unknown mount fails
+// closed instead of falling back to LocalBaseURL. Falling back would let a
+// revoked mount reach whatever else the node happens to serve.
+func (c *wsConn) resolveStreamTarget(open wire.StreamOpen) (streamTarget, error) {
+	slug := headerValue(open.Headers, mountHeader)
+	if slug == "" {
+		return streamTarget{
+			baseURL: strings.TrimRight(strings.TrimSpace(c.forward.LocalBaseURL), "/"),
+			path:    open.Path,
+			timeout: defaultForwardTimeout,
+			maxBody: c.forward.MaxBodyBytes,
+		}, nil
+	}
+
+	mount, ok := c.mountForward(slug)
+	if !ok {
+		return streamTarget{}, &forwardError{code: "mount_unknown", message: "agent has no mount " + slug}
+	}
+	path, err := mountPath(mount, open.Path)
+	if err != nil {
+		return streamTarget{}, err
+	}
+	name, value, err := mountAuthHeader(mount, c.envLookup())
+	if err != nil {
+		return streamTarget{}, err
+	}
+	timeout := mount.Timeout
+	if timeout <= 0 {
+		timeout = defaultForwardTimeout
+	}
+	maxBody := mount.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = defaultMaxForwardBody
+	}
+	return streamTarget{
+		baseURL:     strings.TrimRight(strings.TrimSpace(mount.BaseURL), "/"),
+		path:        path,
+		headerName:  name,
+		headerValue: value,
+		timeout:     timeout,
+		maxBody:     maxBody,
+		mount:       slug,
+	}, nil
+}
+
+// mountForward finds the local endpoint for a mount slug.
+func (c *wsConn) mountForward(slug string) (MountForward, bool) {
+	slug = strings.TrimSpace(slug)
+	for _, mount := range c.forward.Mounts {
+		if strings.TrimSpace(mount.Slug) == slug {
+			return mount, true
+		}
+	}
+	return MountForward{}, false
+}
+
+// envLookup resolves mount credentials; tests inject a fake.
+func (c *wsConn) envLookup() func(string) string {
+	if c.forward.Getenv != nil {
+		return c.forward.Getenv
+	}
+	return os.Getenv
+}
+
+// mountToken reads the local credential named by TokenEnv. An empty TokenEnv
+// means "no injection" (a loopback-only endpoint without a token); a named but
+// empty variable is a hard configuration error, not a silent unauthenticated
+// request.
+func mountToken(mount MountForward, getenv func(string) string) (string, error) {
+	name := strings.TrimSpace(mount.TokenEnv)
+	if name == "" {
+		return "", nil
+	}
+	if getenv == nil {
+		return "", &forwardError{code: "mount_token_missing", message: "no environment lookup for " + name}
+	}
+	token := strings.TrimSpace(getenv(name))
+	if token == "" {
+		return "", &forwardError{code: "mount_token_missing", message: "environment variable " + name + " is empty"}
+	}
+	return token, nil
+}
+
+// mountAuthHeader builds the credential header for one mount stream.
+func mountAuthHeader(mount MountForward, getenv func(string) string) (string, string, error) {
+	resolve := func() (string, error) {
+		if value := strings.TrimSpace(mount.TokenValue); value != "" {
+			return value, nil
+		}
+		return mountToken(mount, getenv)
+	}
+	switch strings.ToLower(strings.TrimSpace(mount.AuthType)) {
+	case "", "bearer":
+		token, err := resolve()
+		if err != nil {
+			return "", "", err
+		}
+		if token == "" {
+			return "", "", nil
+		}
+		return "Authorization", "Bearer " + token, nil
+	case "header":
+		token, err := resolve()
+		if err != nil {
+			return "", "", err
+		}
+		if token == "" {
+			return "", "", &forwardError{code: "mount_token_missing", message: "mount auth type header needs token_env"}
+		}
+		name := strings.TrimSpace(mount.Header)
+		if name == "" {
+			name = "Authorization"
+		}
+		return name, token, nil
+	case "none":
+		return "", "", nil
+	default:
+		return "", "", &forwardError{code: "mount_auth_unsupported", message: "unsupported mount auth type " + mount.AuthType}
+	}
+}
+
+// mountPath strips an optional local prefix and rejects traversal. The gateway
+// normally strips its own namespace, so StripPrefix is empty and the request
+// path is already the local path (for example "/mcp").
+func mountPath(mount MountForward, requestPath string) (string, error) {
+	requestPath = strings.TrimSpace(requestPath)
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	pathPart, query, hasQuery := strings.Cut(requestPath, "?")
+
+	prefix := strings.TrimRight(strings.TrimSpace(mount.StripPrefix), "/")
+	if prefix != "" {
+		switch {
+		case pathPart == prefix:
+			pathPart = "/"
+		case strings.HasPrefix(pathPart, prefix+"/"):
+			pathPart = pathPart[len(prefix):]
+		default:
+			return "", &forwardError{code: "bad_path", message: "path is outside the mount prefix " + prefix}
+		}
+	}
+	if !strings.HasPrefix(pathPart, "/") {
+		pathPart = "/" + pathPart
+	}
+	for _, segment := range strings.Split(pathPart, "/") {
+		if segment == ".." {
+			return "", &forwardError{code: "bad_path", message: "path traversal is not allowed"}
+		}
+	}
+	if hasQuery {
+		pathPart += "?" + query
+	}
+	return pathPart, nil
+}
+
+// headerValue performs a case-insensitive lookup in the tunnel header map.
+func headerValue(headers map[string][]string, name string) string {
+	for key, values := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), name) || len(values) == 0 {
+			continue
+		}
+		return strings.TrimSpace(values[0])
+	}
+	return ""
+}
+
 func methodOrGet(method string) string {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	if method == "" {
@@ -305,12 +569,24 @@ func isHopByHopHeader(name string) bool {
 func copyForwardRequestHeaders(dst http.Header, src map[string][]string) {
 	for key, values := range src {
 		lower := strings.ToLower(strings.TrimSpace(key))
-		if isHopByHopHeader(key) || lower == "host" || lower == "authorization" || lower == "cookie" {
+		if isHopByHopHeader(key) || isInternalForwardHeader(lower) {
 			continue
 		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
+	}
+}
+
+// isInternalForwardHeader reports headers the agent owns. The gateway overwrites
+// X-AICLI-Mount and X-Forwarded-Prefix, and it never forwards the caller's
+// credentials; X-AICLI-Token is injected locally for the default target only.
+func isInternalForwardHeader(lower string) bool {
+	switch lower {
+	case "host", "authorization", "cookie", "x-aicli-mount", "x-aicli-token":
+		return true
+	default:
+		return false
 	}
 }
 

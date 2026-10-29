@@ -17,6 +17,18 @@ const maxProxyRequestBody = 1 << 20
 // the caller's router. The response is streamed as it arrives, so SSE and large
 // downloads work without buffering the whole body.
 func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path string) {
+	s.serveProxy(w, r, nodeID, path, "")
+}
+
+// ServeProxyMount reverse-proxies one request that belongs to a published MCP
+// mount. The mount slug is written into the tunnel header here (overwriting any
+// client-supplied value), so the agent can only ever route it to the endpoint
+// that slug names.
+func (s *Server) ServeProxyMount(w http.ResponseWriter, r *http.Request, nodeID, path, mount string) {
+	s.serveProxy(w, r, nodeID, path, mount)
+}
+
+func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path, mount string) {
 	sess, ok := s.session(nodeID)
 	if !ok {
 		http.Error(w, "node offline", http.StatusBadGateway)
@@ -41,12 +53,16 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyRequestBody+1))
+	limit := s.cfg.MaxProxyRequestBody
+	if limit <= 0 {
+		limit = maxProxyRequestBody
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
 	}
-	if int64(len(body)) > maxProxyRequestBody {
+	if int64(len(body)) > limit {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -59,9 +75,20 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 	// gateway overwrites any client-supplied value.
 	headers := make(map[string][]string, len(r.Header)+1)
 	for key, values := range r.Header {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "x-aicli-mount", "x-aicli-token":
+			// Agent-owned headers: a caller must never be able to select the
+			// mount (or inject the local write token) directly.
+			continue
+		}
 		headers[key] = values
 	}
-	headers["X-Forwarded-Prefix"] = []string{"/n/" + nodeID}
+	prefix := "/n/" + nodeID
+	if mount = strings.TrimSpace(mount); mount != "" {
+		prefix = "/m/" + mount
+		headers["X-AICLI-Mount"] = []string{mount}
+	}
+	headers["X-Forwarded-Prefix"] = []string{prefix}
 	open := wire.StreamOpen{
 		Method:  r.Method,
 		Path:    path,
@@ -183,4 +210,11 @@ func routeAllowed(routes []string, requestPath string) bool {
 		}
 	}
 	return false
+}
+
+// RouteAllowed exposes the allowlist predicate so mount registration can reject
+// a mount whose local path the node never declared (fail closed at REGISTER time
+// instead of a confusing 403 on the first call).
+func RouteAllowed(routes []string, requestPath string) bool {
+	return routeAllowed(routes, requestPath)
 }

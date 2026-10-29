@@ -66,7 +66,7 @@ func consoleHandler() http.Handler {
 // hasReservedPrefix reports whether the path belongs to the API, tunnel or
 // reverse-proxy namespaces (never served by the console).
 func hasReservedPrefix(cleaned string) bool {
-	for _, prefix := range []string{"/api", "/gw", "/n"} {
+	for _, prefix := range []string{"/api", "/gw", "/n", "/m"} {
 		if cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/") {
 			return true
 		}

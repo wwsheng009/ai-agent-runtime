@@ -68,6 +68,8 @@
 | [13-connection-control-tasks.md](./13-connection-control-tasks.md) | 连接控制面实现任务清单（文件级改动点 + 测试点 + PR 序列 + DoD） |
 | [14-implementation-record.md](./14-implementation-record.md) | 实现记录：落地状态、运行方式、命令/API 参考、测试、已知缺口 |
 | [15-multi-instance-architecture.md](./15-multi-instance-architecture.md) | 多实例架构与实例间通讯：现状（主备无协议）、防双写与共享协调、归属路由、分级改进与核实 |
+| [16-mcp-mount-tunnel.md](./16-mcp-mount-tunnel.md) | MCP 反向挂载穿透：把本机回环 MCP（`aicli-remote-tools`）以挂载为单位注册进网关，公网按自动生成的唯一路径 `/m/{slug}/mcp` 程序化访问；多挂载、两套凭据、安全边界与落地计划 |
+| [17-aicli-gateway-edge-exposure.md](./17-aicli-gateway-edge-exposure.md) | 生产接入：内层 `aicli-gateway` 挂在 `gateway-edge`（`ttai.online`）后面的路由约定、systemd 单元、构建与原子部署脚本、验收清单，以及本轮 SSH 通道受阻的实测记录 |
 | [gateway-app/](../gateway-app/README.md) | 全网页 App 专项：Tauri 2 容器、原生通知、ntfy 路由修复与实施计划 |
 
 ---
@@ -117,5 +119,6 @@
 10. 控制面实现任务见 [13-connection-control-tasks.md](./13-connection-control-tasks.md)；
 11. 已实现的落地状态与运行方式见 [14-implementation-record.md](./14-implementation-record.md)；
 12. 多实例（主备/双活）边界与改进见 [15-multi-instance-architecture.md](./15-multi-instance-architecture.md)；
-13. 排期与验收见 [06-implementation-plan.md](./06-implementation-plan.md)。
-14. 全网页 App 与原生通知见 [gateway-app/README.md](../gateway-app/README.md)。
+13. 把本机 MCP 以「挂载」穿透到公网（`/m/{slug}/mcp`）见 [16-mcp-mount-tunnel.md](./16-mcp-mount-tunnel.md)；
+14. 排期与验收见 [06-implementation-plan.md](./06-implementation-plan.md)。
+15. 全网页 App 与原生通知见 [gateway-app/README.md](../gateway-app/README.md)。
