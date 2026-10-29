@@ -135,6 +135,76 @@ func TestEnvDWriteFallsBackToProcessChannel(t *testing.T) {
 	}
 }
 
+// The NUL refusal was never a policy: it existed because argv cannot hold a NUL
+// byte. With the native channel the payload is a stream, so refusing a UTF-16
+// file would be a backend-specific rule the local surface does not have.
+func TestEnvDWriteCarriesNULBytesThroughNativeChannel(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+
+	// A UTF-16LE "hi" with BOM: exactly the bytes the shared encoder produces.
+	payload := "ÿþ\x00h\x00i\x00"
+	got := callTool(t, ctx, session, "remote_envd__write", map[string]interface{}{
+		"path": "utf16.txt", "content": payload,
+	})
+	if !strings.Contains(got, "Created utf16.txt") {
+		t.Fatalf("NUL payload write through the native channel = %q", got)
+	}
+	landed, ok := stub.content("/srv/app/utf16.txt")
+	if !ok || landed != payload {
+		t.Fatalf("bytes changed: got %q (found=%v)", landed, ok)
+	}
+	if stub.catCalls.Load() != 0 {
+		t.Fatalf("cat calls = %d, want the native channel to carry the payload", stub.catCalls.Load())
+	}
+}
+
+// Without the native channel the limit is real again, and the refusal must say
+// so: naming the missing capability is what makes the rule look like an
+// environment fact rather than a backend's own policy.
+func TestEnvDWriteRefusesNULWithoutNativeChannel(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{}, nil)
+	stub.disableFiles()
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+
+	refused := callEnvDExpectError(t, ctx, session, "remote_envd__write", map[string]interface{}{
+		"path": "utf16.txt", "content": "a\x00b",
+	})
+	if !strings.Contains(refused, "NUL") {
+		t.Fatalf("refusal = %q, want it to name the NUL bytes", refused)
+	}
+	if !strings.Contains(refused, "native file endpoint is unavailable") {
+		t.Fatalf("refusal = %q, want it to blame the missing capability, not the tool", refused)
+	}
+	if _, ok := stub.content("/srv/app/utf16.txt"); ok {
+		t.Fatal("the refused write landed anyway")
+	}
+}
+
+// The case the NUL refusal actually blocked is not a model typing a NUL - it is
+// `edit` preserving a file's own encoding: read UTF-16LE, write UTF-16LE back.
+// The read is bytes, the write is bytes, and only argv refused in between.
+func TestEnvDEditPreservesUTF16ThroughTheNativeChannel(t *testing.T) {
+	original := "\xff\xfeh\x00i\x00!\x00" // UTF-16LE BOM + "hi!"
+	stub := newEnvdStub(t, map[string]string{"/srv/app/utf16.txt": original}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+
+	got := callTool(t, ctx, session, "remote_envd__edit", map[string]interface{}{
+		"file_path": "utf16.txt", "old_string": "hi!", "new_string": "ok?",
+	})
+	if !strings.Contains(got, "Replaced 1 occurrence(s)") {
+		t.Fatalf("edit = %q", got)
+	}
+	landed, ok := stub.content("/srv/app/utf16.txt")
+	if !ok {
+		t.Fatal("the edit did not land")
+	}
+	want := "\xff\xfe" + "o\x00k\x00?\x00" // UTF-16LE BOM kept, text replaced
+	if landed != want {
+		t.Fatalf("encoding not preserved:\n got % x\nwant % x", []byte(landed), []byte(want))
+	}
+}
+
 // Content fidelity is the reason the native channel exists: bytes that contain
 // printf-sensitive text must not be reinterpreted on the way to the target.
 func TestEnvDWriteSendsBytesVerbatim(t *testing.T) {

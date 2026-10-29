@@ -320,9 +320,9 @@ func envdWrite(ctx context.Context, be *envdBackend, params map[string]interface
 		return envdErrorResult("path is required"), nil
 	}
 	content, _ := params["content"].(string)
-	// Checked before the path is resolved: a write that cannot be carried by any
-	// available channel must not touch the target at all.
-	if refusal := be.refuseOversizedProcessWrite(ctx, len(content)); refusal != nil {
+	// Checked before the path is resolved: a write that no available channel can
+	// carry must not touch the target at all. The raw spelling is echoed only.
+	if refusal := be.refuseUncarriableWrite(ctx, raw, []byte(content)); refusal != nil {
 		return refusal, nil
 	}
 	target, resolveErr := be.resolvePath(ctx, raw)

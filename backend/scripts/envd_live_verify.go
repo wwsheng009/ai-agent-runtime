@@ -201,6 +201,47 @@ func main() {
 		fail("apply_patch fidelity", fmt.Errorf("disk holds %q (%v)", string(after), readErr))
 	}
 	fmt.Printf("PASS apply_patch through the guarded read: disk holds %q\n", "alpha\ndelta\n")
+
+	// The NUL refusal was an argv limit, not a policy. Two things must hold, and
+	// they are different: a model-supplied payload may carry NUL (JSON encodes it
+	// fine), while a non-UTF-8 byte cannot reach either backend through MCP at all,
+	// because JSON string transport replaces it - so that is not something this
+	// change can or should fix. The real win is the round trip the shared encoder
+	// performs: a UTF-16 file on disk, edited, and written back still UTF-16.
+	nulPath := *editPath + ".nul"
+	nulPayload := "a\x00b\x00c"
+	if _, err := written.call(ctx, *prefix+"__write", map[string]interface{}{
+		"path": nulPath, "content": nulPayload,
+	}); err != nil {
+		fail("NUL payload through the native channel", err)
+	}
+	defer func() { _ = os.Remove(nulPath) }()
+	if after, readErr := os.ReadFile(nulPath); readErr != nil || string(after) != nulPayload {
+		fail("NUL fidelity", fmt.Errorf("disk holds %x (%v), want %x", string(after), readErr, nulPayload))
+	}
+	fmt.Printf("PASS NUL payload landed byte-exact (%d bytes, includes 0x00)\n", len(nulPayload))
+
+	// UTF-16 round trip through `edit`, which is the case the refusal used to block.
+	utf16Path := *editPath + ".utf16"
+	utf16Bytes := append([]byte{0xff, 0xfe}, []byte("h\x00i\x00!\x00")...)
+	if err := os.WriteFile(utf16Path, utf16Bytes, 0o600); err != nil {
+		fail("seed the UTF-16 fixture", err)
+	}
+	defer func() { _ = os.Remove(utf16Path) }()
+	if _, err := written.call(ctx, *prefix+"__edit", map[string]interface{}{
+		"file_path": utf16Path, "old_string": "hi!", "new_string": "ok!",
+	}); err != nil {
+		fail("edit a UTF-16 file (the case the NUL refusal used to block)", err)
+	}
+	after, readErr := os.ReadFile(utf16Path)
+	if readErr != nil {
+		fail("read back the UTF-16 edit", readErr)
+	}
+	want := append([]byte{0xff, 0xfe}, []byte("o\x00k\x00!\x00")...)
+	if string(after) != string(want) {
+		fail("UTF-16 round trip", fmt.Errorf("disk holds %x, want %x (BOM and encoding must survive)", string(after), want))
+	}
+	fmt.Printf("PASS UTF-16 edit round trip: BOM + UTF-16LE preserved (%d bytes)\n", len(after))
 	written.close()
 
 	fmt.Println("ALL CHECKS PASSED")

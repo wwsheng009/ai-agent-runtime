@@ -411,41 +411,54 @@ func (be *envdBackend) workspaceRelative(target string) string {
 // ValidateWriteTarget), while `apply_patch` add creates it. A single auto-mkdir
 // for every write would make the same tool behave two ways depending on the
 // transport, which is the drift this merge exists to remove.
-// refuseOversizedProcessWrite reports a write that the only available channel
-// cannot carry, or nil when the write may proceed.
+// refuseUncarriableWrite reports a payload that the only available channel cannot
+// carry, or nil when the write may proceed.
 //
-// One function owns this rule. The ceiling is the argv limit of the process
-// channel - the operating system's, not a policy choice - so it applies only when
-// the native endpoint is unavailable; with /files there is no argv involved and a
-// 2 MiB payload is simply a write.
+// Both rules live here because both are properties of the PROCESS channel, not of
+// the tool: argv cannot contain a NUL byte, and argv has a size ceiling. They are
+// the operating system's limits, not a policy choice - so they apply only while the
+// native endpoint is unavailable. Refusing a UTF-16 payload that `/files` could
+// carry byte for byte would be a backend-specific rule masquerading as policy,
+// which is the exact drift this merge exists to remove; the local backend has never
+// refused those bytes.
 //
 // It is also called BEFORE the path is resolved, which keeps a write that is
-// certain to fail from touching the target at all. That invariant was tested
-// before this existed, and re-deriving it in each tool is how two limits with two
-// messages appear for one setting.
-func (be *envdBackend) refuseOversizedProcessWrite(ctx context.Context, size int) *toolkit.ToolResult {
-	if size <= envdMaxWriteBytes {
+// certain to fail from touching the target at all. That invariant was tested before
+// this existed, and re-deriving it per tool is how two limits with two messages
+// appear for one setting.
+func (be *envdBackend) refuseUncarriableWrite(ctx context.Context, target string, payload []byte) *toolkit.ToolResult {
+	usable, _ := be.filesChannelUsable(ctx)
+	if usable {
 		return nil
 	}
-	if usable, _ := be.filesChannelUsable(ctx); usable {
-		return nil
+	if strings.IndexByte(string(payload), 0) >= 0 {
+		return envdFailureMeta("UNSUPPORTED", map[string]interface{}{
+			"failure_class": "binary_payload",
+			"file_path":     target,
+		}, "cannot write %s: content contains NUL bytes (a BOM or UTF-16 encoding), which cannot be passed as a command-line argument, and envd's native file endpoint is unavailable here (%s). Use a UTF-8 payload, enable /files, or write it with shell", target, be.filesChannelNote())
 	}
-	return envdFailureMeta("UNSUPPORTED", map[string]interface{}{
-		"failure_class":  "payload_too_large",
-		"file_size":      size,
-		"max_file_bytes": envdMaxWriteBytes,
-	}, "content is %d bytes, above the %d byte write limit; split the file or use shell", size, envdMaxWriteBytes)
+	if len(payload) > envdMaxWriteBytes {
+		return envdFailureMeta("UNSUPPORTED", map[string]interface{}{
+			"failure_class":  "payload_too_large",
+			"file_size":      len(payload),
+			"max_file_bytes": envdMaxWriteBytes,
+		}, "content is %d bytes, above the %d byte write limit; split the file or use shell", len(payload), envdMaxWriteBytes)
+	}
+	return nil
 }
 
+// storeBytes writes one file. createParents mirrors the SHARED per-tool contract
+// rather than this backend's convenience: `write`/`append_write` refuse a missing
+// parent (mutatecore ValidateWriteTarget), while `apply_patch` add creates it. A
+// single auto-mkdir for every write would make the same tool behave two ways
+// depending on the transport, which is the drift this merge exists to remove -
+// and it is a live concern here, because envd's own upload handler calls
+// EnsureDirs unconditionally.
 func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []byte, createParents bool) (int64, string, *toolkit.ToolResult) {
 	// knownParent carries the directory entry when the caller already had to look
 	// it up, so the write gate can answer the common case without a process spawn.
 	var knownParent *envdclient.Entry
-	if strings.IndexByte(string(encoded), 0) >= 0 {
-		return 0, "", envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_payload", "file_path": target},
-			"cannot write %s through envd: content contains NUL bytes (a BOM or UTF-16 encoding); the local backend round-trips those, this one refuses. Use a UTF-8 payload or shell for binary content", target)
-	}
-	if refusal := be.refuseOversizedProcessWrite(ctx, len(encoded)); refusal != nil {
+	if refusal := be.refuseUncarriableWrite(ctx, target, encoded); refusal != nil {
 		return 0, "", refusal
 	}
 	if parent := path.Dir(target); !createParents && parent != "/" && parent != be.workspace {
@@ -484,8 +497,8 @@ func (be *envdBackend) storeBytes(ctx context.Context, target string, encoded []
 	}
 
 	// The process channel carries content as one argv element; the rule lives in
-	// refuseOversizedProcessWrite, which already ran before the path was resolved
-	// and again here for callers that come straight to storeBytes.
+	// refuseUncarriableWrite, which already ran before the path was resolved and
+	// again here for callers that come straight to storeBytes.
 	script := envdWriteScript
 	if createParents {
 		script = envdWriteMkdirScript
@@ -1110,6 +1123,21 @@ func (be *envdBackend) markFilesUnusable(err error) {
 	be.filesKnown = true
 	be.filesUsable = false
 	be.filesNote = err.Error()
+}
+
+// filesChannelNote explains why the native endpoint is not in use, so a refusal
+// caused by its absence can name the reason instead of looking like a rule the
+// backend invented.
+func (be *envdBackend) filesChannelNote() string {
+	if be == nil {
+		return "no envd client"
+	}
+	be.filesMu.Lock()
+	defer be.filesMu.Unlock()
+	if note := strings.TrimSpace(be.filesNote); note != "" {
+		return note
+	}
+	return "not available"
 }
 
 // describeFilesError renders one /files failure in this surface's house style:
