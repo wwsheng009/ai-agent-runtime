@@ -525,6 +525,11 @@ func main() {
 		return cfg
 	}))
 
+	// transfer 子命令 — 检测和导入其它 Agent 的本地会话历史
+	rootCmd.AddCommand(commands.NewTransferCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// context 子命令
 	contextCmd := &cobra.Command{
 		Use:     "context",
