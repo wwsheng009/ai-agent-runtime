@@ -3,11 +3,14 @@
 package lscore
 
 import (
+	"context"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 const (
@@ -47,6 +50,34 @@ type TreeListing struct {
 // at most limit entries. Directory entries at the depth boundary are skipped
 // without descending, so callers can preserve the long-standing ls contract.
 func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
+	return ReadTreeVia(context.Background(), localio.Access, path, maxDepth, limit)
+}
+
+// ReadTreeVia walks one tree through the I/O seam: the same listing with the
+// filesystem decision taken out of the walk, which is what lets a remote surface
+// share this renderer instead of keeping its own copy of ls.
+//
+// The traversal is specified by what filepath.WalkDir did, not by what is
+// convenient to write here, because the limit truncates *during* collection: which
+// entries were already gathered when the cut landed decides which rows survive, so
+// a listing that is merely "as deep as before" would still be a different answer.
+// Therefore:
+//
+//   - one directory read per directory, which is WalkDir's own cost shape;
+//   - lexical order per directory (ReadDir is sorted), depth-first, a directory
+//     emitted before its contents;
+//   - the root is Lstat-ed first, exactly as filepath.WalkDir did: a file as the
+//     root yields an empty listing with no error, a missing root yields the error
+//     the handler turns into NOT_FOUND, and a symlinked root is NOT followed -
+//     following it would let a listing climb out of the authorized tree;
+//   - a directory that cannot be read is left undescended rather than failing the
+//     listing, because one off-limits subdirectory is a hole in the tree, not an
+//     error in the answer;
+//   - the depth boundary drops the entries sitting on it and does not descend them.
+func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDepth, limit int) (TreeListing, error) {
+	if access == nil {
+		access = localio.Access
+	}
 	if maxDepth < 1 {
 		maxDepth = 1
 	}
@@ -58,42 +89,69 @@ func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
 	}
 
 	listing := TreeListing{}
-	walkErr := filepath.WalkDir(path, func(walkPath string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		relPath, relErr := filepath.Rel(path, walkPath)
-		if relErr != nil {
-			relPath = walkPath
-		}
-		if relPath == "." {
-			return nil
-		}
-		normalized := filepath.ToSlash(relPath)
-		depth := strings.Count(normalized, "/")
-		if depth >= maxDepth {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		item := TreeEntry{RelPath: normalized, Depth: depth, Dir: entry.IsDir()}
-		listing.Entries = append(listing.Entries, item)
-		if item.Dir {
-			listing.Dirs++
-		} else {
-			listing.Files++
-		}
-		if len(listing.Entries) >= limit {
-			listing.Truncated = true
-			listing.LimitHit = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return TreeListing{}, walkErr
+	rootInfo, statErr := access.Lstat(ctx, path)
+	if statErr != nil {
+		return TreeListing{}, statErr
 	}
+	if !rootInfo.IsDir() {
+		// WalkDir visited a non-directory root once and dropped it (its relative path
+		// was "."): an empty listing, not an error. A symlink to a directory lands
+		// here too, which is what keeps ls from descending through a link that points
+		// outside the authorized roots.
+		return listing, nil
+	}
+
+	// stop is the SkipAll equivalent: once the limit has landed the walk collects
+	// nothing further, in either recursion frame.
+	stop := false
+	var descend func(dirPath, relPrefix string, depth int)
+	descend = func(dirPath, relPrefix string, depth int) {
+		entries, err := access.ReadDir(ctx, dirPath)
+		if err != nil {
+			// A directory whose contents cannot be read is a hole in the tree.
+			// Only the root's own error is allowed to abort the call.
+			return
+		}
+		for _, entry := range entries {
+			if stop {
+				return
+			}
+			name := entry.Name()
+			relPath := name
+			if relPrefix != "" {
+				relPath = relPrefix + "/" + name
+			}
+			if depth >= maxDepth {
+				// The entry sitting on the boundary is dropped, and a directory is
+				// not descended: exactly the old SkipDir branch.
+				continue
+			}
+			item := TreeEntry{RelPath: relPath, Depth: depth, Dir: entry.IsDir()}
+			listing.Entries = append(listing.Entries, item)
+			if item.Dir {
+				listing.Dirs++
+			} else {
+				listing.Files++
+			}
+			// The limit is checked before descending, and that ordering is the
+			// contract, not a micro-optimisation: filepath.WalkDir stopped as soon as
+			// the count reached the limit, so a directory that *filled* the limit was
+			// never entered. Checking after descending collects that directory's
+			// children instead, which changes which rows survive a cut - a difference
+			// only a differential over many depth/limit pairs can see (it bit exactly
+			// this function on its first draft).
+			if len(listing.Entries) >= limit {
+				listing.Truncated = true
+				listing.LimitHit = true
+				stop = true
+				return
+			}
+			if item.Dir {
+				descend(filepath.Join(dirPath, name), relPath, depth+1)
+			}
+		}
+	}
+	descend(path, "", 0)
 	sort.Slice(listing.Entries, func(i, j int) bool {
 		if listing.Entries[i].RelPath == listing.Entries[j].RelPath {
 			if listing.Entries[i].Dir == listing.Entries[j].Dir {

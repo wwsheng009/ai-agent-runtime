@@ -111,6 +111,37 @@ func TestReadDirMatchesOsReadDir(t *testing.T) {
 	}
 }
 
+// TestLstatAndStatDifferOnADanglingLink pins the reason both methods exist on the
+// seam. A listing that decides whether to descend by asking Stat would treat a
+// symlink to a missing target as absent, and a symlink to a directory as one to
+// climb; the walk needs the link itself, which is what filepath.WalkDir used.
+func TestLstatAndStatDifferOnADanglingLink(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "nowhere"), link); err != nil {
+		t.Skipf("cannot create a symlink on this platform: %v", err)
+	}
+
+	_, statErr := Access.Stat(context.Background(), link)
+	if statErr == nil {
+		t.Fatal("Stat through a dangling link must fail")
+	}
+	if !toolcore.IsNotExist(statErr) {
+		t.Fatalf("Stat through a dangling link should classify absence, got %v", statErr)
+	}
+
+	info, lstatErr := Access.Lstat(context.Background(), link)
+	if lstatErr != nil {
+		t.Fatalf("Lstat must describe the link itself: %v", lstatErr)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("Lstat mode = %v, want the symlink bit", info.Mode())
+	}
+	if info.IsDir() {
+		t.Fatal("a symlink is not a directory for the purposes of descending")
+	}
+}
+
 func TestMissingPathIsAbsenceUnderBothVocabularies(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nope.txt")
 
@@ -130,6 +161,9 @@ func TestMissingPathIsAbsenceUnderBothVocabularies(t *testing.T) {
 	_, dirErr := Access.ReadDir(context.Background(), path)
 	if !toolcore.IsNotExist(dirErr) {
 		t.Fatalf("ReadDir absence not classified: %v", dirErr)
+	}
+	if _, lstatErr := Access.Lstat(context.Background(), path); !toolcore.IsNotExist(lstatErr) {
+		t.Fatalf("Lstat absence not classified: %v", lstatErr)
 	}
 	_, openErr := Access.Open(context.Background(), path)
 	if !toolcore.IsNotExist(openErr) {
@@ -166,6 +200,7 @@ func (r remoteRuntime) FileAccess() toolcore.Access { return r.access }
 type stubAccess struct{}
 
 func (stubAccess) Stat(context.Context, string) (fs.FileInfo, error)         { return nil, nil }
+func (stubAccess) Lstat(context.Context, string) (fs.FileInfo, error)        { return nil, nil }
 func (stubAccess) Open(context.Context, string) (toolcore.FileHandle, error) { return nil, nil }
 func (stubAccess) ReadDir(context.Context, string) ([]fs.DirEntry, error)    { return nil, nil }
 

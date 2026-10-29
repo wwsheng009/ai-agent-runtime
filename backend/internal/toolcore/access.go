@@ -49,6 +49,14 @@ type Access interface {
 	// exists and turn a recovery hint into a lie.
 	Stat(ctx context.Context, path string) (fs.FileInfo, error)
 
+	// Lstat describes the path itself rather than what it points at. It exists
+	// because a core that decides whether to *descend* must not follow a symlink:
+	// filepath.WalkDir used Lstat at the root, and a listing that follows a
+	// directory symlink out of the authorized tree turns a jail into a suggestion.
+	// The two methods are deliberately separate - whichever one a caller needs is a
+	// statement about the caller's safety obligation, not a preference.
+	Lstat(ctx context.Context, path string) (fs.FileInfo, error)
+
 	// Open returns a streamable handle. It must not buffer the whole file: a core
 	// that pages through 20,000 lines relies on reading only what it windows.
 	Open(ctx context.Context, path string) (FileHandle, error)

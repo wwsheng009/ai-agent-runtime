@@ -30,6 +30,12 @@ func (osAccess) Stat(_ context.Context, path string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
+// Lstat is the call filepath.WalkDir made at the root, kept separate from Stat so a
+// listing cannot follow its own root out of the authorized tree.
+func (osAccess) Lstat(_ context.Context, path string) (fs.FileInfo, error) {
+	return os.Lstat(path)
+}
+
 // Open deliberately returns the *os.File unchanged rather than adapting it: the
 // handle must stay seekable and streaming, because the view core probes a BOM,
 // rewinds, and then windows the file line by line.

@@ -134,7 +134,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 			fmt.Errorf("limit 参数必须大于 0")), nil
 	}
 
-	listing, readErr := ReadTree(abs, depth, limit)
+	listing, readErr := ReadTreeVia(ctx, access, abs, depth, limit)
 	if readErr != nil {
 		if toolcore.IsNotExist(readErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the workspace path", readErr), nil

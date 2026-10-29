@@ -78,6 +78,12 @@ func (a *seamAccess) Stat(_ context.Context, path string) (fs.FileInfo, error) {
 	return entry.info, nil
 }
 
+// Lstat is present because the seam requires it; view never descends, so the local
+// and linked forms are the same answer here.
+func (a *seamAccess) Lstat(_ context.Context, path string) (fs.FileInfo, error) {
+	return a.Stat(context.Background(), path)
+}
+
 func (a *seamAccess) Open(_ context.Context, path string) (toolcore.FileHandle, error) {
 	a.openCalls++
 	entry, ok := a.files[path]

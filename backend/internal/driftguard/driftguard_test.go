@@ -34,11 +34,12 @@ var coreBaselines = map[string]int{
 	// doing it. Zero is therefore a locked floor, not an estimate: any new os.*
 	// call in these two cores is a fork waiting to happen.
 	//
-	// Zero does NOT mean "no host filesystem access". The listing path still walks
-	// the tree through filepath.WalkDir, which this guard cannot see because it
-	// matches only the `os` selector package. That blind spot is measured by
-	// TestSharedCoresDoNotAddWalkerStyleHostCalls below, so the number here cannot
-	// be read as "the core is backend-neutral already".
+	// Zero does NOT by itself mean "no host filesystem access": this guard matches
+	// only the `os` selector package, and a walk through filepath.WalkDir reaches
+	// the same disk unseen. That blind spot is measured by
+	// TestSharedCoresDoNotAddWalkerStyleHostCalls below, and lscore is now at zero
+	// on both counts - its listing goes through the seam, so the number here can be
+	// read as "this core describes whatever machine the accessor hands it".
 	"viewcore":   0,
 	"lscore":     0,
 	"searchcore": 24,
@@ -105,7 +106,12 @@ func TestSharedCoresDoNotAddHostFilesystemCalls(t *testing.T) {
 // the seam work from quietly moving host access into a different package name.
 var walkerBaselines = map[string]int{
 	"viewcore":   0,
-	"lscore":     1,
+	// lscore's tree walk moved behind Access.ReadDir: the package now reaches the
+	// host only through the seam, so its listing can describe another machine. The
+	// equality with the old filepath.WalkDir traversal is pinned by a differential
+	// over every depth/limit pair (internal/toolcore/lscore/walk_differential_test.go),
+	// with exactly one deliberate divergence documented there.
+	"lscore":     0,
 	"searchcore": 4,
 	"mutatecore": 1,
 }
