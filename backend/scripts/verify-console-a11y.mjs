@@ -114,6 +114,25 @@ const nodeBase = {
   function isHidden(el) {
     return !!el.closest('[hidden]') || el.getAttribute('aria-hidden') === 'true';
   }
+  function block(selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = css.match(new RegExp(escaped + '\\s*\\{([\\s\\S]*?)\\}'));
+    return m ? m[1] : '';
+  }
+  function token(text, name) {
+    const m = text.match(new RegExp('--' + name + ':\\s*(#[0-9a-fA-F]{6})'));
+    return m ? m[1] : '';
+  }
+  function luminance(hex) {
+    const channels = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  }
+  function contrast(a, b) {
+    const x = luminance(a);
+    const y = luminance(b);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
 
   // ── document structure ───────────────────────────────────────────
   const visibleH1 = [...doc.querySelectorAll('h1')].filter((el) => !isHidden(el));
@@ -161,6 +180,23 @@ const nodeBase = {
     /@media\s*\(pointer:\s*coarse\)[\s\S]*?input,\s*\.select\s*\{[^}]*min-height:\s*44px/s.test(css));
   check('保留减少动态效果降级', css.includes('prefers-reduced-motion: reduce'));
   check('保留 focus-visible 焦点环', /:focus-visible\s*\{[^}]*outline:/s.test(css));
+
+  const dark = block(':root');
+  const light = block(':root[data-theme="light"]');
+  const darkPairs = [
+    ['dark 次要文字 / panel-2', token(dark, 'fg-faint'), token(dark, 'panel-2')],
+    ['dark 危险文字 / panel', token(dark, 'danger-ink'), token(dark, 'panel')],
+    ['dark 白字 / danger', '#ffffff', token(dark, 'danger')],
+  ];
+  const lightPairs = [
+    ['light 次要文字 / panel-2', token(light, 'fg-faint'), token(light, 'panel-2')],
+    ['light 危险文字 / panel', token(light, 'danger-ink'), token(light, 'panel')],
+    ['light 白字 / danger', '#ffffff', token(light, 'danger')],
+  ];
+  [...darkPairs, ...lightPairs].forEach(([label, fg, bg]) => {
+    check('对比度 ≥4.5:1：' + label, !!fg && !!bg && contrast(fg, bg) >= 4.5,
+      fg && bg ? contrast(fg, bg).toFixed(2) + ':1' : 'missing token');
+  });
 
   // ── names for controls ───────────────────────────────────────────
   const controls = [...doc.querySelectorAll('button, a[href], select, textarea, [role="menuitem"]')]

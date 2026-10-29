@@ -349,7 +349,7 @@ CI 配置示例（.github/workflows/a11y.yml）:
 
 - 粗指针下 `.btn.sm`、`.seg-btn`、`.attn-chip`、`.event-chip`、`.session-card .s-id`、`input`、`.select` 均 ≥44px。
 - 新增 `#a11y-status` 汇总播报；移除统计卡与事件条的重复 `aria-live`。
-- 补齐 `#log-query`、`#mount-token-days` 的可访问名称；新增 `verify-console-a11y.mjs` 22 项静态/行为检查。
+- 补齐 `#log-query`、`#mount-token-days` 的可访问名称；新增 `verify-console-a11y.mjs` 28 项静态/行为/对比度检查。
 - 真机矩阵仍需按下方清单执行并附到发布 PR。
 
 ---

@@ -387,7 +387,7 @@
 
 > **修复状态**：代码层已在 `v68` 落地；iOS Safari / Android Chrome / NVDA / VoiceOver / 200% 缩放仍需真机验收。
 >
-> **行为验证**：`node backend/scripts/verify-console-a11y.mjs` 22/22 通过；确认框焦点行为由 `verify-console-danger.mjs` 覆盖。
+> **行为验证**：`node backend/scripts/verify-console-a11y.mjs` 28/28 通过（含暗/亮主题关键色对）；确认框焦点行为由 `verify-console-danger.mjs` 覆盖。
 >
 > **实现要点**：粗指针统一 44px；动态待处理计数改为单一 `role=status` 汇总并 1.5s 防抖；补全表单/图标按钮可访问名称；移除统计卡与事件条的重复 live 播报。
 
