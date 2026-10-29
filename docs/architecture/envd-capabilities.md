@@ -11,13 +11,15 @@
 
 ---
 
-## 1. 全景：两个 Connect 服务 + 两个 HTTP 端点
+## 1. 全景：两个 Connect 服务 + 三个 HTTP 端点
 
 ```
 envd :49983
 ├── HTTP 端点
 │   ├── GET /health    → 204  （存活探针，无响应体）
-│   └── GET /metrics   → 200  （CPU/内存/磁盘实时采样）
+│   ├── GET /metrics   → 200  （CPU/内存/磁盘实时采样）
+│   └── GET/POST /files       （**唯一的文件数据通道**：读支持 Range，写是整文件
+│                               O_TRUNC；详见 §3.5，2026-10-28 补）
 │
 ├── process.Process （7 个方法）—— 进程管理
 │   ├── Start          启动进程（流式回传输出）
@@ -210,6 +212,35 @@ IN_UNMOUNT     所在文件系统卸载
 `WatchDir` 实测直接返回 **200（流式）**，说明它是可用功能，而非仅定义。
 
 ---
+
+### 3.5 `GET/POST /files`：唯一的文件数据通道（2026-10-28 实测补录）
+
+本文此前**漏了这个端点**——而 `filesystem.Filesystem` 根本没有 ReadFile/WriteFile
+（探测 404），所以搬运文件字节只有两条路：这个 HTTP 端点，或者 spawn 进程。工具层的
+读/写实现因此直接依赖它。
+
+下表均为对真实 envd **0.2.11** 的测量（TLS + 访问令牌），不是源码推断：
+
+| 行为 | 实测 | 含义 |
+|---|---|---|
+| 鉴权 | `X-Access-Token` 头即 200；无令牌/空值头/错令牌均 401 | 不需要签名。签名是预签名 URL 的替代路径（`v1_` + SHA256(`path:operation:username:token[:exp]`)，**普通哈希而非 HMAC**），客户端不应自己实现 |
+| 区间读 | `Range: bytes=0-9` → **206** + `content-range: bytes 0-9/3814`，与 `head -c 10` 逐字节一致；尾窗/中窗同样精确；10 MiB 文件取 1 KiB 只传 1024B | `view` 类成本可以是 O(窗口) 而非 O(文件) |
+| 越尾 | `Range: bytes=99999-...` → **416** + `content-range: bytes */N` | 可映射成可诊断错误；注意**空文件对任何前缀区间都是 416**，客户端需能重试一次无 Range 请求 |
+| 多区间 | 206 `multipart/byteranges` | 客户端只用单区间，别去解 multipart |
+| 条件读 | **不发 ETag**；`Last-Modified` 是**请求时间**（相隔 2s 的两次分别为 14:20:32 / 14:20:34，而文件 mtime 早得多） | 真实客户端永远拿不到 304：**不得**把缓存/并发检测建立在 `Last-Modified` 上 |
+| 压缩 | 0.2.11 忽略 `Accept-Encoding: gzip`（上游 `main` 已有该路径） | 能力必须**探测**，按版本推导必错 |
+| 写 | 只接受 **multipart**，且 part 字段名必须恰好是 `file`；raw `application/octet-stream` 在 0.2.11 返回 **500**（multipart 解析错误） | 跟随跑着的产物，而不是更新的分支 |
+| 写的陷阱 | 字段名不对（如 `files`）时返回 **`200 []`** 且**什么都没写** | 客户端必须校验响应里列出的路径，不能只看状态码 |
+| 写的语义 | `O_WRONLY\|O_CREATE\|O_TRUNC` + `EnsureDirs` 自动建父目录 + chown 到目标用户 | 破 argv 尺寸上限；但**自动建父目录与本地 `missing_parent` 的拒语义冲突**，必须在调用方之前拦住 |
+| 安全 | **无 jail**：`permissions/path.go:38` 对绝对路径直通；且以**守护进程身份（实测 root）**读写 | `GET /files?path=/etc/shadow` → 200（1401B），而同用户本地 `Permission denied`；写向同理。**jail 与"目标用户可访问性"判定必须在调用方先行**，此端点不得直接暴露给模型 |
+| 路由 | `/files/`（尾斜杠）→ 404 `404 page not found` | 无重定向，URL 要写死 `/files` |
+
+**写侧仍缺的能力**：`POST /files` 只有整文件 `O_TRUNC`，**没有 offset 写 / 原地稀疏写**；
+读侧的 offset 已可用（`Range`）。写侧扩展方案见
+`docs/architecture/envd-client-offset-extension.md`（FUSE 挂载数据面依赖它），本文不重复。
+
+工具层如何使用这条通道（含两道权限闸门、降级与上限规则），见
+`docs/plan/tool-layer-io-seam-design-20261028.md` 的 §3.3 / §3.5 / §13。
 
 ## 4. 能力三：监控（/metrics 的隐藏深度）
 

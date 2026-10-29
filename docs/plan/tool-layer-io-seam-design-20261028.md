@@ -8,6 +8,7 @@
   - `tool-layer-abstraction-design-20261022.md`（Phase 0–6 工具层抽象，行 1542–1574 为 Phase 2/3 定义）
   - `aicli-envd-bridge-merge-plan-20261028.md`（envd 收编方案，§8.1–§8.9 为进度与偏差记录）
   - `docs/architecture/envd-capabilities.md`、`envd-implementation-report.md`（envd RPC 实测矩阵）
+  - `docs/architecture/envd-client-offset-extension.md`（2026-10-29，另一会话）——与本文**分工不重叠且事实一致**：它纠正了"envd 读也无 offset"的旧说法（读侧 `Range` 已可用，本文 §3.3 即其证据来源），并指出**写侧缺 offset 写 / 原地稀疏写**（`POST /files` 只有 `O_TRUNC`）。本文不实现 offset 写；seam 若需要它，应加 `RandomWrite` 能力位并**先对齐那份文档**，避免两边各写一套。FUSE 数据面归那份文档。
 - 本文性质：**新增一层抽象的设计方案**，不是对既有设计的修补（§2.2 给出证明），也不是 Phase 0–6 的替代。
 
 ---
@@ -630,7 +631,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 1. 在 `tool-layer-abstraction-design-20261022.md` 的 §16.1 风险 3 与 Phase 2/3 处加一行交叉引用（指向本文），把"远程后续通过接口适配"这句占位**兑现成接口定义**。
 2. 在 `aicli-envd-bridge-merge-plan-20261028.md` §8.9 后追加一节，把"envd 文件面独立实现"标记为**过渡态，偿还计划见本文**。
 3. ✅ **已完成**：§7.4 的三条反漂移检查已作为 `backend/internal/driftguard` 测试上线（随 `make test` / `go test ./...` 自动执行，无需额外 CI 步骤）。原写的是“先只跑报表、不作硬门”，实际落地为**硬门**：它们只会因新增违规而红，不会拦截现有代码（基线即现状），因此没有“先软后硬”的必要。
-4. 在 `docs/architecture/envd-capabilities.md` 补一节 **`GET/POST /files`（HTTP，非 Connect-RPC）**，记录本轮实测：header token 即可、`Accept-Ranges`/206/416、无 ETag、`Last-Modified` 为请求时间、0.2.11 无 gzip、`POST` 的 `EnsureDirs` 自动建父目录、**无 jail 且以 envd 进程身份读**。它今天只列了 RPC 与 `/health`、`/metrics`，**遗漏了这个最重要的文件通道**。
+4. ✅ **已完成**：`docs/architecture/envd-capabilities.md` 已新增 §3.5 `GET/POST /files（唯一的文件数据通道）`，把本轮全部实测写成表（header token、206/416/多区间、无 ETag 与 `Last-Modified` 为请求时间、gzip 不生效、multipart 字段名 `file` 与静默 `200 []`、`EnsureDirs`、**无 jail 且以守护进程身份读写**、`/files/` 尾斜杠 404），并已与本文双向交叉引用。
 5. 顺手更正 `docs/architecture/envd-source-and-rebuild.md:133` 的 clone 地址：本轮实测 `e2b-dev/infra` 与 `e2b-dev/runtime` 是**同一代码库的跳转**（API 响应里 `html_url` 指向 `e2b-dev/runtime`），两个都可用，文档建议写 `runtime` 并注一个重定向备注，避免后人怀疑找错仓。
 6. **凭据卫生（建议立即做）**：本轮为跑 spike 使用了 sudo 口令与 envd 访问令牌，两者均未回显、未落盘、远端临时产物已清零，但口令已进入会话记录——建议**换发 envd 令牌**（改 `/etc/envd/envd.env` → `systemctl restart envd` → `/init` 重装，步骤见 `docs/aicli/envd-selfhost-deploy.md` §令牌引导）并更换 sudo 口令。
 
