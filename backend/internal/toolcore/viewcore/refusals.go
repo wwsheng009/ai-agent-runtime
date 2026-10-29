@@ -1,24 +1,38 @@
 package viewcore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/pathguard"
 )
 
 // ReadFileHead returns up to size leading bytes of path. Both the binary note
 // and the format sniffers for documents, notebooks and images start from the
 // same head read, so it is one implementation instead of one per caller.
+//
+// It stays path-shaped because four local sniffers call it without a runtime in
+// hand; the seam version below is what the shared handler uses, so the same sniff
+// works on a file that lives on another machine.
 func ReadFileHead(path string, size int) ([]byte, error) {
-	file, err := os.Open(path)
+	return ReadFileHeadFromAccess(context.Background(), localio.Access, path, size)
+}
+
+// ReadFileHeadFromAccess reads the leading bytes of one path through the I/O
+// seam. A nil accessor means the local filesystem.
+func ReadFileHeadFromAccess(ctx context.Context, access toolcore.Access, path string, size int) ([]byte, error) {
+	if access == nil {
+		access = localio.Access
+	}
+	file, err := access.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -51,9 +65,14 @@ func RefusalResult(absPath, reason string) *toolcore.Result {
 // BinaryNote describes a non-renderable binary file without failing the call:
 // one line of MIME + size + a recovery route, so the model can decide whether
 // to download it or pick a converter instead of guessing from NUL bytes.
-func BinaryNote(absPath, displayPath string, size int64) *toolcore.Result {
+//
+// It takes the accessor because its caller - the shared handler - already
+// resolved one. Sniffing the head from a different machine than the metadata is
+// exactly the split-brain the seam exists to remove: the size would describe the
+// remote file while the MIME type came from a local path that shares its name.
+func BinaryNote(ctx context.Context, access toolcore.Access, absPath, displayPath string, size int64) *toolcore.Result {
 	mimeType := ""
-	if head, err := ReadFileHead(absPath, 512); err == nil {
+	if head, err := ReadFileHeadFromAccess(ctx, access, absPath, 512); err == nil {
 		mimeType = strings.TrimSpace(http.DetectContentType(head))
 	}
 	if extMIME := strings.TrimSpace(mime.TypeByExtension(strings.ToLower(filepath.Ext(absPath)))); extMIME != "" &&
@@ -83,8 +102,8 @@ func BinaryNote(absPath, displayPath string, size int64) *toolcore.Result {
 // DirectoryListing is the auto-heal for "view was pointed at a directory": a
 // shallow listing saves a round trip to ls, and the metadata says the path is a
 // directory so the model can ask for a deeper one explicitly.
-func DirectoryListing(absPath, displayPath string) (*toolcore.Result, error) {
-	listing, err := DirectoryPreview(absPath)
+func DirectoryListing(ctx context.Context, access toolcore.Access, absPath, displayPath string) (*toolcore.Result, error) {
+	listing, err := directoryPreview(ctx, access, absPath)
 	if err != nil {
 		return nil, err
 	}

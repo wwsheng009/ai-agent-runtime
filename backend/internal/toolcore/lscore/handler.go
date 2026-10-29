@@ -3,9 +3,9 @@ package lscore
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -74,9 +74,12 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		}
 	}
 	display := paths.Relative(abs)
-	info, statErr := os.Stat(abs)
+	// The existence check goes through the I/O seam: which machine this describes
+	// is the Runtime's decision, not this core's.
+	access := localio.For(call.Runtime)
+	info, statErr := access.Stat(ctx, abs)
 	if statErr != nil {
-		if os.IsNotExist(statErr) {
+		if toolcore.IsNotExist(statErr) {
 			hint := ""
 			if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
 				hint = hinter.PathHint(rawPath)
@@ -133,7 +136,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 
 	listing, readErr := ReadTree(abs, depth, limit)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if toolcore.IsNotExist(readErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the workspace path", readErr), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check directory permissions", readErr), nil

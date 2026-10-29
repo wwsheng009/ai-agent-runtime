@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/pathguard"
 )
@@ -191,22 +191,25 @@ func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths too
 			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 		}
 	}
-	info, statErr := os.Stat(abs)
+	// One accessor for the whole call: the stat below, the directory auto-listing,
+	// the window read and the binary sniff must all describe the same machine.
+	access := fileAccessor(call)
+	info, statErr := access.Stat(ctx, abs)
 	healed := false
-	if statErr != nil && os.IsNotExist(statErr) {
+	if statErr != nil && toolcore.IsNotExist(statErr) {
 		// An invisible-spelling mismatch (case or Unicode variants) makes the
 		// existence check fail forever while the file is right there, so a unique
 		// candidate is adopted and the read proceeds.
 		if candidate, candidates := HealSpelling(permissionChecker(call), abs); candidate != "" {
 			abs = candidate
 			healed = true
-			info, statErr = os.Stat(abs)
+			info, statErr = access.Stat(ctx, abs)
 		} else if len(candidates) > 1 {
 			return AmbiguousSpellingResult(req.FilePath, abs, candidates), nil
 		}
 	}
 	if statErr != nil {
-		if os.IsNotExist(statErr) {
+		if toolcore.IsNotExist(statErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", pathNotFoundError(call, "路径不存在", req.FilePath)), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check permissions on the target file", statErr), nil
@@ -219,7 +222,7 @@ func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths too
 	if info.IsDir() {
 		// Pointing view at a directory lists it instead of failing: the caller
 		// wanted to know what is there, and the metadata says so explicitly.
-		listing, listErr := DirectoryListing(abs, req.FilePath)
+		listing, listErr := DirectoryListing(ctx, access, abs, req.FilePath)
 		if listErr != nil {
 			return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", listErr), nil
 		}
@@ -260,9 +263,9 @@ func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths too
 		}
 	}
 
-	content, stats, readErr := ReadText(abs, window, Options{ByteBudget: byteBudget(call, h.def)})
+	content, stats, readErr := ReadWindowFromAccess(ctx, access, abs, window, byteBudget(call, h.def))
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if toolcore.IsNotExist(readErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", pathNotFoundError(call, "读取文件失败", req.FilePath)), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the file and narrow the window", readErr), nil
@@ -270,7 +273,7 @@ func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths too
 	// A window that is mostly NUL bytes is a binary file: describe it (MIME,
 	// size, recovery route) instead of handing the model unreadable content.
 	if IsBinaryContent(content) {
-		return BinaryNote(abs, req.FilePath, info.Size()), nil
+		return BinaryNote(ctx, access, abs, req.FilePath, info.Size()), nil
 	}
 	result := BuildResult(abs, info.Size(), window, content, stats)
 	if healed {
@@ -339,6 +342,18 @@ func permissionChecker(call *toolcore.Call) toolcore.PermissionChecker {
 		return nil
 	}
 	return call.Runtime.Permissions()
+}
+
+// fileAccessor resolves the I/O seam for one call: the Runtime's accessor when it
+// provides one, the local filesystem otherwise. Every filesystem read in this
+// handler goes through the single value it returns - that is what lets a remote
+// surface share this handler instead of growing a copy of it, and it is why the
+// driftguard baseline for this package can sit at zero.
+func fileAccessor(call *toolcore.Call) toolcore.Access {
+	if call == nil {
+		return localio.Access
+	}
+	return localio.For(call.Runtime)
 }
 
 // pathNotFoundError renders the "path not found" sentence every file tool

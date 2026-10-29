@@ -154,6 +154,77 @@ func isFilesystemCall(name string) bool {
 	return known && enabled
 }
 
+// WalkerStyleCalls names the host-filesystem calls that FilesystemCallCounts is
+// structurally blind to, keyed by their qualified form.
+//
+// Why a second list: the guard above matches the selector package `os`, so
+// filepath.WalkDir - which walks the very same host tree and is exactly as
+// machine-bound as os.ReadDir - never shows up in its numbers. Without this list a
+// core could report zero host calls while still describing only the machine it
+// runs on, and a reader would conclude the seam had landed when it had not.
+//
+// fs.WalkDir is deliberately absent: whether it touches the host depends on the
+// fs.FS it is handed, which cannot be decided from the call site alone. That case
+// needs a review note, not a counter that guesses.
+var WalkerStyleCalls = map[string]bool{
+	"filepath.WalkDir":      true,
+	"filepath.Walk":         true,
+	"filepath.Glob":         true,
+	"filepath.EvalSymlinks": true,
+	"os.DirFS":              true,
+}
+
+// WalkerStyleCallCounts counts the calls in WalkerStyleCalls under root, in
+// non-test Go files. It exists to be ratcheted exactly like FilesystemCallCounts.
+func WalkerStyleCallCounts(root string) (int, []Finding, error) {
+	files, err := goFiles(root)
+	if err != nil {
+		return 0, nil, err
+	}
+	var found []Finding
+	for _, path := range files {
+		calls, err := walkerStyleCallsInFile(path)
+		if err != nil {
+			return 0, nil, err
+		}
+		found = append(found, calls...)
+	}
+	return len(found), found, nil
+}
+
+func walkerStyleCallsInFile(path string) ([]Finding, error) {
+	set := token.NewFileSet()
+	parsed, err := parser.ParseFile(set, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, fmt.Errorf("driftguard: parse %s: %w", path, err)
+	}
+	var found []Finding
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		qualified := pkg.Name + "." + selector.Sel.Name
+		if !WalkerStyleCalls[qualified] {
+			return true
+		}
+		found = append(found, Finding{
+			Pos:     fmt.Sprintf("%s:%d", displayPath(path), set.Position(selector.Pos()).Line),
+			Message: fmt.Sprintf("host-tree call %s reaches the filesystem without saying os.*", qualified),
+		})
+		return true
+	})
+	return found, nil
+}
+
 // importsOS reports whether a file imports the os package under that name.
 func importsOS(file *ast.File) bool {
 	for _, spec := range file.Imports {

@@ -2,15 +2,16 @@ package viewcore
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/textcodec"
 )
 
@@ -70,6 +71,10 @@ type Request struct {
 type Options struct {
 	ByteBudget int
 	Truncated  func(reason TruncReason)
+	// Access is the file-I/O seam used to open the file. nil means the local
+	// filesystem: an unconverted caller keeps its exact pre-seam behaviour, which
+	// is what makes the move reviewable as "no behaviour change".
+	Access toolcore.Access
 }
 
 // Stats is everything the reader learned about one window. It is the input to
@@ -119,13 +124,29 @@ type Stats struct {
 
 // ReadText reads one already-authorized path and returns the rendered window
 // plus its stats. BOM/UTF-16 files are decoded first; plain UTF-8 streams.
+//
+// It is the entry point for a caller that holds no accessor: the handler threads
+// the seam through ReadTextFromHandle instead, so the context that governs the
+// open is the caller's own.
 func ReadText(path string, req Request, opts Options) (string, Stats, error) {
-	file, err := os.Open(path)
+	access := opts.Access
+	if access == nil {
+		access = localio.Access
+	}
+	file, err := access.Open(context.Background(), path)
 	if err != nil {
 		return "", Stats{}, err
 	}
 	defer file.Close()
 
+	return ReadTextFromHandle(file, req, opts)
+}
+
+// ReadTextFromHandle renders one window of an open file. It is ReadText with the
+// I/O decision taken out, which is the whole point of the seam: the same paging,
+// BOM and clamping rules apply to a handle from any backend, so a remote read
+// cannot grow a second window implementation.
+func ReadTextFromHandle(file toolcore.FileHandle, req Request, opts Options) (string, Stats, error) {
 	if enc, hasBOM := probeEncoding(file); hasBOM {
 		if info, statErr := file.Stat(); statErr == nil && info.Size() > MaxDecodeBytes {
 			return "", Stats{}, fmt.Errorf(
@@ -144,6 +165,26 @@ func ReadText(path string, req Request, opts Options) (string, Stats, error) {
 	}
 
 	return ReadWindow(file, req, opts)
+}
+
+// ReadWindowFromAccess opens one already-authorized path through the seam and
+// windows it with the shared reader.
+//
+// The open lives here rather than inside ReadText so the caller's context governs
+// the I/O: a handle that costs an HTTP round trip must die when the call is
+// cancelled, and a core cannot honour that if it picks the filesystem itself.
+// The returned error is the open error or the read error, undifferentiated, which
+// is what lets the handler keep one classification block exactly as it was.
+func ReadWindowFromAccess(ctx context.Context, access toolcore.Access, path string, req Request, budget int) (string, Stats, error) {
+	if access == nil {
+		access = localio.Access
+	}
+	file, err := access.Open(ctx, path)
+	if err != nil {
+		return "", Stats{}, err
+	}
+	defer file.Close()
+	return ReadTextFromHandle(file, req, Options{ByteBudget: budget})
 }
 
 // ReadTextFromBytes renders one window of bytes that are already in memory,
@@ -181,7 +222,7 @@ func detectBOM(data []byte) (textcodec.Encoding, bool) {
 }
 
 // probeEncoding peeks the leading BOM and rewinds the reader.
-func probeEncoding(file *os.File) (textcodec.Encoding, bool) {
+func probeEncoding(file toolcore.FileHandle) (textcodec.Encoding, bool) {
 	var head [4]byte
 	n, _ := file.Read(head[:])
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -528,7 +569,16 @@ func IsBinaryContent(content string) bool {
 // DirectoryPreview returns a shallow directory listing for auto-heal when view
 // is pointed at a directory instead of a file.
 func DirectoryPreview(dirPath string) (string, error) {
-	entries, err := os.ReadDir(dirPath)
+	return directoryPreview(context.Background(), localio.Access, dirPath)
+}
+
+// directoryPreview is the seam-backed implementation: a listing is a filesystem
+// read, so the surface that owns the accessor decides which machine is described.
+func directoryPreview(ctx context.Context, access toolcore.Access, dirPath string) (string, error) {
+	if access == nil {
+		access = localio.Access
+	}
+	entries, err := access.ReadDir(ctx, dirPath)
 	if err != nil {
 		return "", err
 	}

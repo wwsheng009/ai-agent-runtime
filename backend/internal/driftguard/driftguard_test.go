@@ -28,8 +28,19 @@ import (
 // Lower these numbers as the seam lands and never raise one without writing the
 // reason here.
 var coreBaselines = map[string]int{
-	"viewcore":   5,
-	"lscore":     1,
+	// viewcore and lscore reached zero in Phase 2.5a: their host reads now go
+	// through toolcore.Access (internal/toolcore/localio is the only place that
+	// still calls os.* for them), and the view/ls unit tests were not edited while
+	// doing it. Zero is therefore a locked floor, not an estimate: any new os.*
+	// call in these two cores is a fork waiting to happen.
+	//
+	// Zero does NOT mean "no host filesystem access". The listing path still walks
+	// the tree through filepath.WalkDir, which this guard cannot see because it
+	// matches only the `os` selector package. That blind spot is measured by
+	// TestSharedCoresDoNotAddWalkerStyleHostCalls below, so the number here cannot
+	// be read as "the core is backend-neutral already".
+	"viewcore":   0,
+	"lscore":     0,
 	"searchcore": 24,
 	"mutatecore": 27,
 }
@@ -78,6 +89,47 @@ func TestSharedCoresDoNotAddHostFilesystemCalls(t *testing.T) {
 				// Ratchet down deliberately: leaving the ceiling high hides the
 				// progress and lets the next change re-add calls unnoticed.
 				t.Errorf("%s is down to %d host-filesystem calls from the baseline of %d: lower coreBaselines to %d so the improvement is locked in",
+					core, total, baseline, total)
+			}
+		})
+	}
+}
+
+// walkerBaselines is the measured number of host-tree calls per shared core that
+// the os.* guard above structurally cannot see, as of 2026-10-28.
+//
+// It exists because Phase 2.5a drove viewcore and lscore to zero os.* calls, and
+// reading that zero as "these cores no longer touch the filesystem" would be
+// wrong: lscore still walks the tree with filepath.WalkDir. Measuring the blind
+// spot is the only way the zero can be quoted honestly, and ratcheting it keeps
+// the seam work from quietly moving host access into a different package name.
+var walkerBaselines = map[string]int{
+	"viewcore":   0,
+	"lscore":     1,
+	"searchcore": 4,
+	"mutatecore": 1,
+}
+
+func TestSharedCoresDoNotAddWalkerStyleHostCalls(t *testing.T) {
+	root := moduleRoot(t)
+	for core, baseline := range walkerBaselines {
+		core, baseline := core, baseline
+		t.Run(core, func(t *testing.T) {
+			dir := filepath.Join(root, "internal", "toolcore", core)
+			total, sites, err := driftguard.WalkerStyleCallCounts(dir)
+			if err != nil {
+				t.Fatalf("count host-tree calls under %s: %v", dir, err)
+			}
+			if total > baseline {
+				t.Fatalf("%s makes %d host-tree calls outside the os.* set, %d above the recorded baseline of %d.\n"+
+					"These calls are invisible to TestSharedCoresDoNotAddHostFilesystemCalls, so a zero there\n"+
+					"does not mean the core is backend-neutral: filepath.WalkDir describes this machine only.\n"+
+					"First finding:\n%s",
+					core, total, total-baseline, baseline,
+					driftguard.FormatFindings(sites, 5))
+			}
+			if total < baseline {
+				t.Errorf("%s is down to %d host-tree calls from the baseline of %d: lower walkerBaselines to %d so the improvement is locked in",
 					core, total, baseline, total)
 			}
 		})
@@ -181,6 +233,47 @@ func TestX(t *testing.T) { _ = os.Remove("tests are not shipped code") }
 	joined := driftguard.FormatFindings(sites, 10)
 	if strings.Contains(joined, "Getenv") || strings.Contains(joined, "string literal") || strings.Contains(joined, "comment") {
 		t.Fatalf("non-call sites leaked into the report: %s", joined)
+	}
+}
+
+// TestWalkerStyleCallCountsFindsWhatTheOSGuardMisses pins both halves of the
+// claim that justified the second counter: it must see the host walk the os.*
+// guard cannot, and it must not count pure path arithmetic.
+func TestWalkerStyleCallCountsFindsWhatTheOSGuardMisses(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "walk.go", `package fixture
+
+import (
+	"os"
+	"path/filepath"
+)
+
+func Use() {
+	_ = filepath.WalkDir("root", nil)
+	_, _ = filepath.Glob("*.go")
+	_, _ = filepath.Rel("a", "b")
+	_, _ = filepath.Join("a", "b")
+	_ = os.Getenv("HOME")
+}
+`)
+	total, sites, err := driftguard.WalkerStyleCallCounts(dir)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("walker-style count = %d, want 2 (WalkDir + Glob only):\n%s", total, driftguard.FormatFindings(sites, 10))
+	}
+
+	// The point of the second guard: on this same fixture the os.* guard reports
+	// nothing, which is exactly how a core could claim backend neutrality while
+	// walking the host tree.
+	osTotal, osSites, err := driftguard.FilesystemCallCounts(dir)
+	if err != nil {
+		t.Fatalf("count os.*: %v", err)
+	}
+	if osTotal != 0 {
+		t.Fatalf("os.* count on the fixture = %d, want 0; the two guards must be complementary:\n%s",
+			osTotal, driftguard.FormatFindings(osSites, 10))
 	}
 }
 
