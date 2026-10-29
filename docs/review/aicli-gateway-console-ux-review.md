@@ -6,15 +6,15 @@
 >
 > **线上基线**：控制台资产版本 `v55`（`index.html` / `app.js?v=55` / `style.css?v=55`）
 >
-> **源码基线**：工作区 `HEAD` + `backend/cmd/gateway/console` 的 v71 改动
+> **源码基线**：工作区 `HEAD` + `backend/cmd/gateway/console` 的 v72 改动
 >
-> **修复基线**：工作区控制台资产 `v71`（UX-01 ~ UX-09 + UX-08 代码层 + UX-10 已实施）
+> **修复基线**：工作区控制台资产 `v72`（UX-01 ~ UX-09 + UX-08 代码层 + UX-10 已实施）
 >
 > **相关源码**：`backend/cmd/gateway/console/{index.html, app.js, style.css, sw.js}`
 >
 > **原审查方式**：登录后逐页操作，桌面 1568px、窄屏约 762px；含截图观察
 >
-> **本次复核方式**：线上 `v55` 资产与工作区源码/DOM/CSS 交叉核对，补充 WCAG 相对亮度抽查；UX-01 ~ UX-10（UX-08 为代码层）已在 `v71` 落地并通过 jsdom / Edge headless / Go 资产测试
+> **本次复核方式**：线上 `v55` 资产与工作区源码/DOM/CSS 交叉核对，补充 WCAG 相对亮度抽查；UX-01 ~ UX-10（UX-08 为代码层）已在 `v72` 落地并通过 jsdom / Edge headless / Go 资产测试
 >
 > **覆盖页面**：仪表盘 / 会话 / 节点 / 设备令牌 / 连接器 / 通知设置（线上 6 页）
 >
@@ -579,6 +579,8 @@
 4. composer 使用 flex + 文字发送按钮，输入框的 flex-basis 受内容和按钮宽度影响。
 5. 移动端通用 `.seg { flex:1 1 160px }` 同时命中纵向 `.im-list-tools` 里的 `.im-seg`；
    flex-basis 变成长轴高度，过滤条被拉到 160px、按钮 152px。
+6. 会话详情首屏同时触发初始 screen、SSE open screen；多个 SSE 事件又各自立即拉取
+   同一份 40 条窗口，造成重复请求与重复 Markdown/DOM 解析。
 
 **已落地实现**
 
@@ -595,6 +597,10 @@
 - 移动端会话流 `z-index:60`；详情/确认等 `.modal-scrim` 提升到 `70`，toast 提升到 `80`。
   390×844 层叠探测中 `elementFromPoint(中心)` 命中 `modal`，不再被会话流遮挡。
 - `.im-seg` 显式 `flex:0 0 auto`；390×844 + 触摸仿真下过滤条高 52px、每个按钮 44px。
+- 移除详情顶部的「加载更早消息」按钮；滚到顶部仍自动前插 60 条，不再额外占一行。
+- `chatFetchScreen` 增加 `screenBusy` 与 800ms `lastScreenAt` 去重：初始加载与 SSE open
+  不再重复请求同一窗口；assistant_message / turn_end / heartbeat-idle / interrupted
+  统一走 1s 尾随刷新，减少事件风暴下的请求与渲染次数。
 
 **真实布局验证（Edge headless + 静态 harness，`v69`）**
 
@@ -811,6 +817,7 @@
 | v69 | 2026-10-30 | UX-10 会话宽度稳定、composer 全宽、卡片动作迁移到主会话区 |
 | v70 | 2026-10-30 | 移动端详情/确认模态层级修复 |
 | v71 | 2026-10-30 | 移动端会话过滤条高度修复（44px 按钮） |
+| v72 | 2026-10-30 | 移除详情顶部加载更早按钮 + 首屏 screen 去重/刷新合并 |
 
 **备注**：v65/v66 为并行迭代，未改变本审查结论；UX-08 的真机/屏幕阅读器验收仍需执行。
 

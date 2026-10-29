@@ -157,6 +157,9 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 			t.Fatalf("obsolete chat header control still present: %s", removed)
 		}
 	}
+	if strings.Contains(string(html), `id="chat-older"`) {
+		t.Fatal("top load-older button should be removed; scrolling to top auto-loads")
+	}
 }
 
 // The console ships a manual cache-busting version (?v=N) in index.html, the

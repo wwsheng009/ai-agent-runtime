@@ -185,6 +185,7 @@ const env = (src) => ({
     /\.view-sessions #chat-modal\s*\{[^}]*z-index:\s*60/s.test(css));
   check('移动端会话过滤条不被 flex-basis 拉高',
     /\.im-seg\s*\{[^}]*flex:\s*0 0 auto/s.test(css));
+  check('顶部“加载更早消息”按钮已移除', !doc.getElementById('chat-older'));
 
   const moreBtn = doc.getElementById('chat-more');
   const menu = doc.getElementById('chat-more-menu');
@@ -307,7 +308,8 @@ const env = (src) => ({
   await sleep(2500);
   check('忙时兜底轮询拉快照', countScreen() > before, `screen ${before} -> ${countScreen()}`);
   es.emit('heartbeat', { ...env('heartbeat'), session_busy: false, session_active: true });
-  await sleep(100);
+  // busy=false 会触发一次 1s 尾随收敛刷新；先等它落地，再验证之后不再轮询。
+  await sleep(1300);
   const idle = countScreen();
   await sleep(2500);
   check('空闲后停止兜底轮询', countScreen() === idle, `screen ${idle} -> ${countScreen()}`);

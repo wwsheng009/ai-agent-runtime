@@ -420,6 +420,7 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 	for _, needle := range []string{
 		"chat-modal", "/web/api/screen", "/web/api/events", "/web/api/input",
 		"/web/api/statusbar", "message_window", "chat-dyn-status",
+		"screenBusy", "lastScreenAt",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets
 		// eaten by the list rule first).
@@ -438,7 +439,7 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 	// connection dot (setting textContent on #chat-live-status used to do that).
 	for _, needle := range []string{
 		`id="chat-live-text"`, `aria-label="跳到最新消息"`,
-		`aria-label="更多会话操作"`, `aria-label="加载更早消息"`,
+		`aria-label="更多会话操作"`,
 		`aria-label="发送消息"`,
 	} {
 		if !strings.Contains(index, needle) {

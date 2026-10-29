@@ -4612,6 +4612,8 @@
       pending: [],
       live: chatEmptyLive(),
       seq: 0,
+      screenBusy: false,
+      lastScreenAt: 0,
       follow: true,
       olderBusy: false,
       sending: false,
@@ -4658,6 +4660,15 @@
     var st = chatState;
     if (!st) { return; }
     var o = opts || {};
+    if (!o.older) {
+      // 首屏打开会同时触发初始 screen、SSE open screen 和状态栏请求。
+      // 同一面板只允许一份非翻页 screen 在途，并给刚完成的刷新 800ms 去重，
+      // 避免重复解析/渲染同一窗口。
+      if (st.screenBusy) { return; }
+      if (st.lastScreenAt && Date.now() - st.lastScreenAt < 800) { return; }
+      st.screenBusy = true;
+      st.lastScreenAt = Date.now();
+    }
     if (o.older) {
       if (st.olderBusy || !st.win || !st.win.has_more) { return; }
       st.olderBusy = true;
@@ -4692,6 +4703,8 @@
       if (chatState !== st || st.seq !== seq) { return; }
       chatFail("暂时无法加载这段会话。",
         "GET " + url + "\n" + (err && err.message ? err.message : String(err)));
+    }).finally(function () {
+      if (!o.older) { st.screenBusy = false; }
     });
   }
 
@@ -4700,6 +4713,7 @@
     if (!st) { return; }
     st.failed = false;
     st.available = true;
+    st.lastScreenAt = 0;
     chatNotice("");
     chatPlaceholder("正在重新加载消息…");
     chatSetStatus("重新加载…", "");
@@ -5261,7 +5275,7 @@
           chatEndStream();
           chatScheduleRender();
         }
-        chatFetchScreen();
+        chatScheduleRefresh();
         break;
       case "assistant_image_progress":
         var img = d.image && typeof d.image === "object" ? d.image : d;
@@ -5291,7 +5305,7 @@
         chatSetBusy(false);
         chatSetStatus("就绪", "live");
         chatScheduleRender();
-        chatFetchScreen();
+        chatScheduleRefresh();
         break;
       case "heartbeat":
         // 权威忙闲（每次心跳都带）：这是「兜底轮询该开还是该关」的唯一可靠依据，
@@ -5302,7 +5316,7 @@
           chatEndStream();
           chatSetStatus("就绪", "live");
           chatScheduleRender();
-          chatFetchScreen();
+          chatScheduleRefresh();
         }
         break;
       case "session_interrupted":
@@ -5310,7 +5324,7 @@
         chatSetBusy(false);
         chatSetStatus("已停止", "down");
         chatScheduleRender();
-        chatFetchScreen();
+        chatScheduleRefresh();
         break;
       case "dynamic_status":
         // 状态栏主体：Retrying / Analyzing / Running…（active=false 即收尾）。
@@ -7429,7 +7443,6 @@
       });
     }
     el("chat-jump-latest").addEventListener("click", function () { chatScrollToBottom(true); });
-    el("chat-older-btn").addEventListener("click", chatLoadOlder);
     // 头部「下一条待处理」：面板内直接流转到下一条待审批/待回答，不必回列表。
     // 元素缺失时静默跳过（PWA 可能缓存了没有该按钮的旧 index.html）。
     var nextPendingBtn = el("chat-next-pending");
@@ -7712,7 +7725,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=71").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=72").catch(function () {});
     });
   }
 
