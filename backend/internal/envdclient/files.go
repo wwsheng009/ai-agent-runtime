@@ -88,7 +88,21 @@ type FilesError struct {
 	Status  int    // HTTP status as observed, 0 for transport failures
 	Path    string // the path we asked for
 	Message string // server text, already shortened
+	Total   int64  // file size when the reply carried it (a 416 does), else -1
 	Err     error  // underlying cause for transport failures
+}
+
+func newFilesError(code FilesErrorCode, path string) *FilesError {
+	return &FilesError{Code: code, Path: path, Total: -1}
+}
+
+// transportFilesError wraps a failure that never became an HTTP answer. Total stays
+// -1, not 0: a zero here would read as "empty file" to anything resolving a tail
+// offset against it.
+func transportFilesError(path string, err error) *FilesError {
+	fileErr := newFilesError(FilesTransport, path)
+	fileErr.Err = err
+	return fileErr
 }
 
 func (e *FilesError) Error() string {
@@ -148,6 +162,21 @@ func (c *Client) filesURL(rawPath string) string {
 	return c.base + FilesPath + "?" + query.Encode()
 }
 
+// byteRange is one requested window: [off, off+size). A nil range means "the whole
+// body".
+type byteRange struct {
+	off  int64
+	size int64 // <= 0 means "to the end of the file"
+}
+
+// end is the inclusive last byte index, or -1 when the window runs to EOF.
+func (b byteRange) end() int64 {
+	if b.size <= 0 {
+		return -1
+	}
+	return b.off + b.size - 1
+}
+
 // ReadFile fetches a file through /files.
 //
 // maxBytes bounds the transfer: when it is positive the request carries
@@ -155,48 +184,78 @@ func (c *Client) filesURL(rawPath string) string {
 // of a full download, and Partial says there is more. Pass 0 to read the whole
 // body; callers that must bound memory should always pass a limit.
 func (c *Client) ReadFile(ctx context.Context, path string, maxBytes int64) (*FileRead, error) {
-	read, err := c.readFile(ctx, path, maxBytes, true)
+	read, err := c.fetch(ctx, path, &byteRange{off: 0, size: maxBytes})
 	// A prefix request that comes back 416 means this envd build does not clamp
 	// an end beyond EOF the way the measured 0.2.11 does. Retry once without the
 	// header and bound the body here, so behaviour stays identical across builds
 	// instead of turning a working read into an error.
+	//
+	// This retry is specific to reading from the start. ReadRange must not do it:
+	// a caller that asked for the middle of a huge file would get the whole file
+	// back in memory instead of an error.
 	if err != nil && maxBytes > 0 && IsFilesCode(err, FilesRangeUnsatisfiable) {
-		return c.readFile(ctx, path, maxBytes, false)
+		return c.fetch(ctx, path, nil)
 	}
 	return read, err
 }
 
-func (c *Client) readFile(ctx context.Context, path string, maxBytes int64, useRange bool) (*FileRead, error) {
+// fetch is the single request/response path of the read channel. Both the prefix
+// read above and the offset read in rangefile.go go through it, so the identity
+// encoding rule, the Content-Range parsing and the error classification cannot
+// drift apart between the two.
+func (c *Client) fetch(ctx context.Context, path string, rng *byteRange) (*FileRead, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, c.tmo)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, c.filesURL(path), nil)
 	if err != nil {
-		return nil, &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return nil, transportFilesError(path, err)
 	}
 	c.applyHeaders(req)
 	// identity, not gzip: 0.2.11 ignores the request but a future build that
 	// honours it would hand us a compressed body whose length no longer matches
 	// the file, and byte offsets are the whole point of this endpoint.
 	req.Header.Set("Accept-Encoding", "identity")
-	if useRange && maxBytes > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", maxBytes-1))
+	size := int64(0)
+	if rng != nil {
+		size = rng.size
+		// No header at all for "from the start to the end": an open-ended
+		// `bytes=0-` asks a different question than no Range (some servers and
+		// intermediaries answer it with 206 and no Content-Length), and the old
+		// whole-body path relied on the header being absent.
+		switch {
+		case rng.off > 0 && rng.size > 0:
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", rng.off, rng.end()))
+		case rng.off > 0:
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", rng.off))
+		case rng.size > 0:
+			req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", rng.end()))
+		}
 	}
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return nil, transportFilesError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	contentType := resp.Header.Get("Content-Type")
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, classifyFilesReply(resp.StatusCode, contentType, body, path)
+		filesErr := classifyFilesReply(resp.StatusCode, contentType, body, path)
+		if filesErr.Status == http.StatusRequestedRangeNotSatisfiable {
+			// The refusal carries the real size, which is what a caller resolving a
+			// negative offset or a "read past the end" needs.
+			filesErr.Total = parseContentRangeTotal(resp.Header.Get("Content-Range"))
+		}
+		return nil, filesErr
 	}
 
-	want := maxBytes + 1 // one extra byte answers "is there more?" without a HEAD
-	if maxBytes <= 0 {
+	want := size + 1 // one extra byte answers "is there more?" without a HEAD
+	if rng != nil && size <= 0 && rng.off > 0 {
+		// "from here to the end": no useful bound to add one byte to.
+		want = -1
+	} else if size <= 0 {
 		want = -1
 	}
 	var reader io.Reader = resp.Body
@@ -205,7 +264,7 @@ func (c *Client) readFile(ctx context.Context, path string, maxBytes int64, useR
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return nil, transportFilesError(path, err)
 	}
 
 	total := int64(-1)
@@ -216,15 +275,16 @@ func (c *Client) readFile(ctx context.Context, path string, maxBytes int64, useR
 	}
 
 	read := &FileRead{Data: data, StatusCode: resp.StatusCode, Total: total}
-	if maxBytes > 0 {
-		switch {
-		case int64(len(data)) > maxBytes:
-			// Should not happen with a Range request; keep the promise anyway.
-			read.Data = data[:maxBytes]
-			read.Partial = true
-		case total > int64(len(read.Data)):
-			read.Partial = true
-		}
+	if size > 0 && int64(len(data)) > size {
+		// Should not happen with a Range request; keep the promise anyway.
+		read.Data = data[:size]
+		read.Partial = true
+	} else if rng != nil && total >= 0 {
+		// Offset reads must compare against the end of *their* window, not against
+		// the window length: `off + len(data) < total` is what "there is more"
+		// means here. Getting this wrong is silent - a middle window would report
+		// Partial=false and the caller would believe the file ended where it did not.
+		read.Partial = rng.off+int64(len(read.Data)) < total
 	}
 	return read, nil
 }
@@ -240,7 +300,9 @@ func classifyFilesReply(status int, contentType string, body []byte, path string
 	if len(message) > 200 {
 		message = message[:200] + "..."
 	}
-	fileErr := &FilesError{Status: status, Path: path, Message: message}
+	fileErr := newFilesError(FilesBadRequest, path)
+	fileErr.Status = status
+	fileErr.Message = message
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		fileErr.Code = FilesUnauthorized
@@ -315,31 +377,31 @@ func (c *Client) WriteFile(ctx context.Context, path string, data []byte) error 
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("file", pathBase(path))
 	if err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 	if _, err := part.Write(data); err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 	if err := writer.Close(); err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.filesURL(path), &body)
 	if err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 	c.applyHeaders(req)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return &FilesError{Code: FilesTransport, Path: path, Err: err}
+		return transportFilesError(path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return classifyFilesReply(resp.StatusCode, resp.Header.Get("Content-Type"), responseBody, path)
@@ -352,19 +414,20 @@ func (c *Client) WriteFile(ctx context.Context, path string, data []byte) error 
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(responseBody, &entries); err != nil {
-		return &FilesError{Code: FilesNothingWritten, Path: path, Status: resp.StatusCode, Message: strings.TrimSpace(string(responseBody))}
+		fileErr := newFilesError(FilesNothingWritten, path)
+		fileErr.Status = resp.StatusCode
+		fileErr.Message = strings.TrimSpace(string(responseBody))
+		return fileErr
 	}
 	for _, entry := range entries {
 		if entry.Path == path || entry.Name == pathBase(path) {
 			return nil
 		}
 	}
-	return &FilesError{
-		Code:    FilesNothingWritten,
-		Path:    path,
-		Status:  resp.StatusCode,
-		Message: fmt.Sprintf("envd accepted the upload but listed %d file(s): %s", len(entries), strings.TrimSpace(string(responseBody))),
-	}
+	fileErr := newFilesError(FilesNothingWritten, path)
+	fileErr.Status = resp.StatusCode
+	fileErr.Message = fmt.Sprintf("envd accepted the upload but listed %d file(s): %s", len(entries), strings.TrimSpace(string(responseBody)))
+	return fileErr
 }
 
 // pathBase is path.Base for target-side absolute paths, which always use slashes.
@@ -392,7 +455,7 @@ func pathBase(value string) string {
 // The probe is read-only and creates nothing on the target.
 func (c *Client) ProbeFiles(ctx context.Context) error {
 	probe := "/.aicli-envd-files-probe-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	_, err := c.readFile(ctx, probe, 1, true)
+	_, err := c.fetch(ctx, probe, &byteRange{off: 0, size: 1})
 	switch {
 	case err == nil:
 		// Something answered with bytes for a name that cannot exist. Treat the
