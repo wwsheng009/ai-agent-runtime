@@ -180,6 +180,9 @@ const env = (src) => ({
     /\.chat-composer\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto/s.test(css));
   check('composer 输入框填满输入列',
     /\.chat-input\s*\{[^}]*width:\s*100%/s.test(css));
+  check('模态框层级高于移动端全屏会话流',
+    /\.modal-scrim\s*\{[^}]*z-index:\s*70/s.test(css) &&
+    /\.view-sessions #chat-modal\s*\{[^}]*z-index:\s*60/s.test(css));
 
   const moreBtn = doc.getElementById('chat-more');
   const menu = doc.getElementById('chat-more-menu');
@@ -209,6 +212,16 @@ const env = (src) => ({
   check('Home 回到会话头菜单首项', doc.activeElement === firstMenuItem);
   menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   check('Escape 关闭会话头菜单并归还焦点', menu.hidden && doc.activeElement === moreBtn);
+
+  moreBtn.click();
+  await sleep(10);
+  menu.querySelector('[data-chat-detail]').click();
+  await sleep(30);
+  check('会话头详情在会话流之上打开', doc.getElementById('session-modal').hidden === false);
+  doc.getElementById('session-modal-done').click();
+  await sleep(10);
+  check('关闭详情后回到会话流', doc.getElementById('session-modal').hidden === true &&
+    !doc.getElementById('chat-modal').hidden);
 
   const listText = () => (doc.querySelector('#chat-list') || {}).textContent || '';
   check('历史消息已渲染', listText().includes('HISTORY-ASSISTANT'));

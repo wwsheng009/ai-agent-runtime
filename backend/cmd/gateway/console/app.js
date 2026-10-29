@@ -7712,7 +7712,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=69").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=70").catch(function () {});
     });
   }
 
