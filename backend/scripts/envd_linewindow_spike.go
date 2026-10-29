@@ -108,13 +108,14 @@ func main() {
 	fmt.Printf("\n=== AGREEMENT: window bytes and line-count rule vs the core's own view of the whole file (%d samples) ===\n", len(samples))
 	failures := 0
 	for _, s := range samples {
-		problems, notes := checkSample(s)
+		problems, notes := checkSample(s, *budget)
 		if len(problems) == 0 {
 			tag := "served"
 			if s.excludedByDesign {
 				tag = "excluded by design (encoded file)"
 			}
-			fmt.Printf("PASS %-22s %-8d bytes, %d offsets, %s%s\n", s.name, len(s.body), len(s.offsets), tag, notesSuffix(notes))
+			fmt.Printf("PASS %-22s %-8d bytes, %d offsets: bytes AND core render agree, %s%s\n",
+				s.name, len(s.body), len(s.offsets), tag, notesSuffix(notes))
 			continue
 		}
 		failures++
@@ -191,9 +192,16 @@ func buildSamples(dir string) []sample {
 	}
 }
 
-// checkSample compares awk's window against the byte slice the core would have taken
-// from the whole file, and compares awk's count against the core's line rule.
-func checkSample(s sample) ([]string, string) {
+// checkSample asks two questions per offset.
+//
+// First the byte level: is awk's window exactly the slice of the file the core would
+// have windowed, and does awk's count follow the core's line rule? Then the level that
+// actually decides the design: does handing the core that window plus that count
+// produce the SAME render, the same eof, the same continuation and the same line
+// accounting as handing it the whole file? The first version of this spike could only
+// ask the first question, which is why the awk-added final newline was recorded as
+// "to be proven" rather than proven.
+func checkSample(s sample, budget int) ([]string, string) {
 	var problems []string
 	var notes []string
 	totalRef := countLinesCoreRule(s.body)
@@ -211,22 +219,58 @@ func checkSample(s sample) ([]string, string) {
 		want := sliceBytes(s.body, from, to)
 		if !bytes.Equal(window, want) {
 			// awk's `print` re-terminates every record, so an unterminated final line
-			// comes back with a newline the file never had. The core's windower strips
-			// terminators when it emits lines, so the rendered answer is the same - but
-			// this is recorded, not assumed: M1's core-level differential is the place
-			// that claim gets proven.
+			// comes back with a newline the file never had. That is only acceptable if
+			// the core render still agrees - asserted below, not assumed here.
 			if len(want) > 0 && !bytes.HasSuffix(want, []byte("\n")) && bytes.Equal(window, append(append([]byte{}, want...), '\n')) {
 				reterminated++
-				continue
+			} else {
+				problems = append(problems, fmt.Sprintf("offset %d: window bytes differ\n  awk : %x\n  want: %x", offset, window, want))
 			}
-			problems = append(problems, fmt.Sprintf("offset %d: window bytes differ\n  awk : %x\n  want: %x", offset, window, want))
 		}
 		if from > count {
 			beyondEOF++
 		}
+
+		request := viewcore.Request{Offset: offset, Limit: s.limit}
+		wholeText, wholeStats, wholeErr := viewcore.ReadTextFromBytes(s.body, request, viewcore.Options{ByteBudget: budget})
+		if wholeErr != nil {
+			problems = append(problems, fmt.Sprintf("offset %d: whole-file render failed: %v", offset, wholeErr))
+			continue
+		}
+		winText, winStats, winErr := viewcore.ReadTextFromBytes(window, request, viewcore.Options{
+			ByteBudget: budget,
+			Facts:      &viewcore.SourceFacts{TotalLines: count, TotalLinesKnown: true, StartsAtOffset: true},
+		})
+		if winErr != nil {
+			problems = append(problems, fmt.Sprintf("offset %d: the core rejected its own window: %v", offset, winErr))
+			continue
+		}
+		if winText != wholeText {
+			problems = append(problems, fmt.Sprintf("offset %d: core render differs\n  window: %q\n  whole:  %q",
+				offset, firstChars(winText, 200), firstChars(wholeText, 200)))
+		}
+		if winStats.EOF != wholeStats.EOF {
+			problems = append(problems, fmt.Sprintf("offset %d: eof differs: window %v, whole %v (count=%d linesRead=%d)",
+				offset, winStats.EOF, wholeStats.EOF, count, winStats.LinesRead))
+		}
+		if winStats.HasMore != wholeStats.HasMore {
+			problems = append(problems, fmt.Sprintf("offset %d: is_truncated differs: window %v, whole %v",
+				offset, winStats.HasMore, wholeStats.HasMore))
+		}
+		if winStats.LinesRead != wholeStats.LinesRead {
+			problems = append(problems, fmt.Sprintf("offset %d: lines_read differs: window %d, whole %d",
+				offset, winStats.LinesRead, wholeStats.LinesRead))
+		}
+		// total_lines may legitimately be known on one side only (a local read stops at
+		// the window and never learns the count). Two claims that disagree is another
+		// matter, and that is what this checks.
+		if winStats.TotalLinesKnown && wholeStats.TotalLinesKnown && winStats.TotalLines != wholeStats.TotalLines {
+			problems = append(problems, fmt.Sprintf("offset %d: total_lines contradiction: window %d, whole %d",
+				offset, winStats.TotalLines, wholeStats.TotalLines))
+		}
 	}
 	if reterminated > 0 {
-		notes = append(notes, fmt.Sprintf("%d window(s) came back with awk's added final newline (core-insensitive, to be proven in M1)", reterminated))
+		notes = append(notes, fmt.Sprintf("%d window(s) carried awk's added final newline and the core render still agreed", reterminated))
 	}
 	if beyondEOF > 0 {
 		notes = append(notes, fmt.Sprintf("%d offset(s) start past the reported total (the self-consistency check's job)", beyondEOF))

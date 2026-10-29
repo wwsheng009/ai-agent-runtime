@@ -279,3 +279,49 @@ CONFIRMED TRAP: relative operand "a=b.txt" gave window "" (total=0) - awk read i
 - `viewcore.Options.Facts` 只需 `TotalLines/TotalLinesKnown`；行为改动集中在"数据结束时"那一处：有事实时用 `窗口末行行号 >= TotalLines` 决定 `eof`，无事实时保持今天的判断。
 - 必须新增的核级用例：F7（awk 补的换行不影响渲染）、F8（`from > TotalLines` 走越尾提示且文案与整份路径逐字相同）、自洽校验失败 → 返回错误让适配层回落。
 - 无 `Facts` 的既有 `viewcore` 单测**一字不改**通过，仍是"没改语义"的第一证据。
+
+---
+
+## 12. M1 落地与对 §11.5 的三处修正（`viewcore` 侧已实现）
+
+实现 M1 时，§11.5 那句"行为改动集中在一处"被证明**低估了**，而且核级对拍当场抓到一处我自己在 §3.1 表格里写错的字段语义。逐条改正如下——留错比留差异更贵。
+
+### 12.1 修正一：`Facts` 还需要第三个字段 `StartsAtOffset`（结构问题，不是风格问题）
+
+核的窗口实现是"先按 `req.Offset` **跳过**若干行，再读 limit 行"。把远端窗口直接交给它，跳过循环会把这几行当"前缀"消费掉，数据不够长 → 走 `readCount == 0` 分支 → 宣布 **"offset 越尾"**，而那次深读其实完全合法。所以核必须被告知"这些字节已经从目标行开始了"。
+
+这条是**读代码读出来的**，方案里没有；`TestWindowWithoutSkipping` 把两种行为并排钉住（无标志 → `beyond the end` 且 `LinesRead=0`；有标志 → 正确的 `151: …` 三行）。
+
+### 12.2 修正二：`is_truncated` 不能"完全不变"，必须被**放宽**
+
+§3.1 表里我写的是"`is_truncated` 完全不变（核自己因预算/行上限停下才为真）"。错了。整份读满 limit 行后会**前瞻**一次，发现源里还有行 → `HasMore=true`；而窗口看不到自己之后的字节 → 原样会是 `false`。于是 `viewcore` 里同一份数据的同一个偏移，local 报 `is_truncated:true`、远端报 `false`——**这正是本次工作一直在消灭的"同一文件两种答案"**。
+
+实现规则因此是：`HasMore = 核从数据里证明的 || 窗口末行 < 源总行数`，`EOF = !HasMore`。**只放宽、不收窄**（预算截断的窗口仍保留它自己证明的 `HasMore`），差分对拍当场抓到这一点（首轮 9 例 `hasMore differs`）。
+
+### 12.3 修正三：`total_lines` 的单向差异是**决定**，不是缺陷
+
+真机上 local 到 limit 就停、从不统计总行数；远端造窗**必须**逐行数完才能给出窗口。于是同一个字段一端有、一端无。我的取舍：
+
+- **允许**：远端公布它测到的 `total_lines`，local 继续缺席该字段。`WindowMetadata` 本来就是"不知则不发布"，消费方必须容忍缺席。
+- **禁止**：为了和 local 的无知对齐而**扣掉一条测到的真话**——那是把"一致"当成高于"诚实"的目标，本末倒置。
+- **必须相等**：两边都声称知道时不得矛盾（差分只在双方都 `TotalLinesKnown` 时比对数值）。
+
+### 12.4 新增一条 M2 义务：编码文件的判定权在适配层
+
+`ReadTextFromBytes` 里那道"窗口自带 BOM 就拒"的守卫只能覆盖极窄的情形——**真正的中段 UTF-16 窗口开头没有 BOM**（BOM 只在文件第 0 字节）。核拿着一段窗口无从知道源文件是编码的，任何核侧检查都是自欺。因此：
+
+> M2 的适配层在**选择**窗口路径之前，必须先用 4 字节偏移读（`Client.ReadRange(path, 0, 4)`，E0 的能力）探测文件头；带 BOM 一律留在整份路径。
+
+这是 `ReadRange` 一个方案里没预见到的用途——它服务于"要不要走窗口"的判定，而不是窗口本身，正好落在 §4-C 被否决的位置之外。`TestEncodedWindowIsRefused` 把"核能拒什么、不能拒什么"两侧都钉住，包括那条**故意断言核会接受**的限制，免得后来者误以为核侧已经兜住。
+
+### 12.5 已实现 / 已验证（M1 验收门）
+
+- 代码落点：`viewcore/read.go` 的 `SourceFacts` + `Options.Facts` + 跳过抑制 + `applySourceFacts` + 编码守卫；`viewcore/facts_test.go` 新增 7 个测试。
+- **既有 `viewcore` 单测一字未改全部通过**（无 `Facts` 路径与今天同形），12 个包全绿，`driftguard` 三项未放宽（`viewcore`/`lscore` 生产 `os.*` 仍为 0；`Facts` 是数据不是能力查询，`TestCapabilityDecisionsStayCentralized` 上限仍 0）。
+- **反向验证**：逐个摘掉三处守卫 → 全部被抓（取消 `HasMore` 放宽 → 2 个测试红；取消跳过抑制 → 5 个红；取消矛盾校验 → 矛盾测试红）。
+- **真机核级对拍**（目标机原地，gawk 5.2.1）：10 类样本 × 全部 offset，**字节层与核渲染同时一致**；F7 由"记录待证"变成**已证**——"2 window(s) carried awk's added final newline and the core render still agreed"。成本表复现不变（4.56 MB @60000：11 次/8,384,512 → 1 次/190）。
+- 一条操作教训：**不要把负责清理的驱动接 `| head -N`**。Go 对 stdout/stderr 的 EPIPE 会重发 SIGPIPE 终止进程，spike 因此在写完 30 行后被杀，清理钩子根本没跑，目标机上留下 14 个 fixture（已手动清除）。驱动自身的清理钩子表覆盖不到"被信号杀死"这一类，这属于运行纪律而不是代码缺陷。
+
+### 12.6 M2 待办（下一步，按 §11.4 的门）
+
+`ProbeCapabilities` 增加**实测**的 `LineWindow`（纯 stdin、无副作用、逐字节验证 NUL 与末行计数）；`readViewWindow` 增加造窗分支，启用条件 `LineWindow && 无 BOM（4 字节头探测）&& offset > 0 && size > 4×budget`，**绝对路径前置断言**（§11.3 陷阱）；`--no-envd-line-window` kill switch；核级对账失败或探测不过一律回落今天的路径。

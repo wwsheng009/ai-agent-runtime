@@ -75,6 +75,36 @@ type Options struct {
 	// filesystem: an unconverted caller keeps its exact pre-seam behaviour, which
 	// is what makes the move reviewable as "no behaviour change".
 	Access toolcore.Access
+	// Facts describes the source when the caller could not hand over the whole file.
+	// nil means "nothing is known beyond these bytes", which is exactly today's
+	// behaviour: every existing caller keeps the answer it always had.
+	Facts *SourceFacts
+}
+
+// SourceFacts is the ONE channel through which an off-machine source may state a
+// fact about itself, and it exists to stop a worse one: an adapter that fetches a
+// line window cannot let the core believe "I ran out of bytes" means "the file ends
+// here". The core's rule has always been that `eof` reports the end of the data it
+// was given; publishing that about a window would claim an end nobody saw.
+//
+// It is deliberately not a `EOF bool`. A supplied answer has to be checkable against
+// the window the core is holding, so the core derives `eof` from the count instead of
+// being told it, and rejects the whole window when the two disagree.
+type SourceFacts struct {
+	// TotalLines is the line count of the WHOLE source, counted with this core's own
+	// rule: a final line without a newline still counts. That is the rule GNU awk's
+	// NR follows and NOT the one `wc -l` follows, and the difference is one line on
+	// any file that does not end in a newline - which is why `wc -l` is forbidden as
+	// a source for this number.
+	TotalLines int
+	// TotalLinesKnown is false when the source could not say: the core then publishes
+	// no total_lines and no eof, rather than guessing either.
+	TotalLinesKnown bool
+	// StartsAtOffset says these bytes already begin at Request.Offset, so the core
+	// must not skip lines to reach the window. A window from another machine has no
+	// lines before it; skipping would consume the window, find the data short, and
+	// report a perfectly valid deep read as "offset beyond the end of the file".
+	StartsAtOffset bool
 }
 
 // Stats is everything the reader learned about one window. It is the input to
@@ -197,6 +227,17 @@ func ReadWindowFromAccess(ctx context.Context, access toolcore.Access, path stri
 // all stay in ReadWindow, which every view surface already shares.
 func ReadTextFromBytes(data []byte, req Request, opts Options) (string, Stats, error) {
 	if enc, hasBOM := detectBOM(data); hasBOM {
+		if opts.Facts != nil && opts.Facts.StartsAtOffset && req.Offset > 0 {
+			// An encoded file has to be decoded before it can be cut into lines: a
+			// window that starts mid-file arrives as raw UTF-16 bytes whose line
+			// boundaries are not where the source put them. Decoding a fragment would
+			// render the same file as two different texts depending on transport, so
+			// this is refused instead of approximated - encoded files are served whole.
+			return "", Stats{}, fmt.Errorf(
+				"文件使用 %s 编码，不能按行窗口取偏移 %d：编码文件必须先解码再开窗，切片会改变文本；请整份读取",
+				enc, req.Offset,
+			)
+		}
 		if int64(len(data)) > MaxDecodeBytes {
 			return "", Stats{}, fmt.Errorf(
 				"文件使用 %s 编码且超过 %d 字节，view 未做整文件解码；请改用 shell/download 转换后查看",
@@ -251,6 +292,13 @@ func ReadWindow(reader io.Reader, req Request, opts Options) (string, Stats, err
 
 	// Skip to the requested offset.
 	skipped := 0
+	if opts.Facts != nil && opts.Facts.StartsAtOffset {
+		// The bytes handed over already begin at the requested line. Skipping would
+		// consume the window, run out, and then announce "offset beyond the end of
+		// the file" for a deep read that is perfectly valid - the failure mode that
+		// makes a remote window unusable unless this flag exists.
+		skipped = req.Offset
+	}
 	for skipped < req.Offset {
 		line, err := readLine(br)
 		if err != nil {
@@ -311,6 +359,14 @@ func ReadWindow(reader io.Reader, req Request, opts Options) (string, Stats, err
 		stats.TotalLinesKnown = true
 		stats.EOF = true
 	}
+	if opts.Facts != nil {
+		// Reconciled before the empty-window branch below, because that branch's
+		// wording quotes a line count: with a window the only honest count is the
+		// source's, not the few lines that arrived.
+		if factsErr := applySourceFacts(&stats, req, opts.Facts); factsErr != nil {
+			return "", stats, factsErr
+		}
+	}
 
 	if readCount == 0 {
 		stats.EOF = true
@@ -329,6 +385,70 @@ func ReadWindow(reader io.Reader, req Request, opts Options) (string, Stats, err
 
 	stats.WindowStart = req.Offset
 	return FormatContent(lines, req.Offset), stats, nil
+}
+
+// applySourceFacts reconciles what the scan saw with what the source stated, and it
+// is the only place where Facts may change an answer.
+//
+// Two rules shape it. `eof` is derived, never copied: the core decides whether the
+// delivered window reaches the stated end instead of trusting a boolean, so a source
+// cannot assert an ending it never proved. And any disagreement is an error rather
+// than a judgement call, because "believe the window and also believe the count" is
+// exactly how a wrong completeness claim ships.
+func applySourceFacts(stats *Stats, req Request, facts *SourceFacts) error {
+	if !facts.StartsAtOffset {
+		// The core was handed data it could read to the end, so its own count stands.
+		// A contradicting fact means the source lied about the bytes it passed over;
+		// say so rather than picking a winner.
+		if facts.TotalLinesKnown && stats.TotalLinesKnown && facts.TotalLines != stats.TotalLines {
+			return fmt.Errorf("source facts report %d total lines, the data itself holds %d", facts.TotalLines, stats.TotalLines)
+		}
+		return nil
+	}
+
+	if !facts.TotalLinesKnown {
+		if stats.LinesRead == 0 {
+			// An empty window with no count is not an answer at any offset: the core
+			// cannot tell "past the end" from "the source would not say", and it
+			// certainly cannot claim the file is empty.
+			return fmt.Errorf("the window at offset %d is empty and the source's line count is unknown", req.Offset)
+		}
+		// End-of-data is not evidence about the end of the source, so publish neither
+		// a total nor an eof. WindowMetadata omits total_lines when it is not known -
+		// an absent field is a fact, a wrong one is not.
+		// HasMore stays whatever the data proved: with no count there is nothing
+		// better to judge continuation against, and this branch is a defensive path
+		// (a real window caller has a count), not the intended route.
+		stats.TotalLines = 0
+		stats.TotalLinesKnown = false
+		stats.EOF = false
+		return nil
+	}
+
+	if facts.TotalLines < 0 {
+		return fmt.Errorf("source facts report %d total lines, which cannot be right", facts.TotalLines)
+	}
+	// 1-based number of the last line this window actually delivered.
+	lastLine := req.Offset + stats.LinesRead
+	if stats.LinesRead > 0 && lastLine > facts.TotalLines {
+		return fmt.Errorf("the window delivers line %d but the source says %d lines exist", lastLine, facts.TotalLines)
+	}
+	if stats.LinesRead == 0 && req.Offset < facts.TotalLines {
+		return fmt.Errorf("the window is empty at offset %d but the source has %d lines", req.Offset, facts.TotalLines)
+	}
+	stats.TotalLines = facts.TotalLines
+	stats.TotalLinesKnown = true
+	// Continuation is widened by the source, never narrowed by the window. Without
+	// this the two answers disagree on `is_truncated`: a whole-file read peeks past
+	// the delivered limit and reports more lines exist, while a window cannot see
+	// anything after its last byte and would report "nothing more" for a file that
+	// plainly continues. Widening is also safe in the other direction - a budget-cut
+	// window keeps the HasMore the core already proved from the data in hand.
+	stats.HasMore = stats.HasMore || lastLine < facts.TotalLines
+	// Derived, not supplied: eof means every line of the source has been delivered,
+	// and that is a comparison between the window's last line and the count.
+	stats.EOF = !stats.HasMore
+	return nil
 }
 
 // readTailLines implements a negative offset: it streams the whole file while
