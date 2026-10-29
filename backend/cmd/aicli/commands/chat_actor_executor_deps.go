@@ -65,6 +65,9 @@ func deriveLocalSessionContext(
 		if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextReadOnly); ok {
 			sessionCtx.ChildReadOnly = value
 		}
+		if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextShellDisabled); ok {
+			sessionCtx.ChildShellDisabled = value
+		}
 		sessionCtx.ChildDepth = localAgentSessionDepth(runtimeSession)
 	}
 	return sessionCtx, workspaceRoot
@@ -109,6 +112,7 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 		applyLocalChildAgentdefToolPolicy(apiAgent, sessionCtx.ChildAgentType, baseSession, effectiveWorkspace, toolkitBasePath)
 	}
 	applyLocalChildReadOnlyPolicy(apiAgent, sessionCtx.ChildReadOnly)
+	applyLocalChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyLocalChildDepthPolicy(apiAgent, sessionCtx.ChildDepth, localAgentDepthCeiling(runtimeConfig, h))
 
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, baseSession, sessionCtx.RequestedReasoningEffort)

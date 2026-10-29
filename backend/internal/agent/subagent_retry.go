@@ -52,6 +52,14 @@ func ClassifySubagentFailure(err error) SubagentFailureDisposition {
 			category = refined
 		}
 	}
+	// Keep the stable error code aligned with the refined category: a read-only
+	// policy denial used to arrive as the generic UPSTREAM_ERROR, which made
+	// dashboards and the parent report point at the provider instead of the
+	// child's tool boundary.
+	if category == llm.FailureCategoryToolError && (code == "" || code == "UPSTREAM_ERROR") &&
+		(strings.Contains(text, "read-only policy") || strings.Contains(text, "shell is disabled for this child")) {
+		code = "AGENT_READ_ONLY"
+	}
 	disposition := SubagentFailureDisposition{Category: category, ErrorCode: code}
 	disposition.Retryable = IsTransientSubagentFailure(category)
 	return disposition

@@ -26,6 +26,7 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 	session.SetContext(sessionmeta.Model, "m1")
 	session.SetContext(sessionmeta.ReasoningEffort, "high")
 	session.SetContext(toolbroker.AgentSessionContextReadOnly, true)
+	session.SetContext(toolbroker.AgentSessionContextShellDisabled, true)
 	session.SetContext(toolbroker.AgentSessionContextDepth, 2)
 	if err := store.Save(ctx, session); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -42,8 +43,8 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 	if child.RequestedProvider != "openai" || child.RequestedModel != "m1" || child.RequestedReasoningEffort != "high" {
 		t.Fatalf("provider/model/effort mismatch: %+v", child)
 	}
-	if !child.ChildReadOnly || child.ChildDepth != 2 {
-		t.Fatalf("read_only/depth mismatch: %+v", child)
+	if !child.ChildReadOnly || child.ChildDepth != 2 || !child.ChildShellDisabled {
+		t.Fatalf("read_only/shell/depth mismatch: %+v", child)
 	}
 
 	// 基础会话：agent_type/completion 仍读；provider/model/workspace 覆盖不读。
@@ -54,7 +55,7 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 	if baseWS != "/base" {
 		t.Fatalf("base session must not override workspace, got %q", baseWS)
 	}
-	if base.RequestedModel != "" || base.RequestedProvider != "" || base.ChildReadOnly || base.ChildDepth != 0 {
+	if base.RequestedModel != "" || base.RequestedProvider != "" || base.ChildReadOnly || base.ChildShellDisabled || base.ChildDepth != 0 {
 		t.Fatalf("base session must not read child-only fields: %+v", base)
 	}
 

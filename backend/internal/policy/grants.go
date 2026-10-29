@@ -301,7 +301,7 @@ func assessShellReadOnlySegment(segment string) ShellReadOnlyAssessment {
 		allowed = true
 	case "file":
 		allowed = isReadOnlyFileCommand(fields[1:])
-	case "ls", "dir", "pwd", "get-location", "get-childitem", "gci", "gl", "cat", "type", "get-content", "gc", "head", "tail", "wc", "stat", "which", "where", "where.exe", "echo", "printf":
+	case "ls", "dir", "pwd", "get-location", "get-childitem", "gci", "gl", "get-item", "gi", "cat", "type", "get-content", "gc", "head", "tail", "wc", "stat", "which", "where", "where.exe", "echo", "printf":
 		allowed = true
 	case "git":
 		allowed = isReadOnlyGitCommand(fields[1:])
@@ -367,13 +367,21 @@ func isReadOnlyPipelineCmdlet(argv0 string, args []string) bool {
 	}
 }
 
-// isReadOnlySelectObject 只接受 `-First/-Skip <非负整数字面量>`（含
-// PowerShell 的 `-First:5` 形式）。Bare `Select-Object` 没有查询意义，同样拒绝。
+// isReadOnlySelectObject accepts the projection switches that only select or
+// reshape objects already flowing through the pipeline: -First/-Skip with
+// non-negative integer literals, -Property/-ExpandProperty/-ExcludeProperty
+// with static property-name lists, and -Unique. Script blocks, calculated
+// properties and dynamic values stay rejected (the command-level scan already
+// rejects `$`/`{` forms, and the property validator rejects the rest).
+// Bare `Select-Object` has no query meaning and stays rejected.
 func isReadOnlySelectObject(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	seen := false
+	sawFirst := false
+	sawLast := false
+	positional := 0
 	for i := 0; i < len(args); i++ {
 		token := strings.ToLower(strings.TrimSpace(args[i]))
 		switch {
@@ -381,15 +389,63 @@ func isReadOnlySelectObject(args []string) bool {
 			if i+1 >= len(args) || !isNonNegativeIntLiteralToken(args[i+1]) {
 				return false
 			}
+			if token == "-first" {
+				if sawLast {
+					return false
+				}
+				sawFirst = true
+			}
 			i++
 			seen = true
 		case strings.HasPrefix(token, "-first:"), strings.HasPrefix(token, "-skip:"):
 			if !isNonNegativeIntLiteralToken(token[strings.IndexByte(token, ':')+1:]) {
 				return false
 			}
+			if strings.HasPrefix(token, "-first:") {
+				if sawLast {
+					return false
+				}
+				sawFirst = true
+			}
 			seen = true
-		default:
+		case token == "-last":
+			// Combining -First and -Last is accepted by PowerShell but has no
+			// useful projection semantics; keep it out of the fast path.
+			if i+1 >= len(args) || !isNonNegativeIntLiteralToken(args[i+1]) || sawFirst {
+				return false
+			}
+			sawLast = true
+			i++
+			seen = true
+		case strings.HasPrefix(token, "-last:"):
+			if !isNonNegativeIntLiteralToken(token[strings.IndexByte(token, ':')+1:]) || sawFirst {
+				return false
+			}
+			sawLast = true
+			seen = true
+		case token == "-property" || token == "-expandproperty" || token == "-excludeproperty":
+			if i+1 >= len(args) || !isReadOnlyPropertyList(args[i+1]) {
+				return false
+			}
+			i++
+			seen = true
+		case strings.HasPrefix(token, "-property:"), strings.HasPrefix(token, "-expandproperty:"), strings.HasPrefix(token, "-excludeproperty:"):
+			if !isReadOnlyPropertyList(token[strings.IndexByte(token, ':')+1:]) {
+				return false
+			}
+			seen = true
+		case token == "-unique":
+			seen = true
+		case strings.HasPrefix(token, "-"):
 			return false
+		default:
+			// PowerShell also accepts the property list positionally:
+			// `Select-Object Name,Length`. Only one positional list is valid.
+			positional++
+			if positional > 1 || !isReadOnlyPropertyList(args[i]) {
+				return false
+			}
+			seen = true
 		}
 	}
 	return seen
@@ -518,6 +574,21 @@ func isReadOnlyPropertyName(token string) bool {
 		return false
 	}
 	return isReadOnlyWordToken(token)
+}
+
+// isReadOnlyPropertyList accepts a comma-separated list of static property
+// names (Select-Object -Property Name,Length). Empty entries are rejected.
+func isReadOnlyPropertyList(token string) bool {
+	parts := strings.Split(token, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !isReadOnlyPropertyName(strings.TrimSpace(part)) {
+			return false
+		}
+	}
+	return true
 }
 
 // isReadOnlyWordToken 接受字母/数字与 . _ - / * 组成的普通词元（含 100kb 这类

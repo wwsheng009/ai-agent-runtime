@@ -88,6 +88,8 @@ func brokerIgnoredArgHint(toolName, key string) string {
 		"fork_context", "fork_turns", "completion_requirement", "provider", "model",
 		"reasoning_effort", "thinking_effort":
 		return "delegation options are accepted by subagent_spawn, subagent_spawn_batch and team_spawn"
+	case "shell":
+		return "shell is accepted by subagent_spawn and subagent_spawn_batch task entries"
 	case "job_id", "job_ref":
 		return "job_output addresses a background job by job_id"
 	case "task_id", "task_status":

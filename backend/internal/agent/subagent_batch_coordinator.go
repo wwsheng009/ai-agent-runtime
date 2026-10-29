@@ -96,12 +96,15 @@ type BatchTerminalSink func(ctx context.Context, notification BatchTerminalNotif
 // SubagentBatchCoordinatorConfig wires a coordinator to its durable store,
 // execution kernel and event sink.
 type SubagentBatchCoordinatorConfig struct {
-	Store                   subagentbatch.BatchStore
-	Scheduler               *SubagentScheduler
-	Emitter                 BatchEmitter
-	TerminalSink            BatchTerminalSink
-	LifecycleProjector      BatchLifecycleProjector
-	DefaultDeadline         time.Duration // applied when a request carries no deadline
+	Store              subagentbatch.BatchStore
+	Scheduler          *SubagentScheduler
+	Emitter            BatchEmitter
+	TerminalSink       BatchTerminalSink
+	LifecycleProjector BatchLifecycleProjector
+	// DefaultDeadline is an optional operator wall-clock budget applied when a
+	// request carries no deadline. Zero (the default) means unbounded: the
+	// parent controls convergence via subagent_close/subagent_cancel.
+	DefaultDeadline         time.Duration
 	TerminalDeliveryTimeout time.Duration
 	// TerminalDeliveryAttempts bounds sink retries for one terminal
 	// notification (default 3). A malformed mailbox database still fails fast;
@@ -232,8 +235,11 @@ const (
 // NewSubagentBatchCoordinator constructs a coordinator from a config. The
 // store must be non-nil for StartBackground to work.
 func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBatchCoordinator {
-	if cfg.DefaultDeadline <= 0 {
-		cfg.DefaultDeadline = 30 * time.Minute
+	// Zero means "no wall-clock deadline": child sessions are long-lived and
+	// their lifetime belongs to the parent (subagent_close/subagent_cancel).
+	// A configured positive value remains an explicit operator budget.
+	if cfg.DefaultDeadline < 0 {
+		cfg.DefaultDeadline = 0
 	}
 	if cfg.TerminalDeliveryTimeout <= 0 {
 		cfg.TerminalDeliveryTimeout = 5 * time.Second
@@ -514,7 +520,7 @@ func (c *SubagentBatchCoordinator) StartBackground(parentCtx context.Context, op
 	opts.ExecutionMode = mode
 	now := subagentbatch.Now()
 	deadline := opts.BatchDeadline
-	if deadline.IsZero() {
+	if deadline.IsZero() && c.deadline > 0 {
 		deadline = now.Add(c.deadline)
 	}
 
@@ -2465,6 +2471,7 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 		BudgetTokens:          t.BudgetTokens,
 		TimeoutSec:            t.TimeoutSec,
 		ReadOnly:              t.ReadOnly,
+		ShellDisabled:         t.ShellDisabled,
 		CompletionRequirement: t.CompletionRequirement,
 		// Context/ForkMessages 必须进 durable spec：幂等 admission replay 用
 		// loadDurableTasks 从 spec 重建任务，丢弃它们会把 fork（含 last:N 窗口）
@@ -2479,6 +2486,7 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 		WritePaths:            append([]string(nil), t.WritePaths...),
 		ReadOnlySource:        t.ReadOnlySource,
 		ReadOnlyFilteredTools: append([]string(nil), t.ReadOnlyFilteredTools...),
+		ShellFilteredTools:    append([]string(nil), t.ShellFilteredTools...),
 		ReportSchema:          cloneInterfaceMap(t.ReportSchema),
 		ReportSchemaGranted:   t.ReportSchemaGranted,
 		HandoffIn:             handoffToBatchSpec(t.HandoffIn),
@@ -2552,6 +2560,7 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 		BudgetTokens:          spec.BudgetTokens,
 		TimeoutSec:            spec.TimeoutSec,
 		ReadOnly:              spec.ReadOnly,
+		ShellDisabled:         spec.ShellDisabled,
 		CompletionRequirement: spec.CompletionRequirement,
 		Context:               spec.Context,
 		ForkMessages:          spec.ForkMessages,
@@ -2560,6 +2569,7 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 		WritePaths:            append([]string(nil), spec.WritePaths...),
 		ReadOnlySource:        spec.ReadOnlySource,
 		ReadOnlyFilteredTools: append([]string(nil), spec.ReadOnlyFilteredTools...),
+		ShellFilteredTools:    append([]string(nil), spec.ShellFilteredTools...),
 		ReportSchema:          cloneInterfaceMap(spec.ReportSchema),
 		ReportSchemaGranted:   spec.ReportSchemaGranted,
 		HandoffIn:             handoffFromBatchSpec(spec.HandoffIn),

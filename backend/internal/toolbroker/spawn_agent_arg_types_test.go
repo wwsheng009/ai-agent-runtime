@@ -22,8 +22,8 @@ func TestValidateSpawnAgentArgTypesAcceptsDocumentedKinds(t *testing.T) {
 		"isolation":              "worktree",
 		"fork_turns":             "2",
 		"read_only":              true,
+		"shell":                  false,
 		"fork_context":           false,
-		"timeout_sec":            float64(600),
 		"progress_timeout_sec":   json.Number("120"),
 		"approval_timeout_sec":   int64(30),
 		"cancel_grace_sec":       5,
@@ -75,9 +75,9 @@ func TestValidateSpawnAgentArgTypesRejectsKindMismatch(t *testing.T) {
 			wantKey: "provider",
 		},
 		{
-			name:    "timeout_sec as string",
-			args:    map[string]interface{}{"timeout_sec": "600"},
-			wantKey: "timeout_sec",
+			name:    "shell as number",
+			args:    map[string]interface{}{"shell": 5},
+			wantKey: "shell",
 		},
 		{
 			name:    "completion_requirement as bool",
@@ -152,7 +152,7 @@ func TestBroker_SpawnAgentJSONNumberTimeoutsReachRequest(t *testing.T) {
 
 	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":              "run a bounded task",
-		"timeout_sec":          float64(600),
+		"shell":                false,
 		"progress_timeout_sec": json.Number("120"),
 		"approval_timeout_sec": float64(30),
 		"cancel_grace_sec":     5,
@@ -160,8 +160,11 @@ func TestBroker_SpawnAgentJSONNumberTimeoutsReachRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subagent_spawn failed: %v", err)
 	}
-	if controller.lastSpawn.TimeoutSec != 600 {
-		t.Fatalf("timeout_sec float64 must reach the request, got %d", controller.lastSpawn.TimeoutSec)
+	if controller.lastSpawn.TimeoutSec != 0 {
+		t.Fatalf("timeout_sec is no longer model-facing; got %d", controller.lastSpawn.TimeoutSec)
+	}
+	if controller.lastSpawn.Shell == nil || *controller.lastSpawn.Shell {
+		t.Fatalf("shell=false must reach the request as false, got %#v", controller.lastSpawn.Shell)
 	}
 	if controller.lastSpawn.ProgressTimeoutSec != 120 {
 		t.Fatalf("progress_timeout_sec json.Number must reach the request, got %d", controller.lastSpawn.ProgressTimeoutSec)
@@ -174,6 +177,27 @@ func TestBroker_SpawnAgentJSONNumberTimeoutsReachRequest(t *testing.T) {
 	}
 }
 
+func TestBroker_SpawnAgentRejectsTimeoutSecWithParentControlHint(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
+		"message":     "run a long audit",
+		"timeout_sec": float64(600),
+	})
+	if err == nil {
+		t.Fatal("timeout_sec must be rejected now that child lifetime is parent-controlled")
+	}
+	for _, want := range []string{"timeout_sec", "parent controls lifetime", "subagent_close"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should mention %q, got %v", want, err)
+		}
+	}
+	if controller.lastSpawn.Message != "" {
+		t.Fatalf("rejected spawn must not reach the controller, got %#v", controller.lastSpawn)
+	}
+}
+
 // TestBroker_SpawnAgentJSONNumberNegativeTimeoutFailsClosed covers the check
 // that used to be unreachable: a negative JSON number was dropped before the
 // non-negative validation ran.
@@ -182,8 +206,8 @@ func TestBroker_SpawnAgentJSONNumberNegativeTimeoutFailsClosed(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 
 	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
-		"message":     "run a bounded task",
-		"timeout_sec": float64(-5),
+		"message":              "run a bounded task",
+		"progress_timeout_sec": float64(-5),
 	})
 	if err == nil || !strings.Contains(err.Error(), "non-negative") {
 		t.Fatalf("expected non-negative rejection, got %v", err)

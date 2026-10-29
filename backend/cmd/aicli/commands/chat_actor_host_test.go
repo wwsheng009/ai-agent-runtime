@@ -992,6 +992,31 @@ func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
 	}
 }
 
+func TestApplyLocalChildShellPolicy(t *testing.T) {
+	newChild := func() *agent.Agent {
+		apiAgent := agent.NewAgentWithLLM(&agent.Config{Name: "shell-child"}, nil, nil)
+		apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy([]string{"view", "shell"}, false))
+		return apiAgent
+	}
+
+	disabled := newChild()
+	applyLocalChildShellPolicy(disabled, true)
+	disabledPolicy := disabled.GetToolExecutionPolicy()
+	if disabledPolicy == nil || !disabledPolicy.ShellDisabled {
+		t.Fatalf("shell=false must set ShellDisabled, got %#v", disabledPolicy)
+	}
+	if disabledPolicy.AllowsDefinition("shell") {
+		t.Fatal("shell=false must hide the shell tool")
+	}
+
+	enabled := newChild()
+	applyLocalChildShellPolicy(enabled, false)
+	enabledPolicy := enabled.GetToolExecutionPolicy()
+	if enabledPolicy == nil || enabledPolicy.ShellDisabled {
+		t.Fatalf("shell=true/omitted must keep the inherited shell, got %#v", enabledPolicy)
+	}
+}
+
 func TestApplyLocalChildDepthPolicyHidesUnavailableSpawnTools(t *testing.T) {
 	apiAgent := agent.NewAgentWithLLM(&agent.Config{Name: "max-depth-child"}, nil, nil)
 	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy(nil, false))

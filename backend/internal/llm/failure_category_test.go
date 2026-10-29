@@ -57,6 +57,8 @@ func TestFailureCategoryFromErrorCode_ToolSurfaceFailures(t *testing.T) {
 		"tool not found: shell_commands":                                FailureCategoryToolError,
 		"policy:capability not allowed by execution policy: exec_shell": FailureCategoryToolError,
 		"CAPABILITY NOT ALLOWED BY EXECUTION POLICY: exec_shell":        FailureCategoryToolError,
+		"read-only policy blocks non-readonly shell command (segment 2: \"Select-Object Name,Length\"): Get-ChildItem . | Select-Object Name,Length": FailureCategoryToolError,
+		"shell is disabled for this child (shell=false): shell": FailureCategoryToolError,
 		// 未知文本仍不猜测。
 		"something completely new": FailureCategoryUnknown,
 	}

@@ -24,6 +24,7 @@ type SessionContext struct {
 	ChildAgentType             string
 	ChildCompletionRequirement string
 	ChildReadOnly              bool
+	ChildShellDisabled         bool
 	ChildDepth                 int
 	// 模型/提供商/推理强度覆盖。
 	RequestedProvider        string
@@ -78,6 +79,9 @@ func ExtractSessionContext(session *chat.Session) SessionContext {
 	}
 	if value, ok := sessionmeta.Bool(ctx, toolbroker.AgentSessionContextReadOnly); ok {
 		out.ChildReadOnly = value
+	}
+	if value, ok := sessionmeta.Bool(ctx, toolbroker.AgentSessionContextShellDisabled); ok {
+		out.ChildShellDisabled = value
 	}
 	if value, ok := sessionmeta.Int(ctx, toolbroker.AgentSessionContextDepth); ok {
 		out.ChildDepth = value

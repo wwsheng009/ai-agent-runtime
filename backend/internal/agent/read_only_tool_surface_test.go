@@ -97,6 +97,20 @@ func TestSpawnSubagentsReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 	require.Equal(t, runtimepolicy.ReadOnlyChildOptionDescription, readOnly["description"])
 }
 
+func TestSpawnSubagentsSchemaExposesShellAndNoPerTaskTimeout(t *testing.T) {
+	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
+	properties := definition.Parameters["properties"].(map[string]interface{})
+	agents := properties["agents"].(map[string]interface{})
+	items := agents["items"].(map[string]interface{})
+	itemProperties := items["properties"].(map[string]interface{})
+
+	shell, ok := itemProperties["shell"].(map[string]interface{})
+	require.True(t, ok, "subagent_spawn_batch shell property missing")
+	require.Equal(t, "boolean", shell["type"])
+	require.NotContains(t, itemProperties, "timeout", "per-task wall-clock timeout must not be model-facing")
+	require.NotContains(t, itemProperties, "timeout_sec", "per-task wall-clock timeout must not be model-facing")
+}
+
 func TestRenderSubagentResultsSurfacesReadOnlyNarrowing(t *testing.T) {
 	text := renderSubagentResults([]SubagentResult{{
 		ID:                    "writer-1",

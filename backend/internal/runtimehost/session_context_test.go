@@ -35,6 +35,7 @@ func TestExtractSessionContextFull(t *testing.T) {
 		sessionmeta.Stream:                                  true,
 		sessionmeta.DisableTools:                            true,
 		toolbroker.AgentSessionContextReadOnly:              true,
+		toolbroker.AgentSessionContextShellDisabled:         true,
 		toolbroker.AgentSessionContextDepth:                 2,
 		sessionmeta.ActiveTeamTaskID:                        "task-9",
 	}
@@ -47,6 +48,7 @@ func TestExtractSessionContextFull(t *testing.T) {
 		ChildAgentType:             "child",
 		ChildCompletionRequirement: "complete_task",
 		ChildReadOnly:              true,
+		ChildShellDisabled:         true,
 		ChildDepth:                 2,
 		RequestedProvider:          "openai",
 		RequestedModel:             "gpt-x",

@@ -19,6 +19,10 @@ import (
 // ToolExecutionPolicy constrains which runtime tools may execute.
 type ToolExecutionPolicy struct {
 	ReadOnly bool
+	// ShellDisabled removes shell-like tools from the model-visible surface and
+	// denies them at execution (subagent_spawn/subagent_spawn_batch shell=false).
+	// It is independent of ReadOnly: a writable child can still have no shell.
+	ShellDisabled bool
 	// AllowedTools / DeniedTools 的名单元素支持通配模式
 	// （toolregistry.MatchPattern："*" 匹配一切、"prefix_*" 前缀匹配、
 	// 其余归一化精确匹配）。AllowedTools 只在 AllowlistEnabled 为真时生效，
@@ -79,6 +83,20 @@ func NewToolExecutionPolicy(allowedTools []string, readOnly bool) *ToolExecution
 	return policy
 }
 
+// SetShellDisabled removes shell-like tools from the policy surface and, when a
+// capability scope is active, drops exec_shell. It only ever narrows: a child
+// cannot re-enable a shell its parent disabled.
+func (p *ToolExecutionPolicy) SetShellDisabled(disabled bool) *ToolExecutionPolicy {
+	if p == nil || !disabled {
+		return p
+	}
+	p.ShellDisabled = true
+	if p.CapabilityScopeEnabled {
+		delete(p.AllowedCapabilities, CapExecShell)
+	}
+	return p
+}
+
 // SetPathAnchorRoot records the fallback root used to resolve relative path
 // arguments when the execution context has no workspace root.
 //
@@ -136,6 +154,9 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	}
 	if p.BlockDelegation && IsDelegationToolName(normalizedToolName) {
 		return fmt.Errorf("nested delegation is disabled by execution policy: %s", toolName)
+	}
+	if p.ShellDisabled && IsShellLikeToolName(toolName) {
+		return fmt.Errorf("shell is disabled for this child (shell=false): %s", toolName)
 	}
 	// The allowlist is a hard gate: a tool not matched by the list (exact
 	// name or wildcard pattern, see toolregistry.MatchPattern) is denied,
@@ -588,6 +609,7 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 	}
 	cloned := &ToolExecutionPolicy{
 		ReadOnly:               p.ReadOnly,
+		ShellDisabled:          p.ShellDisabled,
 		AllowedTools:           cloneAllowedToolsMap(p.AllowedTools),
 		DeniedTools:            cloneAllowedToolsMap(p.DeniedTools),
 		AllowlistEnabled:       p.AllowlistEnabled,
@@ -617,13 +639,30 @@ func (p *ToolExecutionPolicy) DeriveChild(allowedTools []string, readOnly bool) 
 // DeriveChildForTask creates the minimum capability surface implied by role,
 // requested tools, and declared write paths, while never widening the parent.
 func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly bool, role string, writePaths []string) *ToolExecutionPolicy {
+	return p.DeriveChildForTaskWithShellDisabled(allowedTools, readOnly, role, writePaths, false)
+}
+
+// DeriveChildForTaskWithShellDisabled is DeriveChildForTask plus the explicit
+// shell-disabled flag. The flag only narrows the inherited boundary.
+func (p *ToolExecutionPolicy) DeriveChildForTaskWithShellDisabled(allowedTools []string, readOnly bool, role string, writePaths []string, shellDisabled bool) *ToolExecutionPolicy {
 	if p == nil {
 		child := NewToolExecutionPolicy(allowedTools, readOnly)
 		child.SetCapabilityScope(CapabilitiesForTask(role, readOnly, allowedTools, writePaths))
+		child.SetShellDisabled(shellDisabled)
+		if child.ShellDisabled {
+			caps := make([]Capability, 0, len(child.AllowedCapabilities))
+			for capability, allowed := range child.AllowedCapabilities {
+				if allowed {
+					caps = append(caps, capability)
+				}
+			}
+			child.SetCapabilityScope(filterShellCapability(caps))
+		}
 		return child
 	}
 	child := p.Clone()
 	child.ReadOnly = child.ReadOnly || readOnly
+	child.SetShellDisabled(shellDisabled)
 	child.AllowlistEnabled, child.AllowedTools = intersectAllowedTools(p.AllowlistEnabled, p.AllowedTools, allowedTools)
 	if allowedTools == nil {
 		// nil means "inherit the parent tool surface verbatim". Deriving a
@@ -648,12 +687,18 @@ func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly
 		if child.ReadOnly {
 			inherited = filterReadOnlyCapabilities(inherited)
 		}
+		if child.ShellDisabled {
+			inherited = filterShellCapability(inherited)
+		}
 		child.SetCapabilityScope(inherited)
 		return child
 	}
 	requested := CapabilitiesForTask(role, child.ReadOnly, allowedTools, writePaths)
 	if p.CapabilityScopeEnabled {
 		requested = intersectCapabilities(p.AllowedCapabilities, requested)
+	}
+	if child.ShellDisabled {
+		requested = filterShellCapability(requested)
 	}
 	child.SetCapabilityScope(requested)
 	return child
@@ -1233,4 +1278,3 @@ func intersectAllowedTools(parentEnabled bool, parent map[string]bool, requested
 		return true, result
 	}
 }
-

@@ -669,7 +669,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSubagentSpawn,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Use read_only for the write boundary; read_only does not remove shell. Set shell=false only when the child must have no shell at all. Child lifetime is parent-controlled: there is no timeout_sec, use subagent_close/subagent_cancel to converge. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -700,9 +700,9 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
+						"shell":                  map[string]interface{}{"type": "boolean", "description": "Set false to remove shell-like tools from this child and deny them at execution. Omit or set true to inherit: read_only children can run only read-only commands; writable children get the parent's shell surface. shell only narrows the inherited surface: it cannot add a shell tool the parent policy denies. The parent controls child lifetime; there is no per-child timeout_sec field."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
-						"timeout_sec":            map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional wall-clock limit in seconds for the child run."},
 						"progress_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional no-progress timeout in seconds; a child without progress for this long is treated as stalled."},
 						"approval_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional approval wait timeout in seconds for child tool approvals."},
 						"cancel_grace_sec":       map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional grace period in seconds before a cancelled child is force-stopped."},
@@ -861,7 +861,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSubagentSpawn,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Use read_only for the write boundary; read_only does not remove shell. Set shell=false only when the child must have no shell at all. Child lifetime is parent-controlled: there is no timeout_sec, use subagent_close/subagent_cancel to converge. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -892,9 +892,9 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
+						"shell":                  map[string]interface{}{"type": "boolean", "description": "Set false to remove shell-like tools from this child and deny them at execution. Omit or set true to inherit: read_only children can run only read-only commands; writable children get the parent's shell surface. shell only narrows the inherited surface: it cannot add a shell tool the parent policy denies. The parent controls child lifetime; there is no per-child timeout_sec field."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
-						"timeout_sec":            map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional wall-clock limit in seconds for the child run."},
 						"progress_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional no-progress timeout in seconds; a child without progress for this long is treated as stalled."},
 						"approval_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional approval wait timeout in seconds for child tool approvals."},
 						"cancel_grace_sec":       map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional grace period in seconds before a cancelled child is force-stopped."},
@@ -2299,6 +2299,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if request.ReadOnly && !permissionModeExplicit {
 			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
+		if value, ok := args["shell"].(bool); ok {
+			request.Shell = &value
+		}
 		// The parent run's permission mode is the session-level policy for the
 		// whole session tree: an omitted child mode inherits it, and a child may
 		// not silently re-introduce approval prompts in a --yolo parent session
@@ -2340,12 +2343,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		// decoded from JSON carries float64 (or json.Number on the toolexec
 		// preflight path), never int64, so the old direct assertions dropped
 		// these keys for every real caller - and made the non-negative check
-		// below unreachable for them.
-		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "timeout_sec"); err != nil {
-			return nil, nil, err
-		} else if ok {
-			request.TimeoutSec = value
-		}
+		// below unreachable for them. The wall-clock timeout_sec is no longer
+		// model-facing; TimeoutSec stays in the struct for internal callers.
 		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "progress_timeout_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
@@ -4009,8 +4008,8 @@ var spawnAgentToolArgKeys = []string{
 	"task_type", "task_subject",
 	"provider", "model", "reasoning_effort", "thinking_effort",
 	"permission_mode", "completion_requirement", "completionRequirement",
-	"isolation", "read_only", "fork_context", "fork_turns",
-	"timeout_sec", "progress_timeout_sec", "approval_timeout_sec", "cancel_grace_sec",
+	"isolation", "read_only", "shell", "fork_context", "fork_turns",
+	"progress_timeout_sec", "approval_timeout_sec", "cancel_grace_sec",
 }
 
 // unsupportedSpawnAgentArgHint teaches the caller what to use instead of the
@@ -4023,6 +4022,8 @@ func unsupportedSpawnAgentArgHint(key string) string {
 		return "did you mean message"
 	case "objective", "task_goal", "goal_text":
 		return "did you mean message (alias goal)"
+	case "timeout_sec", "timeout", "deadline", "deadline_sec":
+		return "child sessions have no model-set wall-clock limit; the parent controls lifetime with subagent_close/subagent_cancel (use progress_timeout_sec for stall detection), so omit this key"
 	default:
 		return ""
 	}

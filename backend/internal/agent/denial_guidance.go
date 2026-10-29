@@ -317,6 +317,11 @@ func readOnlyShellRouteWarning() string {
 	return "goal_appears_to_require_mutating_shell: read_only=true only permits individually classified read-only commands (git status/diff/log/show, rg, ls, pwd, ...); build/test/install commands such as go test will be hard-denied; set read_only=false for this child, or narrow the goal to static inspection"
 }
 
+// shellNoneRouteWarning 在 shell=false 但目标明显要跑命令时追加。
+func shellNoneRouteWarning() string {
+	return "goal_appears_to_require_commands: shell=false removes the shell surface from this child, so command-driven work cannot run; omit shell (or set shell=true) to inherit the parent policy, or narrow the goal to the granted file tools"
+}
+
 // enrichReadOnlyToolDescriptions 在只读子代理的模型可见工具面上，给 shell 工具
 // description 动态追加 READ-ONLY MODE 预告，让模型第一轮就知道 shell 边界，
 // 而不是逐个命令试错后被拒。非只读策略原样返回。

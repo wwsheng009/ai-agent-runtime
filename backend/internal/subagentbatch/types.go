@@ -169,21 +169,24 @@ type TaskSpec struct {
 	// TaskType is the closed-enum routing category, TaskSubject is audit-only.
 	// Role stays the orchestration axis; both fields are omitempty so specs
 	// written before this change decode byte-identically.
-	TaskType              string      `json:"task_type,omitempty"`
-	TaskSubject           string      `json:"task_subject,omitempty"`
-	Goal                  string      `json:"goal,omitempty"`
-	Difficulty            string      `json:"difficulty,omitempty"`
-	DifficultyRationale   string      `json:"difficulty_rationale,omitempty"`
-	Provider              string      `json:"provider,omitempty"`
-	Model                 string      `json:"model,omitempty"`
-	ReasoningEffort       string      `json:"reasoning_effort,omitempty"`
-	ToolsWhitelist        []string    `json:"tools_whitelist,omitempty"`
-	DependsOn             []string    `json:"depends_on,omitempty"`
-	Patches               []PatchSpec `json:"patches,omitempty"`
-	BudgetTokens          int         `json:"budget_tokens,omitempty"`
-	TimeoutSec            int         `json:"timeout_sec,omitempty"`
-	ReadOnly              bool        `json:"read_only,omitempty"`
-	CompletionRequirement string      `json:"completion_requirement,omitempty"`
+	TaskType            string      `json:"task_type,omitempty"`
+	TaskSubject         string      `json:"task_subject,omitempty"`
+	Goal                string      `json:"goal,omitempty"`
+	Difficulty          string      `json:"difficulty,omitempty"`
+	DifficultyRationale string      `json:"difficulty_rationale,omitempty"`
+	Provider            string      `json:"provider,omitempty"`
+	Model               string      `json:"model,omitempty"`
+	ReasoningEffort     string      `json:"reasoning_effort,omitempty"`
+	ToolsWhitelist      []string    `json:"tools_whitelist,omitempty"`
+	DependsOn           []string    `json:"depends_on,omitempty"`
+	Patches             []PatchSpec `json:"patches,omitempty"`
+	BudgetTokens        int         `json:"budget_tokens,omitempty"`
+	TimeoutSec          int         `json:"timeout_sec,omitempty"`
+	ReadOnly            bool        `json:"read_only,omitempty"`
+	// ShellDisabled is durable so an idempotent admission replay cannot
+	// silently re-open a shell surface the caller removed with shell=false.
+	ShellDisabled         bool   `json:"shell_disabled,omitempty"`
+	CompletionRequirement string `json:"completion_requirement,omitempty"`
 	// Context/ForkMessages carry the fork request across durable replay:
 	// idempotent admission replay (loadDurableTasks) reconstructs the
 	// scheduler-facing tasks from these specs, so dropping them would silently
@@ -200,6 +203,7 @@ type TaskSpec struct {
 	WritePaths            []string               `json:"write_paths,omitempty"`
 	ReadOnlySource        string                 `json:"read_only_source,omitempty"`
 	ReadOnlyFilteredTools []string               `json:"read_only_filtered_tools,omitempty"`
+	ShellFilteredTools    []string               `json:"shell_filtered_tools,omitempty"`
 	ReportSchema          map[string]interface{} `json:"report_schema,omitempty"`
 	ReportSchemaGranted   bool                   `json:"report_schema_granted,omitempty"`
 	HandoffIn             *HandoffSpec           `json:"handoff_in,omitempty"`

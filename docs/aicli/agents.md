@@ -88,6 +88,8 @@ Do not mutate the workspace.
 
 > 与 CommandCode 的语义差异（有意保留）：本地 `tools` 省略是 **fail-open（继承全量）**，CommandCode 是 fail-closed（省略=无工具）。`aicli agents lint` 会对"省略 tools"给出 info 级提示，`tools: ["*"]` 则为显式全量。
 
+> **子代理 shell 边界（2026-10-29）**：`read_only` 只负责写边界，**不会移除 shell 工具**；它把 shell 命令限制在运行时的只读白名单内。是否提供 shell 由独立的布尔选项 `shell` 控制：默认/`true` 沿用父策略（`read_only=true` 时只能跑只读命令，可写子代理沿用父 shell 面）；`false` 移除并硬拒 shell。不再提供 `shell=readonly/full` 这类命令级模式——命令选择由 LLM 决定，边界由运行时分类器执行。`subagent_spawn` / `subagent_spawn_batch` 也不再暴露每任务墙钟 `timeout_sec`：子会话由父代理通过 `subagent_close` / `subagent_cancel` 收敛，`progress_timeout_sec` 只用于识别真正停滞的运行。
+
 `sandbox` 产品语义（应用层，非 OS 隔离）：
 
 | 值 | 行为 |

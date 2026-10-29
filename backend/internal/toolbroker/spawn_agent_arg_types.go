@@ -22,12 +22,13 @@ import (
 //     back to defaults.
 //   - `fork_turns: 2` was dropped, which also silently re-enabled
 //     fork_context even though fork_turns is documented to override it.
-//   - the four supervision timeout keys were asserted as int64 only. A tool
-//     call decoded from JSON never carries int64 (float64, or json.Number on
-//     the toolexec preflight path), so `timeout_sec`, `progress_timeout_sec`,
+//   - the supervision timeout keys were asserted as int64 only. A tool call
+//     decoded from JSON never carries int64 (float64, or json.Number on the
+//     toolexec preflight path), so `progress_timeout_sec`,
 //     `approval_timeout_sec` and `cancel_grace_sec` were *always* ignored for
 //     real callers - and the "must be non-negative" check below them was
-//     unreachable for those calls.
+//     unreachable for those calls. The wall-clock `timeout_sec` has since been
+//     removed from the model surface; child lifetime is parent-controlled.
 //
 // Validating the kind keeps the existing leniency where it is intentional
 // (numbers are accepted in any JSON spelling, then coerced with
@@ -64,8 +65,8 @@ var spawnAgentFieldKinds = []struct {
 	// integer); a bare number must not silently cancel the override.
 	{"fork_turns", toolArgFieldString},
 	{"read_only", toolArgFieldBool},
+	{"shell", toolArgFieldBool},
 	{"fork_context", toolArgFieldBool},
-	{"timeout_sec", toolArgFieldNumber},
 	{"progress_timeout_sec", toolArgFieldNumber},
 	{"approval_timeout_sec", toolArgFieldNumber},
 	{"cancel_grace_sec", toolArgFieldNumber},

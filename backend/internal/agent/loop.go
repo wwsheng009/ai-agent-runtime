@@ -7855,6 +7855,15 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if err := validateDecodedSubagentFieldTypes(index, item); err != nil {
 			return nil, err
 		}
+		if err := rejectRemovedSubagentFields(index, item); err != nil {
+			return nil, err
+		}
+		shellDisabled := false
+		if rawShell, present := item["shell"]; present && rawShell != nil {
+			if enabled, ok := rawShell.(bool); ok && !enabled {
+				shellDisabled = true
+			}
+		}
 		reasoningEffort := stringValue(item["reasoning_effort"])
 		thinkingEffort := stringValue(item["thinking_effort"])
 		routeWarnings := []string(nil)
@@ -7878,10 +7887,6 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if budgetWarning != "" {
 			routeWarnings = append(routeWarnings, budgetWarning)
 		}
-		timeoutSec, timeoutWarning := sanitizeDecodedSubagentOptionRange("timeout", item["timeout"])
-		if timeoutWarning != "" {
-			routeWarnings = append(routeWarnings, timeoutWarning)
-		}
 		maxTurns, maxTurnsWarning := sanitizeDecodedSubagentOptionRange("max_turns", item["max_turns"])
 		if maxTurnsWarning != "" {
 			routeWarnings = append(routeWarnings, maxTurnsWarning)
@@ -7900,9 +7905,9 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 			ReasoningEffort:       reasoningEffort,
 			RouteWarnings:         routeWarnings,
 			BudgetTokens:          budgetTokens,
-			TimeoutSec:            timeoutSec,
 			MaxTurns:              maxTurns,
 			ReadOnly:              boolValue(item["read_only"]),
+			ShellDisabled:         shellDisabled,
 			CompletionRequirement: completionRequirement,
 		}
 		task.ToolsWhitelist = stringSliceValue(item["tools_whitelist"])
@@ -8106,14 +8111,32 @@ var decodedSubagentFieldTypes = []struct {
 	{"completion_requirement", subagentFieldString},
 	{"completionRequirement", subagentFieldString},
 	{"budget_tokens", subagentFieldNumber},
-	{"timeout", subagentFieldNumber},
 	{"max_turns", subagentFieldNumber},
 	{"fork_messages", subagentFieldNumber},
 	{"read_only", subagentFieldBool},
+	{"shell", subagentFieldBool},
 	{"tools_whitelist", subagentFieldArray},
 	{"depends_on", subagentFieldArray},
 	{"patches", subagentFieldArray},
 	{"write_paths", subagentFieldArray},
+}
+
+// rejectRemovedSubagentFields turns fields that used to be accepted into an
+// actionable error instead of silently dropping them. The per-task wall-clock
+// timeout was removed because child sessions are long-lived and their lifetime
+// is owned by the parent (subagent_close / subagent_cancel); accepting the key
+// silently would make the caller believe a limit was applied.
+func rejectRemovedSubagentFields(index int, item map[string]interface{}) error {
+	for _, key := range []string{"timeout", "timeout_sec"} {
+		if _, present := item[key]; !present {
+			continue
+		}
+		return fmt.Errorf(
+			"subagent_spawn_batch agent %d field %q is no longer accepted: child sessions have no model-set wall-clock limit; the parent controls lifetime with subagent_close/subagent_cancel (use progress_timeout_sec for stall detection), so omit %s",
+			index, key, key,
+		)
+	}
+	return nil
 }
 
 func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) error {
@@ -8799,6 +8822,13 @@ func renderSubagentResults(results []SubagentResult) string {
 			lines = append(lines, "  read-only: the child was denied these requested write-like tools: "+
 				strings.Join(result.ReadOnlyFilteredTools, ", ")+"; do not delegate writes to it.")
 		}
+		if result.ShellDisabled {
+			lines = append(lines, "  shell=false: the child has no shell surface.")
+		}
+		if len(result.ShellFilteredTools) > 0 {
+			lines = append(lines, "  shell=false removed these requested shell tools: "+
+				strings.Join(result.ShellFilteredTools, ", ")+".")
+		}
 		// M1：边界来源上浮到父代理 spawn 报告，父模型能区分 explicit / agentdef /
 		// parent_tool_execution_policy，并明确「重派 read_only=false」的出路。
 		if source := strings.TrimSpace(result.ReadOnlySource); source != "" && result.ReadOnly {
@@ -9002,7 +9032,7 @@ func cloneOptionValue(value interface{}) interface{} {
 // crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
 // blocking path, so nothing falls back to a synchronous wait any more.
 func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string, caps SubagentCapabilities) types.ToolDefinition {
-	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. " + runtimepolicy.SubagentWriterPolicyDescription
+	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. Use read_only for the write boundary; read_only does not remove shell. Set shell=false only when the child must have no shell at all. Child lifetime is parent-controlled: there is no per-task timeout field, use subagent_close/subagent_cancel to converge. " + runtimepolicy.SubagentWriterPolicyDescription
 	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
 		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
 	}
@@ -9017,7 +9047,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 			"properties": map[string]interface{}{
 				"wait_timeout_sec": map[string]interface{}{
 					"type":        "integer",
-					"description": "Optional batch deadline (seconds) for background batches; defaults to the coordinator deadline when unset.",
+					"description": "Optional batch wall-clock deadline (seconds). Omit for no deadline: child sessions are long-lived and the parent controls convergence with subagent_close/subagent_cancel.",
 				},
 				"batch_idempotency_key": map[string]interface{}{
 					"type":        "string",
@@ -9057,7 +9087,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 							"tools_whitelist": map[string]interface{}{
 								"type":        "array",
 								"items":       map[string]interface{}{"type": "string"},
-								"description": "Optional child tool allowlist. Tasks that must run commands (builds/tests/git/package managers) must include \"shell\"; omitting it hides the shell tool from the child and the run is wasted on tool-name guessing. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
+								"description": "Optional child tool allowlist. Tasks that must run commands (builds/tests/git/package managers) need shell present; omitting it hides the shell tool from the child. Set the sibling shell option to false to remove shell entirely. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
 							},
 							"depends_on": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"write_paths": map[string]interface{}{
@@ -9083,12 +9113,6 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 								"maximum":     subagentNumericOptionMax,
 								"description": "Optional per-task token cap. It is not a way to request an unlimited run: 0 or a negative value is ignored (the routed or host default applies) and the effective value is reported back in route_warnings, so omit the field instead of sending 0. Values above the maximum are clipped and reported the same way.",
 							},
-							"timeout": map[string]interface{}{
-								"type":        "integer",
-								"minimum":     1,
-								"maximum":     subagentNumericOptionMax,
-								"description": "Optional per-task wall-clock limit in seconds. 0 or a negative value is ignored (the routed default applies) and reported in route_warnings, so omit the field instead of sending 0. Non-integer values are truncated and values above the maximum are clipped, both reported in route_warnings.",
-							},
 							"max_turns": map[string]interface{}{
 								"type":        "integer",
 								"minimum":     1,
@@ -9098,6 +9122,10 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 							"read_only": map[string]interface{}{
 								"type":        "boolean",
 								"description": runtimepolicy.ReadOnlyChildOptionDescription,
+							},
+							"shell": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Set false to remove shell-like tools from this child and deny them at execution. Omit or set true to inherit: read_only children can run only read-only commands; writable children get the parent's shell surface. The parent controls child lifetime; there is no per-task timeout field.",
 							},
 						},
 						"required": []string{"goal"},
@@ -9209,10 +9237,11 @@ func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinitio
 		}
 	}
 	summary := map[string]interface{}{
-		"catalog_count": len(tools) + len(blocked),
-		"count":         len(allowed),
-		"names":         allowed,
-		"read_only":     policy.ReadOnly,
+		"catalog_count":  len(tools) + len(blocked),
+		"count":          len(allowed),
+		"names":          allowed,
+		"read_only":      policy.ReadOnly,
+		"shell_disabled": policy.ShellDisabled,
 	}
 	if len(blocked) > 0 {
 		summary["blocked"] = blocked

@@ -52,6 +52,10 @@ type SubagentTask struct {
 	BudgetTokens        int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
 	TimeoutSec          int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ReadOnly            bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// ShellDisabled removes the shell surface without making the child
+	// read-only. It is set by the model-facing shell=false option and only ever
+	// narrows the inherited parent boundary.
+	ShellDisabled bool `json:"shell_disabled,omitempty" yaml:"shell_disabled,omitempty"`
 	// AgentType optionally references a portable agent definition
 	// (.agents/agents/*.md, ~/.aicli/agents/*, builtin) whose defaults
 	// (read-only, tools, model/provider/reasoning, maxTurns, completion) fill
@@ -67,6 +71,10 @@ type SubagentTask struct {
 	// requested whitelist before the child is started. It is internal audit
 	// metadata; execution policy remains the final hard boundary.
 	ReadOnlyFilteredTools []string `json:"-" yaml:"-"`
+	// ShellFilteredTools lists shell-like tools removed from the requested
+	// whitelist because the task asked for shell=false. Internal audit metadata;
+	// the execution policy remains the hard boundary.
+	ShellFilteredTools []string `json:"-" yaml:"-"`
 	// CompletionRequirement is none|complete_task for child harness loops.
 	// Empty inherits none at the child factory (team workers set complete_task via RunMeta).
 	CompletionRequirement string `json:"completion_requirement,omitempty" yaml:"completion_requirement,omitempty"`
@@ -121,15 +129,19 @@ type SubagentResult struct {
 	// ReadOnlyFilteredTools lists write-like tools dropped from the requested
 	// whitelist because the child ran read-only. It is surfaced to the parent so
 	// a silently narrowed allowlist is visible in the spawn report.
-	ReadOnlyFilteredTools []string            `json:"read_only_filtered_tools,omitempty" yaml:"read_only_filtered_tools,omitempty"`
-	BudgetTokens          int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
-	Success               bool                `json:"success" yaml:"success"`
-	Summary               string              `json:"summary" yaml:"summary"`
-	Patches               []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
-	Findings              []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
-	Usage                 *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Error                 string              `json:"error,omitempty" yaml:"error,omitempty"`
-	Contract              *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
+	ReadOnlyFilteredTools []string `json:"read_only_filtered_tools,omitempty" yaml:"read_only_filtered_tools,omitempty"`
+	// ShellDisabled reports whether the child had no shell surface.
+	ShellDisabled bool `json:"shell_disabled,omitempty" yaml:"shell_disabled,omitempty"`
+	// ShellFilteredTools lists shell-like tools dropped because shell=false.
+	ShellFilteredTools []string            `json:"shell_filtered_tools,omitempty" yaml:"shell_filtered_tools,omitempty"`
+	BudgetTokens       int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
+	Success            bool                `json:"success" yaml:"success"`
+	Summary            string              `json:"summary" yaml:"summary"`
+	Patches            []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
+	Findings           []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
+	Usage              *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Error              string              `json:"error,omitempty" yaml:"error,omitempty"`
+	Contract           *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
 	// 失败分类与重试证据（方案 §6.1）：供父代理选择重派/拆分/本地完成，
 	// 并随 subagent.completed 载荷进入分析库（failure_category 等）。
 	FailureCategory string `json:"failure_category,omitempty" yaml:"failure_category,omitempty"`
@@ -988,6 +1000,8 @@ func subagentAdmissionFailureResult(task SubagentTask, options SubagentRunOption
 		ReadOnly:              task.ReadOnly,
 		ReadOnlySource:        subagentReadOnlySource(task),
 		ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+		ShellDisabled:         task.ShellDisabled,
+		ShellFilteredTools:    subagentShellFilteredTools(task),
 		BudgetTokens:          task.BudgetTokens,
 		Success:               false,
 		Error:                 err.Error(),
@@ -1018,6 +1032,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ReadOnly:              task.ReadOnly,
 			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			ShellDisabled:         task.ShellDisabled,
+			ShellFilteredTools:    subagentShellFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
 			Error:                 "subagent goal is required",
@@ -1043,6 +1059,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ReadOnly:              task.ReadOnly,
 			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			ShellDisabled:         task.ShellDisabled,
+			ShellFilteredTools:    subagentShellFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
 			Error:                 err.Error(),
@@ -1064,6 +1082,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ReadOnly:              task.ReadOnly,
 			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			ShellDisabled:         task.ShellDisabled,
+			ShellFilteredTools:    subagentShellFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
 			Error:                 err.Error(),
@@ -1075,11 +1095,16 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	}
 	childCtx := ctx
 	var cancel context.CancelFunc
-	if spec.Decision.Timeout > 0 {
+	// Only an explicit internal task budget bounds the child run. Route-profile
+	// Timeout is an operator/provider hint, not a child-session lifetime: a
+	// 30m profile default used to kill long audits mid-flight even though the
+	// caller never asked for a wall clock. The parent owns the child lifetime.
+	taskTimeout := time.Duration(task.TimeoutSec) * time.Second
+	if taskTimeout > 0 {
 		// 用独立 cause 标记任务自己的 deadline。这样父 batch deadline 先到时，
 		// child context 虽然同样会返回 DeadlineExceeded，收尾仍能区分
 		// task_timeout 与 batch_deadline。
-		childCtx, cancel = context.WithTimeoutCause(ctx, spec.Decision.Timeout, subagentTaskDeadlineCause)
+		childCtx, cancel = context.WithTimeoutCause(ctx, taskTimeout, subagentTaskDeadlineCause)
 		defer cancel()
 	}
 	task = spec.Task
@@ -1266,6 +1291,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ReadOnly:              task.ReadOnly,
 			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			ShellDisabled:         task.ShellDisabled,
+			ShellFilteredTools:    subagentShellFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
 			Error:                 runErr.Error(),
@@ -1412,6 +1439,8 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		ReadOnly:              task.ReadOnly,
 		ReadOnlySource:        subagentReadOnlySource(task),
 		ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+		ShellDisabled:         task.ShellDisabled,
+		ShellFilteredTools:    subagentShellFilteredTools(task),
 		BudgetTokens:          task.BudgetTokens,
 		Success:               result.Success,
 		Summary:               result.Output,
@@ -2383,6 +2412,15 @@ func subagentReadOnlyFilteredTools(task SubagentTask) []string {
 		return nil
 	}
 	return append([]string(nil), task.ReadOnlyFilteredTools...)
+}
+
+// subagentShellFilteredTools returns a copy of the shell-like tools removed by
+// shell=false so the parent report can show exactly what the request dropped.
+func subagentShellFilteredTools(task SubagentTask) []string {
+	if len(task.ShellFilteredTools) == 0 {
+		return nil
+	}
+	return append([]string(nil), task.ShellFilteredTools...)
 }
 
 // subagentReadOnlySource resolves the effective read-only boundary origin for

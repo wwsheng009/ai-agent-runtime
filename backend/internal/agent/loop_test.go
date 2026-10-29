@@ -3984,7 +3984,6 @@ func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {
 									"goal":            "Inspect the logs and summarize the error.",
 									"tools_whitelist": []interface{}{"read_logs"},
 									"read_only":       true,
-									"timeout":         15.0,
 								},
 							},
 						},

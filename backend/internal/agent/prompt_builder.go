@@ -46,6 +46,12 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask, f
 	if strings.TrimSpace(task.DifficultyRationale) != "" {
 		lines = append(lines, "Difficulty rationale: "+strings.TrimSpace(task.DifficultyRationale))
 	}
+	if len(task.ShellFilteredTools) > 0 {
+		lines = append(lines, "Removed shell tools: "+strings.Join(task.ShellFilteredTools, ", ")+".")
+	}
+	if task.ShellDisabled {
+		lines = append(lines, "Shell is disabled for this task; use view, grep, glob, ls, or the provided file tools for inspection.")
+	}
 	if task.Provider != "" || task.Model != "" || task.ReasoningEffort != "" {
 		parts := []string{}
 		if task.Provider != "" {
@@ -77,8 +83,10 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask, f
 		lines = append(lines, "This is a read-only subagent. Never perform or propose direct workspace mutations.")
 		lines = append(lines, "Prefer findings, evidence, failures, and open questions.")
 		lines = append(lines, "Prefer dedicated read tools such as view, grep, glob, and ls over shell whenever possible.")
-		lines = append(lines, "For shell, submit exactly one command per command field; do not chain commands with ;, &, &&, ||, pipes, redirections, variable expansion, or command substitution.")
-		lines = append(lines, "For multiple read-only shell commands, use the shell commands array so each entry is validated independently.")
+		if !task.ShellDisabled {
+			lines = append(lines, "For shell, submit exactly one command per command field; do not chain commands with ;, &, &&, ||, pipes, redirections, variable expansion, or command substitution.")
+			lines = append(lines, "For multiple read-only shell commands, use the shell commands array so each entry is validated independently.")
+		}
 		lines = append(lines, "Read-only is a hard execution boundary and cannot be overridden by approval or bypass_permissions.")
 		// M2：边界横幅与出路文案同源（policy.BoundaryManifest），子代理第一轮
 		// 就能看到边界来源、被剥离的写工具与「写需求出路」，而不是试错后才知道。

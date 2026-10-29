@@ -446,6 +446,29 @@ func TestStartBackgroundAfterError(t *testing.T) {
 	}
 }
 
+// TestStartBackgroundWithoutDeadlineLeavesBatchUnbounded pins the 2026-10-29
+// behavior: a background batch without an explicit wait_timeout_sec has no
+// wall-clock deadline. The parent owns convergence (subagent_close/cancel);
+// the old implicit 30m default killed long audits mid-flight.
+func TestStartBackgroundWithoutDeadlineLeavesBatchUnbounded(t *testing.T) {
+	store := testStore(t)
+	exec := &fakeExecutor{results: []SubagentResult{{ID: "t1", Success: true, Summary: "ok"}}}
+	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{Store: store})
+	c.executor = exec
+
+	batch, err := c.StartBackground(context.Background(), BatchStartOptions{
+		ParentSessionID: "session-unbounded",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+	}, []SubagentTask{{ID: "t1", Role: "researcher", Goal: "long audit"}})
+	if err != nil {
+		t.Fatalf("StartBackground: %v", err)
+	}
+	if !batch.BatchDeadline.IsZero() {
+		t.Fatalf("batch deadline = %v, want no wall-clock deadline", batch.BatchDeadline)
+	}
+	_ = c.Shutdown(context.Background(), "test complete")
+}
+
 func TestStartBackgroundIdempotency(t *testing.T) {
 	store := testStore(t)
 	exec := &fakeExecutor{

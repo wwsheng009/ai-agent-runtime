@@ -568,8 +568,12 @@ type SpawnAgentArgs struct {
 	CompletionRequirement string `json:"completion_requirement,omitempty"`
 	// Isolation is none|worktree. Empty normalizes to none. worktree fails closed
 	// (no silent main-tree fallback) when git worktree creation is unavailable.
-	Isolation   string `json:"isolation,omitempty"`
-	ReadOnly    bool   `json:"read_only,omitempty"`
+	Isolation string `json:"isolation,omitempty"`
+	ReadOnly  bool   `json:"read_only,omitempty"`
+	// Shell=false removes the child's shell surface. Nil/true inherits the
+	// parent policy: read_only children get read-only commands only; writable
+	// children get the full shell surface.
+	Shell       *bool  `json:"shell,omitempty"`
 	ForkContext *bool  `json:"fork_context,omitempty"`
 	ForkTurns   string `json:"fork_turns,omitempty"`
 	// ParentToolCallID 是发起本次 spawn 的父侧 tool_call_id，由 broker 在执行
@@ -667,6 +671,7 @@ type AgentStatusResult struct {
 	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
 	PermissionMode           string   `json:"permission_mode,omitempty"`
 	ReadOnly                 bool     `json:"read_only,omitempty"`
+	ShellDisabled            bool     `json:"shell_disabled,omitempty"`
 	Isolation                string   `json:"isolation,omitempty"`
 	WorktreePath             string   `json:"worktree_path,omitempty"`
 	WorktreeBranch           string   `json:"worktree_branch,omitempty"`
@@ -1515,6 +1520,7 @@ const (
 	AgentSessionContextPermissionMode        = "permission_mode"
 	AgentSessionContextCompletionRequirement = "completion_requirement"
 	AgentSessionContextReadOnly              = "read_only"
+	AgentSessionContextShellDisabled         = "shell_disabled"
 	AgentSessionContextIsolation             = "isolation"
 	AgentSessionContextWorktreePath          = "worktree_path"
 	AgentSessionContextWorktreeBranch        = "worktree_branch"
@@ -1627,6 +1633,9 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if args.ReadOnly {
 		session.SetContext(AgentSessionContextReadOnly, true)
 	}
+	if args.Shell != nil && !*args.Shell {
+		session.SetContext(AgentSessionContextShellDisabled, true)
+	}
 }
 
 // ApplySpawnAgentRouteStatusContext copies persisted subagent_spawn route
@@ -1664,6 +1673,9 @@ func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentc
 	}
 	if value, ok := session.GetContext(AgentSessionContextReadOnly); ok {
 		result.ReadOnly, _ = value.(bool)
+	}
+	if value, ok := session.GetContext(AgentSessionContextShellDisabled); ok {
+		result.ShellDisabled, _ = value.(bool)
 	}
 	if isolation := agentcontrol.ContextString(session, AgentSessionContextIsolation); isolation != "" {
 		result.Isolation = isolation

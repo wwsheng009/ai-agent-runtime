@@ -264,9 +264,9 @@ func TestDecodeSubagentTasksAcceptsNumericAndBooleanFields(t *testing.T) {
 		"id":              "writer",
 		"goal":            "apply the patch",
 		"budget_tokens":   float64(1200),
-		"timeout":         90,
 		"read_only":       true,
-		"tools_whitelist": []interface{}{"shell"},
+		"shell":           false,
+		"tools_whitelist": []interface{}{"view"},
 		"patches":         []interface{}{map[string]interface{}{"path": "a.go"}},
 	}))
 	if err != nil {
@@ -276,7 +276,7 @@ func TestDecodeSubagentTasksAcceptsNumericAndBooleanFields(t *testing.T) {
 		t.Fatalf("expected 1 task, got %d", len(tasks))
 	}
 	task := tasks[0]
-	if task.BudgetTokens != 1200 || task.TimeoutSec != 90 || !task.ReadOnly {
+	if task.BudgetTokens != 1200 || task.TimeoutSec != 0 || !task.ReadOnly || !task.ShellDisabled {
 		t.Fatalf("numeric/boolean fields were not preserved: %+v", task)
 	}
 	if len(task.ToolsWhitelist) != 1 || len(task.PatchContext) != 1 {
@@ -368,13 +368,11 @@ func TestDecodeSubagentTasksReportsSanitizedNumericOptions(t *testing.T) {
 			"id":            "writer",
 			"goal":          "apply the patch",
 			"budget_tokens": float64(-500),
-			"timeout":       float64(90.25),
 		},
 		map[string]interface{}{
 			"id":            "verifier",
 			"goal":          "check the patch",
 			"budget_tokens": float64(1e18),
-			"timeout":       0,
 		},
 	))
 	if err != nil {
@@ -388,10 +386,7 @@ func TestDecodeSubagentTasksReportsSanitizedNumericOptions(t *testing.T) {
 	if writer.BudgetTokens != 0 {
 		t.Fatalf("a non-positive budget must fall back to the default, got %d", writer.BudgetTokens)
 	}
-	if writer.TimeoutSec != 90 {
-		t.Fatalf("expected the fractional timeout to truncate to 90, got %d", writer.TimeoutSec)
-	}
-	for _, want := range []string{"budget_tokens_ignored_non_positive", "timeout_truncated_to_integer"} {
+	for _, want := range []string{"budget_tokens_ignored_non_positive"} {
 		if !containsWarning(writer.RouteWarnings, want) {
 			t.Fatalf("writer route warnings %v do not mention %q", writer.RouteWarnings, want)
 		}
@@ -401,13 +396,23 @@ func TestDecodeSubagentTasksReportsSanitizedNumericOptions(t *testing.T) {
 	if verifier.BudgetTokens != subagentNumericOptionMax {
 		t.Fatalf("expected the oversized budget to clip to %d, got %d", subagentNumericOptionMax, verifier.BudgetTokens)
 	}
-	for _, want := range []string{"budget_tokens_clamped_to_range", "timeout_ignored_non_positive"} {
+	for _, want := range []string{"budget_tokens_clamped_to_range"} {
 		if !containsWarning(verifier.RouteWarnings, want) {
 			t.Fatalf("verifier route warnings %v do not mention %q", verifier.RouteWarnings, want)
 		}
 	}
-	if verifier.TimeoutSec != 0 {
-		t.Fatalf("expected timeout 0 to stay unset so the routed default applies, got %d", verifier.TimeoutSec)
+}
+
+func TestDecodeSubagentTasksRejectsRemovedTimeoutField(t *testing.T) {
+	for _, key := range []string{"timeout", "timeout_sec"} {
+		_, err := decodeSubagentTasks(subagentDecodeArgs(map[string]interface{}{
+			"id":   "writer",
+			"goal": "apply the patch",
+			key:    90,
+		}))
+		if err == nil || !strings.Contains(err.Error(), "no longer accepted") {
+			t.Fatalf("expected %s to be rejected with an actionable error, got %v", key, err)
+		}
 	}
 }
 

@@ -88,6 +88,12 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	}
 	task = resolved
 	promptTask := task
+	if task.ShellDisabled {
+		if childConfig.Options == nil {
+			childConfig.Options = make(map[string]interface{})
+		}
+		childConfig.Options["shell_disabled"] = true
+	}
 	// The prompt must describe the effective inherited boundary, not only the
 	// child's requested flag. A read-only parent cannot be widened by omitting
 	// read_only on a nested child request.
@@ -273,9 +279,6 @@ func taskWithRouteDecision(task SubagentTask, decision modelrouting.RouteDecisio
 	task.ReasoningEffort = decision.ReasoningEffort
 	task.RoutingSource = decision.Source
 	task.RouteWarnings = append([]string(nil), decision.Warnings...)
-	if decision.Timeout > 0 && task.TimeoutSec <= 0 {
-		task.TimeoutSec = int(decision.Timeout / time.Second)
-	}
 	return task
 }
 

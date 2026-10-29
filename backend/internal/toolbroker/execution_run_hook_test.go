@@ -68,13 +68,14 @@ func TestStartSpawnExecutionRunRegistersRun(t *testing.T) {
 
 func TestStartSpawnExecutionRunDefaultsAndValidation(t *testing.T) {
 	supervisor := newHookTestSupervisor(t, "hook-defaults")
-	// Zero timeouts fall back to operator defaults.
+	// A spawn without timeout_sec is parent-controlled: the execution run has
+	// no wall-clock deadline. Progress/approval defaults still apply.
 	result := &AgentStatusResult{SessionID: "child-1"}
 	runID, _, err := startSpawnExecutionRun(context.Background(), supervisor, "parent-1", SpawnAgentArgs{}, result)
 	require.NoError(t, err)
 	run, err := supervisor.Store.GetExecutionRun(context.Background(), runID)
 	require.NoError(t, err)
-	require.WithinDuration(t, time.Now().Add(30*time.Minute), *run.ExecutionDeadlineAt, 2*time.Second)
+	require.Nil(t, run.ExecutionDeadlineAt)
 
 	// Negative values are rejected without creating a run.
 	_, _, err = startSpawnExecutionRun(context.Background(), supervisor, "parent-1",
@@ -112,14 +113,13 @@ func TestBrokerSpawnRegistersSupervisedRun(t *testing.T) {
 		ID:   "call-sup-1",
 		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{
-			"message":     "run a bounded task",
-			"timeout_sec": int64(90),
+			"message": "run a bounded task",
 		},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, raw)
 	require.NotEmpty(t, meta["run_id"], "spawn metadata must expose the supervised run_id")
-	require.NotEmpty(t, meta["execution_deadline_at"])
+	require.Empty(t, meta["execution_deadline_at"], "spawn runs are parent-controlled by default")
 	require.Equal(t, "interrupt_then_fail", meta["supervision_policy"])
 
 	runID, _ := meta["run_id"].(string)
@@ -128,8 +128,7 @@ func TestBrokerSpawnRegistersSupervisedRun(t *testing.T) {
 	require.Equal(t, "child-1", run.SessionID)
 	require.Equal(t, "parent-1", run.ParentSessionID)
 	require.Equal(t, supervision.RunStatusQueued, run.Status)
-	require.NotNil(t, run.ExecutionDeadlineAt)
-	require.False(t, run.ExecutionDeadlineAt.IsZero())
+	require.Nil(t, run.ExecutionDeadlineAt)
 }
 
 // TestBrokerSpawnWithoutSupervisorKeepsLegacyBehavior verifies that a broker

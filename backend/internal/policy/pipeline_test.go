@@ -291,6 +291,11 @@ func TestAssessShellReadOnlyCommandAllowsStaticPipelineCmdlets(t *testing.T) {
 	allowed := []string{
 		"Get-ChildItem -LiteralPath . | Select-Object -First 5",
 		"Get-ChildItem . | Select-Object -First:10 -Skip 2",
+		"Get-ChildItem . | Select-Object -Property Name,Length",
+		"Get-ChildItem . | Select-Object -Property Name,Length -First 5",
+		"Get-ChildItem . | Select-Object Name,Length",
+		"Get-ChildItem . | Select-Object Name,Length -First 5",
+		"Get-Item \"E:\\\\projects\\\\sap\\\\sap_network_core\\\\rust\\\\jplatin-rs\\\\src\\\\diag\\\\mod.rs\" | Select-Object -ExpandProperty Length",
 		"Get-Content app.log | Measure-Object -Line",
 		"Get-ChildItem . | Sort-Object -Property Length -Descending",
 		"Get-ChildItem . | Sort-Object Name",
@@ -315,10 +320,11 @@ func TestAssessShellReadOnlyCommandRejectsNonLiteralPipelineCmdlets(t *testing.T
 		command string
 		reason  string
 	}{
-		{"Get-ChildItem . | Select-Object -Property Name,Length", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Select-Object -First 5 -Last 3", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Select-Object -First 5s", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Select-Object -First -5", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Select-Object -Property Name,", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Select-Object -Property {Name}", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Where-Object { Length -gt 100 }", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Where-Object -Property Length -GT 100 -And Name -eq \"x\"", ShellReadOnlyReasonNotAllowed},
 		{"Get-ChildItem . | Where-Object Length -gt (Get-Random)", ShellReadOnlyReasonNotAllowed},

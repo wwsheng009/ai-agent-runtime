@@ -32,13 +32,21 @@ func startSpawnExecutionRun(ctx context.Context, supervisor *supervision.Executi
 	if args.TimeoutSec < 0 || args.ProgressTimeoutSec < 0 || args.ApprovalTimeoutSec < 0 || args.CancelGraceSec < 0 {
 		return "", "", fmt.Errorf("supervision timeouts must be non-negative")
 	}
+	executionTimeout := secondsToDuration(args.TimeoutSec)
+	if args.TimeoutSec == 0 {
+		// No model-facing wall-clock limit: the parent owns the child's
+		// lifetime (subagent_close/subagent_cancel). -1 is the supervisor's
+		// explicit-unbounded spelling; progress_timeout_sec still catches a
+		// genuinely stalled run.
+		executionTimeout = -1
+	}
 	spec := supervision.RunSpec{
 		Workflow:         supervision.RunWorkflowSpawnAgent,
 		RootSessionID:    strings.TrimSpace(parentSessionID),
 		ParentSessionID:  strings.TrimSpace(parentSessionID),
 		SessionID:        strings.TrimSpace(result.SessionID),
 		AgentID:          strings.TrimSpace(firstNonEmptyToolValue(result.SessionID, result.ID)),
-		ExecutionTimeout: secondsToDuration(args.TimeoutSec),
+		ExecutionTimeout: executionTimeout,
 		ProgressTimeout:  secondsToDuration(args.ProgressTimeoutSec),
 		ApprovalTimeout:  secondsToDuration(args.ApprovalTimeoutSec),
 		CancelGrace:      secondsToDuration(args.CancelGraceSec),

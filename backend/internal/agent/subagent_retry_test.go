@@ -208,6 +208,24 @@ func TestClassifySubagentFailureArtifactScopeDenial(t *testing.T) {
 	}
 }
 
+// A read-only shell denial is a deterministic tool-boundary failure, not a
+// provider outage. The 2026-10-29 batch marked A-frame-interpreter failed with
+// provider_error/UPSTREAM_ERROR even though the child had delivered its report
+// and only a cleanup shell command was denied.
+func TestClassifySubagentFailureReadOnlyShellDenial(t *testing.T) {
+	denied := ClassifySubagentFailure(errors.New(
+		`read-only policy blocks non-readonly shell command (segment 2: "Select-Object Name,Length"): Get-ChildItem . | Select-Object Name,Length`))
+	if denied.Category != llm.FailureCategoryToolError {
+		t.Fatalf("read-only shell denial must be tool_error, got %+v", denied)
+	}
+	if denied.ErrorCode != "AGENT_READ_ONLY" {
+		t.Fatalf("read-only shell denial must carry AGENT_READ_ONLY, got %q", denied.ErrorCode)
+	}
+	if denied.Retryable {
+		t.Fatalf("read-only shell denial must not be retryable, got %+v", denied)
+	}
+}
+
 // TestSubagentRetryBackoffBounded 指数退避 + jitter 必须有界（封顶 5s）。
 func TestSubagentRetryBackoffBounded(t *testing.T) {
 	for attempt := 1; attempt <= 10; attempt++ {

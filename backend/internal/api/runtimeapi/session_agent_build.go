@@ -146,11 +146,28 @@ func (h *Handler) buildSessionAgentForContext(
 		toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
+	applyAPIChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, apiAgentDepthCeiling(selectedConfig))
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)
 
 	return apiAgent, selectedConfig
+}
+
+// applyAPIChildShellPolicy applies the explicit shell=false flag persisted by
+// subagent_spawn. A false flag keeps the inherited behavior.
+func applyAPIChildShellPolicy(apiAgent *agent.Agent, shellDisabled bool) {
+	if apiAgent == nil || !shellDisabled {
+		return
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
+	} else {
+		toolPolicy = toolPolicy.Clone()
+	}
+	toolPolicy.SetShellDisabled(true)
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 
 // resolveProfileStateForSessionContext 解析会话 profile 状态。

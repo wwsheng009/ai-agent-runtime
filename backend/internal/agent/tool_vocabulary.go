@@ -177,10 +177,11 @@ func agentChildPolicy(parent *Agent, task SubagentTask) *ToolExecutionPolicy {
 		parentPolicy = parent.GetToolExecutionPolicy()
 	}
 	if parentPolicy != nil {
-		return parentPolicy.DeriveChildForTask(task.ToolsWhitelist, task.ReadOnly, subagentPolicyRole(task), subagentWritePaths(task))
+		return parentPolicy.DeriveChildForTaskWithShellDisabled(task.ToolsWhitelist, task.ReadOnly, subagentPolicyRole(task), subagentWritePaths(task), task.ShellDisabled)
 	}
 	child := NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
 	child.SetCapabilityScope(CapabilitiesForTask(subagentPolicyRole(task), task.ReadOnly, task.ToolsWhitelist, subagentWritePaths(task)))
+	child.SetShellDisabled(task.ShellDisabled)
 	return child
 }
 
@@ -220,14 +221,26 @@ func resolveChildToolSurface(parent *Agent, task SubagentTask) (SubagentTask, *T
 		requested = DefaultToolsForRole(subagentPolicyRole(task))
 	}
 	normalized := normalizeToolWhitelist(requested)
+	// nil means "inherit the parent surface"; the policy's ShellDisabled flag
+	// hides shell there. An explicit list is narrowed here so the parent sees
+	// exactly what shell=false removed.
+	if task.ShellDisabled && normalized != nil {
+		normalized, task.ShellFilteredTools = filterShellLikeTools(normalized)
+	}
+	task.ToolsWhitelist = normalized
 
 	if err := validateRequestedToolVocabulary(task.ID, source, normalized, agentToolSurface(parent)); err != nil {
 		return task, nil, err
 	}
 
-	task.ToolsWhitelist = normalized
 	child := agentChildPolicy(parent, task)
-	if err := validateChildToolAllowlist(task.ID, source, requested, child); err != nil {
+	validationRequested := requested
+	if task.ShellDisabled && len(task.ShellFilteredTools) > 0 {
+		// The caller asked for no shell; an allowlist that held only shell
+		// tools legitimately becomes empty. Do not report that as a blackout.
+		validationRequested = normalized
+	}
+	if err := validateChildToolAllowlist(task.ID, source, validationRequested, child); err != nil {
 		return task, nil, err
 	}
 	if child == nil {
@@ -242,6 +255,40 @@ func resolveChildToolSurface(parent *Agent, task SubagentTask) (SubagentTask, *T
 	}
 	task = appendShellSurfaceRouteWarnings(task, child)
 	return task, child, nil
+}
+
+// filterShellLikeTools removes shell-family names from a requested allowlist.
+// nil stays nil ("inherit"), and an explicit empty result stays empty ("no
+// tools") so the documented allowlist contract is preserved.
+func filterShellLikeTools(tools []string) ([]string, []string) {
+	if tools == nil {
+		return nil, nil
+	}
+	filtered := make([]string, 0, len(tools))
+	removed := make([]string, 0)
+	seen := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		if runtimepolicy.IsShellLikeToolName(tool) {
+			if !seen[tool] {
+				removed = append(removed, tool)
+				seen[tool] = true
+			}
+			continue
+		}
+		if seen[tool] {
+			continue
+		}
+		seen[tool] = true
+		filtered = append(filtered, tool)
+	}
+	if len(filtered) == 0 {
+		filtered = []string{}
+	}
+	return filtered, removed
 }
 
 // finalizeChildToolSurface grants runtime-contract tools after the read-only
@@ -301,6 +348,10 @@ func appendShellSurfaceRouteWarnings(task SubagentTask, child *ToolExecutionPoli
 	if child == nil || !goalHasShellIntent(task.Goal) {
 		return task
 	}
+	if task.ShellDisabled {
+		task.RouteWarnings = appendRouteWarningOnce(task.RouteWarnings, shellNoneRouteWarning())
+		return task
+	}
 	if childSurfaceLacksShell(child) {
 		task.RouteWarnings = appendRouteWarningOnce(task.RouteWarnings, shellSurfaceRouteWarning())
 		return task
@@ -318,6 +369,9 @@ func appendShellSurfaceRouteWarnings(task SubagentTask, child *ToolExecutionPoli
 func childSurfaceLacksShell(child *ToolExecutionPolicy) bool {
 	if child == nil {
 		return false
+	}
+	if child.ShellDisabled {
+		return true
 	}
 	// The allowlist may carry wildcard patterns ("*" / "shell-like prefixes");
 	// AllowedToolNames only lists the literal entries, so the wildcard-aware

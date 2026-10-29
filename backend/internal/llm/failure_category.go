@@ -119,6 +119,16 @@ func FailureCategoryFromErrorCode(code string) string {
 		return FailureCategoryToolError
 	case strings.Contains(normalized, "NOT ALLOWED BY EXECUTION POLICY") || strings.Contains(normalized, "CAPABILITY NOT ALLOWED"):
 		return FailureCategoryToolError
+	// 2026-10-29 真机：只读子代理的收尾 shell 被只读命令表拒绝，终局错误原文
+	// 是 "read-only policy blocks non-readonly shell command (segment N: ...)"。
+	// ClassifyFailureCode 先把它压成 UPSTREAM_ERROR，文本兜底又认不出这句话，
+	// 于是 provider_error + retryable=true 把父代理引向"重试上游"，而真正要改
+	// 的是工具面/命令。这类确定性策略拒绝必须归 tool_error。
+	case strings.Contains(normalized, "READ-ONLY POLICY") ||
+		strings.Contains(normalized, "READONLY POLICY") ||
+		strings.Contains(normalized, "READ ONLY POLICY") ||
+		strings.Contains(normalized, "SHELL IS DISABLED FOR THIS CHILD"):
+		return FailureCategoryToolError
 	// 2026-10-02 真机：subagent_spawn_batch 只给子代理发 tools_whitelist:["shell"]
 	// 时，子代理调用 glob/ls/grep 被 agent/loop.go 的白名单闸门拒绝，终局错误
 	// 原文是 "tool not allowed for this agent: glob; ..."。这是上一条同类的

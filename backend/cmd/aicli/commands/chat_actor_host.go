@@ -1851,6 +1851,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		applyLocalChildAgentdefToolPolicy(apiAgent, sessionCtx.ChildAgentType, session, workspaceRoot, toolkitBasePath)
 	}
 	applyLocalChildReadOnlyPolicy(apiAgent, sessionCtx.ChildReadOnly)
+	applyLocalChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyLocalChildDepthPolicy(apiAgent, sessionCtx.ChildDepth, localAgentDepthCeiling(runtimeConfig, h))
 	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
 	if leaseErr != nil {
@@ -2056,6 +2057,22 @@ func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
 	// 只读边界只能收窄：父策略已带能力面时取交集，避免 read_only 派生反而
 	// 重新拿到父策略没有的 network/agent_management 能力（绝不宽于父会话）。
 	toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
+}
+
+// applyLocalChildShellPolicy applies the explicit shell=false flag persisted by
+// subagent_spawn. A false flag keeps the inherited behavior.
+func applyLocalChildShellPolicy(apiAgent *agent.Agent, shellDisabled bool) {
+	if apiAgent == nil || !shellDisabled {
+		return
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
+	} else {
+		toolPolicy = toolPolicy.Clone()
+	}
+	toolPolicy.SetShellDisabled(true)
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 

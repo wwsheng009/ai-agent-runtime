@@ -49,3 +49,25 @@ func TestSpawnAgentReadOnlyDescriptionCarriesDispatchAdvice(t *testing.T) {
 			"read_only dispatch advice clause drifted from the enforced shell boundary")
 	}
 }
+
+func TestSpawnAgentSchemaExposesShellAndNoTimeoutSec(t *testing.T) {
+	brokers := map[string]*Broker{
+		"agent_sessions": {AgentSessions: &fakeAgentSessionController{}},
+		"team_store":     {AgentSessions: &fakeAgentSessionController{}, TeamStore: newTeamStore(t)},
+	}
+	for name, broker := range brokers {
+		var properties map[string]interface{}
+		for _, def := range broker.Definitions() {
+			if def.Name != ToolSubagentSpawn {
+				continue
+			}
+			properties, _ = def.Parameters["properties"].(map[string]interface{})
+			break
+		}
+		require.NotEmpty(t, properties, "%s: subagent_spawn definition missing", name)
+		shell, ok := properties["shell"].(map[string]interface{})
+		require.True(t, ok, "%s: shell property missing", name)
+		require.Equal(t, "boolean", shell["type"], name)
+		require.NotContains(t, properties, "timeout_sec", "%s: timeout_sec must not be model-facing", name)
+	}
+}

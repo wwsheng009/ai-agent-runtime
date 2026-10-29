@@ -48,7 +48,7 @@ func ReadOnlyChildCapabilities() []Capability {
 // for children that then needed general shell syntax mid-run (doc1 §7.10 ②):
 // the parent sees the shell contract before dispatch instead of only the
 // child-side denial escalation.
-const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and job_start are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove subagent_spawn/team_spawn as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only children's shell stays allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
+const ReadOnlyChildOptionDescription = "Hard child execution boundary for writes. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and job_start are removed from the child's model-visible tool surface and denied at execution. read_only does NOT remove the shell tool: shell stays available, but every command must pass the runtime's read-only allow table. Set the separate shell option to false when the child must have no shell at all; shell=false removes shell-like tools and denies them at execution. The delegation boundary (BlockDelegation / max depth) may remove subagent_spawn/team_spawn as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only shell commands stay allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
 
 // SubagentWriterPolicyDescription is the model-visible contract for writer
 // governance on subagent_spawn_batch. It is the single source of truth for the
@@ -175,6 +175,20 @@ func filterReadOnlyCapabilities(capabilities []Capability) []Capability {
 	filtered := make([]Capability, 0, len(capabilities))
 	for _, capability := range capabilities {
 		if capability != CapWriteFS && capability != CapExternalSideEffect {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
+}
+
+// filterShellCapability drops CapExecShell for shell=false children. The
+// allowlist/ShellDisabled gate still hides and denies shell tools; removing the
+// capability keeps the derived scope honest for diagnostics and for hosts that
+// evaluate capabilities before tool names.
+func filterShellCapability(capabilities []Capability) []Capability {
+	filtered := make([]Capability, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if capability != CapExecShell {
 			filtered = append(filtered, capability)
 		}
 	}
