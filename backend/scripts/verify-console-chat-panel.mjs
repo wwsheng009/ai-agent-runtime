@@ -183,6 +183,8 @@ const env = (src) => ({
   check('模态框层级高于移动端全屏会话流',
     /\.modal-scrim\s*\{[^}]*z-index:\s*70/s.test(css) &&
     /\.view-sessions #chat-modal\s*\{[^}]*z-index:\s*60/s.test(css));
+  check('移动端会话过滤条不被 flex-basis 拉高',
+    /\.im-seg\s*\{[^}]*flex:\s*0 0 auto/s.test(css));
 
   const moreBtn = doc.getElementById('chat-more');
   const menu = doc.getElementById('chat-more-menu');

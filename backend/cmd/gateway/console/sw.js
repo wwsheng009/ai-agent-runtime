@@ -4,12 +4,12 @@
 // Cache-busting version: bump together with the ?v= query in index.html and
 // the register() URL in app.js on every release (Cloudflare edge-caches
 // *.js/*.css for 4h, so a new URL is what makes the update land immediately).
-const CACHE = "aicli-gateway-shell-v70";
+const CACHE = "aicli-gateway-shell-v71";
 const SHELL = [
   "./",
   "./index.html",
-  "./app.js?v=70",
-  "./style.css?v=70",
+  "./app.js?v=71",
+  "./style.css?v=71",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",

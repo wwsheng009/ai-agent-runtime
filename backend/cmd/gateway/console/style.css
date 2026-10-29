@@ -2047,7 +2047,13 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   background: var(--panel-2);
 }
 
-.im-seg { width: 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+/* .im-list-tools is a column flex container. The generic mobile `.seg`
+   rule sets flex-basis:160px for horizontal toolbars; if it applies here the
+   basis becomes the *height* and every filter button grows to ~152px. */
+.im-seg {
+  width: 100%; flex: 0 0 auto; flex-wrap: nowrap;
+  overflow-x: auto; scrollbar-width: none;
+}
 .im-seg::-webkit-scrollbar { display: none; }
 .im-seg .seg-btn { flex-shrink: 0; }
 
