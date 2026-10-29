@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**部分已落地（v6）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）；**v6 记录 `d936b751`：写侧走 `POST /files` + 目标用户可写性闸门，含两条协议陷阱（raw body 在 0.2.11 返回 500；字段名非 `file` 时 `200 []` 而什么都不写）与一次目录级 gofmt 误操作的自记。**剩余项见 §13 末尾。
+- 状态：**部分已落地（v7）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）；**v6 记录 `d936b751`：写侧走 `POST /files` + 目标用户可写性闸门，含两条协议陷阱（raw body 在 0.2.11 返回 500；字段名非 `file` 时 `200 []` 而什么都不写）与一次目录级 gofmt 误操作的自记；**v7 记录 `c0226f10`：读闸门下沉到唯一入口 `readGuarded`，`edit`/`apply_patch` 与 `view` 同路，并用绕开闸门的合法变异做反向验证。§8.9 现只剩 `view` 行窗口一项未关。**
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -158,7 +158,7 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 移动 | `Move`（:180） | ✅ | `Access.Rename` 原生 |
 | 事件流 | `WatchDir`（:248，返回 `*StreamReader`） | ✅ 已用于 `watch_dir` | 流式原语可用 |
 | watcher 管理 | `CreateWatcher`/`GetWatcherEvents`/`RemoveWatcher` | ✅ 路由存在 | — |
-| **读文件字节** | `GET /files`（HTTP，非 RPC） | ✅ **原生存在**（`download.go:19`）；`filesystem.*` 仍无 ReadFile，故今天走 `cat` | `Access.Read` 首选 `/files`，`process+cat` 降为回落 |
+| **读文件字节** | `GET /files`（HTTP，非 RPC） | ✅ **已启用**（`a8ec5aaf` 读、`c0226f10` 全部读入口）：`view`/`edit`/`apply_patch` 均经 `readGuarded`，`cat` 降为兜底 | `Access.Read` 首选 `/files`，**闸门在唯一入口里**（不是每个调用点） |
 | **写文件字节** | `POST /files`（multipart） | ✅ **已启用**（`d936b751`）：`envdclient.WriteFile`，content 不再是 argv 元素，**2,450,000 字节实测逐字节落盘**（旧的 argv 天花板 1 MiB 不再适用）；通道不可用时回退 `printf` 并保留该天花板 | `Access.Write` 经 `/files` 不再受 argv 上限；两个协议陷阱已成文（见下） |
 | **字节区间读** | `GET /files` + `Range` | ✅ **实测 206 且逐字节精确**（§3.3） | `RandomRead` 在 envd 上**为 true**（探测得，非硬编码） |
 | 条件读（304/ETag） | `GET /files` + `If-*` | ❌ **不可用**：`Last-Modified` 回的是**请求时间**，`ETag` 不发（§3.3 实测） | 禁止把 revision 建立在 `Last-Modified` 上，仍用内容哈希 |
@@ -681,17 +681,25 @@ socket 早停仅作日志证据，不作断言。
 
 **过程纪律的一条（我自己违反了两次）**：`gofmt -w <目录>` 会把**未修改的既有文件**一起重排——本仓库里 `audit.go`/`metrics.go`/`platform.go`/`roots.go`/`server_test.go`/`ssh_e2e_test.go` 在 HEAD 中就不是 gofmt 规范形态，一次目录级格式化波及 7 个文件，被 `git checkout` 回退了**两次**（v3 轮一次、`d936b751` 轮再一次）。规则改为：**只对本轮实际改动的具体文件执行 gofmt**，绝不目录级；判断办法是提交前 `git status --short` 必须只剩自己动过的文件。写在这里是因为它会以"顺手清理"的名义反复发生，而不像错误。
 
-**§8.9 缺口的当前状态**（原两项：一项已关、一项拆解如下）：
+**§8.9 缺口的当前状态**（三项）：
 
-1. envd 的 `view` 仍无 `offset`/`limit` 行窗口（描述里还自认“no line windowing on this surface”）。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”。
-2. ~~写侧：`POST /files` 必须与 `missing_parent` 同批~~ → **已完成（`d936b751`）**：写走 `/files`，父目录与闸门均在进通道**之前**，2,450,000 字节逐字节落盘实测。
+1. **envd `view` 的 `offset`/`limit` 行窗口**：**仍未完成**。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”。
+2. **写侧走 `/files` 并与 `missing_parent` 同批**：✅ 已完成（`d936b751`）——父目录与闸门都在进通道**之前**，2,450,000 字节逐字节落盘实测。
+3. **`edit`/`apply_patch` 的读迁入守卫入口**：✅ 已完成（`c0226f10`）——三者共用 `readGuarded`，闸门不再靠每个调用点自觉。
 
-**新的剩余项（按价值/风险排序）：**
+**本轮新增的一条结构教训（比上一个改动更重要）**：闸门必须装在**唯一入口**里，不是每个调用点。
+上一轮把可读性闸门装在 `envdView` 内，`edit`/`apply_patch` 读同一个文件就走另一条路——
+当时**并没有泄漏**（它们走 `cat`，内核把关），但“漏装闸门”的概率等于“有人记得在第三个
+调用点再写一遍”。`readGuarded` 把闸、通道选择、字节上限归一处后，这类遗漏不再取决于记忆；
+测试以“两个工具各自必须被拒且**文件内容不得改变**”钉住，并用**绕开闸门的合法变异**证明
+两条子例各自承担重量（绕开后 `edit` 与 `apply_patch` 真的读到了 0600 root 的文件，而 `view`
+的测试仍绿）。
 
-1. **`edit`/`apply_patch` 的读仍走 `cat`**：写已切换，但 `envd_edit.go`/`envd_patch.go` 读取全文仍 `cat`。同一个工具内“读一条通道、写另一条”不改变结果（字节相同），但与 `Access` 的最终形状不一致，应随 Phase 2.5b 一并入 `envdAccess`。
-2. **NUL/UTF-16 写拒绝可以取消了**：`/files` 不受 argv/NUL 限制，因此 `binary_payload` 拒绝已无技术必需性，取消它就与 local 对齐。但这是**行为变更**，应有自己的测试与说明，所以没夹带在通道迁移里（§3.3.3 已登记）。
-3. **envd `view` 行窗口**（§8.9 旧缺口）：`/files` 区间读可用后，只是“在核里用字节窗口映射行号”，不再需要 `sed` 对拍九类语义。
-4. **`apply_patch` 多文件时的闸门合并**：当前每个缺失祖先的文件各一次 `test -w`；一个 patch 内可以一次探测多个路径（待真实成本数据再决定，不先优化）。
+**剩余项（按价值/风险排序）：**
+
+1. **NUL/UTF-16 写拒绝可以取消了**：`/files` 不受 argv/NUL 限制，因此 `binary_payload` 拒绝已无技术必需性，取消它就与 local 对齐。但这是**行为变更**，应有自己的测试与说明，所以不夹带在通道迁移里（§3.3.3 已登记）。
+2. **`apply_patch` 多文件时的闸门合并**：当前每个"祖先缺失"的文件各一次 `test -w`；一个 patch 内可以一次探测多个路径。待真实成本数据再决定，**不先优化**。
+3. **`view` 行窗口**（§8.9 唯一未关项，见上）。
 
 ---
 
@@ -726,6 +734,9 @@ curl -sk -D - -H "X-Access-Token: $T" -H 'Range: bytes=0-9' "$B?path=$F&username
 #   条件读陷阱：-H 'If-Modified-Since: <未来时间>' 得 304，但连发两次对比 last-modified 会看到它是请求时间
 #   大文件成本：10MiB 文件取 1KiB 区间，核对 size_download == 1024
 #   安全非对称：GET path=/etc/shadow（200）与同用户本地 `head -c 1 /etc/shadow`（Permission denied）对比
+#   写/编辑/补丁：真机一次跑完 9 项，用 backend/scripts/envd_live_verify.go
+#     （-write-path / -edit-path / -forbidden-path；每项均以目标用户身份直接读盘复核，
+#      闸门用例另由 root 确认文件内容未被改动）
 
 # 4.4 现存唯一后端分支（seam 的落点）
 # internal/remotetools/server.go:66-90  “differ only in where files and processes actually live”
