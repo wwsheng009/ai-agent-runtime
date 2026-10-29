@@ -2898,7 +2898,7 @@
     var filter = mountStatusFilter();
     var visible = entries.filter(function (e) {
       if (!filter) { return true; }
-      if (filter === "errors") { return e.status >= 400; }
+      if (filter === "errors") { return e.status >= 400 && e.reason !== "sse_unavailable"; }
       return String(e.status) === filter;
     });
     host.innerHTML = "";
@@ -2913,8 +2913,9 @@
     var row = document.createElement("div");
     row.className = "log-row";
     var status = document.createElement("span");
+    var expectedSse = e.reason === "sse_unavailable";
     status.className = "log-status " +
-      (e.status >= 500 ? "st-bad" : (e.status >= 400 ? "st-warn" : "st-ok"));
+      (expectedSse ? "st-event" : (e.status >= 500 ? "st-bad" : (e.status >= 400 ? "st-warn" : "st-ok")));
     status.textContent = e.status ? String(e.status) : "—";
     var main = document.createElement("span");
     main.className = "log-main";
@@ -2923,14 +2924,20 @@
     var slug = document.createElement("code");
     slug.textContent = e.slug || "—";
     title.appendChild(slug);
-    title.appendChild(document.createTextNode(" " + (e.method || "") + " " + (e.path || "")));
+    var titleText = " " + (e.method || "") + " " + (e.path || "");
+    if (e.command) { titleText += " · " + e.command; }
+    title.appendChild(document.createTextNode(titleText));
     var meta = document.createElement("span");
     meta.className = "log-meta";
     var bits = [];
     if (e.token_id) { bits.push("token " + e.token_id); }
     if (e.remote_addr) { bits.push(e.remote_addr); }
+    if (e.request_bytes != null || e.response_bytes != null) {
+      bits.push(formatBytes(e.request_bytes) + " → " + formatBytes(e.response_bytes));
+    }
     if (e.duration_ms != null) { bits.push(e.duration_ms + "ms"); }
-    if (e.reason) { bits.push(e.reason); }
+    if (e.user_agent) { bits.push("UA " + truncate(e.user_agent, 48)); }
+    if (e.reason) { bits.push(e.reason === "sse_unavailable" ? "SSE 推送未启用（正常）" : e.reason); }
     meta.textContent = bits.join(" · ");
     main.appendChild(title);
     main.appendChild(meta);
