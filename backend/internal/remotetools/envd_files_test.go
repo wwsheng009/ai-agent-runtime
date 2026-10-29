@@ -211,6 +211,54 @@ func TestEnvDViewFilesChannelDisabledByConfig(t *testing.T) {
 	}
 }
 
+// The gate must cover every tool that reads, not just the one that was in mind
+// when it was written: `edit` and `apply_patch` load the same file through the
+// same backend, and a read that skips the gate shows the model content its own
+// shell could not open.
+func TestEnvDEditAndPatchRespectTheReadGate(t *testing.T) {
+	const secret = "hash: abc123\n"
+	setup := func(t *testing.T) (*envdStub, *mcp.ClientSession, context.Context) {
+		t.Helper()
+		stub := newEnvdStub(t, map[string]string{"/srv/app/secrets.env": secret}, nil)
+		stub.pinOwner("/srv/app/secrets.env", "root")
+		stub.pinMode("/srv/app/secrets.env", 0o600)
+		stub.markUnreadable("/srv/app/secrets.env")
+		session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
+		return stub, session, ctx
+	}
+
+	t.Run("edit", func(t *testing.T) {
+		stub, session, ctx := setup(t)
+		before := stub.readableChecks.Load()
+		refused := callEnvDExpectError(t, ctx, session, "remote_envd__edit", map[string]interface{}{
+			"file_path": "secrets.env", "old_string": "abc123", "new_string": "leaked",
+		})
+		if !strings.Contains(refused, "permission denied reading") {
+			t.Fatalf("edit refusal = %q", refused)
+		}
+		if stub.readableChecks.Load() == before {
+			t.Fatal("edit did not ask the target kernel before reading")
+		}
+		if landed, ok := stub.content("/srv/app/secrets.env"); !ok || landed != secret {
+			t.Fatalf("the gated edit changed the file: %q", landed)
+		}
+	})
+
+	t.Run("apply_patch", func(t *testing.T) {
+		stub, session, ctx := setup(t)
+		patch := "*** Begin Patch\n*** Update File: secrets.env\n@@\n-hash: abc123\n+hash: leaked\n*** End Patch\n"
+		refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
+			"patch": patch,
+		})
+		if !strings.Contains(refused, "permission denied reading") {
+			t.Fatalf("apply_patch refusal = %q, want the read gate to stop the hunk", refused)
+		}
+		if landed, ok := stub.content("/srv/app/secrets.env"); !ok || landed != secret {
+			t.Fatalf("the gated patch changed the file: %q", landed)
+		}
+	})
+}
+
 // A refusal about the file must not be re-asked through the other channel: two
 // channels answering the same question differently is how a real error becomes a
 // surprising empty result.

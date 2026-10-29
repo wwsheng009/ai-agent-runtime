@@ -56,11 +56,12 @@ func main() {
 	grepCap := flag.Int("grep-cap-bytes", 512, "per-call payload cap used to prove early stop")
 	writePath := flag.String("write-path", "", "absolute target path to write for the fidelity check (removed afterwards)")
 	forbiddenPath := flag.String("forbidden-path", "", "absolute target path the user may not write but the daemon can")
+	editPath := flag.String("edit-path", "", "absolute target path used for the edit/apply_patch round trip (removed afterwards)")
 	flag.Parse()
 
 	token := strings.TrimSpace(os.Getenv(*tokenEnv))
-	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" || *grepPath == "" || *writePath == "" {
-		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable, -secret, -grep-path and -write-path are required"))
+	if *server == "" || *addr == "" || *workspace == "" || *readable == "" || *secret == "" || *grepPath == "" || *writePath == "" || *editPath == "" {
+		fail("usage", fmt.Errorf("-server, -addr, -workspace, -readable, -secret, -grep-path, -write-path and -edit-path are required"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -169,6 +170,37 @@ func main() {
 		}
 		fmt.Printf("PASS write gate: %s refused (%v)\n", *forbiddenPath, refusalErr)
 	}
+
+	// edit and apply_patch now read through the same guarded channel `view` uses,
+	// so prove the round trip on the real daemon: a small file, edited and patched,
+	// verified by reading the target's disk directly rather than through our tools.
+	const seeded = "alpha\nbeta\n"
+	if _, err := written.call(ctx, *prefix+"__write", map[string]interface{}{
+		"path": *editPath, "content": seeded,
+	}); err != nil {
+		fail("seed the edit fixture", err)
+	}
+	defer func() { _ = os.Remove(*editPath) }()
+	if _, err := written.call(ctx, *prefix+"__edit", map[string]interface{}{
+		"file_path": *editPath, "old_string": "beta", "new_string": "gamma",
+	}); err != nil {
+		fail("edit through the guarded read", err)
+	}
+	if after, readErr := os.ReadFile(*editPath); readErr != nil || string(after) != "alpha\ngamma\n" {
+		fail("edit fidelity", fmt.Errorf("disk holds %q (%v)", string(after), readErr))
+	}
+	fmt.Printf("PASS edit through the guarded read: disk holds %q\n", "alpha\ngamma\n")
+
+	if _, err := written.call(ctx, *prefix+"__apply_patch", map[string]interface{}{
+		"patch": "*** Begin Patch\n*** Update File: " + strings.TrimPrefix(*editPath, *workspace+"/") +
+			"\n@@\n-gamma\n+delta\n*** End Patch\n",
+	}); err != nil {
+		fail("apply_patch through the guarded read", err)
+	}
+	if after, readErr := os.ReadFile(*editPath); readErr != nil || string(after) != "alpha\ndelta\n" {
+		fail("apply_patch fidelity", fmt.Errorf("disk holds %q (%v)", string(after), readErr))
+	}
+	fmt.Printf("PASS apply_patch through the guarded read: disk holds %q\n", "alpha\ndelta\n")
 	written.close()
 
 	fmt.Println("ALL CHECKS PASSED")

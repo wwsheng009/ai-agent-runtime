@@ -70,12 +70,12 @@ func (be *envdBackend) load(ctx context.Context, target string, maxBytes int64) 
 			"max_file_bytes": maxBytes,
 		}, "file size %d exceeds limit %d: %s (split the file or raise the configured limit)", size, maxBytes, target)
 	}
-	stdout, stderr, code, err := be.run(ctx, "/bin/cat", []string{target})
-	if err != nil {
-		return nil, envdErrorResult("read %s: %v", target, err)
-	}
-	if code != 0 {
-		return nil, envdErrorResult("read %s failed (exit %d): %s", target, code, strings.TrimSpace(string(stderr)))
+	// One guarded read, so `edit` and `apply_patch` ask the same permission question
+	// `view` does: the native channel serves bytes as the daemon user, and a read
+	// that skips the gate is a privilege difference no tool name justifies.
+	stdout, _, _, refusal := be.readGuarded(ctx, target, entry, maxBytes)
+	if refusal != nil {
+		return nil, refusal
 	}
 	state.exists = true
 	state.size = size

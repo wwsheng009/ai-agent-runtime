@@ -960,13 +960,9 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 	if size := entry.SizeBytes(); size > int64(limit) {
 		return envdErrorResult("%s is %d bytes, above the %d byte view limit; read it with a narrower tool or shell", target, size, limit), nil
 	}
-	if refusal := be.refuseIfTargetCannotRead(ctx, target, entry); refusal != nil {
+	data, channel, note, refusal := be.readGuarded(ctx, target, entry, int64(limit))
+	if refusal != nil {
 		return refusal, nil
-	}
-
-	data, channel, note, readErr := be.readLimited(ctx, target, int64(limit))
-	if readErr != nil {
-		return envdErrorResult("%s", readErr.Error()), nil
 	}
 	result := envdTextResult(string(data))
 	metadata := map[string]interface{}{"read_channel": channel}
@@ -1020,6 +1016,25 @@ func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target stri
 	return envdFailureMeta(CodeInvalidArgument, map[string]interface{}{
 		"file_path": target,
 	}, "permission denied reading %s: user %s cannot open it (%s %s:%s; %s)", target, be.client.User(), entry.Permissions, owner, group, detail)
+}
+
+// readGuarded is the only way a tool core gets file bytes: it applies the
+// target-user readability gate and then reads through the preferred channel.
+//
+// Keeping the gate inside the read - rather than in each caller - is the point.
+// `view` remembered to check permission; `edit` and `apply_patch` read the same
+// file through the same backend and did not, which is exactly how a privilege
+// asymmetry gets reintroduced one tool at a time. A refusal is returned, not an
+// error, because it is a described answer for the model rather than a failure.
+func (be *envdBackend) readGuarded(ctx context.Context, target string, entry envdclient.Entry, maxBytes int64) ([]byte, string, string, *toolkit.ToolResult) {
+	if refusal := be.refuseIfTargetCannotRead(ctx, target, entry); refusal != nil {
+		return nil, "", "", refusal
+	}
+	data, channel, note, err := be.readLimited(ctx, target, maxBytes)
+	if err != nil {
+		return nil, channel, note, envdErrorResult("%s", err.Error())
+	}
+	return data, channel, note, nil
 }
 
 // readLimited fetches at most maxBytes of one file, preferring the native
