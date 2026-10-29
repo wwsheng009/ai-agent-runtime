@@ -458,6 +458,11 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 
 ### Phase 2.5a —— seam 骨架 + 只读核搬家（风险最低，先建结构）
 
+> ✅ **已落地（`fd8c32c5`，读侧）**，验收门全达标：view/ls 既有单测一字未改通过、`os.*` 在 viewcore/lscore 归零、棘轮已下调锁死。
+> **与本文原稿的三处不同（务必先读 §13 的"Phase 2.5a 落地"再施工）**：读侧形态是句柄式 `Open` 而非 `Read(...) ([]byte, error)`（流式读不能被换成整读进内存）；写侧四个方法刻意未声明（等 3.5a 的消费者）；`Resolve/Relative` 不进 `Access`（`Paths()/Permissions()` 已是唯一入口）。
+> **本段还查出一条守卫盲点**：`filepath.WalkDir` 不被 `os.*` 计数看见，因此"lscore = 0"不等于后端无关；已补 `WalkerStyleCallCounts` 棘轮，2.5b 必须把它一并降到 0。
+> 未交付项：`Capability`/`RandomAccessor`/`Reviser`（原稿列在本段，实际都等到各自消费者出现才声明——见 §13 剩余项）。注入面**已**落地，但形态是 `toolcore.FileAccessProvider.FileAccess()` + `localio.For(runtime)`，不是原稿的 `AccessProvider`：把"未实现即取本地默认"的解析放在 `toolcore` 会形成 `toolcore → localio → toolcore` 的包环，放在 `localio` 才既保住构造性等价，又让默认值只有一处定义。
+
 - 交付：
   1. `toolcore/access.go`：`Access`/`Capability`/`RandomAccessor`/`Reviser` + `AccessProvider` 可选扩展；
   2. `toolcore/localio/access.go`：把 `viewcore`（5 处）与 `lscore`（1 处）的 `os.*` **原样搬入**，语义零变化；
@@ -716,6 +721,16 @@ socket 早停仅作日志证据，不作断言。
 的值来自 `ProbeCapabilities` 的实测而非版本判断。两条来自实现期的约束应写进接口
 契约：偏移读的 `416` **绝不退化为全量读**（为 16 字节拉回 5 GB 不是优化而是事故），
 且 `Partial` 必须相对窗口末尾而非窗口长度判定——两者写反都是静默错误。
+
+**Phase 2.5a 落地（`fd8c32c5`）**：`toolcore.Access` 读侧 seam 建成，viewcore/lscore 的宿主 I/O 归零。三条实施期的判断与原方案不同，记此以免下一段仍照原稿施工：
+
+1. **没有采用 `Read(...) ([]byte, error)`**。`viewcore` 的读是流式的（探 BOM、按行开窗、按预算停），换成"整读进内存再开窗"是一次**隐形回归**——尺寸门和预算都还在，变的是内存曲线。落地形态是句柄式 `Open(ctx, path) (FileHandle, error)`，`FileHandle = Read + Seek + Stat + Close`；并且词汇直接用 `io/fs`（`fs.FileInfo`/`fs.DirEntry`），于是 `*os.File` 天然满足接口、local 侧一行包装都不用写——"搬家"这个词因此才可检验（测试用 `file.(*os.File)` 断言钉住，防止后来者顺手加一层 adapter）。
+2. **只搬读侧**。`Write/MkdirAll/Remove/Rename` 留给 3.5a 的真实消费者；`Resolve/Relative` **不进** `Access`，因为路径身份已有 `Paths()/Permissions()` 这条唯一入口（§4.1 纪律 1），再包一层等于给同一个路径问题设第二套权威。`RandomAccessor` 同样刻意留到它与 `Client.ReadRange` 相接的那一刻。
+3. **`os.IsNotExist` 收敛为 `toolcore.IsNotExist`**，并留 `NotExistError` 作为远程后端的汇入点。分类只能有一个入口，且**权限错误永远不得被判成"不存在"**——否则工具会对着一个就在眼前的文件让模型"去确认路径"。真机之外还有一道本地证据：注入的 accessor 声称不存在、而磁盘上确实有同名文件时，核必须听 accessor 的。
+
+**顺带查出一条守卫盲点（同笔提交已修）**：`FilesystemCallCounts` 只匹配 `os` 这个选择器包，而 `lscore` 的目录遍历走 `filepath.WalkDir`——同样只描述本机，却不被计数。只留下"lscore = 0"会让人误读成"该核已与后端无关"。现在 `WalkerStyleCallCounts` 把这类调用一并棘轮化（viewcore 0 / lscore 1 / searchcore 4 / mutatecore 1，与 grep 的独立测量一致）；`fs.WalkDir` 刻意不数——是否触盘取决于传入的 `fs.FS`，从调用点判定不了，这种情形该写进评审说明而不是让计数器猜。**2.5b 让 `ls` 走 `Access.ReadDir` 时这条计数必须一起降到 0，否则"seam 已落地"是假的。**
+
+**验收证据**：view/ls 既有单测**一字未改**通过；新增注入测试 6 项（accessor 提供磁盘上根本不存在的文件、目录、NUL 嗅探，并断言 handler 关闭了句柄——远程句柄是一条活连接，泄漏在纯本地对拍里永远看不见）；反向验证 = 把 `localio.For` 改成忽略注入 → 恰好这 6 项红、旧测试仍绿；真机 envd 0.2.11 工具层 15 项 + E0 偏移 8 项全 PASS，其中"60000 行深偏移与本地核逐字节一致"走的正是本笔改造的共享核。
 
 **剩余项（按价值/风险排序）：**
 
