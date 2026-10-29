@@ -57,7 +57,7 @@ security:
 
 ```yaml
 security:
-  # 只有来自这些地址的 X-Forwarded-For / X-Real-IP 才可信；
+  # 只有来自这些地址的 CF-Connecting-IP / X-Forwarded-For / X-Real-IP 才可信；
   # 不匹配则使用 socket 对端地址（防伪造 IP 绕过限流/封禁）。
   trusted_proxies:
     - "127.0.0.1/32"

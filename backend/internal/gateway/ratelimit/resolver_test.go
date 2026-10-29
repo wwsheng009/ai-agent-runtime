@@ -50,3 +50,21 @@ func TestResolverBareIPTrust(t *testing.T) {
 		t.Fatalf("bare IP trust failed: %q", got)
 	}
 }
+
+func TestResolverPrefersCloudflareConnectingIP(t *testing.T) {
+	resolver := NewResolver([]string{"127.0.0.1/32"})
+	req := resolverRequest("127.0.0.1:5555", "172.71.183.33", "")
+	req.Header.Set("CF-Connecting-IP", "198.51.100.42")
+	if got := resolver.ClientIP(req); got != "198.51.100.42" {
+		t.Fatalf("ClientIP = %q, want the CF-Connecting-IP client", got)
+	}
+}
+
+func TestResolverIgnoresCloudflareHeaderFromUntrusted(t *testing.T) {
+	resolver := NewResolver([]string{"127.0.0.1/32"})
+	req := resolverRequest("198.51.100.9:5555", "", "")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
+	if got := resolver.ClientIP(req); got != "198.51.100.9" {
+		t.Fatalf("ClientIP = %q, want the socket peer", got)
+	}
+}

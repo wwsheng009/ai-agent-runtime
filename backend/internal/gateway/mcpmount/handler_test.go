@@ -256,3 +256,116 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 		t.Fatalf("error = %q, want %q", payload["error"], code)
 	}
 }
+
+func TestHandlerLogsCommandAndSizes(t *testing.T) {
+	f := newFixture(t, nil)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/x"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/m/k7f3qz2a/mcp", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+f.plaintext)
+	req.Header.Set("User-Agent", "mcp-client/2.3")
+	rec := httptest.NewRecorder()
+	f.handler.ServeMount(rec, req, "k7f3qz2a", "/mcp")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var got Event
+	if evs := *f.events; len(evs) != 1 {
+		t.Fatalf("events = %d, want 1", len(evs))
+	} else {
+		got = evs[0]
+	}
+	if got.Command != "tools/call:read_file" {
+		t.Fatalf("Command = %q, want tools/call:read_file", got.Command)
+	}
+	if got.UserAgent != "mcp-client/2.3" {
+		t.Fatalf("UserAgent = %q", got.UserAgent)
+	}
+	if got.RequestBytes != int64(len(body)) {
+		t.Fatalf("RequestBytes = %d, want %d", got.RequestBytes, len(body))
+	}
+	// fakeProxy writes "proxied" (7 bytes) to the recorder.
+	if got.ResponseBytes != 7 {
+		t.Fatalf("ResponseBytes = %d, want 7", got.ResponseBytes)
+	}
+}
+
+// TestHandlerUsesClientIPResolver proves the call log records the effective
+// client IP resolved through a trusted proxy instead of the raw socket peer.
+func TestHandlerUsesClientIPResolver(t *testing.T) {
+	f := newFixture(t, func(cfg *HandlerConfig) {
+		cfg.ClientIP = func(r *http.Request) string {
+			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+				return strings.TrimSpace(strings.Split(xff, ",")[0])
+			}
+			return "127.0.0.1"
+		}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/m/k7f3qz2a/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req.Header.Set("Authorization", "Bearer "+f.plaintext)
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+	rec := httptest.NewRecorder()
+	f.handler.ServeMount(rec, req, "k7f3qz2a", "/mcp")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	evs := *f.events
+	if len(evs) != 1 {
+		t.Fatalf("events = %d, want 1", len(evs))
+	}
+	if evs[0].RemoteAddr != "203.0.113.9" {
+		t.Fatalf("RemoteAddr = %q, want the resolved client IP", evs[0].RemoteAddr)
+	}
+}
+
+// TestHandlerClassifiesStatelessSSEProbe pins the MCP Streamable HTTP
+// negotiation: a GET 405 means the server does not offer the optional
+// standalone SSE stream, so it is tagged sse_unavailable rather than looking
+// like an arbitrary failure. A POST 405 keeps its empty reason.
+func TestHandlerClassifiesStatelessSSEProbe(t *testing.T) {
+	f := newFixture(t, nil)
+	f.proxy.status = http.StatusMethodNotAllowed
+	rec := f.request(t, http.MethodGet, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	evs := *f.events
+	if len(evs) != 1 {
+		t.Fatalf("events = %d, want 1", len(evs))
+	}
+	if evs[0].Reason != "sse_unavailable" {
+		t.Fatalf("GET 405 Reason = %q, want sse_unavailable", evs[0].Reason)
+	}
+
+	// A POST 405 is a genuine method error, not an SSE probe.
+	f2 := newFixture(t, nil)
+	f2.proxy.status = http.StatusMethodNotAllowed
+	rec2 := f2.request(t, http.MethodPost, "/m/k7f3qz2a/mcp", f2.plaintext, "k7f3qz2a", "/mcp")
+	if rec2.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec2.Code)
+	}
+	if got := (*f2.events)[0].Reason; got != "" {
+		t.Fatalf("POST 405 Reason = %q, want empty", got)
+	}
+}
+
+func TestExtractMCPCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"tools call", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ls"}}`, "tools/call:ls"},
+		{"notification", `{"jsonrpc":"2.0","method":"notifications/message","params":{}}`, "notifications/message"},
+		{"response frame", `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`, "response"},
+		{"batch", `[{"method":"tools/call","params":{"name":"a"}},{"method":"ping"}]`, "tools/call:a, ping"},
+		{"non json", `not-json`, ""},
+		{"empty", ``, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := extractMCPCommand([]byte(c.body)); got != c.want {
+				t.Fatalf("extractMCPCommand(%q) = %q, want %q", c.body, got, c.want)
+			}
+		})
+	}
+}

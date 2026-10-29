@@ -95,6 +95,67 @@ func TestMountRecentLogsRingFiltersAndLimits(t *testing.T) {
 	}
 }
 
+// TestMountLogEntrySerializesNewFields proves the console call log (the
+// in-memory ring surfaced through /api/mounts/logs) carries the MCP command,
+// caller User-Agent and request/response sizes end-to-end from the event.
+func TestMountLogEntrySerializesNewFields(t *testing.T) {
+	manager := &mountManager{reqLogMax: 100}
+	manager.observe(mcpmount.Event{
+		Slug:          "aaaaaaaa",
+		NodeID:        "node-a",
+		TokenID:       "tok-123",
+		Method:        "POST",
+		Path:          "/mcp",
+		Status:        200,
+		Duration:      9 * time.Millisecond,
+		RemoteAddr:    "203.0.113.7:55555",
+		Command:       "tools/call:read_file",
+		UserAgent:     "mcp-client/3.1",
+		RequestBytes:  512,
+		ResponseBytes: 2048,
+	})
+
+	rec := httptest.NewRecorder()
+	manager.handleLogs(rec, httptest.NewRequest(
+		http.MethodGet, "/api/mounts/logs?slug=aaaaaaaa&limit=10", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleLogs = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Entries []mountLogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(body.Entries))
+	}
+	e := body.Entries[0]
+	if e.Command != "tools/call:read_file" {
+		t.Fatalf("command = %q", e.Command)
+	}
+	if e.UserAgent != "mcp-client/3.1" {
+		t.Fatalf("user_agent = %q", e.UserAgent)
+	}
+	if e.RequestBytes != 512 {
+		t.Fatalf("request_bytes = %d, want 512", e.RequestBytes)
+	}
+	if e.ResponseBytes != 2048 {
+		t.Fatalf("response_bytes = %d, want 2048", e.ResponseBytes)
+	}
+	if e.RemoteAddr != "203.0.113.7" {
+		t.Fatalf("remote_addr = %q, want host only", e.RemoteAddr)
+	}
+
+	// The JSON wire form must use the documented keys.
+	raw := rec.Body.String()
+	for _, key := range []string{"\"command\"", "\"user_agent\"", "\"request_bytes\"", "\"response_bytes\""} {
+		if !strings.Contains(raw, key) {
+			t.Fatalf("serialized log missing %s in: %s", key, raw)
+		}
+	}
+}
+
 func TestMountTokenIssueTTLAndNever(t *testing.T) {
 	dir := t.TempDir()
 	registry, err := mcpmount.OpenRegistry(filepath.Join(dir, "mounts.json"))

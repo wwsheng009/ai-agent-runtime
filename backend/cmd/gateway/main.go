@@ -570,6 +570,7 @@ func run() int {
 		*mountTokenTTL,
 		server,
 		server.HasSession,
+		resolver.ClientIP,
 		&metrics,
 		auditLog,
 		func(format string, args ...any) {

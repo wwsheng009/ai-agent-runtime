@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// Resolver resolves the effective client IP. X-Forwarded-For / X-Real-IP are
-// honored only when the request comes from a trusted proxy, so an untrusted
-// client cannot spoof its IP to bypass rate limiting or bans
+// Resolver resolves the effective client IP. X-Forwarded-For / X-Real-IP /
+// CF-Connecting-IP are honored only when the request comes from a trusted proxy,
+// so an untrusted client cannot spoof its IP to bypass rate limiting or bans
 // (docs/gateway/09-edge-hardening.md §4).
 type Resolver struct {
 	trusted []*net.IPNet
@@ -65,6 +65,14 @@ func (r *Resolver) ClientIP(req *http.Request) string {
 	remoteIP := net.ParseIP(remoteHost)
 	if !r.trustedRemote(remoteIP) {
 		return remoteHost
+	}
+	// Cloudflare's CF-Connecting-IP carries the true client address when the
+	// origin sits behind the Cloudflare edge. Prefer it over X-Forwarded-For,
+	// whose first hop is often the edge/proxy rather than the caller.
+	if cf := strings.TrimSpace(req.Header.Get("CF-Connecting-IP")); cf != "" {
+		if net.ParseIP(cf) != nil {
+			return cf
+		}
 	}
 	if xff := strings.TrimSpace(req.Header.Get("X-Forwarded-For")); xff != "" {
 		first := strings.TrimSpace(strings.Split(xff, ",")[0])

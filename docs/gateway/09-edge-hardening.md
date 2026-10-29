@@ -94,7 +94,7 @@ security:
 
 ## 4. 客户端 IP 与可信代理（L0）
 
-- **只在来源可信时**才使用 `X-Forwarded-For` / `X-Real-IP`；否则一律用 socket 对端地址。
+- **只在来源可信时**才使用 `CF-Connecting-IP`（Cloudflare，优先）/ `X-Forwarded-For` / `X-Real-IP`；否则一律用 socket 对端地址。
 - 配置 `security.trusted_proxies`（CIDR 列表，默认 `127.0.0.1/32`、`::1/128`）；不匹配则忽略转发头。
 - 安全模块使用**独立的** client IP 解析（与业务日志分离），避免不同模块口径不一致（外部项目经验）。
 - **风险**：若错误信任 XFF，攻击者可伪造 IP 绕过限流/封禁；文档与测试都要钉住"不可信来源不信任 XFF"。

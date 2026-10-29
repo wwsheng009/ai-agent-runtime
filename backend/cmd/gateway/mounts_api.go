@@ -57,6 +57,13 @@ type mountLogEntry struct {
 	Reason     string    `json:"reason,omitempty"`
 	DurationMS int64     `json:"duration_ms"`
 	RemoteAddr string    `json:"remote_addr,omitempty"`
+	// Command is the MCP method parsed from the request (e.g. tools/call:read_file).
+	Command string `json:"command,omitempty"`
+	// UserAgent is the caller's User-Agent header.
+	UserAgent string `json:"user_agent,omitempty"`
+	// RequestBytes / ResponseBytes are the proxied payload sizes (best-effort).
+	RequestBytes  int64 `json:"request_bytes,omitempty"`
+	ResponseBytes int64 `json:"response_bytes,omitempty"`
 }
 
 // newMountManager opens the persisted state and builds the public handler.
@@ -67,6 +74,7 @@ func newMountManager(
 	tokenTTL time.Duration,
 	proxy mcpmount.Proxy,
 	nodeLive func(string) bool,
+	clientIP func(*http.Request) string,
 	metrics *gatewayMetrics,
 	auditLog *audit.Log,
 	logf func(format string, args ...any),
@@ -98,6 +106,7 @@ func newMountManager(
 		Tokens:   tokens.TokenStore,
 		Proxy:    proxy,
 		NodeLive: nodeLive,
+		ClientIP: clientIP,
 		OnEvent:  manager.observe,
 	})
 	return manager, nil
@@ -121,23 +130,36 @@ func (m *mountManager) observe(event mcpmount.Event) {
 		Type:   audit.TypeMountRequest,
 		Result: event.Reason,
 		IP:     remoteHost(event.RemoteAddr),
-		Detail: fmt.Sprintf("%s %s %s -> %d", event.Slug, event.Method, event.Path, event.Status),
+		Detail: fmt.Sprintf("%s %s %s -> %d%s", event.Slug, event.Method, event.Path, event.Status, mcpCommandSuffix(event.Command)),
 	})
+}
+
+// mcpCommandSuffix renders the MCP command into the audit detail only when one
+// was parsed, keeping security-event lines concise otherwise.
+func mcpCommandSuffix(command string) string {
+	if command == "" {
+		return ""
+	}
+	return " " + command
 }
 
 // recordRequest appends one observation to the in-memory ring.
 func (m *mountManager) recordRequest(event mcpmount.Event) {
 	entry := mountLogEntry{
-		Time:       time.Now().UTC(),
-		Slug:       event.Slug,
-		NodeID:     event.NodeID,
-		TokenID:    event.TokenID,
-		Method:     event.Method,
-		Path:       event.Path,
-		Status:     event.Status,
-		Reason:     event.Reason,
-		DurationMS: event.Duration.Milliseconds(),
-		RemoteAddr: remoteHost(event.RemoteAddr),
+		Time:          time.Now().UTC(),
+		Slug:          event.Slug,
+		NodeID:        event.NodeID,
+		TokenID:       event.TokenID,
+		Method:        event.Method,
+		Path:          event.Path,
+		Status:        event.Status,
+		Reason:        event.Reason,
+		DurationMS:    event.Duration.Milliseconds(),
+		RemoteAddr:    remoteHost(event.RemoteAddr),
+		Command:       event.Command,
+		UserAgent:     event.UserAgent,
+		RequestBytes:  event.RequestBytes,
+		ResponseBytes: event.ResponseBytes,
 	}
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
