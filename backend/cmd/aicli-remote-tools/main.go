@@ -1,8 +1,9 @@
 // Command aicli-remote-tools is the target-side half of the aicli remote tools
 // design (docs/plan/aicli-remote-tools-ssh-http-design-20261021.md).
 //
-// It exposes a read-only tool surface (view/ls/glob/grep) as an MCP server over
-// one of two transports:
+// It exposes the configured tool surface (core read/write/shell tools plus
+// explicitly enabled optional tools) as an MCP server over one of two
+// transports:
 //
 //	aicli-remote-tools serve --stdio     # launched per connection by sshd
 //	aicli-remote-tools serve --http      # long-lived daemon, loopback by default
@@ -79,27 +80,31 @@ func (s *stringListFlag) Set(value string) error {
 
 // serveFlags is the flag set shared by serve/doctor/tools.
 type serveFlags struct {
-	configPath    string
-	configB64     string
-	configSource  string
-	workspace     string
-	allowedRoots  string
-	profile       string
-	toolPrefix    string
-	tools         string
-	targetName    string
-	descStyle     string
-	shell         string
-	maxOutput     int
-	maxBytes      int
-	auditPath     string
-	auditPreview  int
-	jobsRoot      string
-	legacyJobs    bool
-	artifactRoot  string
-	artifactMax   int
-	allowPatterns string
-	denyPatterns  string
+	configPath          string
+	configB64           string
+	configSource        string
+	workspace           string
+	allowedRoots        string
+	profile             string
+	toolPrefix          string
+	tools               string
+	optionalTools       string
+	network             bool
+	networkAllowedHosts string
+	networkDeniedHosts  string
+	targetName          string
+	descStyle           string
+	shell               string
+	maxOutput           int
+	maxBytes            int
+	auditPath           string
+	auditPreview        int
+	jobsRoot            string
+	legacyJobs          bool
+	artifactRoot        string
+	artifactMax         int
+	allowPatterns       string
+	denyPatterns        string
 
 	backend      string
 	envdAddr     string
@@ -231,6 +236,10 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.profile, "profile", "", "all|readonly|standard|ops|custom")
 	fs.StringVar(&flags.toolPrefix, "tool-prefix", "", "prefix for every exposed tool name")
 	fs.StringVar(&flags.tools, "tools", "", "comma-separated tool allowlist")
+	fs.StringVar(&flags.optionalTools, "optional-tools", "", "comma-separated optional tools (multiedit|download|fetch|sourcegraph|*)")
+	fs.BoolVar(&flags.network, "network", false, "enable outbound network tools")
+	fs.StringVar(&flags.networkAllowedHosts, "network-allowed-hosts", "", "comma-separated outbound host allowlist")
+	fs.StringVar(&flags.networkDeniedHosts, "network-denied-hosts", "", "comma-separated outbound host denylist")
 	fs.StringVar(&flags.targetName, "target-name", "", "label for descriptions and audit")
 	fs.StringVar(&flags.descStyle, "description-style", "", "compact|explicit")
 	fs.StringVar(&flags.shell, "shell", "", "shell executable for shell/job_start (default: pwsh > powershell > cmd on Windows; $SHELL > zsh > bash > sh elsewhere)")
@@ -336,6 +345,18 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.tools != "" {
 		cfg.Tools = splitList(flags.tools)
+	}
+	if flags.optionalTools != "" {
+		cfg.OptionalTools.Enabled = splitList(flags.optionalTools)
+	}
+	if flags.network {
+		cfg.Network.Enabled = true
+	}
+	if flags.networkAllowedHosts != "" {
+		cfg.Network.AllowedHosts = splitList(flags.networkAllowedHosts)
+	}
+	if flags.networkDeniedHosts != "" {
+		cfg.Network.DeniedHosts = splitList(flags.networkDeniedHosts)
 	}
 	if flags.targetName != "" {
 		cfg.TargetName = flags.targetName
@@ -600,6 +621,10 @@ type doctorReport struct {
 	JobsRoot               string   `json:"jobsRoot,omitempty"`
 	JobsWritable           bool     `json:"jobsWritable"`
 	LegacyRemoteJobs       bool     `json:"legacyRemoteJobs"`
+	OptionalTools          []string `json:"optionalTools,omitempty"`
+	NetworkEnabled         bool     `json:"networkEnabled"`
+	NetworkAllowedHosts    []string `json:"networkAllowedHosts,omitempty"`
+	NetworkDeniedHosts     []string `json:"networkDeniedHosts,omitempty"`
 	ArtifactsRoot          string   `json:"artifactsRoot,omitempty"`
 	ArtifactsWritable      bool     `json:"artifactsWritable"`
 	ShellVisible           bool     `json:"shellVisible"`
@@ -678,6 +703,10 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		AuditPreviewBytes:      cfg.Audit.CommandPreviewBytes,
 		JobsRoot:               cfg.Jobs.Root,
 		LegacyRemoteJobs:       cfg.Jobs.LegacyRemoteJobs,
+		OptionalTools:          cfg.OptionalToolNames(),
+		NetworkEnabled:         cfg.Network.Enabled,
+		NetworkAllowedHosts:    append([]string(nil), cfg.Network.AllowedHosts...),
+		NetworkDeniedHosts:     append([]string(nil), cfg.Network.DeniedHosts...),
 		ArtifactsRoot:          cfg.Artifacts.Root,
 		ShellVisible:           cfg.ShellExposed(),
 		AllowAll:               shellAllowsAll(cfg.Shell),
@@ -812,6 +841,9 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  audit preview    : %d bytes\n", report.AuditPreviewBytes)
 	fmt.Fprintf(os.Stdout, "  jobs root        : %s (writable=%v)\n", orDash(report.JobsRoot), report.JobsWritable)
 	fmt.Fprintf(os.Stdout, "  legacy jobs      : %v (local-only v1 capability)\n", report.LegacyRemoteJobs)
+	fmt.Fprintf(os.Stdout, "  optional tools   : %s\n", orDash(strings.Join(report.OptionalTools, ", ")))
+	fmt.Fprintf(os.Stdout, "  network          : %v (allowed=%s denied=%s)\n",
+		report.NetworkEnabled, orDash(strings.Join(report.NetworkAllowedHosts, ", ")), orDash(strings.Join(report.NetworkDeniedHosts, ", ")))
 	fmt.Fprintf(os.Stdout, "  artifacts root   : %s (writable=%v)\n", orDash(report.ArtifactsRoot), report.ArtifactsWritable)
 	fmt.Fprintf(os.Stdout, "  http listen      : %s (token set=%v len=%d)\n",
 		report.HTTPListen, report.HTTPTokenSet, report.HTTPTokenLength)

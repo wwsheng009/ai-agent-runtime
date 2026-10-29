@@ -49,6 +49,13 @@ func (s *Server) httpBannerLines(addr string) []string {
 	if s.cfg.Backend == BackendLocal && s.cfg.ShellExposed() {
 		lines = append(lines, "  shell    : "+shellLabel(s.cfg.ResolvedShell))
 	}
+	if s.cfg.Network.Enabled {
+		allowed := "any host"
+		if len(s.cfg.Network.AllowedHosts) > 0 {
+			allowed = strings.Join(s.cfg.Network.AllowedHosts, ", ")
+		}
+		lines = append(lines, "  network  : enabled (allowed hosts: "+allowed+")")
+	}
 	if s.cfg.Gateway.Instance != "" {
 		lines = append(lines, "  instance : "+s.cfg.Gateway.Instance)
 		if strings.TrimSpace(s.cfg.Gateway.IdentityFile) != "" {

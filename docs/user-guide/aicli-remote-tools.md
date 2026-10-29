@@ -352,6 +352,7 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 - `job_*` 是能力门控的工具：需要 `jobs.root` 非空，并通过 `legacyRemoteJobs: true`（或 `--legacy-jobs`）构造 job manager；v1 默认把后台任务视为本地能力。满足这些条件后，默认的 `all` 会再增加 `job_start` `job_output` `job_cancel` `job_list` 四个工具，总数变为 14。
 - `artifacts.root` 非空时，追加 `artifact_read`（用于取回被折叠的完整输出）。
 - `tools:` 非空时是**最终白名单**，不能扩大 profile；`custom` 必须显式列出工具，`job_*`/`artifact_read` 也要列入才可见。
+- 可选工具默认不暴露；需要通过 `optionalTools.enabled`（或 `tools:`）显式开启，且仍受 profile/network 门控，见 §5.4。
 
 ### 5.2 工具名前缀
 
@@ -379,6 +380,60 @@ remote_srv__shell
 aicli-remote-tools tools --config /etc/aicli/remote.yaml
 # 或 MCP 层：tools/list
 ```
+
+### 5.4 可选工具与 profile/配置门控
+
+`remote-tools` 直接复用 `internal/toolkit/tools` 的现有实现，不复制工具逻辑。默认不开启下列工具：
+
+| 可选工具 | 最低 profile | 额外条件 | 说明 |
+|---|---|---|---|
+| `multiedit` | `standard` | 无 | 复用现有批量编辑实现 |
+| `download` | `standard` | `network.enabled: true` | 复用现有下载实现，目标路径仍受 workspace jail |
+| `fetch` | `ops` | `network.enabled: true` | 复用现有 URL 内容获取实现 |
+| `sourcegraph` | `ops` | `network.enabled: true` | 复用现有 Sourcegraph 搜索实现 |
+
+显式开启全部可选工具：
+
+```yaml
+profile: ops
+optionalTools:
+  enabled: ["*"]
+network:
+  enabled: true
+  allowedHosts:
+    - sourcegraph.com
+    - example.com
+  deniedHosts: []
+```
+
+只开启部分工具：
+
+```yaml
+profile: all
+optionalTools:
+  enabled: [multiedit, fetch]
+network:
+  enabled: true
+```
+
+也可以用命令行：
+
+```powershell
+aicli-remote-tools serve --profile ops `
+  --optional-tools "*" `
+  --network `
+  --network-allowed-hosts "sourcegraph.com,example.com"
+```
+
+门控顺序：
+
+1. `optionalTools.enabled` 或 `tools:` 必须点名该工具；`*` 表示所有可选工具；
+2. profile 必须达到该工具的最低档位；
+3. 网络工具还要求 `network.enabled: true`；
+4. `readOnly: true` 会移除所有可选工具；
+5. `tools:` 非空时再做最终白名单收窄。
+
+`network.allowedHosts` 为空时，启用网络后允许任意主机；生产目标建议显式配置 allowlist。网络工具目前只支持本地 backend；envd backend 不会暴露这些依赖 bridge 本机进程的实现。
 
 ---
 

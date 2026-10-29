@@ -33,15 +33,26 @@ func NewSandbox(cfg *Config, workspace *Workspace) (*Sandbox, error) {
 		return nil, err
 	}
 	sandboxConfig := runtimeexecutor.SandboxConfig{
-		Enabled:       true,
-		AllowedPaths:  workspace.AllowedRoots(),
-		DeniedPaths:   nil,
-		ReadOnlyPaths: nil,
+		Enabled:      true,
+		AllowedPaths: workspace.AllowedRoots(),
+		BlockNetwork: !cfg.Network.Enabled,
+		AllowedHosts: append([]string(nil), cfg.Network.AllowedHosts...),
+		DeniedHosts:  append([]string(nil), cfg.Network.DeniedHosts...),
 	}
 	return &Sandbox{
 		inner:    runtimeexecutor.NewSandbox(&sandboxConfig),
 		commands: commands,
 	}, nil
+}
+
+// ExecutorSandbox exposes the shared executor sandbox to optional tools that
+// already implement their own path/network checks. It is the same object the
+// remote core uses, so optional tools cannot grow a second policy.
+func (s *Sandbox) ExecutorSandbox() *runtimeexecutor.Sandbox {
+	if s == nil {
+		return nil
+	}
+	return s.inner
 }
 
 // CheckPath validates one already-resolved absolute path for an operation.

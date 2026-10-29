@@ -740,6 +740,13 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		return nil, fmt.Errorf("artifact_read handler: %w", err)
 	}
 	candidates = append(candidates, registration{name: ToolArtifactRead, tool: artifactTool})
+	optionalTools, err := buildOptionalTools(cfg, workspace, sandbox)
+	if err != nil {
+		return nil, err
+	}
+	for _, tool := range optionalTools {
+		candidates = append(candidates, registration{name: tool.Name(), tool: tool})
+	}
 
 	for _, candidate := range candidates {
 		if !enabled[candidate.name] {

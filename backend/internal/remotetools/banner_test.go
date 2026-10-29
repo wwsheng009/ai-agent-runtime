@@ -67,6 +67,23 @@ func TestHTTPBannerShowsResolvedShell(t *testing.T) {
 	}
 }
 
+func TestHTTPBannerShowsNetworkPolicy(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Network.Enabled = true
+	cfg.Network.AllowedHosts = []string{"example.com"}
+	server, err := NewServer(cfg, "banner-network")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	if !strings.Contains(body, "network  : enabled (allowed hosts: example.com)") {
+		t.Fatalf("banner lacks the network policy:\n%s", body)
+	}
+}
+
 func TestHTTPBannerWarnsWithoutTokenAndUsesHTTPS(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Workspace = t.TempDir()

@@ -35,6 +35,10 @@ Common configuration options (serve/doctor/tools/policy):
   --profile <name>                all (default) | readonly | standard | ops | custom
   --allowed-roots <a,b>           Extra absolute roots
   --tools <a,b>                   Explicit tool allowlist
+  --optional-tools <a,b>          Opt in to multiedit|download|fetch|sourcegraph|*
+  --network                       Enable outbound network tools
+  --network-allowed-hosts <a,b>   Outbound host allowlist
+  --network-denied-hosts <a,b>    Outbound host denylist
   --allow-all                     Explicitly allow every single command
   --allow-command <cmd>           Repeatable argv-prefix allow rule
   --deny-command <cmd>            Repeatable argv-prefix deny rule (always wins)
@@ -69,6 +73,11 @@ Workspace and tool surface:
   --allowed-roots <a,b>           Extra absolute roots (workspace is always included)
   --profile <name>                all (default) | readonly | standard | ops | custom
   --tools <a,b>                   Explicit tool allowlist (narrows the profile)
+  --optional-tools <a,b>          Opt in to extra toolkit tools:
+                                  multiedit|download|fetch|sourcegraph|*
+  --network                       Enable fetch/sourcegraph/download networking
+  --network-allowed-hosts <a,b>   Outbound host allowlist (empty = any host)
+  --network-denied-hosts <a,b>    Outbound host denylist
   --tool-prefix <prefix>          Prefix every exposed tool name
   --target-name <name>            Label used in descriptions and audit records
   --description-style <style>     compact (default) | explicit
@@ -106,6 +115,12 @@ YAML mapping:
   --allow-command-pattern         shell.allowedCommandPatterns
   --deny-command-pattern          shell.deniedCommandPatterns
   --deny-shell-metachars          shell.denyShellMetachars
+
+Optional tools and network:
+  --optional-tools                optionalTools.enabled ("*" = all eligible)
+  --network                       network.enabled
+  --network-allowed-hosts         network.allowedHosts
+  --network-denied-hosts          network.deniedHosts
 
 Transport and HTTP:
   --stdio                         MCP over stdin/stdout (SSH transport)

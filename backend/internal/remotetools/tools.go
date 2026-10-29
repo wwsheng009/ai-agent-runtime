@@ -35,7 +35,8 @@ var shellTools = []string{ToolShell}
 //   - readonly: the four read tools;
 //   - standard: read + write tools;
 //   - ops: standard + shell;
-//   - all: read + write + shell (the default), plus configured job/artifact tools;
+//   - all: read + write + shell (the default), plus configured job/artifact and
+//     explicitly enabled optional tools;
 //   - custom: exactly cfg.Tools.
 //
 // In every case cfg.Tools acts as an additional narrowing filter when non-empty.
@@ -72,6 +73,17 @@ func (c *Config) enabledTools() []string {
 	}
 	if c.Artifacts.Root != "" {
 		base = append(base, artifactTools...)
+	}
+	// Optional tools are implementations that already live in
+	// internal/toolkit/tools. They are never enabled by profile alone: the
+	// operator must opt in through optionalTools.enabled (or name the tool in
+	// the tools allowlist), and the profile remains the upper bound.
+	if c.Backend == "" || c.Backend == BackendLocal {
+		for _, spec := range optionalToolSpecs {
+			if c.optionalToolEnabled(spec) {
+				base = append(base, spec.name)
+			}
+		}
 	}
 	// ReadOnly is a hard override: even a misconfigured `ops` profile cannot
 	// expose a mutation tool when the operator asked for read-only.

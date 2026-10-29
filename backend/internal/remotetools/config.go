@@ -332,6 +332,27 @@ type ArtifactConfig struct {
 	MaxBytes int64  `yaml:"maxBytes" json:"maxBytes"`
 }
 
+// OptionalToolsConfig enables the existing toolkit tools that remote-tools does
+// not expose by default. The profile still selects the ceiling; this list is the
+// explicit opt-in. "*" enables every optional tool allowed by the profile and
+// the network gate.
+type OptionalToolsConfig struct {
+	Enabled []string `yaml:"enabled" json:"enabled"`
+}
+
+// NetworkConfig controls the outbound network used by optional network tools.
+//
+// Network access is off by default. When enabled, the executor sandbox applies
+// the same host allow/deny rules to fetch, sourcegraph and download. An empty
+// allowedHosts list means "any host", matching executor.Sandbox's existing
+// contract; operators should set an allowlist when the target has sensitive
+// network reachability.
+type NetworkConfig struct {
+	Enabled      bool     `yaml:"enabled" json:"enabled"`
+	AllowedHosts []string `yaml:"allowedHosts" json:"allowedHosts"`
+	DeniedHosts  []string `yaml:"deniedHosts" json:"deniedHosts"`
+}
+
 // Config is the complete remote-tools configuration. Command-line flags override
 // file values, and file values override the built-in defaults.
 type Config struct {
@@ -374,6 +395,8 @@ type Config struct {
 	HTTP          HTTPConfig            `yaml:"http" json:"http"`
 	Audit         AuditConfig           `yaml:"audit" json:"audit"`
 	Jobs          JobsConfig            `yaml:"jobs" json:"jobs"`
+	OptionalTools OptionalToolsConfig   `yaml:"optionalTools" json:"optionalTools"`
+	Network       NetworkConfig         `yaml:"network" json:"network"`
 	// Gateway publishes this server's MCP endpoint(s) through aicli-gateway
 	// (docs/gateway/16-mcp-mount-tunnel.md). Empty URL disables it.
 	Gateway GatewayConfig `yaml:"gateway" json:"gateway"`
@@ -537,6 +560,18 @@ func (c *Config) Normalize() error {
 			c.Artifacts.Root = filepath.Join(c.Workspace, ".aicli", "artifacts")
 		}
 	}
+
+	c.OptionalTools.Enabled = dedupeStrings(c.OptionalTools.Enabled)
+	for _, name := range c.OptionalTools.Enabled {
+		if name == "*" {
+			continue
+		}
+		if _, ok := optionalToolByName(name); !ok {
+			return fmt.Errorf("unknown optional tool %q (want multiedit|download|fetch|sourcegraph or *)", name)
+		}
+	}
+	c.Network.AllowedHosts = dedupeStrings(c.Network.AllowedHosts)
+	c.Network.DeniedHosts = dedupeStrings(c.Network.DeniedHosts)
 
 	c.ToolPrefix = strings.TrimSpace(c.ToolPrefix)
 	if c.ToolPrefix != "" && !isPortableToolPrefix(c.ToolPrefix) {
