@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 )
 
 type nopWriteCloser struct{ io.Writer }
@@ -269,6 +271,80 @@ func main() {
 		fail("tail view", fmt.Errorf("result %q err %v", firstChars(tail, 160), tailErr))
 	}
 	fmt.Printf("PASS tail view (negative offset): %q\n", firstChars(tail, 40))
+
+	// Deep-offset paging on a file far larger than the read budget. The expected
+	// text is computed here, on the target, by calling the shared core over the
+	// whole file read straight from disk - so the comparison is a real differential
+	// between "local render" and "remote render over /files + Range growth", not a
+	// restatement of the implementation.
+	bigPath := *editPath + ".big"
+	const bigLines = 120000
+	var bigBody strings.Builder
+	for i := 0; i < bigLines; i++ {
+		fmt.Fprintf(&bigBody, "row %06d: payload for paging checks\n", i)
+	}
+	if err := os.WriteFile(bigPath, []byte(bigBody.String()), 0o600); err != nil {
+		fail("seed the big paging fixture", err)
+	}
+	defer func() { _ = os.Remove(bigPath) }()
+
+	const viewBudget = 4096
+	bigRun := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, "remote_big", *roots, false, viewBudget)
+	defer bigRun.close()
+	deepOffset := 60000 // ~1.9 MB in: far past the initial prefix, so growth must kick in
+	const viewTool = "__view"
+	remoteText, err := bigRun.call(ctx, "remote_big"+viewTool, map[string]interface{}{
+		"path": bigPath, "offset": deepOffset, "limit": 5,
+	})
+	if err != nil {
+		fail("deep-offset view on a file larger than the budget", err)
+	}
+	request := viewcore.Request{FilePath: bigPath, Offset: deepOffset, Limit: 5}
+	request.Offset, request.Limit = viewcore.Normalize(request.Offset, request.Limit)
+	localText, _, coreErr := viewcore.ReadTextFromBytes([]byte(bigBody.String()), request, viewcore.Options{ByteBudget: viewBudget})
+	if coreErr != nil {
+		fail("shared core render of the fixture", coreErr)
+	}
+	if remoteText != localText {
+		fail("deep paging fidelity", fmt.Errorf("remote=%q local=%q", firstChars(remoteText, 160), firstChars(localText, 160)))
+	}
+	fmt.Printf("PASS deep-offset paging on the target: %d lines in, window matches the local core (%d bytes)\n", deepOffset, len(remoteText))
+	bigRun.close()
+
+	// Beyond the fetch ceiling the surface must refuse and say why, instead of
+	// publishing a false eof for a file it never read to the end. The fixture is
+	// built so the requested offset is provably *inside* the file (line 299,990 of
+	// 300,000) yet unreachable within the 8 MiB ceiling: 300000 lines x 41 bytes.
+	hugePath := *editPath + ".huge"
+	const hugeLines = 300000
+	lineWidth := 8 + 2 + 30 + 1
+	if hugeLines%10 != 0 || lineWidth != 41 {
+		fail("ceiling fixture arithmetic", fmt.Errorf("expected 41-byte lines, got %d", lineWidth))
+	}
+	{
+		var hugeBody strings.Builder
+		hugeBody.Grow(hugeLines * lineWidth)
+		for i := 0; i < hugeLines; i++ {
+			fmt.Fprintf(&hugeBody, "%08d: %s\n", i, strings.Repeat("x", 30))
+		}
+		if err := os.WriteFile(hugePath, []byte(hugeBody.String()), 0o600); err != nil {
+			fail("write the ceiling fixture", err)
+		}
+	}
+	defer func() { _ = os.Remove(hugePath) }()
+	ceilingRun := serve(ctx, *server, *addr, *user, *workspace, *caFile, token, "remote_cap", *roots, false, viewBudget)
+	defer ceilingRun.close()
+	_, capErr := ceilingRun.call(ctx, "remote_cap"+viewTool, map[string]interface{}{
+		"path": hugePath, "offset": hugeLines - 10, "limit": 5,
+	})
+	if capErr == nil {
+		fail("ceiling refusal", fmt.Errorf("a window beyond the fetch ceiling was served; it would claim eof for a file it never read to the end"))
+	}
+	if !strings.Contains(capErr.Error(), "may fetch") {
+		fail("ceiling refusal wording", fmt.Errorf("want the refusal to name the fetch ceiling, got: %v", capErr))
+	}
+	fmt.Printf("PASS ceiling refusal is honest: %v\n", firstChars(capErr.Error(), 150))
+	ceilingRun.close()
 	written.close()
 
 	fmt.Println("ALL CHECKS PASSED")

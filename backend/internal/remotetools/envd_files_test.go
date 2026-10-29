@@ -16,6 +16,7 @@ package remotetools_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -278,16 +279,93 @@ func TestEnvDViewDoesNotReaskAPathLevelFailure(t *testing.T) {
 	}
 }
 
-// The size gate is unchanged by the new channel: an oversized file is refused
-// before any transfer, and nothing is read.
-func TestEnvDViewStillRefusesOversizedFiles(t *testing.T) {
-	big := strings.Repeat("x", 4096)
-	stub := newEnvdStub(t, map[string]string{"/srv/app/big.txt": big}, nil)
+// A file larger than the read budget is now served as a window instead of being
+// refused, and the window must be the text the shared core produces from the whole
+// file. That is the §8.9 item closing: the remote surface no longer gives up
+// where the local surface would page.
+func TestEnvDViewsBigFilesByWindowingLikeTheCore(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&body, "row %03d: some payload text\n", i)
+	}
+	full := body.String()
+	stub := newEnvdStub(t, map[string]string{"/srv/app/page.log": full}, nil)
+
 	cfg := newEnvDConfig(stub.server.URL)
-	// One knob must be enough: this is the operator-facing setting aicli expands
-	// from a target's Limits block (--max-bytes-per-call). Before Normalize derived
-	// CaptureLimit from it, the ceiling stayed at the compiled default and read
-	// tools ignored whatever the operator asked for.
+	// One documented knob: Normalize derives the pre-fold ceiling from it.
+	cfg.Limits.MaxBytesPerCall = 128
+	server, err := remotetools.NewServer(cfg, "envd")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	session, ctx := connectEnvDServer(t, server)
+
+	cases := []struct {
+		name          string
+		offset, limit float64
+	}{
+		{"first window", 0, 3},
+		{"deep window", 120, 4},           // beyond the initial prefix: the fetch must grow
+		{"window to the end", 398, 99},    // must not invent lines past the end
+		{"offset past the end", 99999, 5}, // core's own beyond-EOF note, once the file is whole
+	}
+	for _, test := range cases {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			request := viewcore.Request{FilePath: "page.log", Offset: int(test.offset), Limit: int(test.limit)}
+			request.Offset, request.Limit = viewcore.Normalize(request.Offset, request.Limit)
+			want, _, wantErr := viewcore.ReadTextFromBytes([]byte(full), request, viewcore.Options{ByteBudget: 128})
+			if wantErr != nil {
+				t.Fatalf("shared core render: %v", wantErr)
+			}
+			got := callTool(t, ctx, session, "remote_envd__view", map[string]interface{}{
+				"file_path": "page.log", "offset": test.offset, "limit": test.limit,
+			})
+			if got != want {
+				t.Fatalf("remote window differs from the local render for offset=%d limit=%d:\n got %q\nwant %q",
+					request.Offset, request.Limit, clipWindow(got), clipWindow(want))
+			}
+		})
+	}
+}
+
+// clipWindow keeps a failure message readable without dumping every fetched byte.
+func clipWindow(text string) string {
+	if len(text) > 160 {
+		return text[:160] + "..."
+	}
+	return text
+}
+
+// An encoded file is only served whole: cutting the prefix mid-codepoint would
+// change the text, so "same as local" stops being true and a refusal is honest.
+func TestEnvDViewRefusesTruncatedEncodedFiles(t *testing.T) {
+	body := "\xff\xfe" + strings.Repeat("h\x00i\x00\n\x00", 200) // UTF-16LE BOM, past the budget
+	stub := newEnvdStub(t, map[string]string{"/srv/app/utf16-big.txt": body}, nil)
+	cfg := newEnvDConfig(stub.server.URL)
+	cfg.Limits.MaxBytesPerCall = 128
+	server, err := remotetools.NewServer(cfg, "envd")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	session, ctx := connectEnvDServer(t, server)
+
+	refused := callEnvDExpectError(t, ctx, session, "remote_envd__view", map[string]interface{}{
+		"file_path": "utf16-big.txt",
+	})
+	if !strings.Contains(refused, "byte-order mark") {
+		t.Fatalf("refusal = %q, want it to name the encoding constraint", refused)
+	}
+}
+
+// The blanket size refusal is gone: an oversized single-line file now returns a
+// window instead of giving up.
+func TestEnvDViewNoLongerRefusesOversizedFiles(t *testing.T) {
+	body := strings.Repeat("x", 4000)
+	stub := newEnvdStub(t, map[string]string{"/srv/app/wide.txt": body}, nil)
+	cfg := newEnvDConfig(stub.server.URL)
 	cfg.Limits.MaxBytesPerCall = 64
 	server, err := remotetools.NewServer(cfg, "envd")
 	if err != nil {
@@ -296,17 +374,12 @@ func TestEnvDViewStillRefusesOversizedFiles(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 	session, ctx := connectEnvDServer(t, server)
 
-	result := viewCall(t, session, ctx, "big.txt")
-	if !result.IsError {
-		t.Fatalf("oversized file must be refused, got %q", textContent(result))
+	got := callTool(t, ctx, session, "remote_envd__view", map[string]interface{}{"file_path": "wide.txt"})
+	if strings.Contains(got, "above the") {
+		t.Fatalf("the old blanket size refusal came back: %q", got)
 	}
-	if !strings.Contains(textContent(result), "above the") {
-		t.Fatalf("refusal = %q, want the size-limit message", textContent(result))
-	}
-	for _, entry := range stub.filesRequests() {
-		if strings.HasPrefix(entry, "/srv/app/big.txt") {
-			t.Fatalf("an oversized file must not be transferred at all: %v", stub.filesRequests())
-		}
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("expected a rendered window, got nothing")
 	}
 }
 

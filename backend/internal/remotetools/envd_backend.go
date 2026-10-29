@@ -1005,22 +1005,9 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 	}
 	limit := be.viewLimit()
 	size := entry.SizeBytes()
-	if size > int64(limit) {
-		// Still a refusal, and still the one honest difference from the local
-		// surface, which streams a window out of a huge file instead. Feeding this
-		// a byte prefix would make ReadWindow report EOF for a file that has not
-		// reached it, so the metadata would claim a completeness it does not have.
-		// Closing that needs the byte-offset-to-line-offset mapping of §5.2, not more
-		// code here.
-		return envdErrorResult("%s is %d bytes, above the %d byte view limit; read it with a narrower tool or shell", target, size, limit), nil
-	}
-	data, channel, note, refusal := be.readGuarded(ctx, target, entry, int64(limit))
+	content, stats, channel, note, refusal := be.readViewWindow(ctx, target, entry, request, limit)
 	if refusal != nil {
 		return refusal, nil
-	}
-	content, stats, readErr := viewcore.ReadTextFromBytes(data, request, viewcore.Options{ByteBudget: limit})
-	if readErr != nil {
-		return envdErrorResult("%s", readErr.Error()), nil
 	}
 	result := envdTextResult(content)
 	// One metadata source for every view surface: paging fields must not be
@@ -1036,6 +1023,96 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 	result.Metadata = metadata
 	viewcore.AttachEfficiencyHints(result.Metadata, &result.Content, request, stats)
 	return result, nil
+}
+
+// envdViewFetchCeiling bounds how many bytes one view read will pull from the
+// target while it searches for the requested line window. It is deliberately the
+// same number as the shared core's own in-memory decode bound
+// (viewcore.MaxDecodeBytes): a remote read must not be allowed to buffer more
+// than the local surface is willing to hold.
+const envdViewFetchCeiling int64 = 8 << 20
+
+// readViewWindow serves one line window for a file of any size, and it is the
+// only place that decides how many bytes to fetch.
+//
+// The window itself is still rendered by the shared core, so paging, numbering,
+// long-line clamping and the truncation contract are identical to local. What the
+// core cannot know is that a prefix we handed it was cut by *us*. Its rule is
+// simple and must be respected: `stats.EOF` means "I saw the end of what you gave
+// me", and `total_lines`/`is_truncated` are only trustworthy alongside it. Serving
+// a partial prefix that the core believes is the whole file would publish
+// `eof: true` for a file that has no end in sight - a lie about completeness,
+// which is worse than a refusal.
+//
+// So the invariant is: serve only when the prefix is known to cover the request,
+// which is true when (a) we fetched the whole file, or (b) the core stopped early
+// on its own (budget or line limit with data still in hand), which is exactly when
+// it reports HasMore. Anything else grows the fetch and retries, up to the
+// ceiling; past the ceiling it refuses with a message that says what to do next.
+//
+// A BOM/UTF-16 file is only served whole. The core decodes such files in one
+// pass, so cutting the prefix mid-codepoint would change the text, and "identical
+// to local" stops being true; refusing is the honest option, and local refuses
+// past its own decode bound too.
+func (be *envdBackend) readViewWindow(ctx context.Context, target string, entry envdclient.Entry, request viewcore.Request, budget int) (string, viewcore.Stats, string, string, *toolkit.ToolResult) {
+	size := entry.SizeBytes()
+	want := int64(budget)
+	if want > size {
+		want = size
+	}
+	for {
+		data, channel, note, refusal := be.readGuarded(ctx, target, entry, want)
+		if refusal != nil {
+			return "", viewcore.Stats{}, channel, note, refusal
+		}
+		complete := want >= size
+		if !complete && hasByteOrderMark(data) {
+			return "", viewcore.Stats{}, channel, note, envdFailure("UNSUPPORTED",
+				"%s is %d bytes with a byte-order mark, above the %d byte view limit: an encoded file is only served whole, because decoding a cut prefix would change its text (the local surface applies the same rule past its decode bound). Use shell to convert it",
+				target, size, budget)
+		}
+		content, stats, readErr := viewcore.ReadTextFromBytes(data, request, viewcore.Options{ByteBudget: budget})
+		if readErr != nil {
+			return "", viewcore.Stats{}, channel, note, envdErrorResult("%s", readErr.Error())
+		}
+		if complete || stats.HasMore {
+			// Whole file, or the core stopped because of its own budget/line limit
+			// while bytes remained in hand: either way nothing is being claimed
+			// about an end we did not see.
+			return content, stats, channel, note, nil
+		}
+		if want >= envdViewFetchCeiling || want >= size {
+			// The prefix ends and the core still believes that is the end of the
+			// file, but it is not: the requested window sits beyond what this
+			// read is allowed to pull. Say so instead of publishing a false EOF.
+			return "", stats, channel, note, envdFailure(CodeOutputLimit,
+				"%s is %d bytes: the requested window starts beyond the %d bytes this read may fetch, so no line offset can be resolved here; lower the offset, narrow the limit, or read it with shell (for example sed -n '%dp')",
+				target, size, envdViewFetchCeiling, request.Offset+1)
+		}
+		want *= 2
+		if want > size {
+			want = size
+		}
+		if want > envdViewFetchCeiling {
+			want = envdViewFetchCeiling
+		}
+	}
+}
+
+// hasByteOrderMark reports whether these bytes open with a UTF BOM. The check is
+// local on purpose: it mirrors the core's probe without reaching into it, and it
+// only has to be conservative enough to route encoded files to the whole-file
+// path.
+func hasByteOrderMark(data []byte) bool {
+	switch {
+	case len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF:
+		return true
+	case len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE:
+		return true
+	case len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF:
+		return true
+	}
+	return false
 }
 
 // envdRefuseUnsupportedViewParams refuses the view parameters this surface cannot
