@@ -50,6 +50,9 @@ func TestHTTPBannerShowsResolvedShell(t *testing.T) {
 	t.Cleanup(func() { _ = server.Close() })
 
 	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	if !strings.Contains(body, "profile  : all (readOnly=false)") {
+		t.Fatalf("banner lacks the effective profile:\n%s", body)
+	}
 	if !strings.Contains(body, "shell    : "+shellLabel(cfg.ResolvedShell)) {
 		t.Fatalf("banner lacks the resolved shell:\n%s", body)
 	}

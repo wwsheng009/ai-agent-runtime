@@ -34,11 +34,16 @@ func (s *Server) httpBannerLines(addr string) []string {
 	if len(names) > 8 {
 		preview = strings.Join(names[:8], ", ") + fmt.Sprintf(", ... (%d total)", len(names))
 	}
+	profile := strings.TrimSpace(string(s.cfg.Profile))
+	if profile == "" {
+		profile = string(ProfileAll)
+	}
 	lines := []string{
 		"aicli-remote-tools: HTTP MCP server ready",
 		"  endpoint : " + endpoint,
 		"  workspace: " + s.workspace.Root(),
 		fmt.Sprintf("  tools    : %d (%s)", len(names), preview),
+		fmt.Sprintf("  profile  : %s (readOnly=%t)", profile, s.cfg.ReadOnly),
 		"  auth     : " + auth,
 	}
 	if s.cfg.Backend == BackendLocal && s.cfg.ShellExposed() {
