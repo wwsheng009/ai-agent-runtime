@@ -214,3 +214,18 @@ func TestCopyForwardRequestHeadersDropsInternalHeaders(t *testing.T) {
 		t.Fatalf("Accept was dropped")
 	}
 }
+// TestDefaultForwardClientPoolsLoopbackConnections pins the local pool width:
+// the stock http.Transport keeps only two idle connections per host, which
+// throttles bursts of tool calls through one tunnel.
+func TestDefaultForwardClientPoolsLoopbackConnections(t *testing.T) {
+	tr, ok := defaultForwardClient.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		t.Fatalf("defaultForwardClient transport = %T, want *http.Transport", defaultForwardClient.Transport)
+	}
+	if tr.MaxIdleConnsPerHost < 16 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want a wider loopback pool", tr.MaxIdleConnsPerHost)
+	}
+	if tr.Proxy != nil {
+		t.Fatal("local forward transport must not consult an HTTP proxy")
+	}
+}

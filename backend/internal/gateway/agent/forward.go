@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,6 +68,24 @@ const mountHeader = "X-AICLI-Mount"
 
 // defaultForwardTimeout bounds one forwarded call for the default target.
 const defaultForwardTimeout = 5 * time.Minute
+
+// defaultForwardClient is used when ForwardConfig.Client is unset. The standard
+// library's default transport keeps only two idle connections per host, which
+// throttles bursts of tool calls through one tunnel; the forward target is
+// always local, so a wider pool is safe and avoids redialing loopback between
+// bursts.
+var defaultForwardClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:               nil,
+		MaxIdleConns:        256,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	},
+}
 
 // defaultMaxForwardBody bounds a buffered request body.
 const defaultMaxForwardBody = 1 << 20
@@ -270,7 +289,7 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 
 	client := c.forward.Client
 	if client == nil {
-		client = &http.Client{}
+		client = defaultForwardClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -286,12 +305,12 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			if err := c.acquireCredit(ctx, id, int64(len(chunk))); err != nil {
+			if err := c.acquireCredit(ctx, id, int64(n)); err != nil {
 				return
 			}
-			if err := c.writeStreamData(id, chunk, 0); err != nil {
+			// wire.Encode copies the payload into the frame buffer and
+			// WriteMessage is synchronous, so buf can be reused immediately.
+			if err := c.writeStreamData(id, buf[:n], 0); err != nil {
 				return
 			}
 		}

@@ -114,6 +114,12 @@ func NewServer(cfg Config) *Server {
 		// Agents are non-browser clients and authenticate with a bearer device
 		// token, so the Origin check is not the security boundary here.
 		CheckOrigin: func(*http.Request) bool { return true },
+		// Tool payloads (file reads, grep results, tools/list schemas) are text
+		// and compress well. Negotiation is per-connection: an older agent that
+		// does not offer permessage-deflate simply stays uncompressed.
+		EnableCompression: true,
+		ReadBufferSize:    32 << 10,
+		WriteBufferSize:   32 << 10,
 	}
 	if cfg.Upgrader != nil {
 		upgrader = *cfg.Upgrader

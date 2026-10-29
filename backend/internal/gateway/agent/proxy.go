@@ -49,6 +49,20 @@ func parseProxyURL(raw string) (*url.URL, error) {
 	}
 }
 
+// tunnelDialerDefaults applies the transport settings shared by every dialer
+// path: permessage-deflate (the gateway upgrader accepts it, and negotiation is
+// per-connection so older gateways simply stay uncompressed) and 32 KiB buffers
+// so large tool payloads do not fall back to gorilla's 4 KiB default.
+func tunnelDialerDefaults(d *websocket.Dialer) *websocket.Dialer {
+	if d == nil {
+		d = &websocket.Dialer{}
+	}
+	d.EnableCompression = true
+	d.ReadBufferSize = 32 << 10
+	d.WriteBufferSize = 32 << 10
+	return d
+}
+
 // websocketDialer builds the websocket dialer for cfg. With ProxyURL set the
 // tunnel is established through the proxy (HTTP CONNECT or SOCKS5); otherwise
 // the default dialer is used, which honours HTTP(S)_PROXY environment variables
@@ -56,7 +70,11 @@ func parseProxyURL(raw string) (*url.URL, error) {
 func websocketDialer(cfg Config) (*websocket.Dialer, error) {
 	raw := strings.TrimSpace(cfg.ProxyURL)
 	if raw == "" {
-		return websocket.DefaultDialer, nil
+		// Copy the process-wide default instead of mutating it: other callers
+		// (MCP transports, connectors) share DefaultDialer and must keep their
+		// own settings.
+		base := *websocket.DefaultDialer
+		return tunnelDialerDefaults(&base), nil
 	}
 	u, err := parseProxyURL(raw)
 	if err != nil {
@@ -68,19 +86,19 @@ func websocketDialer(cfg Config) (*websocket.Dialer, error) {
 		// x/net/proxy has no http scheme; use the standard library's HTTP proxy
 		// dialer (CONNECT) via Transport semantics wrapped as NetDialContext.
 		cd := httpConnectContextDialer(u.Host, proxyDialerTimeout)
-		return &websocket.Dialer{
+		return tunnelDialerDefaults(&websocket.Dialer{
 			NetDialContext:   cd,
 			HandshakeTimeout: proxyDialerTimeout,
-		}, nil
+		}), nil
 	default: // socks5 / socks5h — auth comes from the URL userinfo
 		d, derr := proxy.FromURL(u, &net.Dialer{Timeout: proxyDialerTimeout})
 		if derr != nil {
 			return nil, derr
 		}
-		return &websocket.Dialer{
+		return tunnelDialerDefaults(&websocket.Dialer{
 			NetDial:          d.Dial,
 			HandshakeTimeout: proxyDialerTimeout,
-		}, nil
+		}), nil
 	}
 }
 

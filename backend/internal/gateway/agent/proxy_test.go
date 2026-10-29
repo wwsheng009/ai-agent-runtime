@@ -70,6 +70,15 @@ func TestWebsocketDialerDefaults(t *testing.T) {
 	if err != nil || d == nil {
 		t.Fatalf("default dialer: %v", err)
 	}
+	if !d.EnableCompression {
+		t.Fatal("tunnel dialer must offer permessage-deflate")
+	}
+	if d.ReadBufferSize != 32<<10 || d.WriteBufferSize != 32<<10 {
+		t.Fatalf("buffer sizes = %d/%d, want 32KiB", d.ReadBufferSize, d.WriteBufferSize)
+	}
+	if websocket.DefaultDialer.EnableCompression {
+		t.Fatal("must not mutate the process-wide websocket.DefaultDialer")
+	}
 	if _, err := websocketDialer(Config{ProxyURL: "socks5://"}); err == nil {
 		t.Fatal("empty host must error")
 	}
@@ -83,6 +92,9 @@ func TestWebsocketDialerSocks5(t *testing.T) {
 	if d.NetDial == nil {
 		t.Fatal("socks5 dialer must set NetDial")
 	}
+	if !d.EnableCompression {
+		t.Fatal("socks5 dialer must offer permessage-deflate")
+	}
 	if _, err := websocketDialer(Config{ProxyURL: "socks5://user:pass@127.0.0.1:1080"}); err != nil {
 		t.Fatalf("socks5 with auth dialer: %v", err)
 	}
@@ -95,6 +107,9 @@ func TestWebsocketDialerHTTP(t *testing.T) {
 	}
 	if d.NetDialContext == nil {
 		t.Fatal("http dialer must set NetDialContext")
+	}
+	if !d.EnableCompression {
+		t.Fatal("http dialer must offer permessage-deflate")
 	}
 }
 
