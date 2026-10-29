@@ -475,7 +475,7 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 ### Phase 2.5b —— envd 只读侧接入 + 真增量（本方案的收益兑现点）
 
 > 🔶 **已开始（`a9866bf7`）**：ls 的目录遍历已进 seam（`Access.ReadDir` + 新增 `Access.Lstat`），walker 计数 lscore 降到 0。三条施工期结论见 §13"Phase 2.5b 第一步"——其中"用 `Stat` 判根会让 `ls` 跟随符号链接出授权根"是一次安全回归，差点被当作搬家细节混过去。
-> 下面 1–4 项仍未交付；本段 4 项里"`RandomAccessor` 走 `GET /files` 单区间 `Range`"这句话**在行窗口上是不够的**：`view offset=N` 是行偏移，`Range` 只回答字节，行号要么靠前缀扫描、要么由目标机按行造窗（`sed -n 'A,Bp'`），照原稿直接接 `ReadRange` 会让适配层替核宣布 `EOF`——那是假元数据。施工前先解决这个模型问题。
+> 下面 1–4 项仍未交付；本段 4 项里"`RandomAccessor` 走 `GET /files` 单区间 `Range`"这句话**在行窗口上是不够的**：`view offset=N` 是行偏移，`Range` 只回答字节，行号要么靠前缀扫描、要么由目标机按行造窗（`sed -n 'A,Bp'`），照原稿直接接 `ReadRange` 会让适配层替核宣布 `EOF`——那是假元数据。施工前先解决这个模型问题：**方案已单独成文，见 `docs/plan/envd-view-line-window-design-20261028.md`**（远端 awk 造窗 + 核接受 `SourceFacts{TotalLines}` 的唯一事实入口；含真机实测的 6 条事实、awk 与 `wc -l` 的末行差异、argv 含 `=` 的陷阱、成本口径与 M0→M3 分期）。
 
 
 - 交付：
