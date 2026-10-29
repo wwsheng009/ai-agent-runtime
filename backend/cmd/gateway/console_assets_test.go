@@ -41,6 +41,10 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		`id="device-search"`,
 		`id="device-status-filter"`,
 		`id="mount-token-days"`,
+		`id="confirm-modal"`,
+		`id="confirm-cancel"`,
+		`id="confirm-confirm"`,
+		`aria-describedby="confirm-message"`,
 		`>不过期<`,
 		`>指定天数…<`,
 	} {
@@ -56,6 +60,13 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	for _, want := range []string{
 		"function loadMounts",
 		"function renderMounts",
+		"function mountHostText",
+		"function mountProfileText",
+		"function appendMountFacts",
+		"labels.hostname",
+		"labels.tool_count",
+		"labels.tools",
+		"labels.roots",
 		"function openMountTokens",
 		"function loadMountTokens",
 		"function syncMountTokenTTL",
@@ -76,6 +87,8 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		"function appendDeviceMeta",
 		"function closeTopbarMenu",
 		"function syncTopbarMenuLabel",
+		"function confirmDestructive",
+		"function bindCardMenu",
 		`data-more`,
 		`data-web`,
 		`class="s-menu"`,
@@ -95,10 +108,12 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	}
 	for _, want := range []string{
 		".s-menu", ".menu-item", ".s-expand", ".mcp-endpoint", ".mcp-head-actions",
+		".mcp-facts", ".mcp-fact", ".mcp-details", ".mcp-chip-list", ".mcp-chip",
 		".mcp-token-prefix", ".log-row", ".log-status", ".stat.attention.has-attention",
 		".s-access", ".detail-diagnostics", ".chat-notice-text",
 		".field-hint", ".field-error", ".notify-savebar", ".notify-quiet-row",
 		".notify-session-group", ".topbar-menu", ".device-toolbar", ".meta-time",
+		".btn.danger-outline", ".modal.modal-sm", "#confirm-message",
 	} {
 		if !strings.Contains(string(css), want) {
 			t.Fatalf("style.css missing %s", want)
@@ -106,6 +121,11 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	}
 	if strings.Contains(string(html), `id="attn-completed"`) {
 		t.Fatal("index.html still renders completed in the pending breakdown")
+	}
+	// UX-06: destructive list-row actions live in the overflow menu and the
+	// in-page confirm dialog, not as always-visible solid-red buttons.
+	if strings.Contains(string(js), "btn danger sm") {
+		t.Fatal("app.js still renders an always-visible solid-red button")
 	}
 }
 

@@ -84,6 +84,108 @@
 
   /* ─────────────────────────── toasts ────────────────────────── */
 
+  /* ───────────────────────── UX-06: 通用二次确认 ──────────────── */
+  // 用站内模态框替代 window.confirm：文案可包含对象、数量与后果，
+  // 取消/确认都会把焦点还给触发按钮，且不会累积 document 监听器。
+  function confirmDestructive(options) {
+    var modal = el("confirm-modal");
+    if (!modal) { return Promise.resolve({ confirmed: false }); }
+
+    var titleEl = el("confirm-title");
+    var msgEl = el("confirm-message");
+    var cancelBtn = el("confirm-cancel");
+    var confirmBtn = el("confirm-confirm");
+    var closeBtn = modal.querySelector(".modal-close");
+    var previousFocus = options.trigger || document.activeElement;
+    var closed = false;
+    var resolvePromise;
+    var promise = new Promise(function (resolve) { resolvePromise = resolve; });
+
+    titleEl.textContent = options.title || "确认操作";
+    msgEl.textContent = options.message || "";
+    cancelBtn.textContent = options.cancelText || "取消";
+    confirmBtn.textContent = options.confirmText || "是的，执行";
+    cancelBtn.hidden = options.showCancel === false;
+
+    function focusables() {
+      return [closeBtn, cancelBtn, confirmBtn].filter(function (node) {
+        return node && !node.hidden && !node.disabled;
+      });
+    }
+
+    function onKeydown(e) {
+      if (closed) { return; }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(false);
+        return;
+      }
+      if (e.key !== "Tab") { return; }
+      var nodes = focusables();
+      if (!nodes.length) { return; }
+      var idx = nodes.indexOf(document.activeElement);
+      if (idx === -1) { idx = 0; }
+      var next = e.shiftKey ? (idx - 1 + nodes.length) % nodes.length : (idx + 1) % nodes.length;
+      e.preventDefault();
+      nodes[next].focus();
+    }
+
+    function onOverlayClick(e) {
+      if (e.target === modal) { close(false); }
+    }
+
+    function close(confirmed, result) {
+      if (closed) { return; }
+      closed = true;
+      modal.hidden = true;
+      document.removeEventListener("keydown", onKeydown, true);
+      modal.removeEventListener("click", onOverlayClick);
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+      if (closeBtn) { closeBtn.onclick = null; }
+      // 操作可能触发列表重绘；等一帧再还焦点：触发器还在就回去，
+      // 已被移除则落到当前视图标题，避免焦点掉到 body。
+      setTimeout(function () {
+        if (previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") {
+          previousFocus.focus();
+          return;
+        }
+        var view = document.querySelector(".view:not([hidden])");
+        var fallback = view && view.querySelector("h2, .page-title");
+        if (!fallback) { fallback = el("main"); }
+        if (fallback) {
+          if (!fallback.hasAttribute("tabindex")) { fallback.setAttribute("tabindex", "-1"); }
+          fallback.focus();
+        }
+      }, 0);
+      resolvePromise({ confirmed: confirmed, result: result });
+    }
+
+    cancelBtn.onclick = function () { close(false); };
+    if (closeBtn) { closeBtn.onclick = function () { close(false); }; }
+    confirmBtn.onclick = function () {
+      confirmBtn.disabled = true;
+      Promise.resolve(options.onConfirm ? options.onConfirm() : null)
+        .then(function (result) { close(true, result); })
+        .catch(function (err) {
+          confirmBtn.disabled = false;
+          pushToast("操作失败：" + (err && err.message ? err.message : err), "error");
+        });
+    };
+
+    document.addEventListener("keydown", onKeydown, true);
+    modal.addEventListener("click", onOverlayClick);
+    modal.hidden = false;
+    confirmBtn.disabled = false;
+    // 破坏性操作默认聚焦「取消」，避免 Enter 直接执行。
+    var initial = options.focusConfirm ? confirmBtn : (cancelBtn.hidden ? confirmBtn : cancelBtn);
+    initial.focus();
+
+    return promise;
+  }
+  /* ───────────────────────── UX-06 结束 ──────────────────────── */
+
   function toastHost() {
     var host = el("toast-host");
     if (!host) {
@@ -1577,7 +1679,7 @@
   // Session action menus live in the DOM. One pair of document listeners closes
   // any open menu (outside click / Escape) so cards never accumulate handlers.
   function closeSessionMenus(restoreFocus) {
-    document.querySelectorAll(".session-card .s-menu").forEach(function (menu) {
+    document.querySelectorAll(".s-menu").forEach(function (menu) {
       if (menu.hidden) { return; }
       var hadFocus = !!(document.activeElement && menu.contains(document.activeElement));
       menu.hidden = true;
@@ -1612,6 +1714,53 @@
     });
   }
 
+  // 任意卡片（设备 / MCP / 离线快照）共用同一套溢出菜单行为：
+  // 固定定位、方向键/Home/End、Escape 关闭、焦点归还。
+  function bindCardMenu(card, menu) {
+    if (!card || !menu) { return; }
+    var trigger = card.querySelector("[data-more]");
+    if (!trigger) { return; }
+    var menuID = "card-menu-" + (++sessionMenuSeq);
+    menu.id = menuID;
+    trigger.setAttribute("aria-controls", menuID);
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var willOpen = menu.hidden;
+      closeSessionMenus(false);
+      if (!willOpen) { return; }
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      positionSessionMenu(trigger, menu);
+      var items = visibleMenuItems(menu);
+      if (items.length) { items[0].focus(); }
+    });
+    menu.addEventListener("keydown", function (e) {
+      var items = visibleMenuItems(menu);
+      if (!items.length) { return; }
+      var idx = items.indexOf(document.activeElement);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        items[(idx + 1) % items.length].focus();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        items[(idx - 1 + items.length) % items.length].focus();
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        items[0].focus();
+      } else if (e.key === "End") {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSessionMenus(true);
+      } else if (e.key === "Tab") {
+        closeSessionMenus(true);
+      }
+    });
+  }
+
   document.addEventListener("click", function (e) {
     if (e.target && e.target.closest && e.target.closest(".s-menu, [data-more]")) { return; }
     closeSessionMenus(false);
@@ -1620,7 +1769,7 @@
     if (e.key === "Escape") { closeSessionMenus(true); }
   });
   function repositionOpenSessionMenus() {
-    document.querySelectorAll(".session-card .s-menu").forEach(function (menu) {
+    document.querySelectorAll(".s-menu").forEach(function (menu) {
       if (menu.hidden) { return; }
       var btn = menu.parentElement && menu.parentElement.querySelector("[data-more]");
       if (btn) { positionSessionMenu(btn, menu); }
@@ -1751,6 +1900,8 @@
         e.preventDefault();
         e.stopPropagation();
         closeSessionMenus(true);
+      } else if (e.key === "Tab") {
+        closeSessionMenus(true);
       }
     });
     menu.addEventListener("focusout", function () {
@@ -1853,8 +2004,22 @@
         e.stopPropagation();
         var it = card.__item;
         if (!it || btn.disabled) { return; }
-        if (action.confirm && !window.confirm(action.confirm)) { return; }
-        requestWindowAction(it.node, it.session, action.kind, action.done);
+        function run() {
+          return requestWindowAction(it.node, it.session, action.kind)
+            .then(function () { notify(action.done, "ok"); });
+        }
+        if (action.confirm) {
+          closeSessionMenus(false);
+          confirmDestructive({
+            title: "关闭窗口进程？",
+            message: action.confirm,
+            trigger: moreBtn,
+            confirmText: "关闭窗口",
+            onConfirm: run
+          });
+          return;
+        }
+        run().catch(function (err) { notify("窗口动作失败：" + err, "error"); });
       });
     });
     var rmBtn = card.querySelector("[data-remove]");
@@ -1862,24 +2027,29 @@
       e.stopPropagation();
       var it = card.__item;
       if (!it) { return; }
-      if (!window.confirm("从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）")) { return; }
-      api("/api/nodes/" + encodeURIComponent(it.node.node_id) +
-          "/sessions/" + encodeURIComponent(it.session.session_id), { method: "DELETE" })
-        .then(function () { notify("会话条目已移除", "ok"); loadNodes(); })
-        .catch(function (err) { notify("移除失败：" + err, "error"); });
+      closeSessionMenus(false);
+      confirmDestructive({
+        title: "移除会话条目？",
+        message: "从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）",
+        trigger: moreBtn,
+        confirmText: "移除",
+        onConfirm: function () {
+          return api("/api/nodes/" + encodeURIComponent(it.node.node_id) +
+              "/sessions/" + encodeURIComponent(it.session.session_id), { method: "DELETE" })
+            .then(function () { notify("会话条目已移除", "ok"); loadNodes(); });
+        }
+      });
     });
     return card;
   }
 
   // requestWindowAction 把一条窗口动作排给节点，并把「排队成功」与「执行成功」
   // 分开表达（网关只保证投递，执行结果要等节点自己的下一次上报才可见）。
-  function requestWindowAction(node, session, kind, doneText) {
+  function requestWindowAction(node, session, kind) {
     var path = "/api/nodes/" + encodeURIComponent(node.node_id) +
       "/sessions/" + encodeURIComponent(session.session_id) +
       "/window?action=" + encodeURIComponent(kind);
-    api(path, { method: "POST" })
-      .then(function () { notify(doneText, "ok"); })
-      .catch(function (err) { notify("窗口动作失败：" + err, "error"); });
+    return api(path, { method: "POST" });
   }
   // updateSessionCard patches one card to match the latest snapshot: text is
   // written only when it changed, visibility flips via `hidden`, and the live
@@ -2258,23 +2428,34 @@
       }
       actions.appendChild(open);
     }
-    // Snapshot rows never resolve on their own; give the operator a cleanup
-    // action. Live nodes are protected (removing them would just be undone by
-    // the next heartbeat sync and would confuse more than help).
     if (node.stale) {
-      var rm = document.createElement("button");
-      rm.className = "btn danger sm";
-      rm.type = "button";
-      rm.textContent = "移除";
-      rm.addEventListener("click", function (e) {
-        e.stopPropagation();
-        if (!window.confirm("移除离线快照节点 " + nodeDisplayName(node) + "？\n该节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。")) { return; }
-        api("/api/nodes/" + encodeURIComponent(node.node_id), { method: "DELETE" })
-          .then(function () { notify("节点已移除：" + nodeDisplayName(node), "ok"); loadNodes(); })
-          .catch(function (err) { notify("移除失败：" + err, "error"); });
+      // UX-06: 破坏性动作默认收进 ⋯，不再作为实心红按钮常驻。
+      actions.insertAdjacentHTML("beforeend",
+        '<button class="btn ghost sm s-more" type="button" data-more aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>' +
+        '<div class="s-menu" role="menu" aria-label="离线快照节点操作" hidden>' +
+        '<button class="menu-item danger" type="button" role="menuitem" data-remove>移除该节点</button>' +
+        '</div>');
+      var staleMenu = actions.querySelector(".s-menu");
+      var staleMore = actions.querySelector("[data-more]");
+      bindCardMenu(card, staleMenu);
+      staleMenu.querySelector("[data-remove]").addEventListener("click", function () {
+        closeSessionMenus(false);
+        confirmDestructive({
+          title: "移除离线快照节点？",
+          message: "移除离线快照节点 " + nodeDisplayName(node) +
+            "？\n该节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。",
+          trigger: staleMore,
+          onConfirm: function () {
+            return api("/api/nodes/" + encodeURIComponent(node.node_id), { method: "DELETE" })
+              .then(function () {
+                notify("节点已移除：" + nodeDisplayName(node), "ok");
+                loadNodes();
+              });
+          }
+        });
       });
-      actions.appendChild(rm);
     }
+
     if (node.node_id) {
       var copyNode = document.createElement("button");
       copyNode.className = "btn ghost sm";
@@ -2298,6 +2479,7 @@
       // The one-click cleanup is offered only while offline snapshots exist.
       clearBtn.hidden = !staleNodes.length;
       clearBtn.textContent = staleNodes.length ? "清除全部（" + staleNodes.length + "）" : "清除全部";
+      clearBtn.setAttribute("aria-label", "清除全部离线快照节点，共 " + staleNodes.length + " 个");
     }
     if (liveHost) {
       liveHost.innerHTML = "";
@@ -2456,32 +2638,42 @@
       if (d.last_used && d.last_used.indexOf("0001") === -1) {
         appendDeviceMeta(meta, "最近使用 " + new Date(d.last_used).toLocaleString(), "meta-time");
       }
-      var actions = card.querySelector(".card-actions");
-      if (!d.revoked) {
-        var revoke = document.createElement("button");
-        revoke.className = "btn danger sm";
-        revoke.type = "button";
-        revoke.textContent = "撤销令牌";
-        revoke.addEventListener("click", function () {
-          if (!window.confirm("撤销令牌「" + (d.name || d.id) + "」？\n使用它的 agent 将无法再注册；撤销后可选择彻底删除记录。")) { return; }
-          api("/api/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
-            .then(function () { notify("令牌已撤销：" + (d.name || d.id), "ok"); loadDevices(); })
-            .catch(function (err) { notify("撤销失败：" + err, "error"); });
+      // UX-06: 撤销/删除收进 ⋯，列表行不再常驻实心红按钮。
+      var deviceActions = card.querySelector(".card-actions");
+      deviceActions.insertAdjacentHTML("beforeend",
+        '<button class="btn ghost sm s-more" type="button" data-more aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>' +
+        '<div class="s-menu" role="menu" aria-label="设备令牌操作" hidden>' +
+        '<button class="menu-item" type="button" role="menuitem" data-copy-id>复制记录 ID</button>' +
+        '<button class="menu-item danger" type="button" role="menuitem" data-action>' +
+        (d.revoked ? "删除记录" : "撤销令牌") +
+        '</button>' +
+        '</div>');
+      var deviceMenu = deviceActions.querySelector(".s-menu");
+      var deviceMore = deviceActions.querySelector("[data-more]");
+      bindCardMenu(card, deviceMenu);
+      deviceMenu.querySelector("[data-copy-id]").addEventListener("click", function () {
+        copyText(d.id || "", this);
+        closeSessionMenus(true);
+      });
+      deviceMenu.querySelector("[data-action]").addEventListener("click", function () {
+        closeSessionMenus(false);
+        var purge = !!d.revoked;
+        confirmDestructive({
+          title: purge ? "删除记录？" : "撤销令牌？",
+          message: purge
+            ? "彻底删除已撤销令牌「" + (d.name || d.id) + "」的记录？\n此操作不可恢复（令牌本身已失效）。"
+            : "撤销令牌「" + (d.name || d.id) + "」？\n使用它的 agent 将无法再注册；撤销后可选择彻底删除记录。",
+          trigger: deviceMore,
+          onConfirm: function () {
+            return api("/api/devices/" + encodeURIComponent(d.id) + (purge ? "?purge=1" : ""), { method: "DELETE" })
+              .then(function () {
+                notify((purge ? "令牌记录已删除：" : "令牌已撤销：") + (d.name || d.id), "ok");
+                loadDevices();
+              });
+          }
         });
-        actions.appendChild(revoke);
-      } else {
-        var del = document.createElement("button");
-        del.className = "btn danger sm";
-        del.type = "button";
-        del.textContent = "删除记录";
-        del.addEventListener("click", function () {
-          if (!window.confirm("彻底删除已撤销令牌「" + (d.name || d.id) + "」的记录？\n此操作不可恢复（令牌本身已失效）。")) { return; }
-          api("/api/devices/" + encodeURIComponent(d.id) + "?purge=1", { method: "DELETE" })
-            .then(function () { notify("令牌记录已删除：" + (d.name || d.id), "ok"); loadDevices(); })
-            .catch(function (err) { notify("删除失败：" + err, "error"); });
-        });
-        actions.appendChild(del);
-      }
+      });
+
       list.appendChild(card);
     });
   }
@@ -2508,6 +2700,118 @@
       lastMounts = (r.body && r.body.mounts) || [];
       renderMounts(lastMounts);
     });
+  }
+
+  function mountLabels(m) {
+    return (m && m.labels) || {};
+  }
+
+  function mountLabelList(value) {
+    if (!Array.isArray(value)) { return []; }
+    return value.filter(function (item) {
+      return typeof item === "string" && item.trim() !== "";
+    });
+  }
+
+  function mountToolCount(m) {
+    var labels = mountLabels(m);
+    var count = Number(labels.tool_count);
+    if (!isFinite(count) || count < 0) { count = 0; }
+    return Math.max(count, mountLabelList(labels.tools).length);
+  }
+
+  function mountHostText(labels) {
+    var host = labels.hostname || "—";
+    var platform = [labels.os, labels.arch].filter(Boolean).join("/");
+    return platform ? host + " · " + platform : host;
+  }
+
+  function mountProfileText(labels) {
+    var profile = labels.profile || "—";
+    if (labels.read_only && profile !== "readonly") {
+      profile += " · 只读";
+    }
+    if (labels.tool_prefix) {
+      profile += " · " + labels.tool_prefix;
+    }
+    return profile;
+  }
+
+  function mountVersionText(labels) {
+    var bits = [];
+    if (labels.version) { bits.push(labels.version); }
+    if (labels.instance) { bits.push("实例 " + labels.instance); }
+    if (labels.backend) { bits.push(labels.backend); }
+    return bits.length ? bits.join(" · ") : "—";
+  }
+
+  function appendMountFact(facts, label, value, asCode) {
+    var row = document.createElement("div");
+    row.className = "mcp-fact";
+    var name = document.createElement("span");
+    name.className = "mcp-fact-label";
+    name.textContent = label;
+    var text = document.createElement(asCode ? "code" : "span");
+    text.className = "mcp-fact-value";
+    text.textContent = value;
+    row.appendChild(name);
+    row.appendChild(text);
+    facts.appendChild(row);
+  }
+
+  function appendMountChips(container, values) {
+    var list = document.createElement("div");
+    list.className = "mcp-chip-list";
+    values.forEach(function (value) {
+      var chip = document.createElement("code");
+      chip.className = "mcp-chip";
+      chip.textContent = value;
+      list.appendChild(chip);
+    });
+    container.appendChild(list);
+  }
+
+  function appendMountDetails(host, title, values, emptyText) {
+    var details = document.createElement("details");
+    details.className = "mcp-details";
+    var summary = document.createElement("summary");
+    summary.textContent = title;
+    summary.title = "展开查看";
+    details.appendChild(summary);
+    if (values.length) {
+      appendMountChips(details, values);
+    } else if (emptyText) {
+      var empty = document.createElement("p");
+      empty.className = "mcp-detail-empty";
+      empty.textContent = emptyText;
+      details.appendChild(empty);
+    }
+    host.appendChild(details);
+  }
+
+  function appendMountFacts(factsHost, detailsHost, m) {
+    var labels = mountLabels(m);
+    var facts = factsHost;
+    if (!facts) { return; }
+    appendMountFact(facts, "主机", mountHostText(labels));
+    appendMountFact(facts, "Profile", mountProfileText(labels));
+    appendMountFact(facts, "工作区", labels.workspace || "—", true);
+    appendMountFact(facts, "版本", mountVersionText(labels));
+
+    var tools = mountLabelList(labels.tools);
+    var toolCount = mountToolCount(m);
+    if (toolCount > 0 || tools.length > 0) {
+      appendMountDetails(
+        detailsHost,
+        "工具（" + (toolCount || tools.length) + "）",
+        tools,
+        "节点只上报了数量，没有工具名（旧版节点或列表被裁剪）。"
+      );
+    }
+    var roots = mountLabelList(labels.roots);
+    if (roots.length > 0) {
+      appendMountDetails(detailsHost, "目录（" + roots.length + "）", roots, "");
+    }
   }
 
   function renderMounts(mounts) {
@@ -2540,6 +2844,8 @@
         '<span class="status-chip ' + chip + '"></span></div>' +
         '<div class="mcp-slug"><code></code></div>' +
         '<div class="mcp-endpoint"><code class="mcp-url"></code></div>' +
+        '<div class="mcp-facts"></div>' +
+        '<div class="mcp-details-host"></div>' +
         '<div class="card-meta"></div>' +
         '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = m.name || m.slug;
@@ -2555,6 +2861,11 @@
       }
       if (m.last_seen) { bits.push("最近 " + new Date(m.last_seen).toLocaleString()); }
       card.querySelector(".card-meta").textContent = bits.join(" · ");
+      appendMountFacts(
+        card.querySelector(".mcp-facts"),
+        card.querySelector(".mcp-details-host"),
+        m
+      );
 
       var actions = card.querySelector(".card-actions");
       if (m.public_url) {
@@ -2585,32 +2896,58 @@
       toggle.textContent = m.disabled ? "启用" : "禁用";
       toggle.addEventListener("click", function () {
         var verb = m.disabled ? "启用" : "禁用";
-        if (!m.disabled && !window.confirm("禁用挂载「" + (m.name || m.slug) + "」？\n公网入口会立即返回 403，节点与地址保留。")) { return; }
         var path = "/api/mounts/" + encodeURIComponent(m.slug) + (m.disabled ? "/enable" : "/disable");
         var opts = { method: "POST", headers: { "Content-Type": "application/json" } };
         if (!m.disabled) { opts.body = JSON.stringify({ reason: "console" }); }
-        api(path, opts).then(function (res) {
-          if (!res.ok) { throw new Error("HTTP " + res.status); }
-          notify("已" + verb + "：" + (m.name || m.slug), "ok");
-          loadMounts();
-        }).catch(function (err) { notify(verb + "失败：" + err, "error"); });
+        function apply() {
+          return api(path, opts).then(function (res) {
+            if (!res.ok) { throw new Error("HTTP " + res.status); }
+            notify("已" + verb + "：" + (m.name || m.slug), "ok");
+            loadMounts();
+          });
+        }
+        if (m.disabled) {
+          apply().catch(function (err) { notify(verb + "失败：" + err, "error"); });
+          return;
+        }
+        confirmDestructive({
+          title: "禁用挂载？",
+          message: "禁用挂载「" + (m.name || m.slug) + "」？\n公网入口会立即返回 403，节点与地址保留。",
+          trigger: toggle,
+          onConfirm: apply
+        });
       });
       actions.appendChild(toggle);
+
+      // UX-06: 仅离线挂载存在删除动作，因此只有它需要 ⋯；
+      // 菜单项使用 danger 文本色，而不是实心红按钮。
       if (m.stale) {
-        var del = document.createElement("button");
-        del.className = "btn danger sm";
-        del.type = "button";
-        del.textContent = "删除";
-        del.addEventListener("click", function () {
-          if (!window.confirm("删除离线挂载「" + (m.name || m.slug) + "」？\n地址将不再保留，持有该 URL 的客户端会得到 404。")) { return; }
-          api("/api/mounts/" + encodeURIComponent(m.slug), { method: "DELETE" }).then(function (res) {
-            if (!res.ok) { throw new Error("HTTP " + res.status); }
-            notify("已删除挂载：" + (m.name || m.slug), "ok");
-            loadMounts();
-          }).catch(function (err) { notify("删除失败：" + err, "error"); });
+        actions.insertAdjacentHTML("beforeend",
+          '<button class="btn ghost sm s-more" type="button" data-more aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>' +
+          '<div class="s-menu" role="menu" aria-label="MCP 挂载操作" hidden>' +
+          '<button class="menu-item danger" type="button" role="menuitem" data-delete>删除离线挂载</button>' +
+          '</div>');
+        var mountMenu = actions.querySelector(".s-menu");
+        var mountMore = actions.querySelector("[data-more]");
+        bindCardMenu(card, mountMenu);
+        mountMenu.querySelector("[data-delete]").addEventListener("click", function () {
+          closeSessionMenus(false);
+          confirmDestructive({
+            title: "删除离线挂载？",
+            message: "删除离线挂载「" + (m.name || m.slug) + "」？\n地址将不再保留，持有该 URL 的客户端会得到 404。",
+            trigger: mountMore,
+            onConfirm: function () {
+              return api("/api/mounts/" + encodeURIComponent(m.slug), { method: "DELETE" })
+                .then(function (res) {
+                  if (!res.ok) { throw new Error("HTTP " + res.status); }
+                  notify("已删除挂载：" + (m.name || m.slug), "ok");
+                  loadMounts();
+                });
+            }
+          });
         });
-        actions.appendChild(del);
       }
+
       list.appendChild(card);
     });
   }
@@ -2764,19 +3101,26 @@
       var actions = card.querySelector(".card-actions");
       if (!t.revoked) {
         var revoke = document.createElement("button");
-        revoke.className = "btn danger sm";
+        revoke.className = "btn ghost sm";
         revoke.type = "button";
         revoke.textContent = "撤销";
         revoke.addEventListener("click", function () {
-          if (!window.confirm("撤销令牌「" + (t.name || t.id) + "」？\n使用它的客户端下一次请求即 401。")) { return; }
-          api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" + encodeURIComponent(t.id), {
-            method: "DELETE",
-          }).then(function (res) {
-            if (!res.ok) { throw new Error("HTTP " + res.status); }
-            notify("令牌已撤销：" + (t.name || t.id), "ok");
-            loadMountTokens();
-            loadMounts();
-          }).catch(function (err) { notify("撤销失败：" + err, "error"); });
+          confirmDestructive({
+            title: "撤销 MCP 令牌？",
+            message: "撤销令牌「" + (t.name || t.id) + "」？\n使用它的客户端下一次请求即 401。",
+            trigger: revoke,
+            confirmText: "撤销",
+            onConfirm: function () {
+              return api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" + encodeURIComponent(t.id), {
+                method: "DELETE",
+              }).then(function (res) {
+                if (!res.ok) { throw new Error("HTTP " + res.status); }
+                notify("令牌已撤销：" + (t.name || t.id), "ok");
+                loadMountTokens();
+                loadMounts();
+              });
+            }
+          });
         });
         actions.appendChild(revoke);
       } else {
@@ -2785,14 +3129,21 @@
         del.type = "button";
         del.textContent = "删除记录";
         del.addEventListener("click", function () {
-          if (!window.confirm("彻底删除已撤销令牌「" + (t.name || t.id) + "」的记录？")) { return; }
-          api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" +
-              encodeURIComponent(t.id) + "?purge=1", { method: "DELETE" })
-            .then(function (res) {
-              if (!res.ok) { throw new Error("HTTP " + res.status); }
-              notify("令牌记录已删除", "ok");
-              loadMountTokens();
-            }).catch(function (err) { notify("删除失败：" + err, "error"); });
+          confirmDestructive({
+            title: "删除令牌记录？",
+            message: "彻底删除已撤销令牌「" + (t.name || t.id) + "」的记录？\n此操作不可恢复。",
+            trigger: del,
+            confirmText: "删除记录",
+            onConfirm: function () {
+              return api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" +
+                  encodeURIComponent(t.id) + "?purge=1", { method: "DELETE" })
+                .then(function (res) {
+                  if (!res.ok) { throw new Error("HTTP " + res.status); }
+                  notify("令牌记录已删除", "ok");
+                  loadMountTokens();
+                });
+            }
+          });
         });
         actions.appendChild(del);
       }
@@ -3018,6 +3369,21 @@
     var d = validTokenTime(raw);
     if (!d) { return "—"; }
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  // formatBytes renders a byte count compactly; null/undefined yields "—".
+  function formatBytes(n) {
+    if (n == null || isNaN(n)) { return "—"; }
+    if (n < 1024) { return n + "B"; }
+    if (n < 1024 * 1024) { return (n / 1024).toFixed(1) + "KB"; }
+    return (n / (1024 * 1024)).toFixed(1) + "MB";
+  }
+
+  // truncate caps a string to max characters, appending an ellipsis when cut.
+  function truncate(s, max) {
+    s = String(s == null ? "" : s);
+    if (s.length <= max) { return s; }
+    return s.slice(0, max) + "…";
   }
 
   function applyLogTabUI() {
@@ -6486,25 +6852,38 @@
   var refreshNodes = el("refresh-nodes");
   if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
 
-  // One-click cleanup of offline snapshots (stale entries restored from
-  // registry.json). One bulk call removes every stale node at once; the
-  // per-node "移除" buttons stay available for selective cleanup.
+  // UX-06: 离线快照清理改为「描边按钮 + 站内确认」，并在确认文案里
+  // 列出受影响节点；不再是实心红按钮 + 原生 confirm。
   var clearStale = el("clear-stale");
   if (clearStale) {
     clearStale.addEventListener("click", function () {
-      var staleCount = lastNodes.filter(function (n) { return n.stale; }).length;
-      if (!staleCount) { return; }
-      if (!window.confirm("清除全部 " + staleCount + " 个离线快照节点？\n这些节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。")) { return; }
-      clearStale.disabled = true;
-      api("/api/nodes?stale=1", { method: "DELETE" })
-        .then(function (res) {
-          if (res.status === 401) { setAuthed(false); return; }
-          if (!res.ok) { notify("清除失败：HTTP " + res.status, "error"); return; }
-          notify("已清除 " + staleCount + " 个离线快照节点", "ok");
-          loadNodes();
-        })
-        .catch(function (err) { notify("清除失败：" + err, "error"); })
-        .finally(function () { clearStale.disabled = false; });
+      var staleNodes = lastNodes.filter(function (n) { return n.stale; });
+      if (!staleNodes.length) { return; }
+      var preview = staleNodes.slice(0, 5).map(function (n) {
+        var hbMs = n.last_heartbeat ? new Date(n.last_heartbeat).getTime() : NaN;
+        return "• " + nodeDisplayName(n) +
+          (isNaN(hbMs) ? "" : "（最后活跃 " + new Date(hbMs).toLocaleString() + "）");
+      }).join("\n");
+      if (staleNodes.length > 5) {
+        preview += "\n• 另有 " + (staleNodes.length - 5) + " 个节点";
+      }
+      closeSessionMenus(false);
+      confirmDestructive({
+        title: "清除全部离线快照？",
+        message: "将删除 " + staleNodes.length + " 个离线节点及其会话条目。\n\n" +
+          preview + "\n\nagent 重新上线会自动重新注册。",
+        trigger: clearStale,
+        confirmText: "清除全部",
+        onConfirm: function () {
+          return api("/api/nodes?stale=1", { method: "DELETE" })
+            .then(function (res) {
+              if (res.status === 401) { setAuthed(false); return; }
+              if (!res.ok) { throw new Error("HTTP " + res.status); }
+              notify("已清除 " + staleNodes.length + " 个离线快照节点", "ok");
+              loadNodes();
+            });
+        }
+      });
     });
   }
 
@@ -7215,7 +7594,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=63").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=67").catch(function () {});
     });
   }
 

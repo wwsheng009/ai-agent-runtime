@@ -867,6 +867,30 @@ body.sb-collapsed .notify-savebar { left: calc(58px + 24px); }
 .btn.danger { background: var(--danger); color: #fff; font-weight: 500; }
 .btn.danger:hover { background: color-mix(in srgb, var(--danger) 86%, #000); }
 
+/* danger-outline: 描边危险样式 - 用于确认弹窗的确认按钮，避免实心红的视觉干扰 */
+.btn.danger-outline {
+  background: transparent;
+  border: 2px solid var(--danger);
+  color: var(--danger-ink);
+  font-weight: 500;
+}
+
+.btn.danger-outline:hover {
+  background: var(--danger);
+  color: white;
+}
+
+.btn.danger-outline:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 禁用状态保持描边 */
+.btn.danger-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn.sm { height: var(--ctl-h-sm); padding: 0 11px; font-size: 12.5px; }
 
 input, .select {
@@ -926,6 +950,20 @@ form { display: flex; gap: 8px; margin-top: 12px; }
 .field-label { font-size: 12.5px; font-weight: 500; color: var(--fg-muted); }
 .field-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--fg-faint); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+/* UX-06 通用确认框：紧凑宽度，正文保留换行并限高滚动。 */
+.modal.modal-sm { max-width: 440px; }
+.modal-body { margin-top: 10px; }
+#confirm-message {
+  margin: 0;
+  white-space: pre-line;
+  line-height: 1.6;
+  font-size: 13px;
+  color: var(--fg-muted);
+  max-height: 45vh;
+  overflow-y: auto;
+}
+#confirm-modal .modal-actions { margin-top: 16px; }
 
 /* Session detail dialog: label/value rows + an optional last-message block. */
 .modal.modal-lg { max-width: 540px; }
@@ -1284,6 +1322,8 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 @media (pointer: coarse) {
   .btn { min-height: 44px; }
   .btn.sm { min-height: 40px; }
+  /* 卡片溢出菜单（设备 / MCP / 离线快照）同样要满足 44px 触控底线。 */
+  .card-actions .s-more { min-width: 44px; min-height: 44px; }
   .menu-item { min-height: 44px; display: flex; align-items: center; }
   .nav-item { padding: 12px; min-height: 44px; }
   body.sb-collapsed .nav-item { min-height: 44px; }
@@ -2266,7 +2306,72 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 }
 .mcp-card .mcp-slug code { font-size: 13px; }
 .mcp-card .card-actions { flex-wrap: wrap; }
+.mcp-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin-top: 10px;
+}
+.mcp-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+}
+.mcp-fact-label {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+.mcp-fact-value {
+  min-width: 0;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.mcp-fact-value:not(code) { font-family: inherit; }
+.mcp-details {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.mcp-details summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+  user-select: none;
+}
+.mcp-details summary:hover { color: var(--fg); }
+.mcp-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.mcp-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.mcp-detail-empty {
+  margin: 8px 0 0;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
 .status-chip.chip-offline { background: var(--panel-2); color: var(--fg-muted); }
+
+@media (max-width: 640px) {
+  .mcp-facts { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* MCP mount token dialog */
 .mcp-token-list-head {
