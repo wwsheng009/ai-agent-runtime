@@ -112,10 +112,21 @@ const SCREEN_OK = {
   message_window: { total: 1209, start: 1207, end: 1209, limit: 40, has_more: true },
 };
 
+const SCREEN_ETAG = 'W/"screen-v1"';
+let screenETagEnabled = false;
+let screenETagHits = 0;
+let screenConditionalRequests = 0;
 const fetchLog = [];
-const jsonResponse = (obj, status = 200) => ({
+const jsonResponse = (obj, status = 200, headers = {}) => ({
   ok: status >= 200 && status < 300,
   status,
+  headers: {
+    get(name) {
+      const wanted = String(name || '').toLowerCase();
+      const key = Object.keys(headers).find((k) => k.toLowerCase() === wanted);
+      return key ? headers[key] : null;
+    },
+  },
   json: async () => obj,
   text: async () => JSON.stringify(obj),
 });
@@ -129,7 +140,16 @@ window.fetch = async (input, init) => {
   if (url.includes('/api/connectors')) return jsonResponse({ connectors: [] });
   if (url.includes('/api/push/config')) return jsonResponse({ enabled: false });
   if (url.includes('/api/presence')) return jsonResponse({ ok: true });
-  if (url.includes('/web/api/screen')) return jsonResponse(SCREEN_OK);
+  if (url.includes('/web/api/screen')) {
+    const headers = (init && init.headers) || {};
+    const ifNoneMatch = headers['If-None-Match'] || headers['if-none-match'] || '';
+    if (ifNoneMatch === SCREEN_ETAG) screenConditionalRequests++;
+    if (screenETagEnabled && ifNoneMatch === SCREEN_ETAG) {
+      screenETagHits++;
+      return jsonResponse({}, 304, { ETag: SCREEN_ETAG });
+    }
+    return jsonResponse(SCREEN_OK, 200, { ETag: SCREEN_ETAG });
+  }
   if (url.includes('/web/api/input')) return jsonResponse({ status: 'queued' });
   if (url.includes('/web/api/statusbar')) {
     // 真实结构：{available, segments:[{kind,text}], full_line}（/web/api/statusbar）
@@ -228,6 +248,8 @@ const env = (src) => ({
 
   const listText = () => (doc.querySelector('#chat-list') || {}).textContent || '';
   check('历史消息已渲染', listText().includes('HISTORY-ASSISTANT'));
+  check('screen 请求使用结构化精简负载',
+    fetchLog.some((u) => u.includes('/web/api/screen') && u.includes('compact=1')));
 
   // 7a) 折叠默认态（必须在任何 busy 渲染之前检查——自动展开状态机会在
   //     busy=true 时把「最后一块」展开，那是有意行为，不能污染默认态断言）。
@@ -243,6 +265,9 @@ const env = (src) => ({
   const shortTgl0 = shortTool0 && shortTool0.closest('.chat-msg').querySelector('.chat-tool-toggle');
   Object.defineProperty(longTool0, 'scrollHeight', { configurable: true, value: 4000 });
   Object.defineProperty(longTool0, 'clientHeight', { configurable: true, value: 130 });
+  // jsdom 没有布局；给短工具行也一个正高度，模拟真实可见面板。否则
+  // toolMeasurePending 会永远为真，无法验证「相同快照不扫描」。
+  Object.defineProperty(shortTool0, 'clientHeight', { configurable: true, value: 50 });
   // 面板初开时 clientHeight 为 0（modal 尚未排版），测量被有意推迟；此刻面板已可见，
   // 手动重跑同一条测量路径（与 chatRefreshToolToggles 等价）。
   // 溢出分支的完整路径（is-off 移除 + 保持折叠 + aria=false）在生产由
@@ -263,11 +288,22 @@ const env = (src) => ({
   await sleep(20);
   es.emit('turn_start', { ...env('turn_start'), turn_id: 'turn-x' });
   await sleep(20);
+  const chatList = doc.getElementById('chat-list');
+  const historyRow = chatList.querySelector('.chat-msg');
+  let chatListQueryCount = 0;
+  const originalChatListQuery = chatList.querySelectorAll.bind(chatList);
+  chatList.querySelectorAll = function (...args) {
+    chatListQueryCount++;
+    return originalChatListQuery(...args);
+  };
   es.emit('assistant_delta', { ...env('assistant_delta'), turn_id: 'turn-x', text: 'LIVE-A' });
   await sleep(40);
   es.emit('assistant_delta', { ...env('assistant_delta'), turn_id: 'turn-x', text: 'LIVE-B' });
   await sleep(60);
   check('live 增量进入 DOM', listText().includes('LIVE-ALIVE-B'), JSON.stringify(listText().replace(/\s+/g, ' ').slice(0, 120)));
+  check('流式增量不扫描历史行', chatListQueryCount === 0 && historyRow.isSameNode(chatList.querySelector('.chat-msg')),
+    `querySelectorAll=${chatListQueryCount}`);
+  chatList.querySelectorAll = originalChatListQuery;
 
   // 2) 状态栏：动态状态（dynamic_status）——字段 {active,text,role,interruptible,elapsed_ms}
   const dyn = doc.querySelector('#chat-dyn-status');
@@ -305,8 +341,20 @@ const env = (src) => ({
   const countScreen = () => fetchLog.filter((u) => u.includes('/web/api/screen')).length;
   const before = countScreen();
   es.emit('heartbeat', { ...env('heartbeat'), session_busy: true, session_active: true });
-  await sleep(2500);
+  await sleep(2300);
   check('忙时兜底轮询拉快照', countScreen() > before, `screen ${before} -> ${countScreen()}`);
+  // 第一轮轮询已完成工具行测量；下一轮返回完全相同的快照时必须整段跳过，
+  // 而不是再做一次 querySelectorAll + DOM 收敛。
+  const pollScanBefore = chatListQueryCount;
+  chatList.querySelectorAll = function (...args) {
+    chatListQueryCount++;
+    return originalChatListQuery(...args);
+  };
+  await sleep(2100);
+  check('内容未变的轮询跳过全量 DOM 扫描',
+    chatListQueryCount === pollScanBefore && historyRow.isSameNode(chatList.querySelector('.chat-msg')),
+    `querySelectorAll=${pollScanBefore} -> ${chatListQueryCount}`);
+  chatList.querySelectorAll = originalChatListQuery;
   es.emit('heartbeat', { ...env('heartbeat'), session_busy: false, session_active: true });
   // busy=false 会触发一次 1s 尾随收敛刷新；先等它落地，再验证之后不再轮询。
   await sleep(1300);
@@ -350,6 +398,7 @@ const env = (src) => ({
   }
 
   // 忙时活跃回合的最后一块自动展开（heartbeat session_busy=true 后的快照刷新）：
+  screenETagEnabled = true;
   es.emit('heartbeat', { ...env('heartbeat'), session_busy: true, session_active: true });
   await sleep(2600);
   const rowsNow = [...doc.querySelectorAll('#chat-list .chat-msg')];
@@ -359,6 +408,9 @@ const env = (src) => ({
     (lastSpecial.querySelector('details.chat-reasoning') || {}).open ||
     (lastSpecial.querySelector('.chat-tool-output') || {}).classList.contains('chat-expanded')),
   lastSpecial && lastSpecial.className.replace('chat-msg ', ''));
+  check('ETag 命中 304 时跳过整份快照重放',
+    screenETagHits > 0 && historyRow.isSameNode(chatList.querySelector('.chat-msg')),
+    `304=${screenETagHits} conditional=${screenConditionalRequests}`);
 
   finish();
 

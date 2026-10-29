@@ -3876,6 +3876,8 @@
   var CHAT_PAGE_LIMIT = 40;    // 首屏与实时刷新窗口（条）
   var CHAT_OLDER_LIMIT = 60;   // 「加载更早消息」每页条数
   var CHAT_REFRESH_MS = 1000;  // 快照刷新尾随节流：事件风暴下每秒最多一次
+  var CHAT_STREAM_RENDER_MS = 50; // 实时文本合帧上限：20fps 足够阅读，避免每个 token
+                                  // 都重跑 Markdown 解析与全列表布局。
   var CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
   var CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
                                // chatApplyWindow），长跑会话会一直往后长，到顶就从
@@ -4442,6 +4444,7 @@
   function chatSetBusy(busy) {
     var st = chatState;
     if (!st) { return; }
+    var wasBusy = st.busy;
     st.busy = !!busy;
     if (st.busy && !st.busyTimer) {
       st.busyTimer = setInterval(function () {
@@ -4450,6 +4453,13 @@
     } else if (!st.busy && st.busyTimer) {
       clearInterval(st.busyTimer);
       st.busyTimer = null;
+    }
+    // 活跃回合的「最后一块推理/工具自动展开」是忙闲状态的呈现，不应依赖下一份
+    // 快照恰好变化才生效（相同快照会被 chatApplyWindow 跳过）。只在 false→true
+    // 的边沿扫描一次，避免每轮轮询重复走整份 DOM。
+    if (!wasBusy && st.busy) {
+      var host = el("chat-list");
+      if (host) { chatApplyLiveTail(host, true); }
     }
   }
 
@@ -4614,6 +4624,9 @@
       seq: 0,
       screenBusy: false,
       lastScreenAt: 0,
+      screenETag: "",
+      renderTimer: null,
+      toolMeasurePending: false,
       follow: true,
       olderBusy: false,
       sending: false,
@@ -4667,7 +4680,6 @@
       if (st.screenBusy) { return; }
       if (st.lastScreenAt && Date.now() - st.lastScreenAt < 800) { return; }
       st.screenBusy = true;
-      st.lastScreenAt = Date.now();
     }
     if (o.older) {
       if (st.olderBusy || !st.win || !st.win.has_more) { return; }
@@ -4677,7 +4689,8 @@
     st.seq++;
     var seq = st.seq;
     var url = "/n/" + encodeURIComponent(st.node.node_id) +
-      "/web/api/screen?format=json&msg_limit=" + (o.older ? CHAT_OLDER_LIMIT : (limit || CHAT_PAGE_LIMIT));
+      "/web/api/screen?format=json&compact=1&msg_limit=" +
+      (o.older ? CHAT_OLDER_LIMIT : (limit || CHAT_PAGE_LIMIT));
     if (o.older) {
       // 游标必须是**本地最老一条**的绝对索引（msgStart），不能取上一份服务端窗口的
       // start：刷新会把 win 推回「最新 N 条」窗口，此时 win.start > msgStart，用
@@ -4687,20 +4700,48 @@
       var cursor = typeof st.msgStart === "number" ? st.msgStart : st.win.start;
       url += "&msg_before=" + cursor;
     }
-    api(url, { cache: "no-store" }).then(function (res) {
+    var requestOpts = { cache: "no-store" };
+    // ETag 由节点对响应体内容寻址。显式回传 If-None-Match 且不让浏览器持久化
+    // transcript：内容未变时节点回 304，本次跳过 JSON 解析和 DOM 收敛；内容变化
+    // 时 ETag 必然变化，不存在旧内容误命中。
+    if (!o.older && st.screenETag) {
+      requestOpts.headers = { "If-None-Match": st.screenETag };
+    }
+    api(url, requestOpts).then(function (res) {
+      var etag = "";
+      if (res.headers && typeof res.headers.get === "function") {
+        etag = res.headers.get("ETag") || "";
+      }
+      if (res.status === 304) {
+        return { notModified: true, etag: etag || st.screenETag };
+      }
       if (!res.ok) { throw new Error("HTTP " + res.status); }
-      return res.json();
-    }).then(function (data) {
+      return res.json().then(function (data) {
+        return { data: data, etag: etag };
+      });
+    }).then(function (result) {
       // 翻页锁先放开：请求被刷新取代（seq 失配）时同样要解锁，否则 olderBusy 永久
       // 卡在 true，本次打开里「加载更早消息」与滚到顶自动翻页一起失效。
       st.olderBusy = false;
       // 面板已关闭 / 已换会话 / 已有更新请求 → 这一份作废。
       if (chatState !== st || st.seq !== seq) { return; }
-      chatApplyWindow(data, o.older);
+      st.lastScreenAt = Date.now();
+      if (result.etag) { st.screenETag = result.etag; }
+      if (result.notModified) {
+        // 304 说明权威内容没变；但首次打开时列表可能尚未完成排版，工具行测量
+        // 会留待下一轮。这里只补这一项局部工作，不再遍历/重写整份消息列表。
+        if (st.toolMeasurePending) {
+          var host = el("chat-list");
+          if (host) { chatRefreshToolToggles(host); }
+        }
+        return;
+      }
+      chatApplyWindow(result.data, o.older);
     }).catch(function (err) {
       st.olderBusy = false;
       chatUpdateOlder();
       if (chatState !== st || st.seq !== seq) { return; }
+      st.lastScreenAt = Date.now();
       chatFail("暂时无法加载这段会话。",
         "GET " + url + "\n" + (err && err.message ? err.message : String(err)));
     }).finally(function () {
@@ -4714,6 +4755,7 @@
     st.failed = false;
     st.available = true;
     st.lastScreenAt = 0;
+    st.screenETag = "";
     chatNotice("");
     chatPlaceholder("正在重新加载消息…");
     chatSetStatus("重新加载…", "");
@@ -4734,6 +4776,19 @@
       { label: "重试", run: chatRetryLoad },
       { label: "复制诊断", run: function () { copyText(diagnostics); } },
     ]);
+  }
+
+  // chatMessagesEqual 只比较面板实际渲染的字段。刷新窗口内容完全相同时跳过
+  // 整份行遍历；role/content 任一变化仍走完整 render，语义不缩水。
+  function chatMessagesEqual(a, b) {
+    if (a === b) { return true; }
+    if (!a || !b || a.length !== b.length) { return false; }
+    for (var i = 0; i < a.length; i++) {
+      var x = a[i], y = b[i];
+      if (x === y) { continue; }
+      if (!x || !y || x.role !== y.role || x.content !== y.content) { return false; }
+    }
+    return true;
   }
 
   // chatApplyWindow 把一次 screen 响应落进面板状态。两条写入路径：
@@ -4776,6 +4831,11 @@
       total: typeof win.total === "number" ? win.total : end,
       has_more: !!win.has_more,
     };
+    var previousMessages = st.messages;
+    var previousStart = st.msgStart;
+    var previousPendingLength = st.pending.length;
+    var liveWasDone = !!(st.live && st.live.done);
+    var needsRebuild = false;
     if (older && typeof st.msgStart === "number" && end === st.msgStart && start < st.msgStart) {
       st.messages = messages.concat(st.messages);
       st.msgStart = start;
@@ -4788,12 +4848,25 @@
       st.messages = messages;
       st.msgStart = start;
       st.rows = {};
+      needsRebuild = true;
     }
     chatConfirmPending();
     // 权威行已经接管这一回合：实时气泡退场，避免同一段内容渲染两次。
     if (st.live.done) { st.live = chatEmptyLive(); }
     chatTrimWindow();
-    chatRender();
+    var messagesChanged = needsRebuild || st.msgStart !== previousStart ||
+      !chatMessagesEqual(previousMessages, st.messages);
+    if (messagesChanged) {
+      chatRender();
+    } else if (st.pending.length !== previousPendingLength || liveWasDone) {
+      // 只有待确认回显或实时气泡状态变了：局部补丁即可，历史行保持原样。
+      chatPatchLive();
+    } else if (st.toolMeasurePending) {
+      // 旧节点可能不返回 ETag（每次都是 200 + 相同内容）；测量尚未完成时仍要
+      // 在可见布局上补一次，不能因为快照相同而永久跳过。
+      var host = el("chat-list");
+      if (host) { chatRefreshToolToggles(host); }
+    }
     chatUpdateOlder();
   }
 
@@ -4842,6 +4915,19 @@
       } else {
         row.innerHTML = '<span class="chat-msg-role"></span><div class="chat-bubble"></div>';
       }
+      // Cache the stable child lookups once per row. During a live turn this
+      // function runs up to 20×/s; repeated querySelector calls across the whole
+      // transcript were pure overhead.
+      row.__roleEl = row.querySelector(".chat-msg-role");
+      row.__bubble = row.querySelector(".chat-bubble");
+      if (o.collapse && role === "reasoning") {
+        row.__reasonEl = row.querySelector(".chat-reasoning");
+        row.__reasonSummary = row.querySelector(".chat-reasoning summary");
+        row.__reasonBody = row.querySelector(".chat-reasoning-body");
+      } else if (o.collapse && role === "tool") {
+        row.__toolOutput = row.querySelector(".chat-tool-output");
+        st.toolMeasurePending = true;
+      }
       st.rows[key] = row;
     }
     row.__key = key;
@@ -4849,15 +4935,15 @@
     if (o.pending) { cls += " is-pending"; }
     if (o.streaming) { cls += " is-streaming"; }
     if (row.className !== cls) { row.className = cls; }
-    var bubble = row.querySelector(".chat-bubble");
+    var bubble = row.__bubble;
 
-    var roleEl = row.querySelector(".chat-msg-role");
+    var roleEl = row.__roleEl;
     var roleText = roleLabelOf(role) + (o.pending ? " · 发送中" : "");
     if (o.collapse && role === "tool") {
       // 工具行的折叠控件长在抬头行里：先写角色文本再追加控件（setText 只在文本
       // 变化时写入，不会反复清掉控件）。
       setText(roleEl, roleText);
-      if (!row.querySelector(".chat-tool-toggle")) {
+      if (!row.__toolToggle) {
         var tgl = document.createElement("button");
         tgl.type = "button";
         tgl.className = "chat-tool-toggle";
@@ -4867,17 +4953,17 @@
           '<span class="chat-tool-icon" aria-hidden="true">▼</span>';
         roleEl.appendChild(document.createTextNode(" "));
         roleEl.appendChild(tgl);
+        row.__toolToggle = tgl;
       }
     } else {
       setText(roleEl, roleText);
     }
 
     if (o.collapse && role === "reasoning") {
-      setText(row.querySelector(".chat-reasoning summary"),
-        roleLabelOf(role) + "过程");
-      setText(row.querySelector(".chat-reasoning-body"), content || "");
+      setText(row.__reasonSummary, roleLabelOf(role) + "过程");
+      setText(row.__reasonBody, content || "");
     } else if (o.collapse && role === "tool") {
-      setText(row.querySelector(".chat-tool-output"), content || "");
+      setText(row.__toolOutput, content || "");
     } else {
       setMessageHTML(bubble, content || "");
     }
@@ -4897,7 +4983,31 @@
     return row;
   }
 
-  // chatRender 组装列表：权威行 → 实时气泡（推理/回答/工具）→ 本地待确认回显。
+  // chatLiveRows 只构建实时气泡。结构快照与逐字增量共用这一份顺序定义：
+  // 推理 → 助手正文/图片 → 工具状态。
+  function chatLiveRows(st) {
+    var rows = [];
+    if (st.live.reasoning) {
+      rows.push(chatRowElement(st, "live:reasoning", "reasoning", st.live.reasoning,
+        { streaming: st.live.streaming }));
+    }
+    // 只有真的收到助手正文（或图片）时才插实时助手行。turn_start 就会把
+    // streaming 置真，但一回合可能长时间停在推理/工具阶段；此时渲染一个空的
+    // 「助手」气泡会一直占在列表底部（表现为一行只有标签、没有内容），而推理/
+    // 工具行与状态栏已经表达了进度。streaming 只用于已有正文时的光标动画。
+    var liveImages = st.live.images || [];
+    if (st.live.assistant || liveImages.length) {
+      rows.push(chatRowElement(st, "live:assistant", "assistant", st.live.assistant,
+        { streaming: st.live.streaming, images: liveImages }));
+    }
+    if (st.live.tool) {
+      rows.push(chatRowElement(st, "live:tool", "tool", st.live.tool, {}));
+    }
+    return rows;
+  }
+
+  // chatRender 是全量收敛路径：只在窗口/消息集合变化后调用。它负责结构行、
+  // 折叠测量和用户展开账本的恢复。
   function chatRender() {
     var st = chatState;
     var host = el("chat-list");
@@ -4908,22 +5018,7 @@
       // 服务端历史行才带折叠结构（推理面板 / 工具折叠）。
       desired.push(chatRowElement(st, "srv:" + (base + i), m.role, m.content, { collapse: true }));
     });
-    if (st.live.reasoning) {
-      desired.push(chatRowElement(st, "live:reasoning", "reasoning", st.live.reasoning,
-        { streaming: st.live.streaming }));
-    }
-    // 只有真的收到助手正文（或图片）时才插实时助手行。turn_start 就会把
-    // streaming 置真，但一回合可能长时间停在推理/工具阶段；此时渲染一个空的
-    // 「助手」气泡会一直占在列表底部（表现为一行只有标签、没有内容），而推理/
-    // 工具行与状态栏已经表达了进度。streaming 只用于已有正文时的光标动画。
-    var liveImages = st.live.images || [];
-    if (st.live.assistant || liveImages.length) {
-      desired.push(chatRowElement(st, "live:assistant", "assistant", st.live.assistant,
-        { streaming: st.live.streaming, images: liveImages }));
-    }
-    if (st.live.tool) {
-      desired.push(chatRowElement(st, "live:tool", "tool", st.live.tool, {}));
-    }
+    desired = desired.concat(chatLiveRows(st));
     st.pending.forEach(function (text, i) {
       desired.push(chatRowElement(st, "pending:" + i, "user", text, { pending: true }));
     });
@@ -4936,15 +5031,16 @@
     if (!desired.length) { chatPlaceholder("暂无消息。"); }
     // 折叠后处理：测量工具行溢出 → 启用/隐藏控件；按用户账本恢复手动展开；
     // 忙时活跃回合的最后一块自动展开、其余折回（与 micro web client 同一状态机）。
-    chatRefreshToolToggles(host);
-    Object.keys(st.rows).forEach(function (key) {
-      if (!chatUserExpanded[key]) { return; }
-      var row = st.rows[key];
-      var det = row.querySelector(".chat-reasoning");
-      if (det && !det.open) { det.open = true; }
-      var out = row.querySelector(".chat-tool-output");
-      if (out && out.classList.contains("chat-collapsed")) { chatSetToolExpanded(row, true); }
-    });
+    if (st.toolMeasurePending) { chatRefreshToolToggles(host); }
+    if (Object.keys(chatUserExpanded).length) {
+      Object.keys(st.rows).forEach(function (key) {
+        if (!chatUserExpanded[key]) { return; }
+        var row = st.rows[key];
+        if (row.__reasonEl && !row.__reasonEl.open) { row.__reasonEl.open = true; }
+        var out = row.__toolOutput;
+        if (out && out.classList.contains("chat-collapsed")) { chatSetToolExpanded(row, true); }
+      });
+    }
     chatApplyLiveTail(host, st.busy);
     // 翻页前插：按新增高度补偿滚动位置，阅读不被顶走。
     if (st.scrollRestore != null) {
@@ -4955,14 +5051,60 @@
     chatSyncJump();
   }
 
-  // chatScheduleRender 把高频增量合并到一帧：逐字流不该每帧重排整份列表。
-  var chatRenderQueued = false;
+  // chatPatchLive 是流式热路径：历史行集合未变时只补实时气泡与待确认回显，
+  // 不重新遍历权威消息内容、不扫描折叠状态，也不重写未变化的 DOM。
+  function chatPatchLive() {
+    var st = chatState;
+    var host = el("chat-list");
+    if (!st || !host) { return; }
+    var desired = [];
+    var pendingRows = [];
+    var base = typeof st.msgStart === "number" ? st.msgStart : 0;
+    var missing = false;
+    st.messages.forEach(function (m, i) {
+      var row = st.rows["srv:" + (base + i)];
+      if (!row) { missing = true; return; }
+      desired.push(row);
+    });
+    st.pending.forEach(function (text, i) {
+      var row = st.rows["pending:" + i];
+      if (!row) { missing = true; return; }
+      pendingRows.push(row);
+    });
+    if (missing) {
+      // 首份 screen 尚未落地或结构刚重定位：交给全量路径建骨架。
+      chatRender();
+      return;
+    }
+    desired = desired.concat(chatLiveRows(st), pendingRows);
+    reconcileChildren(host, desired);
+    var keep = {};
+    desired.forEach(function (row) { keep[row.__key] = true; });
+    Object.keys(st.rows).forEach(function (key) {
+      if (!keep[key]) { delete st.rows[key]; }
+    });
+    if (!desired.length) { chatPlaceholder("暂无消息。"); }
+    if (st.follow) { host.scrollTop = host.scrollHeight; }
+    chatSyncJump();
+  }
+
+  // chatScheduleRender 把高频增量合并到 50ms 窗口：逐字流不该每个 token 都重跑
+  // Markdown 解析。50ms（20fps）对阅读已经连续，CPU 峰值则下降一个数量级。
   function chatScheduleRender() {
-    if (chatRenderQueued) { return; }
-    chatRenderQueued = true;
-    var run = function () { chatRenderQueued = false; chatRender(); };
-    if (typeof window.requestAnimationFrame === "function") { window.requestAnimationFrame(run); }
-    else { setTimeout(run, 16); }
+    var st = chatState;
+    if (!st || st.renderTimer) { return; }
+    st.renderTimer = setTimeout(function () {
+      if (chatState !== st) { return; }
+      st.renderTimer = null;
+      chatPatchLive();
+    }, CHAT_STREAM_RENDER_MS);
+  }
+
+  function chatCancelRender() {
+    var st = chatState;
+    if (!st || !st.renderTimer) { return; }
+    clearTimeout(st.renderTimer);
+    st.renderTimer = null;
   }
 
   /* ── 折叠交互（与 micro web client chat.js 同一状态机） ────────────── */
@@ -4977,11 +5119,12 @@
   // 不打 ready 标记，下次渲染重测。
   function chatRefreshToolToggles(host) {
     var outputs = host.querySelectorAll(".chat-tool-output");
+    var pending = false;
     for (var i = 0; i < outputs.length; i++) {
       var out = outputs[i];
       var row = out.closest(".chat-msg");
       if (!row || row.__toggleReady) { continue; }
-      var tgl = row.querySelector(".chat-tool-toggle");
+      var tgl = row.__toolToggle;
       if (!tgl) { continue; }
       if (out.scrollHeight > out.clientHeight) {
         tgl.classList.remove("is-off");
@@ -4992,12 +5135,15 @@
         tgl.setAttribute("aria-expanded", "true");
       }
       if (out.clientHeight > 0) { row.__toggleReady = true; }
+      else { pending = true; }
     }
+    var st = chatState;
+    if (st) { st.toolMeasurePending = pending; }
   }
 
   function chatSetToolExpanded(row, expanded) {
-    var tgl = row.querySelector(".chat-tool-toggle");
-    var out = row.querySelector(".chat-tool-output");
+    var tgl = row.__toolToggle;
+    var out = row.__toolOutput;
     if (!out || (tgl && tgl.classList.contains("is-off"))) { return; }
     out.classList.toggle("chat-collapsed", !expanded);
     out.classList.toggle("chat-expanded", expanded);
@@ -5029,18 +5175,18 @@
       var key = row.__key;
       if (row === lastReasoning || row === lastTool) { continue; }
       if (key && chatUserExpanded[key]) { continue; }
-      var det = row.querySelector(".chat-reasoning");
+      var det = row.__reasonEl;
       if (det && det.open) { det.open = false; }
-      var out = row.querySelector(".chat-tool-output");
+      var out = row.__toolOutput;
       if (out && out.classList.contains("chat-expanded")) { chatSetToolExpanded(row, false); }
     }
     if (!followTurn) { return; }
     // 最后一块总是展开（busy 时）。
     [lastReasoning, lastTool].forEach(function (row) {
       if (!row) { return; }
-      var det = row.querySelector(".chat-reasoning");
+      var det = row.__reasonEl;
       if (det && !det.open) { det.open = true; return; }
-      var out = row.querySelector(".chat-tool-output");
+      var out = row.__toolOutput;
       if (out && !out.classList.contains("chat-expanded")) { chatSetToolExpanded(row, true); }
     });
   }
@@ -5174,6 +5320,7 @@
     }
     if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     if (st.refreshTimer) { clearTimeout(st.refreshTimer); st.refreshTimer = null; }
+    if (st.renderTimer) { clearTimeout(st.renderTimer); st.renderTimer = null; }
     // 兜底轮询与状态栏时钟随连接一起停：后台/关闭时不空转（chatConnect 会按
     // st.busy 重新武装轮询）。
     if (st.busyTimer) { clearInterval(st.busyTimer); st.busyTimer = null; }
@@ -5416,6 +5563,7 @@
   function chatResetForSession() {
     var st = chatState;
     if (!st) { return; }
+    chatCancelRender();
     var host = el("chat-list");
     if (host) { host.innerHTML = ""; }
     st.messages = [];
@@ -5425,6 +5573,9 @@
     st.pending = [];
     st.live = chatEmptyLive();
     st.failed = false;
+    st.screenETag = "";
+    st.lastScreenAt = 0;
+    st.toolMeasurePending = false;
     // 换会话后旧的审批/提问一律失效（节点的 pending 由新一轮 connected 重报）。
     st.pendingApproval = null;
     st.pendingQuestion = null;
@@ -7725,7 +7876,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=72").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=73").catch(function () {});
     });
   }
 

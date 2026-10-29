@@ -420,7 +420,8 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 	for _, needle := range []string{
 		"chat-modal", "/web/api/screen", "/web/api/events", "/web/api/input",
 		"/web/api/statusbar", "message_window", "chat-dyn-status",
-		"screenBusy", "lastScreenAt",
+		"screenBusy", "lastScreenAt", "screenETag", "If-None-Match",
+		"compact=1", "chatPatchLive", "CHAT_STREAM_RENDER_MS",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets
 		// eaten by the list rule first).
@@ -539,18 +540,35 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 	// A live assistant row must carry content: turn_start sets streaming=true long
 	// before the first assistant delta, so gating the row on streaming alone leaves
 	// an empty「助手」bubble pinned at the bottom for the whole reasoning/tool phase.
-	renderStart := strings.Index(app, "function chatRender()")
+	renderStart := strings.Index(app, "function chatLiveRows(")
 	if renderStart < 0 {
-		t.Fatal("app.js: chatRender not found")
+		t.Fatal("app.js: chatLiveRows not found")
 	}
 	renderBody := app[renderStart:]
-	if cut := strings.Index(renderBody, "function chatScheduleRender"); cut >= 0 {
+	if cut := strings.Index(renderBody, "function chatRender()"); cut >= 0 {
 		renderBody = renderBody[:cut]
 	}
 	if strings.Contains(renderBody, "if (st.live.assistant || st.live.streaming)") {
-		t.Fatal("chatRender gates the live assistant row on streaming alone: an empty 助手 bubble stays pinned during reasoning/tool phases")
+		t.Fatal("chatLiveRows gates the live assistant row on streaming alone: an empty 助手 bubble stays pinned during reasoning/tool phases")
 	}
 	if !strings.Contains(renderBody, "if (st.live.assistant || liveImages.length)") {
-		t.Fatal("chatRender must render the live assistant row only when it has text or images")
+		t.Fatal("chatLiveRows must render the live assistant row only when it has text or images")
+	}
+	// Streaming deltas must stay on the live-only patch path. Re-entering the
+	// full renderer per token reintroduces the whole-transcript scan this guard
+	// exists to prevent.
+	scheduleStart := strings.Index(app, "function chatScheduleRender")
+	if scheduleStart < 0 {
+		t.Fatal("app.js: chatScheduleRender not found")
+	}
+	scheduleBody := app[scheduleStart:]
+	if cut := strings.Index(scheduleBody, "function chatCancelRender"); cut >= 0 {
+		scheduleBody = scheduleBody[:cut]
+	}
+	if strings.Contains(scheduleBody, "chatRender()") {
+		t.Fatal("chatScheduleRender must patch only live rows, not run the full chatRender")
+	}
+	if !strings.Contains(scheduleBody, "chatPatchLive()") {
+		t.Fatal("chatScheduleRender must call chatPatchLive")
 	}
 }

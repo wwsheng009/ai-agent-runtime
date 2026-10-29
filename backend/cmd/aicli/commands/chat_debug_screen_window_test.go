@@ -236,6 +236,86 @@ func TestHandleChatWebAPIScreenJSONMessageWindow(t *testing.T) {
 	}
 }
 
+// TestHandleChatWebAPIScreenCompactJSON locks the gateway console's structured
+// transport contract: messages + window metadata only, compact JSON, and a
+// content-addressed ETag that supports a 304 on the next poll.
+func TestHandleChatWebAPIScreenCompactJSON(t *testing.T) {
+	session := &ChatSession{
+		Messages: []types.Message{
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+			{Role: "assistant", Content: "a2"},
+			{Role: "user", Content: "q3"},
+			{Role: "assistant", Content: "a3"},
+		},
+	}
+	withWebTestSession(t, session)
+
+	req := httptest.NewRequest(http.MethodGet,
+		ChatWebAPIScreenPath+"?format=json&compact=1&msg_limit=2", nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIScreen(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	preview := body
+	if len(preview) > 32 {
+		preview = preview[:32]
+	}
+	if len(body) == 0 || body[0] != '{' {
+		t.Fatalf("compact response must start with '{' (not indented), got %q", string(preview))
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		t.Fatalf("compact screen JSON invalid: %v", err)
+	}
+	if _, ok := top["lines"]; ok {
+		t.Fatalf("compact response must omit lines: %s", string(body))
+	}
+	if _, ok := top["text"]; ok {
+		t.Fatalf("compact response must omit text: %s", string(body))
+	}
+	var messages []chatWebScreenMessage
+	if err := json.Unmarshal(top["messages"], &messages); err != nil {
+		t.Fatalf("messages invalid: %v", err)
+	}
+	if len(messages) != 2 || messages[0].Content != "q3" || messages[1].Content != "a3" {
+		t.Fatalf("compact messages = %+v, want [q3 a3]", messages)
+	}
+	richReq := httptest.NewRequest(http.MethodGet,
+		ChatWebAPIScreenPath+"?format=json&msg_limit=2", nil)
+	richRec := httptest.NewRecorder()
+	HandleChatWebAPIScreen(richRec, richReq)
+	if richRec.Code != http.StatusOK {
+		t.Fatalf("rich status = %d, want 200", richRec.Code)
+	}
+	if len(body) >= richRec.Body.Len() {
+		t.Fatalf("compact body (%d bytes) must be smaller than rich body (%d bytes)",
+			len(body), richRec.Body.Len())
+	}
+	t.Logf("screen payload: compact=%d bytes rich=%d bytes", len(body), richRec.Body.Len())
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("compact response must carry ETag")
+	}
+
+	// The console sends the last ETag explicitly with cache:no-store. A 304 lets
+	// it skip JSON parsing and DOM reconciliation entirely.
+	req = httptest.NewRequest(http.MethodGet,
+		ChatWebAPIScreenPath+"?format=json&compact=1&msg_limit=2", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec = httptest.NewRecorder()
+	HandleChatWebAPIScreen(rec, req)
+	if rec.Code != http.StatusNotModified {
+		t.Fatalf("conditional status = %d, want 304 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("304 body = %q, want empty", rec.Body.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 窗口化提取（O(窗口)）与「先取全量再切片」的等价性
 //

@@ -168,7 +168,7 @@
   子代理行**不给**按钮——节点 `/web/api/screen` 返回的是**节点当前活跃会话**的 transcript，
   子代理共享父级 transcript，给了按钮反而误导（页头也显式显示节点名）。
 - **数据来源**（经网关反向代理到节点自身的微前端接口，与「打开」同一通道）：
-  - 历史 `GET /n/{node}/web/api/screen?format=json&msg_limit=40[&msg_before=N]`
+  - 历史 `GET /n/{node}/web/api/screen?format=json&compact=1&msg_limit=40[&msg_before=N]`
     → `{available, reason?, messages[{role,content}], message_window{total,start,end,has_more}}`。
     **键名是 `message_window`，没有 `window` 别名**（服务端 `chatDebugScreenSnapshot.MessageWindow`）；
     读错键不会报错，只会让 `has_more` 恒 false、翻页游标恒 0——即「加载更早消息」静默失效，
@@ -190,6 +190,11 @@
 - **加载性能**：同一面板只允许一份非翻页 screen 请求在途，刚完成的窗口 800ms 内不重复拉取；
   assistant_message / turn_end / heartbeat-idle / interrupted 统一走 1s 尾随刷新，
   避免 SSE 事件风暴下的重复请求与重复 Markdown 渲染。
+  `compact=1` 请求结构化精简响应（省略与 `messages` 同源的 `lines/text`，不做 JSON 缩进；
+  旧节点忽略未知参数，响应保持兼容）；面板显式回传上一份响应 ETag，内容未变时节点回 304，
+  本次跳过 JSON 解析与 DOM 收敛。快照内容与已渲染窗口逐条相同时同样直接跳过整份重排。
+  逐字增量（assistant/reasoning/tool）合并为 50ms 尾随补丁，只更新实时气泡；历史行、折叠测量
+  与用户展开账本不参与该热路径。
   刷新是**保前缀合并**（老行不重建，流式刷新不打断阅读），因此本地
   最多保留 400 行，超出从头部丢弃并重新开放翻页。关键心算法：行 key 用**绝对索引**，
   丢头部不改变留存行的 key，DOM 身份 / 文本选区 / 折叠状态因此都保住。

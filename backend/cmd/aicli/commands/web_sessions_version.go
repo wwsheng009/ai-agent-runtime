@@ -141,5 +141,6 @@ func chatWebScreenParamsKey(r *http.Request) string {
 		"roles=" + strings.TrimSpace(query.Get("roles")),
 		"q=" + strings.TrimSpace(query.Get("q")),
 		"tail=" + strings.TrimSpace(query.Get("tail")),
+		"compact=" + strings.TrimSpace(query.Get("compact")),
 	}, "&")
 }

@@ -138,7 +138,9 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("format") == "json" {
 		renderStart := time.Now()
-		body, err := marshalChatWebScreenJSONWindowFiltered(window, filter)
+		jsonWindow := window
+		jsonWindow.Compact = chatWebScreenCompactRequested(r)
+		body, err := marshalChatWebScreenJSONWindowFiltered(jsonWindow, filter)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -176,6 +178,21 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	webHTTPWriteBody(w, r, "text/plain; charset=utf-8", payload, etag)
+}
+
+// chatWebScreenCompactRequested 解析 ?compact=1：仅供按结构化消息渲染的
+// 客户端（gateway 控制台）使用。响应省略与 messages 同源的 lines/text，
+// 并改用无缩进 JSON；历史调用方不传该参数，响应形状保持逐字节兼容。
+func chatWebScreenCompactRequested(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("compact"))) {
+	case "1", "true", "yes", "compact":
+		return true
+	default:
+		return false
+	}
 }
 
 // chatWebScreenTailMaxLines 限制 ?tail=N 的上限：避免调用方用超大 N 绕过

@@ -61,6 +61,11 @@ type chatDebugScreenSnapshot struct {
 type chatWebMessageWindow struct {
 	Before int
 	Limit  int
+	// Compact requests the structured-only JSON representation used by the
+	// gateway console: messages + pagination metadata, without duplicating every
+	// body into lines/text or pretty-printing the JSON. It is a transport-shape
+	// hint only; window resolution stays identical.
+	Compact bool
 }
 
 // active 报告窗口参数是否由调用方显式指定（用于决定是否重建 lines/text）。
@@ -441,9 +446,14 @@ func buildChatWebScreenSnapshotForFilter(window chatWebMessageWindow, filter cha
 	snap.MessageWindow.Total = matchedTotal
 	snap.MessageWindow.UnfilteredTotal = unfilteredTotal
 	// 过滤改变了消息集合：lines/text 必须按过滤后的消息重建（无论窗口是否激活）。
-	lines := chatWebLinesForMessages(snap.Messages)
-	snap.Lines = lines
-	snap.Text = strings.Join(lines, "\n")
+	if !window.Compact {
+		lines := chatWebLinesForMessages(snap.Messages)
+		snap.Lines = lines
+		snap.Text = strings.Join(lines, "\n")
+	} else {
+		snap.Lines = nil
+		snap.Text = ""
+	}
 	return snap
 }
 
@@ -549,6 +559,11 @@ func (s *chatDebugScreenSnapshot) fillWindowedMessages(total int, window chatWeb
 		Limit:   window.Limit,
 		HasMore: start > 0,
 	}
+	if window.Compact {
+		s.Lines = nil
+		s.Text = ""
+		return s
+	}
 	lines := chatWebLinesForMessages(msgs)
 	s.Lines = lines
 	s.Text = strings.Join(lines, "\n")
@@ -579,6 +594,9 @@ func marshalChatWebScreenJSONWindowFiltered(window chatWebMessageWindow, filter 
 		// 过滤激活时分页元信息已由 buildChatWebScreenSnapshotForFilter 写入
 		//（含 UnfilteredTotal），这里不得重算覆盖。
 		windowChatWebMessages(snap, window)
+	}
+	if window.Compact {
+		return json.Marshal(snap)
 	}
 	return json.MarshalIndent(snap, "", "  ")
 }
@@ -625,6 +643,11 @@ func windowChatWebMessages(snap *chatDebugScreenSnapshot, window chatWebMessageW
 		End:     end,
 		Limit:   window.Limit,
 		HasMore: start > 0,
+	}
+	if window.Compact {
+		snap.Lines = nil
+		snap.Text = ""
+		return
 	}
 	if !window.active() {
 		return
