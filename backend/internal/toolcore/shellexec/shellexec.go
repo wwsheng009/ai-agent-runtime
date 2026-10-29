@@ -43,6 +43,11 @@ type Launch struct {
 	Args    []string
 	Env     []string
 	Workdir string
+	// RawCmdLine is passed verbatim to CreateProcess on Windows. It is needed
+	// when Command is cmd.exe and Args contains a complete command line:
+	// os/exec's normal argv encoding uses MSVCRT quoting (\" for embedded
+	// quotes), which cmd.exe does not understand. Empty means "use Args".
+	RawCmdLine string
 }
 
 // Options configures one final-result shell execution.
@@ -71,6 +76,10 @@ type Options struct {
 	// Invocation overrides shell detection. It must return argv (program plus
 	// arguments). Nil uses the detected user shell with non-login flags.
 	Invocation func(command string) (string, []string)
+	// Shell identifies the shell selected by the caller. Zero uses the detected
+	// user shell. Invocation still controls argv; Shell only tells the core how
+	// to harden a PowerShell payload (UTF-8 prefix) and which shell to report.
+	Shell runtimeexecutor.Shell
 	// Prepare may rewrite the launch after shell resolution and before Start.
 	// It is the hook for OS-level sandbox wrapping and launcher denials.
 	Prepare func(ctx context.Context, launch Launch) (Launch, error)
@@ -115,6 +124,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ctx = context.Background()
 	}
 	shell := runtimeexecutor.DefaultUserShell()
+	if strings.TrimSpace(opts.Shell.Path) != "" || opts.Shell.Type != "" {
+		shell = opts.Shell
+	}
 
 	var launch Launch
 	if opts.Invocation != nil {
@@ -159,6 +171,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	cmd := exec.Command(launch.Command, launch.Args...)
 	cmd.Dir = launch.Workdir
 	cmd.Env = launch.Env
+	applyRawCmdLine(cmd, launch.RawCmdLine)
 	if opts.Mirror != nil {
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}
@@ -260,4 +273,11 @@ func prefixPowerShellArgs(args []string, shell runtimeexecutor.Shell, launchComm
 	last := len(args) - 1
 	args[last] = runtimeexecutor.PowerShellCommandPrefix + args[last]
 	return args
+}
+
+// HardenPowerShellArgs applies the UTF-8 output directive to a PowerShell argv.
+// Background jobs build their own exec.Cmd instead of going through Run, so they
+// need the same payload hardening without paying Run's synchronous lifecycle.
+func HardenPowerShellArgs(args []string, shell runtimeexecutor.Shell, launchCommand string) []string {
+	return prefixPowerShellArgs(args, shell, launchCommand)
 }

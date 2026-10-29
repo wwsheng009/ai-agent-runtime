@@ -41,6 +41,9 @@ func (s *Server) httpBannerLines(addr string) []string {
 		fmt.Sprintf("  tools    : %d (%s)", len(names), preview),
 		"  auth     : " + auth,
 	}
+	if s.cfg.Backend == BackendLocal && s.cfg.ShellExposed() {
+		lines = append(lines, "  shell    : "+shellLabel(s.cfg.ResolvedShell))
+	}
 	if s.cfg.Gateway.Instance != "" {
 		lines = append(lines, "  instance : "+s.cfg.Gateway.Instance)
 		if strings.TrimSpace(s.cfg.Gateway.IdentityFile) != "" {
@@ -49,6 +52,23 @@ func (s *Server) httpBannerLines(addr string) []string {
 	}
 	if auth == "none (loopback only)" {
 		lines = append(lines, "  warning  : no token configured; any local process can call this endpoint (use --http-token-file)")
+	}
+	if s.cfg.Profile == ProfileAll && !s.cfg.ReadOnly {
+		lines = append(lines, "  warning  : profile all exposes write/shell tools; mount tokens grant the full tool surface")
+	}
+	if s.cfg.ShellExposed() &&
+		len(s.cfg.Shell.AllowedCommands) == 0 && len(s.cfg.Shell.AllowedCommandPatterns) == 0 {
+		lines = append(lines,
+			"  warning  : shell is visible but no allowlist is configured; every shell call will be refused (fail-closed)",
+			"             enable : "+ShellPolicyEnableHint(),
+			"             docs   : docs/user-guide/aicli-remote-tools.md §7",
+		)
+	}
+	if s.cfg.ShellExposed() && strings.TrimSpace(s.cfg.Artifacts.Root) == "" {
+		lines = append(lines,
+			"  warning  : artifacts.root is empty; shell output above the model window will be truncated with no recovery",
+			"             enable : artifacts.root: <writable directory>",
+		)
 	}
 	lines = append(lines,
 		"  connect  : aicli chat --remote "+endpoint,

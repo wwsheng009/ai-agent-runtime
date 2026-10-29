@@ -66,7 +66,7 @@ func TestInitWritesConfigAndToken(t *testing.T) {
 	if doc.Gateway != nil {
 		t.Fatalf("--no-gateway wrote a gateway block: %+v", doc.Gateway)
 	}
-	if doc.Profile != "readonly" {
+	if doc.Profile != "all" {
 		t.Fatalf("profile = %q", doc.Profile)
 	}
 }

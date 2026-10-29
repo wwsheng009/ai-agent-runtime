@@ -20,6 +20,19 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 }
 
+// configureRawCommandLine passes an already-quoted command line to
+// CreateProcess. See windowsShellRawCmdLine for why os/exec's argv encoding
+// cannot be used for cmd.exe.
+func configureRawCommandLine(cmd *exec.Cmd, raw string) {
+	if cmd == nil || raw == "" {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CmdLine = raw
+}
+
 // killProcessGroup terminates the process tree of cmd.
 //
 // taskkill /T is used instead of Process.Kill because the shell's children are

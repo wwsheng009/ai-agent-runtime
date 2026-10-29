@@ -45,8 +45,8 @@ func TestRemoteArtifactRootUnwritableFailsAtStartup(t *testing.T) {
 // TestRemoteShellArchiveFailureCarriesStableCode is the recovery contract for a
 // root that exists at startup but loses write access later.
 //
-// The MCP projection sends only Error for a failed result and drops Content
-// (buildMCPCallToolResult), so the code has to be inside the error text. Before
+// The MCP projection includes Content for failed results now, but the stable
+// code must still be inside Error for clients that render only Error. Before
 // this the model received a bare "artifact archive failed: ... permission denied"
 // with no class and no next action - it could not tell a disk problem from a
 // rejected command.

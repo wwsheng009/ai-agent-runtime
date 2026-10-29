@@ -68,6 +68,12 @@ func TestCheckCommandPatterns(t *testing.T) {
 			rule:    "allowedCommandPatterns:systemctl restart itsm-*",
 		},
 		{
+			name:    "powershell call operator",
+			allowed: []string{"deploy238_*.ps1 *"},
+			command: `& "C:\Program Files\deploy238_a.ps1" --force`,
+			rule:    "allowedCommandPatterns:deploy238_*.ps1 *",
+		},
+		{
 			name:    "subcommand pattern mismatch",
 			allowed: []string{"systemctl restart itsm-*"},
 			command: "systemctl stop itsm-backend",

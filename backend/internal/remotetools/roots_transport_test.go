@@ -108,14 +108,11 @@ func TestRootsOutsideWorkspaceAreIgnored(t *testing.T) {
 func TestShellDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 	root := newTestWorkspace(t)
 
-	// `pwd` is a POSIX shell builtin; cmd.exe prints the current directory when
-	// `cd` runs with no arguments.
-	command, allowed := "pwd", []string{"pwd"}
-	if runtime.GOOS == "windows" {
-		command, allowed = "cd", []string{"cd"}
-	}
+	cfg := newOpsConfig(t, root, nil)
+	command, allowed := workdirProbeCommand(cfg.ResolvedShell.Type)
+	cfg.Shell.AllowedCommands = allowed
 
-	server, err := remotetools.NewServer(newOpsConfig(t, root, allowed), "dev")
+	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -154,12 +151,11 @@ func TestShellDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 // shell test: a roots-narrowed session must not launch in the base workspace.
 func TestJobStartDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 	root := newTestWorkspace(t)
-	command, allowed := "pwd", []string{"pwd"}
-	if runtime.GOOS == "windows" {
-		command, allowed = "cd", []string{"cd"}
-	}
+	cfg := newJobsConfig(t, root, nil)
+	command, allowed := workdirProbeCommand(cfg.ResolvedShell.Type)
+	cfg.Shell.AllowedCommands = allowed
 
-	server, err := remotetools.NewServer(newJobsConfig(t, root, allowed), "dev")
+	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

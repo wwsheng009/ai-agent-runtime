@@ -81,9 +81,41 @@ aicli-remote-tools doctor --config /etc/aicli/remote.yaml --json
 aicli-remote-tools tools  --config /etc/aicli/remote.yaml
 ```
 
-`doctor` 会打印**归一化后的生效值**（`workspace`、`allowedRoots`、profile、工具列表、audit/jobs/artifacts 是否可写、HTTP 地址与 token 是否已设置），并在配置自相矛盾时返回非零退出码。
+`doctor` 会打印**归一化后的生效值**（`workspace`、`allowedRoots`、profile、工具列表、audit/jobs/artifacts 是否可写、HTTP 地址与 token 是否已设置），并额外给出：
+
+- `allow all`：是否配置了 `shell.allowedCommands: ["*"]`
+- `allow rules` / `deny rules`：合并后的生效规则，标明 `prefix:` 或 `glob:`
+- `lint`：常见误配和高风险组合（不改变策略，只报告）
+
+`doctor` 在配置自相矛盾时返回非零退出码；`lint` 是诊断，不会因为警告本身失败。
+
+不启动服务、也不执行命令即可单独检查策略：
+
+```bash
+aicli-remote-tools policy test --config /etc/aicli/remote.yaml "git status"
+aicli-remote-tools policy lint --config /etc/aicli/remote.yaml
+```
+
+`policy test` 返回 `decision: allow|deny`、命中的规则以及失败原因；它只评估策略，不执行命令。评估完成即退出 0（deny 也是有效结果，看 `decision`）；`policy lint` 有发现时返回非零退出码，适合放进部署前检查。
 
 > `token set=false` 只表示当前 shell 没导出该变量；服务真正启动前必须设置好。
+
+### 2.4 分层帮助
+
+根帮助保持简短，具体参数只在对应命令下展开：
+
+```bash
+aicli-remote-tools -h          # 命令列表 + 通用配置项
+aicli-remote-tools serve -h    # 完整 serve/stdio/http/gateway/envd/命令策略参数
+aicli-remote-tools init -h     # 只显示 init 的写配置参数
+aicli-remote-tools doctor -h
+aicli-remote-tools tools -h
+aicli-remote-tools policy -h
+```
+
+`serve -h` 会明确列出 `--allow-all`、`--allow-command`、`--deny-command`、
+`--allow-command-pattern`、`--deny-command-pattern`、旧的逗号列表参数，以及 YAML
+字段映射（`shell.deniedCommands` 等）。不要再从根帮助猜 `allow` / `deny` 的拼写。
 
 ---
 
@@ -94,7 +126,7 @@ aicli-remote-tools tools  --config /etc/aicli/remote.yaml
 ```yaml
 # /etc/aicli/remote.yaml
 workspace: /srv/app        # 必填：相对路径锚点 + 默认 jail 根 + 默认 cwd
-profile: readonly          # 先只读跑通，再逐步放开
+profile: all               # 默认暴露全部工具；需要最小权限时改 readonly
 toolPrefix: remote_srv     # 工具名：remote_srv__view / remote_srv__write / ...
 targetName: srv            # 描述与审计里显示的名字
 descriptionStyle: explicit # 描述里带 [remote:srv]，模型不会误认成本地文件
@@ -186,7 +218,7 @@ HTTPS 直接把 scheme 换成 `https://`。
 ### 4.2 SSH 直连
 
 ```bash
-# 只读（默认）
+# 默认 all（全部工具）；#readonly 可收窄
 aicli chat --remote ssh://ops@target
 
 # 指定远端工作区与深度
@@ -207,7 +239,7 @@ aicli chat --remote 'ssh://ops@target:2222/srv/app?identity=~/.ssh/id_ed25519&bi
 | `scheme` | `http` / `https` / `ssh`，必填 |
 | `host` | 必填；HTTP 默认端口 `18765` |
 | `/path` | 仅 SSH：远端 workspace；省略时服务端用 `"."`（登录用户家目录） |
-| `#depth` | `readonly`（默认）/ `standard` / `ops` |
+| `#depth` | `all`（默认）/ `readonly` / `standard` / `ops` |
 | `?workspace=` | 仅 SSH：显式远端工作区，优先级高于 URL path |
 | `?binary=` | 仅 SSH：远端二进制路径，默认 `aicli-remote-tools`（走 PATH） |
 | `?identity=` | 仅 SSH：私钥路径 |
@@ -304,17 +336,20 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 
 | profile | 暴露的工具 |
 |---------|------------|
-| `readonly`（默认） | `view` `ls` `glob` `grep` |
+| `all`（默认） | `view` `ls` `glob` `grep` `write` `edit` `append_write` `apply_patch` `shell` |
+| `readonly` | `view` `ls` `glob` `grep` |
 | `standard` | readonly + `write` `edit` `append_write` `apply_patch` |
 | `ops` | standard + `shell` |
-| `custom` | `tools:` 列表 + 已配置的 job/artifact 能力工具 |
+| `custom` | 完全由 `tools:` 列表决定 |
 
 补充规则：
 
+- **默认是 `all`**：挂载令牌持有者会看到写文件和 shell 工具；需要最小权限时显式写 `profile: readonly`。
+- `shell` 工具可见 ≠ 任意命令可执行：`shell.allowedCommands` / `allowedCommandPatterns` 为空时仍然 fail-closed，所有命令被拒绝。
 - `readOnly: true` 是硬覆盖：即使 profile 写成 `ops`，也不会暴露写工具。
-- `jobs.root` 非空且 profile 为 `ops`/`custom` 时，追加 `job_start` `job_output` `job_cancel` `job_list`。
+- `jobs.root` 非空且 profile 为 `all` 时追加 `job_start` `job_output` `job_cancel` `job_list`；`ops`/`custom` 仍需 `legacyRemoteJobs: true`。
 - `artifacts.root` 非空时，追加 `artifact_read`（用于取回被折叠的完整输出）。
-- `tools:` 在非 `custom` profile 下是**额外的收窄过滤器**，不能扩大 profile。
+- `tools:` 非空时是**最终白名单**，不能扩大 profile；`custom` 必须显式列出工具，`job_*`/`artifact_read` 也要列入才可见。
 
 ### 5.2 工具名前缀
 
@@ -446,7 +481,7 @@ remote_srv__shell {"workdir":"/etc"}      → PATH_DENIED
 remote_srv__shell {"command":"cat /etc/hostname"} → 成功
 ```
 
-原因是 `shell` 真正执行的是 `sh -c "<command>"`（Windows 为 `cmd.exe /c`），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数。
+原因是 `shell` 真正执行的是 `sh -c "<command>"`（Windows 为启动时解析的 shell，通常 `pwsh`/`powershell`，回退 `cmd.exe /c`），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数。
 
 **如果要求"命令也只能访问 workspace"**，必须使用 OS 级隔离，而不是再加一层 agent 配置：
 
@@ -472,6 +507,7 @@ Roots 中的相对路径按服务端 workspace 解析；指向不存在目录的
 ## 7. 命令管控
 
 `shell` 是显式 opt-in：`profile: ops` 只是让工具出现，**能否执行某条命令由目标侧策略决定**。
+`profile: all` 同理；此外 `readOnly: true`、`tools` 白名单或 `profile: readonly/standard` 都会让 shell **根本不出现在工具列表**。先运行 `aicli-remote-tools doctor` 看 `shell visible` 与 `allow rules / deny rules`，再判断是“工具没暴露”还是“命令被策略拒绝”。
 
 ### 7.1 四道闸（顺序固定）
 
@@ -502,6 +538,15 @@ shell:
   deniedCommandPatterns:
     - "sh -c *"
     - "rm -rf *"
+```
+
+CLI 等价写法（适合 systemd 之外的临时启动）：
+
+```powershell
+aicli-remote-tools serve --http --workspace D:\srv\app `
+  --allow-command git --allow-command "go test" `
+  --allow-command-pattern "deploy*.sh *" `
+  --deny-command rm --deny-command-pattern "sh -c *"
 ```
 
 `allowedCommands` / `deniedCommands` 的语义不变：
@@ -537,6 +582,42 @@ shell:
 > 这等价于「可以先创建 `deploy238_evil.sh` 再执行」。只在受控 target 上使用；更稳的写法是
 > 固定受控入口，把可变部分放到参数里，例如 `itsm-deploy-238 deploy-script deploy238_*.sh`。
 
+### 7.2.1 怎么选：prefix 还是 glob
+
+| 你想允许的内容 | 用哪个 | 例子 |
+|---|---|---|
+| 固定程序及其任意参数 | `allowedCommands`（prefix） | `git`、`go test`、`kubectl get` |
+| 固定脚本入口，参数不固定 | `allowedCommands` | `/opt/ops/deploy.sh` |
+| 脚本名本身不固定 | `allowedCommandPatterns`（glob） | `"deploy238_*.sh *"` |
+| 整个 target 全部单条命令 | `--allow-all` 或 `allowedCommands: ["*"]` | 仍受 deny / metachar / destructive 闸门 |
+
+不要用 `allowedCommands` 写 `deploy*.sh`：它不是通配符。也不要用
+`allowedCommandPatterns: ["*"]` 表达“全部放行”；虽然效果相同，但语义不清晰，
+而且容易掩盖程序名通配的风险。
+
+### 7.2.2 先验证再重启
+
+`doctor` 会打印合并后的 `allow rules` / `deny rules` 和 lint；单独验证一条命令时用：
+
+```bash
+aicli-remote-tools policy test --config /etc/aicli/remote.yaml "git status"
+aicli-remote-tools policy test --config /etc/aicli/remote.yaml -- "deploy238_a.sh --force"
+aicli-remote-tools policy lint --config /etc/aicli/remote.yaml
+```
+
+`policy test` 会显示：
+
+```text
+decision         : allow
+matched rule     : allowedCommands:git
+metachar gate    : deny
+allow rules      : prefix:git
+deny rules       : -
+```
+
+若被拒绝，会额外显示 `code`、`reason`、`next`。它只评估，不执行命令。
+`policy lint` 有发现时返回非零退出码，适合部署前检查。
+
 ### 7.3 执行约束
 
 | 约束 | 默认值 / 行为 |
@@ -545,15 +626,52 @@ shell:
 | 输出上限 | 256 KiB（`limits.maxOutputBytes`）；超限折叠中间并明确标注 |
 | 完整输出 | 配置 `artifacts.root` 后归档，返回 `artifact_id` 可翻页 |
 | 进程组 | 独立进程组；超时杀整棵进程树 |
-| 环境变量 | 默认**不继承**；只透传 `shell.envAllowlist` 列出的变量 |
+| shell | 启动时解析：Windows `pwsh` → `powershell` → `cmd.exe`；Unix `$SHELL` → `zsh` → `bash` → `sh` |
+| 失败结果 | 保留真实退出码，并把 stderr/命令正文随错误一起返回 |
+| 空输出 | 退出码 0 且无输出时明确返回 `Command completed successfully with no output.` |
+| 大输出 | 未配置 `artifacts.root` 时中间部分不保留，并在提示中要求配置 |
+| 环境变量 | 默认注入平台基线；`shell.envAllowlist` 追加；显式 `envAllowlist: []` 才关闭基线 |
 | 工作目录 | 必须是 jail 内的已存在目录 |
 
-`envAllowlist` 为空意味着命令在几乎空的环境里运行（`HOME`、`PATH` 都不会自动带过去）。如果命令依赖 PATH，显式加入：
+Windows 目标不再固定使用 `cmd.exe`。启动时按 `pwsh` → `powershell` → `cmd.exe` 的顺序探测一次，选中结果同时用于 `shell` 和 `job_start`，并写入工具描述。也可以显式指定：
 
 ```yaml
 shell:
-  envAllowlist: [HOME, PATH, LANG]
+  program: pwsh        # 或 C:\Program Files\PowerShell\7\pwsh.exe
 ```
+
+```bash
+aicli-remote-tools serve --http --shell pwsh
+```
+
+指定值在启动时用 `exec.LookPath` 解析；找不到或不是受支持的 shell（`pwsh`/`powershell`/`cmd`/`bash`/`zsh`/`sh`）会直接启动失败。`doctor` 会显示解析后的 `shell`、`shell type` 和 `shell program`。
+
+工具描述会按实际 shell 动态生成语法提示：PowerShell 提示 `Get-Location` / `Select-Object`，cmd 提示 `%VAR%` / `cd`，POSIX 提示 `$VAR` / `pwd`。输出侧复用内置 shell 的硬化：`NO_COLOR=1`、`TERM=dumb`、清空 `COLORTERM`/`CLICOLOR`、`PAGER=cat`，PowerShell 使用 `-NoProfile -NonInteractive` 并注入 UTF-8 输出前缀。
+
+省略 `envAllowlist` 时不会继承完整环境（避免把 token、密钥带进子进程），但会注入运行 shell 和常见工具所需的最小基线：
+
+- Windows：`PATH`、`PATHEXT`、`SystemRoot`、`SystemDrive`、`WINDIR`、`ComSpec`、`TEMP`、`TMP`、`USERPROFILE`、`HOME`、`COMPUTERNAME`、`USERNAME`、`USERDOMAIN`、`PROCESSOR_ARCHITECTURE`、`NUMBER_OF_PROCESSORS`、`LANG`、`LC_ALL`、`TERM`
+- POSIX：`PATH`、`HOME`、`LANG`、`LC_ALL`、`TERM`
+
+需要额外变量时追加即可；显式写 `envAllowlist: []` 才会连基线也关闭（裸命令通常因此无法解析）：
+
+```yaml
+shell:
+  envAllowlist: [APPDATA, LOCALAPPDATA, USERNAME]
+```
+
+Windows 含空格的路径必须整体加引号；PowerShell 下调用这类外部程序还要加 `&`：
+
+```powershell
+& "C:\Program Files\Git\cmd\git.exe" --version
+```
+
+```bat
+"C:\Program Files\Git\cmd\git.exe" --version
+```
+
+> `envAllowlist` 只作用于本地 `aicli-remote-tools` 后端；`envd` 后端由目标机 daemon 决定环境，不会应用此列表。
+> `shell.program` / `--shell` 同样只作用于本地后端；`envd` 固定通过目标机的 `/bin/sh -c` 执行。
 
 ### 7.4 常见错误
 
@@ -567,7 +685,15 @@ COMMAND_DENIED: command "lscpu" is not in the allowlist
 COMMAND_DENIED: remote shell is fail-closed: no allowedCommands/allowedCommandPatterns configured
 ```
 
-→ `profile: ops` 但两种 allow 都为空。这是有意的 fail-closed。
+→ `profile: ops/all` 且 shell 可见，但两种 allow 都为空。这是有意的 fail-closed。
+
+启动横幅与 `doctor` 现在会直接打印可操作指引：
+
+```text
+warning: shell is visible but no allowlist is configured; every shell call will be refused (fail-closed)
+  enable: set shell.allowedCommands: ["git","go"] (argv prefix) or
+          shell.allowedCommandPatterns: ["deploy*.sh *"] (whole command)
+```
 
 ```
 COMMAND_DENIED: command "deploy" is denied by pattern "deploy*"
@@ -580,6 +706,42 @@ COMMAND_DENIED: command contains a pipe (|)
 ```
 
 → 去掉管道/重定向/命令拼接；需要组合逻辑时写脚本并在 allowlist 中放行该脚本。
+
+```
+Command completed successfully with no output.
+```
+
+→ 这是**成功**结果，不是失败；`Set-Content`、`Remove-Item`、`New-Item` 等 cmdlet 成功时通常不产生 stdout。
+
+```
+output window: ... This target has no artifact store, so the omitted middle was NOT kept ...
+```
+
+→ 配置 `artifacts.root`（或启动时 `--artifacts-root`）后重启，服务会暴露 `artifact_read`，可回读完整输出。未配置时请先用 `Select-Object -First` / `Select-String` 等缩小输出范围。
+
+### 7.5 完全放开（仅可信 target，不推荐）
+
+如果确实要让该 target 执行任意命令，必须**同时**显式做两件事：
+
+```yaml
+profile: all
+readOnly: false
+shell:
+  allowedCommands: ["*"]        # 显式全放行；仍受 deny 与破坏性分类器约束
+  denyShellMetachars: false     # 允许 | ; && > < 等组合命令；高风险
+```
+
+CLI 等价写法：
+
+```bash
+aicli-remote-tools serve --http --workspace /srv/app \
+  --allow-all --deny-shell-metachars=false
+```
+
+`--allow-all` 等价于 `shell.allowedCommands: ["*"]`，只是把它做成一个可读的显式
+opt-out；不会自动关闭元字符闸门，也不会绕过 `deniedCommands` 或破坏性分类器。
+
+即使这样，`deniedCommands` / `deniedCommandPatterns` 仍然优先，`shellrisk` 的破坏性分类器仍会拒绝递归删除根/家目录等命令。`allowedCommands: ["*"]` 配合 `denyShellMetachars: false` 等于把目标机账号的 shell 交给持有挂载令牌的客户端；只应在本机、受控 CI 或一次性沙箱中使用。
 
 ---
 
@@ -672,6 +834,27 @@ http:
 - `tlsCert` / `tlsKey` 必须成对出现。
 - `clientCAFile` + `requireClientCert` 启用 mTLS，可与 Bearer Token 叠加。
 - 客户端使用 `https://...`；证书校验默认开启，测试环境才考虑跳过。
+
+**本机测试不想跳过校验（推荐）**：把自签证书导入本机信任根，`curl` 就不必带 `-k`：
+
+- Windows（导入当前用户信任根）：`certutil -addstore -f Root server.crt`
+  - 删除：`certutil -delstore Root <证书 CN 或指纹>`
+  - 浏览器/严格校验客户端若仍报红，重启浏览器或点「高级 → 继续前往」。
+- macOS：`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain server.crt`
+- Linux：`sudo cp server.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
+
+证书 SubjectAltName 必须包含你要连的地址，否则仍会校验失败：
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout server.key -out server.crt -days 365 \
+  -subj "/CN=127.0.0.1" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
+
+**回环监听用 `127.0.0.1`，不要写 `localhost`**：Windows 上 `localhost` 常优先解析到 IPv6 `::1`，而服务若只监听 `127.0.0.1`（IPv4），`localhost`→`::1` 会连不上。固定用 `127.0.0.1`。
+
+完整可复用配置见 [`backend/docs/config/examples/remote-https-token.yaml`](../../backend/docs/config/examples/remote-https-token.yaml)。
 
 ### 9.3 审计
 
@@ -819,18 +1002,29 @@ remoteTargets:
 | 现象 | 常见原因 | 处理 |
 |------|----------|------|
 | `401 Unauthorized` | 本机未设置 token / token 不一致 | 检查两侧 `AICLI_REMOTE_TOKEN`；确认 `.env` 位置 |
+| `503 Service Unavailable` | gateway/上游瞬时不可用，或连接正在重建 | 退避重试；检查 gateway 与本地 listener 状态，不要把它当成命令失败 |
+| MCP 服务标识从 `itsm` 变成 `itsm_2` | 同名 MCP server 被重复注册，客户端自动加了后缀 | 删除旧的 `itsm` 条目，只保留一个；需要固定身份时用 `--target-name` / `--instance` / `--gateway-self-slug` |
+| 连 `localhost` 报 connection refused，但 `127.0.0.1` 能通 | Windows 上 `localhost` 常优先解析到 IPv6 `::1`，而服务只监听 IPv4 `127.0.0.1` | 固定用 `127.0.0.1`，不要写 `localhost`（详见 [§9.2](#92-tls--mtls)） |
 | `connection refused` | 目标服务未启动 / 端口写错 / SSH 转发未建立 | `doctor` 看监听地址；`ss -ltnp`；重建转发 |
 | `remote: added server ...` 后无远程工具 | 服务端 profile 未包含目标工具 / prefix 冲突 | `tools` 子命令确认工具面；检查 `toolPrefix` |
 | 启动直接失败：`workspace ... is not accessible` | 路径不存在或不是目录 | 修正 `workspace`；注意相对路径按启动 CWD 解析 |
 | `PATH_DENIED` | 路径越出 `workspace`/`allowedRoots`，或符号链接逃逸 | 改路径，或把根加入 `allowedRoots` |
 | `COMMAND_DENIED: not in the allowlist` | 目标侧 allowlist 未包含该命令 | 加入 `shell.allowedCommands` 并重启 |
 | `COMMAND_DENIED: no allowedCommands configured` | `profile: ops` 但 allowlist 为空 | 显式配置 allowlist（fail-closed） |
-| 命令找不到（`command not found`） | `envAllowlist` 为空导致没有 `PATH` | 加入 `PATH`、`HOME` 等 |
+| 裸命令找不到（`'git' is not recognized` / `command not found`） | 显式配置了 `envAllowlist: []`，或目标机自身没有 PATH | 删除显式空列表以使用平台基线，或加入 `PATH`、`PATHEXT`、`HOME` 等 |
+| 含空格路径报 `'C:\Program' is not recognized` | 路径没有整体加引号，或 PowerShell 下漏了 `&` | cmd：`"C:\Program Files\...\git.exe" --version`；PowerShell：`& "C:\Program Files\...\git.exe" --version` |
+| `doctor` 显示 shell 是 `cmd.exe` | 未安装 `pwsh`/`powershell`，或显式 `--shell cmd` | 安装 PowerShell 7；或确认 `--shell` / `shell.program` 指向可用 shell |
+| 失败时只看到 `exit status 1` | 运行的是旧版服务，或错误投影仍丢弃正文 | 重新构建并重启服务；新版会保留真实退出码和 stderr |
+| 写命令成功但没有回显 | cmdlet 本身没有 stdout | 看到 `Command completed successfully with no output.` 即为成功；仍建议用 `Test-Path` 复核关键写操作 |
+| 输出里的 `common\tenantctx` 显示成 tab | 可能是请求侧把单反斜杠当成 JSON 转义，或客户端对 `TextContent` 文本做了二次解码；服务端未损坏原始字节 | 看 `metadata.command_has_tab` / `command_has_backslash` / `command_escaped`：TAB 在命令里 = 请求侧；命令有反斜杠而正文是 tab = 响应侧客户端。用原始 MCP 响应或 HTTP 抓包核对；不要服务端二次转义 |
 | `TIMEOUT` | 命令超过 `limits.commandTimeout` | 传 `timeout_ms` 或调整目标配置 |
-| 输出中间被省略 | 超过 `limits.maxOutputBytes` | 用 `grep`/`tail` 收窄，或配置 `artifacts.root` 后翻页 |
+| 输出中间被省略（`NOT kept`） | 超过模型窗口且未配置 `artifacts.root` | 用 `grep`/`tail` 收窄，或配置 `artifacts.root` 后重启并翻页 |
+| `COMMAND_DENIED: contains a pipe/separator` | `denyShellMetachars` 默认开启 | 拆成多条命令，或仅在可信 target 上显式 `denyShellMetachars: false` |
 | `policy:` 告警 | 使用了已废弃的授权块 | 删除，改用 mode / profile / allowlist |
 | `#ops` 在 HTTP 下无效 | 服务已运行，profile 固定 | 修改目标机配置并重启 |
 | SSH 模式报 `binary not found` | 远端 PATH 中没有二进制 | 用 `?binary=/abs/path` |
+
+`shell` 结果新增的 `command_has_tab` / `command_tab_count` / `command_has_backslash` / `command_backslash_count` / `command_escaped` 只在 metadata 中，**不改变正文**。`command_escaped` 是 Go 引号形式：反斜杠显示为 `\\`，TAB 显示为 `\t`。
 
 ### 11.1 快速定位顺序
 
@@ -845,8 +1039,13 @@ aicli-remote-tools tools --config /etc/aicli/remote.yaml
 # 3) 本机 token
 echo "${AICLI_REMOTE_TOKEN:-<unset>}"    # PowerShell: $env:AICLI_REMOTE_TOKEN
 
-# 4) 直接探测 MCP 端点（应返回 401 而不是连接失败）
-curl -i http://127.0.0.1:18765/mcp
+# 4) 直接探测 MCP 端点（HTTPS）：无 token → 401，带 token → 200 + 握手
+#    （自签证书已导入信任根时不必带 -k；否则临时用 -k 跳过校验）
+curl -i -k https://127.0.0.1:18765/mcp                                                  # 期望 401 Unauthorized
+curl -i -k -H "Authorization: Bearer $AICLI_REMOTE_TOKEN" https://127.0.0.1:18765/mcp # 期望 HTTP 200
+
+# 注意：浏览器/地址栏直接打开 /mcp 会返回 405/400（协议合规），
+#       请用 MCP 客户端（如 `aicli chat --remote https://127.0.0.1:18765`）接入。
 ```
 
 ---

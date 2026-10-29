@@ -95,6 +95,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		jobs.SetShell(cfg.ResolvedShell)
 	}
 	artifacts, err := NewArtifactStore(cfg.Artifacts.Root, cfg.Artifacts.MaxBytes)
 	if err != nil {

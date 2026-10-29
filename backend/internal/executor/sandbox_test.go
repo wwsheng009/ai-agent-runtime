@@ -131,6 +131,22 @@ func TestSandboxFilterEnv(t *testing.T) {
 	}
 }
 
+func TestSandboxFilterEnvWindowsIsCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment names are case-insensitive")
+	}
+	sandbox := NewSandbox(&SandboxConfig{
+		EnvWhitelist: []string{"PATH"},
+	})
+	filtered := sandbox.FilterEnv([]string{
+		`Path=C:\Windows\System32`,
+		"SECRET=value",
+	})
+	if len(filtered) != 1 || filtered[0] != `Path=C:\Windows\System32` {
+		t.Fatalf("filtered = %#v, want the Path entry only", filtered)
+	}
+}
+
 func TestSandboxExecuteCommand(t *testing.T) {
 	root := t.TempDir()
 	maxExecutionTime := 5 * time.Second

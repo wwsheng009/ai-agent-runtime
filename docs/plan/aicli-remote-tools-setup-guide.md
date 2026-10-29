@@ -112,7 +112,7 @@ shell:
     - rm
     - dd
   denyShellMetachars: true   # 拒 ; && || | ` $( > < 换行（引号内不算）
-  envAllowlist:              # 空 = 不继承任何环境变量
+  envAllowlist:              # 省略 = 平台基线；显式 [] = 不继承任何环境变量
     - HOME
     - PATH
 ```

@@ -44,14 +44,14 @@ func TestParseSpecHTTPSchemes(t *testing.T) {
 			name:      "bare host takes the default port",
 			raw:       "http://10.0.0.9",
 			transport: TransportHTTP,
-			depth:     DepthReadonly,
+			depth:     DepthAll,
 			listen:    "10.0.0.9:18765",
 		},
 		{
 			name:      "explicit port",
 			raw:       "http://10.0.0.9:19000",
 			transport: TransportHTTP,
-			depth:     DepthReadonly,
+			depth:     DepthAll,
 			listen:    "10.0.0.9:19000",
 		},
 		{
@@ -161,7 +161,7 @@ func TestSpecExpandProducesPrefixedTools(t *testing.T) {
 // The second half is the point: silently accepting `#ops` against an http target
 // was the same class of lie the notice text used to tell about tool prefixes.
 func TestSpecDepthBecomesProfileAndIsHonestAboutHTTP(t *testing.T) {
-	for _, depth := range []SpecDepth{DepthReadonly, DepthStandard, DepthOps} {
+	for _, depth := range []SpecDepth{DepthAll, DepthReadonly, DepthStandard, DepthOps} {
 		t.Run("ssh/"+string(depth), func(t *testing.T) {
 			spec, err := ParseSpec("ssh://ops@h#" + string(depth))
 			require.NoError(t, err)
@@ -176,7 +176,7 @@ func TestSpecDepthBecomesProfileAndIsHonestAboutHTTP(t *testing.T) {
 	}
 
 	t.Run("http warns that depth is not applied", func(t *testing.T) {
-		for _, depth := range []SpecDepth{DepthStandard, DepthOps} {
+		for _, depth := range []SpecDepth{DepthAll, DepthReadonly, DepthStandard, DepthOps} {
 			spec, err := ParseSpec("http://h:18765#" + string(depth))
 			require.NoError(t, err)
 			expanded, err := spec.Expand()
@@ -186,8 +186,9 @@ func TestSpecDepthBecomesProfileAndIsHonestAboutHTTP(t *testing.T) {
 		}
 	})
 
-	t.Run("http readonly needs no warning", func(t *testing.T) {
-		// readonly is the server's own default, so nothing is being claimed.
+	t.Run("http without an explicit depth needs no warning", func(t *testing.T) {
+		// No #depth marker: the server's own default applies, so nothing is
+		// being claimed or warned about.
 		spec, err := ParseSpec("http://h:18765")
 		require.NoError(t, err)
 		expanded, err := spec.Expand()

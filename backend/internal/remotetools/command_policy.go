@@ -43,7 +43,7 @@ func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy,
 		Enabled:          true,
 		AllowedCommands:  normalizeCommandNames(shell.AllowedCommands),
 		DeniedCommands:   normalizeCommandNames(shell.DeniedCommands),
-		EnvWhitelist:     append([]string(nil), shell.EnvAllowlist...),
+		EnvWhitelist:     effectiveShellEnvAllowlist(shell.EnvAllowlist),
 		MaxExecutionTime: timeout,
 	}
 	return &CommandPolicy{
@@ -71,7 +71,7 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 	if p == nil {
 		return "policy:no-shell", newToolError(
 			CodeCommandDenied,
-			"configure shell.allowedCommands or run the target without command execution",
+			ShellPolicyEnableHint(),
 			"shell is not configured on this target",
 		)
 	}
@@ -83,7 +83,7 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 	// the local engine (which validates a resolved argv[0]) but wrong here: the
 	// remote command is a full command line. The argv prefix is what an operator
 	// means by "allow echo".
-	fields := shellrisk.Fields(trimmed)
+	fields := policyFields(trimmed)
 	if len(fields) == 0 {
 		return "policy:empty", newToolError(CodeInvalidArgument, "pass a non-empty command", "command is empty")
 	}
@@ -116,7 +116,7 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 	if len(p.allowedCommands) == 0 && len(p.allowedPatterns) == 0 {
 		return "policy:fail-closed", newToolError(
 			CodeCommandDenied,
-			"add the command to shell.allowedCommands or shell.allowedCommandPatterns on the target",
+			ShellPolicyEnableHint(),
 			"remote shell is fail-closed: no allowedCommands/allowedCommandPatterns configured",
 		)
 	}
@@ -139,7 +139,7 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 	if rule == "" {
 		return "policy:not-allowed", newToolError(
 			CodeCommandDenied,
-			"add it to shell.allowedCommands/allowedCommandPatterns or use a narrower command",
+			ShellPolicyEnableHint(),
 			"command %q is not in the allowlist", program,
 		)
 	}
@@ -148,7 +148,7 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 		if reason := detectShellMetachars(trimmed); reason != "" {
 			return "policy:metachars", newToolError(
 				CodeCommandDenied,
-				"run a single command without pipes, redirection or substitution",
+				"run a single command without pipes, redirection or substitution, or explicitly set shell.denyShellMetachars: false (not recommended)",
 				"command contains %s", reason,
 			)
 		}
@@ -221,7 +221,7 @@ func matchesCommandEntry(program, command, entry string) bool {
 	if len(entryFields) <= 1 {
 		return false
 	}
-	commandFields := shellrisk.Fields(command)
+	commandFields := policyFields(command)
 	if len(commandFields) < len(entryFields) {
 		return false
 	}

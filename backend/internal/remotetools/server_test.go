@@ -96,8 +96,8 @@ func TestToolSurfaceIsPrefixed(t *testing.T) {
 	defer server.Close()
 
 	names := server.ToolNames()
-	if len(names) != 4 {
-		t.Fatalf("expected 4 tools, got %v", names)
+	if len(names) != 5 {
+		t.Fatalf("expected 5 tools, got %v", names)
 	}
 	for _, name := range names {
 		if !strings.HasPrefix(name, "remote_dev__") {
@@ -136,8 +136,8 @@ func TestStdioTransportEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
-	if len(tools.Tools) != 4 {
-		t.Fatalf("expected 4 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(tools.Tools))
 	}
 
 	// view

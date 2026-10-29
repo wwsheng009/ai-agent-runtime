@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // TestShellExecHelperProcess is a re-exec helper. It keeps the test portable:
@@ -118,6 +120,34 @@ func TestRunPassesOnlyTheProvidedEnvironment(t *testing.T) {
 	}
 	if strings.Contains(output, "secret=leaked") {
 		t.Fatalf("non-allowlisted variable leaked: %q", output)
+	}
+}
+
+func TestRunReportsTheSelectedShell(t *testing.T) {
+	selected := runtimeexecutor.Shell{Path: "custom-shell", Type: runtimeexecutor.ShellTypeBash}
+	result, err := Run(context.Background(), Options{
+		Command:         "echo",
+		Env:             helperEnv("echo"),
+		Invocation:      helperInvocation(),
+		Shell:           selected,
+		DisableArtifact: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Shell != selected {
+		t.Fatalf("result shell = %+v, want %+v", result.Shell, selected)
+	}
+}
+
+func TestPrefixPowerShellArgsUsesSelectedShell(t *testing.T) {
+	args := []string{"-NoProfile", "-NonInteractive", "-Command", "Get-Location"}
+	got := prefixPowerShellArgs(args, runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePwsh}, "pwsh")
+	if len(got) != len(args) {
+		t.Fatalf("prefixPowerShellArgs changed arg count: %#v", got)
+	}
+	if !strings.HasPrefix(got[len(got)-1], runtimeexecutor.PowerShellCommandPrefix) {
+		t.Fatalf("PowerShell UTF-8 prefix missing: %#v", got)
 	}
 }
 

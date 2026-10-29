@@ -153,11 +153,21 @@ func isWindowsReservedDeviceName(name string) bool {
 	return false
 }
 
-// windowsShellInvocation returns the shell command for one command string.
+// windowsShellRawCmdLine returns the exact command line CreateProcess must
+// receive for one cmd.exe invocation.
 //
-// cmd.exe is the default because it exists on every Windows target. A target that
-// needs PowerShell can set a custom invocation through the shell policy; P4 keeps
-// the default predictable rather than guessing from the command text.
-func windowsShellInvocation(command string) (string, []string) {
-	return "cmd.exe", []string{"/d", "/s", "/c", command}
+// Passing the command as an argv element makes os/exec escape embedded quotes
+// as \" (the MSVCRT rule). cmd.exe does not implement that rule: a quoted path
+// becomes `\"C:\Program Files\...\"`, and PowerShell's -Command "..." reaches
+// PowerShell as the literal string whoami. The outer quotes below are stripped
+// by cmd.exe /s, leaving the caller's quoting intact.
+func windowsShellRawCmdLine(shellPath, command string) string {
+	shellPath = strings.TrimSpace(shellPath)
+	if shellPath == "" {
+		shellPath = "cmd.exe"
+	}
+	if strings.ContainsAny(shellPath, " \t") && !strings.HasPrefix(shellPath, `"`) {
+		shellPath = `"` + shellPath + `"`
+	}
+	return shellPath + ` /d /s /c "` + command + `"`
 }

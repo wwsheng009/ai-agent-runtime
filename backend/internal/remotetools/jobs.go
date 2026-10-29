@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 )
 
 // Job states reported to the model.
@@ -64,6 +67,7 @@ type Job struct {
 // record was written before the process was spawned.
 type JobManager struct {
 	root      string
+	shell     runtimeexecutor.Shell
 	mu        sync.Mutex
 	active    map[string]*activeJob
 	lastPrune time.Time
@@ -90,6 +94,15 @@ func NewJobManager(root string) (*JobManager, error) {
 		return nil, fmt.Errorf("create job root: %w", err)
 	}
 	return &JobManager{root: abs, active: map[string]*activeJob{}}, nil
+}
+
+// SetShell records the shell resolved by the server. Start falls back to the
+// platform detector when it is unset (for example a manager constructed directly
+// by a test).
+func (m *JobManager) SetShell(shell runtimeexecutor.Shell) {
+	if m != nil {
+		m.shell = shell
+	}
 }
 
 // jobDir returns the directory for one job.
@@ -119,13 +132,19 @@ func (m *JobManager) Start(ctx context.Context, command, workdir string, sandbox
 		return nil, newToolError(CodeInternal, "check jobRoot permissions", "create job output: %v", err)
 	}
 
-	shell, args := remoteShellInvocation(command)
-	cmd := exec.Command(shell, args...)
+	shell := m.shell
+	if strings.TrimSpace(shell.Path) == "" {
+		shell = runtimeexecutor.DefaultUserShell()
+	}
+	program, args := shellInvocation(shell, command)
+	args = shellexec.HardenPowerShellArgs(args, shell, program)
+	cmd := exec.Command(program, args...)
 	cmd.Dir = workdir
-	cmd.Env = sandbox.FilterEnv(os.Environ())
+	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(sandbox.FilterEnv(os.Environ()))
 	cmd.Stdout = output
 	cmd.Stderr = output
 	configureProcessGroup(cmd)
+	configureRawCommandLine(cmd, shellRawCmdLine(shell, command))
 
 	if err := cmd.Start(); err != nil {
 		_ = output.Close()

@@ -418,11 +418,17 @@ func (s *Sandbox) FilterEnv(env []string) []string {
 		return []string{}
 	}
 
+	envKey := func(name string) string {
+		if runtime.GOOS == "windows" {
+			return strings.ToUpper(name)
+		}
+		return name
+	}
 	allowed := make(map[string]struct{}, len(s.config.EnvWhitelist))
 	for _, key := range s.config.EnvWhitelist {
 		key = strings.TrimSpace(key)
 		if key != "" {
-			allowed[key] = struct{}{}
+			allowed[envKey(key)] = struct{}{}
 		}
 	}
 
@@ -432,7 +438,7 @@ func (s *Sandbox) FilterEnv(env []string) []string {
 		if len(parts) == 0 {
 			continue
 		}
-		if _, ok := allowed[parts[0]]; ok {
+		if _, ok := allowed[envKey(parts[0])]; ok {
 			filtered = append(filtered, entry)
 		}
 	}

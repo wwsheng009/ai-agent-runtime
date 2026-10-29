@@ -167,6 +167,12 @@ func buildMCPCallToolResult(result *ToolResult) *mcp.CallToolResult {
 		if result.Error != nil {
 			errMsg = result.Error.Error()
 		}
+		// Failed tools still carry the useful diagnostic body (stderr, command
+		// output, path hint) in Content. Dropping it here made a shell failure
+		// look like a bare "exit status 1" with no cause.
+		if content := strings.TrimSpace(result.Content); content != "" && content != errMsg {
+			errMsg += "\n\n" + content
+		}
 		contents = append(contents, &mcp.TextContent{Text: errMsg})
 	}
 

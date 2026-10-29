@@ -41,7 +41,7 @@ Usage:
 
 Options:
   --workspace <dir>    workspace root (default: current directory)
-  --profile <name>     readonly (default) | standard | ops | custom
+  --profile <name>     all (default) | readonly | standard | ops | custom
   --config <file>      config file to write (default ~/.aicli/remote-tools/config.yaml)
   --token-file <file>  token file to create (default ~/.aicli/remote-tools/mcp.token)
   --gateway            write the gateway block even when no aicli config is detected
@@ -65,20 +65,24 @@ func runInit(args []string) int {
 		noGateway  bool
 	)
 	fs.StringVar(&workspace, "workspace", "", "workspace root (default: current directory)")
-	fs.StringVar(&profile, "profile", string(remotetools.ProfileReadonly), "readonly|standard|ops|custom")
+	fs.StringVar(&profile, "profile", string(remotetools.ProfileAll), "all|readonly|standard|ops|custom")
 	fs.StringVar(&configPath, "config", "", "config file to write")
 	fs.StringVar(&tokenPath, "token-file", "", "token file to create")
 	fs.BoolVar(&force, "force", false, "overwrite an existing config file")
 	fs.BoolVar(&gateway, "gateway", false, "write the gateway block even without a detected aicli config")
 	fs.BoolVar(&noGateway, "no-gateway", false, "never write the gateway block")
+	fs.Usage = func() { fmt.Fprint(os.Stdout, initUsage) }
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 
 	switch remotetools.Profile(strings.ToLower(strings.TrimSpace(profile))) {
-	case remotetools.ProfileReadonly, remotetools.ProfileStandard, remotetools.ProfileOps, remotetools.ProfileCustom:
+	case remotetools.ProfileReadonly, remotetools.ProfileStandard, remotetools.ProfileOps, remotetools.ProfileAll, remotetools.ProfileCustom:
 	default:
-		fmt.Fprintf(os.Stderr, "aicli-remote-tools init: unknown profile %q (want readonly|standard|ops|custom)\n", profile)
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools init: unknown profile %q (want all|readonly|standard|ops|custom)\n", profile)
 		return 2
 	}
 

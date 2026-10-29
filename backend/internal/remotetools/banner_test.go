@@ -40,6 +40,30 @@ func TestHTTPBannerNamesTheEndpointAndCredentialSource(t *testing.T) {
 	}
 }
 
+func TestHTTPBannerShowsResolvedShell(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	server, err := NewServer(cfg, "banner-shell")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	if !strings.Contains(body, "shell    : "+shellLabel(cfg.ResolvedShell)) {
+		t.Fatalf("banner lacks the resolved shell:\n%s", body)
+	}
+	// With no explicit artifacts.root, Normalize now defaults it to a .aicli
+	// directory under the workspace, so the missing-store warning must not appear
+	// and the recoverable-capture tool must be registered.
+	if strings.Contains(body, "artifacts.root is empty") {
+		t.Fatalf("banner should not warn about empty artifacts.root (now defaults to workspace .aicli):\n%s", body)
+	}
+	if !strings.Contains(strings.Join(server.ToolNames(), ","), ToolArtifactRead) {
+		t.Fatalf("artifact_read tool not registered under default artifacts.root; tools=%v", server.ToolNames())
+	}
+}
+
 func TestHTTPBannerWarnsWithoutTokenAndUsesHTTPS(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Workspace = t.TempDir()
@@ -78,5 +102,44 @@ func TestHTTPBannerShowsInstanceAndIdentity(t *testing.T) {
 	}
 	if !strings.Contains(body, "identity : "+cfg.Gateway.IdentityFile) {
 		t.Fatalf("banner lacks the identity path:\n%s", body)
+	}
+}
+
+func TestHTTPBannerShellWarningIncludesEnableGuidance(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	server, err := NewServer(cfg, "banner-shell")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	for _, want := range []string{
+		"shell is visible but no allowlist is configured",
+		"shell.allowedCommands",
+		"shell.allowedCommandPatterns",
+		"denyShellMetachars",
+		"docs/user-guide/aicli-remote-tools.md §7",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("banner warning lacks %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestHTTPBannerShellWarningRespectsReadOnly(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.ReadOnly = true
+	server, err := NewServer(cfg, "banner-readonly")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	if strings.Contains(body, "shell is visible but no allowlist") {
+		t.Fatalf("readOnly banner must not claim shell is visible:\n%s", body)
 	}
 }

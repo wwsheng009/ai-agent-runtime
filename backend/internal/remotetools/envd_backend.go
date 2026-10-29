@@ -158,10 +158,15 @@ func newEnvDBackend(cfg *Config) (*envdBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("envd backend: invalid command policy: %w", err)
 	}
-	if cfg.Profile == ProfileOps && len(cfg.Shell.AllowedCommands)+len(cfg.Shell.AllowedCommandPatterns) == 0 {
+	if cfg.ShellExposed() &&
+		len(cfg.Shell.AllowedCommands)+len(cfg.Shell.AllowedCommandPatterns) == 0 {
 		// Fail-closed either way, but say it at startup instead of letting the
 		// first shell call discover it.
-		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: profile ops but no allowed commands configured; shell and pty_start will refuse every command (fail-closed)\n")
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell is visible but no allowlist is configured; shell and pty_start will refuse every command (fail-closed); %s\n",
+			ShellPolicyEnableHint())
+	}
+	if strings.TrimSpace(cfg.Shell.Program) != "" {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell.program is ignored for the envd backend; envd executes via /bin/sh on the target\n")
 	}
 	extra := make([]string, 0, len(cfg.AllowedRoots))
 	for _, root := range cfg.AllowedRoots {
@@ -835,6 +840,8 @@ func profileRank(p Profile) int {
 		return 1
 	case ProfileOps:
 		return 2
+	case ProfileAll:
+		return 3
 	default:
 		return -1
 	}

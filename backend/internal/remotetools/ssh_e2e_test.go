@@ -250,4 +250,3 @@ func runRemoteCommand(channel ssh.Channel, command string) {
 		}
 	}
 }
-

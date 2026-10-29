@@ -28,16 +28,35 @@ func artifactReadListed(t *testing.T, cfg *remotetools.Config) bool {
 	return false
 }
 
-// TestRemoteArtifactReadIsNotInTheDefaultSurface pins the gating rule: the tool
-// is only advertised when the operator configured an artifact store.
-//
-// This matters because artifact_read dereferences ids produced on that target.
-// Advertising it without a store would offer a tool whose every call fails with
-// "artifact store is not configured" - a capability promised and not delivered.
-func TestRemoteArtifactReadIsNotInTheDefaultSurface(t *testing.T) {
+// TestRemoteArtifactReadDefaultsIntoSurfaceForLocalBackend pins the new default:
+// a bare local config now advertises artifact_read because Normalize defaults
+// artifacts.root to a .aicli directory under the workspace. That keeps folded
+// shell output recoverable instead of truncating it with no recovery (design §D6).
+func TestRemoteArtifactReadDefaultsIntoSurfaceForLocalBackend(t *testing.T) {
 	cfg := newTestConfig(t, t.TempDir())
+	if !artifactReadListed(t, cfg) {
+		t.Fatal("default local config must advertise artifact_read (artifacts.root now defaults to workspace .aicli)")
+	}
+}
+
+// TestRemoteArtifactReadOmittedForEnvDWithoutStore pins the remaining no-store
+// contract for the envd backend: the workspace lives on a remote target, so
+// Normalize does not fabricate a local .aicli root. Without an explicit store,
+// artifact_read stays absent rather than being advertised against a path that
+// does not exist on this host.
+func TestRemoteArtifactReadOmittedForEnvDWithoutStore(t *testing.T) {
+	cfg := remotetools.DefaultConfig()
+	cfg.Workspace = "/srv/app"
+	cfg.Backend = remotetools.BackendEnvD
+	cfg.ToolPrefix = "remote_dev"
+	cfg.TargetName = "dev"
+	cfg.EnvD.Addr = "127.0.0.1:49983"
+	cfg.EnvD.User = "dev"
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
 	if artifactReadListed(t, cfg) {
-		t.Fatal("artifact_read must stay out of the default surface: no artifact store is configured")
+		t.Fatal("envd without an explicit artifact store must not advertise artifact_read")
 	}
 }
 

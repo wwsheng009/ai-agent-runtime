@@ -48,6 +48,8 @@ func run(args []string) int {
 		return runDoctor(args[1:])
 	case "tools":
 		return runTools(args[1:])
+	case "policy":
+		return runPolicy(args[1:])
 	case "version", "--version", "-v":
 		fmt.Fprintf(os.Stdout, "aicli-remote-tools %s\n", version)
 		return 0
@@ -59,102 +61,6 @@ func run(args []string) int {
 		printUsage(os.Stderr)
 		return 2
 	}
-}
-
-func printUsage(w *os.File) {
-	fmt.Fprintf(w, `aicli-remote-tools %s - remote tool server (MCP over stdio or Streamable HTTP)
-
-Usage:
-  aicli-remote-tools init   [options]           # write a ready-to-run config + token
-  aicli-remote-tools serve  --stdio [options]   # SSH transport (one process per connection)
-  aicli-remote-tools serve  --http  [options]   # daemon transport (loopback by default; implied when omitted)
-  aicli-remote-tools doctor [options]           # self-check and effective settings
-  aicli-remote-tools tools  [options]           # list the exposed tool names
-
-Required:
-  --workspace <path>        Root for relative paths; also the default jail root.
-
-Common options:
-  --config <file>           YAML config (flags override file values)
-  --allowed-roots <a,b>     Extra absolute roots (workspace is always included)
-  --profile <name>          readonly (default) | standard | ops | custom
-  --allowed-command-patterns <p1,p2>  Whole-command wildcard allowlist (* and ?)
-  --denied-command-patterns  <p1,p2>  Whole-command wildcard denylist (always wins)
-  --tool-prefix <prefix>    Prefix every tool name, e.g. remote_dev
-  --tools <a,b>             Explicit tool allowlist (narrows any profile)
-  --target-name <name>      Label used in descriptions and audit records
-  --description-style <s>   compact (default) | explicit
-  --max-output-bytes <n>    Model-visible output cap per call (default 262144)
-  --max-bytes-per-call <n>  Per-call payload cap (default 2097152)
-  --audit <path>            NDJSON audit log (0600)
-  --jobs-root <path>        Legacy job_* store root (requires --legacy-jobs)
-  --legacy-jobs             Re-enable the legacy remote job_* tools (v1 default: off)
-  --artifacts-root <path>   Enable artifact_read for folded captures
-  --artifacts-max-bytes <n> Per-artifact size limit (default 67108864)
-
-HTTP options:
-  --http-listen <addr>      Listen address (default 127.0.0.1:18765; 127.0.0.1:0 = random)
-  --http-path <path>        MCP endpoint path (default /mcp)
-  --http-token-env <name>   Env var holding the bearer token (default AICLI_REMOTE_TOKEN)
-  --http-token-file <file>  Read the bearer token from a 0600 file (preferred; overrides the env var)
-  --http-access-log <file>  NDJSON request log (includes 401s; no Authorization header)
-  --tls-cert <file> --tls-key <file>
-
-Gateway mount options (serve --http):
-  --gateway-url <url>            aicli-gateway endpoint, e.g. https://aicli.ttai.online
-  --gateway-from-aicli           Reuse the gateway.* section aicli/the TUI already persisted
-  --gateway-aicli-config <file>  Explicit aicli config file for the above (empty = layered defaults)
-  --gateway-token-file <file>    Device token file (0600), preferred over the env var
-  --gateway-token-env <name>     Env var holding the device token (default AICLI_GATEWAY_TOKEN)
-  --gateway-proxy-url <url>      Proxy for the agent→gateway tunnel (e.g. http://127.0.0.1:10810)
-  --instance <id>                Per-instance identity/label (derives instances/<id>/mount-id)
-  --gateway-name <name>          Node name shown in the gateway console
-  --gateway-self-name <name>     Mount name for this server's own endpoint (default self)
-  --gateway-self-slug <slug>     Pin the public path segment
-  --gateway-identity-file <file> Persisted mount identity (default ~/.aicli/data/gateway-agent/mount-id)
-  --gateway-no-mount-self        Publish only --mount entries
-  --mount name=<id>,upstream=<url>[,token_file=<f>][,token_env=<NAME>][,slug=<slug>]
-                                 Repeatable: publish another local MCP endpoint
-
-First-run behaviour:
-  a bare 'serve' creates ~/.aicli/remote-tools/config.yaml + mcp.token on first
-  run and reuses aicli's persisted gateway.* when present.
-  --no-auto-init                 skip creating the default config/token
-  --no-gateway                   ignore aicli's gateway config (stay local)
-
-envd backend options (serve --stdio --backend envd):
-  --addr <host:port|url>    envd endpoint (required)
-  --user <name>             OS user envd executes as (required; envd reads it from HTTP Basic credentials)
-  --token-env <name>        Env var holding the X-Access-Token value
-  --ca-file <pem>           CA bundle verifying a TLS envd endpoint (switches a bare host:port to https://)
-  --call-timeout <dur>      Per-call deadline (default 10m)
-  --no-envd-files           Read via spawned processes only, never envd's native /files endpoint
-
-The envd backend runs on THIS machine and reaches the target over Connect-RPC:
---workspace is a path on the target (absolute POSIX), the jail is enforced
-against paths canonicalized on the target, and only the stdio transport is
-available. envd performs no path or command checks of its own.
-
-Examples:
-  # Just run it in the directory you want to expose. First run auto-creates
-  # ~/.aicli/remote-tools/{config.yaml,mcp.token} and reuses aicli's gateway.
-  cd D:\work
-  aicli-remote-tools serve
-
-  # Explicit one-time setup (same result, with reviewable output):
-  aicli-remote-tools init --workspace D:\work
-
-  # SSH stdio (local side: ssh-client --stdio ...)
-  aicli-remote-tools serve --stdio --workspace /srv/app --tool-prefix remote_dev
-
-  # HTTP daemon bound to loopback, reached through an SSH local forward
-  AICLI_REMOTE_TOKEN=$(openssl rand -hex 32) \
-    aicli-remote-tools serve --http --workspace /srv/app --tool-prefix remote_dev
-
-  # envd target (no server binary on the target; envd runs there)
-  aicli-remote-tools serve --stdio --backend envd \
-    --addr 10.0.0.9:49983 --user dev --workspace /srv/app --tool-prefix remote_dev
-`, version)
 }
 
 // stringListFlag collects a repeatable flag into a list.
@@ -183,6 +89,7 @@ type serveFlags struct {
 	tools         string
 	targetName    string
 	descStyle     string
+	shell         string
 	maxOutput     int
 	maxBytes      int
 	auditPath     string
@@ -206,6 +113,7 @@ type serveFlags struct {
 	denyCommands     stringListFlag
 	allowCommandPats stringListFlag
 	denyCommandPats  stringListFlag
+	allowAll         bool
 	denyMetachars    bool
 
 	stdio     bool
@@ -320,11 +228,12 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.BoolVar(&flags.noGateway, "no-gateway", false, "ignore aicli's persisted gateway config (stay local)")
 	fs.StringVar(&flags.workspace, "workspace", "", "workspace root (required unless set in config)")
 	fs.StringVar(&flags.allowedRoots, "allowed-roots", "", "comma-separated extra absolute roots")
-	fs.StringVar(&flags.profile, "profile", "", "readonly|standard|ops|custom")
+	fs.StringVar(&flags.profile, "profile", "", "all|readonly|standard|ops|custom")
 	fs.StringVar(&flags.toolPrefix, "tool-prefix", "", "prefix for every exposed tool name")
 	fs.StringVar(&flags.tools, "tools", "", "comma-separated tool allowlist")
 	fs.StringVar(&flags.targetName, "target-name", "", "label for descriptions and audit")
 	fs.StringVar(&flags.descStyle, "description-style", "", "compact|explicit")
+	fs.StringVar(&flags.shell, "shell", "", "shell executable for shell/job_start (default: pwsh > powershell > cmd on Windows; $SHELL > zsh > bash > sh elsewhere)")
 	fs.IntVar(&flags.maxOutput, "max-output-bytes", 0, "model-visible output cap")
 	fs.IntVar(&flags.maxBytes, "max-bytes-per-call", 0, "per-call payload cap")
 	fs.StringVar(&flags.auditPath, "audit", "", "NDJSON audit path")
@@ -354,6 +263,7 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.Var(&flags.denyCommands, "deny-command", "repeatable exact command deny, always wins over the allowlist")
 	fs.Var(&flags.allowCommandPats, "allow-command-pattern", "repeatable whole-command wildcard allowlist (* and ?)")
 	fs.Var(&flags.denyCommandPats, "deny-command-pattern", "repeatable whole-command wildcard denylist")
+	fs.BoolVar(&flags.allowAll, "allow-all", false, "explicitly allow every single command (same as --allow-command \"*\"); deny, metachar and destructive gates still apply")
 	fs.BoolVar(&flags.denyMetachars, "deny-shell-metachars", true, "refuse commands containing shell metacharacters so an allowed binary cannot be chained")
 
 	fs.BoolVar(&flags.stdio, "stdio", false, "serve MCP over stdin/stdout")
@@ -432,6 +342,9 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.descStyle != "" {
 		cfg.DescriptionStyle = flags.descStyle
+	}
+	if flags.shell != "" {
+		cfg.Shell.Program = flags.shell
 	}
 	if flags.maxOutput > 0 {
 		cfg.Limits.MaxOutputBytes = flags.maxOutput
@@ -570,6 +483,9 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	cfg.Shell.DeniedCommands = append(cfg.Shell.DeniedCommands, flags.denyCommands...)
 	cfg.Shell.AllowedCommandPatterns = append(cfg.Shell.AllowedCommandPatterns, flags.allowCommandPats...)
 	cfg.Shell.DeniedCommandPatterns = append(cfg.Shell.DeniedCommandPatterns, flags.denyCommandPats...)
+	if flags.allowAll {
+		cfg.Shell.AllowedCommands = append(cfg.Shell.AllowedCommands, "*")
+	}
 	cfg.Shell.DenyShellMetachars = flags.denyMetachars
 	return cfg, nil
 }
@@ -577,7 +493,11 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 func runServe(args []string) int {
 	flags := &serveFlags{}
 	fs := newFlagSet("serve", flags)
+	fs.Usage = func() { printServeUsage(os.Stdout) }
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 	if flags.stdio && flags.http {
@@ -629,6 +549,7 @@ func remoteServe(cfg *remotetools.Config, stdio bool) int {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: %v\n", err)
 		return 1
 	}
+	server.SetVersion(version)
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -681,13 +602,26 @@ type doctorReport struct {
 	LegacyRemoteJobs       bool     `json:"legacyRemoteJobs"`
 	ArtifactsRoot          string   `json:"artifactsRoot,omitempty"`
 	ArtifactsWritable      bool     `json:"artifactsWritable"`
+	ShellVisible           bool     `json:"shellVisible"`
+	AllowAll               bool     `json:"allowAll"`
+	AllowRules             []string `json:"allowRules,omitempty"`
+	DenyRules              []string `json:"denyRules,omitempty"`
+	AllowedCommands        []string `json:"allowedCommands,omitempty"`
+	DeniedCommands         []string `json:"deniedCommands,omitempty"`
 	AllowedCommandPatterns []string `json:"allowedCommandPatterns,omitempty"`
 	DeniedCommandPatterns  []string `json:"deniedCommandPatterns,omitempty"`
+	DenyShellMetachars     bool     `json:"denyShellMetachars"`
+	ShellProgram           string   `json:"shellProgram,omitempty"`
+	ShellResolved          string   `json:"shellResolved,omitempty"`
+	ShellType              string   `json:"shellType,omitempty"`
+	ShellEnvAllowlist      []string `json:"shellEnvAllowlist,omitempty"`
+	CommandTimeout         string   `json:"commandTimeout"`
 	HTTPListen             string   `json:"httpListen"`
 	HTTPTokenSet           bool     `json:"httpTokenSet"`
 	HTTPTokenLength        int      `json:"httpTokenLength"`
 	HTTPNeedsToken         bool     `json:"httpNeedsToken"`
 	HTTPAccessLog          string   `json:"httpAccessLog,omitempty"`
+	Lints                  []string `json:"lints,omitempty"`
 	Problems               []string `json:"problems"`
 	Warnings               []string `json:"warnings"`
 }
@@ -695,7 +629,11 @@ type doctorReport struct {
 func runDoctor(args []string) int {
 	flags := &serveFlags{}
 	fs := newFlagSet("doctor", flags)
+	fs.Usage = func() { printDoctorUsage(os.Stdout) }
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 	cfg, err := loadConfig(flags)
@@ -741,13 +679,28 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		JobsRoot:               cfg.Jobs.Root,
 		LegacyRemoteJobs:       cfg.Jobs.LegacyRemoteJobs,
 		ArtifactsRoot:          cfg.Artifacts.Root,
+		ShellVisible:           cfg.ShellExposed(),
+		AllowAll:               shellAllowsAll(cfg.Shell),
+		AllowRules:             effectiveAllowRules(cfg.Shell),
+		DenyRules:              effectiveDenyRules(cfg.Shell),
+		AllowedCommands:        append([]string(nil), cfg.Shell.AllowedCommands...),
+		DeniedCommands:         append([]string(nil), cfg.Shell.DeniedCommands...),
 		AllowedCommandPatterns: cfg.Shell.AllowedCommandPatterns,
 		DeniedCommandPatterns:  cfg.Shell.DeniedCommandPatterns,
+		DenyShellMetachars:     cfg.Shell.DenyShellMetachars,
+		ShellProgram:           cfg.Shell.Program,
+		ShellEnvAllowlist:      append([]string(nil), cfg.Shell.EnvAllowlist...),
+		CommandTimeout:         cfg.Limits.CommandTimeout.Duration.String(),
 		HTTPListen:             cfg.HTTP.Listen,
 		HTTPAccessLog:          cfg.HTTP.AccessLog,
 	}
+	report.Lints = policyLints(cfg)
 	report.Problems = []string{}
 	report.Warnings = []string{}
+	if cfg.Backend == remotetools.BackendLocal && cfg.ShellExposed() {
+		report.ShellResolved = cfg.ResolvedShell.Path
+		report.ShellType = string(cfg.ResolvedShell.Type)
+	}
 
 	if _, err := os.Stat(cfg.Workspace); err != nil {
 		report.Problems = append(report.Problems, fmt.Sprintf("workspace is not accessible: %v", err))
@@ -813,19 +766,30 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 				fmt.Sprintf("token from %s is shorter than 32 bytes", cfg.HTTP.TokenEnv))
 		}
 	}
-	if cfg.Profile == remotetools.ProfileOps && len(cfg.Shell.AllowedCommands) == 0 {
+	if cfg.ShellExposed() &&
+		len(cfg.Shell.AllowedCommands) == 0 && len(cfg.Shell.AllowedCommandPatterns) == 0 {
 		report.Warnings = append(report.Warnings,
-			"profile ops exposes the shell tool but shell.allowedCommands is empty: every command will be refused (fail-closed)")
+			"shell is visible but no allowlist is configured: every command will be refused (fail-closed); "+
+				remotetools.ShellPolicyEnableHint())
 	}
-	if (cfg.Profile == remotetools.ProfileStandard || cfg.Profile == remotetools.ProfileOps) && cfg.ReadOnly {
+	if (cfg.Profile == remotetools.ProfileStandard || cfg.Profile == remotetools.ProfileOps ||
+		cfg.Profile == remotetools.ProfileAll) && cfg.ReadOnly {
 		report.Warnings = append(report.Warnings,
 			"readOnly=true overrides the profile: only read tools are exposed")
+	}
+	if cfg.ShellExposed() && strings.TrimSpace(cfg.Artifacts.Root) == "" {
+		report.Warnings = append(report.Warnings,
+			"shell output above the model window will be truncated with no recovery; set artifacts.root to enable artifact_read")
 	}
 	report.OK = len(report.Problems) == 0
 	return report
 }
 
 func printDoctorReport(report doctorReport) {
+	metachars := "allow"
+	if report.DenyShellMetachars {
+		metachars = "deny"
+	}
 	fmt.Fprintf(os.Stdout, "aicli-remote-tools doctor (%s)\n", report.Version)
 	fmt.Fprintf(os.Stdout, "  workspace        : %s\n", report.Workspace)
 	fmt.Fprintf(os.Stdout, "  allowed roots    : %s\n", strings.Join(report.AllowedRoots, ", "))
@@ -834,13 +798,21 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  tool prefix      : %s\n", orDash(report.ToolPrefix))
 	fmt.Fprintf(os.Stdout, "  description      : %s\n", report.DescriptionStyle)
 	fmt.Fprintf(os.Stdout, "  tools (%d)       : %s\n", len(report.Tools), strings.Join(report.Tools, ", "))
+	fmt.Fprintf(os.Stdout, "  shell visible    : %v\n", report.ShellVisible)
+	fmt.Fprintf(os.Stdout, "  allow all        : %v\n", report.AllowAll)
+	fmt.Fprintf(os.Stdout, "  allow rules      : %s\n", orDash(strings.Join(report.AllowRules, ", ")))
+	fmt.Fprintf(os.Stdout, "  deny rules       : %s\n", orDash(strings.Join(report.DenyRules, ", ")))
+	fmt.Fprintf(os.Stdout, "  shell metachars  : %s\n", metachars)
+	fmt.Fprintf(os.Stdout, "  shell            : %s\n", orDash(report.ShellResolved))
+	fmt.Fprintf(os.Stdout, "  shell type       : %s\n", orDash(report.ShellType))
+	fmt.Fprintf(os.Stdout, "  shell program    : %s\n", orDash(report.ShellProgram))
+	fmt.Fprintf(os.Stdout, "  shell env        : %s\n", orDash(strings.Join(report.ShellEnvAllowlist, ", ")))
+	fmt.Fprintf(os.Stdout, "  command timeout  : %s\n", orDash(report.CommandTimeout))
 	fmt.Fprintf(os.Stdout, "  audit            : %s (writable=%v)\n", orDash(report.AuditPath), report.AuditWritable)
 	fmt.Fprintf(os.Stdout, "  audit preview    : %d bytes\n", report.AuditPreviewBytes)
 	fmt.Fprintf(os.Stdout, "  jobs root        : %s (writable=%v)\n", orDash(report.JobsRoot), report.JobsWritable)
 	fmt.Fprintf(os.Stdout, "  legacy jobs      : %v (local-only v1 capability)\n", report.LegacyRemoteJobs)
 	fmt.Fprintf(os.Stdout, "  artifacts root   : %s (writable=%v)\n", orDash(report.ArtifactsRoot), report.ArtifactsWritable)
-	fmt.Fprintf(os.Stdout, "  allow patterns   : %s\n", orDash(strings.Join(report.AllowedCommandPatterns, ", ")))
-	fmt.Fprintf(os.Stdout, "  deny patterns    : %s\n", orDash(strings.Join(report.DeniedCommandPatterns, ", ")))
 	fmt.Fprintf(os.Stdout, "  http listen      : %s (token set=%v len=%d)\n",
 		report.HTTPListen, report.HTTPTokenSet, report.HTTPTokenLength)
 	fmt.Fprintf(os.Stdout, "  http access log  : %s\n", orDash(report.HTTPAccessLog))
@@ -849,6 +821,9 @@ func printDoctorReport(report doctorReport) {
 	}
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(os.Stdout, "  warning: %s\n", warning)
+	}
+	for _, lint := range report.Lints {
+		fmt.Fprintf(os.Stdout, "  lint: %s\n", lint)
 	}
 	if report.OK {
 		fmt.Fprintln(os.Stdout, "  result           : ok")
@@ -860,7 +835,11 @@ func printDoctorReport(report doctorReport) {
 func runTools(args []string) int {
 	flags := &serveFlags{}
 	fs := newFlagSet("tools", flags)
+	fs.Usage = func() { printToolsUsage(os.Stdout) }
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 	cfg, err := loadConfig(flags)

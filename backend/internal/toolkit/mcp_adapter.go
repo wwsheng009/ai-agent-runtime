@@ -2,6 +2,7 @@ package toolkit
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
@@ -43,10 +44,18 @@ func (a *MCPAdapter) ExecuteAsMCP(ctx context.Context, args map[string]interface
 		return nil, err
 	}
 
-	// 转换为 MCP 格式
+	// 转换为 MCP 格式。失败结果同样保留 Error 与 Content：只保留其中一侧会
+	// 让模型看不到 stderr/路径提示，排障时只剩一个泛化的 exit status。
+	text := result.Content
+	if !result.Success && result.Error != nil {
+		text = result.Error.Error()
+		if content := strings.TrimSpace(result.Content); content != "" && content != text {
+			text += "\n\n" + content
+		}
+	}
 	content := protocol.Content{
 		Type: "text",
-		Text: result.Content,
+		Text: text,
 	}
 
 	if result.Data != nil {

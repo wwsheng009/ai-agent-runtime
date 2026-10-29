@@ -82,12 +82,12 @@ func (m *Metrics) Observe(tool string, duration time.Duration, bytesOut int, fai
 
 // Snapshot is one point-in-time reading.
 type Snapshot struct {
-	CallsTotal    int64                    `json:"callsTotal"`
-	CallsFailed   int64                    `json:"callsFailed"`
-	CallsDenied   int64                    `json:"callsDenied"`
-	BytesOutTotal int64                    `json:"bytesOutTotal"`
-	LastLatencyMS int64                    `json:"lastLatencyMs"`
-	PerTool       map[string]ToolSnapshot  `json:"perTool,omitempty"`
+	CallsTotal    int64                   `json:"callsTotal"`
+	CallsFailed   int64                   `json:"callsFailed"`
+	CallsDenied   int64                   `json:"callsDenied"`
+	BytesOutTotal int64                   `json:"bytesOutTotal"`
+	LastLatencyMS int64                   `json:"lastLatencyMs"`
+	PerTool       map[string]ToolSnapshot `json:"perTool,omitempty"`
 }
 
 // ToolSnapshot is the per-tool reading.

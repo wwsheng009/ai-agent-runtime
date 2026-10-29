@@ -19,6 +19,9 @@ const (
 	DepthStandard SpecDepth = "standard"
 	// DepthOps adds shell and grants read+write+shell.
 	DepthOps SpecDepth = "ops"
+	// DepthAll exposes every tool family the remote backend/store can provide.
+	// It is the default so an agent is not silently downgraded to read-only.
+	DepthAll SpecDepth = "all"
 )
 
 // DefaultSpecPort is the port aicli-remote-tools serves on by default.
@@ -43,13 +46,17 @@ const DefaultEnvDTokenEnv = "AICLI_ENVD_TOKEN"
 //
 //	http://10.0.0.9:18765            HTTP, token from the environment
 //	http://10.0.0.9:18765#ops        same, with the ops capability grant
-//	ssh://ops@10.0.0.9               SSH stdio, read-only
+//	ssh://ops@10.0.0.9               SSH stdio, all tools (default)
 //	ssh://ops@10.0.0.9:2222#standard SSH stdio on a non-default port
 type Spec struct {
 	// Transport is TransportHTTP or TransportSSHStdio.
 	Transport string
 	// Depth is the capability grant.
 	Depth SpecDepth
+	// DepthExplicit records whether the caller wrote a #depth marker. HTTP
+	// targets only warn about a profile when it was explicitly requested; the
+	// default all is the server's own default and must not produce noise.
+	DepthExplicit bool
 
 	// HTTP fields.
 	URL string
@@ -158,7 +165,7 @@ func ParseSpec(raw string) (*Spec, error) {
 		return nil, fmt.Errorf("parse remote spec %q: %w", raw, err)
 	}
 
-	spec := &Spec{Depth: DepthReadonly}
+	spec := &Spec{Depth: DepthAll}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
 		spec.Transport = TransportHTTP
@@ -216,10 +223,11 @@ func ParseSpec(raw string) (*Spec, error) {
 	if depthToken != "" {
 		depth := SpecDepth(strings.ToLower(strings.TrimSpace(depthToken)))
 		switch depth {
-		case DepthReadonly, DepthStandard, DepthOps:
+		case DepthReadonly, DepthStandard, DepthOps, DepthAll:
 			spec.Depth = depth
+			spec.DepthExplicit = true
 		default:
-			return nil, fmt.Errorf("remote spec %q has an unknown depth %q (want readonly|standard|ops)", raw, depthToken)
+			return nil, fmt.Errorf("remote spec %q has an unknown depth %q (want all|readonly|standard|ops)", raw, depthToken)
 		}
 	}
 
@@ -308,9 +316,11 @@ func (s *Spec) Expand() (*Expanded, error) {
 		Remote: RemoteConfig{
 			Workspace:        s.Workspace,
 			ToolPrefix:       prefix,
-			Profile:          string(s.Depth),
 			DescriptionStyle: "explicit",
 		},
+	}
+	if s.DepthExplicit {
+		target.Remote.Profile = string(s.Depth)
 	}
 
 	switch s.Transport {

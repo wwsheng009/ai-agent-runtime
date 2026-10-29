@@ -116,6 +116,98 @@ func TestBuildMountRegistrationResolvesSelfAndExtras(t *testing.T) {
 	}
 }
 
+func TestBuildMountRegistrationCarriesDisplayMetadata(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Profile = ProfileAll
+	cfg.ToolPrefix = "remote_dev"
+	cfg.TargetName = "dev"
+	cfg.Workspace = t.TempDir()
+	cfg.HTTP.Path = "/mcp"
+	cfg.Gateway = GatewayConfig{
+		URL:      "wss://gw.example.com",
+		SelfName: "self",
+		Mounts: []GatewayMountConfig{{
+			Name:     "extra",
+			Upstream: "http://127.0.0.1:18766/mcp",
+		}},
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	metadata := MountMetadata{
+		Hostname:  "build-host",
+		OS:        "windows",
+		Arch:      "amd64",
+		Version:   "9.9.9",
+		Instance:  "auto-build-host-1234",
+		Backend:   "local",
+		ReadOnly:  true,
+		ToolCount: 2,
+		Tools:     []string{"remote_dev__view", "remote_dev__grep"},
+		Roots:     []string{cfg.Workspace},
+	}
+	registration, err := BuildMountRegistrationWithMetadata(cfg, "identity-1", "127.0.0.1:18765", metadata)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(registration.Specs) != 2 {
+		t.Fatalf("specs = %d, want 2", len(registration.Specs))
+	}
+	self := registration.Specs[0].Labels
+	if self == nil {
+		t.Fatal("self labels are nil")
+	}
+	if self.Hostname != "build-host" || self.OS != "windows" || self.Arch != "amd64" ||
+		self.Version != "9.9.9" || self.Instance != "auto-build-host-1234" ||
+		self.Backend != "local" || !self.ReadOnly {
+		t.Fatalf("self identity labels = %+v", self)
+	}
+	if self.ToolCount != 2 || len(self.Tools) != 2 || len(self.Roots) != 1 {
+		t.Fatalf("self tool/root labels = %+v", self)
+	}
+	extra := registration.Specs[1].Labels
+	if extra == nil || extra.Hostname != "build-host" || extra.Version != "9.9.9" {
+		t.Fatalf("extra identity labels = %+v", extra)
+	}
+	if len(extra.Tools) != 0 || len(extra.Roots) != 0 {
+		t.Fatalf("extra mount must not claim the local tool surface: %+v", extra)
+	}
+}
+
+func TestServerMountMetadataReportsEffectiveSurface(t *testing.T) {
+	root := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Workspace = root
+	cfg.Profile = ProfileAll
+	cfg.ToolPrefix = "remote_dev"
+	cfg.TargetName = "dev"
+	cfg.ReadOnly = true
+	cfg.HTTP.Path = "/mcp"
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	server, err := NewServer(cfg, "test")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	server.SetVersion("9.9.9")
+
+	metadata := server.MountMetadata()
+	if metadata.Hostname == "" || metadata.OS == "" || metadata.Arch == "" {
+		t.Fatalf("host identity is incomplete: %+v", metadata)
+	}
+	if metadata.Version != "9.9.9" || metadata.Backend != "local" || !metadata.ReadOnly {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+	if metadata.ToolCount != len(server.ToolNames()) || metadata.ToolCount == 0 {
+		t.Fatalf("tool count = %d, names = %v", metadata.ToolCount, server.ToolNames())
+	}
+	if len(metadata.Roots) != 1 || metadata.Roots[0] != root {
+		t.Fatalf("roots = %v, want [%s]", metadata.Roots, root)
+	}
+}
+
 func TestBuildMountRegistrationWildcardListener(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.HTTP.Path = "/mcp"

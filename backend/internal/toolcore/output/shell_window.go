@@ -152,7 +152,8 @@ func shellWindowNoticeFor(omittedStart, omittedEnd, totalBytes, totalLines, page
 			"\n\n[output window: showing head %d B + tail %d B of %d bytes of the captured output "+
 				"(%d lines total); omitted middle bytes [%d,%d) = %d bytes. "+
 				"This target has no artifact store, so the omitted middle was NOT kept and cannot be read "+
-				"back. Re-run a narrower command (tighter pattern, Select-String / Select-Object -First/-Last) "+
+				"back. Set artifacts.root on the target to retain future large output, or re-run a narrower "+
+				"command (tighter pattern, Select-String / Select-Object -First/-Last) "+
 				"to see what you need.]",
 			omittedStart, totalBytes-omittedEnd, totalBytes, totalLines,
 			omittedStart, omittedEnd, omitted,

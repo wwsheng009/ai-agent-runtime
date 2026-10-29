@@ -53,7 +53,7 @@ func validateCommandPatterns(field string, patterns []string) error {
 // are compared in: tokens are unquoted by shellrisk.Fields, joined with one
 // space, and lowercased.
 func normalizeCommandLine(command string) string {
-	fields := shellrisk.Fields(strings.TrimSpace(command))
+	fields := policyFields(command)
 	if len(fields) == 0 {
 		return ""
 	}
@@ -61,6 +61,18 @@ func normalizeCommandLine(command string) string {
 	// path: "./deploy.sh", "/opt/tools/deploy.sh" and "deploy.sh" are one command.
 	fields[0] = commandBaseName(fields[0])
 	return strings.ToLower(strings.Join(fields, " "))
+}
+
+// policyFields tokenizes a command for authorization. PowerShell's call
+// operator ("& \"C:\Program Files\...\script.ps1\" arg") is syntax, not the
+// program identity, so it must not hide the executable from the allowlist.
+// Metacharacter and destructive-command checks still see the original text.
+func policyFields(command string) []string {
+	fields := shellrisk.Fields(strings.TrimSpace(command))
+	if len(fields) > 1 && fields[0] == "&" {
+		return fields[1:]
+	}
+	return fields
 }
 
 // commandPatternMatches reports whether one normalized command matches a

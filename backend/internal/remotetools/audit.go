@@ -15,18 +15,18 @@ import (
 // contents or full command text: an audit log that leaks secrets is a
 // compliance problem of its own (design §7.5 / review S5).
 type AuditRecord struct {
-	TS           string   `json:"ts"`
-	Principal    string   `json:"principal,omitempty"`
-	Transport    string   `json:"transport"`
-	RemoteAddr   string   `json:"remote_addr,omitempty"`
-	SessionID    string   `json:"session_id,omitempty"`
-	ToolCallID   string   `json:"tool_call_id,omitempty"`
-	Target       string   `json:"target,omitempty"`
-	Tool         string   `json:"tool"`
-	Decision     string   `json:"decision"`
-	Reason       string   `json:"reason,omitempty"`
-	Workspace    string   `json:"workspace,omitempty"`
-	Paths        []string `json:"paths,omitempty"`
+	TS         string   `json:"ts"`
+	Principal  string   `json:"principal,omitempty"`
+	Transport  string   `json:"transport"`
+	RemoteAddr string   `json:"remote_addr,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
+	ToolCallID string   `json:"tool_call_id,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Tool       string   `json:"tool"`
+	Decision   string   `json:"decision"`
+	Reason     string   `json:"reason,omitempty"`
+	Workspace  string   `json:"workspace,omitempty"`
+	Paths      []string `json:"paths,omitempty"`
 	// Program is the argv[0] basename for shell/job_start records. It is safe to
 	// log: it is the same identity the command policy matched.
 	Program string `json:"program,omitempty"`
@@ -38,13 +38,13 @@ type AuditRecord struct {
 	CommandPreview string `json:"command_preview,omitempty"`
 	// PolicyRule names the allow/deny rule that produced the decision, e.g.
 	// "allowedCommandPatterns:deploy238_*.sh".
-	PolicyRule   string   `json:"policy_rule,omitempty"`
-	ExitCode     int      `json:"exit_code,omitempty"`
-	DurationMS   int64    `json:"duration_ms,omitempty"`
-	BytesOut     int      `json:"bytes_out,omitempty"`
-	Truncated    bool     `json:"truncated,omitempty"`
-	PolicyVer    string   `json:"policy_version,omitempty"`
-	ExecutionEnv string   `json:"execution_scope,omitempty"`
+	PolicyRule   string `json:"policy_rule,omitempty"`
+	ExitCode     int    `json:"exit_code,omitempty"`
+	DurationMS   int64  `json:"duration_ms,omitempty"`
+	BytesOut     int    `json:"bytes_out,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+	PolicyVer    string `json:"policy_version,omitempty"`
+	ExecutionEnv string `json:"execution_scope,omitempty"`
 }
 
 // AuditSink writes audit records. A nil sink is a no-op.

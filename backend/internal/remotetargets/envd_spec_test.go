@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
 // TestParseSpecEnvD covers the envd:// form end to end.
@@ -455,6 +456,34 @@ func TestExpandOneEnvDWarnsWhenOpsHasNoAllowlist(t *testing.T) {
 	}
 	if !mentioned {
 		t.Fatalf("warnings = %v, want a fail-closed shell warning", warnings)
+	}
+}
+
+func TestExpandOneEnvDWarnsShellProgramIgnored(t *testing.T) {
+	_, warnings, err := expandOne("envdtest", Target{
+		Transport: TransportEnvD,
+		SSH:       SSHConfig{Host: "10.0.0.9", Port: DefaultEnvDPort, User: "dev"},
+		Remote: RemoteConfig{
+			Profile:   "ops",
+			Workspace: "/srv/app",
+			Shell: &remotetools.ShellConfig{
+				AllowedCommands: []string{"uptime"},
+				Program:         "pwsh",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expandOne: %v", err)
+	}
+	var mentioned bool
+	for _, warning := range warnings {
+		if strings.Contains(warning, "shell.program") && strings.Contains(warning, "not applied to envd") {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
+		t.Fatalf("warnings = %v, want a shell.program-ignored warning", warnings)
 	}
 }
 

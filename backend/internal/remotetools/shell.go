@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
@@ -16,6 +16,8 @@ import (
 
 // ToolShell is the canonical name of the remote command tool.
 const ToolShell = "shell"
+
+const emptyCommandOutputNotice = "Command completed successfully with no output."
 
 // remoteShellTool runs one command on the remote host under the command policy.
 //
@@ -32,6 +34,7 @@ type remoteShellTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
 	sandbox *Sandbox
+	shell   runtimeexecutor.Shell
 	// artifacts archives the full capture before folding. Without it a folded
 	// output loses its middle permanently, because a remote call has no local
 	// artifact store to page from (design §D6).
@@ -39,12 +42,13 @@ type remoteShellTool struct {
 }
 
 func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, artifacts *ArtifactStore) *remoteShellTool {
+	shell := resolvedShellForConfig(cfg)
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Command to run on the remote host. One command; pipes, redirection and substitution are refused by policy.",
+				"description": shellCommandParameterDescription(shell),
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -62,11 +66,14 @@ func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, art
 	tool := &remoteShellTool{
 		remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace},
 		sandbox:        sandbox,
+		shell:          shell,
 		artifacts:      artifacts,
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolShell,
-		tool.describe("Run one command on the remote host inside the workspace, subject to the target's command policy."),
+		tool.describe(shellToolDescription(
+			"Run one command on the remote host inside the workspace, subject to the target's command policy.",
+			shell)),
 		"1.0.0",
 		parameters,
 		true,
@@ -83,7 +90,7 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass command", "command is required")), nil
 	}
 	if t.sandbox == nil {
-		return remoteErrorResult(newToolError(CodeCommandDenied, "enable profile ops and configure allowedCommands", "shell is not enabled on this target")), nil
+		return remoteErrorResult(newToolError(CodeCommandDenied, "enable profile all/ops and configure allowedCommands", "shell is not enabled on this target")), nil
 	}
 	rule, err := t.sandbox.CheckCommand(command)
 	if err != nil {
@@ -92,6 +99,7 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			result.Metadata = map[string]interface{}{}
 		}
 		result.Metadata["policy_rule"] = rule
+		addCommandDiagnostics(result.Metadata, command)
 		return result, nil
 	}
 
@@ -133,7 +141,17 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		CaptureLimit:    captureLimit,
 		DisableArtifact: true,
 		QuietNotice:     -1,
-		Invocation:      remoteShellInvocation,
+		Shell:           t.shell,
+		Invocation: func(command string) (string, []string) {
+			return shellInvocation(t.shell, command)
+		},
+		Prepare: func(_ context.Context, launch shellexec.Launch) (shellexec.Launch, error) {
+			// os/exec's Windows argv encoder escapes embedded quotes with
+			// backslashes; cmd.exe treats those as literal characters. Hand
+			// CreateProcess the already-quoted command line instead.
+			launch.RawCmdLine = shellRawCmdLine(t.shell, command)
+			return launch, nil
+		},
 	})
 	if execResult.Cancelled && !execResult.TimedOut {
 		// A client disconnect cancels the request context. It is a control-plane
@@ -148,9 +166,12 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			"remote":      true,
 			"workspace":   effective.Root(),
 			"policy_rule": rule,
+			"shell":       shellLabel(t.shell),
+			"shell_type":  string(t.shell.Type),
 		}
 		metadata["error_code"] = toolcore.ErrCancelled
 		metadata["next_action"] = "retry the call if the command must complete"
+		addCommandDiagnostics(metadata, command)
 		body, metadata := t.shapeModelOutput(ToolShell, execResult.Capture.Output, metadata)
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -178,6 +199,8 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		display = fmt.Sprintf("Command timed out after %s.\n\n%s", timeout, capture)
 	case runErr != nil:
 		display = fmt.Sprintf("Command failed: %v\n\n%s", runErr, capture)
+	case strings.TrimSpace(capture) == "":
+		display = emptyCommandOutputNotice
 	}
 	metadata := map[string]interface{}{
 		"command":              command,
@@ -194,7 +217,10 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"remote":               true,
 		"workspace":            effective.Root(),
 		"policy_rule":          rule,
+		"shell":                shellLabel(t.shell),
+		"shell_type":           string(t.shell.Type),
 	}
+	addCommandDiagnostics(metadata, command)
 	if execResult.Capture.CaptureLimitDisabled {
 		metadata["output_capture_limit_disabled"] = true
 	}
@@ -210,6 +236,9 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 	}
 	if execResult.WaitDelayUsed {
 		metadata["wait_delay_used"] = true
+	}
+	if runErr == nil && !timedOut && strings.TrimSpace(capture) == "" {
+		metadata["output_empty"] = true
 	}
 	// Archive the complete capture before folding, so artifact_read can page the
 	// omitted middle. The notice is charged against the same model-visible
@@ -229,9 +258,9 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 				Success:    false,
 				OutputKind: "text",
 				Content:    body,
-				// The MCP projection sends only Error for a failed result, so the
-				// code and the recovery hint must live here; Content is dropped on
-				// this path. See buildMCPCallToolResult.
+				// Keep the code and recovery hint in Error as well: the MCP
+				// projection now includes Content, but clients that render only
+				// Error must still see the actionable class.
 				Error: shellFailureError(
 					fmt.Errorf("artifact archive failed: %w", archiveErr),
 					toolcore.ErrArtifactWriteFailed,
@@ -307,10 +336,9 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 // shellFailureError builds the error a failed shell call reports.
 //
 // The code and recovery hint go into the error text on purpose. The MCP
-// projection emits only result.Error for a failed result and drops Content
-// entirely (buildMCPCallToolResult), so anything left in Content or metadata
-// never reaches the caller. Without this the model saw a bare
-// "artifact archive failed: ... permission denied" with no class to act on.
+// projection includes Content for failed results, but some clients render only
+// Error; keeping the class here means those clients still see an actionable
+// failure instead of a bare "command failed: exit status 1".
 func shellFailureError(cause error, code, nextAction string) error {
 	message := cause.Error()
 	if trimmed := strings.TrimSpace(code); trimmed != "" {
@@ -322,13 +350,29 @@ func shellFailureError(cause error, code, nextAction string) error {
 	return fmt.Errorf("%s", message)
 }
 
-// remoteShellInvocation returns the platform shell and its arguments.
+// addCommandDiagnostics exposes the exact command bytes for client-vs-server
+// escape diagnosis without changing the model-visible body.
 //
-// A POSIX target uses `sh -c`; Windows targets are out of scope for P2 (design
-// §12 item 4) but the branch keeps the tool from silently doing nothing there.
-func remoteShellInvocation(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return windowsShellInvocation(command)
+// A client that sends a single backslash inside a JSON string can turn
+// `common\tenantctx` into a literal TAB before the command reaches the server.
+// Conversely, a client that decodes the returned TextContent a second time can
+// turn the server's backslash into a TAB while rendering. These fields let the
+// next report distinguish the two cases:
+//
+//	command_has_tab / command_tab_count: the server received a real TAB.
+//	command_has_backslash / command_backslash_count: the server received `\`.
+//	command_escaped: Go-quoted form; a literal backslash is `\\`, a TAB is `\t`.
+//
+// Metadata only: the body and success/error contract are untouched.
+func addCommandDiagnostics(metadata map[string]interface{}, command string) {
+	if metadata == nil {
+		return
 	}
-	return "/bin/sh", []string{"-c", command}
+	metadata["command_escaped"] = fmt.Sprintf("%q", command)
+	metadata["command_has_tab"] = strings.ContainsRune(command, '\t')
+	metadata["command_tab_count"] = strings.Count(command, "\t")
+	metadata["command_has_newline"] = strings.ContainsRune(command, '\n')
+	metadata["command_newline_count"] = strings.Count(command, "\n")
+	metadata["command_has_backslash"] = strings.Contains(command, `\`)
+	metadata["command_backslash_count"] = strings.Count(command, `\`)
 }

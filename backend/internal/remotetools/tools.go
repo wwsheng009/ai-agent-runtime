@@ -35,6 +35,7 @@ var shellTools = []string{ToolShell}
 //   - readonly: the four read tools;
 //   - standard: read + write tools;
 //   - ops: standard + shell;
+//   - all: read + write + shell (the default), plus configured job/artifact tools;
 //   - custom: exactly cfg.Tools.
 //
 // In every case cfg.Tools acts as an additional narrowing filter when non-empty.
@@ -57,11 +58,16 @@ func (c *Config) enabledTools() []string {
 		base = append(base, readOnlyTools...)
 		base = append(base, writeTools...)
 		base = append(base, shellTools...)
+	case ProfileAll:
+		base = append(base, readOnlyTools...)
+		base = append(base, writeTools...)
+		base = append(base, shellTools...)
 	}
-	// Job tools are a legacy local-only surface: the store must be configured
-	// and the operator must explicitly opt into the compatibility window. A
-	// configured store alone is not enough to re-expose a v1-local capability.
-	if c.Jobs.Root != "" && c.Jobs.LegacyRemoteJobs && (c.Profile == ProfileOps || c.Profile == ProfileCustom) {
+	// Job tools need a store. Profile all opts into them directly; the narrower
+	// profiles keep the legacy compatibility gate explicit.
+	if c.Jobs.Root != "" &&
+		(c.Profile == ProfileAll ||
+			(c.Jobs.LegacyRemoteJobs && (c.Profile == ProfileOps || c.Profile == ProfileCustom))) {
 		base = append(base, jobTools...)
 	}
 	if c.Artifacts.Root != "" {

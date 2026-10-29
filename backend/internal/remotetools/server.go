@@ -60,6 +60,9 @@ type Server struct {
 	// environment) and reused for every dial; re-reading per reconnect would
 	// make a rotated file ambiguous.
 	gatewayToken string
+	// version is the application build version stamped into REGISTER and the
+	// mount labels. It is injected by the command layer (main.version).
+	version      string
 	gatewayStart func(localAddr string) error
 	gatewayClose func()
 	// instanceLock is held for the process lifetime so two services cannot
@@ -226,6 +229,16 @@ func (s *Server) ToolNames() []string {
 	return exposedToolNames(s.registry)
 }
 
+// SetVersion records the application build version for gateway registration.
+// It is deliberately separate from NewServer: library callers and tests do not
+// need a build version, while the command layer knows the injected value.
+func (s *Server) SetVersion(version string) {
+	if s == nil {
+		return
+	}
+	s.version = strings.TrimSpace(version)
+}
+
 // Metrics returns the per-server counter set for the status surface.
 func (s *Server) Metrics() *Metrics {
 	if s == nil {
@@ -243,8 +256,20 @@ func (s *Server) RunStdio(ctx context.Context) error {
 	if s == nil || s.mcp == nil {
 		return fmt.Errorf("server is not initialized")
 	}
-	fmt.Fprintf(os.Stderr, "aicli-remote-tools: stdio transport, workspace=%s tools=%s\n",
-		s.workspace.Root(), strings.Join(s.ToolNames(), ","))
+	shellInfo := ""
+	if s.cfg.Backend == BackendLocal && s.cfg.ShellExposed() {
+		shellInfo = ", shell=" + shellLabel(s.cfg.ResolvedShell)
+	}
+	fmt.Fprintf(os.Stderr, "aicli-remote-tools: stdio transport, workspace=%s tools=%s%s\n",
+		s.workspace.Root(), strings.Join(s.ToolNames(), ","), shellInfo)
+	if s.cfg.ShellExposed() &&
+		len(s.cfg.Shell.AllowedCommands) == 0 && len(s.cfg.Shell.AllowedCommandPatterns) == 0 {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell is visible but no allowlist is configured; every shell call will be refused (fail-closed); %s\n",
+			ShellPolicyEnableHint())
+	}
+	if s.cfg.ShellExposed() && strings.TrimSpace(s.cfg.Artifacts.Root) == "" {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: artifacts.root is empty; shell output above the model window will be truncated with no recovery\n")
+	}
 	return s.mcp.Start(ctx)
 }
 

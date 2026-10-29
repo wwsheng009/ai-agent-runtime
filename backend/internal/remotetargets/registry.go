@@ -301,7 +301,7 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 			"workspace":        workspace,
 			"toolPrefix":       prefix,
 			"targetName":       serverName,
-			"profile":          orDefault(target.Remote.Profile, "readonly"),
+			"profile":          orDefault(target.Remote.Profile, "all"),
 			"descriptionStyle": orDefault(target.Remote.DescriptionStyle, "explicit"),
 		}
 		if len(target.Remote.AllowedRoots) > 0 {
@@ -341,7 +341,7 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		cfg.Args = args
 		warnings = append(warnings,
 			fmt.Sprintf("target %q: the remote profile %q must be started with the same workspace in the server config",
-				serverName, orDefault(target.Remote.Profile, "readonly")))
+				serverName, orDefault(target.Remote.Profile, "all")))
 
 	case TransportSSHHTTP:
 		if strings.TrimSpace(target.SSH.Host) == "" {
@@ -377,7 +377,7 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		// that is not applied. Naming it beats the alternative: `--remote
 		// http://host#standard` used to print a depth and stay silent about the fact
 		// that `#standard` changes nothing on an already-serving target.
-		if profile := strings.TrimSpace(target.Remote.Profile); profile != "" && profile != "readonly" {
+		if profile := strings.TrimSpace(target.Remote.Profile); profile != "" {
 			warnings = append(warnings,
 				fmt.Sprintf("target %q: profile %q is not applied to an http target; the tool family is fixed by the running server (use `#depth` with ssh-stdio, or set the server's own profile)",
 					serverName, profile))
@@ -433,7 +433,7 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 			"--user", strings.TrimSpace(target.SSH.User),
 			"--workspace", workspace,
 			"--tool-prefix", prefix,
-			"--profile", orDefault(target.Remote.Profile, "readonly"),
+			"--profile", orDefault(target.Remote.Profile, "all"),
 		}
 		if len(target.Remote.AllowedRoots) > 0 {
 			roots := make([]string, 0, len(target.Remote.AllowedRoots))
@@ -465,6 +465,11 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 					fmt.Sprintf("target %q: remote.shell.envAllowlist is not applied to envd; envd only supports adding explicit envs",
 						serverName))
 			}
+			if strings.TrimSpace(shell.Program) != "" {
+				warnings = append(warnings,
+					fmt.Sprintf("target %q: remote.shell.program is not applied to envd; envd executes commands via /bin/sh on the target",
+						serverName))
+			}
 		}
 		if tokenEnv := strings.TrimSpace(target.Remote.TokenEnv); tokenEnv != "" {
 			args = append(args, "--token-env", tokenEnv)
@@ -488,7 +493,7 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		cfg.Args = args
 		warnings = append(warnings,
 			fmt.Sprintf("target %q: envd performs no path or command checks; the local server enforces workspace %q, profile %q and the shell allowlist before every envd call",
-				serverName, workspace, orDefault(target.Remote.Profile, "readonly")))
+				serverName, workspace, orDefault(target.Remote.Profile, "all")))
 
 	default:
 		return mcpconfig.MCPConfig{}, nil, fmt.Errorf("unknown transport %q (want ssh-stdio|ssh-http|http|envd)", target.Transport)
@@ -502,9 +507,9 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 		if target.Remote.Shell != nil {
 			allowed = len(target.Remote.Shell.AllowedCommands) + len(target.Remote.Shell.AllowedCommandPatterns)
 		}
-		if orDefault(target.Remote.Profile, "readonly") == "ops" && allowed == 0 {
+		if profile := orDefault(target.Remote.Profile, "all"); (profile == "ops" || profile == "all") && allowed == 0 {
 			warnings = append(warnings,
-				fmt.Sprintf("target %q: profile ops but remote.shell.allowedCommands/allowedCommandPatterns is empty; shell and pty_start will refuse every command (fail-closed)",
+				fmt.Sprintf("target %q: profile ops/all but remote.shell.allowedCommands/allowedCommandPatterns is empty; shell and pty_start will refuse every command (fail-closed)",
 					serverName))
 		}
 	}

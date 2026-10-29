@@ -147,7 +147,7 @@ func TestRemoteShellMetadataIsStructured(t *testing.T) {
 	if marshalErr != nil {
 		t.Fatalf("marshal result: %v", marshalErr)
 	}
-	for _, key := range []string{"exit_code", "duration_ms", "timed_out", "remote"} {
+	for _, key := range []string{"exit_code", "duration_ms", "timed_out", "remote", "shell", "shell_type"} {
 		if !strings.Contains(string(encoded), key) {
 			t.Errorf("result missing %q: %s", key, encoded)
 		}

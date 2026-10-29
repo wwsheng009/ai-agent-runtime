@@ -23,6 +23,9 @@ func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// Raw command lines are a Windows/CreateProcess concern.
+func configureRawCommandLine(*exec.Cmd, string) {}
+
 // killProcessGroup terminates the whole process group of cmd.
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {

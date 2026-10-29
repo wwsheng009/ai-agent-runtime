@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
@@ -131,6 +133,114 @@ func TestJobLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(output, "exited") {
 		t.Fatalf("job did not reach a terminal state: %s", output)
+	}
+}
+
+func TestJobStartNeutralizesConsoleStyling(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"echo"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": noColorEchoCommand(cfg.ResolvedShell.Type),
+	})
+	jobID := extractJobID(t, body)
+
+	deadline := time.Now().Add(10 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "exited") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "NO_COLOR=1") {
+		t.Fatalf("job NO_COLOR was not neutralized: %s", output)
+	}
+}
+
+// TestJobStartPreservesQuotedPathOnWindows covers the job path separately: it
+// builds its own exec.Cmd instead of going through shellexec, so it needs the
+// same shell-aware quoting and hardening as the foreground shell.
+func TestJobStartPreservesQuotedPathOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows shell quoting")
+	}
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"*"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	script := writeQuotedCmdProbe(t)
+	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": quotedProbeCommand(cfg.ResolvedShell.Type, script, "job hello"),
+	})
+	jobID := extractJobID(t, body)
+
+	deadline := time.Now().Add(10 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "exited") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "job hello") {
+		t.Fatalf("job did not receive the quoted path/arg: %s", output)
+	}
+}
+
+func TestJobStartPreservesQuotedPathWithCmdOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows shell quoting")
+	}
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"*"})
+	cfg.Shell.Program = "cmd"
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	script := writeQuotedCmdProbe(t)
+	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": quotedProbeCommand(runtimeexecutor.ShellTypeCmd, script, "cmd job hello"),
+	})
+	jobID := extractJobID(t, body)
+
+	deadline := time.Now().Add(10 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "exited") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "cmd job hello") {
+		t.Fatalf("job did not receive the quoted cmd path/arg: %s", output)
 	}
 }
 

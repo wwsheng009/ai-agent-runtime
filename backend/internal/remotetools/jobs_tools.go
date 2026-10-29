@@ -32,12 +32,13 @@ type remoteJobStartTool struct {
 }
 
 func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, jobs *JobManager) *remoteJobStartTool {
+	shell := resolvedShellForConfig(cfg)
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Command to run in the background. Subject to the same command policy as shell.",
+				"description": shellCommandParameterDescription(shell),
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -54,7 +55,9 @@ func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, 
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolJobStart,
-		tool.describe("Start a long-running command on the remote host. Returns a job_id; poll with job_output."),
+		tool.describe(shellToolDescription(
+			"Start a long-running command on the remote host. Returns a job_id; poll with job_output.",
+			shell)),
 		"1.0.0",
 		parameters,
 		true,
@@ -74,7 +77,7 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 		return remoteErrorResult(newToolError(CodeUnsupported, "enable backgroundJobs in the target config", "background jobs are not enabled")), nil
 	}
 	if t.sandbox == nil {
-		return remoteErrorResult(newToolError(CodeCommandDenied, "use profile ops", "shell policy is not configured")), nil
+		return remoteErrorResult(newToolError(CodeCommandDenied, "use profile all/ops", "shell policy is not configured")), nil
 	}
 	rule, err := t.sandbox.CheckCommand(command)
 	if err != nil {
@@ -106,6 +109,7 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 	if err != nil {
 		return remoteErrorResult(err), nil
 	}
+	shell := resolvedShellForConfig(t.cfg)
 	metadata := map[string]interface{}{
 		"job_id":      job.ID,
 		"pid":         job.PID,
@@ -116,6 +120,8 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 		"remote":      true,
 		"workspace":   effective.Root(),
 		"policy_rule": rule,
+		"shell":       shellLabel(shell),
+		"shell_type":  string(shell.Type),
 	}
 	body := fmt.Sprintf("Started job %s (pid %d).\nPoll with job_output job_id=%s.\n", job.ID, job.PID, job.ID)
 	return remoteTextResult(body, metadata), nil
@@ -187,7 +193,14 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 	}
 	fmt.Fprintf(&builder, " ===\n")
 	if output == "" {
-		builder.WriteString("(no output yet)\n")
+		switch job.State {
+		case JobExited:
+			fmt.Fprintf(&builder, "(no output; job exited with code %d)\n", job.ExitCode)
+		case JobKilled:
+			builder.WriteString("(no output; job was killed)\n")
+		default:
+			builder.WriteString("(no output yet)\n")
+		}
 	} else {
 		builder.WriteString(output)
 		if !strings.HasSuffix(output, "\n") {

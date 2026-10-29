@@ -45,6 +45,11 @@ func bigCaptureBytes() int {
 func newArtifactConfig(t *testing.T, root string, modelVisibleCap int) *remotetools.Config {
 	t.Helper()
 	cfg := newOpsConfig(t, root, bigCaptureAllowlist())
+	if runtime.GOOS == "windows" {
+		// Keep the byte-count fixture deterministic and cmd-specific; shell
+		// selection itself is covered by shell_runtime_test.go.
+		cfg.Shell.Program = "cmd"
+	}
 	cfg.Artifacts.Root = filepath.Join(t.TempDir(), "artifacts")
 	cfg.Artifacts.MaxBytes = 8 << 20
 	cfg.Limits.ModelVisibleCap = modelVisibleCap
@@ -233,13 +238,17 @@ func TestRemoteArtifactReadPagesCoverEveryByte(t *testing.T) {
 // model window is a hard limit), but nothing is archived and artifact_read is
 // not even registered.
 //
-// The notice used to keep saying "The complete capture is archived: read the
-// middle with artifact_read ... offset=N, limit=N". That is worse than losing
-// the bytes: it instructs the model to call a tool the server does not expose,
-// with offsets into data that was never written.
-func TestRemoteShellWithoutStoreDoesNotPromiseArtifact(t *testing.T) {
+// TestRemoteShellFoldedOutputPointsAtDefaultArtifactStore locks the new default:
+// a bare config (no explicit artifacts.root) now gets a workspace .aicli store,
+// so a folded shell capture stays reachable. The fold notice must expose the
+// archived middle via artifact_read and an artifact id - folding is only
+// acceptable because the omitted bytes are recoverable, never silently lost.
+func TestRemoteShellFoldedOutputPointsAtDefaultArtifactStore(t *testing.T) {
 	root := t.TempDir()
 	cfg := newOpsConfig(t, root, bigCaptureAllowlist())
+	if runtime.GOOS == "windows" {
+		cfg.Shell.Program = "cmd"
+	}
 	cfg.Limits.ModelVisibleCap = 1024 // force a fold
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -251,27 +260,29 @@ func TestRemoteShellWithoutStoreDoesNotPromiseArtifact(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	// Precondition: the paging tool really is absent on this surface.
+	// Precondition: the default store makes artifact_read available on the surface.
+	found := false
 	for _, name := range server.ToolNames() {
 		if strings.HasSuffix(name, "__artifact_read") {
-			t.Fatalf("this scenario needs no artifact store, but %s is registered", name)
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatalf("default config must register artifact_read now that artifacts.root defaults to workspace .aicli")
 	}
 
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command": bigCaptureCommand(),
 	})
 	if !strings.Contains(body, "output window") {
-		t.Skipf("capture was not folded; body:\n%s", body)
+		t.Skipf("capture was not folded; shell body:\n%s", body)
 	}
-	if strings.Contains(body, "The complete capture is archived") {
-		t.Fatalf("the notice must not claim an archive that does not exist:\n%s", body)
+	if !strings.Contains(body, "artifact_read") {
+		t.Fatalf("a folded capture must expose its archived middle:\n%s", body)
 	}
-	if strings.Contains(body, "read the middle with artifact_read") {
-		t.Fatalf("the notice must not point at a tool this surface does not expose:\n%s", body)
-	}
-	if !strings.Contains(body, "NOT kept") {
-		t.Fatalf("the notice must state that the omitted bytes are gone:\n%s", body)
+	if !strings.Contains(body, "art_") {
+		t.Fatalf("the pointer must carry an artifact id:\n%s", body)
 	}
 }
 

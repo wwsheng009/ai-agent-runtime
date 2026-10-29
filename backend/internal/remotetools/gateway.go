@@ -496,10 +496,67 @@ type MountRegistration struct {
 	Routes   []string
 }
 
+// MountMetadata is the display-only snapshot a node publishes with each mount.
+// It answers "what is this endpoint?" without making the gateway dial the node:
+// host identity, effective profile/directories and the model-visible tool list.
+type MountMetadata struct {
+	Hostname  string
+	OS        string
+	Arch      string
+	Version   string
+	Instance  string
+	Backend   string
+	ReadOnly  bool
+	ToolCount int
+	Tools     []string
+	Roots     []string
+}
+
+// MountMetadata returns this server's registration snapshot. Tools/roots are
+// reported only for the server's own endpoint; additional forwarded mounts have
+// an upstream surface this process cannot describe without probing it.
+func (s *Server) MountMetadata() MountMetadata {
+	if s == nil {
+		return MountMetadata{}
+	}
+	hostname, _ := os.Hostname()
+	backend := "local"
+	if s.cfg != nil && strings.TrimSpace(string(s.cfg.Backend)) != "" {
+		backend = strings.TrimSpace(string(s.cfg.Backend))
+	}
+	instance := ""
+	if s.cfg != nil {
+		instance = firstNonEmptyString(s.gatewayCfg.Instance, s.cfg.Gateway.Instance)
+	}
+	tools := s.ToolNames()
+	roots := []string(nil)
+	if s.cfg != nil {
+		roots = s.cfg.EffectiveAllowedRoots()
+	}
+	return MountMetadata{
+		Hostname:  strings.TrimSpace(hostname),
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		Version:   s.version,
+		Instance:  instance,
+		Backend:   backend,
+		ReadOnly:  s.cfg != nil && s.cfg.ReadOnly,
+		ToolCount: len(tools),
+		Tools:     tools,
+		Roots:     roots,
+	}
+}
+
 // BuildMountRegistration resolves the configured mounts against the real bound
 // listener address. localAddr is the listener address (host:port); :0 is
 // supported because the caller only builds this once the socket exists.
 func BuildMountRegistration(cfg *Config, identity, localAddr string) (*MountRegistration, error) {
+	return BuildMountRegistrationWithMetadata(cfg, identity, localAddr, MountMetadata{})
+}
+
+// BuildMountRegistrationWithMetadata is BuildMountRegistration plus the
+// display-only metadata reported on the self mount.
+func BuildMountRegistrationWithMetadata(cfg *Config, identity, localAddr string, metadata MountMetadata) (*MountRegistration, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
 	}
@@ -511,7 +568,7 @@ func BuildMountRegistration(cfg *Config, identity, localAddr string) (*MountRegi
 	seenSlug := map[string]bool{}
 	seenRoute := map[string]bool{}
 
-	add := func(name, slug, upstream, tokenEnv, tokenFile, authType, header string, timeout time.Duration, maxBody int64, maxConcurrency int) error {
+	add := func(name, slug, upstream, tokenEnv, tokenFile, authType, header string, timeout time.Duration, maxBody int64, maxConcurrency int, self bool) error {
 		// Mount defaults are larger than the default-forwarding limits: MCP tool
 		// calls legitimately carry big payloads and long-running shells.
 		if timeout <= 0 {
@@ -569,6 +626,24 @@ func BuildMountRegistration(cfg *Config, identity, localAddr string) (*MountRegi
 			}
 			tokenValue = resolved
 		}
+		labels := &wire.MountLabels{
+			Profile:    string(cfg.Profile),
+			ToolPrefix: cfg.ToolPrefix,
+			TargetName: cfg.TargetName,
+			Workspace:  cfg.Workspace,
+			Hostname:   metadata.Hostname,
+			OS:         metadata.OS,
+			Arch:       metadata.Arch,
+			Version:    metadata.Version,
+			Instance:   metadata.Instance,
+			Backend:    metadata.Backend,
+			ReadOnly:   metadata.ReadOnly,
+		}
+		if self {
+			labels.ToolCount = metadata.ToolCount
+			labels.Tools = append([]string(nil), metadata.Tools...)
+			labels.Roots = append([]string(nil), metadata.Roots...)
+		}
 		registration.Specs = append(registration.Specs, wire.MountSpec{
 			ID:       name,
 			Name:     name,
@@ -581,12 +656,7 @@ func BuildMountRegistration(cfg *Config, identity, localAddr string) (*MountRegi
 				TimeoutSec:     int(timeout / time.Second),
 				MaxConcurrency: maxConcurrency,
 			},
-			Labels: &wire.MountLabels{
-				Profile:    string(cfg.Profile),
-				ToolPrefix: cfg.ToolPrefix,
-				TargetName: cfg.TargetName,
-				Workspace:  cfg.Workspace,
-			},
+			Labels: labels,
 		})
 		registration.Forwards = append(registration.Forwards, gatewayagent.MountForward{
 			Slug:         slug,
@@ -610,12 +680,12 @@ func BuildMountRegistration(cfg *Config, identity, localAddr string) (*MountRegi
 		if err != nil {
 			return nil, err
 		}
-		if err := add(firstNonEmptyString(cfg.Gateway.SelfName, "self"), cfg.Gateway.SelfSlug, upstream, "", "", "", "", 0, 0, 0); err != nil {
+		if err := add(firstNonEmptyString(cfg.Gateway.SelfName, "self"), cfg.Gateway.SelfSlug, upstream, "", "", "", "", 0, 0, 0, true); err != nil {
 			return nil, err
 		}
 	}
 	for _, mount := range cfg.Gateway.Mounts {
-		if err := add(mount.Name, mount.Slug, mount.Upstream, mount.TokenEnv, mount.TokenFile, mount.AuthType, mount.Header, mount.Timeout.Duration, mount.MaxBodyBytes, mount.MaxConcurren); err != nil {
+		if err := add(mount.Name, mount.Slug, mount.Upstream, mount.TokenEnv, mount.TokenFile, mount.AuthType, mount.Header, mount.Timeout.Duration, mount.MaxBodyBytes, mount.MaxConcurren, false); err != nil {
 			return nil, err
 		}
 	}
@@ -764,7 +834,8 @@ func (s *Server) EnableGateway(ctx context.Context, cfg GatewayConfig) error {
 // startGatewayAgent dials the gateway, registers the mount set and keeps the
 // tunnel alive until ctx ends.
 func (s *Server) startGatewayAgent(ctx context.Context, localAddr string) error {
-	registration, err := BuildMountRegistration(s.cfg, s.gatewayIdentity, localAddr)
+	metadata := s.MountMetadata()
+	registration, err := BuildMountRegistrationWithMetadata(s.cfg, s.gatewayIdentity, localAddr, metadata)
 	if err != nil {
 		return err
 	}
@@ -780,15 +851,27 @@ func (s *Server) startGatewayAgent(ctx context.Context, localAddr string) error 
 		AutoConnect: s.gatewayCfg.AutoConnect == nil || *s.gatewayCfg.AutoConnect,
 	}
 	nodeID := gatewayagent.ProcessNodeID()
+	workspaceName := ""
+	if s.cfg != nil {
+		workspaceName = filepath.Base(filepath.Clean(s.cfg.Workspace))
+	}
 	register := func() wire.Register {
 		return wire.Register{
 			NodeID:       nodeID,
 			NodeStable:   registration.Identity,
 			Kind:         "remote-tools",
 			Name:         gatewayCfg.Name,
+			DeviceName:   metadata.Hostname,
+			Version:      metadata.Version,
+			OS:           metadata.OS,
+			Arch:         metadata.Arch,
 			Capabilities: []string{"mcp-mount"},
 			Routes:       registration.Routes,
 			Mounts:       registration.Specs,
+			Workspace: &wire.WorkspaceInfo{
+				Path: s.cfg.Workspace,
+				Name: workspaceName,
+			},
 		}
 	}
 	controller := gatewayagent.NewController(gatewayCfg, register)

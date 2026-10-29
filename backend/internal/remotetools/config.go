@@ -23,6 +23,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
@@ -30,12 +31,16 @@ import (
 type Profile string
 
 const (
-	// ProfileReadonly exposes view/ls/glob/grep only. It is the default.
+	// ProfileReadonly exposes view/ls/glob/grep only.
 	ProfileReadonly Profile = "readonly"
 	// ProfileStandard adds file-mutating tools (write/edit/apply_patch/...).
 	ProfileStandard Profile = "standard"
 	// ProfileOps adds the shell tool on top of standard.
 	ProfileOps Profile = "ops"
+	// ProfileAll exposes every tool family the configured backend/store can
+	// provide: read + write + shell, plus job/artifact tools when configured.
+	// It is the default so an agent exposes its full capability unless narrowed.
+	ProfileAll Profile = "all"
 	// ProfileCustom exposes exactly the configured tool allowlist.
 	ProfileCustom Profile = "custom"
 )
@@ -139,6 +144,12 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 // ShellConfig carries the command policy. The exec path is argv-based; this
 // policy is the explicit opt-in for allowing a shell at all.
 type ShellConfig struct {
+	// Program selects the shell executable used by shell and job_start. Empty
+	// auto-detects with the same priority as the built-in shell tool: Windows
+	// pwsh -> powershell -> cmd.exe; Unix $SHELL -> zsh -> bash -> sh. A
+	// configured value is resolved with exec.LookPath at startup and must be a
+	// supported shell (pwsh, powershell, cmd, bash, zsh or sh).
+	Program string `yaml:"program,omitempty" json:"program,omitempty"`
 	// AllowedCommands is an allowlist of argv prefixes. Empty means "deny all":
 	// a target that enables the shell tool must name what it permits.
 	AllowedCommands []string `yaml:"allowedCommands" json:"allowedCommands"`
@@ -156,9 +167,79 @@ type ShellConfig struct {
 	// DenyShellMetachars rejects commands containing shell metacharacters so a
 	// single allowed binary cannot be chained into an arbitrary command.
 	DenyShellMetachars bool `yaml:"denyShellMetachars" json:"denyShellMetachars"`
-	// EnvAllowlist lists environment variables passed through. Empty means no
-	// inherited variable is forwarded.
+	// EnvAllowlist adds environment variables to the platform shell baseline. A
+	// nil list (the field is omitted) uses the baseline alone, because a shell
+	// without PATH/PATHEXT cannot resolve an ordinary command. An explicit empty
+	// list disables both the baseline and every inherited variable. The envd
+	// backend does not apply this list: its daemon owns the target environment.
 	EnvAllowlist []string `yaml:"envAllowlist" json:"envAllowlist"`
+}
+
+// defaultShellEnvAllowlist is the minimum environment a platform shell and
+// ordinary toolchain need. It deliberately excludes credentials and other
+// application variables: operators can add those through envAllowlist.
+func defaultShellEnvAllowlist() []string {
+	if os.PathSeparator == '\\' {
+		return []string{
+			"PATH",
+			"PATHEXT",
+			"SystemRoot",
+			"SystemDrive",
+			"WINDIR",
+			"ComSpec",
+			"TEMP",
+			"TMP",
+			"USERPROFILE",
+			"HOME",
+			"COMPUTERNAME",
+			"USERNAME",
+			"USERDOMAIN",
+			"PROCESSOR_ARCHITECTURE",
+			"NUMBER_OF_PROCESSORS",
+			"LANG",
+			"LC_ALL",
+			"TERM",
+		}
+	}
+	return []string{"PATH", "HOME", "LANG", "LC_ALL", "TERM"}
+}
+
+// effectiveShellEnvAllowlist distinguishes "omitted" (nil, use the platform
+// baseline) from "explicitly empty" (keep the environment empty). A non-empty
+// list is additive: it keeps the baseline and appends the operator's names, so
+// adding APPDATA cannot accidentally drop PATH.
+func effectiveShellEnvAllowlist(configured []string) []string {
+	if configured == nil {
+		return defaultShellEnvAllowlist()
+	}
+	if len(configured) == 0 {
+		return []string{}
+	}
+	baseline := defaultShellEnvAllowlist()
+	out := make([]string, 0, len(baseline)+len(configured))
+	seen := make(map[string]bool, len(baseline)+len(configured))
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := name
+		if os.PathSeparator == '\\' {
+			key = strings.ToUpper(key)
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	for _, name := range baseline {
+		add(name)
+	}
+	for _, name := range configured {
+		add(name)
+	}
+	return out
 }
 
 // UnmarshalYAML keeps the safe default when a shell block omits
@@ -286,9 +367,13 @@ type Config struct {
 
 	Limits Limits      `yaml:"limits" json:"limits"`
 	Shell  ShellConfig `yaml:"shell" json:"shell"`
-	HTTP   HTTPConfig  `yaml:"http" json:"http"`
-	Audit  AuditConfig `yaml:"audit" json:"audit"`
-	Jobs   JobsConfig  `yaml:"jobs" json:"jobs"`
+	// ResolvedShell is the shell selected by Normalize. It is runtime state and
+	// is deliberately not serialized: a client sends the selector, the target
+	// resolves it against its own PATH.
+	ResolvedShell runtimeexecutor.Shell `yaml:"-" json:"-"`
+	HTTP          HTTPConfig            `yaml:"http" json:"http"`
+	Audit         AuditConfig           `yaml:"audit" json:"audit"`
+	Jobs          JobsConfig            `yaml:"jobs" json:"jobs"`
 	// Gateway publishes this server's MCP endpoint(s) through aicli-gateway
 	// (docs/gateway/16-mcp-mount-tunnel.md). Empty URL disables it.
 	Gateway GatewayConfig `yaml:"gateway" json:"gateway"`
@@ -299,7 +384,7 @@ type Config struct {
 // DefaultConfig returns the configuration a bare invocation would use.
 func DefaultConfig() *Config {
 	return &Config{
-		Profile:          ProfileReadonly,
+		Profile:          ProfileAll,
 		DescriptionStyle: "compact",
 		Limits: Limits{
 			MaxOutputBytes:  DefaultMaxOutputBytes,
@@ -375,12 +460,12 @@ func (c *Config) Normalize() error {
 	}
 	c.Profile = Profile(strings.ToLower(strings.TrimSpace(string(c.Profile))))
 	if c.Profile == "" {
-		c.Profile = ProfileReadonly
+		c.Profile = ProfileAll
 	}
 	switch c.Profile {
-	case ProfileReadonly, ProfileStandard, ProfileOps, ProfileCustom:
+	case ProfileReadonly, ProfileStandard, ProfileOps, ProfileAll, ProfileCustom:
 	default:
-		return fmt.Errorf("unknown profile %q (want readonly|standard|ops|custom)", c.Profile)
+		return fmt.Errorf("unknown profile %q (want readonly|standard|ops|all|custom)", c.Profile)
 	}
 	c.Backend = Backend(strings.ToLower(strings.TrimSpace(string(c.Backend))))
 	if c.Backend == "" {
@@ -441,6 +526,16 @@ func (c *Config) Normalize() error {
 			roots = append(roots, abs)
 		}
 		c.AllowedRoots = roots
+
+		// Without an explicit artifacts.root, folded shell captures have nowhere
+		// to land, so a model-truncated output is unrecoverable (design §D6): the
+		// artifact_read tool stays unregistered and the model only sees a fold.
+		// Default the root to a .aicli directory under the workspace so full
+		// captures remain reachable without any operator configuration. The store
+		// creates the directory at startup (NewArtifactStore MkdirAll + Chmod).
+		if strings.TrimSpace(c.Artifacts.Root) == "" {
+			c.Artifacts.Root = filepath.Join(c.Workspace, ".aicli", "artifacts")
+		}
 	}
 
 	c.ToolPrefix = strings.TrimSpace(c.ToolPrefix)
@@ -455,6 +550,19 @@ func (c *Config) Normalize() error {
 	}
 	c.Shell.AllowedCommandPatterns = normalizeCommandPatterns(c.Shell.AllowedCommandPatterns)
 	c.Shell.DeniedCommandPatterns = normalizeCommandPatterns(c.Shell.DeniedCommandPatterns)
+	c.Shell.Program = strings.TrimSpace(c.Shell.Program)
+	c.Shell.EnvAllowlist = effectiveShellEnvAllowlist(c.Shell.EnvAllowlist)
+	if c.Backend == BackendLocal {
+		shell, err := resolveShell(c.Shell.Program)
+		if err != nil {
+			return err
+		}
+		c.ResolvedShell = shell
+	} else {
+		// envd executes on the target through /bin/sh; the local bridge's shell
+		// selection must not leak into that backend's tool description.
+		c.ResolvedShell = runtimeexecutor.Shell{}
+	}
 	if c.TargetName == "" {
 		c.TargetName = filepath.Base(c.Workspace)
 	}
@@ -618,6 +726,29 @@ func (c *Config) EffectiveAllowedRoots() []string {
 		return []string{c.Workspace}
 	}
 	return append([]string(nil), c.AllowedRoots...)
+}
+
+// ShellExposed reports whether the effective tool surface includes the shell
+// tool after profile, readOnly and the explicit tools allowlist are applied.
+// It answers the operator question "why is shell missing?" without guessing
+// from Profile alone.
+func (c *Config) ShellExposed() bool {
+	if c == nil {
+		return false
+	}
+	for _, name := range c.enabledTools() {
+		if name == ToolShell {
+			return true
+		}
+	}
+	return false
+}
+
+// ShellPolicyEnableHint is the shared, actionable guidance for a fail-closed
+// shell policy. It deliberately names the smallest useful allowlist rather than
+// recommending "*": allowing everything is an explicit high-risk decision.
+func ShellPolicyEnableHint() string {
+	return `set shell.allowedCommands: ["git","go"] (argv prefix) or shell.allowedCommandPatterns: ["deploy*.sh *"] (whole command); profile/tools must expose shell, readOnly must be false, and denyShellMetachars defaults to true; destructive commands remain blocked`
 }
 
 // isPortableToolPrefix keeps the prefix inside the character set the MCP

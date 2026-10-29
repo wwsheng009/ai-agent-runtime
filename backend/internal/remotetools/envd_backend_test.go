@@ -841,7 +841,9 @@ func TestEnvDServerTierSurface(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{"/srv/app/README.md": "# hello envd\n"}, nil)
 
 	t.Run("readonly", func(t *testing.T) {
-		server, err := remotetools.NewServer(newEnvDConfig(stub.server.URL), "envd")
+		cfg := newEnvDConfig(stub.server.URL)
+		cfg.Profile = remotetools.ProfileReadonly
+		server, err := remotetools.NewServer(cfg, "envd")
 		if err != nil {
 			t.Fatalf("NewServer: %v", err)
 		}

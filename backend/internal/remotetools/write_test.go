@@ -219,16 +219,77 @@ func TestShellEnvAllowlistForwardsConfiguredVariables(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	command := "echo $PATH"
-	if runtime.GOOS == "windows" {
-		command = "echo %PATH%"
-	}
+	command, literal := pathEchoCommand(cfg.ResolvedShell.Type)
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command": command,
 	})
 	got := strings.TrimSpace(body)
-	if got == "" || got == "$PATH" || got == "%PATH%" {
+	if got == "" || got == literal {
 		t.Fatalf("env allowlist did not forward PATH: %q", body)
+	}
+}
+
+// TestShellUsesPlatformBaselineEnvWhenAllowlistOmitted pins the other half of
+// the environment contract: leaving envAllowlist out must not make PATH
+// disappear. Before the baseline, `echo %PATH%` returned the literal text and
+// every bare command failed with "not recognized".
+func TestShellUsesPlatformBaselineEnvWhenAllowlistOmitted(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newOpsConfig(t, root, []string{"echo"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	command, literal := pathEchoCommand(cfg.ResolvedShell.Type)
+	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command": command,
+	})
+	got := strings.TrimSpace(body)
+	if got == "" || got == literal {
+		t.Fatalf("platform baseline did not forward PATH: %q", body)
+	}
+}
+
+func TestShellNeutralizesConsoleStyling(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newOpsConfig(t, root, []string{"echo"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command": noColorEchoCommand(cfg.ResolvedShell.Type),
+	})
+	if !strings.Contains(body, "NO_COLOR=1") {
+		t.Fatalf("NO_COLOR was not neutralized: %s", body)
+	}
+}
+
+func TestShellBaselineExposesComputerNameOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment fixture")
+	}
+	root := newTestWorkspace(t)
+	cfg := newOpsConfig(t, root, []string{"echo"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command": computerNameEchoCommand(cfg.ResolvedShell.Type),
+	})
+	got := strings.TrimSpace(body)
+	if got == "" || got == "%COMPUTERNAME%" || got == "$env:COMPUTERNAME" {
+		t.Fatalf("COMPUTERNAME was not forwarded: %q", body)
 	}
 }
 
@@ -350,12 +411,13 @@ func TestReadOnlyOverridesOpsProfile(t *testing.T) {
 	defer server.Close()
 
 	names := server.ToolNames()
-	if len(names) != 4 {
-		t.Fatalf("expected only the 4 read tools, got %v", names)
+	if len(names) != 5 {
+		t.Fatalf("expected only the 5 read tools, got %v", names)
 	}
 	for _, name := range names {
 		if !strings.Contains(name, "view") && !strings.Contains(name, "ls") &&
-			!strings.Contains(name, "glob") && !strings.Contains(name, "grep") {
+			!strings.Contains(name, "glob") && !strings.Contains(name, "grep") &&
+			!strings.Contains(name, "artifact_read") {
 			t.Fatalf("unexpected tool under readOnly: %q", name)
 		}
 	}

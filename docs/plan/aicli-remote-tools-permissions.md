@@ -316,7 +316,7 @@ shell:
   allowedCommands: [echo, ls]     # 空 = 全拒（fail-closed）
   deniedCommands:  [rm]           # 永远优先
   denyShellMetachars: true        # 拒 ; && || | ` $( > <
-  envAllowlist: [HOME, PATH]      # 空 = 不继承任何环境变量
+  envAllowlist: [HOME, PATH]      # 省略 = 平台基线；显式 [] = 不继承任何环境变量
 ```
 
 ### 10.5 三层叠加的实际效果
