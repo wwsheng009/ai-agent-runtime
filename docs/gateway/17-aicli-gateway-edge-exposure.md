@@ -14,7 +14,7 @@
 | 目标主机 | `racknerd-933b75f` / Ubuntu / x86_64，`/opt/aicli-gateway`、`/opt/ai-gateway-edge` |
 | 现有服务 | `aicli-gateway`（`127.0.0.1:8080`，`https://aicli.ttai.online`）、`ai-gateway-edge`（`:80/:443`，admin `127.0.0.1:19100`）、`ai-gateway`（`127.0.0.1:18443`） |
 | Edge 版本 | 服务器二进制构建自 **`e710d1181`**（当前 ai-gateway HEAD，`v0.1.7-0.20261012230643-e710d1181212+dirty`），`configtest` 通过 → **未替换、未重启**（功能与本地构建一致，替换只会徒增 TLS 入口重启风险） |
-| aicli-gateway | **v68 已上线**（2026-10-29T16:34:01Z，构建自 `abeb7677`）：`/opt/aicli-gateway/gateway`，SHA-256 `cc401199…a2b9ae`，备份 `gateway.before-20261029T163355Z`；`/api/health` 正常，控制台 `/` 与 `app.js?v=68` 已生效 |
+| aicli-gateway | **v69 已上线**（2026-10-29T17:27:30Z，构建自 `b0b36c0e`）：`/opt/aicli-gateway/gateway`，SHA-256 `4d4bb029…73ef99`，备份 `gateway.before-20261029T172725Z`；`/api/health` 正常，控制台 `/` 与 `app.js?v=69` 已生效 |
 | Edge 路由 | 既有规则已把 `aicli.ttai.online/*` 整站转发到 `aicli-console`(`127.0.0.1:8080`)，**无需改配置**；`/m/`、`/gw/agent` 天然随主机转发 |
 | 公网验收 | 测试节点 `avcmh7sc` → `https://aicli.ttai.online/m/avcmh7sc/mcp`；`initialize` 200（Cloudflare `cf-ray` 可见）、`tools/list` 返回 `glob/grep/ls/view`、`tools/call ls` 读到服务器工作区 `hello.txt`；错令牌 401、未知 slug 404 |
 | 清理 | 测试节点/设备令牌/挂载令牌/挂载记录全部撤销并清除（`mount-tokens.json` total=0、`mounts.json` 空），`live_nodes` 回到 **4**、`nodes=14`，与部署前基线一致 |
@@ -28,12 +28,13 @@
 | 二进制 | `/opt/aicli-gateway/gateway`（服务单元 `aicli-gateway.service` 的 `ExecStart` 路径；不是历史文档里的 `/opt/aicli-gateway/bin/aicli-gateway`） |
 | 数据目录 | `/etc/aicli-gateway`（`registry.json`、设备/挂载令牌、Web Push 等） |
 | 控制台 | 站点根路径 `/`（`/console/` 是 SPA fallback，不是资源根；资源实际为 `/app.js`、`/style.css`） |
-| 构建 | HEAD `abeb7677`，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"` |
-| 部署时间 | 2026-10-29T16:34:01Z（`MainPID=2834332`） |
-| 公网验收 | `/` 返回 `style.css?v=68` / `app.js?v=68`；`app.js` 含 `confirmDestructive`、`refreshCurrentView`、`bindCardMenu`；`/api/health` 200；Owner 登录成功，节点列表 20 条 |
-| 回滚点 | `/opt/aicli-gateway/gateway.before-20261029T163355Z`（旧 SHA-256 `e37ad2d4…9830`） |
+| 构建 | HEAD `b0b36c0e`，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"` |
+| 部署时间 | 2026-10-29T17:27:30Z（`MainPID=2836826`） |
+| 公网验收 | `/` 返回 `style.css?v=69` / `app.js?v=69`；`app.js` 含 `syncChatHeaderActions`、`confirmDestructive`、`refreshCurrentView`；`/api/health` 200 |
+| 回滚点 | `/opt/aicli-gateway/gateway.before-20261029T172725Z`（旧 v68 SHA-256 `cc401199…a2b9ae`） |
 
-> 运维注意：本次部署脚本首次健康探测发生在服务重新监听之前；服务于约 5 秒后正常启动。后续部署脚本应先 `sleep 2` 再探测，且回滚前必须 `systemctl stop`，否则运行中的二进制会触发 `Text file busy`。
+> 运维注意：v69 部署脚本已加入 `sleep 2` 起始等待与回滚前 `systemctl stop`；v68 曾因首次探测过早触发误报回滚，
+> 该缺陷已在 v69 脚本中修正。
 
 ## 1. 实测现状（本文所有结论的来源）
 
