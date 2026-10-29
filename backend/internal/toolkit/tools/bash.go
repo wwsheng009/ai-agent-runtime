@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -544,77 +545,77 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		}
 	}
 
-	jobID, jobStatus, err := b.jobRuntime.SubmitShell(ctx, sessionID, command, workdir)
-	if err != nil {
-		return toolResultFailureWithCode(
-			fmt.Errorf("shell job start failed: %w", err),
-			string(runtimeerrors.ErrToolExecution),
-			"check the background job runtime and retry the command",
-			map[string]interface{}{"failure_class": "job_start", "executed": false},
-		), nil
-	}
-	if strings.TrimSpace(jobID) == "" {
-		return toolResultFailureWithCode(
-			fmt.Errorf("shell job start returned no job id"),
-			string(runtimeerrors.ErrToolExecution),
-			"check the background job runtime",
-			map[string]interface{}{"failure_class": "job_start", "executed": false},
-		), nil
-	}
-
-	view, waitErr := b.jobRuntime.WaitShell(ctx, jobID, timeout)
-	if waitErr != nil {
-		_ = b.jobRuntime.CancelShell(context.Background(), jobID)
-		return toolResultFailureWithCode(
-			fmt.Errorf("shell job wait failed: %w", waitErr),
-			string(runtimeerrors.ErrAgentRunCanceled),
-			"retry the call if the command must complete",
-			map[string]interface{}{"failure_class": "job_wait", "job_id": jobID, "job_status": jobStatus, "executed": false},
-		), nil
-	}
-	if view.Status == "" {
-		view.Status = jobStatus
-	}
-
 	limit := captureSettings.captureLimitBytes()
 	if limit < 0 {
 		limit = 0
 	}
-	output, readErr := b.jobRuntime.ReadShell(context.Background(), jobID, 0, limit)
-	if readErr != nil {
-		return toolResultFailureWithCode(
-			fmt.Errorf("shell job output read failed: %w", readErr),
-			string(runtimeerrors.ErrToolExecution),
-			"retry job_output with the returned job id",
-			map[string]interface{}{"failure_class": "job_output", "job_id": jobID, "job_status": view.Status, "executed": true},
-		), nil
+	execution, execErr := shelljob.Execute(ctx, b.jobRuntime, shelljob.Request{
+		SessionID:   sessionID,
+		Command:     command,
+		Workdir:     workdir,
+		WaitTimeout: timeout,
+		OutputLimit: limit,
+	})
+	if execErr != nil {
+		stage := shelljob.StageOf(execErr)
+		jobID := shelljob.JobIDOf(execErr)
+		switch stage {
+		case "owner":
+			return toolResultFailureWithCode(
+				fmt.Errorf("shell job requires a stable session owner"),
+				string(runtimeerrors.ErrToolInvalidArgs),
+				"call the shell from a session-bound agent runtime",
+				map[string]interface{}{"failure_class": "owner_required", "executed": false},
+			), nil
+		case "wait":
+			return toolResultFailureWithCode(
+				fmt.Errorf("shell job wait failed: %w", execErr),
+				string(runtimeerrors.ErrAgentRunCanceled),
+				"retry the call if the command must complete",
+				map[string]interface{}{"failure_class": "job_wait", "job_id": jobID, "executed": false},
+			), nil
+		case "read":
+			return toolResultFailureWithCode(
+				fmt.Errorf("shell job output read failed: %w", execErr),
+				string(runtimeerrors.ErrToolExecution),
+				"retry job_output with the returned job id",
+				map[string]interface{}{"failure_class": "job_output", "job_id": jobID, "executed": true},
+			), nil
+		default:
+			return toolResultFailureWithCode(
+				fmt.Errorf("shell job start failed: %w", execErr),
+				string(runtimeerrors.ErrToolExecution),
+				"check the background job runtime and retry the command",
+				map[string]interface{}{"failure_class": "job_start", "executed": false},
+			), nil
+		}
 	}
 
 	shell := runtimeexecutor.DefaultUserShell()
 	result := CommandExecutionResult{
-		Output:    output.Output,
+		Output:    execution.Output,
 		ShellType: string(shell.Type),
 		ShellPath: shell.Path,
 	}
 	duration := time.Since(started)
 	metadata := buildCommandExecutionMetadata(command, mutatedPaths, result)
-	metadata["job_id"] = jobID
-	metadata["job_status"] = view.Status
+	metadata["job_id"] = execution.JobID
+	metadata["job_status"] = execution.Status
 	metadata["job_first"] = true
 	metadata["session_id"] = sessionID
 	metadata["timeout_source"] = timeoutSource
 	metadata["wait_timeout_ms"] = timeout.Milliseconds()
-	metadata["job_output_offset"] = output.NextOffset
+	metadata["job_output_offset"] = execution.NextOffset
 	if duration > 0 {
 		metadata["duration_ms"] = duration.Milliseconds()
 	}
 
-	if view.TimedOut {
+	if execution.TimedOut {
 		metadata["timed_out"] = true
 		metadata["promoted"] = true
-		metadata[toolresult.MetadataNextActionKey] = fmt.Sprintf("job_output job_id=%s offset=%d", jobID, output.NextOffset)
+		metadata[toolresult.MetadataNextActionKey] = fmt.Sprintf("job_output job_id=%s offset=%d", execution.JobID, execution.NextOffset)
 		body := fmt.Sprintf("Command still running after %s; moved to background job %s.\n\n%s",
-			timeout, jobID, result.Output)
+			timeout, execution.JobID, result.Output)
 		return &toolkit.ToolResult{
 			Success:    true,
 			OutputKind: toolresult.KindText,
@@ -623,17 +624,13 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		}, nil
 	}
 
-	// A finite command completed while this call waited. It was only an
-	// implementation detail of the foreground call; hide it from job_list.
-	_ = b.jobRuntime.ForgetShell(context.Background(), jobID, sessionID)
-
 	exitCode := 0
-	if view.ExitCode != nil {
-		exitCode = *view.ExitCode
+	if execution.ExitCode != nil {
+		exitCode = *execution.ExitCode
 	}
 	metadata["exit_code"] = exitCode
 	metadata["timed_out"] = false
-	switch view.Status {
+	switch execution.Status {
 	case "completed":
 		return &toolkit.ToolResult{
 			Success:    true,
@@ -643,7 +640,7 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		}, nil
 	case "failed", "timed_out":
 		return toolResultFailureWithCode(
-			fmt.Errorf("shell job finished with status %s", view.Status),
+			fmt.Errorf("shell job finished with status %s", execution.Status),
 			string(runtimeerrors.ErrToolExecution),
 			"inspect the command output and retry with a changed command",
 			metadata,
@@ -658,7 +655,7 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		), nil
 	default:
 		return toolResultFailureWithCode(
-			fmt.Errorf("shell job ended in unexpected status %s", view.Status),
+			fmt.Errorf("shell job ended in unexpected status %s", execution.Status),
 			string(runtimeerrors.ErrToolExecution),
 			"retry with job_output to inspect the job",
 			metadata,

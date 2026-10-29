@@ -100,7 +100,6 @@ type serveFlags struct {
 	auditPath           string
 	auditPreview        int
 	jobsRoot            string
-	legacyJobs          bool
 	artifactRoot        string
 	artifactMax         int
 	allowPatterns       string
@@ -248,7 +247,6 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.auditPath, "audit", "", "NDJSON audit path")
 	fs.IntVar(&flags.auditPreview, "audit-command-preview-bytes", 0, "record the first N bytes of shell/job_start commands in the audit log (0=off)")
 	fs.StringVar(&flags.jobsRoot, "jobs-root", "", "root for background job records and output")
-	fs.BoolVar(&flags.legacyJobs, "legacy-jobs", false, "re-enable the legacy remote job_* tools")
 	fs.StringVar(&flags.artifactRoot, "artifacts-root", "", "root for full tool captures")
 	fs.IntVar(&flags.artifactMax, "artifacts-max-bytes", 0, "per-artifact size limit")
 	fs.StringVar(&flags.allowPatterns, "allowed-command-patterns", "", "comma-separated whole-command wildcard allowlist (* and ?)")
@@ -381,9 +379,6 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.jobsRoot != "" {
 		cfg.Jobs.Root = flags.jobsRoot
-	}
-	if flags.legacyJobs {
-		cfg.Jobs.LegacyRemoteJobs = true
 	}
 	if flags.artifactRoot != "" {
 		cfg.Artifacts.Root = flags.artifactRoot
@@ -620,7 +615,6 @@ type doctorReport struct {
 	AuditPreviewBytes      int      `json:"auditPreviewBytes,omitempty"`
 	JobsRoot               string   `json:"jobsRoot,omitempty"`
 	JobsWritable           bool     `json:"jobsWritable"`
-	LegacyRemoteJobs       bool     `json:"legacyRemoteJobs"`
 	OptionalTools          []string `json:"optionalTools,omitempty"`
 	NetworkEnabled         bool     `json:"networkEnabled"`
 	NetworkAllowedHosts    []string `json:"networkAllowedHosts,omitempty"`
@@ -702,7 +696,6 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		AuditPath:              cfg.Audit.Path,
 		AuditPreviewBytes:      cfg.Audit.CommandPreviewBytes,
 		JobsRoot:               cfg.Jobs.Root,
-		LegacyRemoteJobs:       cfg.Jobs.LegacyRemoteJobs,
 		OptionalTools:          cfg.OptionalToolNames(),
 		NetworkEnabled:         cfg.Network.Enabled,
 		NetworkAllowedHosts:    append([]string(nil), cfg.Network.AllowedHosts...),
@@ -840,7 +833,6 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  audit            : %s (writable=%v)\n", orDash(report.AuditPath), report.AuditWritable)
 	fmt.Fprintf(os.Stdout, "  audit preview    : %d bytes\n", report.AuditPreviewBytes)
 	fmt.Fprintf(os.Stdout, "  jobs root        : %s (writable=%v)\n", orDash(report.JobsRoot), report.JobsWritable)
-	fmt.Fprintf(os.Stdout, "  legacy jobs      : %v (local-only v1 capability)\n", report.LegacyRemoteJobs)
 	fmt.Fprintf(os.Stdout, "  optional tools   : %s\n", orDash(strings.Join(report.OptionalTools, ", ")))
 	fmt.Fprintf(os.Stdout, "  network          : %v (allowed=%s denied=%s)\n",
 		report.NetworkEnabled, orDash(strings.Join(report.NetworkAllowedHosts, ", ")), orDash(strings.Join(report.NetworkDeniedHosts, ", ")))

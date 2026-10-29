@@ -82,13 +82,14 @@ Workspace and tool surface:
   --target-name <name>            Label used in descriptions and audit records
   --description-style <style>     compact (default) | explicit
   --shell <path>                  shell for shell/job_start (default: auto-detect)
+                                  shell is job-first; timeout_ms only bounds the wait
   --max-output-bytes <n>          Model-visible output cap per call (default 262144)
   --max-bytes-per-call <n>        Per-call payload cap (default 2097152)
   --audit <path>                  NDJSON audit log (0600)
   --audit-command-preview-bytes <n>
                                   Record the first N command bytes in audit (0=off)
-  --jobs-root <path>              Legacy job_* store root (requires --legacy-jobs)
-  --legacy-jobs                   Re-enable the legacy remote job_* tools
+  --jobs-root <path>              Durable root for shell/job_* records and output
+                                  (default: ~/.aicli/remote-tools/jobs)
   --artifacts-root <path>         Enable artifact_read for folded captures
   --artifacts-max-bytes <n>       Per-artifact size limit (default 67108864)
 

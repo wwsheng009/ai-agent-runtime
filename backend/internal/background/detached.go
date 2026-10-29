@@ -65,6 +65,7 @@ const (
 	detachBlockInvalidJob        = "invalid_job"
 	detachBlockNoLogDir          = "no_log_dir"
 	detachBlockRunnerHostMissing = "runner_host_missing"
+	detachBlockDisabled          = "disabled"
 )
 
 // detachedRunnerHostAvailable reports whether the platform can host the
@@ -98,6 +99,9 @@ func (m *Manager) canUseDetachedExecution(managed *managedJob) bool {
 func (m *Manager) detachedExecutionBlockReason(managed *managedJob) string {
 	if m == nil || managed == nil {
 		return detachBlockInvalidJob
+	}
+	if m.config.DisableDetached {
+		return detachBlockDisabled
 	}
 	if strings.TrimSpace(managed.logPath) == "" {
 		return detachBlockNoLogDir

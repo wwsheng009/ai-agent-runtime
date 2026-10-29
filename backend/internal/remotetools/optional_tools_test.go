@@ -24,7 +24,7 @@ func TestOptionalToolsAreOptInAndProfileGated(t *testing.T) {
 	if err := base.Normalize(); err != nil {
 		t.Fatalf("base normalize: %v", err)
 	}
-	if got := optionalNames(base); len(got) != 10 || got[ToolMultiedit] || got[ToolFetch] {
+	if got := optionalNames(base); len(got) != 14 || got[ToolMultiedit] || got[ToolFetch] {
 		t.Fatalf("default surface changed: %v", got)
 	}
 

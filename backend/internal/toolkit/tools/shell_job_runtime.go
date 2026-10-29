@@ -1,34 +1,13 @@
 package tools
 
-import (
-	"context"
-	"time"
-)
+import "github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 
-// ShellJobRuntime is the core seam between a shell tool and the shared
-// background job manager. The toolkit owns the interface so it does not import
-// the broker/background package; the host supplies the single manager-backed
-// implementation.
-type ShellJobRuntime interface {
-	SubmitShell(ctx context.Context, sessionID, command, cwd string) (jobID, status string, err error)
-	WaitShell(ctx context.Context, jobID string, timeout time.Duration) (ShellJobSnapshot, error)
-	ReadShell(ctx context.Context, jobID string, offset int64, limit int) (ShellJobOutput, error)
-	CancelShell(ctx context.Context, jobID string) error
-	ForgetShell(ctx context.Context, jobID, sessionID string) error
-}
+// ShellJobRuntime aliases the shared shell-job seam. The production
+// implementation is shelljob.ManagerRuntime; there is no second backend.
+type ShellJobRuntime = shelljob.Runtime
 
 // ShellJobSnapshot is the terminal or timed-out view of one job.
-type ShellJobSnapshot struct {
-	ID       string
-	Status   string
-	ExitCode *int
-	TimedOut bool
-}
+type ShellJobSnapshot = shelljob.Snapshot
 
 // ShellJobOutput is one cursor read from a job.
-type ShellJobOutput struct {
-	Output     string
-	NextOffset int64
-	Status     string
-	ExitCode   *int
-}
+type ShellJobOutput = shelljob.Output

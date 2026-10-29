@@ -306,20 +306,16 @@ type AuditConfig struct {
 // configured. It matches the bridge default it replaces.
 const envdDefaultCallTimeout = 10 * time.Minute
 
-// JobsConfig describes the background job store.
+// JobsConfig describes the target-local background job store.
 //
-// Root is required to enable the job_* tools: a job record and its output must
-// survive the process, so an in-memory implementation would silently lose them on
-// reconnect. Empty root leaves the tools unregistered (a host that cannot offer
-// durable jobs should not advertise them).
+// Remote jobs always use the core internal/background manager and a durable
+// root. An omitted Root resolves to <user-home>/.aicli/remote-tools/jobs; there
+// is no in-memory remote fallback.
 type JobsConfig struct {
 	Root string `yaml:"root" json:"root"`
-	// LegacyRemoteJobs re-enables the remote job_* surface. Background jobs are
-	// local-only in v1 (design §11.1); the remote implementation is kept for one
-	// compatibility window and must be opted into explicitly. Default false: a
-	// configured Root alone no longer advertises job_start/job_output/job_cancel/
-	// job_list.
-	LegacyRemoteJobs bool `yaml:"legacyRemoteJobs" json:"legacyRemoteJobs"`
+	// Retention bounds how long terminal jobs and their logs survive. Zero uses
+	// the core default; remote targets default to seven days.
+	Retention Duration `yaml:"retention" json:"retention"`
 }
 
 // ArtifactConfig describes the full-capture store.
@@ -558,6 +554,27 @@ func (c *Config) Normalize() error {
 		// creates the directory at startup (NewArtifactStore MkdirAll + Chmod).
 		if strings.TrimSpace(c.Artifacts.Root) == "" {
 			c.Artifacts.Root = filepath.Join(c.Workspace, ".aicli", "artifacts")
+		}
+		if strings.TrimSpace(c.Jobs.Root) == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve default jobs.root: %w", err)
+			}
+			if strings.TrimSpace(home) == "" {
+				return fmt.Errorf("resolve default jobs.root: user home directory is empty")
+			}
+			c.Jobs.Root = filepath.Join(home, ".aicli", "remote-tools", "jobs")
+		}
+		absJobs, err := filepath.Abs(c.Jobs.Root)
+		if err != nil {
+			return fmt.Errorf("resolve jobs.root %q: %w", c.Jobs.Root, err)
+		}
+		c.Jobs.Root = filepath.Clean(absJobs)
+		if err := ensureJobsRoot(c.Jobs.Root); err != nil {
+			return err
+		}
+		if c.Jobs.Retention.Duration <= 0 {
+			c.Jobs.Retention = Duration{7 * 24 * time.Hour}
 		}
 	}
 

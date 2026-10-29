@@ -179,12 +179,12 @@ func TestJobStartDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
 			"job_id": jobID,
 		})
-		if strings.Contains(output, "exited") {
+		if strings.Contains(output, "completed") {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !strings.Contains(output, "exited") {
+	if !strings.Contains(output, "completed") {
 		t.Fatalf("job did not reach a terminal state: %s", output)
 	}
 

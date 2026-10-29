@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
@@ -67,7 +68,7 @@ func (t *prefixedTool) Execute(ctx context.Context, params map[string]interface{
 // buildResult bundles the registry with the stores that need lifecycle management.
 type buildResult struct {
 	registry  *toolkit.Registry
-	jobs      *JobManager
+	jobs      *background.Manager
 	artifacts *ArtifactStore
 	// envd is set only by the envd backend; it holds the connection (and, from
 	// M2 on, the live pty sessions) that Close must release.
@@ -86,17 +87,22 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The job manager is constructed only for the explicit legacy opt-in. A
-	// configured jobs root without that flag must not even create directories:
-	// the v1 remote surface treats background jobs as local-only.
-	var jobs *JobManager
-	if cfg.Jobs.LegacyRemoteJobs {
-		jobs, err = NewJobManager(cfg.Jobs.Root)
+	// One core background manager backs both the shell job-first path and the
+	// remote job_* tools. It is only constructed when the effective surface can
+	// actually use it, but there is never a second remote job backend.
+	var jobs *background.Manager
+	if configNeedsJobRuntime(cfg) {
+		jobs, err = newRemoteBackgroundManager(cfg, sandbox)
 		if err != nil {
 			return nil, err
 		}
-		jobs.SetShell(cfg.ResolvedShell)
 	}
+	keepJobs := false
+	defer func() {
+		if !keepJobs {
+			_ = closeBackgroundManager(jobs)
+		}
+	}()
 	artifacts, err := NewArtifactStore(cfg.Artifacts.Root, cfg.Artifacts.MaxBytes)
 	if err != nil {
 		return nil, err
@@ -684,7 +690,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		{name: ToolLs, tool: lsTool},
 		{name: ToolGlob, tool: globTool},
 		{name: ToolGrep, tool: grepTool},
-		{name: ToolShell, tool: newRemoteShellTool(cfg, workspace, sandbox, artifacts)},
+		{name: ToolShell, tool: newRemoteShellTool(cfg, workspace, sandbox, artifacts, jobs)},
 		{name: ToolJobStart, tool: newRemoteJobStartTool(cfg, workspace, sandbox, jobs)},
 		{name: ToolJobOutput, tool: newRemoteJobOutputTool(cfg, workspace, jobs)},
 		{name: ToolJobCancel, tool: newRemoteJobCancelTool(cfg, workspace, jobs)},
@@ -757,7 +763,28 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			return nil, fmt.Errorf("register %s: %w", candidate.name, err)
 		}
 	}
+	keepJobs = true
 	return &buildResult{registry: registry, jobs: jobs, artifacts: artifacts}, nil
+}
+
+// configNeedsJobRuntime reports whether the effective remote surface includes a
+// tool that needs the shared job runtime. A read-only or file-only surface must
+// not create a job store just because the default jobs.root exists.
+func configNeedsJobRuntime(cfg *Config) bool {
+	if cfg == nil || strings.TrimSpace(cfg.Jobs.Root) == "" {
+		return false
+	}
+	for _, name := range cfg.enabledTools() {
+		if name == ToolShell {
+			return true
+		}
+		for _, jobTool := range jobTools {
+			if name == jobTool {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // auditTool wraps a tool so every invocation produces one audit record.

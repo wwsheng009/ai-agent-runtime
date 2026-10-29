@@ -373,7 +373,7 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 		return m.openTerminalPTY(jobCtx, managed, args)
 	}
 
-	cmd := buildShellCommand(jobCtx, command)
+	cmd := m.buildShellCommand(jobCtx, command)
 	if cmd == nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return managed.snapshot(), nil

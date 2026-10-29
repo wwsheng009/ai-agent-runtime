@@ -1,6 +1,6 @@
 # Shell 超时提升为后台 Job：Core 能力方案
 
-> 状态：方案定稿；P1/P2 core 已实现，P3 remote 待实现  
+> 状态：方案定稿；P1/P2 core 与 P3 remote-tools adapter 已实现
 > 日期：2026-10-29  
 > 版本：v4（single job runtime，confirmed）  
 > 适用：`bash` / `shell` / `execute_shell_command`，以及 `aicli-remote-tools` 的 remote shell  

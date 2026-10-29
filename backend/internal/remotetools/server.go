@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -41,7 +42,7 @@ type Server struct {
 	mcp       *toolkit.ToolkitMCPServer
 	audit     AuditSink
 	access    AccessLogSink
-	jobs      *JobManager
+	jobs      *background.Manager
 	metrics   *Metrics
 	roots     *rootsResolver
 	token     string
@@ -108,6 +109,12 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	keepBuilt := false
+	defer func() {
+		if !keepBuilt {
+			_ = closeBackgroundManager(built.jobs)
+		}
+	}()
 	names := exposedToolNames(built.registry)
 	if len(names) == 0 {
 		return nil, fmt.Errorf("profile %q exposes no tools; check --tools / --profile", cfg.Profile)
@@ -139,7 +146,7 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 	// through the narrowed workspace (roots_transport.go).
 	resolver := newRootsResolver(workspace, principal)
 	mcpServer.SetToolContextDecorator(resolver.decorate)
-	return &Server{
+	server := &Server{
 		cfg:       cfg,
 		workspace: workspace,
 		registry:  audited,
@@ -153,7 +160,9 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 		principal: principal,
 		slots:     slots,
 		envd:      built.envd,
-	}, nil
+	}
+	keepBuilt = true
+	return server, nil
 }
 
 // wrapRegistryWithAudit rebuilds the registry with one audit wrapper per tool.
@@ -199,15 +208,15 @@ func (s *Server) Close() error {
 	}
 	// Running jobs are children of this process: leaving them behind after the
 	// daemon stops would orphan a build on the target.
-	if s.jobs != nil {
-		s.jobs.Close()
+	var errs []error
+	if err := closeBackgroundManager(s.jobs); err != nil {
+		errs = append(errs, err)
 	}
 	// Same reasoning for envd pty sessions: the process runs on the target, and
 	// the stream plus its pump goroutine must die with this server.
 	if s.envd != nil {
 		s.envd.closeAllSessions()
 	}
-	var errs []error
 	if s.access != nil {
 		if err := s.access.Close(); err != nil {
 			errs = append(errs, err)

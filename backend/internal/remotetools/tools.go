@@ -64,11 +64,10 @@ func (c *Config) enabledTools() []string {
 		base = append(base, writeTools...)
 		base = append(base, shellTools...)
 	}
-	// Job tools need a store. Profile all opts into them directly; the narrower
-	// profiles keep the legacy compatibility gate explicit.
+	// Job tools share the one core background manager and its durable jobs.root.
+	// They are part of the command-control surface, never the read-only surface.
 	if c.Jobs.Root != "" &&
-		(c.Profile == ProfileAll ||
-			(c.Jobs.LegacyRemoteJobs && (c.Profile == ProfileOps || c.Profile == ProfileCustom))) {
+		(c.Profile == ProfileAll || c.Profile == ProfileOps || c.Profile == ProfileCustom) {
 		base = append(base, jobTools...)
 	}
 	if c.Artifacts.Root != "" {

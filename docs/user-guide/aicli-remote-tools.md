@@ -304,8 +304,9 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 - 客户端健康检查每 `global.healthCheckInterval`（默认 1m；ITSM 的 `mcp.yaml` 为 1m）执行一次 `ListTools` 探针，失败则重建 MCP 会话；检测 + 重连通常需要 1–2 分钟。
 - 下一次工具调用如果发现 client 已断开，会**在调用前同步重建会话**；如果已有重连在进行，则返回“正在重连”，不会重放上一次调用。
 - 断连时当前调用会失败：`view` / `ls` / `glob` / `grep` / `status` 可以安全重试；`write` / `shell` / 部署脚本不要盲目重试，先查状态再决定。
-- 服务端 `ReadHeaderTimeout=10s`、`IdleTimeout=120s`，不设整体 `WriteTimeout`（允许长调用）。如果是网络黑洞（没有 FIN/RST），handler 可能一直运行到 `limits.commandTimeout`（238 为 30m，默认 120s）才结束。
-- 请求取消或超时会杀掉整个进程组，避免构建子进程残留。
+- 服务端 `ReadHeaderTimeout=10s`、`IdleTimeout=120s`，不设整体 `WriteTimeout`（允许长调用）。
+- `shell` 默认先把命令登记为 core background job；`timeout_ms` / `limits.commandTimeout` 只限制本次等待，不杀 job。等待到期返回 promoted 结果和 `job_id`，命令继续运行。
+- 请求取消会 cancel 整个 job 进程组；server 关闭也会收敛运行中的 job，避免构建子进程残留。
 - `limits.maxConcurrentCalls` 已在 HTTP MCP 入口强制执行：超出时返回 **429** + `Retry-After: 1`；`/metrics` 不占并发名额。
 
 **SSH stdio**
@@ -320,12 +321,13 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
   死链约 45 秒内会被发现。
 - `ssh-client` 的自动重连/退避只用于 `-N` 端口转发模式；**stdio 模式不会自动重连**，由 MCP 健康检查重建会话。
 - `ssh-client -C` / `Compression yes` 会输出明确告警：`x/crypto/ssh` 只协商 `none`，压缩不生效。
-- 长构建/部署用 `setsid nohup` 的 detached 脚本，或启用 `jobs.root` 后使用 `job_start` / `job_output`；不要让 SSH 连接成为任务的唯一生命周期。
+- SSH stdio 每个连接一个远端进程；连接断开时该进程结束，运行中的 job 也会被取消。需要跨进程存活的长任务请使用目标机上的 `setsid nohup` / systemd 托管。
+- 同一连接内，`shell` 等待超时会自动 promoted；也可直接用 `job_start` 提交、`job_output` 按 cursor 读取。
 
 **推荐做法**
 
 - 部署脚本做成幂等、可检查点：`status → build → wait → up`；
-- 长任务放到后台（detached 或 `job_*`），断线后重新连接再查结果；
+- 长任务放到目标机自身 service manager；HTTP daemon 内的 job 只在原 MCP logical session 内可续读，重连后 session 变化时不会继承旧 job；
 - 监控审计/访问日志以及 `mcp.health.failed` / `mcp.reconnected` 生命周期事件。
 
 ---
@@ -336,20 +338,21 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 
 | profile | 暴露的工具 |
 |---------|------------|
-| `all`（默认） | 9 个核心工具（read + write + shell）+ `artifact_read`；配置 jobs 时再加 `job_*` |
+| `all`（默认） | 9 个核心工具（read + write + shell）+ `artifact_read` + `job_*`（默认 jobs.root 可用时） |
 | `readonly` | `view` `ls` `glob` `grep` |
 | `standard` | readonly + `write` `edit` `append_write` `apply_patch` |
-| `ops` | standard + `shell` |
+| `ops` | standard + `shell` + `job_*`（默认 jobs.root 可用时） |
 | `custom` | 完全由 `tools:` 列表决定 |
 
 补充规则：
 
-- **默认是 `all`，默认实际是 10 个工具**：`view` `ls` `glob` `grep` + `write` `edit` `append_write` `apply_patch` + `shell` + `artifact_read`。`profile: all` 表示“当前配置和存储能力下所有可用工具族”，不是无条件列出所有潜在工具。
+- **默认是 `all`，默认实际是 14 个工具**：`view` `ls` `glob` `grep` + `write` `edit` `append_write` `apply_patch` + `shell` + `artifact_read` + `job_start` `job_output` `job_cancel` `job_list`。`profile: all` 表示“当前配置和存储能力下所有可用工具族”，不是无条件列出所有潜在工具。
 - `artifact_read` 默认可见：未配置 `artifacts.root` 时，服务会把 `Normalize` 的默认值落到 `<workspace>/.aicli/artifacts`；它不是可选的“额外 1 个”之外的隐式行为，而是默认工具面的一部分。
 - **默认是 `all`**：挂载令牌持有者会看到写文件和 shell 工具；需要最小权限时显式写 `profile: readonly`。
 - `shell` 工具可见 ≠ 任意命令可执行：`shell.allowedCommands` / `allowedCommandPatterns` 为空时仍然 fail-closed，所有命令被拒绝。
 - `readOnly: true` 是硬覆盖：即使 profile 写成 `ops`，也不会暴露写工具。
-- `job_*` 是能力门控的工具：需要 `jobs.root` 非空，并通过 `legacyRemoteJobs: true`（或 `--legacy-jobs`）构造 job manager；v1 默认把后台任务视为本地能力。满足这些条件后，默认的 `all` 会再增加 `job_start` `job_output` `job_cancel` `job_list` 四个工具，总数变为 14。
+- `job_*` 与 `shell` 共用同一个 core background manager。`jobs.root` 省略时自动使用并创建 `<user-home>/.aicli/remote-tools/jobs`；只有显式把 `jobs.root` 设为不可写目录才会启动失败。
+- `job_*` 只出现在 `all` / `ops` / `custom` 的命令控制面；`readonly` / `standard` 不暴露。
 - `artifacts.root` 非空时，追加 `artifact_read`（用于取回被折叠的完整输出）。
 - `tools:` 非空时是**最终白名单**，不能扩大 profile；`custom` 必须显式列出工具，`job_*`/`artifact_read` 也要列入才可见。
 - 可选工具默认不暴露；需要通过 `optionalTools.enabled`（或 `tools:`）显式开启，且仍受 profile/network 门控，见 §5.4。
@@ -679,12 +682,14 @@ deny rules       : -
 
 | 约束 | 默认值 / 行为 |
 |------|---------------|
-| 超时 | 120s；调用方可传 `timeout_ms` |
+| 等待预算 | 120s；调用方可传 `timeout_ms`。到期返回 promoted + `job_id`，不杀命令 |
+| 作业 | `shell` 默认 job-first；`job_start` 只提交不等待；快速完成的前台 job 自动 `Forget` |
+| 作业 owner | 绑定 MCP logical session；HTTP stateless 无稳定 session 时 fail closed |
 | 输出上限 | 256 KiB（`limits.maxOutputBytes`）；超限折叠中间并明确标注 |
 | 完整输出 | 配置 `artifacts.root` 后归档，返回 `artifact_id` 可翻页 |
-| 进程组 | 独立进程组；超时杀整棵进程树 |
+| 进程组 | 独立进程组；调用取消 / server 关闭时收敛整棵进程树 |
 | shell | 启动时解析：Windows `pwsh` → `powershell` → `cmd.exe`；Unix `$SHELL` → `zsh` → `bash` → `sh` |
-| 失败结果 | 保留真实退出码，并把 stderr/命令正文随错误一起返回 |
+| 失败结果 | 保留真实退出码，并把 stderr/命令正文随错误一起返回；promoted 不是错误 |
 | 空输出 | 退出码 0 且无输出时明确返回 `Command completed successfully with no output.` |
 | 大输出 | 未配置 `artifacts.root` 时中间部分不保留，并在提示中要求配置 |
 | 环境变量 | 默认注入平台基线；`shell.envAllowlist` 追加；显式 `envAllowlist: []` 才关闭基线 |
@@ -982,13 +987,20 @@ curl -H "Authorization: Bearer $AICLI_REMOTE_TOKEN" \
 
 ```yaml
 jobs:
-  root: /var/lib/aicli/jobs          # 非空才暴露 job_* 工具
+  # 可省略；省略时使用并创建 <user-home>/.aicli/remote-tools/jobs
+  root: /var/lib/aicli/jobs
+  retention: 168h                    # 终态 job 和日志保留 7 天
 artifacts:
-  root: /var/lib/aicli/artifacts     # 非空才暴露 artifact_read
+  root: /var/lib/aicli/artifacts     # 默认 <workspace>/.aicli/artifacts
   maxBytes: 33554432
 ```
 
-- `job_*` 需要持久化目录；没有配置时工具不会出现在工具面里，而不是"出现了但一用就报错"。
+- `shell` / `job_start` / `job_output` / `job_cancel` / `job_list` 共用目标进程内的 **core `background.Manager`**，没有第二套 remote job 实现。
+- `jobs.root` 是持久化根：job store 为 `<root>/background.db`，输出日志为 `<root>/logs`。目录创建或写探针失败时启动失败，不会退回内存 job 或旧 remote JobManager。
+- `shell` 默认 job-first：快速完成的命令返回普通结果并自动 `Forget`；等待预算到期返回 promoted 结果和 `job_id`/`next_offset`，命令继续运行。
+- `job_output` 使用 core cursor：默认从 `offset=0` 开始，把返回的 `next_offset` 原样传回即可续读；不再把 `offset=0` 解释为 tail。
+- job 绑定调用方的 MCP logical session（stdio 使用目标进程的稳定 principal）；`job_output` / `job_cancel` / `job_list` 只能看到本 session 的 job。HTTP stateless 且没有稳定 session 时创建 job 会 fail closed。
+- 升级时旧 `<root>/jobs/<id>/job.json` / `output.log` 会被启动清理：running 记录按 PID 尝试终止进程树，然后删除旧目录；旧 job 不迁移、不可查询。
 - 输出被折叠时，服务端先归档完整内容并返回 `artifact_id`，模型可用 `artifact_read` 翻页。
 
 ---
@@ -1074,7 +1086,8 @@ remoteTargets:
 | 失败时只看到 `exit status 1` | 运行的是旧版服务，或错误投影仍丢弃正文 | 重新构建并重启服务；新版会保留真实退出码和 stderr |
 | 写命令成功但没有回显 | cmdlet 本身没有 stdout | 看到 `Command completed successfully with no output.` 即为成功；仍建议用 `Test-Path` 复核关键写操作 |
 | 输出里的 `common\tenantctx` 显示成 tab | 可能是请求侧把单反斜杠当成 JSON 转义，或客户端对 `TextContent` 文本做了二次解码；服务端未损坏原始字节 | 看 `metadata.command_has_tab` / `command_has_backslash` / `command_escaped`：TAB 在命令里 = 请求侧；命令有反斜杠而正文是 tab = 响应侧客户端。用原始 MCP 响应或 HTTP 抓包核对；不要服务端二次转义 |
-| `TIMEOUT` | 命令超过 `limits.commandTimeout` | 传 `timeout_ms` 或调整目标配置 |
+| shell 等待到期 | 命令仍在运行，结果返回 `promoted=true` + `job_id`，不是 `TIMEOUT` | 用 `job_output job_id=... offset=<next_offset>` 续读；需要停止时 `job_cancel` |
+| job 状态 `timed_out` | job 自身的运行时限到期（独立于 shell 等待预算） | 检查 job 输出、目标配置或改成长任务 |
 | 输出中间被省略（`NOT kept`） | 超过模型窗口且未配置 `artifacts.root` | 用 `grep`/`tail` 收窄，或配置 `artifacts.root` 后重启并翻页 |
 | `COMMAND_DENIED: contains a pipe/separator` | `denyShellMetachars` 默认开启 | 拆成多条命令，或仅在可信 target 上显式 `denyShellMetachars: false` |
 | `policy:` 告警 | 使用了已废弃的授权块 | 删除，改用 mode / profile / allowlist |

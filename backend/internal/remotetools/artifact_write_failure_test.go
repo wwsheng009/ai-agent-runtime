@@ -48,8 +48,14 @@ func TestShellReportsArtifactWriteFailure(t *testing.T) {
 	if err := os.RemoveAll(cfg.Artifacts.Root); err != nil {
 		t.Fatalf("break artifact root: %v", err)
 	}
-	tool := newRemoteShellTool(cfg, workspace, sandbox, artifacts)
-	result, err := tool.Execute(context.Background(), map[string]interface{}{
+	jobs, err := newRemoteBackgroundManager(cfg, sandbox)
+	if err != nil {
+		t.Fatalf("newRemoteBackgroundManager: %v", err)
+	}
+	t.Cleanup(func() { _ = jobs.Close() })
+	tool := newRemoteShellTool(cfg, workspace, sandbox, artifacts, jobs)
+	ctx := WithRequestInfo(context.Background(), RequestInfo{SessionID: "artifact-test"})
+	result, err := tool.Execute(ctx, map[string]interface{}{
 		"command": "echo " + strings.Repeat("x", 2000),
 	})
 	if err != nil {

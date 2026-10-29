@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -39,9 +40,11 @@ type remoteShellTool struct {
 	// output loses its middle permanently, because a remote call has no local
 	// artifact store to page from (design §D6).
 	artifacts *ArtifactStore
+	// jobs is the single target-side core job runtime shared with job_*.
+	jobs *background.Manager
 }
 
-func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, artifacts *ArtifactStore) *remoteShellTool {
+func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, artifacts *ArtifactStore, jobs *background.Manager) *remoteShellTool {
 	shell := resolvedShellForConfig(cfg)
 	parameters := map[string]interface{}{
 		"type": "object",
@@ -68,11 +71,12 @@ func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, art
 		sandbox:        sandbox,
 		shell:          shell,
 		artifacts:      artifacts,
+		jobs:           jobs,
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolShell,
 		tool.describe(shellToolDescription(
-			"Run one command on the remote host inside the workspace, subject to the target's command policy.",
+			"Run one command on the remote host inside the workspace, subject to the target's command policy. Every call starts a core background job and waits for it; timeout_ms only bounds that wait, so a timed-out command keeps running as a job.",
 			shell)),
 		"1.0.0",
 		parameters,
@@ -128,77 +132,101 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		timeout = time.Duration(requested) * time.Millisecond
 	}
 
-	captureLimit := DefaultMaxOutputBytes
-	if t.cfg != nil && t.cfg.Limits.MaxOutputBytes > 0 {
-		captureLimit = t.cfg.Limits.MaxOutputBytes
+	if t.jobs == nil {
+		return remoteErrorResult(newToolError(CodeUnsupported, "configure jobs.root on the target", "background job runtime is not configured")), nil
 	}
-
-	execResult, runErr := shellexec.Run(ctx, shellexec.Options{
-		Command:         command,
-		Workdir:         workdir,
-		Env:             t.sandbox.FilterEnv(os.Environ()),
-		Timeout:         timeout,
-		CaptureLimit:    captureLimit,
-		DisableArtifact: true,
-		QuietNotice:     -1,
-		Shell:           t.shell,
-		Invocation: func(command string) (string, []string) {
-			return shellInvocation(t.shell, command)
-		},
-		Prepare: func(_ context.Context, launch shellexec.Launch) (shellexec.Launch, error) {
-			// os/exec's Windows argv encoder escapes embedded quotes with
-			// backslashes; cmd.exe treats those as literal characters. Hand
-			// CreateProcess the already-quoted command line instead.
-			launch.RawCmdLine = shellRawCmdLine(t.shell, command)
-			return launch, nil
-		},
-	})
-	if execResult.Cancelled && !execResult.TimedOut {
-		// A client disconnect cancels the request context. It is a control-plane
-		// failure, never a content result, and must not be reported as a command
-		// timeout: the command may have produced output before the disconnect.
-		metadata := map[string]interface{}{
-			"command":     command,
-			"workdir":     t.cleanDisplayPath(workdir),
-			"duration_ms": execResult.Duration.Milliseconds(),
-			"timed_out":   false,
-			"exit_code":   -1,
-			"remote":      true,
-			"workspace":   effective.Root(),
-			"policy_rule": rule,
-			"shell":       shellLabel(t.shell),
-			"shell_type":  string(t.shell.Type),
-		}
-		metadata["error_code"] = toolcore.ErrCancelled
-		metadata["next_action"] = "retry the call if the command must complete"
-		addCommandDiagnostics(metadata, command)
-		body, metadata := t.shapeModelOutput(ToolShell, execResult.Capture.Output, metadata)
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: "text",
-			Content:    body,
-			Error:      fmt.Errorf("request cancelled"),
-			Metadata:   metadata,
-		}, nil
-	}
-	if !execResult.Started && runErr != nil {
+	owner := remoteJobOwner(ctx, t.cfg)
+	if owner == "" {
 		return remoteErrorResult(newToolError(
-			CodeCommandDenied,
-			"check that the command exists on the target",
-			"cannot start command: %v", runErr,
+			CodeUnsupported,
+			"call the tool from a session-bound MCP client; a stateless request cannot own a job",
+			"remote shell requires a stable session owner",
 		)), nil
 	}
-	capture := execResult.Capture.Output
-	exitCode := execResult.ExitCode
-	timedOut := execResult.TimedOut
-	duration := execResult.Duration
 
+	started := time.Now()
+	execution, execErr := shelljob.Execute(ctx, shelljob.NewManagerRuntime(t.jobs), shelljob.Request{
+		SessionID:   owner,
+		Command:     command,
+		Workdir:     workdir,
+		WaitTimeout: timeout,
+		OutputLimit: t.captureLimit(),
+		KeepJob:     true,
+	})
+	if execErr != nil {
+		stage := shelljob.StageOf(execErr)
+		jobID := shelljob.JobIDOf(execErr)
+		switch {
+		case stage == "owner":
+			return remoteErrorResult(newToolError(
+				CodeUnsupported,
+				"call the tool from a session-bound MCP client",
+				"remote shell requires a stable session owner",
+			)), nil
+		case stage == "wait" && ctx.Err() != nil:
+			metadata := map[string]interface{}{
+				"command":     command,
+				"workdir":     t.cleanDisplayPath(workdir),
+				"duration_ms": time.Since(started).Milliseconds(),
+				"timed_out":   false,
+				"exit_code":   -1,
+				"job_id":      jobID,
+				"remote":      true,
+				"workspace":   effective.Root(),
+				"policy_rule": rule,
+				"shell":       shellLabel(t.shell),
+				"shell_type":  string(t.shell.Type),
+			}
+			metadata["error_code"] = toolcore.ErrCancelled
+			metadata["next_action"] = "retry the call if the command must complete"
+			addCommandDiagnostics(metadata, command)
+			body, metadata := t.shapeModelOutput(ToolShell, "", metadata)
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: "text",
+				Content:    body,
+				Error:      fmt.Errorf("request cancelled"),
+				Metadata:   metadata,
+			}, nil
+		case stage == "read":
+			return remoteErrorResult(newToolError(
+				CodeInternal,
+				fmt.Sprintf("retry job_output job_id=%s offset=0", jobID),
+				"read shell job output: %v", execErr,
+			)), nil
+		default:
+			return remoteErrorResult(newToolError(
+				CodeCommandDenied,
+				"check that the command exists on the target and the jobs.root is writable",
+				"cannot start shell job: %v", execErr,
+			)), nil
+		}
+	}
+
+	duration := time.Since(started)
+	if !execution.TimedOut {
+		// The foreground shell hides a settled job after its output has been
+		// archived/formatted. Promoted jobs stay visible for job_output.
+		defer func() {
+			_ = t.jobs.ForgetJob(context.Background(), execution.JobID, owner)
+		}()
+	}
+	capture := execution.Output
+	exitCode := -1
+	if execution.ExitCode != nil {
+		exitCode = *execution.ExitCode
+	}
 	display := capture
 	switch {
-	case timedOut:
-		display = fmt.Sprintf("Command timed out after %s.\n\n%s", timeout, capture)
-	case runErr != nil:
-		display = fmt.Sprintf("Command failed: %v\n\n%s", runErr, capture)
+	case execution.TimedOut:
+		display = fmt.Sprintf("Command still running after %s; moved to background job %s\n\n%s",
+			timeout, execution.JobID, capture)
+	case execution.Status == "completed" && exitCode != 0:
+		display = fmt.Sprintf("Command failed: exit status %d\n\n%s", exitCode, capture)
+	case execution.Status == "failed":
+		display = fmt.Sprintf("Command failed: job status failed\n\n%s", capture)
+	case execution.Status == "cancelled":
+		display = fmt.Sprintf("Command cancelled.\n\n%s", capture)
 	case strings.TrimSpace(capture) == "":
 		display = emptyCommandOutputNotice
 	}
@@ -207,13 +235,13 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"workdir":              t.cleanDisplayPath(workdir),
 		"duration_ms":          duration.Milliseconds(),
 		"timeout_ms":           timeout.Milliseconds(),
-		"timed_out":            timedOut,
+		"timed_out":            execution.TimedOut,
 		"exit_code":            exitCode,
 		"output_bytes":         len(capture),
-		"total_output_bytes":   execResult.Capture.TotalBytes,
-		"total_output_lines":   execResult.Capture.TotalLines,
-		"output_truncated":     execResult.Capture.Truncated,
-		"output_capture_limit": execResult.Capture.CaptureLimitBytes,
+		"total_output_bytes":   len(capture),
+		"total_output_lines":   strings.Count(capture, "\n"),
+		"output_capture_limit": t.captureLimit(),
+		"job_first":            true,
 		"remote":               true,
 		"workspace":            effective.Root(),
 		"policy_rule":          rule,
@@ -221,56 +249,105 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"shell_type":           string(t.shell.Type),
 	}
 	addCommandDiagnostics(metadata, command)
-	if execResult.Capture.CaptureLimitDisabled {
-		metadata["output_capture_limit_disabled"] = true
-	}
-	if execResult.Capture.OmittedBytes > 0 {
-		metadata["omitted_output_bytes"] = execResult.Capture.OmittedBytes
-	}
-	if execResult.GuardReport.TreeKill {
-		metadata["process_tree_kill"] = true
-		metadata["killed_pids"] = execResult.GuardReport.Killed
-	}
-	if strings.TrimSpace(execResult.GuardReport.Mode) != "" {
-		metadata["process_tree_mode"] = execResult.GuardReport.Mode
-	}
-	if execResult.WaitDelayUsed {
-		metadata["wait_delay_used"] = true
-	}
-	if runErr == nil && !timedOut && strings.TrimSpace(capture) == "" {
+	if execution.TimedOut {
+		metadata["job_id"] = execution.JobID
+		metadata["job_status"] = execution.Status
+		metadata["next_offset"] = execution.NextOffset
+		metadata["promoted"] = true
+		metadata["next_action"] = fmt.Sprintf("job_output job_id=%s offset=%d", execution.JobID, execution.NextOffset)
+	} else if execution.Status == "completed" && strings.TrimSpace(capture) == "" {
 		metadata["output_empty"] = true
 	}
-	// Archive the complete capture before folding, so artifact_read can page the
-	// omitted middle. The notice is charged against the same model-visible
-	// window; folding first and then trimming the body to make room would drop
-	// the tail verdicts the head+tail window exists to preserve.
+
+	body, metadata, failure := t.finalizeShellOutput(capture, display, execution.LogPath, metadata)
+	if failure != nil {
+		return failure, nil
+	}
+	if execution.TimedOut {
+		return remoteTextResult(body, metadata), nil
+	}
+	if execution.Status == "completed" && exitCode == 0 {
+		if boolMetadata(metadata, toolcoreoutput.KeyIsTruncated) {
+			metadata["next_action"] = "narrow the command output (grep/tail) or raise max-output-bytes"
+		}
+		return remoteTextResult(body, metadata), nil
+	}
+
+	metadata["error_code"] = CodeCommandFailed
+	if execution.Status == "cancelled" {
+		metadata["error_code"] = toolcore.ErrCancelled
+		metadata["next_action"] = "start a new shell call if the command is still needed"
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: "text",
+			Content:    body,
+			Error:      shellFailureError(fmt.Errorf("command cancelled"), toolcore.ErrCancelled, "start a new shell call if the command is still needed"),
+			Metadata:   metadata,
+		}, nil
+	}
+	metadata["next_action"] = "check the command output and the target environment"
+	return &toolkit.ToolResult{
+		Success:    false,
+		OutputKind: "text",
+		Content:    body,
+		Error: shellFailureError(
+			fmt.Errorf("command failed: %s", execution.Status),
+			CodeCommandFailed, "check the command output and the target environment"),
+		Metadata: metadata,
+	}, nil
+}
+
+func (t *remoteShellTool) captureLimit() int {
+	if t == nil || t.cfg == nil {
+		return DefaultMaxOutputBytes
+	}
+	if t.cfg.Limits.MaxOutputBytes > 0 {
+		return t.cfg.Limits.MaxOutputBytes
+	}
+	if t.cfg.Limits.CaptureLimit > 0 {
+		return t.cfg.Limits.CaptureLimit
+	}
+	return DefaultMaxOutputBytes
+}
+
+// finalizeShellOutput archives the raw capture before folding. The job output
+// may be larger than the model-visible window; archiving first keeps the
+// omitted middle pageable through artifact_read.
+func (t *remoteShellTool) finalizeShellOutput(capture, display, logPath string, metadata map[string]interface{}) (string, map[string]interface{}, *toolkit.ToolResult) {
+	archiveBytes := []byte(capture)
+	if strings.TrimSpace(logPath) != "" {
+		if full, readErr := os.ReadFile(logPath); readErr == nil {
+			archiveBytes = full
+		}
+	}
+	if len(archiveBytes) > len(capture) {
+		metadata["total_output_bytes"] = len(archiveBytes)
+		metadata["output_truncated"] = true
+	}
 	archiveNotice := ""
-	if len(capture) > t.modelVisibleCap() && t.artifacts != nil {
-		ref, archiveErr := t.artifacts.PutRef(t.cfg.TargetName, []byte(capture))
+	if len(archiveBytes) > t.modelVisibleCap() && t.artifacts != nil && t.cfg != nil {
+		ref, archiveErr := t.artifacts.PutRef(t.cfg.TargetName, archiveBytes)
 		if archiveErr != nil || ref.IsZero() {
-			// The folded body is not recoverable without the archived capture.
-			// Returning success here would silently lose the omitted middle, so
-			// the call fails with the documented recovery code instead.
+			if archiveErr == nil {
+				archiveErr = fmt.Errorf("artifact store returned an empty reference")
+			}
 			metadata[toolcoreoutput.KeyErrorCode] = toolcore.ErrArtifactWriteFailed
 			metadata[toolcoreoutput.KeyNextAction] = "reduce the command output or fix the target artifact store"
 			body, _ := t.shapeModelOutput(ToolShell, display, metadata)
-			return &toolkit.ToolResult{
+			return body, metadata, &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: "text",
 				Content:    body,
-				// Keep the code and recovery hint in Error as well: the MCP
-				// projection now includes Content, but clients that render only
-				// Error must still see the actionable class.
 				Error: shellFailureError(
 					fmt.Errorf("artifact archive failed: %w", archiveErr),
 					toolcore.ErrArtifactWriteFailed,
 					"reduce the command output or fix the target artifact store"),
 				Metadata: metadata,
-			}, nil
+			}
 		}
 		metadata[toolcoreoutput.KeyArtifactRef] = ref.String()
 		metadata[toolcoreoutput.KeyArtifactID] = ref.ID
-		metadata["artifact_total_bytes"] = len(capture)
+		metadata["artifact_total_bytes"] = len(archiveBytes)
 		archiveNotice = fmt.Sprintf("\n[full capture archived as %s; page it with artifact_read artifact_id=%s]\n", ref.String(), ref.ID)
 	}
 	shapeBudget := 0
@@ -278,17 +355,13 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		budget := toolcoreoutput.ResolveCap(ToolShell, 0, 0, t.modelVisibleCap())
 		shapeBudget = budget - len(archiveNotice)
 		if shapeBudget < 256 {
-			shapeBudget = 0 // degenerate window: keep the ordinary fold
+			shapeBudget = 0
 		}
 	}
 	pageBytes := toolcoreoutput.ShellOutputBudgetBytes - 512
 	if pageBytes < 1024 {
 		pageBytes = 1024
 	}
-	// archived tells the notice whether the omitted middle can be retrieved.
-	// Without an artifact store nothing was written, and artifact_read is not
-	// even registered on this surface - promising it would send the model after
-	// a tool that does not exist.
 	body, shapedMetadata, _, _ := toolcoreoutput.ShapeShellWindowWithArchive(
 		ToolShell, display, metadata, shapeBudget, t.modelVisibleCap(), pageBytes, t.artifacts != nil)
 	metadata = shapedMetadata
@@ -300,37 +373,7 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		}
 		metadata[toolcoreoutput.KeyModelVisibleBudget] = t.modelVisibleCap()
 	}
-
-	switch {
-	case timedOut:
-		metadata["error_code"] = CodeTimeout
-		metadata["next_action"] = "narrow the command or raise the target timeout"
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: "text",
-			Content:    body,
-			Error: shellFailureError(
-				fmt.Errorf("command timed out after %s", timeout),
-				CodeTimeout, "narrow the command or raise the target timeout"),
-			Metadata: metadata,
-		}, nil
-	case runErr != nil:
-		metadata["error_code"] = CodeCommandFailed
-		metadata["next_action"] = "check the command output and the target environment"
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: "text",
-			Content:    body,
-			Error: shellFailureError(
-				fmt.Errorf("command failed: %w", runErr),
-				CodeCommandFailed, "check the command output and the target environment"),
-			Metadata: metadata,
-		}, nil
-	}
-	if boolMetadata(metadata, toolcoreoutput.KeyIsTruncated) {
-		metadata["next_action"] = "narrow the command output (grep/tail) or raise max-output-bytes"
-	}
-	return remoteTextResult(body, metadata), nil
+	return body, metadata, nil
 }
 
 // shellFailureError builds the error a failed shell call reports.

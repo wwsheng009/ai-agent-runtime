@@ -18,6 +18,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 )
 
 // Config controls background execution defaults.
@@ -61,6 +62,21 @@ type Config struct {
 	// (2026-09-28).
 	RecoverPendingOnStart bool
 	EventHandler          func(JobEvent)
+	// Shell overrides the shell used to execute jobs. Zero keeps the
+	// platform-detected user shell. A remote-tools target sets its own resolved
+	// shell here instead of introducing a second job runner.
+	Shell runtimeexecutor.Shell
+	// Env is the already-filtered environment for job processes. Nil inherits
+	// the runtime environment (with console styling neutralized).
+	Env []string
+	// PrepareCommand runs after shell argv construction and before Start. It is
+	// the shared hook for Windows cmd.exe raw command lines and other launcher
+	// adjustments; nil is a no-op.
+	PrepareCommand func(shell runtimeexecutor.Shell, command string, cmd *exec.Cmd)
+	// DisableDetached keeps jobs on the in-process manager path. Remote targets
+	// use this because the detached runner has its own shell/environment and
+	// would bypass the target-specific shell selection.
+	DisableDetached bool
 }
 
 // DefaultConfig returns a conservative default config.
@@ -565,6 +581,22 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 
 	managed.mu.RLock()
 	info := managed.info
+	// Decoration reads this snapshot after the lock is released. Keep a deep
+	// copy of metadata and the optional time/exit pointers so worker updates
+	// cannot race map iteration in decorateTaskOutputResult.
+	info.Metadata = cloneJobMetadata(managed.info.Metadata)
+	if managed.info.StartedAt != nil {
+		startedAt := *managed.info.StartedAt
+		info.StartedAt = &startedAt
+	}
+	if managed.info.FinishedAt != nil {
+		finishedAt := *managed.info.FinishedAt
+		info.FinishedAt = &finishedAt
+	}
+	if managed.info.ExitCode != nil {
+		exitCode := *managed.info.ExitCode
+		info.ExitCode = &exitCode
+	}
 	status := info.Status
 	exitCode := info.ExitCode
 	logPath := managed.logPath
@@ -727,6 +759,11 @@ func (m *Manager) ForgetJob(ctx context.Context, jobID, sessionID string) error 
 			m.mu.Unlock()
 			return err
 		}
+	}
+	// A forgotten job is deliberately invisible; its output log must not become
+	// an orphan that no cleanup query can ever find again.
+	if path := strings.TrimSpace(job.LogPath); path != "" {
+		_ = os.Remove(path)
 	}
 	return nil
 }
@@ -1389,7 +1426,7 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
-	cmd := buildShellCommand(ctx, managed.info.Command)
+	cmd := m.buildShellCommand(ctx, managed.info.Command)
 	if cmd == nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return
@@ -3259,19 +3296,34 @@ func currentLogSize(path string) int64 {
 	return info.Size()
 }
 
-func buildShellCommand(ctx context.Context, command string) *exec.Cmd {
+func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.Cmd {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
+	cfg := Config{}
+	if m != nil {
+		cfg = m.config
+	}
 	// 使用智能 shell 检测，与 BashTool 保持一致
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := cfg.Shell
+	if strings.TrimSpace(shell.Path) == "" {
+		shell = runtimeexecutor.DefaultUserShell()
+	}
 	shellArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+	shellArgs = shellexec.HardenPowerShellArgs(shellArgs, shell, command)
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
 	// captured background output is unstyled before it reaches the model.
-	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(os.Environ()))
+	env := cfg.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(env))
+	if cfg.PrepareCommand != nil {
+		cfg.PrepareCommand(shell, command, cmd)
+	}
 	return cmd
 }
 

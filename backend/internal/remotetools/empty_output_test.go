@@ -70,12 +70,12 @@ func TestJobOutputReportsEmptyExit(t *testing.T) {
 		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
 			"job_id": jobID,
 		})
-		if strings.Contains(output, "job exited with code") {
+		if strings.Contains(output, "job completed") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if !strings.Contains(output, "no output; job exited with code 0") {
+	if !strings.Contains(output, "no output; job completed") {
 		t.Fatalf("empty job exit was not explained: %s", output)
 	}
 	if strings.Contains(output, "no output yet") {

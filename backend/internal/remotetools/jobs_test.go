@@ -1,7 +1,7 @@
 package remotetools_test
 
 import (
-	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,91 +15,18 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
-// newJobsConfig builds an ops config with job and artifact stores enabled.
+// newJobsConfig builds an ops config with a target-local durable job root.
 func newJobsConfig(t *testing.T, root string, allowed []string) *remotetools.Config {
 	t.Helper()
 	cfg := newOpsConfig(t, root, allowed)
 	stateDir := t.TempDir()
 	cfg.Jobs.Root = filepath.Join(stateDir, "jobs")
-	// These tests cover the one-release legacy compatibility window; the v1
-	// default is local-only and requires the explicit opt-in.
-	cfg.Jobs.LegacyRemoteJobs = true
 	cfg.Artifacts.Root = filepath.Join(stateDir, "artifacts")
 	cfg.Limits.MaxOutputBytes = 4096
 	return cfg
 }
 
-// TestJobStartReturnsImmutableRecord pins the contract in JobManager.Start's
-// doc comment: the caller gets a snapshot, not the pointer the supervisor keeps
-// mutating after the process exits. Returning the shared pointer made the
-// tool's read of job.State race the supervisor's write (visible under -race in
-// TestJobsSurviveServerRestart).
-func TestJobStartReturnsImmutableRecord(t *testing.T) {
-	root := newTestWorkspace(t)
-	cfg := newJobsConfig(t, root, []string{"echo"})
-	workspace, err := remotetools.NewWorkspace(root, nil)
-	if err != nil {
-		t.Fatalf("NewWorkspace: %v", err)
-	}
-	sandbox, err := remotetools.NewSandbox(cfg, workspace)
-	if err != nil {
-		t.Fatalf("NewSandbox: %v", err)
-	}
-	jobs, err := remotetools.NewJobManager(cfg.Jobs.Root)
-	if err != nil {
-		t.Fatalf("NewJobManager: %v", err)
-	}
-	if jobs == nil {
-		t.Fatal("jobs must be enabled for the legacy opt-in")
-	}
-
-	started, err := jobs.Start(context.Background(), "echo race-probe", root, sandbox)
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if started.State != remotetools.JobRunning {
-		t.Fatalf("starting state = %q, want %q", started.State, remotetools.JobRunning)
-	}
-
-	// Let the process finish so the supervisor stamps its own copy. The record
-	// the caller received must not change: a poller still shows "running" for
-	// the call that started it, and reads of the on-disk record pick up the
-	// terminal state instead.
-	deadline := time.Now().Add(10 * time.Second)
-	var final *remotetools.Job
-	for time.Now().Before(deadline) {
-		final, err = jobs.Status(started.ID)
-		if err != nil {
-			t.Fatalf("Status: %v", err)
-		}
-		if final.State != remotetools.JobRunning {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if final == nil || final.State == remotetools.JobRunning {
-		t.Fatal("job never reached a terminal state")
-	}
-	if started.State != remotetools.JobRunning {
-		t.Fatalf("start record mutated under the caller: state = %q", started.State)
-	}
-	// The snapshot was taken while the job was running, so it must still carry
-	// no finish stamp, while the on-disk record does. If the shared pointer had
-	// been returned, the supervisor would have stamped this same object and both
-	// sides would report a finished job.
-	if !started.FinishedAt.IsZero() {
-		t.Fatalf("start record was stamped after the call returned: %v", started.FinishedAt)
-	}
-	if final.FinishedAt.IsZero() {
-		t.Fatal("terminal record is missing its finish stamp")
-	}
-	if final.State == remotetools.JobRunning {
-		t.Fatalf("on-disk record should have advanced past running: %v", final.State)
-	}
-}
-
-// TestJobLifecycle covers start → poll → terminal state.
-func TestJobLifecycle(t *testing.T) {
+func TestJobLifecycleUsesCoreManager(t *testing.T) {
 	root := newTestWorkspace(t)
 	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo"}), "dev")
 	if err != nil {
@@ -116,138 +43,27 @@ func TestJobLifecycle(t *testing.T) {
 		t.Fatalf("no job id in response: %s", body)
 	}
 
-	// Poll until the job exits; the supervisor goroutine stamps the record.
 	deadline := time.Now().Add(10 * time.Second)
 	var output string
 	for time.Now().Before(deadline) {
 		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
 			"job_id": jobID,
 		})
-		if strings.Contains(output, "exited") {
+		if strings.Contains(output, "completed") {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	if !strings.Contains(output, "job-output-marker") {
 		t.Fatalf("job output missing marker: %s", output)
 	}
-	if !strings.Contains(output, "exited") {
-		t.Fatalf("job did not reach a terminal state: %s", output)
+	if !strings.Contains(output, "completed") {
+		t.Fatalf("job did not reach the core terminal state: %s", output)
 	}
 }
 
-func TestJobStartNeutralizesConsoleStyling(t *testing.T) {
+func TestJobCancelUsesCoreManager(t *testing.T) {
 	root := newTestWorkspace(t)
-	cfg := newJobsConfig(t, root, []string{"echo"})
-	server, err := remotetools.NewServer(cfg, "dev")
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer server.Close()
-	session, ctx := startTestSession(t, server)
-
-	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
-		"command": noColorEchoCommand(cfg.ResolvedShell.Type),
-	})
-	jobID := extractJobID(t, body)
-
-	deadline := time.Now().Add(10 * time.Second)
-	var output string
-	for time.Now().Before(deadline) {
-		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
-			"job_id": jobID,
-		})
-		if strings.Contains(output, "exited") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !strings.Contains(output, "NO_COLOR=1") {
-		t.Fatalf("job NO_COLOR was not neutralized: %s", output)
-	}
-}
-
-// TestJobStartPreservesQuotedPathOnWindows covers the job path separately: it
-// builds its own exec.Cmd instead of going through shellexec, so it needs the
-// same shell-aware quoting and hardening as the foreground shell.
-func TestJobStartPreservesQuotedPathOnWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("windows shell quoting")
-	}
-	root := newTestWorkspace(t)
-	cfg := newJobsConfig(t, root, []string{"*"})
-	server, err := remotetools.NewServer(cfg, "dev")
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer server.Close()
-	session, ctx := startTestSession(t, server)
-
-	script := writeQuotedCmdProbe(t)
-	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
-		"command": quotedProbeCommand(cfg.ResolvedShell.Type, script, "job hello"),
-	})
-	jobID := extractJobID(t, body)
-
-	deadline := time.Now().Add(10 * time.Second)
-	var output string
-	for time.Now().Before(deadline) {
-		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
-			"job_id": jobID,
-		})
-		if strings.Contains(output, "exited") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !strings.Contains(output, "job hello") {
-		t.Fatalf("job did not receive the quoted path/arg: %s", output)
-	}
-}
-
-func TestJobStartPreservesQuotedPathWithCmdOnWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("windows shell quoting")
-	}
-	root := newTestWorkspace(t)
-	cfg := newJobsConfig(t, root, []string{"*"})
-	cfg.Shell.Program = "cmd"
-	if err := cfg.Normalize(); err != nil {
-		t.Fatalf("Normalize: %v", err)
-	}
-	server, err := remotetools.NewServer(cfg, "dev")
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer server.Close()
-	session, ctx := startTestSession(t, server)
-
-	script := writeQuotedCmdProbe(t)
-	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
-		"command": quotedProbeCommand(runtimeexecutor.ShellTypeCmd, script, "cmd job hello"),
-	})
-	jobID := extractJobID(t, body)
-
-	deadline := time.Now().Add(10 * time.Second)
-	var output string
-	for time.Now().Before(deadline) {
-		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
-			"job_id": jobID,
-		})
-		if strings.Contains(output, "exited") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !strings.Contains(output, "cmd job hello") {
-		t.Fatalf("job did not receive the quoted cmd path/arg: %s", output)
-	}
-}
-
-// TestJobCancelStopsRunningJob covers the cancel path.
-func TestJobCancelStopsRunningJob(t *testing.T) {
-	root := newTestWorkspace(t)
-	// `sleep` is the canonical long-running command for this test.
 	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"sleep"}), "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -259,17 +75,18 @@ func TestJobCancelStopsRunningJob(t *testing.T) {
 		"command": "sleep 60",
 	})
 	jobID := extractJobID(t, body)
-
+	if jobID == "" {
+		t.Fatalf("no job id in response: %s", body)
+	}
 	cancelBody := callTool(t, ctx, session, "remote_dev__job_cancel", map[string]interface{}{
 		"job_id": jobID,
 	})
-	if !strings.Contains(cancelBody, "killed") && !strings.Contains(cancelBody, "exited") {
+	if !strings.Contains(cancelBody, "cancelled") && !strings.Contains(cancelBody, "completed") {
 		t.Fatalf("unexpected cancel result: %s", cancelBody)
 	}
 }
 
-// TestJobListReportsJobs covers enumeration.
-func TestJobListReportsJobs(t *testing.T) {
+func TestJobListReportsJobsOwnedBySession(t *testing.T) {
 	root := newTestWorkspace(t)
 	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo"}), "dev")
 	if err != nil {
@@ -285,50 +102,130 @@ func TestJobListReportsJobs(t *testing.T) {
 	}
 }
 
-// TestJobToolsAbsentWithoutStore locks the capability rule: a host that cannot
-// persist jobs must not advertise job tools.
-func TestJobToolsAbsentWithoutStore(t *testing.T) {
+func TestRemoteShellFastCommandForgetsJobAndTimeoutPromotes(t *testing.T) {
+	root := newTestWorkspace(t)
+	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo", "sleep"}), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	fast := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command": "echo fast-marker",
+	})
+	if !strings.Contains(fast, "fast-marker") {
+		t.Fatalf("fast shell output missing marker: %s", fast)
+	}
+	list := callTool(t, ctx, session, "remote_dev__job_list", map[string]interface{}{})
+	if !strings.Contains(list, "(no jobs)") {
+		t.Fatalf("fast shell left a model-visible job: %s", list)
+	}
+
+	promoted := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command":    "sleep 30",
+		"timeout_ms": 200,
+	})
+	if !strings.Contains(promoted, "moved to background job") {
+		t.Fatalf("timeout did not promote to a job: %s", promoted)
+	}
+	jobID := extractJobID(t, promoted)
+	if jobID == "" {
+		t.Fatalf("promoted result missing job id: %s", promoted)
+	}
+	var output string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "running") || strings.Contains(output, "completed") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "running") && !strings.Contains(output, "completed") {
+		t.Fatalf("promoted job is not readable through job_output: %s", output)
+	}
+	_ = callTool(t, ctx, session, "remote_dev__job_cancel", map[string]interface{}{"job_id": jobID})
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{"job_id": jobID})
+		if strings.Contains(output, "cancelled") || strings.Contains(output, "completed") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestReadOnlyProfileDoesNotExposeJobTools(t *testing.T) {
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"echo"})
-	cfg.Jobs.Root = ""
+	cfg.Profile = remotetools.ProfileReadonly
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	defer server.Close()
-
 	for _, name := range server.ToolNames() {
-		if strings.Contains(name, "job_") {
-			t.Fatalf("job tool %q must not be exposed without a jobs store", name)
+		if strings.Contains(name, "job_") || strings.Contains(name, "shell") {
+			t.Fatalf("read-only surface exposed %q: %v", name, server.ToolNames())
 		}
 	}
 }
 
-// TestJobToolsAbsentWithoutLegacyOptIn pins the v1 convergence: a configured
-// jobs root alone must not advertise the legacy remote job_* surface.
-func TestJobToolsAbsentWithoutLegacyOptIn(t *testing.T) {
+func TestLegacyRemoteJobsPurgedOnStartup(t *testing.T) {
 	root := newTestWorkspace(t)
-	cfg := newOpsConfig(t, root, []string{"echo"})
-	cfg.Jobs.Root = filepath.Join(t.TempDir(), "jobs")
-	// cfg.Jobs.LegacyRemoteJobs deliberately stays false.
+	cfg := newJobsConfig(t, root, []string{"echo"})
+	legacyDir := filepath.Join(cfg.Jobs.Root, "jobs", "job_legacy")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	record, _ := json.Marshal(map[string]interface{}{
+		"id":         "job_legacy",
+		"pid":        0,
+		"started_at": time.Now().Add(-time.Hour).Format(time.RFC3339Nano),
+		"state":      "exited",
+	})
+	if err := os.WriteFile(filepath.Join(legacyDir, "job.json"), record, 0o600); err != nil {
+		t.Fatalf("write legacy record: %v", err)
+	}
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	defer server.Close()
-
-	for _, name := range server.ToolNames() {
-		if strings.Contains(name, "job_") {
-			t.Fatalf("legacy job tool %q must stay off by default", name)
-		}
+	if _, statErr := os.Stat(legacyDir); !os.IsNotExist(statErr) {
+		t.Fatalf("legacy job directory was not removed: %v", statErr)
 	}
 }
 
-// TestArtifactArchiveAndRead covers the folded-output recovery path.
+func TestNormalizeCreatesDefaultJobsRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	cfg := remotetools.DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	want := filepath.Join(home, ".aicli", "remote-tools", "jobs")
+	if filepath.Clean(cfg.Jobs.Root) != filepath.Clean(want) {
+		t.Fatalf("jobs.root = %q, want %q", cfg.Jobs.Root, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("default jobs.root was not created: %v", err)
+	}
+	if cfg.Jobs.Retention.Duration != 7*24*time.Hour {
+		t.Fatalf("jobs.retention = %s, want 168h", cfg.Jobs.Retention.Duration)
+	}
+}
+
 func TestArtifactArchiveAndRead(t *testing.T) {
 	root := newTestWorkspace(t)
 	cfg := newJobsConfig(t, root, []string{"echo"})
-	cfg.Limits.MaxOutputBytes = 256 // force folding
+	cfg.Limits.MaxOutputBytes = 256
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -339,8 +236,6 @@ func TestArtifactArchiveAndRead(t *testing.T) {
 	if !containsTool(server.ToolNames(), "remote_dev__artifact_read") {
 		t.Fatalf("artifact_read missing from surface: %v", server.ToolNames())
 	}
-
-	// Generate output far beyond the 256-byte window.
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command": "echo " + strings.Repeat("A", 2000),
 	})
@@ -348,7 +243,6 @@ func TestArtifactArchiveAndRead(t *testing.T) {
 		t.Fatalf("expected an artifact pointer in folded output: %s", body)
 	}
 	artifactID := extractArtifactID(t, body)
-
 	page := callTool(t, ctx, session, "remote_dev__artifact_read", map[string]interface{}{
 		"artifact_id": artifactID,
 		"offset":      0,
@@ -359,8 +253,6 @@ func TestArtifactArchiveAndRead(t *testing.T) {
 	}
 }
 
-// TestArtifactReadRejectsTraversal locks the id validation: the id becomes a
-// filename, so a path-shaped id must be refused before touching the filesystem.
 func TestArtifactReadRejectsTraversal(t *testing.T) {
 	root := newTestWorkspace(t)
 	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo"}), "dev")
@@ -385,40 +277,102 @@ func TestArtifactReadRejectsTraversal(t *testing.T) {
 	}
 }
 
-// TestJobsSurviveServerRestart proves the job record is durable.
-func TestJobsSurviveServerRestart(t *testing.T) {
-	root := newTestWorkspace(t)
-	cfg := newJobsConfig(t, root, []string{"echo"})
-	first, err := remotetools.NewServer(cfg, "dev")
+func TestArtifactStoreExpiry(t *testing.T) {
+	store, err := remotetools.NewArtifactStore(t.TempDir(), 1024)
 	if err != nil {
-		t.Fatalf("NewServer: %v", err)
+		t.Fatalf("NewArtifactStore: %v", err)
 	}
-	session, ctx := startTestSession(t, first)
-	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
-		"command": "echo durable",
-	})
-	jobID := extractJobID(t, body)
-	// Wait for the terminal state to be persisted.
-	time.Sleep(500 * time.Millisecond)
-	_ = session.Close()
-	_ = first.Close()
-
-	// A second server over the same job root must see the record.
-	second, err := remotetools.NewServer(cfg, "dev")
+	id, err := store.Put([]byte("payload"))
 	if err != nil {
-		t.Fatalf("NewServer (second): %v", err)
+		t.Fatalf("Put: %v", err)
 	}
-	defer second.Close()
-	session2, ctx2 := startTestSession(t, second)
-	output := callTool(t, ctx2, session2, "remote_dev__job_output", map[string]interface{}{
-		"job_id": jobID,
-	})
-	if !strings.Contains(output, "durable") {
-		t.Fatalf("job record did not survive restart: %s", output)
+	content, size, eof, err := store.Read(id, 0, 100)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if content != "payload" || size != 7 || !eof {
+		t.Fatalf("unexpected read: %q size=%d eof=%v", content, size, eof)
+	}
+	if _, _, _, err := store.Read("art_zzzz", 0, 10); err == nil {
+		t.Fatal("expected malformed id to be refused")
+	}
+	if _, err := store.Put(make([]byte, 2048)); err == nil {
+		t.Fatal("expected oversized payload to be refused")
 	}
 }
 
-// extractJobID pulls the job id out of the job_start response.
+func TestJobStartPreservesQuotedPathOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows shell quoting")
+	}
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"*"})
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	script := writeQuotedCmdProbe(t)
+	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": quotedProbeCommand(cfg.ResolvedShell.Type, script, "job hello"),
+	})
+	jobID := extractJobID(t, body)
+	deadline := time.Now().Add(10 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "completed") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "job hello") {
+		t.Fatalf("job did not receive the quoted path/arg: %s", output)
+	}
+}
+
+func TestJobStartPreservesQuotedPathWithCmdOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows cmd.exe quoting")
+	}
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"*"})
+	cfg.Shell.Program = "cmd"
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	script := writeQuotedCmdProbe(t)
+	body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": quotedProbeCommand(runtimeexecutor.ShellTypeCmd, script, "cmd job hello"),
+	})
+	jobID := extractJobID(t, body)
+	deadline := time.Now().Add(10 * time.Second)
+	var output string
+	for time.Now().Before(deadline) {
+		output = callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+			"job_id": jobID,
+		})
+		if strings.Contains(output, "completed") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(output, "cmd job hello") {
+		t.Fatalf("job did not receive the quoted cmd path/arg: %s", output)
+	}
+}
+
 func extractJobID(t *testing.T, body string) string {
 	t.Helper()
 	for _, line := range strings.Split(body, "\n") {
@@ -436,7 +390,6 @@ func extractJobID(t *testing.T, body string) string {
 	return ""
 }
 
-// extractArtifactID pulls the art_… id out of a folded shell result.
 func extractArtifactID(t *testing.T, body string) string {
 	t.Helper()
 	index := strings.Index(body, "art_")
@@ -459,47 +412,3 @@ func containsTool(names []string, want string) bool {
 	}
 	return false
 }
-
-// TestArtifactStoreExpiry documents the retention behavior at the unit level.
-func TestArtifactStoreExpiry(t *testing.T) {
-	store, err := remotetools.NewArtifactStore(t.TempDir(), 1024)
-	if err != nil {
-		t.Fatalf("NewArtifactStore: %v", err)
-	}
-	id, err := store.Put([]byte("payload"))
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	content, size, eof, err := store.Read(id, 0, 100)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if content != "payload" || size != 7 || !eof {
-		t.Fatalf("unexpected read: %q size=%d eof=%v", content, size, eof)
-	}
-	if _, _, _, err := store.Read("art_zzzz", 0, 10); err == nil {
-		t.Fatal("expected malformed id to be refused")
-	}
-	// Oversized payload is refused rather than silently truncated.
-	if _, err := store.Put(make([]byte, 2048)); err == nil {
-		t.Fatal("expected oversized payload to be refused")
-	}
-}
-
-// TestJobManagerDisabledWithoutRoot documents the disabled state.
-func TestJobManagerDisabledWithoutRoot(t *testing.T) {
-	manager, err := remotetools.NewJobManager("")
-	if err != nil {
-		t.Fatalf("NewJobManager: %v", err)
-	}
-	if manager != nil {
-		t.Fatal("empty root must disable the job manager")
-	}
-	// A nil manager reports unsupported rather than panicking.
-	if _, err := manager.Status("job_x"); err == nil {
-		t.Fatal("expected unsupported error")
-	}
-}
-
-var _ = context.Background
-var _ = os.Getenv

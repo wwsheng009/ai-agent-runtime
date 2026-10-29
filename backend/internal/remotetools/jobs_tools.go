@@ -3,8 +3,13 @@ package remotetools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -17,21 +22,74 @@ const (
 	ToolArtifactRead = "artifact_read"
 )
 
-// jobTools is the P3 background surface, enabled by profile ops.
+// jobTools is the command-control surface backed by the core job manager.
 var jobTools = []string{ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobList}
 
 // artifactTools is enabled whenever the artifact store is configured.
 var artifactTools = []string{ToolArtifactRead}
 
-// remoteJobStartTool starts a detached command.
+// remoteJobOwner returns the stable logical owner for a remote job. It is the
+// MCP session id when the transport supplies one; direct tool calls may bind the
+// same fact through toolctx. An empty owner is fail-closed.
+func remoteJobOwner(ctx context.Context, cfg *Config) string {
+	if info := RequestInfoFromContext(ctx); strings.TrimSpace(info.SessionID) != "" {
+		return strings.TrimSpace(info.SessionID)
+	}
+	if owner := strings.TrimSpace(toolctx.SessionID(ctx)); owner != "" {
+		return owner
+	}
+	// stdio is one process per client and has no durable MCP session id. The
+	// process principal is the stable owner there. HTTP stateless requests must
+	// not fall back to a shared token: they have no stable owner and fail closed.
+	if cfg == nil || strings.EqualFold(strings.TrimSpace(cfg.Transport), "http") {
+		return ""
+	}
+	return strings.TrimSpace(RequestInfoFromContext(ctx).Principal)
+}
+
+func requireRemoteJobOwner(ctx context.Context, cfg *Config) (string, error) {
+	owner := remoteJobOwner(ctx, cfg)
+	if owner == "" {
+		return "", newToolError(
+			CodeUnsupported,
+			"call the tool from a session-bound MCP client; a stateless request cannot own a job",
+			"remote job requires a stable session owner",
+		)
+	}
+	return owner, nil
+}
+
+func remoteJobManagerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound) {
+		return newToolError(CodeNotFound, "use job_list to discover jobs owned by this session", "%v", err)
+	}
+	return newToolError(CodeInternal, "retry the call or inspect jobs.root", "%v", err)
+}
+
+func requireOwnedJob(ctx context.Context, manager *background.Manager, jobID, owner string) (*background.Job, error) {
+	job, err := manager.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, remoteJobManagerError(err)
+	}
+	if strings.TrimSpace(job.SessionID) != strings.TrimSpace(owner) {
+		// Do not reveal the existence or status of another session's job.
+		return nil, newToolError(CodeNotFound, "use job_list to discover jobs owned by this session", "job not found: %s", jobID)
+	}
+	return job, nil
+}
+
+// remoteJobStartTool starts a command without waiting for it.
 type remoteJobStartTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
 	sandbox *Sandbox
-	jobs    *JobManager
+	jobs    *background.Manager
 }
 
-func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, jobs *JobManager) *remoteJobStartTool {
+func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, jobs *background.Manager) *remoteJobStartTool {
 	shell := resolvedShellForConfig(cfg)
 	parameters := map[string]interface{}{
 		"type": "object",
@@ -56,9 +114,9 @@ func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, 
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolJobStart,
 		tool.describe(shellToolDescription(
-			"Start a long-running command on the remote host. Returns a job_id; poll with job_output.",
+			"Start a command on the remote host without waiting. Returns a job_id; poll with job_output. This uses the same job runtime as shell.",
 			shell)),
-		"1.0.0",
+		"2.0.0",
 		parameters,
 		true,
 	)
@@ -74,10 +132,14 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass command", "command is required")), nil
 	}
 	if t.jobs == nil {
-		return remoteErrorResult(newToolError(CodeUnsupported, "enable backgroundJobs in the target config", "background jobs are not enabled")), nil
+		return remoteErrorResult(newToolError(CodeUnsupported, "configure jobs.root on the target", "background jobs are not enabled")), nil
 	}
 	if t.sandbox == nil {
 		return remoteErrorResult(newToolError(CodeCommandDenied, "use profile all/ops", "shell policy is not configured")), nil
+	}
+	owner, err := requireRemoteJobOwner(ctx, t.cfg)
+	if err != nil {
+		return remoteErrorResult(err), nil
 	}
 	rule, err := t.sandbox.CheckCommand(command)
 	if err != nil {
@@ -89,8 +151,6 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 		return result, nil
 	}
 
-	// Same rule as shell: a roots-narrowed session must not start the job in the
-	// server's base workspace, which lies outside the client's declaration.
 	effective := workspaceForCall(ctx, t.workspace)
 	workdir := effective.Root()
 	if raw, ok := params["workdir"].(string); ok && strings.TrimSpace(raw) != "" {
@@ -105,25 +165,28 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 		workdir = resolved
 	}
 
-	job, err := t.jobs.Start(ctx, command, workdir, t.sandbox)
+	job, err := t.jobs.SubmitShell(ctx, owner, background.BackgroundTaskArgs{
+		Command: command,
+		Cwd:     workdir,
+	})
 	if err != nil {
-		return remoteErrorResult(err), nil
+		return remoteErrorResult(remoteJobManagerError(err)), nil
 	}
 	shell := resolvedShellForConfig(t.cfg)
 	metadata := map[string]interface{}{
 		"job_id":      job.ID,
-		"pid":         job.PID,
-		"state":       job.State,
+		"state":       string(job.Status),
 		"command":     command,
 		"workdir":     t.cleanDisplayPath(workdir),
-		"started_at":  job.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+		"started_at":  job.CreatedAt.Format(time.RFC3339),
 		"remote":      true,
 		"workspace":   effective.Root(),
 		"policy_rule": rule,
 		"shell":       shellLabel(shell),
 		"shell_type":  string(shell.Type),
+		"owner":       owner,
 	}
-	body := fmt.Sprintf("Started job %s (pid %d).\nPoll with job_output job_id=%s.\n", job.ID, job.PID, job.ID)
+	body := fmt.Sprintf("Started job %s\nPoll with job_output job_id=%s offset=0.\n", job.ID, job.ID)
 	return remoteTextResult(body, metadata), nil
 }
 
@@ -131,24 +194,24 @@ func (t *remoteJobStartTool) Execute(ctx context.Context, params map[string]inte
 type remoteJobOutputTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
-	jobs *JobManager
+	jobs *background.Manager
 }
 
-func newRemoteJobOutputTool(cfg *Config, workspace *Workspace, jobs *JobManager) *remoteJobOutputTool {
+func newRemoteJobOutputTool(cfg *Config, workspace *Workspace, jobs *background.Manager) *remoteJobOutputTool {
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"job_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Job id returned by job_start.",
+				"description": "Job id returned by job_start or a promoted shell result.",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
-				"description": "Byte offset to read from. Omit for the tail.",
+				"description": "Byte offset to read from. Default 0. Use the returned next_offset to continue.",
 			},
 			"tail_bytes": map[string]interface{}{
 				"type":        "integer",
-				"description": "How many bytes to return. Default 8192, capped at 65536.",
+				"description": "Maximum bytes to return. Default 8192, capped at 65536.",
 			},
 		},
 		"required":             []string{"job_id"},
@@ -160,8 +223,8 @@ func newRemoteJobOutputTool(cfg *Config, workspace *Workspace, jobs *JobManager)
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolJobOutput,
-		tool.describe("Read the state and recent output of a remote background job."),
-		"1.0.0",
+		tool.describe("Read the state and an output window of a remote background job, using the same offset cursor as the core job runtime."),
+		"2.0.0",
 		parameters,
 		true,
 	)
@@ -176,48 +239,69 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 	if strings.TrimSpace(jobID) == "" {
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass job_id", "job_id is required")), nil
 	}
-	offset := int64(intParam(params, "offset", 0))
-	tail := intParam(params, "tail_bytes", 8192)
-	if tail > artifactReadMaxBytes {
-		tail = artifactReadMaxBytes
+	if t.jobs == nil {
+		return remoteErrorResult(newToolError(CodeUnsupported, "configure jobs.root on the target", "background jobs are not enabled")), nil
 	}
-
-	output, job, size, err := t.jobs.ReadOutput(jobID, offset, tail)
+	owner, err := requireRemoteJobOwner(ctx, t.cfg)
 	if err != nil {
 		return remoteErrorResult(err), nil
 	}
+	offset := int64(intParam(params, "offset", 0))
+	limit := intParam(params, "tail_bytes", 8192)
+	if limit > artifactReadMaxBytes {
+		limit = artifactReadMaxBytes
+	}
+	job, err := requireOwnedJob(ctx, t.jobs, jobID, owner)
+	if err != nil {
+		return remoteErrorResult(err), nil
+	}
+	result, err := t.jobs.ReadOutput(ctx, background.TaskOutputArgs{
+		JobID:  job.ID,
+		Offset: offset,
+		Limit:  limit,
+	})
+	if err != nil {
+		return remoteErrorResult(remoteJobManagerError(err)), nil
+	}
+
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== job %s: %s", job.ID, job.State)
-	if job.State == JobExited {
-		fmt.Fprintf(&builder, " (exit %d)", job.ExitCode)
+	fmt.Fprintf(&builder, "=== job %s: %s", result.JobID, result.Status)
+	if result.ExitCode != nil {
+		fmt.Fprintf(&builder, " (exit %d)", *result.ExitCode)
 	}
 	fmt.Fprintf(&builder, " ===\n")
-	if output == "" {
-		switch job.State {
-		case JobExited:
-			fmt.Fprintf(&builder, "(no output; job exited with code %d)\n", job.ExitCode)
-		case JobKilled:
-			builder.WriteString("(no output; job was killed)\n")
+	if result.Output == "" {
+		switch background.JobStatus(result.Status) {
+		case background.StatusCompleted:
+			builder.WriteString("(no output; job completed)\n")
+		case background.StatusFailed:
+			builder.WriteString("(no output; job failed)\n")
+		case background.StatusCancelled:
+			builder.WriteString("(no output; job was cancelled)\n")
+		case background.StatusPending:
+			builder.WriteString("(no output yet; job is queued)\n")
 		default:
 			builder.WriteString("(no output yet)\n")
 		}
 	} else {
-		builder.WriteString(output)
-		if !strings.HasSuffix(output, "\n") {
+		builder.WriteString(result.Output)
+		if !strings.HasSuffix(result.Output, "\n") {
 			builder.WriteByte('\n')
 		}
 	}
 	metadata := map[string]interface{}{
-		"job_id":       job.ID,
-		"state":        job.State,
-		"exit_code":    job.ExitCode,
-		"output_bytes": size,
+		"job_id":       result.JobID,
+		"state":        result.Status,
+		"exit_code":    result.ExitCode,
+		"offset":       offset,
+		"next_offset":  result.NextOffset,
+		"output_bytes": len(result.Output),
 		"remote":       true,
 	}
-	if job.State == JobRunning {
-		metadata["next_action"] = "poll again with job_output; the job is still running"
-	} else {
+	if background.IsTerminalStatus(background.JobStatus(result.Status)) {
 		metadata["finished"] = true
+	} else {
+		metadata["next_action"] = fmt.Sprintf("job_output job_id=%s offset=%d", result.JobID, result.NextOffset)
 	}
 	return remoteTextResult(builder.String(), metadata), nil
 }
@@ -226,10 +310,10 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 type remoteJobCancelTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
-	jobs *JobManager
+	jobs *background.Manager
 }
 
-func newRemoteJobCancelTool(cfg *Config, workspace *Workspace, jobs *JobManager) *remoteJobCancelTool {
+func newRemoteJobCancelTool(cfg *Config, workspace *Workspace, jobs *background.Manager) *remoteJobCancelTool {
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -247,8 +331,8 @@ func newRemoteJobCancelTool(cfg *Config, workspace *Workspace, jobs *JobManager)
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolJobCancel,
-		tool.describe("Stop a running remote background job (SIGTERM, then a tree kill)."),
-		"1.0.0",
+		tool.describe("Stop a remote background job through the core manager's cancellation path."),
+		"2.0.0",
 		parameters,
 		true,
 	)
@@ -263,27 +347,37 @@ func (t *remoteJobCancelTool) Execute(ctx context.Context, params map[string]int
 	if strings.TrimSpace(jobID) == "" {
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass job_id", "job_id is required")), nil
 	}
-	job, err := t.jobs.Cancel(jobID)
+	if t.jobs == nil {
+		return remoteErrorResult(newToolError(CodeUnsupported, "configure jobs.root on the target", "background jobs are not enabled")), nil
+	}
+	owner, err := requireRemoteJobOwner(ctx, t.cfg)
 	if err != nil {
 		return remoteErrorResult(err), nil
 	}
+	if _, err := requireOwnedJob(ctx, t.jobs, jobID, owner); err != nil {
+		return remoteErrorResult(err), nil
+	}
+	job, err := t.jobs.CancelJob(ctx, jobID)
+	if err != nil {
+		return remoteErrorResult(remoteJobManagerError(err)), nil
+	}
 	metadata := map[string]interface{}{
 		"job_id":    job.ID,
-		"state":     job.State,
+		"state":     string(job.Status),
 		"exit_code": job.ExitCode,
 		"remote":    true,
 	}
-	return remoteTextResult(fmt.Sprintf("Job %s is now %s.\n", job.ID, job.State), metadata), nil
+	return remoteTextResult(fmt.Sprintf("Job %s is now %s.\n", job.ID, job.Status), metadata), nil
 }
 
-// remoteJobListTool lists recent jobs.
+// remoteJobListTool lists recent jobs owned by the calling session.
 type remoteJobListTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
-	jobs *JobManager
+	jobs *background.Manager
 }
 
-func newRemoteJobListTool(cfg *Config, workspace *Workspace, jobs *JobManager) *remoteJobListTool {
+func newRemoteJobListTool(cfg *Config, workspace *Workspace, jobs *background.Manager) *remoteJobListTool {
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -301,8 +395,8 @@ func newRemoteJobListTool(cfg *Config, workspace *Workspace, jobs *JobManager) *
 	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolJobList,
-		tool.describe("List recent remote background jobs, newest first."),
-		"1.0.0",
+		tool.describe("List recent remote background jobs owned by this session, newest first."),
+		"2.0.0",
 		parameters,
 		true,
 	)
@@ -313,15 +407,28 @@ func (t *remoteJobListTool) Execute(ctx context.Context, params map[string]inter
 	if err := contextErr(ctx); err != nil {
 		return remoteErrorResult(err), nil
 	}
-	limit := intParam(params, "limit", 20)
-	jobs, err := t.jobs.List(limit)
+	if t.jobs == nil {
+		return remoteErrorResult(newToolError(CodeUnsupported, "configure jobs.root on the target", "background jobs are not enabled")), nil
+	}
+	owner, err := requireRemoteJobOwner(ctx, t.cfg)
 	if err != nil {
 		return remoteErrorResult(err), nil
 	}
+	limit := intParam(params, "limit", 20)
+	if limit <= 0 {
+		limit = 20
+	}
+	jobs, err := t.jobs.ListJobs(ctx, background.JobFilter{SessionID: owner, Limit: limit})
+	if err != nil {
+		return remoteErrorResult(remoteJobManagerError(err)), nil
+	}
+	sort.SliceStable(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
+	})
 	var builder strings.Builder
 	builder.WriteString("=== remote jobs ===\n")
 	for _, job := range jobs {
-		fmt.Fprintf(&builder, "%s  %-8s pid=%-7d %s\n", job.ID, job.State, job.PID, truncateForDisplay(job.Command, 80))
+		fmt.Fprintf(&builder, "%s  %-10s %s\n", job.ID, job.Status, truncateForDisplay(job.Command, 80))
 	}
 	if len(jobs) == 0 {
 		builder.WriteString("(no jobs)\n")

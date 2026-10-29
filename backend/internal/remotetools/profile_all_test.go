@@ -23,7 +23,7 @@ func TestDefaultProfileAllExposesFullCoreSurface(t *testing.T) {
 	}
 	got := toolNames(cfg)
 	want := []string{
-		"append_write", "apply_patch", "artifact_read", "edit", "glob", "grep", "ls", "shell", "view", "write",
+		"append_write", "apply_patch", "artifact_read", "edit", "glob", "grep", "job_cancel", "job_list", "job_output", "job_start", "ls", "shell", "view", "write",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("profile all tools = %v, want %v", got, want)
