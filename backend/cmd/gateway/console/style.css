@@ -188,7 +188,7 @@ body.login-mode [data-auth] { display: none !important; }
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
-.brand-text h1 { font-size: 14.5px; margin: 0; }
+.brand-text .brand-name { font-size: 14.5px; margin: 0; font-weight: 600; }
 .brand-sub { font-size: 11px; color: var(--fg-muted); }
 
 .nav { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
@@ -290,7 +290,18 @@ body.login-mode [data-auth] { display: none !important; }
 
 /* ── Views ───────────────────────────────────────────────────── */
 
-.views { padding: 20px 24px 48px; }
+.views {
+  padding: 20px 24px 48px;
+  max-width: 1440px;
+  margin-inline: auto;
+}
+
+/* 只给读屏的汇总播报（不参与视觉布局）。 */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 
 .view[hidden] { display: none; }
 
@@ -1321,18 +1332,21 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
    on touch devices only, so the dense desktop layout is unchanged. */
 @media (pointer: coarse) {
   .btn { min-height: 44px; }
-  .btn.sm { min-height: 40px; }
+  .btn.sm { height: auto; min-height: 44px; }
   /* 卡片溢出菜单（设备 / MCP / 离线快照）同样要满足 44px 触控底线。 */
   .card-actions .s-more { min-width: 44px; min-height: 44px; }
   .menu-item { min-height: 44px; display: flex; align-items: center; }
   .nav-item { padding: 12px; min-height: 44px; }
   body.sb-collapsed .nav-item { min-height: 44px; }
   .seg { height: auto; }
-  .seg-btn { min-height: 38px; padding: 0 14px; }
-  .attn-chip { min-height: 40px; }
+  .seg-btn { min-height: 44px; padding: 0 14px; }
+  .attn-chip { min-height: 44px; }
+  input, .select { min-height: 44px; }
+  .event-strip { max-height: 48px; padding-block: 2px; }
+  .event-chip { min-height: 44px; }
   .modal-close { min-width: 44px; min-height: 44px; }
-  .toast-close { width: 32px; height: 32px; }
-  .session-card .s-id { min-height: 32px; }
+  .toast-close { width: 44px; height: 44px; }
+  .session-card .s-id { min-height: 44px; }
 }
 
 /* First paint: panels stay empty until /api/nodes answers. Show a quiet note
@@ -1463,16 +1477,22 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 /* ── Migration event strip (P2) ────────────────────────────────── */
 
 .event-strip {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+  max-height: 44px; overflow-x: auto; overflow-y: hidden;
   padding: 6px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   font-size: 12px;
+  scrollbar-width: none;
+}
+.event-strip::-webkit-scrollbar { display: none; }
+.event-strip.expanded {
+  flex-wrap: wrap; max-height: none; overflow: visible;
 }
 .event-strip-title { color: var(--fg-faint); flex-shrink: 0; }
 .event-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  max-width: 340px; min-width: 0;
+  max-width: 340px; min-width: 0; flex: 0 1 auto;
   border: 1px solid var(--border-strong); border-radius: 999px;
   background: var(--panel-2); color: var(--fg-muted);
   font-family: inherit; font-size: 11.5px;
@@ -1489,6 +1509,14 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
 }
 .event-strip-clear { margin-left: auto; flex-shrink: 0; }
+.event-strip-more { flex-shrink: 0; }
+
+/* UX-07: 连接器技术字段默认折叠，首屏只保留任务语言。 */
+.connector-advanced { margin: 8px 0 4px; }
+.connector-advanced > summary {
+  cursor: pointer; color: var(--fg-muted); font-size: 12.5px;
+}
+.connector-advanced[open] > summary { color: var(--fg); }
 
 /* ── Collapsed-card live line (folds live output into the list) ── */
 

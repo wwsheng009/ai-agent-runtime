@@ -373,6 +373,23 @@
     window.location.hash = view + (params ? "?" + params : "");
   }
 
+  // UX-07: 顶栏刷新是唯一的手动刷新入口，只刷新当前视图。
+  function refreshCurrentView() {
+    var view = currentView();
+    if (view === "tokens") { return loadDevices(); }
+    if (view === "connectors") { return loadConnectors(true); }
+    if (view === "mcp") { return loadMounts(); }
+    if (view === "logs") { refreshLogs(); return Promise.resolve(); }
+    if (view === "notifications") {
+      if (notifyPolicyIsDirty()) {
+        notify("通知设置还有未保存的修改，先保存或放弃再刷新", "error");
+        return Promise.resolve();
+      }
+      return loadNotifyPolicy(true);
+    }
+    return loadNodes();
+  }
+
   function closeSidebar() {
     el("sidebar").classList.remove("open");
     el("sidebar-scrim").hidden = true;
@@ -614,6 +631,7 @@
   var STRIP_LIMIT = 10;
   var STRIP_TTL_MS = 10 * 60 * 1000;
   var stripEvents = [];
+  var stripExpanded = false;
 
   function pushStripEvent(ev) {
     if (!ev || !ev.session_id) { return; }
@@ -625,6 +643,12 @@
     stripEvents = stripEvents.filter(function (item) {
       return item.nodeID + "|" + item.sessionID !== key;
     });
+    // UX-07: 已完成不进入全局事件条；同时清掉该会话之前的活动 chip，
+    // 避免停在旧状态上。
+    if (ev.state === "completed" || ev.attention === "completed") {
+      renderEventStrip();
+      return;
+    }
     stripEvents.unshift({
       nodeID: ev.node_id || "",
       sessionID: ev.session_id,
@@ -649,14 +673,22 @@
     if (!host) { return; }
     var now = Date.now();
     stripEvents = stripEvents.filter(function (ev) { return now - ev.ts < STRIP_TTL_MS; });
-    if (!stripEvents.length) { host.hidden = true; host.innerHTML = ""; return; }
+    if (stripEvents.length <= 3) { stripExpanded = false; }
+    if (!stripEvents.length) {
+      host.hidden = true;
+      host.innerHTML = "";
+      host.classList.remove("expanded");
+      return;
+    }
     host.hidden = false;
+    host.classList.toggle("expanded", stripExpanded);
     host.innerHTML = "";
     var title = document.createElement("span");
     title.className = "event-strip-title";
     title.textContent = "刚刚";
     host.appendChild(title);
-    stripEvents.forEach(function (ev) {
+    var visible = stripExpanded ? stripEvents : stripEvents.slice(0, 3);
+    visible.forEach(function (ev) {
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "event-chip" + (ev.attention ? " ev-att-" + ev.attention : "");
@@ -669,11 +701,27 @@
       chip.addEventListener("click", function () { locateSession(ev.nodeID, ev.sessionID); });
       host.appendChild(chip);
     });
+    if (stripEvents.length > 3) {
+      var more = document.createElement("button");
+      more.type = "button";
+      more.className = "btn ghost sm event-strip-more";
+      more.textContent = stripExpanded ? "收起" : "还有 " + (stripEvents.length - 3) + " 条";
+      more.setAttribute("aria-expanded", stripExpanded ? "true" : "false");
+      more.addEventListener("click", function () {
+        stripExpanded = !stripExpanded;
+        renderEventStrip();
+      });
+      host.appendChild(more);
+    }
     var clear = document.createElement("button");
     clear.type = "button";
     clear.className = "btn ghost sm event-strip-clear";
-    clear.textContent = "清空";
-    clear.addEventListener("click", function () { stripEvents = []; renderEventStrip(); });
+    clear.textContent = "隐藏动态";
+    clear.addEventListener("click", function () {
+      stripEvents = [];
+      stripExpanded = false;
+      renderEventStrip();
+    });
     host.appendChild(clear);
   }
 
@@ -890,12 +938,34 @@
 
   /* ─────────────────────── rendering: stats ──────────────────── */
 
+  var lastAnnouncedAttention = null;
+  var attentionAnnounceTimer = null;
+
+  // UX-08: 计数变化只通过一个 role=status 汇总播报，并做延迟合并；
+  // 避免 SSE 连发时反复打断读屏用户。
+  function announceAttentionChange(count) {
+    if (lastAnnouncedAttention === null) {
+      lastAnnouncedAttention = count;
+      return;
+    }
+    if (count === lastAnnouncedAttention) { return; }
+    lastAnnouncedAttention = count;
+    if (attentionAnnounceTimer) { clearTimeout(attentionAnnounceTimer); }
+    attentionAnnounceTimer = setTimeout(function () {
+      attentionAnnounceTimer = null;
+      var status = el("a11y-status");
+      if (!status) { return; }
+      status.textContent = count ? "待处理 " + count + " 项" : "当前没有待处理";
+    }, 1500);
+  }
+
   function updateStats(nodes) {
     var live = 0, offline = 0, active = 0;
     (nodes || []).forEach(function (node) {
       if (node.stale) { offline++; } else { live++; active += (node.sessions || []).length; }
     });
     var attention = inboxItems(nodes).length;
+    announceAttentionChange(attention);
     el("stat-online").textContent = String(live);
     el("stat-offline").textContent = String(offline);
     el("stat-sessions").textContent = String(active);
@@ -6792,15 +6862,11 @@
   el("logout").addEventListener("click", doLogout);
   el("logout-top").addEventListener("click", doLogout);
 
-  el("refresh").addEventListener("click", function () { loadNodes(); loadDevices(); loadConnectors(true); });
-  var mcpRefresh = el("mcp-refresh");
-  if (mcpRefresh) { mcpRefresh.addEventListener("click", function () { loadMounts(); }); }
+  el("refresh").addEventListener("click", function () { refreshCurrentView(); });
   // Logs view: tabs, manual refresh, follow toggle and server-side filters.
   document.querySelectorAll("[data-logtab]").forEach(function (btn) {
     btn.addEventListener("click", function () { setLogTab(btn.getAttribute("data-logtab")); });
   });
-  var logsRefresh = el("logs-refresh");
-  if (logsRefresh) { logsRefresh.addEventListener("click", refreshLogs); }
   var logsFollow = el("logs-follow");
   if (logsFollow) {
     logsFollow.addEventListener("click", function () {
@@ -6843,15 +6909,6 @@
       }, 300);
     });
   }
-  // Connectors tab has its own refresh so a stale list is one click away.
-  var refreshConnectors = el("connectors-refresh");
-  if (refreshConnectors) {
-    refreshConnectors.addEventListener("click", function () { loadConnectors(true); });
-  }
-  // Keep the standalone nodes-panel refresh working too (same data source).
-  var refreshNodes = el("refresh-nodes");
-  if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
-
   // UX-06: 离线快照清理改为「描边按钮 + 站内确认」，并在确认文案里
   // 列出受影响节点；不再是实心红按钮 + 原生 confirm。
   var clearStale = el("clear-stale");
@@ -7594,7 +7651,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=67").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=68").catch(function () {});
     });
   }
 

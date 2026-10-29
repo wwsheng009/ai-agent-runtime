@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=67">
+<link rel="stylesheet" href="./style.css?v=68">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -36,7 +36,7 @@
     <div class="sidebar-brand">
       <span class="brand-mark" aria-hidden="true"></span>
       <div class="brand-text">
-        <h1>aicli-gateway</h1>
+        <div class="brand-name">aicli-gateway</div>
         <span class="brand-sub">会话网关</span>
       </div>
     </div>
@@ -103,7 +103,7 @@
       <button id="nav-toggle" type="button" class="btn ghost sm nav-toggle" aria-label="打开导航">
         <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <h2 class="view-title" id="view-title">仪表盘</h2>
+      <h1 class="view-title" id="view-title">仪表盘</h1>
       <div class="topbar-actions">
         <span class="conn-chip" id="conn-chip" role="status" aria-live="polite"><span class="dot live"></span><span class="conn-text">已连接</span></span>
         <button id="theme-toggle" type="button" class="btn ghost sm" title="切换主题（跟随系统 → 亮 → 暗）">
@@ -125,7 +125,9 @@
       </div>
     </header>
 
-    <div class="event-strip" id="event-strip" hidden aria-live="polite"></div>
+    <div class="event-strip" id="event-strip" hidden></div>
+
+    <div id="a11y-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <main class="views" id="main" tabindex="-1">
 
@@ -137,7 +139,7 @@
             <a class="stat" href="#nodes"><span class="stat-num" id="stat-online">0</span><span class="stat-label">在线节点</span></a>
             <a class="stat" href="#nodes"><span class="stat-num" id="stat-offline">0</span><span class="stat-label">离线快照</span></a>
             <a class="stat" href="#sessions?running=1"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">活跃会话</span></a>
-            <a class="stat attention" id="stat-attention-card" href="#sessions?attention=1" aria-live="polite"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
+            <a class="stat attention" id="stat-attention-card" href="#sessions?attention=1"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
           </div>
 
           <div class="attention-breakdown panel" id="attention-breakdown" hidden>
@@ -182,7 +184,7 @@
             <!-- ① 会话列表 -->
             <aside class="im-list" aria-label="会话列表">
               <div class="im-list-head">
-                <h2 class="im-list-title">会话</h2>
+                <h2 class="im-list-title">全部会话</h2>
                 <span class="im-list-count" id="im-list-count" hidden></span>
               </div>
               <div class="im-list-tools">
@@ -343,13 +345,12 @@
         <section class="view" data-view="mcp" hidden>
           <section class="panel">
             <div class="panel-head">
-              <h2>MCP 服务</h2>
+              <h2>已注册挂载</h2>
               <div class="mcp-head-actions">
                 <span id="mcp-summary" class="muted"></span>
-                <button id="mcp-refresh" type="button" class="btn ghost sm">刷新</button>
               </div>
             </div>
-            <p class="connectors-hint">本网关已注册的 MCP 挂载（<code>/m/{slug}/mcp</code>）。「令牌」管理外部客户端的 <code>amt_</code> 凭据（明文只显示一次）；「日志」查看该挂载最近的调用与失败原因。禁用后公网入口立即返回 403，但节点与地址保留；删除仅对离线挂载可用。</p>
+            <p class="connectors-hint">本网关已注册的 MCP 挂载。外部客户端通过挂载地址调用工具；「令牌」用于认证（明文只显示一次），「日志」查看最近的调用与失败原因。禁用后公网入口立即返回 403，但节点与地址保留；删除仅对离线挂载可用。</p>
             <div id="mcp-list" class="list"></div>
           </section>
         </section>
@@ -358,10 +359,9 @@
         <section class="view" data-view="logs" hidden>
           <section class="panel">
             <div class="panel-head">
-              <h2>日志</h2>
+              <h2>请求与审计</h2>
               <div class="mcp-head-actions">
                 <span id="logs-summary" class="muted"></span>
-                <button id="logs-refresh" type="button" class="btn ghost sm">刷新</button>
                 <button id="logs-follow" type="button" class="btn ghost sm" aria-pressed="true">自动刷新：开</button>
               </div>
             </div>
@@ -399,9 +399,9 @@
                   <option value="device">设备令牌</option>
                   <option value="rate">限流/封禁</option>
                 </select>
-                <input id="log-query" class="filter-input" type="search" placeholder="搜索 slug、IP、结果…">
+                <input id="log-query" class="filter-input" type="search" placeholder="搜索 slug、IP、结果…" aria-label="搜索挂载日志（slug、IP、结果）">
               </div>
-              <p class="connectors-hint">审计事件持久化在网关 <code>audit.log</code>（只记 4xx/5xx 与安全事件，不含令牌明文和请求体）。</p>
+              <p class="connectors-hint">审计事件保存在网关日志文件中：只记 4xx/5xx 与安全事件，不含令牌明文和请求体。</p>
               <div id="log-audit-list" class="log-list"></div>
             </div>
           </section>
@@ -431,15 +431,18 @@
         <section class="view" data-view="connectors" hidden>
           <section class="panel">
             <div class="panel-head">
-              <h2>连接器</h2>
+              <h2>已注册连接器</h2>
               <span class="badge" id="connectors-count" hidden></span>
             </div>
-            <p class="connectors-hint">连接器把平台消息（Telegram / 微信 / QQ / 飞书）投递到在线节点的会话（Backend=gateway_node）。这里只展示运行归属与配置面；完整编辑器由前端切片提供。</p>
-            <div class="toolbar">
-              <button id="connectors-refresh" type="button" class="btn ghost sm">刷新列表</button>
-              <a class="btn ghost sm" href="/api/connectors" target="_blank" rel="noopener">管理接口 JSON</a>
-              <a class="btn ghost sm" href="/api/connectors/schema" target="_blank" rel="noopener">Schema</a>
-            </div>
+            <p class="connectors-hint">连接器把平台消息（Telegram / 微信 / QQ / 飞书）投递到在线节点的会话。这里展示运行归属与配置状态；需要编辑或排障时展开「高级信息」。</p>
+            <details class="connector-advanced">
+              <summary>高级信息</summary>
+              <p class="connectors-hint">后端归属：<code>gateway_node</code>。配置由前端切片提供；原始管理接口与 Schema 如下。</p>
+              <div class="toolbar">
+                <a class="btn ghost sm" href="/api/connectors" target="_blank" rel="noopener">管理接口 JSON</a>
+                <a class="btn ghost sm" href="/api/connectors/schema" target="_blank" rel="noopener">Schema</a>
+              </div>
+            </details>
             <div id="connectors-list" class="list"></div>
           </section>
         </section>
@@ -597,7 +600,7 @@
           <option value="custom">指定天数…</option>
           <option value="never">不过期</option>
         </select>
-        <input id="mount-token-days" type="number" min="1" max="3650" step="1" placeholder="天数（1–3650）" hidden>
+        <input id="mount-token-days" type="number" min="1" max="3650" step="1" placeholder="天数（1–3650）" aria-label="自定义有效期天数" hidden>
         <p class="field-hint" id="mount-token-ttl-hint" hidden>不过期令牌不会自动失效，泄露后只能手动撤销。</p>
       </div>
       <div class="modal-actions">
@@ -721,6 +724,6 @@
 
 <!-- 会话面板已内联进 #sessions 视图（微信式左列表 / 右会话流）。 -->
 
-<script src="./app.js?v=67"></script>
+<script src="./app.js?v=68"></script>
 </body>
 </html>

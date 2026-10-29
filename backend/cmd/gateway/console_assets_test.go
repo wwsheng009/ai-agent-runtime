@@ -18,8 +18,12 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	for _, want := range []string{
 		`data-view="mcp"`,
 		`id="mcp-list"`,
-		`id="mcp-refresh"`,
 		`id="mcp-summary"`,
+		`id="logs-follow"`,
+		`id="a11y-status"`,
+		`class="connector-advanced"`,
+		`<h1 class="view-title" id="view-title">`,
+		`<div class="event-strip" id="event-strip" hidden>`,
 		`id="stat-attention-card"`,
 		`data-view="logs"`,
 		`id="log-mount-list"`,
@@ -89,6 +93,9 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		"function syncTopbarMenuLabel",
 		"function confirmDestructive",
 		"function bindCardMenu",
+		"function refreshCurrentView",
+		"function announceAttentionChange",
+		"var stripExpanded",
 		`data-more`,
 		`data-web`,
 		`class="s-menu"`,
@@ -114,6 +121,7 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		".field-hint", ".field-error", ".notify-savebar", ".notify-quiet-row",
 		".notify-session-group", ".topbar-menu", ".device-toolbar", ".meta-time",
 		".btn.danger-outline", ".modal.modal-sm", "#confirm-message",
+		".sr-only", ".event-strip.expanded", "max-width: 1440px",
 	} {
 		if !strings.Contains(string(css), want) {
 			t.Fatalf("style.css missing %s", want)
@@ -122,10 +130,20 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	if strings.Contains(string(html), `id="attn-completed"`) {
 		t.Fatal("index.html still renders completed in the pending breakdown")
 	}
+	// UX-07: topbar refresh is the single manual refresh entry.
+	for _, removed := range []string{"mcp-refresh", "logs-refresh", "connectors-refresh", "refresh-nodes"} {
+		if strings.Contains(string(html), `id="`+removed+`"`) ||
+			strings.Contains(string(js), `"`+removed+`"`) {
+			t.Fatalf("duplicate refresh control still wired: %s", removed)
+		}
+	}
 	// UX-06: destructive list-row actions live in the overflow menu and the
 	// in-page confirm dialog, not as always-visible solid-red buttons.
 	if strings.Contains(string(js), "btn danger sm") {
 		t.Fatal("app.js still renders an always-visible solid-red button")
+	}
+	if strings.Contains(string(html), `id="event-strip" hidden aria-live`) {
+		t.Fatal("event strip must not announce every transient chip")
 	}
 }
 
