@@ -14,12 +14,26 @@
 | 目标主机 | `racknerd-933b75f` / Ubuntu / x86_64，`/opt/aicli-gateway`、`/opt/ai-gateway-edge` |
 | 现有服务 | `aicli-gateway`（`127.0.0.1:8080`，`https://aicli.ttai.online`）、`ai-gateway-edge`（`:80/:443`，admin `127.0.0.1:19100`）、`ai-gateway`（`127.0.0.1:18443`） |
 | Edge 版本 | 服务器二进制构建自 **`e710d1181`**（当前 ai-gateway HEAD，`v0.1.7-0.20261012230643-e710d1181212+dirty`），`configtest` 通过 → **未替换、未重启**（功能与本地构建一致，替换只会徒增 TLS 入口重启风险） |
-| aicli-gateway | **已替换**：`f64505d1…a5d3efb`（本次构建），备份 `gateway.bak-20261029T050554Z`；`systemctl restart aicli-gateway` 后 PID `2812277`，`/api/health` 正常 |
+| aicli-gateway | **v68 已上线**（2026-10-29T16:34:01Z，构建自 `abeb7677`）：`/opt/aicli-gateway/gateway`，SHA-256 `cc401199…a2b9ae`，备份 `gateway.before-20261029T163355Z`；`/api/health` 正常，控制台 `/` 与 `app.js?v=68` 已生效 |
 | Edge 路由 | 既有规则已把 `aicli.ttai.online/*` 整站转发到 `aicli-console`(`127.0.0.1:8080`)，**无需改配置**；`/m/`、`/gw/agent` 天然随主机转发 |
 | 公网验收 | 测试节点 `avcmh7sc` → `https://aicli.ttai.online/m/avcmh7sc/mcp`；`initialize` 200（Cloudflare `cf-ray` 可见）、`tools/list` 返回 `glob/grep/ls/view`、`tools/call ls` 读到服务器工作区 `hello.txt`；错令牌 401、未知 slug 404 |
 | 清理 | 测试节点/设备令牌/挂载令牌/挂载记录全部撤销并清除（`mount-tokens.json` total=0、`mounts.json` 空），`live_nodes` 回到 **4**、`nodes=14`，与部署前基线一致 |
 
 > 首次部署前（§1、§6 记录）代理不允许 22 端口，因此曾判定“无法部署”；随后代理放行 SSH，上述步骤全部真实执行。
+
+### 0.1 当前实际部署口径（v68 校准）
+
+| 项 | 当前事实 |
+|---|---|
+| 二进制 | `/opt/aicli-gateway/gateway`（服务单元 `aicli-gateway.service` 的 `ExecStart` 路径；不是历史文档里的 `/opt/aicli-gateway/bin/aicli-gateway`） |
+| 数据目录 | `/etc/aicli-gateway`（`registry.json`、设备/挂载令牌、Web Push 等） |
+| 控制台 | 站点根路径 `/`（`/console/` 是 SPA fallback，不是资源根；资源实际为 `/app.js`、`/style.css`） |
+| 构建 | HEAD `abeb7677`，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"` |
+| 部署时间 | 2026-10-29T16:34:01Z（`MainPID=2834332`） |
+| 公网验收 | `/` 返回 `style.css?v=68` / `app.js?v=68`；`app.js` 含 `confirmDestructive`、`refreshCurrentView`、`bindCardMenu`；`/api/health` 200；Owner 登录成功，节点列表 20 条 |
+| 回滚点 | `/opt/aicli-gateway/gateway.before-20261029T163355Z`（旧 SHA-256 `e37ad2d4…9830`） |
+
+> 运维注意：本次部署脚本首次健康探测发生在服务重新监听之前；服务于约 5 秒后正常启动。后续部署脚本应先 `sleep 2` 再探测，且回滚前必须 `systemctl stop`，否则运行中的二进制会触发 `Text file busy`。
 
 ## 1. 实测现状（本文所有结论的来源）
 
@@ -142,6 +156,8 @@ aicli-remote-tools serve --http --workspace D:\srv\app `
   --gateway-self-name prod-readonly
 # 输出：aicli-remote-tools: mount <slug> -> https://aicli.ttai.online/m/<slug>/mcp
 ```
+
+节点注册时还会上报展示用快照：主机名、OS/arch、版本、实例、profile（含只读标记/工具前缀）、workspace、有效目录和工具清单。控制台「MCP 服务」卡片可直接展开检查 `工具（N）` 与 `目录（N）`，无需登录节点；这些标签只用于展示，不参与路由或授权（见 [16 §6.1](./16-mcp-mount-tunnel.md)）。
 
 ### 3.1 凭据只配一次：tokenFile（推荐，无需每次 export）
 
@@ -278,7 +294,7 @@ aicli-remote-tools serve
 | `--gateway-identity-file` | `~/.aicli/data/gateway-agent/mount-id` | 一般不用传 |
 | `--instance <id>` | 未指定时按 machine ID + workspace 派生 `auto-<hostname>-<8hex>` | 一键区分：派生 `.../gateway-agent/instances/<id>/mount-id`，selfName/节点名默认 `<id>`；**并发实例必须不同** |
 | `--gateway-self-name` | `self` | 改公网 slug 时用 `--gateway-self-slug` |
-| `--profile` | `readonly` | 写文件/执行命令再升到 `standard/ops` |
+| `--profile` | `all` | 默认暴露全部工具；最小权限用 `readonly` |
 
 自动初始化的三个安全约定：**已有 config 不覆盖**、**已有 token 永不轮换**（避免让所有客户端失效）、生成的配置里**不落任何秘密**（令牌只存在于 0600 文件）。
 
@@ -341,7 +357,7 @@ serve --workspace C:\...\rt-auto-check2
 
 ### 3.4 控制台：MCP 服务页（令牌管理）+ 日志页 + 会话动作收纳
 
-**MCP 服务页**（侧栏「MCP 服务」）：读取 `/api/mounts`，逐行展示名称、`/m/{slug}/mcp`、公网地址、节点、本地路径、令牌数与最近心跳，并用状态色区分 **在线 / 离线 / 已禁用**。动作：
+**MCP 服务页**（侧栏「MCP 服务」）：读取 `/api/mounts`，逐行展示名称、`/m/{slug}/mcp`、公网地址、节点、本地路径、令牌数与最近心跳，并用状态色区分 **在线 / 离线 / 已禁用**。注册快照还会显示 **主机名 · OS/arch、profile（含只读标记/工具前缀）、workspace、版本·实例·backend**；`工具（N）` 与 `目录（N）` 可展开检查。旧节点缺少这些字段时显示 `—`，不会用本地路径猜测。动作：
 
 - **启用 / 禁用** → `POST /api/mounts/{slug}/enable|disable`（禁用后公网入口立即 403，节点与地址保留）；
 - **复制地址**（一次点击，含 toast 反馈）；
@@ -358,7 +374,7 @@ serve --workspace C:\...\rt-auto-check2
 
 **日志页**（侧栏「日志」）：
 
-- **MCP 调用**：读取 `GET /api/mounts/logs` 的**内存环形缓冲**（最近 1000 条，重启清空）。包含 2xx/4xx/5xx 全量调用：`status / slug / method / path / token_id / client_ip / duration / reason`；支持按挂载、状态过滤，默认 5s 自动刷新（可关）。
+- **MCP 调用**：读取 `GET /api/mounts/logs` 的**内存环形缓冲**（最近 1000 条，重启清空）。包含 2xx/4xx/5xx 全量调用：`status / slug / method / path / token_id / client_ip / duration / reason`，以及解析出的 `command`（MCP JSON-RPC 方法，如 `tools/call:read_file`）、调用方 `user_agent`、请求/返回体大小 `request_bytes` / `response_bytes`（请求体仅在带 Content-Length 且低于 1 MiB  inspect 上限时解析命令，否则只记声明长度）；支持按挂载、状态过滤，默认 5s 自动刷新（可关）。
 - **审计事件**：读取 `GET /api/audit`（持久化 `audit.log`，只记 4xx/5xx 与安全事件），支持 `type` 前缀（`mount`/`tunnel`/`login`/`device`/`rate`）与 `q` 关键词过滤；同样可自动刷新。
 - **边界**：控制台展示的是网关自己的审计 + MCP 调用环，不是任意 journald 进程日志；进程级排障仍用 `journalctl -u aicli-gateway`，两者在 §5 的排障表中并列。
 
@@ -366,9 +382,9 @@ serve --workspace C:\...\rt-auto-check2
 
 **会话卡片动作收纳**：卡片只保留 `打开` 与 `⋯`（以及按需出现的审批/展开按钮），详情、会话、新终端、恢复、关窗口、移除全部收进 `⋯` 弹出菜单；点击空白处或 `Esc` 关闭，`aria-expanded` 同步，小屏不再出现一排按钮。
 
-**`serve --http` 启动横幅**：绑定成功后打印 endpoint（含 `:0` 的真实端口）、workspace、工具数量与清单、**凭据来源**（文件路径或环境变量名，绝不打印令牌值）以及 `aicli chat --remote` 示例；无令牌时额外给出回环警告。
+**`serve --http` 启动横幅**：绑定成功后打印 endpoint（含 `:0` 的真实端口）、workspace、工具数量与清单、**凭据来源**（文件路径或环境变量名，绝不打印令牌值）以及 `aicli chat --remote` 示例；无令牌时额外给出回环警告。shell 可见但 allowlist 为空时，横幅会打印 `shell.allowedCommands` / `shell.allowedCommandPatterns` 的最小配置示例和文档链接，而不是只说 “every command refused”；`doctor` 同时输出 `shell visible`、allow/deny commands/patterns、`denyShellMetachars`、`envAllowlist` 与 `commandTimeout`。
 
-**发布必须同 bump 资源版本**：console 的 `index.html`、`app.js` 的 `sw.js?v=N` 与 `sw.js` 的 `CACHE/SHELL` 是同一套手动版本（本次 **v62**）。Cloudflare 对 `*.js/*.css` 有 4 小时边缘缓存，不 bump 就会出现“部署成功但页面还是旧按钮”。`cmd/gateway/console_assets_test.go` 已加一致性断言，版本漂移会让测试失败。
+**发布必须同 bump 资源版本**：console 的 `index.html`、`app.js` 的 `sw.js?v=N` 与 `sw.js` 的 `CACHE/SHELL` 是同一套手动版本（本次 **v64**）。Cloudflare 对 `*.js/*.css` 有 4 小时边缘缓存，不 bump 就会出现“部署成功但页面还是旧按钮”。`cmd/gateway/console_assets_test.go` 已加一致性断言，版本漂移会让测试失败。
 
 **真机视觉验收（390×844 移动视口，2026-10-29）**：
 
@@ -391,6 +407,20 @@ MCP 服务页：title=MCP 服务 · summary="1 个 · 在线 1" · card=self
 会话页：8 张卡片；首卡内联 = 回答 / 展开 / 打开 / ⋯；Escape 关闭菜单
 ```
 
+**注册元数据验收（v64，2026-10-29，公网控制台）**：
+
+```text
+MCP 卡片：auto-thinkbook14-6d0aeecb / self 均在线
+主机    ：thinkbook14 · windows/amd64
+Profile ：all
+工作区  ：E:\projects\itsm\itsm / E:\projects\ai\ai-agent-runtime\backend
+版本    ：0.1.0 · 实例 auto-thinkbook14-6d0aeecb · local（legacy self 无实例）
+工具    ：工具（9）展开后 = append_write/apply_patch/edit/glob/grep/ls/shell/view/write
+目录    ：目录（1）展开后 = 各自 workspace
+布局    ：390×844 无横向滚动；展开动作可点击
+落盘    ：mounts.json 含 hostname/tool_count/tools/roots；API 401 边界不变
+```
+
 ---
 
 ## 4. 构建与部署步骤
@@ -409,9 +439,9 @@ go build -p 1 -trimpath -ldflags "-s -w" -o E:\projects\ai\ai-agent-runtime\tmp\
 
 | 产物 | 大小 | SHA-256 |
 |------|------|---------|
-| `aicli-gateway` | 12,988,576 | `5c3d56f3195f15c8dc125ba41dea3b859964078fd877678fcac0a3a9352f9e50` |
+| `aicli-gateway` | 13,033,632 | `3f955754a41c58004152ab6247c8963e5e685f1ee3108267a23c1c7674d5e56e` |
 | `gateway-edge` | 21,950,624 | `de9d4cc4d55bf2b4c1f6590364cf966fdb865792e9e4a0b36c60a118521b4fb0` |
-| `aicli-remote-tools` | 12,374,176 | `4cd7505d9c7455081e566d74dce25b8b86c5629018757b4a3b3cf51e13bf0035` |
+| `aicli-remote-tools` | 12,394,656 | `569abfa215144c85f0e2c37a5bbc8a2706ac79185661271c062e3168e7d0951f` |
 
 上传 + 部署（**需要可用的 SSH/等价通道，见 §6**）：
 
