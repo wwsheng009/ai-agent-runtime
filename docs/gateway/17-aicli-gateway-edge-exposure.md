@@ -14,7 +14,7 @@
 | 目标主机 | `racknerd-933b75f` / Ubuntu / x86_64，`/opt/aicli-gateway`、`/opt/ai-gateway-edge` |
 | 现有服务 | `aicli-gateway`（`127.0.0.1:8080`，`https://aicli.ttai.online`）、`ai-gateway-edge`（`:80/:443`，admin `127.0.0.1:19100`）、`ai-gateway`（`127.0.0.1:18443`） |
 | Edge 版本 | 服务器二进制构建自 **`e710d1181`**（当前 ai-gateway HEAD，`v0.1.7-0.20261012230643-e710d1181212+dirty`），`configtest` 通过 → **未替换、未重启**（功能与本地构建一致，替换只会徒增 TLS 入口重启风险） |
-| aicli-gateway | **v71 已上线**（2026-10-29T22:44:42Z，构建自 `d53b3aae`）：`/opt/aicli-gateway/gateway`，SHA-256 `9d76d3a9…b29998`，备份 `gateway.before-20261029T224436Z`；`/api/health` 正常，控制台 `/` 与 `app.js?v=71` 已生效 |
+| aicli-gateway | **v72 已上线**（2026-10-29T23:00:18Z，构建自 `c1504df2`）：`/opt/aicli-gateway/gateway`，SHA-256 `88d1de61…d297c`，备份 `gateway.before-20261029T230013Z`；`/api/health` 正常，控制台 `/` 与 `app.js?v=72` 已生效 |
 | Edge 路由 | 既有规则已把 `aicli.ttai.online/*` 整站转发到 `aicli-console`(`127.0.0.1:8080`)，**无需改配置**；`/m/`、`/gw/agent` 天然随主机转发 |
 | 公网验收 | 测试节点 `avcmh7sc` → `https://aicli.ttai.online/m/avcmh7sc/mcp`；`initialize` 200（Cloudflare `cf-ray` 可见）、`tools/list` 返回 `glob/grep/ls/view`、`tools/call ls` 读到服务器工作区 `hello.txt`；错令牌 401、未知 slug 404 |
 | 清理 | 测试节点/设备令牌/挂载令牌/挂载记录全部撤销并清除（`mount-tokens.json` total=0、`mounts.json` 空），`live_nodes` 回到 **4**、`nodes=14`，与部署前基线一致 |
@@ -28,10 +28,10 @@
 | 二进制 | `/opt/aicli-gateway/gateway`（服务单元 `aicli-gateway.service` 的 `ExecStart` 路径；不是历史文档里的 `/opt/aicli-gateway/bin/aicli-gateway`） |
 | 数据目录 | `/etc/aicli-gateway`（`registry.json`、设备/挂载令牌、Web Push 等） |
 | 控制台 | 站点根路径 `/`（`/console/` 是 SPA fallback，不是资源根；资源实际为 `/app.js`、`/style.css`） |
-| 构建 | HEAD `d53b3aae`，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"` |
-| 部署时间 | 2026-10-29T22:44:42Z（`MainPID=2841418`） |
-| 公网验收 | `/` 返回 `style.css?v=71` / `app.js?v=71`；`style.css` 中 `.im-seg` 为 `flex:0 0 auto`；`/api/health` 200 |
-| 回滚点 | `/opt/aicli-gateway/gateway.before-20261029T224436Z`（旧 v70 SHA-256 `e092700b…a7a51`） |
+| 构建 | HEAD `c1504df2`，`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"` |
+| 部署时间 | 2026-10-29T23:00:18Z（`MainPID=2842349`） |
+| 公网验收 | `/` 返回 `style.css?v=72` / `app.js?v=72`，HTML 已无 `id="chat-older"`；`app.js?v=72` 200（329883 bytes）；`/api/health` 200，`live_nodes=5`、`nodes=21` |
+| 回滚点 | `/opt/aicli-gateway/gateway.before-20261029T230013Z`（旧 v71 SHA-256 `9d76d3a9…b29998`） |
 
 > 运维注意：v70 部署脚本修正了 `curl | grep -q` 提前关管道导致的 curl 23 误判；健康与版本检查改为先落临时文件再 grep。
 > v68 的首次探测过早、v69 的管道误判均已在后续脚本中修正。
