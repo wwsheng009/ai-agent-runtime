@@ -40,9 +40,14 @@ var coreBaselines = map[string]int{
 	// TestSharedCoresDoNotAddWalkerStyleHostCalls below, and lscore is now at zero
 	// on both counts - its listing goes through the seam, so the number here can be
 	// read as "this core describes whatever machine the accessor hands it".
-	"viewcore":   0,
-	"lscore":     0,
-	"searchcore": 24,
+	"viewcore": 0,
+	"lscore":   0,
+	// searchcore: S1 of docs/plan/searchcore-io-seam-migration-20261028.md moved the
+	// three handler-level host reads (the glob search root, and the anchor decision
+	// for ignore_file/pattern_file) behind toolcore.Access. 24→21 is this guard's own
+	// measurement, not arithmetic: what remains is the file readers, the mtime sorts,
+	// the ignore-file loading and the two walkers, each sealed in its own later step.
+	"searchcore": 21,
 	"mutatecore": 27,
 }
 
@@ -105,7 +110,7 @@ func TestSharedCoresDoNotAddHostFilesystemCalls(t *testing.T) {
 // spot is the only way the zero can be quoted honestly, and ratcheting it keeps
 // the seam work from quietly moving host access into a different package name.
 var walkerBaselines = map[string]int{
-	"viewcore":   0,
+	"viewcore": 0,
 	// lscore's tree walk moved behind Access.ReadDir: the package now reaches the
 	// host only through the seam, so its listing can describe another machine. The
 	// equality with the old filepath.WalkDir traversal is pinned by a differential

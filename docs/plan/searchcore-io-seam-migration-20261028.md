@@ -79,7 +79,7 @@ Access toolcore.Access
 
 | 步 | 封住的关注点 | 触及 | 棘轮预期（**每步实施前重新实测，不预先填数**） | 回滚 |
 |---|---|---|---|---|
-| S1 | handler 层的参数校验/anchor stat（4 处，Runtime 在手） | handler.go | os.* 24→20 | 删 4 行注入 |
+| S1 ✅ | handler 层的搜索根存在性 + anchor 判定（**实测 os.* 24→21**；4 个调用点里有 1 个是 `os.IsNotExist`，不计入守卫） | handler.go | 21（本表原先写"24→20"是把 IsNotExist 也数了进去，实测纠正） | 删 3 行注入 |
 | S2 | 文件内容读取的三个独立消费者：二进制嗅探、上下文重读、模式文件读取 | grep_binary.go、grep_context.go、grep.go | os.* 20→17 | 同上 |
 | S3 | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go | os.* 17→15 | 同上 |
 | S4 | ignore 文件读取（含 Q3 决定 + 守卫可见性补齐） | grep_ignore.go | os.* 15→11；**新增一项守卫**覆盖 HOME 类现场 | 同上 |

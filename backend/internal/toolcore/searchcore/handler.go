@@ -3,12 +3,12 @@ package searchcore
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -122,7 +122,12 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	// empty result: "no matches" and "there is nothing there" lead to different
 	// next actions. The local tool says which path it could not use, and the
 	// remote surface now says the same.
-	if _, statErr := os.Stat(base); statErr != nil {
+	// The existence check goes through the I/O seam: which machine this describes is
+	// the Runtime's decision. A search root is also the one thing that must not be
+	// answered from the wrong machine - a local directory that happens to share the
+	// name would turn "no such path" into a successful empty search.
+	access := localio.For(call.Runtime)
+	if _, statErr := access.Stat(ctx, base); statErr != nil {
 		hint := ""
 		if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
 			hint = hinter.PathHint(stringArg(call.Args, "path"))
@@ -131,7 +136,7 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		if hint != "" {
 			message = fmt.Errorf("搜索路径不可用: %s\n%s", paths.Relative(base), hint)
 		}
-		if os.IsNotExist(statErr) {
+		if toolcore.IsNotExist(statErr) {
 			return toolcore.Error(toolcore.ErrNotFound,
 				"check the path; narrow it to a directory that exists in the workspace",
 				message), nil
@@ -307,7 +312,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if failure != nil {
 		return failure, nil
 	}
-	patternFiles, patternFailure := grepPatternFilesFromArgs(call, paths, roots)
+	patternFiles, patternFailure := grepPatternFilesFromArgs(ctx, call, paths, roots)
 	if patternFailure != nil {
 		return patternFailure, nil
 	}
@@ -352,7 +357,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	// mirroring the local parameter pair.
 	includeHidden := !boolArg(call.Args, "no_hidden") &&
 		(boolArg(call.Args, "hidden") || unrestricted >= 2)
-	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(call, paths, roots)
+	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(ctx, call, paths, roots)
 	if ignoreFailure != nil {
 		return ignoreFailure, nil
 	}
@@ -938,20 +943,27 @@ func grepUnrestrictedFromArgs(args map[string]any) (int, bool) {
 // grepIgnoreFilesFromArgs resolves the explicit ignore_file(s) spellings into
 // absolute paths, so both engines read the same files. The string spelling is
 // split on top-level commas exactly like the other scalar lists.
-func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
+func grepIgnoreFilesFromArgs(ctx context.Context, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
 	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "ignore_file")...),
 		GrepGlobListFromArgs(call.Args, "ignore_files")...)
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	resolved := make([]string, 0, len(raw))
+	// One accessor per call, not one per entry: the answer cannot change mid-list,
+	// and resolving it in the loop invites the thought that different entries might
+	// be anchored on different machines.
+	access := localio.For(call.Runtime)
 	for _, entry := range raw {
 		// A relative ignore_file spelling anchors to the search root's
 		// directory (the local tool's workingDir rule), not the process CWD.
 		anchor := ""
 		if !filepath.IsAbs(entry) && len(roots) > 0 {
 			anchor = roots[0]
-			if info, statErr := os.Stat(anchor); statErr == nil && !info.IsDir() {
+			// Anchoring a relative ignore_file to a *file* root means its parent
+			// directory; that decision is made on the machine holding the file, so
+			// it goes through the seam like every other read here.
+			if info, statErr := access.Stat(ctx, anchor); statErr == nil && !info.IsDir() {
 				anchor = filepath.Dir(anchor)
 			}
 			entry = filepath.Join(anchor, entry)
@@ -967,17 +979,18 @@ func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, r
 
 // grepPatternFilesFromArgs resolves pattern_file(s) into absolute paths. Both
 // spellings are accepted and merged; each file's lines join the pattern list.
-func grepPatternFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
+func grepPatternFilesFromArgs(ctx context.Context, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
 	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "pattern_file")...),
 		GrepGlobListFromArgs(call.Args, "pattern_files")...)
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	resolved := make([]string, 0, len(raw))
+	access := localio.For(call.Runtime)
 	for _, entry := range raw {
 		if !filepath.IsAbs(entry) && len(roots) > 0 {
 			anchor := roots[0]
-			if info, statErr := os.Stat(anchor); statErr == nil && !info.IsDir() {
+			if info, statErr := access.Stat(ctx, anchor); statErr == nil && !info.IsDir() {
 				anchor = filepath.Dir(anchor)
 			}
 			entry = filepath.Join(anchor, entry)
