@@ -236,7 +236,11 @@ IN_UNMOUNT     所在文件系统卸载
 | 路由 | `/files/`（尾斜杠）→ 404 `404 page not found` | 无重定向，URL 要写死 `/files` |
 
 **写侧仍缺的能力**：`POST /files` 只有整文件 `O_TRUNC`，**没有 offset 写 / 原地稀疏写**；
-读侧的 offset 已可用（`Range`）。写侧扩展方案见
+读侧的 offset 已可用（`Range`），且已由客户端接口 **`Client.ReadRange`** 暴露（`2e73aaa4`）：
+`416` 直接报错而**绝不退回全量读**（与 `ReadFile` 刻意不同：为 16 字节拉回 5 GB 是灾难），
+`Partial` 相对本窗口末尾判定，负偏移先经 `Stat` 解析。
+另：真机 416 的响应体措辞是 `invalid range: failed to overlap`（Go `net/http`）。
+写侧扩展方案见
 `docs/architecture/envd-client-offset-extension.md`（FUSE 挂载数据面依赖它），本文不重复。
 
 工具层如何使用这条通道（含两道权限闸门、降级与上限规则），见

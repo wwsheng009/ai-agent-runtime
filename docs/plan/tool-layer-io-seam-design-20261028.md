@@ -708,6 +708,15 @@ socket 早停仅作日志证据，不作断言。
 
 **一条会复发的教训（`a1d44e50`）**：旧测试 `TestEnvDWriteThenViewRoundTrip` 断言 `read back == "abc"`，而 local 输出一直是 `"1: abc"`——**它把漂移固化成了期望值**，并在每次重构时保护这条漂移。处理方式不是“改测试让 CI 绿”，而是把断言改成共享形状并在注释里写明“旧期望就是被固化的漂移”。推论：写相等断言前，先确认被当作“正确”的那一侧确实是正确的一侧；差分对拍（期望值由共享核对同批字节现算）之所以重要，就因为它使这类断言无法再自指。
 
+**对 seam 设计的直接影响（`2e73aaa4`）**：客户端已暴露真偏移读 `Client.ReadRange`
+与能力探测 `ProbeCapabilities`（实施 `envd-client-offset-extension.md` 的 E0，
+只做读侧；句柄表与写策略按那份文档留在 `mountctl` 层）。因此 §4.2 的
+`RandomAccessor.RandomRead` 不再是"需要发明的能力"，而是**已有原语的转发**：
+`envdAccess.RandomRead(off, n)` 直接映射到 `ReadRange`，`Capability.RandomRead`
+的值来自 `ProbeCapabilities` 的实测而非版本判断。两条来自实现期的约束应写进接口
+契约：偏移读的 `416` **绝不退化为全量读**（为 16 字节拉回 5 GB 不是优化而是事故），
+且 `Partial` 必须相对窗口末尾而非窗口长度判定——两者写反都是静默错误。
+
 **剩余项（按价值/风险排序）：**
 
 1. ~~NUL/UTF-16 写拒绝可以取消了~~ → **已完成（`4302b807`）**：拒绝现在由**通道能力**决定（`refuseUncarriableWrite`），`edit` 的 UTF-16 编码保持往返已恢复。**同时记下一条我们修不了、也不假装能修的边界**：真机首次跳测报 `0xFF` 变成了 U+FFFD——**MCP/JSON 字符串传输本身无法携带非 UTF-8 字节**（Go 的 `encoding/json` 会替换非法 UTF-8），**local 后端完全相同**。所以本次提升覆盖 NUL（JSON 能表达）与编码保持往返，**不覆盖“写任意二进制”**；想写二进制仍只能走 `shell`/下载路径。
