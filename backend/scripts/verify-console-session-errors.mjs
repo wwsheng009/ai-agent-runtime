@@ -142,8 +142,8 @@ async function boot(node, opts = {}) {
     const { doc, window, screenCalls, copied } = await boot(node, {
       screen: () => failScreen ? response({ reason: 'backend unavailable' }, 500) : response(screenOK('RECOVERED')),
     });
-    const open = doc.querySelector('[data-open]');
-    open.click();
+    const openCard = doc.querySelector('.session-card');
+    openCard.click();
     await sleep(80);
     const notice = doc.getElementById('chat-notice');
     check('会话加载失败进入可恢复态', notice.hidden === false && screenCalls() > 0);

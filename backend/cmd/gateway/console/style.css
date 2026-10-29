@@ -292,6 +292,7 @@ body.login-mode [data-auth] { display: none !important; }
 
 .views {
   padding: 20px 24px 48px;
+  width: 100%;
   max-width: 1440px;
   margin-inline: auto;
 }
@@ -312,7 +313,7 @@ body.login-mode [data-auth] { display: none !important; }
   min-width: 0;
 }
 
-.app-views { display: flex; flex-direction: column; gap: 18px; }
+.app-views { display: flex; flex-direction: column; gap: 18px; width: 100%; }
 
 /* ── Stats ───────────────────────────────────────────────────── */
 
@@ -1827,10 +1828,14 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .chat-foot {
   flex-shrink: 0; margin-top: 8px; padding-top: 10px;
   border-top: 1px solid var(--border);
+  width: 100%;
 }
-.chat-composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 0; }
+.chat-composer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end; gap: 8px; margin: 0; width: 100%;
+}
 .chat-input {
-  flex: 1 1 auto; min-width: 0; resize: none;
+  width: 100%; min-width: 0; resize: none;
   min-height: var(--ctl-h-sm); max-height: 160px;
   padding: 6px 10px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
@@ -1847,13 +1852,17 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .chat-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .chat-send {
   position: relative; flex-shrink: 0;
-  min-width: var(--ctl-h-sm);
+  width: var(--ctl-h); min-width: var(--ctl-h); padding: 0;
   transition: background 0.15s ease, opacity 0.15s ease, transform 0.12s ease;
 }
 .chat-send:active { transform: scale(0.96); }
 .chat-send[disabled] { opacity: 0.45; }
 .chat-send-icon { display: block; }
-.chat-send-label { display: inline; }
+.chat-send-label {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 .chat-send-spinner {
   display: none; width: 14px; height: 14px;
   border: 2px solid currentColor; border-right-color: transparent;
@@ -1862,7 +1871,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .chat-send.is-sending .chat-send-icon { display: none; }
 .chat-send.is-sending .chat-send-spinner { display: block; }
 @keyframes chat-spin { to { transform: rotate(360deg); } }
-.chat-hint { flex-basis: 100%; font-size: 11.5px; color: var(--fg-muted); }
+.chat-hint { grid-column: 1 / -1; font-size: 11.5px; color: var(--fg-muted); }
 .chat-readonly {
   margin: 0; padding: 2px 0;
   text-align: center; font-size: 12.5px; color: var(--fg-muted);
@@ -1990,7 +1999,9 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 
 .im-app {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  /* 固定列表轨道，避免卡片内容长度反向改变两栏宽度。 */
+  grid-template-columns: 304px minmax(0, 1fr);
+  width: 100%;
   min-height: 0;
   min-width: 0;
   border: 1px solid var(--border);
@@ -2048,9 +2059,12 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 }
 
 /* 列表行：像微信会话行——左侧头像、上行名称+时间、下行摘要。 */
-.session-table { display: flex; flex-direction: column; gap: 0; }
-.session-group { display: flex; flex-direction: column; }
-.group-body { display: flex; flex-direction: column; }
+.session-table {
+  display: flex; flex-direction: column; gap: 0;
+  align-items: stretch; width: 100%;
+}
+.session-group { display: flex; flex-direction: column; width: 100%; align-items: stretch; }
+.group-body { display: flex; flex-direction: column; width: 100%; align-items: stretch; }
 
 .view-sessions .session-card {
   position: relative;
@@ -2059,6 +2073,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   gap: 2px 8px;
   align-items: center;
   padding: 10px 12px 10px 58px;
+  width: 100%;
   background: transparent;
   border: 0;
   border-radius: var(--radius-sm);
@@ -2148,18 +2163,15 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 }
 .view-sessions .session-card .s-meta .s-access:not([hidden]) ~ .s-sync { display: none; }
 
-/* 动作区常显：审批/回答等关键 CTA 不能依赖 hover；只保留一个主按钮、
-   一个可选展开 chevron 与一个溢出菜单，避免 hover 改变行高。 */
-.view-sessions .session-card .s-actions {
-  grid-column: 1 / -1;
-  display: flex; flex-wrap: wrap; gap: 6px;
-  align-items: center; justify-content: flex-end;
-  margin-top: 4px;
+/* 列表只承担“选择会话”：审批、详情、窗口与移除都在右侧会话头。
+   卡片内容不再随动作/尾流/回复区展开而改变宽度或高度。 */
+.view-sessions .session-card .s-actions,
+.view-sessions .session-card .s-last,
+.view-sessions .session-card .s-reply,
+.view-sessions .session-card .s-tail,
+.view-sessions .session-card .s-live {
+  display: none !important;
 }
-
-/* 列表内不再重复展示整段尾流与展开区正文（会话流页才是阅读处）。 */
-.view-sessions .session-card .s-tail { grid-column: 1 / -1; }
-.view-sessions .session-card .s-live { grid-column: 1 / -1; }
 
 /* 分组头：设备分组保持可折叠，样式压薄。 */
 .view-sessions .group-head {
@@ -2175,6 +2187,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .view-sessions #chat-modal {
   display: flex;
   flex-direction: column;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   padding: 0;
@@ -2203,6 +2216,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   padding: 10px 14px 6px;
   margin-top: 0;
   gap: 12px;
+  width: 100%;
 }
 .view-sessions #chat-modal .chat-notice { margin: 8px 14px 0; }
 .view-sessions #chat-modal .chat-interactive { margin: 8px 14px 0; }
@@ -2210,6 +2224,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .view-sessions #chat-modal .chat-status { padding: 6px 14px 0; }
 .view-sessions #chat-modal .chat-foot {
   padding: 8px 14px 12px; margin-top: 6px;
+  width: 100%;
 }
 
 /* ── ③ 未选中会话时的占位（微信「未选择聊天」） ─────────────── */

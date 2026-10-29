@@ -34,7 +34,7 @@ const liveNode = {
   name: 'live-alpha',
   kind: 'aicli',
   stale: false,
-  capabilities: ['runner', 'status', 'sessions', 'window-actions'],
+  capabilities: ['runner', 'status', 'sessions', 'screen', 'events', 'input', 'window-actions'],
   routes: ['/web', '/web/api'],
   last_heartbeat: now,
   sessions: [{
@@ -295,20 +295,25 @@ const mounts = [
   await goto('#sessions');
   const sessionCard = [...doc.querySelectorAll('.session-card')]
     .find((card) => card.textContent.includes('live-session'));
-  check('会话卡片窗口操作仍在 ⋯ 内', !!sessionCard);
-  opened = openMenu(sessionCard);
+  check('会话卡片仍是摘要入口', !!sessionCard);
+  sessionCard.click();
+  await sleep(120);
+  const chatMore = doc.getElementById('chat-more');
+  const chatMenu = doc.getElementById('chat-more-menu');
+  check('窗口操作已移到主会话区', !!chatMore && !!chatMenu);
+  chatMore.click();
   await sleep(5);
-  const closeWindow = opened.menu.querySelector('[data-window-close]');
-  check('关窗口菜单项可见', closeWindow && closeWindow.hidden === false);
+  const closeWindow = chatMenu.querySelector('[data-chat-window-close]');
+  check('主会话区关窗口菜单项可见', closeWindow && closeWindow.hidden === false);
   closeWindow.click();
   await sleep(5);
   check('关窗口弹出站内确认框', modal.hidden === false && title.textContent === '关闭窗口进程？');
   check('关窗口文案说明后果', message.textContent.includes('/exit'));
   await cancelDialog();
-  check('关窗口取消后焦点归还 ⋯', doc.activeElement === opened.more);
-  opened = openMenu(sessionCard);
+  check('关窗口取消后焦点归还主会话区 ⋯', doc.activeElement === chatMore);
+  chatMore.click();
   await sleep(5);
-  opened.menu.querySelector('[data-window-close]').click();
+  chatMenu.querySelector('[data-chat-window-close]').click();
   await sleep(5);
   confirm.click();
   await sleep(120);

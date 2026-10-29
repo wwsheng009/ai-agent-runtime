@@ -24,6 +24,9 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		`class="connector-advanced"`,
 		`<h1 class="view-title" id="view-title">`,
 		`<div class="event-strip" id="event-strip" hidden>`,
+		`id="chat-more"`,
+		`id="chat-more-menu"`,
+		`data-chat-window-close`,
 		`id="stat-attention-card"`,
 		`data-view="logs"`,
 		`id="log-mount-list"`,
@@ -96,6 +99,7 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		"function refreshCurrentView",
 		"function announceAttentionChange",
 		"var stripExpanded",
+		"function syncChatHeaderActions",
 		`data-more`,
 		`data-web`,
 		`class="s-menu"`,
@@ -122,6 +126,9 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		".notify-session-group", ".topbar-menu", ".device-toolbar", ".meta-time",
 		".btn.danger-outline", ".modal.modal-sm", "#confirm-message",
 		".sr-only", ".event-strip.expanded", "max-width: 1440px",
+		"grid-template-columns: 304px minmax(0, 1fr)",
+		"align-items: stretch",
+		"grid-template-columns: minmax(0, 1fr) auto",
 	} {
 		if !strings.Contains(string(css), want) {
 			t.Fatalf("style.css missing %s", want)
@@ -144,6 +151,11 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 	}
 	if strings.Contains(string(html), `id="event-strip" hidden aria-live`) {
 		t.Fatal("event strip must not announce every transient chip")
+	}
+	for _, removed := range []string{`id="chat-modal-open"`, `id="chat-detail"`} {
+		if strings.Contains(string(html), removed) {
+			t.Fatalf("obsolete chat header control still present: %s", removed)
+		}
 	}
 }
 

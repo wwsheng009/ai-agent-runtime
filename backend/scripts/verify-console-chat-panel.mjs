@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const CONSOLE = path.join(REPO, 'backend', 'cmd', 'gateway', 'console');
+const css = fs.readFileSync(path.join(CONSOLE, 'style.css'), 'utf8');
 
 // jsdom 只装在 frontend/ 下（控制台外壳本身零依赖，不额外引入）。
 const require = createRequire(path.join(REPO, 'frontend', 'package.json'));
@@ -161,13 +162,53 @@ const env = (src) => ({
   }
   await sleep(50);
 
-  const chatBtn = doc.querySelector('[data-chat]');
-  check('会话入口按钮可见', chatBtn && !chatBtn.hidden);
-  if (!chatBtn) { return finish(); }
+  const card = doc.querySelector('.view-sessions .session-card');
+  check('会话卡片仍是摘要行', !!card && !!card.querySelector('.s-title') && !!card.querySelector('.s-preview'));
+  check('列表卡片动作区已隐藏',
+    /\.view-sessions \.session-card \.s-actions[\s\S]*?display:\s*none/s.test(css));
+  check('列表不再显示展开/尾流/回复区',
+    /\.view-sessions \.session-card \.s-tail[\s\S]*?display:\s*none/s.test(css));
+  check('列表宽度由固定轨道控制',
+    /\.im-app\s*\{[^}]*grid-template-columns:\s*304px minmax\(0,\s*1fr\)/s.test(css));
+  check('会话列表容器不再按内容收缩',
+    /\.session-table\s*\{[^}]*align-items:\s*stretch/s.test(css));
+  check('内容区显式撑满可用宽度',
+    /\.views\s*\{[^}]*width:\s*100%/s.test(css));
+  check('会话流显式撑满右栏',
+    /\.view-sessions #chat-modal\s*\{[^}]*width:\s*100%/s.test(css));
+  check('composer 使用“输入列 + 按钮列”网格',
+    /\.chat-composer\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto/s.test(css));
+  check('composer 输入框填满输入列',
+    /\.chat-input\s*\{[^}]*width:\s*100%/s.test(css));
 
-  chatBtn.click();
+  const moreBtn = doc.getElementById('chat-more');
+  const menu = doc.getElementById('chat-more-menu');
+  check('右侧会话头提供管理菜单', !!moreBtn && !!menu);
+  check('管理菜单包含详情与原版 Web',
+    !!menu.querySelector('[data-chat-detail]') && !!menu.querySelector('[data-chat-web]'));
+  check('管理菜单包含窗口动作与移除',
+    !!menu.querySelector('[data-chat-window-open]') &&
+    !!menu.querySelector('[data-chat-window-close]') &&
+    !!menu.querySelector('[data-chat-remove]'));
+  if (!card) { return finish(); }
+
+  card.click();
   await sleep(80);
   check('面板已打开', !doc.querySelector('#chat-modal').hidden);
+
+  moreBtn.click();
+  await sleep(10);
+  check('会话头菜单打开并标记 expanded', !menu.hidden && moreBtn.getAttribute('aria-expanded') === 'true');
+  check('会话头菜单有可访问名称', menu.getAttribute('aria-label') === '会话操作');
+  check('会话头菜单打开后焦点进入首项', menu.contains(doc.activeElement));
+  check('会话头菜单使用视口定位', !!menu.style.left && !!menu.style.top);
+  const firstMenuItem = doc.activeElement;
+  menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+  check('方向键移动会话头菜单焦点', menu.contains(doc.activeElement) && doc.activeElement !== firstMenuItem);
+  menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+  check('Home 回到会话头菜单首项', doc.activeElement === firstMenuItem);
+  menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('Escape 关闭会话头菜单并归还焦点', menu.hidden && doc.activeElement === moreBtn);
 
   const listText = () => (doc.querySelector('#chat-list') || {}).textContent || '';
   check('历史消息已渲染', listText().includes('HISTORY-ASSISTANT'));

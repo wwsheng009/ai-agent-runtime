@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=68">
+<link rel="stylesheet" href="./style.css?v=69">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -238,16 +238,17 @@
                     <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
                     <span class="chat-action-label" id="chat-next-pending-label">下一条待处理</span>
                   </button>
-                  <button class="btn ghost sm chat-icon-btn" id="chat-modal-open" type="button"
-                          aria-label="打开原版 Web" title="打开原版 Web">
-                    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                    <span class="chat-action-label">打开原版 Web</span>
-                  </button>
-                  <button class="btn ghost sm chat-icon-btn" id="chat-detail" type="button"
-                          aria-label="会话详情" title="会话详情">
-                    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                    <span class="chat-action-label">详情</span>
-                  </button>
+                  <button class="btn ghost sm chat-icon-btn" id="chat-more" type="button" data-more
+                          aria-label="更多会话操作" title="更多会话操作"
+                          aria-haspopup="menu" aria-expanded="false" aria-controls="chat-more-menu">⋯</button>
+                  <div class="s-menu chat-more-menu" id="chat-more-menu" role="menu" aria-label="会话操作" hidden>
+                    <button class="menu-item" type="button" role="menuitem" data-chat-detail>详情</button>
+                    <button class="menu-item" type="button" role="menuitem" data-chat-web>原版 Web</button>
+                    <button class="menu-item" type="button" role="menuitem" data-chat-window-open>新终端</button>
+                    <button class="menu-item" type="button" role="menuitem" data-chat-window-resume>恢复</button>
+                    <button class="menu-item danger" type="button" role="menuitem" data-chat-window-close>关窗口</button>
+                    <button class="menu-item danger" type="button" role="menuitem" data-chat-remove>移除</button>
+                  </div>
                   <button class="btn ghost sm modal-close" id="chat-modal-close" aria-label="关闭">
                     <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                   </button>
@@ -724,6 +725,6 @@
 
 <!-- 会话面板已内联进 #sessions 视图（微信式左列表 / 右会话流）。 -->
 
-<script src="./app.js?v=68"></script>
+<script src="./app.js?v=69"></script>
 </body>
 </html>

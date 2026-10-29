@@ -1790,7 +1790,7 @@
     if (!card || !menu) { return; }
     var trigger = card.querySelector("[data-more]");
     if (!trigger) { return; }
-    var menuID = "card-menu-" + (++sessionMenuSeq);
+    var menuID = menu.id || ("card-menu-" + (++sessionMenuSeq));
     menu.id = menuID;
     trigger.setAttribute("aria-controls", menuID);
     trigger.setAttribute("aria-expanded", "false");
@@ -3910,6 +3910,22 @@
     return !!(node && !node.stale && (node.capabilities || []).indexOf("input") !== -1);
   }
 
+  // UX: 桌面端把会话级管理动作集中到右栏会话头，列表卡片只保留摘要。
+  function syncChatHeaderActions() {
+    var st = chatState;
+    var menu = el("chat-more-menu");
+    if (!st || !menu) { return; }
+    var node = st.node, session = st.session;
+    var canWeb = nodeHasWebUI(node);
+    var canWindow = windowActionsSupported(node) && !isSubagentSession(session);
+    menu.querySelector("[data-chat-detail]").hidden = false;
+    menu.querySelector("[data-chat-web]").hidden = !canWeb;
+    menu.querySelector("[data-chat-window-open]").hidden = !canWindow;
+    menu.querySelector("[data-chat-window-resume]").hidden = !canWindow;
+    menu.querySelector("[data-chat-window-close]").hidden = !canWindow;
+    menu.querySelector("[data-chat-remove]").hidden = !node.stale;
+  }
+
   /* ── 「下一条待处理」流转（孤立的审批清理循环）────────────────────
      面板一次只显示一条会话；逐个清掉待审批/待回答时，用户此前必须关闭面板、
      回列表、再找下一条。这两个函数把这条循环收进面板：头部常驻按钮 + 处理完
@@ -4619,6 +4635,7 @@
       pendingQuestion: null,
       focusInteractive: wantInteractive,
     };
+    syncChatHeaderActions();
     // 面板打开时先收起上一次的交互条（状态刚被替换，避免残留上一条审批）。
     chatRenderInteractive();
     if (!skipMarkRead) { markRead(node, session); }
@@ -5071,6 +5088,7 @@
   function closeSessionChat() {
     var st = chatState;
     if (!st) { return; }
+    closeSessionMenus(false);
     // 先断流再清状态：否则关闭过程中的帧会写进正在被清空的 DOM。
     chatDisconnect();
     chatState = null;
@@ -5374,6 +5392,7 @@
     setText(el("chat-modal-sub"),
       nodeDisplayName(st.node) + " · " + (st.node.kind || "agent") +
       " · " + stateLabelOf(st.session));
+    syncChatHeaderActions();
     markRead(st.node, st.session);
     rememberPresence(st.node, st.session);
   }
@@ -7160,9 +7179,9 @@
   syncMdToggle();
 
   // Keyboard model: "/" focuses the search, ↑/↓ (or j/k) walks the session
-  // cards, Enter opens the same inline session as a card click, Space toggles
-  // the optional 展开, and c/o/a act on the focused card (站内会话 / 原版 Web /
-  // 审批·回答). Visible card actions remain the discoverable path.
+  // cards, Enter/Space opens the same inline session as a card click, and
+  // c/o/a act on the focused card (站内会话 / 原版 Web / 审批·回答).
+  // Session-level management actions live in the right-hand chat header.
   document.addEventListener("keydown", function (e) {
     // 任一模态打开时不接管快捷键：会话面板里有输入框与滚动区，全局的 "/" 聚焦、
     // ↑/↓ 走卡片在这里都不该生效（另一条 typing 守卫只挡输入类元素）。
@@ -7228,12 +7247,7 @@
       var found = findSessionByKey(current.getAttribute("data-draft-key"));
       if (!found) { return; }
       e.preventDefault();
-      if (e.key === " ") {
-        var expandButton = current.querySelector("[data-expand]");
-        if (expandButton && !expandButton.hidden) { expandButton.click(); }
-      } else {
-        openSessionFromCard(found.node, found.session);
-      }
+      openSessionFromCard(found.node, found.session);
     }
   });
 
@@ -7355,18 +7369,65 @@
     // 手机端返回键：会话流整页 → 会话列表。
     var backBtn = el("chat-back");
     if (backBtn) { backBtn.addEventListener("click", closeSessionChat); }
-    // 会话流页头部的「详情」：手机上列表行的动作按钮不可见，这里是唯一入口。
-    var chatDetailBtn = el("chat-detail");
-    if (chatDetailBtn) {
-      chatDetailBtn.addEventListener("click", function () {
+    // 会话级管理动作统一放在右栏会话头；列表卡片只负责选择会话。
+    var chatMore = el("chat-more");
+    var chatMenu = el("chat-more-menu");
+    if (chatMore && chatMenu) {
+      bindCardMenu(chatMore.parentElement, chatMenu);
+      chatMenu.querySelector("[data-chat-detail]").addEventListener("click", function () {
         if (!chatState) { return; }
+        closeSessionMenus(false);
         openSessionDetail(chatState.node, chatState.session);
       });
+      chatMenu.querySelector("[data-chat-web]").addEventListener("click", function () {
+        if (!chatState) { return; }
+        closeSessionMenus(false);
+        openSession(chatState.node, chatState.session);
+      });
+      [
+        { selector: "[data-chat-window-open]", kind: "open-terminal", done: "已排队：该节点下一个心跳会在本机新终端里打开此会话" },
+        { selector: "[data-chat-window-resume]", kind: "resume", done: "已排队：该节点下一个心跳会恢复此会话" },
+      ].forEach(function (action) {
+        chatMenu.querySelector(action.selector).addEventListener("click", function () {
+          if (!chatState) { return; }
+          closeSessionMenus(false);
+          requestWindowAction(chatState.node, chatState.session, action.kind)
+            .then(function () { notify(action.done, "ok"); })
+            .catch(function (err) { notify("窗口动作失败：" + err, "error"); });
+        });
+      });
+      chatMenu.querySelector("[data-chat-window-close]").addEventListener("click", function () {
+        if (!chatState) { return; }
+        var st = chatState;
+        closeSessionMenus(false);
+        confirmDestructive({
+          title: "关闭窗口进程？",
+          message: "关闭该会话在本机的窗口进程？\n（等同在窗口里敲 /exit：会话会正常保存。）",
+          trigger: chatMore,
+          confirmText: "关闭窗口",
+          onConfirm: function () {
+            return requestWindowAction(st.node, st.session, "close")
+              .then(function () { notify("已排队：该节点下一个心跳会关闭此窗口", "ok"); });
+          }
+        });
+      });
+      chatMenu.querySelector("[data-chat-remove]").addEventListener("click", function () {
+        if (!chatState) { return; }
+        var st = chatState;
+        closeSessionMenus(false);
+        confirmDestructive({
+          title: "移除会话条目？",
+          message: "从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）",
+          trigger: chatMore,
+          confirmText: "移除",
+          onConfirm: function () {
+            return api("/api/nodes/" + encodeURIComponent(st.node.node_id) +
+                "/sessions/" + encodeURIComponent(st.session.session_id), { method: "DELETE" })
+              .then(function () { notify("会话条目已移除", "ok"); closeSessionChat(); loadNodes(); });
+          }
+        });
+      });
     }
-    el("chat-modal-open").addEventListener("click", function () {
-      if (!chatState) { return; }
-      openSession(chatState.node, chatState.session);
-    });
     el("chat-jump-latest").addEventListener("click", function () { chatScrollToBottom(true); });
     el("chat-older-btn").addEventListener("click", chatLoadOlder);
     // 头部「下一条待处理」：面板内直接流转到下一条待审批/待回答，不必回列表。
@@ -7651,7 +7712,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=68").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=69").catch(function () {});
     });
   }
 
