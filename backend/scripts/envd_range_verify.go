@@ -160,8 +160,37 @@ func main() {
 	if !caps.ProcessChannel {
 		fail("ProcessChannel capability", fmt.Errorf("reported false although the process RPC answers here"))
 	}
-	fmt.Printf("PASS ProbeCapabilities measured on the target: RangeRead=%v RangeWrite=%v ProcessChannel=%v HasDD=%v\n",
-		caps.RangeRead, caps.RangeWrite, caps.ProcessChannel, caps.HasDD)
+	fmt.Printf("PASS ProbeCapabilities measured on the target: RangeRead=%v RangeWrite=%v ProcessChannel=%v HasDD=%v LineWindow=%v\n",
+		caps.RangeRead, caps.RangeWrite, caps.ProcessChannel, caps.HasDD, caps.LineWindow)
+
+	// The line-window capability is what the deep-offset read path will key on, so
+	// its evidence is checked rather than trusted: the probe sample must come back
+	// byte-exact through the process channel. A target that honestly answers "no"
+	// (mawk, busybox awk, no /dev/stderr) is a valid outcome and is reported, not
+	// failed - but an incoherent answer, or a verdict that disagrees with the bytes
+	// the same call returned, is a bug in the probe and must stop the run.
+	supported, probeStdout, probeStderr, probeCode, probeErr := client.ProbeLineWindow(ctx)
+	if probeErr != nil {
+		fail("ProbeLineWindow", probeErr)
+	}
+	if probeCode != 0 {
+		fail("line window probe exited nonzero", fmt.Errorf("code=%d stderr=%q", probeCode, brief(string(probeStderr), 200)))
+	}
+	if string(probeStdout) != envdclient.LineWindowProbeStdout {
+		fail("line window probe sample came back altered", fmt.Errorf("stdout=%x want=%x (NUL fidelity or the line rule differs; M2 would refuse to window on this target)",
+			probeStdout, []byte(envdclient.LineWindowProbeStdout)))
+	}
+	if !strings.Contains(string(probeStderr), envdclient.LineWindowProbeStderr) {
+		fmt.Printf("NOTE line window unavailable on this target: the count side channel produced %q - a window without a total may not speak about the end of a file, so M2 must stay on the prefix path\n",
+			brief(string(probeStderr), 120))
+	} else if !supported {
+		fail("line window verdict contradicts its own evidence", fmt.Errorf("stdout and stderr both match, yet supported=false"))
+	} else if supported != caps.LineWindow {
+		fail("capability disagreement", fmt.Errorf("ProbeLineWindow says %v, ProbeCapabilities says %v", supported, caps.LineWindow))
+	} else {
+		fmt.Printf("PASS line window measured byte-exact: %d stdout bytes through the process channel, count side channel answered\n",
+			len(probeStdout))
+	}
 
 	unprobed, err := client.ProbeCapabilities(ctx, "", false)
 	if err != nil {
@@ -169,6 +198,9 @@ func main() {
 	}
 	if unprobed.RangeRead {
 		fail("unprobed capability", fmt.Errorf("reported as supported without ever measuring it"))
+	}
+	if unprobed.LineWindow {
+		fail("unprobed capability", fmt.Errorf("LineWindow reported true without running a single command"))
 	}
 	fmt.Printf("PASS unprobed capabilities report false, not true\n")
 
@@ -186,6 +218,14 @@ func transferCost(ctx context.Context, client *envdclient.Client, path string, s
 		return 0, err
 	}
 	return int64(len(read.Data)), nil
+}
+
+// brief bounds a quoted diagnostic so a failure message stays readable.
+func brief(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func cleanupAndReport(path string) int {

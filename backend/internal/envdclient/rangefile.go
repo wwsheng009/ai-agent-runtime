@@ -1,6 +1,7 @@
 package envdclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -80,6 +81,19 @@ type Capabilities struct {
 	// HasDD reports whether the target has `dd`, which the process-channel write
 	// strategy depends on. Probed only when asked for.
 	HasDD bool
+
+	// LineWindow reports that the target can produce a LINE window - a slice of a
+	// file by line number - together with the file's line count, in one command,
+	// with byte-exact fidelity. That combination is what makes it safe for a remote
+	// surface to hand the view core a window instead of a growing prefix: the count
+	// is what lets the core derive `eof` rather than being told it.
+	//
+	// Measured, never inferred from a version or from "awk exists": an awk that
+	// cannot write /dev/stderr, one that rewrites NUL bytes, and one that counts an
+	// unterminated final line differently from the core all fail this probe, and all
+	// of them exist in the wild (mawk, busybox awk). False means "not measured or
+	// measured absent", which is the only acceptable answer for a read-only caller.
+	LineWindow bool
 	// MaxReadBytes is the largest window this channel will hand back in one
 	// request, or 0 when the deployment reports no such limit. It is measured with
 	// a real read, not read from a header: envd advertises none.
@@ -133,6 +147,15 @@ func (c *Client) ProbeCapabilities(ctx context.Context, samplePath string, withP
 		} else {
 			_, _, code, err := c.probeCommand(ctx, "/bin/sh", []string{"-c", "command -v dd >/dev/null 2>&1", "probe"})
 			caps.HasDD = err == nil && code == 0
+			// A line window is a command-level capability, so it can only be measured
+			// on a target that answered the channel probe at all. Ordering matters for
+			// the cost, not the truth: one failing spawn is enough to know there is no
+			// command path here, and paying three more on a target that has none is
+			// how a capability probe becomes the slowest part of a call.
+			if caps.ProcessChannel {
+				lineWindow, _, _, _, probeErr := c.ProbeLineWindow(ctx)
+				caps.LineWindow = probeErr == nil && lineWindow
+			}
 		}
 	}
 	return caps, nil
@@ -142,4 +165,60 @@ func (c *Client) ProbeCapabilities(ctx context.Context, samplePath string, withP
 // Run it never carries payload, so the buffering question does not arise.
 func (c *Client) probeCommand(ctx context.Context, cmd string, args []string) (stdout []byte, stderr []byte, code int32, err error) {
 	return c.Run(ctx, StartRequest{Process: ProcessConfig{Cmd: cmd, Args: args}})
+}
+
+const (
+	// LineWindowProbeScript builds its own two-record sample on awk's stdin - one
+	// record containing a NUL byte, and a final line with no newline - then asks the
+	// same program shape the real read uses: the window on stdout, the total count on
+	// /dev/stderr. It opens no file and writes nothing, so a probe leaves no trace on
+	// a target that may be read-only.
+	//
+	// Exported, together with the two expectations below, so the live verification
+	// driver measures the identical thing instead of carrying a copy that can drift
+	// away from what the client actually asks for.
+	LineWindowProbeScript = `printf 'a\000b\nlast-unterminated' | awk -v a=1 -v b=2 'NR>=a && NR<=b {print} END {print "LINECOUNT=" NR > "/dev/stderr"}'`
+
+	// LineWindowProbeStdout is the byte-exact answer. It requires three things at
+	// once: NUL survives the process channel and awk's record handling unchanged, the
+	// unterminated final line is delivered (so the count rule can be checked against
+	// it), and awk's `print` adds the newline the core then strips - the one
+	// difference a window has from the raw file, proven harmless at byte level.
+	LineWindowProbeStdout = "a\x00b\nlast-unterminated\n"
+
+	// LineWindowProbeStderr is the side-channel marker. An awk that cannot write
+	// /dev/stderr - the common mawk and busybox case - fails here while still
+	// producing a plausible window, which is precisely the trap: a window whose total
+	// is unknown must never be allowed to speak about the end of the file.
+	LineWindowProbeStderr = "LINECOUNT=2"
+)
+
+// ProbeLineWindow measures whether this target can serve a byte-exact line window
+// with its line count. It returns the verdict plus the raw evidence, because "the
+// probe said no" is not actionable for an operator: the actual stdout and stderr are
+// what show whether awk is missing, whether NUL was rewritten, or whether the count
+// channel is absent.
+func (c *Client) ProbeLineWindow(ctx context.Context) (supported bool, stdout, stderr []byte, code int32, err error) {
+	if c == nil {
+		return false, nil, nil, -1, errors.New("envdclient: no client")
+	}
+	stdout, stderr, code, err = c.probeCommand(ctx, "/bin/sh", []string{"-c", LineWindowProbeScript})
+	if err != nil {
+		return false, stdout, stderr, code, err
+	}
+	return lineWindowReport(stdout, stderr, code), stdout, stderr, code, nil
+}
+
+// lineWindowReport is the acceptance predicate, pure so every way it can refuse has
+// a test. All three conditions are load-bearing and each catches a different real
+// deployment: a missing awk (exit code), a non-GNU awk that rewrites NUL or counts
+// lines differently (stdout bytes), and an awk without /dev/stderr (stderr marker).
+func lineWindowReport(stdout, stderr []byte, code int32) bool {
+	if code != 0 {
+		return false
+	}
+	if !bytes.Equal(stdout, []byte(LineWindowProbeStdout)) {
+		return false
+	}
+	return bytes.Contains(stderr, []byte(LineWindowProbeStderr))
 }

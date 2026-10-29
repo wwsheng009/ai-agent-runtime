@@ -325,3 +325,17 @@ CONFIRMED TRAP: relative operand "a=b.txt" gave window "" (total=0) - awk read i
 ### 12.6 M2 待办（下一步，按 §11.4 的门）
 
 `ProbeCapabilities` 增加**实测**的 `LineWindow`（纯 stdin、无副作用、逐字节验证 NUL 与末行计数）；`readViewWindow` 增加造窗分支，启用条件 `LineWindow && 无 BOM（4 字节头探测）&& offset > 0 && size > 4×budget`，**绝对路径前置断言**（§11.3 陷阱）；`--no-envd-line-window` kill switch；核级对账失败或探测不过一律回落今天的路径。
+
+### 12.7 能力探测先行落地，M2 适配层被他人的在途改动挡住（如实记录）
+
+**已落地并可验证的部分**（`internal/envdclient/rangefile.go`）：`Capabilities.LineWindow` + `ProbeLineWindow`。探测形态定为**零副作用**：`printf` 自造两行样本（一行含 NUL、末行无换行）经 stdin 喂给 awk，同一条命令要求三件事同时成立——窗口字节精确、`/dev/stderr` 旁路可写、总数按核的规则计数。因此 mawk / busybox awk / 缺 awk / 通道改写字节的部署都会自然落到 `false`，而**不需要任何版本号判断**。
+
+- 判据 `lineWindowReport` 抽成纯函数，8 条用例逐个钉住每种真实差异（NUL 被换成 U+FFFD、末行被丢弃、`wc -l` 式计数、无 `/dev/stderr`、exit 127、零退出但无输出等）。
+- 反向验证：把字节级校验弱化 → 红；把旁路要求弱化 → 红。（第一次尝试直接把整段判据换成 `return true` 造成 **build failed**——`bytes` 变未使用 import；编译失败不算测试红，改做可编译的定向变异才成立。）
+- 常量 `LineWindowProbeScript/Stdout/Stderr` 导出，让真机驱动探测**同一件事**而不是会漂移的副本；`scripts/envd_range_verify.go` 现在校验原始证据本身（字节不符即失败），并且诚实区分两种"否"：目标机确实没有该能力 → NOTE；证据与判决自相矛盾 → FAIL。
+- 真机（172.18.3.238）：**`LineWindow=true`**，证据为 22 字节 stdout 原样穿过进程通道 + 计数旁路应答。这同时证明了此前只有推断的一件事：**envd 进程通道逐字节保真 NUL**。
+- 回归对照：envd 工具层 15 项全 PASS（含"60000 行深偏移与本地核逐字节一致"），闸门标记复核 20 字节未被改动，本轮远端产物清零。
+
+**M2 为什么现在不能做**：`readViewWindow` 所在的 `internal/remotetools/envd_backend.go` 当前带着**他人未提交**的改动（`cfg.ShellExposed()`、`ProfileAll`、`ShellPolicyEnableHint`，与 `config.go`/`server.go`/`cmd/aicli-remote-tools/main.go` 同一批 shell 策略工作）。我若改这个文件，`git add` 会把他们的在途改动一并卷进我的提交——这正是本条工作线禁止的事。计划里的 `--no-envd-line-window` kill switch 也需要 `main.go`/`config.go` 两个脏文件，因此同样推迟；回滚点改为"revert 本探测提交"。
+
+**一条仓库现状（非我引入）**：本轮最后一次 `go build ./...` 失败于 `internal/toolbroker`：它引用 `runtimepolicy.ShellModes`、`ParseShellMode`、`ShellModeFull`，而这些符号在工作区与 HEAD 的 `runtimepolicy` 里**都不存在**——他人正在做的 shell-mode 重构尚未落完。我的包（`envdclient`、`toolcore/...`、`remotetools`、`cmd/aicli-remote-tools`）单独 `go build`/`go vet`/`go test` 全绿，故本报告不声称全仓构建通过。等他们落完，M2 的接线即可开始，探测部分无需返工。

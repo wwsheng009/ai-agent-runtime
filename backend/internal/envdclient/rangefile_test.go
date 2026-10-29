@@ -197,7 +197,7 @@ func TestProbeCapabilitiesReportsWhatItMeasured(t *testing.T) {
 	if caps.RangeWrite {
 		t.Fatal("nothing was measured for partial writes, so it must be reported false")
 	}
-	if caps.ProcessChannel || caps.HasDD {
+	if caps.ProcessChannel || caps.HasDD || caps.LineWindow {
 		t.Fatal("process probes must not run unless asked for")
 	}
 	if !strings.Contains(strings.Join(stub.ranges, "|"), "bytes=1-1") {
@@ -219,6 +219,49 @@ func TestProbeCapabilitiesWithoutSampleIsNotSilentlyTrue(t *testing.T) {
 	}
 }
 
+// TestLineWindowReportRejectsEveryRealDeploymentDifference pins the acceptance
+// predicate case by case. Each row is a machine that exists in the wild and would
+// otherwise produce a window that cannot be trusted about the end of the file.
+func TestLineWindowReportRejectsEveryRealDeploymentDifference(t *testing.T) {
+	correct := []byte(LineWindowProbeStdout)
+	tests := []struct {
+		name   string
+		stdout []byte
+		stderr []byte
+		code   int32
+		want   bool
+	}{
+		{"gnu awk answer", correct, []byte("LINECOUNT=2\n"), 0, true},
+		{"nul rewritten by the transport", []byte("a\xEF\xBF\xBDb\nlast-unterminated\n"), []byte("LINECOUNT=2\n"), 0, false},
+		{"final unterminated line dropped", []byte("a\x00b\n"), []byte("LINECOUNT=1\n"), 0, false},
+		{"no /dev/stderr side channel", correct, nil, 0, false},
+		{"count uses the wc -l rule", correct, []byte("LINECOUNT=1\n"), 0, false},
+		{"awk is not installed", nil, []byte("sh: awk: not found"), 127, false},
+		{"zero exit but no output", nil, nil, 0, false},
+		{"window carries stray diagnostics", correct, []byte("LINECOUNT=2\nwarning: something\n"), 0, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := lineWindowReport(test.stdout, test.stderr, test.code); got != test.want {
+				t.Fatalf("verdict = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestLineWindowProbeExpectsTwoRecords documents what the probe sample asserts, so a
+// future edit to the script cannot silently change the meaning of "supported".
+func TestLineWindowProbeExpectsTwoRecords(t *testing.T) {
+	if !strings.Contains(LineWindowProbeScript, `-v a=1 -v b=2`) {
+		t.Fatal("the probe asks for a two-record window; if that changed, the expectations changed with it")
+	}
+	if !strings.HasSuffix(LineWindowProbeStdout, "\n") {
+		t.Fatal("awk's print terminates the unterminated final line; that is part of what the probe proves")
+	}
+	if strings.Contains(LineWindowProbeStdout, "\r") {
+		t.Fatal("the probe sample must not depend on carriage returns")
+	}
+}
 func TestProbeCapabilitiesDetectsMissingChannel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusUnauthorized)
