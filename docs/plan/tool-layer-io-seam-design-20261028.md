@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**部分已落地（v5）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；**v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）**。剩余项见 §13 末尾两条。
+- 状态：**部分已落地（v6）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）；**v6 记录 `d936b751`：写侧走 `POST /files` + 目标用户可写性闸门，含两条协议陷阱（raw body 在 0.2.11 返回 500；字段名非 `file` 时 `200 []` 而什么都不写）与一次目录级 gofmt 误操作的自记。**剩余项见 §13 末尾。
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -30,7 +30,7 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 传输层 | `process.Process/Start` 是 server-streaming（`Start/Data/End/KeepAlive`），`StreamReader.Recv` 已在 `pty`/`watch_dir` 使用 | **已具备**，只是 `client.Run()` 把流攒完（且 `DefaultMaxBufferedOutput = 8 MiB` 以上丢弃） |
 | 计算层 | `filesystem.*` 无 ReadFile/WriteFile/区间读；**但 `GET /files` 提供真随机读**（实测 `Range` → 206 逐字节精确）；`process` 可跑 `rg`/`sed` | **view 已可 O(窗口) 而非 O(文件)**；grep 可早停。远端 `sed` 造窗降为回落路径 |
 | 呈现层 | MCP 一次调用一个结果 | 真"边跑边显示"需 progress notification 贯通，**是另一条工程线**，与 envd 无关 |
-| **`/files`（已 spike）** | header token 即可（不需签名）；200/206/416/400/404 全部实测；`POST` 无 argv 上限 | ✅ **`Access.Read/Write` 的首选通道**；但 `Last-Modified` 是请求时间、无 ETag、gzip 在 0.2.11 不生效（**条件读不可用**），且**无 jail 且以 root 身份读**（§3.5） |
+| **`/files`（已 spike，读写均已启用）** | header token 即可（不需签名）；200/206/416/400/404 全部实测；`POST` 无 argv 上限 | ✅ **`Access.Read/Write` 的首选通道**；但 `Last-Modified` 是请求时间、无 ETag、gzip 在 0.2.11 不生效（**条件读不可用**），**无 jail 且以 root 身份读写**（§3.5），另有两条协议陷阱：raw body 在 0.2.11 返回 500（必须 multipart），multipart 字段名非 `file` 时**返回 `200 []` 却什么都没写**（§3.3.3） |
 
 推荐顺序：**§10 近项（N0b+N0 已交付）→ N2 → 写侧 → 再按 §6 分五段落 seam**；每段独立可回滚。**§3.5 的可读性闸门是安全项，优先级高于性能项——它与通道同批交付。**
 
@@ -159,7 +159,7 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 事件流 | `WatchDir`（:248，返回 `*StreamReader`） | ✅ 已用于 `watch_dir` | 流式原语可用 |
 | watcher 管理 | `CreateWatcher`/`GetWatcherEvents`/`RemoveWatcher` | ✅ 路由存在 | — |
 | **读文件字节** | `GET /files`（HTTP，非 RPC） | ✅ **原生存在**（`download.go:19`）；`filesystem.*` 仍无 ReadFile，故今天走 `cat` | `Access.Read` 首选 `/files`，`process+cat` 降为回落 |
-| **写文件字节** | `POST /files`（multipart） | ✅ **原生存在**（`upload.go`）；今天走 `printf` + argv 上限 `envdMaxWriteBytes = 1<<20` | `Access.Write` 经 `/files` **不再受 argv 上限** |
+| **写文件字节** | `POST /files`（multipart） | ✅ **已启用**（`d936b751`）：`envdclient.WriteFile`，content 不再是 argv 元素，**2,450,000 字节实测逐字节落盘**（旧的 argv 天花板 1 MiB 不再适用）；通道不可用时回退 `printf` 并保留该天花板 | `Access.Write` 经 `/files` 不再受 argv 上限；两个协议陷阱已成文（见下） |
 | **字节区间读** | `GET /files` + `Range` | ✅ **实测 206 且逐字节精确**（§3.3） | `RandomRead` 在 envd 上**为 true**（探测得，非硬编码） |
 | 条件读（304/ETag） | `GET /files` + `If-*` | ❌ **不可用**：`Last-Modified` 回的是**请求时间**，`ETag` 不发（§3.3 实测） | 禁止把 revision 建立在 `Last-Modified` 上，仍用内容哈希 |
 | 传输压缩 | `Accept-Encoding: gzip` | ❌ 部署版 **0.2.11 不生效**（`main` 分支源码已有该路径） | 能力必须探测，不得假设版本 |
@@ -213,6 +213,16 @@ https://172.18.3.238:49983/download                    -> 401
 2. **原结论“`/files` 不吃 access token”是错的**：我当时只观察到“未认证就 401”就反推了。本轮裸 curl/空头/错令牌都是 401，带令牌是 200，**不存在开放文件读**。
 3. **区间/流式读真的能省带宽，但“条件读省带宽”省不了**：因为 `Last-Modified` 不是文件 mtime。**不得把缓存/并发检测建在 `Last-Modified` 上**，仍用内容哈希（`Reviser`）。
 
+### 3.3.3 写侧的两条协议陷阱（`d936b751` 实测）
+
+这两条都是**先读源码会写错**的类型，所以单独记录：
+
+| 陷阱 | 实测行为 | 因此实现成 |
+|---|---|---|
+| raw body 上传 | 0.2.11 把每个 POST 都按 multipart 解析，`Content-Type: application/octet-stream` 得到 **`500 error parsing multipart form`**（尽管上游 `main` 已支持 raw 分支） | 只用 **multipart**；注释写明“跟随跑着的产物，而不是更新的分支” |
+| 字段名 | multipart 的 part 字段**必须恰好是 `file`**。字段 `file` → 200 且落盘 15B；字段 `files` → **200 `[]`，什么都没写**（`upload.go:220` 对其它字段名直接 `continue`） | 不只依赖状态码：校验响应里列出的路径，新增错误码 `FilesNothingWritten`；**它故意不算通道级问题**（`IsFilesChannelIssue=false`），否则一次失败的写会被静默重试成另一种“成功” |
+| 额外收益 | `POST` 走 chown（`upload.go:83`）→ 实测文件变成 `n9e:n9e 0644` | 无需额外 chown；也说明**写入归属与 `printf` 路径一致** |
+
 ### 3.4 档位与工具面一致性（收编成果，作为 seam 的约束保留）
 
 | 后端/形态 | readonly | standard | ops |
@@ -224,12 +234,13 @@ https://172.18.3.238:49983/download                    -> 401
 
 ### 3.5 真机安全发现（必须成为 `Access` 的边界条件）
 
-本轮最重的发现不是性能，而是**权限非对称**：
+本轮最重的发现不是性能，而是**权限非对称**（读写两个方向都是）：
 
 ```
-GET /files?path=/etc/shadow&username=n9e   -> 200, 1401 bytes      # envd 以自身进程身份（root）读
+GET  /files?path=/etc/shadow&username=n9e   -> 200, 1401 bytes      # envd 以自身进程身份（root）读
 n9e@target$ head -c 1 /etc/shadow          -> Permission denied    # 目标用户本身读不了
-GET /files?path=/etc/shadow&username=root  -> 200, 1401 bytes      # username 不造成降权
+GET  /files?path=/etc/shadow&username=root  -> 200, 1401 bytes      # username 不造成降权
+WRITE /files -> /root/<user-writable-nothing>                      # 同非对称的写方向，后果更重
 ```
 
 配合两个已确认的上游事实：`auth.go:27-32` 把 `GET/files`、`POST/files` 列入 `authExcludedPaths`（中间件不拦，由 handler 内 `validateSigning` 兜底）；`permissions/path.go:38` 对绝对路径**直通返回，无任何 jail**。
@@ -237,12 +248,13 @@ GET /files?path=/etc/shadow&username=root  -> 200, 1401 bytes      # username �
 **四条结论（写进设计，不可讨论）：**
 
 1. **`/files` 只能做核内实现细节**，绝不暴露为工具、绝不接受 raw path：`Access` 收到的必须是**已过 jail 的已解析目标**（与 §4.1 纪律 1/4 一致）。
-2. **必须加“目标用户可读性闸门”**（原 U7，本轮定为**做**）：否则同一个 `view` 工具经 `/files` 能看到 `shell` 工具看不到的文件，这是**相对提权**。实现上**绝不在 Go 里重实现 POSIX 权限判定**（易错且遇 ACL/组/namespace 就错），而是用**内核自己回答**：`process.Start(["/usr/bin/test", "-r", <已解析路径>])` 作为目标用户跑，退出码非 0 则拒。为控制往返成本：仅在（a）`/files` 通道且（b）`Stat` 的 mode 显示存在拒绝可能时才探测，并按目录缓存结论。
-   ⚠️ 本项**不是假想风险**：目标机上 `~/.aicli/remote-238.yaml` 的 `allowedRoots` 就含 `/var/log`，那里大量文件是 `0640 root:<group>`，`n9e` 读不到——**jail 内就会发生**。
+2. **必须加“目标用户可访问闸门”，读写两面都要**（原 U7，已定为做；`a8ec5aaf` 读向、`d936b751` 写向已落地）：否则同一个 `view`/`write` 工具经 `/files` 能看到/覆盖 `shell` 工具碰不了的文件，这是**相对提权**。实现上**绝不在 Go 里重实现 POSIX 权限判定**（易错且遇 ACL/组/namespace 就错），而是用**内核自己回答**：读 `test -r "$1"`；写 `test -w "$1"`，且写新文件时**先向上走到第一个存在的祖先**再判（创建是目录的问题，而 `apply_patch` 合法地整棵树新建）。
+    **成本控制取代 v2 的写法**：v2 说过“按目录缓存结论”，那个设计是错的——一个文件的权限不能由它所在目录的结论推得。现在的规则是**只在能确定放行时免探测**：`Stat` 已 world-readable → 读不探；目标由本用户拥有且 `u+w`，或新建时其目录由本用户拥有且 `u+w|u+x` → 写不探。“确定 yes”才跳，任何不确定一律问内核。效果：自有工作区里的常规写入**零额外 spawn**（测试以 `writableChecks == 0` 断言），而回退 `printf` 时**不做**探测（内核已经在管，多探是纯成本）。
+    ⚠️ 本项**不是假想风险**：目标机上 `~/.aicli/remote-238.yaml` 的 `allowedRoots` 就含 `/var/log`，那里大量文件是 `0640 root:<group>`，`n9e` 读不到——**jail 内就会发生**。写向的真机证据：对 `/root/` 下一个 root 拥有的 0644 文件发起 `write`，闸门拒绝后**由 root 复核内容仍是原值**——“报了拒绝”与“确实没写进去”是两件事，只证前者不够。
 3. **沿用上游的 fail-closed 姿态**：`401 envd not initialized`（`auth.go:65-81`，live-upgrade pre-init 窗口故意把 `/files` 排除在允许列表外）一律视为后端不可用并**回落 `process` 通道**，绝不静默返回空。
 4. **令牌与日志卫生**：`/files` 的 URL 含 `path`/`username`，审计与日志**只记方法 + 状态码 + 长度**，不记完整 URL、不记令牌；本轮探针已做到（令牌只存在于目标机 shell 变量与 600 权限的 curl 配置文件，全程未回显）。
 
-另需记一笔**已测得的具体偏差**（§8.9 式登记，不糊合）：`POST /files` 的 `EnsureDirs` 会自动建父目录，与 local 面的 `missing_parent` 拒语义不同。**该差异必须在核侧消除**（进 `Access` 前先查父目录），不得依赖传输层行为。
+另需记一笔**已测得的具体偏差**（§8.9 式登记）：`POST /files` 的 `EnsureDirs`（`upload.go:59`）会自动建父目录，与 local 面的 `missing_parent` 拒语义不同。**该差异已在核侧消除**（`d936b751`）：`storeBytes` 在进 `Access`/通道**之前**先查父目录，`write` 依旧拒（`missing_parent`），只有 `apply_patch add`（`createParents=true`）建树；测试断言“被拒的写不得落盘”。不得依赖传输层行为，这条仍是铁律。
 
 ---
 
@@ -598,6 +610,7 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 | ~~N0~~ | ✅ **已完成**（`a8ec5aaf`）：`view` 走 `GET /files` 单区间 `Range` | — | `envdclient/files.go` + `readLimited` | 可直接作为 `envdAccess.Read/RandomRead` 的实现体 |
 | N1 | ~~`view` 远端窗口（`sed`/`dd` 造窗）~~ | — | — | **作废**：降为 R0 不可用时的回落，不单独立项 |
 | ~~N2~~ | ✅ **已完成**（`29d6e334`）：`grep` 流式消费 + 上限早停 | — | `envd_backend.go` `runCapped` + `envdGrep` | `envdAccess` 的 `ExecStreamer` 形状 |
+| ~~N4~~ | ✅ **已完成**（`d936b751`）：写侧 `POST /files` + 可写性闸门 + 逐字节落盘 | — | `envdclient.WriteFile` + `storeBytes` | 可直接作为 `envdAccess.Write` 的实现体 |
 | ~~N3~~ | `/files` 签名调研 | — | — | **已完成**（本轮 C-1，结论见 §5.4） |
 
 执行顺序：~~N0b → N0~~（**均已完成，见 §13**）→ **N2（`grep` 流式 + 早停，下一个）** → 写侧 `POST /files`（必须与 `missing_parent` 前置检查同批）。各项独立提交、独立回滚；即便后续走 seam，它们的**逻辑原封不动搬家**（这正是 seam 设计要检验的第一件事：如果近项代码搬不进 `Access`，说明接口设计错了）。本轮已验证：`readLimited`/`refuseIfTargetCannotRead` 就是 `envdAccess.Read` + 闸门的形状。
@@ -666,10 +679,19 @@ socket 早停仅作日志证据，不作断言。
 
 ⚠️ **这是一个对外可见的行为变更**：过去把 `limits.maxBytesPerCall` 设得比默认值小的部署（包括 aicli 从 target `Limits` 块展开出的 `--max-bytes-per-call`），读工具**现在真的会按那个值收紧**。这正是该设置本来的含义，但发版说明应当点一句。
 
-**仍未关掉 §8.9 的缺口**（两项，彼此独立）：
+**过程纪律的一条（我自己违反了两次）**：`gofmt -w <目录>` 会把**未修改的既有文件**一起重排——本仓库里 `audit.go`/`metrics.go`/`platform.go`/`roots.go`/`server_test.go`/`ssh_e2e_test.go` 在 HEAD 中就不是 gofmt 规范形态，一次目录级格式化波及 7 个文件，被 `git checkout` 回退了**两次**（v3 轮一次、`d936b751` 轮再一次）。规则改为：**只对本轮实际改动的具体文件执行 gofmt**，绝不目录级；判断办法是提交前 `git status --short` 必须只剩自己动过的文件。写在这里是因为它会以"顺手清理"的名义反复发生，而不像错误。
+
+**§8.9 缺口的当前状态**（原两项：一项已关、一项拆解如下）：
 
 1. envd 的 `view` 仍无 `offset`/`limit` 行窗口（描述里还自认“no line windowing on this surface”）。`/files` 区间读已可用后，这件事从“需要 `sed` 对拍九类语义”降为“在核里用字节窗口映射行号”。
-2. 写侧：`POST /files` 可破 1 MiB argv 上限，但 `upload.go:59` 的 `EnsureDirs` 会自动建父目录，**必须与 `missing_parent` 前置检查同批做**（否则 `36caf76f` 的语义会被通道差消灭）；`edit`/`apply_patch` 的读仍走 `cat`，属于同一批。
+2. ~~写侧：`POST /files` 必须与 `missing_parent` 同批~~ → **已完成（`d936b751`）**：写走 `/files`，父目录与闸门均在进通道**之前**，2,450,000 字节逐字节落盘实测。
+
+**新的剩余项（按价值/风险排序）：**
+
+1. **`edit`/`apply_patch` 的读仍走 `cat`**：写已切换，但 `envd_edit.go`/`envd_patch.go` 读取全文仍 `cat`。同一个工具内“读一条通道、写另一条”不改变结果（字节相同），但与 `Access` 的最终形状不一致，应随 Phase 2.5b 一并入 `envdAccess`。
+2. **NUL/UTF-16 写拒绝可以取消了**：`/files` 不受 argv/NUL 限制，因此 `binary_payload` 拒绝已无技术必需性，取消它就与 local 对齐。但这是**行为变更**，应有自己的测试与说明，所以没夹带在通道迁移里（§3.3.3 已登记）。
+3. **envd `view` 行窗口**（§8.9 旧缺口）：`/files` 区间读可用后，只是“在核里用字节窗口映射行号”，不再需要 `sed` 对拍九类语义。
+4. **`apply_patch` 多文件时的闸门合并**：当前每个缺失祖先的文件各一次 `test -w`；一个 patch 内可以一次探测多个路径（待真实成本数据再决定，不先优化）。
 
 ---
 
