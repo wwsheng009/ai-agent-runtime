@@ -242,6 +242,33 @@ func main() {
 		fail("UTF-16 round trip", fmt.Errorf("disk holds %x, want %x (BOM and encoding must survive)", string(after), want))
 	}
 	fmt.Printf("PASS UTF-16 edit round trip: BOM + UTF-16LE preserved (%d bytes)\n", len(after))
+
+	// Line windowing is a model-visible change on this surface (numbered output,
+	// offset/limit paging), so verify the actual text against the real daemon.
+	pagePath := *editPath + ".pages"
+	if _, err := written.call(ctx, *prefix+"__write", map[string]interface{}{
+		"path": pagePath, "content": "one\ntwo\nthree\nfour\nfive\nsix\n",
+	}); err != nil {
+		fail("seed the paging fixture", err)
+	}
+	defer func() { _ = os.Remove(pagePath) }()
+	page, err := written.call(ctx, *prefix+"__view", map[string]interface{}{
+		"path": pagePath, "offset": 2, "limit": 2,
+	})
+	if err != nil {
+		fail("paged view", err)
+	}
+	if !strings.HasPrefix(page, "3: three\n4: four") {
+		fail("paged view shape", fmt.Errorf("want numbered lines 3 and 4, got %q", firstChars(page, 200)))
+	}
+	fmt.Printf("PASS paged view: offset=2 limit=2 -> %q\n", firstChars(page, 40))
+	tail, tailErr := written.call(ctx, *prefix+"__view", map[string]interface{}{
+		"path": pagePath, "offset": -2,
+	})
+	if tailErr != nil || !strings.Contains(tail, "5: five") || !strings.Contains(tail, "6: six") {
+		fail("tail view", fmt.Errorf("result %q err %v", firstChars(tail, 160), tailErr))
+	}
+	fmt.Printf("PASS tail view (negative offset): %q\n", firstChars(tail, 40))
 	written.close()
 
 	fmt.Println("ALL CHECKS PASSED")

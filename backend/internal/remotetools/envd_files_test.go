@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 )
 
 // envDServe starts the envd backend against one stub and returns the session plus
@@ -305,6 +306,72 @@ func TestEnvDViewStillRefusesOversizedFiles(t *testing.T) {
 	for _, entry := range stub.filesRequests() {
 		if strings.HasPrefix(entry, "/srv/app/big.txt") {
 			t.Fatalf("an oversized file must not be transferred at all: %v", stub.filesRequests())
+		}
+	}
+}
+
+// Differential parity, not self-reference: the expected text is produced by the
+// same shared core the local surface runs over the same bytes. If envd later grows
+// its own windowing, this fails even though envd alone would still look sane.
+func TestEnvDViewWindowsMatchTheSharedCore(t *testing.T) {
+	const body = "line one\nline two\nline three\nline four\nline five\n"
+	stub := newEnvdStub(t, map[string]string{"/srv/app/pages.txt": body}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
+
+	cases := []struct {
+		name          string
+		offset, limit float64
+	}{
+		{"head", 0, 2},
+		{"page two", 2, 2},
+		{"window to end", 3, 99},
+		{"last lines", -2, 0},
+		{"beyond eof", 99, 3},
+	}
+	for _, test := range cases {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			request := viewcore.Request{FilePath: "pages.txt", Offset: int(test.offset), Limit: int(test.limit)}
+			request.Offset, request.Limit = viewcore.Normalize(request.Offset, request.Limit)
+			want, _, err := viewcore.ReadTextFromBytes([]byte(body), request, viewcore.Options{ByteBudget: 4096})
+			if err != nil {
+				t.Fatalf("shared core render: %v", err)
+			}
+			got := callTool(t, ctx, session, "remote_envd__view", map[string]interface{}{
+				"file_path": "pages.txt", "offset": test.offset, "limit": test.limit,
+			})
+			if got != want {
+				t.Fatalf("envd window differs from the shared core for offset=%d limit=%d:\n got %q\nwant %q",
+					request.Offset, request.Limit, got, want)
+			}
+		})
+	}
+}
+
+// Unsupported parameters must never be quietly served as a plain single read.
+// Two layers can say no: today the published JSON schema rejects them first
+// ("unexpected additional properties"), and envdRefuseUnsupportedViewParams is the
+// backstop for entry points that do not validate the schema. Both are acceptable;
+// silently answering with one file's window is not.
+func TestEnvDViewRefusesParametersItDoesNotImplement(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{"/srv/app/a.txt": "a\n"}, nil)
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
+
+	for _, key := range []string{"files", "symbol", "compact"} {
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name: "remote_envd__view",
+			Arguments: map[string]interface{}{
+				"file_path": "a.txt", key: "anything",
+			},
+		})
+		// The schema layer answers with a protocol error today; the handler guard
+		// would answer with a tool error. Either is a refusal.
+		refused := err != nil || result.IsError
+		if !refused {
+			t.Fatalf("%q was accepted by the surface; text=%q", key, textContent(result))
+		}
+		if err == nil && strings.Contains(textContent(result), "1: a") {
+			t.Fatalf("%q was served as a normal single read: %q", key, textContent(result))
 		}
 	}
 }

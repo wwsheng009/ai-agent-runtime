@@ -35,6 +35,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -917,27 +918,47 @@ func envdToolSpecs(base remoteToolBase) []envdToolSpec {
 	return append([]envdToolSpec{
 		{
 			name:        ToolView,
-			description: base.describe("Read one file from the envd target as text. Paths resolve inside the workspace and symlinks are canonicalized on the target. There is no line windowing on this surface yet, so a file above the read limit is refused rather than half-read."),
+			description: base.describe("Read a window of a file on the envd target with stable line numbers and the same truncation metadata the local view publishes (offset, limit, lines_read, eof, is_truncated). Batch (files), symbol and compact are refused rather than ignored."),
 			version:     "1.0.0",
-			parameters: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"file_path": map[string]interface{}{
-						"type":        "string",
-						"description": "File path on the target, absolute or relative to the workspace.",
-					},
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Alias for file_path.",
-					},
-				},
-			},
-			call: envdView,
+			parameters:  envdViewParameters(),
+			call:        envdView,
 		},
 	}, append(append(append(append(envdFileToolSpecs(base), envdEditToolSpecs(base)...), envdPatchSpec(base)), envdProcessToolSpecs(base)...), envdPtyToolSpecs(base)...)...)
 }
 
-// envdView reads a file through envd.
+// envdViewParameters publishes the local view's own parameter text for the subset
+// this surface honours. Taking the descriptions from viewcore.Schema() rather than
+// rewriting them is deliberate: two wordings for one parameter is how callers learn
+// that `offset` might mean something different per transport, and `path` stays as
+// the accepted alias because that spelling is already in use on this surface.
+func envdViewParameters() map[string]interface{} {
+	source := map[string]interface{}{}
+	if properties, ok := viewcore.Schema()["properties"].(map[string]interface{}); ok {
+		for _, key := range []string{"file_path", "offset", "limit"} {
+			if value, ok := properties[key]; ok {
+				source[key] = value
+			}
+		}
+	}
+	source["path"] = map[string]interface{}{
+		"type":        "string",
+		"description": "Alias for file_path.",
+	}
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": source,
+		"required":   []string{},
+	}
+}
+
+// envdView reads a file through envd and renders the same line window the local
+// and ssh/http surfaces render.
+//
+// The window is not implemented here: `viewcore.ReadTextFromBytes` is the shared
+// implementation (numbering, paging, long-line clamping, encoding, and the
+// truncation accounting behind `eof`/`is_truncated`). envd only supplies the bytes,
+// which is the one thing a remote target can answer differently. Writing a second
+// windower here would be the exact drift this merge exists to remove.
 //
 // Two channels can move bytes here, and which one answers is published as
 // read_channel so a caller can tell them apart rather than guess from prose -
@@ -958,6 +979,19 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 	if raw == "" {
 		return envdErrorResult("file_path is required"), nil
 	}
+	if refusal := envdRefuseUnsupportedViewParams(params); refusal != nil {
+		return refusal, nil
+	}
+	request := viewcore.Request{
+		FilePath: raw,
+		// The shared int reader already used by pty/process parameters, so this
+		// surface does not grow a second idea of how a JSON number arrives.
+		Offset: envdIntParam(params, "offset", 0),
+		Limit:  envdIntParam(params, "limit", 0),
+	}
+	// Same normalisation the local surface applies: defaults, the hard cap, and a
+	// negative offset meaning "the last N lines".
+	request.Offset, request.Limit = viewcore.Normalize(request.Offset, request.Limit)
 	target, err := be.resolvePath(ctx, raw)
 	if err != nil {
 		return envdErrorResult("%v", err), nil
@@ -970,20 +1004,52 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 		return envdErrorResult("%s is a directory; use ls to list it", target), nil
 	}
 	limit := be.viewLimit()
-	if size := entry.SizeBytes(); size > int64(limit) {
+	size := entry.SizeBytes()
+	if size > int64(limit) {
+		// Still a refusal, and still the one honest difference from the local
+		// surface, which streams a window out of a huge file instead. Feeding this
+		// a byte prefix would make ReadWindow report EOF for a file that has not
+		// reached it, so the metadata would claim a completeness it does not have.
+		// Closing that needs the byte-offset-to-line-offset mapping of §5.2, not more
+		// code here.
 		return envdErrorResult("%s is %d bytes, above the %d byte view limit; read it with a narrower tool or shell", target, size, limit), nil
 	}
 	data, channel, note, refusal := be.readGuarded(ctx, target, entry, int64(limit))
 	if refusal != nil {
 		return refusal, nil
 	}
-	result := envdTextResult(string(data))
-	metadata := map[string]interface{}{"read_channel": channel}
+	content, stats, readErr := viewcore.ReadTextFromBytes(data, request, viewcore.Options{ByteBudget: limit})
+	if readErr != nil {
+		return envdErrorResult("%s", readErr.Error()), nil
+	}
+	result := envdTextResult(content)
+	// One metadata source for every view surface: paging fields must not be
+	// reinvented per transport, or a caller paging a remote file gets a different
+	// continuation contract than a caller paging a local one.
+	metadata := viewcore.WindowMetadata(request, stats)
+	metadata["file_path"] = target
+	metadata["file_size"] = size
+	metadata["read_channel"] = channel
 	if note != "" {
 		metadata["read_channel_note"] = note
 	}
 	result.Metadata = metadata
+	viewcore.AttachEfficiencyHints(result.Metadata, &result.Content, request, stats)
 	return result, nil
+}
+
+// envdRefuseUnsupportedViewParams refuses the view parameters this surface cannot
+// honour. Silently ignoring them is worse than refusing: a batch or symbol request
+// that came back as a plain single read would teach the caller that the same
+// argument names mean different things depending on transport.
+func envdRefuseUnsupportedViewParams(params map[string]interface{}) *toolkit.ToolResult {
+	for _, key := range []string{"files", "symbol", "compact"} {
+		if _, ok := params[key]; ok {
+			return envdFailure("UNSUPPORTED",
+				"remote view over envd does not support %q yet; call it once per file with file_path, offset and limit", key)
+		}
+	}
+	return nil
 }
 
 // refuseIfTargetCannotRead returns a refusal when the user this backend acts as

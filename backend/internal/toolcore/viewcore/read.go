@@ -1,6 +1,7 @@
 package viewcore
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -136,13 +137,47 @@ func ReadText(path string, req Request, opts Options) (string, Stats, error) {
 		if readErr != nil {
 			return "", Stats{}, readErr
 		}
-		text, actual := textcodec.Decode(data)
-		content, stats, readErr := ReadWindow(strings.NewReader(text), req, opts)
-		stats.Encoding = actual.String()
-		return content, stats, readErr
+		// The BOM rule lives in one place: a surface that already holds the bytes
+		// (a remote read over an RPC) must decode exactly like this one, or the
+		// same file renders as two different texts depending on transport.
+		return ReadTextFromBytes(data, req, opts)
 	}
 
 	return ReadWindow(file, req, opts)
+}
+
+// ReadTextFromBytes renders one window of bytes that are already in memory,
+// applying the same encoding rule as ReadText: a BOM means decode-then-window,
+// plain UTF-8 streams line by line.
+//
+// It exists so a surface without a local path - the envd backend, which gets the
+// bytes over HTTP - reuses this implementation instead of carrying its own idea
+// of what a window is. Paging, clamping, numbering and the truncation accounting
+// all stay in ReadWindow, which every view surface already shares.
+func ReadTextFromBytes(data []byte, req Request, opts Options) (string, Stats, error) {
+	if enc, hasBOM := detectBOM(data); hasBOM {
+		if int64(len(data)) > MaxDecodeBytes {
+			return "", Stats{}, fmt.Errorf(
+				"文件使用 %s 编码且超过 %d 字节，view 未做整文件解码；请改用 shell/download 转换后查看",
+				enc, MaxDecodeBytes,
+			)
+		}
+		text, actual := textcodec.Decode(data)
+		content, stats, err := ReadWindow(strings.NewReader(text), req, opts)
+		stats.Encoding = actual.String()
+		return content, stats, err
+	}
+	return ReadWindow(bytes.NewReader(data), req, opts)
+}
+
+// detectBOM is the in-memory twin of probeEncoding, which needs a seekable file.
+func detectBOM(data []byte) (textcodec.Encoding, bool) {
+	head := data
+	if len(head) > 4 {
+		head = head[:4]
+	}
+	enc, _ := textcodec.DetectEncoding(head)
+	return enc, enc.HasBOM()
 }
 
 // probeEncoding peeks the leading BOM and rewinds the reader.

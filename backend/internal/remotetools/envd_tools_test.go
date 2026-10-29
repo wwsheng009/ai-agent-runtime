@@ -131,8 +131,11 @@ func TestEnvDWriteThenViewRoundTrip(t *testing.T) {
 		t.Fatal("the stub never received the write")
 	}
 	got := callTool(t, ctx, session, "remote_envd__view", map[string]interface{}{"file_path": "sub/hello.txt"})
-	if got != "abc" {
-		t.Fatalf("read back = %q, want abc", got)
+	// Numbered like the local surface. The previous expectation here was `abc`,
+	// which means this test had been pinning the drift itself: two surfaces, one
+	// tool name, two output shapes.
+	if got != "1: abc" {
+		t.Fatalf("read back = %q, want the shared numbered render %q", got, "1: abc")
 	}
 }
 
