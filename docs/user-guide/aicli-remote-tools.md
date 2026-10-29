@@ -336,7 +336,7 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 
 | profile | 暴露的工具 |
 |---------|------------|
-| `all`（默认） | `view` `ls` `glob` `grep` `write` `edit` `append_write` `apply_patch` `shell` |
+| `all`（默认） | 9 个核心工具（read + write + shell）+ `artifact_read`；配置 jobs 时再加 `job_*` |
 | `readonly` | `view` `ls` `glob` `grep` |
 | `standard` | readonly + `write` `edit` `append_write` `apply_patch` |
 | `ops` | standard + `shell` |
@@ -344,10 +344,12 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 
 补充规则：
 
+- **默认是 `all`，默认实际是 10 个工具**：`view` `ls` `glob` `grep` + `write` `edit` `append_write` `apply_patch` + `shell` + `artifact_read`。`profile: all` 表示“当前配置和存储能力下所有可用工具族”，不是无条件列出所有潜在工具。
+- `artifact_read` 默认可见：未配置 `artifacts.root` 时，服务会把 `Normalize` 的默认值落到 `<workspace>/.aicli/artifacts`；它不是可选的“额外 1 个”之外的隐式行为，而是默认工具面的一部分。
 - **默认是 `all`**：挂载令牌持有者会看到写文件和 shell 工具；需要最小权限时显式写 `profile: readonly`。
 - `shell` 工具可见 ≠ 任意命令可执行：`shell.allowedCommands` / `allowedCommandPatterns` 为空时仍然 fail-closed，所有命令被拒绝。
 - `readOnly: true` 是硬覆盖：即使 profile 写成 `ops`，也不会暴露写工具。
-- `jobs.root` 非空且 profile 为 `all` 时追加 `job_start` `job_output` `job_cancel` `job_list`；`ops`/`custom` 仍需 `legacyRemoteJobs: true`。
+- `job_*` 是能力门控的工具：需要 `jobs.root` 非空，并通过 `legacyRemoteJobs: true`（或 `--legacy-jobs`）构造 job manager；v1 默认把后台任务视为本地能力。满足这些条件后，默认的 `all` 会再增加 `job_start` `job_output` `job_cancel` `job_list` 四个工具，总数变为 14。
 - `artifacts.root` 非空时，追加 `artifact_read`（用于取回被折叠的完整输出）。
 - `tools:` 非空时是**最终白名单**，不能扩大 profile；`custom` 必须显式列出工具，`job_*`/`artifact_read` 也要列入才可见。
 
