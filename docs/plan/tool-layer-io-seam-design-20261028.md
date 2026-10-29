@@ -474,6 +474,10 @@ backend/internal/toolcore/{viewcore,lscore,searchcore,mutatecore}/*.go
 
 ### Phase 2.5b —— envd 只读侧接入 + 真增量（本方案的收益兑现点）
 
+> 🔶 **已开始（`a9866bf7`）**：ls 的目录遍历已进 seam（`Access.ReadDir` + 新增 `Access.Lstat`），walker 计数 lscore 降到 0。三条施工期结论见 §13"Phase 2.5b 第一步"——其中"用 `Stat` 判根会让 `ls` 跟随符号链接出授权根"是一次安全回归，差点被当作搬家细节混过去。
+> 下面 1–4 项仍未交付；本段 4 项里"`RandomAccessor` 走 `GET /files` 单区间 `Range`"这句话**在行窗口上是不够的**：`view offset=N` 是行偏移，`Range` 只回答字节，行号要么靠前缀扫描、要么由目标机按行造窗（`sed -n 'A,Bp'`），照原稿直接接 `ReadRange` 会让适配层替核宣布 `EOF`——那是假元数据。施工前先解决这个模型问题。
+
+
 - 交付：
   1. `remotetools/envd_access.go` 实现 `Stat`/`ReadDir`/`Read`（RPC + `cat`），`Capabilities` 如实声明（`RandomRead=false`、`StreamingExec=true`、`Watch=true`）；
   2. `searchcore` 的 25 处 `os.*` 搬入 `localAccess`（含 `grep_ignore.go` 的 ignore 读取、`ripgrep_engine.go` 的 runner）；
@@ -732,6 +736,18 @@ socket 早停仅作日志证据，不作断言。
 
 **验收证据**：view/ls 既有单测**一字未改**通过；新增注入测试 6 项（accessor 提供磁盘上根本不存在的文件、目录、NUL 嗅探，并断言 handler 关闭了句柄——远程句柄是一条活连接，泄漏在纯本地对拍里永远看不见）；反向验证 = 把 `localio.For` 改成忽略注入 → 恰好这 6 项红、旧测试仍绿；真机 envd 0.2.11 工具层 15 项 + E0 偏移 8 项全 PASS，其中"60000 行深偏移与本地核逐字节一致"走的正是本笔改造的共享核。
 
+**Phase 2.5b 第一步：ls 的目录遍历进 seam（`a9866bf7`）**
+
+`walkerBaselines` 里 lscore 那 1 处（`filepath.WalkDir`）已降到 0，因此"lscore 与后端无关"这句话现在才真的可以说。三条施工期发现必须留档，因为它们都会复发：
+
+1. **`Access` 补了 `Lstat`，而且它是一次安全修正而不是加料**。旧 `WalkDir` 对**根**做 Lstat，而 handler 早先用 `os.Stat`（跟随链接）判定"是不是目录"。我照 `ReadDir` 递归重写的第一版用了 `access.Stat` 判根——`ls` 指向目录符号链接时不再返回旧的空列表，而是跟随链接列出授权根之外的内容。seam 缺的正是"不跟随"这个能力，所以补方法而不是在核里偷 lstat；接口的注释写清了**哪个方法承担哪条安全义务**。
+2. **limit 的检查顺序是契约**：旧实现"追加 → 查 limit → 才下降"，命中上限的目录不进入。写成"先下降再查"会改变"哪些行在截断后存活"。这是差分对拍（72 组 depth×limit）在单测里抓到的；三条手写用例看不见它。
+3. **唯一一处故意的分歧**：根不存在时旧实现吞掉错误返回空列表（`if walkErr != nil` 与 handler 的"列目录失败→NOT_FOUND"都是死代码）。seam 不能继承这种吞法——远程 accessor 的网络故障若变成"这个目录是空的"就是假元数据。差分用 `diverges` 标记显式断言这一支，并说明 ls 表面观察不到（handler 先 Stat，NOT_FOUND 从那里出）。
+
+**真机验证新增一个驱动**：`backend/scripts/ls_live_verify.go` 起真实 `aicli-remote-tools`（local 后端 + MCP stdio），把改造前的 `WalkDir` 算法钉在驱动里当 oracle，经共享渲染器生成期望文本后逐字节比对，另覆盖 Windows 上构造不出来的四类现场：`chmod 000` 子目录、符号链接根、树内符号链接、悬空链接。结果 3 目录 × 25 组合逐字节一致 + 上述现场全 PASS。它自身也暴露过两个坑：`fail()` 的 `os.Exit` 跳过 `defer` 清理（会把 000 目录和服务器子进程留在目标机上，已改为清理钩子表 + `-simulate-failure` 自检），以及 `//go:build ignore` 漏加会和 `//go:build windows` 的 ConPTY 驱动撞 `main redeclared`。
+
+**注意**：本步不影响 envd——envd 的 `ls` 目前仍是自实现（`envd_tools.go:156 envdLs → client.ListDir`）。把 envd 的 view/ls/glob/grep 切到共享核仍是 2.5b 的正题。
+
 **剩余项（按价值/风险排序）：**
 
 1. ~~NUL/UTF-16 写拒绝可以取消了~~ → **已完成（`4302b807`）**：拒绝现在由**通道能力**决定（`refuseUncarriableWrite`），`edit` 的 UTF-16 编码保持往返已恢复。**同时记下一条我们修不了、也不假装能修的边界**：真机首次跳测报 `0xFF` 变成了 U+FFFD——**MCP/JSON 字符串传输本身无法携带非 UTF-8 字节**（Go 的 `encoding/json` 会替换非法 UTF-8），**local 后端完全相同**。所以本次提升覆盖 NUL（JSON 能表达）与编码保持往返，**不覆盖“写任意二进制”**；想写二进制仍只能走 `shell`/下载路径。
@@ -777,6 +793,11 @@ curl -sk -D - -H "X-Access-Token: $T" -H 'Range: bytes=0-9' "$B?path=$F&username
 #   写/编辑/补丁：真机一次跑完 9 项，用 backend/scripts/envd_live_verify.go
 #     （-write-path / -edit-path / -forbidden-path；每项均以目标用户身份直接读盘复核，
 #      闸门用例另由 root 确认文件内容未被改动）
+#   ls 遍历等价性：真机跑 backend/scripts/ls_live_verify.go（local 后端 + MCP stdio，
+#     以改造前的 WalkDir 为 oracle 逐字节对拍；交叉编译须按文件路径单独构建：
+#       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o <out> ./scripts/ls_live_verify.go
+#     注意这些驱动带 //go:build ignore，go build ./... 不会带上它们；每次 shell
+#     调用是新进程，GOOS 不会跨调用保留）
 
 # 4.4 现存唯一后端分支（seam 的落点）
 # internal/remotetools/server.go:66-90  “differ only in where files and processes actually live”
