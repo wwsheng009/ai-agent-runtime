@@ -120,6 +120,36 @@ func (s Shell) DeriveExecArgs(command string, login bool) []string {
 	}
 }
 
+// WrapPowerShellExitCode appends an epilogue that preserves the command's real
+// process status. PowerShell folds a failed native command into its own generic
+// failure when invoked with -Command: `pwsh -Command "cmd /c exit 3"` exits 1,
+// not 3. The epilogue records both $? (cmdlet/pipeline success) and
+// $LASTEXITCODE (native command status), then uses $host.SetShouldExit so object
+// formatting (for example Get-Location) is not lost the way a raw `exit` can
+// lose it.
+//
+// The wrapper is a no-op for non-PowerShell shells. Callers that already wrap
+// the same command must not call it twice.
+func WrapPowerShellExitCode(shell Shell, command string) string {
+	switch shell.Type {
+	case ShellTypePowerShell, ShellTypePwsh:
+	default:
+		return command
+	}
+	return command + `
+$__aicli_ok = $?
+$__aicli_code = $LASTEXITCODE
+if (-not $__aicli_ok) {
+    if ($null -ne $__aicli_code -and [int]$__aicli_code -ne 0) { $host.SetShouldExit([int]$__aicli_code) }
+    else { $host.SetShouldExit(1) }
+} elseif ($null -ne $__aicli_code) {
+    $host.SetShouldExit([int]$__aicli_code)
+} else {
+    $host.SetShouldExit(0)
+}
+`
+}
+
 // EncodePowerShellCommand base64-encodes a script as UTF-16LE, the encoding
 // -EncodedCommand expects, and prepends PowerShellCommandPrefix so the
 // encoded payload keeps the UTF-8 output contract on its own.

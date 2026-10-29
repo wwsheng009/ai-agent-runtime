@@ -780,7 +780,7 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 			"fi",
 		)
 	}
-	commandLine := buildShellCommandLine(shell.DeriveExecArgs(command, false))
+	commandLine := buildShellCommandLine(shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false))
 	lines = append(lines,
 		fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)),
 		`code=$?`,
@@ -876,7 +876,7 @@ func buildShellCommandLine(args []string) string {
 
 func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) string {
 	heartbeatPath := statusPath + ".heartbeat"
-	commandArgs := shell.DeriveExecArgs(command, false)
+	commandArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
 	quotedArgs := make([]string, 0, len(commandArgs)-1)
 	for _, arg := range commandArgs[1:] {
 		quotedArgs = append(quotedArgs, powershellQuote(arg))

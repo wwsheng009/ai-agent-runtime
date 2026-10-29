@@ -709,7 +709,7 @@ func (m *Manager) Resize(ctx context.Context, jobID string, cols, rows int) erro
 // only reached when pty.Supported() is true (2026-10-11).
 func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args TerminalOpenArgs) (*Job, error) {
 	shell := runtimeexecutor.DefaultUserShell()
-	argv := shell.DeriveExecArgs(managed.info.Command, false)
+	argv := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, managed.info.Command), false)
 	if len(argv) == 0 {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return managed.snapshot(), nil

@@ -1589,7 +1589,7 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 	// Use the same detected user shell as tool-based command execution.
 	shell := runtimeexecutor.DefaultUserShell()
 	result.Shell = shell
-	shellCmd := shell.DeriveExecArgs(executedCommand, false)
+	shellCmd := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, executedCommand), false)
 
 	if streamOutput {
 		fmt.Printf("\n执行命令: %s\n", executedCommand)

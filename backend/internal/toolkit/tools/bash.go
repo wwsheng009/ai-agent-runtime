@@ -860,6 +860,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 
 	// 使用智能 shell 检测
 	shell := runtimeexecutor.DefaultUserShell()
+	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 	shellCmd := shell.DeriveExecArgs(command, false)
 
 	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
@@ -874,13 +875,14 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	outputMirror := resolveToolTerminalOutputMirror(ctx)
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
 	execResult, runErr := shellexec.Run(cmdCtx, shellexec.Options{
-		Command:       command,
+		Command:       commandForShell,
 		Workdir:       resolvedWorkdir,
 		Env:           runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ()),
 		CaptureLimit:  captureSettings.captureLimitBytes(),
 		ArtifactScope: "toolkit",
 		ArtifactRoot:  artifactRoot,
 		Mirror:        outputMirror,
+		Shell:         shell,
 		Invocation: func(command string) (string, []string) {
 			argv := shell.DeriveExecArgs(command, false)
 			return argv[0], argv[1:]
@@ -1041,6 +1043,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 
 	// 使用智能 shell 检测
 	shell := runtimeexecutor.DefaultUserShell()
+	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 
 	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
 	env := runtimeexecutor.WithResolvedRipgrepPath(runtimeexecutor.FilterSensitiveEnv(os.Environ()))
@@ -1048,13 +1051,14 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	outputMirror := resolveToolTerminalOutputMirror(ctx)
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
 	execResult, err := shellexec.Run(cmdCtx, shellexec.Options{
-		Command:       command,
+		Command:       commandForShell,
 		Workdir:       cfg.workdir,
 		Env:           env,
 		CaptureLimit:  captureLimitBytesFromExecConfig(cfg),
 		ArtifactScope: "toolkit",
 		ArtifactRoot:  artifactRoot,
 		Mirror:        outputMirror,
+		Shell:         shell,
 	})
 	if !execResult.Started && err != nil {
 		return CommandExecutionResult{}, err
@@ -1218,7 +1222,7 @@ func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolved
 	}
 
 	shell := runtimeexecutor.DefaultUserShell()
-	shellCmd := shell.DeriveExecArgs(command, false)
+	shellCmd := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
 	if len(shellCmd) == 0 {
 		return toolResultFailureWithCode(
 			fmt.Errorf("detach: 无法解析 shell 启动命令"),

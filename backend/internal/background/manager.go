@@ -3168,7 +3168,7 @@ func buildShellCommand(ctx context.Context, command string) *exec.Cmd {
 	}
 	// 使用智能 shell 检测，与 BashTool 保持一致
 	shell := runtimeexecutor.DefaultUserShell()
-	shellArgs := shell.DeriveExecArgs(command, false)
+	shellArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
