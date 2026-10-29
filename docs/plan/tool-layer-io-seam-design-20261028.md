@@ -1,7 +1,7 @@
 # 工具层 I/O seam 与 envd 增量能力方案
 
 - 文档编号：`tool-layer-io-seam-design-20261028`
-- 状态：**部分已落地（v7）**——v1 为结构草案；v2 把 §5.2/§5.4/§10/§11 的假设换成 **C-1 真机 spike 实测**并新增 §3.5 安全发现；v3 回填 §13 落地记录（N0b+N0 已交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更说明）与 `29d6e334`（N2：grep 流式消费 + 上限早停）；v5 把 §7.4 的三条反漂移检查以 `backend/internal/driftguard` 测试上线（随 `go test ./...` 硬门执行）；**v6 记录 `d936b751`：写侧走 `POST /files` + 目标用户可写性闸门，含两条协议陷阱（raw body 在 0.2.11 返回 500；字段名非 `file` 时 `200 []` 而什么都不写）与一次目录级 gofmt 误操作的自记；**v7 记录 `c0226f10`：读闸门下沉到唯一入口 `readGuarded`，`edit`/`apply_patch` 与 `view` 同路，并用绕开闸门的合法变异做反向验证。§8.9 现只剩 `view` 行窗口一项未关。**
+- 状态：**部分已落地（v8）**。逐版：v1 结构草案；v2 用 C-1 真机 spike 实测替换 §5.2/§5.4/§10/§11 的假设并新增 §3.5 安全发现；v3 回填 §13（N0b+N0 交付 `a8ec5aaf`）；v4 记录 `552bf850`（`--max-bytes-per-call` 缺陷修，含一处对外可见的行为变更）与 `29d6e334`（N2 grep 流式 + 上限早停）；v5 把 §7.4 三条反漂移检查做成 `backend/internal/driftguard` 硬门测试；v6 记录 `d936b751`（写侧 `POST /files` + 可写闸门 + 两条协议陷阱：raw body 在 0.2.11 返回 500、字段名非 `file` 时 `200 []` 而什么都不写）；v7 记录 `c0226f10`（读闸门下沉到唯一入口 `readGuarded`，含绕开闸门的反向验证）；**v8 记录 `4302b807`：NUL/尺寸拒绝改由通道能力判定，UTF-16 编辑往返恢复，并写明 JSON 传输无法携带非 UTF-8 字节这条我们修不了的边界。§8.9 现只剩 `view` 行窗口一项未关。**
 - 日期：2026-10-28
 - 作者：Qoder（基于 2026-10-28 envd 收编完成后的实测事实撰写）
 - 前置文档：
@@ -159,7 +159,7 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | 事件流 | `WatchDir`（:248，返回 `*StreamReader`） | ✅ 已用于 `watch_dir` | 流式原语可用 |
 | watcher 管理 | `CreateWatcher`/`GetWatcherEvents`/`RemoveWatcher` | ✅ 路由存在 | — |
 | **读文件字节** | `GET /files`（HTTP，非 RPC） | ✅ **已启用**（`a8ec5aaf` 读、`c0226f10` 全部读入口）：`view`/`edit`/`apply_patch` 均经 `readGuarded`，`cat` 降为兜底 | `Access.Read` 首选 `/files`，**闸门在唯一入口里**（不是每个调用点） |
-| **写文件字节** | `POST /files`（multipart） | ✅ **已启用**（`d936b751`）：`envdclient.WriteFile`，content 不再是 argv 元素，**2,450,000 字节实测逐字节落盘**（旧的 argv 天花板 1 MiB 不再适用）；通道不可用时回退 `printf` 并保留该天花板 | `Access.Write` 经 `/files` 不再受 argv 上限；两个协议陷阱已成文（见下） |
+| **写文件字节** | `POST /files`（multipart） | ✅ **已启用**（`d936b751`）：`envdclient.WriteFile`，content 不再是 argv 元素，**2,450,000 字节实测逐字节落盘**（旧的 argv 天花板 1 MiB 不再适用）；**NUL/UTF-16 写也已恢复**（`4302b807`，按通道能力判定），两个协议陷阱已成文（见下） | `Access.Write` 经 `/files` 不再受 argv 上限与 NUL 限制 |
 | **字节区间读** | `GET /files` + `Range` | ✅ **实测 206 且逐字节精确**（§3.3） | `RandomRead` 在 envd 上**为 true**（探测得，非硬编码） |
 | 条件读（304/ETag） | `GET /files` + `If-*` | ❌ **不可用**：`Last-Modified` 回的是**请求时间**，`ETag` 不发（§3.3 实测） | 禁止把 revision 建立在 `Last-Modified` 上，仍用内容哈希 |
 | 传输压缩 | `Accept-Encoding: gzip` | ❌ 部署版 **0.2.11 不生效**（`main` 分支源码已有该路径） | 能力必须探测，不得假设版本 |
@@ -695,9 +695,18 @@ socket 早停仅作日志证据，不作断言。
 两条子例各自承担重量（绕开后 `edit` 与 `apply_patch` 真的读到了 0600 root 的文件，而 `view`
 的测试仍绿）。
 
+**第二条结构先例（`4302b807`，供 §4.3 直接引用）**：拒绝应由**能力**判定，不应由后端身份判定。
+`binary_payload` 从"envd 拒绝 NUL"变成了"当前唯一可用通道是 argv，而 argv 放不下 NUL"——
+同一份代码里不再存在"因为这是 envd 所以拒"这类分支，只存在"因为没有该能力所以降级或拒绝"。
+这正是 §4.1 纪律 1（能力不表达策略）与 §4.3 降级矩阵要的形状，也是它第一次在真实代码里兑现。
+配套要求：拒绝文案必须**归因到缺失的能力**（含探测到的原因），否则使用者会把它读成工具的规矩。
+同轮记下一条**不属于本方案能力范围的边界**：MCP/JSON 字符串传输无法携带非 UTF-8 字节
+（Go 的 `encoding/json` 替换非法 UTF-8），local 与 envd 完全相同，因此"写任意二进制"仍只能
+走 `shell`/下载路径——把它写成"已支持"会是虚假的完工声明。
+
 **剩余项（按价值/风险排序）：**
 
-1. **NUL/UTF-16 写拒绝可以取消了**：`/files` 不受 argv/NUL 限制，因此 `binary_payload` 拒绝已无技术必需性，取消它就与 local 对齐。但这是**行为变更**，应有自己的测试与说明，所以不夹带在通道迁移里（§3.3.3 已登记）。
+1. ~~NUL/UTF-16 写拒绝可以取消了~~ → **已完成（`4302b807`）**：拒绝现在由**通道能力**决定（`refuseUncarriableWrite`），`edit` 的 UTF-16 编码保持往返已恢复。**同时记下一条我们修不了、也不假装能修的边界**：真机首次跳测报 `0xFF` 变成了 U+FFFD——**MCP/JSON 字符串传输本身无法携带非 UTF-8 字节**（Go 的 `encoding/json` 会替换非法 UTF-8），**local 后端完全相同**。所以本次提升覆盖 NUL（JSON 能表达）与编码保持往返，**不覆盖“写任意二进制”**；想写二进制仍只能走 `shell`/下载路径。
 2. **`apply_patch` 多文件时的闸门合并**：当前每个"祖先缺失"的文件各一次 `test -w`；一个 patch 内可以一次探测多个路径。待真实成本数据再决定，**不先优化**。
 3. **`view` 行窗口**（§8.9 唯一未关项，见上）。
 
