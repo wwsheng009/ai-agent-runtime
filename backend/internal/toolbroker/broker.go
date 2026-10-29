@@ -1692,7 +1692,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 
 	case ToolJobStart:
 		if b.Background == nil {
-			b.Background = background.NewManager(background.DefaultConfig())
+			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
 		command, _ := args["command"].(string)
 		command = strings.TrimSpace(command)

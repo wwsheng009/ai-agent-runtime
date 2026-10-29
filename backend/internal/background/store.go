@@ -40,6 +40,13 @@ type Store interface {
 	GetJob(ctx context.Context, jobID string) (*Job, error)
 }
 
+// JobForgetter removes a terminal job record. It is deliberately separate
+// from Store so an implementation that cannot delete records remains usable
+// for execution-only compositions.
+type JobForgetter interface {
+	ForgetJob(ctx context.Context, jobID string) error
+}
+
 // JobLister lists background jobs.
 type JobLister interface {
 	ListJobs(ctx context.Context, filter JobFilter) ([]Job, error)
@@ -232,6 +239,26 @@ func (s *SQLiteStore) SaveJob(ctx context.Context, job Job) error {
 // UpdateJob updates a background job record.
 func (s *SQLiteStore) UpdateJob(ctx context.Context, job Job) error {
 	return s.upsertJob(ctx, job)
+}
+
+// ForgetJob removes one record after the caller has verified that it is
+// terminal and owned by the calling session.
+func (s *SQLiteStore) ForgetJob(ctx context.Context, jobID string) error {
+	if s == nil {
+		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return fmt.Errorf("job id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM background_jobs WHERE id = ?`, jobID)
+	if err != nil {
+		return fmt.Errorf("forget background job: %w", err)
+	}
+	return nil
 }
 
 // terminalStatusesSQL lists the statuses that absorb writes: once a row is

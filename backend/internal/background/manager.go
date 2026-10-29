@@ -633,6 +633,104 @@ func (m *Manager) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	return nil, jobNotFoundError(jobID)
 }
 
+// WaitJob waits until a job reaches a terminal state or the caller's timeout
+// expires. A timed-out wait does not cancel the job; callers must use
+// CancelJob when they want to stop it.
+func (m *Manager) WaitJob(ctx context.Context, jobID string, timeout time.Duration) (*Job, bool, error) {
+	if m == nil {
+		return nil, false, fmt.Errorf("background manager is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, false, fmt.Errorf("job_id is required")
+	}
+
+	// A foreground shell wait is an observation of this job's terminal state;
+	// suppress a duplicate completion notice when the job settles while the
+	// caller is waiting.
+	m.BeginOutputWait(jobID)
+	defer m.EndOutputWait(jobID)
+
+	started := time.Now()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		job, err := m.GetJob(ctx, jobID)
+		if err != nil {
+			return nil, false, err
+		}
+		if isTerminalStatus(job.Status) {
+			return job, false, nil
+		}
+		if timeout > 0 && time.Since(started) >= timeout {
+			return job, true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return job, false, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// ForgetJob removes a terminal job after verifying its logical owner. A quick
+// foreground shell call uses this so the model never sees a job it did not
+// choose to start. Running jobs must be cancelled first.
+func (m *Manager) ForgetJob(ctx context.Context, jobID, sessionID string) error {
+	if m == nil {
+		return fmt.Errorf("background manager is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return fmt.Errorf("job_id is required")
+	}
+	job, err := m.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if !isTerminalStatus(job.Status) {
+		return fmt.Errorf("job is not terminal: %s", job.Status)
+	}
+	if owner := strings.TrimSpace(sessionID); owner != "" && strings.TrimSpace(job.SessionID) != owner {
+		return fmt.Errorf("job %s is not owned by session %s", jobID, owner)
+	}
+
+	// Remove from the live map first so a concurrent reader cannot observe a
+	// deleted durable row through the in-memory snapshot.
+	m.mu.Lock()
+	if managed := m.jobs[jobID]; managed != nil {
+		delete(m.jobs, jobID)
+	}
+	m.mu.Unlock()
+
+	if m.store != nil {
+		forgetter, ok := m.store.(JobForgetter)
+		if !ok {
+			m.mu.Lock()
+			if managed := m.managedJobFromStored(*job); managed != nil {
+				m.jobs[jobID] = managed
+			}
+			m.mu.Unlock()
+			return fmt.Errorf("background store does not support forgetting jobs")
+		}
+		if err := forgetter.ForgetJob(ctx, jobID); err != nil {
+			m.mu.Lock()
+			if managed := m.managedJobFromStored(*job); managed != nil {
+				m.jobs[jobID] = managed
+			}
+			m.mu.Unlock()
+			return err
+		}
+	}
+	return nil
+}
+
 // CancelJob requests cancellation of a background job.
 func (m *Manager) CancelJob(ctx context.Context, jobID string) (*Job, error) {
 	return m.cancelJobWithSource(ctx, jobID, "user_request")

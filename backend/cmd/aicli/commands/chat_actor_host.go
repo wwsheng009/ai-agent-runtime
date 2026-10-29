@@ -1389,12 +1389,16 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	// background 事件回调需要 host 上的 supervision 控制面，而 host 在 manager
 	// 之后装配：用 relay 延迟绑定，避免为了回调改 background 包的构造顺序。
 	backgroundEvents := &localBackgroundJobEventRelay{}
-	backgroundManager := buildLocalChatBackgroundManager(runtimeConfig, backgroundEvents.handle)
+	var backgroundManager *background.Manager
+	if toolManager != nil {
+		backgroundManager = buildLocalChatBackgroundManager(runtimeConfig, backgroundEvents.handle)
+	}
 	// detach=true 收敛（2026-10-11）：注入 toolkit↔broker 缝，让 shell 工具的
 	// detach 走受管后台作业（输出捕获 + 生命周期 + 进程树 + supervision 唤醒），
 	// 而不是弃用的 fire-and-forget 启动器。
 	if toolManager != nil && backgroundManager != nil {
 		toolManager.SetBackgroundSubmitter(runtimetools.NewBackgroundSubmitter(backgroundManager))
+		toolManager.SetShellJobRuntime(runtimetools.NewShellJobRuntime(backgroundManager))
 	}
 	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore
 	var globalAgentStore agentcontrol.AgentRegistryStore
@@ -3476,9 +3480,6 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, on
 		return nil
 	}
 	cfg := runtimeConfig.Background
-	if strings.TrimSpace(cfg.StorePath) == "" && strings.TrimSpace(cfg.StoreDSN) == "" && strings.TrimSpace(cfg.LogDir) == "" {
-		return nil
-	}
 	return background.NewManager(background.Config{
 		MaxOutputBytes:          cfg.MaxOutputBytes,
 		DefaultTimeout:          cfg.DefaultTimeout,
