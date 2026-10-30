@@ -453,6 +453,12 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
 `sort=modified` 只用 `ModTime()`，远端可诚实支持，S3 已把它接进 seam 并用测试钉住方向
 （rg 的 `--sort=modified` 是**升序=最旧优先**，`--sortr` 才是降序——本仓的比较器就是这么实现的）。
 
+（2026-10-28 补钉：推荐的"拒绝"路径落地为 `TestGrepSortAccessedOverARemoteSourceIsDeclinedNotFaked`
+——同夹具对照（`modified` 在同一 accessor 上必须成功，防止"因别的原因报错也算拒绝"）+ 拒绝必须点名
+key 与缺失能力（`sort=accessed` 且含"不可用"）。变异（把拒绝换成 `info.ModTime()` 近似，即 Q4 否决的
+方案 2，可编译）当场红、逐字节还原后复绿；Windows 与 Linux 双端均绿。此钉同时是 S6 的哨兵：envd
+若未来能从 wire 诚实地带上 atime/btime，须先重读这条测试再放开。）
+
 ## 5. 风险（按已发生的先例写，不写抽象担忧）
 
 | 风险 | 先例 | 对策 |

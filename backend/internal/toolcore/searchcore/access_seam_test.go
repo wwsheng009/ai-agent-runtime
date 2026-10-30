@@ -695,7 +695,8 @@ func TestGlobOrderFollowsTheAccessorsTimes(t *testing.T) {
 // boundary this exposes: sort=accessed and sort=created read platform-specific
 // Stat_t fields through FileInfo.Sys(), which an accessor over another transport
 // cannot honestly supply - those two must stay declined for remote sources rather
-// than approximated. Only "modified" is exercised here.
+// than approximated. Only "modified" is exercised here; the refusal itself is pinned
+// by TestGrepSortAccessedOverARemoteSourceIsDeclinedNotFaked below.
 func TestGrepSortFollowsTheAccessorsTimes(t *testing.T) {
 	root := t.TempDir()
 	first := filepath.Join(root, "f1.txt")
@@ -747,6 +748,43 @@ func TestGrepSortFollowsTheAccessorsTimes(t *testing.T) {
 	}
 	if len(remote.Matches) != 2 || filepath.Base(remote.Matches[0].File) != "f1.txt" {
 		t.Fatalf("grep sorted by this machine's mtimes instead of the accessor's: %v", remote.Matches)
+	}
+}
+
+// TestGrepSortAccessedOverARemoteSourceIsDeclinedNotFaked closes the boundary the
+// test above only described: sort=accessed and sort=created read platform Stat_t
+// fields through FileInfo.Sys(), and an accessor over another transport cannot
+// honestly supply them. On every host the answer must be a refusal that names the
+// key and the missing capability - never an order derived from this machine's clock,
+// and never a fabricated stamp. If a future accessor can carry honest access times,
+// this test must be re-read deliberately, not relaxed by accident.
+func TestGrepSortAccessedOverARemoteSourceIsDeclinedNotFaked(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "a.txt")
+	access := &virtualAccess{
+		files: map[string][]byte{file: []byte("needle\n")},
+		dirs:  map[string]bool{root: true},
+		times: map[string]time.Time{file: time.Unix(1_700_000_000, 0)},
+	}
+	shared := GrepOptions{Path: root, Limit: 10, Pattern: "needle", Access: access}
+
+	// Same fixture, honest key: if this fails, the refusal below proves nothing.
+	control := shared
+	control.SortKey = "modified"
+	control.SortSet = true
+	if _, err := Grep(context.Background(), control); err != nil {
+		t.Fatalf("the control (sort=modified) must succeed on this fixture: %v", err)
+	}
+
+	refused := shared
+	refused.SortKey = "accessed"
+	refused.SortSet = true
+	_, err := Grep(context.Background(), refused)
+	if err == nil {
+		t.Fatal("sort=accessed over an accessor must be declined: no honest access time exists over this transport")
+	}
+	if !strings.Contains(err.Error(), "sort=accessed") || !strings.Contains(err.Error(), "不可用") {
+		t.Fatalf("the refusal must name the key and the missing capability, got: %v", err)
 	}
 }
 
