@@ -61,6 +61,14 @@ rules:
 ```
 
 > 注意：`deny_tools` / `allow_tools`（以及 `--deny-tool` / `--allow-tool`）是**硬精确工具名**，写 `Shell(git push:*)` 这类语法会被拒绝装载；specifier 语法只在 `rules[].tools` 里生效。
+>
+> **一个例外：结果契约的只读 companion 会被自动补入。** `shell` 超时后会把执行提升为 job 引用，模型必须能调用 `job_output` 才读得到后续输出，因此允许 `shell` 时会自动带上 `job_output`（只读，不扩大副作用面）。这条补入走契约授权路径，所以：
+>
+> - **`--deny-tool job_output` 优先**。同时允许 `shell` 并显式拒绝 `job_output` 时，`shell` 会被撤下——不会给你一个"能起 job 却读不到结果"的工具；
+> - 起停/监控类工具（`job_start`、`job_cancel`）**不会**被自动补入，仍须显式允许；
+> - 空工具面不会被复活：`DisableTools` 或空白名单下不会有补入。
+>
+> 远程工具面的同类行为见 [user-guide/aicli-remote-tools.md](../user-guide/aicli-remote-tools.md) §5.5。
 
 ### 0.3 怎么进这些模式
 

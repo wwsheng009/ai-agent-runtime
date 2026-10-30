@@ -28,6 +28,15 @@ const (
 	MetadataEssential     = "essential"
 	MetadataAliasOf       = "alias_of"
 	MetadataContractual   = "contractual"
+	// MetadataRequiredBy lists the producer tools that declare this tool as an
+	// auto-exposed result-contract dependency. It answers "why is job_output
+	// here when I only allowed shell?" without needing request-assembly facts:
+	// the relation is a static property of the registry declarations.
+	//
+	// Only producers whose dependency sets AutoExpose are listed, because only
+	// those can make the tool appear on their own. Recommended-only relations
+	// do not add tools, so listing them here would overstate the surface.
+	MetadataRequiredBy = "required_by"
 	// MetadataContractSource describes why a registry entry belongs to the
 	// runtime contract (for example "output_contract"). It is not a grant
 	// decision: an explicit profile allowlist can also admit the same tool.
@@ -175,6 +184,41 @@ func applyRegistryMetadata(metadata map[string]interface{}, name string) {
 		canonical = ""
 	}
 	metadata[MetadataAliasOf] = canonical
+	// required_by 只在真有生产者声明时写入：绝大多数工具没有依赖关系，
+	// 全量写空数组只会放大 payload，也会让"缺失"与"空"难以区分。
+	if requiredBy := autoExposeProducersOf(name); len(requiredBy) > 0 {
+		metadata[MetadataRequiredBy] = requiredBy
+	}
+}
+
+// autoExposeProducersOf returns the producer tools that auto-expose name.
+//
+// This is a static registry fact, not a per-request admission decision: it says
+// "shell would pull job_output in", not "this request did". Keeping the two
+// apart matters because the observation payload must not imply that something
+// was granted when the tool came from an explicit allowlist instead.
+func autoExposeProducersOf(name string) []string {
+	target := toolregistry.Canonical(name)
+	if target == "" {
+		return nil
+	}
+	var producers []string
+	for _, entry := range toolregistry.Entries() {
+		for _, dep := range entry.Dependencies {
+			if !dep.AutoExpose {
+				continue
+			}
+			if toolregistry.Canonical(dep.Tool) == target {
+				producers = append(producers, entry.Name)
+				break
+			}
+		}
+	}
+	if len(producers) == 0 {
+		return nil
+	}
+	sort.Strings(producers)
+	return producers
 }
 
 // buildGroups 用 registry 分组目录 + 本目录计数生成 groups[]。

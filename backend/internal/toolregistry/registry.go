@@ -94,7 +94,23 @@ type Entry struct {
 	//
 	// 与 Essential 的区别：Essential 不影响可用性；Contractual 影响可用性，
 	// 但授权来源是契约而不是用户名单。
+	//
+	// 与 Dependencies 的关系：Contractual 是**无条件**契约（与启用了什么工具
+	// 无关，恒定授予）；Dependencies 是**条件性**契约（只有生产者出现在生效
+	// 工具面上才触发）。两者不合并，但共用同一条授权实现路径——条件性契约
+	// 的补入结果最终表达为 policy.ContractualTools 成员，见
+	// docs/plan/tool-surface-dependency-auto-exposure-design-20261029.md §3.4。
 	Contractual bool
+	// Dependencies 声明**结果/数据契约依赖**，不是函数调用依赖。
+	//
+	// 语义：本工具（生产者）的输出里会带回一个引用，消费它需要 Tool 指定的
+	// 消费者工具。例如 shell 超时后 promoted 成 job 引用，模型必须能调用
+	// job_output 才能读到结果——shell 从不"调用"job_output，但没有它工具面
+	// 就是断链的。
+	//
+	// 消费方（local aicli policy / remote-tools enabledTools）在装配阶段做
+	// 依赖闭包，见 internal/toolsurface.ResolveDependencies。
+	Dependencies []ToolDependency
 	// ToolkitBuiltin 为真表示该内置工具的**定义**由 internal/toolkit/tools 提供，
 	// 且必须由 toolkit 装配点（internal/tools.registerBuiltinToolkitTools 的
 	// builtinToolkitRegistrations 构造表）注册进运行时注册表。
@@ -124,6 +140,30 @@ type Entry struct {
 	PlanWrite  bool
 }
 
+// DependencyMode 是依赖的强制级别。
+type DependencyMode string
+
+const (
+	// DependencyRequired 缺失即装配失败（fail closed）。
+	DependencyRequired DependencyMode = "required"
+	// DependencyRecommended 缺失只告警，不影响装配。
+	DependencyRecommended DependencyMode = "recommended"
+)
+
+// ToolDependency 是一条结果/数据契约依赖的声明。
+type ToolDependency struct {
+	// Tool 是消费者工具的 canonical name（解析前先 Normalize）。
+	Tool string
+	// Mode 是强制级别。
+	Mode DependencyMode
+	// AutoExpose 为真表示生产者出现在生效面时，消费者应被自动补入。
+	// 只有只读 consumer 才允许置真：自动暴露不得扩大控制面权限。
+	AutoExpose bool
+	// Reason 用于启动日志、doctor 与错误文本。禁止只写"depends on"——
+	// 必须说明**为什么**需要（例如 promoted 结果必须可消费）。
+	Reason string
+}
+
 // sharedExposure 是内置工具的默认暴露面。
 var sharedExposure = []Exposure{ExposureShared}
 
@@ -140,7 +180,33 @@ var tuiLocalExposure = []Exposure{ExposureTUILocal}
 // 每一条都必须能通过 registry_contract_test.go 与 toolkit 真实注册表对账。
 var builtinEntries = []Entry{
 	// ---- 命令执行（shell 组）----
-	{Name: "shell", Aliases: []string{"bash", "execute_shell_command"}, Group: GroupShell, Exposure: sharedExposure, ShellLike: true, ToolkitBuiltin: true},
+	// shell 是 promoted 结果的生产者：命令超时会被提升为 job 引用，模型必须
+	// 能调用 job_output 才能读到后续输出。它从不"调用"job_output，这是结果
+	// 契约依赖，不是函数调用依赖。
+	{Name: "shell", Aliases: []string{"bash", "execute_shell_command"}, Group: GroupShell, Exposure: sharedExposure, ShellLike: true, ToolkitBuiltin: true,
+		Dependencies: []ToolDependency{
+			{
+				Tool:       "job_output",
+				Mode:       DependencyRequired,
+				AutoExpose: true,
+				Reason:     "promoted shell result is a job reference; its output must be consumable",
+			},
+			{
+				Tool:   "job_cancel",
+				Mode:   DependencyRecommended,
+				Reason: "a long-running shell job may need an explicit cancel path",
+			},
+			{
+				Tool:   "job_list",
+				Mode:   DependencyRecommended,
+				Reason: "discover promoted jobs when the reference was not remembered",
+			},
+		}},
+	// aicli_exec 同样是 ShellLike，但它**不是** job 生产者：超时直接返回
+	// context.DeadlineExceeded 失败结果（toolkit/tools/aicli_exec.go），既不返回
+	// job id 也不写 next_action，因此不声明依赖。判据见设计文档 §3.2.1——
+	// 只有"超时后仍返回 job id 并要求后续读取"的工具才算生产者，不能只看
+	// ShellLike 标记。
 	{Name: "aicli_exec", Group: GroupShell, Exposure: sharedExposure, ShellLike: true, ToolkitBuiltin: true},
 
 	// ---- 读取（read 组）----
@@ -196,7 +262,18 @@ var builtinEntries = []Entry{
 	{Name: "plan_review", Group: GroupOrchestration, Exposure: tuiLocalExposure, Essential: true},
 
 	// job 家族（命名契约 B1）
-	{Name: "job_start", Aliases: []string{"background_task"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
+	// job_start 总是返回 job 引用，消费者是 job_output。
+	// job_search 不在此列：remote-tools 侧没有该实现（见 jobs_tools.go 的
+	// jobTools），recommended 若指向不存在的工具只会制造噪声告警。
+	{Name: "job_start", Aliases: []string{"background_task"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true,
+		Dependencies: []ToolDependency{
+			{
+				Tool:       "job_output",
+				Mode:       DependencyRequired,
+				AutoExpose: true,
+				Reason:     "job_start always returns a job reference that must be consumable",
+			},
+		}},
 	{Name: "job_output", Aliases: []string{"task_output"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	{Name: "job_list", Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	{Name: "job_search", Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},

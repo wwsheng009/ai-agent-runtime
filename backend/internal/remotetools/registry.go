@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -108,6 +109,13 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		return nil, err
 	}
 	registry := toolkit.NewRegistry()
+	// Fail closed: a required result-contract dependency that cannot be exposed
+	// (denied, or not auto-exposable) means the surface would hand the model a
+	// reference it cannot consume. Refuse to build rather than ship a broken
+	// surface.
+	if _, resolution := cfg.resolveEnabledTools(); resolution.Failed() {
+		return nil, fmt.Errorf("remote tool surface: %w", errors.Join(resolution.Errors...))
+	}
 	enabled := map[string]bool{}
 	for _, name := range cfg.enabledTools() {
 		enabled[name] = true

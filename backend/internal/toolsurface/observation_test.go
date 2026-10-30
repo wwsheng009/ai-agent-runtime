@@ -172,3 +172,38 @@ func observationTotalGroupCounts(groups []Group) int {
 	}
 	return total
 }
+
+// required_by 说明"这个工具是被哪个生产者依赖才可能出现的"，是静态登记事实，
+// 不是本次请求的授权结论。用户只允许 shell 却在 /tools 看到 job_output 时，
+// 这个键要能解释原因。
+func TestEnrichMarksAutoExposeProducers(t *testing.T) {
+	observation := Enrich([]runtimetypes.ToolDefinition{{Name: "job_output"}}, Ledger{}, nil)
+	require.Len(t, observation.Tools, 1)
+	metadata := observation.Tools[0].Metadata
+	producers, ok := metadata[MetadataRequiredBy].([]string)
+	require.True(t, ok, "job_output should carry required_by producers, got %v", metadata[MetadataRequiredBy])
+	require.Contains(t, producers, "shell")
+	require.Contains(t, producers, "job_start")
+
+	// 只读消费者本身不依赖任何工具，不应出现该键（避免 payload 虚胖）。
+	none := Enrich([]runtimetypes.ToolDefinition{{Name: "view"}}, Ledger{}, nil)
+	require.NotContains(t, none.Tools[0].Metadata, MetadataRequiredBy)
+}
+
+// 只有 AutoExpose 的生产者才计入 required_by：recommended 关系不补工具，
+// 列进去会让人误以为该工具会因依赖自动出现。
+func TestEnrichRequiredByIgnoresRecommendedOnlyRelations(t *testing.T) {
+	observation := Enrich([]runtimetypes.ToolDefinition{{Name: "job_cancel"}}, Ledger{}, nil)
+	require.Len(t, observation.Tools, 1)
+	// job_cancel 只被声明为 recommended，不参与自动补入。
+	require.NotContains(t, observation.Tools[0].Metadata, MetadataRequiredBy)
+}
+
+// 别名拼写按 canonical 归一后再判定依赖归属。
+func TestEnrichRequiredByNormalizesAlias(t *testing.T) {
+	observation := Enrich([]runtimetypes.ToolDefinition{{Name: "task_output"}}, Ledger{}, nil)
+	require.Len(t, observation.Tools, 1)
+	producers, ok := observation.Tools[0].Metadata[MetadataRequiredBy].([]string)
+	require.True(t, ok, "alias spelling should still report producers")
+	require.Contains(t, producers, "shell")
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ import (
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageledger"
@@ -2950,7 +2952,142 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 		policy.AllowlistEnabled = true
 		policy.AllowedTools = map[string]bool{}
 	}
+	// 结果契约依赖闭包（见 internal/toolsurface/dependency.go）：
+	// `--allow-tool shell` 会让模型拿到 promoted job 引用，但 shell 从不"调用"
+	// job_output——不补入的话工具面就是断链的。补入结果走 ContractualTools
+	// 授权路径，deny 恒优先、空 allowlist 不重启、子代理继承三条不变量自动成立。
+	if summary := applyLocalToolSurfaceDependencies(policy); summary.HasChanges() {
+		// 只在实际偏离用户 allowlist 时输出一行，避免正常会话被噪声淹没。
+		logpkg.Infof("tool surface dependency resolved: %s", summary.String())
+	}
 	return policy
+}
+
+// applyLocalToolSurfaceDependencies 在本地策略上闭合结果契约依赖。
+//
+// 只在 allowlist 生效时才有意义：AllowlistEnabled 为 false 表示"全部允许"，
+// job_output 本来就可调用，无需补入（补入反而会让契约集合虚胖）。
+//
+// 失败策略与 remote 不同，这是有意的：
+//   - remote 是"构建一个工具面"，失败就拒绝构建（见 remotetools/registry.go）；
+//   - local 这里是"修饰一个已存在的会话策略"，函数没有 error 通道，而整面
+//     清空对用户过于粗暴。因此改为**逐个撤掉断链的生产者**并留下明确日志：
+//     宁可暂时没有 shell，也不给模型一个"能起 job 但读不到结果"的工具。
+//
+// 撤生产者后必须重新解析：撤掉 shell 可能连带让 job_output 失去来源，也可能
+// 让另一个生产者（job_start）暴露同样的缺口，所以循环到稳定为止。
+func applyLocalToolSurfaceDependencies(policy *runtimepolicy.ToolExecutionPolicy) localToolSurfaceSummary {
+	var summary localToolSurfaceSummary
+	if policy == nil || !policy.AllowlistEnabled {
+		return summary
+	}
+	const maxPasses = 4
+	for pass := 0; pass < maxPasses; pass++ {
+		// Base 必须包含已在面上的契约工具，否则每轮都会把已授予的 companion
+		// 当成"新补入"，摘要重复且闭包不幂等。契约工具确实在生效面上，把它
+		// 们算进 Base 与真实工具面一致。
+		base := exactAllowlistNames(policy.AllowedTools)
+		base = append(base, exactAllowlistNames(policy.ContractualTools)...)
+		resolution := toolsurface.ResolveDependencies(toolsurface.SurfaceResolutionInput{
+			Base:     base,
+			Denied:   exactAllowlistNames(policy.DeniedTools),
+			ReadOnly: policy.ReadOnly,
+		})
+		if len(resolution.BrokenProducers) == 0 {
+			grants := make([]string, 0, len(resolution.AutoExposed))
+			for _, name := range resolution.AutoExposed {
+				// 已经被 allowlist（含通配）放行的不必再进契约集合。
+				if policy.AllowsTool(name) {
+					continue
+				}
+				grants = append(grants, name)
+			}
+			if len(grants) > 0 {
+				policy.GrantConditionalContractualTools(grants...)
+				summary.Granted = append(summary.Granted, grants...)
+			}
+			for _, warning := range resolution.Warnings {
+				summary.Warnings = append(summary.Warnings, warning)
+				logpkg.Warnf("tool surface dependency: %s", warning)
+			}
+			return summary
+		}
+		for _, producer := range resolution.BrokenProducers {
+			summary.Withdrawn = append(summary.Withdrawn, producer)
+			for _, err := range resolution.Errors {
+				summary.Errors = append(summary.Errors, err.Error())
+			}
+			removeAllowedTool(policy, producer)
+		}
+	}
+	return summary
+}
+
+// localToolSurfaceSummary 是一次本地依赖闭合的可观测结果。
+//
+// 之所以要把它返回出去而不是只打日志：这三类变化都会让"用户的 allowlist"与
+// "实际生效工具面"不一致，属于必须可解释的差异。
+//   - Granted：因依赖被补入的只读 companion（例如 job_output）；
+//   - Withdrawn：因必需依赖无法满足而被撤下的生产者（例如 deny 了 job_output 的 shell）；
+//   - Warnings/Errors：recommended 缺失与失败原因。
+type localToolSurfaceSummary struct {
+	Granted   []string
+	Withdrawn []string
+	Warnings  []string
+	Errors    []string
+}
+
+// HasChanges 报告工具面是否偏离了用户的原始 allowlist。
+func (s localToolSurfaceSummary) HasChanges() bool {
+	return len(s.Granted) > 0 || len(s.Withdrawn) > 0
+}
+
+// String 生成一行可读摘要，供启动日志与诊断使用。
+func (s localToolSurfaceSummary) String() string {
+	parts := make([]string, 0, 2)
+	if len(s.Granted) > 0 {
+		sort.Strings(s.Granted)
+		parts = append(parts, "auto-exposed "+strings.Join(s.Granted, ", "))
+	}
+	if len(s.Withdrawn) > 0 {
+		sort.Strings(s.Withdrawn)
+		parts = append(parts, "withdrawn "+strings.Join(s.Withdrawn, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// exactAllowlistNames 返回名单里的精确名字（丢掉通配模式）。
+//
+// 通配项无法枚举成具体工具，交给 policy.AllowsTool / DeniesTool 在授权判定时
+// 处理；依赖闭包只对确定性名字做推断。
+func exactAllowlistNames(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for name, ok := range set {
+		if !ok || name == "" {
+			continue
+		}
+		if strings.ContainsAny(name, "*?") {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// removeAllowedTool 从 allowlist 中撤掉某工具及其别名拼写。
+func removeAllowedTool(policy *runtimepolicy.ToolExecutionPolicy, name string) {
+	if policy == nil || policy.AllowedTools == nil {
+		return
+	}
+	canonical := toolregistry.Canonical(name)
+	for key := range policy.AllowedTools {
+		if key == name || (canonical != "" && toolregistry.Canonical(key) == canonical) {
+			delete(policy.AllowedTools, key)
+		}
+	}
 }
 
 // applyLocalChatToolObservation 接线知识层工具观察链（TUI 与 ACP 共用，

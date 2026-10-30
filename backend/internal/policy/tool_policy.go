@@ -212,6 +212,52 @@ func buildContractualToolsMap() map[string]bool {
 	return set
 }
 
+// GrantConditionalContractualTools 把"条件性契约"工具并入 ContractualTools。
+//
+// 这是结果契约依赖（toolregistry.Entry.Dependencies 的 AutoExpose）唯一的授权
+// 落地面：调用方（local policy 派生 / remote-tools 装配）解析出需要补入的消费者
+// 后，必须经由本方法并入契约集合，而**不是**直接写 AllowedTools。
+//
+// 为什么必须走这里：并入契约集合后，授权自动沿用 AllowTool 的既有判定顺序
+// （deny → contractual → BlockDelegation → allowlist → capability → read-only），
+// 于是三条既有不变量无需重写就成立：
+//   - deny 恒优先：显式拒绝的 companion 不会被契约救回来；
+//   - 空 allowlist 不重启：contractualToolAllowed 对空面直接返回 false；
+//   - 子代理继承：Clone 与本集合一起派生，appendContractualToolNames 读同一集合。
+//
+// 与 toolregistry.Contractual 的关系见 Entry.Contractual 的注释：那是无条件
+// 契约，本方法是条件性契约；两者共用这一条授权路径，不新增判定分支。
+func (p *ToolExecutionPolicy) GrantConditionalContractualTools(names ...string) {
+	if p == nil || len(names) == 0 {
+		return
+	}
+	additions := make([]string, 0, len(names))
+	for _, name := range names {
+		normalized := toolregistry.Normalize(name)
+		if normalized == "" {
+			continue
+		}
+		if p.ContractualTools != nil && p.ContractualTools[normalized] {
+			continue
+		}
+		// deny 恒优先：显式拒绝的名字不进契约集合，避免出现"in deny set yet
+		// granted"的自相矛盾状态（AllowTool 也会先拦，但状态本身不该出现）。
+		if p.DeniesTool(normalized) {
+			continue
+		}
+		additions = append(additions, normalized)
+	}
+	if len(additions) == 0 {
+		return
+	}
+	if p.ContractualTools == nil {
+		p.ContractualTools = make(map[string]bool, len(additions))
+	}
+	for _, name := range additions {
+		p.ContractualTools[name] = true
+	}
+}
+
 // DeniesTool reports whether the deny list rejects the tool: exact entries
 // (raw or normalized spelling) or wildcard patterns. Exported for callers
 // that need list membership semantics rather than a full AllowTool

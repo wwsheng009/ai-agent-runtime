@@ -10,6 +10,7 @@ import (
 
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 )
 
 // Tool names are the canonical (unprefixed) identities. The registry applies the
@@ -40,7 +41,64 @@ var shellTools = []string{ToolShell}
 //   - custom: exactly cfg.Tools.
 //
 // In every case cfg.Tools acts as an additional narrowing filter when non-empty.
+//
+// enabledTools returns the effective remote tool surface: the profile/allowlist
+// baseline (enabledToolsBase) with result-contract dependencies closed over.
+//
+// A promoted shell result is a job reference. Without job_output the surface is
+// broken even though every individual tool works, so the closure runs here — at
+// the assembly point — rather than being left to the model to notice.
+//
+// Names are kept literal: the remote tools allowlist matches exact strings
+// (see the allowed[name] check below), so no alias rewriting is applied.
+// Declarations are still looked up canonically inside the resolver.
 func (c *Config) enabledTools() []string {
+	names, _ := c.resolveEnabledTools()
+	return names
+}
+
+// resolveEnabledTools is enabledTools plus the resolution detail callers need
+// for diagnostics and fail-closed handling.
+func (c *Config) resolveEnabledTools() ([]string, toolsurface.SurfaceResolution) {
+	base := c.enabledToolsBase()
+	resolution := toolsurface.ResolveDependencies(toolsurface.SurfaceResolutionInput{
+		Base:         base,
+		ReadOnly:     c.ReadOnly,
+		LiteralNames: true,
+	})
+	return resolution.Tools, resolution
+}
+
+// EffectiveTools returns the tool names the remote surface will advertise,
+// including any tool added only to satisfy a result-contract dependency.
+//
+// Exported for diagnostics (doctor, tools listing). Prefer enabledTools for
+// internal assembly so the call sites stay few and reviewable.
+func (c *Config) EffectiveTools() []string {
+	names, _ := c.resolveEnabledTools()
+	return names
+}
+
+// AutoExposedTools returns the tools that are present only because a
+// dependency required them (for example job_output alongside shell).
+//
+// This is the observable half of the dependency closure: without it a user who
+// wrote tools:["shell"] cannot tell why tools/list also shows job_output.
+func (c *Config) AutoExposedTools() []string {
+	_, resolution := c.resolveEnabledTools()
+	return append([]string(nil), resolution.AutoExposed...)
+}
+
+// ToolSurfaceWarnings returns non-fatal surface notes (for example a
+// recommended companion that is not exposed). Empty when the surface is clean.
+func (c *Config) ToolSurfaceWarnings() []string {
+	_, resolution := c.resolveEnabledTools()
+	return append([]string(nil), resolution.Warnings...)
+}
+
+// enabledToolsBase is the surface implied by profile, jobs/artifacts config,
+// optional tools and the tools allowlist, before dependency closure.
+func (c *Config) enabledToolsBase() []string {
 	base := make([]string, 0, len(readOnlyTools)+len(writeTools)+len(shellTools))
 	switch c.Profile {
 	case ProfileCustom:
