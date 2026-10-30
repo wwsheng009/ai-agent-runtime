@@ -14,7 +14,7 @@
 | 目标主机 | `racknerd-933b75f` / Ubuntu / x86_64，`/opt/aicli-gateway`、`/opt/ai-gateway-edge` |
 | 现有服务 | `aicli-gateway`（`127.0.0.1:8080`，`https://aicli.ttai.online`）、`ai-gateway-edge`（`:80/:443`，admin `127.0.0.1:19100`）、`ai-gateway`（`127.0.0.1:18443`） |
 | Edge 版本 | 服务器二进制构建自 **`e710d1181`**（当前 ai-gateway HEAD，`v0.1.7-0.20261012230643-e710d1181212+dirty`），`configtest` 通过 → **未替换、未重启**（功能与本地构建一致，替换只会徒增 TLS 入口重启风险） |
-| aicli-gateway | **v74 已上线**（2026-10-30T00:50:27Z，干净 release worktree 构建自 `dc314b0d` = `f29f8730` + v74 控制台，`vcs.modified=false`）：`/opt/aicli-gateway/gateway`，SHA-256 `4cd06394…ec6f2`，回滚点 `gateway.before-20261030T005026Z`（v73）；`/api/health` 正常，控制台 `/` 与 `app.js?v=74` 已生效 |
+| aicli-gateway | **v75 已上线**（2026-10-30T01:06:31Z，干净 release worktree 构建自 `843d7145` = `dc314b0d` + v75 控制台，`vcs.modified=false`）：`/opt/aicli-gateway/gateway`，SHA-256 `64e4a2da…f475`，回滚点 `gateway.before-20261030T010630Z`（v74）；`/api/health` 正常，控制台 `/` 与 `app.js?v=75` 已生效 |
 | Edge 路由 | 既有规则已把 `aicli.ttai.online/*` 整站转发到 `aicli-console`(`127.0.0.1:8080`)，**无需改配置**；`/m/`、`/gw/agent` 天然随主机转发 |
 | 公网验收 | 测试节点 `avcmh7sc` → `https://aicli.ttai.online/m/avcmh7sc/mcp`；`initialize` 200（Cloudflare `cf-ray` 可见）、`tools/list` 返回 `glob/grep/ls/view`、`tools/call ls` 读到服务器工作区 `hello.txt`；错令牌 401、未知 slug 404 |
 | 清理 | 测试节点/设备令牌/挂载令牌/挂载记录全部撤销并清除（`mount-tokens.json` total=0、`mounts.json` 空），`live_nodes` 回到 **4**、`nodes=14`，与部署前基线一致 |
@@ -28,15 +28,16 @@
 | 二进制 | `/opt/aicli-gateway/gateway`（服务单元 `aicli-gateway.service` 的 `ExecStart` 路径；不是历史文档里的 `/opt/aicli-gateway/bin/aicli-gateway`） |
 | 数据目录 | `/etc/aicli-gateway`（`registry.json`、设备/挂载令牌、Web Push 等） |
 | 控制台 | 站点根路径 `/`（`/console/` 是 SPA fallback，不是资源根；资源实际为 `/app.js`、`/style.css`） |
-| 构建 | 主分支提交 `51052690`（v74）cherry-pick 到 `f29f8730` 的干净 worktree（`tmp/deploy/v74-head`，release build `dc314b0d`），`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"`，二进制 `vcs.modified=false` |
-| 部署时间 | 2026-10-30T00:50:27Z（`MainPID=2844644`） |
-| 公网验收 | `/` 返回 `style.css?v=74` / `app.js?v=74`；`app.js?v=74` 200（342089 bytes，SHA-256 `0f5edabc…0853`，与本地一致），含自适应纯文本流式、30fps rAF、底部校准；`style.css?v=74` 含 `content-visibility:auto` / `contain-intrinsic-size:auto 140px`；`/api/health` 200，`live_nodes=6`、`nodes=6` |
-| 回滚点 | `/opt/aicli-gateway/gateway.before-20261030T005026Z`（v73 SHA-256 `2261cbf6…af798`） |
+| 构建 | 主分支提交 `0605a46e`（v75）cherry-pick 到 v74 release build `dc314b0d` 的干净 worktree（`tmp/deploy/v75-head`，release build `843d7145`），`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`，`-trimpath -ldflags "-s -w"`，二进制 `vcs.modified=false` |
+| 部署时间 | 2026-10-30T01:06:31Z（`MainPID=2845553`） |
+| 公网验收 | `/` 返回 `style.css?v=75` / `app.js?v=75`；`app.js?v=75` 200（343701 bytes，SHA-256 `7cea0b86…ac663`，与本地一致），含 `chat-stream-chunk` / 自适应纯文本流式 / 30fps rAF / 底部校准；`style.css?v=75` 含消息行与流式块两层 `content-visibility:auto`；`/api/health` 200，`live_nodes=6`、`nodes=6` |
+| 回滚点 | `/opt/aicli-gateway/gateway.before-20261030T010630Z`（v74 SHA-256 `4cd06394…ec6f2`） |
 
 > 运维注意：v70 部署脚本修正了 `curl | grep -q` 提前关管道导致的 curl 23 误判；健康与版本检查改为先落临时文件再 grep。
 > v68 的首次探测过早、v69 的管道误判均已在后续脚本中修正。
 > v73 首次构建虽标记 `f29f8730`，但工作区有未提交依赖改动（`vcs.modified=true`）；已改用干净 worktree 重建并覆盖部署，临时 v73 备份已删除，回滚点仍是 v72。
 > v74 修复长会话流式卡顿：屏外消息行跳过布局、30fps rAF 合帧、长正文自适应纯文本追加、首屏延迟底部校准；400 行历史 + 29KB 实时正文实测 p95≈33ms、无 >50ms 长任务。
+> v75 将长正文纯文本按行边界切成约 1.2KB 的独立流式块。桌面 400 行 + 29KB 实测 p95≈17ms、长任务 0；4× CPU 节流的 390×844 移动视口下 400 行 + 29KB 布局累计 0.78s（v74 为 9.9s）。短回复仍保留实时 Markdown，终稿始终按 Markdown 渲染。
 
 ## 1. 实测现状（本文所有结论的来源）
 
