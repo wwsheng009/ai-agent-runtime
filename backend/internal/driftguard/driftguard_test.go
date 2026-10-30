@@ -43,14 +43,14 @@ var coreBaselines = map[string]int{
 	"viewcore": 0,
 	"lscore":   0,
 	// searchcore: S1 moved the handler-level host reads (glob's search root, the
-	// ignore_file/pattern_file anchor) and S2a moved the per-candidate file concern -
-	// the content read, the binary probe and the size/regular gate for the same file -
-	// behind toolcore.Access. 24→18 is this guard's own measurement after each step,
-	// not arithmetic. What remains is the pattern-file read, the context re-read, the
-	// mtime sorts, the ignore loading, the two walkers and the platform identity file;
-	// root-shape Stats move with the walkers on purpose, because enumerating one
-	// machine while stat-ing another is the same mistake one level up.
-	"searchcore": 18,
+	// ignore_file/pattern_file anchor), S2a moved the per-candidate file concern (the
+	// content read, the binary probe and the size/regular gate for the same file), and
+	// S2b moved the pattern-file read. 24→17 is this guard's own measurement after
+	// each step, not arithmetic. What remains is the context re-read, the mtime sorts,
+	// the ignore loading, the two walkers and the platform identity file; root-shape
+	// Stats move with the walkers on purpose, because enumerating one machine while
+	// stat-ing another is the same mistake one level up.
+	"searchcore": 17,
 	"mutatecore": 27,
 }
 

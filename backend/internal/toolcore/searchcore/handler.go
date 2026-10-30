@@ -312,7 +312,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if failure != nil {
 		return failure, nil
 	}
-	patternFiles, patternFailure := grepPatternFilesFromArgs(ctx, call, paths, roots)
+	// One accessor for the whole grep call: the anchor decision below, the pattern
+	// files it resolves, and the candidate files the search then reads must all be
+	// answered by the same machine. Resolving it per helper would only look harmless
+	// until a Runtime ever returned something different.
+	access := localio.For(call.Runtime)
+	patternFiles, patternFailure := grepPatternFilesFromArgs(ctx, access, call, paths, roots)
 	if patternFailure != nil {
 		return patternFailure, nil
 	}
@@ -357,7 +362,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	// mirroring the local parameter pair.
 	includeHidden := !boolArg(call.Args, "no_hidden") &&
 		(boolArg(call.Args, "hidden") || unrestricted >= 2)
-	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(ctx, call, paths, roots)
+	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(ctx, access, call, paths, roots)
 	if ignoreFailure != nil {
 		return ignoreFailure, nil
 	}
@@ -370,8 +375,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		follow = true
 	}
 	options := GrepOptions{
-		Patterns:                  patterns,
-		PatternFiles:              patternFiles,
+		Patterns:     patterns,
+		PatternFiles: patternFiles,
+		// The same accessor, handed to the search: a pattern file resolved by one
+		// machine and read by another is the split this whole line of work exists
+		// to remove.
+		Access:                    access,
 		Path:                      roots[0],
 		Paths:                     roots[1:],
 		Mode:                      mode,
@@ -570,7 +579,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	// was actually searched rather than only the direct spellings.
 	effectivePatterns := patterns
 	if len(options.PatternFiles) > 0 {
-		if withFiles, err := GrepPatternsWithFiles(options); err == nil {
+		if withFiles, err := GrepPatternsWithFiles(ctx, options); err == nil {
 			effectivePatterns = withFiles
 		}
 	}
@@ -943,26 +952,19 @@ func grepUnrestrictedFromArgs(args map[string]any) (int, bool) {
 // grepIgnoreFilesFromArgs resolves the explicit ignore_file(s) spellings into
 // absolute paths, so both engines read the same files. The string spelling is
 // split on top-level commas exactly like the other scalar lists.
-func grepIgnoreFilesFromArgs(ctx context.Context, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
+func grepIgnoreFilesFromArgs(ctx context.Context, access toolcore.Access, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
 	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "ignore_file")...),
 		GrepGlobListFromArgs(call.Args, "ignore_files")...)
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	resolved := make([]string, 0, len(raw))
-	// One accessor per call, not one per entry: the answer cannot change mid-list,
-	// and resolving it in the loop invites the thought that different entries might
-	// be anchored on different machines.
-	access := localio.For(call.Runtime)
 	for _, entry := range raw {
 		// A relative ignore_file spelling anchors to the search root's
 		// directory (the local tool's workingDir rule), not the process CWD.
 		anchor := ""
 		if !filepath.IsAbs(entry) && len(roots) > 0 {
 			anchor = roots[0]
-			// Anchoring a relative ignore_file to a *file* root means its parent
-			// directory; that decision is made on the machine holding the file, so
-			// it goes through the seam like every other read here.
 			if info, statErr := access.Stat(ctx, anchor); statErr == nil && !info.IsDir() {
 				anchor = filepath.Dir(anchor)
 			}
@@ -979,14 +981,13 @@ func grepIgnoreFilesFromArgs(ctx context.Context, call *toolcore.Call, paths too
 
 // grepPatternFilesFromArgs resolves pattern_file(s) into absolute paths. Both
 // spellings are accepted and merged; each file's lines join the pattern list.
-func grepPatternFilesFromArgs(ctx context.Context, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
+func grepPatternFilesFromArgs(ctx context.Context, access toolcore.Access, call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
 	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "pattern_file")...),
 		GrepGlobListFromArgs(call.Args, "pattern_files")...)
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	resolved := make([]string, 0, len(raw))
-	access := localio.For(call.Runtime)
 	for _, entry := range raw {
 		if !filepath.IsAbs(entry) && len(roots) > 0 {
 			anchor := roots[0]

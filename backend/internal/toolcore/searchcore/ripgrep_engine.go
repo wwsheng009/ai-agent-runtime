@@ -710,7 +710,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if len(opts.PatternFiles) > 0 {
 		// Pattern files are read by the core, not passed to rg: the effective
 		// pattern list must be identical on both engines.
-		withFiles, err := GrepPatternsWithFiles(opts)
+		withFiles, err := GrepPatternsWithFiles(ctx, opts)
 		if err != nil {
 			return GrepResult{}, true, err
 		}

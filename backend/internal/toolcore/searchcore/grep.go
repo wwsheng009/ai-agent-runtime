@@ -355,7 +355,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		access = localio.Access
 	}
 	opts.Access = access
-	patterns, err := GrepPatternsWithFiles(opts)
+	patterns, err := GrepPatternsWithFiles(ctx, opts)
 	if err != nil {
 		return GrepResult{}, err
 	}
@@ -868,15 +868,24 @@ func walkGrepFollowing(root string, onEntry func(path string, entry os.DirEntry,
 // GrepPatternsWithFiles returns the effective pattern list: the direct
 // spellings followed by every line of each pattern file. Direct spellings win
 // in order, exactly like the local tool's loadPatternFiles.
-func GrepPatternsWithFiles(opts GrepOptions) ([]string, error) {
+//
+// It takes the context because a pattern file is I/O on the machine the search runs
+// against: reading it must die with the call, not linger behind a Background context.
+// The accessor comes from opts, which is also why the signature did not grow a second
+// seam parameter - "which machine" is one property of one request.
+func GrepPatternsWithFiles(ctx context.Context, opts GrepOptions) ([]string, error) {
 	patterns := grepPatterns(opts)
 	if len(opts.PatternFiles) == 0 {
 		return patterns, nil
 	}
+	access := opts.Access
+	if access == nil {
+		access = localio.Access
+	}
 	out := make([]string, 0, len(patterns)+8)
 	out = append(out, patterns...)
 	for _, path := range opts.PatternFiles {
-		lines, err := readGrepPatternFile(path)
+		lines, err := readGrepPatternFile(ctx, access, path)
 		if err != nil {
 			if opts.NoMessages {
 				// Same rule as an explicit ignore_file: no_messages turns a
@@ -892,8 +901,8 @@ func GrepPatternsWithFiles(opts GrepOptions) ([]string, error) {
 
 // readGrepPatternFile reads one pattern file through the shared bounded line
 // reader, so a huge line cannot blow memory and line numbering stays stable.
-func readGrepPatternFile(path string) ([]string, error) {
-	file, err := os.Open(path)
+func readGrepPatternFile(ctx context.Context, access toolcore.Access, path string) ([]string, error) {
+	file, err := access.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}

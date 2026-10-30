@@ -357,6 +357,65 @@ func TestGrepSizeGateUsesTheAccessorsSize(t *testing.T) {
 	}
 }
 
+// TestGrepPatternFileComesThroughTheAccessor is S2b: the pattern file is read on the
+// machine the search runs against. The disk copy asks for a word that appears nowhere,
+// the accessor's copy asks for the word that is in the haystack. Zero matches would
+// mean the read bypassed the seam; the control case below shows the disk copy really
+// does produce zero, so a pass here can only come from the accessor.
+func TestGrepPatternFileComesThroughTheAccessor(t *testing.T) {
+	root := t.TempDir()
+	// The pattern file lives OUTSIDE the searched tree: a pattern file inside the
+	// tree would match its own literal text, and the control below would pass for
+	// the wrong reason. (It did, on the first run of this test.)
+	tree := filepath.Join(root, "tree")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	haystack := filepath.Join(tree, "haystack.txt")
+	if err := os.WriteFile(haystack, []byte("needle in the haystack\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patternFile := filepath.Join(root, "patterns.txt")
+	if err := os.WriteFile(patternFile, []byte("absent-word\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Control: reading the pattern file from disk finds nothing.
+	fromDisk, err := Grep(context.Background(), GrepOptions{Path: tree, Limit: 10, PatternFiles: []string{patternFile}})
+	if err != nil {
+		t.Fatalf("control grep: %v", err)
+	}
+	if len(fromDisk.Matches) != 0 {
+		t.Fatalf("the control is wrong: the on-disk pattern file should match nothing, got %v", fromDisk.Matches)
+	}
+
+	access := &virtualAccess{files: map[string][]byte{
+		patternFile: []byte("needle\n"),
+		haystack:    []byte("needle in the haystack\n"),
+	}}
+	result, err := Grep(context.Background(), GrepOptions{
+		Path: tree, Limit: 10, PatternFiles: []string{patternFile}, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep with the accessor: %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1: the pattern file was not read through the accessor", len(result.Matches))
+	}
+	if !strings.Contains(result.Matches[0].Text, "needle in the haystack") {
+		t.Fatalf("unexpected match text: %q", result.Matches[0].Text)
+	}
+	sawPatternFile := false
+	for _, opened := range access.opened {
+		if opened == patternFile {
+			sawPatternFile = true
+		}
+	}
+	if !sawPatternFile {
+		t.Fatalf("the accessor never served the pattern file it was supposed to read: %v", access.opened)
+	}
+}
+
 // TestGrepWithoutAnAccessorKeepsReadingTheDisk is the no-behaviour-change half, and it
 // is why the option defaults to nil instead of forcing every caller to change at once.
 func TestGrepWithoutAnAccessorKeepsReadingTheDisk(t *testing.T) {
