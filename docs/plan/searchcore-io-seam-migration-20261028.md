@@ -9,7 +9,12 @@
 1. **不需要签名级联**（这是好消息，也是本方案能小步走的原因）：`Grep(ctx, opts GrepOptions)` 与 `GlobWithOptions(ctx, opts GlobOptions)` 已经是"选项结构体 + ctx"入口，按 `viewcore.Options.Access` 的同形加一个字段即可贯穿，**导出签名一字不改**。
 2. 但**必须先回答三个设计问题**（§2），否则会把三类语义"搬"成静默错误：symlink 解析、文件身份（inode）、全局 gitignore 的"谁的 HOME"。这三处都不是 `os.Stat` 那种机械替换，**盲搬等于把 local 的假设硬塞给远端**。
 3. 因此分五步（§4），每步只封一个**完整关注点**（不出现"同一关注点两种真值来源"），每步带实测棘轮差量与回滚点。
-4. 终局收益：`handler.go:180` 那个 `call.Runtime.(Searcher)` 拦截（远端自带 grep/glob 实现）是**本 seam 要消灭的第二套实现**；S6 才是把它退役，§3 说明为什么不能提前。
+4. 终局收益：**envd 那套目标机脚本文件工具**（`envdLs`/`envdGlob`/`envdGrep`，由 `buildEnvDRegistry` 注册，
+   `server.go:91-108` 的 `switch cfg.Backend` 决定 envd 走它、其他后端走共享核）才是本 seam 要消灭的
+   **第二套实现**；S6 才是把这些工具换成共享核 + `FileAccess()`，§3 说明为什么不能提前。
+   **勘误（2026-10-28 复核）**：本节早先写成"要退役的是 `handler.go` 那个 `Searcher` 拦截"，那是把
+   **ssh/http** 的路径当成了 envd 的。envd 的 `grep` 根本不经过 `searchcore` 的 handler，`Searcher`
+   拦截对 envd 完全不发生；两个机制各自独立，别再把它们混为一谈。
 
 ---
 
@@ -62,12 +67,15 @@ S5b 落地形态（与上面的差别只在一处，但那一处是别人踩过�
 3. 环路与重复目标的身份仍用**解析后的目标**，不用链接自身路径——变异 N7 证明这条承重：换成
    链接自身路径后，`alpha/to-beta/to-alpha/to-beta/…` 这样的路径会无限增长，遍历不再终止。
 
-顺带查出一条**尚未修的宿主假设泄漏**（记在这里，不擅自改动他人语义）：`handler.go` 用
-`runtime.GOOS == "windows"` 决定 `follow` 的默认值，而这个默认值会传给目标机的 rg（远端通路
-现在仍走 `Searcher` 拦截）。也就是说**客户端操作系统的种类，正在决定另一台机器上文件的遍历
-语义**。改成"仅本地 accessor 才默认 follow"是符合本方案精神的做法，但它会改变远端 grep 的
-可观测行为（Windows 客户端上的远端搜索将不再默认 `--follow`），属工具面语义变化，需在 S6 的
-合并清单里显式决定，不在本步顺手做。
+顺带记一条**当时未核实、现已更正**的推断（照原样保留教训，不当成事实用）：这条曾经写作
+"`handler.go` 用 `runtime.GOOS == \"windows\"` 决定 `follow` 默认值，而这个默认值会传给目标机的 rg，
+于是客户端 OS 在决定另一台机器的遍历语义"。**复核后：对 envd 不成立。** envd 的 grep 是
+`envd_tools.go` 里一段目标机脚本（`rg --line-number …` 或 `grep -rnI …`），它的参数表只有
+`path` 与 `pattern` 两个，既没有 `follow` 也没有 `one_file_system`——共享核 handler 的那些默认值
+根本到不了它。真正走共享核 + `Searcher` 的是 ssh/http 那条路，而那条路自己的状态需要单独核实
+（其中 `remoteRuntime` 把 `searchcore.Ripgrep{Path: 本机 rg 路径}` 交给引擎这一处，值得单独查清
+它到底在哪台机器上执行）。**结论：在把这条泄漏当成决策依据之前，必须先对着 ssh/http 路径重新
+推导一次；本文不再引用它。**
 
 ### Q2 文件系统边界（原文误述为"inode 去重"，S5c 读代码后更正）
 
@@ -132,7 +140,20 @@ Access toolcore.Access
 - `handler.go` 的 4 处直接用 `localio.For(call.Runtime)`，与 viewcore/lscore 完全同形（**这是 S1，最小、最安全、可立刻验证**）。
 - 注意保留两条已验证过的教训：**①** 遍历顺序即截断语义（ls 那次 limit 检查顺序的坑），**②** 判"是否目录"用于决定下降时必须用 `Lstat`，不能用跟随链接的 `Stat`（ls 符号链接逃逸那次）。`walkGrepFollowing`/`grepWalkRoot` 两处都涉及下降决策，属同一风险面。
 
-`Searcher` 拦截（`handler.go:180`、`remoteRuntime.Grep/Glob`、`rg_search.go`）在 S1–S5 期间**必须保留**：它是远端现在唯一的 grep/glob 通路。S6 才在 envd/ssh 拿到可用的 `Access` 后退役它——提前退役就是把工具面砍了（违反"工具面 6/13/19 与档位表在任何一段都不得变化"）。
+**两套远端通路，必须分开说**（这是本方案最容易写错的一处，我第一版就写错了）：
+
+- **envd**：`server.go` 按 `cfg.Backend` 分派，envd 走 `buildEnvDRegistry`，其 `ls`/`glob`/`grep`
+  是 `envd_tools.go` 里的**目标机脚本**（`envdLs`/`envdGlob`/`envdGrep`），`grep` 只有 `path`+`pattern`
+  两个参数、有 rg 用 rg 否则 `grep -rnI`、输出按字节封顶，引擎名会回报给调用方。它**不经过**
+  `searchcore` handler，因此 S1–S5 的改动对它零影响。
+- **ssh/http**：走 `buildRegistry` → `searchcore.NewGrepHandler/NewGlobHandler` + `remoteRuntime`
+  （该 runtime 实现 `Searcher`，见 `rg_search.go`）。S1–S5 的改动**直接影响这条路**——这也解释了
+  为什么 `driftguard` 与 `searchcore` 的测试必须一直绿。
+
+S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面砍了（违反"工具面与档位表在任何一段都不得
+变化"）。S6 的真实内容是把 envd 的脚本工具换成"共享核 + `FileAccess()`"（本方案的执行腿），
+让两条路在**核**这一层合流；那时 envd 的 `grep` 会从两个参数变成完整的本地参数面——这是**能力
+增加**，但必须逐项确认"今天能用的调用明天仍然能用"。
 
 ---
 
@@ -150,7 +171,7 @@ Access toolcore.Access
 | S5a ✅ | **遍历本身**（默认不跟随链接那条腿）+ 所有"路径形状"判定：搜索模式（root/roots[0] 是否regular file）、ignore 作用域、ripgrep 的 argv 形状与 SingleFile | seam_walk.go（新）、glob.go、grep.go、grep_ignore.go、ripgrep_engine.go | **实测 os.* 9→4、walker 4→2** | 单文件回滚（`seam_walk.go` 存在即这步的开关） |
 | S5b ✅ | `walkGrepFollowing`（跟随链接那条腿）：被跟随的根、每级清单、链接目标形状三处换源，链接**身份**经可选接口 `toolcore.SymlinkResolver`（Q1 落地）。能力只在真的遇到"指向目录的链接"时才要，缺能力则**带路径拒绝**，不静默跳过、不做半吊子环路检测 | grep.go、toolcore/access.go、localio/access.go | **实测 os.* 4→1、walker 2→0** | 单文件回滚（`walkGrepFollowing` 换回宿主调用即撤销本步） |
 | S5c ✅ | `one_file_system` 的**文件系统边界**（Q2 更正后的名字；原写"inode 去重"是误述）：平台实现整体搬进 `localio`，核心经可选接口 `toolcore.FilesystemIdentifier` 询问；缺能力即**拒绝该标志**（不是降级照跨），出路写进消息 | toolcore/access.go、localio/identity_unix.go（新）、localio/identity_windows.go（新）、seam_access.go、grep.go；删除 searchcore/filesystem_unix.go、filesystem_windows.go | **实测 os.* 1→0、walker 仍 0**（searchcore 归零） | 把两处调用改回 `localio` 直调即撤销 |
-| S6 | 退役 `Searcher` 拦截，让远端 grep/glob 走共享核。**前置**：全仓除 `localio` 外没有任何生产 `toolcore.Access` 实现，所以要先造 envd 执行腿；能力映射、两个可选能力的可行性与 `one_file_system` 的取舍见 `envd-io-seam-access-leg-20261028.md` | remotetools + handler | 目标是**删代码**（与 bridge 那轮 −3175 行同类收益） | 整步独立可撤 |
+| S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
 
 每步验收门（与既有纪律逐条对齐）：
 1. 既有 `searchcore` 单测**一字不改**通过；
@@ -199,9 +220,9 @@ S4 新增的五条（前两条是本次最贵教训，后三条是对验收门�
    否决的替代方案：在函数内部塞 `context.Background()`（把取消语义假装没发生，与 S2b 同一否决理由）、
    或加一个 `...WithContext` 双导出（两处权威，正是这套重构要消灭的东西）。
 8. **偏离验收门 #6（涉及远端通路的步骤跑 envd 三套）**：本步**没有**跑真机，理由是它此刻在远端
-   **不可观测**——远端 grep/glob 仍走 `Searcher` 拦截（目标机上的 rg），共享核的 ignore 代码不在远端
-   通路上，拦截退役要到 S6 才发生（§3 已写明 S1–S5 必须保留它）。因此 envd 三套顺延到 S6，届时这笔
-   注入才是可被真机证伪的对象。不把"没跑"写成"已跑"。
+    **不可观测**——envd 的 `ls`/`glob`/`grep` 是目标机脚本（§3 勘误），共享核的 ignore/遍历代码不在
+   那条通路上；envd 切到共享核要等 S6。因此 envd 三套顺延到 S6，届时这笔注入才是可被真机证伪的
+   对象。不把"没跑"写成"已跑"。
 9. **一处"证据缺口"最后被证明是不可观测，而不是没测到（S5a 结案）**：`rulesFor` 那处形状 Stat
    在枚举换成 accessor 之后仍然没有任何夹具能让结果发生变化——变异 `os.Stat(absPath)` 存活
    （M6，8/9 被抓、它没被抓）。原因可推死：`rulesFor` 从 `dir` 一路走回搜索根，`dir = absPath`
