@@ -275,7 +275,7 @@ M4 删除了 `cmd/aicli-envd-bridge` 并同步了 `Makefile`，但漏改 `.githu
 
 处置：门禁 **1:1 改挂收编后的载体** `aicli-remote-tools`——`go build -trimpath -o /tmp/aicli-remote-tools-check ./cmd/aicli-remote-tools` + `go test ./internal/envdclient/... ./internal/remotetargets/... ./cmd/aicli-remote-tools/... -count=1`；删除桥的构建与分发两行（归档按 `dist/release/*` glob，无需其他改动）。保留一行历史注记，说明门禁为何叫 remote-tools。
 
-验证（本笔提交内实跑）：构建退出码 0；三包测试全 `ok`（envdclient 2.2s / remotetargets 2.0s / cmd/aicli-remote-tools 7.9s）；工作流 YAML 解析通过。
+验证（本笔提交内实跑）：构建退出码 0；三包测试全 `ok`（envdclient 2.2s / remotetargets 2.0s / cmd/aicli-remote-tools 7.9s）；工作流 YAML 解析通过。**注意**：实跑位于主工作树，而该树含 `internal/gateway/wire` 的未提交补丁（107 行，`MountLabels`/`NotifySuppress` 字段）；**干净 HEAD 单独仍不可构建**（`docs/plan/upstream-broken-commits-20261028.md` 案例 1）。已实测：干净 HEAD + 该 107 行补丁 → `go build ./internal/remotetools/ ./cmd/aicli-remote-tools/ ./internal/gateway/...` 退出码 0 且 `go test ./internal/gateway/wire/` ok（临时 worktree 内，验完已移除）——即"补交该 wire 补丁"是让 release 门禁（含本处新门禁）在干净检出上可绿的前置。
 
 ### 8.11 文件面过渡态现状（2026-10-31，S6 之后）
 
