@@ -251,6 +251,8 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 > **（2026-10-31 补记）本条三项均已关闭**：`view` 自 `5031aaf0` 起走共享 `viewcore` 渲染（行号/分页/窗口元数据与 local 同形，另有 `read_channel` 元数据）；`edit` 措辞由 §8.9 对齐；`write` 上限差异随 bridge 删除消失（两侧同一 `Limits.CaptureLimit`）。过渡态现状见 §8.11。
 
+**补记（2026-10-31，S6 之后）**：用当前工作树交叉编译的二进制（`GOOS=linux`，18.9MB，独立文件名部署）经 `ssh -T … serve --stdio --workspace /home/n9e --allowed-roots /tmp --profile standard` 真机 MCP stdio 复核 **14/14 通过**：握手 `2025-06-18`；工具面 9 个共享面工具（`view ls glob grep write append_write edit apply_patch artifact_read`，无 `remove`/`mkdir`，与本节原记录一致）；`write→view`（行号）→`append_write`→`view offset/limit 分页`→`edit`（`Replaced 1 occurrence`）→`view` 回读；`grep` 命中并渲染 `file:line:`；`one_file_system=true` 在 local 面带能力、照常命中；越界 `/etc/passwd` 点名拒绝；`/tmp`（allowed-root）写允许。一处操作口径记档：**文件类工具的入参在 local/ssh 面是 `file_path`，envd 面是 `path`**（schema 层 `-32602` 拒绝，非行为缺陷）。探针文件与验证二进制已清理，运行中的 `~/bin/aicli-remote-tools` 与 envd 服务未受触碰。
+
 ### 8.9 结果文案对齐 local 面（2026-10-28）
 
 以真机 ssh-stdio 实测到的 local 文案为基准（不靠猜），消除同名工具的回复差异：
@@ -290,7 +292,7 @@ M4 删除了 `cmd/aicli-envd-bridge` 并同步了 `Makefile`，但漏改 `.githu
 | envd 专属工具（`mkdir`/`remove`/`move`/`host_metrics`/`watch_dir`/`pty_*`） | 保持后端自有（无共享核对应物） | 同上 |
 | 执行腿 | `envd_access.go` 已**接线**（不再是"已就绪未接线"） | S6 |
 
-S6 的行为口径（有意保留，方向已钉进 e2e）：引擎统一 walker（不再按目标机是否装 rg 分叉；rg 优先为独立待决步骤 S6b）；`one_file_system` 与 `sort=accessed/created` 由静默忽略改为点名拒绝；glob 的 `*.go` 语义收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA（不擅自去配置文件取秘密）。
+S6 的行为口径（有意保留，方向已钉进 e2e）：引擎统一 walker（不再按目标机是否装 rg 分叉；rg 优先为独立待决步骤 S6b）；`one_file_system` 与 `sort=accessed/created` 由静默忽略改为点名拒绝；glob 的 `*.go` 语义收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA（不擅自去配置文件取秘密）。（2026-10-31 复核：**ssh 面**已用当前工作树二进制真机 14/14 通过，见 §8.8 补记；**envd 面**仍卡在同一处——`ENVD_ACCESS_TOKEN` 在目标机 `/etc/envd/envd.env`（600 root-only），`n9e` 无读权且 sudo 需密码，`/files`、`/metrics`、`Process/List` 一律 401。）
 
 > 说明：§8.1–§8.10 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
 
