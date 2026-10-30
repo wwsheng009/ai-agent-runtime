@@ -15,6 +15,7 @@ import (
 	"context"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
@@ -45,6 +46,18 @@ func (osAccess) Open(_ context.Context, path string) (toolcore.FileHandle, error
 
 func (osAccess) ReadDir(_ context.Context, path string) ([]fs.DirEntry, error) {
 	return os.ReadDir(path)
+}
+
+// EvalLinkPath is the host's own canonical form for one path, which is what
+// filepath.EvalSymlinks has always returned for a search running on this machine.
+//
+// It lives here rather than in a core on purpose: a core must not be able to ask
+// "which path is this" of the filesystem, because that question has one authority in the
+// tool layer (design §4.2) and this method exists only so that following links can
+// terminate. A remote backend that cannot answer it does not implement the interface, and
+// the feature is declined rather than approximated - see toolcore.SymlinkResolver.
+func (osAccess) EvalLinkPath(_ context.Context, path string) (string, error) {
+	return filepath.EvalSymlinks(path)
 }
 
 // For resolves the accessor a core should use for one call: the Runtime's when it
@@ -88,3 +101,7 @@ func IsLocal(access toolcore.Access) bool {
 // _ proves the move adds no adapter: the operating system's own file type is
 // already a valid seam handle.
 var _ toolcore.FileHandle = (*os.File)(nil)
+
+// _ proves the host accessor carries the link capability, so a core that declines
+// follow mode when it is missing never declines on this machine by accident.
+var _ toolcore.SymlinkResolver = osAccess{}

@@ -13,6 +13,7 @@ package searchcore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -47,7 +48,11 @@ type fakeInfo struct {
 	name  string
 	size  int64
 	isDir bool
-	mod   time.Time
+	// link marks a directory entry that is a symbolic link. The follow walker decides
+	// whether to resolve a path by asking the entry, so a fake that could not say "this is
+	// a link" could not express the case at all.
+	link bool
+	mod  time.Time
 }
 
 func (i fakeInfo) Name() string { return i.name }
@@ -55,6 +60,9 @@ func (i fakeInfo) Size() int64  { return i.size }
 func (i fakeInfo) Mode() fs.FileMode {
 	if i.isDir {
 		return fs.ModeDir | 0o755
+	}
+	if i.link {
+		return fs.ModeSymlink | 0o644
 	}
 	return 0o644
 }
@@ -215,6 +223,10 @@ func TestGrepAsksTheAccessorAboutTheAnchor(t *testing.T) {
 type virtualAccess struct {
 	files map[string][]byte
 	times map[string]time.Time
+	// links declares "this path is a symbolic link to that path". The follow walker needs
+	// a backend that can say so, because its whole cycle rule is built on the target's
+	// identity rather than on the path being walked.
+	links map[string]string
 	// dirs declares the paths this accessor calls directories. The ignore work needs
 	// it: a directory that exists on the host but is not in `files` would otherwise be
 	// reported absent, so a test about scope could pass or fail on an accident of the
@@ -237,7 +249,41 @@ func (h *virtualHandle) Close() error {
 	return nil
 }
 
-func (a *virtualAccess) Stat(_ context.Context, path string) (fs.FileInfo, error) {
+// materialize resolves every link component of a path, which is what the operating system
+// does before a read: a file under a linked directory is reachable through the link's own
+// path, and a search that follows links must report it under that path. Without this the
+// fake could describe a link but not answer anything reached through it, so the follow
+// walker's most interesting case - a match at a path that exists only via a link - could
+// not be expressed at all. The second result reports that the chain never settled, which is
+// what a real EvalSymlinks answers with ELOOP.
+func (a *virtualAccess) materialize(path string) (string, bool) {
+	for step := 0; step < 16; step++ {
+		changed := false
+		for link, target := range a.links {
+			if path == link {
+				path = target
+				changed = true
+				break
+			}
+			if strings.HasPrefix(path, link+string(filepath.Separator)) {
+				path = target + strings.TrimPrefix(path, link)
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return path, false
+		}
+	}
+	return path, true
+}
+
+func (a *virtualAccess) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
+	// A link reports what it points at, exactly like os.Stat: the follow walker asks Stat
+	// for the target's shape and asks the resolver for the target's identity.
+	if resolved, looped := a.materialize(path); !looped {
+		path = resolved
+	}
 	body, ok := a.files[path]
 	if !ok {
 		if a.dirs[path] {
@@ -249,17 +295,21 @@ func (a *virtualAccess) Stat(_ context.Context, path string) (fs.FileInfo, error
 }
 
 func (a *virtualAccess) Lstat(ctx context.Context, path string) (fs.FileInfo, error) {
+	if _, ok := a.links[path]; ok {
+		return fakeInfo{name: filepath.Base(path), link: true}, nil
+	}
 	return a.Stat(ctx, path)
 }
 
 func (a *virtualAccess) Open(_ context.Context, path string) (toolcore.FileHandle, error) {
-	body, ok := a.files[path]
+	resolved, _ := a.materialize(path)
+	body, ok := a.files[resolved]
 	if !ok {
 		return nil, absentErr{path: path}
 	}
 	a.openCalls++
 	a.opened = append(a.opened, path)
-	return &virtualHandle{Reader: bytes.NewReader(body), info: fakeInfo{name: filepath.Base(path), size: int64(len(body))}}, nil
+	return &virtualHandle{Reader: bytes.NewReader(body), info: fakeInfo{name: filepath.Base(resolved), size: int64(len(body))}}, nil
 }
 
 func (a *virtualAccess) ReadDir(_ context.Context, dir string) ([]fs.DirEntry, error) {
@@ -270,6 +320,10 @@ func (a *virtualAccess) ReadDir(_ context.Context, dir string) ([]fs.DirEntry, e
 	// The entries come back in REVERSE name order on purpose. os.ReadDir sorts, so a fake
 	// that also sorted could never expose a missing sort in the walker - and traversal
 	// order is paging order in this package, so the sort is load-bearing, not cosmetic.
+
+	// Listing a path reached through a link shows the target's contents under the link's
+	// own path, exactly like the host does.
+	dir, _ = a.materialize(dir)
 	prefix := dir + string(filepath.Separator)
 	byName := map[string]fs.DirEntry{}
 	for path, body := range a.files {
@@ -303,12 +357,40 @@ func (a *virtualAccess) ReadDir(_ context.Context, dir string) ([]fs.DirEntry, e
 		}
 		byName[rest] = fs.FileInfoToDirEntry(fakeInfo{name: rest, isDir: true})
 	}
+	for path := range a.links {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		if rest == "" || strings.ContainsRune(rest, filepath.Separator) {
+			continue
+		}
+		byName[rest] = fs.FileInfoToDirEntry(fakeInfo{name: rest, link: true})
+	}
 	entries := make([]fs.DirEntry, 0, len(byName))
 	for _, entry := range byName {
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
 	return entries, nil
+}
+
+// EvalLinkPath is the fake's answer to "where does this chain actually lead": it walks the
+// links map until it reaches something that is not a link, and the target must exist - the
+// same contract filepath.EvalSymlinks gives a broken link. toolcore.SymlinkResolver is
+// optional, so a test that needs an accessor WITHOUT it wraps this type instead of
+// removing the method.
+func (a *virtualAccess) EvalLinkPath(_ context.Context, path string) (string, error) {
+	current, looped := a.materialize(path)
+	if looped {
+		return "", fmt.Errorf("链接环: %s", path)
+	}
+	if _, ok := a.files[current]; !ok && !a.dirs[current] {
+		// A broken link must fail to resolve, because the walker's cycle rule depends on that
+		// failure exactly like filepath.EvalSymlinks' does.
+		return "", absentErr{path: current}
+	}
+	return current, nil
 }
 
 // TestGrepSearchesTheAccessorsBytes: the disk holds text with no match, the accessor

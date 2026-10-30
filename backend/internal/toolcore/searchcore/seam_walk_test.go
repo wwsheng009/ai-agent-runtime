@@ -512,3 +512,302 @@ func TestGrepSingleFileFlagFollowsTheAccessorShape(t *testing.T) {
 		t.Fatalf("the control is wrong: a local directory must not be single-file, got %+v", local)
 	}
 }
+
+// --- S5b: the follow-mode traversal ---
+
+// legacyWalkGrepFollowing is a frozen snapshot of the implementation that existed before
+// S5b - the same algorithm reading the host directly (os.Stat, os.ReadDir,
+// filepath.EvalSymlinks). It lives here only as the oracle for the differential below.
+// Keeping the old code, rather than re-deriving expectations by hand, is the only way to
+// pin "the follow walker changed its source of truth and nothing else"; lscore's
+// walk_differential_test.go set that precedent.
+func legacyWalkGrepFollowing(root string, onEntry func(path string, entry fs.DirEntry, err error) error) error {
+	rootInfo, statErr := os.Stat(root)
+	if statErr != nil {
+		return onEntry(root, nil, statErr)
+	}
+	seen := map[string]bool{}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		seen[resolved] = true
+	}
+	if err := onEntry(root, fs.FileInfoToDirEntry(rootInfo), nil); err != nil {
+		if err == filepath.SkipAll {
+			return err
+		}
+		if err == filepath.SkipDir {
+			return nil
+		}
+		return err
+	}
+	if !rootInfo.IsDir() {
+		return nil
+	}
+	type dirFrame struct {
+		dir     string
+		entries []fs.DirEntry
+		index   int
+	}
+	stack := []*dirFrame{{dir: root}}
+	for len(stack) > 0 {
+		frame := stack[len(stack)-1]
+		if frame.entries == nil {
+			entries, readErr := os.ReadDir(frame.dir)
+			if readErr != nil {
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			frame.entries = entries
+		}
+		if frame.index >= len(frame.entries) {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		entry := frame.entries[frame.index]
+		frame.index++
+		path := filepath.Join(frame.dir, entry.Name())
+		isDir := entry.IsDir()
+		if entry.Type()&fs.ModeSymlink != 0 {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				continue
+			}
+			if info.IsDir() {
+				resolved, resolveErr := filepath.EvalSymlinks(path)
+				if resolveErr != nil || seen[resolved] {
+					continue
+				}
+				seen[resolved] = true
+				isDir = true
+				entry = fs.FileInfoToDirEntry(info)
+			}
+		}
+		if err := onEntry(path, entry, nil); err != nil {
+			switch {
+			case err == filepath.SkipAll:
+				return err
+			case err == filepath.SkipDir && isDir:
+				continue
+			case err == filepath.SkipDir:
+				frame.index = len(frame.entries)
+				continue
+			default:
+				return err
+			}
+		}
+		if isDir {
+			stack = append(stack, &dirFrame{dir: path})
+		}
+	}
+	return nil
+}
+
+// buildFollowFixture makes the link shapes the walker has to get right: a link to a file,
+// two links to one directory (searched once), a mutual pair between two real directories
+// (the cycle case), a link pointing at an ancestor, and a broken link.
+func buildFollowFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	touch := func(rel, body string) string {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	touch("top.txt", "top\n")
+	dirA := filepath.Join(root, "alpha")
+	dirB := filepath.Join(root, "beta")
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch("alpha/in-alpha.txt", "a\n")
+	touch("beta/in-beta.txt", "b\n")
+	links := map[string]string{
+		"link-to-file":  filepath.Join(root, "top.txt"),
+		"link-to-alpha": dirA,
+		"dup-to-alpha":  dirA,
+		"link-to-beta":  dirB,
+		"loop-to-root":  root,
+		"broken-link":   filepath.Join(root, "nothing-here"),
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			t.Fatalf("this differential needs symlink support: %v", err)
+		}
+	}
+	// The mutual pair, which is what a plain "already visited this path" check cannot
+	// terminate: each link's own path is new every time.
+	if err := os.Symlink(dirB, filepath.Join(dirA, "to-beta")); err != nil {
+		t.Fatalf("this differential needs symlink support: %v", err)
+	}
+	if err := os.Symlink(dirA, filepath.Join(dirB, "to-alpha")); err != nil {
+		t.Fatalf("this differential needs symlink support: %v", err)
+	}
+	return root
+}
+
+func TestWalkGrepFollowingMatchesLegacyImplementation(t *testing.T) {
+	root := buildFollowFixture(t)
+	resolver, ok := localio.Access.(toolcore.SymlinkResolver)
+	if !ok {
+		t.Fatal("localio.Access must provide the link capability, or follow mode would decline on every local search")
+	}
+
+	// boundVisits keeps a broken cycle rule from crashing the test with a stack overflow.
+	// An unbounded walk must fail as an assertion instead: "goroutine stack exceeds" proves
+	// the same thing less precisely, hides which rule broke, and spends the package timeout
+	// doing it - which is how the first version of this differential reported its evidence.
+	const boundVisits = 400
+	tooMany := errors.New("访问数超过上限：链接环规则没有终止遍历")
+	collect := func(walk func(func(string, fs.DirEntry, error) error) error) []string {
+		visits := []string{}
+		err := walk(func(path string, entry fs.DirEntry, err error) error {
+			visits = append(visits, describe(path, entry, err))
+			if len(visits) > boundVisits {
+				return tooMany
+			}
+			return nil
+		})
+		if err != nil {
+			visits = append(visits, "RETURNED-ERROR: "+err.Error())
+		}
+		return visits
+	}
+
+	oracle := collect(func(fn func(string, fs.DirEntry, error) error) error {
+		return legacyWalkGrepFollowing(root, fn)
+	})
+	got := collect(func(fn func(string, fs.DirEntry, error) error) error {
+		return walkGrepFollowing(context.Background(), localio.Access, resolver, root, fn)
+	})
+	if !reflect.DeepEqual(oracle, got) {
+		t.Fatalf("the accessor-driven follow walker diverged from the host one\n legacy (%d): %v\n   seam (%d): %v", len(oracle), oracle, len(got), got)
+	}
+
+	// Same tree, unsorted listing: proves the walker imposes the lexical order itself
+	// instead of inheriting os.ReadDir's courtesy.
+	unsorted := collect(func(fn func(string, fs.DirEntry, error) error) error {
+		return walkGrepFollowing(context.Background(), reverseReadDirAccess{localio.Access}, resolver, root, fn)
+	})
+	if !reflect.DeepEqual(oracle, unsorted) {
+		t.Fatalf("an unsorted listing changed the follow walk order\n legacy: %v\n   got: %v", oracle, unsorted)
+	}
+
+	// And the guarantee the cycle rule exists for: a mutual link pair terminates with each
+	// real directory's own files reported once per distinct path, not endlessly.
+	hits := 0
+	for _, visit := range got {
+		if strings.HasSuffix(visit, "in-alpha.txt|file|in-alpha.txt") {
+			hits++
+		}
+	}
+	if hits == 0 || hits > 4 {
+		t.Fatalf("the link cycle rule produced %d visits of in-alpha.txt, want a small bounded number: %v", hits, got)
+	}
+}
+
+// noResolverAccess hides a capability that the value inside it has. Embedding the interface
+// type, rather than the concrete one, is what makes the method set shrink - which is how a
+// backend that cannot resolve links is represented without writing a second fake.
+type noResolverAccess struct{ toolcore.Access }
+
+func TestGrepFollowNeedsTheLinkCapabilityOnlyWhenThereAreLinks(t *testing.T) {
+	hostDir := t.TempDir()
+	remote := filepath.Join(hostDir, "repo")
+	real := filepath.Join(remote, "src")
+	linked := filepath.Join(remote, "current")
+
+	plain := &virtualAccess{
+		files: map[string][]byte{filepath.Join(real, "one.txt"): []byte("needle one\n")},
+		dirs:  map[string]bool{remote: true, real: true},
+	}
+
+	// A link-free tree is answered by a resolver-less accessor with no decline at all. This
+	// is the case my first version of the gate broke: the handler turns follow on by default
+	// on Windows, so refusing up front would have denied every ordinary search.
+	capabilityless := noResolverAccess{plain}
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 10, Follow: true, Access: capabilityless,
+	})
+	if err != nil {
+		t.Fatalf("a tree without links must not need the link capability: %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %v, want the one file in the accessor's tree", result.Matches)
+	}
+
+	// The same accessor, the same options, but the tree now contains a link to a directory:
+	// the walk must decline instead of dropping the cycle check or guessing an identity.
+	withLink := &virtualAccess{
+		files: map[string][]byte{filepath.Join(real, "one.txt"): []byte("needle one\n")},
+		dirs:  map[string]bool{remote: true, real: true},
+		links: map[string]string{linked: real},
+	}
+	_, err = Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 10, Follow: true, Access: noResolverAccess{withLink},
+	})
+	if err == nil {
+		t.Fatal("following a link to a directory without a resolver must decline, not search on without cycle protection")
+	}
+	if !strings.Contains(err.Error(), "SymlinkResolver") {
+		t.Fatalf("the refusal must name the missing capability: %v", err)
+	}
+}
+
+// TestGrepFollowReachesAMatchThatOnlyExistsThroughALink is the injection half: the tree
+// exists only for the accessor, and the reported path is reached through a link that this
+// machine has never heard of. Getting it therefore needs enumeration, link detection, the
+// target's shape and the resolver all answered by the same non-local source.
+func TestGrepFollowReachesAMatchThatOnlyExistsThroughALink(t *testing.T) {
+	hostDir := t.TempDir()
+	remote := filepath.Join(hostDir, "repo")
+	real := filepath.Join(remote, "src")
+	linked := filepath.Join(remote, "current")
+	second := filepath.Join(remote, "mirror")
+
+	access := &virtualAccess{
+		files: map[string][]byte{filepath.Join(real, "one.txt"): []byte("needle one\n")},
+		dirs:  map[string]bool{remote: true, real: true},
+		links: map[string]string{linked: real, second: real},
+	}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 10, Follow: true, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("follow with the accessor's links: %v", err)
+	}
+	found := map[string]bool{}
+	for _, match := range result.Matches {
+		rel, relErr := filepath.Rel(remote, match.File)
+		if relErr != nil {
+			t.Fatalf("match outside the root: %v", match.File)
+		}
+		found[filepath.ToSlash(rel)] = true
+	}
+	// src/one.txt is reached directly and once through each link; two links to one
+	// directory are searched once, so exactly one link path joins the real one.
+	if len(found) != 2 || !found["src/one.txt"] {
+		t.Fatalf("follow did not use the accessor's links: %v", found)
+	}
+	if !found["current/one.txt"] && !found["mirror/one.txt"] {
+		t.Fatalf("expected one link path alongside the real one, got %v", found)
+	}
+
+	// Control: the same call with no accessor searches this machine, where the tree is
+	// absent, and must find nothing.
+	local, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 10, Follow: true,
+	})
+	if err != nil {
+		t.Fatalf("local follow grep: %v", err)
+	}
+	if len(local.Matches) != 0 {
+		t.Fatalf("the control is wrong: that tree is not on this machine, got %v", local.Matches)
+	}
+}

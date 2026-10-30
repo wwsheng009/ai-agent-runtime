@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -763,10 +764,13 @@ func grepWalkRoot(ctx context.Context, access toolcore.Access, root string, foll
 	if !follow {
 		return walkViaAccess(ctx, access, root, onEntry)
 	}
-	// follow=true still walks the host tree: it needs a link *resolver*, which is a
-	// path-identity question the seam deliberately does not answer (design §2 Q1), so it
-	// moves as its own step rather than half-implementing cycle detection here.
-	return walkGrepFollowing(root, onEntry)
+	// The capability is asked for when a link actually needs resolving, not up front. That
+	// is not a convenience: this handler turns follow on by default on Windows (a junction
+	// is not a directory to the traversal), so refusing up front would deny every local and
+	// every link-free remote search a feature it never needed. A tree without links never
+	// asks the question.
+	resolver, _ := access.(toolcore.SymlinkResolver)
+	return walkGrepFollowing(ctx, access, resolver, root, onEntry)
 }
 
 // walkGrepFollowing is filepath.WalkDir with links followed: a link that
@@ -780,15 +784,33 @@ func grepWalkRoot(ctx context.Context, access toolcore.Access, root string, foll
 // links to one directory are searched once. The cost of that guarantee is that
 // a duplicate target stops producing a second path - observed against rg 14.1.0,
 // which prints both paths and only refuses links that point at an ancestor.
-func walkGrepFollowing(root string, onEntry func(path string, entry os.DirEntry, err error) error) error {
-	rootInfo, statErr := os.Stat(root)
+//
+// S5b moved the three host reads it made (the followed root, each directory listing, the
+// link target) onto the accessor the traversal is otherwise using, plus the resolver
+// capability above. One behaviour is deliberately NOT aligned with walkViaAccess: a failed
+// listing here pops the frame and moves to the next sibling without re-reporting the
+// directory, whereas the non-following walker reproduces the standard library's second
+// call. The difference is unobservable to every caller in this package, which answers a
+// listing error by skipping, and keeping it is what lets the differential test compare the
+// new code to the old implementation entry for entry.
+//
+// resolver may be nil, and that is the Q1 capability gate in its real shape: it is needed
+// only to identify the directory a link leads to, so a walk that never meets a
+// link-to-directory asks nothing of it. Meeting one without it ends the search with a
+// decline rather than a guess, because both available approximations - drop the cycle
+// check, or identify a directory by path+size+mtime - would trade a refusal for a
+// confidently wrong answer.
+func walkGrepFollowing(ctx context.Context, access toolcore.Access, resolver toolcore.SymlinkResolver, root string, onEntry func(path string, entry os.DirEntry, err error) error) error {
+	rootInfo, statErr := access.Stat(ctx, root)
 	if statErr != nil {
 		// Match WalkDir: report the error to the callback and stop.
 		return onEntry(root, nil, statErr)
 	}
 	seen := map[string]bool{}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		seen[resolved] = true
+	if resolver != nil {
+		if resolved, err := resolver.EvalLinkPath(ctx, root); err == nil {
+			seen[resolved] = true
+		}
 	}
 	if err := onEntry(root, fs.FileInfoToDirEntry(rootInfo), nil); err != nil {
 		if err == filepath.SkipAll {
@@ -812,11 +834,14 @@ func walkGrepFollowing(root string, onEntry func(path string, entry os.DirEntry,
 	for len(stack) > 0 {
 		frame := stack[len(stack)-1]
 		if frame.entries == nil {
-			entries, readErr := os.ReadDir(frame.dir)
+			entries, readErr := access.ReadDir(ctx, frame.dir)
 			if readErr != nil {
 				stack = stack[:len(stack)-1]
 				continue
 			}
+			// os.ReadDir sorted for the host and the seam promises no order, so the
+			// lexical order that paging and truncation depend on is imposed here too.
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 			frame.entries = entries
 		}
 		if frame.index >= len(frame.entries) {
@@ -829,12 +854,15 @@ func walkGrepFollowing(root string, onEntry func(path string, entry os.DirEntry,
 
 		isDir := entry.IsDir()
 		if entry.Type()&os.ModeSymlink != 0 {
-			info, statErr := os.Stat(path)
+			info, statErr := access.Stat(ctx, path)
 			if statErr != nil {
 				continue
 			}
 			if info.IsDir() {
-				resolved, resolveErr := filepath.EvalSymlinks(path)
+				if resolver == nil {
+					return fmt.Errorf("follow 需要 accessor 实现 toolcore.SymlinkResolver（%T 未提供该能力）：%s 是指向目录的链接，拿不到链接目标就无法可靠终止链接环", access, path)
+				}
+				resolved, resolveErr := resolver.EvalLinkPath(ctx, path)
 				if resolveErr != nil || seen[resolved] {
 					continue
 				}

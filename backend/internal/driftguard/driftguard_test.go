@@ -65,23 +65,27 @@ var coreBaselines = map[string]int{
 	// reachable from a policy that proved its accessor is local - and pinned by
 	// behaviour tests, because a count cannot express "only on this branch".
 	//
-	// S5 moved the traversal itself and every remaining shape question: both walkers now
-	// go through walkViaAccess (a copy of filepath.WalkDir, pinned by a differential over
-	// five callback policies against symlinks, hidden dirs, an empty dir and an unsorted
-	// listing), and the root/file shape Stats that used to pick the search mode, the
-	// ignore scope and the ripgrep argv shape answer from the accessor too.
+	// S5a moved the traversal itself and every shape question: both walkers now answer from
+	// the accessor (the non-following one is walkViaAccess, a copy of filepath.WalkDir
+	// pinned by a differential over five callback policies against symlinks, hidden dirs, an
+	// empty dir and an unsorted listing), and the root/file Stats that pick the search mode,
+	// the ignore scope and the ripgrep argv shape answer from it too.
+	// S5b moved the following leg: the followed root, each listing and each link target now
+	// come from the same accessor, and the link *identity* the cycle rule needs arrives as an
+	// optional capability (toolcore.SymlinkResolver) rather than as a new Access method -
+	// design §2 Q1 keeps "which path is this" with the one authority that answers it, because
+	// a second one is how the envd fork was born. An accessor without that capability
+	// searches link-free trees normally and declines, in as many words, the moment a
+	// link-to-directory would need resolving; nothing is approximated.
 	//
-	// The 4 that remain are exactly two concerns, and both need a capability the seam does
-	// not have yet:
-	//   - walkGrepFollowing (3): following links needs a path *resolver*, which design §2
-	//     Q1 deliberately keeps out of Access, so it moves as its own step;
-	//   - filesystemIdentity (1): the device id behind one_file_system, design §2 Q2.
-	// The 2 walker-style calls left are the same resolver's filepath.EvalSymlinks uses.
-	// When they reach 0 the number will again say more than it should: localio is the one
-	// package allowed to touch the host - that is its whole purpose - and driftguard does
-	// not scan it, so a zero here means "the core asks no host question", not "no process
-	// reads a disk".
-	"searchcore": 4,
+	// The 1 that remains is filesystemIdentity: the device id behind one_file_system, which
+	// is design §2 Q2's optional-interface question and moves as S5c.
+	//
+	// A zero would again say more than it should, in both guards: localio is the one package
+	// allowed to touch the host - that is its whole purpose, and driftguard does not scan it.
+	// filepath.EvalSymlinks now lives there as the host's answer, so walkerBaselines reaching
+	// 0 means "no core asks a host question", not "no process reads a disk".
+	"searchcore": 1,
 	"mutatecore": 27,
 }
 
@@ -151,11 +155,11 @@ var walkerBaselines = map[string]int{
 	// over every depth/limit pair (internal/toolcore/lscore/walk_differential_test.go),
 	// with exactly one deliberate divergence documented there.
 	"lscore": 0,
-	// searchcore's remaining host-tree calls are the two filepath.EvalSymlinks uses inside
-	// walkGrepFollowing. They are counted here rather than in coreBaselines because they
-	// are not os.* calls, and they are the reason "0 os.*" would not yet mean a
-	// backend-neutral follow mode (design §2 Q1).
-	"searchcore": 2,
+	// searchcore's two filepath.EvalSymlinks uses moved into localio as the host's answer to
+	// the optional SymlinkResolver capability (design §2 Q1). Follow mode on a backend that
+	// cannot resolve links is declined rather than approximated, which is what lets this
+	// number read as zero without reading it as "no process touches a disk".
+	"searchcore": 0,
 	"mutatecore": 1,
 }
 

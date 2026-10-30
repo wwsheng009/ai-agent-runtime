@@ -48,6 +48,27 @@
 
 结论：**不进 `Access`**。它是 `follow=true` 这条可选策略的一部分，正确形态是给 `GrepOptions` 一个能力门（远端已有 `aicli-envd-resolve` 这条 RPC，`ProbeCapabilities` 可测）。若在 seam 里再造 `EvalSymlinks`，同一个"这路径真的是哪儿"的问题就会有两套答案，而这正是 envd 分叉当初的病根。
 
+S5b 落地形态（与上面的差别只在一处，但那一处是别人踩过的坑）：
+
+1. 能力门做成**可选接口** `toolcore.SymlinkResolver{ EvalLinkPath(ctx, path) }`，`localio`
+   实现它（宿主自己的 `filepath.EvalSymlinks`），`searchcore` 只做类型断言。原方案写的是"给
+   `GrepOptions` 一个能力门"，实际不需要给 options 加字段：门开在 accessor 上，`Access` 的
+   方法集一个都没动。
+2. **问能力的时机是"真的遇到需要解析的链接"，不是进入 follow 分支那一刻**。这条是既有测试
+   逼出来的：`handler.go` 在 Windows 上把 `follow` 默认置真（NTFS junction 在遍历眼里不是
+   目录），所以任何走 handler 的搜索都在 follow 这条腿上。前置拒绝会连"一棵根本没有链接的
+   树"都拒掉——本地搜索当场变红。现在无链接树照常搜索，遇到指向目录的链接而 accessor 给不出
+   目标时，带路径拒绝，**绝不静默跳过**（静默跳过就是把"少了一个能力"伪装成"这里没有链接"）。
+3. 环路与重复目标的身份仍用**解析后的目标**，不用链接自身路径——变异 N7 证明这条承重：换成
+   链接自身路径后，`alpha/to-beta/to-alpha/to-beta/…` 这样的路径会无限增长，遍历不再终止。
+
+顺带查出一条**尚未修的宿主假设泄漏**（记在这里，不擅自改动他人语义）：`handler.go` 用
+`runtime.GOOS == "windows"` 决定 `follow` 的默认值，而这个默认值会传给目标机的 rg（远端通路
+现在仍走 `Searcher` 拦截）。也就是说**客户端操作系统的种类，正在决定另一台机器上文件的遍历
+语义**。改成"仅本地 accessor 才默认 follow"是符合本方案精神的做法，但它会改变远端 grep 的
+可观测行为（Windows 客户端上的远端搜索将不再默认 `--follow`），属工具面语义变化，需在 S6 的
+合并清单里显式决定，不在本步顺手做。
+
 ### Q2 文件身份（inode）
 `filesystemIdentity` 在 unix 上用 `dev+ino` 做"同一文件去重"。envd 的 `Entry` **没有 inode**，SSH 后端也没有。硬搬的后果是远端把两个不同文件当成同一个（或反之），而去重结果直接影响 grep 命中列表。
 
@@ -108,7 +129,7 @@ Access toolcore.Access
 | S3 ✅ | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go、ripgrep_engine.go、handler.go | **实测 16→14** | 单文件回滚 |
 | S4 ✅ | ignore 的**完整关注点**：规则文件读取、显式 ignore_file 的校验（Stat+读）、以及"哪个目录的规则适用"的两处形状判定，全部与枚举同源。`ValidateGrepIgnoreFiles` **加了 ctx**（见 §4b 偏离声明） | grep_ignore.go、grep.go、handler.go、localio/access.go | **实测 14→9**（5 处：3 Stat + 2 ReadFile。本表原先写"15→11"是预填数，实测纠正；HOME 三处不计入守卫，理由见 §2 Q3 第 2 条） | 单次 revert |
 | S5a ✅ | **遍历本身**（默认不跟随链接那条腿）+ 所有"路径形状"判定：搜索模式（root/roots[0] 是否regular file）、ignore 作用域、ripgrep 的 argv 形状与 SingleFile | seam_walk.go（新）、glob.go、grep.go、grep_ignore.go、ripgrep_engine.go | **实测 os.* 9→4、walker 4→2** | 单文件回滚（`seam_walk.go` 存在即这步的开关） |
-| S5b | `walkGrepFollowing`（跟随链接那条腿）：`os.Stat`×3 + `os.ReadDir`×1 + **Q1 落地**（链接解析能力门，无解析器即拒绝 `follow=true`，不做半吊子环路检测） | grep.go、localio | os.* 4→1、walker 2→0 | 同上 |
+| S5b ✅ | `walkGrepFollowing`（跟随链接那条腿）：被跟随的根、每级清单、链接目标形状三处换源，链接**身份**经可选接口 `toolcore.SymlinkResolver`（Q1 落地）。能力只在真的遇到"指向目录的链接"时才要，缺能力则**带路径拒绝**，不静默跳过、不做半吊子环路检测 | grep.go、toolcore/access.go、localio/access.go | **实测 os.* 4→1、walker 2→0** | 单文件回滚（`walkGrepFollowing` 换回宿主调用即撤销本步） |
 | S5c | `filesystemIdentity`（`one_file_system` 的设备边界，**Q2**） | filesystem_unix.go、filesystem_windows.go | os.* 1→0 | 同上 |
 | S6 | 退役 `Searcher` 拦截，让远端 grep/glob 走共享核 | remotetools + handler | 目标是**删代码**（与 bridge 那轮 −3175 行同类收益） | 整步独立可撤 |
 
@@ -122,7 +143,7 @@ Access toolcore.Access
 
 ---
 
-## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4 / S5a，累计 os.* 24→4，walker 4→2）
+## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4 / S5a / S5b，累计 os.* 24→1，walker 4→0）
 
 四步均按"每步实测"落数：`24→21→18→17→16`，棘轮在同一笔提交里下调并写明剩余归属。三步都带了注入证据与反向验证（摘掉 seam 后测试必须红，且必须是**测试**红、不是编译红）。
 
@@ -187,6 +208,25 @@ S5a 另三条新教训：
 12. **对拍必须覆盖回调的三种处置**（nil / SkipDir / 真错误）与 **未预排序的列表**：`reverseReadDirAccess`
     包一层把目录倒序返回，才能证明排序是被测代码做的（`localio` 自己就是有序的，用它对拍永远测不出
     少了 `sort`）。fake 的 `ReadDir` 也故意**倒序**返回，同理。
+
+S5b 另三条（第 13 条是本步最有价值的一条）：
+
+13. **既有测试逼出了正确的设计**：能力门第一版做成"进入 follow 分支即要求 `SymlinkResolver`"，
+    `TestGrepContextLinesComeFromTheSameSource` 当场变红——因为 `handler.go` 在 **Windows 上默认
+    `follow=true`**（junction 问题），任何走 handler 的搜索都在这条腿上，前置拒绝等于拒掉全部本地
+    搜索。我没有改测试，而是改成"遇到需要解析的链接才要能力"。教训：**能力门要卡在最小必要时机上**，
+    卡早了就是把"缺能力"扩大成"不可用"；而发现这一点的成本几乎为零——先跑既有测试，不要先改它。
+    顺带查出 `runtime.GOOS` 正在替远端决定遍历语义这条更深的泄漏，已记进 §2 Q1（不擅自改他人语义）。
+14. **变异脚本必须自带基线自检**：第一次跑 S5b 变异时，脚本在 N5 处因 Windows 控制台 GBK 解码
+    UTF-8 输出而崩在读线程里，**变异残留在工作树**；第二轮脚本以那份脏代码为"原始版本"，于是报出
+    "N6 锚点不中"这种假结论，而它其实是上一轮的残留。修法是三条：`subprocess` 显式
+    `encoding="utf-8", errors="replace"`；每条变异放在 `try/finally` 里还原；**开始前断言基线含
+    预期锚点且相关测试全绿**，否则拒绝运行（并在结束后复跑一次）。教训：**变异测试的前提是基线
+    可信，而"字节还原为 True"只相对于本轮读到的那份文件成立**——如果那份文件本身已脏，整轮结论
+    都是噪声。这与本会话 §4b 第 5 条是同一个病：不取地面真相就下结论。
+15. **让"不终止"以断言失败呈现，而不是以 panic 呈现**：N7（环路身份改用链接自身路径）最初表现为
+    栈溢出 panic。panic 虽然也算测试失败，但它隐去了"哪条规则失效"，还要烧掉包级超时。给对拍的
+    访问数加一个上限（超过即回调返回错误）之后，同一条变异以 `--- FAIL` + 明确原因失败，17s 内收敛。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

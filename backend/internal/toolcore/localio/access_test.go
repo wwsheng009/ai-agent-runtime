@@ -300,3 +300,44 @@ func TestLocalHandleSatisfiesSeamWithoutWrapper(t *testing.T) {
 		return info
 	}()
 }
+
+// TestEvalLinkPathIsTheHostResolver pins the two halves of the Q1 capability gate that a
+// shared core depends on: the local accessor must actually carry the capability, and its
+// answer must be the host's own canonical form. A core that declines follow mode when the
+// capability is missing must never decline on this machine, and a core that uses the answer
+// to terminate a link cycle must get the same identity the pre-seam code got from
+// filepath.EvalSymlinks directly.
+func TestEvalLinkPathIsTheHostResolver(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this host cannot create symlinks (privileges?): %v", err)
+	}
+
+	resolver, ok := Access.(toolcore.SymlinkResolver)
+	if !ok {
+		t.Fatal("the local accessor must provide the link capability, or every local follow search would be declined")
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.EvalLinkPath(context.Background(), link)
+	if err != nil {
+		t.Fatalf("EvalLinkPath: %v", err)
+	}
+	if resolved != want {
+		t.Fatalf("EvalLinkPath = %q, want the host's own answer %q", resolved, want)
+	}
+
+	// A path that is not there must fail rather than echo the input back: the walker's cycle
+	// rule treats a failed resolution as "do not descend", so a permissive answer here would
+	// turn a broken link into a directory to explore.
+	if _, err := resolver.EvalLinkPath(context.Background(), filepath.Join(dir, "nope.txt")); err == nil {
+		t.Fatal("a missing path must not resolve")
+	}
+}

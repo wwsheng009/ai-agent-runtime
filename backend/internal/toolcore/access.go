@@ -89,6 +89,29 @@ type FileAccessProvider interface {
 	FileAccess() Access
 }
 
+// SymlinkResolver is the optional capability that answers, for one already-authorized
+// path, which existing path a chain of symbolic links leads to.
+//
+// It is an optional extension and deliberately NOT a method of Access. Access is the read
+// vocabulary: bytes, one directory level, the shape of a path. Link *identity* is not
+// another read - it is the question "which path is this", and the tool layer keeps exactly
+// one authority for path identity and authorization (Paths()/Permissions(), design §4.2).
+// Putting EvalSymlinks into Access would create a second one, and two authorities over the
+// same path is the shape of the bug this whole refactor exists to end.
+//
+// What a consumer may use it for is narrower than what an implementation may answer: cycle
+// avoidance while following links. It must never be consulted to decide whether a path is
+// allowed - that answer stays with the authorizing resolver, and a core that asked this one
+// would be re-deriving policy from a filesystem hint.
+//
+// A backend that cannot answer it simply does not implement the interface, and the feature
+// that needs it is then declined in as many words. Approximating it - skipping the cycle
+// check, or treating path+size+mtime as an identity - would trade a refusal for a wrong
+// answer, which is the trade this seam refuses everywhere.
+type SymlinkResolver interface {
+	EvalLinkPath(ctx context.Context, path string) (string, error)
+}
+
 // NotExistError is the hook a backend whose transport reports absence with its
 // own error type (an RPC status, an HTTP 404) implements so that a single
 // classification in the core covers both the local and the remote answer.
