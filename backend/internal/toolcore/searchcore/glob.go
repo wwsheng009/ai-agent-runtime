@@ -3,6 +3,7 @@ package searchcore
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -129,11 +130,17 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 	}
 	budgetCtx, cancel := context.WithTimeout(searchCtx, GlobSearchBudget)
 	defer cancel()
+	// One accessor for the whole call. The base's shape, the traversal below it and the
+	// ordering of the results must be answered by the same machine, and the answer must
+	// not be able to change between one directory and the next.
+	access := seamAccess(opts.Access)
 
 	// A single-file root is its own match set: `path: "a/b.go"` with any
 	// pattern that names the file now returns it, which is what the local tool
 	// has always done. Walking from a file root would return nothing.
-	if info, err := os.Stat(base); err == nil && !info.IsDir() {
+	// Stat, not Lstat, deliberately: a symlink that resolves to a directory must be
+	// walked as a directory, which is what os.Stat answered here before the seam.
+	if info, err := access.Stat(budgetCtx, base); err == nil && !info.IsDir() {
 		result := GlobResult{}
 		name := filepath.Base(filepath.Clean(base))
 		for _, candidate := range expanded {
@@ -160,7 +167,7 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 		return result, nil
 	}
 
-	matches, timedOut, walkErr := walkGlobMatches(budgetCtx, base, expanded, fetchLimit, opts)
+	matches, timedOut, walkErr := walkGlobMatches(budgetCtx, access, base, expanded, fetchLimit, opts)
 	if walkErr != nil {
 		return GlobResult{}, walkErr
 	}
@@ -169,7 +176,7 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 	// give every page its own order, so next_offset could not describe a stable
 	// sequence.
 	if opts.SortByModTime {
-		sortGlobMatchesByModTime(ctx, seamAccess(opts.Access), result.Matches)
+		sortGlobMatchesByModTime(ctx, access, result.Matches)
 	} else {
 		sort.Strings(result.Matches)
 	}
@@ -209,7 +216,7 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 // walkGlobMatches is the shared pure-Go traversal. It unions the brace
 // alternatives, keeps directories when the caller allows them, never follows a
 // symlink, and returns what it collected when the budget expires.
-func walkGlobMatches(ctx context.Context, base string, patterns []string, fetchLimit int, opts GlobOptions) ([]string, bool, error) {
+func walkGlobMatches(ctx context.Context, access toolcore.Access, base string, patterns []string, fetchLimit int, opts GlobOptions) ([]string, bool, error) {
 	matchers := make([]*GlobMatcher, 0, len(patterns))
 	for _, pattern := range patterns {
 		matcher, err := NewGlobMatcher(pattern)
@@ -224,7 +231,7 @@ func walkGlobMatches(ctx context.Context, base string, patterns []string, fetchL
 	timedOut := false
 	// WalkDir reports the root itself; it is not a candidate (a glob pattern
 	// describes children of the base, never the base).
-	walkErr := filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
+	walkErr := walkViaAccess(ctx, access, base, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			// Unreadable subtrees are skipped, not fatal: a permission error on
 			// one directory must not hide the rest of the tree.

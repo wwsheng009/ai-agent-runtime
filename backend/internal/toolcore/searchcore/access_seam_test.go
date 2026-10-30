@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -261,8 +262,53 @@ func (a *virtualAccess) Open(_ context.Context, path string) (toolcore.FileHandl
 	return &virtualHandle{Reader: bytes.NewReader(body), info: fakeInfo{name: filepath.Base(path), size: int64(len(body))}}, nil
 }
 
-func (a *virtualAccess) ReadDir(context.Context, string) ([]fs.DirEntry, error) {
-	return nil, absentErr{path: "directory walking is S5, not this step"}
+func (a *virtualAccess) ReadDir(_ context.Context, dir string) ([]fs.DirEntry, error) {
+	// S5: enumeration belongs to the accessor too. The listing is derived from the same
+	// `files`/`dirs` maps the rest of the fake answers from, so a tree can be described
+	// once and the search will only ever see it through this method.
+	//
+	// The entries come back in REVERSE name order on purpose. os.ReadDir sorts, so a fake
+	// that also sorted could never expose a missing sort in the walker - and traversal
+	// order is paging order in this package, so the sort is load-bearing, not cosmetic.
+	prefix := dir + string(filepath.Separator)
+	byName := map[string]fs.DirEntry{}
+	for path, body := range a.files {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		if rest == "" {
+			continue
+		}
+		if idx := strings.IndexByte(rest, filepath.Separator); idx >= 0 {
+			name := rest[:idx]
+			if _, ok := byName[name]; !ok {
+				byName[name] = fs.FileInfoToDirEntry(fakeInfo{name: name, isDir: true})
+			}
+			continue
+		}
+		if a.dirs[path] {
+			byName[rest] = fs.FileInfoToDirEntry(fakeInfo{name: rest, isDir: true})
+			continue
+		}
+		byName[rest] = fs.FileInfoToDirEntry(fakeInfo{name: rest, size: int64(len(body)), mod: a.times[path]})
+	}
+	for path := range a.dirs {
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(path, prefix)
+		if rest == "" || strings.ContainsRune(rest, filepath.Separator) {
+			continue
+		}
+		byName[rest] = fs.FileInfoToDirEntry(fakeInfo{name: rest, isDir: true})
+	}
+	entries := make([]fs.DirEntry, 0, len(byName))
+	for _, entry := range byName {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+	return entries, nil
 }
 
 // TestGrepSearchesTheAccessorsBytes: the disk holds text with no match, the accessor
@@ -276,7 +322,7 @@ func TestGrepSearchesTheAccessorsBytes(t *testing.T) {
 	}
 	access := &virtualAccess{files: map[string][]byte{
 		candidate: []byte("hit from the other machine\n"),
-	}}
+	}, dirs: map[string]bool{root: true}}
 
 	result, err := Grep(context.Background(), GrepOptions{
 		Pattern: "hit", Path: root, Limit: 10, Access: access,
@@ -307,7 +353,7 @@ func TestGrepBinaryProbeSharesThatSameSource(t *testing.T) {
 	}
 	access := &virtualAccess{files: map[string][]byte{
 		candidate: []byte("needle\x00binary\n"),
-	}}
+	}, dirs: map[string]bool{root: true}}
 
 	result, err := Grep(context.Background(), GrepOptions{
 		Pattern: "needle", Path: root, Limit: 10, Access: access,
@@ -342,7 +388,7 @@ func TestGrepSizeGateUsesTheAccessorsSize(t *testing.T) {
 	}
 	access := &virtualAccess{files: map[string][]byte{
 		candidate: []byte("needle much larger than the gate\n"),
-	}}
+	}, dirs: map[string]bool{root: true}}
 
 	result, err := Grep(context.Background(), GrepOptions{
 		Pattern: "needle", Path: root, Limit: 10, MaxFileBytes: 20, Access: access,
@@ -401,7 +447,7 @@ func TestGrepPatternFileComesThroughTheAccessor(t *testing.T) {
 	access := &virtualAccess{files: map[string][]byte{
 		patternFile: []byte("needle\n"),
 		haystack:    []byte("needle in the haystack\n"),
-	}}
+	}, dirs: map[string]bool{tree: true}}
 	result, err := Grep(context.Background(), GrepOptions{
 		Path: tree, Limit: 10, PatternFiles: []string{patternFile}, Access: access,
 	})
@@ -438,7 +484,7 @@ func TestGrepContextLinesComeFromTheSameSource(t *testing.T) {
 	}
 	access := &virtualAccess{files: map[string][]byte{
 		hay: []byte("needle\nREMOTE-BELOW\n"),
-	}}
+	}, dirs: map[string]bool{root: true}}
 
 	handler := NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
 	runtime := seamRuntime{
@@ -534,6 +580,7 @@ func TestGlobOrderFollowsTheAccessorsTimes(t *testing.T) {
 	access := &virtualAccess{
 		files: map[string][]byte{first: []byte("x\n"), second: []byte("x\n")},
 		times: map[string]time.Time{first: newer, second: old},
+		dirs:  map[string]bool{root: true},
 	}
 	options.Access = access
 	remote, err := GlobWithOptions(context.Background(), options)
@@ -592,6 +639,7 @@ func TestGrepSortFollowsTheAccessorsTimes(t *testing.T) {
 		// The accessor's view flips the ages: f1 is the older file there, so the
 		// ascending order must start with f1 while disk starts with f2.
 		times: map[string]time.Time{first: old, second: newer},
+		dirs:  map[string]bool{root: true},
 	}
 	shared.Access = access
 	remote, err := Grep(context.Background(), shared)
@@ -820,49 +868,92 @@ func TestLocalAccessorStillReadsTheHostHomeGitignore(t *testing.T) {
 	assertFileList(t, grepFilterMatches(t, root, shared), []string{"keep.txt"})
 }
 
-// TestGrepIgnoreScopeFollowsTheAccessorsRootShape pins the other Stat this step moved:
-// whether the search root is a directory decides which ancestor's ignore files bound the
-// search, because a file-shaped root also consults its own directory's rules.
+// TestGrepIgnoreScopeFollowsTheAccessorsRootShape pins the Stat that chooses which
+// directory the search is scoped to. Now that the traversal answers from the accessor,
+// this question must agree with it: a path that is a directory on the target and a plain
+// file here is the ordinary shape of "same path, different machine", and choosing the
+// scope from the host answer makes the search consult the parent of a tree the caller
+// never named - rules leaking in from outside the root.
 //
-// The fixture is deliberately asymmetric: the root is a real directory on this machine
-// and a *file* according to the accessor, and the ignore rule that hides the match lives
-// in the parent. Answering the shape question locally therefore finds no rule and
-// reports a match; answering it through the accessor scopes the search to the parent and
-// hides it. Without this asymmetry both answers agree and the test proves nothing, which
-// is the same trap the ordering test fell into on the first draft.
+// The fixture is asymmetric on purpose, and its first draft was wrong in a way only a
+// mutation exposed: when both sides agreed the root was a directory, baseRules already
+// loads the ancestors it can reach, so the two scope answers produced the same rule set and
+// the test stayed green against a host-side Stat. Here the parent's rule can only reach the
+// match through the root's shape question, and no_ignore_parent is what shuts the other
+// door.
 func TestGrepIgnoreScopeFollowsTheAccessorsRootShape(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "app")
 	parent := filepath.Dir(filepath.Clean(root))
-	hit := filepath.Join(root, "hit.txt")
-	writeHostFile(t, hit, "needle\n")
+	hit := filepath.Join(root, "src", "hit.txt")
+	// On this machine the search root is a file with unrelated bytes.
+	writeHostFile(t, root, "this path is a file here\n")
 
 	access := &virtualAccess{
 		files: map[string][]byte{
-			// The root itself is bytes, not a directory, as far as the target is
-			// concerned - and the parent carries a rule that hides the match.
-			root:                                []byte("this root is a file here\n"),
-			hit:                                 []byte("needle\n"),
+			hit: []byte("needle\n"),
+			// The parent carries a rule that hides the match by base name. It may
+			// only reach the search if the scope is chosen from the host answer.
 			filepath.Join(parent, ".gitignore"): []byte("hit.txt\n"),
 		},
+		dirs: map[string]bool{root: true, filepath.Join(root, "src"): true},
 	}
 
 	shared := GrepOptions{Pattern: "needle", Limit: 10, NoIgnoreParent: true}
 	shared.Access = access
-	got := grepFilterMatches(t, root, shared)
-	if len(got) != 0 {
-		t.Fatalf("the ignore scope was chosen by this machine's root shape, not the accessor's: %v", got)
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"src/hit.txt"})
+
+	// Control: with no accessor this machine has a file at the root, so there is no tree
+	// to search and nothing is reported. The two sources must differ, or the assertion
+	// above is passing on an inert fixture.
+	assertFileList(t, grepFilterMatches(t, root, GrepOptions{
+		Pattern: "needle", Limit: 10, NoIgnoreParent: true,
+	}), nil)
+}
+
+// TestGrepRulesForFollowsTheAccessorsDirectoryShape is a regression pin for the target's
+// own directory rules, and it is NOT the evidence S4 hoped for. The mutation that answers
+// this candidate's shape from the host (os.Stat on absPath) leaves the result unchanged,
+// and the reason is structural rather than a flaw in the fixture:
+//
+//	rulesFor walks from `dir` up to the search root, so choosing dir = absPath adds exactly
+//	one more directory level, dirRules(absPath). Those rule files carry scope = absPath, and
+//	they are matched against absPath itself, whose relative path is "." - which the matcher
+//	skips. Children of absPath reach dirRules(absPath) through their own parent either way.
+//	So the shape answer at a candidate cannot change that candidate's verdict, and no fixture
+//	can make it observable.
+//
+// The Stat still moved, for a different reason than evidence: one search must have one
+// answerer for the same question, and a future change to the chain would otherwise make
+// this line quietly load-bearing. This test keeps the behaviour pinned in the meantime -
+// the target's .gitignore inside a directory that is a file here must hide its own match.
+func TestGrepRulesForFollowsTheAccessorsDirectoryShape(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "pkg")
+	writeHostFile(t, sub, "not a directory here\n")
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			sub:                              []byte("not a directory here\n"),
+			filepath.Join(sub, ".gitignore"): []byte("hit.txt\n"),
+			filepath.Join(sub, "hit.txt"):    []byte("needle\n"),
+		},
+		dirs: map[string]bool{root: true, sub: true},
 	}
 
-	// no_ignore_parent is load-bearing for this fixture, and the first draft of the test
-	// got it wrong: baseRules already loads every ancestor it can reach, so with the flag
-	// unset both candidate scopes produced the same rule set and the test stayed green
-	// against a mutation that answers the root shape from the host. With the flag set, the
-	// only way the parent's rule can reach the match is through the root's own shape
-	// question - which is the question this step moved.
-	//
-	// Control: with no accessor the host really does have a directory here, so the search
-	// root stays the root and the parent's rule is out of scope. The two answers must
-	// differ, or the assertion above is passing on an inert fixture.
-	control := grepFilterMatches(t, root, GrepOptions{Pattern: "needle", Limit: 10, NoIgnoreParent: true})
-	assertFileList(t, control, []string{"hit.txt"})
+	assertFileList(t, grepFilterMatches(t, root, GrepOptions{
+		Pattern: "needle", Limit: 10, Access: access,
+	}), nil)
+
+	// And the same tree without the target's rule file must report the match, proving the
+	// zero above is the rule file doing work rather than the candidate never being reached.
+	unruled := &virtualAccess{
+		files: map[string][]byte{
+			sub:                           []byte("not a directory here\n"),
+			filepath.Join(sub, "hit.txt"): []byte("needle\n"),
+		},
+		dirs: map[string]bool{root: true, sub: true},
+	}
+	assertFileList(t, grepFilterMatches(t, root, GrepOptions{
+		Pattern: "needle", Limit: 10, Access: unruled,
+	}), []string{"pkg/hit.txt"})
 }

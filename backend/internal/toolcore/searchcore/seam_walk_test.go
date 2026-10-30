@@ -1,0 +1,514 @@
+package searchcore
+
+// S5 of docs/plan/searchcore-io-seam-migration-20261028.md: the traversal itself.
+//
+// These tests carry the weight of the claim that walkViaAccess is a copy of
+// filepath.WalkDir and not an approximation. Traversal order is not cosmetic here: the
+// fetch limit, the paging offset and the early SkipAll are all decided in visit order, so
+// a re-ordered walk silently changes which files a caller is shown - which is exactly what
+// the ls migration's differential test was built to catch, and the reason this step is not
+// allowed to ship on "the existing tests still pass".
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
+)
+
+// walkPolicy turns one visited entry into the decision a caller would make, so the
+// differential covers the SkipDir/SkipAll/error paths and not only the happy one.
+type walkPolicy struct {
+	name string
+	// decide returns the callback's value for one entry. A nil decide means "nil".
+	decide func(path string, entry fs.DirEntry, err error, visitIndex int) error
+}
+
+func buildWalkFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	mkdir := func(rel string) string {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	touch := func(rel, body string) string {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	// Names chosen so that creation order differs from lexical order, and so that a
+	// SkipDir on one file must hide only the siblings that follow it.
+	touch("z.txt", "z\n")
+	touch("a.txt", "a\n")
+	mkdir("empty-dir")
+	touch("nested/a-first.txt", "1\n")
+	touch("nested/middle/b.txt", "2\n")
+	touch("nested/z-last.txt", "3\n")
+	touch(".hidden/c.txt", "3\n")
+	linkTarget := touch("a.txt", "a\n")
+	if err := os.Symlink(linkTarget, filepath.Join(root, "link-to-file.txt")); err != nil {
+		t.Fatalf("this differential needs symlink support: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "nested"), filepath.Join(root, "link-to-dir")); err != nil {
+		t.Fatalf("this differential needs symlink support: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "nowhere"), filepath.Join(root, "broken-link")); err != nil {
+		t.Fatalf("this differential needs symlink support: %v", err)
+	}
+	return root
+}
+
+// describe renders one visit the way both walks record it, so a divergence says which
+// entry differs instead of only that two slices were unequal.
+func describe(path string, entry fs.DirEntry, err error) string {
+	kind := "file"
+	name := ""
+	switch {
+	case entry == nil:
+		kind = "nil-entry"
+	case entry.IsDir():
+		kind = "dir"
+	case entry.Type()&fs.ModeSymlink != 0:
+		kind = "link"
+	}
+	if entry != nil {
+		name = entry.Name()
+	}
+	if err != nil {
+		return path + "|" + kind + "|" + name + "|err"
+	}
+	return path + "|" + kind + "|" + name
+}
+
+func (p walkPolicy) run(root string, walk func(func(string, fs.DirEntry, error) error) error) ([]string, error) {
+	t := []string{}
+	index := 0
+	err := walk(func(path string, entry fs.DirEntry, err error) error {
+		index++
+		t = append(t, describe(path, entry, err))
+		if p.decide == nil {
+			return nil
+		}
+		return p.decide(path, entry, err, index)
+	})
+	return t, err
+}
+
+func TestWalkViaAccessMatchesWalkDirReference(t *testing.T) {
+	root := buildWalkFixture(t)
+	policies := []walkPolicy{
+		{name: "visit-everything"},
+		{name: "skip-the-nested-dir", decide: func(path string, entry fs.DirEntry, _ error, _ int) error {
+			if entry != nil && entry.IsDir() && entry.Name() == "nested" {
+				return filepath.SkipDir
+			}
+			return nil
+		}},
+		// The subtle one: SkipDir returned for a NON-directory must stop the remaining
+		// siblings of that directory, which is what the stdlib's loop does with `break`.
+		{name: "skip-rest-after-one-file", decide: func(path string, entry fs.DirEntry, _ error, _ int) error {
+			if entry != nil && !entry.IsDir() && filepath.Base(path) == "a-first.txt" {
+				return filepath.SkipDir
+			}
+			return nil
+		}},
+		{name: "stop-at-first-file", decide: func(path string, entry fs.DirEntry, _ error, _ int) error {
+			if entry != nil && !entry.IsDir() {
+				return filepath.SkipAll
+			}
+			return nil
+		}},
+		{name: "error-propagates", decide: func(path string, entry fs.DirEntry, _ error, _ int) error {
+			if filepath.Base(path) == "b.txt" {
+				return errors.New("stop here")
+			}
+			return nil
+		}},
+	}
+
+	for _, policy := range policies {
+		t.Run(policy.name, func(t *testing.T) {
+			oracle, oracleErr := policy.run(root, func(fn func(string, fs.DirEntry, error) error) error {
+				return filepath.WalkDir(root, fn)
+			})
+
+			viaSeam, seamErr := policy.run(root, func(fn func(string, fs.DirEntry, error) error) error {
+				return walkViaAccess(context.Background(), localio.Access, root, fn)
+			})
+
+			if !reflect.DeepEqual(oracle, viaSeam) || !reflect.DeepEqual(oracleErr, seamErr) {
+				t.Fatalf("walkViaAccess diverged from filepath.WalkDir\n oracle (%d): %v\n  seam  (%d): %v\n oracleErr=%v seamErr=%v",
+					len(oracle), oracle, len(viaSeam), viaSeam, oracleErr, seamErr)
+			}
+
+			// The same walk against an accessor whose listing is NOT sorted. os.ReadDir
+			// sorted for us before the seam, so this is the only way to prove the walker
+			// sorts by name itself instead of inheriting the host's courtesy.
+			viaUnsorted, unsortedErr := policy.run(root, func(fn func(string, fs.DirEntry, error) error) error {
+				return walkViaAccess(context.Background(), reverseReadDirAccess{localio.Access}, root, fn)
+			})
+			if !reflect.DeepEqual(oracle, viaUnsorted) || !reflect.DeepEqual(oracleErr, unsortedErr) {
+				t.Fatalf("a remote listing that is not pre-sorted changed the visit order\n oracle: %v\n  got: %v",
+					oracle, viaUnsorted)
+			}
+		})
+	}
+}
+
+// reverseReadDirAccess hands back each directory in reverse name order, which is what an
+// unsorted remote listing looks like. A real transport makes no ordering promise, so the
+// walker must not depend on one.
+type reverseReadDirAccess struct{ inner toolcore.Access }
+
+func (a reverseReadDirAccess) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
+	return a.inner.Stat(ctx, path)
+}
+
+func (a reverseReadDirAccess) Lstat(ctx context.Context, path string) (fs.FileInfo, error) {
+	return a.inner.Lstat(ctx, path)
+}
+
+func (a reverseReadDirAccess) Open(ctx context.Context, path string) (toolcore.FileHandle, error) {
+	return a.inner.Open(ctx, path)
+}
+
+func (a reverseReadDirAccess) ReadDir(ctx context.Context, path string) ([]fs.DirEntry, error) {
+	entries, err := a.inner.ReadDir(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	reversed := append([]fs.DirEntry(nil), entries...)
+	sort.Slice(reversed, func(i, j int) bool { return reversed[i].Name() > reversed[j].Name() })
+	return reversed, nil
+}
+
+// unreadableAccess fails exactly one directory listing, which is the branch the host tree
+// cannot be asked to produce on demand.
+type unreadableAccess struct {
+	toolcore.Access
+	bad string
+}
+
+func (a unreadableAccess) ReadDir(ctx context.Context, path string) ([]fs.DirEntry, error) {
+	if path == a.bad {
+		return nil, errors.New("permission denied")
+	}
+	return a.Access.ReadDir(ctx, path)
+}
+
+// TestWalkViaAccessReportsAReadDirErrorLikeWalkDir pins the stdlib's "second call": an
+// unreadable directory is reported to the callback twice - once as the entry itself, once
+// with the listing error - and the walk then continues with the next sibling. The shape of
+// that sequence is what makes a permission problem cost one subtree instead of the search.
+func TestWalkViaAccessReportsAReadDirErrorLikeWalkDir(t *testing.T) {
+	root := buildWalkFixture(t)
+	bad := filepath.Join(root, "nested")
+	access := unreadableAccess{Access: localio.Access, bad: bad}
+
+	var visits []string
+	err := walkViaAccess(context.Background(), access, root, func(path string, entry fs.DirEntry, err error) error {
+		visits = append(visits, describe(path, entry, err))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("an unreadable subtree must not fail the walk: %v", err)
+	}
+
+	var reportedErr, reachedAfter int
+	for _, visit := range visits {
+		if strings.HasPrefix(visit, bad) && strings.HasSuffix(visit, "|err") {
+			reportedErr++
+		}
+		if strings.HasPrefix(visit, filepath.Join(root, "z.txt")) {
+			reachedAfter++
+		}
+	}
+	if reportedErr != 1 {
+		t.Fatalf("the listing error must be reported for that directory exactly once, got %d in %v", reportedErr, visits)
+	}
+	if reachedAfter == 0 {
+		t.Fatalf("the walk abandoned the whole tree after one unreadable directory: %v", visits)
+	}
+	// The directory itself is visited twice: as its own entry, then with the error.
+	firstAsEntry := 0
+	for _, visit := range visits {
+		if strings.HasPrefix(visit, bad) && !strings.HasSuffix(visit, "|err") {
+			firstAsEntry++
+		}
+	}
+	if firstAsEntry != 1 {
+		t.Fatalf("the directory must also be reported as an entry once, got %d in %v", firstAsEntry, visits)
+	}
+
+	// The three dispositions of the second call, each pinned against the stdlib's text:
+	//
+	//   - SkipDir on a directory whose listing failed means "that subtree is done", and
+	//     since the listing already failed the visit sequence is the SAME as swallowing
+	//     the error. Asserting the equality is the point: an implementation that treated
+	//     SkipDir as a fatal error would abort here instead.
+	var skipped []string
+	skipErr := walkViaAccess(context.Background(), access, root, func(path string, entry fs.DirEntry, err error) error {
+		skipped = append(skipped, describe(path, entry, err))
+		if err != nil && entry != nil && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if skipErr != nil {
+		t.Fatalf("SkipDir on a listing error must not surface as a failure: %v", skipErr)
+	}
+	if !reflect.DeepEqual(visits, skipped) {
+		t.Fatalf("a failed listing is already finished; SkipDir must not change what is visited\n swallow: %v\n skipdir: %v", visits, skipped)
+	}
+
+	//   - a real error from that same callback aborts the walk and propagates, which is
+	//     what makes the other two branches a policy choice rather than an accident.
+	var stopped []string
+	abortErr := walkViaAccess(context.Background(), access, root, func(path string, entry fs.DirEntry, err error) error {
+		stopped = append(stopped, describe(path, entry, err))
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if abortErr == nil {
+		t.Fatal("a callback error on a failed listing must abort the walk")
+	}
+	if len(stopped) >= len(visits) {
+		t.Fatalf("the abort must stop earlier than completing the tree (%d vs %d visits)", len(stopped), len(visits))
+	}
+}
+
+// TestGlobEnumeratesATreeTheHostDoesNotHave is the strongest single statement of this
+// step: the directory does not exist on this machine at all, and every path below it comes
+// from the accessor. Listing it is only possible through the seam.
+func TestGlobEnumeratesATreeTheHostDoesNotHave(t *testing.T) {
+	hostDir := t.TempDir()
+	remoteRoot := filepath.Join(hostDir, "checkout")
+	deep := filepath.Join(remoteRoot, "src", "pkg")
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(deep, "one.go"):          []byte("package one\n"),
+			filepath.Join(deep, "two.go"):          []byte("package two\n"),
+			filepath.Join(remoteRoot, "README.md"): []byte("# hi\n"),
+		},
+		dirs: map[string]bool{remoteRoot: true, deep: true, filepath.Join(remoteRoot, "src"): true},
+	}
+
+	result, err := GlobWithOptions(context.Background(), GlobOptions{
+		Base: remoteRoot, Pattern: "**/*.go", Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("glob over an accessor-only tree: %v", err)
+	}
+	if len(result.Matches) != 2 {
+		t.Fatalf("matches = %d (%v), want the two files the accessor listed", len(result.Matches), result.Matches)
+	}
+
+	// Control: the same call without an accessor looks at this machine, where the tree is
+	// genuinely absent, and must find nothing.
+	local, err := GlobWithOptions(context.Background(), GlobOptions{
+		Base: remoteRoot, Pattern: "**/*.go", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("local glob: %v", err)
+	}
+	if len(local.Matches) != 0 {
+		t.Fatalf("the control is wrong: that path does not exist here, got %v", local.Matches)
+	}
+}
+
+// TestGrepEnumeratesATreeTheHostDoesNotHave is the grep counterpart, and it also pins that
+// the ignore rules travel with the same listing: the tree carries its own .gitignore, which
+// only exists on the target.
+func TestGrepEnumeratesATreeTheHostDoesNotHave(t *testing.T) {
+	hostDir := t.TempDir()
+	remoteRoot := filepath.Join(hostDir, "checkout")
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(remoteRoot, ".gitignore"):         []byte("vendor\n"),
+			filepath.Join(remoteRoot, "keep.txt"):           []byte("needle here\n"),
+			filepath.Join(remoteRoot, "vendor", "skip.txt"): []byte("needle too\n"),
+		},
+		dirs: map[string]bool{
+			remoteRoot:                          true,
+			filepath.Join(remoteRoot, "vendor"): true,
+		},
+	}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remoteRoot, Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep over an accessor-only tree: %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %d (%v), want only keep.txt", len(result.Matches), result.Matches)
+	}
+	if filepath.Base(result.Matches[0].File) != "keep.txt" {
+		t.Fatalf("the target's own .gitignore was not honoured: %v", result.Matches[0].File)
+	}
+
+	local, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remoteRoot, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("local grep: %v", err)
+	}
+	if len(local.Matches) != 0 {
+		t.Fatalf("the control is wrong: that tree is not on this machine, got %v", local.Matches)
+	}
+}
+
+// --- the engine's shape answers ---
+
+// The ripgrep engine runs where the caller put it, but it decides its own argv from the
+// shape of the paths it is handed. Those are the caller's paths: answering from this
+// machine means a remote directory that is a file here gets searched with the wrong
+// program shape, and the difference shows up as a silently different result rather than an
+// error.
+
+func TestRipgrepGlobAsksTheAccessorAboutTheBase(t *testing.T) {
+	hostDir := t.TempDir()
+	base := filepath.Join(hostDir, "checkout")
+	// Here: a plain file. On the target: the directory the caller means.
+	writeHostFile(t, base, "not a directory here\n")
+	access := &virtualAccess{
+		files: map[string][]byte{filepath.Join(base, "one.go"): []byte("package one\n")},
+		dirs:  map[string]bool{base: true},
+	}
+
+	invoked := false
+	engine := Ripgrep{
+		Path: "rg",
+		Stream: func(_ context.Context, _ []string, _ string, _ func(line []byte) bool) error {
+			invoked = true
+			return nil
+		},
+	}
+	result, used, err := engine.Glob(context.Background(), GlobOptions{
+		Base: base, Pattern: "*.go", Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("engine glob: %v", err)
+	}
+	if !used || !invoked {
+		t.Fatalf("the engine declined a base the accessor called a directory; it decided from this machine's file (used=%v invoked=%v %v)",
+			used, invoked, result.Matches)
+	}
+
+	// Control: the same base with no accessor is a file here, and a file base is exactly
+	// the shape the engine hands back to the walker.
+	localResult, localUsed, err := engine.Glob(context.Background(), GlobOptions{
+		Base: base, Pattern: "*.go", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("local engine glob: %v", err)
+	}
+	if localUsed || len(localResult.Matches) != 0 {
+		t.Fatalf("the control is wrong: a file base must be declined, got used=%v %v", localUsed, localResult.Matches)
+	}
+}
+
+func TestRipgrepSingleFileFollowsTheAccessorShape(t *testing.T) {
+	hostDir := t.TempDir()
+	root := filepath.Join(hostDir, "one-file.txt")
+	// Here: a directory. On the target: the single file the caller named.
+	if err := os.MkdirAll(filepath.Join(root, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, filepath.Join(root, "inner", "a.txt"), "needle\n")
+	access := &virtualAccess{
+		files: map[string][]byte{root: []byte("needle in the only file\n")},
+	}
+
+	engine := Ripgrep{
+		Path: "rg",
+		Stream: func(_ context.Context, _ []string, _ string, onLine func(line []byte) bool) error {
+			onLine([]byte(root + ":1:needle in the only file"))
+			return nil
+		},
+	}
+	result, used, err := engine.Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("engine grep: %v", err)
+	}
+	if !used {
+		t.Fatal("the engine declined a search it should have answered")
+	}
+	if !result.SingleFile {
+		t.Fatalf("SingleFile was decided by this machine's directory, not the accessor's file: %+v", result)
+	}
+
+	// Control: without an accessor the path is a directory here, and the same call must
+	// report a tree search instead.
+	local, localUsed, err := engine.Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("local engine grep: %v", err)
+	}
+	if !localUsed || local.SingleFile {
+		t.Fatalf("the control is wrong: a directory root must not be marked single-file (used=%v %+v)", localUsed, local)
+	}
+}
+
+// TestGrepSingleFileFlagFollowsTheAccessorShape covers the walker's two remaining shape
+// answers - "is this root a single file" for the result flag and for the search mode -
+// against the same asymmetry: a path that is a directory here and the file the caller
+// named on the target. Before this step both questions were answered from the host, so a
+// remote file behind a locally-existing directory name was reported as a tree search.
+func TestGrepSingleFileFlagFollowsTheAccessorShape(t *testing.T) {
+	hostDir := t.TempDir()
+	root := filepath.Join(hostDir, "notes.txt")
+	// Here it is a directory that happens to carry the same name, holding a file that
+	// does not match, so a host-shaped answer is visible rather than invisible.
+	writeHostFile(t, filepath.Join(root, "inner.md"), "nothing to see\n")
+
+	access := &virtualAccess{
+		files: map[string][]byte{root: []byte("needle in the named file\n")},
+	}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if !result.SingleFile {
+		t.Fatalf("the accessor called this root a file; the result still describes a tree search: %+v", result)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %v, want the one line of the file the accessor named", result.Matches)
+	}
+
+	// Control: without an accessor this machine has a directory there, and the same call
+	// searches it as a tree and finds nothing.
+	local, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("local grep: %v", err)
+	}
+	if local.SingleFile || len(local.Matches) != 0 {
+		t.Fatalf("the control is wrong: a local directory must not be single-file, got %+v", local)
+	}
+}

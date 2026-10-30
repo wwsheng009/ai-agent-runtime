@@ -107,7 +107,9 @@ Access toolcore.Access
 
 | S3 ✅ | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go、ripgrep_engine.go、handler.go | **实测 16→14** | 单文件回滚 |
 | S4 ✅ | ignore 的**完整关注点**：规则文件读取、显式 ignore_file 的校验（Stat+读）、以及"哪个目录的规则适用"的两处形状判定，全部与枚举同源。`ValidateGrepIgnoreFiles` **加了 ctx**（见 §4b 偏离声明） | grep_ignore.go、grep.go、handler.go、localio/access.go | **实测 14→9**（5 处：3 Stat + 2 ReadFile。本表原先写"15→11"是预填数，实测纠正；HOME 三处不计入守卫，理由见 §2 Q3 第 2 条） | 单次 revert |
-| S5 | 遍历器本体：`grepWalkRoot`/`walkGrepFollowing`/`walkGlobMatches` + Q1/Q2 | grep.go、glob.go | os.* 11→? 、walker 4→? （Q1/Q2 未定则为剩余量并写明原因） | 单文件回滚 |
+| S5a ✅ | **遍历本身**（默认不跟随链接那条腿）+ 所有"路径形状"判定：搜索模式（root/roots[0] 是否regular file）、ignore 作用域、ripgrep 的 argv 形状与 SingleFile | seam_walk.go（新）、glob.go、grep.go、grep_ignore.go、ripgrep_engine.go | **实测 os.* 9→4、walker 4→2** | 单文件回滚（`seam_walk.go` 存在即这步的开关） |
+| S5b | `walkGrepFollowing`（跟随链接那条腿）：`os.Stat`×3 + `os.ReadDir`×1 + **Q1 落地**（链接解析能力门，无解析器即拒绝 `follow=true`，不做半吊子环路检测） | grep.go、localio | os.* 4→1、walker 2→0 | 同上 |
+| S5c | `filesystemIdentity`（`one_file_system` 的设备边界，**Q2**） | filesystem_unix.go、filesystem_windows.go | os.* 1→0 | 同上 |
 | S6 | 退役 `Searcher` 拦截，让远端 grep/glob 走共享核 | remotetools + handler | 目标是**删代码**（与 bridge 那轮 −3175 行同类收益） | 整步独立可撤 |
 
 每步验收门（与既有纪律逐条对齐）：
@@ -120,7 +122,7 @@ Access toolcore.Access
 
 ---
 
-## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4，累计 os.* 24→9）
+## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4 / S5a，累计 os.* 24→4，walker 4→2）
 
 四步均按"每步实测"落数：`24→21→18→17→16`，棘轮在同一笔提交里下调并写明剩余归属。三步都带了注入证据与反向验证（摘掉 seam 后测试必须红，且必须是**测试**红、不是编译红）。
 
@@ -160,10 +162,31 @@ S4 新增的五条（前两条是本次最贵教训，后三条是对验收门�
    **不可观测**——远端 grep/glob 仍走 `Searcher` 拦截（目标机上的 rg），共享核的 ignore 代码不在远端
    通路上，拦截退役要到 S6 才发生（§3 已写明 S1–S5 必须保留它）。因此 envd 三套顺延到 S6，届时这笔
    注入才是可被真机证伪的对象。不把"没跑"写成"已跑"。
-9. **一处已知证据缺口，留给 S5**：`rulesFor` 里那处形状 Stat 目前没有独立的注入证据——在枚举仍来自
-   宿主的前提下，它与 `newGrepIgnoreRules` 的答案无法在测试结果上分离（枚举出的候选在两侧同形）。
-   它被搬走是为了"一次搜索内同一个问题只有一个回答者"的一致性，不是新增行为。**S5 把枚举交给
-   accessor 后必须补一条能区分它的用例**，否则这条就是空口正确。
+9. **一处"证据缺口"最后被证明是不可观测，而不是没测到（S5a 结案）**：`rulesFor` 那处形状 Stat
+   在枚举换成 accessor 之后仍然没有任何夹具能让结果发生变化——变异 `os.Stat(absPath)` 存活
+   （M6，8/9 被抓、它没被抓）。原因可推死：`rulesFor` 从 `dir` 一路走回搜索根，`dir = absPath`
+   只多带一层 `dirRules(absPath)`，而那一层规则文件的 scope 就是 `absPath`，与 `absPath` 自己
+   匹配时相对路径是 `"."`，匹配器直接跳过；`absPath` 的子项无论走哪条分支都会经父目录拿到同一批
+   规则。**所以这行对候选自身的判定是惰性的。** 处置：保留搬迁（同一问题在一个搜索里只能有一个
+   回答者，且将来若改动链式结构它就会变成隐性承重），但把代码注释与测试注释改成"为一致性而搬、
+   非为证据而搬"，并保留 `TestGrepRulesForFollowsTheAccessorsDirectoryShape` 作为行为钉。
+   教训：**变异存活有两种性质——测试瞎，或者这行本来就不承载行为。前者要修测试，后者要写证明；
+   把一个"必然同解"的行硬凑出一条绿测试，就是自欺。**
+
+S5a 另三条新教训：
+
+10. **复刻标准库必须读它的源码，不能凭记忆**：`SkipDir` 落在**非目录**条目上时，`filepath` 的父循环
+    `break`（跳过该目录余下兄弟项），与我记忆的"继续"相反；ReadDir 失败会对同一路径**二次回调**。
+    两处都是从 `GOROOT/src/io/fs/walk.go` 与 `path/filepath/path.go`（1.27.1 里 walk.go 已并入
+    path.go）逐行抄来的。第一版按记忆写的断言（"SkipDir 分支必须让访问序列不同"）直接把
+    `TestWalkViaAccessReportsAReadDirErrorLikeWalkDir` 跑红了——红的是我的断言，不是实现。
+11. **fake 的优先级是一条隐藏策略**：`virtualAccess.Stat` 先查 `files` 再查 `dirs`，于是"同一个路径
+    既在 files 又在 dirs"的夹具会静默回答"是文件"。这条让新建的根形状测试先以错误的方式通过、
+    再以正确的方式失败。教训：**fake 里任何"两个来源都能回答同一个问题"的写法，都必须显式定优先级
+    并写进注释**；否则测试测的是 fake 的实现顺序而不是被测代码。
+12. **对拍必须覆盖回调的三种处置**（nil / SkipDir / 真错误）与 **未预排序的列表**：`reverseReadDirAccess`
+    包一层把目录倒序返回，才能证明排序是被测代码做的（`localio` 自己就是有序的，用它对拍永远测不出
+    少了 `sort`）。fake 的 `ReadDir` 也故意**倒序**返回，同理。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

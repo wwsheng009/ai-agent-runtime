@@ -429,7 +429,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	budgetCtx, cancelBudget := context.WithTimeout(walkCtx, GrepSearchBudget)
 	defer cancelBudget()
 	if len(roots) == 1 {
-		if info, statErr := os.Stat(roots[0]); statErr == nil && info.Mode().IsRegular() {
+		if info, statErr := access.Stat(budgetCtx, roots[0]); statErr == nil && info.Mode().IsRegular() {
 			result.SingleFile = true
 		}
 	}
@@ -584,7 +584,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	sortRequested := opts.SortSet && sortKey != "" && sortKey != "none"
 	for _, root := range roots {
 		rules := newGrepIgnoreRules(ctx, newGrepIgnorePolicy(opts), root)
-		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
+		if info, statErr := access.Stat(budgetCtx, root); statErr == nil && info.Mode().IsRegular() {
 			if globMatcher == nil || globMatcher.matches(filepath.Base(root)) {
 				if err := visit(root, rules, root); err != nil && err != filepath.SkipAll {
 					return GrepResult{}, err
@@ -661,7 +661,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				}
 				return visit(root, rules, path)
 			}
-			walkErr := grepWalkRoot(root, opts.Follow, onEntry)
+			walkErr := grepWalkRoot(budgetCtx, access, root, opts.Follow, onEntry)
 			if walkErr != nil && walkErr != filepath.SkipAll {
 				return GrepResult{}, walkErr
 			}
@@ -759,10 +759,13 @@ func appendGrepLineEntries(result *GrepResult, compiled *regexp.Regexp, opts Gre
 // filepath.WalkDir; with follow the traversal also descends through links that
 // resolve to directories, which is what `rg --follow` does - and a link cycle
 // terminates instead of recursing forever.
-func grepWalkRoot(root string, follow bool, onEntry func(path string, entry os.DirEntry, err error) error) error {
+func grepWalkRoot(ctx context.Context, access toolcore.Access, root string, follow bool, onEntry func(path string, entry os.DirEntry, err error) error) error {
 	if !follow {
-		return filepath.WalkDir(root, onEntry)
+		return walkViaAccess(ctx, access, root, onEntry)
 	}
+	// follow=true still walks the host tree: it needs a link *resolver*, which is a
+	// path-identity question the seam deliberately does not answer (design §2 Q1), so it
+	// moves as its own step rather than half-implementing cycle detection here.
 	return walkGrepFollowing(root, onEntry)
 }
 

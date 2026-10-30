@@ -166,9 +166,11 @@ func (r *grepIgnoreRules) rulesFor(ctx context.Context, absPath string) []grepIg
 		return nil
 	}
 	dir := absPath
-	// The path came out of the search's own enumeration, so its shape must be answered
-	// by the machine that listed it: this Stat decides which directory's rule files
-	// apply, and a local answer for a remote path silently changes the rule set.
+	// The path came out of the search's own enumeration, so its shape is answered by the
+	// machine that listed it. Kept honest about its weight: for this candidate the choice is
+	// provably inert (the extra directory level's rules carry this path's own scope, and the
+	// matcher skips a relative path of "."), so it moved for single-answerer consistency and
+	// not because a test can see it - see TestGrepRulesForFollowsTheAccessorsDirectoryShape.
 	if info, err := r.policy.access.Stat(ctx, absPath); err != nil || !info.IsDir() {
 		dir = filepath.Dir(absPath)
 	}

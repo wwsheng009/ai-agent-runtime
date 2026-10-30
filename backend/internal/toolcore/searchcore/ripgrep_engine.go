@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -205,7 +204,11 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	if opts.Offset > GlobFetchHardCap {
 		opts.Offset = GlobFetchHardCap
 	}
-	info, statErr := os.Stat(base)
+	// The engine runs where the caller put it, but the shape of the path it is being
+	// handed is the caller's filesystem's answer: with a remote accessor, stat-ing the
+	// host here would decide "is this a file search" from a same-named local path.
+	access := seamAccess(opts.Access)
+	info, statErr := access.Stat(ctx, base)
 	if statErr != nil || !info.IsDir() {
 		// Match the walker's file-base behavior by leaving it to the walker.
 		return GlobResult{}, false, nil
@@ -535,7 +538,8 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	}
 	result := GrepResult{}
 	if len(roots) == 1 {
-		if info, statErr := os.Stat(roots[0]); statErr == nil && info.Mode().IsRegular() {
+		access := seamAccess(opts.Access)
+		if info, statErr := access.Stat(ctx, roots[0]); statErr == nil && info.Mode().IsRegular() {
 			result.SingleFile = true
 		}
 	}

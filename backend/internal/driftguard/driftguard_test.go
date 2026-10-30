@@ -65,10 +65,23 @@ var coreBaselines = map[string]int{
 	// reachable from a policy that proved its accessor is local - and pinned by
 	// behaviour tests, because a count cannot express "only on this branch".
 	//
-	// Remaining host reads are the two walkers plus the root/file-shape Stats that move
-	// with them (enumerating one machine while stat-ing another is the same mistake one
-	// level up) and the platform identity file.
-	"searchcore": 9,
+	// S5 moved the traversal itself and every remaining shape question: both walkers now
+	// go through walkViaAccess (a copy of filepath.WalkDir, pinned by a differential over
+	// five callback policies against symlinks, hidden dirs, an empty dir and an unsorted
+	// listing), and the root/file shape Stats that used to pick the search mode, the
+	// ignore scope and the ripgrep argv shape answer from the accessor too.
+	//
+	// The 4 that remain are exactly two concerns, and both need a capability the seam does
+	// not have yet:
+	//   - walkGrepFollowing (3): following links needs a path *resolver*, which design §2
+	//     Q1 deliberately keeps out of Access, so it moves as its own step;
+	//   - filesystemIdentity (1): the device id behind one_file_system, design §2 Q2.
+	// The 2 walker-style calls left are the same resolver's filepath.EvalSymlinks uses.
+	// When they reach 0 the number will again say more than it should: localio is the one
+	// package allowed to touch the host - that is its whole purpose - and driftguard does
+	// not scan it, so a zero here means "the core asks no host question", not "no process
+	// reads a disk".
+	"searchcore": 4,
 	"mutatecore": 27,
 }
 
@@ -137,8 +150,12 @@ var walkerBaselines = map[string]int{
 	// equality with the old filepath.WalkDir traversal is pinned by a differential
 	// over every depth/limit pair (internal/toolcore/lscore/walk_differential_test.go),
 	// with exactly one deliberate divergence documented there.
-	"lscore":     0,
-	"searchcore": 4,
+	"lscore": 0,
+	// searchcore's remaining host-tree calls are the two filepath.EvalSymlinks uses inside
+	// walkGrepFollowing. They are counted here rather than in coreBaselines because they
+	// are not os.* calls, and they are the reason "0 os.*" would not yet mean a
+	// backend-neutral follow mode (design §2 Q1).
+	"searchcore": 2,
 	"mutatecore": 1,
 }
 
