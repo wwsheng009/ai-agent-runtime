@@ -1584,19 +1584,59 @@
     }
   }
 
-  // chatSetStreamingText appends only the new suffix to the live text node.
-  // Replacing the whole 30KB textContent every frame discards the browser's
-  // previous line-layout work; an append lets it reuse the stable prefix.
+  // chatSetStreamingText appends only the new suffix to the live text.
+  // Long text is split at line boundaries into content-visibility chunks so a
+  // 30KB answer does not force the browser to re-layout all previous lines on
+  // every token. The concatenated textContent remains byte-for-byte the source.
   function chatSetStreamingText(node, text) {
     if (!node) { return; }
     var src = text || "";
-    var first = node.firstChild;
-    var current = first && first.nodeType === 3 ? first.data : "";
-    if (current && src.indexOf(current) === 0) {
-      if (src.length > current.length) { first.appendData(src.slice(current.length)); }
-      return;
+    var chunks = node.__streamChunks;
+    if (!chunks || !chunks.length || chunks[0].el.parentNode !== node) {
+      chunks = chatResetStreamingText(node, src);
+    } else {
+      var current = "";
+      chunks.forEach(function (chunk) { current += chunk.node.data; });
+      if (src.indexOf(current) !== 0) {
+        chunks = chatResetStreamingText(node, src);
+      } else if (src.length > current.length) {
+        chunks[chunks.length - 1].node.appendData(src.slice(current.length));
+      }
     }
-    node.textContent = src;
+    chatSplitStreamingChunks(node, chunks);
+  }
+
+  function chatResetStreamingText(node, text) {
+    node.textContent = "";
+    var chunk = chatNewStreamChunk(text);
+    node.__streamChunks = [chunk];
+    node.appendChild(chunk.el);
+    return node.__streamChunks;
+  }
+
+  function chatNewStreamChunk(text) {
+    var el = document.createElement("div");
+    el.className = "chat-stream-chunk";
+    var textNode = document.createTextNode(text || "");
+    el.appendChild(textNode);
+    return { el: el, node: textNode };
+  }
+
+  function chatSplitStreamingChunks(node, chunks) {
+    if (!chunks || !chunks.length) { return; }
+    var last = chunks[chunks.length - 1];
+    while (last.node.data.length > CHAT_LIVE_CHUNK_CHARS) {
+      var data = last.node.data;
+      var cut = data.lastIndexOf("\n", CHAT_LIVE_CHUNK_CHARS - 1);
+      if (cut >= 0) { cut += 1; }
+      else { cut = CHAT_LIVE_CHUNK_CHARS; }
+      var rest = data.slice(cut);
+      last.node.deleteData(cut, rest.length);
+      var next = chatNewStreamChunk(rest);
+      node.insertBefore(next.el, last.el.nextSibling);
+      chunks.push(next);
+      last = next;
+    }
   }
 
   // ── Incremental board: keyed reconcile instead of a full rebuild ──
@@ -3897,6 +3937,8 @@
                                      // 终稿仍由服务端行按 Markdown 渲染。
   var CHAT_LIVE_MARKDOWN_MAX = 6000; // 超过该长度的实时正文直接走纯文本快路径，
                                      // 避免等到 Markdown 单帧已经超预算才降级。
+  var CHAT_LIVE_CHUNK_CHARS = 1200; // 纯文本流式按行边界切块；旧块不被重写，
+                                    // 屏外块由 content-visibility 跳过布局。
   var CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
   var CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
                                // chatApplyWindow），长跑会话会一直往后长，到顶就从
@@ -8022,7 +8064,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=74").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=75").catch(function () {});
     });
   }
 

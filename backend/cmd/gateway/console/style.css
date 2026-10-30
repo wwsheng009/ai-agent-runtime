@@ -1733,6 +1733,14 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+/* Plain streaming text is appended in line-bounded chunks. Existing chunks are
+   never rewritten, and off-screen chunks skip layout/paint independently. */
+.chat-stream-chunk {
+  display: block; margin: 0; min-width: 0;
+  white-space: pre-wrap;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 24px;
+}
 .chat-msg-user { align-items: flex-end; }
 .chat-msg-user .chat-bubble {
   max-width: 82%;

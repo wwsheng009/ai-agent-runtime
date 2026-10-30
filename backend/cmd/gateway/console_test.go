@@ -423,7 +423,8 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		"screenBusy", "lastScreenAt", "screenETag", "If-None-Match",
 		"compact=1", "chatPatchLive", "requestAnimationFrame", "chatCancelRender",
 		"chatSetStreamingText", "CHAT_LIVE_PLAIN_AFTER_MS", "chatPinBottomAfterLayout",
-		"CHAT_LIVE_MARKDOWN_MAX", "scrollGuardUntil", "followHoldUntil",
+		"CHAT_LIVE_MARKDOWN_MAX", "CHAT_LIVE_CHUNK_CHARS", "chat-stream-chunk",
+		"scrollGuardUntil", "followHoldUntil",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets
 		// eaten by the list rule first).

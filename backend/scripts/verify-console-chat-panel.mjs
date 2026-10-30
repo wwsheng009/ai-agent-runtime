@@ -209,6 +209,9 @@ const env = (src) => ({
     /\.chat-msg\s*\{[^}]*content-visibility:\s*auto/s.test(css) &&
     /\.chat-msg\s*\{[^}]*contain-intrinsic-size:\s*auto\s+140px/s.test(css) &&
     /\.chat-msg\s*\{[^}]*flex:\s*0 0 auto/s.test(css));
+  check('长正文流式块独立跳过屏外布局',
+    appjs.includes('chat-stream-chunk') &&
+    /\.chat-stream-chunk\s*\{[^}]*content-visibility:\s*auto/s.test(css));
   check('实时增量按绘制帧合并',
     appjs.includes('requestAnimationFrame') && !appjs.includes('CHAT_STREAM_RENDER_MS'));
   check('顶部“加载更早消息”按钮已移除', !doc.getElementById('chat-older'));
