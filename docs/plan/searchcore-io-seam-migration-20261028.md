@@ -185,6 +185,7 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5c ✅ | `one_file_system` 的**文件系统边界**（Q2 更正后的名字；原写"inode 去重"是误述）：平台实现整体搬进 `localio`，核心经可选接口 `toolcore.FilesystemIdentifier` 询问；缺能力即**拒绝该标志**（不是降级照跨），出路写进消息 | toolcore/access.go、localio/identity_unix.go（新）、localio/identity_windows.go（新）、seam_access.go、grep.go；删除 searchcore/filesystem_unix.go、filesystem_windows.go | **实测 os.* 1→0、walker 仍 0**（searchcore 归零） | 把两处调用改回 `localio` 直调即撤销 |
 | S5d ✅ | **子路径的拼法随目标**：三处遍历（`walkViaAccess`、`walkGrepFollowing`、`lscore` 的 `descend`）此前各自 `filepath.Join`，在 Windows 客户端上为 POSIX 目标拼出 `\srv\work\a.txt`，远端每个 stat 都 miss——症状是**空结果而非报错**。新增可选接口 `toolcore.TargetPathStyle` + 唯一入口 `toolcore.JoinTargetPath`，缺能力时保持本机惯例（本地行为零变化） | toolcore/access.go（接口+helper+测试）、seam_walk.go、grep.go、lscore/ls.go、remotetools/envd_access.go（声明 `/`） | os.* 与 walker 均不变（三处都是纯拼写决策） | 把三处改回 `filepath.Join` 即撤销 |
 | S5e ✅ | **路径运算随目标（同类缺陷的第二、三、四处）**：① ignore 子系统——规则候选名、祖先链、scope 的 `Dir/Clean` 全是宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机的 `.gitignore` **静默失效**（页面多出被排除的文件、无报错）；② `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**——`filepath.IsAbs("/srv/work/x")` 在 Windows 上是假的，调用方点名的绝对路径被拼成 `/srv/work/\srv\work\srv\work\custom.ignore` 并被告知"读不到"（**首个用户可见的失败**）；③ `ripgrep_engine.go` 四处（glob 候选、`baseDir`、`--files` 模式、`resolveRipgrepPath`）——`FromSlash+IsAbs+Join` 组合把 rg 输出的斜杠路径重新拼成宿主拼法。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator,IsAbsTargetPath,NormalizeTargetPath}`（`path` 包没有 `Rel`，POSIX 版自带实现），换掉三处文件的相应运算——`handler.go` 与 `ripgrep_engine.go` 改完都**不再需要 `path/filepath`**（编译器直接报 unused） | toolcore/access.go（family+测试）、searchcore/{grep_ignore.go,handler.go,ripgrep_engine.go}、searchcore/seam_walk_test.go | os.* 与 walker 均不变 | 把三处文件的调用换回 `filepath.*` 即撤销 |
+| S5f ✅ | **跨包盲区：核经被调用的 helper 读宿主**（比拼写更重的一类）。`viewcore` 的拼写修复经 `internal/pathrepair.FindSpellingMatches` 直接 `os.ReadDir` 读**本机**目录；守卫按包计数**看不见它**，于是 viewcore 一边显示 0 宿主读、一边真实地在读本机。改法：`FindSpellingMatches` 与 `HealSpelling` 接收 accessor，经 seam 列目录；候选拼写也走目标方言（`DirTargetPath`/`JoinTargetPath`）。新增守卫 `TestSpellingRepairReadsThroughTheSeam` 直接扫 `internal/pathrepair`（**先写、先红**：实测 1 处），并在 viewcore 基线的注释里写明这第二类盲区与其真正的看门人 | pathrepair/pathrepair.go（去 `os`）、viewcore/{spelling.go,handler.go}、driftguard/driftguard_test.go、viewcore/access_seam_test.go、toolkit/tools/path_spelling_test.go（9 处调用点各加两个实参，断言语义未动） | **pathrepair os.\* 1→0**；viewcore 仍 0，但现在是真的 | 把 accessor 参数换回即撤销 |
 | S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）**且子路径拼法已随目标（S5d，否则 Windows 客户端上远端遍历全 miss）**；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
 
 每步验收门（与既有纪律逐条对齐）：
@@ -384,6 +385,23 @@ S5d 两条（第 21 条是这一步的由来，第 22 条是"自证"事故的第
     `FromSlash` 是空操作，于是"删掉方言判断"的变异**存活**了；改成嵌套路径 `pkg/gamma.txt` 之后两条
     测试同时红。这与第 6 条同源：**夹具必须让被测的那一处改动成为唯一变量**，否则"通过"可能只是
     因为那个分支根本没被走到。
+
+S5f 一条（它比前面所有拼写问题都更重，因为守卫**看不见**它）：
+
+24. **跨包盲区：核自己不碰宿主，却经它调用的 helper 去碰**。守卫按**包**计数，所以 `viewcore` 可以
+    一边报告 0 处宿主读、一边通过 `internal/pathrepair.FindSpellingMatches` 里的 `os.ReadDir` 真实地
+    读本机目录——这正是守卫文件自己在散文里警告过的那类"零不等于没有"的误读，只不过这次的盲区不在
+    同一个包内。后果不是拼写错误而是**答错机器**：修复一个远端路径时列的是本机目录，要么找不到
+    （调用方拿到一条永远死掉的路），要么更糟——本机恰好有个同名不同物的文件，于是"修复"出一个目标机
+    从未有过的路径。处置：`FindSpellingMatches`/`HealSpelling` 接收 accessor 并经 seam 列目录，候选
+    拼写同时走目标方言；`pathrepair` 因此**不再导入 `os`**。证据链：先写守卫
+    `TestSpellingRepairReadsThroughTheSeam`（直接扫 `internal/pathrepair`）→ **红，实测 1 处**；修复后
+    转绿；行为侧新增 `TestHealingAsksTheAccessorsDirectory`（夹具里宿主机目录为空、目标机列出唯一正确
+    名字，只有问目标机才修得好）；变异（把 seam 读换回 `os.ReadDir`，可编译）让**守卫与行为测试同时
+    变红**。教训：**"某包为 0"这种断言必须问清"它调用的包是否为 0"**，否则守卫给出的是安慰而不是保证。
+    一处偏离声明：`toolkit/tools/path_spelling_test.go` 的 9 处调用点各加两个实参
+    （`context.Background(), localio.Access`），断言语义一字未动——签名是被修复逼出来的，函数体仍
+    不可能在包内自己造一个 accessor。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

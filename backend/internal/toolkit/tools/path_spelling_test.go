@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/pathrepair"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 func TestPathSpellingNormalizeNameForSpelling(t *testing.T) {
@@ -45,19 +47,19 @@ func TestPathSpellingFindSpellingMatches(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.txt"), []byte("x"), 0o644))
 
 	// An ASCII space finds the narrow-no-break-space file.
-	require.Equal(t, []string{"report\u202Ffinal.txt"}, pathrepair.FindSpellingMatches(dir, "report final.txt"))
+	require.Equal(t, []string{"report\u202Ffinal.txt"}, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "report final.txt"))
 	// A straight quote finds the curly-quote file.
-	require.Equal(t, []string{"don\u2019t.txt"}, pathrepair.FindSpellingMatches(dir, "don't.txt"))
+	require.Equal(t, []string{"don\u2019t.txt"}, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "don't.txt"))
 
 	// Exact names need no repair and are never reported as their own match.
-	require.Nil(t, pathrepair.FindSpellingMatches(dir, "plain.txt"))
-	require.Nil(t, pathrepair.FindSpellingMatches(dir, "report\u202Ffinal.txt"))
-	require.Nil(t, pathrepair.FindSpellingMatches(dir, "don\u2019t.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "plain.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "report\u202Ffinal.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "don\u2019t.txt"))
 
 	// Missing names, missing directories and empty dirs yield nil.
-	require.Nil(t, pathrepair.FindSpellingMatches(dir, "missing report.txt"))
-	require.Nil(t, pathrepair.FindSpellingMatches(filepath.Join(dir, "nope"), "report final.txt"))
-	require.Nil(t, pathrepair.FindSpellingMatches("", "report final.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "missing report.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, filepath.Join(dir, "nope"), "report final.txt"))
+	require.Nil(t, pathrepair.FindSpellingMatches(context.Background(), localio.Access, "", "report final.txt"))
 }
 
 func TestPathSpellingFindSpellingMatchesLimit(t *testing.T) {
@@ -72,7 +74,7 @@ func TestPathSpellingFindSpellingMatchesLimit(t *testing.T) {
 	// A decoy sharing the prefix but folding differently must stay out.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cap-file.txt"), []byte("x"), 0o644))
 
-	matches := pathrepair.FindSpellingMatches(dir, "cap file.txt")
+	matches := pathrepair.FindSpellingMatches(context.Background(), localio.Access, dir, "cap file.txt")
 	require.Len(t, matches, 8)
 	require.True(t, sort.StringsAreSorted(matches))
 	require.NotContains(t, matches, "cap-file.txt")

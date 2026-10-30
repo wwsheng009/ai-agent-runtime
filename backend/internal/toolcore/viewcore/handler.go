@@ -200,7 +200,7 @@ func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths too
 		// An invisible-spelling mismatch (case or Unicode variants) makes the
 		// existence check fail forever while the file is right there, so a unique
 		// candidate is adopted and the read proceeds.
-		if candidate, candidates := HealSpelling(permissionChecker(call), abs); candidate != "" {
+		if candidate, candidates := HealSpelling(ctx, permissionChecker(call), access, abs); candidate != "" {
 			abs = candidate
 			healed = true
 			info, statErr = access.Stat(ctx, abs)

@@ -356,3 +356,39 @@ func TestDirectoryPreviewKeepsTheLocalWrapper(t *testing.T) {
 		t.Fatalf("local preview = %q", preview)
 	}
 }
+
+// TestHealingAsksTheAccessorsDirectory is the behavioural half of the seam fix in
+// internal/pathrepair: the repair asks "which names are in this directory", and that question
+// has to reach the machine holding the file.
+//
+// The fixture makes the two machines disagree in the way that matters. The host directory
+// (t.TempDir) is empty, and the target lists exactly one name: the spelled-out form of the
+// file the caller asked for with an invisible code point in it. A repair that listed locally
+// would find nothing and leave the caller with a permanently dead path; one that lists the
+// target adopts the real name and the read proceeds.
+func TestHealingAsksTheAccessorsDirectory(t *testing.T) {
+	root := t.TempDir()
+	narrowSpace := "report\u202ffinal.txt" // U+202F, folds to an ASCII space
+	const spelled = "report final.txt"
+	target := filepath.Join(root, spelled)
+
+	access := &seamAccess{
+		files: map[string]seamFile{
+			target: newSeamFile(spelled, []byte("healed through the accessor\n")),
+		},
+		children: map[string][]seamFile{
+			root: {newSeamFile(spelled, nil)},
+		},
+	}
+
+	result := runView(t, root, access, map[string]any{"file_path": narrowSpace})
+	if !result.Success {
+		t.Fatalf("the repair did not consult the accessor's listing: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "healed through the accessor") {
+		t.Fatalf("the window did not come from the healed target file:\n%s", result.Content)
+	}
+	if access.readDirCalls == 0 {
+		t.Fatal("the directory was never listed through the accessor; the repair read the host instead")
+	}
+}

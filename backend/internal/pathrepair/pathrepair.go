@@ -10,9 +10,11 @@
 package pathrepair
 
 import (
-	"os"
+	"context"
 	"sort"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // FindSpellingMatchesLimit bounds the candidate list returned to the model.
@@ -55,11 +57,17 @@ func NormalizeNameForSpelling(s string) string {
 // folded form of base, excluding the exact name itself (it needs no repair).
 // Results are sorted lexicographically and capped at FindSpellingMatchesLimit.
 // An empty dir, a missing directory, or any read failure returns nil.
-func FindSpellingMatches(dir string, base string) []string {
+//
+// The listing goes through the accessor, and that is not plumbing: the caller may be
+// repairing a path on another machine, and a repair answered from this machine's directory
+// would either find nothing (leaving the caller with a dead path) or find a *different* file
+// with a similar name and hand back a path the target has never heard of. access must be
+// non-nil; the seam's convention resolves the unset case before anything gets here.
+func FindSpellingMatches(ctx context.Context, access toolcore.Access, dir string, base string) []string {
 	if dir == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := access.ReadDir(ctx, dir)
 	if err != nil {
 		return nil
 	}

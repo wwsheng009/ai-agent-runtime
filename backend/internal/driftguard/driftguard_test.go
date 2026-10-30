@@ -40,6 +40,13 @@ var coreBaselines = map[string]int{
 	// TestSharedCoresDoNotAddWalkerStyleHostCalls below, and lscore is now at zero
 	// on both counts - its listing goes through the seam, so the number here can be
 	// read as "this core describes whatever machine the accessor hands it".
+	//
+	// A SECOND blind spot, found while sweeping the same class of defect: the count is per
+	// package, so a core can reach the host through a helper it imports and still read zero
+	// here. viewcore did exactly that - its spelling repair listed directories via
+	// internal/pathrepair, which this scan does not cover - and the fix moved that listing
+	// onto the accessor. The sharper guard for it is TestSpellingRepairReadsThroughTheSeam
+	// below, which scans pathrepair itself rather than trusting this number.
 	"viewcore": 0,
 	"lscore":   0,
 	// searchcore: S1 moved the handler-level host reads (glob's search root, the
@@ -414,5 +421,31 @@ func TestFormatFindingsTruncates(t *testing.T) {
 	}
 	if driftguard.FormatFindings(nil, 3) != "(none)" {
 		t.Fatal("an empty list must render as (none), not an empty string")
+	}
+}
+
+// TestSpellingRepairReadsThroughTheSeam pins a blind spot that the two scans above cannot see,
+// and it is the reason this test is not in the core maps.
+//
+// viewcore reports "0 direct host-filesystem calls" while it reaches the host through
+// internal/pathrepair: the counts are per package, and a helper one import away is invisible
+// to them. That is exactly the shape the guard file warns about in prose - a core can report
+// zero and still describe only the machine it runs on, and this one did.
+//
+// The repair itself is right to exist (a name that differs by case or an invisible code point
+// fails an existence check forever), but it must ask the machine that holds the file which
+// names are there. So the honest assertion is zero, and it is a real assertion: before the fix
+// pathrepair made exactly one direct call.
+func TestSpellingRepairReadsThroughTheSeam(t *testing.T) {
+	root := moduleRoot(t)
+	dir := filepath.Join(root, "internal", "pathrepair")
+	total, sites, err := driftguard.FilesystemCallCounts(dir)
+	if err != nil {
+		t.Fatalf("count os.* calls under %s: %v", dir, err)
+	}
+	if total != 0 {
+		t.Fatalf("pathrepair makes %d direct host-filesystem call(s): the spelling repair must list through the accessor, "+
+			"or a remote view heals a target path against this machine's directory:\n%s",
+			total, driftguard.FormatFindings(sites, 5))
 	}
 }

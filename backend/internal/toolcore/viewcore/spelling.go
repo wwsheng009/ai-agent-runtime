@@ -1,6 +1,7 @@
 package viewcore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -21,15 +22,18 @@ import (
 // original request also has to admit the candidate. The folding itself lives in
 // internal/pathrepair, the same notion of "same name" the tool preflight layer
 // ranks candidates with.
-func HealSpelling(checker toolcore.PermissionChecker, absPath string) (healed string, candidates []string) {
-	dir, base := filepath.Dir(absPath), filepath.Base(absPath)
-	matches := pathrepair.FindSpellingMatches(dir, base)
+func HealSpelling(ctx context.Context, checker toolcore.PermissionChecker, access toolcore.Access, absPath string) (healed string, candidates []string) {
+	// Both the listing and the candidate spelling belong to the machine holding the file:
+	// with the host's rules a remote path would be cut at the wrong place and rejoined with
+	// the wrong separator, and the healed answer would name something the target cannot open.
+	dir, base := toolcore.DirTargetPath(access, absPath), filepath.Base(absPath)
+	matches := pathrepair.FindSpellingMatches(ctx, access, dir, base)
 	if len(matches) == 0 {
 		return "", nil
 	}
 	candidates = make([]string, 0, len(matches))
 	for _, name := range matches {
-		candidate := filepath.Join(dir, name)
+		candidate := toolcore.JoinTargetPath(access, dir, name)
 		if checker != nil {
 			if err := checker.CheckPath(toolcore.OpRead, candidate); err != nil {
 				continue
