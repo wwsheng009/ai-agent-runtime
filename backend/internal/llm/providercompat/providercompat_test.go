@@ -327,6 +327,91 @@ func TestPrepareRequestBody_OpenAIToolCallTypeNormalization(t *testing.T) {
 			t.Fatalf("original history was mutated: type = %#v", got)
 		}
 	})
+
+	t.Run("custom_tool_call freeform input becomes valid JSON", func(t *testing.T) {
+		// Split marker prefixes so this fixture can itself be edited with apply_patch.
+		patch := "*** Be" + "gin Patch\n" +
+			"*** Up" + "date File: note.txt\n" +
+			"@" + "@\n" +
+			"-" + "old \"quoted\"\n" +
+			"+" + "new \\ path\n" +
+			"*** En" + "d Patch\n"
+		body := map[string]interface{}{
+			"model": "test-model",
+			"messages": []map[string]interface{}{
+				{
+					"role": "assistant",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":    "call_patch",
+							"type":  "custom_tool_call",
+							"name":  "apply_patch",
+							"input": patch,
+						},
+					},
+				},
+			},
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := normalized["messages"].([]map[string]interface{})
+		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+		fn := toolCalls[0]["function"].(map[string]interface{})
+		arguments, ok := fn["arguments"].(string)
+		if !ok {
+			t.Fatalf("expected function.arguments string, got %#v", fn["arguments"])
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+			t.Fatalf("expected valid JSON function.arguments, got %q: %v", arguments, err)
+		}
+		if got := decoded["_raw"]; got != patch {
+			t.Fatalf("expected freeform patch preserved in _raw, got %#v", got)
+		}
+		// Canonical history must retain the freeform custom-tool input untouched.
+		origCalls := body["messages"].([]map[string]interface{})[0]["tool_calls"].([]map[string]interface{})
+		if got := origCalls[0]["input"]; got != patch {
+			t.Fatalf("original history was mutated: input = %#v", got)
+		}
+	})
+
+	t.Run("custom_tool_call function shape freeform input becomes valid JSON", func(t *testing.T) {
+		patch := "*** Be" + "gin Patch\n*** En" + "d Patch\n"
+		body := map[string]interface{}{
+			"model": "test-model",
+			"messages": []map[string]interface{}{
+				{
+					"role": "assistant",
+					"tool_calls": []map[string]interface{}{
+						{
+							"id":   "call_patch",
+							"type": "custom_tool_call",
+							"function": map[string]interface{}{
+								"name":      "apply_patch",
+								"arguments": patch,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := normalized["messages"].([]map[string]interface{})
+		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+		fn := toolCalls[0]["function"].(map[string]interface{})
+		arguments, ok := fn["arguments"].(string)
+		if !ok {
+			t.Fatalf("expected function.arguments string, got %#v", fn["arguments"])
+		}
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+			t.Fatalf("expected valid JSON function.arguments, got %q: %v", arguments, err)
+		}
+		if got := decoded["_raw"]; got != patch {
+			t.Fatalf("expected freeform patch preserved in _raw, got %#v", got)
+		}
+	})
 }
 
 func TestPrepareRequestBody_ChatGPTCodexDropsMaxOutputTokens(t *testing.T) {

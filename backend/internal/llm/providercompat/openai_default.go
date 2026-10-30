@@ -303,6 +303,7 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 		return normalized
 	}
 
+	toolType := strings.ToLower(strings.TrimSpace(stringValue(call["type"])))
 	function, hasFunction := call["function"].(map[string]interface{})
 	if !hasFunction {
 		name, hasName := call["name"].(string)
@@ -310,12 +311,22 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 			return call, false
 		}
 		arguments := "{}"
-		if rawArgs, hasArgs := call["arguments"]; hasArgs {
+		if toolType == "custom_tool_call" {
+			if rawInput, hasInput := call["input"]; hasInput {
+				if normalizedArgs, _ := normalizeOpenAICompatibleFreeformToolArguments(rawInput); normalizedArgs != "" {
+					arguments = normalizedArgs
+				}
+			} else if rawArgs, hasArgs := call["arguments"]; hasArgs {
+				if normalizedArgs, _ := normalizeOpenAICompatibleFreeformToolArguments(rawArgs); normalizedArgs != "" {
+					arguments = normalizedArgs
+				}
+			}
+		} else if rawArgs, hasArgs := call["arguments"]; hasArgs {
 			if normalized, _ := normalizeOpenAICompatibleToolArguments(rawArgs); normalized != "" {
 				arguments = normalized
 			}
 		} else if rawInput, hasInput := call["input"]; hasInput {
-			if normalized, _ := normalizeOpenAICompatibleToolArguments(rawInput); normalized != "" {
+			if normalized, _ := normalizeOpenAICompatibleFreeformToolArguments(rawInput); normalized != "" {
 				arguments = normalized
 			}
 		}
@@ -332,7 +343,13 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 	}
 
 	normalizedFunction := function
-	if arguments, ok := normalizeOpenAICompatibleToolArguments(function["arguments"]); ok {
+	if toolType == "custom_tool_call" {
+		if arguments, ok := normalizeOpenAICompatibleFreeformToolArguments(function["arguments"]); ok {
+			normalizedFunction = cloneMapStringAny(function)
+			normalizedFunction["arguments"] = arguments
+			ensureMutable()["function"] = normalizedFunction
+		}
+	} else if arguments, ok := normalizeOpenAICompatibleToolArguments(function["arguments"]); ok {
 		normalizedFunction = cloneMapStringAny(function)
 		normalizedFunction["arguments"] = arguments
 		ensureMutable()["function"] = normalizedFunction
@@ -423,6 +440,31 @@ func normalizeOpenAICompatibleToolArguments(raw interface{}) (string, bool) {
 		}
 		return string(payload), true
 	}
+}
+
+// normalizeOpenAICompatibleFreeformToolArguments serializes Codex custom-tool
+// input for OpenAI Chat Completions. The wire field function.arguments must be
+// a JSON string, but custom tools carry raw text (for example an apply_patch
+// payload) that is not valid JSON. Preserve valid JSON inputs and wrap freeform
+// text in the runtime's canonical {"_raw": ...} object so strict gateways such
+// as Baidu Qianfan do not reject replayed history with invalid_argument.
+func normalizeOpenAICompatibleFreeformToolArguments(raw interface{}) (string, bool) {
+	normalized, changed := normalizeOpenAICompatibleToolArguments(raw)
+	if strings.TrimSpace(normalized) == "" {
+		return "{}", true
+	}
+	if json.Valid([]byte(normalized)) {
+		return normalized, changed
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return "{}", true
+	}
+	payload, err := json.Marshal(map[string]interface{}{"_raw": text})
+	if err != nil {
+		return "{}", true
+	}
+	return string(payload), true
 }
 
 func normalizeOpenAICompatibleStreamToolArguments(raw interface{}) (string, bool) {
