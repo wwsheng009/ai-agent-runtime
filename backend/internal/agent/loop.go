@@ -5058,7 +5058,7 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 			item.Description = "以确定性 argv 启动本机 aicli exec 子进程并返回合并输出。prompt 走 stdin；未显式传 config 时子 aicli 按自身默认配置查找。默认 --disable-tools。"
 			item.Parameters = compactAICLIExecParametersForModel(item.Parameters)
 		case "shell":
-			item.Description = "用检测到的用户 shell 执行一条命令，或用 commands 批量执行并一次返回全部结果。非零退出码是内容结果（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要用 bash heredoc。"
+			item.Description = "用检测到的用户 shell 执行一条命令；命令启动即登记为后台 job，前台只等待结果，等待超时返回 promoted job 而不杀进程。非零退出码是内容结果（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要用 bash heredoc。"
 			item.Parameters = compactShellParametersForModel(item.Parameters)
 		case "view":
 			item.Description = "查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出含稳定行号与截断元数据；已知符号名可传 symbol。"

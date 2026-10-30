@@ -51,7 +51,7 @@ func TestBashJobFirstReturnsForegroundAndForgetsQuickJob(t *testing.T) {
 			ExitCode:   &exitCode,
 		},
 	}
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetShellJobRuntime(runtime)
 
 	result, err := tool.Execute(toolctx.WithSessionID(context.Background(), "session-job"), map[string]interface{}{
@@ -86,7 +86,7 @@ func TestBashJobFirstTimeoutReturnsPromotedJob(t *testing.T) {
 			Status:     "running",
 		},
 	}
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetShellJobRuntime(runtime)
 
 	result, err := tool.Execute(toolctx.WithSessionID(context.Background(), "session-job"), map[string]interface{}{
@@ -115,7 +115,7 @@ func TestBashJobFirstTimeoutReturnsPromotedJob(t *testing.T) {
 
 func TestBashJobFirstRequiresOwner(t *testing.T) {
 	runtime := &fakeShellJobRuntime{}
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetShellJobRuntime(runtime)
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{"command": "echo hi"})
@@ -127,5 +127,35 @@ func TestBashJobFirstRequiresOwner(t *testing.T) {
 	}
 	if got := result.Metadata["failure_class"]; got != "owner_required" {
 		t.Fatalf("failure_class = %#v", got)
+	}
+}
+
+func TestProductionBashToolRequiresJobRuntime(t *testing.T) {
+	result, err := NewBashTool().Execute(context.Background(), map[string]interface{}{
+		"command": "echo should-not-run",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("shell without a job runtime must fail closed: %+v", result)
+	}
+	if result.Metadata["failure_class"] != "job_runtime_missing" {
+		t.Fatalf("failure_class = %#v", result.Metadata["failure_class"])
+	}
+}
+
+func TestProductionBashToolRejectsCommandBatch(t *testing.T) {
+	result, err := NewBashTool().Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{map[string]interface{}{"command": "echo first"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("command batch must be rejected: %+v", result)
+	}
+	if result.Metadata["failure_class"] != "batch_unsupported" {
+		t.Fatalf("failure_class = %#v", result.Metadata["failure_class"])
 	}
 }

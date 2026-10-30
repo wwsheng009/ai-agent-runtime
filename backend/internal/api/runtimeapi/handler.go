@@ -6179,15 +6179,14 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 	})
 	h.backgroundManager = manager
 	h.backgroundConfigKey = key
-	// detach=true 收敛（2026-10-11）：后台管理器懒创建后，把 toolkit↔broker 缝
-	// 注入进程级共享工具面（AgentAdapter→tools.Manager），shell 工具的 detach
-	// 从此走受管后台作业而不是弃用的 fire-and-forget 启动器。重复注入无害
-	//（同一 manager 实例），config key 变化时会以新 manager 再注入一次。
+	// shell 默认 job-first：把同一个后台 manager 注入进程级共享工具面
+	//（AgentAdapter→tools.Manager）。重复注入无害（同一 manager 实例），
+	// config key 变化时会以新 manager 再注入一次。
 	if surface, ok := h.mcpManager.(interface {
 		UnderlyingToolsManager() *runtimetools.Manager
 	}); ok {
 		if toolsManager := surface.UnderlyingToolsManager(); toolsManager != nil {
-			toolsManager.SetBackgroundSubmitter(runtimetools.NewBackgroundSubmitter(manager))
+			toolsManager.SetShellJobRuntime(runtimetools.NewShellJobRuntime(manager))
 		}
 	}
 	return manager

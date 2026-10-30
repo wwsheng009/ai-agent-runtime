@@ -1393,11 +1393,8 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	if toolManager != nil {
 		backgroundManager = buildLocalChatBackgroundManager(runtimeConfig, backgroundEvents.handle)
 	}
-	// detach=true 收敛（2026-10-11）：注入 toolkit↔broker 缝，让 shell 工具的
-	// detach 走受管后台作业（输出捕获 + 生命周期 + 进程树 + supervision 唤醒），
-	// 而不是弃用的 fire-and-forget 启动器。
+	// shell 默认 job-first：注入唯一的 background manager。
 	if toolManager != nil && backgroundManager != nil {
-		toolManager.SetBackgroundSubmitter(runtimetools.NewBackgroundSubmitter(backgroundManager))
 		toolManager.SetShellJobRuntime(runtimetools.NewShellJobRuntime(backgroundManager))
 	}
 	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore

@@ -134,7 +134,7 @@ func TestBudgetOwningToolsDoNotTriggerRenderLayerTruncation(t *testing.T) {
 			name:   "bash",
 			budget: shellOutputBudgetBytes,
 			run: func(t *testing.T) *toolkit.ToolResult {
-				return executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+				return executeBudgetTool(t, newTestBashTool(), map[string]interface{}{
 					"command": shellPrintFileCommand(t, workspace),
 				})
 			},
@@ -297,7 +297,7 @@ func TestShellToolsOwnTheirOutputWindow(t *testing.T) {
 // render-layer folding.
 func TestShellToolsStampOwnershipOnEveryExecutePath(t *testing.T) {
 	t.Run("bash single command", func(t *testing.T) {
-		result := executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+		result := executeBudgetTool(t, newTestBashTool(), map[string]interface{}{
 			"command": "echo shell-window-wiring",
 		})
 		require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
@@ -305,7 +305,7 @@ func TestShellToolsStampOwnershipOnEveryExecutePath(t *testing.T) {
 	})
 
 	t.Run("bash batch", func(t *testing.T) {
-		result := executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+		result := executeBudgetTool(t, newTestBashTool(), map[string]interface{}{
 			"commands": []interface{}{
 				map[string]interface{}{"command": "echo one"},
 				map[string]interface{}{"command": "echo two"},

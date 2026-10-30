@@ -4,6 +4,7 @@
 > 日期：2026-10-29  
 > 版本：v4（single job runtime，confirmed）  
 > 适用：`bash` / `shell` / `execute_shell_command`，以及 `aicli-remote-tools` 的 remote shell  
+> 收尾：生产 shell 已删除 direct/detach/batch 旁路；`commands` 批次明确拒绝，测试实现仅保留在 `_test.go`
 > 参考实现：`E:\projects\ai\deepseek-harness` 的 `dsh-tool-bash`  
 > 目标：把“超时命令转为后台 job”做成 **core 能力**，remote-tools 只提供 target-side 适配，不维护第二套语义。
 

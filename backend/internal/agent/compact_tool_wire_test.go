@@ -63,10 +63,9 @@ func TestOptimizeModelToolSurfaceAicliExecWhitelist(t *testing.T) {
 func TestOptimizeModelToolSurfaceShellWhitelist(t *testing.T) {
 	def := collectSurfaceDefinitions(t, "shell")["shell"]
 	require.Equal(t, []string{
-		"command", "commands", "max_parallel", "parallel", "stop_on_error",
-		"timeout_ms", "timeout_sec", "workdir",
+		"command", "timeout_ms", "timeout_sec", "workdir",
 	}, propertyNames(t, def))
-	require.Contains(t, def.Description, "commands")
+	require.NotContains(t, def.Description, "commands")
 	require.NotContains(t, def.Description, "detach")
 }
 

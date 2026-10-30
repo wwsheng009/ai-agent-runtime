@@ -20,7 +20,7 @@ func longRunningTestCommand() string {
 // timeout no longer leaves the tool call pending: the tree is terminated and
 // the result carries structured termination diagnostics.
 func TestShellToolTerminatesTreeOnTimeout(t *testing.T) {
-	tool := NewShellTool()
+	tool := newTestShellTool()
 	start := time.Now()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command": longRunningTestCommand(),

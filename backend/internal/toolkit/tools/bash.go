@@ -9,10 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -38,11 +36,14 @@ import (
 type BashTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
-	executer    CommandExecuter
-	timeout     time.Duration
-	blacklist   []string
-	bgSubmitter BackgroundSubmitter
-	jobRuntime  ShellJobRuntime
+	executer   CommandExecuter
+	timeout    time.Duration
+	blacklist  []string
+	jobRuntime ShellJobRuntime
+	// The following hooks are set only by toolkit test helpers. They live in
+	// _test.go as well, keeping the production shell path exclusively job-first.
+	directExecutor func(context.Context, *BashTool, string, string, time.Duration, string, outputCaptureSettings, []string) (*toolkit.ToolResult, error)
+	batchExecutor  func(context.Context, map[string]interface{}, []bashCommandBatchItem) (*toolkit.ToolResult, error)
 }
 
 // 危险命令黑名单
@@ -94,35 +95,7 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "单条 Shell 命令。需要顺序执行多条独立检查时改用 commands，减少 LLM 往返。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。Windows 不要使用 bash heredoc（<<EOF）。",
-			},
-			"commands": map[string]interface{}{
-				"type":        "array",
-				"description": "命令批次（对象数组，也可容忍 JSON 字符串数组）。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 与 timeout_sec/timeout_ms。",
-				"items": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"command":     map[string]interface{}{"type": "string"},
-						"workdir":     map[string]interface{}{"type": "string"},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。"},
-						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1, "description": "秒级超时；普通命令默认 30s，测试/构建等长命令请显式设置。"},
-					},
-					"required":             []string{"command"},
-					"additionalProperties": false,
-				},
-			},
-			"stop_on_error": map[string]interface{}{
-				"type":        "boolean",
-				"description": "commands 批次中某条硬失败（未启动/超时/取消/权限拒绝等）后是否停止；默认 false。进程非零退出码视为内容结果，不会触发停止。",
-			},
-			"parallel": map[string]interface{}{
-				"type":        "boolean",
-				"description": "commands 是否并发执行。仅用于互不依赖的只读检查；默认 false。结果仍按输入顺序返回。",
-			},
-			"max_parallel": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "parallel=true 时的最大并发命令数。默认根据 CPU 自动选择，最多 4；显式设置可覆盖。",
+				"description": "单条 Shell 命令。多条独立检查请分别调用。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。Windows 不要使用 bash heredoc（<<EOF）。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -160,10 +133,6 @@ func NewBashTool() *BashTool {
 					"type": "string",
 				},
 			},
-			"detach": map[string]interface{}{
-				"type":        "boolean",
-				"description": "可选：设为 true 时把命令作为独立进程启动（fire-and-forget），立即返回 PID。**已弃用**：该进程不继承输出管道（输出不会进入工具结果、无监督），请优先改用 `job_start`（需要交互会话时用 interactive=true，之后用 `job_input` 驱动）。仅支持单条 command（不适用于 commands 批次）；运行时可用 AICLI_SHELL_ALLOW_DETACH=0 全局禁用；仍适用于需要真实控制台/TTY 的程序（如再开一个 aicli TUI）。",
-			},
 		},
 		"required": []string{},
 	}
@@ -171,7 +140,7 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
+			"执行一条 Shell 命令；命令启动即登记为后台 job，前台只等待结果。等待超时返回 promoted job，不杀进程。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
 			"1.3.4",
 			parameters,
 			true, // 支持直接调用
@@ -194,16 +163,6 @@ func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 		// model-facing shell surface is `shell` (agent-side dedupe keeps one).
 		"alias_of": "shell",
 	}
-}
-
-// SetBackgroundSubmitter wires the toolkit↔broker seam (internal/tools/manager.go).
-// Non-nil routes detach=true through the managed background manager instead of
-// the deprecated fire-and-forget launcher (2026-10-11).
-func (b *BashTool) SetBackgroundSubmitter(submitter BackgroundSubmitter) {
-	if b == nil {
-		return
-	}
-	b.bgSubmitter = submitter
 }
 
 // SetShellJobRuntime injects the shared manager-backed job runtime. When set,
@@ -271,7 +230,19 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}
 	if batchRequested {
-		return b.executeBatch(ctx, params, commands)
+		if b.batchExecutor != nil && b.jobRuntime == nil {
+			return b.batchExecutor(ctx, params, commands)
+		}
+		return toolResultFailureWithCode(
+			fmt.Errorf("commands batch is no longer executed by the shell tool"),
+			string(runtimeerrors.ErrToolInvalidArgs),
+			"Call the shell once per command. Batch execution must use a single job plan and is intentionally unavailable in this runtime.",
+			map[string]interface{}{
+				"failure_class":   "batch_unsupported",
+				"executed":        false,
+				"batch_requested": true,
+			},
+		), nil
 	}
 	command, ok := params["command"].(string)
 	if !ok {
@@ -380,135 +351,24 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return bashSearchPathGlobRedirectResult(globToken), nil
 	}
 
-	// detach=true: fire-and-forget launch outside the per-command job object.
-	// Opt-in per call, and refusable through AICLI_SHELL_ALLOW_DETACH=0.
-	if detachRequested, _ := resolveBoolParam(params, "detach"); detachRequested {
-		return b.executeDetachedCommand(ctx, command, effectiveWorkdir)
+	// Every shell call is a job. There is no direct process fallback: a host
+	// that did not inject the shared manager fails closed.
+	if b.jobRuntime == nil {
+		if b.directExecutor != nil {
+			return b.directExecutor(ctx, b, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
+		}
+		return toolResultFailureWithCode(
+			fmt.Errorf("shell job runtime is not configured"),
+			string(runtimeerrors.ErrToolExecution),
+			"Wire the shared background manager into the shell tool before exposing it.",
+			map[string]interface{}{
+				"failure_class": "job_runtime_missing",
+				"executed":      false,
+			},
+		), nil
 	}
+	return b.executeJobFirst(ctx, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
 
-	// Production hosts inject the shared background manager here. In that mode
-	// every single-command shell call is a job: the command is submitted before
-	// it runs, and timeout only ends this wait.
-	if b.jobRuntime != nil {
-		return b.executeJobFirst(ctx, command, effectiveWorkdir, timeout, string(timeoutSource), captureSettings, mutatedPaths)
-	}
-
-	// 使用 executer 执行命令
-	started := time.Now()
-	execResult, err := b.executeCommand(ctx, command, effectiveWorkdir, timeout, captureSettings)
-	duration := time.Since(started)
-	if err != nil {
-		// rg/grep exit 1 with empty/no-error output is "no matches", not a hard
-		// crash. Soft-succeed so batch checks and model recovery treat it as
-		// empty evidence instead of failing the whole tool call.
-		if isSearchToolNoMatch(command, execResult.Output, err) {
-			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
-			toolresult.MarkEmptySuccess(metadata)
-			metadata["search_no_match"] = true
-			metadata["exit_code"] = 1
-			metadata["non_zero_exit"] = true
-			if duration > 0 {
-				metadata["duration_ms"] = duration.Milliseconds()
-			}
-			metadata[toolresult.MetadataNextActionKey] = bashSearchNoMatchNextAction()
-			// Prefer the cleaned search body so PowerShell NativeCommandError chrome
-			// is not presented as useful stdout to the model.
-			content := strings.TrimSpace(stripPowerShellNoiseForSearchClassification(execResult.Output))
-			if content == "" {
-				content = "未匹配到结果（rg/grep exit 1）。这是空证据，不是命令崩溃。优先改用 toolkit `grep`，或更换关键词/扩大 path。"
-			} else if hint := friendlyHintFor(command, execResult.Output, err, effectiveWorkdir); hint != "" {
-				content = strings.TrimSpace(content + "\n" + hint)
-			}
-			content = formatShellCommandContent(1, execResult.ShellType, effectiveWorkdir, duration, false, content)
-			return &toolkit.ToolResult{
-				Success:    true,
-				OutputKind: toolresult.KindText,
-				Content:    content,
-				Metadata:   metadata,
-			}, nil
-		}
-		// Completed process with a non-zero exit code is content success (Codex-
-		// like contract). Models must inspect Exit code / Output rather than
-		// treating every non-zero status as TOOL_EXECUTION.
-		if !isHardShellExecutionError(err) {
-			exitCode := exitCodeFromError(err)
-			if exitCode < 0 {
-				exitCode = 1
-			}
-			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
-			metadata["exit_code"] = exitCode
-			metadata["non_zero_exit"] = exitCode != 0
-			annotateTerminationMetadata(metadata, err)
-			if duration > 0 {
-				metadata["duration_ms"] = duration.Milliseconds()
-			}
-			if next := bashCommandFailureNextAction(command, execResult.Output, err, effectiveWorkdir); next != "" {
-				metadata[toolresult.MetadataNextActionKey] = next
-			}
-			content := formatShellCommandContent(exitCode, execResult.ShellType, effectiveWorkdir, duration, false, execResult.Output)
-			if hint := friendlyHintFor(command, execResult.Output, err, effectiveWorkdir); hint != "" {
-				content = strings.TrimRight(content, "\n") + "\n" + hint
-			}
-			return &toolkit.ToolResult{
-				Success:    true,
-				OutputKind: toolresult.KindText,
-				Content:    content,
-				Metadata:   metadata,
-			}, nil
-		}
-		failureMetadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
-		if duration > 0 {
-			failureMetadata["duration_ms"] = duration.Milliseconds()
-		}
-		if code := exitCodeFromError(err); code >= 0 {
-			failureMetadata["exit_code"] = code
-		}
-		annotateTerminationMetadata(failureMetadata, err)
-		if next := bashCommandFailureNextAction(command, execResult.Output, err, effectiveWorkdir); next != "" {
-			failureMetadata[toolresult.MetadataNextActionKey] = next
-		}
-		recoveryHint := ""
-		if isShellTimeoutError(err) {
-			recoveryHint = longRunningShellCommandHint(command)
-			if recoveryHint != "" {
-				failureMetadata["long_running_command_hint"] = true
-			}
-		}
-		if recoveryHint == "" && execResult.WaitDelayUsed {
-			recoveryHint = "命令本体已结束，但仍有后代进程占用输出管道；runtime 已按 WaitDelay 收敛，输出可能不完整。若该进程是有意保留的守护进程，请改用 job_start，或在命令内显式等待/终止该子进程。"
-			failureMetadata["wait_delay_note"] = true
-		}
-		if recoveryHint != "" {
-			if existing, _ := failureMetadata[toolresult.MetadataNextActionKey].(string); strings.TrimSpace(existing) == "" {
-				failureMetadata[toolresult.MetadataNextActionKey] = recoveryHint
-			}
-		}
-		code := classifyHardShellExecutionErrorCode(err, execResult.Output)
-		result := toolResultFailureWithCode(
-			buildBashCommandFailureError(command, execResult.Output, err),
-			code,
-			"", // keep bashCommandFailureNextAction from failureMetadata when present
-			failureMetadata,
-		)
-		// Preserve partial stdout/stderr for model recovery even on hard fail.
-		result.Content = execResult.Output
-		if recoveryHint != "" {
-			result.Content = strings.TrimRight(result.Content, "\n") + "\n" + recoveryHint
-		}
-		return result, nil
-	}
-
-	metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
-	metadata["exit_code"] = 0
-	if duration > 0 {
-		metadata["duration_ms"] = duration.Milliseconds()
-	}
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    formatShellCommandContent(0, execResult.ShellType, effectiveWorkdir, duration, false, execResult.Output),
-		Metadata:   metadata,
-	}, nil
 }
 
 // executeJobFirst is the manager-backed shell path. The command is submitted
@@ -724,424 +584,6 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 		commands = append(commands, bashCommandBatchItem{Command: command, Params: item})
 	}
 	return commands, true, nil
-}
-
-func (b *BashTool) executeBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
-	if detachRequested, _ := resolveBoolParam(parent, "detach"); detachRequested {
-		return toolResultFailureWithCode(
-			fmt.Errorf("detach=true 只支持单条 command 调用，不支持 commands 批次；请拆分为多次 bash 调用"),
-			string(runtimeerrors.ErrToolExecution),
-			"Call bash once per detached launch with a single `command` and detach=true.",
-			map[string]interface{}{"detach_batch_refused": true},
-		), nil
-	}
-	stopOnError, _ := resolveBoolParam(parent, "stop_on_error")
-	parallel, _ := resolveBoolParam(parent, "parallel")
-	if parallel && stopOnError {
-		result, err := b.executeSequentialBatch(ctx, parent, commands, true)
-		if result != nil && result.Metadata != nil {
-			result.Metadata["parallel_requested"] = true
-			result.Metadata["parallel_downgraded_reason"] = "stop_on_error_requires_ordered_execution"
-		}
-		return result, err
-	}
-	if parallel {
-		return b.executeParallelBatch(ctx, parent, commands)
-	}
-	return b.executeSequentialBatch(ctx, parent, commands, stopOnError)
-}
-
-func (b *BashTool) executeSequentialBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem, stopOnError bool) (*toolkit.ToolResult, error) {
-	results := make([]*toolkit.ToolResult, 0, len(commands))
-	for _, item := range commands {
-		result := b.executeBatchItem(ctx, parent, item)
-		results = append(results, result)
-		if stopOnError && !result.Success {
-			break
-		}
-	}
-	return buildBashBatchResult(ctx, parent, commands, results, stopOnError, 1)
-}
-
-func (b *BashTool) executeParallelBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
-	parallelism, err := resolveBashBatchParallelism(parent, len(commands))
-	if err != nil {
-		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
-	}
-	results := make([]*toolkit.ToolResult, len(commands))
-	sem := make(chan struct{}, parallelism)
-	var wg sync.WaitGroup
-	for index, item := range commands {
-		wg.Add(1)
-		go func(index int, item bashCommandBatchItem) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[index] = &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: ctx.Err()}
-				return
-			}
-			results[index] = b.executeBatchItem(ctx, parent, item)
-		}(index, item)
-	}
-	wg.Wait()
-	return buildBashBatchResult(ctx, parent, commands, results, false, parallelism)
-}
-
-func resolveBashBatchParallelism(params map[string]interface{}, commandCount int) (int, error) {
-	if commandCount <= 1 {
-		return 1, nil
-	}
-	parallelism := runtime.GOMAXPROCS(0)
-	if parallelism <= 0 {
-		parallelism = 1
-	}
-	if parallelism > 4 {
-		parallelism = 4
-	}
-	if raw, ok := params["max_parallel"]; ok && raw != nil {
-		if !isNumericZero(raw) {
-			value, err := extractPositiveInt(raw)
-			if err != nil {
-				return 0, fmt.Errorf("max_parallel 参数无效: %w", err)
-			}
-			parallelism = value
-		}
-	}
-	if parallelism > commandCount {
-		parallelism = commandCount
-	}
-	return parallelism, nil
-}
-
-func (b *BashTool) executeBatchItem(ctx context.Context, parent map[string]interface{}, item bashCommandBatchItem) *toolkit.ToolResult {
-	commandParams := bashBatchCommandParams(parent, item.Params)
-	commandParams["command"] = item.Command
-	delete(commandParams, "commands")
-	delete(commandParams, "parallel")
-	delete(commandParams, "max_parallel")
-	delete(commandParams, "stop_on_error")
-	if detach, _ := resolveBoolParam(commandParams, "detach"); detach {
-		return toolResultFailureWithCode(
-			fmt.Errorf("detach=true 只支持单条 command 调用，不支持 commands 批次；请拆分为多次 bash 调用"),
-			string(runtimeerrors.ErrToolExecution),
-			"Call bash once per detached launch with a single `command` and detach=true.",
-			map[string]interface{}{"detach_batch_refused": true},
-		)
-	}
-	result, err := b.Execute(ctx, commandParams)
-	if err != nil {
-		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}
-	}
-	if result == nil {
-		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: fmt.Errorf("bash command returned no result")}
-	}
-	return result
-}
-
-func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem, results []*toolkit.ToolResult, stopOnError bool, parallelism int) (*toolkit.ToolResult, error) {
-	sections := make([]string, 0, len(commands))
-	items := make([]map[string]interface{}, 0, len(commands))
-	failedItems := make([]map[string]interface{}, 0)
-	failed := 0
-	nonZeroExit := 0
-	commandTexts := make([]string, 0, len(commands))
-	artifactPaths := make([]string, 0, len(commands))
-	batchArtifactPath := ""
-	for index, result := range results {
-		item := commands[index]
-		commandTexts = append(commandTexts, item.Command)
-		entry := map[string]interface{}{
-			"index": index, "command": item.Command, "success": result != nil && result.Success,
-		}
-		status := "ok"
-		content := ""
-		if result != nil {
-			content = result.Content
-			entry["metadata"] = result.Metadata
-			if result.Metadata != nil {
-				if code, ok := result.Metadata["exit_code"]; ok {
-					entry["exit_code"] = code
-					if asInt, ok := asIntish(code); ok && asInt != 0 {
-						nonZeroExit++
-						entry["non_zero_exit"] = true
-						if result.Success {
-							status = "exit_nonzero"
-						}
-					}
-				}
-			}
-			if artifactPath := extractString(result.Metadata["raw_output_artifact_path"]); artifactPath != "" {
-				artifactPaths = append(artifactPaths, artifactPath)
-			}
-		}
-		if result == nil || !result.Success {
-			failed++
-			status = "failed"
-			errText := ""
-			if result != nil && result.Error != nil {
-				errText = result.Error.Error()
-				entry["error"] = errText
-				if strings.TrimSpace(content) == "" {
-					content = errText
-				}
-			}
-			if errText == "" {
-				errText = "unknown error"
-			}
-			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), "", item.Command, errText); row != nil {
-				failedItems = append(failedItems, row)
-			}
-		}
-		sections = append(sections, fmt.Sprintf("===== command %d/%d [%s] =====\n%s\n%s", index+1, len(commands), status, item.Command, strings.TrimSpace(content)))
-		items = append(items, entry)
-	}
-	succeeded := len(commands) - failed
-	if succeeded < 0 {
-		succeeded = 0
-	}
-	metadata := map[string]interface{}{
-		"batch": true, "requested_count": len(commands), "executed_count": len(items),
-		"succeeded_count": succeeded, "failed_count": failed,
-		"partial_failure": failed > 0 && succeeded > 0,
-		"stop_on_error":   stopOnError, "items": items,
-		"parallel": parallelism > 1, "parallelism": parallelism,
-		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
-	}
-	// Batch output declares the shell's own model-visible window (see
-	// buildCommandExecutionMetadata). Execute folds the batch body to that window
-	// and stamps the render-layer opt-out before the result leaves the tool, so
-	// this number describes the window the model really gets.
-	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
-	if nonZeroExit > 0 {
-		metadata["non_zero_exit_count"] = nonZeroExit
-		metadata["has_non_zero_exit"] = true
-	}
-	if len(failedItems) > 0 {
-		// Source-side failed_items so gateway/Diagnose can enrich next_action
-		// without parsing items[] or error strings.
-		metadata[toolresult.MetadataFailedItemsKey] = failedItems
-	}
-	batchOutput := strings.Join(sections, "\n\n")
-	if mutatedPaths := extractStringList(parent["mutated_paths"]); len(mutatedPaths) > 0 {
-		metadata["mutated_paths"] = mutatedPaths
-	}
-	if len(batchOutput) > modelHistoryArtifactThresholdBytes() {
-		artifactPath, artifactErr := runtimeexecutor.PersistShellOutputArtifact(
-			"toolkit", "bash command batch", toolctx.ShellOutputArtifactDir(ctx), batchOutput,
-		)
-		if artifactErr != nil {
-			metadata["raw_output_artifact_error"] = artifactErr.Error()
-		} else if strings.TrimSpace(artifactPath) != "" {
-			artifactPaths = append(artifactPaths, artifactPath)
-			batchArtifactPath = artifactPath
-		}
-	}
-	if len(artifactPaths) > 0 {
-		metadata["raw_output_artifact_paths"] = artifactPaths
-		if batchArtifactPath == "" {
-			batchArtifactPath = artifactPaths[0]
-		}
-		metadata["raw_output_artifact_path"] = batchArtifactPath
-	}
-	if failed > 0 {
-		return &toolkit.ToolResult{
-			Success: false, OutputKind: toolresult.KindText, Content: batchOutput,
-			Metadata: metadata, Error: buildBashBatchFailureError(failed, items),
-		}, nil
-	}
-	// Process non-zero exits are already content-success per item. Keep the
-	// batch tool call successful and surface recovery guidance in metadata.
-	if nonZeroExit > 0 {
-		metadata[toolresult.MetadataNextActionKey] = "One or more shell commands exited non-zero. Inspect each Exit code/Output section, reuse successful item outputs, and only retry the failed commands with a changed command/workdir/timeout. Non-zero exit is not a tool crash."
-		if failed == 0 && succeeded == len(commands) {
-			// All items completed; mark outcome-friendly partial only when mixed
-			// zero/non-zero is useful. Pure non-zero batch still succeeds.
-			if nonZeroExit < len(commands) {
-				metadata["partial_failure"] = false
-				metadata["partial_non_zero_exit"] = true
-			}
-		}
-	}
-	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: batchOutput, Metadata: metadata}, nil
-}
-
-func bashBatchCommandParams(parent, item map[string]interface{}) map[string]interface{} {
-	params := make(map[string]interface{}, len(parent)+len(item))
-	for key, value := range parent {
-		params[key] = value
-	}
-	for key, value := range item {
-		params[key] = value
-	}
-	return params
-}
-
-func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
-	// 解析工作目录
-	resolvedWorkdir, err := b.workdirForExecution(ctx, workdir)
-	if err != nil {
-		return CommandExecutionResult{}, err
-	}
-	budget := resolveShellTimeoutBudget(ctx, timeout)
-
-	if b.sandbox == nil {
-		opts := []ExecOption{WithWorkdir(resolvedWorkdir)}
-		if captureSettings.hasOutputBytesCap {
-			opts = append(opts, WithOutputBytesCap(captureSettings.outputBytesCap))
-		}
-		if captureSettings.disableOutputCap {
-			opts = append(opts, WithDisableOutputCap())
-		}
-		result, err := b.executer.Execute(ctx, command, timeout, opts...)
-		applyCommandTimeoutBudget(&result, budget)
-		return result, err
-	}
-
-	mainCmd := extractPrimaryCommand(command)
-	if err := b.sandbox.ValidateCommand(mainCmd); err != nil {
-		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied command execution", err, map[string]interface{}{
-			"policy":    "sandbox",
-			"operation": string(runtimeexecutor.OpExecute),
-			"command":   mainCmd,
-		})
-	}
-
-	if err := b.sandbox.CheckPermission(runtimeexecutor.OpExecute, resolvedWorkdir); err != nil {
-		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied command working directory", err, map[string]interface{}{
-			"policy":      "sandbox",
-			"operation":   string(runtimeexecutor.OpExecute),
-			"target_path": resolvedWorkdir,
-			"command":     mainCmd,
-		})
-	}
-
-	if configured := b.sandbox.Config().MaxExecutionTime; configured > 0 {
-		budget = runtimeexecution.LimitTimeout(budget, configured, runtimeexecution.TimeoutSourceSandboxPolicy)
-	}
-	// budget.Effective == 0 表示不设超时（默认关闭上限且调用方未指定）。
-	// context.WithTimeout(ctx, 0) 会立刻过期并取消命令，因此必须显式跳过。
-	cmdCtx := ctx
-	if budget.Effective > 0 {
-		withTimeout, cancel := context.WithTimeout(ctx, budget.Effective)
-		defer cancel()
-		cmdCtx = withTimeout
-	}
-
-	// 使用智能 shell 检测
-	shell := runtimeexecutor.DefaultUserShell()
-	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
-	shellCmd := shell.DeriveExecArgs(command, false)
-
-	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
-		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
-			"policy":    "sandbox",
-			"operation": string(runtimeexecutor.OpExecute),
-			"command":   mainCmd,
-			"launcher":  shellCmd[0],
-		})
-	}
-
-	outputMirror := resolveToolTerminalOutputMirror(ctx)
-	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
-	execResult, runErr := shellexec.Run(cmdCtx, shellexec.Options{
-		Command:       commandForShell,
-		Workdir:       resolvedWorkdir,
-		Env:           runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ()),
-		CaptureLimit:  captureSettings.captureLimitBytes(),
-		ArtifactScope: "toolkit",
-		ArtifactRoot:  artifactRoot,
-		Mirror:        outputMirror,
-		Shell:         shell,
-		Invocation: func(command string) (string, []string) {
-			argv := shell.DeriveExecArgs(command, false)
-			return argv[0], argv[1:]
-		},
-		Prepare: func(prepareCtx context.Context, launch shellexec.Launch) (shellexec.Launch, error) {
-			if err := b.sandbox.CheckCommandDenied(launch.Command); err != nil {
-				return shellexec.Launch{}, wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
-					"policy":    "sandbox",
-					"operation": string(runtimeexecutor.OpExecute),
-					"command":   mainCmd,
-					"launcher":  launch.Command,
-				})
-			}
-			wrapped, wrapErr := b.sandbox.PrepareOSCommand(prepareCtx, launch.Command, launch.Args, launch.Workdir, launch.Env)
-			if wrapErr != nil {
-				return shellexec.Launch{}, wrapSandboxPermissionError("sandbox denied os isolation", wrapErr, map[string]interface{}{
-					"policy":    "sandbox",
-					"operation": string(runtimeexecutor.OpExecute),
-					"command":   mainCmd,
-					"launcher":  launch.Command,
-					"os_mode":   b.sandbox.Config().OSSandbox,
-				})
-			}
-			prepared := shellexec.Launch{
-				Command: wrapped.Command,
-				Args:    append([]string(nil), wrapped.Args...),
-				Env:     wrapped.Env,
-				Workdir: launch.Workdir,
-			}
-			if strings.TrimSpace(wrapped.WorkDir) != "" {
-				prepared.Workdir = wrapped.WorkDir
-			}
-			if wrapped.Env == nil {
-				prepared.Env = launch.Env
-			}
-			return prepared, nil
-		},
-	})
-	if !execResult.Started && runErr != nil {
-		return CommandExecutionResult{}, runErr
-	}
-	capture := execResult.Capture
-	artifactPath := execResult.ArtifactPath
-	artifactErr := execResult.ArtifactError
-	err = runErr
-	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
-	if err != nil {
-		if cmdCtx.Err() == context.DeadlineExceeded {
-			result := commandExecutionFromCapture(capture)
-			result.RawOutputArtifactPath = artifactPath
-			if artifactErr != nil {
-				result.RawOutputArtifactError = artifactErr.Error()
-			}
-			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, execResult, err, "timeout")
-			applyCommandTimeoutBudget(&result, budget)
-			return result, runtimeexecution.TimeoutError(budget)
-		}
-		if cmdCtx.Err() == context.Canceled {
-			result := commandExecutionFromCapture(capture)
-			result.RawOutputArtifactPath = artifactPath
-			if artifactErr != nil {
-				result.RawOutputArtifactError = artifactErr.Error()
-			}
-			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, execResult, err, "cancel")
-			applyCommandTimeoutBudget(&result, budget)
-			return result, runtimeexecution.ContextCancellationError(ctx)
-		}
-		result := commandExecutionFromCapture(capture)
-		result.RawOutputArtifactPath = artifactPath
-		if artifactErr != nil {
-			result.RawOutputArtifactError = artifactErr.Error()
-		}
-		result = applyCommandExecutionShell(result, shell)
-		result = applyProcessGuardResult(result, execResult, err, "error")
-		applyCommandTimeoutBudget(&result, budget)
-		return result, err
-	}
-	result := commandExecutionFromCapture(capture)
-	result.RawOutputArtifactPath = artifactPath
-	if artifactErr != nil {
-		result.RawOutputArtifactError = artifactErr.Error()
-	}
-	result = applyCommandExecutionShell(result, shell)
-	result = applyProcessGuardResult(result, execResult, err, "")
-	applyCommandTimeoutBudget(&result, budget)
-	return result, nil
 }
 
 func (b *BashTool) isBlacklisted(command string) bool {
@@ -1364,136 +806,6 @@ func resolveMaxShellCommandTimeout() time.Duration {
 		return parsed
 	}
 	return defaultMaxShellCommandTimeout
-}
-
-// executeDetachedCommand launches the command as an independent process
-// (detach=true): new console/session, null stdio, no job-object assignment and
-// no output capture. It returns immediately with the PID so the caller can
-// manage the process explicitly.
-func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolvedWorkdir string) (*toolkit.ToolResult, error) {
-	// Managed routing (2026-10-11): when the broker injected a background
-	// submitter, detach=true becomes a supervised job (captured output, job
-	// lifecycle, process tree, supervision wake) — an interactive session when
-	// the caller asks for a TTY-shaped command, otherwise a one-shot job. The
-	// legacy fire-and-forget launcher stays as the fallback for tool instances
-	// constructed without the seam (tests, toolkit-mcp-server).
-	if b.bgSubmitter != nil {
-		return b.executeDetachedManaged(ctx, command, resolvedWorkdir)
-	}
-	if !runtimeexecutor.ResolveDetachAllowed() {
-		return toolResultFailureWithCode(
-			fmt.Errorf("detach=true 已被运行时禁用（%s=0）", runtimeexecutor.DetachAllowedEnv),
-			string(runtimeerrors.ErrAgentPermission),
-			"Drop detach=true, or ask the operator to unset "+runtimeexecutor.DetachAllowedEnv+".",
-			map[string]interface{}{
-				"detach_refused": true,
-				"detach_gate":    runtimeexecutor.DetachAllowedEnv,
-			},
-		), nil
-	}
-
-	shell := runtimeexecutor.DefaultUserShell()
-	shellCmd := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
-	if len(shellCmd) == 0 {
-		return toolResultFailureWithCode(
-			fmt.Errorf("detach: 无法解析 shell 启动命令"),
-			string(runtimeerrors.ErrProcessStartFailed),
-			"",
-			map[string]interface{}{"detach_failed": true},
-		), nil
-	}
-	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
-		return toolResultFailureWithCode(
-			wrapSandboxPermissionError("sandbox denied detached shell launcher", err, map[string]interface{}{
-				"policy":    "sandbox",
-				"operation": string(runtimeexecutor.OpExecute),
-				"command":   command,
-				"launcher":  shellCmd[0],
-			}),
-			string(runtimeerrors.ErrAgentPermission),
-			"",
-			map[string]interface{}{"detach_refused": true},
-		), nil
-	}
-
-	launchPath := shellCmd[0]
-	launchArgs := shellCmd[1:]
-	launchDir := resolvedWorkdir
-	launchEnv := runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
-	if launch, wrapErr := b.sandbox.PrepareOSCommand(ctx, shellCmd[0], shellCmd[1:], resolvedWorkdir, launchEnv); wrapErr != nil {
-		return toolResultFailureWithCode(
-			wrapSandboxPermissionError("sandbox denied detached os isolation", wrapErr, map[string]interface{}{
-				"policy":    "sandbox",
-				"operation": string(runtimeexecutor.OpExecute),
-				"command":   command,
-				"launcher":  shellCmd[0],
-				"os_mode":   b.sandbox.Config().OSSandbox,
-			}),
-			string(runtimeerrors.ErrAgentPermission),
-			"",
-			map[string]interface{}{"detach_refused": true},
-		), nil
-	} else if strings.TrimSpace(launch.Command) != "" {
-		launchPath = launch.Command
-		launchArgs = launch.Args
-		if strings.TrimSpace(launch.WorkDir) != "" {
-			launchDir = launch.WorkDir
-		}
-		if launch.Env != nil {
-			launchEnv = launch.Env
-		}
-	}
-
-	started := time.Now()
-	proc, err := runtimeexecutor.StartDetached(runtimeexecutor.DetachedLaunch{
-		Path: launchPath,
-		Args: launchArgs,
-		Dir:  launchDir,
-		Env:  launchEnv,
-	})
-	duration := time.Since(started)
-	if err != nil {
-		return toolResultFailureWithCode(
-			err,
-			string(runtimeerrors.ErrProcessStartFailed),
-			"Fix the executable/workdir, or run the command in the foreground to surface its output.",
-			map[string]interface{}{"detach_failed": true},
-		), nil
-	}
-
-	content := fmt.Sprintf(
-		"已在独立控制台启动（detach=true，fire-and-forget）。\nPID: %d\n隔离模式: %s（breakaway=%v）\n命令: %s\n说明: 该进程不继承输出管道，输出不会进入本工具结果；它不受本次调用超时/Esc 终止影响，请用 PID 显式管理（Windows: `Stop-Process -Id %d -Force`；Unix: `kill %d`）。",
-		proc.PID, proc.Mode, proc.Breakaway, command, proc.PID, proc.PID,
-	)
-	if warning := strings.TrimSpace(proc.Warning); warning != "" {
-		content += "\n提示: " + warning
-		content += "（该进程仍独立于本次调用的作业对象，但可能被外层作业跟踪。）"
-	}
-	content += "\n注意: detach=true 已弃用（输出不被捕获、无监督）。需要读取输出或后续交互时，请改用 job_start（交互会话用 interactive=true + job_input）。"
-	metadata := map[string]interface{}{
-		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
-		"detached":                    true,
-		"detached_pid":                proc.PID,
-		"detach_mode":                 proc.Mode,
-		"detach_breakaway":            proc.Breakaway,
-		"executed":                    true,
-		"duration_ms":                 duration.Milliseconds(),
-		"deprecated":                  true,
-		"deprecated_reason":           "detach=true is fire-and-forget: output is not captured and the process is unsupervised",
-		toolresult.MetadataNextActionKey: fmt.Sprintf(
-			"detach=true is deprecated (fire-and-forget, no captured output). Prefer job_start (interactive=true for a session driven by job_input); otherwise manage pid=%d explicitly (Stop-Process -Id %d / kill %d) and avoid launching duplicates.",
-			proc.PID, proc.PID, proc.PID,
-		),
-	}
-	if warning := strings.TrimSpace(proc.Warning); warning != "" {
-		metadata["detach_warning"] = warning
-	}
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    content,
-		Metadata:   metadata,
-	}, nil
 }
 
 func nonEmptyStrings(values ...string) []string {
@@ -2473,11 +1785,11 @@ func resolveShellTimeoutFromEnv(timeoutMSEnv string, timeoutEnv string, fallback
 func buildBashMissingCommandError(params map[string]interface{}) error {
 	parts := []string{"command 参数缺失或类型错误"}
 	if parseErr := extractString(params["_parse_error"]); parseErr != "" {
-		parts = append(parts, fmt.Sprintf("参数解析失败: %s。请缩短 command 或拆成 commands 批次后重试", parseErr))
+		parts = append(parts, fmt.Sprintf("参数解析失败: %s。请缩短 command 后重试", parseErr))
 	} else if raw := extractString(params["_raw"]); raw != "" {
-		parts = append(parts, "检测到原始工具参数，但缺少可解析的 command 字段；请使用 {\"command\":\"...\"} 或 commands 数组")
+		parts = append(parts, "检测到原始工具参数，但缺少可解析的 command 字段；请使用 {\"command\":\"...\"}")
 	} else {
-		parts = append(parts, "请提供非空 command 字符串，或改用 commands:[{command:\"...\"}] 批量执行")
+		parts = append(parts, "请提供非空 command 字符串")
 	}
 	return fmt.Errorf("%s", strings.Join(parts, "。"))
 }
@@ -2487,7 +1799,7 @@ func buildBashEmptyCommandError(params map[string]interface{}) error {
 	if parseErr := extractString(params["_parse_error"]); parseErr != "" {
 		parts = append(parts, fmt.Sprintf("参数解析失败: %s", parseErr))
 	}
-	parts = append(parts, "请提供非空 command，或改用 commands 批次")
+	parts = append(parts, "请提供非空 command")
 	return fmt.Errorf("%s", strings.Join(parts, "。"))
 }
 
@@ -2519,7 +1831,7 @@ func buildBashCommandFailureError(command, output string, err error) error {
 	cmdPreview := mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 120)
 	snippet := firstNonEmptyLines(output, 4, 240)
 	if snippet != "" {
-		return fmt.Errorf("%s。命令: %s。输出摘要: %s。完整输出见 Content；批量检查请用 commands 并查看失败摘要", base, cmdPreview, snippet)
+		return fmt.Errorf("%s。命令: %s。输出摘要: %s。完整输出见 Content", base, cmdPreview, snippet)
 	}
 	return fmt.Errorf("%s。命令: %s。无 stdout/stderr 输出；请检查命令拼写、workdir、PATH，以及是否需要先 cd 到正确目录", base, cmdPreview)
 }

@@ -216,7 +216,7 @@ func TestBashTool_RespectsSandboxCommandPolicy(t *testing.T) {
 		MaxExecutionTime: 15 * time.Second,
 	})
 
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetSandbox(sandbox)
 
 	allowedResult, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -262,7 +262,7 @@ func TestBashTool_ReadOnlySandboxBlocksShellLauncher(t *testing.T) {
 		EnvWhitelist:    []string{"PATH", "SystemRoot", "ComSpec"},
 	})
 
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetSandbox(sandbox)
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{

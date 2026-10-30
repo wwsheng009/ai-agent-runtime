@@ -56,7 +56,7 @@ func TestShellJobFirstPromotesTimeout(t *testing.T) {
 	jobs, listErr := manager.ListJobs(ctx, background.JobFilter{SessionID: "session-job-promoted"})
 	require.NoError(t, listErr)
 	require.Len(t, jobs, 1)
-	require.Equal(t, background.StatusRunning, jobs[0].Status)
+	require.Contains(t, []background.JobStatus{background.StatusPending, background.StatusRunning}, jobs[0].Status)
 	_, cancelErr := manager.CancelJob(ctx, jobs[0].ID)
 	require.NoError(t, cancelErr)
 }

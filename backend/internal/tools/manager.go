@@ -254,7 +254,7 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 //     local sandbox and no local LSP pool can be reached by accident.
 //
 // Every m.toolkit use site is already nil-guarded (ListTools, GetToolInfo,
-// Execute, resolveToolSource, SetBackgroundSubmitter), which ListToolsTests and
+// Execute, resolveToolSource, SetShellJobRuntime), which ListToolsTests and
 // the remote-only integration test pin.
 func NewRemoteOnlyManager(mcp manager.Manager) *Manager {
 	return &Manager{

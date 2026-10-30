@@ -21,9 +21,9 @@ func NewAgentAdapter(manager *Manager) *AgentAdapter {
 }
 
 // UnderlyingToolsManager exposes the wrapped tools manager for host-side
-// wiring seams that are built after the tool surface (e.g. the runtime-server
-// lazily-created background manager injecting the detach→managed-job submitter,
-// 2026-10-11). Returns nil when the adapter has no manager.
+// wiring that is built after the tool surface (for example the runtime-server
+// lazily-created background manager injecting the shell job runtime). Returns
+// nil when the adapter has no manager.
 func (a *AgentAdapter) UnderlyingToolsManager() *Manager {
 	if a == nil {
 		return nil

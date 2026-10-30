@@ -31,7 +31,7 @@ func TestReliabilityEvalParentDeadlineStopsRealToolExecution(t *testing.T) {
 	defer cancel()
 
 	startedAt := time.Now()
-	result, err := NewBashTool().Execute(ctx, map[string]interface{}{
+	result, err := newTestBashTool().Execute(ctx, map[string]interface{}{
 		"command":    reliabilityEvalAppendCommand(commandDelay, effectFile, "deadline-effect"),
 		"workdir":    workdir,
 		"timeout_ms": requestedTimeout.Milliseconds(),

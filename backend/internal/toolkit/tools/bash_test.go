@@ -75,7 +75,7 @@ func (f *inspectExecuter) Execute(ctx context.Context, command string, timeout t
 }
 
 func TestBashTool_EmitsMutatedPaths(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -99,7 +99,7 @@ func TestBashTool_EmitsMutatedPaths(t *testing.T) {
 }
 
 func TestBashTool_ExecutesStructuredCommandBatchInOneToolCall(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &batchInspectExecuter{}
 	tool.executer = inspector
 
@@ -129,7 +129,7 @@ func TestBashTool_ExecutesStructuredCommandBatchInOneToolCall(t *testing.T) {
 }
 
 func TestBashTool_EmptyOptionalCommandBatchFallsBackToSingleCommand(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &batchInspectExecuter{}
 	tool.executer = inspector
 
@@ -151,7 +151,7 @@ func TestBashTool_EmptyOptionalCommandBatchFallsBackToSingleCommand(t *testing.T
 }
 
 func TestBashTool_EmptyCommandBatchWithoutSingleCommandStillFails(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "unexpected"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -167,7 +167,7 @@ func TestBashTool_EmptyCommandBatchWithoutSingleCommandStillFails(t *testing.T) 
 }
 
 func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &batchInspectExecuter{failures: map[string]error{"first": fmt.Errorf("first failed")}}
 	tool.executer = inspector
 
@@ -211,7 +211,7 @@ func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
 }
 
 func TestBashTool_CommandBatchNonZeroExitIsContentSuccess(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = &batchInspectExecuter{failures: map[string]error{
 		"first":  fmt.Errorf("exit status 1"),
 		"second": fmt.Errorf("exit status 2"),
@@ -279,7 +279,7 @@ func TestIsHardShellExecutionError(t *testing.T) {
 }
 
 func TestBashTool_RealNonZeroExitIsContentSuccess(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	command := "exit 1"
 	if runtime.GOOS != "windows" {
 		command = "false"
@@ -303,7 +303,7 @@ func TestBashTool_RealNonZeroExitIsContentSuccess(t *testing.T) {
 }
 
 func TestBashTool_MissingCommandIncludesParseErrorHint(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"_parse_error": "unexpected end of JSON input",
 	})
@@ -320,7 +320,7 @@ func TestBashTool_MissingCommandIncludesParseErrorHint(t *testing.T) {
 }
 
 func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &batchInspectExecuter{failures: map[string]error{"first": fmt.Errorf("first failed")}}
 	tool.executer = inspector
 
@@ -345,7 +345,7 @@ func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
 }
 
 func TestBashTool_CommandBatchAcceptsStringItems(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &batchInspectExecuter{}
 	tool.executer = inspector
 
@@ -362,7 +362,7 @@ func TestBashTool_CommandBatchAcceptsStringItems(t *testing.T) {
 }
 
 func TestBashTool_CommandBatchRunsIndependentChecksInParallel(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	executer := &parallelBatchExecuter{started: make(chan string, 2), release: make(chan struct{})}
 	tool.executer = executer
 	type execution struct {
@@ -406,7 +406,7 @@ func TestBashTool_CommandBatchRunsIndependentChecksInParallel(t *testing.T) {
 }
 
 func TestExecuteShellCommandTool_EmitsMutatedPaths(t *testing.T) {
-	tool := NewExecuteShellCommandTool()
+	tool := newTestExecuteShellCommandTool()
 	tool.BashTool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -430,7 +430,7 @@ func TestExecuteShellCommandTool_EmitsMutatedPaths(t *testing.T) {
 }
 
 func TestExecuteShellCommandTool_DescribesDetectedWindowsShellAndWorkdir(t *testing.T) {
-	tool := NewExecuteShellCommandTool()
+	tool := newTestExecuteShellCommandTool()
 	description := strings.ToLower(tool.Description())
 	if !strings.Contains(description, "powershell") || !strings.Contains(description, "workdir") || !strings.Contains(description, "裸 cd") || !strings.Contains(description, "head") || !strings.Contains(description, "select-object") {
 		t.Fatalf("description should steer models toward workdir and PowerShell head compatibility, got %q", tool.Description())
@@ -454,7 +454,7 @@ func TestExecuteShellCommandTool_DescribesDetectedWindowsShellAndWorkdir(t *test
 }
 
 func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	description := strings.ToLower(tool.Description())
 	if !strings.Contains(description, "powershell") || !strings.Contains(description, "select-object") {
 		t.Fatalf("tool description should mention detected Windows shell guidance, got %q", tool.Description())
@@ -475,9 +475,8 @@ func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testi
 	if _, ok := properties["timeout_ms"]; !ok {
 		t.Fatalf("expected timeout_ms parameter in bash schema: %#v", properties)
 	}
-	commandsSchema, ok := properties["commands"].(map[string]interface{})
-	if !ok || commandsSchema["type"] != "array" {
-		t.Fatalf("expected structured commands batch parameter, got %#v", properties["commands"])
+	if _, exists := properties["commands"]; exists {
+		t.Fatalf("job-first shell must not advertise commands batch: %#v", properties["commands"])
 	}
 }
 
@@ -488,8 +487,8 @@ func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testi
 // TestBashTool_PassesExplicitTimeoutToExecuter 与 bash_process_guard_test.go。
 func TestShellModelSurfaceExposesIntegerTimeoutsOnly(t *testing.T) {
 	surfaces := map[string]map[string]interface{}{
-		"bash":                  NewBashTool().Parameters(),
-		"execute_shell_command": NewExecuteShellCommandTool().Parameters(),
+		"bash":                  newTestBashTool().Parameters(),
+		"execute_shell_command": newTestExecuteShellCommandTool().Parameters(),
 	}
 	for name, params := range surfaces {
 		properties, ok := params["properties"].(map[string]interface{})
@@ -530,7 +529,7 @@ func TestShellModelSurfaceExposesIntegerTimeoutsOnly(t *testing.T) {
 }
 
 func TestBashTool_PassesExplicitTimeoutToExecuter(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -555,7 +554,7 @@ func TestBashTool_PassesExplicitTimeoutToExecuter(t *testing.T) {
 func TestBashTool_UsesEnvDefaultTimeout(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "90s")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -579,7 +578,7 @@ func TestBashTool_UsesEnvDefaultTimeout(t *testing.T) {
 func TestBashTool_GoTestUsesExtendedInferredTimeout(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -597,7 +596,7 @@ func TestBashTool_GoTestUsesExtendedInferredTimeout(t *testing.T) {
 func TestBashTool_SearchShellUsesShorterInferredTimeout(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: ""}}
 	tool.executer = inspector
 
@@ -614,7 +613,7 @@ func TestBashTool_SearchShellUsesShorterInferredTimeout(t *testing.T) {
 }
 
 func TestBashTool_ExplicitTimeoutOverridesSearchInference(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "match"}}
 	tool.executer = inspector
 
@@ -650,7 +649,7 @@ func TestInferredShellCommandTimeout_SearchVsGoTest(t *testing.T) {
 }
 
 func TestBashTool_ExplicitTimeoutOverridesGoTestInference(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -669,7 +668,7 @@ func TestBashTool_ExplicitTimeoutOverridesGoTestInference(t *testing.T) {
 func TestBashTool_NonStringTimeoutFallsBackToDefault(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "45s")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -691,7 +690,7 @@ func TestBashTool_NonStringTimeoutFallsBackToDefault(t *testing.T) {
 func TestBashTool_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "90s")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -711,7 +710,7 @@ func TestBashTool_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
 }
 
 func TestBashTool_AcceptsPlainNumericTimeoutAsSeconds(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -731,7 +730,7 @@ func TestBashTool_AcceptsPlainNumericTimeoutAsSeconds(t *testing.T) {
 }
 
 func TestBashTool_IgnoresZeroTimeoutPlaceholder(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -753,7 +752,7 @@ func TestBashTool_IgnoresZeroTimeoutPlaceholder(t *testing.T) {
 func TestBashTool_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise(t *testing.T) {
 	// Live residual: models emit timeout_ms=1 with timeout_sec=30/60, which used
 	// to hard-timeout after 1ms under strict timeout_ms priority.
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -776,7 +775,7 @@ func TestBashTool_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise(t *testing.T) {
 }
 
 func TestBashTool_KeepsPlausibleShortTimeoutMsOverTimeoutSec(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -842,7 +841,7 @@ func TestParseShellCommandTimeout_NoiseReconciliation(t *testing.T) {
 }
 
 func TestBashTool_RejectsNegativeTimeout(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -868,7 +867,7 @@ func TestBashTool_EnvDefaultTimeoutStopsRealWindowsCommand(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "")
 	t.Setenv(shellCommandTimeoutMSEnv, "100")
 
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command": "Start-Sleep -Milliseconds 500; Write-Output done",
 	})
@@ -903,7 +902,7 @@ func TestBashTool_ExplicitTimeoutOverridesEnvDefaultForRealWindowsCommand(t *tes
 	t.Setenv(shellCommandTimeoutEnv, "")
 	t.Setenv(shellCommandTimeoutMSEnv, "100")
 
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":    "Start-Sleep -Milliseconds 500; Write-Output done",
 		"timeout_ms": 5000,
@@ -947,7 +946,7 @@ func TestBuildCommandExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 }
 
 func TestBashTool_WorkdirParameter(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -987,7 +986,7 @@ func TestResolveWorkdir(t *testing.T) {
 }
 
 func TestBashTool_AnnotatesTruncatedOutputMetadata(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{
 		Output:                "Total output lines: 200\nTotal output bytes: 9000\n\nhead\n\n[exec output truncated at capture limit: omitted 4000 bytes from the middle]\n\ntail",
 		Truncated:             true,
@@ -1038,7 +1037,7 @@ func TestBashTool_AnnotatesTruncatedOutputMetadata(t *testing.T) {
 }
 
 func TestBashTool_AnnotatesDisabledCaptureMetadata(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{
 		Output:               "full-output",
 		TotalBytes:           11,
@@ -1069,7 +1068,7 @@ func TestBashTool_AnnotatesDisabledCaptureMetadata(t *testing.T) {
 }
 
 func TestBashTool_AnnotatesArtifactErrorMetadata(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{
 		Output:                 "partial-output",
 		Truncated:              true,
@@ -1092,7 +1091,7 @@ func TestBashTool_AnnotatesArtifactErrorMetadata(t *testing.T) {
 }
 
 func TestBashTool_PassesOutputCaptureOptionsToExecuter(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -1115,7 +1114,7 @@ func TestBashTool_PassesOutputCaptureOptionsToExecuter(t *testing.T) {
 }
 
 func TestBashTool_ExplicitOutputCapWinsOverDisablePlaceholder(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -1139,7 +1138,7 @@ func TestBashTool_ExplicitOutputCapWinsOverDisablePlaceholder(t *testing.T) {
 }
 
 func TestBashTool_IgnoresNullOutputCaptureOptions(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -1163,7 +1162,7 @@ func TestBashTool_IgnoresNullOutputCaptureOptions(t *testing.T) {
 }
 
 func TestBashTool_IgnoresZeroStrictSchemaPlaceholders(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 	tool.executer = inspector
 
@@ -1190,7 +1189,7 @@ func TestBashTool_IgnoresZeroStrictSchemaPlaceholders(t *testing.T) {
 }
 
 func TestBashTool_BatchIgnoresZeroMaxParallelPlaceholder(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -1349,7 +1348,7 @@ func TestBuildBashCommandFailureError_EmptyOutputGuidance(t *testing.T) {
 }
 
 func TestBashTool_NonZeroExitIsContentSuccess(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: "cannot open file: no such file"},
 		err:    fmt.Errorf("exit status 1"),
@@ -1381,7 +1380,7 @@ func TestBashTool_NonZeroExitIsContentSuccess(t *testing.T) {
 }
 
 func TestBashTool_HardLaunchFailureStillFails(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: ""},
 		err:    fmt.Errorf("exec: \"pwsh\": executable file not found in %%PATH%%"),
@@ -1458,7 +1457,7 @@ func TestIsSearchToolNoMatch(t *testing.T) {
 }
 
 func TestBashTool_SearchNoMatchSoftSucceeds(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: ""},
 		err:    fmt.Errorf("exit status 1"),
@@ -1495,7 +1494,7 @@ func TestBashTool_SearchNoMatchSoftSucceeds(t *testing.T) {
 }
 
 func TestBashTool_SearchRealFailureIsContentSuccessWithGuidance(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{
 		result: CommandExecutionResult{Output: "rg: regex parse error: unclosed group"},
 		err:    fmt.Errorf("exit status 2"),
@@ -1582,7 +1581,7 @@ func TestBuildBashCommandFailureError_TimeoutGuidance(t *testing.T) {
 }
 
 func TestBashTool_BatchOfSearchNoMatchSucceeds(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	// batchInspectExecuter returns Output + optional err; empty-ish output +
 	// exit 1 on rg should soft-succeed per item and make the batch overall ok.
 	inspector := &batchInspectExecuter{
@@ -1656,7 +1655,7 @@ func TestBashTool_WindowsHeredocPreflight(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("heredoc preflight is Windows-specific")
 	}
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	// Ensure we never reach the executer for blocked dialect.
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
 
@@ -1728,7 +1727,7 @@ func TestIsSearchToolNoMatch_IgnoresPowerShellNoise(t *testing.T) {
 }
 
 func TestBashTool_ShellToolkitCommandPreflight(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command": "view -path internal/dbmigration/sql_migrations.go -offset 1040 -limit 50",
 	})
@@ -1948,7 +1947,7 @@ func TestBashTool_SearchPathShellGlobHandling(t *testing.T) {
 
 	// A glob that really expands runs instead of being redirected for its syntax.
 	if shellExpandsUnquotedGlobs(runtimeexecutor.DefaultUserShell()) {
-		tool := NewBashTool()
+		tool := newTestBashTool()
 		tool.SetBasePath(dir)
 		tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "sample.go:1:func sample"}}
 		result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -1971,7 +1970,7 @@ func TestBashTool_SearchPathShellGlobHandling(t *testing.T) {
 		`rg --files 'missing-dir/*.go'`,
 		`rg -n -e sample 'missing-dir/*.go' | Select-Object -First 5`,
 	} {
-		tool := NewBashTool()
+		tool := newTestBashTool()
 		tool.SetBasePath(dir)
 		tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
 		result, err := tool.Execute(context.Background(), map[string]interface{}{"command": command})
@@ -2104,7 +2103,7 @@ func TestLooksLikeSimpleShellCodeSearch(t *testing.T) {
 }
 
 func TestBashTool_SimpleShellCodeSearchSoftRedirect(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{

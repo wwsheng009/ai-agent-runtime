@@ -15,7 +15,7 @@ import (
 // process working directory. Anything else lets the sandbox clear a relative
 // "workdir" against one directory while the command runs in another.
 func TestWorkdirForExecutionPrefersSessionRoot(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetBasePath(t.TempDir())
 
 	base := t.TempDir()
@@ -52,7 +52,7 @@ func TestWorkdirForExecutionPrefersSessionRoot(t *testing.T) {
 // directory (which would break relative paths the policy already cleared).
 func TestWorkdirForExecutionFallsBackToRegisteredBasePath(t *testing.T) {
 	registered := t.TempDir()
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	tool.SetBasePath(registered)
 
 	got, err := tool.workdirForExecution(context.Background(), "")
@@ -84,7 +84,7 @@ func TestWorkdirForExecutionFallsBackToRegisteredBasePath(t *testing.T) {
 
 // A tool with nothing bound at all keeps the legacy process-directory behavior.
 func TestWorkdirForExecutionFallsBackToProcessCWD(t *testing.T) {
-	tool := NewBashTool()
+	tool := newTestBashTool()
 
 	got, err := tool.workdirForExecution(context.Background(), "")
 	if err != nil {
@@ -137,7 +137,7 @@ func TestBashExecuteReportsResolvedSessionWorkdir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewBashTool()
+			tool := newTestBashTool()
 			inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
 			tool.executer = inspector
 

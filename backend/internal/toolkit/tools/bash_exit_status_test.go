@@ -51,7 +51,7 @@ func TestBashToolSignalDeathIsContentSuccessWith137(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("signals are a Unix concept; Windows WaitStatus never reports Signaled")
 	}
-	tool := NewBashTool()
+	tool := newTestBashTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":    "kill -9 $$",
 		"timeout_ms": 10000,

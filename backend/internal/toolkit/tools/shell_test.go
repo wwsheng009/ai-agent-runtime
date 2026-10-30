@@ -8,7 +8,7 @@ import (
 )
 
 func TestShellTool_NameDescriptionVersion(t *testing.T) {
-	tool := NewShellTool()
+	tool := newTestShellTool()
 	if tool.Name() != "shell" {
 		t.Fatalf("expected name shell, got %q", tool.Name())
 	}
@@ -32,8 +32,8 @@ func TestShellTool_NameDescriptionVersion(t *testing.T) {
 	if _, ok := props["command"]; !ok {
 		t.Fatalf("expected command property, got %#v", props)
 	}
-	if _, ok := props["commands"]; !ok {
-		t.Fatalf("expected commands batch property, got %#v", props)
+	if _, ok := props["commands"]; ok {
+		t.Fatalf("job-first shell must not advertise commands batch: %#v", props)
 	}
 	if !tool.CanDirectCall() {
 		t.Fatal("expected shell tool to allow direct call")
@@ -41,7 +41,7 @@ func TestShellTool_NameDescriptionVersion(t *testing.T) {
 }
 
 func TestShellTool_RealNonZeroExitIsContentSuccess(t *testing.T) {
-	tool := NewShellTool()
+	tool := newTestShellTool()
 	command := "exit 1"
 	if runtime.GOOS != "windows" {
 		command = "false"
@@ -74,7 +74,7 @@ func TestShellTool_RealNonZeroExitIsContentSuccess(t *testing.T) {
 }
 
 func TestShellTool_DelegatesHardFailure(t *testing.T) {
-	tool := NewShellTool()
+	tool := newTestShellTool()
 	tool.executer = fakeExecuter{err: context.DeadlineExceeded}
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command": "echo should-timeout",

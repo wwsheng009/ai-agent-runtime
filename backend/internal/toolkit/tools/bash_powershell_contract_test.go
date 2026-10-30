@@ -35,7 +35,7 @@ func TestCoreShellPowerShellExitAndOutputContracts(t *testing.T) {
 		{name: "sandboxed_direct_exec"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tool := NewShellTool()
+			tool := newTestShellTool()
 			if tc.withSandbox {
 				tool.SetSandbox(runtimeexecutor.NewSandbox(&runtimeexecutor.SandboxConfig{}))
 			}
