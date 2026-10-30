@@ -3,7 +3,6 @@ package searchcore
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -974,12 +973,16 @@ func grepIgnoreFilesFromArgs(ctx context.Context, access toolcore.Access, call *
 		// A relative ignore_file spelling anchors to the search root's
 		// directory (the local tool's workingDir rule), not the process CWD.
 		anchor := ""
-		if !filepath.IsAbs(entry) && len(roots) > 0 {
+		// "Is this absolute?" and "whose parent is this?" are questions about the target's
+		// filesystem, not this process's: filepath would call "/srv/work/x" relative on a
+		// Windows client and anchor it onto the search root, turning a file that exists into
+		// an unreadable one.
+		if !toolcore.IsAbsTargetPath(access, entry) && len(roots) > 0 {
 			anchor = roots[0]
 			if info, statErr := access.Stat(ctx, anchor); statErr == nil && !info.IsDir() {
-				anchor = filepath.Dir(anchor)
+				anchor = toolcore.DirTargetPath(access, anchor)
 			}
-			entry = filepath.Join(anchor, entry)
+			entry = toolcore.JoinTargetPath(access, anchor, entry)
 		}
 		abs, err := paths.Resolve(entry)
 		if err != nil {
@@ -1000,12 +1003,12 @@ func grepPatternFilesFromArgs(ctx context.Context, access toolcore.Access, call 
 	}
 	resolved := make([]string, 0, len(raw))
 	for _, entry := range raw {
-		if !filepath.IsAbs(entry) && len(roots) > 0 {
+		if !toolcore.IsAbsTargetPath(access, entry) && len(roots) > 0 {
 			anchor := roots[0]
 			if info, statErr := access.Stat(ctx, anchor); statErr == nil && !info.IsDir() {
-				anchor = filepath.Dir(anchor)
+				anchor = toolcore.DirTargetPath(access, anchor)
 			}
-			entry = filepath.Join(anchor, entry)
+			entry = toolcore.JoinTargetPath(access, anchor, entry)
 		}
 		abs, err := paths.Resolve(entry)
 		if err != nil {

@@ -184,7 +184,7 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5b ✅ | `walkGrepFollowing`（跟随链接那条腿）：被跟随的根、每级清单、链接目标形状三处换源，链接**身份**经可选接口 `toolcore.SymlinkResolver`（Q1 落地）。能力只在真的遇到"指向目录的链接"时才要，缺能力则**带路径拒绝**，不静默跳过、不做半吊子环路检测 | grep.go、toolcore/access.go、localio/access.go | **实测 os.* 4→1、walker 2→0** | 单文件回滚（`walkGrepFollowing` 换回宿主调用即撤销本步） |
 | S5c ✅ | `one_file_system` 的**文件系统边界**（Q2 更正后的名字；原写"inode 去重"是误述）：平台实现整体搬进 `localio`，核心经可选接口 `toolcore.FilesystemIdentifier` 询问；缺能力即**拒绝该标志**（不是降级照跨），出路写进消息 | toolcore/access.go、localio/identity_unix.go（新）、localio/identity_windows.go（新）、seam_access.go、grep.go；删除 searchcore/filesystem_unix.go、filesystem_windows.go | **实测 os.* 1→0、walker 仍 0**（searchcore 归零） | 把两处调用改回 `localio` 直调即撤销 |
 | S5d ✅ | **子路径的拼法随目标**：三处遍历（`walkViaAccess`、`walkGrepFollowing`、`lscore` 的 `descend`）此前各自 `filepath.Join`，在 Windows 客户端上为 POSIX 目标拼出 `\srv\work\a.txt`，远端每个 stat 都 miss——症状是**空结果而非报错**。新增可选接口 `toolcore.TargetPathStyle` + 唯一入口 `toolcore.JoinTargetPath`，缺能力时保持本机惯例（本地行为零变化） | toolcore/access.go（接口+helper+测试）、seam_walk.go、grep.go、lscore/ls.go、remotetools/envd_access.go（声明 `/`） | os.* 与 walker 均不变（三处都是纯拼写决策） | 把三处改回 `filepath.Join` 即撤销 |
-| S5e ✅ | **ignore 子系统的路径运算随目标**（同类缺陷的第二处）：规则候选名、祖先链、scope 的 `Dir/Clean` 此前全用宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机自己的 `.gitignore` **静默失效**（页面里多出被排除的文件，没有报错）。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator}`（`path` 包没有 `Rel`，POSIX 版自带实现），并把 `grep_ignore.go` 的相应运算全部换掉 | toolcore/access.go（family+测试）、searchcore/grep_ignore.go | os.* 与 walker 均不变 | 把 `grep_ignore.go` 的调用换回 `filepath.*` 即撤销 |
+| S5e ✅ | **路径运算随目标（同类缺陷的第二、三处）**：① ignore 子系统——规则候选名、祖先链、scope 的 `Dir/Clean` 全是宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机的 `.gitignore` **静默失效**（页面多出被排除的文件、无报错）；② `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**——`filepath.IsAbs("/srv/work/x")` 在 Windows 上是假的，于是调用方点名的绝对路径被拼成 `/srv/work/\srv\work\srv\work\custom.ignore` 并被告知"读不到"（**首个用户可见的失败**）。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator,IsAbsTargetPath}`（`path` 包没有 `Rel`，POSIX 版自带实现），换掉 `grep_ignore.go` 与 `handler.go` 的相应运算（后者因此不再需要 `path/filepath`） | toolcore/access.go（family+测试）、searchcore/grep_ignore.go、searchcore/handler.go | os.* 与 walker 均不变 | 把两处文件的调用换回 `filepath.*` 即撤销 |
 | S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）**且子路径拼法已随目标（S5d，否则 Windows 客户端上远端遍历全 miss）**；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
 
 每步验收门（与既有纪律逐条对齐）：
@@ -369,6 +369,12 @@ S5d 两条（第 21 条是这一步的由来，第 22 条是"自证"事故的第
     这条测试第一次跑就**报红**，但错在我的夹具：根清单里没列 `pkg`，遍历无从下钻，于是"目标页少一个
     文件"被差分报成了渲染差异。**差分测试会把夹具的错先算到被测方头上**，定位时要先问"两侧的输入真的
     一样吗"。
+    第三处在 `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**（S1 当时动过这段），也是三处里
+    唯一**用户可见**的：`filepath.IsAbs("/srv/work/custom.ignore")` 在 Windows 上为假 → 被拼成
+    `/srv/work/\srv\work\srv\work\custom.ignore` → 调用方点名的**存在**文件被告知"读取 ignore_file
+    失败"。证据就在失败信息里那条路，不需要再推理。补 `IsAbsTargetPath` 并换掉两处判定后，该用例转绿；
+    变异（回宿主语义）立刻让它变红。附带一个漂亮的信号：改完 `handler.go` **不再需要 `path/filepath`**，
+    编译器直接报 `imported and not used`——即"这个文件里对目标路径的运算已经全部换源"。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

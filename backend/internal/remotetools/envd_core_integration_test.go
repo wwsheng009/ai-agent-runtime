@@ -412,3 +412,43 @@ func TestSharedGrepPageMatchesTheLocalPage(t *testing.T) {
 		t.Fatalf("neither page used the target's separator:\n%s", localPage.Content)
 	}
 }
+
+// TestSharedGrepAnchorsAnAbsoluteIgnoreFileTheTargetsWay covers the third instance of the
+// same class, and the one with a visible failure rather than a silent one: the anchor rule
+// for ignore_file / pattern_file asks filepath.IsAbs whether the caller's spelling is
+// absolute. On a Windows client "/srv/work/custom.ignore" answers false, so the path is
+// joined onto the search root ("\srv\work\srv\work\custom.ignore"), the target has no such
+// file, and a caller who named an existing absolute path is told their ignore file cannot be
+// read.
+func TestSharedGrepAnchorsAnAbsoluteIgnoreFileTheTargetsWay(t *testing.T) {
+	ignoreFile := "/srv/work/custom.ignore"
+	fake := &fakeEnvdFiles{
+		entries: map[string]envdclient.Entry{
+			"/srv/work":          fakeDirEntry("/srv/work"),
+			ignoreFile:           fakeFileEntry(ignoreFile, int64(len("skip.txt\n"))),
+			"/srv/work/skip.txt": fakeFileEntry("/srv/work/skip.txt", int64(len("needle skip\n"))),
+			"/srv/work/keep.txt": fakeFileEntry("/srv/work/keep.txt", int64(len("needle keep\n"))),
+		},
+		listing: map[string][]string{"/srv/work": {"skip.txt", "keep.txt", "custom.ignore"}},
+		content: map[string][]byte{
+			ignoreFile:           []byte("skip.txt\n"),
+			"/srv/work/skip.txt": []byte("needle skip\n"),
+			"/srv/work/keep.txt": []byte("needle keep\n"),
+		},
+	}
+	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: &envdAccess{api: fake}}
+	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+
+	result := runHandler(t, handler, map[string]any{
+		"pattern": "needle", "path": ".", "ignore_file": ignoreFile,
+	}, runtime)
+	if !result.Success {
+		t.Fatalf("an absolute ignore_file that exists on the target was rejected: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "keep.txt") {
+		t.Fatalf("the search found nothing:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "skip.txt") {
+		t.Fatalf("the named ignore_file's rules were not applied:\n%s", result.Content)
+	}
+}

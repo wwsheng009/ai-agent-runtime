@@ -209,6 +209,20 @@ func TestTargetPathHelpersFollowTheAccessorsConvention(t *testing.T) {
 		t.Fatal("mixing an absolute base with a relative target must be an error, not a guess")
 	}
 
+	// IsAbsTargetPath is where the two conventions diverge in the most visible way: the
+	// same string is absolute to one filesystem and relative to the other. A caller who
+	// names "/srv/work/x" on a POSIX target means an absolute path, whatever this process
+	// would call it.
+	if !IsAbsTargetPath(posix, "/srv/work/x") {
+		t.Fatal("a slash-leading path is absolute on a POSIX target")
+	}
+	if IsAbsTargetPath(posix, "pkg/x") {
+		t.Fatal("a bare relative spelling must stay relative")
+	}
+	if IsAbsTargetPath(host, "/srv/work/x") != filepath.IsAbs("/srv/work/x") {
+		t.Fatal("the host convention must keep filepath.IsAbs, quirks included")
+	}
+
 	// The host half must stay filepath.Rel exactly: a local search's relative paths are what
 	// `glob` filters and max_depth are matched against, and this family must not change them.
 	want := filepath.Join("..", "c", "d.txt")

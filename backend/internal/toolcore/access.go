@@ -188,6 +188,18 @@ func DirTargetPath(access Access, p string) string {
 	return filepath.Dir(p)
 }
 
+// IsAbsTargetPath reports whether a path is absolute *on the target*, which is not the same
+// question as filepath.IsAbs on this process: "/srv/work/x" is absolute to a POSIX daemon and
+// merely "slash-leading" to Windows. The caller-visible version of getting this wrong is an
+// ignore_file or pattern_file that exists on the target being anchored onto the search root
+// and reported as unreadable.
+func IsAbsTargetPath(access Access, p string) bool {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return path.IsAbs(p)
+	}
+	return filepath.IsAbs(p)
+}
+
 // CleanTargetPath is path.Clean or filepath.Clean.
 func CleanTargetPath(access Access, p string) string {
 	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
