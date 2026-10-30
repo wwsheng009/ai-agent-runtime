@@ -151,6 +151,9 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
 8. **AppPush 原生通道**：App 通过 `/api/app/devices` 注册 APNs/FCM/UnifiedPush
    token；网关经受信任 relay webhook 投递。详见
    [gateway-app/06](../gateway-app/06-apppush-relay.md)。
+9. **Bot 通道（C 方案，待实施）**：网关自持 bot 作为 `im` 通知通道，直接向
+   所有节点的目标 chat 发送，不依赖节点回程；目标模型、单归属迁移与回退语义见
+   [18-gateway-bot-notify-channel.md](./18-gateway-bot-notify-channel.md)。
 
 ---
 

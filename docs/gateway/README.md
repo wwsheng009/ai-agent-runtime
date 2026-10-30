@@ -70,6 +70,7 @@
 | [15-multi-instance-architecture.md](./15-multi-instance-architecture.md) | 多实例架构与实例间通讯：现状（主备无协议）、防双写与共享协调、归属路由、分级改进与核实 |
 | [16-mcp-mount-tunnel.md](./16-mcp-mount-tunnel.md) | MCP 反向挂载穿透：把本机回环 MCP（`aicli-remote-tools`）以挂载为单位注册进网关，公网按自动生成的唯一路径 `/m/{slug}/mcp` 程序化访问；多挂载、两套凭据、安全边界与落地计划 |
 | [17-aicli-gateway-edge-exposure.md](./17-aicli-gateway-edge-exposure.md) | 生产接入：内层 `aicli-gateway` 挂在 `gateway-edge`（`ttai.online`）后面的路由约定、systemd 单元、构建与原子部署脚本、验收清单，以及本轮 SSH 通道受阻的实测记录 |
+| [18-gateway-bot-notify-channel.md](./18-gateway-bot-notify-channel.md) | 网关自持 bot 通知通道（C 方案）：网关直接向平台发送所有节点通知，不依赖节点回程；目标模型、通知路由、单归属迁移、安全与分阶段落地 |
 | [gateway-app/](../gateway-app/README.md) | 全网页 App 专项：Tauri 2 容器、原生通知、ntfy 路由修复与实施计划 |
 
 ---
