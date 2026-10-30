@@ -1713,7 +1713,16 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   color: var(--fg-muted); font-size: 13px;
 }
 
-.chat-msg { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* Long transcripts: an off-screen row must not participate in every streaming
+   layout. Without this, each live patch reflows all retained history rows
+   (measured: 39 long tasks / ~3.6s layout for 400 rows). The intrinsic size keeps
+   the scrollbar stable until the browser has remembered the row's real height. */
+.chat-msg {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  flex: 0 0 auto;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
 .chat-msg-role { font-size: 11px; color: var(--fg-faint); }
 .chat-bubble {
   padding: 8px 11px;

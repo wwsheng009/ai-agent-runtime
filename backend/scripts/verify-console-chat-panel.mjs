@@ -205,6 +205,12 @@ const env = (src) => ({
     /\.view-sessions #chat-modal\s*\{[^}]*z-index:\s*60/s.test(css));
   check('移动端会话过滤条不被 flex-basis 拉高',
     /\.im-seg\s*\{[^}]*flex:\s*0 0 auto/s.test(css));
+  check('屏外消息行跳过流式布局',
+    /\.chat-msg\s*\{[^}]*content-visibility:\s*auto/s.test(css) &&
+    /\.chat-msg\s*\{[^}]*contain-intrinsic-size:\s*auto\s+140px/s.test(css) &&
+    /\.chat-msg\s*\{[^}]*flex:\s*0 0 auto/s.test(css));
+  check('实时增量按绘制帧合并',
+    appjs.includes('requestAnimationFrame') && !appjs.includes('CHAT_STREAM_RENDER_MS'));
   check('顶部“加载更早消息”按钮已移除', !doc.getElementById('chat-older'));
 
   const moreBtn = doc.getElementById('chat-more');

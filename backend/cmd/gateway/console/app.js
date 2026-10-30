@@ -1584,6 +1584,21 @@
     }
   }
 
+  // chatSetStreamingText appends only the new suffix to the live text node.
+  // Replacing the whole 30KB textContent every frame discards the browser's
+  // previous line-layout work; an append lets it reuse the stable prefix.
+  function chatSetStreamingText(node, text) {
+    if (!node) { return; }
+    var src = text || "";
+    var first = node.firstChild;
+    var current = first && first.nodeType === 3 ? first.data : "";
+    if (current && src.indexOf(current) === 0) {
+      if (src.length > current.length) { first.appendData(src.slice(current.length)); }
+      return;
+    }
+    node.textContent = src;
+  }
+
   // ── Incremental board: keyed reconcile instead of a full rebuild ──
   // setText writes only when the value actually changed: untouched nodes keep
   // text selection and avoid needless layout invalidation on every data tick.
@@ -3876,8 +3891,12 @@
   var CHAT_PAGE_LIMIT = 40;    // 首屏与实时刷新窗口（条）
   var CHAT_OLDER_LIMIT = 60;   // 「加载更早消息」每页条数
   var CHAT_REFRESH_MS = 1000;  // 快照刷新尾随节流：事件风暴下每秒最多一次
-  var CHAT_STREAM_RENDER_MS = 50; // 实时文本合帧上限：20fps 足够阅读，避免每个 token
-                                  // 都重跑 Markdown 解析与全列表布局。
+  var CHAT_STREAM_FRAME_MS = 32; // 实时正文最多约 30fps：长正文一次布局约 16ms，
+                                 // 60fps 会把主线程吃满；仍按 rAF 对齐绘制帧。
+  var CHAT_LIVE_PLAIN_AFTER_MS = 30; // 一次实时补丁超过该耗时就改为纯文本流式，
+                                     // 终稿仍由服务端行按 Markdown 渲染。
+  var CHAT_LIVE_MARKDOWN_MAX = 6000; // 超过该长度的实时正文直接走纯文本快路径，
+                                     // 避免等到 Markdown 单帧已经超预算才降级。
   var CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
   var CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
                                // chatApplyWindow），长跑会话会一直往后长，到顶就从
@@ -4022,7 +4041,7 @@
   }
 
   function chatEmptyLive() {
-    return { streaming: false, done: false, assistant: "", reasoning: "", tool: "", images: [] };
+    return { streaming: false, done: false, plain: false, assistant: "", reasoning: "", tool: "", images: [] };
   }
 
   function chatSetStatus(text, kind) {
@@ -4625,7 +4644,13 @@
       screenBusy: false,
       lastScreenAt: 0,
       screenETag: "",
-      renderTimer: null,
+      renderFrame: 0,
+      lastLiveRenderAt: 0,
+      bottomPin: 0,
+      scrollGuardUntil: 0,
+      programmaticScrollTop: 0,
+      followHoldUntil: Date.now() + 800,
+      bottomPinTimer: 0,
       toolMeasurePending: false,
       follow: true,
       olderBusy: false,
@@ -4964,6 +4989,15 @@
       setText(row.__reasonBody, content || "");
     } else if (o.collapse && role === "tool") {
       setText(row.__toolOutput, content || "");
+    } else if (o.plain) {
+      // Streaming text is transient and can grow to tens of KB. Re-parsing
+      // Markdown + replacing innerHTML every frame makes each update a layout
+      // stall; keep the live bubble plain and render Markdown once on the final
+      // (non-streaming) frame / authoritative snapshot.
+      bubble.classList.remove("md");
+      bubble.__mdSrc = null;
+      bubble.__mdOn = false;
+      chatSetStreamingText(bubble, content || "");
     } else {
       setMessageHTML(bubble, content || "");
     }
@@ -4989,7 +5023,7 @@
     var rows = [];
     if (st.live.reasoning) {
       rows.push(chatRowElement(st, "live:reasoning", "reasoning", st.live.reasoning,
-        { streaming: st.live.streaming }));
+        { streaming: st.live.streaming, plain: true }));
     }
     // 只有真的收到助手正文（或图片）时才插实时助手行。turn_start 就会把
     // streaming 置真，但一回合可能长时间停在推理/工具阶段；此时渲染一个空的
@@ -4997,11 +5031,13 @@
     // 工具行与状态栏已经表达了进度。streaming 只用于已有正文时的光标动画。
     var liveImages = st.live.images || [];
     if (st.live.assistant || liveImages.length) {
+      var livePlain = st.live.plain || st.live.done ||
+        st.live.assistant.length > CHAT_LIVE_MARKDOWN_MAX;
       rows.push(chatRowElement(st, "live:assistant", "assistant", st.live.assistant,
-        { streaming: st.live.streaming, images: liveImages }));
+        { streaming: st.live.streaming, plain: livePlain, images: liveImages }));
     }
     if (st.live.tool) {
-      rows.push(chatRowElement(st, "live:tool", "tool", st.live.tool, {}));
+      rows.push(chatRowElement(st, "live:tool", "tool", st.live.tool, { plain: true }));
     }
     return rows;
   }
@@ -5044,11 +5080,12 @@
     chatApplyLiveTail(host, st.busy);
     // 翻页前插：按新增高度补偿滚动位置，阅读不被顶走。
     if (st.scrollRestore != null) {
-      host.scrollTop = host.scrollHeight - st.scrollRestore;
+      chatSetScrollTop(st, host, host.scrollHeight - st.scrollRestore);
       st.scrollRestore = null;
     }
-    if (st.follow) { host.scrollTop = host.scrollHeight; }
+    if (st.follow) { chatSetScrollTop(st, host, host.scrollHeight); }
     chatSyncJump();
+    chatPinBottomAfterLayout();
   }
 
   // chatPatchLive 是流式热路径：历史行集合未变时只补实时气泡与待确认回显，
@@ -5084,27 +5121,69 @@
       if (!keep[key]) { delete st.rows[key]; }
     });
     if (!desired.length) { chatPlaceholder("暂无消息。"); }
-    if (st.follow) { host.scrollTop = host.scrollHeight; }
+    if (st.follow) { chatSetScrollTop(st, host, host.scrollHeight); }
     chatSyncJump();
   }
 
-  // chatScheduleRender 把高频增量合并到 50ms 窗口：逐字流不该每个 token 都重跑
-  // Markdown 解析。50ms（20fps）对阅读已经连续，CPU 峰值则下降一个数量级。
+  // chatScheduleRender 按浏览器绘制帧合并高频增量：同一帧内多个 token 只补一次
+  // 实时气泡。这里不用固定 50ms 定时器——那会让文字按 20fps 成段跳变，且回调
+  // 可能落在布局帧之外，主观上更卡。
   function chatScheduleRender() {
     var st = chatState;
-    if (!st || st.renderTimer) { return; }
-    st.renderTimer = setTimeout(function () {
+    if (!st || st.renderFrame) { return; }
+    var nowFn = (window.performance && window.performance.now)
+      ? function () { return window.performance.now(); }
+      : function () { return Date.now(); };
+    var run = function () {
+      st.renderFrame = 0;
       if (chatState !== st) { return; }
-      st.renderTimer = null;
+      var now = nowFn();
+      if (now - st.lastLiveRenderAt < CHAT_STREAM_FRAME_MS) {
+        chatScheduleRender();
+        return;
+      }
+      st.lastLiveRenderAt = now;
+      var renderStart = nowFn();
       chatPatchLive();
-    }, CHAT_STREAM_RENDER_MS);
+      // Adaptive downgrade: short responses keep live Markdown. If one patch
+      // (parse + layout) crosses the frame budget, switch this turn to the
+      // cheap committed-prefix text path; the final server row is still Markdown.
+      if (chatState === st && st.live.streaming && !st.live.plain &&
+          nowFn() - renderStart > CHAT_LIVE_PLAIN_AFTER_MS) {
+        st.live.plain = true;
+        chatScheduleRender();
+      }
+    };
+    if (typeof window.requestAnimationFrame === "function") {
+      st.renderFrame = window.requestAnimationFrame(run);
+    } else {
+      st.renderFrame = setTimeout(run, 16);
+    }
   }
 
   function chatCancelRender() {
     var st = chatState;
-    if (!st || !st.renderTimer) { return; }
-    clearTimeout(st.renderTimer);
-    st.renderTimer = null;
+    if (!st) { return; }
+    if (st.renderFrame) {
+      if (typeof window.cancelAnimationFrame === "function") {
+        window.cancelAnimationFrame(st.renderFrame);
+      } else {
+        clearTimeout(st.renderFrame);
+      }
+      st.renderFrame = 0;
+    }
+    if (st.bottomPin) {
+      if (typeof window.cancelAnimationFrame === "function") {
+        window.cancelAnimationFrame(st.bottomPin);
+      } else {
+        clearTimeout(st.bottomPin);
+      }
+      st.bottomPin = 0;
+    }
+    if (st.bottomPinTimer) {
+      clearTimeout(st.bottomPinTimer);
+      st.bottomPinTimer = 0;
+    }
   }
 
   /* ── 折叠交互（与 micro web client chat.js 同一状态机） ────────────── */
@@ -5196,8 +5275,54 @@
     var host = el("chat-list");
     if (!st || !host) { return; }
     if (force) { st.follow = true; }
-    host.scrollTop = host.scrollHeight;
+    chatSetScrollTop(st, host, host.scrollHeight);
     chatSyncJump();
+    chatPinBottomAfterLayout();
+  }
+
+  // content-visibility makes the browser settle intrinsic row heights after
+  // the synchronous render. One rAF later, re-pin the viewport to the true
+  // bottom so opening a long transcript never leaves the operator one row short.
+  function chatPinBottomAfterLayout() {
+    var st = chatState;
+    var host = el("chat-list");
+    if (!st || !host || !st.follow || st.bottomPin) { return; }
+    var tries = 0;
+    var pin = function () {
+      st.bottomPin = 0;
+      if (chatState !== st || !st.follow) { return; }
+      chatSetScrollTop(st, host, host.scrollHeight);
+      chatSyncJump();
+      tries++;
+      // Intrinsic sizes settle over a few frames on a long transcript. Re-pin
+      // briefly so the initial open (and a backwards paging settle) lands on the
+      // true bottom without adding work to the per-token path.
+      if (tries < 8) { st.bottomPin = window.requestAnimationFrame(pin); }
+    };
+    if (typeof window.requestAnimationFrame === "function") {
+      st.bottomPin = window.requestAnimationFrame(pin);
+    } else {
+      st.bottomPin = setTimeout(pin, 16);
+    }
+    if (!st.bottomPinTimer) {
+      st.bottomPinTimer = setTimeout(function () {
+        st.bottomPinTimer = 0;
+        if (chatState !== st || !st.follow) { return; }
+        chatSetScrollTop(st, host, host.scrollHeight);
+        chatSyncJump();
+      }, 350);
+    }
+  }
+
+  function chatSetScrollTop(st, host, top) {
+    if (!st || !host) { return; }
+    // The scroll event is async and observed after content-visibility has
+    // already changed scrollHeight. Treat our own scrollTop writes as
+    // intentional follow, otherwise the first short layout flips follow off
+    // and the bottom pin cancels itself.
+    st.scrollGuardUntil = Date.now() + 120;
+    host.scrollTop = top;
+    st.programmaticScrollTop = host.scrollTop;
   }
 
   // chatSyncJump：只有「列表可滚 + 用户已上滚」时才提供回到最新。
@@ -5320,7 +5445,7 @@
     }
     if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     if (st.refreshTimer) { clearTimeout(st.refreshTimer); st.refreshTimer = null; }
-    if (st.renderTimer) { clearTimeout(st.renderTimer); st.renderTimer = null; }
+    chatCancelRender();
     // 兜底轮询与状态栏时钟随连接一起停：后台/关闭时不空转（chatConnect 会按
     // st.busy 重新武装轮询）。
     if (st.busyTimer) { clearInterval(st.busyTimer); st.busyTimer = null; }
@@ -5576,6 +5701,7 @@
     st.screenETag = "";
     st.lastScreenAt = 0;
     st.toolMeasurePending = false;
+    st.followHoldUntil = Date.now() + 800;
     // 换会话后旧的审批/提问一律失效（节点的 pending 由新一轮 connected 重报）。
     st.pendingApproval = null;
     st.pendingQuestion = null;
@@ -7624,9 +7750,29 @@
       var st = chatState;
       var host = el("chat-list");
       if (!st || !host) { return; }
+      if (Date.now() < st.followHoldUntil) {
+        chatSyncJump();
+        return;
+      }
+      if (st.scrollGuardUntil && Date.now() < st.scrollGuardUntil &&
+          Math.abs(host.scrollTop - st.programmaticScrollTop) <= 1) {
+        chatSyncJump();
+        return;
+      }
       st.follow = host.scrollHeight - host.scrollTop - host.clientHeight < 24;
       chatSyncJump();
       if (host.scrollTop < 64) { chatLoadOlder(); }
+    });
+    // A real wheel/touch gesture overrides the short initial follow hold. A
+    // programmatic scroll (and content-visibility settling) must not be mistaken
+    // for the operator trying to leave the live edge.
+    ["wheel", "touchmove", "pointerdown"].forEach(function (name) {
+      el("chat-list").addEventListener(name, function () {
+        var st = chatState;
+        if (!st) { return; }
+        st.followHoldUntil = 0;
+        st.scrollGuardUntil = 0;
+      }, { passive: true });
     });
     // 工具行折叠控件：点击 + Enter/Space（与 micro web client 同一委托方式）。
     // 用户手动展开 → 记账（永不自动折回）；手动收起 → 连自动标记一起清。
@@ -7876,7 +8022,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=73").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=74").catch(function () {});
     });
   }
 

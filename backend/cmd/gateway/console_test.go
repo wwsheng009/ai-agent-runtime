@@ -421,7 +421,9 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		"chat-modal", "/web/api/screen", "/web/api/events", "/web/api/input",
 		"/web/api/statusbar", "message_window", "chat-dyn-status",
 		"screenBusy", "lastScreenAt", "screenETag", "If-None-Match",
-		"compact=1", "chatPatchLive", "CHAT_STREAM_RENDER_MS",
+		"compact=1", "chatPatchLive", "requestAnimationFrame", "chatCancelRender",
+		"chatSetStreamingText", "CHAT_LIVE_PLAIN_AFTER_MS", "chatPinBottomAfterLayout",
+		"CHAT_LIVE_MARKDOWN_MAX", "scrollGuardUntil", "followHoldUntil",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets
 		// eaten by the list rule first).
@@ -453,6 +455,9 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		`font-size: 16px; line-height: 23px;`,
 		`.btn.chat-send {`,
 		`min-width: 44px; min-height: 44px;`,
+		`content-visibility: auto;`,
+		`contain-intrinsic-size: auto 140px;`,
+		`flex: 0 0 auto;`,
 	} {
 		if !strings.Contains(readConsoleAsset(t, "style.css"), needle) {
 			t.Fatalf("style.css is missing %q", needle)
