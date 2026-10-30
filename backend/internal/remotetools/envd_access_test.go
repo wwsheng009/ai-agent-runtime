@@ -31,6 +31,7 @@ type fakeEnvdFiles struct {
 	listing   map[string][]string
 	content   map[string][]byte
 	windows   []string
+	listCalls []string
 	statErr   error
 	listErr   error
 	rangeErr  error
@@ -53,6 +54,7 @@ func (f *fakeEnvdFiles) Stat(_ context.Context, filePath string) (envdclient.Ent
 }
 
 func (f *fakeEnvdFiles) ListDir(_ context.Context, dirPath string, depth uint32) ([]envdclient.Entry, error) {
+	f.listCalls = append(f.listCalls, dirPath+"@"+strconv.FormatUint(uint64(depth), 10))
 	if f.listErr != nil {
 		return nil, f.listErr
 	}

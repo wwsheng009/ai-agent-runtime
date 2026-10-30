@@ -850,7 +850,7 @@ func walkGrepFollowing(ctx context.Context, access toolcore.Access, resolver too
 		}
 		entry := frame.entries[frame.index]
 		frame.index++
-		path := filepath.Join(frame.dir, entry.Name())
+		path := toolcore.JoinTargetPath(access, frame.dir, entry.Name())
 
 		isDir := entry.IsDir()
 		if entry.Type()&os.ModeSymlink != 0 {

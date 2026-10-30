@@ -8,11 +8,13 @@ package toolcore
 // tool lie about the reason it failed.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -103,3 +105,59 @@ func TestLocalAbsenceStillMatchesOsIsNotExist(t *testing.T) {
 // errno mapping (ENOENT, ERROR_FILE_NOT_FOUND) is what makes
 // errors.Is(err, fs.ErrNotExist) true for the host errors above; the equivalence
 // test pins it so a future refactor cannot quietly widen absence into "any error".
+// styleStubAccess satisfies Access without answering anything: JoinTargetPath is a pure
+// decision about spelling, and a fake that could be called would only invite a test to
+// depend on I/O that the function under test never performs.
+type styleStubAccess struct{}
+
+func (styleStubAccess) Stat(context.Context, string) (fs.FileInfo, error) {
+	return nil, errors.New("unused")
+}
+func (styleStubAccess) Lstat(context.Context, string) (fs.FileInfo, error) {
+	return nil, errors.New("unused")
+}
+func (styleStubAccess) Open(context.Context, string) (FileHandle, error) {
+	return nil, errors.New("unused")
+}
+func (styleStubAccess) ReadDir(context.Context, string) ([]fs.DirEntry, error) {
+	return nil, errors.New("unused")
+}
+
+// slashStyleStub is a POSIX target: the case that motivated the capability.
+type slashStyleStub struct{ styleStubAccess }
+
+func (slashStyleStub) PathSeparator() rune { return '/' }
+
+// TestJoinTargetPathFollowsTheAccessorsConvention pins the single place that decides how a
+// core spells a child path.
+//
+// Both halves matter. The default must stay this process's own convention, because a local
+// walk cannot change just because the seam exists - and the spelling is not cosmetic: the
+// path a core builds is echoed back in results, so a local listing that suddenly used
+// slashes on Windows would be a visible regression. The POSIX half matters because the
+// failure it prevents is invisible: a Windows client walking a Linux target with the host's
+// separator asks the daemon for "\srv\work\a.txt", gets "not found" for every entry, and
+// reports an empty result rather than an error.
+func TestJoinTargetPathFollowsTheAccessorsConvention(t *testing.T) {
+	const dir, name = "/srv/work", "a.txt"
+
+	hostConvention := filepath.Join(dir, name)
+	if got := JoinTargetPath(nil, dir, name); got != hostConvention {
+		t.Fatalf("no accessor must keep this process's convention: got %q, want %q", got, hostConvention)
+	}
+	if got := JoinTargetPath(styleStubAccess{}, dir, name); got != hostConvention {
+		t.Fatalf("an accessor without the capability must keep this process's convention: got %q, want %q", got, hostConvention)
+	}
+	if got := JoinTargetPath(slashStyleStub{}, dir, name); got != "/srv/work/a.txt" {
+		t.Fatalf("a POSIX target must get slashes on every host: got %q", got)
+	}
+
+	// On this host the two conventions differ; asserting that keeps the capability from
+	// becoming decorative if someone ever makes filepath.Join slash-shaped on Windows.
+	if runtime.GOOS == "windows" {
+		posix := JoinTargetPath(slashStyleStub{}, dir, name)
+		if posix == hostConvention {
+			t.Fatalf("the capability changed nothing on Windows: both spellings are %q", posix)
+		}
+	}
+}

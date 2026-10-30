@@ -32,6 +32,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"path"
+	"path/filepath"
 )
 
 // Access is the read side of the file-I/O seam. Every method takes a context so
@@ -128,6 +130,36 @@ type SymlinkResolver interface {
 // asked for, and both look like a normal result.
 type FilesystemIdentifier interface {
 	FilesystemIdentity(ctx context.Context, path string) (string, error)
+}
+
+// TargetPathStyle is the optional capability that says how the filesystem behind an
+// accessor spells a child path.
+//
+// Why a core needs to ask at all: a walk builds its child paths itself - it joins a
+// directory it just listed with the name of the entry it just saw - and before the seam
+// there was only ever one machine, so this process's own separator was always right. With
+// a foreign target it is not: a Windows client walking a Linux tree builds
+// `\srv\work\a.txt`, and every stat against the daemon misses. The symptom is not an error
+// but an empty result, which is the kind of wrong answer the seam exists to eliminate.
+//
+// The default is deliberately this process's own convention, so a core that has no
+// accessor, or an accessor that has not implemented this, behaves exactly as it did before
+// (localio is the host, and the backends that talk to a POSIX target are expected to
+// implement it as they are converted).
+type TargetPathStyle interface {
+	// PathSeparator is the separator the target's filesystem uses: '/' for a POSIX
+	// target, the host's separator for a host target.
+	PathSeparator() rune
+}
+
+// JoinTargetPath joins a directory with one child name the way the accessor's filesystem
+// spells it. It is the single definition of "how a core builds a child path", so a walk
+// cannot accidentally use the process's convention for a foreign tree.
+func JoinTargetPath(access Access, dir, name string) string {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return path.Join(dir, name)
+	}
+	return filepath.Join(dir, name)
 }
 
 // NotExistError is the hook a backend whose transport reports absence with its

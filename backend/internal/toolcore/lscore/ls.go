@@ -5,7 +5,6 @@ package lscore
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -147,7 +146,7 @@ func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDe
 				return
 			}
 			if item.Dir {
-				descend(filepath.Join(dirPath, name), relPath, depth+1)
+				descend(toolcore.JoinTargetPath(access, dirPath, name), relPath, depth+1)
 			}
 		}
 	}

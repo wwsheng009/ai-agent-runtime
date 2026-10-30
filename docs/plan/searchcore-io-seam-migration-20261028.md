@@ -150,6 +150,18 @@ Access toolcore.Access
   （该 runtime 实现 `Searcher`，见 `rg_search.go`）。S1–S5 的改动**直接影响这条路**——这也解释了
   为什么 `driftguard` 与 `searchcore` 的测试必须一直绿。
 
+  **已核实、待产品侧确认的一件事（不在本方案修复范围内，此处只记录）**：这条路上的
+  `remoteRuntime.search = resolveRipgrepRunner()` 解析出的是**本机**的 rg
+  （`ripgrep.Resolve` 的顺序是"显式 override → 随发行版内置 → 本机 PATH"），而引擎在没有
+  `Stream` 覆盖时用 `exec.CommandContext(path, args...)` 并设 `cmd.Dir = dir`（`ripgrep_engine.go:80-86`）
+  ——也就是说它会拿**本机的 rg** 去打**目标机的路径**，`cmd.Dir` 在本机根本不存在。失败时按
+  `handler` 的规则回落共享核遍历器，而那个遍历器的 accessor 仍是 `localio`（`remoteRuntime`
+   没有实现 `FileAccessProvider`），于是搜索落在**本机**。两种结果都不是"远端搜索"。
+  `remotetools` 里那几条 `TestRemoteGrep*/TestRemoteRipgrep*` 之所以全绿，是因为它们用
+  `t.TempDir()` 把两端放在**同一台机器**上跑——形态（argv/解析/分页）被钉住了，"在哪台机器执行"
+  从未被覆盖。需要产品侧确认 ssh/http 这条后端是否仍对外启用；若启用，这是一个独立于 envd 的
+  bug，修法属于它自己的范围（给它一个远端 `Stream`，或给它一个 `FileAccess`），我不擅自改。
+
 S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面砍了（违反"工具面与档位表在任何一段都不得
 变化"）。S6 的真实内容是把 envd 的脚本工具换成"共享核 + `FileAccess()`"（本方案的执行腿），
 让两条路在**核**这一层合流；那时 envd 的 `grep` 会从两个参数变成完整的本地参数面——这是**能力
@@ -171,7 +183,8 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5a ✅ | **遍历本身**（默认不跟随链接那条腿）+ 所有"路径形状"判定：搜索模式（root/roots[0] 是否regular file）、ignore 作用域、ripgrep 的 argv 形状与 SingleFile | seam_walk.go（新）、glob.go、grep.go、grep_ignore.go、ripgrep_engine.go | **实测 os.* 9→4、walker 4→2** | 单文件回滚（`seam_walk.go` 存在即这步的开关） |
 | S5b ✅ | `walkGrepFollowing`（跟随链接那条腿）：被跟随的根、每级清单、链接目标形状三处换源，链接**身份**经可选接口 `toolcore.SymlinkResolver`（Q1 落地）。能力只在真的遇到"指向目录的链接"时才要，缺能力则**带路径拒绝**，不静默跳过、不做半吊子环路检测 | grep.go、toolcore/access.go、localio/access.go | **实测 os.* 4→1、walker 2→0** | 单文件回滚（`walkGrepFollowing` 换回宿主调用即撤销本步） |
 | S5c ✅ | `one_file_system` 的**文件系统边界**（Q2 更正后的名字；原写"inode 去重"是误述）：平台实现整体搬进 `localio`，核心经可选接口 `toolcore.FilesystemIdentifier` 询问；缺能力即**拒绝该标志**（不是降级照跨），出路写进消息 | toolcore/access.go、localio/identity_unix.go（新）、localio/identity_windows.go（新）、seam_access.go、grep.go；删除 searchcore/filesystem_unix.go、filesystem_windows.go | **实测 os.* 1→0、walker 仍 0**（searchcore 归零） | 把两处调用改回 `localio` 直调即撤销 |
-| S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
+| S5d ✅ | **子路径的拼法随目标**：三处遍历（`walkViaAccess`、`walkGrepFollowing`、`lscore` 的 `descend`）此前各自 `filepath.Join`，在 Windows 客户端上为 POSIX 目标拼出 `\srv\work\a.txt`，远端每个 stat 都 miss——症状是**空结果而非报错**。新增可选接口 `toolcore.TargetPathStyle` + 唯一入口 `toolcore.JoinTargetPath`，缺能力时保持本机惯例（本地行为零变化） | toolcore/access.go（接口+helper+测试）、seam_walk.go、grep.go、lscore/ls.go、remotetools/envd_access.go（声明 `/`） | os.* 与 walker 均不变（三处都是纯拼写决策） | 把三处改回 `filepath.Join` 即撤销 |
+| S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）**且子路径拼法已随目标（S5d，否则 Windows 客户端上远端遍历全 miss）**；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
 
 每步验收门（与既有纪律逐条对齐）：
 1. 既有 `searchcore` 单测**一字不改**通过；
@@ -319,6 +332,23 @@ S5c 之后补的 Linux 实跑（把 §4b 第 17 条那句"未验证"关掉）：
       成 `C:Usersvince`——若照原样跑，Go 会在仓库里生出相对路径垃圾目录。必须显式
       `HOME=/home/wangweisheng GOMODCACHE=... GOCACHE=...` 并用 `bash -lc`；输出落盘再用文件工具读，
       不要穿过 `wsl.exe` 的管道。
+
+S5d 两条（第 21 条是这一步的由来，第 22 条是"自证"事故的第四、第五次复现）：
+
+21. **单元测试全绿不等于核心能跑起来**：执行腿的 9 条契约测试证明每个 `Access` 方法对，但把**真实
+    handler**（`searchcore` 的 grep/glob、`lscore` 的 ls）架在它上面跑时，三条里两条报"成功但零命中"。
+    诊断（`files_scanned:0` 加上 fake 记录的 `statCalls` 里出现 `\srv\work\alpha.txt`）指出根因：三处
+    遍历各自用 `filepath.Join` 拼子路径，在 Windows 客户端上为 POSIX 目标拼出反斜杠形式，远端每个
+    stat 都 miss。**症状是空结果而不是错误**，且只在"Windows 客户端 + 非本机目标"这一组合下出现——
+    本地测试永远碰不到它。修法：可选接口 `toolcore.TargetPathStyle` + 唯一入口
+    `toolcore.JoinTargetPath`；缺能力时保持本机惯例，因此本地行为零变化（`lscore` 的差分对拍仍绿）。
+    反向验证时发现**夹具本身也有盲区**：ls 那条初版只列一层、不覆盖 `lscore` 的下钻，变异时它是绿的；
+    补了 `depth:3` 的嵌套下钻之后，让能力分支短路即可让 grep/glob/ls **三条全红**。
+22. **两条"自证"事故**：其一，这条变异第一次写成"删掉能力分支"，直接导致 `path` import 未使用
+    ——**编译不过的变异不算证据**，改成可编译的常量短路后才成立（与 §4b 第 3 条同源，第四次复现）。
+    其二，我写的"恢复"脚本从错误的文件读"原文"、还把唯一备份删了，却照样打印 `restored` 字样；
+    发现它靠的是当场 `rg` 那行真实代码。教训与前几条一脉相承：**脚本的自述不是证据，改完必须重新读
+    产物**；备份与恢复必须是两条可分别验证的路径，不能共用"读哪个文件"的假设。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

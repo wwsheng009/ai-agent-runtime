@@ -73,7 +73,7 @@ func walkViaAccessEntry(ctx context.Context, access toolcore.Access, path string
 	// listing and a host listing paging to the same page.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, child := range entries {
-		if err := walkViaAccessEntry(ctx, access, filepath.Join(path, child.Name()), child, onEntry); err != nil {
+		if err := walkViaAccessEntry(ctx, access, toolcore.JoinTargetPath(access, path, child.Name()), child, onEntry); err != nil {
 			if err == filepath.SkipDir {
 				break
 			}

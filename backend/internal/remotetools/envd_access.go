@@ -75,6 +75,7 @@ func NewEnvdAccess(client *envdclient.Client) toolcore.Access {
 var (
 	_ toolcore.Access          = (*envdAccess)(nil)
 	_ toolcore.SymlinkResolver = (*envdAccess)(nil)
+	_ toolcore.TargetPathStyle = (*envdAccess)(nil)
 )
 
 // envdError maps an envd failure onto the seam's error vocabulary.
@@ -148,6 +149,13 @@ func (i envdInfo) Mode() fs.FileMode {
 // platform-specific field must decline the feature rather than invent it - which is what
 // sort=accessed/created (design §2 Q4) and one_file_system (design §2 Q2) now do.
 func (i envdInfo) Sys() any { return nil }
+
+// PathSeparator reports '/' and that is a fact about envd, not a preference: the daemon
+// runs on Linux and every path in its API is POSIX. It matters because the cores build
+// child paths themselves - a Windows client walking this target with the host's separator
+// would spell \srv\work\a.txt and every stat would miss, silently returning an empty
+// result rather than an error.
+func (a *envdAccess) PathSeparator() rune { return '/' }
 
 // Lstat describes the path itself. A symlink stays a symlink, which is what lets a
 // listing refuse to descend out of the authorized tree.

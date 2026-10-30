@@ -109,6 +109,13 @@ S5a 在 `walkViaAccess` 里显式 `sort.Slice` 的原因——排序在被测代
 `FILE_TYPE_SYMLINK`、中间组件由服务端自己跟随，于是逐跳 `SymlinkTarget` 就够，不必开进程；
 代价是这条假设至今**只有假目标证明过**。
 
+接着补上了**离线门**：`remotetools/envd_core_integration_test.go` 用真实的三个 handler
+（`searchcore` 的 grep/glob、`lscore` 的 ls）架在适配器上跑，runtime 唯一有意义的实现就是
+`FileAccess()`。它比契约测试高一层——契约测试证明每个方法对，它证明**核心能在适配器上跑**。
+这道门立刻抓出一个只在"Windows 客户端 + 非本机目标"下出现、且**以空结果而非报错**呈现的缺陷：
+三处遍历各自 `filepath.Join` 拼子路径（见方案 S5d）。修掉之后 grep/glob/ls 三条集成测试在
+Windows 上全绿，且把能力分支短路可让它们全红。
+
 关掉它的工具已经写好（只读、不写目标机、任一假设不成立即非零退出）：
 
 ```
