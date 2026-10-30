@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -902,5 +903,112 @@ func TestGrepOneFileSystemDeclinesWithoutTheCapability(t *testing.T) {
 	}
 	if len(grepFileNames(plain)) != 2 {
 		t.Fatalf("the same tree must still be searchable in full, got %v", grepFileNames(plain))
+	}
+}
+
+// --- the engine's output paths follow the target's dialect ---
+
+// posixAccess adds the dialect to the content fake: the same tree, spelled the way a Linux
+// target spells it. It wraps rather than modifies virtualAccess so every existing test keeps
+// the host dialect and the two can be compared side by side.
+type posixAccess struct{ *virtualAccess }
+
+func (posixAccess) PathSeparator() rune { return '/' }
+
+// TestRipgrepMatchPathsFollowTheTargetsDialect drives the engine with an output line that
+// ripgrep prints for a relative root - the single-root case, and the one where the engine
+// itself has to join. The accessor decides how: a POSIX target must get "/srv/work/alpha.txt",
+// and on Windows the host dialect must still get the backslashed form, or a local search would
+// have changed shape.
+func TestRipgrepMatchPathsFollowTheTargetsDialect(t *testing.T) {
+	fake := &virtualAccess{
+		files: map[string][]byte{
+			"/srv/work/pkg/gamma.txt": []byte("needle\n"),
+		},
+		dirs: map[string]bool{"/srv/work": true, "/srv/work/pkg": true},
+	}
+	const printed = "pkg/gamma.txt"
+	run := func(access toolcore.Access) GrepResult {
+		t.Helper()
+		engine := Ripgrep{
+			Path: "rg",
+			// The engine asks ripgrep for --json in the normal modes, so the line to
+			// model is an event, not the human-readable "path:line:text" form. The first
+			// draft of this test fed the readable form, json.Unmarshal rejected it, and the
+			// run came back with zero matches - which looked like a path bug and was a
+			// fixture bug.
+			//
+			// The printed path is nested on purpose: with a bare name like "alpha.txt"
+			// filepath.FromSlash is a no-op, so a mutation that dropped the dialect branch
+			// would survive. A nested path is what makes the spelling decision load-bearing.
+			Stream: func(_ context.Context, _ []string, _ string, onLine func([]byte) bool) error {
+				onLine([]byte(`{"type":"match","data":{"path":{"text":"` + printed + `"},"lines":{"text":"needle\n"},"line_number":1,"absolute_offset":0,"submatches":[{"match":{"text":"needle"},"start":0,"end":6}]}}`))
+				return nil
+			},
+		}
+		result, used, err := engine.Grep(context.Background(), GrepOptions{
+			Pattern: "needle", Path: "/srv/work", Limit: 10, Access: access,
+		})
+		if err != nil || !used {
+			t.Fatalf("engine run: used=%v err=%v", used, err)
+		}
+		return result
+	}
+
+	posix := run(posixAccess{fake})
+	if len(posix.Matches) != 1 || posix.Matches[0].File != "/srv/work/pkg/gamma.txt" {
+		t.Fatalf("a POSIX target's match path = %v, want /srv/work/pkg/gamma.txt", posix.Matches)
+	}
+
+	host := run(fake)
+	if len(host.Matches) != 1 {
+		t.Fatalf("host run produced %v", host.Matches)
+	}
+	if runtime.GOOS == "windows" && host.Matches[0].File == posix.Matches[0].File {
+		t.Fatalf("the dialect decided nothing: both runs spelled the path %q", host.Matches[0].File)
+	}
+	if host.Matches[0].File != filepath.Join("/srv/work", filepath.FromSlash(printed)) {
+		t.Fatalf("the host dialect must keep filepath.Join: got %q", host.Matches[0].File)
+	}
+}
+
+// TestRipgrepGlobCandidatesFollowTheTargetsDialect is the same question for the listing path:
+// the engine normalises ripgrep's line for matching (slashes, no leading "/") and then has to
+// rebuild an absolute path against the base. Rebuilding it with the host's rules is how a
+// Windows client turns "/srv/work/pkg" into "\srv\work\pkg" and loses every file.
+func TestRipgrepGlobCandidatesFollowTheTargetsDialect(t *testing.T) {
+	fake := &virtualAccess{dirs: map[string]bool{"/srv/work": true}}
+	run := func(access toolcore.Access) []string {
+		t.Helper()
+		engine := Ripgrep{
+			Path: "rg",
+			Stream: func(_ context.Context, _ []string, _ string, onLine func([]byte) bool) error {
+				onLine([]byte("pkg/a.go"))
+				onLine([]byte("b.go"))
+				return nil
+			},
+		}
+		result, used, err := engine.Glob(context.Background(), GlobOptions{
+			Base: "/srv/work", Pattern: "**/*.go", Limit: 10, Access: access,
+		})
+		if err != nil || !used {
+			t.Fatalf("engine glob: used=%v err=%v", used, err)
+		}
+		return result.Matches
+	}
+
+	got := run(posixAccess{fake})
+	want := []string{"/srv/work/b.go", "/srv/work/pkg/a.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("POSIX glob candidates = %v, want %v", got, want)
+	}
+
+	host := run(fake)
+	if runtime.GOOS == "windows" {
+		for _, match := range host {
+			if !strings.HasPrefix(match, `\srv\work`) {
+				t.Fatalf("the host dialect must keep filepath.Join on Windows: %v", host)
+			}
+		}
 	}
 }

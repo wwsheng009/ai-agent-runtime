@@ -200,6 +200,19 @@ func IsAbsTargetPath(access Access, p string) bool {
 	return filepath.IsAbs(p)
 }
 
+// NormalizeTargetPath puts a path from a *tool's own output* back into the target's spelling.
+// ripgrep prints paths with slashes in the places the matcher wants them (the glob engine
+// normalises exactly that way before matching), and a consumer that then stores or joins the
+// path has to convert back to the spelling its filesystem uses: filepath.FromSlash for a host
+// target, and nothing at all for a POSIX one - converting there would turn "/srv/work/a.txt"
+// into "\srv\work\a.txt", which the daemon has never heard of.
+func NormalizeTargetPath(access Access, p string) string {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return p
+	}
+	return filepath.FromSlash(p)
+}
+
 // CleanTargetPath is path.Clean or filepath.Clean.
 func CleanTargetPath(access Access, p string) string {
 	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {

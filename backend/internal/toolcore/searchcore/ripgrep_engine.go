@@ -8,11 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 const (
@@ -302,9 +303,9 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 		if !matched {
 			continue
 		}
-		candidate := filepath.FromSlash(rel)
-		if !filepath.IsAbs(candidate) {
-			candidate = filepath.Join(base, candidate)
+		candidate := toolcore.NormalizeTargetPath(access, rel)
+		if !toolcore.IsAbsTargetPath(access, candidate) {
+			candidate = toolcore.JoinTargetPath(access, base, candidate)
 		}
 		if _, ok := seen[candidate]; ok {
 			continue
@@ -474,6 +475,10 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if !e.Available() {
 		return GrepResult{}, false, nil
 	}
+	// One accessor for the whole root: every path this function builds (the base directory
+	// ripgrep's output is made absolute against, and the relative paths it prints) has to be
+	// spelled the way the machine holding the files spells it.
+	access := seamAccess(opts.Access)
 	if opts.Limit < 1 {
 		opts.Limit = DefaultGrepLimit
 	}
@@ -793,7 +798,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if len(roots) == 1 {
 		baseDir = roots[0]
 		if result.SingleFile {
-			baseDir = filepath.Dir(roots[0])
+			baseDir = toolcore.DirTargetPath(access, roots[0])
 		}
 	}
 
@@ -822,7 +827,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			return true
 		}
 		if jsonOutput {
-			event := collectRipgrepJSONEvent(&result, line, baseDir)
+			event := collectRipgrepJSONEvent(&result, line, baseDir, access)
 			if event.Type == "summary" {
 				result.JSONStats.Matches += event.Data.Stats.Matches
 				result.JSONStats.MatchedLines += event.Data.Stats.MatchedLines
@@ -936,9 +941,9 @@ func (e Ripgrep) grepRootFilesWithout(ctx context.Context, opts GrepOptions, mod
 		if strings.TrimSpace(display) == "" {
 			continue
 		}
-		path := filepath.FromSlash(display)
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, path)
+		path := toolcore.NormalizeTargetPath(opts.Access, display)
+		if !toolcore.IsAbsTargetPath(opts.Access, path) {
+			path = toolcore.JoinTargetPath(opts.Access, baseDir, path)
 		}
 		if globMatcher != nil && !globMatcher.matches(path) {
 			continue
@@ -1053,7 +1058,7 @@ func normalizeGrepEngineText(text string) (string, bool) {
 // other engine, then report whether the page is complete. The caller stops the
 // stream on true, so Truncated/has_more stay accurate.
 func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFilter, baseDir, rawPath string, lineNo, column int, text string, result *GrepResult) bool {
-	matchPath := resolveRipgrepPath(rawPath, baseDir)
+	matchPath := resolveRipgrepPath(seamAccess(opts.Access), rawPath, baseDir)
 	if globMatcher != nil && !globMatcher.matches(matchPath) {
 		return false
 	}
@@ -1074,7 +1079,7 @@ func appendRipgrepMatch(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFi
 // text normalization are the same as a match; the entry is marked context so
 // the renderer and the match counters can tell them apart.
 func appendRipgrepContext(opts GrepOptions, mode GrepMode, globMatcher *grepGlobFilter, baseDir, rawPath string, lineNo int, text string, result *GrepResult) bool {
-	matchPath := resolveRipgrepPath(rawPath, baseDir)
+	matchPath := resolveRipgrepPath(seamAccess(opts.Access), rawPath, baseDir)
 	if globMatcher != nil && !globMatcher.matches(matchPath) {
 		return false
 	}
@@ -1111,10 +1116,10 @@ func ripgrepJSONEventText(event rgJSONEvent) (string, bool) {
 // resolveRipgrepPath turns a printed path into an absolute one: ripgrep echoes
 // a relative path when it was given a relative root (the single-root case), and
 // every consumer downstream works in absolute paths.
-func resolveRipgrepPath(rawPath, baseDir string) string {
-	matchPath := filepath.FromSlash(rawPath)
-	if !filepath.IsAbs(matchPath) {
-		matchPath = filepath.Join(baseDir, matchPath)
+func resolveRipgrepPath(access toolcore.Access, rawPath, baseDir string) string {
+	matchPath := toolcore.NormalizeTargetPath(access, rawPath)
+	if !toolcore.IsAbsTargetPath(access, matchPath) {
+		matchPath = toolcore.JoinTargetPath(access, baseDir, matchPath)
 	}
 	return matchPath
 }
@@ -1124,13 +1129,13 @@ func resolveRipgrepPath(rawPath, baseDir string) string {
 // handler can rewrite it into the surface's display path without reparsing the
 // stream. The line itself is kept byte-for-byte: json output is a passthrough,
 // and reformatting it would change what the caller receives.
-func collectRipgrepJSONEvent(result *GrepResult, line []byte, baseDir string) rgJSONEvent {
+func collectRipgrepJSONEvent(result *GrepResult, line []byte, baseDir string, access toolcore.Access) rgJSONEvent {
 	var event rgJSONEvent
 	_ = json.Unmarshal(line, &event)
 	result.JSONEvents = append(result.JSONEvents, string(line))
 	path := ""
 	if event.Data.Path.Text != "" {
-		path = resolveRipgrepPath(event.Data.Path.Text, baseDir)
+		path = resolveRipgrepPath(access, event.Data.Path.Text, baseDir)
 	}
 	result.JSONEventPaths = append(result.JSONEventPaths, path)
 	return event
