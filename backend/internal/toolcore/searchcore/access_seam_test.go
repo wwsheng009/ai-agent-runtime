@@ -11,6 +11,7 @@ package searchcore
 // and the caller has no way to know the two are unrelated.
 
 import (
+	"bytes"
 	"context"
 	"io/fs"
 	"os"
@@ -42,11 +43,12 @@ func (absentErr) NotExist() bool  { return true }
 
 type fakeInfo struct {
 	name  string
+	size  int64
 	isDir bool
 }
 
 func (i fakeInfo) Name() string { return i.name }
-func (i fakeInfo) Size() int64  { return 0 }
+func (i fakeInfo) Size() int64  { return i.size }
 func (i fakeInfo) Mode() fs.FileMode {
 	if i.isDir {
 		return fs.ModeDir | 0o755
@@ -198,5 +200,175 @@ func TestGrepAsksTheAccessorAboutTheAnchor(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the handler never asked the accessor about the search root %q, asked: %v", anchor, access.queried)
+	}
+}
+
+// --- S2a: the candidate file's bytes come from the accessor ---
+
+// virtualAccess serves file contents the test chooses, while the host filesystem
+// holds something deliberately different at the same path. That asymmetry is the
+// point: if any part of the search opened the disk directly, the answer would come
+// from bytes the accessor never offered, and the assertion fails loudly.
+type virtualAccess struct {
+	files     map[string][]byte
+	openCalls int
+	opened    []string
+}
+
+type virtualHandle struct {
+	*bytes.Reader
+	info   fs.FileInfo
+	closed bool
+}
+
+func (h *virtualHandle) Stat() (fs.FileInfo, error) { return h.info, nil }
+
+func (h *virtualHandle) Close() error {
+	h.closed = true
+	return nil
+}
+
+func (a *virtualAccess) Stat(_ context.Context, path string) (fs.FileInfo, error) {
+	body, ok := a.files[path]
+	if !ok {
+		return nil, absentErr{path: path}
+	}
+	// The size the accessor reports is the size of the bytes it would serve, which
+	// is what the walker's MaxFileBytes gate must compare against.
+	return fakeInfo{name: filepath.Base(path), size: int64(len(body))}, nil
+}
+
+func (a *virtualAccess) Lstat(ctx context.Context, path string) (fs.FileInfo, error) {
+	return a.Stat(ctx, path)
+}
+
+func (a *virtualAccess) Open(_ context.Context, path string) (toolcore.FileHandle, error) {
+	body, ok := a.files[path]
+	if !ok {
+		return nil, absentErr{path: path}
+	}
+	a.openCalls++
+	a.opened = append(a.opened, path)
+	return &virtualHandle{Reader: bytes.NewReader(body), info: fakeInfo{name: filepath.Base(path), size: int64(len(body))}}, nil
+}
+
+func (a *virtualAccess) ReadDir(context.Context, string) ([]fs.DirEntry, error) {
+	return nil, absentErr{path: "directory walking is S5, not this step"}
+}
+
+// TestGrepSearchesTheAccessorsBytes: the disk holds text with no match, the accessor
+// holds the match. A successful search therefore proves the content came through the
+// seam - which is also what the binary probe below depends on.
+func TestGrepSearchesTheAccessorsBytes(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "remote.txt")
+	if err := os.WriteFile(candidate, []byte("nothing here at all\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	access := &virtualAccess{files: map[string][]byte{
+		candidate: []byte("hit from the other machine\n"),
+	}}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "hit", Path: root, Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep through the accessor: %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("matches = %d, want 1: the walker read the disk instead of the accessor (%v)",
+			len(result.Matches), result.Matches)
+	}
+	if !strings.Contains(result.Matches[0].Text, "other machine") {
+		t.Fatalf("match text came from the wrong source: %q", result.Matches[0].Text)
+	}
+	if access.openCalls == 0 {
+		t.Fatal("the accessor was never asked for the file it just supplied")
+	}
+}
+
+// TestGrepBinaryProbeSharesThatSameSource: a file the disk calls plain text but the
+// accessor says carries a NUL must be skipped by the default rules. Classification and
+// content arriving from two different machines is exactly the drift this step removes.
+func TestGrepBinaryProbeSharesThatSameSource(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "supposedly-text.txt")
+	if err := os.WriteFile(candidate, []byte("needle plain text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	access := &virtualAccess{files: map[string][]byte{
+		candidate: []byte("needle\x00binary\n"),
+	}}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if len(result.Matches) != 0 {
+		t.Fatalf("a NUL-bearing file must be skipped by the default rules, got %v", result.Matches)
+	}
+	// -uuu searches binary files: the same bytes must then be searchable, which also
+	// proves the probe and the read share one source.
+	full, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, Unrestricted: 3, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep -uuu: %v", err)
+	}
+	if len(full.Matches) != 1 {
+		t.Fatalf("-uuu matches = %d, want 1 (the accessor is the only source for both probes)", len(full.Matches))
+	}
+}
+
+// TestGrepSizeGateUsesTheAccessorsSize: the host file is 19 bytes, the accessor serves
+// 26. With MaxFileBytes=20 the search must skip it. A gate reading the local stat would
+// search it instead, which is the quiet kind of wrong a half-moved seam produces.
+func TestGrepSizeGateUsesTheAccessorsSize(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "sized.txt")
+	if err := os.WriteFile(candidate, []byte("needle small on disk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	access := &virtualAccess{files: map[string][]byte{
+		candidate: []byte("needle much larger than the gate\n"),
+	}}
+
+	result, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, MaxFileBytes: 20, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	if len(result.Matches) != 0 {
+		t.Fatalf("the size gate used the host file, not the accessor's bytes: %v", result.Matches)
+	}
+
+	// Same file, a gate that fits the accessor's size: the bytes must be searchable.
+	roomy, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: root, Limit: 10, MaxFileBytes: 40, Access: access,
+	})
+	if err != nil {
+		t.Fatalf("grep with room: %v", err)
+	}
+	if len(roomy.Matches) != 1 || !strings.Contains(roomy.Matches[0].Text, "larger than the gate") {
+		t.Fatalf("the accessor's bytes were not searched: %v", roomy.Matches)
+	}
+}
+
+// TestGrepWithoutAnAccessorKeepsReadingTheDisk is the no-behaviour-change half, and it
+// is why the option defaults to nil instead of forcing every caller to change at once.
+func TestGrepWithoutAnAccessorKeepsReadingTheDisk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("needle on disk\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Grep(context.Background(), GrepOptions{Pattern: "needle", Path: root, Limit: 10})
+	if err != nil {
+		t.Fatalf("local grep: %v", err)
+	}
+	if len(result.Matches) != 1 || !strings.Contains(result.Matches[0].Text, "on disk") {
+		t.Fatalf("the local default regressed: %v", result.Matches)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 // grepBinaryFixture builds the four cases that decide the binary contract:
@@ -142,13 +144,16 @@ func TestGrepBinaryProbeHead(t *testing.T) {
 	if err := os.WriteFile(text, []byte("no nul here"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !grepFileIsBinary(binary) {
+	// The seam argument is added mechanically: this test asserts the probe's
+	// classification rules, and localio.Access is exactly the filesystem those rules
+	// were written against. No assertion below changed.
+	if !grepFileIsBinary(context.Background(), localio.Access, binary) {
 		t.Fatal("a NUL in the head must be classified as binary")
 	}
-	if grepFileIsBinary(text) {
+	if grepFileIsBinary(context.Background(), localio.Access, text) {
 		t.Fatal("plain text must not be classified as binary")
 	}
-	if grepFileIsBinary(filepath.Join(root, "missing")) {
+	if grepFileIsBinary(context.Background(), localio.Access, filepath.Join(root, "missing")) {
 		t.Fatal("an unreadable probe must not be reported as binary")
 	}
 }

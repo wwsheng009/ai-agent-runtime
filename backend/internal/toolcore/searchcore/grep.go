@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 const (
@@ -229,6 +232,13 @@ type GrepOptions struct {
 	// handler reports that plainly rather than returning some other text under a
 	// key that promises JSON.
 	JSONOutput bool
+
+	// Access is the I/O seam the walker reads candidate files through. nil means the
+	// local filesystem, so an unconverted caller keeps the behaviour it always had.
+	// It lives on the options rather than in a new signature because "which machine
+	// holds these files" is a property of one search request, and because the core
+	// must classify a file (binary or not) from the same bytes it will search.
+	Access toolcore.Access
 }
 
 // RequiresRipgrep reports whether this request needs the ripgrep engine rather
@@ -337,6 +347,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if err != nil {
 		return GrepResult{}, err
 	}
+	// Resolved once: the probe below, the content read below and every other file
+	// question in this search must go to the same machine, and the answer must not
+	// be able to change between one file and the next inside a single call.
+	access := opts.Access
+	if access == nil {
+		access = localio.Access
+	}
+	opts.Access = access
 	patterns, err := GrepPatternsWithFiles(opts)
 	if err != nil {
 		return GrepResult{}, err
@@ -451,7 +469,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		// The explicit root may be a symlink that the surface adapter already
 		// resolved and verified. Links discovered during traversal are rejected
 		// by the WalkDir callback below and never reach this visit.
-		info, statErr := os.Stat(path)
+		//
+		// This Stat goes through the same accessor as the read below on purpose: the
+		// regular-file test and MaxFileBytes/MaxFileSizeBytes are decisions about the
+		// bytes we are about to search, so answering them from another machine would
+		// gate remote content by local sizes - a skip that silently differs per
+		// deployment. Root-shape Stats stay with the walker (S5), because enumerating
+		// one machine while stat-ing another is the same mistake one level up.
+		info, statErr := access.Stat(ctx, path)
 		if statErr != nil || !info.Mode().IsRegular() {
 			return nil
 		}
@@ -482,14 +507,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			}
 			return nil
 		}
-		if opts.Unrestricted < 3 && grepFileIsBinary(path) {
+		if opts.Unrestricted < 3 && grepFileIsBinary(ctx, access, path) {
 			// ripgrep's default: a file with a NUL byte is skipped outright.
 			// It is neither a match nor a proven no-match file, so it is
 			// reported to neither mode. -uuu (Unrestricted 3) searches it.
 			return nil
 		}
 		result.FilesScanned++
-		file, openErr := os.Open(path)
+		file, openErr := access.Open(ctx, path)
 		if openErr != nil {
 			return nil
 		}

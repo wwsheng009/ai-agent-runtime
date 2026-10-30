@@ -2,8 +2,10 @@ package searchcore
 
 import (
 	"bytes"
+	"context"
 	"io"
-	"os"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // GrepNulDisplay replaces a NUL byte in model-visible text. A raw NUL inside
@@ -23,8 +25,21 @@ const grepBinaryProbeBytes = 8 * 1024
 // grepBinaryProbeBytes. NUL is the marker every tool in this space uses (rg,
 // git, our own write-side gate), and it is the only one that matters here:
 // invalid UTF-8 without a NUL stays searchable, exactly like ripgrep.
-func grepFileIsBinary(path string) bool {
-	file, err := os.Open(path)
+//
+// The probe reads through the I/O seam rather than opening the path itself: this is
+// the same file the search is about to read, and answering "is this binary?" from a
+// different machine than the bytes came from would classify a file by content nobody
+// searched. The failure modes stay unchanged - an unreadable probe is not a silent
+// "binary", because the real read reports what is actually wrong.
+func grepFileIsBinary(ctx context.Context, access toolcore.Access, path string) bool {
+	if access == nil {
+		// No accessor means no evidence, and the rule of this function is that only
+		// an observed NUL makes a file binary. Guessing "binary" here would hide a
+		// searchable file; guessing "not binary" only lets the real read report the
+		// actual problem.
+		return false
+	}
+	file, err := access.Open(ctx, path)
 	if err != nil {
 		return false
 	}

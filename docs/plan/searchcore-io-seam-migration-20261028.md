@@ -80,7 +80,9 @@ Access toolcore.Access
 | 步 | 封住的关注点 | 触及 | 棘轮预期（**每步实施前重新实测，不预先填数**） | 回滚 |
 |---|---|---|---|---|
 | S1 ✅ | handler 层的搜索根存在性 + anchor 判定（**实测 os.* 24→21**；4 个调用点里有 1 个是 `os.IsNotExist`，不计入守卫） | handler.go | 21（本表原先写"24→20"是把 IsNotExist 也数了进去，实测纠正） | 删 3 行注入 |
-| S2 | 文件内容读取的三个独立消费者：二进制嗅探、上下文重读、模式文件读取 | grep_binary.go、grep_context.go、grep.go | os.* 20→17 | 同上 |
+| **S2a ✅** | **候选文件的字节与关于该字节的判断**：内容读取、NUL 二进制嗅探、regular/尺寸门 | grep.go、grep_binary.go | **实测 21→18**（三处） | 单次 revert |
+| S2b | 模式文件读取（`readGrepPatternFile`，需先决定 `GrepPatternsWithFiles` 是否加 ctx） | grep.go | 实测填写 | 同上 |
+| S2c | 上下文重读（`expandGrepContextFile`，`ExpandGrepContext` 是导出函数，需扩参数或改由调用方供句柄） | grep_context.go | 实测填写 | 同上 |
 | S3 | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go | os.* 17→15 | 同上 |
 | S4 | ignore 文件读取（含 Q3 决定 + 守卫可见性补齐） | grep_ignore.go | os.* 15→11；**新增一项守卫**覆盖 HOME 类现场 | 同上 |
 | S5 | 遍历器本体：`grepWalkRoot`/`walkGrepFollowing`/`walkGlobMatches` + Q1/Q2 | grep.go、glob.go | os.* 11→? 、walker 4→? （Q1/Q2 未定则为剩余量并写明原因） | 单文件回滚 |

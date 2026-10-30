@@ -42,12 +42,15 @@ var coreBaselines = map[string]int{
 	// read as "this core describes whatever machine the accessor hands it".
 	"viewcore": 0,
 	"lscore":   0,
-	// searchcore: S1 of docs/plan/searchcore-io-seam-migration-20261028.md moved the
-	// three handler-level host reads (the glob search root, and the anchor decision
-	// for ignore_file/pattern_file) behind toolcore.Access. 24→21 is this guard's own
-	// measurement, not arithmetic: what remains is the file readers, the mtime sorts,
-	// the ignore-file loading and the two walkers, each sealed in its own later step.
-	"searchcore": 21,
+	// searchcore: S1 moved the handler-level host reads (glob's search root, the
+	// ignore_file/pattern_file anchor) and S2a moved the per-candidate file concern -
+	// the content read, the binary probe and the size/regular gate for the same file -
+	// behind toolcore.Access. 24→18 is this guard's own measurement after each step,
+	// not arithmetic. What remains is the pattern-file read, the context re-read, the
+	// mtime sorts, the ignore loading, the two walkers and the platform identity file;
+	// root-shape Stats move with the walkers on purpose, because enumerating one
+	// machine while stat-ing another is the same mistake one level up.
+	"searchcore": 18,
 	"mutatecore": 27,
 }
 
