@@ -274,6 +274,31 @@ S5c 四条（第 16 条是对我自己的方案文档动手术，第 17 条最�
     它输出的 diff 而不是只看结论行；随后编译期也会报（未定义变量）。这正是 §4b 第 2/3 条的老病
     第三次发作：**每次编辑后看 diff 全量，改完立刻编译。**
 
+S5c 之后补的 Linux 实跑（把 §4b 第 17 条那句"未验证"关掉）：
+
+20. **交付目标是 Linux，就不能只在开发机上验证**。用本机 WSL Ubuntu（`go1.26.0`，与 `go.mod`
+    的 `go 1.26.0` 正好匹配；`/` 有 927 GB，不动已经紧张的 E:）实跑，结果：
+    - `localio.TestFilesystemIdentitySeparatesDevices` 在 Linux 上是 **PASS 而不是 SKIP**，
+      即 `/dev/shm` 与临时目录**确实取到不同 dev**——搬进 localio 的 unix 分支（含
+      `syscall.Stat_t` / `unix.Stat_t` 双类型兼容那段历史坑）在真 Linux 上工作正常。这是 S5c
+      当时唯一"编译过但没跑过"的部分，现已闭合。
+    - `searchcore` 的 seam 与 one_file_system 相关用例在 Linux 上**执行 18 条、整包 ok**，其中
+      3 条 `//go:build !windows` 的注入用例是 Windows 上从未编译过的；两条遍历器对拍
+      （`walkViaAccess` vs `filepath.WalkDir`、`walkGrepFollowing` vs 冻结旧实现）在 **ext4 +
+      真符号链接**下同样逐条目一致。`driftguard`（含归零后的两个基线）在 Linux 也 ok。
+    - **新发现一条与我无关的 Linux 恒红**：`TestGrepWalkerBudgetBoundsTheSearch`。归因用的是
+      对照实验而非推理：把 seam 整条线之前的 `39658009^`（=`89f2aeaf`）clone 到 WSL 的 ext4 上
+      跑同一条用例，`-count=5` 同样 FAIL、信息一字不差。已写进
+      `upstream-broken-commits-20261028.md` 案例 3（作者 `41360369`），并说明它会在真机上挡住
+      "共享核测试全绿"，我没有改他人测试去凑绿。
+    - **没有做到的一半**：`remotetools` 整包在 Linux 上没跑完——这台机器的 `wsl.exe` 在长输出/
+      长运行时会崩（`0xC00000FD` 栈溢出，`--exec` 脱管也不幸存），我按"不谎报"处理。已确认
+      Linux 侧存在 `/usr/bin/rg`（引擎路径可跑），Windows 侧 remotetools 91.4s 全绿。
+    - 顺带一条操作教训：`bash -c`（非登录 shell）里没有 `go`，且此机的 `HOME` 被 Windows 环境污染
+      成 `C:Usersvince`——若照原样跑，Go 会在仓库里生出相对路径垃圾目录。必须显式
+      `HOME=/home/wangweisheng GOMODCACHE=... GOCACHE=...` 并用 `bash -lc`；输出落盘再用文件工具读，
+      不要穿过 `wsl.exe` 的管道。
+
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 
 `grep_sort.go` 对这两个 key 读的是 `FileInfo.Sys()` 里的平台 `Stat_t`（`fileAccessTime` /
