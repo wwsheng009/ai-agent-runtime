@@ -53,6 +53,20 @@ func TestRunChatLoopNoInteractiveInitialPromptExitsAfterOneSend(t *testing.T) {
 	}
 }
 
+func TestRunChatLoopExitsWhenExternalExitRequested(t *testing.T) {
+	// 网关「关窗口」在节点进程内部置位退出请求；聊天循环必须在消费下一条
+	// 输入（这里是启动消息）之前观察到它，否则关闭动作会被当成一次正常发送。
+	executor := &fakeChatExecutor{output: "should not run"}
+	session := newInitialPromptLoopTestSession(executor)
+	session.exitRequested.Store(true)
+
+	runChatLoop(session, true, "inspect project")
+
+	if len(executor.prompts) != 0 {
+		t.Fatalf("exit request must be observed before submitting input, got %#v", executor.prompts)
+	}
+}
+
 func newInitialPromptLoopTestSession(executor *fakeChatExecutor) *ChatSession {
 	return &ChatSession{
 		Provider:     config.Provider{Protocol: "codex"},

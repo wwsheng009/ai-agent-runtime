@@ -139,19 +139,21 @@ func openGatewayNewSessionWindow(session *ChatSession) (string, error) {
 
 // closeGatewaySessionWindow 关闭某个会话在本机的窗口进程。
 //
-// 复用 mesh 的停止编排而不是自己 kill：graceful 模式投的是 `/exit`，因此保存会话、
-// 注销节点档案、释放租约都走目标自己的退出路径（与用户在 TUI 里敲 /exit 完全等价）。
-// 「本进程关自己」被 mesh 一律拒绝（StopCodeSelfRefused），这里把它翻译成操作者能
-// 照做的提示，而不是一个含糊的失败。
+// 网关把窗口动作排给**目标会话所在节点**，动作最终由该节点的进程自己执行；
+// 因此正常路径一定是「本进程关自己」。mesh 的停止编排按设计拒绝自停
+// （StopCodeSelfRefused），不能再把动作转投给 mesh：这里直接请求本进程的聊天
+// 循环优雅退出，保存会话、注销节点档案、释放租约都走与 TUI `/exit` 相同的
+// 延迟清理路径。
 func closeGatewaySessionWindow(session *ChatSession, sessionID string) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return "", fmt.Errorf("窗口动作缺少会话 ID")
 	}
-	// 「别自杀」的判定排在 mesh 可用性之前：这条原因恒定成立，而 --mesh=false 的
-	// 进程根本编排不了停止——先报更具体、更可行动的那一条。
+	// 当前会话就是目标：请求本进程退出。这个判定排在 mesh 可用性之前——普通
+	// --web 会话即使没有 mesh，也应该能关闭自己的窗口。
 	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, sessionID) {
-		return "", fmt.Errorf("目标就是本窗口，拒绝自杀；请在该窗口的 TUI 里用 /exit 退出")
+		session.RequestExit()
+		return fmt.Sprintf("已请求关闭本会话窗口 %s（正在优雅退出）", sessionID), nil
 	}
 	host := mesh.Current()
 	if host == nil {

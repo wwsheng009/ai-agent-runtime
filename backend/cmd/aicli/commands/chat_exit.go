@@ -16,6 +16,26 @@ type chatInterruptExitState struct {
 	lastSignalAt time.Time
 }
 
+// RequestExit asks the chat loop to leave gracefully from outside the input
+// path. Gateway window actions run in the node process itself, so a "close
+// window" cannot be expressed as a mesh stop: mesh correctly refuses to let a
+// node kill itself. The loop observes exitRequested at its turn boundaries and
+// then runs the same deferred cleanup as /exit.
+//
+// A busy turn must be interrupted first; otherwise the loop cannot reach the
+// next boundary until the turn finishes. An idle composer read is woken so the
+// loop can observe the flag immediately instead of waiting for the next key.
+func (s *ChatSession) RequestExit() {
+	if s == nil {
+		return
+	}
+	s.exitRequested.Store(true)
+	if chatInterruptSignalBusy(s) {
+		s.InterruptPreservePendingInput()
+	}
+	s.wakeComposerRead()
+}
+
 func (s *chatInterruptExitState) handleInterruptSignal(session *ChatSession, shouldExit *atomic.Bool, now time.Time) bool {
 	if shouldExit != nil && shouldExit.Load() {
 		if session != nil {

@@ -1,7 +1,11 @@
 package commands
 
 import (
+	"bufio"
+	"bytes"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -25,12 +29,62 @@ func TestCloseGatewaySessionWindowRequiresMeshHost(t *testing.T) {
 	require.ErrorContains(t, err, "mesh 未启用")
 }
 
-func TestCloseGatewaySessionWindowRefusesSelfBeforeMeshCheck(t *testing.T) {
-	// 目标就是本窗口时，先给出「别自杀」这条更具体的原因：它在任何环境下都成立，
-	// 而 mesh 可用性只是这台机器此刻的编排能力。
+func TestCloseGatewaySessionWindowRequestsLocalExitForCurrentSession(t *testing.T) {
+	// 窗口动作由目标节点自己执行：目标就是本窗口时不能再转投 mesh（mesh 会
+	// 拒绝自停），必须直接请求聊天循环优雅退出。这个判定也必须排在 mesh
+	// 可用性之前，否则 --web 无网格的会话永远关不掉。
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "session_self"}}
-	_, err := closeGatewaySessionWindow(session, "SESSION_SELF")
-	require.ErrorContains(t, err, "拒绝自杀")
+	message, err := closeGatewaySessionWindow(session, "SESSION_SELF")
+	require.NoError(t, err)
+	require.Contains(t, message, "已请求关闭本会话窗口")
+	require.True(t, session.exitRequested.Load(), "关窗口必须置位聊天循环退出请求")
+}
+
+func TestCloseGatewaySessionWindowExitsRunningChatLoop(t *testing.T) {
+	// 这条覆盖真实断点：动作到达节点时，聊天循环正阻塞在输入读取上。关闭
+	// 必须唤醒读取并让 runChatLoop 返回，而不是只置一个没人检查的标志。
+	t.Setenv("AICLI_CHAT_INPUT_LINE_MODE", "1")
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	session := newInitialPromptLoopTestSession(&fakeChatExecutor{output: "should not run"})
+	session.RuntimeSession = &runtimechat.Session{ID: "session_self"}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(reader))
+	var output bytes.Buffer
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
+	session.Interaction.SetWriter(&output)
+	defer session.Interaction.Shutdown()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runChatLoop(session, false, "")
+	}()
+
+	// 等到主循环真正注册了可唤醒的读取上下文，再投递关闭动作。
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		session.composerWakeMu.Lock()
+		reading := session.composerWakeCancel != nil
+		session.composerWakeMu.Unlock()
+		if reading {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("chat loop never entered the composer read")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	message, err := closeGatewaySessionWindow(session, "session_self")
+	require.NoError(t, err)
+	require.Contains(t, message, "已请求关闭本会话窗口")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("close window did not terminate the running chat loop")
+	}
 }
 
 func TestGatewayWindowRegistrationAdvertisesCapabilityOnlyWhenTerminalExists(t *testing.T) {

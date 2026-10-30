@@ -222,6 +222,7 @@ type ChatSession struct {
 	composerWakeMu            sync.Mutex                           // 保护 composer 读取唤醒取消
 	composerWakeCancel        context.CancelFunc                   // 当前 composer 读取的唤醒取消
 	interrupted               atomic.Bool                          // 是否被中断（原子操作，避免竞态）
+	exitRequested             atomic.Bool                          // 外部窗口动作请求优雅退出（网关「关窗口」）
 	escapeStoppingNoticeShown atomic.Bool                          // 重复 Esc 的“停止处理中”提示本中断周期内是否已展示（P2-10）
 	interruptCleanupMu        sync.Mutex                           // 保护当前中断清理完成信号
 	interruptCleanupDone      chan struct{}                        // 阻止下一轮与上一轮异步清理交错
@@ -1993,7 +1994,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 	// 聊天循环
 	for {
 		// 检查二次终止信号
-		if shouldExit.Load() {
+		if shouldExit.Load() || session.exitRequested.Load() {
 			printDirectInteractiveOutput(session, "\n")
 			break
 		}
@@ -2007,7 +2008,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			session.cancelFunc()
 		}
 		session.cancelCtx, session.cancelFunc, session.cancelCause = newChatCancelContext()
-		if shouldExit.Load() {
+		if shouldExit.Load() || session.exitRequested.Load() {
 			printDirectInteractiveOutput(session, "\n")
 			break
 		}
@@ -2091,6 +2092,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			finishChatInteractiveReadPromptState(session, err)
+			if session.exitRequested.Load() {
+				writeEphemeralDirectInteractiveOutput(session, "正在退出...\n")
+				flushEphemeralDirectInteractiveOutput(session)
+				break
+			}
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputTranscriptRequested) {
 					openChatTranscriptPager(session)
