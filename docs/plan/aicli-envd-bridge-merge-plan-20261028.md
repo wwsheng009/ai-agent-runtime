@@ -267,7 +267,15 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 - 实施结论：M0–M4 已完成（本文件保留为执行记录）；遗留项仅 `StreamInput` client-streaming 未暴露（需 HTTP/2）与既有 TOCTOU 限制，见实施报告 §8.3。
 
-> 说明：§8.1–§8.7 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
+### 8.10 收编尾巴：release workflow 的桥悬空门禁已清除（2026-10-31）
+
+M4 删除了 `cmd/aicli-envd-bridge` 并同步了 `Makefile`，但漏改 `.github/workflows/release-aicli.yml`：收编后的 HEAD 上仍留有 5 处悬空引用——门禁步骤 `go build` / `go test ./cmd/aicli-envd-bridge`（L236/240/241）、打包构建（L382）与分发拷贝（L409）——release 流程会在门禁步骤直接失败（`directory not found`，本机同命令实测复现）。
+
+处置：门禁 **1:1 改挂收编后的载体** `aicli-remote-tools`——`go build -trimpath -o /tmp/aicli-remote-tools-check ./cmd/aicli-remote-tools` + `go test ./internal/envdclient/... ./internal/remotetargets/... ./cmd/aicli-remote-tools/... -count=1`；删除桥的构建与分发两行（归档按 `dist/release/*` glob，无需其他改动）。保留一行历史注记，说明门禁为何叫 remote-tools。
+
+验证（本笔提交内实跑）：构建退出码 0；三包测试全 `ok`（envdclient 2.2s / remotetargets 2.0s / cmd/aicli-remote-tools 7.9s）；工作流 YAML 解析通过。
+
+> 说明：§8.1–§8.10 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
 
 ---
 
