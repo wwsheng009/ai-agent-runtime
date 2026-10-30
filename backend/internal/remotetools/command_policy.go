@@ -2,6 +2,7 @@ package remotetools
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,6 +25,10 @@ type CommandPolicy struct {
 	shell           ShellConfig
 	timeout         time.Duration
 	inheritEnv      bool
+	// posixEscapes records whether the target shell treats a backslash as an
+	// escape character. It decides if "\;" is a literal semicolon (safe) or a
+	// literal backslash followed by a real command separator (a bypass).
+	posixEscapes bool
 }
 
 // NewCommandPolicy builds a command policy from the same ShellConfig used by
@@ -57,7 +62,33 @@ func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy,
 		shell:           shell,
 		timeout:         timeout,
 		inheritEnv:      !shell.DisableEnvInheritance && shell.EnvAllowlist == nil,
+		posixEscapes:    shellHonorsBackslashEscapes(shell.Program),
 	}, nil
+}
+
+// shellHonorsBackslashEscapes reports whether the resolved shell treats a
+// backslash as an escape character.
+//
+// The distinction is security relevant, not cosmetic: in bash/zsh/sh "a\;b" is
+// a literal semicolon and runs one command, while in pwsh/powershell/cmd the
+// backslash is an ordinary character and ";" still separates commands. Treating
+// the escaped form as harmless everywhere would let a PowerShell target bypass
+// the metacharacter gate, so the safe default is "no escape handling".
+func shellHonorsBackslashEscapes(program string) bool {
+	base := strings.ToLower(strings.TrimSpace(program))
+	base = strings.TrimSuffix(filepath.Base(strings.ReplaceAll(base, `\`, "/")), ".exe")
+	switch base {
+	case "bash", "sh", "zsh", "dash", "ksh", "mksh", "ash":
+		return true
+	case "pwsh", "powershell", "cmd":
+		return false
+	case "":
+		// Auto-detect: the built-in resolution prefers a POSIX shell off Windows
+		// and pwsh/powershell/cmd on Windows.
+		return runtime.GOOS != "windows"
+	default:
+		return false
+	}
 }
 
 // CheckCommand applies the command policy to one command string and returns the
@@ -148,11 +179,11 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 	}
 
 	if p.shell.DenyShellMetachars {
-		if reason := detectShellMetachars(trimmed); reason != "" {
+		if reasons := detectShellMetachars(trimmed, p.posixEscapes); len(reasons) > 0 {
 			return "policy:metachars", newToolError(
 				CodeCommandDenied,
-				"run a single command without pipes, redirection or substitution, or explicitly set shell.denyShellMetachars: false (not recommended)",
-				"command contains %s", reason,
+				"this target only runs one command per call: split the work into separate shell calls, or use the dedicated grep/glob/file tools instead of pipes and redirection",
+				"command contains %s", strings.Join(reasons, ", "),
 			)
 		}
 	}
@@ -281,26 +312,47 @@ var metacharCandidates = []struct {
 	{"\n", "a newline"},
 }
 
-// detectShellMetachars reports the first metacharacter construct found in the
-// unquoted portion of the command.
-func detectShellMetachars(command string) string {
-	unquoted := stripQuotedSpans(command)
+// detectShellMetachars reports every metacharacter construct found in the
+// unquoted and unescaped portion of the command.
+//
+// Reporting all findings in one pass lets a caller repair the command once,
+// instead of rediscovering the same policy one rejection at a time. Each match
+// is masked before the next pattern is tested so "||" is not also reported as a
+// bare pipe.
+func detectShellMetachars(command string, posixEscapes bool) []string {
+	remaining := stripQuotedSpans(command, posixEscapes)
+	var reasons []string
 	for _, candidate := range metacharCandidates {
-		if strings.Contains(unquoted, candidate.pattern) {
-			return candidate.reason
+		if !strings.Contains(remaining, candidate.pattern) {
+			continue
 		}
+		reasons = append(reasons, candidate.reason)
+		remaining = strings.ReplaceAll(remaining, candidate.pattern, strings.Repeat(" ", len(candidate.pattern)))
 	}
-	return ""
+	return reasons
 }
 
 // stripQuotedSpans removes single- and double-quoted spans, preserving length
 // with spaces so offsets stay meaningful for future diagnostics.
-func stripQuotedSpans(command string) string {
+//
+// Backslash escapes are masked only for shells where a backslash actually
+// escapes (see shellHonorsBackslashEscapes): in bash/zsh/sh "a\;b" is a literal
+// semicolon, so flagging it would be a false positive. In PowerShell and cmd a
+// backslash is an ordinary character and "a\;b" still separates commands, so
+// masking it there would open a bypass.
+func stripQuotedSpans(command string, posixEscapes bool) string {
 	var builder strings.Builder
 	builder.Grow(len(command))
 	var quote rune
+	escaped := false
 	for _, r := range command {
 		switch {
+		case escaped:
+			escaped = false
+			builder.WriteRune(' ')
+		case posixEscapes && r == '\\' && quote != '\'':
+			escaped = true
+			builder.WriteRune(' ')
 		case quote != 0:
 			if r == quote {
 				quote = 0

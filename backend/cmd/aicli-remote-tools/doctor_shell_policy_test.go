@@ -18,8 +18,8 @@ func TestDoctorShellPolicyReportsEffectiveGatesAndGuidance(t *testing.T) {
 	if !report.ShellVisible {
 		t.Fatalf("default profile should expose shell: %+v", report)
 	}
-	if !report.DenyShellMetachars {
-		t.Fatal("default shell policy must deny metacharacters")
+	if report.DenyShellMetachars {
+		t.Fatal("default shell policy must allow pipes and redirection; the restriction is opt-in")
 	}
 	if report.CommandTimeout != "2m0s" {
 		t.Fatalf("command timeout = %q, want 2m0s", report.CommandTimeout)

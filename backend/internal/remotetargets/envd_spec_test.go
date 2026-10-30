@@ -487,10 +487,10 @@ func TestExpandOneEnvDWarnsShellProgramIgnored(t *testing.T) {
 	}
 }
 
-// TestLoadFileShellPolicyDefaultsDenyMetachars proves a YAML shell block that
-// omits denyShellMetachars still gets the safe default before it reaches the
-// bridge, where a false value would allow `allowed; anything`.
-func TestLoadFileShellPolicyDefaultsDenyMetachars(t *testing.T) {
+// TestLoadFileShellPolicyDefaultsAllowMetachars proves a YAML shell block that
+// omits denyShellMetachars passes the composition-allowing default through to
+// the bridge, so `allowed | other` works without extra configuration.
+func TestLoadFileShellPolicyDefaultsAllowMetachars(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "remote-targets.yaml")
 	body := `remoteTargets:
   envdtest:
@@ -517,8 +517,10 @@ func TestLoadFileShellPolicyDefaultsDenyMetachars(t *testing.T) {
 	if !strings.Contains(joined, "--allow-command uptime") {
 		t.Errorf("args = %q, want the allowed command", joined)
 	}
-	if !strings.Contains(joined, "--deny-shell-metachars=true") {
-		t.Errorf("args = %q, want the safe metachar default", joined)
+	// Composition is allowed unless the operator opts in, so the generated args
+	// must not turn the restriction on behind their back.
+	if !strings.Contains(joined, "--deny-shell-metachars=false") {
+		t.Errorf("args = %q, want pipes allowed by default", joined)
 	}
 }
 

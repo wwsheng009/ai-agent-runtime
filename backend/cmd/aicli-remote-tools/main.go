@@ -273,7 +273,7 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.Var(&flags.allowCommandPats, "allow-command-pattern", "repeatable whole-command wildcard allowlist (* and ?)")
 	fs.Var(&flags.denyCommandPats, "deny-command-pattern", "repeatable whole-command wildcard denylist")
 	fs.BoolVar(&flags.allowAll, "allow-all", false, "explicitly allow every single command (same as --allow-command \"*\"); deny, metachar and destructive gates still apply")
-	fs.BoolVar(&flags.denyMetachars, "deny-shell-metachars", true, "refuse commands containing shell metacharacters so an allowed binary cannot be chained")
+	fs.BoolVar(&flags.denyMetachars, "deny-shell-metachars", false, "opt-in restriction: refuse commands containing shell metacharacters so an allowed binary cannot be chained (default allows pipes and redirection)")
 
 	fs.BoolVar(&flags.stdio, "stdio", false, "serve MCP over stdin/stdout")
 	fs.BoolVar(&flags.http, "http", false, "serve MCP over Streamable HTTP")
@@ -605,12 +605,16 @@ func remoteServe(cfg *remotetools.Config, stdio bool) int {
 
 // doctorReport is the machine-readable shape of `doctor --json`.
 type doctorReport struct {
-	OK                     bool     `json:"ok"`
-	Version                string   `json:"version"`
-	Workspace              string   `json:"workspace"`
-	AllowedRoots           []string `json:"allowedRoots"`
-	Profile                string   `json:"profile"`
-	Tools                  []string `json:"tools"`
+	OK           bool     `json:"ok"`
+	Version      string   `json:"version"`
+	Workspace    string   `json:"workspace"`
+	AllowedRoots []string `json:"allowedRoots"`
+	Profile      string   `json:"profile"`
+	Tools        []string `json:"tools"`
+	// AutoExposedTools are tools added to the surface only because of a
+	// result-contract dependency (e.g. job_output alongside shell). Callers
+	// that expected a minimal allowlist need to see these explicitly.
+	AutoExposedTools       []string `json:"autoExposedTools,omitempty"`
 	ToolPrefix             string   `json:"toolPrefix,omitempty"`
 	TargetName             string   `json:"targetName,omitempty"`
 	ServerName             string   `json:"serverName"`
@@ -748,6 +752,13 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		report.Tools = server.ToolNames()
 		_ = server.Close()
 	}
+	// Surface dependency diagnostics: which tools exist only because a
+	// result-contract dependency required them. Kept separate from Tools so a
+	// user who wrote tools:["shell"] can tell why job_output also appears.
+	report.AutoExposedTools = cfg.AutoExposedTools()
+	for _, warning := range cfg.ToolSurfaceWarnings() {
+		report.Warnings = append(report.Warnings, "tool surface: "+warning)
+	}
 
 	if cfg.Audit.Path != "" {
 		dir := cfg.Audit.Path
@@ -827,6 +838,10 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  tool prefix      : %s\n", orDash(report.ToolPrefix))
 	fmt.Fprintf(os.Stdout, "  description      : %s\n", report.DescriptionStyle)
 	fmt.Fprintf(os.Stdout, "  tools (%d)       : %s\n", len(report.Tools), strings.Join(report.Tools, ", "))
+	if len(report.AutoExposedTools) > 0 {
+		fmt.Fprintf(os.Stdout, "  auto-exposed     : %s (added by tool dependencies)\n",
+			strings.Join(report.AutoExposedTools, ", "))
+	}
 	fmt.Fprintf(os.Stdout, "  shell visible    : %v\n", report.ShellVisible)
 	fmt.Fprintf(os.Stdout, "  allow all        : %v\n", report.AllowAll)
 	fmt.Fprintf(os.Stdout, "  allow rules      : %s\n", orDash(strings.Join(report.AllowRules, ", ")))

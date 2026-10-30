@@ -164,8 +164,14 @@ type ShellConfig struct {
 	// DeniedCommandPatterns is the denial counterpart of AllowedCommandPatterns.
 	// Deny patterns are evaluated before every allow rule.
 	DeniedCommandPatterns []string `yaml:"deniedCommandPatterns" json:"deniedCommandPatterns"`
-	// DenyShellMetachars rejects commands containing shell metacharacters so a
-	// single allowed binary cannot be chained into an arbitrary command.
+	// DenyShellMetachars is the explicit opt-in restriction that refuses
+	// commands containing shell metacharacters (pipes, redirection, command
+	// substitution, sequencing).
+	//
+	// It defaults to false so composition works out of the box: a caller can run
+	// "find . -size +100M | head" in a single call instead of several round
+	// trips to list, page and trim. Set it to true when a target must not chain
+	// an allowed binary into another command.
 	DenyShellMetachars bool `yaml:"denyShellMetachars" json:"denyShellMetachars"`
 	// EnvAllowlist switches the shell from default inheritance to an explicit
 	// allowlist. A nil list inherits the full target process environment (the
@@ -252,16 +258,15 @@ func effectiveShellEnvAllowlist(configured []string, disableInheritance bool) []
 	return out
 }
 
-// UnmarshalYAML keeps the safe default when a shell block omits
-// denyShellMetachars.
+// UnmarshalYAML decodes a shell block without forcing any metacharacter
+// restriction.
 //
-// The zero value of a bool is false, which would silently allow piping an
-// allowed binary into an arbitrary command. DefaultConfig sets this field to
-// true, but a nested block decoded into a fresh struct (as remoteTargets does)
-// would otherwise lose that default.
+// DenyShellMetachars defaults to false: composition is allowed unless the
+// operator asks for the restriction, so a block-level decode must not silently
+// turn pipes off. Set "denyShellMetachars: true" explicitly to refuse them.
 func (s *ShellConfig) UnmarshalYAML(value *yaml.Node) error {
 	type plain ShellConfig
-	decoded := plain{DenyShellMetachars: true}
+	decoded := plain{}
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
@@ -432,9 +437,7 @@ func DefaultConfig() *Config {
 			CommandTimeout:     Duration{120 * time.Second},
 			MaxConcurrentCalls: 8,
 		},
-		Shell: ShellConfig{
-			DenyShellMetachars: true,
-		},
+		Shell: ShellConfig{},
 		HTTP: HTTPConfig{
 			Path:     "/mcp",
 			TokenEnv: "AICLI_REMOTE_TOKEN",
@@ -810,7 +813,7 @@ func (c *Config) ShellExposed() bool {
 // shell policy. It deliberately names the smallest useful allowlist rather than
 // recommending "*": allowing everything is an explicit high-risk decision.
 func ShellPolicyEnableHint() string {
-	return `set shell.allowedCommands: ["git","go"] (argv prefix) or shell.allowedCommandPatterns: ["deploy*.sh *"] (whole command); profile/tools must expose shell, readOnly must be false, and denyShellMetachars defaults to true; destructive commands remain blocked`
+	return `set shell.allowedCommands: ["git","go"] (argv prefix) or shell.allowedCommandPatterns: ["deploy*.sh *"] (whole command); profile/tools must expose shell, readOnly must be false; pipes and redirection are allowed by default, and denyShellMetachars: true opts back into refusing them; destructive commands remain blocked`
 }
 
 // isPortableToolPrefix keeps the prefix inside the character set the MCP

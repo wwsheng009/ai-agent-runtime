@@ -112,8 +112,13 @@ type Spec struct {
 	AllowedCommandPatterns []string
 	DeniedCommands         []string
 	DeniedCommandPatterns  []string
-	// AllowShellMetachars opts out of the default refusal of pipes, redirection,
-	// substitution and command sequencing.
+	// DenyShellMetachars is the opt-in restriction that refuses pipes,
+	// redirection, substitution and command sequencing. It is off unless asked
+	// for, so composition works by default.
+	DenyShellMetachars bool
+	// AllowShellMetachars is the legacy spelling of the same switch. It is kept
+	// so existing envd:// specs keep parsing, and it can only relax the
+	// restriction, never tighten it.
 	AllowShellMetachars bool
 }
 
@@ -255,6 +260,13 @@ func ParseSpec(raw string) (*Spec, error) {
 				}
 				spec.AllowShellMetachars = allowed
 			}
+			if value := strings.TrimSpace(query.Get("deny_shell_metachars")); value != "" {
+				deny, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, fmt.Errorf("remote spec %q has an invalid deny_shell_metachars value %q", raw, value)
+				}
+				spec.DenyShellMetachars = deny
+			}
 		}
 	}
 	return spec, nil
@@ -355,13 +367,13 @@ func (s *Spec) Expand() (*Expanded, error) {
 		target.Remote.AuditLog = s.AuditLog
 		if len(s.AllowedCommands) > 0 || len(s.AllowedCommandPatterns) > 0 ||
 			len(s.DeniedCommands) > 0 || len(s.DeniedCommandPatterns) > 0 ||
-			s.AllowShellMetachars {
+			s.AllowShellMetachars || s.DenyShellMetachars {
 			target.Remote.Shell = &remotetools.ShellConfig{
 				AllowedCommands:        append([]string(nil), s.AllowedCommands...),
 				AllowedCommandPatterns: append([]string(nil), s.AllowedCommandPatterns...),
 				DeniedCommands:         append([]string(nil), s.DeniedCommands...),
 				DeniedCommandPatterns:  append([]string(nil), s.DeniedCommandPatterns...),
-				DenyShellMetachars:     !s.AllowShellMetachars,
+				DenyShellMetachars:     s.DenyShellMetachars && !s.AllowShellMetachars,
 			}
 		}
 		if s.CAFile != "" {
