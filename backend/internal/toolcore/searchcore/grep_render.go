@@ -23,6 +23,11 @@ type grepRenderInputs struct {
 	mode          GrepMode
 	contextBefore int
 	contextAfter  int
+	// openFile re-opens a searched file for context lines, on the machine the search
+	// ran against. nil means this process's filesystem. It is a closure rather than
+	// a context field because a struct must not carry a context, and the caller that
+	// owns the context is the one that builds this input.
+	openFile grepFileOpener
 }
 
 type grepPage struct {
@@ -175,7 +180,7 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		// A replacement rewrites the matched line, so the engine's text has to
 		// win over the re-read line or the substitution would be undone here.
 		expanded := ExpandGrepContext(in.result.Matches, in.contextBefore, in.contextAfter,
-			in.options.OnlyMatching, in.options.Replace != "")
+			in.options.OnlyMatching, in.options.Replace != "", in.openFile)
 		page.contextLines = len(expanded)
 		separator := grepContextSeparator(in.options)
 		printedAny := false

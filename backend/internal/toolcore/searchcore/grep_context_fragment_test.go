@@ -23,7 +23,7 @@ func TestExpandGrepContextKeepsFragmentsOnTheMatchedLine(t *testing.T) {
 		{File: path, Line: 2, Column: 9, Text: "foo"},
 		{File: path, Line: 4, Column: 1, Text: "foo"},
 	}
-	lines := ExpandGrepContext(matches, 1, 1, true, false)
+	lines := ExpandGrepContext(matches, 1, 1, true, false, nil)
 
 	type entry struct {
 		line    int

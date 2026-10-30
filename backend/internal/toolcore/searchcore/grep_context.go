@@ -1,6 +1,31 @@
 package searchcore
 
-import "os"
+import (
+	"context"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
+)
+
+// grepFileOpener re-opens a file that has already been searched, to read the lines
+// around a match. A nil opener means "this machine's filesystem", exactly like
+// GrepOptions.Access.
+//
+// It is a function rather than a context + Access pair because the context that owns
+// a search lives in the handler, and threading it into the render layer would have
+// meant either storing a context inside a struct or adding a parameter to a renderer
+// that a dozen tests call. A closure keeps cancellation where it belongs without
+// either distortion.
+type grepFileOpener func(path string) (toolcore.FileHandle, error)
+
+func (open grepFileOpener) open(path string) (toolcore.FileHandle, error) {
+	if open != nil {
+		return open(path)
+	}
+	// The local default has nothing to cancel, which is exactly what `os.Open` was
+	// before this existed: no context, no channel, one syscall.
+	return localio.Access.Open(context.Background(), path)
+}
 
 // MaxGrepContextLines caps before/after context per match. The local tool has
 // always clamped at this value; living in core turns it from a surface
@@ -51,7 +76,12 @@ type grepContextWindow struct {
 // replacement rewrites them, so re-reading the file would print the
 // pre-substitution line and silently undo the request. Context lines still come
 // from the file, exactly like `rg -r`, which substitutes matched lines only.
-func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching, hitTextFromEngine bool) []GrepContextLine {
+//
+// open decides where the context lines come from, and it is not a cosmetic
+// parameter: a search that reads its candidates through one machine and re-reads
+// neighbours from another prints lines that do not exist in the file it searched -
+// a fabricated answer, worse than a wrong one. Callers that search locally pass nil.
+func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching, hitTextFromEngine bool, open grepFileOpener) []GrepContextLine {
 	before = ClampGrepContextLines(before)
 	after = ClampGrepContextLines(after)
 	out := make([]GrepContextLine, 0, len(matches))
@@ -69,13 +99,13 @@ func ExpandGrepContext(matches []GrepMatch, before, after int, onlyMatching, hit
 		for j < len(matches) && matches[j].File == file {
 			j++
 		}
-		expandGrepContextFile(reader, matches[i:j], file, before, after, onlyMatching, hitTextFromEngine, &out)
+		expandGrepContextFile(reader, matches[i:j], file, before, after, onlyMatching, hitTextFromEngine, open, &out)
 		i = j
 	}
 	return out
 }
 
-func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, onlyMatching, hitTextFromEngine bool, out *[]GrepContextLine) {
+func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string, before, after int, onlyMatching, hitTextFromEngine bool, open grepFileOpener, out *[]GrepContextLine) {
 	windows := make([]grepContextWindow, 0, len(matches))
 	for _, match := range matches {
 		start := match.Line - before
@@ -92,7 +122,7 @@ func expandGrepContextFile(reader *lineReader, matches []GrepMatch, file string,
 		windows = append(windows, grepContextWindow{start: start, end: end})
 	}
 
-	source, err := os.Open(file)
+	source, err := open.open(file)
 	if err != nil {
 		// The file vanished between search and expansion (or cannot be
 		// re-read): keep the match lines the engine already read instead of

@@ -416,6 +416,79 @@ func TestGrepPatternFileComesThroughTheAccessor(t *testing.T) {
 	}
 }
 
+// TestGrepContextLinesComeFromTheSameSource is S2c, end to end through the handler.
+// A context line is a neighbour of a match, so it must be re-read on the machine that
+// produced the match: the disk copy here carries a different neighbour than the
+// accessor's copy. Seeing DISK-BELOW would mean the render layer re-opened the file
+// locally and printed a line that does not exist in the file it searched.
+func TestGrepContextLinesComeFromTheSameSource(t *testing.T) {
+	root := t.TempDir()
+	hay := filepath.Join(root, "hay.txt")
+	if err := os.WriteFile(hay, []byte("needle\nDISK-BELOW\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	access := &virtualAccess{files: map[string][]byte{
+		hay: []byte("needle\nREMOTE-BELOW\n"),
+	}}
+
+	handler := NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+	runtime := seamRuntime{
+		presentationRuntime: presentationRuntime{paths: presentationPaths{root: root}},
+		access:              access,
+	}
+	result, err := handler.Execute(context.Background(), &toolcore.Call{
+		Args:    map[string]any{"pattern": "needle", "path": ".", "context": 1},
+		Runtime: runtime,
+	})
+	if err != nil {
+		t.Fatalf("grep returned a Go error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("grep failed: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "REMOTE-BELOW") {
+		t.Fatalf("the context line did not come from the accessor:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "DISK-BELOW") {
+		t.Fatalf("the context line was re-read from disk:\n%s", result.Content)
+	}
+	// One open for the search itself and one for the context re-read: without the
+	// second, "REMOTE-BELOW" could only have come from somewhere else.
+	if access.openCalls < 2 {
+		t.Fatalf("opens = %d, want at least 2 (search + context re-read through the seam)", access.openCalls)
+	}
+}
+
+// TestExpandGrepContextNilOpenerMeansLocal pins the convention the whole seam relies
+// on: nil is not "no context lines", it is "this machine's filesystem", which is what
+// every caller did before the seam existed.
+func TestExpandGrepContextNilOpenerMeansLocal(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "near.txt")
+	if err := os.WriteFile(path, []byte("one\nneedle\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	matches := []GrepMatch{{File: path, Line: 2, Text: "needle"}}
+
+	local := ExpandGrepContext(matches, 1, 1, false, false, nil)
+	if len(local) != 3 {
+		t.Fatalf("nil opener produced %d lines, want 3 (one, needle, three): %v", len(local), local)
+	}
+	if local[0].Text != "one" || local[2].Text != "three" {
+		t.Fatalf("unexpected local neighbours: %q / %q", local[0].Text, local[2].Text)
+	}
+
+	// The same call with an opener that serves different neighbours must show those
+	// instead, which is what proves the parameter is honoured rather than ignored.
+	other := &virtualAccess{files: map[string][]byte{path: []byte("L1\nneedle\nL3\n")}}
+	remote := ExpandGrepContext(matches, 1, 1, false, false, func(p string) (toolcore.FileHandle, error) {
+		return other.Open(context.Background(), p)
+	})
+	if len(remote) != 3 || remote[0].Text != "L1" || remote[2].Text != "L3" {
+		t.Fatalf("opener was not honoured: %v", remote)
+	}
+}
+
 // TestGrepWithoutAnAccessorKeepsReadingTheDisk is the no-behaviour-change half, and it
 // is why the option defaults to nil instead of forcing every caller to change at once.
 func TestGrepWithoutAnAccessorKeepsReadingTheDisk(t *testing.T) {

@@ -528,6 +528,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		mode:          mode,
 		contextBefore: contextBefore,
 		contextAfter:  contextAfter,
+		// Context lines are re-read on the machine that produced the matches: this
+		// closure binds the search's own context and accessor, so a neighbour line is
+		// never fetched from the wrong host, and a cancelled search stops fetching.
+		openFile: func(path string) (toolcore.FileHandle, error) {
+			return access.Open(ctx, path)
+		},
 	}
 	page := renderGrepPage(renderInputs)
 	if options.JSONOutput {
