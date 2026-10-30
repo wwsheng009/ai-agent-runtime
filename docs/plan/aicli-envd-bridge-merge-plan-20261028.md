@@ -249,6 +249,8 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 **仍存的表面差异（明确记录，不掩饰）**：`view` 在 envd 侧返回原文（无行号/窗口/折叠元数据，工具描述已声明），local 侧返回带 `1: ` 行号与截断元数据；`edit` 的成功摘要措辞两侧不同（`Edited …: N replacement(s)` 与 `Replaced N occurrence(s)`）；`write` 上限取共享 `Limits.CaptureLimit`（2 MiB）而 bridge 原为 1 MiB。统一这些渲染需把共享核的读/渲染路径做成可插 I/O seam（§3 的远期项），不在本次收编范围。
 
+> **（2026-10-31 补记）本条三项均已关闭**：`view` 自 `5031aaf0` 起走共享 `viewcore` 渲染（行号/分页/窗口元数据与 local 同形，另有 `read_channel` 元数据）；`edit` 措辞由 §8.9 对齐；`write` 上限差异随 bridge 删除消失（两侧同一 `Limits.CaptureLimit`）。过渡态现状见 §8.11。
+
 ### 8.9 结果文案对齐 local 面（2026-10-28）
 
 以真机 ssh-stdio 实测到的 local 文案为基准（不靠猜），消除同名工具的回复差异：
@@ -261,7 +263,7 @@ aicli-remote-tools serve --stdio [--backend local|envd]
 
 顺带：`write` 不再多花一次 `cat`（此前为回读尺寸而 Stat+写+Stat，现为判定存在性的单次 Stat + 写后 Stat 确认落盘）。
 
-**渲染层仍存差异（未修，需 I/O seam 决策）**：`view` 行号/窗口/折叠元数据、`grep`/`glob` 的完整参数面（`patterns/include/exclude/mode/offset/limit` 等）。属能力面差异，需 §3 远期 seam 改造。
+**渲染层差异（2026-10-28 记录；2026-10-31 已全部关闭）**：`view` 行号/窗口/折叠元数据由 `5031aaf0` 关闭；`grep`/`glob` 的完整参数面（`patterns/include/exclude/mode/offset/limit` 等）由 **S6（`5c4e1660`）**关闭——三个搜索工具改用与本地/ssh-http 同一套 handler（共享 schema + `FileAccess()` 执行腿），脚本实现退役。S6 同时带来三处有意保留的行为口径（引擎 walker-only、`one_file_system` 点名拒绝、`*.go` 深度语义），见 §8.11 与 seam 方案的 S6 实施记。
 
 **已补：结构化错误 metadata（2026-10-28）**——拒绝不再只有散文。envd 侧按 local 同名键发布 `error_code` 与 `failure_class` 及伴随字段：`ambiguous_edit`（`occurrences`/`occurrence_lines`/`file_path`）、`stale_context`、`missing_file`、`binary_target`、`file_too_large`（`file_size`/`max_file_bytes`）、`payload_too_large`、`binary_payload`、`missing_parent`，以及 jail 的 `PATH_DENIED`（`envdToolError` 从 `ToolError` 取码，文本仍是 `CODE: msg (next: …)` 原样）。非 `ToolError` 不会被编造错误码；辅助函数有独立单测。
 
@@ -274,6 +276,21 @@ M4 删除了 `cmd/aicli-envd-bridge` 并同步了 `Makefile`，但漏改 `.githu
 处置：门禁 **1:1 改挂收编后的载体** `aicli-remote-tools`——`go build -trimpath -o /tmp/aicli-remote-tools-check ./cmd/aicli-remote-tools` + `go test ./internal/envdclient/... ./internal/remotetargets/... ./cmd/aicli-remote-tools/... -count=1`；删除桥的构建与分发两行（归档按 `dist/release/*` glob，无需其他改动）。保留一行历史注记，说明门禁为何叫 remote-tools。
 
 验证（本笔提交内实跑）：构建退出码 0；三包测试全 `ok`（envdclient 2.2s / remotetargets 2.0s / cmd/aicli-remote-tools 7.9s）；工作流 YAML 解析通过。
+
+### 8.11 文件面过渡态现状（2026-10-31，S6 之后）
+
+收编方案里"envd 文件面独立实现"是被明确接受的**过渡态**，偿还计划见 `tool-layer-io-seam-design-20261028.md`（§2 结构图与 §7 偿还表）。S6（`5c4e1660`）之后逐项对账：
+
+| 面 | 现状 | 依据 |
+|---|---|---|
+| `ls` / `glob` / `grep` | **已偿还**：与本地/ssh-http 同一套 handler（共享 schema + `FileAccess()=envd_access`），脚本实现（`find`/`rg-or-grep`/手写渲染器）退役 | S6 提交与 seam 方案 S6 实施记 |
+| `view` 渲染 | 已共享（`viewcore` 渲染/分页/元数据） | `5031aaf0` |
+| `view` 字节读取 | 仍走 `envdclient /files` + `cat` 两通道直取，未搬进 accessor | `envd_backend.go` 的 `readViewWindow`（S6 明确列为可选、未做） |
+| `write` / `edit` / `append_write` / `apply_patch` | 仍为后端自有实现（bail/脚本/`storeBytes`）；`mutatecore` 纯函数复用属偿还计划的后续项 | `envd_tools.go` / `envd_edit.go` / `envd_patch.go` |
+| envd 专属工具（`mkdir`/`remove`/`move`/`host_metrics`/`watch_dir`/`pty_*`） | 保持后端自有（无共享核对应物） | 同上 |
+| 执行腿 | `envd_access.go` 已**接线**（不再是"已就绪未接线"） | S6 |
+
+S6 的行为口径（有意保留，方向已钉进 e2e）：引擎统一 walker（不再按目标机是否装 rg 分叉；rg 优先为独立待决步骤 S6b）；`one_file_system` 与 `sort=accessed/created` 由静默忽略改为点名拒绝；glob 的 `*.go` 语义收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA（不擅自去配置文件取秘密）。
 
 > 说明：§8.1–§8.10 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
 

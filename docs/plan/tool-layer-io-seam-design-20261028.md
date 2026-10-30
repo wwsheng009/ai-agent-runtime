@@ -116,7 +116,7 @@ envd 收编已经完成（M0–M4，M5 shim 取消），三档工具面在真机
 | **文件 I/O 接口化、能力位降级、两实现体收敛** | **本方案** |
 | `/files` 签名、远端窗口、流式消费 | 本方案 §5、§10 |
 
-收编方案里"envd 文件面独立实现"是被**明确接受的过渡态**（`envd_tools.go:5-10` 的注释就是这个决定的书面记录）。本方案是那笔过渡债的**偿还计划**，不是对收编的否定。
+收编方案里"envd 文件面独立实现"是被**明确接受的过渡态**（`envd_tools.go:5-10` 的注释就是这个决定的书面记录）。本方案是那笔过渡债的**偿还计划**，不是对收编的否定。（2026-10-31 进度：搜索面已偿还——S6 `5c4e1660` 把 `ls`/`glob`/`grep` 换成共享核 + `FileAccess()` 并退役三个脚本实现；逐面对账见收编方案 §8.11。）
 
 ---
 
@@ -632,13 +632,13 @@ func RunSuite(t *testing.T, implName string, a toolcore.Access)
 - **U7（已定）是否加“目标用户可读性闸门”**：**加**。`/files` 以 envd 进程身份（实测 root）读文件，与 `shell`/`process` 通道（以目标用户身份执行）存在**权限非对称 = 相对提权**；不闸门则 `view` 能看到 `shell` 看不到的文件（§3.5）。做法：`process.Start(["/usr/bin/test","-r",<已解析路径>])` 让**内核自己回答**，绝不在 Go 里重实现 POSIX 位/ACL/组判定；仅在 mode 显示可能拒时探测，并按目录缓存。
 - **U2 是否接受 2.5b 的过渡双路径（一版）？** 不接受则 2.5b/3.5b 合并为一次大改（回滚粒度变粗，R8 风险消失但风险集中）。
 - **U3 呈现层增量（progress notification 贯通到 manager/TUI）是否立项？** 与 envd 无关，独立评审；不立项则本文的"增量"只到计算/传输层为止。
-- **U4 `grep` 参数面缺口（§8.9：`glob`/`type`/`-i`/多 patterns 的远端方言映射）是否并入 2.5b？** 同一段代码，建议并入，代价 +1–2 天。
-- **U5 envd 形态下 `PathResolver` 是否也归入 seam？** 今天 `PathResolver.Resolve` 在本机做 `filepath`/symlink 判定，envd 侧靠 `be.resolvePath`（RPC）。本文按"归入 `Access.Resolve`"设计；若评审希望保持 `PathResolver` 独立，则 `Access` 去掉 `Resolve`，改为 `envdAccess` 自带 resolver——需决策，因为它决定 2.5a 的改动半径。
+- **U4 `grep` 参数面缺口（§8.9：`glob`/`type`/`-i`/多 patterns 的远端方言映射）是否并入 2.5b？→ 已关闭（2026-10-31，S6 `5c4e1660`）**：脚本退役后不存在"向目标机引擎映射方言"这回事——envd 上 `grep`/`glob`/`ls` 与本地/ssh-http 走**同一套 handler 与同一份 schema**（`glob`/`type`/`case_insensitive`/多 patterns/`include`/`exclude`/`mode`/`offset`/`limit` 全部可用），遍历由共享 walker 经 accessor 完成。
+- **U5 envd 形态下 `PathResolver` 是否也归入 seam？→ 已按第二条落地（S6 `5c4e1660`）**：落地的 seam（S1–S6）实际上取的是"保持 `PathResolver` 独立"——`toolcore.Access` 未长出 `Resolve`；envd 侧 `Paths()` 由独立 resolver（`envdPaths` → 既有 `be.resolvePath`，workdir 锚点/词法关押/目标侧 canonicalize 不变）承担，accessor 只管 I/O。2.5a 的改动半径据此收敛为"accessor + 独立 resolver"这一形状。
 
 ## 12. 建议的最小评审动作（本文通过后）
 
 1. 在 `tool-layer-abstraction-design-20261022.md` 的 §16.1 风险 3 与 Phase 2/3 处加一行交叉引用（指向本文），把"远程后续通过接口适配"这句占位**兑现成接口定义**。
-2. 在 `aicli-envd-bridge-merge-plan-20261028.md` §8.9 后追加一节，把"envd 文件面独立实现"标记为**过渡态，偿还计划见本文**。
+2. ✅ **已完成（2026-10-31）**：收编方案新增 §8.10（收编尾巴：CI 门禁改挂）与 §8.11（文件面过渡态现状，逐面对账），"envd 文件面独立实现"的过渡态与偿还进度已写明。
 3. ✅ **已完成**：§7.4 的三条反漂移检查已作为 `backend/internal/driftguard` 测试上线（随 `make test` / `go test ./...` 自动执行，无需额外 CI 步骤）。原写的是“先只跑报表、不作硬门”，实际落地为**硬门**：它们只会因新增违规而红，不会拦截现有代码（基线即现状），因此没有“先软后硬”的必要。
 4. ✅ **已完成**：`docs/architecture/envd-capabilities.md` 已新增 §3.5 `GET/POST /files（唯一的文件数据通道）`，把本轮全部实测写成表（header token、206/416/多区间、无 ETag 与 `Last-Modified` 为请求时间、gzip 不生效、multipart 字段名 `file` 与静默 `200 []`、`EnsureDirs`、**无 jail 且以守护进程身份读写**、`/files/` 尾斜杠 404），并已与本文双向交叉引用。
 5. 顺手更正 `docs/architecture/envd-source-and-rebuild.md:133` 的 clone 地址：本轮实测 `e2b-dev/infra` 与 `e2b-dev/runtime` 是**同一代码库的跳转**（API 响应里 `html_url` 指向 `e2b-dev/runtime`），两个都可用，文档建议写 `runtime` 并注一个重定向备注，避免后人怀疑找错仓。
@@ -746,7 +746,7 @@ socket 早停仅作日志证据，不作断言。
 
 **真机验证新增一个驱动**：`backend/scripts/ls_live_verify.go` 起真实 `aicli-remote-tools`（local 后端 + MCP stdio），把改造前的 `WalkDir` 算法钉在驱动里当 oracle，经共享渲染器生成期望文本后逐字节比对，另覆盖 Windows 上构造不出来的四类现场：`chmod 000` 子目录、符号链接根、树内符号链接、悬空链接。结果 3 目录 × 25 组合逐字节一致 + 上述现场全 PASS。它自身也暴露过两个坑：`fail()` 的 `os.Exit` 跳过 `defer` 清理（会把 000 目录和服务器子进程留在目标机上，已改为清理钩子表 + `-simulate-failure` 自检），以及 `//go:build ignore` 漏加会和 `//go:build windows` 的 ConPTY 驱动撞 `main redeclared`。
 
-**注意**：本步不影响 envd——envd 的 `ls` 目前仍是自实现（`envd_tools.go:156 envdLs → client.ListDir`）。把 envd 的 view/ls/glob/grep 切到共享核仍是 2.5b 的正题。
+**注意**：本步不影响 envd——envd 的 `ls` 当时仍是自实现（`envd_tools.go:156 envdLs → client.ListDir`）。把 envd 的 view/ls/glob/grep 切到共享核是 2.5b 的正题——**已在 2026-10-31 由 S6 `5c4e1660` 完成**（`view` 渲染更早已共享；`ls`/`glob`/`grep` 现走共享核），逐面对账见 §14 与收编方案 §8.11。
 
 **剩余项（按价值/风险排序）：**
 
@@ -756,6 +756,24 @@ socket 早停仅作日志证据，不作断言。
    - **`apply_patch` 多文件的闸门合并**（一个 patch 内多次 `test -w`，待真实成本数据再决定，不先优化）；
    - **深偏移的取数成本**：现在靠倍增取前缀（最多 8 MiB）解决，本地则是流式跳行。若实际使用中出现大量深偏移，候选做法是先用 `Stat` 的均行长估算起点再用 `Range` 直接定位，把往返从 O(log) 降到 O(1)（**需先拿到成本数据再动**）；
    - **BOM 文件仍只整份服务**（超过预算则拒）：这是与 local 对齐后的故意差异，local 越过自身解码上限同样拒。
+
+---
+
+## 14. 落地记录（2026-10-31：S6 `5c4e1660`——搜索面偿还）
+
+本文的偿还计划第一次成规模落地：envd 的 `ls`/`glob`/`grep` 从目标机脚本换成共享核（`lscore`/`searchcore`），执行腿 `envd_access.go` 正式**接线**（`FileAccess() = NewEnvdAccess(be.client)`），三个脚本实现（`find` / `rg-or-grep` / 手写渲染器）退役。
+
+**与本文设计的对应**：
+
+- §4.3「能力门 + 降级明示」：`one_file_system` 与 `sort=accessed/created` 在 envd 上从"静默忽略"变为**点名拒绝**（缺能力消息含出路）；
+- §8.9 的 `grep`/`glob` 参数面缺口随脚本退役一并关闭（U4）；
+- `PathResolver` 保持独立（U5 的第二条）：accessor 只做 I/O，`Paths()` 仍由后端 resolver 承担。
+
+**有意保留的口径（是决策，不是未修）**：引擎统一 walker（不再按目标机是否装 rg 分叉，rg 优先为独立待决步骤 S6b）；glob 的 `*.go` 收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。三处均记于收编方案 §8.11 与 seam 方案的 S6 实施记。
+
+**仍属偿还范围**：`view` 的字节读取（仍走 `envdclient /files` + `cat` 两通道）、写/编辑面（`write`/`edit`/`append_write`/`apply_patch` 仍为后端自有实现）、`mutatecore` 纯函数复用。
+
+**验证**：离线门（`envd_core_integration_test.go`）+ stub 端到端与单元钉（新增/改写 6 条 e2e + 2 条生产 runtime 单元钉）全绿；4 个可编译变异逐个红 → 逐字节还原；Windows 整包与 WSL（剥两条宿主 shell 依赖红）均通过。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA。
 
 ---
 
