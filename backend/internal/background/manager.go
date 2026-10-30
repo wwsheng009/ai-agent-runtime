@@ -2244,7 +2244,15 @@ func (m *Manager) orphanJob(managed *managedJob, message string) {
 	managed.scheduled = false
 	managed.info.Status = StatusOrphaned
 	managed.info.Message = message
-	managed.info.ExitCode = nil
+	// Keep any exit code the runtime already captured. Clearing it turns a
+	// recorded outcome into "unknown" and makes the caller unable to tell a real
+	// failure from a lost record. Only a job that never produced one stays nil.
+	if managed.info.ExitCode == nil {
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		managed.info.Metadata["exit_code_lost"] = true
+	}
 	managed.info.FinishedAt = &finishedAt
 	if managed.info.Metadata == nil {
 		managed.info.Metadata = map[string]interface{}{}

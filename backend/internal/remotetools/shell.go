@@ -223,6 +223,8 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			timeout, execution.JobID, capture)
 	case execution.Status == "completed" && exitCode != 0:
 		display = fmt.Sprintf("Command failed: exit status %d\n\n%s", exitCode, capture)
+	case execution.Status == "orphaned":
+		display = fmt.Sprintf("Command outcome could not be recorded (job %s was orphaned); the output below was captured before the outcome was lost. Verify with job_output before retrying.\n\n%s", execution.JobID, capture)
 	case execution.Status == "failed":
 		display = fmt.Sprintf("Command failed: job status failed\n\n%s", capture)
 	case execution.Status == "cancelled":
@@ -249,6 +251,12 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"shell_type":           string(t.shell.Type),
 	}
 	addCommandDiagnostics(metadata, command)
+	// Always expose the job identity and whether the exit code is real. Without
+	// these, a failed call cannot be re-inspected and an unknown outcome is
+	// indistinguishable from a genuine command failure.
+	metadata["job_id"] = execution.JobID
+	metadata["job_status"] = execution.Status
+	metadata["exit_code_known"] = execution.ExitCode != nil
 	if execution.TimedOut {
 		metadata["job_id"] = execution.JobID
 		metadata["job_status"] = execution.Status
@@ -273,6 +281,24 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		return remoteTextResult(body, metadata), nil
 	}
 
+	if isUnknownOutcomeStatus(execution.Status) {
+		// The command may have completed successfully; only the record of the
+		// outcome was lost. Report that distinctly so callers do not treat a
+		// possibly-successful run as a failure, and point at the job record.
+		next := fmt.Sprintf("the captured output may be complete: check job_output job_id=%s before retrying, then retry only if the work is not done", execution.JobID)
+		metadata["error_code"] = CodeCommandOutcomeUnknown
+		metadata["exit_code_known"] = false
+		metadata["next_action"] = next
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: "text",
+			Content:    body,
+			Error: shellFailureError(
+				fmt.Errorf("command outcome unknown: %s", execution.Status),
+				CodeCommandOutcomeUnknown, next),
+			Metadata: metadata,
+		}, nil
+	}
 	metadata["error_code"] = CodeCommandFailed
 	if execution.Status == "cancelled" {
 		metadata["error_code"] = toolcore.ErrCancelled
@@ -295,6 +321,19 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			CodeCommandFailed, "check the command output and the target environment"),
 		Metadata: metadata,
 	}, nil
+}
+
+// isUnknownOutcomeStatus reports whether a job status means "the result was not
+// recorded" rather than "the command failed". An orphaned job is the common
+// case: the manager lost the outcome across a restart, so the captured output
+// may well be complete and the command may have succeeded.
+func isUnknownOutcomeStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "orphaned", "unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 func (t *remoteShellTool) captureLimit() int {

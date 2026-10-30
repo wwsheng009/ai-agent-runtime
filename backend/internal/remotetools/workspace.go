@@ -37,6 +37,10 @@ const (
 	CodeUnsupported       = "UNSUPPORTED"
 	CodeCommandDenied     = "COMMAND_DENIED"
 	CodeCommandFailed     = "COMMAND_FAILED"
+	// CodeCommandOutcomeUnknown marks a command whose result could not be
+	// recorded (for example a job orphaned by a process restart). The captured
+	// output may be complete, so this is not the same thing as a failure.
+	CodeCommandOutcomeUnknown = "COMMAND_OUTCOME_UNKNOWN"
 	CodeInternal          = "INTERNAL_ERROR"
 	CodeWorkspaceDisabled = "WORKSPACE_UNAVAILABLE"
 )

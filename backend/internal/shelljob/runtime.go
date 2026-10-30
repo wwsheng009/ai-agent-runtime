@@ -164,7 +164,7 @@ func Execute(ctx context.Context, runtime Runtime, req Request) (Execution, erro
 	}
 	execution := Execution{
 		JobID:      jobID,
-		Status:     firstNonEmpty(output.Status, snapshot.Status),
+		Status:     preferTerminalStatus(output.Status, snapshot.Status),
 		ExitCode:   firstExitCode(output.ExitCode, snapshot.ExitCode),
 		Output:     output.Output,
 		NextOffset: output.NextOffset,
@@ -178,6 +178,31 @@ func Execute(ctx context.Context, runtime Runtime, req Request) (Execution, erro
 		_ = runtime.ForgetShell(context.Background(), jobID, sessionID)
 	}
 	return execution, nil
+}
+
+// preferTerminalStatus keeps a terminal status the waiter already observed
+// instead of letting a later store read downgrade it.
+//
+// ReadShell re-reads the persisted record, which may have been rewritten by the
+// manager after the wait returned (for example a recovery sweep marking an
+// already-finished job as orphaned). Without this guard a command whose real
+// outcome was known would be reported as an unknown outcome.
+func preferTerminalStatus(values ...string) string {
+	for _, value := range values {
+		if isTerminalJobStatus(value) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return firstNonEmpty(values...)
+}
+
+func isTerminalJobStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonEmpty(values ...string) string {
