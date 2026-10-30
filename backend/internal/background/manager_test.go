@@ -14,7 +14,50 @@ import (
 
 	"github.com/stretchr/testify/require"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
+
+func TestBuildShellCommandPrefixesPowerShellUTF8(t *testing.T) {
+	manager := &Manager{config: Config{
+		Shell: runtimeexecutor.Shell{Path: "pwsh.exe", Type: runtimeexecutor.ShellTypePwsh},
+	}}
+
+	cmd := manager.buildShellCommand(context.Background(), "Write-Output '中文'")
+	require.NotNil(t, cmd)
+	require.NotEmpty(t, cmd.Args)
+	require.True(t,
+		strings.HasPrefix(cmd.Args[len(cmd.Args)-1], runtimeexecutor.PowerShellCommandPrefix),
+		"PowerShell background shell must emit UTF-8 regardless of the host code page: %#v",
+		cmd.Args,
+	)
+}
+
+func TestBackgroundPowerShellPreservesUTF8Output(t *testing.T) {
+	shell := runtimeexecutor.DefaultUserShell()
+	if shell.Type != runtimeexecutor.ShellTypePwsh && shell.Type != runtimeexecutor.ShellTypePowerShell {
+		t.Skipf("UTF-8 regression only applies to PowerShell, got %q", shell.Type)
+	}
+
+	ctx := context.Background()
+	root := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(root, "background.db"),
+		LogDir:            filepath.Join(root, "logs"),
+		MaxConcurrentJobs: 1,
+		Shell:             shell,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-utf8", BackgroundTaskArgs{
+		Command: "echo 中文编码-OK",
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusCompleted, backgroundTestTimeout(10*time.Second)))
+
+	output, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: job.ID})
+	require.NoError(t, err)
+	require.Contains(t, output.Output, "中文编码-OK")
+}
 
 func TestDefaultConfigCapsRerunRecoveryAttempts(t *testing.T) {
 	cfg := DefaultConfig()

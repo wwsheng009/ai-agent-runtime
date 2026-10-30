@@ -255,15 +255,15 @@ func exitCode(err error) int {
 // prefixPowerShellArgs keeps PowerShell output UTF-8 without corrupting an
 // -EncodedCommand payload. It only applies when the launched program is
 // actually PowerShell; a remote cmd.exe target must not inherit a local pwsh
-// detection.
-func prefixPowerShellArgs(args []string, shell runtimeexecutor.Shell, launchCommand string) []string {
+// detection. program must be argv[0], not the user-supplied command text.
+func prefixPowerShellArgs(args []string, shell runtimeexecutor.Shell, program string) []string {
 	if len(args) < 2 {
 		return args
 	}
 	if shell.Type != runtimeexecutor.ShellTypePowerShell && shell.Type != runtimeexecutor.ShellTypePwsh {
 		return args
 	}
-	base := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.TrimSpace(launchCommand))), ".exe")
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.TrimSpace(program))), ".exe")
 	if base != "powershell" && base != "pwsh" {
 		return args
 	}
@@ -276,8 +276,9 @@ func prefixPowerShellArgs(args []string, shell runtimeexecutor.Shell, launchComm
 }
 
 // HardenPowerShellArgs applies the UTF-8 output directive to a PowerShell argv.
-// Background jobs build their own exec.Cmd instead of going through Run, so they
-// need the same payload hardening without paying Run's synchronous lifecycle.
-func HardenPowerShellArgs(args []string, shell runtimeexecutor.Shell, launchCommand string) []string {
-	return prefixPowerShellArgs(args, shell, launchCommand)
+// program is the executable path/name (argv[0]), not the user command. Background
+// jobs build their own exec.Cmd instead of going through Run, so they need the
+// same payload hardening without paying Run's synchronous lifecycle.
+func HardenPowerShellArgs(args []string, shell runtimeexecutor.Shell, program string) []string {
+	return prefixPowerShellArgs(args, shell, program)
 }

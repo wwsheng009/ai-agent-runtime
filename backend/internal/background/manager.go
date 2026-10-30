@@ -3311,7 +3311,9 @@ func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.C
 		shell = runtimeexecutor.DefaultUserShell()
 	}
 	shellArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
-	shellArgs = shellexec.HardenPowerShellArgs(shellArgs, shell, command)
+	// HardenPowerShellArgs identifies the shell from argv[0]; passing the user
+	// command here made every short PowerShell command skip the UTF-8 prefix.
+	shellArgs = shellexec.HardenPowerShellArgs(shellArgs, shell, shellArgs[0])
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
