@@ -1,11 +1,15 @@
 package searchcore
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // grepIgnoreRule is one parsed ignore-file line, scoped to the directory its
@@ -32,6 +36,11 @@ type grepIgnorePolicy struct {
 	skipGlobal        bool
 	skipExplicitFiles bool
 	explicitFiles     []string
+	// access answers every file question the rule set has: which directories are
+	// directories, and what a rule file contains. It is resolved once, here, from the
+	// same options the search itself uses, so a rule cannot be discovered on one
+	// machine and applied to a listing from another.
+	access toolcore.Access
 	// discoveredCaseInsensitive makes the conventionally discovered ignore
 	// files (.gitignore, .ignore, .git/info/exclude, ...) compare
 	// case-insensitively.
@@ -47,13 +56,22 @@ func newGrepIgnorePolicy(opts GrepOptions) *grepIgnorePolicy {
 	if opts.NoIgnore {
 		return nil
 	}
+	access := seamAccess(opts.Access)
 	return &grepIgnorePolicy{
-		skipParent:                opts.NoIgnoreParent,
-		skipVCS:                   opts.NoIgnoreVCS,
-		skipDot:                   opts.NoIgnoreDot,
-		skipGlobal:                opts.NoIgnoreGlobal,
+		skipParent: opts.NoIgnoreParent,
+		skipVCS:    opts.NoIgnoreVCS,
+		skipDot:    opts.NoIgnoreDot,
+		// Q3 (design §3): a global gitignore lives under a HOME, and HOME is a fact
+		// about the machine running this process, not about the machine holding the
+		// files. toolcore.Access has no notion of home, so there is no honest answer
+		// to "whose global rules" once the rules come from elsewhere. Default: the
+		// host's global files are consulted only for a host accessor. The supported way
+		// to apply global rules to a remote tree is ignore_file, which now travels
+		// through the same accessor as the search and may name a file inside it.
+		skipGlobal:                opts.NoIgnoreGlobal || !seamAccessIsLocal(access),
 		skipExplicitFiles:         opts.NoIgnoreFiles,
 		explicitFiles:             opts.IgnoreFiles,
+		access:                    access,
 		discoveredCaseInsensitive: opts.IgnoreFileCaseInsensitive,
 	}
 }
@@ -67,12 +85,17 @@ func newGrepIgnorePolicy(opts GrepOptions) *grepIgnorePolicy {
 //
 // NoMessages mirrors rg --no-messages: skip an unreadable explicit file instead
 // of failing the whole call.
-func ValidateGrepIgnoreFiles(opts GrepOptions) error {
+func ValidateGrepIgnoreFiles(ctx context.Context, opts GrepOptions) error {
 	if opts.NoIgnore || opts.NoIgnoreFiles {
 		return nil
 	}
+	// The accessor is resolved exactly like the search resolves it: a caller that names
+	// an ignore file on the target must not be told the file is missing because this
+	// machine happens not to have it, and must not be promised a rule set because a
+	// same-named local file happens to exist.
+	access := seamAccess(opts.Access)
 	for _, file := range opts.IgnoreFiles {
-		info, err := os.Stat(file)
+		info, err := access.Stat(ctx, file)
 		if err == nil && info.IsDir() {
 			err = fmt.Errorf("is a directory")
 		}
@@ -82,7 +105,7 @@ func ValidateGrepIgnoreFiles(opts GrepOptions) error {
 			}
 			return fmt.Errorf("读取 ignore_file 失败 %s: %w", file, err)
 		}
-		if _, readErr := os.ReadFile(file); readErr != nil {
+		if _, readErr := readGrepIgnoreFile(ctx, access, file); readErr != nil {
 			if opts.NoMessages {
 				continue
 			}
@@ -90,6 +113,23 @@ func ValidateGrepIgnoreFiles(opts GrepOptions) error {
 		}
 	}
 	return nil
+}
+
+// readGrepIgnoreFile reads one rule file through the seam. Both the validator above
+// and the loader below need the same answer, and two read paths would be two
+// opinions about what "unreadable" means.
+//
+// It deliberately reads the whole file, as os.ReadFile did: an ignore file that opens
+// but cannot be read to the end must still fail validation, because naming one is a
+// promise about its rules. Truncating the probe to a few bytes would keep the promise
+// only for files that happen to read cleanly so far.
+func readGrepIgnoreFile(ctx context.Context, access toolcore.Access, filePath string) ([]byte, error) {
+	file, err := access.Open(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 // grepIgnoreRules is the cache + assembler the walk keeps for one search root.
@@ -101,19 +141,19 @@ type grepIgnoreRules struct {
 	cache  map[string][]grepIgnoreRule
 }
 
-func newGrepIgnoreRules(policy *grepIgnorePolicy, root string) *grepIgnoreRules {
+func newGrepIgnoreRules(ctx context.Context, policy *grepIgnorePolicy, root string) *grepIgnoreRules {
 	if policy == nil {
 		return nil
 	}
 	// A single-file root still consults its directory's ignore files, exactly
 	// like a walk that started in that directory would.
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+	if info, err := policy.access.Stat(ctx, root); err != nil || !info.IsDir() {
 		root = filepath.Dir(filepath.Clean(root))
 	}
 	return &grepIgnoreRules{
 		policy: policy,
 		root:   root,
-		base:   policy.baseRules(root),
+		base:   policy.baseRules(ctx, root),
 		cache:  map[string][]grepIgnoreRule{},
 	}
 }
@@ -121,12 +161,15 @@ func newGrepIgnoreRules(policy *grepIgnorePolicy, root string) *grepIgnoreRules 
 // rulesFor assembles the effective rules for one absolute path: the base rules
 // (global + ancestors + explicit files) followed by each directory from the
 // search root down to the path's parent, in walk order, so later rules win.
-func (r *grepIgnoreRules) rulesFor(absPath string) []grepIgnoreRule {
+func (r *grepIgnoreRules) rulesFor(ctx context.Context, absPath string) []grepIgnoreRule {
 	if r == nil {
 		return nil
 	}
 	dir := absPath
-	if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
+	// The path came out of the search's own enumeration, so its shape must be answered
+	// by the machine that listed it: this Stat decides which directory's rule files
+	// apply, and a local answer for a remote path silently changes the rule set.
+	if info, err := r.policy.access.Stat(ctx, absPath); err != nil || !info.IsDir() {
 		dir = filepath.Dir(absPath)
 	}
 	chain := []string{}
@@ -153,16 +196,16 @@ func (r *grepIgnoreRules) rulesFor(absPath string) []grepIgnoreRule {
 	rules := make([]grepIgnoreRule, 0, len(r.base))
 	rules = append(rules, r.base...)
 	for _, dir := range chain {
-		rules = append(rules, r.dirRules(dir)...)
+		rules = append(rules, r.dirRules(ctx, dir)...)
 	}
 	return rules
 }
 
-func (r *grepIgnoreRules) dirRules(dir string) []grepIgnoreRule {
+func (r *grepIgnoreRules) dirRules(ctx context.Context, dir string) []grepIgnoreRule {
 	if cached, ok := r.cache[dir]; ok {
 		return cached
 	}
-	rules := r.policy.dirRules(dir)
+	rules := r.policy.dirRules(ctx, dir)
 	r.cache[dir] = rules
 	return rules
 }
@@ -171,13 +214,13 @@ func (r *grepIgnoreRules) dirRules(dir string) []grepIgnoreRule {
 // ignore files and every ancestor directory's ignore files, outermost first, so
 // deeper rules can negate earlier ones. Explicit ignore_file entries join the
 // same list, scoped to their own directory.
-func (p *grepIgnorePolicy) baseRules(root string) []grepIgnoreRule {
+func (p *grepIgnorePolicy) baseRules(ctx context.Context, root string) []grepIgnoreRule {
 	if p == nil {
 		return nil
 	}
 	rules := make([]grepIgnoreRule, 0, 16)
 	if !p.skipGlobal {
-		rules = append(rules, globalIgnoreRulesWithCase(p.discoveredCaseInsensitive)...)
+		rules = append(rules, globalIgnoreRulesWithCase(ctx, p.access, p.discoveredCaseInsensitive)...)
 	}
 	if !p.skipParent {
 		ancestors := []string{}
@@ -193,7 +236,7 @@ func (p *grepIgnorePolicy) baseRules(root string) []grepIgnoreRule {
 			ancestors[i], ancestors[j] = ancestors[j], ancestors[i]
 		}
 		for _, ancestor := range ancestors {
-			rules = append(rules, p.dirRules(ancestor)...)
+			rules = append(rules, p.dirRules(ctx, ancestor)...)
 		}
 	}
 	if !p.skipExplicitFiles {
@@ -201,41 +244,42 @@ func (p *grepIgnorePolicy) baseRules(root string) []grepIgnoreRule {
 			// Explicit files stay case-sensitive even under the flag: rg does
 			// the same (verified), and the flag's own help text scopes it to
 			// the discovered file family.
-			rules = append(rules, loadGrepIgnoreFile(file, filepath.Dir(file))...)
+			rules = append(rules, loadGrepIgnoreFile(ctx, p.access, file, filepath.Dir(file))...)
 		}
 	}
 	return rules
 }
 
-func (p *grepIgnorePolicy) dirRules(dir string) []grepIgnoreRule {
+func (p *grepIgnorePolicy) dirRules(ctx context.Context, dir string) []grepIgnoreRule {
 	if p == nil {
 		return nil
 	}
 	rules := make([]grepIgnoreRule, 0, 8)
 	if !p.skipDot {
 		for _, name := range []string{".ignore", ".rgignore"} {
-			rules = append(rules, loadGrepIgnoreFileWithCase(
+			rules = append(rules, loadGrepIgnoreFileWithCase(ctx, p.access,
 				filepath.Join(dir, name), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	if !p.skipVCS {
 		for _, rel := range []string{".gitignore", filepath.Join(".git", "info", "exclude")} {
-			rules = append(rules, loadGrepIgnoreFileWithCase(
+			rules = append(rules, loadGrepIgnoreFileWithCase(ctx, p.access,
 				filepath.Join(dir, rel), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	return rules
 }
 
-// globalIgnoreRules mirrors the local tool's two global candidates.
-func globalIgnoreRules() []grepIgnoreRule {
-	return globalIgnoreRulesWithCase(false)
-}
-
-func globalIgnoreRulesWithCase(caseInsensitive bool) []grepIgnoreRule {
-	// HOME/USERPROFILE win over os.UserHomeDir: tests (and hosts) pin the
-	// global ignore location through the environment, exactly like the local
-	// tool's os.UserHomeDir respects them.
+// globalIgnoreRulesWithCase mirrors the local tool's two global candidates.
+//
+// The HOME lookups below are host facts and stay host-side: they are reached only
+// through a policy that newGrepIgnorePolicy already proved local (skipGlobal), which
+// is why they are not routed through the accessor. The file they name is read through
+// the accessor, which for a local policy is the same host file, so the parse semantics
+// are unchanged while the reach rule is enforced in one place.
+func globalIgnoreRulesWithCase(ctx context.Context, access toolcore.Access, caseInsensitive bool) []grepIgnoreRule {
+	// HOME/USERPROFILE win over the user-home lookup: tests (and hosts) pin the
+	// global ignore location through the environment, exactly like the local tool does.
 	home := strings.TrimSpace(os.Getenv("HOME"))
 	if home == "" {
 		home = strings.TrimSpace(os.Getenv("USERPROFILE"))
@@ -256,22 +300,22 @@ func globalIgnoreRulesWithCase(caseInsensitive bool) []grepIgnoreRule {
 		filepath.Join(home, ".config", "git", "ignore"),
 		filepath.Join(home, ".gitignore_global"),
 	} {
-		rules = append(rules, loadGrepIgnoreFileWithCase(candidate, filepath.Dir(candidate), caseInsensitive)...)
+		rules = append(rules, loadGrepIgnoreFileWithCase(ctx, access, candidate, filepath.Dir(candidate), caseInsensitive)...)
 	}
 	return rules
 }
 
 // loadGrepIgnoreFile parses one ignore file the way the local loader does.
 // Missing files are silent: ignore files are optional by nature.
-func loadGrepIgnoreFile(filePath, scope string) []grepIgnoreRule {
-	return loadGrepIgnoreFileWithCase(filePath, scope, false)
+func loadGrepIgnoreFile(ctx context.Context, access toolcore.Access, filePath, scope string) []grepIgnoreRule {
+	return loadGrepIgnoreFileWithCase(ctx, access, filePath, scope, false)
 }
 
 // loadGrepIgnoreFileWithCase is the same loader with the per-file case mode
 // recorded on each rule, so the comparison rule travels with the rule instead of
 // being a global switch that would leak into discovered files.
-func loadGrepIgnoreFileWithCase(filePath, scope string, caseInsensitive bool) []grepIgnoreRule {
-	data, err := os.ReadFile(filePath)
+func loadGrepIgnoreFileWithCase(ctx context.Context, access toolcore.Access, filePath, scope string, caseInsensitive bool) []grepIgnoreRule {
+	data, err := readGrepIgnoreFile(ctx, access, filePath)
 	if err != nil {
 		return nil
 	}

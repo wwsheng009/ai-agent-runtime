@@ -486,7 +486,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if !opts.IncludeHidden && isHiddenGrepPath(relativeGrepCandidate(root, path)) {
 			return nil
 		}
-		if rules != nil && ignoredByGrepRules(rules.rulesFor(path), path) {
+		if rules != nil && ignoredByGrepRules(rules.rulesFor(ctx, path), path) {
 			return nil
 		}
 		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
@@ -583,7 +583,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	sortKey := strings.TrimSpace(opts.SortKey)
 	sortRequested := opts.SortSet && sortKey != "" && sortKey != "none"
 	for _, root := range roots {
-		rules := newGrepIgnoreRules(newGrepIgnorePolicy(opts), root)
+		rules := newGrepIgnoreRules(ctx, newGrepIgnorePolicy(opts), root)
 		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
 			if globMatcher == nil || globMatcher.matches(filepath.Base(root)) {
 				if err := visit(root, rules, root); err != nil && err != filepath.SkipAll {
@@ -633,7 +633,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					if !opts.IncludeHidden && path != root && strings.HasPrefix(entry.Name(), ".") {
 						return filepath.SkipDir
 					}
-					if rules != nil && ignoredByGrepRules(rules.rulesFor(path), path) {
+					if rules != nil && ignoredByGrepRules(rules.rulesFor(ctx, path), path) {
 						return filepath.SkipDir
 					}
 					// Depth mirrors the local tool: a direct child directory has

@@ -25,7 +25,7 @@ func TestValidateGrepIgnoreFilesExplicitFileIsAPromise(t *testing.T) {
 	}
 
 	t.Run("missing fails", func(t *testing.T) {
-		err := ValidateGrepIgnoreFiles(GrepOptions{IgnoreFiles: []string{missing}})
+		err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{IgnoreFiles: []string{missing}})
 		if err == nil {
 			t.Fatal("a missing explicit ignore_file must fail")
 		}
@@ -35,7 +35,7 @@ func TestValidateGrepIgnoreFilesExplicitFileIsAPromise(t *testing.T) {
 	})
 
 	t.Run("missing is skipped with no_messages", func(t *testing.T) {
-		if err := ValidateGrepIgnoreFiles(GrepOptions{
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
 			IgnoreFiles: []string{missing}, NoMessages: true,
 		}); err != nil {
 			t.Fatalf("no_messages must turn the failure into a skip: %v", err)
@@ -43,19 +43,19 @@ func TestValidateGrepIgnoreFilesExplicitFileIsAPromise(t *testing.T) {
 	})
 
 	t.Run("directory fails", func(t *testing.T) {
-		if err := ValidateGrepIgnoreFiles(GrepOptions{IgnoreFiles: []string{asDir}}); err == nil {
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{IgnoreFiles: []string{asDir}}); err == nil {
 			t.Fatal("a directory named as ignore_file must fail")
 		}
 	})
 
 	t.Run("readable file passes", func(t *testing.T) {
-		if err := ValidateGrepIgnoreFiles(GrepOptions{IgnoreFiles: []string{readable}}); err != nil {
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{IgnoreFiles: []string{readable}}); err != nil {
 			t.Fatalf("a readable ignore_file must pass: %v", err)
 		}
 	})
 
 	t.Run("no_ignore_files disables the check", func(t *testing.T) {
-		if err := ValidateGrepIgnoreFiles(GrepOptions{
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
 			IgnoreFiles: []string{missing}, NoIgnoreFiles: true,
 		}); err != nil {
 			t.Fatalf("no_ignore_files discards the list, so nothing can fail: %v", err)
@@ -63,7 +63,7 @@ func TestValidateGrepIgnoreFilesExplicitFileIsAPromise(t *testing.T) {
 	})
 
 	t.Run("no_ignore disables the check", func(t *testing.T) {
-		if err := ValidateGrepIgnoreFiles(GrepOptions{
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
 			IgnoreFiles: []string{missing}, NoIgnore: true,
 		}); err != nil {
 			t.Fatalf("no_ignore disables the whole mechanism: %v", err)

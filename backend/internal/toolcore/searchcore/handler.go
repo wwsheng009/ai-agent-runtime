@@ -484,7 +484,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	engine := "walker"
 	// An explicit ignore_file that cannot be read is a caller-visible failure,
 	// not a silent difference in the rule set. NoMessages turns it into a skip.
-	if err := ValidateGrepIgnoreFiles(options); err != nil {
+	if err := ValidateGrepIgnoreFiles(ctx, options); err != nil {
 		return toolcore.Error(toolcore.ErrInvalidArgument,
 			"fix the ignore_file path or pass no_messages to skip unreadable ones", err), nil
 	}

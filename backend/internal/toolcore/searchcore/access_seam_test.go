@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 // countingAccess answers Stat from a set the test controls, and records every
@@ -211,8 +212,13 @@ func TestGrepAsksTheAccessorAboutTheAnchor(t *testing.T) {
 // point: if any part of the search opened the disk directly, the answer would come
 // from bytes the accessor never offered, and the assertion fails loudly.
 type virtualAccess struct {
-	files     map[string][]byte
-	times     map[string]time.Time
+	files map[string][]byte
+	times map[string]time.Time
+	// dirs declares the paths this accessor calls directories. The ignore work needs
+	// it: a directory that exists on the host but is not in `files` would otherwise be
+	// reported absent, so a test about scope could pass or fail on an accident of the
+	// fixture instead of on the answer the accessor actually gave.
+	dirs      map[string]bool
 	openCalls int
 	opened    []string
 }
@@ -233,6 +239,9 @@ func (h *virtualHandle) Close() error {
 func (a *virtualAccess) Stat(_ context.Context, path string) (fs.FileInfo, error) {
 	body, ok := a.files[path]
 	if !ok {
+		if a.dirs[path] {
+			return fakeInfo{name: filepath.Base(path), isDir: true}, nil
+		}
 		return nil, absentErr{path: path}
 	}
 	return fakeInfo{name: filepath.Base(path), size: int64(len(body)), mod: a.times[path]}, nil
@@ -608,4 +617,252 @@ func TestGrepWithoutAnAccessorKeepsReadingTheDisk(t *testing.T) {
 	if len(result.Matches) != 1 || !strings.Contains(result.Matches[0].Text, "on disk") {
 		t.Fatalf("the local default regressed: %v", result.Matches)
 	}
+}
+
+// --- S4: the ignore rule set is discovered on the machine that holds the files ---
+
+// writeHostFile puts one file on the disk, which is what makes the injection honest:
+// the same path holds different bytes for the accessor, so a rule that arrived from the
+// host is visible in the answer rather than invisible in a passing test.
+func writeHostFile(t *testing.T, filePath, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGrepIgnoreRulesComeFromTheAccessorsBytes: the host .gitignore hides keep.txt, the
+// accessor's .gitignore hides ignored.txt. Which file the search reports is therefore a
+// direct read of which machine supplied the rule.
+//
+// The control is not decoration. Without it, a fixture whose rules simply never applied
+// would produce the same "accessor" answer for the wrong reason, and the test would pass
+// while proving nothing.
+func TestGrepIgnoreRulesComeFromTheAccessorsBytes(t *testing.T) {
+	root := t.TempDir()
+	writeHostFile(t, filepath.Join(root, ".gitignore"), "keep.txt\n")
+	writeHostFile(t, filepath.Join(root, "ignored.txt"), "needle\n")
+	writeHostFile(t, filepath.Join(root, "keep.txt"), "needle\n")
+
+	shared := GrepOptions{Pattern: "needle", Limit: 10}
+	control := grepFilterMatches(t, root, shared)
+	assertFileList(t, control, []string{"ignored.txt"})
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(root, ".gitignore"):  []byte("ignored.txt\n"),
+			filepath.Join(root, "ignored.txt"): []byte("needle\n"),
+			filepath.Join(root, "keep.txt"):    []byte("needle\n"),
+		},
+		dirs: map[string]bool{root: true},
+	}
+	shared.Access = access
+	got := grepFilterMatches(t, root, shared)
+	if strings.Join(got, ",") == strings.Join(control, ",") {
+		t.Fatalf("the accessor changed nothing: the rule still came from the host (%v)", got)
+	}
+	assertFileList(t, got, []string{"keep.txt"})
+}
+
+// TestGrepExplicitIgnoreFileIsReadThroughTheAccessor pins the other entry point: an
+// ignore_file the caller named is a rule set, and a remote search must read the target's
+// copy of it. Before this step the file was opened on the host even when the search was
+// pointed elsewhere, so the caller's own promise was answered by the wrong machine.
+func TestGrepExplicitIgnoreFileIsReadThroughTheAccessor(t *testing.T) {
+	root := t.TempDir()
+	custom := filepath.Join(root, "custom.ignore")
+	writeHostFile(t, custom, "keep.txt\n")
+	writeHostFile(t, filepath.Join(root, "ignored.txt"), "needle\n")
+	writeHostFile(t, filepath.Join(root, "keep.txt"), "needle\n")
+
+	shared := GrepOptions{Pattern: "needle", Limit: 10, IgnoreFiles: []string{custom}}
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"ignored.txt"})
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			custom:                             []byte("ignored.txt\n"),
+			filepath.Join(root, "ignored.txt"): []byte("needle\n"),
+			filepath.Join(root, "keep.txt"):    []byte("needle\n"),
+		},
+		dirs: map[string]bool{root: true},
+	}
+	shared.Access = access
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"keep.txt"})
+	found := false
+	for _, path := range access.opened {
+		if path == custom {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the explicit ignore file was never opened through the accessor: %v", access.opened)
+	}
+}
+
+// TestValidateGrepIgnoreFilesAsksTheAccessor is the promise half: naming an ignore_file
+// means its rules apply, so the check for "can this file be read" has to be answered by
+// the machine the search is going to read. Two cases matter and both are silent failures
+// if wrong: a remote-only file that this machine would call missing, and a local file the
+// target does not have.
+func TestValidateGrepIgnoreFilesAsksTheAccessor(t *testing.T) {
+	root := t.TempDir()
+	remoteOnly := filepath.Join(root, "remote-only.ignore")
+	localOnly := filepath.Join(root, "local-only.ignore")
+	writeHostFile(t, localOnly, "keep.txt\n")
+
+	access := &virtualAccess{
+		files: map[string][]byte{remoteOnly: []byte("ignored.txt\n")},
+		dirs:  map[string]bool{filepath.Join(root, "dir.ignore"): true},
+	}
+
+	t.Run("a file the accessor has passes even though the host lacks it", func(t *testing.T) {
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
+			IgnoreFiles: []string{remoteOnly}, Access: access,
+		}); err != nil {
+			t.Fatalf("validation answered from the host: %v", err)
+		}
+		if access.openCalls == 0 {
+			t.Fatal("validation never asked the accessor")
+		}
+	})
+
+	t.Run("a file only the host has fails", func(t *testing.T) {
+		err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
+			IgnoreFiles: []string{localOnly}, Access: access,
+		})
+		if err == nil {
+			t.Fatal("the accessor says this file is absent; promising its rules would be a lie")
+		}
+		if !strings.Contains(err.Error(), "ignore_file") {
+			t.Fatalf("the error must name the parameter: %v", err)
+		}
+	})
+
+	t.Run("no_messages turns the accessor's refusal into a skip", func(t *testing.T) {
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
+			IgnoreFiles: []string{localOnly}, NoMessages: true, Access: access,
+		}); err != nil {
+			t.Fatalf("no_messages must skip: %v", err)
+		}
+	})
+
+	t.Run("a directory by the accessor's answer fails", func(t *testing.T) {
+		if err := ValidateGrepIgnoreFiles(context.Background(), GrepOptions{
+			IgnoreFiles: []string{filepath.Join(root, "dir.ignore")}, Access: access,
+		}); err == nil {
+			t.Fatal("a path the accessor calls a directory must not be promised as a rule file")
+		}
+	})
+}
+
+// TestRemoteAccessorDoesNotReadTheHostHomeGitignore is the Q3 decision, and it is the
+// reason the ratchet number alone is not the whole argument: HOME is a fact about the
+// machine running the tool, so applying it to files held elsewhere would silently hide
+// matches the target's own user never ignored.
+//
+// The control here is what makes the fixture trustworthy: without an accessor the same
+// global file must take effect, proving the host rule really is in place and that the
+// remote case is declining it rather than failing to read it.
+func TestRemoteAccessorDoesNotReadTheHostHomeGitignore(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("USERPROFILE", tempHome)
+	writeHostFile(t, filepath.Join(tempHome, ".config", "git", "ignore"), "global.txt\n")
+
+	root := t.TempDir()
+	writeHostFile(t, filepath.Join(root, "global.txt"), "needle\n")
+	writeHostFile(t, filepath.Join(root, "keep.txt"), "needle\n")
+
+	shared := GrepOptions{Pattern: "needle", Limit: 10}
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"keep.txt"})
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(root, "global.txt"): []byte("needle\n"),
+			filepath.Join(root, "keep.txt"):   []byte("needle\n"),
+			// The target also holds a file at the *host's* HOME path. That is the
+			// realistic collision - both sides are Linux, both have
+			// /home/<name>/.config/git/ignore - and it is what makes skipping the
+			// host's global rules observable instead of accidentally correct.
+			// Without this entry the remote case would pass even if the code asked
+			// for the host's global file, because the read would go to the accessor
+			// and find nothing there: two safeguards, one test, and no evidence that
+			// the intended one is doing any work.
+			filepath.Join(tempHome, ".config", "git", "ignore"): []byte("global.txt\n"),
+		},
+		dirs: map[string]bool{root: true},
+	}
+	shared.Access = access
+	// The host's global file hides global.txt, so a search that consulted it would answer
+	// with only keep.txt. Reporting global.txt is the proof that the host's HOME was left
+	// alone: HOME names this machine, and these bytes are not this machine's files.
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"global.txt", "keep.txt"})
+}
+
+// TestLocalAccessorStillReadsTheHostHomeGitignore keeps the other side of the default:
+// handing the core localio.Access explicitly is the same machine, so the host's global
+// rules must still apply. If this ever failed, a plain local search would have quietly
+// stopped honouring its own ~/.config/git/ignore.
+func TestLocalAccessorStillReadsTheHostHomeGitignore(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("USERPROFILE", tempHome)
+	writeHostFile(t, filepath.Join(tempHome, ".config", "git", "ignore"), "global.txt\n")
+
+	root := t.TempDir()
+	writeHostFile(t, filepath.Join(root, "global.txt"), "needle\n")
+	writeHostFile(t, filepath.Join(root, "keep.txt"), "needle\n")
+
+	shared := GrepOptions{Pattern: "needle", Limit: 10, Access: localio.Access}
+	assertFileList(t, grepFilterMatches(t, root, shared), []string{"keep.txt"})
+}
+
+// TestGrepIgnoreScopeFollowsTheAccessorsRootShape pins the other Stat this step moved:
+// whether the search root is a directory decides which ancestor's ignore files bound the
+// search, because a file-shaped root also consults its own directory's rules.
+//
+// The fixture is deliberately asymmetric: the root is a real directory on this machine
+// and a *file* according to the accessor, and the ignore rule that hides the match lives
+// in the parent. Answering the shape question locally therefore finds no rule and
+// reports a match; answering it through the accessor scopes the search to the parent and
+// hides it. Without this asymmetry both answers agree and the test proves nothing, which
+// is the same trap the ordering test fell into on the first draft.
+func TestGrepIgnoreScopeFollowsTheAccessorsRootShape(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Dir(filepath.Clean(root))
+	hit := filepath.Join(root, "hit.txt")
+	writeHostFile(t, hit, "needle\n")
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			// The root itself is bytes, not a directory, as far as the target is
+			// concerned - and the parent carries a rule that hides the match.
+			root:                                []byte("this root is a file here\n"),
+			hit:                                 []byte("needle\n"),
+			filepath.Join(parent, ".gitignore"): []byte("hit.txt\n"),
+		},
+	}
+
+	shared := GrepOptions{Pattern: "needle", Limit: 10, NoIgnoreParent: true}
+	shared.Access = access
+	got := grepFilterMatches(t, root, shared)
+	if len(got) != 0 {
+		t.Fatalf("the ignore scope was chosen by this machine's root shape, not the accessor's: %v", got)
+	}
+
+	// no_ignore_parent is load-bearing for this fixture, and the first draft of the test
+	// got it wrong: baseRules already loads every ancestor it can reach, so with the flag
+	// unset both candidate scopes produced the same rule set and the test stayed green
+	// against a mutation that answers the root shape from the host. With the flag set, the
+	// only way the parent's rule can reach the match is through the root's own shape
+	// question - which is the question this step moved.
+	//
+	// Control: with no accessor the host really does have a directory here, so the search
+	// root stays the root and the parent's rule is out of scope. The two answers must
+	// differ, or the assertion above is passing on an inert fixture.
+	control := grepFilterMatches(t, root, GrepOptions{Pattern: "needle", Limit: 10, NoIgnoreParent: true})
+	assertFileList(t, control, []string{"hit.txt"})
 }

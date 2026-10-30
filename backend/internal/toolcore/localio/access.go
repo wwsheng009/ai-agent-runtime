@@ -66,6 +66,25 @@ func For(rt toolcore.Runtime) toolcore.Access {
 	return Access
 }
 
+// IsLocal reports whether an accessor serves the filesystem of the machine running
+// this process, as opposed to a machine the caller pointed it at.
+//
+// It is a type assertion and deliberately not `access == Access`: interface
+// comparison panics at run time when the dynamic type is not comparable, so an
+// osAccess that ever grows a slice or map field would turn a quiet predicate into a
+// crash in whichever core asked it. Only this package can answer the question, since
+// only it knows its own implementation type.
+//
+// The reason a core is allowed to ask at all: some facts are properties of the
+// machine running the tool rather than of the files being read, and they have no
+// answer on a remote accessor. A wrapped local accessor is reported as not-local on
+// purpose - wrapping means something is being intercepted, so the core must not
+// claim it is talking to its own host.
+func IsLocal(access toolcore.Access) bool {
+	_, ok := access.(osAccess)
+	return ok
+}
+
 // _ proves the move adds no adapter: the operating system's own file type is
 // already a valid seam handle.
 var _ toolcore.FileHandle = (*os.File)(nil)

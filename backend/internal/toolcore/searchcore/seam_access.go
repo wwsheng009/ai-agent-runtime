@@ -17,3 +17,15 @@ func seamAccess(access toolcore.Access) toolcore.Access {
 	}
 	return access
 }
+
+// seamAccessIsLocal answers the one question a shared core may ask about *where* an
+// accessor points: does it serve this process's own machine?
+//
+// It exists for facts that are properties of the host rather than of the files being
+// searched, and which therefore have no honest answer on a remote accessor. The global
+// gitignore is the first such fact: it lives under a HOME, and HOME belongs to whoever
+// runs the tool, not to the machine holding the matches. The predicate is asked of
+// localio because only that package knows its own implementation type; see IsLocal.
+func seamAccessIsLocal(access toolcore.Access) bool {
+	return localio.IsLocal(seamAccess(access))
+}

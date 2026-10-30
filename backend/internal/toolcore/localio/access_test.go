@@ -231,6 +231,46 @@ func TestForResolvesTheInjectedAccessorAndDefaultsToLocal(t *testing.T) {
 	}
 }
 
+// TestIsLocalAnswersForTheCoreNotTheCaller pins the predicate a shared core uses to
+// decide whether a fact that belongs to *this machine* may be read at all - the
+// global-gitignore HOME question being the first real consumer.
+func TestIsLocalAnswersForTheCoreNotTheCaller(t *testing.T) {
+	if !IsLocal(Access) {
+		t.Fatal("the shared local accessor must be recognised as local")
+	}
+	if IsLocal(For(plainRuntime{})) == false {
+		t.Fatal("For's local default must satisfy IsLocal, or every local search loses its host facts")
+	}
+	if IsLocal(stubAccess{}) {
+		t.Fatal("an injected accessor must not be reported as local")
+	}
+	if IsLocal(nil) {
+		t.Fatal("nil is not an accessor: a core must resolve it through the seam before asking")
+	}
+	// A wrapper around the local value is deliberately not local. Reporting it as
+	// local would let a core claim its own host through an intercepting layer.
+	if IsLocal(wrappedAccess{Access}) {
+		t.Fatal("a wrapped accessor must not be reported as local")
+	}
+}
+
+// wrappedAccess delegates to another accessor, which is exactly what must not be
+// mistaken for the host.
+type wrappedAccess struct{ inner toolcore.Access }
+
+func (w wrappedAccess) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
+	return w.inner.Stat(ctx, path)
+}
+func (w wrappedAccess) Lstat(ctx context.Context, path string) (fs.FileInfo, error) {
+	return w.inner.Lstat(ctx, path)
+}
+func (w wrappedAccess) Open(ctx context.Context, path string) (toolcore.FileHandle, error) {
+	return w.inner.Open(ctx, path)
+}
+func (w wrappedAccess) ReadDir(ctx context.Context, path string) ([]fs.DirEntry, error) {
+	return w.inner.ReadDir(ctx, path)
+}
+
 // anyAccess puts two different interface values on the same footing so the
 // comparison above can be an identity check.
 func anyAccess(access toolcore.Access) interface{} { return access }
