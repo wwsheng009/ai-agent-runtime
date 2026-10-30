@@ -116,6 +116,7 @@ const SCREEN_ETAG = 'W/"screen-v1"';
 let screenETagEnabled = false;
 let screenETagHits = 0;
 let screenConditionalRequests = 0;
+let interruptPosts = 0;
 const fetchLog = [];
 const jsonResponse = (obj, status = 200, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -150,7 +151,15 @@ window.fetch = async (input, init) => {
     }
     return jsonResponse(SCREEN_OK, 200, { ETag: SCREEN_ETAG });
   }
-  if (url.includes('/web/api/input')) return jsonResponse({ status: 'queued' });
+  if (url.includes('/web/api/input')) {
+    let body = {};
+    try { body = JSON.parse((init && init.body) || '{}'); } catch (err) { body = {}; }
+    if (body.type === 'interrupt') {
+      interruptPosts++;
+      return jsonResponse({ status: 'interrupted', result: 'started' });
+    }
+    return jsonResponse({ status: 'queued' });
+  }
   if (url.includes('/web/api/statusbar')) {
     // 真实结构：{available, segments:[{kind,text}], full_line}（/web/api/statusbar）
     return jsonResponse({
@@ -428,6 +437,43 @@ const env = (src) => ({
   check('ETag 命中 304 时跳过整份快照重放',
     screenETagHits > 0 && historyRow.isSameNode(chatList.querySelector('.chat-msg')),
     `304=${screenETagHits} conditional=${screenConditionalRequests}`);
+
+  const sendBtn = doc.getElementById('chat-send');
+  check('运行中主按钮切换为停止',
+    !!sendBtn && sendBtn.classList.contains('is-stop') && !sendBtn.disabled &&
+    sendBtn.getAttribute('aria-label') === '停止',
+    sendBtn && (sendBtn.className + ' / ' + sendBtn.getAttribute('aria-label')));
+  sendBtn.click();
+  await sleep(80);
+  check('点击停止提交 interrupt 并进入停止中',
+    interruptPosts === 1 && sendBtn.disabled && sendBtn.classList.contains('is-sending') &&
+    sendBtn.getAttribute('aria-label') === '正在停止…',
+    `interrupt=${interruptPosts} class=${sendBtn.className} label=${sendBtn.getAttribute('aria-label')}`);
+  es.emit('session_interrupted', { ...env('session_interrupted'), turn_id: 'turn-x' });
+  await sleep(120);
+  check('停止完成后恢复发送按钮',
+    !sendBtn.classList.contains('is-stop') && !sendBtn.classList.contains('is-sending') &&
+    sendBtn.disabled && sendBtn.getAttribute('aria-label') === '发送',
+    sendBtn.className + ' / ' + sendBtn.getAttribute('aria-label'));
+  const globalES = sources.find((s) => s.url.includes('/api/events'));
+  if (globalES) {
+    globalES.emit('session', {
+      node_id: NODE_ID,
+      session: { ...node.sessions[0], state: 'running', busy: true },
+    });
+    await sleep(30);
+    check('registry session 忙闲驱动停止按钮',
+      !sendBtn.disabled && sendBtn.classList.contains('is-stop') &&
+      sendBtn.getAttribute('aria-label') === '停止',
+      sendBtn.className + ' / ' + sendBtn.getAttribute('aria-label'));
+    globalES.emit('session', {
+      node_id: NODE_ID,
+      session: { ...node.sessions[0], state: 'idle', busy: false },
+    });
+    await sleep(30);
+    check('registry session 空闲恢复发送',
+      !sendBtn.classList.contains('is-stop') && sendBtn.getAttribute('aria-label') === '发送');
+  }
 
   finish();
 

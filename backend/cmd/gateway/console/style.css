@@ -1893,6 +1893,18 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .chat-send:active { transform: scale(0.96); }
 .chat-send[disabled] { opacity: 0.45; }
 .chat-send-icon { display: block; }
+.chat-stop-icon {
+  display: none; width: 11px; height: 11px;
+  border-radius: 2px; background: currentColor;
+}
+.chat-send.is-stop {
+  background: var(--danger); border-color: transparent; color: #fff;
+}
+.chat-send.is-stop:hover { background: color-mix(in srgb, var(--danger) 86%, #000); }
+.chat-send.is-stop[disabled] { opacity: 0.72; }
+.chat-send.is-stop .chat-send-icon { display: none; }
+.chat-send.is-stop .chat-stop-icon { display: block; }
+.chat-send.is-sending .chat-stop-icon { display: none; }
 .chat-send-label {
   position: absolute; width: 1px; height: 1px;
   margin: -1px; padding: 0; border: 0;

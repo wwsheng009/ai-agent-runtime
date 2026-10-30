@@ -176,12 +176,18 @@
   - 实时 `EventSource /n/{node}/web/api/events`；
   - 发送 `POST /n/{node}/web/api/input`，body `{"prompt":"…"}`，成功返回 `{status:"queued"}`
     （与卡片行内回复表单同一契约，失败读 `body.reason`）。
+- **发送/停止按钮**：主按钮由会话 `busy` / active state 驱动。运行中变为红色「停止」方块；
+  点击提交 `/web/api/input` 的 `{"type":"interrupt"}`（返回 `{status:"interrupted",result}`
+  表示请求已受理），按钮进入「正在停止…」禁用态，收到 `session_interrupted` / `turn_end` /
+  `heartbeat(session_busy=false)` 后恢复「发送」。busy 的权威来源依次为 registry session
+  增量、SSE connected/heartbeat；打开面板时先用 session 快照初始化，避免首帧误显示发送。
+  运行中在输入框按 Enter 仍走 prompt 排队（不停止）；停止状态下的 Enter 被忽略。
 - **范围差异（与节点原版 Web UI 相比）**：做**消息渲染 + 输入 + 审批/提问内联决议**——
   挂起的审批/提问经 `connected.pending_approval|pending_question`（中途打开不丢）与
   `approval_requested` / `question_asked` 呈现在交互区，批准/拒绝/回答直接走
   `/web/api/input`（`{type:"approval",request_id,allow}` / `{type:"question_answer",…}`），
   不必跳转原版 Web；审批参数按「键: 值」逐行渲染（超长值截断、悬停看全文）。
-  不做 provider / model / reasoning effort 切换、停止回合、附件上传；需要这些时用面板内的
+  不做 provider / model / reasoning effort 切换、附件上传；需要这些时用面板内的
   「打开原版 Web」跳到完整界面。
 - **分页与窗口**：首屏 40 条；滚到顶部附近自动按 `msg_before` 前插 60 条（不再显示顶部按钮），
   并按新增高度补偿滚动位置。`msg_before` 的游标必须是**本地最老一条的绝对索引**（`msgStart`），

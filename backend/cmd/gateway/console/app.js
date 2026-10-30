@@ -816,6 +816,15 @@
       list.push(session);
     });
     if (!found) { loadNodes(); return; }
+    if (chatState && chatState.node && chatState.session &&
+        chatState.node.node_id === nodeID &&
+        chatState.session.session_id === session.session_id) {
+      chatState.session = session;
+      setText(el("chat-modal-sub"),
+        nodeDisplayName(chatState.node) + " · " + (chatState.node.kind || "agent") +
+        " · " + stateLabelOf(session));
+      chatSetBusy(sessionBusyFlag(session));
+    }
     updateStats(lastNodes);
     renderInbox(lastNodes);
     renderSessionTable(lastNodes);
@@ -3823,6 +3832,13 @@
     return session.busy && !isActiveSessionState(session.state) ? label + " · 处理中" : label;
   }
 
+  // Either the registry's `busy` flag or an active state marks a live turn;
+  // older snapshots may omit `busy` (omitempty false), so evaluate both.
+  function sessionBusyFlag(session) {
+    if (!session) { return false; }
+    return session.busy === true || isActiveSessionState(session.state);
+  }
+
   // Clipboard write with a legacy fallback. The button briefly confirms, but a
   // label swap alone is invisible to screen readers (and absent when the caller
   // passes no button), so the outcome is also announced as a toast.
@@ -4464,30 +4480,64 @@
     hint.hidden = !text;
   }
 
-  // chatSetSending 同步发送按钮的三态：空闲（纸飞机）/ 发送中（转圈）/ 失败
-  // （保持可点重试）。输入为空时按钮禁用，避免「点了没反应」的假反馈。
-  function chatSetSending(sending) {
+  // chatSyncComposer 是发送/停止按钮的唯一状态机：
+  //   idle（纸飞机）→ posting（转圈）→ busy（停止方块）→ interrupting（转圈，禁用）。
+  // busy 来自 registry/SSE 的会话忙闲，不靠“输入框里有没有字”猜测。
+  function chatSyncComposer() {
     var st = chatState;
     var btn = el("chat-send");
     var input = el("chat-input");
     if (!btn) { return; }
-    if (sending) {
-      btn.classList.add("is-sending");
-      btn.disabled = true;
-      btn.setAttribute("aria-busy", "true");
-      return;
-    }
-    btn.classList.remove("is-sending");
-    btn.removeAttribute("aria-busy");
+    var busy = !!(st && st.busy);
+    var interrupting = !!(st && st.interrupting);
+    var sending = !!(st && st.sending);
+    var stale = !!(st && st.node && st.node.stale);
+    var canInput = !!(st && chatCanInput(st.node));
     var hasText = !!(input && String(input.value || "").trim());
-    btn.disabled = !hasText || !!(st && st.node && st.node.stale);
+    var label = "发送";
+    var disabled = false;
+    btn.classList.toggle("is-stop", busy || interrupting);
+    btn.classList.toggle("is-sending", sending || interrupting);
+    btn.removeAttribute("aria-busy");
+    if (interrupting) {
+      label = "正在停止…";
+      disabled = true;
+      btn.setAttribute("aria-busy", "true");
+    } else if (sending) {
+      label = "发送中…";
+      disabled = true;
+      btn.setAttribute("aria-busy", "true");
+    } else if (busy) {
+      label = "停止";
+      disabled = stale || !canInput;
+    } else {
+      disabled = !hasText || stale || !canInput;
+    }
+    btn.disabled = disabled;
+    btn.setAttribute("aria-label", label);
+    btn.title = label === "发送" ? "发送（Enter）" : label;
+    setText(btn.querySelector(".chat-send-label"), label);
+    if (input) {
+      input.placeholder = interrupting
+        ? "正在停止当前任务…"
+        : (busy
+          ? "当前任务运行中，Enter 排队下一条…（Shift+Enter 换行）"
+          : "回复该会话…（Enter 发送，Shift+Enter 换行）");
+    }
+  }
+
+  // chatSetSending 保留原调用点语义，实际由统一状态机决定按钮外观。
+  function chatSetSending(sending) {
+    var st = chatState;
+    if (st) { st.sending = !!sending; }
+    chatSyncComposer();
   }
 
   // chatSyncSendState 在每次输入变化时刷新按钮可用性。
   function chatSyncSendState() {
     var st = chatState;
     if (!st || st.sending) { return; }
-    chatSetSending(false);
+    chatSyncComposer();
   }
 
   /* ── 状态栏（动态状态 + 静态段） ─────────────────────────────── */
@@ -4610,6 +4660,16 @@
       clearInterval(st.busyTimer);
       st.busyTimer = null;
     }
+    if (!st.busy) {
+      if (st.stopTimer) {
+        clearTimeout(st.stopTimer);
+        st.stopTimer = null;
+      }
+      if (st.interrupting) {
+        st.interrupting = false;
+        chatShowHint("已停止");
+      }
+    }
     // 活跃回合的「最后一块推理/工具自动展开」是忙闲状态的呈现，不应依赖下一份
     // 快照恰好变化才生效（相同快照会被 chatApplyWindow 跳过）。只在 false→true
     // 的边沿扫描一次，避免每轮轮询重复走整份 DOM。
@@ -4617,6 +4677,7 @@
       var host = el("chat-list");
       if (host) { chatApplyLiveTail(host, true); }
     }
+    chatSyncComposer();
   }
 
   function chatAutoGrow() {
@@ -4747,6 +4808,7 @@
       return;
     }
     var canInput = chatCanInput(node);
+    var initialBusy = sessionBusyFlag(session);
     setText(el("chat-modal-title"), sessionLabelOf(session));
     setText(el("chat-modal-sub"),
       nodeDisplayName(node) + " · " + (node.kind || "agent") +
@@ -4766,7 +4828,6 @@
     if (jump) { jump.hidden = true; }
     var input = el("chat-input");
     if (input) { input.value = ""; input.style.height = ""; }
-    chatSetSending(false);
     chatPlaceholder("正在加载消息…");
     chatState = {
       node: node,
@@ -4791,13 +4852,15 @@
       follow: true,
       olderBusy: false,
       sending: false,
+      interrupting: false,
+      stopTimer: null,
       available: true,
       failed: false,
       scrollRestore: null,
       source: null,
       pollTimer: null,
       refreshTimer: null,
-      busy: false,
+      busy: initialBusy,
       busyTimer: null,
       frames: 0,
       lastEvent: "",
@@ -4811,6 +4874,7 @@
       pendingQuestion: null,
       focusInteractive: wantInteractive,
     };
+    chatSyncComposer();
     syncChatHeaderActions();
     // 面板打开时先收起上一次的交互条（状态刚被替换，避免残留上一条审批）。
     chatRenderInteractive();
@@ -5580,6 +5644,11 @@
     if (st.pollTimer) { clearInterval(st.pollTimer); st.pollTimer = null; }
     if (st.refreshTimer) { clearTimeout(st.refreshTimer); st.refreshTimer = null; }
     chatCancelRender();
+    if (st.stopTimer) { clearTimeout(st.stopTimer); st.stopTimer = null; }
+    if (st.interrupting) {
+      st.interrupting = false;
+      chatSyncComposer();
+    }
     // 兜底轮询与状态栏时钟随连接一起停：后台/关闭时不空转（chatConnect 会按
     // st.busy 重新武装轮询）。
     if (st.busyTimer) { clearInterval(st.busyTimer); st.busyTimer = null; }
@@ -5855,6 +5924,62 @@
 
   // ── 输入面：发送 ────────────────────────────────────────────
 
+  // chatStopTurn 中断当前回合。响应 interrupted 表示请求已受理，真正复位仍以
+  // session_interrupted / turn_end / heartbeat(session_busy=false) 为准。
+  function chatStopTurn() {
+    var st = chatState;
+    if (!st || !st.busy || st.sending || st.interrupting) { return; }
+    if (st.node.stale) {
+      chatShowHint("节点离线，无法停止当前任务。");
+      return;
+    }
+    if (!chatCanInput(st.node)) {
+      chatShowHint("该节点未开启输入通道，无法停止。");
+      return;
+    }
+    st.interrupting = true;
+    chatSyncComposer();
+    chatShowHint("正在停止…");
+    chatSetStatus("正在停止…", "busy");
+    if (st.stopTimer) { clearTimeout(st.stopTimer); }
+    st.stopTimer = setTimeout(function () {
+      st.stopTimer = null;
+      if (chatState !== st || !st.interrupting) { return; }
+      st.interrupting = false;
+      chatSyncComposer();
+      chatSetStatus(st.busy ? "处理中…" : "就绪", st.busy ? "busy" : "live");
+      chatShowHint("停止请求未收到确认，可再次点击停止。");
+    }, 10000);
+    api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/input", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "interrupt" }),
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) { throw new Error((body && body.reason) || ("HTTP " + res.status)); }
+        return body || {};
+      });
+    }).then(function (body) {
+      if (chatState !== st || !st.interrupting) { return; }
+      if (body.status !== "interrupted") {
+        throw new Error(body.reason || body.status || "停止请求被拒绝");
+      }
+      chatSetStatus("正在停止…", "busy");
+      chatShowHint(body.result === "already_stopping"
+        ? "已在停止中，等待会话收尾…"
+        : "已请求停止，等待会话收尾…");
+    }).catch(function (err) {
+      if (chatState !== st || !st.interrupting) { return; }
+      if (st.stopTimer) { clearTimeout(st.stopTimer); st.stopTimer = null; }
+      st.interrupting = false;
+      chatSyncComposer();
+      chatSetStatus(st.busy ? "处理中…" : "就绪", st.busy ? "busy" : "live");
+      var message = err && err.message ? err.message : String(err);
+      chatShowHint("停止失败：" + message);
+      notify("停止失败：" + message, "error");
+    });
+  }
+
   // chatSend 复用卡片回复表单已固化的契约：POST /n/{node}/web/api/input
   // {"prompt":…}，只有 {status:"queued"} 算成功；失败保留草稿。
   function chatSend() {
@@ -5862,7 +5987,7 @@
     if (!st) { return; }
     var input = el("chat-input");
     var text = (input && input.value ? input.value : "").trim();
-    if (!text || st.sending) { return; }
+    if (!text || st.sending || st.interrupting) { return; }
     if (st.node.stale) {
       notify("节点「" + nodeDisplayName(st.node) + "」离线，无法发送。", "error");
       return;
@@ -7868,6 +7993,18 @@
       e.preventDefault();
       chatSend();
     });
+    var chatSendBtn = el("chat-send");
+    if (chatSendBtn) {
+      chatSendBtn.addEventListener("click", function (e) {
+        var st = chatState;
+        if (!st || !st.busy) { return; }
+        // The button is type=submit: while a turn is running, intercept the
+        // submit and turn the primary action into Stop. Enter still queues the
+        // next prompt through the form handler below.
+        e.preventDefault();
+        chatStopTurn();
+      });
+    }
     el("chat-input").addEventListener("input", function () {
       chatAutoGrow();
       chatSyncSendState();
@@ -8157,7 +8294,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=76").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=77").catch(function () {});
     });
   }
 

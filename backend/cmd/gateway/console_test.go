@@ -425,7 +425,8 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		"chatSetStreamingText", "chatSetStreamingMarkdown", "chatMarkdownStableBoundary",
 		"chatFlushMarkdownChunks", "chatPinBottomAfterLayout",
 		"CHAT_LIVE_MD_CHUNK_CHARS", "CHAT_LIVE_CHUNK_CHARS", "chat-stream-chunk",
-		"chat-stream-md-chunk",
+		"chat-stream-md-chunk", "chatSyncComposer", "chatStopTurn", "sessionBusyFlag",
+		`type: "interrupt"`,
 		"scrollGuardUntil", "followHoldUntil",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets
@@ -438,6 +439,9 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 	}
 	if !strings.Contains(index, `id="chat-dyn-status"`) || !strings.Contains(index, `id="chat-segs"`) {
 		t.Fatal("index.html is missing the chat status bar (#chat-dyn-status / #chat-segs)")
+	}
+	if !strings.Contains(index, `class="chat-stop-icon"`) {
+		t.Fatal("index.html is missing the composer stop icon")
 	}
 
 	// Icon-first mobile actions: every icon-only control keeps a name, and the
@@ -461,6 +465,7 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		`content-visibility: auto;`,
 		`contain-intrinsic-size: auto 140px;`,
 		`flex: 0 0 auto;`,
+		`.chat-send.is-stop {`,
 	} {
 		if !strings.Contains(readConsoleAsset(t, "style.css"), needle) {
 			t.Fatalf("style.css is missing %q", needle)
