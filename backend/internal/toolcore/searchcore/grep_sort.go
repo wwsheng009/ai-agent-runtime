@@ -1,12 +1,14 @@
 package searchcore
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // GrepSortKeys lists the accepted --sort/--sortr values. The set is ripgrep's
@@ -59,7 +61,11 @@ type grepSortCandidate struct {
 //
 // Ties are broken by the root-relative path (ascending in both directions) so
 // the order is total and deterministic even when timestamps collide.
-func sortGrepCandidates(candidates []grepSortCandidate, key string, reverse bool) ([]grepSortCandidate, error) {
+//
+// The timestamps are read through the accessor that enumerated the candidates:
+// ordering remote paths by this machine's mtimes would be a confidently wrong order,
+// and an unverifiable one at that.
+func sortGrepCandidates(ctx context.Context, access toolcore.Access, candidates []grepSortCandidate, key string, reverse bool) ([]grepSortCandidate, error) {
 	key = strings.TrimSpace(key)
 	if key == "" || key == "none" {
 		return candidates, nil
@@ -79,7 +85,7 @@ func sortGrepCandidates(candidates []grepSortCandidate, key string, reverse bool
 		rel := filepath.ToSlash(relativeGrepCandidate(candidate.root, candidate.path))
 		item := entry{candidate: candidate, rel: rel}
 		if key != "path" {
-			info, err := os.Stat(candidate.path)
+			info, err := access.Stat(ctx, candidate.path)
 			if err != nil {
 				// The file vanished between discovery and sorting; the scan
 				// would have skipped it too.

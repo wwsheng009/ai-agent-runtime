@@ -45,6 +45,7 @@ type fakeInfo struct {
 	name  string
 	size  int64
 	isDir bool
+	mod   time.Time
 }
 
 func (i fakeInfo) Name() string { return i.name }
@@ -55,7 +56,7 @@ func (i fakeInfo) Mode() fs.FileMode {
 	}
 	return 0o644
 }
-func (i fakeInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeInfo) ModTime() time.Time { return i.mod }
 func (i fakeInfo) IsDir() bool        { return i.isDir }
 func (i fakeInfo) Sys() any           { return nil }
 
@@ -211,6 +212,7 @@ func TestGrepAsksTheAccessorAboutTheAnchor(t *testing.T) {
 // from bytes the accessor never offered, and the assertion fails loudly.
 type virtualAccess struct {
 	files     map[string][]byte
+	times     map[string]time.Time
 	openCalls int
 	opened    []string
 }
@@ -233,9 +235,7 @@ func (a *virtualAccess) Stat(_ context.Context, path string) (fs.FileInfo, error
 	if !ok {
 		return nil, absentErr{path: path}
 	}
-	// The size the accessor reports is the size of the bytes it would serve, which
-	// is what the walker's MaxFileBytes gate must compare against.
-	return fakeInfo{name: filepath.Base(path), size: int64(len(body))}, nil
+	return fakeInfo{name: filepath.Base(path), size: int64(len(body)), mod: a.times[path]}, nil
 }
 
 func (a *virtualAccess) Lstat(ctx context.Context, path string) (fs.FileInfo, error) {
@@ -486,6 +486,111 @@ func TestExpandGrepContextNilOpenerMeansLocal(t *testing.T) {
 	})
 	if len(remote) != 3 || remote[0].Text != "L1" || remote[2].Text != "L3" {
 		t.Fatalf("opener was not honoured: %v", remote)
+	}
+}
+
+// TestGlobOrderFollowsTheAccessorsTimes is S3 for glob. Every glob call orders
+// matches newest-first, so the timestamps must belong to the machine being listed.
+// The disk is set up with the opposite order, and the control case proves the two
+// sources really do disagree - otherwise this test would pass while reading nothing.
+func TestGlobOrderFollowsTheAccessorsTimes(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "a.txt")
+	second := filepath.Join(root, "b.txt")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Unix(1_600_000_000, 0)
+	newer := time.Unix(1_700_000_000, 0)
+	// Disk: b is the newer file.
+	if err := os.Chtimes(first, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	options := GlobOptions{Base: root, Pattern: "*.txt", Limit: 10, SortByModTime: true}
+
+	local, err := GlobWithOptions(context.Background(), options)
+	if err != nil {
+		t.Fatalf("local glob: %v", err)
+	}
+	if len(local.Matches) != 2 || filepath.Base(local.Matches[0]) != "b.txt" {
+		t.Fatalf("the control is wrong: disk order should put b.txt first, got %v", local.Matches)
+	}
+
+	// The accessor insists a is the newer file.
+	access := &virtualAccess{
+		files: map[string][]byte{first: []byte("x\n"), second: []byte("x\n")},
+		times: map[string]time.Time{first: newer, second: old},
+	}
+	options.Access = access
+	remote, err := GlobWithOptions(context.Background(), options)
+	if err != nil {
+		t.Fatalf("glob with the accessor: %v", err)
+	}
+	if len(remote.Matches) != 2 || filepath.Base(remote.Matches[0]) != "a.txt" {
+		t.Fatalf("glob ordered by this machine's mtimes instead of the accessor's: %v", remote.Matches)
+	}
+}
+
+// TestGrepSortFollowsTheAccessorsTimes is S3 for grep's --sort=modified. Note the
+// boundary this exposes: sort=accessed and sort=created read platform-specific
+// Stat_t fields through FileInfo.Sys(), which an accessor over another transport
+// cannot honestly supply - those two must stay declined for remote sources rather
+// than approximated. Only "modified" is exercised here.
+func TestGrepSortFollowsTheAccessorsTimes(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "f1.txt")
+	second := filepath.Join(root, "f2.txt")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("needle\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Unix(1_600_000_000, 0)
+	newer := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(first, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(second, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// SortSet is load-bearing: a key alone is not a request. The first draft of this
+	// test omitted it, so no sorting happened and the "control" passed for the wrong
+	// reason - the assertion below only became meaningful once the sort actually ran.
+	// rg's `--sort=modified` is ascending - oldest file first - and the core keeps
+	// that meaning (`--sortr` is the reverse). The first draft of this test asserted
+	// newest-first and so "failed" against correct behaviour; the comparator in
+	// grep_sort.go settled it.
+	shared := GrepOptions{Path: root, Limit: 10, Pattern: "needle", SortKey: "modified", SortSet: true}
+	local, err := Grep(context.Background(), shared)
+	if err != nil {
+		t.Fatalf("local grep: %v", err)
+	}
+	if len(local.Matches) != 2 || filepath.Base(local.Matches[0].File) != "f2.txt" {
+		t.Fatalf("the control is wrong: ascending by disk mtime should put the older f2.txt first, got %v", local.Matches)
+	}
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			first:  []byte("needle\n"),
+			second: []byte("needle\n"),
+		},
+		// The accessor's view flips the ages: f1 is the older file there, so the
+		// ascending order must start with f1 while disk starts with f2.
+		times: map[string]time.Time{first: old, second: newer},
+	}
+	shared.Access = access
+	remote, err := Grep(context.Background(), shared)
+	if err != nil {
+		t.Fatalf("grep with the accessor: %v", err)
+	}
+	if len(remote.Matches) != 2 || filepath.Base(remote.Matches[0].File) != "f1.txt" {
+		t.Fatalf("grep sorted by this machine's mtimes instead of the accessor's: %v", remote.Matches)
 	}
 }
 

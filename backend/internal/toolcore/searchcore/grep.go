@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/localio"
 )
 
 const (
@@ -347,13 +346,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if err != nil {
 		return GrepResult{}, err
 	}
-	// Resolved once: the probe below, the content read below and every other file
-	// question in this search must go to the same machine, and the answer must not
-	// be able to change between one file and the next inside a single call.
-	access := opts.Access
-	if access == nil {
-		access = localio.Access
-	}
+	// Resolved once: the probe below, the content read below, the ordering above it
+	// and every other file question in this search must go to the same machine, and
+	// the answer must not be able to change between one file and the next inside a
+	// single call.
+	access := seamAccess(opts.Access)
 	opts.Access = access
 	patterns, err := GrepPatternsWithFiles(ctx, opts)
 	if err != nil {
@@ -669,7 +666,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				return GrepResult{}, walkErr
 			}
 			if sortRequested {
-				ordered, sortErr := sortGrepCandidates(sortCandidates, opts.SortKey, opts.SortReverse)
+				ordered, sortErr := sortGrepCandidates(ctx, access, sortCandidates, opts.SortKey, opts.SortReverse)
 				if sortErr != nil {
 					return GrepResult{}, sortErr
 				}
@@ -878,10 +875,7 @@ func GrepPatternsWithFiles(ctx context.Context, opts GrepOptions) ([]string, err
 	if len(opts.PatternFiles) == 0 {
 		return patterns, nil
 	}
-	access := opts.Access
-	if access == nil {
-		access = localio.Access
-	}
+	access := seamAccess(opts.Access)
 	out := make([]string, 0, len(patterns)+8)
 	out = append(out, patterns...)
 	for _, path := range opts.PatternFiles {

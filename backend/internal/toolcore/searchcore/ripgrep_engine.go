@@ -312,7 +312,7 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	// Order before paging, exactly like the walker: sorting a page afterwards
 	// gives each page its own order and makes next_offset meaningless.
 	if opts.SortByModTime {
-		sortGlobMatchesByModTime(result.Matches)
+		sortGlobMatchesByModTime(ctx, seamAccess(opts.Access), result.Matches)
 	} else {
 		sort.Strings(result.Matches)
 	}

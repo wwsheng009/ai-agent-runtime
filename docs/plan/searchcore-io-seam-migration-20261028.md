@@ -84,7 +84,7 @@ Access toolcore.Access
 | S2b ✅ | 模式文件读取（`GrepPatternsWithFiles` **加了 ctx**：3 个调用点全在包内且 ctx 均已在手，全仓无外部调用方；内部用 `context.Background()` 假装取消不是选项） | grep.go | **实测 18→17** | 单次 revert |
 | S2c ✅ | 上下文重读。**不给渲染层加 ctx**：改为传一个已捕获 ctx 的 `grepFileOpener` 闭包（`nil` = 本地，沿用 `Options.Access` 约定）。理由：`renderGrepPage` 有 10+ 测试调用点，加参数代价大；把 context 存进结构体是 Go 明令禁止的形状。闭包让取消留在真正拥有它的 handler 里 | grep_context.go、grep_render.go、handler.go | **实测 17→16** | 单次 revert |
 
-| S3 | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go | os.* 17→15 | 同上 |
+| S3 ✅ | 排序所需的 mtime（glob 与 grep 两处） | glob.go、grep_sort.go、ripgrep_engine.go、handler.go | **实测 16→14** | 单文件回滚 |
 | S4 | ignore 文件读取（含 Q3 决定 + 守卫可见性补齐） | grep_ignore.go | os.* 15→11；**新增一项守卫**覆盖 HOME 类现场 | 同上 |
 | S5 | 遍历器本体：`grepWalkRoot`/`walkGrepFollowing`/`walkGlobMatches` + Q1/Q2 | grep.go、glob.go | os.* 11→? 、walker 4→? （Q1/Q2 未定则为剩余量并写明原因） | 单文件回滚 |
 | S6 | 退役 `Searcher` 拦截，让远端 grep/glob 走共享核 | remotetools + handler | 目标是**删代码**（与 bridge 那轮 −3175 行同类收益） | 整步独立可撤 |
@@ -109,7 +109,23 @@ Access toolcore.Access
 2. **文本手术不该交给无守卫的批量替换**：S2c 给测试加第 6 个参数时，脚本用 `, false, false)` 作锚点，连带误改了 `contextLine(...)` 辅助调用；随后的补救又因切片长度算错留下 `false, ),`。最终做法是回退两个文件、只按"该行含 `ExpandGrepContext(`"作守卫重做，并逐行核对 diff。教训：**批量替换必须带行级守卫，且改完必须看 diff 全量而不是只看编译通过**。
 3. **变异必须是可编译的**：两次变异分别造成 build failed（未使用变量）与"锚点没匹配上的空跑 ok"。之后统一为先打印"锚点找到 / 写入可见"，再跑测试，最后验证还原残留为 0。
 
+4. **S3 提交前遇到两条偶发失败，已记录而非掩盖、也未擅自归因**：五包并跑时 `remotetools` 的 `TestShellReportsArtifactWriteFailure` 与 `cmd/aicli-remote-tools` 的 `TestDoctorShellPolicyReportsEffectiveGatesAndGuidance` 失败；**单独跑两个用例通过，两包并跑整包也通过**（80.2s / 11.0s 全绿）。两者主题都是 shell/artifacts，与本步改动的 glob/grep 排序无关；在他人 WIP 与两处半提交仍在树上的情况下，我没有把它记成"与我无关"就放过，而是留下这条：合并前应在干净基线上重跑确认。另外本仓同一时段 `internal/toolkit` 的 `TestBashTool` / `TestRegistryExecute_UnwrapsRawArgs` 稳定失败，其错误串只出现在他人未提交的 `toolkit/tools/bash.go` 里，属其 shell/jobs 中途状态。
+
 一个刻意的设计取舍（S2c）：渲染层需要"从哪台机器重读上下文行"，但**没有**把 `ctx` 塞进 `grepRenderInputs`，也没有给 `renderGrepPage` 加参数（10+ 测试调用点），而是传一个捕获了 ctx 的 `grepFileOpener` 闭包，`nil` 表示本地。取消语义因此留在真正拥有它的 handler 里，结构体不携带 context。
+
+### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
+
+`grep_sort.go` 对这两个 key 读的是 `FileInfo.Sys()` 里的平台 `Stat_t`（`fileAccessTime` /
+`fileCreationTime`）。跨传输的 accessor 给不出诚实的 `Sys()`，于是只有三条路：
+
+1. **拒绝**（推荐）：远端 source 下这两个 key 报"本平台不可用"，与现有
+   `grepSortKeySupported` 的降级文案同形；
+2. 用 `path+size+mtime` 伪造 —— **否决**，把弱判断伪装成强判断；
+3. 让 accessor 额外传 birth/atime —— 需先确认 envd 的 `Entry` 能拿到这些字段，属于
+   `envd_access.go` 的设计题，不在本步偷做。
+
+`sort=modified` 只用 `ModTime()`，远端可诚实支持，S3 已把它接进 seam 并用测试钉住方向
+（rg 的 `--sort=modified` 是**升序=最旧优先**，`--sortr` 才是降序——本仓的比较器就是这么实现的）。
 
 ## 5. 风险（按已发生的先例写，不写抽象担忧）
 

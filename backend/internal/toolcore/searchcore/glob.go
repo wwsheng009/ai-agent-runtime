@@ -69,6 +69,10 @@ type GlobOptions struct {
 	// path) instead of the default name order. This is the local tool's order:
 	// the files a caller is usually looking for are the ones just touched.
 	SortByModTime bool
+	// Access is the I/O seam used for the timestamps that ordering needs. nil means
+	// this machine's filesystem, exactly like GrepOptions.Access: an unconverted
+	// caller keeps the behaviour it always had.
+	Access toolcore.Access
 }
 
 // GlobWithOptions runs one glob. The pattern is expanded for shell braces
@@ -165,7 +169,7 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 	// give every page its own order, so next_offset could not describe a stable
 	// sequence.
 	if opts.SortByModTime {
-		sortGlobMatchesByModTime(result.Matches)
+		sortGlobMatchesByModTime(ctx, seamAccess(opts.Access), result.Matches)
 	} else {
 		sort.Strings(result.Matches)
 	}
@@ -517,7 +521,11 @@ func globTimeoutNotice() string {
 // sortGlobMatchesByModTime orders newest first, breaking ties by path so the
 // sequence is stable across runs. A match that cannot be stat'ed sorts last
 // rather than being dropped: it still is a real match.
-func sortGlobMatchesByModTime(matches []string) {
+//
+// The timestamps come from the accessor, not from this process's disk: the list being
+// ordered is a list of paths that accessor enumerated, and ordering remote files by
+// local mtimes would produce a confidently wrong order rather than a degraded one.
+func sortGlobMatchesByModTime(ctx context.Context, access toolcore.Access, matches []string) {
 	type entry struct {
 		path    string
 		modTime time.Time
@@ -525,7 +533,7 @@ func sortGlobMatchesByModTime(matches []string) {
 	entries := make([]entry, 0, len(matches))
 	for _, match := range matches {
 		var mod time.Time
-		if info, err := os.Stat(match); err == nil {
+		if info, err := access.Stat(ctx, match); err == nil {
 			mod = info.ModTime()
 		}
 		entries = append(entries, entry{path: match, modTime: mod})

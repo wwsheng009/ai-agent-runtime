@@ -173,8 +173,13 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Offset:          offset,
 		CaseInsensitive: caseInsensitive,
 		// Match order follows the local tool: newest first. It is not exposed as
-		// a parameter because both surfaces have always behaved this way.
+		// a parameter because both surfaces have always behaved this way - which
+		// also means every glob call stats each match, so the timestamps must come
+		// from the same accessor that answered the existence check above. Ordering
+		// a remote listing by this machine's mtimes would be a confidently wrong
+		// answer rather than a degraded one.
 		SortByModTime: true,
+		Access:        access,
 	}
 	// One budget covers both engines: the walker and ripgrep must stop at the
 	// same deadline, otherwise a slow listing would change behavior based only
