@@ -18,7 +18,9 @@ package remotetools
 
 import (
 	"context"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -318,5 +320,95 @@ func TestSharedGrepGlobFilterUsesTheTargetsPaths(t *testing.T) {
 	}
 	if strings.Contains(result.Content, "alpha.txt") {
 		t.Fatalf("the glob filter admitted a file outside its pattern:\n%s", result.Content)
+	}
+}
+
+// hostPaths resolves like the local surface does: the host's own rules, because that is
+// what a local search has always used. It exists so the comparison below runs the local side
+// through exactly the code a local caller would get, not through a POSIX-flavoured stub.
+type hostPaths struct{ root string }
+
+func (p hostPaths) Root() string { return p.root }
+
+func (p hostPaths) Resolve(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "." {
+		return p.root, nil
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw), nil
+	}
+	return filepath.Join(p.root, raw), nil
+}
+
+func (p hostPaths) Relative(abs string) string {
+	rel, err := filepath.Rel(p.root, abs)
+	if err != nil {
+		return abs
+	}
+	return filepath.ToSlash(rel)
+}
+
+// TestSharedGrepPageMatchesTheLocalPage is the claim this whole line of work exists to make,
+// stated as an assertion rather than as prose: the same logical tree, searched by the same
+// core, renders the same page whether the bytes came from this machine or from the target.
+//
+// Per-case assertions ("the output contains gamma.txt") can pass while the page still differs
+// in the ways a caller notices - a backslash in a label, a root prefix that should not be
+// there, a different separator between the file and the line number. Comparing the two pages
+// byte for byte is the only assertion that cannot pass for a partially-right rendering, and
+// it is what makes S5d/S5e's path work verifiable instead of merely plausible.
+func TestSharedGrepPageMatchesTheLocalPage(t *testing.T) {
+	const body = "needle here\n"
+	local := t.TempDir()
+	for _, rel := range []string{"alpha.txt", "pkg/gamma.txt"} {
+		full := filepath.Join(local, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	remoteRoot := "/srv/work"
+	fake := &fakeEnvdFiles{
+		entries: map[string]envdclient.Entry{remoteRoot: fakeDirEntry(remoteRoot)},
+		listing: map[string][]string{},
+		content: map[string][]byte{},
+	}
+	for _, rel := range []string{"alpha.txt", "pkg/gamma.txt"} {
+		target := path.Join(remoteRoot, rel)
+		fake.entries[target] = fakeFileEntry(target, int64(len(body)))
+		fake.content[target] = []byte(body)
+	}
+	// The directory must appear in its parent's listing, or the walk has no reason to
+	// descend - the first draft of this fixture forgot that and the target page came back
+	// with one file, which the comparison reported as a rendering difference.
+	pkgDir := path.Join(remoteRoot, "pkg")
+	fake.entries[pkgDir] = fakeDirEntry(pkgDir)
+	fake.listing[remoteRoot] = []string{"alpha.txt", "pkg"}
+	fake.listing[pkgDir] = []string{"gamma.txt"}
+
+	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+	args := map[string]any{"pattern": "needle", "path": "."}
+
+	localPage := runHandler(t, handler, args, envdCoreRuntime{paths: hostPaths{root: local}, access: nil})
+	if !localPage.Success {
+		t.Fatalf("local grep failed: %s", localPage.Content)
+	}
+	remotePage := runHandler(t, handler, args, envdCoreRuntime{
+		paths: envdCorePaths{root: remoteRoot}, access: &envdAccess{api: fake},
+	})
+	if !remotePage.Success {
+		t.Fatalf("remote grep failed: %s", remotePage.Content)
+	}
+
+	if localPage.Content != remotePage.Content {
+		t.Fatalf("the same logical tree rendered two different pages:\n--- local ---\n%s\n--- target ---\n%s",
+			localPage.Content, remotePage.Content)
+	}
+	if !strings.Contains(localPage.Content, "pkg/gamma.txt") {
+		t.Fatalf("neither page used the target's separator:\n%s", localPage.Content)
 	}
 }
