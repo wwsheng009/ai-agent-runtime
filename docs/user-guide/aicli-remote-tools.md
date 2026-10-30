@@ -356,6 +356,7 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 - `artifacts.root` 非空时，追加 `artifact_read`（用于取回被折叠的完整输出）。
 - `tools:` 非空时是**最终白名单**，不能扩大 profile；`custom` 必须显式列出工具，`job_*`/`artifact_read` 也要列入才可见。
 - 可选工具默认不暴露；需要通过 `optionalTools.enabled`（或 `tools:`）显式开启，且仍受 profile/network 门控，见 §5.4。
+- **例外：结果契约依赖会被自动补入**。`tools:["shell"]` 会自动带上 `job_output`，见 §5.5；`tools:[]`（空列表）仍然是空面，不会被补成有工具。
 
 ### 5.2 工具名前缀
 
@@ -437,6 +438,33 @@ aicli-remote-tools serve --profile ops `
 5. `tools:` 非空时再做最终白名单收窄。
 
 `network.allowedHosts` 为空时，启用网络后允许任意主机；生产目标建议显式配置 allowlist。网络工具目前只支持本地 backend；envd backend 不会暴露这些依赖 bridge 本机进程的实现。
+
+### 5.5 依赖自动补入（`shell` 与 `job_output`）
+
+`tools:` 是最终白名单，但有一个**结果契约依赖**的例外：`shell` 超时后会把执行提升为 job 引用，模型必须能调用 `job_output` 才读得到后续输出。因此当 `shell` 出现在生效面上时，`job_output` 会被自动补入。
+
+```yaml
+profile: custom
+tools: ["shell"]        # 实际生效：shell + job_output
+```
+
+这条规则不会扩大权限面：
+
+- **只补只读消费者**。`job_output` 是只读的；起停/监控类工具（`job_start`、`job_cancel`）**不会**被自动补入，仍须显式列出；
+- **空列表不复活**。`tools: []` 仍然是空工具面，不会被补成有工具——契约只填补遗漏项；
+- **`readonly` 面不触发**。read-only 下 `shell` 本身不出现，因此也不会带入 `job_output`。
+
+查看哪些工具是被自动补入的：
+
+```bash
+aicli-remote-tools doctor --config /etc/aicli/remote.yaml
+#   tools (2)        : shell, job_output
+#   auto-exposed     : job_output (added by tool dependencies)
+```
+
+`doctor` 的 `auto-exposed` 行只在存在补入项时出现；`--json` 输出对应 `autoExposedTools` 字段。
+
+> **注意**：远程 `tools:` 按**精确名**匹配，不做别名归一。写 `tools: ["bash"]` 不会匹配 `shell`（也不会触发补入）；请使用 `shell`。本地 `aicli --allow-tool` 支持别名。
 
 ---
 
@@ -541,7 +569,7 @@ remote_srv__shell {"workdir":"/etc"}      → PATH_DENIED
 remote_srv__shell {"command":"cat /etc/hostname"} → 成功
 ```
 
-原因是 `shell` 真正执行的是 `sh -c "<command>"`（Windows 为启动时解析的 shell，通常 `pwsh`/`powershell`，回退 `cmd.exe /c`），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数。
+原因是 `shell` 真正执行的是 `sh -c "<command>"`（Windows 为启动时解析的 shell，通常 `pwsh`/`powershell`，回退 `cmd.exe /c`），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 开启时只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数；该项**默认关闭**，因此管道等组合默认可用，需要收紧时请显式设为 `true`。
 
 **如果要求"命令也只能访问 workspace"**，必须使用 OS 级隔离，而不是再加一层 agent 配置：
 
@@ -577,7 +605,7 @@ Roots 中的相对路径按服务端 workspace 解析；指向不存在目录的
 |------|------|------|
 | 1 | `deniedCommands` / `deniedCommandPatterns` | **永远优先**，即使同时出现在 allowlist 中也拒绝 |
 | 2 | `allowedCommands` / `allowedCommandPatterns` | 至少一个非空；两者都空 = 全拒（与本地"空=全放"相反） |
-| 3 | `denyShellMetachars` | 拒绝 `;` `&&` `\|\|` `\|` 反引号 `$(` `>` `<` 和换行（引号内不算） |
+| 3 | `denyShellMetachars` | **可选，默认关闭**；开启后拒绝 `;` `&&` `\|\|` `\|` 反引号 `$(` `>` `<` 和换行（引号内不算） |
 | 4 | 破坏性分类器 | 共享 `shellrisk`：递归删除根/家目录等，即使二进制在 allowlist 中也拒绝 |
 
 ### 7.2 两种匹配方式：argv 前缀 与 整条命令通配
@@ -649,7 +677,7 @@ aicli-remote-tools serve --http --workspace D:\srv\app `
 | 固定程序及其任意参数 | `allowedCommands`（prefix） | `git`、`go test`、`kubectl get` |
 | 固定脚本入口，参数不固定 | `allowedCommands` | `/opt/ops/deploy.sh` |
 | 脚本名本身不固定 | `allowedCommandPatterns`（glob） | `"deploy238_*.sh *"` |
-| 整个 target 全部单条命令 | `--allow-all` 或 `allowedCommands: ["*"]` | 仍受 deny / metachar / destructive 闸门 |
+| 整个 target 全部单条命令 | `--allow-all` 或 `allowedCommands: ["*"]` | 仍受 deny / destructive 闸门（metachar 闸门默认关闭） |
 
 不要用 `allowedCommands` 写 `deploy*.sh`：它不是通配符。也不要用
 `allowedCommandPatterns: ["*"]` 表达“全部放行”；虽然效果相同，但语义不清晰，
@@ -670,7 +698,7 @@ aicli-remote-tools policy lint --config /etc/aicli/remote.yaml
 ```text
 decision         : allow
 matched rule     : allowedCommands:git
-metachar gate    : deny
+metachar gate    : allow
 allow rules      : prefix:git
 deny rules       : -
 ```
@@ -796,7 +824,7 @@ profile: all
 readOnly: false
 shell:
   allowedCommands: ["*"]        # 显式全放行；仍受 deny 与破坏性分类器约束
-  denyShellMetachars: false     # 允许 | ; && > < 等组合命令；高风险
+  denyShellMetachars: false     # 默认即为 false；显式写出便于审计，允许 | ; && > <
 ```
 
 CLI 等价写法：
@@ -807,7 +835,8 @@ aicli-remote-tools serve --http --workspace /srv/app \
 ```
 
 `--allow-all` 等价于 `shell.allowedCommands: ["*"]`，只是把它做成一个可读的显式
-opt-out；不会自动关闭元字符闸门，也不会绕过 `deniedCommands` 或破坏性分类器。
+opt-out；不会自动打开元字符闸门（该闸门**默认关闭**，需显式
+`--deny-shell-metachars=true` 才开启），也不会绕过 `deniedCommands` 或破坏性分类器。
 
 即使这样，`deniedCommands` / `deniedCommandPatterns` 仍然优先，`shellrisk` 的破坏性分类器仍会拒绝递归删除根/家目录等命令。`allowedCommands: ["*"]` 配合 `denyShellMetachars: false` 等于把目标机账号的 shell 交给持有挂载令牌的客户端；只应在本机、受控 CI 或一次性沙箱中使用。
 
@@ -1095,7 +1124,7 @@ remoteTargets:
 | shell 等待到期 | 命令仍在运行，结果返回 `promoted=true` + `job_id`，不是 `TIMEOUT` | 用 `job_output job_id=... offset=<next_offset>` 续读；需要停止时 `job_cancel` |
 | job 状态 `timed_out` | job 自身的运行时限到期（独立于 shell 等待预算） | 检查 job 输出、目标配置或改成长任务 |
 | 输出中间被省略（`NOT kept`） | 超过模型窗口且未配置 `artifacts.root` | 用 `grep`/`tail` 收窄，或配置 `artifacts.root` 后重启并翻页 |
-| `COMMAND_DENIED: contains a pipe/separator` | `denyShellMetachars` 默认开启 | 拆成多条命令，或仅在可信 target 上显式 `denyShellMetachars: false` |
+| `COMMAND_DENIED: contains a pipe/separator` | 该 target 显式开启了 `denyShellMetachars: true` | 拆成多条命令，或删掉该项 / 改为 false（默认即允许组合） |
 | `policy:` 告警 | 使用了已废弃的授权块 | 删除，改用 mode / profile / allowlist |
 | `#ops` 在 HTTP 下无效 | 服务已运行，profile 固定 | 修改目标机配置并重启 |
 | SSH 模式报 `binary not found` | 远端 PATH 中没有二进制 | 用 `?binary=/abs/path` |

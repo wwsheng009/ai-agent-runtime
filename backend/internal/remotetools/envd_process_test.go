@@ -66,7 +66,12 @@ func TestEnvDShellRefusesUnlistedCommandWithoutCallingEnvd(t *testing.T) {
 
 func TestEnvDShellRefusesMetacharacterChaining(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{}, nil)
-	session, ctx := connectEnvDOps(t, stub, allowCommands("echo"))
+	// The gate is opt-in, so this test enables it explicitly: it covers the
+	// refusal path itself, not the default policy.
+	session, ctx := connectEnvDOps(t, stub, func(cfg *remotetools.Config) {
+		cfg.Shell.AllowedCommands = []string{"echo"}
+		cfg.Shell.DenyShellMetachars = true
+	})
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__shell", map[string]interface{}{
 		"command": "echo hi; id",

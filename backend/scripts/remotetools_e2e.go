@@ -110,10 +110,11 @@ func main() {
 	deniedShell := mustCallExpectError(ctx, session, prefix+"__shell", map[string]interface{}{"command": "whoami"})
 	assertContains("shell denies non-allowlisted", deniedShell, "COMMAND_DENIED")
 
-	// Metacharacter chaining must be refused even for an allowed binary: the
-	// allowlist is per-command, not "anything echo can reach".
-	chainShell := mustCallExpectError(ctx, session, prefix+"__shell", map[string]interface{}{"command": "echo hi; whoami"})
-	assertContains("shell denies metachar chaining", chainShell, "COMMAND_DENIED")
+	// Metacharacter chaining is opt-in disabled: unless the target sets
+	// denyShellMetachars, an allowed binary may be composed, so the call must
+	// reach the shell rather than be refused by the policy gate.
+	chainShell := mustCall(ctx, session, prefix+"__shell", map[string]interface{}{"command": "echo hi; whoami"})
+	assertContains("shell allows metachar chaining by default", chainShell, "hi")
 
 	// A destructive command must be refused even when its binary is allowlisted.
 	destructive := mustCallExpectError(ctx, session, prefix+"__shell", map[string]interface{}{"command": "rm -rf /"})

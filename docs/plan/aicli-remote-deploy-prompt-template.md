@@ -41,6 +41,7 @@ toolPrefix: remote_svc
 shell:
   allowedCommands: [./status.sh, ./start.sh, ./stop.sh, curl, sha256sum, ln, mv, cp, mkdir, ls, cat]
   deniedCommands:  [rm, sh, bash]
+  # 可选：默认关闭（允许 | ; && > < 组合）；需要收紧时显式开启
   denyShellMetachars: true
 http:
   listen: 127.0.0.1:18765
@@ -155,7 +156,7 @@ aicli mcp list                                             # 本机，应显示 
 
 ### 允许使用的命令
 
-<列白名单；并注明禁止管道/重定向/; /&&/$(...)>
+<列白名单；管道/重定向/; /&&/$(...) 默认允许，如需禁止请注明目标已显式开启 denyShellMetachars>
 
 ## 交付
 
@@ -175,7 +176,7 @@ aicli mcp list                                             # 本机，应显示 
 | 端口显式指定 | 新版本默认值一变，服务就漂移到别的端口，健康检查全挂 |
 | `mv -T` 原子切换 | `ln -sfn` 直接覆盖时 `current` 可能短暂不存在，重启脚本读到空路径 |
 | 「保留旧版本目录」 | 模型可能"清理"掉旧 release，回滚能力归零 |
-| 多条命令禁止 `;` / `&&` | 目标侧 `denyShellMetachars` 会拒，模型要绕成多次调用 |
+| 目标显式开启了 `denyShellMetachars` | 组合命令会被拒；该闸门默认关闭，删掉该项即可允许 `|` `;` `&&` |
 | 要求贴真实输出 | 模型倾向于总结"已成功"，无法验证 |
 
 ---

@@ -315,7 +315,7 @@ profile: ops
 shell:
   allowedCommands: [echo, ls]     # 空 = 全拒（fail-closed）
   deniedCommands:  [rm]           # 永远优先
-  denyShellMetachars: true        # 拒 ; && || | ` $( > <
+  denyShellMetachars: true        # 可选，默认关闭；开启后拒 ; && || | ` $( > <
   envAllowlist: [HOME, PATH]      # 省略 = 继承完整环境；显式 [] = 不继承任何环境变量
   disableEnvInheritance: false    # true = 关闭完整继承，回退到平台基线
 ```

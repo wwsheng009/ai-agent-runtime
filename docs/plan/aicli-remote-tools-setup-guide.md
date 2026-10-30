@@ -111,7 +111,7 @@ shell:
   deniedCommands:            # 永远优先
     - rm
     - dd
-  denyShellMetachars: true   # 拒 ; && || | ` $( > < 换行（引号内不算）
+  denyShellMetachars: true   # 可选，默认关闭；开启后拒 ; && || | ` $( > < 换行（引号内不算）
   envAllowlist:              # 省略 = 继承完整环境；显式 [] = 不继承任何环境变量
     - HOME
     - PATH

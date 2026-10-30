@@ -230,6 +230,7 @@ remoteTargets:
           - "deploy238_*.sh"
         deniedCommands:
           - rm
+        # 显式开启才拦截管道/重定向；省略该项即允许组合命令
         denyShellMetachars: true
       tls:
         caFile: C:\tools\envd-ca.crt
@@ -247,12 +248,13 @@ metachar 拒绝 > destructive 分类）。没有配置任何 `allowedCommands` /
 `allowedCommandPatterns` 时，每次执行都会被拒绝，而不会因为 `profile: ops`
 直接放行。
 
-- YAML 里省略 `denyShellMetachars` 时默认为 **true**；如确需管道/重定向，
-  显式写 `denyShellMetachars: false`。
+- YAML 里省略 `denyShellMetachars` 时默认为 **false**，即管道、`;`、`&&`、
+  重定向默认可组合（例如 `find . -size +100M | head` 一次完成）；如需恢复
+  拦截，显式写 `denyShellMetachars: true`。
 - 单串写法用重复的 `allow_command=` / `allow_command_pattern=` /
   `deny_command=` / `deny_command_pattern=` 传入；值里的空格必须 URL 编码
-  （例如 `allow_command=git%20status`），`allow_shell_metachars=true` 才关闭
-  metachar 检查。
+  （例如 `allow_command=git%20status`）；`deny_shell_metachars=true` 才开启
+  metachar 拦截（`allow_shell_metachars=true` 为旧写法，仍然生效且优先放宽）。
 - 命令条目按 argv[0] 的 basename 匹配：允许 `/bin/sh` 要写 `sh`，
   允许 `~/.local/bin/host-inspect.sh` 要写 `host-inspect.sh`；带参数的条目
   按 argv 前缀匹配（如 `git status`）。
@@ -314,7 +316,7 @@ envd://n9e@10.0.0.9:49983/home/n9e?binary=...&audit_log=C:\logs\envd-audit.jsonl
 | `/init` 返回 409 | 进程内已有不同令牌 | `systemctl restart envd` 后重新引导 |
 | `COMMAND_DENIED` + `fail-closed` | 没有配置命令 allowlist | 在 `remote.shell.allowedCommands` 或 `?allow_command=` 中添加命令/argv 前缀 |
 | `policy:not-allowed` | 命令不在 allowlist | 添加精确命令或 `allowedCommandPatterns`；不要用 `*` 图省事 |
-| `policy:metachars` | 命令含管道/重定向/替换/顺序执行 | 拆成单条命令，或显式 `denyShellMetachars: false`（不推荐） |
+| `policy:metachars` | 该 target 显式开启了元字符拦截，命令含管道/重定向/替换/顺序执行 | 该 target 配置了 `denyShellMetachars: true`；确需组合可删掉该项或改为 false |
 | `policy:destructive` | 被共享 destructive 分类器拦截 | 在目标机人工执行，或调整业务脚本 |
 | `resolve ... failed` / `returned ""` | 目标机缺少 `realpath` 和 `readlink -f`，或 symlink 循环 | 安装 coreutils；检查目标链接；bridge 对解析失败 fail-closed |
 | `resolves to ... outside the workspace` | 路径经 symlink 指向 workspace 外 | 改用 workspace 内真实路径；这是路径围栏的预期结果 |

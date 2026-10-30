@@ -48,14 +48,14 @@ Common configuration options (serve/doctor/tools/policy):
                                   Legacy comma-separated allow patterns
   --denied-command-patterns <p1,p2>
                                   Legacy comma-separated deny patterns
-  --deny-shell-metachars[=bool]   Refuse pipes/redirection/substitution (default true)
+  --deny-shell-metachars[=bool]   Refuse pipes/redirection/substitution (default false)
 
 YAML command-policy keys:
   shell.allowedCommands           argv-prefix allow rules
   shell.deniedCommands            argv-prefix deny rules (always win)
   shell.allowedCommandPatterns    whole-command glob allow rules
   shell.deniedCommandPatterns     whole-command glob deny rules
-  shell.denyShellMetachars        separate metacharacter gate
+  shell.denyShellMetachars        opt-in metacharacter gate (default off)
   shell.envAllowlist              explicit env allowlist (omit = inherit all)
   shell.disableEnvInheritance     opt out of full env inheritance
 
@@ -111,7 +111,7 @@ Command policy:
   --denied-command-patterns <p1,p2>
                                   Legacy comma-separated deny patterns
   --deny-shell-metachars[=bool]   Refuse pipes, redirection, sequencing and
-                                  substitution when true (default true)
+                                  substitution when true (default false)
 
 YAML mapping:
   --allow-all                     shell.allowedCommands: ["*"]
