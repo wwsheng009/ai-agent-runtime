@@ -161,3 +161,58 @@ func TestJoinTargetPathFollowsTheAccessorsConvention(t *testing.T) {
 		}
 	}
 }
+
+// TestTargetPathHelpersFollowTheAccessorsConvention covers the rest of the family: the
+// ignore subsystem does more than join, and every one of those operations is the same
+// host-or-target question. The POSIX Rel cases are enumerated rather than spot-checked
+// because it is hand-written (the path package has no Rel) and it decides whether a rule
+// scoped to a directory still applies to a file under or beside it.
+func TestTargetPathHelpersFollowTheAccessorsConvention(t *testing.T) {
+	posix := slashStyleStub{}
+	host := styleStubAccess{}
+
+	if got := DirTargetPath(posix, "/srv/work/pkg"); got != "/srv/work" {
+		t.Fatalf("DirTargetPath(posix) = %q", got)
+	}
+	if got := CleanTargetPath(posix, "/srv//work/./pkg/.."); got != "/srv/work" {
+		t.Fatalf("CleanTargetPath(posix) = %q", got)
+	}
+	if got := TargetSeparator(posix); got != "/" {
+		t.Fatalf("TargetSeparator(posix) = %q", got)
+	}
+	hostDir := filepath.Join("a", "b")
+	if got := DirTargetPath(host, hostDir); got != "a" {
+		t.Fatalf("DirTargetPath(host) = %q, want %q", got, "a")
+	}
+	if got := TargetSeparator(host); got != string(filepath.Separator) {
+		t.Fatalf("TargetSeparator(host) = %q", got)
+	}
+
+	rels := []struct{ base, target, want string }{
+		{"/srv/work", "/srv/work/a.txt", "a.txt"},
+		{"/srv/work", "/srv/work/pkg/b.txt", "pkg/b.txt"},
+		{"/srv/work/pkg", "/srv/work/a.txt", "../a.txt"},
+		{"/srv/work", "/srv/work", "."},
+		{"/srv/work", "/other/x", "../../other/x"},
+		{"/", "/srv/work", "srv/work"},
+	}
+	for _, c := range rels {
+		got, err := RelTargetPath(posix, c.base, c.target)
+		if err != nil {
+			t.Fatalf("RelTargetPath(%q, %q): %v", c.base, c.target, err)
+		}
+		if got != c.want {
+			t.Fatalf("RelTargetPath(%q, %q) = %q, want %q", c.base, c.target, got, c.want)
+		}
+	}
+	if _, err := RelTargetPath(posix, "/srv", "relative"); err == nil {
+		t.Fatal("mixing an absolute base with a relative target must be an error, not a guess")
+	}
+
+	// The host half must stay filepath.Rel exactly: a local search's relative paths are what
+	// `glob` filters and max_depth are matched against, and this family must not change them.
+	want := filepath.Join("..", "c", "d.txt")
+	if got, err := RelTargetPath(host, filepath.Join("a", "b"), filepath.Join("a", "c", "d.txt")); err != nil || got != want {
+		t.Fatalf("RelTargetPath(host) = %q, %v; want %q", got, err, want)
+	}
+}

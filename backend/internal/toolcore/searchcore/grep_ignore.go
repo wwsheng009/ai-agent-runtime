@@ -148,7 +148,9 @@ func newGrepIgnoreRules(ctx context.Context, policy *grepIgnorePolicy, root stri
 	// A single-file root still consults its directory's ignore files, exactly
 	// like a walk that started in that directory would.
 	if info, err := policy.access.Stat(ctx, root); err != nil || !info.IsDir() {
-		root = filepath.Dir(filepath.Clean(root))
+		// The root is a path on the target, so its parent is the target's notion of a
+		// parent: with the host's rules this is how a remote .gitignore stops being found.
+		root = toolcore.DirTargetPath(policy.access, toolcore.CleanTargetPath(policy.access, root))
 	}
 	return &grepIgnoreRules{
 		policy: policy,
@@ -172,21 +174,22 @@ func (r *grepIgnoreRules) rulesFor(ctx context.Context, absPath string) []grepIg
 	// matcher skips a relative path of "."), so it moved for single-answerer consistency and
 	// not because a test can see it - see TestGrepRulesForFollowsTheAccessorsDirectoryShape.
 	if info, err := r.policy.access.Stat(ctx, absPath); err != nil || !info.IsDir() {
-		dir = filepath.Dir(absPath)
+		dir = toolcore.DirTargetPath(r.policy.access, absPath)
 	}
 	chain := []string{}
-	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+	separator := toolcore.TargetSeparator(r.policy.access)
+	for current := toolcore.CleanTargetPath(r.policy.access, dir); ; current = toolcore.DirTargetPath(r.policy.access, current) {
 		if current == r.root {
 			chain = append(chain, current)
 			break
 		}
-		if !strings.HasPrefix(current, r.root+string(filepath.Separator)) {
+		if !strings.HasPrefix(current, r.root+separator) {
 			// The path sits outside the search root: only base rules apply.
 			chain = nil
 			break
 		}
 		chain = append(chain, current)
-		if parent := filepath.Dir(current); parent == current {
+		if parent := toolcore.DirTargetPath(r.policy.access, current); parent == current {
 			break
 		}
 	}
@@ -226,9 +229,9 @@ func (p *grepIgnorePolicy) baseRules(ctx context.Context, root string) []grepIgn
 	}
 	if !p.skipParent {
 		ancestors := []string{}
-		for current := filepath.Dir(filepath.Clean(root)); ; current = filepath.Dir(current) {
+		for current := toolcore.DirTargetPath(p.access, toolcore.CleanTargetPath(p.access, root)); ; current = toolcore.DirTargetPath(p.access, current) {
 			ancestors = append(ancestors, current)
-			parent := filepath.Dir(current)
+			parent := toolcore.DirTargetPath(p.access, current)
 			if parent == current {
 				break
 			}
@@ -246,7 +249,7 @@ func (p *grepIgnorePolicy) baseRules(ctx context.Context, root string) []grepIgn
 			// Explicit files stay case-sensitive even under the flag: rg does
 			// the same (verified), and the flag's own help text scopes it to
 			// the discovered file family.
-			rules = append(rules, loadGrepIgnoreFile(ctx, p.access, file, filepath.Dir(file))...)
+			rules = append(rules, loadGrepIgnoreFile(ctx, p.access, file, toolcore.DirTargetPath(p.access, file))...)
 		}
 	}
 	return rules
@@ -260,13 +263,16 @@ func (p *grepIgnorePolicy) dirRules(ctx context.Context, dir string) []grepIgnor
 	if !p.skipDot {
 		for _, name := range []string{".ignore", ".rgignore"} {
 			rules = append(rules, loadGrepIgnoreFileWithCase(ctx, p.access,
-				filepath.Join(dir, name), dir, p.discoveredCaseInsensitive)...)
+				toolcore.JoinTargetPath(p.access, dir, name), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	if !p.skipVCS {
-		for _, rel := range []string{".gitignore", filepath.Join(".git", "info", "exclude")} {
+		// The second candidate is a *relative* path with two components, spelled with slashes
+		// on purpose: it is joined onto a target directory, and the join is what decides the
+		// separator. Building ".git\info\exclude" first would smuggle the host's convention in.
+		for _, rel := range []string{".gitignore", ".git/info/exclude"} {
 			rules = append(rules, loadGrepIgnoreFileWithCase(ctx, p.access,
-				filepath.Join(dir, rel), dir, p.discoveredCaseInsensitive)...)
+				toolcore.JoinTargetPath(p.access, dir, rel), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	return rules

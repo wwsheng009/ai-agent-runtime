@@ -30,10 +30,12 @@ package toolcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // Access is the read side of the file-I/O seam. Every method takes a context so
@@ -160,6 +162,84 @@ func JoinTargetPath(access Access, dir, name string) string {
 		return path.Join(dir, name)
 	}
 	return filepath.Join(dir, name)
+}
+
+// The rest of this family exists because the ignore subsystem asks more of a path than
+// "join this with that": it walks the ancestor chain, scopes a rule to the directory its
+// file lived in, and computes paths relative to that scope. Each of those is the same
+// host-or-target question, and answering any of them with the host's rules is how a remote
+// `.gitignore` goes silently unapplied - no error, just files the target's own repository
+// excludes showing up in the page.
+
+// TargetSeparator is the separator string the target uses, for code that builds a prefix
+// check by hand (the ignore chain does, to decide whether a path is still under the root).
+func TargetSeparator(access Access) string {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return "/"
+	}
+	return string(filepath.Separator)
+}
+
+// DirTargetPath is path.Dir or filepath.Dir, depending on whose paths these are.
+func DirTargetPath(access Access, p string) string {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return path.Dir(p)
+	}
+	return filepath.Dir(p)
+}
+
+// CleanTargetPath is path.Clean or filepath.Clean.
+func CleanTargetPath(access Access, p string) string {
+	if style, ok := access.(TargetPathStyle); ok && style.PathSeparator() == '/' {
+		return path.Clean(p)
+	}
+	return filepath.Clean(p)
+}
+
+// RelTargetPath is filepath.Rel for a host target and a self-contained POSIX equivalent for
+// a foreign one. The POSIX half is written here rather than delegated because the path
+// package has no Rel: Go's only Rel is separator-aware for the running process, so feeding
+// it "/srv/work" on Windows is exactly the mistake this family exists to prevent.
+func RelTargetPath(access Access, base, target string) (string, error) {
+	style, ok := access.(TargetPathStyle)
+	if !ok || style.PathSeparator() != '/' {
+		return filepath.Rel(base, target)
+	}
+	return posixRel(base, target)
+}
+
+func posixRel(base, target string) (string, error) {
+	base, target = path.Clean(base), path.Clean(target)
+	if base == target {
+		return ".", nil
+	}
+	if path.IsAbs(base) != path.IsAbs(target) {
+		return "", fmt.Errorf("rel %q: 与 %q 一个是绝对路径、一个是相对路径", target, base)
+	}
+	baseParts, targetParts := splitPosix(base), splitPosix(target)
+	common := 0
+	for common < len(baseParts) && common < len(targetParts) && baseParts[common] == targetParts[common] {
+		common++
+	}
+	parts := make([]string, 0, len(baseParts)-common+len(targetParts)-common)
+	for i := common; i < len(baseParts); i++ {
+		parts = append(parts, "..")
+	}
+	parts = append(parts, targetParts[common:]...)
+	if len(parts) == 0 {
+		return ".", nil
+	}
+	return path.Join(parts...), nil
+}
+
+// splitPosix turns "/a/b" into ["a", "b"] and "a" into ["a"]; the leading slash is not a
+// component, which is what makes the common-prefix walk above correct for absolute paths.
+func splitPosix(p string) []string {
+	trimmed := strings.TrimPrefix(p, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
 }
 
 // NotExistError is the hook a backend whose transport reports absence with its

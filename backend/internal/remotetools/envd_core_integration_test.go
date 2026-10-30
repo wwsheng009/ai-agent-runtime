@@ -250,3 +250,73 @@ func TestSharedGrepPagesTheAccessorsTree(t *testing.T) {
 		t.Fatalf("page two did not continue the sequence:\n%s", second.Content)
 	}
 }
+
+// TestSharedGrepHonoursTheTargetsIgnoreRules is the second half of the path-spelling
+// problem, and it is the half that stays invisible longest.
+//
+// The walk's child paths were fixed by JoinTargetPath, but the ignore subsystem does its own
+// path arithmetic - it builds each candidate rule file's name, walks the ancestor chain, and
+// computes a path relative to a rule's scope - all with the host's rules. On a Windows client
+// the candidate for the target's .gitignore is spelled "\srv\work\.gitignore", the daemon has
+// no such path, and the caller's own rules are silently not applied. Nothing reports an
+// error: the search just returns files the target's repository excludes.
+func TestSharedGrepHonoursTheTargetsIgnoreRules(t *testing.T) {
+	fake := &fakeEnvdFiles{
+		entries: map[string]envdclient.Entry{
+			"/srv/work":            fakeDirEntry("/srv/work"),
+			"/srv/work/.gitignore": fakeFileEntry("/srv/work/.gitignore", int64(len("skip.txt\n"))),
+			"/srv/work/skip.txt":   fakeFileEntry("/srv/work/skip.txt", int64(len("needle skip\n"))),
+			"/srv/work/keep.txt":   fakeFileEntry("/srv/work/keep.txt", int64(len("needle keep\n"))),
+		},
+		listing: map[string][]string{"/srv/work": {"skip.txt", "keep.txt", ".gitignore"}},
+		content: map[string][]byte{
+			"/srv/work/.gitignore": []byte("skip.txt\n"),
+			"/srv/work/skip.txt":   []byte("needle skip\n"),
+			"/srv/work/keep.txt":   []byte("needle keep\n"),
+		},
+	}
+	access := &envdAccess{api: fake}
+	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: access}
+	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+
+	result := runHandler(t, handler, map[string]any{"pattern": "needle", "path": "."}, runtime)
+	if !result.Success {
+		t.Fatalf("grep with the target's ignore file failed: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "keep.txt") {
+		t.Fatalf("the search found nothing at all:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "skip.txt") {
+		t.Fatalf("the target's own .gitignore was not applied (its candidate path was spelled with the host's separator):\n%s\nstatCalls=%v listCalls=%v",
+			result.Content, fake.statCalls, fake.listCalls)
+	}
+
+	// Control: without an accessor the tree does not exist here, so the assertion above
+	// cannot be passing because the rules came from this machine by accident.
+	control := runHandler(t, handler, map[string]any{"pattern": "needle", "path": "."},
+		envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: nil})
+	if control.Success && strings.Contains(control.Content, "keep.txt") {
+		t.Fatalf("the control searched a tree that exists for no one locally:\n%s", control.Content)
+	}
+}
+
+// TestSharedGrepGlobFilterUsesTheTargetsPaths is the same question one level up: the
+// include/exclude glob is matched against a path relative to the search root, and that
+// relative path is also computed with the host's rules.
+func TestSharedGrepGlobFilterUsesTheTargetsPaths(t *testing.T) {
+	access := &envdAccess{api: envdIntegrationTree()}
+	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: access}
+	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+
+	// A path-aware pattern: `pkg/*.txt` must match the nested file and nothing at the root.
+	result := runHandler(t, handler, map[string]any{"pattern": "needle", "path": ".", "glob": "pkg/*.txt"}, runtime)
+	if !result.Success {
+		t.Fatalf("glob-filtered grep failed: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "gamma.txt") {
+		t.Fatalf("the glob filter excluded the file it names (relative path was computed with the host's rules):\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "alpha.txt") {
+		t.Fatalf("the glob filter admitted a file outside its pattern:\n%s", result.Content)
+	}
+}
