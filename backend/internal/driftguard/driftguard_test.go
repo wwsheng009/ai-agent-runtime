@@ -10,8 +10,11 @@ package driftguard_test
 // on a backend name, or a capability decision being copied into a second place.
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -447,5 +450,117 @@ func TestSpellingRepairReadsThroughTheSeam(t *testing.T) {
 		t.Fatalf("pathrepair makes %d direct host-filesystem call(s): the spelling repair must list through the accessor, "+
 			"or a remote view heals a target path against this machine's directory:\n%s",
 			total, driftguard.FormatFindings(sites, 5))
+	}
+}
+
+// TestCoreDependencyClosureDoesNotReadTheHost is the third tier of the same
+// measurement. The first two scan the core packages themselves; this one scans
+// everything the three shared cores can reach.
+//
+// It exists because both earlier tiers share a blind spot: they count per package.
+// viewcore reported zero direct host calls while reaching the host one import away,
+// through internal/pathrepair's os.ReadDir - and reading the host is exactly what
+// matters here, because the repair then heals a target path against this machine's
+// directory instead of the machine the accessor describes. Fixing pathrepair closed
+// that instance; the closure set below is what keeps the next one from arriving
+// unnoticed.
+//
+// The set is walked, not fetched from the toolchain: a guard that shells out to
+// `go list` is not a guard, it is an environment dependency. The BFS over internal
+// imports of non-test files was verified against `go list -deps` on 2026-10-28 -
+// both name the same twelve packages, with no platform-variant differences. Every
+// reached package except the host-facing one must carry zero direct calls in both
+// guarded families; a new dependency must be added to the map deliberately, which
+// is the moment a reviewer gets to ask what it does with the filesystem.
+func TestCoreDependencyClosureDoesNotReadTheHost(t *testing.T) {
+	backendRoot := moduleRoot(t)
+	const modulePrefix = "github.com/wwsheng009/ai-agent-runtime/"
+
+	// hostFacing is the single package whose job is touching the host. It is
+	// recorded so the equality below stays honest, and skipped by the zero scan.
+	hostFacing := "internal/toolcore/localio"
+	allowed := map[string]bool{
+		hostFacing:                     true,
+		"internal/errors":              true,
+		"internal/pathrepair":          true,
+		"internal/toolcore":            true,
+		"internal/toolcore/lscore":     true,
+		"internal/toolcore/output":     true,
+		"internal/toolcore/pathguard":  true,
+		"internal/toolcore/searchcore": true,
+		"internal/toolcore/textcodec":  true,
+		"internal/toolcore/viewcore":   true,
+		"internal/toolresult":          true,
+		"internal/toolschema":          true,
+	}
+
+	frontier := []string{"internal/toolcore/viewcore", "internal/toolcore/lscore", "internal/toolcore/searchcore"}
+	seen := map[string]bool{}
+	for len(frontier) > 0 {
+		pkg := frontier[0]
+		frontier = frontier[1:]
+		if seen[pkg] {
+			continue
+		}
+		seen[pkg] = true
+		dir := filepath.Join(backendRoot, filepath.FromSlash(pkg))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read package directory %s: %v", pkg, err)
+		}
+		nonTest := 0
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			nonTest++
+			parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatalf("parse %s/%s: %v", pkg, name, err)
+			}
+			for _, spec := range parsed.Imports {
+				importPath, err := strconv.Unquote(spec.Path.Value)
+				if err != nil || !strings.HasPrefix(importPath, modulePrefix) {
+					continue
+				}
+				frontier = append(frontier, strings.TrimPrefix(importPath, modulePrefix))
+			}
+		}
+		if nonTest == 0 {
+			t.Fatalf("no non-test Go files in %s: the closure would pass vacuously", pkg)
+		}
+	}
+
+	for pkg := range seen {
+		if !allowed[pkg] {
+			t.Fatalf("the shared cores now reach %s, which is not in the scanned dependency set.\n"+
+				"A new dependency is a new route to the host filesystem: add it to the map here and run it\n"+
+				"through the same guards, or a core can go back to reporting zero while reading this machine.", pkg)
+		}
+	}
+	for pkg := range allowed {
+		if !seen[pkg] {
+			t.Fatalf("%s is recorded as part of the cores' dependency closure, but nothing imports it any more.\n"+
+				"Remove the stale entry so the set keeps describing reality.", pkg)
+		}
+	}
+
+	for pkg := range seen {
+		if pkg == hostFacing {
+			continue
+		}
+		dir := filepath.Join(backendRoot, filepath.FromSlash(pkg))
+		total, sites, err := driftguard.HostCallCountsShallow(dir)
+		if err != nil {
+			t.Fatalf("count host calls under %s: %v", pkg, err)
+		}
+		if total > 0 {
+			t.Fatalf("%s is reachable from the shared cores and makes %d direct host-filesystem call(s).\n"+
+				"The per-core guards cannot see this: they scan the core directories, so a core reports zero\n"+
+				"while reading this machine through what it imports - the viewcore spelling repair did exactly\n"+
+				"that before the fix. Route the call through the accessor.\nFirst findings:\n%s",
+				pkg, total, driftguard.FormatFindings(sites, 5))
+		}
 	}
 }

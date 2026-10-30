@@ -225,6 +225,43 @@ func walkerStyleCallsInFile(path string) ([]Finding, error) {
 	return found, nil
 }
 
+// HostCallCountsShallow counts both guarded call families - FilesystemCalls and
+// WalkerStyleCalls - in the .go files directly inside root, without descending
+// into subpackages.
+//
+// Why shallow exists: FilesystemCallCounts and WalkerStyleCallCounts walk the
+// whole tree, which is the right scope when the scan root is a core that owns no
+// subpackages, and the wrong one when it owns subpackages with different duties.
+// internal/toolcore owns localio, the single package allowed to touch the host,
+// so a recursive scan of internal/toolcore would report localio's calls as the
+// seam package's own. A dependency scan needs the package as shipped, not its
+// neighbours.
+func HostCallCountsShallow(root string) (int, []Finding, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, nil, fmt.Errorf("driftguard: scan root %s: %w", root, err)
+	}
+	var found []Finding
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(root, name)
+		filesystemCalls, err := filesystemCallsInFile(path)
+		if err != nil {
+			return 0, nil, err
+		}
+		walkerCalls, err := walkerStyleCallsInFile(path)
+		if err != nil {
+			return 0, nil, err
+		}
+		found = append(found, filesystemCalls...)
+		found = append(found, walkerCalls...)
+	}
+	return len(found), found, nil
+}
+
 // importsOS reports whether a file imports the os package under that name.
 func importsOS(file *ast.File) bool {
 	for _, spec := range file.Imports {

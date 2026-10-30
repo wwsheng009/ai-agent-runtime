@@ -186,6 +186,7 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5d ✅ | **子路径的拼法随目标**：三处遍历（`walkViaAccess`、`walkGrepFollowing`、`lscore` 的 `descend`）此前各自 `filepath.Join`，在 Windows 客户端上为 POSIX 目标拼出 `\srv\work\a.txt`，远端每个 stat 都 miss——症状是**空结果而非报错**。新增可选接口 `toolcore.TargetPathStyle` + 唯一入口 `toolcore.JoinTargetPath`，缺能力时保持本机惯例（本地行为零变化） | toolcore/access.go（接口+helper+测试）、seam_walk.go、grep.go、lscore/ls.go、remotetools/envd_access.go（声明 `/`） | os.* 与 walker 均不变（三处都是纯拼写决策） | 把三处改回 `filepath.Join` 即撤销 |
 | S5e ✅ | **路径运算随目标（同类缺陷的第二、三、四处）**：① ignore 子系统——规则候选名、祖先链、scope 的 `Dir/Clean` 全是宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机的 `.gitignore` **静默失效**（页面多出被排除的文件、无报错）；② `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**——`filepath.IsAbs("/srv/work/x")` 在 Windows 上是假的，调用方点名的绝对路径被拼成 `/srv/work/\srv\work\srv\work\custom.ignore` 并被告知"读不到"（**首个用户可见的失败**）；③ `ripgrep_engine.go` 四处（glob 候选、`baseDir`、`--files` 模式、`resolveRipgrepPath`）——`FromSlash+IsAbs+Join` 组合把 rg 输出的斜杠路径重新拼成宿主拼法。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator,IsAbsTargetPath,NormalizeTargetPath}`（`path` 包没有 `Rel`，POSIX 版自带实现），换掉三处文件的相应运算——`handler.go` 与 `ripgrep_engine.go` 改完都**不再需要 `path/filepath`**（编译器直接报 unused） | toolcore/access.go（family+测试）、searchcore/{grep_ignore.go,handler.go,ripgrep_engine.go}、searchcore/seam_walk_test.go | os.* 与 walker 均不变 | 把三处文件的调用换回 `filepath.*` 即撤销 |
 | S5f ✅ | **跨包盲区：核经被调用的 helper 读宿主**（比拼写更重的一类）。`viewcore` 的拼写修复经 `internal/pathrepair.FindSpellingMatches` 直接 `os.ReadDir` 读**本机**目录；守卫按包计数**看不见它**，于是 viewcore 一边显示 0 宿主读、一边真实地在读本机。改法：`FindSpellingMatches` 与 `HealSpelling` 接收 accessor，经 seam 列目录；候选拼写也走目标方言（`DirTargetPath`/`JoinTargetPath`）。新增守卫 `TestSpellingRepairReadsThroughTheSeam` 直接扫 `internal/pathrepair`（**先写、先红**：实测 1 处），并在 viewcore 基线的注释里写明这第二类盲区与其真正的看门人 | pathrepair/pathrepair.go（去 `os`）、viewcore/{spelling.go,handler.go}、driftguard/driftguard_test.go、viewcore/access_seam_test.go、toolkit/tools/path_spelling_test.go（9 处调用点各加两个实参，断言语义未动） | **pathrepair os.\* 1→0**；viewcore 仍 0，但现在是真的 | 把 accessor 参数换回即撤销 |
+| S5g ✅ | **跨包盲区的系统化（S5f 的收尾）**：把扫描从"核自己"扩到**整条可达闭包**——`go list -deps` 取三核非测试传递闭包（12 个本地包），逐包按守卫两张表同口径词法扫描：除 `localio`（唯一允许）外**零**宿主读。固化为 `TestCoreDependencyClosureDoesNotReadTheHost`：测试内 BFS 复现闭包（**不 shell 出去调 toolchain**——那是环境依赖，不是守卫），BFS 与 `go list -deps` 逐包对拍一致（含"平台特异文件不造成超集"），集合**写死**——新依赖必须显式登记，登记点就是评审点。`driftguard` 新增 `HostCallCountsShallow`（**不递归子包**：递归会把 `localio` 的调用记到 seam 包账上，扫得越宽结论越假） | driftguard/driftguard.go、driftguard/driftguard_test.go | 核内棘轮无变化（本步不含核内改动；守的是依赖侧） | 删测试函数即撤销 |
 | S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）**且子路径拼法已随目标（S5d，否则 Windows 客户端上远端遍历全 miss）**；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
 
 每步验收门（与既有纪律逐条对齐）：
@@ -402,6 +403,22 @@ S5f 一条（它比前面所有拼写问题都更重，因为守卫**看不见**
     一处偏离声明：`toolkit/tools/path_spelling_test.go` 的 9 处调用点各加两个实参
     （`context.Background(), localio.Access`），断言语义一字未动——签名是被修复逼出来的，函数体仍
     不可能在包内自己造一个 accessor。
+
+S5g 一条（把第 24 条从"这一处"变成"这一类"）：
+
+25. **修好一处跨包盲区后，要扫的是"闭包"而不是"直接依赖"**：S5f 修掉 viewcore→pathrepair 那条路之后，
+    只把三核的直接依赖列出来扫一遍还不够——"依赖的依赖"同样在闭包里。做法：`go list -deps` 取权威
+    闭包（12 个本地包），再用测试内 BFS（解析非测试文件的 internal import）复现，两者**逐包对拍一致**；
+    这条对拍本身就是测试敢用 BFS 的理由——BFS 读到所有平台的 `.go`，`go list` 只算当前 GOOS，若平台
+    特异文件引入额外包，两边立刻不等（实测这份代码上相等，不含超集）。落成守卫后做了两组**可编译**变异：
+    ① 依赖包（`pathrepair`）加一条 `os.ReadFile` → 红，报出准确位置；② 核新增未登记依赖
+    （blank import）→ 红，报"新依赖=通往宿主的新路线"。两处都逐字节还原。一个实现陷阱值得单记：扫描器
+    必须**浅扫**——`internal/toolcore` 目录里有 `localio` 子包，递归扫描会把唯一允许读宿主的包的调用
+    记到 seam 包账上，于是"扫得越宽"反而"结论越假"（`HostCallCountsShallow` 因此存在）。
+    证据面：Windows 上 `toolcore/... + driftguard + cmd` 全绿（组合批跑出现过一次瞬态 `0xC00000FD`，
+    复跑即绿、单包亦绿，未归因、如实记录）；WSL 上 `driftguard` ok、`toolcore/...` 除已归档的
+    `TestGrepWalkerBudgetBoundsTheSearch` 恒红外全绿、`cmd` PASS（wsl.exe 中途崩溃两次，按第 20 条
+    的办法"编译与运行拆开、输出落盘"才把证据取回来）。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 
