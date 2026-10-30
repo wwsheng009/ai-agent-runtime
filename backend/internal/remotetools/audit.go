@@ -26,6 +26,10 @@ type AuditRecord struct {
 	Decision   string   `json:"decision"`
 	Reason     string   `json:"reason,omitempty"`
 	Workspace  string   `json:"workspace,omitempty"`
+	// Workdir is the per-call directory base that relative path arguments were
+	// resolved against, when the caller supplied one. Paths alone cannot show
+	// this: the same relative path means different files under different bases.
+	Workdir string `json:"workdir,omitempty"`
 	Paths      []string `json:"paths,omitempty"`
 	// Program is the argv[0] basename for shell/job_start records. It is safe to
 	// log: it is the same identity the command policy matched.

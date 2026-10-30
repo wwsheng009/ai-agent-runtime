@@ -216,7 +216,14 @@ func (b remoteToolBase) describe(text string) string {
 // therefore never close over a single workspace, which is what lets one registry
 // serve sessions with different declarations.
 func (b remoteToolBase) resolve(ctx context.Context, raw string) (string, error) {
-	return workspaceForCall(ctx, b.workspace).Resolve(raw)
+	ws := workspaceForCall(ctx, b.workspace)
+	// A per-call workdir (set by prefixedTool.Execute) moves the relative anchor
+	// to that directory. An empty value keeps the historical behaviour exactly:
+	// resolve against the session workspace root.
+	if base := CallWorkdir(ctx); base != "" {
+		return ws.ResolveFrom(base, raw)
+	}
+	return ws.Resolve(raw)
 }
 
 // maxViewBytes resolves the payload ceiling for this call.

@@ -55,7 +55,7 @@ func newRemoteShellTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, art
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
-				"description": "Working directory, relative to the remote workspace. Default: workspace root.",
+				"description": "Working directory for THIS command only. An absolute path is used as-is; a relative path is resolved against the session workspace root (NOT against the previous call's workdir, and not against the process CWD). Omit to use the session workspace root. The choice does not persist: every call must pass workdir again to run elsewhere. The directory must already exist.",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",

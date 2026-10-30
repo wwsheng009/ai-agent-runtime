@@ -204,7 +204,8 @@ func envdPtyToolSpecs(base remoteToolBase) []envdToolSpec {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"command": envdStringProp("Command to run under the pty."),
-					"cwd":     envdStringProp("Working directory (jailed; defaults to the workspace)."),
+					"workdir": envdStringProp("Working directory for the pty process (jailed). An absolute path is used as-is; a relative path is resolved against the workspace root. Omit to use the workspace root. The directory must already exist."),
+					"cwd":     envdStringProp("Deprecated alias of workdir, kept for compatibility. If both workdir and cwd are supplied they must be identical."),
 					"cols":    intProp("Terminal columns (default 80)."),
 					"rows":    intProp("Terminal rows (default 24)."),
 				},
@@ -284,10 +285,14 @@ func envdPtyStart(ctx context.Context, be *envdBackend, params map[string]interf
 		return envdErrorResult("command denied (%s): %v", rule, err), nil
 	}
 	cwd := be.workspace
-	if requested := envdStringParam(params, "cwd"); requested != "" {
-		resolved, resolveErr := be.resolvePath(ctx, requested)
+	requestedDir, conflict := envdDirParam(params)
+	if conflict != "" {
+		return envdErrorResult("%s", conflict), nil
+	}
+	if requestedDir != "" {
+		resolved, resolveErr := be.resolvePath(ctx, requestedDir)
 		if resolveErr != nil {
-			return envdErrorResult("cwd: %v", resolveErr), nil
+			return envdErrorResult("workdir: %v", resolveErr), nil
 		}
 		cwd = resolved
 	}

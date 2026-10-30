@@ -47,11 +47,31 @@ func newPrefixedTool(inner toolkit.Tool, prefix string) *prefixedTool {
 	}
 }
 
-func (t *prefixedTool) Name() string                       { return t.name }
-func (t *prefixedTool) Description() string                { return t.description }
-func (t *prefixedTool) Version() string                    { return t.inner.Version() }
-func (t *prefixedTool) Parameters() map[string]interface{} { return t.inner.Parameters() }
-func (t *prefixedTool) CanDirectCall() bool                { return t.inner.CanDirectCall() }
+func (t *prefixedTool) Name() string        { return t.name }
+func (t *prefixedTool) Description() string { return t.description }
+func (t *prefixedTool) Version() string     { return t.inner.Version() }
+
+// Parameters exposes the inner schema, adding an optional workdir to tools that
+// take filesystem paths.
+//
+// Tools that already declare workdir themselves (shell, job_start) are left
+// untouched, and tools without any path parameter are left untouched, so the
+// advertised surface only grows where the parameter actually means something.
+func (t *prefixedTool) Parameters() map[string]interface{} {
+	schema := t.inner.Parameters()
+	if schema == nil {
+		return nil
+	}
+	if _, already := schema["properties"].(map[string]interface{})["workdir"]; already {
+		return schema
+	}
+	if !declaresPathParam(schema) {
+		return schema
+	}
+	return withWorkdirProperty(schema)
+}
+
+func (t *prefixedTool) CanDirectCall() bool { return t.inner.CanDirectCall() }
 
 func (t *prefixedTool) DefinitionMetadata() map[string]interface{} {
 	if provider, ok := t.inner.(toolkit.ToolDefinitionMetadataProvider); ok {
@@ -62,8 +82,40 @@ func (t *prefixedTool) DefinitionMetadata() map[string]interface{} {
 	return nil
 }
 
+// Execute forwards to the inner tool, carrying an optional per-call workdir in
+// the context so that remoteToolBase.resolve anchors relative paths there.
+//
+// Tools that already declare workdir (shell, job_start) read the parameter
+// themselves, so they must be delegated untouched: putting the value in the
+// context as well would apply it twice and resolve "sub" to "<root>/sub/sub".
+//
+// For every other path-taking tool the key is stripped from the map before
+// delegation, because handlers decode their argument struct strictly and would
+// reject a key they never asked for; the context value still reaches path
+// resolution.
+//
+// The derived context is local to this call, so nothing becomes sticky.
 func (t *prefixedTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	return t.inner.Execute(ctx, params)
+	workdir, _ := params["workdir"].(string)
+	if workdir == "" {
+		return t.inner.Execute(ctx, params)
+	}
+
+	innerParams := t.inner.Parameters()
+	props, _ := innerParams["properties"].(map[string]interface{})
+	if _, nativeWorkdir := props["workdir"]; nativeWorkdir {
+		// The tool resolves workdir itself; do not also set it on the context.
+		return t.inner.Execute(ctx, params)
+	}
+
+	callParams := make(map[string]interface{}, len(params))
+	for k, v := range params {
+		if k == "workdir" {
+			continue
+		}
+		callParams[k] = v
+	}
+	return t.inner.Execute(WithCallWorkdir(ctx, workdir), callParams)
 }
 
 // buildResult bundles the registry with the stores that need lifecycle management.
@@ -856,6 +908,12 @@ func (t *auditTool) Execute(ctx context.Context, params map[string]interface{}) 
 		Workspace:    t.workspace,
 		DurationMS:   duration.Milliseconds(),
 		ExecutionEnv: string(executionScopeRemote),
+	}
+	// The audit layer wraps the registry, so it sees the original argument map
+	// before prefixedTool strips workdir and moves it into the context. Reading
+	// the parameter here is therefore the only way to record it.
+	if workdir, ok := params["workdir"].(string); ok && strings.TrimSpace(workdir) != "" {
+		record.Workdir = workdir
 	}
 	if command, ok := params["command"].(string); ok && strings.TrimSpace(command) != "" {
 		fields := shellrisk.Fields(command)

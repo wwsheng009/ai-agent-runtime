@@ -90,7 +90,17 @@ func (r *remoteRuntime) PathHint(raw string) string {
 	if workspace == nil {
 		return ""
 	}
-	return runtimeexecutor.BuildPathNotFoundHintForPath(raw, workspace.Root())
+	root := workspace.Root()
+	// Explain the failure against the directory the call actually used. Using
+	// the workspace root here made the hint name a different directory than the
+	// one the path was resolved against, which sends the caller in the wrong
+	// direction. A workdir that no longer resolves falls back to the root.
+	if base := CallWorkdir(r.ctx); base != "" {
+		if baseAbs, err := workspace.ResolveFrom(base, ""); err == nil {
+			root = baseAbs
+		}
+	}
+	return runtimeexecutor.BuildPathNotFoundHintForPath(raw, root)
 }
 
 // Glob implements searchcore.Searcher with the resolver-backed ripgrep binary.
@@ -139,10 +149,20 @@ func (p *remotePaths) Root() string {
 	return ""
 }
 
+// Resolve resolves a tool path argument.
+//
+// It honours a per-call workdir exactly like remoteToolBase.resolve does, so the
+// mutation surface (write, edit, append, apply_patch, mkdir, move, ...) anchors
+// relative paths the same way the remote-specific handlers do. Without this the
+// workdir advertised in those tools' schemas would be silently ignored, which is
+// worse than not offering it at all.
 func (p *remotePaths) Resolve(raw string) (string, error) {
 	workspace := p.effective()
 	if workspace == nil {
 		return "", fmt.Errorf("workspace is not configured")
+	}
+	if base := CallWorkdir(p.ctx); base != "" {
+		return workspace.ResolveFrom(base, raw)
 	}
 	return workspace.Resolve(raw)
 }

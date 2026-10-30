@@ -222,6 +222,7 @@ func grepAudit() schemaAudit {
 			"patterns": "read inside GrepPatternsFromArgs, which takes the whole map",
 			"regexp":   "read inside GrepPatternsFromArgs, which takes the whole map",
 			"pattern":  "read inside GrepPatternsFromArgs, which takes the whole map",
+			"workdir":  "injected by prefixedTool.Parameters and consumed by remoteToolBase.resolve through the per-call context, so this handler never names the key",
 		},
 	}
 }
@@ -231,6 +232,9 @@ func globAudit() schemaAudit {
 		tool: "remote_dev__glob",
 		scan: []scanEntry{
 			{file: searchHandlerPath(), receiver: "globHandler", name: "Execute"},
+		},
+		indirect: map[string]string{
+			"workdir": "injected by prefixedTool.Parameters and consumed by remoteToolBase.resolve through the per-call context, so this handler never names the key",
 		},
 	}
 }
@@ -246,6 +250,9 @@ func viewAudit() schemaAudit {
 		filtered: map[string]string{
 			"symbol": "the remote runtime has no code index, so registry.go removes it with FilterSchemaParams(ParamSymbol); the handler resolves it through toolcore.SymbolResolver and falls back to the file window when the surface cannot answer",
 		},
+		indirect: map[string]string{
+			"workdir": "injected by prefixedTool.Parameters and consumed by remoteToolBase.resolve through the per-call context, so this handler never names the key",
+		},
 	}
 }
 
@@ -254,6 +261,9 @@ func lsAudit() schemaAudit {
 		tool: "remote_dev__ls",
 		scan: []scanEntry{
 			{file: lsHandlerPath(), receiver: "handler", name: "Execute"},
+		},
+		indirect: map[string]string{
+			"workdir": "injected by prefixedTool.Parameters and consumed by remoteToolBase.resolve through the per-call context, so this handler never names the key",
 		},
 	}
 }

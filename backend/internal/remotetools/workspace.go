@@ -194,6 +194,45 @@ func (w *Workspace) Resolve(raw string) (string, error) {
 	return target, nil
 }
 
+// ResolveFrom resolves raw against an explicit base directory instead of the
+// workspace root, which is what a per-call workdir needs.
+//
+// The base is resolved first so an out-of-jail base fails with an error that
+// names the real cause (PATH_DENIED on the base) rather than a confusing denial
+// on a derived path. Absolute raw values bypass the base entirely, matching the
+// documented contract that workdir only moves relative anchors.
+//
+// Both branches end in Resolve, so the device-name guard, the lexical jail check
+// and the symlink re-check all still apply. There is deliberately no second,
+// weaker code path here.
+func (w *Workspace) ResolveFrom(base, raw string) (string, error) {
+	if base == "" {
+		return w.Resolve(raw)
+	}
+	baseAbs, err := w.Resolve(base)
+	if err != nil {
+		return "", err
+	}
+	// A workdir must be a directory. Without this check the path tools (ls,
+	// glob, grep) would accept a file as the base and resolve children under a
+	// non-directory, while shell and job_start reject the same value. One
+	// parameter must mean one thing across tools.
+	if isDir, statErr := isDirectory(baseAbs); statErr != nil {
+		return "", newToolError(CodeInvalidArgument, "pass a directory",
+			"workdir is not readable: %q: %v", base, statErr)
+	} else if !isDir {
+		return "", newToolError(CodeInvalidArgument, "pass a directory",
+			"workdir is not a directory: %q", base)
+	}
+	if raw == "" {
+		return baseAbs, nil
+	}
+	if filepath.IsAbs(w.platform.normalizePath(raw)) {
+		return w.Resolve(raw)
+	}
+	return w.Resolve(filepath.Join(baseAbs, raw))
+}
+
 // ensureInside verifies an absolute path sits under one of the admitted roots.
 func (w *Workspace) ensureInside(target string) error {
 	for _, root := range w.allowedRoots {
@@ -204,7 +243,7 @@ func (w *Workspace) ensureInside(target string) error {
 	return newToolError(
 		CodePathDenied,
 		"use a path inside the configured workspace",
-		"path %q is outside the allowed roots", target,
+		"path %q is outside the allowed roots %v; re-issue the call with a path under one of these roots", target, w.allowedRoots,
 	)
 }
 

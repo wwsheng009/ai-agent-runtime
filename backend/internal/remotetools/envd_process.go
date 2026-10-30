@@ -51,7 +51,8 @@ func envdProcessToolSpecs(base remoteToolBase) []envdToolSpec {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"command": envdStringProp("Command line to execute on the target."),
-					"cwd":     envdStringProp("Working directory, absolute or relative to the workspace. Defaults to the workspace."),
+					"workdir": envdStringProp("Working directory for THIS command only (equivalent to workdir on the local backend). An absolute path is used as-is; a relative path is resolved against the workspace root. Omit to use the workspace root. The choice is not remembered by later calls and the directory must already exist."),
+					"cwd":     envdStringProp("Deprecated alias of workdir, kept for compatibility. If both workdir and cwd are supplied they must be identical."),
 				},
 				"required": []string{"command"},
 			},
@@ -94,11 +95,15 @@ func envdShell(ctx context.Context, be *envdBackend, params map[string]interface
 	if err != nil {
 		return envdErrorResult("command denied (%s): %v", rule, err), nil
 	}
+	requestedDir, conflict := envdDirParam(params)
+	if conflict != "" {
+		return envdErrorResult("%s", conflict), nil
+	}
 	cwd := be.workspace
-	if requested := envdStringParam(params, "cwd"); requested != "" {
-		resolved, resolveErr := be.resolvePath(ctx, requested)
+	if requestedDir != "" {
+		resolved, resolveErr := be.resolvePath(ctx, requestedDir)
 		if resolveErr != nil {
-			return envdErrorResult("cwd: %v", resolveErr), nil
+			return envdErrorResult("workdir: %v", resolveErr), nil
 		}
 		cwd = resolved
 	}

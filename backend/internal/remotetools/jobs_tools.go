@@ -64,7 +64,14 @@ func remoteJobManagerError(err error) error {
 		return nil
 	}
 	if runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound) {
-		return newToolError(CodeNotFound, "use job_list to discover jobs owned by this session", "%v", err)
+		// Jobs live in the manager of the process that started them. A restarted
+		// server therefore has no record of an older job, and saying only "not
+		// found" leaves the caller no way to tell that apart from a typo. Naming
+		// the lifecycle keeps the message diagnosable without revealing whether
+		// some other session owns the id.
+		return newToolError(CodeNotFound,
+			"use job_list to discover jobs owned by this session; background jobs live only in the server process that started them, so they do not survive a server restart",
+			"%v", err)
 	}
 	return newToolError(CodeInternal, "retry the call or inspect jobs.root", "%v", err)
 }
@@ -100,7 +107,7 @@ func newRemoteJobStartTool(cfg *Config, workspace *Workspace, sandbox *Sandbox, 
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
-				"description": "Working directory, relative to the remote workspace.",
+				"description": "Starting directory for the background job. An absolute path is used as-is; a relative path is resolved against the session workspace root (NOT against a previous shell workdir). Omit to use the session workspace root. The directory must already exist.",
 			},
 		},
 		"required":             []string{"command"},

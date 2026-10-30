@@ -18,11 +18,12 @@ import (
 // client input, which is why the intersection is computed here and not by the
 // caller.
 //
-// P4 status: the transport plumbing (roots/list) is not wired yet, because the
-// go-sdk client in this repository declares no roots capability by default and the
-// server-side handler runs per request in stateless mode. The narrowing primitive
-// below is complete and tested so wiring it later is a transport change only, not a
-// security redesign.
+// Wiring status: the narrowing primitive below is complete and tested, and the
+// roots/list transport plumbing is wired in server.go, which installs a
+// rootsResolver as the tool context decorator so every call resolves its paths
+// against the session-narrowed workspace. Narrowing only takes effect when the
+// connecting client declares the roots capability; otherwise the decorator
+// falls back to the statically configured workspace.
 type Roots struct {
 	base       *Workspace
 	requested  []string

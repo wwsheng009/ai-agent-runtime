@@ -329,8 +329,49 @@ func (be *envdBackend) canonicalize(ctx context.Context, target string) (string,
 // lexical jail, then target-side canonicalization, then the jail check against
 // the canonical path. Callers must use the returned path for the actual
 // operation, so a symlink cannot redirect a second lookup.
+// anchorCallWorkdir applies a per-call workdir to a caller-supplied path so the
+// envd backend behaves like the local one: relative arguments hang off the
+// requested directory, absolute arguments are left alone.
+//
+// The base is validated twice on purpose. lexicalResolve keeps it inside the
+// jail, and the target-side test -d proves it is a real directory; without the
+// second check a file would be accepted as a base and the same value would be
+// rejected by shell and job_start.
+func (be *envdBackend) anchorCallWorkdir(ctx context.Context, raw string) (string, error) {
+	base := CallWorkdir(ctx)
+	if base == "" {
+		return raw, nil
+	}
+	baseAbs, err := be.lexicalResolve(base)
+	if err != nil {
+		return "", err
+	}
+	stdout, stderr, code, runErr := be.run(ctx, "/bin/sh", []string{
+		"-c", `test -d "$1" && printf dir || printf other`, "aicli-envd-dir", baseAbs,
+	})
+	if runErr != nil {
+		return "", newToolError(CodeInternal, "check the envd connection", "check workdir %s: %v", baseAbs, runErr)
+	}
+	if code != 0 || strings.TrimSpace(string(stdout)) != "dir" {
+		return "", newToolError(CodeInvalidArgument, "pass a directory",
+			"workdir is not a directory: %q %s", base, strings.TrimSpace(string(stderr)))
+	}
+	requested := strings.TrimSpace(raw)
+	if requested == "" {
+		return baseAbs, nil
+	}
+	if path.IsAbs(requested) {
+		return requested, nil
+	}
+	return path.Join(baseAbs, requested), nil
+}
+
 func (be *envdBackend) resolvePath(ctx context.Context, raw string) (string, error) {
-	lexical, err := be.lexicalResolve(raw)
+	anchored, anchorErr := be.anchorCallWorkdir(ctx, raw)
+	if anchorErr != nil {
+		return "", anchorErr
+	}
+	lexical, err := be.lexicalResolve(anchored)
 	if err != nil {
 		return "", err
 	}
@@ -364,7 +405,11 @@ func (be *envdBackend) protectedRoot(candidate string) bool {
 // intermediate symlink (workspace/link/file) would otherwise redirect the
 // operation outside the jail.
 func (be *envdBackend) resolveMutationPath(ctx context.Context, raw string) (string, error) {
-	lexical, err := be.lexicalResolve(raw)
+	anchored, anchorErr := be.anchorCallWorkdir(ctx, raw)
+	if anchorErr != nil {
+		return "", anchorErr
+	}
+	lexical, err := be.lexicalResolve(anchored)
 	if err != nil {
 		return "", err
 	}
@@ -807,6 +852,29 @@ func envdStringParam(params map[string]interface{}, keys ...string) string {
 	}
 	return ""
 }
+
+// envdDirParam reads the requested working directory, accepting workdir as the
+// canonical key and cwd as a deprecated alias.
+//
+// One tool name must mean one parameter across backends, otherwise a model
+// cannot know which key to send when it cannot tell which backend is attached.
+// workdir is the canonical spelling because the local backend already uses it.
+//
+// Supplying both with different values is ambiguous rather than "last one
+// wins": silently preferring either would hide a caller bug and could run a
+// command in a directory the caller did not intend.
+func envdDirParam(params map[string]interface{}) (dir string, conflict string) {
+	workdir := envdStringParam(params, "workdir")
+	cwd := envdStringParam(params, "cwd")
+	if workdir != "" && cwd != "" && workdir != cwd {
+		return "", "workdir and cwd disagree; pass only workdir (cwd is a deprecated alias)"
+	}
+	if workdir != "" {
+		return workdir, ""
+	}
+	return cwd, ""
+}
+
 
 // envdExtensionTiers pins the tools that exist only on the envd backend to the
 // tier they belong to.

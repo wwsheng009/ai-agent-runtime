@@ -212,25 +212,83 @@ func (t *remoteOptionalTool) DefinitionMetadata() map[string]interface{} {
 	return nil
 }
 
+// pathValues normalizes a path parameter that may arrive as a string, []string
+// or []interface{}. A single type assertion silently skipped array-valued
+// arguments, so the pre-check passed for every path it never looked at.
+func pathValues(v interface{}) []string {
+	switch typed := v.(type) {
+	case string:
+		return []string{typed}
+	case []string:
+		return typed
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func (t *remoteOptionalTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	effective := workspaceForCall(ctx, t.workspace)
 	if effective != nil {
+		base := CallWorkdir(ctx)
 		for _, key := range t.pathParams {
-			raw, _ := params[key].(string)
-			if strings.TrimSpace(raw) == "" {
+			if base == "" {
+				raw, _ := params[key].(string)
+				if strings.TrimSpace(raw) == "" {
+					continue
+				}
+				if _, err := effective.Resolve(raw); err != nil {
+					return &toolkit.ToolResult{
+						Success:    false,
+						OutputKind: toolresult.KindText,
+						Error: newToolError(CodePathDenied,
+							"use a path inside the current workspace",
+							"%s denied by the remote workspace: %v", key, err),
+					}, nil
+				}
 				continue
 			}
-			if _, err := effective.Resolve(raw); err != nil {
-				return &toolkit.ToolResult{
-					Success:    false,
-					OutputKind: toolresult.KindText,
-					Error: newToolError(CodePathDenied,
-						"use a path inside the current workspace",
-						"%s denied by the remote workspace: %v", key, err),
-				}, nil
+			// With a workdir the inner tool still resolves against the workspace
+			// root, so the base has to be folded into the argument. Rewriting to
+			// an absolute path keeps the jail check meaningful and makes the
+			// advertised workdir actually change where the call lands.
+			values := pathValues(params[key])
+			if len(values) == 0 {
+				continue
+			}
+			rewritten := make([]string, 0, len(values))
+			for _, raw := range values {
+				trimmed := strings.TrimSpace(raw)
+				if trimmed == "" {
+					rewritten = append(rewritten, raw)
+					continue
+				}
+				resolved, err := effective.ResolveFrom(base, trimmed)
+				if err != nil {
+					return &toolkit.ToolResult{
+						Success:    false,
+						OutputKind: toolresult.KindText,
+						Error: newToolError(CodePathDenied,
+							"use a path inside the current workspace",
+							"%s denied by the remote workspace: %v", key, err),
+					}, nil
+				}
+				rewritten = append(rewritten, resolved)
+			}
+			if _, isString := params[key].(string); isString {
+				params[key] = rewritten[0]
+			} else {
+				params[key] = rewritten
 			}
 		}
 		ctx = toolctx.WithWorkspaceRoot(ctx, effective.Root())
