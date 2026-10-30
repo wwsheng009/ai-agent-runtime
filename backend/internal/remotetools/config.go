@@ -167,18 +167,24 @@ type ShellConfig struct {
 	// DenyShellMetachars rejects commands containing shell metacharacters so a
 	// single allowed binary cannot be chained into an arbitrary command.
 	DenyShellMetachars bool `yaml:"denyShellMetachars" json:"denyShellMetachars"`
-	// EnvAllowlist adds environment variables to the platform shell baseline. A
-	// nil list (the field is omitted) uses the baseline alone, because a shell
-	// without PATH/PATHEXT cannot resolve an ordinary command. An explicit empty
-	// list disables both the baseline and every inherited variable. The envd
-	// backend does not apply this list: its daemon owns the target environment.
+	// EnvAllowlist switches the shell from default inheritance to an explicit
+	// allowlist. A nil list inherits the full target process environment (the
+	// operating system's machine/user union) with credential-like names filtered
+	// out. A non-empty list keeps the platform shell baseline and adds exactly the
+	// named variables, so operators can opt in to a credential when a tool needs
+	// it. An explicit empty list clears the environment entirely. The envd backend
+	// does not apply this list: its daemon owns the target environment.
 	EnvAllowlist []string `yaml:"envAllowlist" json:"envAllowlist"`
+	// DisableEnvInheritance is the explicit opt-out from default full-environment
+	// inheritance. With it set, an omitted EnvAllowlist falls back to the platform
+	// shell baseline instead of inheriting the parent process environment.
+	DisableEnvInheritance bool `yaml:"disableEnvInheritance" json:"disableEnvInheritance"`
 }
 
-// defaultShellEnvAllowlist is the minimum environment a platform shell and
-// ordinary toolchain need. It deliberately excludes credentials and other
-// application variables: operators can add those through envAllowlist.
-func defaultShellEnvAllowlist() []string {
+// shellEnvBaseline is the minimum environment a platform shell and ordinary
+// toolchain need when full inheritance is disabled or an explicit allowlist is
+// selected. Operators can add more variables through envAllowlist.
+func shellEnvBaseline() []string {
 	if os.PathSeparator == '\\' {
 		return []string{
 			"PATH",
@@ -204,18 +210,22 @@ func defaultShellEnvAllowlist() []string {
 	return []string{"PATH", "HOME", "LANG", "LC_ALL", "TERM"}
 }
 
-// effectiveShellEnvAllowlist distinguishes "omitted" (nil, use the platform
-// baseline) from "explicitly empty" (keep the environment empty). A non-empty
-// list is additive: it keeps the baseline and appends the operator's names, so
-// adding APPDATA cannot accidentally drop PATH.
-func effectiveShellEnvAllowlist(configured []string) []string {
+// effectiveShellEnvAllowlist distinguishes default inheritance (nil without the
+// disable switch), the platform baseline (nil with disableEnvInheritance), an
+// explicit allowlist (non-empty) and a deliberately empty environment ([]).
+// Non-empty lists are additive: they keep the baseline and append the operator's
+// names, so adding LOCALAPPDATA cannot accidentally drop PATH.
+func effectiveShellEnvAllowlist(configured []string, disableInheritance bool) []string {
 	if configured == nil {
-		return defaultShellEnvAllowlist()
+		if disableInheritance {
+			return shellEnvBaseline()
+		}
+		return nil
 	}
 	if len(configured) == 0 {
 		return []string{}
 	}
-	baseline := defaultShellEnvAllowlist()
+	baseline := shellEnvBaseline()
 	out := make([]string, 0, len(baseline)+len(configured))
 	seen := make(map[string]bool, len(baseline)+len(configured))
 	add := func(name string) {
@@ -603,7 +613,7 @@ func (c *Config) Normalize() error {
 	c.Shell.AllowedCommandPatterns = normalizeCommandPatterns(c.Shell.AllowedCommandPatterns)
 	c.Shell.DeniedCommandPatterns = normalizeCommandPatterns(c.Shell.DeniedCommandPatterns)
 	c.Shell.Program = strings.TrimSpace(c.Shell.Program)
-	c.Shell.EnvAllowlist = effectiveShellEnvAllowlist(c.Shell.EnvAllowlist)
+	c.Shell.EnvAllowlist = effectiveShellEnvAllowlist(c.Shell.EnvAllowlist, c.Shell.DisableEnvInheritance)
 	if c.Backend == BackendLocal {
 		shell, err := resolveShell(c.Shell.Program)
 		if err != nil {

@@ -229,11 +229,10 @@ func TestShellEnvAllowlistForwardsConfiguredVariables(t *testing.T) {
 	}
 }
 
-// TestShellUsesPlatformBaselineEnvWhenAllowlistOmitted pins the other half of
-// the environment contract: leaving envAllowlist out must not make PATH
-// disappear. Before the baseline, `echo %PATH%` returned the literal text and
-// every bare command failed with "not recognized".
-func TestShellUsesPlatformBaselineEnvWhenAllowlistOmitted(t *testing.T) {
+// TestShellInheritsEnvWhenAllowlistOmitted pins the default inheritance
+// contract: leaving envAllowlist out must keep PATH and the Windows user
+// directories that toolchains use to locate their caches.
+func TestShellInheritsEnvWhenAllowlistOmitted(t *testing.T) {
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"echo"})
 	server, err := remotetools.NewServer(cfg, "dev")
@@ -249,7 +248,19 @@ func TestShellUsesPlatformBaselineEnvWhenAllowlistOmitted(t *testing.T) {
 	})
 	got := strings.TrimSpace(body)
 	if got == "" || got == literal {
-		t.Fatalf("platform baseline did not forward PATH: %q", body)
+		t.Fatalf("default inheritance did not forward PATH: %q", body)
+	}
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			t.Skip("host process has no LOCALAPPDATA")
+		}
+		body = callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+			"command": "echo $env:LOCALAPPDATA",
+		})
+		if !strings.Contains(body, localAppData) {
+			t.Fatalf("default inheritance dropped LOCALAPPDATA: %q", body)
+		}
 	}
 }
 

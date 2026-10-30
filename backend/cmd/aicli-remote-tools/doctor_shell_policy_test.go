@@ -27,8 +27,8 @@ func TestDoctorShellPolicyReportsEffectiveGatesAndGuidance(t *testing.T) {
 	if report.ShellResolved == "" || report.ShellType == "" {
 		t.Fatalf("doctor did not report the resolved shell: %+v", report)
 	}
-	if !containsString(report.ShellEnvAllowlist, "PATH") {
-		t.Fatalf("doctor shell env = %v, want PATH", report.ShellEnvAllowlist)
+	if !report.ShellEnvInherit {
+		t.Fatalf("doctor shell env allowlist = %v, want inherited environment", report.ShellEnvAllowlist)
 	}
 	warnings := strings.Join(report.Warnings, "\n")
 	for _, want := range []string{
@@ -67,6 +67,33 @@ func TestDoctorShellPolicyReportsEffectiveGatesAndGuidance(t *testing.T) {
 	report = buildDoctorReport(cfg)
 	if report.ShellVisible {
 		t.Fatal("readOnly must hide shell from the effective surface")
+	}
+}
+
+func TestDoctorReportsExplicitEnvironmentModes(t *testing.T) {
+	cfg := remotetools.DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.EnvAllowlist = []string{}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	report := buildDoctorReport(cfg)
+	if report.ShellEnvInherit || len(report.ShellEnvAllowlist) != 0 {
+		t.Fatalf("explicit empty env = inherit:%v allowlist:%v", report.ShellEnvInherit, report.ShellEnvAllowlist)
+	}
+	if got := shellEnvSummary(report); got != "none (explicitly cleared)" {
+		t.Fatalf("empty env summary = %q", got)
+	}
+
+	cfg = remotetools.DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.DisableEnvInheritance = true
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	report = buildDoctorReport(cfg)
+	if report.ShellEnvInherit || !containsString(report.ShellEnvAllowlist, "PATH") {
+		t.Fatalf("baseline env = inherit:%v allowlist:%v", report.ShellEnvInherit, report.ShellEnvAllowlist)
 	}
 }
 

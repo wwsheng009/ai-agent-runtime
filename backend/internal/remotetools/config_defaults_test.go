@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,20 +98,17 @@ func TestNormalizeListenDefaults(t *testing.T) {
 	}
 }
 
-func TestNormalizeShellEnvAllowlistDefaultsToPlatformBaseline(t *testing.T) {
+func TestNormalizeShellEnvAllowlistDefaultsToInheritedEnvironment(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Workspace = t.TempDir()
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
-	if !containsEnvName(cfg.Shell.EnvAllowlist, "PATH") {
-		t.Fatalf("default env allowlist = %v, want PATH", cfg.Shell.EnvAllowlist)
+	if cfg.Shell.EnvAllowlist != nil {
+		t.Fatalf("default env allowlist = %v, want nil (inherit the process environment)", cfg.Shell.EnvAllowlist)
 	}
-	if runtime.GOOS == "windows" && !containsEnvName(cfg.Shell.EnvAllowlist, "PATHEXT") {
-		t.Fatalf("default Windows env allowlist = %v, want PATHEXT", cfg.Shell.EnvAllowlist)
-	}
-	if runtime.GOOS == "windows" && !containsEnvName(cfg.Shell.EnvAllowlist, "COMPUTERNAME") {
-		t.Fatalf("default Windows env allowlist = %v, want COMPUTERNAME", cfg.Shell.EnvAllowlist)
+	if cfg.Shell.DisableEnvInheritance {
+		t.Fatal("default disableEnvInheritance = true, want false")
 	}
 }
 
@@ -143,9 +139,24 @@ func TestNormalizeShellEnvAllowlistAddsToBaseline(t *testing.T) {
 	}
 }
 
+func TestNormalizeShellEnvAllowlistDisableInheritanceUsesBaseline(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.DisableEnvInheritance = true
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if !containsEnvName(cfg.Shell.EnvAllowlist, "PATH") {
+		t.Fatalf("baseline env allowlist = %v, want PATH", cfg.Shell.EnvAllowlist)
+	}
+	if containsEnvName(cfg.Shell.EnvAllowlist, "LOCALAPPDATA") {
+		t.Fatalf("disabled inheritance still contains LOCALAPPDATA: %v", cfg.Shell.EnvAllowlist)
+	}
+}
+
 // TestLoadConfigFileDistinguishesOmittedAndEmptyEnvAllowlist pins the
 // nil-vs-empty contract across YAML decoding: omitting the field opts into the
-// platform baseline, while an explicit [] keeps the environment empty.
+// inherited environment, while an explicit [] keeps the environment empty.
 func TestLoadConfigFileDistinguishesOmittedAndEmptyEnvAllowlist(t *testing.T) {
 	root := t.TempDir()
 	base := fmt.Sprintf("workspace: %s\nshell:\n  allowedCommands: [echo]\n", filepath.ToSlash(root))
@@ -161,8 +172,8 @@ func TestLoadConfigFileDistinguishesOmittedAndEmptyEnvAllowlist(t *testing.T) {
 	if err := omitted.Normalize(); err != nil {
 		t.Fatalf("normalize omitted config: %v", err)
 	}
-	if !containsEnvName(omitted.Shell.EnvAllowlist, "PATH") {
-		t.Fatalf("omitted envAllowlist = %v, want platform baseline", omitted.Shell.EnvAllowlist)
+	if omitted.Shell.EnvAllowlist != nil {
+		t.Fatalf("omitted envAllowlist = %v, want nil (inherit)", omitted.Shell.EnvAllowlist)
 	}
 
 	emptyPath := filepath.Join(t.TempDir(), "empty.yaml")
@@ -178,6 +189,28 @@ func TestLoadConfigFileDistinguishesOmittedAndEmptyEnvAllowlist(t *testing.T) {
 	}
 	if empty.Shell.EnvAllowlist == nil || len(empty.Shell.EnvAllowlist) != 0 {
 		t.Fatalf("explicit [] envAllowlist = %#v, want a non-nil empty slice", empty.Shell.EnvAllowlist)
+	}
+}
+
+func TestLoadConfigFileDisableEnvInheritanceFallsBackToBaseline(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(t.TempDir(), "disable-env.yaml")
+	body := fmt.Sprintf("workspace: %s\nshell:\n  allowedCommands: [echo]\n  disableEnvInheritance: true\n", filepath.ToSlash(root))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if !cfg.Shell.DisableEnvInheritance {
+		t.Fatal("disableEnvInheritance was not decoded")
+	}
+	if !containsEnvName(cfg.Shell.EnvAllowlist, "PATH") {
+		t.Fatalf("disabled inheritance did not restore the baseline: %v", cfg.Shell.EnvAllowlist)
 	}
 }
 

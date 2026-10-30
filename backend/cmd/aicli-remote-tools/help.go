@@ -56,6 +56,8 @@ YAML command-policy keys:
   shell.allowedCommandPatterns    whole-command glob allow rules
   shell.deniedCommandPatterns     whole-command glob deny rules
   shell.denyShellMetachars        separate metacharacter gate
+  shell.envAllowlist              explicit env allowlist (omit = inherit all)
+  shell.disableEnvInheritance     opt out of full env inheritance
 
 Run 'aicli-remote-tools <command> -h' for the complete command help.
 `)
@@ -83,6 +85,8 @@ Workspace and tool surface:
   --description-style <style>     compact (default) | explicit
   --shell <path>                  shell for shell/job_start (default: auto-detect)
                                   shell is job-first; timeout_ms only bounds the wait
+  --disable-env-inheritance       use the platform env baseline instead of the
+                                  full target process environment
   --max-output-bytes <n>          Model-visible output cap per call (default 262144)
   --max-bytes-per-call <n>        Per-call payload cap (default 2097152)
   --audit <path>                  NDJSON audit log (0600)
@@ -116,6 +120,7 @@ YAML mapping:
   --allow-command-pattern         shell.allowedCommandPatterns
   --deny-command-pattern          shell.deniedCommandPatterns
   --deny-shell-metachars          shell.denyShellMetachars
+  --disable-env-inheritance       shell.disableEnvInheritance
 
 Optional tools and network:
   --optional-tools                optionalTools.enabled ("*" = all eligible)

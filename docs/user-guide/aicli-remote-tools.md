@@ -692,7 +692,7 @@ deny rules       : -
 | 失败结果 | 保留真实退出码，并把 stderr/命令正文随错误一起返回；promoted 不是错误 |
 | 空输出 | 退出码 0 且无输出时明确返回 `Command completed successfully with no output.` |
 | 大输出 | 未配置 `artifacts.root` 时中间部分不保留，并在提示中要求配置 |
-| 环境变量 | 默认注入平台基线；`shell.envAllowlist` 追加；显式 `envAllowlist: []` 才关闭基线 |
+| 环境变量 | 默认继承目标进程完整环境（Windows 为系统变量与用户变量的并集，凭证类名称过滤）；可用 `envAllowlist` 收紧或 `disableEnvInheritance` 关闭 |
 | 工作目录 | 必须是 jail 内的已存在目录 |
 
 Windows 目标不再固定使用 `cmd.exe`。启动时按 `pwsh` → `powershell` → `cmd.exe` 的顺序探测一次，选中结果同时用于 `shell` 和 `job_start`，并写入工具描述。也可以显式指定：
@@ -710,17 +710,23 @@ aicli-remote-tools serve --http --shell pwsh
 
 工具描述会按实际 shell 动态生成语法提示：PowerShell 提示 `Get-Location` / `Select-Object`，cmd 提示 `%VAR%` / `cd`，POSIX 提示 `$VAR` / `pwd`。输出侧复用内置 shell 的硬化：`NO_COLOR=1`、`TERM=dumb`、清空 `COLORTERM`/`CLICOLOR`、`PAGER=cat`，PowerShell 使用 `-NoProfile -NonInteractive` 并注入 UTF-8 输出前缀。
 
-省略 `envAllowlist` 时不会继承完整环境（避免把 token、密钥带进子进程），但会注入运行 shell 和常见工具所需的最小基线：
+省略 `envAllowlist` 时默认继承目标进程的完整环境。Windows 上这就是系统环境变量与用户环境变量的并集，因此 `LOCALAPPDATA`、`APPDATA`、`TEMP`、`GOCACHE` 等构建工具依赖的变量不会丢失。默认仍会过滤名称包含 `KEY`、`SECRET` 或 `TOKEN` 的凭证类变量，避免把服务端凭据带进命令。
 
-- Windows：`PATH`、`PATHEXT`、`SystemRoot`、`SystemDrive`、`WINDIR`、`ComSpec`、`TEMP`、`TMP`、`USERPROFILE`、`HOME`、`COMPUTERNAME`、`USERNAME`、`USERDOMAIN`、`PROCESSOR_ARCHITECTURE`、`NUMBER_OF_PROCESSORS`、`LANG`、`LC_ALL`、`TERM`
-- POSIX：`PATH`、`HOME`、`LANG`、`LC_ALL`、`TERM`
-
-需要额外变量时追加即可；显式写 `envAllowlist: []` 才会连基线也关闭（裸命令通常因此无法解析）：
+需要收紧环境时，显式配置 `envAllowlist`。非空列表表示“平台基线 + 指定变量”，会停止完整继承；此时可以按需显式放行某个凭证变量：
 
 ```yaml
 shell:
-  envAllowlist: [APPDATA, LOCALAPPDATA, USERNAME]
+  envAllowlist: [LOCALAPPDATA, APPDATA, USERNAME]
 ```
+
+显式写 `envAllowlist: []` 会清空环境（裸命令通常因此无法解析）。如果要关闭完整继承但保留最小平台基线，使用独立开关：
+
+```yaml
+shell:
+  disableEnvInheritance: true
+```
+
+或启动时传 `--disable-env-inheritance`。`doctor` 会显示当前是 `inherit all`、`allowlist` 还是 `none`。
 
 Windows 含空格的路径必须整体加引号；PowerShell 下调用这类外部程序还要加 `&`：
 
@@ -1080,7 +1086,7 @@ remoteTargets:
 | `PATH_DENIED` | 路径越出 `workspace`/`allowedRoots`，或符号链接逃逸 | 改路径，或把根加入 `allowedRoots` |
 | `COMMAND_DENIED: not in the allowlist` | 目标侧 allowlist 未包含该命令 | 加入 `shell.allowedCommands` 并重启 |
 | `COMMAND_DENIED: no allowedCommands configured` | `profile: ops` 但 allowlist 为空 | 显式配置 allowlist（fail-closed） |
-| 裸命令找不到（`'git' is not recognized` / `command not found`） | 显式配置了 `envAllowlist: []`，或目标机自身没有 PATH | 删除显式空列表以使用平台基线，或加入 `PATH`、`PATHEXT`、`HOME` 等 |
+| 裸命令找不到（`'git' is not recognized` / `command not found`） | 显式配置了 `envAllowlist: []`，或目标机自身没有 PATH | 删除显式空列表以恢复完整继承，或加入 `PATH`、`PATHEXT`、`HOME` 等 |
 | 含空格路径报 `'C:\Program' is not recognized` | 路径没有整体加引号，或 PowerShell 下漏了 `&` | cmd：`"C:\Program Files\...\git.exe" --version`；PowerShell：`& "C:\Program Files\...\git.exe" --version` |
 | `doctor` 显示 shell 是 `cmd.exe` | 未安装 `pwsh`/`powershell`，或显式 `--shell cmd` | 安装 PowerShell 7；或确认 `--shell` / `shell.program` 指向可用 shell |
 | 失败时只看到 `exit status 1` | 运行的是旧版服务，或错误投影仍丢弃正文 | 重新构建并重启服务；新版会保留真实退出码和 stderr |

@@ -112,9 +112,10 @@ shell:
     - rm
     - dd
   denyShellMetachars: true   # 拒 ; && || | ` $( > < 换行（引号内不算）
-  envAllowlist:              # 省略 = 平台基线；显式 [] = 不继承任何环境变量
+  envAllowlist:              # 省略 = 继承完整环境；显式 [] = 不继承任何环境变量
     - HOME
     - PATH
+  disableEnvInheritance: false  # true = 关闭完整继承，回退到平台基线
 ```
 
 HTTP 服务端配置：

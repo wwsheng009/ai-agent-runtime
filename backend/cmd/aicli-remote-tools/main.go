@@ -95,6 +95,7 @@ type serveFlags struct {
 	targetName          string
 	descStyle           string
 	shell               string
+	disableEnvInherit   bool
 	maxOutput           int
 	maxBytes            int
 	auditPath           string
@@ -242,6 +243,7 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.targetName, "target-name", "", "label for descriptions and audit")
 	fs.StringVar(&flags.descStyle, "description-style", "", "compact|explicit")
 	fs.StringVar(&flags.shell, "shell", "", "shell executable for shell/job_start (default: pwsh > powershell > cmd on Windows; $SHELL > zsh > bash > sh elsewhere)")
+	fs.BoolVar(&flags.disableEnvInherit, "disable-env-inheritance", false, "use the platform env baseline instead of inheriting the full target process environment")
 	fs.IntVar(&flags.maxOutput, "max-output-bytes", 0, "model-visible output cap")
 	fs.IntVar(&flags.maxBytes, "max-bytes-per-call", 0, "per-call payload cap")
 	fs.StringVar(&flags.auditPath, "audit", "", "NDJSON audit path")
@@ -364,6 +366,9 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.shell != "" {
 		cfg.Shell.Program = flags.shell
+	}
+	if flags.disableEnvInherit {
+		cfg.Shell.DisableEnvInheritance = true
 	}
 	if flags.maxOutput > 0 {
 		cfg.Limits.MaxOutputBytes = flags.maxOutput
@@ -633,6 +638,7 @@ type doctorReport struct {
 	ShellProgram           string   `json:"shellProgram,omitempty"`
 	ShellResolved          string   `json:"shellResolved,omitempty"`
 	ShellType              string   `json:"shellType,omitempty"`
+	ShellEnvInherit        bool     `json:"shellEnvInherit"`
 	ShellEnvAllowlist      []string `json:"shellEnvAllowlist,omitempty"`
 	CommandTimeout         string   `json:"commandTimeout"`
 	HTTPListen             string   `json:"httpListen"`
@@ -711,6 +717,7 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		DeniedCommandPatterns:  cfg.Shell.DeniedCommandPatterns,
 		DenyShellMetachars:     cfg.Shell.DenyShellMetachars,
 		ShellProgram:           cfg.Shell.Program,
+		ShellEnvInherit:        cfg.Shell.EnvAllowlist == nil && !cfg.Shell.DisableEnvInheritance,
 		ShellEnvAllowlist:      append([]string(nil), cfg.Shell.EnvAllowlist...),
 		CommandTimeout:         cfg.Limits.CommandTimeout.Duration.String(),
 		HTTPListen:             cfg.HTTP.Listen,
@@ -828,7 +835,7 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  shell            : %s\n", orDash(report.ShellResolved))
 	fmt.Fprintf(os.Stdout, "  shell type       : %s\n", orDash(report.ShellType))
 	fmt.Fprintf(os.Stdout, "  shell program    : %s\n", orDash(report.ShellProgram))
-	fmt.Fprintf(os.Stdout, "  shell env        : %s\n", orDash(strings.Join(report.ShellEnvAllowlist, ", ")))
+	fmt.Fprintf(os.Stdout, "  shell env        : %s\n", shellEnvSummary(report))
 	fmt.Fprintf(os.Stdout, "  command timeout  : %s\n", orDash(report.CommandTimeout))
 	fmt.Fprintf(os.Stdout, "  audit            : %s (writable=%v)\n", orDash(report.AuditPath), report.AuditWritable)
 	fmt.Fprintf(os.Stdout, "  audit preview    : %d bytes\n", report.AuditPreviewBytes)
@@ -854,6 +861,16 @@ func printDoctorReport(report doctorReport) {
 	} else {
 		fmt.Fprintf(os.Stdout, "  result           : %d problem(s)\n", len(report.Problems))
 	}
+}
+
+func shellEnvSummary(report doctorReport) string {
+	if report.ShellEnvInherit {
+		return "inherit all (system+user; *KEY*/*SECRET*/*TOKEN* filtered)"
+	}
+	if len(report.ShellEnvAllowlist) == 0 {
+		return "none (explicitly cleared)"
+	}
+	return "allowlist: " + strings.Join(report.ShellEnvAllowlist, ", ")
 }
 
 func runTools(args []string) int {

@@ -1088,7 +1088,7 @@ deny list 或 sandbox。
 2. deny 永远优先于 allow；
 3. 路径越界、`..`、symlink 逃逸必须拒绝；
 4. 命令元字符与破坏性分类器在 allow 之后仍然生效；
-5. env 默认注入平台基线，envAllowlist 追加；显式空列表才完全不继承；
+5. env 默认继承目标进程完整环境（凭证类名称过滤）；envAllowlist 改为显式收紧，disableEnvInheritance 可回退平台基线，显式空列表才完全不继承；
 6. 超时杀整个进程组；
 7. 输出硬上限 + artifact 归档；
 8. 策略错误不得被工具实现吞掉；

@@ -12,3 +12,14 @@ func TestServeFlagsAcceptShellOverride(t *testing.T) {
 		t.Fatalf("shell flag = %q, want pwsh", flags.shell)
 	}
 }
+
+func TestServeFlagsAcceptDisableEnvInheritance(t *testing.T) {
+	flags := &serveFlags{}
+	fs := newFlagSet("serve", flags)
+	if err := fs.Parse([]string{"--disable-env-inheritance"}); err != nil {
+		t.Fatalf("parse --disable-env-inheritance: %v", err)
+	}
+	if !flags.disableEnvInherit {
+		t.Fatal("disable-env-inheritance flag was not recorded")
+	}
+}

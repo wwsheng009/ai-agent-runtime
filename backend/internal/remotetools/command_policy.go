@@ -23,6 +23,7 @@ type CommandPolicy struct {
 	deniedPatterns  []string
 	shell           ShellConfig
 	timeout         time.Duration
+	inheritEnv      bool
 }
 
 // NewCommandPolicy builds a command policy from the same ShellConfig used by
@@ -39,11 +40,12 @@ func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy,
 		return nil, err
 	}
 
+	envWhitelist := effectiveShellEnvAllowlist(shell.EnvAllowlist, shell.DisableEnvInheritance)
 	sandboxConfig := runtimeexecutor.SandboxConfig{
 		Enabled:          true,
 		AllowedCommands:  normalizeCommandNames(shell.AllowedCommands),
 		DeniedCommands:   normalizeCommandNames(shell.DeniedCommands),
-		EnvWhitelist:     effectiveShellEnvAllowlist(shell.EnvAllowlist),
+		EnvWhitelist:     envWhitelist,
 		MaxExecutionTime: timeout,
 	}
 	return &CommandPolicy{
@@ -54,6 +56,7 @@ func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy,
 		deniedPatterns:  normalizeCommandPatterns(shell.DeniedCommandPatterns),
 		shell:           shell,
 		timeout:         timeout,
+		inheritEnv:      !shell.DisableEnvInheritance && shell.EnvAllowlist == nil,
 	}, nil
 }
 
@@ -169,11 +172,17 @@ func (p *CommandPolicy) CheckCommand(command string) (string, error) {
 
 // FilterEnv returns the environment for one command.
 //
-// An empty whitelist yields an empty environment (not the inherited one): a remote
-// command should not silently inherit credentials from the server process.
+// Default mode inherits the complete target process environment (the machine and
+// user environment union) after removing credential-like names. An explicit
+// allowlist uses exactly the baseline plus the named variables, which lets an
+// operator opt in to a credential for a tool that needs it. An explicit empty
+// allowlist yields an empty environment.
 func (p *CommandPolicy) FilterEnv(env []string) []string {
 	if p == nil || p.inner == nil {
 		return nil
+	}
+	if p.inheritEnv {
+		return runtimeexecutor.FilterSensitiveEnv(env)
 	}
 	return p.inner.FilterEnv(env)
 }
