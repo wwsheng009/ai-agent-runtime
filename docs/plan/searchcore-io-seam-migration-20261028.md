@@ -187,7 +187,7 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5e ✅ | **路径运算随目标（同类缺陷的第二、三、四处）**：① ignore 子系统——规则候选名、祖先链、scope 的 `Dir/Clean` 全是宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机的 `.gitignore` **静默失效**（页面多出被排除的文件、无报错）；② `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**——`filepath.IsAbs("/srv/work/x")` 在 Windows 上是假的，调用方点名的绝对路径被拼成 `/srv/work/\srv\work\srv\work\custom.ignore` 并被告知"读不到"（**首个用户可见的失败**）；③ `ripgrep_engine.go` 四处（glob 候选、`baseDir`、`--files` 模式、`resolveRipgrepPath`）——`FromSlash+IsAbs+Join` 组合把 rg 输出的斜杠路径重新拼成宿主拼法。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator,IsAbsTargetPath,NormalizeTargetPath}`（`path` 包没有 `Rel`，POSIX 版自带实现），换掉三处文件的相应运算——`handler.go` 与 `ripgrep_engine.go` 改完都**不再需要 `path/filepath`**（编译器直接报 unused） | toolcore/access.go（family+测试）、searchcore/{grep_ignore.go,handler.go,ripgrep_engine.go}、searchcore/seam_walk_test.go | os.* 与 walker 均不变 | 把三处文件的调用换回 `filepath.*` 即撤销 |
 | S5f ✅ | **跨包盲区：核经被调用的 helper 读宿主**（比拼写更重的一类）。`viewcore` 的拼写修复经 `internal/pathrepair.FindSpellingMatches` 直接 `os.ReadDir` 读**本机**目录；守卫按包计数**看不见它**，于是 viewcore 一边显示 0 宿主读、一边真实地在读本机。改法：`FindSpellingMatches` 与 `HealSpelling` 接收 accessor，经 seam 列目录；候选拼写也走目标方言（`DirTargetPath`/`JoinTargetPath`）。新增守卫 `TestSpellingRepairReadsThroughTheSeam` 直接扫 `internal/pathrepair`（**先写、先红**：实测 1 处），并在 viewcore 基线的注释里写明这第二类盲区与其真正的看门人 | pathrepair/pathrepair.go（去 `os`）、viewcore/{spelling.go,handler.go}、driftguard/driftguard_test.go、viewcore/access_seam_test.go、toolkit/tools/path_spelling_test.go（9 处调用点各加两个实参，断言语义未动） | **pathrepair os.\* 1→0**；viewcore 仍 0，但现在是真的 | 把 accessor 参数换回即撤销 |
 | S5g ✅ | **跨包盲区的系统化（S5f 的收尾）**：把扫描从"核自己"扩到**整条可达闭包**——`go list -deps` 取三核非测试传递闭包（12 个本地包），逐包按守卫两张表同口径词法扫描：除 `localio`（唯一允许）外**零**宿主读。固化为 `TestCoreDependencyClosureDoesNotReadTheHost`：测试内 BFS 复现闭包（**不 shell 出去调 toolchain**——那是环境依赖，不是守卫），BFS 与 `go list -deps` 逐包对拍一致（含"平台特异文件不造成超集"），集合**写死**——新依赖必须显式登记，登记点就是评审点。`driftguard` 新增 `HostCallCountsShallow`（**不递归子包**：递归会把 `localio` 的调用记到 seam 包账上，扫得越宽结论越假） | driftguard/driftguard.go、driftguard/driftguard_test.go | 核内棘轮无变化（本步不含核内改动；守的是依赖侧） | 删测试函数即撤销 |
-| S6 | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。逐项：`envdGrep`/`envdGlob`/`envdLs` 三个脚本工具 → `searchcore.NewGrepHandler/NewGlobHandler` + `lscore`，其 runtime 提供 `FileAccess() = envd_access`；`view` 的字节读取可选一并搬到同一 accessor。**前置**：执行腿已就绪（未接线）**且子路径拼法已随目标（S5d，否则 Windows 客户端上远端遍历全 miss）**；接线前必须用 `scripts/envd_seam_access_verify.go` 对真机跑一遍。**能力方向只能是"增加"**：今天脚本只吃 `path`+`pattern`，换成共享核后参数面变全，必须逐项确认老调用仍能用 | remotetools（`envd_tools.go`、`envd_backend.go`、runtime 装配）+ 三个核心包 | 目标是**删代码**（三个脚本工具与其解析一并退役） | 整步独立可撤（保留 `buildEnvDRegistry` 分支即可回退） |
+| S6 ✅ | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误保留：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。落地：`remotetools/envd_core.go`（新）——三个工具用与 ssh/http **同一份 schema**（grep 那 480 行参数表从 `registry.go` 逐字节搬进 `search_schemas.go`（新），两后端同调）；runtime 的 `FileAccess()=NewEnvdAccess(be.client)`、`Paths()` 复用既有 `be.resolvePath`/`workspaceRelative`（workdir 锚点/词法关押/目标侧 canonicalize/canonical 复核一字未动）、`Output()`/`CaptureLimit()` 复用同一折叠与 `Limits` 预算；`envdLs`/`envdGlob`/`envdGrep` 与 `find`/`rg-or-grep` 脚本、引擎 marker 一并退役。**引擎取 walker-only**：不再按"目标机装没装 rg"分叉（同一目标面在每台机器上语义一致、ignore 读目标机自己的规则、可翻页）；rg 优先留作独立步骤（见执行腿笔记 §6）。**能力方向逐项核过**：老调用 `path`+`pattern` 在 5 条 e2e 实跑；增加=分页/ignore/排序/glob 过滤/workdir；两处**用户可见的语义变化**：`*.go` 收敛为"搜索根下一层"（深用 `**/*.go`）、`one_file_system` 由静默忽略变点名拒绝；`sort=accessed/created` 同形拒绝。**真机门未跑**（待换发令牌，见 §2 安全待办） | `remotetools/{envd_core.go(新), search_schemas.go(新), envd_backend.go, envd_tools.go, registry.go}` + 测试夹具与 5 条 e2e | **删代码**：脚本工具、解析器、stub 死仿真全退役 | 整步可撤：`buildEnvDRegistry` 里删去 `envdSharedCoreTools` 调用即回到全脚本面 |
 
 每步验收门（与既有纪律逐条对齐）：
 1. 既有 `searchcore` 单测**一字不改**通过；
@@ -430,14 +430,59 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
       拒绝相对化、工作区落在单根内），输出分别是 `b/pkg/x.txt`、`/srv/b/pkg/x.txt`、`/srv/b/x.txt`
       ——miss 收敛到与命中相同的诚实答案（`Paths.Relative` 的拒绝语义兜住了它）。**结论：保持原样**，
       换成常驻测试 `TestGrepRenderMultiRootPosixPathsStayHonest` 钉住这三条字面量（Windows 与 Linux
-      期望一致，两端实跑均绿）；S6 更换 `Paths` 语义时这条会先说话。
+      期望一致，两端实跑均绿）；S6 已落地且**未更换本机 `Paths` 语义**（envd 走自己的 `envdPaths`），本钉继续有效、未被触发。
     - `glob.go` 的模式形状校验里 `filepath.IsAbs(trimmed)` 只多拦一个 Windows 盘符写法：Linux 宿主
       上的盘符模式本就无意义，Windows 宿主上的 POSIX 绝对写法已由 `HasPrefix(normalized,"/")` 拦下
       ——保持，不替一个不可达组合改动用户可见的校验文案。
     - `viewcore/read.go` 目录预览给目录名加的后缀跟随宿主分隔符（`view_test.go:226` 已钉住宿主形态）：
-      S6 把 view 接到远端时再决定方言（离线门的逐字节对比会先暴露差异），不在本地可见语义上擅自改。
+      envd 的 `view` 在 S6 里**没有**搬进 accessor（继续走 `envdclient /files`+`cat` 两通道、`viewcore` 渲染），本条仍待它搬入时再决定方言，不在本地可见语义上擅自改。
     教训：把"可疑"直接翻译成"要改"会制造无人需要的语义变更；放过不说则是留债。**分诊本身要付费用
     （探针/测试）证明**，而不是用一段解释把疑点压下去。
+
+### S6 实施记（2026-10-28：envd 脚本工具 → 共享核 + `FileAccess()`）
+
+**落地**：`envd_core.go`（新）注册 `ls/glob/grep`，schema 与 ssh/http 完全同源（三个
+`*InputSchema()` 在 `search_schemas.go`（新），480 行参数表从 `registry.go` 逐字节搬移）；三个旧脚本
+工具（`envdLs`/`envdGlob`/`envdGrep`、`find` 与 `rg-or-grep` 脚本、`envdGrepEnginePrefix`/
+`splitEnvdEngineMarker`）与其 spec 退役；stub 里只服务于它们的死仿真（`grepFrames`/`streamCut`/
+`aicli-envd-grep`/`/usr/bin/find`）同步清退，并补上真正承重的 `test -d`（workdir 锚点探针）。
+
+**反向验证（4 个可编译变异，逐个红 → 逐字节还原 → 复绿，sha256 对拍）**：
+
+- M1 `FileAccess()` 返回 nil（核回落 `localio`）：三件工具当场去读本机，全红；
+- M2 `Relative` 返回绝对路径：**第一轮存活**——e2e 断言是子串，`/srv/app/README.md:2: …` 照样
+  *包含* `README.md:2: …`。补精确断言（`TrimSpace` 相等）并新增生产 runtime 单元钉
+  `TestEnvdPathsRenderWorkspaceRelativeLabels` 后，三处同时红；
+- M3 `Output` 折叠预算放大到 `1<<30`：40 条匹配全量出网，红；
+- M4 `Resolve` 直接 `return raw`：三件工具全红（路径不再解析）。
+
+**证据**：Windows——build 全仓、`remotetools` 整包 92.0s 全绿、`toolcore/...` + `driftguard` +
+`pathrepair` + `cmd` 全绿（除下述上游既有红）；WSL——`remotetools` 整包 PASS（`-test.skip` 剥掉
+下面两条宿主依赖红）。**真机门未跑**：`scripts/envd_seam_access_verify.go` 需 `AICLI_ENVD_TOKEN`，
+与"换发令牌"安全待办冲突（不去配置文件取秘密），如实保留为接线后的第一件事。
+
+**上游既有红（本轮实测，均与本次改动无关，未代修）**：
+
+- `cmd/contractgen TestGeneratedFileIsUpToDate`：干净 HEAD worktree 同样红（`internal/events`
+  注册表 → `frontend/src/types/runtime/event-contract.ts` 投影过期），属事件契约线的债；
+- WSL 上 `TestRemoteShellPreservesBackslashPathsInOutput` / `TestRemoteShellCommandDiagnosticsDoNotChangeBody`：
+  测试命令用 PowerShell 语义（`Write-Output`、`\` 路径），在 zsh 下必然红（`command not found`）；
+  Windows 全绿，属 shell 工作区；
+- 干净 HEAD 对 `remotetools` 编不过（`wire.MountLabels`，见 §5 最后一行）。
+
+**给用户文档/产品的三条行为差**（换核的真实后果，方向已钉进 e2e）：
+
+1. `one_file_system`：静默忽略 → 点名拒绝（含出路）；`sort=accessed/created` 同形拒绝。
+2. glob 匹配语言收敛到本地规则：`*.go` 只在本层，任意深度用 `**/*.go`（旧 `find -name` 是任意
+   深度按基名）。这是**语义收敛**，不是能力减少。
+3. 引擎：不再"目标机有 rg 用 rg"——统一 walker（每台目标同语义、同 ignore 规则、可翻页）；
+   rg 专属参数（`json` 等）点名拒绝；"恢复 rg 优先"是独立步骤（执行腿笔记 §6 已记，待产品确认）。
+
+27. **断言的字面形状本身会放行回归（M2 的存活）**：端到端用子串断言时，"多了一个前缀"的渲染回归
+    （`Relative` 退化为绝对路径）**不会红**——`/srv/app/README.md:2: …` 照样 `Contains`
+    `README.md:2: …`。与前几条同族（第 6/25 条：夹具/断言必须让被测改动成为唯一变量），但这次变量
+    是**断言的宽松度**：单值输出一律精确/`TrimSpace` 相等，并给生产 runtime 补单元钉，不把"能不能
+    渲染错"赌在 e2e 的字符串包含上。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 
@@ -469,4 +514,4 @@ key 与缺失能力（`sort=accessed` 且含"不可用"）。变异（把拒绝�
 | 半封关注点造成两种真值来源 | 台账里"读闸门唯一入口"那条 | 分步边界=关注点边界（§4 每行都是一个完整关注点） |
 | 上游半提交使 HEAD 不可构建，验证要靠临时借文件 | M2 现状：`8f325893` 漏交 `wire` 字段、`4c2f0f56` 漏交 `importSessionResult` 字段 | 见 seam 文档 §13.6 合并清单；S1 若落在 remotetools 之外的包，构建不受此阻塞影响（`searchcore` 不依赖 `remotetools`），**可先行** |
 
-最后一行值得注意：**S1–S5 全在 `internal/toolcore/searchcore`，不依赖那个坏包**，所以这一步不被上游阻塞；阻塞的只有 M2 的合并与 S6。
+最后一行值得注意：**S1–S5 全在 `internal/toolcore/searchcore`，不依赖那个坏包**，所以这一步不被上游阻塞；阻塞的只有 M2 的合并与 S6。**S6 已落地**（见下节实施记）：它动的 `remotetools` 在当前工作树里可编译（`wire.MountLabels` 字段在他人未提交的工作区中在场），但**干净 HEAD 仍编不过**——本轮实测：干净 `git worktree` 里`go test -c ./internal/remotetools/` 直接失败于 `gateway.go: unknown field Hostname in wire.MountLabels`（第 470 行先例的复现），所以本次全部验证都在工作树内完成，并如实记录。

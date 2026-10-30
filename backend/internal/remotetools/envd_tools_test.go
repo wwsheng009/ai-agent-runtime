@@ -48,36 +48,69 @@ func TestEnvDLsListsOneLevel(t *testing.T) {
 		"/srv/app/src/main.go":   "package main\n",
 		"/srv/app/src/deep/x.go": "package deep\n",
 	}, nil)
-	stub.mu.Lock()
-	stub.dirs["/srv/app/src"] = []map[string]any{}
-	stub.mu.Unlock()
 
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
 	got := callTool(t, ctx, session, "remote_envd__ls", map[string]interface{}{"path": "."})
 	if !strings.Contains(got, "README.md") {
 		t.Fatalf("ls missing the direct child: %s", got)
 	}
+	// A subdirectory is an entry like any other: a listing that skipped it would
+	// make every walk blind to the nested tree below it.
+	if !strings.Contains(got, "src/") {
+		t.Fatalf("ls missing the subdirectory entry: %s", got)
+	}
 	// One level only: nested entries belong to a deeper call, not this listing.
 	if strings.Contains(got, "main.go") || strings.Contains(got, "deep") {
 		t.Fatalf("ls leaked deeper levels: %s", got)
 	}
+
+	// One level down through the per-call workdir, which the prefix wrapper adds
+	// to every path-taking tool: the listing anchors there, not at the root.
+	anchored := callTool(t, ctx, session, "remote_envd__ls", map[string]interface{}{"path": ".", "workdir": "src"})
+	if !strings.Contains(anchored, "main.go") {
+		t.Fatalf("workdir listing missed the anchored child: %s", anchored)
+	}
+	if strings.Contains(anchored, "README.md") {
+		t.Fatalf("workdir was ignored; the listing still starts at the workspace root: %s", anchored)
+	}
 }
 
-func TestEnvDGlobRunsRemoteFind(t *testing.T) {
+func TestEnvDGlobWalksTheTargetThroughTheSeam(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{
 		"/srv/app/src/main.go": "package main\n",
+		"/srv/app/top.go":      "package top\n",
 		"/srv/app/README.md":   "hello\n",
 	}, nil)
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
 
+	// The shared glob semantics, converged with the local tool: `**/*.go` reaches
+	// into subdirectories...
 	got := callTool(t, ctx, session, "remote_envd__glob", map[string]interface{}{
-		"path": ".", "pattern": "*.go",
+		"path": ".", "pattern": "**/*.go",
 	})
-	if !strings.Contains(got, "/srv/app/src/main.go") {
-		t.Fatalf("glob missed the .go file: %s", got)
+	// The shared render, relative to the search root, and reached by walking the
+	// target through the accessor - no remote find runs any more.
+	if !strings.Contains(got, "src/main.go") {
+		t.Fatalf("recursive glob missed the nested .go file: %s", got)
 	}
 	if strings.Contains(got, "README.md") {
 		t.Fatalf("glob matched outside the pattern: %s", got)
+	}
+
+	// ...while a bare `*.go` stays at the search root's first level, exactly like
+	// the local tool. (The retired find matched by basename at any depth; the
+	// merge converged on the local rule, so callers reaching into subdirectories
+	// spell it `**/*.go`.)
+	shallow := callTool(t, ctx, session, "remote_envd__glob", map[string]interface{}{
+		"path": ".", "pattern": "*.go",
+	})
+	// Exact, not substring: labels must stay workspace-relative, and an absolute
+	// prefix would still "contain" the relative path.
+	if strings.TrimSpace(shallow) != "top.go" {
+		t.Fatalf("bare glob = %q, want the workspace-relative label %q", shallow, "top.go")
+	}
+	if strings.Contains(shallow, "src/main.go") {
+		t.Fatalf("bare *.go must stay at depth 1 on this transport too: %s", shallow)
 	}
 
 	// The jail still applies to the search root.
@@ -89,28 +122,40 @@ func TestEnvDGlobRunsRemoteFind(t *testing.T) {
 	}
 }
 
-func TestEnvDGrepReportsWhichEngineRan(t *testing.T) {
-	stub := newEnvdStub(t, map[string]string{
-		"/srv/app/README.md": "line one\nhello envd\nline three\n",
-	}, nil)
+// TestEnvDGrepDeclinesCapabilitiesTheTargetCannotProvide pins the capability
+// direction of the swap: the retired script silently ignored parameters it did
+// not understand, which turned "I asked for this guarantee" into "you got
+// something else". The shared core refuses instead, and the message names the
+// missing capability together with the way out.
+func TestEnvDGrepDeclinesCapabilitiesTheTargetCannotProvide(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{"/srv/app/README.md": "hello envd\n"}, nil)
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
 
-	got := callTool(t, ctx, session, "remote_envd__grep", map[string]interface{}{
-		"path": ".", "pattern": "hello",
+	// envd's wire carries no device id, so the filesystem boundary cannot be
+	// known: inferring it from path shape would cross a mount the caller excluded.
+	refused := callEnvDExpectError(t, ctx, session, "remote_envd__grep", map[string]interface{}{
+		"path": ".", "pattern": "hello", "one_file_system": true,
 	})
-	if !strings.Contains(got, "searched with rg") {
-		t.Fatalf("grep did not report its engine: %s", got)
-	}
-	if !strings.Contains(got, "hello envd") {
-		t.Fatalf("grep missed the match: %s", got)
+	if !strings.Contains(refused, "one_file_system") || !strings.Contains(refused, "FilesystemIdentifier") {
+		t.Fatalf("one_file_system refusal = %q", refused)
 	}
 
-	// No match is a result, not a failure (rg/grep both exit 1 for it).
-	empty := callTool(t, ctx, session, "remote_envd__grep", map[string]interface{}{
-		"path": ".", "pattern": "absent-token",
+	// Access and creation times are not on the wire either: no order may be
+	// invented from this machine's clock.
+	refusedSort := callEnvDExpectError(t, ctx, session, "remote_envd__grep", map[string]interface{}{
+		"path": ".", "pattern": "hello", "sort": "accessed",
 	})
-	if !strings.Contains(empty, "no matches for") {
-		t.Fatalf("no-match text = %q", empty)
+	if !strings.Contains(refusedSort, "sort=accessed") {
+		t.Fatalf("sort=accessed refusal = %q", refusedSort)
+	}
+
+	// The same call without the unanswerable guarantee still works: the refusal
+	// is scoped to the parameter, not the tool.
+	ok := callTool(t, ctx, session, "remote_envd__grep", map[string]interface{}{
+		"path": ".", "pattern": "hello",
+	})
+	if !strings.Contains(ok, "hello envd") {
+		t.Fatalf("dropping one_file_system must still search: %q", ok)
 	}
 }
 

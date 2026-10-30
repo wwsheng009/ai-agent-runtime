@@ -70,12 +70,6 @@ type envdStub struct {
 	// empty list, writing nothing. A client that trusts the status code reports a
 	// successful write that never happened.
 	writeDropsSilently bool
-	// grepFrames splits the stubbed search output into N data frames, so a test can
-	// tell "the client stopped reading early" apart from "the client drained
-	// everything and trimmed the string". streamCut records that a later write
-	// failed, which is exactly what happens when the reader cancels.
-	grepFrames int
-	streamCut  atomic.Bool
 
 	statCalls    atomic.Int64
 	processCalls atomic.Int64
@@ -263,6 +257,12 @@ func (s *envdStub) isDir(target string) bool {
 
 // entriesFor returns the ListDir payload for one path: an explicit pin when set,
 // otherwise one synthesized level from the file map.
+//
+// The synthesis must model directories, not just files: a listing that only
+// carries files cannot be walked - the shared cores descend by seeing a
+// directory entry, and the daemon reports subdirectories as entries too. A file
+// below a subdirectory therefore contributes a directory entry for that
+// subdirectory (once), which is what lets glob/grep reach the nested tree.
 func (s *envdStub) entriesFor(target string) []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -277,15 +277,32 @@ func (s *envdStub) entriesFor(target string) []map[string]any {
 			continue
 		}
 		rest := strings.TrimPrefix(candidate, prefix)
-		if rest == "" || strings.Contains(rest, "/") {
+		if rest == "" {
 			continue
 		}
-		if seen[rest] {
+		name, isFile := rest, true
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			name, isFile = rest[:slash], false
+		}
+		if seen[name] {
 			continue
 		}
-		seen[rest] = true
+		seen[name] = true
+		if !isFile {
+			out = append(out, map[string]any{
+				"name":        name,
+				"path":        prefix + name,
+				"type":        "FILE_TYPE_DIRECTORY",
+				"size":        "4096",
+				"mode":        511,
+				"permissions": "drwxr-xr-x",
+				"owner":       "dev",
+				"group":       "dev",
+			})
+			continue
+		}
 		out = append(out, map[string]any{
-			"name":        rest,
+			"name":        name,
 			"path":        candidate,
 			"type":        "FILE_TYPE_FILE",
 			"size":        fmt.Sprintf("%d", len(content)),
@@ -586,57 +603,15 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 				}
 				stub.mu.Unlock()
 				writeProcessStream(t, w, []byte(resolved+"\n"), nil, 0)
-			case "aicli-envd-grep":
-				pattern, root := arg(3), arg(4)
-				stub.mu.Lock()
-				var matches []string
-				for candidate, content := range stub.files {
-					if !strings.HasPrefix(candidate, root) {
-						continue
-					}
-					for number, line := range strings.Split(content, "\n") {
-						if strings.Contains(line, pattern) {
-							matches = append(matches, fmt.Sprintf("%s:%d:%s", candidate, number+1, line))
-							break
-						}
-					}
-				}
-				frames := stub.grepFrames
-				stub.mu.Unlock()
-				sort.Strings(matches)
-				out := strings.Join(matches, "\n")
-				if out != "" {
-					out += "\n"
-				}
-				// The engine marker goes first, the way the real script does it: a
-				// capped read must still report which dialect produced it.
-				if frames > 0 {
-					cut := false
-					if !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 9}}}) {
-						cut = true
-					}
-					marker := base64.StdEncoding.EncodeToString([]byte("__TOOL__=rg\n"))
-					if !cut && !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": marker}}}) {
-						cut = true
-					}
-					for index := 0; index < frames && !cut; index++ {
-						chunk := fmt.Sprintf("/srv/app/f%d.md:1:%s\n", index, strings.Repeat("x", 64))
-						encoded := base64.StdEncoding.EncodeToString([]byte(chunk))
-						if !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": encoded}}}) {
-							cut = true
-						}
-					}
-					if !cut && !writeEnvDFrameSoft(w, map[string]any{"event": map[string]any{"end": map[string]any{"exited": true, "status": "exit status 0"}}}) {
-						cut = true
-					}
-					if cut {
-						// The reader stopped consuming: that is the whole point of a
-						// capped search, and it is what a test must be able to see.
-						stub.streamCut.Store(true)
-					}
+			case "aicli-envd-dir":
+				// `test -d "$1" && printf dir || printf other`: the workdir anchor
+				// probe. Answered from the stub's own directory model, so a workdir
+				// call behaves on the stub the way it behaves on a target.
+				if stub.isDir(arg(3)) {
+					writeProcessStream(t, w, []byte("dir"), nil, 0)
 					return
 				}
-				writeProcessStream(t, w, []byte("__TOOL__=rg\n"+out), nil, 0)
+				writeProcessStream(t, w, []byte("other"), nil, 0)
 			case "aicli-envd-write":
 				stub.put(arg(3), arg(4))
 				writeProcessStream(t, w, nil, nil, 0)
@@ -672,25 +647,6 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 				return
 			}
 			writeProcessStream(t, w, []byte(content), nil, 0)
-		case "/usr/bin/find":
-			root, pattern := arg(0), arg(2)
-			stub.mu.Lock()
-			var hits []string
-			for candidate := range stub.files {
-				if !strings.HasPrefix(candidate, root+"/") {
-					continue
-				}
-				if matchesBaseGlob(base(candidate), pattern) {
-					hits = append(hits, candidate)
-				}
-			}
-			stub.mu.Unlock()
-			sort.Strings(hits)
-			if len(hits) == 0 {
-				writeProcessStream(t, w, nil, nil, 0)
-				return
-			}
-			writeProcessStream(t, w, []byte(strings.Join(hits, "\n")+"\n"), nil, 0)
 		default:
 			writeProcessStream(t, w, nil, []byte("stub: unexpected command "+req.Process.Cmd+"\n"), 127)
 		}
@@ -699,17 +655,6 @@ func newEnvdStub(t *testing.T, files, links map[string]string) *envdStub {
 	stub.server = httptest.NewServer(mux)
 	t.Cleanup(stub.server.Close)
 	return stub
-}
-
-// matchesBaseGlob implements the tiny subset of base-name globbing the find stub
-// needs: "*.ext" and exact names.
-func matchesBaseGlob(name, pattern string) bool {
-	switch {
-	case strings.HasPrefix(pattern, "*"):
-		return strings.HasSuffix(name, strings.TrimPrefix(pattern, "*"))
-	default:
-		return name == pattern
-	}
 }
 
 // base returns the last slash-separated element of a target-side path.

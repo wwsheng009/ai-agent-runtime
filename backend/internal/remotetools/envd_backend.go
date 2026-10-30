@@ -76,9 +76,10 @@ const (
 )
 
 // envdReadChannel* name the transport that actually moved the bytes, published
-// as result metadata. envdGrep already reports which engine ran because the two
-// dialects differ; a read channel is the same kind of fact, and a caller must be
-// able to tell "native endpoint" from "fell back to cat" without reading prose.
+// as result metadata. The shared grep reports which engine ran for the same
+// reason - the fact belongs to the transport, not to the prose; a read channel
+// is the same kind of fact, and a caller must be able to tell "native endpoint"
+// from "fell back to cat" without reading prose.
 const (
 	envdReadChannelFiles   = "files"
 	envdReadChannelProcess = "process"
@@ -875,7 +876,6 @@ func envdDirParam(params map[string]interface{}) (dir string, conflict string) {
 	return cwd, ""
 }
 
-
 // envdExtensionTiers pins the tools that exist only on the envd backend to the
 // tier they belong to.
 //
@@ -961,6 +961,11 @@ func envdToolEnabled(cfg *Config, name string) bool {
 // A tool the backend has not implemented yet is simply not a candidate. Names are
 // rewritten by the same newPrefixedTool wrapper, which is what keeps a remote tool
 // from ever colliding with a local builtin.
+//
+// Two kinds of tools are registered here, through the same gating and the same
+// wrapper: the shared-core surface (ls/glob/grep, built in envd_core.go over
+// the backend's FileAccess) and the spec-backed surface below, whose execution
+// still belongs to this backend alone.
 func buildEnvDRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if cfg == nil || workspace == nil {
 		return nil, fmt.Errorf("config and workspace are required")
@@ -971,6 +976,18 @@ func buildEnvDRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) 
 	}
 	base := remoteToolBase{cfg: cfg, workspace: workspace}
 	registry := toolkit.NewRegistry()
+	shared, err := envdSharedCoreTools(base, backend)
+	if err != nil {
+		return nil, err
+	}
+	for _, tool := range shared {
+		if !envdToolEnabled(cfg, tool.Name()) {
+			continue
+		}
+		if err := registry.Register(newPrefixedTool(tool, cfg.ToolPrefix)); err != nil {
+			return nil, fmt.Errorf("register envd %s: %w", tool.Name(), err)
+		}
+	}
 	for _, spec := range envdToolSpecs(base) {
 		if !envdToolEnabled(cfg, spec.name) {
 			continue
@@ -1037,7 +1054,7 @@ func envdViewParameters() map[string]interface{} {
 //
 // Two channels can move bytes here, and which one answers is published as
 // read_channel so a caller can tell them apart rather than guess from prose -
-// the same reason envdGrep publishes which engine ran:
+// the same reason the shared search surfaces publish which engine ran:
 //
 //   - envd's native GET /files (see internal/envdclient/files.go) is preferred:
 //     it is a real HTTP transfer with Range support, so no shell, no argv, no

@@ -134,3 +134,33 @@ go run ./scripts/envd_seam_access_verify.go -addr https://<host>:49983 `
 链接的中间目录能否 Stat、seam 读到的字节与 `/files` 原生整读是否逐字节相同且回绕后一致、缺失
 归为不存在、（可选）权限拒绝不被说成不存在、以及适配器和 `FilesystemIdentifier` 的**不**实现。
 跑完这条就是接线前的最后一道门。
+
+## 6. 接线后的实际落地（2026-10-28，S6）
+
+§4 的 B 被采纳并落地：三个脚本工具（`envdLs`/`envdGlob`/`envdGrep` 与它们的 `find`/`rg-or-grep`
+脚本）退役，`ls/glob/grep` 由共享核在 `remotetools/envd_core.go` 的 runtime 上执行——
+`FileAccess()` 就是本文 §1 造的那条访问器；`Paths()` 复用既有 `be.resolvePath`/`workspaceRelative`
+（workdir 锚点、词法关押、目标侧 canonicalize、canonical 复核全部原样）；`Output()`/`CaptureLimit()`
+复用共享折叠与同一 `Limits` 预算。
+
+**一处偏离必须写明**：§4-1 提到的"保留 rg 优先"没有照做，落地取 **walker-only**。理由不是省事：
+旧脚本的"有 rg 用 rg、没有用 grep -rnI"意味着**同一个工具在每台目标机上语义不同**（方言、ignore
+规则随目标机漂移），这正是"一套外壳 + 一条执行腿"要消掉的分叉；而 rg 通道要做成
+`searchcore.Searcher`（进程通道 + `Ripgrep.Stream`），并补上 §4-1 自己点明的"是否装 rg"可见性
+（`ProbeCapabilities` 覆盖不到它），是本仓一档独立工作。若产品要"装了 rg 的目标恢复 rg 优先"，
+记为独立步骤 S6b，**待确认**。
+
+**换核后逐项核过的事实**（全部实跑）：
+
+- 老调用（`path`+`pattern`）照常工作；`workdir` 锚点保留（prefix 包装 + `anchorCallWorkdir`）。
+- `one_file_system`：按 B 变为**点名拒绝**（消息含"去掉 one_file_system"的出路，来自共享核的能力门）；
+  `sort=accessed/created` 同形拒绝（Q4 哨兵）。两者都从"静默忽略"到"点名拒绝"，即本文 §3 的方向。
+- rg 专属参数（`json`/`json_output` 等）从"目标机 rg 能跑"变成点名拒绝；拒绝文案是共享核的、
+  对"本机"措辞，envd 用户读起来略偏——已知并记录。
+- glob 的匹配语言收敛到共享规则：`*.go` 只匹配搜索根下一层，任意深度用 `**/*.go`（旧 `find -name`
+  是任意深度按基名）。这是**用户可见的语义收敛**，不是能力减少。
+- 成本形态变化（未做真机性能对比）：从"目标机一次进程"变成"每个候选一次读窗口（page 满即停）"；
+  列为真机门的观察项。
+
+**真机门**（§5 末尾那把关）仍未跑：需 `AICLI_ENVD_TOKEN`，与"换发令牌"安全待办冲突，不去配置
+文件取秘密；离线门（`envd_core_integration_test.go`）与 stub 上的端到端（5 条）均已全绿。
