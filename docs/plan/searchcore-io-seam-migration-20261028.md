@@ -420,6 +420,25 @@ S5g 一条（把第 24 条从"这一处"变成"这一类"）：
     `TestGrepWalkerBudgetBoundsTheSearch` 恒红外全绿、`cmd` PASS（wsl.exe 中途崩溃两次，按第 20 条
     的办法"编译与运行拆开、输出落盘"才把证据取回来）。
 
+S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三条理由 + 一条新钉子"）：
+
+26. **"看起来可疑"要按可达性分诊，正确产出有时是零改动，但必须是"钉住或写明"，不能是"放过"**。
+    把三个核非测试文件里剩余的 `filepath.*` 全部过完（哨兵 `SkipAll`/`SkipDir` 与路径无关；
+    `Base` 对斜杠路径正确、`Rel` 后接 `ToSlash` 属第 23 条已分诊），只剩三处：
+    - `grep_render.go` 的 `closestRoot` 用 `root+宿主分隔符` 去前缀匹配**目标拼写**的 file——宿主的
+      `\` 对 POSIX 拼写必然 miss。修不修不靠推理：一次性探针实测三种形状（工作区在多根之上、resolver
+      拒绝相对化、工作区落在单根内），输出分别是 `b/pkg/x.txt`、`/srv/b/pkg/x.txt`、`/srv/b/x.txt`
+      ——miss 收敛到与命中相同的诚实答案（`Paths.Relative` 的拒绝语义兜住了它）。**结论：保持原样**，
+      换成常驻测试 `TestGrepRenderMultiRootPosixPathsStayHonest` 钉住这三条字面量（Windows 与 Linux
+      期望一致，两端实跑均绿）；S6 更换 `Paths` 语义时这条会先说话。
+    - `glob.go` 的模式形状校验里 `filepath.IsAbs(trimmed)` 只多拦一个 Windows 盘符写法：Linux 宿主
+      上的盘符模式本就无意义，Windows 宿主上的 POSIX 绝对写法已由 `HasPrefix(normalized,"/")` 拦下
+      ——保持，不替一个不可达组合改动用户可见的校验文案。
+    - `viewcore/read.go` 目录预览给目录名加的后缀跟随宿主分隔符（`view_test.go:226` 已钉住宿主形态）：
+      S6 把 view 接到远端时再决定方言（离线门的逐字节对比会先暴露差异），不在本地可见语义上擅自改。
+    教训：把"可疑"直接翻译成"要改"会制造无人需要的语义变更；放过不说则是留债。**分诊本身要付费用
+    （探针/测试）证明**，而不是用一段解释把疑点压下去。
+
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 
 `grep_sort.go` 对这两个 key 读的是 `FileInfo.Sys()` 里的平台 `Stat_t`（`fileAccessTime` /

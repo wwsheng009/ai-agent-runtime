@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // fakeRenderPaths renders display paths like the workspace resolver: relative
@@ -151,5 +153,54 @@ func TestGrepRenderFilesAndCountShapes(t *testing.T) {
 	page = renderGrepPage(grepRenderInputs{paths: paths, result: &counts, options: GrepOptions{Limit: 10}, mode: GrepModeCount, roots: []string{root}})
 	if page.content != "a.txt:1\nnested/b.txt:1" {
 		t.Fatalf("count shape = %q", page.content)
+	}
+}
+
+// decliningPaths is a resolver whose workspace is unrelated to the search roots:
+// it answers absolutely instead of relativizing, which is the shape the
+// absolute-path guard in displayPathFor was written for.
+type decliningPaths struct{ root string }
+
+func (p decliningPaths) Root() string                       { return p.root }
+func (p decliningPaths) Resolve(raw string) (string, error) { return raw, nil }
+func (p decliningPaths) Relative(abs string) string         { return abs }
+
+// TestGrepRenderMultiRootPosixPathsStayHonest pins the multi-root display for
+// POSIX spellings on every host, because the branch that composes the root label
+// probes paths with `root+filepath.Separator` - the host's separator against the
+// target's spelling. Measured on 2026-10-28: the probe's miss converges to the same
+// honest answer a hit would produce, for both a workspace-relative resolver and one
+// that declines to relativize, so the probe needs no change today - but a remote
+// surface (S6) changes what Paths.Relative answers, and that is exactly when these
+// literals must be re-read instead of re-derived from the code.
+func TestGrepRenderMultiRootPosixPathsStayHonest(t *testing.T) {
+	cases := []struct {
+		name  string
+		paths toolcore.PathResolver
+		roots []string
+		file  string
+		want  string
+	}{
+		{
+			"workspace above both roots",
+			fakeRenderPaths{root: filepath.FromSlash("/srv")},
+			[]string{"/srv/a", "/srv/b"}, "/srv/b/pkg/x.txt", "b/pkg/x.txt",
+		},
+		{
+			"resolver declines to relativize",
+			decliningPaths{root: filepath.FromSlash("/srv")},
+			[]string{"/srv/a", "/srv/b"}, "/srv/b/pkg/x.txt", "/srv/b/pkg/x.txt",
+		},
+		{
+			"workspace inside the first root",
+			fakeRenderPaths{root: filepath.FromSlash("/srv/a")},
+			[]string{"/srv/a", "/srv/b"}, "/srv/b/x.txt", "/srv/b/x.txt",
+		},
+	}
+	for _, tc := range cases {
+		in := grepRenderInputs{paths: tc.paths, roots: tc.roots}
+		if got := in.displayPathFor(tc.file); got != tc.want {
+			t.Fatalf("%s: display = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
