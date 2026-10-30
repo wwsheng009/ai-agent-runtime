@@ -23,8 +23,13 @@ C 方案的定义：
 
 | 层级 | 内容 | 适用场景 |
 |------|------|----------|
-| **C1** | 网关新增一个专用 ops bot + 全局通知目标；节点本地 bot 继续负责会话命令回环 | 最小风险、最快上线；网关通知发给单独的运维群/频道 |
+| **C1** | 网关新增一个专用 ops bot + 全局通知目标；节点本地 bot 继续负责会话命令回环 | 最小风险、最快上线；网关通知发给单独的运维目标（QQ 群/C2C 或微信 DM） |
 | **C2** | 把原本运行在 aicli/runtime-server 上的会话 bot 迁移到网关；网关 bot 成为该会话的唯一 IM 入口 | 目标是“网关统一承接所有通知 + 命令回环” |
+
+**C1/C2 不是两套代码**：它们共用 `GatewayBot` 通道、连接器 CRUD、绑定和目标模型。
+C1 只是“网关 bot + 全局 target，节点 bot 保留”；C2 是“网关 bot + 会话 binding，
+节点 bot 禁用/迁移”。因此可以先做 C1 验证通道，再按需把 C2 作为迁移模式启用；
+不需要为了 C2 重写一套通知系统。
 
 **不建议**把节点的 `connectors.json`/`config.yaml` 复制到网关，也不建议让网关通过隧道回调节点来发通知：
 
@@ -312,17 +317,24 @@ runtime-server 为 `/n/{node}/`（不拼 session query）：
 
 审批/提问消息中的 `/approve`、`/deny`、`/answer` 只有在网关 bot 绑定到目标节点/会话时才可闭环；C1 的 ops bot 可以只做通知，不承诺命令回环。
 
-### 5.8 Provider 能力矩阵（首期约束）
+### 5.8 Provider 能力矩阵（首期微信 + QQ）
 
-| Provider | 仅出站（不启动轮询/WS） | 目标 chat 来源 | 约束与建议 |
-|----------|--------------------------|----------------|------------|
-| Telegram | 可用：`sendMessage` 只依赖 bot token | chat_id（可手工/测试 getUpdates） | **首期推荐**；无需 webhook |
-| 飞书 | 可用：tenant token + `chat_id` | chat_id / open_id | **首期推荐**；后续可升 interactive card |
-| QQ 官方 bot | 可用：openapi 发送 | C2C/群 openid | 需验证主动消息频控/被动回复窗口；首期后置 |
-| 微信 | 有条件：部分发送依赖 `context_token` | openid / 绑定上下文 | 不作为网关 ops 首选；必须先真机验证 proactive 限制 |
+首期已定微信与 QQ；两者的现实边界不同：
 
-首期不建议把微信作为“网关自持 bot 通知”的主通道：它需要较为复杂的上下文和主动消息窗口，
-失败模式比 Telegram/飞书多。网关 bot 的 Provider 选择应由配置时校验 + 测试消息先行验证。
+| Provider | 目标形态 | 出站约束 | 首期建议 |
+|----------|----------|----------|----------|
+| QQ 官方 bot | 群 / C2C（openid） | 无 `msg_id` 走主动消息；有单聊/群/关系/日配额；平台仍兜底 | **C1 首选**：用 QQ 群或 C2C 做网关 ops target |
+| 微信 | 当前 Provider 是 **1:1 chat/openid**，无群/chatroom 能力 | `Send` 必须携带该 chat 最近入站的 `context_token`；无 token 直接失败；会话过期需重新入站刷新 | C1 只能作为 owner 的 **微信 DM**，且必须先给网关 bot 发一条消息播种；C2 更适合按会话迁移 |
+
+补充：
+
+- QQ 群/C2C 目标不需要先有入站消息；主动消息受平台配额限制，适合低频运维通知。
+- 微信不支持“把消息发到一个微信群”：当前 Provider 没有 group/chatroom 解析；如果目标是群，
+  首期应使用 QQ 群，而不是微信。
+- 微信 `context_token` 是 **按 connector+chat** 的回复上下文；网关 bot 自己的 store
+  必须有该 token（入站播种或迁移时显式导入），不能靠节点只读 API 自动抓取。
+- 网关 bot 的 Provider 选择应由配置时校验 + 测试消息先行验证；测试失败不能阻断
+  push/ntfy 的既有回退。
 
 ---
 
@@ -506,12 +518,19 @@ POST /api/notify/im/test    可选：向指定 target 发送测试文本
 ### 7.2 C1：专用网关 ops bot（推荐首期）
 
 - 网关新增一个**独立的 bot/token**（不要复用节点正在轮询的 token）；
-- 目标是一个独立的运维群/频道，通常不绑定会话；
+- 目标是一个独立的运维目标（QQ 群/C2C，或微信 owner DM），通常不绑定会话；
 - 节点本地 bots 继续负责会话命令回环与本地通知；
 - 网关 bot 负责：网关级告警、跨节点摘要、以及可选的 error/waiting 补充；
 - 优点：不需要迁移节点 bot，不会抢消息，不要求节点回程。
 
-注意：如果 C1 使用 Telegram polling / QQ WS 等会消费入站的通道，网关 bot 仍会收到
+首期微信/QQ 的具体落点：
+
+- **QQ**：建议作为 C1 主 ops target，使用 QQ 群或 owner C2C；主动消息配额足够低频通知；
+- **微信**：C1 只能是 owner 的 **1:1 微信 DM**（当前 Provider 无群能力）。网关 bot
+  必须先收到该 owner 的一条入站消息产生 `context_token`，之后才能向该 DM 发通知；
+  若 context 过期，需要再次入站播种。不要把微信 C1 描述成“运维群”。
+
+注意：如果 C1 使用 QQ WS / 微信长轮询等会消费入站的通道，网关 bot 仍会收到
 平台消息。此时要么在 `settings.node_id` 指定一个目标节点（命令回环有明确落点），
 要么在后续 `notify_only` 模式下不启动轮询；否则多节点时入站会按现有
 `gateway_node` 规则报“需要指定 node_id”并记日志，虽然不影响出站通知，但会产生噪声。
@@ -545,6 +564,10 @@ POST /api/notify/im/test    可选：向指定 target 发送测试文本
 C2-A 的 secrets 只能由 owner 手工导出/导入（或使用离线迁移工具），**不能**
 让网关通过节点的只读 `/api/connectors` 自动抓取；后者只返回 `secret_keys`，
 这是安全边界，不应为 C2 放宽。
+
+微信 C2 额外约束：迁移后网关 bot 的 store 需要该 chat 的 `context_token`；
+迁移时要么复制 state（人工/离线）并验证，要么在切换后让 owner 重新发一条消息
+播种。QQ C2 没有 context_token 依赖，但受主动消息配额与被动回复窗口约束。
 
 ### 7.4 多实例
 
@@ -619,7 +642,7 @@ gateway_bot_no_recipient_total{kind}
 ### 阶段 0：决策与前置（0.5–1 人日）
 
 - 确认 C1 vs C2；
-- 确认首期 Provider（建议 Telegram/飞书；微信先不做网关 ops）；
+- 首期 Provider 已定微信 + QQ：C1 用 QQ 群/C2C；微信仅 owner DM + context_token 播种；
 - 确认“网关 bot 是否必须命令回环”；
 - 确认 normal 的 bot 主通道与 fallback 链。
 
@@ -637,7 +660,7 @@ gateway_bot_no_recipient_total{kind}
 - 测试：high/normal/no-target/failure/partial/coalesce/presence；
 - 控制台：Bot 通道目标列表 + 测试按钮（最小 UI）。
 
-**验收**：配置一个专用 Telegram/飞书 bot + 全局 target，所有节点的 approval/question/error 能到一个运维群；normal completion 能到，且 push 不重复；断网/失败时 push 回退。
+**验收**：配置一个专用 QQ ops bot + 全局 target，所有节点的 approval/question/error 能到 QQ 群/C2C；微信 DM 作为第二 target（先播种 context_token）；normal completion 能到，且 push 不重复；断网/失败时 push 回退。
 
 ### 阶段 2：网关 bot CRUD + 绑定 UI（3–5 人日）
 
@@ -645,15 +668,16 @@ gateway_bot_no_recipient_total{kind}
 - 复用 `restapi` schema/form；密钥留空=保持/`__clear__`；
 - 节点连接器继续只读；
 - 冲突警告（同 provider/同 bot identity/同 session 双绑定）；
-- Telegram/Feishu 优先；QQ 其次；微信标注“需验证 proactive/context_token”。
+- 首期 QQ（群/C2C）+ 微信（DM + context_token 播种）；Telegram/飞书留作后续扩展。
 
-**验收**：不通过 curl，只在控制台创建 Feishu/Telegram 网关 bot，绑定 chat，发送测试，收到消息；节点连接器不变。
+**验收**：不通过 curl，只在控制台创建 QQ/微信网关 bot，绑定 chat，发送测试，收到消息；
+微信测试必须先完成 context_token 播种；节点连接器不变。
 
 ### 阶段 3：C2 迁移与高级能力（3–5 人日）
 
 - 迁移向导：从节点 bot → 网关 bot（禁用节点、绑定网关、验证入站/命令）；
 - 可选 `notify_only` 模式（不启动轮询，仅出站；按 Provider 能力）；
-- 飞书卡片/QQ 富媒体/微信限制提示；
+- QQ 富媒体/微信 context_token 失效提示/后续 Telegram/飞书卡片；
 - 网关级告警源（node offline、bot failure）接入 `GatewayBot`；
 - `scope=nodes/sessions` 与 per-target `ignore_presence`/rate limit。
 
@@ -736,7 +760,7 @@ gateway_bot_no_recipient_total{kind}
 ## 14. 开放问题（评审需拍板）
 
 1. **C1 还是 C2 作为首期目标？** 推荐 C1（独立 ops bot），C2 作为迁移项目。
-2. **首期 Provider？** 推荐 Telegram + 飞书；微信 proactive/context_token 需真机验证；QQ 可后置。
+2. **首期 Provider？** 已定微信 + QQ：QQ 适合 C1 群/C2C；微信只适合 C1 owner DM（先播种 context_token）或 C2 会话迁移。
 3. **normal 主通道是否默认 `im`？** 推荐“有 target 则 im 主通道，无 target/失败回退 push”。
 4. **presence 是否抑制 bot？** 推荐默认抑制，与 push 一致；target 可后续加 `ignore_presence`。
 5. **waiting 是否发 bot？** 推荐默认不发；target 显式 kinds 才发。
@@ -767,7 +791,7 @@ gateway_bot_no_recipient_total{kind}
 | R4 | 现有 `connectorAttentionHook` 绕过 Dispatcher 的合并/免打扰/账本，直接新增 bot hook 会绕过策略 | 高 | 采用 `GatewayBot` 一等 Channel；旧 hook 用 feature flag 关闭，避免双路径 |
 | R5 | 只有 Binding 模型，无法表达“发给所有节点”的全局 target | 高 | 新增 `gateway-im.json` + scope all/nodes/sessions；与 bindings 去重 |
 | R6 | 网关 bot 的 secrets 会进入网关，需确认安全边界 | 中 | 复用 0600 store；API 只回 secret_keys；不复制节点 secrets；C1 用独立 token |
-| R7 | 微信 proactive/context_token、QQ 回复窗口可能限制网关 bot | 中 | Provider 能力矩阵；首期 Telegram/飞书；微信真机验证后再开 |
+| R7 | 微信 context_token/无群能力、QQ 主动消息配额可能限制网关 bot | 中 | 首期 QQ 群/C2C + 微信 owner DM；微信先播种 context_token；QQ 先验证配额 |
 | R8 | presence 是否抑制 IM 未定 | 中 | 默认沿用 push 抑制；target 加 `ignore_presence` 作为后续 |
 | R9 | C2 迁移不是复制配置，而是迁移 bot 所有权 | 高 | 迁移向导：创建网关 bot → 绑定 → 禁用节点 → 验证入站 → 删除节点绑定 |
 | R10 | 网关多实例没有 bot 租约 | 中 | 明确 active/passive 约束；不得双 active；沿用 gateway 15 号文档 |
