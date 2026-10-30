@@ -81,10 +81,29 @@ S5a 在 `walkViaAccess` 里显式 `sort.Slice` 的原因——排序在被测代
 4. **D｜接受远端不支持 `one_file_system`**：只有在 A/B 都被否掉时才谈，且必须写进用户文档
    与档位说明，不能靠运行时报错让员工自己发现。
 
-## 5. 我建议的下一步（不含争议部分）
+## 5. 下一步（不含争议部分）
 
 `Access` 的四个方法里，`Lstat / ReadDir / Open(ReadRange) / Stat(解析后)` 与
 `SymlinkResolver(复用 canonicalize)` 都能**自证、不改工具面、不碰他人热区**地先做出来：
 新文件 + 以假 transport 为对象的单测，**先不接线**（接线才需要动 `remotetools` 的 runtime，
 而那里 `registry.go`/`tools.go` 他人正在提交）。这样 §4 的决策可以在一个"已经能跑、
 只是没接上"的执行腿上面做，而不是在纸面上猜。
+
+已按此落地：`remotetools/envd_access.go`（含 9 条契约测试与 9/9 反向验证）。落地时比本节
+多走了一步——链接解析**没有**复用 `canonicalize`，因为读实现发现 envd 只把末段报成
+`FILE_TYPE_SYMLINK`、中间组件由服务端自己跟随，于是逐跳 `SymlinkTarget` 就够，不必开进程；
+代价是这条假设至今**只有假目标证明过**。
+
+关掉它的工具已经写好（只读、不写目标机、任一假设不成立即非零退出）：
+
+```
+$env:AICLI_ENVD_TOKEN = '<access token>'
+go run ./scripts/envd_seam_access_verify.go -addr https://<host>:49983 `
+   -user <user> -workspace /home/<user> -ca-file <tls.crt>
+```
+
+它逐条打印 PASS/FAIL/SKIP：workspace 是否还像目录（`Mode().IsRegular()` 必须为假）、清单
+自一致性、`Lstat` 保住末段链接而 `Stat` 跟随、`EvalLinkPath` 给出绝对存在的目标、穿过可能被
+链接的中间目录能否 Stat、seam 读到的字节与 `/files` 原生整读是否逐字节相同且回绕后一致、缺失
+归为不存在、（可选）权限拒绝不被说成不存在、以及适配器和 `FilesystemIdentifier` 的**不**实现。
+跑完这条就是接线前的最后一道门。
