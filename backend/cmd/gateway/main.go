@@ -690,6 +690,13 @@ func run() int {
 		notifier.observe(registry.List())
 		writeJSON(w, http.StatusOK, map[string]any{"removed": nodeID})
 	}))).Methods(http.MethodDelete)
+	// 连接器页只读聚合：网关自身 store 之外，按节点读取其本地连接器管理面。
+	// 该入口固定指向 /api/connectors 命名空间且只允许 GET；不把任意路径交给
+	// 隧道代理。节点离线/未开启 Web 时由 ServeProxy 返回 502。
+	nodeConnectorView := limited(owner.RequireSession(handleNodeConnectors(server)))
+	// 不在这里挂 Methods(GET)：handler 自己回 405 + Allow，避免写方法落到 404。
+	router.Handle("/api/nodes/{node_id}/connectors", nodeConnectorView)
+	router.PathPrefix("/api/nodes/{node_id}/connectors/").Handler(nodeConnectorView)
 	router.Handle("/api/nodes/{node_id}/sessions/{session_id}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		nodeID, sessionID := vars["node_id"], vars["session_id"]

@@ -409,6 +409,11 @@
       // 登录/刷新完成后补做通知定位请求（事件可能早于快照到达）。
       flushPendingLocate();
       subscribeEvents();
+      // 连接器视图可能先于节点快照打开（首屏 hash 直达 #connectors）：
+      // 节点到齐后按签名补读一次；节点集合/路由不变时不会重复请求。
+      if (currentView() === "connectors" && connectorGatewaySettled) {
+        refreshConnectorNodes(false);
+      }
     }).finally(function () {
       if (views) { views.removeAttribute("aria-busy"); }
     });
@@ -425,6 +430,21 @@
   /* ─────────────────────── rendering: connectors ─────────────── */
 
   var connectorsLoaded = false;
+
+  // 连接器列表不是单一数据源：网关自身 store 是主数据，在线节点上的
+  // aicli/runtime-server 连接器经 /n/{node}/ 反代读取。页面把两边合并展示；
+  // 同一 id 出现在多个共享 config.yaml 的节点时只保留正在运行该连接器的一份。
+  var connectorEntries = [];
+  var connectorGatewayEntries = [];
+  var connectorGatewayMessage = "";
+  var connectorGatewaySettled = false;
+  var connectorMessage = "";
+  var connectorLoadSeq = 0;
+  var connectorNodeFetchSeq = 0;
+  var connectorLoadedAt = 0;
+  var connectorNodeSignature = "";
+  var connectorNodeReadTimeoutMs = 4000;
+  var connectorCacheTTLMs = 10000;
 
   // connectorSchemaProviders 是三端共用的 GET /api/connectors/schema 缓存
   // （providers 数组）；连接器卡片据此渲染通用动作按钮（kind=button，
@@ -449,59 +469,258 @@
     return null;
   }
 
-  // loadConnectors 读取 GET /api/connectors（owner 会话鉴权）。force=true 时
-  // 跳过缓存；未接线（启动时 connectors disabled）或响应不是 JSON 契约时给出
-  // 明确的页面态，而不是空白列表。
-  function loadConnectors(force) {
-    if (connectorsLoaded && !force) { return Promise.resolve(); }
-    return apiJSON("/api/connectors").then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
-      if (r.res.status === 403 || r.res.status === 503) {
-        renderConnectors(null, (r.body && r.body.error) || ("连接器管理面不可用（HTTP " + r.res.status + "）"));
+  // connectorNodeBasePath 返回该在线节点连接器视图的网关只读入口。
+  // 网关用固定路径 /api/connectors 代读到节点本地，因此不要求节点把
+  // /api/connectors 加进通用 /n/ 反代白名单；节点的本地 token 由隧道注入。
+  function connectorNodeBasePath(node) {
+    if (!node || node.stale || !node.node_id) { return ""; }
+    var kind = String(node.kind || "").toLowerCase();
+    if (kind !== "aicli" && kind !== "runtime-server") { return ""; }
+    var routes = Array.isArray(node.routes) ? node.routes : [];
+    if (!routes.length) { return ""; }
+    return "/api/nodes/" + encodeURIComponent(node.node_id) + "/connectors";
+  }
+
+  function connectorBasePath(entry) {
+    if (entry.source === "gateway") { return "/api/connectors"; }
+    return connectorNodeBasePath(entry.node);
+  }
+
+  function connectorSourceLabel(entry) {
+    if (entry.source === "gateway") { return "网关"; }
+    return nodeDisplayName(entry.node) || entry.node.node_id;
+  }
+
+  function connectorEntryRank(entry) {
+    if (entry && entry.connector && entry.connector.owned_by_current_host) { return 2; }
+    if (entry && entry.source === "gateway") { return 1; }
+    return 0;
+  }
+
+  // mergeConnectorEntries 按 id 去重：同一份共享 config.yaml 会被多个节点
+  // 同时返回；优先保留“本宿主正在运行”的那份，并把实际来源合并展示。
+  function mergeConnectorEntries(groups) {
+    var byID = {};
+    var order = [];
+    function add(entry) {
+      if (!entry || !entry.connector) { return; }
+      var id = String(entry.connector.id || "").trim();
+      if (!id) { return; }
+      var existing = byID[id];
+      if (!existing) {
+        byID[id] = entry;
+        order.push(id);
         return;
       }
+      if (!existing.sources) { existing.sources = [connectorSourceLabel(existing)]; }
+      var label = connectorSourceLabel(entry);
+      if (existing.sources.indexOf(label) === -1) { existing.sources.push(label); }
+      if (connectorEntryRank(entry) > connectorEntryRank(existing)) {
+        var primary = connectorSourceLabel(entry);
+        entry.sources = [primary].concat(existing.sources.filter(function (label) { return label !== primary; }));
+        byID[id] = entry;
+      }
+    }
+    (groups || []).forEach(function (group) {
+      (group || []).forEach(add);
+    });
+    return order.map(function (id) { return byID[id]; });
+  }
+
+  function connectorNodesSignature(nodes) {
+    return (nodes || []).filter(function (node) { return !node.stale && node.node_id; }).map(function (node) {
+      return node.node_id + ":" + (Array.isArray(node.routes) ? node.routes.join(",") : "");
+    }).sort().join("|");
+  }
+
+  function connectorNodeFetch(node) {
+    var base = connectorNodeBasePath(node);
+    if (!base) { return Promise.resolve({ node: node, items: [] }); }
+    var controller = null;
+    var timer = null;
+    var opts = {};
+    if (typeof window.AbortController === "function") {
+      controller = new window.AbortController();
+      opts.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, connectorNodeReadTimeoutMs);
+    }
+    return apiJSON(base, opts).then(function (r) {
+      if (timer) { clearTimeout(timer); }
       if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
-        renderConnectors(null, "连接器管理面未接线（gateway 启动日志中查找 connectors disabled）");
-        return;
+        var reason = r.body && (r.body.reason || r.body.error);
+        return {
+          node: node,
+          items: [],
+          error: "HTTP " + r.res.status + (reason ? " " + reason : ""),
+        };
       }
-      connectorsLoaded = true;
-      renderConnectors(r.body.items, "");
-      // Schema 加载完成后补渲染动作按钮（首帧不被 schema 请求阻塞）。
-      loadConnectorSchema().then(function (providers) {
-        if (providers && window.location.hash.replace(/^#\/?/, "").split("?")[0] === "connectors") {
-          renderConnectors(r.body.items, "");
-        }
-      });
+      return { node: node, items: r.body.items };
     }).catch(function (err) {
-      renderConnectors(null, "读取连接器失败：" + (err && err.message ? err.message : err));
+      if (timer) { clearTimeout(timer); }
+      return {
+        node: node,
+        items: [],
+        error: err && err.name === "AbortError" ? "读取超时" : (err && err.message ? err.message : String(err)),
+      };
     });
   }
 
-  function renderConnectors(items, errorText) {
+  function connectorNodeHint(results) {
+    var live = (lastNodes || []).filter(function (node) { return !node.stale; });
+    if (!live.length) {
+      return "网关配置为空，当前也没有在线节点可读取本地连接器。";
+    }
+    if (!results || !results.length) {
+      return "网关配置为空；未找到可读取的在线节点连接器（节点可能未开启 Web）。";
+    }
+    var returned = 0;
+    var failed = 0;
+    results.forEach(function (res) {
+      if (res && res.error) { failed++; } else { returned++; }
+    });
+    if (returned === 0) {
+      return "网关配置为空；已尝试读取 " + results.length + " 个在线节点，但没有节点返回连接器视图（可能未开启 Web 或连接器未装配）。";
+    }
+    return "网关与在线节点都没有已配置的连接器。" + (failed ? "（另有 " + failed + " 个节点读取失败）" : "");
+  }
+
+  function connectorInitialMessage() {
+    if (connectorGatewayMessage) { return connectorGatewayMessage; }
+    if (!connectorGatewayEntries.length && (lastNodes || []).some(function (node) { return !node.stale; })) {
+      return "正在读取在线节点的连接器…";
+    }
+    return "";
+  }
+
+  function renderConnectorLoading() {
+    var list = el("connectors-list");
+    if (!list) { return; }
+    var countEl = el("connectors-count");
+    if (countEl) { countEl.hidden = true; }
+    list.innerHTML = "";
+    var loadingEl = document.createElement("p");
+    loadingEl.className = "empty";
+    loadingEl.textContent = "正在读取连接器…";
+    list.appendChild(loadingEl);
+  }
+
+  // refreshConnectorNodes 只读在线节点声明的 /api/connectors；节点结果按
+  // 签名去重（节点集合/路由不变不重复请求），与网关结果合并后重绘。
+  function refreshConnectorNodes(force) {
+    var signature = connectorNodesSignature(lastNodes);
+    if (!force && signature === connectorNodeSignature) { return Promise.resolve(); }
+    connectorNodeSignature = signature;
+    var seq = connectorLoadSeq;
+    var nodeSeq = ++connectorNodeFetchSeq;
+    var targets = (lastNodes || []).filter(function (node) { return connectorNodeBasePath(node); });
+    if (!targets.length) {
+      connectorEntries = mergeConnectorEntries([connectorGatewayEntries, []]);
+      connectorMessage = connectorGatewayMessage || (connectorEntries.length ? "" : connectorNodeHint(null));
+      renderConnectors(connectorEntries, connectorMessage);
+      loadConnectorSchema().then(function () {
+        if (seq === connectorLoadSeq && currentView() === "connectors") {
+          renderConnectors(connectorEntries, connectorMessage);
+        }
+      });
+      return Promise.resolve();
+    }
+    if (!connectorGatewayEntries.length) {
+      connectorMessage = connectorGatewayMessage || "正在读取在线节点的连接器…";
+      renderConnectors(connectorEntries, connectorMessage);
+    }
+    return Promise.all(targets.map(connectorNodeFetch)).then(function (results) {
+      if (seq !== connectorLoadSeq || nodeSeq !== connectorNodeFetchSeq) { return; }
+      var nodeEntries = [];
+      results.forEach(function (res) {
+        if (!res || !Array.isArray(res.items)) { return; }
+        res.items.forEach(function (item) {
+          nodeEntries.push({ connector: item, source: "node", node: res.node });
+        });
+      });
+      connectorEntries = mergeConnectorEntries([connectorGatewayEntries, nodeEntries]);
+      connectorMessage = connectorGatewayMessage || (connectorEntries.length ? "" : connectorNodeHint(results));
+      renderConnectors(connectorEntries, connectorMessage);
+      loadConnectorSchema().then(function () {
+        if (seq === connectorLoadSeq && currentView() === "connectors") {
+          renderConnectors(connectorEntries, connectorMessage);
+        }
+      });
+    });
+  }
+
+  // loadConnectors 读取网关自身 GET /api/connectors（owner 会话鉴权），再聚合
+  // 在线节点的同一契约。force=true 时跳过缓存；网关未接线时仍尝试节点视图，
+  // 但把网关错误保留在页面提示中。
+  function loadConnectors(force) {
+    if (connectorsLoaded && !force) {
+      if (Date.now() - connectorLoadedAt < connectorCacheTTLMs) { return Promise.resolve(); }
+      force = true;
+    }
+    var seq = ++connectorLoadSeq;
+    connectorNodeFetchSeq++;
+    connectorsLoaded = false;
+    connectorGatewaySettled = false;
+    connectorNodeSignature = "";
+    if (!connectorEntries.length) { renderConnectorLoading(); }
+    return apiJSON("/api/connectors").then(function (r) {
+      if (seq !== connectorLoadSeq) { return; }
+      if (r.res.status === 401) { setAuthed(false); return; }
+      connectorGatewayEntries = [];
+      connectorGatewayMessage = "";
+      if (r.res.status === 403 || r.res.status === 503) {
+        connectorGatewayMessage = (r.body && r.body.error) || ("连接器管理面不可用（HTTP " + r.res.status + "）");
+      } else if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
+        connectorGatewayMessage = "连接器管理面未接线（gateway 启动日志中查找 connectors disabled）";
+      } else {
+        connectorGatewayEntries = r.body.items.map(function (item) {
+          return { connector: item, source: "gateway" };
+        });
+        connectorsLoaded = true;
+        connectorLoadedAt = Date.now();
+      }
+      connectorGatewaySettled = true;
+      connectorEntries = connectorGatewayEntries;
+      connectorMessage = connectorInitialMessage();
+      renderConnectors(connectorEntries, connectorMessage);
+      return refreshConnectorNodes(true);
+    }).catch(function (err) {
+      if (seq !== connectorLoadSeq) { return; }
+      connectorsLoaded = false;
+      connectorGatewaySettled = false;
+      connectorEntries = [];
+      connectorGatewayEntries = [];
+      connectorGatewayMessage = "";
+      connectorMessage = "读取连接器失败：" + (err && err.message ? err.message : err);
+      renderConnectors(null, connectorMessage);
+    });
+  }
+
+  function renderConnectors(entries, messageText) {
     var list = el("connectors-list");
     if (!list) { return; }
     var countEl = el("connectors-count");
     list.innerHTML = "";
-    if (errorText) {
+    entries = entries || [];
+    if (!entries.length) {
       if (countEl) { countEl.hidden = true; }
-      var errorEl = document.createElement("p");
-      errorEl.className = "empty";
-      errorEl.textContent = errorText;
-      list.appendChild(errorEl);
-      return;
-    }
-    if (countEl) {
-      countEl.textContent = items.length + " 个";
-      countEl.hidden = false;
-    }
-    if (!items.length) {
       var emptyEl = document.createElement("p");
       emptyEl.className = "empty";
-      emptyEl.textContent = "还没有连接器 —— 在支持连接器编辑的客户端（aicli 微前端 / runtime-server / 前端切片）创建通道后，这里会显示运行状态。";
+      emptyEl.textContent = messageText || "还没有连接器 —— 网关与在线节点都没有已配置的通道。";
       list.appendChild(emptyEl);
       return;
     }
-    items.forEach(function (item) {
+    if (countEl) {
+      countEl.textContent = entries.length + " 个";
+      countEl.hidden = false;
+    }
+    if (messageText) {
+      var noticeEl = document.createElement("p");
+      noticeEl.className = "connectors-hint";
+      noticeEl.textContent = messageText;
+      list.appendChild(noticeEl);
+    }
+    entries.forEach(function (entry) {
+      var item = entry.connector;
       var card = document.createElement("div");
       card.className = "card" + (item.enabled ? "" : " offline");
       card.innerHTML =
@@ -511,31 +730,36 @@
       card.querySelector(".card-title").textContent = (item.name || item.id) + "（" + item.provider + "）";
       card.querySelector(".status-chip").textContent = item.enabled ? "已启用" : "已停用";
       var owner = item.active_owner
-        ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? "（本网关）" : "")
+        ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? (entry.source === "gateway" ? "（本网关）" : "（此节点）") : "")
         : "未认领运行（网关重启或宿主离线）";
+      var sources = entry.sources && entry.sources.length ? entry.sources : [connectorSourceLabel(entry)];
       var meta = card.querySelector(".card-meta");
-      meta.textContent = "id " + item.id + (item.mode ? " · " + item.mode : "") + " · " + owner +
+      meta.textContent = "来源 " + sources.join(" / ") + " · id " + item.id +
+        (item.mode ? " · " + item.mode : "") + " · " + owner +
         (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
-      // 通用动作（Schema kind=button，如 QQ「授权校验」）：直接执行并把返回
-      // 摘要（message 优先）以 toast 展示；二维码类 action 仍由 web 端承载。
-      var schema = connectorSchemaFor(item.provider);
-      var actions = (schema && schema.actions) || [];
-      actions.forEach(function (action) {
-        if (!action || action.kind !== "button" || !action.key) { return; }
-        var actionBtn = document.createElement("button");
-        actionBtn.type = "button";
-        actionBtn.className = "btn ghost sm";
-        actionBtn.textContent = action.label || action.key;
-        actionBtn.addEventListener("click", function () {
-          runConnectorActionButton(item, action, actionBtn);
+      // 节点条目来自只读聚合入口，动作按钮只在网关自身 store 上执行。
+      if (entry.source === "gateway") {
+        // 通用动作（Schema kind=button，如 QQ「授权校验」）：直接执行并把返回
+        // 摘要（message 优先）以 toast 展示；二维码类 action 仍由 web 端承载。
+        var schema = connectorSchemaFor(item.provider);
+        var actions = (schema && schema.actions) || [];
+        actions.forEach(function (action) {
+          if (!action || action.kind !== "button" || !action.key) { return; }
+          var actionBtn = document.createElement("button");
+          actionBtn.type = "button";
+          actionBtn.className = "btn ghost sm";
+          actionBtn.textContent = action.label || action.key;
+          actionBtn.addEventListener("click", function () {
+            runConnectorActionButton(entry, action, actionBtn);
+          });
+          card.querySelector(".card-actions").appendChild(actionBtn);
         });
-        card.querySelector(".card-actions").appendChild(actionBtn);
-      });
+      }
       // 管理跳转：完整编辑器由前端切片提供，这里保留契约入口（单项 JSON +
       // 全量 Schema），不做编辑，避免与前端 repo 耦合。
       var detail = document.createElement("a");
       detail.className = "btn ghost sm";
-      detail.href = "/api/connectors/" + encodeURIComponent(item.id);
+      detail.href = connectorBasePath(entry) + "/" + encodeURIComponent(item.id);
       detail.target = "_blank";
       detail.rel = "noopener";
       detail.textContent = "配置 JSON";
@@ -545,10 +769,12 @@
   }
 
   // runConnectorActionButton 执行一次通道动作（POST /api/connectors/{id}/actions/{action}，
-  // 空体=无参数）；执行期间禁用按钮防连点，失败给出可读错误。
-  function runConnectorActionButton(item, action, btn) {
+  // 空体=无参数）；节点来源走 /n/{node}/api/connectors 同一契约。执行期间禁用按钮防连点，
+  // 失败给出可读错误。
+  function runConnectorActionButton(entry, action, btn) {
     var label = action.label || action.key;
-    var path = "/api/connectors/" + encodeURIComponent(item.id) + "/actions/" + encodeURIComponent(action.key);
+    var path = connectorBasePath(entry) + "/" + encodeURIComponent(entry.connector.id) +
+      "/actions/" + encodeURIComponent(action.key);
     btn.disabled = true;
     apiJSON(path, { method: "POST" }).then(function (r) {
       btn.disabled = false;
@@ -604,6 +830,9 @@
         var payload = JSON.parse(event.data);
         lastNodes = (payload && payload.nodes) || [];
         renderAll(lastNodes);
+        if (currentView() === "connectors" && connectorGatewaySettled) {
+          refreshConnectorNodes(false);
+        }
         // 挂载登记随节点注册/断连变化；只在该视图打开时才多拉一次。
         if (currentView() === "mcp") { loadMounts(); }
         if (currentView() === "logs") { loadMounts().then(populateLogSlugOptions); }
@@ -8294,7 +8523,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=77").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=78").catch(function () {});
     });
   }
 

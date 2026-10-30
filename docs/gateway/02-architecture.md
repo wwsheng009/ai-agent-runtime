@@ -195,6 +195,7 @@ Phase 3 再评估，本文其余部分以单实例为主。
 | `POST /api/security/policy/rollback` | Cookie | 安全策略回滚 |
 | `GET /gw/agent` | 设备令牌 | WebSocket 升级（隧道入口） |
 | `/n/{node_id}/…` | Cookie | 按节点反向代理（路径白名单 + 能力裁剪） |
+| `GET /api/nodes/{node_id}/connectors[/…]` | Cookie | 连接器页只读聚合：固定目标为节点本地 `/api/connectors` 命名空间，GET-only；不扩大 `/n/` 白名单 |
 | `/s/{session_id}/…` | Cookie | 按会话反向代理（解析 node 后同上，并可注入会话选择） |
 
 ### 4.2 反向代理路径映射

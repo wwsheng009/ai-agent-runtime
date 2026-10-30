@@ -169,6 +169,60 @@ func TestProxyRouteNotAllowed(t *testing.T) {
 	}
 }
 
+// ServeProxyPinned is for gateway-selected read-only views (the console
+// connector aggregation). It must reach a fixed path even when the node did not
+// advertise it, while the general ServeProxy path stays fail-closed.
+func TestProxyPinnedBypassesRouteAllowlist(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/connectors" {
+			t.Errorf("pinned target path = %q, want /api/connectors", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "pinned connector view")
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	connector := testConnector("node-pinned")
+	connector.Register = func() wire.Register {
+		return wire.Register{NodeID: "node-pinned", Kind: "aicli", Routes: []string{"/web"}}
+	}
+	connector.Forward = agent.ForwardConfig{LocalBaseURL: upstream.URL}
+	conn, err := connector.Dial(context.Background(), agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-pinned"); return ok })
+
+	pinned := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.ServeProxyPinned(w, r, "node-pinned", "/api/connectors")
+	}))
+	t.Cleanup(pinned.Close)
+	resp, err := http.Get(pinned.URL + "/proxy-path-is-ignored")
+	if err != nil {
+		t.Fatalf("pinned get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "pinned connector view" {
+		t.Fatalf("pinned status/body = %d/%q", resp.StatusCode, body)
+	}
+
+	normal := startProxy(t, server, "node-pinned")
+	resp2, err := http.Get(normal.URL + "/api/connectors")
+	if err != nil {
+		t.Fatalf("normal get: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("normal proxy status = %d, want 403 (allowlist remains fail-closed)", resp2.StatusCode)
+	}
+}
+
 func TestProxyEmptyRoutesDenied(t *testing.T) {
 	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
 	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))

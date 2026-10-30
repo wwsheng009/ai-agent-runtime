@@ -17,7 +17,7 @@ const maxProxyRequestBody = 1 << 20
 // the caller's router. The response is streamed as it arrives, so SSE and large
 // downloads work without buffering the whole body.
 func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path string) {
-	s.serveProxy(w, r, nodeID, path, "")
+	s.serveProxy(w, r, nodeID, path, "", false)
 }
 
 // ServeProxyMount reverse-proxies one request that belongs to a published MCP
@@ -25,10 +25,19 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 // client-supplied value), so the agent can only ever route it to the endpoint
 // that slug names.
 func (s *Server) ServeProxyMount(w http.ResponseWriter, r *http.Request, nodeID, path, mount string) {
-	s.serveProxy(w, r, nodeID, path, mount)
+	s.serveProxy(w, r, nodeID, path, mount, false)
 }
 
-func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path, mount string) {
+// ServeProxyPinned reverse-proxies a trusted, gateway-selected path. Unlike
+// ServeProxy it does not consult the node's advertised route allowlist; callers
+// must pass a constant, server-side path and must never forward a raw
+// caller-controlled path here. It exists for read-only gateway surfaces that
+// need a node-local admin view without widening the general /n/ proxy.
+func (s *Server) ServeProxyPinned(w http.ResponseWriter, r *http.Request, nodeID, path string) {
+	s.serveProxy(w, r, nodeID, path, "", true)
+}
+
+func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path, mount string, pinned bool) {
 	sess, ok := s.session(nodeID)
 	if !ok {
 		http.Error(w, "node offline", http.StatusBadGateway)
@@ -45,7 +54,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 		http.Error(w, "node offline", http.StatusBadGateway)
 		return
 	}
-	if !routeAllowed(node.Routes, path) {
+	if !pinned && !routeAllowed(node.Routes, path) {
 		if s.cfg.OnRouteDenied != nil {
 			s.cfg.OnRouteDenied(r)
 		}

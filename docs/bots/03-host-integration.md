@@ -48,7 +48,7 @@
 | 路由与鉴权 | `main.go:405-711`；`/api/*`、`/n/` 全为 owner session（`:445-543,701`） | 已落地：管理 API `/api/connectors*`（`owner.RequireSession`）+ 独立命名空间 `POST /hooks/connectors/{id}`（按连接器签名校验，不走 owner session）；挂在 console 的 `/` 兜底之前 |
 | 会话执行 | 注册表 `nodeID|sessionID`（`push.go:102`）＋反代 `/n/{node_id}/`（`main.go:701`） | 已落地 `Backend=gateway_node`：把 IM 消息经隧道投递到目标 node 的 `POST /web/api/invoke`（同步注入 prompt、等待 turn 结束并回传最终 assistant 回复）；节点选择见下 |
 | 出站提醒 | `pushNotifier` + `notify_policy`（优先级/静音/合并）+ `internal/gateway/ntfy` | 把 IM 当**第三通道**：高优先即时、低优先合并；复用同一 attention 差分，不重复推送 |
-| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | ◐ 最小列表页 + **通用动作执行**已落地：`#connectors` 视图读取 `GET /api/connectors`（id/provider/启停/运行归属/secret_keys），按 `GET /api/connectors/schema` 渲染 `kind=button` 动作按钮（如 QQ「授权校验」，2026-10-14 补记；`qr` 类动作仍在 web 端）；保留管理接口 JSON 与 Schema 跳转；Schema 表单/测试按钮/日志随 P1 前端切片补齐（不与前端 repo 耦合） |
+| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | ◐ 最小列表页 + **通用动作执行**已落地：`#connectors` 视图读取 `GET /api/connectors`（id/provider/启停/运行归属/secret_keys），按 `GET /api/connectors/schema` 渲染 `kind=button` 动作按钮（如 QQ「授权校验」，2026-10-14 补记；`qr` 类动作仍在 web 端）；保留管理接口 JSON 与 Schema 跳转；Schema 表单/测试按钮/日志随 P1 前端切片补齐（不与前端 repo 耦合）。**2026-10-30**：页面同时按 `GET /api/nodes/{node_id}/connectors` **只读聚合**在线 aicli/runtime-server 的本地连接器（同一 id 按运行归属去重并标注来源）；该入口 owner 鉴权、GET-only、目标固定为节点本地 `/api/connectors` 命名空间，不扩大通用 `/n/` 反代白名单 |
 
 > 语义边界：gateway 不执行 agent，只做**入口 + 路由 + 提醒**；agent 始终跑在 node 上（与本项目现有架构一致）。
 

@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=77">
+<link rel="stylesheet" href="./style.css?v=78">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -429,10 +429,10 @@
               <h2>已注册连接器</h2>
               <span class="badge" id="connectors-count" hidden></span>
             </div>
-            <p class="connectors-hint">连接器把平台消息（Telegram / 微信 / QQ / 飞书）投递到在线节点的会话。这里展示运行归属与配置状态；需要编辑或排障时展开「高级信息」。</p>
+            <p class="connectors-hint">连接器把平台消息（Telegram / 微信 / QQ / 飞书）投递到在线节点的会话。这里汇总网关与在线节点上的连接器、运行归属与配置来源；需要编辑或排障时展开「高级信息」。</p>
             <details class="connector-advanced">
               <summary>高级信息</summary>
-              <p class="connectors-hint">后端归属：<code>gateway_node</code>。配置由前端切片提供；原始管理接口与 Schema 如下。</p>
+              <p class="connectors-hint">网关自身使用 <code>gateway_node</code> 后端；在线节点条目按其本地连接器管理面读取（只读聚合）。原始管理接口与 Schema 如下。</p>
               <div class="toolbar">
                 <a class="btn ghost sm" href="/api/connectors" target="_blank" rel="noopener">管理接口 JSON</a>
                 <a class="btn ghost sm" href="/api/connectors/schema" target="_blank" rel="noopener">Schema</a>
@@ -719,6 +719,6 @@
 
 <!-- 会话面板已内联进 #sessions 视图（微信式左列表 / 右会话流）。 -->
 
-<script src="./app.js?v=77"></script>
+<script src="./app.js?v=78"></script>
 </body>
 </html>
