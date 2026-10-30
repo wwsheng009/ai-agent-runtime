@@ -1639,6 +1639,105 @@
     }
   }
 
+  // chatSetStreamingMarkdown keeps the live bubble formatted at every frame
+  // without re-rendering the whole answer. Completed Markdown blocks are
+  // appended once before a stable marker; only the unfinished tail is replaced.
+  function chatSetStreamingMarkdown(node, text) {
+    if (!node) { return; }
+    var src = String(text || "").replace(/\r\n?/g, "\n");
+    var mark = node.__streamMdMark;
+    if (!mark || mark.parentNode !== node) {
+      node.textContent = "";
+      mark = document.createComment("chat-stream-md-stable-end");
+      node.appendChild(mark);
+      node.__streamMdMark = mark;
+      node.__streamMdStable = "";
+      node.__streamMdPending = "";
+      node.__streamMdTail = "";
+    }
+    var boundary = chatMarkdownStableBoundary(src);
+    var stable = src.slice(0, boundary);
+    var tail = src.slice(boundary);
+    var previousStable = node.__streamMdStable || "";
+    if (stable.indexOf(previousStable) !== 0) {
+      while (node.firstChild && node.firstChild !== mark) {
+        node.removeChild(node.firstChild);
+      }
+      while (mark.nextSibling) { node.removeChild(mark.nextSibling); }
+      previousStable = "";
+      node.__streamMdStable = "";
+      node.__streamMdPending = "";
+      node.__streamMdTail = "";
+    }
+    if (stable.length > previousStable.length) {
+      node.__streamMdPending = (node.__streamMdPending || "") +
+        stable.slice(previousStable.length);
+      node.__streamMdStable = stable;
+      chatFlushMarkdownChunks(node);
+    }
+    // Pending stable blocks stay visible in the tail until they cross the chunk
+    // threshold; that keeps the per-frame re-render bounded to one small region.
+    var tailText = (node.__streamMdPending || "") + tail;
+    if (tailText !== node.__streamMdTail) {
+      while (mark.nextSibling) { node.removeChild(mark.nextSibling); }
+      if (tailText) {
+        var tailFrag = document.createElement("template");
+        tailFrag.innerHTML = renderMarkdown(tailText);
+        node.appendChild(tailFrag.content);
+      }
+      node.__streamMdTail = tailText;
+    }
+  }
+
+  function chatFlushMarkdownChunks(node) {
+    var pending = node.__streamMdPending || "";
+    var mark = node.__streamMdMark;
+    while (pending.length >= CHAT_LIVE_MD_CHUNK_CHARS) {
+      // Stable text always contains blank-line boundaries outside fences. Cut at
+      // the nearest one after the threshold so a code fence is never split.
+      var cut = pending.indexOf("\n\n", CHAT_LIVE_MD_CHUNK_CHARS - 80);
+      if (cut === -1) {
+        if (pending.length < CHAT_LIVE_MD_CHUNK_CHARS * 2) { break; }
+        cut = pending.length;
+      } else {
+        cut += 2;
+      }
+      var chunkHTML = renderMarkdown(pending.slice(0, cut));
+      pending = pending.slice(cut);
+      if (chunkHTML) {
+        var chunk = document.createElement("div");
+        chunk.className = "chat-stream-md-chunk";
+        chunk.innerHTML = chunkHTML;
+        node.insertBefore(chunk, mark);
+      }
+    }
+    node.__streamMdPending = pending;
+  }
+
+  // chatMarkdownStableBoundary returns the end of the last blank line outside a
+  // fenced code block. Everything before it is final Markdown and can be
+  // appended once; only the suffix needs another parse while tokens arrive.
+  function chatMarkdownStableBoundary(src) {
+    var pos = 0;
+    var boundary = 0;
+    var inFence = false;
+    while (pos < src.length) {
+      var nl = src.indexOf("\n", pos);
+      var lineEnd = nl === -1 ? src.length : nl;
+      var line = src.slice(pos, lineEnd);
+      if (inFence) {
+        if (/^\s*(```|~~~)\s*$/.test(line)) { inFence = false; }
+      } else if (/^\s*(```|~~~)/.test(line)) {
+        inFence = true;
+      } else if (/^\s*$/.test(line)) {
+        boundary = nl === -1 ? src.length : nl + 1;
+      }
+      if (nl === -1) { break; }
+      pos = nl + 1;
+    }
+    return boundary;
+  }
+
   // ── Incremental board: keyed reconcile instead of a full rebuild ──
   // setText writes only when the value actually changed: untouched nodes keep
   // text selection and avoid needless layout invalidation on every data tick.
@@ -3931,14 +4030,10 @@
   var CHAT_PAGE_LIMIT = 40;    // 首屏与实时刷新窗口（条）
   var CHAT_OLDER_LIMIT = 60;   // 「加载更早消息」每页条数
   var CHAT_REFRESH_MS = 1000;  // 快照刷新尾随节流：事件风暴下每秒最多一次
-  var CHAT_STREAM_FRAME_MS = 32; // 实时正文最多约 30fps：长正文一次布局约 16ms，
-                                 // 60fps 会把主线程吃满；仍按 rAF 对齐绘制帧。
-  var CHAT_LIVE_PLAIN_AFTER_MS = 30; // 一次实时补丁超过该耗时就改为纯文本流式，
-                                     // 终稿仍由服务端行按 Markdown 渲染。
-  var CHAT_LIVE_MARKDOWN_MAX = 6000; // 超过该长度的实时正文直接走纯文本快路径，
-                                     // 避免等到 Markdown 单帧已经超预算才降级。
   var CHAT_LIVE_CHUNK_CHARS = 1200; // 纯文本流式按行边界切块；旧块不被重写，
                                     // 屏外块由 content-visibility 跳过布局。
+  var CHAT_LIVE_MD_CHUNK_CHARS = 800; // 实时 Markdown 的稳定前缀按块落盘，限制
+                                       // 每帧只需要重绘未完成的尾部。
   var CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
   var CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
                                // chatApplyWindow），长跑会话会一直往后长，到顶就从
@@ -4083,7 +4178,7 @@
   }
 
   function chatEmptyLive() {
-    return { streaming: false, done: false, plain: false, assistant: "", reasoning: "", tool: "", images: [] };
+    return { streaming: false, done: false, assistant: "", reasoning: "", tool: "", images: [] };
   }
 
   function chatSetStatus(text, kind) {
@@ -4687,7 +4782,6 @@
       lastScreenAt: 0,
       screenETag: "",
       renderFrame: 0,
-      lastLiveRenderAt: 0,
       bottomPin: 0,
       scrollGuardUntil: 0,
       programmaticScrollTop: 0,
@@ -5031,11 +5125,22 @@
       setText(row.__reasonBody, content || "");
     } else if (o.collapse && role === "tool") {
       setText(row.__toolOutput, content || "");
+    } else if (o.streamMarkdown) {
+      if (mdEnabled) {
+        bubble.classList.add("md");
+        bubble.__mdSrc = null;
+        bubble.__mdOn = true;
+        chatSetStreamingMarkdown(bubble, content || "");
+      } else {
+        bubble.classList.remove("md");
+        bubble.__mdSrc = null;
+        bubble.__mdOn = false;
+        chatSetStreamingText(bubble, content || "");
+      }
     } else if (o.plain) {
       // Streaming text is transient and can grow to tens of KB. Re-parsing
-      // Markdown + replacing innerHTML every frame makes each update a layout
-      // stall; keep the live bubble plain and render Markdown once on the final
-      // (non-streaming) frame / authoritative snapshot.
+      // Markdown is not applicable to reasoning/tool live rows (their server
+      // twins are plain too); append in chunks without rewriting old text.
       bubble.classList.remove("md");
       bubble.__mdSrc = null;
       bubble.__mdOn = false;
@@ -5073,10 +5178,8 @@
     // 工具行与状态栏已经表达了进度。streaming 只用于已有正文时的光标动画。
     var liveImages = st.live.images || [];
     if (st.live.assistant || liveImages.length) {
-      var livePlain = st.live.plain || st.live.done ||
-        st.live.assistant.length > CHAT_LIVE_MARKDOWN_MAX;
       rows.push(chatRowElement(st, "live:assistant", "assistant", st.live.assistant,
-        { streaming: st.live.streaming, plain: livePlain, images: liveImages }));
+        { streaming: st.live.streaming, streamMarkdown: true, images: liveImages }));
     }
     if (st.live.tool) {
       rows.push(chatRowElement(st, "live:tool", "tool", st.live.tool, { plain: true }));
@@ -5173,28 +5276,10 @@
   function chatScheduleRender() {
     var st = chatState;
     if (!st || st.renderFrame) { return; }
-    var nowFn = (window.performance && window.performance.now)
-      ? function () { return window.performance.now(); }
-      : function () { return Date.now(); };
     var run = function () {
       st.renderFrame = 0;
       if (chatState !== st) { return; }
-      var now = nowFn();
-      if (now - st.lastLiveRenderAt < CHAT_STREAM_FRAME_MS) {
-        chatScheduleRender();
-        return;
-      }
-      st.lastLiveRenderAt = now;
-      var renderStart = nowFn();
       chatPatchLive();
-      // Adaptive downgrade: short responses keep live Markdown. If one patch
-      // (parse + layout) crosses the frame budget, switch this turn to the
-      // cheap committed-prefix text path; the final server row is still Markdown.
-      if (chatState === st && st.live.streaming && !st.live.plain &&
-          nowFn() - renderStart > CHAT_LIVE_PLAIN_AFTER_MS) {
-        st.live.plain = true;
-        chatScheduleRender();
-      }
     };
     if (typeof window.requestAnimationFrame === "function") {
       st.renderFrame = window.requestAnimationFrame(run);
@@ -5329,17 +5414,24 @@
     var st = chatState;
     var host = el("chat-list");
     if (!st || !host || !st.follow || st.bottomPin) { return; }
+    var lastHeight = -1;
+    var stableFrames = 0;
     var tries = 0;
     var pin = function () {
       st.bottomPin = 0;
       if (chatState !== st || !st.follow) { return; }
-      chatSetScrollTop(st, host, host.scrollHeight);
+      var height = host.scrollHeight;
+      chatSetScrollTop(st, host, height);
       chatSyncJump();
+      if (height === lastHeight) { stableFrames++; }
+      else { stableFrames = 0; lastHeight = height; }
       tries++;
       // Intrinsic sizes settle over a few frames on a long transcript. Re-pin
       // briefly so the initial open (and a backwards paging settle) lands on the
       // true bottom without adding work to the per-token path.
-      if (tries < 8) { st.bottomPin = window.requestAnimationFrame(pin); }
+      if (tries < 60 && stableFrames < 3) {
+        st.bottomPin = window.requestAnimationFrame(pin);
+      }
     };
     if (typeof window.requestAnimationFrame === "function") {
       st.bottomPin = window.requestAnimationFrame(pin);
@@ -7792,6 +7884,7 @@
       var st = chatState;
       var host = el("chat-list");
       if (!st || !host) { return; }
+      if (st.bottomPin) { chatSyncJump(); return; }
       if (Date.now() < st.followHoldUntil) {
         chatSyncJump();
         return;
@@ -8064,7 +8157,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=75").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=76").catch(function () {});
     });
   }
 

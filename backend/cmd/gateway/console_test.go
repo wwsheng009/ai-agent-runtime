@@ -422,8 +422,10 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		"/web/api/statusbar", "message_window", "chat-dyn-status",
 		"screenBusy", "lastScreenAt", "screenETag", "If-None-Match",
 		"compact=1", "chatPatchLive", "requestAnimationFrame", "chatCancelRender",
-		"chatSetStreamingText", "CHAT_LIVE_PLAIN_AFTER_MS", "chatPinBottomAfterLayout",
-		"CHAT_LIVE_MARKDOWN_MAX", "CHAT_LIVE_CHUNK_CHARS", "chat-stream-chunk",
+		"chatSetStreamingText", "chatSetStreamingMarkdown", "chatMarkdownStableBoundary",
+		"chatFlushMarkdownChunks", "chatPinBottomAfterLayout",
+		"CHAT_LIVE_MD_CHUNK_CHARS", "CHAT_LIVE_CHUNK_CHARS", "chat-stream-chunk",
+		"chat-stream-md-chunk",
 		"scrollGuardUntil", "followHoldUntil",
 		// GFM tables: the block scanner must know the pipe-row rule, otherwise a
 		// whole table degrades to a paragraph (and the "-" separator line gets

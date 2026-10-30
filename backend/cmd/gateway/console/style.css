@@ -1741,6 +1741,22 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   content-visibility: auto;
   contain-intrinsic-size: auto 24px;
 }
+/* Incremental live Markdown appends complete blocks; skip layout/paint for
+   blocks that are above the scroll viewport. This keeps formatted 60fps
+   streaming affordable even when the live answer is tens of KB. */
+.chat-msg.is-streaming .chat-bubble.md > :not(img) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+}
+/* Completed stable Markdown is flushed into bounded chunks; only the open tail
+   is rebuilt per frame. Chunks keep their own layout cache. */
+.chat-stream-md-chunk {
+  display: block; margin: 0; padding: 0; min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+.chat-stream-md-chunk > :first-child { margin-top: 0; }
+.chat-stream-md-chunk > :last-child { margin-bottom: 0; }
 .chat-msg-user { align-items: flex-end; }
 .chat-msg-user .chat-bubble {
   max-width: 82%;

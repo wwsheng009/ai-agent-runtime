@@ -212,8 +212,14 @@ const env = (src) => ({
   check('长正文流式块独立跳过屏外布局',
     appjs.includes('chat-stream-chunk') &&
     /\.chat-stream-chunk\s*\{[^}]*content-visibility:\s*auto/s.test(css));
-  check('实时增量按绘制帧合并',
-    appjs.includes('requestAnimationFrame') && !appjs.includes('CHAT_STREAM_RENDER_MS'));
+  check('实时 Markdown 稳定块与尾部分离',
+    appjs.includes('chatSetStreamingMarkdown') &&
+    appjs.includes('chatMarkdownStableBoundary') &&
+    /\.chat-stream-md-chunk\s*\{[^}]*content-visibility:\s*auto/s.test(css));
+  check('实时增量按绘制帧合并且不降帧',
+    appjs.includes('requestAnimationFrame') &&
+    !appjs.includes('CHAT_STREAM_RENDER_MS') &&
+    !appjs.includes('CHAT_STREAM_FRAME_MS'));
   check('顶部“加载更早消息”按钮已移除', !doc.getElementById('chat-older'));
 
   const moreBtn = doc.getElementById('chat-more');
@@ -310,6 +316,8 @@ const env = (src) => ({
   es.emit('assistant_delta', { ...env('assistant_delta'), turn_id: 'turn-x', text: 'LIVE-B' });
   await sleep(60);
   check('live 增量进入 DOM', listText().includes('LIVE-ALIVE-B'), JSON.stringify(listText().replace(/\s+/g, ' ').slice(0, 120)));
+  const liveBubble = doc.querySelector('#chat-list .is-streaming .chat-bubble');
+  check('流式助手仍使用 Markdown 渲染', !!liveBubble && liveBubble.classList.contains('md'));
   check('流式增量不扫描历史行', chatListQueryCount === 0 && historyRow.isSameNode(chatList.querySelector('.chat-msg')),
     `querySelectorAll=${chatListQueryCount}`);
   chatList.querySelectorAll = originalChatListQuery;

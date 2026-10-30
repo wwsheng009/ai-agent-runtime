@@ -193,14 +193,14 @@
   `compact=1` 请求结构化精简响应（省略与 `messages` 同源的 `lines/text`，不做 JSON 缩进；
   旧节点忽略未知参数，响应保持兼容）；面板显式回传上一份响应 ETag，内容未变时节点回 304，
   本次跳过 JSON 解析与 DOM 收敛。快照内容与已渲染窗口逐条相同时同样直接跳过整份重排。
-  逐字增量（assistant/reasoning/tool）按 `requestAnimationFrame` 绘制帧合并并限制约 30fps，
-  只更新实时气泡；历史行、折叠测量与用户展开账本不参与该热路径。消息行使用
-  `content-visibility:auto` + `flex:0 0 auto` 跳过屏外布局。短回复流式期间保留 Markdown；
-  实时正文超过 6KB 或单帧超过 30ms 时自动降级为纯文本追加，终稿仍由服务端行按 Markdown
-  渲染一次。纯文本按行边界切成约 1.2KB 的 `chat-stream-chunk`，旧块不重写、屏外块独立跳过
-  布局。桌面 400 行历史 + 29KB 实时正文实测帧间隔 p95≈17ms；4× CPU 节流的移动视口下，
-  50 行时 p95≈17ms、400 行时 p95≈33ms 且布局累计从 v74 的 9.9s 降到 0.69s。
-  对照 v73 的 400 行 + 30KB 场景为 39 次长任务、最大 150ms。
+  逐字增量（assistant/reasoning/tool）按 `requestAnimationFrame` 绘制帧合并，不设人为降帧；
+  只更新实时气泡，历史行、折叠测量与用户展开账本不参与该热路径。消息行使用
+  `content-visibility:auto` + `flex:0 0 auto` 跳过屏外布局。助手正文流式期间始终保留
+  Markdown：完整块按约 800B 的 `chat-stream-md-chunk` 追加一次，仅未完成的尾部按帧重绘；
+  reasoning/tool 本来就是纯文本，按约 1.2KB 的 `chat-stream-chunk` 追加。桌面 400 行历史 +
+  29KB 实时正文（40ms 事件间隔）实测 p95≈17ms、仅 1 次约 52ms 长任务；4× CPU 节流的移动
+  视口、50 行历史时 p95≈17ms、长任务 0；400 行时 p95≈33ms，保留偶发长任务。对照 v73
+  的 400 行 + 30KB 场景为 39 次长任务、最大 150ms。性能优化不以降低帧率或流式格式化为代价。
   首屏会做短暂的跟随保护与延迟底部校准，避免 `content-visibility` 的内在尺寸在下一帧
   才落定后把最新消息留在视口外；用户上滚后立即停止跟随。
   刷新是**保前缀合并**（老行不重建，流式刷新不打断阅读），因此本地
