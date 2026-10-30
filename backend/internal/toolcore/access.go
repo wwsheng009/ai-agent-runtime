@@ -112,6 +112,24 @@ type SymlinkResolver interface {
 	EvalLinkPath(ctx context.Context, path string) (string, error)
 }
 
+// FilesystemIdentifier is the optional capability that answers which filesystem - device,
+// volume, mount - a path lives on.
+//
+// It exists for one question and one only: whether a directory is still inside the
+// filesystem the search root sits on, which is what a caller asking to stay on one file
+// system needs before the walk descends into a mount it never meant to enter.
+//
+// Read the name carefully: this is a *filesystem* id, not a file id. It says nothing about
+// whether two paths are the same file, and no consumer may use it to deduplicate - the
+// local answer is st_dev on Unix and a volume name on Windows, and neither identifies an
+// inode. A backend whose transport cannot report a device simply does not implement the
+// interface, and the feature that needs it is declined: guessing the boundary from
+// path shape would either search a mount the caller excluded or stop short of the tree they
+// asked for, and both look like a normal result.
+type FilesystemIdentifier interface {
+	FilesystemIdentity(ctx context.Context, path string) (string, error)
+}
+
 // NotExistError is the hook a backend whose transport reports absence with its
 // own error type (an RPC status, an HTTP 404) implements so that a single
 // classification in the core covers both the local and the remote answer.

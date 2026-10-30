@@ -227,6 +227,11 @@ type virtualAccess struct {
 	// a backend that can say so, because its whole cycle rule is built on the target's
 	// identity rather than on the path being walked.
 	links map[string]string
+	// devices declares the filesystem id this accessor reports for a path. one_file_system
+	// needs it, and declaring it here is the point: the answer belongs to the machine holding
+	// the files, not to the machine running the search. A path that is not listed reports the
+	// same id as the root, so "same filesystem" is the boring default rather than an accident.
+	devices map[string]string
 	// dirs declares the paths this accessor calls directories. The ignore work needs
 	// it: a directory that exists on the host but is not in `files` would otherwise be
 	// reported absent, so a test about scope could pass or fail on an accident of the
@@ -391,6 +396,18 @@ func (a *virtualAccess) EvalLinkPath(_ context.Context, path string) (string, er
 		return "", absentErr{path: current}
 	}
 	return current, nil
+}
+
+// FilesystemIdentity is this accessor's answer to "which filesystem is this path on", which
+// is what a search asked to stay on one file system has to ask the machine that holds the
+// files. toolcore.FilesystemIdentifier is optional, so a test that needs an accessor without
+// it wraps this type instead of removing the method.
+func (a *virtualAccess) FilesystemIdentity(_ context.Context, path string) (string, error) {
+	resolved, _ := a.materialize(path)
+	if id, ok := a.devices[resolved]; ok {
+		return id, nil
+	}
+	return "home-filesystem", nil
 }
 
 // TestGrepSearchesTheAccessorsBytes: the disk holds text with no match, the accessor

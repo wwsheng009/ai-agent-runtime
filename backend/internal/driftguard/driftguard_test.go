@@ -78,14 +78,20 @@ var coreBaselines = map[string]int{
 	// searches link-free trees normally and declines, in as many words, the moment a
 	// link-to-directory would need resolving; nothing is approximated.
 	//
-	// The 1 that remains is filesystemIdentity: the device id behind one_file_system, which
-	// is design §2 Q2's optional-interface question and moves as S5c.
+	// S5c moved the last one: the filesystem boundary behind one_file_system is now an
+	// optional capability (toolcore.FilesystemIdentifier) answered by localio, and a core that
+	// is handed an accessor which cannot report a device declines the flag instead of inferring
+	// the boundary from path shape - guessing would either search a mount the caller excluded
+	// or stop short of the tree they asked for, and both look like a normal result.
 	//
-	// A zero would again say more than it should, in both guards: localio is the one package
-	// allowed to touch the host - that is its whole purpose, and driftguard does not scan it.
-	// filepath.EvalSymlinks now lives there as the host's answer, so walkerBaselines reaching
-	// 0 means "no core asks a host question", not "no process reads a disk".
-	"searchcore": 1,
+	// This 0 says: no question about a file inside searchcore is answered without being routed
+	// through an accessor. It does NOT say no process reads a disk, and reading it that way is
+	// the exact mistake this file warns about twice already. localio is the one package allowed
+	// to touch the host - that is its whole purpose - and driftguard does not scan it, so
+	// os.Stat, filepath.EvalSymlinks and the platform device probe all still happen, in the one
+	// place that is meant to do it. Roll the number back to a host read by deleting an
+	// injection, not by editing this map.
+	"searchcore": 0,
 	"mutatecore": 27,
 }
 

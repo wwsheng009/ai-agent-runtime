@@ -811,3 +811,96 @@ func TestGrepFollowReachesAMatchThatOnlyExistsThroughALink(t *testing.T) {
 		t.Fatalf("the control is wrong: that tree is not on this machine, got %v", local.Matches)
 	}
 }
+
+// --- S5c: the filesystem boundary behind one_file_system ---
+
+// noIdentityAccess hides the optional filesystem capability the same way noResolverAccess
+// hides the link one: embedding the interface type, not the concrete value.
+type noIdentityAccess struct{ toolcore.Access }
+
+// TestGrepOneFileSystemUsesTheAccessorsBoundary is the injection for the last host read in
+// this core. The tree exists only for the accessor, and the accessor says one of its
+// directories sits on another filesystem. This machine would answer "same volume" for every
+// one of those paths - on Windows the host probe is a path string, on Unix a st_dev of a
+// directory that is not here - so a boundary taken from the host simply would not exist and
+// the search would descend into a mount the caller excluded.
+func TestGrepOneFileSystemUsesTheAccessorsBoundary(t *testing.T) {
+	hostDir := t.TempDir()
+	remote := filepath.Join(hostDir, "repo")
+	mounted := filepath.Join(remote, "mounted")
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(remote, "local.txt"): []byte("needle local\n"),
+			filepath.Join(mounted, "far.txt"):  []byte("needle far\n"),
+		},
+		dirs:    map[string]bool{remote: true, mounted: true},
+		devices: map[string]string{mounted: "other-filesystem"},
+	}
+
+	shared := GrepOptions{Pattern: "needle", Path: remote, Limit: 50, Access: access}
+
+	// Control first, and it is the load-bearing half: with the flag off both sides of the
+	// boundary are searched, so any absence below is the boundary doing work rather than the
+	// subtree never having been enumerated.
+	without, err := Grep(context.Background(), shared)
+	if err != nil {
+		t.Fatalf("grep without the flag: %v", err)
+	}
+	if names := grepFileNames(without); len(names) != 2 {
+		t.Fatalf("control must search both sides of the boundary, got %v", names)
+	}
+
+	shared.OneFileSystem = true
+	with, err := Grep(context.Background(), shared)
+	if err != nil {
+		t.Fatalf("grep with the flag: %v", err)
+	}
+	assertFileList(t, grepFileNames(with), []string{"local.txt"})
+}
+
+// TestGrepOneFileSystemDeclinesWithoutTheCapability pins the second half of design §2 Q2.
+// A transport that cannot report a device must not have the boundary inferred for it:
+// guessing from path shape would either search a mount the caller excluded or stop short of
+// the tree they asked for, and either result would look completely normal.
+//
+// The decline is also scoped to the feature that needs the capability, which is the same
+// lesson S5b learned the hard way: the same accessor, without one_file_system, still
+// searches - because nothing about that tree requires knowing a device.
+func TestGrepOneFileSystemDeclinesWithoutTheCapability(t *testing.T) {
+	hostDir := t.TempDir()
+	remote := filepath.Join(hostDir, "repo")
+	mounted := filepath.Join(remote, "mounted")
+
+	access := &virtualAccess{
+		files: map[string][]byte{
+			filepath.Join(remote, "local.txt"): []byte("needle local\n"),
+			filepath.Join(mounted, "far.txt"):  []byte("needle far\n"),
+		},
+		dirs:    map[string]bool{remote: true, mounted: true},
+		devices: map[string]string{mounted: "other-filesystem"},
+	}
+	blocked := noIdentityAccess{access}
+
+	_, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 50, Access: blocked, OneFileSystem: true,
+	})
+	if err == nil {
+		t.Fatal("one_file_system without a filesystem capability must decline, not search across an unknown boundary")
+	}
+	if !strings.Contains(err.Error(), "FilesystemIdentifier") {
+		t.Fatalf("the refusal must name the missing capability: %v", err)
+	}
+
+	// The workaround the message offers is real: the same accessor answers normally once
+	// the caller stops asking for a guarantee the transport cannot give.
+	plain, err := Grep(context.Background(), GrepOptions{
+		Pattern: "needle", Path: remote, Limit: 50, Access: blocked,
+	})
+	if err != nil {
+		t.Fatalf("dropping one_file_system must not need the capability: %v", err)
+	}
+	if len(grepFileNames(plain)) != 2 {
+		t.Fatalf("the same tree must still be searchable in full, got %v", grepFileNames(plain))
+	}
+}

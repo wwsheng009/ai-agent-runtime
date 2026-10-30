@@ -105,3 +105,7 @@ var _ toolcore.FileHandle = (*os.File)(nil)
 // _ proves the host accessor carries the link capability, so a core that declines
 // follow mode when it is missing never declines on this machine by accident.
 var _ toolcore.SymlinkResolver = osAccess{}
+
+// _ proves the host accessor also answers the filesystem-boundary question, for the same
+// reason: a core that declines one_file_system without it must never decline here.
+var _ toolcore.FilesystemIdentifier = osAccess{}

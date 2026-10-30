@@ -597,7 +597,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if opts.OneFileSystem {
 				// The root itself is always searched: the boundary only stops
 				// the walk from entering a *different* filesystem below it.
-				identity, identityErr := FilesystemIdentityFunc(root)
+				identity, identityErr := grepFilesystemIdentity(budgetCtx, access, root)
 				if identityErr != nil {
 					return GrepResult{}, identityErr
 				}
@@ -619,7 +619,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 						// A mount point on another filesystem: do not descend.
 						// The directory entry itself was already returned by
 						// the walk, and skipping it here keeps its files out.
-						identity, identityErr := FilesystemIdentityFunc(path)
+						identity, identityErr := grepFilesystemIdentity(budgetCtx, access, path)
 						if identityErr != nil {
 							return identityErr
 						}

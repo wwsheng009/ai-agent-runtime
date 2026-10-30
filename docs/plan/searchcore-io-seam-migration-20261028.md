@@ -69,10 +69,29 @@ S5b 落地形态（与上面的差别只在一处，但那一处是别人踩过�
 可观测行为（Windows 客户端上的远端搜索将不再默认 `--follow`），属工具面语义变化，需在 S6 的
 合并清单里显式决定，不在本步顺手做。
 
-### Q2 文件身份（inode）
-`filesystemIdentity` 在 unix 上用 `dev+ino` 做"同一文件去重"。envd 的 `Entry` **没有 inode**，SSH 后端也没有。硬搬的后果是远端把两个不同文件当成同一个（或反之），而去重结果直接影响 grep 命中列表。
+### Q2 文件系统边界（原文误述为"inode 去重"，S5c 读代码后更正）
 
-结论：抽成**可选接口**（`IdentityResolver`，与 `RandomAccessor` 同族），**不实现即降级为不去重**，并在结果里说明降级——沿用 §4.2"不实现即降级"的既有模式。绝不为了"看起来一致"而用 `path+size+mtime` 伪造一个 inode 等价物：那是把弱判断伪装成强判断。
+**本节第一条在写方案时是错的**，照原样实施会把降级做成错误方向。写的时候我断言
+`filesystemIdentity` 用"dev+ino 做同一文件去重"；S5c 实施前读实现，实际是：
+
+- unix 用 `os.Stat` 后取 `Stat_t.Dev`（**只有 dev，没有 ino**）；
+- windows 用 `filepath.VolumeName`，**一次磁盘读取都没有**；
+- 全仓 `searchcore` **不存在 inode/去重逻辑**（`rg "\.Ino|SameFile|dedup"` 命中 0）。
+
+所以这个能力不是"文件身份"，是 **`one_file_system` 的文件系统边界**：它回答"这个目录还是不是
+搜索根所在的那个文件系统"，用来在下降**之前**拦住挂载点。名字也跟着更正：落地为
+`toolcore.FilesystemIdentifier{ FilesystemIdentity(ctx, path) }`，接口注释里明写"这是文件系统
+ id，不是文件 id，不得用于去重"——防止下一个读者再犯我犯过的错。
+
+结论也据此改掉。原写"不实现即**降级为不去重**并明示"，对边界这个关注点是危险的降级：
+`one_file_system` 的语义是"别跨文件系统"，降级=照跨，后果是把 `/proc`、网络挂载这类调用方
+明确排除的树搜进来（可能失控），而且结果看起来完全正常。改为：**缺能力即拒绝该标志**，
+并给出可操作的出路（去掉 `one_file_system`）。这仍与 §4.2"不实现即降级"同族——降级的对象是
+`sort=accessed` 那种"少一个排序键"；而边界一旦降级就变成"做了被禁止的事"，两者不可同日而语。
+Q4（`sort=accessed`/`created` 必须拒绝而非近似）本来就是同一判断，这里与它对齐。
+
+同样保持不变的是那条否决：**绝不为了"看起来一致"用 `path+size+mtime` 伪造等价物**。此处对应
+的形式是"用路径形状猜文件系统"——同样把弱判断伪装成强判断，已否决。
 
 ### Q3 全局 gitignore 读"谁的 HOME"（S4 已按此实现）
 local 读当前用户家目录；envd 上守护进程的家目录**不是请求者的**，读它会应用用户从未设置过的 ignore 规则——**静默少结果**，比拒绝更坏。
@@ -130,7 +149,7 @@ Access toolcore.Access
 | S4 ✅ | ignore 的**完整关注点**：规则文件读取、显式 ignore_file 的校验（Stat+读）、以及"哪个目录的规则适用"的两处形状判定，全部与枚举同源。`ValidateGrepIgnoreFiles` **加了 ctx**（见 §4b 偏离声明） | grep_ignore.go、grep.go、handler.go、localio/access.go | **实测 14→9**（5 处：3 Stat + 2 ReadFile。本表原先写"15→11"是预填数，实测纠正；HOME 三处不计入守卫，理由见 §2 Q3 第 2 条） | 单次 revert |
 | S5a ✅ | **遍历本身**（默认不跟随链接那条腿）+ 所有"路径形状"判定：搜索模式（root/roots[0] 是否regular file）、ignore 作用域、ripgrep 的 argv 形状与 SingleFile | seam_walk.go（新）、glob.go、grep.go、grep_ignore.go、ripgrep_engine.go | **实测 os.* 9→4、walker 4→2** | 单文件回滚（`seam_walk.go` 存在即这步的开关） |
 | S5b ✅ | `walkGrepFollowing`（跟随链接那条腿）：被跟随的根、每级清单、链接目标形状三处换源，链接**身份**经可选接口 `toolcore.SymlinkResolver`（Q1 落地）。能力只在真的遇到"指向目录的链接"时才要，缺能力则**带路径拒绝**，不静默跳过、不做半吊子环路检测 | grep.go、toolcore/access.go、localio/access.go | **实测 os.* 4→1、walker 2→0** | 单文件回滚（`walkGrepFollowing` 换回宿主调用即撤销本步） |
-| S5c | `filesystemIdentity`（`one_file_system` 的设备边界，**Q2**） | filesystem_unix.go、filesystem_windows.go | os.* 1→0 | 同上 |
+| S5c ✅ | `one_file_system` 的**文件系统边界**（Q2 更正后的名字；原写"inode 去重"是误述）：平台实现整体搬进 `localio`，核心经可选接口 `toolcore.FilesystemIdentifier` 询问；缺能力即**拒绝该标志**（不是降级照跨），出路写进消息 | toolcore/access.go、localio/identity_unix.go（新）、localio/identity_windows.go（新）、seam_access.go、grep.go；删除 searchcore/filesystem_unix.go、filesystem_windows.go | **实测 os.* 1→0、walker 仍 0**（searchcore 归零） | 把两处调用改回 `localio` 直调即撤销 |
 | S6 | 退役 `Searcher` 拦截，让远端 grep/glob 走共享核 | remotetools + handler | 目标是**删代码**（与 bridge 那轮 −3175 行同类收益） | 整步独立可撤 |
 
 每步验收门（与既有纪律逐条对齐）：
@@ -143,7 +162,7 @@ Access toolcore.Access
 
 ---
 
-## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4 / S5a / S5b，累计 os.* 24→1，walker 4→0）
+## 4b. 实施记录（S1 / S2a / S2b / S2c / S3 / S4 / S5a / S5b / S5c，累计 os.* 24→0，walker 4→0）
 
 四步均按"每步实测"落数：`24→21→18→17→16`，棘轮在同一笔提交里下调并写明剩余归属。三步都带了注入证据与反向验证（摘掉 seam 后测试必须红，且必须是**测试**红、不是编译红）。
 
@@ -227,6 +246,33 @@ S5b 另三条（第 13 条是本步最有价值的一条）：
 15. **让"不终止"以断言失败呈现，而不是以 panic 呈现**：N7（环路身份改用链接自身路径）最初表现为
     栈溢出 panic。panic 虽然也算测试失败，但它隐去了"哪条规则失效"，还要烧掉包级超时。给对拍的
     访问数加一个上限（超过即回调返回错误）之后，同一条变异以 `--- FAIL` + 明确原因失败，17s 内收敛。
+
+S5c 四条（第 16 条是对我自己的方案文档动手术，第 17 条最贵）：
+
+16. **方案里的事实陈述错了，而且错在会导出危险结论的地方**：Q2 原写"`filesystemIdentity` 用
+    dev+ino 做同一文件去重"，据此起的结论是"不实现即降级为不去重"。读实现后更正：只有
+    `Stat_t.Dev`（无 ino）、Windows 分支是纯路径字符串、`searchcore` 内**没有任何去重逻辑**；
+    真实关注点是 `one_file_system` 的**文件系统边界**。若照原结论"降级"，等于让一个声明"别跨
+    文件系统"的搜索**照跨**——把 `/proc`、网络挂载搜进结果，而且看起来完全正常。已改为缺能力即
+    拒绝，并与 Q4（`sort=accessed/created` 必须拒绝）对齐。教训：**分步实施前必须重读实现，
+    方案文档里的代码事实不是凭记忆的部分**；发现自己写错过要就地更正，不要将错就错地实施。
+17. **build tag 会让证据"看起来存在"而实际没跑**：`grep_onefilesystem_test.go` 是
+    `//go:build !windows`，所以在 Windows 上"本地路由是否咨询注入缝"这一类断言**一条都没编译**。
+    同一条变异（能力优先于宿主注入函数）在 `searchcore` 里 GREEN，却在 `toolkit/tools` 的
+    `TestGrepTool_OneFileSystemBuiltinSkipsCrossDeviceDirectories` 里 RED——真正的证据藏在另一个包。
+    两个处置：变异脚本新增一条规则——**`-run` 跑中 0 条测试即判为"不算证据"**（这次正是 O4 靠
+    `=== RUN` 计数才暴露范围切错）；而我又从那个"本机永不编译"的文件里删过测试，于是补了
+    `GOOS=linux/darwin go vet` + `GOOS=linux go test -c`（三个包分别编出 8.2/34.9/5.3 MB 测试
+    二进制）才算没有把 Linux CI 编译搞坏。**注**：Linux 上的**执行**仍未验证（docker 引擎未运行，
+    且磁盘只剩 8 GB，我没有拉镜像写满它）；替代证据是搬迁前后**函数体逐行一致**（unix 12 行、
+    windows 6 行，用 git show 对拍）——这是"未改写"的证明，不是"在 Linux 上跑得对"的证明。
+18. **变异要切在关注点上，不能切得过细**：只把 root 一处、或只把子目录一处改回问本机，都会
+    被另一处仍走 accessor 的调用掩盖，结果"边界仍然生效"，两条都 GREEN；两处**一起**改才 RED。
+    这说明"两处必须同答"本身是被测试保护的——只是单点保护不住。
+19. **工具报"成功应用 N 处编辑"不等于改动是对的**：一次 multiedit 的第二条我把"追加方法"写成了
+    删除 `current, looped := a.materialize(path)` 这一行，工具照做并回报成功。发现它是因为我读了
+    它输出的 diff 而不是只看结论行；随后编译期也会报（未定义变量）。这正是 §4b 第 2/3 条的老病
+    第三次发作：**每次编辑后看 diff 全量，改完立刻编译。**
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 

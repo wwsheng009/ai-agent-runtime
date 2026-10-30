@@ -114,29 +114,9 @@ func TestGrepOneFileSystemSingleFilesystemIsUnchanged(t *testing.T) {
 	assertFileList(t, grepFileNames(withFlag), grepFileNames(plain))
 }
 
-// TestFilesystemIdentitySeparatesDevices is the guard for the bug that made the
-// old local implementation unusable: os.Stat returns *syscall.Stat_t on Linux,
-// not *unix.Stat_t, so asserting only the latter failed every call and
-// one_file_system could never run. /dev/shm and /tmp are different devices on
-// mainstream Linux and need no privileges.
-func TestFilesystemIdentitySeparatesDevices(t *testing.T) {
-	primary := t.TempDir()
-	id, err := filesystemIdentity(primary)
-	if err != nil {
-		t.Fatalf("filesystemIdentity(%s): %v", primary, err)
-	}
-	if id == "" {
-		t.Fatal("filesystemIdentity returned an empty device id")
-	}
-	other, statErr := os.Stat("/dev/shm")
-	if statErr != nil || !other.IsDir() {
-		t.Skip("/dev/shm is not available")
-	}
-	otherID, err := filesystemIdentity("/dev/shm")
-	if err != nil {
-		t.Fatalf("filesystemIdentity(/dev/shm): %v", err)
-	}
-	if otherID == id {
-		t.Skipf("/dev/shm shares the device id %q with the temp dir", id)
-	}
-}
+// TestFilesystemIdentitySeparatesDevices moved to internal/toolcore/localio/identity_test.go
+// with the platform code it guards (S5c): the assertion is about how a platform reports a
+// device - on Linux os.Stat answers *syscall.Stat_t, not *unix.Stat_t, and asserting only
+// the latter once failed every call - and that is now localio's business, not a core's.
+// What stays tested here is the core's own decision: which door the boundary question is
+// asked of (see TestGrepOneFileSystemUsesTheAccessorsBoundary).
