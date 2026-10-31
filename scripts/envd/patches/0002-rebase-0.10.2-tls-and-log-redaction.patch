@@ -1,0 +1,106 @@
+diff --git a/packages/envd/internal/logs/logger.go b/packages/envd/internal/logs/logger.go
+index f8a4a0c..5bb9096 100644
+--- a/packages/envd/internal/logs/logger.go
++++ b/packages/envd/internal/logs/logger.go
+@@ -3,6 +3,7 @@ package logs
+ import (
+ 	"io"
+ 	"os"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/rs/zerolog"
+@@ -16,12 +17,22 @@ func NewLogger(verbose bool, writers ...io.Writer) *zerolog.Logger {
+ 		writers = append(writers, os.Stdout)
+ 	}
+ 
++	// Request payloads can contain file bodies (the bridge's write tool passes content
++	// as an argv element), so debug must not be the default. Operators can still opt in
++	// explicitly with ENVD_LOG_LEVEL=debug.
++	level := zerolog.InfoLevel
++	if raw := strings.TrimSpace(os.Getenv("ENVD_LOG_LEVEL")); raw != "" {
++		if parsed, err := zerolog.ParseLevel(raw); err == nil {
++			level = parsed
++		}
++	}
++
+ 	l := zerolog.
+ 		New(io.MultiWriter(writers...)).
+ 		With().
+ 		Timestamp().
+ 		Logger().
+-		Level(zerolog.DebugLevel)
++		Level(level)
+ 
+ 	return &l
+ }
+diff --git a/packages/envd/internal/services/process/handler/handler.go b/packages/envd/internal/services/process/handler/handler.go
+index 236eb96..fe7621c 100644
+--- a/packages/envd/internal/services/process/handler/handler.go
++++ b/packages/envd/internal/services/process/handler/handler.go
+@@ -600,7 +600,10 @@ func (p *Handler) Start(ctx context.Context, requestTimeout time.Duration) (uint
+ 		Info().
+ 		Str("event_type", "process_start").
+ 		Int("pid", p.cmd.Process.Pid).
+-		Str("command", p.userCommand()).
++		// argv can carry file bodies or secrets (the bridge's write tool sends content
++		// as an argument), so log the executable and arity only.
++		Str("command", p.cmd.Path).
++		Int("args_count", len(p.cmd.Args)).
+ 		Dur("request_timeout_ms", requestTimeout).
+ 		Msg(fmt.Sprintf("Process with pid %d started", p.cmd.Process.Pid))
+ 
+diff --git a/packages/envd/main.go b/packages/envd/main.go
+index 6655ead..e57840c 100644
+--- a/packages/envd/main.go
++++ b/packages/envd/main.go
+@@ -58,6 +58,11 @@ var (
+ 
+ 	isNotFC bool
+ 	port    int64
++	// tlsCertFile/tlsKeyFile enable HTTPS. Go's ListenAndServeTLS negotiates HTTP/2
++	// automatically, which is what the client-streaming RPCs (SendInput/SendSignal/
++	// Update) require.
++	tlsCertFile string
++	tlsKeyFile  string
+ 
+ 	versionFlag bool
+ 	commitFlag  bool
+@@ -100,6 +105,20 @@ func parseFlags() {
+ 		"a port on which the daemon should run",
+ 	)
+ 
++	flag.StringVar(
++		&tlsCertFile,
++		"tls-cert",
++		"",
++		"path to a TLS certificate; enables HTTPS with HTTP/2",
++	)
++
++	flag.StringVar(
++		&tlsKeyFile,
++		"tls-key",
++		"",
++		"path to the TLS private key",
++	)
++
+ 	flag.StringVar(
+ 		&cgroupRoot,
+ 		"cgroup-root",
+@@ -474,7 +493,15 @@ func run() error {
+ 		}
+ 	})
+ 
+-	err := s.ListenAndServe()
++	var err error
++	if tlsCertFile != "" || tlsKeyFile != "" {
++		if tlsCertFile == "" || tlsKeyFile == "" {
++			log.Fatalf("both -tls-cert and -tls-key are required to enable TLS")
++		}
++		err = s.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
++	} else {
++		err = s.ListenAndServe()
++	}
+ 	// Signal goroutines to stop before deferred cleanup closes their resources.
+ 	// TODO: shutdown synchronization needs to be revisited.
+ 	cancel()

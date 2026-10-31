@@ -67,6 +67,37 @@ go build -trimpath -ldflags "-s -w -X main.commitSHA=fcf15acb+logsafe+tls" -o en
 > 网络受限环境可把 `GOPROXY` 换成可达的镜像；`goproxy.cn` 在本次两类环境均可达。
 > 本地补丁同时提供 `-tls-cert` / `-tls-key`（见 §3 TLS），以及日志脱敏（见 §4）。
 
+### 升级到 0.10.2（2026-10-31 实测）
+
+> 目的：目标机旧版（0.2.11）线上没有链接词汇（`Stat`/`ListDir` 对符号链接一律回跟随后的类型、
+> `symlink_target` 恒空），而链路保真是 `searchcore` 共享核在 envd 上正确工作的一部分（F2）。
+
+- **上游**：`github.com/e2b-dev/runtime` 主分支 tip `78d5ff91`（`pkg/version.go` = `0.10.2`）。
+  链接词汇自 **0.10.0（2026-10-12）** 起原生提供：`is_symlink`（条目自身是链接）+ `symlink_target`
+  （`EvalSymlinks` 后的绝对目标；悬空/不可解时报链接自身路径且 `type=UNSPECIFIED`）。
+- **补丁重基**：旧 `0001` 面向 `fcf15acb`（2025-09）且已无法直接应用；本次重基为
+  `scripts/envd/patches/0002-rebase-0.10.2-tls-and-log-redaction.patch`，只保留仍必要的两件事：
+  `-tls-cert`/`-tls-key` 与日志脱敏（`ENVD_LOG_LEVEL` 默认 info；`process_start` 只记可执行文件与
+  参数个数——upstream 已把无错误 unary 调用降到 debug，不再需要旧补丁的 interceptor 改动）。
+- **构建**（同 §2 交叉编译，替换 checkout 与补丁）：
+  `-ldflags "-s -w -X main.commitSHA=78d5ff91+logsafe+tls"`；产物 12,152,992 字节，
+  sha256 `e711810e34cc5ed4644ad501683c14864bf8a211580ec51931ab12c971a906e5`。
+- **上线前预检**（只读）：`envd -version` → `0.10.2`；`-commit` → `78d5ff91+logsafe+tls`；
+  `-h` 必须仍含 `-isnotfc`/`-port`/`-tls-cert`/`-tls-key`（unit 的 `ExecStart` 原样可用）。
+- **部署与回滚**：
+
+  ```bash
+  sudo cp -a /usr/local/bin/envd /usr/local/bin/envd.bak-20261031-pre0.10.2   # 旧 sha256 77d21f0d…
+  sudo install -m 755 ~/envd-0.10.2-preview /usr/local/bin/envd
+  sudo systemctl restart envd      # ExecStartPost 重装令牌；journal 应见 "envd: access token applied"
+  # 验证：/health 204；/metrics 无令牌 401、带令牌 200
+  # 回滚：
+  # sudo install -m 755 /usr/local/bin/envd.bak-20261031-pre0.10.2 /usr/local/bin/envd && sudo systemctl restart envd
+  ```
+
+- **升级后验证（2026-10-31 实测）**：seam 门 10/10（含旧版为红的链接探针）；金丝雀 A/B 各 23/23
+  （F1 闸门不回归）；链接行为 9/9（默认/显式 `follow=false` 不下钻出树链接、`follow=true` 跟随且环终止）。
+
 ## 3. 目标机安装（root）
 
 需要落地 5 个文件：

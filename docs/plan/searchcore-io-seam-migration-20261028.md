@@ -492,11 +492,22 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
   A/B 各 23/23（0644 可见 → view 成功且 grep 命中，证明走查真的到达；0600 → view 拒绝且
   grep 不返回）。修复前后同调用对照：`grep /home/n9e leakcanary` 修复前命中泄漏、修复后
   `empty_result=true` 且无 `timed_out`（走查完成、内容被正确跳过）。
-- **F2（链接保真，未修，待决）**：线上没有链接词汇——`Stat`/`ListDir` 对符号链接一律回
-  跟随后的类型（link→file 报 FILE、link→dir 报 DIRECTORY、悬空报空类型），`symlink_target` 恒空。
-  `envd_access.go` 的 Lstat/EvalLinkPath 假设被真机证伪（此前只有假目标证明过），follow 的
-  "拒绝下钻/环路保护"在 envd 上不可信；源码注释已加 WARNING。修法待决：daemon fork 侧报
-  类型+目标，或父目录 ListDir 旁路；seam 门该探针保持红以示警。
+- **F2（链接保真，已修，2026-10-31）**：旧线上没有链接词汇（`Stat`/`ListDir` 一律回跟随后的类型、
+  `symlink_target` 恒空），`envd_access.go` 的原假设被真机证伪。修复走"升级 daemon + 适配器接真话"
+  两腿：① 上游 0.10.0（2026-10-12）起原生提供 `is_symlink` 与已解析的 `symlinkTarget`（`type` 描述
+  目标；悬空/不可解 = `UNSPECIFIED` + `is_symlink=true`），本次把目标机 envd 从 0.2.11 升到 0.10.2
+  （源 `78d5ff91`，重基本地 TLS+日志脱敏补丁 `0002` 构建，旧二进制备份
+  `/usr/local/bin/envd.bak-20261031-pre0.10.2`）；② 适配器接入双编码（`Entry.IsLink()`：
+  `is_symlink || Type==SYMLINK`；`IsDir` 链接优先；`resolve` 消费已解析目标，悬空/环不可分时拒绝
+  伪造 absence）。验证：seam 门 **10/10 PASS**（旧版该探针为红）、链接行为 9/9（默认/显式 off 不下钻
+  出树链接，follow=on 跟随且环终止）、金丝雀 A/B 各 23/23；适配器提交 `e8732fd3`。
+- **F4（follow 默认取自客户端 OS，已修，2026-10-31）**：共享 handler 三处（grep/glob/ls）用
+  `runtime.GOOS` 决定"未显式 follow 时是否跟随"，Windows 客户端驱 POSIX 目标（envd）因此默认下钻
+  目录链接——与本地/ssh 面不一致，是 F2 修好后才显形的下一层。修复：新增
+  `toolcore.TargetIsWindows(access)`（有 `TargetPathStyle` 问目标，无法回答才回落进程 OS），三处换用；
+  离线含双向断言（POSIX 目标默认 false、Windows 风格目标默认 true）与变异反证（还原为进程 OS 时
+  三包测试同时红）；真机默认 `follow=false` 已实测（元数据与行为双证，见链接行为 9/9 的默认用例）。
+  本线提交 `216d1ec4`；glob/ls 两处调用点落在他人并发在途的 follow 特性同文件中，随其提交。
 - **F3（成本现实，记录）**：`glob` 在 `/home/n9e` 级目录撞 20s 搜索预算并如实提示（"未完成、
   收窄重试"）；同树上 `grep` 因早停通常可行。可读性探针只在"mode 显示可能拒"时触发、按调用
   按路径缓存，但大目录走查的 RPC 成本仍是可见的现实。

@@ -164,3 +164,19 @@ go run ./scripts/envd_seam_access_verify.go -addr https://<host>:49983 `
 
 **真机门**（§5 末尾那把关）仍未跑：需 `AICLI_ENVD_TOKEN`，与"换发令牌"安全待办冲突，不去配置
 文件取秘密；离线门（`envd_core_integration_test.go`）与 stub 上的端到端（5 条）均已全绿。
+
+## 7. 修法更新（2026-10-31，真机收尾）
+
+本文 §2 关于 `Lstat`"能，几乎是直译"与 §5"逐跳 `SymlinkTarget` 就够"的结论，以前提"envd 会把末段
+报成链接"为基础；真机（0.2.11）证伪该前提（一律回跟随后的类型、`symlink_target` 恒空）。2026-10-31
+的收尾把两条腿都走了：
+
+- **daemon**：升到 **0.10.2**（源 `78d5ff91`；链接词汇自 0.10.0 起原生：`is_symlink` + 已解析
+  `symlinkTarget`，`type` 描述目标），含本地 TLS+日志脱敏补丁的重基（`0002`）；构建、部署、回滚见
+  `docs/aicli/envd-selfhost-deploy.md`。
+- **适配器**：`envd_access.go` 同时理解两代编码（旧：`Type==FILE_TYPE_SYMLINK`；新：`is_symlink` +
+  目标类型 + 已解析目标），`Lstat`/`Stat`/`EvalLinkPath` 与本地语义对齐；悬空与环在线上不可区分时
+  明确拒绝把"未知"说成"不存在"。seam 门在真机 **10/10 绿**（旧版时该探针为红）。
+- **附带抓出并修掉 F4**：`follow` 的"未显式指定"默认取自**客户端 OS**（三处 handler），Windows 客户端
+  驱 POSIX 目标时默认下钻目录链接；改为 `toolcore.TargetIsWindows(access)`（问目标，无法回答才回落
+  进程 OS）。详见 `docs/plan/searchcore-io-seam-migration-20261028.md` 的 S6 实施记。
