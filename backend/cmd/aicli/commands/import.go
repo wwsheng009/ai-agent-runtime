@@ -120,6 +120,9 @@ func NewImportCommand(getConfig func() *config.Config) *cobra.Command {
 type importRequest struct {
 	// Path 是导出文件路径。
 	Path string
+	// SourceFile 是可选的人类可读源路径。跨 Agent 导入先写成临时 envelope，
+	// 仍走同一条二进制导入路径，但摘要与 provenance 应记录真实来源而不是临时文件。
+	SourceFile string
 	// NewID 允许在 ID 冲突（或文件缺少 ID）时生成新 ID。
 	NewID bool
 	// DryRun 只做校验与冲突判定，不落库。
@@ -141,6 +144,8 @@ type importSessionResult struct {
 	ContentPartCount int      `json:"content_part_count"`
 	SourceFile       string   `json:"source_file"`
 	SourceFormat     string   `json:"source_format,omitempty"`
+	SourceAgent      string   `json:"source_agent,omitempty"`
+	SourceView       string   `json:"source_view,omitempty"`
 	ExportedAt       string   `json:"exported_at,omitempty"`
 	StoreDir         string   `json:"store_dir,omitempty"`
 	DryRun           bool     `json:"dry_run"`
@@ -204,7 +209,10 @@ func importChatSessionFromExportFile(ctx context.Context, session *ChatSession, 
 	}
 
 	imported := *envelope.Session
-	absoluteSource, _ := filepath.Abs(req.Path)
+	absoluteSource := strings.TrimSpace(req.SourceFile)
+	if absoluteSource == "" {
+		absoluteSource, _ = filepath.Abs(req.Path)
+	}
 
 	warnings := make([]string, 0, 4)
 	// 归属：显式 --user > 文件里的 userId > 当前解析出的默认用户。
@@ -537,6 +545,12 @@ func printImportCommandResult(result *importSessionResult, outputOptions structu
 	printChatSessionMetaRow("Messages:", fmt.Sprintf("%d", result.MessageCount))
 	printChatSessionMetaRow("Tool Calls:", fmt.Sprintf("%d", result.ToolCallCount))
 	printChatSessionMetaRow("Source File:", chatDebugValueOrNone(result.SourceFile))
+	if result.SourceAgent != "" {
+		printChatSessionMetaRow("Source Agent:", result.SourceAgent)
+	}
+	if result.SourceView != "" {
+		printChatSessionMetaRow("Source View:", result.SourceView)
+	}
 	if result.ExportedAt != "" {
 		printChatSessionMetaRow("Exported At:", result.ExportedAt)
 	}
