@@ -235,12 +235,17 @@ jobs:
       # (envdclient + remotetargets) must keep unit tests green before release.
       # 历史注记：envd 曾由独立进程 cmd/aicli-envd-bridge 承载；2026-10-28 收编进
       # aicli-remote-tools（serve --stdio --backend envd），本门禁随之改挂。
-      - name: Verify aicli-remote-tools envd backend and envd transport tests
+      - name: Verify aicli-remote-tools envd backend, toolcore seam and MCP manager tests
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -euo pipefail
           go build -trimpath -o /tmp/aicli-remote-tools-check ./cmd/aicli-remote-tools
           go test ./internal/envdclient/... ./internal/remotetargets/... ./cmd/aicli-remote-tools/... -count=1
+          # The I/O seam library (toolcore.Access: search/glob/grep/ls over the local
+          # folder and the envd target) and the MCP process manager that spawns the
+          # envd carrier are hermetic unit suites; hard-gate both so seam regressions
+          # cannot hide behind the soft reliability gate.
+          go test ./internal/toolcore/... ./internal/mcp/manager/... -count=1
           # The stacking e2e spawns a real MCP stdio child (this test binary itself)
           # through manager → tools.Manager, so it stays hermetic (no live target).
           go test ./internal/tools/ -run 'TestToolsManagerRunsOverRealMCPStdioChild' -count=1
