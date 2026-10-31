@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli aicli-console aicli-mesh aicli-remote-tools install-aicli uninstall-aicli package-server contract contract-check gateway-console gateway-console-check
+.PHONY: build test lint tidy clean aicli aicli-console aicli-mesh aicli-remote-tools install-aicli uninstall-aicli package-server contract contract-check
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -19,14 +19,6 @@ LDFLAGS     := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 
 build:
 	cd $(BACKEND_DIR) && go build ./...
-
-# gateway 控制台：console-src/ 的功能片段 -> console/app.js（go:embed 的单文件产物）。
-gateway-console:
-	node scripts/build-gateway-console.mjs
-
-# 校验 console/app.js 与 console-src/ 一致（提交前 / CI）。
-gateway-console-check:
-	node scripts/build-gateway-console.mjs --check
 
 # 单独构建 aicli 二进制到仓库根目录（开发者本地使用）
 aicli:

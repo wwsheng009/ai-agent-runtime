@@ -1,3 +1,46 @@
+// 60-markdown.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  escapeHTML: escapeHTML,
+  safeLinkHref: safeLinkHref,
+  mdInline: mdInline,
+  mdSplitCells: mdSplitCells,
+  mdIsSeparatorRow: mdIsSeparatorRow,
+  mdAlignOf: mdAlignOf,
+  mdTable: mdTable,
+  renderMarkdown: renderMarkdown,
+  setMessageHTML: setMessageHTML,
+  chatSetStreamingText: chatSetStreamingText,
+  chatResetStreamingText: chatResetStreamingText,
+  chatNewStreamChunk: chatNewStreamChunk,
+  chatSplitStreamingChunks: chatSplitStreamingChunks,
+  chatSetStreamingMarkdown: chatSetStreamingMarkdown,
+  chatFlushMarkdownChunks: chatFlushMarkdownChunks,
+  chatMarkdownStableBoundary: chatMarkdownStableBoundary,
+  setText: setText,
+  reconcileChildren: reconcileChildren,
+  pruneSessionRowEls: pruneSessionRowEls,
+  ensureSessionRow: ensureSessionRow,
+  ensureSessionGroup: ensureSessionGroup,
+  renderSessionTable: renderSessionTable,
+  createSessionGroup: createSessionGroup,
+  updateSessionGroup: updateSessionGroup,
+  closeSessionMenus: closeSessionMenus,
+  positionSessionMenu: positionSessionMenu,
+  visibleMenuItems: visibleMenuItems,
+  bindCardMenu: bindCardMenu,
+  repositionOpenSessionMenus: repositionOpenSessionMenus,
+  syncExpandButton: syncExpandButton,
+  createSessionCard: createSessionCard,
+  requestWindowAction: requestWindowAction,
+  updateSessionCard: updateSessionCard,
+});
+
   /* ─────────────────────── markdown rendering ────────────────── */
 
   function escapeHTML(text) {
@@ -45,7 +88,7 @@
   // GFM 管道表格：行必须以 | 起止（与节点 micro web client 的 markdown.js 同一
   // 识别规则，保证同一条消息在面板与原版 Web 里渲染一致）；第二行是分隔行
   // （:--- / :---: / ---:）时首行为表头，否则整块当无表头表格。
-  var MD_TABLE_ROW = /^ {0,3}\|.*\|[ \t]*$/;
+  S.MD_TABLE_ROW = /^ {0,3}\|.*\|[ \t]*$/;
 
   function mdSplitCells(row) {
     var s = String(row).trim();
@@ -138,10 +181,10 @@
       }
       // 表格：连续 | 行（至少两行）——与 micro web client 的块级扫描同一位置
       // （列表之前），否则单元格里的 "-" 会被列表规则先吃掉。
-      if (MD_TABLE_ROW.test(line)) {
+      if (S.MD_TABLE_ROW.test(line)) {
         var trows = [];
         var tj = i;
-        while (tj < lines.length && MD_TABLE_ROW.test(lines[tj])) { trows.push(lines[tj]); tj++; }
+        while (tj < lines.length && S.MD_TABLE_ROW.test(lines[tj])) { trows.push(lines[tj]); tj++; }
         if (trows.length >= 2) {
           flushPara();
           html.push(mdTable(trows));
@@ -177,10 +220,10 @@
   function setMessageHTML(node, text) {
     if (!node) { return; }
     var src = text || "";
-    if (node.__mdSrc === src && node.__mdOn === mdEnabled) { return; }
+    if (node.__mdSrc === src && node.__mdOn === S.mdEnabled) { return; }
     node.__mdSrc = src;
-    node.__mdOn = mdEnabled;
-    if (mdEnabled) {
+    node.__mdOn = S.mdEnabled;
+    if (S.mdEnabled) {
       node.classList.add("md");
       node.innerHTML = renderMarkdown(src);
     } else {
@@ -220,21 +263,22 @@
   }
 
   function chatNewStreamChunk(text) {
-    var el = document.createElement("div");
-    el.className = "chat-stream-chunk";
+    // 局部名避开顶层 el()（模块化后顶层函数走 G 表，局部同名会遮蔽）。
+    var chunkEl = document.createElement("div");
+    chunkEl.className = "chat-stream-chunk";
     var textNode = document.createTextNode(text || "");
-    el.appendChild(textNode);
-    return { el: el, node: textNode };
+    chunkEl.appendChild(textNode);
+    return { el: chunkEl, node: textNode };
   }
 
   function chatSplitStreamingChunks(node, chunks) {
     if (!chunks || !chunks.length) { return; }
     var last = chunks[chunks.length - 1];
-    while (last.node.data.length > CHAT_LIVE_CHUNK_CHARS) {
+    while (last.node.data.length > S.CHAT_LIVE_CHUNK_CHARS) {
       var data = last.node.data;
-      var cut = data.lastIndexOf("\n", CHAT_LIVE_CHUNK_CHARS - 1);
+      var cut = data.lastIndexOf("\n", S.CHAT_LIVE_CHUNK_CHARS - 1);
       if (cut >= 0) { cut += 1; }
-      else { cut = CHAT_LIVE_CHUNK_CHARS; }
+      else { cut = S.CHAT_LIVE_CHUNK_CHARS; }
       var rest = data.slice(cut);
       last.node.deleteData(cut, rest.length);
       var next = chatNewStreamChunk(rest);
@@ -297,12 +341,12 @@
   function chatFlushMarkdownChunks(node) {
     var pending = node.__streamMdPending || "";
     var mark = node.__streamMdMark;
-    while (pending.length >= CHAT_LIVE_MD_CHUNK_CHARS) {
+    while (pending.length >= S.CHAT_LIVE_MD_CHUNK_CHARS) {
       // Stable text always contains blank-line boundaries outside fences. Cut at
       // the nearest one after the threshold so a code fence is never split.
-      var cut = pending.indexOf("\n\n", CHAT_LIVE_MD_CHUNK_CHARS - 80);
+      var cut = pending.indexOf("\n\n", S.CHAT_LIVE_MD_CHUNK_CHARS - 80);
       if (cut === -1) {
-        if (pending.length < CHAT_LIVE_MD_CHUNK_CHARS * 2) { break; }
+        if (pending.length < S.CHAT_LIVE_MD_CHUNK_CHARS * 2) { break; }
         cut = pending.length;
       } else {
         cut += 2;
@@ -371,8 +415,8 @@
   // pruneSessionRowEls forgets registry entries whose elements left the board
   // (filtered out, removed snapshot, …) so the next render starts clean.
   function pruneSessionRowEls() {
-    Object.keys(sessionRowEls).forEach(function (key) {
-      if (!sessionRowEls[key].isConnected) { delete sessionRowEls[key]; }
+    Object.keys(S.sessionRowEls).forEach(function (key) {
+      if (!S.sessionRowEls[key].isConnected) { delete S.sessionRowEls[key]; }
     });
   }
 
@@ -380,59 +424,59 @@
   // place; only new rows (or rows that switched kind) allocate DOM.
   function ensureSessionRow(item) {
     var key = "c:" + item.node.node_id + "|" + item.session.session_id;
-    var kind = isSubagentSession(item.session) ? "child" : "card";
-    var rowEl = sessionRowEls[key];
+    var kind = G.isSubagentSession(item.session) ? "child" : "card";
+    var rowEl = S.sessionRowEls[key];
     if (rowEl && rowEl.__kind === kind) {
       if (kind === "card") { updateSessionCard(rowEl, item); }
-      else { updateSubagentRow(rowEl, item); }
+      else { G.updateSubagentRow(rowEl, item); }
       return rowEl;
     }
-    var created = kind === "child" ? createSubagentRow() : createSessionCard();
+    var created = kind === "child" ? G.createSubagentRow() : createSessionCard();
     created.setAttribute("data-rkey", key);
     created.__kind = kind;
-    sessionRowEls[key] = created;
+    S.sessionRowEls[key] = created;
     if (kind === "card") { updateSessionCard(created, item); }
-    else { updateSubagentRow(created, item); }
+    else { G.updateSubagentRow(created, item); }
     return created;
   }
 
   function ensureSessionGroup(node) {
     var key = "g:" + node.node_id;
-    var group = sessionRowEls[key];
+    var group = S.sessionRowEls[key];
     if (group && group.__kind === "group") { return group; }
     group = createSessionGroup(node);
     group.setAttribute("data-rkey", key);
     group.__kind = "group";
-    sessionRowEls[key] = group;
+    S.sessionRowEls[key] = group;
     return group;
   }
 
   function renderSessionTable(nodes) {
-    var host = el("session-table");
+    var host = S.el("session-table");
     if (!host) { return; }
-    var items = allSessions(nodes).filter(sessionMatches).sort(sessionSorter);
-    var empty = el("session-empty");
+    var items = G.allSessions(nodes).filter(G.sessionMatches).sort(G.sessionSorter);
+    var empty = S.el("session-empty");
     if (empty) { empty.hidden = items.length > 0; }
-    var listCount = el("im-list-count");
+    var listCount = S.el("im-list-count");
     if (listCount) {
       setText(listCount, String(items.length));
       listCount.hidden = items.length === 0;
     }
     // Skip redundant rebuilds (identical SSE frames): typing, focus and
     // selection stay untouched unless something visible actually changed.
-    var signature = sessionTableSignature(items);
-    if (signature === lastSessionTableSignature) { return; }
-    lastSessionTableSignature = signature;
-    captureSessionDrafts();
+    var signature = G.sessionTableSignature(items);
+    if (signature === S.lastSessionTableSignature) { return; }
+    S.lastSessionTableSignature = signature;
+    G.captureSessionDrafts();
     // Nodes with several visible sessions collapse into a group (session list
     // grouped by device); single-session nodes stay flat so the two-column
     // board keeps its density.
     // 子代理行跟随父会话：先按可见父行重排（孤儿子行直接丢弃），节点分组只按
     // 顶层会话计数，避免"1 个父 + N 个子"把节点误判成多会话分组。
-    items = orderSessionsWithChildren(items);
+    items = G.orderSessionsWithChildren(items);
     var nodeCounts = {};
     items.forEach(function (item) {
-      if (isSubagentSession(item.session)) { return; }
+      if (G.isSubagentSession(item.session)) { return; }
       var k = item.node.node_id;
       nodeCounts[k] = (nodeCounts[k] || 0) + 1;
     });
@@ -457,12 +501,12 @@
     });
     reconcileChildren(host, desired);
     pruneSessionRowEls();
-    restoreSessionDrafts(host);
-    syncImActiveCard();
-    if (currentView() === "sessions") { setTimeout(autoSelectFirstSession, 0); }
-    if (!sessionsScrollRestored) {
-      sessionsScrollRestored = true;
-      setTimeout(restoreSessionsScroll, 0);
+    G.restoreSessionDrafts(host);
+    G.syncImActiveCard();
+    if (G.currentView() === "sessions") { setTimeout(G.autoSelectFirstSession, 0); }
+    if (!S.sessionsScrollRestored) {
+      S.sessionsScrollRestored = true;
+      setTimeout(G.restoreSessionsScroll, 0);
     }
   }
 
@@ -478,8 +522,8 @@
       '<span class="group-caret" aria-hidden="true">▾</span></button>' +
       '<div class="group-body"></div>';
     group.querySelector(".group-head").addEventListener("click", function () {
-      var next = !collapsedGroups[node.node_id];
-      if (next) { collapsedGroups[node.node_id] = true; } else { delete collapsedGroups[node.node_id]; }
+      var next = !S.collapsedGroups[node.node_id];
+      if (next) { S.collapsedGroups[node.node_id] = true; } else { delete S.collapsedGroups[node.node_id]; }
       group.querySelector(".group-body").hidden = next;
       group.querySelector(".group-caret").textContent = next ? "▸" : "▾";
       this.setAttribute("aria-expanded", String(!next));
@@ -490,7 +534,7 @@
   function updateSessionGroup(group, node, groupItems) {
     group.classList.toggle("offline", !!node.stale);
     group.querySelector(".group-head .dot").className = "dot " + (node.stale ? "offline" : "live");
-    setText(group.querySelector(".group-name"), nodeDisplayName(node));
+    setText(group.querySelector(".group-name"), G.nodeDisplayName(node));
     var latest = 0;
     groupItems.forEach(function (item) {
       var t = new Date(item.session.updated_at || 0).getTime();
@@ -499,7 +543,7 @@
     setText(group.querySelector(".group-meta"),
       (node.kind || "agent") + " · 会话 " + groupItems.length +
       (latest ? " · 最近 " + new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
-    var collapsed = !!collapsedGroups[node.node_id];
+    var collapsed = !!S.collapsedGroups[node.node_id];
     group.querySelector(".group-body").hidden = collapsed;
     group.querySelector(".group-caret").textContent = collapsed ? "▸" : "▾";
     group.querySelector(".group-head").setAttribute("aria-expanded", String(!collapsed));
@@ -549,7 +593,7 @@
     if (!card || !menu) { return; }
     var trigger = card.querySelector("[data-more]");
     if (!trigger) { return; }
-    var menuID = menu.id || ("card-menu-" + (++sessionMenuSeq));
+    var menuID = menu.id || ("card-menu-" + (++S.sessionMenuSeq));
     menu.id = menuID;
     trigger.setAttribute("aria-controls", menuID);
     trigger.setAttribute("aria-expanded", "false");
@@ -609,9 +653,9 @@
     if (e.target && e.target.closest && e.target.closest(".s-menu")) { return; }
     repositionOpenSessionMenus();
   }, true);
-  var sessionListBody = document.querySelector(".im-list-body");
-  if (sessionListBody) {
-    sessionListBody.addEventListener("scroll", repositionOpenSessionMenus);
+  S.sessionListBody = document.querySelector(".im-list-body");
+  if (S.sessionListBody) {
+    S.sessionListBody.addEventListener("scroll", repositionOpenSessionMenus);
   }
 
   function syncExpandButton(card, expanded) {
@@ -675,7 +719,7 @@
     card.querySelector("[data-attend]").addEventListener("click", function (e) {
       e.stopPropagation();
       var it = card.__item;
-      if (it) { openSessionChat(it.node, it.session, { focusInteractive: true }); }
+      if (it) { G.openSessionChat(it.node, it.session, { focusInteractive: true }); }
     });
     // 微信式：整行就是「打开这条会话」。行内按钮 / 展开区 / 可选中文本
     // 仍然各自生效，只有真正的空白处落点才打开会话流。
@@ -686,12 +730,12 @@
       if (t && t.closest && t.closest("button, a, input, textarea, select, label, .s-tail-body, .s-last, .s-menu")) { return; }
       var sel = window.getSelection && window.getSelection();
       if (sel && String(sel).length) { return; }
-      openSessionFromCard(it.node, it.session);
+      G.openSessionFromCard(it.node, it.session);
     });
     // 动作收纳：小屏只保留「打开会话 / ⋯」，其余动作收进弹出菜单。
     var moreBtn = card.querySelector("[data-more]");
     var menu = card.querySelector(".s-menu");
-    var menuID = "s-menu-" + (++sessionMenuSeq);
+    var menuID = "s-menu-" + (++S.sessionMenuSeq);
     menu.id = menuID;
     moreBtn.setAttribute("aria-controls", menuID);
     moreBtn.addEventListener("click", function (e) {
@@ -749,19 +793,19 @@
     // The card body was informational only before; 详情 stays explicit.
     card.querySelector("[data-detail]").addEventListener("click", function () {
       var it = card.__item;
-      if (it) { openSessionDetail(it.node, it.session); }
+      if (it) { G.openSessionDetail(it.node, it.session); }
     });
     // 网关会话 URL 标识：把这张卡片的规范化深链复制到剪贴板，便于贴到 IM /
     // 工单里，点击后回到控制台并定位同一会话。
     card.querySelector("[data-copy-link]").addEventListener("click", function () {
       var it = card.__item;
-      if (it) { copyGatewaySessionLink(it.node, it.session); }
+      if (it) { G.copyGatewaySessionLink(it.node, it.session); }
     });
     // 原版 Web 是明确的外部/旧版入口，和站内「打开会话」分开命名，避免
     // 两个都叫「打开」却走向不同页面。
     card.querySelector("[data-web]").addEventListener("click", function () {
       var it = card.__item;
-      if (it) { openSession(it.node, it.session); }
+      if (it) { G.openSession(it.node, it.session); }
     });
     // Primary action: open the same inline session as a card click. Legacy
     // agents without screen/events fall back to their original Web UI and use
@@ -771,9 +815,9 @@
       var it = card.__item;
       if (!it || openBtn.disabled) { return; }
       if (openBtn.getAttribute("data-open-mode") === "web") {
-        openSession(it.node, it.session);
+        G.openSession(it.node, it.session);
       } else {
-        openSessionFromCard(it.node, it.session);
+        G.openSessionFromCard(it.node, it.session);
       }
     });
     // 展开/收起: the full last message and the reply form live in the
@@ -783,13 +827,13 @@
       var it = card.__item;
       if (!it || expandBtn.hidden) { return; }
       var key = card.getAttribute("data-draft-key");
-      var next = !expandedSessions[key];
-      if (next) { expandedSessions[key] = true; } else { delete expandedSessions[key]; }
+      var next = !S.expandedSessions[key];
+      if (next) { S.expandedSessions[key] = true; } else { delete S.expandedSessions[key]; }
       card.classList.toggle("expanded", next);
       syncExpandButton(card, next);
       // Expansion is the "I'm watching this session" signal: it gates the
       // live tail on the agent (P1-b) and suppresses pushes while open.
-      rememberPresence(it.node, it.session, { tail: next });
+      G.rememberPresence(it.node, it.session, { tail: next });
     });
     // Collapsed cards still surface the newest live line, so progress is
     // visible without expanding; clicking it expands the full tail.
@@ -798,11 +842,11 @@
       var it = card.__item;
       if (!it) { return; }
       var key = card.getAttribute("data-draft-key");
-      if (!expandedSessions[key]) {
-        expandedSessions[key] = true;
+      if (!S.expandedSessions[key]) {
+        S.expandedSessions[key] = true;
         card.classList.add("expanded");
         syncExpandButton(card, true);
-        rememberPresence(it.node, it.session, { tail: true });
+        G.rememberPresence(it.node, it.session, { tail: true });
       }
       var body = card.querySelector(".s-tail-body");
       if (body && body.scrollIntoView) { body.scrollIntoView({ block: "nearest" }); }
@@ -814,16 +858,16 @@
     var followBtn = card.querySelector("[data-tail-follow]");
     card.__syncFollowBtn = function () {
       var key = card.getAttribute("data-draft-key");
-      followBtn.textContent = tailFollow[key] === false ? "跳到底部" : "跟随中";
+      followBtn.textContent = S.tailFollow[key] === false ? "跳到底部" : "跟随中";
     };
     followBtn.addEventListener("click", function () {
-      tailFollow[card.getAttribute("data-draft-key")] = true;
+      S.tailFollow[card.getAttribute("data-draft-key")] = true;
       card.__syncFollowBtn();
       tailBody.scrollTop = tailBody.scrollHeight;
     });
     tailBody.addEventListener("scroll", function () {
       var atBottom = tailBody.scrollHeight - tailBody.scrollTop - tailBody.clientHeight < 24;
-      tailFollow[card.getAttribute("data-draft-key")] = atBottom;
+      S.tailFollow[card.getAttribute("data-draft-key")] = atBottom;
       card.__syncFollowBtn();
     });
     // 窗口动作（新终端 / 恢复 / 关窗口）：控制台 → 网关排队 → 节点下一次心跳
@@ -842,11 +886,11 @@
         if (!it || btn.disabled) { return; }
         function run() {
           return requestWindowAction(it.node, it.session, action.kind)
-            .then(function () { notify(action.done, "ok"); });
+            .then(function () { G.notify(action.done, "ok"); });
         }
         if (action.confirm) {
           closeSessionMenus(false);
-          confirmDestructive({
+          G.confirmDestructive({
             title: "关闭窗口进程？",
             message: action.confirm,
             trigger: moreBtn,
@@ -855,7 +899,7 @@
           });
           return;
         }
-        run().catch(function (err) { notify("窗口动作失败：" + err, "error"); });
+        run().catch(function (err) { G.notify("窗口动作失败：" + err, "error"); });
       });
     });
     var rmBtn = card.querySelector("[data-remove]");
@@ -864,15 +908,15 @@
       var it = card.__item;
       if (!it) { return; }
       closeSessionMenus(false);
-      confirmDestructive({
+      G.confirmDestructive({
         title: "移除会话条目？",
         message: "从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）",
         trigger: moreBtn,
         confirmText: "移除",
         onConfirm: function () {
-          return api("/api/nodes/" + encodeURIComponent(it.node.node_id) +
+          return G.api("/api/nodes/" + encodeURIComponent(it.node.node_id) +
               "/sessions/" + encodeURIComponent(it.session.session_id), { method: "DELETE" })
-            .then(function () { notify("会话条目已移除", "ok"); loadNodes(); });
+            .then(function () { G.notify("会话条目已移除", "ok"); G.loadNodes(); });
         }
       });
     });
@@ -885,7 +929,7 @@
     var path = "/api/nodes/" + encodeURIComponent(node.node_id) +
       "/sessions/" + encodeURIComponent(session.session_id) +
       "/window?action=" + encodeURIComponent(kind);
-    return api(path, { method: "POST" });
+    return G.api(path, { method: "POST" });
   }
   // updateSessionCard patches one card to match the latest snapshot: text is
   // written only when it changed, visibility flips via `hidden`, and the live
@@ -894,13 +938,13 @@
   function updateSessionCard(card, item) {
     var s = item.session, node = item.node;
     var cardKey = node.node_id + "|" + s.session_id;
-    var canOpen = nodeHasWebUI(node);
+    var canOpen = G.nodeHasWebUI(node);
     card.__item = item;
     card.setAttribute("data-draft-key", cardKey);
     // URL 导航标识：卡片 DOM 上一直带着这张卡片的规范深链，事件条/外部脚本
     // 都能据此生成可分享的网关会话 URL。
-    card.setAttribute("data-session-url", gatewaySessionLink(node.node_id, s.session_id));
-    var expanded = !!expandedSessions[cardKey];
+    card.setAttribute("data-session-url", G.gatewaySessionLink(node.node_id, s.session_id));
+    var expanded = !!S.expandedSessions[cardKey];
     card.classList.toggle("offline", !!node.stale);
     card.classList.toggle("expanded", expanded);
     var attClass = s.attention ? "att-" + s.attention : "";
@@ -910,36 +954,36 @@
       card.__attClass = attClass;
     }
     // Pulse when this session visibly moved since the previous render.
-    var fingerprint = sessionFingerprint(s);
-    if (sessionLastSeen[cardKey] !== undefined && sessionLastSeen[cardKey] !== fingerprint) {
+    var fingerprint = G.sessionFingerprint(s);
+    if (S.sessionLastSeen[cardKey] !== undefined && S.sessionLastSeen[cardKey] !== fingerprint) {
       card.classList.remove("card-updated");
       void card.offsetWidth; // restart the pulse animation
       card.classList.add("card-updated");
     }
-    sessionLastSeen[cardKey] = fingerprint;
+    S.sessionLastSeen[cardKey] = fingerprint;
     card.querySelector(".s-title .dot").className = "dot " + (node.stale ? "offline" : "live");
     card.classList.toggle("is-active",
-      !!chatState && chatState.node && chatState.session &&
-      chatState.node.node_id === node.node_id &&
-      chatState.session.session_id === s.session_id);
-    var label = sessionLabelOf(s);
+      !!S.chatState && S.chatState.node && S.chatState.session &&
+      S.chatState.node.node_id === node.node_id &&
+      S.chatState.session.session_id === s.session_id);
+    var label = G.sessionLabelOf(s);
     setText(card.querySelector(".s-name"), label);
     // 头像位：微信列表行的首字母/首字方块（CSS ::before 读取 data-avatar）。
     var avatar = Array.from((label || "").trim())[0] || "·";
     if (card.getAttribute("data-avatar") !== avatar) { card.setAttribute("data-avatar", avatar); }
     card.setAttribute("aria-label",
-      sessionLabelOf(s) + "，" + nodeDisplayName(node) + "，" + stateLabelOf(s) +
-      (s.attention ? "，" + attentionLabel(s.attention) : "") +
+      G.sessionLabelOf(s) + "，" + G.nodeDisplayName(node) + "，" + G.stateLabelOf(s) +
+      (s.attention ? "，" + G.attentionLabel(s.attention) : "") +
       (canOpen ? "，按 Enter 打开会话" : "，按 Enter 查看详情"));
     setText(card.querySelector(".s-node-text"),
-      nodeDisplayName(node) + " · " + (node.kind || "agent"));
+      G.nodeDisplayName(node) + " · " + (node.kind || "agent"));
     var accessEl = card.querySelector(".s-access");
     var accessText = node.stale || canOpen ? "" :
       (node.kind === "runtime-server" ? "服务未就绪" : "网页未启用");
     accessEl.hidden = !accessText;
     accessEl.textContent = accessText;
     if (accessText) {
-      accessEl.title = webUnavailableText(node);
+      accessEl.title = G.webUnavailableText(node);
     } else {
       accessEl.removeAttribute("title");
     }
@@ -947,7 +991,7 @@
     // 且节点支持站内面板时，把主操作提升为「审批 / 回答」。
     var attendBtn = card.querySelector("[data-attend]");
     var attendKind = (s.attention === "approval" || s.attention === "question") &&
-      chatPanelSupported(node, s) && chatCanInput(node) ? s.attention : "";
+      G.chatPanelSupported(node, s) && G.chatCanInput(node) ? s.attention : "";
     if (attendKind) {
       attendBtn.hidden = false;
       attendBtn.textContent = attendKind === "approval" ? "审批" : "回答";
@@ -962,8 +1006,8 @@
     var syncEl = card.querySelector(".s-sync");
     var syncedMs = s.synced_at ? new Date(s.synced_at).getTime() : NaN;
     if (!isNaN(syncedMs)) {
-      setRelTime(syncEl, syncedMs, "同步 ", 60000,
-        "网关最后收到该会话更新：" + absoluteTime(syncedMs) + "（服务器时间）");
+      G.setRelTime(syncEl, syncedMs, "同步 ", 60000,
+        "网关最后收到该会话更新：" + G.absoluteTime(syncedMs) + "（服务器时间）");
       syncEl.hidden = false;
     } else {
       syncEl.hidden = true;
@@ -973,9 +1017,9 @@
     // clock, kept apart from the metadata line so "what is happening now"
     // reads as the card's most time-sensitive zone.
     var stateChip = card.querySelector(".s-state");
-    var stateLabel = STATE_LABELS[s.state];
+    var stateLabel = S.STATE_LABELS[s.state];
     var chipShown = false;
-    if (stateLabel && (isActiveSessionState(s.state) || s.state === "interrupted")) {
+    if (stateLabel && (G.isActiveSessionState(s.state) || s.state === "interrupted")) {
       stateChip.textContent = stateLabel;
       stateChip.className = "s-state st-" + s.state;
       stateChip.hidden = false;
@@ -985,7 +1029,7 @@
     }
     var statusText = (s.status_text || "").trim();
     var startedMs = Date.parse(s.status_started_at || "");
-    var showElapsed = isActiveSessionState(s.state) && !isNaN(startedMs);
+    var showElapsed = G.isActiveSessionState(s.state) && !isNaN(startedMs);
     var activityLine = card.querySelector(".s-activity");
     var statusTextEl = card.querySelector(".s-status-text");
     setText(statusTextEl, statusText);
@@ -994,7 +1038,7 @@
     if (chipShown || statusText || showElapsed) {
       if (showElapsed) {
         elapsedEl.setAttribute("data-started", s.status_started_at);
-        setText(elapsedEl, "· " + formatStatusElapsed(Date.now() - startedMs));
+        setText(elapsedEl, "· " + G.formatStatusElapsed(Date.now() - startedMs));
         elapsedEl.hidden = false;
       } else {
         elapsedEl.hidden = true;
@@ -1008,7 +1052,7 @@
     }
     if (s.attention) {
       var b = card.querySelector(".s-badge");
-      b.textContent = attentionLabel(s.attention);
+      b.textContent = G.attentionLabel(s.attention);
       b.className = "att-badge s-badge att-" + s.attention;
       b.hidden = false;
     } else {
@@ -1017,7 +1061,7 @@
     var t = card.querySelector(".s-time");
     var updatedMs = s.updated_at ? new Date(s.updated_at).getTime() : NaN;
     if (!isNaN(updatedMs)) {
-      setRelTime(t, updatedMs, "", 0, "内容时间：" + absoluteTime(updatedMs));
+      G.setRelTime(t, updatedMs, "", 0, "内容时间：" + G.absoluteTime(updatedMs));
       t.hidden = false;
     } else { t.hidden = true; }
     var previewEl = card.querySelector(".s-preview");
@@ -1030,7 +1074,7 @@
       var role = s.last_message_role || "";
       var roleEl = card.querySelector(".s-last-role");
       roleEl.className = "s-last-role" + (role ? " role-" + role : "");
-      setText(roleEl, roleLabelOf(role));
+      setText(roleEl, G.roleLabelOf(role));
       setMessageHTML(card.querySelector(".s-last-text"), lastText);
       lastBlock.hidden = false;
     } else {
@@ -1039,7 +1083,7 @@
     // Live-output tail (bounded by the shared core): rendered only while
     // the global "实时输出" switch is on; the 跟随 button pins the viewport
     // to the newest line and pauses automatically when the user scrolls up.
-    var tailText = tailEnabled ? (s.status_tail || "") : "";
+    var tailText = S.tailEnabled ? (s.status_tail || "") : "";
     var tailBlock = card.querySelector(".s-tail");
     var liveLine = card.querySelector(".s-live");
     if (tailText) {
@@ -1055,7 +1099,7 @@
       // Follow mode pins the viewport to the newest line. When the operator
       // scrolled up (tailFollow false) scrollTop is left untouched — that is
       // what keeps a scrolled-up detail readable while the session streams.
-      if (tailFollow[cardKey] !== false) { tailBody.scrollTop = tailBody.scrollHeight; }
+      if (S.tailFollow[cardKey] !== false) { tailBody.scrollTop = tailBody.scrollHeight; }
     } else {
       liveLine.hidden = true;
       tailBlock.hidden = true;
@@ -1078,7 +1122,7 @@
     // the detail dialog instead.
     var openBtn = card.querySelector("[data-open]");
     var webItem = card.querySelector("[data-web]");
-    var canInline = chatPanelSupported(node, s);
+    var canInline = G.chatPanelSupported(node, s);
     var openMode = "";
     if (attendKind) {
       openBtn.hidden = true;
@@ -1101,7 +1145,7 @@
     card.querySelector("[data-remove]").hidden = !node.stale;
     // 窗口动作按钮：只在该节点自己通告了 window-actions（本机有可用终端）时出现。
     // 子代理行不独立拥有窗口——它是父进程里的一个任务，所以恒不显示。
-    var canWindow = windowActionsSupported(node) && !isSubagentSession(s);
+    var canWindow = G.windowActionsSupported(node) && !G.isSubagentSession(s);
     card.querySelector("[data-window-open]").hidden = !canWindow;
     card.querySelector("[data-window-resume]").hidden = !canWindow;
     card.querySelector("[data-window-close]").hidden = !canWindow;
@@ -1119,7 +1163,7 @@
     // the "input" capability so stale agents just hide the form.
     var replyForm = card.querySelector(".s-reply");
     if (wantReply && !replyForm) {
-      card.insertBefore(buildReplyForm(node, s), card.querySelector(".s-live"));
+      card.insertBefore(G.buildReplyForm(node, s), card.querySelector(".s-live"));
     } else if (!wantReply && replyForm) {
       replyForm.remove();
     }
@@ -1133,4 +1177,3 @@
       if (menuTrigger) { positionSessionMenu(menuTrigger, openMenu); }
     }
   }
-

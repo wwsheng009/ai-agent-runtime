@@ -1,3 +1,40 @@
+// 90-session-view.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  nodeWebBase: nodeWebBase,
+  nodeWebRoute: nodeWebRoute,
+  nodeHasWebUI: nodeHasWebUI,
+  windowActionsSupported: windowActionsSupported,
+  webUnavailableText: webUnavailableText,
+  sessionOpenTarget: sessionOpenTarget,
+  gatewaySessionLink: gatewaySessionLink,
+  copyGatewaySessionLink: copyGatewaySessionLink,
+  sessionAccessText: sessionAccessText,
+  sessionDiagnostics: sessionDiagnostics,
+  openSession: openSession,
+  openSessionInline: openSessionInline,
+  openSessionFromCard: openSessionFromCard,
+  isMobileViewport: isMobileViewport,
+  saveSessionsScroll: saveSessionsScroll,
+  restoreSessionsScroll: restoreSessionsScroll,
+  markRead: markRead,
+  stateLabelOf: stateLabelOf,
+  sessionBusyFlag: sessionBusyFlag,
+  copyText: copyText,
+  modalIsOpen: modalIsOpen,
+  openModal: openModal,
+  closeModal: closeModal,
+  openModalEl: openModalEl,
+  trapModalTab: trapModalTab,
+  closeSessionDetail: closeSessionDetail,
+  openSessionDetail: openSessionDetail,
+});
+
   /* ─────────────────────── session open / read ───────────────── */
 
   function nodeWebBase(node) {
@@ -42,7 +79,7 @@
 
   // webUnavailableText explains why a node cannot be opened, per host kind.
   function webUnavailableText(node) {
-    var name = "节点「" + ((node && nodeDisplayName(node)) || "") + "」";
+    var name = "节点「" + ((node && G.nodeDisplayName(node)) || "") + "」";
     if (node && node.kind === "runtime-server") {
       return name + "的本地服务暂时未就绪，请稍后重试。";
     }
@@ -65,32 +102,11 @@
     return location.origin + location.pathname + "#sessions" + (q.length ? "?" + q.join("&") : "");
   }
 
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      var ta = document.createElement("textarea");
-      ta.value = text;
-      ta.setAttribute("readonly", "");
-      ta.style.position = "fixed";
-      ta.style.top = "-1000px";
-      document.body.appendChild(ta);
-      ta.select();
-      var ok = false;
-      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
-      document.body.removeChild(ta);
-      if (ok) { resolve(); } else { reject(new Error("clipboard unavailable")); }
-    });
-  }
-
   function copyGatewaySessionLink(node, session) {
     var link = gatewaySessionLink(node && node.node_id, session && session.session_id);
-    copyText(link).then(function () {
-      notify("已复制会话链接", "ok");
-    }).catch(function () {
-      notify("复制失败：" + link, "error");
-    });
+    // 复用本文件下方的 copyText(text, btn)（带 legacy 回退 + toast 反馈）；
+    // 早先这里有一次同名重复声明，按 JS 语义「后声明者生效」，那份是死代码。
+    copyText(link, null);
   }
 
   function sessionAccessText(node, session) {
@@ -98,7 +114,7 @@
     if (!nodeHasWebUI(node)) {
       return node.kind === "runtime-server" ? "本地服务未就绪" : "网页会话未启用";
     }
-    if (chatPanelSupported(node, session)) { return "站内会话可用"; }
+    if (G.chatPanelSupported(node, session)) { return "站内会话可用"; }
     return "原版 Web 可用";
   }
 
@@ -108,12 +124,12 @@
     var lines = [
       "aicli-gateway 会话诊断",
       "time: " + new Date().toISOString(),
-      "node: " + ((node && (nodeDisplayName(node) + " (" + (node.node_id || "—") + ")")) || "—"),
+      "node: " + ((node && (G.nodeDisplayName(node) + " (" + (node.node_id || "—") + ")")) || "—"),
       "node_kind: " + ((node && node.kind) || "—"),
       "node_stale: " + !!(node && node.stale),
       "node_routes: " + ((node && (node.routes || []).join(", ")) || "—"),
       "node_capabilities: " + ((node && (node.capabilities || []).join(", ")) || "—"),
-      "session: " + ((session && (sessionLabelOf(session) + " (" + (session.session_id || "—") + ")")) || "—"),
+      "session: " + ((session && (G.sessionLabelOf(session) + " (" + (session.session_id || "—") + ")")) || "—"),
       "session_state: " + ((session && stateLabelOf(session)) || "—"),
       "session_attention: " + ((session && session.attention) || "none"),
       "session_updated_at: " + ((session && session.updated_at) || "—"),
@@ -128,7 +144,7 @@
     // Offline (stale snapshot) nodes have no tunnel: the proxy would answer
     // 502. Tell the operator instead of pretending to navigate.
     if (node.stale) {
-      pushToast("该节点当前离线，网页会话不可用。", "error", {
+      G.pushToast("该节点当前离线，网页会话不可用。", "error", {
         label: "查看详情",
         run: function () { openSessionDetail(node, session); },
       });
@@ -137,19 +153,19 @@
     // A live node without a Web route (agent started without its web client)
     // would only fail inside the tunnel: refuse up front with the reason.
     if (!nodeHasWebUI(node)) {
-      pushToast(webUnavailableText(node), "error", {
+      G.pushToast(webUnavailableText(node), "error", {
         label: "查看详情",
         run: function () { openSessionDetail(node, session); },
       });
       return;
     }
     if (session) { markRead(node, session); }
-    rememberPresence(node, session);
+    G.rememberPresence(node, session);
     var target = sessionOpenTarget(node, session ? session.session_id : "");
     if (isMobileViewport()) {
       // Phones get the same-tab flow so the browser back button returns to
       // the list; prefs + scroll are persisted so it comes back as it was.
-      saveSessionPrefs();
+      G.saveSessionPrefs();
       saveSessionsScroll();
       window.location.assign(target);
       return;
@@ -164,8 +180,8 @@
   // 只读面板；需要能作答的历史入口（审批/回答）另有 chatCanInput 门槛。
   function openSessionInline(node, session, opts) {
     if (!node) { return; }
-    if (chatPanelSupported(node, session)) {
-      openSessionChat(node, session, opts);
+    if (G.chatPanelSupported(node, session)) {
+      G.openSessionChat(node, session, opts);
       return;
     }
     openSession(node, session);
@@ -181,7 +197,7 @@
       openSessionDetail(node, session);
       return;
     }
-    openSessionInline(node, session, chatFocusOptsFor(session));
+    openSessionInline(node, session, G.chatFocusOptsFor(session));
   }
 
   function isMobileViewport() {
@@ -189,31 +205,31 @@
   }
 
   function saveSessionsScroll() {
-    try { localStorage.setItem(SESSIONS_SCROLL_KEY, String(Math.round(window.scrollY || 0))); } catch (err) { /* storage */ }
+    try { localStorage.setItem(S.SESSIONS_SCROLL_KEY, String(Math.round(window.scrollY || 0))); } catch (err) { /* storage */ }
   }
 
   function restoreSessionsScroll() {
-    if (currentView() !== "sessions") { return; }
+    if (G.currentView() !== "sessions") { return; }
     try {
-      var y = parseInt(localStorage.getItem(SESSIONS_SCROLL_KEY) || "0", 10);
+      var y = parseInt(localStorage.getItem(S.SESSIONS_SCROLL_KEY) || "0", 10);
       if (y > 0) { window.scrollTo(0, y); }
     } catch (err) { /* storage */ }
   }
 
   function markRead(node, session) {
     if (!node || !session || !session.attention) { return; }
-    readAttention[attentionKey(node, session)] = Date.now();
-    saveReadAttention();
-    renderInbox(lastNodes);
-    updateStats(lastNodes);
-    renderSessionTable(lastNodes);
+    S.readAttention[G.attentionKey(node, session)] = Date.now();
+    G.saveReadAttention();
+    G.renderInbox(S.lastNodes);
+    G.updateStats(S.lastNodes);
+    G.renderSessionTable(S.lastNodes);
   }
 
   /* ─────────────────────── session detail dialog ─────────────── */
 
-  var detailTarget = null;
+  S.detailTarget = null;
 
-  var STATE_LABELS = {
+  S.STATE_LABELS = {
     idle: "闲置",
     running: "运行中",
     thinking: "思考中",
@@ -226,15 +242,15 @@
   };
 
   function stateLabelOf(session) {
-    var label = STATE_LABELS[session.state] || session.state || "未知";
-    return session.busy && !isActiveSessionState(session.state) ? label + " · 处理中" : label;
+    var label = S.STATE_LABELS[session.state] || session.state || "未知";
+    return session.busy && !G.isActiveSessionState(session.state) ? label + " · 处理中" : label;
   }
 
   // Either the registry's `busy` flag or an active state marks a live turn;
   // older snapshots may omit `busy` (omitempty false), so evaluate both.
   function sessionBusyFlag(session) {
     if (!session) { return false; }
-    return session.busy === true || isActiveSessionState(session.state);
+    return session.busy === true || G.isActiveSessionState(session.state);
   }
 
   // Clipboard write with a legacy fallback. The button briefly confirms, but a
@@ -248,9 +264,9 @@
         btn.textContent = "已复制 ✓";
         setTimeout(function () { btn.textContent = prev; }, 1500);
       }
-      notify("已复制到剪贴板", "ok");
+      G.notify("已复制到剪贴板", "ok");
     };
-    var failed = function () { notify("复制失败，请手动选择文本", "error"); };
+    var failed = function () { G.notify("复制失败，请手动选择文本", "error"); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done, failed);
     } else {
@@ -267,22 +283,22 @@
 
   /* ─────────────────── modal focus management ────────────────── */
 
-  var FOCUSABLE_SEL =
+  S.FOCUSABLE_SEL =
     'a[href],button:not([disabled]),input:not([disabled]),' +
     'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-  var modalReturnFocus = {};
+  S.modalReturnFocus = {};
 
   // modalIsOpen 把「元素缺失」也当作未打开：PWA 可能缓存了旧版 index.html，
   // 新版 app.js 不能因为少一个模态节点就抛错（与 subagent-toggle 同一约定）。
   function modalIsOpen(id) {
-    var modal = el(id);
+    var modal = S.el(id);
     return !!(modal && !modal.hidden);
   }
 
   function openModal(id) {
-    var modal = el(id);
+    var modal = S.el(id);
     if (!modal) { return; }
-    modalReturnFocus[id] = document.activeElement;
+    S.modalReturnFocus[id] = document.activeElement;
     modal.hidden = false;
     // aria-modal alone does not stop the browser from tabbing into the page
     // behind the dialog; inert does (the focus trap below is the fallback).
@@ -293,14 +309,14 @@
     // 对不可见元素是 no-op —— 焦点会留在刚被置为 inert 的页面上，对话框标题不被读屏
     // 播报（会话面板的「跳到最新」正是一个默认隐藏的首个可聚焦元素）。这里只按
     // hidden 属性判断，不依赖布局尺寸，jsdom 下行为一致。
-    var first = Array.prototype.filter.call(modal.querySelectorAll(FOCUSABLE_SEL), function (n) {
+    var first = Array.prototype.filter.call(modal.querySelectorAll(S.FOCUSABLE_SEL), function (n) {
       return !n.hidden && !n.closest("[hidden]");
     })[0];
     (first || modal).focus();
   }
 
   function closeModal(id) {
-    var modal = el(id);
+    var modal = S.el(id);
     if (!modal) { return; }
     modal.hidden = true;
     if (!openModalEl()) {
@@ -310,8 +326,8 @@
     }
     // Hand focus back to whatever opened the dialog instead of dropping it on
     // <body> (which resets the keyboard user's position in the page).
-    var back = modalReturnFocus[id];
-    modalReturnFocus[id] = null;
+    var back = S.modalReturnFocus[id];
+    S.modalReturnFocus[id] = null;
     if (back && typeof back.focus === "function" && document.contains(back)) {
       back.focus();
     }
@@ -321,14 +337,14 @@
   // 设 inert、不参与 Tab 焦点陷阱。这里必须把它排除，否则会话流常驻（桌面
   // 双栏）时任何真实弹层关闭后都会把 .workspace 永久留在 inert 状态。
   function openModalEl() {
-    if (modalIsOpen("session-modal")) { return el("session-modal"); }
-    if (modalIsOpen("token-modal")) { return el("token-modal"); }
-    if (modalIsOpen("mount-token-modal")) { return el("mount-token-modal"); }
-    if (modalIsOpen("connector-editor-modal")) { return el("connector-editor-modal"); }
-    if (modalIsOpen("connector-test-modal")) { return el("connector-test-modal"); }
-    if (modalIsOpen("connector-logs-modal")) { return el("connector-logs-modal"); }
-    if (modalIsOpen("connector-action-modal")) { return el("connector-action-modal"); }
-    if (modalIsOpen("connector-qr-modal")) { return el("connector-qr-modal"); }
+    if (modalIsOpen("session-modal")) { return S.el("session-modal"); }
+    if (modalIsOpen("token-modal")) { return S.el("token-modal"); }
+    if (modalIsOpen("mount-token-modal")) { return S.el("mount-token-modal"); }
+    if (modalIsOpen("connector-editor-modal")) { return S.el("connector-editor-modal"); }
+    if (modalIsOpen("connector-test-modal")) { return S.el("connector-test-modal"); }
+    if (modalIsOpen("connector-logs-modal")) { return S.el("connector-logs-modal"); }
+    if (modalIsOpen("connector-action-modal")) { return S.el("connector-action-modal"); }
+    if (modalIsOpen("connector-qr-modal")) { return S.el("connector-qr-modal"); }
     return null;
   }
 
@@ -337,7 +353,7 @@
     var modal = openModalEl();
     if (!modal) { return; }
     var items = Array.prototype.filter.call(
-      modal.querySelectorAll(FOCUSABLE_SEL),
+      modal.querySelectorAll(S.FOCUSABLE_SEL),
       function (n) { return n.offsetWidth > 0 || n.offsetHeight > 0 || n === document.activeElement; }
     );
     if (!items.length) { e.preventDefault(); modal.focus(); return; }
@@ -353,76 +369,75 @@
   }
 
   function closeSessionDetail() {
-    detailTarget = null;
+    S.detailTarget = null;
     closeModal("session-modal");
   }
 
   function openSessionDetail(node, session) {
-    var modal = el("session-modal");
+    var modal = S.el("session-modal");
     if (!modal || !node || !session) { return; }
-    detailTarget = { node: node, session: session };
-    el("sd-title").textContent = session.title || "（无标题）";
-    el("sd-id").textContent = session.session_id;
-    el("sd-node").textContent =
-      nodeDisplayName(node) + " · " + (node.kind || "agent") +
+    S.detailTarget = { node: node, session: session };
+    S.el("sd-title").textContent = session.title || "（无标题）";
+    S.el("sd-id").textContent = session.session_id;
+    S.el("sd-node").textContent =
+      G.nodeDisplayName(node) + " · " + (node.kind || "agent") +
       (node.stale ? " · 离线快照" : "");
     var canOpenDetail = nodeHasWebUI(node);
-    el("sd-access").textContent = sessionAccessText(node, session);
-    el("sd-diagnostics").textContent = sessionDiagnostics(node, session, "detail");
-    var detailOpen = el("session-modal-open");
+    S.el("sd-access").textContent = sessionAccessText(node, session);
+    S.el("sd-diagnostics").textContent = sessionDiagnostics(node, session, "detail");
+    var detailOpen = S.el("session-modal-open");
     detailOpen.hidden = !canOpenDetail;
-    detailOpen.textContent = chatPanelSupported(node, session) ? "打开会话" : "打开原版 Web";
-    el("sd-node-id").textContent = node.node_id || "—";
-    el("sd-state").textContent = stateLabelOf(session);
-    el("sd-attention").textContent = session.attention ? attentionLabel(session.attention) : "无";
+    detailOpen.textContent = G.chatPanelSupported(node, session) ? "打开会话" : "打开原版 Web";
+    S.el("sd-node-id").textContent = node.node_id || "—";
+    S.el("sd-state").textContent = stateLabelOf(session);
+    S.el("sd-attention").textContent = session.attention ? G.attentionLabel(session.attention) : "无";
     var statusBits = [];
     var detailStatus = (session.status_text || "").trim();
     if (detailStatus) { statusBits.push(detailStatus); }
     var detailStarted = Date.parse(session.status_started_at || "");
-    if (isActiveSessionState(session.state) && !isNaN(detailStarted)) {
-      statusBits.push("已持续 " + formatStatusElapsed(Date.now() - detailStarted));
+    if (G.isActiveSessionState(session.state) && !isNaN(detailStarted)) {
+      statusBits.push("已持续 " + G.formatStatusElapsed(Date.now() - detailStarted));
     }
-    el("sd-status").textContent = statusBits.length ? statusBits.join(" · ") : "—";
+    S.el("sd-status").textContent = statusBits.length ? statusBits.join(" · ") : "—";
     var updated = session.updated_at ? new Date(session.updated_at) : null;
-    el("sd-updated").textContent =
+    S.el("sd-updated").textContent =
       updated && !isNaN(updated.getTime()) ? updated.toLocaleString() : "—";
     var synced = session.synced_at ? new Date(session.synced_at) : null;
-    el("sd-sync").textContent =
+    S.el("sd-sync").textContent =
       synced && !isNaN(synced.getTime())
-        ? timeAgo(synced) + "（" + synced.toLocaleString() + "，网关时间）"
+        ? G.timeAgo(synced) + "（" + synced.toLocaleString() + "，网关时间）"
         : "—";
     var stateAt = session.state_changed_at ? new Date(session.state_changed_at) : null;
-    el("sd-state-at").textContent =
+    S.el("sd-state-at").textContent =
       stateAt && !isNaN(stateAt.getTime())
-        ? timeAgo(stateAt) + "（" + stateAt.toLocaleString() + "，网关时间）"
+        ? G.timeAgo(stateAt) + "（" + stateAt.toLocaleString() + "，网关时间）"
         : "—";
     var attAt = session.attention_changed_at ? new Date(session.attention_changed_at) : null;
-    el("sd-attention-at").textContent =
+    S.el("sd-attention-at").textContent =
       attAt && !isNaN(attAt.getTime())
-        ? timeAgo(attAt) + "（" + attAt.toLocaleString() + "，网关时间）"
+        ? G.timeAgo(attAt) + "（" + attAt.toLocaleString() + "，网关时间）"
         : "—";
     var hbMs2 = node.last_heartbeat ? new Date(node.last_heartbeat).getTime() : NaN;
-    el("sd-heartbeat").textContent =
-      isNaN(hbMs2) ? "—" : timeAgo(hbMs2) + "（" + absoluteTime(hbMs2) + "，网关时间）";
-    el("sd-preview").textContent = session.preview || "—";
-    var lastWrap = el("sd-last-wrap");
+    S.el("sd-heartbeat").textContent =
+      isNaN(hbMs2) ? "—" : G.timeAgo(hbMs2) + "（" + G.absoluteTime(hbMs2) + "，网关时间）";
+    S.el("sd-preview").textContent = session.preview || "—";
+    var lastWrap = S.el("sd-last-wrap");
     if (session.last_message) {
-      var role = el("sd-last-role");
-      role.textContent = roleLabelOf(session.last_message_role || "");
+      var role = S.el("sd-last-role");
+      role.textContent = G.roleLabelOf(session.last_message_role || "");
       role.className = "s-last-role" + (session.last_message_role ? " role-" + session.last_message_role : "");
-      setMessageHTML(el("sd-last"), session.last_message);
+      G.setMessageHTML(S.el("sd-last"), session.last_message);
       lastWrap.hidden = false;
     } else {
       lastWrap.hidden = true;
     }
     var tailText = (session.status_tail || "").trim();
-    var tailWrap = el("sd-tail-wrap");
+    var tailWrap = S.el("sd-tail-wrap");
     if (tailText) {
-      setMessageHTML(el("sd-tail"), tailText);
+      G.setMessageHTML(S.el("sd-tail"), tailText);
       tailWrap.hidden = false;
     } else {
       tailWrap.hidden = true;
     }
     openModal("session-modal");
   }
-

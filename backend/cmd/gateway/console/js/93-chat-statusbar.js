@@ -1,3 +1,41 @@
+// 93-chat-statusbar.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  fmtDuration: fmtDuration,
+  chatRenderDynamic: chatRenderDynamic,
+  chatSetDynamic: chatSetDynamic,
+  chatRenderSegments: chatRenderSegments,
+  chatLoadStatusBar: chatLoadStatusBar,
+  chatSetBusy: chatSetBusy,
+  chatAutoGrow: chatAutoGrow,
+  imViewport: imViewport,
+  imChatIsOpen: imChatIsOpen,
+  autoSelectFirstSession: autoSelectFirstSession,
+  imChatPageOpen: imChatPageOpen,
+  isMobileChatOpenFlag: isMobileChatOpenFlag,
+  syncImActiveCard: syncImActiveCard,
+  imOpenChatPanel: imOpenChatPanel,
+  imCloseChatPanel: imCloseChatPanel,
+  openSessionChat: openSessionChat,
+  chatFetchScreen: chatFetchScreen,
+  chatRetryLoad: chatRetryLoad,
+  chatFail: chatFail,
+  chatMessagesEqual: chatMessagesEqual,
+  chatApplyWindow: chatApplyWindow,
+  chatTrimWindow: chatTrimWindow,
+  chatRowElement: chatRowElement,
+  chatLiveRows: chatLiveRows,
+  chatRender: chatRender,
+  chatPatchLive: chatPatchLive,
+  chatScheduleRender: chatScheduleRender,
+  chatCancelRender: chatCancelRender,
+});
+
   /* ── 状态栏（动态状态 + 静态段） ─────────────────────────────── */
 
   function fmtDuration(secs) {
@@ -11,8 +49,8 @@
   // 变化时推一次），时钟由本地按 elapsed_ms 基准每秒推进——与节点 micro web client
   // 的 statusbar 同语义（服务端不重复推同一状态，时钟必须本地走）。
   function chatRenderDynamic() {
-    var st = chatState;
-    var box = el("chat-dyn-status");
+    var st = S.chatState;
+    var box = S.el("chat-dyn-status");
     if (!st || !box) { return; }
     if (!st.dynText) {
       box.hidden = true;
@@ -33,7 +71,7 @@
   // active=false 或空文本 = 状态行结束。用服务端给的 elapsed_ms 反推本地起点，时钟
   // 才不会从 0 重新开始——面板是中途打开的，这是常态而非例外。
   function chatSetDynamic(data) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     var d = data || {};
     if (!d.active || !d.text) {
@@ -49,7 +87,7 @@
     st.dynStartedAt = ms > 0 ? Date.now() - ms : 0;
     if (!st.dynTimer) {
       st.dynTimer = setInterval(function () {
-        if (chatState) { chatRenderDynamic(); }
+        if (S.chatState) { chatRenderDynamic(); }
       }, 1000);
     }
     chatRenderDynamic();
@@ -80,20 +118,20 @@
   // client 的 statusbar 同一端点、同一渲染口径；失败只清空，不打扰用户（动态状态行
   // 是主体，静态段缺失不影响面板可用性）。
   function chatLoadStatusBar() {
-    var st = chatState;
-    var box = el("chat-segs");
+    var st = S.chatState;
+    var box = S.el("chat-segs");
     if (!st || !box) { return; }
-    api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/statusbar", { cache: "no-store" })
+    G.api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/statusbar", { cache: "no-store" })
       .then(function (res) {
         if (!res.ok) { throw new Error("HTTP " + res.status); }
         return res.json();
       })
       .then(function (snap) {
-        if (chatState !== st) { return; }
+        if (S.chatState !== st) { return; }
         chatRenderSegments(box, snap);
       })
       .catch(function () {
-        if (chatState !== st) { return; }
+        if (S.chatState !== st) { return; }
         box.textContent = "";
       });
   }
@@ -106,14 +144,14 @@
   // 权威的。忙时按固定间隔重取快照，把「实时性」从「帧必须到达」解耦为「快照必须
   // 到达」，与节点原版客户端的降级轮询同一思路（且刷新是保前缀合并，不打断阅读）。
   function chatSetBusy(busy) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     var wasBusy = st.busy;
     st.busy = !!busy;
     if (st.busy && !st.busyTimer) {
       st.busyTimer = setInterval(function () {
-        if (chatState && chatState.busy) { chatFetchScreen(); }
-      }, CHAT_BUSY_POLL_MS);
+        if (S.chatState && S.chatState.busy) { chatFetchScreen(); }
+      }, S.CHAT_BUSY_POLL_MS);
     } else if (!st.busy && st.busyTimer) {
       clearInterval(st.busyTimer);
       st.busyTimer = null;
@@ -125,21 +163,21 @@
       }
       if (st.interrupting) {
         st.interrupting = false;
-        chatShowHint("已停止");
+        G.chatShowHint("已停止");
       }
     }
     // 活跃回合的「最后一块推理/工具自动展开」是忙闲状态的呈现，不应依赖下一份
     // 快照恰好变化才生效（相同快照会被 chatApplyWindow 跳过）。只在 false→true
     // 的边沿扫描一次，避免每轮轮询重复走整份 DOM。
     if (!wasBusy && st.busy) {
-      var host = el("chat-list");
-      if (host) { chatApplyLiveTail(host, true); }
+      var host = S.el("chat-list");
+      if (host) { G.chatApplyLiveTail(host, true); }
     }
-    chatSyncComposer();
+    G.chatSyncComposer();
   }
 
   function chatAutoGrow() {
-    var input = el("chat-input");
+    var input = S.el("chat-input");
     // jsdom 没有布局引擎（scrollHeight === 0），此时跳过同步。
     if (!input || !input.scrollHeight) { return; }
     input.style.height = "auto";
@@ -150,15 +188,15 @@
   // 桌面端列表与会话流同屏双栏（微信电脑版），手机端列表整页、点开滑入会话
   // 流整页并用返回键回列表（微信手机版）。#chat-modal 仍复用原来的数据面，
   // 只是不再走 openModal：不加 scrim、不设 inert、不加焦点陷阱。
-  var imChatHistoryPushed = false;
-  var imSuppressHistoryBack = false;
+  S.imChatHistoryPushed = false;
+  S.imSuppressHistoryBack = false;
 
   function imViewport() {
     return (window.matchMedia && window.matchMedia("(max-width: 860px)").matches) ? "mobile" : "desktop";
   }
 
   function imChatIsOpen() {
-    var panel = el("chat-modal");
+    var panel = S.el("chat-modal");
     return !!(panel && !panel.hidden);
   }
 
@@ -166,13 +204,13 @@
   // pane. Select the first visible, chat-capable session without marking it
   // read and without stealing focus. The operator can still close it and browse.
   function autoSelectFirstSession() {
-    if (sessionsAutoSelected) { return; }
-    if (currentView() !== "sessions" || imViewport() !== "desktop" || imChatIsOpen()) { return; }
-    var items = allSessions(lastNodes).filter(sessionMatches).sort(sessionSorter);
+    if (S.sessionsAutoSelected) { return; }
+    if (G.currentView() !== "sessions" || imViewport() !== "desktop" || imChatIsOpen()) { return; }
+    var items = G.allSessions(S.lastNodes).filter(G.sessionMatches).sort(G.sessionSorter);
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-      if (isSubagentSession(item.session) || !chatPanelSupported(item.node, item.session)) { continue; }
-      sessionsAutoSelected = true;
+      if (G.isSubagentSession(item.session) || !G.chatPanelSupported(item.node, item.session)) { continue; }
+      S.sessionsAutoSelected = true;
       openSessionChat(item.node, item.session, { skipMarkRead: true, skipFocus: true });
       return;
     }
@@ -189,7 +227,7 @@
 
   // 列表行高亮：当前打开的会话（微信里是浅灰底）。
   function syncImActiveCard() {
-    var st = chatState;
+    var st = S.chatState;
     var key = (st && st.node && st.session)
       ? st.node.node_id + "|" + st.session.session_id
       : "";
@@ -200,17 +238,17 @@
   }
 
   function imOpenChatPanel(noFocus) {
-    var panel = el("chat-modal");
+    var panel = S.el("chat-modal");
     if (!panel) { return; }
     panel.hidden = false;
-    var emptyPane = el("im-chat-empty");
+    var emptyPane = S.el("im-chat-empty");
     if (emptyPane) { emptyPane.hidden = true; }
     syncImActiveCard();
     if (imViewport() === "mobile") {
       document.body.classList.add("im-chat-open");
       // 会话流在手机上表现为一个"页面"：压一条历史记录，系统/手势返回即回列表。
-      if (!imChatHistoryPushed) {
-        try { window.history.pushState({ imChat: true }, ""); imChatHistoryPushed = true; } catch (e) {}
+      if (!S.imChatHistoryPushed) {
+        try { window.history.pushState({ imChat: true }, ""); S.imChatHistoryPushed = true; } catch (e) {}
       }
     }
     // 把焦点交给面板（读屏能立刻读到会话标题）；手机端不主动聚焦输入框，
@@ -222,15 +260,15 @@
   }
 
   function imCloseChatPanel() {
-    var panel = el("chat-modal");
+    var panel = S.el("chat-modal");
     if (!panel) { return; }
     panel.hidden = true;
     document.body.classList.remove("im-chat-open");
-    var emptyPane = el("im-chat-empty");
+    var emptyPane = S.el("im-chat-empty");
     if (emptyPane) { emptyPane.hidden = false; }
-    if (imChatHistoryPushed) {
-      imChatHistoryPushed = false;
-      if (!imSuppressHistoryBack) {
+    if (S.imChatHistoryPushed) {
+      S.imChatHistoryPushed = false;
+      if (!S.imSuppressHistoryBack) {
         // 回退掉打开时压入的那条记录，让浏览历史保持干净。
         try { window.history.back(); } catch (e) {}
       }
@@ -240,54 +278,54 @@
 
   function openSessionChat(node, session, opts) {
     if (!node || !session) { return; }
-    sessionsAutoSelected = true;
+    S.sessionsAutoSelected = true;
     var wantInteractive = !!(opts && opts.focusInteractive);
     var skipMarkRead = !!(opts && opts.skipMarkRead);
     var skipFocus = !!(opts && opts.skipFocus);
     if (node.stale) {
-      pushToast("该节点当前离线，暂时无法读取会话消息。", "error", {
+      G.pushToast("该节点当前离线，暂时无法读取会话消息。", "error", {
         label: "查看详情",
-        run: function () { openSessionDetail(node, session); },
+        run: function () { G.openSessionDetail(node, session); },
       });
       return;
     }
-    if (!chatPanelSupported(node, session)) {
-      if (!nodeHasWebUI(node)) {
-        pushToast(webUnavailableText(node), "error", {
+    if (!G.chatPanelSupported(node, session)) {
+      if (!G.nodeHasWebUI(node)) {
+        G.pushToast(G.webUnavailableText(node), "error", {
           label: "查看详情",
-          run: function () { openSessionDetail(node, session); },
+          run: function () { G.openSessionDetail(node, session); },
         });
       } else {
-        pushToast("该会话暂时不能在站内打开，可尝试原版 Web。", "error", {
+        G.pushToast("该会话暂时不能在站内打开，可尝试原版 Web。", "error", {
           label: "打开原版 Web",
-          run: function () { openSession(node, session); },
+          run: function () { G.openSession(node, session); },
         });
       }
       return;
     }
-    var canInput = chatCanInput(node);
-    var initialBusy = sessionBusyFlag(session);
-    setText(el("chat-modal-title"), sessionLabelOf(session));
-    setText(el("chat-modal-sub"),
-      nodeDisplayName(node) + " · " + (node.kind || "agent") +
-      " · " + stateLabelOf(session));
-    var host = el("chat-list");
+    var canInput = G.chatCanInput(node);
+    var initialBusy = G.sessionBusyFlag(session);
+    G.setText(S.el("chat-modal-title"), G.sessionLabelOf(session));
+    G.setText(S.el("chat-modal-sub"),
+      G.nodeDisplayName(node) + " · " + (node.kind || "agent") +
+      " · " + G.stateLabelOf(session));
+    var host = S.el("chat-list");
     if (host) { host.innerHTML = ""; }
-    chatNotice("");
-    chatSetStatus("连接中…", "");
-    chatShowHint("");
-    var form = el("chat-form");
+    G.chatNotice("");
+    G.chatSetStatus("连接中…", "");
+    G.chatShowHint("");
+    var form = S.el("chat-form");
     if (form) { form.hidden = !canInput; }
-    var ro = el("chat-readonly");
+    var ro = S.el("chat-readonly");
     if (ro) { ro.hidden = canInput; }
-    var older = el("chat-older");
+    var older = S.el("chat-older");
     if (older) { older.hidden = true; }
-    var jump = el("chat-jump-latest");
+    var jump = S.el("chat-jump-latest");
     if (jump) { jump.hidden = true; }
-    var input = el("chat-input");
+    var input = S.el("chat-input");
     if (input) { input.value = ""; input.style.height = ""; }
-    chatPlaceholder("正在加载消息…");
-    chatState = {
+    G.chatPlaceholder("正在加载消息…");
+    S.chatState = {
       node: node,
       session: session,
       win: null,
@@ -295,7 +333,7 @@
       messages: [],
       rows: {},
       pending: [],
-      live: chatEmptyLive(),
+      live: G.chatEmptyLive(),
       seq: 0,
       screenBusy: false,
       lastScreenAt: 0,
@@ -332,20 +370,20 @@
       pendingQuestion: null,
       focusInteractive: wantInteractive,
     };
-    chatSyncComposer();
-    syncChatHeaderActions();
+    G.chatSyncComposer();
+    G.syncChatHeaderActions();
     // 面板打开时先收起上一次的交互条（状态刚被替换，避免残留上一条审批）。
-    chatRenderInteractive();
-    if (!skipMarkRead) { markRead(node, session); }
+    G.chatRenderInteractive();
+    if (!skipMarkRead) { G.markRead(node, session); }
     // 面板打开 = 「正在看这个会话」：抑制该会话的推送；关面板时释放。
-    rememberPresence(node, session);
+    G.rememberPresence(node, session);
     chatRenderDynamic();
-    chatRenderSegments(el("chat-segs"), null);
+    chatRenderSegments(S.el("chat-segs"), null);
     imOpenChatPanel(skipFocus);
-    chatFetchScreen(CHAT_PAGE_LIMIT);
+    chatFetchScreen(S.CHAT_PAGE_LIMIT);
     chatLoadStatusBar();
-    chatConnect();
-    chatUpdateNextPending();
+    G.chatConnect();
+    G.chatUpdateNextPending();
   }
 
   // ── 数据面：快照 / 渲染 ──────────────────────────────────────
@@ -353,7 +391,7 @@
   // chatFetchScreen 拉取权威窗口。older=true 时按 win.start 向前翻页，结果前插。
   // 每次请求带代次（seq），过期响应直接丢弃——快速重连 + 节流刷新会并发多份。
   function chatFetchScreen(limit, opts) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     var o = opts || {};
     if (!o.older) {
@@ -367,13 +405,13 @@
     if (o.older) {
       if (st.olderBusy || !st.win || !st.win.has_more) { return; }
       st.olderBusy = true;
-      chatUpdateOlder();
+      G.chatUpdateOlder();
     }
     st.seq++;
     var seq = st.seq;
     var url = "/n/" + encodeURIComponent(st.node.node_id) +
       "/web/api/screen?format=json&compact=1&msg_limit=" +
-      (o.older ? CHAT_OLDER_LIMIT : (limit || CHAT_PAGE_LIMIT));
+      (o.older ? S.CHAT_OLDER_LIMIT : (limit || S.CHAT_PAGE_LIMIT));
     if (o.older) {
       // 游标必须是**本地最老一条**的绝对索引（msgStart），不能取上一份服务端窗口的
       // start：刷新会把 win 推回「最新 N 条」窗口，此时 win.start > msgStart，用
@@ -390,7 +428,7 @@
     if (!o.older && st.screenETag) {
       requestOpts.headers = { "If-None-Match": st.screenETag };
     }
-    api(url, requestOpts).then(function (res) {
+    G.api(url, requestOpts).then(function (res) {
       var etag = "";
       if (res.headers && typeof res.headers.get === "function") {
         etag = res.headers.get("ETag") || "";
@@ -407,23 +445,23 @@
       // 卡在 true，本次打开里「加载更早消息」与滚到顶自动翻页一起失效。
       st.olderBusy = false;
       // 面板已关闭 / 已换会话 / 已有更新请求 → 这一份作废。
-      if (chatState !== st || st.seq !== seq) { return; }
+      if (S.chatState !== st || st.seq !== seq) { return; }
       st.lastScreenAt = Date.now();
       if (result.etag) { st.screenETag = result.etag; }
       if (result.notModified) {
         // 304 说明权威内容没变；但首次打开时列表可能尚未完成排版，工具行测量
         // 会留待下一轮。这里只补这一项局部工作，不再遍历/重写整份消息列表。
         if (st.toolMeasurePending) {
-          var host = el("chat-list");
-          if (host) { chatRefreshToolToggles(host); }
+          var host = S.el("chat-list");
+          if (host) { G.chatRefreshToolToggles(host); }
         }
         return;
       }
       chatApplyWindow(result.data, o.older);
     }).catch(function (err) {
       st.olderBusy = false;
-      chatUpdateOlder();
-      if (chatState !== st || st.seq !== seq) { return; }
+      G.chatUpdateOlder();
+      if (S.chatState !== st || st.seq !== seq) { return; }
       st.lastScreenAt = Date.now();
       chatFail("暂时无法加载这段会话。",
         "GET " + url + "\n" + (err && err.message ? err.message : String(err)));
@@ -433,31 +471,31 @@
   }
 
   function chatRetryLoad() {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     st.failed = false;
     st.available = true;
     st.lastScreenAt = 0;
     st.screenETag = "";
-    chatNotice("");
-    chatPlaceholder("正在重新加载消息…");
-    chatSetStatus("重新加载…", "");
-    chatFetchScreen(CHAT_PAGE_LIMIT);
+    G.chatNotice("");
+    G.chatPlaceholder("正在重新加载消息…");
+    G.chatSetStatus("重新加载…", "");
+    chatFetchScreen(S.CHAT_PAGE_LIMIT);
   }
 
   // chatFail 只在本次打开里提示一次失败：持续失败的刷新不该反复弹 toast。
   function chatFail(userMessage, reason) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
-    chatSetStatus("读取失败", "down");
+    G.chatSetStatus("读取失败", "down");
     if (st.failed) { return; }
     st.failed = true;
     var message = userMessage || "暂时无法加载这段会话。";
-    if (!st.messages.length) { chatPlaceholder(message); }
-    var diagnostics = sessionDiagnostics(st.node, st.session, reason);
-    chatNotice(message + " 你可以重试，或打开原版 Web；诊断信息可复制给管理员。", [
+    if (!st.messages.length) { G.chatPlaceholder(message); }
+    var diagnostics = G.sessionDiagnostics(st.node, st.session, reason);
+    G.chatNotice(message + " 你可以重试，或打开原版 Web；诊断信息可复制给管理员。", [
       { label: "重试", run: chatRetryLoad },
-      { label: "复制诊断", run: function () { copyText(diagnostics); } },
+      { label: "复制诊断", run: function () { G.copyText(diagnostics); } },
     ]);
   }
 
@@ -479,27 +517,27 @@
   //     折叠与滚动位置都不动（这就是流式刷新不打断阅读的原因）；
   //   · 翻页（older=true）：窗口紧邻且连续时前插；不连续说明历史被改写，整体重建。
   function chatApplyWindow(data, older) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     if (!data || data.available === false) {
-      var empty = el("chat-list");
+      var empty = S.el("chat-list");
       if (empty) { empty.innerHTML = ""; }
       st.rows = {};
       st.available = false;
-      chatPlaceholder("暂无可显示的消息。");
+      G.chatPlaceholder("暂无可显示的消息。");
       var unavailableReason = data && data.reason ? data.reason : "transcript 未就绪，或会话刚被切换";
-      var unavailableDiagnostics = sessionDiagnostics(st.node, st.session, "screen unavailable: " + unavailableReason);
-      chatNotice("这个会话暂时没有可读取的消息。可以重试，或打开原版 Web 查看完整界面。", [
+      var unavailableDiagnostics = G.sessionDiagnostics(st.node, st.session, "screen unavailable: " + unavailableReason);
+      G.chatNotice("这个会话暂时没有可读取的消息。可以重试，或打开原版 Web 查看完整界面。", [
         { label: "重试", run: chatRetryLoad },
-        { label: "复制诊断", run: function () { copyText(unavailableDiagnostics); } },
+        { label: "复制诊断", run: function () { G.copyText(unavailableDiagnostics); } },
       ]);
-      chatSetStatus("无消息", "down");
-      chatUpdateOlder();
+      G.chatSetStatus("无消息", "down");
+      G.chatUpdateOlder();
       return;
     }
     st.available = true;
     st.failed = false;
-    chatNotice("");
+    G.chatNotice("");
     // 键名是 message_window，没有 window 别名（服务端 chatDebugScreenSnapshot.
     // MessageWindow，见 chat_debug_screen_http.go）。读错键的后果是静默的：win 恒为
     // {} → has_more 恒 false → 「加载更早消息」永不出现；start 恒 0 → 翻页游标恒 0，
@@ -533,9 +571,9 @@
       st.rows = {};
       needsRebuild = true;
     }
-    chatConfirmPending();
+    G.chatConfirmPending();
     // 权威行已经接管这一回合：实时气泡退场，避免同一段内容渲染两次。
-    if (st.live.done) { st.live = chatEmptyLive(); }
+    if (st.live.done) { st.live = G.chatEmptyLive(); }
     chatTrimWindow();
     var messagesChanged = needsRebuild || st.msgStart !== previousStart ||
       !chatMessagesEqual(previousMessages, st.messages);
@@ -547,20 +585,20 @@
     } else if (st.toolMeasurePending) {
       // 旧节点可能不返回 ETag（每次都是 200 + 相同内容）；测量尚未完成时仍要
       // 在可见布局上补一次，不能因为快照相同而永久跳过。
-      var host = el("chat-list");
-      if (host) { chatRefreshToolToggles(host); }
+      var host = S.el("chat-list");
+      if (host) { G.chatRefreshToolToggles(host); }
     }
-    chatUpdateOlder();
+    G.chatUpdateOlder();
   }
 
   // chatTrimWindow 把本地窗口收在 CHAT_MAX_WINDOW 内。行 key 用的是绝对索引
   // （"srv:" + msgStart + i），所以整块从头部丢弃后，留存行的 key 不变——DOM 身份、
   // 选区与折叠都保住。丢弃后必须重新开放翻页：更早的内容还在服务端。
   function chatTrimWindow() {
-    var st = chatState;
-    var host = el("chat-list");
+    var st = S.chatState;
+    var host = S.el("chat-list");
     if (!st || !host) { return; }
-    var extra = st.messages.length - CHAT_MAX_WINDOW;
+    var extra = st.messages.length - S.CHAT_MAX_WINDOW;
     if (extra <= 0) { return; }
     // 丢弃的是视口上方的内容，到列表底部的距离因此不变——沿用翻页那套滚动补偿
     // （chatRender 里按 scrollHeight - scrollTop 还原），阅读位置不会跳。
@@ -621,11 +659,11 @@
     var bubble = row.__bubble;
 
     var roleEl = row.__roleEl;
-    var roleText = roleLabelOf(role) + (o.pending ? " · 发送中" : "");
+    var roleText = G.roleLabelOf(role) + (o.pending ? " · 发送中" : "");
     if (o.collapse && role === "tool") {
       // 工具行的折叠控件长在抬头行里：先写角色文本再追加控件（setText 只在文本
       // 变化时写入，不会反复清掉控件）。
-      setText(roleEl, roleText);
+      G.setText(roleEl, roleText);
       if (!row.__toolToggle) {
         var tgl = document.createElement("button");
         tgl.type = "button";
@@ -639,25 +677,25 @@
         row.__toolToggle = tgl;
       }
     } else {
-      setText(roleEl, roleText);
+      G.setText(roleEl, roleText);
     }
 
     if (o.collapse && role === "reasoning") {
-      setText(row.__reasonSummary, roleLabelOf(role) + "过程");
-      setText(row.__reasonBody, content || "");
+      G.setText(row.__reasonSummary, G.roleLabelOf(role) + "过程");
+      G.setText(row.__reasonBody, content || "");
     } else if (o.collapse && role === "tool") {
-      setText(row.__toolOutput, content || "");
+      G.setText(row.__toolOutput, content || "");
     } else if (o.streamMarkdown) {
-      if (mdEnabled) {
+      if (S.mdEnabled) {
         bubble.classList.add("md");
         bubble.__mdSrc = null;
         bubble.__mdOn = true;
-        chatSetStreamingMarkdown(bubble, content || "");
+        G.chatSetStreamingMarkdown(bubble, content || "");
       } else {
         bubble.classList.remove("md");
         bubble.__mdSrc = null;
         bubble.__mdOn = false;
-        chatSetStreamingText(bubble, content || "");
+        G.chatSetStreamingText(bubble, content || "");
       }
     } else if (o.plain) {
       // Streaming text is transient and can grow to tens of KB. Re-parsing
@@ -666,9 +704,9 @@
       bubble.classList.remove("md");
       bubble.__mdSrc = null;
       bubble.__mdOn = false;
-      chatSetStreamingText(bubble, content || "");
+      G.chatSetStreamingText(bubble, content || "");
     } else {
-      setMessageHTML(bubble, content || "");
+      G.setMessageHTML(bubble, content || "");
     }
     if (o.images && o.images.length) {
       // 图片追加在正文之后：setMessageHTML 只在正文变化时重写 innerHTML，
@@ -712,8 +750,8 @@
   // chatRender 是全量收敛路径：只在窗口/消息集合变化后调用。它负责结构行、
   // 折叠测量和用户展开账本的恢复。
   function chatRender() {
-    var st = chatState;
-    var host = el("chat-list");
+    var st = S.chatState;
+    var host = S.el("chat-list");
     if (!st || !host) { return; }
     var desired = [];
     var base = typeof st.msgStart === "number" ? st.msgStart : 0;
@@ -725,41 +763,41 @@
     st.pending.forEach(function (text, i) {
       desired.push(chatRowElement(st, "pending:" + i, "user", text, { pending: true }));
     });
-    reconcileChildren(host, desired);
+    G.reconcileChildren(host, desired);
     var keep = {};
     desired.forEach(function (row) { keep[row.__key] = true; });
     Object.keys(st.rows).forEach(function (key) {
       if (!keep[key]) { delete st.rows[key]; }
     });
-    if (!desired.length) { chatPlaceholder("暂无消息。"); }
+    if (!desired.length) { G.chatPlaceholder("暂无消息。"); }
     // 折叠后处理：测量工具行溢出 → 启用/隐藏控件；按用户账本恢复手动展开；
     // 忙时活跃回合的最后一块自动展开、其余折回（与 micro web client 同一状态机）。
-    if (st.toolMeasurePending) { chatRefreshToolToggles(host); }
-    if (Object.keys(chatUserExpanded).length) {
+    if (st.toolMeasurePending) { G.chatRefreshToolToggles(host); }
+    if (Object.keys(S.chatUserExpanded).length) {
       Object.keys(st.rows).forEach(function (key) {
-        if (!chatUserExpanded[key]) { return; }
+        if (!S.chatUserExpanded[key]) { return; }
         var row = st.rows[key];
         if (row.__reasonEl && !row.__reasonEl.open) { row.__reasonEl.open = true; }
         var out = row.__toolOutput;
-        if (out && out.classList.contains("chat-collapsed")) { chatSetToolExpanded(row, true); }
+        if (out && out.classList.contains("chat-collapsed")) { G.chatSetToolExpanded(row, true); }
       });
     }
-    chatApplyLiveTail(host, st.busy);
+    G.chatApplyLiveTail(host, st.busy);
     // 翻页前插：按新增高度补偿滚动位置，阅读不被顶走。
     if (st.scrollRestore != null) {
-      chatSetScrollTop(st, host, host.scrollHeight - st.scrollRestore);
+      G.chatSetScrollTop(st, host, host.scrollHeight - st.scrollRestore);
       st.scrollRestore = null;
     }
-    if (st.follow) { chatSetScrollTop(st, host, host.scrollHeight); }
-    chatSyncJump();
-    chatPinBottomAfterLayout();
+    if (st.follow) { G.chatSetScrollTop(st, host, host.scrollHeight); }
+    G.chatSyncJump();
+    G.chatPinBottomAfterLayout();
   }
 
   // chatPatchLive 是流式热路径：历史行集合未变时只补实时气泡与待确认回显，
   // 不重新遍历权威消息内容、不扫描折叠状态，也不重写未变化的 DOM。
   function chatPatchLive() {
-    var st = chatState;
-    var host = el("chat-list");
+    var st = S.chatState;
+    var host = S.el("chat-list");
     if (!st || !host) { return; }
     var desired = [];
     var pendingRows = [];
@@ -781,26 +819,26 @@
       return;
     }
     desired = desired.concat(chatLiveRows(st), pendingRows);
-    reconcileChildren(host, desired);
+    G.reconcileChildren(host, desired);
     var keep = {};
     desired.forEach(function (row) { keep[row.__key] = true; });
     Object.keys(st.rows).forEach(function (key) {
       if (!keep[key]) { delete st.rows[key]; }
     });
-    if (!desired.length) { chatPlaceholder("暂无消息。"); }
-    if (st.follow) { chatSetScrollTop(st, host, host.scrollHeight); }
-    chatSyncJump();
+    if (!desired.length) { G.chatPlaceholder("暂无消息。"); }
+    if (st.follow) { G.chatSetScrollTop(st, host, host.scrollHeight); }
+    G.chatSyncJump();
   }
 
   // chatScheduleRender 按浏览器绘制帧合并高频增量：同一帧内多个 token 只补一次
   // 实时气泡。这里不用固定 50ms 定时器——那会让文字按 20fps 成段跳变，且回调
   // 可能落在布局帧之外，主观上更卡。
   function chatScheduleRender() {
-    var st = chatState;
+    var st = S.chatState;
     if (!st || st.renderFrame) { return; }
     var run = function () {
       st.renderFrame = 0;
-      if (chatState !== st) { return; }
+      if (S.chatState !== st) { return; }
       chatPatchLive();
     };
     if (typeof window.requestAnimationFrame === "function") {
@@ -811,7 +849,7 @@
   }
 
   function chatCancelRender() {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return; }
     if (st.renderFrame) {
       if (typeof window.cancelAnimationFrame === "function") {
@@ -834,4 +872,3 @@
       st.bottomPinTimer = 0;
     }
   }
-

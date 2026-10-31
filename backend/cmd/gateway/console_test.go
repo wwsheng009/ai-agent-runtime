@@ -2,9 +2,11 @@ package main
 
 import (
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -29,7 +31,7 @@ func TestConsoleServesIndex(t *testing.T) {
 }
 
 func TestConsoleServesAssets(t *testing.T) {
-	for _, path := range []string{"/style.css", "/app.js", "/sw.js", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-180.png", "/badge-96.png", "/manifest.webmanifest"} {
+	for _, path := range []string{"/style.css", "/app.js", "/sw.js", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-180.png", "/badge-96.png", "/manifest.webmanifest", "/js/runtime.js", "/js/00-state-api.js", "/js/zz-boot.js"} {
 		rec := getConsole(path)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, want 200", path, rec.Code)
@@ -37,6 +39,11 @@ func TestConsoleServesAssets(t *testing.T) {
 		if rec.Body.Len() == 0 {
 			t.Fatalf("%s served an empty body", path)
 		}
+	}
+
+	// 模块文件也必须可重新验证（CDN 边缘默认缓存 *.js 数小时）。
+	if cc := getConsole("/js/runtime.js").Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("module Cache-Control = %q, want no-cache", cc)
 	}
 
 	rec := getConsole("/manifest.webmanifest")
@@ -141,7 +148,8 @@ func TestConsoleNotifyPolicyAsset(t *testing.T) {
 // (only the first load seeded, so nothing ever fired).
 func TestConsoleAttentionTrackingWired(t *testing.T) {
 	app := readConsoleAsset(t, "app.js")
-	for _, needle := range []string{"trackAttention(nodes);", "trackAttention(lastNodes);"} {
+	// 模块化后跨模块调用经共享注册表 G，可变状态经 S：
+	for _, needle := range []string{"G.trackAttention(nodes);", "G.trackAttention(S.lastNodes);"} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing fresh-attention call %q", needle)
 		}
@@ -243,7 +251,7 @@ func TestConsoleNextPendingFlowAsset(t *testing.T) {
 		"item.session.session_id === st.session.session_id",
 		// Offer only when this panel actually displayed the resolved item;
 		// duplicate/late frames must not re-toast.
-		"chatOfferNextPending(); } else { chatUpdateNextPending(); }",
+		"G.chatOfferNextPending(); } else { G.chatUpdateNextPending(); }",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing next-pending hook %q", needle)
@@ -272,7 +280,7 @@ func TestConsoleNextPendingFlowAsset(t *testing.T) {
 	}
 	// The click handler must guard the element (PWA may cache an older
 	// index.html without the button; see the subagent-toggle precedent).
-	if !strings.Contains(app, `var nextPendingBtn = el("chat-next-pending");`) {
+	if !strings.Contains(app, `var nextPendingBtn = S.el("chat-next-pending");`) {
 		t.Fatal("chat-next-pending click handler must guard element existence")
 	}
 	// renderInbox is the single data-refresh path for the count.
@@ -289,9 +297,9 @@ func TestConsoleRowClickAndKeyShortcuts(t *testing.T) {
 	app := readConsoleAsset(t, "app.js")
 	for _, needle := range []string{
 		"function openSessionInline(",
-		"openSessionInline(item.node, item.session, chatFocusOptsFor(item.session));",
-		"openSessionInline(item.node, s);",
-		"openSessionInline(node, session);",
+		"G.openSessionInline(item.node, item.session, G.chatFocusOptsFor(item.session));",
+		"G.openSessionInline(item.node, s);",
+		"openSessionInline(node, session);", // 同模块内调用保持裸名
 		// Keyboard: c/o/a act on the focused card, never with modifiers
 		// (Ctrl+C / Ctrl+O must stay browser-native).
 		`var action = e.key === "c" || e.key === "o" || e.key === "a";`,
@@ -310,17 +318,17 @@ func TestConsoleRowClickAndKeyShortcuts(t *testing.T) {
 func TestConsoleReadAttentionPersistence(t *testing.T) {
 	app := readConsoleAsset(t, "app.js")
 	for _, needle := range []string{
-		`var READ_ATTENTION_KEY = "aicli-gw-read-attention";`,
+		`S.READ_ATTENTION_KEY = "aicli-gw-read-attention";`,
 		"function loadReadAttention(",
 		"function saveReadAttention(",
 		"loadReadAttention();",
-		"readAttention[attentionKey(node, session)] = Date.now();",
+		"S.readAttention[G.attentionKey(node, session)] = Date.now();",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing %q", needle)
 		}
 	}
-	if strings.Contains(app, "readAttention[attentionKey(node, session)] = true;") {
+	if strings.Contains(app, "S.readAttention[G.attentionKey(node, session)] = true;") {
 		t.Fatal("markRead must store a timestamp (TTL), not a bare true")
 	}
 }
@@ -373,7 +381,42 @@ func TestConsoleRejectsTraversal(t *testing.T) {
 
 // readConsoleAsset reads a shell asset from the embedded FS, i.e. exactly the
 // bytes the console handler ships (and not whatever happens to be on disk).
+//
+// 控制台按功能域拆成 console/js/*.js 后，入口 console/app.js 只剩 import 列表；
+// 断言"某个函数/钩子存在"时必须在整个控制台 JS 面上找，因此 name=="app.js"
+// 返回入口 + 全部模块（runtime.js 在前，其余按文件名排序）。
 func readConsoleAsset(t *testing.T, name string) string {
+	t.Helper()
+	if name != "app.js" {
+		return readEmbeddedConsole(t, name)
+	}
+	var b strings.Builder
+	b.WriteString(readEmbeddedConsole(t, "app.js"))
+	entries, err := fs.ReadDir(consoleFS, "console/js")
+	if err != nil {
+		t.Fatalf("read console/js: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".js") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for i, n := range names {
+		if n == "runtime.js" && i > 0 {
+			names = append([]string{"runtime.js"}, append(names[:i], names[i+1:]...)...)
+			break
+		}
+	}
+	for _, n := range names {
+		b.WriteString("\n")
+		b.WriteString(readEmbeddedConsole(t, "js/"+n))
+	}
+	return b.String()
+}
+
+func readEmbeddedConsole(t *testing.T, name string) string {
 	t.Helper()
 	raw, err := consoleFS.ReadFile("console/" + name)
 	if err != nil {

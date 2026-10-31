@@ -1,3 +1,79 @@
+// 95-notify.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  trackAttention: trackAttention,
+  showAttentionToast: showAttentionToast,
+  rememberPresence: rememberPresence,
+  sendPresence: sendPresence,
+  releasePresence: releasePresence,
+  authHeartbeat: authHeartbeat,
+  urlBase64ToUint8Array: urlBase64ToUint8Array,
+  setPushLabel: setPushLabel,
+  isIOSDevice: isIOSDevice,
+  isStandalone: isStandalone,
+  nativeNotificationApi: nativeNotificationApi,
+  readNativeNotifyPref: readNativeNotifyPref,
+  writeNativeNotifyPref: writeNativeNotifyPref,
+  nativeNotificationsEnabled: nativeNotificationsEnabled,
+  enableNativeNotifications: enableNativeNotifications,
+  disableNativeNotifications: disableNativeNotifications,
+  sendNativeNotification: sendNativeNotification,
+  nativeAttentionNotification: nativeAttentionNotification,
+  notifyNormalizeKind: notifyNormalizeKind,
+  notifyKindPriority: notifyKindPriority,
+  notifyKindDescription: notifyKindDescription,
+  notifyPriorityOption: notifyPriorityOption,
+  notifyPriorityLabel: notifyPriorityLabel,
+  notifyPriorityRank: notifyPriorityRank,
+  notifyParseQuietHours: notifyParseQuietHours,
+  notifyInQuietHours: notifyInQuietHours,
+  notifyPolicyAllowsAttention: notifyPolicyAllowsAttention,
+  cloneJSON: cloneJSON,
+  notifyPolicyKindsMeta: notifyPolicyKindsMeta,
+  notifyPolicyChannelRows: notifyPolicyChannelRows,
+  notifyCanonicalJSON: notifyCanonicalJSON,
+  notifyPolicyIsDirty: notifyPolicyIsDirty,
+  notifySetQuietError: notifySetQuietError,
+  notifyRefreshDirty: notifyRefreshDirty,
+  notifyDiscardPolicyDraft: notifyDiscardPolicyDraft,
+  notifyParseClock: notifyParseClock,
+  notifyQuietRowsFromPolicy: notifyQuietRowsFromPolicy,
+  notifyQuietRangeKey: notifyQuietRangeKey,
+  notifyCollectQuietRows: notifyCollectQuietRows,
+  loadNotifyPolicy: loadNotifyPolicy,
+  setNotifyStatus: setNotifyStatus,
+  renderNotifyPolicy: renderNotifyPolicy,
+  renderNotifyPriorityHint: renderNotifyPriorityHint,
+  renderNotifyQuietRows: renderNotifyQuietRows,
+  notifyAppendQuietRow: notifyAppendQuietRow,
+  renderNotifyPolicyKinds: renderNotifyPolicyKinds,
+  collectCheckedNotifyKinds: collectCheckedNotifyKinds,
+  renderNotifyPolicyChannels: renderNotifyPolicyChannels,
+  notifyPolicySessionRows: notifyPolicySessionRows,
+  notifySessionOverrideActive: notifySessionOverrideActive,
+  notifySessionSearchText: notifySessionSearchText,
+  notifyFilteredSessionRows: notifyFilteredSessionRows,
+  renderNotifyPolicySessions: renderNotifyPolicySessions,
+  notifyMarkSessionRow: notifyMarkSessionRow,
+  updateNotifySessionOverride: updateNotifySessionOverride,
+  saveNotifyPolicy: saveNotifyPolicy,
+  resetNotifyPolicyDraft: resetNotifyPolicyDraft,
+  pushEnvironment: pushEnvironment,
+  loadPushConfig: loadPushConfig,
+  pushLabel: pushLabel,
+  syncPushSubscription: syncPushSubscription,
+  refreshPushState: refreshPushState,
+  mapPushError: mapPushError,
+  requestPushPermission: requestPushPermission,
+  enablePush: enablePush,
+  disablePush: disablePush,
+});
+
   /* ─────────────────────── attention tracking ────────────────── */
 
   function trackAttention(nodes) {
@@ -7,23 +83,23 @@
       if (node.stale) { return; }
       (node.sessions || []).forEach(function (session) {
         if (!session.attention) { return; }
-        var key = attentionKey(node, session);
+        var key = G.attentionKey(node, session);
         current[key] = true;
-        if (isWatching(node.node_id, session.session_id)) {
-          readAttention[key] = Date.now();
+        if (G.isWatching(node.node_id, session.session_id)) {
+          S.readAttention[key] = Date.now();
           return;
         }
-        if (!seenAttention[key]) { fresh.push({ node: node, session: session }); }
+        if (!S.seenAttention[key]) { fresh.push({ node: node, session: session }); }
       });
     });
-    var seeded = attentionSeeded;
-    Object.keys(readAttention).forEach(function (k) {
-      if (!current[k]) { delete readAttention[k]; }
+    var seeded = S.attentionSeeded;
+    Object.keys(S.readAttention).forEach(function (k) {
+      if (!current[k]) { delete S.readAttention[k]; }
     });
     // attentionKey 清理后落盘：服务端已消解的条目不留在存储里无限增长。
-    saveReadAttention();
-    seenAttention = current;
-    attentionSeeded = true;
+    G.saveReadAttention();
+    S.seenAttention = current;
+    S.attentionSeeded = true;
     if (!seeded) { return; }
     fresh.forEach(function (item) { showAttentionToast(item.node, item.session); });
   }
@@ -35,18 +111,18 @@
     nativeAttentionNotification(node, session);
     // The "open" affordance is a real button, so the toast is usable without a
     // mouse; clicking anywhere on the toast is no longer the only entry point.
-    pushToast(
-      nodeDisplayName(node) + " · " + sessionLabelOf(session) + "：" +
-        attentionLabel(session.attention),
+    G.pushToast(
+      G.nodeDisplayName(node) + " · " + G.sessionLabelOf(session) + "：" +
+        G.attentionLabel(session.attention),
       null,
       {
         label: "打开",
         run: function () {
-          if (!nodeHasWebUI(node)) {
-            notify(webUnavailableText(node), "error");
+          if (!G.nodeHasWebUI(node)) {
+            G.notify(G.webUnavailableText(node), "error");
             return;
           }
-          window.open(sessionOpenTarget(node, session.session_id), "_blank");
+          window.open(G.sessionOpenTarget(node, session.session_id), "_blank");
         },
       }
     );
@@ -63,17 +139,17 @@
       // session (P1-b watch gating); false releases it.
       tail: !!(opts && opts.tail),
     };
-    presenceTargets[target.node_id + "|" + target.session_id] = target;
+    S.presenceTargets[target.node_id + "|" + target.session_id] = target;
     sendPresence();
   }
 
   function sendPresence() {
     if (document.hidden) { return; }
-    Object.keys(presenceTargets).forEach(function (key) {
-      api("/api/presence", {
+    Object.keys(S.presenceTargets).forEach(function (key) {
+      G.api("/api/presence", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(presenceTargets[key]),
+        body: JSON.stringify(S.presenceTargets[key]),
       }).catch(function () {});
     });
   }
@@ -83,7 +159,7 @@
   // suppressing pushes for the session it last viewed until the presence TTL
   // (default 90s) expires — the classic "切后台后没有及时提醒" report.
   function releasePresence() {
-    if (!Object.keys(presenceTargets).length) { return; }
+    if (!Object.keys(S.presenceTargets).length) { return; }
     var body = JSON.stringify({ all: true });
     try {
       fetch("/api/presence/release", {
@@ -100,13 +176,13 @@
   // 会话心跳：静置在某个视图（SSE 静默失败、页面不再发其它请求）时，owner cookie
   // 过期也能在一分钟内把用户送回登录页。命中 401 由 api() 集中处理；无 presence
   // 目标时 sendPresence 不发请求，所以这里用 /api/devices 做独立的轻量复检。
-  var authHeartbeatAt = 0;
+  S.authHeartbeatAt = 0;
   function authHeartbeat() {
-    if (!authedState || document.hidden) { return; }
+    if (!S.authedState || document.hidden) { return; }
     var now = Date.now();
-    if (now - authHeartbeatAt < 45000) { return; }
-    authHeartbeatAt = now;
-    api("/api/devices").catch(function () {});
+    if (now - S.authHeartbeatAt < 45000) { return; }
+    S.authHeartbeatAt = now;
+    G.api("/api/devices").catch(function () {});
   }
   setInterval(authHeartbeat, 60000);
   document.addEventListener("visibilitychange", function () {
@@ -119,19 +195,19 @@
     // Returning to the tab: re-sync the notification toggle with the browser's
     // actual permission/subscription (a prompt may have been answered while
     // the page was hidden).
-    if (authedState) { refreshPushState(); }
+    if (S.authedState) { refreshPushState(); }
     // Coming back from a suspended tab: if the SSE feed has been quiet for
     // a long stretch, pull a fresh snapshot instead of trusting the cache.
-    if (eventsSubscribed && lastEventAt && Date.now() - lastEventAt > 60000) { loadNodes(); }
+    if (S.eventsSubscribed && S.lastEventAt && Date.now() - S.lastEventAt > 60000) { G.loadNodes(); }
   });
   window.addEventListener("pagehide", releasePresence);
 
   /* ─────────────────────── Web Push ──────────────────────────── */
 
-  var pushRegistration = null;
-  var pushConfig = null;       // cached GET /api/push/config
-  var pushConfigPromise = null;
-  var pushSynced = false;      // per-page guard for the idempotent re-register
+  S.pushRegistration = null;
+  S.pushConfig = null;       // cached GET /api/push/config
+  S.pushConfigPromise = null;
+  S.pushSynced = false;      // per-page guard for the idempotent re-register
 
   function urlBase64ToUint8Array(base64) {
     var padding = "=".repeat((4 - (base64.length % 4)) % 4);
@@ -143,7 +219,7 @@
   }
 
   function setPushLabel(text) {
-    var label = el("push-toggle-label");
+    var label = S.el("push-toggle-label");
     if (label) { label.textContent = text; }
   }
 
@@ -184,11 +260,12 @@
   }
 
   function enableNativeNotifications() {
-    var api = nativeNotificationApi();
-    if (!api) { return Promise.resolve(); }
-    return Promise.resolve(api.isPermissionGranted()).then(function (granted) {
+    // 局部名避开顶层 api()（模块化后顶层函数走 G 表，局部同名会遮蔽）。
+    var tnApi = nativeNotificationApi();
+    if (!tnApi) { return Promise.resolve(); }
+    return Promise.resolve(tnApi.isPermissionGranted()).then(function (granted) {
       if (granted) { return "granted"; }
-      return api.requestPermission();
+      return tnApi.requestPermission();
     }).then(function (state) {
       if (state !== "granted") {
         throw new Error("应用通知权限未授予（当前：" + state + "）。请在系统设置中允许通知后重试。");
@@ -204,11 +281,11 @@
   }
 
   function sendNativeNotification(title, body, extra) {
-    var api = nativeNotificationApi();
-    if (!api) { return Promise.resolve(false); }
-    return Promise.resolve(api.isPermissionGranted()).then(function (granted) {
+    var tnApi = nativeNotificationApi();
+    if (!tnApi) { return Promise.resolve(false); }
+    return Promise.resolve(tnApi.isPermissionGranted()).then(function (granted) {
       if (!granted || !nativeNotificationsEnabled(granted)) { return false; }
-      return Promise.resolve(api.sendNotification({
+      return Promise.resolve(tnApi.sendNotification({
         title: title,
         body: body,
         extra: extra || {},
@@ -230,11 +307,11 @@
     // 点击深链：跳回网关控制台并定位该会话（#sessions?node=…&session=…），与
     // Web Push / ntfy 的 click 落点一致；节点原版 Web 仍在卡片菜单里提供，
     // 不再作为通知的默认落点（缺 url 时桌面壳会自行拼节点 URL 并可能 403）。
-    try { extra.url = gatewaySessionLink(node.node_id, session.session_id); }
+    try { extra.url = G.gatewaySessionLink(node.node_id, session.session_id); }
     catch (err) { /* URL 构造失败时退回桌面壳的 node/session 兜底拼装 */ }
     sendNativeNotification(
-      nodeDisplayName(node) + " · " + sessionLabelOf(session),
-      attentionLabel(session.attention),
+      G.nodeDisplayName(node) + " · " + G.sessionLabelOf(session),
+      G.attentionLabel(session.attention),
       extra
     );
   }
@@ -242,19 +319,19 @@
   /* ────────────── 通知设置页 / 通知策略（GET-PUT API） ────────── */
 
   // 词表兜底：正常取 /api/notify/policy 的 meta.kinds（与网关登记表同源）。
-  var NOTIFY_KIND_FALLBACK = [
+  S.NOTIFY_KIND_FALLBACK = [
     { kind: "approval", label: "待审批", priority: "high" },
     { kind: "question", label: "待回答", priority: "high" },
     { kind: "error", label: "出错", priority: "high" },
     { kind: "completed", label: "已完成", priority: "normal" },
     { kind: "waiting", label: "等待中", priority: "normal" },
   ];
-  var NOTIFY_PRIORITY_OPTIONS = [
+  S.NOTIFY_PRIORITY_OPTIONS = [
     { value: "low", label: "全部通知", hint: "所有类型都通知，包括未来新增的低优先级消息。" },
     { value: "normal", label: "重要通知（默认）", hint: "待处理、已完成和等待中都会通知。" },
     { value: "high", label: "仅待处理", hint: "仅待审批、待回答和出错；完成/等待状态不打扰。" },
   ];
-  var NOTIFY_KIND_DESCRIPTIONS = {
+  S.NOTIFY_KIND_DESCRIPTIONS = {
     approval: "工具请求审批，需要你允许或拒绝。",
     question: "会话向你提问，等待你的答复。",
     error: "执行失败，需要排查或重试。",
@@ -274,14 +351,14 @@
 
   function notifyKindDescription(kind) {
     kind = notifyNormalizeKind(kind);
-    return NOTIFY_KIND_DESCRIPTIONS[kind] || "收到该类事件时通知。";
+    return S.NOTIFY_KIND_DESCRIPTIONS[kind] || "收到该类事件时通知。";
   }
 
   function notifyPriorityOption(value) {
-    for (var i = 0; i < NOTIFY_PRIORITY_OPTIONS.length; i++) {
-      if (NOTIFY_PRIORITY_OPTIONS[i].value === value) { return NOTIFY_PRIORITY_OPTIONS[i]; }
+    for (var i = 0; i < S.NOTIFY_PRIORITY_OPTIONS.length; i++) {
+      if (S.NOTIFY_PRIORITY_OPTIONS[i].value === value) { return S.NOTIFY_PRIORITY_OPTIONS[i]; }
     }
-    return NOTIFY_PRIORITY_OPTIONS[1];
+    return S.NOTIFY_PRIORITY_OPTIONS[1];
   }
 
   function notifyPriorityLabel(value) {
@@ -326,10 +403,10 @@
   // 全部静默。
   function notifyPolicyAllowsAttention(kind, sessionID) {
     if (!kind) { return false; }
-    if (!notifyPolicy) { return true; }
-    var global = notifyPolicy.global || {};
+    if (!S.notifyPolicy) { return true; }
+    var global = S.notifyPolicy.global || {};
     if (global.muted === true) { return false; }
-    var session = (notifyPolicy.sessions || {})[sessionID] || {};
+    var session = (S.notifyPolicy.sessions || {})[sessionID] || {};
     if (session.muted === true) { return false; }
     var priority = notifyKindPriority(kind);
     var minPriority = session.min_priority || global.min_priority || "low";
@@ -354,14 +431,14 @@
   }
 
   function notifyPolicyKindsMeta() {
-    if (notifyPolicyMeta && Array.isArray(notifyPolicyMeta.kinds) && notifyPolicyMeta.kinds.length) {
-      return notifyPolicyMeta.kinds;
+    if (S.notifyPolicyMeta && Array.isArray(S.notifyPolicyMeta.kinds) && S.notifyPolicyMeta.kinds.length) {
+      return S.notifyPolicyMeta.kinds;
     }
-    return NOTIFY_KIND_FALLBACK;
+    return S.NOTIFY_KIND_FALLBACK;
   }
 
   function notifyPolicyChannelRows() {
-    return (notifyPolicyMeta && Array.isArray(notifyPolicyMeta.channels)) ? notifyPolicyMeta.channels : [];
+    return (S.notifyPolicyMeta && Array.isArray(S.notifyPolicyMeta.channels)) ? S.notifyPolicyMeta.channels : [];
   }
 
   function notifyCanonicalJSON(value) {
@@ -376,38 +453,38 @@
   }
 
   function notifyPolicyIsDirty() {
-    if (notifyQuietError) { return true; }
-    if (!notifyPolicyDraft || !notifyPolicy) { return false; }
-    return notifyCanonicalJSON(notifyPolicyDraft) !== notifyPolicyBaseline;
+    if (S.notifyQuietError) { return true; }
+    if (!S.notifyPolicyDraft || !S.notifyPolicy) { return false; }
+    return notifyCanonicalJSON(S.notifyPolicyDraft) !== S.notifyPolicyBaseline;
   }
 
   function notifySetQuietError(message) {
-    notifyQuietError = String(message || "");
-    var node = el("notify-quiet-error");
+    S.notifyQuietError = String(message || "");
+    var node = S.el("notify-quiet-error");
     if (node) {
-      node.textContent = notifyQuietError;
-      node.hidden = !notifyQuietError;
+      node.textContent = S.notifyQuietError;
+      node.hidden = !S.notifyQuietError;
     }
   }
 
   function notifyRefreshDirty() {
-    var bar = el("notify-savebar");
-    var text = el("notify-dirty");
-    var dot = el("notify-dirty-dot");
-    var save = el("notify-save");
+    var bar = S.el("notify-savebar");
+    var text = S.el("notify-dirty");
+    var dot = S.el("notify-dirty-dot");
+    var save = S.el("notify-save");
     var dirty = notifyPolicyIsDirty();
-    var blocked = !!notifyQuietError;
+    var blocked = !!S.notifyQuietError;
     if (bar) {
       bar.classList.toggle("is-dirty", dirty || blocked);
       bar.classList.toggle("is-invalid", blocked);
     }
     if (dot) { dot.hidden = !(dirty || blocked); }
     if (text) {
-      if (!notifyPolicyLoaded && !notifyPolicyDraft) {
+      if (!S.notifyPolicyLoaded && !S.notifyPolicyDraft) {
         text.textContent = "策略尚未加载";
       } else if (blocked) {
-        text.textContent = notifyQuietError;
-      } else if (notifyPolicySaving) {
+        text.textContent = S.notifyQuietError;
+      } else if (S.notifyPolicySaving) {
         text.textContent = "正在保存…";
       } else if (dirty) {
         text.textContent = "有未保存的修改";
@@ -415,12 +492,12 @@
         text.textContent = "所有修改已保存";
       }
     }
-    if (save) { save.disabled = !dirty || blocked || notifyPolicySaving; }
+    if (save) { save.disabled = !dirty || blocked || S.notifyPolicySaving; }
   }
 
   function notifyDiscardPolicyDraft() {
-    if (!notifyPolicy) { return; }
-    notifyPolicyDraft = cloneJSON(notifyPolicy);
+    if (!S.notifyPolicy) { return; }
+    S.notifyPolicyDraft = cloneJSON(S.notifyPolicy);
     notifySetQuietError("");
     notifyRefreshDirty();
   }
@@ -435,7 +512,7 @@
   }
 
   function notifyQuietRowsFromPolicy() {
-    var raw = notifyPolicyDraft && notifyPolicyDraft.global && notifyPolicyDraft.global.quiet_hours;
+    var raw = S.notifyPolicyDraft && S.notifyPolicyDraft.global && S.notifyPolicyDraft.global.quiet_hours;
     if (!Array.isArray(raw)) { return []; }
     var rows = [];
     raw.forEach(function (item) {
@@ -453,7 +530,7 @@
   }
 
   function notifyCollectQuietRows(showError) {
-    var host = el("notify-quiet-rows");
+    var host = S.el("notify-quiet-rows");
     var invalid = null;
     if (!host) { return true; }
     var rows = Array.prototype.slice.call(host.querySelectorAll(".notify-quiet-row"));
@@ -490,66 +567,66 @@
     });
     if (showError) { notifySetQuietError(error); }
     if (!error) {
-      notifyPolicyDraft.global = notifyPolicyDraft.global || {};
-      if (ranges.length || notifyQuietTouched) {
-        notifyPolicyDraft.global.quiet_hours = ranges;
+      S.notifyPolicyDraft.global = S.notifyPolicyDraft.global || {};
+      if (ranges.length || S.notifyQuietTouched) {
+        S.notifyPolicyDraft.global.quiet_hours = ranges;
       }
     }
-    notifyQuietInvalidEl = invalid;
+    S.notifyQuietInvalidEl = invalid;
     notifyRefreshDirty();
     return !error;
   }
 
   function loadNotifyPolicy(force) {
-    if (notifyPolicyLoading) { return notifyPolicyLoading; }
-    if (notifyPolicyLoaded && !force) { return Promise.resolve(notifyPolicy); }
-    notifyPolicyLoading = apiJSON("/api/notify/policy").then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return notifyPolicy; }
+    if (S.notifyPolicyLoading) { return S.notifyPolicyLoading; }
+    if (S.notifyPolicyLoaded && !force) { return Promise.resolve(S.notifyPolicy); }
+    S.notifyPolicyLoading = G.apiJSON("/api/notify/policy").then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return S.notifyPolicy; }
       if (!r.res.ok || !r.body || !r.body.policy) {
         throw new Error("HTTP " + r.res.status + (r.body && r.body.error ? " " + r.body.error : ""));
       }
-      notifyPolicy = r.body.policy;
-      notifyPolicyMeta = r.body.meta || {};
-      notifyPolicyDraft = cloneJSON(notifyPolicy);
-      notifyPolicyBaseline = notifyCanonicalJSON(notifyPolicy);
-      notifyPolicyLoaded = true;
-      notifyPolicySaving = false;
-      notifyQuietTouched = false;
-      notifyQuietInvalidEl = null;
+      S.notifyPolicy = r.body.policy;
+      S.notifyPolicyMeta = r.body.meta || {};
+      S.notifyPolicyDraft = cloneJSON(S.notifyPolicy);
+      S.notifyPolicyBaseline = notifyCanonicalJSON(S.notifyPolicy);
+      S.notifyPolicyLoaded = true;
+      S.notifyPolicySaving = false;
+      S.notifyQuietTouched = false;
+      S.notifyQuietInvalidEl = null;
       notifySetQuietError("");
       renderNotifyPolicy();
-      return notifyPolicy;
+      return S.notifyPolicy;
     }).catch(function (err) {
-      if (currentView() === "notifications") {
-        notify("通知策略读取失败：" + (err && err.message ? err.message : err), "error");
+      if (G.currentView() === "notifications") {
+        G.notify("通知策略读取失败：" + (err && err.message ? err.message : err), "error");
       }
       notifyRefreshDirty();
-      return notifyPolicy;
+      return S.notifyPolicy;
     });
-    var pending = notifyPolicyLoading;
-    pending.finally(function () { if (notifyPolicyLoading === pending) { notifyPolicyLoading = null; } });
+    var pending = S.notifyPolicyLoading;
+    pending.finally(function () { if (S.notifyPolicyLoading === pending) { S.notifyPolicyLoading = null; } });
     return pending;
   }
 
   function setNotifyStatus(text) {
-    var status = el("notify-status");
+    var status = S.el("notify-status");
     if (!status) { return; }
     status.textContent = text || "";
     status.hidden = !text;
   }
 
   function renderNotifyPolicy() {
-    if (!notifyPolicyDraft) { notifyRefreshDirty(); return; }
-    var global = notifyPolicyDraft.global || {};
-    var enabled = el("notify-global-enabled");
+    if (!S.notifyPolicyDraft) { notifyRefreshDirty(); return; }
+    var global = S.notifyPolicyDraft.global || {};
+    var enabled = S.el("notify-global-enabled");
     if (enabled) { enabled.checked = global.muted !== true; }
-    var min = el("notify-min-priority");
+    var min = S.el("notify-min-priority");
     if (min) { min.value = global.min_priority || "normal"; }
     renderNotifyPriorityHint();
     renderNotifyQuietRows();
-    var source = el("notify-policy-source");
+    var source = S.el("notify-policy-source");
     if (source) {
-      var meta = notifyPolicyMeta || {};
+      var meta = S.notifyPolicyMeta || {};
       var labels = { file: "策略文件", legacy: "旧偏好回退", "default": "默认值" };
       source.textContent = labels[meta.source] || "策略";
       source.title = meta.path || "";
@@ -562,14 +639,14 @@
   }
 
   function renderNotifyPriorityHint() {
-    var hint = el("notify-priority-hint");
-    var select = el("notify-min-priority");
+    var hint = S.el("notify-priority-hint");
+    var select = S.el("notify-min-priority");
     if (!hint || !select) { return; }
     hint.textContent = notifyPriorityOption(select.value).hint;
   }
 
   function renderNotifyQuietRows() {
-    var host = el("notify-quiet-rows");
+    var host = S.el("notify-quiet-rows");
     if (!host) { return; }
     host.textContent = "";
     notifyQuietRowsFromPolicy().forEach(function (range) {
@@ -578,7 +655,7 @@
   }
 
   function notifyAppendQuietRow(range) {
-    var host = el("notify-quiet-rows");
+    var host = S.el("notify-quiet-rows");
     if (!host) { return; }
     range = range || { start: "", end: "" };
     var row = document.createElement("div");
@@ -605,7 +682,7 @@
     remove.textContent = "移除";
     remove.setAttribute("aria-label", "移除此免打扰时段");
     var changed = function () {
-      notifyQuietTouched = true;
+      S.notifyQuietTouched = true;
       notifyCollectQuietRows(true);
     };
     start.addEventListener("input", changed);
@@ -613,7 +690,7 @@
     end.addEventListener("input", changed);
     end.addEventListener("change", changed);
     remove.addEventListener("click", function () {
-      notifyQuietTouched = true;
+      S.notifyQuietTouched = true;
       row.remove();
       notifyCollectQuietRows(true);
     });
@@ -626,10 +703,10 @@
   }
 
   function renderNotifyPolicyKinds() {
-    var host = el("notify-kinds");
-    if (!host || !notifyPolicyDraft) { return; }
+    var host = S.el("notify-kinds");
+    if (!host || !S.notifyPolicyDraft) { return; }
     host.textContent = "";
-    var global = notifyPolicyDraft.global || {};
+    var global = S.notifyPolicyDraft.global || {};
     var allow = global.allow_kinds;
     notifyPolicyKindsMeta().forEach(function (spec) {
       var label = document.createElement("label");
@@ -645,8 +722,8 @@
         });
       }
       input.addEventListener("change", function () {
-        notifyPolicyDraft.global = notifyPolicyDraft.global || {};
-        notifyPolicyDraft.global.allow_kinds = collectCheckedNotifyKinds();
+        S.notifyPolicyDraft.global = S.notifyPolicyDraft.global || {};
+        S.notifyPolicyDraft.global.allow_kinds = collectCheckedNotifyKinds();
         notifyRefreshDirty();
       });
       var copy = document.createElement("span");
@@ -673,8 +750,8 @@
   }
 
   function renderNotifyPolicyChannels() {
-    var host = el("notify-channels");
-    if (!host || !notifyPolicyDraft) { return; }
+    var host = S.el("notify-channels");
+    if (!host || !S.notifyPolicyDraft) { return; }
     host.textContent = "";
     var rows = notifyPolicyChannelRows();
     if (!rows.length) {
@@ -690,14 +767,14 @@
       var input = document.createElement("input");
       input.type = "checkbox";
       input.disabled = !row.available;
-      var entry = (notifyPolicyDraft.channels || {})[row.name] || {};
+      var entry = (S.notifyPolicyDraft.channels || {})[row.name] || {};
       input.checked = row.available && entry.muted !== true;
       input.addEventListener("change", function () {
-        notifyPolicyDraft.channels = notifyPolicyDraft.channels || {};
+        S.notifyPolicyDraft.channels = S.notifyPolicyDraft.channels || {};
         if (input.checked) {
-          delete notifyPolicyDraft.channels[row.name];
+          delete S.notifyPolicyDraft.channels[row.name];
         } else {
-          notifyPolicyDraft.channels[row.name] = { muted: true };
+          S.notifyPolicyDraft.channels[row.name] = { muted: true };
         }
         notifyRefreshDirty();
       });
@@ -727,18 +804,18 @@
 
   function notifyPolicySessionRows() {
     var rows = [];
-    (lastNodes || []).forEach(function (node) {
+    (S.lastNodes || []).forEach(function (node) {
       (node.sessions || []).forEach(function (session) {
         if (session && session.session_id) { rows.push({ node: node, session: session }); }
       });
     });
     rows.sort(function (a, b) {
-      var na = nodeDisplayName(a.node).localeCompare(nodeDisplayName(b.node));
+      var na = G.nodeDisplayName(a.node).localeCompare(G.nodeDisplayName(b.node));
       if (na !== 0) { return na; }
       var ia = String(a.node.node_id || "").localeCompare(String(b.node.node_id || ""));
       if (ia !== 0) { return ia; }
-      var pa = attentionPriority[a.session.attention] != null ? attentionPriority[a.session.attention] : 9;
-      var pb = attentionPriority[b.session.attention] != null ? attentionPriority[b.session.attention] : 9;
+      var pa = S.attentionPriority[a.session.attention] != null ? S.attentionPriority[a.session.attention] : 9;
+      var pb = S.attentionPriority[b.session.attention] != null ? S.attentionPriority[b.session.attention] : 9;
       if (pa !== pb) { return pa - pb; }
       return String(a.session.title || "").localeCompare(String(b.session.title || ""));
     });
@@ -751,7 +828,7 @@
 
   function notifySessionSearchText(item) {
     return [
-      nodeDisplayName(item.node),
+      G.nodeDisplayName(item.node),
       item.node && item.node.node_id,
       item.session && item.session.session_id,
       item.session && item.session.title,
@@ -760,10 +837,10 @@
   }
 
   function notifyFilteredSessionRows(rows) {
-    var query = String(notifySessionQuery || "").trim().toLowerCase();
-    var sessions = notifyPolicyDraft.sessions || {};
+    var query = String(S.notifySessionQuery || "").trim().toLowerCase();
+    var sessions = S.notifyPolicyDraft.sessions || {};
     return rows.filter(function (item) {
-      if (notifySessionOnlyCustom && !notifySessionOverrideActive(sessions[item.session.session_id])) {
+      if (S.notifySessionOnlyCustom && !notifySessionOverrideActive(sessions[item.session.session_id])) {
         return false;
       }
       return !query || notifySessionSearchText(item).indexOf(query) !== -1;
@@ -771,44 +848,44 @@
   }
 
   function renderNotifyPolicySessions() {
-    var host = el("notify-session-list");
-    if (!host || !notifyPolicyDraft) { return; }
+    var host = S.el("notify-session-list");
+    if (!host || !S.notifyPolicyDraft) { return; }
     // 正在编辑时不要被 SSE 刷新打断焦点/滚动。
     if (host.contains(document.activeElement)) { return; }
     host.textContent = "";
     var allRows = notifyPolicySessionRows();
     var filtered = notifyFilteredSessionRows(allRows);
     var rows = filtered.slice(0, 200);
-    var search = el("notify-session-search");
-    if (search && search.value !== notifySessionQuery) { search.value = notifySessionQuery; }
-    var onlyCustom = el("notify-session-only-custom");
-    if (onlyCustom) { onlyCustom.checked = notifySessionOnlyCustom; }
-    var empty = el("notify-session-empty");
+    var search = S.el("notify-session-search");
+    if (search && search.value !== S.notifySessionQuery) { search.value = S.notifySessionQuery; }
+    var onlyCustom = S.el("notify-session-only-custom");
+    if (onlyCustom) { onlyCustom.checked = S.notifySessionOnlyCustom; }
+    var empty = S.el("notify-session-empty");
     if (empty) {
       empty.hidden = rows.length > 0;
       empty.textContent = allRows.length ? "没有匹配的会话。" : "暂无已知会话；会话上报后这里会出现可单独静音或提高门槛的条目。";
     }
-    var count = el("notify-session-count");
+    var count = S.el("notify-session-count");
     if (count) {
       count.textContent = filtered.length === allRows.length
         ? allRows.length + " 个会话"
         : rows.length + " / " + allRows.length + " 个会话";
       count.hidden = allRows.length === 0;
     }
-    var sessions = notifyPolicyDraft.sessions || {};
+    var sessions = S.notifyPolicyDraft.sessions || {};
     var group = null;
     var groupHost = null;
     rows.forEach(function (item) {
       var sessionID = item.session.session_id;
       var override = sessions[sessionID] || {};
-      var nodeID = item.node.node_id || nodeDisplayName(item.node);
+      var nodeID = item.node.node_id || G.nodeDisplayName(item.node);
       if (!group || group.getAttribute("data-node-id") !== nodeID) {
         group = document.createElement("section");
         group.className = "notify-session-group";
         group.setAttribute("data-node-id", nodeID);
         var head = document.createElement("div");
         head.className = "notify-session-group-head";
-        head.textContent = nodeDisplayName(item.node);
+        head.textContent = G.nodeDisplayName(item.node);
         groupHost = document.createElement("div");
         groupHost.className = "list notify-session-group-list";
         group.appendChild(head);
@@ -821,7 +898,7 @@
       row.classList.toggle("is-overridden", notifySessionOverrideActive(override));
       var name = document.createElement("span");
       name.className = "notify-session-name";
-      name.textContent = sessionLabelOf(item.session);
+      name.textContent = G.sessionLabelOf(item.session);
       name.title = sessionID;
       row.appendChild(name);
       var custom = document.createElement("span");
@@ -847,8 +924,8 @@
 
       var select = document.createElement("select");
       select.className = "select sm";
-      select.setAttribute("aria-label", "该会话的通知范围：" + sessionLabelOf(item.session));
-      [["", "跟随全局"]].concat(NOTIFY_PRIORITY_OPTIONS.map(function (opt) {
+      select.setAttribute("aria-label", "该会话的通知范围：" + G.sessionLabelOf(item.session));
+      [["", "跟随全局"]].concat(S.NOTIFY_PRIORITY_OPTIONS.map(function (opt) {
         return [opt.value, opt.label];
       })).forEach(function (opt) {
         var option = document.createElement("option");
@@ -867,76 +944,76 @@
   }
 
   function notifyMarkSessionRow(row, badge) {
-    if (!row || !notifyPolicyDraft) { return; }
+    if (!row || !S.notifyPolicyDraft) { return; }
     var sessionID = row.getAttribute("data-session-id");
-    var entry = (notifyPolicyDraft.sessions || {})[sessionID];
+    var entry = (S.notifyPolicyDraft.sessions || {})[sessionID];
     var active = notifySessionOverrideActive(entry);
     row.classList.toggle("is-overridden", active);
     if (badge) { badge.hidden = !active; }
   }
 
   function updateNotifySessionOverride(sessionID, field, value) {
-    notifyPolicyDraft.sessions = notifyPolicyDraft.sessions || {};
-    var entry = notifyPolicyDraft.sessions[sessionID] || {};
+    S.notifyPolicyDraft.sessions = S.notifyPolicyDraft.sessions || {};
+    var entry = S.notifyPolicyDraft.sessions[sessionID] || {};
     if (value == null) {
       delete entry[field];
     } else {
       entry[field] = value;
     }
     if (entry.muted == null && !entry.min_priority && entry.allow_kinds == null) {
-      delete notifyPolicyDraft.sessions[sessionID];
+      delete S.notifyPolicyDraft.sessions[sessionID];
     } else {
-      notifyPolicyDraft.sessions[sessionID] = entry;
+      S.notifyPolicyDraft.sessions[sessionID] = entry;
     }
     notifyRefreshDirty();
   }
 
   function saveNotifyPolicy() {
-    if (!notifyPolicyDraft || !notifyPolicyLoaded || notifyPolicySaving) { return; }
+    if (!S.notifyPolicyDraft || !S.notifyPolicyLoaded || S.notifyPolicySaving) { return; }
     if (!notifyCollectQuietRows(true)) {
-      if (notifyQuietInvalidEl) { notifyQuietInvalidEl.focus(); }
+      if (S.notifyQuietInvalidEl) { S.notifyQuietInvalidEl.focus(); }
       return;
     }
     if (!notifyPolicyIsDirty()) {
       notifyRefreshDirty();
       return;
     }
-    var payload = cloneJSON(notifyPolicyDraft);
+    var payload = cloneJSON(S.notifyPolicyDraft);
     payload.version = 1;
-    notifyPolicySaving = true;
+    S.notifyPolicySaving = true;
     notifyRefreshDirty();
     setNotifyStatus("保存中…");
-    apiJSON("/api/notify/policy", {
+    G.apiJSON("/api/notify/policy", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(function (r) {
       if (r.res.status === 401) {
-        notifyPolicySaving = false;
+        S.notifyPolicySaving = false;
         setNotifyStatus("");
-        setAuthed(false);
+        G.setAuthed(false);
         return;
       }
       if (!r.res.ok) {
         throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status));
       }
-      notifyPolicy = r.body.policy;
-      notifyPolicyMeta = r.body.meta || notifyPolicyMeta;
-      notifyPolicyDraft = cloneJSON(notifyPolicy);
-      notifyPolicyBaseline = notifyCanonicalJSON(notifyPolicy);
-      notifyPolicyLoaded = true;
-      notifyPolicySaving = false;
-      notifyQuietTouched = false;
-      notifyQuietInvalidEl = null;
+      S.notifyPolicy = r.body.policy;
+      S.notifyPolicyMeta = r.body.meta || S.notifyPolicyMeta;
+      S.notifyPolicyDraft = cloneJSON(S.notifyPolicy);
+      S.notifyPolicyBaseline = notifyCanonicalJSON(S.notifyPolicy);
+      S.notifyPolicyLoaded = true;
+      S.notifyPolicySaving = false;
+      S.notifyQuietTouched = false;
+      S.notifyQuietInvalidEl = null;
       notifySetQuietError("");
       setNotifyStatus("");
       renderNotifyPolicy();
-      notify("通知策略已保存并立即生效", "ok");
+      G.notify("通知策略已保存并立即生效", "ok");
     }).catch(function (err) {
-      notifyPolicySaving = false;
+      S.notifyPolicySaving = false;
       setNotifyStatus("");
       notifyRefreshDirty();
-      notify("保存策略失败：" + (err && err.message ? err.message : err), "error");
+      G.notify("保存策略失败：" + (err && err.message ? err.message : err), "error");
     });
   }
 
@@ -948,21 +1025,21 @@
       } catch (e) { /* headless/jsdom: proceed */ }
       if (!reset) { return; }
     }
-    var defaults = (notifyPolicyMeta && notifyPolicyMeta.defaults) || {
+    var defaults = (S.notifyPolicyMeta && S.notifyPolicyMeta.defaults) || {
       muted: false,
       min_priority: "normal",
       allow_kinds: ["approval", "question", "error", "completed", "waiting"],
     };
-    notifyPolicyDraft = { version: 1, global: cloneJSON(defaults), sessions: {}, channels: {} };
-    notifyPolicyDraft.global = notifyPolicyDraft.global || {};
-    if (!Array.isArray(notifyPolicyDraft.global.quiet_hours)) {
-      notifyPolicyDraft.global.quiet_hours = [];
+    S.notifyPolicyDraft = { version: 1, global: cloneJSON(defaults), sessions: {}, channels: {} };
+    S.notifyPolicyDraft.global = S.notifyPolicyDraft.global || {};
+    if (!Array.isArray(S.notifyPolicyDraft.global.quiet_hours)) {
+      S.notifyPolicyDraft.global.quiet_hours = [];
     }
-    notifyQuietTouched = true;
-    notifyQuietInvalidEl = null;
+    S.notifyQuietTouched = true;
+    S.notifyQuietInvalidEl = null;
     notifySetQuietError("");
     renderNotifyPolicy();
-    notify("已恢复默认值，点击「保存策略」后生效", "ok");
+    G.notify("已恢复默认值，点击「保存策略」后生效", "ok");
   }
 
   // pushEnvironment explains whether Web Push can work here and, when it
@@ -984,17 +1061,17 @@
   }
 
   function loadPushConfig() {
-    if (pushConfig) { return Promise.resolve(pushConfig); }
-    if (pushConfigPromise) { return pushConfigPromise; }
-    pushConfigPromise = apiJSON("/api/push/config").then(function (r) {
-      pushConfig = (r && r.res && r.res.ok && r.body) ? r.body : { enabled: false };
+    if (S.pushConfig) { return Promise.resolve(S.pushConfig); }
+    if (S.pushConfigPromise) { return S.pushConfigPromise; }
+    S.pushConfigPromise = G.apiJSON("/api/push/config").then(function (r) {
+      S.pushConfig = (r && r.res && r.res.ok && r.body) ? r.body : { enabled: false };
     }).catch(function () {
-      pushConfig = { enabled: false };
+      S.pushConfig = { enabled: false };
     }).then(function () {
-      pushConfigPromise = null;
-      return pushConfig;
+      S.pushConfigPromise = null;
+      return S.pushConfig;
     });
-    return pushConfigPromise;
+    return S.pushConfigPromise;
   }
 
   function pushLabel() {
@@ -1007,10 +1084,10 @@
   // Re-POST an existing browser subscription: the gateway upserts by endpoint,
   // so this self-heals a lost/restored push store without user action.
   function syncPushSubscription(sub) {
-    if (!sub || pushSynced || !sub.toJSON) { return; }
-    pushSynced = true;
+    if (!sub || S.pushSynced || !sub.toJSON) { return; }
+    S.pushSynced = true;
     var json = sub.toJSON();
-    apiJSON("/api/push/subscriptions", {
+    G.apiJSON("/api/push/subscriptions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1022,11 +1099,11 @@
   }
 
   function refreshPushState() {
-    var btn = el("push-toggle");
-    var test = el("push-test");
+    var btn = S.el("push-toggle");
+    var test = S.el("push-test");
     if (!btn) { return; }
-    btn.hidden = !authedState;
-    if (!authedState) { return; }
+    btn.hidden = !S.authedState;
+    if (!S.authedState) { return; }
     var nativeApi = nativeNotificationApi();
     if (nativeApi) {
       btn.title = "使用 Tauri 系统原生通知";
@@ -1072,7 +1149,7 @@
       btn.title = "";
       return navigator.serviceWorker.ready
       .then(function (reg) {
-        pushRegistration = reg;
+        S.pushRegistration = reg;
         return reg.pushManager.getSubscription();
       })
       .then(function (sub) {
@@ -1161,7 +1238,7 @@
         throw new Error("网关未启用推送（--push-enabled 或 VAPID 初始化失败）");
       }
       return navigator.serviceWorker.ready.then(function (reg) {
-        pushRegistration = reg;
+        S.pushRegistration = reg;
         return reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(cfg.public_key),
@@ -1170,7 +1247,7 @@
     }).then(function (sub) {
       if (!sub) { return null; }
       var json = sub.toJSON();
-      return apiJSON("/api/push/subscriptions", {
+      return G.apiJSON("/api/push/subscriptions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1189,12 +1266,12 @@
 
   function disablePush() {
     if (nativeNotificationApi()) { return disableNativeNotifications(); }
-    if (!pushRegistration) { return Promise.resolve(); }
-    return pushRegistration.pushManager.getSubscription().then(function (sub) {
+    if (!S.pushRegistration) { return Promise.resolve(); }
+    return S.pushRegistration.pushManager.getSubscription().then(function (sub) {
       if (!sub) { return; }
       var endpoint = sub.endpoint;
       return sub.unsubscribe().then(function () {
-        return apiJSON("/api/push/unsubscribe", {
+        return G.apiJSON("/api/push/unsubscribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ endpoint: endpoint }),
@@ -1202,4 +1279,3 @@
       });
     });
   }
-

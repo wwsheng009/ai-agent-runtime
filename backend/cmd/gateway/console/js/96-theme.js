@@ -1,3 +1,18 @@
+// 96-theme.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  applyTheme: applyTheme,
+  cycleTheme: cycleTheme,
+  syncTopbarMenuLabel: syncTopbarMenuLabel,
+  topbarMenuItems: topbarMenuItems,
+  closeTopbarMenu: closeTopbarMenu,
+});
+
   /* ─────────────────────── theme ─────────────────────────────── */
 
   // Three-state cycle: follow-system → light → dark → follow-system.
@@ -9,9 +24,9 @@
       document.documentElement.removeAttribute("data-theme");
     }
     var label = theme === "light" ? "亮色" : theme === "dark" ? "暗色" : "跟随系统";
-    var labelEl = el("theme-label");
+    var labelEl = S.el("theme-label");
     if (labelEl) { labelEl.textContent = label; }
-    var btn = el("theme-toggle");
+    var btn = S.el("theme-toggle");
     if (btn) { btn.title = "当前：" + label + "（点击切换）"; }
     syncTopbarMenuLabel();
   }
@@ -29,27 +44,27 @@
     applyTheme(next);
   }
 
-  el("theme-toggle").addEventListener("click", cycleTheme);
+  S.el("theme-toggle").addEventListener("click", cycleTheme);
   applyTheme(document.documentElement.getAttribute("data-theme"));
 
   // Narrow screens keep one topbar action: this menu absorbs the theme and
   // refresh buttons. Logout deliberately stays only in the sidebar.
   function syncTopbarMenuLabel() {
-    var item = el("topbar-theme");
+    var item = S.el("topbar-theme");
     if (!item) { return; }
-    var label = el("theme-label");
+    var label = S.el("theme-label");
     item.textContent = "主题：" + (label && label.textContent ? label.textContent : "跟随系统");
   }
 
   function topbarMenuItems() {
-    var menu = el("topbar-menu");
+    var menu = S.el("topbar-menu");
     if (!menu) { return []; }
     return Array.prototype.slice.call(menu.querySelectorAll('[role="menuitem"]'));
   }
 
   function closeTopbarMenu(restoreFocus) {
-    var menu = el("topbar-menu");
-    var trigger = el("topbar-more");
+    var menu = S.el("topbar-menu");
+    var trigger = S.el("topbar-more");
     if (!menu || menu.hidden) { return; }
     var hadFocus = !!(document.activeElement && menu.contains(document.activeElement));
     menu.hidden = true;
@@ -59,24 +74,24 @@
     }
   }
 
-  var topbarMore = el("topbar-more");
-  var topbarMenu = el("topbar-menu");
-  if (topbarMore && topbarMenu) {
-    topbarMore.addEventListener("click", function (e) {
+  S.topbarMore = S.el("topbar-more");
+  S.topbarMenu = S.el("topbar-menu");
+  if (S.topbarMore && S.topbarMenu) {
+    S.topbarMore.addEventListener("click", function (e) {
       e.stopPropagation();
-      var willOpen = topbarMenu.hidden;
-      closeSessionMenus(false);
+      var willOpen = S.topbarMenu.hidden;
+      G.closeSessionMenus(false);
       if (!willOpen) {
         closeTopbarMenu(false);
         return;
       }
       syncTopbarMenuLabel();
-      topbarMenu.hidden = false;
-      topbarMore.setAttribute("aria-expanded", "true");
+      S.topbarMenu.hidden = false;
+      S.topbarMore.setAttribute("aria-expanded", "true");
       var items = topbarMenuItems();
       if (items.length) { items[0].focus(); }
     });
-    topbarMenu.addEventListener("keydown", function (e) {
+    S.topbarMenu.addEventListener("keydown", function (e) {
       var items = topbarMenuItems();
       if (!items.length) { return; }
       var idx = items.indexOf(document.activeElement);
@@ -112,7 +127,7 @@
     window.addEventListener("resize", function () {
       if (window.innerWidth > 860) { closeTopbarMenu(false); }
     });
-    var topbarTheme = el("topbar-theme");
+    var topbarTheme = S.el("topbar-theme");
     if (topbarTheme) {
       topbarTheme.addEventListener("click", function () {
         cycleTheme();
@@ -120,13 +135,12 @@
         closeTopbarMenu(true);
       });
     }
-    var topbarRefresh = el("topbar-refresh");
+    var topbarRefresh = S.el("topbar-refresh");
     if (topbarRefresh) {
       topbarRefresh.addEventListener("click", function () {
-        var refresh = el("refresh");
+        var refresh = S.el("refresh");
         if (refresh) { refresh.click(); }
         closeTopbarMenu(true);
       });
     }
   }
-

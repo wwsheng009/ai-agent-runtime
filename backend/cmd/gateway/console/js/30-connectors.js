@@ -1,41 +1,68 @@
+// 30-connectors.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  loadConnectorSchema: loadConnectorSchema,
+  connectorSchemaFor: connectorSchemaFor,
+  connectorNodeBasePath: connectorNodeBasePath,
+  connectorBasePath: connectorBasePath,
+  connectorSourceLabel: connectorSourceLabel,
+  connectorEntryRank: connectorEntryRank,
+  mergeConnectorEntries: mergeConnectorEntries,
+  connectorNodesSignature: connectorNodesSignature,
+  connectorNodeFetch: connectorNodeFetch,
+  connectorNodeHint: connectorNodeHint,
+  connectorInitialMessage: connectorInitialMessage,
+  renderConnectorLoading: renderConnectorLoading,
+  refreshConnectorNodes: refreshConnectorNodes,
+  loadConnectors: loadConnectors,
+  renderConnectors: renderConnectors,
+  runConnectorActionButton: runConnectorActionButton,
+  connectorActionSummary: connectorActionSummary,
+});
+
   /* ─────────────────────── rendering: connectors ─────────────── */
 
-  var connectorsLoaded = false;
+  S.connectorsLoaded = false;
 
   // 连接器列表不是单一数据源：网关自身 store 是主数据，在线节点上的
   // aicli/runtime-server 连接器经 /n/{node}/ 反代读取。页面把两边合并展示；
   // 同一 id 出现在多个共享 config.yaml 的节点时只保留正在运行该连接器的一份。
-  var connectorEntries = [];
-  var connectorGatewayEntries = [];
-  var connectorGatewayMessage = "";
-  var connectorGatewaySettled = false;
-  var connectorMessage = "";
-  var connectorLoadSeq = 0;
-  var connectorNodeFetchSeq = 0;
-  var connectorLoadedAt = 0;
-  var connectorNodeSignature = "";
-  var connectorNodeReadTimeoutMs = 4000;
-  var connectorCacheTTLMs = 10000;
+  S.connectorEntries = [];
+  S.connectorGatewayEntries = [];
+  S.connectorGatewayMessage = "";
+  S.connectorGatewaySettled = false;
+  S.connectorMessage = "";
+  S.connectorLoadSeq = 0;
+  S.connectorNodeFetchSeq = 0;
+  S.connectorLoadedAt = 0;
+  S.connectorNodeSignature = "";
+  S.connectorNodeReadTimeoutMs = 4000;
+  S.connectorCacheTTLMs = 10000;
 
   // connectorSchemaProviders 是三端共用的 GET /api/connectors/schema 缓存
   // （providers 数组）；连接器卡片据此渲染通用动作按钮（kind=button，
   // 如 QQ「授权校验」）。拉取失败/未接线时静默降级（卡片仍可用）。
-  var connectorSchemaProviders = null;
+  S.connectorSchemaProviders = null;
 
   function loadConnectorSchema() {
-    if (connectorSchemaProviders) { return Promise.resolve(connectorSchemaProviders); }
-    return apiJSON("/api/connectors/schema").then(function (r) {
+    if (S.connectorSchemaProviders) { return Promise.resolve(S.connectorSchemaProviders); }
+    return G.apiJSON("/api/connectors/schema").then(function (r) {
       if (r.res.ok && r.body && Array.isArray(r.body.providers)) {
-        connectorSchemaProviders = r.body.providers;
+        S.connectorSchemaProviders = r.body.providers;
       }
-      return connectorSchemaProviders;
+      return S.connectorSchemaProviders;
     }).catch(function () { return null; });
   }
 
   function connectorSchemaFor(provider) {
-    if (!connectorSchemaProviders) { return null; }
-    for (var i = 0; i < connectorSchemaProviders.length; i++) {
-      if (connectorSchemaProviders[i].provider === provider) { return connectorSchemaProviders[i]; }
+    if (!S.connectorSchemaProviders) { return null; }
+    for (var i = 0; i < S.connectorSchemaProviders.length; i++) {
+      if (S.connectorSchemaProviders[i].provider === provider) { return S.connectorSchemaProviders[i]; }
     }
     return null;
   }
@@ -59,7 +86,7 @@
 
   function connectorSourceLabel(entry) {
     if (entry.source === "gateway") { return "网关"; }
-    return nodeDisplayName(entry.node) || entry.node.node_id;
+    return G.nodeDisplayName(entry.node) || entry.node.node_id;
   }
 
   function connectorEntryRank(entry) {
@@ -113,9 +140,9 @@
     if (typeof window.AbortController === "function") {
       controller = new window.AbortController();
       opts.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, connectorNodeReadTimeoutMs);
+      timer = setTimeout(function () { controller.abort(); }, S.connectorNodeReadTimeoutMs);
     }
-    return apiJSON(base, opts).then(function (r) {
+    return G.apiJSON(base, opts).then(function (r) {
       if (timer) { clearTimeout(timer); }
       if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
         var reason = r.body && (r.body.reason || r.body.error);
@@ -137,7 +164,7 @@
   }
 
   function connectorNodeHint(results) {
-    var live = (lastNodes || []).filter(function (node) { return !node.stale; });
+    var live = (S.lastNodes || []).filter(function (node) { return !node.stale; });
     if (!live.length) {
       return "网关配置为空，当前也没有在线节点可读取本地连接器。";
     }
@@ -156,17 +183,17 @@
   }
 
   function connectorInitialMessage() {
-    if (connectorGatewayMessage) { return connectorGatewayMessage; }
-    if (!connectorGatewayEntries.length && (lastNodes || []).some(function (node) { return !node.stale; })) {
+    if (S.connectorGatewayMessage) { return S.connectorGatewayMessage; }
+    if (!S.connectorGatewayEntries.length && (S.lastNodes || []).some(function (node) { return !node.stale; })) {
       return "正在读取在线节点的连接器…";
     }
     return "";
   }
 
   function renderConnectorLoading() {
-    var list = el("connectors-list");
+    var list = S.el("connectors-list");
     if (!list) { return; }
-    var countEl = el("connectors-count");
+    var countEl = S.el("connectors-count");
     if (countEl) { countEl.hidden = true; }
     list.innerHTML = "";
     var loadingEl = document.createElement("p");
@@ -178,29 +205,29 @@
   // refreshConnectorNodes 只读在线节点声明的 /api/connectors；节点结果按
   // 签名去重（节点集合/路由不变不重复请求），与网关结果合并后重绘。
   function refreshConnectorNodes(force) {
-    var signature = connectorNodesSignature(lastNodes);
-    if (!force && signature === connectorNodeSignature) { return Promise.resolve(); }
-    connectorNodeSignature = signature;
-    var seq = connectorLoadSeq;
-    var nodeSeq = ++connectorNodeFetchSeq;
-    var targets = (lastNodes || []).filter(function (node) { return connectorNodeBasePath(node); });
+    var signature = connectorNodesSignature(S.lastNodes);
+    if (!force && signature === S.connectorNodeSignature) { return Promise.resolve(); }
+    S.connectorNodeSignature = signature;
+    var seq = S.connectorLoadSeq;
+    var nodeSeq = ++S.connectorNodeFetchSeq;
+    var targets = (S.lastNodes || []).filter(function (node) { return connectorNodeBasePath(node); });
     if (!targets.length) {
-      connectorEntries = mergeConnectorEntries([connectorGatewayEntries, []]);
-      connectorMessage = connectorGatewayMessage || (connectorEntries.length ? "" : connectorNodeHint(null));
-      renderConnectors(connectorEntries, connectorMessage);
+      S.connectorEntries = mergeConnectorEntries([S.connectorGatewayEntries, []]);
+      S.connectorMessage = S.connectorGatewayMessage || (S.connectorEntries.length ? "" : connectorNodeHint(null));
+      renderConnectors(S.connectorEntries, S.connectorMessage);
       loadConnectorSchema().then(function () {
-        if (seq === connectorLoadSeq && currentView() === "connectors") {
-          renderConnectors(connectorEntries, connectorMessage);
+        if (seq === S.connectorLoadSeq && G.currentView() === "connectors") {
+          renderConnectors(S.connectorEntries, S.connectorMessage);
         }
       });
       return Promise.resolve();
     }
-    if (!connectorGatewayEntries.length) {
-      connectorMessage = connectorGatewayMessage || "正在读取在线节点的连接器…";
-      renderConnectors(connectorEntries, connectorMessage);
+    if (!S.connectorGatewayEntries.length) {
+      S.connectorMessage = S.connectorGatewayMessage || "正在读取在线节点的连接器…";
+      renderConnectors(S.connectorEntries, S.connectorMessage);
     }
     return Promise.all(targets.map(connectorNodeFetch)).then(function (results) {
-      if (seq !== connectorLoadSeq || nodeSeq !== connectorNodeFetchSeq) { return; }
+      if (seq !== S.connectorLoadSeq || nodeSeq !== S.connectorNodeFetchSeq) { return; }
       var nodeEntries = [];
       results.forEach(function (res) {
         if (!res || !Array.isArray(res.items)) { return; }
@@ -208,12 +235,12 @@
           nodeEntries.push({ connector: item, source: "node", node: res.node });
         });
       });
-      connectorEntries = mergeConnectorEntries([connectorGatewayEntries, nodeEntries]);
-      connectorMessage = connectorGatewayMessage || (connectorEntries.length ? "" : connectorNodeHint(results));
-      renderConnectors(connectorEntries, connectorMessage);
+      S.connectorEntries = mergeConnectorEntries([S.connectorGatewayEntries, nodeEntries]);
+      S.connectorMessage = S.connectorGatewayMessage || (S.connectorEntries.length ? "" : connectorNodeHint(results));
+      renderConnectors(S.connectorEntries, S.connectorMessage);
       loadConnectorSchema().then(function () {
-        if (seq === connectorLoadSeq && currentView() === "connectors") {
-          renderConnectors(connectorEntries, connectorMessage);
+        if (seq === S.connectorLoadSeq && G.currentView() === "connectors") {
+          renderConnectors(S.connectorEntries, S.connectorMessage);
         }
       });
     });
@@ -223,54 +250,54 @@
   // 在线节点的同一契约。force=true 时跳过缓存；网关未接线时仍尝试节点视图，
   // 但把网关错误保留在页面提示中。
   function loadConnectors(force) {
-    if (connectorsLoaded && !force) {
-      if (Date.now() - connectorLoadedAt < connectorCacheTTLMs) { return Promise.resolve(); }
+    if (S.connectorsLoaded && !force) {
+      if (Date.now() - S.connectorLoadedAt < S.connectorCacheTTLMs) { return Promise.resolve(); }
       force = true;
     }
-    var seq = ++connectorLoadSeq;
-    connectorNodeFetchSeq++;
-    connectorsLoaded = false;
-    connectorGatewaySettled = false;
-    connectorNodeSignature = "";
-    if (!connectorEntries.length) { renderConnectorLoading(); }
-    return apiJSON("/api/connectors").then(function (r) {
-      if (seq !== connectorLoadSeq) { return; }
-      if (r.res.status === 401) { setAuthed(false); return; }
-      connectorGatewayEntries = [];
-      connectorGatewayMessage = "";
+    var seq = ++S.connectorLoadSeq;
+    S.connectorNodeFetchSeq++;
+    S.connectorsLoaded = false;
+    S.connectorGatewaySettled = false;
+    S.connectorNodeSignature = "";
+    if (!S.connectorEntries.length) { renderConnectorLoading(); }
+    return G.apiJSON("/api/connectors").then(function (r) {
+      if (seq !== S.connectorLoadSeq) { return; }
+      if (r.res.status === 401) { G.setAuthed(false); return; }
+      S.connectorGatewayEntries = [];
+      S.connectorGatewayMessage = "";
       if (r.res.status === 403 || r.res.status === 503) {
-        connectorGatewayMessage = (r.body && r.body.error) || ("连接器管理面不可用（HTTP " + r.res.status + "）");
+        S.connectorGatewayMessage = (r.body && r.body.error) || ("连接器管理面不可用（HTTP " + r.res.status + "）");
       } else if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
-        connectorGatewayMessage = "连接器管理面未接线（gateway 启动日志中查找 connectors disabled）";
+        S.connectorGatewayMessage = "连接器管理面未接线（gateway 启动日志中查找 connectors disabled）";
       } else {
-        connectorGatewayEntries = r.body.items.map(function (item) {
+        S.connectorGatewayEntries = r.body.items.map(function (item) {
           return { connector: item, source: "gateway" };
         });
-        connectorsLoaded = true;
-        connectorLoadedAt = Date.now();
+        S.connectorsLoaded = true;
+        S.connectorLoadedAt = Date.now();
       }
-      connectorGatewaySettled = true;
-      connectorEntries = connectorGatewayEntries;
-      connectorMessage = connectorInitialMessage();
-      renderConnectors(connectorEntries, connectorMessage);
-      loadConnectorBindings();
+      S.connectorGatewaySettled = true;
+      S.connectorEntries = S.connectorGatewayEntries;
+      S.connectorMessage = connectorInitialMessage();
+      renderConnectors(S.connectorEntries, S.connectorMessage);
+      G.loadConnectorBindings();
       return refreshConnectorNodes(true);
     }).catch(function (err) {
-      if (seq !== connectorLoadSeq) { return; }
-      connectorsLoaded = false;
-      connectorGatewaySettled = false;
-      connectorEntries = [];
-      connectorGatewayEntries = [];
-      connectorGatewayMessage = "";
-      connectorMessage = "读取连接器失败：" + (err && err.message ? err.message : err);
-      renderConnectors(null, connectorMessage);
+      if (seq !== S.connectorLoadSeq) { return; }
+      S.connectorsLoaded = false;
+      S.connectorGatewaySettled = false;
+      S.connectorEntries = [];
+      S.connectorGatewayEntries = [];
+      S.connectorGatewayMessage = "";
+      S.connectorMessage = "读取连接器失败：" + (err && err.message ? err.message : err);
+      renderConnectors(null, S.connectorMessage);
     });
   }
 
   function renderConnectors(entries, messageText) {
-    var list = el("connectors-list");
+    var list = S.el("connectors-list");
     if (!list) { return; }
-    var countEl = el("connectors-count");
+    var countEl = S.el("connectors-count");
     list.innerHTML = "";
     entries = entries || [];
     if (!entries.length) {
@@ -285,7 +312,7 @@
       countEl.textContent = entries.length + " 个";
       countEl.hidden = false;
     }
-    syncConnectorIDOptions();
+    G.syncConnectorIDOptions();
     if (messageText) {
       var noticeEl = document.createElement("p");
       noticeEl.className = "connectors-hint";
@@ -295,8 +322,8 @@
     entries.forEach(function (entry) {
       var item = entry.connector;
       var isGateway = entry.source === "gateway";
-      var migratedEntry = isGateway ? null : connectorMigratedEntry(entry);
-      var busy = connectorIsBusy(item.id);
+      var migratedEntry = isGateway ? null : G.connectorMigratedEntry(entry);
+      var busy = G.connectorIsBusy(item.id);
       var card = document.createElement("div");
       card.className = "card" + (item.enabled ? "" : " offline");
       card.innerHTML =
@@ -320,17 +347,17 @@
         (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
       var note = card.querySelector(".card-note");
       if (isGateway) {
-        var bindings = connectorBindingRows(item.id);
+        var bindings = G.connectorBindingRows(item.id);
         if (bindings.length) {
           var bindLine = document.createElement("p");
           bindLine.className = "connectors-hint";
-          bindLine.textContent = "绑定：" + bindings.map(connectorBindingLabel).join("；");
+          bindLine.textContent = "绑定：" + bindings.map(G.connectorBindingLabel).join("；");
           note.appendChild(bindLine);
         }
         if (item.origin) {
           var copied = document.createElement("p");
           copied.className = "connectors-hint";
-          var targets = notifyIMTargets().filter(function (t) {
+          var targets = G.notifyIMTargets().filter(function (t) {
             return t && t.connector_id === item.id && t.enabled !== false;
           });
           copied.textContent = "已从节点 " + item.origin.node_id + "/" + item.origin.connector_id +
@@ -343,7 +370,7 @@
         ro.className = "connectors-hint";
         ro.textContent = migratedEntry
           ? "已迁移到网关副本 " + migratedEntry.connector.id + "；节点继续负责入站/回复，本地通知已关闭。"
-          : "来自在线节点 " + (entry.node && (nodeDisplayName(entry.node) || entry.node.node_id) || "") + "，只读；可迁移通知到网关。";
+          : "来自在线节点 " + (entry.node && (G.nodeDisplayName(entry.node) || entry.node.node_id) || "") + "，只读；可迁移通知到网关。";
         note.appendChild(ro);
       }
       var actionsHost = card.querySelector(".card-actions");
@@ -352,54 +379,54 @@
         var providerActions = (schema && schema.actions) || [];
         providerActions.forEach(function (action) {
           if (!action || !action.key) { return; }
-          var actionBtn = connectorActionBtn(action.label || action.key, busy || !item.enabled, function (b) {
+          var actionBtn = G.connectorActionBtn(action.label || action.key, busy || !item.enabled, function (b) {
             runConnectorActionButton(entry, action, b);
           });
           actionsHost.appendChild(actionBtn);
         });
         if (item.enabled && item.active_owner && !item.owned_by_current_host) {
-          actionsHost.appendChild(connectorActionBtn("接管运行", busy, function (b) {
-            connectorTakeover(item, b);
+          actionsHost.appendChild(G.connectorActionBtn("接管运行", busy, function (b) {
+            G.connectorTakeover(item, b);
           }));
         }
         if (item.origin) {
-          actionsHost.appendChild(connectorActionBtn("管理通知目标", busy, function () {
-            manageNotifyTargets(item.id);
+          actionsHost.appendChild(G.connectorActionBtn("管理通知目标", busy, function () {
+            G.manageNotifyTargets(item.id);
           }));
-          var originNodeEntry = connectorNodeEntryForGateway(item);
+          var originNodeEntry = G.connectorNodeEntryForGateway(item);
           if (originNodeEntry) {
-            actionsHost.appendChild(connectorActionBtn("重新同步", busy, function (b) {
-              connectorMigrate(originNodeEntry, b, true);
+            actionsHost.appendChild(G.connectorActionBtn("重新同步", busy, function (b) {
+              G.connectorMigrate(originNodeEntry, b, true);
             }));
           }
         }
-        actionsHost.appendChild(connectorActionBtn("日志", busy, function () { openConnectorLogs(item); }));
-        actionsHost.appendChild(connectorActionBtn(item.enabled ? "停用" : "启用", busy, function () {
-          connectorToggle(item);
+        actionsHost.appendChild(G.connectorActionBtn("日志", busy, function () { G.openConnectorLogs(item); }));
+        actionsHost.appendChild(G.connectorActionBtn(item.enabled ? "停用" : "启用", busy, function () {
+          G.connectorToggle(item);
         }));
         if (!item.origin) {
-          actionsHost.appendChild(connectorActionBtn("编辑", busy, function () { openConnectorEditor(item); }));
+          actionsHost.appendChild(G.connectorActionBtn("编辑", busy, function () { G.openConnectorEditor(item); }));
         }
-        actionsHost.appendChild(connectorActionBtn("测试", busy || !item.enabled, function () { openConnectorTest(item); }));
+        actionsHost.appendChild(G.connectorActionBtn("测试", busy || !item.enabled, function () { G.openConnectorTest(item); }));
         if (!item.origin) {
-          actionsHost.appendChild(connectorActionBtn("重载", busy, function () { connectorReload(item); }));
+          actionsHost.appendChild(G.connectorActionBtn("重载", busy, function () { G.connectorReload(item); }));
         }
-        actionsHost.appendChild(connectorActionBtn("删除", busy, function (b) { connectorDelete(item, b); }, "danger-outline"));
+        actionsHost.appendChild(G.connectorActionBtn("删除", busy, function (b) { G.connectorDelete(item, b); }, "danger-outline"));
       } else {
         if (migratedEntry) {
-          actionsHost.appendChild(connectorActionBtn("管理通知目标", busy, function () {
-            manageNotifyTargets(migratedEntry.connector.id);
+          actionsHost.appendChild(G.connectorActionBtn("管理通知目标", busy, function () {
+            G.manageNotifyTargets(migratedEntry.connector.id);
           }));
-          actionsHost.appendChild(connectorActionBtn("重新同步", busy, function (b) {
-            connectorMigrate(entry, b, true);
+          actionsHost.appendChild(G.connectorActionBtn("重新同步", busy, function (b) {
+            G.connectorMigrate(entry, b, true);
           }));
         } else if (item.enabled && (item.provider === "qqbot" || item.provider === "wechat") &&
                    entry.node && (entry.node.capabilities || []).indexOf("connector-handoff") >= 0) {
-          actionsHost.appendChild(connectorActionBtn("迁移通知到网关", busy, function (b) {
-            connectorMigrate(entry, b, false);
+          actionsHost.appendChild(G.connectorActionBtn("迁移通知到网关", busy, function (b) {
+            G.connectorMigrate(entry, b, false);
           }));
         } else if (item.enabled && (item.provider === "qqbot" || item.provider === "wechat")) {
-          var oldBtn = connectorActionBtn("节点版本过旧", true, function () {});
+          var oldBtn = G.connectorActionBtn("节点版本过旧", true, function () {});
           oldBtn.title = "该节点未提供 connector-handoff；升级并重启节点后可迁移";
           actionsHost.appendChild(oldBtn);
         }
@@ -421,25 +448,25 @@
   function runConnectorActionButton(entry, action, btn) {
     var item = entry.connector;
     if (action && action.kind === "qr") {
-      openConnectorQRDialog(item, action, { draft: false });
+      G.openConnectorQRDialog(item, action, { draft: false });
       return;
     }
     var label = action.label || action.key;
     var path = connectorBasePath(entry) + "/" + encodeURIComponent(item.id) +
       "/actions/" + encodeURIComponent(action.key);
     btn.disabled = true;
-    apiJSON(path, { method: "POST" }).then(function (r) {
+    G.apiJSON(path, { method: "POST" }).then(function (r) {
       btn.disabled = false;
       if (!r.res.ok) {
-        notify(label + "失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
+        G.notify(label + "失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
         return;
       }
       var summary = connectorActionSummary(r.body);
-      notify("动作完成：" + (summary || label), "ok");
-      openConnectorActionResult(item, action, r.body);
+      G.notify("动作完成：" + (summary || label), "ok");
+      G.openConnectorActionResult(item, action, r.body);
     }).catch(function (err) {
       btn.disabled = false;
-      notify(label + "失败：" + (err && err.message ? err.message : err), "error");
+      G.notify(label + "失败：" + (err && err.message ? err.message : err), "error");
     });
   }
 
@@ -453,4 +480,3 @@
     if (!keys.length) { return ""; }
     try { return JSON.stringify(body); } catch (err) { return ""; }
   }
-

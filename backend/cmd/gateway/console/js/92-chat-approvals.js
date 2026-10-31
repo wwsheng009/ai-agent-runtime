@@ -1,3 +1,25 @@
+// 92-chat-approvals.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  chatInteractiveHint: chatInteractiveHint,
+  chatRenderApprovalArgs: chatRenderApprovalArgs,
+  chatRenderInteractive: chatRenderInteractive,
+  chatPostInput: chatPostInput,
+  chatSendApprovalDecision: chatSendApprovalDecision,
+  chatSendQuestionAnswer: chatSendQuestionAnswer,
+  chatToggleInteractiveDetail: chatToggleInteractiveDetail,
+  chatPlaceholder: chatPlaceholder,
+  chatShowHint: chatShowHint,
+  chatSyncComposer: chatSyncComposer,
+  chatSetSending: chatSetSending,
+  chatSyncSendState: chatSyncSendState,
+});
+
   /* ── 审批 / 提问交互区（与节点原版 Web 客户端同契约）─────────────
      数据来自节点 SSE：connected.pending_approval / pending_question、
      approval_requested、question_asked；决议走 POST /web/api/input：
@@ -6,7 +28,7 @@
      这样卡片上的「审批 / 回答」不必跳转到原版 Web。 */
 
   function chatInteractiveHint(text, kind) {
-    var hint = el("ci-answer-hint");
+    var hint = S.el("ci-answer-hint");
     if (!hint) { return; }
     hint.textContent = text || "";
     hint.hidden = !text;
@@ -24,7 +46,7 @@
       try { value = JSON.parse(value); } catch (err) { value = rawArgs; }
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      setText(target, typeof value === "string" ? value : (JSON.stringify(value, null, 2) || ""));
+      G.setText(target, typeof value === "string" ? value : (JSON.stringify(value, null, 2) || ""));
       return;
     }
     Object.keys(value).forEach(function (key) {
@@ -51,28 +73,28 @@
   }
 
   function chatRenderInteractive() {
-    var box = el("chat-interactive");
+    var box = S.el("chat-interactive");
     if (!box) { return; }
-    var st = chatState;
+    var st = S.chatState;
     if (!st || (!st.pendingApproval && !st.pendingQuestion)) {
       box.hidden = true;
       return;
     }
     var approval = st.pendingApproval;
     var question = st.pendingQuestion;
-    var kindEl = el("ci-kind");
-    var titleEl = el("ci-title");
-    var promptEl = el("ci-prompt");
-    var detail = el("ci-detail");
-    var toggle = el("ci-detail-toggle");
-    var actions = el("ci-actions");
-    var suggestions = el("ci-suggestions");
-    var form = el("ci-answer-form");
-    var answerInput = el("ci-answer-input");
+    var kindEl = S.el("ci-kind");
+    var titleEl = S.el("ci-title");
+    var promptEl = S.el("ci-prompt");
+    var detail = S.el("ci-detail");
+    var toggle = S.el("ci-detail-toggle");
+    var actions = S.el("ci-actions");
+    var suggestions = S.el("ci-suggestions");
+    var form = S.el("ci-answer-form");
+    var answerInput = S.el("ci-answer-input");
     if (approval) {
-      setText(kindEl, "待审批工具");
-      setText(titleEl, approval.tool_name || "?");
-      setText(promptEl, approval.prompt || "");
+      G.setText(kindEl, "待审批工具");
+      G.setText(titleEl, approval.tool_name || "?");
+      G.setText(promptEl, approval.prompt || "");
       chatRenderApprovalArgs(detail, approval.arguments);
       var args = approval.arguments;
       if (typeof args === "string") {
@@ -84,17 +106,17 @@
       // 写「显示详情」而内容已展开，第一次点击标签与动作相反。
       if (toggle) { toggle.hidden = !hasArgs; toggle.textContent = (detail && detail.hidden) ? "显示详情" : "隐藏详情"; }
       if (actions) { actions.hidden = false; }
-      if (el("ci-approve")) { el("ci-approve").disabled = false; }
-      if (el("ci-deny")) { el("ci-deny").disabled = false; }
+      if (S.el("ci-approve")) { S.el("ci-approve").disabled = false; }
+      if (S.el("ci-deny")) { S.el("ci-deny").disabled = false; }
       if (suggestions) { suggestions.hidden = true; suggestions.innerHTML = ""; }
       if (form) { form.hidden = true; }
       chatInteractiveHint("", "");
     } else {
-      setText(kindEl, "提问");
+      G.setText(kindEl, "提问");
       // 交互条不暴露 question_id：id 只走数据面（question_answer 用它回执），
       // 界面保留「提问」+ 题面 + 建议/自由输入即可。
-      setText(titleEl, "");
-      setText(promptEl, question.prompt || "");
+      G.setText(titleEl, "");
+      G.setText(promptEl, question.prompt || "");
       if (detail) { detail.hidden = true; detail.textContent = ""; }
       if (toggle) { toggle.hidden = true; }
       if (actions) { actions.hidden = true; }
@@ -123,9 +145,9 @@
   }
 
   function chatPostInput(payload) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { return Promise.reject(new Error("面板已关闭")); }
-    return api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/input", {
+    return G.api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/input", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -137,19 +159,19 @@
   }
 
   function chatSendApprovalDecision(allow) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st || !st.pendingApproval) { return; }
     var requestID = st.pendingApproval.request_id;
-    if (!requestID) { notify("审批请求缺少 request_id，无法提交", "error"); return; }
-    var approveBtn = el("ci-approve");
-    var denyBtn = el("ci-deny");
+    if (!requestID) { G.notify("审批请求缺少 request_id，无法提交", "error"); return; }
+    var approveBtn = S.el("ci-approve");
+    var denyBtn = S.el("ci-deny");
     if (approveBtn) { approveBtn.disabled = true; }
     if (denyBtn) { denyBtn.disabled = true; }
     chatInteractiveHint("已提交，等待节点确认…", "");
     chatPostInput({ type: "approval", request_id: requestID, allow: !!allow }).then(function (r) {
       var body = r.body || {};
       if (body.status === "resolved") {
-        chatNotice("");
+        G.chatNotice("");
         chatInteractiveHint("", "");
       } else {
         chatInteractiveHint(body.reason || ("提交失败（" + (body.status || r.status) + "）"), "error");
@@ -164,20 +186,20 @@
   }
 
   function chatSendQuestionAnswer(answer) {
-    var st = chatState;
+    var st = S.chatState;
     if (!st || !st.pendingQuestion) { return; }
     var text = String(answer == null ? "" : answer).trim();
     if (!text) { chatInteractiveHint("请输入回答", "error"); return; }
     var questionID = st.pendingQuestion.question_id;
-    if (!questionID) { notify("提问缺少 question_id，无法提交", "error"); return; }
-    var submit = el("ci-answer-submit");
+    if (!questionID) { G.notify("提问缺少 question_id，无法提交", "error"); return; }
+    var submit = S.el("ci-answer-submit");
     if (submit) { submit.disabled = true; }
     chatInteractiveHint("已提交，等待节点确认…", "");
     chatPostInput({ type: "question_answer", question_id: questionID, answer: text }).then(function (r) {
       var body = r.body || {};
       if (body.status === "resolved") {
         chatInteractiveHint("", "");
-        var input = el("ci-answer-input");
+        var input = S.el("ci-answer-input");
         if (input) { input.value = ""; }
       } else {
         chatInteractiveHint(body.reason || ("提交失败（" + (body.status || r.status) + "）"), "error");
@@ -190,29 +212,29 @@
   }
 
   function chatToggleInteractiveDetail() {
-    var detail = el("ci-detail");
-    var toggle = el("ci-detail-toggle");
+    var detail = S.el("ci-detail");
+    var toggle = S.el("ci-detail-toggle");
     if (!detail || !toggle) { return; }
     detail.hidden = !detail.hidden;
     toggle.textContent = detail.hidden ? "显示详情" : "隐藏详情";
   }
 
   (function bindChatInteractive() {
-    var approve = el("ci-approve");
+    var approve = S.el("ci-approve");
     if (approve) { approve.addEventListener("click", function () { chatSendApprovalDecision(true); }); }
-    var deny = el("ci-deny");
+    var deny = S.el("ci-deny");
     if (deny) { deny.addEventListener("click", function () { chatSendApprovalDecision(false); }); }
-    var toggle = el("ci-detail-toggle");
+    var toggle = S.el("ci-detail-toggle");
     if (toggle) { toggle.addEventListener("click", chatToggleInteractiveDetail); }
-    var form = el("ci-answer-form");
+    var form = S.el("ci-answer-form");
     if (form) {
       form.addEventListener("submit", function (e) {
         e.preventDefault();
-        var input = el("ci-answer-input");
+        var input = S.el("ci-answer-input");
         chatSendQuestionAnswer(input ? input.value : "");
       });
     }
-    var answer = el("ci-answer-input");
+    var answer = S.el("ci-answer-input");
     if (answer) {
       answer.addEventListener("keydown", function (e) {
         if (e.key !== "Enter" || e.shiftKey) { return; }
@@ -225,8 +247,8 @@
 
   // chatPlaceholder 在列表为空时给一句空状态文案（复用同一个节点，避免堆叠）。
   function chatPlaceholder(text) {
-    var host = el("chat-list");
-    var node = el("chat-placeholder");
+    var host = S.el("chat-list");
+    var node = S.el("chat-placeholder");
     if (!host) { return; }
     if (!node) {
       node = document.createElement("p");
@@ -234,11 +256,11 @@
       node.id = "chat-placeholder";
       host.appendChild(node);
     }
-    setText(node, text);
+    G.setText(node, text);
   }
 
   function chatShowHint(text) {
-    var hint = el("chat-hint");
+    var hint = S.el("chat-hint");
     if (!hint) { return; }
     hint.textContent = text || "";
     hint.hidden = !text;
@@ -248,15 +270,15 @@
   //   idle（纸飞机）→ posting（转圈）→ busy（停止方块）→ interrupting（转圈，禁用）。
   // busy 来自 registry/SSE 的会话忙闲，不靠“输入框里有没有字”猜测。
   function chatSyncComposer() {
-    var st = chatState;
-    var btn = el("chat-send");
-    var input = el("chat-input");
+    var st = S.chatState;
+    var btn = S.el("chat-send");
+    var input = S.el("chat-input");
     if (!btn) { return; }
     var busy = !!(st && st.busy);
     var interrupting = !!(st && st.interrupting);
     var sending = !!(st && st.sending);
     var stale = !!(st && st.node && st.node.stale);
-    var canInput = !!(st && chatCanInput(st.node));
+    var canInput = !!(st && G.chatCanInput(st.node));
     var hasText = !!(input && String(input.value || "").trim());
     var label = "发送";
     var disabled = false;
@@ -280,7 +302,7 @@
     btn.disabled = disabled;
     btn.setAttribute("aria-label", label);
     btn.title = label === "发送" ? "发送（Enter）" : label;
-    setText(btn.querySelector(".chat-send-label"), label);
+    G.setText(btn.querySelector(".chat-send-label"), label);
     if (input) {
       input.placeholder = interrupting
         ? "正在停止当前任务…"
@@ -292,15 +314,14 @@
 
   // chatSetSending 保留原调用点语义，实际由统一状态机决定按钮外观。
   function chatSetSending(sending) {
-    var st = chatState;
+    var st = S.chatState;
     if (st) { st.sending = !!sending; }
     chatSyncComposer();
   }
 
   // chatSyncSendState 在每次输入变化时刷新按钮可用性。
   function chatSyncSendState() {
-    var st = chatState;
+    var st = S.chatState;
     if (!st || st.sending) { return; }
     chatSyncComposer();
   }
-

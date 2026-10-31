@@ -1,12 +1,46 @@
+// 98-notify-im.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  installHintDismissed: installHintDismissed,
+  renderInstallHint: renderInstallHint,
+  ensureNotifyDraft: ensureNotifyDraft,
+  notifyIMRequest: notifyIMRequest,
+  notifyIMShowError: notifyIMShowError,
+  notifyIMEmptyConfig: notifyIMEmptyConfig,
+  notifyIMTargets: notifyIMTargets,
+  notifyIMScopeValuesField: notifyIMScopeValuesField,
+  populateNotifyIMNodes: populateNotifyIMNodes,
+  notifyKindLabel: notifyKindLabel,
+  notifyIMCollectKinds: notifyIMCollectKinds,
+  notifyIMSyncKindsHint: notifyIMSyncKindsHint,
+  notifyIMClearKinds: notifyIMClearKinds,
+  renderNotifyIMKinds: renderNotifyIMKinds,
+  notifyIMSourceField: notifyIMSourceField,
+  renderNotifyIMTargets: renderNotifyIMTargets,
+  loadNotifyIM: loadNotifyIM,
+  setNotifyIMKindsSelection: setNotifyIMKindsSelection,
+  notifyIMEditorReset: notifyIMEditorReset,
+  closeNotifyIMEditor: closeNotifyIMEditor,
+  openNotifyIMEditor: openNotifyIMEditor,
+  buildNotifyIMTargetFromEditor: buildNotifyIMTargetFromEditor,
+  applyNotifyIMEditor: applyNotifyIMEditor,
+  saveNotifyIM: saveNotifyIM,
+});
+
   /* ─────────────────────── PWA install hint ─────────────────── */
 
-  var deferredInstall = null;
+  S.deferredInstall = null;
 
   window.addEventListener("beforeinstallprompt", function (event) {
     // Android/Chrome: keep the prompt for an explicit "安装" click instead of
     // letting the mini-infobar disappear without teaching the user why.
     event.preventDefault();
-    deferredInstall = event;
+    S.deferredInstall = event;
     renderInstallHint();
   });
 
@@ -15,18 +49,18 @@
   }
 
   function renderInstallHint() {
-    var hint = el("install-hint");
+    var hint = S.el("install-hint");
     if (!hint) { return; }
-    if (!authedState || installHintDismissed()) { hint.hidden = true; return; }
-    var action = el("install-hint-action");
-    if (deferredInstall) {
-      el("install-hint-text").textContent = "安装到主屏幕后可像 App 一样打开，并在后台收到通知提醒。";
+    if (!S.authedState || installHintDismissed()) { hint.hidden = true; return; }
+    var action = S.el("install-hint-action");
+    if (S.deferredInstall) {
+      S.el("install-hint-text").textContent = "安装到主屏幕后可像 App 一样打开，并在后台收到通知提醒。";
       action.hidden = false;
       hint.hidden = false;
       return;
     }
-    if (isIOSDevice() && !isStandalone()) {
-      el("install-hint-text").textContent = "iPhone/iPad 需先安装：Safari 分享 → 添加到主屏幕，再从桌面图标打开，后台通知才会生效。";
+    if (G.isIOSDevice() && !G.isStandalone()) {
+      S.el("install-hint-text").textContent = "iPhone/iPad 需先安装：Safari 分享 → 添加到主屏幕，再从桌面图标打开，后台通知才会生效。";
       action.hidden = true;
       hint.hidden = false;
       return;
@@ -34,90 +68,90 @@
     hint.hidden = true;
   }
 
-  el("install-hint-dismiss").addEventListener("click", function () {
-    el("install-hint").hidden = true;
+  S.el("install-hint-dismiss").addEventListener("click", function () {
+    S.el("install-hint").hidden = true;
     try { localStorage.setItem("aicli-gw-install-hint-dismissed", "1"); } catch (e) { /* storage unavailable */ }
   });
-  el("install-hint-action").addEventListener("click", function () {
-    var ev = deferredInstall;
-    deferredInstall = null;
-    el("install-hint").hidden = true;
+  S.el("install-hint-action").addEventListener("click", function () {
+    var ev = S.deferredInstall;
+    S.deferredInstall = null;
+    S.el("install-hint").hidden = true;
     if (ev && ev.prompt) { ev.prompt(); }
   });
 
   /* ─────────────────── 通知设置页交互 ───────────────────────── */
 
   function ensureNotifyDraft() {
-    notifyPolicyDraft = notifyPolicyDraft || { version: 1, global: {}, sessions: {}, channels: {} };
-    notifyPolicyDraft.global = notifyPolicyDraft.global || {};
-    return notifyPolicyDraft;
+    S.notifyPolicyDraft = S.notifyPolicyDraft || { version: 1, global: {}, sessions: {}, channels: {} };
+    S.notifyPolicyDraft.global = S.notifyPolicyDraft.global || {};
+    return S.notifyPolicyDraft;
   }
 
-  var notifyEnabledInput = el("notify-global-enabled");
-  if (notifyEnabledInput) {
-    notifyEnabledInput.addEventListener("change", function () {
-      ensureNotifyDraft().global.muted = !notifyEnabledInput.checked;
-      notifyRefreshDirty();
+  S.notifyEnabledInput = S.el("notify-global-enabled");
+  if (S.notifyEnabledInput) {
+    S.notifyEnabledInput.addEventListener("change", function () {
+      ensureNotifyDraft().global.muted = !S.notifyEnabledInput.checked;
+      G.notifyRefreshDirty();
     });
   }
-  var notifyMinInput = el("notify-min-priority");
-  if (notifyMinInput) {
-    notifyMinInput.addEventListener("change", function () {
-      ensureNotifyDraft().global.min_priority = notifyMinInput.value;
-      renderNotifyPriorityHint();
-      notifyRefreshDirty();
+  S.notifyMinInput = S.el("notify-min-priority");
+  if (S.notifyMinInput) {
+    S.notifyMinInput.addEventListener("change", function () {
+      ensureNotifyDraft().global.min_priority = S.notifyMinInput.value;
+      G.renderNotifyPriorityHint();
+      G.notifyRefreshDirty();
     });
   }
-  var notifyQuietAdd = el("notify-quiet-add");
-  if (notifyQuietAdd) {
-    notifyQuietAdd.addEventListener("click", function () {
-      notifyQuietTouched = true;
-      var first = notifyAppendQuietRow({ start: "", end: "" });
+  S.notifyQuietAdd = S.el("notify-quiet-add");
+  if (S.notifyQuietAdd) {
+    S.notifyQuietAdd.addEventListener("click", function () {
+      S.notifyQuietTouched = true;
+      var first = G.notifyAppendQuietRow({ start: "", end: "" });
       if (first) { first.focus(); }
-      notifyCollectQuietRows(true);
+      G.notifyCollectQuietRows(true);
     });
   }
-  var notifySessionSearch = el("notify-session-search");
-  if (notifySessionSearch) {
-    notifySessionSearch.addEventListener("input", function () {
-      notifySessionQuery = notifySessionSearch.value || "";
-      renderNotifyPolicySessions();
+  S.notifySessionSearch = S.el("notify-session-search");
+  if (S.notifySessionSearch) {
+    S.notifySessionSearch.addEventListener("input", function () {
+      S.notifySessionQuery = S.notifySessionSearch.value || "";
+      G.renderNotifyPolicySessions();
     });
   }
-  var notifySessionOnly = el("notify-session-only-custom");
-  if (notifySessionOnly) {
-    notifySessionOnly.addEventListener("change", function () {
-      notifySessionOnlyCustom = notifySessionOnly.checked;
-      renderNotifyPolicySessions();
+  S.notifySessionOnly = S.el("notify-session-only-custom");
+  if (S.notifySessionOnly) {
+    S.notifySessionOnly.addEventListener("change", function () {
+      S.notifySessionOnlyCustom = S.notifySessionOnly.checked;
+      G.renderNotifyPolicySessions();
     });
   }
-  var notifySaveBtn = el("notify-save");
-  if (notifySaveBtn) { notifySaveBtn.addEventListener("click", saveNotifyPolicy); }
-  var notifyResetBtn = el("notify-reset");
-  if (notifyResetBtn) { notifyResetBtn.addEventListener("click", resetNotifyPolicyDraft); }
-  var notifyTestBtn = el("notify-test");
-  if (notifyTestBtn) {
-    notifyTestBtn.addEventListener("click", function () {
-      var sidebarTest = el("push-test");
+  S.notifySaveBtn = S.el("notify-save");
+  if (S.notifySaveBtn) { S.notifySaveBtn.addEventListener("click", G.saveNotifyPolicy); }
+  S.notifyResetBtn = S.el("notify-reset");
+  if (S.notifyResetBtn) { S.notifyResetBtn.addEventListener("click", G.resetNotifyPolicyDraft); }
+  S.notifyTestBtn = S.el("notify-test");
+  if (S.notifyTestBtn) {
+    S.notifyTestBtn.addEventListener("click", function () {
+      var sidebarTest = S.el("push-test");
       if (!sidebarTest) { return; }
-      notifyTestBtn.disabled = true;
+      S.notifyTestBtn.disabled = true;
       sidebarTest.click();
-      setTimeout(function () { notifyTestBtn.disabled = false; }, 1500);
+      setTimeout(function () { S.notifyTestBtn.disabled = false; }, 1500);
     });
   }
-  notifyRefreshDirty();
+  G.notifyRefreshDirty();
 
   /* ── Bot 通道（网关自持 IM 目标，docs/gateway/18 §6.1）─────────────
      与上方通知策略是两份独立配置：策略决定"发不发"，Bot 目标决定"发到
      哪个 IM 会话"。未配置目标时后端不注册通道，行为与以往一致。 */
 
-  var notifyIMState = { config: null, meta: null, busy: false };
+  S.notifyIMState = { config: null, meta: null, busy: false };
 
   function notifyIMRequest(path, options) {
     var opts = options || {};
     // 走 api() 而不是裸 fetch：IM 目标读写同样受 owner 会话保护，过期时也要
     // 回到登录页，而不是把 401 当成"配置读取失败"。
-    return api(path, opts).then(function (resp) {
+    return G.api(path, opts).then(function (resp) {
       return resp.text().then(function (text) {
         var data = null;
         if (text) {
@@ -133,7 +167,7 @@
   }
 
   function notifyIMShowError(msg) {
-    var box = el("notify-im-error");
+    var box = S.el("notify-im-error");
     if (!box) { return; }
     if (!msg) {
       box.hidden = true;
@@ -149,28 +183,28 @@
   }
 
   function notifyIMTargets() {
-    if (!notifyIMState.config || !notifyIMState.config.targets) { return []; }
-    return notifyIMState.config.targets;
+    if (!S.notifyIMState.config || !S.notifyIMState.config.targets) { return []; }
+    return S.notifyIMState.config.targets;
   }
 
   function notifyIMScopeValuesField() {
-    var scope = el("notify-im-scope");
-    var field = el("notify-im-scope-values-field");
+    var scope = S.el("notify-im-scope");
+    var field = S.el("notify-im-scope-values-field");
     if (!scope || !field) { return; }
     field.hidden = scope.value === "all";
   }
 
   // populateNotifyIMNodes 把在线节点填进「节点 Bot」下拉（离线快照不进入）。
   function populateNotifyIMNodes() {
-    var sel = el("notify-im-node");
+    var sel = S.el("notify-im-node");
     if (!sel) { return; }
     var current = sel.value;
     sel.innerHTML = "";
-    var nodes = (lastNodes || []).filter(function (n) { return n && !n.stale && n.node_id; });
+    var nodes = (S.lastNodes || []).filter(function (n) { return n && !n.stale && n.node_id; });
     nodes.forEach(function (n) {
       var opt = document.createElement("option");
       opt.value = n.node_id;
-      opt.textContent = (nodeDisplayName(n) || n.node_id) + " · " + (n.kind || "agent");
+      opt.textContent = (G.nodeDisplayName(n) || n.node_id) + " · " + (n.kind || "agent");
       sel.appendChild(opt);
     });
     if (!nodes.length) {
@@ -185,20 +219,20 @@
 
   // IM 目标的事件类型：多选复选框，值域与「哪些消息触发通知」同源
   // （/api/notify/policy 的 meta.kinds），不再要求用户手写逗号分隔字符串。
-  var notifyIMKindsSignature = "";
+  S.notifyIMKindsSignature = "";
 
   function notifyKindLabel(kind) {
-    var want = notifyNormalizeKind(kind);
-    var specs = notifyPolicyKindsMeta();
+    var want = G.notifyNormalizeKind(kind);
+    var specs = G.notifyPolicyKindsMeta();
     for (var i = 0; i < specs.length; i++) {
-      if (notifyNormalizeKind(specs[i].kind) === want) { return specs[i].label; }
+      if (G.notifyNormalizeKind(specs[i].kind) === want) { return specs[i].label; }
     }
     return kind;
   }
 
   function notifyIMCollectKinds() {
     var out = [];
-    var host = el("notify-im-kinds");
+    var host = S.el("notify-im-kinds");
     if (!host) { return out; }
     host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
       if (input.checked) { out.push(input.getAttribute("data-notify-kind")); }
@@ -207,9 +241,9 @@
   }
 
   function notifyIMSyncKindsHint() {
-    var hint = el("notify-im-kinds-hint");
+    var hint = S.el("notify-im-kinds-hint");
     if (!hint) { return; }
-    var source = el("notify-im-source");
+    var source = S.el("notify-im-source");
     var isNode = !!source && source.value === "node";
     var picked = notifyIMCollectKinds();
     if (picked.length) {
@@ -224,7 +258,7 @@
   }
 
   function notifyIMClearKinds() {
-    var host = el("notify-im-kinds");
+    var host = S.el("notify-im-kinds");
     if (host) {
       host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
         input.checked = false;
@@ -236,11 +270,11 @@
   // renderNotifyIMKinds 按当前 kinds 元数据补齐复选框；元数据不变时只刷新说明，
   // 不会清掉用户已勾选的项（切换来源、重新打开页面都安全）。
   function renderNotifyIMKinds() {
-    var host = el("notify-im-kinds");
+    var host = S.el("notify-im-kinds");
     if (!host) { return; }
-    var specs = notifyPolicyKindsMeta();
+    var specs = G.notifyPolicyKindsMeta();
     var signature = specs.map(function (spec) { return spec.kind; }).join("|");
-    if (signature !== notifyIMKindsSignature) {
+    if (signature !== S.notifyIMKindsSignature) {
       host.textContent = "";
       specs.forEach(function (spec) {
         var label = document.createElement("label");
@@ -258,24 +292,24 @@
         label.appendChild(copy);
         host.appendChild(label);
       });
-      notifyIMKindsSignature = signature;
+      S.notifyIMKindsSignature = signature;
     }
     notifyIMSyncKindsHint();
   }
 
   // notifyIMSourceField 切换「网关 Bot / 节点 Bot」的可见字段与说明。
   function notifyIMSourceField() {
-    var source = el("notify-im-source");
+    var source = S.el("notify-im-source");
     if (!source) { return; }
     var isNode = source.value === "node";
-    var conn = el("notify-im-gateway-connector-field");
-    var chat = el("notify-im-gateway-chat-field");
-    var node = el("notify-im-node-field");
+    var conn = S.el("notify-im-gateway-connector-field");
+    var chat = S.el("notify-im-gateway-chat-field");
+    var node = S.el("notify-im-node-field");
     if (conn) { conn.hidden = isNode; }
     if (chat) { chat.hidden = isNode; }
     if (node) { node.hidden = !isNode; }
     renderNotifyIMKinds();
-    var hint = el("notify-im-source-hint");
+    var hint = S.el("notify-im-source-hint");
     if (hint) {
       hint.textContent = isNode
         ? "节点 Bot（兼容旧部署）：委托目标节点，用该节点自己的 bot 按本地绑定发送；通知依赖节点在线与节点策略。QQ/微信建议改用连接器页的「复制到网关」。测试需要 scope=sessions 且至少一个会话。"
@@ -285,14 +319,14 @@
   }
 
   function renderNotifyIMTargets() {
-    var host = el("notify-im-targets");
+    var host = S.el("notify-im-targets");
     if (!host) { return; }
     // 保留输入焦点：整表重建会打断正在编辑的表单，因此只在渲染后恢复。
     host.textContent = "";
     var targets = notifyIMTargets();
-    var empty = el("notify-im-empty");
+    var empty = S.el("notify-im-empty");
     if (empty) { empty.hidden = targets.length > 0; }
-    var count = el("notify-im-count");
+    var count = S.el("notify-im-count");
     if (count) {
       count.hidden = targets.length === 0;
       count.textContent = targets.length + " 个目标";
@@ -358,8 +392,8 @@
       testBtn.className = "btn ghost sm";
       testBtn.textContent = "测试";
       testBtn.addEventListener("click", function () {
-        if (notifyIMState.busy) { return; }
-        notifyIMState.busy = true;
+        if (S.notifyIMState.busy) { return; }
+        S.notifyIMState.busy = true;
         testBtn.disabled = true;
         notifyIMShowError("");
         notifyIMRequest("/api/notify/im/test", {
@@ -368,11 +402,11 @@
           // 带上完整 target：草稿（尚未保存）也能直接测试。
           body: JSON.stringify({ target_id: target.id, target: target })
         }).then(function () {
-          notify("已发送测试消息：" + (target.label || target.id), "ok");
+          G.notify("已发送测试消息：" + (target.label || target.id), "ok");
         }).catch(function (err) {
           notifyIMShowError("测试失败：" + err.message);
         }).then(function () {
-          notifyIMState.busy = false;
+          S.notifyIMState.busy = false;
           testBtn.disabled = false;
         });
       });
@@ -383,7 +417,7 @@
       delBtn.className = "btn ghost sm";
       delBtn.textContent = "移除";
       delBtn.addEventListener("click", function () {
-        notifyIMState.config.targets.splice(index, 1);
+        S.notifyIMState.config.targets.splice(index, 1);
         renderNotifyIMTargets();
       });
       tools.appendChild(delBtn);
@@ -395,16 +429,16 @@
 
   function loadNotifyIM() {
     return notifyIMRequest("/api/notify/im").then(function (data) {
-      notifyIMState.config = (data && data.config) || notifyIMEmptyConfig();
-      if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
-      notifyIMState.meta = (data && data.meta) || null;
+      S.notifyIMState.config = (data && data.config) || notifyIMEmptyConfig();
+      if (!S.notifyIMState.config.targets) { S.notifyIMState.config.targets = []; }
+      S.notifyIMState.meta = (data && data.meta) || null;
       notifyIMShowError(data && data.warning ? ("配置未生效：" + data.warning) : "");
       notifyIMSourceField();
       populateNotifyIMNodes();
       // 配置从网关重载后，编辑器里可能还停在一个已被替换/删除的目标上：收起它。
       closeNotifyIMEditor();
       renderNotifyIMTargets();
-      ensureGatewayConnectorOptions();
+      G.ensureGatewayConnectorOptions();
     }).catch(function (err) {
       notifyIMShowError("加载 Bot 通道配置失败：" + err.message);
     });
@@ -413,33 +447,33 @@
   // ── Bot 目标编辑器 ────────────────────────────────────────────
   // 全局「哪些消息触发通知」与单个目标的收件范围是两个层级：这里只编辑「这一个
   // 目标」的来源/连接/范围/事件类型，不把 per-chat 的 kinds 混进全局设置面。
-  var notifyIMEditingId = null;
+  S.notifyIMEditingId = null;
 
   function setNotifyIMKindsSelection(kinds) {
-    var host = el("notify-im-kinds");
+    var host = S.el("notify-im-kinds");
     if (!host) { return; }
     var want = {};
-    (kinds || []).forEach(function (kind) { want[notifyNormalizeKind(kind)] = true; });
+    (kinds || []).forEach(function (kind) { want[G.notifyNormalizeKind(kind)] = true; });
     host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
-      input.checked = !!want[notifyNormalizeKind(input.getAttribute("data-notify-kind"))];
+      input.checked = !!want[G.notifyNormalizeKind(input.getAttribute("data-notify-kind"))];
     });
     notifyIMSyncKindsHint();
   }
 
   function notifyIMEditorReset() {
-    var source = el("notify-im-source");
+    var source = S.el("notify-im-source");
     if (source) { source.value = "gateway"; }
-    var connector = el("notify-im-connector");
+    var connector = S.el("notify-im-connector");
     if (connector) { connector.value = ""; }
-    var chat = el("notify-im-chat");
+    var chat = S.el("notify-im-chat");
     if (chat) { chat.value = ""; }
-    var node = el("notify-im-node");
+    var node = S.el("notify-im-node");
     if (node) { node.value = ""; }
-    var label = el("notify-im-label");
+    var label = S.el("notify-im-label");
     if (label) { label.value = ""; }
-    var scope = el("notify-im-scope");
+    var scope = S.el("notify-im-scope");
     if (scope) { scope.value = "all"; }
-    var values = el("notify-im-scope-values");
+    var values = S.el("notify-im-scope-values");
     if (values) { values.value = ""; }
     notifyIMClearKinds();
     notifyIMScopeValuesField();
@@ -447,50 +481,50 @@
   }
 
   function closeNotifyIMEditor() {
-    var box = el("notify-im-editor");
+    var box = S.el("notify-im-editor");
     if (box) { box.hidden = true; }
-    notifyIMEditingId = null;
+    S.notifyIMEditingId = null;
     notifyIMEditorReset();
   }
 
   function openNotifyIMEditor(target) {
-    var box = el("notify-im-editor");
+    var box = S.el("notify-im-editor");
     if (!box) { return; }
-    notifyIMEditingId = target ? target.id : null;
+    S.notifyIMEditingId = target ? target.id : null;
     notifyIMEditorReset();
-    var title = el("notify-im-editor-title");
+    var title = S.el("notify-im-editor-title");
     if (title) {
       title.textContent = target ? ("配置目标：" + (target.label || target.id)) : "添加 Bot 目标";
     }
-    var mode = el("notify-im-editor-mode");
+    var mode = S.el("notify-im-editor-mode");
     if (mode) {
       mode.textContent = target ? "编辑" : "新增";
       mode.hidden = false;
     }
     if (target) {
       var isNode = (target.source || "gateway").toLowerCase() === "node";
-      var source = el("notify-im-source");
+      var source = S.el("notify-im-source");
       if (source) { source.value = isNode ? "node" : "gateway"; }
       notifyIMSourceField();
       if (isNode) {
         populateNotifyIMNodes();
-        var node = el("notify-im-node");
+        var node = S.el("notify-im-node");
         if (node) { node.value = target.node_id || ""; }
       } else {
-        var chat = el("notify-im-chat");
+        var chat = S.el("notify-im-chat");
         if (chat) { chat.value = target.chat || ""; }
         // 连接器下拉是懒加载的：选项到齐后再回填，避免编辑时被清空。
-        ensureGatewayConnectorOptions().then(function () {
-          var connector = el("notify-im-connector");
+        G.ensureGatewayConnectorOptions().then(function () {
+          var connector = S.el("notify-im-connector");
           if (connector && target.connector_id) { connector.value = target.connector_id; }
         });
       }
-      var label = el("notify-im-label");
+      var label = S.el("notify-im-label");
       if (label) { label.value = target.label || ""; }
-      var scope = el("notify-im-scope");
+      var scope = S.el("notify-im-scope");
       if (scope) { scope.value = target.scope || "all"; }
       notifyIMScopeValuesField();
-      var values = el("notify-im-scope-values");
+      var values = S.el("notify-im-scope-values");
       if (values) {
         var list = target.scope === "nodes" ? (target.nodes || [])
           : target.scope === "sessions" ? (target.sessions || []) : [];
@@ -506,13 +540,13 @@
   // buildNotifyIMTargetFromEditor 读取编辑器字段并校验；失败返回 null（错误已
   // 显示）。空选事件类型 = 该来源的默认语义（网关=全部，节点=error/waiting）。
   function buildNotifyIMTargetFromEditor() {
-    var sourceEl = el("notify-im-source");
-    var connector = el("notify-im-connector");
-    var chat = el("notify-im-chat");
-    var node = el("notify-im-node");
-    var label = el("notify-im-label");
-    var scope = el("notify-im-scope");
-    var values = el("notify-im-scope-values");
+    var sourceEl = S.el("notify-im-source");
+    var connector = S.el("notify-im-connector");
+    var chat = S.el("notify-im-chat");
+    var node = S.el("notify-im-node");
+    var label = S.el("notify-im-label");
+    var scope = S.el("notify-im-scope");
+    var values = S.el("notify-im-scope-values");
     if (!sourceEl || !scope) { return null; }
     var source = sourceEl.value === "node" ? "node" : "gateway";
     var scopeValue = scope.value || "all";
@@ -559,10 +593,10 @@
     var built = buildNotifyIMTargetFromEditor();
     if (!built) { return; }
     var list = notifyIMTargets();
-    if (notifyIMEditingId != null) {
+    if (S.notifyIMEditingId != null) {
       for (var i = 0; i < list.length; i++) {
-        if (list[i].id === notifyIMEditingId) {
-          built.id = notifyIMEditingId;
+        if (list[i].id === S.notifyIMEditingId) {
+          built.id = S.notifyIMEditingId;
           // 启用开关是列表上的快捷操作，编辑保存不能把它复位。
           built.enabled = list[i].enabled !== false;
           list[i] = built;
@@ -578,8 +612,8 @@
   }
 
   function saveNotifyIM() {
-    if (notifyIMState.busy) { return; }
-    notifyIMState.busy = true;
+    if (S.notifyIMState.busy) { return; }
+    S.notifyIMState.busy = true;
     notifyIMShowError("");
     var payload = { version: 1, targets: notifyIMTargets() };
     notifyIMRequest("/api/notify/im", {
@@ -587,30 +621,29 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }).then(function (data) {
-      notifyIMState.config = (data && data.config) || payload;
-      if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
+      S.notifyIMState.config = (data && data.config) || payload;
+      if (!S.notifyIMState.config.targets) { S.notifyIMState.config.targets = []; }
       renderNotifyIMTargets();
-      notify("Bot 通道配置已保存", "ok");
+      G.notify("Bot 通道配置已保存", "ok");
     }).catch(function (err) {
       notifyIMShowError("保存失败：" + err.message);
     }).then(function () {
-      notifyIMState.busy = false;
+      S.notifyIMState.busy = false;
     });
   }
 
-  var notifyIMAddBtn = el("notify-im-add");
-  if (notifyIMAddBtn) { notifyIMAddBtn.addEventListener("click", function () { openNotifyIMEditor(null); }); }
-  var notifyIMApplyBtn = el("notify-im-apply");
-  if (notifyIMApplyBtn) { notifyIMApplyBtn.addEventListener("click", applyNotifyIMEditor); }
-  var notifyIMCancelBtn = el("notify-im-cancel");
-  if (notifyIMCancelBtn) { notifyIMCancelBtn.addEventListener("click", closeNotifyIMEditor); }
-  var notifyIMSaveBtn = el("notify-im-save");
-  if (notifyIMSaveBtn) { notifyIMSaveBtn.addEventListener("click", saveNotifyIM); }
-  var notifyIMReloadBtn = el("notify-im-reload");
-  if (notifyIMReloadBtn) { notifyIMReloadBtn.addEventListener("click", loadNotifyIM); }
-  var notifyIMScopeSelect = el("notify-im-scope");
-  if (notifyIMScopeSelect) { notifyIMScopeSelect.addEventListener("change", notifyIMScopeValuesField); }
-  var notifyIMSourceSelect = el("notify-im-source");
-  if (notifyIMSourceSelect) { notifyIMSourceSelect.addEventListener("change", notifyIMSourceField); }
-  if (el("notify-im-targets")) { loadNotifyIM(); }
-
+  S.notifyIMAddBtn = S.el("notify-im-add");
+  if (S.notifyIMAddBtn) { S.notifyIMAddBtn.addEventListener("click", function () { openNotifyIMEditor(null); }); }
+  S.notifyIMApplyBtn = S.el("notify-im-apply");
+  if (S.notifyIMApplyBtn) { S.notifyIMApplyBtn.addEventListener("click", applyNotifyIMEditor); }
+  S.notifyIMCancelBtn = S.el("notify-im-cancel");
+  if (S.notifyIMCancelBtn) { S.notifyIMCancelBtn.addEventListener("click", closeNotifyIMEditor); }
+  S.notifyIMSaveBtn = S.el("notify-im-save");
+  if (S.notifyIMSaveBtn) { S.notifyIMSaveBtn.addEventListener("click", saveNotifyIM); }
+  S.notifyIMReloadBtn = S.el("notify-im-reload");
+  if (S.notifyIMReloadBtn) { S.notifyIMReloadBtn.addEventListener("click", loadNotifyIM); }
+  S.notifyIMScopeSelect = S.el("notify-im-scope");
+  if (S.notifyIMScopeSelect) { S.notifyIMScopeSelect.addEventListener("change", notifyIMScopeValuesField); }
+  S.notifyIMSourceSelect = S.el("notify-im-source");
+  if (S.notifyIMSourceSelect) { S.notifyIMSourceSelect.addEventListener("change", notifyIMSourceField); }
+  if (S.el("notify-im-targets")) { loadNotifyIM(); }

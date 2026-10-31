@@ -1,11 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -63,10 +62,7 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		}
 	}
 
-	js, err := os.ReadFile("console/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
+	js := readConsoleAsset(t, "app.js")
 	for _, want := range []string{
 		"function loadMounts",
 		"function renderMounts",
@@ -101,7 +97,7 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		"function bindCardMenu",
 		"function refreshCurrentView",
 		"function announceAttentionChange",
-		"var stripExpanded",
+		"S.stripExpanded",
 		"function syncChatHeaderActions",
 		`data-more`,
 		`data-web`,
@@ -234,10 +230,7 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 			t.Fatalf("index.html missing %s", want)
 		}
 	}
-	js, err := os.ReadFile("console/app.js")
-	if err != nil {
-		t.Fatalf("read app.js: %v", err)
-	}
+	js := readConsoleAsset(t, "app.js")
 	for _, want := range []string{
 		"function connectorBuildPayload",
 		"function openConnectorEditor",
@@ -283,45 +276,66 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 	}
 }
 
-// console/app.js 是 console-src/ 片段按 manifest.json 拼装的单文件产物
-// （go:embed 的入口仍必须是单文件，见 console-src/README.md）。直接改 app.js，
-// 或者改了片段却忘记重建，都会让两者漂移——这里把它钉成显式失败，避免
-// 「源码改了、线上还是旧逻辑」这种最难查的回归。
-func TestConsoleAppMatchesSplitSources(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("console-src", "manifest.json"))
-	if err != nil {
-		t.Fatalf("read console-src/manifest.json: %v", err)
+// 控制台按功能域拆成 console/js/*.js 模块，入口 console/app.js 只按顺序 import
+// 它们（共享面见 console/js/runtime.js）。这里钉住四件事，防止"模块增删了，但
+// 入口 / SW 预缓存 / 共享运行时 / 版本号没跟上"这类静默失效：
+//  1. 入口每个 import 目标都存在，且 console/js/ 里每个模块恰好被 import 一次；
+//  2. import 顺序 == 文件名顺序（= 原单文件顶层语句顺序，顶层副作用次序不变）；
+//  3. 每个模块都 import runtime.js 的 { S, G }，版本号与入口一致；
+//  4. sw.js 的 SHELL 覆盖入口 + 全部模块（PWA 离线可用）。
+func TestConsoleModulesWired(t *testing.T) {
+	entry := readEmbeddedConsole(t, "app.js")
+	re := regexp.MustCompile(`(?m)^import "\./js/([^"?]+)\?v=(\d+)";$`)
+	matches := re.FindAllStringSubmatch(entry, -1)
+	if len(matches) < 10 {
+		t.Fatalf("app.js imports %d modules; expected the feature split", len(matches))
 	}
-	var manifest struct {
-		Generated string   `json:"generated"`
-		Files     []string `json:"files"`
-	}
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatalf("parse console-src/manifest.json: %v", err)
-	}
-	if manifest.Generated != "console/app.js" {
-		t.Fatalf("manifest.generated = %q, want console/app.js", manifest.Generated)
-	}
-	if len(manifest.Files) < 10 {
-		t.Fatalf("manifest lists %d fragments; expected the feature split", len(manifest.Files))
-	}
-	want := "(function () {\n"
-	for _, name := range manifest.Files {
-		body, err := os.ReadFile(filepath.Join("console-src", name))
-		if err != nil {
-			t.Fatalf("read console-src/%s: %v", name, err)
+	version := matches[0][2]
+	imported := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m[2] != version {
+			t.Fatalf("console/js/%s carries v%s but the entry uses v%s", m[1], m[2], version)
 		}
-		if len(bytes.TrimSpace(body)) == 0 {
-			t.Fatalf("console-src/%s is empty", name)
-		}
-		want += string(body)
+		imported = append(imported, m[1])
 	}
-	want += "})();\n"
-	got, err := os.ReadFile(filepath.Join("console", "app.js"))
+
+	entries, err := fs.ReadDir(consoleFS, "console/js")
 	if err != nil {
-		t.Fatalf("read console/app.js: %v", err)
+		t.Fatalf("read console/js: %v", err)
 	}
-	if string(got) != want {
-		t.Fatal("console/app.js drifted from console-src/; run: node scripts/build-gateway-console.mjs")
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".js") && e.Name() != "runtime.js" {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+	if len(files) != len(imported) {
+		t.Fatalf("entry imports %d modules but console/js holds %d:\n  imports=%v\n  files=%v",
+			len(imported), len(files), imported, files)
+	}
+	for i := range files {
+		if files[i] != imported[i] {
+			t.Fatalf("module wiring drifted at #%d: import=%s file=%s\n"+
+				"（import 顺序必须等于文件名顺序，才能保持原顶层副作用次序）", i, imported[i], files[i])
+		}
+	}
+
+	runtimeImport := `import { S, G } from "./runtime.js?v=` + version + `";`
+	for _, n := range imported {
+		if !strings.Contains(readEmbeddedConsole(t, "js/"+n), runtimeImport) {
+			t.Fatalf("console/js/%s must import the shared runtime: %s", n, runtimeImport)
+		}
+	}
+
+	sw := readEmbeddedConsole(t, "sw.js")
+	shell := []string{"./app.js?v=" + version, "./js/runtime.js?v=" + version}
+	for _, n := range imported {
+		shell = append(shell, "./js/"+n+"?v="+version)
+	}
+	for _, want := range shell {
+		if !strings.Contains(sw, `"`+want+`"`) {
+			t.Fatalf("sw.js SHELL is missing %s（PWA 离线预缓存必须覆盖全部模块）", want)
+		}
 	}
 }

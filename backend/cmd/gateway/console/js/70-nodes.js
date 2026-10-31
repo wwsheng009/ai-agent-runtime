@@ -1,15 +1,33 @@
+// 70-nodes.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  renderInbox: renderInbox,
+  nodeCard: nodeCard,
+  renderNodeLists: renderNodeLists,
+  renderAttentionBreakdown: renderAttentionBreakdown,
+  renderActivityFeed: renderActivityFeed,
+  renderAll: renderAll,
+  renderDevices: renderDevices,
+  appendDeviceMeta: appendDeviceMeta,
+});
+
   /* ─────────────────────── rendering: inbox ──────────────────── */
 
   function renderInbox(nodes) {
-    var list = el("inbox-list");
+    var list = S.el("inbox-list");
     if (!list) { return; }
-    var count = el("inbox-count");
-    var items = inboxItems(nodes);
+    var count = S.el("inbox-count");
+    var items = G.inboxItems(nodes);
     if (count) {
       count.textContent = items.length ? String(items.length) : "";
       count.hidden = !items.length;
     }
-    var panel = el("inbox-panel");
+    var panel = S.el("inbox-panel");
     if (panel) { panel.hidden = !items.length; }
     list.innerHTML = "";
     items.forEach(function (item) {
@@ -24,23 +42,23 @@
         '<span class="card-head"><span class="card-title"></span><span class="att-badge" hidden></span></span>' +
         '<span class="card-meta"></span>';
       row.querySelector(".card-title").textContent =
-        nodeDisplayName(item.node) + " · " + sessionLabelOf(item.session);
+        G.nodeDisplayName(item.node) + " · " + G.sessionLabelOf(item.session);
       var b = row.querySelector(".att-badge");
-      b.textContent = attentionLabel(item.session.attention);
+      b.textContent = G.attentionLabel(item.session.attention);
       b.className = "att-badge att-" + item.session.attention;
       b.hidden = false;
       // 副标题给出「节点 · 状态」，node-id 只收进 hover 提示，避免与标题重复。
       row.querySelector(".card-meta").textContent =
-        nodeDisplayName(item.node) + " · " + stateLabelOf(item.session);
+        G.nodeDisplayName(item.node) + " · " + G.stateLabelOf(item.session);
       if (item.node.node_id) { row.title = "节点 ID：" + item.node.node_id; }
       row.addEventListener("click", function () {
         // 待办行点击与卡片「审批 / 回答」同语义：能面板内打开就聚焦交互区。
-        openSessionInline(item.node, item.session, chatFocusOptsFor(item.session));
+        G.openSessionInline(item.node, item.session, G.chatFocusOptsFor(item.session));
       });
       list.appendChild(row);
     });
     // 面板头部的「下一条待处理」按钮随同一份 inbox 数据刷新（面板关闭时自隐藏）。
-    chatUpdateNextPending();
+    G.chatUpdateNextPending();
   }
 
   /* ─────────────────────── rendering: nodes ──────────────────── */
@@ -56,7 +74,7 @@
       '<div class="card-actions"></div>';
     card.querySelector(".card-title").innerHTML =
       '<span class="dot ' + (node.stale ? "offline" : "live") + '"></span>' +
-      nodeDisplayName(node);
+      G.nodeDisplayName(node);
     card.querySelector(".badge").textContent =
       (node.kind || "agent") + " · 会话 " + sessions.length;
     var meta = card.querySelector(".card-meta");
@@ -71,9 +89,9 @@
     if (!isNaN(hbMs)) {
       var hb = document.createElement("span");
       hb.className = "n-heartbeat";
-      setRelTime(hb, hbMs, node.stale ? "最后心跳 " : "心跳 ",
+      G.setRelTime(hb, hbMs, node.stale ? "最后心跳 " : "心跳 ",
         node.stale ? 0 : 60000,
-        "网关最后收到该节点心跳：" + absoluteTime(hbMs) + "（服务器时间）");
+        "网关最后收到该节点心跳：" + G.absoluteTime(hbMs) + "（服务器时间）");
       meta.appendChild(hb);
     }
 
@@ -88,7 +106,7 @@
         row.innerHTML =
           '<div class="session-info"><span class="session-title"></span><div class="session-preview" hidden></div></div>' +
           '<span class="att-badge" hidden></span><button class="btn ghost sm" type="button">打开</button>';
-        row.querySelector(".session-title").textContent = sessionLabelOf(session);
+        row.querySelector(".session-title").textContent = G.sessionLabelOf(session);
         var p = row.querySelector(".session-preview");
         if (session.preview) {
           p.textContent = session.preview;
@@ -96,14 +114,14 @@
         }
         var b = row.querySelector(".att-badge");
         if (session.attention) {
-          b.textContent = attentionLabel(session.attention);
+          b.textContent = G.attentionLabel(session.attention);
           b.className = "att-badge att-" + session.attention;
         } else {
           b.hidden = true;
         }
         row.querySelector("button").addEventListener("click", function (e) {
           e.stopPropagation();
-          openSessionInline(node, session);
+          G.openSessionInline(node, session);
         });
         sessionsHost.appendChild(row);
       });
@@ -112,7 +130,7 @@
         more.className = "btn ghost sm";
         more.type = "button";
         more.textContent = "查看全部 " + sessions.length + " 个会话";
-        more.addEventListener("click", function () { navigate("sessions"); });
+        more.addEventListener("click", function () { G.navigate("sessions"); });
         actions.appendChild(more);
       }
     } else if (!node.stale) {
@@ -120,14 +138,14 @@
       open.className = "btn ghost sm";
       open.type = "button";
       open.textContent = "打开节点";
-      if (nodeHasWebUI(node)) {
+      if (G.nodeHasWebUI(node)) {
         open.addEventListener("click", function () {
-          rememberPresence(node, null);
-          window.open(nodeWebBase(node), "_blank");
+          G.rememberPresence(node, null);
+          window.open(G.nodeWebBase(node), "_blank");
         });
       } else {
         open.disabled = true;
-        open.title = webUnavailableText(node);
+        open.title = G.webUnavailableText(node);
       }
       actions.appendChild(open);
     }
@@ -140,19 +158,19 @@
         '</div>');
       var staleMenu = actions.querySelector(".s-menu");
       var staleMore = actions.querySelector("[data-more]");
-      bindCardMenu(card, staleMenu);
+      G.bindCardMenu(card, staleMenu);
       staleMenu.querySelector("[data-remove]").addEventListener("click", function () {
-        closeSessionMenus(false);
-        confirmDestructive({
+        G.closeSessionMenus(false);
+        G.confirmDestructive({
           title: "移除离线快照节点？",
-          message: "移除离线快照节点 " + nodeDisplayName(node) +
+          message: "移除离线快照节点 " + G.nodeDisplayName(node) +
             "？\n该节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。",
           trigger: staleMore,
           onConfirm: function () {
-            return api("/api/nodes/" + encodeURIComponent(node.node_id), { method: "DELETE" })
+            return G.api("/api/nodes/" + encodeURIComponent(node.node_id), { method: "DELETE" })
               .then(function () {
-                notify("节点已移除：" + nodeDisplayName(node), "ok");
-                loadNodes();
+                G.notify("节点已移除：" + G.nodeDisplayName(node), "ok");
+                G.loadNodes();
               });
           }
         });
@@ -165,19 +183,19 @@
       copyNode.type = "button";
       copyNode.textContent = "复制节点 ID";
       copyNode.title = "复制完整节点 ID：" + node.node_id;
-      copyNode.setAttribute("aria-label", "复制节点 ID " + shortNodeID(node.node_id));
-      copyNode.addEventListener("click", function () { copyText(node.node_id, copyNode); });
+      copyNode.setAttribute("aria-label", "复制节点 ID " + G.shortNodeID(node.node_id));
+      copyNode.addEventListener("click", function () { G.copyText(node.node_id, copyNode); });
       actions.appendChild(copyNode);
     }
     return card;
   }
 
   function renderNodeLists(nodes) {
-    var liveHost = el("node-live-list");
-    var offHost = el("node-offline-list");
-    var dashHost = el("dash-node-list");
+    var liveHost = S.el("node-live-list");
+    var offHost = S.el("node-offline-list");
+    var dashHost = S.el("dash-node-list");
     var staleNodes = nodes.filter(function (n) { return n.stale; });
-    var clearBtn = el("clear-stale");
+    var clearBtn = S.el("clear-stale");
     if (clearBtn) {
       // The one-click cleanup is offered only while offline snapshots exist.
       clearBtn.hidden = !staleNodes.length;
@@ -211,26 +229,26 @@
   }
 
   function renderAttentionBreakdown(nodes) {
-    var panel = el("attention-breakdown");
+    var panel = S.el("attention-breakdown");
     if (!panel) { return; }
     var counts = { approval: 0, question: 0, error: 0 };
-    var items = inboxItems(nodes);
+    var items = G.inboxItems(nodes);
     items.forEach(function (item) {
       var kind = item.session.attention;
       if (counts[kind] !== undefined) { counts[kind]++; }
     });
     panel.hidden = !items.length;
     ["approval", "question", "error"].forEach(function (k) {
-      var n = el("attn-" + k);
+      var n = S.el("attn-" + k);
       if (n) { n.textContent = String(counts[k]); }
     });
   }
 
   function renderActivityFeed(nodes) {
-    var host = el("activity-feed");
+    var host = S.el("activity-feed");
     if (!host) { return; }
     // Aggregate: every session with an updated_at, newest first, cap 8.
-    var items = allSessions(nodes).filter(function (item) {
+    var items = G.allSessions(nodes).filter(function (item) {
       return item.session.updated_at;
     }).sort(function (a, b) {
       return new Date(b.session.updated_at) - new Date(a.session.updated_at);
@@ -256,50 +274,50 @@
         '<span class="activity-when"></span>' +
         '</span>';
       row.querySelector(".activity-title").textContent =
-        nodeDisplayName(item.node) + " · " + sessionLabelOf(s) +
-        (s.attention ? "（" + attentionLabel(s.attention) + "）" : "") +
+        G.nodeDisplayName(item.node) + " · " + G.sessionLabelOf(s) +
+        (s.attention ? "（" + G.attentionLabel(s.attention) + "）" : "") +
         (item.node.stale ? "（离线快照）" : "");
       row.querySelector(".activity-when").textContent =
         when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
         (fresh ? " · 刚刚" : "");
       if (fresh) { row.classList.add("fresh"); }
-      row.addEventListener("click", function () { openSessionInline(item.node, s); });
+      row.addEventListener("click", function () { G.openSessionInline(item.node, s); });
       host.appendChild(row);
     });
-    var win = el("activity-window");
+    var win = S.el("activity-window");
     if (win) { win.textContent = "最近 " + items.length + " 条"; }
   }
 
   function renderAll(nodes) {
     // v40 重构丢了这里的调用，导致 trackAttention（fresh attention →
     // toast/原生通知）整条链路从不执行；恢复并加控制台资产测试防回归。
-    trackAttention(nodes);
-    updateStats(nodes);
+    G.trackAttention(nodes);
+    G.updateStats(nodes);
     renderInbox(nodes);
     renderAttentionBreakdown(nodes);
     renderActivityFeed(nodes);
     renderNodeLists(nodes);
-    renderSessionTable(nodes);
-    if (currentView() === "notifications") { renderNotifyPolicySessions(); }
+    G.renderSessionTable(nodes);
+    if (G.currentView() === "notifications") { G.renderNotifyPolicySessions(); }
   }
 
   /* ─────────────────────── rendering: devices ────────────────── */
 
   function renderDevices(devices) {
-    var list = el("device-list");
+    var list = S.el("device-list");
     if (!list) { return; }
-    var search = el("device-search");
-    if (search && search.value !== deviceQuery) { search.value = deviceQuery; }
-    var status = el("device-status-filter");
-    if (status && status.value !== deviceStatusFilter) { status.value = deviceStatusFilter; }
-    var query = String(deviceQuery || "").trim().toLowerCase();
+    var search = S.el("device-search");
+    if (search && search.value !== S.deviceQuery) { search.value = S.deviceQuery; }
+    var status = S.el("device-status-filter");
+    if (status && status.value !== S.deviceStatusFilter) { status.value = S.deviceStatusFilter; }
+    var query = String(S.deviceQuery || "").trim().toLowerCase();
     var filtered = devices.filter(function (d) {
-      if (deviceStatusFilter === "active" && d.revoked) { return false; }
-      if (deviceStatusFilter === "revoked" && !d.revoked) { return false; }
+      if (S.deviceStatusFilter === "active" && d.revoked) { return false; }
+      if (S.deviceStatusFilter === "revoked" && !d.revoked) { return false; }
       if (!query) { return true; }
       return [d.name, d.id, d.prefix].join(" ").toLowerCase().indexOf(query) !== -1;
     });
-    var count = el("device-count");
+    var count = S.el("device-count");
     if (count) {
       count.textContent = filtered.length === devices.length
         ? devices.length + " 个令牌"
@@ -334,7 +352,7 @@
       var prefixCopy = card.querySelector(".device-prefix-copy");
       prefixCopy.setAttribute("aria-label", "复制令牌标识 " + (d.prefix || ""));
       prefixCopy.title = "复制令牌标识（不是完整令牌）";
-      prefixCopy.addEventListener("click", function () { copyText(d.prefix || "", prefixCopy); });
+      prefixCopy.addEventListener("click", function () { G.copyText(d.prefix || "", prefixCopy); });
       var meta = card.querySelector(".card-meta");
       appendDeviceMeta(meta, "记录 ID " + (d.id || "—"), "meta-id");
       appendDeviceMeta(meta, "签发于 " + (d.created_at ? new Date(d.created_at).toLocaleString() : "—"), "meta-time");
@@ -353,25 +371,25 @@
         '</div>');
       var deviceMenu = deviceActions.querySelector(".s-menu");
       var deviceMore = deviceActions.querySelector("[data-more]");
-      bindCardMenu(card, deviceMenu);
+      G.bindCardMenu(card, deviceMenu);
       deviceMenu.querySelector("[data-copy-id]").addEventListener("click", function () {
-        copyText(d.id || "", this);
-        closeSessionMenus(true);
+        G.copyText(d.id || "", this);
+        G.closeSessionMenus(true);
       });
       deviceMenu.querySelector("[data-action]").addEventListener("click", function () {
-        closeSessionMenus(false);
+        G.closeSessionMenus(false);
         var purge = !!d.revoked;
-        confirmDestructive({
+        G.confirmDestructive({
           title: purge ? "删除记录？" : "撤销令牌？",
           message: purge
             ? "彻底删除已撤销令牌「" + (d.name || d.id) + "」的记录？\n此操作不可恢复（令牌本身已失效）。"
             : "撤销令牌「" + (d.name || d.id) + "」？\n使用它的 agent 将无法再注册；撤销后可选择彻底删除记录。",
           trigger: deviceMore,
           onConfirm: function () {
-            return api("/api/devices/" + encodeURIComponent(d.id) + (purge ? "?purge=1" : ""), { method: "DELETE" })
+            return G.api("/api/devices/" + encodeURIComponent(d.id) + (purge ? "?purge=1" : ""), { method: "DELETE" })
               .then(function () {
-                notify((purge ? "令牌记录已删除：" : "令牌已撤销：") + (d.name || d.id), "ok");
-                loadDevices();
+                G.notify((purge ? "令牌记录已删除：" : "令牌已撤销：") + (d.name || d.id), "ok");
+                G.loadDevices();
               });
           }
         });
@@ -394,4 +412,3 @@
     part.textContent = text;
     host.appendChild(part);
   }
-

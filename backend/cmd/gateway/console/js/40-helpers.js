@@ -1,9 +1,41 @@
+// 40-helpers.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  pushStripEvent: pushStripEvent,
+  stripTitleOf: stripTitleOf,
+  renderEventStrip: renderEventStrip,
+  sessionCardSelector: sessionCardSelector,
+  pulseSessionCard: pulseSessionCard,
+  nodeIDForSession: nodeIDForSession,
+  locateSession: locateSession,
+  flushPendingLocate: flushPendingLocate,
+  pruneStripEvents: pruneStripEvents,
+  patchSession: patchSession,
+  loadReadAttention: loadReadAttention,
+  saveReadAttention: saveReadAttention,
+  attentionKey: attentionKey,
+  isWatching: isWatching,
+  sessionLabelOf: sessionLabelOf,
+  shortNodeID: shortNodeID,
+  nodeDisplayName: nodeDisplayName,
+  timeAgo: timeAgo,
+  absoluteTime: absoluteTime,
+  setRelTime: setRelTime,
+  allSessions: allSessions,
+  inboxItems: inboxItems,
+});
+
   /* ── Migration event strip (state/attention changes) ─────────── */
 
-  var STRIP_LIMIT = 10;
-  var STRIP_TTL_MS = 10 * 60 * 1000;
-  var stripEvents = [];
-  var stripExpanded = false;
+  S.STRIP_LIMIT = 10;
+  S.STRIP_TTL_MS = 10 * 60 * 1000;
+  S.stripEvents = [];
+  S.stripExpanded = false;
 
   function pushStripEvent(ev) {
     if (!ev || !ev.session_id) { return; }
@@ -12,7 +44,7 @@
     // duplicate on every transition, and moves to the front with the latest
     // label. Distinct sessions stay apart.
     var key = (ev.node_id || "") + "|" + ev.session_id;
-    stripEvents = stripEvents.filter(function (item) {
+    S.stripEvents = S.stripEvents.filter(function (item) {
       return item.nodeID + "|" + item.sessionID !== key;
     });
     // UX-07: 已完成不进入全局事件条；同时清掉该会话之前的活动 chip，
@@ -21,19 +53,19 @@
       renderEventStrip();
       return;
     }
-    stripEvents.unshift({
+    S.stripEvents.unshift({
       nodeID: ev.node_id || "",
       sessionID: ev.session_id,
       state: ev.state || "",
       attention: ev.attention || "",
       ts: Date.parse(ev.ts || "") || Date.now(),
     });
-    stripEvents = stripEvents.slice(0, STRIP_LIMIT);
+    S.stripEvents = S.stripEvents.slice(0, S.STRIP_LIMIT);
     renderEventStrip();
   }
 
   function stripTitleOf(ev) {
-    var items = allSessions(lastNodes);
+    var items = allSessions(S.lastNodes);
     for (var i = 0; i < items.length; i++) {
       if (items[i].session.session_id === ev.sessionID) { return sessionLabelOf(items[i].session); }
     }
@@ -41,30 +73,30 @@
   }
 
   function renderEventStrip() {
-    var host = el("event-strip");
+    var host = S.el("event-strip");
     if (!host) { return; }
     var now = Date.now();
-    stripEvents = stripEvents.filter(function (ev) { return now - ev.ts < STRIP_TTL_MS; });
-    if (stripEvents.length <= 3) { stripExpanded = false; }
-    if (!stripEvents.length) {
+    S.stripEvents = S.stripEvents.filter(function (ev) { return now - ev.ts < S.STRIP_TTL_MS; });
+    if (S.stripEvents.length <= 3) { S.stripExpanded = false; }
+    if (!S.stripEvents.length) {
       host.hidden = true;
       host.innerHTML = "";
       host.classList.remove("expanded");
       return;
     }
     host.hidden = false;
-    host.classList.toggle("expanded", stripExpanded);
+    host.classList.toggle("expanded", S.stripExpanded);
     host.innerHTML = "";
     var title = document.createElement("span");
     title.className = "event-strip-title";
     title.textContent = "刚刚";
     host.appendChild(title);
-    var visible = stripExpanded ? stripEvents : stripEvents.slice(0, 3);
+    var visible = S.stripExpanded ? S.stripEvents : S.stripEvents.slice(0, 3);
     visible.forEach(function (ev) {
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "event-chip" + (ev.attention ? " ev-att-" + ev.attention : "");
-      var label = ev.attention ? attentionLabel(ev.attention) : (STATE_LABELS[ev.state] || ev.state || "状态变化");
+      var label = ev.attention ? G.attentionLabel(ev.attention) : (S.STATE_LABELS[ev.state] || ev.state || "状态变化");
       chip.textContent = stripTitleOf(ev) + " · " + label + " ";
       var when = document.createElement("span");
       when.className = "event-chip-when";
@@ -73,14 +105,14 @@
       chip.addEventListener("click", function () { locateSession(ev.nodeID, ev.sessionID); });
       host.appendChild(chip);
     });
-    if (stripEvents.length > 3) {
+    if (S.stripEvents.length > 3) {
       var more = document.createElement("button");
       more.type = "button";
       more.className = "btn ghost sm event-strip-more";
-      more.textContent = stripExpanded ? "收起" : "还有 " + (stripEvents.length - 3) + " 条";
-      more.setAttribute("aria-expanded", stripExpanded ? "true" : "false");
+      more.textContent = S.stripExpanded ? "收起" : "还有 " + (S.stripEvents.length - 3) + " 条";
+      more.setAttribute("aria-expanded", S.stripExpanded ? "true" : "false");
       more.addEventListener("click", function () {
-        stripExpanded = !stripExpanded;
+        S.stripExpanded = !S.stripExpanded;
         renderEventStrip();
       });
       host.appendChild(more);
@@ -90,8 +122,8 @@
     clear.className = "btn ghost sm event-strip-clear";
     clear.textContent = "隐藏动态";
     clear.addEventListener("click", function () {
-      stripEvents = [];
-      stripExpanded = false;
+      S.stripEvents = [];
+      S.stripExpanded = false;
       renderEventStrip();
     });
     host.appendChild(clear);
@@ -118,7 +150,7 @@
   // 网关会话 URL 标识（#sessions?node=…&session=…）允许只带 session：从当前快照
   // 反查它挂在哪个节点，这样任意来源的深链都能定位到同一张卡片。
   function nodeIDForSession(sessionID) {
-    var items = allSessions(lastNodes);
+    var items = allSessions(S.lastNodes);
     for (var i = 0; i < items.length; i++) {
       if (items[i].session.session_id === sessionID) { return items[i].node.node_id; }
     }
@@ -130,63 +162,63 @@
     if (!nodeID) { nodeID = nodeIDForSession(sessionID); }
     if (!nodeID) {
       // 快照里还没有这个会话（通知先于快照到达）：补拉一次后按 session 反查。
-      loadNodes().then(function () {
+      G.loadNodes().then(function () {
         var resolved = nodeIDForSession(sessionID);
         if (resolved) { locateSession(resolved, sessionID); return; }
-        notify("未在列表中找到该会话（可能已过期或已移除）", "error");
+        G.notify("未在列表中找到该会话（可能已过期或已移除）", "error");
       });
       return;
     }
-    if (currentView() !== "sessions") {
-      navigate("sessions");
+    if (G.currentView() !== "sessions") {
+      G.navigate("sessions");
       // hashchange 是异步的；立即 applyRoute，保证随后的滚动/聚焦发生在
       // 已可见的会话视图上（对 hidden 容器调用 scrollIntoView 是无效的）。
-      applyRoute();
+      G.applyRoute();
     }
     var selector = sessionCardSelector(nodeID, sessionID);
     var card = document.querySelector(selector);
     if (card) { pulseSessionCard(card); return; }
     // 当前筛选/搜索把它藏起来了：放宽为“全部 + 空搜索”后重排一次。
-    sessionFilterKind = "all";
-    sessionFilterText = "";
-    if (el("session-filter")) { el("session-filter").value = ""; }
-    syncFilterControls();
-    saveSessionPrefs();
-    renderSessionTable(lastNodes);
+    S.sessionFilterKind = "all";
+    S.sessionFilterText = "";
+    if (S.el("session-filter")) { S.el("session-filter").value = ""; }
+    G.syncFilterControls();
+    G.saveSessionPrefs();
+    G.renderSessionTable(S.lastNodes);
     card = document.querySelector(selector);
     if (card) { pulseSessionCard(card); return; }
     // 未知/新会话（例如通知先于快照到达）：补拉一次快照再试。
-    loadNodes().then(function () {
+    G.loadNodes().then(function () {
       var retry = document.querySelector(selector);
       if (retry) { pulseSessionCard(retry); return; }
-      notify("未在列表中找到该会话（可能已过期或已移除）", "error");
+      G.notify("未在列表中找到该会话（可能已过期或已移除）", "error");
     });
   }
 
   // 桌面壳点击通知时只派发定位事件（不 navigate、不开新窗口）。页面不在会话
   // 视图、未登录或快照未就绪时先记下目标，登录/加载完成后补做。
-  var pendingLocate = null;
+  S.pendingLocate = null;
   window.addEventListener("aicli-gateway-locate", function (event) {
     var detail = (event && event.detail) || {};
     if (!detail.node_id || !detail.session_id) { return; }
-    pendingLocate = { nodeID: String(detail.node_id), sessionID: String(detail.session_id) };
-    if (authedState) { flushPendingLocate(); }
+    S.pendingLocate = { nodeID: String(detail.node_id), sessionID: String(detail.session_id) };
+    if (S.authedState) { flushPendingLocate(); }
   });
 
   function flushPendingLocate() {
-    if (!pendingLocate || !authedState) { return; }
-    var target = pendingLocate;
-    pendingLocate = null;
+    if (!S.pendingLocate || !S.authedState) { return; }
+    var target = S.pendingLocate;
+    S.pendingLocate = null;
     locateSession(target.nodeID, target.sessionID);
   }
 
   // Expired chips are pruned by the 5s tick (labels advance via setRelTime).
   function pruneStripEvents() {
-    if (!stripEvents.length) { return; }
+    if (!S.stripEvents.length) { return; }
     var now = Date.now();
-    var next = stripEvents.filter(function (ev) { return now - ev.ts < STRIP_TTL_MS; });
-    if (next.length !== stripEvents.length) {
-      stripEvents = next;
+    var next = S.stripEvents.filter(function (ev) { return now - ev.ts < S.STRIP_TTL_MS; });
+    if (next.length !== S.stripEvents.length) {
+      S.stripEvents = next;
       renderEventStrip();
     }
   }
@@ -198,7 +230,7 @@
   function patchSession(nodeID, session) {
     if (!session || !session.session_id) { return; }
     var found = false;
-    (lastNodes || []).forEach(function (node) {
+    (S.lastNodes || []).forEach(function (node) {
       if (node.node_id !== nodeID) { return; }
       found = true;
       var list = node.sessions || (node.sessions = []);
@@ -207,41 +239,41 @@
       }
       list.push(session);
     });
-    if (!found) { loadNodes(); return; }
-    if (chatState && chatState.node && chatState.session &&
-        chatState.node.node_id === nodeID &&
-        chatState.session.session_id === session.session_id) {
-      chatState.session = session;
-      setText(el("chat-modal-sub"),
-        nodeDisplayName(chatState.node) + " · " + (chatState.node.kind || "agent") +
-        " · " + stateLabelOf(session));
-      chatSetBusy(sessionBusyFlag(session));
+    if (!found) { G.loadNodes(); return; }
+    if (S.chatState && S.chatState.node && S.chatState.session &&
+        S.chatState.node.node_id === nodeID &&
+        S.chatState.session.session_id === session.session_id) {
+      S.chatState.session = session;
+      G.setText(S.el("chat-modal-sub"),
+        nodeDisplayName(S.chatState.node) + " · " + (S.chatState.node.kind || "agent") +
+        " · " + G.stateLabelOf(session));
+      G.chatSetBusy(G.sessionBusyFlag(session));
     }
-    updateStats(lastNodes);
-    renderInbox(lastNodes);
-    renderSessionTable(lastNodes);
+    G.updateStats(S.lastNodes);
+    G.renderInbox(S.lastNodes);
+    G.renderSessionTable(S.lastNodes);
     // 增量 session 事件也要走 fresh-attention 检测：网关对注意力变化先推
     // 单会话增量；漏掉这一调用会让 toast/原生通知延迟到下一次全量快照。
-    trackAttention(lastNodes);
+    G.trackAttention(S.lastNodes);
   }
 
   /* ─────────────────────── derived helpers ───────────────────── */
 
   function loadReadAttention() {
     try {
-      var raw = JSON.parse(localStorage.getItem(READ_ATTENTION_KEY) || "null");
+      var raw = JSON.parse(localStorage.getItem(S.READ_ATTENTION_KEY) || "null");
       if (!raw || typeof raw !== "object") { return; }
       var now = Date.now();
       Object.keys(raw).forEach(function (key) {
         var ts = typeof raw[key] === "number" ? raw[key] : 0;
-        if (ts && now - ts < READ_ATTENTION_TTL_MS) { readAttention[key] = ts; }
+        if (ts && now - ts < S.READ_ATTENTION_TTL_MS) { S.readAttention[key] = ts; }
       });
     } catch (err) { /* storage unavailable */ }
   }
 
   function saveReadAttention() {
     try {
-      localStorage.setItem(READ_ATTENTION_KEY, JSON.stringify(readAttention));
+      localStorage.setItem(S.READ_ATTENTION_KEY, JSON.stringify(S.readAttention));
     } catch (err) { /* storage unavailable */ }
   }
 
@@ -250,7 +282,7 @@
   }
 
   function isWatching(nodeID, sessionID) {
-    return !!presenceTargets[nodeID + "|" + (sessionID || "")];
+    return !!S.presenceTargets[nodeID + "|" + (sessionID || "")];
   }
 
   // sessionLabelOf 给列表 / 面板一句人类可读的标题：会话没有标题时回退「未命名会话」，
@@ -327,13 +359,12 @@
   // remain useful status/notification signals, but they are not operator work.
   function inboxItems(nodes) {
     return allSessions(nodes).filter(function (item) {
-      return !item.node.stale && isActionableAttention(item.session.attention) &&
-        !readAttention[attentionKey(item.node, item.session)];
+      return !item.node.stale && G.isActionableAttention(item.session.attention) &&
+        !S.readAttention[attentionKey(item.node, item.session)];
     }).sort(function (a, b) {
-      var pa = attentionPriority[a.session.attention]; if (pa === undefined) { pa = 99; }
-      var pb = attentionPriority[b.session.attention]; if (pb === undefined) { pb = 99; }
+      var pa = S.attentionPriority[a.session.attention]; if (pa === undefined) { pa = 99; }
+      var pb = S.attentionPriority[b.session.attention]; if (pb === undefined) { pb = 99; }
       if (pa !== pb) { return pa - pb; }
       return sessionLabelOf(a.session) < sessionLabelOf(b.session) ? -1 : 1;
     });
   }
-

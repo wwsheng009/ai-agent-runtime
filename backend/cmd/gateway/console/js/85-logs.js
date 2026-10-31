@@ -1,17 +1,46 @@
+// 85-logs.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  stopLogTimer: stopLogTimer,
+  startLogTimer: startLogTimer,
+  initLogsView: initLogsView,
+  logHashSlug: logHashSlug,
+  populateLogSlugOptions: populateLogSlugOptions,
+  setLogSummary: setLogSummary,
+  refreshLogs: refreshLogs,
+  loadMountLogs: loadMountLogs,
+  mountStatusFilter: mountStatusFilter,
+  renderMountLogs: renderMountLogs,
+  mountLogRow: mountLogRow,
+  loadAuditLogs: loadAuditLogs,
+  renderAuditLogs: renderAuditLogs,
+  auditLogRow: auditLogRow,
+  formatLogTime: formatLogTime,
+  formatBytes: formatBytes,
+  truncate: truncate,
+  applyLogTabUI: applyLogTabUI,
+  setLogTab: setLogTab,
+});
+
   /* ───────────────────────── logs view ───────────────────────── */
 
   function stopLogTimer() {
-    if (logTimer) {
-      clearInterval(logTimer);
-      logTimer = null;
+    if (S.logTimer) {
+      clearInterval(S.logTimer);
+      S.logTimer = null;
     }
   }
 
   function startLogTimer() {
     stopLogTimer();
-    if (!logFollow) { return; }
-    logTimer = setInterval(function () {
-      if (currentView() === "logs") { refreshLogs(); }
+    if (!S.logFollow) { return; }
+    S.logTimer = setInterval(function () {
+      if (G.currentView() === "logs") { refreshLogs(); }
     }, 5000);
   }
 
@@ -19,10 +48,10 @@
     // A per-mount "日志" link always means "this mount's calls": force the
     // mounts tab even if the operator last looked at audit events.
     if (logHashSlug()) {
-      logTab = "mounts";
+      S.logTab = "mounts";
       applyLogTabUI();
     }
-    var ready = lastMounts.length ? Promise.resolve() : loadMounts();
+    var ready = S.lastMounts.length ? Promise.resolve() : G.loadMounts();
     Promise.resolve(ready).then(function () {
       populateLogSlugOptions();
       refreshLogs();
@@ -38,11 +67,11 @@
   }
 
   function populateLogSlugOptions() {
-    var sel = el("log-slug");
+    var sel = S.el("log-slug");
     if (!sel) { return; }
     var wanted = logHashSlug() || sel.value;
     sel.innerHTML = '<option value="">全部挂载</option>';
-    lastMounts.forEach(function (m) {
+    S.lastMounts.forEach(function (m) {
       var opt = document.createElement("option");
       opt.value = m.slug;
       opt.textContent = (m.name || m.slug) + " · " + m.slug;
@@ -52,46 +81,46 @@
   }
 
   function setLogSummary(text) {
-    var summary = el("logs-summary");
+    var summary = S.el("logs-summary");
     if (summary) { summary.textContent = text || ""; }
   }
 
   function refreshLogs() {
-    if (currentView() !== "logs" || logLoading) { return; }
-    logLoading = true;
-    var job = logTab === "audit" ? loadAuditLogs() : loadMountLogs();
+    if (G.currentView() !== "logs" || S.logLoading) { return; }
+    S.logLoading = true;
+    var job = S.logTab === "audit" ? loadAuditLogs() : loadMountLogs();
     Promise.resolve(job).catch(function () {
       setLogSummary("读取失败，稍后重试");
     }).then(function () {
-      logLoading = false;
+      S.logLoading = false;
     });
   }
 
   function loadMountLogs() {
-    var sel = el("log-slug");
+    var sel = S.el("log-slug");
     var slug = sel ? sel.value : "";
     var url = "/api/mounts/logs?limit=500";
     if (slug) { url += "&slug=" + encodeURIComponent(slug); }
-    return apiJSON(url).then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
+    return G.apiJSON(url).then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return; }
       if (!r.res.ok) {
         setLogSummary("MCP 日志读取失败：HTTP " + r.res.status);
         return;
       }
-      logMountEntries = (r.body && r.body.entries) || [];
-      renderMountLogs(logMountEntries);
-      setLogSummary("MCP 调用 " + logMountEntries.length + " 条 · 更新于 " +
+      S.logMountEntries = (r.body && r.body.entries) || [];
+      renderMountLogs(S.logMountEntries);
+      setLogSummary("MCP 调用 " + S.logMountEntries.length + " 条 · 更新于 " +
         new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     });
   }
 
   function mountStatusFilter() {
-    var sel = el("log-status");
+    var sel = S.el("log-status");
     return sel ? sel.value : "";
   }
 
   function renderMountLogs(entries) {
-    var host = el("log-mount-list");
+    var host = S.el("log-mount-list");
     if (!host) { return; }
     var filter = mountStatusFilter();
     var visible = entries.filter(function (e) {
@@ -142,7 +171,7 @@
     var time = document.createElement("span");
     time.className = "log-time";
     time.textContent = formatLogTime(e.time);
-    var when = validTokenTime(e.time);
+    var when = G.validTokenTime(e.time);
     if (when) { time.title = when.toLocaleString(); }
     row.appendChild(status);
     row.appendChild(main);
@@ -151,26 +180,26 @@
   }
 
   function loadAuditLogs() {
-    var type = el("log-type") ? el("log-type").value : "";
-    var query = el("log-query") ? el("log-query").value.trim() : "";
+    var type = S.el("log-type") ? S.el("log-type").value : "";
+    var query = S.el("log-query") ? S.el("log-query").value.trim() : "";
     var url = "/api/audit?limit=500";
     if (type) { url += "&type=" + encodeURIComponent(type); }
     if (query) { url += "&q=" + encodeURIComponent(query); }
-    return apiJSON(url).then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
+    return G.apiJSON(url).then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return; }
       if (!r.res.ok) {
         setLogSummary("审计日志读取失败：HTTP " + r.res.status);
         return;
       }
-      logAuditEntries = (r.body && r.body.events) || [];
-      renderAuditLogs(logAuditEntries);
-      setLogSummary("审计事件 " + logAuditEntries.length + " 条 · 更新于 " +
+      S.logAuditEntries = (r.body && r.body.events) || [];
+      renderAuditLogs(S.logAuditEntries);
+      setLogSummary("审计事件 " + S.logAuditEntries.length + " 条 · 更新于 " +
         new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     });
   }
 
   function renderAuditLogs(events) {
-    var host = el("log-audit-list");
+    var host = S.el("log-audit-list");
     if (!host) { return; }
     host.innerHTML = "";
     if (!events.length) {
@@ -204,7 +233,7 @@
     var time = document.createElement("span");
     time.className = "log-time";
     time.textContent = formatLogTime(event.time);
-    var when = validTokenTime(event.time);
+    var when = G.validTokenTime(event.time);
     if (when) { time.title = when.toLocaleString(); }
     row.appendChild(type);
     row.appendChild(main);
@@ -213,7 +242,7 @@
   }
 
   function formatLogTime(raw) {
-    var d = validTokenTime(raw);
+    var d = G.validTokenTime(raw);
     if (!d) { return "—"; }
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
@@ -235,20 +264,19 @@
 
   function applyLogTabUI() {
     document.querySelectorAll("[data-logtab]").forEach(function (btn) {
-      var active = btn.getAttribute("data-logtab") === logTab;
+      var active = btn.getAttribute("data-logtab") === S.logTab;
       btn.classList.toggle("active", active);
       btn.setAttribute("aria-selected", active ? "true" : "false");
       btn.setAttribute("aria-pressed", active ? "true" : "false");
     });
-    var mountsPanel = el("log-mounts-panel");
-    var auditPanel = el("log-audit-panel");
-    if (mountsPanel) { mountsPanel.hidden = logTab !== "mounts"; }
-    if (auditPanel) { auditPanel.hidden = logTab !== "audit"; }
+    var mountsPanel = S.el("log-mounts-panel");
+    var auditPanel = S.el("log-audit-panel");
+    if (mountsPanel) { mountsPanel.hidden = S.logTab !== "mounts"; }
+    if (auditPanel) { auditPanel.hidden = S.logTab !== "audit"; }
   }
 
   function setLogTab(tab) {
-    logTab = tab === "audit" ? "audit" : "mounts";
+    S.logTab = tab === "audit" ? "audit" : "mounts";
     applyLogTabUI();
     refreshLogs();
   }
-

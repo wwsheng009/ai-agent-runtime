@@ -1,22 +1,81 @@
+// 31-connectors-manage.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  connectorNotice: connectorNotice,
+  connectorSetBusy: connectorSetBusy,
+  connectorIsBusy: connectorIsBusy,
+  connectorProviderOptions: connectorProviderOptions,
+  connectorDefaultValues: connectorDefaultValues,
+  connectorHasModeField: connectorHasModeField,
+  connectorEmptyForm: connectorEmptyForm,
+  connectorFormFromView: connectorFormFromView,
+  connectorProviderSchemaOf: connectorProviderSchemaOf,
+  connectorSecretSet: connectorSecretSet,
+  connectorFieldControl: connectorFieldControl,
+  connectorErrorLine: connectorErrorLine,
+  connectorFieldRow: connectorFieldRow,
+  connectorSimpleRow: connectorSimpleRow,
+  renderConnectorEditorForm: renderConnectorEditorForm,
+  connectorBindingRows: connectorBindingRows,
+  connectorBindingLabel: connectorBindingLabel,
+  loadConnectorBindings: loadConnectorBindings,
+  syncConnectorIDOptions: syncConnectorIDOptions,
+  ensureGatewayConnectorOptions: ensureGatewayConnectorOptions,
+  renderConnectorBindings: renderConnectorBindings,
+  unbindConnectorChat: unbindConnectorChat,
+  openConnectorEditor: openConnectorEditor,
+  closeConnectorEditor: closeConnectorEditor,
+  connectorValidate: connectorValidate,
+  connectorBuildPayload: connectorBuildPayload,
+  connectorFieldErrorsFrom: connectorFieldErrorsFrom,
+  saveConnectorEditor: saveConnectorEditor,
+  connectorActionBtn: connectorActionBtn,
+  connectorToggle: connectorToggle,
+  connectorReload: connectorReload,
+  connectorDelete: connectorDelete,
+  connectorTakeover: connectorTakeover,
+  connectorMigratedEntry: connectorMigratedEntry,
+  connectorNodeEntryForGateway: connectorNodeEntryForGateway,
+  shortStableHash: shortStableHash,
+  friendlyConnectorError: friendlyConnectorError,
+  manageNotifyTargets: manageNotifyTargets,
+  rollbackConnectorMigration: rollbackConnectorMigration,
+  connectorMigrate: connectorMigrate,
+  openConnectorTest: openConnectorTest,
+  sendConnectorTest: sendConnectorTest,
+  openConnectorLogs: openConnectorLogs,
+  loadConnectorLogs: loadConnectorLogs,
+  renderConnectorLogs: renderConnectorLogs,
+  connectorActionImage: connectorActionImage,
+  renderConnectorActionResult: renderConnectorActionResult,
+  openConnectorActionResult: openConnectorActionResult,
+  connectorLoginStatus: connectorLoginStatus,
+});
+
   /* ──────────── connectors: management (create/edit/test/…) ─────────── */
   // 数据面：GET/POST /api/connectors、PATCH/DELETE /api/connectors/{id}、
   // POST /{id}/reload|test、GET /{id}/logs、POST /{id}/actions/{action}、
   // GET /api/connectors/bindings + PUT/DELETE /{id}/bindings/{chat}。
   // 表单完全由 GET /api/connectors/schema 驱动（docs/bots/07 §7）。
 
-  var connectorBindings = [];
-  var connectorBindingsError = "";
-  var connectorBusy = {};
-  var connectorEditing = null;
-  var connectorForm = null;
-  var connectorFormErrors = {};
-  var connectorSaving = false;
-  var connectorLogsState = { id: "", name: "", entries: [], stats: null, loading: false };
-  var connectorTestState = { id: "", name: "", busy: false };
-  var connectorActionState = { id: "", name: "", action: "", payload: null, busy: false };
+  S.connectorBindings = [];
+  S.connectorBindingsError = "";
+  S.connectorBusy = {};
+  S.connectorEditing = null;
+  S.connectorForm = null;
+  S.connectorFormErrors = {};
+  S.connectorSaving = false;
+  S.connectorLogsState = { id: "", name: "", entries: [], stats: null, loading: false };
+  S.connectorTestState = { id: "", name: "", busy: false };
+  S.connectorActionState = { id: "", name: "", action: "", payload: null, busy: false };
 
   function connectorNotice(text) {
-    var box = el("connectors-notice");
+    var box = S.el("connectors-notice");
     if (!box) { return; }
     if (!text) { box.hidden = true; box.textContent = ""; return; }
     box.hidden = false;
@@ -24,13 +83,13 @@
   }
 
   function connectorSetBusy(id, busy) {
-    if (busy) { connectorBusy[id] = true; } else { delete connectorBusy[id]; }
+    if (busy) { S.connectorBusy[id] = true; } else { delete S.connectorBusy[id]; }
   }
 
-  function connectorIsBusy(id) { return !!connectorBusy[id]; }
+  function connectorIsBusy(id) { return !!S.connectorBusy[id]; }
 
   function connectorProviderOptions() {
-    return connectorSchemaProviders || [];
+    return S.connectorSchemaProviders || [];
   }
 
   function connectorDefaultValues(providerSchema) {
@@ -63,7 +122,7 @@
   }
 
   function connectorFormFromView(view) {
-    var ps = connectorSchemaFor(view.provider);
+    var ps = G.connectorSchemaFor(view.provider);
     var values = {};
     var settings = (view && view.settings) || {};
     Object.keys(settings).forEach(function (key) { values[key] = String(settings[key]); });
@@ -84,12 +143,12 @@
   }
 
   function connectorProviderSchemaOf(form) {
-    return connectorSchemaFor(form && form.provider);
+    return G.connectorSchemaFor(form && form.provider);
   }
 
   function connectorSecretSet(key) {
-    if (!connectorEditing) { return false; }
-    var keys = connectorEditing.secret_keys || [];
+    if (!S.connectorEditing) { return false; }
+    var keys = S.connectorEditing.secret_keys || [];
     return keys.indexOf(key) >= 0;
   }
 
@@ -105,7 +164,7 @@
       input.value = value;
       input.addEventListener("input", function () {
         form.values[field.key] = input.value;
-        delete connectorFormErrors[field.key];
+        delete S.connectorFormErrors[field.key];
       });
       wrap.appendChild(input);
       if (connectorSecretSet(field.key)) {
@@ -132,7 +191,7 @@
       box.checked = value === "true";
       box.addEventListener("change", function () {
         form.values[field.key] = box.checked ? "true" : "false";
-        delete connectorFormErrors[field.key];
+        delete S.connectorFormErrors[field.key];
       });
       line.appendChild(box);
       line.appendChild(document.createTextNode(" 开启"));
@@ -157,7 +216,7 @@
       sel.value = value;
       sel.addEventListener("change", function () {
         form.values[field.key] = sel.value;
-        delete connectorFormErrors[field.key];
+        delete S.connectorFormErrors[field.key];
       });
       return sel;
     }
@@ -169,7 +228,7 @@
     input2.autocomplete = "off";
     input2.addEventListener("input", function () {
       form.values[field.key] = input2.value;
-      delete connectorFormErrors[field.key];
+      delete S.connectorFormErrors[field.key];
     });
     return input2;
   }
@@ -177,8 +236,8 @@
   function connectorErrorLine(key) {
     var err = document.createElement("p");
     err.className = "field-error";
-    err.textContent = connectorFormErrors[key] || "";
-    err.hidden = !connectorFormErrors[key];
+    err.textContent = S.connectorFormErrors[key] || "";
+    err.hidden = !S.connectorFormErrors[key];
     return err;
   }
 
@@ -213,13 +272,13 @@
   }
 
   function renderConnectorEditorForm() {
-    var host = el("connector-editor-form");
-    if (!host || !connectorForm) { return; }
+    var host = S.el("connector-editor-form");
+    if (!host || !S.connectorForm) { return; }
     host.innerHTML = "";
-    var form = connectorForm;
+    var form = S.connectorForm;
     var ps = connectorProviderSchemaOf(form);
 
-    if (connectorEditing) {
+    if (S.connectorEditing) {
       var prov = document.createElement("input");
       prov.type = "text";
       prov.value = form.provider;
@@ -237,30 +296,30 @@
       sel.value = form.provider;
       sel.addEventListener("change", function () {
         form.provider = sel.value;
-        var next = connectorSchemaFor(sel.value);
+        var next = G.connectorSchemaFor(sel.value);
         form.mode = next && next.modes && next.modes.length ? next.modes[0] : "";
         form.values = connectorDefaultValues(next);
         form.clearedSecrets = {};
-        connectorFormErrors = {};
+        S.connectorFormErrors = {};
         renderConnectorEditorForm();
       });
       host.appendChild(connectorSimpleRow("通道", sel, "provider"));
     }
 
-    if (connectorHasQRAction(ps)) {
+    if (G.connectorHasQRAction(ps)) {
       var qrEntry = document.createElement("div");
       qrEntry.className = "connector-qr-entry";
       var qrHint = document.createElement("p");
       qrHint.className = "connectors-hint";
-      qrHint.textContent = connectorEditing
+      qrHint.textContent = S.connectorEditing
         ? "重新扫码只替换登录凭据（bot_token / 账号），名称、策略与已有绑定保持不变。"
         : "扫码通道无需手动填写 Token：点下方按钮自动创建连接器并出二维码，确认后凭据自动回填。";
       qrEntry.appendChild(qrHint);
       var qrStartBtn = document.createElement("button");
       qrStartBtn.type = "button";
       qrStartBtn.className = "btn sm";
-      qrStartBtn.textContent = connectorEditing ? "重新扫码（替换凭据）" : "扫码登录（自动创建）";
-      qrStartBtn.addEventListener("click", startConnectorQRFromEditor);
+      qrStartBtn.textContent = S.connectorEditing ? "重新扫码（替换凭据）" : "扫码登录（自动创建）";
+      qrStartBtn.addEventListener("click", G.startConnectorQRFromEditor);
       qrEntry.appendChild(qrStartBtn);
       host.appendChild(qrEntry);
     }
@@ -268,14 +327,14 @@
     var idInput = document.createElement("input");
     idInput.type = "text";
     idInput.value = form.id;
-    idInput.disabled = !!connectorEditing;
+    idInput.disabled = !!S.connectorEditing;
     idInput.placeholder = "如 tg-ops / qq-ops";
     idInput.autocomplete = "off";
     idInput.addEventListener("input", function () {
       form.id = idInput.value;
-      delete connectorFormErrors.id;
+      delete S.connectorFormErrors.id;
     });
-    host.appendChild(connectorSimpleRow("连接器 ID" + (connectorEditing ? "（不可修改）" : " *"), idInput, "id"));
+    host.appendChild(connectorSimpleRow("连接器 ID" + (S.connectorEditing ? "（不可修改）" : " *"), idInput, "id"));
 
     var nameInput = document.createElement("input");
     nameInput.type = "text";
@@ -284,7 +343,7 @@
     nameInput.autocomplete = "off";
     nameInput.addEventListener("input", function () {
       form.name = nameInput.value;
-      delete connectorFormErrors.name;
+      delete S.connectorFormErrors.name;
     });
     host.appendChild(connectorSimpleRow("名称", nameInput, "name"));
 
@@ -336,7 +395,7 @@
     ta.value = form.policyText;
     ta.addEventListener("input", function () {
       form.policyText = ta.value;
-      delete connectorFormErrors.policy;
+      delete S.connectorFormErrors.policy;
     });
     policyWrap.appendChild(ta);
     var policyHelp = document.createElement("p");
@@ -356,11 +415,11 @@
     skipLine.appendChild(document.createTextNode(" 跳过保存前凭据校验（平台暂不可达时强制落盘）"));
     host.appendChild(skipLine);
 
-    if (connectorEditing) { renderConnectorBindings(); }
+    if (S.connectorEditing) { renderConnectorBindings(); }
   }
 
   function connectorBindingRows(connectorID) {
-    return (connectorBindings || []).filter(function (b) { return b.connector_id === connectorID; });
+    return (S.connectorBindings || []).filter(function (b) { return b.connector_id === connectorID; });
   }
 
   function connectorBindingLabel(b) {
@@ -370,28 +429,28 @@
   }
 
   function loadConnectorBindings() {
-    return apiJSON("/api/connectors/bindings").then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
+    return G.apiJSON("/api/connectors/bindings").then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return; }
       if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
-        connectorBindings = [];
-        connectorBindingsError = (r.body && r.body.error) || ("HTTP " + r.res.status);
+        S.connectorBindings = [];
+        S.connectorBindingsError = (r.body && r.body.error) || ("HTTP " + r.res.status);
         return;
       }
-      connectorBindings = r.body.items;
-      connectorBindingsError = "";
+      S.connectorBindings = r.body.items;
+      S.connectorBindingsError = "";
     }).catch(function (err) {
-      connectorBindings = [];
-      connectorBindingsError = err && err.message ? err.message : String(err);
+      S.connectorBindings = [];
+      S.connectorBindingsError = err && err.message ? err.message : String(err);
     }).then(function () {
-      if (currentView() === "connectors") { renderConnectors(connectorEntries, connectorMessage); }
-      if (connectorEditing) { renderConnectorBindings(); }
+      if (G.currentView() === "connectors") { G.renderConnectors(S.connectorEntries, S.connectorMessage); }
+      if (S.connectorEditing) { renderConnectorBindings(); }
     });
   }
 
   // syncConnectorIDOptions 把网关自身连接器填进 Bot 通道表单的下拉框，
   // 让 operator 不必手记 connector_id。节点条目不属于本宿主 store，不进入列表。
   function syncConnectorIDOptions() {
-    var sel = el("notify-im-connector");
+    var sel = S.el("notify-im-connector");
     if (!sel) { return; }
     var current = sel.value;
     sel.innerHTML = "";
@@ -399,7 +458,7 @@
     placeholder.value = "";
     placeholder.textContent = "选择网关连接器";
     sel.appendChild(placeholder);
-    (connectorGatewayEntries || []).forEach(function (entry) {
+    (S.connectorGatewayEntries || []).forEach(function (entry) {
       var item = entry.connector;
       if (!item || !item.id) { return; }
       var opt = document.createElement("option");
@@ -414,26 +473,26 @@
   // ensureGatewayConnectorOptions 让直接打开「通知设置」的用户也能拿到连接器
   // 下拉选项（连接器列表是懒加载视图，不能假设用户先去过连接器页）。
   function ensureGatewayConnectorOptions() {
-    if (connectorGatewayEntries && connectorGatewayEntries.length) {
+    if (S.connectorGatewayEntries && S.connectorGatewayEntries.length) {
       syncConnectorIDOptions();
       return Promise.resolve();
     }
-    return loadConnectors(false).then(function () {
+    return G.loadConnectors(false).then(function () {
       syncConnectorIDOptions();
     }).catch(function () {});
   }
 
   function renderConnectorBindings() {
-    var host = el("connector-editor-bindings");
+    var host = S.el("connector-editor-bindings");
     if (!host) { return; }
-    if (!connectorEditing) { host.hidden = true; host.innerHTML = ""; return; }
+    if (!S.connectorEditing) { host.hidden = true; host.innerHTML = ""; return; }
     host.hidden = false;
     host.innerHTML = "";
     var title = document.createElement("div");
     title.className = "connector-bindings-head";
     title.textContent = "绑定会话（聊天 → 会话）";
     host.appendChild(title);
-    var rows = connectorBindingRows(connectorEditing.id);
+    var rows = connectorBindingRows(S.connectorEditing.id);
     if (!rows.length) {
       var empty = document.createElement("p");
       empty.className = "connectors-hint";
@@ -451,7 +510,7 @@
         del.type = "button";
         del.className = "btn ghost sm";
         del.textContent = "解绑";
-        del.addEventListener("click", function () { unbindConnectorChat(connectorEditing.id, b.chat, del); });
+        del.addEventListener("click", function () { unbindConnectorChat(S.connectorEditing.id, b.chat, del); });
         row.appendChild(del);
         host.appendChild(row);
       });
@@ -478,29 +537,29 @@
       var chatValue = (chat.value || "").trim();
       var sessionValue = (session.value || "").trim();
       if (!chatValue || !sessionValue) {
-        notify("chat 与 session_id 必填", "error");
+        G.notify("chat 与 session_id 必填", "error");
         return;
       }
       add.disabled = true;
       var body = { session_id: sessionValue };
       var nodeValue = (node.value || "").trim();
       if (nodeValue) { body.node_id = nodeValue; }
-      apiJSON("/api/connectors/" + encodeURIComponent(connectorEditing.id) + "/bindings/" + encodeURIComponent(chatValue), {
+      G.apiJSON("/api/connectors/" + encodeURIComponent(S.connectorEditing.id) + "/bindings/" + encodeURIComponent(chatValue), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       }).then(function (r) {
         add.disabled = false;
         if (!r.res.ok) {
-          notify("绑定失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
+          G.notify("绑定失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
           return;
         }
         chat.value = ""; session.value = ""; node.value = "";
-        notify("已绑定 " + chatValue, "ok");
+        G.notify("已绑定 " + chatValue, "ok");
         loadConnectorBindings();
       }).catch(function (err) {
         add.disabled = false;
-        notify("绑定失败：" + (err && err.message ? err.message : err), "error");
+        G.notify("绑定失败：" + (err && err.message ? err.message : err), "error");
       });
     });
     form.appendChild(chat);
@@ -511,50 +570,50 @@
   }
 
   function unbindConnectorChat(connectorID, chat, btn) {
-    confirmDestructive({
+    G.confirmDestructive({
       title: "解除绑定",
       message: "将解绑 " + connectorID + " 的 chat " + chat + "。入站消息不再投递到该会话。",
       confirmText: "解绑",
       trigger: btn,
       onConfirm: function () {
-        return apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/bindings/" + encodeURIComponent(chat), { method: "DELETE" }).then(function (r) {
+        return G.apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/bindings/" + encodeURIComponent(chat), { method: "DELETE" }).then(function (r) {
           if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         });
       },
     }).then(function (res) {
-      if (res.confirmed) { notify("已解绑 " + chat, "ok"); loadConnectorBindings(); }
+      if (res.confirmed) { G.notify("已解绑 " + chat, "ok"); loadConnectorBindings(); }
     });
   }
 
   function openConnectorEditor(view) {
-    connectorEditing = view || null;
-    connectorForm = view ? connectorFormFromView(view) : connectorEmptyForm();
-    connectorFormErrors = {};
-    connectorSaving = false;
-    var err = el("connector-editor-error");
+    S.connectorEditing = view || null;
+    S.connectorForm = view ? connectorFormFromView(view) : connectorEmptyForm();
+    S.connectorFormErrors = {};
+    S.connectorSaving = false;
+    var err = S.el("connector-editor-error");
     if (err) { err.hidden = true; err.textContent = ""; }
-    el("connector-editor-title").textContent = view ? "编辑连接器" : "新建连接器";
-    var saveBtn = el("connector-editor-save");
+    S.el("connector-editor-title").textContent = view ? "编辑连接器" : "新建连接器";
+    var saveBtn = S.el("connector-editor-save");
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = view ? "保存修改" : "创建连接器"; }
-    if (!connectorSchemaProviders) {
-      loadConnectorSchema().then(function () {
-        if (!connectorSchemaProviders) {
+    if (!S.connectorSchemaProviders) {
+      G.loadConnectorSchema().then(function () {
+        if (!S.connectorSchemaProviders) {
           connectorNotice("无法读取连接器 Schema，管理表单不可用。请检查 /api/connectors/schema。");
           return;
         }
-        if (!connectorForm.provider) { connectorForm = connectorEmptyForm(); }
+        if (!S.connectorForm.provider) { S.connectorForm = connectorEmptyForm(); }
         renderConnectorEditorForm();
       });
     }
     renderConnectorEditorForm();
-    openModal("connector-editor-modal");
+    G.openModal("connector-editor-modal");
   }
 
   function closeConnectorEditor() {
-    closeModal("connector-editor-modal");
-    connectorEditing = null;
-    connectorForm = null;
-    connectorFormErrors = {};
+    G.closeModal("connector-editor-modal");
+    S.connectorEditing = null;
+    S.connectorForm = null;
+    S.connectorFormErrors = {};
   }
 
   function connectorValidate(form, ps, isCreate) {
@@ -565,7 +624,7 @@
       else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) { errors.id = "只能包含字母、数字、._-（最长 64）"; }
     }
     if (!ps) { errors.provider = "请选择通道"; return errors; }
-    var existingSecrets = connectorEditing ? (connectorEditing.secret_keys || []) : [];
+    var existingSecrets = S.connectorEditing ? (S.connectorEditing.secret_keys || []) : [];
     (ps.fields || []).forEach(function (field) {
       if (!field.required) { return; }
       var value = (form.values[field.key] || "").trim();
@@ -627,38 +686,38 @@
   }
 
   function saveConnectorEditor() {
-    if (connectorSaving || !connectorForm) { return; }
-    var ps = connectorProviderSchemaOf(connectorForm);
-    var isCreate = !connectorEditing;
-    connectorFormErrors = connectorValidate(connectorForm, ps, isCreate);
+    if (S.connectorSaving || !S.connectorForm) { return; }
+    var ps = connectorProviderSchemaOf(S.connectorForm);
+    var isCreate = !S.connectorEditing;
+    S.connectorFormErrors = connectorValidate(S.connectorForm, ps, isCreate);
     renderConnectorEditorForm();
-    var errBox = el("connector-editor-error");
-    if (Object.keys(connectorFormErrors).length) {
+    var errBox = S.el("connector-editor-error");
+    if (Object.keys(S.connectorFormErrors).length) {
       if (errBox) { errBox.hidden = false; errBox.textContent = "请修正标红的字段后再保存。"; }
       return;
     }
     var payload;
     try {
-      payload = connectorBuildPayload(connectorForm, ps, isCreate);
+      payload = connectorBuildPayload(S.connectorForm, ps, isCreate);
     } catch (e) {
-      connectorFormErrors.policy = e.message;
+      S.connectorFormErrors.policy = e.message;
       renderConnectorEditorForm();
       return;
     }
-    connectorSaving = true;
-    var saveBtn = el("connector-editor-save");
+    S.connectorSaving = true;
+    var saveBtn = S.el("connector-editor-save");
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "保存中…"; }
     if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
-    var path = isCreate ? "/api/connectors" : "/api/connectors/" + encodeURIComponent(connectorEditing.id);
-    apiJSON(path, {
+    var path = isCreate ? "/api/connectors" : "/api/connectors/" + encodeURIComponent(S.connectorEditing.id);
+    G.apiJSON(path, {
       method: isCreate ? "POST" : "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(function (r) {
-      connectorSaving = false;
+      S.connectorSaving = false;
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = isCreate ? "创建连接器" : "保存修改"; }
       if (!r.res.ok) {
-        connectorFormErrors = connectorFieldErrorsFrom(r.body);
+        S.connectorFormErrors = connectorFieldErrorsFrom(r.body);
         renderConnectorEditorForm();
         if (errBox) {
           errBox.hidden = false;
@@ -667,10 +726,10 @@
         return;
       }
       closeConnectorEditor();
-      notify(isCreate ? "已创建连接器 " + payload.id : "连接器已保存", "ok");
-      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+      G.notify(isCreate ? "已创建连接器 " + payload.id : "连接器已保存", "ok");
+      G.loadConnectors(true).then(function () { return loadConnectorBindings(); });
     }).catch(function (err) {
-      connectorSaving = false;
+      S.connectorSaving = false;
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = isCreate ? "创建连接器" : "保存修改"; }
       if (errBox) { errBox.hidden = false; errBox.textContent = "保存失败：" + (err && err.message ? err.message : err); }
     });
@@ -689,8 +748,8 @@
   function connectorToggle(item) {
     connectorSetBusy(item.id, true);
     connectorNotice("");
-    renderConnectors(connectorEntries, connectorMessage);
-    apiJSON("/api/connectors/" + encodeURIComponent(item.id), {
+    G.renderConnectors(S.connectorEntries, S.connectorMessage);
+    G.apiJSON("/api/connectors/" + encodeURIComponent(item.id), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: !item.enabled }),
@@ -698,40 +757,40 @@
       connectorSetBusy(item.id, false);
       if (!r.res.ok) {
         connectorNotice("切换失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
-        renderConnectors(connectorEntries, connectorMessage);
+        G.renderConnectors(S.connectorEntries, S.connectorMessage);
         return;
       }
-      notify((item.enabled ? "已停用 " : "已启用 ") + (item.name || item.id), "ok");
-      loadConnectors(true);
+      G.notify((item.enabled ? "已停用 " : "已启用 ") + (item.name || item.id), "ok");
+      G.loadConnectors(true);
     }).catch(function (err) {
       connectorSetBusy(item.id, false);
       connectorNotice("切换失败：" + (err && err.message ? err.message : err));
-      renderConnectors(connectorEntries, connectorMessage);
+      G.renderConnectors(S.connectorEntries, S.connectorMessage);
     });
   }
 
   function connectorReload(item) {
     connectorSetBusy(item.id, true);
     connectorNotice("");
-    renderConnectors(connectorEntries, connectorMessage);
-    apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/reload", { method: "POST" }).then(function (r) {
+    G.renderConnectors(S.connectorEntries, S.connectorMessage);
+    G.apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/reload", { method: "POST" }).then(function (r) {
       connectorSetBusy(item.id, false);
       if (!r.res.ok) {
         connectorNotice("重载失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
-        renderConnectors(connectorEntries, connectorMessage);
+        G.renderConnectors(S.connectorEntries, S.connectorMessage);
         return;
       }
-      notify("已重载 " + (item.name || item.id), "ok");
-      loadConnectors(true);
+      G.notify("已重载 " + (item.name || item.id), "ok");
+      G.loadConnectors(true);
     }).catch(function (err) {
       connectorSetBusy(item.id, false);
       connectorNotice("重载失败：" + (err && err.message ? err.message : err));
-      renderConnectors(connectorEntries, connectorMessage);
+      G.renderConnectors(S.connectorEntries, S.connectorMessage);
     });
   }
 
   function connectorDelete(item, btn) {
-    confirmDestructive({
+    G.confirmDestructive({
       title: "删除连接器",
       message: "将删除连接器 " + (item.name || item.id) + "（" + item.id + "）及其配置密钥；绑定与运行实例会停止。此操作不可撤销。",
       confirmText: "删除",
@@ -740,7 +799,7 @@
         var restore = Promise.resolve();
         if (item.origin && item.origin.node_id && item.origin.connector_id) {
           // 导入副本删除前先恢复节点本地通知，避免节点永久静音。
-          restore = apiJSON("/api/nodes/" + encodeURIComponent(item.origin.node_id) +
+          restore = G.apiJSON("/api/nodes/" + encodeURIComponent(item.origin.node_id) +
             "/connectors/" + encodeURIComponent(item.origin.connector_id) + "/handoff/rollback",
             { method: "POST" }).then(function (r) {
             if (!r.res.ok) {
@@ -749,33 +808,33 @@
           });
         }
         return restore.then(function () {
-          return apiJSON("/api/connectors/" + encodeURIComponent(item.id), { method: "DELETE" });
+          return G.apiJSON("/api/connectors/" + encodeURIComponent(item.id), { method: "DELETE" });
         }).then(function (r) {
           if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         });
       },
     }).then(function (res) {
       if (!res.confirmed) { return; }
-      notify("已删除连接器 " + (item.name || item.id), "ok");
-      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+      G.notify("已删除连接器 " + (item.name || item.id), "ok");
+      G.loadConnectors(true).then(function () { return loadConnectorBindings(); });
     });
   }
 
   function connectorTakeover(item, btn) {
-    confirmDestructive({
+    G.confirmDestructive({
       title: "接管运行归属",
       message: "将把连接器 " + (item.name || item.id) + " 的运行归属从 " + (item.active_owner || "其它宿主") + " 抢到本网关，并重启其轮询。",
       confirmText: "接管",
       trigger: btn,
       onConfirm: function () {
-        return apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/takeover", { method: "POST" }).then(function (r) {
+        return G.apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/takeover", { method: "POST" }).then(function (r) {
           if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         });
       },
     }).then(function (res) {
       if (!res.confirmed) { return; }
-      notify("已接管 " + (item.name || item.id), "ok");
-      loadConnectors(true);
+      G.notify("已接管 " + (item.name || item.id), "ok");
+      G.loadConnectors(true);
     });
   }
 
@@ -785,7 +844,7 @@
     var nodeID = entry.node.node_id;
     var connectorID = entry.connector.id;
     if (!nodeID || !connectorID) { return null; }
-    var groups = connectorGatewayEntries || [];
+    var groups = S.connectorGatewayEntries || [];
     for (var i = 0; i < groups.length; i++) {
       var candidate = groups[i] && groups[i].connector;
       if (candidate && candidate.origin &&
@@ -798,7 +857,7 @@
 
   function connectorNodeEntryForGateway(item) {
     if (!item || !item.origin) { return null; }
-    var entries = connectorEntries || [];
+    var entries = S.connectorEntries || [];
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i];
       if (!entry || entry.source === "gateway" || !entry.node || !entry.connector) { continue; }
@@ -855,19 +914,19 @@
     var chain = Promise.resolve();
     if (node && node.node_id && connectorID) {
       chain = chain.then(function () {
-        return apiJSON("/api/nodes/" + encodeURIComponent(node.node_id) +
+        return G.apiJSON("/api/nodes/" + encodeURIComponent(node.node_id) +
           "/connectors/" + encodeURIComponent(connectorID) + "/handoff/rollback",
           { method: "POST" }).catch(function () {});
       });
     }
     if (gatewayID) {
       chain = chain.then(function () {
-        return apiJSON("/api/connectors/" + encodeURIComponent(gatewayID), { method: "DELETE" }).catch(function () {});
+        return G.apiJSON("/api/connectors/" + encodeURIComponent(gatewayID), { method: "DELETE" }).catch(function () {});
       });
     }
     if (beforeConfig) {
       chain = chain.then(function () {
-        return apiJSON("/api/notify/im", {
+        return G.apiJSON("/api/notify/im", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(beforeConfig),
@@ -876,8 +935,8 @@
     }
     return chain.then(function () {
       if (beforeConfig) {
-        notifyIMState.config = beforeConfig;
-        renderNotifyIMTargets();
+        S.notifyIMState.config = beforeConfig;
+        G.renderNotifyIMTargets();
       }
     });
   }
@@ -889,12 +948,12 @@
     var item = entry && entry.connector;
     var node = entry && entry.node;
     if (!item || !node || !node.node_id) {
-      notify("节点信息缺失，无法迁移", "error");
+      G.notify("节点信息缺失，无法迁移", "error");
       return;
     }
     var nodeBase = "/api/nodes/" + encodeURIComponent(node.node_id);
     var bindingsURL = nodeBase + "/connectors/bindings?connector_id=" + encodeURIComponent(item.id);
-    apiJSON(bindingsURL).then(function (bindingsResp) {
+    G.apiJSON(bindingsURL).then(function (bindingsResp) {
       if (!bindingsResp.res.ok) {
         throw new Error((bindingsResp.body && bindingsResp.body.error) || ("HTTP " + bindingsResp.res.status));
       }
@@ -907,18 +966,18 @@
       var kinds = ["approval", "question", "completed", "error", "waiting"];
       var chats = bindings.map(function (b) { return b.chat; });
       var message = (resync
-        ? "将重新同步节点「" + (nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) + " 配置，并重建通知目标。\n\n"
-        : "将把节点「" + (nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) +
+        ? "将重新同步节点「" + (G.nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) + " 配置，并重建通知目标。\n\n"
+        : "将把节点「" + (G.nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) +
           "（" + item.provider + "）迁移到网关：\n\n") +
         "• 复制 " + bindings.length + " 个绑定 chat：" + chats.join("、") + "\n" +
         "• 创建网关 outbound-only 副本（不轮询，节点继续入站/回复）\n" +
         "• 通知范围：全部会话（含当前 live 会话）\n" +
-        "• 自动创建 Bot target：" + kinds.map(notifyKindLabel).join("、") + "\n" +
+        "• 自动创建 Bot target：" + kinds.map(G.notifyKindLabel).join("、") + "\n" +
         "• 关闭节点该连接器的本地通知\n\n" +
         "凭据只经隧道传输，不写日志。";
       return { bindings: bindings, kinds: kinds, message: message };
     }).then(function (prepared) {
-      return confirmDestructive({
+      return G.confirmDestructive({
         title: resync ? "重新同步网关副本" : "迁移通知到网关",
         message: prepared.message,
         confirmText: resync ? "同步" : "迁移",
@@ -926,17 +985,17 @@
         onConfirm: function () {
           var gatewayID = "";
           var beforeConfig = null;
-          var chain = apiJSON(nodeBase + "/connectors/" + encodeURIComponent(item.id) + "/handoff", { method: "POST" })
+          var chain = G.apiJSON(nodeBase + "/connectors/" + encodeURIComponent(item.id) + "/handoff", { method: "POST" })
             .then(function (r) {
               if (!r.res.ok) {
                 throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status));
               }
               gatewayID = (r.body && r.body.connector_id) || "";
               if (!gatewayID) { throw new Error("节点未返回网关副本 ID"); }
-              return loadNotifyIM();
+              return G.loadNotifyIM();
             })
             .then(function () {
-              beforeConfig = JSON.parse(JSON.stringify(notifyIMState.config || { version: 1, targets: [] }));
+              beforeConfig = JSON.parse(JSON.stringify(S.notifyIMState.config || { version: 1, targets: [] }));
               var next = JSON.parse(JSON.stringify(beforeConfig));
               if (!next.targets) { next.targets = []; }
               next.targets = next.targets.filter(function (t) {
@@ -955,7 +1014,7 @@
                   enabled: true,
                 });
               });
-              return apiJSON("/api/notify/im", {
+              return G.apiJSON("/api/notify/im", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(next),
@@ -963,9 +1022,9 @@
                 if (!put.res.ok) {
                   throw new Error((put.body && put.body.error) || ("HTTP " + put.res.status));
                 }
-                notifyIMState.config = (put.body && put.body.config) || next;
-                if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
-                renderNotifyIMTargets();
+                S.notifyIMState.config = (put.body && put.body.config) || next;
+                if (!S.notifyIMState.config.targets) { S.notifyIMState.config.targets = []; }
+                G.renderNotifyIMTargets();
                 syncConnectorIDOptions();
                 return { gatewayID: gatewayID, count: prepared.bindings.length };
               });
@@ -980,112 +1039,112 @@
     }).then(function (res) {
       if (!res.confirmed) { return; }
       var result = res.result || {};
-      notify((resync ? "已重新同步" : "已迁移") + " " + (result.count || 0) + " 个 chat 到网关" +
+      G.notify((resync ? "已重新同步" : "已迁移") + " " + (result.count || 0) + " 个 chat 到网关" +
         (result.gatewayID ? "（" + result.gatewayID + "）" : "") +
         "；节点本地通知已关闭。可在 Bot 通道点「测试」验证。", "ok");
-      loadConnectors(true);
+      G.loadConnectors(true);
     }).catch(function (err) {
-      notify("迁移失败：" + friendlyConnectorError(err), "error");
+      G.notify("迁移失败：" + friendlyConnectorError(err), "error");
     });
   }
 
   function openConnectorTest(item) {
-    connectorTestState.id = item.id;
-    connectorTestState.name = item.name || item.id;
-    connectorTestState.busy = false;
-    var title = el("connector-test-title");
-    if (title) { title.textContent = "发送测试消息 · " + connectorTestState.name; }
-    var sub = el("connector-test-sub");
+    S.connectorTestState.id = item.id;
+    S.connectorTestState.name = item.name || item.id;
+    S.connectorTestState.busy = false;
+    var title = S.el("connector-test-title");
+    if (title) { title.textContent = "发送测试消息 · " + S.connectorTestState.name; }
+    var sub = S.el("connector-test-sub");
     if (sub) { sub.textContent = "通过连接器 " + item.id + " 向指定 chat 发送一条测试消息，用于验证凭据与出站链路。"; }
-    var err = el("connector-test-error");
+    var err = S.el("connector-test-error");
     if (err) { err.hidden = true; err.textContent = ""; }
-    var chat = el("connector-test-chat");
+    var chat = S.el("connector-test-chat");
     var bindings = connectorBindingRows(item.id);
     if (chat) { chat.value = bindings.length ? bindings[0].chat : ""; }
-    var text = el("connector-test-text");
+    var text = S.el("connector-test-text");
     if (text) { text.value = "这是一条来自控制台的测试消息。"; }
-    var send = el("connector-test-send");
+    var send = S.el("connector-test-send");
     if (send) { send.disabled = false; send.textContent = "发送"; }
-    openModal("connector-test-modal");
+    G.openModal("connector-test-modal");
   }
 
   function sendConnectorTest() {
-    if (connectorTestState.busy) { return; }
-    var chat = (el("connector-test-chat") && el("connector-test-chat").value || "").trim();
-    var text = (el("connector-test-text") && el("connector-test-text").value || "").trim();
-    var errBox = el("connector-test-error");
+    if (S.connectorTestState.busy) { return; }
+    var chat = (S.el("connector-test-chat") && S.el("connector-test-chat").value || "").trim();
+    var text = (S.el("connector-test-text") && S.el("connector-test-text").value || "").trim();
+    var errBox = S.el("connector-test-error");
     if (!chat) {
       if (errBox) { errBox.hidden = false; errBox.textContent = "目标会话 / 群 ID 必填。"; }
       return;
     }
-    connectorTestState.busy = true;
-    var send = el("connector-test-send");
+    S.connectorTestState.busy = true;
+    var send = S.el("connector-test-send");
     if (send) { send.disabled = true; send.textContent = "发送中…"; }
     if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
-    apiJSON("/api/connectors/" + encodeURIComponent(connectorTestState.id) + "/test", {
+    G.apiJSON("/api/connectors/" + encodeURIComponent(S.connectorTestState.id) + "/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat: chat, text: text }),
     }).then(function (r) {
-      connectorTestState.busy = false;
+      S.connectorTestState.busy = false;
       if (send) { send.disabled = false; send.textContent = "发送"; }
       if (!r.res.ok) {
         if (errBox) { errBox.hidden = false; errBox.textContent = "发送失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         return;
       }
-      closeModal("connector-test-modal");
-      notify("测试消息已发送到 " + chat, "ok");
+      G.closeModal("connector-test-modal");
+      G.notify("测试消息已发送到 " + chat, "ok");
     }).catch(function (err) {
-      connectorTestState.busy = false;
+      S.connectorTestState.busy = false;
       if (send) { send.disabled = false; send.textContent = "发送"; }
       if (errBox) { errBox.hidden = false; errBox.textContent = "发送失败：" + (err && err.message ? err.message : err); }
     });
   }
 
   function openConnectorLogs(item) {
-    connectorLogsState.id = item.id;
-    connectorLogsState.name = item.name || item.id;
-    connectorLogsState.entries = [];
-    connectorLogsState.stats = null;
-    var title = el("connector-logs-title");
-    if (title) { title.textContent = "连接器日志 · " + connectorLogsState.name; }
-    var sub = el("connector-logs-sub");
+    S.connectorLogsState.id = item.id;
+    S.connectorLogsState.name = item.name || item.id;
+    S.connectorLogsState.entries = [];
+    S.connectorLogsState.stats = null;
+    var title = S.el("connector-logs-title");
+    if (title) { title.textContent = "连接器日志 · " + S.connectorLogsState.name; }
+    var sub = S.el("connector-logs-sub");
     if (sub) { sub.textContent = "内存日志（重启即清空），最新在前，最多 100 条。"; }
-    var err = el("connector-logs-error");
+    var err = S.el("connector-logs-error");
     if (err) { err.hidden = true; err.textContent = ""; }
     renderConnectorLogs();
-    openModal("connector-logs-modal");
+    G.openModal("connector-logs-modal");
     loadConnectorLogs(item.id);
   }
 
   function loadConnectorLogs(id) {
-    connectorLogsState.loading = true;
+    S.connectorLogsState.loading = true;
     renderConnectorLogs();
-    apiJSON("/api/connectors/" + encodeURIComponent(id) + "/logs?limit=100").then(function (r) {
-      connectorLogsState.loading = false;
-      var errBox = el("connector-logs-error");
+    G.apiJSON("/api/connectors/" + encodeURIComponent(id) + "/logs?limit=100").then(function (r) {
+      S.connectorLogsState.loading = false;
+      var errBox = S.el("connector-logs-error");
       if (!r.res.ok) {
         if (errBox) { errBox.hidden = false; errBox.textContent = "读取日志失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         renderConnectorLogs();
         return;
       }
       if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
-      connectorLogsState.entries = (r.body && r.body.entries) || [];
-      connectorLogsState.stats = (r.body && r.body.stats) || null;
+      S.connectorLogsState.entries = (r.body && r.body.entries) || [];
+      S.connectorLogsState.stats = (r.body && r.body.stats) || null;
       renderConnectorLogs();
     }).catch(function (err) {
-      connectorLogsState.loading = false;
-      var errBox = el("connector-logs-error");
+      S.connectorLogsState.loading = false;
+      var errBox = S.el("connector-logs-error");
       if (errBox) { errBox.hidden = false; errBox.textContent = "读取日志失败：" + (err && err.message ? err.message : err); }
       renderConnectorLogs();
     });
   }
 
   function renderConnectorLogs() {
-    var statsHost = el("connector-logs-stats");
+    var statsHost = S.el("connector-logs-stats");
     if (!statsHost) { return; }
     statsHost.innerHTML = "";
-    var s = connectorLogsState.stats;
+    var s = S.connectorLogsState.stats;
     if (s) {
       var bits = [
         "入站 " + (s.inbound || 0),
@@ -1099,24 +1158,24 @@
       line.textContent = bits.join(" · ") + (s.last_error ? " · 最近错误：" + s.last_error : "");
       statsHost.appendChild(line);
     }
-    var list = el("connector-logs-list");
+    var list = S.el("connector-logs-list");
     if (!list) { return; }
     list.innerHTML = "";
-    if (connectorLogsState.loading) {
+    if (S.connectorLogsState.loading) {
       var loading = document.createElement("p");
       loading.className = "empty";
       loading.textContent = "正在读取日志…";
       list.appendChild(loading);
       return;
     }
-    if (!connectorLogsState.entries.length) {
+    if (!S.connectorLogsState.entries.length) {
       var empty = document.createElement("p");
       empty.className = "empty";
       empty.textContent = "暂无日志。连接器收到或发送消息后会在这里出现。";
       list.appendChild(empty);
       return;
     }
-    connectorLogsState.entries.forEach(function (entry) {
+    S.connectorLogsState.entries.forEach(function (entry) {
       var row = document.createElement("div");
       row.className = "connector-log-row level-" + (entry.level || "info");
       var time = document.createElement("span");
@@ -1152,10 +1211,10 @@
   }
 
   function renderConnectorActionResult() {
-    var host = el("connector-action-body");
+    var host = S.el("connector-action-body");
     if (!host) { return; }
     host.innerHTML = "";
-    var payload = connectorActionState.payload || {};
+    var payload = S.connectorActionState.payload || {};
     var img = connectorActionImage(payload);
     if (img) {
       var image = document.createElement("img");
@@ -1169,52 +1228,52 @@
     try { pre.textContent = JSON.stringify(payload, null, 2); } catch (e) { pre.textContent = String(payload); }
     host.appendChild(pre);
     var loginID = payload.login_id;
-    if (loginID && connectorActionState.action === "start_login") {
+    if (loginID && S.connectorActionState.action === "start_login") {
       var tools = document.createElement("div");
       tools.className = "toolbar";
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn ghost sm";
       btn.textContent = "查询登录状态";
-      btn.addEventListener("click", function () { connectorLoginStatus(connectorActionState.id, loginID, btn); });
+      btn.addEventListener("click", function () { connectorLoginStatus(S.connectorActionState.id, loginID, btn); });
       tools.appendChild(btn);
       host.appendChild(tools);
     }
   }
 
   function openConnectorActionResult(item, action, payload) {
-    connectorActionState.id = item.id;
-    connectorActionState.name = item.name || item.id;
-    connectorActionState.action = action.key;
-    connectorActionState.payload = payload || {};
-    var title = el("connector-action-title");
+    S.connectorActionState.id = item.id;
+    S.connectorActionState.name = item.name || item.id;
+    S.connectorActionState.action = action.key;
+    S.connectorActionState.payload = payload || {};
+    var title = S.el("connector-action-title");
     if (title) { title.textContent = "通道动作 · " + (action.label || action.key); }
-    var sub = el("connector-action-sub");
-    if (sub) { sub.textContent = connectorActionState.name + " · " + action.key; }
-    var err = el("connector-action-error");
+    var sub = S.el("connector-action-sub");
+    if (sub) { sub.textContent = S.connectorActionState.name + " · " + action.key; }
+    var err = S.el("connector-action-error");
     if (err) { err.hidden = true; err.textContent = ""; }
     renderConnectorActionResult();
-    openModal("connector-action-modal");
+    G.openModal("connector-action-modal");
   }
 
   function connectorLoginStatus(connectorID, loginID, btn) {
     btn.disabled = true;
-    apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/actions/login_status", {
+    G.apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/actions/login_status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ login_id: loginID }),
     }).then(function (r) {
       btn.disabled = false;
-      var errBox = el("connector-action-error");
+      var errBox = S.el("connector-action-error");
       if (!r.res.ok) {
         if (errBox) { errBox.hidden = false; errBox.textContent = "查询失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
         return;
       }
-      connectorActionState.payload = r.body || {};
+      S.connectorActionState.payload = r.body || {};
       renderConnectorActionResult();
       if (r.body && (r.body.settings || r.body.secrets)) {
         // 微信扫码确认会返回 settings/secrets 补丁：按 D4 两层模型回填实体。
-        apiJSON("/api/connectors/" + encodeURIComponent(connectorID), {
+        G.apiJSON("/api/connectors/" + encodeURIComponent(connectorID), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ settings: r.body.settings || {}, secrets: r.body.secrets || {} }),
@@ -1223,14 +1282,13 @@
             if (errBox) { errBox.hidden = false; errBox.textContent = "凭据回填失败：" + ((pr.body && pr.body.error) || ("HTTP " + pr.res.status)); }
             return;
           }
-          notify("扫码已确认，凭据已回填", "ok");
-          loadConnectors(true).then(function () { return loadConnectorBindings(); });
+          G.notify("扫码已确认，凭据已回填", "ok");
+          G.loadConnectors(true).then(function () { return loadConnectorBindings(); });
         });
       }
     }).catch(function (err) {
       btn.disabled = false;
-      var errBox = el("connector-action-error");
+      var errBox = S.el("connector-action-error");
       if (errBox) { errBox.hidden = false; errBox.textContent = "查询失败：" + (err && err.message ? err.message : err); }
     });
   }
-

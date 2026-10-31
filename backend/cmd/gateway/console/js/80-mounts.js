@@ -1,10 +1,41 @@
+// 80-mounts.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  loadMounts: loadMounts,
+  mountLabels: mountLabels,
+  mountLabelList: mountLabelList,
+  mountToolCount: mountToolCount,
+  mountHostText: mountHostText,
+  mountProfileText: mountProfileText,
+  mountVersionText: mountVersionText,
+  appendMountFact: appendMountFact,
+  appendMountChips: appendMountChips,
+  appendMountDetails: appendMountDetails,
+  appendMountFacts: appendMountFacts,
+  renderMounts: renderMounts,
+  openMountTokens: openMountTokens,
+  hideMountTokenReveal: hideMountTokenReveal,
+  syncMountTokenTTL: syncMountTokenTTL,
+  closeMountTokenModal: closeMountTokenModal,
+  showMountToken: showMountToken,
+  loadMountTokens: loadMountTokens,
+  validTokenTime: validTokenTime,
+  mountTokenState: mountTokenState,
+  renderMountTokens: renderMountTokens,
+});
+
   /* ─────────────────────── MCP mounts ────────────────────────── */
 
   function loadMounts() {
-    return apiJSON("/api/mounts").then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
-      lastMounts = (r.body && r.body.mounts) || [];
-      renderMounts(lastMounts);
+    return G.apiJSON("/api/mounts").then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return; }
+      S.lastMounts = (r.body && r.body.mounts) || [];
+      renderMounts(S.lastMounts);
     });
   }
 
@@ -121,9 +152,9 @@
   }
 
   function renderMounts(mounts) {
-    var list = el("mcp-list");
+    var list = S.el("mcp-list");
     if (!list) { return; }
-    var summary = el("mcp-summary");
+    var summary = S.el("mcp-summary");
     var live = 0, disabled = 0, offline = 0;
     mounts.forEach(function (m) {
       if (m.disabled) { disabled++; } else if (m.stale) { offline++; } else { live++; }
@@ -159,7 +190,7 @@
       card.querySelector(".mcp-slug code").textContent = "/m/" + m.slug + "/mcp";
       var urlEl = card.querySelector(".mcp-url");
       urlEl.textContent = m.public_url || "（网关未配置 public-base-url）";
-      var bits = ["节点 " + (shortNodeID(m.node_id) || "—")];
+      var bits = ["节点 " + (G.shortNodeID(m.node_id) || "—")];
       if (m.local_path) { bits.push("本地 " + m.local_path); }
       if (m.tokens != null) { bits.push(m.tokens + " 个令牌"); }
       if (m.limits && m.limits.max_body_bytes) {
@@ -179,7 +210,7 @@
         copy.className = "btn ghost sm";
         copy.type = "button";
         copy.textContent = "复制地址";
-        copy.addEventListener("click", function () { copyText(m.public_url, copy); });
+        copy.addEventListener("click", function () { G.copyText(m.public_url, copy); });
         actions.appendChild(copy);
       }
       var tokensBtn = document.createElement("button");
@@ -193,7 +224,7 @@
       logsBtn.type = "button";
       logsBtn.textContent = "日志";
       logsBtn.addEventListener("click", function () {
-        navigate("logs", "slug=" + encodeURIComponent(m.slug));
+        G.navigate("logs", "slug=" + encodeURIComponent(m.slug));
       });
       actions.appendChild(logsBtn);
       var toggle = document.createElement("button");
@@ -206,17 +237,17 @@
         var opts = { method: "POST", headers: { "Content-Type": "application/json" } };
         if (!m.disabled) { opts.body = JSON.stringify({ reason: "console" }); }
         function apply() {
-          return api(path, opts).then(function (res) {
+          return G.api(path, opts).then(function (res) {
             if (!res.ok) { throw new Error("HTTP " + res.status); }
-            notify("已" + verb + "：" + (m.name || m.slug), "ok");
+            G.notify("已" + verb + "：" + (m.name || m.slug), "ok");
             loadMounts();
           });
         }
         if (m.disabled) {
-          apply().catch(function (err) { notify(verb + "失败：" + err, "error"); });
+          apply().catch(function (err) { G.notify(verb + "失败：" + err, "error"); });
           return;
         }
-        confirmDestructive({
+        G.confirmDestructive({
           title: "禁用挂载？",
           message: "禁用挂载「" + (m.name || m.slug) + "」？\n公网入口会立即返回 403，节点与地址保留。",
           trigger: toggle,
@@ -235,18 +266,18 @@
           '</div>');
         var mountMenu = actions.querySelector(".s-menu");
         var mountMore = actions.querySelector("[data-more]");
-        bindCardMenu(card, mountMenu);
+        G.bindCardMenu(card, mountMenu);
         mountMenu.querySelector("[data-delete]").addEventListener("click", function () {
-          closeSessionMenus(false);
-          confirmDestructive({
+          G.closeSessionMenus(false);
+          G.confirmDestructive({
             title: "删除离线挂载？",
             message: "删除离线挂载「" + (m.name || m.slug) + "」？\n地址将不再保留，持有该 URL 的客户端会得到 404。",
             trigger: mountMore,
             onConfirm: function () {
-              return api("/api/mounts/" + encodeURIComponent(m.slug), { method: "DELETE" })
+              return G.api("/api/mounts/" + encodeURIComponent(m.slug), { method: "DELETE" })
                 .then(function (res) {
                   if (!res.ok) { throw new Error("HTTP " + res.status); }
-                  notify("已删除挂载：" + (m.name || m.slug), "ok");
+                  G.notify("已删除挂载：" + (m.name || m.slug), "ok");
                   loadMounts();
                 });
             }
@@ -262,32 +293,32 @@
 
   function openMountTokens(m) {
     if (!m) { return; }
-    mountTokenTarget = { slug: m.slug, name: m.name || m.slug };
-    el("mount-token-modal-title").textContent = "MCP 令牌 · " + mountTokenTarget.name;
-    el("mount-token-modal-sub").textContent =
+    S.mountTokenTarget = { slug: m.slug, name: m.name || m.slug };
+    S.el("mount-token-modal-title").textContent = "MCP 令牌 · " + S.mountTokenTarget.name;
+    S.el("mount-token-modal-sub").textContent =
       "外部客户端调用 " + (m.public_url || ("/m/" + m.slug + "/mcp")) +
       " 的凭据。明文只在签发时显示一次；网关只保存 SHA-256 与指纹。";
-    el("mount-token-name").value = "";
-    el("mount-token-ttl").value = "7776000";
-    el("mount-token-days").value = "";
+    S.el("mount-token-name").value = "";
+    S.el("mount-token-ttl").value = "7776000";
+    S.el("mount-token-days").value = "";
     syncMountTokenTTL();
     hideMountTokenReveal();
-    openModal("mount-token-modal");
-    el("mount-token-name").focus();
+    G.openModal("mount-token-modal");
+    S.el("mount-token-name").focus();
     loadMountTokens();
   }
 
   function hideMountTokenReveal() {
-    var box = el("mount-token-reveal");
+    var box = S.el("mount-token-reveal");
     if (!box) { return; }
     box.hidden = true;
     box.innerHTML = "";
   }
 
   function syncMountTokenTTL() {
-    var select = el("mount-token-ttl");
-    var days = el("mount-token-days");
-    var hint = el("mount-token-ttl-hint");
+    var select = S.el("mount-token-ttl");
+    var days = S.el("mount-token-days");
+    var hint = S.el("mount-token-ttl-hint");
     if (!select) { return; }
     var custom = select.value === "custom";
     var never = select.value === "never";
@@ -301,12 +332,12 @@
   function closeMountTokenModal() {
     // Never leave the one-time plaintext in a hidden DOM node after close.
     hideMountTokenReveal();
-    mountTokenTarget = null;
-    closeModal("mount-token-modal");
+    S.mountTokenTarget = null;
+    G.closeModal("mount-token-modal");
   }
 
   function showMountToken(token) {
-    var box = el("mount-token-reveal");
+    var box = S.el("mount-token-reveal");
     if (!box) { return; }
     box.innerHTML = "";
     var hint = document.createElement("div");
@@ -320,7 +351,7 @@
     copy.className = "btn ghost sm";
     copy.type = "button";
     copy.textContent = "复制";
-    copy.addEventListener("click", function () { copyText(token, copy); });
+    copy.addEventListener("click", function () { G.copyText(token, copy); });
     row.appendChild(strong);
     row.appendChild(copy);
     var note = document.createElement("div");
@@ -333,17 +364,17 @@
   }
 
   function loadMountTokens() {
-    if (!mountTokenTarget) { return Promise.resolve(); }
-    var slug = mountTokenTarget.slug;
-    return apiJSON("/api/mounts/" + encodeURIComponent(slug) + "/tokens").then(function (r) {
-      if (r.res.status === 401) { setAuthed(false); return; }
+    if (!S.mountTokenTarget) { return Promise.resolve(); }
+    var slug = S.mountTokenTarget.slug;
+    return G.apiJSON("/api/mounts/" + encodeURIComponent(slug) + "/tokens").then(function (r) {
+      if (r.res.status === 401) { G.setAuthed(false); return; }
       if (!r.res.ok) {
-        notify("读取 MCP 令牌失败：HTTP " + r.res.status, "error");
+        G.notify("读取 MCP 令牌失败：HTTP " + r.res.status, "error");
         return;
       }
       renderMountTokens((r.body && r.body.tokens) || []);
     }).catch(function (err) {
-      notify("读取 MCP 令牌失败：" + err, "error");
+      G.notify("读取 MCP 令牌失败：" + err, "error");
     });
   }
 
@@ -364,14 +395,14 @@
   }
 
   function renderMountTokens(tokens) {
-    var list = el("mount-token-list");
+    var list = S.el("mount-token-list");
     if (!list) { return; }
     list.innerHTML = "";
     if (!tokens.length) {
       list.innerHTML = '<p class="empty">还没有令牌 —— 在上方签发一个给外部 MCP 客户端。</p>';
       return;
     }
-    var targetSlug = mountTokenTarget ? mountTokenTarget.slug : "";
+    var targetSlug = S.mountTokenTarget ? S.mountTokenTarget.slug : "";
     tokens.forEach(function (t) {
       var state = mountTokenState(t);
       var card = document.createElement("div");
@@ -411,17 +442,17 @@
         revoke.type = "button";
         revoke.textContent = "撤销";
         revoke.addEventListener("click", function () {
-          confirmDestructive({
+          G.confirmDestructive({
             title: "撤销 MCP 令牌？",
             message: "撤销令牌「" + (t.name || t.id) + "」？\n使用它的客户端下一次请求即 401。",
             trigger: revoke,
             confirmText: "撤销",
             onConfirm: function () {
-              return api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" + encodeURIComponent(t.id), {
+              return G.api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" + encodeURIComponent(t.id), {
                 method: "DELETE",
               }).then(function (res) {
                 if (!res.ok) { throw new Error("HTTP " + res.status); }
-                notify("令牌已撤销：" + (t.name || t.id), "ok");
+                G.notify("令牌已撤销：" + (t.name || t.id), "ok");
                 loadMountTokens();
                 loadMounts();
               });
@@ -435,17 +466,17 @@
         del.type = "button";
         del.textContent = "删除记录";
         del.addEventListener("click", function () {
-          confirmDestructive({
+          G.confirmDestructive({
             title: "删除令牌记录？",
             message: "彻底删除已撤销令牌「" + (t.name || t.id) + "」的记录？\n此操作不可恢复。",
             trigger: del,
             confirmText: "删除记录",
             onConfirm: function () {
-              return api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" +
+              return G.api("/api/mounts/" + encodeURIComponent(targetSlug) + "/tokens/" +
                   encodeURIComponent(t.id) + "?purge=1", { method: "DELETE" })
                 .then(function (res) {
                   if (!res.ok) { throw new Error("HTTP " + res.status); }
-                  notify("令牌记录已删除", "ok");
+                  G.notify("令牌记录已删除", "ok");
                   loadMountTokens();
                 });
             }
@@ -456,4 +487,3 @@
       list.appendChild(card);
     });
   }
-

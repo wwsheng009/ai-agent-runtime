@@ -1,9 +1,36 @@
+// 32-connectors-qr.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  connectorHasQRAction: connectorHasQRAction,
+  connectorFirstQRAction: connectorFirstQRAction,
+  connectorQRDirectImage: connectorQRDirectImage,
+  connectorQRStatusText: connectorQRStatusText,
+  connectorQRShowError: connectorQRShowError,
+  stopConnectorQRPoll: stopConnectorQRPoll,
+  scheduleConnectorQRPoll: scheduleConnectorQRPoll,
+  renderConnectorQR: renderConnectorQR,
+  startConnectorQRLogin: startConnectorQRLogin,
+  pollConnectorQRLogin: pollConnectorQRLogin,
+  finishConnectorQRLogin: finishConnectorQRLogin,
+  openConnectorQRDialog: openConnectorQRDialog,
+  closeConnectorQRDialog: closeConnectorQRDialog,
+  connectorGenerateID: connectorGenerateID,
+  startConnectorQRFromEditor: startConnectorQRFromEditor,
+  setConnBanner: setConnBanner,
+  subscribeEvents: subscribeEvents,
+});
+
   /* ──────────── connectors: QR login (start_login → poll → refill) ─────────── */
   // 与 aicli micro web（commands/web/js/connectors.js）同口径：
   //   start_login → 渲染二维码（data:image 直出；链接走本机 /api/qr 编码）
   //   → 每 2s 轮询 login_status（后端长轮询）→ confirmed/expired 停止
   //   → confirmed 且 credential_ready 时把 settings/secrets 合并 PATCH 一次。
-  var connectorQRState = {
+  S.connectorQRState = {
     connectorID: "", name: "", actionKey: "start_login",
     seq: 0, timer: null, loginID: "", content: "",
     closed: false, payload: null, draft: false, refilled: false, busy: false,
@@ -40,7 +67,7 @@
   }
 
   function connectorQRShowError(text) {
-    var box = el("connector-qr-error");
+    var box = S.el("connector-qr-error");
     if (!box) { return; }
     if (!text) { box.hidden = true; box.textContent = ""; return; }
     box.hidden = false;
@@ -48,35 +75,35 @@
   }
 
   function stopConnectorQRPoll() {
-    if (connectorQRState.timer) {
-      clearTimeout(connectorQRState.timer);
-      connectorQRState.timer = null;
+    if (S.connectorQRState.timer) {
+      clearTimeout(S.connectorQRState.timer);
+      S.connectorQRState.timer = null;
     }
   }
 
   function scheduleConnectorQRPoll(delay) {
-    var st = connectorQRState;
+    var st = S.connectorQRState;
     if (!st || st.closed || !st.connectorID) { return; }
     stopConnectorQRPoll();
     st.timer = setTimeout(function () { pollConnectorQRLogin(st); }, delay);
   }
 
   function renderConnectorQR() {
-    var st = connectorQRState;
+    var st = S.connectorQRState;
     if (!st) { return; }
     var status = st.payload && st.payload.status ? st.payload.status : "";
-    var statusEl = el("connector-qr-status");
+    var statusEl = S.el("connector-qr-status");
     if (statusEl) {
       statusEl.textContent = connectorQRStatusText(status);
       statusEl.setAttribute("data-status", status || "starting");
     }
     var content = (st.payload && st.payload.qr_code_content) || st.content || "";
     st.content = content;
-    var wrap = el("connector-qr-image-wrap");
-    var img = el("connector-qr-image");
-    var linkWrap = el("connector-qr-link-wrap");
-    var link = el("connector-qr-link");
-    var copyBtn = el("connector-qr-copy");
+    var wrap = S.el("connector-qr-image-wrap");
+    var img = S.el("connector-qr-image");
+    var linkWrap = S.el("connector-qr-link-wrap");
+    var link = S.el("connector-qr-link");
+    var copyBtn = S.el("connector-qr-copy");
     if (content) {
       if (wrap) { wrap.hidden = false; }
       if (img) {
@@ -97,7 +124,7 @@
       if (linkWrap) { linkWrap.hidden = true; }
       if (copyBtn) { copyBtn.hidden = true; }
     }
-    var meta = el("connector-qr-meta");
+    var meta = S.el("connector-qr-meta");
     if (meta) {
       var bits = [];
       if (st.payload && st.payload.expires_at) { bits.push("有效期至 " + st.payload.expires_at); }
@@ -109,7 +136,7 @@
   }
 
   function startConnectorQRLogin() {
-    var st = connectorQRState;
+    var st = S.connectorQRState;
     if (!st || st.closed || !st.connectorID) { return; }
     stopConnectorQRPoll();
     var seq = ++st.seq;
@@ -117,12 +144,12 @@
     st.loginID = "";
     st.refilled = false;
     connectorQRShowError("");
-    var statusEl = el("connector-qr-status");
+    var statusEl = S.el("connector-qr-status");
     if (statusEl) { statusEl.textContent = "正在获取二维码…"; statusEl.setAttribute("data-status", "starting"); }
-    var restart = el("connector-qr-restart");
+    var restart = S.el("connector-qr-restart");
     if (restart) { restart.disabled = true; }
-    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/" + encodeURIComponent(st.actionKey), { method: "POST" }).then(function (r) {
-      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+    G.apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/" + encodeURIComponent(st.actionKey), { method: "POST" }).then(function (r) {
+      if (!S.connectorQRState || S.connectorQRState !== st || st.closed || seq !== st.seq) { return; }
       if (restart) { restart.disabled = false; }
       if (!r.res.ok) {
         connectorQRShowError("获取二维码失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
@@ -133,14 +160,14 @@
       renderConnectorQR();
       scheduleConnectorQRPoll(2000);
     }).catch(function (err) {
-      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (!S.connectorQRState || S.connectorQRState !== st || st.closed || seq !== st.seq) { return; }
       if (restart) { restart.disabled = false; }
       connectorQRShowError("获取二维码失败：" + (err && err.message ? err.message : err));
     });
   }
 
   function pollConnectorQRLogin(st) {
-    if (!connectorQRState || connectorQRState !== st || st.closed || !st.loginID) { return; }
+    if (!S.connectorQRState || S.connectorQRState !== st || st.closed || !st.loginID) { return; }
     var expiresAt = st.payload && st.payload.expires_at ? Date.parse(st.payload.expires_at) : NaN;
     if (!isNaN(expiresAt) && expiresAt <= Date.now()) {
       st.payload = Object.assign({}, st.payload, { status: "expired" });
@@ -148,12 +175,12 @@
       return;
     }
     var seq = st.seq;
-    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/login_status", {
+    G.apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/login_status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ login_id: st.loginID }),
     }).then(function (r) {
-      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (!S.connectorQRState || S.connectorQRState !== st || st.closed || seq !== st.seq) { return; }
       if (!r.res.ok) {
         // 400（登录会话不存在/已清理）重试无意义；其余（网络抖动）继续轮询。
         if (r.res.status === 400) {
@@ -173,7 +200,7 @@
       if (status === "expired") { return; }
       scheduleConnectorQRPoll(2000);
     }).catch(function () {
-      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (!S.connectorQRState || S.connectorQRState !== st || st.closed || seq !== st.seq) { return; }
       scheduleConnectorQRPoll(3000);
     });
   }
@@ -182,15 +209,15 @@
     stopConnectorQRPoll();
     var data = st.payload || {};
     if (data.credential_ready !== true) {
-      notify("已确认登录，等待凭据就绪（可稍后重新打开查看）", "ok");
+      G.notify("已确认登录，等待凭据就绪（可稍后重新打开查看）", "ok");
       closeConnectorQRDialog();
-      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+      G.loadConnectors(true).then(function () { return G.loadConnectorBindings(); });
       return;
     }
     st.busy = true;
-    var done = el("connector-qr-done");
+    var done = S.el("connector-qr-done");
     if (done) { done.disabled = true; }
-    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID), {
+    G.apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ settings: data.settings || {}, secrets: data.secrets || {} }),
@@ -206,12 +233,12 @@
       if (result.adopted && result.removed_id) {
         st.connectorID = result.id || st.connectorID;
         var superseded = result.superseded_account ? ("，原连接 " + result.superseded_account + " 已由微信解除") : "";
-        notify("扫码登录成功：识别为既有机器人 " + (result.id || "") + "（同一 owner），已更新连接" + superseded + "；临时 " + result.removed_id + " 已清理", "ok");
+        G.notify("扫码登录成功：识别为既有机器人 " + (result.id || "") + "（同一 owner），已更新连接" + superseded + "；临时 " + result.removed_id + " 已清理", "ok");
       } else {
-        notify("扫码登录成功，凭据已回填", "ok");
+        G.notify("扫码登录成功，凭据已回填", "ok");
       }
       closeConnectorQRDialog();
-      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+      G.loadConnectors(true).then(function () { return G.loadConnectorBindings(); });
     }).catch(function (err) {
       st.busy = false;
       if (done) { done.disabled = false; }
@@ -222,7 +249,7 @@
   function openConnectorQRDialog(item, action, opts) {
     opts = opts || {};
     stopConnectorQRPoll();
-    connectorQRState = {
+    S.connectorQRState = {
       connectorID: item.id,
       name: item.name || item.id,
       actionKey: (action && action.key) || "start_login",
@@ -230,27 +257,27 @@
       closed: false, payload: null,
       draft: !!opts.draft, refilled: false, busy: false,
     };
-    var title = el("connector-qr-title");
-    if (title) { title.textContent = "扫码登录 · " + connectorQRState.name; }
-    var sub = el("connector-qr-sub");
+    var title = S.el("connector-qr-title");
+    if (title) { title.textContent = "扫码登录 · " + S.connectorQRState.name; }
+    var sub = S.el("connector-qr-sub");
     if (sub) { sub.textContent = (action && action.label) || "扫码登录"; }
     connectorQRShowError("");
-    var statusEl = el("connector-qr-status");
+    var statusEl = S.el("connector-qr-status");
     if (statusEl) { statusEl.textContent = "正在获取二维码…"; statusEl.setAttribute("data-status", "starting"); }
-    var wrap = el("connector-qr-image-wrap"); if (wrap) { wrap.hidden = true; }
-    var img = el("connector-qr-image"); if (img) { img.removeAttribute("src"); img.hidden = true; }
-    var linkWrap = el("connector-qr-link-wrap"); if (linkWrap) { linkWrap.hidden = true; }
-    var meta = el("connector-qr-meta"); if (meta) { meta.hidden = true; meta.textContent = ""; }
-    var copyBtn = el("connector-qr-copy"); if (copyBtn) { copyBtn.hidden = true; }
-    var done = el("connector-qr-done"); if (done) { done.disabled = false; }
-    var restart = el("connector-qr-restart"); if (restart) { restart.disabled = false; }
-    openModal("connector-qr-modal");
+    var wrap = S.el("connector-qr-image-wrap"); if (wrap) { wrap.hidden = true; }
+    var img = S.el("connector-qr-image"); if (img) { img.removeAttribute("src"); img.hidden = true; }
+    var linkWrap = S.el("connector-qr-link-wrap"); if (linkWrap) { linkWrap.hidden = true; }
+    var meta = S.el("connector-qr-meta"); if (meta) { meta.hidden = true; meta.textContent = ""; }
+    var copyBtn = S.el("connector-qr-copy"); if (copyBtn) { copyBtn.hidden = true; }
+    var done = S.el("connector-qr-done"); if (done) { done.disabled = false; }
+    var restart = S.el("connector-qr-restart"); if (restart) { restart.disabled = false; }
+    G.openModal("connector-qr-modal");
     startConnectorQRLogin();
   }
 
   function closeConnectorQRDialog() {
-    var st = connectorQRState;
-    if (!st) { closeModal("connector-qr-modal"); return; }
+    var st = S.connectorQRState;
+    if (!st) { G.closeModal("connector-qr-modal"); return; }
     if (st.busy) { return; } // 凭据回填保存中拦截关闭
     st.closed = true;
     stopConnectorQRPoll();
@@ -258,12 +285,12 @@
     // 已 confirmed 的实体即使 credential_ready=false 也保留，便于稍后重试。
     var draftID = st.draft && !st.refilled &&
       !(st.payload && st.payload.status === "confirmed") ? st.connectorID : "";
-    closeModal("connector-qr-modal");
+    G.closeModal("connector-qr-modal");
     if (draftID) {
-      apiJSON("/api/connectors/" + encodeURIComponent(draftID), { method: "DELETE" }).then(function () {
-        notify("已清理未完成的扫码连接器", "ok");
-        loadConnectors(true);
-      }).catch(function () { loadConnectors(true); });
+      G.apiJSON("/api/connectors/" + encodeURIComponent(draftID), { method: "DELETE" }).then(function () {
+        G.notify("已清理未完成的扫码连接器", "ok");
+        G.loadConnectors(true);
+      }).catch(function () { G.loadConnectors(true); });
     }
   }
 
@@ -276,16 +303,16 @@
   }
 
   function startConnectorQRFromEditor() {
-    var form = connectorForm;
+    var form = S.connectorForm;
     if (!form) { return; }
-    var ps = connectorProviderSchemaOf(form);
+    var ps = G.connectorProviderSchemaOf(form);
     var action = connectorFirstQRAction(ps);
-    if (!ps || !action) { notify("该通道不支持扫码登录", "error"); return; }
-    var errBox = el("connector-editor-error");
+    if (!ps || !action) { G.notify("该通道不支持扫码登录", "error"); return; }
+    var errBox = S.el("connector-editor-error");
 
-    if (connectorEditing) {
-      var item = connectorEditing;
-      closeConnectorEditor();
+    if (S.connectorEditing) {
+      var item = S.connectorEditing;
+      G.closeConnectorEditor();
       openConnectorQRDialog(item, action, { draft: false });
       return;
     }
@@ -300,8 +327,8 @@
     if ((form.policyText || "").trim()) {
       try { JSON.parse(form.policyText); } catch (e) { errors.policy = "策略不是合法 JSON：" + e.message; }
     }
-    connectorFormErrors = errors;
-    renderConnectorEditorForm();
+    S.connectorFormErrors = errors;
+    G.renderConnectorEditorForm();
     if (Object.keys(errors).length) {
       if (errBox) { errBox.hidden = false; errBox.textContent = "请修正标红字段后再扫码。"; }
       return;
@@ -309,24 +336,24 @@
 
     var payload;
     try {
-      payload = connectorBuildPayload(form, ps, true);
+      payload = G.connectorBuildPayload(form, ps, true);
       delete payload.secrets; // 凭据由扫码回填
     } catch (e) {
-      connectorFormErrors.policy = e.message;
-      renderConnectorEditorForm();
+      S.connectorFormErrors.policy = e.message;
+      G.renderConnectorEditorForm();
       return;
     }
-    var saveBtn = el("connector-editor-save");
+    var saveBtn = S.el("connector-editor-save");
     if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "创建中…"; }
-    apiJSON("/api/connectors", {
+    G.apiJSON("/api/connectors", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(function (r) {
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "创建连接器"; }
       if (!r.res.ok) {
-        connectorFormErrors = connectorFieldErrorsFrom(r.body);
-        renderConnectorEditorForm();
+        S.connectorFormErrors = G.connectorFieldErrorsFrom(r.body);
+        G.renderConnectorEditorForm();
         if (errBox) {
           errBox.hidden = false;
           errBox.textContent = (r.body && (r.body.error || r.body.message)) || ("创建失败：HTTP " + r.res.status);
@@ -335,8 +362,8 @@
       }
       var created = r.body || {};
       if (!created.id) { created = { id: payload.id, name: payload.name, provider: ps.provider }; }
-      closeConnectorEditor();
-      notify("已创建扫码连接器 " + (created.id || payload.id), "ok");
+      G.closeConnectorEditor();
+      G.notify("已创建扫码连接器 " + (created.id || payload.id), "ok");
       openConnectorQRDialog(created, action, { draft: true });
     }).catch(function (err) {
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "创建连接器"; }
@@ -344,60 +371,59 @@
     });
   }
 
-  var eventsSubscribed = false;
-  var lastEventAt = 0;
-  var sseDropped = false;
+  S.eventsSubscribed = false;
+  S.lastEventAt = 0;
+  S.sseDropped = false;
 
   // Visible connection state: a banner + the topbar chip tint. EventSource
   // reconnects on its own; we only surface it and re-sync on reopen.
   function setConnBanner(lost) {
-    var banner = el("conn-banner");
+    var banner = S.el("conn-banner");
     if (banner) { banner.hidden = !lost; }
-    var chip = el("conn-chip");
+    var chip = S.el("conn-chip");
     if (chip) { chip.classList.toggle("conn-lost", lost); }
   }
 
   function subscribeEvents() {
-    if (eventsSubscribed || typeof EventSource !== "function") { return; }
-    eventsSubscribed = true;
+    if (S.eventsSubscribed || typeof EventSource !== "function") { return; }
+    S.eventsSubscribed = true;
     var source = new EventSource("/api/events");
     source.addEventListener("open", function () {
-      lastEventAt = Date.now();
+      S.lastEventAt = Date.now();
       setConnBanner(false);
       // A reopen after a drop can hide missed registry changes; re-align once.
-      if (sseDropped) { sseDropped = false; loadNodes(); }
+      if (S.sseDropped) { S.sseDropped = false; G.loadNodes(); }
     });
     source.addEventListener("nodes", function (event) {
-      lastEventAt = Date.now();
+      S.lastEventAt = Date.now();
       try {
         var payload = JSON.parse(event.data);
-        lastNodes = (payload && payload.nodes) || [];
-        renderAll(lastNodes);
-        if (currentView() === "connectors" && connectorGatewaySettled) {
-          refreshConnectorNodes(false);
+        S.lastNodes = (payload && payload.nodes) || [];
+        G.renderAll(S.lastNodes);
+        if (G.currentView() === "connectors" && S.connectorGatewaySettled) {
+          G.refreshConnectorNodes(false);
         }
         // 挂载登记随节点注册/断连变化；只在该视图打开时才多拉一次。
-        if (currentView() === "mcp") { loadMounts(); }
-        if (currentView() === "logs") { loadMounts().then(populateLogSlugOptions); }
+        if (G.currentView() === "mcp") { G.loadMounts(); }
+        if (G.currentView() === "logs") { G.loadMounts().then(G.populateLogSlugOptions); }
       } catch (err) { /* ignore malformed frame */ }
     });
     source.addEventListener("session", function (event) {
-      lastEventAt = Date.now();
+      S.lastEventAt = Date.now();
       try {
         var payload = JSON.parse(event.data);
-        if (payload) { patchSession(payload.node_id, payload.session); }
+        if (payload) { G.patchSession(payload.node_id, payload.session); }
       } catch (err) { /* ignore malformed frame */ }
     });
     source.addEventListener("session-event", function (event) {
-      lastEventAt = Date.now();
-      try { pushStripEvent(JSON.parse(event.data)); } catch (err) { /* ignore */ }
+      S.lastEventAt = Date.now();
+      try { G.pushStripEvent(JSON.parse(event.data)); } catch (err) { /* ignore */ }
     });
     source.addEventListener("error", function () {
-      sseDropped = true;
+      S.sseDropped = true;
       setConnBanner(true);
       // SSE 断开也可能是 owner 会话过期（/api/events 受 RequireSession 保护）。
       // 心跳会用一个轻量管理面请求复检，命中 401 就把用户送回登录页。
-      authHeartbeat();
+      G.authHeartbeat();
     });
   }
-

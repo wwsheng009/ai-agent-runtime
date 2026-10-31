@@ -1,16 +1,31 @@
+// 05-ui-basics.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  confirmDestructive: confirmDestructive,
+  toastHost: toastHost,
+  pushToast: pushToast,
+  notify: notify,
+  setAuthed: setAuthed,
+});
+
   /* ─────────────────────────── toasts ────────────────────────── */
 
   /* ───────────────────────── UX-06: 通用二次确认 ──────────────── */
   // 用站内模态框替代 window.confirm：文案可包含对象、数量与后果，
   // 取消/确认都会把焦点还给触发按钮，且不会累积 document 监听器。
   function confirmDestructive(options) {
-    var modal = el("confirm-modal");
+    var modal = S.el("confirm-modal");
     if (!modal) { return Promise.resolve({ confirmed: false }); }
 
-    var titleEl = el("confirm-title");
-    var msgEl = el("confirm-message");
-    var cancelBtn = el("confirm-cancel");
-    var confirmBtn = el("confirm-confirm");
+    var titleEl = S.el("confirm-title");
+    var msgEl = S.el("confirm-message");
+    var cancelBtn = S.el("confirm-cancel");
+    var confirmBtn = S.el("confirm-confirm");
     var closeBtn = modal.querySelector(".modal-close");
     var previousFocus = options.trigger || document.activeElement;
     var closed = false;
@@ -69,7 +84,7 @@
         }
         var view = document.querySelector(".view:not([hidden])");
         var fallback = view && view.querySelector("h2, .page-title");
-        if (!fallback) { fallback = el("main"); }
+        if (!fallback) { fallback = S.el("main"); }
         if (fallback) {
           if (!fallback.hasAttribute("tabindex")) { fallback.setAttribute("tabindex", "-1"); }
           fallback.focus();
@@ -103,7 +118,7 @@
   /* ───────────────────────── UX-06 结束 ──────────────────────── */
 
   function toastHost() {
-    var host = el("toast-host");
+    var host = S.el("toast-host");
     if (!host) {
       host = document.createElement("div");
       host.id = "toast-host";
@@ -178,30 +193,29 @@
   }
 
   function setAuthed(authed) {
-    authedState = !!authed;
-    el("login").hidden = authed;
-    el("app").hidden = !authed;
-    el("logout").hidden = !authed;
-    el("logout-top").hidden = !authed;
+    S.authedState = !!authed;
+    S.el("login").hidden = authed;
+    S.el("app").hidden = !authed;
+    S.el("logout").hidden = !authed;
+    S.el("logout-top").hidden = !authed;
     // Two-screen layout: pre-auth = standalone login page (chrome hidden),
     // authed = full workspace. The class also gates the chrome via CSS.
     document.body.classList.toggle("login-mode", !authed);
     if (!authed) {
-      closeSidebar();
-      el("password").setAttribute("aria-invalid", "false");
-      el("password").focus();
-      pushConfig = null; // re-read gateway push config on the next login
-      notifyPolicy = null;
-      notifyPolicyMeta = null;
-      notifyPolicyDraft = null;
-      notifyPolicyLoaded = false;
-      notifyPolicyBaseline = "";
-      notifyPolicySaving = false;
-      notifyQuietError = "";
-      notifyQuietTouched = false;
-      notifyQuietInvalidEl = null;
+      G.closeSidebar();
+      S.el("password").setAttribute("aria-invalid", "false");
+      S.el("password").focus();
+      S.pushConfig = null; // re-read gateway push config on the next login
+      S.notifyPolicy = null;
+      S.notifyPolicyMeta = null;
+      S.notifyPolicyDraft = null;
+      S.notifyPolicyLoaded = false;
+      S.notifyPolicyBaseline = "";
+      S.notifyPolicySaving = false;
+      S.notifyQuietError = "";
+      S.notifyQuietTouched = false;
+      S.notifyQuietInvalidEl = null;
     }
-    refreshPushState();
-    renderInstallHint();
+    G.refreshPushState();
+    G.renderInstallHint();
   }
-

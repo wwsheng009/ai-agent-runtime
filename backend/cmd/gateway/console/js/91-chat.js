@@ -1,3 +1,25 @@
+// 91-chat.js
+// gateway 控制台功能模块（gateway 控制台模块化，共享面见 console/js/runtime.js）。
+// 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
+// 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
+// 与原单文件的顶层语句顺序一致。
+import { S, G } from "./runtime.js?v=95";
+
+Object.assign(G, {
+  chatPanelSupported: chatPanelSupported,
+  chatCanInput: chatCanInput,
+  syncChatHeaderActions: syncChatHeaderActions,
+  chatQueueRank: chatQueueRank,
+  pendingQueue: pendingQueue,
+  chatUpdateNextPending: chatUpdateNextPending,
+  chatSwitchTo: chatSwitchTo,
+  chatFocusOptsFor: chatFocusOptsFor,
+  chatOfferNextPending: chatOfferNextPending,
+  chatEmptyLive: chatEmptyLive,
+  chatSetStatus: chatSetStatus,
+  chatNotice: chatNotice,
+});
+
   /* ──────────────── session chat panel (history + live) ───────── */
   //
   // 数据源是节点自身的 micro web client，经网关反代访问：
@@ -18,19 +40,19 @@
   //      只有一个活跃会话，因此只对父级会话开放入口：子代理行共享父 transcript，
   //      给了按钮只会让人以为在看子会话。
 
-  var CHAT_PAGE_LIMIT = 40;    // 首屏与实时刷新窗口（条）
-  var CHAT_OLDER_LIMIT = 60;   // 「加载更早消息」每页条数
-  var CHAT_REFRESH_MS = 1000;  // 快照刷新尾随节流：事件风暴下每秒最多一次
-  var CHAT_LIVE_CHUNK_CHARS = 1200; // 纯文本流式按行边界切块；旧块不被重写，
+  S.CHAT_PAGE_LIMIT = 40;    // 首屏与实时刷新窗口（条）
+  S.CHAT_OLDER_LIMIT = 60;   // 「加载更早消息」每页条数
+  S.CHAT_REFRESH_MS = 1000;  // 快照刷新尾随节流：事件风暴下每秒最多一次
+  S.CHAT_LIVE_CHUNK_CHARS = 1200; // 纯文本流式按行边界切块；旧块不被重写，
                                     // 屏外块由 content-visibility 跳过布局。
-  var CHAT_LIVE_MD_CHUNK_CHARS = 800; // 实时 Markdown 的稳定前缀按块落盘，限制
+  S.CHAT_LIVE_MD_CHUNK_CHARS = 800; // 实时 Markdown 的稳定前缀按块落盘，限制
                                        // 每帧只需要重绘未完成的尾部。
-  var CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
-  var CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
+  S.CHAT_MAX_LIVE = 60000;   // 实时气泡本地累积上限（字符），超限只等快照收敛
+  S.CHAT_MAX_WINDOW = 400;   // 本地保留的消息行上限：刷新是「保前缀」合并（见
                                // chatApplyWindow），长跑会话会一直往后长，到顶就从
                                // 头部丢弃并重新开放「加载更早消息」。
-  var CHAT_BUSY_POLL_MS = 2000; // 「会话忙」期间的兜底快照轮询间隔（见 chatSetBusy）
-  var CHAT_SSE_EVENTS = [
+  S.CHAT_BUSY_POLL_MS = 2000; // 「会话忙」期间的兜底快照轮询间隔（见 chatSetBusy）
+  S.CHAT_SSE_EVENTS = [
     "connected", "heartbeat", "screen_refresh", "session_switched", "error",
     "session_start", "session_end", "session_interrupted",
     "turn_start", "turn_delta", "turn_end",
@@ -42,15 +64,15 @@
   ];
 
   // chatState 是单例面板状态；null = 面板关闭。字段只由本节读写。
-  var chatState = null;
+  S.chatState = null;
 
   // chatPanelSupported：只有能给出 transcript + 实时流的节点才给「会话」入口。
   // runtime-server 是 SPA（自带 /api/runtime/*），未带 --web 的 aicli 不注册
   // screen/events 路由；离线快照没有隧道，一律不给。
   function chatPanelSupported(node, session) {
     if (!node || node.stale) { return false; }
-    if (!nodeHasWebUI(node)) { return false; }
-    if (isSubagentSession(session)) { return false; }
+    if (!G.nodeHasWebUI(node)) { return false; }
+    if (G.isSubagentSession(session)) { return false; }
     var caps = node.capabilities || [];
     return caps.indexOf("screen") !== -1 && caps.indexOf("events") !== -1;
   }
@@ -61,12 +83,12 @@
 
   // UX: 桌面端把会话级管理动作集中到右栏会话头，列表卡片只保留摘要。
   function syncChatHeaderActions() {
-    var st = chatState;
-    var menu = el("chat-more-menu");
+    var st = S.chatState;
+    var menu = S.el("chat-more-menu");
     if (!st || !menu) { return; }
     var node = st.node, session = st.session;
-    var canWeb = nodeHasWebUI(node);
-    var canWindow = windowActionsSupported(node) && !isSubagentSession(session);
+    var canWeb = G.nodeHasWebUI(node);
+    var canWindow = G.windowActionsSupported(node) && !G.isSubagentSession(session);
     menu.querySelector("[data-chat-detail]").hidden = false;
     menu.querySelector("[data-chat-web]").hidden = !canWeb;
     menu.querySelector("[data-chat-window-open]").hidden = !canWindow;
@@ -94,8 +116,8 @@
   }
 
   function pendingQueue() {
-    var st = chatState;
-    var items = inboxItems(lastNodes);
+    var st = S.chatState;
+    var items = G.inboxItems(S.lastNodes);
     if (st) {
       items = items.filter(function (item) {
         return !(item.node.node_id === st.node.node_id &&
@@ -109,22 +131,22 @@
   // chatUpdateNextPending 刷新头部「下一条待处理」按钮：队列为空时隐藏，
   // 否则显示剩余条数。任何数据刷新（renderInbox）与面板开合都会走到这里。
   function chatUpdateNextPending() {
-    var btn = el("chat-next-pending");
+    var btn = S.el("chat-next-pending");
     if (!btn) { return; }
-    var st = chatState;
+    var st = S.chatState;
     if (!st) { btn.hidden = true; return; }
     var queue = pendingQueue();
     if (!queue.length) { btn.hidden = true; return; }
     btn.hidden = false;
-    var label = el("chat-next-pending-label");
+    var label = S.el("chat-next-pending-label");
     if (label) {
       label.textContent = queue.length > 1
         ? "下一条待处理（" + queue.length + "）"
         : "下一条待处理";
     }
-    var tip = "下一条待处理：" + sessionLabelOf(queue[0].session) +
-      " · " + nodeDisplayName(queue[0].node) +
-      "（" + attentionLabel(queue[0].session.attention) + "）";
+    var tip = "下一条待处理：" + G.sessionLabelOf(queue[0].session) +
+      " · " + G.nodeDisplayName(queue[0].node) +
+      "（" + G.attentionLabel(queue[0].session.attention) + "）";
     btn.title = tip;
     btn.setAttribute("aria-label", tip);
   }
@@ -135,11 +157,11 @@
   function chatSwitchTo(node, session, opts) {
     if (!node || !session) { return; }
     if (!chatPanelSupported(node, session)) {
-      openSession(node, session);
+      G.openSession(node, session);
       return;
     }
-    closeSessionChat();
-    openSessionChat(node, session, opts);
+    G.closeSessionChat();
+    G.openSessionChat(node, session, opts);
   }
 
   // chatFocusOptsFor 目标带待审批/待回答时，切换后聚焦交互区（与卡片
@@ -158,9 +180,9 @@
     if (!queue.length) { chatUpdateNextPending(); return; }
     var next = queue[0];
     chatUpdateNextPending();
-    pushToast("已处理 · 下一条待处理：" +
-      nodeDisplayName(next.node) + " · " + sessionLabelOf(next.session) +
-      "（" + attentionLabel(next.session.attention) + "）", null, {
+    G.pushToast("已处理 · 下一条待处理：" +
+      G.nodeDisplayName(next.node) + " · " + G.sessionLabelOf(next.session) +
+      "（" + G.attentionLabel(next.session.attention) + "）", null, {
       label: "打开",
       run: function () {
         chatSwitchTo(next.node, next.session, chatFocusOptsFor(next.session));
@@ -173,10 +195,10 @@
   }
 
   function chatSetStatus(text, kind) {
-    var dot = el("chat-live-status");
-    var label = el("chat-live-text");
+    var dot = S.el("chat-live-status");
+    var label = S.el("chat-live-text");
     if (!dot || !label) { return; }
-    var st = chatState;
+    var st = S.chatState;
     // 帧计数直接写进状态点：SSE 是否真的在投递，是「面板不更新」类问题的第一个
     // 分叉点（连上了但零帧 ≠ 连接失败），运维/排障时一眼可读。
     var suffix = st && st.frames ? " · " + st.frames + " 帧" : "";
@@ -189,7 +211,7 @@
   }
 
   function chatNotice(text, actions) {
-    var box = el("chat-notice");
+    var box = S.el("chat-notice");
     if (!box) { return; }
     box.innerHTML = "";
     if (!text) { box.hidden = true; return; }
@@ -208,4 +230,3 @@
       box.appendChild(btn);
     });
   }
-

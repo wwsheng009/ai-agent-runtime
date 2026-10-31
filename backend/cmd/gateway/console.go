@@ -44,8 +44,11 @@ func consoleHandler() http.Handler {
 		// *.js/*.css for hours by default, which would otherwise delay a
 		// release until the TTL expires. Versioned ?v= URLs in index.html are
 		// the primary mechanism; this header is defense in depth.
-		switch name {
-		case "index.html", "app.js", "style.css", "sw.js":
+		// 外壳与模块（console/js/*.js）都必须可重新验证：CDN 边缘默认按扩展名
+		// 缓存 *.js 数小时，靠 ?v= 换 URL 破缓存；再叠一层 no-cache 兜底，
+		// 避免"部署成功但页面还是旧逻辑"。
+		if name == "index.html" || name == "app.js" || name == "style.css" || name == "sw.js" ||
+			strings.HasPrefix(name, "js/") {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
 		if name == "index.html" {
