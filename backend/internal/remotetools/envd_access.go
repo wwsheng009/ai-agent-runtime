@@ -186,6 +186,18 @@ func (a *envdAccess) Stat(ctx context.Context, filePath string) (fs.FileInfo, er
 // SymlinkTarget gives the target's path without spawning anything. A cycle becomes an
 // error, which the caller's rule for a failed resolution already handles by refusing to
 // descend: that is ELOOP's job, and it must not become this process's job.
+//
+// WARNING (measured 2026-10-31 on a live 0.2.11, n9e@172.18.3.238): the assumption above
+// is FALSE on the wire. Both Stat and ListDir report the FOLLOWED type for a symlink
+// (a link to a file comes back as FILE_TYPE_FILE, a link to a directory as
+// FILE_TYPE_DIRECTORY, a dangling link as an empty type) and SymlinkTarget is never
+// populated - so this function currently degenerates to an identity resolution and the
+// cycle rule it feeds never fires. Link fidelity on envd needs either a daemon-side
+// change (report the link type and target) or a parent-ListDir workaround; until then
+// every link-dependent behaviour (follow=false refusing to descend, follow=true cycle
+// termination) is NOT trustworthy here. See the S6 record in
+// docs/plan/searchcore-io-seam-migration-20261028.md and the link probe in
+// scripts/envd_seam_access_verify.go, which fails on a real target for exactly this.
 func (a *envdAccess) EvalLinkPath(ctx context.Context, filePath string) (string, error) {
 	resolved, _, err := a.resolve(ctx, filePath)
 	return resolved, err

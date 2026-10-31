@@ -223,7 +223,23 @@ func main() {
 	}
 	if *unreadable != "" {
 		_, err := access.Open(ctx, *unreadable)
-		report("a denied path is not reported as absent", err != nil && !toolcore.IsNotExist(err), fmt.Sprint(err))
+		// The adapter is transport-only by design: it serves what the daemon serves,
+		// and the target-user readability gate lives in the runtime wrapper
+		// (remotetools/envd_guarded_access.go). So a raw adapter that can read this
+		// path is today's expected shape, reported as information; the invariant that
+		// still belongs to the adapter is "a permission problem must not be reported
+		// as absence". The *wired* refusal is pinned by
+		// TestEnvDGrepSkipsTheTargetUsersUnreadableFiles (offline) and by the
+		// MCP-level live driver (canary A/B on the real target).
+		switch {
+		case err == nil:
+			report("read gate is the runtime wrapper's job (raw adapter serves the daemon)", true,
+				*unreadable+" is open to the daemon user; the wired runtime refuses it")
+		case toolcore.IsNotExist(err):
+			report("a denied path is not reported as absent", false, "absence reported for "+*unreadable)
+		default:
+			report("a denied path is not reported as absent", true, err.Error())
+		}
 	} else {
 		report("a denied path is not reported as absent", true, "skip: pass -unreadable to probe it")
 	}

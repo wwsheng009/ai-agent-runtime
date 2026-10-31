@@ -159,6 +159,45 @@ func TestEnvDGrepDeclinesCapabilitiesTheTargetCannotProvide(t *testing.T) {
 	}
 }
 
+// TestEnvDGrepSkipsTheTargetUsersUnreadableFiles pins the gate the live target
+// caught missing: envd's /files endpoint reads as the daemon process (measured:
+// root), so without the target-user check a search through the shared kernel would
+// return the contents of a file remote_x__shell cannot open. Measured on a live
+// 0.2.11 before envdGuardedAccess existed: a 0600 root file inside the workspace
+// came back through grep while view of the same file was already refused.
+func TestEnvDGrepSkipsTheTargetUsersUnreadableFiles(t *testing.T) {
+	stub := newEnvdStub(t, map[string]string{
+		"/srv/app/readable.txt": "needle readable\n",
+		"/srv/app/canary.txt":   "needle secret\n",
+	}, nil)
+	// The gate's fast path only probes when the mode says denial is possible; the
+	// fixture must model that, or the test would pass without asking the kernel.
+	stub.pinMode("/srv/app/canary.txt", 0o600)
+	stub.markUnreadable("/srv/app/canary.txt")
+	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
+
+	got := callTool(t, ctx, session, "remote_envd__grep", map[string]interface{}{
+		"path": ".", "pattern": "needle",
+	})
+	if !strings.Contains(got, "readable.txt") {
+		t.Fatalf("the readable file was not searched: %s", got)
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "canary.txt") {
+		t.Fatalf("the search served a file the target user cannot open: %s", got)
+	}
+	if stub.readableChecks.Load() == 0 {
+		t.Fatal("the read gate never asked the target kernel")
+	}
+
+	// Control: the bespoke view of the same file is refused by the same verdict
+	// through an independent path, so this test cannot pass merely because the file
+	// was absent.
+	refused := callEnvDExpectError(t, ctx, session, "remote_envd__view", map[string]interface{}{"file_path": "canary.txt"})
+	if !strings.Contains(refused, "permission denied") {
+		t.Fatalf("view refusal = %q", refused)
+	}
+}
+
 func TestEnvDWriteThenViewRoundTrip(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{}, nil)
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)

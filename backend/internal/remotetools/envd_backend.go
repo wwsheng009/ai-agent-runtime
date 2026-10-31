@@ -1221,15 +1221,20 @@ func envdRefuseUnsupportedViewParams(params map[string]interface{}) *toolkit.Too
 	return nil
 }
 
-// refuseIfTargetCannotRead returns a refusal when the user this backend acts as
-// cannot open the path, or nil when it may be served.
+// targetCannotRead asks the target kernel whether cfg.User may open the path, and
+// returns a described error when it may not (nil when it may).
 //
 // World-readable files skip the probe: the answer is already certain, and 0644 is
 // the common case in a source tree, so the check costs nothing there. Everything
 // else (0640 root:adm inside /var/log, 0600 files of another user) is asked of the
 // kernel on the target, which is the only place that knows the real uid, groups and
 // ACLs.
-func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target string, entry envdclient.Entry) *toolkit.ToolResult {
+//
+// Two callers share this one verdict: the bespoke tools through readGuarded (which
+// wraps it as a tool-layer refusal) and the shared kernels through
+// envdGuardedAccess's Open (which returns it as the error a core treats like a
+// local EACCES). One probe implementation, so the two surfaces cannot drift.
+func (be *envdBackend) targetCannotRead(ctx context.Context, target string, entry envdclient.Entry) error {
 	if be == nil || be.client == nil {
 		return nil
 	}
@@ -1240,7 +1245,7 @@ func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target stri
 	if err != nil {
 		// An inconclusive probe must not become a free pass: report the failure
 		// instead of serving bytes we cannot prove are allowed.
-		return envdErrorResult("cannot confirm read permission for %s: %v", target, err)
+		return fmt.Errorf("cannot confirm read permission for %s: %v", target, err)
 	}
 	if code == 0 {
 		return nil
@@ -1249,7 +1254,7 @@ func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target stri
 	if detail == "" {
 		detail = fmt.Sprintf("exit %d", code)
 	}
-	// The mode and owner come from the Stat this call already made, so the refusal
+	// The mode and owner come from the Stat the caller already made, so the refusal
 	// says why the file is unreachable without another round trip: "permission
 	// denied" alone leaves the reader guessing whether it is ownership, a group, or
 	// an ACL.
@@ -1261,13 +1266,26 @@ func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target stri
 	if group == "" {
 		group = "?"
 	}
-	return envdFailureMeta(CodeInvalidArgument, map[string]interface{}{
-		"file_path": target,
-	}, "permission denied reading %s: user %s cannot open it (%s %s:%s; %s)", target, be.client.User(), entry.Permissions, owner, group, detail)
+	return fmt.Errorf("permission denied reading %s: user %s cannot open it (%s %s:%s; %s)", target, be.client.User(), entry.Permissions, owner, group, detail)
 }
 
-// readGuarded is the only way a tool core gets file bytes: it applies the
+// refuseIfTargetCannotRead is the tool-layer wrapper over targetCannotRead: the
+// same verdict, shaped as the refusal a model reads (stable code + file_path
+// metadata), so the bespoke tools' wording and metadata stay byte-identical.
+func (be *envdBackend) refuseIfTargetCannotRead(ctx context.Context, target string, entry envdclient.Entry) *toolkit.ToolResult {
+	err := be.targetCannotRead(ctx, target, entry)
+	if err == nil {
+		return nil
+	}
+	return envdFailureMeta(CodeInvalidArgument, map[string]interface{}{
+		"file_path": target,
+	}, "%v", err)
+}
+
+// readGuarded is the only way a bespoke tool gets file bytes: it applies the
 // target-user readability gate and then reads through the preferred channel.
+// (The shared kernels read through envdGuardedAccess, whose Open applies the same
+// verdict as an error; see envd_guarded_access.go. The two must not drift.)
 //
 // Keeping the gate inside the read - rather than in each caller - is the point.
 // `view` remembered to check permission; `edit` and `apply_patch` read the same

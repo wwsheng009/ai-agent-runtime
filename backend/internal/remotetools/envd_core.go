@@ -11,9 +11,12 @@ package remotetools
 //
 // What the cores get, and what they deliberately do not:
 //
-//   - FileAccess() is an envdAccess over the live connection. The path was
-//     resolved and jailed by this runtime before the core ever touches the
-//     accessor, so the adapter itself re-checks nothing (envd_access.go rule 1).
+//   - FileAccess() is the guarded envd adapter over the live connection
+//     (envd_guarded_access.go): the bytes it serves are limited to files the
+//     target user may open, the same kernel verdict the bespoke tools apply, so a
+//     search cannot see content that shell cannot. Paths are still resolved and
+//     jailed by this runtime before the core ever touches the accessor, so the
+//     adapter re-checks no *path policy* (envd_access.go rule 1).
 //   - Paths() is the target's own resolution: POSIX spelling, the target-side
 //     workspace as the root, and the same choke point the script tools used
 //     (be.resolvePath: per-call workdir, lexical jail, target-side
@@ -140,7 +143,9 @@ func (r *envdRuntime) Paths() toolcore.PathResolver { return r.paths }
 // FileAccess is the seam this whole migration exists to open: the cores read
 // the target through the envd adapter, so a walk, a stat and a read all
 // describe the machine holding the files rather than the one running the tool.
-func (r *envdRuntime) FileAccess() toolcore.Access { return NewEnvdAccess(r.backend.client) }
+// The adapter is wrapped with the target-user readability gate; see
+// envd_guarded_access.go for why the transport, not the core, owns that answer.
+func (r *envdRuntime) FileAccess() toolcore.Access { return newEnvdGuardedAccess(r.backend) }
 
 // CaptureLimit mirrors remoteCapture: the pre-fold capture ceiling comes from
 // the same Limits block as every other remote read.
