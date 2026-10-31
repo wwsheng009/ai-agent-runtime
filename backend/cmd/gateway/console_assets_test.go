@@ -255,6 +255,10 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 		"function setNotifyIMKindsSelection(",
 		"function notifyCollectCompletedContent(",
 		"function notifySetCompletedError(",
+		// Bot 目标级出站健康（"最近发送失败：…"）与惰性加载。
+		`"/api/notify/im/health"`,
+		"notify-im-health",
+		"function loadNotifyIMHealth(",
 		"completed_include_last_message",
 		"completed_last_message_max_chars",
 		`data-notify-kind`,

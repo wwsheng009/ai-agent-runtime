@@ -824,6 +824,15 @@ a.stat:hover {
   color: var(--fg-muted); font-size: 11.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 目标行上的"最近发送失败"：把 401/缺少 context_token 这类原因直接显示出来，
+   避免用户只能去翻网关日志。允许换行（错误信息通常较长）。 */
+.notify-im-health {
+  margin-top: 3px;
+  color: var(--warn-ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: normal;
+}
 .notify-im-row .toolbar { flex: 0 0 auto; }
 .notify-im-row-focus {
   outline: 2px solid var(--accent);

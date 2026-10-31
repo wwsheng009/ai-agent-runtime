@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=96";
+import { S, G } from "./runtime.js?v=98";
 
 Object.assign(G, {
   installHintDismissed: installHintDismissed,
@@ -152,7 +152,7 @@ Object.assign(G, {
      与上方通知策略是两份独立配置：策略决定"发不发"，Bot 目标决定"发到
      哪个 IM 会话"。未配置目标时后端不注册通道，行为与以往一致。 */
 
-  S.notifyIMState = { config: null, meta: null, busy: false };
+  S.notifyIMState = { config: null, meta: null, busy: false, health: {} };
 
   function notifyIMRequest(path, options) {
     var opts = options || {};
@@ -332,7 +332,10 @@ Object.assign(G, {
     host.textContent = "";
     var targets = notifyIMTargets();
     var empty = S.el("notify-im-empty");
-    if (empty) { empty.hidden = targets.length > 0; }
+    if (empty) {
+      // 配置还没拉回来时别显示"尚未配置"（会误导成"我的目标丢了"）。
+      empty.hidden = targets.length > 0 || !S.notifyIMState.config;
+    }
     var count = S.el("notify-im-count");
     if (count) {
       count.hidden = targets.length === 0;
@@ -368,6 +371,16 @@ Object.assign(G, {
         sub.textContent = "网关 " + (target.connector_id || "?") + " → " + (target.chat || "?") + kindText + " · " + scopeText;
       }
       main.appendChild(sub);
+
+      // 最近一次出站失败（GET /api/notify/im/health）：把"这条为什么没发出去"显示在
+      // 目标行上，不必去翻网关日志（例如微信缺 context_token / 源节点离线）。
+      var healthMsg = (S.notifyIMState.health || {})[target.connector_id || ""];
+      if (healthMsg) {
+        var health = document.createElement("div");
+        health.className = "notify-im-health";
+        health.textContent = "最近发送失败：" + healthMsg;
+        main.appendChild(health);
+      }
       row.appendChild(main);
 
       var tools = document.createElement("div");
@@ -435,6 +448,11 @@ Object.assign(G, {
   }
 
   function loadNotifyIM() {
+    // 未登录时不发这个请求：boot 阶段（登录前）调用会拿到 401，并把
+    // 「加载 Bot 通道配置失败：HTTP 401」永久留在「已配置目标」区——登录后也不会
+    // 自动重来，看起来像"配置坏了"。改为进「通知设置」页 / 登录后再拉（见
+    // applyRoute 与 refreshCurrentView）。
+    if (!S.authedState) { return Promise.resolve(); }
     return notifyIMRequest("/api/notify/im").then(function (data) {
       S.notifyIMState.config = (data && data.config) || notifyIMEmptyConfig();
       if (!S.notifyIMState.config.targets) { S.notifyIMState.config.targets = []; }
@@ -446,8 +464,23 @@ Object.assign(G, {
       closeNotifyIMEditor();
       renderNotifyIMTargets();
       G.ensureGatewayConnectorOptions();
+      return loadNotifyIMHealth();
     }).catch(function (err) {
-      notifyIMShowError("加载 Bot 通道配置失败：" + err.message);
+      // 会话过期的 401 已由 api() 统一送回登录页，这里不再重复展示原始报错。
+      var msg = String((err && err.message) || "");
+      notifyIMShowError(/401/.test(msg) ? "" : ("加载 Bot 通道配置失败：" + msg));
+    });
+  }
+
+  // loadNotifyIMHealth 拉取各网关连接器**最近一次出站失败**
+  // （GET /api/notify/im/health），把"这条为什么没发出去"直接显示在目标行上——
+  // 否则用户只能去翻 journalctl（例如微信缺 context_token）。
+  function loadNotifyIMHealth() {
+    return notifyIMRequest("/api/notify/im/health").then(function (h) {
+      S.notifyIMState.health = (h && h.errors) || {};
+      renderNotifyIMTargets();
+    }).catch(function () {
+      S.notifyIMState.health = {};
     });
   }
 
@@ -653,4 +686,5 @@ Object.assign(G, {
   if (S.notifyIMScopeSelect) { S.notifyIMScopeSelect.addEventListener("change", notifyIMScopeValuesField); }
   S.notifyIMSourceSelect = S.el("notify-im-source");
   if (S.notifyIMSourceSelect) { S.notifyIMSourceSelect.addEventListener("change", notifyIMSourceField); }
-  if (S.el("notify-im-targets")) { loadNotifyIM(); }
+  // 登录前不主动拉 /api/notify/im（会 401 并把错误留在页面上）；改由
+  // applyRoute（进「通知设置」页）与 refreshCurrentView 触发，见 loadNotifyIM 的守卫。

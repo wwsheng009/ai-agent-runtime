@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=96";
+import { S, G } from "./runtime.js?v=98";
 
 Object.assign(G, {
   currentView: currentView,
@@ -59,6 +59,8 @@ Object.assign(G, {
       G.ensureGatewayConnectorOptions();
       // IM 目标的事件类型是多选：进页面就按 kinds 元数据补齐复选框。
       G.renderNotifyIMKinds();
+      // Bot 目标列表也是惰性的：登录后进这一页才拉（登录前拉会 401，见 loadNotifyIM）。
+      G.loadNotifyIM();
     }
     // 微信式会话壳只在「会话」视图生效：body.im-mode 打开整页固定高度，
     // 让左右两栏各自滚动（而不是整页滚动）。
@@ -129,7 +131,7 @@ Object.assign(G, {
         G.notify("通知设置还有未保存的修改，先保存或放弃再刷新", "error");
         return Promise.resolve();
       }
-      return G.loadNotifyPolicy(true);
+      return G.loadNotifyPolicy(true).then(function () { return G.loadNotifyIM(); });
     }
     return G.loadNodes();
   }

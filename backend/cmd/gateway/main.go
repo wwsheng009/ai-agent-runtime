@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/appdevice"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
@@ -384,20 +385,15 @@ func run() int {
 		}
 	}
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
-	// 通知点击深链按节点 kind 生成（aicli → /web/、runtime-server → /），
-	// 否则反代 route allowlist 会 403 "route not allowed"（push.go sessionURL）。
-	notifier.nodeKind = func(id string) string {
-		if node, ok := registry.Get(id); ok {
-			return node.Kind
-		}
-		return ""
-	}
 	ntfySender := ntfy.NewSender(*ntfyURL, *ntfyTopic, *ntfyToken)
 	if *ntfyURL != "" && !ntfySender.Enabled() {
 		fmt.Fprintln(os.Stderr, "gateway: --ntfy-url requires --ntfy-topic (and a valid base URL)")
 		return 1
 	}
 	notifier.ntfy = ntfySender
+	// 目标级出站健康：连接器每次出站的结果都记在这里（成功即清除），
+	// 控制台 /api/notify/im/health 读取它并显示"最近发送失败：…"。
+	imHealth := newNotifyTargetHealth()
 	// 通知策略（可选文件；热加载，见 notify_policy.go）：notify-policy.json
 	// 优先；缺失时只读回退旧 notify-prefs.json（PUT 保存后不再读取旧文件）。
 	policySource := newNotifyPolicySource(
@@ -408,6 +404,21 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "gateway: WARNING: notify policy ignored: %v\n", policyErr)
 	}
 	notifier.policy = policySource
+	// 网关自持 bot（IM 通道）配置源（docs/gateway/18 §6）。文件缺失 = 未配置
+	// bot：通道面与 primary 保持既有行为（§5.2 动态主通道）。
+	imSource := newNotifyIMSource(filepath.Join(*dataDir, "gateway-im.json"))
+	notifier.imSource = imSource
+	if _, warn := imSource.Current(); warn != "" {
+		fmt.Fprintf(os.Stderr, "gateway: WARNING: gateway-im.json ignored: %s\n", warn)
+	}
+	// 通道级交付账本（P1）：跨重启/多目标的「同一通道同一事件只投一次」。
+	deliveryLedger := newNotifyDeliveryLedger(
+		filepath.Join(*dataDir, "notify-delivery.json"),
+		notifyDeliveryTTL,
+		notifyDeliveryCap,
+	)
+	notifier.deliveryLedger = deliveryLedger
+	defer deliveryLedger.Close()
 	// connectorAttentionHook 在下方 setupGatewayConnectors 装配后赋值（var 预声明：
 	// tunnel OnSessionTransition 闭包先于 connectors setup 构造，靠闭包捕获变量
 	// 实现构造期后接线；装配失败时保持 nil，transition 回调 nil 检查兜底）。
@@ -531,6 +542,13 @@ func run() int {
 		},
 		OnRouteDenied: func(r *http.Request) {
 			bans.Record(resolver.ClientIP(r))
+		},
+		// 自动本地通知抑制：source=node 的 target 由网关委托节点 bot 出站，
+		// 规则随 REGISTER_ACK/HEARTBEAT_ACK 下发，节点据此只关闭重叠的本地
+		// 自动发送（不再需要 AICLI_CONNECTOR_NOTIFY_OWNER）。target 热加载后
+		// 最多一个心跳周期收敛；source=gateway 不参与，保留多通道 fan-out。
+		NotifySuppress: func(nodeID string) []wire.NotifySuppressRule {
+			return imSource.LocalSuppression(nodeID)
 		},
 		OnRegistryChanged: func() {
 			hub.notify()
@@ -694,9 +712,6 @@ func run() int {
 	// 该入口固定指向 /api/connectors 命名空间且只允许 GET；不把任意路径交给
 	// 隧道代理。节点离线/未开启 Web 时由 ServeProxy 返回 502。
 	nodeConnectorView := limited(owner.RequireSession(handleNodeConnectors(server)))
-	// 不在这里挂 Methods(GET)：handler 自己回 405 + Allow，避免写方法落到 404。
-	router.Handle("/api/nodes/{node_id}/connectors", nodeConnectorView)
-	router.PathPrefix("/api/nodes/{node_id}/connectors/").Handler(nodeConnectorView)
 	router.Handle("/api/nodes/{node_id}/sessions/{session_id}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		nodeID, sessionID := vars["node_id"], vars["session_id"]
@@ -922,10 +937,25 @@ func run() int {
 	router.Handle("/api/notify/policy", owner.RequireSession(handleNotifyPolicy(policySource, policyMeta, func() {
 		notifier.applyPolicy()
 	}))).Methods(http.MethodGet, http.MethodPut)
+	// 网关自持 bot（IM 通道）目标配置（docs/gateway/18 §6.1）。owner 保护；
+	// PUT 成功后在"是否存在启用 target"变化时重建通道面。
+	imMeta := func() notifyIMMeta {
+		return notifyIMMeta{Path: imSource.Path(), TargetLimit: notifyIMTargetLimit}
+	}
+	router.Handle("/api/notify/im", owner.RequireSession(handleNotifyIM(imSource, imMeta, func(wasEnabled bool) {
+		notifier.applyIMConfig(wasEnabled)
+	}))).Methods(http.MethodGet, http.MethodPut)
+	router.Handle("/api/notify/im/test", owner.RequireSession(handleNotifyIMTest(imSource))).Methods(http.MethodPost)
+	// 目标级出站健康（owner 保护）：控制台「Bot 目标」用它显示"最近发送失败"的
+	// 具体原因（如微信缺 context_token），不必让运维去翻 journalctl。
+	router.Handle("/api/notify/im/health", owner.RequireSession(handleNotifyIMHealth(imHealth))).Methods(http.MethodGet)
 	// Native App push-token registry (owner-protected). Registration is kept
 	// separate from the agent tunnel token store.
 	router.Handle("/api/app/devices", owner.RequireSession(handleAppDevices(appDevices))).Methods(http.MethodGet, http.MethodPost)
 	router.Handle("/api/app/devices/{id}", owner.RequireSession(handleAppDeviceDelete(appDevices))).Methods(http.MethodDelete)
+	// 扫码登录二维码：微信等通道返回的是 liteapp 链接而非图片，由本端点
+	// 用 go-qrcode 编码为 PNG（与 aicli micro web 的 /web/api/qr 同口径）。
+	router.Handle("/api/qr", owner.RequireSession(handleQRCode())).Methods(http.MethodGet)
 	// Presence: the console reports the session it is viewing so the gateway can
 	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
 	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)
@@ -984,6 +1014,57 @@ func run() int {
 	} else {
 		// D6 主通道接线：pushNotifier 的 normal 类通知据此让位给 IM（已绑定场景）。
 		notifier.imMainChannel = connectorIMMainChannel
+		// 网关自持 bot 的通道依赖（docs/gateway/18 §5.3）：连接器存储用于 D5
+		// 过滤，SendOutbound 用于全局 target 出站，NotifyScoped 用于会话绑定
+		// 路径。装配失败时三者保持 nil，IM 通道不参与通道面。
+		notifier.connectorStore = connectorService.ConnectorStore()
+		// 出站结果顺带写入 imHealth：成功清除旧错误、失败记下原因，
+		// 控制台据此在目标行显示「最近发送失败」（见 notify_target_health.go）。
+		notifier.sendOutbound = func(ctx context.Context, connectorID, chat string, msgs []connectors.OutboundMessage) error {
+			err := connectorService.SendOutbound(ctx, connectorID, chat, msgs)
+			imHealth.Record(connectorID, err)
+			return err
+		}
+		notifier.notifyScoped = func(ctx context.Context, connectorIDs []string, notice connectors.AttentionNotice) error {
+			err := connectorService.NotifyAttentionScoped(ctx, connectorIDs, notice)
+			imHealth.RecordMany(connectorIDs, err)
+			return err
+		}
+		imSource.SetSendTest(func(ctx context.Context, connectorID, chat, text string) error {
+			// 手动「测试」也是一次真实出站：失败同样记进 imHealth，让控制台立刻显示
+			// 原因（例如微信缺 context_token），不必等下一个真实事件。
+			err := connectorService.SendOutbound(ctx, connectorID, chat, []connectors.OutboundMessage{{Text: text}})
+			imHealth.Record(connectorID, err)
+			return err
+		})
+	}
+	handoffLogf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
+	}
+	// 节点 bot 配置复制（QQ/微信）：先注册具体路径，再注册只读聚合前缀；
+	// gorilla/mux 按注册顺序匹配，顺序反了会被只读 handler 吞掉。
+	if connectorErr == nil && server != nil {
+		router.Handle("/api/nodes/{node_id}/connectors/{connector_id}/handoff",
+			limited(owner.RequireSession(handleNodeConnectorHandoff(server, connectorService, handoffLogf))),
+		).Methods(http.MethodPost)
+	}
+	if server != nil {
+		router.Handle("/api/nodes/{node_id}/connectors/{connector_id}/handoff/rollback",
+			limited(owner.RequireSession(handleNodeConnectorHandoffRollback(server))),
+		).Methods(http.MethodPost)
+	}
+	// 不在这里挂 Methods(GET)：handler 自己回 405 + Allow，避免写方法落到 404。
+	router.Handle("/api/nodes/{node_id}/connectors", nodeConnectorView)
+	router.PathPrefix("/api/nodes/{node_id}/connectors/").Handler(nodeConnectorView)
+	if connectorErr == nil && server != nil {
+		go syncImportedWeChatState(connectorCtx, connectorService.ConnectorStore(), server, handoffLogf)
+	}
+	// 节点委托（docs/gateway/18 复用方案）：通知可交给目标节点，由节点自己的
+	// bot 按本地绑定出站（不复制密钥；节点离线时由 notify 回退链改走 push）。
+	// 与 connectors 装配独立——连接器管理面失败时节点委托仍可用。
+	if server != nil {
+		notifier.delegateToNode = newNodeAttentionDelegate(server)
+		imSource.SetSendNodeAttention(notifier.delegateToNode)
 	}
 	// Lightweight embedded console (registered last so specific routes win).
 	router.PathPrefix("/").Handler(consoleHandler())

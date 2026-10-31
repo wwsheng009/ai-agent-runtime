@@ -100,6 +100,11 @@ type pushNotifier struct {
 	generation map[string]int64
 	// deliveryLedger 是通道级交付账本（跨重启/多目标去重，P1）。
 	deliveryLedger *notifyDeliveryLedger
+	// logMu/loggedErrs 给"同一个投递失败"做限流：completed 事件持续到达时，同一条
+	// 错误（例如微信缺 context_token）会刷满 journalctl。按错误文本去重——首次立刻
+	// 打印，之后最多每 notifyErrLogEvery 打一次；错误消失后自然过期淘汰。
+	logMu      sync.Mutex
+	loggedErrs map[string]time.Time
 }
 
 func newPushNotifier(manager *push.Manager, baseURL string, presence notify.Presence) *pushNotifier {
@@ -559,7 +564,12 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 			ev.Target = item.sessionID
 			receipt, err := dispatcher.Dispatch(ctx, ev)
 			if err != nil {
-				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
+				// 同一错误限流打印：这条日志过去会随每个 completed 事件重复刷屏
+				// （见 notifyErrLogEvery 的注释）。
+				msg := fmt.Sprintf("push: dispatch failed (attention=%s): %v", item.attention, err)
+				if p.shouldLogDispatchError(msg) {
+					log.Print(msg)
+				}
 			}
 			// 双门收敛（docs/bots/12 §3 D1）+ 账本不变式（§3 D2）：内核在场门
 			// 抑制（Suppressed）时撤销 observe 已记的 seen——抑制不是投递，
@@ -667,6 +677,35 @@ func truncateNotificationText(text string, max int) string {
 		return text
 	}
 	return string(runes[:max]) + "…"
+}
+
+// notifyErrLogEvery 是"同一投递失败"的日志限流窗口。取 10 分钟：既保留第一次
+// 的完整上下文（便于发现新问题），又不让一个持续存在的错误把 journal 刷满。
+const notifyErrLogEvery = 10 * time.Minute
+
+// shouldLogDispatchError 对同一错误文本限流（map 有界：超过 64 条先清理过期项）。
+func (p *pushNotifier) shouldLogDispatchError(msg string) bool {
+	if p == nil {
+		return true
+	}
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	if p.loggedErrs == nil {
+		p.loggedErrs = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if last, ok := p.loggedErrs[msg]; ok && now.Sub(last) < notifyErrLogEvery {
+		return false
+	}
+	if len(p.loggedErrs) >= 64 {
+		for k, t := range p.loggedErrs {
+			if now.Sub(t) >= notifyErrLogEvery {
+				delete(p.loggedErrs, k)
+			}
+		}
+	}
+	p.loggedErrs[msg] = now
+	return true
 }
 
 // applyDeliveryPolicy maps an attention kind onto push-service delivery hints
