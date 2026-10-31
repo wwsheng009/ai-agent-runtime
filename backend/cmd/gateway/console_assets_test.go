@@ -198,3 +198,84 @@ func TestConsoleAssetVersionIsConsistent(t *testing.T) {
 		t.Fatalf("asset versions drifted (%v); bump index.html, app.js register() and sw.js together", versions)
 	}
 }
+
+// The connector management UI is the only place operators can create/edit a
+// gateway bot; keep its HTML hooks, API verbs and schema-driven helpers wired.
+func TestConsoleConnectorManagementUI(t *testing.T) {
+	html, err := os.ReadFile("console/index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	for _, want := range []string{
+		`id="connectors-create"`,
+		`id="connector-editor-modal"`,
+		`id="connector-editor-form"`,
+		`id="connector-editor-save"`,
+		`id="connector-test-modal"`,
+		`id="connector-logs-modal"`,
+		`id="connector-action-modal"`,
+		`id="connector-qr-modal"`,
+		`id="connector-qr-image"`,
+		`id="notify-im-connector"`,
+		`id="notify-im-source"`,
+		`id="notify-im-node"`,
+		`id="notify-im-kinds"`,
+		// 通知设置页分三层（全局策略 / Bot 目标 / 会话级覆盖），每个 Bot 目标有
+		// 自己的配置面。
+		`class="notify-layer"`,
+		`id="notify-im-editor"`,
+		`id="notify-im-apply"`,
+		`id="notify-im-cancel"`,
+	} {
+		if !strings.Contains(string(html), want) {
+			t.Fatalf("index.html missing %s", want)
+		}
+	}
+	js, err := os.ReadFile("console/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	for _, want := range []string{
+		"function connectorBuildPayload",
+		"function openConnectorEditor",
+		"function saveConnectorEditor",
+		"function loadConnectorLogs",
+		"function connectorLoginStatus",
+		"function openConnectorQRDialog",
+		"function startConnectorQRFromEditor",
+		"function notifyIMSourceField",
+		"function populateNotifyIMNodes",
+		// IM 目标事件类型是多选（值域 = kinds 元数据），不是手写逗号分隔。
+		"function renderNotifyIMKinds(",
+		"function notifyIMCollectKinds(",
+		"function notifyIMSyncKindsHint(",
+		"function openNotifyIMEditor(",
+		"function applyNotifyIMEditor(",
+		"function buildNotifyIMTargetFromEditor(",
+		"function setNotifyIMKindsSelection(",
+		`data-notify-kind`,
+		`"/api/qr?text="`,
+		`apiJSON("/api/connectors/"`,
+		`"/bindings/"`,
+		`"__clear__"`,
+		`apiJSON("/api/connectors/bindings")`,
+	} {
+		if !strings.Contains(string(js), want) {
+			t.Fatalf("app.js missing %s", want)
+		}
+	}
+	// kinds 输入框必须已经换成复选框容器（回归：又退回自由文本）。
+	if strings.Contains(string(html), `id="notify-im-kinds" class="filter-input"`) ||
+		strings.Contains(string(html), `<input id="notify-im-kinds"`) {
+		t.Fatal("notify-im-kinds is still a free-text input; it must be a multi-select group")
+	}
+	css, err := os.ReadFile("console/style.css")
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	for _, want := range []string{".connector-form", ".connector-binding-form", ".connector-log-row", ".connector-action-qr", ".connector-qr-img", ".notify-kinds-compact", ".notify-layer", ".notify-layer-head", ".notify-im-editor"} {
+		if !strings.Contains(string(css), want) {
+			t.Fatalf("style.css missing %s", want)
+		}
+	}
+}

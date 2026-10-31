@@ -313,7 +313,11 @@
 
 - 徽标实时更新（订阅网关 `/api/events` SSE 的会话状态事件）。
 - 可选 Web Push / ntfy 双通道（见 [05 §2.5](./05-wan-and-mobile.md)、[08 §10](./08-notifications.md)）：
-  点击通知直达对应会话视图；侧栏「发送测试通知」按通道显示投递结果（`channels.webpush` / `channels.ntfy`）。
+  点击通知落到**网关会话深链** `/#sessions?node={node_id}&session={session_id}`：已打开的控制台标签页会被
+  复用并就地定位（`applyHashParams()` → `locateSession()`），不会新开节点原版 Web；侧栏「发送测试通知」
+  按通道显示投递结果（`channels.webpush` / `channels.ntfy`）。
+- **会话 URL 标识**：每张会话卡片都带 `data-session-url`（`#sessions?node=…&session=…`，`node` 可省略、
+  落地时按 `session_id` 反查），卡片菜单「复制链接」可直接复制该深链，用于 IM / 工单里互相指到同一会话。
 - 去重：同一会话同一注意力状态在时间窗内只提醒一次。
 - 完整的**通知/注意力模型**（事件→`attention` 映射、`NOTIFY` 帧、presence 抑制、免打扰）见
   [08-notifications.md](./08-notifications.md)；控制台只消费网关聚合结果，不直接解析本地事件。
@@ -324,6 +328,13 @@
   保存即热加载；
   桌面 App 的原生通知桥同样先读该策略再弹窗（[gateway-app/02](../gateway-app/02-notification-routing.md)、
   [gateway-app/07](../gateway-app/07-desktop-ux.md) §5.1）。
+- **页面分三层**（设置面按作用域分开，避免「全局」与「单个目标」混在一起）：
+  「全局策略」（总开关 / 通知范围 / 免打扰 / 哪些消息触发通知 / 通道，对所有节点与通道生效）、
+  「Bot 目标」（每个 IM 群/私聊各一份配置）、「会话级覆盖」（粒度最小、优先级最高）。
+  下面的层级只能收窄全局，**取交集**：全局关掉的 kind，Bot 目标勾了也收不到。
+  Bot 目标的「事件类型」多选、来源/连接/范围都在**该目标自己的配置面**（列表行「配置」或「添加 Bot 目标」
+  打开），与全局「哪些消息触发通知」是两个层级；`kinds` 值域来自 `/api/notify/policy` 的 `meta.kinds`。
+  数据面：全局/会话级为 `GET/PUT /api/notify/policy`，Bot 目标为 `GET/PUT /api/notify/im`（各自独立保存）。
 
 ### 5.5 错误态（必须显式，不静默）
 
@@ -333,7 +344,7 @@
 | 上游 502/504 | iframe 内/上方提示："本地服务无响应（502/504）" + 重试按钮 |
 | 路由 403 | "该路径未被授权访问"（白名单/能力位） |
 | 设备令牌被撤销 | 设备消失 + 状态页审计记录；agent 侧提示重新签发 |
-| owner 会话过期 | 跳登录页，保留原目标路径（登录后回跳） |
+| owner 会话过期 | 任意管理面 API 的 401 由 `api()` 集中截获 → 立即跳登录页并提示，保留当前 hash（登录后回跳同一视图）；另有 60s 会话心跳 + SSE 断开复检，静置页面也能在一分钟内发现过期 |
 
 ### 5.6 断线
 

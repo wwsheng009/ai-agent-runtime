@@ -59,13 +59,48 @@ func TestConsoleNativeNotificationBridge(t *testing.T) {
 		"aicli-gw-native-notify",
 		// 原生通知桥必须经过网关通知策略（否则关闭 kind 后 App 仍会弹窗）。
 		"notifyPolicyAllowsAttention(session.attention, session.session_id)",
-		// 点击深链必须带正确的节点 Web 前缀（aicli=/web/），否则反代 403
-		// "route not allowed"。
-		"sessionOpenTarget(node, session.session_id)",
+		// 点击落点是网关控制台的会话深链（#sessions?node=…&session=…），
+		// 与 Web Push / ntfy 的 click 口径一致。
+		"gatewaySessionLink(node.node_id, session.session_id)",
 		"extra.url",
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing native notification bridge hook %q", needle)
+		}
+	}
+}
+
+// TestConsoleGatewaySessionDeepLink pins the gateway session URL identifier:
+// #sessions?node=…&session=… must locate a card (node optional), the card must
+// expose a copy-link action, and a service-worker notification click must reuse
+// the open tab instead of opening the node's own Web UI.
+func TestConsoleGatewaySessionDeepLink(t *testing.T) {
+	app := readConsoleAsset(t, "app.js")
+	for _, needle := range []string{
+		"function gatewaySessionLink(",
+		"function nodeIDForSession(",
+		"function openGatewayDeepLink(",
+		`params.get("node")`,
+		`params.get("session")`,
+		"data-copy-link",
+		`card.setAttribute("data-session-url"`,
+		`"aicli-gateway-open"`,
+		"function handleUnauthorized(",
+		"function handleAuthResponse(",
+		"function authHeartbeat(",
+	} {
+		if !strings.Contains(app, needle) {
+			t.Fatalf("app.js is missing %q", needle)
+		}
+	}
+	sw := readConsoleAsset(t, "sw.js")
+	for _, needle := range []string{
+		"notificationclick",
+		"aicli-gateway-open",
+		"self.location.origin",
+	} {
+		if !strings.Contains(sw, needle) {
+			t.Fatalf("sw.js is missing %q", needle)
 		}
 	}
 }

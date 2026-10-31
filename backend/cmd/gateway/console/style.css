@@ -366,7 +366,8 @@ a.stat:hover {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; margin-bottom: 12px;
 }
-.panel-head h2 { font-size: 13.5px; margin: 0; letter-spacing: 0.3px; color: var(--fg-muted); text-transform: none; }
+.panel-head h2,
+.panel-head h3 { font-size: 13.5px; margin: 0; letter-spacing: 0.3px; color: var(--fg-muted); text-transform: none; }
 
 .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
 .dash-grid > .panel { margin-bottom: 0; }
@@ -699,6 +700,17 @@ a.stat:hover {
 .notify-grid .field { max-width: 440px; }
 .notify-grid .filter-input { flex: 1 1 auto; min-width: 0; max-width: none; }
 
+/* 通知设置页的层级分组：全局策略（对所有通道生效）/ Bot 目标（每个 chat 一份）/
+   会话级覆盖（粒度最小）。层级标题把「全局」与「单个目标」的设置面明确分开。 */
+.notify-layer { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.notify-layer-head { padding-left: 10px; border-left: 3px solid var(--accent-solid); }
+.notify-layer-title { font-size: 15px; margin: 0 0 2px; }
+.notify-layer-desc { margin: 0; color: var(--fg-muted); font-size: 12.5px; line-height: 1.6; }
+
+/* 目标编辑器：与目标列表同处 Bot 层，用强调边框标明“正在编辑这一个目标”。 */
+.notify-im-editor { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.notify-im-editor[hidden] { display: none; }
+
 .check-line {
   display: inline-flex; align-items: center; gap: 8px;
   font-size: 13.5px; color: var(--fg); cursor: pointer;
@@ -750,6 +762,10 @@ a.stat:hover {
 .notify-kind-desc, .notify-channel-desc {
   color: var(--fg-muted); font-size: 11.5px; line-height: 1.45;
 }
+/* IM 目标表单里的紧凑多选：只保留名称，5 项一行放得下。 */
+.notify-kinds-compact { grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 6px; }
+.notify-kinds-compact .notify-kind { padding: 6px 8px; align-items: center; }
+.notify-kinds-compact .notify-kind input[type="checkbox"] { margin-top: 0; }
 .notify-channel.is-unavailable {
   background: transparent; border-style: dashed;
   color: var(--fg-muted); cursor: not-allowed;
@@ -788,6 +804,32 @@ a.stat:hover {
 .notify-session-custom { flex: 0 0 auto; }
 .notify-session-row .select { flex: 0 0 auto; }
 .select.sm { height: var(--ctl-h-sm); font-size: 12.5px; padding: 0 8px; }
+
+/* Bot 通道目标行（docs/gateway/18 §6.1）。与 notify-session-row 同口径，
+   但左列是两行文本（目标名 + 连接器/会话映射），因此不套用 nowrap 省略。 */
+.notify-im-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.notify-im-main { flex: 1 1 240px; min-width: 0; }
+.notify-im-title {
+  font-size: 13px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notify-im-sub {
+  margin-top: 2px;
+  color: var(--fg-muted); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notify-im-row .toolbar { flex: 0 0 auto; }
+.notify-im-row-focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  transition: outline-color 160ms ease;
+}
 
 .view[data-view="notifications"] { padding-bottom: 88px; }
 .notify-savebar {
@@ -2529,3 +2571,92 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   .log-time { grid-column: 2; }
   .log-toolbar .select { flex: 1 1 140px; min-width: 0; }
 }
+/* ── 连接器管理（Schema 驱动表单 / 日志 / 动作结果） ─────────────── */
+.panel-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+
+.card-note { margin-top: 6px; }
+.card-note .connectors-hint { margin: 0; }
+
+.connector-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.connector-form .field { margin: 0; }
+.connector-form input:not([type="checkbox"]),
+.connector-form select,
+.connector-form textarea { width: 100%; box-sizing: border-box; }
+.connector-form .check-line { margin-top: 2px; }
+.connector-form .connector-policy-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+}
+.connector-secret { display: flex; flex-direction: column; gap: 6px; }
+.connector-secret .check-line { font-size: 12px; }
+
+.connector-bindings { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.connector-bindings-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.connector-binding-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 0; border-bottom: 1px dashed var(--border); flex-wrap: wrap;
+}
+.connector-binding-label { font-size: 12.5px; color: var(--fg-muted); word-break: break-all; }
+.connector-binding-form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.connector-binding-form .filter-input { flex: 1 1 140px; max-width: none; min-width: 0; }
+
+.connector-log-stats { margin: 4px 0 8px; }
+.connector-log-list {
+  max-height: 52vh; overflow: auto; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--panel-2);
+}
+.connector-log-row {
+  display: grid;
+  grid-template-columns: 150px 110px minmax(80px, 140px) minmax(0, 1fr);
+  gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border);
+  font-size: 12px; align-items: start;
+}
+.connector-log-row:last-child { border-bottom: none; }
+.connector-log-row.level-error { background: rgba(220, 38, 38, 0.08); }
+.connector-log-row.level-warn { background: rgba(217, 119, 6, 0.08); }
+.connector-log-time { color: var(--fg-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.connector-log-level { color: var(--fg-muted); white-space: nowrap; }
+.connector-log-chat { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connector-log-summary { color: var(--fg); word-break: break-word; }
+
+.connector-action-body { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.connector-action-qr {
+  display: block; max-width: 260px; width: 100%; margin: 0 auto;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 6px;
+}
+.connector-action-json {
+  margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); font-size: 11.5px; line-height: 1.45;
+  max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .panel-actions { width: 100%; margin-left: 0; }
+  .connector-log-row { grid-template-columns: minmax(0, 1fr); }
+  .connector-log-row > * { grid-column: 1; }
+}/* ── 扫码登录（start_login → login_status 轮询 → 凭据回填） ─────────── */
+.connector-qr-panel { margin-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.connector-qr-status { font-size: 13px; font-weight: 500; color: var(--fg); }
+.connector-qr-status[data-status="wait"] { color: var(--fg-muted); }
+.connector-qr-status[data-status="scanned"] { color: var(--accent-primary, #2563eb); }
+.connector-qr-status[data-status="confirmed"] { color: #15803d; }
+.connector-qr-status[data-status="expired"] { color: var(--danger-ink); }
+.connector-qr-image-wrap { display: flex; justify-content: center; }
+.connector-qr-img {
+  width: 280px; max-width: 100%; image-rendering: pixelated;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 8px;
+}
+.connector-qr-link {
+  display: block; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--panel-2); font-size: 11.5px; word-break: break-all;
+}
+.connector-qr-meta { font-size: 11.5px; color: var(--fg-faint); }
+.connector-qr-entry {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--panel-2);
+}
+.connector-qr-entry .connectors-hint { margin: 0; }
+.connector-qr-entry .btn { align-self: flex-start; }

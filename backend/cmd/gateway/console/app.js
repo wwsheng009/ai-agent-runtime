@@ -69,9 +69,32 @@
 
   /* ─────────────────────────── api ───────────────────────────── */
 
+  // Owner 会话过期/被吊销后，管理面一律返回 401。集中在这里把用户送回登录页：
+  // 具体页面（连接器、MCP、通知设置、设备令牌……）各自漏判时不再停在"加载失败 /
+  // 空列表 / 连接器面不可用"的状态。hash 不动，登录成功后 applyRoute() 会回到
+  // 用户原本在看的视图。
+  var authRedirecting = false;
+
+  function handleUnauthorized() {
+    if (!authedState || authRedirecting) { return; }
+    authRedirecting = true;
+    setAuthed(false);
+    notify("登录已过期，请重新登录", "error");
+    setTimeout(function () { authRedirecting = false; }, 1000);
+  }
+
+  function handleAuthResponse(path, res) {
+    if (res && res.status === 401 && path !== "/api/auth/login") {
+      handleUnauthorized();
+    }
+    return res;
+  }
+
   function api(path, options) {
     var opts = Object.assign({ credentials: "same-origin" }, options || {});
-    return fetch(path, opts);
+    return fetch(path, opts).then(function (res) {
+      return handleAuthResponse(path, res);
+    });
   }
 
   function apiJSON(path, options) {
@@ -331,6 +354,9 @@
     if (view === "notifications") {
       loadNotifyPolicy();
       if (notifyPolicyLoaded) { renderNotifyPolicy(); }
+      ensureGatewayConnectorOptions();
+      // IM 目标的事件类型是多选：进页面就按 kinds 元数据补齐复选框。
+      renderNotifyIMKinds();
     }
     // 微信式会话壳只在「会话」视图生效：body.im-mode 打开整页固定高度，
     // 让左右两栏各自滚动（而不是整页滚动）。
@@ -373,11 +399,27 @@
     window.location.hash = view + (params ? "?" + params : "");
   }
 
+  // 通知点击落地：service worker 聚焦已有控制台页面后把目标 URL postMessage
+  // 过来。同源 hash 深链就地导航，避免整页重载（并保留登录态与草稿）。
+  function openGatewayDeepLink(raw) {
+    var u;
+    try { u = new URL(raw, location.origin); } catch (e) { return; }
+    if (u.origin !== location.origin) { return; }
+    var hash = u.hash || "";
+    if (!hash) { return; }
+    try { history.replaceState(null, "", hash); } catch (e) { window.location.hash = hash.replace(/^#/, ""); }
+    applyHashParams();
+    applyRoute();
+  }
+
   // UX-07: 顶栏刷新是唯一的手动刷新入口，只刷新当前视图。
   function refreshCurrentView() {
     var view = currentView();
     if (view === "tokens") { return loadDevices(); }
-    if (view === "connectors") { return loadConnectors(true); }
+    if (view === "connectors") {
+      connectorNotice("");
+      return loadConnectors(true).then(function () { return loadConnectorBindings(); });
+    }
     if (view === "mcp") { return loadMounts(); }
     if (view === "logs") { refreshLogs(); return Promise.resolve(); }
     if (view === "notifications") {
@@ -682,6 +724,7 @@
       connectorEntries = connectorGatewayEntries;
       connectorMessage = connectorInitialMessage();
       renderConnectors(connectorEntries, connectorMessage);
+      loadConnectorBindings();
       return refreshConnectorNodes(true);
     }).catch(function (err) {
       if (seq !== connectorLoadSeq) { return; }
@@ -713,6 +756,7 @@
       countEl.textContent = entries.length + " 个";
       countEl.hidden = false;
     }
+    syncConnectorIDOptions();
     if (messageText) {
       var noticeEl = document.createElement("p");
       noticeEl.className = "connectors-hint";
@@ -721,49 +765,123 @@
     }
     entries.forEach(function (entry) {
       var item = entry.connector;
+      var isGateway = entry.source === "gateway";
+      var migratedEntry = isGateway ? null : connectorMigratedEntry(entry);
+      var busy = connectorIsBusy(item.id);
       var card = document.createElement("div");
       card.className = "card" + (item.enabled ? "" : " offline");
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="status-chip ' + (item.enabled ? "chip-active" : "chip-revoked") + '"></span></div>' +
         '<div class="card-meta"></div>' +
+        '<div class="card-note"></div>' +
         '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = (item.name || item.id) + "（" + item.provider + "）";
       card.querySelector(".status-chip").textContent = item.enabled ? "已启用" : "已停用";
-      var owner = item.active_owner
-        ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? (entry.source === "gateway" ? "（本网关）" : "（此节点）") : "")
-        : "未认领运行（网关重启或宿主离线）";
+      var owner = item.runtime_mode === "outbound"
+        ? "只出站副本（不轮询）"
+        : (item.active_owner
+          ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? (isGateway ? "（本网关）" : "（此节点）") : "")
+          : "未认领运行（网关重启或宿主离线）");
       var sources = entry.sources && entry.sources.length ? entry.sources : [connectorSourceLabel(entry)];
       var meta = card.querySelector(".card-meta");
       meta.textContent = "来源 " + sources.join(" / ") + " · id " + item.id +
         (item.mode ? " · " + item.mode : "") + " · " + owner +
+        (item.runtime_mode ? " · " + item.runtime_mode : "") +
+        (item.origin ? " · 复制自 " + item.origin.node_id + "/" + item.origin.connector_id : "") +
         (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
-      // 节点条目来自只读聚合入口，动作按钮只在网关自身 store 上执行。
-      if (entry.source === "gateway") {
-        // 通用动作（Schema kind=button，如 QQ「授权校验」）：直接执行并把返回
-        // 摘要（message 优先）以 toast 展示；二维码类 action 仍由 web 端承载。
-        var schema = connectorSchemaFor(item.provider);
-        var actions = (schema && schema.actions) || [];
-        actions.forEach(function (action) {
-          if (!action || action.kind !== "button" || !action.key) { return; }
-          var actionBtn = document.createElement("button");
-          actionBtn.type = "button";
-          actionBtn.className = "btn ghost sm";
-          actionBtn.textContent = action.label || action.key;
-          actionBtn.addEventListener("click", function () {
-            runConnectorActionButton(entry, action, actionBtn);
+      var note = card.querySelector(".card-note");
+      if (isGateway) {
+        var bindings = connectorBindingRows(item.id);
+        if (bindings.length) {
+          var bindLine = document.createElement("p");
+          bindLine.className = "connectors-hint";
+          bindLine.textContent = "绑定：" + bindings.map(connectorBindingLabel).join("；");
+          note.appendChild(bindLine);
+        }
+        if (item.origin) {
+          var copied = document.createElement("p");
+          copied.className = "connectors-hint";
+          var targets = notifyIMTargets().filter(function (t) {
+            return t && t.connector_id === item.id && t.enabled !== false;
           });
-          card.querySelector(".card-actions").appendChild(actionBtn);
-        });
+          copied.textContent = "已从节点 " + item.origin.node_id + "/" + item.origin.connector_id +
+            " 复制；节点本地通知已关闭；通知目标 " + targets.length + " 个。" +
+            (targets.length ? "" : " 尚未配置 Bot 目标，通知不会发送。");
+          note.appendChild(copied);
+        }
+      } else {
+        var ro = document.createElement("p");
+        ro.className = "connectors-hint";
+        ro.textContent = migratedEntry
+          ? "已迁移到网关副本 " + migratedEntry.connector.id + "；节点继续负责入站/回复，本地通知已关闭。"
+          : "来自在线节点 " + (entry.node && (nodeDisplayName(entry.node) || entry.node.node_id) || "") + "，只读；可迁移通知到网关。";
+        note.appendChild(ro);
       }
-      // 管理跳转：完整编辑器由前端切片提供，这里保留契约入口（单项 JSON +
-      // 全量 Schema），不做编辑，避免与前端 repo 耦合。
+      var actionsHost = card.querySelector(".card-actions");
+      if (isGateway) {
+        var schema = connectorSchemaFor(item.provider);
+        var providerActions = (schema && schema.actions) || [];
+        providerActions.forEach(function (action) {
+          if (!action || !action.key) { return; }
+          var actionBtn = connectorActionBtn(action.label || action.key, busy || !item.enabled, function (b) {
+            runConnectorActionButton(entry, action, b);
+          });
+          actionsHost.appendChild(actionBtn);
+        });
+        if (item.enabled && item.active_owner && !item.owned_by_current_host) {
+          actionsHost.appendChild(connectorActionBtn("接管运行", busy, function (b) {
+            connectorTakeover(item, b);
+          }));
+        }
+        if (item.origin) {
+          actionsHost.appendChild(connectorActionBtn("管理通知目标", busy, function () {
+            manageNotifyTargets(item.id);
+          }));
+          var originNodeEntry = connectorNodeEntryForGateway(item);
+          if (originNodeEntry) {
+            actionsHost.appendChild(connectorActionBtn("重新同步", busy, function (b) {
+              connectorMigrate(originNodeEntry, b, true);
+            }));
+          }
+        }
+        actionsHost.appendChild(connectorActionBtn("日志", busy, function () { openConnectorLogs(item); }));
+        actionsHost.appendChild(connectorActionBtn(item.enabled ? "停用" : "启用", busy, function () {
+          connectorToggle(item);
+        }));
+        if (!item.origin) {
+          actionsHost.appendChild(connectorActionBtn("编辑", busy, function () { openConnectorEditor(item); }));
+        }
+        actionsHost.appendChild(connectorActionBtn("测试", busy || !item.enabled, function () { openConnectorTest(item); }));
+        if (!item.origin) {
+          actionsHost.appendChild(connectorActionBtn("重载", busy, function () { connectorReload(item); }));
+        }
+        actionsHost.appendChild(connectorActionBtn("删除", busy, function (b) { connectorDelete(item, b); }, "danger-outline"));
+      } else {
+        if (migratedEntry) {
+          actionsHost.appendChild(connectorActionBtn("管理通知目标", busy, function () {
+            manageNotifyTargets(migratedEntry.connector.id);
+          }));
+          actionsHost.appendChild(connectorActionBtn("重新同步", busy, function (b) {
+            connectorMigrate(entry, b, true);
+          }));
+        } else if (item.enabled && (item.provider === "qqbot" || item.provider === "wechat") &&
+                   entry.node && (entry.node.capabilities || []).indexOf("connector-handoff") >= 0) {
+          actionsHost.appendChild(connectorActionBtn("迁移通知到网关", busy, function (b) {
+            connectorMigrate(entry, b, false);
+          }));
+        } else if (item.enabled && (item.provider === "qqbot" || item.provider === "wechat")) {
+          var oldBtn = connectorActionBtn("节点版本过旧", true, function () {});
+          oldBtn.title = "该节点未提供 connector-handoff；升级并重启节点后可迁移";
+          actionsHost.appendChild(oldBtn);
+        }
+      }
       var detail = document.createElement("a");
       detail.className = "btn ghost sm";
       detail.href = connectorBasePath(entry) + "/" + encodeURIComponent(item.id);
       detail.target = "_blank";
       detail.rel = "noopener";
       detail.textContent = "配置 JSON";
-      card.querySelector(".card-actions").appendChild(detail);
+      actionsHost.appendChild(detail);
       list.appendChild(card);
     });
   }
@@ -772,8 +890,13 @@
   // 空体=无参数）；节点来源走 /n/{node}/api/connectors 同一契约。执行期间禁用按钮防连点，
   // 失败给出可读错误。
   function runConnectorActionButton(entry, action, btn) {
+    var item = entry.connector;
+    if (action && action.kind === "qr") {
+      openConnectorQRDialog(item, action, { draft: false });
+      return;
+    }
     var label = action.label || action.key;
-    var path = connectorBasePath(entry) + "/" + encodeURIComponent(entry.connector.id) +
+    var path = connectorBasePath(entry) + "/" + encodeURIComponent(item.id) +
       "/actions/" + encodeURIComponent(action.key);
     btn.disabled = true;
     apiJSON(path, { method: "POST" }).then(function (r) {
@@ -783,7 +906,8 @@
         return;
       }
       var summary = connectorActionSummary(r.body);
-      notify("动作完成：" + (summary || label));
+      notify("动作完成：" + (summary || label), "ok");
+      openConnectorActionResult(item, action, r.body);
     }).catch(function (err) {
       btn.disabled = false;
       notify(label + "失败：" + (err && err.message ? err.message : err), "error");
@@ -799,6 +923,1588 @@
     var keys = Object.keys(body);
     if (!keys.length) { return ""; }
     try { return JSON.stringify(body); } catch (err) { return ""; }
+  }
+
+  /* ──────────── connectors: management (create/edit/test/…) ─────────── */
+  // 数据面：GET/POST /api/connectors、PATCH/DELETE /api/connectors/{id}、
+  // POST /{id}/reload|test、GET /{id}/logs、POST /{id}/actions/{action}、
+  // GET /api/connectors/bindings + PUT/DELETE /{id}/bindings/{chat}。
+  // 表单完全由 GET /api/connectors/schema 驱动（docs/bots/07 §7）。
+
+  var connectorBindings = [];
+  var connectorBindingsError = "";
+  var connectorBusy = {};
+  var connectorEditing = null;
+  var connectorForm = null;
+  var connectorFormErrors = {};
+  var connectorSaving = false;
+  var connectorLogsState = { id: "", name: "", entries: [], stats: null, loading: false };
+  var connectorTestState = { id: "", name: "", busy: false };
+  var connectorActionState = { id: "", name: "", action: "", payload: null, busy: false };
+
+  function connectorNotice(text) {
+    var box = el("connectors-notice");
+    if (!box) { return; }
+    if (!text) { box.hidden = true; box.textContent = ""; return; }
+    box.hidden = false;
+    box.textContent = text;
+  }
+
+  function connectorSetBusy(id, busy) {
+    if (busy) { connectorBusy[id] = true; } else { delete connectorBusy[id]; }
+  }
+
+  function connectorIsBusy(id) { return !!connectorBusy[id]; }
+
+  function connectorProviderOptions() {
+    return connectorSchemaProviders || [];
+  }
+
+  function connectorDefaultValues(providerSchema) {
+    var values = {};
+    var fields = (providerSchema && providerSchema.fields) || [];
+    fields.forEach(function (field) { values[field.key] = field.default || ""; });
+    return values;
+  }
+
+  function connectorHasModeField(providerSchema) {
+    var fields = (providerSchema && providerSchema.fields) || [];
+    return fields.some(function (field) { return field.key === "mode"; });
+  }
+
+  function connectorEmptyForm() {
+    var providers = connectorProviderOptions();
+    var first = providers.length ? providers[0] : null;
+    var modes = (first && first.modes) || [];
+    return {
+      id: "",
+      provider: first ? first.provider : "",
+      name: "",
+      enabled: true,
+      mode: modes.length ? modes[0] : "",
+      values: connectorDefaultValues(first),
+      clearedSecrets: {},
+      policyText: "{}",
+      skipCredentialCheck: false,
+    };
+  }
+
+  function connectorFormFromView(view) {
+    var ps = connectorSchemaFor(view.provider);
+    var values = {};
+    var settings = (view && view.settings) || {};
+    Object.keys(settings).forEach(function (key) { values[key] = String(settings[key]); });
+    if (connectorHasModeField(ps) && !values.mode) { values.mode = view.mode || ""; }
+    var policyText = "{}";
+    try { policyText = JSON.stringify(view.policy || {}, null, 2); } catch (err) { policyText = "{}"; }
+    return {
+      id: view.id,
+      provider: view.provider,
+      name: view.name || "",
+      enabled: view.enabled !== false,
+      mode: view.mode || "",
+      values: values,
+      clearedSecrets: {},
+      policyText: policyText,
+      skipCredentialCheck: false,
+    };
+  }
+
+  function connectorProviderSchemaOf(form) {
+    return connectorSchemaFor(form && form.provider);
+  }
+
+  function connectorSecretSet(key) {
+    if (!connectorEditing) { return false; }
+    var keys = connectorEditing.secret_keys || [];
+    return keys.indexOf(key) >= 0;
+  }
+
+  function connectorFieldControl(field, form) {
+    var value = form.values[field.key] == null ? "" : String(form.values[field.key]);
+    if (field.type === "secret") {
+      var wrap = document.createElement("div");
+      wrap.className = "connector-secret";
+      var input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.placeholder = connectorSecretSet(field.key) ? "已设置（留空保持不变）" : (field.placeholder || "");
+      input.value = value;
+      input.addEventListener("input", function () {
+        form.values[field.key] = input.value;
+        delete connectorFormErrors[field.key];
+      });
+      wrap.appendChild(input);
+      if (connectorSecretSet(field.key)) {
+        var clearLine = document.createElement("label");
+        clearLine.className = "check-line";
+        var clearBox = document.createElement("input");
+        clearBox.type = "checkbox";
+        clearBox.checked = !!form.clearedSecrets[field.key];
+        clearBox.addEventListener("change", function () {
+          form.clearedSecrets[field.key] = clearBox.checked;
+          if (clearBox.checked) { input.value = ""; form.values[field.key] = ""; }
+        });
+        clearLine.appendChild(clearBox);
+        clearLine.appendChild(document.createTextNode(" 清除已保存的密钥"));
+        wrap.appendChild(clearLine);
+      }
+      return wrap;
+    }
+    if (field.type === "bool") {
+      var line = document.createElement("label");
+      line.className = "check-line";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = value === "true";
+      box.addEventListener("change", function () {
+        form.values[field.key] = box.checked ? "true" : "false";
+        delete connectorFormErrors[field.key];
+      });
+      line.appendChild(box);
+      line.appendChild(document.createTextNode(" 开启"));
+      return line;
+    }
+    if (field.type === "enum") {
+      var sel = document.createElement("select");
+      sel.className = "select";
+      var options = field.options || [];
+      options.forEach(function (opt) {
+        var o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label || opt.value;
+        sel.appendChild(o);
+      });
+      if (value !== "" && !options.some(function (opt) { return opt.value === value; })) {
+        var extra = document.createElement("option");
+        extra.value = value;
+        extra.textContent = value;
+        sel.appendChild(extra);
+      }
+      sel.value = value;
+      sel.addEventListener("change", function () {
+        form.values[field.key] = sel.value;
+        delete connectorFormErrors[field.key];
+      });
+      return sel;
+    }
+    var input2 = document.createElement("input");
+    input2.type = field.type === "number" ? "number" : (field.type === "url" ? "url" : "text");
+    if (field.type === "number") { input2.step = "any"; }
+    input2.placeholder = field.placeholder || "";
+    input2.value = value;
+    input2.autocomplete = "off";
+    input2.addEventListener("input", function () {
+      form.values[field.key] = input2.value;
+      delete connectorFormErrors[field.key];
+    });
+    return input2;
+  }
+
+  function connectorErrorLine(key) {
+    var err = document.createElement("p");
+    err.className = "field-error";
+    err.textContent = connectorFormErrors[key] || "";
+    err.hidden = !connectorFormErrors[key];
+    return err;
+  }
+
+  function connectorFieldRow(field, form) {
+    var row = document.createElement("div");
+    row.className = "field";
+    var label = document.createElement("label");
+    label.className = "field-label";
+    label.textContent = (field.label || field.key) + (field.required ? " *" : "");
+    row.appendChild(label);
+    row.appendChild(connectorFieldControl(field, form));
+    if (field.help) {
+      var help = document.createElement("p");
+      help.className = "field-hint";
+      help.textContent = field.help;
+      row.appendChild(help);
+    }
+    row.appendChild(connectorErrorLine(field.key));
+    return row;
+  }
+
+  function connectorSimpleRow(labelText, control, key) {
+    var row = document.createElement("div");
+    row.className = "field";
+    var label = document.createElement("label");
+    label.className = "field-label";
+    label.textContent = labelText;
+    row.appendChild(label);
+    row.appendChild(control);
+    row.appendChild(connectorErrorLine(key || ""));
+    return row;
+  }
+
+  function renderConnectorEditorForm() {
+    var host = el("connector-editor-form");
+    if (!host || !connectorForm) { return; }
+    host.innerHTML = "";
+    var form = connectorForm;
+    var ps = connectorProviderSchemaOf(form);
+
+    if (connectorEditing) {
+      var prov = document.createElement("input");
+      prov.type = "text";
+      prov.value = form.provider;
+      prov.disabled = true;
+      host.appendChild(connectorSimpleRow("通道（不可修改）", prov, "provider"));
+    } else {
+      var sel = document.createElement("select");
+      sel.className = "select";
+      connectorProviderOptions().forEach(function (p) {
+        var o = document.createElement("option");
+        o.value = p.provider;
+        o.textContent = (p.label || p.provider) + "（" + p.provider + "）";
+        sel.appendChild(o);
+      });
+      sel.value = form.provider;
+      sel.addEventListener("change", function () {
+        form.provider = sel.value;
+        var next = connectorSchemaFor(sel.value);
+        form.mode = next && next.modes && next.modes.length ? next.modes[0] : "";
+        form.values = connectorDefaultValues(next);
+        form.clearedSecrets = {};
+        connectorFormErrors = {};
+        renderConnectorEditorForm();
+      });
+      host.appendChild(connectorSimpleRow("通道", sel, "provider"));
+    }
+
+    if (connectorHasQRAction(ps)) {
+      var qrEntry = document.createElement("div");
+      qrEntry.className = "connector-qr-entry";
+      var qrHint = document.createElement("p");
+      qrHint.className = "connectors-hint";
+      qrHint.textContent = connectorEditing
+        ? "重新扫码只替换登录凭据（bot_token / 账号），名称、策略与已有绑定保持不变。"
+        : "扫码通道无需手动填写 Token：点下方按钮自动创建连接器并出二维码，确认后凭据自动回填。";
+      qrEntry.appendChild(qrHint);
+      var qrStartBtn = document.createElement("button");
+      qrStartBtn.type = "button";
+      qrStartBtn.className = "btn sm";
+      qrStartBtn.textContent = connectorEditing ? "重新扫码（替换凭据）" : "扫码登录（自动创建）";
+      qrStartBtn.addEventListener("click", startConnectorQRFromEditor);
+      qrEntry.appendChild(qrStartBtn);
+      host.appendChild(qrEntry);
+    }
+
+    var idInput = document.createElement("input");
+    idInput.type = "text";
+    idInput.value = form.id;
+    idInput.disabled = !!connectorEditing;
+    idInput.placeholder = "如 tg-ops / qq-ops";
+    idInput.autocomplete = "off";
+    idInput.addEventListener("input", function () {
+      form.id = idInput.value;
+      delete connectorFormErrors.id;
+    });
+    host.appendChild(connectorSimpleRow("连接器 ID" + (connectorEditing ? "（不可修改）" : " *"), idInput, "id"));
+
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = form.name;
+    nameInput.placeholder = "显示名（留空 = 使用 ID）";
+    nameInput.autocomplete = "off";
+    nameInput.addEventListener("input", function () {
+      form.name = nameInput.value;
+      delete connectorFormErrors.name;
+    });
+    host.appendChild(connectorSimpleRow("名称", nameInput, "name"));
+
+    if (!connectorHasModeField(ps)) {
+      var modes = (ps && ps.modes) || [];
+      var modeSel = document.createElement("select");
+      modeSel.className = "select";
+      modes.forEach(function (m) {
+        var o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        modeSel.appendChild(o);
+      });
+      if (form.mode && modes.indexOf(form.mode) < 0) {
+        var extra = document.createElement("option");
+        extra.value = form.mode;
+        extra.textContent = form.mode;
+        modeSel.appendChild(extra);
+      }
+      modeSel.value = form.mode;
+      modeSel.addEventListener("change", function () { form.mode = modeSel.value; });
+      host.appendChild(connectorSimpleRow("接入模式", modeSel, "mode"));
+    }
+
+    var enabledLine = document.createElement("label");
+    enabledLine.className = "check-line";
+    var enabledBox = document.createElement("input");
+    enabledBox.type = "checkbox";
+    enabledBox.checked = form.enabled;
+    enabledBox.addEventListener("change", function () { form.enabled = enabledBox.checked; });
+    enabledLine.appendChild(enabledBox);
+    enabledLine.appendChild(document.createTextNode(" 启用（保存后立即应用）"));
+    host.appendChild(enabledLine);
+
+    ((ps && ps.fields) || []).forEach(function (field) {
+      host.appendChild(connectorFieldRow(field, form));
+    });
+
+    var policyWrap = document.createElement("div");
+    policyWrap.className = "field";
+    var policyLabel = document.createElement("label");
+    policyLabel.className = "field-label";
+    policyLabel.textContent = "策略（JSON，可选）";
+    policyWrap.appendChild(policyLabel);
+    var ta = document.createElement("textarea");
+    ta.className = "filter-input connector-policy-input";
+    ta.rows = 6;
+    ta.spellcheck = false;
+    ta.value = form.policyText;
+    ta.addEventListener("input", function () {
+      form.policyText = ta.value;
+      delete connectorFormErrors.policy;
+    });
+    policyWrap.appendChild(ta);
+    var policyHelp = document.createElement("p");
+    policyHelp.className = "field-hint";
+    policyHelp.textContent = "对应 REST 的 policy：runtime_owner / command_prefix / allowed_users / session_mode / reply_mode / notify / route / events 等。留空=不修改。";
+    policyWrap.appendChild(policyHelp);
+    policyWrap.appendChild(connectorErrorLine("policy"));
+    host.appendChild(policyWrap);
+
+    var skipLine = document.createElement("label");
+    skipLine.className = "check-line";
+    var skipBox = document.createElement("input");
+    skipBox.type = "checkbox";
+    skipBox.checked = form.skipCredentialCheck;
+    skipBox.addEventListener("change", function () { form.skipCredentialCheck = skipBox.checked; });
+    skipLine.appendChild(skipBox);
+    skipLine.appendChild(document.createTextNode(" 跳过保存前凭据校验（平台暂不可达时强制落盘）"));
+    host.appendChild(skipLine);
+
+    if (connectorEditing) { renderConnectorBindings(); }
+  }
+
+  function connectorBindingRows(connectorID) {
+    return (connectorBindings || []).filter(function (b) { return b.connector_id === connectorID; });
+  }
+
+  function connectorBindingLabel(b) {
+    var session = (b.session_id || "").trim();
+    var node = (b.node_id || "").trim();
+    return b.chat + " → " + (session || "（未绑定会话）") + (node ? " @ " + node : "");
+  }
+
+  function loadConnectorBindings() {
+    return apiJSON("/api/connectors/bindings").then(function (r) {
+      if (r.res.status === 401) { setAuthed(false); return; }
+      if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
+        connectorBindings = [];
+        connectorBindingsError = (r.body && r.body.error) || ("HTTP " + r.res.status);
+        return;
+      }
+      connectorBindings = r.body.items;
+      connectorBindingsError = "";
+    }).catch(function (err) {
+      connectorBindings = [];
+      connectorBindingsError = err && err.message ? err.message : String(err);
+    }).then(function () {
+      if (currentView() === "connectors") { renderConnectors(connectorEntries, connectorMessage); }
+      if (connectorEditing) { renderConnectorBindings(); }
+    });
+  }
+
+  // syncConnectorIDOptions 把网关自身连接器填进 Bot 通道表单的下拉框，
+  // 让 operator 不必手记 connector_id。节点条目不属于本宿主 store，不进入列表。
+  function syncConnectorIDOptions() {
+    var sel = el("notify-im-connector");
+    if (!sel) { return; }
+    var current = sel.value;
+    sel.innerHTML = "";
+    var placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "选择网关连接器";
+    sel.appendChild(placeholder);
+    (connectorGatewayEntries || []).forEach(function (entry) {
+      var item = entry.connector;
+      if (!item || !item.id) { return; }
+      var opt = document.createElement("option");
+      opt.value = item.id;
+      opt.textContent = (item.name || item.id) + "（" + item.provider + "）" +
+        (item.runtime_mode === "outbound" ? " · 副本" : "");
+      sel.appendChild(opt);
+    });
+    if (current) { sel.value = current; }
+  }
+
+  // ensureGatewayConnectorOptions 让直接打开「通知设置」的用户也能拿到连接器
+  // 下拉选项（连接器列表是懒加载视图，不能假设用户先去过连接器页）。
+  function ensureGatewayConnectorOptions() {
+    if (connectorGatewayEntries && connectorGatewayEntries.length) {
+      syncConnectorIDOptions();
+      return Promise.resolve();
+    }
+    return loadConnectors(false).then(function () {
+      syncConnectorIDOptions();
+    }).catch(function () {});
+  }
+
+  function renderConnectorBindings() {
+    var host = el("connector-editor-bindings");
+    if (!host) { return; }
+    if (!connectorEditing) { host.hidden = true; host.innerHTML = ""; return; }
+    host.hidden = false;
+    host.innerHTML = "";
+    var title = document.createElement("div");
+    title.className = "connector-bindings-head";
+    title.textContent = "绑定会话（聊天 → 会话）";
+    host.appendChild(title);
+    var rows = connectorBindingRows(connectorEditing.id);
+    if (!rows.length) {
+      var empty = document.createElement("p");
+      empty.className = "connectors-hint";
+      empty.textContent = "尚未绑定会话。绑定后，该 chat 的入站消息会投递到指定会话。";
+      host.appendChild(empty);
+    } else {
+      rows.forEach(function (b) {
+        var row = document.createElement("div");
+        row.className = "connector-binding-row";
+        var text = document.createElement("span");
+        text.className = "connector-binding-label";
+        text.textContent = connectorBindingLabel(b);
+        row.appendChild(text);
+        var del = document.createElement("button");
+        del.type = "button";
+        del.className = "btn ghost sm";
+        del.textContent = "解绑";
+        del.addEventListener("click", function () { unbindConnectorChat(connectorEditing.id, b.chat, del); });
+        row.appendChild(del);
+        host.appendChild(row);
+      });
+    }
+    var form = document.createElement("div");
+    form.className = "connector-binding-form";
+    var chat = document.createElement("input");
+    chat.className = "filter-input";
+    chat.placeholder = "chat / 群号";
+    chat.autocomplete = "off";
+    var session = document.createElement("input");
+    session.className = "filter-input";
+    session.placeholder = "session_id";
+    session.autocomplete = "off";
+    var node = document.createElement("input");
+    node.className = "filter-input";
+    node.placeholder = "node_id（可选）";
+    node.autocomplete = "off";
+    var add = document.createElement("button");
+    add.type = "button";
+    add.className = "btn ghost sm";
+    add.textContent = "绑定";
+    add.addEventListener("click", function () {
+      var chatValue = (chat.value || "").trim();
+      var sessionValue = (session.value || "").trim();
+      if (!chatValue || !sessionValue) {
+        notify("chat 与 session_id 必填", "error");
+        return;
+      }
+      add.disabled = true;
+      var body = { session_id: sessionValue };
+      var nodeValue = (node.value || "").trim();
+      if (nodeValue) { body.node_id = nodeValue; }
+      apiJSON("/api/connectors/" + encodeURIComponent(connectorEditing.id) + "/bindings/" + encodeURIComponent(chatValue), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        add.disabled = false;
+        if (!r.res.ok) {
+          notify("绑定失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
+          return;
+        }
+        chat.value = ""; session.value = ""; node.value = "";
+        notify("已绑定 " + chatValue, "ok");
+        loadConnectorBindings();
+      }).catch(function (err) {
+        add.disabled = false;
+        notify("绑定失败：" + (err && err.message ? err.message : err), "error");
+      });
+    });
+    form.appendChild(chat);
+    form.appendChild(session);
+    form.appendChild(node);
+    form.appendChild(add);
+    host.appendChild(form);
+  }
+
+  function unbindConnectorChat(connectorID, chat, btn) {
+    confirmDestructive({
+      title: "解除绑定",
+      message: "将解绑 " + connectorID + " 的 chat " + chat + "。入站消息不再投递到该会话。",
+      confirmText: "解绑",
+      trigger: btn,
+      onConfirm: function () {
+        return apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/bindings/" + encodeURIComponent(chat), { method: "DELETE" }).then(function (r) {
+          if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        });
+      },
+    }).then(function (res) {
+      if (res.confirmed) { notify("已解绑 " + chat, "ok"); loadConnectorBindings(); }
+    });
+  }
+
+  function openConnectorEditor(view) {
+    connectorEditing = view || null;
+    connectorForm = view ? connectorFormFromView(view) : connectorEmptyForm();
+    connectorFormErrors = {};
+    connectorSaving = false;
+    var err = el("connector-editor-error");
+    if (err) { err.hidden = true; err.textContent = ""; }
+    el("connector-editor-title").textContent = view ? "编辑连接器" : "新建连接器";
+    var saveBtn = el("connector-editor-save");
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = view ? "保存修改" : "创建连接器"; }
+    if (!connectorSchemaProviders) {
+      loadConnectorSchema().then(function () {
+        if (!connectorSchemaProviders) {
+          connectorNotice("无法读取连接器 Schema，管理表单不可用。请检查 /api/connectors/schema。");
+          return;
+        }
+        if (!connectorForm.provider) { connectorForm = connectorEmptyForm(); }
+        renderConnectorEditorForm();
+      });
+    }
+    renderConnectorEditorForm();
+    openModal("connector-editor-modal");
+  }
+
+  function closeConnectorEditor() {
+    closeModal("connector-editor-modal");
+    connectorEditing = null;
+    connectorForm = null;
+    connectorFormErrors = {};
+  }
+
+  function connectorValidate(form, ps, isCreate) {
+    var errors = {};
+    var id = (form.id || "").trim();
+    if (isCreate) {
+      if (!id) { errors.id = "连接器 ID 必填"; }
+      else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) { errors.id = "只能包含字母、数字、._-（最长 64）"; }
+    }
+    if (!ps) { errors.provider = "请选择通道"; return errors; }
+    var existingSecrets = connectorEditing ? (connectorEditing.secret_keys || []) : [];
+    (ps.fields || []).forEach(function (field) {
+      if (!field.required) { return; }
+      var value = (form.values[field.key] || "").trim();
+      if (field.type === "secret") {
+        if (form.clearedSecrets[field.key]) { return; }
+        if (value || existingSecrets.indexOf(field.key) >= 0) { return; }
+        errors[field.key] = (field.label || field.key) + " 为必填项";
+        return;
+      }
+      if (!value) { errors[field.key] = (field.label || field.key) + " 为必填项"; }
+    });
+    if ((form.policyText || "").trim()) {
+      try { JSON.parse(form.policyText); } catch (e) { errors.policy = "策略不是合法 JSON：" + e.message; }
+    }
+    return errors;
+  }
+
+  function connectorBuildPayload(form, ps, isCreate) {
+    var settings = {};
+    var secrets = {};
+    (ps.fields || []).forEach(function (field) {
+      var raw = form.values[field.key] == null ? "" : String(form.values[field.key]);
+      if (field.type === "secret") {
+        if (form.clearedSecrets[field.key]) { secrets[field.key] = "__clear__"; return; }
+        var value = raw.trim();
+        if (value) { secrets[field.key] = value; }
+        return;
+      }
+      settings[field.key] = raw;
+    });
+    var modeField = connectorHasModeField(ps);
+    var payload = {
+      settings: settings,
+      secrets: secrets,
+      mode: modeField ? (settings.mode || "") : form.mode,
+      enabled: form.enabled !== false,
+    };
+    if (isCreate) {
+      payload.id = (form.id || "").trim();
+      payload.provider = ps.provider;
+      payload.name = (form.name || "").trim() || payload.id;
+    } else {
+      payload.name = (form.name || "").trim();
+    }
+    if ((form.policyText || "").trim()) { payload.policy = JSON.parse(form.policyText); }
+    if (form.skipCredentialCheck) { payload.skip_credential_check = true; }
+    return payload;
+  }
+
+  function connectorFieldErrorsFrom(body) {
+    var out = {};
+    var fields = body && body.fields;
+    if (Array.isArray(fields)) {
+      fields.forEach(function (item) {
+        if (item && item.key) { out[item.key] = item.message || "校验失败"; }
+      });
+    }
+    return out;
+  }
+
+  function saveConnectorEditor() {
+    if (connectorSaving || !connectorForm) { return; }
+    var ps = connectorProviderSchemaOf(connectorForm);
+    var isCreate = !connectorEditing;
+    connectorFormErrors = connectorValidate(connectorForm, ps, isCreate);
+    renderConnectorEditorForm();
+    var errBox = el("connector-editor-error");
+    if (Object.keys(connectorFormErrors).length) {
+      if (errBox) { errBox.hidden = false; errBox.textContent = "请修正标红的字段后再保存。"; }
+      return;
+    }
+    var payload;
+    try {
+      payload = connectorBuildPayload(connectorForm, ps, isCreate);
+    } catch (e) {
+      connectorFormErrors.policy = e.message;
+      renderConnectorEditorForm();
+      return;
+    }
+    connectorSaving = true;
+    var saveBtn = el("connector-editor-save");
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "保存中…"; }
+    if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+    var path = isCreate ? "/api/connectors" : "/api/connectors/" + encodeURIComponent(connectorEditing.id);
+    apiJSON(path, {
+      method: isCreate ? "POST" : "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (r) {
+      connectorSaving = false;
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = isCreate ? "创建连接器" : "保存修改"; }
+      if (!r.res.ok) {
+        connectorFormErrors = connectorFieldErrorsFrom(r.body);
+        renderConnectorEditorForm();
+        if (errBox) {
+          errBox.hidden = false;
+          errBox.textContent = (r.body && (r.body.error || r.body.message)) || ("保存失败：HTTP " + r.res.status);
+        }
+        return;
+      }
+      closeConnectorEditor();
+      notify(isCreate ? "已创建连接器 " + payload.id : "连接器已保存", "ok");
+      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+    }).catch(function (err) {
+      connectorSaving = false;
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = isCreate ? "创建连接器" : "保存修改"; }
+      if (errBox) { errBox.hidden = false; errBox.textContent = "保存失败：" + (err && err.message ? err.message : err); }
+    });
+  }
+
+  function connectorActionBtn(label, disabled, onClick, extraClass) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost sm" + (extraClass ? " " + extraClass : "");
+    btn.textContent = label;
+    btn.disabled = !!disabled;
+    btn.addEventListener("click", function () { onClick(btn); });
+    return btn;
+  }
+
+  function connectorToggle(item) {
+    connectorSetBusy(item.id, true);
+    connectorNotice("");
+    renderConnectors(connectorEntries, connectorMessage);
+    apiJSON("/api/connectors/" + encodeURIComponent(item.id), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !item.enabled }),
+    }).then(function (r) {
+      connectorSetBusy(item.id, false);
+      if (!r.res.ok) {
+        connectorNotice("切换失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
+        renderConnectors(connectorEntries, connectorMessage);
+        return;
+      }
+      notify((item.enabled ? "已停用 " : "已启用 ") + (item.name || item.id), "ok");
+      loadConnectors(true);
+    }).catch(function (err) {
+      connectorSetBusy(item.id, false);
+      connectorNotice("切换失败：" + (err && err.message ? err.message : err));
+      renderConnectors(connectorEntries, connectorMessage);
+    });
+  }
+
+  function connectorReload(item) {
+    connectorSetBusy(item.id, true);
+    connectorNotice("");
+    renderConnectors(connectorEntries, connectorMessage);
+    apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/reload", { method: "POST" }).then(function (r) {
+      connectorSetBusy(item.id, false);
+      if (!r.res.ok) {
+        connectorNotice("重载失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
+        renderConnectors(connectorEntries, connectorMessage);
+        return;
+      }
+      notify("已重载 " + (item.name || item.id), "ok");
+      loadConnectors(true);
+    }).catch(function (err) {
+      connectorSetBusy(item.id, false);
+      connectorNotice("重载失败：" + (err && err.message ? err.message : err));
+      renderConnectors(connectorEntries, connectorMessage);
+    });
+  }
+
+  function connectorDelete(item, btn) {
+    confirmDestructive({
+      title: "删除连接器",
+      message: "将删除连接器 " + (item.name || item.id) + "（" + item.id + "）及其配置密钥；绑定与运行实例会停止。此操作不可撤销。",
+      confirmText: "删除",
+      trigger: btn,
+      onConfirm: function () {
+        var restore = Promise.resolve();
+        if (item.origin && item.origin.node_id && item.origin.connector_id) {
+          // 导入副本删除前先恢复节点本地通知，避免节点永久静音。
+          restore = apiJSON("/api/nodes/" + encodeURIComponent(item.origin.node_id) +
+            "/connectors/" + encodeURIComponent(item.origin.connector_id) + "/handoff/rollback",
+            { method: "POST" }).then(function (r) {
+            if (!r.res.ok) {
+              throw new Error("恢复节点本地通知失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
+            }
+          });
+        }
+        return restore.then(function () {
+          return apiJSON("/api/connectors/" + encodeURIComponent(item.id), { method: "DELETE" });
+        }).then(function (r) {
+          if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        });
+      },
+    }).then(function (res) {
+      if (!res.confirmed) { return; }
+      notify("已删除连接器 " + (item.name || item.id), "ok");
+      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+    });
+  }
+
+  function connectorTakeover(item, btn) {
+    confirmDestructive({
+      title: "接管运行归属",
+      message: "将把连接器 " + (item.name || item.id) + " 的运行归属从 " + (item.active_owner || "其它宿主") + " 抢到本网关，并重启其轮询。",
+      confirmText: "接管",
+      trigger: btn,
+      onConfirm: function () {
+        return apiJSON("/api/connectors/" + encodeURIComponent(item.id) + "/takeover", { method: "POST" }).then(function (r) {
+          if (!r.res.ok) { throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        });
+      },
+    }).then(function (res) {
+      if (!res.confirmed) { return; }
+      notify("已接管 " + (item.name || item.id), "ok");
+      loadConnectors(true);
+    });
+  }
+
+  // connectorMigratedEntry 在网关连接器里找出来自这个节点连接器的副本。
+  function connectorMigratedEntry(entry) {
+    if (!entry || !entry.node || !entry.connector) { return null; }
+    var nodeID = entry.node.node_id;
+    var connectorID = entry.connector.id;
+    if (!nodeID || !connectorID) { return null; }
+    var groups = connectorGatewayEntries || [];
+    for (var i = 0; i < groups.length; i++) {
+      var candidate = groups[i] && groups[i].connector;
+      if (candidate && candidate.origin &&
+          candidate.origin.node_id === nodeID && candidate.origin.connector_id === connectorID) {
+        return groups[i];
+      }
+    }
+    return null;
+  }
+
+  function connectorNodeEntryForGateway(item) {
+    if (!item || !item.origin) { return null; }
+    var entries = connectorEntries || [];
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      if (!entry || entry.source === "gateway" || !entry.node || !entry.connector) { continue; }
+      if (entry.node.node_id === item.origin.node_id && entry.connector.id === item.origin.connector_id) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  function shortStableHash(text) {
+    var h = 2166136261;
+    for (var i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function friendlyConnectorError(err) {
+    var msg = err && err.message ? err.message : String(err);
+    if (/HTTP 502|no response|EOF|panic/i.test(msg)) {
+      return "节点连接中断或版本不兼容；请确认节点在线且已升级到支持迁移的版本。";
+    }
+    if (/HTTP 404/i.test(msg)) {
+      return "节点上没有该连接器，或节点版本过旧（缺少 handoff 接口）。";
+    }
+    if (/node offline|节点离线/i.test(msg)) {
+      return "节点离线，无法读取 bot 配置。";
+    }
+    if (/HTTP 401|HTTP 403/i.test(msg)) {
+      return "节点管理面鉴权失败。";
+    }
+    return msg;
+  }
+
+  function manageNotifyTargets(connectorID) {
+    var nav = document.querySelector('.nav-item[data-view="notifications"]');
+    if (nav) { nav.click(); }
+    setTimeout(function () {
+      var rows = document.querySelectorAll("#notify-im-targets .notify-im-row");
+      var match = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].getAttribute("data-connector-id") === connectorID) { match = rows[i]; break; }
+      }
+      if (!match) { return; }
+      match.classList.add("notify-im-row-focus");
+      match.scrollIntoView({ behavior: "smooth", block: "center" });
+      setTimeout(function () { match.classList.remove("notify-im-row-focus"); }, 2200);
+    }, 150);
+  }
+
+  function rollbackConnectorMigration(node, connectorID, gatewayID, beforeConfig) {
+    var chain = Promise.resolve();
+    if (node && node.node_id && connectorID) {
+      chain = chain.then(function () {
+        return apiJSON("/api/nodes/" + encodeURIComponent(node.node_id) +
+          "/connectors/" + encodeURIComponent(connectorID) + "/handoff/rollback",
+          { method: "POST" }).catch(function () {});
+      });
+    }
+    if (gatewayID) {
+      chain = chain.then(function () {
+        return apiJSON("/api/connectors/" + encodeURIComponent(gatewayID), { method: "DELETE" }).catch(function () {});
+      });
+    }
+    if (beforeConfig) {
+      chain = chain.then(function () {
+        return apiJSON("/api/notify/im", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(beforeConfig),
+        }).catch(function () {});
+      });
+    }
+    return chain.then(function () {
+      if (beforeConfig) {
+        notifyIMState.config = beforeConfig;
+        renderNotifyIMTargets();
+      }
+    });
+  }
+
+  // connectorMigrate 是一次完整迁移：读取节点绑定 → 复制凭据 → 创建网关
+  // outbound 副本 → 自动为每个绑定 chat 建立 Bot target → 关闭节点本地通知。
+  // 失败时回滚节点/副本/target，避免“节点静音但网关没有目标”。
+  function connectorMigrate(entry, btn, resync) {
+    var item = entry && entry.connector;
+    var node = entry && entry.node;
+    if (!item || !node || !node.node_id) {
+      notify("节点信息缺失，无法迁移", "error");
+      return;
+    }
+    var nodeBase = "/api/nodes/" + encodeURIComponent(node.node_id);
+    var bindingsURL = nodeBase + "/connectors/bindings?connector_id=" + encodeURIComponent(item.id);
+    apiJSON(bindingsURL).then(function (bindingsResp) {
+      if (!bindingsResp.res.ok) {
+        throw new Error((bindingsResp.body && bindingsResp.body.error) || ("HTTP " + bindingsResp.res.status));
+      }
+      var bindings = ((bindingsResp.body && bindingsResp.body.items) || []).filter(function (b) {
+        return b && b.chat;
+      });
+      if (!bindings.length) {
+        throw new Error("该连接器没有可迁移的绑定 chat；已取消，节点配置未改动。");
+      }
+      var kinds = ["approval", "question", "completed", "error", "waiting"];
+      var chats = bindings.map(function (b) { return b.chat; });
+      var message = (resync
+        ? "将重新同步节点「" + (nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) + " 配置，并重建通知目标。\n\n"
+        : "将把节点「" + (nodeDisplayName(node) || node.node_id) + "」的 " + (item.name || item.id) +
+          "（" + item.provider + "）迁移到网关：\n\n") +
+        "• 复制 " + bindings.length + " 个绑定 chat：" + chats.join("、") + "\n" +
+        "• 创建网关 outbound-only 副本（不轮询，节点继续入站/回复）\n" +
+        "• 通知范围：全部会话（含当前 live 会话）\n" +
+        "• 自动创建 Bot target：" + kinds.map(notifyKindLabel).join("、") + "\n" +
+        "• 关闭节点该连接器的本地通知\n\n" +
+        "凭据只经隧道传输，不写日志。";
+      return { bindings: bindings, kinds: kinds, message: message };
+    }).then(function (prepared) {
+      return confirmDestructive({
+        title: resync ? "重新同步网关副本" : "迁移通知到网关",
+        message: prepared.message,
+        confirmText: resync ? "同步" : "迁移",
+        trigger: btn,
+        onConfirm: function () {
+          var gatewayID = "";
+          var beforeConfig = null;
+          var chain = apiJSON(nodeBase + "/connectors/" + encodeURIComponent(item.id) + "/handoff", { method: "POST" })
+            .then(function (r) {
+              if (!r.res.ok) {
+                throw new Error((r.body && r.body.error) || ("HTTP " + r.res.status));
+              }
+              gatewayID = (r.body && r.body.connector_id) || "";
+              if (!gatewayID) { throw new Error("节点未返回网关副本 ID"); }
+              return loadNotifyIM();
+            })
+            .then(function () {
+              beforeConfig = JSON.parse(JSON.stringify(notifyIMState.config || { version: 1, targets: [] }));
+              var next = JSON.parse(JSON.stringify(beforeConfig));
+              if (!next.targets) { next.targets = []; }
+              next.targets = next.targets.filter(function (t) {
+                return !t || t.connector_id !== gatewayID;
+              });
+              prepared.bindings.forEach(function (binding) {
+                var chat = String(binding.chat || "").trim();
+                if (!chat) { return; }
+                next.targets.push({
+                  id: "mig-" + shortStableHash(gatewayID + "|" + chat),
+                  connector_id: gatewayID,
+                  label: (item.name || item.id) + " · " + chat,
+                  source: "gateway",
+                  scope: "all",
+                  kinds: prepared.kinds.slice(),
+                  enabled: true,
+                });
+              });
+              return apiJSON("/api/notify/im", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(next),
+              }).then(function (put) {
+                if (!put.res.ok) {
+                  throw new Error((put.body && put.body.error) || ("HTTP " + put.res.status));
+                }
+                notifyIMState.config = (put.body && put.body.config) || next;
+                if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
+                renderNotifyIMTargets();
+                syncConnectorIDOptions();
+                return { gatewayID: gatewayID, count: prepared.bindings.length };
+              });
+            });
+          return chain.catch(function (err) {
+            return rollbackConnectorMigration(node, item.id, gatewayID, beforeConfig).then(function () {
+              throw new Error(friendlyConnectorError(err));
+            });
+          });
+        },
+      });
+    }).then(function (res) {
+      if (!res.confirmed) { return; }
+      var result = res.result || {};
+      notify((resync ? "已重新同步" : "已迁移") + " " + (result.count || 0) + " 个 chat 到网关" +
+        (result.gatewayID ? "（" + result.gatewayID + "）" : "") +
+        "；节点本地通知已关闭。可在 Bot 通道点「测试」验证。", "ok");
+      loadConnectors(true);
+    }).catch(function (err) {
+      notify("迁移失败：" + friendlyConnectorError(err), "error");
+    });
+  }
+
+  function openConnectorTest(item) {
+    connectorTestState.id = item.id;
+    connectorTestState.name = item.name || item.id;
+    connectorTestState.busy = false;
+    var title = el("connector-test-title");
+    if (title) { title.textContent = "发送测试消息 · " + connectorTestState.name; }
+    var sub = el("connector-test-sub");
+    if (sub) { sub.textContent = "通过连接器 " + item.id + " 向指定 chat 发送一条测试消息，用于验证凭据与出站链路。"; }
+    var err = el("connector-test-error");
+    if (err) { err.hidden = true; err.textContent = ""; }
+    var chat = el("connector-test-chat");
+    var bindings = connectorBindingRows(item.id);
+    if (chat) { chat.value = bindings.length ? bindings[0].chat : ""; }
+    var text = el("connector-test-text");
+    if (text) { text.value = "这是一条来自控制台的测试消息。"; }
+    var send = el("connector-test-send");
+    if (send) { send.disabled = false; send.textContent = "发送"; }
+    openModal("connector-test-modal");
+  }
+
+  function sendConnectorTest() {
+    if (connectorTestState.busy) { return; }
+    var chat = (el("connector-test-chat") && el("connector-test-chat").value || "").trim();
+    var text = (el("connector-test-text") && el("connector-test-text").value || "").trim();
+    var errBox = el("connector-test-error");
+    if (!chat) {
+      if (errBox) { errBox.hidden = false; errBox.textContent = "目标会话 / 群 ID 必填。"; }
+      return;
+    }
+    connectorTestState.busy = true;
+    var send = el("connector-test-send");
+    if (send) { send.disabled = true; send.textContent = "发送中…"; }
+    if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+    apiJSON("/api/connectors/" + encodeURIComponent(connectorTestState.id) + "/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat: chat, text: text }),
+    }).then(function (r) {
+      connectorTestState.busy = false;
+      if (send) { send.disabled = false; send.textContent = "发送"; }
+      if (!r.res.ok) {
+        if (errBox) { errBox.hidden = false; errBox.textContent = "发送失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        return;
+      }
+      closeModal("connector-test-modal");
+      notify("测试消息已发送到 " + chat, "ok");
+    }).catch(function (err) {
+      connectorTestState.busy = false;
+      if (send) { send.disabled = false; send.textContent = "发送"; }
+      if (errBox) { errBox.hidden = false; errBox.textContent = "发送失败：" + (err && err.message ? err.message : err); }
+    });
+  }
+
+  function openConnectorLogs(item) {
+    connectorLogsState.id = item.id;
+    connectorLogsState.name = item.name || item.id;
+    connectorLogsState.entries = [];
+    connectorLogsState.stats = null;
+    var title = el("connector-logs-title");
+    if (title) { title.textContent = "连接器日志 · " + connectorLogsState.name; }
+    var sub = el("connector-logs-sub");
+    if (sub) { sub.textContent = "内存日志（重启即清空），最新在前，最多 100 条。"; }
+    var err = el("connector-logs-error");
+    if (err) { err.hidden = true; err.textContent = ""; }
+    renderConnectorLogs();
+    openModal("connector-logs-modal");
+    loadConnectorLogs(item.id);
+  }
+
+  function loadConnectorLogs(id) {
+    connectorLogsState.loading = true;
+    renderConnectorLogs();
+    apiJSON("/api/connectors/" + encodeURIComponent(id) + "/logs?limit=100").then(function (r) {
+      connectorLogsState.loading = false;
+      var errBox = el("connector-logs-error");
+      if (!r.res.ok) {
+        if (errBox) { errBox.hidden = false; errBox.textContent = "读取日志失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        renderConnectorLogs();
+        return;
+      }
+      if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+      connectorLogsState.entries = (r.body && r.body.entries) || [];
+      connectorLogsState.stats = (r.body && r.body.stats) || null;
+      renderConnectorLogs();
+    }).catch(function (err) {
+      connectorLogsState.loading = false;
+      var errBox = el("connector-logs-error");
+      if (errBox) { errBox.hidden = false; errBox.textContent = "读取日志失败：" + (err && err.message ? err.message : err); }
+      renderConnectorLogs();
+    });
+  }
+
+  function renderConnectorLogs() {
+    var statsHost = el("connector-logs-stats");
+    if (!statsHost) { return; }
+    statsHost.innerHTML = "";
+    var s = connectorLogsState.stats;
+    if (s) {
+      var bits = [
+        "入站 " + (s.inbound || 0),
+        "出站 " + (s.outbound || 0),
+        "错误 " + (s.errors || 0),
+        "去重跳过 " + (s.dedup_skipped || 0),
+        "队列满 " + (s.queue_full || 0),
+      ];
+      var line = document.createElement("p");
+      line.className = "connectors-hint";
+      line.textContent = bits.join(" · ") + (s.last_error ? " · 最近错误：" + s.last_error : "");
+      statsHost.appendChild(line);
+    }
+    var list = el("connector-logs-list");
+    if (!list) { return; }
+    list.innerHTML = "";
+    if (connectorLogsState.loading) {
+      var loading = document.createElement("p");
+      loading.className = "empty";
+      loading.textContent = "正在读取日志…";
+      list.appendChild(loading);
+      return;
+    }
+    if (!connectorLogsState.entries.length) {
+      var empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "暂无日志。连接器收到或发送消息后会在这里出现。";
+      list.appendChild(empty);
+      return;
+    }
+    connectorLogsState.entries.forEach(function (entry) {
+      var row = document.createElement("div");
+      row.className = "connector-log-row level-" + (entry.level || "info");
+      var time = document.createElement("span");
+      time.className = "connector-log-time";
+      time.textContent = entry.time ? new Date(entry.time).toLocaleString() : "";
+      var level = document.createElement("span");
+      level.className = "connector-log-level";
+      level.textContent = (entry.level || "info") + " / " + (entry.direction || "system");
+      var chat = document.createElement("span");
+      chat.className = "connector-log-chat";
+      chat.textContent = entry.chat || "";
+      var summary = document.createElement("span");
+      summary.className = "connector-log-summary";
+      summary.textContent = entry.summary || "";
+      row.appendChild(time); row.appendChild(level); row.appendChild(chat); row.appendChild(summary);
+      list.appendChild(row);
+    });
+  }
+
+  function connectorActionImage(payload) {
+    if (!payload) { return ""; }
+    var keys = ["qr_code_content", "qrcode_img_content", "qr_code_img", "qrcode_img_string", "qr_image", "image", "qr_url", "url"];
+    for (var i = 0; i < keys.length; i++) {
+      var value = payload[keys[i]];
+      if (typeof value !== "string" || !value.trim()) { continue; }
+      var s = value.trim();
+      if (/^data:image\//i.test(s) || /^https?:\/\//i.test(s)) { return s; }
+      if (keys[i] !== "url" && /^[A-Za-z0-9+/=\s]+$/.test(s) && s.length > 200) {
+        return "data:image/png;base64," + s.replace(/\s+/g, "");
+      }
+    }
+    return "";
+  }
+
+  function renderConnectorActionResult() {
+    var host = el("connector-action-body");
+    if (!host) { return; }
+    host.innerHTML = "";
+    var payload = connectorActionState.payload || {};
+    var img = connectorActionImage(payload);
+    if (img) {
+      var image = document.createElement("img");
+      image.className = "connector-action-qr";
+      image.alt = "二维码";
+      image.src = img;
+      host.appendChild(image);
+    }
+    var pre = document.createElement("pre");
+    pre.className = "connector-action-json";
+    try { pre.textContent = JSON.stringify(payload, null, 2); } catch (e) { pre.textContent = String(payload); }
+    host.appendChild(pre);
+    var loginID = payload.login_id;
+    if (loginID && connectorActionState.action === "start_login") {
+      var tools = document.createElement("div");
+      tools.className = "toolbar";
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn ghost sm";
+      btn.textContent = "查询登录状态";
+      btn.addEventListener("click", function () { connectorLoginStatus(connectorActionState.id, loginID, btn); });
+      tools.appendChild(btn);
+      host.appendChild(tools);
+    }
+  }
+
+  function openConnectorActionResult(item, action, payload) {
+    connectorActionState.id = item.id;
+    connectorActionState.name = item.name || item.id;
+    connectorActionState.action = action.key;
+    connectorActionState.payload = payload || {};
+    var title = el("connector-action-title");
+    if (title) { title.textContent = "通道动作 · " + (action.label || action.key); }
+    var sub = el("connector-action-sub");
+    if (sub) { sub.textContent = connectorActionState.name + " · " + action.key; }
+    var err = el("connector-action-error");
+    if (err) { err.hidden = true; err.textContent = ""; }
+    renderConnectorActionResult();
+    openModal("connector-action-modal");
+  }
+
+  function connectorLoginStatus(connectorID, loginID, btn) {
+    btn.disabled = true;
+    apiJSON("/api/connectors/" + encodeURIComponent(connectorID) + "/actions/login_status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ login_id: loginID }),
+    }).then(function (r) {
+      btn.disabled = false;
+      var errBox = el("connector-action-error");
+      if (!r.res.ok) {
+        if (errBox) { errBox.hidden = false; errBox.textContent = "查询失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)); }
+        return;
+      }
+      connectorActionState.payload = r.body || {};
+      renderConnectorActionResult();
+      if (r.body && (r.body.settings || r.body.secrets)) {
+        // 微信扫码确认会返回 settings/secrets 补丁：按 D4 两层模型回填实体。
+        apiJSON("/api/connectors/" + encodeURIComponent(connectorID), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ settings: r.body.settings || {}, secrets: r.body.secrets || {} }),
+        }).then(function (pr) {
+          if (!pr.res.ok) {
+            if (errBox) { errBox.hidden = false; errBox.textContent = "凭据回填失败：" + ((pr.body && pr.body.error) || ("HTTP " + pr.res.status)); }
+            return;
+          }
+          notify("扫码已确认，凭据已回填", "ok");
+          loadConnectors(true).then(function () { return loadConnectorBindings(); });
+        });
+      }
+    }).catch(function (err) {
+      btn.disabled = false;
+      var errBox = el("connector-action-error");
+      if (errBox) { errBox.hidden = false; errBox.textContent = "查询失败：" + (err && err.message ? err.message : err); }
+    });
+  }
+
+  /* ──────────── connectors: QR login (start_login → poll → refill) ─────────── */
+  // 与 aicli micro web（commands/web/js/connectors.js）同口径：
+  //   start_login → 渲染二维码（data:image 直出；链接走本机 /api/qr 编码）
+  //   → 每 2s 轮询 login_status（后端长轮询）→ confirmed/expired 停止
+  //   → confirmed 且 credential_ready 时把 settings/secrets 合并 PATCH 一次。
+  var connectorQRState = {
+    connectorID: "", name: "", actionKey: "start_login",
+    seq: 0, timer: null, loginID: "", content: "",
+    closed: false, payload: null, draft: false, refilled: false, busy: false,
+  };
+
+  function connectorHasQRAction(ps) {
+    var actions = (ps && ps.actions) || [];
+    return actions.some(function (a) { return a && a.kind === "qr"; });
+  }
+
+  function connectorFirstQRAction(ps) {
+    var actions = (ps && ps.actions) || [];
+    for (var i = 0; i < actions.length; i++) {
+      if (actions[i] && actions[i].kind === "qr") { return actions[i]; }
+    }
+    return null;
+  }
+
+  function connectorQRDirectImage(content) {
+    var text = (content || "").trim();
+    if (!text) { return false; }
+    if (/^data:image\//i.test(text)) { return true; }
+    return /^https?:\/\//i.test(text) && /\.(png|jpe?g|gif|webp|bmp|svg)([?#]|$)/i.test(text);
+  }
+
+  function connectorQRStatusText(status) {
+    switch (status) {
+      case "wait": return "等待扫码…";
+      case "scanned": return "已扫码，请在手机上确认…";
+      case "confirmed": return "已确认";
+      case "expired": return "二维码已过期，请点「重新获取二维码」";
+      default: return status || "正在获取二维码…";
+    }
+  }
+
+  function connectorQRShowError(text) {
+    var box = el("connector-qr-error");
+    if (!box) { return; }
+    if (!text) { box.hidden = true; box.textContent = ""; return; }
+    box.hidden = false;
+    box.textContent = text;
+  }
+
+  function stopConnectorQRPoll() {
+    if (connectorQRState.timer) {
+      clearTimeout(connectorQRState.timer);
+      connectorQRState.timer = null;
+    }
+  }
+
+  function scheduleConnectorQRPoll(delay) {
+    var st = connectorQRState;
+    if (!st || st.closed || !st.connectorID) { return; }
+    stopConnectorQRPoll();
+    st.timer = setTimeout(function () { pollConnectorQRLogin(st); }, delay);
+  }
+
+  function renderConnectorQR() {
+    var st = connectorQRState;
+    if (!st) { return; }
+    var status = st.payload && st.payload.status ? st.payload.status : "";
+    var statusEl = el("connector-qr-status");
+    if (statusEl) {
+      statusEl.textContent = connectorQRStatusText(status);
+      statusEl.setAttribute("data-status", status || "starting");
+    }
+    var content = (st.payload && st.payload.qr_code_content) || st.content || "";
+    st.content = content;
+    var wrap = el("connector-qr-image-wrap");
+    var img = el("connector-qr-image");
+    var linkWrap = el("connector-qr-link-wrap");
+    var link = el("connector-qr-link");
+    var copyBtn = el("connector-qr-copy");
+    if (content) {
+      if (wrap) { wrap.hidden = false; }
+      if (img) {
+        img.onerror = function () {
+          img.hidden = true;
+          if (wrap) { wrap.hidden = true; }
+          if (linkWrap) { linkWrap.hidden = false; }
+        };
+        img.onload = function () { img.hidden = false; if (wrap) { wrap.hidden = false; } };
+        img.src = connectorQRDirectImage(content) ? content : ("/api/qr?text=" + encodeURIComponent(content));
+        img.hidden = false;
+      }
+      if (link) { link.textContent = content; }
+      if (linkWrap) { linkWrap.hidden = connectorQRDirectImage(content); }
+      if (copyBtn) { copyBtn.hidden = connectorQRDirectImage(content); }
+    } else {
+      if (wrap) { wrap.hidden = true; }
+      if (linkWrap) { linkWrap.hidden = true; }
+      if (copyBtn) { copyBtn.hidden = true; }
+    }
+    var meta = el("connector-qr-meta");
+    if (meta) {
+      var bits = [];
+      if (st.payload && st.payload.expires_at) { bits.push("有效期至 " + st.payload.expires_at); }
+      if (st.payload && st.payload.refresh_count) { bits.push("已自动刷新 " + st.payload.refresh_count + " 次"); }
+      if (status === "confirmed" && st.payload && st.payload.credential_ready === false) { bits.push("等待凭据就绪"); }
+      meta.textContent = bits.join(" · ");
+      meta.hidden = !bits.length;
+    }
+  }
+
+  function startConnectorQRLogin() {
+    var st = connectorQRState;
+    if (!st || st.closed || !st.connectorID) { return; }
+    stopConnectorQRPoll();
+    var seq = ++st.seq;
+    st.payload = null;
+    st.loginID = "";
+    st.refilled = false;
+    connectorQRShowError("");
+    var statusEl = el("connector-qr-status");
+    if (statusEl) { statusEl.textContent = "正在获取二维码…"; statusEl.setAttribute("data-status", "starting"); }
+    var restart = el("connector-qr-restart");
+    if (restart) { restart.disabled = true; }
+    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/" + encodeURIComponent(st.actionKey), { method: "POST" }).then(function (r) {
+      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (restart) { restart.disabled = false; }
+      if (!r.res.ok) {
+        connectorQRShowError("获取二维码失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
+        return;
+      }
+      st.payload = r.body || {};
+      st.loginID = st.payload.login_id || "";
+      renderConnectorQR();
+      scheduleConnectorQRPoll(2000);
+    }).catch(function (err) {
+      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (restart) { restart.disabled = false; }
+      connectorQRShowError("获取二维码失败：" + (err && err.message ? err.message : err));
+    });
+  }
+
+  function pollConnectorQRLogin(st) {
+    if (!connectorQRState || connectorQRState !== st || st.closed || !st.loginID) { return; }
+    var expiresAt = st.payload && st.payload.expires_at ? Date.parse(st.payload.expires_at) : NaN;
+    if (!isNaN(expiresAt) && expiresAt <= Date.now()) {
+      st.payload = Object.assign({}, st.payload, { status: "expired" });
+      renderConnectorQR();
+      return;
+    }
+    var seq = st.seq;
+    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID) + "/actions/login_status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ login_id: st.loginID }),
+    }).then(function (r) {
+      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      if (!r.res.ok) {
+        // 400（登录会话不存在/已清理）重试无意义；其余（网络抖动）继续轮询。
+        if (r.res.status === 400) {
+          connectorQRShowError("轮询失败：" + ((r.body && r.body.error) || "登录会话已失效"));
+          return;
+        }
+        scheduleConnectorQRPoll(3000);
+        return;
+      }
+      st.payload = r.body || {};
+      renderConnectorQR();
+      var status = st.payload.status || "";
+      if (status === "confirmed") {
+        finishConnectorQRLogin(st);
+        return;
+      }
+      if (status === "expired") { return; }
+      scheduleConnectorQRPoll(2000);
+    }).catch(function () {
+      if (!connectorQRState || connectorQRState !== st || st.closed || seq !== st.seq) { return; }
+      scheduleConnectorQRPoll(3000);
+    });
+  }
+
+  function finishConnectorQRLogin(st) {
+    stopConnectorQRPoll();
+    var data = st.payload || {};
+    if (data.credential_ready !== true) {
+      notify("已确认登录，等待凭据就绪（可稍后重新打开查看）", "ok");
+      closeConnectorQRDialog();
+      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+      return;
+    }
+    st.busy = true;
+    var done = el("connector-qr-done");
+    if (done) { done.disabled = true; }
+    apiJSON("/api/connectors/" + encodeURIComponent(st.connectorID), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: data.settings || {}, secrets: data.secrets || {} }),
+    }).then(function (r) {
+      st.busy = false;
+      if (done) { done.disabled = false; }
+      if (!r.res.ok) {
+        connectorQRShowError("凭据回填失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)) + "（可稍后在编辑里手动填写）");
+        return;
+      }
+      st.refilled = true;
+      var result = r.body || {};
+      if (result.adopted && result.removed_id) {
+        st.connectorID = result.id || st.connectorID;
+        var superseded = result.superseded_account ? ("，原连接 " + result.superseded_account + " 已由微信解除") : "";
+        notify("扫码登录成功：识别为既有机器人 " + (result.id || "") + "（同一 owner），已更新连接" + superseded + "；临时 " + result.removed_id + " 已清理", "ok");
+      } else {
+        notify("扫码登录成功，凭据已回填", "ok");
+      }
+      closeConnectorQRDialog();
+      loadConnectors(true).then(function () { return loadConnectorBindings(); });
+    }).catch(function (err) {
+      st.busy = false;
+      if (done) { done.disabled = false; }
+      connectorQRShowError("凭据回填失败：" + (err && err.message ? err.message : err));
+    });
+  }
+
+  function openConnectorQRDialog(item, action, opts) {
+    opts = opts || {};
+    stopConnectorQRPoll();
+    connectorQRState = {
+      connectorID: item.id,
+      name: item.name || item.id,
+      actionKey: (action && action.key) || "start_login",
+      seq: 0, timer: null, loginID: "", content: "",
+      closed: false, payload: null,
+      draft: !!opts.draft, refilled: false, busy: false,
+    };
+    var title = el("connector-qr-title");
+    if (title) { title.textContent = "扫码登录 · " + connectorQRState.name; }
+    var sub = el("connector-qr-sub");
+    if (sub) { sub.textContent = (action && action.label) || "扫码登录"; }
+    connectorQRShowError("");
+    var statusEl = el("connector-qr-status");
+    if (statusEl) { statusEl.textContent = "正在获取二维码…"; statusEl.setAttribute("data-status", "starting"); }
+    var wrap = el("connector-qr-image-wrap"); if (wrap) { wrap.hidden = true; }
+    var img = el("connector-qr-image"); if (img) { img.removeAttribute("src"); img.hidden = true; }
+    var linkWrap = el("connector-qr-link-wrap"); if (linkWrap) { linkWrap.hidden = true; }
+    var meta = el("connector-qr-meta"); if (meta) { meta.hidden = true; meta.textContent = ""; }
+    var copyBtn = el("connector-qr-copy"); if (copyBtn) { copyBtn.hidden = true; }
+    var done = el("connector-qr-done"); if (done) { done.disabled = false; }
+    var restart = el("connector-qr-restart"); if (restart) { restart.disabled = false; }
+    openModal("connector-qr-modal");
+    startConnectorQRLogin();
+  }
+
+  function closeConnectorQRDialog() {
+    var st = connectorQRState;
+    if (!st) { closeModal("connector-qr-modal"); return; }
+    if (st.busy) { return; } // 凭据回填保存中拦截关闭
+    st.closed = true;
+    stopConnectorQRPoll();
+    // 新建扫码流在未确认且未回填时清理草稿连接器（与 micro web 同语义）；
+    // 已 confirmed 的实体即使 credential_ready=false 也保留，便于稍后重试。
+    var draftID = st.draft && !st.refilled &&
+      !(st.payload && st.payload.status === "confirmed") ? st.connectorID : "";
+    closeModal("connector-qr-modal");
+    if (draftID) {
+      apiJSON("/api/connectors/" + encodeURIComponent(draftID), { method: "DELETE" }).then(function () {
+        notify("已清理未完成的扫码连接器", "ok");
+        loadConnectors(true);
+      }).catch(function () { loadConnectors(true); });
+    }
+  }
+
+  // connectorGenerateID 与 micro web/React 同口径：<provider>-<base36 时间><4 随机>。
+  function connectorGenerateID(provider) {
+    var prefix = String(provider || "conn").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "conn";
+    var time = Date.now().toString(36);
+    var rand = Math.random().toString(36).slice(2, 6);
+    return prefix + "-" + time + rand;
+  }
+
+  function startConnectorQRFromEditor() {
+    var form = connectorForm;
+    if (!form) { return; }
+    var ps = connectorProviderSchemaOf(form);
+    var action = connectorFirstQRAction(ps);
+    if (!ps || !action) { notify("该通道不支持扫码登录", "error"); return; }
+    var errBox = el("connector-editor-error");
+
+    if (connectorEditing) {
+      var item = connectorEditing;
+      closeConnectorEditor();
+      openConnectorQRDialog(item, action, { draft: false });
+      return;
+    }
+
+    if (!(form.id || "").trim()) { form.id = connectorGenerateID(ps.provider); }
+    var errors = {};
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test((form.id || "").trim())) { errors.id = "连接器 ID 不合法"; }
+    (ps.fields || []).forEach(function (field) {
+      if (!field.required || field.type === "secret") { return; } // 扫码路径不要求先填密钥
+      if (!(form.values[field.key] || "").trim()) { errors[field.key] = (field.label || field.key) + " 为必填项"; }
+    });
+    if ((form.policyText || "").trim()) {
+      try { JSON.parse(form.policyText); } catch (e) { errors.policy = "策略不是合法 JSON：" + e.message; }
+    }
+    connectorFormErrors = errors;
+    renderConnectorEditorForm();
+    if (Object.keys(errors).length) {
+      if (errBox) { errBox.hidden = false; errBox.textContent = "请修正标红字段后再扫码。"; }
+      return;
+    }
+
+    var payload;
+    try {
+      payload = connectorBuildPayload(form, ps, true);
+      delete payload.secrets; // 凭据由扫码回填
+    } catch (e) {
+      connectorFormErrors.policy = e.message;
+      renderConnectorEditorForm();
+      return;
+    }
+    var saveBtn = el("connector-editor-save");
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "创建中…"; }
+    apiJSON("/api/connectors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (r) {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "创建连接器"; }
+      if (!r.res.ok) {
+        connectorFormErrors = connectorFieldErrorsFrom(r.body);
+        renderConnectorEditorForm();
+        if (errBox) {
+          errBox.hidden = false;
+          errBox.textContent = (r.body && (r.body.error || r.body.message)) || ("创建失败：HTTP " + r.res.status);
+        }
+        return;
+      }
+      var created = r.body || {};
+      if (!created.id) { created = { id: payload.id, name: payload.name, provider: ps.provider }; }
+      closeConnectorEditor();
+      notify("已创建扫码连接器 " + (created.id || payload.id), "ok");
+      openConnectorQRDialog(created, action, { draft: true });
+    }).catch(function (err) {
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "创建连接器"; }
+      if (errBox) { errBox.hidden = false; errBox.textContent = "创建失败：" + (err && err.message ? err.message : err); }
+    });
   }
 
   var eventsSubscribed = false;
@@ -852,6 +2558,9 @@
     source.addEventListener("error", function () {
       sseDropped = true;
       setConnBanner(true);
+      // SSE 断开也可能是 owner 会话过期（/api/events 受 RequireSession 保护）。
+      // 心跳会用一个轻量管理面请求复检，命中 401 就把用户送回登录页。
+      authHeartbeat();
     });
   }
 
@@ -972,8 +2681,28 @@
     }
   }
 
+  // 网关会话 URL 标识（#sessions?node=…&session=…）允许只带 session：从当前快照
+  // 反查它挂在哪个节点，这样任意来源的深链都能定位到同一张卡片。
+  function nodeIDForSession(sessionID) {
+    var items = allSessions(lastNodes);
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].session.session_id === sessionID) { return items[i].node.node_id; }
+    }
+    return "";
+  }
+
   function locateSession(nodeID, sessionID) {
-    if (!nodeID || !sessionID) { return; }
+    if (!sessionID) { return; }
+    if (!nodeID) { nodeID = nodeIDForSession(sessionID); }
+    if (!nodeID) {
+      // 快照里还没有这个会话（通知先于快照到达）：补拉一次后按 session 反查。
+      loadNodes().then(function () {
+        var resolved = nodeIDForSession(sessionID);
+        if (resolved) { locateSession(resolved, sessionID); return; }
+        notify("未在列表中找到该会话（可能已过期或已移除）", "error");
+      });
+      return;
+    }
     if (currentView() !== "sessions") {
       navigate("sessions");
       // hashchange 是异步的；立即 applyRoute，保证随后的滚动/聚焦发生在
@@ -2289,6 +4018,7 @@
       '<button class="btn ghost sm s-more" type="button" data-more aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>' +
       '<div class="s-menu" role="menu" aria-label="会话操作" hidden>' +
       '<button class="menu-item" type="button" role="menuitem" data-detail>详情</button>' +
+      '<button class="menu-item" type="button" role="menuitem" data-copy-link>复制链接</button>' +
       '<button class="menu-item" type="button" role="menuitem" data-web hidden>原版 Web</button>' +
       '<button class="menu-item" type="button" role="menuitem" data-window-open hidden title="在该节点本机的新终端窗口里打开此会话（带它当初的启动参数）">新终端</button>' +
       '<button class="menu-item" type="button" role="menuitem" data-window-resume hidden title="让该会话在节点本机重新跑起来（无窗口则新开一个）">恢复</button>' +
@@ -2382,6 +4112,12 @@
     card.querySelector("[data-detail]").addEventListener("click", function () {
       var it = card.__item;
       if (it) { openSessionDetail(it.node, it.session); }
+    });
+    // 网关会话 URL 标识：把这张卡片的规范化深链复制到剪贴板，便于贴到 IM /
+    // 工单里，点击后回到控制台并定位同一会话。
+    card.querySelector("[data-copy-link]").addEventListener("click", function () {
+      var it = card.__item;
+      if (it) { copyGatewaySessionLink(it.node, it.session); }
     });
     // 原版 Web 是明确的外部/旧版入口，和站内「打开会话」分开命名，避免
     // 两个都叫「打开」却走向不同页面。
@@ -2523,6 +4259,9 @@
     var canOpen = nodeHasWebUI(node);
     card.__item = item;
     card.setAttribute("data-draft-key", cardKey);
+    // URL 导航标识：卡片 DOM 上一直带着这张卡片的规范深链，事件条/外部脚本
+    // 都能据此生成可分享的网关会话 URL。
+    card.setAttribute("data-session-url", gatewaySessionLink(node.node_id, s.session_id));
     var expanded = !!expandedSessions[cardKey];
     card.classList.toggle("offline", !!node.stale);
     card.classList.toggle("expanded", expanded);
@@ -3924,6 +5663,44 @@
     return base + "?session=" + encodeURIComponent(sessionID || "");
   }
 
+  // 网关会话的规范 URL 标识：不区分节点类型，统一映射到控制台会话视图
+  // （#sessions?node=…&session=…）。通知点击、卡片「复制链接」与事件条共用同一
+  // 个深链，落地后由 applyHashParams() → locateSession() 聚焦对应卡片。
+  function gatewaySessionLink(nodeID, sessionID) {
+    var q = [];
+    if (nodeID) { q.push("node=" + encodeURIComponent(nodeID)); }
+    if (sessionID) { q.push("session=" + encodeURIComponent(sessionID)); }
+    return location.origin + location.pathname + "#sessions" + (q.length ? "?" + q.join("&") : "");
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (ok) { resolve(); } else { reject(new Error("clipboard unavailable")); }
+    });
+  }
+
+  function copyGatewaySessionLink(node, session) {
+    var link = gatewaySessionLink(node && node.node_id, session && session.session_id);
+    copyText(link).then(function () {
+      notify("已复制会话链接", "ok");
+    }).catch(function () {
+      notify("复制失败：" + link, "error");
+    });
+  }
+
   function sessionAccessText(node, session) {
     if (!node || node.stale) { return "离线快照，仅可查看详情"; }
     if (!nodeHasWebUI(node)) {
@@ -4155,6 +5932,11 @@
     if (modalIsOpen("session-modal")) { return el("session-modal"); }
     if (modalIsOpen("token-modal")) { return el("token-modal"); }
     if (modalIsOpen("mount-token-modal")) { return el("mount-token-modal"); }
+    if (modalIsOpen("connector-editor-modal")) { return el("connector-editor-modal"); }
+    if (modalIsOpen("connector-test-modal")) { return el("connector-test-modal"); }
+    if (modalIsOpen("connector-logs-modal")) { return el("connector-logs-modal"); }
+    if (modalIsOpen("connector-action-modal")) { return el("connector-action-modal"); }
+    if (modalIsOpen("connector-qr-modal")) { return el("connector-qr-modal"); }
     return null;
   }
 
@@ -6373,12 +8155,25 @@
   }
 
   setInterval(sendPresence, 30000);
+  // 会话心跳：静置在某个视图（SSE 静默失败、页面不再发其它请求）时，owner cookie
+  // 过期也能在一分钟内把用户送回登录页。命中 401 由 api() 集中处理；无 presence
+  // 目标时 sendPresence 不发请求，所以这里用 /api/devices 做独立的轻量复检。
+  var authHeartbeatAt = 0;
+  function authHeartbeat() {
+    if (!authedState || document.hidden) { return; }
+    var now = Date.now();
+    if (now - authHeartbeatAt < 45000) { return; }
+    authHeartbeatAt = now;
+    api("/api/devices").catch(function () {});
+  }
+  setInterval(authHeartbeat, 60000);
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       releasePresence();
       return;
     }
     sendPresence();
+    authHeartbeat();
     // Returning to the tab: re-sync the notification toggle with the browser's
     // actual permission/subscription (a prompt may have been answered while
     // the page was hidden).
@@ -6490,13 +8285,11 @@
       session_id: session.session_id,
       attention: session.attention,
     };
-    // 点击深链：aicli 节点必须是 /n/{node}/web/?session=…（route allowlist 只
-    // 放行 /web），runtime-server 才是 /n/{node}/。缺 url 时桌面壳会自行拼
-    // /n/{node}/?session=… 并被反代 403（"route not allowed"），所以这里显式
-    // 带上控制台同源的绝对 URL。
-    try {
-      extra.url = new URL(sessionOpenTarget(node, session.session_id), location.origin).toString();
-    } catch (err) { /* URL 构造失败时退回桌面壳的 node/session 兜底拼装 */ }
+    // 点击深链：跳回网关控制台并定位该会话（#sessions?node=…&session=…），与
+    // Web Push / ntfy 的 click 落点一致；节点原版 Web 仍在卡片菜单里提供，
+    // 不再作为通知的默认落点（缺 url 时桌面壳会自行拼节点 URL 并可能 403）。
+    try { extra.url = gatewaySessionLink(node.node_id, session.session_id); }
+    catch (err) { /* URL 构造失败时退回桌面壳的 node/session 兜底拼装 */ }
     sendNativeNotification(
       nodeDisplayName(node) + " · " + sessionLabelOf(session),
       attentionLabel(session.attention),
@@ -8398,6 +10191,15 @@
       sessionFilterKind = "running";
       syncFilterControls();
     }
+    // 网关会话 URL 标识：通知点击 / 复制链接落到 #sessions?node=…&session=…
+    // （node 可省略，按 session 反查）。快照未就绪或尚未登录时先记下目标，
+    // 由 flushPendingLocate() 在 loadNodes() 成功后补做定位。
+    var nodeParam = params.get("node") || "";
+    var sessionParam = params.get("session") || "";
+    if (sessionParam) {
+      pendingLocate = { nodeID: nodeParam, sessionID: sessionParam };
+      if (authedState) { flushPendingLocate(); }
+    }
   }
 
   /* ─────────────────────── PWA install hint ─────────────────── */
@@ -8509,6 +10311,576 @@
   }
   notifyRefreshDirty();
 
+  /* ── Bot 通道（网关自持 IM 目标，docs/gateway/18 §6.1）─────────────
+     与上方通知策略是两份独立配置：策略决定"发不发"，Bot 目标决定"发到
+     哪个 IM 会话"。未配置目标时后端不注册通道，行为与以往一致。 */
+
+  var notifyIMState = { config: null, meta: null, busy: false };
+
+  function notifyIMRequest(path, options) {
+    var opts = options || {};
+    // 走 api() 而不是裸 fetch：IM 目标读写同样受 owner 会话保护，过期时也要
+    // 回到登录页，而不是把 401 当成"配置读取失败"。
+    return api(path, opts).then(function (resp) {
+      return resp.text().then(function (text) {
+        var data = null;
+        if (text) {
+          try { data = JSON.parse(text); } catch (e) { data = null; }
+        }
+        if (!resp.ok) {
+          var msg = (data && (data.error || data.message)) || ("HTTP " + resp.status);
+          throw new Error(msg);
+        }
+        return data;
+      });
+    });
+  }
+
+  function notifyIMShowError(msg) {
+    var box = el("notify-im-error");
+    if (!box) { return; }
+    if (!msg) {
+      box.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    box.hidden = false;
+    box.textContent = msg;
+  }
+
+  function notifyIMEmptyConfig() {
+    return { version: 1, targets: [] };
+  }
+
+  function notifyIMTargets() {
+    if (!notifyIMState.config || !notifyIMState.config.targets) { return []; }
+    return notifyIMState.config.targets;
+  }
+
+  function notifyIMScopeValuesField() {
+    var scope = el("notify-im-scope");
+    var field = el("notify-im-scope-values-field");
+    if (!scope || !field) { return; }
+    field.hidden = scope.value === "all";
+  }
+
+  // populateNotifyIMNodes 把在线节点填进「节点 Bot」下拉（离线快照不进入）。
+  function populateNotifyIMNodes() {
+    var sel = el("notify-im-node");
+    if (!sel) { return; }
+    var current = sel.value;
+    sel.innerHTML = "";
+    var nodes = (lastNodes || []).filter(function (n) { return n && !n.stale && n.node_id; });
+    nodes.forEach(function (n) {
+      var opt = document.createElement("option");
+      opt.value = n.node_id;
+      opt.textContent = (nodeDisplayName(n) || n.node_id) + " · " + (n.kind || "agent");
+      sel.appendChild(opt);
+    });
+    if (!nodes.length) {
+      var none = document.createElement("option");
+      none.value = "";
+      none.textContent = "（暂无在线节点）";
+      sel.appendChild(none);
+    } else if (current) {
+      sel.value = current;
+    }
+  }
+
+  // IM 目标的事件类型：多选复选框，值域与「哪些消息触发通知」同源
+  // （/api/notify/policy 的 meta.kinds），不再要求用户手写逗号分隔字符串。
+  var notifyIMKindsSignature = "";
+
+  function notifyKindLabel(kind) {
+    var want = notifyNormalizeKind(kind);
+    var specs = notifyPolicyKindsMeta();
+    for (var i = 0; i < specs.length; i++) {
+      if (notifyNormalizeKind(specs[i].kind) === want) { return specs[i].label; }
+    }
+    return kind;
+  }
+
+  function notifyIMCollectKinds() {
+    var out = [];
+    var host = el("notify-im-kinds");
+    if (!host) { return out; }
+    host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
+      if (input.checked) { out.push(input.getAttribute("data-notify-kind")); }
+    });
+    return out;
+  }
+
+  function notifyIMSyncKindsHint() {
+    var hint = el("notify-im-kinds-hint");
+    if (!hint) { return; }
+    var source = el("notify-im-source");
+    var isNode = !!source && source.value === "node";
+    var picked = notifyIMCollectKinds();
+    if (picked.length) {
+      hint.textContent = "已选：" + picked.map(notifyKindLabel).join("、") + "。";
+      return;
+    }
+    // 空选的语义由后端决定：网关 Bot = 全部事件；节点 Bot = 只发节点本地
+    // hook 不发的那两类（避免 approval/question/completed 重复）。
+    hint.textContent = isNode
+      ? "未勾选 = 节点 Bot 默认只发「出错 / 等待中」（避免与节点本地通知重复）。"
+      : "未勾选 = 全部事件。";
+  }
+
+  function notifyIMClearKinds() {
+    var host = el("notify-im-kinds");
+    if (host) {
+      host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
+        input.checked = false;
+      });
+    }
+    notifyIMSyncKindsHint();
+  }
+
+  // renderNotifyIMKinds 按当前 kinds 元数据补齐复选框；元数据不变时只刷新说明，
+  // 不会清掉用户已勾选的项（切换来源、重新打开页面都安全）。
+  function renderNotifyIMKinds() {
+    var host = el("notify-im-kinds");
+    if (!host) { return; }
+    var specs = notifyPolicyKindsMeta();
+    var signature = specs.map(function (spec) { return spec.kind; }).join("|");
+    if (signature !== notifyIMKindsSignature) {
+      host.textContent = "";
+      specs.forEach(function (spec) {
+        var label = document.createElement("label");
+        label.className = "notify-kind";
+        var input = document.createElement("input");
+        input.type = "checkbox";
+        input.setAttribute("data-notify-kind", spec.kind);
+        input.addEventListener("change", notifyIMSyncKindsHint);
+        var copy = document.createElement("span");
+        copy.className = "notify-kind-copy";
+        var title = document.createElement("strong");
+        title.textContent = spec.label;
+        copy.appendChild(title);
+        label.appendChild(input);
+        label.appendChild(copy);
+        host.appendChild(label);
+      });
+      notifyIMKindsSignature = signature;
+    }
+    notifyIMSyncKindsHint();
+  }
+
+  // notifyIMSourceField 切换「网关 Bot / 节点 Bot」的可见字段与说明。
+  function notifyIMSourceField() {
+    var source = el("notify-im-source");
+    if (!source) { return; }
+    var isNode = source.value === "node";
+    var conn = el("notify-im-gateway-connector-field");
+    var chat = el("notify-im-gateway-chat-field");
+    var node = el("notify-im-node-field");
+    if (conn) { conn.hidden = isNode; }
+    if (chat) { chat.hidden = isNode; }
+    if (node) { node.hidden = !isNode; }
+    renderNotifyIMKinds();
+    var hint = el("notify-im-source-hint");
+    if (hint) {
+      hint.textContent = isNode
+        ? "节点 Bot（兼容旧部署）：委托目标节点，用该节点自己的 bot 按本地绑定发送；通知依赖节点在线与节点策略。QQ/微信建议改用连接器页的「复制到网关」。测试需要 scope=sessions 且至少一个会话。"
+        : "网关 Bot：由本网关连接器直接发到指定 chat；密钥只在本网关。";
+    }
+    if (isNode) { populateNotifyIMNodes(); }
+  }
+
+  function renderNotifyIMTargets() {
+    var host = el("notify-im-targets");
+    if (!host) { return; }
+    // 保留输入焦点：整表重建会打断正在编辑的表单，因此只在渲染后恢复。
+    host.textContent = "";
+    var targets = notifyIMTargets();
+    var empty = el("notify-im-empty");
+    if (empty) { empty.hidden = targets.length > 0; }
+    var count = el("notify-im-count");
+    if (count) {
+      count.hidden = targets.length === 0;
+      count.textContent = targets.length + " 个目标";
+    }
+    targets.forEach(function (target, index) {
+      var row = document.createElement("div");
+      row.className = "notify-im-row";
+      row.setAttribute("data-connector-id", target.connector_id || "");
+
+      var main = document.createElement("div");
+      main.className = "notify-im-main";
+
+      var title = document.createElement("div");
+      title.className = "notify-im-title";
+      title.textContent = target.label || target.id;
+      main.appendChild(title);
+
+      var sub = document.createElement("div");
+      sub.className = "notify-im-sub";
+      var scopeText = target.scope === "nodes"
+        ? "指定节点：" + (target.nodes || []).join(", ")
+        : target.scope === "sessions"
+          ? "指定会话：" + (target.sessions || []).join(", ")
+          : "全部节点";
+      var source = (target.source || "gateway").toLowerCase();
+      var kindText = Array.isArray(target.kinds) && target.kinds.length
+        ? " · " + target.kinds.map(notifyKindLabel).join("、")
+        : "";
+      if (source === "node") {
+        sub.textContent = "节点 " + (target.node_id || "?") + " → 该节点本地 bot" + kindText + " · " + scopeText;
+      } else {
+        sub.textContent = "网关 " + (target.connector_id || "?") + " → " + (target.chat || "?") + kindText + " · " + scopeText;
+      }
+      main.appendChild(sub);
+      row.appendChild(main);
+
+      var tools = document.createElement("div");
+      tools.className = "toolbar";
+
+      var enabled = document.createElement("label");
+      enabled.className = "check-line";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      // 缺省视为启用（与后端 enabled==null → true 一致）。
+      box.checked = target.enabled !== false;
+      box.addEventListener("change", function () {
+        target.enabled = box.checked;
+      });
+      enabled.appendChild(box);
+      enabled.appendChild(document.createTextNode(" 启用"));
+      tools.appendChild(enabled);
+
+      // 「配置」打开该目标自己的配置面（来源/连接/范围/事件类型）。
+      var configBtn = document.createElement("button");
+      configBtn.type = "button";
+      configBtn.className = "btn ghost sm";
+      configBtn.textContent = "配置";
+      configBtn.addEventListener("click", function () { openNotifyIMEditor(target); });
+      tools.appendChild(configBtn);
+
+      var testBtn = document.createElement("button");
+      testBtn.type = "button";
+      testBtn.className = "btn ghost sm";
+      testBtn.textContent = "测试";
+      testBtn.addEventListener("click", function () {
+        if (notifyIMState.busy) { return; }
+        notifyIMState.busy = true;
+        testBtn.disabled = true;
+        notifyIMShowError("");
+        notifyIMRequest("/api/notify/im/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // 带上完整 target：草稿（尚未保存）也能直接测试。
+          body: JSON.stringify({ target_id: target.id, target: target })
+        }).then(function () {
+          notify("已发送测试消息：" + (target.label || target.id), "ok");
+        }).catch(function (err) {
+          notifyIMShowError("测试失败：" + err.message);
+        }).then(function () {
+          notifyIMState.busy = false;
+          testBtn.disabled = false;
+        });
+      });
+      tools.appendChild(testBtn);
+
+      var delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "btn ghost sm";
+      delBtn.textContent = "移除";
+      delBtn.addEventListener("click", function () {
+        notifyIMState.config.targets.splice(index, 1);
+        renderNotifyIMTargets();
+      });
+      tools.appendChild(delBtn);
+
+      row.appendChild(tools);
+      host.appendChild(row);
+    });
+  }
+
+  function loadNotifyIM() {
+    return notifyIMRequest("/api/notify/im").then(function (data) {
+      notifyIMState.config = (data && data.config) || notifyIMEmptyConfig();
+      if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
+      notifyIMState.meta = (data && data.meta) || null;
+      notifyIMShowError(data && data.warning ? ("配置未生效：" + data.warning) : "");
+      notifyIMSourceField();
+      populateNotifyIMNodes();
+      // 配置从网关重载后，编辑器里可能还停在一个已被替换/删除的目标上：收起它。
+      closeNotifyIMEditor();
+      renderNotifyIMTargets();
+      ensureGatewayConnectorOptions();
+    }).catch(function (err) {
+      notifyIMShowError("加载 Bot 通道配置失败：" + err.message);
+    });
+  }
+
+  // ── Bot 目标编辑器 ────────────────────────────────────────────
+  // 全局「哪些消息触发通知」与单个目标的收件范围是两个层级：这里只编辑「这一个
+  // 目标」的来源/连接/范围/事件类型，不把 per-chat 的 kinds 混进全局设置面。
+  var notifyIMEditingId = null;
+
+  function setNotifyIMKindsSelection(kinds) {
+    var host = el("notify-im-kinds");
+    if (!host) { return; }
+    var want = {};
+    (kinds || []).forEach(function (kind) { want[notifyNormalizeKind(kind)] = true; });
+    host.querySelectorAll("input[data-notify-kind]").forEach(function (input) {
+      input.checked = !!want[notifyNormalizeKind(input.getAttribute("data-notify-kind"))];
+    });
+    notifyIMSyncKindsHint();
+  }
+
+  function notifyIMEditorReset() {
+    var source = el("notify-im-source");
+    if (source) { source.value = "gateway"; }
+    var connector = el("notify-im-connector");
+    if (connector) { connector.value = ""; }
+    var chat = el("notify-im-chat");
+    if (chat) { chat.value = ""; }
+    var node = el("notify-im-node");
+    if (node) { node.value = ""; }
+    var label = el("notify-im-label");
+    if (label) { label.value = ""; }
+    var scope = el("notify-im-scope");
+    if (scope) { scope.value = "all"; }
+    var values = el("notify-im-scope-values");
+    if (values) { values.value = ""; }
+    notifyIMClearKinds();
+    notifyIMScopeValuesField();
+    notifyIMSourceField();
+  }
+
+  function closeNotifyIMEditor() {
+    var box = el("notify-im-editor");
+    if (box) { box.hidden = true; }
+    notifyIMEditingId = null;
+    notifyIMEditorReset();
+  }
+
+  function openNotifyIMEditor(target) {
+    var box = el("notify-im-editor");
+    if (!box) { return; }
+    notifyIMEditingId = target ? target.id : null;
+    notifyIMEditorReset();
+    var title = el("notify-im-editor-title");
+    if (title) {
+      title.textContent = target ? ("配置目标：" + (target.label || target.id)) : "添加 Bot 目标";
+    }
+    var mode = el("notify-im-editor-mode");
+    if (mode) {
+      mode.textContent = target ? "编辑" : "新增";
+      mode.hidden = false;
+    }
+    if (target) {
+      var isNode = (target.source || "gateway").toLowerCase() === "node";
+      var source = el("notify-im-source");
+      if (source) { source.value = isNode ? "node" : "gateway"; }
+      notifyIMSourceField();
+      if (isNode) {
+        populateNotifyIMNodes();
+        var node = el("notify-im-node");
+        if (node) { node.value = target.node_id || ""; }
+      } else {
+        var chat = el("notify-im-chat");
+        if (chat) { chat.value = target.chat || ""; }
+        // 连接器下拉是懒加载的：选项到齐后再回填，避免编辑时被清空。
+        ensureGatewayConnectorOptions().then(function () {
+          var connector = el("notify-im-connector");
+          if (connector && target.connector_id) { connector.value = target.connector_id; }
+        });
+      }
+      var label = el("notify-im-label");
+      if (label) { label.value = target.label || ""; }
+      var scope = el("notify-im-scope");
+      if (scope) { scope.value = target.scope || "all"; }
+      notifyIMScopeValuesField();
+      var values = el("notify-im-scope-values");
+      if (values) {
+        var list = target.scope === "nodes" ? (target.nodes || [])
+          : target.scope === "sessions" ? (target.sessions || []) : [];
+        values.value = list.join(", ");
+      }
+      setNotifyIMKindsSelection(target.kinds);
+    }
+    box.hidden = false;
+    notifyIMShowError("");
+    if (box.scrollIntoView) { box.scrollIntoView({ block: "nearest" }); }
+  }
+
+  // buildNotifyIMTargetFromEditor 读取编辑器字段并校验；失败返回 null（错误已
+  // 显示）。空选事件类型 = 该来源的默认语义（网关=全部，节点=error/waiting）。
+  function buildNotifyIMTargetFromEditor() {
+    var sourceEl = el("notify-im-source");
+    var connector = el("notify-im-connector");
+    var chat = el("notify-im-chat");
+    var node = el("notify-im-node");
+    var label = el("notify-im-label");
+    var scope = el("notify-im-scope");
+    var values = el("notify-im-scope-values");
+    if (!sourceEl || !scope) { return null; }
+    var source = sourceEl.value === "node" ? "node" : "gateway";
+    var scopeValue = scope.value || "all";
+    var target = {
+      source: source,
+      label: (label && label.value ? label.value.trim() : ""),
+      scope: scopeValue,
+    };
+    if (source === "node") {
+      var nodeID = (node && node.value ? node.value.trim() : "");
+      if (!nodeID) {
+        notifyIMShowError("请选择目标节点（节点 Bot 需要在线节点 ID）。");
+        return null;
+      }
+      target.node_id = nodeID;
+    } else {
+      var connectorID = (connector && connector.value ? connector.value.trim() : "");
+      var chatID = (chat && chat.value ? chat.value.trim() : "");
+      if (!connectorID || !chatID) {
+        notifyIMShowError("连接器 ID 与会话 ID 都是必填项。");
+        return null;
+      }
+      target.connector_id = connectorID;
+      target.chat = chatID;
+    }
+    var kinds = notifyIMCollectKinds();
+    if (kinds.length) { target.kinds = kinds; }
+    if (scopeValue !== "all") {
+      var list = (values && values.value ? values.value : "")
+        .split(",").map(function (s) { return s.trim(); })
+        .filter(function (s) { return s !== ""; });
+      if (list.length === 0) {
+        notifyIMShowError("选择「指定节点 / 会话」时必须填写范围明细。");
+        return null;
+      }
+      if (scopeValue === "nodes") { target.nodes = list; } else { target.sessions = list; }
+    }
+    notifyIMShowError("");
+    return target;
+  }
+
+  // applyNotifyIMEditor 把编辑器写回目标列表；网关配置仍需「保存到网关」提交。
+  function applyNotifyIMEditor() {
+    var built = buildNotifyIMTargetFromEditor();
+    if (!built) { return; }
+    var list = notifyIMTargets();
+    if (notifyIMEditingId != null) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === notifyIMEditingId) {
+          built.id = notifyIMEditingId;
+          // 启用开关是列表上的快捷操作，编辑保存不能把它复位。
+          built.enabled = list[i].enabled !== false;
+          list[i] = built;
+          break;
+        }
+      }
+    } else {
+      built.id = "t-" + Date.now().toString(36);
+      list.push(built);
+    }
+    closeNotifyIMEditor();
+    renderNotifyIMTargets();
+  }
+
+  function saveNotifyIM() {
+    if (notifyIMState.busy) { return; }
+    notifyIMState.busy = true;
+    notifyIMShowError("");
+    var payload = { version: 1, targets: notifyIMTargets() };
+    notifyIMRequest("/api/notify/im", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (data) {
+      notifyIMState.config = (data && data.config) || payload;
+      if (!notifyIMState.config.targets) { notifyIMState.config.targets = []; }
+      renderNotifyIMTargets();
+      notify("Bot 通道配置已保存", "ok");
+    }).catch(function (err) {
+      notifyIMShowError("保存失败：" + err.message);
+    }).then(function () {
+      notifyIMState.busy = false;
+    });
+  }
+
+  var notifyIMAddBtn = el("notify-im-add");
+  if (notifyIMAddBtn) { notifyIMAddBtn.addEventListener("click", function () { openNotifyIMEditor(null); }); }
+  var notifyIMApplyBtn = el("notify-im-apply");
+  if (notifyIMApplyBtn) { notifyIMApplyBtn.addEventListener("click", applyNotifyIMEditor); }
+  var notifyIMCancelBtn = el("notify-im-cancel");
+  if (notifyIMCancelBtn) { notifyIMCancelBtn.addEventListener("click", closeNotifyIMEditor); }
+  var notifyIMSaveBtn = el("notify-im-save");
+  if (notifyIMSaveBtn) { notifyIMSaveBtn.addEventListener("click", saveNotifyIM); }
+  var notifyIMReloadBtn = el("notify-im-reload");
+  if (notifyIMReloadBtn) { notifyIMReloadBtn.addEventListener("click", loadNotifyIM); }
+  var notifyIMScopeSelect = el("notify-im-scope");
+  if (notifyIMScopeSelect) { notifyIMScopeSelect.addEventListener("change", notifyIMScopeValuesField); }
+  var notifyIMSourceSelect = el("notify-im-source");
+  if (notifyIMSourceSelect) { notifyIMSourceSelect.addEventListener("change", notifyIMSourceField); }
+  if (el("notify-im-targets")) { loadNotifyIM(); }
+
+  /* ─────────────── connectors: management wiring ─────────────── */
+
+  var connectorsCreateBtn = el("connectors-create");
+  if (connectorsCreateBtn) {
+    connectorsCreateBtn.addEventListener("click", function () { openConnectorEditor(null); });
+  }
+
+  if (el("connector-editor-close")) {
+    el("connector-editor-close").addEventListener("click", closeConnectorEditor);
+  }
+  if (el("connector-editor-cancel")) {
+    el("connector-editor-cancel").addEventListener("click", closeConnectorEditor);
+  }
+  if (el("connector-editor-save")) {
+    el("connector-editor-save").addEventListener("click", saveConnectorEditor);
+  }
+
+  var connectorTestClose = function () { closeModal("connector-test-modal"); };
+  if (el("connector-test-close")) { el("connector-test-close").addEventListener("click", connectorTestClose); }
+  if (el("connector-test-cancel")) { el("connector-test-cancel").addEventListener("click", connectorTestClose); }
+  if (el("connector-test-send")) { el("connector-test-send").addEventListener("click", sendConnectorTest); }
+  if (el("connector-test-chat")) {
+    el("connector-test-chat").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); sendConnectorTest(); }
+    });
+  }
+
+  var connectorLogsClose = function () { closeModal("connector-logs-modal"); };
+  if (el("connector-logs-close")) { el("connector-logs-close").addEventListener("click", connectorLogsClose); }
+  if (el("connector-logs-refresh")) {
+    el("connector-logs-refresh").addEventListener("click", function () {
+      if (connectorLogsState.id) { loadConnectorLogs(connectorLogsState.id); }
+    });
+  }
+
+  var connectorActionClose = function () { closeModal("connector-action-modal"); };
+  if (el("connector-action-close")) { el("connector-action-close").addEventListener("click", connectorActionClose); }
+  if (el("connector-action-done")) { el("connector-action-done").addEventListener("click", connectorActionClose); }
+
+  var connectorQRClose = function () { closeConnectorQRDialog(); };
+  if (el("connector-qr-close")) { el("connector-qr-close").addEventListener("click", connectorQRClose); }
+  if (el("connector-qr-done")) { el("connector-qr-done").addEventListener("click", connectorQRClose); }
+  if (el("connector-qr-restart")) { el("connector-qr-restart").addEventListener("click", startConnectorQRLogin); }
+  if (el("connector-qr-copy")) {
+    el("connector-qr-copy").addEventListener("click", function () {
+      copyText(connectorQRState.content || "", el("connector-qr-copy"));
+    });
+  }
+
+  function wireConnectorScrim(id, closeFn) {
+    var modal = el(id);
+    if (!modal) { return; }
+    modal.addEventListener("click", function (e) { if (e.target === modal) { closeFn(); } });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !modal.hidden) { closeFn(); }
+    });
+  }
+  wireConnectorScrim("connector-editor-modal", closeConnectorEditor);
+  wireConnectorScrim("connector-test-modal", connectorTestClose);
+  wireConnectorScrim("connector-logs-modal", connectorLogsClose);
+  wireConnectorScrim("connector-action-modal", connectorActionClose);
+  wireConnectorScrim("connector-qr-modal", connectorQRClose);
+
   /* ─────────────────────── boot ──────────────────────────────── */
 
   if ("serviceWorker" in navigator) {
@@ -8519,11 +10891,16 @@
       if (data.type === "push-received") {
         notify("已收到推送：" + (data.title || "通知") + (data.body ? " · " + data.body : ""), "ok");
       }
+      // 通知点击：service worker 复用了已打开的标签页，把会话深链交给页面
+      // 就地导航（而不是新开窗口或整页重载）。
+      if (data.type === "aicli-gateway-open" && data.url) {
+        openGatewayDeepLink(data.url);
+      }
     });
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=78").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=94").catch(function () {});
     });
   }
 

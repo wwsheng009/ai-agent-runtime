@@ -4,12 +4,12 @@
 // Cache-busting version: bump together with the ?v= query in index.html and
 // the register() URL in app.js on every release (Cloudflare edge-caches
 // *.js/*.css for 4h, so a new URL is what makes the update land immediately).
-const CACHE = "aicli-gateway-shell-v78";
+const CACHE = "aicli-gateway-shell-v94";
 const SHELL = [
   "./",
   "./index.html",
-  "./app.js?v=78",
-  "./style.css?v=78",
+  "./app.js?v=94",
+  "./style.css?v=94",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",
@@ -158,15 +158,23 @@ self.addEventListener("pushsubscriptionchange", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const target = (event.notification.data && event.notification.data.url) || "./";
+  const absolute = new URL(target, self.location.origin).toString();
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // 深链带 hash（#sessions?…），不能再用 client.url.indexOf(target) 精确匹配：
+      // 已打开的控制台停留在别处也会被漏判。改为聚焦同源窗口并把深链交给页面
+      // 就地导航，保留登录态、草稿与滚动位置。
       for (const client of clients) {
-        if (client.url.indexOf(target) !== -1 && "focus" in client) {
-          return client.focus();
+        if (client.url.indexOf(self.location.origin) === 0 && "focus" in client) {
+          const focused = client.focus();
+          if ("postMessage" in client) {
+            client.postMessage({ type: "aicli-gateway-open", url: absolute });
+          }
+          return focused;
         }
       }
       if (self.clients.openWindow) {
-        return self.clients.openWindow(target);
+        return self.clients.openWindow(absolute);
       }
     }),
   );
