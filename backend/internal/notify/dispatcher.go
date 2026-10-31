@@ -50,6 +50,12 @@ type Event struct {
 	// 宿主在通知正文里带了会话专属内容（如「已完成」附带最后一条助手回复）时
 	// 必须置位——Coalesce 的合并摘要只保留标题，会把正文内容丢掉。
 	SkipCoalesce bool
+	// Detail 是宿主补充的「会话专属正文」（如「已完成」附带的最后一条助手
+	// 回复，docs/gateway/08 §5.1）。它与 Notification.Body 分开存放是因为
+	// IM 通道会用投影文案（"✅ 会话回合已完成" 等）**替换** Body——若只渲染
+	// Body，这段会话专属内容就会整体丢失（2026-10-31 真机复盘）。通道渲染
+	// 时应在投影/正文之后追加 Detail；空 = 无附加内容（既有行为不变）。
+	Detail string
 }
 
 // EventFor 组装请求并按登记表解析优先级（未登记回落 PriorityOf）。

@@ -166,6 +166,9 @@ type pendingNotification struct {
 	// 助手回复，docs/gateway/08 §5.1）。这类事件必须绕过合并窗口逐条投递：
 	// Coalesce 的合并摘要只保留标题，会把正文内容丢掉。
 	attachDetail bool
+	// detail 是同一段会话专属内容的原文，随事件透传给通道（Event.Detail）。
+	// IM 通道会用投影文案替换 Body，只靠 Body 会丢掉这段内容（见 §5.1）。
+	detail string
 }
 
 // observe diffs the current attention states against the previous snapshot and
@@ -245,6 +248,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				note:         note,
 				eventID:      eventID,
 				attachDetail: detail != "",
+				detail:       detail,
 			}
 			if p.imMainChannel != nil && p.imMainChannel(node.NodeID, sess.SessionID, attention) {
 				item.imMain = true
@@ -558,6 +562,9 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 			ev.IMPresenceExempt = p.imPresenceExempt(item.nodeID, item.sessionID, item.attention)
 			// 正文带会话专属内容时不进合并窗口（Coalesce 只保留标题）。
 			ev.SkipCoalesce = item.attachDetail
+			// 会话专属正文另走 Detail：IM 通道会用投影文案替换 Body，
+			// 只靠 Body 会把「已完成」附带的内容丢掉（docs/gateway/08 §5.1）。
+			ev.Detail = item.detail
 			// Target 是通道专用寻址提示（docs/gateway/18 §5.3）：IM 通道用它
 			// 定位会话做投影映射与 scope=sessions 命中。与 Session 同值，但
 			// 语义分层——Session 供偏好解析，Target 供投递寻址。

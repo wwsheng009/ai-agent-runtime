@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=99";
+import { S, G } from "./runtime.js?v=100";
 
 Object.assign(G, {
   renderInbox: renderInbox,

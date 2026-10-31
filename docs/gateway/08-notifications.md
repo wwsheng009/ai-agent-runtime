@@ -177,6 +177,12 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
   窗口内多个会话完成时各发各的，内容不会互相覆盖。
 - **各通道各自再截断**：IM 按 provider 上限（并保留末尾 URL），Web Push 受约 4KB
   负载限制——200 字符的默认值对推送是安全值，需要更长内容时优先用 IM 直达。
+- **IM 必须按 `Event.Detail` 渲染，不能只渲染 `Notification.Body`**：IM 通道会用
+  **投影文案**（`completed` → "✅ 会话回合已完成"，见 `AttentionNoticeForProjection`）
+  *替换* `Body`。内容若只拼进 `Body`，QQ/微信上就只剩那一行、助手回复整体消失
+  （2026-10-31 真机复盘：策略已开、正文已算，IM 侧却看不到）。因此宿主把内容同时
+  放进 `notify.Event.Detail`，`channels.IM.messageText` 在投影/正文之后追加它，
+  并用 `Contains` 判定避免宿主已拼进 `Body` 时重复。
 - 内容取自节点 `SESSION_UPDATE` 的 `last_message` / `last_message_role`（agent 侧已
   截断到 2000 runes）；网关不额外拉取会话正文（§6「不重复渲染正文」原则不变）。
 - 非 `global` 层级设这两个字段会被 API 拒绝（400）：它描述"通知内容口径"，不是按

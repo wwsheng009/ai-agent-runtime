@@ -464,6 +464,17 @@ func (c *IM) messageText(ev notify.Event, limit int) string {
 			body = t
 		}
 	}
+	// 会话专属正文（如「已完成」附带的最后一条助手回复，docs/gateway/08 §5.1）
+	// 必须显式追加：上面的投影文案**替换**了 Body，只渲染 Body 会把这段内容丢掉
+	//（2026-10-31 真机复盘：策略已开、事件 Detail 已算、IM 侧却看不到正文）。
+	// 投影未命中时 Body 本身就含该内容（宿主已拼进正文），Contains 判定避免重复。
+	if detail := strings.TrimSpace(ev.Detail); detail != "" && !strings.Contains(body, detail) {
+		if body == "" {
+			body = detail
+		} else {
+			body += "\n" + detail
+		}
+	}
 	text := head
 	switch {
 	case text == "":
