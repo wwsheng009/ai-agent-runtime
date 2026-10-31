@@ -292,7 +292,7 @@ M4 删除了 `cmd/aicli-envd-bridge` 并同步了 `Makefile`，但漏改 `.githu
 | envd 专属工具（`mkdir`/`remove`/`move`/`host_metrics`/`watch_dir`/`pty_*`） | 保持后端自有（无共享核对应物） | 同上 |
 | 执行腿 | `envd_access.go` 已**接线**（不再是"已就绪未接线"） | S6 |
 
-S6 的行为口径（有意保留，方向已钉进 e2e）：引擎统一 walker（不再按目标机是否装 rg 分叉；rg 优先为独立待决步骤 S6b）；`one_file_system` 与 `sort=accessed/created` 由静默忽略改为点名拒绝；glob 的 `*.go` 语义收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA（不擅自去配置文件取秘密）。（2026-10-31 复核：**ssh 面**已用当前工作树二进制真机 14/14 通过，见 §8.8 补记；**envd 面**仍卡在同一处——`ENVD_ACCESS_TOKEN` 在目标机 `/etc/envd/envd.env`（600 root-only），`n9e` 无读权且 sudo 需密码，`/files`、`/metrics`、`Process/List` 一律 401。）
+S6 的行为口径（有意保留，方向已钉进 e2e）：引擎统一 walker（不再按目标机是否装 rg 分叉；rg 优先为独立待决步骤 S6b）；`one_file_system` 与 `sort=accessed/created` 由静默忽略改为点名拒绝；glob 的 `*.go` 语义收敛为"搜索根下一层"（深用 `**/*.go`）；分页取代旧的字节截断。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA（不擅自去配置文件取秘密）。（2026-10-31 复核：**ssh 面**已用当前工作树二进制真机 14/14 通过，见 §8.8 补记；**envd 面**同日随后补齐——经用户提供的 `sudo` 口令取令牌与 CA（均未回显；探针与验证产物已清理）：seam 门 8 PASS / 1 FAIL（唯一红=链接保真 F2）、金丝雀 A/B 各 23/23；安全回归 F1 已修（`bb4479fa`）。F2（线上无链接词汇，follow 语义不可信）与 F3（大目录 glob 撞 20s 预算、如实提示）待决/记录于 seam 方案 S6 实施记。）
 
 > 说明：§8.1–§8.10 为本计划的执行记录（含实测结果与偏差）；验收门 1–7 全部关闭（门 6 由 §8.7 真机活测满足）。
 

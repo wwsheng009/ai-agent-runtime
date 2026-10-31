@@ -775,6 +775,8 @@ socket 早停仅作日志证据，不作断言。
 
 **验证**：离线门（`envd_core_integration_test.go`）+ stub 端到端与单元钉（新增/改写 6 条 e2e + 2 条生产 runtime 单元钉）全绿；4 个可编译变异逐个红 → 逐字节还原；Windows 整包与 WSL（剥两条宿主 shell 依赖红）均通过。真机门（`scripts/envd_seam_access_verify.go`）**仍待跑**——需目标机令牌与 CA。
 
+**真机复跑（2026-10-31）**：seam 门 8 PASS / 1 FAIL（唯一红=链接保真 F2）；金丝雀 A/B 各 23/23；安全回归 F1（共享核读路径缺目标用户可读性闸门）已由 `bb4479fa` 修复并双态复验。F2 的结论对本方案尤其重要：线上 `Stat`/`ListDir` 无链接词汇，`Access.Lstat` 的"path itself"承诺在 envd 上无法兑现，follow 语义与环保护不可信——属 §4/§7 的偿还范围外新债，修法待决。
+
 ---
 
 ## 附录 A：本文数字的复现命令

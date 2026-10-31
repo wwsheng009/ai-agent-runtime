@@ -187,7 +187,7 @@ S1–S5 期间两条路都**不能动**：任何提前切换都是把工具面�
 | S5e ✅ | **路径运算随目标（同类缺陷的第二、三、四处）**：① ignore 子系统——规则候选名、祖先链、scope 的 `Dir/Clean` 全是宿主语义，Windows 客户端上问的是 `\srv\.gitignore`，目标机的 `.gitignore` **静默失效**（页面多出被排除的文件、无报错）；② `handler.go` 的 `ignore_file`/`pattern_file` **anchor 判定**——`filepath.IsAbs("/srv/work/x")` 在 Windows 上是假的，调用方点名的绝对路径被拼成 `/srv/work/\srv\work\srv\work\custom.ignore` 并被告知"读不到"（**首个用户可见的失败**）；③ `ripgrep_engine.go` 四处（glob 候选、`baseDir`、`--files` 模式、`resolveRipgrepPath`）——`FromSlash+IsAbs+Join` 组合把 rg 输出的斜杠路径重新拼成宿主拼法。补齐 `toolcore.{DirTargetPath,CleanTargetPath,RelTargetPath,TargetSeparator,IsAbsTargetPath,NormalizeTargetPath}`（`path` 包没有 `Rel`，POSIX 版自带实现），换掉三处文件的相应运算——`handler.go` 与 `ripgrep_engine.go` 改完都**不再需要 `path/filepath`**（编译器直接报 unused） | toolcore/access.go（family+测试）、searchcore/{grep_ignore.go,handler.go,ripgrep_engine.go}、searchcore/seam_walk_test.go | os.* 与 walker 均不变 | 把三处文件的调用换回 `filepath.*` 即撤销 |
 | S5f ✅ | **跨包盲区：核经被调用的 helper 读宿主**（比拼写更重的一类）。`viewcore` 的拼写修复经 `internal/pathrepair.FindSpellingMatches` 直接 `os.ReadDir` 读**本机**目录；守卫按包计数**看不见它**，于是 viewcore 一边显示 0 宿主读、一边真实地在读本机。改法：`FindSpellingMatches` 与 `HealSpelling` 接收 accessor，经 seam 列目录；候选拼写也走目标方言（`DirTargetPath`/`JoinTargetPath`）。新增守卫 `TestSpellingRepairReadsThroughTheSeam` 直接扫 `internal/pathrepair`（**先写、先红**：实测 1 处），并在 viewcore 基线的注释里写明这第二类盲区与其真正的看门人 | pathrepair/pathrepair.go（去 `os`）、viewcore/{spelling.go,handler.go}、driftguard/driftguard_test.go、viewcore/access_seam_test.go、toolkit/tools/path_spelling_test.go（9 处调用点各加两个实参，断言语义未动） | **pathrepair os.\* 1→0**；viewcore 仍 0，但现在是真的 | 把 accessor 参数换回即撤销 |
 | S5g ✅ | **跨包盲区的系统化（S5f 的收尾）**：把扫描从"核自己"扩到**整条可达闭包**——`go list -deps` 取三核非测试传递闭包（12 个本地包），逐包按守卫两张表同口径词法扫描：除 `localio`（唯一允许）外**零**宿主读。固化为 `TestCoreDependencyClosureDoesNotReadTheHost`：测试内 BFS 复现闭包（**不 shell 出去调 toolchain**——那是环境依赖，不是守卫），BFS 与 `go list -deps` 逐包对拍一致（含"平台特异文件不造成超集"），集合**写死**——新依赖必须显式登记，登记点就是评审点。`driftguard` 新增 `HostCallCountsShallow`（**不递归子包**：递归会把 `localio` 的调用记到 seam 包账上，扫得越宽结论越假） | driftguard/driftguard.go、driftguard/driftguard_test.go | 核内棘轮无变化（本步不含核内改动；守的是依赖侧） | 删测试函数即撤销 |
-| S6 ✅ | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误保留：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。落地：`remotetools/envd_core.go`（新）——三个工具用与 ssh/http **同一份 schema**（grep 那 480 行参数表从 `registry.go` 逐字节搬进 `search_schemas.go`（新），两后端同调）；runtime 的 `FileAccess()=NewEnvdAccess(be.client)`、`Paths()` 复用既有 `be.resolvePath`/`workspaceRelative`（workdir 锚点/词法关押/目标侧 canonicalize/canonical 复核一字未动）、`Output()`/`CaptureLimit()` 复用同一折叠与 `Limits` 预算；`envdLs`/`envdGlob`/`envdGrep` 与 `find`/`rg-or-grep` 脚本、引擎 marker 一并退役。**引擎取 walker-only**：不再按"目标机装没装 rg"分叉（同一目标面在每台机器上语义一致、ignore 读目标机自己的规则、可翻页）；rg 优先留作独立步骤（见执行腿笔记 §6）。**能力方向逐项核过**：老调用 `path`+`pattern` 在 5 条 e2e 实跑；增加=分页/ignore/排序/glob 过滤/workdir；两处**用户可见的语义变化**：`*.go` 收敛为"搜索根下一层"（深用 `**/*.go`）、`one_file_system` 由静默忽略变点名拒绝；`sort=accessed/created` 同形拒绝。**真机门未跑**（待换发令牌，见 §2 安全待办） | `remotetools/{envd_core.go(新), search_schemas.go(新), envd_backend.go, envd_tools.go, registry.go}` + 测试夹具与 5 条 e2e | **删代码**：脚本工具、解析器、stub 死仿真全退役 | 整步可撤：`buildEnvDRegistry` 里删去 `envdSharedCoreTools` 调用即回到全脚本面 |
+| S6 ✅ | **把 envd 的脚本文件工具换成"共享核 + `FileAccess()`"**（勘误保留：原写"退役 `Searcher` 拦截"是把 ssh/http 的机制错记到 envd 头上；envd 从不经过 `searchcore` handler）。落地：`remotetools/envd_core.go`（新）——三个工具用与 ssh/http **同一份 schema**（grep 那 480 行参数表从 `registry.go` 逐字节搬进 `search_schemas.go`（新），两后端同调）；runtime 的 `FileAccess()` 经目标用户可读性闸门包装 `envdGuardedAccess`（2026-10-31 真机泄漏后修复）、`Paths()` 复用既有 `be.resolvePath`/`workspaceRelative`（workdir 锚点/词法关押/目标侧 canonicalize/canonical 复核一字未动）、`Output()`/`CaptureLimit()` 复用同一折叠与 `Limits` 预算；`envdLs`/`envdGlob`/`envdGrep` 与 `find`/`rg-or-grep` 脚本、引擎 marker 一并退役。**引擎取 walker-only**：不再按"目标机装没装 rg"分叉（同一目标面在每台机器上语义一致、ignore 读目标机自己的规则、可翻页）；rg 优先留作独立步骤（见执行腿笔记 §6）。**能力方向逐项核过**：老调用 `path`+`pattern` 在 5 条 e2e 实跑；增加=分页/ignore/排序/glob 过滤/workdir；两处**用户可见的语义变化**：`*.go` 收敛为"搜索根下一层"（深用 `**/*.go`）、`one_file_system` 由静默忽略变点名拒绝；`sort=accessed/created` 同形拒绝。**真机门已跑（2026-10-31）**：seam 门 8 PASS / 1 FAIL（唯一红=链接保真 F2）、金丝雀 A/B 各 23/23、F1（共享核读路径闸门，安全）已修（`bb4479fa`），见实施记 | `remotetools/{envd_core.go(新), search_schemas.go(新), envd_backend.go, envd_tools.go, registry.go}` + 测试夹具与 5 条 e2e | **删代码**：脚本工具、解析器、stub 死仿真全退役 | 整步可撤：`buildEnvDRegistry` 里删去 `envdSharedCoreTools` 调用即回到全脚本面 |
 
 每步验收门（与既有纪律逐条对齐）：
 1. 既有 `searchcore` 单测**一字不改**通过；
@@ -458,8 +458,7 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
 
 **证据**：Windows——build 全仓、`remotetools` 整包 92.0s 全绿、`toolcore/...` + `driftguard` +
 `pathrepair` + `cmd` 全绿（除下述上游既有红）；WSL——`remotetools` 整包 PASS（`-test.skip` 剥掉
-下面两条宿主依赖红）。**真机门未跑**：`scripts/envd_seam_access_verify.go` 需 `AICLI_ENVD_TOKEN`，
-与"换发令牌"安全待办冲突（不去配置文件取秘密），如实保留为接线后的第一件事。
+下面两条宿主依赖红）。**真机门已跑（2026-10-31，n9e@172.18.3.238）**：经用户口令 `sudo` 取令牌与 CA（均未回显；探针文件与验证产物已清理）。结果与两条真发现见下；ssh 面另以当前工作树二进制复核 14/14（见收编方案 §8.8 补记）。
 
 **上游既有红（本轮实测，均与本次改动无关，未代修）**：
 
@@ -483,6 +482,24 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
     `README.md:2: …`。与前几条同族（第 6/25 条：夹具/断言必须让被测改动成为唯一变量），但这次变量
     是**断言的宽松度**：单值输出一律精确/`TrimSpace` 相等，并给生产 runtime 补单元钉，不把"能不能
     渲染错"赌在 e2e 的字符串包含上。
+
+**真机复跑记录（2026-10-31，n9e@172.18.3.238，envd 0.2.11）**：
+
+- **F1（安全回归，已修，提交 `bb4479fa`）**：共享核读路径缺目标用户可读性闸门——0600 root
+  金丝雀在 workspace 内被 `grep` 读出，而同文件 `view` 已被 `readGuarded` 拒绝（相对提权在
+  搜索面复现）。修复：`targetCannotRead` 抽为共享判决 + `envdGuardedAccess` 传输侧包装
+  （见该提交）；证据：离线 e2e（含变异反向验证：闸门置空后金丝雀内容当场出现）+ 真机金丝雀
+  A/B 各 23/23（0644 可见 → view 成功且 grep 命中，证明走查真的到达；0600 → view 拒绝且
+  grep 不返回）。修复前后同调用对照：`grep /home/n9e leakcanary` 修复前命中泄漏、修复后
+  `empty_result=true` 且无 `timed_out`（走查完成、内容被正确跳过）。
+- **F2（链接保真，未修，待决）**：线上没有链接词汇——`Stat`/`ListDir` 对符号链接一律回
+  跟随后的类型（link→file 报 FILE、link→dir 报 DIRECTORY、悬空报空类型），`symlink_target` 恒空。
+  `envd_access.go` 的 Lstat/EvalLinkPath 假设被真机证伪（此前只有假目标证明过），follow 的
+  "拒绝下钻/环路保护"在 envd 上不可信；源码注释已加 WARNING。修法待决：daemon fork 侧报
+  类型+目标，或父目录 ListDir 旁路；seam 门该探针保持红以示警。
+- **F3（成本现实，记录）**：`glob` 在 `/home/n9e` 级目录撞 20s 搜索预算并如实提示（"未完成、
+  收窄重试"）；同树上 `grep` 因早停通常可行。可读性探针只在"mode 显示可能拒"时触发、按调用
+  按路径缓存，但大目录走查的 RPC 成本仍是可见的现实。
 
 ### Q4 `sort=accessed` / `sort=created` 在远端不可表示（S3 实施时新发现）
 
