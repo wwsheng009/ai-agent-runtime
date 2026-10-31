@@ -12,7 +12,7 @@
 |----|------|
 | 是什么 | 网关自带的 hub 视图：跨设备**会话聚合 + 切换 + 打开**，设备/令牌管理，连接与审计状态 |
 | 不是什么 | 不是又一个完整工作台（不做文件/Git/MCP/技能/分析的全套 UI——那些在**被代理的会话视图**里已有） |
-| 技术范式 | 与 `micro web client` 同源：`//go:embed` 静态资源、`index.html` + `style.css` + `app.js` + `js/*.js`（ES 模块）、**零构建步骤** |
+| 技术范式 | 与 `micro web client` 同源：`//go:embed` 静态资源、`index.html` + `style.css` + 单个 `app.js` 产物；源码按功能域拆在 `console-src/*.js`，拼装产物见 §7.1 |
 | 首期不选 `frontend/` | React/Vite 工作台面向"单 runtime-server 全功能管理"，体积/构建/依赖与网关"轻量 hub"目标不匹配；且它需要 `VITE_API_BASE_URL` 指向后端，与网关的反向代理模型不同 |
 
 **与 `frontend/` 的关系**：二者共存、职责不同。`frontend/` 是 `runtime-server` 的完整工作台（可经网关
@@ -28,7 +28,7 @@
 | `go:embed` 目录 | `backend/cmd/aicli/commands/web_page.go:15` `//go:embed web` | `internal/gateway/console/console/` 用 `//go:embed console` 嵌入 |
 | 单 handler 伺服静态资源 | `HandleChatWebPage`（`web_page.go:23`）：按扩展名给 `Content-Type`、拒绝 `..`/绝对路径、`index.html` 走 `no-cache` | 同构实现，增加 CSP 与 owner Cookie 引导 |
 | 内联引导脚本 | `chatWebAuthFetchWrapperScript`（`web_page.go:63`）在 ES 模块前注入令牌包装 | 控制台改为：注入 `window.__GATEWAY__` 配置 + CSRF 双提交引导（**不注入本机令牌**） |
-| 原生 ES 模块 | `web/js/*.js`（sessions/composer/sse/stream/markdown/files/git/mcp/skills/analysis…） | `console/js/*.js`（auth/sessions/nodes/devices/iframe/sse/notify/mobile） |
+| 原生 ES 模块 | `web/js/*.js`（sessions/composer/sse/stream/markdown/files/git/mcp/skills/analysis…） | `console-src/*.js`（按功能域拆分；拼装为单文件 `console/app.js`，见 §7.1） |
 | SSE 客户端独立处理 | `web/js/sse.js`（EventSource 无法设头，单独拼 URL） | 控制台不直连会话 SSE（由 iframe 内的微前端负责）；控制台自身只订阅**节点/会话状态 SSE** |
 | h2c 连接预算 | `pprof.go:505` `newChatWebH2CHandler(...)` | 网关用 TLS 下的 HTTP/2（或前置明文 h2c），同一动机 |
 | 缓存策略 | `index.html` `no-cache`；页面资源 `no-cache, no-store` | 控制台外壳可缓存（PWA），但 `index.html` 与 `/api/*` 不缓存 |
@@ -379,25 +379,42 @@
 ### 7.1 目录布局
 
 ```text
-internal/gateway/console/
-├── console.go              # //go:embed console；伺服 handler（参考 HandleChatWebPage）
-├── console/                # 静态资源（零构建，直接编辑后 go build 生效）
+backend/cmd/gateway/
+├── console.go                   # //go:embed console；伺服 handler（参考 HandleChatWebPage）
+├── console/                     # 静态资源（go:embed 的服务产物）
 │   ├── index.html
 │   ├── style.css
-│   ├── app.js              # 引导 + 路由
+│   ├── app.js                   # ★ 生成产物：由 console-src/ 片段拼装，勿直接编辑
+│   ├── sw.js                    # service worker（缓存外壳）
 │   ├── manifest.webmanifest
-│   ├── sw.js               # service worker（缓存外壳）
-│   └── js/
-│       ├── auth.js         # 登录/登出/会话过期
-│       ├── api.js          # 管理 API 封装（含 CSRF 头）
-│       ├── nodes.js        # 设备分组渲染
-│       ├── sessions.js     # 会话列表/过滤/卡片
-│       ├── view.js         # 会话视图 iframe 生命周期
-│       ├── events.js       # 控制台自身 SSE（节点/会话状态）
-│       ├── notify.js       # 通知/PWA 安装引导
-│       └── mobile.js       # 视口/键盘/抽屉
-└── console_test.go         # 静态资源伺服 / 路径穿越 / 外壳资产契约（版本号一致 + 会话面板）测试
+│   └── icon.svg / *.png
+├── console-src/                 # 源码片段：按功能域拆分（24 个），非运行时模块
+│   ├── README.md                # 拆分规则 / 重建命令 / 新增片段的约束
+│   ├── manifest.json            # 拼装顺序（唯一权威）
+│   ├── 00-state-api.js          # 状态 + api/apiJSON + 401 集中回登录 + toast
+│   ├── 05-ui-basics.js … 20-data-loading.js
+│   ├── 30-connectors.js … 32-connectors-qr.js
+│   ├── 40-helpers.js … 95-notify.js
+│   └── 96-theme.js … zz-boot.js
+├── console_assets_test.go       # 资产契约测试（版本号一致 + 拆分产物一致 + 关键钩子）
+└── console_test.go
 ```
+
+**app.js 是生成产物（源拆分，产物单文件）**：控制台历史上是单文件 IIFE，已增长到约
+10.9k 行 / 460 KB，无法 review。现按功能域拆成 `console-src/*.js` 片段，由
+`scripts/build-gateway-console.mjs` 依 `manifest.json` 顺序拼回**逐字节相同**的单文件
+`console/app.js`。之所以不在运行时多文件：`index.html` 的 `./app.js?v=N`、`sw.js` 的
+`CACHE`/`SHELL` 与 `TestConsoleAssetVersionIsConsistent` 共同构成版本契约，改多文件会
+同时动缓存策略与预缓存清单；本次目标是**可维护性**，不引入运行时加载次序风险。
+
+```sh
+node scripts/build-gateway-console.mjs          # 片段 -> app.js（或 make gateway-console）
+node scripts/build-gateway-console.mjs --check  # 校验二者一致（或 make gateway-console-check）
+```
+
+`TestConsoleAppMatchesSplitSources` 把「片段拼装 == app.js」钉成断言：只改 app.js、或
+改了片段忘记重建，都会失败（两个方向都兜住）。片段必须从**顶层语句边界**开始/结束
+（顶层语句缩进 2 空格、括号深度回到 0），细节见 `console-src/README.md`。
 
 ### 7.2 伺服 handler 要点（照搬 micro web 的成熟做法）
 

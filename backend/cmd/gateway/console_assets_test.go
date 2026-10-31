@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -277,5 +280,48 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 		if !strings.Contains(string(css), want) {
 			t.Fatalf("style.css missing %s", want)
 		}
+	}
+}
+
+// console/app.js 是 console-src/ 片段按 manifest.json 拼装的单文件产物
+// （go:embed 的入口仍必须是单文件，见 console-src/README.md）。直接改 app.js，
+// 或者改了片段却忘记重建，都会让两者漂移——这里把它钉成显式失败，避免
+// 「源码改了、线上还是旧逻辑」这种最难查的回归。
+func TestConsoleAppMatchesSplitSources(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("console-src", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read console-src/manifest.json: %v", err)
+	}
+	var manifest struct {
+		Generated string   `json:"generated"`
+		Files     []string `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("parse console-src/manifest.json: %v", err)
+	}
+	if manifest.Generated != "console/app.js" {
+		t.Fatalf("manifest.generated = %q, want console/app.js", manifest.Generated)
+	}
+	if len(manifest.Files) < 10 {
+		t.Fatalf("manifest lists %d fragments; expected the feature split", len(manifest.Files))
+	}
+	want := "(function () {\n"
+	for _, name := range manifest.Files {
+		body, err := os.ReadFile(filepath.Join("console-src", name))
+		if err != nil {
+			t.Fatalf("read console-src/%s: %v", name, err)
+		}
+		if len(bytes.TrimSpace(body)) == 0 {
+			t.Fatalf("console-src/%s is empty", name)
+		}
+		want += string(body)
+	}
+	want += "})();\n"
+	got, err := os.ReadFile(filepath.Join("console", "app.js"))
+	if err != nil {
+		t.Fatalf("read console/app.js: %v", err)
+	}
+	if string(got) != want {
+		t.Fatal("console/app.js drifted from console-src/; run: node scripts/build-gateway-console.mjs")
 	}
 }

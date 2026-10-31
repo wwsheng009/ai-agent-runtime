@@ -1,0 +1,29 @@
+{
+  "generated": "console/app.js",
+  "files": [
+    "00-state-api.js",
+    "05-ui-basics.js",
+    "10-router.js",
+    "20-data-loading.js",
+    "30-connectors.js",
+    "31-connectors-manage.js",
+    "32-connectors-qr.js",
+    "40-helpers.js",
+    "50-sessions.js",
+    "60-markdown.js",
+    "70-nodes.js",
+    "80-mounts.js",
+    "85-logs.js",
+    "90-session-view.js",
+    "91-chat.js",
+    "92-chat-approvals.js",
+    "93-chat-statusbar.js",
+    "94-chat-collapse.js",
+    "95-notify.js",
+    "96-theme.js",
+    "97-wiring.js",
+    "98-notify-im.js",
+    "99-connectors-wiring.js",
+    "zz-boot.js"
+  ]
+}
