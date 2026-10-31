@@ -17,6 +17,13 @@ type DigestRequest struct {
 	AfterSeq int64
 	// Limit caps the number of items injected (unresolved_digest_limit).
 	Limit int
+	// MaxChars caps the runes of the injected Text (digest_max_chars). The item
+	// cap alone is not a context budget: long reasons/details multiplied by the
+	// item count still handed the parent tens of kilobytes every turn. Rows are
+	// dropped from the lowest-priority tail until the rendering fits; the
+	// durable rows stay reachable through subagent_status / supervision
+	// snapshot. 0 keeps the shipped default (DefaultConfig().DigestMaxChars).
+	MaxChars int
 	// IncludeResolvedSince injects a compact list of items resolved after
 	// AfterSeq when true.
 	IncludeResolvedSince bool
@@ -100,6 +107,11 @@ type Digest struct {
 	StaleSubjects         int          `json:"stale_subjects,omitempty"`
 	Truncated             bool         `json:"truncated,omitempty"`
 	Items                 []DigestItem `json:"items,omitempty"`
+	// RepeatSuppressed counts rows withheld from this digest because the
+	// parent had already been shown them and nothing beyond bookkeeping
+	// remained (see repeatInjectionSuppressed). They stay durable and visible
+	// through subagent_status / supervision_snapshot.
+	RepeatSuppressed int `json:"repeat_suppressed,omitempty"`
 	// NextSeq is the cursor for supervision_snapshot(after_seq=...).
 	NextSeq int64 `json:"next_seq,omitempty"`
 	// Progress is the opt-in progress rollup (P0-B). Empty when the caller wired
@@ -222,6 +234,19 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 		if n.DecisionState == DecisionAcknowledged {
 			continue
 		}
+		// Context budget: a row the parent already saw and that offers nothing
+		// beyond bookkeeping (inspect/acknowledge/defer) must not be re-sent
+		// every turn — a long-lived session's unacknowledged warning backlog
+		// was re-injecting the same slice until the prompt grew with the
+		// backlog instead of with the news. The durable row stays (snapshot
+		// and tools keep listing it; counters below keep counting it); it just
+		// stops reappearing. Critical rows and rows that still carry a real
+		// decision keep reappearing until acknowledged — the exact rule the
+		// delivery doctrine above states for seen rows.
+		if repeatInjectionSuppressed(n, evaluator.EvaluateAllowedActions(n)) {
+			digest.RepeatSuppressed++
+			continue
+		}
 		if !item.Resolved || req.IncludeResolvedSince {
 			items = append(items, item)
 		}
@@ -254,7 +279,24 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 	// counters, notification ids, allowed-action vocabularies) for /debug and
 	// the supervision tools, which is where machine handles belong.
 	digest.DiagnosticsText = formatDigestText(digest)
+
+	// Only the model-facing Text carries the hard context budget: after the
+	// item cap, the lowest-priority tail rows are dropped until the rendering
+	// fits MaxChars. The loop is bounded by len(digest.Items), which Limit
+	// already capped. DiagnosticsText above keeps the full capped list.
+	//
+	// (Rows stay durable either way; the tools reach them by scope, not by
+	// re-reading this digest.)
+	maxChars := req.MaxChars
+	if maxChars <= 0 {
+		maxChars = defaultDigestMaxChars
+	}
 	digest.Text = formatDigestBriefText(digest)
+	for len(digest.Items) > 0 && len([]rune(digest.Text)) > maxChars {
+		digest.Truncated = true
+		digest.Items = digest.Items[:len(digest.Items)-1]
+		digest.Text = formatDigestBriefText(digest)
+	}
 	return digest, nil
 }
 
@@ -289,6 +331,51 @@ func itemPriority(item DigestItem) int {
 }
 
 const defaultDigestLimit = 50
+
+// defaultDigestMaxChars mirrors DefaultConfig().DigestMaxChars: the shipped
+// rune budget for the injected brief text when a request does not set one.
+const defaultDigestMaxChars = 4000
+
+// repeatInjectionSuppressed reports whether a notification the parent has
+// already been shown should be withheld from this digest.
+//
+// Rows without a real decision left (only inspect/acknowledge/defer) are
+// one-shot: the model saw them once, the durable row keeps its state and the
+// tools keep listing it, but every further preflight would only repeat the
+// same sentence. Critical rows and rows carrying a control decision
+// (cancel/close/retry/reassign/extend_deadline/takeover/cancel_subtree) keep
+// reappearing until acknowledged or acted on. A deferred row is an explicit
+// "show me later": its re-entry contract wins over the one-shot rule and it
+// keeps reappearing after its deadline until acknowledged. (Delivery marking
+// is monotonic — an already-seen row is never re-stamped — so there is no
+// reliable "shown after the deadline" signal to key a one-shot here; the
+// explicit-defer population is tiny, so this exemption cannot refill the
+// context budget.)
+func repeatInjectionSuppressed(n Notification, allowed []string) bool {
+	if n.DeliveryState != DeliveryDelivered && n.DeliveryState != DeliverySeen {
+		return false
+	}
+	if n.Severity == SeverityCritical || hasControlAction(allowed) {
+		return false
+	}
+	if n.DeferUntil != nil {
+		return false
+	}
+	return true
+}
+
+// hasControlAction reports whether an announced action set carries a decision
+// beyond the bookkeeping trio (inspect / acknowledge / defer).
+func hasControlAction(allowed []string) bool {
+	for _, action := range allowed {
+		switch ActionKind(action) {
+		case ActionInspect, ActionAcknowledge, ActionDefer:
+		default:
+			return true
+		}
+	}
+	return false
+}
 
 // formatDigestBriefText renders the parent-facing block: what happened, the
 // business payload, and (only on rows that need a decision) the one handle the

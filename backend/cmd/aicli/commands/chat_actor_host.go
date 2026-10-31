@@ -3932,6 +3932,7 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		TargetParentSessionID: sessionID,
 		TargetParentTeamID:    targetTeamID,
 		Limit:                 host.supervisionConfig.WithDefaults().DigestMaxItems,
+		MaxChars:              host.supervisionConfig.WithDefaults().DigestMaxChars,
 		IncludeResolvedSince:  true,
 		SubjectPresence:       localSupervisionSubjectPresence(host),
 		HostCapabilities:      localSupervisionHostCapabilities(host),

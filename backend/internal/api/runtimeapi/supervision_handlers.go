@@ -401,6 +401,7 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 		// host hardcoded 20 while the CLI read config, so the two hosts could
 		// disagree on the injection budget.
 		Limit:                h.supervisionTuning().DigestMaxItems,
+		MaxChars:             h.supervisionTuning().DigestMaxChars,
 		IncludeResolvedSince: true,
 		SubjectPresence:      h.supervisionSubjectPresence(),
 		HostCapabilities:     h.supervisionHostCapabilities(),
