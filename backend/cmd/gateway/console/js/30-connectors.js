@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=100";
+import { S, G } from "./runtime.js?v=101";
 
 Object.assign(G, {
   loadConnectorSchema: loadConnectorSchema,
@@ -450,13 +450,18 @@ Object.assign(G, {
           }
         }
         actionsHost.appendChild(G.connectorActionBtn("日志", busy, function () { G.openConnectorLogs(item); }));
+        // Exactly one primary per card: enable when the connector is off,
+        // otherwise edit (or test for origin-managed rows that cannot be
+        // edited here). Without this the action row gave all ~11 buttons
+        // equal weight and offered no visual first step.
+        var primaryAction = item.enabled ? (item.origin ? "test" : "edit") : "toggle";
         actionsHost.appendChild(G.connectorActionBtn(item.enabled ? "停用" : "启用", busy, function () {
           G.connectorToggle(item);
-        }));
+        }, primaryAction === "toggle" ? "primary" : ""));
         if (!item.origin) {
-          actionsHost.appendChild(G.connectorActionBtn("编辑", busy, function () { G.openConnectorEditor(item); }));
+          actionsHost.appendChild(G.connectorActionBtn("编辑", busy, function () { G.openConnectorEditor(item); }, primaryAction === "edit" ? "primary" : ""));
         }
-        actionsHost.appendChild(G.connectorActionBtn("测试", busy || !item.enabled, function () { G.openConnectorTest(item); }));
+        actionsHost.appendChild(G.connectorActionBtn("测试", busy || !item.enabled, function () { G.openConnectorTest(item); }, primaryAction === "test" ? "primary" : ""));
         if (!item.origin) {
           actionsHost.appendChild(G.connectorActionBtn("重载", busy, function () { G.connectorReload(item); }));
         }

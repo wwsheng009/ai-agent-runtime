@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=100";
+import { S, G } from "./runtime.js?v=101";
 
 Object.assign(G, {
   connectorNotice: connectorNotice,
@@ -739,7 +739,11 @@ Object.assign(G, {
   function connectorActionBtn(label, disabled, onClick, extraClass) {
     var btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "btn ghost sm" + (extraClass ? " " + extraClass : "");
+    // .btn.ghost is declared after .btn.primary in style.css, so a button
+    // carrying both renders transparent and loses its primary emphasis.
+    // Drop ghost whenever the caller promotes this button to card primary.
+    var isPrimary = !!(extraClass && extraClass.indexOf("primary") >= 0);
+    btn.className = "btn " + (isPrimary ? "" : "ghost ") + "sm" + (extraClass ? " " + extraClass : "");
     btn.textContent = label;
     btn.disabled = !!disabled;
     btn.addEventListener("click", function () { onClick(btn); });

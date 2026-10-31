@@ -604,3 +604,41 @@ relay 契约与设备注册 API 见
 
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。
+---
+
+## 11. 网关版本部署记录（2026-10-31）
+
+> **v99 · 网关自持连接器形态**（`feat(gateway): 网关自持连接器形态`）
+> 只出站副本（`runtime_mode=outbound`）把「收」留在节点，微信 `Send` 所需的
+> per-chat `context_token` 只能靠节点周期同步 → 节点离线时同步一直 502、token 恒为
+> `{}`，「重新扫码」也只换凭据救不回来。新增 `runtime_mode=gateway`：本机 Activate +
+> 轮询入站，`context_token` 本地产出并持久化；新增 `settings.inbound_mode`
+> （`agent` / `notify-only`）。控制台连接器卡片提供「自持·仅通知 / 自持·接对话 /
+> 改回只出站副本」。
+> 回滚：`gateway.before-20261031T052658Z`。
+
+> **v100 · 「已完成」附带的助手回复在 IM 上不再丢正文**
+> IM 通道 `messageText` 用投影文案（`completed` → 「✅ 会话回合已完成」）**替换**
+> `Notification.Body`，把 push 侧刚算出的正文整段丢掉（webpush/ntfy 均 muted 时用户
+> 只看得到那一行）。修复：内容另走 `notify.Event.Detail`，通道渲染时追加。
+> 回滚：`gateway.before-20261031T081216Z`。
+
+> **v101 · 截断停在可读边界**
+> 真机微信收到 `notify-policy.json: {"global":{"completed_include_last…`：200 字符硬切
+> 正好落在代码块里的 JSON 行中间。`truncateNotificationText` 改为优先回退到上限之前的
+> 最后一个换行（保留 ≥40% 上限，否则硬切），并丢掉末尾只剩符号的行。
+> 回滚：`gateway.before-20261031T084439Z`。
+
+### 部署链路的坑（勿重复）
+
+- **`/tmp` 残留会让 grep 型检查「假通过」**：v101 首次上线被误判失败并自动回滚——
+  `ready` 被上一轮遗留的 `/tmp/aicli-health.json` 满足，随后 console/route/mode 检查
+  撞上新进程尚未绑定端口（日志 `console=0 route=000 mode=000`）。`deploy-gateway-v*.sh`
+  现在先 `rm -f` 这些文件，且每个检查都有上限重试。
+- **生成远端 bash 脚本必须 LF**：PowerShell `Set-Content` 会写成 CRLF，远端
+  `set -euo pipefail\r` 直接失败。改用 `tmp/deploy/mk_deploy_script.py`（`newline=""`）。
+- **批量改 `?v=` 同理**：Python 默认文本模式在 Windows 落 CRLF，会让
+  `console_assets_test.go` 的模块正则（以 LF 行尾为锚）报 `app.js imports 0 modules`；
+  用 `tmp/deploy/bump_console_version.py` + `normalize_console_lf.py`。
+- SSH 经本地 CONNECT 代理偶发 `Error reading SSH protocol banner`：相关脚本均已加重试；
+  直连 `192.210.174.189:22` 在本机不通，必须走代理隧道。

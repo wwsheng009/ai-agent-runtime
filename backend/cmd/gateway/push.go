@@ -674,7 +674,16 @@ func (p *pushNotifier) contentOptions() notifyContentOptions {
 	return p.policy.ContentOptions()
 }
 
-// truncateNotificationText 按 rune 截断（多字节安全），截断时补 "…"。
+// truncateNotificationText 按 rune 截断「已完成」附带的助手回复，并尽量停在
+// 可读边界上（docs/gateway/08 §5.1）：
+//
+//  1. 上限是 rune 数（多字节安全）；
+//  2. 优先回退到上限之前的最后一个换行——否则会把 JSON / 代码块 / 表格切在中间，
+//     通知里只剩半截机器文本（2026-10-31 真机：微信收到
+//     `notify-policy.json: {"global":{"completed_include_last…`）；
+//     回退幅度过大（保留不足上限的 40%）时不回退，仍按上限硬切，避免为了找边界
+//     把有用的正文丢光；
+//  3. 丢掉末尾只剩符号噪声的行（孤立的 ``` / | / ---），再补 "…"。
 func truncateNotificationText(text string, max int) string {
 	if max <= 0 {
 		max = notifyDefaultLastMessageMaxChars
@@ -683,7 +692,64 @@ func truncateNotificationText(text string, max int) string {
 	if len(runes) <= max {
 		return text
 	}
-	return string(runes[:max]) + "…"
+
+	cut := max
+	if lastBreak := lastLineBreak(runes[:max]); lastBreak >= max*2/5 {
+		cut = lastBreak
+	}
+	head := strings.TrimRight(string(runes[:cut]), " \t\n\r")
+	for head != "" {
+		line, at := trailingLine(head)
+		if !isNoiseOnlyLine(line) {
+			break
+		}
+		if at < 0 {
+			head = ""
+			break
+		}
+		head = strings.TrimRight(head[:at], " \t\n\r")
+	}
+	if head == "" {
+		// 全部被判定为噪声（极端输入）：退回硬切，至少保留内容。
+		head = strings.TrimRight(string(runes[:max]), " \t\n\r")
+	}
+	return head + "…"
+}
+
+// lastLineBreak 返回 head 中最后一个换行的下标；没有换行时返回 -1。
+func lastLineBreak(head []rune) int {
+	for i := len(head) - 1; i >= 0; i-- {
+		if head[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+// trailingLine 返回最后一行与其起始下标（无换行时 at = -1）。
+func trailingLine(text string) (string, int) {
+	at := strings.LastIndex(text, "\n")
+	if at < 0 {
+		return text, -1
+	}
+	return text[at+1:], at
+}
+
+// isNoiseOnlyLine 报告一行去掉空白后是否只剩标记符号（```、|、---、> 等）。
+// 这类行单独出现在截断处没有信息量，留着只会让通知以 "```" 收尾。
+func isNoiseOnlyLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	for _, r := range trimmed {
+		switch r {
+		case '`', '|', '-', '*', '_', '>', '#', '~', '+', '=':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // notifyErrLogEvery 是"同一投递失败"的日志限流窗口。取 10 分钟：既保留第一次

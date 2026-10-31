@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=100";
+import { S, G } from "./runtime.js?v=101";
 
 Object.assign(G, {
   attentionLabel: attentionLabel,
@@ -58,7 +58,10 @@ Object.assign(G, {
   S.notifyQuietTouched = false;
   S.notifyQuietInvalidEl = null;
   S.notifySessionQuery = "";
-  S.notifySessionOnlyCustom = false;
+  // Default to "only adjusted": with ~33 sessions the full list was almost
+  // entirely "跟随全局" rows, so the page opened on a wall of no-information
+  // items and buried the handful that actually differed.
+  S.notifySessionOnlyCustom = true;
   S.deviceQuery = "";
   S.deviceStatusFilter = "";
 

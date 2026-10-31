@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=100";
+import { S, G } from "./runtime.js?v=101";
 
 Object.assign(G, {
   installHintDismissed: installHintDismissed,
@@ -147,6 +147,47 @@ Object.assign(G, {
     });
   }
   G.notifyRefreshDirty();
+
+  /* ── 分区锚点（通知设置页）───────────────────────────────────────────
+     页面纵向可达 5–6 屏，三个分区之间只能靠滚动。这里用 button + 手动
+     scrollIntoView，避免改用 <a href="#..."> 把路由 hash 从 #notifications
+     冲掉；滚动时用 IntersectionObserver 高亮当前分区。 */
+  (function bindNotifyAnchors() {
+    var host = S.el("notify-anchors");
+    if (!host) { return; }
+    var anchorBtns = Array.prototype.slice.call(host.querySelectorAll(".notify-anchor"));
+    if (!anchorBtns.length) { return; }
+
+    function setActive(id) {
+      anchorBtns.forEach(function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-anchor") === id);
+      });
+    }
+
+    anchorBtns.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var target = S.el(btn.getAttribute("data-anchor"));
+        if (!target) { return; }
+        setActive(btn.getAttribute("data-anchor"));
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+
+    if (typeof IntersectionObserver !== "function") { return; }
+    var spy = new IntersectionObserver(function (entries) {
+      var best = null;
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) { return; }
+        if (!best || entry.intersectionRatio > best.intersectionRatio) { best = entry; }
+      });
+      if (best) { setActive(best.target.id); }
+    }, { rootMargin: "-72px 0px -60% 0px", threshold: [0, 0.25, 0.5, 1] });
+
+    ["notify-sec-global", "notify-sec-bots", "notify-sec-sessions"].forEach(function (id) {
+      var sec = S.el(id);
+      if (sec) { spy.observe(sec); }
+    });
+  })();
 
   /* ── Bot 通道（网关自持 IM 目标，docs/gateway/18 §6.1）─────────────
      与上方通知策略是两份独立配置：策略决定"发不发"，Bot 目标决定"发到

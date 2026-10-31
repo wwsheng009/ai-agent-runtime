@@ -183,6 +183,12 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
   （2026-10-31 真机复盘：策略已开、正文已算，IM 侧却看不到）。因此宿主把内容同时
   放进 `notify.Event.Detail`，`channels.IM.messageText` 在投影/正文之后追加它，
   并用 `Contains` 判定避免宿主已拼进 `Body` 时重复。
+- **截断停在可读边界**：上限按 rune 计，且优先回退到上限之前的**最后一个换行**
+  （回退后仍保留 ≥40% 上限，否则按上限硬切，避免为了找边界丢光正文），并丢掉末尾
+  只剩符号的行（孤立的 ```` ``` ```` / `|` / `---`）。硬切会把 JSON / 代码块 / 表格
+  切在半截：2026-10-31 真机微信收到
+  `notify-policy.json: {"global":{"completed_include_last…` 正是 200 字符落在 JSON
+  行中间造成的（`truncateNotificationText`）。
 - 内容取自节点 `SESSION_UPDATE` 的 `last_message` / `last_message_role`（agent 侧已
   截断到 2000 runes）；网关不额外拉取会话正文（§6「不重复渲染正文」原则不变）。
 - 非 `global` 层级设这两个字段会被 API 拒绝（400）：它描述"通知内容口径"，不是按
