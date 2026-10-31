@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=101">
+<link rel="stylesheet" href="./style.css?v=103">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -614,7 +614,7 @@
           </div>
 
           <!-- 层级 3/3：会话级覆盖——最小粒度。 -->
-          <div class="notify-layer">
+          <div class="notify-layer" id="notify-sec-sessions">
             <div class="notify-layer-head">
               <h2 class="notify-layer-title">会话级覆盖</h2>
               <p class="notify-layer-desc">对单个会话收窄全局策略（静音 / 提高门槛 / 限定事件类型），粒度最小、优先级最高。</p>
@@ -953,6 +953,6 @@
 
 <!-- type="module"：app.js 只负责按顺序 import console/js/*.js（见 console/js/runtime.js）。
      模块脚本是 defer 语义，等价原来放在 body 末尾的 script。 -->
-<script type="module" src="./app.js?v=101"></script>
+<script type="module" src="./app.js?v=103"></script>
 </body>
 </html>

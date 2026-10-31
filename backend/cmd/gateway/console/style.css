@@ -2261,6 +2261,24 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 
 .im-tools-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .im-tools-row .select { flex: 0 0 auto; }
+/* The three display toggles (实时输出/Markdown/子代理) are low-frequency
+   preferences, yet they sat at the same visual weight as 排序 and pushed the
+   eye past the controls that actually narrow the list. Mute them so the
+   scope/sort row reads first; they stay fully clickable and keyboard-focusable. */
+.im-tools-row #tail-toggle,
+.im-tools-row #md-toggle,
+.im-tools-row #subagent-toggle {
+  color: var(--fg-faint);
+  border-color: transparent;
+  background: transparent;
+}
+.im-tools-row #tail-toggle:hover,
+.im-tools-row #md-toggle:hover,
+.im-tools-row #subagent-toggle:hover {
+  color: var(--fg-muted);
+  background: var(--panel);
+  border-color: var(--border);
+}
 
 .im-list-body {
   flex: 1 1 auto; min-height: 0;
@@ -2645,6 +2663,10 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .log-tabs { margin: 12px 0 4px; }
 .log-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .log-toolbar .select, .log-toolbar .filter-input { min-width: 150px; }
+/* P2: 挂载 slug 可能很长，select 无上限时会把整条工具条撑到一行放不下，
+   导致「自动刷新」被挤到第二行且右侧留白失衡。给下拉一个上限，超长选项
+   由原生控件自身截断显示，工具条因此保持稳定的单行节奏。 */
+.log-toolbar .select { max-width: 260px; }
 .log-list {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -2667,6 +2689,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .log-status.st-ok { background: var(--ok-soft); color: var(--ok-ink); }
@@ -2676,7 +2699,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .log-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .log-title { font-size: 14px; color: var(--fg); word-break: break-word; }
 .log-title code { font-family: var(--font-mono); font-size: 13px; }
-.log-meta { font-size: 13px; color: var(--fg-faint); word-break: break-word; }
+.log-meta { font-size: 13px; color: var(--fg-faint); word-break: break-word; font-variant-numeric: tabular-nums; }
 .log-time {
   font-size: 13px; color: var(--fg-faint);
   font-variant-numeric: tabular-nums; white-space: nowrap;
