@@ -16,16 +16,22 @@ import (
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+// invalidRuntimeModeMessage 是 runtime_mode 取值非法时的 400 文案。
+const invalidRuntimeModeMessage = `runtime_mode 只支持 ""（默认：正常轮询/webhook）、"outbound"（只出站副本）、"gateway"（网关自持）`
+
 // ConnectorView 是连接器对外视图（密钥只回字段名，不回明文）。
 type ConnectorView struct {
-	ID         string            `json:"id"`
-	Provider   string            `json:"provider"`
-	Name       string            `json:"name"`
-	Enabled    bool              `json:"enabled"`
-	Mode       string            `json:"mode"`
-	Settings   map[string]string `json:"settings,omitempty"`
-	SecretKeys []string          `json:"secret_keys,omitempty"`
-	Policy     PolicyView        `json:"policy"`
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`
+	Mode     string `json:"mode"`
+	// RuntimeMode/Origin 仅网关复制副本使用（additive）。
+	RuntimeMode string            `json:"runtime_mode,omitempty"`
+	Origin      *OriginView       `json:"origin,omitempty"`
+	Settings    map[string]string `json:"settings,omitempty"`
+	SecretKeys  []string          `json:"secret_keys,omitempty"`
+	Policy      PolicyView        `json:"policy"`
 	// ActiveOwner 是当前运行归属的宿主（空 = 未认领；含已陈旧记录，重启/接管
 	// 后由下一次认领刷新）。字段 additive：旧客户端忽略即可（07 §5.6「冲突可见」）。
 	ActiveOwner string `json:"active_owner,omitempty"`
@@ -49,6 +55,12 @@ type ConnectorView struct {
 // RuntimeView 是连接器运行可观测视图（stats 与 GET /{id}/logs 载荷中的 stats 同构）。
 type RuntimeView struct {
 	Stats connectors.ConnectorStats `json:"stats"`
+}
+
+// OriginView 标记网关副本来自哪个节点的哪个连接器。
+type OriginView struct {
+	NodeID      string `json:"node_id"`
+	ConnectorID string `json:"connector_id"`
 }
 
 // PolicyView 是"用户操作逻辑"配置的对外视图。
@@ -77,9 +89,10 @@ type RoutePolicyView struct {
 
 // NotifyPolicyView 是 D5 事件通知接收配置的对外形状（docs/bots/09 §7.4.1）。
 type NotifyPolicyView struct {
-	Enabled bool     `json:"enabled"`
-	Kinds   []string `json:"kinds,omitempty"`
-	Scope   string   `json:"scope,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	SuppressLocal bool     `json:"suppress_local,omitempty"`
+	Kinds         []string `json:"kinds,omitempty"`
+	Scope         string   `json:"scope,omitempty"`
 }
 
 // EventsPolicyView 是 S2 声明式事件订阅的对外形状（docs/bots/13 §6.1）。
@@ -127,6 +140,10 @@ type submitRequest struct {
 	Settings map[string]string `json:"settings"`
 	Secrets  map[string]string `json:"secrets"`
 	Policy   *PolicyView       `json:"policy"`
+	// RuntimeMode 是宿主运行形态（runtime_mode.go）：缺省=保持现状，空串=
+	// 清回默认（正常轮询/webhook），"outbound"=只出站副本，"gateway"=网关自持。
+	// 仅管理面可见；用于把网关自持/只出站副本在两者间切换。
+	RuntimeMode *string `json:"runtime_mode"`
 	// SkipCredentialCheck 跳过保存前的在线凭据校验（默认 false）。仅用于
 	// 离线配置/平台暂不可达等必须强制落盘的场景（见 verifyCredentials）。
 	SkipCredentialCheck bool `json:"skip_credential_check,omitempty"`
@@ -413,6 +430,14 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 		Secrets:   secrets,
 		Policy:    policyFrom(request.Policy),
 	}
+	if request.RuntimeMode != nil {
+		mode, modeOK := connectors.NormalizeRuntimeMode(*request.RuntimeMode)
+		if !modeOK {
+			writeError(w, http.StatusBadRequest, invalidRuntimeModeMessage)
+			return
+		}
+		cfg.RuntimeMode = mode
+	}
 	// 保存前凭据校验（2026-10-15 加固）：实现 CredentialVerifier 的通道在
 	// 落盘前做真实校验，拒绝「保存成功但凭据无效」的静默失败（qqbot 真机复盘）。
 	if !request.SkipCredentialCheck {
@@ -480,6 +505,15 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	updated.UpdatedAt = time.Now().UTC()
 	if request.Enabled != nil {
 		updated.Enabled = *request.Enabled
+	}
+	if request.RuntimeMode != nil {
+		mode, modeOK := connectors.NormalizeRuntimeMode(*request.RuntimeMode)
+		if !modeOK {
+			writeError(w, http.StatusBadRequest, invalidRuntimeModeMessage)
+			return
+		}
+		// Origin* 保持不动（切换收/发形态不改变复制来源）。
+		updated.RuntimeMode = mode
 	}
 	if request.Policy != nil {
 		updated.Policy = policyFrom(request.Policy)
@@ -680,11 +714,18 @@ func (h *handlers) view(cfg connectors.Config) ConnectorView {
 		Name:        cfg.Name,
 		Enabled:     cfg.Enabled,
 		Mode:        cfg.Mode,
+		RuntimeMode: cfg.RuntimeMode,
 		Policy:      policyViewFrom(cfg.Policy),
 		CreatedAt:   formatViewTime(cfg.CreatedAt),
 		UpdatedAt:   formatViewTime(cfg.UpdatedAt),
 		BotIdentity: botIdentityFrom(cfg),
 		BotAccount:  botAccountFrom(cfg),
+	}
+	if strings.TrimSpace(cfg.OriginNodeID) != "" || strings.TrimSpace(cfg.OriginConnectorID) != "" {
+		view.Origin = &OriginView{
+			NodeID:      strings.TrimSpace(cfg.OriginNodeID),
+			ConnectorID: strings.TrimSpace(cfg.OriginConnectorID),
+		}
 	}
 	if len(cfg.Settings) > 0 {
 		view.Settings = make(map[string]string, len(cfg.Settings))
@@ -739,11 +780,12 @@ func policyViewFrom(policy connectors.Policy) PolicyView {
 		RuntimeOwner:  policy.RuntimeOwner,
 		ContentMirror: policy.ContentMirror,
 	}
-	if policy.Notify.Enabled {
+	if policy.Notify.Enabled || policy.Notify.SuppressLocal {
 		view.Notify = &NotifyPolicyView{
-			Enabled: true,
-			Kinds:   append([]string(nil), policy.Notify.Kinds...),
-			Scope:   policy.Notify.Scope,
+			Enabled:       policy.Notify.Enabled,
+			SuppressLocal: policy.Notify.SuppressLocal,
+			Kinds:         append([]string(nil), policy.Notify.Kinds...),
+			Scope:         policy.Notify.Scope,
 		}
 	}
 	if policy.Route.HasOverride() {
@@ -784,11 +826,12 @@ func policyFrom(view *PolicyView) connectors.Policy {
 		RuntimeOwner:  view.RuntimeOwner,
 		ContentMirror: view.ContentMirror,
 	}
-	if view.Notify != nil && view.Notify.Enabled {
+	if view.Notify != nil && (view.Notify.Enabled || view.Notify.SuppressLocal) {
 		policy.Notify = connectors.NotifyPolicy{
-			Enabled: true,
-			Kinds:   append([]string(nil), view.Notify.Kinds...),
-			Scope:   strings.TrimSpace(view.Notify.Scope),
+			Enabled:       view.Notify.Enabled,
+			SuppressLocal: view.Notify.SuppressLocal,
+			Kinds:         append([]string(nil), view.Notify.Kinds...),
+			Scope:         strings.TrimSpace(view.Notify.Scope),
 		}
 	}
 	if view.Route != nil {

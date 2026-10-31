@@ -1,6 +1,6 @@
 # 18 · 网关自持 Bot 通知通道（C 方案）
 
-> 状态：设计草案（2026-10-30，已完成代码锚点审查，待产品/架构拍板）
+> 状态：修订稿 v2（2026-10-30）。v1 的代码锚点审查结论保留；P0 阻断项已修正，改动见 §17 修订记录
 > 基线：gateway v78（`876cc106`，连接器页只读聚合已上线）
 > 关联：`docs/gateway/08-notifications.md`、`docs/bots/06-target-architecture.md`、`docs/bots/09-multi-instance-binding.md`
 
@@ -9,6 +9,17 @@
 ## 0. 结论摘要
 
 **可行，建议采用 C 方案。**
+
+### 0.1 v2 修订要点（相对 v1）
+
+v1 的方向、边界与安全取舍成立，但有四处结论建立在与仓库实际不符的描述上，已修正：
+
+| # | v1 问题 | v2 修正 | 位置 |
+|---|---------|---------|------|
+| P0-1 | 计划新增 `Name()="im"` 的通道，但该名字已被 `channels.IM` 占用 | 改为**扩展现有 `channels.IM`**，不新增同名通道 | §5.1、§11 |
+| P0-2 | 只提 `meta.channels` 加 `im`，漏了 `policyChannelNames()` | 显式要求 `policyChannelNames()` 纳入 `im`，否则事件在进 Dispatcher 前被丢 | §5.2、§11 |
+| P0-3 | 首期 Provider 四个位置出现三种答案（微信+QQ / Telegram+飞书 / 示例用 tg/feishu） | 全文统一为**首期 微信 + QQ**，Telegram/飞书列为后续扩展 | §5.8、§6.2、§12、§15.3 |
+| P0-4 | 无条件 `SetPrimary("im")`，把全部 normal 通知押在回退链上 | 改为**按是否存在启用 target 动态选择**；未配置时零变化 | §5.2 |
 
 C 方案的定义：
 
@@ -66,7 +77,7 @@ C1 只是“网关 bot + 全局 target，节点 bot 保留”；C2 是“网关 
 
 ### 1.2 当前缺口
 
-1. **通知分发器没有 bot/IM 通道**：`pushNotifier.ensureDispatcher()` 只注册 WebPush、ntfy、AppPush；`channels.IM` 存在，但只在连接器投影 hook 中单独使用，不在 `notify.Dispatcher` 的通道列表里。
+1. **通知分发器没有 bot/IM 通道**：`pushNotifier.ensureDispatcher()` 只注册 WebPush、ntfy、AppPush；`channels.IM` 存在，但只在连接器投影 hook 中单独使用，不在 `notify.Dispatcher` 的通道列表里。**注意**：`internal/notify/channels/im.go` 已实现 `Name() string { return "im" }`，通道名 `im` 已被占用；`Dispatcher` 按通道名索引，因此只能扩展该实现，不能另建同名通道（v2 决策见 §5.1）。
 2. **网关连接器页是只读的**：虽然 REST API 已有完整 CRUD，控制台没有新建/编辑/启停/测试/日志/绑定表单。
 3. **没有“发给所有节点”的目标模型**：现有 `Binding` 是“chat ↔ 某个会话”的一对一指针；没有“这个 bot 的某个 chat 接收所有节点通知”的表达。
 4. **没有失败回退**：现有 gateway store 的 IM hook 通过 `imMainChannel` 让 normal push 静默；如果 IM 发送失败，normal 通知可能既没有 IM 也没有 push。
@@ -179,17 +190,23 @@ IM Platform --webhook/WS--> gateway connector service
 
 ## 5. 通知语义与路由
 
-### 5.1 通道命名
+### 5.1 通道命名（v2 决策：复用 `im`，不新建同名通道）
 
-新增 `im` 通道（实现名 `GatewayBot`），进入 `notify.Dispatcher`：
+`im` 这个通道名已被占用：`internal/notify/channels/im.go` 已实现
+`Name() string { return "im" }`，语义是「按会话绑定 + `AcceptsNotice` 过滤 → `NotifyScoped` 出站」。
+`notify.Dispatcher` 按通道名索引通道，再注册一个同名通道会覆盖既有实现或产生歧义。
 
-```text
-channels:
-  webpush
-  ntfy
-  apppush
-  im        # 新增：网关自持 bot
-```
+因此 v2 的做法是**扩展现有 `channels.IM`**，而不是新增 `gatewaybot.go`：
+
+| 项 | v1 | v2 |
+|----|----|-----|
+| 通道名 | 新增 `im`（实现 `GatewayBot`） | 复用 `im`（扩展现有 `channels.IM`） |
+| 代码位置 | `internal/notify/channels/gatewaybot.go`（新文件） | `internal/notify/channels/im.go`（扩展） |
+| 全局 target | 在 `GatewayBot` 内实现 | 在 `channels.IM` 内新增 target 解析分支 |
+
+扩展后 `channels.IM.Deliver` 同时承载两种投递来源：**会话绑定**（既有逻辑，`Store` +
+`AcceptsNotice`）与**全局/范围 target**（新增解析），两者按 `(connector_id, chat)` 合并去重（§5.3）。
+`Dispatcher` 看到的通道列表仍是四项：
 
 控制台「通知设置」页的通道列表增加 `im`；现有 `notify-policy.json` 的 `channels.im` 可直接复用偏好覆盖（mute / min_priority / allow_kinds）。
 
@@ -213,6 +230,21 @@ gateway notify policy 而自动合并。
 - normal 用 bot 作为主通道，符合“网关承接所有节点通知”的目标；
 - 没有 bot 目标时绝不能把 normal 丢掉，必须有回退。
 
+**主通道选择（v2 修订 P0-4）**：`cmd/gateway/push.go:381` 当前固定 `d.SetPrimary("webpush")`。
+v2 **不改这个默认值**，而是按「是否存在启用的 `im` target」动态决定：
+
+| 条件 | primary | fallback |
+|------|---------|----------|
+| 无启用的 `im` target（默认部署） | `webpush`（现状不变） | 无，沿用既有 `normalChannels` |
+| 有启用的 `im` target | `im` | `webpush` → `ntfy` → `apppush` |
+
+理由：v1 无条件 `SetPrimary("im")` 会让**全部** normal 通知都先走 IM，完全依赖回退链才能到达
+push。回退是共享内核改动，一旦有缺陷，受影响面是全部历史 normal 通知，而非仅 bot 用户。
+动态选择保证「没配 bot 的部署零变化」，也把回退链的爆炸半径限制在已显式启用 bot 的实例上。
+
+实现上该判定只在 `ensureDispatcher()` 构建时求值一次（通道面启动后固定），配置热加载通过
+§6.1 的原子快照生效，不重建 Dispatcher。
+
 ### 5.3 目标解析
 
 `GatewayBot` 的投递目标由两部分组成，按 `(connector_id, chat)` 去重：
@@ -229,6 +261,20 @@ gateway notify policy 而自动合并。
 
 如果同一事件同时命中全局目标和会话绑定，只发送一次（按 connector+chat 去重）。
 
+**v2 注记（必须收敛为一条路径，不要三条并存）**：上表第 2 项「会话绑定目标」与现有
+`channels.IM.Deliver` 的判断逻辑完全重合（`cfg.Enabled` + `AcceptsNotice` + binding 命中）。
+扩展时**直接复用该逻辑，不要复制一份**。收敛后同一通知的发送路径应当只有一条：
+
+```text
+pushNotifier.observe -> Dispatcher -> channels.IM.Deliver
+                     （旧 connectorAttentionHook 已停用，见 §11）
+```
+
+`connectorAttentionHook`（`cmd/gateway/main.go:414/549`）与 `imMainChannel`（`push.go:43-46/191`）
+是 v1 之前的旧路径，阶段 1 必须**停用并删除**，而不是用 feature flag 与之长期并存——两个 flag
+并存会留下「同一事件走 hook、走 IM channel、走 dispatcher」三出口的隐患，且 §12 的双发回归测试
+也无法覆盖全部组合。
+
 全局目标与连接器 `policy.notify` 的关系：全局目标是显式配置的网关通知路由，
 不要求连接器 `policy.notify.enabled=true`，但仍要求连接器 enabled；会话绑定目标
 仍按 `policy.notify` 过滤。这样可以支持“一个 bot 既接收命令、又只把全局告警发到
@@ -237,6 +283,119 @@ gateway notify policy 而自动合并。
 过滤器优先级：`notify-policy.json` 的 `allow_kinds` / `min_priority` 先过滤
 （决定是否进入 Dispatcher），target 的 `kinds` / `min_priority` 再过滤
 （决定发给哪个 chat）；两者是交集，不是替代。
+
+### 5.3.1 自动本地通知归属（P2 自动版）
+
+`source=node` 的 target 不新增通道实例：它把事件委托给节点自己的 bot 出站。
+节点本地 `SubscribeAttention` 若同时自动发送，同一 `(通道实例, chat, 事件)`
+就会投两次。早期用 `AICLI_CONNECTOR_NOTIFY_OWNER=gateway` 全局关闭节点通知：
+需要人工设置，且会误关与网关不重叠的通道。现已改为**自动、按 target 推导**：
+
+1. 网关对每个 `source=node` target 生成规则 `{kinds, sessions}`：
+   - `scope=all/nodes`：`sessions` 为空（该节点全部会话）；
+   - `scope=sessions`：只列目标会话；
+   - `kinds` 为空时取 `error/waiting`（与 `channels.IM.acceptsKind` 的节点
+     target 缺省一致）。
+2. 规则随 `REGISTER_ACK` 和每条 `HEARTBEAT_ACK` 下发（字段
+   `notify_suppress`）。旧节点忽略该字段，行为不变；target 热加载后最多一个
+   心跳周期收敛。
+3. 节点只跳过命中规则的**本地自动发送**；`InletAttention`（网关委托入口）
+   不经过该抑制，因此委托链仍会向该节点的全部本地绑定 fan-out。
+4. `source=gateway` 的 target 属于网关自持通道实例，不参与抑制——不同通道
+   实例仍正常 fan-out。
+5. 隧道断开时 agent 立即清空规则，本地自动发送恢复；不会因为网关不可达而
+   静默丢通知。重连后的 `REGISTER_ACK` 再重新下发。
+
+环境变量 `AICLI_CONNECTOR_NOTIFY_OWNER` 保留为覆盖开关，但**默认无需设置**：
+
+| 值 | 行为 |
+|----|------|
+| 未设置 / `auto` | 自动模式（推荐） |
+| `gateway` | 强制关闭本机全部 attention 通知（排障/特殊部署） |
+| `node` | 强制忽略抑制规则，全部本地发送（独立部署/排障） |
+
+### 5.3.2 网关 outbound-only 副本（QQ / 微信）
+
+`source=node` 只是“借用节点发送能力”，通知仍依赖节点在线/策略。QQ/微信的
+正确形态是**复制节点的 bot 凭据到网关，启动第二个只出站实例**：
+
+- 只复制 `provider / settings / secrets`（微信额外复制 `context_tokens` 状态），
+  不复制节点的 bindings、policy、会话映射；
+- 副本 `runtime_mode=outbound`：`Service.Start` 跳过 `Activate` / 轮询 /
+  WebSocket / webhook 注册，只允许 `SendOutbound`；
+- 节点继续运行原连接器负责 agent 入站/命令/回复；网关副本只负责通知出站；
+- 导入成功后节点收到 `handoff/confirm`，把该连接器 `policy.notify.suppress_local`
+  置为 true：节点保留入站/回复，但不再本地发 attention，也不向 mesh peers
+  转发该连接器的通知；
+- 删除网关副本前必须调用 `handoff/rollback` 恢复节点本地通知。
+
+复制通道（只经 pinned 隧道，密钥不写日志、不回浏览器）：
+
+```text
+POST /api/nodes/{node}/connectors/{id}/handoff          # 节点导出配置+密钥+context_tokens
+POST /api/nodes/{node}/connectors/{id}/handoff/confirm  # 节点关闭本地通知
+POST /api/nodes/{node}/connectors/{id}/handoff/rollback # 节点恢复本地通知
+GET  /api/nodes/{node}/connectors/{id}/state/context-tokens
+```
+
+Provider 约束：
+
+- **QQ**：副本不建 WS，`Send` 走主动消息；无 `msg_id` 时受主动消息配额/QPS
+  限制，被动回复仍由节点负责；
+- **微信**：`Send` 必须带该 chat 最近一次入站的 `context_token`。导入时复制
+  快照，并由网关每 20s 从节点同步一次；节点离线期间沿用最后一次快照，失效
+  时按普通发送失败进入回退链。
+
+安全：`/handoff` 仅在 owner 鉴权链内可达，且要求 `X-AICLI-Handoff: 1`；密钥
+只存在节点/网关各自的 0600 存储。复制是显式动作，不做后台自动密钥同步。
+
+### 5.3.3 网关自持副本（`runtime_mode=gateway`）
+
+只出站副本把「收」留在节点，于是**通知的可用性被节点的存活绑住**：微信 `Send`
+必须携带该 chat 最近一次入站的 `context_token`，而副本自己不收消息，只能等节点
+每 20s 同步一次；节点离线时同步持续 `HTTP 502: node offline`，token 保持为空，
+每条通知都以「缺少 context_token」失败（2026-10-31 真机复盘）。
+
+自持形态把「收 + 发」都收回网关：
+
+| 项 | 只出站副本 `outbound` | 网关自持 `gateway` |
+|----|----------------------|-------------------|
+| `Activate` / 轮询 | 跳过（`polling disabled`） | **本机执行** |
+| `context_token` 来源 | 源节点周期同步 | **本机轮询入站产出**（持久化快照） |
+| 通知/回复可用性 | 依赖节点在线 | 不依赖节点 |
+| 入站去向 | 无（不出站以外不消费） | 见下方 `inbound_mode` |
+| 与节点同通道并发 | 无冲突（节点独占入站） | **同通道只能一个宿主收**，节点侧同名 bot 须停用 |
+
+入站策略（`settings.inbound_mode`，未知键透传，无需改 Schema）：
+
+- `agent`（缺省）：入站经既有 `gateway_node` Backend 投递给 `settings.node_id`
+  指定的节点 agent（未指定且在线节点唯一时自动选中）；节点侧只需停用同名 bot，
+  对话能力不受影响；
+- `notify-only`：入站只用于刷新会话上下文（`context_token`），不投递 agent，
+  也不回「本次处理失败」——适合**纯通知 bot**（没有 agent 可接，也不该让每条
+  用户消息换来一条失败文案）。
+
+> `notify-only` 只在 `runtime_mode=gateway` 时生效（`Config.InboundNotifyOnly()`）。
+> 节点侧连接器即使误配该值也会被忽略，避免静默吞掉对话消息。
+
+管理面开关（`PATCH /api/connectors/{id}`，缺省=保持现状，空串=清回默认）：
+
+```json
+{"runtime_mode": "gateway", "settings": {"inbound_mode": "notify-only"}}
+{"runtime_mode": "outbound", "settings": {"inbound_mode": ""}}
+```
+
+控制台在「连接器」页对该连接器的复制副本给出「自持·仅通知 / 自持·接对话 /
+改回只出站副本」动作，并把当前形态写进卡片元信息。
+
+**前提与代价（必须显式确认）**：
+
+- 同一 bot 的入站只能有一个宿主消费。切到自持后请**停用节点侧同名 bot**，
+  否则两个宿主的游标会各拿到一部分消息（`docs/gateway/18 §14 风险 R2`）；
+- 网关是单写者约定，多实例网关同时启动同一 data-dir 会双轮询
+  （见 `docs/gateway/15-multi-instance-architecture.md`）；
+- 自持副本不再调用 `syncImportedWeChatState`：`wechatSyncEligible()` 只认
+  `runtime_mode=outbound`，避免节点（离线时为空的）快照覆盖本机新产出的 token。
 
 ### 5.4 事件映射
 
@@ -258,11 +417,33 @@ gateway notify policy 而自动合并。
 - **跨通道去重**：`notify.Dispatcher` 的 `DedupKey` / `Ledger`；
 - **normal 合并**：沿用 `Dispatcher` 的 coalesce 窗口（默认 30s）；
 - **免打扰**：`notify-policy.json` 的 quiet_hours 对 low/normal 生效，high 穿透；
-- **在场**：`presence` 门默认生效（与 push 一致）；如果运营希望在“正在看控制台”时仍收 IM，可给 target 增加 `ignore_presence=true`（后续）。
+- **在场**：按 target 类型区分（v2 修订）。`push.go:170` 的 presence 门是「有人在看这个会话就跳过，
+且不记 seen」，这个语义直接套到运维群上是反的——C1 运维群的价值恰恰是 owner **不看**控制台时也能
+收到告警，而 owner 打开控制台时把运维群静音，正好错在最需要告警的场景。
+
+  | target 类型 | 默认 `ignore_presence` | 说明 |
+  |-------------|------------------------|------|
+  | `scope=all` / `nodes` / `sessions`（全局/范围 target） | **`true`** | 运维告警不应被控制台浏览抑制 |
+  | 会话绑定 target | `false`（沿用 push 语义） | 「人已经在看这个会话就不打扰」仍然成立 |
+
+  字段仍按 target 暴露，允许显式覆盖；不再列为「后续」。
 - **旧 hook 迁移差异**：旧 `connectorAttentionHook` 不经过 Dispatcher 的合并/免打扰/账本；
   新通道会经过，启用新通道后行为会变得更安静、更可配置，这是预期变化。
 
 ### 5.6 失败与回退
+
+**v2 修订：先分清既有能力与新增能力。** 现状 `internal/notify/dispatcher.go` 只有
+`SetPrimary`（:99）与 `SetNormalChannels`（:102），**没有** `SetNormalFallback`，也**没有**
+`ErrNoRecipient` / `ErrAllTargetsFailed`。v1 在正文里交替使用这几个名字，读起来像已存在的能力，
+会让实现者去找不存在的接口。v2 明确标注：
+
+| 符号 | 状态 |
+|------|------|
+| `Dispatcher.SetPrimary` | 既有（`dispatcher.go:99`） |
+| `Dispatcher.SetNormalChannels` | 既有（`dispatcher.go:102`，显式 fanout 语义） |
+| `Dispatcher.SetNormalFallback(...)` | **新增**（阶段 1） |
+| `notify.ErrNoRecipient` / `ErrAllTargetsFailed` | **新增**（阶段 1） |
+| `channels.IM` 全局 target 解析 | **新增**（在既有文件上扩展） |
 
 新增 `notify.ErrNoRecipient` 与 normal 回退链：
 
@@ -286,8 +467,14 @@ gateway notify policy 而自动合并。
 - fallback 名单中未注册的通道跳过并记录日志；
 - normal 主通道被 `prefs` 以 muted/allow_kinds 跳过时，也应视为“不可用”并进入
   fallback；否则用户静音 `im` 会连带吞掉 normal 通知；
-- `GatewayBot.Deliver` 的 32 个 target 不应串行阻塞 30s：按 target 并发（建议上限 4）、
-  单 target 5s 超时，整体仍受 Dispatcher 30s context 约束。
+- target 投递的并发预算必须算得通（v2 修正）。v1 写「32 target、并发 4、单 target 5s」
+  三者互相矛盾：`ceil(32/4) × 5s = 40s`，已超出 Dispatcher 的 30s context，最坏情况会被
+  ctx 截断且部分 target 根本没发。修正为：
+  - 并发上限 `C = min(4, len(targets))`；
+  - 单 target 超时 `T = min(5s, 剩余 ctx 时间 − 2s 收尾余量)`；
+  - 提交前按剩余时间判定，来不及的 target 记 `skipped(deadline_exceeded)`，**不启动**半截发送；
+  - 目标上限 `N`（§6.3 = 32）、`C`、`T` 三者必须满足 `ceil(N/C) × T ≤ 30s`；若不满足，
+    下调 `N` 或提高 `C`，**以不等式为准**，不以拍脑袋的默认值为准。
 
 ### 5.7 消息格式
 
@@ -306,6 +493,11 @@ https://aicli.ttai.online/n/{node}/web/?session={session}
 - 正文优先取 `connectors.AttentionNoticeForProjection(ev.Session, ev.Kind)` 的
   `Text`（包含 `/approve`、`/deny`、`/answer` 等可操作提示）；该映射对
   `waiting` 返回 false，此时回退 `Notification.Body`。
+- **长度截断（v2 新增，v1 只写了格式未写超长策略）**：正文超限时按字符截断并追加 `…`，
+  但**必须保留末尾 URL**——可点击入口比正文完整性更重要。顺序是：先按
+  `limit − len(URL) − 2` 截断「标题 + 正文」，再拼接 URL。首期上限集中定义在
+  `channels.IM`（不散落到各 Provider）：Telegram 4096、飞书 text 4096（保守取值）、
+  QQ 纯文本 2000、微信 text 2000。
 
 URL 沿用 `pushNotifier.sessionURL`：aicli 为 `/n/{node}/web/?session=...`，
 runtime-server 为 `/n/{node}/`（不拼 session query）：
@@ -325,6 +517,11 @@ runtime-server 为 `/n/{node}/`（不拼 session query）：
 |----------|----------|----------|----------|
 | QQ 官方 bot | 群 / C2C（openid） | 无 `msg_id` 走主动消息；有单聊/群/关系/日配额；平台仍兜底 | **C1 首选**：用 QQ 群或 C2C 做网关 ops target |
 | 微信 | 当前 Provider 是 **1:1 chat/openid**，无群/chatroom 能力 | `Send` 必须携带该 chat 最近入站的 `context_token`；无 token 直接失败；会话过期需重新入站刷新 | C1 只能作为 owner 的 **微信 DM**，且必须先给网关 bot 发一条消息播种；C2 更适合按会话迁移 |
+
+> **v2 注记（证据边界）**：上表的 Provider 能力（微信为 1:1 无群/chatroom 能力、`context_token`
+> 必需、过期需重新入站播种；QQ 主动消息有配额）**尚未逐条对照 Provider 实现代码核实**，属于
+> **待实测项**，不是既定事实。阶段 1 的前置动作是用测试消息验证；若与实测不符，按 §14 开放问题
+> 重新选择首期 Provider，而不是硬套本表。
 
 补充：
 
@@ -383,9 +580,9 @@ Dispatcher。`enabled=false` 或无 target 时返回 `ErrNoRecipient`，自然�
   "targets": [
     {
       "id": "ops-main",
-      "connector_id": "tg-ops",
+      "connector_id": "qq-ops",
       "chat": "123456789",
-      "label": "运维群",
+      "label": "运维群（QQ）",
       "enabled": true,
       "kinds": ["approval", "question", "error", "completed"],
       "min_priority": "normal",
@@ -393,8 +590,8 @@ Dispatcher。`enabled=false` 或无 target 时返回 `ErrNoRecipient`，自然�
     },
     {
       "id": "box-a-only",
-      "connector_id": "feishu-ops",
-      "chat": "oc_xxx",
+      "connector_id": "wx-ops",
+      "chat": "owner-openid",
       "enabled": true,
       "kinds": ["error"],
       "min_priority": "high",
@@ -450,6 +647,11 @@ POST /api/notify/im/test    可选：向指定 target 发送测试文本
 
 - 删除仍被 `gateway-im.json` 引用的网关连接器时，`DELETE /api/connectors/{id}`
   应返回 409 并列出引用 target；先禁用/删除 target，再删连接器；
+- **上述 409 检查存在 check-then-act 竞态（v2 补充）**：`gateway-im.lock` 与连接器删除锁
+  是两把独立的锁，从「检查通过」到「真正删除」之间 target 仍可被写入，结果是删掉一个
+  正在被引用的连接器。处置二选一：连接器删除侧持 `gateway-im.lock` 读锁，并在提交删除前
+  **复核** target 集合；或给 `gateway-im.json` 增加 `version` 字段，删除时做 CAS 校验。
+  同时规定全仓统一锁序：**先 `gateway-im.lock`，后连接器配置锁**，禁止反向获取；
 - 连接器 disabled 时，target 视为 skipped（不是发送失败），`GET /api/notify/im`
   返回 `invalid_reason` 供控制台提示；
 - connector 被替换/轮换后，旧 target 不应静默发到新 token；要求重新确认或
@@ -467,8 +669,8 @@ POST /api/notify/im/test    可选：向指定 target 发送测试文本
   "targets": [
     {
       "id": "ops-main",
-      "connector_id": "tg-ops",
-      "provider": "telegram",
+      "connector_id": "qq-ops",
+      "provider": "qq",
       "chat": "123456789",
       "kinds": ["approval", "question", "error", "completed"],
       "min_priority": "normal",
@@ -488,8 +690,15 @@ POST /api/notify/im/test    可选：向指定 target 发送测试文本
    - 「网关托管」区：新建/编辑/启停/测试/日志/删除/绑定；
    - 「节点连接器」区：保持 v78 只读，展示来源节点与配置 JSON 链接；
    - 明确标识“网关 bot 使用网关自己的密钥，不复制节点密钥”。
+   - QQ/微信节点条目提供**一次迁移**：预览绑定 chat → 复制凭据 →
+     创建 outbound-only 副本 → 自动为每个绑定 chat 建 Bot target →
+     关闭节点本地通知；成功后节点条目显示“已迁移到 gw-...”，网关条目显示
+     目标数并提供「管理通知目标 / 重新同步」；失败自动回滚节点、副本与 target。
 2. **通知设置页**
-   - 新「Bot 通道」区：目标列表、connector 选择、chat、label、kinds、min_priority、scope；
+   - 页面按**作用域分三层**：全局策略 / Bot 目标 / 会话级覆盖；三层的 kind 过滤为交集。
+   - 「Bot 目标」层：目标列表 + **每个目标自己的配置面**（列表行「配置」或「添加 Bot 目标」打开），
+     含 connector 选择、chat、label、scope 与 kinds（**多选复选框**，值域取
+     `/api/notify/policy` 的 `meta.kinds`，不再手写逗号分隔；与全局「哪些消息触发通知」是两个层级）；
    - 测试按钮（发送一条测试通知）；
    - 显示 bot 通道状态（enabled/targets/last error）；
    - 显示与节点本地 bot 的潜在重复警告。
@@ -569,6 +778,13 @@ C2-A 的 secrets 只能由 owner 手工导出/导入（或使用离线迁移工�
 迁移时要么复制 state（人工/离线）并验证，要么在切换后让 owner 重新发一条消息
 播种。QQ C2 没有 context_token 依赖，但受主动消息配额与被动回复窗口约束。
 
+**落地路径（已实现，§5.3.3）**：不走 W 向导重新扫码，而是把网关侧已有的复制副本
+从 `runtime_mode=outbound` 切成 `gateway`——网关开始本机轮询入站，`context_token`
+由本机产出并持久化，通知/回复不再依赖节点；节点侧停用同名 bot 后，对话由
+「网关入站 → 隧道 → 节点 agent」承接。该形态同时回答了 §14 开放问题 11：bot 允许
+消费入站，但必须显式选择 `inbound_mode`（`agent` 需 `settings.node_id` 或唯一
+在线节点；纯通知用 `notify-only`）。
+
 ### 7.4 多实例
 
 当前 gateway 主备是“单写者”约定，代码没有跨实例 bot 租赁。C 方案要求：
@@ -625,6 +841,7 @@ gateway_bot_no_recipient_total{kind}
 | 没有 bot target | `ErrNoRecipient` → normal 回退 Web Push/ntfy/AppPush；high 仍走 push |
 | bot target 存在但 provider 发送失败 | normal 回退 push；high 记录错误，push 已发 |
 | 部分 target 成功 | 记录部分成功，不触发全量回退；避免重复 |
+| `SendOutbound` 成功但 ledger `Complete` 失败 | 下次可能重发一次；v2 明确该边界为「至多一次」降级为「至少一次」，不承诺严格 exactly-once（Provider 侧无幂等键时无法做到） |
 | 网关 bot 未配置/禁用 | 等同无 target，不影响现有通知 |
 | 节点离线 | 注册表不产生新 attention；不会回调节点；网关机器人仍可用于网关级告警（后续） |
 | 网关重启 | 沿用 seen 快照 seed；bot 不重发旧 attention |
@@ -648,16 +865,36 @@ gateway_bot_no_recipient_total{kind}
 
 ### 阶段 1：C1 最小闭环（3–5 人日）
 
+> **v2 注记（工期与切片）**：3–5 人日要同时覆盖「共享内核回退 + 原子写 + 校验 + 热加载 +
+> 最小 UI + 全量测试」偏乐观。建议拆成两个可独立验收的切片，任一失败可单独回退：
+>
+> - **切片 1A（内核）**：`ErrNoRecipient` / normal 回退 / `policyChannelNames` 纳入 `im` /
+>   动态 primary。验收标准是**既有测试全绿且未配置 bot 时行为逐字节不变**。
+> - **切片 1B（通道与配置）**：`gateway-im.json` + `channels.IM` 全局 target 扩展 +
+>   `/api/notify/im` + 最小 UI。
+
 - 新增 `gateway-im.json` + `GET/PUT /api/notify/im` + 校验/热加载；
-- 新增 `notify/channels/gatewaybot.go`（`Name()=im`）；
-- Dispatcher 增加 `ErrNoRecipient` / normal fallback；
-- `pushNotifier.ensureDispatcher` 注册 `im`，`SetPrimary("im")`，`SetNormalFallback("webpush","ntfy","apppush")`；
-- `pushNotifier.observe` 的唤醒门必须把 `im` 算进去（当前只有 push/ntfy/apppush 时才会进入 observe）；
-- 旧 `connectorAttentionHook` 改为 feature flag，启用新通道时禁用；同时移除/停用
-  `connectorIMMainChannel`/`imMain` 判定，避免旧 hook 与新 Dispatcher 双路径；
-- `/api/notify/policy` 的 `meta.channels` 增加 `im`（Available 取决于 gateway bot
-  service/targets），否则「通知设置」页不会渲染 bot 通道开关；
-- 测试：high/normal/no-target/failure/partial/coalesce/presence；
+- **扩展** `internal/notify/channels/im.go`（不新建 `gatewaybot.go`，通道名 `im` 已被占用，见 §5.1），
+  在其中新增全局/范围 target 解析分支，复用既有 `Store`/`AcceptsNotice` 逻辑；
+- `internal/notify/dispatcher.go` **新增** `ErrNoRecipient`（`errors.Is` 可判）/ `SetNormalFallback` /
+  同一 `deliver` 内的回退链；既有 `SetPrimary`/`SetNormalChannels` 语义不动；
+- `pushNotifier.ensureDispatcher()` 注册 `im` 通道，并按 §5.2 **动态**选择 primary：
+  有启用 target 才 `SetPrimary("im")` 且 `SetNormalFallback("webpush","ntfy","apppush")`，
+  否则保持 `SetPrimary("webpush")`；
+- **`pushNotifier.policyChannelNames()`（`push.go:260`）必须纳入 `im`**：该函数返回的通道名列表
+  供 `kindAllowedByPolicy`（`push.go:277`）做通道级 `allow_kinds` 兜底判定。若只配 IM 不配 push，
+  列表中缺 `im` 会导致用户在「通知设置」里为 `im` 单独开的白名单**完全不生效**，且事件在进入
+  Dispatcher 之前就被丢弃。v1 只提了 `meta.channels`，遗漏此处；
+- 唤醒/短路门槛（v1 称为「唤醒门」，v2 直接写函数）：`ensureDispatcher` 的
+  `len(chans) == 0` 返回 nil（`push.go:370`）、以及 `dispatch` 里
+  `webPushSubscribers == 0 && !p.ntfyEnabled() && p.appPushDeviceCount() == 0` 的告警分支
+  （`push.go:417`），都必须把「存在启用 `im` target」计入，否则纯 IM 部署会被判成无收件人；
+- 旧路径**收敛为一条**：停用并删除 `connectorAttentionHook`（`main.go:414/549`）与
+  `connectorIMMainChannel`/`imMain` 判定（`push.go:43-46/191/427`），不要用 feature flag 与
+  新通道长期并存（三出口隐患见 §5.3 注记）；
+- `/api/notify/policy` 的 `meta.channels` 增加 `im`（Available 取决于 `channels.IM` 是否装配
+  且存在启用 target），否则「通知设置」页不会渲染 bot 通道开关；
+- 测试：high/normal/no-target/failure/partial/coalesce/presence/allow_kinds-仅配-im；
 - 控制台：Bot 通道目标列表 + 测试按钮（最小 UI）。
 
 **验收**：配置一个专用 QQ ops bot + 全局 target，所有节点的 approval/question/error 能到 QQ 群/C2C；微信 DM 作为第二 target（先播种 context_token）；normal completion 能到，且 push 不重复；断网/失败时 push 回退。
@@ -693,13 +930,15 @@ gateway_bot_no_recipient_total{kind}
 | 文件/包 | 改动 |
 |---------|------|
 | `internal/notify/dispatcher.go` | `ErrNoRecipient`、normal primary fallback、prefs-skipped 回退、回执语义 |
-| `internal/notify/channels/gatewaybot.go`（新） | `Name()=im`；target 解析、`Service.SendOutbound`、并发/超时/部分成功 |
+| `internal/notify/channels/im.go`（**扩展**，非新文件） | 保留 `Name()=im` 与既有会话绑定逻辑；新增全局/范围 target 解析、`Service.SendOutbound`、并发/超时/部分成功、长度截断 |
 | `cmd/gateway/notify_im.go`（新） | `gateway-im.json` 读写、校验、热加载、`GET/PUT /api/notify/im`、test |
-| `cmd/gateway/push.go` | 注册 `im`、`SetPrimary`/`SetNormalFallback`、唤醒门、移除旧 `imMain` 路径 |
+| `cmd/gateway/push.go` | 注册 `im`；动态 `SetPrimary`/`SetNormalFallback`；`policyChannelNames()` 纳入 `im`；`dispatch` 无收件人判定纳入 `im`；移除旧 `imMain` 路径 |
 | `cmd/gateway/connector_bootstrap.go` | 旧 `connectorAttentionHook` feature flag / 退役；连接器服务与 bot channel 接线 |
 | `cmd/gateway/main.go` | 注册 `/api/notify/im*`；装配 GatewayBot；审计/指标 |
 | `cmd/gateway/console/{app.js,index.html,style.css}` | bot CRUD、bindings、Bot 通道目标、测试、警告、v79 版本 |
 | `cmd/gateway/connector_*_test.go` | 目标解析、fallback、去重、迁移/双发回归 |
+| `cmd/gateway/im_main_channel_test.go`、`cmd/gateway/push_routing_test.go` | **v2 补充**：两者直接依赖 `imMainChannel` 字段（`push_routing_test.go:136`），移除旧 `imMain` 路径时必改，否则编译失败 |
+| `cmd/gateway/push_test.go`、`push_suppressed_test.go`、`push_notifier_policy_test.go` | **v2 补充**：`policyChannelNames` / 唤醒阈值改动的影响面，需回归 |
 
 注意：`notify.Dispatcher` 的 fallback 是**共享内核改动**，必须先补测试再改
 `pushNotifier`；否则容易把现有 `webpush,ntfy` fanout 语义改坏。
@@ -729,7 +968,8 @@ gateway_bot_no_recipient_total{kind}
 
 ### 真机
 
-- 创建 Feishu/Telegram 网关 bot；
+- 创建 **QQ 网关 bot**（群 / C2C）与 **微信网关 bot**（owner DM，先入站播种 `context_token`）；
+  Telegram/飞书列为后续扩展，真机不作为首期验收项（v2 统一口径）；
 - 发送测试通知；
 - 节点离线/网络断开时网关 bot 仍可发；
 - 网关重启不重发旧 attention；
@@ -738,7 +978,8 @@ gateway_bot_no_recipient_total{kind}
 
 ### 回归
 
-- 现有 `cmd/gateway`、`internal/notify`、`internal/connectors` 测试；
+- 现有 `cmd/gateway`、`internal/notify`、`internal/connectors` 测试（含 `im_main_channel_test.go`、
+  `push_routing_test.go`、`push_suppressed_test.go`，见 §11 文件表）；
 - 现有 Web Push/ntfy/AppPush 行为；
 - 控制台 v78 连接器只读聚合不回归；
 - `/api/health`、SSE、owner auth。
@@ -801,7 +1042,7 @@ gateway_bot_no_recipient_total{kind}
 ### 15.3 评审门槛（必须满足后才进入实现）
 
 - [ ] 明确 C1 首期范围与目标 chat；
-- [ ] 确认 allowed providers（Telegram/飞书优先）；
+- [ ] 确认 allowed providers（v2 已定：**首期 微信 + QQ**；Telegram/飞书为后续扩展，示例配置同步为 `qq-ops`/`wx-ops`）；
 - [ ] 定义 `gateway-im.json` 最终字段与 API；
 - [ ] 定义 normal fallback 的精确语义与测试；
 - [ ] 定义 C2 迁移 checklist（禁止同 token 并行）；
@@ -820,9 +1061,228 @@ gateway_bot_no_recipient_total{kind}
 | 连接器装配 | `backend/cmd/gateway/connector_bootstrap.go` |
 | 网关 bot 入站 | `backend/cmd/gateway/connector_backend.go` |
 | 连接器管理 API | `backend/internal/connectors/restapi/restapi.go` |
-| IM 适配器 | `backend/internal/notify/channels/im.go` |
+| IM 适配器（需扩展，`Name()=im`） | `backend/internal/notify/channels/im.go` |
+| 分发器既有 API（`SetPrimary`:99、`SetNormalChannels`:102） | `backend/internal/notify/dispatcher.go` |
+| 优先级词表（approval/question/error=high） | `backend/internal/notify/policy.go:52` |
+| 依赖旧 `imMain` 的测试 | `backend/cmd/gateway/im_main_channel_test.go`、`push_routing_test.go` |
 | 节点本地通知 | `backend/cmd/aicli/commands/connector_host.go`、`backend/cmd/runtime-server/connector_bootstrap.go` |
 | 节点注意力接收 | `backend/internal/connectors/attention.go`（`InletAttention`） |
 | 多实例约束 | `docs/gateway/15-multi-instance-architecture.md` |
 | 现有通知语义 | `docs/gateway/08-notifications.md` |
 | v78 连接器只读聚合 | `backend/cmd/gateway/node_connectors_api.go`、`backend/cmd/gateway/console/app.js` |
+
+---
+
+## 17. 修订记录
+
+### 17.1 v1 → v2 变更清单
+
+| # | 严重度 | 位置 | 问题 | v2 处置 |
+|---|--------|------|------|---------|
+| 1 | P0 | §5.1、§11 | 计划新增 `Name()="im"` 的通道，但 `channels/im.go:24` 已返回 `"im"`，`Dispatcher` 按名索引会冲突 | 改为扩展现有 `channels.IM`，不新建 `gatewaybot.go` |
+| 2 | P0 | §5.2、§11 | 只提 `meta.channels`，漏了 `policyChannelNames()`；只配 IM 时通道级 `allow_kinds` 失效且事件被提前丢弃 | 显式要求 `push.go:260` 纳入 `im` |
+| 3 | P0 | §5.8、§6.2、§12、§15.3 | 首期 Provider 四处三种答案（微信+QQ / Telegram+飞书 / 示例 `tg-ops`、`feishu-ops`） | 全文统一为首期 微信+QQ，示例改 `qq-ops`/`wx-ops` |
+| 4 | P0 | §5.2 | 无条件 `SetPrimary("im")`，全部 normal 通知押在回退链上，缺陷影响面为全量 | 改为按是否存在启用 target 动态选择，默认仍 `webpush` |
+| 5 | P1 | §5.6 | 正文混用 `SetNormalFallback` 与既有 `normalChannels`，且 `ErrNoRecipient` 尚不存在，易误导实现 | 增加「既有 / 新增」符号边界表 |
+| 6 | P1 | §5.3 | 会话绑定目标逻辑与 `channels.IM.Deliver` 重复，加上旧 hook 会形成三出口 | 明确复用既有逻辑，旧 hook 删除而非 flag 并存 |
+| 7 | P1 | §5.5 | 全局运维 target 默认受 presence 抑制，与 C1「owner 不看控制台时告警」的用途相反 | 范围 target 默认 `ignore_presence=true`，会话绑定沿用 |
+| 8 | P1 | §11、§12 | 回归面漏 `im_main_channel_test.go`、`push_routing_test.go` 等依赖 `imMain` 的测试 | 补入文件改动表与回归清单 |
+| 9 | P1 | §5.8 | 微信 `context_token`、QQ 配额等 Provider 能力无代码锚点，被当作既定事实 | 标注为待实测项，阶段 1 前置验证 |
+| 10 | P2 | §5.6 | 并发预算不成立：`ceil(32/4)×5s = 40s > 30s` ctx | 给出以不等式为准的并发/超时取值规则 |
+| 11 | P2 | §5.7 | 只写消息格式，未定义超长截断 | 新增截断策略，保留末尾 URL |
+| 12 | P2 | §11 | 阶段 1 工期偏乐观 | 拆为 1A 内核 / 1B 通道配置两个可独立验收切片 |
+| 13 | P2 | §6.3 | 删除连接器的 409 检查存在 check-then-act 竞态，两把锁无锁序 | 补 CAS/复核要求与统一锁序 |
+| 14 | P2 | §10 | 未声明幂等保证级别 | 明确「至多一次」可能降级为「至少一次」 |
+| 15 | P2 | §11 | 「唤醒门」措辞模糊，指代不清 | 直接写函数名与行号 |
+
+### 17.2 未在 v2 解决、仍需拍板的项
+
+- §14 开放问题 1–11 中，第 1（C1 vs C2）、3（normal 主通道）、6（C2 节点侧关闭方式）、
+  11（C1 是否消费入站）仍待产品/架构决定，v2 只给出了推荐值与实现约束；
+- §5.8 Provider 能力矩阵需真机验证后回填，当前为待实测；
+- §9 指标中缺少 `skipped(deadline_exceeded)` 计数，待与 §5.6 并发规则一并补充。
+
+### 17.3 复核方式
+
+v2 中所有代码锚点（行号、符号名、文件名）均已在 `backend/` 下逐条核对：`channels/im.go`、
+`notify/dispatcher.go`、`notify/policy.go`、`cmd/gateway/push.go`、`cmd/gateway/main.go`。
+未核对的项已在正文显式标注为「待实测」，不与已核实结论混写。
+
+---
+
+## 18. 阶段 1 实施记录（2026-10-30）
+
+本节记录 v2 方案落到代码的实际结果。实现遵循 §11 的 1A/1B 切片：内核先行、
+通道与配置随后，每一片都可独立验收。
+
+### 18.1 内核改动（切片 1A）
+
+| 文件 | 改动 |
+|------|------|
+| `internal/notify/dispatcher.go` | 新增 `ErrNoRecipient` / `ErrAllTargetsFailed`（均 `errors.Is` 可判）、`SetNormalFallback`、`fallbackChain`、`deliverChain`。既有 `SetPrimary` / `SetNormalChannels` 语义未变 |
+| `internal/notify/dispatcher_fallback_test.go`（新） | 8 个用例：无收件人回退、首个成功即止、全链失败、high 不走回退、显式 `normalChannels` 优先、未注册通道跳过、全链被偏好门跳过、`errors.Is` 契约 |
+
+回退链的关键约束按 §5.6 实现：**在同一个 `deliver` 内完成，不递归 `Dispatch`**，
+因此复用已 `Claim` 的账本键，不破坏去重语义。`Priority != normal` 时不走回退链，
+high 优先级仍扇出全部通道。
+
+### 18.2 通道与配置（切片 1B）
+
+| 文件 | 改动 |
+|------|------|
+| `internal/notify/channels/im.go`（**扩展**，未新建通道） | 保留 `Name()="im"` 与会话绑定路径；新增 `IMTarget` / `TargetsFn` 动态来源、按 scope（all/nodes/sessions）命中、`connector_id|chat` 去重、并发与预算裁剪、`ErrNoRecipient` 语义、超长截断保留 URL |
+| `internal/notify/channels/im_test.go`（新） | 9 个用例：未配置 target 保持静默、scope=all/nodes/sessions、同 chat 去重、未知 scope 不命中、配置了但无命中返回 `ErrNoRecipient`、`TargetsFn` 优先、截断保 URL、部分失败上报 |
+| `cmd/gateway/notify_im.go`（新） | `gateway-im.json` 的读写与校验（原子写：tmp + rename，Windows 覆盖回退）、按文件戳热加载、GET/PUT/test 三个 handler、target 上限 32 |
+| `cmd/gateway/push.go` | `imChannel` / `imEnabled` / `imTargets` / `applyIMConfig`；`policyChannelNames()` 纳入 `im`；`observe` 唤醒门与 `dispatch` 无收件人判定纳入 `im`；**动态** `SetPrimary`（有 target 才设 `im` 并启用回退链） |
+| `cmd/gateway/main.go` | 装配 `imSource`、`/api/notify/im` 与 `/api/notify/im/test`（owner 会话保护）、注入 `connectorStore` / `sendOutbound` / `notifyScoped` 与测试发送器 |
+| `internal/connectors/service.go` | 新增 `ConnectorStore()` 只读访问器（供 IM 通道做 D5 过滤） |
+
+### 18.3 与 v2 决策的对应
+
+- **P0-1 通道名冲突**：未新建 `gatewaybot.go`，全部逻辑落在既有 `channels/im.go`
+  内，`Dispatcher` 通道名不冲突。
+- **P0-2 `policyChannelNames`**：`im` 已加入该列表，只配 IM 不配 push 时通道级
+  `allow_kinds` 可正常生效。
+- **P0-3 首期 Provider**：代码未绑定 provider 词表；`notifyIMMeta` 由装配层提供，
+  首期微信 + QQ 的取舍不进入内核。
+- **P0-4 动态主通道**：`ensureDispatcher` 内仅在 `imEnabled()` 为真时
+  `SetPrimary("im")` + `SetNormalFallback(...)`；**未配置 bot 的部署保持
+  `webpush`，行为不变**。
+- **P1-6 单一路径**：旧 `connectorAttentionHook` / `imMain` 仅在
+  **未启用 bot target** 时保持原有让位行为；启用 bot 后一律走 Dispatcher，
+  避免双路径都收不到。旧路径的**物理删除**仍待后续切片（本阶段不改行为）。
+- **P1-7 presence**：`IMTarget.IgnorePresence` 缺省为 `true`（全局/范围 target），
+  可在配置里显式覆盖。
+- **P2-10 并发预算**：`perTarget` 按剩余 ctx 时间与波次动态收紧
+  （`ceil(N/C)*T ≤ budget`），预算耗尽时**不启动**半截发送。
+
+### 18.4 验证
+
+```text
+go build ./...                                   PASS
+go vet ./internal/notify/... ./cmd/gateway/      PASS
+go test ./internal/notify/... -count=1           PASS（内核 8 + 通道 9 个新用例）
+go test ./internal/connectors/ -count=1          PASS
+go test ./cmd/gateway/ -count=1                  PASS（含 push_routing / im_main_channel 回归）
+gofmt（改动文件）                                  PASS
+```
+
+### 18.5 第二批：控制台 UI 与指标（2026-10-30 续）
+
+| 文件 | 改动 |
+|------|------|
+| `cmd/gateway/console/index.html` | 通知页新增「Bot 通道（网关自持）」面板：目标列表、连接器/会话/备注/范围表单、添加-保存-重新加载按钮 |
+| `cmd/gateway/console/app.js` | `notifyIMState` + `loadNotifyIM` / `renderNotifyIMTargets` / `addNotifyIMTarget` / `saveNotifyIM`；逐条「测试」调 `POST /api/notify/im/test`；错误就地展示于 `#notify-im-error` |
+| `cmd/gateway/console/style.css` | `.notify-im-row` / `-main` / `-title` / `-sub`（与 `.notify-session-row` 同口径） |
+| `internal/notify/ledger.go` | `ChannelOutcome.Reason` + `SkipReasonPreference` / `SkipReasonDeadlineExceeded`；`Receipt.Skipped()` / `SkippedByReason()` |
+| `internal/notify/dispatcher.go` | 新增 `SkippedError`（`errors.As` 可判）；两条投递路径把"预算耗尽"记为 `skipped(deadline_exceeded)` 而非失败，且**停止回退**（同 ctx 下继续尝试只会得到相同结论） |
+| `internal/notify/channels/im.go` | 预算耗尽改为返回 `&notify.SkippedError{...}` |
+| `internal/notify/dispatcher_skipped_test.go`（新） | 3 个用例：deadline 不计错误率且不触发回退、preference 与 deadline 可区分、`SkippedError` 可被包装提取 |
+
+`skipped(deadline_exceeded)` 的语义（§9 要求）：这是**未尝试**发送，不是发送失败，
+因此不计入错误率；它同时是并发/超时预算需要调整的信号，回执里可直接统计。
+
+### 18.6 仍未做（需后续切片）
+
+- 旧 `connectorAttentionHook` / `imMain` 的**物理删除**与对应测试改写（本阶段已让
+  启用 bot 后不再走旧路径，仅保留未配置 bot 时的原行为，避免一次改动同时变更两条语义）；
+- §5.8 Provider 能力矩阵的真机验证（微信 `context_token`、QQ 配额仍为待实测）；
+- 控制台「Bot 通道」尚未接入 i18n 词表（现有文案为中文直写，与通知页其余部分一致）。
+
+### 18.7 落地审计（2026-10-30）
+
+对 §18.1–§18.5 的实现做了逐项取证复核（按实现取证，不依赖设计文档自述）。
+**结论：事件通道、配置规则、UI、指标四层均已连通**，但审计发现两处真实断链，
+已修复。
+
+| 维度 | 结论 | 取证 |
+|------|------|------|
+| 事件通道 | ✅ 连通 | `push.go:430-431` `imChannel()` 结果确实 append 进 `chans`；`policyChannelNames` 在 `imEnabled()` 时追加 `im` |
+| 主通道/回退 | ✅ 未配置零变化 | 默认 `SetPrimary("webpush")`；仅 `imEnabled()` 时改 `im` 并 `SetNormalFallback` |
+| 配置规则 | ✅ 生效 | `notify_im.go` 校验/上限 32/CAS/原子写；8 个 httptest 用例覆盖（含"校验失败不落盘"） |
+| UI | ✅ 对齐 | `index.html` 13 个 `notify-im-*` id 与 `app.js` 逐一对应；`style.css` 补 `.notify-im-*`；`node --check` 通过 |
+| 指标 | ✅ 产出 | 预算耗尽返回 `SkippedError{deadline_exceeded}`，Dispatcher 记 skipped 而非 failure |
+
+#### 审计发现的缺陷 1：`notify.Event.Target` 全仓无写入点
+
+`channels.IM` 有三处读 `ev.Target`（会话绑定路径、`deliverTargets` 的
+`scope=sessions` 判定、`messageText` 的投影映射），但 `EventFor()` 只填
+`Kind`/`DedupKey`/`Notification`，`cmd/gateway` 的 `Dispatch` 调用只补了
+`Node` 与 `Session`。后果：
+
+- `scope=sessions` 的 target **永不命中**；
+- `AttentionNoticeForProjection(sessionID, kind)` 收到空串 → 取不到
+  `/approve` / `/deny` / `/answer` 提示，全局 target 只能发通用正文，
+  **C 方案"补齐 error 映射"的核心增量实际失效**。
+
+修复：`push.go` 在构造事件时设 `ev.Target = item.sessionID`（与 `Session`
+同值但语义分层：`Session` 供偏好解析，`Target` 供投递寻址）；同时
+`im.go` 增加 `sessionOf(ev)`，`Target` 为空时回退 `Session`，使该通道对
+"只填 Session"的调用方也安全。
+
+#### 审计发现的缺陷 2：`notifyIMSource.ReloadIfChanged` 无调用点
+
+热加载方法定义完整（按文件戳增量重读），但全仓无调用点，实际只有
+`PUT /api/notify/im` 能让配置生效；手工改 `gateway-im.json` 不会生效。
+修复：`pushNotifier.observe` 在 `applyPolicy()` 之后调用
+`imSource.ReloadIfChanged()`，与策略热加载同节奏。
+
+#### 复核结果
+
+```text
+go test ./internal/notify/...          PASS（回退 8 + 指标 3 + 通道 9 用例）
+go test ./cmd/gateway/                 PASS（新增配置 API 8 用例）
+go test ./internal/connectors/         PASS
+go vet ./cmd/gateway/ ./internal/notify/...  PASS
+```
+
+#### 仍未落地（如实记录）
+
+- 旧 `connectorAttentionHook` / `imMain` 仅"启用 bot 后绕过"，未物理删除；
+- 微信 `context_token` 播种与 QQ 主动消息配额未做真机验证；
+- 控制台新增文案为中文直写，未进 i18n 词表。
+---
+
+## 19. 网关自持副本实施记录（2026-10-31）
+
+**动因（真机复盘）**：网关侧微信复制副本长期通知失败——
+
+```text
+push: dispatch failed (attention=completed): im target wechat-ops:
+  wechat: chat "o9cq802…@im.wechat" 缺少 context_token（回复需要该会话最近一次入站消息）
+gateway: wechat context sync gw-3683ebdd-wechat-mv7iz5g54db
+  (node-4fd7589c3683ebdd/wechat-mv7iz5g54db): HTTP 502: node offline
+```
+
+这是 §5.3.2 只出站副本的结构性缺陷：副本不轮询入站，`context_token` 只能靠源节点
+同步；节点离线 12+ 小时后，副本的 `cursors.<id>.context_tokens` 仍是 `{}`，于是
+「重新扫码」（只刷新凭据）也救不回来——**能补上 token 的只有「收到一条消息」**。
+
+**实现**：
+
+| 面 | 变更 |
+|----|------|
+| 运行形态 | 新增 `runtime_mode=gateway`（`internal/connectors/runtime_mode.go`）：`startConnector` 只对 `outbound` 短路，自持形态走完整 Activate + 轮询，并打出「网关自持模式」日志 |
+| 入站策略 | 新增 `settings.inbound_mode`（`agent` 缺省 / `notify-only`）：`Service.processMessage` 在 notify-only 时只记账不投递，避免每条用户消息换来一条「本次处理失败」 |
+| 管理面 | `PATCH/POST /api/connectors` 接受 `runtime_mode`（`*string`：缺省=保持，空串=清回默认），未知值 400 不落盘；`Origin*` 保持不变 |
+| 节点同步 | 抽出 `wechatSyncEligible()`：只有 `outbound` 副本才同步节点 token，自持副本不再被节点（离线时为空的）快照覆盖 |
+| 控制台 | 连接器卡片新增形态文案与「自持·仅通知 / 自持·接对话 / 改回只出站副本」动作；`sw.js` CACHE → `shell-v99`，全站 `?v=99` |
+
+**回归保护**：`runtime_mode_test.go`（取值规整/判定/自持必轮询/outbound 仍不轮询/
+notify-only 不投递 agent + 对照用例）、`connectors_runtime_mode_test.go`（PATCH/POST
+契约、400 不落盘、Origin 不变）、`TestWeChatSyncEligibleOnlyForOutboundCopies`
+（自持不得同步节点 token）。
+
+**复核结果**：
+
+```text
+go vet ./internal/connectors/... ./cmd/gateway/...        PASS
+go test ./internal/connectors/... ./cmd/gateway/...       PASS
+```
+
+**坑（勿重复）**：批量改 `?v=` 不能用 Python 默认文本模式写回——Windows 会把 `\n`
+落成 `\r\n`，`console_assets_test.go` 的模块正则以 LF 行为锚，会立刻报
+`app.js imports 0 modules`。已加 `newline=""`，并提供 `normalize_console_lf.py`。
+
+**仍未落地（如实记录）**：切换自持不会自动停用节点侧同名 bot（跨宿主无双写者围栏，
+§14 R2），需人工停用；控制台只做提示，不做远程写节点配置。

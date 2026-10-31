@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=98";
+import { S, G } from "./runtime.js?v=99";
 
 Object.assign(G, {
   loadConnectorSchema: loadConnectorSchema,
@@ -333,16 +333,21 @@ Object.assign(G, {
         '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = (item.name || item.id) + "（" + item.provider + "）";
       card.querySelector(".status-chip").textContent = item.enabled ? "已启用" : "已停用";
-      var owner = item.runtime_mode === "outbound"
-        ? "只出站副本（不轮询）"
-        : (item.active_owner
-          ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? (isGateway ? "（本网关）" : "（此节点）") : "")
-          : "未认领运行（网关重启或宿主离线）");
+      var inboundNotifyOnly = !!(item.settings && item.settings.inbound_mode === "notify-only");
+      var owner;
+      if (item.runtime_mode === "outbound") {
+        owner = "只出站副本（不轮询，靠源节点同步会话上下文）";
+      } else if (item.runtime_mode === "gateway") {
+        owner = "网关自持（本机收 + 发" + (inboundNotifyOnly ? "；入站仅通知，不投递 agent" : "") + "）";
+      } else if (item.active_owner) {
+        owner = "运行宿主 " + item.active_owner + (item.owned_by_current_host ? (isGateway ? "（本网关）" : "（此节点）") : "");
+      } else {
+        owner = "未认领运行（网关重启或宿主离线）";
+      }
       var sources = entry.sources && entry.sources.length ? entry.sources : [connectorSourceLabel(entry)];
       var meta = card.querySelector(".card-meta");
       meta.textContent = "来源 " + sources.join(" / ") + " · id " + item.id +
         (item.mode ? " · " + item.mode : "") + " · " + owner +
-        (item.runtime_mode ? " · " + item.runtime_mode : "") +
         (item.origin ? " · 复制自 " + item.origin.node_id + "/" + item.origin.connector_id : "") +
         (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
       var note = card.querySelector(".card-note");
@@ -364,6 +369,13 @@ Object.assign(G, {
             " 复制；节点本地通知已关闭；通知目标 " + targets.length + " 个。" +
             (targets.length ? "" : " 尚未配置 Bot 目标，通知不会发送。");
           note.appendChild(copied);
+          var modeHint = document.createElement("p");
+          modeHint.className = "connectors-hint";
+          modeHint.textContent = item.runtime_mode === "gateway"
+            ? "网关自持：本机轮询入站，会话上下文（微信 context_token）本地产出，通知/回复不依赖节点。" +
+              "请确认节点侧同名 bot 已停用，否则两个宿主会争抢同一条入站消息。"
+            : "只出站副本：入站仍由节点轮询，网关靠节点周期同步会话上下文；节点离线时微信出站会因缺少 context_token 失败。";
+          note.appendChild(modeHint);
         }
       } else {
         var ro = document.createElement("p");
@@ -397,6 +409,43 @@ Object.assign(G, {
           if (originNodeEntry) {
             actionsHost.appendChild(G.connectorActionBtn("重新同步", busy, function (b) {
               G.connectorMigrate(originNodeEntry, b, true);
+            }));
+          }
+          // 运行形态切换（docs/gateway/18 §7.3 C2）：只出站副本 ↔ 网关自持。
+          // 自持让「收 + 发」都在网关，会话上下文本地产出，不再依赖节点同步；
+          // 代价是同通道的入站只能有一个宿主消费，节点侧同名 bot 需停用。
+          if (item.runtime_mode === "gateway") {
+            actionsHost.appendChild(G.connectorActionBtn(inboundNotifyOnly ? "入站改回接对话" : "入站改为仅通知",
+              busy || !item.enabled, function () {
+                G.connectorSetRuntimeMode(item, "gateway",
+                  { inbound_mode: inboundNotifyOnly ? "" : "notify-only" },
+                  {
+                    okText: inboundNotifyOnly ? "入站改回投递 agent" : "入站改为仅通知",
+                    notice: inboundNotifyOnly
+                      ? "入站将投递给 agent（需 settings.node_id 指定目标节点，否则唯一在线节点）。"
+                      : "入站只用于刷新会话上下文，不再投递 agent，也不会回失败文案。",
+                  });
+              }));
+            actionsHost.appendChild(G.connectorActionBtn("改回只出站副本", busy, function () {
+              G.connectorSetRuntimeMode(item, "outbound", { inbound_mode: "" }, {
+                okText: "已改回只出站副本",
+                notice: "该连接器不再轮询，会话上下文改由源节点周期同步；节点离线时微信出站会失败。",
+              });
+            }));
+          } else {
+            actionsHost.appendChild(G.connectorActionBtn("自持·仅通知", busy || !item.enabled, function () {
+              G.connectorSetRuntimeMode(item, "gateway", { inbound_mode: "notify-only" }, {
+                okText: "网关自持（仅通知）已生效",
+                notice: "网关开始本机轮询该 bot：入站只用于刷新 context_token（不投递 agent）。" +
+                  "请停用节点侧同名 bot，避免两个宿主争抢入站。",
+              });
+            }));
+            actionsHost.appendChild(G.connectorActionBtn("自持·接对话", busy || !item.enabled, function () {
+              G.connectorSetRuntimeMode(item, "gateway", { inbound_mode: "" }, {
+                okText: "网关自持（接对话）已生效",
+                notice: "网关开始本机轮询该 bot，入站经隧道投递给 agent（settings.node_id 或唯一在线节点）。" +
+                  "请停用节点侧同名 bot，避免两个宿主争抢入站。",
+              });
             }));
           }
         }

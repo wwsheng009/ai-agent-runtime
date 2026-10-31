@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=98";
+import { S, G } from "./runtime.js?v=99";
 
 Object.assign(G, {
   connectorNotice: connectorNotice,
@@ -36,6 +36,7 @@ Object.assign(G, {
   saveConnectorEditor: saveConnectorEditor,
   connectorActionBtn: connectorActionBtn,
   connectorToggle: connectorToggle,
+  connectorSetRuntimeMode: connectorSetRuntimeMode,
   connectorReload: connectorReload,
   connectorDelete: connectorDelete,
   connectorTakeover: connectorTakeover,
@@ -785,6 +786,44 @@ Object.assign(G, {
     }).catch(function (err) {
       connectorSetBusy(item.id, false);
       connectorNotice("重载失败：" + (err && err.message ? err.message : err));
+      G.renderConnectors(S.connectorEntries, S.connectorMessage);
+    });
+  }
+
+  // connectorSetRuntimeMode 切换连接器的宿主运行形态（docs/gateway/18 §7.3 C2）：
+  //   - "gateway"：网关自持——本机轮询入站 + 出站，会话上下文（微信
+  //     context_token）由本机产出并持久化，通知/回复不再依赖节点；
+  //   - "outbound"：只出站副本——回到「节点收、网关发」的复制形态。
+  // extraSettings 只做增量提交（PATCH 按 Schema 合并；未知键透传为 settings），
+  // 传空串表示清回默认。切换后由 reload 立即生效（无需重启网关）。
+  function connectorSetRuntimeMode(item, runtimeMode, extraSettings, opts) {
+    opts = opts || {};
+    var body = { runtime_mode: runtimeMode };
+    if (extraSettings) {
+      var settings = {};
+      Object.keys(extraSettings).forEach(function (key) { settings[key] = extraSettings[key]; });
+      if (Object.keys(settings).length) { body.settings = settings; }
+    }
+    connectorSetBusy(item.id, true);
+    connectorNotice("");
+    G.renderConnectors(S.connectorEntries, S.connectorMessage);
+    return G.apiJSON("/api/connectors/" + encodeURIComponent(item.id), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      connectorSetBusy(item.id, false);
+      if (!r.res.ok) {
+        connectorNotice("切换运行形态失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)));
+        G.renderConnectors(S.connectorEntries, S.connectorMessage);
+        return;
+      }
+      if (opts.notice) { connectorNotice(opts.notice); }
+      G.notify(opts.okText || "已切换运行形态", "ok");
+      G.loadConnectors(true);
+    }).catch(function (err) {
+      connectorSetBusy(item.id, false);
+      connectorNotice("切换运行形态失败：" + (err && err.message ? err.message : err));
       G.renderConnectors(S.connectorEntries, S.connectorMessage);
     });
   }

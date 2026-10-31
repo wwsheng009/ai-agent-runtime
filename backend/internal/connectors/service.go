@@ -319,6 +319,40 @@ func (s *Service) Stop(ctx context.Context) {
 // Service.baseCtx 派生（未 Start 时回落 context.Background()），保证
 // REST handler 返回后请求 ctx 取消不会静默停掉轮询（Fix-1）。
 func (s *Service) startConnector(_ context.Context, cfg Config) {
+	if cfg.IsOutboundOnly() {
+		// 网关从节点复制配置后运行的第二个实例：只允许 SendOutbound，
+		// 不 Activate、不轮询/建 WS/注册 webhook，避免与节点抢入站。
+		s.logf("connector %s: outbound-only mode; polling disabled", cfg.ID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "只出站模式：跳过激活与轮询",
+		}, logCounters{})
+		return
+	}
+	if cfg.IsSelfHosted() {
+		// 网关自持（docs/gateway/18 §7.3 C2）：本机收 + 发，会话上下文
+		// （微信 context_token）由本机轮询产出并持久化，不再依赖节点同步。
+		s.logf("connector %s: gateway self-hosted mode; 本机轮询入站（会话上下文本地产出，不依赖节点）", cfg.ID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "网关自持模式：本机轮询入站与出站",
+		}, logCounters{})
+	}
+	if cfg.InboundNotifyOnly() {
+		// 纯通知形态：入站只为刷新会话上下文，不投递给 agent（也没有 agent
+		// 可投递）。显式警告，避免运维误以为该 bot 仍在应答对话。
+		s.logf("connector %s: inbound_mode=notify-only; 入站仅刷新会话上下文，不投递 agent", cfg.ID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "入站策略 notify-only：仅刷新会话上下文，不投递 agent",
+		}, logCounters{})
+	}
 	// fail-closed 安全闸（Fix-S2）：未配置白名单的启用连接器意味着任意平台
 	// 用户都能驱动 agent。要求宿主显式开启本闸时，宁可跳过启动，也不带着
 	// 「对所有人开放」的语义默默上线。
@@ -939,6 +973,9 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 	if !ok {
 		return fmt.Errorf("connectors: unknown connector %q", connectorID)
 	}
+	if !cfg.Enabled {
+		return fmt.Errorf("connectors: connector %q is disabled", connectorID)
+	}
 	provider, ok := s.provider(cfg.Provider)
 	if !ok {
 		return fmt.Errorf("connectors: provider %q not registered", cfg.Provider)
@@ -955,6 +992,16 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 		return err
 	}
 	return nil
+}
+
+// ConnectorStore 暴露配置存储（只读用法）：notify 侧的 IM 通道需要按
+// AcceptsNotice 与绑定做逐连接器过滤（docs/gateway/18 §5.3）。返回 nil 表示
+// 服务未装配存储，调用方须按"无过滤"口径降级。
+func (s *Service) ConnectorStore() Store {
+	if s == nil {
+		return nil
+	}
+	return s.deps.Store
 }
 
 // EnqueueOutbound 把一条出站投递排入该 chat 的串行队列（键 = connector|chat，
@@ -1195,6 +1242,20 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		Chat:        msg.Chat,
 		Summary:     "开始处理入站消息",
 	}, logCounters{})
+
+	// 纯通知连接器（自持 + inbound_mode=notify-only）：入站只为刷新会话上下文
+	// （provider 在调用本入口之前已记忆 context_token），不进入 agent，也不回
+	// 「本次处理失败」——否则每条用户消息都会换来一条无意义的失败文案。
+	if cfg.InboundNotifyOnly() {
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "notify-only：仅刷新会话上下文（不投递 agent）",
+		}, logCounters{inbound: true})
+		return nil
+	}
 
 	// 失败回复重放（切片 2f）：命中重发意图时消费本条入站，不进入 agent。
 	if handled := s.tryReplayFailedReply(ctx, cfg, provider, msg); handled {

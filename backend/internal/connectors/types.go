@@ -26,6 +26,15 @@ type Config struct {
 	Name     string
 	Enabled  bool
 	Mode     string // polling | webhook（由 Schema.Modes 定义）
+	// RuntimeMode 是宿主运行形态，取值与语义见 runtime_mode.go：
+	// 空 = 正常轮询/webhook；"outbound" = 只出站副本（网关从节点复制 bot 配置
+	// 后的第二实例，不 Activate/不轮询/不注册 webhook）；"gateway" = 网关自持
+	// （本机收 + 发，会话上下文本地产出，不依赖节点同步）。
+	RuntimeMode string
+	// OriginNodeID/OriginConnectorID 标记该连接器是从哪个节点的哪个连接器
+	// 复制而来（仅网关自持副本使用；空 = 本地原生配置）。
+	OriginNodeID      string
+	OriginConnectorID string
 	// CreatedAt/UpdatedAt 是配置生命周期时间戳（UTC；零值 = 旧数据未打戳，
 	// 视图/落盘均省略，读取方需容忍缺省）。additive：宿主创建时打戳，
 	// 更新路径只动 UpdatedAt，不改写 CreatedAt。
@@ -154,6 +163,10 @@ func (r RoutePolicy) HasOverride() bool {
 type NotifyPolicy struct {
 	// Enabled 总开关；false（含缺省）时本 bot 不接收任何事件通知。
 	Enabled bool
+	// SuppressLocal 表示该连接器的通知出站已移交给网关副本：节点保留
+	// 入站/命令/回复，但不再产生本地 attention 通知。与 Enabled 独立，
+	// 因为 approval/question 在绑定会话上是"恒开"的。
+	SuppressLocal bool `json:"suppress_local,omitempty"`
 	// Kinds 是接收的事件类型白名单（approval|question|completion|error，
 	// 与 AttentionKind* 同名）；空 = 全部类型。
 	Kinds []string
@@ -181,6 +194,11 @@ const (
 //
 // boundHere 报告事件会话是否绑定到本连接器；为 nil 时按"未绑定"处理。
 func (p Policy) AcceptsNotice(notice AttentionNotice, boundHere func(session SessionRef) bool) bool {
+	if p.Notify.SuppressLocal {
+		// 通知出站已移交给网关副本：节点保留入站/命令/回复，但不再本地发
+		// attention（approval/question 的“绑定恒开”也不能绕过此开关）。
+		return false
+	}
 	if boundHere != nil && boundHere(notice.Session) {
 		// 绑定会话：approval/question（命令回环）不受开关影响；completion 属
 		// 回执类提示，与 notify 总开关联动（默认关闭 = 零配置零打扰）。
@@ -569,7 +587,7 @@ type CommandBackend interface {
 }
 
 // InterruptBackend 是可选能力：把 IM 侧的 /stop 映射到宿主会话的中断入口
-//（语义与 TUI Esc / Web interrupt / `/stop` 一致：取消当前在途回合，保留草稿与
+// （语义与 TUI Esc / Web interrupt / `/stop` 一致：取消当前在途回合，保留草稿与
 // 排队输入；重复请求折叠为“已在停止中”）。
 //
 // 未实现该接口的宿主由核心回明确提示，不静默、不把命令落进普通 turn。
