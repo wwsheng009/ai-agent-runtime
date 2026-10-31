@@ -30,6 +30,10 @@ func Parameters() map[string]interface{} {
 				"minimum":     1,
 				"description": "最多返回的条目数（默认 1000；单层列表默认 200）。",
 			},
+			"follow": map[string]interface{}{
+				"type":        "boolean",
+				"description": "是否跟随遍历中发现的符号链接目录（默认随目标平台：Windows 目标为 true，POSIX 目标为 false）。显式传入的 path 本身若为链接，会按其目标列出（与 glob/grep、rg 的显式路径语义一致）；follow 只控制该根目录之下的子链接。链接目录按链接自身路径展示，Windows junction/符号链接都会下钻，并带环路保护。",
+			},
 		},
 		"required": []string{},
 	}
@@ -133,8 +137,21 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass limit >= 1, or omit it for the default",
 			fmt.Errorf("limit 参数必须大于 0")), nil
 	}
+	// The junction/symlink-following default belongs to the TREE, not to this process: a
+	// Windows client driving a POSIX backend must not inherit the host's habit and
+	// descend links the local tool would refuse.
+	follow := toolcore.TargetIsWindows(access)
+	if value, set := boolArg(call.Args, "follow"); set {
+		follow = value
+	}
 
-	listing, readErr := ReadTreeVia(ctx, access, abs, depth, limit)
+	// The root was named explicitly by the caller, so resolve it even when
+	// follow=false. The flag governs links discovered below it, matching the
+	// glob/grep walkers and ripgrep's treatment of an explicit path argument.
+	listing, readErr := ReadTreeViaWithOptions(ctx, access, abs, depth, limit, ReadTreeOptions{
+		FollowRoot:  true,
+		FollowLinks: follow,
+	})
 	if readErr != nil {
 		if toolcore.IsNotExist(readErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the workspace path", readErr), nil
@@ -153,6 +170,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		"result_count":   rendered,
 		"truncated":      truncated,
 		"limit_hit":      listing.LimitHit,
+		"follow":         follow,
 		// Compatibility with the one-level listing shape.
 		"entries":      listing.Total,
 		"dirs":         listing.Dirs,
@@ -208,4 +226,16 @@ func intArg(args map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+// boolArg distinguishes an explicit false from an omitted key. A non-boolean
+// value is treated as false but still counts as present, matching the other
+// shared handlers' tolerant argument decoding.
+func boolArg(args map[string]any, key string) (bool, bool) {
+	value, present := args[key]
+	if !present {
+		return false, false
+	}
+	typed, _ := value.(bool)
+	return typed, true
 }

@@ -127,6 +127,44 @@ func TestHandlerEmptyDirectoryIsEmptySuccess(t *testing.T) {
 	}
 }
 
+// A symlinked root is the path the caller named, so follow=false must not turn
+// it into an empty answer. The flag governs links discovered below the root.
+func TestHandlerSymlinkedRootIsListedEvenWhenFollowFalse(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "one.go"), []byte("package one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked-root")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	result, err := handler.Execute(context.Background(), &toolcore.Call{
+		Args:    map[string]any{"path": "linked-root", "follow": false},
+		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("result = %+v, want success", result)
+	}
+	if !strings.Contains(result.Content, "one.go") {
+		t.Fatalf("symlinked root was not listed:\n%s", result.Content)
+	}
+	if result.Metadata["follow"] != false {
+		t.Fatalf("metadata.follow = %#v, want false", result.Metadata["follow"])
+	}
+	if result.Metadata["empty_result"] == true {
+		t.Fatalf("a resolved symlinked root must not be an empty success: %+v", result.Metadata)
+	}
+}
+
 // TestHandlerClampsDepth pins the depth ceiling: a huge depth is clamped, not
 // rejected, because the caller asked for "as deep as sensible".
 func TestHandlerClampsDepth(t *testing.T) {

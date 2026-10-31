@@ -5,6 +5,7 @@ package lscore
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strings"
 
@@ -45,6 +46,17 @@ type TreeListing struct {
 	LimitHit bool
 }
 
+// ReadTreeOptions controls traversal details that are a caller policy rather
+// than a property of the tree. FollowRoot resolves a symlink passed as the
+// explicit root (the caller named that path, exactly as `rg <link>` does);
+// FollowLinks descends into directory symlinks discovered below it. The zero
+// value preserves the historical filepath.WalkDir behaviour of not following
+// any link.
+type ReadTreeOptions struct {
+	FollowRoot  bool
+	FollowLinks bool
+}
+
 // ReadTree walks path up to maxDepth, sorts paths deterministically, and keeps
 // at most limit entries. Directory entries at the depth boundary are skipped
 // without descending, so callers can preserve the long-standing ls contract.
@@ -52,28 +64,8 @@ func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
 	return ReadTreeVia(context.Background(), localio.Access, path, maxDepth, limit)
 }
 
-// ReadTreeVia walks one tree through the I/O seam: the same listing with the
-// filesystem decision taken out of the walk, which is what lets a remote surface
-// share this renderer instead of keeping its own copy of ls.
-//
-// The traversal is specified by what filepath.WalkDir did, not by what is
-// convenient to write here, because the limit truncates *during* collection: which
-// entries were already gathered when the cut landed decides which rows survive, so
-// a listing that is merely "as deep as before" would still be a different answer.
-// Therefore:
-//
-//   - one directory read per directory, which is WalkDir's own cost shape;
-//   - lexical order per directory (ReadDir is sorted), depth-first, a directory
-//     emitted before its contents;
-//   - the root is Lstat-ed first, exactly as filepath.WalkDir did: a file as the
-//     root yields an empty listing with no error, a missing root yields the error
-//     the handler turns into NOT_FOUND, and a symlinked root is NOT followed -
-//     following it would let a listing climb out of the authorized tree;
-//   - a directory that cannot be read is left undescended rather than failing the
-//     listing, because one off-limits subdirectory is a hole in the tree, not an
-//     error in the answer;
-//   - the depth boundary drops the entries sitting on it and does not descend them.
-func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDepth, limit int) (TreeListing, error) {
+// ReadTreeViaWithOptions is ReadTreeVia with the caller's link policy.
+func ReadTreeViaWithOptions(ctx context.Context, access toolcore.Access, path string, maxDepth, limit int, options ReadTreeOptions) (TreeListing, error) {
 	if access == nil {
 		access = localio.Access
 	}
@@ -88,16 +80,31 @@ func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDe
 	}
 
 	listing := TreeListing{}
+	// Lstat is the default because the authorized tree ends at a link. An
+	// explicitly named root may be resolved independently of nested links, so
+	// `ls link-to-dir` lists the target the caller named without turning
+	// follow on for every link found below it.
 	rootInfo, statErr := access.Lstat(ctx, path)
+	if options.FollowRoot || options.FollowLinks {
+		rootInfo, statErr = access.Stat(ctx, path)
+	}
 	if statErr != nil {
 		return TreeListing{}, statErr
 	}
 	if !rootInfo.IsDir() {
 		// WalkDir visited a non-directory root once and dropped it (its relative path
 		// was "."): an empty listing, not an error. A symlink to a directory lands
-		// here too, which is what keeps ls from descending through a link that points
-		// outside the authorized roots.
+		// here when follow is off, which is what keeps ls from descending through a
+		// link that points outside the authorized roots.
 		return listing, nil
+	}
+
+	resolver, _ := access.(toolcore.SymlinkResolver)
+	seenDirs := make(map[string]struct{})
+	if (options.FollowRoot || options.FollowLinks) && resolver != nil {
+		if resolved, err := resolver.EvalLinkPath(ctx, path); err == nil {
+			seenDirs[resolved] = struct{}{}
+		}
 	}
 
 	// stop is the SkipAll equivalent: once the limit has landed the walk collects
@@ -125,7 +132,32 @@ func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDe
 				// not descended: exactly the old SkipDir branch.
 				continue
 			}
-			item := TreeEntry{RelPath: relPath, Depth: depth, Dir: entry.IsDir()}
+			childPath := toolcore.JoinTargetPath(access, dirPath, name)
+			isDir := entry.IsDir()
+			descendDir := isDir
+			if options.FollowLinks && isFollowableLink(entry.Type()) {
+				info, statErr := access.Stat(ctx, childPath)
+				if statErr == nil {
+					isDir = info.IsDir()
+					descendDir = isDir
+				}
+				if isDir {
+					// A link to a directory is listed as a directory. When links can
+					// be resolved, a target already visited by this walk is not
+					// descended again; that is what terminates mutual links and a
+					// link back to the root.
+					if resolver == nil {
+						descendDir = false
+					} else if resolved, resolveErr := resolver.EvalLinkPath(ctx, childPath); resolveErr != nil {
+						descendDir = false
+					} else if _, seen := seenDirs[resolved]; seen {
+						descendDir = false
+					} else {
+						seenDirs[resolved] = struct{}{}
+					}
+				}
+			}
+			item := TreeEntry{RelPath: relPath, Depth: depth, Dir: isDir}
 			listing.Entries = append(listing.Entries, item)
 			if item.Dir {
 				listing.Dirs++
@@ -145,8 +177,8 @@ func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDe
 				stop = true
 				return
 			}
-			if item.Dir {
-				descend(toolcore.JoinTargetPath(access, dirPath, name), relPath, depth+1)
+			if descendDir {
+				descend(childPath, relPath, depth+1)
 			}
 		}
 	}
@@ -162,6 +194,37 @@ func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDe
 	})
 	listing.Total = len(listing.Entries)
 	return listing, nil
+}
+
+// ReadTreeVia walks one tree through the I/O seam: the same listing with the
+// filesystem decision taken out of the walk, which is what lets a remote surface
+// share this renderer instead of keeping its own copy of ls.
+//
+// The traversal is specified by what filepath.WalkDir did, not by what is
+// convenient to write here, because the limit truncates *during* collection: which
+// entries were already gathered when the cut landed decides which rows survive, so
+// a listing that is merely "as deep as before" would still be a different answer.
+// Therefore:
+//
+//   - one directory read per directory, which is WalkDir's own cost shape;
+//   - lexical order per directory (ReadDir is sorted), depth-first, a directory
+//     emitted before its contents;
+//   - the root is Lstat-ed first, exactly as filepath.WalkDir did: a file as the
+//     root yields an empty listing with no error, a missing root yields the error
+//     the handler turns into NOT_FOUND, and a symlinked root is NOT followed -
+//     following it would let a listing climb out of the authorized tree;
+//   - a directory that cannot be read is left undescended rather than failing the
+//     listing, because one off-limits subdirectory is a hole in the tree, not an
+//     error in the answer;
+//   - the depth boundary drops the entries sitting on it and does not descend them.
+func ReadTreeVia(ctx context.Context, access toolcore.Access, path string, maxDepth, limit int) (TreeListing, error) {
+	return ReadTreeViaWithOptions(ctx, access, path, maxDepth, limit, ReadTreeOptions{})
+}
+
+// isFollowableLink recognizes the portable symlink bit and the irregular bit
+// that some Windows Go versions use for reparse-point junctions.
+func isFollowableLink(mode fs.FileMode) bool {
+	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
 }
 
 // RenderTree writes one depth-limited listing in the local tool's shape: a
