@@ -210,7 +210,8 @@ winpty ./aicli.exe chat --compat-mode
   runtime-server.exe start --listen 127.0.0.1:8102 --pid-file logs\runtime-server-win7.pid
   ```
 
-- `win7compat` 构建当前禁用 MCP 集成；需要 MCP 时应在受支持的新系统上运行。
+- `win7compat` 构建当前禁用 MCP 集成（含 `--remote` 与 `remoteTargets` 远程目标声明：
+  前者明确报"不支持"，后者按未声明处理）；需要 MCP 时应在受支持的新系统上运行。
 - 搜索工具找不到外部 `rg.exe` 时会回退到内置扫描器。若自行提供 ripgrep，
   也必须确认该 ripgrep 版本能在 Windows 7 上启动。
 

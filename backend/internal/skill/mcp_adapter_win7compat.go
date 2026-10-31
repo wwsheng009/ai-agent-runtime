@@ -6,13 +6,14 @@ import (
 	"fmt"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // 本文件是 Windows 7 兼容构建（Go 1.21.4 + win7compat tag）下的 MCP 适配器
 // stub。MCP 在 Win7 兼容构建中整体禁用，MCPAdapter 保持与原实现相同的
 // 导出面（FindTool/CallTool/CallToolWithMeta/ListTools/ResolveToolSource/
-// GetManager），全部返回空或"不支持"错误，保证调用方（skills 集成、
-// chat 工具桥）无需改动即可编译。
+// GetManager/WithRuntimeMCPMetadata），全部返回空或"不支持"错误，保证调用
+// 方（skills 集成、chat 工具桥、tools manager 适配器）无需改动即可编译。
 
 // MCPAdapter MCP 适配器
 type MCPAdapter struct {
@@ -52,4 +53,16 @@ func (a *MCPAdapter) ResolveToolSource(toolName string) string {
 // GetManager 获取底层 Manager
 func (a *MCPAdapter) GetManager() manager.Manager {
 	return a.manager
+}
+
+// WithRuntimeMCPMetadata is the win7compat counterpart of the standard build's
+// exported stamp. MCP is disabled in this build, so no tool server can own
+// filesystem paths and the stamp is inert; keeping the same body keeps the
+// tools manager adapter compiling unchanged and the metadata shape identical.
+func WithRuntimeMCPMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata[types.ToolMetadataFSOwnerKey] = types.ToolFSOwnerToolServer
+	return metadata
 }

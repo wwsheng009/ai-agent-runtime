@@ -1,3 +1,5 @@
+//go:build !win7compat
+
 // Package remotetargets expands a declarative `remoteTargets` block into the
 // MCP server entries and per-target tool policy the local runtime consumes.
 //
