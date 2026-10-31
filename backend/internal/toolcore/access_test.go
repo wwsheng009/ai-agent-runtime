@@ -162,6 +162,32 @@ func TestJoinTargetPathFollowsTheAccessorsConvention(t *testing.T) {
 	}
 }
 
+// backslashStyleStub is a Windows-style target: the counterpart of slashStyleStub.
+type backslashStyleStub struct{ styleStubAccess }
+
+func (backslashStyleStub) PathSeparator() rune { return '\\' }
+
+// TestTargetIsWindowsFollowsTheAccessorNotTheProcess pins the question the search surfaces
+// ask before defaulting to "follow links". That default used to be read from runtime.GOOS,
+// which turned a Windows client driving a POSIX target (the envd backend) into a walker
+// that descends directory links the local tool would refuse. The accessor answers; only an
+// accessor that never declared a style keeps the process-OS answer.
+func TestTargetIsWindowsFollowsTheAccessorNotTheProcess(t *testing.T) {
+	if TargetIsWindows(slashStyleStub{}) {
+		t.Fatal("a POSIX accessor must not inherit a Windows process's follow habit")
+	}
+	if !TargetIsWindows(backslashStyleStub{}) {
+		t.Fatal("a Windows-style accessor must answer for its own tree")
+	}
+	hostDefault := runtime.GOOS == "windows"
+	if got := TargetIsWindows(nil); got != hostDefault {
+		t.Fatalf("TargetIsWindows(nil) = %v, want the process convention %v", got, hostDefault)
+	}
+	if got := TargetIsWindows(styleStubAccess{}); got != hostDefault {
+		t.Fatalf("an accessor without a declared style = %v, want %v", got, hostDefault)
+	}
+}
+
 // TestTargetPathHelpersFollowTheAccessorsConvention covers the rest of the family: the
 // ignore subsystem does more than join, and every one of those operations is the same
 // host-or-target question. The POSIX Rel cases are enumerated rather than spot-checked

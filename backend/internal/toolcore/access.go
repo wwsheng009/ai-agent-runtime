@@ -35,6 +35,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -152,6 +153,23 @@ type TargetPathStyle interface {
 	// PathSeparator is the separator the target's filesystem uses: '/' for a POSIX
 	// target, the host's separator for a host target.
 	PathSeparator() rune
+}
+
+// TargetIsWindows reports whether the tree behind an accessor speaks Windows path
+// conventions - the question a search must ask before falling back to "follow links", the
+// way this process historically did on a Windows host.
+//
+// The default belongs to the TREE, not to this process: a Windows client driving a POSIX
+// target (the envd backend) must not inherit the host's junction-following habit, or an
+// ordinary search that never said "follow" would descend through directory links the local
+// tool refuses to follow. An accessor that carries TargetPathStyle answers directly; the
+// local filesystem and backends that have not declared their style keep the process-OS
+// answer they always had, so no local behaviour changes.
+func TargetIsWindows(access Access) bool {
+	if style, ok := access.(TargetPathStyle); ok {
+		return style.PathSeparator() == '\\'
+	}
+	return runtime.GOOS == "windows"
 }
 
 // JoinTargetPath joins a directory with one child name the way the accessor's filesystem

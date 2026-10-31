@@ -3,7 +3,6 @@ package searchcore
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
@@ -371,12 +370,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return ignoreFailure, nil
 	}
 	contextBefore, contextAfter := grepContextFromArgs(call.Args)
-	// On Windows a junction is not a directory to the traversal itself, so this
-	// tool has always followed them unless told otherwise; the same default
-	// belongs in the shared handler because it is the same tree being searched.
+	// On Windows a junction is not a directory to the traversal itself, so this tool
+	// has always followed them unless told otherwise - but that habit belongs to the
+	// TREE, not to this process: a Windows client driving a POSIX backend must not
+	// descend directory links the local tool would refuse. toolcore.TargetIsWindows
+	// asks the accessor and keeps the process-OS answer only when it cannot.
 	follow, followSet := boolArg(call.Args, "follow"), argPresent(call.Args, "follow")
-	if !followSet && runtime.GOOS == "windows" {
-		follow = true
+	if !followSet {
+		follow = toolcore.TargetIsWindows(access)
 	}
 	options := GrepOptions{
 		Patterns:     patterns,
