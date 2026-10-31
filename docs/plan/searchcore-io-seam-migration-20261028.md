@@ -507,7 +507,8 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
   `toolcore.TargetIsWindows(access)`（有 `TargetPathStyle` 问目标，无法回答才回落进程 OS），三处换用；
   离线含双向断言（POSIX 目标默认 false、Windows 风格目标默认 true）与变异反证（还原为进程 OS 时
   三包测试同时红）；真机默认 `follow=false` 已实测（元数据与行为双证，见链接行为 9/9 的默认用例）。
-  本线提交 `216d1ec4`；glob/ls 两处调用点落在他人并发在途的 follow 特性同文件中，随其提交。
+  本线提交 `216d1ec4`；glob/ls 两处调用点已随"链接语义统一"收编落定（`00586100` searchcore /
+  `aa0f990c` lscore——显式根总解析、follow 下沉、rg `--follow` 同步）。
 - **F3（成本现实，记录）**：`glob` 在 `/home/n9e` 级目录撞 20s 搜索预算并如实提示（"未完成、
   收窄重试"）；同树上 `grep` 因早停通常可行。可读性探针只在"mode 显示可能拒"时触发、按调用
   按路径缓存，但大目录走查的 RPC 成本仍是可见的现实。
