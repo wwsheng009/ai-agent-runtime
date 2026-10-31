@@ -286,6 +286,36 @@ jobs:
           set -euo pipefail
           go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory' -count=1
 
+      # win7compat compile smoke (gap found 2026-10-31): the Win7 workflow runs
+      # only on win7-* tags and manual dispatch, so a win7 build break sits
+      # invisible on main until someone cuts a Win7 release — the 2026-10-22
+      # break stayed unnoticed for 9 days. Compile the three shipped win7
+      # targets here with the same pinned toolchain/modfile as that workflow.
+      - name: Setup Go ${{ env.WIN7_GO_VERSION }} for the win7compat smoke
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.WIN7_GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.win7.sum
+
+      - name: Verify Windows 7 compatible build compiles
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/win7-smoke
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
+            -o /tmp/win7-smoke/aicli-smoke.exe ${CMD_PATH}
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
+            -o /tmp/win7-smoke/aicli-console-smoke.exe ${CONSOLE_CMD_PATH}
+          GOFLAGS="-modfile=${{ env.WIN7_MODFILE }}" \
+            go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
+            -o /tmp/win7-smoke/runtime-server-smoke.exe ${RUNTIME_SERVER_CMD_PATH}
+
   build-frontend:
     name: Build embedded frontend (webui dist)
     runs-on: ubuntu-latest
