@@ -87,6 +87,20 @@ func TestAttentionNoticeForEventMapping(t *testing.T) {
 	}
 }
 
+func TestAcceptsNoticeSuppressLocal(t *testing.T) {
+	bound := func(SessionRef) bool { return true }
+	policy := Policy{Notify: NotifyPolicy{SuppressLocal: true}}
+	for _, kind := range []string{AttentionKindApproval, AttentionKindQuestion, AttentionKindCompletion, "error", "waiting"} {
+		if policy.AcceptsNotice(AttentionNotice{Kind: kind, Session: SessionRef{SessionID: "s1"}}, bound) {
+			t.Fatalf("kind %q must be suppressed after handoff", kind)
+		}
+	}
+	policy.Notify.SuppressLocal = false
+	if !policy.AcceptsNotice(AttentionNotice{Kind: AttentionKindApproval, Session: SessionRef{SessionID: "s1"}}, bound) {
+		t.Fatal("approval must remain always-on for bound sessions when not handed off")
+	}
+}
+
 func TestAttentionDeduperEvictsOldest(t *testing.T) {
 	dedupe := newAttentionDeduper(2)
 	if !dedupe.first("a") || dedupe.first("a") {
@@ -113,9 +127,9 @@ func TestAttentionNoticeForProjection(t *testing.T) {
 		{"question", true, AttentionKindQuestion},
 		{"error", true, "error"},
 		{"completed", true, AttentionKindCompletion},
-		{"waiting", false, ""},   // 托管挂起不推（避免与 completed 双推）
-		{"unknown", false, ""},   // 未知 kind 保守跳过
-		{"", false, ""},          // 空 kind 不推
+		{"waiting", false, ""}, // 托管挂起不推（避免与 completed 双推）
+		{"unknown", false, ""}, // 未知 kind 保守跳过
+		{"", false, ""},        // 空 kind 不推
 		{"  approval  ", true, AttentionKindApproval},
 	}
 	for _, tc := range cases {
@@ -193,6 +207,53 @@ func TestSubscribeAttentionForwardWanted(t *testing.T) {
 	case n := <-notifyCalls:
 		t.Fatalf("local notify must be suppressed for unbound+sessions scope, got %+v", n)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestSubscribeAttentionGatewaySuppression 锁定自动归属：被网关接管的
+// (session, kind) 不得进入本地出站队列；未接管的 kind 照常投递。
+func TestSubscribeAttentionGatewaySuppression(t *testing.T) {
+	bus := runtimeevents.NewBusWithRetention(16)
+	calls := make(chan AttentionNotice, 4)
+	sub := SubscribeAttention(context.Background(), AttentionDeps{
+		Subscribe: func(handler func(runtimeevents.Event)) func() {
+			return bus.SubscribeCancelable(runtimechat.EventApprovalRequested, handler)
+		},
+		Suppressed: func(sessionID, kind string) bool {
+			return sessionID == "s-suppressed" && kind == AttentionKindApproval
+		},
+		Notify: func(_ context.Context, notice AttentionNotice) error {
+			calls <- notice
+			return nil
+		},
+	})
+	defer sub()
+
+	bus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "s-suppressed",
+		Timestamp: time.Now(),
+		Payload:   map[string]any{"request_id": "apr-suppressed"},
+	})
+	select {
+	case n := <-calls:
+		t.Fatalf("suppressed notice must not be delivered: %+v", n)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	bus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "s-allowed",
+		Timestamp: time.Now(),
+		Payload:   map[string]any{"request_id": "apr-allowed"},
+	})
+	select {
+	case n := <-calls:
+		if n.Session.SessionID != "s-allowed" {
+			t.Fatalf("allowed notice = %+v", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("non-suppressed notice must be delivered")
 	}
 }
 

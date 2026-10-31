@@ -138,6 +138,10 @@ type connectorRecord struct {
 	Name     string `json:"name,omitempty"`
 	Enabled  bool   `json:"enabled"`
 	Mode     string `json:"mode,omitempty"`
+	// RuntimeMode/Origin* 仅网关复制副本使用（见 connectors.Config）。
+	RuntimeMode       string `json:"runtime_mode,omitempty"`
+	OriginNodeID      string `json:"origin_node_id,omitempty"`
+	OriginConnectorID string `json:"origin_connector_id,omitempty"`
 	// 生命周期时间戳（RFC3339 UTC；零值省略 = 旧数据未打戳）。
 	CreatedAt time.Time         `json:"created_at,omitempty"`
 	UpdatedAt time.Time         `json:"updated_at,omitempty"`
@@ -170,9 +174,10 @@ type routeRecord struct {
 
 // notifyRecord 是 D5 事件通知接收配置（docs/bots/09 §7.4.1）。
 type notifyRecord struct {
-	Enabled bool     `json:"enabled"`
-	Kinds   []string `json:"kinds,omitempty"`
-	Scope   string   `json:"scope,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	SuppressLocal bool     `json:"suppress_local,omitempty"`
+	Kinds         []string `json:"kinds,omitempty"`
+	Scope         string   `json:"scope,omitempty"`
 }
 
 // eventsRecord 是 S2 声明式事件订阅（docs/bots/13 §6.1）。
@@ -197,15 +202,18 @@ type sessionsRecord struct {
 
 func recordFromConfig(cfg connectors.Config) connectorRecord {
 	record := connectorRecord{
-		ID:        strings.TrimSpace(cfg.ID),
-		Provider:  strings.TrimSpace(cfg.Provider),
-		Name:      strings.TrimSpace(cfg.Name),
-		Enabled:   cfg.Enabled,
-		Mode:      strings.TrimSpace(cfg.Mode),
-		CreatedAt: cfg.CreatedAt,
-		UpdatedAt: cfg.UpdatedAt,
-		Settings:  cfg.Settings,
-		Secrets:   cfg.Secrets,
+		ID:                strings.TrimSpace(cfg.ID),
+		Provider:          strings.TrimSpace(cfg.Provider),
+		Name:              strings.TrimSpace(cfg.Name),
+		Enabled:           cfg.Enabled,
+		Mode:              strings.TrimSpace(cfg.Mode),
+		RuntimeMode:       strings.TrimSpace(cfg.RuntimeMode),
+		OriginNodeID:      strings.TrimSpace(cfg.OriginNodeID),
+		OriginConnectorID: strings.TrimSpace(cfg.OriginConnectorID),
+		CreatedAt:         cfg.CreatedAt,
+		UpdatedAt:         cfg.UpdatedAt,
+		Settings:          cfg.Settings,
+		Secrets:           cfg.Secrets,
 	}
 	if len(cfg.Policy.AllowedUsers) > 0 {
 		record.Policy.AllowedUsers = append([]string(nil), cfg.Policy.AllowedUsers...)
@@ -222,11 +230,12 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 			ReasoningEffort: strings.TrimSpace(cfg.Policy.Route.ReasoningEffort),
 		}
 	}
-	if cfg.Policy.Notify.Enabled {
+	if cfg.Policy.Notify.Enabled || cfg.Policy.Notify.SuppressLocal {
 		record.Policy.Notify = &notifyRecord{
-			Enabled: true,
-			Kinds:   append([]string(nil), cfg.Policy.Notify.Kinds...),
-			Scope:   strings.TrimSpace(cfg.Policy.Notify.Scope),
+			Enabled:       cfg.Policy.Notify.Enabled,
+			SuppressLocal: cfg.Policy.Notify.SuppressLocal,
+			Kinds:         append([]string(nil), cfg.Policy.Notify.Kinds...),
+			Scope:         strings.TrimSpace(cfg.Policy.Notify.Scope),
 		}
 	}
 	if cfg.Policy.Events.Enabled && len(cfg.Policy.Events.Subscriptions) > 0 {
@@ -250,15 +259,18 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 
 func (r connectorRecord) toConfig() connectors.Config {
 	config := connectors.Config{
-		ID:        strings.TrimSpace(r.ID),
-		Provider:  strings.TrimSpace(r.Provider),
-		Name:      strings.TrimSpace(r.Name),
-		Enabled:   r.Enabled,
-		Mode:      strings.TrimSpace(r.Mode),
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
-		Settings:  r.Settings,
-		Secrets:   r.Secrets,
+		ID:                strings.TrimSpace(r.ID),
+		Provider:          strings.TrimSpace(r.Provider),
+		Name:              strings.TrimSpace(r.Name),
+		Enabled:           r.Enabled,
+		Mode:              strings.TrimSpace(r.Mode),
+		RuntimeMode:       strings.TrimSpace(r.RuntimeMode),
+		OriginNodeID:      strings.TrimSpace(r.OriginNodeID),
+		OriginConnectorID: strings.TrimSpace(r.OriginConnectorID),
+		CreatedAt:         r.CreatedAt,
+		UpdatedAt:         r.UpdatedAt,
+		Settings:          r.Settings,
+		Secrets:           r.Secrets,
 		Policy: connectors.Policy{
 			CommandPrefix: strings.TrimSpace(r.Policy.CommandPrefix),
 			AllowedUsers:  r.Policy.AllowedUsers,
@@ -277,9 +289,10 @@ func (r connectorRecord) toConfig() connectors.Config {
 	}
 	if r.Policy.Notify != nil {
 		config.Policy.Notify = connectors.NotifyPolicy{
-			Enabled: r.Policy.Notify.Enabled,
-			Kinds:   r.Policy.Notify.Kinds,
-			Scope:   strings.TrimSpace(r.Policy.Notify.Scope),
+			Enabled:       r.Policy.Notify.Enabled,
+			SuppressLocal: r.Policy.Notify.SuppressLocal,
+			Kinds:         r.Policy.Notify.Kinds,
+			Scope:         strings.TrimSpace(r.Policy.Notify.Scope),
 		}
 	}
 	if r.Policy.Events != nil {

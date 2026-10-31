@@ -92,6 +92,12 @@ func NewRouter(deps Deps) http.Handler {
 	// scope=all 广播经此进入本宿主（入口内再做本地 D5 过滤）。
 	router.HandleFunc("/connectors/attention", handlers.attentionInlet).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}", handlers.get).Methods(http.MethodGet)
+	// 节点 → 网关的显式 bot 配置移交（QQ/微信）：只读视图不含密钥，复制走
+	// 这条一次性通道；网关导入成功后调用 confirm 关闭节点本地通知。
+	router.HandleFunc("/connectors/{id}/handoff", handlers.handoff).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/handoff/confirm", handlers.handoffConfirm).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/handoff/rollback", handlers.handoffRollback).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/state/context-tokens", handlers.contextTokensState).Methods(http.MethodGet)
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)
 	router.HandleFunc("/connectors/{id}", handlers.remove).Methods(http.MethodDelete)

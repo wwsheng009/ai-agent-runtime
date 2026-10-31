@@ -1076,8 +1076,11 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 		policy["route"] = route
 	}
 	// D5（docs/bots/09 §7.4.1）：notify 缺省零值不落盘（保持文件最小噪音）。
-	if cfg.Policy.Notify.Enabled {
-		notify := map[string]interface{}{"enabled": true}
+	if cfg.Policy.Notify.Enabled || cfg.Policy.Notify.SuppressLocal {
+		notify := map[string]interface{}{"enabled": cfg.Policy.Notify.Enabled}
+		if cfg.Policy.Notify.SuppressLocal {
+			notify["suppress_local"] = true
+		}
 		if len(cfg.Policy.Notify.Kinds) > 0 {
 			kinds := make([]interface{}, 0, len(cfg.Policy.Notify.Kinds))
 			for _, kind := range cfg.Policy.Notify.Kinds {
@@ -1157,6 +1160,7 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 		}
 		if notifyRaw, ok := policyRaw["notify"].(map[string]interface{}); ok {
 			policy.Notify.Enabled = anyToBool(notifyRaw["enabled"])
+			policy.Notify.SuppressLocal = anyToBool(notifyRaw["suppress_local"])
 			policy.Notify.Kinds = anyToStringSlice(notifyRaw["kinds"])
 			policy.Notify.Scope = anyToString(notifyRaw["scope"])
 		}

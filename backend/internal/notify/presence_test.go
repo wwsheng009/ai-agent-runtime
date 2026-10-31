@@ -94,6 +94,33 @@ func TestDispatcherPresenceGateRequiresNodeAndSession(t *testing.T) {
 	}
 }
 
+// TestDispatcherPresenceExemptIM 锁定运维 IM target 的 ignore_presence 语义：
+// 控制台正在看会话时，IM 仍投递；push 等其它通道仍被在场门静音。
+func TestDispatcherPresenceExemptIM(t *testing.T) {
+	im := &notifyTestChannel{name: "im"}
+	push := &notifyTestChannel{name: "webpush"}
+	ledger := NewMemoryLedger(8)
+	d := NewDispatcher(ledger, im, push)
+	d.SetPresence(PresenceFunc(func(nodeID, sessionID string) bool { return true }))
+
+	ev := EventFor("error", "n1|s1", notifyTestNote("ops"))
+	ev.Node, ev.Session = "n1", "s1"
+	ev.IMPresenceExempt = true
+	r, err := d.Dispatch(context.Background(), ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Suppressed {
+		t.Fatalf("IM ignore_presence 不应被在场门整体抑制：%+v", r)
+	}
+	if len(im.calls) != 1 {
+		t.Fatalf("IM 应投递一次，实际 %d", len(im.calls))
+	}
+	if len(push.calls) != 0 {
+		t.Fatalf("push 仍应被在场门静音，实际 %d", len(push.calls))
+	}
+}
+
 // —— G3 静默/合并下沉内核（docs/bots/12-notify-consolidation-plan.md §4 G3 / §3 D3）——
 
 // TestDispatcherQuietHoursMutesNormal 锁定静默门语义：窗口内 normal 被丢弃

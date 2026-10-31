@@ -103,6 +103,13 @@ type AttentionDeps struct {
 	// Subscribe 订阅注意力事件，返回退订函数；nil 表示事件总线不可用
 	//（连接器退化为仅命令/回复闭环）。
 	Subscribe func(handler func(runtimeevents.Event)) func()
+	// Disabled 关闭本宿主的 attention 通知出站（P2）：节点只处理入站/命令，
+	// 通知由网关统一发送（AICLI_CONNECTOR_NOTIFY_OWNER=gateway）。
+	Disabled bool
+	// Suppressed 报告某会话/kind 的本地自动通知是否已由网关接管（默认
+	// connectors.GatewaySuppresses）。nil = 不抑制；网关断开时宿主会清空
+	// 规则，本地发送自动恢复。
+	Suppressed func(sessionID, kind string) bool
 	// Parked 报告会话是否处于 §6.12 托管挂起（run 结束 ≠ 托管 turn 结束）；
 	// 可 nil（按未挂起处理）。
 	Parked func(sessionID string) bool
@@ -377,6 +384,12 @@ func digestNoticeKind(kinds map[string]int) string {
 //
 // 返回退订函数；ctx 取消（宿主 close）时自动退订并停止 worker。
 func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
+	if deps.Disabled {
+		if deps.Logf != nil {
+			deps.Logf("connector notifications disabled on this host (owner=gateway): inbound/commands only")
+		}
+		return func() {}
+	}
 	if deps.Subscribe == nil || (deps.Notify == nil && deps.NotifyScoped == nil) {
 		return func() {}
 	}
@@ -443,7 +456,16 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 	}()
 	unsubscribe := deps.Subscribe(func(event runtimeevents.Event) {
 		notice, key, ok := AttentionNoticeForEvent(event, deps.Parked)
-		if !ok || !dedupe.first(key) {
+		if !ok {
+			return
+		}
+		// 网关接管判定（P2 自动版）：source=node target 会委托节点 bot 出站，
+		// 本地订阅若再发一次就是同一 (通道实例, chat, 事件) 的重复投递。
+		// 必须在 dedupe.first 之前判断，避免被抑制的事件占用去重键。
+		if deps.Suppressed != nil && deps.Suppressed(notice.Session.SessionID, notice.Kind) {
+			return
+		}
+		if !dedupe.first(key) {
 			return
 		}
 		subEvent, _ := subscriptionEventFor(event.Type)
@@ -456,10 +478,16 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		targets := make([]attentionTarget, 0, 2)
 		digestHits := make([]digestHit, 0, 2)
 		anyBoundAccepted := false
-		forwardWanted := deps.Forward != nil
+		// 有 store 时必须由某个启用 bot 明确表达广播意愿才转发；无 store 的
+		// 纯测试口径沿用“有 Forward 即转发”。SuppressLocal 的连接器不贡献意愿。
+		forwardWanted := deps.Forward != nil && deps.Store == nil
 		if deps.Store != nil {
 			for _, cfg := range deps.Store.ListConfigs() {
 				if !cfg.Enabled {
+					continue
+				}
+				if cfg.Policy.Notify.SuppressLocal {
+					// 通知出站已移交给网关副本：不本地发，也不向 mesh peers 转发。
 					continue
 				}
 				// 绑定反查按 SessionID（与 13 的会话选择器口径一致；绑定数
@@ -488,7 +516,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 				// 转发意愿：任一 bot 的 notify.enabled 或 events.enabled（无论
 				// scope/kinds 命中与否——过滤是本宿主出站粒度，对端有自己的
 				// 词表；enabled 是「这个 bot 想收广播」的意愿位）。
-				if cfg.Policy.Notify.Enabled || cfg.Policy.Events.Enabled {
+				if !cfg.Policy.Notify.SuppressLocal && (cfg.Policy.Notify.Enabled || cfg.Policy.Events.Enabled) {
 					forwardWanted = true
 				}
 			}
