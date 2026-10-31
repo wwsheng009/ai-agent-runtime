@@ -217,6 +217,18 @@ jobs:
           go build -trimpath -o /tmp/aicli-cgo0-check ${CMD_PATH}
           /tmp/aicli-cgo0-check version
 
+      # Full-tree build gate: a half-committed caller/definition pair (a commit
+      # that lands one file without its companion, e.g. a package that starts
+      # using a field or constant committed later) leaves HEAD unbuildable while
+      # the author's worktree hides it. Package-scoped steps here miss it when
+      # nothing they compile imports the broken package; this mirrors the clean
+      # "go build ./..." check used to find those breaks.
+      - name: Verify full-tree build (go build ./...)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go build ./...
+
       # Mesh CLI gate (docs/aicli/mesh-cli.md): the operations tool must keep
       # its unit tests green, must build, and must answer --help / version / an
       # empty-mesh ls without a mesh root present (fail-closed, exit 0).
