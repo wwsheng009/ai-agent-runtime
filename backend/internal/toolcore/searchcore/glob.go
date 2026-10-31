@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -74,6 +73,13 @@ type GlobOptions struct {
 	// this machine's filesystem, exactly like GrepOptions.Access: an unconverted
 	// caller keeps the behaviour it always had.
 	Access toolcore.Access
+	// Follow descends through symlinks that resolve to directories and lets
+	// links that resolve to files participate in the match set. Both engines
+	// implement it with cycle protection, so a linked source tree is visible no
+	// matter whether ripgrep is installed. An explicitly supplied Base is always
+	// resolved (the caller named it, exactly as `rg <link>` does); Follow only
+	// controls links discovered while walking below that root.
+	Follow bool
 }
 
 // GlobWithOptions runs one glob. The pattern is expanded for shell braces
@@ -214,8 +220,10 @@ func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) 
 }
 
 // walkGlobMatches is the shared pure-Go traversal. It unions the brace
-// alternatives, keeps directories when the caller allows them, never follows a
-// symlink, and returns what it collected when the budget expires.
+// alternatives, keeps directories when the caller allows them, follows links
+// only when asked, and returns what it collected when the budget expires. The
+// base itself is always resolved, matching ripgrep's treatment of an explicit
+// path argument; Follow is about links discovered below it.
 func walkGlobMatches(ctx context.Context, access toolcore.Access, base string, patterns []string, fetchLimit int, opts GlobOptions) ([]string, bool, error) {
 	matchers := make([]*GlobMatcher, 0, len(patterns))
 	for _, pattern := range patterns {
@@ -231,7 +239,7 @@ func walkGlobMatches(ctx context.Context, access toolcore.Access, base string, p
 	timedOut := false
 	// WalkDir reports the root itself; it is not a candidate (a glob pattern
 	// describes children of the base, never the base).
-	walkErr := walkViaAccess(ctx, access, base, func(path string, entry fs.DirEntry, err error) error {
+	onEntry := func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			// Unreadable subtrees are skipped, not fatal: a permission error on
 			// one directory must not hide the rest of the tree.
@@ -244,10 +252,11 @@ func walkGlobMatches(ctx context.Context, access toolcore.Access, base string, p
 		if path == base {
 			return nil
 		}
-		// Traversal never follows links. A discovered link can point outside
-		// the admitted root, so listing it would leak paths the path jail has
-		// not resolved.
-		if entry.Type()&os.ModeSymlink != 0 {
+		// Without follow, a discovered link is skipped: it can point outside the
+		// admitted root. With follow enabled, the generic link walker replaces
+		// it with the target's shape before this callback runs, under the link's
+		// own path.
+		if !opts.Follow && isFollowableLinkEntry(entry) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(base, path)
@@ -282,7 +291,14 @@ func walkGlobMatches(ctx context.Context, access toolcore.Access, base string, p
 			return filepath.SkipAll
 		}
 		return nil
-	})
+	}
+	var walkErr error
+	if opts.Follow {
+		resolver, _ := access.(toolcore.SymlinkResolver)
+		walkErr = walkFollowingLinks(ctx, access, resolver, base, onEntry)
+	} else {
+		walkErr = walkViaAccessFollowingRoot(ctx, access, base, onEntry)
+	}
 	if walkErr != nil && walkErr != filepath.SkipAll {
 		return nil, false, walkErr
 	}

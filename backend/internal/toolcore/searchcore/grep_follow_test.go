@@ -71,6 +71,36 @@ func TestWalkerFollowsLinksOnlyWhenAsked(t *testing.T) {
 	}
 }
 
+// An explicitly named root is resolved even with follow=false, matching rg's
+// treatment of a path argument. follow remains the switch for links discovered
+// below that root (covered by TestWalkerFollowsLinksOnlyWhenAsked).
+func TestWalkerSearchesSymlinkedRootWithoutFollow(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "note.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "linked-root")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this host cannot create symlinks (privileges?): %v", err)
+	}
+
+	result, err := Grep(context.Background(), GrepOptions{Pattern: "needle", Path: link, Limit: 10})
+	if err != nil {
+		t.Fatalf("walker grep failed: %v", err)
+	}
+	if len(result.Matches) != 1 {
+		t.Fatalf("follow=false linked-root matches = %+v, want one", result.Matches)
+	}
+	got := filepath.ToSlash(result.Matches[0].File)
+	if !strings.HasPrefix(got, filepath.ToSlash(link)) || !strings.HasSuffix(got, "note.txt") {
+		t.Fatalf("match path = %q, want it under the named link root", got)
+	}
+}
+
 func containsGrepFile(files []string, want string) bool {
 	for _, file := range files {
 		if file == want {

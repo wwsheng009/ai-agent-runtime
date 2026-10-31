@@ -756,19 +756,21 @@ func appendGrepLineEntries(result *GrepResult, compiled *regexp.Regexp, opts Gre
 	return GrepPageComplete(result.Matches, mode, opts)
 }
 
-// grepWalkRoot walks one search root. Without follow this is exactly
-// filepath.WalkDir; with follow the traversal also descends through links that
-// resolve to directories, which is what `rg --follow` does - and a link cycle
-// terminates instead of recursing forever.
+// grepWalkRoot walks one search root. The explicitly named root is always
+// resolved, matching ripgrep's handling of an explicit path argument. Follow
+// controls only links discovered below it: with follow the traversal also
+// descends through links that resolve to directories, which is what
+// `rg --follow` does - and a link cycle terminates instead of recursing
+// forever.
 func grepWalkRoot(ctx context.Context, access toolcore.Access, root string, follow bool, onEntry func(path string, entry os.DirEntry, err error) error) error {
 	if !follow {
-		return walkViaAccess(ctx, access, root, onEntry)
+		return walkViaAccessFollowingRoot(ctx, access, root, onEntry)
 	}
 	// The capability is asked for when a link actually needs resolving, not up front. That
-	// is not a convenience: this handler turns follow on by default on Windows (a junction
-	// is not a directory to the traversal), so refusing up front would deny every local and
-	// every link-free remote search a feature it never needed. A tree without links never
-	// asks the question.
+	// is not a convenience: this handler turns follow on by default for a Windows-style
+	// target (a junction is not a directory to the traversal there), so refusing up front
+	// would deny every such search a feature a link-free tree never needed anyway. A tree
+	// without links never asks the question.
 	resolver, _ := access.(toolcore.SymlinkResolver)
 	return walkGrepFollowing(ctx, access, resolver, root, onEntry)
 }
@@ -801,6 +803,10 @@ func grepWalkRoot(ctx context.Context, access toolcore.Access, root string, foll
 // check, or identify a directory by path+size+mtime - would trade a refusal for a
 // confidently wrong answer.
 func walkGrepFollowing(ctx context.Context, access toolcore.Access, resolver toolcore.SymlinkResolver, root string, onEntry func(path string, entry os.DirEntry, err error) error) error {
+	return walkFollowingLinks(ctx, access, resolver, root, onEntry)
+}
+
+func walkFollowingLinks(ctx context.Context, access toolcore.Access, resolver toolcore.SymlinkResolver, root string, onEntry func(path string, entry os.DirEntry, err error) error) error {
 	rootInfo, statErr := access.Stat(ctx, root)
 	if statErr != nil {
 		// Match WalkDir: report the error to the callback and stop.
@@ -853,7 +859,7 @@ func walkGrepFollowing(ctx context.Context, access toolcore.Access, resolver too
 		path := toolcore.JoinTargetPath(access, frame.dir, entry.Name())
 
 		isDir := entry.IsDir()
-		if entry.Type()&os.ModeSymlink != 0 {
+		if isFollowableLinkEntry(entry) {
 			info, statErr := access.Stat(ctx, path)
 			if statErr != nil {
 				continue

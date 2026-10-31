@@ -262,6 +262,9 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	// stays explicit here until its hidden policy is parameterized too, and it
 	// keeps ignoring nothing (the same policy the local glob tool has).
 	args = append(args, "--hidden", "--no-ignore")
+	if opts.Follow {
+		args = append(args, "--follow")
+	}
 	args = append(args, "--", ".")
 	// Readers take the first N lines ripgrep prints. That is sound only while the
 	// output order is the page order: with --sort path, the first N lines are the

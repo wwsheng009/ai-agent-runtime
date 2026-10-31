@@ -14,6 +14,15 @@ import (
 // unchanged.
 type seamWalkFunc func(path string, entry fs.DirEntry, err error) error
 
+// isFollowableLinkEntry recognizes both a symbolic link and the irregular
+// reparse shape some Windows Go versions report for NTFS junctions.
+func isFollowableLinkEntry(entry fs.DirEntry) bool {
+	if entry == nil {
+		return false
+	}
+	return entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
 // walkViaAccess is filepath.WalkDir over an accessor, reproduced against the standard
 // library's own text rather than from memory, because traversal order is not a cosmetic
 // property in this package: paging, the fetch limit and the early `SkipAll` are all
@@ -37,6 +46,29 @@ type seamWalkFunc func(path string, entry fs.DirEntry, err error) error
 // sentinels.
 func walkViaAccess(ctx context.Context, access toolcore.Access, root string, onEntry seamWalkFunc) error {
 	info, err := access.Lstat(ctx, root)
+	if err != nil {
+		err = onEntry(root, nil, err)
+	} else {
+		err = walkViaAccessEntry(ctx, access, root, fs.FileInfoToDirEntry(info), onEntry)
+	}
+	if err == filepath.SkipDir || err == filepath.SkipAll {
+		return nil
+	}
+	return err
+}
+
+// walkViaAccessFollowingRoot is walkViaAccess for an explicitly named root.
+// The caller asked for this exact path, so a symlink at the root is resolved
+// with Stat and its target is walked; links discovered below it are still
+// Lstat-ed and remain opaque unless the caller also enabled Follow.
+//
+// This split is what keeps the walker aligned with ripgrep: an explicit path
+// argument is followed even without --follow, while --follow only decides
+// whether links found during traversal are entered. The root is admitted by
+// the sandbox before this function runs, so following it does not widen the
+// authorized tree on its own.
+func walkViaAccessFollowingRoot(ctx context.Context, access toolcore.Access, root string, onEntry seamWalkFunc) error {
+	info, err := access.Stat(ctx, root)
 	if err != nil {
 		err = onEntry(root, nil, err)
 	} else {

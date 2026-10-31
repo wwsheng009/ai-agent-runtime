@@ -55,6 +55,10 @@ func GlobParameters() map[string]interface{} {
 				"default":     0,
 				"minimum":     0,
 			},
+			"follow": map[string]interface{}{
+				"type":        "boolean",
+				"description": "是否跟随遍历中发现的符号链接目录（默认随目标平台：Windows 目标为 true，POSIX 目标为 false）。显式传入的 path 本身若为链接，总是按该路径读取（与 rg 的显式路径语义一致）；follow 只控制该根目录之下的子链接。链接目录按链接自身的路径参与匹配并下钻；链接文件也参与匹配。walker 与 rg 引擎都带环路保护。",
+			},
 		},
 		"required": []string{"pattern"},
 	}
@@ -164,6 +168,14 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 
 	engine := "walker"
 	caseInsensitive := boolArg(call.Args, "case_insensitive", "ignore_case")
+	follow, followSet := boolArg(call.Args, "follow"), argPresent(call.Args, "follow")
+	if !followSet {
+		// The junction-following default belongs to the TREE, not to this process: a
+		// Windows client driving a POSIX backend must not inherit the host's habit.
+		// toolcore.TargetIsWindows asks the accessor and keeps the process-OS answer
+		// only when the accessor cannot declare a style.
+		follow = toolcore.TargetIsWindows(access)
+	}
 	options := GlobOptions{
 		Base:            base,
 		Pattern:         pattern,
@@ -178,6 +190,7 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// answer rather than a degraded one.
 		SortByModTime: true,
 		Access:        access,
+		Follow:        follow,
 	}
 	// One budget covers both engines: the walker and ripgrep must stop at the
 	// same deadline, otherwise a slow listing would change behavior based only
@@ -216,6 +229,7 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"limit":            limit,
 		"offset":           offset,
 		"case_insensitive": caseInsensitive,
+		"follow":           follow,
 		"count":            len(rendered),
 		"returned_count":   len(rendered),
 		"files":            append([]string(nil), rendered...),
