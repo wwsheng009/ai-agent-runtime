@@ -219,11 +219,38 @@ type MountLimits struct {
 
 // MountLabels carries display-only metadata for the console. It is never used
 // for routing or authorization.
+//
+// The gateway treats every field as untrusted display text: values are bounded
+// before they are persisted/listed, and the console renders them with
+// textContent (never HTML). Older nodes omit the newer fields, so consumers must
+// treat them as optional.
 type MountLabels struct {
 	Profile    string `json:"profile,omitempty"`
 	ToolPrefix string `json:"tool_prefix,omitempty"`
 	TargetName string `json:"target_name,omitempty"`
 	Workspace  string `json:"workspace,omitempty"`
+	// Hostname/OS/Arch/Version/Instance describe the reporting node. They are
+	// copied into the mount record so the MCP page does not need a second lookup
+	// against the node registry.
+	Hostname string `json:"hostname,omitempty"`
+	OS       string `json:"os,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Instance string `json:"instance,omitempty"`
+	Backend  string `json:"backend,omitempty"`
+	// ReadOnly is the effective hard filter, which may differ from Profile
+	// (readOnly=true turns profile all/ops into a read-only surface).
+	ReadOnly bool `json:"read_only,omitempty"`
+	// ToolCount is the full exposed-tool count. Tools may be capped for wire
+	// size, so the console should prefer ToolCount for the headline number.
+	ToolCount int `json:"tool_count,omitempty"`
+	// Tools is the model-visible tool list for this node's own MCP endpoint.
+	// Additional forwarded mounts leave it empty because their surface is not
+	// known without probing the upstream.
+	Tools []string `json:"tools,omitempty"`
+	// Roots is the effective directory allowlist (workspace included). It is
+	// display-only; the gateway never authorizes a path from it.
+	Roots []string `json:"roots,omitempty"`
 }
 
 // MountAck reports one mount's registration outcome. PublicURL is populated for

@@ -103,6 +103,38 @@ func TestDecodePayloadRoundTripRegisterAck(t *testing.T) {
 	}
 }
 
+func TestMountLabelsRoundTripDisplayMetadata(t *testing.T) {
+	in := MountLabels{
+		Profile:    "all",
+		ToolPrefix: "remote_dev",
+		Workspace:  "E:/proj",
+		Hostname:   "build-host",
+		OS:         "windows",
+		Arch:       "amd64",
+		Version:    "0.1.0",
+		Instance:   "auto-build-host-1234",
+		Backend:    "local",
+		ReadOnly:   true,
+		ToolCount:  2,
+		Tools:      []string{"remote_dev__view", "remote_dev__grep"},
+		Roots:      []string{"E:/proj", "E:/shared"},
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got MountLabels
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Hostname != in.Hostname || got.OS != in.OS || got.Arch != in.Arch ||
+		got.Version != in.Version || got.Instance != in.Instance ||
+		got.Backend != in.Backend || got.ReadOnly != in.ReadOnly ||
+		got.ToolCount != in.ToolCount || len(got.Tools) != 2 || len(got.Roots) != 2 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
 func TestDecodePayloadNonJSON(t *testing.T) {
 	f := Frame{Type: TypeStreamData, Payload: []byte("raw")}
 	if _, err := DecodePayload[Hello](f); err == nil {
