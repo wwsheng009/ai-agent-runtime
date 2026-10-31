@@ -14,3 +14,10 @@
 // 约束：这些模块保持 ES5 风格（var + function），不引入 let/const/箭头/class。
 export const S = {};
 export const G = {};
+
+// 诊断钩子：URL 带 ?debugRuntime=1 时把共享面挂到 window.__GWRT，便于真浏览器
+// 冒烟与排查"改动没落盘 / 某个模块没注册"这类问题。默认关闭，不改变运行期行为
+// （同源脚本本来就能读到这些 DOM 状态，暴露面不变）。
+if (typeof location !== "undefined" && /(^|[?&])debugRuntime=1(&|$)/.test(location.search || "")) {
+  window.__GWRT = { S: S, G: G };
+}

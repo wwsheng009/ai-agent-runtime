@@ -20,6 +20,63 @@ func policyKinds(kinds ...string) *[]string {
 	return &out
 }
 
+// TestNotifyPolicyCompletedContentOptions 锁定「已完成通知附带最后一条助手回复」
+// 的策略解析（docs/gateway/08-notifications.md §5.1）：缺省 = 关闭 + 200 字符；
+// global 可设且随文件热加载；非 global 层级与越界长度一律拒绝（400 语义），
+// 且失败不覆盖当前生效值。
+func TestNotifyPolicyCompletedContentOptions(t *testing.T) {
+	dir := t.TempDir()
+	src := newNotifyPolicySource(
+		filepath.Join(dir, "notify-policy.json"),
+		filepath.Join(dir, "notify-prefs.json"),
+	)
+	if err := src.Load(); err != nil {
+		t.Fatalf("load default: %v", err)
+	}
+	if opts := src.ContentOptions(); opts.CompletedIncludeLastMessage ||
+		opts.LastMessageMaxChars != notifyDefaultLastMessageMaxChars {
+		t.Fatalf("defaults = %+v, want off + %d", opts, notifyDefaultLastMessageMaxChars)
+	}
+
+	on, limit := true, 640
+	if err := src.Apply(notifyPolicyFile{Global: notifyPolicyScope{
+		CompletedIncludeLastMessage:  &on,
+		CompletedLastMessageMaxChars: &limit,
+	}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if opts := src.ContentOptions(); !opts.CompletedIncludeLastMessage || opts.LastMessageMaxChars != 640 {
+		t.Fatalf("effective = %+v, want on + 640", opts)
+	}
+	// GET 视图必须带回这两个字段：控制台据此渲染开关与上限输入框。
+	view, err := src.CurrentView()
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if view.Global.CompletedIncludeLastMessage == nil || !*view.Global.CompletedIncludeLastMessage ||
+		view.Global.CompletedLastMessageMaxChars == nil || *view.Global.CompletedLastMessageMaxChars != 640 {
+		t.Fatalf("view lost the content options: %+v", view.Global)
+	}
+
+	// 非 global 层级：拒绝（避免用户在通道/会话层级设了一个永远不生效的开关）。
+	if err := src.Apply(notifyPolicyFile{Channels: map[string]notifyPolicyScope{
+		"ntfy": {CompletedIncludeLastMessage: &on},
+	}}); err == nil || !isNotifyPolicyValidationError(err) {
+		t.Fatalf("channel-scope toggle must be rejected, got %v", err)
+	}
+	// 越界长度：拒绝。
+	tooLong := notifyMaxLastMessageMaxChars + 1
+	if err := src.Apply(notifyPolicyFile{Global: notifyPolicyScope{
+		CompletedLastMessageMaxChars: &tooLong,
+	}}); err == nil || !isNotifyPolicyValidationError(err) {
+		t.Fatalf("out-of-range max chars must be rejected, got %v", err)
+	}
+	// 失败不覆盖当前生效值。
+	if opts := src.ContentOptions(); !opts.CompletedIncludeLastMessage || opts.LastMessageMaxChars != 640 {
+		t.Fatalf("failed apply must keep the last good policy: %+v", opts)
+	}
+}
+
 // TestBuildNotifyPolicyStoreKindOverride 锁定字段级覆盖：session 白名单
 // 覆盖 global；未覆盖的会话仍受 global 限制；completion/completed 别名归一。
 func TestBuildNotifyPolicyStoreKindOverride(t *testing.T) {

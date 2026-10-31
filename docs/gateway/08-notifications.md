@@ -134,12 +134,14 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
 
 1. **注册表**：`Session.attention`（持久）+ 最近 `notify` 摘要（短 TTL，不入长期审计正文）。
 2. **控制台 SSE**：`/api/events` 推送 `session.updated` / `notify`，驱动徽标、收件箱、toast（[07](./07-console.md) §5.4）。
-3. **Web Push**（移动端后台）：仅在**无活跃控制台会话**或**页面不可见**时推送；点击直达 `/s/{session_id}/web/`。
+3. **Web Push**（移动端后台）：仅在**无活跃控制台会话**或**页面不可见**时推送；点击直达网关控制台的会话深链
+   `/#sessions?node={node_id}&session={session_id}`（已打开的控制台标签页会被复用并就地定位，
+   不再跳到节点原版 Web UI）。
 4. **ntfy 第二通道**（可选，`--ntfy-url`/`--ntfy-topic`，见 [10-runbook.md](./10-runbook.md) §14）：
    高优先（approval/question/error）与 Web Push **并行扇出**；普通通知默认仍走
    Web Push 主通道。若要让 completed/waiting 也进入 ntfy，显式配置
    `--notify-normal-channels webpush,ntfy`（见 [gateway-app/02](../gateway-app/02-notification-routing.md)）。
-   高优先 → `priority=5` + `warning`，普通 → `priority=3`，点击打开对应会话。
+   高优先 → `priority=5` + `warning`，普通 → `priority=3`，`click` 指向同一网关会话深链。
    用于 Web Push 不可达的场景（国内 Android 的 FCM、WNS 通道异常等），
    或在手机端直接以 ntfy 作为主要提醒方式。
 5. **抑制（presence）**：若某控制台客户端**正打开该会话**（心跳/SSE 订阅标记），则不 toast、不推送（用户已在看）。
@@ -154,6 +156,31 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
 9. **Bot 通道（C 方案，待实施）**：网关自持 bot 作为 `im` 通知通道，直接向
    所有节点的目标 chat 发送，不依赖节点回程；目标模型、单归属迁移与回退语义见
    [18-gateway-bot-notify-channel.md](./18-gateway-bot-notify-channel.md)。
+
+### 5.1 「已完成」通知附带最后一条助手回复
+
+默认「已完成」只报"谁完成了"（元数据），正文不带会话内容。需要"在手机锁屏 / IM 里
+直接读结论"时，可在通知策略里打开（`notify-policy.json` 的 `global` 层级；控制台
+「通知设置 → 全局策略 → 已完成通知内容」）：
+
+| 字段 | 语义 | 默认 |
+|------|------|------|
+| `completed_include_last_message` | `true` = 「已完成」通知正文附带该会话最后一条**助手**回复 | `false` |
+| `completed_last_message_max_chars` | 附带正文的字符上限（1..2000，按 rune 截断，超出补 `…`） | `200` |
+
+行为要点：
+
+- **只带助手内容**：最后一条是 user/tool（例如等待用户输入后中断）时自动省略——那
+  不是"结论"，带上反而误导。
+- **逐条投递**：带了内容的事件绕过合并窗口（`notify.Event.SkipCoalesce`）。合并摘要
+  是「N sessions completed + 标题列表」，会把正文内容丢掉，所以这里必须逐条发；同一
+  窗口内多个会话完成时各发各的，内容不会互相覆盖。
+- **各通道各自再截断**：IM 按 provider 上限（并保留末尾 URL），Web Push 受约 4KB
+  负载限制——200 字符的默认值对推送是安全值，需要更长内容时优先用 IM 直达。
+- 内容取自节点 `SESSION_UPDATE` 的 `last_message` / `last_message_role`（agent 侧已
+  截断到 2000 runes）；网关不额外拉取会话正文（§6「不重复渲染正文」原则不变）。
+- 非 `global` 层级设这两个字段会被 API 拒绝（400）：它描述"通知内容口径"，不是按
+  通道/会话的开关。
 
 ---
 
@@ -222,7 +249,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 - [ ] `approval_requested` / `question_asked` 触发高优先通知，控制台徽标与收件箱即时更新。
 - [ ] 会话重连/网关重连后，收件箱可由 `SESSION_UPDATE` 对账重建（不依赖瞬时 `NOTIFY`）。
 - [ ] 用户正打开该会话时不重复 toast/推送（presence 抑制）。
-- [ ] 移动端后台可收到 Web Push，点击直达 `/s/{session_id}/web/`。
+- [ ] 移动端后台可收到 Web Push，点击直达网关会话深链 `/#sessions?node=…&session=…`（已打开的控制台标签页被复用并就地定位）。
 - [ ] Web Push 不可达（FCM/WNS 受限）时，同一通知仍经 ntfy 通道送达手机（高优先 `priority=5`）。
 - [ ] 未配置网关时，本地通知（终端标题/声音）与 hooks 行为**逐字不变**。
 - [ ] 点会话卡片可在控制台 iframe 内打开本机 aicli 微前端 / runtime-server SPA 并正常交互。
@@ -257,7 +284,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | presence 主动释放 | `cmd/gateway/presence.go`、`console/app.js` | 新增 `POST /api/presence/release`（`{all:true}` 或 `{node_id,session_id}`）；页面 `visibilitychange(hidden)` / `pagehide` 时用 keepalive 释放，切后台后不再被 presence 抑制最长 90s |
 | 订阅自愈 | `console/sw.js` | 处理 `pushsubscriptionchange`：浏览器轮换/失效 endpoint 后自动重新订阅并回传网关（upsert），不再静默失联 |
 | 移动端可发现性与权限 | `console/app.js`、`console/index.html`、`console/manifest.webmanifest`、`console/*.png` | 点击手势内先 `Notification.requestPermission()`（iOS 要求）；HTTP 非安全上下文 / iOS 未安装 / 权限被拒绝均给出显性原因；A2HS 与 `beforeinstallprompt` 安装引导；`/api/push/test` 测试通知按钮；PNG 图标（192/512/180/apple-touch-icon + 通知 badge），修复 SVG 图标在系统通知中不显示的问题 |
-| **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；high 向 Web Push 与 ntfy **并行扇出**，normal 默认走 Web Push 主通道，可用 `--notify-normal-channels webpush,ntfy` 显式扩展；Web Push 关闭时 ntfy 仍独立投递；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click` 指向会话深链；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
+| **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；high 向 Web Push 与 ntfy **并行扇出**，normal 默认走 Web Push 主通道，可用 `--notify-normal-channels webpush,ntfy` 显式扩展；Web Push 关闭时 ntfy 仍独立投递；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click`/Web Push `url` 统一指向网关控制台会话深链 `/#sessions?node=…&session=…`；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
 | **通知策略（独立配置页）** | `cmd/gateway/{notify_policy.go,notify_api.go,push.go,main.go}`、`internal/notify/{prefs.go,dispatcher.go}`、`console/{index.html,app.js,style.css}` | 新增 `<data-dir>/notify-policy.json`（`global`/`sessions`/`channels` 三级，字段 `muted`/`min_priority`/`allow_kinds`/`quiet_hours`），owner 保护的 `GET/PUT /api/notify/policy`，保存后**立即热加载**（无需重启）；`allow_kinds` 在 observe 阶段拦截被关闭的 kind（仍记入去重快照，不回溯补发）；控制台新增独立「通知设置」页（`#notifications`），结果导向范围/开始-结束时段校验/未保存拦截/固定保存条/会话覆盖搜索分组/未配置通道说明均已落地，原生通知桥 `nativeAttentionNotification` 先读策略再决定是否弹窗；`--notify-quiet-hours` 作为基线，策略显式给出 `global.quiet_hours` 时被替换（空数组 = 清空） |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时，向当前优先级选中的通道投递一次（high 全扇出；normal 为显式列表或 Web Push 主通道）。因此：

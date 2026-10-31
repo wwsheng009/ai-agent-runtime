@@ -335,6 +335,12 @@
   Bot 目标的「事件类型」多选、来源/连接/范围都在**该目标自己的配置面**（列表行「配置」或「添加 Bot 目标」
   打开），与全局「哪些消息触发通知」是两个层级；`kinds` 值域来自 `/api/notify/policy` 的 `meta.kinds`。
   数据面：全局/会话级为 `GET/PUT /api/notify/policy`，Bot 目标为 `GET/PUT /api/notify/im`（各自独立保存）。
+- **「已完成通知内容」**（在「全局策略」层）：可勾选「已完成通知附带最后一条助手回复」
+  并设置字符上限（1..2000，默认 200）。打开后该会话最后一条**助手**内容会一并进通知正文
+  （最后一条是 user/tool 时自动省略），且这类通知**逐条投递、不参与合并**——合并摘要只
+  保留标题，会把正文吃掉。字段为 `notify-policy.json` 的 `global.completed_include_last_message`
+  / `completed_last_message_max_chars`（非 global 层级会被 API 拒绝），详见
+  [08-notifications.md](./08-notifications.md) §5.1。
 
 ### 5.5 错误态（必须显式，不静默）
 
@@ -419,6 +425,10 @@ import 一次、import 顺序 == 文件名顺序、每个模块都 import 了 `{
 入口一致、`sw.js` 的 `SHELL` 覆盖入口 + 全部模块（PWA 离线可用）。新增功能时在
 `console/js/` 加模块并在 `app.js` 按文件名顺序 import，同时把 URL 加进 `sw.js`
 的 `SHELL`——测试会在任何一处漏掉时报错。
+
+> 诊断钩子：URL 带 `?debugRuntime=1` 时 `runtime.js` 会把共享面挂到 `window.__GWRT`
+> （`{S, G}`），用于真浏览器冒烟排查"某个模块没注册 / 改动没落盘"。默认关闭，
+> 不改变运行期行为。
 
 ### 7.2 伺服 handler 要点（照搬 micro web 的成熟做法）
 

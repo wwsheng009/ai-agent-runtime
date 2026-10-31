@@ -50,6 +50,23 @@ type notifyPolicyScope struct {
 	MinPriority string    `json:"min_priority,omitempty"`
 	AllowKinds  *[]string `json:"allow_kinds,omitempty"`
 	QuietHours  *[]string `json:"quiet_hours,omitempty"`
+	// CompletedIncludeLastMessage / CompletedLastMessageMaxChars 控制「已完成」
+	// 通知是否附带该会话最后一条助手回复（docs/gateway/08 §5.1）。只在 global
+	// 层级可设；maxChars 缺省 200，范围 1..2000。
+	CompletedIncludeLastMessage  *bool `json:"completed_include_last_message,omitempty"`
+	CompletedLastMessageMaxChars *int  `json:"completed_last_message_max_chars,omitempty"`
+}
+
+// 「已完成」附带正文的默认/上限（字符数，按 rune 计）。
+const (
+	notifyDefaultLastMessageMaxChars = 200
+	notifyMaxLastMessageMaxChars     = 2000
+)
+
+// notifyContentOptions 是"通知正文内容"相关的生效策略（由 global 层级解析）。
+type notifyContentOptions struct {
+	CompletedIncludeLastMessage bool
+	LastMessageMaxChars         int
 }
 
 // notifyPolicyValidationError 区分 400（策略内容非法）与 500（写盘失败）。
@@ -70,6 +87,12 @@ func buildNotifyPolicyStore(file notifyPolicyFile) (*notify.MemoryPreferenceStor
 	add := func(scope notify.Scope, item notifyPolicyScope, where string) error {
 		if item.QuietHours != nil && where != "global" {
 			return fmt.Errorf("%s: quiet_hours is only supported on the global scope", where)
+		}
+		if (item.CompletedIncludeLastMessage != nil || item.CompletedLastMessageMaxChars != nil) && where != "global" {
+			return fmt.Errorf("%s: completed_include_last_message / completed_last_message_max_chars are only supported on the global scope", where)
+		}
+		if n := item.CompletedLastMessageMaxChars; n != nil && (*n < 1 || *n > notifyMaxLastMessageMaxChars) {
+			return fmt.Errorf("%s: completed_last_message_max_chars must be between 1 and %d", where, notifyMaxLastMessageMaxChars)
 		}
 		pref := notify.Preference{Muted: item.Muted}
 		if mp := strings.TrimSpace(item.MinPriority); mp != "" {
@@ -185,6 +208,7 @@ type notifyPolicySource struct {
 	prefs      *notify.MemoryPreferenceStore
 	quiet      []notify.QuietRange
 	quietSet   bool
+	content    notifyContentOptions
 	lastErr    error
 }
 
@@ -238,6 +262,34 @@ func (s *notifyPolicySource) Effective() (*notify.MemoryPreferenceStore, []notif
 	defer s.mu.Unlock()
 	err := s.refreshLocked(false)
 	return s.prefs, append([]notify.QuietRange(nil), s.quiet...), s.quietSet, err
+}
+
+// ContentOptions 返回"通知正文内容"相关的生效策略（递增热加载检查，语义与
+// Effective 一致）。无策略源 / 未设置时返回零值 + 默认长度上限。
+func (s *notifyPolicySource) ContentOptions() notifyContentOptions {
+	if s == nil {
+		return notifyContentOptions{LastMessageMaxChars: notifyDefaultLastMessageMaxChars}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshLocked(false)
+	out := s.content
+	if out.LastMessageMaxChars <= 0 {
+		out.LastMessageMaxChars = notifyDefaultLastMessageMaxChars
+	}
+	return out
+}
+
+// contentOptionsFromView 从策略视图解析正文内容选项（只在 global 层级）。
+func contentOptionsFromView(view notifyPolicyFile) notifyContentOptions {
+	out := notifyContentOptions{LastMessageMaxChars: notifyDefaultLastMessageMaxChars}
+	if view.Global.CompletedIncludeLastMessage != nil {
+		out.CompletedIncludeLastMessage = *view.Global.CompletedIncludeLastMessage
+	}
+	if n := view.Global.CompletedLastMessageMaxChars; n != nil && *n > 0 {
+		out.LastMessageMaxChars = *n
+	}
+	return out
 }
 
 // CurrentView 返回当前策略视图（GET API 用，含热加载检查）。
@@ -307,6 +359,7 @@ func (s *notifyPolicySource) refreshLocked(force bool) error {
 			s.prefs = nil
 			s.quiet = nil
 			s.quietSet = false
+			s.content = contentOptionsFromView(s.view)
 			s.legacy = false
 			s.source = "default"
 			s.lastErr = nil
@@ -319,6 +372,7 @@ func (s *notifyPolicySource) refreshLocked(force bool) error {
 			return err
 		}
 		s.view, s.prefs, s.quiet, s.quietSet = view, prefs, quiet, quietSet
+		s.content = contentOptionsFromView(view)
 		s.legacy, s.source, s.lastErr = true, "legacy", nil
 		return nil
 	}
@@ -341,6 +395,7 @@ func (s *notifyPolicySource) refreshLocked(force bool) error {
 		view.Version = notifyPolicyVersion
 	}
 	s.view, s.prefs, s.quiet, s.quietSet = view, prefs, quiet, quietSet
+	s.content = contentOptionsFromView(view)
 	s.legacy, s.source, s.lastErr = false, "file", nil
 	return nil
 }

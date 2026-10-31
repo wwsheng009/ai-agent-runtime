@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=95";
+import { S, G } from "./runtime.js?v=96";
 
   /* ─────────────────────── boot ──────────────────────────────── */
 
@@ -24,7 +24,7 @@ import { S, G } from "./runtime.js?v=95";
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=95").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=96").catch(function () {});
     });
   }
 

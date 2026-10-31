@@ -39,6 +39,17 @@ type Event struct {
 	// 投递寻址仍用 Target（两者通常相同，但语义分层）。
 	Session      string
 	Notification Notification
+	// EventID 是事件级稳定标识（可空）：通道交付账本用它实现
+	// 「同一通道实例 + 同一 chat + 同一事件只投一次」（跨重启/多进程）。
+	// 空 = 不参与通道级去重（保持既有语义）。
+	EventID string
+	// IMPresenceExempt 表示本次事件有 IM target 显式 ignore_presence：在场门
+	// 只跳过其它通道，IM 仍投递。没有该标志时在场门按历史语义整体抑制。
+	IMPresenceExempt bool
+	// SkipCoalesce 让本条事件绕过合并窗口、逐条投递（docs/gateway/08 §5.1）：
+	// 宿主在通知正文里带了会话专属内容（如「已完成」附带最后一条助手回复）时
+	// 必须置位——Coalesce 的合并摘要只保留标题，会把正文内容丢掉。
+	SkipCoalesce bool
 }
 
 // EventFor 组装请求并按登记表解析优先级（未登记回落 PriorityOf）。
@@ -64,6 +75,10 @@ type Dispatcher struct {
 	// normalChannels 是显式配置的 normal 通道列表。为空时沿用 D6 的
 	// 单主通道行为；非空时按列表顺序投递（去重、忽略未注册通道）。
 	normalChannels []string
+	// normalFallback 是 normal 优先级的回退链（docs/gateway/18 §5.6）：主通道
+	// 无收件人（ErrNoRecipient）或投递失败时按链序尝试下一通道，首个成功即止。
+	// 显式 normalChannels 非空时以扇出语义为准，本字段不参与。
+	normalFallback []string
 	clock          func() time.Time
 	logf           func(string, ...any)
 	prefs          PreferenceStore
@@ -113,6 +128,49 @@ func (d *Dispatcher) SetNormalChannels(names ...string) {
 
 // SetLogger 注入短路/失败日志（可 nil）。
 func (d *Dispatcher) SetLogger(logf func(string, ...any)) { d.logf = logf }
+
+// ErrNoRecipient 表示本次投递没有任何通道真正受理（通道无收件人）。normal
+// 回退链据此判定是否继续尝试下一通道；errors.Is 可判（docs/gateway/18 §5.6）。
+var ErrNoRecipient = errors.New("notify: no recipient")
+
+// ErrAllTargetsFailed 表示回退链上的通道都被尝试过且全部失败。
+var ErrAllTargetsFailed = errors.New("notify: all targets failed")
+
+// SkippedError 表示通道**未尝试**投递（预算耗尽等），与"尝试后失败"不同：
+// Dispatcher 把回执记为 skipped(reason) 而非失败，避免把"来不及发"算进错误
+// 率，也让 skipped(deadline_exceeded) 可被统计（docs/gateway/18 §9）。
+type SkippedError struct {
+	// Reason 是原因码，取值见 SkipReason* 常量。
+	Reason string
+}
+
+func (e *SkippedError) Error() string {
+	if e == nil || e.Reason == "" {
+		return "notify: skipped"
+	}
+	return "notify: skipped (" + e.Reason + ")"
+}
+
+// asSkipped 提取 SkippedError（支持被包装的情况）。
+func asSkipped(err error) (*SkippedError, bool) {
+	var target *SkippedError
+	if errors.As(err, &target) {
+		return target, true
+	}
+	return nil, false
+}
+
+// SetNormalFallback 指定 normal 优先级的回退链（主通道 → 备选 …）。首个成功
+// 即止；显式 SetNormalChannels 非空时扇出语义优先，回退链不参与。未注册的
+// 通道名告警后跳过；空参数清空回退链（回到 D6 单主通道语义）。
+func (d *Dispatcher) SetNormalFallback(names ...string) {
+	d.normalFallback = d.normalFallback[:0]
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			d.normalFallback = append(d.normalFallback, name)
+		}
+	}
+}
 
 // SetPreferences 注入偏好存储（nil = 无偏好，行为不变）。热加载安全。
 func (d *Dispatcher) SetPreferences(prefs PreferenceStore) {
@@ -231,16 +289,35 @@ func (d *Dispatcher) deliver(ctx context.Context, ev Event) (Receipt, error) {
 		return Receipt{Key: key, At: d.now()}, nil
 	}
 	receipt := Receipt{Key: key, At: d.now()}
-	var errs []error
 	prefs := d.preferenceStore()
+
+	// 回退链（docs/gateway/18 §5.6）：必须在同一个 deliver 内完成，不能递归
+	// Dispatch——递归会二次认领已 Claim 的账本键，破坏去重语义。
+	if chain := d.fallbackChain(ev.Priority); len(chain) > 0 {
+		err := d.deliverChain(ctx, ev, chain, prefs, &receipt)
+		if key != "" && d.ledger != nil {
+			d.ledger.Complete(key, receipt)
+		}
+		return receipt, err
+	}
+
+	var errs []error
 	for _, ch := range d.targetsFor(ev.Priority) {
 		if prefs != nil && !prefs.Resolve(ev.Session, ch.Name()).AllowsEvent(ev.Priority, ev.Kind) {
-			receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{Channel: ch.Name(), Skipped: true})
+			receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{Channel: ch.Name(), Skipped: true, Reason: SkipReasonPreference})
 			continue
 		}
 		err := ch.Deliver(ctx, ev)
 		out := ChannelOutcome{Channel: ch.Name(), OK: err == nil}
-		if err != nil {
+		if skipped, isSkip := asSkipped(err); isSkip {
+			// 未尝试投递（预算耗尽）：记 skipped(reason)，不计入错误率。
+			out.OK = false
+			out.Skipped = true
+			out.Reason = skipped.Reason
+			if d.logf != nil {
+				d.logf("notify dispatcher: channel %s skipped (%s) kind=%s", ch.Name(), skipped.Reason, ev.Kind)
+			}
+		} else if err != nil {
 			out.Err = err.Error()
 			errs = append(errs, fmt.Errorf("channel %s: %w", ch.Name(), err))
 		}
@@ -250,6 +327,81 @@ func (d *Dispatcher) deliver(ctx context.Context, ev Event) (Receipt, error) {
 		d.ledger.Complete(key, receipt)
 	}
 	return receipt, errors.Join(errs...)
+}
+
+// fallbackChain 解析 normal 的回退链（nil = 不走回退语义）。显式
+// normalChannels 非空时扇出优先，回退链不参与；未注册通道告警后跳过。
+func (d *Dispatcher) fallbackChain(p Priority) []Channel {
+	if p != PriorityNormal || len(d.normalFallback) == 0 {
+		return nil
+	}
+	if len(d.normalChannels) > 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(d.normalFallback))
+	out := make([]Channel, 0, len(d.normalFallback))
+	for _, name := range d.normalFallback {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		ch, ok := d.byName[name]
+		if !ok {
+			if d.logf != nil {
+				d.logf("notify dispatcher: fallback channel %q is not registered, ignore", name)
+			}
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+// deliverChain 按回退链逐通道尝试：首个成功即止；被偏好门跳过的通道不计入
+// 尝试次数。全部尝试失败返回 ErrAllTargetsFailed，全部被跳过返回
+// ErrNoRecipient——调用方据此区分"没人收"与"都没发出去"。
+func (d *Dispatcher) deliverChain(ctx context.Context, ev Event, chain []Channel, prefs PreferenceStore, receipt *Receipt) error {
+	var errs []error
+	attempted := 0
+	for _, ch := range chain {
+		name := ch.Name()
+		if prefs != nil && !prefs.Resolve(ev.Session, name).AllowsEvent(ev.Priority, ev.Kind) {
+			receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{Channel: name, Skipped: true, Reason: SkipReasonPreference})
+			continue
+		}
+		attempted++
+		err := ch.Deliver(ctx, ev)
+		out := ChannelOutcome{Channel: name, OK: err == nil}
+		if err == nil {
+			receipt.Outcomes = append(receipt.Outcomes, out)
+			if d.logf != nil && len(errs) > 0 {
+				d.logf("notify dispatcher: channel %s accepted after %d failure(s) (kind=%s)", name, len(errs), ev.Kind)
+			}
+			return nil
+		}
+		if skipped, isSkip := asSkipped(err); isSkip {
+			// 预算耗尽：本轮未启动发送。记为 skipped 而非失败，并停止回退——
+			// 后续通道共享同一 ctx，继续尝试只会得到同样的结论。
+			out.OK = false
+			out.Skipped = true
+			out.Reason = skipped.Reason
+			receipt.Outcomes = append(receipt.Outcomes, out)
+			if d.logf != nil {
+				d.logf("notify dispatcher: channel %s skipped (%s) kind=%s, stop fallback", name, skipped.Reason, ev.Kind)
+			}
+			return nil
+		}
+		out.Err = err.Error()
+		receipt.Outcomes = append(receipt.Outcomes, out)
+		errs = append(errs, fmt.Errorf("channel %s: %w", name, err))
+		if d.logf != nil && errors.Is(err, ErrNoRecipient) {
+			d.logf("notify dispatcher: channel %s has no recipient (kind=%s), try next", name, ev.Kind)
+		}
+	}
+	if attempted == 0 {
+		return ErrNoRecipient
+	}
+	return fmt.Errorf("%w: %w", ErrAllTargetsFailed, errors.Join(errs...))
 }
 
 // SetLedger 注入跨路径去重账本（构造后注入用；nil = 不去重）。
@@ -270,6 +422,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
 	// ——查看者离开后同一事件可再次投递（"切走补推一次"）。门禁必须早于
 	// 认领，否则去重会吞掉补推。
 	if d.presenceActive(ev) {
+		// IM target 可以显式 ignore_presence：此时只投 IM（其它通道仍受在场门
+		// 约束），避免运维告警被“正在看控制台”静音。
+		if ev.IMPresenceExempt {
+			if ch, ok := d.byName["im"]; ok && ch != nil {
+				return d.deliverIMOnly(ctx, ev, ch)
+			}
+		}
 		if d.logf != nil {
 			d.logf("notify dispatcher: presence active for %s/%s (kind=%s), skip delivery",
 				strings.TrimSpace(ev.Node), strings.TrimSpace(ev.Session), ev.Kind)
@@ -288,10 +447,52 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
 	// 合并门（docs/bots/12 §3 D3）：normal 事件在窗口内按 attention 攒批，
 	// 定时器统一 flush。攒批期间键暂不认领（flush 时若已被其他路径投出，
 	// 由账本短路兜底）。high 不攒批；low 无需攒批（收件箱即时）。
-	if ev.Priority == PriorityNormal && d.coalesceWindow > 0 {
+	// 合并门：SkipCoalesce 的 normal 事件逐条投递（宿主在正文里塞了会话专属
+	// 内容，合并摘要只保留标题会丢内容）。
+	if ev.Priority == PriorityNormal && d.coalesceWindow > 0 && !ev.SkipCoalesce {
 		return d.coalesce(ev), nil
 	}
 	return d.deliver(ctx, ev)
+}
+
+// deliverIMOnly 是在场门下的 IM 专用投递：保留账本/偏好语义，但不走
+// 其它通道与 normal 回退链（在场时 push 仍应静音）。
+func (d *Dispatcher) deliverIMOnly(ctx context.Context, ev Event, ch Channel) (Receipt, error) {
+	key := strings.TrimSpace(ev.DedupKey)
+	if key != "" && d.ledger != nil && !d.ledger.Claim(key) {
+		if d.logf != nil {
+			d.logf("notify dispatcher: dedup key %q (kind=%s), skip IM delivery", key, ev.Kind)
+		}
+		if r, ok := d.ledger.Receipt(key); ok {
+			return r, nil
+		}
+		return Receipt{Key: key, At: d.now()}, nil
+	}
+	receipt := Receipt{Key: key, At: d.now()}
+	prefs := d.preferenceStore()
+	if prefs != nil && !prefs.Resolve(ev.Session, ch.Name()).AllowsEvent(ev.Priority, ev.Kind) {
+		receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{
+			Channel: ch.Name(), Skipped: true, Reason: SkipReasonPreference,
+		})
+		if key != "" && d.ledger != nil {
+			d.ledger.Complete(key, receipt)
+		}
+		return receipt, nil
+	}
+	err := ch.Deliver(ctx, ev)
+	out := ChannelOutcome{Channel: ch.Name(), OK: err == nil}
+	if skipped, isSkip := asSkipped(err); isSkip {
+		out.OK = false
+		out.Skipped = true
+		out.Reason = skipped.Reason
+	} else if err != nil {
+		out.Err = err.Error()
+	}
+	receipt.Outcomes = append(receipt.Outcomes, out)
+	if key != "" && d.ledger != nil {
+		d.ledger.Complete(key, receipt)
+	}
+	return receipt, err
 }
 
 // targetsFor 实现通道选择：high=全部通道扇出；normal=显式列表，未配置时

@@ -7,10 +7,13 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
@@ -44,6 +47,17 @@ type pushNotifier struct {
 	// 则 IM，否则 Web Push；nil = 一律走 push 侧）。由 connectors 装配供给
 	// （newIMMainChannelPredicate），与该宿主的投影 hook 投递口径逐字同源。
 	imMainChannel func(nodeID, sessionID, kind string) bool
+	// imSource 是网关自持 bot 的配置源（docs/gateway/18 §6；nil = 未配置 bot）。
+	// Targets 为空时通道面与 primary 均与既有行为一致（§5.2 动态主通道）。
+	imSource *notifyIMSource
+	// delegateToNode 把通知委托给目标节点，由节点自己的 bot 按本地绑定发送
+	// （docs/gateway/18 复用方案）。nil = 未接线。
+	delegateToNode func(ctx context.Context, nodeID string, notice connectors.AttentionNotice) error
+	// connectorStore / notifyScoped / sendOutbound 由 connectors 装配注入
+	// （装配失败时保持 nil：IM 通道不参与，见 imChannel）。
+	connectorStore connectors.Store
+	notifyScoped   func(ctx context.Context, connectorIDs []string, notice connectors.AttentionNotice) error
+	sendOutbound   func(ctx context.Context, connectorID, chat string, msgs []connectors.OutboundMessage) error
 	// preferences 是三级通知偏好（global/session/channel；nil = 无偏好）。
 	// 由 main.go 从 <data-dir>/notify-prefs.json 装载（缺失 = 行为不变）。
 	preferences notify.PreferenceStore
@@ -56,10 +70,6 @@ type pushNotifier struct {
 	baseQuietHours []notify.QuietRange
 	// policyErr 去重策略装载告警，避免每次 observe 刷日志。
 	policyErr string
-	// nodeKind 查询注册表里的节点类型：aicli 的 Web UI 挂在 /web/，
-	// runtime-server SPA 在根路径 /。通知 click / 原生跳转必须按 kind 生成，
-	// 否则会被反代 route allowlist 403（"route not allowed"）。
-	nodeKind func(nodeID string) string
 	// normalChannels 是 --notify-normal-channels 的解析结果。为空时保持
 	// D6 单主通道（webpush）；非空时 normal 按列表投递，供 ntfy/AppPush
 	// 等通道显式接收 completed/waiting。
@@ -82,15 +92,25 @@ type pushNotifier struct {
 	// 清除时释放旧键）必须作用在与 Dispatch 相同的账本上；每次新建会使
 	// 释放失效。键 = tag|attention（§3 D2）；生命周期镜像 seen 快照。
 	ledger *notify.MemoryLedger
+	// bootID 是本次网关启动的唯一标识：事件 ID 含它，重启后不会与旧账本
+	// 条目碰撞（旧条目按 TTL 淘汰）。
+	bootID string
+	// generation 是每会话的注意力代次（node|session → counter）：同一 attention
+	// 清除后重新进入视为新事件，避免账本把合法重投吞掉。
+	generation map[string]int64
+	// deliveryLedger 是通道级交付账本（跨重启/多目标去重，P1）。
+	deliveryLedger *notifyDeliveryLedger
 }
 
 func newPushNotifier(manager *push.Manager, baseURL string, presence notify.Presence) *pushNotifier {
 	return &pushNotifier{
-		seen:     make(map[string]string),
-		manager:  manager,
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		presence: presence,
-		now:      time.Now,
+		seen:       make(map[string]string),
+		manager:    manager,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		presence:   presence,
+		now:        time.Now,
+		bootID:     fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405.000000000"), os.Getpid()),
+		generation: make(map[string]int64),
 	}
 }
 
@@ -136,18 +156,33 @@ type pendingNotification struct {
 	sessionID string
 	imMain    bool
 	note      push.Notification
+	eventID   string
+	// attachDetail 表示 note.Body 里带了会话专属内容（「已完成」附带的最后一条
+	// 助手回复，docs/gateway/08 §5.1）。这类事件必须绕过合并窗口逐条投递：
+	// Coalesce 的合并摘要只保留标题，会把正文内容丢掉。
+	attachDetail bool
 }
 
 // observe diffs the current attention states against the previous snapshot and
 // notifies for each newly-attentive session.
 func (p *pushNotifier) observe(nodes []*tunnel.Node) {
-	if p == nil || (p.manager == nil && !p.ntfyEnabled() && !p.appPushEnabled()) {
+	// imEnabled 必须计入唤醒门：纯 bot 部署可能既无 Web Push 也无 ntfy/App
+	// （docs/gateway/18 §11）。
+	if p == nil || (p.manager == nil && !p.ntfyEnabled() && !p.appPushEnabled() && !p.imEnabled()) {
 		return
 	}
 	// 策略热加载：stat 一次策略文件，变化才重读并热替换偏好/免打扰。
 	p.applyPolicy()
+	// Bot target 热加载（docs/gateway/18 §6.1）：外部直接改 gateway-im.json 时
+	// 也要生效，不能只依赖 PUT 接口。stat 一次，戳未变则几乎零开销。
+	if p.imSource != nil {
+		p.imSource.ReloadIfChanged()
+	}
 	p.mu.Lock()
 	next := make(map[string]string)
+	if p.generation == nil {
+		p.generation = make(map[string]int64)
+	}
 	var immediate []pendingNotification
 	var batched []pendingNotification
 	prefs := p.preferences
@@ -167,7 +202,10 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			}
 			// Suppress while a console client is viewing this session, and leave
 			// it unrecorded so the notification still fires once they look away.
-			if p.presence != nil && p.presence.Active(node.NodeID, sess.SessionID) {
+			// 例外：存在显式 ignore_presence 的 IM target 时，IM 仍应投递；
+			// 其余通道由 Dispatcher 的在场门继续静音。
+			if p.presence != nil && p.presence.Active(node.NodeID, sess.SessionID) &&
+				!p.imPresenceExempt(node.NodeID, sess.SessionID, attention) {
 				continue
 			}
 			next[key] = attention
@@ -186,8 +224,23 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				Tag:   key,
 				URL:   p.sessionURL(node.NodeID, sess.SessionID),
 			}
+			// docs/gateway/08 §5.1：「已完成」可选附带最后一条助手回复
+			// （策略开关 + 长度上限，默认关闭）。
+			detail := p.completedLastMessage(sess.LastMessageRole, sess.LastMessage, attention)
+			if detail != "" {
+				note.Body = strings.TrimSpace(note.Body) + "\n" + detail
+			}
 			applyDeliveryPolicy(&note, attention)
-			item := pendingNotification{attention: attention, nodeID: node.NodeID, sessionID: sess.SessionID, note: note}
+			p.generation[key]++
+			eventID := p.bootID + "|" + key + "|" + attention + "|" + strconv.FormatInt(p.generation[key], 10)
+			item := pendingNotification{
+				attention:    attention,
+				nodeID:       node.NodeID,
+				sessionID:    sess.SessionID,
+				note:         note,
+				eventID:      eventID,
+				attachDetail: detail != "",
+			}
 			if p.imMainChannel != nil && p.imMainChannel(node.NodeID, sess.SessionID, attention) {
 				item.imMain = true
 			}
@@ -268,7 +321,53 @@ func (p *pushNotifier) policyChannelNames() []string {
 	if p.appPushEnabled() {
 		names = append(names, "apppush")
 	}
+	// v2 §5.2：im 必须进入通道级 allow_kinds 判定。否则只配 IM 不配 push 时，
+	// 用户在「通知设置」里为 im 单独开的白名单完全不生效，且事件在此处就被
+	// 提前丢弃（kindAllowedByPolicy 的通道级兜底依赖本列表）。
+	if p.imEnabled() {
+		names = append(names, "im")
+	}
 	return names
+}
+
+// imTargets 返回当前启用的全局/范围 target（配置源热加载后即时生效）。
+func (p *pushNotifier) imTargets() []channels.IMTarget {
+	if p == nil || p.imSource == nil {
+		return nil
+	}
+	return p.imSource.Targets()
+}
+
+// imEnabled 报告是否配置了启用的 bot target（0 = 未配置 bot，行为零变化）。
+func (p *pushNotifier) imEnabled() bool { return len(p.imTargets()) > 0 }
+
+// imChannel 构造 IM 通道实例；未配置 target 或连接器未装配时返回 false，
+// 通道面保持既有构成（docs/gateway/18 §5.1：扩展现有 channels.IM，不新建
+// 同名通道）。
+func (p *pushNotifier) imChannel() (notify.Channel, bool) {
+	if p.imSource == nil || (p.sendOutbound == nil && p.delegateToNode == nil) {
+		return nil, false
+	}
+	return &channels.IM{
+		Store:             p.connectorStore,
+		NotifyScoped:      p.notifyScoped,
+		TargetsFn:         p.imTargets,
+		SendOutbound:      p.sendOutbound,
+		SendNodeAttention: p.delegateToNode,
+		DeliveryLedger:    p.deliveryLedger,
+	}, true
+}
+
+// applyIMConfig 在 Bot 通道配置保存后调用（notify_im.go 的 onSaved）。
+// target 内容变化由 TargetsFn 即时生效，无需重建；只有"是否存在启用 target"
+// 发生变化时才重建通道面——primary 与回退链在 ensureDispatcher 里决定。
+func (p *pushNotifier) applyIMConfig(wasEnabled bool) {
+	if p == nil || p.imEnabled() == wasEnabled {
+		return
+	}
+	p.mu.Lock()
+	p.dispatcher = nil
+	p.mu.Unlock()
 }
 
 // kindAllowedByPolicy 按 global→session→channel 字段级覆盖判定 kind 是否
@@ -367,6 +466,9 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	if p.appPush != nil && p.appPush.Enabled() {
 		chans = append(chans, p.appPush)
 	}
+	if ch, ok := p.imChannel(); ok {
+		chans = append(chans, ch)
+	}
 	if len(chans) == 0 {
 		return nil
 	}
@@ -381,6 +483,13 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	d.SetPrimary("webpush")
 	d.SetPreferences(p.preferences)
 	d.SetNormalChannels(p.normalChannels...)
+	// v2 §5.2 动态主通道：只有存在启用 target 时才把 IM 设为主通道并启用回退
+	// 链；未配置 bot 的部署保持 webpush，行为逐字节不变。回退在同一次
+	// Dispatch 内完成（§5.6），不递归。
+	if p.imEnabled() {
+		d.SetPrimary("im")
+		d.SetNormalFallback("webpush", "ntfy", "apppush")
+	}
 	// 在场门下沉到内核（docs/bots/10 §5 S4a）：登记表即 Presence 权威。
 	// observe 的 seen 前置检查仍是"跳过且不记 seen → 补推一次"的语义门；
 	// 这里兜住未自行前置检查的生产者（内核门同样不认领去重键）。
@@ -414,7 +523,8 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 	if p.manager != nil {
 		webPushSubscribers = p.manager.Store().Count()
 	}
-	if webPushSubscribers == 0 && !p.ntfyEnabled() && p.appPushDeviceCount() == 0 {
+	// 无收件人判定同样要把 im 计入（§11 唤醒/短路门槛）。
+	if webPushSubscribers == 0 && !p.ntfyEnabled() && p.appPushDeviceCount() == 0 && !p.imEnabled() {
 		// Without recipients the dispatch below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
 		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(items), p.baseURL)
@@ -424,7 +534,10 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 		defer cancel()
 		for _, item := range items {
 			// D6 主通道：normal 类已路由 IM 时 push 侧静默；high 类仍扇出。
-			if item.imMain && notify.PriorityOf(item.attention) == notify.PriorityNormal {
+			// 配置了 bot target 时一律交给 Dispatcher（IM 通道 + 回退链），不在
+			// 宿主侧静默——否则绑定会话的 normal 通知会因旧 hook 停用而双路径
+			// 都收不到（docs/gateway/18 §5.3 收敛为单一路径）。
+			if item.imMain && !p.imEnabled() && notify.PriorityOf(item.attention) == notify.PriorityNormal {
 				log.Printf("push: %s routed to IM main channel, push suppressed (%s)", item.attention, item.note.Tag)
 				continue
 			}
@@ -436,6 +549,14 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 			ev := notify.EventFor(item.attention, item.note.Tag+"|"+item.attention, item.note)
 			ev.Node = item.nodeID
 			ev.Session = item.sessionID
+			ev.EventID = item.eventID
+			ev.IMPresenceExempt = p.imPresenceExempt(item.nodeID, item.sessionID, item.attention)
+			// 正文带会话专属内容时不进合并窗口（Coalesce 只保留标题）。
+			ev.SkipCoalesce = item.attachDetail
+			// Target 是通道专用寻址提示（docs/gateway/18 §5.3）：IM 通道用它
+			// 定位会话做投影映射与 scope=sessions 命中。与 Session 同值，但
+			// 语义分层——Session 供偏好解析，Target 供投递寻址。
+			ev.Target = item.sessionID
 			receipt, err := dispatcher.Dispatch(ctx, ev)
 			if err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
@@ -457,18 +578,35 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 	}()
 }
 
+// imPresenceExempt 报告是否存在覆盖该事件的 IM target 且显式 ignore_presence。
+// 与 channels.IM.Deliver 的 target 受理判定同源，避免两套口径。
+func (p *pushNotifier) imPresenceExempt(nodeID, sessionID, kind string) bool {
+	for _, target := range p.imTargets() {
+		if target.IgnorePresence && target.MatchesEvent(nodeID, sessionID, kind) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *pushNotifier) sessionURL(nodeID, sessionID string) string {
 	if p.baseURL == "" {
 		return ""
 	}
-	webPath := "/web/"
-	if p.nodeKind != nil && strings.TrimSpace(p.nodeKind(nodeID)) == "runtime-server" {
-		webPath = "/"
+	// 通知点击落点是**网关控制台自己的会话深链**（#sessions?node=…&session=…）：
+	// 不区分节点类型（aicli / runtime-server 都由控制台统一定位），也不再直接
+	// 指向节点原版 Web（避免依赖各节点 route allowlist 与 kind 判定）。节点原版
+	// Web 仍在卡片菜单里提供。
+	q := url.Values{}
+	if nodeID != "" {
+		q.Set("node", nodeID)
 	}
-	u := p.baseURL + "/n/" + url.PathEscape(nodeID) + webPath
-	// runtime-server 自己维护会话路由；只有 aicli 微前端支持 ?session= 深链。
-	if sessionID != "" && webPath != "/" {
-		u += "?session=" + url.QueryEscape(sessionID)
+	if sessionID != "" {
+		q.Set("session", sessionID)
+	}
+	u := p.baseURL + "/#sessions"
+	if encoded := q.Encode(); encoded != "" {
+		u += "?" + encoded
 	}
 	return u
 }
@@ -486,6 +624,49 @@ func attentionBody(node *tunnel.Node, attention string) string {
 		name = node.NodeID
 	}
 	return fmt.Sprintf("%s: %s", name, attention)
+}
+
+// completedLastMessage 返回「已完成」通知要附带的最后一条助手回复（已按策略
+// 截断）；策略未开启 / kind 不是 completed / 最后一条不是助手消息时返回 ""。
+// docs/gateway/08-notifications.md §5.1。
+func (p *pushNotifier) completedLastMessage(lastRole, lastText, attention string) string {
+	if p == nil || !strings.EqualFold(strings.TrimSpace(attention), "completed") {
+		return ""
+	}
+	opts := p.contentOptions()
+	if !opts.CompletedIncludeLastMessage {
+		return ""
+	}
+	// 只带助手内容：最后一条可能是 user/tool（例如等待用户输入后中断），
+	// 那种情况下它不是"结论"，宁可不带。
+	if !strings.EqualFold(strings.TrimSpace(lastRole), "assistant") {
+		return ""
+	}
+	text := strings.TrimSpace(lastText)
+	if text == "" {
+		return ""
+	}
+	return truncateNotificationText(text, opts.LastMessageMaxChars)
+}
+
+// contentOptions 读取"通知正文内容"策略（策略源缺失 = 默认关闭）。
+func (p *pushNotifier) contentOptions() notifyContentOptions {
+	if p == nil || p.policy == nil {
+		return notifyContentOptions{LastMessageMaxChars: notifyDefaultLastMessageMaxChars}
+	}
+	return p.policy.ContentOptions()
+}
+
+// truncateNotificationText 按 rune 截断（多字节安全），截断时补 "…"。
+func truncateNotificationText(text string, max int) string {
+	if max <= 0 {
+		max = notifyDefaultLastMessageMaxChars
+	}
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max]) + "…"
 }
 
 // applyDeliveryPolicy maps an attention kind onto push-service delivery hints

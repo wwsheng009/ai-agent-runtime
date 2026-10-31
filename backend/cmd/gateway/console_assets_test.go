@@ -225,6 +225,10 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 		`id="notify-im-editor"`,
 		`id="notify-im-apply"`,
 		`id="notify-im-cancel"`,
+		// 「已完成」附带最后一条助手回复（docs/gateway/08 §5.7）。
+		`id="notify-completed-include-last-message"`,
+		`id="notify-completed-max-chars"`,
+		`id="notify-completed-error"`,
 	} {
 		if !strings.Contains(string(html), want) {
 			t.Fatalf("index.html missing %s", want)
@@ -249,6 +253,10 @@ func TestConsoleConnectorManagementUI(t *testing.T) {
 		"function applyNotifyIMEditor(",
 		"function buildNotifyIMTargetFromEditor(",
 		"function setNotifyIMKindsSelection(",
+		"function notifyCollectCompletedContent(",
+		"function notifySetCompletedError(",
+		"completed_include_last_message",
+		"completed_last_message_max_chars",
 		`data-notify-kind`,
 		`"/api/qr?text="`,
 		`apiJSON("/api/connectors/"`,

@@ -398,14 +398,19 @@ relay 契约与设备注册 API 见
 `GET/PUT /api/notify/policy` 返回/保存同一份策略。三级键 `global` /
 `sessions.<id>` / `channels.<name>`，字段 `muted`、`min_priority`
 （high|normal|low）、`allow_kinds`（kind 白名单；空数组 = 全禁）、
-`quiet_hours`（仅 global，`HH:MM-HH:MM` 数组）；更具体层级**字段级**覆盖：
+`quiet_hours`（仅 global，`HH:MM-HH:MM` 数组）、
+`completed_include_last_message` / `completed_last_message_max_chars`
+（仅 global：「已完成」通知附带最后一条助手回复 + 字符上限 1..2000，
+见 [08-notifications.md](./08-notifications.md) §5.1）；更具体层级**字段级**覆盖：
 
 ```json
 {
   "version": 1,
   "global": { "muted": false, "min_priority": "normal",
               "allow_kinds": ["approval", "question", "error"],
-              "quiet_hours": ["22:00-08:00"] },
+              "quiet_hours": ["22:00-08:00"],
+              "completed_include_last_message": true,
+              "completed_last_message_max_chars": 200 },
   "sessions": { "s-123": { "muted": true } },
   "channels": { "ntfy": { "muted": true } }
 }

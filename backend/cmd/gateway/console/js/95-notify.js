@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=95";
+import { S, G } from "./runtime.js?v=96";
 
 Object.assign(G, {
   trackAttention: trackAttention,
@@ -39,6 +39,8 @@ Object.assign(G, {
   notifyCanonicalJSON: notifyCanonicalJSON,
   notifyPolicyIsDirty: notifyPolicyIsDirty,
   notifySetQuietError: notifySetQuietError,
+  notifySetCompletedError: notifySetCompletedError,
+  notifyCollectCompletedContent: notifyCollectCompletedContent,
   notifyRefreshDirty: notifyRefreshDirty,
   notifyDiscardPolicyDraft: notifyDiscardPolicyDraft,
   notifyParseClock: notifyParseClock,
@@ -454,6 +456,7 @@ Object.assign(G, {
 
   function notifyPolicyIsDirty() {
     if (S.notifyQuietError) { return true; }
+    if (S.notifyCompletedError) { return true; }
     if (!S.notifyPolicyDraft || !S.notifyPolicy) { return false; }
     return notifyCanonicalJSON(S.notifyPolicyDraft) !== S.notifyPolicyBaseline;
   }
@@ -465,6 +468,48 @@ Object.assign(G, {
       node.textContent = S.notifyQuietError;
       node.hidden = !S.notifyQuietError;
     }
+  }
+
+  function notifySetCompletedError(message) {
+    S.notifyCompletedError = String(message || "");
+    var node = S.el("notify-completed-error");
+    if (node) {
+      node.textContent = S.notifyCompletedError;
+      node.hidden = !S.notifyCompletedError;
+    }
+  }
+
+  // notifyCollectCompletedContent 校验并写回「已完成通知内容」两个旋钮
+  // （docs/gateway/08-notifications.md §5.1）。返回 false = 输入非法（错误已就地
+  // 显示），调用方应中止保存。
+  function notifyCollectCompletedContent(showError) {
+    var include = S.el("notify-completed-include-last-message");
+    var maxInput = S.el("notify-completed-max-chars");
+    if (!include || !maxInput || !S.notifyPolicyDraft) { return true; }
+    S.notifyPolicyDraft.global = S.notifyPolicyDraft.global || {};
+    var global = S.notifyPolicyDraft.global;
+    var raw = String(maxInput.value || "").trim();
+    var limit = parseInt(raw, 10);
+    if (include.checked) {
+      global.completed_include_last_message = true;
+      if (!raw || !(limit >= 1 && limit <= 2000)) {
+        if (showError) { notifySetCompletedError("附带正文上限需为 1..2000 的整数（字符数）。"); }
+        // 与免打扰收集器一致：非法值也要刷新保存条（否则保存按钮停在 disabled，
+        // 用户改了却点不动，看起来像"功能不生效"）。
+        notifyRefreshDirty();
+        return false;
+      }
+      global.completed_last_message_max_chars = limit;
+    } else {
+      delete global.completed_include_last_message;
+      // 关闭时上限只是"下次打开用"的草稿值：合法才写回，非法忽略（打开时会重校验）。
+      if (raw && limit >= 1 && limit <= 2000) {
+        global.completed_last_message_max_chars = limit;
+      }
+    }
+    if (showError) { notifySetCompletedError(""); }
+    notifyRefreshDirty();
+    return true;
   }
 
   function notifyRefreshDirty() {
@@ -623,6 +668,15 @@ Object.assign(G, {
     var min = S.el("notify-min-priority");
     if (min) { min.value = global.min_priority || "normal"; }
     renderNotifyPriorityHint();
+    // docs/gateway/08 §5.1：「已完成」是否附带最后一条助手回复 + 长度上限。
+    var includeLast = S.el("notify-completed-include-last-message");
+    if (includeLast) { includeLast.checked = global.completed_include_last_message === true; }
+    var maxChars = S.el("notify-completed-max-chars");
+    if (maxChars) {
+      var limit = parseInt(global.completed_last_message_max_chars, 10);
+      maxChars.value = String(limit >= 1 && limit <= 2000 ? limit : 200);
+    }
+    notifySetCompletedError("");
     renderNotifyQuietRows();
     var source = S.el("notify-policy-source");
     if (source) {
@@ -974,6 +1028,11 @@ Object.assign(G, {
       if (S.notifyQuietInvalidEl) { S.notifyQuietInvalidEl.focus(); }
       return;
     }
+    if (!notifyCollectCompletedContent(true)) {
+      var completedLimitEl = S.el("notify-completed-max-chars");
+      if (completedLimitEl) { completedLimitEl.focus(); }
+      return;
+    }
     if (!notifyPolicyIsDirty()) {
       notifyRefreshDirty();
       return;
@@ -1038,6 +1097,7 @@ Object.assign(G, {
     S.notifyQuietTouched = true;
     S.notifyQuietInvalidEl = null;
     notifySetQuietError("");
+    notifySetCompletedError("");
     renderNotifyPolicy();
     G.notify("已恢复默认值，点击「保存策略」后生效", "ok");
   }

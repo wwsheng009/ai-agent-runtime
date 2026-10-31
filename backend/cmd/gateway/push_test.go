@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,9 +198,9 @@ func TestPushNotifierFansOutToNtfyWithoutWebPush(t *testing.T) {
 		if got["topic"] != "aicli-gateway" || got["priority"] != float64(5) {
 			t.Fatalf("ntfy payload = %v", got)
 		}
-		// aicli 节点的 Web UI 在 /web/；/n/{node}/?session= 会被
-		// route allowlist 403（"route not allowed"）。
-		if got["click"] != "https://gw.example.com/n/n1/web/?session=s1" {
+		// 通知点击落点是网关控制台自己的会话深链（不区分节点类型，
+		// 也不再直接指向节点原版 Web）。
+		if got["click"] != "https://gw.example.com/#sessions?node=n1&session=s1" {
 			t.Fatalf("click = %v", got["click"])
 		}
 	case <-time.After(3 * time.Second):
@@ -207,25 +208,25 @@ func TestPushNotifierFansOutToNtfyWithoutWebPush(t *testing.T) {
 	}
 }
 
-// TestPushNotifierSessionURLUsesNodeKindWebBase 锁定通知点击深链：aicli 节点
-// 走 /web/（route allowlist 只放行该前缀），runtime-server 走根路径 /。
-// 旧实现永远拼 /n/{node}/?session=，点击必 403 "route not allowed"。
-func TestPushNotifierSessionURLUsesNodeKindWebBase(t *testing.T) {
+// TestPushNotifierSessionURLIsGatewayDeepLink 锁定通知点击落点：统一指向网关
+// 控制台的会话深链（#sessions?node=…&session=…），不再按节点 kind 拼节点原版
+// Web 路径（旧实现会被 route allowlist 403，且不同 kind 口径不一致）。
+func TestPushNotifierSessionURLIsGatewayDeepLink(t *testing.T) {
 	n := newPushNotifier(nil, "https://gw.example.com", nil)
-	if got := n.sessionURL("n1", "s1"); got != "https://gw.example.com/n/n1/web/?session=s1" {
-		t.Fatalf("aicli click = %q", got)
+	if got := n.sessionURL("n1", "s1"); got != "https://gw.example.com/#sessions?node=n1&session=s1" {
+		t.Fatalf("session click = %q", got)
 	}
-	if got := n.sessionURL("n1", ""); got != "https://gw.example.com/n/n1/web/" {
-		t.Fatalf("aicli no-session click = %q", got)
+	if got := n.sessionURL("n1", ""); got != "https://gw.example.com/#sessions?node=n1" {
+		t.Fatalf("node-only click = %q", got)
 	}
-	n.nodeKind = func(id string) string {
-		if id == "rs1" {
-			return "runtime-server"
-		}
-		return "aicli"
+	if got := n.sessionURL("", "s1"); got != "https://gw.example.com/#sessions?session=s1" {
+		t.Fatalf("session-only click = %q", got)
 	}
-	if got := n.sessionURL("rs1", "s1"); got != "https://gw.example.com/n/rs1/" {
-		t.Fatalf("runtime-server click = %q", got)
+	if got := n.sessionURL("", ""); got != "https://gw.example.com/#sessions" {
+		t.Fatalf("no-target click = %q", got)
+	}
+	if got := newPushNotifier(nil, "", nil).sessionURL("n1", "s1"); got != "" {
+		t.Fatalf("no base url click = %q", got)
 	}
 }
 
@@ -274,5 +275,85 @@ func TestPushTestHandlerReportsChannels(t *testing.T) {
 	handlePushTest(nil, nil)(rr2, httptest.NewRequest(http.MethodPost, "/api/push/test", nil))
 	if rr2.Code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled status = %d", rr2.Code)
+	}
+}
+
+// TestPushNotifierCompletedCarriesLastAssistantMessage 锁定 docs/gateway/08 §5.1：
+// 打开策略后「已完成」通知的正文带上该会话最后一条助手回复（按上限截断），且这类
+// 通知**绕过合并窗口逐条投递**——合并摘要只保留标题，否则正文会被吃掉，功能表现
+// 成"时灵时不灵"。策略关闭时行为与既有一致（不带内容）。
+func TestPushNotifierCompletedCarriesLastAssistantMessage(t *testing.T) {
+	deliveries := make(chan map[string]any, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		deliveries <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	src := newNotifyPolicySource(
+		filepath.Join(dir, "notify-policy.json"),
+		filepath.Join(dir, "notify-prefs.json"),
+	)
+	on, limit := true, 12
+	if err := src.Apply(notifyPolicyFile{Global: notifyPolicyScope{
+		CompletedIncludeLastMessage:  &on,
+		CompletedLastMessageMaxChars: &limit,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	n := newPushNotifier(nil, "https://gw.example.com", nil)
+	n.ntfy = ntfy.NewSender(srv.URL, "aicli-gateway", "")
+	n.policy = src
+	// 合并窗口开着：带内容的事件必须逐条投递，否则会被合并摘要吞掉正文。
+	n.coalesceWindow = 30 * time.Second
+
+	node := func(sessionID, text string) *tunnel.Node {
+		return &tunnel.Node{NodeID: "n1", Name: "laptop", Sessions: []wire.SessionSummary{{
+			SessionID:       sessionID,
+			Title:           "A",
+			Attention:       "completed",
+			LastMessageRole: "assistant",
+			LastMessage:     text,
+		}}}
+	}
+	long := strings.Repeat("结", limit+18)
+	short := "结论：已完成" // 6 runes < limit → 不应被截断
+	n.observe([]*tunnel.Node{node("s1", short)})
+	n.observe([]*tunnel.Node{node("s2", long)})
+
+	// 两条通知的投递是并发的，不保证顺序：按内容判定。
+	var msgs []string
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-deliveries:
+			msg, _ := got["message"].(string)
+			msgs = append(msgs, msg)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("expected notification #%d（逐条投递，未被合并吞掉）", i+1)
+		}
+	}
+	// 合并摘要的特征是标题变成「2 sessions completed」；逐条投递时两条都保留
+	// 各自的 attention 行与正文。
+	for i, msg := range msgs {
+		if !strings.Contains(msg, "completed") {
+			t.Fatalf("message #%d 应保留 attention 行：%q", i+1, msg)
+		}
+		if strings.Contains(msg, "sessions") {
+			t.Fatalf("message #%d 被合并摘要覆盖（正文内容会丢）：%q", i+1, msg)
+		}
+	}
+	full, truncated := msgs[0], msgs[1]
+	if !strings.Contains(full, short) {
+		full, truncated = truncated, full
+	}
+	if !strings.Contains(full, short) {
+		t.Fatalf("应有一条带完整助手回复：%v", msgs)
+	}
+	if !strings.HasSuffix(truncated, "…") || strings.Contains(truncated, long) {
+		t.Fatalf("另一条应按上限 %d 截断：%q", limit, truncated)
 	}
 }

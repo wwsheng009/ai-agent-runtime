@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=95">
+<link rel="stylesheet" href="./style.css?v=96">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -498,6 +498,24 @@
             </section>
 
             <section class="panel">
+              <div class="panel-head"><h3>已完成通知内容</h3></div>
+              <p class="connectors-hint">「已完成」默认只报谁完成了。打开后会把该会话最后一条助手回复一并带上，方便在手机锁屏或 IM 里直接读结论；带了内容的那条通知会逐条投递、不参与合并（合并通知只保留标题）。</p>
+              <div class="notify-grid">
+                <div class="field">
+                  <span class="field-label">附带内容</span>
+                  <label class="check-line"><input type="checkbox" id="notify-completed-include-last-message"> 已完成通知附带最后一条助手回复</label>
+                  <p class="field-hint">最后一条不是助手消息时（例如等待用户输入）自动省略。</p>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="notify-completed-max-chars">附带正文上限（字符）</label>
+                  <input id="notify-completed-max-chars" class="filter-input" type="number" inputmode="numeric" min="1" max="2000" step="50" value="200" autocomplete="off">
+                  <p class="field-hint">按字符截断（中文按 1 个字符算），超出部分以「…」结尾；各通道仍各有自己的长度上限。</p>
+                </div>
+              </div>
+              <p class="field-error" id="notify-completed-error" role="alert" hidden></p>
+            </section>
+
+            <section class="panel">
               <div class="panel-head"><h3>通道</h3></div>
               <div class="notify-channels" id="notify-channels" role="group" aria-label="通知通道"></div>
               <p class="connectors-hint">未配置的通道不可用；关闭通道只影响网关外发（Web Push / ntfy / AppPush），桌面 App 的本机弹窗受上方总开关与 kind 开关控制。</p>
@@ -927,6 +945,6 @@
 
 <!-- type="module"：app.js 只负责按顺序 import console/js/*.js（见 console/js/runtime.js）。
      模块脚本是 defer 语义，等价原来放在 body 末尾的 script。 -->
-<script type="module" src="./app.js?v=95"></script>
+<script type="module" src="./app.js?v=96"></script>
 </body>
 </html>
