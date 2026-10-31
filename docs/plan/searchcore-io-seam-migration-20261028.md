@@ -467,7 +467,9 @@ S5g 收尾扫描的另一半（同一关注点扫完的产物："零改动 + 三
 - WSL 上 `TestRemoteShellPreservesBackslashPathsInOutput` / `TestRemoteShellCommandDiagnosticsDoNotChangeBody`：
   测试命令用 PowerShell 语义（`Write-Output`、`\` 路径），在 zsh 下必然红（`command not found`）；
   Windows 全绿，属 shell 工作区；
-- 干净 HEAD 对 `remotetools` 编不过（`wire.MountLabels`，见 §5 最后一行）。
+- 干净 HEAD 对 `remotetools` 编不过（`wire.MountLabels`，见 §5 最后一行）。**已收束**：
+  该缺口由补交 `d0244855`（`wire.MountLabels`；另 `8f4ab0be` 补 import 摘要来源字段）修复，
+  2026-10-31 干净归档全量 `go build ./...`=0 实证，见 §5 收束记。
 
 **给用户文档/产品的三条行为差**（换核的真实后果，方向已钉进 e2e）：
 
@@ -543,4 +545,11 @@ key 与缺失能力（`sort=accessed` 且含"不可用"）。变异（把拒绝�
 | 半封关注点造成两种真值来源 | 台账里"读闸门唯一入口"那条 | 分步边界=关注点边界（§4 每行都是一个完整关注点） |
 | 上游半提交使 HEAD 不可构建，验证要靠临时借文件 | M2 现状：`8f325893` 漏交 `wire` 字段、`4c2f0f56` 漏交 `importSessionResult` 字段 | 见 seam 文档 §13.6 合并清单；S1 若落在 remotetools 之外的包，构建不受此阻塞影响（`searchcore` 不依赖 `remotetools`），**可先行** |
 
-最后一行值得注意：**S1–S5 全在 `internal/toolcore/searchcore`，不依赖那个坏包**，所以这一步不被上游阻塞；阻塞的只有 M2 的合并与 S6。**S6 已落地**（见下节实施记）：它动的 `remotetools` 在当前工作树里可编译（`wire.MountLabels` 字段在他人未提交的工作区中在场），但**干净 HEAD 仍编不过**——本轮实测：干净 `git worktree` 里`go test -c ./internal/remotetools/` 直接失败于 `gateway.go: unknown field Hostname in wire.MountLabels`（第 470 行先例的复现），所以本次全部验证都在工作树内完成，并如实记录。
+最后一行值得注意：**S1–S5 全在 `internal/toolcore/searchcore`，不依赖那个坏包**，所以这一步不被上游阻塞；阻塞的只有 M2 的合并与 S6。**S6 已落地**（见下节实施记）：它动的 `remotetools` 在当前工作树里可编译（`wire.MountLabels` 字段在他人未提交的工作区中在场），但**当时干净 HEAD 仍编不过**——本轮实测：干净 `git worktree` 里`go test -c ./internal/remotetools/` 直接失败于 `gateway.go: unknown field Hostname in wire.MountLabels`（第 470 行先例的复现），所以当时全部验证都在工作树内完成，并如实记录。
+
+**收束记（2026-10-31）**：上述"干净 HEAD 编不过"局面已终结——`wire.MountLabels` 由 `d0244855`、
+import 摘要来源字段由 `8f4ab0be` 补交，干净归档（HEAD=`bcd6879d`）全量 `go build ./...`=0；离线回归
+8 步（build / toolcore 全族 / envdclient+remotetargets / carrier / 叠加 e2e / mcp-manager /
+gateway-wire / commands Import-Transfer）全绿（15 个包 `ok`、零 FAIL）。envd 硬门禁相应补挂
+`./internal/toolcore/...` 与 `./internal/mcp/manager/...`（提交 `53ad858f`）——该线核心单测此前
+只由软门（`continue-on-error: true` 的全量 `go test ./...`）看护，现回归会在硬门被拦截。
