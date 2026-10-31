@@ -100,6 +100,9 @@ type pushNotifier struct {
 	generation map[string]int64
 	// deliveryLedger 是通道级交付账本（跨重启/多目标去重，P1）。
 	deliveryLedger *notifyDeliveryLedger
+	// shortLinks 把通知正文里的会话深链压成短址（/s/{code}，docs/gateway/08
+	// §5.2）。nil = 用完整深链（旧行为）；baseURL 为空时 URL() 也返回空并回退。
+	shortLinks *shortLinker
 	// logMu/loggedErrs 给"同一个投递失败"做限流：completed 事件持续到达时，同一条
 	// 错误（例如微信缺 context_token）会刷满 journalctl。按错误文本去重——首次立刻
 	// 打印，之后最多每 notifyErrLogEvery 打一次；错误消失后自然过期淘汰。
@@ -606,22 +609,41 @@ func (p *pushNotifier) imPresenceExempt(nodeID, sessionID, kind string) bool {
 	return false
 }
 
+// sessionURL 返回通知正文里的「点击进控制台会话」落点。
+//
+// 默认走短址（/s/{code}，~35 字符）：完整深链有 ~95 字符，会把 IM 正文预算
+// （provider 上限 + 「已完成」附带内容上限）挤掉大半（2026-10-31 真机）。
+// 未装配短址或 baseURL 为空时回退完整深链（行为与历史一致）。
 func (p *pushNotifier) sessionURL(nodeID, sessionID string) string {
-	if p.baseURL == "" {
+	if p == nil || p.baseURL == "" {
 		return ""
 	}
-	// 通知点击落点是**网关控制台自己的会话深链**（#sessions?node=…&session=…）：
-	// 不区分节点类型（aicli / runtime-server 都由控制台统一定位），也不再直接
-	// 指向节点原版 Web（避免依赖各节点 route allowlist 与 kind 判定）。节点原版
-	// Web 仍在卡片菜单里提供。
+	if p.shortLinks != nil {
+		if short := p.shortLinks.URL(nodeID, sessionID); short != "" {
+			return short
+		}
+	}
+	return consoleSessionURL(p.baseURL, nodeID, sessionID)
+}
+
+// consoleSessionURL 构造控制台会话深链。**唯一构造点**：直链与短址解析共用同一
+// 口径，避免两处各自拼接后漂移（短址 302 的目标也是它）。
+// 不区分节点类型（aicli / runtime-server 都由控制台统一定位），也不直接指向节点
+// 原版 Web（避免依赖各节点 route allowlist 与 kind 判定）；节点原版 Web 仍在卡片
+// 菜单里提供。
+func consoleSessionURL(baseURL, nodeID, sessionID string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
 	q := url.Values{}
-	if nodeID != "" {
+	if nodeID = strings.TrimSpace(nodeID); nodeID != "" {
 		q.Set("node", nodeID)
 	}
-	if sessionID != "" {
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		q.Set("session", sessionID)
 	}
-	u := p.baseURL + "/#sessions"
+	u := baseURL + "/#sessions"
 	if encoded := q.Encode(); encoded != "" {
 		u += "?" + encoded
 	}

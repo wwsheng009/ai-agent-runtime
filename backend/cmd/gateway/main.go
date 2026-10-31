@@ -251,6 +251,9 @@ func run() int {
 		coalesceWindow  = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
 		quietHours      = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
 		normalChannels  = flag.String("notify-normal-channels", "", "comma-separated channels for normal notifications (completed/waiting), e.g. webpush,ntfy; empty keeps the D6 single primary channel (webpush)")
+		// 通知正文里的会话深链默认压成短址（/s/{code}）：完整深链 ~95 字符，
+		// 会把 IM 正文预算挤掉大半（docs/gateway/08 §5.2）。false = 旧行为。
+		notifyShortLinks = flag.Bool("notify-short-links", true, "use short links (/s/{code}) instead of full console deep links in notification bodies")
 		eventTick       = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
 		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
 		// without owner password and without any device token" — the combination
@@ -385,6 +388,14 @@ func run() int {
 		}
 	}
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
+	// 通知短址（docs/gateway/08 §5.2）：把会话深链从 ~95 字符压到 ~35 字符，
+	// 给正文留出预算。映射落 <data-dir>/short-links.json（0600，含随机 HMAC
+	// 密钥）；--notify-short-links=false 时保持完整深链（旧行为，行为零变化）。
+	var shortLinks *shortLinker
+	if *notifyShortLinks {
+		shortLinks = newShortLinker(filepath.Join(*dataDir, "short-links.json"), *publicBaseURL)
+		notifier.shortLinks = shortLinks
+	}
 	ntfySender := ntfy.NewSender(*ntfyURL, *ntfyTopic, *ntfyToken)
 	if *ntfyURL != "" && !ntfySender.Enabled() {
 		fmt.Fprintln(os.Stderr, "gateway: --ntfy-url requires --ntfy-topic (and a valid base URL)")
@@ -956,6 +967,12 @@ func run() int {
 	// 扫码登录二维码：微信等通道返回的是 liteapp 链接而非图片，由本端点
 	// 用 go-qrcode 编码为 PNG（与 aicli micro web 的 /web/api/qr 同口径）。
 	router.Handle("/api/qr", owner.RequireSession(handleQRCode())).Methods(http.MethodGet)
+	// 通知短址（docs/gateway/08 §5.2）：public、**不**走 owner 鉴权——手机/微信
+	// 点开时没有 cookie；控制台自身仍要求登录，短链只做 302 跳转（拿到链接的人
+	// 看到的仍旧只是 node/session 标识，与旧行为把完整深链发到 IM 等价）。
+	if shortLinks != nil {
+		router.Handle("/s/{code}", limited(shortLinks.Handler())).Methods(http.MethodGet, http.MethodHead)
+	}
 	// Presence: the console reports the session it is viewing so the gateway can
 	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
 	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)

@@ -194,6 +194,30 @@ runtime-server 宿主的对应实现见 `internal/api/runtimeapi/gateway_attenti
 - 非 `global` 层级设这两个字段会被 API 拒绝（400）：它描述"通知内容口径"，不是按
   通道/会话的开关。
 
+### 5.2 通知正文里的短链（`/s/{code}`）
+
+通知要点进控制台会话就得带深链，而完整深链很长：
+
+```text
+https://aicli.ttai.online/#sessions?node=node-9df82a73f680352a&session=session_20261030153213_PhTLvD97   ← ~95 字符
+https://aicli.ttai.online/s/GEZDGNBVGY                                                                    ← ~35 字符
+```
+
+IM 正文预算同时受 provider 上限（默认 2000）与「已完成」附带内容上限（默认 200）
+挤压，长链会把正文挤没（2026-10-31 真机）。因此默认启用短址：
+
+- **短码确定性**：`base32(HMAC-SHA256(key, "v1\nnode\nsession"))[:10]`——同一会话
+  永远得到同一个码（重复投递不堆条目、不暴露自增序号可枚举）；key 随机生成并存在
+  `<data-dir>/short-links.json`（0600），重启后旧链接仍可解析。
+- **`GET /s/{code}`**：命中 302 到控制台深链（`consoleSessionURL` 是唯一构造点，
+  直链与短址解析共用同一口径），未知码 404。该端点 **public、不走 owner 鉴权**
+  （手机/微信点开时没有 cookie）；控制台自身仍要求登录，因此没有放宽权限——拿到
+  链接的人看到的仍旧只是 node/session 标识，与旧行为把完整深链发到 IM 等价。
+- **容量**：条目上限 `shortLinkMaxLinks`(4096)，超出淘汰最旧（确定性的码意味着老
+  链接可能失效，这是「有界存储」与「永久有效」的取舍）。
+- **开关**：`--notify-short-links`（默认 `true`）。设为 false 时正文回到完整深链，
+  行为与历史逐字一致（`sessionURL` 回退分支）。
+
 ---
 
 ## 6. 与"会话预览"取舍的关系
