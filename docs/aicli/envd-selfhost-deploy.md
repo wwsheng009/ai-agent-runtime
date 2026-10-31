@@ -96,7 +96,9 @@ go build -trimpath -ldflags "-s -w -X main.commitSHA=fcf15acb+logsafe+tls" -o en
   ```
 
 - **升级后验证（2026-10-31 实测）**：seam 门 10/10（含旧版为红的链接探针）；金丝雀 A/B 各 23/23
-  （F1 闸门不回归）；链接行为 9/9（默认/显式 `follow=false` 不下钻出树链接、`follow=true` 跟随且环终止）。
+  （F1 闸门不回归）；链接行为 9/9（默认/显式 `follow=false` 不下钻出树链接、`follow=true` 跟随且环终止）；
+  manager 级 live smoke（`internal/mcp/manager`）实跑：错误 token 红 / 正确 token 绿
+  （`remote_envd__ls` 返回真实目录内容）。
 
 ## 3. 目标机安装（root）
 
