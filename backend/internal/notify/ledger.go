@@ -17,7 +17,19 @@ type ChannelOutcome struct {
 	Err     string
 	// Skipped 表示该通道被偏好（静音/优先级门槛）跳过，未尝试投递。
 	Skipped bool
+	// Reason 是跳过的原因码（仅 Skipped 时非空）：'preference' = 被偏好门
+	// 过滤；'deadline_exceeded' = 预算耗尽、未启动发送。用于区分"用户不让发"
+	// 与"来不及发"，后者说明并发/超时预算需要调整（docs/gateway/18 §9）。
+	Reason string
 }
+
+// 跳过原因码（ChannelOutcome.Reason）。
+const (
+	// SkipReasonPreference 表示被偏好（静音/kind 门槛/优先级）过滤。
+	SkipReasonPreference = "preference"
+	// SkipReasonDeadlineExceeded 表示整体投递预算已耗尽，未启动发送。
+	SkipReasonDeadlineExceeded = "deadline_exceeded"
+)
 
 // Receipt 是一次投递的回执（按 DedupKey 记账）。
 type Receipt struct {
@@ -33,6 +45,28 @@ type Receipt struct {
 	// 静默期结束后同一事件**不**补推（现网 flush 行为，docs/bots/12 §3 D3）；
 	// DedupKey 同样未被认领（静默是时刻性判定，不是投递记账）。
 	Muted bool
+}
+
+// SkippedByReason 统计按原因码被跳过的通道数（指标上报/日志用）。
+func (r Receipt) SkippedByReason(reason string) int {
+	n := 0
+	for _, o := range r.Outcomes {
+		if o.Skipped && o.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
+// Skipped 统计被跳过的通道总数（不区分原因）。
+func (r Receipt) Skipped() int {
+	n := 0
+	for _, o := range r.Outcomes {
+		if o.Skipped {
+			n++
+		}
+	}
+	return n
 }
 
 // Ledger 是投递账本契约。
