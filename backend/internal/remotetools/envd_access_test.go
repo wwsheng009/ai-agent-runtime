@@ -190,6 +190,86 @@ func TestEnvdAccessLinkCycleBecomesAnError(t *testing.T) {
 	}
 }
 
+// fakeLinkEntryV2 is a link as envd >= 0.10.0 reports it: is_symlink marks the entry itself
+// while Type describes the TARGET (the daemon's documented meaning), and SymlinkTarget is
+// the already-resolved absolute target. The pre-upgrade daemon never sent this shape.
+func fakeLinkEntryV2(filePath string, targetType envdclient.FileType, target string) envdclient.Entry {
+	return envdclient.Entry{
+		Name: path.Base(filePath), Path: filePath, Type: targetType,
+		Size: "0", Mode: 0o755, SymlinkTarget: target, IsSymlink: true,
+		ModifiedTime: "2026-01-02T03:04:05Z",
+	}
+}
+
+// TestEnvdAccessConsumesTheIsSymlinkVocabulary pins the second wire encoding. envd >= 0.10.0
+// marks the entry itself and lets Type describe the target, so the same on-target facts
+// arrive in a different shape; an adapter that only understood the old shape would read
+// every link on an upgraded daemon as a plain file or directory.
+func TestEnvdAccessConsumesTheIsSymlinkVocabulary(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakeEnvdFiles{
+		entries: map[string]envdclient.Entry{
+			"/work/linkdir":  fakeLinkEntryV2("/work/linkdir", envdclient.FileTypeDirectory, "/work/real"),
+			"/work/linkfile": fakeLinkEntryV2("/work/linkfile", envdclient.FileTypeFile, "/work/note"),
+			"/work/dangling": fakeLinkEntryV2("/work/dangling", envdclient.FileTypeUnspecified, "/work/dangling"),
+			"/work/real":     fakeDirEntry("/work/real"),
+			"/work/note":     fakeFileEntry("/work/note", 5),
+		},
+		listing: map[string][]string{"/work": {"linkdir", "linkfile", "dangling", "real", "note"}},
+	}
+	access := newFakeAccess(t, fake, 0)
+
+	lstat, err := access.Lstat(ctx, "/work/linkdir")
+	if err != nil {
+		t.Fatalf("Lstat(linkdir): %v", err)
+	}
+	if lstat.Mode()&fs.ModeSymlink == 0 || lstat.IsDir() {
+		t.Fatalf("Lstat must report the link itself, got mode %v isdir %v", lstat.Mode(), lstat.IsDir())
+	}
+
+	stat, err := access.Stat(ctx, "/work/linkdir")
+	if err != nil || !stat.IsDir() {
+		t.Fatalf("Stat must follow the link to the directory: err=%v info=%v", err, stat)
+	}
+	if stat.Mode()&fs.ModeSymlink != 0 {
+		t.Fatalf("a followed link must not still claim ModeSymlink: %v", stat.Mode())
+	}
+
+	resolved, err := access.EvalLinkPath(ctx, "/work/linkfile")
+	if err != nil || resolved != "/work/note" {
+		t.Fatalf("EvalLinkPath = %q, err %v, want /work/note", resolved, err)
+	}
+
+	// A listing must present the link as a link, not as the directory it resolves to,
+	// because that is what keeps a non-following walk from descending it.
+	entries, err := access.ReadDir(ctx, "/work")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "linkdir" && (entry.IsDir() || entry.Type()&fs.ModeSymlink == 0) {
+			t.Fatalf("a link-to-directory must stay a link in a listing, got dir=%v type=%v", entry.IsDir(), entry.Type())
+		}
+	}
+
+	// The daemon answers a chain it cannot resolve with the link's own path; dangling and
+	// cyclic are indistinguishable there, so the adapter must not name either - and must
+	// not turn "unknown" into absence.
+	if _, err := access.Stat(ctx, "/work/dangling"); err == nil {
+		t.Fatal("an unresolvable link must be an error, not a followed entry")
+	} else {
+		if toolcore.IsNotExist(err) {
+			t.Fatalf("an unresolvable chain must not be reported as plain absence: %v", err)
+		}
+		if !strings.Contains(err.Error(), "不可解析") {
+			t.Fatalf("the error must say the chain itself could not be resolved: %v", err)
+		}
+	}
+	if info, err := access.Lstat(ctx, "/work/dangling"); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("Lstat of a dangling link must still describe the link: info=%v err=%v", info, err)
+	}
+}
+
 func TestEnvdAccessReadDirKeepsTheTargetsOrderAndTypes(t *testing.T) {
 	fake := &fakeEnvdFiles{
 		entries: map[string]envdclient.Entry{

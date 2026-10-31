@@ -210,6 +210,31 @@ func TestSharedLsRunsOnTheEnvdAccessor(t *testing.T) {
 	}
 }
 
+// TestSharedLsDoesNotDescendADirectoryLink pins F2's user-visible rule at the core level:
+// with follow off, a link that points at a directory is listed as the link it is and is not
+// descended - the same rule the local walker applies. The fixture carries the >= 0.10.0
+// wire shape (is_symlink + the target's type), which is exactly the shape that used to read
+// as a plain directory and sent the walk through the link.
+func TestSharedLsDoesNotDescendADirectoryLink(t *testing.T) {
+	fake := envdIntegrationTree()
+	fake.entries["/srv/work/lnk"] = fakeLinkEntryV2("/srv/work/lnk", envdclient.FileTypeDirectory, "/srv/work/pkg")
+	fake.listing["/srv/work"] = append(fake.listing["/srv/work"], "lnk")
+
+	access := &envdAccess{api: fake}
+	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: access}
+	handler := lscore.NewHandler(toolcore.Definition{Name: "ls", Version: "1.0.0"})
+	result := runHandler(t, handler, map[string]any{"path": ".", "depth": 3}, runtime)
+	if !result.Success {
+		t.Fatalf("ls against the accessor failed: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "lnk") {
+		t.Fatalf("the link itself must appear in the listing:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, "lnk/gamma.txt") {
+		t.Fatalf("a directory link was descended with follow off:\n%s", result.Content)
+	}
+}
+
 // TestSharedGrepPagesTheAccessorsTree pins the property a remote core depends on most: the
 // page is filled by the target's own enumeration order, sorted by the core, and a second
 // page continues rather than repeating. One-level fakes cannot show that, so this tree has

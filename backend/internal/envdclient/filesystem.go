@@ -41,6 +41,11 @@ type Entry struct {
 	Group         string   `json:"group"`
 	ModifiedTime  string   `json:"modifiedTime"`
 	SymlinkTarget string   `json:"symlinkTarget"`
+	// IsSymlink is envd >= 0.10.0's "the entry itself is a link" flag (wire: is_symlink).
+	// Type then describes the link's TARGET, and SymlinkTarget arrives already resolved to
+	// the final absolute path. Older daemons omit the field and mark links through Type
+	// alone, which is why the predicate below accepts both encodings.
+	IsSymlink bool `json:"isSymlink"`
 }
 
 // UnmarshalJSON accepts Size as either a JSON string or a JSON number.
@@ -94,8 +99,14 @@ func (e Entry) SizeBytes() int64 {
 // IsDir reports whether the entry is a directory.
 func (e Entry) IsDir() bool { return e.Type == FileTypeDirectory }
 
-// IsSymlink reports whether the entry is a symlink.
-func (e Entry) IsSymlink() bool { return e.Type == FileTypeSymlink }
+// IsLink reports whether the entry ITSELF is a symbolic link.
+//
+// Two wire generations have to be accepted at once: envd < 0.10.0 marks a link by Type
+// (FILE_TYPE_SYMLINK), while envd >= 0.10.0 sends is_symlink and reports the target's
+// type in Type - a link to a directory comes back as FILE_TYPE_DIRECTORY. Reading only
+// one of the two would let the other generation's links masquerade as plain
+// files/directories, which is the failure this seam exists to prevent.
+func (e Entry) IsLink() bool { return e.IsSymlink || e.Type == FileTypeSymlink }
 
 // StatResponse is the body of filesystem.Filesystem/Stat.
 type StatResponse struct {

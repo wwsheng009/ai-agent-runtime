@@ -48,10 +48,12 @@ type envdFileAPI interface {
 // file without allocating a megabyte.
 var envdReadChunk int64 = 64 << 10
 
-// envdLinkHops bounds symlink resolution. The target reports only the final component as a
-// link (intermediate components are followed by the daemon itself, which is exactly POSIX
-// resolution), so iterating SymlinkTarget is faithful - but a cycle in that chain must
-// become an error the way ELOOP does, not a loop in this process.
+// envdLinkHops bounds symlink resolution. The target reports the FINAL component's linkness
+// (intermediate components are followed by the daemon itself, which is exactly POSIX
+// resolution) and, on envd >= 0.10.0, an already-resolved target - so one hop normally
+// terminates. The loop stays because a chain can still be a chain (and because older
+// daemons answer with raw targets), and a cycle in it must become an error the way ELOOP
+// does, not a loop in this process.
 const envdLinkHops = 40
 
 type envdAccess struct {
@@ -131,15 +133,24 @@ func (i envdInfo) ModTime() time.Time {
 	return ts
 }
 
-func (i envdInfo) IsDir() bool { return i.entry.IsDir() }
+// IsDir answers "may a walk descend here", not "what did Type say": envd >= 0.10.0 reports a
+// link to a directory as Type DIRECTORY alongside is_symlink, and a listing that treated
+// that as a directory would descend through a link the local walker refuses to follow. The
+// link flag therefore wins over the type, in both wire encodings.
+func (i envdInfo) IsDir() bool { return !i.entry.IsLink() && i.entry.IsDir() }
 
 func (i envdInfo) Mode() fs.FileMode {
 	mode := fs.FileMode(i.entry.Mode & 0o7777)
+	// The link case is checked first on purpose: with the >= 0.10.0 vocabulary a
+	// link-to-directory also answers IsDir(), and a ModeDir bit would reintroduce the
+	// descent this adapter exists to refuse. The permission bits are left as the daemon
+	// sent them (on that vocabulary they are the target's, which is what the target-user
+	// readability gate reads).
 	switch {
+	case i.entry.IsLink():
+		mode |= fs.ModeSymlink
 	case i.entry.IsDir():
 		mode |= fs.ModeDir
-	case i.entry.IsSymlink():
-		mode |= fs.ModeSymlink
 	}
 	return mode
 }
@@ -187,17 +198,16 @@ func (a *envdAccess) Stat(ctx context.Context, filePath string) (fs.FileInfo, er
 // error, which the caller's rule for a failed resolution already handles by refusing to
 // descend: that is ELOOP's job, and it must not become this process's job.
 //
-// WARNING (measured 2026-10-31 on a live 0.2.11, n9e@172.18.3.238): the assumption above
-// is FALSE on the wire. Both Stat and ListDir report the FOLLOWED type for a symlink
-// (a link to a file comes back as FILE_TYPE_FILE, a link to a directory as
-// FILE_TYPE_DIRECTORY, a dangling link as an empty type) and SymlinkTarget is never
-// populated - so this function currently degenerates to an identity resolution and the
-// cycle rule it feeds never fires. Link fidelity on envd needs either a daemon-side
-// change (report the link type and target) or a parent-ListDir workaround; until then
-// every link-dependent behaviour (follow=false refusing to descend, follow=true cycle
-// termination) is NOT trustworthy here. See the S6 record in
-// docs/plan/searchcore-io-seam-migration-20261028.md and the link probe in
-// scripts/envd_seam_access_verify.go, which fails on a real target for exactly this.
+// WARNING, kept because it is the reason the daemon version is now part of the contract
+// (measured 2026-10-31, n9e@172.18.3.238): envd < 0.10.0 reports the FOLLOWED type for a
+// symlink (a link to a file comes back as FILE_TYPE_FILE, a link to a directory as
+// FILE_TYPE_DIRECTORY, a dangling link as an empty type) and never populates
+// SymlinkTarget - here this function then degenerates to an identity resolution and the
+// cycle rule it feeds never fires. envd >= 0.10.0 reports is_symlink plus the resolved
+// target, which is what the branches below consume; the link probe in
+// scripts/envd_seam_access_verify.go stays the tripwire that tells the two apart on a
+// live target (red on the old daemon, green on the new one). See the S6 record in
+// docs/plan/searchcore-io-seam-migration-20261028.md.
 func (a *envdAccess) EvalLinkPath(ctx context.Context, filePath string) (string, error) {
 	resolved, _, err := a.resolve(ctx, filePath)
 	return resolved, err
@@ -216,19 +226,30 @@ func (a *envdAccess) resolve(ctx context.Context, filePath string) (string, envd
 		if err != nil {
 			return "", envdclient.Entry{}, envdError("stat", current, err)
 		}
-		if !entry.IsSymlink() {
+		if !entry.IsLink() {
 			return current, entry, nil
 		}
 		target := strings.TrimSpace(entry.SymlinkTarget)
 		if target == "" {
-			return "", envdclient.Entry{}, fmt.Errorf("解析链接 %s: 目标为空: %w", current, fs.ErrNotExist)
+			// The daemon marked the entry as a link but sent no target. Claiming absence
+			// here would invent a fact about a path that exists as a link.
+			return "", envdclient.Entry{}, fmt.Errorf("解析链接 %s: 链接无目标信息（daemon 未提供 symlinkTarget）", current)
 		}
 		if !path.IsAbs(target) {
 			// A relative link target is relative to the directory holding the link -
 			// not to the caller's cwd, which is a different machine's notion entirely.
 			target = path.Join(path.Dir(current), target)
 		}
-		current = path.Clean(target)
+		target = path.Clean(target)
+		if target == current {
+			// envd >= 0.10.0 answers a chain it cannot resolve (EvalSymlinks failed, e.g.
+			// dangling or ELOOP) with the link's own path. The wire cannot tell those two
+			// apart, so the adapter refuses to name one of them - and refuses to convert
+			// "unknown" into absence, the same discipline that keeps permission from
+			// becoming "not found".
+			return "", envdclient.Entry{}, fmt.Errorf("解析链接 %s: 链接目标不可解析（悬空或链接环；daemon 只报告解析后的目标）", current)
+		}
+		current = target
 	}
 	return "", envdclient.Entry{}, fmt.Errorf("解析链接 %s: 超过 %d 跳上限", filePath, envdLinkHops)
 }

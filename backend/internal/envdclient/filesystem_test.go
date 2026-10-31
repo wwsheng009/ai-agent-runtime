@@ -125,6 +125,41 @@ func TestFilesystemUnaryCalls(t *testing.T) {
 	}
 }
 
+// TestEntryDecodesBothLinkEncodings pins the wire facts the adapter depends on: envd >= 0.10.0
+// sends isSymlink (protojson of is_symlink) while Type describes the target, and the older
+// generation marks links through Type alone. IsLink must read both, and a plain entry must
+// not be mistaken for a link by either.
+func TestEntryDecodesBothLinkEncodings(t *testing.T) {
+	var newShape Entry
+	if err := json.Unmarshal([]byte(`{"name":"lnk","type":"FILE_TYPE_DIRECTORY","isSymlink":true,"symlinkTarget":"/srv/real"}`), &newShape); err != nil {
+		t.Fatalf("unmarshal >= 0.10.0 shape: %v", err)
+	}
+	if !newShape.IsLink() {
+		t.Fatalf(">= 0.10.0 link not recognised: %+v", newShape)
+	}
+	// The wire TYPE still describes the target (the daemon's documented meaning); the
+	// adapter, not this struct, is where the link flag wins over the type.
+	if !newShape.IsDir() || newShape.Type != FileTypeDirectory {
+		t.Fatalf(">= 0.10.0 shape lost the target type: %+v", newShape)
+	}
+
+	var oldShape Entry
+	if err := json.Unmarshal([]byte(`{"name":"lnk","type":"FILE_TYPE_SYMLINK","symlinkTarget":"/srv/real"}`), &oldShape); err != nil {
+		t.Fatalf("unmarshal old shape: %v", err)
+	}
+	if !oldShape.IsLink() {
+		t.Fatalf("old-style link not recognised: %+v", oldShape)
+	}
+
+	var plain Entry
+	if err := json.Unmarshal([]byte(`{"name":"f","type":"FILE_TYPE_FILE"}`), &plain); err != nil {
+		t.Fatalf("unmarshal plain file: %v", err)
+	}
+	if plain.IsLink() {
+		t.Fatalf("a plain file was read as a link: %+v", plain)
+	}
+}
+
 // TestWatchDirDecodesEventFrames covers the streaming filesystem method.
 func TestWatchDirDecodesEventFrames(t *testing.T) {
 	srv, _ := newFilesystemStub(t)
