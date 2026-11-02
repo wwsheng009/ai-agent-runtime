@@ -102,6 +102,68 @@ func TestJobListReportsJobsOwnedBySession(t *testing.T) {
 	}
 }
 
+// TestJobOutputSurfacesQueueSaturation locks the remote mapping of the core
+// queue diagnostics. Before this, job_output said only "(no output yet; job is
+// queued)" while all four execution slots were wedged, so the model had no way
+// to distinguish normal queuing from a saturated scheduler.
+func TestJobOutputSurfacesQueueSaturation(t *testing.T) {
+	root := newTestWorkspace(t)
+	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo", "sleep"}), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	running := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		body := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+			"command": "sleep 30",
+		})
+		jobID := extractJobID(t, body)
+		if jobID == "" {
+			t.Fatalf("job_start %d returned no job id: %s", i, body)
+		}
+		running = append(running, jobID)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		list := callTool(t, ctx, session, "remote_dev__job_list", map[string]interface{}{})
+		if strings.Count(list, "running") >= 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("four sleep jobs did not occupy the scheduler slots:\n%s", list)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	queuedBody := callTool(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": "echo queued-probe",
+	})
+	queuedID := extractJobID(t, queuedBody)
+	if queuedID == "" {
+		t.Fatalf("queued job_start returned no job id: %s", queuedBody)
+	}
+	output := callTool(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+		"job_id": queuedID,
+	})
+	if !strings.Contains(output, "Scheduler: saturated") {
+		t.Fatalf("job_output hid the saturated scheduler state: %s", output)
+	}
+	if !strings.Contains(output, "4/4 slots active") {
+		t.Fatalf("job_output hid the slot capacity: %s", output)
+	}
+
+	for _, jobID := range append(running, queuedID) {
+		_, _ = session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "remote_dev__job_cancel",
+			Arguments: map[string]interface{}{"job_id": jobID},
+		})
+	}
+}
+
 func TestRemoteShellFastCommandForgetsJobAndTimeoutPromotes(t *testing.T) {
 	root := newTestWorkspace(t)
 	server, err := remotetools.NewServer(newJobsConfig(t, root, []string{"echo", "sleep"}), "dev")
@@ -111,23 +173,42 @@ func TestRemoteShellFastCommandForgetsJobAndTimeoutPromotes(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	fast := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+	fastResult := callToolResult(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command": "echo fast-marker",
 	})
+	if fastResult.IsError {
+		t.Fatalf("fast shell failed: %s", textContent(fastResult))
+	}
+	fast := textContent(fastResult)
 	if !strings.Contains(fast, "fast-marker") {
 		t.Fatalf("fast shell output missing marker: %s", fast)
+	}
+	if fastResult.Meta != nil {
+		if _, ok := fastResult.Meta["job_id"]; ok {
+			t.Fatalf("fast shell must not advertise a job id it is about to forget: %v", fastResult.Meta)
+		}
 	}
 	list := callTool(t, ctx, session, "remote_dev__job_list", map[string]interface{}{})
 	if !strings.Contains(list, "(no jobs)") {
 		t.Fatalf("fast shell left a model-visible job: %s", list)
 	}
 
-	promoted := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+	promotedResult := callToolResult(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command":    "sleep 30",
 		"timeout_ms": 200,
 	})
-	if !strings.Contains(promoted, "moved to background job") {
+	if promotedResult.IsError {
+		t.Fatalf("promoted shell failed: %s", textContent(promotedResult))
+	}
+	promoted := textContent(promotedResult)
+	if !strings.Contains(promoted, "background job") {
 		t.Fatalf("timeout did not promote to a job: %s", promoted)
+	}
+	if promotedResult.Meta == nil {
+		t.Fatalf("promoted result is missing _meta: %v", promotedResult)
+	}
+	if _, ok := promotedResult.Meta["job_id"]; !ok {
+		t.Fatalf("promoted result must retain its job id: %v", promotedResult.Meta)
 	}
 	jobID := extractJobID(t, promoted)
 	if jobID == "" {
@@ -381,7 +462,7 @@ func extractJobID(t *testing.T, body string) string {
 			continue
 		}
 		rest := line[index:]
-		end := strings.IndexAny(rest, " \t\n)")
+		end := strings.IndexAny(rest, " \t\n);,")
 		if end < 0 {
 			end = len(rest)
 		}

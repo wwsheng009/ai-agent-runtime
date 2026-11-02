@@ -91,6 +91,48 @@ func TestExecuteTimeoutKeepsPromotedJob(t *testing.T) {
 	}
 }
 
+// TestExecutePropagatesQueueAndWaitDelayDiagnostics locks the plumbing that
+// makes queue saturation and pipe-hold settlement visible to the model. These
+// fields existed in background.TaskOutputResult but were dropped here before
+// the remote surface could render them.
+func TestExecutePropagatesQueueAndWaitDelayDiagnostics(t *testing.T) {
+	runtime := &fakeRuntime{
+		jobID: "job_pending",
+		wait:  Snapshot{ID: "job_pending", Status: "pending", TimedOut: true},
+		output: Output{
+			Status:         "pending",
+			Message:        "queue saturated: 4/4 slots active; wait for a slot to free or cancel a stuck job",
+			WaitDelayUsed:  true,
+			WaitDelayMs:    500,
+			QueuePosition:  1,
+			ActiveJobs:     4,
+			MaxConcurrent:  4,
+			SchedulerState: "saturated",
+			NextAction:     "queue saturated: 4/4 slots active; wait for a slot to free or cancel a stuck job",
+		},
+	}
+	execution, err := Execute(context.Background(), runtime, Request{
+		SessionID:   "session-a",
+		Command:     "echo queued",
+		WaitTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if execution.QueuePosition != 1 || execution.ActiveJobs != 4 || execution.MaxConcurrent != 4 {
+		t.Fatalf("queue diagnostics were dropped: %+v", execution)
+	}
+	if execution.SchedulerState != "saturated" || execution.NextAction == "" {
+		t.Fatalf("scheduler diagnostics were dropped: %+v", execution)
+	}
+	if !execution.WaitDelayUsed || execution.WaitDelayMs != 500 {
+		t.Fatalf("wait-delay diagnostics were dropped: %+v", execution)
+	}
+	if execution.Message == "" {
+		t.Fatalf("manager message was dropped: %+v", execution)
+	}
+}
+
 func TestExecuteWaitErrorCancelsJob(t *testing.T) {
 	runtime := &fakeRuntime{
 		jobID:   "job_wait",

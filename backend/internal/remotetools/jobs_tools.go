@@ -3,6 +3,7 @@ package remotetools
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -83,6 +84,9 @@ func requireOwnedJob(ctx context.Context, manager *background.Manager, jobID, ow
 	}
 	if strings.TrimSpace(job.SessionID) != strings.TrimSpace(owner) {
 		// Do not reveal the existence or status of another session's job.
+		fmt.Fprintf(os.Stderr,
+			"aicli-remote-tools: job %s owner mismatch (request owner %q, job owner %q); treating it as not found\n",
+			jobID, strings.TrimSpace(owner), strings.TrimSpace(job.SessionID))
 		return nil, newToolError(CodeNotFound, "use job_list to discover jobs owned by this session", "job not found: %s", jobID)
 	}
 	return job, nil
@@ -277,6 +281,21 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 		fmt.Fprintf(&builder, " (exit %d)", *result.ExitCode)
 	}
 	fmt.Fprintf(&builder, " ===\n")
+	if result.SchedulerState != "" {
+		fmt.Fprintf(&builder, "Scheduler: %s", result.SchedulerState)
+		if result.MaxConcurrent > 0 {
+			fmt.Fprintf(&builder, " (%d/%d slots active", result.ActiveJobs, result.MaxConcurrent)
+			if result.QueuePosition > 0 {
+				fmt.Fprintf(&builder, ", queue position %d", result.QueuePosition)
+			}
+			builder.WriteString(")")
+		}
+		builder.WriteByte('\n')
+	}
+	if msg := strings.TrimSpace(result.Message); msg != "" {
+		builder.WriteString(msg)
+		builder.WriteByte('\n')
+	}
 	if result.Output == "" {
 		switch background.JobStatus(result.Status) {
 		case background.StatusCompleted:
@@ -296,6 +315,12 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 			builder.WriteByte('\n')
 		}
 	}
+	terminal := background.IsTerminalStatus(background.JobStatus(result.Status))
+	if !terminal && result.NextAction != "" {
+		builder.WriteString("Next: ")
+		builder.WriteString(result.NextAction)
+		builder.WriteByte('\n')
+	}
 	metadata := map[string]interface{}{
 		"job_id":       result.JobID,
 		"state":        result.Status,
@@ -305,8 +330,25 @@ func (t *remoteJobOutputTool) Execute(ctx context.Context, params map[string]int
 		"output_bytes": len(result.Output),
 		"remote":       true,
 	}
-	if background.IsTerminalStatus(background.JobStatus(result.Status)) {
+	if result.QueuePosition > 0 {
+		metadata["queue_position"] = result.QueuePosition
+	}
+	if result.ActiveJobs > 0 {
+		metadata["active_jobs"] = result.ActiveJobs
+	}
+	if result.MaxConcurrent > 0 {
+		metadata["max_concurrent"] = result.MaxConcurrent
+	}
+	if result.SchedulerState != "" {
+		metadata["scheduler_state"] = result.SchedulerState
+	}
+	if result.Message != "" {
+		metadata["message"] = result.Message
+	}
+	if terminal {
 		metadata["finished"] = true
+	} else if result.NextAction != "" {
+		metadata["next_action"] = result.NextAction
 	} else {
 		metadata["next_action"] = fmt.Sprintf("job_output job_id=%s offset=%d", result.JobID, result.NextOffset)
 	}

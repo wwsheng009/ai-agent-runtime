@@ -41,6 +41,21 @@ type Output struct {
 	Status     string
 	ExitCode   *int
 	LogPath    string
+	// Message carries the manager's terminal or pending explanation (queue
+	// saturation, wait-delay settlement, watchdog diagnosis). Dropping it here
+	// is what left remote callers with "still running" and no next step.
+	Message string
+	// WaitDelayUsed reports that the command process exited while descendants
+	// kept the output pipe open; the captured tail may be incomplete.
+	WaitDelayUsed bool
+	WaitDelayMs   int64
+	// Queue diagnostics for pending jobs. The core manager already computes
+	// these; shells and job_output must surface them instead of guessing.
+	QueuePosition  int
+	ActiveJobs     int
+	MaxConcurrent  int
+	SchedulerState string
+	NextAction     string
 }
 
 // Request describes one foreground shell invocation. WaitTimeout only bounds
@@ -60,14 +75,22 @@ type Request struct {
 
 // Execution is the surface-neutral result of a shell call.
 type Execution struct {
-	JobID      string
-	Status     string
-	ExitCode   *int
-	Output     string
-	NextOffset int64
-	TimedOut   bool
-	Promoted   bool
-	LogPath    string
+	JobID          string
+	Status         string
+	ExitCode       *int
+	Output         string
+	NextOffset     int64
+	TimedOut       bool
+	Promoted       bool
+	LogPath        string
+	Message        string
+	WaitDelayUsed  bool
+	WaitDelayMs    int64
+	QueuePosition  int
+	ActiveJobs     int
+	MaxConcurrent  int
+	SchedulerState string
+	NextAction     string
 }
 
 // StageError identifies which part of Submit -> Wait -> Read failed. Callers
@@ -163,14 +186,22 @@ func Execute(ctx context.Context, runtime Runtime, req Request) (Execution, erro
 		}, &StageError{Stage: "read", JobID: jobID, Status: snapshot.Status, Err: readErr}
 	}
 	execution := Execution{
-		JobID:      jobID,
-		Status:     preferTerminalStatus(output.Status, snapshot.Status),
-		ExitCode:   firstExitCode(output.ExitCode, snapshot.ExitCode),
-		Output:     output.Output,
-		NextOffset: output.NextOffset,
-		TimedOut:   snapshot.TimedOut,
-		Promoted:   snapshot.TimedOut,
-		LogPath:    output.LogPath,
+		JobID:          jobID,
+		Status:         preferTerminalStatus(output.Status, snapshot.Status),
+		ExitCode:       firstExitCode(output.ExitCode, snapshot.ExitCode),
+		Output:         output.Output,
+		NextOffset:     output.NextOffset,
+		TimedOut:       snapshot.TimedOut,
+		Promoted:       snapshot.TimedOut,
+		LogPath:        output.LogPath,
+		Message:        output.Message,
+		WaitDelayUsed:  output.WaitDelayUsed,
+		WaitDelayMs:    output.WaitDelayMs,
+		QueuePosition:  output.QueuePosition,
+		ActiveJobs:     output.ActiveJobs,
+		MaxConcurrent:  output.MaxConcurrent,
+		SchedulerState: output.SchedulerState,
+		NextAction:     output.NextAction,
 	}
 	if !snapshot.TimedOut && !req.KeepJob {
 		// This job was an implementation detail of the foreground call. Hide it
@@ -278,15 +309,36 @@ func (r *ManagerRuntime) ReadShell(ctx context.Context, jobID string, offset int
 		return Output{}, err
 	}
 	logPath := ""
+	waitDelayUsed := false
+	waitDelayMs := int64(0)
 	if job, jobErr := r.manager.GetJob(ctx, jobID); jobErr == nil && job != nil {
 		logPath = job.LogPath
+		if value, ok := job.Metadata["wait_delay_used"].(bool); ok {
+			waitDelayUsed = value
+		}
+		switch value := job.Metadata["wait_delay_ms"].(type) {
+		case int:
+			waitDelayMs = int64(value)
+		case int64:
+			waitDelayMs = value
+		case float64:
+			waitDelayMs = int64(value)
+		}
 	}
 	return Output{
-		Output:     result.Output,
-		NextOffset: result.NextOffset,
-		Status:     result.Status,
-		ExitCode:   result.ExitCode,
-		LogPath:    logPath,
+		Output:         result.Output,
+		NextOffset:     result.NextOffset,
+		Status:         result.Status,
+		ExitCode:       result.ExitCode,
+		LogPath:        logPath,
+		Message:        result.Message,
+		WaitDelayUsed:  waitDelayUsed,
+		WaitDelayMs:    waitDelayMs,
+		QueuePosition:  result.QueuePosition,
+		ActiveJobs:     result.ActiveJobs,
+		MaxConcurrent:  result.MaxConcurrent,
+		SchedulerState: result.SchedulerState,
+		NextAction:     result.NextAction,
 	}, nil
 }
 

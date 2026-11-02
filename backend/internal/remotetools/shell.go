@@ -204,9 +204,12 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 	}
 
 	duration := time.Since(started)
-	if !execution.TimedOut {
-		// The foreground shell hides a settled job after its output has been
-		// archived/formatted. Promoted jobs stay visible for job_output.
+	// A settled foreground job is an implementation detail and is forgotten
+	// after its output has been formatted. Promoted jobs and jobs whose outcome
+	// was lost must stay readable: the latter's next_action explicitly asks the
+	// caller to inspect job_output before retrying.
+	keepJob := execution.TimedOut || isUnknownOutcomeStatus(execution.Status)
+	if !keepJob {
 		defer func() {
 			_ = t.jobs.ForgetJob(context.Background(), execution.JobID, owner)
 		}()
@@ -218,6 +221,27 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 	}
 	display := capture
 	switch {
+	case execution.TimedOut && strings.EqualFold(execution.Status, "pending"):
+		queue := ""
+		switch execution.SchedulerState {
+		case "dispatched":
+			queue = " (dispatched and starting)"
+		case "queued", "saturated", "recovering":
+			queue = fmt.Sprintf(" (scheduler=%s", execution.SchedulerState)
+			if execution.QueuePosition > 0 {
+				queue += fmt.Sprintf(", queue position %d", execution.QueuePosition)
+			}
+			if execution.MaxConcurrent > 0 {
+				queue += fmt.Sprintf(", %d/%d slots active", execution.ActiveJobs, execution.MaxConcurrent)
+			}
+			queue += ")"
+		default:
+			if execution.MaxConcurrent > 0 {
+				queue = fmt.Sprintf(" (%d/%d slots active)", execution.ActiveJobs, execution.MaxConcurrent)
+			}
+		}
+		display = fmt.Sprintf("Command did not start within %s; background job %s%s\n\n%s",
+			timeout, execution.JobID, queue, capture)
 	case execution.TimedOut:
 		display = fmt.Sprintf("Command still running after %s; moved to background job %s\n\n%s",
 			timeout, execution.JobID, capture)
@@ -225,12 +249,33 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		display = fmt.Sprintf("Command failed: exit status %d\n\n%s", exitCode, capture)
 	case execution.Status == "orphaned":
 		display = fmt.Sprintf("Command outcome could not be recorded (job %s was orphaned); the output below was captured before the outcome was lost. Verify with job_output before retrying.\n\n%s", execution.JobID, capture)
+	case execution.Status == "interrupted":
+		display = fmt.Sprintf("Command outcome was lost (job %s was interrupted before its result was recorded); verify with job_output before retrying.\n\n%s", execution.JobID, capture)
 	case execution.Status == "failed":
 		display = fmt.Sprintf("Command failed: job status failed\n\n%s", capture)
 	case execution.Status == "cancelled":
 		display = fmt.Sprintf("Command cancelled.\n\n%s", capture)
 	case strings.TrimSpace(capture) == "":
 		display = emptyCommandOutputNotice
+	}
+	if msg := strings.TrimSpace(execution.Message); msg != "" &&
+		(execution.Status == "pending" || execution.Status == "failed" ||
+			execution.Status == "orphaned" || execution.Status == "interrupted") {
+		display = strings.TrimSpace(display) + "\n\n" + msg
+	}
+	if execution.WaitDelayUsed {
+		delay := "the configured wait delay"
+		if execution.WaitDelayMs > 0 {
+			delay = fmt.Sprintf("%dms", execution.WaitDelayMs)
+		}
+		display = strings.TrimSpace(display) + fmt.Sprintf(
+			"\n\n[runtime] command process exited, but descendants kept the output pipe open; "+
+				"the job was settled after %s and the remaining process tree was terminated. "+
+				"Output produced after that point may be missing. Use job_start (or a service manager) for long-lived processes.",
+			delay)
+	}
+	if execution.TimedOut && execution.NextAction != "" {
+		display = strings.TrimSpace(display) + "\n\nNext: " + execution.NextAction
 	}
 	metadata := map[string]interface{}{
 		"command":              command,
@@ -251,20 +296,44 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"shell_type":           string(t.shell.Type),
 	}
 	addCommandDiagnostics(metadata, command)
-	// Always expose the job identity and whether the exit code is real. Without
-	// these, a failed call cannot be re-inspected and an unknown outcome is
-	// indistinguishable from a genuine command failure.
-	metadata["job_id"] = execution.JobID
-	metadata["job_status"] = execution.Status
-	metadata["exit_code_known"] = execution.ExitCode != nil
-	if execution.TimedOut {
+	// Expose the job identity only when the job is retained. A fast foreground
+	// call is forgotten on return; advertising its id teaches the model to poll
+	// a record that no longer exists (design §5.4).
+	if keepJob {
 		metadata["job_id"] = execution.JobID
 		metadata["job_status"] = execution.Status
+		metadata["exit_code_known"] = execution.ExitCode != nil
+	}
+	if execution.TimedOut {
 		metadata["next_offset"] = execution.NextOffset
 		metadata["promoted"] = true
-		metadata["next_action"] = fmt.Sprintf("job_output job_id=%s offset=%d", execution.JobID, execution.NextOffset)
+		if execution.QueuePosition > 0 {
+			metadata["queue_position"] = execution.QueuePosition
+		}
+		if execution.ActiveJobs > 0 {
+			metadata["active_jobs"] = execution.ActiveJobs
+		}
+		if execution.MaxConcurrent > 0 {
+			metadata["max_concurrent"] = execution.MaxConcurrent
+		}
+		if execution.SchedulerState != "" {
+			metadata["scheduler_state"] = execution.SchedulerState
+		}
+		if execution.Message != "" {
+			metadata["message"] = execution.Message
+		}
+		if execution.NextAction != "" {
+			metadata["next_action"] = execution.NextAction
+		} else {
+			metadata["next_action"] = fmt.Sprintf("job_output job_id=%s offset=%d", execution.JobID, execution.NextOffset)
+		}
 	} else if execution.Status == "completed" && strings.TrimSpace(capture) == "" {
 		metadata["output_empty"] = true
+	}
+	if execution.WaitDelayUsed {
+		metadata["wait_delay_used"] = true
+		metadata["wait_delay_ms"] = execution.WaitDelayMs
+		metadata["output_truncated_by_wait_delay"] = true
 	}
 
 	body, metadata, failure := t.finalizeShellOutput(capture, display, execution.LogPath, metadata)
@@ -329,7 +398,7 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 // may well be complete and the command may have succeeded.
 func isUnknownOutcomeStatus(status string) bool {
 	switch strings.TrimSpace(strings.ToLower(status)) {
-	case "orphaned", "unknown":
+	case "orphaned", "unknown", "interrupted":
 		return true
 	default:
 		return false
