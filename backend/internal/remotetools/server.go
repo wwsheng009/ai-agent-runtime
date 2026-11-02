@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -50,6 +51,10 @@ type Server struct {
 	// slots bounds concurrent MCP requests in HTTP mode. A streaming tool call
 	// holds its slot until the response completes.
 	slots chan struct{}
+	// streamSlots bounds the optional standalone GET SSE streams. They are
+	// long-lived session state, not work, so they must not consume the POST
+	// slots that actually execute tools.
+	streamSlots chan struct{}
 	// envd is the envd execution backend; nil for the local backend.
 	envd *envdBackend
 	// Gateway mount wiring (docs/gateway/16-mcp-mount-tunnel.md). gatewayStart
@@ -66,6 +71,9 @@ type Server struct {
 	version      string
 	gatewayStart func(localAddr string) error
 	gatewayClose func()
+	// gatewayOptions carries extra controller options. Tests inject shortened
+	// reconnect delays; production leaves it nil.
+	gatewayOptions []gatewayagent.Option
 	// instanceLock is held for the process lifetime so two services cannot
 	// silently share one mount identity (and fight over the same public slug).
 	instanceLock *os.File
@@ -139,6 +147,7 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 	principal := principalFor(cfg, token)
 	metrics := NewMetrics()
 	slots := make(chan struct{}, cfg.Limits.MaxConcurrentCalls)
+	streamSlots := make(chan struct{}, cfg.Limits.MaxConcurrentStreams)
 	audited := wrapRegistryWithAudit(built.registry, audit, metrics, cfg, workspace, transportOf(cfg))
 	mcpServer := toolkit.NewToolkitMCPServer(audited)
 	// Roots narrowing is a per-request context concern: the decorator resolves the
@@ -147,19 +156,20 @@ func NewServer(cfg *Config, serverName string) (*Server, error) {
 	resolver := newRootsResolver(workspace, principal)
 	mcpServer.SetToolContextDecorator(resolver.decorate)
 	server := &Server{
-		cfg:       cfg,
-		workspace: workspace,
-		registry:  audited,
-		mcp:       mcpServer,
-		audit:     audit,
-		access:    access,
-		jobs:      built.jobs,
-		metrics:   metrics,
-		roots:     resolver,
-		token:     token,
-		principal: principal,
-		slots:     slots,
-		envd:      built.envd,
+		cfg:         cfg,
+		workspace:   workspace,
+		registry:    audited,
+		mcp:         mcpServer,
+		audit:       audit,
+		access:      access,
+		jobs:        built.jobs,
+		metrics:     metrics,
+		roots:       resolver,
+		token:       token,
+		principal:   principal,
+		slots:       slots,
+		streamSlots: streamSlots,
+		envd:        built.envd,
 	}
 	keepBuilt = true
 	return server, nil
@@ -318,9 +328,14 @@ func (s *Server) RunHTTPWithListener(ctx context.Context, onListening func(addr 
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return s.mcp.GetMCPServer()
 	}, &mcp.StreamableHTTPOptions{
-		// Stateless keeps deployment simple and avoids session affinity
-		// requirements; the read-only P1 surface has no cross-request state.
-		Stateless: true,
+		// Shell and job_* are owned by the logical MCP session. A stateless
+		// transport generates a fresh random session id for every request when
+		// the client does not echo Mcp-Session-Id (G5), so job_start could
+		// return a handle that job_output could never read. Stateful sessions
+		// also make the roots cache effective. SessionTimeout bounds idle
+		// sessions so a disconnected client cannot pin memory forever.
+		Stateless:      false,
+		SessionTimeout: 30 * time.Minute,
 		// SSE is kept so a single call can stream progress. JSONResponse would
 		// collapse every long call into one blocking response.
 		JSONResponse: false,
@@ -465,23 +480,64 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// concurrencyMiddleware rejects excess in-flight MCP requests with 429 instead
-// of letting them pile up and exhaust the target. /metrics intentionally bypasses
-// the limit so operators can still inspect a saturated server.
+// concurrencyMiddleware rejects excess in-flight MCP work with 429 instead of
+// letting it pile up and exhaust the target. /metrics intentionally bypasses the
+// limits so operators can still inspect a saturated server.
+//
+// The accounting is deliberately method-aware:
+//   - POST executes tools and consumes a work slot.
+//   - GET is the optional standalone SSE stream; it consumes a separate stream
+//     slot because one stream normally represents one initialized session.
+//   - DELETE is the session teardown path. It must never wait for the slots it
+//     is trying to release, otherwise a saturated server can never recover.
+//   - Other methods are cheap and are left to the MCP handler's 405 response.
 func (s *Server) concurrencyMiddleware(next http.Handler) http.Handler {
-	if s == nil || s.slots == nil {
+	if s == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case s.slots <- struct{}{}:
-			defer func() { <-s.slots }()
+		switch r.Method {
+		case http.MethodDelete:
 			next.ServeHTTP(w, r)
-		default:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "too many concurrent requests", http.StatusTooManyRequests)
+			return
+		case http.MethodGet:
+			if !acquireSlot(s.streamSlots) {
+				writeTooMany(w, "too many concurrent streams")
+				return
+			}
+			defer releaseSlot(s.streamSlots)
+		case http.MethodPost:
+			if !acquireSlot(s.slots) {
+				writeTooMany(w, "too many concurrent requests")
+				return
+			}
+			defer releaseSlot(s.slots)
 		}
+		next.ServeHTTP(w, r)
 	})
+}
+
+func acquireSlot(slot chan struct{}) bool {
+	if slot == nil {
+		return true
+	}
+	select {
+	case slot <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseSlot(slot chan struct{}) {
+	if slot != nil {
+		<-slot
+	}
+}
+
+func writeTooMany(w http.ResponseWriter, message string) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, message, http.StatusTooManyRequests)
 }
 
 // requestInfoMiddleware carries the HTTP peer address into the tool context. The

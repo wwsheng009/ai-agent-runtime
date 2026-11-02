@@ -50,7 +50,7 @@ func TestBuildRemoteFlagTargetDerivesEverything(t *testing.T) {
 // parsed value keeps the surface honest about what `#ops` can and cannot do here.
 func TestBuildRemoteFlagTargetDepthLadder(t *testing.T) {
 	cases := map[string]remotetargets.SpecDepth{
-		"":          remotetargets.DepthReadonly,
+		"":          remotetargets.DepthAll,
 		"#readonly": remotetargets.DepthReadonly,
 		"#standard": remotetargets.DepthStandard,
 		"#ops":      remotetargets.DepthOps,
@@ -82,11 +82,11 @@ func TestBuildRemoteFlagTargetAcceptsSSH(t *testing.T) {
 // rather than producing a session with no remote tools and no explanation.
 func TestBuildRemoteFlagTargetRejectsBadSpec(t *testing.T) {
 	for _, bad := range []string{
-		"10.0.0.9:18765",     // no scheme
-		"ftp://host",         // wrong scheme
-		"http://",            // no host
-		"ssh://",             // no host
-		"http://h#bogus",     // unknown depth
+		"10.0.0.9:18765", // no scheme
+		"ftp://host",     // wrong scheme
+		"http://",        // no host
+		"ssh://",         // no host
+		"http://h#bogus", // unknown depth
 	} {
 		_, err := buildRemoteFlagTarget(bad)
 		require.Error(t, err, "%q must be rejected", bad)

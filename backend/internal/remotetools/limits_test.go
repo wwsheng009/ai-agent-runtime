@@ -55,3 +55,29 @@ func TestDefaultConfigLeavesCaptureLimitUnset(t *testing.T) {
 		t.Fatalf("max bytes per call = %d, want a working default", cfg.Limits.MaxBytesPerCall)
 	}
 }
+
+func TestDefaultConfigSetsSeparateConcurrencyBudgets(t *testing.T) {
+	cfg := remotetools.DefaultConfig()
+	if cfg.Limits.MaxConcurrentCalls != remotetools.DefaultMaxConcurrentCalls {
+		t.Fatalf("max concurrent calls = %d, want %d", cfg.Limits.MaxConcurrentCalls, remotetools.DefaultMaxConcurrentCalls)
+	}
+	if cfg.Limits.MaxConcurrentStreams != remotetools.DefaultMaxConcurrentStreams {
+		t.Fatalf("max concurrent streams = %d, want %d", cfg.Limits.MaxConcurrentStreams, remotetools.DefaultMaxConcurrentStreams)
+	}
+}
+
+func TestNormalizeFillsConcurrencyBudgets(t *testing.T) {
+	cfg := remotetools.DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Limits.MaxConcurrentCalls = 0
+	cfg.Limits.MaxConcurrentStreams = 0
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if cfg.Limits.MaxConcurrentCalls != remotetools.DefaultMaxConcurrentCalls {
+		t.Fatalf("max concurrent calls = %d, want default %d", cfg.Limits.MaxConcurrentCalls, remotetools.DefaultMaxConcurrentCalls)
+	}
+	if cfg.Limits.MaxConcurrentStreams != remotetools.DefaultMaxConcurrentStreams {
+		t.Fatalf("max concurrent streams = %d, want default %d", cfg.Limits.MaxConcurrentStreams, remotetools.DefaultMaxConcurrentStreams)
+	}
+}

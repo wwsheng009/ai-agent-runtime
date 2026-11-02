@@ -28,10 +28,7 @@ import (
 // command line.
 const DefaultGatewayTokenEnv = "AICLI_GATEWAY_TOKEN"
 
-const (
-	mountIdentityFileName = "mount-id"
-	gatewayConnectTimeout = 20 * time.Second
-)
+const mountIdentityFileName = "mount-id"
 
 var instancePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
@@ -104,6 +101,7 @@ type GatewayMountConfig struct {
 	Timeout      Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	MaxBodyBytes int64    `yaml:"maxBodyBytes,omitempty" json:"maxBodyBytes,omitempty"`
 	MaxConcurren int      `yaml:"maxConcurrency,omitempty" json:"maxConcurrency,omitempty"`
+	MaxStreams   int      `yaml:"maxStreams,omitempty" json:"maxStreams,omitempty"`
 }
 
 // mountSelfEnabled reports whether the server's own endpoint is published.
@@ -210,8 +208,8 @@ func (c *Config) normalizeGateway() error {
 		default:
 			return fmt.Errorf("gateway.mounts[%d].authType %q must be bearer, header or none", i, mount.AuthType)
 		}
-		if mount.MaxBodyBytes < 0 || mount.MaxConcurren < 0 {
-			return fmt.Errorf("gateway.mounts[%d]: maxBodyBytes/maxConcurrency must not be negative", i)
+		if mount.MaxBodyBytes < 0 || mount.MaxConcurren < 0 || mount.MaxStreams < 0 {
+			return fmt.Errorf("gateway.mounts[%d]: maxBodyBytes/maxConcurrency/maxStreams must not be negative", i)
 		}
 	}
 	return nil
@@ -568,7 +566,7 @@ func BuildMountRegistrationWithMetadata(cfg *Config, identity, localAddr string,
 	seenSlug := map[string]bool{}
 	seenRoute := map[string]bool{}
 
-	add := func(name, slug, upstream, tokenEnv, tokenFile, authType, header string, timeout time.Duration, maxBody int64, maxConcurrency int, self bool) error {
+	add := func(name, slug, upstream, tokenEnv, tokenFile, authType, header string, timeout time.Duration, maxBody int64, maxConcurrency, maxStreams int, self bool) error {
 		// Mount defaults are larger than the default-forwarding limits: MCP tool
 		// calls legitimately carry big payloads and long-running shells.
 		if timeout <= 0 {
@@ -655,6 +653,7 @@ func BuildMountRegistrationWithMetadata(cfg *Config, identity, localAddr string,
 				MaxBodyBytes:   maxBody,
 				TimeoutSec:     int(timeout / time.Second),
 				MaxConcurrency: maxConcurrency,
+				MaxStreams:     maxStreams,
 			},
 			Labels: labels,
 		})
@@ -680,12 +679,12 @@ func BuildMountRegistrationWithMetadata(cfg *Config, identity, localAddr string,
 		if err != nil {
 			return nil, err
 		}
-		if err := add(firstNonEmptyString(cfg.Gateway.SelfName, "self"), cfg.Gateway.SelfSlug, upstream, "", "", "", "", 0, 0, 0, true); err != nil {
+		if err := add(firstNonEmptyString(cfg.Gateway.SelfName, "self"), cfg.Gateway.SelfSlug, upstream, "", "", "", "", 0, 0, 0, 0, true); err != nil {
 			return nil, err
 		}
 	}
 	for _, mount := range cfg.Gateway.Mounts {
-		if err := add(mount.Name, mount.Slug, mount.Upstream, mount.TokenEnv, mount.TokenFile, mount.AuthType, mount.Header, mount.Timeout.Duration, mount.MaxBodyBytes, mount.MaxConcurren, false); err != nil {
+		if err := add(mount.Name, mount.Slug, mount.Upstream, mount.TokenEnv, mount.TokenFile, mount.AuthType, mount.Header, mount.Timeout.Duration, mount.MaxBodyBytes, mount.MaxConcurren, mount.MaxStreams, false); err != nil {
 			return nil, err
 		}
 	}
@@ -874,7 +873,10 @@ func (s *Server) startGatewayAgent(ctx context.Context, localAddr string) error 
 			},
 		}
 	}
-	controller := gatewayagent.NewController(gatewayCfg, register)
+	// Lifecycle diagnostics go to stderr; tests may override them through
+	// gatewayOptions.
+	options := append([]gatewayagent.Option{gatewayagent.WithLogger(s.gatewayLogf())}, s.gatewayOptions...)
+	controller := gatewayagent.NewController(gatewayCfg, register, options...)
 	controller.SetForward(gatewayagent.ForwardConfig{
 		Mounts: registration.Forwards,
 		Getenv: os.Getenv,
@@ -895,9 +897,10 @@ func (s *Server) startGatewayAgent(ctx context.Context, localAddr string) error 
 		return nil
 	}
 	go func() {
-		connectCtx, cancel := context.WithTimeout(context.Background(), gatewayConnectTimeout)
-		defer cancel()
-		if err := controller.Connect(connectCtx); err != nil {
+		// Retry the first dial with the reconnect backoff ladder: the gateway
+		// (or the local network) may not be reachable yet at startup, and a
+		// one-shot Connect would leave this node offline until a restart.
+		if err := controller.ConnectWithRetry(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "aicli-remote-tools: gateway connect failed: %v\n", err)
 			return
 		}
@@ -917,6 +920,16 @@ func (s *Server) startGatewayAgent(ctx context.Context, localAddr string) error 
 		}
 	}()
 	return nil
+}
+
+// gatewayLogf writes gateway lifecycle diagnostics to stderr with the same
+// prefix as the rest of the serve output. The agent package reports connection
+// loss, retry attempts and reconnects through it, so a mount that shows offline
+// in the console also leaves a local trace instead of being silent.
+func (s *Server) gatewayLogf() func(string, ...any) {
+	return func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: "+format+"\n", args...)
+	}
 }
 
 func firstNonEmptyString(values ...string) string {

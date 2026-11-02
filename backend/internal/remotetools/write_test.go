@@ -26,6 +26,10 @@ func newOpsConfig(t *testing.T, root string, allowed []string) *remotetools.Conf
 	cfg.Shell.AllowedCommands = allowed
 	cfg.Shell.DenyShellMetachars = true
 	cfg.Limits.CommandTimeout = remotetools.Duration{Duration: 10 * time.Second}
+	// Never share the default ~/.aicli/remote-tools/jobs root: another test
+	// server (or another package running in parallel) would treat this test's
+	// running jobs as orphaned on startup recovery.
+	cfg.Jobs.Root = filepath.Join(t.TempDir(), "jobs")
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

@@ -89,6 +89,16 @@ type EnvDConfig struct {
 	FilesChannelDisabled bool `yaml:"filesChannelDisabled,omitempty" json:"filesChannelDisabled,omitempty"`
 }
 
+// DefaultMaxConcurrentCalls bounds the POST requests that actually execute
+// tools. Long-lived GET SSE streams and DELETE teardown are tracked separately:
+// they must never consume the slots a running tool call needs.
+const DefaultMaxConcurrentCalls = 8
+
+// DefaultMaxConcurrentStreams bounds the optional standalone GET SSE streams.
+// Each initialized MCP session may hold one for its lifetime, so this is a
+// session cap rather than a tool-call cap.
+const DefaultMaxConcurrentStreams = 64
+
 // Limits bounds one remote invocation so a single call cannot exhaust the
 // target machine or the model context.
 type Limits struct {
@@ -105,8 +115,12 @@ type Limits struct {
 	ModelVisibleCap int `yaml:"modelVisibleCap" json:"modelVisibleCap"`
 	// CommandTimeout bounds one shell command (shell tool only).
 	CommandTimeout Duration `yaml:"commandTimeout" json:"commandTimeout"`
-	// MaxConcurrentCalls bounds in-flight requests in HTTP mode.
+	// MaxConcurrentCalls bounds in-flight POST requests in HTTP mode. GET SSE
+	// streams and DELETE teardown deliberately do not consume these slots.
 	MaxConcurrentCalls int `yaml:"maxConcurrentCalls" json:"maxConcurrentCalls"`
+	// MaxConcurrentStreams bounds the optional standalone GET SSE streams in
+	// HTTP mode. One stream normally represents one initialized MCP session.
+	MaxConcurrentStreams int `yaml:"maxConcurrentStreams" json:"maxConcurrentStreams"`
 }
 
 // Duration is a YAML/JSON friendly time.Duration.
@@ -432,10 +446,15 @@ func DefaultConfig() *Config {
 			// from --max-bytes-per-call, including the value aicli expands from a
 			// target's Limits block - was silently ignored by read tools: the default
 			// ceiling kept applying. Keeping it zero is what makes one knob work.
-			CaptureLimit:       0,
-			ModelVisibleCap:    DefaultModelVisibleCap,
-			CommandTimeout:     Duration{120 * time.Second},
-			MaxConcurrentCalls: 8,
+			CaptureLimit:    0,
+			ModelVisibleCap: DefaultModelVisibleCap,
+			// This is the shell wait budget, not a process deadline. Keep it
+			// below the typical MCP request timeout: if the inner wait outlives
+			// the transport, the client reports "outcome unknown" and may kill
+			// the server (taking the promoted job with it).
+			CommandTimeout:       Duration{30 * time.Second},
+			MaxConcurrentCalls:   DefaultMaxConcurrentCalls,
+			MaxConcurrentStreams: DefaultMaxConcurrentStreams,
 		},
 		Shell: ShellConfig{},
 		HTTP: HTTPConfig{
@@ -652,10 +671,13 @@ func (c *Config) Normalize() error {
 		c.Limits.ModelVisibleCap = DefaultRemoteOutputHardCap
 	}
 	if c.Limits.CommandTimeout.Duration <= 0 {
-		c.Limits.CommandTimeout = Duration{120 * time.Second}
+		c.Limits.CommandTimeout = Duration{30 * time.Second}
 	}
 	if c.Limits.MaxConcurrentCalls <= 0 {
-		c.Limits.MaxConcurrentCalls = 8
+		c.Limits.MaxConcurrentCalls = DefaultMaxConcurrentCalls
+	}
+	if c.Limits.MaxConcurrentStreams <= 0 {
+		c.Limits.MaxConcurrentStreams = DefaultMaxConcurrentStreams
 	}
 
 	switch strings.ToLower(strings.TrimSpace(c.DescriptionStyle)) {

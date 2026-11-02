@@ -62,6 +62,7 @@ func TestBuildMountRegistrationResolvesSelfAndExtras(t *testing.T) {
 			Timeout:      Duration{Duration: 15 * time.Minute},
 			MaxBodyBytes: 1 << 20,
 			MaxConcurren: 4,
+			MaxStreams:   7,
 		}},
 	}
 
@@ -103,7 +104,7 @@ func TestBuildMountRegistrationResolvesSelfAndExtras(t *testing.T) {
 	if extra.Auth == nil || extra.Auth.TokenEnv != "K8S_TOKEN" {
 		t.Fatalf("extra auth = %+v", extra.Auth)
 	}
-	if extra.Limits == nil || extra.Limits.TimeoutSec != 900 || extra.Limits.MaxBodyBytes != 1<<20 || extra.Limits.MaxConcurrency != 4 {
+	if extra.Limits == nil || extra.Limits.TimeoutSec != 900 || extra.Limits.MaxBodyBytes != 1<<20 || extra.Limits.MaxConcurrency != 4 || extra.Limits.MaxStreams != 7 {
 		t.Fatalf("extra limits = %+v", extra.Limits)
 	}
 	// Slugs are deterministic, so a restart keeps every client URL.

@@ -21,8 +21,8 @@ func TestDoctorShellPolicyReportsEffectiveGatesAndGuidance(t *testing.T) {
 	if report.DenyShellMetachars {
 		t.Fatal("default shell policy must allow pipes and redirection; the restriction is opt-in")
 	}
-	if report.CommandTimeout != "2m0s" {
-		t.Fatalf("command timeout = %q, want 2m0s", report.CommandTimeout)
+	if report.CommandTimeout != "30s" {
+		t.Fatalf("command timeout = %q, want 30s", report.CommandTimeout)
 	}
 	if report.ShellResolved == "" || report.ShellType == "" {
 		t.Fatalf("doctor did not report the resolved shell: %+v", report)

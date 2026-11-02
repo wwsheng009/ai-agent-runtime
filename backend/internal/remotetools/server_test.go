@@ -305,6 +305,70 @@ func TestHTTPEndToEnd(t *testing.T) {
 	}
 }
 
+// TestHTTPJobHandleSurvivesAcrossCalls is the G5 regression: with stateless
+// HTTP the SDK generated a fresh random session id per request when the client
+// did not echo Mcp-Session-Id, so job_start returned a handle that the very
+// next job_output could not read (owner mismatch was reported as not found).
+func TestHTTPJobHandleSurvivesAcrossCalls(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"sleep"})
+	cfg.HTTP.Listen = "127.0.0.1:0"
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrCh := make(chan string, 1)
+	go func() {
+		_ = server.RunHTTPWithListener(ctx, func(addr string) { addrCh <- addr })
+	}()
+
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("http server did not report a listener")
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: "http://" + addr + "/mcp",
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+
+	start := callToolResult(t, ctx, session, "remote_dev__job_start", map[string]interface{}{
+		"command": "sleep 30",
+	})
+	if start.IsError {
+		t.Fatalf("job_start failed: %s", textContent(start))
+	}
+	jobID := extractJobID(t, textContent(start))
+	if jobID == "" {
+		t.Fatalf("job_start returned no job id: %s", textContent(start))
+	}
+
+	output := callToolResult(t, ctx, session, "remote_dev__job_output", map[string]interface{}{
+		"job_id": jobID,
+	})
+	if output.IsError {
+		t.Fatalf("job_output could not read the handle from job_start: %s", textContent(output))
+	}
+	if !strings.Contains(textContent(output), jobID) {
+		t.Fatalf("job_output returned a different job: %s", textContent(output))
+	}
+
+	_, _ = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "remote_dev__job_cancel",
+		Arguments: map[string]interface{}{"job_id": jobID},
+	})
+}
+
 // callTool invokes one tool and returns its concatenated text.
 func callTool(t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, args map[string]interface{}) string {
 	t.Helper()
@@ -316,6 +380,17 @@ func callTool(t *testing.T, ctx context.Context, session *mcp.ClientSession, nam
 		t.Fatalf("tool %s failed: %s", name, textContent(result))
 	}
 	return textContent(result)
+}
+
+// callToolResult invokes one tool and keeps the structured result (including
+// _meta) so tests can lock the metadata contract, not just rendered text.
+func callToolResult(t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, args map[string]interface{}) *mcp.CallToolResult {
+	t.Helper()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	return result
 }
 
 func textContent(result *mcp.CallToolResult) string {
