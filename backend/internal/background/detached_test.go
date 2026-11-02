@@ -25,7 +25,10 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	)
 
 	require.Contains(t, content, `$shellPath = 'C:\Program Files\PowerShell\7\pwsh.exe'`)
-	require.Contains(t, content, `$shellArgs = @('-NoProfile', '-NonInteractive', '-Command', 'git status`)
+	require.Contains(t, content, `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`)
+	require.Contains(t, content,
+		`$shellArgs = @('-NoProfile', '-NonInteractive', '-Command', '`+
+			runtimeexecutor.PowerShellCommandPrefix+`git status`)
 	require.Contains(t, content, `$__aicli_ok = $?`)
 	require.Contains(t, content, `$host.SetShouldExit`)
 	require.Contains(t, content, `Set-Location -LiteralPath 'E:\projects\ai\ai-agent-runtime'`)
@@ -40,6 +43,21 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	require.Contains(t, content, `if ($null -ne $heartbeatJob)`)
 	require.NotContains(t, content, `::new(`)
 	require.NotContains(t, content, `Remove-Job -Job $heartbeatJob -Force`)
+}
+
+func TestBuildWindowsDetachedRunnerContentDoesNotPrefixNonPowerShell(t *testing.T) {
+	shell := runtimeexecutor.Shell{Path: `C:\Windows\System32\cmd.exe`, Type: runtimeexecutor.ShellTypeCmd}
+
+	content := buildWindowsDetachedRunnerContent(
+		shell,
+		"git status",
+		`E:\projects\ai\ai-agent-runtime`,
+		`C:\logs\job.log`,
+		`C:\logs\job.status`,
+	)
+
+	require.NotContains(t, content, runtimeexecutor.PowerShellCommandPrefix)
+	require.Contains(t, content, `$shellArgs = @('/c', 'git status')`)
 }
 
 func TestDetachedLaunchRetriesTransientLauncherFailures(t *testing.T) {

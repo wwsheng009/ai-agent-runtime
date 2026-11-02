@@ -15,6 +15,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 )
 
 const (
@@ -881,12 +882,24 @@ func buildShellCommandLine(args []string) string {
 func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) string {
 	heartbeatPath := statusPath + ".heartbeat"
 	commandArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+	// The detached runner starts a second PowerShell process for the user
+	// command. Harden that child too, otherwise Git/Node output arrives as UTF-8
+	// bytes and PowerShell's default GBK output encoding turns it into mojibake
+	// before the log writer sees it.
+	commandArgs = shellexec.HardenPowerShellArgs(commandArgs, shell, commandArgs[0])
 	quotedArgs := make([]string, 0, len(commandArgs)-1)
 	for _, arg := range commandArgs[1:] {
 		quotedArgs = append(quotedArgs, powershellQuote(arg))
 	}
 
-	lines := []string{"$ErrorActionPreference = 'Stop'"}
+	lines := []string{
+		"$ErrorActionPreference = 'Stop'",
+		// The runner captures the child PowerShell's stdout through a pipeline.
+		// Decode that pipe as UTF-8 as well; hardening only the child would make
+		// the child emit UTF-8 while this parent still reads it as GBK and writes
+		// the already-mojibake string to the UTF-8 log.
+		"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
+	}
 	lines = append(lines, fmt.Sprintf("$shellPath = %s", powershellQuote(shell.Path)))
 	lines = append(lines, fmt.Sprintf("$shellArgs = @(%s)", strings.Join(quotedArgs, ", ")))
 	lines = append(lines,

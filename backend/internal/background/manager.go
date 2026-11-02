@@ -69,6 +69,13 @@ type Config struct {
 	// Env is the already-filtered environment for job processes. Nil inherits
 	// the runtime environment (with console styling neutralized).
 	Env []string
+	// WaitDelay bounds how long Wait may block after the command process exits
+	// while stdout/stderr are still held open by surviving descendants (for
+	// example a daemon started by the command). Zero resolves to
+	// executor.ResolveProcessWaitDelay() (5s, or AICLI_SHELL_WAIT_DELAY); a
+	// non-zero value wins; a negative value disables the bound. Without it, a
+	// job can stay "running" forever even though the shell already exited.
+	WaitDelay time.Duration
 	// PrepareCommand runs after shell argv construction and before Start. It is
 	// the shared hook for Windows cmd.exe raw command lines and other launcher
 	// adjustments; nil is a no-op.
@@ -102,6 +109,7 @@ func DefaultConfig() Config {
 		QueueTimeout:            30 * time.Minute,
 		OrphanReaperInterval:    30 * time.Second,
 		RecoverPendingOnStart:   false,
+		WaitDelay:               5 * time.Second,
 		EventHandler:            nil,
 	}
 }
@@ -143,6 +151,7 @@ type Manager struct {
 	logDir            string
 	dispatchCh        chan struct{}
 	maxConcurrentJobs int
+	waitDelay         time.Duration
 	eventHandler      func(JobEvent)
 	stopCh            chan struct{}
 	doneCh            chan struct{}
@@ -266,11 +275,18 @@ func NewManager(cfg Config) *Manager {
 	if cfg.QueueTimeout == 0 {
 		cfg.QueueTimeout = DefaultConfig().QueueTimeout
 	}
+	if cfg.WaitDelay == 0 {
+		cfg.WaitDelay = runtimeexecutor.ResolveProcessWaitDelay()
+	}
+	if cfg.WaitDelay < 0 {
+		cfg.WaitDelay = 0
+	}
 	manager := &Manager{
 		config:               cfg,
 		jobs:                 make(map[string]*managedJob),
 		dispatchCh:           make(chan struct{}, 1),
 		maxConcurrentJobs:    cfg.MaxConcurrentJobs,
+		waitDelay:            cfg.WaitDelay,
 		interactive:          make(map[string]*interactiveSession),
 		interactiveBySession: make(map[string]string),
 		lastUsage:            make(map[string]usageSample),
@@ -428,6 +444,13 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	m.lastCreatedAt = now
 	if m.instanceID != "" {
 		managed.info.OwnerInstanceID = m.instanceID
+		// Publish a live lease with the row itself. Waiting for the first
+		// heartbeat leaves a window where a peer opening the same store sees a
+		// running job with no lease and wrongly orphans it.
+		if m.config.LeaseTTL > 0 {
+			lease := now.Add(m.config.LeaseTTL)
+			managed.info.LeaseExpiresAt = &lease
+		}
 	}
 	queuedAt := managed.info.CreatedAt
 	managed.info.QueuedAt = &queuedAt
@@ -440,7 +463,20 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 
 	m.ensureInstanceRegistered(ctx)
 	if m.store != nil {
-		_ = m.store.SaveJob(ctx, managed.info)
+		if err := m.store.SaveJob(ctx, managed.info); err != nil {
+			// The durable store is the only job registry for remote targets.
+			// Returning success here would hand the caller a job id that cannot
+			// survive the process (and could never be read back), so fail closed
+			// before the job is dispatched.
+			m.mu.Lock()
+			delete(m.jobs, jobID)
+			m.mu.Unlock()
+			cancel()
+			if logPath != "" {
+				_ = os.Remove(logPath)
+			}
+			return nil, fmt.Errorf("persist background job %s: %w", jobID, err)
+		}
 	}
 	m.appendJobEvent(ctx, managed.info.ID, "queued", map[string]interface{}{
 		"status": managed.info.Status,
@@ -1437,6 +1473,12 @@ func (m *Manager) runJob(managed *managedJob) {
 	// Put the child in its own process group on Unix so the whole tree can be
 	// signalled as a unit (2026-09-28, P2).
 	applyProcessGroup(cmd)
+	// Bound post-exit I/O. Without this, a descendant that inherited the
+	// stdout/stderr pipe keeps Wait blocked forever even though the shell
+	// itself already exited (the classic `Start-Process daemon` hang).
+	if m.waitDelay > 0 {
+		cmd.WaitDelay = m.waitDelay
+	}
 
 	// Wire the output sinks before Start and let os/exec drive them: with
 	// StdoutPipe/StderrPipe, Wait closes the read end as soon as the process
@@ -1494,6 +1536,10 @@ func (m *Manager) runJob(managed *managedJob) {
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		m.markTimedOut(managed, "command timed out")
+		return
+	}
+	if errors.Is(waitErr, exec.ErrWaitDelay) {
+		m.settleWaitDelay(managed, cmd)
 		return
 	}
 	if waitErr != nil {
@@ -2128,6 +2174,36 @@ func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, mess
 		"exit_code": exitCode,
 	})
 	m.notifyDispatcher()
+}
+
+// settleWaitDelay converges a job whose root process already exited but whose
+// stdout/stderr are still held open by descendants. WaitDelay delivered the
+// real process exit status, so this is a settled command with a truncated I/O
+// tail, not a hard wait failure. Treating it as a failure would turn a
+// successful command into a failed job and hide why the wait ended early.
+func (m *Manager) settleWaitDelay(managed *managedJob, cmd *exec.Cmd) {
+	if managed == nil {
+		return
+	}
+	exitCode := -1
+	if cmd != nil && cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	managed.mu.Lock()
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["wait_delay_used"] = true
+	managed.info.Metadata["wait_delay_ms"] = m.waitDelay.Milliseconds()
+	managed.info.Metadata["leftover_descendants"] = "process tree termination requested at terminal transition"
+	managed.mu.Unlock()
+
+	message := "command process exited, but descendant processes kept the output pipe open; the job was settled after the wait delay and cleanup of the remaining process tree was requested"
+	if exitCode >= 0 {
+		m.completeJobWithMessage(managed, exitCode, message)
+		return
+	}
+	m.failJobWithErrorCode(managed, runtimeerrors.ErrToolExecution, fmt.Errorf("%s: %w", message, exec.ErrWaitDelay))
 }
 
 func (m *Manager) failJob(managed *managedJob, err error) {
