@@ -548,7 +548,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			presentStages[stage] = true
 		}
 	}
-	factLedgerSuppressed := stagePresent("fact_ledger") || (activeTurnHasReplay && !stagePresent("compaction"))
+	// The ledger is the residue of a compaction, not a second transcript. Until
+	// some history has actually been replaced, every fact it could state is still
+	// readable verbatim in the tool results above, so building it duplicated
+	// context the model already had and charged for it on every single request.
+	compactionBoundaryReached := compactionPressure || transcriptHasCompactionBoundary(scopedHistory)
+	factLedgerActiveTurnSuppressed := stagePresent("fact_ledger") || (activeTurnHasReplay && !stagePresent("compaction"))
+	factLedgerSuppressed := !compactionBoundaryReached || factLedgerActiveTurnSuppressed
 
 	layerMetrics := map[string]interface{}{
 		"hot": map[string]interface{}{
@@ -603,7 +609,9 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"injected":                   false,
 			"count":                      0,
 			"goal_id":                    input.GoalID,
-			"suppressed_for_active_turn": factLedgerSuppressed,
+			"suppressed_for_active_turn": factLedgerActiveTurnSuppressed,
+			"suppressed_pre_compaction":  !compactionBoundaryReached,
+			"compaction_boundary":        compactionBoundaryReached,
 		},
 	}
 	if knowledgeMode != KnowledgeModeOff {
@@ -667,7 +675,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		factEvidence []string
 	)
 	if factLedgerSuppressed {
-		layerMetrics["facts"].(map[string]interface{})["suppressed_for_active_turn"] = true
+		factsMetrics := layerMetrics["facts"].(map[string]interface{})
+		if factLedgerActiveTurnSuppressed {
+			factsMetrics["suppressed_for_active_turn"] = true
+		}
+		if !compactionBoundaryReached {
+			factsMetrics["suppressed_pre_compaction"] = true
+		}
 	} else {
 		factMessage, factCount, factEvidence = m.buildFactLedgerMessage(ctx, input)
 	}

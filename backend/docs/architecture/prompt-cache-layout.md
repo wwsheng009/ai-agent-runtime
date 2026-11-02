@@ -66,11 +66,47 @@ Never reintroduce dynamic content in front of raw history.
 
 ### Fact ledger policy
 
-Implementation: `backend/internal/contextmgr/facts.go` (`buildFactLedgerMessage`).
+Implementation: `backend/internal/contextmgr/facts.go`
+(`PersistCompactionFacts` writes, `buildFactLedgerMessage` renders).
 
-- Load only **active** facts for the current goal (`factledger.ListActive` with
-  `GoalID` / session / workspace scope).
-- Inject only when there is something authoritative to show.
+The ledger is the **residue of a compaction**, not a second transcript.
+
+- **Written only at the boundary** that replaces history
+  (`Manager.PersistCompactionFacts`), reached from both compact adapters:
+  `LocalAdapter.saveSummaryCheckpoint` hands over the whole replaced segment, and
+  `RemoteAdapter.Compact` diffs input against the merged replacement so only turns
+  the provider actually dropped (and did not re-pin as durable world state) are
+  recorded. Tool traffic is never recorded: outcomes are
+  process artifacts, already present as tool results before a compaction, owned
+  by the summary afterwards, and reachable via `artifact_read` / the tool-layer
+  file-read ledger.
+- **Declarative kinds only**: `constraint`, `decision`, `remaining_work`,
+  `open_question`, `failure`, `goal`, `completed_action`. `execution`,
+  `test_result`, `state_change`, `runtime`, `workspace` are filtered at read time,
+  so the ~181k rows older builds stored stop reaching the prompt without any
+  data migration. The kind filter is **pushed into storage**
+  (`artifact.Store.LoadMemoryEntriesByContentKind`, a `json_extract` predicate), so
+  the read window counts matching rows: a declarative fact buried behind 387
+  process-artifact rows in a legacy session is still reached.
+- **Harvested from user assertions only.** Agent narration — decisions it took,
+  pitfalls it hit, progress recaps — is what the compaction summary is instructed
+  to carry, so storing it again only hands the model its own prose back,
+  mislabelled (`- [rule] assistant requires: Let me do final due-diligence...`).
+  Three read-side guards retire the rows older writers already stored:
+  `narratedFactSubject` (Subject is a speaking role), `selfIngestedFactValue`
+  (value is a rendered ledger/checkpoint block — the ledger feeding on itself), and
+  `reportsACleanResult` on stored `failure` rows ("848 passed / 0 failed" filed as
+  a pitfall by the vocabulary heuristic).
+- **Injected only past a compaction boundary**
+  (`transcriptHasCompactionBoundary`, or this build is under compaction
+  pressure). While the prose is intact the block would only duplicate context
+  the model can already read, and pay for it on every request.
+- **Delta-only**: facts already announced by a `fact_ledger` message still in the
+  transcript are skipped (`announcedFactIDs`), the way codex advances context
+  with `render_diff` / an RFC 7386 merge patch instead of re-dumping it. Once the
+  carrying message is itself compacted away, the facts are re-announced.
+- Slot-capped per kind and newest first; evidence references stay in message
+  metadata (`fact_ids`, `evidence_refs`) and are never inlined into prose.
 - Suppressed while the active user turn already has tool/assistant replay
   (`activeTurnHasReplay`), so mid-turn rebuilds do not thrash the tail.
 - Position: **after history**, never before.
@@ -185,12 +221,20 @@ byte-identical, provider reported 88,128 / 88,206 cached tokens.
 ## Do not regress
 
 1. **Fact ledger after history** — never prepend dynamic fact content.
-2. **Active-goal-only facts** — do not inject unrelated / global fact noise into
-   the prompt tail.
-3. **Turn-stable tools after first freeze** — no per-step tool re-compact solely
+2. **Active-goal-only facts** — do not inject another goal's facts into the
+   prompt tail.
+   (A goal-less build still shows goal-scoped facts: dropping them emptied the
+   ledger mid-session and relocated the injected block, breaking the prefix.)
+3. **No process artifacts in the ledger** — tool outcomes must not be recorded or
+   injected; guard: `TestBuildNeverInjectsProcessArtifacts`,
+   `TestPersistCompactionFactsStoresOnlyDeclarativeStatements`.
+4. **Silent before the boundary** — guard:
+   `TestBuildKeepsFactLedgerSilentUntilCompactionBoundary`.
+5. **Announce each fact once** — guard: `TestBuildAnnouncesEachFactOnlyOnce`.
+6. **Turn-stable tools after first freeze** — no per-step tool re-compact solely
    to chase remaining budget.
-4. **Freeze against fixed turn prompt budget** — not first-step message size.
-5. **Preflight regressions** with small `context_max_prompt_tokens` (1300/1400)
+7. **Freeze against fixed turn prompt budget** — not first-step message size.
+8. **Preflight regressions** with small `context_max_prompt_tokens` (1300/1400)
    and large tool results must keep passing:
    - `TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest`
    - `TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist`
@@ -199,7 +243,7 @@ byte-identical, provider reported 88,128 / 88,206 cached tokens.
    - `TestReActLoop_Run_FreezesToolSurfaceForEntireTurn`
    - `TestBuildKeepsConversationPrefixStableWhenFactLedgerInjected`
    - `TestBuildDoesNotPrependFactLedgerBeforeHistory`
-6. **Content prefix before volatile knobs** — `marshalProviderRequestBody`
+9. **Content prefix before volatile knobs** — `marshalProviderRequestBody`
    (`backend/internal/llm/request_body_marshal.go`) must serialize
    `messages`/`input`/`contents`, `system`, `tools`/`functions` before the
    remaining keys, so `max_tokens` retry escalation cannot rewrite the cached

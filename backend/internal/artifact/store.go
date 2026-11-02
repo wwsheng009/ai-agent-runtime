@@ -556,6 +556,47 @@ func (s *Store) InsertMemoryEntry(ctx context.Context, entry MemoryEntry) (strin
 
 // LoadMemoryEntries 读取 ledger 项。
 func (s *Store) LoadMemoryEntries(ctx context.Context, sessionID string, kinds []string, limit int) ([]MemoryEntry, error) {
+	return s.queryMemoryEntries(ctx, sessionID, kinds, nil, limit, "priority DESC, created_at DESC")
+}
+
+// LoadMemoryEntriesRecent 按时间倒序读取 ledger 项。
+//
+// LoadMemoryEntries 以 priority 为主排序键：长期会话里低优先级但最新的记录（例如
+// 最近一次工具执行结果）会在窗口截断时被高优先级旧记录挤出，读取方拿到的是"历史上
+// 最重要的"而不是"当前最新的"状态。事实账本必须反映世界现状，所以它改用本方法。
+func (s *Store) LoadMemoryEntriesRecent(ctx context.Context, sessionID string, kinds []string, limit int) ([]MemoryEntry, error) {
+	return s.queryMemoryEntries(ctx, sessionID, kinds, nil, limit, "created_at DESC")
+}
+
+// LoadMemoryEntriesByContentKind 把 content_json 里的语义 kind 下推到 SQL 后按时间倒序读取。
+//
+// memory_entries.kind 存的是条目类型（例如 structured_fact），而语义 kind 藏在
+// content_json 的 $.kind。只按行数开窗时，长期会话里稀疏的声明式事实会被大量早已
+// 不再使用的过程产物行挤出窗口（实测：某会话最新一条声明式事实排在第 387 行）。
+// 过滤下推之后 LIMIT 统计的是"匹配行数"，稀疏事实不再依赖它新旧。
+func (s *Store) LoadMemoryEntriesByContentKind(ctx context.Context, sessionID, entryKind string, contentKinds []string, limit int) ([]MemoryEntry, error) {
+	if len(contentKinds) == 0 {
+		return s.LoadMemoryEntriesRecent(ctx, sessionID, []string{entryKind}, limit)
+	}
+	return s.queryMemoryEntries(ctx, sessionID, []string{entryKind}, contentKinds, limit, "created_at DESC")
+}
+
+// memoryEntryPlaceholders builds one or more "?" bind markers. Values are always
+// bound as parameters, never interpolated into the statement.
+func memoryEntryPlaceholders(count int) string {
+	if count <= 0 {
+		return "?"
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func (s *Store) queryMemoryEntries(ctx context.Context, sessionID string, kinds []string, contentKinds []string, limit int, orderBy string) ([]MemoryEntry, error) {
+	// orderBy is interpolated into SQL, so only the two known literals may pass.
+	switch orderBy {
+	case "priority DESC, created_at DESC", "created_at DESC":
+	default:
+		return nil, fmt.Errorf("unsupported memory order %q", orderBy)
+	}
 	if s == nil {
 		return nil, fmt.Errorf("artifact store is not initialized")
 	}
@@ -570,32 +611,30 @@ func (s *Store) LoadMemoryEntries(ctx context.Context, sessionID string, kinds [
 		limit = 12
 	}
 
-	var rows *sql.Rows
-	if len(kinds) == 0 {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, session_id, task_id, kind, priority, content_json, source_refs_json, source_hash, created_at
-			FROM memory_entries
-			WHERE session_id = ?
-			ORDER BY priority DESC, created_at DESC
-			LIMIT ?
-		`, sessionID, limit)
-	} else {
-		placeholders := make([]string, 0, len(kinds))
-		args := make([]interface{}, 0, len(kinds)+2)
-		args = append(args, sessionID)
+	where := "WHERE session_id = ?"
+	args := make([]interface{}, 0, len(kinds)+len(contentKinds)+2)
+	args = append(args, sessionID)
+	if len(kinds) > 0 {
+		where += " AND kind IN (" + memoryEntryPlaceholders(len(kinds)) + ")"
 		for _, kind := range kinds {
-			placeholders = append(placeholders, "?")
 			args = append(args, kind)
 		}
-		args = append(args, limit)
-		rows, err = s.db.QueryContext(ctx, fmt.Sprintf(`
-			SELECT id, session_id, task_id, kind, priority, content_json, source_refs_json, source_hash, created_at
-			FROM memory_entries
-			WHERE session_id = ? AND kind IN (%s)
-			ORDER BY priority DESC, created_at DESC
-			LIMIT ?
-		`, strings.Join(placeholders, ",")), args...)
 	}
+	if len(contentKinds) > 0 {
+		where += " AND coalesce(json_extract(content_json, '$.kind'), '') IN (" + memoryEntryPlaceholders(len(contentKinds)) + ")"
+		for _, contentKind := range contentKinds {
+			args = append(args, strings.ToLower(strings.TrimSpace(contentKind)))
+		}
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, task_id, kind, priority, content_json, source_refs_json, source_hash, created_at
+		FROM memory_entries
+		`+where+`
+		ORDER BY `+orderBy+`
+		LIMIT ?
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load memory entries: %w", err)
 	}

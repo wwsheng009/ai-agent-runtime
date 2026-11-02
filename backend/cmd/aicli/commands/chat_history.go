@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -490,11 +491,17 @@ func isVisibleChatHistoryMessage(session *ChatSession, message runtimetypes.Mess
 	return true
 }
 
-const legacyFactLedgerHeader = "Verified fact ledger (authoritative over compacted prose):"
-
+// isLegacyFactLedgerTranscript recognizes ledger blocks written by any build.
+// The primary filter is the context_stage metadata; this text check stays as
+// defense for old sessions whose ledger rows lost their metadata.
 func isLegacyFactLedgerTranscript(content string) bool {
 	trimmed := strings.TrimSpace(content)
-	return strings.HasPrefix(trimmed, legacyFactLedgerHeader)
+	for _, header := range contextmgr.LegacyFactLedgerHeaders() {
+		if strings.HasPrefix(trimmed, header) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall) {

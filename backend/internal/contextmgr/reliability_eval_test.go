@@ -185,7 +185,7 @@ func TestReliabilityEvalLongSessionCompactStateRetention(t *testing.T) {
 			afterFactIDs := factIDs(after.Messages)
 			require.ElementsMatch(t, expectedFactIDs, beforeFactIDs)
 			require.ElementsMatch(t, beforeFactIDs, afterFactIDs,
-				"compaction must not change the authoritative facts injected into the current prompt")
+				"a second compaction must not change the declarative facts already carried by the transcript")
 			require.NotContains(t, before.Metadata, "compacted_messages")
 
 			compactedMessages, ok := after.Metadata["compacted_messages"].(int)
@@ -308,6 +308,13 @@ func longSessionHistory(
 	oldSessionTodoMark string,
 ) []types.Message {
 	history := []types.Message{*types.NewSystemMessage("system reliability policy")}
+	// The eval models a long session that has already crossed a compaction
+	// boundary once: that is the only state in which the fact ledger exists, and
+	// the durable facts below were written by that earlier boundary.
+	boundary := types.NewUserMessage("Compacted context from earlier turns:\nEarlier turns were summarized.")
+	boundary.Metadata["context_stage"] = "compaction"
+	boundary.Metadata["session_id"] = sessionID
+	history = append(history, *boundary)
 	jobReference := types.NewAssistantMessage("background job reference: " + jobID + " status=running")
 	jobReference.Metadata["session_id"] = sessionID
 	jobReference.Metadata["goal_id"] = activeGoalID

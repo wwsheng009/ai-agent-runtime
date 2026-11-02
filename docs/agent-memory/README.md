@@ -31,6 +31,7 @@
 | [08-completeness-review.md](./08-completeness-review.md) | 闭环审查、缺口修复记录、剩余决策与实施就绪度 | 完成 |
 | [09-memory-horizons-recall-and-budget.md](./09-memory-horizons-recall-and-budget.md) | 短期/长期/工作区/全局记忆、召回漏斗、Token 预算与可观测性 | 完成 |
 | [10-nuphus-deepseek-harness-memory-comparison.md](./10-nuphus-deepseek-harness-memory-comparison.md) | Nuphus / DeepSeek Harness / ai-memory 记忆能力对比与借鉴清单 | 完成 |
+| [11-fact-ledger-convergence-decision.md](./11-fact-ledger-convergence-decision.md) | Fact Ledger 收敛决策记录：过程产物/结论切分、实测证据、停止投入理由与重启条件 | **已执行**（本目录其余文档为方案基线） |
 
 ## 3. 核心结论
 

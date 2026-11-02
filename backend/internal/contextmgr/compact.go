@@ -372,6 +372,24 @@ func isDurablePromptStage(stage string) bool {
 	}
 }
 
+// transcriptHasCompactionBoundary reports whether any part of this transcript
+// has already been replaced by a compaction checkpoint.
+//
+// It gates the fact ledger: until a compaction destroys the prose, every tool
+// outcome the ledger could describe is still readable verbatim in the tool
+// results, so the ledger adds a lossy duplicate rather than information. After
+// the boundary the summary owns the narrative and the ledger only carries the
+// declarative residue the summary was free to drop.
+func transcriptHasCompactionBoundary(messages []types.Message) bool {
+	for index := range messages {
+		stage := strings.ToLower(strings.TrimSpace(messages[index].Metadata.GetString(metaContextStage, "")))
+		if stage == "compaction" || stage == "ledger" {
+			return true
+		}
+	}
+	return false
+}
+
 // knowledgeCompactionTrace 生成 knowledge 阶段消息的压缩痕迹：只含计数/模式/
 // 版本，**绝不含注入正文**（正文按版本逐轮重生成）。
 func knowledgeCompactionTrace(metadata types.Metadata) string {
@@ -607,10 +625,30 @@ func looksLikeOpenQuestion(s string) bool {
 }
 
 func looksLikeFailure(s string) bool {
+	// Failure vocabulary is not a failure. Real sessions produced "failure"
+	// entries out of sentences that report a clean run — "848 passed / 0 failed"
+	// — and those then got injected back as an authoritative pitfall.
+	if reportsACleanResult(s) {
+		return false
+	}
 	return strings.Contains(s, "failed") ||
 		strings.Contains(s, "error") ||
 		strings.Contains(s, "denied") ||
 		strings.Contains(s, "panic")
+}
+
+// reportsACleanResult recognises the "success stated with failure vocabulary"
+// shape. Input is already lower-cased by the caller.
+func reportsACleanResult(s string) bool {
+	for _, marker := range []string{
+		"0 failed", "0 failures", "0 errors", "0 test failures",
+		"all tests pass", "all tests passed", "no failures", "zero failures",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractArtifactRefs(metadata types.Metadata) []string {

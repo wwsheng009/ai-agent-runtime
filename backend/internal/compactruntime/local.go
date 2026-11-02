@@ -1650,6 +1650,13 @@ func (a *LocalAdapter) saveSummaryCheckpoint(ctx context.Context, sessionID, tas
 	if err != nil {
 		return ""
 	}
+	// Everything in `history` stops reaching the model at this line. Hand the
+	// declarative residue — constraints, decisions, owed work, recorded pitfalls
+	// — to the fact ledger at the exact boundary that dropped the prose, which is
+	// the only place the ledger is ever written and the only place it is read.
+	if a.contextManager != nil {
+		a.contextManager.PersistCompactionFacts(ctx, "", strings.TrimSpace(sessionID), checkpoint.TaskID, history)
+	}
 	return strings.TrimSpace(checkpointID)
 }
 

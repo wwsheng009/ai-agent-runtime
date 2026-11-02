@@ -128,7 +128,7 @@ providers:
 - local compact：pre-turn 放在 summary 之后；mid-turn 放在真实 user request 与 tool replay 之间
 - remote compact：对 provider 返回的 replacement 再 merge 同一份 durable 快照
 
-若 mid-turn compact 后 active turn 中出现 compaction checkpoint 且仍缺少 `fact_ledger`，下一次 context build 允许 append-only rehydrate 权威 ledger；普通 ReAct tool replay 不会因此反复注入。workspace / recall 等瞬时投影仍不跨 compact 钉住，由下一轮按需重新构建。
+若 mid-turn compact 后 active turn 中出现 compaction checkpoint 且仍缺少 `fact_ledger`，下一次 context build 允许 append-only rehydrate 权威 ledger；普通 ReAct tool replay 不会因此反复注入。workspace / recall 等瞬时投影仍不跨 compact 钉住，由下一轮按需重新构建。（ledger 自身的边界见下文「Fact ledger 的边界」。）
 
 解析顺序：
 
@@ -148,6 +148,63 @@ Provider 未返回 usage 时的兜底估算使用 `internal/tokenestimate`：按
 context:
   fallbackMaxPromptTokens: 32000
 ```
+
+### Fact ledger 的边界（2026-10-28 收敛）
+
+fact ledger 是**压缩之后的残留声明层**，不是第二份 transcript：
+
+- **写入点只有一个**：替换 history 的压缩边界。`compactruntime` 的
+  `saveSummaryCheckpoint` 在 checkpoint 落库成功后调用
+  `contextmgr.Manager.PersistCompactionFacts`，把这段被销毁历史里的声明式内容交给账本。
+  工具调用不再写入账本——工具执行属于过程产物：压缩前它原样在 tool result 里，
+  压缩后其结论由 summary 承载（local 摘要 prompt 已要求 decisions / constraints /
+  critical references / pitfalls / remaining work），超大原文由 artifact 归档 +
+  `artifact_read` 按需取回，重复读由工具层 file-read ledger 拦截。
+- **只存声明式 kind**：`constraint`、`decision`、`remaining_work`、`open_question`、
+  `failure`、`goal`、`completed_action`。`execution`/`test_result`/`state_change`/
+  `runtime`/`workspace` 在读取侧过滤，因此旧版本留下的历史行无需迁移即不再注入。
+  kind 过滤已**下推到存储**（`artifact.Store.LoadMemoryEntriesByContentKind`，用
+  `json_extract` 谓词），因此读窗口按"匹配行数"计——实测被 387 行过程产物压在最底部的
+  声明式事实现在可以被读到。
+- **只采集用户断言**：agent 自己的叙述（它做的决策、踩的坑、进度复述）本就是压缩摘要
+  被要求承载的内容，再存一遍等于把模型自己的话换个标签还给它（实测出现过
+  `- [rule] assistant requires: Let me do final due-diligence...`）。
+  旧 writer 已经写进去的行由读侧三道兜底拦掉：`narratedFactSubject`（Subject 是发言角色）、
+  `selfIngestedFactValue`（内容本身就是账本/检查点渲染，账本在吃自己）、
+  以及对 `failure` 行复用的 `reportsACleanResult`（"848 passed / 0 failed" 曾被词汇
+  启发式判成 pitfall）。
+- **只在跨过压缩边界后注入**：`transcriptHasCompactionBoundary` 或本轮处于压缩压力。
+  此前实现无条件注入，而本文件同时声明生产请求路径默认关闭 prompt-view
+  compaction——即账本在它声称的理由从未成立的路径上每轮都发；本次修正使代码与文档一致。
+- **增量下发**：transcript 中仍存在的 `fact_ledger` 消息已宣告过的 fact id 会被跳过
+  （`announcedFactIDs`），携带它的那条消息自身被压缩掉后才重新宣告。
+
+remote 与 local 两条路径都在边界写入声明式残留：
+
+- local：`LocalAdapter.saveSummaryCheckpoint` 落库成功后，整段被替换的 history 交给
+  `PersistCompactionFacts`。
+- remote：provider 只回 projection，本地永远看不到那段 prose。`RemoteAdapter.Compact` 在
+  `mergeDurableWorldState` 之后按消息身份做差集（`droppedCompactionInput`），只把
+  **provider 删掉且没有被 durable 重钉回来**的那些轮次交给 `PersistCompactionFacts`。
+  provider 保留的轮次不记账（它仍然可见，记账就是重复）；同一边界重复触发也不会堆副本
+  （FactID 由 entry SourceHash 稳定派生，落库 `ON CONFLICT DO NOTHING`）。
+  回归：`TestMaybeCompactRemoteRecordsDeclarativeResidueOfDroppedTurns`、
+  `TestMaybeCompactRemoteFactResidueIsIdempotent`、
+  `TestMaybeCompactRemoteRecordsNothingWhenProviderKeepsTurns`。
+
+仍未接通：账本存储仍是 append-only、无 TTL。本次只切断新的过程产物写入并在读取侧过滤，
+存量行清理需要单独的修剪任务。
+
+> 以上“未接通/未做”项均为**有意停止投入**，不是遗漏。决策依据、实测产出量
+> （≤1 条声明式事实 / 压缩会话）与重启条件见
+> [docs/agent-memory/11-fact-ledger-convergence-decision.md](../agent-memory/11-fact-ledger-convergence-decision.md)。
+> 复测配方在该文件第 7 节，勿重新推导。
+
+另有一处**既有**缺口（非本次改动引入）：`cmd/aicli/commands/chat_core.go` 的 shared-chat 路径以
+`compactruntime.New(llmRuntime, nil)` 构造适配器，而 `summaryCheckpointStore(nil)` 返回 nil，
+因此该路径在改动前就不会持久化 summary checkpoint，改动后也不会写入声明式事实——它一直是
+"无持久化"状态，行为未变。actor / runtimeapi / agent loop 三条主路径都传入非 nil manager，
+声明式事实正常写入。
 
 ### 模式解析规则
 

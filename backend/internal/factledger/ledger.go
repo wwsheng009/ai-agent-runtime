@@ -147,6 +147,10 @@ func factPriority(kind string) int {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "constraint":
 		return 100
+	case "state_change":
+		// A file the agent actually changed is the strongest world-state signal
+		// an upcoming turn can act on.
+		return 95
 	case "decision", "test_result":
 		return 90
 	case "workspace", "runtime":

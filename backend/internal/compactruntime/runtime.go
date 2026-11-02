@@ -130,7 +130,8 @@ func New(llmRuntime *llm.LLMRuntime, contextManager *contextmgr.Manager) *Runtim
 			contextManager: contextManager,
 		},
 		remote: &RemoteAdapter{
-			llmRuntime: llmRuntime,
+			llmRuntime:     llmRuntime,
+			contextManager: contextManager,
 		},
 	}
 }

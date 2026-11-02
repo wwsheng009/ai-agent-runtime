@@ -181,7 +181,7 @@ describe("applySessionHistoryToThread", () => {
   it("hides fact ledger and other internal prompt-context messages", () => {
     const response: SessionHistoryResponse = {
       session_id: "session-1",
-      count: 4,
+      count: 6,
       history: [
         {
           role: "user",
@@ -200,6 +200,18 @@ describe("applySessionHistoryToThread", () => {
           role: "assistant",
           content:
             "Verified fact ledger (authoritative over compacted prose):\n- legacy assistant leak",
+        },
+        // The current ledger label must stay hidden too, even when the row lost
+        // its metadata (old sessions leaked ledgers as assistant text).
+        {
+          role: "assistant",
+          content:
+            "Verified session facts (newest first; already checked, do not redo):\n- [run] shell succeeded",
+        },
+        {
+          role: "assistant",
+          content:
+            "Session facts carried across compaction (constraints, decisions, open work; newest first):\n- [rule] user requires: Chinese output",
         },
         {
           role: "assistant",

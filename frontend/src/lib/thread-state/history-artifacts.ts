@@ -253,8 +253,15 @@ export function normalizeSessionHistoryMessages(
   });
 }
 
-const LEGACY_FACT_LEDGER_HEADER =
-  "Verified fact ledger (authoritative over compacted prose):";
+// Ledger blocks are prompt infrastructure. The current label plus every label
+// ever shipped must stay hidden, because stored sessions can carry any of them.
+// Mirrors contextmgr.LegacyFactLedgerHeaders() on the backend — keep the two in
+// sync, or an old session leaks an internal prompt layer into the thread.
+const FACT_LEDGER_HEADERS = [
+  "Session facts carried across compaction (constraints, decisions, open work; newest first):",
+  "Verified session facts (newest first; already checked, do not redo):",
+  "Verified fact ledger (authoritative over compacted prose):",
+];
 
 function isInternalPromptContextMessage(item: {
   role?: string;
@@ -283,7 +290,7 @@ function isInternalPromptContextMessage(item: {
   }
 
   const content = typeof item.content === "string" ? item.content.trim() : "";
-  return content.startsWith(LEGACY_FACT_LEDGER_HEADER);
+  return FACT_LEDGER_HEADERS.some((header) => content.startsWith(header));
 }
 
 export function buildHistoryArtifacts(

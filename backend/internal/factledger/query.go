@@ -12,6 +12,12 @@ import (
 )
 
 // ListActive reconstructs the current projection without deleting superseded history.
+//
+// Ordering is recency-first with confidence only as a tie-break. The previous
+// confidence-first order let every stored failure outrank newer successes, so a
+// transient error that had already been retried away kept occupying the injected
+// window: the ledger then described the session's past problems rather than its
+// present state.
 func (l *Ledger) ListActive(ctx context.Context, query Query) ([]Fact, error) {
 	history, err := l.ListHistory(ctx, query)
 	if err != nil {
@@ -26,7 +32,7 @@ func (l *Ledger) ListActive(ctx context.Context, query Query) ([]Fact, error) {
 			invalidated[fact.Supersedes] = fact.FactID
 		}
 	}
-	entries, err := l.store.LoadMemoryEntries(ctx, query.SessionID, []string{memoryKindInvalidation}, ledgerLoadLimit(query.Limit))
+	entries, err := l.loadEntries(ctx, query.SessionID, []string{memoryKindInvalidation}, ledgerLoadLimit(query.Limit))
 	if err != nil {
 		return nil, err
 	}
@@ -44,15 +50,50 @@ func (l *Ledger) ListActive(ctx context.Context, query Query) ([]Fact, error) {
 		active = append(active, fact)
 	}
 	sort.SliceStable(active, func(i, j int) bool {
-		if active[i].Confidence == active[j].Confidence {
-			return active[i].UpdatedAt.After(active[j].UpdatedAt)
+		if active[i].UpdatedAt.Equal(active[j].UpdatedAt) {
+			return active[i].Confidence > active[j].Confidence
 		}
-		return active[i].Confidence > active[j].Confidence
+		return active[i].UpdatedAt.After(active[j].UpdatedAt)
 	})
 	if query.Limit > 0 && len(active) > query.Limit {
 		active = active[:query.Limit]
 	}
 	return active, nil
+}
+
+// recencyAwareStore loads rows newest-first. The default LoadMemoryEntries
+// orders by priority before recency, which for a long session silently drops
+// the most recent facts (they share the lowest priority band) instead of the
+// oldest ones.
+type recencyAwareStore interface {
+	LoadMemoryEntriesRecent(ctx context.Context, sessionID string, kinds []string, limit int) ([]artifact.MemoryEntry, error)
+}
+
+// factKindAwareStore filters on the semantic kind stored *inside* content_json.
+// Without it the read window is measured in raw rows, and a long session's
+// sparse declarative facts are pushed out by the process-artifact rows that
+// older builds stored — rows the reader is going to discard anyway.
+type factKindAwareStore interface {
+	LoadMemoryEntriesByContentKind(ctx context.Context, sessionID, entryKind string, contentKinds []string, limit int) ([]artifact.MemoryEntry, error)
+}
+
+func (l *Ledger) loadEntries(ctx context.Context, sessionID string, kinds []string, limit int) ([]artifact.MemoryEntry, error) {
+	if loader, ok := l.store.(recencyAwareStore); ok {
+		return loader.LoadMemoryEntriesRecent(ctx, sessionID, kinds, limit)
+	}
+	return l.store.LoadMemoryEntries(ctx, sessionID, kinds, limit)
+}
+
+// loadFacts reads the fact rows matching the query, pushing the semantic kind
+// filter into storage when the store can do it.
+func (l *Ledger) loadFacts(ctx context.Context, sessionID string, query Query, limit int) ([]artifact.MemoryEntry, error) {
+	contentKinds := sortedLowerList(query.Kinds)
+	if len(contentKinds) > 0 {
+		if filter, ok := l.store.(factKindAwareStore); ok {
+			return filter.LoadMemoryEntriesByContentKind(ctx, sessionID, memoryKindFact, contentKinds, limit)
+		}
+	}
+	return l.loadEntries(ctx, sessionID, []string{memoryKindFact}, limit)
 }
 
 func (l *Ledger) ListHistory(ctx context.Context, query Query) ([]Fact, error) {
@@ -63,7 +104,7 @@ func (l *Ledger) ListHistory(ctx context.Context, query Query) ([]Fact, error) {
 	if query.SessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
-	entries, err := l.store.LoadMemoryEntries(ctx, query.SessionID, []string{memoryKindFact}, ledgerLoadLimit(query.Limit))
+	entries, err := l.loadFacts(ctx, query.SessionID, query, ledgerLoadLimit(query.Limit))
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +184,12 @@ func matchesQuery(fact Fact, query Query, kinds map[string]bool) bool {
 	if query.WorkspaceID != "" && fact.WorkspaceID != "" && fact.WorkspaceID != query.WorkspaceID {
 		return false
 	}
-	if query.GoalID == "" {
-		if fact.GoalID != "" || fact.Scope == ScopeGoal {
-			return false
-		}
-	} else if fact.GoalID != "" && fact.GoalID != query.GoalID {
+	// A goal-less query must NOT drop goal-scoped facts. The old rule hid every
+	// goal fact the moment the goal ended, so the ledger — and with it the
+	// statement "these outcomes are verified" — silently emptied itself in the
+	// middle of a still-running session, which also relocated the injected
+	// message between requests and broke the provider prompt-cache prefix.
+	if query.GoalID != "" && fact.GoalID != "" && fact.GoalID != query.GoalID {
 		return false
 	}
 	return len(kinds) == 0 || kinds[fact.Kind]
@@ -176,6 +218,23 @@ func stringSet(values []string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// sortedLowerList normalizes and sorts a kind list so a pushed-down SQL filter
+// gets a deterministic, duplicate-free argument list.
+func sortedLowerList(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func firstValue(values ...string) string {

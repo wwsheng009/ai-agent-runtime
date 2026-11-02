@@ -1683,6 +1683,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			pendingFailures, recovered = recoverMatchingToolFailures(pendingFailures, toolResult.Call.Name)
 			recoveredToolErrorCount += recovered
 		}
+		// Recovered failures deliberately do NOT touch the durable fact ledger:
+		// tool outcomes are process artifacts and are no longer recorded there,
+		// so the transcript plus the compaction summary is the only place they
+		// need to be corrected.
 
 		// SK-3：主循环工具面观测（含文档模式技能）——命中隐式调用时发布 skills.invoked。
 		loop.observeImplicitSkillInvocations(traceID, sessionID, step, normalizedCalls, toolResults, implicitInvocationSeen)
@@ -1690,18 +1694,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 3. Observe: 记录执行结果
 		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
 		loop.parkTeamObligationsFromResults(currentCtx, sessionID, toolResults)
-		observationStart := len(observations)
+		// Observations feed the transient warm-memory projection only. They are
+		// not persisted as facts: the ledger keeps the declarative residue a
+		// compaction drops, and the compaction boundary writes it.
 		observations = loop.observe(currentCtx, toolResults, observations, step)
-		if manager := loop.agent.GetContextManager(); manager != nil && observationStart < len(observations) {
-			workspaceID := ""
-			if loop.agent.config != nil {
-				workspaceID = optionString(loop.agent.config.Options, "workspace_id")
-			}
-			manager.RecordObservations(currentCtx, contextmgr.FactObservationInput{
-				TraceID: traceID, WorkspaceID: workspaceID, SessionID: sessionID,
-				GoalID: toolctx.GoalID(currentCtx), Observations: observations[observationStart:],
-			})
-		}
 
 		// 4. 更新对话历史
 		// Prompt path keeps pure advisories; durable builder strips them so
