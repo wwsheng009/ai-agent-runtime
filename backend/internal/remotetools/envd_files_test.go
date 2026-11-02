@@ -250,7 +250,7 @@ func TestEnvDEditAndPatchRespectTheReadGate(t *testing.T) {
 		stub, session, ctx := setup(t)
 		patch := "*** Begin Patch\n*** Update File: secrets.env\n@@\n-hash: abc123\n+hash: leaked\n*** End Patch\n"
 		refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-			"patch": patch,
+			"input": patch,
 		})
 		if !strings.Contains(refused, "permission denied reading") {
 			t.Fatalf("apply_patch refusal = %q, want the read gate to stop the hunk", refused)

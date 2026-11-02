@@ -24,7 +24,7 @@ func TestEnvDPatchAppliesAddUpdateDelete(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	got := callTool(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Add File: notes.md",
 			"+# notes",
@@ -64,7 +64,7 @@ func TestEnvDPatchRollsBackEarlierOperationsOnStaleHunk(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Add File: scratch.txt",
 			"+should not survive",
@@ -97,7 +97,7 @@ func TestEnvDPatchRefusesEscapeBeforeMutatingAnything(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Update File: keep.txt",
 			"@@",
@@ -127,7 +127,7 @@ func TestEnvDPatchMoveRules(t *testing.T) {
 		session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 		callTool(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-			"patch": patch(
+			"input": patch(
 				"*** Begin Patch",
 				"*** Update File: old.txt",
 				"*** Move to: renamed.txt",
@@ -150,7 +150,7 @@ func TestEnvDPatchMoveRules(t *testing.T) {
 		session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 		refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-			"patch": patch(
+			"input": patch(
 				"*** Begin Patch",
 				"*** Update File: src.txt",
 				"*** Move to: dst.txt",
@@ -174,7 +174,7 @@ func TestEnvDPatchAddRefusesDifferentContent(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Add File: exists.txt",
 			"+different content",
@@ -190,7 +190,7 @@ func TestEnvDPatchAddRefusesDifferentContent(t *testing.T) {
 
 	// The same add twice is a replay, not a failure.
 	replay := callTool(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Add File: exists.txt",
 			"+real content",
@@ -207,7 +207,7 @@ func TestEnvDPatchUnknownPathGetsNotFound(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": patch(
+		"input": patch(
 			"*** Begin Patch",
 			"*** Update File: nowhere.txt",
 			"@@",
@@ -226,7 +226,7 @@ func TestEnvDPatchSyntaxErrorIsReportedNotPanicking(t *testing.T) {
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileStandard)
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__apply_patch", map[string]interface{}{
-		"patch": "*** Begin Patch\n*** Frobnicate: bad.txt\n*** End Patch",
+		"input": "*** Begin Patch\n*** Frobnicate: bad.txt\n*** End Patch",
 	})
 	if strings.TrimSpace(refused) == "" {
 		t.Fatal("syntax error produced an empty message")

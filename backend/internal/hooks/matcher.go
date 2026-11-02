@@ -214,14 +214,11 @@ func extractPathsFromArgs(args map[string]interface{}) []string {
 			}
 		}
 	}
-	if raw, ok := args["patch"]; ok {
-		if patch, ok := raw.(string); ok {
-			paths = append(paths, extractPathsFromPatch(patch)...)
-		}
-	}
-	if raw, ok := args["diff"]; ok {
-		if patch, ok := raw.(string); ok {
-			paths = append(paths, extractPathsFromPatch(patch)...)
+	for _, key := range []string{"input", "patch", "diff", "patch_text"} {
+		if raw, ok := args[key]; ok {
+			if patch, ok := raw.(string); ok {
+				paths = append(paths, extractPathsFromPatch(patch)...)
+			}
 		}
 	}
 	return dedupeStrings(paths)

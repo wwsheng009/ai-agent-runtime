@@ -47,7 +47,7 @@ func pathSchema(props ...string) map[string]interface{} {
 // Over-injecting advertises a parameter on tools that cannot honour it, which is
 // exactly the failure mode this whole change is meant to remove.
 func TestDeclaresPathParam(t *testing.T) {
-	yes := []string{"path", "paths", "files", "file_path", "source", "destination", "patch"}
+	yes := []string{"path", "paths", "files", "file_path", "source", "destination", "input", "patch"}
 	for _, key := range yes {
 		if !declaresPathParam(pathSchema(key)) {
 			t.Fatalf("%q should count as a path parameter", key)

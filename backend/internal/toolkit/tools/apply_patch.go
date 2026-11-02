@@ -42,18 +42,18 @@ func NewApplyPatchTool() *ApplyPatchTool {
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"patch": map[string]interface{}{
+			"input": map[string]interface{}{
 				"type":        "string",
-				"description": "要应用的补丁文本。普通函数调用模式下放入 patch 参数；Codex/freeform 模式下直接发送补丁文本，不要包 JSON。必须使用 Codex apply_patch 格式，例如 *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch。若补丁很大或包含多个独立变更，请拆分为多个更小的补丁块，每次只聚焦一个文件或一个变更区域，避免单次参数过长导致截断。",
+				"description": "要应用的补丁文本。函数调用模式下放入 input 参数；Codex/freeform 模式下直接发送补丁文本，不要包 JSON。必须使用 Codex apply_patch 格式（Begin/Update/Add/Delete/End Patch 指令）。若补丁很大或包含多个独立变更，请拆分为多个更小的补丁块，每次只聚焦一个文件或一个变更区域，避免单次参数过长导致截断。",
 			},
 		},
-		"required": []string{"patch"},
+		"required": []string{"input"},
 	}
 
 	return &ApplyPatchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"apply_patch",
-			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。Codex/custom-tool 模式下这是 FREEFORM 工具，应直接发送补丁文本，不要包 JSON；普通函数调用模式使用 patch 参数。若需要处理很大的变更或多个独立目标，请拆分为多个更小的 apply_patch 调用，每次只聚焦一个文件或一个变更区域，避免单次参数过大导致截断。",
+			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。Codex/custom-tool 模式下这是 FREEFORM 工具，应直接发送补丁文本，不要包 JSON；函数调用模式使用 input 参数。若需要处理很大的变更或多个独立目标，请拆分为多个更小的 apply_patch 调用，每次只聚焦一个文件或一个变更区域，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -82,16 +82,21 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 	if result, truncated := truncatedToolArgsResult(params); truncated {
 		return result, nil
 	}
-	// The freeform tool call arrives either as a `patch` argument or as raw
-	// text; normalize that at the surface, then run the shared handler.
-	if raw, ok := params["patch"].(string); !ok || strings.TrimSpace(raw) == "" {
-		if fallback, ok := params["_raw"].(string); ok && strings.TrimSpace(fallback) != "" {
+	// The freeform tool call arrives either as an `input` argument or as raw
+	// text. `patch` is accepted for compatibility with older sessions/prompts.
+	if raw, ok := params["input"].(string); !ok || strings.TrimSpace(raw) == "" {
+		for _, key := range []string{"patch", "_raw"} {
+			fallback, ok := params[key].(string)
+			if !ok || strings.TrimSpace(fallback) == "" {
+				continue
+			}
 			copied := make(map[string]interface{}, len(params)+1)
 			for key, value := range params {
 				copied[key] = value
 			}
-			copied["patch"] = fallback
+			copied["input"] = fallback
 			params = copied
+			break
 		}
 	}
 	return executeCoreSearchTool(ctx, t, params)

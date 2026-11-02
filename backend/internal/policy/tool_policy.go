@@ -942,7 +942,7 @@ var (
 
 	// Patch text is the only shape the policy can mine for mutated paths; the
 	// list is ordered so extracted-path diagnostics stay deterministic.
-	policyPatchArgKeyList = []string{"patch", "diff", "patch_text", "patchtext"}
+	policyPatchArgKeyList = []string{"input", "patch", "diff", "patch_text", "patchtext"}
 	policyPatchArgKeys    = buildPolicyArgKeySet(policyPatchArgKeyList)
 
 	// policyScalarArgKeys is the union of every argument the policy reads as a
@@ -977,6 +977,7 @@ var policyToolkitCanonicalArgClasses = map[string]policyArgClass{
 	"workdir":   policyArgClassPath,
 	"path":      policyArgClassPath,
 	"url":       policyArgClassURL,
+	"input":     policyArgClassPatch,
 	"patch":     policyArgClassPatch,
 }
 

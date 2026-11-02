@@ -100,7 +100,7 @@ func ApplyPatchParameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"patch": map[string]interface{}{
+			"input": map[string]interface{}{
 				"type": "string",
 				"description": "Codex-style patch: " + PatchBegin + " / " +
 					strings.TrimSuffix(PatchAdd, ": ") + " / " +
@@ -109,6 +109,6 @@ func ApplyPatchParameters() map[string]interface{} {
 					PatchEnd + ".",
 			},
 		},
-		"required": []string{"patch"},
+		"required": []string{"input"},
 	}
 }

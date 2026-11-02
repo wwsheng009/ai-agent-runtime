@@ -71,9 +71,9 @@ type envdPatchApplier struct {
 }
 
 func envdApplyPatch(ctx context.Context, be *envdBackend, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	rawPatch, hasPatch := envdParamString(params, "patch")
+	rawPatch, hasPatch := envdParamString(params, "input", "patch", "_raw")
 	if !hasPatch || strings.TrimSpace(rawPatch) == "" {
-		return envdErrorResult("patch is required"), nil
+		return envdErrorResult("input is required (legacy alias: patch)"), nil
 	}
 	operations, err := mutatecore.ParsePatch(rawPatch)
 	if err != nil {

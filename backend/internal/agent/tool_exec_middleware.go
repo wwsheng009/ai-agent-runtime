@@ -22,7 +22,7 @@ func (loop *ReActLoop) bindFreeformToolCall(ctx context.Context, call types.Tool
 	if info == nil {
 		return call
 	}
-	call.Args = toolargs.BindFreeform(call.Args, info.InputSchema)
+	call.Args = toolargs.NormalizeToolkitArgs(call.Name, toolargs.BindFreeform(call.Args, info.InputSchema))
 	return call
 }
 
@@ -40,6 +40,11 @@ func (loop *ReActLoop) ensureToolExecMemory() *toolexec.Memory {
 // terminal failure circuit, optional read-path existence, empty soft negative
 // cache) and attaches digest metadata.
 func (loop *ReActLoop) prepareToolExecution(ctx context.Context, metadata map[string]interface{}, toolName, toolCallID string, args map[string]interface{}, toolInfo *runtimeskill.ToolInfo) toolexec.PreflightDecision {
+	// Legacy argument spellings must be promoted before the schema's required
+	// fields are checked. Otherwise a supported alias (for example apply_patch's
+	// old `patch`) is rejected as "missing required argument(s)" by preflight
+	// even though the executor would have normalized it.
+	args = toolargs.NormalizeToolkitArgs(toolName, args)
 	var schema map[string]interface{}
 	var toolMeta map[string]interface{}
 	if toolInfo != nil {

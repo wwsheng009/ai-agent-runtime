@@ -65,3 +65,11 @@ func TestRegistryAliasesAllResolve(t *testing.T) {
 	}
 	require.NotZero(t, checked, "没有任何别名被检查：注册表与参数表可能已经脱节")
 }
+
+func TestApplyPatchCanonicalArgumentIsInput(t *testing.T) {
+	aliases, ok := toolargs.ToolkitArgAliasesFor("apply_patch")
+	require.True(t, ok)
+	require.Len(t, aliases.Args, 1)
+	require.Equal(t, "input", aliases.Args[0].Canonical)
+	require.Contains(t, aliases.Args[0].Aliases, "patch")
+}

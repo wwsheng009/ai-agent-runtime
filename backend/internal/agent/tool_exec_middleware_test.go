@@ -140,6 +140,39 @@ func TestPrepareToolExecution_MissingRequiredArgs(t *testing.T) {
 	}
 }
 
+func TestPrepareToolExecution_PromotesApplyPatchLegacyPatchAlias(t *testing.T) {
+	loop := NewReActLoop(&Agent{}, nil, nil)
+	info := &skill.ToolInfo{
+		Name: "apply_patch",
+		InputSchema: map[string]interface{}{
+			"type":     "object",
+			"required": []interface{}{"input"},
+			"properties": map[string]interface{}{
+				"input": map[string]interface{}{"type": "string"},
+			},
+		},
+	}
+
+	for name, args := range map[string]map[string]interface{}{
+		"canonical input": {"input": "*** Begin Patch\n*** End Patch"},
+		"legacy patch":    {"patch": "*** Begin Patch\n*** End Patch"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			metadata := map[string]interface{}{}
+			decision := loop.prepareToolExecution(context.Background(), metadata, "apply_patch", "tc-"+name, args, info)
+			if !decision.Allow {
+				t.Fatalf("expected alias to pass preflight, got %q (%s)", decision.Error, decision.ErrorCode)
+			}
+			if _, ok := decision.Args["input"]; !ok {
+				t.Fatalf("expected preflight args to use canonical input, got %#v", decision.Args)
+			}
+			if _, ok := decision.Args["patch"]; ok {
+				t.Fatalf("expected legacy alias to be promoted, got %#v", decision.Args)
+			}
+		})
+	}
+}
+
 func TestToolWorkspaceRootPrefersToolBasePath(t *testing.T) {
 	loop := NewReActLoop(&Agent{
 		config: &Config{

@@ -93,7 +93,10 @@ var toolkitArgAliases = map[string]ToolkitArgAliases{
 		},
 	},
 	"apply_patch": {
-		Args: []ToolkitArgAliasPair{pairs("patch", "diff", "input", "patch_text")},
+		// input is the canonical spelling because the Codex custom-tool
+		// transport calls the freeform payload "input". patch remains the
+		// legacy/function-call alias so existing sessions keep working.
+		Args: []ToolkitArgAliasPair{pairs("input", "patch", "diff", "patch_text")},
 	},
 }
 

@@ -37,6 +37,7 @@ func TestEveryPathToolDeclaresWorkdir(t *testing.T) {
 		"file_path":   true,
 		"source":      true,
 		"destination": true,
+		"input":       true,
 		"patch":       true,
 	}
 	// These resolve workdir in the handler, so they legitimately declare it

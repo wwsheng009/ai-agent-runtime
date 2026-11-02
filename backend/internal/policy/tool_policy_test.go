@@ -472,15 +472,19 @@ func TestToolExecutionPolicy_AllowToolCall_BlocksPatchPathOutsideSandbox(t *test
 		"+hello",
 		"*** End Patch",
 	}, "\n")
-	err := policy.AllowToolCall(skill.ToolInfo{
-		Name:          "apply_patch",
-		MCPTrustLevel: "local",
-		ExecutionMode: "local_mcp",
-	}, map[string]interface{}{
-		"patch": patch,
-	})
-	if err == nil {
-		t.Fatal("expected patch path outside sandbox to be blocked")
+	for _, key := range []string{"input", "patch"} {
+		t.Run(key, func(t *testing.T) {
+			err := policy.AllowToolCall(skill.ToolInfo{
+				Name:          "apply_patch",
+				MCPTrustLevel: "local",
+				ExecutionMode: "local_mcp",
+			}, map[string]interface{}{
+				key: patch,
+			})
+			if err == nil {
+				t.Fatalf("expected %s path outside sandbox to be blocked", key)
+			}
+		})
 	}
 }
 

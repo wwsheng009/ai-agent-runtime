@@ -145,7 +145,7 @@ func TestApplyPatchAddUpdateDelete(t *testing.T) {
 		"*** End Patch",
 	}, "\n")
 
-	callTool(t, ctx, session, "remote_dev__apply_patch", map[string]interface{}{"patch": patch})
+	callTool(t, ctx, session, "remote_dev__apply_patch", map[string]interface{}{"input": patch})
 
 	assertFile(t, filepath.Join(root, "added.txt"), "first\nsecond\n")
 	assertFile(t, filepath.Join(root, "README.md"), "# demo\nDONE\n")
@@ -175,7 +175,7 @@ func TestApplyPatchRejectsMismatchedHunk(t *testing.T) {
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "remote_dev__apply_patch",
-		Arguments: map[string]interface{}{"patch": patch},
+		Arguments: map[string]interface{}{"input": patch},
 	})
 	if err != nil {
 		t.Fatalf("call: %v", err)

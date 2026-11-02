@@ -74,6 +74,32 @@ func TestApplyPatchTool_AppliesAddUpdateMoveAndDelete(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_AcceptsInputParameter(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	requireWriteFile(t, path, "before\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: input.txt",
+		"@@",
+		"-before",
+		"+after",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"input": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected input parameter to succeed, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "after\n")
+}
+
 func TestApplyPatchTool_RejectsMalformedPatch(t *testing.T) {
 	tool := NewApplyPatchTool()
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -518,13 +544,20 @@ func TestApplyPatchTool_DescriptionGuidesPatchSplitting(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected properties in schema, got %#v", params)
 	}
-	patchSchema, ok := props["patch"].(map[string]interface{})
+	patchSchema, ok := props["input"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected patch schema in properties, got %#v", props)
+		t.Fatalf("expected input schema in properties, got %#v", props)
+	}
+	if _, legacy := props["patch"]; legacy {
+		t.Fatalf("legacy patch must not be advertised in the model-facing schema, got %#v", props)
 	}
 	patchDesc, _ := patchSchema["description"].(string)
 	if !strings.Contains(patchDesc, "拆分") || !strings.Contains(patchDesc, "截断") {
 		t.Fatalf("expected patch description to guide patch splitting, got %q", patchDesc)
+	}
+	required, _ := params["required"].([]string)
+	if len(required) != 1 || required[0] != "input" {
+		t.Fatalf("expected required=[input], got %#v", params["required"])
 	}
 }
 

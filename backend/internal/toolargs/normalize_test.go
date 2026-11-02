@@ -93,12 +93,12 @@ func TestBindFreeformBindsSoleRequiredStringField(t *testing.T) {
 	got := BindFreeform(DecodeFreeform(raw), map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"patch": map[string]interface{}{"type": "string"},
+			"input": map[string]interface{}{"type": "string"},
 		},
-		"required": []string{"patch"},
+		"required": []string{"input"},
 	})
-	if got["patch"] != raw || got["_raw"] != nil || got["_parse_error"] != nil {
-		t.Fatalf("expected raw input to bind cleanly to patch, got %#v", got)
+	if got["input"] != raw || got["_raw"] != nil || got["_parse_error"] != nil {
+		t.Fatalf("expected raw input to bind cleanly to input, got %#v", got)
 	}
 }
 

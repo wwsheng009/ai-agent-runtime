@@ -471,9 +471,19 @@ type applyPatchHandler struct {
 func (h *applyPatchHandler) Definition() toolcore.Definition { return h.def }
 
 func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.Result, error) {
-	rawPatch := stringArg(call, "patch")
+	rawPatch := stringArg(call, "input")
 	if strings.TrimSpace(rawPatch) == "" {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "pass patch", fmt.Errorf("patch is required")), nil
+		// `patch` is the legacy spelling; `_raw` covers a freeform payload
+		// that reached the core handler before schema binding.
+		for _, key := range []string{"patch", "_raw"} {
+			if fallback := stringArg(call, key); strings.TrimSpace(fallback) != "" {
+				rawPatch = fallback
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(rawPatch) == "" {
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass a non-empty input (legacy alias: patch)", fmt.Errorf("input is required (legacy alias: patch)")), nil
 	}
 	if failure := runtimeFailure(call); failure != nil {
 		return failure, nil

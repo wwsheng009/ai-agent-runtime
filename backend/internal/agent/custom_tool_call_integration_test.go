@@ -110,7 +110,8 @@ func TestFreeformPatchBindingRunsBeforeSandboxPolicy(t *testing.T) {
 		ID: "call_patch", Type: "custom_tool_call", Name: "apply_patch",
 		Args: map[string]interface{}{"_raw": raw}, RawInput: raw,
 	})
-	require.Equal(t, raw, call.Args["patch"])
+	require.Equal(t, raw, call.Args["input"])
+	require.NotContains(t, call.Args, "patch")
 	require.NotContains(t, call.Args, "_raw")
 
 	info, err := manager.FindTool("apply_patch")

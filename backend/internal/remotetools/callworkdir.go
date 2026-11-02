@@ -42,7 +42,7 @@ func CallWorkdir(ctx context.Context) string {
 // declares any of them can meaningfully accept a workdir base, so the schema
 // wrapper injects the parameter for exactly those tools. Tools that already
 // declare "workdir" themselves (shell, job_start) are excluded by the caller.
-var pathParams = []string{"path", "paths", "files", "file_path", "source", "destination", "patch"}
+var pathParams = []string{"path", "paths", "files", "file_path", "source", "destination", "input", "patch"}
 
 // declaresPathParam reports whether the schema's properties include any
 // filesystem path parameter.

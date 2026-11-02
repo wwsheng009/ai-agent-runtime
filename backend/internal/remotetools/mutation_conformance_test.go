@@ -54,7 +54,7 @@ func TestRemoteMutationsPreserveEncoding(t *testing.T) {
 		"+A",
 		"*** End Patch",
 	}, "\n")
-	callTool(t, ctx, session, "remote_dev__apply_patch", map[string]interface{}{"patch": patch})
+	callTool(t, ctx, session, "remote_dev__apply_patch", map[string]interface{}{"input": patch})
 	assertBytes(t, crlfPath, append(append([]byte{}, utf8BOM...), "A\r\nb\r\n"...))
 }
 

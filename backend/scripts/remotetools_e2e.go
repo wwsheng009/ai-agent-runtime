@@ -97,7 +97,7 @@ func main() {
 		"+beta",
 		"*** End Patch",
 	}, "\n")
-	mustCall(ctx, session, prefix+"__apply_patch", map[string]interface{}{"patch": patch})
+	mustCall(ctx, session, prefix+"__apply_patch", map[string]interface{}{"input": patch})
 	patchedBody := mustCall(ctx, session, prefix+"__view", map[string]interface{}{"file_path": "patched.txt"})
 	assertContains("apply_patch add", patchedBody, "beta")
 
