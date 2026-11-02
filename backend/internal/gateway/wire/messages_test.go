@@ -89,6 +89,9 @@ func TestDecodePayloadRoundTripRegisterAck(t *testing.T) {
 		NodeID:         "node-aicli-9f3a",
 		ConsoleURL:     "https://gw/n/node-aicli-9f3a/web/",
 		AcceptedRoutes: []string{"/web"},
+		NotifySuppress: []NotifySuppressRule{
+			{Kinds: []string{"approval"}, Sessions: []string{"s1"}},
+		},
 	}
 	f, err := NewJSONFrame(TypeRegisterAck, 0, in)
 	if err != nil {
@@ -100,6 +103,30 @@ func TestDecodePayloadRoundTripRegisterAck(t *testing.T) {
 	}
 	if got.NodeID != in.NodeID || got.ConsoleURL != in.ConsoleURL || len(got.AcceptedRoutes) != 1 {
 		t.Fatalf("ack mismatch: %+v", got)
+	}
+	if len(got.NotifySuppress) != 1 || len(got.NotifySuppress[0].Kinds) != 1 ||
+		got.NotifySuppress[0].Kinds[0] != "approval" || len(got.NotifySuppress[0].Sessions) != 1 {
+		t.Fatalf("notify suppress mismatch: %+v", got.NotifySuppress)
+	}
+}
+
+func TestHeartbeatAckNotifySuppressRoundTrip(t *testing.T) {
+	in := HeartbeatAck{
+		Pending: []string{"tail-gating:on"},
+		NotifySuppress: []NotifySuppressRule{
+			{Kinds: []string{"completed"}},
+		},
+	}
+	f, err := NewJSONFrame(TypeHeartbeatAck, 0, in)
+	if err != nil {
+		t.Fatalf("NewJSONFrame: %v", err)
+	}
+	got, err := DecodePayload[HeartbeatAck](f)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if len(got.NotifySuppress) != 1 || got.NotifySuppress[0].Kinds[0] != "completed" {
+		t.Fatalf("notify suppress mismatch: %+v", got.NotifySuppress)
 	}
 }
 

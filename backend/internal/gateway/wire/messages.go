@@ -176,6 +176,11 @@ type RegisterAck struct {
 	RejectedRoutes []string   `json:"rejected_routes,omitempty"`
 	AcceptedMounts []MountAck `json:"accepted_mounts,omitempty"`
 	RejectedMounts []MountAck `json:"rejected_mounts,omitempty"`
+	// NotifySuppress 是网关下发的“本地自动通知抑制”规则（G→A）。它由网关
+	// 的 source=node target 推导：这些 target 会委托节点自己的 bot 出站，
+	// 节点本地 SubscribeAttention 若再发一次就会双发。空 = 不抑制。
+	// 字段是增量的：旧节点忽略它，行为保持。
+	NotifySuppress []NotifySuppressRule `json:"notify_suppress,omitempty"`
 }
 
 // MountSpec is one locally hosted MCP endpoint a node publishes through the
@@ -215,6 +220,10 @@ type MountLimits struct {
 	MaxBodyBytes   int64 `json:"max_body_bytes,omitempty"`
 	TimeoutSec     int   `json:"timeout_sec,omitempty"`
 	MaxConcurrency int   `json:"max_concurrency,omitempty"`
+	// MaxStreams bounds long-lived GET SSE streams. Zero uses the gateway
+	// default; it is intentionally separate from MaxConcurrency so idle
+	// sessions cannot starve tool calls or the DELETE teardown path.
+	MaxStreams int `json:"max_streams,omitempty"`
 }
 
 // MountLabels carries display-only metadata for the console. It is never used
@@ -290,6 +299,9 @@ type Heartbeat struct {
 type HeartbeatAck struct {
 	ServerTime time.Time `json:"server_time,omitempty"`
 	Pending    []string  `json:"pending,omitempty"`
+	// NotifySuppress 每条心跳都携带当前完整规则集：target 配置变化后，
+	// 节点最多一个心跳周期内收敛；断线时 agent 清空规则并回退本地发送。
+	NotifySuppress []NotifySuppressRule `json:"notify_suppress,omitempty"`
 }
 
 // SessionUpdate is an incremental session change (A→G, stream 0).
@@ -337,6 +349,19 @@ type Notify struct {
 	Title     string    `json:"title,omitempty"`
 	DedupKey  string    `json:"dedup_key,omitempty"`
 	TS        time.Time `json:"ts,omitempty"`
+}
+
+// NotifySuppressRule 描述一类“网关已接管、节点不要本地自动发送”的通知。
+//
+// 语义是 OR：任一条规则命中即抑制。
+//   - Kinds 为空 = 所有 kind；
+//   - Sessions 为空 = 该节点全部会话；非空 = 仅列出的会话。
+//
+// Kind 使用网关通知词表（approval/question/completed/error/waiting）；
+// 节点侧匹配时把本地 completion 归一化为 completed。
+type NotifySuppressRule struct {
+	Kinds    []string `json:"kinds,omitempty"`
+	Sessions []string `json:"sessions,omitempty"`
 }
 
 // Deregister is sent on graceful shutdown (A→G, stream 0).
