@@ -19,6 +19,37 @@ const (
 	MetadataKeyTransientPrompt = "transient_prompt"
 )
 
+// Host-authored control-plane prompts ride into the transcript as ordinary user
+// turns. They are scaffolding, not user assertions: a supervision digest line
+// such as “child session failed” states runtime bookkeeping, and a durable
+// consumer that files it as a user-claimed fact is repeating the exact mistake
+// the fact ledger had to be rebuilt to avoid.
+const (
+	// SupervisionDigestPromptHeader opens the progress digest the host injects
+	// when waking a parent turn (supervision's digest brief renderer).
+	SupervisionDigestPromptHeader = "[子任务与后台作业进展]"
+	// SupervisionPromptTag opens every host-submitted supervision turn, both the
+	// fixed auto-wake prompt and the resume prompt.
+	SupervisionPromptTag = "[supervision]"
+)
+
+var controlPlanePromptMarkers = []string{SupervisionDigestPromptHeader, SupervisionPromptTag}
+
+// IsControlPlanePromptText reports whether a message body begins with a
+// host-authored control-plane tag rather than something a user asserted.
+func IsControlPlanePromptText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	for _, marker := range controlPlanePromptMarkers {
+		if strings.HasPrefix(trimmed, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // requestScopedContextStages lists the injected layers that are rebuilt per
 // request. Values mirror contextmgr's stage names.
 var requestScopedContextStages = map[string]bool{

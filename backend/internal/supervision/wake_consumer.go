@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // AutoWakePrompt is the fixed parent turn prompt used for auto-scheduled
 // supervision wakes (doc 6.5 rule 5: the wake prompt references only the
 // lifecycle digest; the digest itself is injected by the preflight step on
 // the parent turn start path).
-const AutoWakePrompt = "[supervision] 存在待处理的子 Agent / Team 关键生命周期事件，请检查生命周期摘要（lifecycle digest）并继续。"
+const AutoWakePrompt = types.SupervisionPromptTag +
+	" 存在待处理的子 Agent / Team 关键生命周期事件，请检查生命周期摘要（lifecycle digest）并继续。"
 
 // AutoWakePromptFor renders the wake prompt for one delivery. When a resume
 // context was assembled from the obligation ledger (plan C2-1) the prompt

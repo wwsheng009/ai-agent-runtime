@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // C2-1（改动 #4）：wake 升级为 resume。
@@ -566,7 +568,7 @@ func ResumePrompt(rc *ResumeContext) string {
 		// 生命周期收敛事件）。
 		trigger = "等待期兜底反馈（无新进度）触发"
 	}
-	b.WriteString("[supervision] resume：" + trigger + "**同一 turn 续跑**")
+	b.WriteString(types.SupervisionPromptTag + " resume：" + trigger + "**同一 turn 续跑**")
 	b.WriteString("。以下 rollup 由 runtime 组装，无需回溯历史。\n")
 	if rc != nil {
 		// The verdict itself is stated once, in rc.Text, in business terms. A

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // DigestRequest describes what the preflight digest should include.
@@ -390,7 +392,9 @@ func formatDigestBriefText(digest *Digest) string {
 	// A progress-only digest (P2-D wake) has no event to report, so the header
 	// would introduce an empty section. Only print it when a row explains it.
 	if len(digest.Items) > 0 {
-		b.WriteString("[子任务与后台作业进展]\n")
+		// The header is a shared contract: durable consumers must recognize this
+		// digest as host control-plane text, so it comes from one constant.
+		b.WriteString(types.SupervisionDigestPromptHeader + "\n")
 	}
 	// A single human sentence replaces four counter lines. Only state that
 	// changes what the parent should do is spelled out.
