@@ -390,6 +390,54 @@ func Bool(ctx map[string]interface{}, key string) (bool, bool) {
 	return boolean, ok
 }
 
+// Strings 读取字符串数组元数据。存储层（SQLite/file 的 metadata_json）会把数组
+// 反序列化成 []interface{}，而进程内写入的是 []string，两种形态都必须读出同一
+// 结果；非字符串元素按 fmt 归一并跳过空值，缺键返回 nil（调用方以 len==0 判定）。
+func Strings(ctx map[string]interface{}, key string) []string {
+	value, ok := Value(ctx, key)
+	if !ok || value == nil {
+		return nil
+	}
+	var raw []interface{}
+	switch typed := value.(type) {
+	case []string:
+		if len(typed) == 0 {
+			return nil
+		}
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				result = append(result, text)
+			}
+		}
+		return result
+	case []interface{}:
+		raw = typed
+	default:
+		return nil
+	}
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if item == nil {
+			continue
+		}
+		text := ""
+		if valueText, isText := item.(string); isText {
+			text = valueText
+		} else {
+			text = fmt.Sprintf("%v", item)
+		}
+		if text = strings.TrimSpace(text); text == "" || text == "<nil>" {
+			continue
+		}
+		result = append(result, text)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func Int(ctx map[string]interface{}, key string) (int, bool) {
 	value, ok := Value(ctx, key)
 	if !ok || value == nil {
