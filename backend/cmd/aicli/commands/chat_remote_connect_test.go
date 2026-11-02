@@ -19,12 +19,12 @@ type statusProbeManager struct {
 	lastError  string
 }
 
-func (m *statusProbeManager) LoadConfig(string) error             { return nil }
-func (m *statusProbeManager) Start(context.Context) error         { return nil }
-func (m *statusProbeManager) Stop() error                         { return nil }
-func (m *statusProbeManager) ListTools() []*mcpregistry.ToolInfo  { return nil }
-func (m *statusProbeManager) SetMCPEnabled(string, bool) error    { return nil }
-func (m *statusProbeManager) ReloadConfig() error                 { return nil }
+func (m *statusProbeManager) LoadConfig(string) error            { return nil }
+func (m *statusProbeManager) Start(context.Context) error        { return nil }
+func (m *statusProbeManager) Stop() error                        { return nil }
+func (m *statusProbeManager) ListTools() []*mcpregistry.ToolInfo { return nil }
+func (m *statusProbeManager) SetMCPEnabled(string, bool) error   { return nil }
+func (m *statusProbeManager) ReloadConfig() error                { return nil }
 func (m *statusProbeManager) ListMCPs() []*mcpconfig.MCPStatus {
 	return []*mcpconfig.MCPStatus{{Name: m.serverName, Connected: m.connected}}
 }

@@ -45,14 +45,14 @@ func TestStripQuotedSpansOnlyHonorsEscapesForPosixShells(t *testing.T) {
 
 func TestShellHonorsBackslashEscapes(t *testing.T) {
 	cases := map[string]bool{
-		"bash":          true,
-		"/bin/zsh":      true,
-		"sh":            true,
-		"pwsh":          false,
-		"powershell":    false,
-		"pwsh.exe":      false,
+		"bash":                                   true,
+		"/bin/zsh":                               true,
+		"sh":                                     true,
+		"pwsh":                                   false,
+		"powershell":                             false,
+		"pwsh.exe":                               false,
 		`C:\Program Files\PowerShell\7\pwsh.exe`: false,
-		"cmd": false,
+		"cmd":                                    false,
 	}
 	for program, want := range cases {
 		if got := shellHonorsBackslashEscapes(program); got != want {
@@ -128,7 +128,7 @@ func TestDefaultPolicyAllowsPipelines(t *testing.T) {
 		t.Fatal("DefaultConfig().Shell.DenyShellMetachars = true, want the restriction off by default")
 	}
 	policy, err := NewCommandPolicy(ShellConfig{
-		AllowedCommands: []string{"*"},
+		AllowedCommands:    []string{"*"},
 		DenyShellMetachars: false,
 	}, 0)
 	if err != nil {

@@ -116,4 +116,3 @@ func TestLocalAgentRegistryTerminalStateMissingSession(t *testing.T) {
 	require.Equal(t, 1, store.metadataCalls)
 	require.Zero(t, store.loadCalls)
 }
-

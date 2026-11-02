@@ -7,7 +7,7 @@ import (
 )
 
 // TestLocalSubagentCapabilitiesMapsConfig 是 CLI 宿主能力位接线的守卫
-//（P1-1'）：config → SubagentCapabilities 的映射必须保持"现状请求位恒开、
+// （P1-1'）：config → SubagentCapabilities 的映射必须保持"现状请求位恒开、
 // 新能力位默认关"的口径，否则灰度开关会静默失效或意外放宽。
 func TestLocalSubagentCapabilitiesMapsConfig(t *testing.T) {
 	// 默认（未配置）：现状已支持的请求位开，新能力位关（G4）。

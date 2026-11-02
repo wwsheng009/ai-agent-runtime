@@ -11,7 +11,7 @@ import (
 // 优先级：modal > busy capture > ESC 消费者 > 空闲编辑器。
 
 // R4/R5 灰度取样：期望态（仲裁器）与实际 KeyHandler 位的分叉必须可机读
-//（/debug 的 Input Arbitration 节），不依赖 DebugMode 日志。
+// （/debug 的 Input Arbitration 节），不依赖 DebugMode 日志。
 func TestChatInputArbitrationDivergenceTelemetry(t *testing.T) {
 	session, kh := newEscapeConsumerTestSession(t)
 	release := startChatEscapeInterruptWatcher(session)

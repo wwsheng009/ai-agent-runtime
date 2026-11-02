@@ -241,7 +241,8 @@ func syncChatInputArbitration(session *ChatSession) {
 	}
 }
 
-func ensureChatInputArbitrator(session *ChatSession) *chatInputArbitrator {	if session == nil {
+func ensureChatInputArbitrator(session *ChatSession) *chatInputArbitrator {
+	if session == nil {
 		return nil
 	}
 	session.inputArbitrationMu.Lock()

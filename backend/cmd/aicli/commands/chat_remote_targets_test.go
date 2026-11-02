@@ -50,9 +50,9 @@ func TestRemoteToolsAreGovernedLikeLocalOnes(t *testing.T) {
 	resolver := runtimepolicy.DefaultCapabilityResolver{}
 
 	cases := []struct {
-		raw      string
-		write    bool // classify as write-like
-		shell    bool // needs exec_shell
+		raw        string
+		write      bool // classify as write-like
+		shell      bool // needs exec_shell
 		background bool
 	}{
 		{raw: "view", write: false},

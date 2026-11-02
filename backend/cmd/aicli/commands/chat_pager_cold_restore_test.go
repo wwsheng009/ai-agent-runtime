@@ -14,10 +14,11 @@ import (
 //
 // 设计 §14.9 的核心承诺：开启逐出后，Ctrl+T 仍然能翻到全部历史（冷区按需从
 // 写穿 store 读回）。本文件锁定：
-//  ① 逐出后账本记录了被逐出 cell（供 status index / pager 使用）；
-//  ② pager 视图前置了冷区内容，且顺序正确（冷区在前、窗口在后、不重复）；
-//  ③ store 不可用时降级为"仅窗口"且 PagerTruncated=true（绝不静默少显示）；
-//  ④ status 的 index/cold 分区变为真实值。
+//
+//	① 逐出后账本记录了被逐出 cell（供 status index / pager 使用）；
+//	② pager 视图前置了冷区内容，且顺序正确（冷区在前、窗口在后、不重复）；
+//	③ store 不可用时降级为"仅窗口"且 PagerTruncated=true（绝不静默少显示）；
+//	④ status 的 index/cold 分区变为真实值。
 func TestPagerRestoresEvictedCellsFromStore(t *testing.T) {
 	dir := t.TempDir()
 	resetResidencyRuntimeForTest(t)

@@ -109,7 +109,7 @@ func TestOverlayPinnedFunctionsOnlyNarrows(t *testing.T) {
 		Schemas:            []map[string]interface{}{{"name": "read_file", "description": "read"}},
 	}
 	pin := &skillTurnPin{
-		PinnedFunctions: []string{"skill__imagegen"},
+		PinnedFunctions:     []string{"skill__imagegen"},
 		DisallowedFunctions: []string{"read_file"},
 	}
 

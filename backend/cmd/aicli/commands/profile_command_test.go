@@ -296,7 +296,7 @@ func TestRunProfileShowCommandEffectiveSurface(t *testing.T) {
 // 子代理/团队工具的 essential 豁免已于 2026-10-16 移除——allowlist 本身就能
 // 裁掉它们；模板仍保留显式 denylist 作为防御性双保险（deny 恒优先，且覆盖
 // MCP/宿主侧同名工具）；且 deny 必须精确命中——未被 deny 的工具仍可用
-//（不是"全禁"）。
+// （不是"全禁"）。
 func TestRenderedReviewTemplateDeniesDelegationTools(t *testing.T) {
 	root := t.TempDir()
 	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{}}

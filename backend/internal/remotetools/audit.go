@@ -15,22 +15,22 @@ import (
 // contents or full command text: an audit log that leaks secrets is a
 // compliance problem of its own (design §7.5 / review S5).
 type AuditRecord struct {
-	TS         string   `json:"ts"`
-	Principal  string   `json:"principal,omitempty"`
-	Transport  string   `json:"transport"`
-	RemoteAddr string   `json:"remote_addr,omitempty"`
-	SessionID  string   `json:"session_id,omitempty"`
-	ToolCallID string   `json:"tool_call_id,omitempty"`
-	Target     string   `json:"target,omitempty"`
-	Tool       string   `json:"tool"`
-	Decision   string   `json:"decision"`
-	Reason     string   `json:"reason,omitempty"`
-	Workspace  string   `json:"workspace,omitempty"`
+	TS         string `json:"ts"`
+	Principal  string `json:"principal,omitempty"`
+	Transport  string `json:"transport"`
+	RemoteAddr string `json:"remote_addr,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Target     string `json:"target,omitempty"`
+	Tool       string `json:"tool"`
+	Decision   string `json:"decision"`
+	Reason     string `json:"reason,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
 	// Workdir is the per-call directory base that relative path arguments were
 	// resolved against, when the caller supplied one. Paths alone cannot show
 	// this: the same relative path means different files under different bases.
-	Workdir string `json:"workdir,omitempty"`
-	Paths      []string `json:"paths,omitempty"`
+	Workdir string   `json:"workdir,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 	// Program is the argv[0] basename for shell/job_start records. It is safe to
 	// log: it is the same identity the command policy matched.
 	Program string `json:"program,omitempty"`
