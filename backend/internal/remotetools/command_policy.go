@@ -221,7 +221,7 @@ func (p *CommandPolicy) FilterEnv(env []string) []string {
 // Timeout returns the effective command timeout.
 func (p *CommandPolicy) Timeout() time.Duration {
 	if p == nil || p.timeout <= 0 {
-		return 120 * time.Second
+		return 30 * time.Second
 	}
 	return p.timeout
 }
