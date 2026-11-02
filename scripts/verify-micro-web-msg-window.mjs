@@ -1071,6 +1071,70 @@ var freshRow = screenEl.querySelector('[data-msg-index="3"]');
 assert.ok(!freshRow.querySelector(".reasoning-block").open,
   "会话切换后不再恢复旧会话的用户展开意图（账本已清空）");
 
+// ---- 19. 新会话首条 prompt：不可见 system 消息抬高 baseline，user 索引回跳不得留下重复 ----
+// 真实现场：全新会话首帧只有 canonical 的 system/environment 消息（total=1），
+// web 客户端把它渲染为服务端行；用户发送首条 prompt 后，live Scene 接管，
+// user 落在绝对索引 0（system 不再出现在 Scene 里）。旧 baseline 取
+// serverMessageTotal=1，`index >= baseline` 永远不成立，pending 气泡与权威
+// user 行同时存在 —— 用户看到首条 prompt 重复，刷新页面后又只剩一条。
+chat.clearPendingPrompts();
+chat.setUI("idle", "");
+screenQueue.length = 0;
+screenQueue.push(screenPayload(0, 1, 1, {
+  contents: { 0: "ENV-SYSTEM-ONLY" },
+  roles: { 0: "system" },
+}));
+chat.refreshScreen(true);
+await flush();
+assert.strictEqual(rowIndices().length, 1, "前置：新会话首帧只有 system 行");
+assert.strictEqual(rowEls().filter(function (el) {
+  return el.classList.contains("msg-user");
+}).length, 0, "前置：首条 prompt 之前没有 user 行");
+
+elements["prompt"].value = "FIRST-PROMPT-AFTER-EMPTY-SESSION";
+elements["send-btn"].click();
+await flush();
+assert.ok(screenEl.querySelector(".msg-row.msg-pending"), "发送后应立即出现 pending 气泡");
+
+screenQueue.push(screenPayload(0, 3, 3, {
+  contents: { 0: "FIRST-PROMPT-AFTER-EMPTY-SESSION", 1: "agent.turn.started", 2: "回答" },
+  roles: { 0: "user", 1: "system", 2: "assistant" },
+}));
+chat.refreshScreen();
+await flush();
+assert.strictEqual(screenEl.querySelector(".msg-row.msg-pending"), null,
+  "首条 user 落在索引 0 时也必须释放 pending（不能因 system-only 首帧抬高 baseline）");
+assert.strictEqual(countRowsWithText("FIRST-PROMPT-AFTER-EMPTY-SESSION"), 1,
+  "首条 prompt 只能渲染一次（此前的现场是 pending + 权威行各一条）");
+
+// ---- 20. 失败后重试同一文本：最后一轮没有 assistant 产出时，权威 user 行本身就是确认 ----
+chat.clearPendingPrompts();
+chat.setUI("idle", "");
+screenQueue.length = 0;
+screenQueue.push(screenPayload(0, 1, 1, {
+  contents: { 0: "RETRY-SAME-PROMPT" },
+  roles: { 0: "user" },
+}));
+chat.refreshScreen();
+await flush();
+assert.strictEqual(countRowsWithText("RETRY-SAME-PROMPT"), 1, "前置：上一轮失败后只有一条 user 行");
+
+elements["prompt"].value = "RETRY-SAME-PROMPT";
+elements["send-btn"].click();
+await flush();
+assert.ok(screenEl.querySelector(".msg-row.msg-pending"), "重试发送后应出现 pending 气泡");
+
+screenQueue.push(screenPayload(0, 1, 1, {
+  contents: { 0: "RETRY-SAME-PROMPT" },
+  roles: { 0: "user" },
+}));
+chat.refreshScreen();
+await flush();
+assert.strictEqual(screenEl.querySelector(".msg-row.msg-pending"), null,
+  "重试的同一文本必须由尚无产出的最后一条 user 行确认，不得再钉一个 pending 副本");
+assert.strictEqual(countRowsWithText("RETRY-SAME-PROMPT"), 1,
+  "重试同一 prompt 仍只能渲染一次");
+
 clearTestIntervals();
 console.log("verify-micro-web-msg-window: 全部断言通过");
 console.log("  - 首屏只渲染最新一页（msg_limit=40），不随会话总 turn 数增长");

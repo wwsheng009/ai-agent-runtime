@@ -1943,7 +1943,7 @@ func (c *chatInteractionCoordinator) stopDynamicStatusTickLocked() {
 func chatSurfaceTitleState(s chatSurfaceStatus) string {
 	switch s.kind {
 	case chatSurfaceStatusTool, chatSurfaceStatusPlanning,
-		chatSurfaceStatusThinking, chatSurfaceStatusStreaming:
+		chatSurfaceStatusThinking, chatSurfaceStatusStreaming, chatSurfaceStatusCompacting:
 		return "running"
 	case chatSurfaceStatusStopping:
 		return "stopping"
@@ -2460,6 +2460,26 @@ func (c *chatInteractionCoordinator) SetNotice(text string) {
 		kind:   chatSurfaceStatusNotice,
 		detail: strings.TrimSpace(text),
 	})
+}
+
+// SetCompacting 显示 /compact 的执行态。与 SetNotice 不同，它属于 running
+// 状态：动态栏会启动秒表，用户能确认压缩仍在推进；该命令不可 Esc 中断。
+func (c *chatInteractionCoordinator) SetCompacting() {
+	c.setSurfaceStatus(chatSurfaceStatus{kind: chatSurfaceStatusCompacting})
+}
+
+// ClearCompacting 只清理 compact 状态，避免覆盖期间可能出现的其他运行态；
+// 清态后按当前 activity flags / agent stage 重新派生 Ready 或既有状态。
+func (c *chatInteractionCoordinator) ClearCompacting() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || c.surfaceStatus.kind != chatSurfaceStatusCompacting {
+		return
+	}
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 func (c *chatInteractionCoordinator) setSurfaceStatus(s chatSurfaceStatus) {
@@ -3044,18 +3064,19 @@ func (c *chatInteractionCoordinator) isReadyLocked() bool {
 type chatSurfaceStatusKind int
 
 const (
-	chatSurfaceStatusIdle      chatSurfaceStatusKind = iota // Ready / 终态（Codex 对齐）
-	chatSurfaceStatusWaiting                                // 等待（legacy activity flag）
-	chatSurfaceStatusThinking                               // 思考（thinking / reasoning）
-	chatSurfaceStatusStreaming                              // 流式输出
-	chatSurfaceStatusPlanning                               // 规划阶段
-	chatSurfaceStatusStopping                               // 中断清理
-	chatSurfaceStatusTool                                   // 执行工具，detail=工具名/进度
-	chatSurfaceStatusRetrying                               // 正在重试，detail=retry parts
-	chatSurfaceStatusApproval                               // 等待审批（agent stage）
-	chatSurfaceStatusAnswer                                 // 等待回答（agent stage）
-	chatSurfaceStatusNotice                                 // 透传 UI 文案（detail=全文），非状态机语义
-	chatSurfaceStatusParked                                 // 托管挂起（§6.12：actor Busy 但没有自己的 run）
+	chatSurfaceStatusIdle       chatSurfaceStatusKind = iota // Ready / 终态（Codex 对齐）
+	chatSurfaceStatusWaiting                                 // 等待（legacy activity flag）
+	chatSurfaceStatusThinking                                // 思考（thinking / reasoning）
+	chatSurfaceStatusStreaming                               // 流式输出
+	chatSurfaceStatusPlanning                                // 规划阶段
+	chatSurfaceStatusCompacting                              // 手动 /compact 压缩中
+	chatSurfaceStatusStopping                                // 中断清理
+	chatSurfaceStatusTool                                    // 执行工具，detail=工具名/进度
+	chatSurfaceStatusRetrying                                // 正在重试，detail=retry parts
+	chatSurfaceStatusApproval                                // 等待审批（agent stage）
+	chatSurfaceStatusAnswer                                  // 等待回答（agent stage）
+	chatSurfaceStatusNotice                                  // 透传 UI 文案（detail=全文），非状态机语义
+	chatSurfaceStatusParked                                  // 托管挂起（§6.12：actor Busy 但没有自己的 run）
 )
 
 // chatSurfaceStatus 是 surface 状态的结构化描述。kind 决定语义（是否 running、
@@ -3068,7 +3089,7 @@ type chatSurfaceStatus struct {
 func (s chatSurfaceStatus) isRunning() bool {
 	switch s.kind {
 	case chatSurfaceStatusWaiting, chatSurfaceStatusThinking, chatSurfaceStatusStreaming,
-		chatSurfaceStatusPlanning, chatSurfaceStatusStopping,
+		chatSurfaceStatusPlanning, chatSurfaceStatusCompacting, chatSurfaceStatusStopping,
 		chatSurfaceStatusTool, chatSurfaceStatusRetrying,
 		chatSurfaceStatusApproval, chatSurfaceStatusAnswer:
 		return true
@@ -3094,6 +3115,8 @@ func (s chatSurfaceStatus) String() string {
 		return "Waiting"
 	case chatSurfaceStatusPlanning:
 		return "Planning"
+	case chatSurfaceStatusCompacting:
+		return "Compacting context"
 	case chatSurfaceStatusStopping:
 		return "Stopping"
 	case chatSurfaceStatusApproval:
@@ -3254,6 +3277,9 @@ func buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(s chatSurfaceS
 			hint = "ctrl+c or /stop"
 		}
 		suffix = fmt.Sprintf(" (%s • %s)", formatChatDynamicStatusElapsed(elapsed), hint)
+	} else if s.kind == chatSurfaceStatusCompacting {
+		// 不可中断，但仍需要秒表证明压缩仍在推进。
+		suffix = fmt.Sprintf(" (%s)", formatChatDynamicStatusElapsed(elapsed))
 	}
 	if budget := width - ui.DisplayWidth("◦ "+suffix); budget >= 4 {
 		action = compactStatusValue(action, budget)
@@ -3299,6 +3325,9 @@ func chatDynamicStatusAction(s chatSurfaceStatus, inputMode chatInputMode) (stri
 		return "Retrying " + detail, style.RoleWarning, true
 	case chatSurfaceStatusWaiting, chatSurfaceStatusThinking, chatSurfaceStatusPlanning:
 		return "Analyzing", style.RoleReasoning, true
+	case chatSurfaceStatusCompacting:
+		// /compact 是同步命令，不支持 Esc 中断；只显示运行态与秒表。
+		return "Compacting context…", style.RoleProgress, false
 	case chatSurfaceStatusParked:
 		// 托管挂起（§6.12）：actor 仍 Busy（不接受新 turn），但本会话没有自己的
 		// run —— 只有 durable 义务在跑。绝不能复用 "Analyzing" + 秒表后缀：
@@ -3886,6 +3915,8 @@ func chatSurfaceModalStatusSegment(s chatSurfaceStatus, inputMode chatInputMode)
 		return chatStatusSegment{full: "输出中", compact: "输出中"}
 	case chatSurfaceStatusPlanning:
 		return chatStatusSegment{full: "规划中", compact: "规划中"}
+	case chatSurfaceStatusCompacting:
+		return chatStatusSegment{full: "压缩上下文中", compact: "压缩"}
 	case chatSurfaceStatusApproval:
 		return chatStatusSegment{full: "等待审批", compact: "审批"}
 	case chatSurfaceStatusAnswer:
@@ -3914,7 +3945,8 @@ func chatSurfaceModalStatusRole(s chatSurfaceStatus, inputMode chatInputMode) st
 	switch s.kind {
 	case chatSurfaceStatusThinking:
 		return style.RoleReasoning
-	case chatSurfaceStatusTool, chatSurfaceStatusStreaming, chatSurfaceStatusPlanning:
+	case chatSurfaceStatusTool, chatSurfaceStatusStreaming, chatSurfaceStatusPlanning,
+		chatSurfaceStatusCompacting:
 		return style.RoleTool
 	case chatSurfaceStatusWaiting, chatSurfaceStatusApproval, chatSurfaceStatusAnswer,
 		chatSurfaceStatusStopping, chatSurfaceStatusRetrying:
@@ -4265,6 +4297,8 @@ func compactChatSurfaceState(s chatSurfaceStatus) string {
 		return "输出中"
 	case chatSurfaceStatusPlanning:
 		return "规划中"
+	case chatSurfaceStatusCompacting:
+		return "压缩中"
 	case chatSurfaceStatusApproval:
 		return "等待审批"
 	case chatSurfaceStatusAnswer:
@@ -5452,17 +5486,18 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(input) == "" {
 		return
 	}
+	// 首条 prompt 是最容易撞上「事件日志重放尚未消费」的入口：能力面异步
+	// 就绪前 bridge 已创建但 start() 没有订阅/重放。必须在拿 coordinator 锁
+	// 之前完成 bridge 装配（含一次空日志重放），否则 start() 里的 replace
+	// snapshot 投递可能回压 UI actor，而 reducer 又需要 c.mu，形成锁等待。
+	bridge := ensureChatRuntimeEventBridge(c.session)
 	c.mu.Lock()
 	submittedDraft := c.promptInputSnapshotState()
 	submittedSequence := promptSubmittedSequence(submittedDraft, input)
-	bridge := c.session.RuntimeEventBridge
 	if bridge == nil {
-		// 新会话首次提交发生在 actor 启动之前：bridge 尚未创建，用户输入
-		// 的 Scene 注入（submitUserInput）与快照发布（postTranscriptSnapshot
-		// FromBridge）都会旁路，导致第一条 prompt 完全不渲染。unified 模式下
-		// 旧 history 已 fenced，Scene 是唯一渲染路径，必须在此补齐 bridge。
-		// ensure 幂等：已创建时直接复用，start() 仅订阅 EventBus 不回调。
-		bridge = ensureChatRuntimeEventBridge(c.session)
+		// ensure 失败（会话不可用）时保留原有旁路语义：没有 bridge 就没有
+		// Scene 注入，但 legacy history cell 仍然提交。
+		bridge = c.session.RuntimeEventBridge
 	}
 	c.renderUserEchoLocked(input, true, true)
 	// The line editor normally emits an empty OnChange snapshot before

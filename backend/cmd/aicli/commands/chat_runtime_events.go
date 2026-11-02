@@ -1153,13 +1153,24 @@ func oneLineStatusDetail(text string) string {
 }
 
 func (b *chatRuntimeEventBridge) start() {
-	if b == nil || b.session == nil || b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.EventBus == nil {
+	if b == nil || b.session == nil {
+		return
+	}
+	// Event-log replay does not depend on the runtime host. Consume replayOnce
+	// before the host gate so a fresh session finishes its (empty) load replay
+	// before the first live prompt is appended by submitUserInput. The previous
+	// order deferred replay to the first turn: by then the current prompt was
+	// already the only log record, and replay reset the Scene identities and
+	// minted it again into native scrollback (user-visible duplicate first
+	// prompt, while AppState/web snapshots still showed one).
+	b.replaySessionLoadLogOnce()
+	if b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.EventBus == nil {
 		return
 	}
 	b.startOnce.Do(func() {
-		// 非装载入口（首个 turn 的 ensure 等）保持既有语义：首个成功 start 时
-		// 重放一次会话事件日志。装载入口会更早调用 replaySessionLoadLogOnce，
-		// 两者共用 replayOnce，因此这里通常已是 no-op。
+		// retry 只覆盖上一次 replay 被「run 进行中 / 日志路径未知」跳过的情形；
+		// 正常启动与首个 prompt 之前的调用已经消费 replayOnce，因此这里通常
+		// 已是 no-op。绝不能把当前 turn 的 live user cell 再按日志铸造一次。
 		b.replaySessionLoadLogOnce()
 		b.startProcessor()
 		// 记录退订句柄：Shutdown 需要它把 bridge 从共享 EventBus 上摘下来，

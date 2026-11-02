@@ -27,6 +27,17 @@ const compactTokenSourceObservedUsage = "observed_usage"
 
 var runManualChatCompact = executeManualChatCompact
 
+// beginChatCompactStatus shows the live "Compacting context…" row for the
+// synchronous manual compact path. The returned func clears only that state;
+// callers must defer it so error/skip paths cannot leave a stuck activity row.
+func beginChatCompactStatus(session *ChatSession) func() {
+	if session == nil || session.Interaction == nil {
+		return func() {}
+	}
+	session.Interaction.SetCompacting()
+	return session.Interaction.ClearCompacting
+}
+
 func executeManualChatCompact(session *ChatSession, requestedMode string) (*chatCompactReport, error) {
 	if session == nil {
 		return nil, fmt.Errorf("当前没有活动会话")

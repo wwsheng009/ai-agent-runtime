@@ -3,11 +3,77 @@ package commands
 import (
 	"strings"
 	"testing"
+	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// TestExecuteStructuredCompactCommandShowsCompactingStatus 固化 /compact 的
+// 同步执行反馈：压缩在跑时动态状态行必须是 running 的 "Compacting context…"，
+// 完成后恢复 Ready，不能让用户面对一个无反馈的界面。
+func TestExecuteStructuredCompactCommandShowsCompactingStatus(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	original := runManualChatCompact
+	t.Cleanup(func() { runManualChatCompact = original })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runManualChatCompact = func(*ChatSession, string) (*chatCompactReport, error) {
+		close(started)
+		<-release
+		return &chatCompactReport{
+			RequestedMode: compactruntime.ModeAuto,
+			Status: compactruntime.Status{
+				Mode:   compactruntime.ModeAuto,
+				Reason: "below_limit",
+			},
+		}, nil
+	}
+
+	session := &ChatSession{}
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	done := make(chan CommandResult, 1)
+	go func() {
+		done <- executeStructuredCompactCommand(session, "/compact")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("/compact did not reach the compact runner")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		coordinator.mu.Lock()
+		kind := coordinator.surfaceStatus.kind
+		coordinator.mu.Unlock()
+		if kind == chatSurfaceStatusCompacting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("compact running status = %v, want compacting", kind)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("/compact did not finish after release")
+	}
+	coordinator.mu.Lock()
+	kind := coordinator.surfaceStatus.kind
+	coordinator.mu.Unlock()
+	if kind == chatSurfaceStatusCompacting {
+		t.Fatal("compacting status was not cleared after /compact finished")
+	}
+}
 
 func TestFormatChatCompactReport_MissingModelCapabilityIncludesConfigHint(t *testing.T) {
 	report := &chatCompactReport{

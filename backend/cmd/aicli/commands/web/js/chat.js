@@ -696,6 +696,47 @@ function pendingTextMatches(serverText, pendingText) {
 //      规范化/改写）—— 服务端是权威，最早的待确认回显让位，绝不允许它一直钉在
 //      列表末尾（历史顺序错乱的直接来源）。
 // 过滤把「用户消息」排除在外时不渲染本地乐观回显（队列保留，清过滤后重现）。
+function latestServerUserAnchor() {
+  var anchor = { index: -1, text: "", hasOutcomeAfter: false };
+  if (!screenEl || !screenEl.querySelectorAll) { return anchor; }
+  screenEl.querySelectorAll("[data-msg-index]").forEach(function (row) {
+    var index = parseInt(row.getAttribute("data-msg-index"), 10);
+    if (isNaN(index) || rowRole(row) !== "user") { return; }
+    // 不依赖 DOM 顺序：窗口对账后虽然已排序，但发送瞬间仍可能处于
+    // orderConversationRows 之前的中间态。取最大绝对索引作为锚点。
+    if (index >= anchor.index) {
+      anchor.index = index;
+      anchor.text = domMessageText(row);
+    }
+  });
+  if (anchor.index < 0) { return anchor; }
+  screenEl.querySelectorAll("[data-msg-index]").forEach(function (row) {
+    var index = parseInt(row.getAttribute("data-msg-index"), 10);
+    if (isNaN(index) || index <= anchor.index) { return; }
+    // system 只是会话/回合边界，不代表上一轮已经产出结果；assistant /
+    // reasoning / tool 等才是"该 user 回合已完成"的证据。
+    if (rowRole(row) !== "system") { anchor.hasOutcomeAfter = true; }
+  });
+  return anchor;
+}
+
+// pending 的发送基线不能取 serverMessageTotal：全新会话首帧可能只有一条
+// canonical system/environment 消息（total=1），而首条 user 在 live Scene
+// 接管后落在绝对索引 0。旧的 `index >= total` 会永远不成立，pending 与权威
+// user 行同时留在 DOM，用户看到首条 prompt 重复。
+//
+// 正确锚点是最新一条服务端 user：正常新回合取 index+1；上一轮 user 尚无
+// assistant/reasoning/tool 结果且文本相同（失败后重试）时取 index 本身，
+// 让重试复用同一条待完成回合的权威行。
+function pendingPromptBaseline(text) {
+  var anchor = latestServerUserAnchor();
+  if (anchor.index < 0) { return 0; }
+  if (!anchor.hasOutcomeAfter && pendingTextMatches(anchor.text, text)) {
+    return anchor.index;
+  }
+  return anchor.index + 1;
+}
+
 function renderPendingPrompts(messages, w) {
   if (!screenEl) { return; }
   var startIdx = (w && typeof w.start === "number") ? w.start : 0;
@@ -1057,9 +1098,10 @@ function copyRowMessage(btnEl) {
 // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
 function appendPendingUserPrompt(text) {
   if (!text) { return; }
-  // 发送基线 = 当前服务端窗口右边界：只有绝对索引 >= 基线的 user 行才可能是
-  // 这条 prompt 的落地结果（否则会误把历史里的同文本消息当成确认）。
-  localPendingPrompts.push({ text: text, baseline: loadedEnd > 0 ? loadedEnd : serverMessageTotal });
+  // 发送基线 = 最新一条服务端 user 的绝对索引（见 pendingPromptBaseline）：
+  // 只有索引 >= 基线的 user 行才可能是这条 prompt 的落地结果，避免误把历史
+  // 里的同文本消息当成确认；同时不受首帧 system-only 消息抬高 total 的影响。
+  localPendingPrompts.push({ text: text, baseline: pendingPromptBaseline(text) });
   // 过滤排除用户消息时不追加乐观回显（与 renderPendingPrompts 同口径）。
   if (screenEl && filterAllowsRole("user")) {
     // 首个消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。

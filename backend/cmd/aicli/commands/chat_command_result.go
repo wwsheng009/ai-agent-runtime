@@ -1096,6 +1096,9 @@ func executeStructuredCompactCommand(session *ChatSession, command string) Comma
 	if err != nil {
 		return commandErrorResult(err)
 	}
+	// /compact 是同步执行、可能耗时数秒的命令；先点亮状态行，结束后无论
+	// 成功/跳过/失败都清态，避免用户面对一个无反馈的 Ready 界面。
+	defer beginChatCompactStatus(session)()
 	report, compactErr := runManualChatCompact(session, mode)
 	if report != nil {
 		applyChatCompactContextUsage(session, report.Result, report.Status, true)

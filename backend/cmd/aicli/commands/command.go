@@ -879,6 +879,7 @@ func handleCompactCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
+	defer beginChatCompactStatus(session)()
 	report, err := runManualChatCompact(session, mode)
 	if report != nil {
 		applyChatCompactContextUsage(session, report.Result, report.Status, true)

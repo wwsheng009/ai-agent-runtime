@@ -24,6 +24,28 @@ func TestBuildChatDynamicStatusModelUsesCodexActivityFormat(t *testing.T) {
 	}
 }
 
+func TestBuildChatDynamicStatusModelShowsCompactingWithElapsedAndNoInterruptHint(t *testing.T) {
+	model := buildChatDynamicStatusModelForWidthAndInputMode(
+		chatSurfaceStatus{kind: chatSurfaceStatusCompacting},
+		160,
+		chatInputModeChat,
+		3*time.Second,
+	)
+	if model == nil {
+		t.Fatal("expected an active compacting dynamic status model")
+	}
+	plain := style.StatusLineDocument(*model, 160).PlainText()
+	if !strings.Contains(plain, "Compacting context") {
+		t.Fatalf("unexpected compacting dynamic status: %q", plain)
+	}
+	if !strings.Contains(plain, "3s") {
+		t.Fatalf("compacting status lost the elapsed clock: %q", plain)
+	}
+	if strings.Contains(plain, "esc to interrupt") {
+		t.Fatalf("compacting status must not advertise an unsupported interrupt: %q", plain)
+	}
+}
+
 func TestBuildChatDynamicStatusModelRendersRetryDetail(t *testing.T) {
 	model := buildChatDynamicStatusModelForWidthAndInputMode(
 		chatSurfaceStatus{kind: chatSurfaceStatusRetrying, detail: "step=1 attempt=2/3 reason=rate_limit delay=500ms"},
