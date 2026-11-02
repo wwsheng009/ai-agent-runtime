@@ -53,6 +53,10 @@ type WSConnector struct {
 	// actions (tail watch gating). The controller constructor wires it to
 	// ApplyPending.
 	OnPendingActions func([]string)
+	// OnNotifySuppress, when set, receives the gateway-derived local-notify
+	// suppression rules from REGISTER_ACK and every HEARTBEAT_ACK. Passing an
+	// empty slice clears them (gateway disconnected => local sends resume).
+	OnNotifySuppress func([]wire.NotifySuppressRule)
 	// DigestProvider, when set, supplies the compact per-session state carried
 	// inside each HEARTBEAT frame. Called on the heartbeat goroutine; it must
 	// not block (the controller's SessionDigests only snapshots memory).
@@ -103,6 +107,7 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		forward:           forward,
 		onHeartbeatAck:    c.OnHeartbeatAck,
 		onPendingActions:  c.OnPendingActions,
+		onNotifySuppress:  c.OnNotifySuppress,
 		digestProvider:    c.DigestProvider,
 		done:              make(chan struct{}),
 		sendCredit:        make(map[uint32]int64),
@@ -198,6 +203,8 @@ type wsConn struct {
 	onHeartbeatAck func()
 	// onPendingActions receives Pending entries from HEARTBEAT_ACK frames.
 	onPendingActions func([]string)
+	// onNotifySuppress receives the gateway's local-notify suppression rules.
+	onNotifySuppress func([]wire.NotifySuppressRule)
 	// digestProvider fills the session digest section of HEARTBEAT frames
 	// (nil disables the section, keeping the frame liveness-only).
 	digestProvider func() []wire.SessionDigest
@@ -335,6 +342,9 @@ func (c *wsConn) handshake(ctx context.Context, agentVersion string, cfg Config)
 	c.nodeID = ack.NodeID
 	c.consoleURL = ack.ConsoleURL
 	c.mounts = mountStatusesFromAck(ack)
+	if c.onNotifySuppress != nil {
+		c.onNotifySuppress(ack.NotifySuppress)
+	}
 
 	_ = c.ws.SetReadDeadline(time.Time{})
 	return nil
@@ -524,8 +534,11 @@ func (c *wsConn) readLoop() {
 			// Gateway liveness: refresh the watchdog deadline and the host's
 			// LastHeartbeat (Status) so /gateway status stays accurate.
 			c.recordGatewayLiveness()
-			if c.onPendingActions != nil {
-				if ack, decodeErr := wire.DecodePayload[wire.HeartbeatAck](frame); decodeErr == nil && len(ack.Pending) > 0 {
+			if ack, decodeErr := wire.DecodePayload[wire.HeartbeatAck](frame); decodeErr == nil {
+				if c.onNotifySuppress != nil {
+					c.onNotifySuppress(ack.NotifySuppress)
+				}
+				if c.onPendingActions != nil && len(ack.Pending) > 0 {
 					c.onPendingActions(ack.Pending)
 				}
 			}

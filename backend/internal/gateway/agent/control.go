@@ -43,6 +43,10 @@ const (
 	ErrCodeNetwork       = "network"
 	ErrCodeBusy          = "busy"
 	ErrCodeInternal      = "internal"
+	// ErrCodeOperatorDisconnect reports that automatic reconnect (or a retry
+	// loop) was suppressed by an explicit operator disconnect. Manual connect
+	// (ConnectManual) clears the suppression and proceeds.
+	ErrCodeOperatorDisconnect = "operator_disconnect"
 )
 
 // ConnectError classifies a failed connect attempt. Retryable=false (for
@@ -69,8 +73,14 @@ func (e *ConnectError) Error() string {
 // termination, enabling the auto-reconnect loop. Minimal fakes omit it.
 type doneConn interface{ Done() <-chan struct{} }
 
-// autoReconnectDelays is the reconnect backoff ladder (capped).
+// autoReconnectDelays is the reconnect backoff ladder (capped). It is shared by
+// the automatic reconnect watcher and ConnectWithRetry so a host retrying the
+// first dial backs off exactly like a host recovering a dropped tunnel.
 var autoReconnectDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+
+// connectAttemptTimeout bounds a single dial attempt (handshake included)
+// inside a retry loop, so one wedged dial cannot stall the backoff ladder.
+const connectAttemptTimeout = 30 * time.Second
 
 // asConnectError normalises an arbitrary dial error into a *ConnectError.
 func asConnectError(err error) *ConnectError {
@@ -108,6 +118,36 @@ func WithWindowAction(handler func(WindowAction)) Option {
 	}
 }
 
+// WithLogger installs a diagnostic logger for connection lifecycle events:
+// connection loss, retry attempts and outcomes, watchdog closes and reconnect
+// stops. nil (the default) disables logging. It also feeds the WebSocket
+// transport built by NewController.
+func WithLogger(logf func(format string, args ...any)) Option {
+	return func(c *Controller) {
+		if logf != nil {
+			c.logf = logf
+		}
+	}
+}
+
+// WithReconnectDelays overrides the retry backoff ladder used by the automatic
+// reconnect watcher and ConnectWithRetry (entry N = delay before retry N+1,
+// capped at the last entry). Hosts with unusual networks may tune it; tests use
+// it to keep runs fast. An empty ladder keeps the package default.
+func WithReconnectDelays(delays []time.Duration) Option {
+	cleaned := make([]time.Duration, 0, len(delays))
+	for _, delay := range delays {
+		if delay > 0 {
+			cleaned = append(cleaned, delay)
+		}
+	}
+	return func(c *Controller) {
+		if len(cleaned) > 0 {
+			c.retryDelays = cleaned
+		}
+	}
+}
+
 // Controller owns the connection state machine. All exported methods are safe
 // for concurrent use. Connect/Disconnect/Reconnect are serialised through the
 // mutex; the blocking dial runs outside the lock so Status stays responsive.
@@ -129,6 +169,12 @@ type Controller struct {
 	// Disconnect/Connect bumps the generation so only the latest watcher runs.
 	reconnectGen uint64
 	backoffIdx   int
+	// logf receives lifecycle diagnostics (loss, retries, watchdog closes).
+	// Set once at construction via WithLogger; nil disables logging.
+	logf func(format string, args ...any)
+	// retryDelays overrides the backoff ladder. Empty keeps
+	// autoReconnectDelays.
+	retryDelays []time.Duration
 
 	forwardMu sync.RWMutex
 	forward   ForwardConfig
@@ -139,6 +185,14 @@ type Controller struct {
 	watchMu     sync.Mutex
 	watchSet    map[string]struct{}
 	watchGating bool
+
+	// notifySuppressMu guards the gateway-derived local-notification
+	// suppression rules. They are replaced on REGISTER_ACK/HEARTBEAT_ACK and
+	// cleared on disconnect so a dead gateway cannot silently mute local
+	// notifications.
+	notifySuppressMu       sync.RWMutex
+	notifySuppress         []wire.NotifySuppressRule
+	notifySuppressObserver func([]wire.NotifySuppressRule)
 
 	// 窗口动作（控制台点「在新终端打开 / 恢复 / 关闭」）。windowHandler 在 New 之后
 	// 只读；queue/dropped 由 windowMu 保护。
@@ -279,6 +333,9 @@ func New(cfg Config, dial DialFunc, opts ...Option) *Controller {
 			opt(c)
 		}
 	}
+	if len(c.retryDelays) == 0 {
+		c.retryDelays = autoReconnectDelays
+	}
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -310,6 +367,30 @@ func (c *Controller) Config() Config {
 	return c.cfg
 }
 
+// retryDelay returns the backoff before one retry attempt (0-based index),
+// capped at the last ladder entry.
+func (c *Controller) retryDelay(attempt int) time.Duration {
+	delays := c.retryDelays
+	if len(delays) == 0 {
+		delays = autoReconnectDelays
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt >= len(delays) {
+		attempt = len(delays) - 1
+	}
+	return delays[attempt]
+}
+
+// logf0 forwards to the host-supplied logger when one is installed.
+func (c *Controller) logf0(format string, args ...any) {
+	if c == nil || c.logf == nil {
+		return
+	}
+	c.logf(format, args...)
+}
+
 // SetSessions updates the session count reported to the gateway. It is called
 // by the host as sessions are added/removed and never changes the connection
 // state.
@@ -327,6 +408,99 @@ func (c *Controller) MarkHeartbeat() {
 	c.mu.Lock()
 	c.status.LastHeartbeat = c.now()
 	c.mu.Unlock()
+}
+
+// ApplyNotifySuppress replaces the gateway-derived local-notification
+// suppression rules. The gateway sends the full set in REGISTER_ACK and every
+// HEARTBEAT_ACK; nil/empty clears it. The observer (when set) mirrors the
+// rules into the host's connector layer.
+func (c *Controller) ApplyNotifySuppress(rules []wire.NotifySuppressRule) {
+	if c == nil {
+		return
+	}
+	copied := cloneNotifySuppressRules(rules)
+	c.notifySuppressMu.Lock()
+	c.notifySuppress = copied
+	observer := c.notifySuppressObserver
+	c.notifySuppressMu.Unlock()
+	if observer != nil {
+		observer(cloneNotifySuppressRules(copied))
+	}
+}
+
+// SetNotifySuppressObserver installs a hook that receives every rule-set
+// replacement (including the initial snapshot, if rules already arrived).
+// Hosts use it to feed internal/connectors' process-level suppression store.
+func (c *Controller) SetNotifySuppressObserver(fn func([]wire.NotifySuppressRule)) {
+	if c == nil {
+		return
+	}
+	c.notifySuppressMu.Lock()
+	c.notifySuppressObserver = fn
+	current := cloneNotifySuppressRules(c.notifySuppress)
+	c.notifySuppressMu.Unlock()
+	if fn != nil {
+		fn(current)
+	}
+}
+
+// NotifySuppressed reports whether the gateway has taken over this local
+// notification (session + local kind). It is empty when disconnected; the
+// controller clears rules on connection loss so local sends resume.
+func (c *Controller) NotifySuppressed(sessionID, kind string) bool {
+	if c == nil {
+		return false
+	}
+	kind = normalizeSuppressKind(kind)
+	sessionID = strings.TrimSpace(sessionID)
+	c.notifySuppressMu.RLock()
+	rules := c.notifySuppress
+	c.notifySuppressMu.RUnlock()
+	for _, rule := range rules {
+		if len(rule.Sessions) > 0 {
+			matched := false
+			for _, id := range rule.Sessions {
+				if strings.EqualFold(strings.TrimSpace(id), sessionID) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if len(rule.Kinds) == 0 {
+			return true
+		}
+		for _, ruleKind := range rule.Kinds {
+			if normalizeSuppressKind(ruleKind) == kind {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloneNotifySuppressRules(rules []wire.NotifySuppressRule) []wire.NotifySuppressRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]wire.NotifySuppressRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, wire.NotifySuppressRule{
+			Kinds:    append([]string(nil), rule.Kinds...),
+			Sessions: append([]string(nil), rule.Sessions...),
+		})
+	}
+	return out
+}
+
+func normalizeSuppressKind(kind string) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind == "completion" {
+		return "completed"
+	}
+	return kind
 }
 
 // Connect establishes the tunnel as a config-driven (auto) connection. It is
@@ -360,6 +534,18 @@ func (c *Controller) connect(ctx context.Context, mode string) error {
 		c.mu.Unlock()
 		return &ConnectError{Code: ErrCodeDisabled, Message: "gateway is disabled", Retryable: false}
 	}
+	// An explicit operator disconnect suppresses automatic reconnect. Manual
+	// connect (ConnectManual) clears the flag, but the auto path must refuse:
+	// otherwise a backoff loop (or a late host retry) would silently undo the
+	// operator's decision.
+	if c.status.OperatorDisconnected && mode != ModeManual {
+		c.mu.Unlock()
+		return &ConnectError{
+			Code:      ErrCodeOperatorDisconnect,
+			Message:   "gateway is manually disconnected; automatic reconnect suppressed",
+			Retryable: false,
+		}
+	}
 	if err := c.cfg.Validate(); err != nil {
 		c.mu.Unlock()
 		return &ConnectError{Code: ErrCodeConfigInvalid, Message: err.Error(), Retryable: false}
@@ -378,6 +564,9 @@ func (c *Controller) connect(ctx context.Context, mode string) error {
 	dial := c.dial
 	c.mu.Unlock()
 
+	// A reconnect must not inherit the previous connection's suppression set:
+	// until the new REGISTER_ACK arrives, local notifications are allowed.
+	c.ApplyNotifySuppress(nil)
 	if old != nil {
 		_ = old.Close()
 	}
@@ -420,6 +609,60 @@ func (c *Controller) connect(ctx context.Context, mode string) error {
 	return nil
 }
 
+// ConnectWithRetry establishes the tunnel like Connect, but keeps retrying
+// retryable failures with the same capped backoff ladder as automatic
+// reconnect. It blocks until:
+//   - connected (nil; the connection-lost watcher then maintains the tunnel),
+//   - a terminal (retryable=false) failure, such as auth_invalid or an
+//     operator disconnect (the *ConnectError is returned),
+//   - ctx is done (ctx.Err() is returned).
+//
+// Hosts that start their agent before the network/gateway is guaranteed
+// reachable (aicli-remote-tools serve) use this instead of a single Connect, so
+// a failed first dial no longer leaves the node offline until a restart.
+func (c *Controller) ConnectWithRetry(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, connectAttemptTimeout)
+		err := c.Connect(attemptCtx)
+		cancel()
+		if err == nil {
+			if st := c.Status(); st.Connected() {
+				c.logf0("gateway agent: connected as node %s", st.NodeID)
+				return nil
+			}
+			// A concurrent Disconnect/Configure won the race; do not report a
+			// success that does not exist.
+			code := ErrCodeBusy
+			message := "connect aborted by concurrent state change"
+			if c.Status().OperatorDisconnected {
+				code = ErrCodeOperatorDisconnect
+				message = "gateway is manually disconnected; automatic reconnect suppressed"
+			}
+			return &ConnectError{Code: code, Message: message, Retryable: false}
+		}
+		ce := asConnectError(err)
+		if !ce.Retryable {
+			c.logf0("gateway agent: connect failed (terminal, %s): %s; not retrying", ce.Code, ce.Message)
+			return ce
+		}
+		delay := c.retryDelay(attempt)
+		c.logf0("gateway agent: connect attempt %d failed (%s): %s; retrying in %s", attempt+1, ce.Code, ce.Message, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // armConnectionLostWatcher spawns the auto-reconnect loop for a freshly
 // established connection: when the connection dies on its own (gateway GOAWAY,
 // network drop), the controller enters Reconnecting and re-dials with a capped
@@ -455,28 +698,36 @@ func (c *Controller) armConnectionLostWatcher(conn Conn) {
 			}
 			c.mu.Unlock()
 			c.HandleConnectionLost(ErrCodeNetwork, "connection lost", true)
+			c.logf0("gateway agent: connection lost; auto-reconnect started")
 
-			for {
+			var lastErr error
+			for attempt := 1; ; attempt++ {
 				c.mu.Lock()
 				if c.reconnectGen != gen {
 					c.mu.Unlock()
 					return
 				}
-				delay := autoReconnectDelays[min(c.backoffIdx, len(autoReconnectDelays)-1)]
+				delay := c.retryDelay(c.backoffIdx)
 				c.backoffIdx++
 				c.mu.Unlock()
 
+				if lastErr != nil {
+					c.logf0("gateway agent: reconnect attempt %d failed: %v; retrying in %s", attempt-1, lastErr, delay)
+				}
 				time.Sleep(delay)
 
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), connectAttemptTimeout)
 				err := c.Connect(ctx)
 				cancel()
 				if err == nil {
+					c.logf0("gateway agent: reconnected on attempt %d (node %s)", attempt, c.Status().NodeID)
 					return // new watcher armed by Connect
 				}
 				if ce, ok := err.(*ConnectError); ok && !ce.Retryable {
+					c.logf0("gateway agent: auto-reconnect stopped: %v", ce)
 					return
 				}
+				lastErr = err
 			}
 		}
 	}()
@@ -492,6 +743,10 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.status.OperatorDisconnected = true
+	// Invalidate any in-flight auto-reconnect loop: an operator disconnect must
+	// win over a drop that is already backing off. The connect() guard refuses
+	// an auto dial even if the loop reaches its next attempt first.
+	c.reconnectGen++
 	switch c.state {
 	case StateDisabled:
 		c.mu.Unlock()
@@ -508,6 +763,9 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 	c.conn = nil
 	c.mu.Unlock()
 
+	// Operator disconnect: the gateway is no longer the sender; let local
+	// notifications resume immediately.
+	c.ApplyNotifySuppress(nil)
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -541,7 +799,6 @@ func (c *Controller) Reconnect(ctx context.Context) error {
 //   - otherwise: enter Reconnecting and let the host schedule a retry.
 func (c *Controller) HandleConnectionLost(code, message string, retryable bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if c.conn != nil {
 		_ = c.conn.Close()
@@ -564,6 +821,10 @@ func (c *Controller) HandleConnectionLost(code, message string, retryable bool) 
 		c.status.ReconnectCount++
 		c.transition(StateReconnecting)
 	}
+	c.mu.Unlock()
+	// The gateway cannot delegate while the tunnel is down: clear the rules so
+	// local bot notifications resume instead of being silently muted.
+	c.ApplyNotifySuppress(nil)
 }
 
 // Configure replaces the configuration and reconciles the enabled flag with the

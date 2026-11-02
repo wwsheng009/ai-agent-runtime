@@ -21,7 +21,8 @@ type fakeGatewayConfig struct {
 	heartbeatSec int
 	// silent makes the gateway swallow HEARTBEAT frames without acknowledging
 	// them (half-open/wedged gateway simulation for the watchdog tests).
-	silent bool
+	silent         bool
+	notifySuppress []wire.NotifySuppressRule
 }
 
 type fakeGateway struct {
@@ -75,8 +76,9 @@ func newFakeGateway(t *testing.T, cfg fakeGatewayConfig) (*httptest.Server, *fak
 			return
 		}
 		_ = writeWSJSON(ws, wire.TypeRegisterAck, wire.RegisterAck{
-			NodeID:     "node-test",
-			ConsoleURL: "https://gw/n/node-test/web/",
+			NodeID:         "node-test",
+			ConsoleURL:     "https://gw/n/node-test/web/",
+			NotifySuppress: cfg.notifySuppress,
 		})
 
 		for {
@@ -94,7 +96,10 @@ func newFakeGateway(t *testing.T, cfg fakeGatewayConfig) (*httptest.Server, *fak
 					// Half-open simulation: absorb the heartbeat, never ack.
 					continue
 				}
-				_ = writeWSJSON(ws, wire.TypeHeartbeatAck, wire.HeartbeatAck{ServerTime: time.Now().UTC()})
+				_ = writeWSJSON(ws, wire.TypeHeartbeatAck, wire.HeartbeatAck{
+					ServerTime:     time.Now().UTC(),
+					NotifySuppress: cfg.notifySuppress,
+				})
 			case wire.TypeDeregister:
 				return
 			}
@@ -202,6 +207,36 @@ func TestDialHandshakeAndHeartbeat(t *testing.T) {
 	case <-g.heartbeats:
 	case <-time.After(3 * time.Second):
 		t.Fatal("gateway did not receive HEARTBEAT")
+	}
+}
+
+func TestDialAppliesNotifySuppressFromRegisterAck(t *testing.T) {
+	rules := []wire.NotifySuppressRule{{Kinds: []string{"approval"}, Sessions: []string{"s1"}}}
+	srv, _ := newFakeGateway(t, fakeGatewayConfig{heartbeatSec: 1, notifySuppress: rules})
+	defer srv.Close()
+
+	got := make(chan []wire.NotifySuppressRule, 4)
+	connector := testConnector()
+	connector.OnNotifySuppress = func(in []wire.NotifySuppressRule) {
+		select {
+		case got <- in:
+		default:
+		}
+	}
+	conn, err := connector.Dial(context.Background(), Config{Enabled: true, URL: srv.URL, Token: "agw_x"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	select {
+	case in := <-got:
+		if len(in) != 1 || len(in[0].Kinds) != 1 || in[0].Kinds[0] != "approval" ||
+			len(in[0].Sessions) != 1 || in[0].Sessions[0] != "s1" {
+			t.Fatalf("rules = %+v", in)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("REGISTER_ACK notify suppression not applied")
 	}
 }
 

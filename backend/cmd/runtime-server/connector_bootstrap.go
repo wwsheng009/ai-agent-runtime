@@ -124,9 +124,14 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	// docs/bots/09 §7.4.1；runtime-server 借 runtimeapi.Handler 的订阅面与
 	// §6.12 托管挂起探测接入）。
 	connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
-		Subscribe: handler.SubscribeConnectorAttentionEvents,
-		Parked:    handler.ConnectorSessionParked,
-		Store:     store,
+		// P2 自动版：网关下发 source=node target 的抑制规则后，只关闭
+		// 重叠会话/kind 的本地自动发送；未设置环境变量即启用自动模式。
+		// AICLI_CONNECTOR_NOTIFY_OWNER=gateway 仍可强制全关（排障用）。
+		Disabled:   connectors.NotificationsOwnerFromEnv() == "gateway",
+		Suppressed: connectors.GatewaySuppresses,
+		Subscribe:  handler.SubscribeConnectorAttentionEvents,
+		Parked:     handler.ConnectorSessionParked,
+		Store:      store,
 		NotifyScoped: func(notifyCtx context.Context, connectorIDs []string, notice connectors.AttentionNotice) error {
 			return service.NotifyAttentionScoped(notifyCtx, connectorIDs, notice)
 		},

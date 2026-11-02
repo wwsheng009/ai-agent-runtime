@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -18,7 +19,7 @@ var chatGatewayDefaultRoutes = []string{"/web", "/web/api", "/debug/endpoints"}
 // chatGatewayCoreCapabilities are the capability bits that stay truthful
 // without a local Web origin: they describe the registry / control-plane
 // projection of this process, not the reverse-proxied Web API.
-var chatGatewayCoreCapabilities = []string{"manifest", "status", "sessions"}
+var chatGatewayCoreCapabilities = []string{"manifest", "status", "sessions", "connector-handoff"}
 
 // chatGatewayWebCapabilities are served through the local Web client's
 // /web/api/* endpoints. They must not be advertised while that client is off:
@@ -327,6 +328,10 @@ func attachChatGateway(session *ChatSession) {
 		chatGatewayRegisterFunc(cfg, chatGatewayRoutes(session), session),
 		gatewayagent.WithWindowAction(chatGatewayWindowHandler(session)),
 	)
+	// 自动通知归属：网关经 REGISTER_ACK/HEARTBEAT_ACK 下发 source=node
+	// target 的抑制规则，本地连接器层据此只关闭重叠会话/kind 的自动发送。
+	// 断线时 controller 会回调空规则，本地发送自动恢复。
+	controller.SetNotifySuppressObserver(applyGatewayNotifySuppress)
 	// Point the agent at this process's loopback web server (recorded by
 	// cmd/aicli once it is listening) before the auto-connect dial.
 	controller.SetForward(chatGatewayForwardConfig())
@@ -340,4 +345,16 @@ func attachChatGateway(session *ChatSession) {
 		// Best-effort: status/errors are surfaced through /gateway.
 		_ = controller.Connect(ctx)
 	}()
+}
+
+// applyGatewayNotifySuppress 把网关协议规则转换为连接器层的中立类型。
+func applyGatewayNotifySuppress(rules []wire.NotifySuppressRule) {
+	out := make([]connectors.NotifySuppressRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, connectors.NotifySuppressRule{
+			Kinds:    rule.Kinds,
+			Sessions: rule.Sessions,
+		})
+	}
+	connectors.SetGatewayNotifySuppress(out)
 }

@@ -31,9 +31,11 @@ func NewController(cfg Config, register RegisterFunc, opts ...Option) *Controlle
 	controller := New(cfg, nil, opts...)
 	connector := &WSConnector{
 		Register:         register,
+		Logf:             controller.logf,
 		OnHeartbeatAck:   controller.MarkHeartbeat,
 		DigestProvider:   controller.SessionDigests,
 		OnPendingActions: controller.ApplyPending,
+		OnNotifySuppress: controller.ApplyNotifySuppress,
 	}
 	controller.dial = connector.Dial
 	connector.ForwardProvider = controller.ForwardConfig

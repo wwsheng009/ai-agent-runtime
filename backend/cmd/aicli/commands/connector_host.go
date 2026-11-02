@@ -419,6 +419,11 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// runtimeapi.Handler 走同款清单 SubscribeConnectorAttentionEvents）。
 		eventTypes := connectors.AttentionEventTypes()
 		connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
+			// P2 自动版：网关下发 source=node target 的抑制规则后，只关闭
+			// 重叠会话/kind 的本地自动发送；未设置环境变量即启用自动模式。
+			// AICLI_CONNECTOR_NOTIFY_OWNER=gateway 仍可强制全关（排障用）。
+			Disabled:   connectors.NotificationsOwnerFromEnv() == "gateway",
+			Suppressed: connectors.GatewaySuppresses,
 			Subscribe: func(handler func(runtimeevents.Event)) func() {
 				unsubs := make([]func(), 0, len(eventTypes))
 				for _, eventType := range eventTypes {

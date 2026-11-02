@@ -24,6 +24,24 @@ func TestAttentionForNotifyKind(t *testing.T) {
 	}
 }
 
+func TestNotifySuppressFor(t *testing.T) {
+	server := &Server{cfg: Config{}}
+	if got := server.notifySuppressFor("n1"); got != nil {
+		t.Fatalf("nil callback must produce nil rules: %+v", got)
+	}
+
+	server.cfg.NotifySuppress = func(nodeID string) []wire.NotifySuppressRule {
+		if nodeID != "n1" {
+			t.Fatalf("unexpected node: %s", nodeID)
+		}
+		return []wire.NotifySuppressRule{{Kinds: []string{"approval"}}}
+	}
+	got := server.notifySuppressFor("n1")
+	if len(got) != 1 || len(got[0].Kinds) != 1 || got[0].Kinds[0] != "approval" {
+		t.Fatalf("rules = %+v", got)
+	}
+}
+
 func TestApplyNotifyToSessions(t *testing.T) {
 	base := func() []wire.SessionSummary {
 		return []wire.SessionSummary{{SessionID: "s1", Title: "one", State: "running", Busy: true}}

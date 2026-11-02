@@ -60,6 +60,11 @@ type Config struct {
 	// watch/unwatch control actions on HEARTBEAT_ACK (P1-b presence gating);
 	// nil disables gating entirely (agents keep pushing tails as in P1-a).
 	TailWatchTargets func(nodeID string) []string
+	// NotifySuppress, when set, returns the local-notification suppression
+	// rules for this node (derived from source=node notify targets). The rules
+	// ride REGISTER_ACK and every HEARTBEAT_ACK so a target edit converges
+	// within one heartbeat. nil leaves local node notifications unchanged.
+	NotifySuppress func(nodeID string) []wire.NotifySuppressRule
 	// DataDir enables registry persistence (registry.json under DataDir,
 	// debounced). Empty disables persistence. Optional.
 	DataDir string
@@ -260,6 +265,14 @@ func (s *Server) notifyRegistryChangedAndPersist() {
 	}
 }
 
+// notifySuppressFor 返回该节点当前应应用的本地通知抑制规则。
+func (s *Server) notifySuppressFor(nodeID string) []wire.NotifySuppressRule {
+	if s == nil || s.cfg.NotifySuppress == nil {
+		return nil
+	}
+	return s.cfg.NotifySuppress(nodeID)
+}
+
 // ServeHTTP upgrades the connection and serves the tunnel.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Authenticate != nil {
@@ -369,6 +382,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		AcceptedRoutes: reg.Routes,
 		AcceptedMounts: acceptedMounts,
 		RejectedMounts: rejectedMounts,
+		NotifySuppress: s.notifySuppressFor(nodeID),
 	}); err != nil {
 		return err
 	}
@@ -423,7 +437,10 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 			// console is watching (diff from what this connection was last
 			// told). The first ack advertises participation so agents can keep
 			// the ungated P1-a behavior against gateways that never do.
-			ack := wire.HeartbeatAck{ServerTime: nowUTC()}
+			ack := wire.HeartbeatAck{
+				ServerTime:     nowUTC(),
+				NotifySuppress: s.notifySuppressFor(nodeID),
+			}
 			if s.cfg.TailWatchTargets != nil {
 				if !watchGatingSent {
 					ack.Pending = append(ack.Pending, "tail-gating:on")

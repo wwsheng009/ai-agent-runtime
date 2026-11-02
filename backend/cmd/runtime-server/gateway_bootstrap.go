@@ -9,6 +9,7 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
@@ -43,6 +44,10 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler, cfg *config.Config) 
 	})
 	controller = gatewayagent.NewController(agentCfg, register)
 	handler.SetGatewayController(controller)
+	// 自动通知归属：网关经 REGISTER_ACK/HEARTBEAT_ACK 下发 source=node
+	// target 的抑制规则；连接器订阅层据此只关闭重叠会话/kind 的自动发送。
+	// 断线时 controller 回调空规则，本地发送自动恢复。
+	controller.SetNotifySuppressObserver(applyRuntimeGatewayNotifySuppress)
 	// Derive per-session attention from the runtime event bus so the gateway can
 	// push notifications (docs/gateway/08-notifications.md §3).
 	handler.EnableGatewayAttention()
@@ -55,6 +60,18 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler, cfg *config.Config) 
 		}()
 	}
 	return controller
+}
+
+// applyRuntimeGatewayNotifySuppress 把网关协议规则转换为连接器层的中立类型。
+func applyRuntimeGatewayNotifySuppress(rules []wire.NotifySuppressRule) {
+	out := make([]connectors.NotifySuppressRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, connectors.NotifySuppressRule{
+			Kinds:    rule.Kinds,
+			Sessions: rule.Sessions,
+		})
+	}
+	connectors.SetGatewayNotifySuppress(out)
 }
 
 // runtimeServerGatewayResolveConfig merges the layered gateway.* config with the
@@ -109,7 +126,7 @@ func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wir
 			Kind:         "runtime-server",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
-			Capabilities: []string{"manifest", "runtime-api", "sessions"},
+			Capabilities: []string{"manifest", "runtime-api", "sessions", "connector-handoff"},
 			Routes:       routes,
 		}
 		if sessions != nil {
