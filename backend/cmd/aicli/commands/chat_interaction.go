@@ -5539,16 +5539,26 @@ func (c *chatInteractionCoordinator) renderUserEchoLocked(input string, allowPro
 	// 模型），使"完整块序列 == Scene cell 序列"对用户块也成立。注入
 	// 只发生在块真正提交后（beginMessageLocked 已通过），nil bridge
 	// 时零行为（旁路）。
-	if injectUserInput && c.session != nil && c.session.RuntimeEventBridge != nil {
-		c.session.RuntimeEventBridge.submitUserInput(input)
+	//
+	// 重发同一 prompt（上一轮尚未落任何 assistant/tool 结果）是同一个待完成
+	// 回合的重试：canonical 侧 appendChatTurnUserMessage / SessionActor 会按
+	// "末条 user 内容相同"去重，只保留一条 user 消息。此时再提交第二个 user
+	// cell 会让 Scene 与 canonical 分叉；该多余 cell 在下次 resume 重放时
+	// 就是用户看到的第一条 prompt 重复。这里与 canonical 使用同一判据，
+	// legacy/unified 两条可见路径都不再追加。
+	pendingRetry := injectUserInput && chatTurnUserPromptIsPendingRetry(c.session, input)
+	if !pendingRetry {
+		if injectUserInput && c.session != nil && c.session.RuntimeEventBridge != nil {
+			c.session.RuntimeEventBridge.submitUserInput(input)
+		}
+		// User echo sits directly under the cleared prompt; no extra blank. Routed
+		// through the retained-source cell model (P4.1) so the same block can later
+		// be re-rendered at a new width without mutating committed output. This is
+		// behavior-identical to writeCompleteBlockLocked(FormatUserMessage): the cell
+		// returns the same normalizeWriteLines rows.
+		userCell := newUserMessageCell(input)
+		c.commitHistoryCellLocked(userCell, gapNone, cellBoundaryMeta(userCell))
 	}
-	// User echo sits directly under the cleared prompt; no extra blank. Routed
-	// through the retained-source cell model (P4.1) so the same block can later
-	// be re-rendered at a new width without mutating committed output. This is
-	// behavior-identical to writeCompleteBlockLocked(FormatUserMessage): the cell
-	// returns the same normalizeWriteLines rows.
-	userCell := newUserMessageCell(input)
-	c.commitHistoryCellLocked(userCell, gapNone, cellBoundaryMeta(userCell))
 	// StartWaiting may have already armed the turn; restore an empty composer so
 	// queued input can continue above the status line. Replay passes
 	// allowPromptRestore=false: growing the bottom reserve between replayed

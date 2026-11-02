@@ -338,26 +338,60 @@ func appendChatTurnUserMessage(session *ChatSession, userMessage string) {
 	if session == nil || strings.TrimSpace(userMessage) == "" {
 		return
 	}
-	var prepared *runtimetypes.Message
-	if len(session.ImagePaths) > 0 {
-		withImages, err := runtimellm.NewUserPromptMessageWithImages(userMessage, session.ImagePaths)
-		if err != nil {
-			withImages = runtimellm.NewUserPromptMessage(userMessage)
-		}
-		prepared = withImages
-	} else {
-		prepared = runtimellm.NewUserPromptMessage(userMessage)
-	}
+	prepared := prepareChatTurnUserMessage(session, userMessage)
 	if prepared == nil {
 		return
 	}
-	if count := len(session.Messages); count > 0 {
-		last := &session.Messages[count-1]
-		if last.Role == "user" && last.Content == prepared.Content &&
-			!runtimellm.MessageHasLocalInputImages(prepared) == !runtimellm.MessageHasLocalInputImages(last) {
-			return
-		}
+	if chatTurnUserMessageMatchesLast(session, prepared) {
+		return
 	}
 	appendRuntimeMessage(session, *prepared)
 	warnIfChatSessionSyncFails(session, "send-prompt persist", syncRuntimeSessionFromChat(session))
+}
+
+func prepareChatTurnUserMessage(session *ChatSession, userMessage string) *runtimetypes.Message {
+	if session == nil || strings.TrimSpace(userMessage) == "" {
+		return nil
+	}
+	if len(session.ImagePaths) > 0 {
+		withImages, err := runtimellm.NewUserPromptMessageWithImages(userMessage, session.ImagePaths)
+		if err == nil {
+			return withImages
+		}
+	}
+	return runtimellm.NewUserPromptMessage(userMessage)
+}
+
+// chatTurnUserMessageMatchesLast reports whether prepared is already the trailing
+// canonical message. The CLI pre-persists the user prompt before executing the
+// turn; the executor/actor repeats the same check so a single turn is never
+// appended twice.
+func chatTurnUserMessageMatchesLast(session *ChatSession, prepared *runtimetypes.Message) bool {
+	if session == nil || prepared == nil {
+		return false
+	}
+	count := len(session.Messages)
+	if count == 0 {
+		return false
+	}
+	last := &session.Messages[count-1]
+	return last.Role == "user" && last.Content == prepared.Content &&
+		runtimellm.MessageHasLocalInputImages(prepared) == runtimellm.MessageHasLocalInputImages(last)
+}
+
+// chatTurnUserPromptIsPendingRetry reports whether userMessage is a resend of the
+// trailing canonical user message, i.e. the previous turn ended without
+// persisting any assistant/tool output. In that case canonical history keeps a
+// single user message (appendChatTurnUserMessage / SessionActor dedupe), so the
+// renderer must not add a second user cell: the extra cell has no canonical
+// counterpart and is replayed as a duplicate prompt on the next resume.
+//
+// Image attachments are excluded because appendChatTurnUserMessage compares the
+// prepared message (tokens/metadata), which the render path does not have before
+// sendMessage normalizes the input.
+func chatTurnUserPromptIsPendingRetry(session *ChatSession, userMessage string) bool {
+	if session == nil || len(session.ImagePaths) > 0 {
+		return false
+	}
+	return chatTurnUserMessageMatchesLast(session, prepareChatTurnUserMessage(session, userMessage))
 }

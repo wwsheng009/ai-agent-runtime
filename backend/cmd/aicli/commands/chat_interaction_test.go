@@ -109,6 +109,52 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *t
 	}
 }
 
+// TestChatInteractionCoordinator_RenderSubmittedUserInputSkipsPendingRetry 固化
+// "重发上一条仍待完成的 prompt 不产生第二个 user 块"：canonical 侧
+// appendChatTurnUserMessage 会按末条 user 内容去重，Scene/legacy 若仍追加一个
+// user cell，就会在 resume 重放时变成用户看到的"第一条 prompt 重复"。
+func TestChatInteractionCoordinator_RenderSubmittedUserInputSkipsPendingRetry(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		Messages: []runtimetypes.Message{*runtimetypes.NewUserMessage("重试同一个问题")},
+	}
+	coord := newTestChatInteractionCoordinator(t, session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderSubmittedUserInput("重试同一个问题")
+
+	if got := strings.Count(output.String(), ui.FormatUserMessage("重试同一个问题")); got != 0 {
+		t.Fatalf("pending prompt retry rendered %d user blocks, want 0\n%s", got, output.String())
+	}
+}
+
+// TestChatInteractionCoordinator_RenderSubmittedUserInputRendersSamePromptAfterAssistant
+// 确保去重只覆盖"上一条仍是同一个 user 消息"的重试：一旦上一轮已有 assistant
+// 结果，同样文本就是新的用户回合，必须正常渲染。
+func TestChatInteractionCoordinator_RenderSubmittedUserInputRendersSamePromptAfterAssistant(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("重复提问"),
+			*runtimetypes.NewAssistantMessage("已回答"),
+		},
+	}
+	coord := newTestChatInteractionCoordinator(t, session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderSubmittedUserInput("重复提问")
+
+	if got := strings.Count(output.String(), ui.FormatUserMessage("重复提问")); got != 1 {
+		t.Fatalf("repeat prompt after assistant rendered %d user blocks, want 1\n%s", got, output.String())
+	}
+}
+
 func TestChatInteractionCoordinator_RenderSubmittedUserInputDoesNotRestoreSubmittedDraft(t *testing.T) {
 	session := &ChatSession{}
 	coord := newTestChatInteractionCoordinator(t, session)

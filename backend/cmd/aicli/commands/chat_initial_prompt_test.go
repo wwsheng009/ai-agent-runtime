@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
@@ -50,6 +52,57 @@ func TestRunChatLoopNoInteractiveInitialPromptExitsAfterOneSend(t *testing.T) {
 	want := []string{"inspect project"}
 	if !reflect.DeepEqual(executor.prompts, want) {
 		t.Fatalf("submitted prompts = %#v, want %#v", executor.prompts, want)
+	}
+}
+
+// TestRunChatLoopRetriedPromptRendersOneUserBlock 固化用户实际遇到的现场：
+// 第一条 prompt 所在回合失败/中断（没有落 assistant 消息）后，用户重发同一
+// 文本。canonical 历史按末条 user 去重只保留一条消息，因此终端/Scene 也只能
+// 有一个 user 块；否则 resume 重放时第一条 prompt 会重复。
+func TestRunChatLoopRetriedPromptRendersOneUserBlock(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.lines <- chatQueuedInput{Text: "retry me\n", Source: "stdin"}
+	queue.lines <- chatQueuedInput{Text: "retry me\n", Source: "stdin"}
+	queue.lines <- chatQueuedInput{Text: "/exit\n", Source: "stdin"}
+
+	first := true
+	executor := &fakeChatExecutor{
+		onCall: func(_ context.Context, _ *ChatSession, _ string) (string, error) {
+			if first {
+				first = false
+				return "", errors.New("simulated failed turn")
+			}
+			return "ok", nil
+		},
+	}
+	session := newInitialPromptLoopTestSession(executor)
+	session.InputQueue = queue
+	var output bytes.Buffer
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
+	session.Interaction.SetWriter(&output)
+	defer session.Interaction.Shutdown()
+
+	prevPreferred := chatPipeLineEditorPreferredFn
+	chatPipeLineEditorPreferredFn = func() bool { return false }
+	t.Cleanup(func() { chatPipeLineEditorPreferredFn = prevPreferred })
+
+	runChatLoop(session, false, "")
+
+	want := []string{"retry me", "retry me"}
+	if !reflect.DeepEqual(executor.prompts, want) {
+		t.Fatalf("submitted prompts = %#v, want %#v", executor.prompts, want)
+	}
+	if got := strings.Count(output.String(), ui.FormatUserMessage("retry me")); got != 1 {
+		t.Fatalf("retried pending prompt rendered %d user blocks, want 1\n%s", got, output.String())
+	}
+	userMessages := 0
+	for _, message := range session.Messages {
+		if message.Role == "user" && message.Content == "retry me" {
+			userMessages++
+		}
+	}
+	if userMessages != 1 {
+		t.Fatalf("canonical history kept %d retry messages, want 1: %#v", userMessages, session.Messages)
 	}
 }
 
