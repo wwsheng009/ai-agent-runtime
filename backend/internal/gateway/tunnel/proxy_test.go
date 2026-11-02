@@ -72,6 +72,55 @@ func TestProxyRoundTrip(t *testing.T) {
 	}
 }
 
+// A client disconnect must cancel the local request, not leave an idle SSE GET
+// holding an upstream concurrency slot until the mount timeout.
+func TestProxyClientDisconnectCancelsUpstream(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	dialAgent(t, server, "node-cancel", upstream.URL)
+	proxy := startProxy(t, server, "node-cancel")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL+"/mcp", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	cancel()
+
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client disconnect did not cancel the upstream request")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("proxied request did not return after cancellation")
+	}
+}
+
 func TestProxyForwardsPostBody(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -210,6 +259,21 @@ func TestProxyPinnedBypassesRouteAllowlist(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK || string(body) != "pinned connector view" {
 		t.Fatalf("pinned status/body = %d/%q", resp.StatusCode, body)
+	}
+
+	// POST with no body is used by connector handoff. A nil http.Request.Body
+	// must be treated as empty instead of panicking in LimitedReader.Read.
+	postReq, err := http.NewRequest(http.MethodPost, pinned.URL+"/proxy-path-is-ignored", nil)
+	if err != nil {
+		t.Fatalf("new post: %v", err)
+	}
+	postResp, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatalf("pinned post: %v", err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != http.StatusOK {
+		t.Fatalf("pinned post status = %d, want 200", postResp.StatusCode)
 	}
 
 	normal := startProxy(t, server, "node-pinned")

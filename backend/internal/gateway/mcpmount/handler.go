@@ -56,6 +56,10 @@ type HandlerConfig struct {
 	// DefaultConcurrency bounds in-flight requests per mount when the node does
 	// not declare limits.max_concurrency (default 16).
 	DefaultConcurrency int
+	// DefaultStreams bounds long-lived GET SSE streams per mount when the node
+	// does not declare limits.max_streams (default 64). Streams are session
+	// state, not work, so they have their own budget.
+	DefaultStreams int
 	// ClientIP optionally resolves the effective client IP. It lets the caller
 	// honor X-Forwarded-For / X-Real-IP only from trusted proxies (the same
 	// policy the rate limiter uses) so the call log shows the real caller, not
@@ -71,6 +75,9 @@ type Handler struct {
 
 	semMu sync.Mutex
 	sem   map[string]chan struct{}
+
+	streamMu  sync.Mutex
+	streamSem map[string]chan struct{}
 }
 
 // NewHandler builds a mount handler. Registry and Tokens are required; a nil
@@ -79,7 +86,14 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.DefaultConcurrency <= 0 {
 		cfg.DefaultConcurrency = 16
 	}
-	return &Handler{cfg: cfg, sem: make(map[string]chan struct{})}
+	if cfg.DefaultStreams <= 0 {
+		cfg.DefaultStreams = 64
+	}
+	return &Handler{
+		cfg:       cfg,
+		sem:       make(map[string]chan struct{}),
+		streamSem: make(map[string]chan struct{}),
+	}
 }
 
 // ServeMount authenticates and proxies one mount request. The router strips the
@@ -165,13 +179,31 @@ func (h *Handler) ServeMount(w http.ResponseWriter, r *http.Request, slug, local
 	}
 	event.Path = path
 
-	release, ok := h.acquire(slug, mountConcurrency(record, h.cfg.DefaultConcurrency))
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		deny(http.StatusTooManyRequests, "mount_busy", "too many concurrent requests for this mount")
-		return
+	switch r.Method {
+	case http.MethodDelete:
+		// DELETE closes the MCP session. It must never compete with the work
+		// or stream slots it is trying to release, otherwise a saturated mount
+		// can never recover.
+	case http.MethodGet:
+		release, ok := h.acquireStream(slug, mountStreams(record, h.cfg.DefaultStreams))
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			deny(http.StatusTooManyRequests, "mount_stream_busy", "too many concurrent streams for this mount")
+			return
+		}
+		defer release()
+	case http.MethodPost:
+		release, ok := h.acquire(slug, mountConcurrency(record, h.cfg.DefaultConcurrency))
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			deny(http.StatusTooManyRequests, "mount_busy", "too many concurrent requests for this mount")
+			return
+		}
+		defer release()
+	default:
+		// Unknown methods are cheap and the MCP handler rejects them with 405;
+		// do not let them consume a work slot.
 	}
-	defer release()
 
 	if h.cfg.Proxy == nil {
 		deny(http.StatusBadGateway, "proxy_unavailable", "mount proxy is not configured")
@@ -218,6 +250,13 @@ func mountConcurrency(record *Record, fallback int) int {
 	return fallback
 }
 
+func mountStreams(record *Record, fallback int) int {
+	if record != nil && record.Limits.MaxStreams > 0 {
+		return record.Limits.MaxStreams
+	}
+	return fallback
+}
+
 // acquire takes a per-mount slot without blocking. A full mount returns 429
 // rather than queueing unbounded work behind the tunnel.
 func (h *Handler) acquire(slug string, limit int) (func(), bool) {
@@ -231,6 +270,28 @@ func (h *Handler) acquire(slug string, limit int) (func(), bool) {
 		h.sem[slug] = slots
 	}
 	h.semMu.Unlock()
+
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	default:
+		return nil, false
+	}
+}
+
+// acquireStream takes a per-mount stream slot without blocking. GET SSE is
+// long-lived session state; it has a separate budget from tool-call work.
+func (h *Handler) acquireStream(slug string, limit int) (func(), bool) {
+	if limit <= 0 {
+		return func() {}, true
+	}
+	h.streamMu.Lock()
+	slots := h.streamSem[slug]
+	if slots == nil || cap(slots) != limit {
+		slots = make(chan struct{}, limit)
+		h.streamSem[slug] = slots
+	}
+	h.streamMu.Unlock()
 
 	select {
 	case slots <- struct{}{}:

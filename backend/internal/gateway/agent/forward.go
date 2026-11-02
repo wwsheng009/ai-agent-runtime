@@ -123,8 +123,13 @@ type streamTarget struct {
 type inboundStream struct {
 	open   wire.StreamOpen
 	body   []byte
+	ctx    context.Context
 	cancel context.CancelFunc
 	target streamTarget
+	// started is set once STREAM_END has handed the request to forwardStream.
+	// The stream stays in the table while the local request runs so a later
+	// STREAM_RESET can still cancel it.
+	started bool
 }
 
 func (c *wsConn) handleStreamOpen(id uint32, frame wire.Frame) {
@@ -139,12 +144,12 @@ func (c *wsConn) handleStreamOpen(id uint32, frame wire.Frame) {
 		_ = c.resetStream(id, code, message)
 		return
 	}
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	if c.streams == nil {
 		c.streams = make(map[uint32]*inboundStream)
 	}
-	c.streams[id] = &inboundStream{open: open, cancel: cancel, target: target}
+	c.streams[id] = &inboundStream{open: open, ctx: ctx, cancel: cancel, target: target}
 	c.mu.Unlock()
 
 	c.flowMu.Lock()
@@ -193,10 +198,11 @@ func (c *wsConn) acquireCredit(ctx context.Context, id uint32, n int64) error {
 func (c *wsConn) handleStreamData(id uint32, frame wire.Frame) {
 	c.mu.Lock()
 	in := c.streams[id]
-	c.mu.Unlock()
-	if in == nil {
+	if in == nil || in.started {
+		c.mu.Unlock()
 		return
 	}
+	c.mu.Unlock()
 	max := in.target.maxBody
 	if max <= 0 {
 		max = c.forward.MaxBodyBytes
@@ -208,6 +214,9 @@ func (c *wsConn) handleStreamData(id uint32, frame wire.Frame) {
 		c.mu.Lock()
 		delete(c.streams, id)
 		c.mu.Unlock()
+		if in.cancel != nil {
+			in.cancel()
+		}
 		_ = c.resetStream(id, "body_too_large", "request body exceeds limit")
 		return
 	}
@@ -217,11 +226,12 @@ func (c *wsConn) handleStreamData(id uint32, frame wire.Frame) {
 func (c *wsConn) handleStreamEnd(id uint32) {
 	c.mu.Lock()
 	in := c.streams[id]
-	delete(c.streams, id)
-	c.mu.Unlock()
-	if in == nil {
+	if in == nil || in.started {
+		c.mu.Unlock()
 		return
 	}
+	in.started = true
+	c.mu.Unlock()
 	go c.forwardStream(id, in)
 }
 
@@ -238,6 +248,20 @@ func (c *wsConn) handleStreamReset(id uint32) {
 // forwardStream performs the local HTTP request and streams the response back
 // as STREAM_DATA/STREAM_END frames.
 func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
+	// Keep the stream registered while the local request runs: a client
+	// disconnect after STREAM_END must still be able to cancel it. Only the
+	// forwarder that owns this entry removes it.
+	defer func() {
+		c.mu.Lock()
+		if c.streams[id] == in {
+			delete(c.streams, id)
+		}
+		c.mu.Unlock()
+		if in.cancel != nil {
+			in.cancel()
+		}
+	}()
+
 	base := strings.TrimRight(strings.TrimSpace(in.target.baseURL), "/")
 	if base == "" {
 		base = strings.TrimRight(strings.TrimSpace(c.forward.LocalBaseURL), "/")
@@ -256,7 +280,11 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 	if timeout <= 0 {
 		timeout = defaultForwardTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	parent := in.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	var body io.Reader

@@ -66,6 +66,12 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 	if limit <= 0 {
 		limit = maxProxyRequestBody
 	}
+	if r.Body == nil {
+		// POST/PUT with no body (e.g. connector handoff) yields a nil Body on
+		// the gateway-side synthetic request; io.LimitReader(nil) would panic
+		// inside LimitedReader.Read. Treat it as an empty body.
+		r.Body = http.NoBody
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -124,6 +130,13 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 	for {
 		select {
 		case <-r.Context().Done():
+			// The caller is gone. Tell the agent to cancel the local request;
+			// otherwise an idle SSE GET can keep an upstream concurrency slot
+			// pinned until its mount timeout.
+			_ = sess.writeJSON(wire.TypeStreamReset, id, wire.StreamReset{
+				Code:    "client_gone",
+				Message: "client disconnected",
+			})
 			return
 		case ev := <-ch:
 			switch ev.kind {

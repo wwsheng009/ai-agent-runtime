@@ -219,7 +219,7 @@ func (m *mountManager) prepareMounts(nodeID, nodeStable string, routes []string,
 			Kind:       firstNonEmpty(spec.Kind, "mcp"),
 			Name:       strings.TrimSpace(spec.Name),
 			LocalPath:  localPath,
-			Labels:     spec.Labels,
+			Labels:     sanitizeMountLabels(spec.Labels),
 			Limits:     mountLimits(spec.Limits),
 			Stale:      true,
 		}
@@ -258,6 +258,80 @@ func (m *mountManager) prepareMounts(nodeID, nodeStable string, routes []string,
 		rejected = nil
 	}
 	return accepted, rejected
+}
+
+// Mount labels are display-only and come from a remote node, so the gateway
+// bounds them before persisting/listing. The caps keep mounts.json and the
+// console API small even if a node sends an oversized or duplicated list.
+const (
+	maxMountLabelShort      = 128
+	maxMountLabelHostname   = 255
+	maxMountLabelWorkspace  = 1024
+	maxMountLabelToolItems  = 128
+	maxMountLabelToolLength = 128
+	maxMountLabelRootItems  = 32
+	maxMountLabelRootLength = 1024
+)
+
+func sanitizeMountLabels(in *wire.MountLabels) *wire.MountLabels {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Profile = clipMountLabel(in.Profile, 32)
+	out.ToolPrefix = clipMountLabel(in.ToolPrefix, maxMountLabelShort)
+	out.TargetName = clipMountLabel(in.TargetName, maxMountLabelShort)
+	out.Workspace = clipMountLabel(in.Workspace, maxMountLabelWorkspace)
+	out.Hostname = clipMountLabel(in.Hostname, maxMountLabelHostname)
+	out.OS = clipMountLabel(in.OS, maxMountLabelShort)
+	out.Arch = clipMountLabel(in.Arch, maxMountLabelShort)
+	out.Version = clipMountLabel(in.Version, maxMountLabelShort)
+	out.Instance = clipMountLabel(in.Instance, maxMountLabelShort)
+	out.Backend = clipMountLabel(in.Backend, maxMountLabelShort)
+	out.Tools = sanitizeMountLabelList(in.Tools, maxMountLabelToolItems, maxMountLabelToolLength)
+	out.Roots = sanitizeMountLabelList(in.Roots, maxMountLabelRootItems, maxMountLabelRootLength)
+	if out.ToolCount < len(out.Tools) {
+		out.ToolCount = len(out.Tools)
+	}
+	if out.ToolCount < 0 {
+		out.ToolCount = 0
+	}
+	return &out
+}
+
+func sanitizeMountLabelList(values []string, maxItems, maxLength int) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(values), maxItems))
+	seen := make(map[string]bool, len(out))
+	for _, raw := range values {
+		value := clipMountLabel(raw, maxLength)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if len(out) >= maxItems {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func clipMountLabel(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max]) + "…"
 }
 
 // activateMounts marks this node's mounts live once its session is registered.

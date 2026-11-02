@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/mcpmount"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // A token issued for mount B must not be revocable through mount A's URL: the
@@ -48,6 +49,73 @@ func TestMountTokenDeleteRejectsCrossMount(t *testing.T) {
 	}
 	if got, ok := store.Get(info.ID); !ok || !got.Revoked {
 		t.Fatalf("owning-mount delete did not revoke: %+v, %v", got, ok)
+	}
+}
+
+func TestSanitizeMountLabelsCapsAndDedupes(t *testing.T) {
+	longRoot := strings.Repeat("r", maxMountLabelRootLength+20)
+	in := &wire.MountLabels{
+		Hostname:  strings.Repeat("h", maxMountLabelHostname+20),
+		Tools:     []string{" view ", "view", "", strings.Repeat("t", maxMountLabelToolLength+20)},
+		Roots:     []string{longRoot, longRoot},
+		ToolCount: 1,
+	}
+	out := sanitizeMountLabels(in)
+	if out == nil {
+		t.Fatal("nil labels returned")
+	}
+	if out.Hostname == in.Hostname || !strings.HasSuffix(out.Hostname, "…") {
+		t.Fatalf("hostname was not clipped: %q", out.Hostname)
+	}
+	if len(out.Tools) != 2 || out.Tools[0] != "view" {
+		t.Fatalf("tools = %v, want deduped [view, clipped]", out.Tools)
+	}
+	if len(out.Roots) != 1 || !strings.HasSuffix(out.Roots[0], "…") {
+		t.Fatalf("roots = %v, want one clipped root", out.Roots)
+	}
+	if out.ToolCount < len(out.Tools) {
+		t.Fatalf("tool_count = %d, want at least %d", out.ToolCount, len(out.Tools))
+	}
+	if in.Hostname == out.Hostname {
+		t.Fatal("sanitize mutated the input labels")
+	}
+}
+
+func TestPrepareMountsPersistsSanitizedDisplayMetadata(t *testing.T) {
+	dir := t.TempDir()
+	registry, err := mcpmount.OpenRegistry(filepath.Join(dir, "mounts.json"))
+	if err != nil {
+		t.Fatalf("OpenRegistry: %v", err)
+	}
+	manager := &mountManager{registry: registry}
+	accepted, rejected := manager.prepareMounts("node-a", "stable-a", []string{"/mcp"}, []wire.MountSpec{{
+		ID:       "self",
+		Name:     "self",
+		Slug:     "aaaaaaaa",
+		Kind:     "mcp",
+		Upstream: "http://127.0.0.1:18765/mcp",
+		Labels: &wire.MountLabels{
+			Profile:   "all",
+			Hostname:  "build-host",
+			OS:        "windows",
+			Arch:      "amd64",
+			Version:   "0.1.0",
+			ToolCount: 2,
+			Tools:     []string{"view", "view", "grep"},
+			Roots:     []string{"E:/proj", "E:/proj"},
+		},
+	}})
+	if len(rejected) != 0 || len(accepted) != 1 {
+		t.Fatalf("accepted/rejected = %d/%d, want 1/0", len(accepted), len(rejected))
+	}
+	record, ok := registry.Get("aaaaaaaa")
+	if !ok || record.Labels == nil {
+		t.Fatalf("mount not persisted: %+v, %v", record, ok)
+	}
+	if record.Labels.Hostname != "build-host" || record.Labels.ToolCount != 2 ||
+		len(record.Labels.Tools) != 2 || record.Labels.Tools[0] != "view" ||
+		len(record.Labels.Roots) != 1 {
+		t.Fatalf("labels not sanitized/persisted: %+v", record.Labels)
 	}
 }
 

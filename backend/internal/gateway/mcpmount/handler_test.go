@@ -18,12 +18,13 @@ type proxyCall struct {
 }
 
 type fakeProxy struct {
-	mu      sync.Mutex
-	calls   []proxyCall
-	status  int
-	block   chan struct{}
-	entered chan struct{}
-	once    sync.Once
+	mu          sync.Mutex
+	calls       []proxyCall
+	status      int
+	block       chan struct{}
+	blockMethod string
+	entered     chan struct{}
+	once        sync.Once
 }
 
 func (p *fakeProxy) ServeProxyMount(w http.ResponseWriter, r *http.Request, nodeID, path, mount string) {
@@ -33,7 +34,7 @@ func (p *fakeProxy) ServeProxyMount(w http.ResponseWriter, r *http.Request, node
 	if p.entered != nil {
 		p.once.Do(func() { close(p.entered) })
 	}
-	if p.block != nil {
+	if p.block != nil && (p.blockMethod == "" || r.Method == p.blockMethod) {
 		<-p.block
 	}
 	status := p.status
@@ -229,6 +230,72 @@ func TestHandlerLimitsConcurrencyPerMount(t *testing.T) {
 
 	close(f.proxy.block)
 	<-firstDone
+}
+
+// DELETE is the session teardown path. It must bypass the per-mount work
+// semaphore even when that semaphore is already full.
+func TestHandlerDeleteBypassesConcurrencyLimit(t *testing.T) {
+	f := newFixture(t, nil)
+	f.proxy.block = make(chan struct{})
+	f.proxy.blockMethod = http.MethodPost
+	f.proxy.entered = make(chan struct{})
+
+	postDone := make(chan struct{})
+	go func() {
+		defer close(postDone)
+		req := httptest.NewRequest(http.MethodPost, "/m/k7f3qz2a/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+f.plaintext)
+		f.handler.ServeMount(httptest.NewRecorder(), req, "k7f3qz2a", "/mcp")
+	}()
+	<-f.proxy.entered
+
+	rec := f.request(t, http.MethodDelete, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200 while the work slot is full", rec.Code)
+	}
+
+	// A second POST must still be rejected by the full work semaphore.
+	rejected := f.request(t, http.MethodPost, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	assertError(t, rejected, http.StatusTooManyRequests, "mount_busy")
+
+	close(f.proxy.block)
+	<-postDone
+}
+
+// GET SSE uses its own stream budget. An open stream must not consume the work
+// slot needed by a tool call, and excess streams get a distinct reason.
+func TestHandlerStreamsUseSeparateLimit(t *testing.T) {
+	f := newFixture(t, func(cfg *HandlerConfig) { cfg.DefaultStreams = 1 })
+	f.proxy.block = make(chan struct{})
+	f.proxy.blockMethod = http.MethodGet
+	f.proxy.entered = make(chan struct{})
+
+	getDone := make(chan struct{})
+	go func() {
+		defer close(getDone)
+		req := httptest.NewRequest(http.MethodGet, "/m/k7f3qz2a/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+f.plaintext)
+		f.handler.ServeMount(httptest.NewRecorder(), req, "k7f3qz2a", "/mcp")
+	}()
+	<-f.proxy.entered
+
+	rejected := f.request(t, http.MethodGet, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	assertError(t, rejected, http.StatusTooManyRequests, "mount_stream_busy")
+
+	// DELETE must bypass the full stream budget as well.
+	deleteRec := f.request(t, http.MethodDelete, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200 while the stream slot is full", deleteRec.Code)
+	}
+
+	// The stream budget is full, but a POST still has its own work slot.
+	post := f.request(t, http.MethodPost, "/m/k7f3qz2a/mcp", f.plaintext, "k7f3qz2a", "/mcp")
+	if post.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200 while a GET stream is open", post.Code)
+	}
+
+	close(f.proxy.block)
+	<-getDone
 }
 
 func TestHandlerFailsClosedWithoutProxy(t *testing.T) {
