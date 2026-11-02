@@ -35,7 +35,13 @@ func beginChatCompactStatus(session *ChatSession) func() {
 		return func() {}
 	}
 	session.Interaction.SetCompacting()
-	return session.Interaction.ClearCompacting
+	return func() {
+		session.Interaction.ClearCompacting()
+		// applyChatCompactContextUsage 可能在 compacting 状态仍在时先调用过
+		// RefreshStatus；这里再按最终 session 快照重绘一次，确保底部状态栏的
+		// Context 比例/窗口/token 段在命令返回前一定采用新值。
+		session.Interaction.RefreshStatus("")
+	}
 }
 
 func executeManualChatCompact(session *ChatSession, requestedMode string) (*chatCompactReport, error) {

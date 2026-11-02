@@ -321,6 +321,8 @@ function onSSEEvent(eventName, data) {
     case "dynamic_status":
       // 动态状态栏：active=false 或空文本时清除；active=true 时显示并
       // 以 started_at 为基准本地推进时钟（服务端只在状态变化时推送一次）。
+      var wasCompacting = !!(dynamicStatus && typeof dynamicStatus.text === "string" &&
+        dynamicStatus.text.indexOf("Compacting context") >= 0);
       if (data && data.active && data.text) {
         dynamicStatus = {
           text: data.text,
@@ -332,6 +334,10 @@ function onSSEEvent(eventName, data) {
         dynamicStatus = null;
       }
       renderDynamicStatus();
+      // /compact 是命令而不是 turn，end 时不会触发 turn_end/session_end。
+      // 压缩结束的动态状态退场就是权威 token 快照已写回的信号，立即重拉
+      // /web/api/statusbar，让底部 Context 比例/窗口/token 同步到新值。
+      if (!dynamicStatus && wasCompacting) { loadStatusBar(); }
       break;
     case "model_changed":
       // TUI 侧 /model、/reasoning_effort 或 /login 切换落地（aicli.chat.

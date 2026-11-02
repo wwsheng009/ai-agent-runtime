@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -72,6 +74,97 @@ func TestExecuteStructuredCompactCommandShowsCompactingStatus(t *testing.T) {
 	coordinator.mu.Unlock()
 	if kind == chatSurfaceStatusCompacting {
 		t.Fatal("compacting status was not cleared after /compact finished")
+	}
+}
+
+func TestCompactRefreshesContextStatusAndDynamicActivity(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	original := runManualChatCompact
+	t.Cleanup(func() { runManualChatCompact = original })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runManualChatCompact = func(*ChatSession, string) (*chatCompactReport, error) {
+		close(started)
+		<-release
+		return &chatCompactReport{
+			RequestedMode: compactruntime.ModeAuto,
+			Result: &compactruntime.Result{
+				Mode:              compactruntime.ModeAuto,
+				TokenBefore:       5000,
+				TokenAfter:        120,
+				CompactedMessages: 4,
+			},
+			Status: compactruntime.Status{
+				Mode:             compactruntime.ModeAuto,
+				MaxContextTokens: 10000,
+			},
+		}, nil
+	}
+
+	session := &ChatSession{
+		ContextTokenCount:       5000,
+		ContextWindowTokenCount: 10000,
+	}
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(96, 24)
+	coordinator.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.RefreshStatus("")
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	initial := statusModelPlainText(coordinator.uiActor.AppState().Bottom.StatusModel, 160)
+	if !strings.Contains(initial, "50%") || !strings.Contains(initial, "Context") {
+		t.Fatalf("initial context status = %q, want Context 50%% used", initial)
+	}
+
+	done := make(chan CommandResult, 1)
+	go func() {
+		done <- executeStructuredCompactCommand(session, "/compact")
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("/compact did not reach the compact runner")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		coordinator.waitUIActorIdle()
+		state := coordinator.uiActor.AppState()
+		row := statusModelPlainText(state.Bottom.DynamicStatusModel, 160)
+		if strings.Contains(row, "Compacting context") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dynamic status during compact = %q, want Compacting context", row)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("/compact did not finish after release")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	final := statusModelPlainText(state.Bottom.StatusModel, 160)
+	if !strings.Contains(final, "1%") || !strings.Contains(final, "Context") {
+		t.Fatalf("context status after compact = %q, want Context 1%% used", final)
+	}
+	if row := statusModelPlainText(state.Bottom.DynamicStatusModel, 160); strings.Contains(row, "Compacting context") {
+		t.Fatalf("dynamic status still shows compacting after completion: %q", row)
 	}
 }
 

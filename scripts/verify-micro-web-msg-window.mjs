@@ -1135,6 +1135,30 @@ assert.strictEqual(screenEl.querySelector(".msg-row.msg-pending"), null,
 assert.strictEqual(countRowsWithText("RETRY-SAME-PROMPT"), 1,
   "重试同一 prompt 仍只能渲染一次");
 
+// ---- 21. /compact 结束：动态状态退场必须触发底部 statusbar 重拉 ----
+// /compact 是命令而非 turn，不会产生 turn_end/session_end；如果客户端不在
+// compacting 动态状态退出时重拉 /web/api/statusbar，底部 Context 比例会一直
+// 停留在压缩前的值。
+var statusbarFetchesBefore = fetchCalls.filter(function (call) {
+  return call.url.indexOf("/web/api/statusbar") === 0;
+}).length;
+es.emit("dynamic_status", {
+  _event: { sequence: 6 },
+  active: true,
+  text: "◦ Compacting context… (1s)",
+  started_at: new Date().toISOString(),
+  interruptible: false,
+});
+await flush();
+es.emit("dynamic_status", { _event: { sequence: 7 }, active: false });
+await flush();
+await flush();
+var statusbarFetchesAfter = fetchCalls.filter(function (call) {
+  return call.url.indexOf("/web/api/statusbar") === 0;
+}).length;
+assert.ok(statusbarFetchesAfter > statusbarFetchesBefore,
+  "compacting 动态状态退场后应重拉 statusbar（否则 Context 比例停留在压缩前）");
+
 clearTestIntervals();
 console.log("verify-micro-web-msg-window: 全部断言通过");
 console.log("  - 首屏只渲染最新一页（msg_limit=40），不随会话总 turn 数增长");
