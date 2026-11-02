@@ -23,11 +23,14 @@ func (s *Server) httpEndpoint(addr string) string {
 func (s *Server) httpBannerLines(addr string) []string {
 	endpoint := s.httpEndpoint(addr)
 	auth := "none (loopback only)"
+	tokenLocation := ""
 	switch {
 	case strings.TrimSpace(s.cfg.HTTP.TokenFile) != "":
-		auth = "bearer token from file " + s.cfg.HTTP.TokenFile
+		auth = "bearer token from file"
+		tokenLocation = s.cfg.HTTP.TokenFile
 	case strings.TrimSpace(s.cfg.HTTP.TokenEnv) != "" && strings.TrimSpace(os.Getenv(s.cfg.HTTP.TokenEnv)) != "":
-		auth = "bearer token from env " + s.cfg.HTTP.TokenEnv
+		auth = "bearer token from env"
+		tokenLocation = "env " + s.cfg.HTTP.TokenEnv
 	}
 	names := s.ToolNames()
 	preview := strings.Join(names, ", ")
@@ -45,6 +48,9 @@ func (s *Server) httpBannerLines(addr string) []string {
 		fmt.Sprintf("  tools    : %d (%s)", len(names), preview),
 		fmt.Sprintf("  profile  : %s (readOnly=%t)", profile, s.cfg.ReadOnly),
 		"  auth     : " + auth,
+	}
+	if tokenLocation != "" {
+		lines = append(lines, "  token    : "+tokenLocation)
 	}
 	if s.cfg.Backend == BackendLocal && s.cfg.ShellExposed() {
 		lines = append(lines, "  shell    : "+shellLabel(s.cfg.ResolvedShell))

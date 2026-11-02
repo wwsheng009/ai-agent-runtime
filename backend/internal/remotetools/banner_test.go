@@ -26,8 +26,11 @@ func TestHTTPBannerNamesTheEndpointAndCredentialSource(t *testing.T) {
 	if !strings.Contains(body, "http://127.0.0.1:43210/mcp") {
 		t.Fatalf("banner lacks the endpoint:\n%s", body)
 	}
-	if !strings.Contains(body, "token from file "+tokenPath) {
+	if !strings.Contains(body, "auth     : bearer token from file") {
 		t.Fatalf("banner lacks the credential source:\n%s", body)
+	}
+	if !strings.Contains(body, "token    : "+tokenPath) {
+		t.Fatalf("banner lacks the token file location:\n%s", body)
 	}
 	if !strings.Contains(body, "aicli chat --remote http://127.0.0.1:43210/mcp") {
 		t.Fatalf("banner lacks the connect hint:\n%s", body)
@@ -37,6 +40,34 @@ func TestHTTPBannerNamesTheEndpointAndCredentialSource(t *testing.T) {
 	}
 	if !strings.Contains(body, "workspace: "+dir) {
 		t.Fatalf("banner lacks the workspace:\n%s", body)
+	}
+}
+
+func TestHTTPBannerShowsTokenEnvLocation(t *testing.T) {
+	const (
+		envName = "AICLI_BANNER_TEST_TOKEN"
+		token   = "banner-test-token-0123456789abcdef"
+	)
+	t.Setenv(envName, token)
+
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.HTTP.TokenEnv = envName
+	server, err := NewServer(cfg, "banner-token-env")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	body := strings.Join(server.httpBannerLines("127.0.0.1:43210"), "\n")
+	if !strings.Contains(body, "auth     : bearer token from env") {
+		t.Fatalf("banner lacks the credential source:\n%s", body)
+	}
+	if !strings.Contains(body, "token    : env "+envName) {
+		t.Fatalf("banner lacks the token env location:\n%s", body)
+	}
+	if strings.Contains(body, token) {
+		t.Fatalf("banner leaked the token:\n%s", body)
 	}
 }
 
