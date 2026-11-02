@@ -423,7 +423,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"follow": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索——链接到目录则下钻（按链接自身的路径呈现），链接到文件则搜索该文件。环保护比 rg 更强：同一目录不会被第二个链接重复带入（互指链接必然终止；同一目标被多个链接指向时只搜索一次）。Windows 上未显式指定时默认跟随 NTFS junction；显式 follow=false 可关闭。",
+				"description": "兼容 rg 的 --follow/-L：跟随遍历中发现的符号链接搜索——链接到目录则下钻（按链接自身的路径呈现），链接到文件则搜索该文件。显式传入的 path 本身若为链接，总是按该路径读取（与 rg 的显式路径语义一致）；follow 只控制该根目录之下的子链接。环保护比 rg 更强：同一目录不会被第二个链接重复带入（互指链接必然终止；同一目标被多个链接指向时只搜索一次）。Windows 上未显式指定时默认跟随 NTFS junction。",
 			},
 			"column": map[string]interface{}{
 				"type":        "boolean",
