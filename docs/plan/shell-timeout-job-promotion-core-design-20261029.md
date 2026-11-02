@@ -8,6 +8,8 @@
 > 参考实现：`E:\projects\ai\deepseek-harness` 的 `dsh-tool-bash`  
 > 目标：把“超时命令转为后台 job”做成 **core 能力**，remote-tools 只提供 target-side 适配，不维护第二套语义。
 
+> **2026-10-30 修复补充**：remote 目标的 `background.Manager` 进程内 launcher 已设置 `cmd.WaitDelay`（默认 5s）并把 `exec.ErrWaitDelay` 收敛为“命令已退出、输出管道仍被后代占用”的终态；快速完成的前台 job 不再暴露已删除的 `job_id`；pending 与 running 分开表述；队列饱和诊断（`queue_position` / `active_jobs` / `max_concurrent` / `scheduler_state` / `next_action`）从 core 透传到 `shell` 与 `job_output`；HTTP 传输改为有状态会话以稳定 owner。
+
 ---
 
 ## 1. 结论摘要
@@ -600,7 +602,7 @@ shell job 必须沿用这套模型，而不是新造 `owner` 字段：
 2. remote `RequestInfo.SessionID` / principal 映射为逻辑 owner；
 3. `OwnerInstanceID` 由目标 runtime 的 manager 生成并维护 lease；
 4. job 的 `job_output` / `job_cancel` / `job_list` 必须按 owner 过滤；
-5. remote HTTP 的无 session/stateless 请求不能创建 unowned job，必须 fail closed；
+5. remote HTTP 的无稳定 session 请求不能创建 unowned job，必须 fail closed；
    客户端若要重连续读 job，必须复用稳定 logical session/owner（不能在每次请求生成随机 owner）；
 6. 旧 legacy `job.json` 没有可靠 owner，不能导入 core store；启动清理时删除。
 
@@ -762,7 +764,7 @@ shell job 必须沿用这套模型，而不是新造 `owner` 字段：
 3. **无 job runtime**：shell 直接不可见/启动失败；fail closed，不做 kill fallback。
 4. **快速完成 job**：使用 `Forget` 删除，不出现在普通 `job_list`。
 5. **owner 来源**：稳定 MCP logical session id + target instance id；
-   HTTP stateless/无 session 时 fail closed，不允许 unowned job。
+   HTTP 无稳定 session 时 fail closed，不允许 unowned job。
 6. **remote 持久化**：remote shell 必须有 `jobs.root`；缺省自动创建
    `<user-home>/.aicli/remote-tools/jobs`，不使用内存 manager。
 7. **单进程执行层**：`shellexec`/process guard 是 manager 的唯一 launcher；

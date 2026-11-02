@@ -1,6 +1,6 @@
 # Shell 命令执行守卫（进程树 + 有界等待）
 
-> 状态：已实现；shell 默认 job-first（core background manager + process guard）
+> 状态：已实现；本地 shell / hooks 使用 ProcessGuard，remote shell 的 core job launcher 也使用 `cmd.WaitDelay`
 
 ## 背景
 
@@ -45,6 +45,7 @@
 
 - `toolkit` shell / bash / execute_shell_command（`internal/toolkit/tools/bash.go`，job-first 路径）
 - hooks 的 shell executor（`internal/hooks/executor_shell.go`）
+- remote tools（`internal/background.Manager` 的进程内 launcher，`DisableDetached: true`）：同一 `WaitDelay` 语义；`wait_delay_used` / `wait_delay_ms` 写入 job 元数据并透传到 `shell` / `job_output`
 
 其它 exec 站点（gitbrowse、filebrowse、mcp transport、worktree 等）可按同一模式接入：`exec.Command` → `guard.Bind(cmd)` → `guard.Attach(cmd.Process)`（或 `CaptureCombinedOutputGuarded`）→ `guard.Close()`。
 

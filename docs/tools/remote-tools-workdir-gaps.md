@@ -86,7 +86,7 @@
 
 **注意包装顺序**：`server.go:179` 的 `newAuditTool` 包裹的是 `registry.List()` 的产物，即 `auditTool` 在 `prefixedTool` **外层**；而 `CallWorkdir(ctx)` 是在 `prefixedTool.Execute` 内部才写入的。因此 audit 层读不到上下文值，**必须从原始 `params` 取**（auditTool 在剥离前看到的是含 workdir 的 map）。
 
-## 6. G5（低）job_start 句柄跨请求失效
+## 6. G5（已修复）job_start 句柄跨请求失效
 
 **实测**：`job_start` 返回 `job_cf77...`，紧接着 `job_output` → `NOT_FOUND: job not found`；`job_list` → `(no jobs)`。
 
@@ -95,6 +95,8 @@
 **影响**：不影响 workdir 正确性（已用落点文件证明 `job_start` cwd 正确锚定到 `backend/internal/remotetools`），但使 workdir 无法通过 job 回读验证，且 job_* 工具族实际不可用。
 
 **建议**：独立排查 owner 来源（`RequestInfoFromContext` vs `toolctx.SessionID` 在 stdio/HTTP stateless 下的取值），与本 workdir 工作解耦。
+
+**修复（2026-10-30）**：HTTP transport 改为有状态会话（`Mcp-Session-Id`，`SessionTimeout: 30m`），客户端在同一连接内回传后 owner 稳定；owner mismatch 追加 stderr 诊断（模型侧仍保持 not-found，不泄露他会话 job）；新增 `TestHTTPJobHandleSurvivesAcrossCalls` 覆盖 `job_start` → `job_output`。**定性修正**：原标"低"不成立——该缺陷会让 `job_*` 工具族整体不可用，并掩盖队列饱和。
 
 ## 7. G6（低）路径参数白名单缺守护
 

@@ -1257,7 +1257,7 @@ background jobs 明确 local-only。**
 
 理由：
 
-- 当前远程 HTTP 是 `Stateless: true`，没有稳定 session；
+- 当前远程 HTTP 使用有状态会话（`Mcp-Session-Id`；2026-10-30 起，原为 `Stateless: true`）；
 - 远程部署/构建的主路径只需要“命令 + 最终 exit code + 输出”，不需要 PTY；
 - 交互/流式/job 会引入 stdin 生命周期、断连重放、job 所有权、取消语义，
   不适合与“抽取 core”同一个阶段完成；

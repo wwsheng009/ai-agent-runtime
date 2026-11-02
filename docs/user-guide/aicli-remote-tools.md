@@ -307,7 +307,8 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 - 服务端 `ReadHeaderTimeout=10s`、`IdleTimeout=120s`，不设整体 `WriteTimeout`（允许长调用）。
 - `shell` 默认先把命令登记为 core background job；`timeout_ms` / `limits.commandTimeout` 只限制本次等待，不杀 job。等待到期返回 promoted 结果和 `job_id`，命令继续运行。
 - 请求取消会 cancel 整个 job 进程组；server 关闭也会收敛运行中的 job，避免构建子进程残留。
-- `limits.maxConcurrentCalls` 已在 HTTP MCP 入口强制执行：超出时返回 **429** + `Retry-After: 1`；`/metrics` 不占并发名额。
+- `limits.maxConcurrentCalls` 已在 HTTP MCP 入口强制执行：只统计 POST 工具调用，超出时返回 **429** + `Retry-After: 1`；`/metrics` 不占并发名额。
+- `limits.maxConcurrentStreams`（默认 64）单独限制 GET SSE 长连接；每个已初始化会话通常占一条。DELETE 是 session 关闭路径，不占工作槽或流槽，避免池满时无法释放。
 
 **SSH stdio**
 
@@ -327,7 +328,7 @@ remote: added server "127-0-0-1" (transport=streamable, requested profile=ops); 
 **推荐做法**
 
 - 部署脚本做成幂等、可检查点：`status → build → wait → up`；
-- 长任务放到目标机自身 service manager；HTTP daemon 内的 job 只在原 MCP logical session 内可续读，重连后 session 变化时不会继承旧 job；
+- 长任务放到目标机自身 service manager；HTTP daemon 内的 job 只在原 MCP logical session 内可续读，重连/重启导致 session 变化时不会继承旧 job；
 - 监控审计/访问日志以及 `mcp.health.failed` / `mcp.reconnected` 生命周期事件。
 
 ---
@@ -710,9 +711,9 @@ deny rules       : -
 
 | 约束 | 默认值 / 行为 |
 |------|---------------|
-| 等待预算 | 120s；调用方可传 `timeout_ms`。到期返回 promoted + `job_id`，不杀命令 |
+| 等待预算 | 30s（低于常见 MCP 客户端请求超时）；调用方可传 `timeout_ms`。到期返回 promoted + `job_id`，不杀命令 |
 | 作业 | `shell` 默认 job-first；`job_start` 只提交不等待；快速完成的前台 job 自动 `Forget` |
-| 作业 owner | 绑定 MCP logical session；HTTP stateless 无稳定 session 时 fail closed |
+| 作业 owner | 绑定 MCP logical session；HTTP 使用有状态会话（`Mcp-Session-Id`，空闲 30m 回收）；无法提供稳定 session 时 fail closed |
 | 输出上限 | 256 KiB（`limits.maxOutputBytes`）；超限折叠中间并明确标注 |
 | 完整输出 | 配置 `artifacts.root` 后归档，返回 `artifact_id` 可翻页 |
 | 进程组 | 独立进程组；调用取消 / server 关闭时收敛整棵进程树 |
@@ -1034,7 +1035,7 @@ artifacts:
 - `jobs.root` 是持久化根：job store 为 `<root>/background.db`，输出日志为 `<root>/logs`。目录创建或写探针失败时启动失败，不会退回内存 job 或旧 remote JobManager。
 - `shell` 默认 job-first：快速完成的命令返回普通结果并自动 `Forget`；等待预算到期返回 promoted 结果和 `job_id`/`next_offset`，命令继续运行。
 - `job_output` 使用 core cursor：默认从 `offset=0` 开始，把返回的 `next_offset` 原样传回即可续读；不再把 `offset=0` 解释为 tail。
-- job 绑定调用方的 MCP logical session（stdio 使用目标进程的稳定 principal）；`job_output` / `job_cancel` / `job_list` 只能看到本 session 的 job。HTTP stateless 且没有稳定 session 时创建 job 会 fail closed。
+- job 绑定调用方的 MCP logical session（stdio 使用目标进程的稳定 principal）；`job_output` / `job_cancel` / `job_list` 只能看到本 session 的 job。HTTP 使用有状态会话（`Mcp-Session-Id`）；客户端不维持 session 时创建/读取 job 会 fail closed。
 - 升级时旧 `<root>/jobs/<id>/job.json` / `output.log` 会被启动清理：running 记录按 PID 尝试终止进程树，然后删除旧目录；旧 job 不迁移、不可查询。
 - 输出被折叠时，服务端先归档完整内容并返回 `artifact_id`，模型可用 `artifact_read` 翻页。
 

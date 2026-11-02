@@ -4,6 +4,12 @@
 > 目标：本地 aicli TUI / runtime-server 在**无外网、仅内网可达目标机**的场景下，调用远端文件读取、搜索、命令执行等工具。
 > 结论先行：**做 Remote Tools，不做 Remote Agent；一个远端二进制，同时支持 SSH stdio 与 Streamable HTTP 两种接入方式。**
 
+> **2026-10-30 实现调整**（以本节为准，覆盖下文旧口径）：
+> - `limits.commandTimeout` 默认 **30s**（原 120s）：它是 shell 等待预算，不是进程 deadline；必须低于常见 MCP 客户端请求超时，否则外层先超时并杀服务端。
+> - HTTP 传输改为**有状态会话**（`Mcp-Session-Id`，`SessionTimeout: 30m`）：`shell` / `job_*` 的 owner 需要有跨请求稳定性；原 stateless 在客户端不回传 session 时每请求生成随机 session id。
+> - `background.Manager` 的进程内 launcher 增加 `cmd.WaitDelay`（默认 5s，复用 `AICLI_SHELL_WAIT_DELAY`）并处理 `exec.ErrWaitDelay`：命令本体退出但后代占用 stdout/stderr 时不再永久 running。
+> - 快速完成的前台 job 不再返回 `job_id`；`orphaned/unknown` job 保留供 `job_output` 检查；`job_output` 透传 `queue_position` / `active_jobs` / `max_concurrent` / `scheduler_state`。
+
 ## 实施状态（2026-10-21）
 
 | 阶段 | 状态 | 落点 |

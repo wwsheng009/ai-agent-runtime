@@ -1,0 +1,43 @@
+# 示例：HTTPS + Bearer Token + 自签证书（回环 / 内网）
+#
+# 适用场景：希望在本机或内网用 TLS 加密传输，并用 token 做访问控制的
+#           "目标机 serve --http" 常驻实例。与手册 §3.2 / §9.1 / §9.2 配合阅读。
+#
+# 与"纯 HTTP"实例相比，本示例只多了三件事：
+#   1) http.tokenEnv   —— 启用 Bearer Token（非回环监听强制要求，fail-closed）
+#   2) http.tlsCert     —— 自签 / CA 签的服务器证书（与 tlsKey 成对）
+#   3) http.tlsKey      —— 私钥
+# token 只从环境变量读取，不写进本文件；证书/私钥路径按实际位置替换。
+#
+# 前置：生成自签证书（测试用，SAN 必须覆盖你要连的地址）
+#   openssl req -x509 -newkey rsa:2048 -nodes \
+#     -keyout server.key -out server.crt -days 365 \
+#     -subj "/CN=127.0.0.1" \
+#     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+#   # Windows：把 server.crt 加入本机信任根，避免客户端跳过校验
+#   #   certutil -addstore -f Root server.crt
+#
+# 启动（token 只从环境变量读取）：
+#   export AICLI_REMOTE_TOKEN="$(openssl rand -hex 32)"
+#   aicli-remote-tools serve --http --config remote-https-token.yaml
+#
+# 默认监听 127.0.0.1:18765/mcp。本机连接（固定用 127.0.0.1，勿用 localhost）：
+#   aicli chat --remote https://127.0.0.1:18765
+# 无 token 访问 → 401 Unauthorized；带正确 token → 200（MCP 握手成功）。
+
+workspace: /srv/app            # 必填：相对路径锚点 + jail 根 + 默认 cwd
+profile: ops                   # 暴露 view/ls/glob/grep/write/edit/apply_patch/shell...
+toolPrefix: remote_srv         # 工具名前缀：remote_srv__view 等
+targetName: srv
+descriptionStyle: explicit     # 描述带 [remote:srv]，模型不会误认成本地文件
+
+http:
+  listen: "127.0.0.1:18765"
+  path: /mcp
+  tokenEnv: AICLI_REMOTE_TOKEN # 非回环监听必须配置 token（fail-closed）
+  tlsCert: /etc/aicli/server.crt
+  tlsKey: /etc/aicli/server.key
+  accessLog: /var/log/aicli/remote-access.ndjson
+
+audit:
+  path: /var/log/aicli/remote-audit.ndjson
