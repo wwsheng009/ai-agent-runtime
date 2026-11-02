@@ -85,7 +85,7 @@ aicli chat                                     # 会话自动加载该挂载
 | agent 转发硬超时 5 分钟 | `agent/forward.go: forwardStream`（`context.WithTimeout(..., 5*time.Minute)`） | envd 后端默认 `callTimeout=10m`、长 shell 任务会被截 → mount 级超时（P0） |
 | 本地 MCP 并发槽 8，超额 429 | `remotetools/config.go: Limits.MaxConcurrentCalls`、`server.go: concurrencyMiddleware` | 外部多客户端并发需容量说明；429 必须原样透传（客户端会重试） |
 | MCP Go SDK v1.4.0 默认开启 DNS-rebinding 保护：**本地地址为回环且 `Host` 非回环 → 403** | go-sdk `mcp/streamable.go: ServeHTTP`（`DisableLocalhostProtection`） | 隧道转发时 Go client 用 target URL 生成 `Host`（= `127.0.0.1:port`）→ **天然通过**；设计里必须写明"禁止把公网 Host 透传进本机"这条隐式契约 |
-| 本地 MCP 走 `Stateless: true` | `remotetools/server.go: StreamableHTTPOptions` | 无 `Mcp-Session-Id` 粘性要求；挂载第三方 stateful MCP 时才需要 mount→node 的会话亲和（天然成立） |
+| 本地 MCP 走 Stateful（稳定 `Mcp-Session-Id`） | `remotetools/server.go: StreamableHTTPOptions` | `shell` / `job_*` 需要跨请求的稳定 owner；stateless 会在客户端不回传 session 时让每个请求生成随机 session id（G5）。挂载第三方 stateful MCP 的会话亲和仍天然成立（一挂载一节点） |
 | 客户端已能把"基址"展开成 `/mcp` 并注入 Bearer 头 | `internal/remotetargets/registry.go: httpURL`、`case TransportHTTP`（`token_env`） | `remote-targets.yaml` 的 `remote.listen` **今天即可**填挂载基址（`httpURL` 保留 scheme+path 再补 `/mcp`），`token_env` 让多挂载各持一把令牌 |
 | 短语法 `--remote` 的 http 形态只保留 `host[:port]` | `internal/remotetargets/spec.go: listenAddress`（`https://svc.internal` → `svc.internal:18765`）、`TokenEnv()` 固定 `AICLI_REMOTE_TOKEN` | `--remote https://gw/m/{slug}` **会丢 scheme 与挂载路径** → 要么走 `remote-targets.yaml`，要么按 §10 第 12 条给短语法补 path/scheme/`?token_env=` |
 | 非回环 `listen` 且未配 `token_env` 会被拒 | `registry.go: case TransportHTTP` + `isLoopbackListen`（fail-closed） | 与挂载"强制令牌"天然一致：客户端不配令牌就连不上，不需要新增校验 |
@@ -142,7 +142,7 @@ type MountSpec struct {
     Upstream string `json:"upstream"`            // 本机地址：http://127.0.0.1:18765/mcp
     Auth     *MountAuth `json:"auth,omitempty"`  // 本地凭据来源（只传变量名，永不传值）
     Limits   *MountLimits `json:"limits,omitempty"`
-    Labels   *MountLabels `json:"labels,omitempty"` // tool_prefix/profile/target_name/workspace（仅展示与自检）
+    Labels   *MountLabels `json:"labels,omitempty"` // profile/workspace/roots/tools/hostname…（仅展示与自检）
 }
 
 type MountAuth struct {
@@ -155,6 +155,7 @@ type MountLimits struct {
     MaxBodyBytes int64 `json:"max_body_bytes,omitempty"`  // 请求体上限
     TimeoutSec   int   `json:"timeout_sec,omitempty"`     // 单次调用上限
     MaxConcurren int   `json:"max_concurrency,omitempty"` // 网关侧并发闸
+    MaxStreams   int   `json:"max_streams,omitempty"`     // GET SSE 长连接上限
 }
 ```
 
@@ -295,7 +296,7 @@ slug       = lower_base32( sha256("aicli-mount-v1" + stable_id)[0:5] )   → 8 �
 | `Host` | 公网 host | — | **不透传**：Go client 用 target URL 生成回环 Host | 必须保持：否则 mcp SDK 直接 403（DNS-rebinding 保护） |
 | `Origin`/`Referer` | 浏览器值 | 透传 | 重写为本地 origin（既有 `rewriteForwardOriginHeaders`） | 程序化 MCP 客户端通常不带；带上也不会因跨源被拒 |
 | `Accept` | `application/json, text/event-stream` | 透传 | 透传 | SDK 校验：POST 必须双类型，缺一即 400 |
-| `Mcp-Session-Id` | 有则透传 | 透传 | 透传 | remote-tools 为 Stateless 不需要；挂载第三方 stateful MCP 时靠 mount→node 天然亲和 |
+| `Mcp-Session-Id` | 有则透传 | 透传 | 透传 | remote-tools 现在也使用 stateful session（`shell` / `job_*` 需要稳定 owner）；挂载第三方 stateful MCP 时靠 mount→node 天然亲和 |
 | `Cookie` | — | **丢弃** | — | 既有行为，保持不变 |
 | `Content-Length`/`Transfer-Encoding` | — | hop-by-hop 清理 | — | 既有 `isHopByHopHeader` |
 | `X-AICLI-Token` | 客户端带 → 丢弃（不信任） | 不进 | agent 只对本机默认转发目标注入 | 与挂载无关，避免把 runtime 写令牌泄给 MCP daemon |
@@ -317,13 +318,21 @@ slug       = lower_base32( sha256("aicli-mount-v1" + stable_id)[0:5] )   → 8 �
       "kind": "mcp", "upstream": "http://127.0.0.1:18765/mcp",
       "auth": { "type": "bearer", "token_env": "AICLI_REMOTE_TOKEN" },
       "limits": { "max_body_bytes": 8388608, "timeout_sec": 600, "max_concurrency": 16 },
-      "labels": { "profile": "readonly", "tool_prefix": "remote_prod", "workspace": "/srv/app" } }
+      "labels": {
+        "profile": "readonly", "tool_prefix": "remote_prod",
+        "workspace": "/srv/app", "roots": ["/srv/app", "/srv/shared"],
+        "hostname": "build-box", "os": "linux", "arch": "amd64",
+        "version": "0.1.0", "instance": "auto-build-box-3f9a",
+        "backend": "local", "read_only": true, "tool_count": 4,
+        "tools": ["remote_prod__view", "remote_prod__ls", "remote_prod__glob", "remote_prod__grep"]
+      } }
   ]
 }
 ```
 
 - **不 bump `wire.ProtocolVersion`**：`tunnel/server.go: serveConn` 对版本是**严格相等**判断，bump 会让所有老 agent 掉线；`mounts` 是纯增量字段，老 gateway `json.Decode` 忽略未知字段 = 天然向后兼容（老 agent + 新 gateway 也照旧，只是没有挂载）。
 - `upstream` **只在本机解释**，网关不访问、不校验可达性、不进日志明文以外的形式（它可能含内网主机名，属敏感拓扑；日志只记 slug）。
+- `labels` 只用于控制台展示与自检：网关在 `prepareMounts` 落库前裁剪长度/数量（工具 128 个、目录 32 个，单值超长追加 `…`），不会把它用于路由或授权。`tools`/`roots` 只对节点自身的 self mount 上报；额外转发的 upstream 不探测、不冒充其工具面。
 
 ### 6.2 REGISTER_ACK 回执
 
@@ -345,6 +354,11 @@ slug       = lower_base32( sha256("aicli-mount-v1" + stable_id)[0:5] )   → 8 �
 | 令牌颁发/撤销 | **只在网关侧**（管理 API / 控制台），不经隧道；节点不感知令牌存在 | P0 |
 
 选择"P0 用重连接受挂载变更"的理由：挂载是低频运维动作，`Reconnect` 已有正确语义（同 NodeID 覆盖 stale 条目），不必在第一阶段引入新帧与新的一致性规则。
+
+节点侧启动健壮性：`aicli-remote-tools serve` 的首次拨号失败不再一次性放弃——宿主用
+`Controller.ConnectWithRetry` 按同一退避阶梯（2s→5s→10s→30s 封顶）重试至成功或终止错误，
+网关/网络未就绪时挂载会自动补注册；连接丢失、重试尝试与重连成功均以
+`aicli-remote-tools:` 前缀写入 stderr，便于定位"控制台显示离线"。
 
 ### 6.4 令牌与挂载的管理面 wire（不属于隧道协议）
 
@@ -418,6 +432,7 @@ func (h *Handler) authenticate(r *http.Request) (*TokenRef, *Record, error) {
 | 既有 IP 限流 | `client_ip` | `--rate-limit` | 全局洪水（复用，不改） |
 | 令牌速率 | `token_id` | 600 rpm（可调，`--mount-token-rate-limit`） | 单个外部调用方失控不拖垮其他调用方 |
 | 挂载并发 | `slug` | `limits.max_concurrency`（默认 16） | 保护本机 `MaxConcurrentCalls`（8）之前先限住上游 |
+| 挂载 SSE 流 | `slug` | `limits.max_streams`（默认 64） | GET SSE 是会话状态，不占工具调用并发槽；超限返回 `mount_stream_busy` |
 | 挂载熔断 | `slug` 连续 5xx/超时 ≥ N | 打开 30s，返回 503 | 节点抖动时不堆积隧道流 |
 | 惩罚封禁 | `client_ip` | 认证失败累计进 `bans` | 与 [09](./09-edge-hardening.md) 同一条链路 |
 
@@ -590,7 +605,7 @@ gateway:
 
 | 威胁 | 控制 | 出处/校验 |
 |------|------|-----------|
-| 公网 MCP 端点被匿名调用 = 远程文件读写 + shell 执行 | 强制挂载令牌（无 dev 旁路）；默认 profile `readonly`；`--tool-prefix` 明示工具归属 | `remotetools.validateHTTPAuth` 同源判断；`mount_auth_failed` 审计 |
+| 公网 MCP 端点被匿名调用 = 远程文件读写 + shell 执行 | 强制挂载令牌（无 dev 旁路）；默认 profile `all`（写/shell 可见，shell 命令仍受 allowlist fail-closed）；需要最小权限时显式 `readonly`；`--tool-prefix` 明示工具归属 | `remotetools.validateHTTPAuth` 同源判断；`mount_auth_failed` 审计 |
 | 令牌泄露（某个调用方被攻破） | 令牌**按挂载作用域**、可逐个撤销、支持短 TTL + 轮换；撤销只影响该挂载 | `TokenRef.Mounts`、`Revoke` 立即生效；`token_rotation_test.go` 既有轮换测试 |
 | 跨挂载横向（A 调用方打 B 挂载） | `token.scope` 校验 → 403 + 罚分 | §7.3 |
 | 伪造 `X-AICLI-Mount` 借用别人的 upstream | 网关**覆写**该头；agent 未知 slug → `reset(mount_unknown)`，绝不回落默认目标 | §5.2、§8.2 第 1 条 |
@@ -625,12 +640,12 @@ gateway:
 |---|------|-------------|-----------|------|
 | 1 | 隧道请求体上限 **1 MiB** | `tunnel/proxy.go: maxProxyRequestBody`；`agent/forward.go: defaultMaxForwardBody` | `write`/`apply_patch`/长 prompt 的工具调用直接 413，是**挂载最常见的第一个失败** | 提升为挂载级 `max_body_bytes`（默认 8 MiB）；`handleStreamOpen` 先解析 mount 再决定上限（§8.2）；413 响应体写清上限值 |
 | 2 | agent 转发硬超时 **5 min** | `agent/forward.go: forwardStream` | envd 后端 `callTimeout` 默认 **10m**、`shell` 长任务、`job_*` 流式被腰斩 | mount 级 `timeout`（默认 10m，与 envd 对齐）；响应头已写入后只能 reset，需在文档说明"超时会得到连接重置而非 504" |
-| 3 | 本地并发槽 **8**，超额 429 | `remotetools/config.go: Limits.MaxConcurrentCalls`、`concurrencyMiddleware` | 多个外部客户端 + 多工具并行 → 频繁 429 | 网关 per-mount 并发闸设在其之前（默认 16 → 提示调大本地槽）；429 原样透传（不吞、不重试） |
+| 3 | 本地 POST 并发槽 **8**，超额 429 | `remotetools/config.go: Limits.MaxConcurrentCalls`、`concurrencyMiddleware` | 多个外部客户端 + 多工具并行 → 频繁 429 | GET SSE 使用独立 `maxConcurrentStreams`（默认 64），DELETE 无条件放行；429 原样透传（不吞、不重试） |
 | 4 | `Route` 白名单是**本地路径**语义 | `tunnel/proxy.go: routeAllowed` | 若沿用 runtime-server 的 `/` 声明，挂载等于全通 | §8.3：纯 MCP 节点只声明 `/mcp` |
 | 5 | 控制台 SPA 兜底吞未知路径 | `cmd/gateway/console.go: hasReservedPrefix`（只认 `/api`、`/gw`、`/n`） | root 风格挂载下 `/xxxxxx/mcp` 可能返回 HTML，客户端报解析错误 | `/m` 入保留前缀；root 风格额外注册到 SPA 之前 + 单测断言返回 404 JSON |
 | 6 | mcp SDK **DNS-rebinding 保护**（回环监听 + 非回环 Host → 403） | go-sdk `mcp/streamable.go`（v1.4.0 起默认开） | 若哪天改为透传公网 `Host`，挂载全量 403（且现象诡异） | §5.2 把"不透传 Host"写成硬契约 + 回归测试（真实 SDK handler 跑一遍隧道） |
 | 7 | SDK 要求 `Accept` 同时含 `application/json` 与 `text/event-stream` | 同上 | 简易客户端 400 | 文档在客户端示例里显式带双 Accept；错误体保持透传（不改写） |
-| 8 | `Stateless: true` | `remotetools/server.go: StreamableHTTPOptions` | 无 `Mcp-Session-Id` 亲和问题；但挂载第三方 stateful MCP 时节点重启会失效 | 文档说明"重启后客户端需重新 `initialize`"；mount→node 单跳天然保证会话亲和 |
+| 8 | Stateful session（`SessionTimeout: 30m`） | `remotetools/server.go: StreamableHTTPOptions` | 客户端必须回传 `Mcp-Session-Id`；节点重启后旧 session 失效，客户端需重新 `initialize` | 文档说明"重启后客户端需重新 `initialize`"；mount→node 单跳天然保证会话亲和 |
 | 9 | 大响应无总量上限（只有流控） | `forward.go: flowControlWindow = 1 MiB` + `WINDOW_UPDATE` 补充 | 语义正确（边读边写），但**慢客户端**会长时间占住隧道流 | per-mount 活跃流指标 + 熔断；文档建议大输出用 `artifact_read` 分页（remote-tools 已有 artifact 面） |
 | 10 | gateway 无 write timeout（`ReadHeaderTimeout:10s`、`IdleTimeout:120s`） | `cmd/gateway/main.go` | SSE 长挂起会被 `IdleTimeout` 砍（Go 的 IdleTimeout 只计无活动连接，实践中 MCP SSE 有心跳即安全） | 验证项：挂载 30 分钟挂起 GET 流不被网关判 idle；必要时 per-mount `SSE` 保活注释与用例 |
 | 11 | 隧道协议版本严格相等校验 | `tunnel/server.go: serveConn` | bump 版本会让所有老 agent 掉线 | 只做 additive 字段，不 bump（§6.1） |
@@ -656,7 +671,7 @@ gateway:
 
 ### 11.2 控制台（`cmd/gateway/console`，对齐 [07](./07-console.md) 轻量原则）
 
-「MCP 服务」页/卡片：每行 `slug`（复制完整 URL）· 节点与在线状态 · profile/工具前缀/workspace（仅标签，来自 `labels`）· 令牌数 · `禁用/启用` · `令牌`（列表 / 签发 / 一次性明文 / 撤销 / 删除记录）· `日志`（跳到 `#logs?slug=`）。令牌明文只在签发响应出现一次，列表只显示 `prefix` 与时间；有效期支持 30/90/365 天、指定天数（1–3650）与**不过期**（有显式警告）。`GET /tokens` 按挂载过滤，`DELETE` 校验作用域。另设「日志」页：MCP 调用环（含 2xx）与审计事件两个 tab，支持过滤与 5s 自动刷新。QPS 与 `probe` 仍未实现，留作 P2。
+「MCP 服务」页/卡片：每行 `slug`（复制完整 URL）· 节点与在线状态 · **主机名 / OS·arch / profile（含只读标记与工具前缀）/ workspace / 版本·实例·backend** · 令牌数 · `禁用/启用` · `令牌`（列表 / 签发 / 一次性明文 / 撤销 / 删除记录）· `日志`（跳到 `#logs?slug=`）。主机、目录与工具清单来自 REGISTER 的 `labels` 快照；`工具（N）` 与 `目录（N）` 可展开检查，旧节点缺字段时显示 `—`，不会伪造信息。网关在落库前对标签做长度/数量裁剪（工具 128 个、目录 32 个），并只把标签当展示文本。令牌明文只在签发响应出现一次，列表只显示 `prefix` 与时间；有效期支持 30/90/365 天、指定天数（1–3650）与**不过期**（有显式警告）。`GET /tokens` 按挂载过滤，`DELETE` 校验作用域。另设「日志」页：MCP 调用环（含 2xx）与审计事件两个 tab，支持过滤与 5s 自动刷新。QPS 与 `probe` 仍未实现，留作 P2。
 审计 tab 走 `GET /api/audit?limit=&type=&q=&errors=`：`type` 为前缀匹配（`mount`/`tunnel`/`login`/`device`/`rate`），`q` 匹配 type/actor/result/ip/detail，`errors=1` 只看有 `result` 的失败/拒绝事件；`audit.log` 仍是持久化来源。
 离线挂载显示为"待节点上线"（灰），与节点的 stale 显示同源；`clear offline snapshots` 同时清 stale 挂载。
 
@@ -709,7 +724,7 @@ curl -sS -X POST https://gw.example.com/m/k7f3qz2a/mcp \
 | `502 node offline` + `Retry-After` | 节点隧道是否断（`/api/nodes` stale）；心跳是否超时 | 节点重连（`/gateway reconnect`）；确认 failover 后 agent 指向新实例 |
 | `413` | `--mount-max-body` 与 `remotetools` 的 `--max-bytes-per-call` 孰小 | 明确告知客户端上限；大文件走分块 patch |
 | 调用被 reset / 无终态 | mount `timeout` 是否短于任务时长；envd `call_timeout` | 调 `--mount-timeout`；长任务改用 `job_*` 工具族 |
-| `429` | 网关并发闸 or 本地 `MaxConcurrentCalls` | 指标 `mount_active_streams` 定位是哪层 |
+| `429` | 网关 `mount_busy` / `mount_stream_busy`，或本地 `MaxConcurrentCalls` / `MaxConcurrentStreams` | 29B `too many concurrent requests` = POST 工作槽；`too many concurrent streams` 文本 = GET 流槽；79B JSON = 网关 per-mount 闸 |
 | URL 变了（客户端突然全断） | 是否换机器/删了 `mount-id` 文件/pin 冲突 | **这是 P0 必须防的**：`mount-id` 纳入备份说明；pin 关键挂载 |
 
 ---
@@ -832,7 +847,7 @@ OAuth 2.1 授权流（MCP 规范方向：`WWW-Authenticate` + 元数据发现）
 
 | 范围 | 文件 | 内容 |
 |------|------|------|
-| 协议类型 | `internal/gateway/wire/messages.go` | `MountSpec` / `MountAuth` / `MountLimits` / `MountLabels` / `MountAck`；`Register.Mounts`、`RegisterAck.AcceptedMounts/RejectedMounts`（additive，未 bump 版本） |
+| 协议类型 | `internal/gateway/wire/messages.go` | `MountSpec` / `MountAuth` / `MountLimits` / `MountLabels` / `MountAck`；`Register.Mounts`、`RegisterAck.AcceptedMounts/RejectedMounts`（additive，未 bump 版本）；`MountLabels` 含 hostname/os/arch/version/instance/backend/read_only/tool_count/tools/roots |
 | slug 规则 | `internal/gateway/mcpmount/slug.go` | `DeriveSlug`（sha256 → base32hex，8 字符，稳定）、`ValidateSlug`（保留段/控制台静态文件）、`NormalizeLocalPath`（拒 `..`/query）、`PublicPath`/`PublicURL`（namespaced 与 root 两种风格） |
 | 挂载登记表 | `internal/gateway/mcpmount/registry.go` | `Upsert`（同 mount 幂等、清 stale、保留 Disabled、pin 变更释放旧 slug）、`SlugConflictError`、`Get/GetByMountID/List`、`MarkStale/Bind/RemoveStale/Restore`、`SetDisabled` |
 | 令牌 | `internal/gateway/mcpmount/tokens.go` | `amt_` 前缀、32 字节熵、只存 SHA-256、按挂载作用域（非通配）、TTL/过期、撤销/两段式删除、`CountForMount`、恒定时间比较在调用侧（`Authenticate` 用 map + TLS-safe 语义同 device） |

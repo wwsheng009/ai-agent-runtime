@@ -208,17 +208,23 @@ gateway: error
 
 ```go
 type Controller interface {
-    Connect(ctx context.Context) error       // 手动连接（清除 operator_disconnected）
-    Disconnect(ctx context.Context) error    // 手动断开（置 operator_disconnected）
+    Connect(ctx context.Context) error         // 自动路径（启动/重连）；手动断开后拒绝（operator_disconnect）
+    ConnectManual(ctx context.Context) error   // 手动连接（清除 operator_disconnected）
+    ConnectWithRetry(ctx context.Context) error // 自动路径 + 退避重试直至成功/终止（remote-tools 启动用）
+    Disconnect(ctx context.Context) error      // 手动断开（置 operator_disconnected，抑制自动重连）
     Reconnect(ctx context.Context) error
-    Status() Status                          // state/node_id/url/heartbeat/last_error/reconnects/sessions
-    Configure(cfg Config) error              // url/name/token/auto_connect（写配置由宿主负责）
+    Status() Status                            // state/node_id/url/heartbeat/last_error/reconnects/sessions
+    Configure(cfg Config) error                // url/name/token/auto_connect（写配置由宿主负责）
 }
 ```
 
 - `aicli`：TUI 命令调用该接口；状态经现有渲染面输出。
 - `runtime-server`：`/api/runtime/gateway/*` 调用该接口；配置读写复用 `internal/runtimeserver` 的配置文档服务。
 - 线程安全：`Connect`/`Disconnect`/`Reconnect` 串行化（内部互斥），重复调用幂等。
+- 重连语义：连接建立后掉线（含 watchdog 判定的假死连接）由自动重连按 2s→5s→10s→30s（封顶）无限重试；
+  `auth_invalid` 等不可重试错误停在 `error`。手动 `disconnect` 同时失效进行中的重连循环，
+  之后自动路径一律拒绝（`operator_disconnect`），直到手动 `connect`/`reconnect`。
+- 首次连接：`ConnectWithRetry` 用同一退避阶梯重试初始拨号（网关/网络未就绪时不再需要重启进程）。
 
 ---
 
