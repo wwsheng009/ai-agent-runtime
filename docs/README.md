@@ -22,7 +22,7 @@ Migration notes:
 
 Main sections:
 
-- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, runtime profiles, image generation, plan mode (review loop + plan artifact archive), tool output rendering, metadata propagation, and provider integration notes
+- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, native session export/import, cross-agent session transfer implementation (DSH / WorkBuddy), portable agents, runtime profiles, image generation, plan mode (review loop + plan artifact archive), tool output rendering, metadata propagation, and provider integration notes
 - `profile/` - profile 体系专题：架构与运行时、设计与决策、使用手册（CLI / TUI / Web）、配置参考（含项目绑定 FR-14 第一阶段与 D29 信任分级门控）
 - `aicli-mesh/` - 多进程网格运维专题（aicli-mesh）：快速上手、拉起与可执行文件解析、生命周期与租约、排障手册
 - `user-guide/` - 操作手册：安装部署、配置、启动、日常操作、构建、故障排查与升级
@@ -33,10 +33,12 @@ Main sections:
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `bots/` - IM 通道接入专题（飞书/QQ/微信/Telegram）：需求分析、连接器核心方案、三宿主接入与前端 schema 配置、从 codex-server 的移植路线（入口见 `bots/README.md`）
 - `gateway-app/` - 网关全网页 App 专题：Tauri 2 WebView 容器、原生通知桥、ntfy 路由修复、跨端实施与运维（入口见 `gateway-app/README.md`）
+- `architecture/` - 沙箱与运行时架构专题：命令执行通道（envd）、FUSE 本地目录挂载（功能口径见 `architecture/fuse-local-mount.md`，实测证据见 `architecture/sandbox-local-folder-mount-mechanism.md`，基于 runtime-server 基座的动态目标挂载设计见 `architecture/fuse-dynamic-mount-design.md`）、envd 能力与自建（客户端 offset 扩展方案见 `architecture/envd-client-offset-extension.md`）
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
 - `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`
 - `agent-memory/` - Agent Memory v2 专题：Codex 记忆机制分析、当前运行时差距、目标架构、数据模型/API、实施与验收方案
+- `dsh-superagent-prototype/` - dsh-superagent 原型借鉴与利用分析：授权分诊、工单生命周期、durable 副作用/出站回执、Source 连接器契约，及面向 AAR 既有设施的落点矩阵与落地顺序（分析入口 `dsh-superagent-prototype/README.md`；实施方案 `dsh-superagent-prototype/implementation-plan.md`）
 - Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
 
 Recommended starting points:
