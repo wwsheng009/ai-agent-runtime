@@ -9,7 +9,7 @@ import { handleParkedTurnSSEEvent } from "./parked.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
-import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, convergeFinishedStreamText, endStream, isStreamActive, isTurnLive, renderStream, resetStreamState, setStreamReasoning, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
+import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, convergeFinishedStreamText, endStream, isStreamActive, isTurnLive, renderStream, resetStreamContent, resetStreamState, setStreamReasoning, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 import { handleTodoSSEEvent } from "./todos.js";
 import { isNetDegraded, onNetStateChange, webAuthToken } from "./util.js";
 
@@ -225,6 +225,11 @@ function onSSEEvent(eventName, data) {
         refreshScreen();
       }
       break;
+    case "assistant_stream_reset":
+      if (isStreamActive()) {
+        resetStreamContent();
+      }
+      break;
     case "tool_start":
       if (isStreamActive()) {
         setStreamTool("[工具: " + (data.tool_name || "?") + " 执行中…]");
@@ -407,7 +412,7 @@ function openEventSource() {
   ["connected", "heartbeat", "screen_refresh", "session_switched", "error",
    "session_start", "session_end", "session_interrupted",
    "turn_start", "turn_delta", "turn_end",
-   "assistant_delta", "assistant_message", "assistant_image_progress", "reasoning_delta",
+   "assistant_delta", "assistant_message", "assistant_stream_reset", "assistant_image_progress", "reasoning_delta",
    "tool_start", "tool_end", "approval_requested", "approval_resolved",
    "question_asked", "question_answered",
    "checkpoint_created",

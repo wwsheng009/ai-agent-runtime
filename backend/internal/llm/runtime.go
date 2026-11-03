@@ -109,6 +109,9 @@ const (
 	EventTypeDone      StreamEventType = "done"
 	EventTypeError     StreamEventType = "error"
 	EventTypeReasoning StreamEventType = "reasoning"
+	// EventTypeReset is a retry boundary. The next text/reasoning chunk belongs
+	// to a fresh attempt and must replace the previous attempt's partial stream.
+	EventTypeReset StreamEventType = "reset"
 )
 
 // NewLLMRuntime 创建 LLM 运行时

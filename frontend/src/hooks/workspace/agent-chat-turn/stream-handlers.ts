@@ -146,6 +146,26 @@ export function createAgentChatStreamHandlers(
       scope: deltaCoordinator ?? null,
     });
 
+  const streamIDOf = (payload: AgentChatStreamChunkPayload): string =>
+    typeof payload.stream_id === "string" ? payload.stream_id.trim() : "";
+
+  const ensureTextStreamStart = (streamID: string) => {
+    if (!streamID || streamID in turnState.streamTextStart) {
+      return;
+    }
+    turnState.streamTextStart[streamID] = turnState.streamedText.length;
+  };
+
+  const ensureReasoningStreamStart = (streamID: string) => {
+    if (!streamID || streamID in turnState.streamReasoningStart) {
+      return;
+    }
+    turnState.streamReasoningStart[streamID] = {
+      text: turnState.reasoningText.length,
+      block: turnState.reasoningBlocks.length,
+    };
+  };
+
   return {
     onMeta: (payload: AgentChatStreamMetaPayload) => {
       pushTrajectory("meta", payload);
@@ -221,6 +241,12 @@ export function createAgentChatStreamHandlers(
       // delta key（claim 在下方，被拒的帧走不到那里）。
       const replace = isReplaceStreamChunk(payload);
       const frameKind = payload.type === "image" ? "image" : "text";
+      if (!replace) {
+        const earlyDelta = getStreamTextDelta(payload);
+        if (earlyDelta) {
+          ensureTextStreamStart(streamIDOf(payload));
+        }
+      }
       if (!replace && !admitContentFrame(frameKind, payload)) {
         return;
       }
@@ -292,18 +318,20 @@ export function createAgentChatStreamHandlers(
       frameScheduler.schedule();
     },
     onReasoning: (payload: AgentChatStreamChunkPayload) => {
+      const delta =
+        typeof payload.content === "string"
+          ? payload.content
+          : payload.reasoning && typeof payload.reasoning.content === "string"
+            ? payload.reasoning.content
+            : "";
+      if (delta) {
+        ensureReasoningStreamStart(streamIDOf(payload));
+      }
       if (!admitContentFrame("reasoning", payload)) {
         return;
       }
       pushTrajectory("reasoning", payload);
       turnState.receivedRuntimeActivity = true;
-      const delta =
-        typeof payload.content === "string"
-          ? payload.content
-          : payload.reasoning &&
-              typeof payload.reasoning.content === "string"
-            ? payload.reasoning.content
-            : "";
       if (delta) {
         const reasoningKey = getRuntimeDeltaKey(
           payload as unknown as Record<string, unknown>,
@@ -329,6 +357,44 @@ export function createAgentChatStreamHandlers(
         setPhaseAndRef("streaming");
         frameScheduler.schedule();
       }
+    },
+    onReset: (payload: AgentChatStreamChunkPayload) => {
+      const streamID = streamIDOf(payload);
+      if (!streamID) {
+        return;
+      }
+      const textStart = turnState.streamTextStart[streamID];
+      const reasoningStart = turnState.streamReasoningStart[streamID];
+      if (textStart !== undefined) {
+        turnState.streamedText = turnState.streamedText.slice(0, textStart);
+      }
+      if (reasoningStart) {
+        turnState.reasoningText = turnState.reasoningText.slice(
+          0,
+          reasoningStart.text,
+        );
+        turnState.reasoningBlocks = turnState.reasoningBlocks.slice(
+          0,
+          reasoningStart.block,
+        );
+        turnState.reasoningBlockToolCounts =
+          turnState.reasoningBlockToolCounts.slice(0, reasoningStart.block);
+        // Force the next reasoning chunk to open a fresh block rather than
+        // appending to the failed attempt's last block.
+        turnState.reasoningBlockBoundaryCount = -1;
+      }
+      turnState.reasoningRunning = false;
+      setLiveStreamText(assistantMessageId, turnState.streamedText);
+      setLiveStreamReasoning(assistantMessageId, "");
+      // The next attempt reuses this stream_id; its contribution starts at the
+      // truncated baseline.
+      turnState.streamTextStart[streamID] = turnState.streamedText.length;
+      turnState.streamReasoningStart[streamID] = {
+        text: turnState.reasoningText.length,
+        block: turnState.reasoningBlocks.length,
+      };
+      setPhaseAndRef("streaming");
+      frameScheduler.schedule();
     },
     onToolStart: (payload: AgentChatStreamChunkPayload) => {
       pushTrajectory("tool_start", payload);

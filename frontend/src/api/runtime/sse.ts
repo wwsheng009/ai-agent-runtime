@@ -154,6 +154,11 @@ type AgentChatStreamHandlers = {
   onOrchestration?: (payload: Record<string, unknown>) => void;
   onPlanning?: (payload: Record<string, unknown>) => void;
   onReasoning?: (payload: AgentChatStreamChunkPayload) => void;
+  /**
+   * Retry boundary: the failed attempt's partially streamed text/reasoning must
+   * be discarded before the next attempt's chunks arrive.
+   */
+  onReset?: (payload: AgentChatStreamChunkPayload) => void;
   onResult?: (payload: AgentChatResult) => void;
   onRoute?: (payload: Record<string, unknown>) => void;
   onSubagent?: (payload: Record<string, unknown>) => void;
@@ -444,6 +449,9 @@ export async function streamAgentChat(
           return;
         case "reasoning":
           handlers.onReasoning?.(payload as AgentChatStreamChunkPayload);
+          return;
+        case "reset":
+          handlers.onReset?.(payload as AgentChatStreamChunkPayload);
           return;
         case "tool_start":
           handlers.onToolStart?.(payload as AgentChatStreamChunkPayload);

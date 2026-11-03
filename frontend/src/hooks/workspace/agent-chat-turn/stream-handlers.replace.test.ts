@@ -67,6 +67,54 @@ describe("chat 流文本帧的写入语义", () => {
   });
 });
 
+describe("provider 重试边界", () => {
+  it("只回滚当前 stream 的部分输出，保留之前工具步的正文与推理", () => {
+    const { handlers, turnState } = createHarness();
+    handlers.onChunk({
+      type: "text",
+      stream_id: "stream-prev",
+      content: "previous step",
+    });
+    handlers.onReasoning({
+      type: "reasoning",
+      stream_id: "stream-prev",
+      content: "prev think",
+    });
+    handlers.onChunk({
+      type: "text",
+      stream_id: "stream-1",
+      content: "failed answer",
+    });
+    handlers.onReasoning({
+      type: "reasoning",
+      stream_id: "stream-1",
+      content: "failed think",
+    });
+
+    handlers.onReset({ type: "reset", stream_id: "stream-1" });
+
+    expect(turnState.streamedText).toBe("previous step");
+    expect(turnState.reasoningBlocks).toEqual(["prev think"]);
+
+    handlers.onChunk({
+      type: "text",
+      stream_id: "stream-1",
+      content: "new answer",
+    });
+    handlers.onReasoning({
+      type: "reasoning",
+      stream_id: "stream-1",
+      content: "new think",
+    });
+
+    expect(turnState.streamedText).toBe("previous stepnew answer");
+    expect(turnState.reasoningBlocks).toEqual(["prev think", "new think"]);
+    expect(getLiveStreamEntry("msg-1")?.text).toBe(
+      "previous stepnew answer",
+    );
+  });
+});
+
 describe("推理块边界：正文帧把当前块关上", () => {
   it("正文帧同样把当前推理块关上（同一工具区间内新起一块）", () => {
     const { handlers, turnState } = createHarness();

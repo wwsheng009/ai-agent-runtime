@@ -130,6 +130,7 @@ func buildKnownEventTypes() map[string]bool {
 		"assistant_reasoning",       // :9
 		"assistant.reasoning",       // :13（canonical 别名）
 		"assistant.image_progress",  // :14
+		"assistant_stream_reset",    // events.EventAssistantStreamReset（重试 attempt 边界）
 		"assistant_message",         // :15
 		"llm_request_started",       // :16
 		"llm_request_finished",      // :17

@@ -104,6 +104,9 @@ var runtimeEventContracts = []Contract{
 	{Type: "assistant_reasoning", Channels: ChannelSessionStore, PersistStreamDelta: true},
 	{Type: "assistant.reasoning", Channels: ChannelSessionStore, PersistStreamDelta: true},
 	{Type: "assistant.image_progress", Channels: ChannelSessionStore},
+	// 重试 attempt 边界：必须落盘，否则事件回放会把被撤销的上一轮正文
+	// 重新拼进最终回答。低频（每次重试一条），立即 flush 以保证回放顺序。
+	{Type: EventAssistantStreamReset, Channels: ChannelSessionStore, PersistCritical: true},
 
 	// ---- A 通道：主 Agent 动态 route 治理事件（方案 §6.2；MG3 的修复）----
 	// 全部走 A 通道：成本归因、失败/降级路径与「还原到基线」的证据都必须在事后

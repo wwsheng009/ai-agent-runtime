@@ -12,6 +12,14 @@ export type ChatTurnRuntimeState = {
   currentSource: string;
   currentKind: string;
   streamedText: string;
+  /**
+   * Per LLM stream start offsets in the turn-level accumulators. A provider
+   * retry reuses the same stream_id but regenerates the whole response; the
+   * reset frame truncates only the failed attempt's contribution and leaves
+   * earlier tool steps' text/reasoning intact.
+   */
+  streamTextStart: Record<string, number>;
+  streamReasoningStart: Record<string, { text: number; block: number }>;
   reasoningText: string;
   /**
    * 分块推理：一个回合里推理与工具是**交替**出现的（推理 → 工具 → 工具 → 推理 → …），
@@ -69,6 +77,8 @@ export function createTurnRuntimeState(
     currentSource: threadSnapshot.runtimeSource ?? "runtime",
     currentKind: "llm",
     streamedText: "",
+    streamTextStart: {},
+    streamReasoningStart: {},
     reasoningText: "",
     reasoningBlocks: [],
     reasoningBlockToolCounts: [],

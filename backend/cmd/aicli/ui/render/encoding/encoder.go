@@ -97,15 +97,15 @@ func ReasoningOperationForEvent(ev runtimeevents.Event) ReasoningOperation {
 // 并发：非线程安全。由事件消费侧（chatRuntimeEventBridge 的单 goroutine
 // 事件循环）独占调用。
 type EventEncoder struct {
-	model                  *RenderModel
-	nextItemID             uint64 // item-{n} 单调分配
-	nextSeq                uint64 // 提交序号单调分配
-	clock                  uint64 // 编码器时钟（每事件 +1）
-	revisions              map[string]uint64
-	assistantBy            map[string]*Item                 // canonical request key -> 当前 assistant item
-	assistantTombstones    map[string]struct{}              // canonical request key -> 已移除的空 assistant 终态
-	reasoningBy            map[string]*Item                 // canonical request key -> 当前 reasoning item
-	reasoningBarriers      map[string]bool                  // request key -> assistant native-history ordering fence
+	model               *RenderModel
+	nextItemID          uint64 // item-{n} 单调分配
+	nextSeq             uint64 // 提交序号单调分配
+	clock               uint64 // 编码器时钟（每事件 +1）
+	revisions           map[string]uint64
+	assistantBy         map[string]*Item    // canonical request key -> 当前 assistant item
+	assistantTombstones map[string]struct{} // canonical request key -> 已移除的空 assistant 终态
+	reasoningBy         map[string]*Item    // canonical request key -> 当前 reasoning item
+	reasoningBarriers   map[string]bool     // request key -> assistant native-history ordering fence
 
 	// reasoningBuilders 按 request key 缓存 reasoning 正文的增量缓冲。
 	//
@@ -116,7 +116,7 @@ type EventEncoder struct {
 	//
 	// strings.Builder 的 String() 与 WriteString 都不复制已写内容，因此追加降为
 	// O(len(delta))；仅在快照替换（非 delta 路径）或 item 终态时丢弃重建。
-	reasoningBuilders map[string]*strings.Builder
+	reasoningBuilders      map[string]*strings.Builder
 	requestAliases         map[string]string                // transport/logical alias -> canonical request key
 	latestRequestByScope   map[string]string                // turn/logical-turn/trace scope -> 最新 request key
 	requestFinished        map[string]bool                  // request key -> 已收到 request finished
@@ -126,6 +126,8 @@ type EventEncoder struct {
 	priorityBy             map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
 	streamOrder            map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
 	reasoningOrder         map[string]*assistantStreamOrder // canonical request key -> reasoning delta 有序提交状态
+	assistantResetPending  map[string]bool                  // retry boundary: next assistant delta establishes a new sequence baseline
+	reasoningResetPending  map[string]bool                  // retry boundary: next reasoning delta establishes a new sequence baseline
 	assistantSnapshotBy    map[string]string                // request key -> llm.request.finished 携带的权威全文
 	orderingBarrierEnabled bool                             // production bridge reserves a hidden reasoning predecessor
 	stats                  Stats
@@ -198,23 +200,25 @@ type priorityPromptState struct {
 // NewEventEncoder 创建空编码器。
 func NewEventEncoder() *EventEncoder {
 	return &EventEncoder{
-		model:                &RenderModel{},
-		revisions:            make(map[string]uint64),
-		assistantBy:          make(map[string]*Item),
-		assistantTombstones:  make(map[string]struct{}),
-		reasoningBy:          make(map[string]*Item),
-		reasoningBarriers:    make(map[string]bool),
-		reasoningBuilders:    make(map[string]*strings.Builder),
-		requestAliases:       make(map[string]string),
-		latestRequestByScope: make(map[string]string),
-		requestFinished:      make(map[string]bool),
-		requestFailureBy:     make(map[string]*Item),
-		toolByID:             make(map[string]*Item),
-		toolOutputBy:         make(map[string]map[string]struct{}),
-		priorityBy:           make(map[string]*priorityPromptState),
-		streamOrder:          make(map[string]*assistantStreamOrder),
-		reasoningOrder:       make(map[string]*assistantStreamOrder),
-		assistantSnapshotBy:  make(map[string]string),
+		model:                 &RenderModel{},
+		revisions:             make(map[string]uint64),
+		assistantBy:           make(map[string]*Item),
+		assistantTombstones:   make(map[string]struct{}),
+		reasoningBy:           make(map[string]*Item),
+		reasoningBarriers:     make(map[string]bool),
+		reasoningBuilders:     make(map[string]*strings.Builder),
+		requestAliases:        make(map[string]string),
+		latestRequestByScope:  make(map[string]string),
+		requestFinished:       make(map[string]bool),
+		requestFailureBy:      make(map[string]*Item),
+		toolByID:              make(map[string]*Item),
+		toolOutputBy:          make(map[string]map[string]struct{}),
+		priorityBy:            make(map[string]*priorityPromptState),
+		streamOrder:           make(map[string]*assistantStreamOrder),
+		reasoningOrder:        make(map[string]*assistantStreamOrder),
+		assistantResetPending: make(map[string]bool),
+		reasoningResetPending: make(map[string]bool),
+		assistantSnapshotBy:   make(map[string]string),
 	}
 }
 
@@ -897,6 +901,11 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 		// （handleEvent 的 RefreshStatus），不产生 transcript/system cell。
 		return opNone
 
+	case runtimeevents.EventAssistantStreamReset:
+		// Retry boundary: the next attempt reuses the same request/stream
+		// identity, so the renderer cannot infer it from delta sequence alone.
+		return opAssistantStreamReset
+
 	case runtimechat.EventCheckpointCreated,
 		runtimechat.EventRewindStarted,
 		runtimechat.EventRewindFinished,
@@ -990,20 +999,21 @@ func isSilentSystemEventType(eventType string) bool {
 type op int
 
 const (
-	opNone              op = iota // 静默事件：不产生任何变更（内部生命周期/遥测）
-	opSystem                      // 系统/会话事件：append 独立 system 块
-	opPriorityRequested           // approval/question：登记 pending prompt identity，不产生 Scene item
-	opPriorityResolved            // approval/question 终态：记录 resolution，保留晚到 transcript identity
-	opReasoning                   // reasoning：append/upsert 当前 assistant 下
-	opAssistantDelta              // assistant delta：upsert 当前流
-	opAssistantFinal              // assistant 完成：upsert 终态
-	opLLMStarted                  // LLM 请求开始：登记流身份，不创建可见占位
-	opLLMFinished                 // LLM 请求结束：成功等待 final，失败终结并呈现错误
-	opSessionEnd                  // 会话终止：收尾所有未完成的流式项（不产生 system 行）
-	opToolStarted                 // 工具调用发起：append tool_call（分配 CauseID）
-	opToolProgress                // 工具运行进度：upsert 同一 mutable tool_call
-	opToolFinished                // 工具完成：upsert tool_call 终态 + append tool_output
-	opToolReceipt                 // 工具持久化回执：幂等复用既有 tool_call（绝不新建调用行）
+	opNone                 op = iota // 静默事件：不产生任何变更（内部生命周期/遥测）
+	opSystem                         // 系统/会话事件：append 独立 system 块
+	opPriorityRequested              // approval/question：登记 pending prompt identity，不产生 Scene item
+	opPriorityResolved               // approval/question 终态：记录 resolution，保留晚到 transcript identity
+	opReasoning                      // reasoning：append/upsert 当前 assistant 下
+	opAssistantDelta                 // assistant delta：upsert 当前流
+	opAssistantFinal                 // assistant 完成：upsert 终态
+	opAssistantStreamReset           // retry boundary：discard the previous attempt's partial cells
+	opLLMStarted                     // LLM 请求开始：登记流身份，不创建可见占位
+	opLLMFinished                    // LLM 请求结束：成功等待 final，失败终结并呈现错误
+	opSessionEnd                     // 会话终止：收尾所有未完成的流式项（不产生 system 行）
+	opToolStarted                    // 工具调用发起：append tool_call（分配 CauseID）
+	opToolProgress                   // 工具运行进度：upsert 同一 mutable tool_call
+	opToolFinished                   // 工具完成：upsert tool_call 终态 + append tool_output
+	opToolReceipt                    // 工具持久化回执：幂等复用既有 tool_call（绝不新建调用行）
 )
 
 // apply 执行一次编码操作。
@@ -1023,6 +1033,8 @@ func (e *EventEncoder) apply(o op, ev runtimeevents.Event, cs *ChangeSet) {
 		e.applyAssistantDelta(ev, cs)
 	case opAssistantFinal:
 		e.applyAssistantFinal(ev, cs)
+	case opAssistantStreamReset:
+		e.applyAssistantStreamReset(ev, cs)
 	case opLLMStarted:
 		e.applyLLMStarted(ev, cs)
 	case opLLMFinished:
@@ -1613,18 +1625,27 @@ func (e *EventEncoder) orderReasoningDelta(key, text string, payload map[string]
 	if !hasSeq || seq == 0 {
 		// Compatibility for legacy providers without ordering metadata. Preserve
 		// bytes and arrival order; do not guess replay from repeated prose.
+		delete(e.reasoningResetPending, key)
 		return text, true
 	}
+	coalescedFrom, coalesced := assistantCoalescedFrom(payload)
 	order := e.reasoningOrder[key]
 	if order == nil {
-		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
+		nextSeq := uint64(1)
+		if e.reasoningResetPending[key] {
+			nextSeq = seq
+			if coalesced && coalescedFrom > 0 {
+				nextSeq = coalescedFrom
+			}
+			delete(e.reasoningResetPending, key)
+		}
+		order = &assistantStreamOrder{nextSeq: nextSeq, pending: make(map[uint64]assistantPendingDelta)}
 		e.reasoningOrder[key] = order
 	}
 	if seq < order.nextSeq {
 		e.stats.DuplicateCount++
 		return "", false
 	}
-	coalescedFrom, coalesced := assistantCoalescedFrom(payload)
 	if coalesced && coalescedFrom < order.nextSeq {
 		e.stats.DuplicateCount++
 		return "", false
@@ -1722,6 +1743,7 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 	}
 	// legacy 路径：无 sequence 身份时按到达顺序直接拼接（兼容旧 provider）。
 	if !hasSeq || seq == 0 {
+		delete(e.assistantResetPending, key)
 		u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
 			if t.Head == "" {
 				t.Head = delta
@@ -1737,9 +1759,18 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 		}
 		return
 	}
+	coalescedFrom, coalesced := assistantCoalescedFrom(ev.Payload)
 	order := e.streamOrder[key]
 	if order == nil {
-		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
+		nextSeq := uint64(1)
+		if e.assistantResetPending[key] {
+			nextSeq = seq
+			if coalesced && coalescedFrom > 0 {
+				nextSeq = coalescedFrom
+			}
+			delete(e.assistantResetPending, key)
+		}
+		order = &assistantStreamOrder{nextSeq: nextSeq, pending: make(map[uint64]assistantPendingDelta)}
 		e.streamOrder[key] = order
 	}
 	if seq < order.nextSeq {
@@ -1747,7 +1778,6 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 		e.stats.DuplicateCount++
 		return
 	}
-	coalescedFrom, coalesced := assistantCoalescedFrom(ev.Payload)
 	if coalesced && coalescedFrom < order.nextSeq {
 		// The merged interval overlaps already committed content; skip the
 		// whole block instead of partially re-applying its text.
@@ -1879,6 +1909,45 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	if changed {
 		e.change(cs, OpUpsert, u)
 	}
+}
+
+// applyAssistantStreamReset discards the previous retry attempt's visible
+// assistant/reasoning cells. Provider retries reuse llm_request_id and
+// stream_id, and sequence numbers may continue monotonically, so this control
+// event is the only reliable attempt boundary available to the renderer.
+func (e *EventEncoder) applyAssistantStreamReset(ev runtimeevents.Event, cs *ChangeSet) {
+	if e == nil || cs == nil {
+		return
+	}
+	key := e.resolveAssistantRequestKey(ev)
+	if key == "" {
+		return
+	}
+	if it := e.assistantBy[key]; it != nil && it.Status == StatusCompleted {
+		// A completed response is not a retry's partial attempt. Ignore a late
+		// reset rather than mutating durable final content.
+		e.stats.DuplicateCount++
+		return
+	}
+	if it := e.assistantBy[key]; it != nil {
+		delete(e.assistantBy, key)
+		e.removeItem(it.ID, cs)
+	}
+	if it := e.reasoningBy[key]; it != nil {
+		delete(e.reasoningBy, key)
+		e.removeItem(it.ID, cs)
+	}
+	delete(e.streamOrder, key)
+	delete(e.reasoningOrder, key)
+	delete(e.reasoningBuilders, key)
+	delete(e.reasoningBarriers, key)
+	delete(e.assistantSnapshotBy, key)
+	delete(e.requestFinished, key)
+	delete(e.assistantTombstones, key)
+	// The next attempt may start at any sequence (the agent loop may reset its
+	// counter or continue it). Establish the baseline from the first delta.
+	e.assistantResetPending[key] = true
+	e.reasoningResetPending[key] = true
 }
 
 // applyAssistantResponseSnapshot converges the assistant item for one completed

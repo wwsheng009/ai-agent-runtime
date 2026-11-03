@@ -167,6 +167,7 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventAssistantDelta, SSEEvent: "assistant_delta", Desc: "流式文本增量"},
 	{BusEvent: runtimechat.EventAssistantReasoningDelta, SSEEvent: "reasoning_delta", Desc: "推理增量"},
 	{BusEvent: runtimechat.EventAssistantReasoning, SSEEvent: "reasoning_delta", Desc: "推理增量（旧别名）"},
+	{BusEvent: runtimeevents.EventAssistantStreamReset, SSEEvent: "assistant_stream_reset", Desc: "重试边界：清空上一轮增量"},
 	{BusEvent: runtimechat.EventAssistantMessage, SSEEvent: "assistant_message", Desc: "助手完整消息"},
 	{BusEvent: runtimechat.EventAssistantImageProgress, SSEEvent: "assistant_image_progress", Desc: "图像生成进度"},
 	{BusEvent: runtimechat.EventLLMRequestFinished, SSEEvent: "turn_end", Desc: "LLM 请求完成"},
@@ -283,6 +284,16 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 				data["text"] = v
 			}
 		}
+
+	case runtimeevents.EventAssistantStreamReset:
+		// Retry boundary: the browser must discard the previous attempt's
+		// streamed text/reasoning before applying the next attempt's deltas.
+		pickField(data, payload, "turn_id")
+		pickField(data, payload, "stream_id")
+		pickField(data, payload, "llm_request_id")
+		pickField(data, payload, "step")
+		pickField(data, payload, "attempt")
+		pickField(data, payload, "retry_reason")
 
 	case runtimechat.EventAssistantMessage:
 		pickField(data, payload, "turn_id")

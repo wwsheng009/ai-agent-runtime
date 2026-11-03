@@ -2015,6 +2015,15 @@ func validateAssistantMessageSemantics(assistantMsg map[string]interface{}) erro
 
 	toolCalls := assistantMessageToolCalls(assistantMsg)
 	if (finishReason == "tool_calls" || finishReason == "function_call") && len(toolCalls) == 0 {
+		// Protocol-agnostic recovery for OpenAI-compatible relays that label a
+		// complete text answer as a tool-call finish while dropping the call.
+		// Replaying cannot recover a call that was never emitted and only causes
+		// the same answer to be streamed repeatedly. A non-empty assistant body is
+		// the authoritative final output in this shape; normalize it to stop.
+		if strings.TrimSpace(stringValue(assistantMsg["content"])) != "" {
+			assistantMsg["finish_reason"] = "stop"
+			return nil
+		}
 		return &assistantProtocolError{code: "missing_tool_call", message: fmt.Sprintf("finish_reason=%s was returned without a tool call", finishReason)}
 	}
 	for index, call := range toolCalls {

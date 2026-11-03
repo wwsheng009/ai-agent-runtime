@@ -688,6 +688,17 @@ func validateOpenAIStreamState(state *StreamState) error {
 	switch finishReason {
 	case "tool_calls", "function_call":
 		if len(state.ToolCalls)+len(state.MarkupCalls) == 0 {
+			// Some OpenAI-compatible gateways set finish_reason=tool_calls even
+			// though the model produced a complete text answer and no call at all.
+			// There is no executable call to recover by replaying the request; the
+			// only effect of treating this as a protocol error is a retry storm that
+			// appends the same answer to the transcript dozens of times. Normalize a
+			// non-empty final answer to stop, while keeping the hard failure for a
+			// truly empty tool-call response.
+			if strings.TrimSpace(state.Content.String()) != "" {
+				state.FinishReason = "stop"
+				break
+			}
 			return &openAIProtocolError{
 				code:    "missing_tool_call",
 				message: fmt.Sprintf("finish_reason=%s was returned without a tool call", finishReason),

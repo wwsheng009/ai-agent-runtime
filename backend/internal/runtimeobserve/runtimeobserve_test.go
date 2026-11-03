@@ -423,6 +423,7 @@ func TestKnownEventTypeCatalogCoversLocalLoopEmits(t *testing.T) {
 	for _, eventType := range []string{
 		"assistant.reasoning",                    // internal/agent/loop.go:1711/:2094
 		"assistant_delta",                        // internal/agent/loop.go:1683
+		"assistant_stream_reset",                 // internal/agent/loop.go：retry attempt boundary
 		"assistant.delta",                        // 点分隔等价形（agent_stdio_bridge.go:245）
 		"tool.requested",                         // internal/agent/loop.go:2143
 		"tool.completed",                         // internal/agent/loop.go:2295 等

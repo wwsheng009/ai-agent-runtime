@@ -182,6 +182,7 @@ func TestExternalEventFamilyConstantsAreRegistered(t *testing.T) {
 		{agentcontrol.EventAgentReclaimed, events.ChannelSessionStore},
 		{chat.EventAssistantDelta, events.ChannelSessionStore},
 		{chat.EventAssistantReasoningDelta, events.ChannelSessionStore},
+		{events.EventAssistantStreamReset, events.ChannelSessionStore},
 		{chat.EventSessionCompactFailed, events.ChannelSessionStore},
 		// 托管 turn 生命周期里程碑（方案 §6.8 / 审计 G3）：A+D，边沿触发。
 		// 与 TestSubagentAuditEventChannelRegistrations 同口径地断言"已知目录"三

@@ -206,7 +206,7 @@ func TestReActLoop_RetryReporterSuppressesRepeatedUpstreamInvalidResponse(t *tes
 		Model:    "test-model",
 		Metadata: map[string]interface{}{"prompt_fingerprint": "fp-field"},
 	}
-	reporter := loop.runtimeRetryEventReporter("trace_retry", "session_retry", 1, req, breaker)
+	reporter := loop.runtimeRetryEventReporter("trace_retry", "session_retry", "turn_retry", 1, req, breaker)
 	require.NotNil(t, reporter)
 
 	for attempt := 1; attempt <= 6; attempt++ {
@@ -224,6 +224,66 @@ func TestReActLoop_RetryReporterSuppressesRepeatedUpstreamInvalidResponse(t *tes
 
 	reporter(llm.RetryEvent{Source: "test", ErrorCode: "TRANSPORT_TIMEOUT"})
 	require.Len(t, retryEvents, 2, "unrelated error codes keep their per-attempt events")
+}
+
+// Reset is a transcript control event, not status-line spam. Even when the
+// repeated UPSTREAM_INVALID_RESPONSE retry line is aggregated away, every
+// attempt must still invalidate the previous partial stream.
+func TestReActLoop_RetryReporterEmitsStreamResetEvenWhenStatusSuppressed(t *testing.T) {
+	loop, _ := newTurnBudgetTestLoop(t, 3, []*llm.LLMResponse{{Content: "ok", Model: "test-model"}})
+	bus := runtimeevents.NewBus()
+	var resetEvents []runtimeevents.Event
+	var retryEvents []runtimeevents.Event
+	bus.Subscribe(runtimeevents.EventAssistantStreamReset, func(event runtimeevents.Event) {
+		resetEvents = append(resetEvents, event)
+	})
+	bus.Subscribe("llm.retry", func(event runtimeevents.Event) {
+		retryEvents = append(retryEvents, event)
+	})
+	loop.agent.SetEventBus(bus)
+	var resetChunks []llm.StreamChunk
+	loop.config.StreamSink = func(chunk llm.StreamChunk) {
+		resetChunks = append(resetChunks, chunk)
+	}
+
+	breaker := NewPromptCacheBreaker(PromptCacheBreakerSpec{})
+	req := &llm.LLMRequest{
+		Provider: "test-provider",
+		Model:    "test-model",
+		Metadata: map[string]interface{}{"prompt_fingerprint": "fp-field"},
+	}
+	reporter := loop.runtimeRetryEventReporter("trace_retry", "session_retry", "turn_retry", 3, req, breaker)
+	require.NotNil(t, reporter)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		reporter(llm.RetryEvent{
+			Source:        "test",
+			Attempt:       attempt,
+			MaxAttempts:   10,
+			ErrorCode:     UpstreamInvalidResponseCode,
+			RetryReason:   "malformed_tool_call",
+			LogicalTurnID: "trace_retry",
+			LLMRequestID:  "llm_req_retry",
+			StreamID:      "stream_retry",
+			PartialOutput: true,
+		})
+	}
+	require.Len(t, retryEvents, 1, "status line keeps only the first identical retry")
+	require.Len(t, resetEvents, 3, "every retry attempt must reset the previous partial stream")
+	for index, event := range resetEvents {
+		require.Equal(t, "turn_retry", event.Payload["turn_id"])
+		require.Equal(t, "stream_retry", event.Payload["stream_id"])
+		require.Equal(t, "llm_req_retry", event.Payload["llm_request_id"])
+		require.EqualValues(t, index+1, event.Payload["attempt"])
+		require.Equal(t, true, event.Payload["partial_output"])
+	}
+	require.Len(t, resetChunks, 3, "the agent-chat SSE sink must receive every reset boundary")
+	for _, chunk := range resetChunks {
+		require.Equal(t, llm.EventTypeReset, chunk.Type)
+		require.Equal(t, "stream_retry", chunk.StreamID)
+		require.Equal(t, "turn_retry", chunk.TurnID)
+		require.Equal(t, "retry_reset", chunk.Metadata["reason"])
+	}
 }
 
 // run 退出时的汇总上报契约：有聚合内容才发一条 warn，发过即清空，不重复。

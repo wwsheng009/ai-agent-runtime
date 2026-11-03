@@ -57,6 +57,7 @@ func waitForBridgeCondition(t *testing.T, what string, timeout time.Duration, co
 func TestClassifyChatRuntimeEventMapsDeliveryClasses(t *testing.T) {
 	critical := []string{
 		runtimechat.EventAssistantMessage,
+		runtimeevents.EventAssistantStreamReset,
 		runtimechat.EventSessionEnd,
 		runtimechat.EventSessionInterrupted,
 		"run_end",

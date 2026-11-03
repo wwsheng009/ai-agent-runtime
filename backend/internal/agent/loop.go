@@ -2847,7 +2847,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	// PR-4 §6.4 第 5 条：run 级熔断器（run() 经 ctx 注入）。上报器与下面的
 	// 请求前退避共用同一实例，因此"计数"和"抑制"看到的是同一份连续失败历史。
 	cacheBreaker := promptCacheBreakerFromContext(ctx)
-	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req, cacheBreaker))
+	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, turnID, step, req, cacheBreaker))
 	// P0-3：本 run 的退化恢复配额与「被丢弃尝试」用量账本挂到 ctx 上，provider /
 	// gateway 重试循环读取同一份实例；失败尝试的 provider 上报用量在这里累积，
 	// 由本函数与 run() 计入步骤用量、run 用量与预算。
@@ -4400,7 +4400,7 @@ func (loop *ReActLoop) emitAggregatedRetryReport(sessionID, traceID string, step
 	return true
 }
 
-func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step int, req *llm.LLMRequest, breaker *PromptCacheBreaker) llm.RetryEventReporter {
+func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID, turnID string, step int, req *llm.LLMRequest, breaker *PromptCacheBreaker) llm.RetryEventReporter {
 	if loop == nil || loop.agent == nil {
 		return nil
 	}
@@ -4411,6 +4411,14 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 		requestModel = strings.TrimSpace(req.Model)
 	}
 	return func(event llm.RetryEvent) {
+		// Every retry is a new rendering attempt. The previous attempt may have
+		// emitted a partial assistant/reasoning stream under the same request and
+		// stream identity; tell renderers to discard that partial stream before
+		// the next attempt starts. Emit this control event before the status-line
+		// aggregation gate: the first retry may still be shown, while identical
+		// UPSTREAM_INVALID_RESPONSE retries are intentionally suppressed from the
+		// status line but must still reset the transcript.
+		loop.emitAssistantStreamResetEvent(traceID, sessionID, turnID, step, req, event)
 		// PR-4 §6.4 第 5 条：UPSTREAM_INVALID_RESPONSE 不逐条外发。首次保留一条
 		// （状态行仍能显示"正在重试"），其后同类只在熔断器里计数，run 结束由
 		// llm.retry.aggregated 一次性上报（现场 6 次刷屏 → 1 条首次 + 1 条汇总）。
@@ -4470,6 +4478,69 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 			}
 		}
 		loop.emitRuntimeEvent("llm.retry", sessionID, "", payload)
+	}
+}
+
+// emitAssistantStreamResetEvent publishes the protocol-level retry boundary
+// consumed by transcript encoders. Retry events are synchronous with respect to
+// the provider loop: this event is published before prepareRetry waits and
+// before the next attempt can emit any delta, so consumers can safely drop the
+// previous attempt's non-terminal cells.
+func (loop *ReActLoop) emitAssistantStreamResetEvent(traceID, sessionID, turnID string, step int, req *llm.LLMRequest, event llm.RetryEvent) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"trace_id":            traceID,
+		"turn_id":             strings.TrimSpace(turnID),
+		"step":                step,
+		"source":              strings.TrimSpace(event.Source),
+		"logical_turn_id":     strings.TrimSpace(event.LogicalTurnID),
+		"llm_request_id":      strings.TrimSpace(event.LLMRequestID),
+		"retry_attempt_id":    strings.TrimSpace(event.RetryAttemptID),
+		"provider_request_id": strings.TrimSpace(event.ProviderRequestID),
+		"stream_id":           strings.TrimSpace(event.StreamID),
+		"retry_reason":        strings.TrimSpace(event.RetryReason),
+		"error_code":          strings.TrimSpace(event.ErrorCode),
+		"partial_output":      event.PartialOutput,
+	}
+	if event.Attempt > 0 {
+		payload["attempt"] = event.Attempt
+	}
+	if event.MaxAttempts > 0 {
+		payload["max_attempts"] = event.MaxAttempts
+	}
+	if req != nil {
+		if provider := firstNonEmptyTrimmed(event.Provider, req.Provider); provider != "" {
+			payload["provider"] = provider
+		}
+		if model := firstNonEmptyTrimmed(event.Model, req.Model); model != "" {
+			payload["model"] = model
+		}
+	}
+	for key, value := range payload {
+		if text, ok := value.(string); ok && text == "" {
+			delete(payload, key)
+		}
+	}
+	loop.emitRuntimeEvent(events.EventAssistantStreamReset, sessionID, "", payload)
+	if loop.config != nil && loop.config.StreamSink != nil {
+		streamID := strings.TrimSpace(event.StreamID)
+		if streamID == "" {
+			streamID = strings.TrimSpace(event.LLMRequestID)
+		}
+		loop.config.StreamSink(llm.StreamChunk{
+			Type:     llm.EventTypeReset,
+			StreamID: streamID,
+			TurnID:   strings.TrimSpace(turnID),
+			Step:     step,
+			Metadata: map[string]interface{}{
+				"reason":       "retry_reset",
+				"retry_reason": strings.TrimSpace(event.RetryReason),
+				"attempt":      event.Attempt,
+				"max_attempts": event.MaxAttempts,
+			},
+		})
 	}
 }
 

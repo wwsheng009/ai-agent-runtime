@@ -725,6 +725,7 @@ func classifyChatRuntimeEvent(eventType string) chatEventClass {
 		runtimechat.EventSessionEnd,
 		runtimechat.EventSessionInterrupted,
 		"run_end", "run.end",
+		runtimeevents.EventAssistantStreamReset,
 		// llm.request.finished 携带 assistant_snapshot（每次模型响应的权威
 		// 全文）：丢弃它等于丢弃已超越流式 delta 的内容，必须走 critical 通道。
 		runtimechat.EventLLMRequestFinished, // llm_request_finished
@@ -4515,6 +4516,12 @@ var chatEventLogJournal = struct {
 	failures atomic.Uint64
 }{}
 
+// chatEventLogFlushMu serializes flush barriers. Without it, a second flush
+// request can hit the capacity-1 flushReq while the first is still pending and
+// return immediately; a synchronous writer may then append the next control row
+// before the queued deltas are written, breaking replay order.
+var chatEventLogFlushMu sync.Mutex
+
 func chatEventLogStartWriter() bool {
 	chatEventLogJournal.once.Do(func() {
 		chatEventLogJournal.queue = make(chan eventLogWriteItem, eventLogQueueCapacity)
@@ -4530,6 +4537,8 @@ func chatEventLogFlush() {
 	if chatEventLogJournal.flushReq == nil {
 		return
 	}
+	chatEventLogFlushMu.Lock()
+	defer chatEventLogFlushMu.Unlock()
 	ack := make(chan error, 1)
 	select {
 	case chatEventLogJournal.flushReq <- ack:
@@ -4537,7 +4546,7 @@ func chatEventLogFlush() {
 		case <-ack:
 		case <-time.After(2 * time.Second):
 		}
-	default:
+	case <-time.After(2 * time.Second):
 	}
 }
 
@@ -4643,6 +4652,19 @@ func chatEventLogRunWriter() {
 				closeFile()
 			}
 		case ack := <-chatEventLogJournal.flushReq:
+			// Drain already-enqueued rows before acknowledging. A flush request
+			// is a read barrier for replay; writing the buffer without first
+			// consuming the queue lets a later synchronous control row land
+			// before earlier delta rows.
+		drainFlush:
+			for drained := 0; drained < eventLogQueueCapacity; drained++ {
+				select {
+				case item := <-chatEventLogJournal.queue:
+					writeLine(item)
+				default:
+					break drainFlush
+				}
+			}
 			flush()
 			ack <- nil
 		}
@@ -7205,6 +7227,10 @@ func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtime
 		// identity-less transport callback can arrive after EndRun; allowing it
 		// through would restart the activity clock and replace the completed
 		// status with a retry that no longer owns a live run.
+		return true
+	case runtimeevents.EventAssistantStreamReset:
+		// A late reset belongs to a retry that can no longer own the closed run;
+		// drop it rather than wiping a rendered final/failed cell.
 		return true
 	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
 		return true

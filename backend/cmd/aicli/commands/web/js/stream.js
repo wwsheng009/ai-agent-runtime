@@ -222,6 +222,18 @@ export function setStreamReasoning(text) {
   if (text) { streamReasoning = text; }
   if (streamReasoningRevealed > streamReasoning.length) { streamReasoningRevealed = streamReasoning.length; }
 }
+// Retry boundary: the provider is about to regenerate the full response under
+// the same stream identity. Drop the failed attempt's partial text so the next
+// attempt starts a fresh live bubble instead of appending a duplicate answer.
+export function resetStreamContent() {
+  streamReasoning = "";
+  streamText = "";
+  streamTool = "";
+  streamImages = [];
+  streamRevealed = 0;
+  streamReasoningRevealed = 0;
+  if (streamActive) { renderStream(); }
+}
 export function setStreamTool(text) { streamTool = text; }
 // 迟到终稿（assistant_message 在气泡收尾之后到达）：把权威全文补回已落行的
 // 本地兜底行。surface 可用时随后的 refreshScreen 会用权威行覆盖它；无 surface

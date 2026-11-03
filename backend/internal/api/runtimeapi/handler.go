@@ -2443,6 +2443,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				case llm.EventTypeReset:
+					// Retry boundary: the next attempt regenerates the full
+					// response under the same stream identity. Drop the failed
+					// attempt's partially revealed text/reasoning.
+					textChars = 0
+					emitter.Emit("reset", buildStreamChunkPayload(chunk, chunkIndex, 0))
 				}
 			}
 
@@ -9268,6 +9274,10 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		case llm.EventTypeImage:
 			payload := buildStreamChunkPayload(chunk, chunkIndex, builder.Len())
 			emitter.Emit("chunk", payload)
+		case llm.EventTypeReset:
+			builder.Reset()
+			reasoningBuilder.Reset()
+			emitter.Emit("reset", buildStreamChunkPayload(chunk, chunkIndex, 0))
 		case llm.EventTypeError:
 			h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
 				"model":   model,
@@ -9417,6 +9427,8 @@ func streamEventName(eventType llm.StreamEventType) string {
 		return "tool_start"
 	case llm.EventTypeToolEnd:
 		return "tool_end"
+	case llm.EventTypeReset:
+		return "reset"
 	default:
 		return "chunk"
 	}

@@ -128,6 +128,66 @@ func TestChatRuntimeEventBridge_EventLogPersistAndReplayRebuildsModel(t *testing
 	}
 }
 
+// Retry reset boundaries must survive event-log replay. Without the persisted
+// reset row, replay re-appends the failed attempt's deltas and reproduces the
+// exact duplicate transcript the live path just removed.
+func TestChatRuntimeEventBridge_EventLogReplayAppliesRetryReset(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+	events := []runtimeevents.Event{
+		{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "session-1",
+			TraceID:   "trace-1",
+			Payload: map[string]interface{}{
+				"turn_id": "turn-1", "stream_id": "stream-1", "llm_request_id": "llm-1",
+				"step": 1, "sequence": uint64(1), "delta": "old answer",
+			},
+		},
+		{
+			Type:      runtimeevents.EventAssistantStreamReset,
+			SessionID: "session-1",
+			TraceID:   "trace-1",
+			Payload: map[string]interface{}{
+				"turn_id": "turn-1", "stream_id": "stream-1", "llm_request_id": "llm-1",
+				"step": 1, "attempt": 2, "max_attempts": 10,
+			},
+		},
+		{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "session-1",
+			TraceID:   "trace-1",
+			Payload: map[string]interface{}{
+				"turn_id": "turn-1", "stream_id": "stream-1", "llm_request_id": "llm-1",
+				"step": 1, "sequence": uint64(50), "delta": "new answer",
+			},
+		},
+	}
+
+	bridge1 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge1.eventLogPathOverride = logPath
+	for _, ev := range events {
+		bridge1.encodeRenderModelEvent(ev)
+	}
+	bridge1.flushStreamDeltaLog()
+	chatEventLogFlush()
+
+	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge2.eventLogPathOverride = logPath
+	if _, err := bridge2.replayEventLog(); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	for name, model := range map[string]*encoding.RenderModel{
+		"live":   bridge1.renderModelSnapshot(),
+		"replay": bridge2.renderModelSnapshot(),
+	} {
+		if len(model.Items) != 1 || model.Items[0].Kind != encoding.KindAssistant || model.Items[0].Head != "new answer" {
+			t.Fatalf("%s items after retry reset = %+v, want only new answer", name, model.Items)
+		}
+	}
+	assertRenderModelEquivalent(t, bridge1.renderModelSnapshot(), bridge2.renderModelSnapshot())
+}
+
 // TestChatRuntimeEventBridge_EventLogAppendAfterRestart 验证重启后的新事件继续
 // 追加到同一日志，且再重启重放仍与实时模型等价（含新事件）。
 func TestChatRuntimeEventBridge_EventLogAppendAfterRestart(t *testing.T) {
