@@ -70,7 +70,11 @@ func (s *SQLiteRuntimeStore) AppendEvents(ctx context.Context, events []runtimee
 		if event.Timestamp.IsZero() {
 			event.Timestamp = batchNow
 		}
-		payloadJSON, err := json.Marshal(event.Payload)
+		// P1-4：批量落盘与单条落盘共用同一折叠规则。此前只有 AppendEvent
+		// 调用了 CompactDurableEventPayload，默认批量路径仍把 content/delta/text
+		// 三份同串全部写入，是流式增量库膨胀的主要来源。
+		compact := runtimeevents.CompactDurableEventPayload(event)
+		payloadJSON, err := json.Marshal(compact.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("marshal event payload: %w", err)
 		}

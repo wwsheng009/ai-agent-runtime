@@ -18,6 +18,7 @@ Migration notes:
 - In this repository, read those old paths as the corresponding locations under `backend/internal/*` unless a document explicitly says it is describing a historical state.
 - For current `aicli` behavior, start with `docs/aicli/quickstart.md`, then `docs/aicli/install.md` / `docs/aicli/faq.md`; these cover first-use setup, starter config bootstrap, `aicli login`, chat preferences, session/resume, slash commands, shell/background, MCP, and troubleshooting.
 - For headless `aicli exec`, portable agents, runtime profiles, and image generation, see `docs/aicli/exec.md`, `docs/aicli/agents.md`, `docs/aicli/profiles.md`, and `docs/aicli/tool_image_generate.md`.
+- For local SQLite data management, age-based session pruning, orphan cleanup, and offline `VACUUM`, see `docs/aicli/storage-maintenance.md`.
 - For current background jobs HTTP operations, see `docs/skill_runtime/runtime_operations_api.md`.
 
 Main sections:
@@ -52,6 +53,7 @@ Recommended starting points:
 - `aicli/exec.md`
 - `aicli/plan-mode.md`
 - `aicli/session-export-import.md`
+- `aicli/storage-maintenance.md`
 - `aicli/agents.md`
 - `aicli/profiles.md`
 - `profile/README.md`

@@ -98,6 +98,8 @@ func NewStorageCommand() *cobra.Command {
 
 子命令：
   storage compact   离线压缩：独占访问时 VACUUM，回收 freelist 空间
+  storage prune-runtime  离线裁剪 runtime 库的历史回执、缓存明细和旧事件
+  storage prune-sessions 按最后活动时间跨库清理过期会话（默认 dry-run）
 
 说明：在线页回收（auto_vacuum/incremental_vacuum）已在 2026-09 的损坏事故后
 整体移除。文件空间回收只能通过本命令的离线 VACUUM 完成，请先退出正在使用这些
@@ -113,6 +115,8 @@ func NewStorageCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newStorageCompactCommand())
+	cmd.AddCommand(newStoragePruneSessionsCommand())
+	cmd.AddCommand(newStoragePruneRuntimeCommand())
 	cmd.AddCommand(newStorageBackfillCommand())
 	return cmd
 }

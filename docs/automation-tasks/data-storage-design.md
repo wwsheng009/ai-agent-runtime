@@ -186,6 +186,12 @@ UPDATE schedule_tasks
 - 最新回执始终保留；发生裁剪时任务行置 `earlierRecordsPruned`（可加列或记入 events）。
 - 读取**不裁剪**（与 dsh 一致：读取声明自身边界）。
 
+> **跨库会话清退（2026-11-02）**：除本库自身的历史裁剪外，
+> `aicli storage prune-sessions` 会按 `session_id` 一并清理 `schedule_tasks`、
+> `schedule_pending_messages`、`schedule_job_runs`、`schedule_delivery_history` 和
+> `schedule_delivery_intents`；`active` / `paused` 任务及其创建者会话受保护。
+> 完整规则见 [docs/aicli/storage-maintenance.md](../aicli/storage-maintenance.md)。
+
 ---
 
 ## 6. 多实例与租约

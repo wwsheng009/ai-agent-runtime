@@ -311,15 +311,27 @@ type RuntimeStoreConfig struct {
 	// 超限载荷不会丢行：持久化为带 payload_truncated / payload_bytes /
 	// payload_cap 标记的有界 stub，见 boundSessionEventPayload。
 	MaxEventPayloadBytes int
+	// ToolReceiptRetention 是单会话保留的工具回执条数上限；<=0 取默认 2048。
+	// 工具回执保存的是可重放的完整 message_json，必须同时受字节上限约束。
+	ToolReceiptRetention int
+	// ToolReceiptMaxBytes 是单会话工具回执 message_json 总字节上限；<=0 取
+	// 默认 8 MiB。每次保存至少保留当前回执，即使单条本身超过上限。
+	ToolReceiptMaxBytes int64
+	// CacheRequestRetention 是单会话保留的缓存请求明细条数上限；<=0 取默认
+	// 4096。仅保留最近的请求，避免 cache_requests 随 LLM 调用无限增长。
+	CacheRequestRetention int
 }
 
 const (
-	defaultRuntimeSQLiteCacheKiB   = 2048
-	defaultRuntimeBusyTimeout      = 5 * time.Second
-	defaultRuntimeEventRetention   = 2048
-	defaultRuntimeMailboxRetention = 2048
-	defaultRuntimePruneInterval    = 256
-	defaultRuntimeOperationTimeout = 10 * time.Second
+	defaultRuntimeSQLiteCacheKiB        = 2048
+	defaultRuntimeBusyTimeout           = 5 * time.Second
+	defaultRuntimeEventRetention        = 2048
+	defaultRuntimeMailboxRetention      = 2048
+	defaultRuntimePruneInterval         = 256
+	defaultRuntimeOperationTimeout      = 10 * time.Second
+	defaultRuntimeToolReceiptRetention  = 2048
+	defaultRuntimeToolReceiptMaxBytes   = 8 << 20
+	defaultRuntimeCacheRequestRetention = 4096
 )
 
 const defaultInMemoryRuntimeRetention = 2048
@@ -1658,19 +1670,22 @@ type SQLiteRuntimeStore struct {
 	openErr error
 	closed  bool
 
-	mu                sync.Mutex
-	mailboxWriteMu    sync.Mutex
-	db                *sql.DB
-	fileBacked        bool
-	busyTimeout       time.Duration
-	cacheKiB          int
-	eventRetention    int
-	mailboxRetention  int
-	pruneInterval     int
-	opTimeout         time.Duration
-	sqliteVersion     string
-	supportsReturning bool
-	appendCounters    runtimeAppendCounters
+	mu                    sync.Mutex
+	mailboxWriteMu        sync.Mutex
+	db                    *sql.DB
+	fileBacked            bool
+	busyTimeout           time.Duration
+	cacheKiB              int
+	eventRetention        int
+	mailboxRetention      int
+	pruneInterval         int
+	toolReceiptRetention  int
+	toolReceiptMaxBytes   int64
+	cacheRequestRetention int
+	opTimeout             time.Duration
+	sqliteVersion         string
+	supportsReturning     bool
+	appendCounters        runtimeAppendCounters
 
 	// P1.7 读池：readDB 为 nil 时读走写池（未拆分/已降级/内存库）。
 	readPoolMu             sync.Mutex
@@ -1775,6 +1790,18 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 	if pruneInterval <= 0 {
 		pruneInterval = defaultRuntimePruneInterval
 	}
+	toolReceiptRetention := cfgCopy.ToolReceiptRetention
+	if toolReceiptRetention <= 0 {
+		toolReceiptRetention = defaultRuntimeToolReceiptRetention
+	}
+	toolReceiptMaxBytes := cfgCopy.ToolReceiptMaxBytes
+	if toolReceiptMaxBytes <= 0 {
+		toolReceiptMaxBytes = defaultRuntimeToolReceiptMaxBytes
+	}
+	cacheRequestRetention := cfgCopy.CacheRequestRetention
+	if cacheRequestRetention <= 0 {
+		cacheRequestRetention = defaultRuntimeCacheRequestRetention
+	}
 	opTimeout := cfgCopy.OperationTimeout
 	if opTimeout <= 0 {
 		opTimeout = defaultRuntimeOperationTimeout
@@ -1806,22 +1833,25 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 		}
 	}
 	store := &SQLiteRuntimeStore{
-		cfg:              cfgCopy,
-		dsn:              dsn,
-		path:             path,
-		fileBacked:       fileBacked,
-		busyTimeout:      busyTimeout,
-		cacheKiB:         cacheKiB,
-		eventRetention:   eventRetention,
-		mailboxRetention: mailboxRetention,
-		pruneInterval:    pruneInterval,
-		opTimeout:        opTimeout,
-		readDSN:          readDSN,
-		readPoolSize:     readPoolSize,
-		readBusyTimeout:  readBusyTimeout,
-		readQueryOnly:    readQueryOnly,
-		readOpTimeout:    readOpTimeout,
-		disableReadPool:  cfgCopy.DisableReadPool,
+		cfg:                   cfgCopy,
+		dsn:                   dsn,
+		path:                  path,
+		fileBacked:            fileBacked,
+		busyTimeout:           busyTimeout,
+		cacheKiB:              cacheKiB,
+		eventRetention:        eventRetention,
+		mailboxRetention:      mailboxRetention,
+		pruneInterval:         pruneInterval,
+		toolReceiptRetention:  toolReceiptRetention,
+		toolReceiptMaxBytes:   toolReceiptMaxBytes,
+		cacheRequestRetention: cacheRequestRetention,
+		opTimeout:             opTimeout,
+		readDSN:               readDSN,
+		readPoolSize:          readPoolSize,
+		readBusyTimeout:       readBusyTimeout,
+		readQueryOnly:         readQueryOnly,
+		readOpTimeout:         readOpTimeout,
+		disableReadPool:       cfgCopy.DisableReadPool,
 	}
 	// In-memory stores stay eager so tests can inspect the connection immediately.
 	if path == "" || isRuntimeSQLiteMemoryDSN(dsn) {
@@ -2638,7 +2668,15 @@ func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolEx
 	if s == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.ensureCtx(ctx); err != nil {
+		return err
+	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("SaveToolReceipt"); err != nil {
 		return err
 	}
 	receipt.SessionID = strings.TrimSpace(receipt.SessionID)
@@ -2649,8 +2687,27 @@ func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolEx
 	if receipt.CreatedAt.IsZero() {
 		receipt.CreatedAt = time.Now().UTC()
 	}
+	if err := sqliteutil.RetryWriteTx(ctx, s.trackWriteRetry, func(attemptCtx context.Context) error {
+		return s.saveToolReceiptTx(attemptCtx, receipt)
+	}); err != nil {
+		s.trackWriteError(err)
+		return fmt.Errorf("save tool receipt: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteRuntimeStore) saveToolReceiptTx(ctx context.Context, receipt ToolExecutionReceipt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("begin tool receipt tx: %w", err)
+	}
+	rollback := func() {
+		_ = tx.Rollback()
+	}
 	createdAt := receipt.CreatedAt.UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO session_tool_receipts (session_id, tool_call_id, tool_name, message_json, created_at, created_at_unix_nano)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, tool_call_id) DO UPDATE SET
@@ -2660,7 +2717,15 @@ func (s *SQLiteRuntimeStore) SaveToolReceipt(ctx context.Context, receipt ToolEx
 			created_at_unix_nano = excluded.created_at_unix_nano
 	`, receipt.SessionID, receipt.ToolCallID, nullIfEmpty(strings.TrimSpace(receipt.ToolName)), string(receipt.MessageJSON), createdAt.Format(time.RFC3339Nano), createdAt.UnixNano())
 	if err != nil {
-		return fmt.Errorf("save tool receipt: %w", err)
+		rollback()
+		return fmt.Errorf("upsert tool receipt: %w", err)
+	}
+	if _, _, err := pruneToolReceipts(ctx, tx, receipt.SessionID, receipt.ToolCallID, s.toolReceiptRetention, s.toolReceiptMaxBytes, false); err != nil {
+		rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tool receipt: %w", err)
 	}
 	return nil
 }
@@ -4802,8 +4867,6 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 					created_at TEXT NOT NULL,
 					UNIQUE(session_id, seq)
 				);
-				CREATE INDEX IF NOT EXISTS idx_session_events_session_seq
-				ON session_events(session_id, seq);
 			`,
 		},
 		{
@@ -5169,6 +5232,16 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				ALTER TABLE session_runtime_state ADD COLUMN stable_tool_surface_ref TEXT;
 				CREATE INDEX IF NOT EXISTS idx_runtime_state_tool_surface_ref
 				ON session_runtime_state(stable_tool_surface_ref);
+			`,
+		},
+		{
+			// v26：删除与 UNIQUE(session_id, seq) 完全重复的显式索引。
+			// 自动索引已经覆盖同一列顺序，显式索引只会让 200 万级事件多存一份
+			// 键值页；旧库由本迁移清理，新库不再创建。
+			Version: 26,
+			Name:    "drop_redundant_session_events_index",
+			UpSQL: `
+				DROP INDEX IF EXISTS idx_session_events_session_seq;
 			`,
 		},
 	}

@@ -65,6 +65,9 @@ func (s *SQLiteRuntimeStore) SaveRequest(record cacheanalytics.CacheRequestRecor
 	if err != nil {
 		return fmt.Errorf("save cache request %s: %w", record.LLMRequestID, err)
 	}
+	if _, err := pruneCacheRequests(context.Background(), s.db, record.SessionID, s.cacheRequestRetention, false); err != nil {
+		return fmt.Errorf("prune cache requests for %s: %w", record.SessionID, err)
+	}
 	return nil
 }
 

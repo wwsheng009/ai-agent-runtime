@@ -61,6 +61,16 @@ aicli storage compact --db <path> --json
 目标：`all|runtime|history|artifacts|analytics|team|agent-control|background`
 （路径由 `sessionruntime.ResolvePaths`（CLI-local）+ `aiclipaths` 默认值解析，与运行时一致）。
 
+> **2026-11-02 追加**：`compact` 只回收 freelist，不决定删除哪些数据。会话级历史清理与
+> 按最后活动时间的跨库清退请使用：
+>
+> - `aicli storage prune-runtime`：按会话预算裁剪 runtime 事件/工具回执/缓存明细；
+> - `aicli storage prune-sessions`：按 `--older-than` 跨 history/runtime/analytics/
+>   artifacts/agent-control/background/schedule 删除会话；默认 dry-run。
+>
+> 完整安全规则、保护条件和运行手册见
+> [docs/aicli/storage-maintenance.md](../aicli/storage-maintenance.md)。
+
 安全性质（均有单测覆盖，`cmd/aicli/commands/storage_compact_test.go`）：
 
 - 只执行 `VACUUM`（可附 `PRAGMA auto_vacuum=NONE` 把历史库转出 INCREMENTAL 模式）；
