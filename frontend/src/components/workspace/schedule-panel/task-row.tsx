@@ -12,6 +12,7 @@ import {
   formatScheduleTimestamp,
   scheduleFrequencySummary,
   scheduleKindLabelKey,
+  scheduleStatusLabelKey,
 } from "@/components/workspace/schedule-panel-shared";
 import { cn } from "@/lib/utils";
 import type { RuntimeScheduleJobRun, RuntimeScheduleTask } from "@/types/runtime";
@@ -22,6 +23,9 @@ import { ScheduleRunHistory } from "./run-history";
 export type ScheduleTaskRowProps = {
   cancelEdit: () => void;
   confirmingId: string;
+  control: (task: RuntimeScheduleTask, action: "pause" | "resume") => void;
+  controllingAction: "pause" | "resume" | null;
+  controllingId: string;
   deletingId: string;
   draft: DraftState | null;
   editingId: string;
@@ -42,6 +46,9 @@ export type ScheduleTaskRowProps = {
 export function ScheduleTaskRow({
   cancelEdit,
   confirmingId,
+  control,
+  controllingAction,
+  controllingId,
   deletingId,
   draft,
   editingId,
@@ -60,6 +67,9 @@ export function ScheduleTaskRow({
 }: ScheduleTaskRowProps) {
   const { t } = useTranslation("workspace");
   const editing = editingId === task.id;
+  const controlling = controllingId === task.id;
+  const active = task.status === "active";
+  const paused = task.status === "paused";
   return (
     <li
       className="rounded-panel border border-border p-3"
@@ -70,14 +80,11 @@ export function ScheduleTaskRow({
           <div className="flex items-center gap-2">
             <Badge
               className={cn(
-                live && "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+                active && "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+                paused && "border-amber-500/40 text-amber-600 dark:text-amber-400",
               )}
             >
-              {t(
-                live
-                  ? "panels.schedule.statusActive"
-                  : "panels.schedule.statusInactive",
-              )}
+              {t(scheduleStatusLabelKey(task.status))}
             </Badge>
             {task.origin === "manual" && (
               <Badge className="border-amber-500/40 text-amber-600 dark:text-amber-400">
@@ -108,6 +115,14 @@ export function ScheduleTaskRow({
           {live ? (
             <div className="mt-1 text-xs">
               {t("panels.schedule.nextRun")}:{" "}
+              {formatScheduleTimestamp(task.scheduledAt)}
+              <span className="ml-2 text-muted-foreground">
+                ({formatScheduleRelative(task.scheduledAt, Date.now())})
+              </span>
+            </div>
+          ) : paused ? (
+            <div className="mt-1 text-xs">
+              {t("panels.schedule.pausedNextRun")}:{" "}
               {formatScheduleTimestamp(task.scheduledAt)}
               <span className="ml-2 text-muted-foreground">
                 ({formatScheduleRelative(task.scheduledAt, Date.now())})
@@ -211,13 +226,40 @@ export function ScheduleTaskRow({
             </>
           ) : (
             <>
-              <Button
-                onClick={() => startEdit(task)}
-                size="sm"
-                variant="ghost"
-              >
-                {t("panels.schedule.edit")}
-              </Button>
+              {active ? (
+                <Button
+                  disabled={controlling}
+                  onClick={() => control(task, "pause")}
+                  size="sm"
+                  variant="ghost"
+                >
+                  {controlling && controllingAction === "pause"
+                    ? t("panels.schedule.pausing")
+                    : t("panels.schedule.pause")}
+                </Button>
+              ) : null}
+              {paused ? (
+                <Button
+                  disabled={controlling}
+                  onClick={() => control(task, "resume")}
+                  size="sm"
+                  variant="ghost"
+                >
+                  {controlling && controllingAction === "resume"
+                    ? t("panels.schedule.resuming")
+                    : t("panels.schedule.resume")}
+                </Button>
+              ) : null}
+              {active || paused ? (
+                <Button
+                  disabled={controlling}
+                  onClick={() => startEdit(task)}
+                  size="sm"
+                  variant="ghost"
+                >
+                  {t("panels.schedule.edit")}
+                </Button>
+              ) : null}
               {confirmingId === task.id ? (
                 <div className="flex gap-1">
                   <Button

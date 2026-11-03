@@ -15,10 +15,10 @@ import (
 )
 
 // ============================================================================
-// aicli 参与调度领导权（S5，opt-in）
+// aicli 参与调度领导权（S6，默认兜底在岗）
 //
-// 默认不参战（schedule.driver.participants 默认 [daemon, runtime-server]）；
-// 用户在配置里加入 "aicli" 后，本进程在**会话宿主挂载期间**以最低优先级参与：
+// 默认参战（schedule.driver.participants 默认 [daemon, runtime-server, aicli]）；
+// 本进程在**会话宿主挂载期间**以最低优先级参与（显式配置去掉 "aicli" 可退出）：
 //
 //   - 只在没有更高优先级调度者（daemon > runtime-server）在岗时持租约
 //     （schedulehost 的优先级让位 v2，DeferToHigherPriority）；
@@ -91,12 +91,12 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 		return
 	}
 	if !runtimeCfg.Schedule.Enabled {
-		// 只在显式 opt-in 后才吵：schedule 未启用是常态（默认配置）。
+		// 默认启用；profile/runtime.yaml 可显式关闭，关闭时保持静默。
 		return
 	}
 	sc := runtimeCfg.Schedule.WithDefaults()
 	if !sc.DriverAllows(config.ScheduleRoleAICLI) {
-		// opt-in：participants 未包含 aicli（默认如此）→ 不参战。
+		// 显式配置 participants 且未包含 aicli → 不参战。
 		chatScheduleDriverWarnf(`not opted in (schedule.driver.participants excludes "aicli"); aicli stays out of scheduling`)
 		return
 	}

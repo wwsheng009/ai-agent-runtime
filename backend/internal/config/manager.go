@@ -586,10 +586,14 @@ func (c ScheduleConfig) DriverDegradedPolicy(role string) string {
 	return ScheduleDriverDegradedStandby
 }
 
-// DefaultScheduleConfig returns the shipped Schedule defaults (disabled, delegate).
+// DefaultScheduleConfig returns the shipped Schedule defaults.
+//
+// Schedule is enabled by default so the automation-task UI and tools work on a
+// fresh installation. Profiles can turn it off via their profile-level
+// runtime.yaml (`schedule.enabled: false`); explicit configuration still wins.
 func DefaultScheduleConfig() ScheduleConfig {
 	return ScheduleConfig{
-		Enabled:                false,
+		Enabled:                true,
 		DeliveryHistoryDays:    30,
 		DeliveryHistoryRecords: 200,
 		MaxDeliveryAttempts:    5,

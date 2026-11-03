@@ -556,6 +556,12 @@ func registerChatWebRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(commands.ChatWebAPIRuntimePath, commands.HandleChatWebAPIRuntime)
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
+	// /web/api/schedule/* 自动化任务管理（「任务」页签）：catalog / create / delete。
+	// 数据源是当前进程的 schedule.Service，与 TUI /schedule、schedule_* 工具同源。
+	// 必须挂在 /web/api 下，非回环模式才能复用统一写令牌鉴权；runtime-server 的
+	// /api/runtime/schedule/* 在 aicli --web 单进程宿主中并未注册。
+	mux.HandleFunc(commands.ChatWebAPISchedulePath, commands.HandleChatWebAPISchedule)
+	mux.HandleFunc(commands.ChatWebAPISchedulePath+"/", commands.HandleChatWebAPISchedule)
 	// /web/api/schedule-deliver 调度投递接收端（S2b，联盟设计 §3.3 L2）：
 	// driver 就近把提醒投进本进程会话；按交付账本 occurrence 去重。
 	// 写 op——由 mesh 调用层强制 allow_write=true 且仅回环。

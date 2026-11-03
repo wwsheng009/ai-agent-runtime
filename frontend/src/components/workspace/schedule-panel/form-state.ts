@@ -43,11 +43,15 @@ export type CreateFormState = {
   plan: string;
   /** J1：执行上下文（session 投递进会话；headless/workspace 不绑会话）。 */
   targetKind: RuntimeScheduleTargetKind;
+  /** J1：workspace 目标必须显式指定工作区路径。 */
+  targetWorkspace: string;
+  /** J1：workspace/headless 可选执行 profile。 */
+  targetProfile: string;
 };
 
-export function emptyCreateForm(): CreateFormState {
+export function emptyCreateForm(sessionId = ""): CreateFormState {
   return {
-    sessionId: "",
+    sessionId,
     title: "",
     prompt: "",
     kind: "after",
@@ -59,6 +63,8 @@ export function emptyCreateForm(): CreateFormState {
     goal: "",
     plan: "",
     targetKind: "session",
+    targetWorkspace: "",
+    targetProfile: "",
   };
 }
 
@@ -79,6 +85,9 @@ export function createRequestFrom(
   if (form.targetKind !== "session" && !form.goal.trim()) {
     return null;
   }
+  if (form.targetKind === "workspace" && !form.targetWorkspace.trim()) {
+    return null;
+  }
   const plan = form.plan
     .split("\n")
     .map((line) => line.trim())
@@ -90,6 +99,12 @@ export function createRequestFrom(
     ...(form.goal.trim() ? { goal: form.goal.trim() } : {}),
     ...(plan.length > 0 ? { plan } : {}),
     ...(form.targetKind !== "session" ? { target_kind: form.targetKind } : {}),
+    ...(form.targetKind === "workspace" && form.targetWorkspace.trim()
+      ? { target_workspace: form.targetWorkspace.trim() }
+      : {}),
+    ...(form.targetKind !== "session" && form.targetProfile.trim()
+      ? { target_profile: form.targetProfile.trim() }
+      : {}),
   };
   switch (form.kind) {
     case "after": {

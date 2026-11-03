@@ -1120,6 +1120,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// same pipeline the model tool uses; see CreateScheduleTask.
 	runtimeRouter.HandleFunc("/schedule/create", h.CreateScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/update", h.UpdateScheduleTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/schedule/pause", h.PauseScheduleTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/schedule/resume", h.ResumeScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/delete", h.DeleteScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)

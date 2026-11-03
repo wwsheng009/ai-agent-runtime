@@ -19,10 +19,13 @@ type CatalogEntry struct {
 	Status    Status `json:"status"`
 	Origin    Origin `json:"origin,omitempty"`
 	// J1/J3：执行上下文与创建者（前端展示 / 归属）。
-	TargetKind      TargetKind       `json:"targetKind,omitempty"`
-	TargetWorkspace string           `json:"targetWorkspace,omitempty"`
-	TargetProfile   string           `json:"targetProfile,omitempty"`
-	LastDelivery    *DeliveryReceipt `json:"lastDelivery,omitempty"`
+	TargetKind      TargetKind `json:"targetKind,omitempty"`
+	TargetWorkspace string     `json:"targetWorkspace,omitempty"`
+	TargetProfile   string     `json:"targetProfile,omitempty"`
+	// CreatedBySessionID lets management surfaces act on non-session targets
+	// (headless/workspace) without pretending they are bound to a session.
+	CreatedBySessionID string           `json:"createdBySessionId,omitempty"`
+	LastDelivery       *DeliveryReceipt `json:"lastDelivery,omitempty"`
 }
 
 // DeleteResult 是删除结果（含非变更的未找到）。
@@ -37,6 +40,7 @@ type UpdateResult struct {
 	ID      string  `json:"id"`
 	Updated bool    `json:"updated"`
 	Record  *Record `json:"record,omitempty"`
+	Status  Status  `json:"status,omitempty"`
 	Code    Code    `json:"code,omitempty"`
 	Message string  `json:"message,omitempty"`
 }
@@ -241,6 +245,13 @@ func (s *Service) Create(sessionID string, req CreateRequest, origin Origin) (Re
 	if err := s.store.Put(task); err != nil {
 		return Record{}, err
 	}
+	// Return the persisted projection: SQLite rounds timestamps to the storage
+	// precision, and management clients use this record as the next CAS
+	// expectation. Returning the pre-store nanosecond value would make an
+	// immediate edit fail with a spurious schedule_conflict.
+	if stored, ok, err := s.store.Get(record.ID); err == nil && ok {
+		record = stored.Record
+	}
 	s.emitChanged()
 	return record, nil
 }
@@ -269,7 +280,7 @@ func (s *Service) Catalog() ([]CatalogEntry, error) {
 		entries = append(entries, CatalogEntry{
 			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin,
 			TargetKind: task.TargetKind, TargetWorkspace: task.TargetWorkspace, TargetProfile: task.TargetProfile,
-			LastDelivery: task.LastDelivery,
+			CreatedBySessionID: task.CreatedBySessionID, LastDelivery: task.LastDelivery,
 		})
 	}
 	return entries, nil
@@ -373,7 +384,7 @@ func (s *Service) Delete(sessionID, id string) (DeleteResult, error) {
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	if !ok || task.SessionID != sessionID {
+	if !ok || !taskOwnedBy(task, sessionID) {
 		return DeleteResult{ID: id, Deleted: false, Code: CodeNotFound}, nil
 	}
 	deleted, err := s.store.Delete(id)
@@ -395,10 +406,10 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	if !ok || current.SessionID != sessionID {
+	if !ok || !taskOwnedBy(current, sessionID) {
 		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
 	}
-	if current.Status != StatusActive {
+	if current.Status != StatusActive && current.Status != StatusPaused {
 		return UpdateResult{ID: id, Updated: false, Code: CodeEnded}, nil
 	}
 	if !recordsEqual(current.Record, expected) {
@@ -433,7 +444,7 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 	}
 	if recordsEqual(updated, current.Record) {
 		record := current.Record
-		return UpdateResult{ID: id, Updated: false, Record: &record}, nil
+		return UpdateResult{ID: id, Updated: false, Record: &record, Status: current.Status}, nil
 	}
 	next := current
 	next.Record = updated
@@ -445,7 +456,138 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 		return UpdateResult{ID: id, Updated: false, Code: CodeConflict}, nil
 	}
 	s.emitChanged()
-	return UpdateResult{ID: id, Updated: true, Record: &updated}, nil
+	return UpdateResult{ID: id, Updated: true, Record: &updated, Status: current.Status}, nil
+}
+
+// Pause moves an active task to the non-terminal paused state. Paused tasks
+// are ignored by the due scanner but keep their committed target; resuming
+// before that target preserves the original schedule.
+func (s *Service) Pause(sessionID, id string) (UpdateResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok, err := s.store.Get(id)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if !ok || !taskOwnedBy(current, sessionID) {
+		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
+	}
+	switch current.Status {
+	case StatusPaused:
+		record := current.Record
+		return UpdateResult{ID: id, Updated: false, Record: &record, Status: StatusPaused}, nil
+	case StatusActive:
+		// Continue below.
+	default:
+		return UpdateResult{ID: id, Updated: false, Status: current.Status, Code: CodeEnded,
+			Message: "ended tasks cannot be paused"}, nil
+	}
+	next := current
+	next.Status = StatusPaused
+	applied, err := s.store.UpdateCAS(next, current.StateVersion)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if !applied {
+		return UpdateResult{ID: id, Updated: false, Status: current.Status, Code: CodeConflict}, nil
+	}
+	s.emitChanged()
+	record := current.Record
+	return UpdateResult{ID: id, Updated: true, Record: &record, Status: StatusPaused}, nil
+}
+
+// Resume makes a paused task schedulable again. If its committed target is
+// still in the future it is preserved. Once the target has passed, recurring
+// rules advance to a fresh future occurrence; one-shot "after" gets a fresh
+// delay, while a passed "at" target must be edited explicitly (never silently
+// move a user-specified wall-clock time).
+func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok, err := s.store.Get(id)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if !ok || !taskOwnedBy(current, sessionID) {
+		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
+	}
+	switch current.Status {
+	case StatusActive:
+		record := current.Record
+		return UpdateResult{ID: id, Updated: false, Record: &record, Status: StatusActive}, nil
+	case StatusPaused:
+		// Continue below.
+	default:
+		return UpdateResult{ID: id, Updated: false, Status: current.Status, Code: CodeEnded,
+			Message: "ended tasks cannot be resumed; create a new task instead"}, nil
+	}
+	now := s.clock().UTC()
+	record, err := resumeScheduleRecord(current.Record, now)
+	if err != nil {
+		return updateInputFailure(id, err)
+	}
+	next := current
+	next.Record = record
+	next.Status = StatusActive
+	// A manual resume is an explicit recovery action; old delivery failures
+	// must not immediately dead-letter the task again.
+	next.AttemptCount = 0
+	next.LastAttemptAt = nil
+	next.DeadLetteredAt = nil
+	applied, err := s.store.UpdateCAS(next, current.StateVersion)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	if !applied {
+		return UpdateResult{ID: id, Updated: false, Status: StatusPaused, Code: CodeConflict}, nil
+	}
+	s.emitChanged()
+	return UpdateResult{ID: id, Updated: true, Record: &record, Status: StatusActive}, nil
+}
+
+func taskOwnedBy(task Task, sessionID string) bool {
+	owner := strings.TrimSpace(sessionID)
+	if owner == "" {
+		return false
+	}
+	return task.SessionID == owner || task.CreatedBySessionID == owner
+}
+
+// resumeScheduleRecord advances a paused record to a safe future target.
+func resumeScheduleRecord(rec Record, now time.Time) (Record, error) {
+	now = now.UTC()
+	if rec.ScheduledAt.After(now) {
+		return rec, nil
+	}
+	switch rec.Kind {
+	case KindAfter:
+		if rec.AfterSeconds <= 0 {
+			return Record{}, inputError(CodeInvalidRule, "after_seconds must be positive")
+		}
+		rec.ScheduledAt = now.Add(time.Duration(rec.AfterSeconds) * time.Second).UTC()
+		return rec, nil
+	case KindAt:
+		return Record{}, inputError(CodeNotFuture,
+			"the original at target has passed; edit the schedule time before resuming")
+	case KindEvery:
+		if rec.EverySeconds < MinEveryIntervalSeconds {
+			return Record{}, inputError(CodeInvalidRule, "every_seconds is below the minimum interval")
+		}
+		rec.ScheduledAt = now.Add(time.Duration(rec.EverySeconds) * time.Second).UTC()
+		return rec, nil
+	case KindDaily, KindWeekly, KindCron:
+		occurrence, err := ResolveOccurrence(rec, now)
+		if err != nil {
+			return Record{}, err
+		}
+		if occurrence.NextScheduledAt == nil {
+			return Record{}, inputError(CodeTimeOutOfRange, "no representable future occurrence")
+		}
+		rec.ScheduledAt = occurrence.NextScheduledAt.UTC()
+		return rec, nil
+	default:
+		return Record{}, inputError(CodeInvalidRule, "unsupported schedule kind")
+	}
 }
 
 func updateInputFailure(id string, err error) (UpdateResult, error) {

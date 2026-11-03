@@ -32,17 +32,19 @@ export function ScheduleCreateForm({
         {t("panels.schedule.createTitle")}
       </h3>
       <div className="grid gap-2 sm:grid-cols-2">
-        <label className="grid gap-1 text-xs">
-          <span className="text-muted-foreground">{t("panels.schedule.sessionLabel")}</span>
-          <input
-            className="rounded border border-border bg-transparent px-2 py-1"
-            onChange={(event) =>
-              setCreateForm({ ...createForm, sessionId: event.target.value })
-            }
-            placeholder={t("panels.schedule.sessionPlaceholder")}
-            value={createForm.sessionId}
-          />
-        </label>
+        {createForm.targetKind === "session" ? (
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">{t("panels.schedule.sessionLabel")}</span>
+            <input
+              className="rounded border border-border bg-transparent px-2 py-1"
+              onChange={(event) =>
+                setCreateForm({ ...createForm, sessionId: event.target.value })
+              }
+              placeholder={t("panels.schedule.sessionPlaceholder")}
+              value={createForm.sessionId}
+            />
+          </label>
+        ) : null}
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.targetLabel")}</span>
           <select
@@ -60,6 +62,36 @@ export function ScheduleCreateForm({
             <option value="workspace">{t("panels.schedule.target.workspace")}</option>
           </select>
         </label>
+        {createForm.targetKind === "workspace" ? (
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">
+              {t("panels.schedule.workspaceLabel")}
+            </span>
+            <input
+              className="rounded border border-border bg-transparent px-2 py-1"
+              onChange={(event) =>
+                setCreateForm({ ...createForm, targetWorkspace: event.target.value })
+              }
+              placeholder={t("panels.schedule.workspacePlaceholder")}
+              value={createForm.targetWorkspace}
+            />
+          </label>
+        ) : null}
+        {createForm.targetKind !== "session" ? (
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">
+              {t("panels.schedule.profileLabel")}
+            </span>
+            <input
+              className="rounded border border-border bg-transparent px-2 py-1"
+              onChange={(event) =>
+                setCreateForm({ ...createForm, targetProfile: event.target.value })
+              }
+              placeholder={t("panels.schedule.profilePlaceholder")}
+              value={createForm.targetProfile}
+            />
+          </label>
+        ) : null}
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.goalLabel")}</span>
           <input
@@ -100,6 +132,11 @@ export function ScheduleCreateForm({
           value={createForm.prompt}
         />
       </label>
+      {createForm.targetKind !== "session" ? (
+        <p className="mt-2 rounded border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
+          {t("panels.schedule.targetHint")}
+        </p>
+      ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.kindLabel")}</span>

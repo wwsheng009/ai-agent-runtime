@@ -71,11 +71,20 @@ func registerProcessScheduleService(service *schedule.Service) {
 	processScheduleMu.Unlock()
 }
 
-// processScheduleLedger 返回进程级交付账本（未启用 schedule → nil）。
-func processScheduleLedger() schedule.OccurrenceLedger {
+// processSchedule 返回本进程登记的活动调度服务（未启用/尚未挂载 → nil）。
+//
+// Web 管理面可能拿到能力面异步挂载前的早期 ChatSession 快照，因此不能只看
+// session.LocalRuntimeHost；与交付账本一样回退到进程级注册位。
+func processSchedule() *schedule.Service {
 	processScheduleMu.RLock()
 	service := processScheduleService
 	processScheduleMu.RUnlock()
+	return service
+}
+
+// processScheduleLedger 返回进程级交付账本（未启用 schedule → nil）。
+func processScheduleLedger() schedule.OccurrenceLedger {
+	service := processSchedule()
 	if service == nil {
 		return nil
 	}

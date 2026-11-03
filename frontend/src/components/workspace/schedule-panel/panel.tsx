@@ -50,6 +50,9 @@ export function SchedulePanel({
     runtimeEventCount,
   });
   const {
+    controlTask,
+    controllingAction,
+    controllingId,
     createTask,
     creating,
     deletingId,
@@ -97,7 +100,7 @@ export function SchedulePanel({
     [expandedRunId, runsByTask, sessionId],
   );
 
-  const { active, inactive } = useMemo(
+  const { active, paused, inactive } = useMemo(
     () => splitScheduleTasks(tasks),
     [tasks],
   );
@@ -126,6 +129,8 @@ export function SchedulePanel({
           kind: task.kind,
           title: task.title,
           prompt: task.prompt,
+          goal: task.goal,
+          plan: task.plan,
           scheduledAt: task.scheduledAt,
           afterSeconds: task.afterSeconds,
           everySeconds: task.everySeconds,
@@ -162,6 +167,18 @@ export function SchedulePanel({
     [removeTask, t],
   );
 
+  const control = useCallback(
+    async (task: RuntimeScheduleTask, action: "pause" | "resume") => {
+      const outcome = await controlTask(task.id, action);
+      setNotice(
+        outcome.ok
+          ? t(action === "pause" ? "panels.schedule.paused" : "panels.schedule.resumed")
+          : t("panels.schedule.controlFailed", { message: outcome.message }),
+      );
+    },
+    [controlTask, t],
+  );
+
   const submitCreate = useCallback(async () => {
     if (!createForm) {
       return;
@@ -190,6 +207,9 @@ export function SchedulePanel({
   const rowProps = {
     cancelEdit,
     confirmingId,
+    control,
+    controllingAction,
+    controllingId,
     deletingId,
     draft,
     editingId,
@@ -221,7 +241,7 @@ export function SchedulePanel({
           <Button
             onClick={() =>
               setCreateForm((form) =>
-                form ? null : emptyCreateForm(),
+                form ? null : emptyCreateForm(sessionId),
               )
             }
             size="sm"
@@ -276,6 +296,18 @@ export function SchedulePanel({
           <ul className="space-y-2">
             {active.map((task) => (
               <ScheduleTaskRow key={task.id} live={true} task={task} {...rowProps} />
+            ))}
+          </ul>
+        </section>
+      )}
+      {paused.length > 0 && (
+        <section>
+          <h3 className="mb-1 text-xs font-medium uppercase text-muted-foreground">
+            {t("panels.schedule.pausedSection")}
+          </h3>
+          <ul className="space-y-2">
+            {paused.map((task) => (
+              <ScheduleTaskRow key={task.id} live={false} task={task} {...rowProps} />
             ))}
           </ul>
         </section>

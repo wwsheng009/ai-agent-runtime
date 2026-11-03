@@ -185,6 +185,7 @@ func TestChatDebugEndpointListWebFamily(t *testing.T) {
 		"/web/api/screen", "/web/api/status", "/web/api/statusbar", "/web/api/runtime",
 		"/web/api/events", "/web/api/events/schema",
 		"/web/api/input", "/web/api/invoke", "/web/api/turn",
+		"/web/api/schedule",
 		"/web/api/sessions", "/web/api/sessions/new", "/web/api/sessions/resume",
 		"/web/api/sessions/rename", "/web/api/sessions/delete",
 		"/web/api/config", "/web/api/config/providers",

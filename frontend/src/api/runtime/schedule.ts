@@ -6,6 +6,8 @@
 //   GET  /api/runtime/schedule/history?session_id=&id=&limit=&before=
 //   POST /api/runtime/schedule/create
 //   POST /api/runtime/schedule/update
+//   POST /api/runtime/schedule/pause
+//   POST /api/runtime/schedule/resume
 //   POST /api/runtime/schedule/delete
 //
 // 归一化说明：后端有 json tag（camelCase），normalize 仍宽容 PascalCase/snake_case。
@@ -136,10 +138,13 @@ export function normalizeScheduleTask(raw: unknown): RuntimeScheduleTask {
   const base = normalizeScheduleRecord(raw);
   const lastDeliveryRaw = asRecord(record.lastDelivery ?? record.LastDelivery);
   const origin = pickString(record, "origin", "Origin");
+  const rawStatus = pickString(record, "status", "Status").trim().toLowerCase();
+  const status =
+    rawStatus === "inactive" ? "inactive" : rawStatus === "paused" ? "paused" : "active";
   return {
     ...base,
     sessionId: pickString(record, "sessionId", "SessionID", "session_id"),
-    status: pickString(record, "status", "Status") === "inactive" ? "inactive" : "active",
+    status,
     origin: (origin === "manual" ? "manual" : "model") as RuntimeScheduleOrigin,
     targetKind: normalizeTargetKind(record.targetKind ?? record.TargetKind ?? record.target_kind),
     targetWorkspace:
@@ -278,15 +283,51 @@ export async function updateScheduleTask(
       change: request.change,
     }),
   });
+  return normalizeScheduleUpdateResponse(payload);
+}
+
+function normalizeScheduleUpdateResponse(payload: unknown): RuntimeScheduleUpdateResponse {
   const record = asRecord(payload) ?? {};
+  const rawStatus = pickString(record, "status", "Status").trim().toLowerCase();
   return {
     id: pickString(record, "id", "ID"),
     updated: record.updated === true,
     record:
       record.record !== undefined ? normalizeScheduleRecord(record.record) : undefined,
+    status:
+      rawStatus === "active" || rawStatus === "paused" || rawStatus === "inactive"
+        ? rawStatus
+        : undefined,
     code: pickString(record, "code", "Code") || undefined,
     message: pickString(record, "message", "Message") || undefined,
   };
+}
+
+async function controlScheduleTask(
+  action: "pause" | "resume",
+  sessionId: string,
+  id: string,
+): Promise<RuntimeScheduleUpdateResponse> {
+  const payload = await fetchRuntimeJson<unknown>(`${SCHEDULE_PATH}/${action}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, id }),
+  });
+  return normalizeScheduleUpdateResponse(payload);
+}
+
+export async function pauseScheduleTask(
+  sessionId: string,
+  id: string,
+): Promise<RuntimeScheduleUpdateResponse> {
+  return controlScheduleTask("pause", sessionId, id);
+}
+
+export async function resumeScheduleTask(
+  sessionId: string,
+  id: string,
+): Promise<RuntimeScheduleUpdateResponse> {
+  return controlScheduleTask("resume", sessionId, id);
 }
 
 export async function deleteScheduleTask(

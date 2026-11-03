@@ -1590,6 +1590,16 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			}
 		},
 		func() {
+			// Schedule is enabled by default, so the host owns an open SQLite
+			// store. Close it with the host: otherwise Windows keeps the file
+			// locked after session teardown (and temp-dir cleanup fails).
+			if host.Schedule != nil {
+				if scheduleStore := host.Schedule.Store(); scheduleStore != nil {
+					_ = scheduleStore.Close()
+				}
+			}
+		},
+		func() {
 			if host.Orchestrator != nil && globalMailboxStore != nil {
 				host.Orchestrator.MailboxWake = nil
 			}

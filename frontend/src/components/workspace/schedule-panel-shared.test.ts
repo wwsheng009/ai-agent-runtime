@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   formatScheduleRelative,
   isLiveScheduleStatus,
+  isPausedScheduleStatus,
   isScheduleRuntimeEvent,
   scheduleFrequencySummary,
   scheduleKindLabelKey,
+  scheduleStatusLabelKey,
   splitScheduleTasks,
 } from "./schedule-panel-shared";
 import type { RuntimeScheduleTask } from "@/types/runtime";
@@ -30,9 +32,11 @@ describe("splitScheduleTasks", () => {
       task({ id: "a", status: "active" }),
       task({ id: "b", status: "inactive" }),
       task({ id: "c", status: "active" }),
+      task({ id: "d", status: "paused" }),
     ];
-    const { active, inactive } = splitScheduleTasks(input);
+    const { active, paused, inactive } = splitScheduleTasks(input);
     expect(active.map((item) => item.id)).toEqual(["a", "c"]);
+    expect(paused.map((item) => item.id)).toEqual(["d"]);
     expect(inactive.map((item) => item.id)).toEqual(["b"]);
   });
 });
@@ -40,7 +44,16 @@ describe("splitScheduleTasks", () => {
 describe("isLiveScheduleStatus", () => {
   it("仅 active 视为 live", () => {
     expect(isLiveScheduleStatus("active")).toBe(true);
+    expect(isLiveScheduleStatus("paused")).toBe(false);
     expect(isLiveScheduleStatus("inactive")).toBe(false);
+  });
+});
+
+describe("isPausedScheduleStatus", () => {
+  it("仅 paused 视为暂停", () => {
+    expect(isPausedScheduleStatus("paused")).toBe(true);
+    expect(isPausedScheduleStatus("active")).toBe(false);
+    expect(isPausedScheduleStatus("inactive")).toBe(false);
   });
 });
 
@@ -62,6 +75,14 @@ describe("scheduleFrequencySummary", () => {
 describe("scheduleKindLabelKey", () => {
   it("返回 panels.schedule.kind.* 前缀", () => {
     expect(scheduleKindLabelKey("daily")).toBe("panels.schedule.kind.daily");
+  });
+});
+
+describe("scheduleStatusLabelKey", () => {
+  it("返回现有扁平状态文案键", () => {
+    expect(scheduleStatusLabelKey("active")).toBe("panels.schedule.statusActive");
+    expect(scheduleStatusLabelKey("paused")).toBe("panels.schedule.statusPaused");
+    expect(scheduleStatusLabelKey("inactive")).toBe("panels.schedule.statusInactive");
   });
 });
 

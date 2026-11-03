@@ -30,6 +30,9 @@ type Status string
 const (
 	// StatusActive 表示任务仍会驱动下一次投递。
 	StatusActive Status = "active"
+	// StatusPaused 表示用户主动暂停的任务：不参与到期扫描，也不是终态。
+	// 暂停保留原 scheduledAt；恢复时若目标已过去，会按规则重算出下一个目标。
+	StatusPaused Status = "paused"
 	// StatusInactive 表示任务已结束（一次性已投递，或无未来目标）。
 	StatusInactive Status = "inactive"
 )

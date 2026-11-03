@@ -17,6 +17,7 @@
 ```
 <profile-root>/
 ├── profile.yaml                 # 必需：场景声明
+├── runtime.yaml                 # 可选：profile 专属运行时配置（含 schedule.enabled）
 └── agents/
     └── <agent-id>/
         ├── agent.yaml           # 可选：portable agent definition（角色/权限/沙箱）
@@ -94,6 +95,28 @@ agents:                     # 按 agent 的内联覆盖（provider/model/tools�
   不能被 profile 覆盖或关闭。
 - **零变化**：不声明某项 = 沿用原有全量行为（未引入 profile 的路径行为不变）。
 - **错误不猜**：`prompts.mode` 等取值非法时**报错**，不回退到别的语义。
+
+### Profile 级运行时配置
+
+`<profile-root>/runtime.yaml` 存在时，该 profile 的会话会用它作为
+`ChatSession.RuntimeConfigPath`，覆盖全局 `.aicli/runtime.yaml` 的运行时行为。
+这是 profile 控制自动化任务（Schedule）等运行时能力的入口：
+
+```yaml
+# profiles/readonly/runtime.yaml
+schedule:
+  enabled: false
+```
+
+未声明 `schedule.enabled` 时使用默认值（当前默认启用）。显式 `false` 优先，
+profile 内的会话不会加载 Schedule 服务，也不会暴露 `schedule_*` 工具。
+
+注意：
+
+- 该文件是 profile 的**独立 runtime 配置源**，不是稀疏 overlay；其中的
+  `workspace`、`knowledge`、`lsp` 等运行时设置若需保留，应一并写入。
+- `profile.yaml` 的 `tools.allowlist` / `denylist` 仍决定 `schedule_*` 工具是否
+  暴露给模型；关闭服务与收窄工具面是两个独立维度。
 
 ---
 

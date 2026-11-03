@@ -12,7 +12,7 @@ export type RuntimeScheduleKind =
   | "weekly"
   | "cron";
 
-export type RuntimeScheduleStatus = "active" | "inactive";
+export type RuntimeScheduleStatus = "active" | "paused" | "inactive";
 
 export type RuntimeScheduleState = "scheduled" | "overdue";
 
@@ -144,6 +144,7 @@ export type RuntimeScheduleUpdateResponse = {
   id: string;
   updated: boolean;
   record?: RuntimeScheduleRecord;
+  status?: RuntimeScheduleStatus;
   code?: string;
   message?: string;
 };

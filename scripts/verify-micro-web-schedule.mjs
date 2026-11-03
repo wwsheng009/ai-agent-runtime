@@ -20,6 +20,27 @@ check(html.includes('id="tab-schedule-btn"'), "index.html 有 #tab-schedule-btn"
 check(html.includes('id="tab-schedule"'), "index.html 有 #tab-schedule");
 check(html.includes('id="schedule-list"'), "index.html 有 #schedule-list");
 check(html.includes('id="schedule-refresh-btn"'), "index.html 有 #schedule-refresh-btn");
+check(html.includes('id="schedule-filters"'), "index.html 有状态筛选条");
+check(html.includes('id="schedule-search"'), "index.html 有任务搜索框");
+check(html.includes('id="schedule-form-error-summary"'), "创建表单有可聚焦错误摘要");
+check(html.includes('id="schedule-form-clock"'), "创建表单有 daily/weekly 本地时间输入");
+check(html.includes('id="schedule-form-target-kind"'), "创建表单有执行上下文选择");
+check(html.includes('id="schedule-form-goal"'), "创建表单有作业目标");
+check(html.includes('id="schedule-form-workspace"'), "创建表单有目标工作区");
+const scheduleJs = readFileSync(path.join(webRoot, "js", "schedule.js"), "utf8");
+check(scheduleJs.includes('"/web/api/schedule"'), "schedule.js 使用本地 /web/api/schedule 端点");
+check(!scheduleJs.includes('"/api/runtime/schedule/'), "schedule.js 不再请求未挂载的 /api/runtime/schedule");
+check(scheduleJs.includes('"/update"'), "schedule.js 暴露编辑保存端点");
+check(scheduleJs.includes('action === "pause"') && scheduleJs.includes('action === "resume"'),
+  "schedule.js 暴露暂停/恢复端点");
+check(scheduleJs.includes("target_kind") && scheduleJs.includes("target_workspace") &&
+  scheduleJs.includes("schedule-form-goal"), "schedule.js 构造无会话创建负载");
+check(scheduleJs.includes("getCurrentSessionID()"), "无会话创建仍记录创建者会话用于后续管理");
+check(scheduleJs.includes('SCHEDULE_API_BASE + "/runs"') &&
+  scheduleJs.includes("renderTaskHistory"), "schedule.js 提供运行历史查看");
+check(scheduleJs.includes("updateSchedulePreview"), "schedule.js 提供触发时间预览");
+check(scheduleJs.includes("schedule-form-clock"), "schedule.js 使用本地时间输入构造 daily/weekly");
+check(scheduleJs.includes("applyScheduleView"), "schedule.js 的筛选/搜索只重绘视图");
 
 // ---- 2. 静态契约：style.css 变量已定义（无未定义的自定义属性——约束见 web-testing.md）----
 const css = readFileSync(path.join(webRoot, "style.css"), "utf8");
@@ -28,10 +49,11 @@ for (const match of css.matchAll(/(--[a-zA-Z0-9-]+)\s*:/g)) {
   defined.add(match[1]);
 }
 const scheduleBlock = css.slice(css.indexOf("自动化任务页签"));
-for (const match of scheduleBlock.matchAll(/var\((--[a-zA-Z0-9-]+)/g)) {
+for (const match of scheduleBlock.matchAll(/var\((--[a-zA-Z0-9-]+)(\s*,[^)]*)?\)/g)) {
   const token = match[1];
+  const fallback = (match[2] || "").trim();
   check(
-    defined.has(token) || token === "--danger" || token === "--ok",
+    defined.has(token) || fallback.startsWith(",") || token === "--danger" || token === "--ok",
     `schedule 样式使用的 ${token} 必须已在主题定义（或带 fallback 字面量）`,
   );
 }
@@ -52,7 +74,9 @@ globalThis.fetch = (url, options) => {
   return Promise.resolve({
     ok: response.ok !== false,
     status: response.status ?? 200,
-    json: () => Promise.resolve(response.body),
+    json: response.jsonError
+      ? () => Promise.reject(new Error("invalid json"))
+      : () => Promise.resolve(response.body),
   });
 };
 
@@ -118,7 +142,7 @@ globalThis.window = globalThis;
 globalThis.__testToast = showToastMessages;
 
 pendingResponses.push([
-  "/api/runtime/schedule/catalog",
+  "/web/api/schedule/catalog",
   {
     body: {
       tasks: [
@@ -146,6 +170,16 @@ pendingResponses.push([
           sessionId: "session-1",
           lastDelivery: { deliveredAt: "2026-10-01T00:00:05Z" },
         },
+        {
+          id: "schedule-c",
+          kind: "every",
+          title: "Paused task",
+          prompt: "resume me",
+          scheduledAt: "2026-10-12T02:00:00.000Z",
+          status: "paused",
+          sessionId: "session-1",
+          everySeconds: 300,
+        },
       ],
     },
   },
@@ -159,13 +193,44 @@ check(rendered.includes("&lt;review&gt;"), "标题 HTML 转义（防注入）");
 check(rendered.includes("Check the build &amp; report"), "prompt HTML 转义");
 check(rendered.includes("已开启"), "live 徽标");
 check(rendered.includes("未运行"), "inactive 徽标");
+check(rendered.includes("已暂停"), "paused 徽标");
+check(rendered.includes("恢复"), "paused 行有恢复动作");
+check(rendered.includes("编辑"), "active/paused 行有编辑动作");
+check(rendered.includes("再次排程"), "inactive 行有再次排程动作");
+check(rendered.includes("运行历史"), "任务行有运行历史入口");
 check(rendered.includes("每天"), "kind 文案");
-check(rendered.includes("09:00:00.000"), "daily 时间摘要");
+check(rendered.includes("每天 09:00"), "daily 时间摘要（HH:MM 人类可读）");
 check(rendered.includes("Asia/Shanghai"), "时区展示");
+check(rendered.includes("每 5 分钟"), "every 时间摘要（人类可读）");
 // J0/J1：作业目标、计划与执行上下文。
 check(rendered.includes("做一次系统检查"), "goal 展示");
 check(rendered.includes("检查磁盘") && rendered.includes("检查内存"), "plan 步骤展示");
 check(rendered.includes("无人值守"), "headless 执行上下文展示");
+
+// 后端不可用时必须展示后端明细，而不是把非 2xx 当成空目录。
+pendingResponses.push([
+  "/web/api/schedule/catalog",
+  {
+    ok: false,
+    status: 503,
+    body: { error: "schedule_disabled: enable schedule.enabled", code: "schedule_disabled" },
+  },
+]);
+schedule.loadSchedule(true);
+await new Promise((resolve) => setTimeout(resolve, 20));
+const unavailable = elements["schedule-list"].innerHTML;
+check(unavailable.includes("加载失败"), "非 2xx 目录请求显示失败态");
+check(unavailable.includes("schedule_disabled"), "目录失败态展示后端错误码");
+
+// 非 JSON 错误体（例如旧路由的 404 纯文本）也必须给出 HTTP 状态，不能静默。
+pendingResponses.push([
+  "/web/api/schedule/catalog",
+  { ok: false, status: 404, jsonError: true },
+]);
+schedule.loadSchedule(true);
+await new Promise((resolve) => setTimeout(resolve, 20));
+const notFound = elements["schedule-list"].innerHTML;
+check(notFound.includes("HTTP 404"), "非 JSON 错误体显示 HTTP 状态");
 
 // 首次加载后不再重复请求（loaded 标记）。
 schedule.loadSchedule(false);

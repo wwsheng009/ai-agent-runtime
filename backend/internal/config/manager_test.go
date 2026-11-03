@@ -31,6 +31,29 @@ func TestWin7RuntimeConfigUsesSharedSessionDatabase(t *testing.T) {
 	require.Equal(t, mainConfig, win7Config)
 }
 
+func TestScheduleDefaultsEnabledAndExplicitDisableWins(t *testing.T) {
+	require.True(t, DefaultRuntimeConfig().Schedule.Enabled)
+
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "default.yaml")
+	require.NoError(t, os.WriteFile(defaultPath, []byte("agent:\n  maxSteps: 1\n"), 0o644))
+	manager := NewRuntimeManager(defaultPath)
+	require.NoError(t, manager.Load())
+	require.True(t, manager.Get().Schedule.Enabled, "missing schedule section must keep the default enabled")
+
+	disabledPath := filepath.Join(dir, "disabled.yaml")
+	require.NoError(t, os.WriteFile(disabledPath, []byte("schedule:\n  enabled: false\n"), 0o644))
+	manager = NewRuntimeManager(disabledPath)
+	require.NoError(t, manager.Load())
+	require.False(t, manager.Get().Schedule.Enabled, "explicit false must win over the default")
+
+	enabledPath := filepath.Join(dir, "enabled.yaml")
+	require.NoError(t, os.WriteFile(enabledPath, []byte("schedule:\n  enabled: true\n"), 0o644))
+	manager = NewRuntimeManager(enabledPath)
+	require.NoError(t, manager.Load())
+	require.True(t, manager.Get().Schedule.Enabled)
+}
+
 func TestRuntimeManager_VersionHistoryAndRollback(t *testing.T) {
 	rm := NewRuntimeManager("")
 

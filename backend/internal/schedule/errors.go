@@ -31,6 +31,8 @@ const (
 	CodeEnded Code = "schedule_ended"
 	// CodeConflict 表示 expected 与当前记录不一致（乐观并发）。
 	CodeConflict Code = "schedule_conflict"
+	// CodeInvalidState 表示当前生命周期状态不允许该操作。
+	CodeInvalidState Code = "schedule_invalid_state"
 	// CodeCursorNotFound 表示投递历史分页游标未知。
 	CodeCursorNotFound Code = "delivery_cursor_not_found"
 	// CodeInternal 表示不应外泄存储细节的内部失败。

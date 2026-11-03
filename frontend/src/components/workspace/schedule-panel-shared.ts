@@ -3,6 +3,7 @@
 
 import type {
   RuntimeScheduleKind,
+  RuntimeScheduleStatus,
   RuntimeScheduleTask,
 } from "@/types/runtime";
 
@@ -11,21 +12,43 @@ export function isLiveScheduleStatus(status: string): boolean {
   return status === "active";
 }
 
-/** 分区：活动在前（按 scheduledAt 升序），未运行在后。 */
+/** paused 是非终态但不会驱动投递；恢复前保持专用分区。 */
+export function isPausedScheduleStatus(status: string): boolean {
+  return status === "paused";
+}
+
+/** i18n 键：`panels.schedule.status<Active|Paused|Inactive>`。 */
+export function scheduleStatusLabelKey(
+  status: RuntimeScheduleStatus,
+): `panels.schedule.${"statusActive" | "statusPaused" | "statusInactive"}` {
+  if (status === "active") {
+    return "panels.schedule.statusActive";
+  }
+  if (status === "paused") {
+    return "panels.schedule.statusPaused";
+  }
+  return "panels.schedule.statusInactive";
+}
+
+/** 分区：活动在前，暂停居中，已结束在后。 */
 export function splitScheduleTasks(tasks: RuntimeScheduleTask[]): {
   active: RuntimeScheduleTask[];
+  paused: RuntimeScheduleTask[];
   inactive: RuntimeScheduleTask[];
 } {
   const active: RuntimeScheduleTask[] = [];
+  const paused: RuntimeScheduleTask[] = [];
   const inactive: RuntimeScheduleTask[] = [];
   for (const task of tasks) {
     if (isLiveScheduleStatus(task.status)) {
       active.push(task);
+    } else if (isPausedScheduleStatus(task.status)) {
+      paused.push(task);
     } else {
       inactive.push(task);
     }
   }
-  return { active, inactive };
+  return { active, paused, inactive };
 }
 
 /** kind → i18n key（`panels.schedule.kind.*`）；模板字面量类型让 t() 通过。 */

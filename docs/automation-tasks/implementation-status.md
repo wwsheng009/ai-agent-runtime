@@ -29,7 +29,8 @@
 - `internal/schedule`：types/errors/domain/store/service/runtime。
 - `cmd/scheduled`：前台守护进程（mesh 单实例租约）。
 - `toolbroker`：`schedule_*` 四工具（`Broker.Schedule != nil` 才进工具面）+ 审计表。
-- `config`：`ScheduleConfig`/`ScheduleExecutionConfig`（默认 disabled/delegate）。
+- `config`：`ScheduleConfig`/`ScheduleExecutionConfig`（默认 enabled/delegate；
+  可用全局或 profile 级 runtime.yaml 的 `schedule.enabled: false` 显式关闭）。
 - 宿主：aicli（`chat_schedule_host.go`）+ runtime-server（`getScheduleService`）两侧接线。
 
 ### P1

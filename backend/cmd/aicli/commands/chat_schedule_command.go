@@ -39,8 +39,10 @@ func executeStructuredScheduleCommand(session *ChatSession, command string) Comm
 	if service == nil {
 		return commandTextResult(
 			"自动化任务未启用。\n" +
-				"提示: 在 runtime 配置中设置 schedule.enabled: true（重启 aicli 生效），" +
-				"或确认调度守护进程 scheduled 正在运行。")
+				"提示: schedule.enabled 默认已启用；当前会话被显式关闭（全局 " +
+				".aicli/runtime.yaml 或 profile 级 runtime.yaml 中的 " +
+				"schedule.enabled: false），移除该覆盖并重启 aicli 生效。" +
+				"若需要后台定时器，另请确认调度守护进程 scheduled 正在运行。")
 	}
 	filter := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
 	rows, err := chatScheduleCatalogTasks(service)
@@ -145,12 +147,16 @@ func buildChatScheduleDocument(rows []scheduleRow, filter string, presenceLine s
 	}
 
 	active := make([]scheduleRow, 0, len(rows))
+	paused := make([]scheduleRow, 0, len(rows))
 	inactive := make([]scheduleRow, 0, len(rows))
 	for _, row := range rows {
-		if row.status == "inactive" {
-			inactive = append(inactive, row)
-		} else {
+		switch row.status {
+		case "active":
 			active = append(active, row)
+		case "paused":
+			paused = append(paused, row)
+		default:
+			inactive = append(inactive, row)
 		}
 	}
 
@@ -158,15 +164,20 @@ func buildChatScheduleDocument(rows []scheduleRow, filter string, presenceLine s
 	case "", "all", "list":
 		// 全部
 	case "active", "on":
+		paused = nil
+		inactive = nil
+	case "paused":
+		active = nil
 		inactive = nil
 	case "inactive", "done", "off":
 		active = nil
+		paused = nil
 	default:
 		return buildChatPlainTextCommandDocument(
-			fmt.Sprintf("未知过滤参数 %q（支持: 空|all|active|inactive）", filter))
+			fmt.Sprintf("未知过滤参数 %q（支持: 空|all|active|paused|inactive）", filter))
 	}
 
-	if len(active) == 0 && len(inactive) == 0 {
+	if len(active) == 0 && len(paused) == 0 && len(inactive) == 0 {
 		builder.WriteString("（还没有自动化任务；在会话中让模型调用 schedule_create 创建）\n")
 		return buildChatPlainTextCommandDocument(builder.String())
 	}
@@ -174,25 +185,35 @@ func buildChatScheduleDocument(rows []scheduleRow, filter string, presenceLine s
 	if len(active) > 0 {
 		builder.WriteString(fmt.Sprintf("已开启（%d）\n", len(active)))
 		for _, row := range active {
-			builder.WriteString(chatScheduleRowLine(row, true))
+			builder.WriteString(chatScheduleRowLine(row, "active"))
+		}
+		builder.WriteString("\n")
+	}
+	if len(paused) > 0 {
+		builder.WriteString(fmt.Sprintf("已暂停（%d）\n", len(paused)))
+		for _, row := range paused {
+			builder.WriteString(chatScheduleRowLine(row, "paused"))
 		}
 		builder.WriteString("\n")
 	}
 	if len(inactive) > 0 {
 		builder.WriteString(fmt.Sprintf("未运行（%d）\n", len(inactive)))
 		for _, row := range inactive {
-			builder.WriteString(chatScheduleRowLine(row, false))
+			builder.WriteString(chatScheduleRowLine(row, "inactive"))
 		}
 	}
 	return buildChatPlainTextCommandDocument(builder.String())
 }
 
-func chatScheduleRowLine(row scheduleRow, live bool) string {
+func chatScheduleRowLine(row scheduleRow, status string) string {
 	var builder strings.Builder
 	builder.WriteString("  ")
-	if live {
+	switch status {
+	case "active":
 		builder.WriteString("[开] ")
-	} else {
+	case "paused":
+		builder.WriteString("[暂] ")
+	default:
 		builder.WriteString("[停] ")
 	}
 	builder.WriteString(row.title)
@@ -208,8 +229,11 @@ func chatScheduleRowLine(row scheduleRow, live bool) string {
 		builder.WriteString(" · ")
 		builder.WriteString(row.zone)
 	}
-	if live {
+	if status == "active" || status == "paused" {
 		builder.WriteString("  下次: ")
+		if status == "paused" {
+			builder.WriteString("(暂停时目标) ")
+		}
 		builder.WriteString(row.target.Local().Format("2006-01-02 15:04:05"))
 	}
 	builder.WriteString("  会话: ")

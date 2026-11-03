@@ -260,6 +260,63 @@ type scheduleDeleteRequest struct {
 	ID        string `json:"id"`
 }
 
+type scheduleControlRequest struct {
+	SessionID string `json:"session_id"`
+	ID        string `json:"id"`
+}
+
+// PauseScheduleTask transitions an active reminder to the non-terminal paused
+// state. Paused tasks keep their committed scheduledAt and are skipped by the
+// due scanner until resumed.
+func (h *Handler) PauseScheduleTask(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	var request scheduleControlRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+		return
+	}
+	result, err := service.Pause(request.SessionID, request.ID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, result)
+}
+
+// ResumeScheduleTask re-arms a paused reminder. A future committed target is
+// preserved; recurring rules advance once their old target has passed, while a
+// past absolute "at" target requires an explicit edit first.
+func (h *Handler) ResumeScheduleTask(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	var request scheduleControlRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+		return
+	}
+	result, err := service.Resume(request.SessionID, request.ID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, result)
+}
+
 // DeleteScheduleTask hard-deletes one reminder within its original Session binding.
 func (h *Handler) DeleteScheduleTask(w http.ResponseWriter, r *http.Request) {
 	service := h.getScheduleService()

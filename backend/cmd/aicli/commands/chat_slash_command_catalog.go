@@ -126,12 +126,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:    "/schedule",
-			Usage:   "/schedule [all|active|inactive]",
+			Usage:   "/schedule [all|active|paused|inactive]",
 			Summary: "查看跨会话自动化任务（定时提醒）目录",
 			Group:   string(chatSlashCommandGroupSession),
 			Args: []chatSlashCommandArgSpec{
 				{Token: "all", Summary: "全部任务（默认）"},
 				{Token: "active", Summary: "仅已开启"},
+				{Token: "paused", Summary: "仅已暂停"},
 				{Token: "inactive", Summary: "仅未运行"},
 			},
 			AcceptsArgs: true,

@@ -15,6 +15,8 @@ import {
   createScheduleTask,
   deleteScheduleTask,
   fetchScheduleCatalog,
+  pauseScheduleTask,
+  resumeScheduleTask,
   updateScheduleTask,
 } from "@/api/runtime/schedule";
 import type {
@@ -41,6 +43,8 @@ export type ScheduleDeleteOutcome =
   | { ok: true }
   | { ok: false; message: string };
 
+export type ScheduleControlAction = "pause" | "resume";
+
 export function useScheduleTasks({
   enabled,
   lastRuntimeEventType,
@@ -55,6 +59,10 @@ export function useScheduleTasks({
   const [deletingId, setDeletingId] = useState("");
   const [savingId, setSavingId] = useState("");
   const [creating, setCreating] = useState(false);
+  const [controlling, setControlling] = useState<{
+    id: string;
+    action: ScheduleControlAction;
+  } | null>(null);
   const requestIdRef = useRef(0);
   const sid = sessionId?.trim() ?? "";
 
@@ -136,7 +144,7 @@ export function useScheduleTasks({
   const removeTask = useCallback(
     async (id: string): Promise<ScheduleDeleteOutcome> => {
       const target = tasks.find((task) => task.id === id);
-      const taskSession = target?.sessionId ?? sid;
+      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
       if (!taskSession) {
         return { ok: false, message: "session id unavailable" };
       }
@@ -166,7 +174,7 @@ export function useScheduleTasks({
       request: Omit<RuntimeScheduleUpdateRequest, "sessionId">,
     ): Promise<ScheduleDeleteOutcome> => {
       const target = tasks.find((task) => task.id === request.id);
-      const taskSession = target?.sessionId ?? sid;
+      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
       if (!taskSession) {
         return { ok: false, message: "session id unavailable" };
       }
@@ -201,7 +209,8 @@ export function useScheduleTasks({
     async (
       request: Omit<RuntimeScheduleCreateRequest, "sessionId"> & { sessionId: string },
     ): Promise<ScheduleDeleteOutcome> => {
-      if (!request.sessionId.trim()) {
+      const targetKind = request.target_kind ?? "session";
+      if (targetKind === "session" && !request.sessionId.trim()) {
         return { ok: false, message: "session id unavailable" };
       }
       setCreating(true);
@@ -221,6 +230,47 @@ export function useScheduleTasks({
     [],
   );
 
+  /** 暂停/恢复：状态冲突作为可读结果返回，不清空当前目录。 */
+  const controlTask = useCallback(
+    async (
+      id: string,
+      action: ScheduleControlAction,
+    ): Promise<ScheduleDeleteOutcome> => {
+      const targetId = id.trim();
+      if (!targetId) {
+        return { ok: false, message: "task id unavailable" };
+      }
+      const target = tasks.find((task) => task.id === targetId);
+      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
+      if (!taskSession) {
+        return { ok: false, message: "session id unavailable" };
+      }
+      setControlling({ id: targetId, action });
+      try {
+        const response =
+          action === "pause"
+            ? await pauseScheduleTask(taskSession, targetId)
+            : await resumeScheduleTask(taskSession, targetId);
+        if (!response.updated && response.code) {
+          return {
+            ok: false,
+            message: response.message || response.code,
+          };
+        }
+        setRefreshToken((token) => token + 1);
+        return { ok: true };
+      } catch (caught) {
+        return {
+          ok: false,
+          message: caught instanceof Error ? caught.message : String(caught),
+        };
+      } finally {
+        setControlling(null);
+      }
+    },
+    [sid, tasks],
+  );
+
   return {
     tasks,
     loading,
@@ -230,6 +280,9 @@ export function useScheduleTasks({
     deletingId,
     savingId,
     creating,
+    controlTask,
+    controllingId: controlling?.id ?? "",
+    controllingAction: controlling?.action ?? null,
     refresh,
     removeTask,
     saveTask,

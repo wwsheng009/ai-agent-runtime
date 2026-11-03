@@ -146,3 +146,33 @@ func TestCreateScheduleTask_CarriesDriverAbsentNotice(t *testing.T) {
 	require.Equal(t, schedulehost.PresenceAbsent, created.Presence.State)
 	require.Contains(t, created.View.Notice, "无调度者在岗")
 }
+
+func TestScheduleTaskPauseResumeEndpoints(t *testing.T) {
+	_, router := newScheduleTestHandler(t)
+
+	body := `{"session_id":"sess-control","title":"Editable task","prompt":"ping","every_seconds":300}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created struct {
+		Record schedule.Record `json:"record"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	controlBody := `{"session_id":"sess-control","id":"` + created.Record.ID + `"}`
+	for _, path := range []string{"/api/runtime/schedule/pause", "/api/runtime/schedule/resume"} {
+		req = httptest.NewRequest(http.MethodPost, path, strings.NewReader(controlBody))
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var result schedule.UpdateResult
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+		require.True(t, result.Updated)
+		if strings.HasSuffix(path, "/pause") {
+			require.Equal(t, schedule.StatusPaused, result.Status)
+		} else {
+			require.Equal(t, schedule.StatusActive, result.Status)
+		}
+	}
+}

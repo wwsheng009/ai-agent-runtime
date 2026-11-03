@@ -46,6 +46,14 @@ const (
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"
 	ChatWebAPIEventsPath    = "/web/api/events"
 	ChatWebAPIInputPath     = "/web/api/input"
+	// ChatWebAPISchedulePath 是 micro web「自动化任务」页签的本地管理端点前缀：
+	//   GET  /web/api/schedule/catalog
+	//   POST /web/api/schedule/create
+	//   POST /web/api/schedule/delete
+	// 数据源是当前进程的 schedule.Service（与 TUI /schedule、schedule_* 工具同源）。
+	// 不使用 runtime-server 的 /api/runtime/schedule/*：aicli --web 是纯本地进程，
+	// 该路径没有挂载（历史缺陷：请求恒 404，前端因此只显示"创建失败"）。
+	ChatWebAPISchedulePath = "/web/api/schedule"
 	// ChatWebAPIScheduleDeliverPath 是调度投递接收端点（S2b，联盟设计 §3.3 L2）：
 	// driver 经 mesh.Call(op=schedule.deliver) 把提醒投进本进程会话，并按交付
 	// 账本做 occurrence 去重（对应 schedule_create 任务的就近投递）。
