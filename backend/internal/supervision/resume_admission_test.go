@@ -330,6 +330,131 @@ func TestResumeAdmissionMatrix(t *testing.T) {
 		require.Equal(t, RetryAdmission, result.Decision)
 	})
 
+	t.Run("approval with matching parked identity resumes legacy", func(t *testing.T) {
+		store := newTestStore(t, "admit-approval-parked")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
+			Claims:       store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			ParentTurnID:    "turn-admit",
+			ParentEpisodeID: "ep-admit",
+			EventKind:       WakeEventApproval,
+			WakeReason:      WakeReasonApprovalRequired,
+		})
+		require.NoError(t, err)
+		require.Equal(t, ResumeLegacy, result.Decision)
+		require.Equal(t, "legacy_approval_resume", result.Reason)
+	})
+
+	t.Run("approval without parent identity is notification only", func(t *testing.T) {
+		store := newTestStore(t, "admit-approval-missing-id")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
+			Claims:       store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			EventKind:       WakeEventApproval,
+			WakeReason:      WakeReasonApprovalRequired,
+		})
+		require.NoError(t, err)
+		require.Equal(t, NotifyOnly, result.Decision)
+		require.Equal(t, "approval_missing_parent_identity", result.Reason)
+	})
+
+	t.Run("approval after finalization is notification only", func(t *testing.T) {
+		store := newTestStore(t, "admit-approval-final")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: &ParentTurnSnapshot{
+				SessionID:          "sess-admit",
+				Status:             "idle",
+				FinalizedTurnID:    "turn-admit",
+				FinalizedEpisodeID: "ep-admit",
+				Phase:              ParentTurnFinalized,
+			}},
+			Claims: store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			ParentTurnID:    "turn-admit",
+			ParentEpisodeID: "ep-admit",
+			EventKind:       WakeEventApproval,
+			WakeReason:      WakeReasonApprovalRequired,
+		})
+		require.NoError(t, err)
+		require.Equal(t, NotifyOnly, result.Decision)
+		require.Equal(t, "parent_turn_finalized", result.Reason)
+	})
+
+	t.Run("approval waits while parent is busy", func(t *testing.T) {
+		store := newTestStore(t, "admit-approval-busy")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: &ParentTurnSnapshot{
+				SessionID:        "sess-admit",
+				Status:           "running",
+				CurrentTurnID:    "turn-admit",
+				CurrentEpisodeID: "ep-admit",
+				Phase:            ParentTurnRunning,
+			}},
+			Claims: store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			ParentTurnID:    "turn-admit",
+			ParentEpisodeID: "ep-admit",
+			EventKind:       WakeEventApproval,
+			WakeReason:      WakeReasonApprovalRequired,
+		})
+		require.NoError(t, err)
+		require.Equal(t, RetryAdmission, result.Decision)
+		require.Equal(t, "parent_turn_busy", result.Reason)
+	})
+
+	t.Run("approval episode mismatch rejects stale", func(t *testing.T) {
+		store := newTestStore(t, "admit-approval-episode")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
+			Claims:       store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			ParentTurnID:    "turn-admit",
+			ParentEpisodeID: "ep-old",
+			EventKind:       WakeEventApproval,
+			WakeReason:      WakeReasonApprovalRequired,
+		})
+		require.NoError(t, err)
+		require.Equal(t, RejectStale, result.Decision)
+		require.Equal(t, "approval_episode_mismatch", result.Reason)
+	})
+
+	t.Run("unknown legacy non-terminal without identity is notification only", func(t *testing.T) {
+		store := newTestStore(t, "admit-legacy-unknown")
+		service := NewResumeAdmissionService(ResumeAdmissionConfig{
+			ParentStates: staticParentTurnResolver{snapshot: &ParentTurnSnapshot{
+				SessionID: "sess-admit",
+				Status:    "idle",
+				Phase:     ParentTurnUnknown,
+			}},
+			Claims: store,
+		})
+		result, err := service.Evaluate(ctx, ResumeAdmissionInput{
+			RootScopeID:     "sess-admit",
+			ParentSessionID: "sess-admit",
+			EventKind:       "legacy_check",
+		})
+		require.NoError(t, err)
+		require.Equal(t, NotifyOnly, result.Decision)
+		require.Equal(t, "legacy_non_terminal_missing_identity", result.Reason)
+	})
+
 	t.Run("missing turn is derived from obligation ledger", func(t *testing.T) {
 		batches := newAdmissionBatchStore(t, "admit-derive-turn")
 		batchID := seedAdmissionParkedBatch(t, batches, subagentbatch.BatchCompleted, "ep-admit")
@@ -397,6 +522,63 @@ func TestResumeAdmissionClaimIsExactlyOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, NotifyOnly, retry.Decision)
 	require.Equal(t, "settlement_already_submitted", retry.Reason)
+}
+
+func TestParentTurnSnapshotWakeIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		snapshot *ParentTurnSnapshot
+		wantTurn string
+		wantEpi  string
+	}{
+		{
+			name: "parked",
+			snapshot: &ParentTurnSnapshot{
+				Phase:              ParentTurnParked,
+				SuspendedTurnID:    "turn-parked",
+				SuspendedEpisodeID: "ep-parked",
+			},
+			wantTurn: "turn-parked",
+			wantEpi:  "ep-parked",
+		},
+		{
+			name: "finalized",
+			snapshot: &ParentTurnSnapshot{
+				Phase:              ParentTurnFinalized,
+				FinalizedTurnID:    "turn-final",
+				FinalizedEpisodeID: "ep-final",
+			},
+			wantTurn: "turn-final",
+			wantEpi:  "ep-final",
+		},
+		{
+			name: "running",
+			snapshot: &ParentTurnSnapshot{
+				Phase:            ParentTurnRunning,
+				CurrentTurnID:    "turn-current",
+				CurrentEpisodeID: "ep-current",
+			},
+			wantTurn: "turn-current",
+			wantEpi:  "ep-current",
+		},
+		{
+			name: "legacy fallback prefers current",
+			snapshot: &ParentTurnSnapshot{
+				CurrentTurnID:    "turn-current",
+				CurrentEpisodeID: "ep-current",
+				SuspendedTurnID:  "turn-parked",
+			},
+			wantTurn: "turn-current",
+			wantEpi:  "ep-current",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			turnID, episodeID := tc.snapshot.WakeIdentity()
+			require.Equal(t, tc.wantTurn, turnID)
+			require.Equal(t, tc.wantEpi, episodeID)
+		})
+	}
 }
 
 func TestResumeAdmissionAllowsNextParkedEpochInSameEpisode(t *testing.T) {

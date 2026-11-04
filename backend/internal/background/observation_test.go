@@ -11,6 +11,7 @@ import (
 func newObservationTestJob(t *testing.T, manager *Manager, jobID string) *managedJob {
 	t.Helper()
 	job := &managedJob{
+		manager: manager,
 		info: Job{
 			ID:        jobID,
 			Status:    StatusRunning,

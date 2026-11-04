@@ -310,7 +310,8 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
 	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
 	managed := &managedJob{
-		ctx: jobCtx,
+		manager: m,
+		ctx:     jobCtx,
 		info: Job{
 			ID:          jobID,
 			SessionID:   strings.TrimSpace(sessionID),

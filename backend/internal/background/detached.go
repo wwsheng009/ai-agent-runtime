@@ -127,7 +127,11 @@ func (m *Manager) runDetachedJob(managed *managedJob) {
 	launch, err := m.launchDetachedShellWithRetry(ctx, managed)
 	if err != nil {
 		if ctx.Err() != nil {
-			m.markCancelled(context.Background(), managed, ctx.Err().Error())
+			if stderrors.Is(ctx.Err(), context.DeadlineExceeded) {
+				m.markTimedOut(managed, "command timed out during detached launch")
+			} else {
+				m.markCancelled(context.Background(), managed, ctx.Err().Error())
+			}
 			return
 		}
 		if m.scheduleDetachedRecovery(managed, "launch_failed", err.Error()) {
@@ -692,6 +696,7 @@ func (m *Manager) emitLogOutput(ctx context.Context, managed *managedJob) {
 				continue
 			}
 			_, _ = managed.output.Write(chunk)
+			managed.outputAbsorbedBytes += int64(n)
 			managed.outputOffset = next
 			m.appendJobEvent(ctx, managed.info.ID, "output", map[string]interface{}{
 				"offset":      start,

@@ -1,9 +1,12 @@
 package background
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 )
 
 // MetadataTerminalObserved marks a job whose terminal state an in-flight
@@ -25,7 +28,56 @@ const (
 	backgroundMetaOutputDrainedAt     = "output_drained_at"
 	backgroundMetaLateOutputCount     = "late_output_count"
 	backgroundMetaLateOutputDiscarded = "late_output_discarded"
+	backgroundMetaOutputDrain         = "output_drain"
 )
+
+func outputDrainLedgerFromMetadata(metadata map[string]interface{}) (outputdrain.Ledger, bool) {
+	if len(metadata) == 0 {
+		return outputdrain.Ledger{}, false
+	}
+	if raw, ok := metadata[backgroundMetaOutputDrain]; ok && raw != nil {
+		encoded, err := json.Marshal(raw)
+		if err == nil {
+			var ledger outputdrain.Ledger
+			if json.Unmarshal(encoded, &ledger) == nil && ledger.Version > 0 {
+				return ledger.Normalize(), true
+			}
+		}
+	}
+	// Legacy rows only had the flat keys. Reconstruct a read-only view so
+	// callers keep working until the next terminal/late write upgrades it.
+	drainedAt, _ := metadata[backgroundMetaOutputDrainedAt].(string)
+	late, _ := intMetadataValue(metadata, backgroundMetaLateOutputCount)
+	discarded, _ := boolMetadataValue(metadata, backgroundMetaLateOutputDiscarded)
+	if strings.TrimSpace(drainedAt) == "" && late == 0 && !discarded {
+		return outputdrain.Ledger{}, false
+	}
+	ledger := outputdrain.Ledger{
+		Version:        1,
+		Phase:          outputdrain.PhaseDrained,
+		DrainedAt:      strings.TrimSpace(drainedAt),
+		LateBytes:      int64(late),
+		LateDiscarded:  discarded,
+		ConflictPolicy: outputdrain.ConflictDiscardLate,
+	}
+	if late > 0 {
+		ledger.Phase = outputdrain.PhaseLateDiscarded
+		ledger.Version++
+	}
+	return ledger.Normalize(), true
+}
+
+func storeOutputDrainMetadata(metadata map[string]interface{}, ledger outputdrain.Ledger) outputdrain.Ledger {
+	ledger = ledger.Normalize()
+	if metadata == nil {
+		return ledger
+	}
+	metadata[backgroundMetaOutputDrain] = ledger
+	metadata[backgroundMetaOutputDrainedAt] = ledger.DrainedAt
+	metadata[backgroundMetaLateOutputCount] = ledger.LateBytes
+	metadata[backgroundMetaLateOutputDiscarded] = ledger.LateDiscarded
+	return ledger
+}
 
 // outputWaitMaxAge bounds how long an in-flight waiter registration is trusted.
 // The longest supported task_output wait is two minutes; anything older is a
@@ -182,21 +234,36 @@ func (j *managedJob) outputTerminal() bool {
 	return isTerminalStatus(j.info.Status)
 }
 
-// recordLateOutput counts bytes discarded after the terminal drain boundary.
-// The in-memory metadata is enough for the live task_output view; the terminal
-// job row is not rewritten on every late chunk.
-func (j *managedJob) recordLateOutput(bytes int) {
+// recordLateOutput counts bytes discarded after the terminal drain boundary and
+// persists the versioned ledger through the narrow metadata-only store path.
+// The in-memory copy keeps the live task_output view current even when the
+// store is unavailable.
+func (j *managedJob) recordLateOutput(bytes int) outputdrain.Ledger {
 	if j == nil || bytes <= 0 {
-		return
+		return outputdrain.Ledger{}
 	}
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	if j.info.Metadata == nil {
 		j.info.Metadata = map[string]interface{}{}
 	}
-	existing, _ := intMetadataValue(j.info.Metadata, backgroundMetaLateOutputCount)
-	j.info.Metadata[backgroundMetaLateOutputCount] = int64(existing + bytes)
-	j.info.Metadata[backgroundMetaLateOutputDiscarded] = true
+	ledger, ok := outputDrainLedgerFromMetadata(j.info.Metadata)
+	if !ok {
+		ledger = outputdrain.Ledger{
+			Version:        1,
+			Phase:          outputdrain.PhaseDrained,
+			DrainedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+			AbsorbedBytes:  j.outputAbsorbedBytes,
+			DrainedBytes:   j.outputAbsorbedBytes,
+			ConflictPolicy: outputdrain.ConflictDiscardLate,
+		}
+	}
+	ledger = ledger.AddLate(int64(bytes))
+	storeOutputDrainMetadata(j.info.Metadata, ledger)
+	j.mu.Unlock()
+	if j.manager != nil {
+		j.manager.persistLateOutput(j.info.ID, ledger)
+	}
+	return ledger
 }
 
 // markTerminalObservedByWaiter stamps the job before its terminal event reaches

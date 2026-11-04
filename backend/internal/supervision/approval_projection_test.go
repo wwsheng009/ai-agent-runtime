@@ -17,6 +17,8 @@ func testApprovalNotice(requestID string) ApprovalNotice {
 		RequestID:             requestID,
 		ToolName:              "write_file",
 		Mode:                  ApprovalModeApproval,
+		ParentTurnID:          "turn-parent-1",
+		ParentEpisodeID:       "ep-parent-1",
 		RequestedAt:           time.Now().Add(-90 * time.Second),
 		Wake:                  true,
 	}
@@ -88,6 +90,10 @@ func TestProjectApprovalRequest_RequestsParentWake(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	require.Equal(t, "root-session-1", pending[0].TargetParentSessionID)
+	require.Equal(t, "turn-parent-1", pending[0].TurnID)
+	require.Equal(t, "turn-parent-1", pending[0].ParentTurnID)
+	require.Equal(t, "ep-parent-1", pending[0].ParentEpisodeID)
+	require.Equal(t, WakeEventApproval, pending[0].EventKind)
 }
 
 // TestProjectApprovalRequest_QuestionStaysDigestOnly verifies that a child

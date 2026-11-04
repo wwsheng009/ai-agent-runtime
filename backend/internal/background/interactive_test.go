@@ -18,10 +18,14 @@ import (
 // interactiveEchoCommand returns a shell command that reads stdin line by line
 // and echoes each line back. It never exits until stdin closes.
 func interactiveEchoCommand() string {
-	if runtime.GOOS == "windows" {
-		return `$input | ForEach-Object { Write-Output ("echo:" + $_) }`
+	switch runtimeexecutor.DefaultUserShell().Type {
+	case runtimeexecutor.ShellTypePowerShell, runtimeexecutor.ShellTypePwsh:
+		return `while ($true) { $line = [Console]::ReadLine(); if ($null -eq $line) { break }; Write-Output ("echo:" + $line) }`
+	case runtimeexecutor.ShellTypeCmd:
+		return "more"
+	default:
+		return `while IFS= read -r line; do printf 'echo:%s\n' "$line"; done`
 	}
-	return `while IFS= read -r line; do printf 'echo:%s\n' "$line"; done`
 }
 
 // interactiveEchoSupported reports whether the detected shell can host the echo
@@ -382,12 +386,15 @@ func TestOpenTerminalPTYSurvivesCallerContextCancel(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows ConPTY fixture")
 	}
+	if !interactiveEchoSupported() {
+		t.Skip("interactive stdin echo is not portable under cmd.exe")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := NewManager(Config{LogDir: t.TempDir(), MonitorInterval: 50 * time.Millisecond})
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	job, err := manager.OpenTerminal(ctx, "session-pty-survive", TerminalOpenArgs{
-		Command: "more",
+		Command: interactiveEchoCommand(),
 		TTY:     true,
 		Cols:    80,
 		Rows:    30,
@@ -400,18 +407,11 @@ func TestOpenTerminalPTYSurvivesCallerContextCancel(t *testing.T) {
 	cancel()
 	time.Sleep(300 * time.Millisecond)
 
-	// Drain the conhost init sequence first (VT mode setup may still stream).
-	for i := 0; i < 5; i++ {
-		res, err := manager.WriteStdin(ctx, job.ID, "", 500)
-		require.NoError(t, err)
-		if res.WaitCondition == "timeout" {
-			break
-		}
-	}
-
-	res, err := manager.WriteStdin(context.Background(), job.ID, "after-cancel\r", 6000)
-	require.NoError(t, err)
-	require.Contains(t, res.Output, "after-cancel", "session must survive caller ctx cancel and still echo input")
+	// The caller context is already cancelled. The PTY must still accept input
+	// and echo it. A bounded poll absorbs ConPTY/PowerShell startup jitter
+	// without turning a missing echo into a silent skip.
+	output := writeStdinUntilContains(t, manager, job.ID, "after-cancel\r", "echo:after-cancel", backgroundTestTimeout(10*time.Second))
+	require.Contains(t, output, "echo:after-cancel", "session must survive caller ctx cancel and still echo input")
 
 	current, err := manager.GetJob(context.Background(), job.ID)
 	require.NoError(t, err)
@@ -419,4 +419,34 @@ func TestOpenTerminalPTYSurvivesCallerContextCancel(t *testing.T) {
 
 	_, err = manager.CloseTerminal(context.Background(), job.ID)
 	require.NoError(t, err)
+}
+
+func writeStdinUntilContains(t *testing.T, manager *Manager, jobID, input, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var seen strings.Builder
+	sent := false
+	var lastErr error
+	for time.Now().Before(deadline) {
+		payload := ""
+		waitMs := 500
+		if !sent {
+			payload = input
+			waitMs = 2000
+			sent = true
+		}
+		res, err := manager.WriteStdin(context.Background(), jobID, payload, waitMs)
+		if err != nil {
+			lastErr = err
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		seen.WriteString(res.Output)
+		if strings.Contains(seen.String(), want) {
+			return seen.String()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("PTY did not echo %q within %s (last_err=%v, seen=%q)", want, timeout, lastErr, seen.String())
+	return seen.String()
 }

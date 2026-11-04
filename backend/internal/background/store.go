@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -352,6 +353,93 @@ func (s *SQLiteStore) UpdateJobCAS(ctx context.Context, job Job, expectedVersion
 		return false, fmt.Errorf("update background job (cas) rows affected: %w", err)
 	}
 	return affected > 0, nil
+}
+
+// UpdateJobOutputDrain persists the versioned drain ledger on both live and
+// terminal rows. It deliberately touches metadata only: terminal job state is
+// immutable under UpdateJobCAS, but late-output accounting must still survive a
+// process restart.
+func (s *SQLiteStore) UpdateJobOutputDrain(ctx context.Context, jobID string, ledger outputdrain.Ledger) error {
+	if s == nil {
+		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return fmt.Errorf("job id is required")
+	}
+	var metadataJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT metadata_json FROM background_jobs WHERE id = ?`, jobID).Scan(&metadataJSON)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read background job metadata for output drain: %w", err)
+	}
+	metadata := map[string]interface{}{}
+	if strings.TrimSpace(metadataJSON) != "" {
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			return fmt.Errorf("decode background job metadata for output drain: %w", err)
+		}
+	}
+	storeOutputDrainMetadata(metadata, ledger)
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("encode background job metadata for output drain: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE background_jobs SET metadata_json = ? WHERE id = ?`, string(encoded), jobID); err != nil {
+		return fmt.Errorf("update background job output drain: %w", err)
+	}
+	return nil
+}
+
+// ListOutputDrainLedgers returns terminal jobs whose drain ledger falls in the
+// metrics window. Legacy rows without a ledger are skipped.
+func (s *SQLiteStore) ListOutputDrainLedgers(ctx context.Context, since, until time.Time) ([]outputdrain.Ledger, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if err := s.ensure(); err != nil {
+		return nil, err
+	}
+	query := `SELECT metadata_json FROM background_jobs WHERE finished_at IS NOT NULL`
+	args := make([]interface{}, 0, 2)
+	if !since.IsZero() {
+		query += ` AND finished_at >= ?`
+		args = append(args, since.UTC().Format(time.RFC3339Nano))
+	}
+	if !until.IsZero() {
+		query += ` AND finished_at <= ?`
+		args = append(args, until.UTC().Format(time.RFC3339Nano))
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list background output drain ledgers: %w", err)
+	}
+	defer rows.Close()
+	ledgers := make([]outputdrain.Ledger, 0)
+	for rows.Next() {
+		var metadataJSON string
+		if err := rows.Scan(&metadataJSON); err != nil {
+			return nil, fmt.Errorf("scan background output drain ledger: %w", err)
+		}
+		if strings.TrimSpace(metadataJSON) == "" {
+			continue
+		}
+		metadata := map[string]interface{}{}
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			continue
+		}
+		if ledger, ok := outputDrainLedgerFromMetadata(metadata); ok {
+			ledgers = append(ledgers, ledger)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate background output drain ledgers: %w", err)
+	}
+	return ledgers, nil
 }
 
 func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {

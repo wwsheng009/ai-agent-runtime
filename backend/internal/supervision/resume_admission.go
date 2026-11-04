@@ -55,6 +55,30 @@ type ParentTurnSnapshot struct {
 	Phase              ParentTurnState
 }
 
+// WakeIdentity returns the logical turn/episode an attention wake should carry.
+// It is used by approval projections, which are not settlement wakes but still
+// must not route by "idle" alone. The phase selects the authoritative pair;
+// unknown legacy state falls back in current -> suspended -> finalized order.
+func (s *ParentTurnSnapshot) WakeIdentity() (turnID, episodeID string) {
+	if s == nil {
+		return "", ""
+	}
+	switch normalizeParentTurnState(s.Phase) {
+	case ParentTurnParked:
+		return firstNonEmptyString(s.SuspendedTurnID, s.CurrentTurnID, s.FinalizedTurnID),
+			firstNonEmptyString(s.SuspendedEpisodeID, s.CurrentEpisodeID, s.FinalizedEpisodeID)
+	case ParentTurnFinalized, ParentTurnCanceled:
+		return firstNonEmptyString(s.FinalizedTurnID, s.CurrentTurnID, s.SuspendedTurnID),
+			firstNonEmptyString(s.FinalizedEpisodeID, s.CurrentEpisodeID, s.SuspendedEpisodeID)
+	case ParentTurnRunning:
+		return firstNonEmptyString(s.CurrentTurnID, s.SuspendedTurnID, s.FinalizedTurnID),
+			firstNonEmptyString(s.CurrentEpisodeID, s.SuspendedEpisodeID, s.FinalizedEpisodeID)
+	default:
+		return firstNonEmptyString(s.CurrentTurnID, s.SuspendedTurnID, s.FinalizedTurnID),
+			firstNonEmptyString(s.CurrentEpisodeID, s.SuspendedEpisodeID, s.FinalizedEpisodeID)
+	}
+}
+
 // ParentTurnStateResolver reads the parent session's durable turn snapshot.
 // Returning an error keeps the wake durable (RetryAdmission); it never falls
 // back to "idle means resumable".
@@ -315,40 +339,12 @@ func (s *ResumeAdmissionService) Evaluate(ctx context.Context, in ResumeAdmissio
 		return result, nil
 	}
 
-	// P0 compatibility bridge: only explicit policies and terminal/settlement
-	// families are forced through admission. Non-terminal legacy supervision
-	// wakes (progress/approval/self-check) keep their old behavior until P1.
+	// Non-terminal legacy wakes have three distinct families:
+	//   - approval: attention wake, requires a durable parent turn identity;
+	//   - progress/wait-feedback: bounded, explicitly legacy idle behavior;
+	//   - unknown: no identity means notification-only.
 	if policy == "" && !isTerminalAdmissionWake(in) {
-		if s != nil && s.parentStates != nil {
-			snapshot, err := s.parentStates.ResolveParentTurn(ctx, in.ParentSessionID)
-			if err != nil {
-				// An unreadable parent state must not be treated as an idle
-				// invitation for a progress turn.
-				result.Decision = RetryAdmission
-				result.Reason = "parent_state_unreadable"
-				return result, nil
-			}
-			if snapshot != nil {
-				switch normalizeParentTurnState(snapshot.Phase) {
-				case ParentTurnFinalized, ParentTurnCanceled:
-					result.Reason = "parent_turn_finalized"
-					return result, nil
-				}
-				if isBusyRuntimeStatus(snapshot.Status) {
-					result.Decision = RetryAdmission
-					result.Reason = "parent_turn_busy"
-					return result, nil
-				}
-				if finalized := strings.TrimSpace(snapshot.FinalizedTurnID); finalized != "" &&
-					finalized == strings.TrimSpace(in.ParentTurnID) {
-					result.Reason = "parent_turn_finalized"
-					return result, nil
-				}
-			}
-		}
-		result.Decision = ResumeLegacy
-		result.Reason = "legacy_non_terminal"
-		return result, nil
+		return s.evaluateLegacyNonTerminalAdmission(ctx, in)
 	}
 
 	if s == nil {
@@ -826,6 +822,181 @@ func isBusyRuntimeStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *ResumeAdmissionService) evaluateLegacyNonTerminalAdmission(ctx context.Context, in ResumeAdmissionInput) (ResumeAdmissionResult, error) {
+	result := ResumeAdmissionResult{Input: in, Decision: NotifyOnly}
+	if isApprovalAdmissionWake(in) {
+		return s.evaluateApprovalAdmission(ctx, in)
+	}
+
+	var snapshot *ParentTurnSnapshot
+	if s != nil && s.parentStates != nil {
+		resolved, err := s.parentStates.ResolveParentTurn(ctx, in.ParentSessionID)
+		if err != nil {
+			// An unreadable parent state must not be treated as an idle
+			// invitation for a progress turn.
+			result.Decision = RetryAdmission
+			result.Reason = "parent_state_unreadable"
+			return result, nil
+		}
+		snapshot = resolved
+		if snapshot != nil {
+			switch normalizeParentTurnState(snapshot.Phase) {
+			case ParentTurnFinalized, ParentTurnCanceled:
+				result.Reason = "parent_turn_finalized"
+				return result, nil
+			}
+			if isBusyRuntimeStatus(snapshot.Status) {
+				result.Decision = RetryAdmission
+				result.Reason = "parent_turn_busy"
+				return result, nil
+			}
+			if finalized := strings.TrimSpace(snapshot.FinalizedTurnID); finalized != "" &&
+				finalized == strings.TrimSpace(in.ParentTurnID) {
+				result.Reason = "parent_turn_finalized"
+				return result, nil
+			}
+		}
+	}
+
+	if !isProgressAdmissionWake(in) {
+		if strings.TrimSpace(in.ParentTurnID) == "" || strings.TrimSpace(in.ParentEpisodeID) == "" {
+			result.Reason = "legacy_non_terminal_missing_identity"
+			return result, nil
+		}
+		if snapshot == nil {
+			result.Reason = "parent_state_missing"
+			return result, nil
+		}
+		if approvalIdentityMatches(in.ParentTurnID, in.ParentEpisodeID, snapshot.SuspendedTurnID, snapshot.SuspendedEpisodeID) {
+			result.Decision = ResumeLegacy
+			result.Reason = "legacy_non_terminal"
+			return result, nil
+		}
+		if approvalIdentityMatches(in.ParentTurnID, in.ParentEpisodeID, snapshot.CurrentTurnID, snapshot.CurrentEpisodeID) {
+			result.Decision = RetryAdmission
+			result.Reason = "legacy_turn_in_flight"
+			return result, nil
+		}
+		if approvalIdentityMatches(in.ParentTurnID, in.ParentEpisodeID, snapshot.FinalizedTurnID, snapshot.FinalizedEpisodeID) {
+			result.Reason = "parent_turn_finalized"
+			return result, nil
+		}
+		if snapshotContainsTurnIdentity(snapshot, in.ParentTurnID) {
+			result.Decision = RejectStale
+			result.Reason = "legacy_episode_mismatch"
+			return result, nil
+		}
+		result.Decision = RejectStale
+		result.Reason = "legacy_turn_identity_mismatch"
+		return result, nil
+	}
+
+	result.Decision = ResumeLegacy
+	result.Reason = "legacy_non_terminal"
+	return result, nil
+}
+
+// evaluateApprovalAdmission keeps the approval channel as an attention wake,
+// not a settlement claim. It may wake an idle parent only when the wake carries
+// a turn+episode that still matches durable parent state. Missing identity,
+// finalized parents and stale episodes stay notification-only.
+func (s *ResumeAdmissionService) evaluateApprovalAdmission(ctx context.Context, in ResumeAdmissionInput) (ResumeAdmissionResult, error) {
+	result := ResumeAdmissionResult{Input: in, Decision: NotifyOnly}
+	turnID := strings.TrimSpace(in.ParentTurnID)
+	episodeID := strings.TrimSpace(in.ParentEpisodeID)
+	if turnID == "" || episodeID == "" {
+		result.Reason = "approval_missing_parent_identity"
+		return result, nil
+	}
+	if s == nil || s.parentStates == nil {
+		result.Decision = RetryAdmission
+		result.Reason = "parent_state_resolver_unwired"
+		return result, nil
+	}
+	snapshot, err := s.parentStates.ResolveParentTurn(ctx, in.ParentSessionID)
+	if err != nil {
+		result.Decision = RetryAdmission
+		result.Reason = "parent_state_unreadable"
+		return result, nil
+	}
+	if snapshot == nil {
+		result.Reason = "parent_state_missing"
+		return result, nil
+	}
+	phase := normalizeParentTurnState(snapshot.Phase)
+	if phase == ParentTurnFinalized || phase == ParentTurnCanceled {
+		result.Reason = "parent_turn_" + string(phase)
+		return result, nil
+	}
+	if isBusyRuntimeStatus(snapshot.Status) {
+		result.Decision = RetryAdmission
+		result.Reason = "parent_turn_busy"
+		return result, nil
+	}
+
+	if approvalIdentityMatches(turnID, episodeID, snapshot.SuspendedTurnID, snapshot.SuspendedEpisodeID) {
+		result.Decision = ResumeLegacy
+		result.Reason = "legacy_approval_resume"
+		return result, nil
+	}
+	if approvalIdentityMatches(turnID, episodeID, snapshot.CurrentTurnID, snapshot.CurrentEpisodeID) {
+		// The run may have ended between the state read and this decision. Do
+		// not start a second concurrent turn; let the next transition retry.
+		result.Decision = RetryAdmission
+		result.Reason = "approval_parent_turn_in_flight"
+		return result, nil
+	}
+	if approvalIdentityMatches(turnID, episodeID, snapshot.FinalizedTurnID, snapshot.FinalizedEpisodeID) {
+		result.Reason = "parent_turn_finalized"
+		return result, nil
+	}
+	if snapshotContainsTurnIdentity(snapshot, turnID) {
+		result.Decision = RejectStale
+		result.Reason = "approval_episode_mismatch"
+		return result, nil
+	}
+	result.Decision = RejectStale
+	result.Reason = "approval_turn_identity_mismatch"
+	return result, nil
+}
+
+func isApprovalAdmissionWake(in ResumeAdmissionInput) bool {
+	if strings.EqualFold(strings.TrimSpace(in.EventKind), WakeEventApproval) {
+		return true
+	}
+	return WakeBudgetClassOf(in.WakeReason) == WakeBudgetClassApproval
+}
+
+func isProgressAdmissionWake(in ResumeAdmissionInput) bool {
+	switch strings.ToLower(strings.TrimSpace(in.EventKind)) {
+	case WakeEventProgress, WakeEventWaitFeedback, WakeEventWaitFeedbackSilence:
+		return true
+	}
+	return WakeBudgetClassOf(in.WakeReason) == WakeBudgetClassProgress
+}
+
+func approvalIdentityMatches(turnID, episodeID, snapshotTurnID, snapshotEpisodeID string) bool {
+	turnID = strings.TrimSpace(turnID)
+	episodeID = strings.TrimSpace(episodeID)
+	snapshotTurnID = strings.TrimSpace(snapshotTurnID)
+	snapshotEpisodeID = strings.TrimSpace(snapshotEpisodeID)
+	return turnID != "" && episodeID != "" &&
+		turnID == snapshotTurnID && episodeID == snapshotEpisodeID
+}
+
+func snapshotContainsTurnIdentity(snapshot *ParentTurnSnapshot, turnID string) bool {
+	if snapshot == nil {
+		return false
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return false
+	}
+	return turnID == strings.TrimSpace(snapshot.CurrentTurnID) ||
+		turnID == strings.TrimSpace(snapshot.SuspendedTurnID) ||
+		turnID == strings.TrimSpace(snapshot.FinalizedTurnID)
 }
 
 func isTerminalAdmissionWake(in ResumeAdmissionInput) bool {

@@ -61,6 +61,14 @@ func (h *Handler) GetSupervisionMetrics(w http.ResponseWriter, r *http.Request) 
 		}
 		opts.MaxCandidates = value
 	}
+	if h.backgroundManager != nil {
+		opts.OutputDrainSources.BackgroundJobs = h.backgroundManager
+	}
+	if store := h.peekSubagentBatchStore(); store != nil {
+		if source, ok := store.(supervision.OutputDrainMetricsSource); ok {
+			opts.OutputDrainSources.BatchTasks = source
+		}
+	}
 	snapshot, err := supervision.CollectMetricsSnapshot(r.Context(), h.getSupervisionStore(), opts)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)

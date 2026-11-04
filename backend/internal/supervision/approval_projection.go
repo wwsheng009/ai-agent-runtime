@@ -62,6 +62,11 @@ type ApprovalNotice struct {
 	Summary               string
 	RequestedAt           time.Time
 	ExpiresAt             time.Time
+	// ParentTurnID / ParentEpisodeID bind an approval wake to the parent
+	// logical turn. They are required for automatic approval wake-up; a legacy
+	// row without both identities stays notification-only.
+	ParentTurnID    string
+	ParentEpisodeID string
 	// Wake asks for a durable auto-wake when the parent is runnable. Approvals
 	// default to waking; questions stay digest-only because they are answered
 	// by a human, not by a parent turn.
@@ -152,6 +157,12 @@ func ProjectApprovalRequest(ctx context.Context, store Store, wakes *WakeSchedul
 			TargetParentTeamID:    notification.TargetParentTeamID,
 			WakeReason:            notification.EventType,
 			NotificationSeq:       notification.EventSeq,
+			// Approval is an attention wake, not a settlement. It still needs
+			// the parent identity so admission can reject finalized/stale
+			// parents instead of treating "idle" as a resume invitation.
+			TurnID:          strings.TrimSpace(notice.ParentTurnID),
+			ParentTurnID:    strings.TrimSpace(notice.ParentTurnID),
+			ParentEpisodeID: strings.TrimSpace(notice.ParentEpisodeID),
 			// C2-4 (#15) / B4: the approval family has its own notify key, so
 			// re-projecting the same request cannot start a second resume while
 			// a later request for the same child still can.
@@ -286,6 +297,8 @@ func normalizeApprovalNotice(notice ApprovalNotice) ApprovalNotice {
 	notice.RequestID = strings.TrimSpace(notice.RequestID)
 	notice.ToolName = strings.TrimSpace(notice.ToolName)
 	notice.Summary = strings.TrimSpace(notice.Summary)
+	notice.ParentTurnID = strings.TrimSpace(notice.ParentTurnID)
+	notice.ParentEpisodeID = strings.TrimSpace(notice.ParentEpisodeID)
 	if notice.Mode == "" {
 		notice.Mode = ApprovalModeApproval
 	}

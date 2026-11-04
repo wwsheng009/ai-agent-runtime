@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1064,6 +1065,27 @@ func TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome(t *testing.T) {
 	require.Equal(t, string(runtimeerrors.ErrToolTimeout), output.ErrorCode)
 	require.Equal(t, int64(100), output.TimeoutEffectiveMs)
 	require.Equal(t, "tool_default", output.TimeoutSource)
+}
+
+// TestJobTimeoutDuringLaunchIsTimedOut pins the race where the timeout expires
+// before cmd.Start completes: that is a timed_out outcome, not a generic
+// process-start failure.
+func TestJobTimeoutDuringLaunchIsTimedOut(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{
+		MaxConcurrentJobs: 1,
+		DefaultTimeout:    50 * time.Millisecond,
+		PrepareCommand: func(runtimeexecutor.Shell, string, *exec.Cmd) {
+			time.Sleep(150 * time.Millisecond)
+		},
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-launch-timeout", BackgroundTaskArgs{
+		Command: shellEchoCommand("late-launch"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusTimedOut, backgroundTestTimeout(5*time.Second)))
 }
 
 func TestDetachedRunnerRefreshesHeartbeatWhileCommandIsQuiet(t *testing.T) {

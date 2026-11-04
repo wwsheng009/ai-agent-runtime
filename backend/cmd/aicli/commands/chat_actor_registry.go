@@ -1538,6 +1538,9 @@ func (r *localActorRegistry) projectLocalAgentApproval(ctx context.Context, pare
 	if !ok {
 		return
 	}
+	if snapshot, err := r.Host.localParentTurnSnapshot(ctx, parentSessionID); err == nil && snapshot != nil {
+		notice.ParentTurnID, notice.ParentEpisodeID = snapshot.WakeIdentity()
+	}
 	_, _ = supervision.ProjectApprovalRequest(ctx, r.Host.Supervision.Store, r.Host.Supervision.Wakes, notice)
 	_ = r.Host.wakeSupervisedParent(ctx, parentSessionID, rootScopeID)
 }

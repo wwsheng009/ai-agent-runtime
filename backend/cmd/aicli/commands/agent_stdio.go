@@ -325,6 +325,11 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	if h == nil {
 		return acp.PromptResponse{}, fmt.Errorf("acp host is nil")
 	}
+	// ACP is intentionally request-scoped. Unlike the CLI/API hosts this path
+	// does not wire a supervision wake consumer: a parked logical turn never
+	// emits a second automatic final response. The next explicit
+	// session/prompt is the continuation request; the durable actor state
+	// decides whether it resumes the same turn/episode.
 	sessionID := strings.TrimSpace(req.SessionID)
 	h.mu.Lock()
 	hostSess := h.sess[sessionID]
@@ -418,7 +423,7 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	// Slash commands are plain text by contract; when a payload also carries
 	// images, claiming the text would drop them, so it stays a model prompt.
 	if len(content.Images) == 0 && h.dispatchACPSlashCommand(promptCtx, sessionID, hostSess, text, emit) {
-		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+		return acpPromptResponseWithTurnMeta(promptCtx, chat, acp.StopReasonEndTurn), nil
 	}
 
 	// Ensure runtime event bridge is live and prefers ACP approvals.
@@ -461,7 +466,7 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 		}
 		hostSess.finalError = err
 		if isACPCancelError(err) || chat.IsInterrupted() || promptCtx.Err() != nil {
-			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+			return acpPromptResponseWithTurnMeta(promptCtx, chat, acp.StopReasonCancelled), nil
 		}
 		return acp.PromptResponse{}, err
 	}
@@ -476,7 +481,7 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	// every completed turn so the client never shows stale session metadata.
 	emitACPSessionUsage(emit, sessionID, chat)
 	h.emitSessionInfo(emit, sessionID, chat)
-	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	return acpPromptResponseWithTurnMeta(promptCtx, chat, acp.StopReasonEndTurn), nil
 }
 
 func (h *acpSessionHost) Cancel(ctx context.Context, sessionID string) error {

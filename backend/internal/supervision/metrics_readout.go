@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 )
 
 // 2026-09-23 C0-E（§7.3 度量基线采集）读数模块。
@@ -418,6 +420,22 @@ type MetricsSnapshotOptions struct {
 	OutboxPageLimit int
 	// MaxCandidates caps the metric-5 review list (default 20).
 	MaxCandidates int
+	// OutputDrainSources optionally supplies the durable background-job and
+	// batch-task drain ledgers. Unwired sources degrade to a note, not a hard
+	// failure.
+	OutputDrainSources OutputDrainSources
+}
+
+// OutputDrainMetricsSource is implemented by background.Manager and the
+// subagentbatch SQLite store.
+type OutputDrainMetricsSource interface {
+	ReadOutputDrainMetrics(ctx context.Context, since, until time.Time) (outputdrain.Metrics, error)
+}
+
+// OutputDrainSources groups the two durable drain-ledger readers.
+type OutputDrainSources struct {
+	BackgroundJobs OutputDrainMetricsSource
+	BatchTasks     OutputDrainMetricsSource
 }
 
 // MetricsSnapshot is the C0-E baseline payload: the same object backs the text
@@ -435,6 +453,9 @@ type MetricsSnapshot struct {
 	// ResumeAdmission carries the parent-turn hardening counters derived from
 	// the durable resume-claim and wake-consumption ledgers.
 	ResumeAdmission ResumeAdmissionMetrics `json:"resume_admission"`
+	// OutputDrain carries the versioned terminal-output absorb/drain/discard
+	// ledger for background jobs and batch task capsules.
+	OutputDrain OutputDrainMetrics `json:"output_drain"`
 	// MisKillCandidates is the §7.3 metric-5 review list (verdict stays human).
 	MisKillCandidates []MisKillCandidate `json:"mis_kill_candidates,omitempty"`
 	// WindowTruncated is true when the window read came back at its cap: the
@@ -463,6 +484,13 @@ type ResumeAdmissionMetrics struct {
 	NotificationOnly     int `json:"notification_only"`
 	Stale                int `json:"stale"`
 	Observed             int `json:"observed"`
+}
+
+// OutputDrainMetrics is the host-neutral drain readout. Background jobs use
+// discard_late; batch task capsules use reject_terminal_write.
+type OutputDrainMetrics struct {
+	BackgroundJobs outputdrain.Metrics `json:"background_jobs"`
+	BatchTasks     outputdrain.Metrics `json:"batch_tasks"`
 }
 
 // ResumeAdmissionMetricsReader is implemented by stores that can aggregate the
@@ -501,6 +529,26 @@ func CollectMetricsSnapshot(ctx context.Context, store Store, opts MetricsSnapsh
 		}
 	} else {
 		snapshot.Notes = append(snapshot.Notes, "store 不支持 resume admission metrics")
+	}
+	if opts.OutputDrainSources.BackgroundJobs != nil {
+		metrics, metricsErr := opts.OutputDrainSources.BackgroundJobs.ReadOutputDrainMetrics(ctx, opts.Since, opts.Until)
+		if metricsErr != nil {
+			snapshot.Notes = append(snapshot.Notes, "background output drain metrics 读取失败: "+metricsErr.Error())
+		} else {
+			snapshot.OutputDrain.BackgroundJobs = metrics
+		}
+	} else {
+		snapshot.Notes = append(snapshot.Notes, "background output drain source 未接线")
+	}
+	if opts.OutputDrainSources.BatchTasks != nil {
+		metrics, metricsErr := opts.OutputDrainSources.BatchTasks.ReadOutputDrainMetrics(ctx, opts.Since, opts.Until)
+		if metricsErr != nil {
+			snapshot.Notes = append(snapshot.Notes, "batch output drain metrics 读取失败: "+metricsErr.Error())
+		} else {
+			snapshot.OutputDrain.BatchTasks = metrics
+		}
+	} else {
+		snapshot.Notes = append(snapshot.Notes, "batch output drain source 未接线")
 	}
 	windowLimit := opts.WindowLimit
 	if windowLimit <= 0 {

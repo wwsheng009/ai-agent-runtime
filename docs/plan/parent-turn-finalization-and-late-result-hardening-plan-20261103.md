@@ -1,6 +1,6 @@
 # 父 Turn 最终化门与异步迟到结果收敛方案
 
-- 状态：`P0 implemented + P1/P2 incremental`（evidence-aware stale claim recovery、legacy wake/self-check 防线、late output drain、metrics readout、required background job 公共能力、nested child self-park 跨重启恢复已落地；剩余协议/兼容策略项待推进）
+- 状态：`P0/P1/P2 tracked scope complete`（evidence-aware stale claim recovery、ACP explicit continuation contract、approval identity/attention wake 收口、legacy wake/self-check 防线、versioned output drain ledger、metrics readout、required background job 公共能力与真机 ConPTY 验收、nested child self-park 跨重启恢复、Windows/PTY 与 timing 稳定性均已落地）
 - 修订：v1.1（2026-11-03 补充后台作业 `background_task` / `task_output` / terminal wake 链路）
 - 日期：2026-11-03
 - 适用范围：`backend/internal/agent`、`backend/internal/supervision`、`backend/internal/subagentbatch`、`backend/internal/background`、CLI/API runtime host、ACP prompt handler
@@ -579,6 +579,28 @@ type WakeAdmissionInput struct {
 | `CANCELED` | 按取消策略记录结果，默认 `NotifyOnly` | `NotifyOnly` | `RejectStale` |
 | 无匹配 suspension | 不自动新开模型，记录通知 | `NotifyOnly` | `RejectStale` |
 
+非终态 attention wake 的明确默认值：
+
+```text
+approval（approval_required / question / permission）
+  turn+episode 缺失                         -> NotifyOnly
+  parent finalized/canceled                 -> NotifyOnly
+  parent busy                               -> RetryAdmission
+  turn+episode 匹配 suspended               -> ResumeLegacy（不做 settlement claim）
+  turn+episode 与 durable parent 不匹配      -> RejectStale
+
+progress / wait_feedback
+  -> 保留既有 bounded legacy idle 行为（显式例外）
+
+其他未知非终态 legacy wake
+  turn/episode 缺失                         -> NotifyOnly
+  identity 与 parent snapshot 不匹配         -> RejectStale
+```
+
+approval 是 attention wake，不是 settlement：它不进入 same-parked-turn 的
+exactly-once claim，但仍必须携带 durable parent identity，不能仅凭 actor idle
+自动续跑。
+
 重点是：
 
 ```text
@@ -1028,6 +1050,10 @@ TestBackgroundMonitorDisarmsOnTerminal
 
 不能为了保持旧行为而把无法证明归属的 late wake 自动投递给当前 idle actor。
 
+approval 旧行没有 `parent_turn_id` / `parent_episode_id` 时默认 `NotifyOnly`；
+不保留“idle 即自动唤醒”的兼容分支，因此不需要新增旧 approval 灰度开关。
+progress / wait-feedback 的 bounded legacy idle 行为是显式例外，不属于 approval。
+
 ### 8.2 灰度开关
 
 建议提供：
@@ -1067,16 +1093,36 @@ supervision.background_job_missing_identity_notify_only
 
 ## 9. 风险与未决决策
 
-### 9.1 ACP 的“挂起但未终局”表达
+### 9.1 ACP 的“挂起但未终局”表达（决策：显式 continuation）
 
-这是最高优先级的协议决策。若 ACP transport 没有非终局的 prompt response，逻辑层的 `PARKED_WAITING_OBLIGATIONS` 与传输层的 request lifecycle 不能简单一一映射。
+决策（2026-11-04）：**不新增 ACP stop reason**。`EndTurn` 继续表示本次
+`session/prompt` 请求结束；逻辑 turn 的 parked 状态通过 ACP 的 `_meta`
+扩展表达，下一次显式 `session/prompt` 才是 continuation 请求。
 
-在该问题明确前，安全底线是：
+```text
+PromptResponse.stopReason = end_turn       # transport request finished
+_meta.ai-agent-runtime.turn_phase=parked  # logical turn not final
+_meta.ai-agent-runtime.parked=true
+_meta.ai-agent-runtime.final=false
+_meta.ai-agent-runtime.continuation=explicit_prompt
+_meta.ai-agent-runtime.resume_turn_id / resume_episode_id
+```
+
+约束：
+
+- ACP host 不接自动 supervision wake consumer，late result 不会产生第二个 final
+  response；
+- 下一次显式 prompt 由 durable actor state 反向判定是否复用同一
+  turn/episode，不依赖 actor 当前是否 idle；
+- finalized/canceled 状态返回 `final=true` / `continuation=new_episode`；
+- 客户端不理解 `_meta` 时可以忽略，仍保持 ACP v1 的 `end_turn` 兼容性。
+
+安全底线保持不变：
 
 ```text
 EndTurn 之后不自动发送第二个最终 response
 late result 只作为 durable notification
-用户 follow-up 才能启动新 episode
+用户显式 follow-up 才能启动 continuation/new episode
 ```
 
 ### 9.2 成功 child 是否默认唤醒
@@ -1722,6 +1768,53 @@ go test ./cmd/aicli/commands -count=1
 required job 的宿主级 loop/resolver 覆盖主会话、API/CLI 直连 loop 与
 in-process child loop。嵌套子代理的跨重启自主恢复见 §11.10。
 
+#### Required job 真机 ConPTY 验收（2026-11-04）
+
+使用真实 ConPTY、真实 `job_start` 工具调用和真实 PowerShell job 进程完成
+required / detached 对照验收。
+
+首次运行 `output/conpty-real-e2e/run-20261104-163559` 暴露的是验收环境问题：
+`backend/.tmp/aicli-conpty-real.exe` 为旧构建，`job_start` 实际忽略了
+`finalization_policy` 并按 detached 落库。按当前源码重建该二进制后重跑通过；
+这不是 runtime 逻辑失败。
+
+最终证据：
+
+```text
+required:
+  output/conpty-real-e2e/run-20261104-164116/background-job-required/result.json
+  output/conpty-real-e2e/run-20261104-164116/verification-summary.json
+
+detached control:
+  output/conpty-real-e2e/run-20261104-164224/background-job-detached/result.json
+```
+
+required 断言：
+
+- `parent.turn.parked` 携带 `turn_00a97cc6-...` / `ep_e6aad9fa-...`，且
+  `final=false`；
+- job metadata：`finalization_policy=required`，parent turn/episode 与 parked
+  完全相同；
+- job 先 terminal，随后 `turn.resumed(phase=started)`，最后
+  `parent.turn.finalized`，turn/episode 全程不变；
+- wake consumption=`model_turn`，`supervision_resume_claims=1` 且
+  `state=submitted`、`model_turn_id` 等于同一 turn；
+- 恢复回合最终回复包含 job marker，finalize 后没有新的模型 `session_start`。
+
+detached 对照断言：
+
+- job policy=`detached`，parent 在 job terminal 前 finalized；
+- wake consumption=`notification_only`，`resume_claims=0`；
+- job 输出保留 marker，finalize 后没有第二个 `session_start` 或模型 turn。
+
+验收结论：
+
+```text
+verdict = true
+required job  -> park -> terminal -> resume same turn/episode -> finalize
+detached job  -> finalize first -> notification_only -> no resume
+```
+
 ### 11.10 嵌套 child agent 自己 park 后的跨重启恢复（2026-11-04）
 
 嵌套 child 的逻辑 turn 可能把自身 park 在 `job:` / 子批次 / team / 更深 child
@@ -1852,3 +1945,191 @@ TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes（改为 current-tur
 边界：`recovery_pending` 是安全的不确定状态，不是自动重试状态；需要后续证据或
 人工/运维释放。它保证“不知道是否启动”时既不重复模型 turn，也不静默删除唯一
 恢复记录。
+
+### 11.12 ACP 显式 continuation 契约（2026-11-04）
+
+P1-1 按“显式 continuation”落地，不新增 ACP stop reason：
+
+- `PromptResponse.stopReason` 继续只用 `end_turn` / `cancelled` 等 ACP v1 值；
+- 新增可选 `PromptResponse._meta`，键为 `ai-agent-runtime`，载荷：
+  ```json
+  {
+    "turn_id": "turn_...",
+    "episode_id": "ep_...",
+    "turn_phase": "parked",
+    "parked": true,
+    "final": false,
+    "continuation": "explicit_prompt",
+    "resume_turn_id": "turn_...",
+    "resume_episode_id": "ep_..."
+  }
+  ```
+- finalized/canceled 返回 `final=true`、`continuation=new_episode`；
+- runtime state 不可读时不写 `_meta`，不猜测 turn identity；
+- ACP host 明确不接 supervision wake consumer，late result 只保留在
+  durable notification/result evidence 中，不产生第二个 final response；
+- 下一次显式 `session/prompt` 由 actor 的 durable suspension 反向复用
+  同一 turn/episode；客户端不需要理解内部 supervision 账本。
+
+新增测试：
+
+```text
+TestACPParkedTurnContinuationIsExplicitPrompt
+TestACPFinalizedTurnContinuationIsNewEpisode
+TestACPParkedTurnMetaFallsBackToDurableSuspensionFields
+TestACPTurnMetaPrefersCurrentTurnOverPreviousFinalization
+TestACPPromptResponseOmitsMetaWithoutRuntimeState
+```
+
+验证：
+
+```text
+go test ./internal/acp -count=1
+go test ./cmd/aicli/commands -run '^TestACP(Parked|Finalized|Prompt)' -count=1
+```
+
+### 11.13 Approval identity / legacy wake 收口（2026-11-04）
+
+P1-3 决策：approval 是 **attention wake**，不是 settlement。它可以唤醒空闲父
+turn，但必须携带 durable `parent_turn_id` / `parent_episode_id`，不能仅凭
+actor idle 自动续跑。
+
+实现内容：
+
+1. **ApprovalNotice / wake identity**
+   - `ApprovalNotice` 新增 `ParentTurnID` / `ParentEpisodeID`；
+   - `ProjectApprovalRequest` 把它们写入 `WakeRequest.TurnID` /
+     `ParentTurnID` / `ParentEpisodeID`；
+   - CLI/API approval bridge 从 parent runtime snapshot 的
+     `WakeIdentity()` 填充；snapshot 不可读或没有身份时留空。
+2. **Admission**
+   - approval wake：
+     ```text
+     missing turn/episode       -> NotifyOnly
+     parent finalized/canceled  -> NotifyOnly
+     parent busy                -> RetryAdmission
+     matching suspended identity-> ResumeLegacy（不做 settlement claim）
+     identity mismatch          -> RejectStale
+     ```
+   - progress / wait-feedback 保留既有 bounded legacy idle 行为；
+   - 其他无 policy 的非终态 wake 缺少 turn/episode 时默认 `NotifyOnly`，
+     identity 与 parent snapshot 不匹配时 `RejectStale`。
+3. **旧记录**
+   - 旧 approval wake 无 parent identity 时默认通知，不自动投递给 idle actor；
+   - 不新增 legacy approval 灰度开关，避免保留无法证明归属的自动续跑。
+
+新增/更新测试：
+
+```text
+TestProjectApprovalRequest_RequestsParentWake（断言 parent identity）
+TestParentTurnSnapshotWakeIdentity
+TestResumeAdmissionMatrix/approval with matching parked identity resumes legacy
+TestResumeAdmissionMatrix/approval without parent identity is notification only
+TestResumeAdmissionMatrix/approval after finalization is notification only
+TestResumeAdmissionMatrix/approval waits while parent is busy
+TestResumeAdmissionMatrix/approval episode mismatch rejects stale
+TestResumeAdmissionMatrix/unknown legacy non-terminal without identity is notification only
+```
+
+### 11.14 Versioned terminal output drain ledger（2026-11-04）
+
+P2-1 把原先分散的 `output_drained_at` / `late_output_count` 升级为共享的
+版本化账本：
+
+```text
+internal/outputdrain.Ledger
+  version           # 1 at terminal boundary; +1 per late decision
+  phase             # absorbing | draining | drained | late_discarded
+  terminal_epoch
+  drained_at
+  absorbed_bytes
+  drained_bytes
+  late_bytes
+  late_discarded
+  conflict_policy   # discard_late | reject_terminal_write
+```
+
+实现内容：
+
+1. **Background job**
+   - terminal transition 初始化 `output_drain`，version=1，phase=drained，
+     absorbed/drained bytes 取 terminal 前接受字节数；
+   - terminal 后 producer 写入走 `AddLate`，version 递增、late bytes 累加，
+     phase=late_discarded，并写入 `output_drain` + 旧版 flat keys；
+   - terminal job row 不能被 `UpdateJobCAS` 改写，因此新增窄路径
+     `UpdateJobOutputDrain`，只更新 `metadata_json`，保证 late 计数跨重启保留；
+   - `TaskOutputResult` 同时暴露 `output_drain` 与旧字段。
+2. **Batch task capsule**
+   - `TaskResult` 增加同一 `output_drain` 结构；
+   - `RecordTaskResult` 按 task version 生成 ledger：parked=draining，
+     terminal=drained；
+   - batch task 的 conflict policy 是 `reject_terminal_write`：terminal
+     overwrite 直接返回版本冲突，不允许静默覆盖稳定 capsule。
+3. **Supervision metrics**
+   - `MetricsSnapshot` 新增 `output_drain.background_jobs` /
+     `output_drain.batch_tasks`：records、versions、absorbed/drained/late bytes、
+     late_discarded、conflict policy 分布；
+   - CLI `/debug supervision metrics` 与 API `/supervision/metrics` 接入
+     background manager / batch store；未接线时写 note 降级；
+   - `cmd/supervision-metrics` 仍可在无宿主源时读取 supervision store 的其余指标。
+
+新增/更新测试：
+
+```text
+TestLedgerLateWriteIsVersionedAndCounted
+TestLedgerNormalizeKeepsMonotonicDefaults
+TestLateOutputAfterTerminalIsDiscardedAndCounted（扩展 version/phase/bytes）
+TestOutputDrainLedgerPersistsAcrossStoreReload
+TestRecordTaskResult...（扩展 TaskResult.OutputDrain + metrics）
+TestMetricsSnapshotCollectsOutputDrainSources
+```
+
+验证：
+
+```text
+go test ./internal/outputdrain ./internal/background ./internal/subagentbatch ./internal/supervision -count=1
+go test ./internal/api/runtimeapi -count=1
+go test ./cmd/aicli/commands -count=1
+```
+
+已知环境性失败保持 P2-2 口径：`internal/background` 的 PTY/timing 用例在完整
+并行负载下偶发失败，单独串行复跑通过；不是本次 drain 逻辑回归。
+
+### 11.15 Windows/PTY 与高负载 timing 稳定性（2026-11-04）
+
+P2-2 的两个已知失败已收敛，不再以“环境问题”跳过真实回归。
+
+1. **PTY echo fixture**
+   - 旧用例固定使用 `more`，并在 PowerShell / Git Bash 混合环境下依赖错误的
+     shell 语法；
+   - fixture 现在使用 `runtimeexecutor.DefaultUserShell()` 选择命令，与未配置
+     `shell:` 时的 background manager 默认解析一致；
+   - PowerShell 使用 `[Console]::ReadLine()` 循环（不是 `$input` 管道）；
+   - echo 断言改为有界轮询 `writeStdinUntilContains`，失败时输出
+     `last_err` 与完整 `seen` 流；不会把缺失 echo 静默 skip。
+2. **timeout 与 launch 的竞态**
+   - 如果 deadline 在 `cmd.Start` 或 detached launcher 启动期间到期，旧路径会
+     落成 `failed(context deadline exceeded)`；
+   - 现在两条 launch 路径都区分 `DeadlineExceeded`，收敛为 `timed_out`，
+     与进程已启动后的 timeout 语义一致；
+   - 新增 `TestJobTimeoutDuringLaunchIsTimedOut` 确定性覆盖该窗口。
+3. **回归/CI**
+   - CI 基线已使用 `go test -p=1 ./... -count=1 -timeout=600s`；
+   - 增加本地 `make test-background`，固定 `-p 1 ./internal/background -count=1`；
+   - 已知 PTY / timeout 用例连续复跑 3 次通过，完整
+     `go test -p 1 ./internal/background -count=1` 通过。
+
+新增/更新测试：
+
+```text
+TestOpenTerminalPTYSurvivesCallerContextCancel
+TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome
+TestJobTimeoutDuringLaunchIsTimedOut
+```
+
+验证：
+
+```text
+go test ./internal/background -run 'TestOpenTerminalPTYSurvivesCallerContextCancel|TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome|TestJobTimeoutDuringLaunchIsTimedOut' -count=3
+go test -p 1 ./internal/background -count=1
+```

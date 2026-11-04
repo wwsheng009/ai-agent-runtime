@@ -1309,6 +1309,9 @@ func (c *sessionAgentController) projectAgentApproval(ctx context.Context, paren
 	if !ok {
 		return
 	}
+	if snapshot, err := c.handler.apiParentTurnSnapshot(ctx, parentSessionID); err == nil && snapshot != nil {
+		notice.ParentTurnID, notice.ParentEpisodeID = snapshot.WakeIdentity()
+	}
 	_, _ = supervision.ProjectApprovalRequest(ctx, store, c.handler.getSupervisionWakeScheduler(), notice)
 	// The parent may already be idle: start one bounded turn now. Busy parents
 	// keep the durable wake for the next runnable transition, and every parent

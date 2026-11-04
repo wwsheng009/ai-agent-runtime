@@ -1,6 +1,6 @@
 # Parent Turn 最终化与迟到结果加固：实施执行计划
 
-- 状态：`P0 implemented + P1/P2 incremental`（切面 1-9 已完成；evidence-aware stale claim recovery、claim lease heartbeat、self-check claim、late output drain、metrics readout、claim retention/host maintenance、finalization sequence gate、FINALIZING phase、persisted/JSONL replayed resume-start event、progress-only wake classification、parked client semantics、CLI metrics/state readout、`job_start(finalization_policy=required)` 公共能力已补）
+- 状态：`P0/P1/P2 tracked scope complete`（切面 1-9 已完成；evidence-aware stale claim recovery、ACP explicit continuation metadata、approval identity/attention wake 收口、claim lease heartbeat、self-check claim、versioned output drain ledger、metrics readout、claim retention/host maintenance、finalization sequence gate、FINALIZING phase、persisted/JSONL replayed resume-start event、progress-only wake classification、parked client semantics、CLI metrics/state readout、`job_start(finalization_policy=required)` 公共能力与真机 ConPTY 验收、Windows/PTY 与 timing 稳定性已补）
 - 日期：2026-11-03
 - 依据：`docs/plan/parent-turn-finalization-and-late-result-hardening-plan-20261103.md`
 - 目标：先落地 P0（identity、Resume Admission、finalization gate、后台 terminal 安全默认），并完成支撑 P0 的 exactly-once claim 与回归测试；P1/P2 按本计划后续阶段推进。
@@ -804,8 +804,8 @@ git diff --check
 
 ## 10. 已知残留风险 / 后续阶段
 
-1. progress/approval/self-check/session-end 的 admission 尚未全部强制；本轮只覆盖 terminal/settlement/job；P1 统一。
+1. approval 已强制携带 parent identity 并走 attention-wake admission；progress / wait-feedback 保留显式 bounded legacy idle 行为；其他无 identity 的非终态 wake 默认 NotifyOnly。self-check/session-end 仍复用既有 admission 入口。
 2. ~~resume claim 崩溃恢复窗口~~ 已收敛：主方案 §11.11 增加 evidence-aware stale recovery；current/finalized/re-park 证据收敛为 `recovered_submitted`，原始 suspension 未变化则 `recovered_unsubmitted` 安全重试，无法证明时保留 `recovery_pending`。
-3. terminal output drain 的版本化吸收/丢弃指标未完整实现。
-4. ACP 非终局响应协议未改动；当前依赖“ACP 不接自动 wake”保证不产生第二 final response。
-5. 旧 wake 行若既无 turn 也无 policy，且不属于 terminal/job，本轮保持 legacy 行为；P1 将按 5.4 矩阵统一。
+3. ~~terminal output drain 的版本化吸收/丢弃指标~~ 已收敛：共享 `outputdrain.Ledger`，background job 与 batch task capsule 统一 version/phase/absorbed/drained/late/conflict policy；terminal job metadata-only 持久化，supervision metrics 已接入 background/batch 源。
+4. ~~ACP 非终局响应协议未改动~~ 已决策并落地：`EndTurn` 保持 request-scoped；`PromptResponse._meta.ai-agent-runtime` 暴露 parked/final/turn/episode，下一次显式 prompt 作为 continuation；ACP 仍不接自动 wake，不产生第二 final response。见主方案 §9.1 / §11.12。
+5. ~~旧 wake 行若既无 turn 也无 policy，且不属于 terminal/job~~ 已收敛：approval/未知非终态缺 identity 默认 NotifyOnly；progress / wait-feedback 是显式 bounded legacy 例外。

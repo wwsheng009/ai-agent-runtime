@@ -1,6 +1,10 @@
 package background
 
-import "time"
+import (
+	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
+)
 
 // RestartPolicy describes how a job should be handled after a process restart.
 type RestartPolicy string
@@ -161,12 +165,16 @@ type TaskOutputResult struct {
 	// Terminal output drain observability. LateOutputCount is the number of
 	// bytes a producer wrote after the terminal drain boundary; they were
 	// discarded rather than attached to the settled result.
-	OutputDrainedAt     string   `json:"output_drained_at,omitempty"`
-	LateOutputCount     int64    `json:"late_output_count,omitempty"`
-	LateOutputDiscarded bool     `json:"late_output_discarded,omitempty"`
-	OSPID               *int     `json:"os_pid,omitempty"`
-	CPUPercent          *float64 `json:"cpu_percent,omitempty"`
-	RSSKB               *int64   `json:"rss_kb,omitempty"`
+	OutputDrainedAt     string `json:"output_drained_at,omitempty"`
+	LateOutputCount     int64  `json:"late_output_count,omitempty"`
+	LateOutputDiscarded bool   `json:"late_output_discarded,omitempty"`
+	// OutputDrain is the versioned ledger behind the legacy fields above.
+	// Version increments on every late-write decision; Phase distinguishes
+	// absorbing/draining/drained/late_discarded.
+	OutputDrain *outputdrain.Ledger `json:"output_drain,omitempty"`
+	OSPID       *int                `json:"os_pid,omitempty"`
+	CPUPercent  *float64            `json:"cpu_percent,omitempty"`
+	RSSKB       *int64              `json:"rss_kb,omitempty"`
 }
 
 // JobFilter filters background job queries.

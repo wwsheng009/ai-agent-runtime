@@ -91,7 +91,7 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 |---|---|
 | `initialize` | 握手。返回 `protocolVersion`、`agentCapabilities`、`agentInfo`（name=`aicli`）、`authMethods`。`authMethods` 恒为**非 nil 空数组** `[]`：本 agent 凭据由本地 `aicli login` 管理，不实现 `authenticate` / `logout`（裁定见实施计划 §11.4-D1） |
 | `session/new` | 创建会话。参数 `{cwd, mcpServers}`（`mcpServers` 逐条容错解析并装配为会话级 MCP，见 [MCP 集成](#mcp-集成)）；返回 `{sessionId, configOptions?}`（`configOptions` 携带模型 / provider 选择器） |
-| `session/prompt` | 运行一轮对话。参数 `{sessionId, prompt: ContentBlock[]}`；阻塞至本轮结束，返回 `{stopReason}`。当前仅 `type=text` 内容块 |
+| `session/prompt` | 运行一轮对话。参数 `{sessionId, prompt: ContentBlock[]}`；阻塞至本轮请求结束，返回 `{stopReason, _meta?}`。当前支持 text / image / embedded resource 内容块 |
 | `session/cancel` | 取消某 session 的在途 prompt。参数 `{sessionId}`（通知，无响应） |
 | `session/set_config_option` | 修改会话选项（模型 / provider 选择）。参数 `{sessionId, configId, value}`，`value` 为 `value_id` 字符串或布尔值；返回**完整的** `{configOptions}` 供客户端刷新选择器。Zed 的模型菜单即通过该方法切换模型，provider 选择器走同一方法（`configId: "provider"`） |
 | `session/load` | 恢复会话（仅 `loadSession=true` 能力时可用）。agent 通过 `session/update` 回放历史后返回空对象 `{}`（`LoadSessionResponse`，字段均可选）。返回 `null` 违反 ACP v1 schema，会导致 Zed 等严格客户端反序列化失败 |
@@ -150,6 +150,34 @@ ACP v1 把 `sessionCapabilities` 的每一项定型为**能力对象**（不是�
 | `max_tokens` | 达到 token 上限 |
 | `max_turn_requests` | 达到回合内请求次数上限 |
 | `refusal` | 模型拒绝回答 |
+
+### prompt continuation metadata
+
+`EndTurn` 只表示本次 `session/prompt` 请求结束，不保证逻辑 turn 已经 finalized。
+当逻辑 turn 因 required child / job / team obligation 进入 `parked` 时，响应仍返回
+`stopReason: "end_turn"`，但附带可选扩展：
+
+```json
+{
+  "_meta": {
+    "ai-agent-runtime": {
+      "turn_id": "turn_...",
+      "episode_id": "ep_...",
+      "turn_phase": "parked",
+      "parked": true,
+      "final": false,
+      "continuation": "explicit_prompt",
+      "resume_turn_id": "turn_...",
+      "resume_episode_id": "ep_..."
+    }
+  }
+}
+```
+
+客户端不需要理解 supervision 账本；下一次显式 `session/prompt` 会由 durable actor
+state 反向判定是否复用同一 turn/episode。finalized/canceled turn 返回
+`final=true` / `continuation="new_episode"`。ACP host 不接自动 wake consumer，
+因此 late child/job result 不会产生第二个 final response。
 
 ## session/update 事件
 

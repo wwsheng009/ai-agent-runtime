@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
@@ -362,6 +363,10 @@ type TaskResult struct {
 	Error       string      `json:"error,omitempty"`
 	UsageTotal  int         `json:"usage_total,omitempty"`
 	ArtifactRef string      `json:"artifact_ref,omitempty"`
+	// OutputDrain is the same versioned drain ledger used by background jobs.
+	// A batch task capsule is a single result boundary; terminal overwrites are
+	// rejected by RecordTaskResult.
+	OutputDrain *outputdrain.Ledger `json:"output_drain,omitempty"`
 }
 
 // BatchSummary is the coalesced digest used at batch terminal time and for

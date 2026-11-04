@@ -576,6 +576,11 @@ type PromptRequest struct {
 // PromptResponse is the result for session/prompt.
 type PromptResponse struct {
 	StopReason string `json:"stopReason"`
+	// Meta is the ACP extension point for optional host metadata. The runtime
+	// uses it to expose the logical turn/episode and whether a parked turn
+	// requires an explicit follow-up prompt; clients that do not understand the
+	// extension can ignore it.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
 }
 
 // CancelNotification is the params for session/cancel.

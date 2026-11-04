@@ -18,6 +18,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 )
 
@@ -201,6 +202,7 @@ type Manager struct {
 }
 
 type managedJob struct {
+	manager      *Manager
 	mu           sync.RWMutex
 	ctx          context.Context
 	info         Job
@@ -209,7 +211,10 @@ type managedJob struct {
 	logPath      string
 	outputMu     sync.Mutex
 	outputOffset int64
-	scheduled    bool
+	// outputAbsorbedBytes counts bytes accepted before the terminal boundary.
+	// Late writes are counted separately in the drain ledger.
+	outputAbsorbedBytes int64
+	scheduled           bool
 	// scheduledAt records when the job was handed to a worker goroutine; the
 	// watchdog uses it to reclaim slots that never transition to running.
 	scheduledAt time.Time
@@ -417,7 +422,8 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
 	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
 	managed := &managedJob{
-		ctx: jobCtx,
+		manager: m,
+		ctx:     jobCtx,
 		info: Job{
 			ID:            jobID,
 			SessionID:     strings.TrimSpace(sessionID),
@@ -1502,8 +1508,12 @@ func (m *Manager) runJob(managed *managedJob) {
 		if logFile != nil {
 			_ = logFile.Close()
 		}
-		if ctx.Err() == context.Canceled {
-			m.markCancelled(ctx, managed, "cancelled")
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				m.markTimedOut(managed, "command timed out during launch")
+			} else {
+				m.markCancelled(ctx, managed, "cancelled")
+			}
 			return
 		}
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, err)
@@ -1814,17 +1824,95 @@ func (m *Manager) settleTerminalTransitionEffects(jobID string) {
 		return
 	}
 	if managed := m.getJob(jobID); managed != nil {
+		managed.outputMu.Lock()
+		absorbedBytes := managed.outputAbsorbedBytes
+		if absorbedBytes == 0 {
+			absorbedBytes = managed.outputOffset
+		}
+		managed.outputMu.Unlock()
+
 		managed.mu.Lock()
 		if managed.info.Metadata == nil {
 			managed.info.Metadata = map[string]interface{}{}
 		}
-		if _, exists := stringMetadataValue(managed.info.Metadata, backgroundMetaOutputDrainedAt); !exists {
-			managed.info.Metadata[backgroundMetaOutputDrainedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		ledger, ok := outputDrainLedgerFromMetadata(managed.info.Metadata)
+		if !ok || ledger.Version == 0 {
+			ledger = outputdrain.Ledger{
+				Version:        1,
+				Phase:          outputdrain.PhaseDrained,
+				DrainedAt:      now,
+				AbsorbedBytes:  absorbedBytes,
+				DrainedBytes:   absorbedBytes,
+				ConflictPolicy: outputdrain.ConflictDiscardLate,
+			}
+		} else if ledger.Phase != outputdrain.PhaseLateDiscarded {
+			ledger.Phase = outputdrain.PhaseDrained
+			ledger.AbsorbedBytes = absorbedBytes
+			ledger.DrainedBytes = absorbedBytes
 		}
+		if ledger.DrainedAt == "" {
+			ledger.DrainedAt = now
+		}
+		if ledger.TerminalEpoch == "" {
+			if managed.info.FinishedAt != nil && !managed.info.FinishedAt.IsZero() {
+				ledger.TerminalEpoch = managed.info.FinishedAt.UTC().Format(time.RFC3339Nano)
+			} else {
+				ledger.TerminalEpoch = fmt.Sprintf("state:%d", managed.info.StateVersion)
+			}
+		}
+		ledger = storeOutputDrainMetadata(managed.info.Metadata, ledger)
 		managed.mu.Unlock()
+		m.persistOutputDrain(jobID, ledger)
 	}
 	m.markTerminalObservedByWaiter(jobID)
 	m.cancelJobMonitors(jobID)
+}
+
+// persistOutputDrain writes the versioned drain ledger independently of the
+// job state row. Terminal job rows are immutable under UpdateJobCAS, so late
+// producer writes need this narrow metadata-only persistence path to survive a
+// restart.
+func (m *Manager) persistOutputDrain(jobID string, ledger outputdrain.Ledger) {
+	if m == nil || m.store == nil {
+		return
+	}
+	writer, ok := m.store.(interface {
+		UpdateJobOutputDrain(ctx context.Context, jobID string, ledger outputdrain.Ledger) error
+	})
+	if !ok {
+		return
+	}
+	_ = writer.UpdateJobOutputDrain(context.Background(), strings.TrimSpace(jobID), ledger.Normalize())
+}
+
+// persistLateOutput is the late-write entry point used by managedJob.
+func (m *Manager) persistLateOutput(jobID string, ledger outputdrain.Ledger) {
+	m.persistOutputDrain(jobID, ledger)
+}
+
+// ReadOutputDrainMetrics aggregates the durable background-job drain ledgers.
+// It is an optional supervision metrics source; stores without the reader
+// return an empty aggregate.
+func (m *Manager) ReadOutputDrainMetrics(ctx context.Context, since, until time.Time) (outputdrain.Metrics, error) {
+	var metrics outputdrain.Metrics
+	if m == nil || m.store == nil {
+		return metrics, nil
+	}
+	reader, ok := m.store.(interface {
+		ListOutputDrainLedgers(ctx context.Context, since, until time.Time) ([]outputdrain.Ledger, error)
+	})
+	if !ok {
+		return metrics, nil
+	}
+	ledgers, err := reader.ListOutputDrainLedgers(ctx, since, until)
+	if err != nil {
+		return metrics, err
+	}
+	for _, ledger := range ledgers {
+		metrics.Add(ledger)
+	}
+	return metrics, nil
 }
 
 // instanceStoreWriter is implemented by the SQLite store: instance heartbeats,
@@ -2227,10 +2315,15 @@ func (m *Manager) failJobWithErrorCode(managed *managedJob, code runtimeerrors.E
 	if err != nil {
 		message = err.Error()
 	}
-	m.failJobWithCodeAndError(managed, exitCodeFromError(err), code, message)
 	if err != nil {
-		managed.output.Write([]byte("\n" + err.Error()))
+		managed.outputMu.Lock()
+		if !managed.outputTerminal() {
+			_, _ = managed.output.Write([]byte("\n" + err.Error()))
+			managed.outputAbsorbedBytes += int64(len(err.Error()) + 1)
+		}
+		managed.outputMu.Unlock()
 	}
+	m.failJobWithCodeAndError(managed, exitCodeFromError(err), code, message)
 }
 
 func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message string) {
@@ -3059,6 +3152,7 @@ func (m *Manager) managedJobFromStored(job Job) *managedJob {
 		}
 	}
 	managed := &managedJob{
+		manager:   m,
 		ctx:       jobCtx,
 		info:      job,
 		request:   request,
@@ -3276,6 +3370,12 @@ func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult
 	}
 	if value, ok := boolMetadataValue(job.Metadata, backgroundMetaLateOutputDiscarded); ok {
 		result.LateOutputDiscarded = value
+	}
+	if ledger, ok := outputDrainLedgerFromMetadata(job.Metadata); ok {
+		result.OutputDrain = &ledger
+		result.OutputDrainedAt = ledger.DrainedAt
+		result.LateOutputCount = ledger.LateBytes
+		result.LateOutputDiscarded = ledger.LateDiscarded
 	}
 	if job.QueuedAt != nil && !job.QueuedAt.IsZero() {
 		result.QueuedAt = job.QueuedAt.UTC().Format(time.RFC3339Nano)
@@ -3633,6 +3733,7 @@ func (w *jobOutputWriter) Write(p []byte) (int, error) {
 	}
 
 	_, _ = w.job.output.Write(p)
+	w.job.outputAbsorbedBytes += int64(len(p))
 	if w.logFile != nil {
 		_, _ = w.logFile.Write(p)
 	}

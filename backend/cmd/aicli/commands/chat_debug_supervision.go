@@ -340,7 +340,7 @@ func handleChatDebugSupervisionCommand(session *ChatSession, argument string) (s
 	case "control":
 		return runChatDebugSupervisionControl(ctx, session, scopes, req)
 	case "metrics":
-		return runChatDebugSupervisionMetrics(ctx, store, scopes, req)
+		return runChatDebugSupervisionMetrics(ctx, store, session, scopes, req)
 	case "state":
 		return runChatDebugSupervisionTurnState(ctx, session)
 	case "help", "--help", "-h":
@@ -390,7 +390,7 @@ func runChatDebugSupervisionList(ctx context.Context, store supervision.Store, s
 // resume_admission block is the parent-turn hardening readout (claims and wake
 // consumption), so an operator can inspect exactly-once/NotifyOnly behavior
 // without opening the HTTP API.
-func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store, scopes []string, req chatDebugSupervisionRequest) (string, error) {
+func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store, session *ChatSession, scopes []string, req chatDebugSupervisionRequest) (string, error) {
 	now := time.Now().UTC()
 	since := now.Add(-24 * time.Hour)
 	windowLimit := req.Limit
@@ -404,12 +404,13 @@ func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store
 	lines := []string{fmt.Sprintf("supervision metrics（root_scope=%s；window=24h）：", strings.Join(scopes, ","))}
 	for _, scope := range scopes {
 		snapshot, err := supervision.CollectMetricsSnapshot(ctx, store, supervision.MetricsSnapshotOptions{
-			RootSessionID:   scope,
-			Since:           since,
-			Until:           now,
-			WindowLimit:     windowLimit,
-			MaxCandidates:   maxCandidates,
-			PerSessionLimit: 100,
+			RootSessionID:      scope,
+			Since:              since,
+			Until:              now,
+			WindowLimit:        windowLimit,
+			MaxCandidates:      maxCandidates,
+			PerSessionLimit:    100,
+			OutputDrainSources: chatDebugOutputDrainSources(session),
 		})
 		if err != nil {
 			return "", fmt.Errorf("读取 supervision metrics 失败（scope=%s）: %w", scope, err)
@@ -419,6 +420,16 @@ func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store
 			"  %s: resume_admission claimed=%d submitted=%d recovered=%d released=%d model_turns=%d notification_only=%d stale=%d observed=%d",
 			scope, resume.Claimed, resume.Submitted, resume.Recovered, resume.Released,
 			resume.ModelTurns, resume.NotificationOnly, resume.Stale, resume.Observed,
+		))
+		drain := snapshot.OutputDrain
+		lines = append(lines, fmt.Sprintf(
+			"    output_drain background records=%d versions=%d absorbed=%d drained=%d late=%d discarded=%d; batch records=%d versions=%d absorbed=%d drained=%d late=%d discarded=%d",
+			drain.BackgroundJobs.Records, drain.BackgroundJobs.Versions,
+			drain.BackgroundJobs.AbsorbedBytes, drain.BackgroundJobs.DrainedBytes,
+			drain.BackgroundJobs.LateBytes, drain.BackgroundJobs.LateDiscarded,
+			drain.BatchTasks.Records, drain.BatchTasks.Versions,
+			drain.BatchTasks.AbsorbedBytes, drain.BatchTasks.DrainedBytes,
+			drain.BatchTasks.LateBytes, drain.BatchTasks.LateDiscarded,
 		))
 		lines = append(lines, fmt.Sprintf(
 			"    cancel total=%d forced=%d decision_window_expired=%d forced_ratio=%.3f decision_window_ratio=%.3f",
@@ -441,6 +452,22 @@ func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store
 		}
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func chatDebugOutputDrainSources(session *ChatSession) supervision.OutputDrainSources {
+	var sources supervision.OutputDrainSources
+	if session == nil || session.LocalRuntimeHost == nil {
+		return sources
+	}
+	if session.LocalRuntimeHost.Background != nil {
+		sources.BackgroundJobs = session.LocalRuntimeHost.Background
+	}
+	if session.LocalRuntimeHost.SubagentBatches != nil {
+		if source, ok := session.LocalRuntimeHost.SubagentBatches.(supervision.OutputDrainMetricsSource); ok {
+			sources.BatchTasks = source
+		}
+	}
+	return sources
 }
 
 // runChatDebugSupervisionTurnState renders the durable parent-turn identity and

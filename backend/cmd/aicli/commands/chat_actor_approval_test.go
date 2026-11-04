@@ -55,6 +55,41 @@ func TestLocalAgentApprovalBridgeProjectsDigestAndResolves(t *testing.T) {
 	require.Empty(t, digest.Items)
 }
 
+func TestLocalAgentApprovalWakeCarriesParentIdentity(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.SessionStore = runtimechat.NewInMemoryStorage()
+	host.RuntimeStore = runtimechat.NewInMemoryRuntimeStore(8)
+	registry := &localActorRegistry{Host: host}
+	ctx := context.Background()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:          "parent-cli-approval-wake",
+		Status:             runtimechat.SessionIdle,
+		TurnPhase:          runtimechat.ParentTurnPhaseParked,
+		SuspendedTurnID:    "turn-parent-approval",
+		SuspendedEpisodeID: "ep-parent-approval",
+	}))
+
+	child := runtimechat.NewSession("user-cli-approval-wake")
+	child.ID = "child-cli-approval-wake-1"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, "parent-cli-approval-wake")
+	require.NoError(t, host.SessionStore.Save(ctx, child))
+
+	registry.projectLocalAgentApproval(ctx, "parent-cli-approval-wake", child.ID, "/root/child-cli-approval-wake-1", runtimechat.EventApprovalRequested, map[string]interface{}{
+		"request_id": "req-cli-wake-1",
+		"tool_name":  "write_file",
+	})
+
+	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           "parent-cli-approval-wake",
+		TargetParentSessionID: "parent-cli-approval-wake",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "turn-parent-approval", pending[0].ParentTurnID)
+	require.Equal(t, "ep-parent-approval", pending[0].ParentEpisodeID)
+}
+
 // TestLocalAgentQuestionBridgeStaysDigestOnly verifies the CLI host does not
 // auto-wake the parent for a child question.
 func TestLocalAgentQuestionBridgeStaysDigestOnly(t *testing.T) {

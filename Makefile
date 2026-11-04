@@ -59,6 +59,9 @@ package-server:
 test:
 	cd $(BACKEND_DIR) && go test ./...
 
+test-background:
+	cd $(BACKEND_DIR) && go test -p 1 ./internal/background -count=1
+
 lint:
 	cd $(BACKEND_DIR) && go vet ./...
 

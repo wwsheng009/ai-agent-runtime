@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -1012,6 +1013,26 @@ func (s *sqliteBatchStore) RecordTaskResult(ctx context.Context, batchID, taskID
 		return err
 	}
 	now := Now()
+	if result != nil && result.OutputDrain == nil {
+		// The capsule itself is the batch task's single output boundary. A
+		// parked result is still draining; a terminal result is already stable.
+		probe, _ := json.Marshal(result)
+		phase := outputdrain.PhaseDraining
+		drainedBytes := int64(0)
+		if status.Terminal() {
+			phase = outputdrain.PhaseDrained
+			drainedBytes = int64(len(probe))
+		}
+		result.OutputDrain = &outputdrain.Ledger{
+			Version:        record.Version + 1,
+			Phase:          phase,
+			TerminalEpoch:  fmt.Sprintf("task:%s:%d", taskID, record.Version+1),
+			DrainedAt:      now.Format(time.RFC3339Nano),
+			AbsorbedBytes:  int64(len(probe)),
+			DrainedBytes:   drainedBytes,
+			ConflictPolicy: outputdrain.ConflictRejectTerminalWrite,
+		}
+	}
 	var payload []byte
 	if result != nil {
 		payload, err = json.Marshal(result)
@@ -1038,6 +1059,53 @@ func (s *sqliteBatchStore) RecordTaskResult(ctx context.Context, batchID, taskID
 		return fmt.Errorf("subagentbatch: commit record result: %w", err)
 	}
 	return nil
+}
+
+// ReadOutputDrainMetrics aggregates versioned result-capsule drain ledgers for
+// terminal tasks in the requested window. Legacy capsules without a ledger are
+// skipped; terminal overwrite attempts are rejected before they reach a row.
+func (s *sqliteBatchStore) ReadOutputDrainMetrics(ctx context.Context, since, until time.Time) (outputdrain.Metrics, error) {
+	var metrics outputdrain.Metrics
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return metrics, err
+	}
+	query := `SELECT result_json FROM subagent_tasks
+		WHERE result_json IS NOT NULL AND finished_at IS NOT NULL`
+	args := make([]interface{}, 0, 2)
+	if !since.IsZero() {
+		query += ` AND finished_at >= ?`
+		args = append(args, since.UTC().Format(time.RFC3339Nano))
+	}
+	if !until.IsZero() {
+		query += ` AND finished_at <= ?`
+		args = append(args, until.UTC().Format(time.RFC3339Nano))
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return metrics, fmt.Errorf("subagentbatch: list output drain metrics: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return metrics, fmt.Errorf("subagentbatch: scan output drain metrics: %w", err)
+		}
+		if strings.TrimSpace(payload) == "" {
+			continue
+		}
+		var result TaskResult
+		if err := json.Unmarshal([]byte(payload), &result); err != nil {
+			continue
+		}
+		if result.OutputDrain != nil {
+			metrics.Add(*result.OutputDrain)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return metrics, fmt.Errorf("subagentbatch: iterate output drain metrics: %w", err)
+	}
+	return metrics, nil
 }
 
 // VersionConflictError reports a CAS mismatch.

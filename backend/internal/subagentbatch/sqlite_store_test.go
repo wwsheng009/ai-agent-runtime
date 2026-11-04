@@ -3,6 +3,7 @@ package subagentbatch
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/outputdrain"
 )
 
 func newTestStore(t *testing.T) BatchStore {
@@ -281,6 +283,35 @@ func TestUpdateTaskCASAndResult(t *testing.T) {
 	}
 	if finalTask.Version != run.Version+1 {
 		t.Errorf("version after result = %d, want %d", finalTask.Version, run.Version+1)
+	}
+	var capsule TaskResult
+	if err := json.Unmarshal(finalTask.ResultSummary, &capsule); err != nil {
+		t.Fatalf("decode result capsule: %v", err)
+	}
+	if capsule.OutputDrain == nil {
+		t.Fatal("terminal result capsule must carry an output drain ledger")
+	}
+	if capsule.OutputDrain.Phase != "drained" {
+		t.Fatalf("output drain phase = %q, want drained", capsule.OutputDrain.Phase)
+	}
+	if capsule.OutputDrain.Version != finalTask.Version {
+		t.Fatalf("output drain version = %d, want task version %d", capsule.OutputDrain.Version, finalTask.Version)
+	}
+	if capsule.OutputDrain.ConflictPolicy != "reject_terminal_write" {
+		t.Fatalf("output drain conflict policy = %q", capsule.OutputDrain.ConflictPolicy)
+	}
+	metricsReader, ok := store.(interface {
+		ReadOutputDrainMetrics(ctx context.Context, since, until time.Time) (outputdrain.Metrics, error)
+	})
+	if !ok {
+		t.Fatal("test store must expose output drain metrics")
+	}
+	metrics, err := metricsReader.ReadOutputDrainMetrics(ctx, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("ReadOutputDrainMetrics: %v", err)
+	}
+	if metrics.Records != 1 || metrics.Versions != capsule.OutputDrain.Version {
+		t.Fatalf("drain metrics = %+v", metrics)
 	}
 
 	// terminal task rejects further transition
