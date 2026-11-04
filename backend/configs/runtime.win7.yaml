@@ -1,5 +1,18 @@
 version: "v1"
 
+# Win7 覆盖档的 shell 候选链（方案 §14 P1 / §6.4）。
+# Git for Windows 2.46.2 是最后支持 Win7/8 的版本（2.47.0 起要求 Win8.1+），
+# 所以显式把它放在首位；busybox-w32 是原生 Win32 进程、无需 MSYS 运行时，
+# 是裁剪机上最稳的 POSIX 兜底。wsl 与 pwsh 均不写入：前者要求 Win10+，
+# 后者的 7.x 也不支持 Win7。cmd 留在链尾，保证严格探针下也总有可用宿主。
+# 每个候选都要通过哨兵探针，配置顺序不等于"一定可用"。
+shell:
+  autoDetect: true
+  prefer: [git-bash, busybox, msys-bash, powershell, cmd]
+  # Win7 工控机冷启动较慢；3s 缺省值在这里留出余量，仍受单次探针上限约束。
+  probeTimeout: 5s
+  scriptDelivery: stdin
+
 # Windows 7 uses the Go 1.21.4 toolchain with go-sqlite3 v0.22.0
 # (same driver version as the main build). Its proper shared-memory
 # support (shm_windows.go) makes multi-process WAL concurrency work on

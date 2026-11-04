@@ -25,9 +25,23 @@ func TestWin7RuntimeConfigUsesSharedSessionDatabase(t *testing.T) {
 	// WAL concurrency work); no replica copies are configured.
 	require.Equal(t, "session_history.sqlite", win7Config.Sessions.StorePath)
 
+	// Win7 is the one profile with a deliberate `shell:` override (plan §14
+	// P1): Git for Windows 2.46.2 and busybox-w32 are the only Win7-compatible
+	// POSIX hosts, so the candidate chain must be pinned here. Assert it
+	// explicitly instead of letting the "every value aligned" comparison below
+	// erase it.
+	require.Equal(t,
+		[]string{"git-bash", "busybox", "msys-bash", "powershell", "cmd"},
+		win7Config.Shell.Prefer)
+	require.Equal(t, 5*time.Second, win7Config.Shell.ProbeTimeout)
+	require.Equal(t, runtimeexecutor.ScriptDeliveryStdin, win7Config.Shell.ScriptDelivery)
+	require.True(t, win7Config.Shell.ShellAutoDetect(), "win7 must keep autodetection on")
+	require.NoError(t, runtimeexecutor.ValidateShellConfig(&win7Config.Shell))
+
 	// The Win7 file is an override profile, not an independent behavior fork.
-	// Keep every effective value aligned with runtime.yaml.
+	// Keep every other effective value aligned with runtime.yaml.
 	win7Config.Sessions = mainConfig.Sessions
+	win7Config.Shell = mainConfig.Shell
 	require.Equal(t, mainConfig, win7Config)
 }
 

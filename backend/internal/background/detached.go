@@ -43,6 +43,13 @@ const (
 
 var detachedShellLauncher = launchDetachedShell
 
+// detachedShellForRunner is the shell used to build and host the detached
+// runner. It is a variable so the host check and the runner generation can be
+// driven from one place in tests — and so they can never disagree about which
+// shell they are talking about (a mismatch here produces a .sh runner started
+// by PowerShell).
+var detachedShellForRunner = runtimeexecutor.CurrentShell
+
 type detachedLaunchError struct {
 	err       error
 	retryable bool
@@ -70,15 +77,25 @@ const (
 )
 
 // detachedRunnerHostAvailable reports whether the platform can host the
-// detached runner script. Unix always can (/bin/sh + setsid/nohup); Windows
-// needs PowerShell, and the §7 Win7 fleet explicitly includes machines where
-// PowerShell is removed or trimmed (windows7-compat-internals.md §7). Such
-// machines must not select a runner that can never start — they fall back to
-// native in-process supervision instead (2026-09-29). Overridable in tests.
+// detached runner script. Unix always can (/bin/sh + setsid/nohup). On Windows
+// the runner needs a host process, and there are two:
+//
+//   - a POSIX shell (Git Bash / MSYS2 / busybox), which runs the plain sh
+//     runner directly — no PowerShell involved;
+//   - PowerShell, which runs the generated .ps1 runner.
+//
+// The §7 Win7 fleet explicitly includes machines where PowerShell is removed or
+// trimmed (windows7-compat-internals.md §7), so a box whose only host is a
+// POSIX shell must still be allowed to detach. Machines with neither host fall
+// back to native in-process supervision instead (2026-09-29). Overridable in
+// tests.
 var detachedRunnerHostAvailable = defaultDetachedRunnerHostAvailable
 
 func defaultDetachedRunnerHostAvailable() bool {
 	if runtime.GOOS != "windows" {
+		return true
+	}
+	if _, ok := detachedRunnerPosixHost(); ok {
 		return true
 	}
 	if _, err := exec.LookPath("pwsh"); err == nil {
@@ -88,6 +105,46 @@ func defaultDetachedRunnerHostAvailable() bool {
 		return true
 	}
 	return false
+}
+
+// detachedRunnerHost returns the shell that will host the runner, plus whether
+// that host runs a sh script (as opposed to a .ps1 script).
+//
+// On Windows a POSIX shell is preferred when it is really there; otherwise the
+// caller falls back to the PowerShell runner, whose host comes from
+// DefaultUserShell. The fallback is what keeps a forced-but-uninstalled bash
+// path from producing a .sh runner that nothing can start: the check and the
+// generation both read this one answer.
+func detachedRunnerHost() (runtimeexecutor.Shell, bool) {
+	if runtime.GOOS != "windows" {
+		return detachedShellForRunner(), true
+	}
+	if shell, ok := detachedRunnerPosixHost(); ok {
+		return shell, true
+	}
+	return runtimeexecutor.DefaultUserShell(), false
+}
+
+// detachedRunnerPosixHost returns the POSIX shell that can host a sh runner, if
+// one is actually present on disk.
+//
+// The stat check matters: CurrentShell() reports what *would* run commands, and
+// the config allows a forced path that has since been uninstalled. Trusting it
+// blindly would select a runner that can never start.
+func detachedRunnerPosixHost() (runtimeexecutor.Shell, bool) {
+	shell := detachedShellForRunner()
+	if !shell.SpeaksPosix() {
+		return runtimeexecutor.Shell{}, false
+	}
+	path := strings.TrimSpace(shell.Path)
+	if path == "" {
+		return runtimeexecutor.Shell{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return runtimeexecutor.Shell{}, false
+	}
+	return shell, true
 }
 
 func (m *Manager) canUseDetachedExecution(managed *managedJob) bool {
@@ -728,12 +785,11 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	statusPath := strings.TrimSuffix(logPath, filepath.Ext(logPath)) + ".status"
 	heartbeatPath := statusPath + ".heartbeat"
 	runnerPath := strings.TrimSuffix(logPath, filepath.Ext(logPath))
-	shell := runtimeexecutor.CurrentShell()
-	if runtime.GOOS == "windows" {
-		runnerPath += ".ps1"
-	} else {
-		runnerPath += ".sh"
-	}
+	// One host decision drives both the runner format and the process that
+	// starts it, so a Windows box on Git Bash gets a .sh runner hosted by bash
+	// and never a .sh runner handed to PowerShell.
+	shell, posixHost := detachedRunnerHost()
+	runnerPath += detachedRunnerExtension(posixHost)
 
 	if err := os.Remove(statusPath); err != nil && !os.IsNotExist(err) {
 		return nil, &detachedLaunchError{err: err, retryable: true}
@@ -741,10 +797,10 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	if err := os.Remove(heartbeatPath); err != nil && !os.IsNotExist(err) {
 		return nil, &detachedLaunchError{err: err, retryable: true}
 	}
-	if err := writeDetachedRunner(runnerPath, shell, command, cwd, logPath, statusPath); err != nil {
+	if err := writeDetachedRunner(runnerPath, shell, posixHost, command, cwd, logPath, statusPath); err != nil {
 		return nil, &detachedLaunchError{err: err, retryable: true}
 	}
-	pid, err := startDetachedRunner(runnerPath)
+	pid, err := startDetachedRunner(runnerPath, shell, posixHost)
 	if err != nil {
 		return nil, &detachedLaunchError{err: err, retryable: detachedRunnerStartRetryable(err)}
 	}
@@ -768,14 +824,49 @@ func detachedRunnerStartRetryable(err error) bool {
 	return !stderrors.As(err, &parseErr)
 }
 
-func writeDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
-	if runtime.GOOS == "windows" {
-		return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+// detachedRunnerExtension picks the runner file extension for the chosen host.
+func detachedRunnerExtension(posixHost bool) string {
+	if posixHost {
+		return ".sh"
 	}
-	return writeUnixDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+	return ".ps1"
+}
+
+func writeDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool, command, cwd, logPath, statusPath string) error {
+	if posixHost {
+		return writeUnixDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+	}
+	return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+}
+
+// posixRunnerArgv builds the argv the runner script uses to invoke the real
+// shell.
+//
+// On Windows the executable path comes back as `C:\Program Files\Git\bin\
+// bash.exe`, and it is about to be embedded in a *sh* line where it may be
+// re-parsed by MSYS. Forward slashes are accepted by both the MSYS path
+// converter and CreateProcess, so normalizing the first argv element removes a
+// class of quoting/escaping surprises without touching the payload.
+func posixRunnerArgv(shell runtimeexecutor.Shell, command string) []string {
+	argv := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+	if runtime.GOOS == "windows" && len(argv) > 0 {
+		argv[0] = filepath.ToSlash(argv[0])
+	}
+	return argv
 }
 
 func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
+	if runtime.GOOS == "windows" {
+		// Every path embedded below reaches either a shell builtin (`cd`) or a
+		// cygwin open()/CreateProcess pair, and `C:/...` is accepted by all of
+		// them while `C:\...` depends on which converter sees it first.
+		// Normalizing all of them here keeps the rule to one line instead of a
+		// per-site judgement call. The caller's own copies stay untouched: the
+		// manager reads the status file back with the original Windows form.
+		cwd = filepath.ToSlash(cwd)
+		logPath = filepath.ToSlash(logPath)
+		statusPath = filepath.ToSlash(statusPath)
+	}
 	heartbeatPath := statusPath + ".heartbeat"
 	lines := []string{
 		"#!/bin/sh",
@@ -795,7 +886,7 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 			"fi",
 		)
 	}
-	commandLine := buildShellCommandLine(shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false))
+	commandLine := buildShellCommandLine(posixRunnerArgv(shell, command))
 	lines = append(lines,
 		fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)),
 		`code=$?`,
@@ -813,8 +904,30 @@ func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, comman
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-func startDetachedRunner(path string) (int, error) {
+// posixRunnerHostArgv builds the argv used to start the sh runner with the
+// POSIX shell itself. busybox-w32 exposes sh as an applet and therefore needs
+// its `sh` prefix here too, just as DeriveExecArgs does for the inner command.
+func posixRunnerHostArgv(shell runtimeexecutor.Shell, path string) []string {
+	argv := make([]string, 0, len(shell.Prefix)+1)
+	argv = append(argv, shell.Prefix...)
+	argv = append(argv, filepath.ToSlash(path))
+	return argv
+}
+
+func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool) (int, error) {
 	if runtime.GOOS == "windows" {
+		if posixHost {
+			// POSIX host: the runner is a plain sh script, so the shell that
+			// speaks the same language starts it directly. No PowerShell process
+			// is involved, which is what makes detaching work on Win7 boxes
+			// without one. The script path is a single argv element (no shell
+			// re-parsing here), and ToSlash keeps MSYS's path converter happy.
+			//
+			// Prefix matters: busybox-w32 exposes sh as an applet, so its argv
+			// is `busybox.exe sh runner.sh`. Dropping the prefix would hand the
+			// script to the applet dispatcher as if it were an applet name.
+			return startDetachedProcess(shell.Path, posixRunnerHostArgv(shell, path))
+		}
 		launcher := windowsPowerShellHost()
 		// Spawn the runner directly instead of bouncing through a per-job
 		// `Start-Process` wrapper: the wrapper waited for a full PowerShell

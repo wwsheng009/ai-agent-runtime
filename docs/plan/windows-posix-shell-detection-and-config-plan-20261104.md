@@ -1,6 +1,6 @@
 # Windows 上使用 POSIX Shell 的方案：自动探测 + 配置控制 + doctor/TUI/Web 四入口
 
-- 状态：Proposed
+- 状态：Implemented（P0/P1/P2 代码已落地；附录 B 中环境依赖项仍未实测，见 §17）
 - 日期：2026-11-04
 - 适用范围：`aicli`（CLI / TUI / Web 控制台）、`runtime-server`、Win7 兼容构建
 - 相关文档：[windows7-compat-internals.md](../aicli/windows7-compat-internals.md)、[windows7.md](../aicli/windows7.md)、[exec.md](../aicli/exec.md)
@@ -611,10 +611,10 @@ UI 要点：
 
 ### P0 — 探测与配置骨架（可独立上线）
 
-- [ ] `ShellConfig` + `Validate`，`runtime.yaml` 支持 `shell:` 段
-- [ ] `ResolveShell` + 哨兵探针 + `wsl` 守卫 + memo
-- [ ] `doctor shell`（text/json/`--refresh`）
-- [ ] `DeriveExecArgs` 增加 stdin 变体
+- [x] `ShellConfig` + `Validate`，`runtime.yaml` 支持 `shell:` 段
+- [x] `ResolveShell` + 哨兵探针 + `wsl` 守卫 + memo
+- [x] `doctor shell`（text/json/`--refresh`）
+- [x] `DeriveExecArgs` 增加 stdin 变体
 
 **验收**
 
@@ -628,10 +628,10 @@ UI 要点：
 
 ### P1 — 四个入口打通配置
 
-- [ ] `GET/PUT /api/runtime/config/shell` + `probe`
-- [ ] `config --tui` 新增 Shell 分区
-- [ ] 前端 settings shell 域 + i18n
-- [ ] `runtime.win7.yaml` 显式链
+- [x] `GET/PUT /api/runtime/config/shell` + `probe`
+- [x] `config --tui` 新增 Shell 分区
+- [x] 前端 settings shell 域 + i18n
+- [x] `runtime.win7.yaml` 显式链
 
 **验收**
 
@@ -644,9 +644,10 @@ UI 要点：
 
 ### P2 — detached runner 与 Win7
 
-- [ ] `.sh` runner 在 Windows 上可用（含 heartbeat/status 语义）
-- [ ] `detachedRunnerHostAvailable` 改用解析结果
-- [ ] Win7 包内置 busybox + `runtime.win7.yaml` 缺省链
+- [x] `.sh` runner 在 Windows 上可用（含 heartbeat/status 语义）
+- [x] `detachedRunnerHostAvailable` 改用解析结果
+- [x] `runtime.win7.yaml` 缺省链
+- [ ] **Win7 发布包内置 busybox-w32**：属于打包/发布环节，本轮未改动制品清单；在该项落地前，Win7 裁剪机仍依赖自带 Git Bash 2.46.2 或 PowerShell 5.1 之一存在。
 
 **验收**
 
@@ -800,6 +801,48 @@ if c.Backend == BackendLocal {
 | 提示词中的 shell 描述与实际执行 | 一致（`environment_context.go` 已改用 resolver） |
 | envd 远端工具 | 行为零变化；`shellSyntaxHint` 从模糊提示变为 POSIX 提示 |
 
+## 17. 实施记录（2026-11-04）
+
+### 17.1 提交与范围
+
+| 提交 | 范围 |
+| --- | --- |
+| `724a914d` | P0 + P1：`ShellConfig`/`ResolveShell`、进程级 resolver、哨兵探针与 WSL 桩守卫、7 类调用点收口、stdin 长脚本、`doctor shell`、TUI、Web API、前端 shell 域与 i18n |
+| P2 提交（紧随其后） | detached runner 按方言选型、Win7 显式候选链、bootstrap 边界修复、附录 B 实测用例与文档回填 |
+
+### 17.2 与方案的一处实现差异（重要）
+
+方案 §16.4 写的是 `sync.Once` 单例。实现改成了**带配置指纹的锁保护 memo**（`ConfigureShell` → 指纹变化则失效；`InvalidateShellResolution` 供写入路径主动失效）。原因：`runtime.yaml` 的 `shell:` 段在 Web/TUI 里可热更新，`sync.Once` 无法让一次保存立即生效。同时增加 `configured` 标志：**只有真实启动入口安装过配置才启用新探测链**，否则 `CurrentShell()` 仍返回 `DefaultUserShell()`（`Source=legacy`），保证库级调用方和既有单测的行为不被改变。
+
+### 17.3 安装点边界（实测发现的缺陷与修复）
+
+`ConfigureShell` 是进程级全局写入，只能出现在启动入口，不能出现在请求/会话路径的 helper 里。实测到的两类污染：
+
+| 位置 | 现象 | 修复 |
+| --- | --- | --- |
+| `runtimeapi/handler.go` 的 `getBackgroundManager` | 每个 HTTP 请求都安装一次；同进程单测里 PowerShell guidance 断言拿到 bash | 删除，保留 `cmd/runtime-server/main.go` 的启动期安装 |
+| `cmd/aicli/commands/chat_actor_host.go` 的 `buildLocalChatBackgroundManager` | 该函数被单测直接调用，装出的新方言泄漏到整个测试进程：`TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance` 找不到 `Select-Object -First 200`，`cmd /c exit 0` 被 MSYS 改写 `/c` 导致进入交互模式 | 新增导出 `commands.InstallRuntimeShellResolver(cfg)`，只在 `cmd/aicli/main.go` 的 `PersistentPreRunE` 里调用；加 `TestBuildLocalChatBackgroundManagerDoesNotInstallGlobalShellResolver` 钉住约束 |
+
+最终安装点只有三处：`cmd/aicli/main.go`、`cmd/runtime-server/main.go`、`config_tui_shell.go`（保存后立即生效，属用户显式动作）。
+
+### 17.4 P2 detached runner 的实现要点
+
+- 宿主判定与 runner 生成共用一次结果：`detachedRunnerHost()` 返回 `(shell, posixHost)`，`launchDetachedShell` 同时用它决定扩展名（`.sh` / `.ps1`）、脚本内容和启动进程，杜绝"生成 `.sh` 却交给 PowerShell"。
+- Windows 上 `CurrentShell()` 是 POSIX 时还要 `os.Stat(shell.Path)` 且非目录，防止"配置里强制指向已卸载的 bash"生成永远起不来的 runner；失败则回落 `DefaultUserShell()` 的 `.ps1`。
+- `writeUnixDetachedRunner` 在 Windows 上把所有嵌入路径统一 `filepath.ToSlash`（`cd` 是内建命令，不走 CreateProcess，`C:\...` 依赖 MSYS 转换器猜）。
+- busybox-w32 的 `sh` 是 applet：`Prefix: ["sh"]` 既要进 runner 内部的 `DeriveExecArgs`，也要进**宿主进程**的 argv（`busybox.exe sh runner.sh`），见 `posixRunnerHostArgv`。
+- `detachedRunnerHostAvailable()` 不再只认 PowerShell：存在任一磁盘上真实可用的 POSIX shell 即返回 true，覆盖 §7 里"PowerShell 被裁剪掉"的 Win7 工控机。
+
+### 17.5 验证结果
+
+- `go build ./...` 通过；`go vet` 在改动涉及的所有包通过（全仓仅剩既有 `internal/pty/pty_windows.go:162` 的 `unsafe.Pointer` 告警，与本方案无关）。
+- 后端全量回归（`-count=1`）：`internal/background`、`internal/executor`、`internal/config`、`internal/agentconfig`、`internal/runtimeserver`、`internal/toolcore/shellexec`、`internal/prompt`、`internal/api/runtimeapi`、`internal/toolkit/tools`、`cmd/aicli/commands` 共 10 个包全部 PASS。
+- 前端：`tsc -b`、i18n 一致性校验、eslint（新增文件）、`vitest run src/components/workspace/settings`（45 个测试文件 / 272 项）全部通过。
+- `go run ./cmd/aicli doctor shell --json` 实测选中 `git-bash`（`C:\Program Files\Git\bin\bash.exe`，`5.2.21`，`posix-full`，探针 168 ms），候选矩阵完整。
+- 附录 B 第 5/7/8 项已用端到端实测回填；第 2/3/4/6 项仍为未实测，按"未验证不得按已确认处理"保留标注。
+
+---
+
 ## 附录 A：实测环境
 
 ```
@@ -809,15 +852,17 @@ PowerShell:    5.1 (System32\WindowsPowerShell\v1.0) / pwsh 7 (C:\Program Files\
 路径探测:      where bash.exe → 4 条（System32 的 WSL 桩位于最前）
 ```
 
-## 附录 B：本方案中标注为"待实测"的项
+## 附录 B：本方案中标注为"待实测"的项（2026-11-04 回填）
 
-1. `ApplyDocumentPathChange` 写入切片值（`shell.prefer`）的 yaml 序列化形态与往返一致性。
-2. 所用 busybox-w32 构建是否启用 `FEATURE_SH_STANDALONE`（决定是否需要 `--install -s`）。
-3. `busybox sed -i` 与 GNU `sed -i` 在备份后缀上的行为差异。
-4. Win7 实机上 Git Bash 2.46.2 与 busybox 并存时的候选排序实际表现。
-5. `.sh` runner 在 Windows 下的 `kill -0 $$` 心跳可用性（需在真实 detached 生命周期里验证）。
-6. `powershell -Command -` / `pwsh -Command -` 读取多行 stdin 脚本的行为（含 `$LASTEXITCODE` 与 `WrapPowerShellExitCode` 尾声的配合）。本方案对 PowerShell 的长脚本仍以 `-EncodedCommand` 为保守缺省，待此项实测通过后再切换为 stdin。
-7. **MSYS bash 在 Windows Job Object 内的行为**：`AssignProcessToJobObject` 之后，bash fork 出的子进程是否全部继承 job、`TerminateJobObject` 能否一次杀干净、是否残留 `msys-2.0.dll` 持有的孤儿进程。Cygwin/MSYS 的 fork 路径与 Job Object 在历史上有兼容问题，这一项必须实测（见 §16.2）。
-8. **bash 场景下 `CREATE_BREAKAWAY_FROM_JOB` 的逃生是否仍成立**：detached runner 换用 bash 启动后，`JOB_OBJECT_LIMIT_BREAKAWAY_OK` 是否仍允许其脱离 per-command job，以及脱离后 `taskkill /T` 是否仍能收尾。
+| # | 项 | 状态 | 实测结论 / 未测原因 |
+| --- | --- | --- | --- |
+| 1 | `ApplyDocumentPathChange` 写入切片值（`shell.prefer`）的序列化形态与往返一致性 | ✅ 已实测 | `TestApplyDocumentPathChangeWritesShellSliceValue` 确认 slice 序列化为块序列且往返一致。**同时发现真实缺陷**：`applyDocumentChanges` 把层文件解码成 `map[string]interface{}` 后整体 `yaml.Marshal`，必然丢失注释与键顺序。因此配置写入改走 `runtimeserver.persistShellSettings` 的 `yaml.Node` 单键 upsert，并由 `TestPersistShellSettingsPreservesCommentsAndOrder` 固化。 |
+| 2 | busybox-w32 是否启用 `FEATURE_SH_STANDALONE`（决定是否需 `--install -s`） | ❌ 未实测 | 参考机未安装 busybox-w32。**不据此下结论**：实现里按 applet 语义固定 `Prefix: ["sh"]`，并用 `TestPosixRunnerHostArgvKeepsShellPrefix` 覆盖 argv 形状；是否需 standalone 安装仍待实机确认。 |
+| 3 | `busybox sed -i` 与 GNU `sed -i` 的备份后缀差异 | ❌ 未实测 | 同上，缺样本。文档与提示词不宣称两者等价；`posix-narrow` 方言只禁用 bash 扩展，不声称工具链完全一致。 |
+| 4 | Win7 实机上 Git Bash 2.46.2 与 busybox 并存时的候选排序 | ❌ 未实测 | 无 Win7 实机。`runtime.win7.yaml` 已给出显式链 `git-bash → busybox → msys-bash → powershell → cmd`，但顺序需在实机复验；配置文件里的排序是**设计意图**，不是实测结论。 |
+| 5 | `.sh` runner 在 Windows 下的 `kill -0 $$` 心跳可用性 | ✅ 已实测 | `TestLaunchDetachedShellWithPosixHost` 在 Win11 + Git Bash 上真实跑完 detached 生命周期：runner 写出可被 `strconv.Atoi` 解析的数字心跳时间戳，并把退出码 `7` 回写 status 文件。`TestWriteDetachedRunnerShContentForPosixHost` 另固化脚本内容。 |
+| 6 | `powershell -Command -` / `pwsh -Command -` 读取多行 stdin 脚本 | ❌ 未实测 | 按方案保持保守缺省：PowerShell 长脚本仍走 `-EncodedCommand`，`SupportsStdinScript()` 只对 POSIX 返回 true。切换前必须单独实测 `$LASTEXITCODE` 与 `WrapPowerShellExitCode` 尾声的配合。 |
+| 7 | **MSYS bash 在 Windows Job Object 内的行为** | ✅ 已实测 | 新增 `TestMSYSBashDescendantsAreInsideWindowsJobObject`（Windows-only）：让 Git Bash fork 一个持续写文件的子进程，用 `QueryInformationJobObject(JobObjectBasicProcessIdList)` 直接观察到 job 内 ≥2 个 PID；取消后 `TerminationReport.Mode == "job_object"`、`TreeKill == true`、`Killed >= 2`，且 liveness 文件停止增长 → **fork 出来的子进程确实继承 job，`TerminateJobObject` 一次杀净，未观察到孤儿残留**。历史上的 Cygwin/MSYS 兼容顾虑在本机 Git Bash 5.2.21 上未复现。 |
+| 8 | **bash 场景下 `CREATE_BREAKAWAY_FROM_JOB` 逃生与 `taskkill /T` 收尾** | ⚠️ 部分实测 | 已实测：`startDetachedProcess(bash.exe, [runner.sh])` 能启动并完成 detached 生命周期（第 5 项）；`TestDetachedPosixRunnerTerminateKillsWholeTree` 验证 `taskkill /T /F` 后 MSYS 后代停止写文件，无孤儿。**注意**：该场景里 runner 由 manager 进程直接启动，并不位于 per-command job 内，因此 `JOB_OBJECT_LIMIT_BREAKAWAY_OK` 的"从 per-command job 脱离"这一半**未构造场景验证**；`startDetachedProcess` 本身也未设置 `CREATE_BREAKAWAY_FROM_JOB`。另实测到 `taskkill /T /F` 在 MSYS 树上可能返回 `exit status 255`，但重试即报"没有找到进程"（树已被杀净），所以生产侧以 `waitProcessGone` 为权威判定，不采信退出码。 |
 
-以上各项在对应阶段实施时以实测结论回填本节，未验证前不得在文档或提示词中按已确认处理。
+> 结论口径：标 ✅ 的项有可执行测试作为证据；标 ⚠️ 的项只覆盖了一半场景；标 ❌ 的项仍是开放问题，不得在文档、提示词或缺省配置里按已确认处理。

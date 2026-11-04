@@ -45,3 +45,25 @@ func TestBuildLocalChatBackgroundManagerForwardsInteractiveCap(t *testing.T) {
 	require.Contains(t, err.Error(), "too many interactive sessions (1)",
 		"the configured cap must be forwarded to the background manager")
 }
+
+// TestBuildLocalChatBackgroundManagerDoesNotInstallGlobalShellResolver pins the
+// 2026-11-04 bootstrap boundary. The process-wide shell resolver is installed
+// once from cmd/aicli/main.go; installing it from this per-session helper made
+// every test in the package (and any second chat session) inherit an arbitrary
+// shell dialect, which showed up as PowerShell guidance assertions seeing bash
+// and `cmd /c` being rewritten by MSYS. Keep this helper free of global writes.
+func TestBuildLocalChatBackgroundManagerDoesNotInstallGlobalShellResolver(t *testing.T) {
+	before := runtimeexecutor.ShellConfigSnapshot()
+
+	cfg := &runtimecfg.RuntimeConfig{}
+	cfg.Background.StorePath = filepath.Join(t.TempDir(), "jobs.db")
+	cfg.Shell.Prefer = []string{runtimeexecutor.ShellIDCmd}
+
+	manager := buildLocalChatBackgroundManager(cfg, nil)
+	require.NotNil(t, manager)
+	t.Cleanup(func() { _ = manager.Close() })
+
+	after := runtimeexecutor.ShellConfigSnapshot()
+	require.Equal(t, before.Prefer, after.Prefer,
+		"a session helper must not rewrite the process-wide shell config")
+}

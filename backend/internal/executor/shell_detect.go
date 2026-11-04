@@ -158,6 +158,26 @@ func (s Shell) withPrefix(tail ...string) []string {
 	return argv
 }
 
+// DialectOrDerived returns the dialect recorded at detection time, falling back
+// to one derived from Type for shells that never went through the resolver
+// (DefaultUserShell, test fixtures, callers that build Shell{} by hand).
+//
+// Without the fallback the zero value "" would read as "not POSIX", so a
+// PowerShell-only gate would wrongly reject a real bash.
+func (s Shell) DialectOrDerived() ShellDialect {
+	if s.Dialect != "" {
+		return s.Dialect
+	}
+	return DialectFor(s.Type, s.ID)
+}
+
+// SpeaksPosix reports whether this shell takes sh-style scripts. It is the one
+// predicate callers should use to decide between a .sh runner and a PowerShell
+// runner, or between `/bin/sh`-style and PowerShell quoting.
+func (s Shell) SpeaksPosix() bool {
+	return s.DialectOrDerived().IsPosixDialect()
+}
+
 // SupportsStdinScript reports whether the shell can read its script from stdin.
 // Only POSIX shells are wired today; PowerShell's `-Command -` behaviour is
 // still unverified (plan appendix B item 6), so it stays on -EncodedCommand.

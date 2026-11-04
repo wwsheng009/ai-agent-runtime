@@ -290,8 +290,11 @@ func TestWriteUnixDetachedRunnerUsesDetectedShellAndRecordsCwdFailure(t *testing
 
 	require.Contains(t, content, "if ! cd '/tmp/work dir'; then")
 	require.Contains(t, content, "printf 'failed to change directory: %s\\n' '/tmp/work dir'")
-	require.Contains(t, content, "printf \"%s\" \"1\" > '"+statusPath+"'")
-	require.Contains(t, content, "'/opt/zsh' '-c' 'git status' >> '"+logPath+"' 2>&1")
+	// Paths embedded in the sh runner are slash-normalized on Windows (see
+	// writeUnixDetachedRunner); ToSlash is identity on Unix, so one expectation
+	// covers both.
+	require.Contains(t, content, "printf \"%s\" \"1\" > '"+filepath.ToSlash(statusPath)+"'")
+	require.Contains(t, content, "'/opt/zsh' '-c' 'git status' >> '"+filepath.ToSlash(logPath)+"' 2>&1")
 }
 
 func TestDetachedExecutionBlockReason(t *testing.T) {

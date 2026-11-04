@@ -349,6 +349,11 @@ func main() {
 		}
 		cfg = loadedConfig
 
+		// 进程级 shell resolver 的唯一 CLI 安装点：必须在任何工具、后台 job、
+		// PTY、detached runner 与提示词构造之前完成。不能下沉到会话级 helper，
+		// 否则第二个会话（或单测）会改写全局方言。
+		commands.InstallRuntimeShellResolver(cfg)
+
 		// AICLI 日志配置覆盖（优先级：命令行 > aicli.log > log），并统一为文件日志，
 		// 避免内部 JSON 日志污染交互提示、管道输出或结构化命令结果。
 		if cfg != nil {

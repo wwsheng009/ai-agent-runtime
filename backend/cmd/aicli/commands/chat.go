@@ -1103,6 +1103,27 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 	return resolved
 }
 
+// InstallRuntimeShellResolver installs the process-wide shell resolver from the
+// layered runtime.yaml. It must be called once from the CLI bootstrap
+// (cmd/aicli/main.go), before any tool, job, PTY, detached runner or prompt is
+// built — all of those read CurrentShell().
+//
+// It deliberately does NOT live in a per-session helper such as
+// buildLocalChatBackgroundManager: that helper is also called directly by tests
+// and when a second session is constructed, so installing there rewrites the
+// global shell underneath already-running jobs and leaks the new dialect into
+// every later caller in the process. runtime-server has its own bootstrap call.
+func InstallRuntimeShellResolver(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	runtimeConfig := loadRuntimeToolConfig(cfg, nil)
+	if runtimeConfig == nil {
+		return
+	}
+	runtimeexecutor.ConfigureShell(runtimeConfig.Shell)
+}
+
 // resolveRuntimeToolConfigPath 解析会话工具面使用的 runtime.yaml 路径：
 // 会话/profile 显式路径优先，其次是全局 .aicli 层解析；"" 表示使用内置默认值。
 // 与 loadRuntimeToolConfig 共用同一份解析，避免启动期扫描的写入目标与加载来源漂移。

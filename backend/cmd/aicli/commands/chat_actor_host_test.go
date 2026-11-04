@@ -1823,6 +1823,11 @@ func initLocalIsolationTestRepo(t *testing.T) string {
 		}
 	}
 	run("init")
+	// PortableGit ships a system gitconfig with core.autocrlf=true on Windows.
+	// Worktree apply goes through a git path checkout, so the landed file would
+	// otherwise come back as CRLF and the byte-for-byte assertions in these
+	// tests would depend on the developer's machine instead of the code.
+	run("config", "core.autocrlf", "false")
 	run("checkout", "-b", "main")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)

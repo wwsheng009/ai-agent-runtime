@@ -6169,8 +6169,10 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		return nil
 	}
 	bgCfg := cfg.Background
-	// 进程级 shell resolver：web/runtime-server 侧与 CLI 会话读同一份配置。
-	executor.ConfigureShell(cfg.Shell)
+	// 进程级 shell resolver 由启动入口安装（runtime-server main / aicli chat
+	// actor），这里**不要**再装一次：这是个请求触发的全局副作用，会让同一个
+	// 进程里先后执行的读者看到两套 shell（例如测试进程里前一个用例配了
+	// shell，后面的 prompt 渲染就换成了 bash 方言）。
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
