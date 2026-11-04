@@ -808,7 +808,7 @@ if c.Backend == BackendLocal {
 | 提交 | 范围 |
 | --- | --- |
 | `724a914d` | P0 + P1：`ShellConfig`/`ResolveShell`、进程级 resolver、哨兵探针与 WSL 桩守卫、7 类调用点收口、stdin 长脚本、`doctor shell`、TUI、Web API、前端 shell 域与 i18n |
-| P2 提交（紧随其后） | detached runner 按方言选型、Win7 显式候选链、bootstrap 边界修复、附录 B 实测用例与文档回填 |
+| `07ba1b89` | P2：detached runner 按方言选型、Win7 显式候选链、bootstrap 边界修复、附录 B 实测用例与文档回填 |
 
 ### 17.2 与方案的一处实现差异（重要）
 
