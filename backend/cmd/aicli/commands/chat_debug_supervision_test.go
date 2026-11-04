@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -188,6 +189,83 @@ func TestChatDebugSupervisionListShowsWakeBudget(t *testing.T) {
 	require.Contains(t, text, "approval=unlimited")
 	require.Contains(t, text, "failure=0/5")
 	require.Contains(t, text, "other=0/5")
+}
+
+// TestChatDebugSupervisionMetricsShowsResumeAdmission pins the local readout:
+// the CLI must expose the same C0-E snapshot (including resume_admission) as
+// /supervision/metrics, without requiring the HTTP host.
+func TestChatDebugSupervisionMetricsShowsResumeAdmission(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	ctx := context.Background()
+
+	_, won, err := host.Supervision.Store.ClaimResume(ctx, supervision.ResumeClaim{
+		ClaimKey:        "debug-metrics-claim",
+		RootScopeID:     "parent-session",
+		ParentSessionID: "parent-session",
+		ParentTurnID:    "turn-debug-metrics",
+		ParentEpisodeID: "ep-debug-metrics",
+		SettlementID:    "settlement-debug-metrics",
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	text, err := handleChatDebugSupervisionCommand(session, "supervision metrics")
+	require.NoError(t, err)
+	require.Contains(t, text, "resume_admission claimed=1")
+	require.Contains(t, text, "submitted=0 recovered=0")
+	require.Contains(t, text, "cancel total=0")
+	require.Contains(t, text, "report_latency")
+	require.Contains(t, text, "read_path=")
+}
+
+// TestChatDebugSupervisionStateShowsFinalizationAndObligations covers the
+// local state readout: durable phase/identity, the suspension ledger's
+// obligation progress, pending wake reasons and unresolved notifications.
+func TestChatDebugSupervisionStateShowsFinalizationAndObligations(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	sessionID := "parent-state"
+	session := newChatDebugSupervisionSession(host, sessionID)
+	host.RuntimeStore = runtimechat.NewInMemoryRuntimeStore(8)
+	host.SubagentBatches = newTestSubagentBatchStore(t)
+	turnID := "turn-state-debug"
+	now := time.Now().UTC()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:          sessionID,
+		Status:             runtimechat.SessionIdle,
+		TurnPhase:          runtimechat.ParentTurnPhaseParked,
+		SuspendedTurnID:    turnID,
+		SuspendedEpisodeID: "ep-state-debug",
+		UpdatedAt:          now,
+	}))
+	require.NoError(t, host.SubagentBatches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		EpisodeID:     "ep-state-debug",
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{"batch-state-debug"},
+		ResumeQueue:   []string{"batch-state-debug"},
+		ParkedAt:      now,
+	}))
+	_, err := host.Supervision.Wakes.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		ParentTurnID:          turnID,
+		ParentEpisodeID:       "ep-state-debug",
+		WakeReason:            supervision.WakeReasonObligationSettled,
+	})
+	require.NoError(t, err)
+
+	text, err := handleChatDebugSupervisionCommand(session, "supervision state")
+	require.NoError(t, err)
+	require.Contains(t, text, "phase=parked")
+	require.Contains(t, text, "suspended_turn="+turnID)
+	require.Contains(t, text, "suspension turn="+turnID)
+	require.Contains(t, text, "obligations total=1 terminal=0 all_terminal=false")
+	require.Contains(t, text, "pending_wakes total=1")
+	require.Contains(t, text, "reasons="+supervision.WakeReasonObligationSettled)
+	require.Contains(t, text, "unresolved_notifications total=0")
 }
 
 // TestLocalSupervisionSubjectPresenceMarksMissingRunStale covers the CLI host

@@ -89,6 +89,17 @@ type BatchTerminalReplayResult struct {
 	Failed    int
 }
 
+// ParkedBatchResumeResult summarizes one durable resume scan. A parked batch
+// is launched only when the child logical turn's required obligations are known
+// terminal; an unreadable ledger leaves it parked instead of guessing.
+type ParkedBatchResumeResult struct {
+	Scanned     int
+	Resumed     int
+	StillParked int
+	Failed      int
+	Errors      []string
+}
+
 // BatchTerminalSink writes the terminal control-plane notification (normally
 // to the parent session mailbox). It runs before the runtime display mirror.
 type BatchTerminalSink func(ctx context.Context, notification BatchTerminalNotification) BatchTerminalDelivery
@@ -135,6 +146,11 @@ type SubagentBatchCoordinatorConfig struct {
 	// task then fails its child build with an actionable error instead of
 	// silently degrading to fresh.
 	ParentHistoryFor func(ctx context.Context, parentSessionID string) []types.Message
+	// ObligationResolvers judge the child/team/job obligations that can keep a
+	// parked child logical turn open. They are the same durable readers the
+	// agent loop uses, so a batch resumer cannot disagree with the child's own
+	// settle predicate after a restart.
+	ObligationResolvers subagentbatch.ObligationResolvers
 }
 
 // SubagentLiveSlotGate admits (or rejects) a batch before it is persisted,
@@ -155,19 +171,20 @@ type subagentExecutor interface {
 
 // SubagentBatchCoordinator persists and drives background subagent batches.
 type SubagentBatchCoordinator struct {
-	store              subagentbatch.BatchStore
-	executor           subagentExecutor
-	emitter            BatchEmitter
-	sink               BatchTerminalSink
-	lifecycleProjector BatchLifecycleProjector
-	deadline           time.Duration
-	deliveryTimeout    time.Duration
-	deliveryAttempts   int
-	deliveryRetryBase  time.Duration
-	heartbeatEvery     time.Duration
-	taskProgressEvery  time.Duration
-	liveSlotGate       SubagentLiveSlotGate
-	parentHistoryFor   func(ctx context.Context, parentSessionID string) []types.Message
+	store               subagentbatch.BatchStore
+	executor            subagentExecutor
+	emitter             BatchEmitter
+	sink                BatchTerminalSink
+	lifecycleProjector  BatchLifecycleProjector
+	deadline            time.Duration
+	deliveryTimeout     time.Duration
+	deliveryAttempts    int
+	deliveryRetryBase   time.Duration
+	heartbeatEvery      time.Duration
+	taskProgressEvery   time.Duration
+	liveSlotGate        SubagentLiveSlotGate
+	parentHistoryFor    func(ctx context.Context, parentSessionID string) []types.Message
+	obligationResolvers subagentbatch.ObligationResolvers
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -191,6 +208,7 @@ type SubagentBatchCoordinator struct {
 	taskProgressStats subagentTaskProgressStats
 	progressErrMu     sync.Mutex
 	progressErrLast   time.Time
+	resumerOnce       sync.Once
 }
 
 // SubagentTaskProgressCounts is a point-in-time snapshot of the coordinator's
@@ -255,25 +273,48 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 	}
 	scheduler := cfg.Scheduler
 	return &SubagentBatchCoordinator{
-		store:              cfg.Store,
-		executor:           scheduler,
-		emitter:            cfg.Emitter,
-		sink:               cfg.TerminalSink,
-		lifecycleProjector: cfg.LifecycleProjector,
-		deadline:           cfg.DefaultDeadline,
-		deliveryTimeout:    cfg.TerminalDeliveryTimeout,
-		deliveryAttempts:   cfg.TerminalDeliveryAttempts,
-		deliveryRetryBase:  cfg.TerminalDeliveryRetryDelay,
-		heartbeatEvery:     cfg.HeartbeatInterval,
-		taskProgressEvery:  cfg.TaskProgressInterval,
-		liveSlotGate:       cfg.LiveSlotGate,
-		parentHistoryFor:   cfg.ParentHistoryFor,
-		cancels:            make(map[string]context.CancelFunc),
-		owned:              make(map[string]struct{}),
-		abandoned:          make(map[string]struct{}),
-		terminalDelivered:  make(map[string]struct{}),
-		ownerID:            subagentbatch.NewID("coordinator"),
+		store:               cfg.Store,
+		executor:            scheduler,
+		emitter:             cfg.Emitter,
+		sink:                cfg.TerminalSink,
+		lifecycleProjector:  cfg.LifecycleProjector,
+		deadline:            cfg.DefaultDeadline,
+		deliveryTimeout:     cfg.TerminalDeliveryTimeout,
+		deliveryAttempts:    cfg.TerminalDeliveryAttempts,
+		deliveryRetryBase:   cfg.TerminalDeliveryRetryDelay,
+		heartbeatEvery:      cfg.HeartbeatInterval,
+		taskProgressEvery:   cfg.TaskProgressInterval,
+		liveSlotGate:        cfg.LiveSlotGate,
+		parentHistoryFor:    cfg.ParentHistoryFor,
+		obligationResolvers: cfg.ObligationResolvers,
+		cancels:             make(map[string]context.CancelFunc),
+		owned:               make(map[string]struct{}),
+		abandoned:           make(map[string]struct{}),
+		terminalDelivered:   make(map[string]struct{}),
+		ownerID:             subagentbatch.NewID("coordinator"),
 	}
+}
+
+// SetObligationResolvers installs or replaces the durable non-batch obligation
+// readers used when deciding whether a parked child turn may resume. It is safe
+// to call after construction: hosts often build the coordinator before the
+// agent's resolver set is wired.
+func (c *SubagentBatchCoordinator) SetObligationResolvers(resolvers subagentbatch.ObligationResolvers) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.obligationResolvers = resolvers
+	c.mu.Unlock()
+}
+
+func (c *SubagentBatchCoordinator) obligationResolversSnapshot() subagentbatch.ObligationResolvers {
+	if c == nil {
+		return subagentbatch.ObligationResolvers{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.obligationResolvers
 }
 
 // SetLifecycleProjector installs or replaces the host lifecycle adapter. It
@@ -1079,8 +1120,10 @@ func (c *SubagentBatchCoordinator) convergeBatchTerminal(ctx context.Context, ba
 
 // RecoverStaleBatches converges non-terminal records left by a previous
 // process. Fresh records are left alone so opening another actor in the same
-// host cannot orphan a live worker. A zero staleAfter intentionally makes all
-// recoverable rows eligible.
+// host cannot orphan a live worker. Parked rows are preserved as resumable
+// unless their explicit deadline expired; a stale running row with durable
+// parked-task evidence is demoted back to parked instead of being orphaned. A
+// zero staleAfter intentionally makes all recoverable rows eligible.
 func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, staleAfter time.Duration, parentSessionID string, limit int) (int, error) {
 	if c == nil || c.store == nil {
 		return 0, fmt.Errorf("subagent batch coordinator is not configured")
@@ -1090,9 +1133,14 @@ func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, stal
 	}
 	batches, err := c.store.ListBatches(ctx, subagentbatch.BatchFilter{
 		ParentSessionID: strings.TrimSpace(parentSessionID),
-		Status:          []subagentbatch.BatchStatus{subagentbatch.BatchQueued, subagentbatch.BatchRunning, subagentbatch.BatchPartiallyCompleted},
-		ExecutionMode:   []subagentbatch.ExecutionMode{subagentbatch.ExecutionModeBackground},
-		Limit:           limit,
+		Status: []subagentbatch.BatchStatus{
+			subagentbatch.BatchQueued,
+			subagentbatch.BatchRunning,
+			subagentbatch.BatchPartiallyCompleted,
+			subagentbatch.BatchParked,
+		},
+		ExecutionMode: []subagentbatch.ExecutionMode{subagentbatch.ExecutionModeBackground},
+		Limit:         limit,
 	})
 	if err != nil {
 		return 0, err
@@ -1101,6 +1149,31 @@ func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, stal
 	changed := 0
 	for i := range batches {
 		batch := batches[i]
+		deadlineExpired := !batch.BatchDeadline.IsZero() && !batch.BatchDeadline.After(subagentbatch.Now())
+		if batch.Status == subagentbatch.BatchParked {
+			if !deadlineExpired {
+				// A parked row is deliberately non-terminal and has no worker to
+				// heartbeat. It must survive restart until the child logical turn
+				// becomes resumable; orphaning it here would silently turn an
+				// explicit wait into lost work.
+				continue
+			}
+			if err := c.timeoutNonTerminalTasks(ctx, batch.BatchID, "batch deadline exceeded while parked"); err != nil {
+				return changed, err
+			}
+			beforeVersion := batch.Version
+			if err := c.convergeBatchTerminal(ctx, &batch, subagentbatch.BatchTimedOut, "batch deadline exceeded while parked"); err != nil {
+				return changed, err
+			}
+			current, err := c.store.GetBatch(ctx, batch.BatchID)
+			if err != nil {
+				return changed, err
+			}
+			if current != nil && current.Version != beforeVersion && current.Status.Terminal() {
+				changed++
+			}
+			continue
+		}
 		last := batch.HeartbeatAt
 		if last.IsZero() {
 			last = batch.UpdatedAt
@@ -1109,9 +1182,19 @@ func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, stal
 		if staleAfter > 0 && last.After(cutoff) && (deadlineActive || batch.BatchDeadline.IsZero()) {
 			continue
 		}
+		if !deadlineExpired {
+			recoveredParked, recoverErr := c.recoverRunningBatchAsParked(ctx, &batch)
+			if recoverErr != nil {
+				return changed, recoverErr
+			}
+			if recoveredParked {
+				changed++
+				continue
+			}
+		}
 		reason := "stale worker after restart"
 		status := subagentbatch.BatchOrphaned
-		if !batch.BatchDeadline.IsZero() && !batch.BatchDeadline.After(subagentbatch.Now()) {
+		if deadlineExpired {
 			reason = "batch deadline exceeded during recovery"
 			status = subagentbatch.BatchTimedOut
 		}
@@ -1128,6 +1211,751 @@ func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, stal
 		}
 	}
 	return changed, nil
+}
+
+func (c *SubagentBatchCoordinator) timeoutNonTerminalTasks(ctx context.Context, batchID, reason string) error {
+	if c == nil || c.store == nil {
+		return nil
+	}
+	records, err := c.store.ListTasks(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	now := subagentbatch.Now()
+	for i := range records {
+		if records[i].Status.Terminal() {
+			continue
+		}
+		_, err := c.store.UpdateTask(ctx, batchID, records[i].TaskID, records[i].Version, func(task *subagentbatch.SubagentTaskRecord) {
+			if task.Status.Terminal() {
+				return
+			}
+			task.Status = subagentbatch.TaskTimedOut
+			task.FinishedAt = &now
+			task.ErrorClass = "timeout"
+			task.ErrorCode = reason
+			task.UpdatedAt = now
+		})
+		if err != nil {
+			var conflict *subagentbatch.VersionConflictError
+			if errors.As(err, &conflict) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+const defaultParkedBatchResumeInterval = 5 * time.Second
+
+// StartParkedBatchResumer starts at most one low-frequency resumer for this
+// coordinator. It is used by hosts that materialize an agent after process
+// restart: a parked child batch has no live worker, so no wake edge can bring
+// it back by itself. The first pass runs immediately; later passes only inspect
+// parked batches whose child logical turn has known-terminal obligations.
+//
+// The goroutine exits with ctx. A nil executor makes this a no-op, preserving
+// the recovery-only coordinator contract.
+func (c *SubagentBatchCoordinator) StartParkedBatchResumer(ctx context.Context, interval time.Duration, parentSessionID string, limit int) {
+	if c == nil || c.store == nil {
+		return
+	}
+	if !c.store.IsDurable() {
+		return
+	}
+	c.mu.Lock()
+	executor := c.executor
+	c.mu.Unlock()
+	if executor == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultParkedBatchResumeInterval
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.resumerOnce.Do(func() {
+		go func() {
+			_, _ = c.ResumeParkedBatches(ctx, parentSessionID, limit)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					_, _ = c.ResumeParkedBatches(ctx, parentSessionID, limit)
+				}
+			}
+		}()
+	})
+}
+
+// ResumeParkedBatches claims every resumable parked background batch and
+// launches a worker that re-runs only the parked tasks. Completed siblings stay
+// untouched; a task is considered runnable only when its deterministic child
+// TurnSuspension has no live required obligation (or no suspension remains).
+//
+// The durable batch CAS is the cross-process admission point: two hosts scan
+// the same row, but only the winner can transition parked -> running. A
+// non-durable store is rejected because a resume that dies with the process
+// would violate the parking contract.
+func (c *SubagentBatchCoordinator) ResumeParkedBatches(ctx context.Context, parentSessionID string, limit int) (ParkedBatchResumeResult, error) {
+	var result ParkedBatchResumeResult
+	if c == nil || c.store == nil {
+		return result, fmt.Errorf("subagent batch coordinator is not configured")
+	}
+	if !c.store.IsDurable() {
+		return result, nil
+	}
+	c.mu.Lock()
+	executor := c.executor
+	c.mu.Unlock()
+	if executor == nil {
+		return result, fmt.Errorf("subagent batch: scheduler is not configured for parked resume")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if limit <= 0 {
+		limit = 128
+	}
+	batches, err := c.store.ListBatches(ctx, subagentbatch.BatchFilter{
+		ParentSessionID: strings.TrimSpace(parentSessionID),
+		Status:          []subagentbatch.BatchStatus{subagentbatch.BatchParked},
+		ExecutionMode:   []subagentbatch.ExecutionMode{subagentbatch.ExecutionModeBackground},
+		Limit:           limit,
+	})
+	if err != nil {
+		return result, err
+	}
+	batches = c.expandNestedParkedBatches(ctx, batches, limit)
+	for i := range batches {
+		batch := batches[i]
+		result.Scanned++
+		ready, readyErr := c.parkedBatchHasReadyTask(ctx, batch.BatchID)
+		if readyErr != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", batch.BatchID, readyErr))
+			continue
+		}
+		if !ready {
+			result.StillParked++
+			continue
+		}
+		launched, launchErr := c.launchParkedBatchResume(ctx, &batch)
+		if launchErr != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", batch.BatchID, launchErr))
+			continue
+		}
+		if launched {
+			result.Resumed++
+		} else {
+			result.StillParked++
+		}
+	}
+	return result, nil
+}
+
+// expandNestedParkedBatches follows batch obligations found on parked child
+// suspensions. A child can park on a batch it spawned itself; that nested batch
+// has a different parent_session_id, but it is still part of this resume tree.
+// Expanding the scoped scan lets the base resumer revive the deepest resumable
+// leaf first; the next tick can then satisfy its direct parent.
+func (c *SubagentBatchCoordinator) expandNestedParkedBatches(ctx context.Context, batches []subagentbatch.SubagentBatch, limit int) []subagentbatch.SubagentBatch {
+	if c == nil || c.store == nil {
+		return batches
+	}
+	if limit <= 0 {
+		limit = 128
+	}
+	maxBatches := limit * 4
+	seen := make(map[string]struct{}, len(batches))
+	for i := range batches {
+		seen[batches[i].BatchID] = struct{}{}
+	}
+	queue := append([]subagentbatch.SubagentBatch(nil), batches...)
+	for index := 0; index < len(queue) && len(batches) < maxBatches; index++ {
+		records, err := c.store.ListTasks(ctx, queue[index].BatchID)
+		if err != nil {
+			continue
+		}
+		for i := range records {
+			if records[i].Status != subagentbatch.TaskParked {
+				continue
+			}
+			suspension, err := c.taskChildSuspension(ctx, &records[i])
+			if err != nil || suspension == nil {
+				continue
+			}
+			for _, nestedBatchID := range suspension.ObligationBatchIDs() {
+				nestedBatchID = strings.TrimSpace(nestedBatchID)
+				if nestedBatchID == "" {
+					continue
+				}
+				if _, ok := seen[nestedBatchID]; ok {
+					continue
+				}
+				nested, err := c.store.GetBatch(ctx, nestedBatchID)
+				if err != nil || nested == nil || nested.Status != subagentbatch.BatchParked ||
+					nested.ExecutionMode != subagentbatch.ExecutionModeBackground {
+					continue
+				}
+				seen[nestedBatchID] = struct{}{}
+				batches = append(batches, *nested)
+				queue = append(queue, *nested)
+				if len(batches) >= maxBatches {
+					break
+				}
+			}
+		}
+	}
+	return batches
+}
+
+func (c *SubagentBatchCoordinator) parkedBatchHasReadyTask(ctx context.Context, batchID string) (bool, error) {
+	records, err := c.store.ListTasks(ctx, batchID)
+	if err != nil {
+		return false, err
+	}
+	foundParked := false
+	for i := range records {
+		if records[i].Status != subagentbatch.TaskParked {
+			continue
+		}
+		foundParked = true
+		ready, err := c.parkedTaskResumeReady(ctx, &records[i])
+		if err != nil {
+			return false, err
+		}
+		if ready {
+			return true, nil
+		}
+	}
+	if !foundParked {
+		return false, fmt.Errorf("batch %s has no parked task", batchID)
+	}
+	return false, nil
+}
+
+// parkedTaskResumeReady resolves the child logical turn's TurnSuspension. A
+// missing row is terminal evidence (the original run either cleared it before
+// dying or never parked); an unreadable row is not.
+func (c *SubagentBatchCoordinator) parkedTaskResumeReady(ctx context.Context, task *subagentbatch.SubagentTaskRecord) (bool, error) {
+	if c == nil || c.store == nil || task == nil {
+		return false, fmt.Errorf("subagent batch resume state is not configured")
+	}
+	record, err := c.taskChildSuspension(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	if record == nil {
+		return true, nil
+	}
+	return c.childSuspensionSettled(ctx, record)
+}
+
+func (c *SubagentBatchCoordinator) taskChildSuspension(ctx context.Context, task *subagentbatch.SubagentTaskRecord) (*subagentbatch.TurnSuspension, error) {
+	if c == nil || c.store == nil || task == nil {
+		return nil, fmt.Errorf("subagent batch resume state is not configured")
+	}
+	turnID := childTaskTurnID(task.TaskID)
+	if turnID == "" {
+		return nil, fmt.Errorf("task %s has no durable child turn identity", task.TaskID)
+	}
+	if sessionID := strings.TrimSpace(task.ChildSessionID); sessionID != "" {
+		record, ok, err := c.store.GetTurnSuspension(ctx, sessionID, turnID)
+		if err != nil {
+			return nil, err
+		}
+		if ok && record != nil {
+			return record, nil
+		}
+		return nil, nil
+	}
+	// Legacy parked rows may predate the child_session_id binding. The child
+	// turn id is still deterministic, so recover the matching session from the
+	// suspension ledger and persist the binding opportunistically.
+	records, err := c.store.ListAllTurnSuspensions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		if record == nil || strings.TrimSpace(record.TurnID) != turnID {
+			continue
+		}
+		if sess := strings.TrimSpace(record.SessionID); sess != "" {
+			c.bindTaskChildSession(ctx, task.BatchID, task.TaskID, sess)
+		}
+		return record, nil
+	}
+	return nil, nil
+}
+
+func (c *SubagentBatchCoordinator) childSuspensionSettled(ctx context.Context, record *subagentbatch.TurnSuspension) (bool, error) {
+	if record == nil {
+		return true, nil
+	}
+	if len(record.RequiredObligationIDs()) == 0 {
+		// The record carries only detached/explicit-followup evidence; it does
+		// not block a child resume.
+		return true, nil
+	}
+	return subagentbatch.TurnObligationsAllTerminalWithResolvers(ctx, c.store, record, c.obligationResolversSnapshot())
+}
+
+func (c *SubagentBatchCoordinator) launchParkedBatchResume(ctx context.Context, batch *subagentbatch.SubagentBatch) (bool, error) {
+	if c == nil || c.store == nil || batch == nil {
+		return false, fmt.Errorf("subagent batch resume state is not configured")
+	}
+	if !batch.BatchDeadline.IsZero() && !batch.BatchDeadline.After(subagentbatch.Now()) {
+		return false, fmt.Errorf("batch deadline already exceeded; leave it to stale recovery")
+	}
+	tasks, err := c.loadDurableTasks(ctx, batch.BatchID)
+	if err != nil {
+		return false, err
+	}
+	records, err := c.store.ListTasks(ctx, batch.BatchID)
+	if err != nil {
+		return false, err
+	}
+	recordByID := make(map[string]*subagentbatch.SubagentTaskRecord, len(records))
+	for i := range records {
+		recordByID[records[i].TaskID] = &records[i]
+	}
+	selected := make([]SubagentTask, 0, len(tasks))
+	for i := range tasks {
+		record := recordByID[tasks[i].ID]
+		if record == nil || record.Status != subagentbatch.TaskParked {
+			continue
+		}
+		ready, err := c.parkedTaskResumeReady(ctx, record)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			continue
+		}
+		task := tasks[i]
+		task.ChildSessionID = firstNonEmptyString(record.ChildSessionID, buildDurableSubagentSessionID(batch.BatchID, task.ID))
+		task.Goal = parkedTaskResumeGoal(task.Goal, record.ResultSummary)
+		selected = append(selected, task)
+	}
+	if len(selected) == 0 {
+		return false, nil
+	}
+
+	now := subagentbatch.Now()
+	ownerID := c.coordinatorOwnerID()
+	claimToken := subagentBatchFencingToken(ownerID)
+	updated, err := c.store.UpdateBatch(ctx, batch.BatchID, batch.Version, func(current *subagentbatch.SubagentBatch) {
+		if current.Status != subagentbatch.BatchParked {
+			return
+		}
+		current.Status = subagentbatch.BatchRunning
+		current.OwnerID = ownerID
+		current.FencingToken = claimToken
+		current.HeartbeatAt = now
+		current.UpdatedAt = now
+	})
+	if err != nil {
+		var conflict *subagentbatch.VersionConflictError
+		if errors.As(err, &conflict) {
+			return false, nil
+		}
+		return false, err
+	}
+	if updated == nil || updated.Status != subagentbatch.BatchRunning || updated.OwnerID != ownerID || updated.FencingToken != claimToken {
+		return false, nil
+	}
+
+	workerCtx, cancel := context.WithCancel(agentWithoutCancel(ctx))
+	if !updated.BatchDeadline.IsZero() {
+		var deadlineCancel context.CancelFunc
+		workerCtx, deadlineCancel = context.WithDeadline(workerCtx, updated.BatchDeadline)
+		baseCancel := cancel
+		cancel = func() {
+			deadlineCancel()
+			baseCancel()
+		}
+	}
+	c.stateMu.Lock()
+	if c.closed {
+		c.stateMu.Unlock()
+		cancel()
+		_ = c.restoreParkedAfterResumeAdmission(batch.BatchID, ownerID, claimToken)
+		return false, fmt.Errorf("coordinator closed before parked resume admission")
+	}
+	c.workers.Add(1)
+	c.mu.Lock()
+	if c.owned == nil {
+		c.owned = make(map[string]struct{})
+	}
+	if c.cancels == nil {
+		c.cancels = make(map[string]context.CancelFunc)
+	}
+	c.owned[batch.BatchID] = struct{}{}
+	c.cancels[batch.BatchID] = cancel
+	c.mu.Unlock()
+	c.stateMu.Unlock()
+
+	opts := parkedBatchResumeOptions(updated)
+	go func() {
+		defer c.workers.Done()
+		defer cancel()
+		defer c.forgetCancel(batch.BatchID)
+		c.runResumedParkedBatch(workerCtx, batch.BatchID, opts, tasks, selected, ownerID, claimToken)
+	}()
+	return true, nil
+}
+
+func parkedBatchResumeOptions(batch *subagentbatch.SubagentBatch) BatchStartOptions {
+	if batch == nil {
+		return BatchStartOptions{}
+	}
+	return BatchStartOptions{
+		TraceID:          batch.TraceID,
+		ParentSessionID:  batch.ParentSessionID,
+		ParentTurnID:     batch.ParentTurnID,
+		ParentToolCallID: batch.ParentToolCallID,
+		RootScopeID:      batch.RootScopeID,
+		ExecutionMode:    batch.ExecutionMode,
+	}
+}
+
+func (c *SubagentBatchCoordinator) restoreParkedAfterResumeAdmission(batchID, ownerID, fencingToken string) error {
+	if c == nil || c.store == nil {
+		return nil
+	}
+	now := subagentbatch.Now()
+	_, err := c.store.UpdateBatch(context.Background(), batchID, -1, func(batch *subagentbatch.SubagentBatch) {
+		if batch.Status != subagentbatch.BatchRunning || batch.OwnerID != ownerID || batch.FencingToken != fencingToken {
+			return
+		}
+		batch.Status = subagentbatch.BatchParked
+		batch.OwnerID = ""
+		batch.FencingToken = ""
+		batch.UpdatedAt = now
+		batch.HeartbeatAt = now
+	})
+	return err
+}
+
+// recoverRunningBatchAsParked is the crash bridge between the initial worker
+// and the explicit parked row. If the process died after a task was parked but
+// before finalizeBatch wrote BatchParked, the batch still looks running and the
+// ordinary stale path would orphan it. A parked task row, or a running task
+// whose deterministic child TurnSuspension still exists, is durable evidence
+// that this is resumable work, not lost work.
+func (c *SubagentBatchCoordinator) recoverRunningBatchAsParked(ctx context.Context, batch *subagentbatch.SubagentBatch) (bool, error) {
+	if c == nil || c.store == nil || batch == nil || batch.Status.Terminal() {
+		return false, nil
+	}
+	unlockWrite, writable := c.acquireBatchWrite(batch.BatchID)
+	if !writable {
+		return false, nil
+	}
+	defer unlockWrite()
+	records, err := c.store.ListTasks(ctx, batch.BatchID)
+	if err != nil {
+		return false, err
+	}
+	resumable := make(map[string]struct{})
+	for i := range records {
+		record := records[i]
+		switch record.Status {
+		case subagentbatch.TaskParked:
+			resumable[record.TaskID] = struct{}{}
+		case subagentbatch.TaskRunning:
+			hasSuspension, suspensionErr := c.taskHasChildSuspension(ctx, &record)
+			if suspensionErr != nil {
+				return false, suspensionErr
+			}
+			if !hasSuspension {
+				return false, nil
+			}
+			resumable[record.TaskID] = struct{}{}
+		default:
+			if !record.Status.Terminal() {
+				// A queued/ready sibling has no parked evidence; let the
+				// ordinary stale/orphan decision own the batch.
+				return false, nil
+			}
+		}
+	}
+	if len(resumable) == 0 {
+		return false, nil
+	}
+	now := subagentbatch.Now()
+	for i := range records {
+		if _, ok := resumable[records[i].TaskID]; !ok || records[i].Status != subagentbatch.TaskRunning {
+			continue
+		}
+		updated, updateErr := c.store.UpdateTask(ctx, batch.BatchID, records[i].TaskID, records[i].Version, func(current *subagentbatch.SubagentTaskRecord) {
+			if current.Status != subagentbatch.TaskRunning {
+				return
+			}
+			current.Status = subagentbatch.TaskParked
+			current.FinishedAt = nil
+			current.UpdatedAt = now
+		})
+		if updateErr != nil {
+			var conflict *subagentbatch.VersionConflictError
+			if errors.As(updateErr, &conflict) {
+				return false, nil
+			}
+			return false, updateErr
+		}
+		if updated == nil || updated.Status != subagentbatch.TaskParked {
+			return false, nil
+		}
+	}
+	records, err = c.store.ListTasks(ctx, batch.BatchID)
+	if err != nil {
+		return false, err
+	}
+	counts := subagentbatch.DeriveTaskCounts(records)
+	latest, err := c.store.GetBatch(ctx, batch.BatchID)
+	if err != nil || latest == nil || latest.Status.Terminal() {
+		return false, err
+	}
+	statuses := make(map[string]string, len(records))
+	for _, record := range records {
+		statuses[record.TaskID] = string(record.Status)
+	}
+	summaryJSON, _ := json.Marshal(subagentbatch.BatchSummary{
+		BatchID:               latest.BatchID,
+		Status:                subagentbatch.BatchParked,
+		TaskCount:             len(records),
+		CompletedCount:        counts.Completed,
+		ParkedCount:           counts.Parked,
+		FailedCount:           counts.FailedTotal(),
+		FailedWithResultCount: counts.FailedWithResult,
+		CanceledCount:         counts.Canceled,
+		TimedOutCount:         counts.TimedOut,
+		ElapsedMillis:         elapsedMillis(latest.CreatedAt, now),
+		TaskStatuses:          statuses,
+		CreatedAt:             latest.CreatedAt,
+	})
+	persisted, err := c.store.UpdateBatch(ctx, batch.BatchID, latest.Version, func(current *subagentbatch.SubagentBatch) {
+		if current.Status.Terminal() {
+			return
+		}
+		current.Status = subagentbatch.BatchParked
+		current.ResultSummary = summaryJSON
+		current.ErrorClass = ""
+		current.ErrorDetail = ""
+		current.FinishedAt = nil
+		current.OwnerID = ""
+		current.FencingToken = ""
+		current.HeartbeatAt = now
+		current.UpdatedAt = now
+		current.QueuedCount = counts.Queued
+		current.RunningCount = 0
+		current.CompletedCount = counts.Completed
+		current.FailedCount = counts.FailedTotal()
+		current.CanceledCount = counts.Canceled
+		current.TimedOutCount = counts.TimedOut
+	})
+	if err != nil {
+		var conflict *subagentbatch.VersionConflictError
+		if errors.As(err, &conflict) {
+			return false, nil
+		}
+		return false, err
+	}
+	if persisted == nil || persisted.Status != subagentbatch.BatchParked {
+		return false, nil
+	}
+	c.emit(runtimeevents.EventSubagentBatchParked, map[string]interface{}{
+		"batch_id":          batch.BatchID,
+		"parent_session_id": latest.ParentSessionID,
+		"root_scope_id":     latest.RootScopeID,
+		"trace_id":          latest.TraceID,
+		"status":            string(subagentbatch.BatchParked),
+		"parked_count":      counts.Parked,
+		"task_count":        len(records),
+		"recovered":         true,
+	})
+	return true, nil
+}
+
+func (c *SubagentBatchCoordinator) taskHasChildSuspension(ctx context.Context, task *subagentbatch.SubagentTaskRecord) (bool, error) {
+	if c == nil || c.store == nil || task == nil {
+		return false, nil
+	}
+	turnID := childTaskTurnID(task.TaskID)
+	if turnID == "" {
+		return false, nil
+	}
+	if sessionID := strings.TrimSpace(task.ChildSessionID); sessionID != "" {
+		_, ok, err := c.store.GetTurnSuspension(ctx, sessionID, turnID)
+		return ok, err
+	}
+	records, err := c.store.ListAllTurnSuspensions(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, record := range records {
+		if record != nil && strings.TrimSpace(record.TurnID) == turnID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *SubagentBatchCoordinator) runResumedParkedBatch(ctx context.Context, batchID string, opts BatchStartOptions, tasks, selected []SubagentTask, ownerID, fencingToken string) {
+	stopHeartbeat := c.startHeartbeat(ctx, batchID, ownerID, fencingToken)
+	defer stopHeartbeat()
+	progressWriteback := c.taskProgressWritebackEnabled(opts.ExecutionMode)
+	stopProgress := func() {}
+	if progressWriteback {
+		stopProgress = c.startTaskProgressRefresher(ctx, batchID)
+	}
+	reports, runErr := c.runTasksWithProgress(ctx, batchID, opts, selected, progressWriteback)
+	stopProgress()
+	if len(reports) > 0 {
+		merged, err := c.mergeResumeReports(ctx, batchID, tasks, selected, reports)
+		if err != nil {
+			c.emit("subagent.batch.progress", map[string]interface{}{
+				"batch_id":    batchID,
+				"error":       err.Error(),
+				"error_class": subagentbatch.CanonicalErrorClass(err),
+			})
+			return
+		}
+		reports = merged
+	}
+	c.finalizeBatch(ctx, batchID, opts, tasks, reports, runErr)
+}
+
+func (c *SubagentBatchCoordinator) mergeResumeReports(ctx context.Context, batchID string, tasks, selected []SubagentTask, resumed []SubagentResult) ([]SubagentResult, error) {
+	selectedByID := make(map[string]SubagentResult, len(selected))
+	for i := range selected {
+		if i < len(resumed) {
+			selectedByID[selected[i].ID] = resumed[i]
+		}
+	}
+	records, err := c.store.ListTasks(ctx, batchID)
+	if err != nil {
+		return nil, err
+	}
+	recordByID := make(map[string]*subagentbatch.SubagentTaskRecord, len(records))
+	for i := range records {
+		recordByID[records[i].TaskID] = &records[i]
+	}
+	merged := make([]SubagentResult, len(tasks))
+	for i := range tasks {
+		task := tasks[i]
+		if result, ok := selectedByID[task.ID]; ok {
+			merged[i] = result
+			continue
+		}
+		record := recordByID[task.ID]
+		if record == nil {
+			continue
+		}
+		switch record.Status {
+		case subagentbatch.TaskParked:
+			merged[i] = parkedResultFromRecord(*record)
+		default:
+			if record.Status.Terminal() {
+				merged[i] = resultFromRecord(*record)
+			}
+		}
+	}
+	return merged, nil
+}
+
+func resultFromRecord(record subagentbatch.SubagentTaskRecord) SubagentResult {
+	result := SubagentResult{
+		ID:        record.TaskID,
+		Role:      record.Role,
+		SessionID: record.ChildSessionID,
+	}
+	if len(record.ResultSummary) > 0 {
+		var capsule subagentbatch.TaskResult
+		if json.Unmarshal(record.ResultSummary, &capsule) == nil {
+			result.SessionID = firstNonEmptyString(capsule.SessionID, result.SessionID)
+			result.Success = capsule.Success
+			result.Summary = capsule.Summary
+			result.Findings = append([]string(nil), capsule.Findings...)
+			result.Patches = batchPatchSpecsToFilePatches(capsule.Patches)
+			result.Error = capsule.Error
+			if capsule.UsageTotal > 0 {
+				result.Usage = &types.TokenUsage{TotalTokens: capsule.UsageTotal}
+			}
+		}
+	}
+	switch record.Status {
+	case subagentbatch.TaskSucceeded:
+		result.Success = true
+	case subagentbatch.TaskFailed, subagentbatch.TaskFailedWithResult:
+		result.Success = false
+	}
+	return result
+}
+
+func parkedResultFromRecord(record subagentbatch.SubagentTaskRecord) SubagentResult {
+	result := resultFromRecord(record)
+	result.Success = false
+	result.Error = ""
+	result.TurnParked = true
+	result.TurnID = childTaskTurnID(record.TaskID)
+	result.EpisodeID = childTaskEpisodeID(record.TaskID)
+	return result
+}
+
+func batchPatchSpecsToFilePatches(patches []subagentbatch.PatchSpec) []FilePatch {
+	out := make([]FilePatch, 0, len(patches))
+	for _, patch := range patches {
+		out = append(out, FilePatch{
+			Path:               patch.Path,
+			Diff:               patch.Diff,
+			Summary:            patch.Summary,
+			ApplyStatus:        patch.ApplyStatus,
+			AppliedBy:          patch.AppliedBy,
+			VerificationStatus: patch.VerificationStatus,
+			VerifiedBy:         patch.VerifiedBy,
+			ArtifactRefs:       patch.ArtifactRefs,
+		})
+	}
+	return out
+}
+
+func parkedTaskResumeGoal(goal string, capsuleJSON []byte) string {
+	var capsule subagentbatch.TaskResult
+	if len(capsuleJSON) == 0 || json.Unmarshal(capsuleJSON, &capsule) != nil {
+		return goal
+	}
+	summary := strings.TrimSpace(capsule.Summary)
+	if summary == "" && len(capsule.Findings) == 0 && len(capsule.Patches) == 0 {
+		return goal
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(goal))
+	b.WriteString("\n\n[Durable continuation after a nested-obligation pause]\n")
+	b.WriteString("This child logical turn was parked while its required nested work was still running. ")
+	b.WriteString("That work is now terminal. Continue from the evidence below instead of restarting the task or spawning the same work again.\n")
+	if summary != "" {
+		b.WriteString("Previous partial output:\n")
+		b.WriteString(summary)
+		b.WriteString("\n")
+	}
+	if len(capsule.Findings) > 0 {
+		b.WriteString("Previous findings:\n")
+		for _, finding := range capsule.Findings {
+			if trimmed := strings.TrimSpace(finding); trimmed != "" {
+				b.WriteString("- ")
+				b.WriteString(trimmed)
+				b.WriteString("\n")
+			}
+		}
+	}
+	return b.String()
 }
 
 // subagentBatchFencingToken mints the token that pins one durable claim of a
@@ -1539,8 +2367,14 @@ func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID,
 			if t.Status.Terminal() {
 				return
 			}
+			resumed := t.Status == subagentbatch.TaskParked
 			t.Status = subagentbatch.TaskRunning
-			t.StartedAt = &now
+			if t.StartedAt == nil {
+				t.StartedAt = &now
+			}
+			if resumed {
+				t.Attempt++
+			}
 			// M1: the started transition forces a progress stamp in the same
 			// write; it is a state transition, not a throttled refresh, so the
 			// TaskProgressInterval window never suppresses it (ADR-1: only
@@ -1562,6 +2396,94 @@ func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID,
 			})
 		}
 	}
+}
+
+// parkTaskResult moves one task to the non-terminal parked state and stores the
+// partial result capsule that a later resume uses as continuation evidence. It
+// deliberately does not use RecordTaskResult: that path stamps FinishedAt and is
+// reserved for terminal outcomes. The transition is CAS-guarded and idempotent.
+func (c *SubagentBatchCoordinator) parkTaskResult(ctx context.Context, batchID, taskID string, result *subagentbatch.TaskResult, progressWriteback bool) (alreadyParked bool, err error) {
+	if c == nil || c.store == nil {
+		return false, fmt.Errorf("subagent batch coordinator is not configured")
+	}
+	unlockWrite, writable := c.acquireBatchWrite(batchID)
+	if !writable {
+		return false, &subagentbatch.VersionConflictError{Kind: "batch", ID: batchID, Expected: -1}
+	}
+	defer unlockWrite()
+
+	batch, err := c.store.GetBatch(ctx, batchID)
+	if err != nil {
+		return false, err
+	}
+	if batch == nil {
+		return false, fmt.Errorf("subagent batch %q not found", batchID)
+	}
+	if batch.Status.Terminal() {
+		return false, &subagentbatch.VersionConflictError{Kind: "batch", ID: batchID, Expected: -1, Actual: batch.Version}
+	}
+	task, err := c.store.GetTask(ctx, batchID, taskID)
+	if err != nil {
+		return false, err
+	}
+	if task == nil {
+		return false, fmt.Errorf("subagent task %q not found", taskID)
+	}
+	if task.Status.Terminal() {
+		return false, &subagentbatch.VersionConflictError{Kind: "task", ID: taskID, Expected: -1, Actual: task.Version}
+	}
+	alreadyParked = task.Status == subagentbatch.TaskParked
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return false, fmt.Errorf("subagentbatch: marshal parked result: %w", err)
+	}
+	if task.Status == subagentbatch.TaskPending || task.Status == subagentbatch.TaskReady {
+		now := subagentbatch.Now()
+		promoted, promoteErr := c.store.UpdateTask(ctx, batchID, taskID, task.Version, func(current *subagentbatch.SubagentTaskRecord) {
+			if current.Status.Terminal() {
+				return
+			}
+			current.Status = subagentbatch.TaskRunning
+			if current.StartedAt == nil {
+				current.StartedAt = &now
+			}
+			current.UpdatedAt = now
+		})
+		if promoteErr != nil {
+			return false, promoteErr
+		}
+		if promoted == nil {
+			return false, fmt.Errorf("subagent task %q promotion returned nil", taskID)
+		}
+		task = promoted
+	}
+	if task.Status != subagentbatch.TaskRunning && task.Status != subagentbatch.TaskParked {
+		return false, fmt.Errorf("subagent task %q cannot park from %s", taskID, task.Status)
+	}
+
+	now := subagentbatch.Now()
+	updated, err := c.store.UpdateTask(ctx, batchID, taskID, task.Version, func(current *subagentbatch.SubagentTaskRecord) {
+		if current.Status.Terminal() {
+			return
+		}
+		current.Status = subagentbatch.TaskParked
+		current.ResultSummary = payload
+		current.FinishedAt = nil
+		current.ErrorClass = ""
+		current.ErrorCode = ""
+		if progressWriteback {
+			current.LastProgressAt = &now
+		}
+		current.UpdatedAt = now
+	})
+	if err != nil {
+		return false, err
+	}
+	if updated == nil || updated.Status != subagentbatch.TaskParked {
+		return false, fmt.Errorf("subagent task %q did not enter parked state", taskID)
+	}
+	return alreadyParked, nil
 }
 
 // prepareTaskResult advances a task to a legal source state and records its
@@ -1608,7 +2530,7 @@ func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchI
 	version := task.Version
 	if status == subagentbatch.TaskSucceeded || status == subagentbatch.TaskFailed || status == subagentbatch.TaskFailedWithResult {
 		switch task.Status {
-		case subagentbatch.TaskPending, subagentbatch.TaskReady:
+		case subagentbatch.TaskPending, subagentbatch.TaskReady, subagentbatch.TaskParked:
 			progressStamped := false
 			updated, updateErr := c.store.UpdateTask(ctx, batchID, taskID, version, func(current *subagentbatch.SubagentTaskRecord) {
 				if current.Status.Terminal() {
@@ -1714,7 +2636,7 @@ const (
 // reason rather than treated as failures (TaskPending -> TaskFailed is not even
 // a legal transition).
 func reportProduced(r SubagentResult) bool {
-	return r.Success || r.Error != "" || r.Summary != "" || r.SessionID != "" ||
+	return r.TurnParked || r.Success || r.Error != "" || r.Summary != "" || r.SessionID != "" ||
 		len(r.Findings) > 0 || len(r.Patches) > 0
 }
 
@@ -1797,9 +2719,12 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 				Patches:    batchFilePatchesToSpec(r.Patches),
 				Error:      r.Error,
 			}
-			if r.Success && r.Error == "" {
+			switch {
+			case r.TurnParked && abortReason == batchAbortNone:
+				ts = subagentbatch.TaskParked
+			case r.Success && r.Error == "":
 				ts = subagentbatch.TaskSucceeded
-			} else {
+			default:
 				ts = subagentbatch.TaskFailed
 				criticalErrors = append(criticalErrors, compactTaskError(taskID, r.Error))
 			}
@@ -1841,7 +2766,13 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		if ts == subagentbatch.TaskFailed && resultHasDeliverable(taskResult) {
 			ts = subagentbatch.TaskFailedWithResult
 		}
-		alreadyTerminal, prepareErr := c.prepareTaskResult(persistCtx, batchID, taskID, ts, taskResult, progressWriteback)
+		var alreadyTerminal bool
+		var prepareErr error
+		if ts == subagentbatch.TaskParked {
+			alreadyTerminal, prepareErr = c.parkTaskResult(persistCtx, batchID, taskID, taskResult, progressWriteback)
+		} else {
+			alreadyTerminal, prepareErr = c.prepareTaskResult(persistCtx, batchID, taskID, ts, taskResult, progressWriteback)
+		}
 		if prepareErr != nil {
 			var conflict *subagentbatch.VersionConflictError
 			if errors.As(prepareErr, &conflict) && conflict.Kind == "batch" {
@@ -1856,15 +2787,24 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			}
 			continue
 		}
+		statuses[taskID] = string(ts)
 		if alreadyTerminal {
 			continue
 		}
-		statuses[taskID] = string(ts)
-		c.emit("subagent.task.completed", map[string]interface{}{
+		eventType := "subagent.task.completed"
+		if ts == subagentbatch.TaskParked {
+			eventType = runtimeevents.EventSubagentTaskParked
+		}
+		payload := map[string]interface{}{
 			"batch_id": batchID,
 			"task_id":  taskID,
 			"status":   string(ts),
-		})
+		}
+		if ts == subagentbatch.TaskParked {
+			payload["parent_session_id"] = opts.ParentSessionID
+			payload["trace_id"] = opts.TraceID
+		}
+		c.emit(eventType, payload)
 	}
 	if resultWriteBlocked {
 		// A durable batch fence won while task results were being flushed. Do not
@@ -1901,6 +2841,87 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			"batch_id":    batchID,
 			"error":       fmt.Sprintf("durable task count %d does not match requested count %d", len(records), len(tasks)),
 			"error_class": "durability",
+		})
+		return
+	}
+	if counts.Parked > 0 {
+		if counts.Running > 0 || counts.Queued > 0 {
+			c.emit("subagent.batch.progress", map[string]interface{}{
+				"batch_id": batchID,
+				"error": fmt.Sprintf(
+					"parked batch still has live tasks: parked=%d running=%d queued=%d",
+					counts.Parked, counts.Running, counts.Queued,
+				),
+				"error_class": "durability",
+			})
+			return
+		}
+		summary := subagentbatch.BatchSummary{
+			BatchID:               batchID,
+			Status:                subagentbatch.BatchParked,
+			TaskCount:             len(tasks),
+			CompletedCount:        completed,
+			ParkedCount:           counts.Parked,
+			FailedCount:           failed,
+			FailedWithResultCount: counts.FailedWithResult,
+			CanceledCount:         canceled,
+			TimedOutCount:         timedOut,
+			ElapsedMillis:         elapsedMillis(batch.CreatedAt, now),
+			CriticalErrors:        compactStrings(criticalErrors),
+			TaskStatuses:          statuses,
+			CreatedAt:             batch.CreatedAt,
+		}
+		summaryJSON, _ := json.Marshal(summary)
+		unlockWrite, writable = c.acquireBatchWrite(batchID)
+		if !writable {
+			return
+		}
+		latest, latestErr := c.store.GetBatch(persistCtx, batchID)
+		unlockWrite()
+		if latestErr != nil || latest == nil || latest.Status.Terminal() ||
+			latest.OwnerID != c.coordinatorOwnerID() || strings.TrimSpace(latest.FencingToken) == "" {
+			return
+		}
+		unlockWrite, writable = c.acquireBatchWrite(batchID)
+		if !writable {
+			return
+		}
+		persisted, updateErr := c.store.UpdateBatch(persistCtx, batchID, latest.Version, func(b *subagentbatch.SubagentBatch) {
+			if b.Status.Terminal() || b.OwnerID != c.coordinatorOwnerID() || b.FencingToken != latest.FencingToken {
+				return
+			}
+			b.Status = subagentbatch.BatchParked
+			b.ResultSummary = summaryJSON
+			b.ErrorClass = ""
+			b.ErrorDetail = ""
+			b.UpdatedAt = now
+			b.FinishedAt = nil
+			b.HeartbeatAt = now
+			b.QueuedCount = counts.Queued
+			b.RunningCount = 0
+			b.CompletedCount = completed
+			b.FailedCount = failed
+			b.CanceledCount = canceled
+			b.TimedOutCount = timedOut
+			// Parked means no worker currently owns execution. Clearing the
+			// lease makes the CAS claim in ResumeParkedBatches unambiguous and
+			// prevents heartbeat renewal from resurrecting a stopped worker.
+			b.OwnerID = ""
+			b.FencingToken = ""
+		})
+		unlockWrite()
+		if updateErr != nil || persisted == nil || persisted.Status != subagentbatch.BatchParked {
+			return
+		}
+		c.emit(runtimeevents.EventSubagentBatchParked, map[string]interface{}{
+			"batch_id":          batchID,
+			"parent_session_id": latest.ParentSessionID,
+			"root_scope_id":     latest.RootScopeID,
+			"trace_id":          latest.TraceID,
+			"status":            string(subagentbatch.BatchParked),
+			"parked_count":      counts.Parked,
+			"task_count":        len(tasks),
+			"task_statuses":     statuses,
 		})
 		return
 	}
@@ -2545,6 +3566,7 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 	}
 	return SubagentTask{
 		ID:                    taskID,
+		ChildSessionID:        strings.TrimSpace(record.ChildSessionID),
 		Role:                  spec.Role,
 		TaskType:              spec.TaskType,
 		TaskSubject:           spec.TaskSubject,

@@ -190,6 +190,23 @@ func ScheduleWaitFeedbackWake(
 	tracker *WaitFeedbackTracker,
 	parentSessionID, rootScopeID string,
 ) (bool, error) {
+	return ScheduleWaitFeedbackWakeWithResolvers(ctx, batches, subagentbatch.ObligationResolvers{
+		AgentSessions: resolver,
+		Teams:         teamResolver,
+	}, scheduler, tracker, parentSessionID, rootScopeID)
+}
+
+// ScheduleWaitFeedbackWakeWithResolvers is the full-obligation-kind form of
+// ScheduleWaitFeedbackWake. Required background jobs contribute to progress just
+// like batches, child sessions and teams.
+func ScheduleWaitFeedbackWakeWithResolvers(
+	ctx context.Context,
+	batches subagentbatch.BatchStore,
+	resolvers subagentbatch.ObligationResolvers,
+	scheduler *WakeScheduler,
+	tracker *WaitFeedbackTracker,
+	parentSessionID, rootScopeID string,
+) (bool, error) {
 	if batches == nil || scheduler == nil {
 		return false, nil
 	}
@@ -213,7 +230,7 @@ func ScheduleWaitFeedbackWake(
 		if record == nil || strings.TrimSpace(record.TurnID) == "" {
 			continue
 		}
-		progress, err := subagentbatch.CountObligationProgress(ctx, batches, record, resolver, teamResolver)
+		progress, err := subagentbatch.CountObligationProgressWithResolvers(ctx, batches, record, resolvers)
 		if err != nil {
 			continue
 		}

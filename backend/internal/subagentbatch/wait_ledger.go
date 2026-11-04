@@ -11,11 +11,12 @@ import (
 // so subagent_wait / team_wait can never report a ledger the control plane
 // disagrees with, and no new storage is introduced.
 type WaitLedgerRow struct {
-	// ObligationID identifies the obligation (today: the batch id).
+	// ObligationID identifies the obligation (batch id, or a prefixed
+	// agent_session:/team:/job: id).
 	ObligationID string
-	// SubjectKind is the kind of subject this obligation gates (today: "batch").
+	// SubjectKind is the kind of subject this obligation gates.
 	SubjectKind string
-	// SubjectID is the subject's own id (today: the batch id).
+	// SubjectID is the subject's own id (without an obligation prefix).
 	SubjectID string
 	// State is the durable subject state; WaitLedgerStateMissing means the
 	// ledger references an obligation the store has no row for.
@@ -58,15 +59,31 @@ func BuildWaitLedgerWith(
 	record *TurnSuspension,
 	resolver AgentSessionObligationResolver,
 ) ([]WaitLedgerRow, error) {
+	return BuildWaitLedgerWithResolvers(ctx, store, record, ObligationResolvers{AgentSessions: resolver})
+}
+
+// BuildWaitLedgerWithResolvers renders the obligation ledger including child
+// agent sessions, team runs and required background jobs. Batch rows keep the
+// original order; non-batch rows follow in record order. A missing durable row
+// stays WaitLedgerStateMissing and non-terminal (never evidence of completion),
+// and an unwired resolver reports that subject kind the same way.
+func BuildWaitLedgerWithResolvers(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolvers ObligationResolvers,
+) ([]WaitLedgerRow, error) {
 	if store == nil || record == nil {
 		return nil, nil
 	}
 	batchIDs := record.ObligationBatchIDs()
 	agentSessionIDs := record.ObligationAgentSessionIDs()
-	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 {
+	teamIDs := record.ObligationTeamIDs()
+	jobIDs := record.ObligationBackgroundJobIDs()
+	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 && len(jobIDs) == 0 {
 		return nil, nil
 	}
-	rows := make([]WaitLedgerRow, 0, len(batchIDs)+len(agentSessionIDs))
+	rows := make([]WaitLedgerRow, 0, len(batchIDs)+len(agentSessionIDs)+len(teamIDs)+len(jobIDs))
 	for _, batchID := range batchIDs {
 		batch, err := store.GetBatch(ctx, batchID)
 		if err != nil {
@@ -96,8 +113,8 @@ func BuildWaitLedgerWith(
 			State:        WaitLedgerStateMissing,
 			DeadlineAt:   record.DecisionWindowUntil,
 		}
-		if resolver != nil {
-			terminal, found, err := resolver.AgentSessionTerminal(ctx, sessionID)
+		if resolvers.AgentSessions != nil {
+			terminal, found, err := resolvers.AgentSessions.AgentSessionTerminal(ctx, sessionID)
 			if err != nil {
 				return nil, err
 			}
@@ -107,6 +124,54 @@ func BuildWaitLedgerWith(
 					row.State = "closed"
 				} else {
 					row.State = "active"
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+	for _, teamID := range teamIDs {
+		row := WaitLedgerRow{
+			ObligationID: TeamObligationID(teamID),
+			SubjectKind:  "team",
+			SubjectID:    teamID,
+			State:        WaitLedgerStateMissing,
+			DeadlineAt:   record.DecisionWindowUntil,
+		}
+		if resolvers.Teams != nil {
+			terminal, found, err := resolvers.Teams.TeamTerminal(ctx, teamID)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				row.Terminal = terminal
+				if terminal {
+					row.State = "closed"
+				} else {
+					row.State = "active"
+				}
+			}
+		}
+		rows = append(rows, row)
+	}
+	for _, jobID := range jobIDs {
+		row := WaitLedgerRow{
+			ObligationID: BackgroundJobObligationID(jobID),
+			SubjectKind:  "background_job",
+			SubjectID:    jobID,
+			State:        WaitLedgerStateMissing,
+			DeadlineAt:   record.DecisionWindowUntil,
+		}
+		if resolvers.BackgroundJobs != nil {
+			terminal, found, err := resolvers.BackgroundJobs.BackgroundJobTerminal(ctx, jobID)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				row.Terminal = terminal
+				if terminal {
+					row.State = "completed"
+				} else {
+					row.State = "running"
 				}
 			}
 		}

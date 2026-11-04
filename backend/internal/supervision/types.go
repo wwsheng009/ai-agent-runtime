@@ -273,8 +273,20 @@ type WakePending struct {
 	RootScopeID           string `json:"root_scope_id,omitempty"`
 	TargetParentSessionID string `json:"target_parent_session_id,omitempty"`
 	TargetParentTeamID    string `json:"target_parent_team_id,omitempty"`
-	WakeReason            string `json:"wake_reason,omitempty"`
-	NotificationSeq       int64  `json:"notification_seq,omitempty"`
+	// ParentTurnID / ParentEpisodeID bind the wake to one logical parent turn
+	// episode. A wake missing either identity is never eligible for automatic
+	// resume; it remains a durable notification for the user's next episode.
+	ParentTurnID    string `json:"parent_turn_id,omitempty"`
+	ParentEpisodeID string `json:"parent_episode_id,omitempty"`
+	// FinalizationPolicy is required|detached|explicit_followup. Empty is
+	// interpreted by the admission service from the wake source.
+	FinalizationPolicy string `json:"finalization_policy,omitempty"`
+	// SettlementID / SettlementCohortID identify the durable settlement that
+	// authorized one resume. They also form the automatic-resume claim key.
+	SettlementID       string `json:"settlement_id,omitempty"`
+	SettlementCohortID string `json:"settlement_cohort_id,omitempty"`
+	WakeReason         string `json:"wake_reason,omitempty"`
+	NotificationSeq    int64  `json:"notification_seq,omitempty"`
 	// TurnID names the parked turn this wake resumes (C2-1 #4 / I3). It is a
 	// hint: the authoritative identity is re-derived from the obligation
 	// ledger at delivery time, so a coalesced row can never resume a turn that
@@ -318,6 +330,39 @@ type WakeDelivered struct {
 	EventSeq              int64     `json:"event_seq,omitempty"`
 	DeliveredAt           time.Time `json:"delivered_at,omitempty"`
 	DeliveredBy           string    `json:"delivered_by,omitempty"`
+	// Consumption records how this wake was consumed: model_turn,
+	// notification_only or stale. A notification-only consumption suppresses
+	// replay wakes but deliberately leaves the inbox notification intact.
+	Consumption string `json:"consumption,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// ResumeClaimState is the durable settlement-consumption state. A claimed row
+// must never start a second model turn: a crash leaves it claimed, and recovery
+// converges it to submitted or notification-only rather than retrying blindly.
+type ResumeClaimState string
+
+const (
+	ResumeClaimStateClaimed   ResumeClaimState = "claimed"
+	ResumeClaimStateSubmitted ResumeClaimState = "submitted"
+	ResumeClaimStateReleased  ResumeClaimState = "released"
+)
+
+// ResumeClaim is the durable exactly-once boundary for one automatic resume.
+type ResumeClaim struct {
+	ClaimKey           string           `json:"claim_key"`
+	RootScopeID        string           `json:"root_scope_id,omitempty"`
+	ParentSessionID    string           `json:"parent_session_id,omitempty"`
+	ParentTurnID       string           `json:"parent_turn_id,omitempty"`
+	ParentEpisodeID    string           `json:"parent_episode_id,omitempty"`
+	SettlementID       string           `json:"settlement_id,omitempty"`
+	SettlementCohortID string           `json:"settlement_cohort_id,omitempty"`
+	State              ResumeClaimState `json:"state,omitempty"`
+	ClaimedAt          time.Time        `json:"claimed_at,omitempty"`
+	SubmittedAt        *time.Time       `json:"submitted_at,omitempty"`
+	ModelTurnID        string           `json:"model_turn_id,omitempty"`
+	DeliveryAttempt    int              `json:"delivery_attempt,omitempty"`
+	Version            int64            `json:"version,omitempty"`
 }
 
 // WakeFilter selects wake pending rows.

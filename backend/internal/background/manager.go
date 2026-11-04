@@ -414,6 +414,8 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	// directory (see resolveJobCwd).
 	req.Cwd = resolveJobCwd(ctx, req.Cwd)
 	jobCtx, cancel := context.WithCancel(context.Background())
+	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
+	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
 	managed := &managedJob{
 		ctx: jobCtx,
 		info: Job{
@@ -427,7 +429,7 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 			Status:        StatusPending,
 			CreatedAt:     now,
 			LogPath:       logPath,
-			Metadata:      metadataFromRequest(req, m.config.DefaultTimeout),
+			Metadata:      metadata,
 		},
 		request: sanitizeBackgroundTaskArgs(req),
 		output:  newOutputBuffer(m.config.MaxOutputBytes),
@@ -1810,6 +1812,16 @@ func (m *Manager) settleTerminalTransitionEffects(jobID string) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		return
+	}
+	if managed := m.getJob(jobID); managed != nil {
+		managed.mu.Lock()
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		if _, exists := stringMetadataValue(managed.info.Metadata, backgroundMetaOutputDrainedAt); !exists {
+			managed.info.Metadata[backgroundMetaOutputDrainedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		managed.mu.Unlock()
 	}
 	m.markTerminalObservedByWaiter(jobID)
 	m.cancelJobMonitors(jobID)
@@ -3256,6 +3268,15 @@ func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult
 	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaHealthcheckError); ok {
 		result.HealthcheckError = value
 	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaOutputDrainedAt); ok {
+		result.OutputDrainedAt = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaLateOutputCount); ok {
+		result.LateOutputCount = int64(value)
+	}
+	if value, ok := boolMetadataValue(job.Metadata, backgroundMetaLateOutputDiscarded); ok {
+		result.LateOutputDiscarded = value
+	}
 	if job.QueuedAt != nil && !job.QueuedAt.IsZero() {
 		result.QueuedAt = job.QueuedAt.UTC().Format(time.RFC3339Nano)
 	}
@@ -3606,6 +3627,10 @@ func (w *jobOutputWriter) Write(p []byte) (int, error) {
 	}
 	w.job.outputMu.Lock()
 	defer w.job.outputMu.Unlock()
+	if w.job.outputTerminal() {
+		w.job.recordLateOutput(len(p))
+		return len(p), nil
+	}
 
 	_, _ = w.job.output.Write(p)
 	if w.logFile != nil {

@@ -69,7 +69,11 @@ func resumeTriggerRank(trigger string) int {
 // 不该显示一次从未发生的恢复）。
 type ResumeAnnouncement struct {
 	// TurnID 是 resume 锚定的托管 turn（同一 turn_id，I3）。
-	TurnID          string
+	TurnID string
+	// EpisodeID is the logical episode the parked turn kept across the resume.
+	// It lets clients correlate the start edge with parent.turn.parked /
+	// parent.turn.finalized without waiting for session_start.
+	EpisodeID       string
 	ParentSessionID string
 	RootScopeID     string
 	// Trigger 取 ResumeTrigger* 常量之一。
@@ -97,12 +101,16 @@ func (a ResumeAnnouncement) EventPayload() map[string]interface{} {
 		"session_id":    strings.TrimSpace(a.ParentSessionID),
 		"root_scope_id": strings.TrimSpace(a.RootScopeID),
 		"trigger":       strings.TrimSpace(a.Trigger),
+		"phase":         "started",
 		"pending_count": a.PendingCount,
 		"status":        strings.TrimSpace(a.Status),
 		"terminal":      a.Terminal,
 	}
 	if turnID := strings.TrimSpace(a.TurnID); turnID != "" {
 		payload["turn_id"] = turnID
+	}
+	if episodeID := strings.TrimSpace(a.EpisodeID); episodeID != "" {
+		payload["episode_id"] = episodeID
 	}
 	if len(a.WakeIDs) > 0 {
 		payload["wake_ids"] = append([]string(nil), a.WakeIDs...)

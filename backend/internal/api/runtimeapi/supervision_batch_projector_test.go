@@ -192,6 +192,7 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	require.True(t, created)
 	require.NoError(t, handler.getSubagentBatchStore().ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
 		TurnID:        parkedTurnID,
+		EpisodeID:     "ep_api_parked",
 		SessionID:     parentSession,
 		RootScopeID:   parentSession,
 		ObligationIDs: []string{batchID},
@@ -202,9 +203,11 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	// AcceptsResume()==true（接受同一 turn 的 resume episode）。
 	runtimeStore := chat.NewInMemoryRuntimeStore(16)
 	require.NoError(t, runtimeStore.SaveState(ctx, &chat.RuntimeState{
-		SessionID:       parentSession,
-		Status:          chat.SessionIdle,
-		SuspendedTurnID: parkedTurnID,
+		SessionID:          parentSession,
+		Status:             chat.SessionIdle,
+		SuspendedTurnID:    parkedTurnID,
+		SuspendedEpisodeID: "ep_api_parked",
+		TurnPhase:          chat.ParentTurnPhaseParked,
 	}))
 	handler.sessionRuntimeStore = runtimeStore
 	apiAgent := handler.newAPIAgent(&agent.Config{Name: "api-parked-agent", Model: "test-model", MaxSteps: 3})
@@ -223,6 +226,8 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	require.NoError(t, actor.UpdateStateForTest(ctx, func(state *chat.RuntimeState) error {
 		state.Status = chat.SessionIdle
 		state.SuspendedTurnID = parkedTurnID
+		state.SuspendedEpisodeID = "ep_api_parked"
+		state.TurnPhase = chat.ParentTurnPhaseParked
 		return nil
 	}))
 	summary, ok := actor.StateSummary()

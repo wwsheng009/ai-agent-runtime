@@ -28,11 +28,12 @@ const (
 
 	// EventTurnResumed：宿主开始一次 resume episode。载荷（宿主事件总线）：
 	// turn_id、session_id、trigger（terminal/progress/approval/other）、
-	// wake_reasons、wake_ids、pending_count、status、terminal、summary。
+	// phase（started/settled）、wake_reasons、wake_ids、pending_count、status、
+	// terminal、summary。
 	//
 	// 闭合半边（2026-09-26 真机 E2E 补）：trigger=TurnResumedTriggerSettled 时
 	// 表示挂起态在**同一 run 内**被结清（义务已全部终态），不是 wake 投递的
-	// resume episode；载荷见 settleParkedTurnOnRunEnd。
+	// resume episode；载荷 phase=settled，见 settleParkedTurnOnRunEnd。
 	EventTurnResumed = "turn.resumed"
 
 	// TurnResumedTriggerSettled 是 turn.resumed 的非 wake 闭合触发值：run 结束时

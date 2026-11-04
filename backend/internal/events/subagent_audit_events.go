@@ -75,4 +75,13 @@ const (
 	// 合并语义，过渡期双发已移除。
 	EventSubagentAttemptStarted  = "subagent.attempt.started"
 	EventSubagentAttemptFinished = "subagent.attempt.finished"
+
+	// EventSubagentTaskParked / EventSubagentBatchParked are the non-terminal
+	// sibling of subagent.task.completed / subagent.batch.completed. A child
+	// logical turn can park on its own required obligations; the task and its
+	// containing batch must stay resumable instead of being reported as
+	// succeeded, failed, retried or orphaned. The events are diagnostic edges,
+	// so they use the same tail-only channel as the other task lifecycle rows.
+	EventSubagentTaskParked  = "subagent.task.parked"
+	EventSubagentBatchParked = "subagent.batch.parked"
 )

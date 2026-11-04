@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -31,6 +32,10 @@ func chatDebugSupervisionUsageText() string {
 		"    收敛通知的 resolution 状态；标的已消失的 critical 行可据此退出未决集合。",
 		"/debug supervision control <notification_id> --action <cancel|close|cancel_subtree|retry|reassign> --reason <text> [--cascade target|descendants] [--expected-version N]",
 		"    对通知标的执行 durable 控制动作（与模型侧 subagent_control、HTTP 宿主同一实现，动作全程落 action 审计行）。",
+		"/debug supervision metrics [--team <team_id>] [--limit N]",
+		"    读取当前 root scope 的 supervision 指标快照（取消率、汇报延迟、resume_admission 计数）。",
+		"/debug supervision state",
+		"    显示 durable parent turn/episode、finalization phase、挂起义务进度与 pending wake/notification。",
 		chatDebugSupervisorUsageText(),
 	}, "\n"), "\n")
 }
@@ -334,6 +339,10 @@ func handleChatDebugSupervisionCommand(session *ChatSession, argument string) (s
 		return runChatDebugSupervisionResolve(ctx, store, scopes, req)
 	case "control":
 		return runChatDebugSupervisionControl(ctx, session, scopes, req)
+	case "metrics":
+		return runChatDebugSupervisionMetrics(ctx, store, scopes, req)
+	case "state":
+		return runChatDebugSupervisionTurnState(ctx, session)
 	case "help", "--help", "-h":
 		return chatDebugSupervisionUsageText(), nil
 	default:
@@ -373,6 +382,177 @@ func runChatDebugSupervisionList(ctx context.Context, store supervision.Store, s
 		return header + "\n（无未决通知；--all 可包含已确认行）", nil
 	}
 	return header + "\n" + strings.Join(lines, "\n"), nil
+}
+
+// runChatDebugSupervisionMetrics exposes the same C0-E snapshot as
+// /supervision/metrics, scoped to the local session's root scopes. The default
+// window is 24h; --limit caps the execution-row window read. The
+// resume_admission block is the parent-turn hardening readout (claims and wake
+// consumption), so an operator can inspect exactly-once/NotifyOnly behavior
+// without opening the HTTP API.
+func runChatDebugSupervisionMetrics(ctx context.Context, store supervision.Store, scopes []string, req chatDebugSupervisionRequest) (string, error) {
+	now := time.Now().UTC()
+	since := now.Add(-24 * time.Hour)
+	windowLimit := req.Limit
+	if windowLimit <= 0 {
+		windowLimit = 200
+	}
+	maxCandidates := 5
+	if req.Limit > 0 && req.Limit < maxCandidates {
+		maxCandidates = req.Limit
+	}
+	lines := []string{fmt.Sprintf("supervision metrics（root_scope=%s；window=24h）：", strings.Join(scopes, ","))}
+	for _, scope := range scopes {
+		snapshot, err := supervision.CollectMetricsSnapshot(ctx, store, supervision.MetricsSnapshotOptions{
+			RootSessionID:   scope,
+			Since:           since,
+			Until:           now,
+			WindowLimit:     windowLimit,
+			MaxCandidates:   maxCandidates,
+			PerSessionLimit: 100,
+		})
+		if err != nil {
+			return "", fmt.Errorf("读取 supervision metrics 失败（scope=%s）: %w", scope, err)
+		}
+		resume := snapshot.ResumeAdmission
+		lines = append(lines, fmt.Sprintf(
+			"  %s: resume_admission claimed=%d submitted=%d recovered=%d released=%d model_turns=%d notification_only=%d stale=%d observed=%d",
+			scope, resume.Claimed, resume.Submitted, resume.Recovered, resume.Released,
+			resume.ModelTurns, resume.NotificationOnly, resume.Stale, resume.Observed,
+		))
+		lines = append(lines, fmt.Sprintf(
+			"    cancel total=%d forced=%d decision_window_expired=%d forced_ratio=%.3f decision_window_ratio=%.3f",
+			snapshot.Cancel.Total, snapshot.Cancel.ForcedCancel, snapshot.Cancel.DecisionWindowExpired,
+			snapshot.Cancel.ForcedCancelRatio(), snapshot.Cancel.DecisionWindowExpiredRatio(),
+		))
+		latency := snapshot.ReportLatency
+		lines = append(lines, fmt.Sprintf(
+			"    report_latency samples=%d p50_ms=%d p95_ms=%d max_ms=%d unavailable=%t",
+			latency.Samples, latency.P50Millis, latency.P95Millis, latency.MaxMillis, latency.Unavailable,
+		))
+		if snapshot.WindowTruncated {
+			lines = append(lines, "    truncated=true")
+		}
+		if snapshot.ReadPath != "" {
+			lines = append(lines, "    read_path="+snapshot.ReadPath)
+		}
+		if len(snapshot.Notes) > 0 {
+			lines = append(lines, "    notes="+strings.Join(snapshot.Notes, "; "))
+		}
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// runChatDebugSupervisionTurnState renders the durable parent-turn identity and
+// finalization state without mutating anything. The suspension ledger is the
+// authority for a parked turn; RuntimeState fields are shown as the derived
+// cache they are. This is the local counterpart of the digest fields required by
+// the hardening plan (parent turn/episode, required obligations, pending wake).
+func runChatDebugSupervisionTurnState(ctx context.Context, session *ChatSession) (string, error) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.RuntimeStore == nil {
+		return "", fmt.Errorf("当前会话没有 runtime store：无法读取 parent turn state")
+	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+	if sessionID == "" {
+		return "", fmt.Errorf("当前会话 ID 为空")
+	}
+	host := session.LocalRuntimeHost
+	state, err := host.RuntimeStore.LoadState(ctx, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("读取 parent turn state 失败: %w", err)
+	}
+	lines := []string{fmt.Sprintf("parent turn state（session=%s）：", sessionID)}
+	turnID := ""
+	if state == nil {
+		lines = append(lines, "  （无 durable runtime state）")
+	} else {
+		phase := strings.TrimSpace(string(state.TurnPhase))
+		if phase == "" {
+			phase = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf(
+			"  status=%s phase=%s current_turn=%s current_episode=%s active_jobs=%d",
+			state.Status, phase, strings.TrimSpace(state.CurrentTurnID), strings.TrimSpace(state.CurrentEpisodeID), len(state.ActiveJobIDs),
+		))
+		lines = append(lines, fmt.Sprintf(
+			"  suspended_turn=%s suspended_episode=%s finalized_turn=%s finalized_episode=%s",
+			strings.TrimSpace(state.SuspendedTurnID), strings.TrimSpace(state.SuspendedEpisodeID),
+			strings.TrimSpace(state.FinalizedTurnID), strings.TrimSpace(state.FinalizedEpisodeID),
+		))
+		turnID = firstNonEmptyChatValue(state.SuspendedTurnID, state.CurrentTurnID, state.FinalizedTurnID)
+	}
+	if turnID != "" && host.SubagentBatches != nil {
+		record, ok, readErr := host.SubagentBatches.GetTurnSuspension(ctx, sessionID, turnID)
+		switch {
+		case readErr != nil:
+			lines = append(lines, "  suspension=unavailable error="+readErr.Error())
+		case !ok || record == nil:
+			lines = append(lines, "  suspension=missing（derived cache points at a turn with no durable record）")
+		default:
+			parkedAt := "unknown"
+			if !record.ParkedAt.IsZero() {
+				parkedAt = record.ParkedAt.UTC().Format(time.RFC3339)
+			}
+			lines = append(lines, fmt.Sprintf(
+				"  suspension turn=%s episode=%s obligations=%d resume_queue=%d parked_at=%s",
+				strings.TrimSpace(record.TurnID), strings.TrimSpace(record.EpisodeID),
+				len(record.ObligationIDs), len(record.ResumeQueue), parkedAt,
+			))
+			progress, progressErr := subagentbatch.CountObligationProgressWithResolvers(
+				ctx, host.SubagentBatches, record, host.obligationResolvers(),
+			)
+			if progressErr != nil {
+				lines = append(lines, "  obligations progress=unavailable error="+progressErr.Error())
+			} else {
+				lines = append(lines, fmt.Sprintf(
+					"  obligations total=%d terminal=%d all_terminal=%t",
+					progress.Total, progress.Terminal, progress.AllTerminal(),
+				))
+			}
+		}
+	}
+	if host.Supervision != nil && host.Supervision.Store != nil {
+		rootScopeID := host.localBackgroundJobRootScope(sessionID)
+		pending, pendingErr := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+			RootScopeID:           rootScopeID,
+			TargetParentSessionID: sessionID,
+			UnclaimedOnly:         true,
+			Limit:                 20,
+		})
+		if pendingErr != nil {
+			lines = append(lines, "  pending_wakes=unavailable error="+pendingErr.Error())
+		} else {
+			reasons := make([]string, 0, 3)
+			seenReasons := map[string]bool{}
+			for _, wake := range pending {
+				reason := strings.TrimSpace(wake.WakeReason)
+				if reason == "" || seenReasons[reason] {
+					continue
+				}
+				seenReasons[reason] = true
+				reasons = append(reasons, reason)
+				if len(reasons) == 3 {
+					break
+				}
+			}
+			line := fmt.Sprintf("  pending_wakes total=%d", len(pending))
+			if len(reasons) > 0 {
+				line += " reasons=" + strings.Join(reasons, ",")
+			}
+			lines = append(lines, line)
+		}
+		notifications, notificationErr := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{
+			RootScopeID:           rootScopeID,
+			TargetParentSessionID: sessionID,
+			Limit:                 50,
+		})
+		if notificationErr != nil {
+			lines = append(lines, "  unresolved_notifications=unavailable error="+notificationErr.Error())
+		} else {
+			lines = append(lines, fmt.Sprintf("  unresolved_notifications total=%d（limit=50）", len(notifications)))
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 // chatDebugSupervisionWakeBudgetText renders the auto-wake budget (plan P1-6)

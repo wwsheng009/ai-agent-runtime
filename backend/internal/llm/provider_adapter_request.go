@@ -125,10 +125,16 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 	// Resolve/clamp MaxTokens with Claude Code-style default/upperLimit logic.
 	// Positive request budgets are only clamped to the hard ceiling; zero/unset
 	// budgets fall back to the capped model default (8k) unless env overrides.
-	maxTokens := CapRequestMaxTokens(input.Protocol, input.Model, input.MaxTokens, capability, hasCapability, 0)
-	if maxTokens <= 0 {
-		resolved := ResolveRequestMaxTokens(input.Protocol, input.Model, 0, capability, hasCapability, 0)
-		maxTokens = resolved.Default
+	// Internal callers can set MetadataKeyOmitMaxTokens to suppress that default
+	// and leave max_tokens absent from the wire request. An explicit positive
+	// budget still wins over the omit flag.
+	maxTokens := 0
+	if input.MaxTokens > 0 || !metadataOmitsMaxTokens(metadata) {
+		maxTokens = CapRequestMaxTokens(input.Protocol, input.Model, input.MaxTokens, capability, hasCapability, 0)
+		if maxTokens <= 0 {
+			resolved := ResolveRequestMaxTokens(input.Protocol, input.Model, 0, capability, hasCapability, 0)
+			maxTokens = resolved.Default
+		}
 	}
 
 	return adapter.RequestConfig{

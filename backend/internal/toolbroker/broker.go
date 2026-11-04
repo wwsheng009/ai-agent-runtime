@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -413,6 +414,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"restart_policy": map[string]interface{}{
 						"type":        "string",
 						"description": "Infrastructure-failure recovery policy: fail (default) or rerun. Rerun automatically requeues after heartbeat stalls, zombie detection, process loss, PID reuse, or repeated launch failure, and may repeat command side effects.",
+					},
+					"finalization_policy": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"detached", "required", "explicit_followup"},
+						"description": "Whether this job gates the current parent turn. detached (default) lets the parent finalize immediately and delivers a notification-only result; required parks the parent and resumes the same turn/episode when the job reaches a terminal state; explicit_followup never auto-resumes and expects a later user turn. required needs turn/episode identity and a durable job store.",
 					},
 					"startup_acceptance": map[string]interface{}{
 						"type":        "object",
@@ -1512,6 +1518,11 @@ func decorateBackgroundTaskResult(job background.Job) BackgroundTaskResult {
 	result := BackgroundTaskResult{
 		JobID: job.ID, Status: string(job.Status), Message: job.Message, RestartPolicy: job.RestartPolicy,
 	}
+	if origin := background.JobOriginFromMetadata(job.Metadata); origin.FinalizationPolicy != "" {
+		result.FinalizationPolicy = background.JobFinalizationPolicy(origin.FinalizationPolicy)
+		result.ParentTurnID = origin.ParentTurnID
+		result.ParentEpisodeID = origin.ParentEpisodeID
+	}
 	if value, ok := job.Metadata["launch_state"].(string); ok {
 		result.LaunchState = value
 	}
@@ -1716,6 +1727,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["restart_policy"].(string); ok {
 			req.RestartPolicy = background.RestartPolicy(strings.TrimSpace(value))
 		}
+		policy, ok := background.ParseJobFinalizationPolicy(brokerTaskStringArg(args, "finalization_policy"))
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported finalization_policy %q: use detached, required or explicit_followup",
+				strings.TrimSpace(brokerTaskStringArg(args, "finalization_policy")))
+		}
 		if value, ok := args["startup_acceptance"].(map[string]interface{}); ok {
 			startup := &background.StartupAcceptance{}
 			if probe, ok := value["probe"].(string); ok {
@@ -1751,6 +1767,29 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if ok {
 			req.Rows = value
 		}
+		// Capture the submitting logical turn/episode from the run context, not
+		// from model arguments. A job terminal after the parent turn finalized
+		// must be able to prove which episode it belonged to and stay
+		// notification-only.
+		parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+		if parentSessionID == "" {
+			parentSessionID = strings.TrimSpace(sessionID)
+		}
+		parentTurnID := strings.TrimSpace(toolctx.TurnID(ctx))
+		parentEpisodeID := strings.TrimSpace(toolctx.EpisodeID(ctx))
+		if policy == background.JobPolicyRequired && (parentSessionID == "" || parentTurnID == "" || parentEpisodeID == "") {
+			return nil, nil, fmt.Errorf("finalization_policy=required needs the submitting session, turn and episode identity; use detached when no resumable parent turn exists")
+		}
+		if policy == background.JobPolicyRequired && !b.Background.JobStoreDurable() {
+			return nil, nil, fmt.Errorf("finalization_policy=required needs a durable background job store; use detached when this host cannot resume the job after a restart")
+		}
+		ctx = background.WithJobOrigin(ctx, background.JobOrigin{
+			RootScopeID:        parentSessionID,
+			ParentSessionID:    parentSessionID,
+			ParentTurnID:       parentTurnID,
+			ParentEpisodeID:    parentEpisodeID,
+			FinalizationPolicy: string(policy),
+		})
 		var job *background.Job
 		var submitErr error
 		if req.Interactive {
@@ -1801,6 +1840,13 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			return nil, nil, submitErr
 		}
+		if policy == background.JobPolicyRequired && job != nil {
+			if alreadyOpen, _ := job.Metadata["already_open"].(bool); alreadyOpen {
+				return nil, nil, fmt.Errorf(
+					"finalization_policy=required cannot adopt already-open interactive job %s; close that session first or use finalization_policy=detached",
+					strings.TrimSpace(job.ID))
+			}
+		}
 		jobAlias := strings.TrimSpace(job.ID)
 		if handleAliases != nil {
 			jobAlias = handleAliases.Jobs.register(job.ID, deterministicHandleAlias(backgroundJobAliasPrefix, toolCallID, ToolJobStart, args))
@@ -1814,6 +1860,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"job_alias":            jobAlias,
 			"status":               string(job.Status),
 			"restart_policy":       job.RestartPolicy,
+			"finalization_policy":  string(policy),
+			"parent_turn_id":       parentTurnID,
+			"parent_episode_id":    parentEpisodeID,
 		}
 		for _, key := range []string{
 			"timeout_requested_ms", "timeout_effective_ms", "timeout_ms", "timeout_source",

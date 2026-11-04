@@ -686,6 +686,11 @@ func (m *Manager) emitLogOutput(ctx context.Context, managed *managedJob) {
 			chunk := append([]byte(nil), buf[:n]...)
 			start := managed.outputOffset
 			next := start + int64(n)
+			if managed.outputTerminal() {
+				managed.recordLateOutput(n)
+				managed.outputOffset = next
+				continue
+			}
 			_, _ = managed.output.Write(chunk)
 			managed.outputOffset = next
 			m.appendJobEvent(ctx, managed.info.ID, "output", map[string]interface{}{

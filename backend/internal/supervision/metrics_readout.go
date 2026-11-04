@@ -432,6 +432,9 @@ type MetricsSnapshot struct {
 	Cancel RuntimeCancelMetrics `json:"cancel"`
 	// ReportLatency carries §7.3 metric 3.
 	ReportLatency ReportLatencyMetrics `json:"report_latency"`
+	// ResumeAdmission carries the parent-turn hardening counters derived from
+	// the durable resume-claim and wake-consumption ledgers.
+	ResumeAdmission ResumeAdmissionMetrics `json:"resume_admission"`
 	// MisKillCandidates is the §7.3 metric-5 review list (verdict stays human).
 	MisKillCandidates []MisKillCandidate `json:"mis_kill_candidates,omitempty"`
 	// WindowTruncated is true when the window read came back at its cap: the
@@ -441,6 +444,26 @@ type MetricsSnapshot struct {
 	// per-session walk) so a baseline is reproducible.
 	ReadPath string   `json:"read_path,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
+}
+
+// ResumeAdmissionMetrics is the durable admission/consumption readout:
+// automatic model turns, notification-only late results, stale suppressions and
+// observed terminal waits.
+type ResumeAdmissionMetrics struct {
+	Claimed          int `json:"claimed"`
+	Submitted        int `json:"submitted"`
+	Recovered        int `json:"recovered"`
+	Released         int `json:"released"`
+	ModelTurns       int `json:"model_turns"`
+	NotificationOnly int `json:"notification_only"`
+	Stale            int `json:"stale"`
+	Observed         int `json:"observed"`
+}
+
+// ResumeAdmissionMetricsReader is implemented by stores that can aggregate the
+// resume-claim and wake-consumption ledgers without loading every row.
+type ResumeAdmissionMetricsReader interface {
+	ReadResumeAdmissionMetrics(ctx context.Context, since, until time.Time) (ResumeAdmissionMetrics, error)
 }
 
 // CollectMetricsSnapshot reads one window and returns the §7.3 metrics that can
@@ -463,6 +486,16 @@ func CollectMetricsSnapshot(ctx context.Context, store Store, opts MetricsSnapsh
 	if store == nil {
 		snapshot.Notes = append(snapshot.Notes, "supervision store 未接线：§7.3 指标 1–3、5 不可读")
 		return snapshot, nil
+	}
+	if reader, ok := store.(ResumeAdmissionMetricsReader); ok {
+		metrics, metricsErr := reader.ReadResumeAdmissionMetrics(ctx, opts.Since, opts.Until)
+		if metricsErr != nil {
+			snapshot.Notes = append(snapshot.Notes, "resume admission metrics 读取失败: "+metricsErr.Error())
+		} else {
+			snapshot.ResumeAdmission = metrics
+		}
+	} else {
+		snapshot.Notes = append(snapshot.Notes, "store 不支持 resume admission metrics")
 	}
 	windowLimit := opts.WindowLimit
 	if windowLimit <= 0 {

@@ -154,8 +154,10 @@ var runtimeEventContracts = []Contract{
 	// ---- D 通道：仅回合末尾巴补发（实时通道与事件库都没有它们）----
 	{Type: "subagent.batch.started", Channels: ChannelTailOnly},
 	{Type: "subagent.batch.completed", Channels: ChannelTailOnly},
+	{Type: EventSubagentBatchParked, Channels: ChannelTailOnly},
 	{Type: "subagent.task.started", Channels: ChannelTailOnly},
 	{Type: "subagent.task.completed", Channels: ChannelTailOnly},
+	{Type: EventSubagentTaskParked, Channels: ChannelTailOnly},
 	{Type: "subagent.started", Channels: ChannelTailOnly},
 	// subagent.completed 是**摘要落盘**：agent-controller 在子会话终态时把
 	// 生命周期摘要（agent_id/path/status/usage，无子正文）直接 AppendEvent 写进
@@ -204,6 +206,10 @@ var runtimeEventContracts = []Contract{
 	// 顺序在崩溃窗口里错乱。
 	{Type: EventTurnSuspended, Channels: ChannelSessionStore | ChannelTailOnly, PersistCritical: true},
 	{Type: EventTurnResumed, Channels: ChannelSessionStore | ChannelTailOnly, PersistCritical: true},
+	// parent.finalization.stable_sequence_retry is durable audit evidence for the
+	// finalization tail gate. The actor persists it directly; A+D keeps replay
+	// and late-mounted consumers on the same contract as the turn milestones.
+	{Type: "parent.finalization.stable_sequence_retry", Channels: ChannelSessionStore | ChannelTailOnly},
 
 	// ---- 已登记、当前无 chat 侧通道 ----
 	// chat/events.go 常量（其中 tool_started/tool_finished 是 tool.requested/

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,6 +145,55 @@ func TestChatRuntimeEventBridge_SettledResumeDoesNotOpenPhantomRun(t *testing.T)
 	require.False(t, retired, "the closure edge still clears the retirement marker")
 	require.False(t, bridge.isRunActive(), "a settled closure must not open a run")
 	require.Empty(t, bridge.resumeTurnID, "a settled closure must not arm revival")
+}
+
+// TestChatRuntimeEventBridge_WakeStartResumeReachesEventLog pins the
+// observability edge: the wake-start turn.resumed is persisted before the
+// resumed run's session_start, so the bridge may still be ownerless. The
+// ownership guard must not drop it from the JSONL replay journal; that would
+// leave only the later settled closure visible.
+func TestChatRuntimeEventBridge_WakeStartResumeReachesEventLog(t *testing.T) {
+	bridge := newResumeTestBridge(t)
+	// The previous run's adopted owner may not have been cleared yet. This is
+	// exactly the window where the generic ownership guard used to suppress
+	// the start edge.
+	bridge.renderMu.Lock()
+	bridge.adoptedTurnID = "turn-stale"
+	bridge.renderMu.Unlock()
+
+	var mu sync.Mutex
+	var lines []string
+	bridge.eventLogSinkOverride = func(line []byte) {
+		mu.Lock()
+		lines = append(lines, string(line))
+		mu.Unlock()
+	}
+
+	start := runtimeevents.Event{
+		Type:      runtimeevents.EventTurnResumed,
+		SessionID: "session-resume",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1",
+			"phase":   "started",
+			"trigger": "terminal",
+		},
+	}
+	require.False(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(start),
+		"the resume-start edge is control-plane state, not a render mutation")
+
+	// Handle normally queues through the UI actor; execute the handler directly
+	// so this test isolates the ownership fence and journal path.
+	bridge.handleEvent(start)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, line := range lines {
+			if strings.Contains(line, `"type":"turn.resumed"`) && strings.Contains(line, `"phase":"started"`) {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "wake-start turn.resumed must reach the replay journal")
 }
 
 // TestChatRuntimeEventDrainSnapshot_DistinguishesBacklogFromRenderLag pins the

@@ -125,6 +125,7 @@ type sessionRunControl struct {
 	sessionID             string
 	generation            uint64
 	turnID                string
+	episodeID             string
 	stripMetadataKeys     []string
 	reply                 chan SubmitResult
 	replyOnce             sync.Once
@@ -1136,7 +1137,9 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	a.noteRunTriggerOrigin(cmd.TriggerTurnAuto)
 	// 挂起态（§6.12）收到 steer/新输入 ⇒ 起"同一 turn 的新 episode"（AC-P2-7a）。
 	turnID := a.nextTurnID(ctx)
+	episodeID := a.episodeIDForTurn(ctx, turnID)
 	run := a.claimSessionRun(turnID, nil, reply)
+	run.episodeID = episodeID
 	runCtx := withSessionRunControl(ctx, run)
 	session, err := a.loadSession(runCtx)
 	if err != nil {
@@ -1188,6 +1191,12 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	if err := a.updateState(ctx, func(state *RuntimeState) error {
 		state.Status = SessionRunning
 		state.CurrentTurnID = turnID
+		state.CurrentEpisodeID = episodeID
+		state.TurnPhase = ParentTurnPhaseRunning
+		if strings.TrimSpace(state.SuspendedTurnID) != turnID {
+			state.SuspendedTurnID = ""
+			state.SuspendedEpisodeID = ""
+		}
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
 		// A new run invalidates the previous run's terminal marker (P0-1).
@@ -1225,7 +1234,9 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 	a.noteRunTriggerOrigin(false)
 	// 挂起态（§6.12）的 continue/steer 同样落在"同一 turn 的新 episode"上（AC-P2-7a）。
 	turnID := a.nextTurnID(ctx)
+	episodeID := a.episodeIDForTurn(ctx, turnID)
 	run := a.claimSessionRun(turnID, cmd.StripMetadataKeys, reply)
+	run.episodeID = episodeID
 	runCtx := withSessionRunControl(ctx, run)
 	session, err := a.loadSession(runCtx)
 	if err != nil {
@@ -1237,6 +1248,12 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 	if err := a.updateState(ctx, func(state *RuntimeState) error {
 		state.Status = SessionRunning
 		state.CurrentTurnID = turnID
+		state.CurrentEpisodeID = episodeID
+		state.TurnPhase = ParentTurnPhaseRunning
+		if strings.TrimSpace(state.SuspendedTurnID) != turnID {
+			state.SuspendedTurnID = ""
+			state.SuspendedEpisodeID = ""
+		}
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
 		// A new run invalidates the previous run's terminal marker (P0-1).
@@ -3092,6 +3109,28 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		run = a.claimSessionRun(turnID, nil, reply)
 	}
 	ctx = withSessionRunControl(ctx, run)
+	if strings.TrimSpace(run.episodeID) == "" {
+		run.episodeID = a.episodeIDForTurn(ctx, turnID)
+	}
+	if state := a.stateWithoutToolSurfaces(); state != nil &&
+		strings.TrimSpace(state.CurrentTurnID) == strings.TrimSpace(turnID) &&
+		strings.TrimSpace(state.CurrentEpisodeID) == "" {
+		// Approval/recovery paths may enter startSessionRun without the normal
+		// submit-state write. Stamp the episode before tools run so background
+		// jobs and obligations capture the same identity as the turn.
+		_ = a.updateStateConvergent(ctx, func(state *RuntimeState) error {
+			if strings.TrimSpace(state.CurrentTurnID) != strings.TrimSpace(turnID) ||
+				strings.TrimSpace(state.CurrentEpisodeID) != "" {
+				return nil
+			}
+			state.CurrentEpisodeID = run.episodeID
+			if state.TurnPhase == "" {
+				state.TurnPhase = ParentTurnPhaseRunning
+			}
+			state.UpdatedAt = time.Now().UTC()
+			return nil
+		})
+	}
 	// P2 单写者收敛：run 接管 session 即挂真身引用，恢复路径经 RunLiveSession
 	// 在真身上操作（禁止 loadSession 副本写回）。
 	run.attachLiveSession(session)
@@ -3101,6 +3140,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnID(runCtx, turnID)
+	runCtx = agent.WithEpisodeID(runCtx, run.episodeID)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
 	if injection != nil {
 		runCtx = agent.WithTurnSystemMessages(runCtx, injection.systemMessages)
@@ -3275,9 +3315,12 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			runCtx = nextCtx
 		}
 	}
+	continuation := continuationKind(prompt, resume)
 	startPayload := map[string]interface{}{
-		"turn_id": turnID,
-		"resume":  resume,
+		"turn_id":      turnID,
+		"episode_id":   strings.TrimSpace(run.episodeID),
+		"resume":       resume,
+		"continuation": continuation,
 	}
 	if !resume {
 		startPayload["prompt_length"] = len(prompt)
@@ -3360,6 +3403,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// turn starts. Only the current ownership token may mutate or persist
 		// session state.
 		publishTerminal := false
+		logicalTurnPhase := ParentTurnPhaseFinalizing
+		logicalEpisodeID := strings.TrimSpace(run.episodeID)
 		if a.sessionRunOwned(run) {
 			finalizeCtx := withSessionRunControl(context.Background(), run)
 			if !approvalDetached && shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
@@ -3398,9 +3443,49 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			// 后续 steer / 新输入 / wake resume 以**同一 turn_id** 起新 episode
 			// （AC-P2-7a、AC-P1-1a）；记录已被清则写空，不再复用。
 			suspendedTurnID := ""
+			suspendedEpisodeID := ""
+			turnPhase := ParentTurnPhaseCanceled
+			finalizedTurnID := ""
+			finalizedEpisodeID := ""
+			runEpisodeID := strings.TrimSpace(run.episodeID)
+			var sequenceGate finalizationSequenceGate
 			if publishTerminal {
-				suspendedTurnID = a.syncSuspendedTurn(finalizeCtx, turnID)
+				if !approvalDetached || terminalApproval {
+					// Persist FINALIZING before the tail check so a slow/retrying
+					// gate is observable and concurrent re-finalizers can see that
+					// the turn is already in its closing phase.
+					_ = a.markTurnFinalizing(finalizeCtx, turnID)
+				}
+				// Durable tail stability check: a loop can return while its final
+				// event append is still settling. Observe a bounded quiet window
+				// and re-read the suspension ledger against each new sequence
+				// snapshot. A suspension found during the retry keeps the logical
+				// turn parked; continuously moving unrelated traffic is audited
+				// but must not wedge the turn forever.
+				sequenceGate = a.evaluateFinalizationSequenceGate(finalizeCtx, turnID, runEpisodeID)
+				suspendedTurnID = sequenceGate.SuspendedTurnID
+				suspendedEpisodeID = sequenceGate.SuspendedEpisodeID
+				switch {
+				case suspendedTurnID != "":
+					turnPhase = ParentTurnPhaseParked
+				case status == SessionStopped:
+					turnPhase = ParentTurnPhaseCanceled
+				default:
+					// The gate exhausted its bounded retries without materializing
+					// a required suspension. Treat the remaining sequence churn as
+					// unrelated session traffic; the audit event emitted below
+					// carries the full evidence for later investigation.
+					turnPhase = ParentTurnPhaseFinalized
+					finalizedTurnID = turnID
+					finalizedEpisodeID = runEpisodeID
+				}
+				if !approvalDetached || terminalApproval {
+					logicalTurnPhase = turnPhase
+					logicalEpisodeID = runEpisodeID
+				}
 			}
+			previousState := a.stateWithoutToolSurfaces()
+			announcePhase := false
 			if publishTerminal && (!approvalDetached || terminalApproval) {
 				approvalSnapshot := a.stateWithoutToolSurfaces()
 				applied := false
@@ -3408,10 +3493,23 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					if state.CurrentTurnID != turnID {
 						return nil
 					}
+					switch state.TurnPhase {
+					case ParentTurnPhaseParked, ParentTurnPhaseFinalized, ParentTurnPhaseCanceled:
+						// A concurrent finalizer already converged this turn to a
+						// terminal phase; do not overwrite its identity.
+						return nil
+					}
 					applied = true
 					state.Status = status
 					state.CurrentTurnID = ""
+					state.CurrentEpisodeID = ""
 					state.SuspendedTurnID = suspendedTurnID
+					state.SuspendedEpisodeID = suspendedEpisodeID
+					state.TurnPhase = turnPhase
+					if finalizedTurnID != "" {
+						state.FinalizedTurnID = finalizedTurnID
+						state.FinalizedEpisodeID = finalizedEpisodeID
+					}
 					state.CurrentRunMeta = nil
 					resetFrozenTurnTools(state)
 					state.PendingTool = nil
@@ -3434,6 +3532,19 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					state.UpdatedAt = time.Now().UTC()
 					return nil
 				})
+				if applied {
+					announcePhase = previousState == nil ||
+						previousState.TurnPhase != turnPhase ||
+						previousState.SuspendedTurnID != suspendedTurnID ||
+						previousState.SuspendedEpisodeID != suspendedEpisodeID
+					if turnPhase == ParentTurnPhaseFinalized && previousState != nil &&
+						previousState.FinalizedTurnID != finalizedTurnID {
+						// A new explicit user turn may finalize while the previous
+						// turn already had the same phase; the turn id still makes
+						// this a distinct finalization edge.
+						announcePhase = true
+					}
+				}
 				if applied && terminalApproval {
 					terminalApprovalEvent = terminalApprovalResolvedEventPayload(approvalSnapshot, cancelSource)
 					if approvalSnapshot != nil && approvalSnapshot.PendingApproval != nil {
@@ -3445,6 +3556,44 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					}
 				}
 			}
+			if publishTerminal && sequenceGate.SequenceAvailable &&
+				(!sequenceGate.SequenceStable || sequenceGate.SequenceAttempts > 1) {
+				sequencePayload := map[string]interface{}{
+					"turn_id":         turnID,
+					"episode_id":      runEpisodeID,
+					"stable":          sequenceGate.SequenceStable,
+					"attempts":        sequenceGate.SequenceAttempts,
+					"sequence_before": sequenceGate.SequenceBefore,
+					"sequence_after":  sequenceGate.SequenceAfter,
+				}
+				if sequenceGate.SequenceError != "" {
+					sequencePayload["error"] = sequenceGate.SequenceError
+				}
+				a.publish(runtimeevents.Event{
+					Type:      EventParentTurnFinalizationSequenceRetry,
+					SessionID: a.id,
+					Payload:   sequencePayload,
+				})
+				if !sequenceGate.SequenceStable && suspendedTurnID == "" {
+					logpkg.Warnf("parent turn finalization sequence remained unstable: session=%s turn=%s episode=%s attempts=%d before=%d after=%d error=%s; no required suspension was materialized",
+						a.id, turnID, runEpisodeID, sequenceGate.SequenceAttempts, sequenceGate.SequenceBefore, sequenceGate.SequenceAfter, sequenceGate.SequenceError)
+				}
+			}
+			if publishTerminal && announcePhase {
+				payload := map[string]interface{}{
+					"turn_id":    turnID,
+					"episode_id": runEpisodeID,
+					"phase":      string(turnPhase),
+				}
+				annotateLogicalTurnPayload(payload, runEpisodeID, turnPhase)
+				eventType := "parent.turn.finalized"
+				if turnPhase == ParentTurnPhaseParked {
+					eventType = "parent.turn.parked"
+				} else if turnPhase == ParentTurnPhaseCanceled {
+					eventType = "parent.turn.canceled"
+				}
+				a.publish(runtimeevents.Event{Type: eventType, SessionID: a.id, Payload: payload})
+			}
 		}
 
 		duration := durationMillis(result)
@@ -3453,13 +3602,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		success := execErr == nil && result != nil && result.Success
 		payload := map[string]interface{}{
-			"turn_id":  turnID,
-			"resume":   resume,
-			"success":  success,
-			"steps":    resultSteps(result),
-			"error":    firstNonEmptyError(execErr, result),
-			"duration": duration,
-			"status":   status,
+			"turn_id":      turnID,
+			"resume":       resume,
+			"continuation": continuation,
+			"success":      success,
+			"steps":        resultSteps(result),
+			"error":        firstNonEmptyError(execErr, result),
+			"duration":     duration,
+			"status":       status,
 		}
 		if cancelSource != "" {
 			payload["cancel_source"] = cancelSource
@@ -3513,7 +3663,9 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				hookPayload := map[string]interface{}{
 					"session_id":      a.id,
 					"turn_id":         turnID,
+					"episode_id":      logicalEpisodeID,
 					"resume":          resume,
+					"continuation":    continuation,
 					"success":         execErr == nil && result != nil && result.Success,
 					"error":           firstNonEmptyError(execErr, result),
 					"hook_event_name": "SessionEnd",
@@ -3538,10 +3690,12 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// reconcile its final reasoning snapshot and retire the stream identity.
 		if publishTerminal && result != nil {
 			messagePayload := map[string]interface{}{
-				"turn_id": turnID,
-				"content": result.Output,
-				"mode":    "snapshot",
+				"turn_id":      turnID,
+				"continuation": continuation,
+				"content":      result.Output,
+				"mode":         "snapshot",
 			}
+			annotateLogicalTurnPayload(messagePayload, logicalEpisodeID, logicalTurnPhase)
 			if streamID := strings.TrimSpace(result.AssistantStreamID); streamID != "" {
 				messagePayload["stream_id"] = streamID
 				messagePayload["sequence"] = result.AssistantStreamSequence + 1
@@ -3567,6 +3721,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// Publish assistant_message before session_end so interactive clients can
 		// complete any buffered streaming output before session teardown.
 		if publishTerminal {
+			annotateLogicalTurnPayload(payload, logicalEpisodeID, logicalTurnPhase)
 			a.publish(runtimeevents.Event{
 				Type:      EventSessionEnd,
 				SessionID: a.id,

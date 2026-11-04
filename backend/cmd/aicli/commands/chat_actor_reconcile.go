@@ -327,12 +327,11 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 			continue
 		}
 		outcome.Scanned++
-		settled, err := subagentbatch.TurnObligationsSettledWithTeams(
+		settled, err := subagentbatch.TurnObligationsSettledWithResolvers(
 			sweepCtx,
 			h.SubagentBatches,
 			record,
-			h.agentSessionObligationResolver(),
-			h.teamObligationResolver(),
+			h.obligationResolvers(),
 		)
 		if err != nil || !settled {
 			continue
@@ -341,11 +340,10 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 		if rootScopeID == "" {
 			rootScopeID = strings.TrimSpace(record.SessionID)
 		}
-		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+		_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 			sweepCtx,
 			h.SubagentBatches,
-			h.agentSessionObligationResolver(),
-			h.teamObligationResolver(),
+			h.obligationResolvers(),
 			wakeScheduler,
 			record.SessionID,
 			rootScopeID,
@@ -382,6 +380,7 @@ func (h *localChatRuntimeHost) publishParkedTurnSettledResume(ctx context.Contex
 			"turn_id":          record.TurnID,
 			"session_id":       record.SessionID,
 			"trigger":          runtimeevents.TurnResumedTriggerSettled,
+			"phase":            "settled",
 			"settled":          true,
 			"obligation_count": len(record.ObligationIDs),
 			"sweep":            true,

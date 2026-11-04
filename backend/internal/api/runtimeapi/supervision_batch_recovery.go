@@ -344,12 +344,11 @@ func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (age
 			continue
 		}
 		outcome.Scanned++
-		settled, err := subagentbatch.TurnObligationsSettledWithTeams(
+		settled, err := subagentbatch.TurnObligationsSettledWithResolvers(
 			sweepCtx,
 			store,
 			record,
-			h.agentSessionObligationResolver(),
-			h.teamObligationResolver(),
+			h.obligationResolvers(),
 		)
 		if err != nil || !settled {
 			continue
@@ -358,11 +357,10 @@ func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (age
 		if rootScopeID == "" {
 			rootScopeID = strings.TrimSpace(record.SessionID)
 		}
-		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+		_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 			sweepCtx,
 			store,
-			h.agentSessionObligationResolver(),
-			h.teamObligationResolver(),
+			h.obligationResolvers(),
 			h.getSupervisionWakeScheduler(),
 			record.SessionID,
 			rootScopeID,
@@ -401,6 +399,7 @@ func (h *Handler) publishParkedTurnSettledResume(ctx context.Context, record *su
 			"turn_id":          record.TurnID,
 			"session_id":       record.SessionID,
 			"trigger":          runtimeevents.TurnResumedTriggerSettled,
+			"phase":            "settled",
 			"settled":          true,
 			"obligation_count": len(record.ObligationIDs),
 			"sweep":            true,

@@ -110,11 +110,10 @@ func (h *Handler) maybeResumeTeamParkedTurn(ctx context.Context, event team.Team
 	}
 	settleCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+	_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 		settleCtx,
 		batches,
-		h.agentSessionObligationResolver(),
-		h.teamObligationResolver(),
+		h.obligationResolvers(),
 		scheduler,
 		parentSessionID,
 		rootScopeID,

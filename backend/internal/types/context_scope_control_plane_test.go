@@ -21,6 +21,11 @@ func TestIsControlPlanePromptText(t *testing.T) {
 			wanted: true,
 		},
 		{
+			name:   "supervision lifecycle preflight",
+			text:   "[Child lifecycle preflight]\nsnapshot_seq: 42\ncritical_unresolved: 0\n",
+			wanted: true,
+		},
+		{
 			name:   "supervision auto wake",
 			text:   "[supervision] 存在待处理的子 Agent / Team 关键生命周期事件，请检查生命周期摘要（lifecycle digest）并继续。",
 			wanted: true,
@@ -53,7 +58,9 @@ func TestIsControlPlanePromptText(t *testing.T) {
 // ledger to reject them; a rename that changes only one side breaks both.
 func TestControlPlaneMarkerShape(t *testing.T) {
 	require.Equal(t, "[子任务与后台作业进展]", SupervisionDigestPromptHeader)
+	require.Equal(t, "[Child lifecycle preflight]", SupervisionPreflightPromptHeader)
 	require.Equal(t, "[supervision]", SupervisionPromptTag)
 	require.True(t, IsControlPlanePromptText(SupervisionDigestPromptHeader))
+	require.True(t, IsControlPlanePromptText(SupervisionPreflightPromptHeader))
 	require.True(t, IsControlPlanePromptText(SupervisionPromptTag))
 }

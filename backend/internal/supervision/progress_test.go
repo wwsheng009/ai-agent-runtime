@@ -3,10 +3,12 @@ package supervision
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type fakeProgressSource struct {
@@ -90,6 +92,33 @@ func TestBuildDigest_ProgressRollupVisibleInTurn(t *testing.T) {
 	require.Equal(t, "root-session-1", source.last.RootScopeID)
 	require.Equal(t, "root-session-1", source.last.ParentSessionID)
 	require.Equal(t, defaultDigestLimit, source.last.RowLimit)
+}
+
+// TestBuildDigest_ProgressOnlyStartsWithControlPlaneHeader pins the wake
+// classification contract: a P2-D progress-only digest prepended to a wake
+// prompt must begin with the shared control-plane marker. Without it,
+// session_start.continuation records the auto-resume as a user turn and the
+// durable consumer loses the distinction between user work and supervision.
+func TestBuildDigest_ProgressOnlyStartsWithControlPlaneHeader(t *testing.T) {
+	store := testDigestStore(t, "supervision-progress-only-header")
+	ctx := context.Background()
+
+	digest, err := BuildDigest(ctx, store, DigestRequest{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		Progress: &fakeProgressSource{groups: []ProgressGroup{{
+			GroupID:   "batch-only",
+			Total:     1,
+			Completed: 0,
+			Running:   1,
+		}}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, digest.Items)
+	require.NotEmpty(t, digest.Progress)
+	require.True(t, strings.HasPrefix(digest.Text, runtimetypes.SupervisionDigestPromptHeader),
+		"progress-only text must carry the control-plane header")
+	require.True(t, runtimetypes.IsControlPlanePromptText(digest.Text))
 }
 
 // Unwired hosts (P0-B off, or a host with no batch surface yet) must inject

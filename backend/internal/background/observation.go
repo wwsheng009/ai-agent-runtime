@@ -17,6 +17,16 @@ import (
 // TerminalObserved for reads: a missing key means "not observed".
 const MetadataTerminalObserved = "terminal_observed"
 
+// Terminal output drain metadata. output_drained_at marks the terminal
+// transition's declared drain boundary; late_output_count/late_output_discarded
+// record producer writes that arrived after that boundary and were deliberately
+// not attached to the settled result.
+const (
+	backgroundMetaOutputDrainedAt     = "output_drained_at"
+	backgroundMetaLateOutputCount     = "late_output_count"
+	backgroundMetaLateOutputDiscarded = "late_output_discarded"
+)
+
 // outputWaitMaxAge bounds how long an in-flight waiter registration is trusted.
 // The longest supported task_output wait is two minutes; anything older is a
 // leak (a wait that returned without unregistering) and must not suppress a
@@ -159,6 +169,34 @@ func TerminalObserved(job *Job) bool {
 	}
 	observed, _ := job.Metadata[MetadataTerminalObserved].(bool)
 	return observed
+}
+
+// outputTerminal reports whether the job's output buffer is closed to producer
+// writes. It is read under managed.mu; callers may already hold outputMu.
+func (j *managedJob) outputTerminal() bool {
+	if j == nil {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return isTerminalStatus(j.info.Status)
+}
+
+// recordLateOutput counts bytes discarded after the terminal drain boundary.
+// The in-memory metadata is enough for the live task_output view; the terminal
+// job row is not rewritten on every late chunk.
+func (j *managedJob) recordLateOutput(bytes int) {
+	if j == nil || bytes <= 0 {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.info.Metadata == nil {
+		j.info.Metadata = map[string]interface{}{}
+	}
+	existing, _ := intMetadataValue(j.info.Metadata, backgroundMetaLateOutputCount)
+	j.info.Metadata[backgroundMetaLateOutputCount] = int64(existing + bytes)
+	j.info.Metadata[backgroundMetaLateOutputDiscarded] = true
 }
 
 // markTerminalObservedByWaiter stamps the job before its terminal event reaches

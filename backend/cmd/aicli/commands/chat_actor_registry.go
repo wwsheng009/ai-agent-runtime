@@ -1494,11 +1494,10 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 		// "auto-resumes it on the child's terminal event" 契约相悖。
 		// 结清判定以 durable 账本为准（ListTurnSuspensions + settle 谓词），
 		// 不依赖派生缓存；排出的 wake 由下面的 wakeSupervisedParent 立即排空。
-		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+		_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 			ctx,
 			r.Host.SubagentBatches,
-			r.Host.agentSessionObligationResolver(),
-			r.Host.teamObligationResolver(),
+			r.Host.obligationResolvers(),
 			r.Host.Supervision.Wakes,
 			parentSessionID,
 			rootScopeID,
@@ -3495,7 +3494,7 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	if err != nil || !ok || record == nil {
 		return nil, nil, false, ""
 	}
-	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, r.Host.SubagentBatches, record, r.Host.agentSessionObligationResolver())
+	rows, err := subagentbatch.BuildWaitLedgerWithResolvers(ctx, r.Host.SubagentBatches, record, r.Host.obligationResolvers())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}

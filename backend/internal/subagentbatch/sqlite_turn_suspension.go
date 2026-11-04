@@ -61,6 +61,10 @@ func (s *sqliteBatchStore) ParkTurnSuspension(ctx context.Context, record *TurnS
 	if err != nil {
 		return fmt.Errorf("subagentbatch: encode resume queue: %w", err)
 	}
+	policies, err := json.Marshal(jsonPolicyMap(record.ObligationPolicies))
+	if err != nil {
+		return fmt.Errorf("subagentbatch: encode obligation policies: %w", err)
+	}
 	parkedAt := record.ParkedAt
 	if parkedAt.IsZero() {
 		parkedAt = Now()
@@ -77,17 +81,21 @@ func (s *sqliteBatchStore) ParkTurnSuspension(ctx context.Context, record *TurnS
 	_, err = db.ExecContext(ctx, `
 INSERT INTO turn_suspensions (
 	session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	decision_window_until, resume_queue_json, episode_id,
+	obligation_policies_json, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
 	root_scope_id = excluded.root_scope_id,
 	obligation_ids_json = excluded.obligation_ids_json,
 	parked_at = excluded.parked_at,
 	decision_window_until = excluded.decision_window_until,
 	resume_queue_json = excluded.resume_queue_json,
+	episode_id = excluded.episode_id,
+	obligation_policies_json = excluded.obligation_policies_json,
 	updated_at = excluded.updated_at
 `, record.SessionID, record.TurnID, record.RootScopeID, string(obligations),
 		parkedAt.UTC().Format(time.RFC3339Nano), decisionWindow, string(resumeQueue),
+		record.EpisodeID, string(policies),
 		Now().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("subagentbatch: park turn suspension: %w", err)
@@ -111,15 +119,16 @@ func (s *sqliteBatchStore) GetTurnSuspension(ctx context.Context, sessionID, tur
 		record        TurnSuspension
 		obligations   string
 		resumeQueue   string
+		policies      string
 		parkedAt      sql.NullString
 		decisionUntil sql.NullString
 	)
 	err = db.QueryRowContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
 FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 		Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue)
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, false, nil
@@ -128,6 +137,7 @@ FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 	}
 	record.ObligationIDs = decodeJSONIDList(obligations)
 	record.ResumeQueue = decodeJSONIDList(resumeQueue)
+	record.ObligationPolicies = decodeJSONPolicyMap(policies)
 	record.ParkedAt = parseBatchTime(parkedAt.String)
 	if until := parseNullableBatchTime(decisionUntil); until != nil {
 		record.DecisionWindowUntil = *until
@@ -150,7 +160,7 @@ func (s *sqliteBatchStore) ListTurnSuspensions(ctx context.Context, sessionID st
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
 FROM turn_suspensions WHERE session_id = ?
 ORDER BY parked_at DESC, turn_id ASC`, sessionID)
 	if err != nil {
@@ -163,15 +173,17 @@ ORDER BY parked_at DESC, turn_id ASC`, sessionID)
 			record        TurnSuspension
 			obligations   string
 			resumeQueue   string
+			policies      string
 			parkedAt      sql.NullString
 			decisionUntil sql.NullString
 		)
 		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue); err != nil {
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies); err != nil {
 			return nil, fmt.Errorf("subagentbatch: read turn suspension row: %w", err)
 		}
 		record.ObligationIDs = decodeJSONIDList(obligations)
 		record.ResumeQueue = decodeJSONIDList(resumeQueue)
+		record.ObligationPolicies = decodeJSONPolicyMap(policies)
 		record.ParkedAt = parseBatchTime(parkedAt.String)
 		if until := parseNullableBatchTime(decisionUntil); until != nil {
 			record.DecisionWindowUntil = *until
@@ -195,7 +207,7 @@ func (s *sqliteBatchStore) ListAllTurnSuspensions(ctx context.Context) ([]*TurnS
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
 FROM turn_suspensions
 ORDER BY parked_at DESC, session_id ASC, turn_id ASC`)
 	if err != nil {
@@ -208,15 +220,17 @@ ORDER BY parked_at DESC, session_id ASC, turn_id ASC`)
 			record        TurnSuspension
 			obligations   string
 			resumeQueue   string
+			policies      string
 			parkedAt      sql.NullString
 			decisionUntil sql.NullString
 		)
 		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue); err != nil {
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies); err != nil {
 			return nil, fmt.Errorf("subagentbatch: read all turn suspension row: %w", err)
 		}
 		record.ObligationIDs = decodeJSONIDList(obligations)
 		record.ResumeQueue = decodeJSONIDList(resumeQueue)
+		record.ObligationPolicies = decodeJSONPolicyMap(policies)
 		record.ParkedAt = parseBatchTime(parkedAt.String)
 		if until := parseNullableBatchTime(decisionUntil); until != nil {
 			record.DecisionWindowUntil = *until
@@ -270,4 +284,40 @@ func decodeJSONIDList(raw string) []string {
 		return nil
 	}
 	return values
+}
+
+// jsonPolicyMap keeps the persisted payload an object even for nil input, so a
+// legacy record upgraded by the v4 migration reads back as an empty map.
+func jsonPolicyMap(values map[string]FinalizationPolicy) map[string]FinalizationPolicy {
+	if values == nil {
+		return map[string]FinalizationPolicy{}
+	}
+	return values
+}
+
+func decodeJSONPolicyMap(raw string) map[string]FinalizationPolicy {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values map[string]FinalizationPolicy
+	if err := json.Unmarshal([]byte(raw), &values); err != nil || len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]FinalizationPolicy, len(values))
+	for id, policy := range values {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		normalized := NormalizeFinalizationPolicy(policy)
+		if normalized == FinalizationPolicyRequired {
+			continue
+		}
+		out[id] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

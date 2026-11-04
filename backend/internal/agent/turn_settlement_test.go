@@ -83,6 +83,7 @@ func parkAgentSettleTurn(t *testing.T, store subagentbatch.BatchStore, turnID, b
 	t.Helper()
 	require.NoError(t, store.ParkTurnSuspension(context.Background(), &subagentbatch.TurnSuspension{
 		TurnID:        turnID,
+		EpisodeID:     "ep-settle",
 		SessionID:     "sess-1",
 		RootScopeID:   "sess-1",
 		ObligationIDs: []string{batchID, "task-1"},

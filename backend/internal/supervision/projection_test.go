@@ -80,3 +80,21 @@ func TestProjectLifecycleReplayDoesNotWakeAcknowledgedParent(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pending, "acknowledged idempotent replay must not schedule another parent turn")
 }
+
+func TestProjectAgentCompletionCarriesRequiredAdmissionPolicy(t *testing.T) {
+	store := newTestStore(t, "supervision-agent-completion-policy")
+	wakes := NewWakeScheduler(store, WakeSchedulerConfig{})
+	ctx := context.Background()
+
+	_, err := ProjectAgentCompletion(ctx, store, wakes, "root-1", "parent-1", "child-1", "failed", "session_end")
+	require.NoError(t, err)
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "required", pending[0].FinalizationPolicy)
+	require.Equal(t, "child-1", pending[0].ObligationID)
+}

@@ -7477,6 +7477,11 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
 	bridge.eventLogPathOverride = logPath
+	// Mimic the production session-load sequence: consume the one-shot replay
+	// before live interaction state exists. Otherwise the first
+	// ensureChatRuntimeEventBridge call during RenderCommandDocument replays the
+	// log, resets the render plane, and clears the pending interaction anchor.
+	bridge.replaySessionLoadLogOnce()
 	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
@@ -7485,7 +7490,10 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	// Priority requests are pending lifecycle state rather than Scene items,
 	// therefore a committed supplement provides the deterministic anchor.
 	bridge.submitSupplement("first visible event")
-	bridge.recordInteractionAnchor("debug")
+	anchor := bridge.recordInteractionAnchor("debug")
+	if anchor == nil || anchor.ItemID != "item-1" {
+		t.Fatalf("interaction anchor = %+v, want item-1", anchor)
+	}
 	bridge.submitSupplement("second visible event")
 	if ok := coord.RenderCommandDocument(render.Document{
 		Blocks: []render.Block{
@@ -7498,6 +7506,9 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	}
 	live := bridge.sceneSnapshot()
 	if len(live.Cells) != 3 || live.Cells[1].ID != 3 {
+		for i, cell := range live.Cells {
+			t.Logf("live cell %d: %+v", i, *cell)
+		}
 		t.Fatalf("live cells = %d, want 3 with interaction at index 1", len(live.Cells))
 	}
 

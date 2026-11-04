@@ -156,8 +156,25 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	}
 
 	childAgent := NewAgentWithLLM(&childConfig, parent.mcpManager, parent.llmRuntime)
+	// Child turns resolve obligations through the same durable control planes as
+	// their parent. Without this, a nested child/team/job obligation can only
+	// degrade and the child turn may park forever.
+	obligationResolvers := parent.GetObligationResolvers()
+	childAgent.SetObligationResolvers(obligationResolvers)
 	childSchedulerConfig := childSubagentSchedulerConfig(parent.GetSubagentScheduler(), req.Config)
 	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, childSchedulerConfig))
+	if parentCoordinator := parent.PeekSubagentBatchCoordinator(); parentCoordinator != nil {
+		if store := parentCoordinator.Store(); store != nil && store.IsDurable() {
+			cfg := SubagentBatchCoordinatorConfig{
+				Store:               store,
+				Scheduler:           childAgent.GetSubagentScheduler(),
+				Emitter:             childAgent.batchRuntimeEventEmitter(),
+				LifecycleProjector:  parent.batchLifecycleProjectorSnapshot(),
+				ObligationResolvers: obligationResolvers,
+			}
+			childAgent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(cfg))
+		}
+	}
 	if childPolicy == nil {
 		childPolicy = NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
 	}
@@ -177,24 +194,27 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		effectiveMaxSteps = task.MaxTurns
 	}
 	loopConfig := &LoopReActConfig{
-		MaxSteps:              effectiveMaxSteps,
-		MaxToolCalls:          childConfig.MaxToolCalls,
-		MaxRunDuration:        childConfig.MaxRunDuration,
-		MaxExplorationSteps:   childConfig.MaxExplorationSteps,
-		MaxRepeatedToolCalls:  childConfig.MaxRepeatedToolCalls,
-		MaxRepeatedPollCalls:  childConfig.MaxRepeatedPollCalls,
-		EnableThought:         true,
-		EnableToolCalls:       true,
-		Temperature:           childConfig.Temperature,
-		ReasoningEffort:       decision.ReasoningEffort,
-		CompletionRequirement: NormalizeCompletionRequirement(task.CompletionRequirement),
+		MaxSteps:                 effectiveMaxSteps,
+		MaxToolCalls:             childConfig.MaxToolCalls,
+		MaxRunDuration:           childConfig.MaxRunDuration,
+		MaxExplorationSteps:      childConfig.MaxExplorationSteps,
+		MaxRepeatedToolCalls:     childConfig.MaxRepeatedToolCalls,
+		MaxRepeatedPollCalls:     childConfig.MaxRepeatedPollCalls,
+		EnableThought:            true,
+		EnableToolCalls:          true,
+		Temperature:              childConfig.Temperature,
+		ReasoningEffort:          decision.ReasoningEffort,
+		CompletionRequirement:    NormalizeCompletionRequirement(task.CompletionRequirement),
+		AgentSessionObligations:  obligationResolvers.AgentSessions,
+		TeamObligations:          obligationResolvers.Teams,
+		BackgroundJobObligations: obligationResolvers.BackgroundJobs,
 	}
 
 	return ChildAgentSpec{
 		Agent:       childAgent,
 		Runtime:     parent.llmRuntime,
 		LoopConfig:  loopConfig,
-		SessionID:   buildSubagentSessionID(task.ID),
+		SessionID:   firstNonEmptyString(task.ChildSessionID, buildDurableSubagentSessionID(req.Options.BatchID, task.ID)),
 		Config:      childConfig,
 		Task:        task,
 		Decision:    decision,

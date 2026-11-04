@@ -16,15 +16,18 @@ func TestBackgroundJobTerminalDisposition(t *testing.T) {
 		state       SupervisionState
 		schedulable bool
 	}{
-		"completed": {"background_job_completed", SeverityWarning, SupervisionTerminated, true},
-		"failed":    {"background_job_failed", SeverityCritical, SupervisionTerminated, true},
-		"timed_out": {"background_job_timed_out", SeverityCritical, SupervisionTimedOut, true},
-		"orphaned":  {"background_job_orphaned", SeverityCritical, SupervisionOrphaned, true},
-		"cancelled": {"background_job_cancelled", SeverityWarning, SupervisionTerminated, true},
-		"FAILED":    {"background_job_failed", SeverityCritical, SupervisionTerminated, true},
-		"running":   {"", "", "", false},
-		"output":    {"", "", "", false},
-		"":          {"", "", "", false},
+		"completed":   {"background_job_completed", SeverityWarning, SupervisionTerminated, true},
+		"failed":      {"background_job_failed", SeverityCritical, SupervisionTerminated, true},
+		"timed_out":   {"background_job_timed_out", SeverityCritical, SupervisionTimedOut, true},
+		"orphaned":    {"background_job_orphaned", SeverityCritical, SupervisionOrphaned, true},
+		"cancelled":   {"background_job_cancelled", SeverityWarning, SupervisionTerminated, true},
+		"interrupted": {"background_job_interrupted", SeverityCritical, SupervisionTerminated, true},
+		"expired":     {"background_job_expired", SeverityWarning, SupervisionTerminated, true},
+		"abandoned":   {"background_job_abandoned", SeverityWarning, SupervisionTerminated, true},
+		"FAILED":      {"background_job_failed", SeverityCritical, SupervisionTerminated, true},
+		"running":     {"", "", "", false},
+		"output":      {"", "", "", false},
+		"":            {"", "", "", false},
 	}
 	for status, want := range cases {
 		eventType, severity, state := BackgroundJobTerminalDisposition(status)
@@ -229,6 +232,21 @@ func TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, pending, "an already observed terminal state must not force a wake turn")
+	deliveredKey := DeriveNotifyKey("", "job-observed", WakeEventTerminal, notification.EventSeq)
+	delivered, err := store.IsWakeDelivered(ctx, deliveredKey)
+	require.NoError(t, err)
+	require.True(t, delivered,
+		"the observed terminal epoch must be recorded so a later replay cannot schedule a wake")
+	in.Observed = false
+	_, err = ProjectBackgroundJobTerminal(ctx, store, scheduler, in)
+	require.NoError(t, err)
+	pending, err = store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "a later unobserved replay of the same epoch must stay suppressed")
 
 	// The digest must still carry the item: suppression only skips the turn,
 	// never the evidence.
@@ -239,4 +257,59 @@ func TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, digest.Items, 1)
 	require.Equal(t, "job-observed", digest.Items[0].SubjectID)
+}
+
+func TestProjectBackgroundJobTerminal_CarriesParentIdentityAndPolicy(t *testing.T) {
+	store := newTestStore(t, "background-job-identity")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
+	_, err := ProjectBackgroundJobTerminal(ctx, store, scheduler, BackgroundJobTerminalInput{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		JobID:                 "job-identity",
+		ParentTurnID:          "turn-1",
+		ParentEpisodeID:       "ep-1",
+		FinalizationPolicy:    "required",
+		Status:                "completed",
+		Epoch:                 1700000000000000999,
+	})
+	require.NoError(t, err)
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "turn-1", pending[0].ParentTurnID)
+	require.Equal(t, "ep-1", pending[0].ParentEpisodeID)
+	require.Equal(t, "required", pending[0].FinalizationPolicy)
+	require.NotEmpty(t, pending[0].SettlementID)
+	require.Equal(t, pending[0].SettlementID, pending[0].SettlementCohortID)
+}
+
+func TestProjectBackgroundJobTerminal_DefaultsToDetached(t *testing.T) {
+	store := newTestStore(t, "background-job-detached")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
+	_, err := ProjectBackgroundJobTerminal(ctx, store, scheduler, BackgroundJobTerminalInput{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		JobID:                 "job-detached",
+		Status:                "completed",
+		Epoch:                 1700000000000001000,
+	})
+	require.NoError(t, err)
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, "detached", pending[0].FinalizationPolicy)
+	require.Empty(t, pending[0].ParentTurnID)
+	require.Empty(t, pending[0].ParentEpisodeID)
 }

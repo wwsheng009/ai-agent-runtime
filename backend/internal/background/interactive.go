@@ -307,6 +307,8 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 	req.Cwd = resolveJobCwd(ctx, req.Cwd)
 
 	jobCtx, cancel := context.WithCancel(context.Background())
+	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
+	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
 	managed := &managedJob{
 		ctx: jobCtx,
 		info: Job{
@@ -322,7 +324,7 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 			TTY:         false,
 			Cols:        args.Cols,
 			Rows:        args.Rows,
-			Metadata:    metadataFromRequest(req, m.config.DefaultTimeout),
+			Metadata:    metadata,
 		},
 		request: req,
 		output:  newOutputBuffer(m.config.MaxOutputBytes),

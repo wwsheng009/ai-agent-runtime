@@ -193,6 +193,7 @@ func TestDurableSuspensionParksTurnAndSurvivesReopen(t *testing.T) {
 
 	loop := NewReActLoop(apiAgent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
 	loop.turnID = "turn-9"
+	loop.episodeID = "ep-9"
 	args := map[string]interface{}{"execution_mode": "background"}
 	require.True(t, loop.dispatchSubagentsAsync())
 
@@ -207,9 +208,12 @@ func TestDurableSuspensionParksTurnAndSurvivesReopen(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok, "a durable dispatch must park the turn")
 	require.Equal(t, []string{batch.BatchID, "t1"}, record.ObligationIDs)
+	require.Equal(t, "ep-9", record.EpisodeID)
 	require.Equal(t, []string{batch.BatchID}, record.ResumeQueue)
 	require.Equal(t, "sess-9", record.RootScopeID)
 	require.False(t, record.ParkedAt.IsZero())
+	require.True(t, loop.turnStillParked(ctx, "sess-9", "turn-9"),
+		"a non-terminal suspension keeps the logical turn parked")
 
 	// Re-parking the same turn is idempotent (crash/retry safe).
 	require.NoError(t, store.ParkTurnSuspension(ctx, record))
@@ -235,11 +239,13 @@ func TestDurableSuspensionParksTurnAndSurvivesReopen(t *testing.T) {
 	require.Equal(t, record.ObligationIDs, reread.ObligationIDs)
 	require.Equal(t, record.ResumeQueue, reread.ResumeQueue)
 	require.Equal(t, record.RootScopeID, reread.RootScopeID)
+	require.Equal(t, "ep-9", reread.EpisodeID)
 	require.Equal(t, record.ParkedAt.UTC(), reread.ParkedAt.UTC())
 
 	durableBatch, err := reopened.GetBatch(ctx, batch.BatchID)
 	require.NoError(t, err)
 	require.NotNil(t, durableBatch, "the dispatched batch must survive the reopen too")
+
 }
 
 // TestSpawnSubagentsDescriptionStatesSuspensionAvailability pins the model-visible

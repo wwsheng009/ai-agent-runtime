@@ -2,6 +2,7 @@ package supervision
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -67,6 +68,22 @@ func ScheduleSettledTurnWakeWithTeams(
 	scheduler *WakeScheduler,
 	parentSessionID, rootScopeID string,
 ) (bool, error) {
+	return ScheduleSettledTurnWakeWithResolvers(ctx, batches, subagentbatch.ObligationResolvers{
+		AgentSessions: resolver,
+		Teams:         teamResolver,
+	}, scheduler, parentSessionID, rootScopeID)
+}
+
+// ScheduleSettledTurnWakeWithResolvers is the full-obligation-kind form of
+// ScheduleSettledTurnWakeWithTeams. Required background-job settlements use the
+// same park-episode identity as batches/teams.
+func ScheduleSettledTurnWakeWithResolvers(
+	ctx context.Context,
+	batches subagentbatch.BatchStore,
+	resolvers subagentbatch.ObligationResolvers,
+	scheduler *WakeScheduler,
+	parentSessionID, rootScopeID string,
+) (bool, error) {
 	if batches == nil || scheduler == nil {
 		return false, nil
 	}
@@ -89,7 +106,7 @@ func ScheduleSettledTurnWakeWithTeams(
 		if record == nil {
 			continue
 		}
-		settled, err := subagentbatch.TurnObligationsAllTerminalWithTeams(ctx, batches, record, resolver, teamResolver)
+		settled, err := subagentbatch.TurnObligationsAllTerminalWithResolvers(ctx, batches, record, resolvers)
 		if err != nil {
 			// One unreadable record must not hide a later settled one; the
 			// turn keeps its previous (parked) behavior.
@@ -110,11 +127,16 @@ func ScheduleSettledTurnWakeWithTeams(
 		if !record.ParkedAt.IsZero() {
 			parkEpoch = record.ParkedAt.UTC().UnixNano()
 		}
+		settlementID := settlementIdentity(record, parkEpoch)
 		if _, err := scheduler.ScheduleWake(ctx, WakeRequest{
 			RootScopeID:           rootScopeID,
 			TargetParentSessionID: parentSessionID,
 			WakeReason:            WakeReasonObligationSettled,
 			TurnID:                record.TurnID,
+			ParentEpisodeID:       strings.TrimSpace(record.EpisodeID),
+			FinalizationPolicy:    string(subagentbatch.FinalizationPolicyRequired),
+			SettlementID:          settlementID,
+			SettlementCohortID:    settlementID,
 			EventKind:             WakeEventLifecycle,
 			EventSeq:              parkEpoch,
 		}); err != nil {
@@ -123,4 +145,18 @@ func ScheduleSettledTurnWakeWithTeams(
 		return true, nil
 	}
 	return false, nil
+}
+
+// settlementIdentity is stable across replays of the same parked episode and
+// changes when the same turn parks again under a new episode/epoch.
+func settlementIdentity(record *subagentbatch.TurnSuspension, parkEpoch int64) string {
+	if record == nil {
+		return ""
+	}
+	turnID := strings.TrimSpace(record.TurnID)
+	episodeID := strings.TrimSpace(record.EpisodeID)
+	if turnID == "" || episodeID == "" || parkEpoch <= 0 {
+		return ""
+	}
+	return turnID + ":" + episodeID + ":" + strconv.FormatInt(parkEpoch, 10)
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
@@ -38,7 +39,8 @@ func TestLocalTurnResumedEventPayload(t *testing.T) {
 	bus.Subscribe(runtimeevents.EventTurnResumed, func(event runtimeevents.Event) {
 		resumed = append(resumed, event)
 	})
-	host := &localChatRuntimeHost{EventBus: bus}
+	store := runtimechat.NewInMemoryRuntimeStore(8)
+	host := &localChatRuntimeHost{EventBus: bus, EventStore: store}
 
 	host.publishLocalTurnResumed(supervision.ResumeAnnouncement{
 		TurnID:          "turn-resume-1",
@@ -59,10 +61,17 @@ func TestLocalTurnResumedEventPayload(t *testing.T) {
 	require.Equal(t, "sess-resume-1", event.SessionID)
 	require.Equal(t, "turn-resume-1", event.Payload["turn_id"])
 	require.Equal(t, supervision.ResumeTriggerTerminal, event.Payload["trigger"])
+	require.Equal(t, "started", event.Payload["phase"])
 	require.Equal(t, 0, event.Payload["pending_count"])
 	require.Equal(t, true, event.Payload["terminal"])
 	require.Equal(t, []string{"lifecycle_failed"}, event.Payload["wake_reasons"])
 	require.Equal(t, "batch_resume_terminal 失败", event.Payload["summary"])
+	require.NotZero(t, event.Payload["seq"], "wake-start turn.resumed must carry a durable seq")
+	persisted, err := store.ListEvents(context.Background(), "sess-resume-1", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, persisted, 1)
+	require.Equal(t, runtimeevents.EventTurnResumed, persisted[0].Type)
+	require.Equal(t, "started", persisted[0].Payload["phase"])
 
 	// 空宿主/空总线是 no-op（best-effort 观察者不得 panic 或污染投递路径）。
 	(&localChatRuntimeHost{}).publishLocalTurnResumed(supervision.ResumeAnnouncement{})

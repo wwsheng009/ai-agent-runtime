@@ -139,6 +139,7 @@ func overlayTurnPinnedTools(base []types.ToolDefinition, pinned []types.ToolDefi
 // ---------------------------------------------------------------------------
 
 type turnIDContextKey struct{}
+type episodeIDContextKey struct{}
 
 // WithTurnID annotates an agent run with the durable chat actor turn identity.
 // The ReAct trace ID is intentionally separate and must not be used to isolate
@@ -161,6 +162,29 @@ func TurnIDFromContext(ctx context.Context) string {
 	}
 	turnID, _ := ctx.Value(turnIDContextKey{}).(string)
 	return strings.TrimSpace(turnID)
+}
+
+// WithEpisodeID annotates an agent run with the durable logical episode that
+// owns any obligations it dispatches. Automatic resumes reuse the parked
+// episode; a user follow-up after finalization gets a fresh one.
+func WithEpisodeID(ctx context.Context, episodeID string) context.Context {
+	episodeID = strings.TrimSpace(episodeID)
+	if episodeID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, episodeIDContextKey{}, episodeID)
+}
+
+// EpisodeIDFromContext returns the durable logical episode, when present.
+func EpisodeIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	episodeID, _ := ctx.Value(episodeIDContextKey{}).(string)
+	return strings.TrimSpace(episodeID)
 }
 
 func runtimeEventPayloadWithTurnID(ctx context.Context, payload map[string]interface{}) map[string]interface{} {

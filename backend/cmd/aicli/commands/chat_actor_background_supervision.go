@@ -87,10 +87,12 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 
 	command := ""
 	observed := false
+	origin := background.JobOrigin{}
 	if h.Background != nil {
 		if job, err := h.Background.GetJob(ctx, strings.TrimSpace(event.JobID)); err == nil && job != nil {
 			command = job.Command
 			observed = background.TerminalObserved(job)
+			origin = background.JobOriginFromMetadata(job.Metadata)
 		}
 	}
 	rootScopeID := h.localBackgroundJobRootScope(sessionID)
@@ -98,6 +100,11 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: sessionID,
 		JobID:                 strings.TrimSpace(event.JobID),
+		ParentTurnID:          origin.ParentTurnID,
+		ParentEpisodeID:       origin.ParentEpisodeID,
+		SettlementID:          origin.SettlementID,
+		SettlementCohortID:    origin.SettlementCohortID,
+		FinalizationPolicy:    origin.FinalizationPolicy,
 		Status:                event.Type,
 		Command:               command,
 		ExitCode:              localBackgroundJobEventString(event.Payload["exit_code"]),
@@ -131,9 +138,11 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobMonitor(event background
 	defer cancel()
 
 	command := ""
+	origin := background.JobOrigin{}
 	if h.Background != nil {
 		if job, err := h.Background.GetJob(ctx, strings.TrimSpace(event.JobID)); err == nil && job != nil {
 			command = job.Command
+			origin = background.JobOriginFromMetadata(job.Metadata)
 		}
 	}
 	rootScopeID := h.localBackgroundJobRootScope(sessionID)
@@ -141,6 +150,11 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobMonitor(event background
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: sessionID,
 		JobID:                 strings.TrimSpace(event.JobID),
+		ParentTurnID:          origin.ParentTurnID,
+		ParentEpisodeID:       origin.ParentEpisodeID,
+		SettlementID:          origin.SettlementID,
+		SettlementCohortID:    origin.SettlementCohortID,
+		FinalizationPolicy:    origin.FinalizationPolicy,
 		Status:                localBackgroundJobEventString(event.Payload["status"]),
 		Command:               command,
 		Elapsed:               localBackgroundJobPayloadDuration(event.Payload["elapsed_ms"]),

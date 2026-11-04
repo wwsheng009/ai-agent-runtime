@@ -60,9 +60,11 @@ func TestSQLiteBatchStoreTurnSuspensionRoundTrip(t *testing.T) {
 	window := parkedAt.Add(30 * time.Second)
 	record := &TurnSuspension{
 		TurnID:              "turn-1",
+		EpisodeID:           "ep-1",
 		SessionID:           "sess-1",
 		RootScopeID:         "sess-1",
 		ObligationIDs:       []string{"batch-1", "task-1", "task-2"},
+		ObligationPolicies:  map[string]FinalizationPolicy{"task-2": FinalizationPolicyDetached},
 		ParkedAt:            parkedAt,
 		DecisionWindowUntil: window,
 		ResumeQueue:         []string{"batch-1"},
@@ -83,6 +85,15 @@ func TestSQLiteBatchStoreTurnSuspensionRoundTrip(t *testing.T) {
 	}
 	if got.RootScopeID != "sess-1" {
 		t.Fatalf("root scope = %q, want sess-1", got.RootScopeID)
+	}
+	if got.EpisodeID != "ep-1" {
+		t.Fatalf("episode = %q, want ep-1", got.EpisodeID)
+	}
+	if policy := got.PolicyForObligation("task-2"); policy != FinalizationPolicyDetached {
+		t.Fatalf("task-2 policy = %q, want detached", policy)
+	}
+	if policy := got.PolicyForObligation("task-1"); policy != FinalizationPolicyRequired {
+		t.Fatalf("undeclared policy must stay required, got %q", policy)
 	}
 	if !got.ParkedAt.Equal(parkedAt) {
 		t.Fatalf("parked at = %v, want %v", got.ParkedAt, parkedAt)

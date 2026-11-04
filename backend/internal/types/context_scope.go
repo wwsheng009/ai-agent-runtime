@@ -28,12 +28,20 @@ const (
 	// SupervisionDigestPromptHeader opens the progress digest the host injects
 	// when waking a parent turn (supervision's digest brief renderer).
 	SupervisionDigestPromptHeader = "[子任务与后台作业进展]"
+	// SupervisionPreflightPromptHeader opens the injected lifecycle digest on
+	// the resume/preflight prompt path. It is host-authored control-plane text
+	// even when the caller happens to be a wake rather than a user.
+	SupervisionPreflightPromptHeader = "[Child lifecycle preflight]"
 	// SupervisionPromptTag opens every host-submitted supervision turn, both the
 	// fixed auto-wake prompt and the resume prompt.
 	SupervisionPromptTag = "[supervision]"
 )
 
-var controlPlanePromptMarkers = []string{SupervisionDigestPromptHeader, SupervisionPromptTag}
+var controlPlanePromptMarkers = []string{
+	SupervisionDigestPromptHeader,
+	SupervisionPreflightPromptHeader,
+	SupervisionPromptTag,
+}
 
 // IsControlPlanePromptText reports whether a message body begins with a
 // host-authored control-plane tag rather than something a user asserted.

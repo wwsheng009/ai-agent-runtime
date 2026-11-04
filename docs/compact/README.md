@@ -278,6 +278,8 @@ mid-turn 与 pre-turn 自动压缩都会改用 local 摘要，并在事件载荷
 
 - 若调用方提供了当前 turn 的冻结 tool surface，会保留同一套 `tools`，并设置 `tool_choice=none`，避免 compact 执行工具，同时尽量复用 chat 的 tools 前缀 cache。
 - 没有 tools 时仍禁用 tools。
+- `max_tokens` 只在 `model_capabilities.<model>.max_tokens` 显式配置时继承并下发；未显式配置时不主动注入，由 provider 使用自身默认值（请求 metadata 标记 `omit_max_tokens`）。显式值仍受上下文窗口和 replacement 预算约束。
+- provider 返回 `finish_reason=length` / `max_tokens` / `max_output_tokens*` 时视为摘要被截断，走 deterministic fallback，不把半截摘要替换进历史。
 - `temperature=0`。
 - metadata 带 `internal_operation=compact`。
 - 与 chat 使用相同的 `session_id` / `prompt_cache_key`。

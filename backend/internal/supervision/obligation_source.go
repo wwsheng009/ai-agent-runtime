@@ -29,8 +29,9 @@ type BatchObligationSource struct {
 	// wake admission that scheduled it can never disagree. A nil resolver keeps
 	// every such row non-terminal: an unreadable child is never evidence that
 	// the work finished.
-	AgentSessions subagentbatch.AgentSessionObligationResolver
-	Teams         subagentbatch.TeamObligationResolver
+	AgentSessions  subagentbatch.AgentSessionObligationResolver
+	Teams          subagentbatch.TeamObligationResolver
+	BackgroundJobs subagentbatch.BackgroundJobObligationResolver
 	// MaxBatches bounds the per-read page. Non-positive uses the default (32,
 	// the same bound the P0-B progress projection uses).
 	MaxBatches int
@@ -65,6 +66,22 @@ func NewBatchObligationSourceWithResolvers(store subagentbatch.BatchStore, agent
 		return nil
 	}
 	return &BatchObligationSource{Store: store, AgentSessions: agentSessions, Teams: teams}
+}
+
+// NewBatchObligationSourceWithObligationResolvers is the complete constructor:
+// hosts that can park required background jobs must pass BackgroundJobs too, or
+// the resume projection cannot see the pending job and may tell the model the
+// turn is ready to finalize.
+func NewBatchObligationSourceWithObligationResolvers(store subagentbatch.BatchStore, resolvers subagentbatch.ObligationResolvers) ObligationSource {
+	if store == nil {
+		return nil
+	}
+	return &BatchObligationSource{
+		Store:          store,
+		AgentSessions:  resolvers.AgentSessions,
+		Teams:          resolvers.Teams,
+		BackgroundJobs: resolvers.BackgroundJobs,
+	}
 }
 
 // ListObligations implements ObligationSource. Scope口径 与 progress 投影一致：
@@ -141,6 +158,18 @@ func (s *BatchObligationSource) ListObligations(ctx context.Context, parentSessi
 			seen[ref.ID] = struct{}{}
 			out = append(out, ref)
 		}
+		for _, jobID := range record.ObligationBackgroundJobIDs() {
+			jobID = strings.TrimSpace(jobID)
+			if jobID == "" {
+				continue
+			}
+			ref := s.obligationForBackgroundJob(ctx, jobID, turnID)
+			if _, dup := seen[ref.ID]; dup {
+				continue
+			}
+			seen[ref.ID] = struct{}{}
+			out = append(out, ref)
+		}
 	}
 	return out, nil
 }
@@ -185,6 +214,31 @@ func (s *BatchObligationSource) obligationForTeam(ctx context.Context, teamID, t
 		return ref
 	}
 	terminal, found, err := s.Teams.TeamTerminal(ctx, teamID)
+	if err != nil || !found {
+		return ref
+	}
+	if terminal {
+		ref.State = ObligationStateCompleted
+		ref.Terminal = true
+		return ref
+	}
+	ref.State = ObligationStateRunning
+	return ref
+}
+
+// obligationForBackgroundJob is the required-job twin of
+// obligationForAgentSession. Missing/unwired/read-error all stay pending.
+func (s *BatchObligationSource) obligationForBackgroundJob(ctx context.Context, jobID, turnID string) ObligationRef {
+	ref := ObligationRef{
+		ID:           subagentbatch.BackgroundJobObligationID(jobID),
+		Kind:         "background_job",
+		ParentTurnID: turnID,
+		State:        ObligationStatePending,
+	}
+	if s == nil || s.BackgroundJobs == nil {
+		return ref
+	}
+	terminal, found, err := s.BackgroundJobs.BackgroundJobTerminal(ctx, jobID)
 	if err != nil || !found {
 		return ref
 	}
@@ -343,7 +397,7 @@ func obligationStateForBatchStatus(status subagentbatch.BatchStatus) string {
 		return ObligationStateTimedOut
 	case subagentbatch.BatchOrphaned:
 		return ObligationStateOrphaned
-	case subagentbatch.BatchRunning, subagentbatch.BatchPartiallyCompleted:
+	case subagentbatch.BatchRunning, subagentbatch.BatchParked, subagentbatch.BatchPartiallyCompleted:
 		return ObligationStateRunning
 	default:
 		return ObligationStatePending
@@ -366,7 +420,7 @@ func obligationStateForTaskStatus(status subagentbatch.TaskStatus) string {
 		return ObligationStateTimedOut
 	case subagentbatch.TaskSkipped:
 		return ObligationStateSkipped
-	case subagentbatch.TaskRunning, subagentbatch.TaskReady:
+	case subagentbatch.TaskRunning, subagentbatch.TaskParked, subagentbatch.TaskReady:
 		return ObligationStateRunning
 	default:
 		return ObligationStatePending

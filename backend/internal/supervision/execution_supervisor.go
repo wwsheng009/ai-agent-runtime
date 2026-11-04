@@ -1207,6 +1207,8 @@ func (s *ExecutionSupervisor) projectRestartOrphan(ctx context.Context, run *Exe
 		SupervisionState:      SupervisionOrphaned,
 		Reason:                reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
+		TurnID:                strings.TrimSpace(run.TurnID),
+		FinalizationPolicy:    "required",
 	})
 	if err == nil {
 		s.notifyWakeScheduled(ctx, notification)
@@ -1352,12 +1354,15 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 	}
 	severity := SeverityCritical
 	state := SupervisionCancelRequested
+	finalizationPolicy := ""
 	switch decision.Decision {
 	case "orphan_suspected":
 		state = SupervisionOrphaned
 		severity = SeverityCritical
+		finalizationPolicy = "required"
 	case "execution_timed_out", "approval_timeout":
 		state = SupervisionTimedOut
+		finalizationPolicy = "required"
 	case "progress_stalled":
 		state = SupervisionStalled
 	case "auto_extended":
@@ -1366,6 +1371,7 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		severity = SeverityInfo
 	case "cancel_grace_expired":
 		state = SupervisionOrphaned
+		finalizationPolicy = "required"
 	}
 	notification, err := ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
 		RootScopeID:           run.RootSessionID,
@@ -1377,6 +1383,8 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		SupervisionState:      state,
 		Reason:                decision.Reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
+		TurnID:                strings.TrimSpace(run.TurnID),
+		FinalizationPolicy:    finalizationPolicy,
 	})
 	if err == nil {
 		s.notifyWakeScheduled(ctx, notification)
@@ -1423,6 +1431,8 @@ func (s *ExecutionSupervisor) projectTerminal(ctx context.Context, run *Executio
 		Severity:              severity,
 		SupervisionState:      state,
 		Reason:                reason,
+		TurnID:                strings.TrimSpace(run.TurnID),
+		FinalizationPolicy:    "required",
 	})
 	if err == nil {
 		s.notifyWakeScheduled(ctx, notification)

@@ -59,6 +59,7 @@ func NewBatchProgressSource(store subagentbatch.BatchStore) ProgressSource {
 var activeBatchStatuses = []subagentbatch.BatchStatus{
 	subagentbatch.BatchQueued,
 	subagentbatch.BatchRunning,
+	subagentbatch.BatchParked,
 	subagentbatch.BatchPartiallyCompleted,
 }
 

@@ -163,6 +163,7 @@ func chatGatewaySubagentSessions(session *ChatSession, parentSessionID string) [
 		Status: []subagentbatch.BatchStatus{
 			subagentbatch.BatchQueued,
 			subagentbatch.BatchRunning,
+			subagentbatch.BatchParked,
 			subagentbatch.BatchPartiallyCompleted,
 		},
 		Limit: gatewayagent.SubagentSessionMax,

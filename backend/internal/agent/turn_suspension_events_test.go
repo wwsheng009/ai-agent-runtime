@@ -133,6 +133,7 @@ func TestSettleParkedTurnAnnouncesResumeClosure(t *testing.T) {
 	require.Equal(t, runtimeevents.EventTurnResumed, event.Type)
 	require.Equal(t, "sess-1", event.SessionID)
 	require.Equal(t, "turn-settle-announce", event.Payload["turn_id"], "闭合事件必须锚定被结清的 turn（I3）")
+	require.Equal(t, "ep-settle", event.Payload["episode_id"], "闭合事件必须保留被结清 turn 的 episode 身份")
 	require.Equal(t, runtimeevents.TurnResumedTriggerSettled, event.Payload["trigger"])
 	require.Equal(t, true, event.Payload["settled"])
 	require.Equal(t, 2, event.Payload["obligation_count"])

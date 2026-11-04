@@ -23,7 +23,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolPlanEnter:               {"plan_path", "plan_write_paths"},
 	ToolPlanExit:                {"decision", "notes"},
 	ToolPlanReview:              {"plan_id", "plan_path", "version", "compare_version"},
-	ToolJobStart:                {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
+	ToolJobStart:                {"command", "cwd", "priority", "restart_policy", "finalization_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
 	ToolJobOutput:               {"job_id", "limit", "offset", "timeout_ms", "wait"},
 	ToolJobCancel:               {"job_id", "reason", "task_id"},
 	ToolJobMonitor:              {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},

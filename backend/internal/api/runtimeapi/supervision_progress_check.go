@@ -51,6 +51,7 @@ const (
 var apiSupervisionProgressCheckActiveStatuses = []subagentbatch.BatchStatus{
 	subagentbatch.BatchQueued,
 	subagentbatch.BatchRunning,
+	subagentbatch.BatchParked,
 	subagentbatch.BatchPartiallyCompleted,
 }
 
@@ -82,7 +83,7 @@ func (h *Handler) wireSupervisionSources() {
 		return
 	}
 	if store := h.peekSubagentBatchStore(); store != nil {
-		scheduler.SetObligationSource(supervision.NewBatchObligationSourceWithResolvers(store, h.agentSessionObligationResolver(), h.teamObligationResolver()))
+		scheduler.SetObligationSource(supervision.NewBatchObligationSourceWithObligationResolvers(store, h.obligationResolvers()))
 	}
 	scheduler.SetProgressSource(h.supervisionProgressSource())
 }
@@ -343,11 +344,10 @@ func (h *Handler) maybeScheduleWaitFeedbackWake(
 	if h.supervisionHasUnresolvedCritical(ctx, rootScopeID) {
 		return false, nil
 	}
-	scheduled, err := supervision.ScheduleWaitFeedbackWake(
+	scheduled, err := supervision.ScheduleWaitFeedbackWakeWithResolvers(
 		ctx,
 		batchStore,
-		h.agentSessionObligationResolver(),
-		h.teamObligationResolver(),
+		h.obligationResolvers(),
 		scheduler,
 		h.apiWaitFeedbackTracker(),
 		parentSessionID,

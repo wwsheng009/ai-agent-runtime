@@ -650,6 +650,8 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 			RecommendedAction:     recommended,
 			AllowedActions:        []string{string(supervision.ActionInspect), string(supervision.ActionCancel), string(supervision.ActionClose)},
 			ResolutionState:       resolution,
+			TurnID:                strings.TrimSpace(terminal.ParentTurnID),
+			FinalizationPolicy:    "required",
 		})
 		if err != nil {
 			return err
@@ -672,11 +674,10 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		// 结算 wake（谓词要求全部义务已终态才会排），下面的 drain 把它投递成
 		// 一次真实父 turn，run 结束时 settle 清账并补发 turn.resumed。
 		if !supervision.LifecycleWakeScheduled(notification) {
-			_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+			_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 				ctx,
 				host.SubagentBatches,
-				host.agentSessionObligationResolver(),
-				host.teamObligationResolver(),
+				host.obligationResolvers(),
 				host.Supervision.Wakes,
 				parentSessionID,
 				rootScopeID,
@@ -933,7 +934,8 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 		return
 	}
 	h.supervisionWake = &supervision.WakeConsumer{
-		Wakes: h.Supervision.Wakes,
+		Wakes:     h.Supervision.Wakes,
+		Admission: h.newLocalResumeAdmission(),
 		// A6：resume = 起 turn，先过同一套门控（MaxConcurrent / MaxDepth）。
 		// 瞬时容量（agents.maxThreads 槽位占满）⇒ 排队 + 位次，边界见
 		// supervision.ResumeQueuePolicy；静态策略（深度越界）不可恢复，禁止
@@ -1878,6 +1880,12 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	// §6.12 扩展：team_spawn 的 team: 义务同样需要 run 收尾时的 durable 判读器
 	// （team store 终态 + 无 live loop）；未接线时 team 义务保持保守不清账。
 	loopConfig.TeamObligations = h.teamObligationResolver()
+	// job_start(finalization_policy=required) 的 job: 义务同源：run 收尾结清
+	// 与 admission 都读同一个 background manager。
+	loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
+	// In-process child agents inherit these readers through Agent. Explicit
+	// LoopReActConfig values above still win for the current loop.
+	apiAgent.SetObligationResolvers(h.obligationResolvers())
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
 	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
 	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
@@ -1950,6 +1958,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		}
 		return nil, err
 	}
+	// Start only after every tool/permission/depth policy and the actor config
+	// are final; a detached parked-child run must never observe half-wired policy.
+	h.startLocalParkedBatchResumer(apiAgent, sessionID, isBaseSession)
 	return actor, nil
 }
 
@@ -2468,11 +2479,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	var batchCoordinator *agent.SubagentBatchCoordinator
 	if host.SubagentBatches != nil {
 		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
-			Store:              host.SubagentBatches,
-			Scheduler:          scheduler,
-			Emitter:            localSubagentBatchEmitter(host),
-			TerminalSink:       localSubagentBatchTerminalSink(host),
-			LifecycleProjector: localSubagentBatchLifecycleProjector(host),
+			Store:               host.SubagentBatches,
+			Scheduler:           scheduler,
+			Emitter:             localSubagentBatchEmitter(host),
+			TerminalSink:        localSubagentBatchTerminalSink(host),
+			LifecycleProjector:  localSubagentBatchLifecycleProjector(host),
+			ObligationResolvers: host.obligationResolvers(),
 			// P0-1a/M1: task-level progress write-back is an explicit opt-in
 			// (supervision.task_progress_interval, default 0 = no writes).
 			TaskProgressInterval: host.supervisionConfig.WithDefaults().TaskProgressInterval,
@@ -4257,11 +4269,10 @@ func (h *localChatRuntimeHost) maybeResumeTeamParkedTurn(ctx context.Context, se
 	}
 	settleCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+	_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 		settleCtx,
 		h.SubagentBatches,
-		h.agentSessionObligationResolver(),
-		h.teamObligationResolver(),
+		h.obligationResolvers(),
 		h.Supervision.Wakes,
 		parentSessionID,
 		rootScopeID,

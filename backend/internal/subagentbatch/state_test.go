@@ -15,6 +15,7 @@ func TestValidateBatchTransition(t *testing.T) {
 	}{
 		{BatchQueued, BatchQueued},
 		{BatchQueued, BatchRunning},
+		{BatchQueued, BatchParked},
 		{BatchQueued, BatchPartiallyCompleted},
 		{BatchQueued, BatchCanceled},
 		{BatchQueued, BatchTimedOut},
@@ -22,12 +23,20 @@ func TestValidateBatchTransition(t *testing.T) {
 		{BatchQueued, BatchFailed},
 
 		{BatchRunning, BatchRunning},
+		{BatchRunning, BatchParked},
 		{BatchRunning, BatchPartiallyCompleted},
 		{BatchRunning, BatchCompleted},
 		{BatchRunning, BatchFailed},
 		{BatchRunning, BatchCanceled},
 		{BatchRunning, BatchTimedOut},
 		{BatchRunning, BatchOrphaned},
+
+		{BatchParked, BatchParked},
+		{BatchParked, BatchRunning},
+		{BatchParked, BatchCompleted},
+		{BatchParked, BatchCanceled},
+		{BatchParked, BatchTimedOut},
+		{BatchParked, BatchOrphaned},
 
 		{BatchPartiallyCompleted, BatchPartiallyCompleted},
 		{BatchPartiallyCompleted, BatchCompleted},
@@ -46,6 +55,7 @@ func TestValidateBatchTransition(t *testing.T) {
 		from, to BatchStatus
 	}{
 		{BatchCompleted, BatchRunning},
+		{BatchCompleted, BatchParked},
 		{BatchFailed, BatchCompleted},
 		{BatchCanceled, BatchFailed},
 		{BatchTimedOut, BatchPartiallyCompleted},
@@ -78,10 +88,16 @@ func TestValidateTaskTransition(t *testing.T) {
 		{TaskReady, TaskTimedOut},
 
 		{TaskRunning, TaskRunning},
+		{TaskRunning, TaskParked},
 		{TaskRunning, TaskSucceeded},
 		{TaskRunning, TaskFailed},
 		{TaskRunning, TaskCanceled},
 		{TaskRunning, TaskTimedOut},
+
+		{TaskParked, TaskParked},
+		{TaskParked, TaskRunning},
+		{TaskParked, TaskCanceled},
+		{TaskParked, TaskTimedOut},
 	}
 	for _, tt := range allowed {
 		if err := ValidateTaskTransition(tt.from, tt.to); err != nil {
@@ -111,7 +127,7 @@ func TestTerminalStatesAreAbsorbing(t *testing.T) {
 		if !status.Terminal() {
 			t.Errorf("%s should be terminal", status)
 		}
-		for _, other := range []BatchStatus{BatchQueued, BatchRunning, BatchPartiallyCompleted, BatchCompleted, BatchFailed, BatchCanceled, BatchTimedOut, BatchOrphaned} {
+		for _, other := range []BatchStatus{BatchQueued, BatchRunning, BatchParked, BatchPartiallyCompleted, BatchCompleted, BatchFailed, BatchCanceled, BatchTimedOut, BatchOrphaned} {
 			if other != status {
 				if !isTerminalForbidden(status, other) {
 					t.Errorf("terminal %s -> %s should be forbidden", status, other)
@@ -119,7 +135,7 @@ func TestTerminalStatesAreAbsorbing(t *testing.T) {
 			}
 		}
 	}
-	for _, status := range []BatchStatus{BatchQueued, BatchRunning, BatchPartiallyCompleted} {
+	for _, status := range []BatchStatus{BatchQueued, BatchRunning, BatchParked, BatchPartiallyCompleted} {
 		if status.Terminal() {
 			t.Errorf("%s should not be terminal", status)
 		}

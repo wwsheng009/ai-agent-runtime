@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -72,6 +73,16 @@ func TestLocalBackgroundJobRelay_ProjectsTerminalJobOnce(t *testing.T) {
 		rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: sessionID})
 		return err == nil && len(rows) == 1
 	}, time.Second, 10*time.Millisecond)
+
+	// Terminal output drain: a late output frame after the terminal transition
+	// must not project a second notification or reopen the job obligation.
+	relay.handle(localBackgroundJobTestEvent("job-cli-1", "output", sessionID, map[string]interface{}{
+		"chunk": "late tail",
+	}))
+	require.Never(t, func() bool {
+		rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: sessionID})
+		return err != nil || len(rows) != 1
+	}, 200*time.Millisecond, 20*time.Millisecond)
 }
 
 // TestLocalBackgroundJobRelay_SafeWithoutHostOrPlane 保证 relay 在 host 尚未
@@ -98,6 +109,66 @@ func TestLocalBackgroundJobRelay_SafeWithoutHostOrPlane(t *testing.T) {
 	}, 200*time.Millisecond, 20*time.Millisecond)
 }
 
+func TestLocalBackgroundJobAfterFinalizedParentIsNotificationOnly(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	sessionID := "sess-cli-finalized"
+	host.RuntimeStore = runtimechat.NewInMemoryRuntimeStore(8)
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:          sessionID,
+		Status:             runtimechat.SessionIdle,
+		TurnPhase:          runtimechat.ParentTurnPhaseFinalized,
+		FinalizedTurnID:    "turn-cli-finalized",
+		FinalizedEpisodeID: "ep-cli-finalized",
+		UpdatedAt:          time.Now().UTC(),
+	}))
+
+	manager := background.NewManager(background.Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	host.Background = manager
+	originCtx := background.WithJobOrigin(ctx, background.JobOrigin{
+		RootScopeID:        sessionID,
+		ParentSessionID:    sessionID,
+		ParentTurnID:       "turn-cli-finalized",
+		ParentEpisodeID:    "ep-cli-finalized",
+		FinalizationPolicy: string(background.JobPolicyDetached),
+	})
+	job, err := manager.SubmitShell(originCtx, sessionID, background.BackgroundTaskArgs{Command: "echo cli"})
+	require.NoError(t, err)
+
+	host.projectLocalBackgroundJobTerminal(localBackgroundJobTestEvent(job.ID, "completed", sessionID, map[string]interface{}{"exit_code": 0}), sessionID)
+
+	consumer := &supervision.WakeConsumer{
+		Wakes:     host.Supervision.Wakes,
+		Admission: host.newLocalResumeAdmission(),
+		Runnable:  func(context.Context, string, string, string) bool { return true },
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
+			t.Fatal("a detached job terminal after parent finalization must not start a new CLI turn")
+			return nil
+		},
+		DeliverResume: func(context.Context, string, string, *supervision.Digest, []string, *supervision.ResumeContext) error {
+			t.Fatal("a detached job terminal after parent finalization must not resume a CLI turn")
+			return nil
+		},
+	}
+	require.NoError(t, consumer.MaybeWakeParent(ctx, sessionID, "", sessionID))
+
+	rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		SubjectKind:           supervision.SubjectJob,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "late CLI job evidence must stay durable")
+	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
 func TestLocalBackgroundJobHelpers(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	require.Equal(t, "sess-7", host.localBackgroundJobRootScope("sess-7"),
@@ -111,6 +182,71 @@ func TestLocalBackgroundJobHelpers(t *testing.T) {
 	require.Equal(t, "137", localBackgroundJobEventString(float64(137)))
 	require.Equal(t, "TOOL_TIMEOUT", localBackgroundJobEventString("TOOL_TIMEOUT"))
 	require.Equal(t, "", localBackgroundJobEventString(nil))
+}
+
+// TestLocalResumeAdmissionWiresRequiredBackgroundJobs pins the CLI host wiring:
+// the admission service must read the same background manager that job_start
+// writes, otherwise a required job can never authorize its parked-turn resume.
+func TestLocalResumeAdmissionWiresRequiredBackgroundJobs(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	sessionID := "sess-cli-required-job"
+
+	batches, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batches.Close() })
+	host.SubagentBatches = batches
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(8)
+	require.NoError(t, runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:          sessionID,
+		Status:             runtimechat.SessionIdle,
+		TurnPhase:          runtimechat.ParentTurnPhaseParked,
+		SuspendedTurnID:    "turn-required-job",
+		SuspendedEpisodeID: "ep-required-job",
+		UpdatedAt:          time.Now().UTC(),
+	}))
+	host.RuntimeStore = runtimeStore
+
+	manager := background.NewManager(background.Config{
+		StorePath: filepath.Join(t.TempDir(), "background.sqlite"),
+		LogDir:    filepath.Join(t.TempDir(), "logs"),
+	})
+	t.Cleanup(func() { _ = manager.Close() })
+	host.Background = manager
+	job, err := manager.SubmitShell(ctx, sessionID, background.BackgroundTaskArgs{
+		Command: "echo required-admission",
+	})
+	require.NoError(t, err)
+	_, timedOut, err := manager.WaitJob(ctx, job.ID, 10*time.Second)
+	require.NoError(t, err)
+	require.False(t, timedOut)
+
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-required-job",
+		EpisodeID:     "ep-required-job",
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{subagentbatch.BackgroundJobObligationID(job.ID)},
+		ParkedAt:      time.Now().UTC(),
+	}))
+
+	admission := host.newLocalResumeAdmission()
+	require.NotNil(t, admission)
+	result, err := admission.Evaluate(ctx, supervision.ResumeAdmissionInput{
+		RootScopeID:        sessionID,
+		ParentSessionID:    sessionID,
+		ParentTurnID:       "turn-required-job",
+		ParentEpisodeID:    "ep-required-job",
+		ObligationID:       job.ID,
+		FinalizationPolicy: string(subagentbatch.FinalizationPolicyRequired),
+		EventKind:          supervision.WakeEventTerminal,
+	})
+	require.NoError(t, err)
+	require.Equal(t, supervision.ResumeSameParkedTurn, result.Decision)
+	require.NotEmpty(t, result.ClaimKey)
 }
 
 // newObservedLocalBackgroundManager 造一个「终态已由 task_output wait 送达」

@@ -136,6 +136,20 @@ CREATE TABLE IF NOT EXISTS turn_suspensions (
 CREATE INDEX IF NOT EXISTS idx_turn_suspensions_root_scope ON turn_suspensions(root_scope_id);
 `,
 	},
+	{
+		Version: 4,
+		Name:    "turn_suspension_episode_and_policies",
+		// Parent episode identity separates one logical parked episode from a
+		// later user follow-up. Policy values are persisted explicitly for
+		// detached/explicit obligations; required stays the implicit default so
+		// old rows and existing dispatch paths keep their exact semantics.
+		UpSQL: `
+ALTER TABLE turn_suspensions ADD COLUMN episode_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE turn_suspensions ADD COLUMN obligation_policies_json TEXT NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_turn_suspensions_episode
+	ON turn_suspensions(session_id, episode_id);
+`,
+	},
 }
 
 // NewSQLiteBatchStore creates a SQLite-backed batch store.
@@ -595,7 +609,7 @@ func (s *sqliteBatchStore) PruneTerminalBatches(ctx context.Context, olderThan t
 
 func (s *sqliteBatchStore) Recoverable(ctx context.Context, limit int) ([]SubagentBatch, error) {
 	return s.ListBatches(ctx, BatchFilter{
-		Status: []BatchStatus{BatchQueued, BatchRunning, BatchPartiallyCompleted},
+		Status: []BatchStatus{BatchQueued, BatchRunning, BatchParked, BatchPartiallyCompleted},
 		Limit:  limit,
 	})
 }

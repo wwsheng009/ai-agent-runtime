@@ -162,28 +162,129 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	if c.Runnable != nil && !c.Runnable(ctx, rootScopeID, parentSessionID, parentTeamID) {
 		return false, nil
 	}
-	pending, err := c.Wakes.SelfCheckPending(ctx, rootScopeID)
-	if err != nil || !pending {
-		return false, err
+	if c.Admission == nil {
+		pending, err := c.Wakes.SelfCheckPending(ctx, rootScopeID)
+		if err != nil || !pending {
+			return false, err
+		}
+		digest, err := c.Wakes.RootDigest(ctx, rootScopeID, parentSessionID, parentTeamID)
+		if err != nil {
+			return false, err
+		}
+		if digest == nil || len(digest.Items) == 0 {
+			// The notification was resolved (or already acknowledged) while the
+			// wake stayed durable: drop the stale rows instead of spending an
+			// allowance on a content-free turn.
+			if _, err := c.Wakes.ResolveUnclaimedWakes(ctx, rootScopeID); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if !c.Wakes.AllowSelfCheck(rootScopeID) {
+			return false, nil
+		}
+		if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, nil); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	digest, err := c.Wakes.RootDigest(ctx, rootScopeID, parentSessionID, parentTeamID)
+
+	// The self-check bypasses the class budget, not finalization admission or
+	// exactly-once. Consume late/notification-only settlements, claim one
+	// settlement per episode, and resolve the delivered wakes so a later window
+	// cannot replay the same continuation.
+	_, _ = c.Admission.RecoverStaleClaims(ctx)
+	pending, err := c.Wakes.store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		TargetParentTeamID:    parentTeamID,
+		UnclaimedOnly:         true,
+	})
 	if err != nil {
 		return false, err
 	}
-	if digest == nil || len(digest.Items) == 0 {
-		// The notification was resolved (or already acknowledged) while the
-		// wake stayed durable: drop the stale rows instead of spending an
-		// allowance on a content-free turn.
-		if _, err := c.Wakes.ResolveUnclaimedWakes(ctx, rootScopeID); err != nil {
-			return false, err
+	claims := map[string]ResumeClaim{}
+	admitted := make([]WakePending, 0, len(pending))
+	releaseClaims := func() {
+		for _, held := range claims {
+			_ = c.Admission.Release(ctx, held)
 		}
+	}
+	for _, row := range pending {
+		result, admitErr := c.Admission.Evaluate(ctx, ResumeAdmissionInputFromWake(row))
+		if admitErr != nil {
+			releaseClaims()
+			return false, nil
+		}
+		switch result.Decision {
+		case NotifyOnly, RejectStale:
+			consumption := "notification_only"
+			reason := string(result.Decision)
+			if result.Decision == RejectStale {
+				consumption = "stale"
+			}
+			_ = c.Wakes.markConsumed(ctx, row, consumption, reason)
+		case RetryAdmission:
+			releaseClaims()
+			return false, nil
+		default:
+			if result.Decision == ResumeSameParkedTurn {
+				claimKey := strings.TrimSpace(result.ClaimKey)
+				if claimKey == "" {
+					claimKey = DeriveResumeClaimKey(result.Input.ParentSessionID, result.Input.ParentTurnID, result.Input.ParentEpisodeID, result.Input.SettlementCohortID, result.Input.SettlementID)
+				}
+				if _, exists := claims[claimKey]; !exists {
+					claim, won, claimErr := c.Admission.Claim(ctx, result)
+					if claimErr != nil {
+						releaseClaims()
+						return false, claimErr
+					}
+					if !won {
+						_ = c.Wakes.markConsumed(ctx, row, "notification_only", "settlement_already_claimed")
+						continue
+					}
+					claims[claimKey] = claim
+				}
+			}
+			admitted = append(admitted, row)
+		}
+	}
+	if len(admitted) == 0 {
+		releaseClaims()
+		return false, nil
+	}
+	stopClaimRenewal := c.startClaimRenewal(claims)
+	defer stopClaimRenewal()
+	digest, err := c.Wakes.RootDigest(ctx, rootScopeID, parentSessionID, parentTeamID)
+	if err != nil {
+		releaseClaims()
+		return false, err
+	}
+	if digest == nil || (len(digest.Items) == 0 && len(digest.Progress) == 0) {
+		releaseClaims()
+		c.releasePending(ctx, admitted)
 		return false, nil
 	}
 	if !c.Wakes.AllowSelfCheck(rootScopeID) {
+		releaseClaims()
 		return false, nil
 	}
-	if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, nil); err != nil {
+	wakeIDs := make([]string, 0, len(admitted))
+	for _, row := range admitted {
+		wakeIDs = append(wakeIDs, row.WakeID)
+	}
+	if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, wakeIDs); err != nil {
+		releaseClaims()
 		return false, err
 	}
+	// Self-check resumes the same parked turn through the legacy Deliver hook,
+	// so it must emit the same wake-start milestone as MaybeWakeParent; otherwise
+	// the durable audit sees only the later settled closure.
+	c.announceResume(ctx, parentSessionID, rootScopeID, admitted, nil)
+	for _, held := range claims {
+		_ = c.Admission.MarkSubmitted(ctx, held, strings.Join(wakeIDs, ","))
+	}
+	_ = c.Wakes.RecordWakeDelivery(ctx, admitted)
+	c.releasePending(ctx, admitted)
 	return true, nil
 }

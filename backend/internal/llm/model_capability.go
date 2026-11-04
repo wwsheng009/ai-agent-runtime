@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	defaultCompactMaxTokens    = 2048
 	DefaultContextWindowTokens = 128000
 )
 
@@ -76,11 +75,13 @@ func ReasoningModelEnabled(capability agentconfig.ModelCapabilitySpec, explicit 
 }
 
 // CompactSummarySettings resolves compact-specific request settings from a
-// model capability with safe defaults when the capability does not define them.
+// model capability. A zero maxTokens means the capability has no explicit
+// output budget: callers should omit max_tokens and let the provider apply its
+// own default instead of inventing a local ceiling.
 func CompactSummarySettings(capability agentconfig.ModelCapabilitySpec) (maxTokens int, reasoningEffort string) {
 	maxTokens = capability.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = defaultCompactMaxTokens
+	if maxTokens < 0 {
+		maxTokens = 0
 	}
 
 	reasoningEffort = strings.TrimSpace(capability.CompactReasoningEffort)

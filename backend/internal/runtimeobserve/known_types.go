@@ -220,10 +220,12 @@ func buildKnownEventTypes() map[string]bool {
 		"agent.reclaimed",          // agentcontrol/reclaim_events.go:17
 		"subagent.batch.started",   // agent/subagent_batch_coordinator.go:1044
 		"subagent.batch.completed", // agent/subagent_batch_coordinator.go:1771
+		"subagent.batch.parked",    // agent/subagent_batch_coordinator.go（child logical turn parked）
 		"subagent.started",         // agent/scheduler.go:417
 		"subagent.completed",       // agent/scheduler.go:454
 		"subagent.task.started",    // agent/subagent_batch_coordinator.go:1184（events/contract.go 登记为 tail-only）
 		"subagent.task.completed",  // agent/subagent_batch_coordinator.go:1399（events/contract.go 登记为 tail-only）
+		"subagent.task.parked",     // agent/scheduler.go（child logical turn parked）
 	)
 
 	// 来源 8：主 Agent 动态 route 治理事件 + 在途健康门禁信号（见文件头说明）。
@@ -294,6 +296,7 @@ func buildKnownEventTypes() map[string]bool {
 	add(
 		"turn.suspended", // events.EventTurnSuspended（agent/loop.go parkBackgroundTurn）
 		"turn.resumed",   // events.EventTurnResumed（supervision/wake_consumer.go → 宿主总线）
+		"parent.finalization.stable_sequence_retry", // chat.EventParentTurnFinalizationSequenceRetry
 	)
 
 	return out

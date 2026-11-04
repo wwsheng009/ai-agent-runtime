@@ -147,6 +147,37 @@ func TestBuildProviderAdapterRequest_CapsMaxTokensByCapability(t *testing.T) {
 	}
 }
 
+func TestBuildProviderAdapterRequest_OmitMaxTokensSkipsDefaultBudget(t *testing.T) {
+	result := buildProviderAdapterRequest(providerAdapterRequestInput{
+		Protocol: "openai",
+		Model:    "gpt-5",
+		Metadata: map[string]interface{}{MetadataKeyOmitMaxTokens: true},
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "summarize"},
+		},
+	})
+
+	if result.MaxTokens != 0 {
+		t.Fatalf("expected max_tokens to stay omitted, got %d", result.MaxTokens)
+	}
+}
+
+func TestBuildProviderAdapterRequest_ExplicitMaxTokensWinsOverOmitFlag(t *testing.T) {
+	result := buildProviderAdapterRequest(providerAdapterRequestInput{
+		Protocol:  "openai",
+		Model:     "gpt-5",
+		MaxTokens: 4096,
+		Metadata:  map[string]interface{}{MetadataKeyOmitMaxTokens: true},
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "summarize"},
+		},
+	})
+
+	if result.MaxTokens != 4096 {
+		t.Fatalf("expected explicit max_tokens to win, got %d", result.MaxTokens)
+	}
+}
+
 func TestBuildProviderAdapterRequest_AnthropicDropsTrailingAssistantPrefill(t *testing.T) {
 	input := providerAdapterRequestInput{
 		Protocol: "anthropic",

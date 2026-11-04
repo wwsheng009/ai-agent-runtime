@@ -139,6 +139,9 @@ func (c *sessionAgentController) parkAgentChildObligation(ctx context.Context, p
 	if record == nil {
 		record = &subagentbatch.TurnSuspension{TurnID: turnID, SessionID: parentSessionID}
 	}
+	if episodeID := strings.TrimSpace(agent.EpisodeIDFromContext(ctx)); episodeID != "" {
+		record.EpisodeID = episodeID
+	}
 	record.RootScopeID = firstNonEmptyString(strings.TrimSpace(record.RootScopeID), parentSessionID)
 	obligationID := subagentbatch.AgentSessionObligationID(childSessionID)
 	for _, existing := range record.ObligationIDs {

@@ -118,6 +118,24 @@ func (s *SQLiteStore) Opened() bool {
 	return s.db != nil
 }
 
+// IsDurable reports whether this store is backed by an on-disk database. The
+// required-job obligation path uses it for the same I9 reason the batch store
+// does: an in-memory job row cannot resolve a durable parent suspension after a
+// restart.
+func (s *SQLiteStore) IsDurable() bool {
+	if s == nil {
+		return false
+	}
+	if strings.TrimSpace(s.path) != "" {
+		return !isBackgroundSQLiteMemoryDSN(s.dsn)
+	}
+	dsn := strings.TrimSpace(s.dsn)
+	// StoreDSN is a supported configuration path. Any non-memory DSN is
+	// considered restart-survivable; only the explicit in-memory forms are
+	// rejected.
+	return dsn != "" && !isBackgroundSQLiteMemoryDSN(dsn)
+}
+
 // Path returns the configured on-disk path when one is used.
 func (s *SQLiteStore) Path() string {
 	if s == nil {

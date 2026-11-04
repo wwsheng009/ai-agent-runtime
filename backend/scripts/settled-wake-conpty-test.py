@@ -99,7 +99,10 @@ class MockHandler(BaseHTTPRequestHandler):
             if m.get("role") == "tool"
             and ("batch_id" in str(m.get("content")) or "execution_mode" in str(m.get("content")))
         )
-        preflight = "[Child lifecycle preflight]" in blob
+        preflight = any(
+            marker in blob
+            for marker in ("[Child lifecycle preflight]", "[子任务与后台作业进展]", "[supervision]")
+        )
         child_marker = any(
             m.get("role") == "user" and "MOCK-CHILD-GOAL" in str(m.get("content")) for m in msgs
         )
@@ -238,6 +241,21 @@ def wait_signal(rec, pattern, mark, deadline, hard_deadline):
     return False, len(rec.text())
 
 
+def wait_any_signal(rec, patterns, mark, deadline, hard_deadline):
+    end = min(time.time() + deadline, hard_deadline)
+    while time.time() < end:
+        visible_text = rec.since(mark)
+        if any(pattern in visible_text for pattern in patterns):
+            return True, len(rec.text())
+        time.sleep(0.25)
+    return False, len(rec.text())
+
+
+def first_marker_position(text, patterns):
+    positions = [text.find(pattern) for pattern in patterns if text.find(pattern) >= 0]
+    return min(positions) if positions else -1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default=os.environ.get("AICLI_WAKE_E2E_EXE", r"E:\projects\ai\ai-agent-runtime\backend\aicli-4x.exe"))
@@ -302,7 +320,8 @@ providers:
     rec = PtyRecorder(pty)
 
     wait_signal(rec, "PHASE1-SPAWN-1", 0, 120, hard_deadline)
-    wait_signal(rec, "Waiting for subagents", 0, 90, hard_deadline)
+    parked_markers = ("Waiting for subagents", "parent.turn.parked", "turn.suspended")
+    wait_any_signal(rec, parked_markers, 0, 90, hard_deadline)
     wait_signal(rec, "PHASE2-SPAWN-2", 0, args.phase3_deadline, hard_deadline)
     wait_signal(rec, "PHASE3-RESUMED-OK", 0, args.phase3_deadline, hard_deadline)
 
@@ -311,11 +330,11 @@ providers:
     text = rec.text()
     kinds = [r["kind"] for r in MOCK_LOG]
     pos1 = text.find("PHASE1-SPAWN-1")
-    pos_banner = text.find("Waiting for subagents")
+    pos_banner = first_marker_position(text, parked_markers)
     pos2 = text.find("PHASE2-SPAWN-2")
     pos3 = text.find("PHASE3-RESUMED-OK")
     order_ok = -1 < pos1 < pos_banner < pos2 < pos3
-    banner_count = text.count("Waiting for subagents")
+    banner_count = sum(text.count(pattern) for pattern in parked_markers)
     check("mock: parent dispatched first batch (spawn1)", "spawn1" in kinds)
     check("mock: first settle produced a wake resume (wake1)", "wake1" in kinds)
     check("mock: second settle produced a wake resume (wake2, fix)", "wake2" in kinds)

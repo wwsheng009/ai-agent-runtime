@@ -75,6 +75,20 @@ const (
 	SessionStopped         SessionStatus = "stopped"
 )
 
+// ParentTurnPhase is the durable logical-turn lifecycle. It is deliberately
+// separate from SessionStatus: an idle session with a parked turn is not
+// finalized, while a finalized turn must never be auto-resumed by a late
+// settlement.
+type ParentTurnPhase string
+
+const (
+	ParentTurnPhaseRunning    ParentTurnPhase = "running"
+	ParentTurnPhaseFinalizing ParentTurnPhase = "finalizing"
+	ParentTurnPhaseParked     ParentTurnPhase = "parked"
+	ParentTurnPhaseFinalized  ParentTurnPhase = "finalized"
+	ParentTurnPhaseCanceled   ParentTurnPhase = "canceled"
+)
+
 // ApprovalRequest captures an interactive approval requirement for tool execution.
 type ApprovalRequest = runtimepolicy.ApprovalRequest
 
@@ -86,6 +100,10 @@ type RuntimeState struct {
 	SessionID     string        `json:"session_id"`
 	Status        SessionStatus `json:"status"`
 	CurrentTurnID string        `json:"current_turn_id,omitempty"`
+	// CurrentEpisodeID identifies the logical turn episode currently executing.
+	// An automatic resume reuses the parked episode; a user follow-up after the
+	// turn finalized starts a fresh episode.
+	CurrentEpisodeID string `json:"current_episode_id,omitempty"`
 	// SuspendedTurnID 记录本会话处于**挂起态**（§6.12 parked turn）的托管 turn：
 	// 父 turn 派发 durable background obligations 后收尾、账本未终态时，该 turn
 	// 并未结束，只是没有正在执行的 run。此后到达的 steer（用户输入 / subagent_input
@@ -95,7 +113,14 @@ type RuntimeState struct {
 	// 该字段是**派生缓存**：每次使用前都会回查 durable batch 控制面上的 §6.12
 	// 记录，记录被清（resume 收尾 / 放弃）后立即失效，因此不会把 turn_id 永久
 	// 粘住（EC-E1 的防线之一）。
-	SuspendedTurnID              string                 `json:"suspended_turn_id,omitempty"`
+	SuspendedTurnID    string `json:"suspended_turn_id,omitempty"`
+	SuspendedEpisodeID string `json:"suspended_episode_id,omitempty"`
+	// TurnPhase records the durable parent-turn lifecycle independently from
+	// Status. Status answers "does a run exist now"; TurnPhase answers "may this
+	// logical turn still be resumed or is it finalized".
+	TurnPhase                    ParentTurnPhase        `json:"turn_phase,omitempty"`
+	FinalizedTurnID              string                 `json:"finalized_turn_id,omitempty"`
+	FinalizedEpisodeID           string                 `json:"finalized_episode_id,omitempty"`
 	CurrentCheckpointID          string                 `json:"current_checkpoint_id,omitempty"`
 	CurrentRunMeta               *team.RunMeta          `json:"current_run_meta,omitempty"`
 	AmbientRunMeta               *team.RunMeta          `json:"ambient_run_meta,omitempty"`
@@ -126,11 +151,16 @@ type RuntimeStateSummary struct {
 	SessionID           string
 	Status              SessionStatus
 	CurrentTurnID       string
+	CurrentEpisodeID    string
 	CurrentCheckpointID string
 	// SuspendedTurnID 是 §6.12 挂起记录在状态里的派生标记：非空表示本会话持有一个
 	// `awaiting_obligations` 的托管 turn（账本未空，只是没有正在执行的 run）。它来自
 	// durable 状态，因此重启后的宿主看到与挂起进程一致的答案（C4-3 / AC-P3-3c）。
 	SuspendedTurnID          string
+	SuspendedEpisodeID       string
+	TurnPhase                ParentTurnPhase
+	FinalizedTurnID          string
+	FinalizedEpisodeID       string
 	PendingTool              bool
 	PendingToolCallID        string
 	PendingToolName          string
@@ -186,8 +216,13 @@ func (s *RuntimeState) Summary() RuntimeStateSummary {
 		SessionID:           s.SessionID,
 		Status:              s.Status,
 		CurrentTurnID:       s.CurrentTurnID,
+		CurrentEpisodeID:    s.CurrentEpisodeID,
 		CurrentCheckpointID: s.CurrentCheckpointID,
 		SuspendedTurnID:     s.SuspendedTurnID,
+		SuspendedEpisodeID:  s.SuspendedEpisodeID,
+		TurnPhase:           s.TurnPhase,
+		FinalizedTurnID:     s.FinalizedTurnID,
+		FinalizedEpisodeID:  s.FinalizedEpisodeID,
 		PendingTool:         s.PendingTool != nil,
 		PendingApproval:     s.PendingApproval != nil,
 		PendingQuestion:     s.PendingQuestion != nil,

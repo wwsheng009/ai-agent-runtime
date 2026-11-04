@@ -36,6 +36,60 @@ func (a *SessionActor) nextTurnID(ctx context.Context) string {
 	return "turn_" + uuid.NewString()
 }
 
+// episodeIDForTurn returns the logical episode a new run belongs to. A parked
+// turn keeps the episode recorded when it parked; everything else starts a new
+// episode. Legacy suspension rows without an episode are upgraded once here so
+// later settlement wakes can carry a stable identity, while any wake already
+// persisted without one remains stale and non-resumable.
+func (a *SessionActor) episodeIDForTurn(ctx context.Context, turnID string) string {
+	if a == nil {
+		return ""
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return "ep_" + uuid.NewString()
+	}
+	if state := a.stateWithoutToolSurfaces(); state != nil {
+		if strings.TrimSpace(state.CurrentTurnID) == turnID {
+			if episodeID := strings.TrimSpace(state.CurrentEpisodeID); episodeID != "" {
+				return episodeID
+			}
+		}
+	}
+	if record := a.parkedTurnRecord(ctx, turnID); record != nil {
+		if episodeID := strings.TrimSpace(record.EpisodeID); episodeID != "" {
+			return episodeID
+		}
+		episodeID := "ep_" + uuid.NewString()
+		record.EpisodeID = episodeID
+		if err := a.parkParkedTurnRecord(ctx, record); err == nil {
+			return episodeID
+		}
+	}
+	return "ep_" + uuid.NewString()
+}
+
+// parkParkedTurnRecord writes a suspension record through the same durable
+// store the dispatch path uses. It is a small adapter so actor-side episode
+// migration does not duplicate coordinator lookup logic.
+func (a *SessionActor) parkParkedTurnRecord(ctx context.Context, record *subagentbatch.TurnSuspension) error {
+	if a == nil || a.agent == nil || record == nil {
+		return nil
+	}
+	coordinator := a.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return nil
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return store.ParkTurnSuspension(ctx, record)
+}
+
 // suspendedTurnID 返回本会话当前可续跑的挂起 turn_id；无挂起 turn 时返回空串。
 func (a *SessionActor) suspendedTurnID(ctx context.Context) string {
 	if a == nil {
@@ -115,36 +169,65 @@ func (a *SessionActor) turnSuspended(ctx context.Context, turnID string) bool {
 // parkedTurnRecord 读取本会话在 durable batch 控制面上的 §6.12 挂起记录。
 // 未接线、非 durable、记录不存在或读失败一律返回 nil。
 func (a *SessionActor) parkedTurnRecord(ctx context.Context, turnID string) *subagentbatch.TurnSuspension {
+	record, _, _ := a.parkedTurnRecordState(ctx, turnID)
+	return record
+}
+
+// parkedTurnRecordState is the error-aware read used by the finalization gate.
+// A read failure must not be interpreted as "no suspension": that would let a
+// logical turn finalize while a required obligation may still be running.
+func (a *SessionActor) parkedTurnRecordState(ctx context.Context, turnID string) (*subagentbatch.TurnSuspension, bool, error) {
 	turnID = strings.TrimSpace(turnID)
 	if a == nil || a.agent == nil || turnID == "" {
-		return nil
+		return nil, false, nil
 	}
 	coordinator := a.agent.GetSubagentBatchCoordinator()
 	if coordinator == nil {
-		return nil
+		return nil, false, nil
 	}
 	store := coordinator.Store()
 	if store == nil || !store.IsDurable() {
-		return nil
+		return nil, false, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	record, ok, err := store.GetTurnSuspension(ctx, a.id, turnID)
-	if err != nil || !ok || record == nil {
-		return nil
+	if err != nil {
+		return nil, false, err
 	}
-	return record
+	if !ok || record == nil {
+		return nil, false, nil
+	}
+	return record, true, nil
 }
 
-// syncSuspendedTurn 在 run 收尾时把"本回合是否仍在挂起态"写回 RuntimeState，
-// 返回应写入的 turn_id（空串＝未挂起）。它只做一次 durable 读，不写账本：
-// 挂起记录由派发方（agent loop §6.12）与 resume/放弃路径维护，actor 不越权清理。
-func (a *SessionActor) syncSuspendedTurn(ctx context.Context, turnID string) string {
-	if !a.turnSuspended(ctx, turnID) {
-		return ""
+// syncSuspendedTurnState returns the parked turn and its episode. A legacy
+// record without an episode is upgraded from the run that just parked it, so a
+// newly written settlement wake can carry the same identity.
+func (a *SessionActor) syncSuspendedTurnState(ctx context.Context, turnID, fallbackEpisode string) (string, string) {
+	turnID = strings.TrimSpace(turnID)
+	record, ok, err := a.parkedTurnRecordState(ctx, turnID)
+	if err != nil {
+		// Conservative: an unreadable ledger keeps the logical turn open. The
+		// next natural settlement attempt will clear it once the store recovers.
+		return turnID, strings.TrimSpace(fallbackEpisode)
 	}
-	return strings.TrimSpace(turnID)
+	if !ok || record == nil {
+		return "", ""
+	}
+	episodeID := strings.TrimSpace(record.EpisodeID)
+	if episodeID == "" {
+		episodeID = strings.TrimSpace(fallbackEpisode)
+		if episodeID != "" {
+			record.EpisodeID = episodeID
+			_ = a.parkParkedTurnRecord(ctx, record)
+		}
+	}
+	if strings.TrimSpace(record.TurnID) == "" {
+		return strings.TrimSpace(turnID), episodeID
+	}
+	return strings.TrimSpace(record.TurnID), episodeID
 }
 
 // clearSuspendedTurnID 清掉派生缓存（仅当缓存值仍等于已知失效值时写状态）。

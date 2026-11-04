@@ -464,3 +464,33 @@ func (s *SubagentScheduler) emitSubagentAttemptFinished(options SubagentRunOptio
 	s.parent.emitRuntimeEvent(runtimeevents.EventSubagentAttemptFinished, options.ParentSessionID, "",
 		mergeRouteAuditPayload(payload, spec.Decision))
 }
+
+// emitSubagentParked publishes the non-terminal edge for a child logical turn
+// that still owns required obligations. It is deliberately not a
+// subagent.completed event: downstream consumers must keep the containing batch
+// obligation open until the same child turn is resumed and reaches a real
+// terminal state.
+func (s *SubagentScheduler) emitSubagentParked(options SubagentRunOptions, task SubagentTask, childSessionID, childAgentName string, spec ChildAgentSpec, report SubagentResult, attempt, maxAttempts int) {
+	if s == nil || s.parent == nil {
+		return
+	}
+	payload := mergeRouteAuditPayload(map[string]interface{}{
+		"subagent_id":         task.ID,
+		"role":                task.Role,
+		"success":             false,
+		"status":              "parked",
+		"turn_parked":         true,
+		"turn_id":             report.TurnID,
+		"episode_id":          report.EpisodeID,
+		"attempt":             attempt,
+		"max_attempts":        maxAttempts,
+		"batch_id":            options.BatchID,
+		"parent_session_id":   options.ParentSessionID,
+		"parent_tool_call_id": options.ParentToolCallID,
+		"child_session_id":    childSessionID,
+		"child_agent_name":    childAgentName,
+		"trace_id":            options.TraceID,
+		"summary":             report.Summary,
+	}, spec.Decision)
+	s.parent.emitRuntimeEvent(runtimeevents.EventSubagentTaskParked, options.ParentSessionID, "", payload)
+}

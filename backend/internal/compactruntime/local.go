@@ -25,7 +25,6 @@ const (
 	localSummaryTextKey            = "summary_text"
 	localSummaryHeading            = "Compacted context from earlier turns:"
 	localRetainedRecentMaxTokens   = 20000
-	localCompactDefaultMaxTokens   = 2048
 	localCompactMaxRequestBytes    = 1024 * 1024
 	localFallbackUserRunes         = 2200
 	localFallbackAssistantRunes    = 2200
@@ -171,7 +170,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 
 	summaryHistory := compactionSummaryHistory(req.Phase, history)
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
-	maxTokens = fitLocalCompactSummaryMaxTokens(maxTokens, req, systemMessages, summaryHistory, counter)
+	maxTokens = fitLocalCompactSummaryMaxTokens(maxTokens, req, threshold.MaxContextTokens, systemMessages, summaryHistory, counter)
 	request := buildLocalCompactionLLMRequest(req, systemMessages, summaryHistory, maxTokens, reasoningEffort)
 	if reason := localCompactionRequestBudgetFailure(a.llmRuntime, request, threshold); reason != "" {
 		request = buildFittedLocalCompactionLLMRequest(a.llmRuntime, req, threshold, systemMessages, summaryHistory, maxTokens, reasoningEffort, reason)
@@ -181,6 +180,13 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 	}
 
 	response, err := a.streamSummaryResponse(ctx, request)
+	if err != nil && maxTokens > 0 && compactMaxTokensUnsupported(err) {
+		// Some OpenAI-compatible models reject max_tokens/max_output_tokens
+		// entirely. Retry the one internal summary call without that field
+		// instead of turning a usable model into a deterministic-only fallback.
+		request = compactRequestWithoutMaxTokens(request)
+		response, err = a.streamSummaryResponse(ctx, request)
+	}
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, nil, "", ctxErr
@@ -504,6 +510,12 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 		"session_id":       strings.TrimSpace(req.SessionID),
 		"prompt_cache_key": strings.TrimSpace(req.SessionID),
 	}
+	if maxTokens <= 0 {
+		// No explicit capability budget: leave max_tokens absent and let the
+		// provider use its own default. buildProviderAdapterRequest respects
+		// this flag instead of synthesizing the chat 8k slot budget.
+		metadata[llm.MetadataKeyOmitMaxTokens] = true
+	}
 	if len(tools) > 0 {
 		// Preserve the chat tools prefix for provider prompt-cache hits, but
 		// force tool_choice=none so the compact summary never executes tools.
@@ -526,6 +538,25 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 		ReasoningEffort: strings.TrimSpace(reasoningEffort),
 		Metadata:        metadata,
 	}
+}
+
+func compactMaxTokensUnsupported(err error) bool {
+	return llm.IsUnsupportedRequestParameter(err, "max_tokens") ||
+		llm.IsUnsupportedRequestParameter(err, "max_output_tokens")
+}
+
+func compactRequestWithoutMaxTokens(request *llm.LLMRequest) *llm.LLMRequest {
+	if request == nil {
+		return nil
+	}
+	cloned := *request
+	cloned.MaxTokens = 0
+	cloned.Metadata = make(map[string]interface{}, len(request.Metadata)+1)
+	for key, value := range request.Metadata {
+		cloned.Metadata[key] = value
+	}
+	cloned.Metadata[llm.MetadataKeyOmitMaxTokens] = true
+	return &cloned
 }
 
 // buildFittedLocalCompactionLLMRequest maps the omitted prefix locally and lets
@@ -786,6 +817,9 @@ func mergeCompactStreamMetadata(target, source map[string]interface{}) {
 
 func validateCompactStreamDone(metadata map[string]interface{}) error {
 	finishReason := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", metadata["finish_reason"])))
+	if llm.IsMaxOutputTokensStop(finishReason) {
+		return fmt.Errorf("compact summary stream truncated by output limit: finish_reason=%s", finishReason)
+	}
 	switch finishReason {
 	case "", "stop", "end_turn":
 		return nil
@@ -1503,7 +1537,7 @@ func summarizeCompactLine(text string, limit int) string {
 }
 
 func resolveCompactSummaryRequestSettings(runtime *llm.LLMRuntime, providerName, model string) (int, string) {
-	maxTokens := localCompactDefaultMaxTokens
+	maxTokens := 0
 	reasoningEffort := ""
 	if runtime == nil {
 		return maxTokens, reasoningEffort
@@ -1514,19 +1548,40 @@ func resolveCompactSummaryRequestSettings(runtime *llm.LLMRuntime, providerName,
 		return maxTokens, reasoningEffort
 	}
 
-	if resolvedMaxTokens, resolvedReasoningEffort := llm.CompactSummarySettings(capability); resolvedMaxTokens > 0 {
-		maxTokens = resolvedMaxTokens
-		if strings.TrimSpace(resolvedReasoningEffort) != "" {
-			reasoningEffort = strings.TrimSpace(resolvedReasoningEffort)
-		}
+	resolvedMaxTokens, resolvedReasoningEffort := llm.CompactSummarySettings(capability)
+	maxTokens = resolvedMaxTokens
+	if strings.TrimSpace(resolvedReasoningEffort) != "" {
+		reasoningEffort = strings.TrimSpace(resolvedReasoningEffort)
 	}
 
 	return maxTokens, reasoningEffort
 }
 
-func fitLocalCompactSummaryMaxTokens(configured int, req Request, systemMessages, history []types.Message, counter TokenCounter) int {
+func fitLocalCompactSummaryMaxTokens(
+	configured int,
+	req Request,
+	maxContextTokens int,
+	systemMessages []types.Message,
+	history []types.Message,
+	counter TokenCounter,
+) int {
 	if configured <= 0 {
-		configured = localCompactDefaultMaxTokens
+		// No explicit model budget. Do not invent one; the request builder
+		// marks the request to omit max_tokens and lets the provider decide.
+		return 0
+	}
+	// The compact request itself needs room for its input (system + history +
+	// the compaction prompt). Never let the summary output budget consume more
+	// than half of a known context window; small-context models otherwise send
+	// a max_tokens value larger than the entire window and always fall back.
+	if maxContextTokens > 0 {
+		ceiling := maxContextTokens / 2
+		if ceiling < 1 {
+			ceiling = 1
+		}
+		if configured > ceiling {
+			configured = ceiling
+		}
 	}
 	if req.ReplacementTokenLimit <= 0 || counter == nil {
 		return configured

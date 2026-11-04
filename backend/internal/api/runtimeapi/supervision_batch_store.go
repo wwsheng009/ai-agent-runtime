@@ -30,6 +30,12 @@ func (h *Handler) SetSubagentBatchStore(store subagentbatch.BatchStore) {
 	h.subagentBatchStore = store
 	h.subagentBatchTried = true
 	h.subagentBatchMu.Unlock()
+	// The admission service captures the suspension ledger. A late batch-store
+	// injection must invalidate the cached consumer so the next drain sees it;
+	// otherwise required resumptions would retry forever against a nil ledger.
+	h.supervisionWakeMu.Lock()
+	h.supervisionWake = nil
+	h.supervisionWakeMu.Unlock()
 	// G2：控制面一旦可见就把它接成 wake 的账本/进度投影（resume 上下文的数据源）。
 	// 锁已释放后再接线，避免与 wireSupervisionSources 里的另一把读锁互相阻塞。
 	h.wireSupervisionSources()
@@ -88,6 +94,7 @@ func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *
 		// (supervision.task_progress_interval, default 0 = no writes), wired
 		// from the same host tuning the CLI reads so the two hosts cannot drift.
 		TaskProgressInterval: h.supervisionTuning().TaskProgressInterval,
+		ObligationResolvers:  h.obligationResolvers(),
 		// Live-slot ceiling (agents.maxThreads) across subagent_spawn and
 		// subagent_spawn_batch: without this the batch path only had a concurrency
 		// window and could accumulate unbounded idle children. Mirrors the CLI

@@ -144,6 +144,12 @@ func (h *Handler) runSupervisionWaitFeedbackSweepOnce(ctx context.Context) (int,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// The feedback sweep is also the API host's default-on maintenance tick.
+	// Recover abandoned claims (and let the admission service opportunistically
+	// prune terminal claim history) even when no parent is currently parked.
+	if consumer := h.cachedSupervisionWakeConsumer(); consumer != nil && consumer.Admission != nil {
+		_, _ = consumer.Admission.RecoverStaleClaims(ctx)
+	}
 	// 反馈 wake 的 digest 内容同样只能来自投影（rollup / 账本）；调度前必须保证
 	// scheduler 能看到接线后的投影。接线幂等（与 runSupervisionProgressCheckOnce
 	// 同一理由——progress wake 没有 lifecycle 行可依赖），scheduler 晚于 batch
@@ -183,4 +189,17 @@ func (h *Handler) runSupervisionWaitFeedbackSweepOnce(ctx context.Context) (int,
 		}
 	}
 	return scheduled, firstErr
+}
+
+// cachedSupervisionWakeConsumer returns the host's already-built consumer
+// without constructing one. Maintenance must use the same admission instance
+// that owns the delivery path (and its prune throttle); a nil consumer simply
+// means this host has not wired supervision wakes yet.
+func (h *Handler) cachedSupervisionWakeConsumer() *supervision.WakeConsumer {
+	if h == nil {
+		return nil
+	}
+	h.supervisionWakeMu.Lock()
+	defer h.supervisionWakeMu.Unlock()
+	return h.supervisionWake
 }

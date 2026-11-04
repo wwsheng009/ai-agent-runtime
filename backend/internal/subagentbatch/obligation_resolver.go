@@ -29,6 +29,27 @@ type TeamObligationResolver interface {
 	TeamTerminal(ctx context.Context, teamID string) (terminal bool, found bool, err error)
 }
 
+// BackgroundJobObligationResolver answers the durable state of a background job
+// referenced by a job: obligation (job_start with finalization_policy=required).
+// Jobs live in the background manager/store, not in the batch table, so the
+// settle/ledger predicates must ask the host instead of assuming the batch table
+// is the whole obligation universe.
+//
+// found=false means the host has no durable row for the id. A required job
+// always owns a row while it is resumable, so a missing row is never accepted as
+// evidence of completion for a resume verdict.
+type BackgroundJobObligationResolver interface {
+	BackgroundJobTerminal(ctx context.Context, jobID string) (terminal bool, found bool, err error)
+}
+
+// ObligationResolvers groups the host-provided readers for obligation kinds
+// outside the batch store. A nil entry keeps that kind conservatively pending.
+type ObligationResolvers struct {
+	AgentSessions  AgentSessionObligationResolver
+	Teams          TeamObligationResolver
+	BackgroundJobs BackgroundJobObligationResolver
+}
+
 // TurnObligationsSettledWith is §6.12 settle predicate extended to child-session
 // obligations. It preserves the batch-only rules (a resolved terminal batch is
 // required; vanished batches are skipped; at least one resolved obligation must
@@ -61,13 +82,30 @@ func TurnObligationsSettledWithTeams(
 	resolver AgentSessionObligationResolver,
 	teamResolver TeamObligationResolver,
 ) (bool, error) {
+	return TurnObligationsSettledWithResolvers(ctx, store, record, ObligationResolvers{
+		AgentSessions: resolver,
+		Teams:         teamResolver,
+	})
+}
+
+// TurnObligationsSettledWithResolvers is TurnObligationsSettledWithTeams
+// extended to background-job obligations. The missing-row rules are the same as
+// the other non-batch kinds: an unreadable or absent job keeps the turn parked
+// rather than being mistaken for settled work.
+func TurnObligationsSettledWithResolvers(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolvers ObligationResolvers,
+) (bool, error) {
 	if record == nil {
 		return false, nil
 	}
 	batchIDs := record.ObligationBatchIDs()
 	agentSessionIDs := record.ObligationAgentSessionIDs()
 	teamIDs := record.ObligationTeamIDs()
-	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 {
+	jobIDs := record.ObligationBackgroundJobIDs()
+	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 && len(jobIDs) == 0 {
 		return false, nil
 	}
 
@@ -91,12 +129,12 @@ func TurnObligationsSettledWithTeams(
 		}
 	}
 	for _, sessionID := range agentSessionIDs {
-		if resolver == nil {
+		if resolvers.AgentSessions == nil {
 			// The child-session control plane is not wired; keep the turn
 			// parked instead of guessing that the child is done.
 			return false, nil
 		}
-		terminal, found, err := resolver.AgentSessionTerminal(ctx, sessionID)
+		terminal, found, err := resolvers.AgentSessions.AgentSessionTerminal(ctx, sessionID)
 		if err != nil {
 			return false, err
 		}
@@ -111,18 +149,36 @@ func TurnObligationsSettledWithTeams(
 		}
 	}
 	for _, teamID := range teamIDs {
-		if teamResolver == nil {
+		if resolvers.Teams == nil {
 			// The team control plane is not wired; keep the turn parked
 			// instead of guessing that the team is done.
 			return false, nil
 		}
-		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		terminal, found, err := resolvers.Teams.TeamTerminal(ctx, teamID)
 		if err != nil {
 			return false, err
 		}
 		if !found {
 			// No durable team row: the team may simply still be starting.
 			// Never accept that as evidence of completion.
+			return false, nil
+		}
+		resolved++
+		if !terminal {
+			return false, nil
+		}
+	}
+	for _, jobID := range jobIDs {
+		if resolvers.BackgroundJobs == nil {
+			// The job control plane is not wired; keep the turn parked.
+			return false, nil
+		}
+		terminal, found, err := resolvers.BackgroundJobs.BackgroundJobTerminal(ctx, jobID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			// No durable job row: the job may simply still be starting.
 			return false, nil
 		}
 		resolved++
@@ -164,13 +220,30 @@ func TurnObligationsAllTerminalWithTeams(
 	resolver AgentSessionObligationResolver,
 	teamResolver TeamObligationResolver,
 ) (bool, error) {
+	return TurnObligationsAllTerminalWithResolvers(ctx, store, record, ObligationResolvers{
+		AgentSessions: resolver,
+		Teams:         teamResolver,
+	})
+}
+
+// TurnObligationsAllTerminalWithResolvers is the strict resume-gate variant of
+// TurnObligationsSettledWithResolvers: every listed obligation must have a
+// readable durable row and that row must be terminal. Missing job rows block the
+// resume instead of being skipped.
+func TurnObligationsAllTerminalWithResolvers(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolvers ObligationResolvers,
+) (bool, error) {
 	if record == nil {
 		return false, nil
 	}
 	batchIDs := record.ObligationBatchIDs()
 	agentSessionIDs := record.ObligationAgentSessionIDs()
 	teamIDs := record.ObligationTeamIDs()
-	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 {
+	jobIDs := record.ObligationBackgroundJobIDs()
+	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 && len(jobIDs) == 0 {
 		return false, nil
 	}
 
@@ -192,10 +265,10 @@ func TurnObligationsAllTerminalWithTeams(
 		}
 	}
 	for _, sessionID := range agentSessionIDs {
-		if resolver == nil {
+		if resolvers.AgentSessions == nil {
 			return false, nil
 		}
-		terminal, found, err := resolver.AgentSessionTerminal(ctx, sessionID)
+		terminal, found, err := resolvers.AgentSessions.AgentSessionTerminal(ctx, sessionID)
 		if err != nil {
 			return false, err
 		}
@@ -209,15 +282,32 @@ func TurnObligationsAllTerminalWithTeams(
 		}
 	}
 	for _, teamID := range teamIDs {
-		if teamResolver == nil {
+		if resolvers.Teams == nil {
 			return false, nil
 		}
-		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		terminal, found, err := resolvers.Teams.TeamTerminal(ctx, teamID)
 		if err != nil {
 			return false, err
 		}
 		if !found {
 			// No durable team row: the team may simply still be starting.
+			return false, nil
+		}
+		known++
+		if !terminal {
+			return false, nil
+		}
+	}
+	for _, jobID := range jobIDs {
+		if resolvers.BackgroundJobs == nil {
+			return false, nil
+		}
+		terminal, found, err := resolvers.BackgroundJobs.BackgroundJobTerminal(ctx, jobID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			// No durable job row: the job may simply still be starting.
 			return false, nil
 		}
 		known++
@@ -253,6 +343,21 @@ func CountObligationProgress(
 	resolver AgentSessionObligationResolver,
 	teamResolver TeamObligationResolver,
 ) (ObligationProgress, error) {
+	return CountObligationProgressWithResolvers(ctx, store, record, ObligationResolvers{
+		AgentSessions: resolver,
+		Teams:         teamResolver,
+	})
+}
+
+// CountObligationProgressWithResolvers extends CountObligationProgress to
+// background-job obligations. Missing/unreadable rows stay pending, so feedback
+// can only under-report progress.
+func CountObligationProgressWithResolvers(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolvers ObligationResolvers,
+) (ObligationProgress, error) {
 	if record == nil {
 		return ObligationProgress{}, nil
 	}
@@ -275,10 +380,10 @@ func CountObligationProgress(
 	}
 	for _, sessionID := range record.ObligationAgentSessionIDs() {
 		progress.Total++
-		if resolver == nil {
+		if resolvers.AgentSessions == nil {
 			continue
 		}
-		terminal, found, err := resolver.AgentSessionTerminal(ctx, sessionID)
+		terminal, found, err := resolvers.AgentSessions.AgentSessionTerminal(ctx, sessionID)
 		if err != nil {
 			return progress, err
 		}
@@ -288,10 +393,23 @@ func CountObligationProgress(
 	}
 	for _, teamID := range record.ObligationTeamIDs() {
 		progress.Total++
-		if teamResolver == nil {
+		if resolvers.Teams == nil {
 			continue
 		}
-		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		terminal, found, err := resolvers.Teams.TeamTerminal(ctx, teamID)
+		if err != nil {
+			return progress, err
+		}
+		if found && terminal {
+			progress.Terminal++
+		}
+	}
+	for _, jobID := range record.ObligationBackgroundJobIDs() {
+		progress.Total++
+		if resolvers.BackgroundJobs == nil {
+			continue
+		}
+		terminal, found, err := resolvers.BackgroundJobs.BackgroundJobTerminal(ctx, jobID)
 		if err != nil {
 			return progress, err
 		}

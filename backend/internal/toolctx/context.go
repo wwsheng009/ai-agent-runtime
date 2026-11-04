@@ -15,6 +15,7 @@ const (
 	sessionIDKey               contextKey = "tool_session_id"
 	toolCallIDKey              contextKey = "tool_call_id"
 	turnIDKey                  contextKey = "tool_turn_id"
+	episodeIDKey               contextKey = "tool_episode_id"
 	goalIDKey                  contextKey = "tool_goal_id"
 	agentDepthKey              contextKey = "tool_agent_depth"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
@@ -79,6 +80,27 @@ func TurnID(ctx context.Context) string {
 		return ""
 	}
 	if value, ok := ctx.Value(turnIDKey).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// WithEpisodeID stores the logical episode that owns tools executed in this
+// context. It lets background-job creation capture the parent turn episode
+// without trusting model-supplied arguments.
+func WithEpisodeID(ctx context.Context, episodeID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, episodeIDKey, strings.TrimSpace(episodeID))
+}
+
+// EpisodeID retrieves the logical episode id from ctx ("" when unbound).
+func EpisodeID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(episodeIDKey).(string); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""

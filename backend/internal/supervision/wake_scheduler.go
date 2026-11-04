@@ -121,6 +121,20 @@ type WakeRequest struct {
 	// Empty falls back to the scheduler's TurnHint resolver; when both are
 	// empty the wake keeps the legacy "new turn" delivery semantics.
 	TurnID string
+	// ParentTurnID is an alias used by projections that carry the parent turn
+	// identity separately from the legacy TurnID hint.
+	ParentTurnID string
+	// ParentEpisodeID binds the wake to the parked episode. EpisodeHint fills
+	// it at scheduling time when the caller only knows the turn id.
+	ParentEpisodeID string
+	// FinalizationPolicy classifies whether this wake may resume the parent
+	// turn or is notification-only.
+	FinalizationPolicy string
+	// SettlementID / SettlementCohortID are the stable identities of the
+	// settlement behind this wake. They are persisted so admission and crash
+	// recovery do not need to re-derive them from mutable runtime state.
+	SettlementID       string
+	SettlementCohortID string
 	// ObligationID / EventKind / EventSeq describe the ledger event behind the
 	// wake and feed the stable notify key (plan C2-4 #15 / B4). EventSeq is
 	// the terminal_epoch for terminal notifications and the progress_seq for
@@ -201,6 +215,10 @@ type WakeSchedulerConfig struct {
 	// a wake is scheduled, so the wake can resume that same turn (plan C2-1,
 	// I3). nil keeps the legacy "new turn" wake.
 	TurnHint TurnHintFunc
+	// EpisodeHint resolves the parked episode for a turn when the caller did
+	// not supply one. A missing/legacy episode stays empty; admission then
+	// treats the wake as stale/notification-only.
+	EpisodeHint func(ctx context.Context, parentSessionID, turnID string) string
 	// Obligations optionally supplies the ledger projection used to assemble
 	// the same-turn resume context (plan C2-1 终局综合 / AC-P1-1d). nil keeps
 	// the legacy wake prompt. Hosts normally wire it later via
@@ -244,6 +262,8 @@ type WakeScheduler struct {
 	// turnHint resolves the parked turn id at scheduling time (see
 	// WakeSchedulerConfig.TurnHint).
 	turnHint TurnHintFunc
+	// episodeHint resolves the parked episode at scheduling time.
+	episodeHint func(context.Context, string, string) string
 	// resumeBudget bounds the assembled resume context (AC-P1-1d).
 	resumeBudget ResumeBudget
 }
@@ -294,6 +314,7 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		progress:         config.Progress,
 		obligations:      config.Obligations,
 		turnHint:         config.TurnHint,
+		episodeHint:      config.EpisodeHint,
 		resumeBudget:     config.ResumeBudget,
 	}
 }
@@ -436,7 +457,14 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 	// authoritative turn id from the obligation ledger (I3 保底).
 	turnID := strings.TrimSpace(req.TurnID)
 	if turnID == "" {
+		turnID = strings.TrimSpace(req.ParentTurnID)
+	}
+	if turnID == "" {
 		turnID = s.turnHintFor(ctx, req.TargetParentSessionID)
+	}
+	episodeID := strings.TrimSpace(req.ParentEpisodeID)
+	if episodeID == "" && turnID != "" && s.episodeHint != nil {
+		episodeID = strings.TrimSpace(s.episodeHint(ctx, req.TargetParentSessionID, turnID))
 	}
 	// The notification idempotency key is derived from the event identity
 	// (plan C2-4 #15 / B4). A replay of an event that was already delivered
@@ -465,6 +493,11 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 		RootScopeID:           strings.TrimSpace(req.RootScopeID),
 		TargetParentSessionID: strings.TrimSpace(req.TargetParentSessionID),
 		TargetParentTeamID:    strings.TrimSpace(req.TargetParentTeamID),
+		ParentTurnID:          turnID,
+		ParentEpisodeID:       episodeID,
+		FinalizationPolicy:    strings.TrimSpace(req.FinalizationPolicy),
+		SettlementID:          strings.TrimSpace(req.SettlementID),
+		SettlementCohortID:    strings.TrimSpace(req.SettlementCohortID),
 		WakeReason:            strings.TrimSpace(req.WakeReason),
 		NotificationSeq:       req.NotificationSeq,
 		TurnID:                turnID,
@@ -529,6 +562,23 @@ type ParentRunnable func(ctx context.Context, rootScopeID, parentSessionID, pare
 // the only place auto turns originate; it never launches a turn itself
 // (doc 6.5 rule 5: the wake prompt references only the lifecycle digest).
 func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, parentTeamID, rootScopeID string, runnable ParentRunnable) ([]WakePending, *Digest, error) {
+	return s.drainRunnable(ctx, parentSessionID, parentTeamID, rootScopeID, runnable, nil)
+}
+
+// DrainRunnableWithAdmission is DrainRunnable plus the host-neutral resume
+// admission gate. Notification-only / stale wakes are consumed here without
+// spending the auto-wake budget; retryable wakes stay durable and unclaimed.
+// Only admitted rows reach the budget/claim/digest path.
+func (s *WakeScheduler) DrainRunnableWithAdmission(
+	ctx context.Context,
+	parentSessionID, parentTeamID, rootScopeID string,
+	runnable ParentRunnable,
+	admission func(context.Context, WakePending) (ResumeAdmissionDecision, error),
+) ([]WakePending, *Digest, error) {
+	return s.drainRunnable(ctx, parentSessionID, parentTeamID, rootScopeID, runnable, admission)
+}
+
+func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, parentTeamID, rootScopeID string, runnable ParentRunnable, admission func(context.Context, WakePending) (ResumeAdmissionDecision, error)) ([]WakePending, *Digest, error) {
 	pending, err := s.store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: parentSessionID,
@@ -548,6 +598,33 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 	}
 
 	now := s.now().UTC()
+	if admission != nil {
+		kept := make([]WakePending, 0, len(pending))
+		for _, w := range pending {
+			decision, admitErr := admission(ctx, w)
+			if admitErr != nil {
+				return nil, nil, admitErr
+			}
+			switch decision {
+			case NotifyOnly, RejectStale:
+				consumption := "notification_only"
+				reason := string(decision)
+				if decision == RejectStale {
+					consumption = "stale"
+				}
+				_ = s.markConsumed(ctx, w, consumption, reason)
+				continue
+			case RetryAdmission:
+				continue
+			default:
+				kept = append(kept, w)
+			}
+		}
+		pending = kept
+		if len(pending) == 0 {
+			return nil, nil, nil
+		}
+	}
 	// Budget each class independently (doc 6.5 rule 4, P1-6 方案 1): an
 	// exhausted failure budget must not delay a blocking approval wake. A
 	// partially drained batch leaves the disallowed wakes durable for the
@@ -649,6 +726,33 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		}
 	}
 	return claimed, digest, nil
+}
+
+// markConsumed records a settlement as consumed without starting a model turn.
+// The durable notification remains in the inbox; only the replay-suppression
+// ledger and the pending wake row are closed.
+func (s *WakeScheduler) markConsumed(ctx context.Context, w WakePending, consumption, reason string) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	if key := strings.TrimSpace(w.NotifyKey); key != "" {
+		_ = s.store.MarkWakeDelivered(ctx, WakeDelivered{
+			NotifyKey:             key,
+			RootScopeID:           w.RootScopeID,
+			TargetParentSessionID: w.TargetParentSessionID,
+			TargetParentTeamID:    w.TargetParentTeamID,
+			WakeID:                w.WakeID,
+			TurnID:                w.TurnID,
+			EventKind:             w.EventKind,
+			ObligationID:          w.ObligationID,
+			EventSeq:              w.EventSeq,
+			DeliveredAt:           s.now().UTC(),
+			DeliveredBy:           WakeClaimOwner,
+			Consumption:           consumption,
+			Reason:                reason,
+		})
+	}
+	return s.store.ResolveWakePending(ctx, w.WakeID)
 }
 
 // digestDeliverable reports whether a drained digest carries content worth one
@@ -816,6 +920,7 @@ func (s *WakeScheduler) RecordWakeDelivery(ctx context.Context, wakes []WakePend
 			EventSeq:              w.EventSeq,
 			DeliveredAt:           now,
 			DeliveredBy:           "wake_consumer",
+			Consumption:           "model_turn",
 		})
 		if err != nil && firstErr == nil {
 			firstErr = err

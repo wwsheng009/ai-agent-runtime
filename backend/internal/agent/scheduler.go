@@ -32,8 +32,13 @@ type FilePatch struct {
 
 // SubagentTask 描述一个子代理任务包。
 type SubagentTask struct {
-	ID   string `json:"id,omitempty" yaml:"id,omitempty"`
-	Role string `json:"role,omitempty" yaml:"role,omitempty"`
+	ID string `json:"id,omitempty" yaml:"id,omitempty"`
+	// ChildSessionID is the durable child session identity persisted on the
+	// batch task row. It is execution metadata, never part of the model-facing
+	// task payload. Resume reads it back so the same logical child session and
+	// the same TurnSuspension row are addressed after a process restart.
+	ChildSessionID string `json:"-" yaml:"-"`
+	Role           string `json:"role,omitempty" yaml:"role,omitempty"`
 	// TaskType/TaskSubject 是 v4 新增可选字段（plan SA-1/SA-3）：封闭枚举类别
 	// 与审计短说明。Role 保留为编排轴 + 路由兼容别名。
 	TaskType            string      `json:"task_type,omitempty" yaml:"task_type,omitempty"`
@@ -133,15 +138,21 @@ type SubagentResult struct {
 	// ShellDisabled reports whether the child had no shell surface.
 	ShellDisabled bool `json:"shell_disabled,omitempty" yaml:"shell_disabled,omitempty"`
 	// ShellFilteredTools lists shell-like tools dropped because shell=false.
-	ShellFilteredTools []string            `json:"shell_filtered_tools,omitempty" yaml:"shell_filtered_tools,omitempty"`
-	BudgetTokens       int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
-	Success            bool                `json:"success" yaml:"success"`
-	Summary            string              `json:"summary" yaml:"summary"`
-	Patches            []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
-	Findings           []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
-	Usage              *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Error              string              `json:"error,omitempty" yaml:"error,omitempty"`
-	Contract           *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
+	ShellFilteredTools []string `json:"shell_filtered_tools,omitempty" yaml:"shell_filtered_tools,omitempty"`
+	BudgetTokens       int      `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
+	Success            bool     `json:"success" yaml:"success"`
+	// TurnParked / TurnID / EpisodeID expose a child logical turn that is still
+	// parked on required obligations. It is a non-terminal task outcome: the
+	// batch must keep the task durable and resume the same child turn later.
+	TurnParked bool                `json:"turn_parked,omitempty" yaml:"turn_parked,omitempty"`
+	TurnID     string              `json:"turn_id,omitempty" yaml:"turn_id,omitempty"`
+	EpisodeID  string              `json:"episode_id,omitempty" yaml:"episode_id,omitempty"`
+	Summary    string              `json:"summary" yaml:"summary"`
+	Patches    []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
+	Findings   []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
+	Usage      *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Error      string              `json:"error,omitempty" yaml:"error,omitempty"`
+	Contract   *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
 	// 失败分类与重试证据（方案 §6.1）：供父代理选择重派/拆分/本地完成，
 	// 并随 subagent.completed 载荷进入分析库（failure_category 等）。
 	FailureCategory string `json:"failure_category,omitempty" yaml:"failure_category,omitempty"`
@@ -1114,6 +1125,17 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		_ = childAgent.Close()
 	}()
 	childSessionID := spec.SessionID
+	// A task owns one stable logical child turn/episode. It is derived from the
+	// durable task id so a parked task can find the same suspension after a
+	// process restart without any new session-actor state.
+	childTurnID := childTaskTurnID(task.ID)
+	childEpisodeID := childTaskEpisodeID(task.ID)
+	if childTurnID != "" {
+		childCtx = WithTurnID(childCtx, childTurnID)
+	}
+	if childEpisodeID != "" {
+		childCtx = WithEpisodeID(childCtx, childEpisodeID)
+	}
 	// 任务级开始时刻：subagent.completed 载荷过去不带耗时，分析库
 	// usage_subagents.duration_ms 因此恒为 0（批次事件自己记的 elapsed_ms
 	// 又完全对不上）。这里取 child 真正开跑的这一刻。
@@ -1462,6 +1484,15 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		report.Error = result.Error
 	}
 	applySubagentStructuredOutput(&report, &task, result.Output)
+	report.TurnParked = result.TurnParked
+	report.TurnID = firstNonEmptyString(result.TurnID, childTurnID)
+	report.EpisodeID = firstNonEmptyString(result.EpisodeID, childEpisodeID)
+	if result.TurnParked {
+		report.Success = false
+		report.Error = ""
+		s.emitSubagentParked(options, task, childSessionID, childConfig.Name, spec, report, attempt, maxAttempts)
+		return report, nil
+	}
 	// §6.3（部分实施）：预算/上下文耗尽时保留已收集的 Findings/Patches
 	//（上面已按只读/写任务分别收集），并把 completion_reason 标注为
 	// budget_exceeded / context_overflow，供分析侧把"有部分产出"的失败单列；
@@ -1866,6 +1897,40 @@ func (s *SubagentScheduler) emitPatchAppliedEvents(options SubagentRunOptions, w
 func buildSubagentSessionID(taskID string) string {
 	base := firstNonEmptyString(taskID, "subagent")
 	return fmt.Sprintf("subagent_%s_%s", base, strings.ReplaceAll(uuid.NewString(), "-", ""))
+}
+
+// buildDurableSubagentSessionID returns the stable session identity of one
+// task inside a durable batch. A parked child turn is resumed with exactly this
+// session id, so the TurnSuspension lookup after a process restart lands on the
+// row written by the first run. Direct (non-batch) spawns keep their historical
+// random identity: they have no durable batch row that could carry the binding.
+func buildDurableSubagentSessionID(batchID, taskID string) string {
+	batchID = strings.TrimSpace(batchID)
+	taskID = strings.TrimSpace(taskID)
+	if batchID == "" || taskID == "" {
+		return buildSubagentSessionID(taskID)
+	}
+	return fmt.Sprintf("subagent_%s_%s", taskID, batchID)
+}
+
+// childTaskTurnID is the durable logical-turn identity of one batch task. It is
+// deterministic so both the live child run and restart recovery address the
+// same TurnSuspension row.
+func childTaskTurnID(taskID string) string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ""
+	}
+	return "turn_child_" + taskID
+}
+
+// childTaskEpisodeID is the matching deterministic episode identity.
+func childTaskEpisodeID(taskID string) string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ""
+	}
+	return "ep_child_" + taskID
 }
 
 // elapsedMS 返回从任务开跑到当前的毫秒数（下限 0）。它给

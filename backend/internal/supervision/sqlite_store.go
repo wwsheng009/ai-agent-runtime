@@ -439,6 +439,50 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 				ALTER TABLE supervision_execution_runs ADD COLUMN budget_ratio REAL NOT NULL DEFAULT 0;
 			`,
 		},
+		{
+			// P0 parent-turn hardening: a wake now carries the parent episode,
+			// finalization policy and durable settlement identity. Existing rows
+			// read back empty and remain non-resumable under the new admission
+			// path instead of silently resuming an unknown turn.
+			Version: 9,
+			Name:    "wake_parent_episode_policy_and_settlement",
+			UpSQL: `
+				ALTER TABLE supervision_wake_pending ADD COLUMN parent_turn_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN parent_episode_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN finalization_policy TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN settlement_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN settlement_cohort_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_delivered ADD COLUMN consumption TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_delivered ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+			`,
+		},
+		{
+			// Exactly-once automatic resume: the claim key is derived from
+			// (parent session, turn, episode, settlement cohort). A claimed row
+			// is CAS-guarded through version; submitted rows are never retried
+			// as a second model turn.
+			Version: 10,
+			Name:    "resume_claims",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS supervision_resume_claims (
+					claim_key TEXT PRIMARY KEY,
+					root_scope_id TEXT NOT NULL DEFAULT '',
+					parent_session_id TEXT NOT NULL DEFAULT '',
+					parent_turn_id TEXT NOT NULL DEFAULT '',
+					parent_episode_id TEXT NOT NULL DEFAULT '',
+					settlement_id TEXT NOT NULL DEFAULT '',
+					settlement_cohort_id TEXT NOT NULL DEFAULT '',
+					state TEXT NOT NULL DEFAULT 'claimed',
+					claimed_at TEXT NOT NULL,
+					submitted_at TEXT,
+					model_turn_id TEXT NOT NULL DEFAULT '',
+					delivery_attempt INTEGER NOT NULL DEFAULT 0,
+					version INTEGER NOT NULL DEFAULT 1
+				);
+				CREATE INDEX IF NOT EXISTS idx_supervision_resume_claims_settlement
+					ON supervision_resume_claims(parent_session_id, parent_turn_id, parent_episode_id, settlement_cohort_id);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -1235,10 +1279,11 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO supervision_wake_pending (
 			wake_id, root_scope_id, target_parent_session_id, target_parent_team_id,
+			parent_turn_id, parent_episode_id, finalization_policy, settlement_id, settlement_cohort_id,
 			wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by,
 			notify_key, event_kind, obligation_id, event_seq
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE ? = '' OR NOT EXISTS (
 			SELECT 1 FROM supervision_wake_delivered WHERE notify_key = ?
 		)
@@ -1248,6 +1293,11 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 		w.RootScopeID,
 		nullSupervisionString(w.TargetParentSessionID),
 		nullSupervisionString(w.TargetParentTeamID),
+		strings.TrimSpace(w.ParentTurnID),
+		strings.TrimSpace(w.ParentEpisodeID),
+		strings.TrimSpace(w.FinalizationPolicy),
+		strings.TrimSpace(w.SettlementID),
+		strings.TrimSpace(w.SettlementCohortID),
 		w.WakeReason,
 		w.NotificationSeq,
 		strings.TrimSpace(w.TurnID),
@@ -1290,7 +1340,7 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 	if filter.UnclaimedOnly {
 		clauses = append(clauses, "claimed_at IS NULL")
 	}
-	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by, notify_key, event_kind, obligation_id, event_seq FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
+	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, parent_turn_id, parent_episode_id, finalization_policy, settlement_id, settlement_cohort_id, wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by, notify_key, event_kind, obligation_id, event_seq FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
 	if filter.Limit > 0 {
 		query += " LIMIT " + fmt.Sprintf("%d", filter.Limit)
 	}
@@ -1304,7 +1354,10 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 		var w WakePending
 		var createdAt, claimedAt sql.NullString
 		var targetParentSession, targetParentTeam sql.NullString
-		if err := rows.Scan(&w.WakeID, &w.RootScopeID, &targetParentSession, &targetParentTeam, &w.WakeReason, &w.NotificationSeq, &w.TurnID, &w.DedupKey, &createdAt, &claimedAt, &w.ClaimedBy, &w.NotifyKey, &w.EventKind, &w.ObligationID, &w.EventSeq); err != nil {
+		if err := rows.Scan(&w.WakeID, &w.RootScopeID, &targetParentSession, &targetParentTeam,
+			&w.ParentTurnID, &w.ParentEpisodeID, &w.FinalizationPolicy, &w.SettlementID, &w.SettlementCohortID,
+			&w.WakeReason, &w.NotificationSeq, &w.TurnID, &w.DedupKey, &createdAt, &claimedAt,
+			&w.ClaimedBy, &w.NotifyKey, &w.EventKind, &w.ObligationID, &w.EventSeq); err != nil {
 			return nil, err
 		}
 		w.TargetParentSessionID = targetParentSession.String
@@ -1482,8 +1535,9 @@ func (s *SQLiteSupervisionStore) MarkWakeDelivered(ctx context.Context, d WakeDe
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO supervision_wake_delivered (
 			notify_key, root_scope_id, target_parent_session_id, target_parent_team_id,
-			wake_id, turn_id, event_kind, obligation_id, event_seq, delivered_at, delivered_by
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			wake_id, turn_id, event_kind, obligation_id, event_seq, delivered_at, delivered_by,
+			consumption, reason
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(notify_key) DO NOTHING
 	`,
 		key,
@@ -1497,6 +1551,8 @@ func (s *SQLiteSupervisionStore) MarkWakeDelivered(ctx context.Context, d WakeDe
 		d.EventSeq,
 		formatSupervisionTime(d.DeliveredAt),
 		d.DeliveredBy,
+		strings.TrimSpace(d.Consumption),
+		strings.TrimSpace(d.Reason),
 	)
 	if err != nil {
 		return fmt.Errorf("mark wake delivered: %w", err)

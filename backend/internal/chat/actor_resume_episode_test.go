@@ -115,6 +115,7 @@ func (h *resumeEpisodeHarness) seedSuspendedTurn(t *testing.T, turnID string) *s
 	parkedAt := time.Now().UTC().Truncate(time.Millisecond)
 	record := &subagentbatch.TurnSuspension{
 		TurnID:        turnID,
+		EpisodeID:     "ep_parked",
 		SessionID:     h.session.ID,
 		RootScopeID:   h.session.ID,
 		ObligationIDs: []string{"batch-1", "task-1"},
@@ -123,10 +124,12 @@ func (h *resumeEpisodeHarness) seedSuspendedTurn(t *testing.T, turnID string) *s
 	}
 	require.NoError(t, h.batches.ParkTurnSuspension(ctx, record))
 	require.NoError(t, h.store.SaveState(ctx, &RuntimeState{
-		SessionID:       h.session.ID,
-		Status:          SessionIdle,
-		SuspendedTurnID: turnID,
-		UpdatedAt:       time.Now().UTC(),
+		SessionID:          h.session.ID,
+		Status:             SessionIdle,
+		SuspendedTurnID:    turnID,
+		SuspendedEpisodeID: "ep_parked",
+		TurnPhase:          ParentTurnPhaseParked,
+		UpdatedAt:          time.Now().UTC(),
 	}))
 	return record
 }
@@ -161,6 +164,9 @@ func TestSubmitPromptOnSuspendedTurnResumesSameTurnID(t *testing.T) {
 	require.Equal(t, "", state.CurrentTurnID, "episode 结束后没有在途 run")
 	require.Equal(t, "turn_parked", state.SuspendedTurnID,
 		"挂起记录仍在 ⇒ turn 仍挂起，后续 steer 继续复用同一 turn_id")
+	require.Equal(t, "ep_parked", state.SuspendedEpisodeID,
+		"automatic resume must reuse the parked episode identity")
+	require.Equal(t, ParentTurnPhaseParked, state.TurnPhase)
 
 	after, ok, err := h.batches.GetTurnSuspension(ctx, h.session.ID, "turn_parked")
 	require.NoError(t, err)
@@ -168,6 +174,31 @@ func TestSubmitPromptOnSuspendedTurnResumesSameTurnID(t *testing.T) {
 	require.Equal(t, record.ObligationIDs, after.ObligationIDs, "steer 不得改写 obligation 账本")
 	require.Equal(t, record.ResumeQueue, after.ResumeQueue)
 	require.Equal(t, record.ParkedAt.UTC(), after.ParkedAt.UTC(), "steer 不是重新挂起")
+}
+
+func TestSubmitPromptAfterFinalizedStartsNewEpisode(t *testing.T) {
+	h := newResumeEpisodeHarness(t)
+	ctx := context.Background()
+	require.NoError(t, h.store.SaveState(ctx, &RuntimeState{
+		SessionID:          h.session.ID,
+		Status:             SessionIdle,
+		TurnPhase:          ParentTurnPhaseFinalized,
+		FinalizedTurnID:    "turn_old",
+		FinalizedEpisodeID: "ep_old",
+		UpdatedAt:          time.Now().UTC(),
+	}))
+
+	result, err := h.actor.SubmitPrompt(ctx, "explicit follow-up", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.EpisodeID)
+	require.NotEqual(t, "ep_old", result.EpisodeID,
+		"explicit user follow-up after finalization must start a new episode")
+	state := h.actor.StateForInspection()
+	require.NotNil(t, state)
+	require.Empty(t, state.SuspendedTurnID)
+	require.Equal(t, ParentTurnPhaseFinalized, state.TurnPhase)
+	require.Equal(t, result.EpisodeID, state.FinalizedEpisodeID)
 }
 
 // TestSubmitPromptClearsStaleSuspendedTurnID 覆盖缓存自愈：挂起记录已被清
@@ -219,4 +250,38 @@ func TestRunEndStampsSuspendedTurnIDForParkedTurn(t *testing.T) {
 	require.NotEmpty(t, parkedTurnID)
 	require.Equal(t, parkedTurnID, h.actor.StateForInspection().SuspendedTurnID,
 		"回合收尾发现挂起记录 ⇒ turn_id 必须留在状态里供后续 episode 复用")
+
+	events, err := h.store.ListEvents(ctx, h.session.ID, 0, 0)
+	require.NoError(t, err)
+	var start, assistant, parked, end map[string]interface{}
+	for _, event := range events {
+		switch event.Type {
+		case EventSessionStart:
+			start = event.Payload
+		case EventAssistantMessage:
+			assistant = event.Payload
+		case "parent.turn.parked":
+			parked = event.Payload
+		case EventSessionEnd:
+			end = event.Payload
+		}
+	}
+	require.NotNil(t, start)
+	require.Equal(t, "user", start["continuation"])
+	require.NotEmpty(t, start["episode_id"])
+	require.NotNil(t, assistant)
+	require.Equal(t, true, assistant["turn_parked"])
+	require.Equal(t, "parked", assistant["turn_phase"])
+	require.Equal(t, false, assistant["final"])
+	require.NotEmpty(t, assistant["episode_id"])
+	require.NotNil(t, parked)
+	require.Equal(t, true, parked["turn_parked"])
+	require.Equal(t, "parked", parked["turn_phase"])
+	require.Equal(t, false, parked["final"])
+	require.NotEmpty(t, parked["episode_id"])
+	require.NotNil(t, end)
+	require.Equal(t, true, end["turn_parked"])
+	require.Equal(t, "parked", end["turn_phase"])
+	require.Equal(t, false, end["final"])
+	require.NotEmpty(t, end["episode_id"])
 }

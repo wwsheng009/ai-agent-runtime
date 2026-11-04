@@ -62,3 +62,10 @@ const (
 	EventJobInteractiveNotRecoverable = "job_interactive_not_recoverable"
 	EventMailboxReceived              = "mailbox_received"
 )
+
+const (
+	// EventParentTurnFinalizationSequenceRetry records that the durable event
+	// high-water mark moved during the finalization quiet window. It is audit
+	// evidence, not a terminal event; the parent phase event follows separately.
+	EventParentTurnFinalizationSequenceRetry = "parent.finalization.stable_sequence_retry"
+)

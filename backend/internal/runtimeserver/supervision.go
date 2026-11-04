@@ -114,6 +114,15 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 	// only record (P2-12 方案 1). Resolved lazily because the host may wire its
 	// executor after the control plane is constructed.
 	wakeConfig := cfg.WakeSchedulerConfig()
+	if hooks.SubagentBatchStore != nil {
+		wakeConfig.EpisodeHint = func(ctx context.Context, parentSessionID, turnID string) string {
+			record, ok, err := hooks.SubagentBatchStore.GetTurnSuspension(ctx, parentSessionID, turnID)
+			if err != nil || !ok || record == nil {
+				return ""
+			}
+			return strings.TrimSpace(record.EpisodeID)
+		}
+	}
 	wakeConfig.HostCapabilities = func() *supervision.HostCapabilities {
 		caps := supervision.FullHostCapabilities()
 		caps.ControlActions = actions.ExecutorReady()
@@ -405,6 +414,7 @@ func (p *supervisionDescendantProvider) ListDescendants(ctx context.Context, sco
 var activeBatchDescendantStatuses = []subagentbatch.BatchStatus{
 	subagentbatch.BatchQueued,
 	subagentbatch.BatchRunning,
+	subagentbatch.BatchParked,
 	subagentbatch.BatchPartiallyCompleted,
 }
 

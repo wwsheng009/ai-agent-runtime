@@ -3469,17 +3469,27 @@ func (b *chatRuntimeEventBridge) encodeRenderModelEvent(event runtimeevents.Even
 	if b.isForeignSessionContentEvent(event) {
 		return
 	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	// 本地诊断/镜像事件（input.queue.*、aicli.chat.dynamic_status）只进
-	// 事件日志（TUI timeline / SSE debug / web 状态栏转发），不进入统一
-	// 渲染数据面：encoder 对未映射事件按 KindSystem 兜底 append，会在
-	// web 消息信息流里产生 "queued input drained"、"aicli.chat.dynamic_status"
-	// 一类系统消息噪声，干扰正确的用户/助手消息。
-	if !isChatRenderDataPlaneSuppressedEvent(event.Type) {
-		b.applyChangeSet(b.renderEncoder.Encode(event))
+	resynced := func() bool {
+		b.renderMu.Lock()
+		defer b.renderMu.Unlock()
+		// 本地诊断/镜像事件（input.queue.*、aicli.chat.dynamic_status）只进
+		// 事件日志（TUI timeline / SSE debug / web 状态栏转发），不进入统一
+		// 渲染数据面：encoder 对未映射事件按 KindSystem 兜底 append，会在
+		// web 消息信息流里产生 "queued input drained"、"aicli.chat.dynamic_status"
+		// 一类系统消息噪声，干扰正确的用户/助手消息。
+		changed := false
+		if !isChatRenderDataPlaneSuppressedEvent(event.Type) {
+			changed = b.applyChangeSet(b.renderEncoder.Encode(event))
+		}
+		b.appendEventLog(event)
+		return changed
+	}()
+	if resynced {
+		// The failed ChangeSet removed/rewrote cells in the encoder model while
+		// Scene rolled back. Publish the rebuilt snapshot immediately so the UI
+		// actor drops the stale active cell even if the next delta is delayed.
+		b.sessionInteractionSnapshotNonBlocking()
 	}
-	b.appendEventLog(event)
 }
 
 // submitUserInput 把用户输入消息注入统一渲染数据面（切片 10）：用户输入
@@ -3890,12 +3900,13 @@ func (b *chatRuntimeEventBridge) submitCommandResult(text string, documents ...r
 
 // applyChangeSet 把编码器产出的 ChangeSet 映射为 SceneTransaction 并提交
 // （路线图 P3：渲染层只消费 ChangeSet）。映射器有状态（chainHeads），
-// 必须按事件顺序在单 goroutine 内串行调用；失败只计数并记录最后错误，
-// 不阻塞事件循环（双跑/旁路模式，旧渲染路径继续输出，切换以快照与
-// 统计审计为准）。Scene 由 sceneMu 保护，/debug 等诊断读可并发取快照。
-func (b *chatRuntimeEventBridge) applyChangeSet(cs *encoding.ChangeSet) {
+// 必须按事件顺序在单 goroutine 内串行调用。失败时计数并记录最后错误，
+// 然后从编码器模型重建 Scene；返回值报告是否发生了重建，调用方可在释放
+// renderMu 后发布一次非阻塞快照。Scene 由 sceneMu 保护，/debug 等诊断读
+// 可并发取快照。
+func (b *chatRuntimeEventBridge) applyChangeSet(cs *encoding.ChangeSet) bool {
 	if b == nil || cs == nil {
-		return
+		return false
 	}
 	b.sceneMu.Lock()
 	defer b.sceneMu.Unlock()
@@ -3903,12 +3914,115 @@ func (b *chatRuntimeEventBridge) applyChangeSet(cs *encoding.ChangeSet) {
 		b.renderScene = scene.New()
 		b.renderMapper = scene.NewChangeSetMapper(b.renderScene)
 	}
+	resynced := false
 	if _, _, err := b.renderMapper.Apply(cs); err != nil {
 		b.sceneApplyFailures++
 		b.sceneLastError = err.Error()
+		// The encoder mutates RenderModel before emitting the ChangeSet. A
+		// rejected ChangeSet (currently: a retry reset removing a cell that the
+		// Scene already committed) therefore leaves Scene behind the model and,
+		// worse, can leave the stale mutable cell ahead of every later cell.
+		// MutableCell() returns the first mutable cell, so that stale cell pins
+		// the AppState active cell forever and the TUI stops repainting.
+		//
+		// Rebuild from the authoritative render model instead of keeping the
+		// partial divergence. The caller publishes the rebuilt snapshot through
+		// the normal ReplaceTranscriptAction path after releasing renderMu.
+		if resyncErr := b.rebuildSceneFromRenderModelLocked(); resyncErr != nil {
+			b.sceneLastError = fmt.Sprintf("%s; scene resync failed: %v", err, resyncErr)
+		} else {
+			b.sceneLastError = fmt.Sprintf("%s; scene resynced from render model", err)
+			resynced = true
+		}
 	}
 	// T6：scene 层窗口化（默认关闭 → 空操作；开启且写穿成功才裁剪）。
 	b.applySceneTrimPolicyLocked()
+	return resynced
+}
+
+// rebuildSceneFromRenderModelLocked reconstructs Scene from the encoder's
+// current RenderModel. Callers must hold b.renderMu (the model is not
+// concurrent-safe) and b.sceneMu (the Scene/mapper pointers are guarded).
+//
+// A ChangeSet is atomic, but the encoder and Scene are two separate state
+// machines. If a later mutation fails, the encoder has already applied the
+// whole event while Scene rolls back. Replaying every model item as an append
+// into a fresh Scene is the only recovery that restores the single-active-cell
+// invariant and drops retry artifacts that the encoder already removed.
+func (b *chatRuntimeEventBridge) rebuildSceneFromRenderModelLocked() error {
+	if b == nil || b.renderEncoder == nil {
+		return fmt.Errorf("render encoder unavailable")
+	}
+	model := b.renderEncoder.Snapshot()
+	if model == nil {
+		return fmt.Errorf("render model unavailable")
+	}
+	// Tool outputs are separate RenderModel items but one Scene cell. The live
+	// mapper merges an output into its chain head while the head is still
+	// mutable and finalizes the head after the batch. Replaying the final model
+	// verbatim would append the already-terminal tool_call first and then try
+	// to update a committed cell for its tool_output. Collapse each chain into
+	// one append with the same source concatenation the live path uses.
+	toolCallIDs := make(map[string]struct{})
+	outputsByCall := make(map[string][]*encoding.Item)
+	for _, it := range model.Items {
+		if it == nil {
+			continue
+		}
+		switch it.Kind {
+		case encoding.KindToolCall:
+			toolCallIDs[it.ID] = struct{}{}
+		case encoding.KindToolOutput:
+			if it.CauseID != "" {
+				outputsByCall[it.CauseID] = append(outputsByCall[it.CauseID], it)
+			}
+		}
+	}
+	cs := &encoding.ChangeSet{}
+	for _, it := range model.Items {
+		if it == nil {
+			continue
+		}
+		if it.Kind == encoding.KindToolOutput {
+			if _, merged := toolCallIDs[it.CauseID]; merged {
+				continue
+			}
+		}
+		if it.Kind == encoding.KindToolCall {
+			clone := *it
+			for _, output := range outputsByCall[it.ID] {
+				if output == nil {
+					continue
+				}
+				if output.Head != "" {
+					if clone.Head != "" {
+						clone.Head += "\n"
+					}
+					clone.Head += output.Head
+				}
+				if output.Presentation.Kind != encoding.PresentationPlain {
+					clone.Presentation = output.Presentation
+				}
+			}
+			cs.Changes = append(cs.Changes, encoding.ItemChange{
+				Op:   encoding.OpAppend,
+				Item: &clone,
+			})
+			continue
+		}
+		cs.Changes = append(cs.Changes, encoding.ItemChange{
+			Op:   encoding.OpAppend,
+			Item: it,
+		})
+	}
+	fresh := scene.New()
+	mapper := scene.NewChangeSetMapper(fresh)
+	if _, _, err := mapper.Apply(cs); err != nil {
+		return err
+	}
+	b.renderScene = fresh
+	b.renderMapper = mapper
+	return nil
 }
 
 // eventLogFilePath 返回事件日志文件路径（测试可注入覆盖）。
@@ -7094,6 +7208,14 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	// isChatRenderDataPlaneSuppressedEvent 中声明为「只进事件日志」，因此不会
 	// 污染 Scene/消息流。
 	if isLSPObservationBusEvent(event.Type) {
+		return false
+	}
+	// turn.resumed is the control-plane edge that opens/closes a parked turn's
+	// resumed episode. It must reach the renderer even when it arrives before
+	// the resumed run's session_start (the wake-start edge is persisted by the
+	// host at delivery time), otherwise the JSONL journal and replay miss the
+	// only event that distinguishes "resume started" from "settled closure".
+	if event.Type == runtimeevents.EventTurnResumed {
 		return false
 	}
 	// Blocking interactive events (approval, question) must reach the user

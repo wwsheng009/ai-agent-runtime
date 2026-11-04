@@ -47,10 +47,16 @@ func (h *Handler) projectBackgroundJobTerminal(parent context.Context, event bac
 	defer cancel()
 
 	command, observed := h.backgroundJobDigestInfo(ctx, jobID)
+	origin := h.backgroundJobOrigin(ctx, jobID)
 	_, _ = supervision.ProjectBackgroundJobTerminal(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobTerminalInput{
 		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
 		TargetParentSessionID: sessionID,
 		JobID:                 jobID,
+		ParentTurnID:          origin.ParentTurnID,
+		ParentEpisodeID:       origin.ParentEpisodeID,
+		SettlementID:          origin.SettlementID,
+		SettlementCohortID:    origin.SettlementCohortID,
+		FinalizationPolicy:    origin.FinalizationPolicy,
 		Status:                event.Type,
 		Command:               command,
 		ExitCode:              backgroundJobPayloadString(event.Payload["exit_code"]),
@@ -88,10 +94,16 @@ func (h *Handler) projectBackgroundJobMonitor(parent context.Context, event back
 	defer cancel()
 
 	command, _ := h.backgroundJobDigestInfo(ctx, jobID)
+	origin := h.backgroundJobOrigin(ctx, jobID)
 	_, _ = supervision.ProjectBackgroundJobMonitor(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobMonitorInput{
 		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
 		TargetParentSessionID: sessionID,
 		JobID:                 jobID,
+		ParentTurnID:          origin.ParentTurnID,
+		ParentEpisodeID:       origin.ParentEpisodeID,
+		SettlementID:          origin.SettlementID,
+		SettlementCohortID:    origin.SettlementCohortID,
+		FinalizationPolicy:    origin.FinalizationPolicy,
 		Status:                backgroundJobPayloadString(event.Payload["status"]),
 		Command:               command,
 		Elapsed:               backgroundJobPayloadDuration(event.Payload["elapsed_ms"]),
@@ -198,6 +210,26 @@ func (h *Handler) backgroundJobDigestInfo(ctx context.Context, jobID string) (st
 		return "", false
 	}
 	return job.Command, background.TerminalObserved(job)
+}
+
+// backgroundJobOrigin reads the parent identity captured at job submission.
+// Missing metadata is a legacy/direct job and deliberately remains zero, which
+// forces the projection's detached notification-only fallback.
+func (h *Handler) backgroundJobOrigin(ctx context.Context, jobID string) background.JobOrigin {
+	if h == nil {
+		return background.JobOrigin{}
+	}
+	h.backgroundMu.Lock()
+	manager := h.backgroundManager
+	h.backgroundMu.Unlock()
+	if manager == nil {
+		return background.JobOrigin{}
+	}
+	job, err := manager.GetJob(ctx, jobID)
+	if err != nil || job == nil {
+		return background.JobOrigin{}
+	}
+	return background.JobOriginFromMetadata(job.Metadata)
 }
 
 func backgroundJobPayloadString(value interface{}) string {

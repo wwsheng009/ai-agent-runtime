@@ -31,6 +31,11 @@ type BackgroundJobMonitorInput struct {
 	RootScopeID           string
 	TargetParentSessionID string
 	JobID                 string
+	ParentTurnID          string
+	ParentEpisodeID       string
+	SettlementID          string
+	SettlementCohortID    string
+	FinalizationPolicy    string
 	// Status is the job's current state at check time (pending|running).
 	Status string
 	// Command is an optional command excerpt for the digest reason.
@@ -94,6 +99,11 @@ func ProjectBackgroundJobMonitor(ctx context.Context, store Store, wakes *WakeSc
 	if _, err := wakes.ScheduleWake(ctx, WakeRequest{
 		RootScopeID:           notification.RootScopeID,
 		TargetParentSessionID: notification.TargetParentSessionID,
+		TurnID:                strings.TrimSpace(in.ParentTurnID),
+		ParentEpisodeID:       strings.TrimSpace(in.ParentEpisodeID),
+		FinalizationPolicy:    normalizeBackgroundJobPolicy(in.FinalizationPolicy),
+		SettlementID:          strings.TrimSpace(in.SettlementID),
+		SettlementCohortID:    strings.TrimSpace(in.SettlementCohortID),
 		WakeReason:            notification.EventType,
 		NotificationSeq:       notification.EventSeq,
 		ObligationID:          notification.SubjectID,

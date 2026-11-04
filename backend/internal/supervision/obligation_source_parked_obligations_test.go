@@ -100,6 +100,38 @@ func TestBatchObligationSource_ProjectsParkedAgentSessionAndTeamObligations(t *t
 	require.Contains(t, AutoWakePromptFor(rc), "可以直接收尾")
 }
 
+func TestBatchObligationSource_ProjectsRequiredBackgroundJobs(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeBatchStore{suspensions: []*subagentbatch.TurnSuspension{{
+		TurnID:      "turn-1",
+		SessionID:   "root-session-1",
+		RootScopeID: "root-session-1",
+		ObligationIDs: []string{
+			subagentbatch.BackgroundJobObligationID("job-done"),
+			subagentbatch.BackgroundJobObligationID("job-live"),
+			subagentbatch.BackgroundJobObligationID("job-missing"),
+		},
+	}}}
+	source := NewBatchObligationSourceWithObligationResolvers(store, subagentbatch.ObligationResolvers{
+		BackgroundJobs: stubAdmissionBackgroundJobs{"job-done": true, "job-live": false},
+	})
+
+	rows, err := source.ListObligations(ctx, "root-session-1")
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	require.Equal(t, "job:job-done", rows[0].ID)
+	require.Equal(t, "background_job", rows[0].Kind)
+	require.Equal(t, ObligationStateCompleted, rows[0].State)
+	require.True(t, rows[0].Terminal)
+	require.Equal(t, ObligationStateRunning, rows[1].State)
+	require.Equal(t, ObligationStatePending, rows[2].State, "a missing job is never evidence of completion")
+
+	rc := BuildResumeContext(ctx, source, nil, ResumeContextRequest{ParentSessionID: "root-session-1"})
+	require.Equal(t, 2, rc.PendingCount)
+	require.False(t, rc.Terminal)
+	require.Contains(t, rc.Text, "job:job-live：运行中，尚未结束")
+}
+
 // TestBatchObligationSource_UnwiredResolversNeverFinalizeParkedChild pins the
 // conservative direction: without the child-session control plane the row stays
 // non-terminal. A host that cannot judge a child must never be told to finalize

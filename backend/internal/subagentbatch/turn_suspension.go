@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+// FinalizationPolicy declares whether an obligation blocks the parent turn's
+// finalization or only produces a late notification once the turn is done.
+// The zero value is treated as required for compatibility with every existing
+// batch / child-session / team obligation.
+type FinalizationPolicy string
+
+const (
+	FinalizationPolicyRequired         FinalizationPolicy = "required"
+	FinalizationPolicyDetached         FinalizationPolicy = "detached"
+	FinalizationPolicyExplicitFollowup FinalizationPolicy = "explicit_followup"
+)
+
+// NormalizeFinalizationPolicy canonicalizes a policy value. Empty and unknown
+// values fall back to required: an untyped old obligation must keep blocking
+// the parent turn rather than silently becoming detached.
+func NormalizeFinalizationPolicy(value FinalizationPolicy) FinalizationPolicy {
+	switch FinalizationPolicy(strings.ToLower(strings.TrimSpace(string(value)))) {
+	case FinalizationPolicyDetached:
+		return FinalizationPolicyDetached
+	case FinalizationPolicyExplicitFollowup:
+		return FinalizationPolicyExplicitFollowup
+	default:
+		return FinalizationPolicyRequired
+	}
+}
+
 // TurnSuspension is the §6.12 parked-turn record: the durable evidence that a
 // parent turn handed work to background obligations and parked itself instead
 // of blocking. The design names exactly these fields
@@ -19,6 +45,11 @@ import (
 type TurnSuspension struct {
 	// TurnID identifies the parked parent turn.
 	TurnID string
+	// EpisodeID identifies the logical episode of the parked turn. Automatic
+	// resumes reuse this id; a user follow-up after finalization starts a new
+	// episode. Empty is a legacy record and can only be notified, never
+	// automatically resumed.
+	EpisodeID string
 	// SessionID is the parent session that owns the turn.
 	SessionID string
 	// RootScopeID groups every turn of one supervision scope (normally the
@@ -37,6 +68,10 @@ type TurnSuspension struct {
 	// ResumeQueue holds the wake keys that will drive the resume; ordering is
 	// the delivery order and duplicates are preserved.
 	ResumeQueue []string
+	// ObligationPolicies records a non-required policy per obligation. A
+	// missing entry means required, which keeps every existing dispatch path
+	// blocking finalization without a schema data migration.
+	ObligationPolicies map[string]FinalizationPolicy
 }
 
 // Clone returns a deep copy so callers cannot mutate stored slices.
@@ -45,8 +80,15 @@ func (t *TurnSuspension) Clone() *TurnSuspension {
 		return nil
 	}
 	out := *t
+	out.EpisodeID = strings.TrimSpace(t.EpisodeID)
 	out.ObligationIDs = append([]string(nil), t.ObligationIDs...)
 	out.ResumeQueue = append([]string(nil), t.ResumeQueue...)
+	if len(t.ObligationPolicies) > 0 {
+		out.ObligationPolicies = make(map[string]FinalizationPolicy, len(t.ObligationPolicies))
+		for id, policy := range t.ObligationPolicies {
+			out.ObligationPolicies[id] = NormalizeFinalizationPolicy(policy)
+		}
+	}
 	return &out
 }
 
@@ -57,6 +99,7 @@ func (t *TurnSuspension) normalize() {
 		return
 	}
 	t.TurnID = strings.TrimSpace(t.TurnID)
+	t.EpisodeID = strings.TrimSpace(t.EpisodeID)
 	t.SessionID = strings.TrimSpace(t.SessionID)
 	t.RootScopeID = strings.TrimSpace(t.RootScopeID)
 	if t.RootScopeID == "" {
@@ -64,6 +107,64 @@ func (t *TurnSuspension) normalize() {
 	}
 	t.ObligationIDs = normalizeIDList(t.ObligationIDs)
 	t.ResumeQueue = normalizeIDList(t.ResumeQueue)
+	if len(t.ObligationPolicies) == 0 {
+		t.ObligationPolicies = nil
+		return
+	}
+	policies := make(map[string]FinalizationPolicy, len(t.ObligationPolicies))
+	for id, policy := range t.ObligationPolicies {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		normalized := NormalizeFinalizationPolicy(policy)
+		if normalized == FinalizationPolicyRequired {
+			// Required is the implicit default. Keeping it out of the map keeps
+			// old and new records byte-identical for existing dispatch paths.
+			continue
+		}
+		policies[id] = normalized
+	}
+	if len(policies) == 0 {
+		t.ObligationPolicies = nil
+		return
+	}
+	t.ObligationPolicies = policies
+}
+
+// PolicyForObligation returns the declared policy for one obligation. Missing
+// entries are required, including every obligation written before policies
+// existed.
+func (t *TurnSuspension) PolicyForObligation(obligationID string) FinalizationPolicy {
+	if t == nil {
+		return FinalizationPolicyRequired
+	}
+	obligationID = strings.TrimSpace(obligationID)
+	if policy, ok := t.ObligationPolicies[obligationID]; ok {
+		return NormalizeFinalizationPolicy(policy)
+	}
+	return FinalizationPolicyRequired
+}
+
+// RequiredObligationIDs returns only the obligations that block finalization.
+// Detached / explicit-followup entries stay on the record for evidence but do
+// not gate the parent turn.
+func (t *TurnSuspension) RequiredObligationIDs() []string {
+	if t == nil {
+		return nil
+	}
+	ids := normalizeIDList(t.ObligationIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	required := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if t.PolicyForObligation(id) != FinalizationPolicyRequired {
+			continue
+		}
+		required = append(required, id)
+	}
+	return required
 }
 
 func normalizeIDList(values []string) []string {
@@ -176,6 +277,54 @@ func (t *TurnSuspension) ObligationTeamIDs() []string {
 	return teamIDs
 }
 
+// BackgroundJobObligationPrefix marks an obligation backed by a durable
+// background job (job_start with finalization_policy=required). The job lives
+// in the background manager/store, not in the batch table, so the settle and
+// resume predicates must ask the host for its durable state. The prefix keeps
+// one persisted representation (obligation_ids_json) and prevents a job id from
+// being mistaken for a batch id.
+const BackgroundJobObligationPrefix = "job:"
+
+// BackgroundJobObligationID renders the obligation id for one background job.
+func BackgroundJobObligationID(jobID string) string {
+	return BackgroundJobObligationPrefix + strings.TrimSpace(jobID)
+}
+
+// IsBackgroundJobObligation reports whether an obligation id is backed by a
+// background job.
+func IsBackgroundJobObligation(obligationID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(obligationID), BackgroundJobObligationPrefix)
+}
+
+// BackgroundJobIDFromObligation returns the job id encoded in a job obligation
+// id ("" when the id is batch-, child-session-, or team-backed).
+func BackgroundJobIDFromObligation(obligationID string) string {
+	trimmed := strings.TrimSpace(obligationID)
+	if !strings.HasPrefix(trimmed, BackgroundJobObligationPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, BackgroundJobObligationPrefix))
+}
+
+// ObligationBackgroundJobIDs lists the background-job obligations in record
+// order (batch-, child-session-, and team-backed ids are ignored).
+func (t *TurnSuspension) ObligationBackgroundJobIDs() []string {
+	if t == nil {
+		return nil
+	}
+	obligations := normalizeIDList(t.ObligationIDs)
+	if len(obligations) == 0 {
+		return nil
+	}
+	var jobIDs []string
+	for _, obligation := range obligations {
+		if jobID := BackgroundJobIDFromObligation(obligation); jobID != "" {
+			jobIDs = append(jobIDs, jobID)
+		}
+	}
+	return jobIDs
+}
+
 // TurnObligationsSettled reports whether every obligation referenced by the
 // parked-turn record reached a terminal state, i.e. whether the parked turn may
 // end (design §6.12 / EC-E1 "turn 永不结束").
@@ -211,7 +360,7 @@ func (t *TurnSuspension) ObligationBatchIDs() []string {
 	for _, obligation := range obligations {
 		// Child-session / team-run obligations are not batches; the fallback
 		// exists for batch ids written without a resume queue.
-		if IsAgentSessionObligation(obligation) || IsTeamObligation(obligation) {
+		if IsAgentSessionObligation(obligation) || IsTeamObligation(obligation) || IsBackgroundJobObligation(obligation) {
 			continue
 		}
 		return []string{obligation}

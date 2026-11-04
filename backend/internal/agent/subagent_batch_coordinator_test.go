@@ -58,6 +58,11 @@ func (f *fakeExecutor) RunChildren(ctx context.Context, options SubagentRunOptio
 	}
 	for _, task := range tasks {
 		options.notifyTaskEvent(task.ID, "started")
+		for _, result := range f.results {
+			if result.ID == task.ID && strings.TrimSpace(result.SessionID) != "" {
+				options.notifyTaskBound(task.ID, result.SessionID)
+			}
+		}
 	}
 	if f.started != nil {
 		close(f.started)

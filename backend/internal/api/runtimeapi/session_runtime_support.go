@@ -1263,11 +1263,10 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
 		// "全部义务成功"的挂起 turn 会永久停放，与 subagent_spawn 的
 		// "auto-resumes it on the child's terminal event" 契约相悖。
-		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+		_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 			ctx,
 			c.handler.getSubagentBatchStore(),
-			c.handler.agentSessionObligationResolver(),
-			c.handler.teamObligationResolver(),
+			c.handler.obligationResolvers(),
 			c.handler.getSupervisionWakeScheduler(),
 			parentSessionID,
 			rootScopeID,
@@ -2439,7 +2438,7 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 	// §6.12：子会话义务（agent_session:）与批次义务同源判读——resolver 读
 	// supervision 控制面，未装配时为 nil，此时这些行以 missing 保持 pending
 	// （保守方向，绝不把读不到的义务当完成）。
-	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, batches, record, c.handler.agentSessionObligationResolver())
+	rows, err := subagentbatch.BuildWaitLedgerWithResolvers(ctx, batches, record, c.handler.obligationResolvers())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}
@@ -2532,10 +2531,10 @@ func (c *sessionAgentController) waitTargetObligations(ctx context.Context, args
 	if len(batchIDs) == 0 {
 		return nil, nil, false
 	}
-	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, store, &subagentbatch.TurnSuspension{
+	rows, err := subagentbatch.BuildWaitLedgerWithResolvers(ctx, store, &subagentbatch.TurnSuspension{
 		SessionID:   parentSessionID,
 		ResumeQueue: batchIDs,
-	}, c.handler.agentSessionObligationResolver())
+	}, c.handler.obligationResolvers())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false
 	}

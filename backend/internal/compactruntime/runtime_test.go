@@ -38,6 +38,11 @@ type compactRemoteProvider struct {
 	response        *llm.RemoteCompactResponse
 }
 
+type compactRejectMaxTokensProvider struct {
+	*compactTestProvider
+	requests []*llm.LLMRequest
+}
+
 func (p *compactTestProvider) Name() string { return p.name }
 
 func (p *compactTestProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
@@ -125,6 +130,14 @@ func (p *compactRemoteProvider) RemoteCompact(ctx context.Context, req llm.Remot
 	return response, nil
 }
 
+func (p *compactRejectMaxTokensProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	p.requests = append(p.requests, cloneLLMRequest(req))
+	if req != nil && req.MaxTokens > 0 {
+		return nil, fmt.Errorf("HTTP 400: unsupported parameter: max_tokens")
+	}
+	return p.compactTestProvider.Stream(ctx, req)
+}
+
 func TestMaybeCompactUsesModelSpecificLimit(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -210,7 +223,51 @@ func TestMaybeCompactUsesModelSpecificCompactSettings(t *testing.T) {
 	require.Equal(t, 1, provider.streamCount)
 	require.NotNil(t, provider.lastRequest)
 	assert.Equal(t, 4096, provider.lastRequest.MaxTokens)
+	assert.NotEqual(t, true, provider.lastRequest.Metadata[llm.MetadataKeyOmitMaxTokens])
 	assert.Equal(t, "none", provider.lastRequest.ReasoningEffort)
+}
+
+func TestMaybeCompactRetriesWithoutMaxTokensWhenProviderRejectsIt(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	base := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      272000,
+				MaxTokens:             4096,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	provider := &compactRejectMaxTokensProvider{compactTestProvider: base}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-max-tokens-unsupported",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, provider.requests, 2)
+	require.Equal(t, 4096, provider.requests[0].MaxTokens)
+	require.Zero(t, provider.requests[1].MaxTokens)
+	require.Equal(t, true, provider.requests[1].Metadata[llm.MetadataKeyOmitMaxTokens])
+	require.Equal(t, 1, base.streamCount)
+
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
+	require.NotEqual(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 }
 
 func TestFitLocalCompactSummaryMaxTokensReservesRecentContext(t *testing.T) {
@@ -218,6 +275,7 @@ func TestFitLocalCompactSummaryMaxTokensReservesRecentContext(t *testing.T) {
 	maxTokens := fitLocalCompactSummaryMaxTokens(
 		2048,
 		Request{ReplacementTokenLimit: 600},
+		0,
 		[]types.Message{*types.NewSystemMessage("system")},
 		[]types.Message{
 			*types.NewUserMessage("active request"),
@@ -227,6 +285,32 @@ func TestFitLocalCompactSummaryMaxTokensReservesRecentContext(t *testing.T) {
 	)
 
 	require.Equal(t, 240, maxTokens)
+}
+
+func TestFitLocalCompactSummaryMaxTokensCapsByContextWindow(t *testing.T) {
+	maxTokens := fitLocalCompactSummaryMaxTokens(
+		16384,
+		Request{},
+		5000,
+		nil,
+		nil,
+		nil,
+	)
+
+	require.Equal(t, 2500, maxTokens)
+}
+
+func TestFitLocalCompactSummaryMaxTokensLeavesUnconfiguredBudgetUnset(t *testing.T) {
+	maxTokens := fitLocalCompactSummaryMaxTokens(
+		0,
+		Request{ReplacementTokenLimit: 6000},
+		5000,
+		[]types.Message{*types.NewSystemMessage("system")},
+		[]types.Message{*types.NewUserMessage("active request")},
+		func(messages []types.Message) int { return len(messages) * 60 },
+	)
+
+	require.Zero(t, maxTokens, "no explicit model budget must not be replaced by a local default")
 }
 
 func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t *testing.T) {
@@ -270,6 +354,8 @@ func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t
 	require.Equal(t, 1, provider.streamCount)
 	require.NotNil(t, provider.lastRequest)
 	assert.True(t, provider.lastRequest.Stream)
+	assert.Zero(t, provider.lastRequest.MaxTokens)
+	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyOmitMaxTokens])
 	assert.Empty(t, provider.lastRequest.ReasoningEffort)
 	assert.Equal(t, "compact", provider.lastRequest.Metadata[llm.MetadataKeyInternalOperation])
 	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableRetries])
@@ -796,6 +882,75 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t
 	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "tool_calls")
+}
+
+func TestValidateCompactStreamDoneRejectsOutputLimitReasons(t *testing.T) {
+	for _, reason := range []string{
+		"length",
+		"max_tokens",
+		"max_output_tokens",
+		"max_output_tokens_exceeded",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			err := validateCompactStreamDone(map[string]interface{}{"finish_reason": reason})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "truncated by output limit")
+		})
+	}
+}
+
+func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamTruncatedByLength(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		streamChunks: []llm.StreamChunk{
+			{
+				Type:    llm.EventTypeText,
+				Content: "Compacted context from earlier turns:\n# Handoff Summary\n\n## 1. Current goal\n- partial",
+			},
+			{
+				Type: llm.EventTypeDone,
+				Done: true,
+				Metadata: map[string]interface{}{
+					"finish_reason": "length",
+				},
+			},
+		},
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      272000,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-fallback-length",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 0, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
+
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
+	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+	require.NotContains(t, summary.Content, "- partial")
+	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "finish_reason=length")
 }
 
 func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
@@ -1904,11 +2059,11 @@ func TestMaybeCompactDegradesInlineImageBytesFromPinnedUserTurn(t *testing.T) {
 	}
 
 	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
-		SessionID: "session-image-pinned-user",
-		Model:     "gpt-5",
-		Force:     true,
-		History:   history,
-		Phase:     PhaseMidTurn,
+		SessionID:   "session-image-pinned-user",
+		Model:       "gpt-5",
+		Force:       true,
+		History:     history,
+		Phase:       PhaseMidTurn,
 		CountTokens: counter,
 	})
 	require.NoError(t, err)

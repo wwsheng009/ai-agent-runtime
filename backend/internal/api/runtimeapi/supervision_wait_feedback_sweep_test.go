@@ -109,6 +109,40 @@ func TestAPIWaitFeedbackSweepSkipsBusyParent(t *testing.T) {
 	requireNoPendingAPIWake(t, handler, apiProgressCheckParentSession, "a skipped sweep leaves no stale wake behind")
 }
 
+// TestAPIWaitFeedbackSweepRecoversStaleClaims keeps the default-on API tick
+// useful on an idle host: even when no parent is parked, an abandoned claim
+// must converge and never open a duplicate model turn.
+func TestAPIWaitFeedbackSweepRecoversStaleClaims(t *testing.T) {
+	handler, _ := newAPIProgressCheckFixture(t, "api-wait-feedback-claim", subagentbatch.BatchRunning)
+	ctx := context.Background()
+	handler.supervisionWakeMu.Lock()
+	handler.supervisionWake.Admission = handler.newAPIResumeAdmission()
+	handler.supervisionWakeMu.Unlock()
+	require.NotNil(t, handler.supervisionWake.Admission)
+
+	claim, won, err := handler.getSupervisionStore().ClaimResume(ctx, supervision.ResumeClaim{
+		ClaimKey:        "api-sweep-stale-claim",
+		RootScopeID:     apiProgressCheckParentSession,
+		ParentSessionID: apiProgressCheckParentSession,
+		ParentTurnID:    "turn-api-sweep-claim",
+		ParentEpisodeID: "ep-api-sweep-claim",
+		SettlementID:    "settlement-api-sweep-claim",
+		ClaimedAt:       time.Now().UTC().Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	scheduled, err := handler.runSupervisionWaitFeedbackSweepOnce(ctx)
+	require.NoError(t, err)
+	require.Zero(t, scheduled, "claim maintenance alone must not schedule a feedback wake")
+
+	stored, err := handler.getSupervisionStore().GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, supervision.ResumeClaimStateSubmitted, stored.State)
+	require.Equal(t, "recovered_unknown", stored.ModelTurnID)
+}
+
 // TestAPIWaitFeedbackSweepDefersToPendingWake mirrors the pending-wake gate: a
 // lifecycle wake already in flight owns the next episode, so feedback must not
 // race a duplicate.

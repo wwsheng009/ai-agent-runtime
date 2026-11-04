@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
 // selfCheckTestScheduler builds the shape that reaches the self-check in
@@ -209,4 +210,113 @@ func TestSelfCheck_ResolvesStaleWakeWithoutSpendingAllowance(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pending, "the stale wake is dropped instead of retried every window")
 	require.True(t, scheduler.AllowSelfCheck(wakeBudgetTestRoot), "the stale path spent no allowance")
+}
+
+func TestSelfCheck_FinalizedParentConsumesNotifyOnlyWithoutTurn(t *testing.T) {
+	store := newTestStore(t, "self-check-finalized")
+	ctx := context.Background()
+	scheduler := selfCheckTestScheduler(store, 1)
+	projectTestWake(t, store, scheduler, "child-finalized", WakeReasonExecutionFailed, SeverityCritical)
+
+	admission := NewResumeAdmissionService(ResumeAdmissionConfig{
+		ParentStates: staticParentTurnResolver{snapshot: &ParentTurnSnapshot{
+			SessionID: wakeBudgetTestRoot,
+			Status:    "idle",
+			Phase:     ParentTurnFinalized,
+		}},
+		Claims: store,
+	})
+	delivered := 0
+	consumer := selfCheckTestConsumer(
+		t,
+		scheduler,
+		func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
+		func(*Digest) error {
+			delivered++
+			return nil
+		},
+	)
+	consumer.Admission = admission
+
+	started, err := consumer.MaybeSelfCheckParent(ctx, wakeBudgetTestRoot, "", wakeBudgetTestRoot)
+	require.NoError(t, err)
+	require.False(t, started)
+	require.Zero(t, delivered, "a finalized parent must not get a self-check model turn")
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: wakeBudgetTestRoot, UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "the late wake is consumed as notification-only")
+}
+
+func TestSelfCheck_ClaimsAndConsumesAdmittedSettlement(t *testing.T) {
+	ctx := context.Background()
+	batches := newAdmissionBatchStore(t, "self-check-claim-batches")
+	batchID := seedAdmissionParkedBatch(t, batches, subagentbatch.BatchCompleted, "ep-admit")
+	store := newTestStore(t, "self-check-claim-supervision")
+	scheduler := selfCheckTestScheduler(store, 1)
+
+	_, err := ProjectLifecycle(ctx, store, scheduler, LifecycleProjection{
+		RootScopeID:           "sess-admit",
+		TargetParentSessionID: "sess-admit",
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             batchID,
+		SubjectVersion:        1,
+		EventType:             "subagent.batch.failed",
+		Severity:              SeverityCritical,
+		SupervisionState:      SupervisionTerminated,
+		Reason:                "batch failed",
+		ResolutionState:       ResolutionUnresolved,
+		TurnID:                "turn-admit",
+		EpisodeID:             "ep-admit",
+		FinalizationPolicy:    string(subagentbatch.FinalizationPolicyRequired),
+	})
+	require.NoError(t, err)
+
+	admission := NewResumeAdmissionService(ResumeAdmissionConfig{
+		Suspensions:  batches,
+		ParentStates: staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
+		Claims:       store,
+	})
+	delivered := 0
+	var announcement ResumeAnnouncement
+	consumer := &WakeConsumer{
+		Wakes:     scheduler,
+		Admission: admission,
+		Runnable:  func(context.Context, string, string, string) bool { return true },
+		Deliver: func(_ context.Context, _, _ string, _ *Digest, wakeIDs []string) error {
+			require.NotEmpty(t, wakeIDs, "an admitted self-check must consume the settlement wakes")
+			delivered++
+			return nil
+		},
+		Announce: func(_ context.Context, got ResumeAnnouncement) {
+			announcement = got
+		},
+	}
+	started, err := consumer.MaybeSelfCheckParent(ctx, "sess-admit", "", "sess-admit")
+	require.NoError(t, err)
+	require.True(t, started)
+	require.Equal(t, 1, delivered)
+	require.Equal(t, "turn-admit", announcement.TurnID)
+	require.Equal(t, "ep-admit", announcement.EpisodeID)
+	require.Equal(t, "sess-admit", announcement.ParentSessionID)
+	require.NotEmpty(t, announcement.WakeIDs,
+		"the self-check start milestone must name the settlement it consumed")
+	require.Equal(t, "started", announcement.EventPayload()["phase"],
+		"self-check and the ordinary wake path must share the same start edge")
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "sess-admit", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "delivered self-check wakes must not replay in the next window")
+
+	result, err := admission.Evaluate(ctx, ResumeAdmissionInput{
+		RootScopeID:        "sess-admit",
+		ParentSessionID:    "sess-admit",
+		ParentTurnID:       "turn-admit",
+		ParentEpisodeID:    "ep-admit",
+		ObligationID:       batchID,
+		FinalizationPolicy: string(subagentbatch.FinalizationPolicyRequired),
+		EventKind:          WakeEventTerminal,
+	})
+	require.NoError(t, err)
+	require.Equal(t, NotifyOnly, result.Decision)
+	require.Equal(t, "settlement_already_submitted", result.Reason)
 }

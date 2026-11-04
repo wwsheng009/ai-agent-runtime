@@ -187,6 +187,192 @@ func TestChatRuntimeEventBridge_SceneApplyFailureCounted(t *testing.T) {
 	assertBridgeSceneStats(t, bridge, 1, 1)
 }
 
+// TestChatRuntimeEventBridge_RetryResetResyncsScene reproduces the TUI wedge
+// where a retry reset tries to remove a reasoning cell that the Scene already
+// committed. The whole ChangeSet rolls back, but the encoder has already
+// removed both the assistant and reasoning items from RenderModel. Without a
+// resync the stale mutable assistant remains the first MutableCell(), pinning
+// the AppState active cell and preventing all later transcript rows from being
+// painted.
+func TestChatRuntimeEventBridge_RetryResetResyncsScene(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	base := map[string]interface{}{
+		"trace_id":       "trace-retry-resync",
+		"turn_id":        "turn-retry-resync",
+		"stream_id":      "stream-retry-resync",
+		"llm_request_id": "llm_req_retry_resync",
+		"step":           1,
+	}
+	with := func(extra map[string]interface{}) map[string]interface{} {
+		payload := make(map[string]interface{}, len(base)+len(extra))
+		for key, value := range base {
+			payload[key] = value
+		}
+		for key, value := range extra {
+			payload[key] = value
+		}
+		return payload
+	}
+	post := func(eventType string, payload map[string]interface{}) {
+		t.Helper()
+		bridge.encodeRenderModelEvent(runtimeevents.Event{Type: eventType, Payload: payload})
+	}
+
+	post("llm.request.started", with(nil))
+	post("assistant.reasoning", with(map[string]interface{}{
+		"sequence": uint64(1),
+		"text":     "first attempt thoughts",
+	}))
+	post("assistant_delta", with(map[string]interface{}{
+		"sequence": uint64(1),
+		"delta":    "first attempt partial answer",
+	}))
+	// Success finalizes reasoning (committed) but deliberately keeps the
+	// assistant mutable until the authoritative assistant.message.
+	post("llm.request.finished", with(map[string]interface{}{"success": true}))
+
+	before := bridgeSceneCells(t, bridge)
+	if len(before) != 2 ||
+		before[0].Kind != scene.KindReasoning || before[0].Phase != scene.CellCommitted ||
+		before[1].Kind != scene.KindAssistant || before[1].Phase != scene.CellMutable {
+		t.Fatalf("precondition scene = %+v, want committed reasoning + mutable assistant", before)
+	}
+
+	// Retry reset removes the mutable assistant first, then the committed
+	// reasoning. The latter is rejected and the entire ChangeSet rolls back.
+	post("assistant_stream_reset", with(map[string]interface{}{
+		"attempt": 1,
+		"reason":  "retry",
+	}))
+
+	// The encoder model has both items removed; the Scene must be rebuilt from
+	// that authoritative model instead of retaining the stale mutable cell.
+	cells := bridgeSceneCells(t, bridge)
+	if len(cells) != 0 {
+		t.Fatalf("after failed retry reset scene cells = %+v, want empty after model resync", cells)
+	}
+	if cell := bridge.activeMutableCell(); cell != nil {
+		t.Fatalf("after failed retry reset active mutable cell = %+v, want nil", cell)
+	}
+	_, _, failures, lastErr := bridge.sceneStats()
+	if failures != 1 {
+		t.Fatalf("scene apply failures = %d, want 1", failures)
+	}
+	if !strings.Contains(lastErr, "scene resynced from render model") {
+		t.Fatalf("scene last error = %q, want resync marker", lastErr)
+	}
+
+	// The retry's first reasoning delta must become the new single active cell.
+	post("assistant.reasoning", with(map[string]interface{}{
+		"sequence": uint64(2),
+		"text":     "retry thoughts",
+	}))
+	cell := bridge.activeMutableCell()
+	if cell == nil || cell.Kind != scene.KindReasoning ||
+		!strings.Contains(cell.Source, "retry thoughts") {
+		t.Fatalf("active mutable cell after retry = %+v, want new reasoning cell", cell)
+	}
+	mutable := 0
+	for _, candidate := range bridgeSceneCells(t, bridge) {
+		if candidate.Phase == scene.CellMutable {
+			mutable++
+		}
+	}
+	if mutable != 1 {
+		t.Fatalf("mutable cells after retry = %d, want 1 (single active cell invariant)", mutable)
+	}
+}
+
+// TestChatRuntimeEventBridge_RebuildSceneFromModelMatchesLive verifies the
+// recovery path is not lossy for the normal transcript shapes (user, reasoning,
+// assistant, tool chain, and a second ReAct round). Revisions are intentionally
+// not compared: a rebuilt Scene starts a fresh revision sequence while identity,
+// order, kind, source, phase, and chain ownership must remain identical.
+func TestChatRuntimeEventBridge_RebuildSceneFromModelMatchesLive(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.submitUserInput("hello")
+
+	base := map[string]interface{}{
+		"trace_id":       "trace-rebuild",
+		"turn_id":        "turn-rebuild",
+		"stream_id":      "stream-rebuild-1",
+		"llm_request_id": "llm_req_rebuild",
+		"step":           1,
+	}
+	with := func(extra map[string]interface{}) map[string]interface{} {
+		payload := make(map[string]interface{}, len(base)+len(extra))
+		for key, value := range base {
+			payload[key] = value
+		}
+		for key, value := range extra {
+			payload[key] = value
+		}
+		return payload
+	}
+	post := func(eventType string, payload map[string]interface{}) {
+		t.Helper()
+		bridge.encodeRenderModelEvent(runtimeevents.Event{Type: eventType, Payload: payload})
+	}
+
+	post("llm.request.started", with(nil))
+	post("assistant.reasoning", with(map[string]interface{}{
+		"sequence": uint64(1),
+		"text":     "inspect first",
+	}))
+	post("assistant_delta", with(map[string]interface{}{
+		"sequence": uint64(1),
+		"delta":    "first answer",
+	}))
+	post("tool.requested", with(map[string]interface{}{
+		"tool_call_id": "call-rebuild-1",
+		"tool_name":    "shell",
+	}))
+	post("tool.completed", with(map[string]interface{}{
+		"tool_call_id": "call-rebuild-1",
+		"tool_name":    "shell",
+		"output":       "done",
+	}))
+	post("llm.request.started", with(map[string]interface{}{
+		"stream_id": "stream-rebuild-2",
+		"step":      2,
+	}))
+	post("assistant_delta", with(map[string]interface{}{
+		"stream_id": "stream-rebuild-2",
+		"step":      2,
+		"sequence":  uint64(1),
+		"delta":     "second answer",
+	}))
+
+	before := bridgeSceneCells(t, bridge)
+	if len(before) < 4 {
+		t.Fatalf("live scene cells = %d, want user + reasoning + assistant + tool chain", len(before))
+	}
+
+	bridge.renderMu.Lock()
+	bridge.sceneMu.Lock()
+	err := bridge.rebuildSceneFromRenderModelLocked()
+	bridge.sceneMu.Unlock()
+	bridge.renderMu.Unlock()
+	if err != nil {
+		t.Fatalf("rebuildSceneFromRenderModelLocked: %v", err)
+	}
+
+	after := bridgeSceneCells(t, bridge)
+	if len(after) != len(before) {
+		t.Fatalf("rebuilt cells = %d, want %d", len(after), len(before))
+	}
+	for i := range before {
+		if after[i].ID != before[i].ID ||
+			after[i].Kind != before[i].Kind ||
+			after[i].Source != before[i].Source ||
+			after[i].Phase != before[i].Phase ||
+			after[i].ChainKey != before[i].ChainKey ||
+			after[i].BoundaryGroupKey != before[i].BoundaryGroupKey {
+			t.Fatalf("rebuilt cell %d = %+v, want %+v", i, after[i], before[i])
+		}
+	}
+}
+
 // TestChatRuntimeEventBridge_SceneConsistentUnderOutOfOrderDeltas 验证乱序
 // 注入下 Scene 与模型一致：编码器按 sequence 有序提交（乱序段缓存、连续
 // 补拼，对齐旧终端 orderAssistantDelta 重排语义），Scene 消费端不额外推断

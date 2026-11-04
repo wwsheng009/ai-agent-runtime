@@ -71,6 +71,7 @@ func TestWakeConsumerAnnouncesResumeOnlyAfterDelivery(t *testing.T) {
 			EventType:             "execution_failed",
 			Severity:              SeverityCritical,
 			SupervisionState:      SupervisionTimedOut,
+			EpisodeID:             "ep-announce",
 		})
 		require.NoError(t, err)
 	}
@@ -98,6 +99,8 @@ func TestWakeConsumerAnnouncesResumeOnlyAfterDelivery(t *testing.T) {
 	mu.Unlock()
 	require.Equal(t, "root-announce", announcement.ParentSessionID)
 	require.Equal(t, "root-announce", announcement.RootScopeID)
+	require.Equal(t, "ep-announce", announcement.EpisodeID)
+	require.Equal(t, "ep-announce", announcement.EventPayload()["episode_id"])
 	require.Equal(t, ResumeTriggerTerminal, announcement.Trigger, "execution_failed 必须归入 terminal")
 	require.NotEmpty(t, announcement.WakeIDs)
 	require.Equal(t, []string{"execution_failed"}, announcement.WakeReasons)

@@ -31,6 +31,12 @@ func BackgroundJobTerminalDisposition(status string) (string, Severity, Supervis
 		return "background_job_orphaned", SeverityCritical, SupervisionOrphaned
 	case "cancelled":
 		return "background_job_cancelled", SeverityWarning, SupervisionTerminated
+	case "interrupted":
+		return "background_job_interrupted", SeverityCritical, SupervisionTerminated
+	case "expired":
+		return "background_job_expired", SeverityWarning, SupervisionTerminated
+	case "abandoned":
+		return "background_job_abandoned", SeverityWarning, SupervisionTerminated
 	default:
 		return "", "", ""
 	}
@@ -73,8 +79,18 @@ type BackgroundJobTerminalInput struct {
 	RootScopeID           string
 	TargetParentSessionID string
 	JobID                 string
+	// Parent turn/episode identity captured when the job was submitted. A job
+	// without it is a legacy/direct submission: it stays notification-only and
+	// can never be upgraded to an automatic parent turn by an idle actor.
+	ParentTurnID       string
+	ParentEpisodeID    string
+	SettlementID       string
+	SettlementCohortID string
+	// FinalizationPolicy is "required", "detached" or "explicit_followup".
+	// Empty defaults to detached for background jobs.
+	FinalizationPolicy string
 	// Status is the terminal event type: completed|failed|timed_out|orphaned|
-	// cancelled.
+	// cancelled|interrupted|expired|abandoned.
 	Status string
 	// Command is an optional command excerpt for the digest reason.
 	Command string
@@ -126,6 +142,13 @@ func ProjectBackgroundJobTerminal(ctx context.Context, store Store, wakes *WakeS
 	if in.Epoch <= 0 {
 		in.Epoch = time.Now().UTC().UnixNano()
 	}
+	policy := normalizeBackgroundJobPolicy(in.FinalizationPolicy)
+	if strings.TrimSpace(in.SettlementID) == "" {
+		in.SettlementID = fmt.Sprintf("job:%s:%d", in.JobID, in.Epoch)
+	}
+	if strings.TrimSpace(in.SettlementCohortID) == "" {
+		in.SettlementCohortID = in.SettlementID
+	}
 	notification, err := store.UpsertNotification(ctx, Notification{
 		RootScopeID:           in.RootScopeID,
 		TargetParentSessionID: in.TargetParentSessionID,
@@ -149,6 +172,26 @@ func ProjectBackgroundJobTerminal(ctx context.Context, store Store, wakes *WakeS
 		return notification, nil
 	}
 	if in.Observed {
+		// The model already consumed this terminal state through an active
+		// task_output wait. Record the settlement as consumed for replay
+		// suppression, but never delete the durable notification above.
+		turnID := strings.TrimSpace(in.ParentTurnID)
+		notifyKey := DeriveNotifyKey(turnID, notification.SubjectID, WakeEventTerminal, notification.EventSeq)
+		if notifyKey != "" && wakes.store != nil {
+			_ = wakes.store.MarkWakeDelivered(ctx, WakeDelivered{
+				NotifyKey:             notifyKey,
+				RootScopeID:           notification.RootScopeID,
+				TargetParentSessionID: notification.TargetParentSessionID,
+				TurnID:                turnID,
+				EventKind:             WakeEventTerminal,
+				ObligationID:          notification.SubjectID,
+				EventSeq:              notification.EventSeq,
+				DeliveredAt:           time.Now().UTC(),
+				DeliveredBy:           "task_output_observed",
+				Consumption:           "observed",
+				Reason:                "task_output_wait_seen",
+			})
+		}
 		return notification, nil
 	}
 	// Schedule regardless of severity: a completed job is exactly the async
@@ -156,6 +199,11 @@ func ProjectBackgroundJobTerminal(ctx context.Context, store Store, wakes *WakeS
 	if _, err := wakes.ScheduleWake(ctx, WakeRequest{
 		RootScopeID:           notification.RootScopeID,
 		TargetParentSessionID: notification.TargetParentSessionID,
+		TurnID:                strings.TrimSpace(in.ParentTurnID),
+		ParentEpisodeID:       strings.TrimSpace(in.ParentEpisodeID),
+		FinalizationPolicy:    policy,
+		SettlementID:          strings.TrimSpace(in.SettlementID),
+		SettlementCohortID:    strings.TrimSpace(in.SettlementCohortID),
 		WakeReason:            notification.EventType,
 		NotificationSeq:       notification.EventSeq,
 		ObligationID:          notification.SubjectID,
@@ -165,6 +213,19 @@ func ProjectBackgroundJobTerminal(ctx context.Context, store Store, wakes *WakeS
 		return notification, fmt.Errorf("supervision: schedule background job wake: %w", err)
 	}
 	return notification, nil
+}
+
+func normalizeBackgroundJobPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "required":
+		return "required"
+	case "explicit_followup", "explicit-followup":
+		return "explicit_followup"
+	default:
+		// Background work is detached unless the submitter explicitly asked the
+		// current answer to wait for it.
+		return "detached"
+	}
 }
 
 // FormatBackgroundJobTerminalReason renders the one-line, model-visible digest

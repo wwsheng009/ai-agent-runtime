@@ -389,9 +389,11 @@ func formatDigestBriefText(digest *Digest) string {
 		return ""
 	}
 	var b strings.Builder
-	// A progress-only digest (P2-D wake) has no event to report, so the header
-	// would introduce an empty section. Only print it when a row explains it.
-	if len(digest.Items) > 0 {
+	// Every non-empty brief is host-authored control-plane text, including a
+	// progress-only digest (P2-D wake). The shared header is also what
+	// `session_start.continuation` uses to distinguish a supervision wake from
+	// a user prompt, so omitting it here made those wakes look user-originated.
+	if len(digest.Items) > 0 || len(digest.Progress) > 0 || digest.ResumeQueue != nil || digest.ResumeGate != nil || digest.Truncated {
 		// The header is a shared contract: durable consumers must recognize this
 		// digest as host control-plane text, so it comes from one constant.
 		b.WriteString(types.SupervisionDigestPromptHeader + "\n")
@@ -574,7 +576,7 @@ func (d *Digest) DiagnosticsTextOf() string {
 
 func formatDigestText(digest *Digest) string {
 	var b strings.Builder
-	b.WriteString("[Child lifecycle preflight]\n")
+	b.WriteString(types.SupervisionPreflightPromptHeader + "\n")
 	fmt.Fprintf(&b, "snapshot_seq: %d\n", digest.SnapshotSeq)
 	fmt.Fprintf(&b, "critical_unresolved: %d\n", digest.CriticalUnresolved)
 	fmt.Fprintf(&b, "action_required: %d\n", digest.ActionRequired)

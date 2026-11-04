@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextledger"
@@ -161,6 +162,12 @@ type LoopReActConfig struct {
 	// terminal control-plane state. A record carrying team obligations never
 	// settles while this is nil (conservative: never clear on a guess).
 	TeamObligations subagentbatch.TeamObligationResolver `yaml:"-"`
+	// BackgroundJobObligations resolves jobs parked as `job:` obligations
+	// (job_start with finalization_policy=required). A required job is only
+	// parked when the host can prove both the job store and the suspension store
+	// survive a restart; otherwise the dispatch is projected as an I9
+	// degradation and the parent keeps the legacy detached semantics.
+	BackgroundJobObligations subagentbatch.BackgroundJobObligationResolver `yaml:"-"`
 	// ObserveContextUsage receives one provider-reported context observation
 	// per LLM call (never the run-level cumulative usage). Hosts persist it so
 	// the next turn/run can project prompt size from a real anchor instead of
@@ -184,6 +191,7 @@ type ReActLoop struct {
 	contextLedger                *contextledger.Ledger
 	contextLedgerOnce            sync.Once
 	turnID                       string
+	episodeID                    string
 	toolExecMemory               *toolexec.Memory
 	parallelToolCallsUnsupported atomic.Bool
 	reasoningEffortUnsupported   atomic.Bool
@@ -427,6 +435,21 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 	config = &cfg
 	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
 	config.CompletionRequirement = NormalizeCompletionRequirement(config.CompletionRequirement)
+	if agent != nil {
+		// Hosts wire the durable readers on the agent once; every loop derived
+		// from it (including child-agent loops) inherits the missing fields.
+		// Explicit LoopReActConfig values still win.
+		resolvers := agent.GetObligationResolvers()
+		if config.AgentSessionObligations == nil {
+			config.AgentSessionObligations = resolvers.AgentSessions
+		}
+		if config.TeamObligations == nil {
+			config.TeamObligations = resolvers.Teams
+		}
+		if config.BackgroundJobObligations == nil {
+			config.BackgroundJobObligations = resolvers.BackgroundJobs
+		}
+	}
 	if config.MaxParallelToolCalls <= 0 {
 		config.MaxParallelToolCalls = 1
 	}
@@ -721,6 +744,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, errors.New(errors.ErrValidationFailed, "LLM runtime is nil")
 	}
 	loop.turnID = TurnIDFromContext(ctx)
+	loop.episodeID = EpisodeIDFromContext(ctx)
 	// 结构化回执契约（P1-2'）：run-scoped 状态入口重置——同一 loop 的重试
 	// attempt 不得继承上一 attempt 已接受的回执。
 	loop.reportSchema = options.ReportSchema
@@ -951,7 +975,13 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：本回合的 obligation 批次全部终态时，
 	// 挂起记录必须被清掉，turn 才算真正结束；否则 nextTurnID 会永久复用挂起的 turn_id。
 	// session_id 取解析后的值，与 parkBackgroundTurn 写账本的键完全一致。
-	defer loop.settleParkedTurnOnRunEnd(ctx, sessionID, settleTurnID)
+	defer func() {
+		loop.settleParkedTurnOnRunEnd(ctx, sessionID, settleTurnID)
+		if result != nil {
+			result.EpisodeID = strings.TrimSpace(loop.episodeID)
+			result.TurnParked = loop.turnStillParked(ctx, sessionID, settleTurnID)
+		}
+	}()
 	traceID := options.TraceID
 	if traceID == "" {
 		traceID = "trace_" + uuid.NewString()
@@ -1694,6 +1724,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 3. Observe: 记录执行结果
 		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
 		loop.parkTeamObligationsFromResults(currentCtx, sessionID, toolResults)
+		loop.parkBackgroundJobObligationsFromResults(currentCtx, sessionID, toolResults)
 		// Observations feed the transient warm-memory projection only. They are
 		// not persisted as facts: the ledger keeps the declarative residue a
 		// compaction drops, and the compaction boundary writes it.
@@ -5900,6 +5931,9 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	if turnID := strings.TrimSpace(TurnIDFromContext(ctx)); turnID != "" {
 		ctx = toolctx.WithTurnID(ctx, turnID)
 	}
+	if episodeID := strings.TrimSpace(EpisodeIDFromContext(ctx)); episodeID != "" {
+		ctx = toolctx.WithEpisodeID(ctx, episodeID)
+	}
 	ctx = toolctx.WithAgentDepth(ctx, depth)
 	// Anchor tool execution to the session-bound workspace so shell commands
 	// and relative path resolution run inside the bound project directory
@@ -8462,6 +8496,7 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 	}
 	record := &subagentbatch.TurnSuspension{
 		TurnID:        strings.TrimSpace(loop.turnID),
+		EpisodeID:     strings.TrimSpace(loop.episodeID),
 		SessionID:     sessionID,
 		RootScopeID:   sessionID,
 		ObligationIDs: obligations,
@@ -8535,15 +8570,45 @@ func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentb
 	if root := strings.TrimSpace(existing.RootScopeID); root != "" {
 		candidate.RootScopeID = root
 	}
+	if episodeID := strings.TrimSpace(existing.EpisodeID); episodeID != "" {
+		candidate.EpisodeID = episodeID
+	}
 	if loop.parkedTurnObligationsSettled(ctx, store, existing) {
 		return candidate, true
 	}
 	candidate.ObligationIDs = mergeParkedTurnIDs(existing.ObligationIDs, candidate.ObligationIDs)
 	candidate.ResumeQueue = mergeParkedTurnIDs(existing.ResumeQueue, candidate.ResumeQueue)
+	candidate.ObligationPolicies = mergeParkedTurnPolicies(existing.ObligationPolicies, candidate.ObligationPolicies)
 	if !existing.ParkedAt.IsZero() {
 		candidate.ParkedAt = existing.ParkedAt
 	}
 	return candidate, false
+}
+
+// mergeParkedTurnPolicies keeps the first non-required declaration for an
+// obligation. A required obligation is implicit, so it never overwrites an
+// explicit detached/explicit-followup policy on a merge.
+func mergeParkedTurnPolicies(existing, added map[string]subagentbatch.FinalizationPolicy) map[string]subagentbatch.FinalizationPolicy {
+	if len(existing) == 0 && len(added) == 0 {
+		return nil
+	}
+	merged := make(map[string]subagentbatch.FinalizationPolicy, len(existing)+len(added))
+	for id, policy := range existing {
+		merged[id] = subagentbatch.NormalizeFinalizationPolicy(policy)
+	}
+	for id, policy := range added {
+		normalized := subagentbatch.NormalizeFinalizationPolicy(policy)
+		if normalized == subagentbatch.FinalizationPolicyRequired {
+			continue
+		}
+		if _, ok := merged[id]; !ok {
+			merged[id] = normalized
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 // parkedTurnObligationsSettled reports whether the existing record's obligations
@@ -8556,17 +8621,25 @@ func (loop *ReActLoop) parkedTurnObligationsSettled(ctx context.Context, store s
 	if record == nil {
 		return true
 	}
-	var agentResolver subagentbatch.AgentSessionObligationResolver
-	var teamResolver subagentbatch.TeamObligationResolver
-	if loop != nil && loop.config != nil {
-		agentResolver = loop.config.AgentSessionObligations
-		teamResolver = loop.config.TeamObligations
-	}
-	settled, err := subagentbatch.TurnObligationsAllTerminalWithTeams(ctx, store, record, agentResolver, teamResolver)
+	settled, err := subagentbatch.TurnObligationsAllTerminalWithResolvers(ctx, store, record, loop.obligationResolvers())
 	if err != nil {
 		return true
 	}
 	return settled
+}
+
+// obligationResolvers is the single projection of the host-provided durable
+// readers for non-batch obligation kinds. All loop settle/resume checks share
+// it so a newly parked kind cannot be silently omitted from one predicate.
+func (loop *ReActLoop) obligationResolvers() subagentbatch.ObligationResolvers {
+	if loop == nil || loop.config == nil {
+		return subagentbatch.ObligationResolvers{}
+	}
+	return subagentbatch.ObligationResolvers{
+		AgentSessions:  loop.config.AgentSessionObligations,
+		Teams:          loop.config.TeamObligations,
+		BackgroundJobs: loop.config.BackgroundJobObligations,
+	}
 }
 
 // mergeParkedTurnIDs appends the ids that are not already present, keeping the
@@ -8637,6 +8710,7 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 	}
 	record := &subagentbatch.TurnSuspension{
 		TurnID:        turnID,
+		EpisodeID:     strings.TrimSpace(loop.episodeID),
 		SessionID:     sessionID,
 		RootScopeID:   sessionID,
 		ObligationIDs: []string{obligationID},
@@ -8681,6 +8755,138 @@ func (loop *ReActLoop) parkTeamObligationsFromResults(ctx context.Context, sessi
 		}
 		loop.parkTeamObligation(ctx, sessionID, teamID)
 	}
+}
+
+// parkBackgroundJobObligationsFromResults records a job: obligation for every
+// successful job_start that explicitly declared finalization_policy=required
+// and has not reached a terminal state yet. Detached/explicit-followup jobs and
+// already-terminal jobs never park: the current turn does not owe them a resume.
+func (loop *ReActLoop) parkBackgroundJobObligationsFromResults(ctx context.Context, sessionID string, results []toolExecutionResult) {
+	for _, result := range results {
+		if strings.TrimSpace(result.Error) != "" ||
+			!strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolJobStart) {
+			continue
+		}
+		jobID, policy, status := backgroundJobResultIdentity(result)
+		if jobID == "" || policy != background.JobPolicyRequired {
+			continue
+		}
+		if status != "" && background.IsTerminalStatus(background.JobStatus(status)) {
+			// The job finished before the tool result returned; there is no
+			// pending work for the current turn to park on.
+			continue
+		}
+		loop.parkBackgroundJobObligation(ctx, sessionID, jobID)
+	}
+}
+
+// backgroundJobResultIdentity reads the canonical job id, policy and current
+// status from the broker's structured metadata. The model-visible job id may be
+// a handle alias, so the obligation id must use the canonical metadata value.
+func backgroundJobResultIdentity(result toolExecutionResult) (string, background.JobFinalizationPolicy, string) {
+	if result.Envelope == nil || len(result.Envelope.Metadata) == 0 {
+		return "", "", ""
+	}
+	read := func(key string) string {
+		if value, ok := result.Envelope.Metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+		if nested, ok := result.Envelope.Metadata["tool_metadata"].(map[string]interface{}); ok {
+			if value, ok := nested[key].(string); ok {
+				return strings.TrimSpace(value)
+			}
+		}
+		return ""
+	}
+	jobID := read("job_id")
+	status := read("status")
+	policy, ok := background.ParseJobFinalizationPolicy(read("finalization_policy"))
+	if !ok {
+		// A host that predates the field only produces detached jobs.
+		policy = background.JobPolicyDetached
+	}
+	return jobID, policy, status
+}
+
+// parkBackgroundJobObligation persists the §6.12 parked-turn record for a
+// required background job. It deliberately requires all three durability
+// capabilities: the batch/suspension store, the job store, and a resolver wired
+// into this loop. When any is missing the dispatch is projected as an I9
+// degradation instead of writing a suspension nobody can settle.
+func (loop *ReActLoop) parkBackgroundJobObligation(ctx context.Context, sessionID, jobID string) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	jobID = strings.TrimSpace(jobID)
+	if sessionID == "" || jobID == "" {
+		return
+	}
+	if !loop.agent.SupportsSuspension() {
+		reason, _ := loop.agent.SuspensionProbe()
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "required background job "+jobID+" cannot park: "+reason)
+		return
+	}
+	var resolver subagentbatch.BackgroundJobObligationResolver
+	if loop.config != nil {
+		resolver = loop.config.BackgroundJobObligations
+	}
+	if resolver == nil {
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "required background job resolver is not configured")
+		return
+	}
+	if probe, ok := resolver.(interface{ JobStoreDurable() bool }); ok && !probe.JobStoreDurable() {
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "required background job store is not durable")
+		return
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return
+	}
+	turnID := strings.TrimSpace(loop.turnID)
+	if turnID == "" {
+		return
+	}
+	existing, _, err := store.GetTurnSuspension(ctx, sessionID, turnID)
+	if err != nil {
+		return
+	}
+	obligationID := subagentbatch.BackgroundJobObligationID(jobID)
+	if existing != nil {
+		for _, id := range existing.ObligationIDs {
+			if id == obligationID {
+				return
+			}
+		}
+	}
+	record := &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		EpisodeID:     strings.TrimSpace(loop.episodeID),
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{obligationID},
+		ParkedAt:      time.Now().UTC(),
+	}
+	record, freshEpoch := loop.joinParkedTurnRecord(ctx, store, existing, record)
+	if err := store.ParkTurnSuspension(ctx, record); err != nil {
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "background job parked-state write failed: "+err.Error())
+		return
+	}
+	if !freshEpoch {
+		return
+	}
+	loop.emitRuntimeEvent(events.EventTurnSuspended, sessionID, "", map[string]interface{}{
+		"job_id":             jobID,
+		"obligation_count":   len(record.ObligationIDs),
+		"resume_queue_count": len(record.ResumeQueue),
+		"parked_at":          record.ParkedAt.Format(time.RFC3339Nano),
+	})
 }
 
 // toolCallAutoStartDefaultTrue resolves the team_spawn auto_start argument
@@ -8751,12 +8957,7 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 	if err != nil || len(records) == 0 {
 		return
 	}
-	var agentSessionResolver subagentbatch.AgentSessionObligationResolver
-	var teamResolver subagentbatch.TeamObligationResolver
-	if loop.config != nil {
-		agentSessionResolver = loop.config.AgentSessionObligations
-		teamResolver = loop.config.TeamObligations
-	}
+	resolvers := loop.obligationResolvers()
 	// 当前 turn 的记录排在最前：保留「结清当前 turn」的既有事件顺序，随后再
 	// 处理历史孤儿记录。
 	ordered := make([]*subagentbatch.TurnSuspension, 0, len(records))
@@ -8771,7 +8972,7 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		}
 	}
 	for _, record := range ordered {
-		settled, err := subagentbatch.TurnObligationsSettledWithTeams(settleCtx, store, record, agentSessionResolver, teamResolver)
+		settled, err := subagentbatch.TurnObligationsSettledWithResolvers(settleCtx, store, record, resolvers)
 		if err != nil || !settled {
 			continue
 		}
@@ -8786,12 +8987,39 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		// 因此补发一次非 wake 的闭合事件：trigger=settled，身份字段与 wake 版一致。
 		loop.emitRuntimeEvent(events.EventTurnResumed, sessionID, "", map[string]interface{}{
 			"turn_id":          record.TurnID,
+			"episode_id":       record.EpisodeID,
 			"session_id":       sessionID,
 			"trigger":          events.TurnResumedTriggerSettled,
+			"phase":            "settled",
 			"settled":          true,
 			"obligation_count": len(record.ObligationIDs),
 		})
 	}
+}
+
+// turnStillParked reports whether the current logical turn still owns a
+// durable suspension after the run-end settlement pass. It is the single
+// loop-level finalization fact: TurnParked=true means this run must not be
+// reported as a completed parent turn.
+func (loop *ReActLoop) turnStillParked(ctx context.Context, sessionID, turnID string) bool {
+	if loop == nil || loop.agent == nil {
+		return false
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return false
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return false
+	}
+	record, ok, err := store.GetTurnSuspension(ctx, strings.TrimSpace(sessionID), strings.TrimSpace(turnID))
+	if err != nil {
+		// Unreadable state must not be announced as finalized. The caller sees
+		// TurnParked=true and keeps the logical turn open.
+		return true
+	}
+	return ok && record != nil
 }
 
 // startBackgroundSubagentBatch persists a background batch and launches its

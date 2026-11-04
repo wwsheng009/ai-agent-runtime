@@ -5,12 +5,15 @@ import (
 	"strings"
 )
 
-// batchTransitions defines the allowed monotonic batch state graph
-// (plan §4.3: queued -> running -> partially_completed -> terminal, plus
-// cancel/clock transitions that can arrive from any non-terminal state).
+// batchTransitions defines the allowed batch state graph (plan §4.3:
+// queued -> running -> partially_completed -> terminal, plus cancel/clock
+// transitions from any non-terminal state). Parked is the one deliberate cycle:
+// running -> parked when a child logical turn waits, parked -> running when a
+// later CAS resume claim re-enters the same batch.
 var batchTransitions = map[BatchStatus]map[BatchStatus]bool{
 	BatchQueued: {
 		BatchRunning:            true,
+		BatchParked:             true,
 		BatchPartiallyCompleted: true, // degenerate: all tasks terminal in one pass
 		BatchCanceled:           true,
 		BatchTimedOut:           true,
@@ -19,6 +22,17 @@ var batchTransitions = map[BatchStatus]map[BatchStatus]bool{
 	},
 	BatchRunning: {
 		BatchRunning:            true, // re-heartbeat/refresh keeps identity
+		BatchParked:             true,
+		BatchPartiallyCompleted: true,
+		BatchCompleted:          true,
+		BatchFailed:             true,
+		BatchCanceled:           true,
+		BatchTimedOut:           true,
+		BatchOrphaned:           true,
+	},
+	BatchParked: {
+		BatchParked:             true,
+		BatchRunning:            true, // recovery claim
 		BatchPartiallyCompleted: true,
 		BatchCompleted:          true,
 		BatchFailed:             true,
@@ -41,7 +55,8 @@ var batchTransitions = map[BatchStatus]map[BatchStatus]bool{
 	BatchOrphaned:  {},
 }
 
-// taskTransitions defines the allowed per-task monotonic state graph.
+// taskTransitions defines the allowed per-task state graph. Parked is the only
+// resume cycle: running -> parked, then parked -> running on a CAS resume claim.
 var taskTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskPending: {
 		TaskReady:    true,
@@ -58,11 +73,18 @@ var taskTransitions = map[TaskStatus]map[TaskStatus]bool{
 	},
 	TaskRunning: {
 		TaskRunning:          true, // progress refresh
+		TaskParked:           true,
 		TaskSucceeded:        true,
 		TaskFailed:           true,
 		TaskFailedWithResult: true, // failed overall, but the payload survives
 		TaskCanceled:         true,
 		TaskTimedOut:         true,
+	},
+	TaskParked: {
+		TaskParked:   true, // recovery re-read
+		TaskRunning:  true, // resume claim
+		TaskCanceled: true,
+		TaskTimedOut: true,
 	},
 	TaskSucceeded:        {},
 	TaskFailed:           {},

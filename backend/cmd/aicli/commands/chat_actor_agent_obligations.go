@@ -122,6 +122,9 @@ func (h *localChatRuntimeHost) parkLocalAgentChildObligation(ctx context.Context
 	if record == nil {
 		record = &subagentbatch.TurnSuspension{TurnID: turnID, SessionID: parentSessionID}
 	}
+	if episodeID := strings.TrimSpace(agent.EpisodeIDFromContext(ctx)); episodeID != "" {
+		record.EpisodeID = episodeID
+	}
 	// 记录在本 turn 已有内容（批次派发先挂起）时，loop.parkBackgroundTurn 已经
 	// 播报过 turn.suspended；宿主侧只追加义务、不重复播报。空记录（理论上只可能
 	// 出现在手写/历史数据）仍按首次挂起播报。

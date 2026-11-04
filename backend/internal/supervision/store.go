@@ -74,6 +74,32 @@ type Store interface {
 	// acceptable for stores without retention pressure.
 	PruneWakeDelivered(ctx context.Context, before time.Time) (int64, error)
 
+	// --- Resume claims (exactly-once automatic resume) ---
+
+	// ClaimResume inserts the claim when absent and reports whether this caller
+	// won it. A replay of an already-submitted claim returns claimed=false.
+	ClaimResume(ctx context.Context, claim ResumeClaim) (ResumeClaim, bool, error)
+	// GetResumeClaim returns (nil, nil) when the claim does not exist.
+	GetResumeClaim(ctx context.Context, claimKey string) (*ResumeClaim, error)
+	// MarkResumeSubmitted CAS-transitions claimed -> submitted.
+	MarkResumeSubmitted(ctx context.Context, claimKey, modelTurnID string, at time.Time, expectedVersion int64) (bool, error)
+	// RenewResumeClaim refreshes the lease timestamp of a live `claimed` row.
+	// It intentionally does not bump version: renewal is a heartbeat, not a
+	// state transition, so the holder's later MarkSubmitted/Release CAS remains
+	// valid. A row already submitted/released reports false.
+	RenewResumeClaim(ctx context.Context, claimKey string, at time.Time, expectedVersion int64) (bool, error)
+	// ReleaseResumeClaim CAS-transitions claimed -> released. A released claim
+	// may be reclaimed by a later settlement attempt.
+	ReleaseResumeClaim(ctx context.Context, claimKey string, expectedVersion int64) (bool, error)
+	// RecoverStaleResumeClaims converges claims left in `claimed` past the
+	// cutoff to `submitted` with an unknown/recovered model-turn id. This is the
+	// crash-safe choice: never start a second model turn for the same claim.
+	RecoverStaleResumeClaims(ctx context.Context, claimedBefore time.Time) (int64, error)
+	// PruneResumeClaims removes terminal claims older than the cutoff. A claim
+	// still in `claimed` is never pruned: it may be the only evidence preventing
+	// a duplicate model turn.
+	PruneResumeClaims(ctx context.Context, before time.Time) (int64, error)
+
 	// --- Wake budget claims (doc 6.5 rule 4, plan P1-6) ---
 
 	// RecordWakeClaim appends one delivered auto-wake for budget accounting.

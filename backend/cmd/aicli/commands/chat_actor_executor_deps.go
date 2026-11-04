@@ -118,11 +118,17 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, baseSession, sessionCtx.RequestedReasoningEffort)
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
 	loopConfig.TeamObligations = h.teamObligationResolver()
+	loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
+	apiAgent.SetObligationResolvers(h.obligationResolvers())
 	applyLocalChatMainAgentRouting(loopConfig, baseSession, isBaseSession)
 	observationSubagent := !isBaseSession || strings.TrimSpace(sessionCtx.ChildAgentType) != "" || sessionCtx.ChildDepth > 0 || sessionCtx.ChildReadOnly
 	applyLocalChatToolObservation(loopConfig, baseSession, h,
 		knowledge.ObservationSourceFor(observationSubagent, sessionCtx.ChildReadOnly), localChatObservationTaskID(baseSession))
 	applyLocalChatCompletionRequirement(loopConfig, baseSession, sessionCtx.ChildAgentType, sessionCtx.ChildCompletionRequirement, effectiveWorkspace)
+
+	// All tool/permission/depth policies above are final before a detached
+	// parked-child resume is allowed to start.
+	h.startLocalParkedBatchResumer(apiAgent, sessionID, isBaseSession)
 
 	acquire := func(ctx context.Context, sid string) (*runtimechat.SessionLeaseHandle, error) {
 		return acquireLocalChatSessionLease(ctx, h.RuntimeStore, sid)

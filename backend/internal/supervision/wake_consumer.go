@@ -79,6 +79,11 @@ type WakeConsumer struct {
 	// and must not announce a resume that never started. Like the other hooks it
 	// is best-effort: a nil hook is a no-op and panics are contained.
 	Announce func(ctx context.Context, announcement ResumeAnnouncement)
+	// Admission is the shared resume-admission service. When set, only wakes
+	// that resolve to ResumeSameParkedTurn (or the P0 legacy bridge) may start a
+	// model turn; late/detached settlements are consumed as durable
+	// notifications without spending wake budget.
+	Admission *ResumeAdmissionService
 }
 
 // MaybeWakeParent is called at every parent runnable state-transition point:
@@ -94,7 +99,29 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	if parentSessionID == "" || rootScopeID == "" {
 		return nil
 	}
-	claimed, digest, err := c.Wakes.DrainRunnable(ctx, parentSessionID, parentTeamID, rootScopeID, c.Runnable)
+	if c.Admission != nil {
+		// Converge claims abandoned between `claimed` and `submitted` before a
+		// new drain evaluates them. Recovery never retries the model turn.
+		_, _ = c.Admission.RecoverStaleClaims(ctx)
+	}
+	admissionResults := map[string]ResumeAdmissionResult{}
+	var claimed []WakePending
+	var digest *Digest
+	var err error
+	if c.Admission != nil {
+		claimed, digest, err = c.Wakes.DrainRunnableWithAdmission(ctx, parentSessionID, parentTeamID, rootScopeID, c.Runnable,
+			func(admitCtx context.Context, w WakePending) (ResumeAdmissionDecision, error) {
+				result, admitErr := c.Admission.Evaluate(admitCtx, ResumeAdmissionInputFromWake(w))
+				if admitErr != nil {
+					// A read failure is retryable, never "idle means resume".
+					return RetryAdmission, nil
+				}
+				admissionResults[w.WakeID] = result
+				return result.Decision, nil
+			})
+	} else {
+		claimed, digest, err = c.Wakes.DrainRunnable(ctx, parentSessionID, parentTeamID, rootScopeID, c.Runnable)
+	}
 	if err != nil {
 		// ErrWakeParentBusy / ErrWakeRateLimited: keep the wake durable;
 		// the next runnable point (or the next natural turn preflight)
@@ -104,10 +131,6 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	if len(claimed) == 0 || digest == nil {
 		return nil
 	}
-	wakeIDs := make([]string, 0, len(claimed))
-	for _, w := range claimed {
-		wakeIDs = append(wakeIDs, w.WakeID)
-	}
 	// The underlying notification may have been acknowledged, actioned, or
 	// resolved while the parent was busy. DrainRunnable still claims that
 	// stale durable wake so it can be cleaned up, but a digest without
@@ -115,7 +138,7 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// A progress wake (P2-D) is the one family whose digest content is the
 	// P0-B rollup instead of lifecycle items; see digestDeliverable.
 	if !digestDeliverable(claimed, digest) {
-		c.release(ctx, wakeIDs)
+		c.releasePending(ctx, claimed)
 		return nil
 	}
 	// Delivery-time idempotency (C2-4 #15 / B4): a wake whose notify key was
@@ -124,7 +147,7 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// rows are still released below so their coalescing slot frees up.
 	deliverable := c.Wakes.FilterDeliveredWakes(ctx, claimed)
 	if len(deliverable) == 0 {
-		c.release(ctx, wakeIDs)
+		c.releasePending(ctx, claimed)
 		return nil
 	}
 	// A6 (C2-5): a resume is a turn start, so it must pass the same capacity
@@ -145,6 +168,60 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 			}
 		}
 	}
+	// Exactly-once: claim the settlement before building/submitting a resume.
+	// Multiple wake rows for the same episode share one claim and one model
+	// turn. A lost claim means another process already owns the continuation;
+	// the local row is consumed as notification-only.
+	claims := map[string]ResumeClaim{}
+	if c.Admission != nil {
+		kept := make([]WakePending, 0, len(deliverable))
+		for _, w := range deliverable {
+			result, ok := admissionResults[w.WakeID]
+			if !ok || result.Decision != ResumeSameParkedTurn {
+				kept = append(kept, w)
+				continue
+			}
+			claimKey := strings.TrimSpace(result.ClaimKey)
+			if claimKey == "" {
+				claimKey = DeriveResumeClaimKey(result.Input.ParentSessionID, result.Input.ParentTurnID, result.Input.ParentEpisodeID, result.Input.SettlementCohortID, result.Input.SettlementID)
+			}
+			if _, exists := claims[claimKey]; exists {
+				kept = append(kept, w)
+				continue
+			}
+			claim, won, claimErr := c.Admission.Claim(ctx, result)
+			if claimErr != nil {
+				for _, held := range claims {
+					_ = c.Admission.Release(ctx, held)
+				}
+				c.releasePending(ctx, claimed)
+				return claimErr
+			}
+			if !won {
+				_ = c.Wakes.markConsumed(ctx, w, "notification_only", "settlement_already_claimed")
+				continue
+			}
+			claims[claimKey] = claim
+			kept = append(kept, w)
+		}
+		deliverable = kept
+		if len(deliverable) == 0 {
+			for _, held := range claims {
+				_ = c.Admission.Release(ctx, held)
+			}
+			c.releasePending(ctx, claimed)
+			return nil
+		}
+	}
+	// Keep every claimed settlement warm while buildResume/Deliver can take
+	// longer than ClaimStaleAfter. The stop function is deferred so every
+	// success/failure/early-return path cancels the heartbeat.
+	stopClaimRenewal := c.startClaimRenewal(claims)
+	defer stopClaimRenewal()
+	wakeIDs := make([]string, 0, len(deliverable))
+	for _, w := range deliverable {
+		wakeIDs = append(wakeIDs, w.WakeID)
+	}
 	// Assemble the resume context from the ledger (best-effort: a missing or
 	// failing projection degrades to the legacy digest prompt, never drops the
 	// wake). The claimed wake's TurnID is only the scheduling-time hint; the
@@ -158,6 +235,9 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 			// stays durable in the inbox and the next natural parent turn
 			// injects it via preflight; keeping the row claimed would block
 			// coalescing of later events for the same dedup key.
+			for _, held := range claims {
+				_ = c.Admission.Release(ctx, held)
+			}
 			c.release(ctx, wakeIDs)
 			return err
 		}
@@ -168,6 +248,9 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 			// stays durable in the inbox and the next natural parent turn
 			// injects it via preflight; keeping the row claimed would block
 			// coalescing of later events for the same dedup key.
+			for _, held := range claims {
+				_ = c.Admission.Release(ctx, held)
+			}
 			c.release(ctx, wakeIDs)
 			return err
 		}
@@ -177,6 +260,11 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// 仍留在 durable 队列里等下一次可运行窗口，播报会与事实相反。
 	if delivered {
 		c.announceResume(ctx, parentSessionID, rootScopeID, deliverable, resume)
+		if c.Admission != nil {
+			for _, held := range claims {
+				_ = c.Admission.MarkSubmitted(ctx, held, strings.Join(wakeIDs, ","))
+			}
+		}
 	}
 	// The delivery ledger is written only after a delivery actually happened
 	// (AC-P1-4b): a failed delivery is never recorded, so the retry reuses the
@@ -336,6 +424,7 @@ func (c *WakeConsumer) announceResume(ctx context.Context, parentSessionID, root
 	reasons := make([]string, 0, len(claimed))
 	ann := ResumeAnnouncement{
 		TurnID:          claimedTurnID(claimed),
+		EpisodeID:       claimedEpisodeID(claimed),
 		ParentSessionID: parentSessionID,
 		RootScopeID:     rootScopeID,
 		WakeIDs:         make([]string, 0, len(claimed)),
@@ -379,8 +468,31 @@ func claimedTurnID(claimed []WakePending) string {
 	return ""
 }
 
+// claimedEpisodeID returns the logical episode carried by the claimed wake
+// rows. The durable settlement wake records the parked episode; a legacy row
+// without one simply omits the field from the announcement.
+func claimedEpisodeID(claimed []WakePending) string {
+	for _, w := range claimed {
+		if episodeID := strings.TrimSpace(w.ParentEpisodeID); episodeID != "" {
+			return episodeID
+		}
+	}
+	return ""
+}
+
 func (c *WakeConsumer) release(ctx context.Context, wakeIDs []string) {
 	for _, id := range wakeIDs {
 		_ = c.Wakes.ResolveWake(ctx, id)
 	}
+}
+
+// releasePending resolves the claimed rows that admission/coalescing left out
+// of the final delivery set. Notification evidence remains durable; only the
+// pending wake row is closed.
+func (c *WakeConsumer) releasePending(ctx context.Context, wakes []WakePending) {
+	ids := make([]string, 0, len(wakes))
+	for _, w := range wakes {
+		ids = append(ids, w.WakeID)
+	}
+	c.release(ctx, ids)
 }

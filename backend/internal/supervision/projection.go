@@ -31,6 +31,15 @@ type LifecycleProjection struct {
 	// from the obligation ledger — so an empty value keeps the legacy
 	// "new turn" wake.
 	TurnID string
+	// EpisodeID is the logical parent episode that owns this lifecycle fact.
+	// Empty lets the scheduler's EpisodeHint resolve it from a parked turn.
+	EpisodeID string
+	// FinalizationPolicy is optional. Terminal/completion projections that can
+	// resume a parked turn should set required; approval/progress paths that
+	// remain legacy in P0 leave it empty.
+	FinalizationPolicy string
+	SettlementID       string
+	SettlementCohortID string
 }
 
 // ProjectLifecycle stores a durable parent/lead notification for an abnormal
@@ -103,6 +112,10 @@ func ProjectLifecycle(ctx context.Context, store Store, wakes *WakeScheduler, ev
 			WakeReason:            notification.EventType,
 			NotificationSeq:       notification.EventSeq,
 			TurnID:                strings.TrimSpace(event.TurnID),
+			ParentEpisodeID:       strings.TrimSpace(event.EpisodeID),
+			FinalizationPolicy:    strings.TrimSpace(event.FinalizationPolicy),
+			SettlementID:          strings.TrimSpace(event.SettlementID),
+			SettlementCohortID:    strings.TrimSpace(event.SettlementCohortID),
 			// C2-4 (#15) / B4: the notification identity feeds the notify key.
 			// notification.EventSeq is the store-allocated cursor of this
 			// subject+version+event-type, so an idempotent replay of the same
@@ -182,6 +195,7 @@ func ProjectAgentCompletion(ctx context.Context, store Store, wakes *WakeSchedul
 		Reason:                reason,
 		RecommendedAction:     recommended,
 		ResolutionState:       resolution,
+		FinalizationPolicy:    "required",
 	})
 	if err != nil {
 		return notification, err

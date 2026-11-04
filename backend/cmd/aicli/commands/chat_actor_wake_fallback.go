@@ -136,6 +136,14 @@ func (h *localChatRuntimeHost) runLocalSupervisionWakeFallbackOnce(ctx context.C
 	if parentSessionID == "" {
 		return false, nil
 	}
+	// The fallback tick is also the host's periodic claim-maintenance point:
+	// recover claims abandoned between `claimed` and `submitted`, and let the
+	// admission service opportunistically prune terminal claim history. This
+	// must run even when no wake is pending; otherwise an idle host can leave a
+	// stale claim (and its duplicate-resume fence) in place indefinitely.
+	if h.supervisionWake.Admission != nil {
+		_, _ = h.supervisionWake.Admission.RecoverStaleClaims(ctx)
+	}
 	// 等待期兜底反馈：先按节拍判断是否需要排一次 wait_feedback wake（delta
 	// 即时 / 长静默升级一次），再走既有的 pending-wake 排空——同一 tick 里
 	// 新排出的 wake 就能被投递。活跃 run、活动等待窗口、排队用户输入与已有

@@ -84,11 +84,10 @@ func (h *localChatRuntimeHost) maybeScheduleWaitFeedback(ctx context.Context, pa
 	if rootScopeID == "" {
 		rootScopeID = parentSessionID
 	}
-	_, _ = supervision.ScheduleWaitFeedbackWake(
+	_, _ = supervision.ScheduleWaitFeedbackWakeWithResolvers(
 		ctx,
 		h.SubagentBatches,
-		h.agentSessionObligationResolver(),
-		h.teamObligationResolver(),
+		h.obligationResolvers(),
 		h.Supervision.Wakes,
 		h.localWaitFeedbackTracker(),
 		parentSessionID,

@@ -291,6 +291,10 @@ type Handler struct {
 	subagentBatchMu    sync.Mutex
 	subagentBatchStore subagentbatch.BatchStore
 	subagentBatchTried bool
+	// parkedBatchResumeSeen deduplicates the one bounded parked-child scan per
+	// session build. Failures/retries release the key so a later materialization
+	// can retry; a successfully launched resume leaves the batch running.
+	parkedBatchResumeSeen sync.Map
 
 	// P2-D：opt-in 的周期巡查循环（ProgressCheckInterval > 0 时启动）。
 	// SetSupervisionConfig 是唯一启动点，stop 供测试与宿主关闭使用。
@@ -2327,6 +2331,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
 	h.applyAgentHooks(a, selectedConfig)
 	h.applyAgentRuntimeServices(a, selectedConfig)
+	a.SetObligationResolvers(h.obligationResolvers())
 	usesSessionHistory := session != nil && (len(req.Messages) == 0 || (len(req.Messages) == 1 && strings.EqualFold(strings.TrimSpace(req.Messages[0]["role"]), "user")))
 	if usesSessionHistory {
 		h.maybeAutoCompactSessionHistory(ctx, session, a, agentProvider, agentModel, requestTraceID, req.TaskID)
@@ -2562,6 +2567,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				AgentSessionObligations: h.agentSessionObligationResolver(),
 				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
 				TeamObligations: h.teamObligationResolver(),
+				// job: 义务同源：required background job 的终态判读器。
+				BackgroundJobObligations: h.backgroundJobObligationResolver(),
 			})
 			if reactErr != nil {
 				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
@@ -2929,6 +2936,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				AgentSessionObligations: h.agentSessionObligationResolver(),
 				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
 				TeamObligations: h.teamObligationResolver(),
+				// job: 义务同源：required background job 的终态判读器。
+				BackgroundJobObligations: h.backgroundJobObligationResolver(),
 			},
 		})
 		if reactErr != nil {

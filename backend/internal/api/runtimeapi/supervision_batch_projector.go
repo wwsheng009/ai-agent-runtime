@@ -99,6 +99,8 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 			RecommendedAction:     recommended,
 			AllowedActions:        []string{string(supervision.ActionInspect), string(supervision.ActionCancel), string(supervision.ActionClose)},
 			ResolutionState:       resolution,
+			TurnID:                strings.TrimSpace(terminal.ParentTurnID),
+			FinalizationPolicy:    "required",
 		})
 		if err != nil {
 			return err
@@ -116,11 +118,10 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 		// run 边界结清——没有这笔结算 wake，父会话即使空闲也不会再起 run，
 		// 永久停在 "Waiting for subagents"。谓词只在全部义务终态时排 wake。
 		if !supervision.LifecycleWakeScheduled(notification) {
-			_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+			_, _ = supervision.ScheduleSettledTurnWakeWithResolvers(
 				ctx,
 				h.getSubagentBatchStore(),
-				h.agentSessionObligationResolver(),
-				h.teamObligationResolver(),
+				h.obligationResolvers(),
 				h.getSupervisionWakeScheduler(),
 				parentSessionID,
 				rootScopeID,
@@ -182,7 +183,8 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 		return h.supervisionWake
 	}
 	h.supervisionWake = &supervision.WakeConsumer{
-		Wakes: scheduler,
+		Wakes:     scheduler,
+		Admission: h.newAPIResumeAdmission(),
 		// A6：与 CLI 宿主同口径——resume 先过同一套门控（MaxConcurrent /
 		// MaxDepth）。瞬时容量（槽位占满）⇒ 排队 + 位次，不丢 wake；静态策略
 		//（深度越界）不可恢复，禁止排队，改为放行 + digest 的 resume_gate 行

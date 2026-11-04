@@ -16,6 +16,15 @@ func (s stubAgentSessionResolver) AgentSessionTerminal(_ context.Context, sessio
 	return terminal, found, nil
 }
 
+// stubBackgroundJobResolver maps job id -> terminal. Presence means the job has
+// a durable row; an absent id models a vanished/unstarted job.
+type stubBackgroundJobResolver map[string]bool
+
+func (s stubBackgroundJobResolver) BackgroundJobTerminal(_ context.Context, jobID string) (bool, bool, error) {
+	terminal, found := s[jobID]
+	return terminal, found, nil
+}
+
 func newAgentSessionTestStore(t *testing.T) BatchStore {
 	t.Helper()
 	store, err := NewSQLiteBatchStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "batches.db")})
@@ -610,5 +619,87 @@ func TestCountObligationProgressStrictness(t *testing.T) {
 	}
 	if progress.Total != 3 || progress.Terminal != 3 || !progress.AllTerminal() {
 		t.Fatalf("all-terminal cohort mis-read: %+v", progress)
+	}
+}
+
+// TestBackgroundJobObligationsJoinSettleAndResume pins the required-job
+// obligation kind across every predicate that can end or resume a parked turn.
+// A running or missing job must keep the turn parked; only a durable terminal
+// job may settle it.
+func TestBackgroundJobObligationsJoinSettleAndResume(t *testing.T) {
+	ctx := context.Background()
+	store := newAgentSessionTestStore(t)
+	jobs := stubBackgroundJobResolver{
+		"job-done":    true,
+		"job-running": false,
+	}
+	resolvers := ObligationResolvers{BackgroundJobs: jobs}
+
+	cases := []struct {
+		name    string
+		jobID   string
+		settled bool
+		strict  bool
+	}{
+		{name: "terminal job settles", jobID: "job-done", settled: true, strict: true},
+		{name: "running job stays parked", jobID: "job-running", settled: false, strict: false},
+		{name: "missing job stays parked", jobID: "job-missing", settled: false, strict: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := &TurnSuspension{
+				TurnID: "turn-job", SessionID: "sess-job",
+				ObligationIDs: []string{BackgroundJobObligationID(tc.jobID)},
+			}
+			settled, err := TurnObligationsSettledWithResolvers(ctx, store, record, resolvers)
+			if err != nil {
+				t.Fatalf("TurnObligationsSettledWithResolvers: %v", err)
+			}
+			if settled != tc.settled {
+				t.Fatalf("settled = %v, want %v", settled, tc.settled)
+			}
+			strict, err := TurnObligationsAllTerminalWithResolvers(ctx, store, record, resolvers)
+			if err != nil {
+				t.Fatalf("TurnObligationsAllTerminalWithResolvers: %v", err)
+			}
+			if strict != tc.strict {
+				t.Fatalf("strict = %v, want %v", strict, tc.strict)
+			}
+		})
+	}
+
+	record := &TurnSuspension{
+		TurnID: "turn-job", SessionID: "sess-job",
+		ObligationIDs: []string{BackgroundJobObligationID("job-done")},
+	}
+	if got := record.ObligationBatchIDs(); len(got) != 0 {
+		t.Fatalf("job obligation must not be read as a batch id: %v", got)
+	}
+	if got := record.ObligationBackgroundJobIDs(); len(got) != 1 || got[0] != "job-done" {
+		t.Fatalf("ObligationBackgroundJobIDs = %v, want [job-done]", got)
+	}
+	unwired, err := TurnObligationsAllTerminalWithResolvers(ctx, store, record, ObligationResolvers{})
+	if err != nil {
+		t.Fatalf("unwired strict verdict: %v", err)
+	}
+	if unwired {
+		t.Fatal("an unwired job resolver must never settle on a guess")
+	}
+
+	progress, err := CountObligationProgressWithResolvers(ctx, store, record, resolvers)
+	if err != nil {
+		t.Fatalf("CountObligationProgressWithResolvers: %v", err)
+	}
+	if progress.Total != 1 || progress.Terminal != 1 || !progress.AllTerminal() {
+		t.Fatalf("job progress = %+v, want one terminal row", progress)
+	}
+
+	rows, err := BuildWaitLedgerWithResolvers(ctx, store, record, resolvers)
+	if err != nil {
+		t.Fatalf("BuildWaitLedgerWithResolvers: %v", err)
+	}
+	if len(rows) != 1 || rows[0].SubjectKind != "background_job" ||
+		rows[0].SubjectID != "job-done" || !rows[0].Terminal {
+		t.Fatalf("job ledger row = %+v", rows)
 	}
 }

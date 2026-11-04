@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -26,6 +27,70 @@ func terminalJobEvent(jobID, eventType, sessionID string, payload map[string]int
 		Payload:   payload,
 		CreatedAt: time.Now().UTC(),
 	}
+}
+
+func TestBackgroundJobAfterFinalizedParentIsNotificationOnly(t *testing.T) {
+	handler, store, scheduler := newAPIWakeTestHandler(t, "api-bg-finalized")
+	ctx := context.Background()
+	sessionID := "sess-finalized-job"
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(8)
+	require.NoError(t, runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:          sessionID,
+		Status:             runtimechat.SessionIdle,
+		TurnPhase:          runtimechat.ParentTurnPhaseFinalized,
+		FinalizedTurnID:    "turn-finalized",
+		FinalizedEpisodeID: "ep-finalized",
+		UpdatedAt:          time.Now().UTC(),
+	}))
+	handler.sessionRuntimeStore = runtimeStore
+
+	manager := background.NewManager(background.Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	originCtx := background.WithJobOrigin(ctx, background.JobOrigin{
+		RootScopeID:        sessionID,
+		ParentSessionID:    sessionID,
+		ParentTurnID:       "turn-finalized",
+		ParentEpisodeID:    "ep-finalized",
+		FinalizationPolicy: string(background.JobPolicyDetached),
+	})
+	job, err := manager.SubmitShell(originCtx, sessionID, background.BackgroundTaskArgs{Command: "echo done"})
+	require.NoError(t, err)
+
+	handler.backgroundMu.Lock()
+	handler.backgroundManager = manager
+	handler.backgroundMu.Unlock()
+	handler.projectBackgroundJobTerminal(ctx, terminalJobEvent(job.ID, "completed", sessionID, map[string]interface{}{"exit_code": 0}), sessionID)
+
+	consumer := &supervision.WakeConsumer{
+		Wakes:     scheduler,
+		Admission: handler.newAPIResumeAdmission(),
+		Runnable:  func(context.Context, string, string, string) bool { return true },
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
+			t.Fatal("a detached job terminal after parent finalization must not start a model turn")
+			return nil
+		},
+		DeliverResume: func(context.Context, string, string, *supervision.Digest, []string, *supervision.ResumeContext) error {
+			t.Fatal("a detached job terminal after parent finalization must not resume a turn")
+			return nil
+		},
+	}
+	require.NoError(t, consumer.MaybeWakeParent(ctx, sessionID, "", sessionID))
+
+	items, err := store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		SubjectKind:           supervision.SubjectJob,
+	})
+	require.NoError(t, err)
+	require.Len(t, items, 1, "late job evidence must stay durable")
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "notification-only consumes the wake without starting a turn")
 }
 
 func pendingWakesFor(t *testing.T, store *supervision.SQLiteSupervisionStore, rootScope, sessionID string) []supervision.WakePending {

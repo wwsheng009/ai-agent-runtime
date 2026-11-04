@@ -91,9 +91,9 @@ func TestReasoningModelEnabledUsesExplicitCapabilityFlag(t *testing.T) {
 	}
 }
 
-func TestCompactSummarySettingsOmitsReasoningEffortByDefault(t *testing.T) {
+func TestCompactSummarySettingsLeavesBudgetUnsetByDefault(t *testing.T) {
 	maxTokens, reasoningEffort := CompactSummarySettings(agentconfig.ModelCapabilitySpec{})
-	require.Equal(t, defaultCompactMaxTokens, maxTokens)
+	require.Zero(t, maxTokens)
 	require.Empty(t, reasoningEffort)
 }
 
@@ -104,6 +104,14 @@ func TestCompactSummarySettingsKeepsExplicitReasoningEffort(t *testing.T) {
 	})
 	require.Equal(t, 4096, maxTokens)
 	require.Equal(t, "none", reasoningEffort)
+}
+
+func TestCompactSummarySettingsKeepsReasoningEffortWithoutExplicitMaxTokens(t *testing.T) {
+	maxTokens, reasoningEffort := CompactSummarySettings(agentconfig.ModelCapabilitySpec{
+		CompactReasoningEffort: "low",
+	})
+	require.Zero(t, maxTokens)
+	require.Equal(t, "low", reasoningEffort)
 }
 
 var _ Provider = (*capabilityProvider)(nil)

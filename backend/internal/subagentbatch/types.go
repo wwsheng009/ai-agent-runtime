@@ -78,8 +78,12 @@ func LegacyExecutionModeNotice(value string) string {
 type BatchStatus string
 
 const (
-	BatchQueued             BatchStatus = "queued"
-	BatchRunning            BatchStatus = "running"
+	BatchQueued  BatchStatus = "queued"
+	BatchRunning BatchStatus = "running"
+	// BatchParked means the worker stopped because a child logical turn still
+	// owns required obligations. It is non-terminal: startup recovery resumes
+	// the parked task(s) once those obligations are known terminal.
+	BatchParked             BatchStatus = "parked"
 	BatchPartiallyCompleted BatchStatus = "partially_completed"
 	BatchCompleted          BatchStatus = "completed"
 	BatchFailed             BatchStatus = "failed"
@@ -104,9 +108,13 @@ func (s BatchStatus) Terminal() bool {
 type TaskStatus string
 
 const (
-	TaskPending   TaskStatus = "pending"
-	TaskReady     TaskStatus = "ready"
-	TaskRunning   TaskStatus = "running"
+	TaskPending TaskStatus = "pending"
+	TaskReady   TaskStatus = "ready"
+	TaskRunning TaskStatus = "running"
+	// TaskParked is the non-terminal child-turn suspension state. The batch
+	// worker has returned, but the logical child turn still owns required
+	// obligations and must be resumed in the same child session/turn identity.
+	TaskParked    TaskStatus = "parked"
 	TaskSucceeded TaskStatus = "succeeded"
 	TaskFailed    TaskStatus = "failed"
 	// TaskFailedWithResult is the terminal state of a task that failed overall
@@ -363,6 +371,7 @@ type BatchSummary struct {
 	Status         BatchStatus `json:"status,omitempty"`
 	TaskCount      int         `json:"task_count,omitempty"`
 	CompletedCount int         `json:"completed_count,omitempty"`
+	ParkedCount    int         `json:"parked_count,omitempty"`
 	FailedCount    int         `json:"failed_count,omitempty"`
 	// FailedWithResultCount is a sub-count of FailedCount: tasks that failed
 	// overall but whose result capsule is still retrievable. It is listed
@@ -387,6 +396,7 @@ type TaskCounts struct {
 	Total            int
 	Queued           int
 	Running          int
+	Parked           int
 	Completed        int
 	Failed           int
 	FailedWithResult int
@@ -406,7 +416,7 @@ func (c TaskCounts) Terminal() int {
 }
 
 // DeriveTaskCounts counts every known status so that
-// Queued+Running+Terminal always equals Total for a well-formed cohort. An
+// Queued+Running+Parked+Terminal always equals Total for a well-formed cohort. An
 // unrecognized status is counted as queued rather than dropped: silently
 // losing a row is exactly the drift this helper exists to prevent.
 func DeriveTaskCounts(tasks []SubagentTaskRecord) TaskCounts {
@@ -415,6 +425,8 @@ func DeriveTaskCounts(tasks []SubagentTaskRecord) TaskCounts {
 		switch t.Status {
 		case TaskRunning:
 			counts.Running++
+		case TaskParked:
+			counts.Parked++
 		case TaskSucceeded:
 			counts.Completed++
 		case TaskFailed:

@@ -126,6 +126,9 @@ func (h *Handler) buildSessionAgentForContext(
 		mcpManager:      sessionMCPManager,
 		llmRuntime:      h.llmRuntime,
 	})
+	// Every loop derived from this agent (including in-process child agents)
+	// inherits the same durable obligation readers.
+	apiAgent.SetObligationResolvers(h.obligationResolvers())
 	if disableTools {
 		apiAgent.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
 	} else {
@@ -151,6 +154,9 @@ func (h *Handler) buildSessionAgentForContext(
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)
 
+	// All tool/permission/shell/depth policies are final before a detached
+	// parked-child resume is allowed to start.
+	h.startParkedBatchResumeAsync(sessionID, apiAgent)
 	return apiAgent, selectedConfig
 }
 
@@ -207,6 +213,9 @@ func (h *Handler) buildSessionLoopConfigFor(
 	// §6.12 扩展：team_spawn 的 team: 义务同样需要 run 末的 durable 判读器
 	// （team store 终态）；未接线时 team 义务保持保守不清账。
 	loopConfig.TeamObligations = h.teamObligationResolver()
+	// job_start(finalization_policy=required) 的 job: 义务需要 background
+	// manager 的终态判读器；未接线时 required job 不写挂起记录。
+	loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /
 	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
 	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。

@@ -28,9 +28,10 @@ type LiveTaskCounter interface {
 	CountLiveTasks(ctx context.Context, filter LiveTaskFilter) (int, error)
 }
 
-// LiveTaskStatuses returns the task statuses that still hold a live slot. It is
-// the exact complement of TaskStatus.Terminal(), so a task frees its slot the
-// moment it settles.
+// LiveTaskStatuses returns the task statuses that still hold a live execution
+// slot. Parked is deliberately excluded even though it is non-terminal: the
+// child logical turn released the slot while waiting, and resuming it must pass
+// admission again. Terminal tasks also free their slot immediately.
 func LiveTaskStatuses() []TaskStatus {
 	return []TaskStatus{TaskPending, TaskReady, TaskRunning}
 }

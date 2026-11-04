@@ -77,14 +77,20 @@ type BackgroundTaskArgs struct {
 
 // BackgroundTaskResult reports a submitted job.
 type BackgroundTaskResult struct {
-	JobID            string        `json:"job_id"`
-	Status           string        `json:"status"`
-	Message          string        `json:"message,omitempty"`
-	RestartPolicy    RestartPolicy `json:"restart_policy,omitempty"`
-	LaunchState      string        `json:"launch_state,omitempty"`
-	HealthcheckState string        `json:"healthcheck_state,omitempty"`
-	StartupProbe     string        `json:"startup_probe,omitempty"`
-	StartupGraceMs   int64         `json:"startup_grace_ms,omitempty"`
+	JobID         string        `json:"job_id"`
+	Status        string        `json:"status"`
+	Message       string        `json:"message,omitempty"`
+	RestartPolicy RestartPolicy `json:"restart_policy,omitempty"`
+	// FinalizationPolicy / parent identity are echoed from the submission so the
+	// model can see whether this job gates the current turn and which logical
+	// episode will be resumed.
+	FinalizationPolicy JobFinalizationPolicy `json:"finalization_policy,omitempty"`
+	ParentTurnID       string                `json:"parent_turn_id,omitempty"`
+	ParentEpisodeID    string                `json:"parent_episode_id,omitempty"`
+	LaunchState        string                `json:"launch_state,omitempty"`
+	HealthcheckState   string                `json:"healthcheck_state,omitempty"`
+	StartupProbe       string                `json:"startup_probe,omitempty"`
+	StartupGraceMs     int64                 `json:"startup_grace_ms,omitempty"`
 	// AlreadyOpen reports that an interactive job_start with the same command
 	// returned the live session instead of starting a new process (explicit
 	// reuse marker, 2026-10-14). A different command while the slot is occupied
@@ -148,13 +154,19 @@ type TaskOutputResult struct {
 	DeadlineAt string `json:"deadline_at,omitempty"`
 	// Interactive session fields (2026-10-11): write_stdin exchanges report the
 	// wait condition and the caller's next output offset.
-	Interactive   bool     `json:"interactive,omitempty"`
-	TTY           bool     `json:"tty,omitempty"`
-	WaitCondition string   `json:"wait_condition,omitempty"`
-	WaitedMs      int64    `json:"waited_ms,omitempty"`
-	OSPID         *int     `json:"os_pid,omitempty"`
-	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
-	RSSKB         *int64   `json:"rss_kb,omitempty"`
+	Interactive   bool   `json:"interactive,omitempty"`
+	TTY           bool   `json:"tty,omitempty"`
+	WaitCondition string `json:"wait_condition,omitempty"`
+	WaitedMs      int64  `json:"waited_ms,omitempty"`
+	// Terminal output drain observability. LateOutputCount is the number of
+	// bytes a producer wrote after the terminal drain boundary; they were
+	// discarded rather than attached to the settled result.
+	OutputDrainedAt     string   `json:"output_drained_at,omitempty"`
+	LateOutputCount     int64    `json:"late_output_count,omitempty"`
+	LateOutputDiscarded bool     `json:"late_output_discarded,omitempty"`
+	OSPID               *int     `json:"os_pid,omitempty"`
+	CPUPercent          *float64 `json:"cpu_percent,omitempty"`
+	RSSKB               *int64   `json:"rss_kb,omitempty"`
 }
 
 // JobFilter filters background job queries.

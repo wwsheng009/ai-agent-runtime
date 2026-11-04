@@ -36,7 +36,7 @@ func (h *localChatRuntimeHost) wireLocalSupervisionSources() {
 		return
 	}
 	h.Supervision.Wakes.SetProgressSource(h.newLocalBatchProgressSource())
-	if source := supervision.NewBatchObligationSourceWithResolvers(h.SubagentBatches, h.agentSessionObligationResolver(), h.teamObligationResolver()); source != nil {
+	if source := supervision.NewBatchObligationSourceWithObligationResolvers(h.SubagentBatches, h.obligationResolvers()); source != nil {
 		h.Supervision.Wakes.SetObligationSource(source)
 	}
 }

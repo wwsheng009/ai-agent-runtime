@@ -105,6 +105,7 @@ func (h *Handler) appendGatewaySubagentSessions(ctx context.Context, sessions []
 			Status: []subagentbatch.BatchStatus{
 				subagentbatch.BatchQueued,
 				subagentbatch.BatchRunning,
+				subagentbatch.BatchParked,
 				subagentbatch.BatchPartiallyCompleted,
 			},
 			Limit: gatewayagent.SubagentSessionMax,

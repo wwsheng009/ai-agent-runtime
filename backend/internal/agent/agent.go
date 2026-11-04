@@ -64,6 +64,11 @@ type Agent struct {
 	subagents               *SubagentScheduler
 	batchCoordinator        *SubagentBatchCoordinator
 	batchLifecycleProjector BatchLifecycleProjector
+	// obligationResolvers are inherited by derived loops and child agents. The
+	// host wires the same durable readers it gives the parent loop so nested
+	// turns can settle child/team/job obligations instead of degrading to a
+	// conservative park forever.
+	obligationResolvers subagentbatch.ObligationResolvers
 	// I9 durability gate (design §6.13): the host-neutral projector for the
 	// one-shot degradation warning, plus the per-(session, reason) dedup that
 	// keeps a chatty model from flooding the supervision control plane.
@@ -82,9 +87,9 @@ type Agent struct {
 	hookManager                    *HookManager
 	checkpointMgr                  *CheckpointManager
 	checkpointDisabled             bool
-	mu      sync.RWMutex
-	running bool
-	state   AgentState
+	mu                             sync.RWMutex
+	running                        bool
+	state                          AgentState
 }
 
 // AgentState Agent 状态
@@ -97,10 +102,16 @@ type AgentState struct {
 
 // Result Agent 执行结果
 type Result struct {
-	Success       bool   `json:"success"`
-	Output        string `json:"output"`
-	Steps         int    `json:"steps"`
-	LimitReached  bool   `json:"limit_reached,omitempty"`
+	Success      bool   `json:"success"`
+	Output       string `json:"output"`
+	Steps        int    `json:"steps"`
+	LimitReached bool   `json:"limit_reached,omitempty"`
+	// EpisodeID identifies the logical episode this run belongs to.
+	EpisodeID string `json:"episode_id,omitempty"`
+	// TurnParked reports that the logical turn still owns non-terminal required
+	// obligations and therefore was not finalized by this run. Callers must not
+	// treat it as a finished parent turn.
+	TurnParked    bool   `json:"turn_parked,omitempty"`
 	StepLimit     int    `json:"step_limit,omitempty"`
 	ToolCallLimit int    `json:"tool_call_limit,omitempty"`
 	LimitReason   string `json:"limit_reason,omitempty"`
@@ -384,9 +395,10 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 	defer a.mu.Unlock()
 	if a.batchCoordinator == nil {
 		cfg := SubagentBatchCoordinatorConfig{
-			Scheduler:          scheduler,
-			Store:              store,
-			LifecycleProjector: a.batchLifecycleProjector,
+			Scheduler:           scheduler,
+			Store:               store,
+			LifecycleProjector:  a.batchLifecycleProjector,
+			ObligationResolvers: a.obligationResolvers,
 		}
 		cfg.Emitter = a.batchRuntimeEventEmitter()
 		a.batchCoordinator = NewSubagentBatchCoordinator(cfg)
@@ -396,6 +408,19 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 		// in-memory database/connection.
 		_ = store.Close()
 	}
+	return a.batchCoordinator
+}
+
+// PeekSubagentBatchCoordinator returns the already-injected coordinator without
+// creating the process-local default. Child-agent construction uses it to share
+// the parent's durable suspension store without materializing state on hosts
+// that never opted into supervised batching.
+func (a *Agent) PeekSubagentBatchCoordinator() *SubagentBatchCoordinator {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.batchCoordinator
 }
 
@@ -409,6 +434,9 @@ func (a *Agent) SetSubagentBatchCoordinator(c *SubagentBatchCoordinator) {
 	a.backgroundBatches = c != nil
 	if c != nil {
 		c.SetLifecycleProjector(a.batchLifecycleProjector)
+		// The host may have wired resolvers before injecting the coordinator;
+		// carry them so parked child tasks can decide resumability after restart.
+		c.SetObligationResolvers(a.obligationResolvers)
 		// A host-injected coordinator (shared durable store) normally arrives
 		// without a display-mirror emitter, while the lazy default path always
 		// installs the agent's runtime-event emitter. Preserve that emission so

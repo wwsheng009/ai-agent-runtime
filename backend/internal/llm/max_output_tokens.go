@@ -32,6 +32,13 @@ const (
 	EnvAICLIMaxOutputTokens = "AICLI_MAX_OUTPUT_TOKENS"
 	// EnvDisableMaxTokensCap disables the 8k slot-reservation default.
 	EnvDisableMaxTokensCap = "AICLI_DISABLE_MAX_TOKENS_CAP"
+
+	// MetadataKeyOmitMaxTokens suppresses the synthesized request budget.
+	// It is used by internal callers such as compact summaries when the model
+	// capability has no explicit max_tokens. An explicit LLMRequest.MaxTokens
+	// still wins; this flag only prevents the 8k/model-default fallback from
+	// being injected into the provider request.
+	MetadataKeyOmitMaxTokens = "omit_max_tokens"
 )
 
 // ModelMaxOutputTokens describes a model's default request budget and hard
@@ -179,6 +186,10 @@ func ResolveRequestMaxTokens(
 
 	resolved.Default = defaultTokens
 	return resolved
+}
+
+func metadataOmitsMaxTokens(metadata map[string]interface{}) bool {
+	return metadataBool(metadata[MetadataKeyOmitMaxTokens])
 }
 
 // CapRequestMaxTokens clamps an already-chosen request budget to the best
