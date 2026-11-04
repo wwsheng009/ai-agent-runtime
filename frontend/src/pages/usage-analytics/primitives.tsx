@@ -149,15 +149,18 @@ export function QualityNotice({ coverage, partial, reasons }: {
   );
 }
 
-export function FilterInput({ label, value, placeholder, onChange, icon, type = "text", compact = false, autoComplete }: {
+export function FilterInput({ label, value, placeholder, onChange, icon, type = "text", compact = false, autoComplete, min, max, step }: {
   label: string;
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
   icon?: ReactNode;
-  type?: "text" | "date" | "password";
+  type?: "text" | "date" | "password" | "number";
   compact?: boolean;
   autoComplete?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 }) {
   return (
     <label className={cn(
@@ -173,6 +176,9 @@ export function FilterInput({ label, value, placeholder, onChange, icon, type = 
           type={type}
           value={value}
           autoComplete={autoComplete}
+          min={min}
+          max={max}
+          step={step}
           onChange={(event) => onChange(event.target.value)}
           placeholder={placeholder}
           className={cn(

@@ -110,6 +110,22 @@ sessionRuntime:
   #   busyTimeout: 5s      # 读连接 busy_timeout；缺省继承 store 的 busyTimeout
   #   operationTimeout: 3s # 单次读操作上限；应小于写侧默认 10s（长读会拖住 WAL checkpoint）
 
+usageAnalytics:
+  # 统一用量分析库（~/.aicli/sessions/runtime/usage_analytics.sqlite）。
+  # 自动清理按 started_at/completed_at 分批删除原始请求、工具、回合等明细；
+  # 会话元数据保留，预聚合计数在请求明细删除后重建。
+  # 空间不会立即归还操作系统：删除后的页进入 freelist 供后续写入复用；
+  # 需要缩小文件时，先退出使用进程再执行：
+  #   aicli storage compact --target analytics --require-exclusive
+  # 历史工具 record_json 大载荷可先显式瘦身（建议先 --dry-run）：
+  #   aicli usage-analytics compact-records --dry-run
+  #   aicli usage-analytics compact-records --max-bytes 1024 --batch-size 200
+  retention:
+    enabled: true
+    days: 90
+    interval: 6h
+    batchSize: 2000
+
 knowledge:
   # 知识层（docs/knowledge_Layer）总开关。Phase 2 已完成、ADR-0004 已 Accepted，
   # 门禁解除：on / shadow 均可写入本文件（Phase 0「只允许 off」口径已过期）。

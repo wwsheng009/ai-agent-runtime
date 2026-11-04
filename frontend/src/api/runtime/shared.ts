@@ -256,6 +256,7 @@ function isDedupableRuntimeGet(input: string, init?: RequestInit) {
 export async function fetchRuntimeJson<T>(
   input: string,
   init?: RequestInit,
+  timeoutMs: number = RUNTIME_FETCH_TIMEOUT_MS,
 ): Promise<T> {
   const dedupeKey = isDedupableRuntimeGet(input, init) ? input : null;
   if (dedupeKey) {
@@ -265,7 +266,7 @@ export async function fetchRuntimeJson<T>(
     }
   }
 
-  const request = performRuntimeJsonFetch<T>(input, init);
+  const request = performRuntimeJsonFetch<T>(input, init, timeoutMs);
   if (dedupeKey) {
     inflightRuntimeGets.set(dedupeKey, request);
     void request
@@ -283,12 +284,13 @@ export async function fetchRuntimeJson<T>(
 async function performRuntimeJsonFetch<T>(
   input: string,
   init?: RequestInit,
+  timeoutMs: number = RUNTIME_FETCH_TIMEOUT_MS,
 ): Promise<T> {
   let effectiveInit = init;
   // 调用方未提供自己的 signal 时，加上超时信号；超时后 fetch 立即抛
   // TimeoutError，让 UI 能快速从 "connecting" 进入错误状态，而不是无限旋转。
   if (!init?.signal) {
-    effectiveInit = { ...init, signal: AbortSignal.timeout(RUNTIME_FETCH_TIMEOUT_MS) };
+    effectiveInit = { ...init, signal: AbortSignal.timeout(timeoutMs) };
   }
   const response = await fetch(input, effectiveInit);
   if (!response.ok) {

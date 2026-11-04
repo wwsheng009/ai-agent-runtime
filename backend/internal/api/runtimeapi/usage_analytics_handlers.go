@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
@@ -130,7 +131,13 @@ func (h *Handler) attachUsageAnalyticsService() *usageanalytics.Service {
 	if h.sessionManager != nil && h.sessionManager.GetStorage() != nil {
 		history = &managerCacheHistoryLookup{store: h.sessionManager.GetStorage()}
 	}
-	return attachUsageAnalyticsSingleton(path, h.getRuntimeEventBus(), lookup, history)
+	return attachUsageAnalyticsSingletonWithRetention(
+		path,
+		h.getRuntimeEventBus(),
+		lookup,
+		history,
+		usageAnalyticsRetentionOptions(h.runtimeConfig),
+	)
 }
 
 func attachUsageAnalyticsSingleton(
@@ -138,6 +145,16 @@ func attachUsageAnalyticsSingleton(
 	bus *runtimeevents.Bus,
 	lookup usageanalytics.SessionMetaLookup,
 	history cacheanalytics.HistoryLookup,
+) *usageanalytics.Service {
+	return attachUsageAnalyticsSingletonWithRetention(path, bus, lookup, history, usageanalytics.RetentionOptions{})
+}
+
+func attachUsageAnalyticsSingletonWithRetention(
+	path string,
+	bus *runtimeevents.Bus,
+	lookup usageanalytics.SessionMetaLookup,
+	history cacheanalytics.HistoryLookup,
+	retention usageanalytics.RetentionOptions,
 ) *usageanalytics.Service {
 	path = usageanalytics.NormalizePath(path)
 
@@ -155,14 +172,28 @@ func attachUsageAnalyticsSingleton(
 		Lookup: lookup,
 		// 同一适配器同时实现 SessionLineageLookup（managerSessionMetaLookup）；
 		// 测试桩仅实现 SessionMetaLookup 时按 nil 处理（无父链，旧行为）。
-		Lineage: lineageLookupOf(lookup),
-		History: history,
+		Lineage:   lineageLookupOf(lookup),
+		History:   history,
+		Retention: retention,
 	})
 	if err != nil || service == nil {
 		return nil
 	}
 	usageAnalyticsService = service
 	return usageAnalyticsService
+}
+
+func usageAnalyticsRetentionOptions(config *runtimecfg.RuntimeConfig) usageanalytics.RetentionOptions {
+	if config == nil {
+		return usageanalytics.RetentionOptions{}
+	}
+	retention := config.UsageAnalytics.Retention
+	return usageanalytics.RetentionOptions{
+		Enabled:   retention.Enabled,
+		Days:      retention.Days,
+		Interval:  retention.Interval,
+		BatchSize: retention.BatchSize,
+	}
 }
 
 // lineageLookupOf 从元数据来源提取父链能力（未实现时返回 nil）。

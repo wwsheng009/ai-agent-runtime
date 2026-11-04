@@ -1125,6 +1125,60 @@
         <button id="cache-refresh-btn" type="button" title="重新拉取缓存分析数据">⟳ 刷新</button>
       </div>
       <div id="cache-overview" class="cache-overview"><div class="cache-empty">加载中…</div></div>
+      <div id="cache-filters" class="cache-filters">
+        <label class="cache-filter-field">provider
+          <select id="cache-filter-provider" class="cache-filter-select" aria-label="provider">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="cache-filter-field">model
+          <select id="cache-filter-model" class="cache-filter-select" aria-label="model">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="cache-filter-field">请求状态
+          <select id="cache-filter-request-status" title="按请求终态筛选">
+            <option value="">全部</option>
+            <option value="success">成功</option>
+            <option value="error">错误</option>
+            <option value="interrupted">中断</option>
+          </select>
+        </label>
+        <label class="cache-filter-field">缓存状态
+          <select id="cache-filter-status" title="按缓存状态筛选请求明细">
+            <option value="">全部</option>
+            <option value="hit">命中</option>
+            <option value="write">写入</option>
+            <option value="confirmed_miss">确认未命中</option>
+            <option value="reported_zero">未命中</option>
+            <option value="not_reported">未上报（未知）</option>
+            <option value="error">错误</option>
+          </select>
+        </label>
+        <label class="cache-filter-field">缓存率
+          <input id="cache-filter-hit-min" type="number" min="0" max="100" step="1" placeholder="最低" aria-label="最低缓存率百分比">
+          <span>%</span>
+          <span class="cache-filter-sep">–</span>
+          <input id="cache-filter-hit-max" type="number" min="0" max="100" step="1" placeholder="最高" aria-label="最高缓存率百分比">
+          <span>%</span>
+        </label>
+        <label class="cache-filter-field">时间（本地）
+          <input id="cache-filter-from" class="cache-filter-time" type="datetime-local" title="开始时间（本地时区）" aria-label="开始时间">
+          <span class="cache-filter-sep">–</span>
+          <input id="cache-filter-to" class="cache-filter-time" type="datetime-local" title="结束时间（本地时区）" aria-label="结束时间">
+          <span id="cache-filter-timezone" class="cache-filter-timezone"></span>
+        </label>
+        <label class="cache-filter-field">耗时
+          <input id="cache-filter-duration-min" type="number" min="0" step="1" placeholder="最低" aria-label="最低耗时毫秒">
+          <span>ms</span>
+          <span class="cache-filter-sep">–</span>
+          <input id="cache-filter-duration-max" type="number" min="0" step="1" placeholder="最高" aria-label="最高耗时毫秒">
+          <span>ms</span>
+        </label>
+        <button id="cache-filter-apply" type="button" title="应用筛选条件并从第 1 页查询">筛选</button>
+        <button id="cache-filter-reset" type="button" title="清空筛选条件">重置</button>
+        <span id="cache-filter-error" class="cache-filter-error" aria-live="polite"></span>
+      </div>
       <div id="cache-requests" class="cache-requests"><div class="cache-empty">加载中…</div></div>
     </div>
     <!-- 分析页签（runtime.analytics.v1）：工具 / 子代理 / 失败模式三区 + 顶部采集健康条。

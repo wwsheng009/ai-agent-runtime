@@ -114,7 +114,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET/POST | `/web/api/config[...]` | 配置快照 / provider 增删改与模型拉取探测 / chat 配置保存 |
 | GET | `/web/api/skills[/{name}]` | 技能目录与详情 |
 | GET | `/web/api/analysis[/status\|tools\|subagents\|errors]` | 用量分析 |
-| GET | `/web/api/cache[/overview\|requests\|messages/{id}/trace]` | LLM 缓存分析 |
+| GET | `/web/api/cache[/overview\|requests\|messages/{id}/trace]` | LLM 缓存分析；`overview` 返回会话级 `providers/models` 下拉维度，`requests` 支持 `provider`、`model`、`status`、`cache_status`、`cache_hit_ratio_min/max`（0–1）、`duration_ms_min/max`、`from/to`、`limit/offset` 等筛选 |
 | GET | `/web/api/fs/roots` | 文件页签：作用域根列表（`scope`/`kind`/`name`/`path`/`exists`/`is_git_repo`；`kind=session` 即当前会话工作目录，见本节「文件与 Git 浏览」） |
 | GET | `/web/api/fs/list\|stat\|preview\|download\|search` | 文件页签：目录列表（`cursor` 分页 / `sort` / `show_hidden` / `dirs_first`）/ 单路径元信息 / 文本与图片预览 / 附件下载（支持 Range/HEAD）/ 名称搜索 |
 | GET | `/web/api/git/status\|diff\|commits` | GIT 页签：仓库状态分组 / 结构化 diff（hunks，解析失败降级 `raw`）/ 提交分页 |

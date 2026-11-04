@@ -122,7 +122,7 @@ func TestParentSessionRollupIncludesChildRequests(t *testing.T) {
 // TestParentSessionRowNotPollutedBySubagentAttributedRequests 锁定实测缺陷
 // （2026-10-09）：父会话在子代理在途期间替子代理代跑的请求带
 // parent_session_id=自身/subagent_id=子会话（请求级归因）；会话行必须保持顶层
-// 口径（父链为空），否则根会话会被列表过滤（s.parent_session_id = ''）漏掉、
+// 口径（父链为空），否则根会话会被列表过滤（s.parent_session_id = ”）漏掉、
 // 会话视图的 rollup 口径退化为"仅自身"。
 func TestParentSessionRowNotPollutedBySubagentAttributedRequests(t *testing.T) {
 	now := time.Date(2026, 10, 9, 11, 0, 0, 0, time.UTC)

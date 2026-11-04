@@ -167,10 +167,7 @@ func (c *collector) onToolRequested(event runtimeevents.Event) {
 	if started.IsZero() {
 		started = c.now()
 	}
-	record, err := json.Marshal(payload)
-	if err != nil {
-		record = nil
-	}
+	recordJSON := analyticsToolRecordJSON(payload)
 	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_tool_calls (
   tool_call_id, session_id, trace_id, turn_id, step, tool_name, source, kind, outcome,
@@ -193,7 +190,7 @@ ON CONFLICT(tool_call_id) DO UPDATE SET
 		payloadString(payload, "kind"),
 		"",
 		started.UnixNano(),
-		string(record),
+		recordJSON,
 	); err != nil {
 		c.reportWriteFailure("usage_tool_calls", err)
 	}
@@ -246,10 +243,7 @@ func (c *collector) onToolCompleted(event runtimeevents.Event) {
 		retryableValue = boolToInt(retryable)
 	}
 	duration := payloadInt64(payload, "duration_ms", "duration")
-	record, err := json.Marshal(payload)
-	if err != nil {
-		record = nil
-	}
+	recordJSON := analyticsToolRecordJSON(payload)
 	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_tool_calls (
   tool_call_id, session_id, trace_id, turn_id, step, tool_name, source, kind, outcome, ok,
@@ -292,7 +286,7 @@ ON CONFLICT(tool_call_id) DO UPDATE SET
 		completed.UnixNano(),
 		completed.UnixNano(),
 		duration,
-		string(record),
+		recordJSON,
 	); err != nil {
 		c.reportWriteFailure("usage_tool_calls", err)
 	}

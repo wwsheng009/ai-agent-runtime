@@ -36,11 +36,44 @@ const EnvDisableStats = "AICLI_USAGE_ANALYTICS_DISABLE_STATS"
 // COUNT(DISTINCT ...)。turn_key 语义与旧 sessionSelect 保持一致。
 const statsTurnKeysTable = "usage_session_turn_keys"
 
+const requestStatsRebuildTable = "usage_request_stats_rebuild"
+
 // statsTurnKeyExpr 旧 sessionSelect 的 turn 归属键表达式（usage_requests 别名域）。
 const statsTurnKeyExpr = "COALESCE(NULLIF(trace_id, ''), NULLIF(turn_id, ''), llm_request_id)"
 
 // aliasedTurnKeyExpr 与 statsTurnKeyExpr 同义，用于 usage_requests 别名为 r 的子查询。
 const aliasedTurnKeyExpr = "COALESCE(NULLIF(r.trace_id, ''), NULLIF(r.turn_id, ''), r.llm_request_id)"
+
+func requestStatsInsertSQL(keyExpr, join, where string, replace bool) string {
+	verb := "INSERT INTO "
+	if replace {
+		verb = "INSERT OR REPLACE INTO "
+	}
+	return verb + requestStatsRebuildTable + ` (
+  session_id, total_requests, successes, errors, requests_with_usage,
+  total_tokens, prompt_tokens, completion_tokens, cached_tokens,
+  reasoning_tokens, total_duration_ms, duration_samples,
+  total_first_token_ms, first_token_samples, first_started_at, last_started_at
+)
+SELECT ` + keyExpr + `,
+  COUNT(*),
+  COALESCE(SUM(CASE WHEN r.success = 1 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN r.success = 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN r.usage_available = 1 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(r.total_tokens), 0),
+  COALESCE(SUM(r.prompt_tokens), 0),
+  COALESCE(SUM(r.completion_tokens), 0),
+  COALESCE(SUM(r.cache_read_tokens), 0),
+  COALESCE(SUM(r.reasoning_tokens), 0),
+  COALESCE(SUM(r.duration_ms), 0),
+  COALESCE(SUM(CASE WHEN r.duration_ms <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(r.first_token_ms), 0),
+  COALESCE(SUM(CASE WHEN r.first_token_ms <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(MIN(NULLIF(r.started_at_unix_nano, 0)), 0),
+  COALESCE(MAX(r.started_at_unix_nano), 0)
+FROM usage_requests r` + join + where + `
+GROUP BY ` + keyExpr
+}
 
 // statsColumnDef 单个预聚合列定义（顺序稳定：迁移、探测与文档共用）。
 type statsColumnDef struct {
@@ -142,7 +175,7 @@ func (s *Store) detectStatsSchema() bool {
 	if err != nil || version < statsSchemaVersion {
 		return false
 	}
-	rows, err := s.db.Query("PRAGMA table_info(usage_sessions)")
+	rows, err := s.readDB().Query("PRAGMA table_info(usage_sessions)")
 	if err != nil {
 		return false
 	}
@@ -175,7 +208,7 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	if s == nil || s.db == nil || s.empty {
 		return false, nil
 	}
-	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	rows, err := s.readDB().Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return false, fmt.Errorf("inspect %s columns: %w", table, err)
 	}
@@ -285,7 +318,7 @@ func (s *Store) schemaVersion() (int, error) {
 		return 0, nil
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err := s.readDB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return 0, fmt.Errorf("read usage analytics user_version: %w", err)
 	}
 	return version, nil
@@ -445,34 +478,91 @@ GROUP BY root_session_id, ` + statsTurnKeyExpr
 			return fmt.Errorf("rebuild %s root scope: %w", statsTurnKeysTable, err)
 		}
 	}
-	// 计数列作用域谓词：v9 根行聚合全部后代、子行聚合自身；旧库退化为自身口径。
-	scopePredicate := "r.session_id = usage_sessions.session_id"
+	// Aggregate once, then update session rows from an indexed temp table.
+	// The previous correlated CASE predicate forced a full usage_requests scan
+	// for every session and every aggregate column.
+	if _, err := tx.Exec("DROP TABLE IF EXISTS temp." + requestStatsRebuildTable); err != nil {
+		return fmt.Errorf("reset %s: %w", requestStatsRebuildTable, err)
+	}
+	if _, err := tx.Exec(`CREATE TEMP TABLE ` + requestStatsRebuildTable + ` (
+  session_id            TEXT PRIMARY KEY,
+  total_requests        INTEGER NOT NULL DEFAULT 0,
+  successes             INTEGER NOT NULL DEFAULT 0,
+  errors                INTEGER NOT NULL DEFAULT 0,
+  requests_with_usage   INTEGER NOT NULL DEFAULT 0,
+  total_tokens          INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens         INTEGER NOT NULL DEFAULT 0,
+  completion_tokens     INTEGER NOT NULL DEFAULT 0,
+  cached_tokens         INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens      INTEGER NOT NULL DEFAULT 0,
+  total_duration_ms     INTEGER NOT NULL DEFAULT 0,
+  duration_samples      INTEGER NOT NULL DEFAULT 0,
+  total_first_token_ms  INTEGER NOT NULL DEFAULT 0,
+  first_token_samples   INTEGER NOT NULL DEFAULT 0,
+  first_started_at      INTEGER NOT NULL DEFAULT 0,
+  last_started_at        INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID`); err != nil {
+		return fmt.Errorf("create %s: %w", requestStatsRebuildTable, err)
+	}
 	if rollup {
-		scopePredicate = "(CASE WHEN usage_sessions.parent_session_id <> '' THEN r.session_id ELSE r.root_session_id END) = usage_sessions.session_id"
+		rootWhere := " WHERE r.root_session_id <> ''"
+		rootStatsArgs := []interface{}{}
+		if trimmed != "" {
+			rootWhere = " WHERE r.root_session_id = ?"
+			rootStatsArgs = append(rootStatsArgs, trimmed)
+		}
+		if _, err := tx.Exec(requestStatsInsertSQL("r.root_session_id", "", rootWhere, true), rootStatsArgs...); err != nil {
+			return fmt.Errorf("aggregate %s root scope: %w", requestStatsRebuildTable, err)
+		}
+		childWhere := " WHERE s.parent_session_id <> ''"
+		childArgs := []interface{}{}
+		if trimmed != "" {
+			childWhere += " AND r.session_id = ?"
+			childArgs = append(childArgs, trimmed)
+		}
+		if _, err := tx.Exec(
+			requestStatsInsertSQL("r.session_id", " JOIN usage_sessions s ON s.session_id = r.session_id", childWhere, true),
+			childArgs...,
+		); err != nil {
+			return fmt.Errorf("aggregate %s child scope: %w", requestStatsRebuildTable, err)
+		}
+	} else {
+		where := " WHERE 1=1"
+		statsArgs := []interface{}{}
+		if trimmed != "" {
+			where = " WHERE r.session_id = ?"
+			statsArgs = append(statsArgs, trimmed)
+		}
+		if _, err := tx.Exec(requestStatsInsertSQL("r.session_id", "", where, false), statsArgs...); err != nil {
+			return fmt.Errorf("aggregate %s: %w", requestStatsRebuildTable, err)
+		}
 	}
 	update := `UPDATE usage_sessions SET
-  c_total_requests      = COALESCE((SELECT COUNT(*) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_llm_successes       = COALESCE((SELECT SUM(CASE WHEN r.success = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_llm_errors          = COALESCE((SELECT SUM(CASE WHEN r.success = 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_requests_with_usage = COALESCE((SELECT SUM(CASE WHEN r.usage_available = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_total_tokens        = COALESCE((SELECT SUM(r.total_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_prompt_tokens       = COALESCE((SELECT SUM(r.prompt_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_completion_tokens   = COALESCE((SELECT SUM(r.completion_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_cached_tokens       = COALESCE((SELECT SUM(r.cache_read_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_reasoning_tokens    = COALESCE((SELECT SUM(r.reasoning_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_total_duration_ms   = COALESCE((SELECT SUM(r.duration_ms) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_duration_samples    = COALESCE((SELECT SUM(CASE WHEN r.duration_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_total_first_token_ms = COALESCE((SELECT SUM(r.first_token_ms) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_first_token_samples  = COALESCE((SELECT SUM(CASE WHEN r.first_token_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_total_requests      = COALESCE((SELECT total_requests FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_llm_successes       = COALESCE((SELECT successes FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_llm_errors          = COALESCE((SELECT errors FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_requests_with_usage = COALESCE((SELECT requests_with_usage FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_total_tokens        = COALESCE((SELECT total_tokens FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_prompt_tokens       = COALESCE((SELECT prompt_tokens FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_completion_tokens   = COALESCE((SELECT completion_tokens FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_cached_tokens       = COALESCE((SELECT cached_tokens FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_reasoning_tokens    = COALESCE((SELECT reasoning_tokens FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_total_duration_ms   = COALESCE((SELECT total_duration_ms FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_duration_samples    = COALESCE((SELECT duration_samples FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_total_first_token_ms = COALESCE((SELECT total_first_token_ms FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_first_token_samples  = COALESCE((SELECT first_token_samples FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
   c_turn_count          = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id),
   c_failed_turns        = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id AND k.failed = 1),
-  c_first_started_at    = COALESCE((SELECT MIN(NULLIF(r.started_at_unix_nano, 0)) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
-  c_last_started_at     = COALESCE((SELECT MAX(r.started_at_unix_nano) FROM usage_requests r WHERE ` + scopePredicate + `), 0)`
+  c_first_started_at    = COALESCE((SELECT first_started_at FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0),
+  c_last_started_at     = COALESCE((SELECT last_started_at FROM ` + requestStatsRebuildTable + ` t WHERE t.session_id = usage_sessions.session_id), 0)`
 	if scope != "" {
 		update += scope
 	}
 	if _, err := tx.Exec(update, args...); err != nil {
 		return fmt.Errorf("rebuild usage_sessions stats: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE IF EXISTS temp." + requestStatsRebuildTable); err != nil {
+		return fmt.Errorf("drop %s: %w", requestStatsRebuildTable, err)
 	}
 	return nil
 }

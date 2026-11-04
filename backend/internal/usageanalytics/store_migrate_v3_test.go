@@ -76,7 +76,7 @@ func TestStoreMigratesV3AndBackfills(t *testing.T) {
 
 	version, err := reopened.schemaVersion()
 	require.NoError(t, err)
-	require.Equal(t, statsSchemaVersion, version)
+	require.Equal(t, cacheRatioSchemaVersion, version)
 	require.True(t, reopened.statsReady())
 
 	stats := readStoredStats(t, reopened, "s1")

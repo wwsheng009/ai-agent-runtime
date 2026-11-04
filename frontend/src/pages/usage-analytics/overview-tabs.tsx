@@ -1,4 +1,4 @@
-import { ArchiveIcon, BarChart3Icon, CpuIcon, GaugeIcon, ListIcon, RouteIcon, ServerIcon } from "lucide-react";
+import { ActivityIcon, ArchiveIcon, BarChart3Icon, CpuIcon, GaugeIcon, ListIcon, RouteIcon, ServerIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { TabSwitcher } from "@/components/ui/tab-switcher";
@@ -6,6 +6,7 @@ import { overviewViews, type OverviewView } from "./overview-navigation";
 
 const viewIcons = {
   overview: BarChart3Icon,
+  requests: ActivityIcon,
   models: CpuIcon,
   sessions: ListIcon,
   quota: GaugeIcon,

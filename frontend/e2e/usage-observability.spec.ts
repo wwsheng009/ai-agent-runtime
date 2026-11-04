@@ -132,6 +132,8 @@ function sessionDetail() {
 type StubOptions = {
   toolsForbidden?: boolean;
   errorPatterns?: { error_code: string; failure_category: string; source: string; count: number }[];
+  usageLedgerRecords?: Array<Record<string, unknown>>;
+  analyticsRequestRecords?: Array<Record<string, unknown>>;
   /** 按 /errors 的请求 query 回放不同失败模式（用于断言「失败分类分布跟随筛选」）。 */
   errorPatternsForQuery?: (
     params: URLSearchParams,
@@ -139,6 +141,121 @@ type StubOptions = {
   /** 收集 /errors 请求的 query 字符串（断言参数透传）。 */
   errorQueries?: string[];
 };
+
+function requestListResponse(
+  records: Array<Record<string, unknown>>,
+  params: URLSearchParams,
+) {
+  const reported = new Set(["hit", "write", "confirmed_miss", "reported_zero"]);
+  const from = params.get("from");
+  const to = params.get("to");
+  const fromMs = from ? new Date(`${from}T00:00:00`).getTime() : null;
+  const toExclusiveMs = to
+    ? new Date(`${to}T00:00:00`).getTime() + 86_400_000
+    : null;
+  const provider = params.get("provider")?.toLowerCase() ?? "";
+  const model = params.get("model")?.toLowerCase() ?? "";
+  const search = params.get("q")?.toLowerCase() ?? "";
+  const success = params.get("success");
+  const ratioMin = Number(params.get("cache_hit_ratio_min"));
+  const ratioMax = Number(params.get("cache_hit_ratio_max"));
+  const ratioLt = Number(params.get("cache_hit_ratio_lt"));
+  const ratioGte = Number(params.get("cache_hit_ratio_gte"));
+  const matched = records.filter((record) => {
+    const startedAt = Date.parse(String(record.started_at ?? ""));
+    if (fromMs !== null && (!Number.isFinite(startedAt) || startedAt < fromMs)) {
+      return false;
+    }
+    if (toExclusiveMs !== null && (!Number.isFinite(startedAt) || startedAt >= toExclusiveMs)) {
+      return false;
+    }
+    if (provider && String(record.provider ?? "").toLowerCase() !== provider) {
+      return false;
+    }
+    if (model && String(record.model ?? "").toLowerCase() !== model) {
+      return false;
+    }
+    if (success !== null && String(record.status === "success") !== success) {
+      return false;
+    }
+    const cacheStatus = String(record.cache_status ?? "");
+    const ratio = Number(record.cache_hit_ratio);
+    if (params.has("cache_hit_ratio_lt") && (!reported.has(cacheStatus) || !(ratio < ratioLt))) {
+      return false;
+    }
+    if (params.has("cache_hit_ratio_gte") && (!reported.has(cacheStatus) || !(ratio >= ratioGte))) {
+      return false;
+    }
+    if (params.has("cache_hit_ratio_min") && (!reported.has(cacheStatus) || !(ratio >= ratioMin))) {
+      return false;
+    }
+    if (params.has("cache_hit_ratio_max") && (!reported.has(cacheStatus) || ratio > ratioMax)) {
+      return false;
+    }
+    if (search) {
+      const text = [
+        record.llm_request_id,
+        record.session_id,
+        record.provider,
+        record.model,
+        record.trace_id,
+        record.turn_id,
+      ].join(" ").toLowerCase();
+      if (!text.includes(search)) {
+        return false;
+      }
+    }
+    return true;
+  });
+  const limit = Number(params.get("limit")) || 50;
+  const requests = matched.slice(0, limit);
+  const usageOf = (record: Record<string, unknown>) =>
+    (record.usage ?? {}) as Record<string, number>;
+  const cacheStatusDistribution = {
+    hit: 0,
+    write: 0,
+    confirmed_miss: 0,
+    reported_zero: 0,
+    not_reported: 0,
+    error: 0,
+  };
+  for (const record of matched) {
+    const status = String(record.cache_status ?? "") as keyof typeof cacheStatusDistribution;
+    if (status in cacheStatusDistribution) {
+      cacheStatusDistribution[status] += 1;
+    }
+  }
+  const reportedRatios = matched
+    .filter((record) => reported.has(String(record.cache_status ?? "")))
+    .map((record) => Number(record.cache_hit_ratio))
+    .filter((value) => Number.isFinite(value));
+  const summary = {
+    requests: matched.length,
+    successes: matched.filter((record) => record.status === "success").length,
+    failures: matched.filter((record) => record.status !== "success").length,
+    input_tokens: matched.reduce((sum, record) => sum + (usageOf(record).prompt_tokens ?? 0), 0),
+    output_tokens: matched.reduce((sum, record) => sum + (usageOf(record).completion_tokens ?? 0), 0),
+    total_tokens: matched.reduce((sum, record) => sum + (usageOf(record).total_tokens ?? 0), 0),
+    cache_read_tokens: matched.reduce((sum, record) => sum + (usageOf(record).cache_read_tokens ?? 0), 0),
+    cache_creation_tokens: matched.reduce((sum, record) => sum + (usageOf(record).cache_creation_tokens ?? 0), 0),
+    sessions: new Set(matched.map((record) => record.session_id)).size,
+    providers: new Set(matched.map((record) => record.provider)).size,
+    models: new Set(matched.map((record) => record.model)).size,
+    cache_reported: reportedRatios.length,
+    average_cache_hit_ratio: reportedRatios.length > 0
+      ? reportedRatios.reduce((sum, value) => sum + value, 0) / reportedRatios.length
+      : undefined,
+    cache_status_distribution: cacheStatusDistribution,
+  };
+  return {
+    ...ANALYTICS_META,
+    total: matched.length,
+    limit,
+    offset: 0,
+    summary,
+    requests,
+  };
+}
 
 async function stubAnalytics(page: Page, options: StubOptions = {}) {
   const meta = { ...ANALYTICS_META, coverage: EMPTY_COVERAGE, partial: false, partial_reasons: [] };
@@ -173,6 +290,11 @@ async function stubAnalytics(page: Page, options: StubOptions = {}) {
         ? { ...ANALYTICS_META, summary: EMPTY_SUBAGENT_SUMMARY, subagents: [] }
         : path.endsWith("/errors")
           ? { ...ANALYTICS_META, patterns: errorPatterns }
+          : path.endsWith("/requests")
+            ? requestListResponse(
+                options.analyticsRequestRecords ?? [],
+                requestUrl.searchParams,
+              )
           : path.endsWith("/sessions")
             ? sessions
             : path.endsWith("/overview")
@@ -260,18 +382,23 @@ async function stubAnalytics(page: Page, options: StubOptions = {}) {
   });
 
   await page.route("**/api/runtime/usage/**", async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const limit = Number(requestUrl.searchParams.get("limit")) || 50;
+    const records = options.usageLedgerRecords ?? [];
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        tracking_enabled: false,
-        ledger_enabled: false,
-        quota_enabled: false,
-        policy: {},
-        usage: {},
-        records: [],
-        count: 0,
-      }),
+      body: JSON.stringify(requestUrl.pathname.endsWith("/ledger")
+        ? { records, count: records.length, limit, filters: { limit } }
+        : {
+            tracking_enabled: false,
+            ledger_enabled: false,
+            quota_enabled: false,
+            policy: {},
+            usage: {},
+            records: [],
+            count: 0,
+          }),
     });
   });
 }
@@ -521,10 +648,10 @@ for (const locale of ["zh-CN", "en-US"]) {
     await expect(page.getByTestId("usage-analytics-health-banner")).toBeVisible();
     const filters = page.getByRole("form", { name: /Analytics scope and filters|分析范围与筛选/ });
     const tabs = page.getByRole("tablist", { name: /Usage categories|用量信息分类/ });
-    await expect(tabs.getByRole("tab")).toHaveCount(6);
+    await expect(tabs.getByRole("tab")).toHaveCount(8);
     expect(await filters.evaluate((element) => element.closest('[role="tabpanel"]') === null)).toBe(true);
 
-    for (const view of ["overview", "models", "sessions", "quota", "routing", "artifacts"]) {
+    for (const view of ["overview", "requests", "models", "sessions", "quota", "routing", "artifacts"]) {
       const tab = page.locator(`#usage-view-${view}-tab`);
       await tab.click();
       await expect(tab).toHaveAttribute("aria-selected", "true");
@@ -564,6 +691,284 @@ for (const locale of ["zh-CN", "en-US"]) {
     await expect(filters).toBeVisible();
   });
 }
+
+test("请求分析：账本聚合、请求筛选与移动端布局", async ({ page }) => {
+  await stubAnalytics(page, {
+    analyticsRequestRecords: [
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "req-success",
+        session_id: "session-a",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.8,
+        started_at: "2026-09-13T10:00:00Z",
+        usage: {
+          prompt_tokens: 800,
+          completion_tokens: 200,
+          total_tokens: 1_000,
+          cached_tokens: 640,
+          cache_read_tokens: 640,
+          cache_creation_tokens: 0,
+          input_total_tokens: 800,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "req-failure",
+        session_id: "session-b",
+        provider: "openai",
+        model: "gpt-5",
+        status: "error",
+        cache_status: "reported_zero",
+        cache_hit_ratio: 0,
+        started_at: "2026-09-13T11:00:00Z",
+        usage: {
+          prompt_tokens: 300,
+          completion_tokens: 0,
+          total_tokens: 300,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          input_total_tokens: 300,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "req-anthropic",
+        session_id: "session-c",
+        provider: "anthropic",
+        model: "claude",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.9,
+        started_at: "2026-09-13T12:00:00Z",
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 100,
+          total_tokens: 200,
+          cached_tokens: 90,
+          cache_read_tokens: 90,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+    ],
+  });
+  await seedLanguage(page, "zh-CN");
+  await page.goto("/usage?view=requests&provider=openai&request_outcome=failure&request_limit=50");
+
+  const panel = page.getByRole("region", { name: "请求级历史分析" });
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+  await expect(panel).toContainText("已加载 1 条 · 匹配 1 条");
+  await expect(panel).toContainText("失败 1 条");
+  await expect(panel).toContainText("req-failure");
+  await expect(panel).not.toContainText("req-success");
+
+  await panel.getByRole("button", { name: "结果", exact: true }).click();
+  await page.getByRole("option", { name: "全部结果" }).click();
+  await expect(panel).toContainText("已加载 2 条 · 匹配 2 条");
+  await expect(panel).toContainText("req-success");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+});
+
+test("请求分析：今天低缓存筛选在服务端分页前执行", async ({ page }) => {
+  const now = new Date();
+  const today = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("-");
+  await stubAnalytics(page, {
+    analyticsRequestRecords: [
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "today-low",
+        session_id: "session-low",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.2,
+        started_at: `${today}T10:00:00Z`,
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cached_tokens: 20,
+          cache_read_tokens: 20,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "today-high",
+        session_id: "session-high",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.8,
+        started_at: `${today}T11:00:00Z`,
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cached_tokens: 80,
+          cache_read_tokens: 80,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "today-not-reported",
+        session_id: "session-unknown",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "not_reported",
+        started_at: `${today}T12:00:00Z`,
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cached_tokens: 0,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: false,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+    ],
+  });
+  await seedLanguage(page, "zh-CN");
+  await page.goto("/usage?view=requests");
+  const panel = page.getByRole("region", { name: "请求级历史分析" });
+  await expect(panel).toBeVisible({ timeout: 30_000 });
+
+  await panel.getByRole("button", { name: "今天 · 低缓存" }).click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("from")).toBe(today);
+  await expect.poll(() => new URL(page.url()).searchParams.get("to")).toBe(today);
+  await expect.poll(() => new URL(page.url()).searchParams.get("request_cache")).toBe("low");
+  await expect(panel).toContainText("已加载 1 条 · 匹配 1 条");
+  await expect(panel).toContainText("today-low");
+  await expect(panel).not.toContainText("today-high");
+  await expect(panel).not.toContainText("today-not-reported");
+});
+
+test("请求分析：缓存率范围与完整请求详情面板", async ({ page }) => {
+  await stubAnalytics(page, {
+    analyticsRequestRecords: [
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "range-low",
+        session_id: "session-range-low",
+        trace_id: "trace-range-low",
+        turn_id: "turn-range-low",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.2,
+        started_at: "2026-11-04T10:00:00Z",
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cached_tokens: 20,
+          cache_read_tokens: 20,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "range-target",
+        session_id: "session-range-target",
+        trace_id: "trace-range-target",
+        turn_id: "turn-range-target",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.6,
+        started_at: "2026-11-04T11:00:00Z",
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+          cached_tokens: 60,
+          cache_read_tokens: 60,
+          cache_creation_tokens: 0,
+          input_total_tokens: 100,
+          cache_read_reported: true,
+          cache_creation_reported: false,
+          reasoning_tokens: 0,
+        },
+      },
+      {
+        schema_version: "cache.analytics.v1",
+        llm_request_id: "range-high",
+        session_id: "session-range-high",
+        provider: "openai",
+        model: "gpt-5",
+        status: "success",
+        cache_status: "hit",
+        cache_hit_ratio: 0.9,
+        started_at: "2026-11-04T12:00:00Z",
+      },
+    ],
+  });
+  await seedLanguage(page, "zh-CN");
+  await page.goto(
+    "/usage?view=requests&request_cache_min=50&request_cache_max=80",
+  );
+
+  const panel = page.getByRole("region", { name: "请求级历史分析" });
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("已加载 1 条 · 匹配 1 条");
+  await expect(panel).toContainText("range-target");
+  await expect(panel).not.toContainText("range-low");
+  await expect(panel).not.toContainText("range-high");
+
+  await panel
+    .getByRole("button", { name: "查看请求 range-target 的详情" })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "请求详情" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("range-target");
+  await expect(dialog).toContainText("session-range-target");
+  await expect(dialog).toContainText("trace-range-target");
+  await expect(dialog).toContainText("turn-range-target");
+  await expect(dialog.getByRole("link", { name: "打开关联会话" })).toBeVisible();
+});
 
 for (const locale of ["zh-CN", "en-US"]) {
   test(`紧凑过滤器：高度预算、日期范围与筛选操作（${locale}）`, async ({ page }) => {

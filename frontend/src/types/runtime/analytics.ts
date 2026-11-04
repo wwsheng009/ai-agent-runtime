@@ -1,3 +1,5 @@
+import type { CacheRequestRecord } from "./cache";
+
 export type AnalyticsGroupBy =
   | "day"
   | "provider"
@@ -177,6 +179,57 @@ export type AnalyticsDimensionsResponse = {
   directories: string[];
   projects: string[];
   statuses: string[];
+};
+
+export type AnalyticsRequestCacheStatusDistribution = {
+  hit: number;
+  write: number;
+  confirmed_miss: number;
+  reported_zero: number;
+  not_reported: number;
+  error: number;
+};
+
+export type AnalyticsRequestSummary = {
+  requests: number;
+  successes: number;
+  failures: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  sessions: number;
+  providers: number;
+  models: number;
+  cache_reported: number;
+  /** 已上报缓存请求的平均命中率；没有样本时缺省，不能伪造成 0。 */
+  average_cache_hit_ratio?: number;
+  cache_status_distribution: AnalyticsRequestCacheStatusDistribution;
+};
+
+export type AnalyticsRequestsQuery = AnalyticsSessionsQuery & {
+  session_id?: string;
+  request_status?: string;
+  success?: boolean;
+  cache_status?: string;
+  cache_reported?: boolean;
+  cache_hit_ratio_min?: number;
+  cache_hit_ratio_max?: number;
+  /** 严格小于边界；用于「缓存率低于 50%」。 */
+  cache_hit_ratio_lt?: number;
+  /** 大于等于边界；用于「缓存率不低于 50%」。 */
+  cache_hit_ratio_gte?: number;
+};
+
+export type AnalyticsRequestsResponse = {
+  schema_version: string;
+  generated_at: string;
+  total: number;
+  limit: number;
+  offset: number;
+  summary: AnalyticsRequestSummary;
+  requests: CacheRequestRecord[];
 };
 
 /**

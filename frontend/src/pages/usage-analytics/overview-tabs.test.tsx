@@ -24,6 +24,7 @@ vi.mock("./provider-model-analysis", () => ({
   ),
 }));
 vi.mock("./quota", () => ({ UsageQuotaPanel: () => <div data-testid="quota-panel" /> }));
+vi.mock("./request-analysis", () => ({ RequestAnalysisPanel: () => <div data-testid="request-analysis-panel" /> }));
 vi.mock("./routing-observability-panel", () => ({ RoutingObservabilityPanel: () => <div data-testid="routing-panel" /> }));
 vi.mock("./lsp-observability-panel", () => ({ LspObservabilityPanel: () => <div data-testid="lsp-panel" /> }));
 
@@ -89,7 +90,7 @@ describe("usage overview categories", () => {
     const form = container.querySelector('form[aria-label="分析范围与筛选"]');
     expect(form).not.toBeNull();
     expect(form?.closest('[role="tabpanel"]')).toBeNull();
-    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(7);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(8);
     expect(container.querySelector('[data-testid="overview-chart"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="quota-panel"]')).toBeNull();
     expect(container.querySelector('[data-testid="routing-panel"]')).toBeNull();
@@ -104,6 +105,7 @@ describe("usage overview categories", () => {
       expect(panel?.getAttribute("aria-labelledby")).toBe(`usage-view-${view}-tab`);
       expect(container.querySelectorAll('[role="tab"][tabindex="0"]')).toHaveLength(1);
       expect(Boolean(container.querySelector('[data-testid="overview-chart"]'))).toBe(view === "overview");
+      expect(Boolean(container.querySelector('[data-testid="request-analysis-panel"]'))).toBe(view === "requests");
       expect(Boolean(container.querySelector('[data-testid="model-chart"]'))).toBe(view === "models");
       expect(Boolean(container.querySelector("#usage-sessions-title"))).toBe(view === "sessions");
       expect(Boolean(container.querySelector('[data-testid="quota-panel"]'))).toBe(view === "quota");
@@ -197,10 +199,10 @@ describe("usage overview categories", () => {
   it("supports arrow keys, Home and End with a single focusable selected tab", async () => {
     await mount();
     const transitions = [
-      ["ArrowLeft", "artifacts"],
-      ["Home", "overview"],
+      ["ArrowRight", "requests"],
+      ["ArrowLeft", "overview"],
       ["End", "artifacts"],
-      ["ArrowRight", "overview"],
+      ["Home", "overview"],
     ];
     for (const [key, view] of transitions) {
       const active = container.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');

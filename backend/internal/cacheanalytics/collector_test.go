@@ -1,6 +1,7 @@
 package cacheanalytics
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,6 +83,34 @@ func attachTest(t *testing.T, max int) (*runtimeevents.Bus, *Service) {
 	}
 	t.Cleanup(service.Close)
 	return bus, service
+}
+
+func TestOverviewProviderModelDimensions(t *testing.T) {
+	bus, service := attachTest(t, 100)
+	for _, item := range []struct {
+		id       string
+		provider string
+		model    string
+	}{
+		{id: "dim-openai", provider: "OpenAI", model: "gpt-4o"},
+		{id: "dim-anthropic", provider: "anthropic", model: "claude-sonnet"},
+		{id: "dim-openai-duplicate", provider: "openai", model: "gpt-4o"},
+	} {
+		extra := map[string]interface{}{"provider": item.provider, "model": item.model}
+		publishStarted(bus, "s-dimensions", item.id, extra)
+		publishFinished(bus, "s-dimensions", item.id, true, extra)
+	}
+
+	overview, err := service.Source().Overview("s-dimensions")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if !reflect.DeepEqual(overview.Providers, []string{"anthropic", "OpenAI"}) {
+		t.Fatalf("provider dimensions = %#v", overview.Providers)
+	}
+	if !reflect.DeepEqual(overview.Models, []string{"claude-sonnet", "gpt-4o"}) {
+		t.Fatalf("model dimensions = %#v", overview.Models)
+	}
 }
 
 // TestCollectorPublishesCacheRequestFinished 验证记录终态落盘后发布
@@ -327,12 +356,101 @@ func TestRequestsFilterAndPagination(t *testing.T) {
 	if response.Requests[0].LLMRequestID != "c" {
 		t.Fatalf("expected newest first, got %s", response.Requests[0].LLMRequestID)
 	}
+	page2, err := src.Requests("s1", RequestQuery{Status: RequestStatusSuccess, Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatalf("requests page 2: %v", err)
+	}
+	if page2.Total != 3 || len(page2.Requests) != 1 || page2.Requests[0].LLMRequestID != "b" {
+		t.Fatalf("offset page mismatch: total=%d requests=%+v", page2.Total, page2.Requests)
+	}
 	byTurn, err := src.Requests("s1", RequestQuery{TurnID: "turn-2"})
 	if err != nil {
 		t.Fatalf("requests by turn: %v", err)
 	}
 	if byTurn.Total != 1 || byTurn.Requests[0].LLMRequestID != "d" {
 		t.Fatalf("turn filter mismatch: %+v", byTurn)
+	}
+}
+
+func TestRequestsFilterByCacheHitRatio(t *testing.T) {
+	bus, service := attachTest(t, 100)
+	src := service.Source()
+	for _, fixture := range []struct {
+		id     string
+		read   int
+		prompt int
+	}{
+		{id: "low", read: 10, prompt: 100},
+		{id: "mid", read: 50, prompt: 100},
+		{id: "high", read: 90, prompt: 100},
+	} {
+		publishStarted(bus, "s1", fixture.id, nil)
+		publishFinished(bus, "s1", fixture.id, true, map[string]interface{}{
+			"usage_prompt_tokens":       fixture.prompt,
+			"usage_cache_read_tokens":   fixture.read,
+			"usage_cache_read_reported": true,
+		})
+	}
+	publishStarted(bus, "s1", "unknown", nil)
+	publishFinished(bus, "s1", "unknown", true, nil)
+
+	min, max := 0.4, 0.8
+	response, err := src.Requests("s1", RequestQuery{CacheHitRatioMin: &min, CacheHitRatioMax: &max})
+	if err != nil {
+		t.Fatalf("requests by hit ratio: %v", err)
+	}
+	if response.Total != 1 || len(response.Requests) != 1 || response.Requests[0].LLMRequestID != "mid" {
+		t.Fatalf("hit ratio range mismatch: total=%d requests=%+v", response.Total, response.Requests)
+	}
+
+	high := 0.9
+	response, err = src.Requests("s1", RequestQuery{CacheHitRatioMin: &high})
+	if err != nil {
+		t.Fatalf("requests by min hit ratio: %v", err)
+	}
+	if response.Total != 1 || response.Requests[0].LLMRequestID != "high" {
+		t.Fatalf("hit ratio min mismatch: %+v", response)
+	}
+}
+
+func TestMatchQueryProviderModelStatusAndDuration(t *testing.T) {
+	record := &CacheRequestRecord{
+		Provider:    "OpenAI",
+		Model:       "gpt-4.1-mini",
+		Status:      RequestStatusSuccess,
+		CacheStatus: CacheStatusHit,
+		DurationMS:  750,
+	}
+	durationMin, durationMax := int64(500), int64(1000)
+	query := RequestQuery{
+		Provider:      "OPENAI",
+		Model:         "GPT-4.1-MINI",
+		Status:        "SUCCESS",
+		CacheStatus:   "HIT",
+		DurationMSMin: &durationMin,
+		DurationMSMax: &durationMax,
+	}
+	if !matchQuery(record, query) {
+		t.Fatal("case-insensitive exact provider/model/status and duration range should match")
+	}
+	query.Provider = "open"
+	if matchQuery(record, query) {
+		t.Fatal("provider dropdown filters must not use substring matching")
+	}
+	query.Provider = "OPENAI"
+	query.Model = "4.1"
+	if matchQuery(record, query) {
+		t.Fatal("model dropdown filters must not use substring matching")
+	}
+	query.Model = "GPT-4.1-MINI"
+	query.DurationMSMin = &durationMax
+	if matchQuery(record, query) {
+		t.Fatal("duration outside range should not match")
+	}
+	record.DurationMS = 0
+	query.DurationMSMin, query.DurationMSMax = nil, &durationMax
+	if matchQuery(record, query) {
+		t.Fatal("unobserved duration must not match a duration range")
 	}
 }
 

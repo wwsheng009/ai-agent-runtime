@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,8 @@ func NewUsageAnalyticsCommand() *cobra.Command {
 
 子命令：
   usage-analytics rebuild-stats   从原始请求表重建会话预聚合统计（对账/修复漂移）
+  usage-analytics compact-records 批量瘦身历史工具 record_json 大载荷
+  usage-analytics prune           按保留期清理原始明细
 
 退出码：
   0 = 成功
@@ -48,6 +51,7 @@ func NewUsageAnalyticsCommand() *cobra.Command {
 	}
 	cmd.PersistentFlags().String("db", "", "分析库路径（默认取 AICLI_USAGE_ANALYTICS_DB，未设置时为 ~/.aicli/sessions/runtime/usage_analytics.sqlite）")
 	cmd.AddCommand(newUsageAnalyticsRebuildStatsCommand())
+	cmd.AddCommand(newUsageAnalyticsCompactRecordsCommand())
 	cmd.AddCommand(newUsageAnalyticsPruneCommand())
 	return cmd
 }
@@ -91,6 +95,7 @@ func newUsageAnalyticsRebuildStatsCommand() *cobra.Command {
 	}
 	cmd.Flags().String("session", "", "只重建指定会话（与 --all 二选一）")
 	cmd.Flags().Bool("all", false, "重建全库所有会话")
+	cmd.Flags().Bool("json", false, "以 JSON 输出结果")
 	return cmd
 }
 
@@ -166,6 +171,7 @@ func runUsageAnalyticsRebuildStats(opts usageAnalyticsRebuildOptions) int {
 type usageAnalyticsPruneOptions struct {
 	dbPath string
 	before string
+	ctx    context.Context
 	// vacuum 仅用于解析已停用的 --vacuum flag：命中即刻以用法错误拒绝，
 	// 保证不存在任何在线文件级压缩路径。
 	vacuum bool
@@ -177,11 +183,11 @@ type usageAnalyticsPruneOptions struct {
 func newUsageAnalyticsPruneCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "按保留期清理历史请求明细并重建统计",
-		Long: `删除 --before 之前的 usage_requests 明细与不再引用的 turn 去重键，
+		Short: "按保留期清理全部原始明细并重建统计",
+		Long: `删除 --before 之前的请求、工具、回合、子代理、路由、LSP 与围栏原始明细，
 并重建全库预聚合统计；会话元数据保留（列表仍可见历史会话）。
 
---before 按请求 started_at 比较（started_at=0 的行不清理）。
+时间 0 的行不清理（无法判定年龄）。每批提交，避免长时间占用写锁。
 空间回收不在本命令执行：在线压缩/页回收已在 2026-09 的数据库损坏事故后
 整体移除。需要压缩分析库请先退出使用进程，再离线执行：
   aicli storage compact --target analytics
@@ -202,6 +208,7 @@ func newUsageAnalyticsPruneCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("before", "", "保留边界：此时间之前的请求明细将被删除（RFC3339 或 2006-01-02）")
+	cmd.Flags().Bool("json", false, "以 JSON 输出结果")
 	// --vacuum 已停用：保留解析面以便给出明确迁移提示；MarkDeprecated 会隐藏该 flag。
 	cmd.Flags().Bool("vacuum", false, "已停用：在线压缩已移除；请使用 aicli storage compact --target analytics")
 	_ = cmd.Flags().MarkDeprecated("vacuum", "在线压缩已移除；请使用 aicli storage compact --target analytics")
@@ -264,7 +271,10 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 		return statsExitDeterministic
 	}
 
-	deleted, err := store.PruneBefore(cutoff)
+	stats, err := store.PruneDetailBefore(contextOrDefault(opts.ctx), usageanalytics.PruneOptions{
+		Cutoff:    cutoff,
+		BatchSize: 2000,
+	})
 	if err != nil {
 		fmt.Fprintf(errOut, "清理历史请求失败：%v\n", err)
 		return statsExitDeterministic
@@ -274,7 +284,8 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 		payload := map[string]interface{}{
 			"db_path":          path,
 			"before":           cutoff.Format(time.RFC3339),
-			"deleted_requests": deleted,
+			"deleted_requests": stats.Requests,
+			"deleted_details":  stats,
 		}
 		encoded, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
@@ -284,7 +295,122 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 		fmt.Fprintln(out, string(encoded))
 		return statsExitOK
 	}
-	fmt.Fprintf(out, "清理完成：%s（删除 %d 条请求明细，before=%s）\n",
-		path, deleted, cutoff.Format(time.RFC3339))
+	fmt.Fprintf(out, "清理完成：%s（请求 %d，工具 %d，回合 %d，子代理 %d，路由 %d，LSP %d，围栏 %d；before=%s）\n",
+		path, stats.Requests, stats.ToolCalls, stats.Turns, stats.Subagents,
+		stats.Routes, stats.LSPRequests, stats.RenderFenceDrops,
+		cutoff.Format(time.RFC3339))
+	return statsExitOK
+}
+
+func contextOrDefault(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+type usageAnalyticsCompactOptions struct {
+	dbPath    string
+	maxBytes  int
+	batchSize int
+	dryRun    bool
+	ctx       context.Context
+	json      bool
+	out       io.Writer
+	errOut    io.Writer
+}
+
+func newUsageAnalyticsCompactRecordsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "compact-records",
+		Short: "批量瘦身历史工具 record_json 大载荷",
+		Long: `将 usage_tool_calls 中超过阈值的历史 record_json 改写为分析所需字段，
+丢弃 output/render_output/protocol_result 等大载荷；保留 LSP 基线与诊断字段。
+
+命令按 rowid 单向前进、分批提交，不会重复扫描已处理行。建议在低活跃时段运行；
+删除/改写产生的空闲页由后续写入复用，缩小操作系统文件仍需退出进程后离线执行：
+  aicli storage compact --target analytics --require-exclusive
+
+示例：
+  aicli usage-analytics compact-records --dry-run
+  aicli usage-analytics compact-records --max-bytes 1024 --batch-size 200 --json`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			statsExit(runUsageAnalyticsCompactRecords(usageAnalyticsCompactOptions{
+				dbPath:    stringFlag(cmd, "db"),
+				maxBytes:  intFlag(cmd, "max-bytes"),
+				batchSize: intFlag(cmd, "batch-size"),
+				dryRun:    boolFlag(cmd, "dry-run"),
+				json:      boolFlag(cmd, "json"),
+				out:       cmd.OutOrStdout(),
+				errOut:    cmd.ErrOrStderr(),
+			}))
+		},
+	}
+	cmd.Flags().Int("max-bytes", 1024, "仅改写大于该字节数的 record_json")
+	cmd.Flags().Int("batch-size", 200, "每批提交的行数")
+	cmd.Flags().Bool("dry-run", false, "只统计可瘦身数据，不写库")
+	cmd.Flags().Bool("json", false, "以 JSON 输出结果")
+	return cmd
+}
+
+func runUsageAnalyticsCompactRecords(opts usageAnalyticsCompactOptions) int {
+	out := opts.out
+	if out == nil {
+		out = io.Discard
+	}
+	errOut := opts.errOut
+	if errOut == nil {
+		errOut = io.Discard
+	}
+	if opts.maxBytes <= 0 || opts.batchSize <= 0 {
+		fmt.Fprintln(errOut, "参数错误：--max-bytes 与 --batch-size 必须大于 0")
+		return statsExitUsage
+	}
+	path := strings.TrimSpace(opts.dbPath)
+	if path == "" {
+		path = usageanalytics.DefaultDBPath()
+	}
+	path = filepath.Clean(path)
+	store, err := usageanalytics.Open(usageanalytics.Config{Path: path, ReadOnly: opts.dryRun})
+	if err != nil {
+		fmt.Fprintf(errOut, "打开分析库失败（%s）：%v\n", path, err)
+		return statsExitDeterministic
+	}
+	defer func() { _ = store.Close() }()
+	if store.Empty() {
+		fmt.Fprintf(errOut, "分析库不存在或为空：%s\n", path)
+		return statsExitDeterministic
+	}
+
+	stats, err := store.CompactToolRecords(contextOrDefault(opts.ctx), usageanalytics.ToolRecordCompactOptions{
+		MaxBytes:  opts.maxBytes,
+		BatchSize: opts.batchSize,
+		DryRun:    opts.dryRun,
+	})
+	if err != nil {
+		fmt.Fprintf(errOut, "瘦身工具记录失败：%v\n", err)
+		return statsExitDeterministic
+	}
+	if opts.json {
+		payload := map[string]interface{}{
+			"db_path": path,
+			"stats":   stats,
+		}
+		encoded, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			fmt.Fprintf(errOut, "序列化输出失败：%v\n", err)
+			return statsExitDeterministic
+		}
+		fmt.Fprintln(out, string(encoded))
+		return statsExitOK
+	}
+	mode := "瘦身完成"
+	if opts.dryRun {
+		mode = "预检完成（未写库）"
+	}
+	fmt.Fprintf(out, "%s：%s（扫描 %d，改写 %d，跳过 %d，%d -> %d bytes）\n",
+		mode, path, stats.Scanned, stats.Rewritten, stats.Skipped,
+		stats.BytesBefore, stats.BytesAfter)
 	return statsExitOK
 }

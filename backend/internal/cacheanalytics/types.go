@@ -248,8 +248,12 @@ type CacheOverview struct {
 	// ChildSessionCount / ChildRequestsTotal 是父会话视图中包含的子会话事实
 	// （additive）：请求来源中的子会话数与子会话请求数。0 表示无子代理请求
 	// 或旧数据源未提供（前端显示"-"而不是伪造 0 语义）。
-	ChildSessionCount       int                     `json:"child_session_count,omitempty"`
-	ChildRequestsTotal      int                     `json:"child_requests_total,omitempty"`
+	ChildSessionCount  int `json:"child_session_count,omitempty"`
+	ChildRequestsTotal int `json:"child_requests_total,omitempty"`
+	// Providers/Models 是当前会话视图内出现过的 provider/model 去重列表，
+	// 供筛选下拉框使用；空列表表示当前没有可选维度。
+	Providers               []string                `json:"providers"`
+	Models                  []string                `json:"models"`
 	Tokens                  CacheOverviewTokens     `json:"tokens"`
 	CacheHitRatio           *float64                `json:"cache_hit_ratio,omitempty"`
 	CacheWriteRatio         *float64                `json:"cache_write_ratio,omitempty"`
@@ -322,10 +326,21 @@ type RequestQuery struct {
 	MessageID   string
 	Status      string
 	CacheStatus string
-	From        *time.Time
-	To          *time.Time
-	Limit       int
-	Offset      int
+	// Provider/Model 是大小写不敏感的精确过滤条件，供下拉框选择。
+	Provider string
+	Model    string
+	// CacheHitRatioMin/Max 是缓存命中率的闭区间过滤条件（0–1）。
+	// nil 表示不限；未知命中率的记录不匹配任一区间条件。
+	CacheHitRatioMin *float64
+	CacheHitRatioMax *float64
+	// DurationMSMin/Max 是请求总耗时的闭区间过滤条件（毫秒）。
+	// 设置任一边界时，耗时为 0（未采集）的记录不匹配。
+	DurationMSMin *int64
+	DurationMSMax *int64
+	From          *time.Time
+	To            *time.Time
+	Limit         int
+	Offset        int
 }
 
 // RequestListResponse 明细分页响应（按 started_at 倒序）。

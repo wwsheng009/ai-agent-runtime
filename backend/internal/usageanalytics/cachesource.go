@@ -93,6 +93,8 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
 		SchemaVersion: cacheanalytics.SchemaVersion,
 		SessionID:     sessionID,
 		GeneratedAt:   time.Now().UTC(),
+		Providers:     []string{},
+		Models:        []string{},
 	}
 	if s == nil || strings.TrimSpace(sessionID) == "" {
 		return overview, cacheanalytics.ErrInvalidRequest
@@ -242,6 +244,14 @@ FROM usage_requests WHERE ` + scope
 	overview.AverageDurationMS = avgDurationMS
 	overview.FirstTokenSamples = firstTokenSamples
 	overview.AverageFirstTokenMS = avgFirstTokenMS
+	overview.Providers, err = s.requestDimensionValues(sessionID, "provider")
+	if err != nil {
+		return overview, err
+	}
+	overview.Models, err = s.requestDimensionValues(sessionID, "model")
+	if err != nil {
+		return overview, err
+	}
 	// 子会话事实（additive）：父会话视图中的后代请求数与子会话数。走
 	// idx_usage_requests_root_started 部分索引，只扫该根的子树。
 	if s.hasRootColumn {
@@ -263,6 +273,40 @@ FROM usage_requests WHERE ` + scope
 	}
 	overview.Coverage = coverage
 	return overview, nil
+}
+
+// requestDimensionValues 返回会话视图内某个筛选维度的去重值。column 只能
+// 来自本文件内的固定列名，不能把外部输入拼入 SQL。
+func (s *CacheSource) requestDimensionValues(sessionID, column string) ([]string, error) {
+	switch column {
+	case "provider", "model":
+	default:
+		return []string{}, cacheanalytics.ErrInternal
+	}
+	scope, args := s.requestScope(sessionID)
+	query := "SELECT MIN(TRIM(" + column + ")) FROM usage_requests WHERE " + scope +
+		" AND TRIM(" + column + ") <> '' GROUP BY LOWER(TRIM(" + column + "))" +
+		" ORDER BY LOWER(TRIM(" + column + "))"
+	rows, ok, err := s.store.query(query, args...)
+	if err != nil {
+		return []string{}, cacheanalytics.ErrInternal
+	}
+	values := []string{}
+	if !ok {
+		return values, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return []string{}, cacheanalytics.ErrInternal
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return []string{}, cacheanalytics.ErrInternal
+	}
+	return values, nil
 }
 
 // Requests 明细分页（SQL LIMIT/OFFSET + COUNT(*)）。
@@ -300,6 +344,36 @@ func (s *CacheSource) Requests(sessionID string, q cacheanalytics.RequestQuery) 
 	if cacheStatus := strings.TrimSpace(q.CacheStatus); cacheStatus != "" {
 		where += " AND LOWER(cache_status) = LOWER(?)"
 		args = append(args, cacheStatus)
+	}
+	if provider := strings.TrimSpace(q.Provider); provider != "" {
+		where += " AND LOWER(TRIM(provider)) = LOWER(?)"
+		args = append(args, provider)
+	}
+	if model := strings.TrimSpace(q.Model); model != "" {
+		where += " AND LOWER(TRIM(model)) = LOWER(?)"
+		args = append(args, model)
+	}
+	if q.CacheHitRatioMin != nil || q.CacheHitRatioMax != nil {
+		ratioExpr := s.cacheHitRatioFilterExpr()
+		if q.CacheHitRatioMin != nil {
+			where += " AND (" + ratioExpr + ") >= ?"
+			args = append(args, *q.CacheHitRatioMin)
+		}
+		if q.CacheHitRatioMax != nil {
+			where += " AND (" + ratioExpr + ") <= ?"
+			args = append(args, *q.CacheHitRatioMax)
+		}
+	}
+	if q.DurationMSMin != nil || q.DurationMSMax != nil {
+		where += " AND duration_ms > 0"
+		if q.DurationMSMin != nil {
+			where += " AND duration_ms >= ?"
+			args = append(args, *q.DurationMSMin)
+		}
+		if q.DurationMSMax != nil {
+			where += " AND duration_ms <= ?"
+			args = append(args, *q.DurationMSMax)
+		}
 	}
 	if q.From != nil && !q.From.IsZero() {
 		where += " AND started_at_unix_nano >= ?"
@@ -361,6 +435,16 @@ func (s *CacheSource) Requests(sessionID string, q cacheanalytics.RequestQuery) 
 		}
 	}
 	return response, nil
+}
+
+// cacheHitRatioFilterExpr 返回与 CacheRequestRecord.cache_hit_ratio 同口径的
+// SQL 表达式。直接读取 record_json 中持久化的值，避免另用 token 列重算时把
+// “未上报缓存”误当成 0%；not_reported/error 的 NULL 不会被 >=/<= 命中。
+func (s *CacheSource) cacheHitRatioFilterExpr() string {
+	if s == nil || s.store == nil {
+		return "NULL"
+	}
+	return s.store.cacheHitRatioSQLExpr("")
 }
 
 // Request 单请求详情（record_json 与运行时投影同源）。

@@ -288,6 +288,8 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		SchemaVersion: SchemaVersion,
 		SessionID:     sessionID,
 		GeneratedAt:   time.Now(),
+		Providers:     []string{},
+		Models:        []string{},
 	}
 	states := p.viewStatesLocked(sessionID)
 	if len(states) == 0 {
@@ -357,7 +359,39 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		overview.WindowFrom = &from
 		overview.WindowTo = &to
 	}
+	overview.Providers = collectDimensionValues(records, func(record *CacheRequestRecord) string {
+		return record.Provider
+	})
+	overview.Models = collectDimensionValues(records, func(record *CacheRequestRecord) string {
+		return record.Model
+	})
 	return overview
+}
+
+// collectDimensionValues 返回大小写不敏感去重后的维度值，并按展示顺序排序。
+func collectDimensionValues(records []*CacheRequestRecord, pick func(*CacheRequestRecord) string) []string {
+	values := make(map[string]string)
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		value := strings.TrimSpace(pick(record))
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := values[key]; !exists {
+			values[key] = value
+		}
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i]) < strings.ToLower(result[j])
+	})
+	return result
 }
 
 // averageLatency 计算会话内延迟均值：0/负值视为"未采集"，不计入样本，
@@ -463,11 +497,34 @@ func matchQuery(record *CacheRequestRecord, q RequestQuery) bool {
 	if q.MessageID != "" && record.UserMessageID != q.MessageID && record.AssistantMessageID != q.MessageID {
 		return false
 	}
-	if q.Status != "" && record.Status != q.Status {
+	if q.Status != "" && !strings.EqualFold(record.Status, q.Status) {
 		return false
 	}
-	if q.CacheStatus != "" && record.CacheStatus != q.CacheStatus {
+	if q.CacheStatus != "" && !strings.EqualFold(record.CacheStatus, q.CacheStatus) {
 		return false
+	}
+	if q.Provider != "" && !strings.EqualFold(strings.TrimSpace(record.Provider), strings.TrimSpace(q.Provider)) {
+		return false
+	}
+	if q.Model != "" && !strings.EqualFold(strings.TrimSpace(record.Model), strings.TrimSpace(q.Model)) {
+		return false
+	}
+	if q.CacheHitRatioMin != nil && (record.CacheHitRatio == nil || *record.CacheHitRatio < *q.CacheHitRatioMin) {
+		return false
+	}
+	if q.CacheHitRatioMax != nil && (record.CacheHitRatio == nil || *record.CacheHitRatio > *q.CacheHitRatioMax) {
+		return false
+	}
+	if q.DurationMSMin != nil || q.DurationMSMax != nil {
+		if record.DurationMS <= 0 {
+			return false
+		}
+		if q.DurationMSMin != nil && record.DurationMS < *q.DurationMSMin {
+			return false
+		}
+		if q.DurationMSMax != nil && record.DurationMS > *q.DurationMSMax {
+			return false
+		}
 	}
 	if q.From != nil && record.StartedAt.Before(*q.From) {
 		return false

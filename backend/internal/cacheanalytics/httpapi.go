@@ -2,6 +2,7 @@ package cacheanalytics
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,7 +27,10 @@ func Handler(prefix string, src Source) http.Handler {
 //	GET {prefix}/capabilities                    能力发现
 //	GET {prefix}/overview?session_id=            会话总览
 //	GET {prefix}/requests?session_id=&...        明细分页（trace_id/turn_id/message_id/
-//	                                             status/cache_status/from/to/limit/offset）
+//	                                             status/cache_status/provider/model/
+//	                                             cache_hit_ratio_min/cache_hit_ratio_max/
+//	                                             duration_ms_min/duration_ms_max/
+//	                                             from/to/limit/offset）
 //	GET {prefix}/requests/{llm_request_id}       单请求详情
 //	GET {prefix}/messages/{message_id}/trace     消息追溯
 //
@@ -113,6 +117,8 @@ func parseRequestQuery(r *http.Request) (RequestQuery, error) {
 		MessageID:   strings.TrimSpace(params.Get("message_id")),
 		Status:      strings.TrimSpace(params.Get("status")),
 		CacheStatus: strings.TrimSpace(params.Get("cache_status")),
+		Provider:    strings.TrimSpace(params.Get("provider")),
+		Model:       strings.TrimSpace(params.Get("model")),
 	}
 	if raw := strings.TrimSpace(params.Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
@@ -127,6 +133,42 @@ func parseRequestQuery(r *http.Request) (RequestQuery, error) {
 			return RequestQuery{}, errInvalid("offset")
 		}
 		query.Offset = offset
+	}
+	if raw := strings.TrimSpace(params.Get("cache_hit_ratio_min")); raw != "" {
+		ratio, ok := parseCacheHitRatio(raw)
+		if !ok {
+			return RequestQuery{}, errInvalid("cache_hit_ratio_min")
+		}
+		query.CacheHitRatioMin = &ratio
+	}
+	if raw := strings.TrimSpace(params.Get("cache_hit_ratio_max")); raw != "" {
+		ratio, ok := parseCacheHitRatio(raw)
+		if !ok {
+			return RequestQuery{}, errInvalid("cache_hit_ratio_max")
+		}
+		query.CacheHitRatioMax = &ratio
+	}
+	if query.CacheHitRatioMin != nil && query.CacheHitRatioMax != nil &&
+		*query.CacheHitRatioMin > *query.CacheHitRatioMax {
+		return RequestQuery{}, errInvalid("cache_hit_ratio_min")
+	}
+	if raw := strings.TrimSpace(params.Get("duration_ms_min")); raw != "" {
+		duration, ok := parseDurationMS(raw)
+		if !ok {
+			return RequestQuery{}, errInvalid("duration_ms_min")
+		}
+		query.DurationMSMin = &duration
+	}
+	if raw := strings.TrimSpace(params.Get("duration_ms_max")); raw != "" {
+		duration, ok := parseDurationMS(raw)
+		if !ok {
+			return RequestQuery{}, errInvalid("duration_ms_max")
+		}
+		query.DurationMSMax = &duration
+	}
+	if query.DurationMSMin != nil && query.DurationMSMax != nil &&
+		*query.DurationMSMin > *query.DurationMSMax {
+		return RequestQuery{}, errInvalid("duration_ms_min")
 	}
 	if raw := strings.TrimSpace(params.Get("from")); raw != "" {
 		parsed, err := time.Parse(time.RFC3339, raw)
@@ -143,6 +185,22 @@ func parseRequestQuery(r *http.Request) (RequestQuery, error) {
 		query.To = &parsed
 	}
 	return query, nil
+}
+
+func parseCacheHitRatio(raw string) (float64, bool) {
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 {
+		return 0, false
+	}
+	return ratio, true
+}
+
+func parseDurationMS(raw string) (int64, bool) {
+	duration, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || duration < 0 {
+		return 0, false
+	}
+	return duration, true
 }
 
 func errInvalid(field string) error {

@@ -267,11 +267,11 @@ type StepUsage struct {
 // TurnUsage is a turn-level fact derived by grouping usage_requests on
 // (session_id, trace_id, turn_id) — no separate turns table exists.
 type TurnUsage struct {
-	TurnID     string    `json:"turn_id"`
-	TraceID    string    `json:"trace_id"`
+	TurnID  string `json:"turn_id"`
+	TraceID string `json:"trace_id"`
 	// SessionID/SubagentID：该 turn 归属的实际会话（父视图聚合后代时标注子会话）。
-	SessionID  string `json:"session_id,omitempty"`
-	SubagentID string `json:"subagent_id,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	SubagentID string    `json:"subagent_id,omitempty"`
 	Ordinal    int       `json:"ordinal"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	EndedAt    time.Time `json:"ended_at,omitempty"`

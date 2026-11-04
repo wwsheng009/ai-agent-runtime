@@ -202,6 +202,14 @@ func TestHTTPContract(t *testing.T) {
 	if status != http.StatusOK || body["total"].(float64) != 0 {
 		t.Fatalf("requests filter mismatch: %d %+v", status, body)
 	}
+	status, body = do("/web/api/cache/requests?session_id=s1&cache_hit_ratio_min=0.7&cache_hit_ratio_max=0.9")
+	if status != http.StatusOK || body["total"].(float64) != 1 {
+		t.Fatalf("hit ratio range filter mismatch: %d %+v", status, body)
+	}
+	status, body = do("/web/api/cache/requests?session_id=s1&cache_hit_ratio_min=0.9")
+	if status != http.StatusOK || body["total"].(float64) != 0 {
+		t.Fatalf("hit ratio min filter mismatch: %d %+v", status, body)
+	}
 
 	// 单请求详情
 	status, body = do("/web/api/cache/requests/req-1?session_id=s1")
@@ -234,6 +242,24 @@ func TestHTTPContract(t *testing.T) {
 		t.Fatalf("error code mismatch: %+v", body)
 	}
 
+	// 400：非法/越界/倒置的缓存率区间
+	for _, rawQuery := range []string{
+		"cache_hit_ratio_min=abc",
+		"cache_hit_ratio_max=1.1",
+		"cache_hit_ratio_min=0.8&cache_hit_ratio_max=0.2",
+		"duration_ms_min=abc",
+		"duration_ms_max=-1",
+		"duration_ms_min=900&duration_ms_max=100",
+	} {
+		status, body = do("/web/api/cache/requests?session_id=s1&" + rawQuery)
+		if status != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d", rawQuery, status)
+		}
+		if body["error"].(map[string]interface{})["code"] != ErrInvalidRequest.Error() {
+			t.Fatalf("%s: error code mismatch: %+v", rawQuery, body)
+		}
+	}
+
 	// 404：未知端点
 	status, _ = do("/web/api/cache/unknown")
 	if status != http.StatusNotFound {
@@ -248,6 +274,29 @@ func TestHTTPContract(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", resp.StatusCode)
+	}
+}
+
+func TestParseRequestQueryExtendedFilters(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet,
+		"/web/api/cache/requests?provider=OpenAI&model=gpt&status=success&cache_status=hit"+
+			"&duration_ms_min=100&duration_ms_max=900&from=2026-01-01T00%3A00%3A00Z&to=2026-01-02T00%3A00%3A00Z", nil)
+	query, err := parseRequestQuery(req)
+	if err != nil {
+		t.Fatalf("parse request query: %v", err)
+	}
+	if query.Provider != "OpenAI" || query.Model != "gpt" ||
+		query.Status != "success" || query.CacheStatus != "hit" {
+		t.Fatalf("text filters mismatch: %+v", query)
+	}
+	if query.DurationMSMin == nil || *query.DurationMSMin != 100 ||
+		query.DurationMSMax == nil || *query.DurationMSMax != 900 {
+		t.Fatalf("duration filters mismatch: %+v", query)
+	}
+	if query.From == nil || query.To == nil ||
+		query.From.Format(time.RFC3339) != "2026-01-01T00:00:00Z" ||
+		query.To.Format(time.RFC3339) != "2026-01-02T00:00:00Z" {
+		t.Fatalf("time filters mismatch: %+v", query)
 	}
 }
 

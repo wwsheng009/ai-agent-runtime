@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -86,19 +87,42 @@ func (h *Handler) GetAnalyticsOverview(w http.ResponseWriter, r *http.Request) {
 	if service == nil {
 		return
 	}
-	sessions, err := service.ListSessions(query)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	// 三块载荷在独立只读连接池上并行读取：串行时每次 overview 要跑
+	// ListSessions(计数/分页/汇总) + Summarize(汇总/分组) + Dimensions(5 条
+	// DISTINCT)，冷缓存或多进程写锁竞争时很容易超过前端 10s 截止时间。
+	var (
+		sessions      usageanalytics.ListResult
+		summary       usageanalytics.SummaryResult
+		dimensions    usageanalytics.DimensionsResult
+		sessionsErr   error
+		summaryErr    error
+		dimensionsErr error
+		wg            sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		sessions, sessionsErr = service.ListSessions(query)
+	}()
+	go func() {
+		defer wg.Done()
+		summary, summaryErr = service.Summarize(query)
+	}()
+	go func() {
+		defer wg.Done()
+		dimensions, dimensionsErr = service.Dimensions(query)
+	}()
+	wg.Wait()
+	if sessionsErr != nil {
+		h.writeError(w, http.StatusInternalServerError, sessionsErr)
 		return
 	}
-	summary, err := service.Summarize(query)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	if summaryErr != nil {
+		h.writeError(w, http.StatusInternalServerError, summaryErr)
 		return
 	}
-	dimensions, err := service.Dimensions(query)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	if dimensionsErr != nil {
+		h.writeError(w, http.StatusInternalServerError, dimensionsErr)
 		return
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -507,6 +531,7 @@ func (h *Handler) usageAnalyticsHealthSnapshot() map[string]interface{} {
 		"degraded":    true,
 		"stats_ready": false,
 		"stats_drift": nil,
+		"retention":   usageanalytics.RetentionStatus{},
 	}
 	if h == nil {
 		return block
@@ -532,6 +557,7 @@ func (h *Handler) usageAnalyticsHealthSnapshot() map[string]interface{} {
 	block["degraded"] = health.Degraded
 	block["stats_ready"] = health.StatsReady
 	block["stats_drift"] = health.StatsDrift
+	block["retention"] = service.RetentionStatus()
 	return block
 }
 

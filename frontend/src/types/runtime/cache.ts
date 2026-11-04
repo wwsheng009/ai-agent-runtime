@@ -44,6 +44,9 @@ export type CacheRequestRecord = {
    * 前就失败）；展示层必须显示「未采集」而不是 0ms（总耗时不可冒充首字）。
    */
   first_token_ms?: number;
+  context_prompt_tokens?: number;
+  context_window_tokens?: number;
+  prompt_budget?: number;
   usage?: CacheUsage;
   cache_hit_ratio?: number;
   cache_write_ratio?: number;
@@ -51,11 +54,26 @@ export type CacheRequestRecord = {
   cache_epoch?: number;
   prompt_cache_key?: string;
   prompt_fingerprint?: string;
+  fork_prefix_preserved?: boolean;
+  fork_snapshot_messages?: number;
+  fork_snapshot_tokens?: number;
+  fork_prefix_kept_messages?: number;
+  context_mode?: string;
+  fork_snapshot_hash?: string;
+  cache_lineage_mode?: string;
+  parent_prompt_cache_key?: string;
+  task_attempt?: number;
   user_message_id?: string;
   assistant_message_id?: string;
   provider_request_id?: string;
   error_category?: string;
   correlation_source?: string;
+  terminal_seen?: boolean;
+  arg_error_class?: string;
+  cancel_source?: string;
+  cancel_cause?: string;
+  cancel_reason?: string;
+  usage_unavailable_reason?: string;
 };
 
 export type CacheStatusDistribution = {

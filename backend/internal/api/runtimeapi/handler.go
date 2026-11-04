@@ -1094,6 +1094,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/analytics/overview", h.GetAnalyticsOverview).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/summary", h.GetAnalyticsSummary).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/dimensions", h.GetAnalyticsDimensions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/requests", h.GetAnalyticsRequests).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}/usage", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}/turns", h.ListAnalyticsSessionTurns).Methods(http.MethodGet)

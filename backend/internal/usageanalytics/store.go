@@ -25,6 +25,11 @@ const EnvDBPath = "AICLI_USAGE_ANALYTICS_DB"
 // defaultBusyTimeout SQLite 写锁等待（事件驱动写入为短事务）。
 const defaultBusyTimeout = 5 * time.Second
 
+// defaultWALSizeLimit caps the reused WAL file after checkpoints. The WAL can
+// otherwise remain at its historical high-water mark even when no frames are
+// outstanding, which is pure disk overhead for a multi-GB analytics store.
+const defaultWALSizeLimit = 64 * 1024 * 1024
+
 // 打开期瞬时锁重试（与 internal/chat.SQLiteRuntimeStore 同策略）。
 //
 // 并发场景是常态而非例外：一台开发机上会同时跑多个 aicli 进程与
@@ -73,7 +78,11 @@ type Config struct {
 
 // Store 是分析库句柄：迁移、语句重用与只读降级。
 type Store struct {
-	db       *sql.DB
+	db *sql.DB
+	// reader 是独立只读连接池（仅可写 Store 拥有）：WAL 下读不被写入事务
+	// 占住写连接；查询永远不排队等待 writer。只读打开时 reader 为 nil，
+	// readDB() 回退到 db。
+	reader   *sql.DB
 	path     string
 	readOnly bool
 	// empty 只读打开但库/表不存在：查询返回空结果（不是错误）。
@@ -89,6 +98,10 @@ type Store struct {
 	// 能力探测缓存（列表默认过滤子代理子会话用；只读旧库缺列时退化为不过滤）。
 	parentColumnOnce   sync.Once
 	parentColumnExists bool
+	// cacheRatioColumnOnce/cacheRatioColumnsReady：usage_requests 的缓存比率
+	// 提升列能力探测缓存。schema v5 可写库迁移后直接置位；只读旧库惰性探测。
+	cacheRatioColumnOnce sync.Once
+	cacheRatioColumns    bool
 	// statsGen 写入代数：请求终态落库后自增，供服务端查询缓存惰性失效。
 	statsGen atomic.Uint64
 }
@@ -154,7 +167,46 @@ func openWritable(path string, busyTimeout time.Duration) (*Store, error) {
 		store.db = nil
 		return nil, err
 	}
+	if reader, err := openReadPool(path, busyTimeout); err == nil {
+		store.reader = reader
+	} else {
+		// 只读连接打不开不阻断采集；查询退回写连接（行为与旧版一致）。
+		degradeWarn("分析库只读连接池打开失败，查询回退写连接: %v", err)
+	}
 	return store, nil
+}
+
+// openReadPool 为可写 Store 建立独立只读连接池。
+//
+// 背景：分析库原来只有一条 SetMaxOpenConns(1) 的可写连接，查询与事件写入
+// 共用它。runtime-server 持续采集时，读请求会无限等待唯一连接（database/sql
+// 连接获取没有超时），HTTP 侧最终被前端 AbortSignal 10s 中止，显示
+// "signal timed out"。WAL 允许读写并发，因此这里用 mode=ro 的独立连接池承载
+// 所有查询；写连接只服务迁移与采集事务。
+func openReadPool(path string, busyTimeout time.Duration) (*sql.DB, error) {
+	if busyTimeout <= 0 {
+		busyTimeout = defaultBusyTimeout
+	}
+	dsn := readOnlyDSN(path)
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	dsn += sep + fmt.Sprintf("_pragma=busy_timeout(%d)&_pragma=query_only(1)",
+		busyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// 4 条读连接覆盖 overview 的并发子查询与独立观测面板；再多会放大每条
+	// SQLite 连接各自的页缓存。
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 // openReadOnly 只读打开：库不存在时返回空 store（查询返回空结果而非错误）。
@@ -164,22 +216,28 @@ func openReadOnly(path string, busyTimeout time.Duration) *Store {
 		store.empty = true
 		return store
 	}
-	db, err := sql.Open("sqlite3", readOnlyDSN(path))
+	dsn := readOnlyDSN(path)
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	if busyTimeout <= 0 {
+		busyTimeout = defaultBusyTimeout
+	}
+	dsn += sep + fmt.Sprintf("_pragma=busy_timeout(%d)&_pragma=query_only(1)",
+		busyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		store.empty = true
 		return store
 	}
 	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		store.empty = true
 		return store
 	}
-	if busyTimeout <= 0 {
-		busyTimeout = defaultBusyTimeout
-	}
-	// 只读连接同样吃写锁等待：checkpoint / 迁移期间的读不应直接失败。
-	_, _ = db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeout.Milliseconds()))
 	store.db = db
 	return store
 }
@@ -217,6 +275,10 @@ func (s *Store) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.reader != nil {
+		_ = s.reader.Close()
+		s.reader = nil
+	}
 	if s.db == nil {
 		return nil
 	}
@@ -290,6 +352,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 	statements := []string{
 		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeout.Milliseconds()),
 		"PRAGMA journal_mode=WAL",
+		fmt.Sprintf("PRAGMA journal_size_limit=%d", defaultWALSizeLimit),
 		"PRAGMA synchronous=NORMAL",
 		"PRAGMA foreign_keys=ON",
 		`CREATE TABLE IF NOT EXISTS usage_requests (
@@ -319,12 +382,19 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   usage_available INTEGER NOT NULL DEFAULT 0,
+  cache_hit_ratio REAL,
+  cache_write_ratio REAL,
   record_json BLOB NOT NULL DEFAULT ''
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_session_started ON usage_requests(session_id, started_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_started ON usage_requests(started_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_requests_time_step_id ON usage_requests(started_at_unix_nano DESC, step DESC, llm_request_id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_provider ON usage_requests(provider)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_model ON usage_requests(model)`,
+		// 查询侧使用 LOWER(provider/model) 做大小写不敏感过滤；原始值列上的
+		// 普通索引不会被该表达式命中，补表达式索引（仍保留旧索引兼容旧库）。
+		`CREATE INDEX IF NOT EXISTS idx_usage_requests_provider_lower ON usage_requests(LOWER(provider), started_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_requests_model_lower ON usage_requests(LOWER(model), started_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_trace ON usage_requests(session_id, trace_id, step)`,
 		`CREATE TABLE IF NOT EXISTS usage_sessions (
   session_id TEXT PRIMARY KEY,
@@ -373,6 +443,11 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_session ON usage_tool_calls(session_id, started_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_name ON usage_tool_calls(tool_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_outcome ON usage_tool_calls(outcome, error_code)`,
+		// 工具统计按时间窗聚合（无 session）时，原索引只能全表扫描；补时间索引
+		// 与 (tool_name, started) 组合索引，覆盖"工具 + 时间窗"查询。
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_started ON usage_tool_calls(started_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_tool_started ON usage_tool_calls(tool_name, started_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_time_group ON usage_tool_calls(started_at_unix_nano DESC, tool_name, outcome)`,
 		`CREATE TABLE IF NOT EXISTS usage_subagents (
   subagent_id             TEXT NOT NULL DEFAULT '',
   parent_session_id       TEXT NOT NULL DEFAULT '',
@@ -405,6 +480,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_completed ON usage_subagents(completed_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_started ON usage_subagents(started_at_unix_nano DESC)`,
 		`CREATE TABLE IF NOT EXISTS usage_turns (
   session_id                   TEXT NOT NULL,
   turn_id                      TEXT NOT NULL,
@@ -430,6 +507,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   PRIMARY KEY (session_id, turn_id)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_turns_time ON usage_turns(session_id, ended_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_turns_started ON usage_turns(started_at_unix_nano DESC)`,
 		// ---- 路由切换观测（主 Agent / 子 Agent）：统一表 + 维度索引 ----
 		// 幂等 DDL：老库打开时自动补表，无需单独版本迁移（与 v2 三表同策略）。
 		`CREATE TABLE IF NOT EXISTS usage_routes (
@@ -767,7 +845,10 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			return fmt.Errorf("migrate usage analytics db: %w", err)
 		}
 	}
-	return s.migrateStatsV3()
+	if err := s.migrateStatsV3(); err != nil {
+		return err
+	}
+	return s.migrateCacheRatioV5()
 }
 
 // migrateSubagentsBatchID 把 v7 形态的 usage_subagents 重建为 v8 形态：主键
@@ -824,6 +905,8 @@ FROM usage_subagents`,
 		`ALTER TABLE usage_subagents_v8 RENAME TO usage_subagents`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_completed ON usage_subagents(completed_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_started ON usage_subagents(started_at_unix_nano DESC)`,
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate usage analytics db: %w", err)
@@ -835,12 +918,24 @@ FROM usage_subagents`,
 	return nil
 }
 
+// readDB 返回查询用连接池：可写 Store 优先使用独立只读池；只读 Store 或
+// 只读池打开失败时回退唯一连接。
+func (s *Store) readDB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	if s.reader != nil {
+		return s.reader
+	}
+	return s.db
+}
+
 // query 在只读降级时返回 (nil, false)：调用方给出空结果。
 func (s *Store) query(query string, args ...interface{}) (*sql.Rows, bool, error) {
 	if s == nil || s.db == nil || s.empty {
 		return nil, false, nil
 	}
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.readDB().Query(query, args...)
 	if err != nil {
 		if isMissingTableError(err) {
 			return nil, false, nil

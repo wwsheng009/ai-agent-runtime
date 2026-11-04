@@ -120,7 +120,7 @@ func buildWhere(q Query, sessionStart, childFilter string) whereClause {
 }
 
 // childSessionFilterExpr 返回"仅根会话"过滤表达式：usage_sessions 具备
-// parent_session_id 列（schema v9）时为 s.parent_session_id = ''；旧库缺列时
+// parent_session_id 列（schema v9）时为 s.parent_session_id = ”；旧库缺列时
 // 返回空串（退化为旧行为，不报错）。能力探测结果按 Store 缓存。
 func (s *Store) childSessionFilterExpr() string {
 	if s == nil {

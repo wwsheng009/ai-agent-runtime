@@ -397,7 +397,7 @@ UNION ALL ...  -- 5 段
 | `AVG` 语义差异 | 平均耗时偏差 | 用 `samples` 精确复刻 `AVG(NULLIF(duration_ms,0))`，不采用 `SUM/COUNT(*)` |
 | 灰度期新旧路径混跑 | 读数不一致 | 上线需重启 runtime-server（迁移在 `Open()` 执行）；停机窗口内 `user_version` 门控保证旧进程不受影响 |
 | 新路径出现未知问题需回退 | 无法快速止损 | 增加 `AICLI_USAGE_ANALYTICS_DISABLE_STATS=1` 逃生开关：强制 `statsReady()=false` 走旧 `sessionSelect`（无需回滚版本） |
-| 请求表持续增长（无清理） | 长期再次劣化 | 保留策略：`usage_requests`/`usage_session_turn_keys` 按会话保留期清理 + 定期 `VACUUM`（Phase 4） |
+| 原始明细持续增长（无清理） | 长期再次劣化 | 自动分批清理请求/工具/回合/子代理等原始表；文件缩小走离线 `storage compact`（Phase 4） |
 
 ## 11. 测试计划
 
@@ -463,7 +463,7 @@ UNION ALL ...  -- 5 段
 ### Phase 4（P2）
 14. 首屏瘦身（subagents/errors/health 延迟 + 骨架屏）
 15. 错误模式索引/小表
-16. 保留期清理 + `VACUUM`（§10 长期劣化对策）
+16. 保留期清理 + 离线压缩入口（§10 长期劣化对策；在线 `VACUUM` 已禁用）
 
 ## 14. 功能完整性边界：残留原始表扫描清单
 
@@ -514,7 +514,7 @@ Phase 1 只把**会话级统计**改为读预聚合列；以下路径仍读原�
 | Phase 3 | 服务端 TTL 5s + 写入代数失效缓存（仅 3 个聚合读路径） | `service_cache.go`、`service.go:47/109` |
 | Phase 4 | 首屏瘦身：观测区块（subagents/errors/health）延迟 300ms 独立加载 | `overview.tsx:99-119,154-157` |
 | Phase 4 | `error_category` 部分索引 | `store.go:423` |
-| Phase 4 | 保留期清理 + VACUUM + CLI `prune --vacuum` | `store_maintenance.go`、`usage_analytics_command.go` |
+| Phase 4 | 保留期清理 + CLI `prune`（在线 `--vacuum` 已移除） | `store_maintenance.go`、`usage_analytics_command.go` |
 | Phase 0.1 | 端点基准脚本 | `backend/scripts/usage-analytics-endpoint-bench.ps1` |
 | 收尾修复 | 工具列表补齐 p50/p95/error_top（2 次批量查询替代 N+2） | `query_v2.go` `ToolStats` + `toolDurationSamples`/`toolErrorTopByTool` |
 
@@ -573,3 +573,112 @@ Phase 1 只把**会话级统计**改为读预聚合列；以下路径仍读原�
 | 运行库真实路径 / 表计数（实测） | `/api/runtime/status` → `runtime.usage_analytics` |
 | 端点实测耗时（§2.8） | `curl` 直连 8101，2026-09-17 |
 | 前端代理拓扑 | `frontend/vite.config.ts:130-136`（5193 → 127.0.0.1:8101） |
+
+## 18. 第二轮数据库优化与实测（2026-11-04）
+
+### 18.1 真实库规模
+
+实测 `~/.aicli/sessions/runtime/usage_analytics.sqlite`（迁移前 `user_version=4`）：
+
+| 指标 | 实测值 |
+|---|---:|
+| 主文件 | 2.91 GB |
+| WAL 文件 | 2.40 GB |
+| freelist | 116,915 页（约 479 MB） |
+| `dbstat` 已分配页 | 2.43 GB |
+| `usage_requests` | 239,405 行，约 483 MB 表 + 索引 |
+| `usage_tool_calls` | 298,564 行，约 1.70 GB 表 + 索引 |
+| `usage_turns` / `usage_subagents` | 8,951 / 473 行 |
+| `usage_lsp_requests` | 25,495 行，约 13.7 MB |
+| 数据时间范围 | 2026-09-22 至 2026-11-04 |
+
+结论：当前最大增长源已不是请求表，而是 `usage_tool_calls.record_json`；
+90 天保留期对这份 43 天数据暂时不会删除任何行，必须同时控制新写入体积。
+
+### 18.2 本轮根因与修复
+
+| 问题 | 证据 | 修复 |
+|---|---|---|
+| 缓存率筛选/汇总反复解析 `record_json` | 全历史 JSON 汇总实测 1.266 s | schema v5 增加 `cache_hit_ratio` / `cache_write_ratio` 提升列，迁移回填，查询优先读列并对旧行回退 JSON |
+| 工具记录复制完整展示/protocol 载荷 | 平均 4.3 KB，最大 637 KB | 新写入仅保留分析字段，上限 16 KiB；新增 `compact-records` 显式批量瘦身历史行 |
+| 清理只删请求，主要写入源未清理 | 旧 `PruneBefore` 仅处理 `usage_requests` | 自动清理覆盖请求、工具、回合、子代理、路由、LSP、渲染围栏，保留会话元数据 |
+| 清理批次可能临时排序 | 普通计划会选非时间索引并建 TEMP B-TREE | 新增 `usage_turns` / `usage_subagents` 时间索引；清理 SQL 用 `INDEXED BY` 锁定时间索引 |
+| 请求删除后全库重建统计存在 N×M 扫描 | 相关子查询计划显示每个会话 `SCAN r` | 先按 root/child 各聚合一次到临时表，再按主键更新会话；更新阶段不再扫描请求表 |
+| WAL 保持历史高水位 | `journal_size_limit=-1`，2.40 GB 空 WAL | 打开库时设置 64 MiB WAL 上限；已有文件仍需正常 checkpoint / 离线压缩 |
+
+### 18.3 实测收益
+
+- 全历史缓存率汇总：JSON 回放 **1.266 s**；预计算列临时表同口径 **0.066 s**，约 **19×**。
+- “今天 + 缓存率 < 50%”首屏：JSON 回放 **34 ms**；预计算列 **4 ms**，查询计划仍由
+  `idx_usage_requests_time_step_id` 提供时间倒序，无需额外排序。
+- 全库统计重建：真实数据 root 聚合约 **1.77 s**、child 聚合约 **0.07 s**、
+  1,234 会话更新约 **0.016 s**；旧计划会对每个会话做 17 次相关全表扫描，属于不可接受路径。
+- 清理计划：请求/工具/回合/子代理/路由/LSP/围栏的批量子查询均命各自时间索引，
+  不再出现 `TEMP B-TREE`。
+- 历史工具记录只读 dry-run：只处理 >16 KiB 的 9,218 行可省约 174 MB；
+  阈值降到 1 KiB 后覆盖 296,176 行，`record_json` 由 1.367 GB 降至约 217 MB，
+  逻辑节省约 1.15 GB。因实际写库会放大 WAL，默认仍要求显式执行。
+
+### 18.4 自动清理策略
+
+默认配置：
+
+```yaml
+usageAnalytics:
+  retention:
+    enabled: true
+    days: 90
+    interval: 6h
+    batchSize: 2000
+```
+
+- 每批独立事务，避免持写锁做超大 DELETE；单次 sweep 持续到没有到期行为止。
+- `usage_sessions` 元数据不删除；请求明细删除后重建会话预聚合计数。
+- `/api/runtime/status` 的 `usage_analytics.retention` 暴露最近运行时间、策略、删除数和错误。
+- 当前自动 worker 的宿主是 runtime-server；无 runtime-server 时使用
+  `aicli usage-analytics prune --before ...` 手动执行。若未来由 CLI/TUI 也长期持有 worker，
+  应增加数据库租约，避免多进程重复 sweep。
+
+### 18.5 历史大记录与空间回收
+
+先预检，再在低活跃时段执行：
+
+```powershell
+aicli usage-analytics compact-records --dry-run
+aicli usage-analytics compact-records --max-bytes 1024 --batch-size 200
+aicli usage-analytics prune --before 2026-08-06
+```
+
+行删除/改写只会把页放入 freelist，不会缩小操作系统文件。缩小文件必须先退出所有使用进程：
+
+```powershell
+aicli storage compact --target analytics --require-exclusive
+```
+
+### 18.6 最终落库核对（2026-11-04）
+
+| 指标 | 复核结果 |
+|---|---:|
+| `PRAGMA user_version` | 5 |
+| `cache_hit_ratio` / `cache_write_ratio` | 两列均存在；当前 236,693 行已回填命中率 |
+| 新增时间索引 | `idx_usage_turns_started`、`idx_usage_subagents_started` 均存在 |
+| 主文件 / WAL | 约 2.43 GB / 64 MiB（迁移前 WAL 约 2.40 GB） |
+| freelist | 0 页 |
+| `PRAGMA quick_check` | `ok` |
+| 当天请求 / 缓存率 < 50% | 10,219 / 129 |
+| `compact-records --max-bytes 65536 --dry-run` | 扫描 22 行，可改写 4,458,514 → 13,926 bytes |
+
+清理与查询计划复核：
+
+- 请求、工具、回合、子代理、路由、LSP、渲染围栏 7 张表的删除子查询均命中各自时间索引，
+  无 `TEMP B-TREE`。
+- “今天 + 缓存率 < 50%”的汇总与分页查询均命中时间索引；分页查询使用
+  `idx_usage_requests_time_step_id`，不需要额外排序。
+- WAL 已回落到 64 MiB，但主文件不会因删除/改写自动缩小；离线压缩仍需显式执行。
+
+### 18.7 后续候选（未默认启用）
+
+1. 将 `compact-records` 作为升级后的一次性受控维护任务，在磁盘余量、WAL 上限和低活跃窗口确认后执行；不要默认自动重写 1.7 GB 历史表。
+2. 对 `usage_requests.cache_hit_ratio` 评估低选择性索引；目前“时间倒序 + LIMIT”路径已足够快，贸然增加 ratio-first 索引可能引入排序和写放大。
+3. 为 `usage_subagents` 的负/零时间戳增加采集侧校验；当前保留期只跳过无法判定年龄的行。
+4. 多长期写入宿主之间引入 maintenance lease，再扩大自动清理宿主范围。

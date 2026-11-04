@@ -676,8 +676,9 @@ func (c *collector) requestUpsertStatement(record cacheanalytics.CacheRequestRec
 INSERT INTO usage_requests (
   llm_request_id, session_id, parent_session_id, root_session_id, subagent_id, trace_id, turn_id, step, provider, model, status, cache_status,
   success, error_category, started_at_unix_nano, duration_ms, first_token_ms, prompt_tokens, completion_tokens,
-  cache_read_tokens, cache_creation_tokens, uncached_input_tokens, input_total_tokens, reasoning_tokens, total_tokens, usage_available, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  cache_read_tokens, cache_creation_tokens, uncached_input_tokens, input_total_tokens, reasoning_tokens, total_tokens,
+  usage_available, cache_hit_ratio, cache_write_ratio, record_json
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(llm_request_id) DO UPDATE SET
   session_id = excluded.session_id,
   parent_session_id = CASE
@@ -718,6 +719,8 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
   reasoning_tokens = excluded.reasoning_tokens,
   total_tokens = excluded.total_tokens,
   usage_available = excluded.usage_available,
+  cache_hit_ratio = excluded.cache_hit_ratio,
+  cache_write_ratio = excluded.cache_write_ratio,
   record_json = excluded.record_json`
 	rootSessionID := record.RootSessionID
 	if rootSessionID == "" {
@@ -750,6 +753,8 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
 		reasoning,
 		totalTokens,
 		usageAvailable,
+		record.CacheHitRatio,
+		record.CacheWriteRatio,
 		string(payload),
 	}
 }

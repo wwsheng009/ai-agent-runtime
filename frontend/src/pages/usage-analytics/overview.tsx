@@ -28,6 +28,7 @@ import { ArtifactFlowPanel } from "./artifact-flow-panel";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { UsageQuotaPanel } from "./quota";
+import { RequestAnalysisPanel } from "./request-analysis";
 import { RoutingObservabilityPanel } from "./routing-observability-panel";
 import { LspObservabilityPanel } from "./lsp-observability-panel";
 import { SessionTable } from "./sessions";
@@ -184,11 +185,14 @@ export function UsageOverview() {
         setModelGroups(mod?.groups ?? []);
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(/timeout|signal timed out|database is locked|database table is locked/i.test(message)
+        ? t("loadTimeout")
+        : message);
     } finally {
       setLoading(false);
     }
-  }, [adminToken, groupBy, query]);
+  }, [adminToken, groupBy, query, t]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -278,8 +282,17 @@ export function UsageOverview() {
           </form>
 
           {error ? (
-            <div role="alert" className="rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
-              {t("loadError")}: {error}
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
+              <span>{t("loadError")}: {error}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0 text-xs"
+                onClick={() => { void load(); }}
+              >
+                {t("actions.retry")}
+              </Button>
             </div>
           ) : health && (!health.attached || health.degraded) ? (
             <AnalyticsHealthBanner health={health} />
@@ -356,6 +369,7 @@ export function UsageOverview() {
             {view === "sessions" ? (
               <SessionTable sessions={sessions} total={matched} loading={loading} search={searchParams.toString()} offset={pageOffset} pageSize={50} onPage={(offset) => updateFilter("offset", String(offset))} />
             ) : null}
+            {view === "requests" ? <RequestAnalysisPanel adminToken={adminToken} /> : null}
             {view === "quota" ? <UsageQuotaPanel adminToken={adminToken} /> : null}
             {view === "routing" ? <RoutingObservabilityPanel adminToken={adminToken} /> : null}
             {view === "lsp" ? <LspObservabilityPanel adminToken={adminToken} /> : null}

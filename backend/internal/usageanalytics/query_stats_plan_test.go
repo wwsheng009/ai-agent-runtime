@@ -11,7 +11,7 @@ import (
 // explainPlanText 读取 EXPLAIN QUERY PLAN 的 detail 列并拼接。
 func explainPlanText(t *testing.T, store *Store, sqlText string, args ...interface{}) string {
 	t.Helper()
-	rows, ok, err := store.query("EXPLAIN QUERY PLAN " + sqlText, args...)
+	rows, ok, err := store.query("EXPLAIN QUERY PLAN "+sqlText, args...)
 	require.NoError(t, err)
 	require.True(t, ok)
 	defer rows.Close()

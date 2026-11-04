@@ -39,6 +39,7 @@ type RuntimeConfig struct {
 	Trace          TraceConfig               `yaml:"trace" json:"trace"`
 	Hooks          []runtimehooks.HookConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	SessionRuntime SessionRuntimeConfig      `yaml:"sessionRuntime" json:"sessionRuntime"`
+	UsageAnalytics UsageAnalyticsConfig      `yaml:"usageAnalytics" json:"usageAnalytics"`
 	Artifact       ArtifactConfig            `yaml:"artifact" json:"artifact"`
 	Checkpoint     CheckpointConfig          `yaml:"checkpoint" json:"checkpoint"`
 	Background     BackgroundConfig          `yaml:"background" json:"background"`
@@ -393,6 +394,21 @@ type SessionRuntimeConfig struct {
 	// ReadPool 是 P1.7 读写双池的灰度配置；默认启用（disable=false），
 	// 回滚时置 disable=true（读回落写池，行为与拆分前逐字节一致）。
 	ReadPool ReadPoolConfig `yaml:"readPool" json:"readPool"`
+}
+
+// UsageAnalyticsConfig controls the shared usage_analytics.sqlite store.
+type UsageAnalyticsConfig struct {
+	Retention UsageAnalyticsRetentionConfig `yaml:"retention" json:"retention"`
+}
+
+// UsageAnalyticsRetentionConfig bounds raw request/tool/turn event retention.
+// Session metadata is retained so historical sessions remain discoverable; only
+// raw diagnostic rows are pruned and the pre-aggregated counters are rebuilt.
+type UsageAnalyticsRetentionConfig struct {
+	Enabled   bool          `yaml:"enabled" json:"enabled"`
+	Days      int           `yaml:"days" json:"days"`
+	Interval  time.Duration `yaml:"interval" json:"interval"`
+	BatchSize int           `yaml:"batchSize" json:"batchSize"`
 }
 
 // ReadPoolConfig 控制 runtime store 的只读连接池（P1.7）。
@@ -975,7 +991,15 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		},
 		AgentControl:   AgentControlConfig{},
 		SessionRuntime: SessionRuntimeConfig{},
-		Artifact:       ArtifactConfig{},
+		UsageAnalytics: UsageAnalyticsConfig{
+			Retention: UsageAnalyticsRetentionConfig{
+				Enabled:   true,
+				Days:      90,
+				Interval:  6 * time.Hour,
+				BatchSize: 2000,
+			},
+		},
+		Artifact: ArtifactConfig{},
 		Checkpoint: CheckpointConfig{
 			Enabled:                  false,
 			MaxFileBytes:             1 * 1024 * 1024,
@@ -1424,6 +1448,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateSessionRuntimeConfig(&config.SessionRuntime); err != nil {
 		return err
 	}
+	if err := ValidateUsageAnalyticsConfig(&config.UsageAnalytics); err != nil {
+		return err
+	}
 	if err := ValidateArtifactConfig(&config.Artifact); err != nil {
 		return err
 	}
@@ -1567,6 +1594,24 @@ func ValidateSessionRuntimeConfig(config *SessionRuntimeConfig) error {
 	case "", "memory", "file":
 	default:
 		return errors.New(errors.ErrValidationFailed, "sessionRuntime.defaultPersistence must be one of memory or file")
+	}
+	return nil
+}
+
+// ValidateUsageAnalyticsConfig validates automatic retention bounds.
+func ValidateUsageAnalyticsConfig(config *UsageAnalyticsConfig) error {
+	if config == nil || !config.Retention.Enabled {
+		return nil
+	}
+	retention := config.Retention
+	if retention.Days < 1 || retention.Days > 3650 {
+		return errors.New(errors.ErrValidationFailed, "usageAnalytics.retention.days must be between 1 and 3650")
+	}
+	if retention.Interval < time.Minute {
+		return errors.New(errors.ErrValidationFailed, "usageAnalytics.retention.interval must be at least 1m")
+	}
+	if retention.BatchSize < 100 || retention.BatchSize > 20000 {
+		return errors.New(errors.ErrValidationFailed, "usageAnalytics.retention.batchSize must be between 100 and 20000")
 	}
 	return nil
 }

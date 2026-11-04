@@ -317,8 +317,8 @@ backend/internal/cacheanalytics/
 | 端点（挂载前缀 `{base}` 见 §3.2） | 方法 | 说明 |
 |-----------------------------------|------|------|
 | `{base}/cache/capabilities` | GET | 能力发现：schema 版本、数据源（live/history/offline）、是否支持 SSE |
-| `{base}/cache/overview` | GET | 总览。aicli 形态 `?session_id=` 可选（默认当前会话）；runtime 形态 session 在路径中 |
-| `{base}/cache/requests` | GET | 明细分页列表。过滤参数：`trace_id`、`turn_id`、`message_id`、`status`、`cache_status`、`from`、`to`、`limit`（默认 50，最大 200）、`offset`；按 `started_at` 倒序 |
+| `{base}/cache/overview` | GET | 总览。aicli 形态 `?session_id=` 可选（默认当前会话）；runtime 形态 session 在路径中。附加 `providers`/`models` 去重维度供筛选下拉框使用 |
+| `{base}/cache/requests` | GET | 明细分页列表。过滤参数：`trace_id`、`turn_id`、`message_id`、`provider`/`model`（大小写不敏感精确匹配）、`status`、`cache_status`、`cache_hit_ratio_min/max`（闭区间，0–1）、`duration_ms_min/max`（闭区间，毫秒）、`from`、`to`、`limit`（默认 50，最大 200）、`offset`；按 `started_at` 倒序 |
 | `{base}/cache/requests/{llm_request_id}` | GET | 单请求详情（含 retry attempts 明细） |
 | `{base}/cache/messages/{message_id}/trace` | GET | 消息追溯（§4.3） |
 

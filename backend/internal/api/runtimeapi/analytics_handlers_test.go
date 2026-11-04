@@ -616,6 +616,7 @@ func TestAnalyticsHandlersUsageAnalyticsHealthBlock(t *testing.T) {
 	require.Nil(t, block["last_ingest_at"])
 	require.Equal(t, true, block["degraded"])
 	require.NotNil(t, block["table_counts"])
+	require.NotNil(t, block["retention"])
 
 	// 挂载 + 写入事件：attached=true，计数与最近采集时间可见。
 	bus := handler.getRuntimeEventBus()
@@ -638,6 +639,10 @@ func TestAnalyticsHandlersUsageAnalyticsHealthBlock(t *testing.T) {
 	require.EqualValues(t, 1, block["conflict_total"])
 	require.Equal(t, false, block["degraded"])
 	require.NotNil(t, block["last_ingest_at"])
+	retention, ok := block["retention"].(usageanalytics.RetentionStatus)
+	require.True(t, ok, "retention 必须是 RetentionStatus")
+	require.False(t, retention.Enabled)
+	require.Equal(t, 90, retention.Days)
 	tableCounts := block["table_counts"].(map[string]interface{})
 	require.EqualValues(t, 1, tableCounts["tool_calls"])
 	require.EqualValues(t, 1, tableCounts["subagents"])

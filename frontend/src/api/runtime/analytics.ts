@@ -8,6 +8,8 @@ import type {
   AnalyticsRouteStatsResponse,
   AnalyticsRoutingQuery,
   AnalyticsRuntimeStatusEnvelope,
+  AnalyticsRequestsQuery,
+  AnalyticsRequestsResponse,
   AnalyticsSessionUsageDetail,
   AnalyticsSessionsQuery,
   AnalyticsSessionsResponse,
@@ -22,6 +24,15 @@ import type {
 } from "@/types/runtime";
 
 import { buildRuntimeUrlWithQuery, fetchRuntimeJson } from "./shared";
+
+// 分析库可能较大（本机实测 usage_analytics.sqlite 超过 2GB），冷查询或 WAL
+// checkpoint 期间会明显超过通用 10s 截止时间。分析查询单独放宽到 30s；后端
+// 侧已用独立只读连接池避免被采集写事务无限阻塞（仍保留此兜底）。
+const ANALYTICS_FETCH_TIMEOUT_MS = 30_000;
+
+function fetchAnalyticsJson<T>(input: string, init?: RequestInit): Promise<T> {
+  return fetchRuntimeJson<T>(input, init, ANALYTICS_FETCH_TIMEOUT_MS);
+}
 
 type AnalyticsRequestOptions = {
   adminToken?: string;
@@ -40,7 +51,7 @@ function buildAnalyticsHeaders(adminToken?: string) {
 export async function listAnalyticsSessions(
   options: AnalyticsSessionsQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsSessionsResponse> {
-  return fetchRuntimeJson<AnalyticsSessionsResponse>(
+  return fetchAnalyticsJson<AnalyticsSessionsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/sessions", {
       from: options.from,
       to: options.to,
@@ -63,7 +74,7 @@ export async function listAnalyticsSessions(
 export async function getAnalyticsSummary(
   options: AnalyticsSummaryQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsSummaryResponse> {
-  return fetchRuntimeJson<AnalyticsSummaryResponse>(
+  return fetchAnalyticsJson<AnalyticsSummaryResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/summary", {
       from: options.from,
       to: options.to,
@@ -85,13 +96,49 @@ export async function getAnalyticsSummary(
 }
 
 /**
+ * Cross-session LLM request facts. Cache filters are applied by the backend
+ * before pagination, so "today + cache ratio below 50%" does not depend on the
+ * first page of an unfiltered request window.
+ */
+export async function listAnalyticsRequests(
+  options: AnalyticsRequestsQuery & AnalyticsRequestOptions = {},
+): Promise<AnalyticsRequestsResponse> {
+  return fetchAnalyticsJson<AnalyticsRequestsResponse>(
+    buildRuntimeUrlWithQuery("/api/runtime/analytics/requests", {
+      from: options.from,
+      to: options.to,
+      q: options.q,
+      provider: options.provider,
+      model: options.model,
+      directory: options.directory,
+      project: options.project,
+      status: options.status,
+      limit: options.limit,
+      offset: options.offset,
+      session_id: options.session_id,
+      request_status: options.request_status,
+      success: options.success === undefined ? undefined : String(options.success),
+      cache_status: options.cache_status,
+      cache_reported: options.cache_reported ? "true" : undefined,
+      cache_hit_ratio_min: options.cache_hit_ratio_min,
+      cache_hit_ratio_max: options.cache_hit_ratio_max,
+      cache_hit_ratio_lt: options.cache_hit_ratio_lt,
+      cache_hit_ratio_gte: options.cache_hit_ratio_gte,
+    }),
+    {
+      headers: buildAnalyticsHeaders(options.adminToken),
+    },
+  );
+}
+
+/**
  * 首屏引导端点（方案 Phase 2）：一次返回 sessions/summary/dimensions，
  * 前端首屏从 3 个主数据请求合并为 1 个；其余区块延迟加载。
  */
 export async function getAnalyticsOverview(
   options: AnalyticsSummaryQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsOverviewResponse> {
-  return fetchRuntimeJson<AnalyticsOverviewResponse>(
+  return fetchAnalyticsJson<AnalyticsOverviewResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/overview", {
       from: options.from,
       to: options.to,
@@ -123,7 +170,7 @@ export async function getAnalyticsDimensions(
   if (dimensionsCache && dimensionsCache.expiresAt > now) {
     return dimensionsCache.value!;
   }
-  const value = await fetchRuntimeJson<AnalyticsDimensionsResponse>(
+  const value = await fetchAnalyticsJson<AnalyticsDimensionsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/dimensions", {
       max_scan: options.max_scan,
     }),
@@ -144,7 +191,7 @@ export async function getAnalyticsSessionUsage(
   options: AnalyticsRequestOptions = {},
 ): Promise<AnalyticsSessionUsageDetail> {
   const encoded = encodeURIComponent(sessionId);
-  return fetchRuntimeJson<AnalyticsSessionUsageDetail>(
+  return fetchAnalyticsJson<AnalyticsSessionUsageDetail>(
     buildRuntimeUrlWithQuery(`/api/runtime/analytics/sessions/${encoded}`, {}),
     {
       headers: buildAnalyticsHeaders(options.adminToken),
@@ -165,7 +212,7 @@ export async function getAnalyticsSessionUsage(
 export async function listAnalyticsTools(
   options: AnalyticsToolStatsQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsToolStatsResponse> {
-  return fetchRuntimeJson<AnalyticsToolStatsResponse>(
+  return fetchAnalyticsJson<AnalyticsToolStatsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/tools", {
       session: options.session,
       tool: options.tool,
@@ -183,7 +230,7 @@ export async function listAnalyticsTools(
 export async function getAnalyticsSubagents(
   options: AnalyticsSubagentStatsQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsSubagentStatsResponse> {
-  return fetchRuntimeJson<AnalyticsSubagentStatsResponse>(
+  return fetchAnalyticsJson<AnalyticsSubagentStatsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/subagents", {
       session: options.session,
       failure_category: options.failure_category,
@@ -207,7 +254,7 @@ export async function getAnalyticsSubagents(
 export async function listAnalyticsErrors(
   options: AnalyticsErrorPatternsQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsErrorPatternsResponse> {
-  return fetchRuntimeJson<AnalyticsErrorPatternsResponse>(
+  return fetchAnalyticsJson<AnalyticsErrorPatternsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/errors", {
       session: options.session,
       source: options.source,
@@ -238,7 +285,7 @@ export async function getUsageAnalyticsHealth(
   options: AnalyticsRequestOptions = {},
 ): Promise<AnalyticsUsageHealth | null> {
   try {
-    const payload = await fetchRuntimeJson<AnalyticsRuntimeStatusEnvelope>(
+    const payload = await fetchAnalyticsJson<AnalyticsRuntimeStatusEnvelope>(
       buildRuntimeUrlWithQuery("/api/runtime/status", {}),
       {
         headers: buildAnalyticsHeaders(options.adminToken),
@@ -288,7 +335,7 @@ export async function getToolEfficiencySnapshot(
   options: AnalyticsRequestOptions = {},
 ): Promise<AnalyticsToolEfficiencySnapshot | null> {
   try {
-    const payload = await fetchRuntimeJson<AnalyticsRuntimeStatusEnvelope>(
+    const payload = await fetchAnalyticsJson<AnalyticsRuntimeStatusEnvelope>(
       buildRuntimeUrlWithQuery("/api/runtime/status", {}),
       {
         headers: buildAnalyticsHeaders(options.adminToken),
@@ -424,7 +471,7 @@ function readStringArray(value: unknown): string[] {
 export async function getAnalyticsRoutingStats(
   options: AnalyticsRoutingQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsRouteStatsResponse> {
-  return fetchRuntimeJson<AnalyticsRouteStatsResponse>(
+  return fetchAnalyticsJson<AnalyticsRouteStatsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/routing", {
       from: options.from,
       to: options.to,
@@ -448,7 +495,7 @@ export async function getAnalyticsRoutingStats(
 export async function listAnalyticsRoutingEvents(
   options: AnalyticsRoutingQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsRouteEventsResponse> {
-  return fetchRuntimeJson<AnalyticsRouteEventsResponse>(
+  return fetchAnalyticsJson<AnalyticsRouteEventsResponse>(
     buildRuntimeUrlWithQuery("/api/runtime/analytics/routing/events", {
       from: options.from,
       to: options.to,

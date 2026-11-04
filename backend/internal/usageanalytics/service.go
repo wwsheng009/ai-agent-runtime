@@ -1,6 +1,7 @@
 package usageanalytics
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ type Options struct {
 	SupportsSSE bool
 	// Now 时间源（测试注入）；nil 取 time.Now。
 	Now func() time.Time
+	// Retention controls automatic cleanup of raw analytics detail.
+	Retention RetentionOptions
 }
 
 // Service 是进程内单例的分析服务：同一 SQLite 库同时承载
@@ -37,7 +40,12 @@ type Service struct {
 	// cache 服务端短 TTL 查询缓存（§8.2）；只读降级路径不经过缓存。
 	cache *analyticsQueryCache
 
-	closeOnce sync.Once
+	closeOnce         sync.Once
+	now               func() time.Time
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	retentionMu       sync.RWMutex
+	retentionStatus   RetentionStatus
 }
 
 // Attach 打开分析库、订阅事件总线并返回服务实例。
@@ -47,12 +55,17 @@ func Attach(bus *runtimeevents.Bus, opts Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{store: store, cache: newAnalyticsQueryCache(opts.Now)}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	service := &Service{store: store, cache: newAnalyticsQueryCache(opts.Now), now: now}
 	if bus != nil {
 		service.collector = newCollector(store, opts.Lookup, opts.Now, opts.Lineage)
 		service.collector.subscribe(bus)
 	}
 	service.source = NewCacheSource(store, opts.History, opts.SupportsSSE)
+	service.startRetentionWorker(opts.Retention)
 	return service, nil
 }
 
@@ -62,6 +75,12 @@ func (s *Service) Close() {
 		return
 	}
 	s.closeOnce.Do(func() {
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+		}
+		if s.maintenanceDone != nil {
+			<-s.maintenanceDone
+		}
 		if s.collector != nil {
 			s.collector.close()
 			s.collector = nil
@@ -168,6 +187,21 @@ func (s *Service) SessionUsage(sessionID string) (SessionUsageDetail, error) {
 		return store.SessionUsage(sessionID)
 	}
 	return SessionUsageDetail{}, errSessionNotFound(sessionID)
+}
+
+// ListRequests returns cross-session request-level facts before pagination.
+// Cache ratio filters are applied in SQL against the persisted request payload.
+func (s *Service) ListRequests(q RequestQuery) (RequestListResult, error) {
+	if store := s.Query(); store != nil {
+		return store.ListRequests(q)
+	}
+	return RequestListResult{
+		SchemaVersion: SchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
+		Limit:         normalizeLimit(q.Limit, defaultRequestListLimit, maxRequestListLimit),
+		Offset:        normalizeOffset(q.Offset),
+		Requests:      []cacheanalytics.CacheRequestRecord{},
+	}, nil
 }
 
 // ToolStats 返回工具维度聚合（schema v2；空库返回空数组）。

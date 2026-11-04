@@ -97,6 +97,20 @@ func TestUsageAnalyticsCommandSurface(t *testing.T) {
 	if err != nil || child == nil || child.Name() != "rebuild-stats" {
 		t.Fatalf("rebuild-stats 子命令缺失: child=%v err=%v", child, err)
 	}
+	child, _, err = cmd.Find([]string{"compact-records"})
+	if err != nil || child == nil || child.Name() != "compact-records" {
+		t.Fatalf("compact-records 子命令缺失: child=%v err=%v", child, err)
+	}
+	child, _, err = cmd.Find([]string{"prune"})
+	if err != nil || child == nil || child.Name() != "prune" {
+		t.Fatalf("prune 子命令缺失: child=%v err=%v", child, err)
+	}
+	for _, name := range []string{"rebuild-stats", "compact-records", "prune"} {
+		child, _, err := cmd.Find([]string{name})
+		if err != nil || child == nil || child.Flags().Lookup("json") == nil {
+			t.Fatalf("%s 缺少 --json flag: child=%v err=%v", name, child, err)
+		}
+	}
 }
 
 // TestUsageAnalyticsPruneRemovesOldRequestsAndRebuildsStats 锁定 §13 Phase 4：
@@ -177,5 +191,69 @@ func TestUsageAnalyticsPruneRejectsVacuumFlag(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "storage compact") {
 		t.Fatalf("拒绝提示应指向 storage compact: %s", buf.String())
+	}
+}
+
+func TestUsageAnalyticsCompactRecordsDryRunAndRewrite(t *testing.T) {
+	path := statsTestCreateAnalyticsDB(t)
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	record, err := json.Marshal(map[string]interface{}{
+		"tool_call_id":               "tool-large",
+		"output_original_bytes":      99999,
+		"output_model_visible_bytes": 1234,
+		"output":                     strings.Repeat("x", 20000),
+	})
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage_tool_calls
+		(tool_call_id, session_id, tool_name, record_json)
+		VALUES ('tool-large', 's-compact', 'view', ?)`, record); err != nil {
+		t.Fatalf("seed tool record: %v", err)
+	}
+
+	var buf bytes.Buffer
+	code := runUsageAnalyticsCompactRecords(usageAnalyticsCompactOptions{
+		dbPath:    path,
+		maxBytes:  1024,
+		batchSize: 1,
+		dryRun:    true,
+		json:      true,
+		out:       &buf,
+		errOut:    &buf,
+	})
+	if code != statsExitOK {
+		t.Fatalf("dry-run 退出码 = %d; %s", code, buf.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &payload); err != nil {
+		t.Fatalf("dry-run JSON 解析失败: %v (%s)", err, buf.String())
+	}
+	stats := payload["stats"].(map[string]interface{})
+	if stats["rewritten"] != float64(1) || stats["dry_run"] != true {
+		t.Fatalf("dry-run stats = %v", stats)
+	}
+
+	buf.Reset()
+	code = runUsageAnalyticsCompactRecords(usageAnalyticsCompactOptions{
+		dbPath:    path,
+		maxBytes:  1024,
+		batchSize: 1,
+		out:       &buf,
+		errOut:    &buf,
+	})
+	if code != statsExitOK {
+		t.Fatalf("compact 退出码 = %d; %s", code, buf.String())
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT record_json FROM usage_tool_calls WHERE tool_call_id='tool-large'`).Scan(&raw); err != nil {
+		t.Fatalf("read compacted record: %v", err)
+	}
+	if strings.Contains(raw, `"output"`) || !strings.Contains(raw, `"output_model_visible_bytes"`) {
+		t.Fatalf("compacted record = %s", raw)
 	}
 }
