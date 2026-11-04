@@ -1588,7 +1588,7 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 	}
 
 	// Use the same detected user shell as tool-based command execution.
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	result.Shell = shell
 	shellCmd := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, executedCommand), false)
 
@@ -1766,7 +1766,7 @@ commandDone: // 等待命令完成
 		switch {
 		case cmdLower == "pwd" && runtime.GOOS == "windows":
 			// 在 Windows 上执行 pwd（这是 Unix 命令）
-			if runtimeexecutor.DefaultUserShell().Type == runtimeexecutor.ShellTypeCmd {
+			if runtimeexecutor.CurrentShell().Type == runtimeexecutor.ShellTypeCmd {
 				friendlyHint = "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 			}
 

@@ -451,7 +451,7 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		}
 	}
 
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	result := CommandExecutionResult{
 		Output:    execution.Output,
 		ShellType: string(shell.Type),
@@ -655,7 +655,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	}
 
 	// 使用智能 shell 检测
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 
 	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
@@ -1027,7 +1027,7 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 
 	switch {
 	case mainCmd == "pwd" && runtimeexecutor.IsWindows():
-		shell := runtimeexecutor.DefaultUserShell()
+		shell := runtimeexecutor.CurrentShell()
 		if shell.Type == runtimeexecutor.ShellTypeCmd {
 			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 		}
@@ -1529,7 +1529,7 @@ func formatShellCommandContent(exitCode int, shellType, workdir string, duration
 	fmt.Fprintf(&b, "Exit code: %d\n", exitCode)
 	if shell := strings.TrimSpace(shellType); shell != "" {
 		fmt.Fprintf(&b, "Shell: %s\n", shell)
-	} else if detected := runtimeexecutor.DefaultUserShell(); strings.TrimSpace(string(detected.Type)) != "" {
+	} else if detected := runtimeexecutor.CurrentShell(); strings.TrimSpace(string(detected.Type)) != "" {
 		fmt.Fprintf(&b, "Shell: %s\n", detected.Type)
 	}
 	if wd := strings.TrimSpace(workdir); wd != "" {
@@ -1572,7 +1572,7 @@ func asIntish(value interface{}) (int, bool) {
 // GetShellEnvironmentInfo returns environment info for error messages,
 // including the detected shell type.
 func GetShellEnvironmentInfo() string {
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	var parts []string
 	parts = append(parts, fmt.Sprintf("系统类型: %s", runtimeexecutor.GoOS()))
 	parts = append(parts, fmt.Sprintf("Shell: %s (%s)", shell.Type, shell.Path))
@@ -2249,7 +2249,7 @@ func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
 		// target, not the effective workdir, so do not guess.
 		return "", false
 	}
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	expandsGlobs := shellExpandsUnquotedGlobs(shell)
 	for _, candidate := range candidates {
 		if classifyPathGlobResolution(candidate.Token, candidate.Quoted, workdir, shell, expandsGlobs) == pathGlobLiteral {

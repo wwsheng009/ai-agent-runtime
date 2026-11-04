@@ -240,6 +240,7 @@ export const enRuntimeConfigEditorFeedback = {
     lines: "Lines",
     providers: "Providers",
     agentRouting: "Agent routing",
+    shell: "Shell",
     groups: "Groups",
     proxy: "Proxy",
     routes: "Routes",

@@ -10,6 +10,10 @@ export const zhRuntimeConfigEditorModes = {
       label: "Agent 难度路由",
       description: "按 easy、normal、hard、expert 为子 Agent 和 Team 选择 provider 与模型。",
     },
+    shell: {
+      label: "Shell 执行环境",
+      description: "选择工具执行命令时使用的 shell（自动探测或强制路径）。",
+    },
     providerGroups: {
       label: "Provider Groups",
       description: "维护路由分组、故障切换、截断策略和成员列表。",

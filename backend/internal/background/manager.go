@@ -3510,16 +3510,25 @@ func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.C
 	if m != nil {
 		cfg = m.config
 	}
-	// 使用智能 shell 检测，与 BashTool 保持一致
+	// 使用智能 shell 检测，与 BashTool 保持一致。CurrentShell 读取进程级
+	// resolver 的结果，避免"前台一种 shell、超时转后台另一种 shell"。
 	shell := cfg.Shell
 	if strings.TrimSpace(shell.Path) == "" {
-		shell = runtimeexecutor.DefaultUserShell()
+		shell = runtimeexecutor.CurrentShell()
 	}
-	shellArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+	shellArgs, stdinScript := shell.DeriveExecInvocation(
+		runtimeexecutor.WrapPowerShellExitCode(shell, command),
+		runtimeexecutor.CurrentScriptDelivery(),
+	)
 	// HardenPowerShellArgs identifies the shell from argv[0]; passing the user
 	// command here made every short PowerShell command skip the UTF-8 prefix.
 	shellArgs = shellexec.HardenPowerShellArgs(shellArgs, shell, shellArgs[0])
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
+	if stdinScript != "" {
+		// POSIX long scripts: bash -s reads the script from stdin, which removes
+		// the Windows command-line length limit from the picture.
+		cmd.Stdin = strings.NewReader(stdinScript)
+	}
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
 	// captured background output is unstyled before it reaches the model.
@@ -3527,6 +3536,7 @@ func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.C
 	if env == nil {
 		env = os.Environ()
 	}
+	env = runtimeexecutor.ApplyShellEnvOverrides(env)
 	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(env))
 	if cfg.PrepareCommand != nil {
 		cfg.PrepareCommand(shell, command, cmd)

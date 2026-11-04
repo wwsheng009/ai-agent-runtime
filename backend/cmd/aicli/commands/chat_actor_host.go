@@ -24,6 +24,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
@@ -3635,6 +3636,9 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, on
 	if runtimeConfig == nil {
 		return nil
 	}
+	// 进程级 shell resolver 的唯一安装点：此后 bash 工具、后台 job、PTY、
+	// detached runner 与提示词描述都读同一份解析结果（重复调用是幂等的）。
+	runtimeexecutor.ConfigureShell(runtimeConfig.Shell)
 	cfg := runtimeConfig.Background
 	return background.NewManager(background.Config{
 		MaxOutputBytes:          cfg.MaxOutputBytes,

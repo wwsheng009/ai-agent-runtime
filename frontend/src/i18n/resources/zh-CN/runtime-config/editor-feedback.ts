@@ -237,6 +237,7 @@ export const zhRuntimeConfigEditorFeedback = {
     lines: "行",
     providers: "Provider",
     agentRouting: "Agent 路由",
+    shell: "Shell",
     groups: "组",
     proxy: "代理",
     routes: "路由",

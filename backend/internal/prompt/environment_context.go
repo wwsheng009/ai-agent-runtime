@@ -83,7 +83,7 @@ func CurrentEnvironmentValues() map[string]interface{} {
 }
 
 func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[string]interface{} {
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	now := time.Now()
 	values := map[string]interface{}{
 		"os":           runtime.GOOS,
@@ -110,7 +110,7 @@ func RenderShellExecutionGuidance() string {
 // precomputed (possibly session-frozen) capability section. Pass empty to omit
 // the measured capability appendix.
 func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) string {
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	lines := []string{
 		fmt.Sprintf("Detected operating system: %s.", runtime.GOOS),
 		fmt.Sprintf("Detected user shell: %s.", detectedShellName(shell)),
@@ -126,6 +126,19 @@ func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) strin
 	}
 
 	switch {
+	case runtime.GOOS == "windows" && shell.Dialect.IsPosixDialect():
+		lines = append(lines,
+			"Treat the current shell as a POSIX shell (bash), not PowerShell: use `sh` syntax, `&&`/`||`, `$VAR`, and single or double quotes.",
+			"Write Windows paths with forward slashes (`C:/Users/name`); a backslash is an escape character inside a shell word.",
+			"GNU tools (find/sort/sed/awk/grep/tar/xargs) live in the shell's /usr/bin, and native .exe programs can still be called directly.",
+			"Do not use PowerShell cmdlets (`Select-Object`, `Get-Location`, `Set-Content`, `Out-File`).",
+			"When a command needs to call cmd.exe explicitly, use `cmd //c ...` inside the POSIX shell so the `/c` flag is not rewritten as a path.",
+		)
+		if shell.Dialect == runtimeexecutor.ShellDialectPosixNarrow {
+			lines = append(lines,
+				"This POSIX shell is a narrow (ash/busybox) build: do not use `[[ ]]`, arrays, `pipefail`, or `local`.",
+			)
+		}
 	case runtime.GOOS == "windows" &&
 		(shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh):
 		lines = append(lines,

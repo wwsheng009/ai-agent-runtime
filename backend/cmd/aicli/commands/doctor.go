@@ -98,6 +98,7 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
   doctor provider        对指定 provider 执行可复现调用矩阵
   doctor balance         查看 provider 账户余额 / 订阅额度（缓存或实时）
   doctor search          诊断 grep/glob 的 rg 后端与 builtin 回退
+  doctor shell           诊断命令执行选择的 shell、探测链与方言
   doctor subagent-route  预览子 Agent / Team 难度路由（不调用模型）
   doctor hooks           体检 hooks 配置：来源、信任、告警与可执行性
 
@@ -106,6 +107,7 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
   aicli doctor balance
   aicli doctor balance --provider my-sub2 --refresh
   aicli doctor search --json
+  aicli doctor shell --json
   aicli doctor hooks --json
   aicli doctor provider --provider openai --model gpt-4.1 --json
   aicli doctor subagent-route --difficulty hard --goal "review auth changes" --json
@@ -161,6 +163,7 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
 	cmd.AddCommand(providerCmd)
 	cmd.AddCommand(newDoctorBalanceCommand(getCfg))
 	cmd.AddCommand(newDoctorSearchCommand())
+	cmd.AddCommand(newDoctorShellCommand())
 	cmd.AddCommand(newDoctorSubagentRouteCommand(getCfg))
 	cmd.AddCommand(newDoctorHooksCommand())
 	return cmd

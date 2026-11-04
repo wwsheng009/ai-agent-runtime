@@ -96,6 +96,64 @@ export type RuntimeApprovalExplainSettingsSaveRequest = {
   mode: RuntimeApprovalExplainMode;
 };
 
+/**
+ * `shell:` 段（runtime.yaml）：命令执行使用哪个 shell。
+ *
+ * 设计见 docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md §4/§9。
+ * 候选 ID 是稳定标识（git-bash / msys-bash / busybox / wsl / pwsh / powershell / cmd）。
+ */
+export type RuntimeShellSettings = {
+  auto_detect: boolean;
+  /** 生效的候选链（未显式配置时为内置缺省链）。 */
+  prefer: string[];
+  /** 配置里显式写下的候选链；空数组表示走内置缺省链。 */
+  configured_prefer?: string[];
+  path: string;
+  probe_timeout: string;
+  strict_probe: boolean;
+  script_delivery: "stdin" | "argv" | string;
+  env?: Record<string, string>;
+};
+
+export type RuntimeShellCandidateStatus = "pass" | "fail" | "skip";
+
+/** 候选矩阵的一行：探针是否通过、路径与失败原因。 */
+export type RuntimeShellCandidate = {
+  id: string;
+  status: RuntimeShellCandidateStatus;
+  path?: string;
+  reason?: string;
+  version?: string;
+  dialect?: string;
+  dialect_label?: string;
+  probe_ms?: number;
+  /** 被已知陷阱规则跳过（WSL 启动器）。 */
+  guard?: boolean;
+};
+
+/** 当前实际生效的 shell。 */
+export type RuntimeShellEffective = {
+  id: string;
+  path: string;
+  version?: string;
+  dialect: string;
+  source: string;
+  probe_ms: number;
+};
+
+export type RuntimeShellSettingsResponse = RuntimeShellSettings & {
+  effective?: RuntimeShellEffective;
+  candidates?: RuntimeShellCandidate[];
+  config_path?: string;
+  writable?: boolean;
+  supported_ids?: string[];
+  updated?: boolean;
+  error?: string;
+};
+
+/** PUT 请求：未提供的字段保持当前值。 */
+export type RuntimeShellSettingsSaveRequest = Partial<RuntimeShellSettings>;
+
 export type RuntimeAgentRoutePreviewParent = {
   provider?: string;
   model?: string;

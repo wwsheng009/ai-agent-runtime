@@ -46,6 +46,11 @@ type RuntimeConfig struct {
 	WebSearch      WebSearchConfig           `yaml:"webSearch" json:"webSearch"`
 	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
 
+	// Shell 决定 agent 用哪个 shell 执行命令（Windows 上优先 POSIX shell，
+	// 见 docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md）。
+	// 缺省（全零）行为不变：Windows 仍是 pwsh → powershell → cmd。
+	Shell runtimeexecutor.ShellConfig `yaml:"shell" json:"shell"`
+
 	// UI 交互式 TUI 渲染/驻留配置（C 档，默认全部关闭：不窗口化、不逐出、
 	// 不懒加载，行为与引入前逐字节一致）。
 	// 设计：docs/plan/aicli-transcript-residency-and-lazy-history-design-20261020.md §15.1
@@ -1437,6 +1442,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateSandboxConfig(&config.Sandbox); err != nil {
 		return err
 	}
+	if err := ValidateShellRuntimeConfig(&config.Shell); err != nil {
+		return err
+	}
 	if err := ValidateRolloutConfig(&config.Rollout, config.Version); err != nil {
 		return err
 	}
@@ -1900,6 +1908,19 @@ func ValidateSandboxConfig(config *runtimeexecutor.SandboxConfig) error {
 		if strings.TrimSpace(host) == "" {
 			return errors.New(errors.ErrValidationFailed, "sandbox hosts cannot contain empty entries")
 		}
+	}
+	return nil
+}
+
+// ValidateShellRuntimeConfig validates the `shell:` block. The structural rules
+// live in executor.ValidateShellConfig so the CLI, the settings API and the TUI
+// all reject the same values with the same message.
+func ValidateShellRuntimeConfig(config *runtimeexecutor.ShellConfig) error {
+	if config == nil {
+		return nil
+	}
+	if err := runtimeexecutor.ValidateShellConfig(config); err != nil {
+		return errors.New(errors.ErrValidationFailed, err.Error())
 	}
 	return nil
 }

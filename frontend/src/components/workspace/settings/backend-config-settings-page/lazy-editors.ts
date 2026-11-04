@@ -78,3 +78,8 @@ export const RuntimeAgentRoutingDomainEditor = lazy(() =>
     default: module.RuntimeAgentRoutingDomainEditor,
   })),
 );
+export const RuntimeShellDomainEditor = lazy(() =>
+  import("../runtime-shell-domain-editor").then((module) => ({
+    default: module.RuntimeShellDomainEditor,
+  })),
+);

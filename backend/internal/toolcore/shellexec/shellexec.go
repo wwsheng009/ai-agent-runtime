@@ -123,20 +123,24 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	if strings.TrimSpace(opts.Shell.Path) != "" || opts.Shell.Type != "" {
 		shell = opts.Shell
 	}
 
 	var launch Launch
+	// Long scripts can travel over stdin instead of argv (configured by
+	// shell.scriptDelivery). Empty means "argv carries the command".
+	stdinScript := ""
 	if opts.Invocation != nil {
 		command, args := opts.Invocation(opts.Command)
 		launch = Launch{Command: command, Args: append([]string(nil), args...)}
 	} else {
-		argv := shell.DeriveExecArgs(opts.Command, false)
+		argv, script := shell.DeriveExecInvocation(opts.Command, runtimeexecutor.CurrentScriptDelivery())
 		if len(argv) == 0 {
 			return Result{}, fmt.Errorf("shellexec: shell resolution returned no argv")
 		}
+		stdinScript = script
 		launch = Launch{Command: argv[0], Args: append([]string(nil), argv[1:]...)}
 	}
 	launch.Workdir = opts.Workdir
@@ -148,6 +152,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if launch.Env == nil {
 		launch.Env = os.Environ()
 	}
+	// shell.env来自 runtime.yaml；放在 neutralisation 之前，让样式类变量
+	// 仍由 NeutralizeConsoleStylingEnv 单点拥有。
+	launch.Env = runtimeexecutor.ApplyShellEnvOverrides(launch.Env)
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat so captured output is
 	// unstyled before any Prepare hook (bwrap, sudo, sandbox) can wrap it. The
@@ -171,6 +178,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	cmd := exec.Command(launch.Command, launch.Args...)
 	cmd.Dir = launch.Workdir
 	cmd.Env = launch.Env
+	if stdinScript != "" {
+		cmd.Stdin = strings.NewReader(stdinScript)
+	}
 	applyRawCmdLine(cmd, launch.RawCmdLine)
 	if opts.Mirror != nil {
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)

@@ -23,6 +23,7 @@ import { getRuntimeRoutingConfig, listRuntimeRouteSummaries } from "../runtime-r
 import { getRuntimeRetryConfig, listRuntimeRetryRules } from "../runtime-retry-domain-utils";
 import { getRuntimeTransformerConfig, listRuntimeTransformerModifierSummaries } from "../runtime-transformer-domain-utils";
 import { analyzeRuntimeAgentRoutingConfig, getRuntimeAgentRoutingSettings } from "../runtime-agent-routing-domain-utils";
+import { getRuntimeShellConfig } from "../runtime-shell-domain-utils";
 import { countImpactPaths, formatRuntimeProxySummary } from "./format";
 import { modeMenuEntries } from "./mode-registry";
 import { type EditorMode } from "./types";
@@ -156,6 +157,10 @@ export function useConfigEditorState() {
     () => getRuntimeAuthConfig(draftParsed),
     [draftParsed],
   );
+  const shellConfig = useMemo(
+    () => getRuntimeShellConfig(draftParsed),
+    [draftParsed],
+  );
   const defaultProvider = useMemo(
     () => getRuntimeDefaultProvider(draftParsed),
     [draftParsed],
@@ -249,6 +254,17 @@ export function useConfigEditorState() {
         return authConfig.accessAuthEnabled
           ? tCommon("states.enabled")
           : tCommon("states.disabled");
+      case "shell":
+        // 徽标只说「当前靠什么选 shell」，不复述探测结果——探测要付进程冷启动代价，
+        // 打开设置页时不该顺带跑一遍矩阵（那由面板里的「检测」按钮触发）。
+        if (!shellConfig.autoDetect) {
+          return shellConfig.path
+            ? t("editor.shell.badges.pinned")
+            : tCommon("states.disabled");
+        }
+        return shellConfig.prefer.length > 0
+          ? shellConfig.prefer[0]
+          : t("editor.shell.badges.builtin");
       case "mcp":
         // MCP 面板数据独立于 config document，模式徽标由面板内部自行展示统计。
         return "";
@@ -311,6 +327,8 @@ export function useConfigEditorState() {
         return t("editor.summary.transformer");
       case "auth":
         return t("editor.modes.auth.description");
+      case "shell":
+        return t("editor.summary.shell");
       case "mcp":
         return t("editor.summary.mcp");
       case "profiles":
@@ -458,6 +476,7 @@ export function useConfigEditorState() {
     websocketConfig,
     circuitBreakerConfig,
     authConfig,
+    shellConfig,
     defaultProvider,
     draftIssues,
     draftErrorCount,

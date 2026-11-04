@@ -7,6 +7,7 @@ import { zhRuntimeConfigEditorRuntime } from "./editor-runtime";
 import { zhRuntimeConfigEditorNetwork } from "./editor-network";
 import { zhRuntimeConfigEditorTransformer } from "./editor-transformer";
 import { zhRuntimeConfigEditorFeedback } from "./editor-feedback";
+import { zhRuntimeConfigEditorExecShell } from "./editor-exec-shell";
 
 export const zhRuntimeConfigEditor = {
   ...zhRuntimeConfigEditorShell,
@@ -17,4 +18,5 @@ export const zhRuntimeConfigEditor = {
   ...zhRuntimeConfigEditorNetwork,
   ...zhRuntimeConfigEditorTransformer,
   ...zhRuntimeConfigEditorFeedback,
+  ...zhRuntimeConfigEditorExecShell,
 } as const;

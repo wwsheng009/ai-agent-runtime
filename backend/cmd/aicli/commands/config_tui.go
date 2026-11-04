@@ -48,6 +48,7 @@ func (t *configTUI) run() error {
 		fmt.Fprintln(t.writer, "  3. AICLI Chat 偏好")
 		fmt.Fprintln(t.writer, "  4. Provider Groups")
 		fmt.Fprintln(t.writer, "  5. 全局代理 (proxy)")
+		fmt.Fprintln(t.writer, "  6. Shell 执行环境")
 		fmt.Fprintln(t.writer, "  q. 退出")
 		input, err := t.prompt("config> ")
 		if err != nil {
@@ -70,6 +71,10 @@ func (t *configTUI) run() error {
 			t.pause()
 		case "5", "global", "gp", "proxy":
 			if err := t.runGlobalProxy(); err != nil {
+				return err
+			}
+		case "6", "shell":
+			if err := t.runShellSettings(); err != nil {
 				return err
 			}
 		case "q", "quit", "exit":

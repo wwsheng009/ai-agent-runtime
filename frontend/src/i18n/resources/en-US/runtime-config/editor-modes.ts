@@ -13,6 +13,11 @@ export const enRuntimeConfigEditorModes = {
       description:
         "Choose providers and models for subagents and teams at easy, normal, hard, and expert difficulty.",
     },
+    shell: {
+      label: "Shell environment",
+      description:
+        "Pick the shell used to run tool commands (auto-detect or a forced path).",
+    },
     providerGroups: {
       label: "Provider Groups",
       description: "Maintain routing groups, failover, truncation strategy, and member lists.",

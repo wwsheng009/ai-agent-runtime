@@ -231,6 +231,10 @@ type Handler struct {
 	agentMaxStepsPersister      AgentMaxStepsPersister
 	agentMaxStepsProvider       AgentMaxStepsProvider
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
+	// shell 段设置面（docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md §9）。
+	shellSettingsProvider  ShellSettingsProvider
+	shellSettingsPersister ShellSettingsPersister
+	shellSettingsProber    ShellSettingsProber
 	// gatewayController is the gateway connection control plane (docs/gateway/12-connection-control.md).
 	gatewayController GatewayController
 	// gateway session-state projection (docs/gateway/08-notifications.md §3).
@@ -1057,6 +1061,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.UpdateAgentMaxSteps).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.GetAgentMaxSteps).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/shell", h.GetShellSettings).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/shell", h.UpdateShellSettings).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/config/shell/probe", h.ProbeShellSettings).Methods(http.MethodPost)
 	// 网关连接控制面（docs/gateway/12-connection-control.md）：状态 / 手动连接 / 断开 / 重连 / 配置。
 	runtimeRouter.HandleFunc("/gateway/status", h.GetGatewayStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/gateway/connect", h.ConnectGateway).Methods(http.MethodPost)
@@ -6162,6 +6169,8 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		return nil
 	}
 	bgCfg := cfg.Background
+	// 进程级 shell resolver：web/runtime-server 侧与 CLI 会话读同一份配置。
+	executor.ConfigureShell(cfg.Shell)
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)

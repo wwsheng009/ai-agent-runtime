@@ -11,6 +11,8 @@ import type {
   RuntimeConfigDocumentSaveResponse,
   RuntimeServiceRestartResponse,
   RuntimeServiceStatusResponse,
+  RuntimeShellSettingsResponse,
+  RuntimeShellSettingsSaveRequest,
 } from "@/types/runtime";
 
 import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
@@ -27,6 +29,8 @@ const runtimeAgentMaxStepsUrl = buildRuntimeUrl(
 const runtimeApprovalExplainUrl = buildRuntimeUrl(
   "/api/runtime/config/approval-explain",
 );
+const runtimeShellUrl = buildRuntimeUrl("/api/runtime/config/shell");
+const runtimeShellProbeUrl = buildRuntimeUrl("/api/runtime/config/shell/probe");
 const runtimeServiceUrl = buildRuntimeUrl("/api/runtime/service");
 const runtimeServiceRestartUrl = buildRuntimeUrl("/api/runtime/service/restart");
 
@@ -114,6 +118,47 @@ export async function saveRuntimeAgentMaxSteps(
  */
 export async function getRuntimeAgentMaxSteps() {
   return fetchRuntimeJson<RuntimeAgentMaxStepsResponse>(runtimeAgentMaxStepsUrl);
+}
+
+/**
+ * 读取 `shell:` 段：生效值、候选矩阵与写入目标（GET `/api/runtime/config/shell`）。
+ *
+ * 只读：后端不会因为这次读取改动任何配置。
+ */
+export async function getRuntimeShellSettings() {
+  return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellUrl);
+}
+
+/**
+ * 保存 `shell:` 段。未提供的字段保持当前值；非法值后端返回 400 且不改内存。
+ */
+export async function saveRuntimeShellSettings(
+  request: RuntimeShellSettingsSaveRequest,
+) {
+  return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+/**
+ * 强制重探候选链并返回新矩阵（设置页「检测」按钮）。
+ *
+ * 可携带草稿配置，用于在保存前预览顺序调整的效果；不修改任何配置。
+ */
+export async function probeRuntimeShellSettings(
+  request: RuntimeShellSettingsSaveRequest = {},
+) {
+  return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellProbeUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
 }
 
 /**

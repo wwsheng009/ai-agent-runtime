@@ -9,6 +9,7 @@ import { enRuntimeConfigEditorRuntime } from "./editor-runtime";
 import { enRuntimeConfigEditorNetwork } from "./editor-network";
 import { enRuntimeConfigEditorTransformer } from "./editor-transformer";
 import { enRuntimeConfigEditorFeedback } from "./editor-feedback";
+import { enRuntimeConfigEditorExecShell } from "./editor-exec-shell";
 
 export const enRuntimeConfigEditor = {
   ...enRuntimeConfigEditorShell,
@@ -19,4 +20,5 @@ export const enRuntimeConfigEditor = {
   ...enRuntimeConfigEditorNetwork,
   ...enRuntimeConfigEditorTransformer,
   ...enRuntimeConfigEditorFeedback,
+  ...enRuntimeConfigEditorExecShell,
 } satisfies DeepStringShape<typeof zhRuntimeConfigEditor>;

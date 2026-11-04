@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -35,6 +34,11 @@ func TestShellExecHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case "sleep":
 		time.Sleep(60 * time.Second)
+		os.Exit(0)
+	case "bulk":
+		for i := 0; i < 200; i++ {
+			fmt.Fprintln(os.Stdout, "artifact line")
+		}
 		os.Exit(0)
 	default:
 		os.Exit(2)
@@ -135,7 +139,7 @@ func TestRunReportsTheSelectedShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if result.Shell != selected {
+	if result.Shell.Path != selected.Path || result.Shell.Type != selected.Type {
 		t.Fatalf("result shell = %+v, want %+v", result.Shell, selected)
 	}
 }
@@ -205,7 +209,6 @@ func TestRunCancellationTerminatesTheTree(t *testing.T) {
 
 func TestRunArtifactTeeIsOptional(t *testing.T) {
 	root := t.TempDir()
-	payload := strings.Repeat("artifact line\n", 200)
 
 	withoutArtifact, err := Run(context.Background(), Options{
 		Command:         "echo",
@@ -222,17 +225,13 @@ func TestRunArtifactTeeIsOptional(t *testing.T) {
 		t.Fatalf("DisableArtifact must not write a path, got %q", withoutArtifact.ArtifactPath)
 	}
 
-	// Use a real command so the artifact tee receives a known payload.
-	script := filepath.Join(t.TempDir(), "payload.txt")
-	if err := os.WriteFile(script, []byte(payload), 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	command := "cat " + shellQuote(script)
-	if runtime.GOOS == "windows" {
-		command = "type " + script
-	}
+	// Use the helper process rather than `type`/`cat`: the runtime shell is now
+	// configurable (Windows may resolve to bash), so the fixture must not assume
+	// cmd.exe or a POSIX shell.
 	withArtifact, err := Run(context.Background(), Options{
-		Command:       command,
+		Command:       "bulk",
+		Env:           helperEnv("bulk"),
+		Invocation:    helperInvocation(),
 		CaptureLimit:  128,
 		ArtifactRoot:  root,
 		ArtifactScope: "shellexec-test",

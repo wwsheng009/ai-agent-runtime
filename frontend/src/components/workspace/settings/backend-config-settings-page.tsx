@@ -7,6 +7,7 @@ import { useConfigEditorCore } from "./backend-config-settings-page/use-config-c
 
 import { createProvidersDomain } from "./backend-config-settings-page/domains/providers";
 import { createAgentRoutingDomain } from "./backend-config-settings-page/domains/agent-routing";
+import { createShellDomain } from "./backend-config-settings-page/domains/shell";
 import { createProviderGroupsDomain } from "./backend-config-settings-page/domains/provider-groups";
 import { createNetworkProxyDomain } from "./backend-config-settings-page/domains/network-proxy";
 import { createAuthDomain } from "./backend-config-settings-page/domains/auth";
@@ -30,6 +31,7 @@ import { ConfigDraftValidationPanel } from "./backend-config-settings-page/secti
 
 import { ProvidersModeSection } from "./backend-config-settings-page/sections/modes/providers";
 import { AgentRoutingModeSection } from "./backend-config-settings-page/sections/modes/agentRouting";
+import { ShellModeSection } from "./backend-config-settings-page/sections/modes/shell";
 import { ProviderGroupsModeSection } from "./backend-config-settings-page/sections/modes/providerGroups";
 import { NetworkProxyModeSection } from "./backend-config-settings-page/sections/modes/networkProxy";
 import { AuthModeSection } from "./backend-config-settings-page/sections/modes/auth";
@@ -51,6 +53,7 @@ export function BackendConfigSettingsPage() {
   const core = useConfigEditorCore();
   const providersDomain = createProvidersDomain(core);
   const agentRoutingDomain = createAgentRoutingDomain(core);
+  const shellDomain = createShellDomain(core);
   const providerGroupsDomain = createProviderGroupsDomain(core);
   const networkProxyDomain = createNetworkProxyDomain(core);
   const authDomain = createAuthDomain(core);
@@ -87,6 +90,9 @@ export function BackendConfigSettingsPage() {
             ) : null}
             {core.mode === "agentRouting" ? (
               <AgentRoutingModeSection core={core} domain={agentRoutingDomain} />
+            ) : null}
+            {core.mode === "shell" ? (
+              <ShellModeSection core={core} domain={shellDomain} />
             ) : null}
             {core.mode === "providerGroups" ? (
               <ProviderGroupsModeSection core={core} domain={providerGroupsDomain} />

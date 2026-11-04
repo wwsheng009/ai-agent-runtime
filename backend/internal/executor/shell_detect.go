@@ -26,6 +26,20 @@ const (
 type Shell struct {
 	Path string
 	Type ShellType
+	// Prefix is inserted between the binary and its flags. It exists for
+	// multi-applet binaries: busybox.exe needs `sh` first, and probing /
+	// execution must agree on the same argv shape.
+	Prefix []string
+	// ID is the stable candidate identifier (git-bash, busybox, pwsh, ...).
+	// Empty for shells resolved outside the candidate chain.
+	ID string
+	// Dialect is the command language the model must write for this shell.
+	Dialect ShellDialect
+	// Version is the shell's self-reported version, when probed.
+	Version string
+	// Source records how the shell was chosen: config-path, prefer,
+	// autodetect or fallback.
+	Source string
 }
 
 // String returns a human-readable shell label suitable for prompts, logs,
@@ -61,6 +75,18 @@ func (s Shell) Metadata() map[string]interface{} {
 	if path != "" {
 		metadata["shell_path"] = path
 	}
+	if s.ID != "" {
+		metadata["shell_id"] = s.ID
+	}
+	if s.Dialect != "" {
+		metadata["shell_dialect"] = string(s.Dialect)
+	}
+	if s.Source != "" {
+		metadata["shell_source"] = s.Source
+	}
+	if s.Version != "" {
+		metadata["shell_version"] = s.Version
+	}
 	return metadata
 }
 
@@ -93,31 +119,87 @@ func (s Shell) DeriveExecArgs(command string, login bool) []string {
 	switch s.Type {
 	case ShellTypeBash, ShellTypeZsh, ShellTypeSh:
 		if login {
-			return []string{s.Path, "-lc", command}
+			return s.withPrefix("-lc", command)
 		}
-		return []string{s.Path, "-c", command}
+		return s.withPrefix("-c", command)
 	case ShellTypePowerShell, ShellTypePwsh:
 		longScript := len(command) > PowerShellEncodedCommandThreshold
 		if login {
 			if longScript {
-				return []string{s.Path, "-EncodedCommand", EncodePowerShellCommand(command)}
+				return s.withPrefix("-EncodedCommand", EncodePowerShellCommand(command))
 			}
-			return []string{s.Path, "-Command", command}
+			return s.withPrefix("-Command", command)
 		}
-		args := []string{s.Path, "-NoProfile", "-NonInteractive"}
 		if longScript {
-			return append(args, "-EncodedCommand", EncodePowerShellCommand(command))
+			return s.withPrefix("-NoProfile", "-NonInteractive", "-EncodedCommand", EncodePowerShellCommand(command))
 		}
-		return append(args, "-Command", command)
+		return s.withPrefix("-NoProfile", "-NonInteractive", "-Command", command)
 	case ShellTypeCmd:
-		return []string{s.Path, "/c", command}
+		// `/c`, not MSYS's `//c`: DeriveExecArgs feeds CreateProcess directly,
+		// where no MSYS argument rewriting happens. `//c` is only a workaround
+		// for a POSIX shell line that forwards to cmd.exe, and that shape is
+		// built separately (see background.buildShellCommandLine).
+		return s.withPrefix("/c", command)
 	default:
 		// Fallback: treat as sh-like
 		if login {
-			return []string{s.Path, "-lc", command}
+			return s.withPrefix("-lc", command)
 		}
-		return []string{s.Path, "-c", command}
+		return s.withPrefix("-c", command)
 	}
+}
+
+// withPrefix builds argv as <path> <prefix...> <flags...>.
+func (s Shell) withPrefix(tail ...string) []string {
+	argv := make([]string, 0, 1+len(s.Prefix)+len(tail))
+	argv = append(argv, s.Path)
+	argv = append(argv, s.Prefix...)
+	argv = append(argv, tail...)
+	return argv
+}
+
+// SupportsStdinScript reports whether the shell can read its script from stdin.
+// Only POSIX shells are wired today; PowerShell's `-Command -` behaviour is
+// still unverified (plan appendix B item 6), so it stays on -EncodedCommand.
+func (s Shell) SupportsStdinScript() bool {
+	switch s.Type {
+	case ShellTypeBash, ShellTypeZsh, ShellTypeSh:
+		return true
+	default:
+		return false
+	}
+}
+
+// DeriveExecInvocation returns the argv plus an optional stdin payload for one
+// command string.
+//
+// Short commands always go through argv (`-c`): that keeps their stdin free, so
+// `cat`, `git commit -F -` and other stdin consumers behave as before. Long
+// scripts switch to stdin delivery, which removes the Windows command-line
+// length limit entirely — no more 7000-char heuristic deciding between -Command
+// and -EncodedCommand for POSIX shells.
+func (s Shell) DeriveExecInvocation(command string, delivery ScriptDelivery) ([]string, string) {
+	if delivery != ScriptDeliveryStdin || !s.SupportsStdinScript() {
+		return s.DeriveExecArgs(command, false), ""
+	}
+	if len(command) <= ShellStdinScriptThreshold {
+		return s.DeriveExecArgs(command, false), ""
+	}
+	return s.withPrefix(s.stdinFlags()...), command
+}
+
+// ShellStdinScriptThreshold is the script length above which POSIX shells read
+// the script from stdin instead of argv. It matches the historical PowerShell
+// switch-over point so both transports change at the same size.
+const ShellStdinScriptThreshold = PowerShellEncodedCommandThreshold
+
+// stdinFlags returns the non-interactive flags for stdin script delivery.
+func (s Shell) stdinFlags() []string {
+	if s.Type == ShellTypeBash {
+		return []string{"--noprofile", "--norc", "-s"}
+	}
+	// busybox ash / dash do not know --noprofile; -s alone is POSIX.
+	return []string{"-s"}
 }
 
 // WrapPowerShellExitCode appends an epilogue that preserves the command's real

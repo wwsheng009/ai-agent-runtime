@@ -728,7 +728,7 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	statusPath := strings.TrimSuffix(logPath, filepath.Ext(logPath)) + ".status"
 	heartbeatPath := statusPath + ".heartbeat"
 	runnerPath := strings.TrimSuffix(logPath, filepath.Ext(logPath))
-	shell := runtimeexecutor.DefaultUserShell()
+	shell := runtimeexecutor.CurrentShell()
 	if runtime.GOOS == "windows" {
 		runnerPath += ".ps1"
 	} else {

@@ -25,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filebrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
@@ -1149,6 +1150,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		return nil, err
 	}
 	runtimeConfig := runtimeManager.Get()
+	// 进程级 shell resolver：runtime-server 与 CLI 共用同一份 `shell:` 配置，
+	// 否则 web 提交的 job 会用一种 shell、CLI 会话用另一种。
+	runtimeexecutor.ConfigureShell(runtimeConfig.Shell)
 	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
 	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
 		Config:     runtimeConfig,
@@ -1275,6 +1279,14 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// runtime.yaml 的层栈快照：设置页据此显示候选文件、只读层与写入目标。
 	handler.SetRuntimeConfigLayersProvider(
 		runtimeserver.NewRuntimeConfigLayersProvider(),
+	)
+	// shell 段（执行环境）：读写同一份 runtime.yaml 可写层，并允许设置页在保存前
+	// 探测草稿顺序（docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md §9）。
+	handler.SetShellSettingsProvider(
+		runtimeserver.NewRuntimeShellSettingsProvider(runtimeManager),
+	)
+	handler.SetShellSettingsPersister(
+		runtimeserver.NewLayeredRuntimeShellSettingsPersister(runtimeManager),
 	)
 	handler.SetProfileSupport(runtimeapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
