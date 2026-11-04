@@ -2273,6 +2273,28 @@ body.sidebar-collapsed #sidebar {
 .cache-dist { margin-top: 6px; font-size: 11px; color: var(--fg3); }
 .cache-coverage { margin-top: 4px; font-size: 11px; }
 .cache-coverage.cache-partial { color: var(--reasoningFg, #b8860b); }
+.cache-filters {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 4px 0 8px 0; padding: 7px 8px;
+  font-size: 11px; color: var(--fg3);
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+}
+.cache-filter-field { display: inline-flex; align-items: center; gap: 4px; color: var(--fg4); }
+.cache-filters select,
+.cache-filters input,
+.cache-filters button {
+  font: inherit; color: var(--fg2);
+  background: var(--bg3); border: 1px solid var(--border2); border-radius: 4px;
+}
+.cache-filters select { padding: 3px 5px; }
+.cache-filters input { width: 58px; padding: 3px 5px; }
+.cache-filters select.cache-filter-select { width: 132px; max-width: 180px; }
+.cache-filters input.cache-filter-time { width: 176px; }
+.cache-filters button { padding: 3px 10px; cursor: pointer; }
+.cache-filters button:hover { color: var(--accent); border-color: var(--accent); }
+.cache-filter-sep { color: var(--fg4); }
+.cache-filter-timezone { color: var(--fg4); font-size: 10px; white-space: nowrap; }
+.cache-filter-error { color: var(--red, #e5534b); }
 .cache-requests { padding-bottom: 8px; }
 .cache-table {
   width: 100%; border-collapse: collapse; font-size: 12px;
@@ -2286,6 +2308,23 @@ body.sidebar-collapsed #sidebar {
 .cache-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .cache-table tr.cache-row { cursor: pointer; }
 .cache-table tr.cache-row:hover td { background: var(--hoverBg, var(--bg3)); }
+.cache-pagination {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-top: 8px; padding: 6px 8px;
+  font-size: 11px; color: var(--fg3);
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+}
+.cache-pagination button,
+.cache-pagination select {
+  font: inherit; color: var(--fg2);
+  background: var(--bg3); border: 1px solid var(--border2); border-radius: 4px;
+}
+.cache-pagination button { padding: 3px 9px; cursor: pointer; }
+.cache-pagination button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.cache-pagination button:disabled { opacity: 0.45; cursor: not-allowed; }
+.cache-pagination select { padding: 2px 4px; }
+.cache-page-status { color: var(--fg3); }
+.cache-page-size { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--fg4); }
 .cache-badge {
   display: inline-block; padding: 0 8px; border-radius: 999px;
   font-size: 11px; line-height: 18px; border: 1px solid var(--border);

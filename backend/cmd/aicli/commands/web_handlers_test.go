@@ -180,6 +180,16 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 			t.Fatalf("page body missing tab panel %q", id)
 		}
 	}
+	for _, id := range []string{
+		"cache-filter-provider", "cache-filter-model", "cache-filter-request-status",
+		"cache-filter-status", "cache-filter-hit-min", "cache-filter-hit-max",
+		"cache-filter-from", "cache-filter-to", "cache-filter-duration-min", "cache-filter-duration-max",
+		"cache-filter-apply", "cache-filter-reset", "cache-filter-error",
+	} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("cache tab missing filter element %q", id)
+		}
+	}
 	// 会话相关页签紧跟对话且同序：main < skills < files < git < log。
 	mainBtnIdx := strings.Index(body, `id="tab-main-btn"`)
 	skillsBtnIdx := strings.Index(body, `id="tab-skills-btn"`)

@@ -277,7 +277,9 @@ aicli chat --web
 ### 2.5 缓存分析页
 
 - [ ] 总览卡片：请求总数 / 缓存命中率 / 缓存写入率 / 缓存读取 tokens / 缓存写入 tokens / prompt tokens / **输出 tokens** / **合计 tokens** / **推理 tokens** 均有值；与同会话 `aicli chat` 的 `/usage cache` 总览逐项一致（同一 `cacheanalytics` Source，前端只做展示）。
-- [ ] 请求明细表格（共 10 列）：时间 / provider/model / step / 状态 / 缓存 / 命中率 / prompt / **输出** / 读缓存 / 写缓存；`not_reported` 行的缓存列显示 `--`。
+- [ ] 请求明细表格：时间列显示浏览器本地时区的完整日期时间 `YYYY-MM-DD HH:mm:ss.SSS`；其余列包含 provider/model / step / 子会话 / 状态 / 缓存 / 命中率 / 耗时 / 首字 / prompt / 输出 / 读缓存 / 写缓存；`not_reported` 行的缓存列显示 `--`。
+- [ ] 请求筛选可组合使用：provider/model 下拉框（选项来自当前会话 `overview.providers/models` 去重列表，按大小写不敏感精确值筛选）；请求状态成功/错误/中断；缓存状态命中/写入/确认未命中/未命中/未上报/错误；缓存率最低/最高百分比（0–100，前端换算为 0–1）；本地日期时间起止范围（`datetime-local`，提交时转换为带时区 RFC3339）；耗时最低/最高毫秒。筛选后分页总数来自筛选结果；区间倒置或越界时只提示错误、不发请求；未知缓存率或未采集耗时不匹配对应区间条件。
+- [ ] 明细分页：默认每页 50 条；上一页/下一页按 `limit` + `offset` 查询，页码与「共 N 条」来自后端 `total`；可切每页 20/50/100/200 条；切换会话回到第 1 页；空结果不显示分页条。
 - [ ] 点击明细行：详情面板 token 段含 `prompt tokens` / `completion tokens` / `total tokens` / `缓存读取` / `缓存写入` / `reasoning tokens`。
 - [ ] 消息追溯：`产出请求` 下方的 `产出用量` 行显示 `prompt … · 输出 … · 读缓存 … · 写缓存 …`；无产出请求时显示 `-`。
 - [ ] 边界：空会话显示"暂无 LLM 请求记录（发送一条消息后刷新）"；旧记录缺 usage 时显示 `-`，不得出现 `NaN`/`undefined`。
@@ -637,6 +639,7 @@ node --check backend/cmd/aicli/commands/web/app.js
 
 # 4. 页签行为沙盒（Node，stub document/fetch，无需浏览器；在仓库根目录运行）：
 node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感知/详情分组页签与键盘导航/错误/竞态/页签接线
+node scripts/verify-micro-web-cache-pagination.mjs # 缓存请求查询：limit/offset 分页、provider/model 下拉、本地日期时间显示与筛选、状态/耗时/缓存筛选、参数校验、会话切换复位、空态
 node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬头控件（文字 + ▼/▲ 图标）在「工具」行内、默认折叠（≤5 行）、溢出判定、点击/键盘切换、控件隐藏时不响应、复制不含控件文字
 node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化 + 权威窗口对账 + SSE 序号守卫：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫；本地兜底行被权威窗口覆盖后只保留一行（重复渲染回归）、半截兜底行让位、顺序按绝对索引收敛、pending 按发送基线 + 宽松文本匹配释放（不再钉在末尾）；重复序号帧丢弃 / 跳号触发权威对账 / connected 复位序号基线；流式收口回归：turn_start 的 screen 刷新保留实时气泡（keepStream）、turn_end 用 assistant_snapshot/reasoning_snapshot 收敛被丢弃的增量（与 TUI encoder 同语义）、迟到终稿补全本地兜底行、heartbeat 的 session_busy 收口气泡、assistant_message/compact_end 监听注册；活跃回合展开/折叠统一策略：最后一块（推理/工具）总是展开、被更新的块与回合结束（finishStream 的 collapseLiveTail）自动折回、只作用于最后一条用户消息之后、静态刷新不自动展开；用户手动展开的块（含历史）不参与自动折叠，且按绝对索引账本跨窗口重建恢复（会话切换清空账本）
 node scripts/verify-micro-web-event-sequence.mjs # SSE 帧序号守卫（纯逻辑）：首帧基线、连续递进、重复序号判 duplicate（不推进基线）、跳号判 gap、无序号帧放行、connected 复位、守卫实例相互独立
