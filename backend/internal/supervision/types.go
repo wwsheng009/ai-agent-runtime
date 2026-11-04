@@ -348,6 +348,31 @@ const (
 	ResumeClaimStateReleased  ResumeClaimState = "released"
 )
 
+// ResumeClaimRecoveryOutcome records why stale-claim recovery chose a
+// transition. It is intentionally separate from ResumeClaimState: a recovered
+// submission and a normal delivery both end in "submitted", but only the former
+// needs to be distinguishable in metrics and audits.
+type ResumeClaimRecoveryOutcome string
+
+const (
+	// ResumeClaimRecoverySubmitted means durable model-turn evidence proved the
+	// claimed resume actually started. The claim stays submitted and records the
+	// real model turn id.
+	ResumeClaimRecoverySubmitted ResumeClaimRecoveryOutcome = "recovered_submitted"
+	// ResumeClaimRecoveryUnsubmitted means the original parked suspension was
+	// still unchanged, so no model turn started. The claim is released for a
+	// safe retry.
+	ResumeClaimRecoveryUnsubmitted ResumeClaimRecoveryOutcome = "recovered_unsubmitted"
+	// ResumeClaimRecoveryPending means the recovery scan could not prove either
+	// side. The claim remains claimed and is surfaced as pending instead of
+	// silently retrying or silently dropping the resume.
+	ResumeClaimRecoveryPending ResumeClaimRecoveryOutcome = "recovery_pending"
+	// ResumeClaimRecoveryUnknown is the legacy bulk-recovery outcome used when
+	// no parent-state evidence resolver is wired. It preserves the old
+	// duplicate-safe behavior while making the uncertainty observable.
+	ResumeClaimRecoveryUnknown ResumeClaimRecoveryOutcome = "recovered_unknown"
+)
+
 // ResumeClaim is the durable exactly-once boundary for one automatic resume.
 type ResumeClaim struct {
 	ClaimKey           string           `json:"claim_key"`
@@ -363,6 +388,10 @@ type ResumeClaim struct {
 	ModelTurnID        string           `json:"model_turn_id,omitempty"`
 	DeliveryAttempt    int              `json:"delivery_attempt,omitempty"`
 	Version            int64            `json:"version,omitempty"`
+	// RecoveryOutcome is set only by stale-claim recovery. Normal delivery
+	// leaves it empty. RecoveredAt is the last recovery decision timestamp.
+	RecoveryOutcome ResumeClaimRecoveryOutcome `json:"recovery_outcome,omitempty"`
+	RecoveredAt     *time.Time                 `json:"recovered_at,omitempty"`
 }
 
 // WakeFilter selects wake pending rows.

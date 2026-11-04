@@ -1,6 +1,6 @@
 # 父 Turn 最终化门与异步迟到结果收敛方案
 
-- 状态：`P0 implemented + P1/P2 incremental`（stale claim recovery、legacy wake/self-check 防线、late output drain、metrics readout、required background job 公共能力、nested child self-park 跨重启恢复已落地；剩余协议/高级恢复项待推进）
+- 状态：`P0 implemented + P1/P2 incremental`（evidence-aware stale claim recovery、legacy wake/self-check 防线、late output drain、metrics readout、required background job 公共能力、nested child self-park 跨重启恢复已落地；剩余协议/兼容策略项待推进）
 - 修订：v1.1（2026-11-03 补充后台作业 `background_task` / `task_output` / terminal wake 链路）
 - 日期：2026-11-03
 - 适用范围：`backend/internal/agent`、`backend/internal/supervision`、`backend/internal/subagentbatch`、`backend/internal/background`、CLI/API runtime host、ACP prompt handler
@@ -1794,3 +1794,61 @@ findings / patches）重建，不重放未被 scheduler 持久化的逐步 tool 
 child 需要先从 workspace / artifact / 既有 durable 结果读取现场再继续。这样避免
 把完整子对话复制进 batch 账本，同时保持同一 session/turn/episode 和“只恢复未
 终态工作”的语义。
+
+### 11.11 Resume claim 证据化崩溃恢复（2026-11-04）
+
+`claimed` 超时不再一律收敛为 `submitted + recovered_unknown`。恢复扫描现在先读
+durable parent turn 证据，再决定：
+
+```text
+current turn/episode 匹配 claim       -> recovered_submitted
+finalized turn/episode 匹配 claim     -> recovered_submitted
+suspension 在 claim 之后重新 park     -> recovered_submitted
+suspension 仍是 claim 前的原始 park   -> recovered_unsubmitted -> released
+parent state / suspension 读不到或歧义 -> recovery_pending，保持 claimed
+未接 parent-state resolver             -> recovered_unknown（兼容旧行为）
+```
+
+实现内容：
+
+1. **Schema v11**
+   - `supervision_resume_claims.recovery_outcome`：
+     `recovered_submitted | recovered_unsubmitted | recovery_pending |
+     recovered_unknown`；
+   - `supervision_resume_claims.recovered_at`；
+   - additive migration，旧行读出空 outcome，不改变旧 claim 语义。
+2. **证据化恢复**
+   - `ResumeAdmissionService.RecoverStaleClaimsDetailed` 逐行读取 stale claim，
+     用 `ParentTurnSnapshot` 的 current/finalized identity 和 suspension
+     `ParkedAt` 判定是否真正启动过 resume；
+   - 只有“原始 suspension 仍在且未重新 park”才释放 claim 重试；
+   - 无法证明时保留 `claimed` 并写 `recovery_pending`，不再静默丢失自动恢复，
+     也不再盲目重复模型 turn；
+   - released claim 重新 claim 时使用新的 lease 时间，避免旧 `claimed_at`
+     立刻再次过期。
+3. **正常提交身份**
+   - `MarkSubmitted` 优先记录 claim 的 `ParentTurnID`，wake ids 只作为无 turn
+     identity 的兼容 fallback。
+4. **指标**
+   - `resume_admission` 新增：
+     `recovered_submitted`、`recovered_unsubmitted`、`recovery_pending`、
+     `recovered_unknown`；
+   - `recovered` 只统计已收敛的恢复结果，不把 pending 混入成功恢复。
+
+新增/更新测试：
+
+```text
+TestResumeAdmissionRecoversStaleClaimFromDurableTurnEvidence
+TestResumeAdmissionReleasesStaleClaimWhenOriginalSuspensionIsUnchanged
+TestResumeAdmissionRecoversStaleClaimFromReparkedSuspension
+TestResumeAdmissionKeepsStaleClaimPendingWhenEvidenceIsUnavailable
+TestResumeAdmissionFallsBackToLegacyRecoveryWithoutParentStateResolver
+TestResumeClaimModelTurnIDPrefersLogicalTurn
+TestMetricsSnapshotResumeAdmissionLedger（扩展 recovered_* 分项）
+TestAPIWaitFeedbackSweepRecoversStaleClaims（改为 current-turn 证据）
+TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes（改为 current-turn 证据）
+```
+
+边界：`recovery_pending` 是安全的不确定状态，不是自动重试状态；需要后续证据或
+人工/运维释放。它保证“不知道是否启动”时既不重复模型 turn，也不静默删除唯一
+恢复记录。

@@ -282,7 +282,7 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	// the durable audit sees only the later settled closure.
 	c.announceResume(ctx, parentSessionID, rootScopeID, admitted, nil)
 	for _, held := range claims {
-		_ = c.Admission.MarkSubmitted(ctx, held, strings.Join(wakeIDs, ","))
+		_ = c.Admission.MarkSubmitted(ctx, held, resumeClaimModelTurnID(held, strings.Join(wakeIDs, ",")))
 	}
 	_ = c.Wakes.RecordWakeDelivery(ctx, admitted)
 	c.releasePending(ctx, admitted)

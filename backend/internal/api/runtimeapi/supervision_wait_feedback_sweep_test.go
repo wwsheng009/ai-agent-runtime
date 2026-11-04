@@ -132,6 +132,17 @@ func TestAPIWaitFeedbackSweepRecoversStaleClaims(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, won)
 
+	// Durable current-turn evidence proves the abandoned claim actually
+	// started. Recovery must mark it submitted, not synthesize
+	// recovered_unknown or open another model turn.
+	require.NoError(t, handler.sessionRuntimeStore.SaveState(ctx, &chat.RuntimeState{
+		SessionID:        apiProgressCheckParentSession,
+		Status:           chat.SessionRunning,
+		CurrentTurnID:    "turn-api-sweep-claim",
+		CurrentEpisodeID: "ep-api-sweep-claim",
+		TurnPhase:        chat.ParentTurnPhaseRunning,
+	}))
+
 	scheduled, err := handler.runSupervisionWaitFeedbackSweepOnce(ctx)
 	require.NoError(t, err)
 	require.Zero(t, scheduled, "claim maintenance alone must not schedule a feedback wake")
@@ -140,7 +151,8 @@ func TestAPIWaitFeedbackSweepRecoversStaleClaims(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.Equal(t, supervision.ResumeClaimStateSubmitted, stored.State)
-	require.Equal(t, "recovered_unknown", stored.ModelTurnID)
+	require.Equal(t, "turn-api-sweep-claim", stored.ModelTurnID)
+	require.Equal(t, supervision.ResumeClaimRecoverySubmitted, stored.RecoveryOutcome)
 }
 
 // TestAPIWaitFeedbackSweepDefersToPendingWake mirrors the pending-wake gate: a

@@ -1,6 +1,6 @@
 # Parent Turn 最终化与迟到结果加固：实施执行计划
 
-- 状态：`P0 implemented + P1/P2 incremental`（切面 1-9 已完成；stale claim recovery、claim lease heartbeat、self-check claim、late output drain、metrics readout、claim retention/host maintenance、finalization sequence gate、FINALIZING phase、persisted/JSONL replayed resume-start event、progress-only wake classification、parked client semantics、CLI metrics/state readout、`job_start(finalization_policy=required)` 公共能力已补）
+- 状态：`P0 implemented + P1/P2 incremental`（切面 1-9 已完成；evidence-aware stale claim recovery、claim lease heartbeat、self-check claim、late output drain、metrics readout、claim retention/host maintenance、finalization sequence gate、FINALIZING phase、persisted/JSONL replayed resume-start event、progress-only wake classification、parked client semantics、CLI metrics/state readout、`job_start(finalization_policy=required)` 公共能力已补）
 - 日期：2026-11-03
 - 依据：`docs/plan/parent-turn-finalization-and-late-result-hardening-plan-20261103.md`
 - 目标：先落地 P0（identity、Resume Admission、finalization gate、后台 terminal 安全默认），并完成支撑 P0 的 exactly-once claim 与回归测试；P1/P2 按本计划后续阶段推进。
@@ -805,7 +805,7 @@ git diff --check
 ## 10. 已知残留风险 / 后续阶段
 
 1. progress/approval/self-check/session-end 的 admission 尚未全部强制；本轮只覆盖 terminal/settlement/job；P1 统一。
-2. resume claim 崩溃恢复窗口：`claimed` 后、`MarkSubmitted` 前崩溃时，本轮采取“不重复起模型”的保守策略，需在 P1 增加基于 model turn evidence 的收敛扫描。
+2. ~~resume claim 崩溃恢复窗口~~ 已收敛：主方案 §11.11 增加 evidence-aware stale recovery；current/finalized/re-park 证据收敛为 `recovered_submitted`，原始 suspension 未变化则 `recovered_unsubmitted` 安全重试，无法证明时保留 `recovery_pending`。
 3. terminal output drain 的版本化吸收/丢弃指标未完整实现。
 4. ACP 非终局响应协议未改动；当前依赖“ACP 不接自动 wake”保证不产生第二 final response。
 5. 旧 wake 行若既无 turn 也无 policy，且不属于 terminal/job，本轮保持 legacy 行为；P1 将按 5.4 矩阵统一。

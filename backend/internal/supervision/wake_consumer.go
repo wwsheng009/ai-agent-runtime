@@ -262,7 +262,7 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 		c.announceResume(ctx, parentSessionID, rootScopeID, deliverable, resume)
 		if c.Admission != nil {
 			for _, held := range claims {
-				_ = c.Admission.MarkSubmitted(ctx, held, strings.Join(wakeIDs, ","))
+				_ = c.Admission.MarkSubmitted(ctx, held, resumeClaimModelTurnID(held, strings.Join(wakeIDs, ",")))
 			}
 		}
 	}

@@ -448,16 +448,21 @@ type MetricsSnapshot struct {
 
 // ResumeAdmissionMetrics is the durable admission/consumption readout:
 // automatic model turns, notification-only late results, stale suppressions and
-// observed terminal waits.
+// observed terminal waits. Recovered counts converged recovery decisions only;
+// RecoveryPending is reported separately because it remains claimed.
 type ResumeAdmissionMetrics struct {
-	Claimed          int `json:"claimed"`
-	Submitted        int `json:"submitted"`
-	Recovered        int `json:"recovered"`
-	Released         int `json:"released"`
-	ModelTurns       int `json:"model_turns"`
-	NotificationOnly int `json:"notification_only"`
-	Stale            int `json:"stale"`
-	Observed         int `json:"observed"`
+	Claimed              int `json:"claimed"`
+	Submitted            int `json:"submitted"`
+	Recovered            int `json:"recovered"`
+	RecoveredSubmitted   int `json:"recovered_submitted"`
+	RecoveredUnsubmitted int `json:"recovered_unsubmitted"`
+	RecoveryPending      int `json:"recovery_pending"`
+	RecoveredUnknown     int `json:"recovered_unknown"`
+	Released             int `json:"released"`
+	ModelTurns           int `json:"model_turns"`
+	NotificationOnly     int `json:"notification_only"`
+	Stale                int `json:"stale"`
+	Observed             int `json:"observed"`
 }
 
 // ResumeAdmissionMetricsReader is implemented by stores that can aggregate the

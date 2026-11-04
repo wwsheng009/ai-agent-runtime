@@ -483,6 +483,17 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 					ON supervision_resume_claims(parent_session_id, parent_turn_id, parent_episode_id, settlement_cohort_id);
 			`,
 		},
+		{
+			// Crash recovery must distinguish a resume that really started from
+			// one abandoned between `claimed` and model-turn submission. The
+			// outcome is additive; old rows read as "not recovered".
+			Version: 11,
+			Name:    "resume_claim_recovery_outcome",
+			UpSQL: `
+				ALTER TABLE supervision_resume_claims ADD COLUMN recovery_outcome TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_resume_claims ADD COLUMN recovered_at TEXT;
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }

@@ -53,10 +53,38 @@ func (s *SQLiteSupervisionStore) ReadResumeAdmissionMetrics(ctx context.Context,
 	_ = rows.Close()
 
 	recoveredWhere, recoveredArgs := metricsTimeWindow("claimed_at", since, until)
-	recoveredWhere += " AND model_turn_id = 'recovered_unknown'"
-	recoveredQuery := `SELECT COUNT(*) FROM supervision_resume_claims WHERE ` + recoveredWhere
-	if err := db.QueryRowContext(ctx, recoveredQuery, recoveredArgs...).Scan(&metrics.Recovered); err != nil {
+	recoveredWhere += " AND recovery_outcome <> ''"
+	recoveredRows, err := db.QueryContext(ctx, `
+		SELECT recovery_outcome, COUNT(*) FROM supervision_resume_claims
+		WHERE `+recoveredWhere+`
+		GROUP BY recovery_outcome
+	`, recoveredArgs...)
+	if err != nil {
 		return ResumeAdmissionMetrics{}, fmt.Errorf("read recovered resume claims: %w", err)
+	}
+	defer recoveredRows.Close()
+	for recoveredRows.Next() {
+		var outcome string
+		var count int
+		if err := recoveredRows.Scan(&outcome, &count); err != nil {
+			return ResumeAdmissionMetrics{}, fmt.Errorf("scan recovered resume claim: %w", err)
+		}
+		switch ResumeClaimRecoveryOutcome(strings.TrimSpace(outcome)) {
+		case ResumeClaimRecoverySubmitted:
+			metrics.Recovered += count
+			metrics.RecoveredSubmitted += count
+		case ResumeClaimRecoveryUnsubmitted:
+			metrics.Recovered += count
+			metrics.RecoveredUnsubmitted += count
+		case ResumeClaimRecoveryPending:
+			metrics.RecoveryPending += count
+		case ResumeClaimRecoveryUnknown:
+			metrics.Recovered += count
+			metrics.RecoveredUnknown += count
+		}
+	}
+	if err := recoveredRows.Err(); err != nil {
+		return ResumeAdmissionMetrics{}, fmt.Errorf("iterate recovered resume claims: %w", err)
 	}
 
 	deliveryWhere, deliveryArgs := metricsTimeWindow("delivered_at", since, until)

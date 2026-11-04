@@ -81,8 +81,8 @@ func TestLocalWakeFallbackNoopWithoutPendingWakes(t *testing.T) {
 
 // TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes keeps periodic
 // claim maintenance alive on an otherwise idle host. A fallback tick with no
-// wake must still converge an abandoned `claimed` row; the claim stays
-// non-resumable (`recovered_unknown`) rather than opening a duplicate turn.
+// wake must still converge an abandoned `claimed` row using durable turn
+// evidence rather than opening a duplicate turn.
 func TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes(t *testing.T) {
 	host, deliveries := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
 	ctx := context.Background()
@@ -101,6 +101,14 @@ func TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, won)
 
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:        localProgressCheckTestSession,
+		Status:           runtimechat.SessionRunning,
+		CurrentTurnID:    "turn-fallback-stale",
+		CurrentEpisodeID: "ep-fallback-stale",
+		TurnPhase:        runtimechat.ParentTurnPhaseRunning,
+	}))
+
 	attempted, err := host.runLocalSupervisionWakeFallbackOnce(ctx)
 	require.NoError(t, err)
 	require.False(t, attempted, "claim maintenance alone must not start a turn")
@@ -110,8 +118,9 @@ func TestLocalWakeFallbackRecoversStaleClaimsWithoutPendingWakes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	require.Equal(t, supervision.ResumeClaimStateSubmitted, stored.State)
-	require.Equal(t, "recovered_unknown", stored.ModelTurnID,
-		"recovery must never claim a second model turn")
+	require.Equal(t, "turn-fallback-stale", stored.ModelTurnID,
+		"recovery must use durable turn evidence and never claim a second model turn")
+	require.Equal(t, supervision.ResumeClaimRecoverySubmitted, stored.RecoveryOutcome)
 }
 
 // TestLocalWakeFallbackIntervalResolution pins the config contract: unset

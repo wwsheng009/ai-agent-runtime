@@ -137,6 +137,28 @@ type ResumeAdmissionConfig struct {
 	ClaimPruneInterval time.Duration
 }
 
+// ResumeClaimRecoveryStore is the evidence-aware recovery extension. It is
+// optional so lightweight Store fakes keep compiling; SQLiteSupervisionStore
+// implements it. The core Store still owns the CAS transitions.
+type ResumeClaimRecoveryStore interface {
+	ListStaleResumeClaims(ctx context.Context, claimedBefore time.Time, limit int) ([]ResumeClaim, error)
+	MarkResumeRecovered(ctx context.Context, claimKey, modelTurnID string, outcome ResumeClaimRecoveryOutcome, at time.Time, expectedVersion int64) (bool, error)
+}
+
+// ResumeClaimRecoveryResult is the evidence-aware recovery breakdown. Pending
+// rows stay claimed and remain queryable; they are not counted as converged.
+type ResumeClaimRecoveryResult struct {
+	Submitted   int
+	Unsubmitted int
+	Pending     int
+	Unknown     int
+}
+
+// Converged reports how many stale rows reached a durable decision.
+func (r ResumeClaimRecoveryResult) Converged() int {
+	return r.Submitted + r.Unsubmitted + r.Unknown
+}
+
 // ResumeAdmissionService is the single decision point for automatic resumes.
 type ResumeAdmissionService struct {
 	suspensions        subagentbatch.BatchStore
@@ -189,18 +211,69 @@ func NewResumeAdmissionService(cfg ResumeAdmissionConfig) *ResumeAdmissionServic
 }
 
 // RecoverStaleClaims converges claims stuck in `claimed` past the configured
-// lease. It is best-effort and safe to call from every drain: the UPDATE is
-// idempotent and never retries a model turn.
+// lease. With a parent-state resolver and an evidence-aware store it proves
+// whether the resume started; otherwise it falls back to the legacy
+// duplicate-safe bulk recovery.
 func (s *ResumeAdmissionService) RecoverStaleClaims(ctx context.Context) (int64, error) {
+	result, err := s.RecoverStaleClaimsDetailed(ctx)
+	return int64(result.Converged()), err
+}
+
+// RecoverStaleClaimsDetailed is the observability/test entry point for the
+// evidence-aware recovery matrix.
+func (s *ResumeAdmissionService) RecoverStaleClaimsDetailed(ctx context.Context) (ResumeClaimRecoveryResult, error) {
 	if s == nil || s.claims == nil {
-		return 0, nil
+		return ResumeClaimRecoveryResult{}, nil
 	}
 	cutoff := s.clock().Add(-s.claimStaleAfter)
-	recovered, err := s.claims.RecoverStaleResumeClaims(ctx, cutoff)
-	if err == nil {
+
+	recoveryStore, ok := s.claims.(ResumeClaimRecoveryStore)
+	if !ok || s.parentStates == nil {
+		recovered, err := s.claims.RecoverStaleResumeClaims(ctx, cutoff)
+		if err != nil {
+			return ResumeClaimRecoveryResult{}, err
+		}
 		s.maybePruneClaims(ctx)
+		return ResumeClaimRecoveryResult{Unknown: int(recovered)}, nil
 	}
-	return recovered, err
+
+	stale, err := recoveryStore.ListStaleResumeClaims(ctx, cutoff, 1000)
+	if err != nil {
+		return ResumeClaimRecoveryResult{}, err
+	}
+	result := ResumeClaimRecoveryResult{}
+	now := s.clock()
+	for _, claim := range stale {
+		outcome, modelTurnID := s.classifyResumeClaimEvidence(ctx, claim)
+		if outcome == ResumeClaimRecoveryPending && claim.RecoveryOutcome == ResumeClaimRecoveryPending {
+			// The uncertainty marker is already durable. Re-evaluate on every
+			// scan so new evidence can converge the row, but do not churn its
+			// version/updated_at while the verdict is unchanged.
+			result.Pending++
+			continue
+		}
+		applied, markErr := recoveryStore.MarkResumeRecovered(ctx, claim.ClaimKey, modelTurnID, outcome, now, claim.Version)
+		if markErr != nil {
+			return result, markErr
+		}
+		if !applied {
+			// The holder renewed/transitioned the row after our read. Leave it
+			// alone; the next scan will re-evaluate if it becomes stale again.
+			continue
+		}
+		switch outcome {
+		case ResumeClaimRecoverySubmitted:
+			result.Submitted++
+		case ResumeClaimRecoveryUnsubmitted:
+			result.Unsubmitted++
+		case ResumeClaimRecoveryPending:
+			result.Pending++
+		default:
+			result.Unknown++
+		}
+	}
+	s.maybePruneClaims(ctx)
+	return result, nil
 }
 
 // PruneClaims removes terminal claim history older than the retention window.
@@ -574,6 +647,15 @@ func (s *ResumeAdmissionService) MarkSubmitted(ctx context.Context, claim Resume
 	return nil
 }
 
+// resumeClaimModelTurnID records the logical turn the resume belongs to. The
+// wake IDs are only an audit fallback for legacy claims without a turn id.
+func resumeClaimModelTurnID(claim ResumeClaim, fallback string) string {
+	if turnID := strings.TrimSpace(claim.ParentTurnID); turnID != "" {
+		return turnID
+	}
+	return strings.TrimSpace(fallback)
+}
+
 // ClaimRenewInterval returns the heartbeat cadence for a live claimed row. It
 // stays well inside ClaimStaleAfter so a slow model turn is never mistaken for
 // a crashed delivery; short test/configuration windows get a proportionally
@@ -758,4 +840,73 @@ func isTerminalAdmissionWake(in ResumeAdmissionInput) bool {
 		return true
 	}
 	return false
+}
+
+// classifyResumeClaimEvidence decides a stale claim from durable parent-turn
+// evidence:
+//
+//   - current turn/episode matches -> the resume started;
+//   - finalized turn/episode matches -> the resume started and completed;
+//   - the suspension was re-parked after the claim -> the resume started and
+//     parked again;
+//   - the original suspension is unchanged -> no model turn started, safe to
+//     release for retry;
+//   - anything else -> keep the claim pending instead of guessing.
+//
+// The last rule is the important safety property: an unreadable or incomplete
+// snapshot must never turn into either a duplicate model turn or a silently
+// dropped resume.
+func (s *ResumeAdmissionService) classifyResumeClaimEvidence(ctx context.Context, claim ResumeClaim) (ResumeClaimRecoveryOutcome, string) {
+	if s == nil || s.parentStates == nil || strings.TrimSpace(claim.ParentSessionID) == "" || strings.TrimSpace(claim.ParentTurnID) == "" {
+		return ResumeClaimRecoveryPending, ""
+	}
+	snapshot, err := s.parentStates.ResolveParentTurn(ctx, claim.ParentSessionID)
+	if err != nil || snapshot == nil {
+		return ResumeClaimRecoveryPending, ""
+	}
+
+	if resumeClaimIdentityMatches(claim, snapshot.CurrentTurnID, snapshot.CurrentEpisodeID) {
+		return ResumeClaimRecoverySubmitted, strings.TrimSpace(snapshot.CurrentTurnID)
+	}
+	if resumeClaimIdentityMatches(claim, snapshot.FinalizedTurnID, snapshot.FinalizedEpisodeID) {
+		return ResumeClaimRecoverySubmitted, strings.TrimSpace(snapshot.FinalizedTurnID)
+	}
+
+	// The suspension ledger is a separate durable plane from RuntimeState.
+	// A matching row whose ParkedAt is still at/before the claim is the
+	// original park, not proof that a resumed episode ran. A later ParkedAt is
+	// positive evidence that the resume started and parked again.
+	if s.suspensions != nil {
+		record, ok, recordErr := s.suspensions.GetTurnSuspension(ctx, claim.ParentSessionID, claim.ParentTurnID)
+		if recordErr != nil {
+			return ResumeClaimRecoveryPending, ""
+		}
+		if ok && record != nil {
+			if !resumeClaimIdentityMatches(claim, record.TurnID, record.EpisodeID) {
+				return ResumeClaimRecoveryPending, ""
+			}
+			if !claim.ClaimedAt.IsZero() && record.ParkedAt.After(claim.ClaimedAt) {
+				return ResumeClaimRecoverySubmitted, strings.TrimSpace(record.TurnID)
+			}
+			return ResumeClaimRecoveryUnsubmitted, ""
+		}
+	}
+
+	// A parked snapshot without a readable suspension row cannot distinguish
+	// "never resumed" from "resumed, then the ledger was cleared". Keep the
+	// claim visible for the next scan rather than releasing it.
+	return ResumeClaimRecoveryPending, ""
+}
+
+func resumeClaimIdentityMatches(claim ResumeClaim, turnID, episodeID string) bool {
+	claimTurnID := strings.TrimSpace(claim.ParentTurnID)
+	if claimTurnID == "" || claimTurnID != strings.TrimSpace(turnID) {
+		return false
+	}
+	claimEpisodeID := strings.TrimSpace(claim.ParentEpisodeID)
+	episodeID = strings.TrimSpace(episodeID)
+	if claimEpisodeID == "" || episodeID == "" {
+		return true
+	}
+	return claimEpisodeID == episodeID
 }

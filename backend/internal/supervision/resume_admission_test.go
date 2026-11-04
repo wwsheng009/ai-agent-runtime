@@ -440,42 +440,233 @@ func TestResumeAdmissionAllowsNextParkedEpochInSameEpisode(t *testing.T) {
 	require.NotEqual(t, first.ClaimKey, second.ClaimKey)
 }
 
-func TestResumeAdmissionRecoversStaleClaimAsSubmitted(t *testing.T) {
+func TestResumeAdmissionRecoversStaleClaimFromDurableTurnEvidence(t *testing.T) {
 	ctx := context.Background()
-	batches := newAdmissionBatchStore(t, "admit-stale-claim")
-	batchID := seedAdmissionParkedBatch(t, batches, subagentbatch.BatchCompleted, "ep-admit")
-	store := newTestStore(t, "admit-stale-claim-supervision")
+	now := time.Now().UTC()
+	cases := []struct {
+		key      string
+		snapshot *ParentTurnSnapshot
+	}{
+		{
+			key: "current",
+			snapshot: &ParentTurnSnapshot{
+				SessionID:        "sess-admit",
+				Status:           "running",
+				CurrentTurnID:    "turn-admit",
+				CurrentEpisodeID: "ep-admit",
+				Phase:            ParentTurnRunning,
+			},
+		},
+		{
+			key: "finalized",
+			snapshot: &ParentTurnSnapshot{
+				SessionID:          "sess-admit",
+				Status:             "idle",
+				FinalizedTurnID:    "turn-admit",
+				FinalizedEpisodeID: "ep-admit",
+				Phase:              ParentTurnFinalized,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			store := newTestStore(t, "admit-stale-"+tc.key)
+			claim, won, err := store.ClaimResume(ctx, ResumeClaim{
+				ClaimKey:        "recover-" + tc.key,
+				RootScopeID:     "sess-admit",
+				ParentSessionID: "sess-admit",
+				ParentTurnID:    "turn-admit",
+				ParentEpisodeID: "ep-admit",
+				ClaimedAt:       now.Add(-10 * time.Minute),
+			})
+			require.NoError(t, err)
+			require.True(t, won)
+
+			service := NewResumeAdmissionService(ResumeAdmissionConfig{
+				ParentStates:    staticParentTurnResolver{snapshot: tc.snapshot},
+				Claims:          store,
+				Now:             func() time.Time { return now },
+				ClaimStaleAfter: time.Minute,
+			})
+			result, err := service.RecoverStaleClaimsDetailed(ctx)
+			require.NoError(t, err)
+			require.Equal(t, 1, result.Submitted)
+			require.Zero(t, result.Pending)
+
+			stored, err := store.GetResumeClaim(ctx, claim.ClaimKey)
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			require.Equal(t, ResumeClaimStateSubmitted, stored.State)
+			require.Equal(t, "turn-admit", stored.ModelTurnID)
+			require.Equal(t, ResumeClaimRecoverySubmitted, stored.RecoveryOutcome)
+			require.NotNil(t, stored.RecoveredAt)
+		})
+	}
+}
+
+func TestResumeAdmissionReleasesStaleClaimWhenOriginalSuspensionIsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	batches := newAdmissionBatchStore(t, "admit-stale-unsubmitted-batches")
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-admit",
+		EpisodeID:     "ep-admit",
+		SessionID:     "sess-admit",
+		RootScopeID:   "sess-admit",
+		ObligationIDs: []string{"batch-admit"},
+		ParkedAt:      now.Add(-20 * time.Minute),
+	}))
+	store := newTestStore(t, "admit-stale-unsubmitted")
+	claim, won, err := store.ClaimResume(ctx, ResumeClaim{
+		ClaimKey:        "recover-unsubmitted",
+		RootScopeID:     "sess-admit",
+		ParentSessionID: "sess-admit",
+		ParentTurnID:    "turn-admit",
+		ParentEpisodeID: "ep-admit",
+		ClaimedAt:       now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
 	service := NewResumeAdmissionService(ResumeAdmissionConfig{
 		Suspensions:     batches,
 		ParentStates:    staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
 		Claims:          store,
+		Now:             func() time.Time { return now },
 		ClaimStaleAfter: time.Minute,
 	})
-	input := ResumeAdmissionInput{
-		RootScopeID:        "sess-admit",
-		ParentSessionID:    "sess-admit",
-		ParentTurnID:       "turn-admit",
-		ParentEpisodeID:    "ep-admit",
-		ObligationID:       batchID,
-		FinalizationPolicy: string(subagentbatch.FinalizationPolicyRequired),
-		EventKind:          WakeEventTerminal,
-	}
-	result, err := service.Evaluate(ctx, input)
+	result, err := service.RecoverStaleClaimsDetailed(ctx)
 	require.NoError(t, err)
-	require.Equal(t, ResumeSameParkedTurn, result.Decision)
-	claim, won, err := service.Claim(ctx, result)
+	require.Equal(t, 1, result.Unsubmitted)
+	require.Zero(t, result.Submitted)
+
+	stored, err := store.GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, ResumeClaimStateReleased, stored.State)
+	require.Empty(t, stored.ModelTurnID)
+	require.Equal(t, ResumeClaimRecoveryUnsubmitted, stored.RecoveryOutcome)
+
+	// A released claim is a safe retry. It must receive a fresh lease instead
+	// of inheriting the stale attempt's timestamp.
+	reclaimed, won, err := store.ClaimResume(ctx, ResumeClaim{
+		ClaimKey:  claim.ClaimKey,
+		ClaimedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+	require.Equal(t, ResumeClaimStateClaimed, reclaimed.State)
+	require.WithinDuration(t, now, reclaimed.ClaimedAt, time.Millisecond)
+	require.Empty(t, reclaimed.RecoveryOutcome)
+}
+
+func TestResumeAdmissionRecoversStaleClaimFromReparkedSuspension(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	batches := newAdmissionBatchStore(t, "admit-stale-repark-batches")
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-admit",
+		EpisodeID:     "ep-admit",
+		SessionID:     "sess-admit",
+		RootScopeID:   "sess-admit",
+		ObligationIDs: []string{"batch-admit"},
+		ParkedAt:      now.Add(-time.Minute),
+	}))
+	store := newTestStore(t, "admit-stale-repark")
+	claim, won, err := store.ClaimResume(ctx, ResumeClaim{
+		ClaimKey:        "recover-repark",
+		RootScopeID:     "sess-admit",
+		ParentSessionID: "sess-admit",
+		ParentTurnID:    "turn-admit",
+		ParentEpisodeID: "ep-admit",
+		ClaimedAt:       now.Add(-10 * time.Minute),
+	})
 	require.NoError(t, err)
 	require.True(t, won)
 
-	db, err := store.dbOrErr()
+	service := NewResumeAdmissionService(ResumeAdmissionConfig{
+		Suspensions:     batches,
+		ParentStates:    staticParentTurnResolver{snapshot: admissionParkedSnapshot("sess-admit", "turn-admit", "ep-admit")},
+		Claims:          store,
+		Now:             func() time.Time { return now },
+		ClaimStaleAfter: time.Minute,
+	})
+	result, err := service.RecoverStaleClaimsDetailed(ctx)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `
-		UPDATE supervision_resume_claims
-		SET claimed_at = ?
-		WHERE claim_key = ?
-	`, formatSupervisionTime(time.Now().UTC().Add(-10*time.Minute)), claim.ClaimKey)
-	require.NoError(t, err)
+	require.Equal(t, 1, result.Submitted)
 
+	stored, err := store.GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, ResumeClaimStateSubmitted, stored.State)
+	require.Equal(t, "turn-admit", stored.ModelTurnID)
+	require.Equal(t, ResumeClaimRecoverySubmitted, stored.RecoveryOutcome)
+}
+
+func TestResumeAdmissionKeepsStaleClaimPendingWhenEvidenceIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store := newTestStore(t, "admit-stale-pending")
+	claim, won, err := store.ClaimResume(ctx, ResumeClaim{
+		ClaimKey:        "recover-pending",
+		RootScopeID:     "sess-admit",
+		ParentSessionID: "sess-admit",
+		ParentTurnID:    "turn-admit",
+		ParentEpisodeID: "ep-admit",
+		ClaimedAt:       now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	service := NewResumeAdmissionService(ResumeAdmissionConfig{
+		ParentStates:    staticParentTurnResolver{},
+		Claims:          store,
+		Now:             func() time.Time { return now },
+		ClaimStaleAfter: time.Minute,
+	})
+	result, err := service.RecoverStaleClaimsDetailed(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Pending)
+	require.Zero(t, result.Converged())
+
+	stored, err := store.GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, ResumeClaimStateClaimed, stored.State)
+	require.Empty(t, stored.ModelTurnID)
+	require.Equal(t, ResumeClaimRecoveryPending, stored.RecoveryOutcome)
+
+	second, err := service.RecoverStaleClaimsDetailed(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, second.Pending)
+	unchanged, err := store.GetResumeClaim(ctx, claim.ClaimKey)
+	require.NoError(t, err)
+	require.NotNil(t, unchanged)
+	require.Equal(t, stored.Version, unchanged.Version,
+		"an unchanged pending verdict must not churn the claim version")
+}
+
+func TestResumeAdmissionFallsBackToLegacyRecoveryWithoutParentStateResolver(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	store := newTestStore(t, "admit-stale-legacy-fallback")
+	claim, won, err := store.ClaimResume(ctx, ResumeClaim{
+		ClaimKey:        "recover-legacy-fallback",
+		RootScopeID:     "sess-admit",
+		ParentSessionID: "sess-admit",
+		ParentTurnID:    "turn-admit",
+		ParentEpisodeID: "ep-admit",
+		ClaimedAt:       now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	service := NewResumeAdmissionService(ResumeAdmissionConfig{
+		Claims:          store,
+		Now:             func() time.Time { return now },
+		ClaimStaleAfter: time.Minute,
+	})
 	recovered, err := service.RecoverStaleClaims(ctx)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, recovered)
@@ -485,13 +676,12 @@ func TestResumeAdmissionRecoversStaleClaimAsSubmitted(t *testing.T) {
 	require.NotNil(t, stored)
 	require.Equal(t, ResumeClaimStateSubmitted, stored.State)
 	require.Equal(t, "recovered_unknown", stored.ModelTurnID)
+	require.Equal(t, ResumeClaimRecoveryUnknown, stored.RecoveryOutcome)
+}
 
-	retry, err := service.Evaluate(ctx, input)
-	require.NoError(t, err)
-	require.Equal(t, NotifyOnly, retry.Decision)
-	require.Equal(t, "settlement_already_submitted", retry.Reason)
-	require.NotEqual(t, ResumeSameParkedTurn, retry.Decision,
-		"crash recovery must not create a second model turn")
+func TestResumeClaimModelTurnIDPrefersLogicalTurn(t *testing.T) {
+	require.Equal(t, "turn-logical", resumeClaimModelTurnID(ResumeClaim{ParentTurnID: "turn-logical"}, "wake-a,wake-b"))
+	require.Equal(t, "wake-a,wake-b", resumeClaimModelTurnID(ResumeClaim{}, "wake-a,wake-b"))
 }
 
 // TestResumeAdmissionRenewsClaimBeforeRecovery proves the lease heartbeat is a

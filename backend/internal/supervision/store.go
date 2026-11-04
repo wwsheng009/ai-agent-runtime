@@ -91,9 +91,10 @@ type Store interface {
 	// ReleaseResumeClaim CAS-transitions claimed -> released. A released claim
 	// may be reclaimed by a later settlement attempt.
 	ReleaseResumeClaim(ctx context.Context, claimKey string, expectedVersion int64) (bool, error)
-	// RecoverStaleResumeClaims converges claims left in `claimed` past the
-	// cutoff to `submitted` with an unknown/recovered model-turn id. This is the
-	// crash-safe choice: never start a second model turn for the same claim.
+	// RecoverStaleResumeClaims is the legacy bulk fallback for hosts without a
+	// parent-state evidence resolver. It converges claims left in `claimed`
+	// past the cutoff to `submitted` with an unknown/recovered model-turn id:
+	// never start a second model turn for the same claim.
 	RecoverStaleResumeClaims(ctx context.Context, claimedBefore time.Time) (int64, error)
 	// PruneResumeClaims removes terminal claims older than the cutoff. A claim
 	// still in `claimed` is never pruned: it may be the only evidence preventing
