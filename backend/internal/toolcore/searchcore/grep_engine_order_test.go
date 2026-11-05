@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
@@ -107,11 +106,14 @@ func TestGrepWalkerBudgetBoundsTheSearch(t *testing.T) {
 		}
 	}
 
-	// A budget so short the walk cannot finish inside it. Restored so the
-	// process-wide default is never left shrunken for another test.
-	original := GrepSearchBudget
-	GrepSearchBudget = time.Millisecond
-	defer func() { GrepSearchBudget = original }()
+	// Use the visit-count budget rather than a 1ms wall-clock budget: a fast
+	// filesystem can finish this tree before the timer fires, while a slow CI
+	// runner can expire before the first file. Both produce environment-
+	// dependent flakes. The visit-count stand-in exercises the same expiry
+	// branch deterministically and is restored for other tests.
+	originalVisits := GrepBudgetAfterVisits
+	GrepBudgetAfterVisits = 10
+	defer func() { GrepBudgetAfterVisits = originalVisits }()
 
 	result, err := Grep(context.Background(), GrepOptions{Pattern: "needle", Path: root, Limit: 10})
 	if err != nil {
