@@ -1443,14 +1443,17 @@ func selectModelFullScreen(provider config.Provider) (string, bool) {
 	// startup watchdog treats it as "waiting for user input", not a stall.
 	beginChatInputWait()
 	defer endChatInputWait()
+	// The startup picker has no ChatSession, so its rows must stay aligned
+	// 1:1 with options: result.Index is used directly to index options below.
+	items := buildModelPickerModelItems(options, provider.DefaultModel)
 	result, err := ui.RunStartupFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "选择 Model",
 		Subtitle:     "↑/↓ 选择 · 输入关键词模糊搜索 · Enter 确认 · Esc 取消",
 		EmptyMessage: "没有可用的模型",
 		ConfirmLabel: "使用选中模型",
-		Items:        buildModelPickerModelItems(options, provider.DefaultModel),
+		Items:        items,
 	})
-	if err != nil || result.Cancelled || result.Index < 0 || result.Index >= len(options) {
+	if err != nil || result.Cancelled || result.Index < 0 || result.Index >= len(items) || result.Index >= len(options) {
 		return "", false
 	}
 	// Index back into the normalized option list: the rendered row title

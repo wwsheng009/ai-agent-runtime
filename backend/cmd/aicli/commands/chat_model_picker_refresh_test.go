@@ -44,9 +44,9 @@ func TestBuildModelPickerItemsWithRefreshRowLeadsWithRefresh(t *testing.T) {
 	}
 }
 
-// The startup picker (selectModelFullScreen) runs without a ChatSession and
-// maps item indexes straight back into the option list, so its builder must not
-// gain a leading action row.
+// This builder is the /model stage variant with the add row but no refresh
+// row. (The startup picker must not use it: selectModelFullScreen maps item
+// indexes straight back into the option list and needs a catalog-only builder.)
 func TestBuildModelPickerItemsWithAddRowHasNoRefreshRow(t *testing.T) {
 	list := buildModelPickerItemsWithAddRow([]string{"gpt-5"}, "")
 	if list.refreshIndex != -1 {
@@ -432,10 +432,10 @@ func TestModelPickerActionRowsCarryNoIndex(t *testing.T) {
 		}
 	}
 
-	// 启动路径没有刷新行，第一条仍是动作行。
+	// 不带刷新行的 /model builder：第一条仍是添加动作行。
 	addOnly := buildModelPickerItemsWithAddRow([]string{"m-a"}, "m-a")
 	if !addOnly.items[addOnly.addIndex].NoIndex {
-		t.Fatalf("startup add row must opt out of the rank column: %#v", addOnly.items[addOnly.addIndex])
+		t.Fatalf("add row must opt out of the rank column: %#v", addOnly.items[addOnly.addIndex])
 	}
 	if addOnly.items[addOnly.optionIndexOff].NoIndex {
 		t.Fatal("the first model row must keep its rank label")

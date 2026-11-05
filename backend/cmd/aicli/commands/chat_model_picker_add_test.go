@@ -204,11 +204,21 @@ func TestModelPickerIndexMappingCoversEveryRow(t *testing.T) {
 	}
 }
 
-// buildModelPickerModelItems keeps its single-return contract for callers that
-// only need rows; it must still carry the add row at the front.
-func TestBuildModelPickerModelItemsIncludesAddRow(t *testing.T) {
-	items := buildModelPickerModelItems([]string{"gpt-5"}, "")
-	if len(items) != 2 || !strings.Contains(items[0].Title, "添加模型") {
-		t.Fatalf("items = %#v, want the add row followed by the models", items)
+// 启动路径拿不到 ChatSession，无法执行“添加模型”，并且 selectModelFullScreen
+// 会用 picker 返回的下标直接回查 options。这里必须保持行与模型一一对应，
+// 不能复用 /model 的前置动作行，否则第一个模型会整体错位一位。
+func TestBuildModelPickerModelItemsMapsDirectlyToCatalog(t *testing.T) {
+	models := []string{"gpt-5", "claude-sonnet-4"}
+	items := buildModelPickerModelItems(models, "gpt-5")
+	if len(items) != len(models) {
+		t.Fatalf("items = %#v, want exactly the model rows", items)
+	}
+	for index, want := range models {
+		if !strings.HasPrefix(items[index].Title, want) {
+			t.Fatalf("row %d = %q, want it to start with %q", index, items[index].Title, want)
+		}
+	}
+	if strings.Contains(items[0].Title, "添加模型") {
+		t.Fatalf("startup model picker must not prepend an action row: %#v", items)
 	}
 }

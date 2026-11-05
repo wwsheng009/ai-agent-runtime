@@ -437,7 +437,10 @@ func chatModelPickerStageNotice(text string) (string, string) {
 }
 
 func buildModelPickerModelItems(models []string, current string) []ui.FullScreenListItem {
-	return buildModelPickerItemsWithAddRow(models, current).items
+	// 启动路径（selectModelFullScreen）没有 ChatSession，无法处理“添加模型”
+	// 动作，而且确认后会用 result.Index 直接回查 options。这里必须返回与
+	// options 一一对应的纯模型行；前置动作行会让首个模型整体错位一位。
+	return buildChatPickerItems(models, current, "model", "model")
 }
 
 // chatModelRemovalGuard rejects a model deletion that would break the current
