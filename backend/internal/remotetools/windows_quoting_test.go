@@ -116,9 +116,10 @@ func TestRemoteShellPowerShellCallOperatorHonorsAllowlistOnWindows(t *testing.T)
 }
 
 // TestRemoteShellBareAndQuotedPowerShellOnWindows covers the two failures from
-// the live report: a bare command needs PATH from the platform baseline, and a
-// quoted -Command argument must reach PowerShell intact instead of being
-// printed back as the literal text "whoami".
+// the live report without depending on the host's account name or PATH order:
+// a bare command needs PATH from the platform baseline, and a quoted -Command
+// argument must reach PowerShell intact instead of being printed back as
+// literal text.
 func TestRemoteShellBareAndQuotedPowerShellOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows shell and powershell")
@@ -127,7 +128,14 @@ func TestRemoteShellBareAndQuotedPowerShellOnWindows(t *testing.T) {
 		t.Skip("powershell.exe is not installed")
 	}
 	root := newTestWorkspace(t)
-	server, err := remotetools.NewServer(newOpsConfig(t, root, []string{"whoami", "powershell"}), "dev")
+	cfg := newOpsConfig(t, root, []string{"cmd", "powershell"})
+	// Pin the outer shell so the quoted-command half always exercises
+	// PowerShell's parser, independent of the host's default shell choice.
+	cfg.Shell.Program = "powershell"
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -135,16 +143,16 @@ func TestRemoteShellBareAndQuotedPowerShellOnWindows(t *testing.T) {
 	session, ctx := startTestSession(t, server)
 
 	bare := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": "whoami",
+		"command": "cmd /c echo bare-ok",
 	})
-	if !strings.Contains(bare, `\`) {
-		t.Fatalf("bare whoami did not resolve through PATH: %s", bare)
+	if !strings.Contains(bare, "bare-ok") {
+		t.Fatalf("bare command did not resolve through PATH: %s", bare)
 	}
 
 	quoted := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-		"command": `powershell.exe -NoProfile -Command "whoami"`,
+		"command": `powershell.exe -NoProfile -Command "Write-Output quoted-ok"`,
 	})
-	if strings.TrimSpace(quoted) == "whoami" || !strings.Contains(quoted, `\`) {
+	if strings.Contains(quoted, "Write-Output") || !strings.Contains(quoted, "quoted-ok") {
 		t.Fatalf("powershell -Command received literal text: %s", quoted)
 	}
 }
