@@ -194,11 +194,18 @@ func TestStorageResolveTargetsDefaults(t *testing.T) {
 	require.Equal(t, "team_store.sqlite", byName["team"])
 	require.Equal(t, "agent_control.sqlite", byName["agent-control"])
 	require.Equal(t, "background.sqlite", byName["background"])
+	require.Equal(t, "schedule.sqlite", byName["schedule"])
 
 	history, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "history"}, nil, "")
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, "history", history[0].Name)
+
+	schedule, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "schedule"}, nil, "")
+	require.NoError(t, err)
+	require.Len(t, schedule, 1)
+	require.Equal(t, "schedule", schedule[0].Name)
+	require.Equal(t, "schedule.sqlite", filepath.Base(schedule[0].Path))
 }
 
 // TestStorageCompactRequireExclusiveRefusesWhileHandleOpen 锁定严格独占门：

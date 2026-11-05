@@ -162,7 +162,7 @@ func newStorageCompactCommand() *cobra.Command {
 			}))
 		},
 	}
-	cmd.Flags().String("target", "all", "目标：all|runtime|history|artifacts|analytics|team|agent-control|background")
+	cmd.Flags().String("target", "all", "目标：all|runtime|history|artifacts|analytics|team|agent-control|background|schedule")
 	cmd.Flags().String("db", "", "显式指定单个库文件（与 --target 互斥）")
 	cmd.Flags().Bool("dry-run", false, "只体检与预估，不执行 VACUUM")
 	cmd.Flags().Bool("force", false, "即使没有空闲页也执行 VACUUM")
@@ -273,7 +273,7 @@ func storageResolveTargetsFromConfig(opts storageCompactOptions, config *runtime
 	if target == "" {
 		target = "all"
 	}
-	known := []string{"all", "runtime", "history", "artifacts", "analytics", "team", "agent-control", "background"}
+	known := []string{"all", "runtime", "history", "artifacts", "analytics", "team", "agent-control", "background", "schedule"}
 	if !storageContainsString(known, target) {
 		return nil, fmt.Errorf("未知 --target %q（可选：%s）", opts.target, strings.Join(known, "|"))
 	}
@@ -290,6 +290,7 @@ func storageResolveTargetsFromConfig(opts storageCompactOptions, config *runtime
 		{Name: "team", Path: paths.TeamStorePath},
 		{Name: "agent-control", Path: paths.AgentControlStorePath},
 		{Name: "background", Path: paths.BackgroundStorePath},
+		{Name: "schedule", Path: resolvePruneSessionsSchedulePath(config, configFile)},
 	}
 	selected := make([]storageCompactTarget, 0, len(all))
 	seen := map[string]bool{}
