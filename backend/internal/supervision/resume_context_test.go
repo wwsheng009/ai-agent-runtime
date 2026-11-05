@@ -347,6 +347,25 @@ func TestResumeContext_NilSourceIsSafe(t *testing.T) {
 	require.Empty(t, obligations)
 }
 
+func TestResumePromptAgentSessionDirectsParentToWait(t *testing.T) {
+	resume := &ResumeContext{
+		Terminal:     true,
+		PendingCount: 0,
+		TotalCount:   1,
+		Obligations: []ObligationRef{{
+			ID:       "agent_session:child-1",
+			Kind:     "agent_session",
+			State:    ObligationStateCompleted,
+			Terminal: true,
+		}},
+		Text: "agent_session:child-1：已完成",
+	}
+	require.True(t, resume.HasAgentSessionObligations())
+	prompt := ResumePrompt(resume)
+	require.Contains(t, prompt, "agent_session 子代理结果未内联")
+	require.Contains(t, prompt, "subagent_wait")
+}
+
 // TestWakeConsumer_DeliversResumeContext is the L1 closure of AC-P1-1a/1d: the
 // delivery path prefers the resume payload, and the prompt handed to the parked
 // turn carries the rollup under the same turn id.

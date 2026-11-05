@@ -58,7 +58,7 @@ func aliasAgentWaitResult(result *AgentWaitResult, aliases *handleAliasRegistry)
 			cloned.PendingIDs[index] = aliasSessionValue(value, aliases)
 		}
 	}
-	return &cloned
+	return AttachSynthesisPacket(&cloned)
 }
 
 func aliasAgentListResult(result *AgentListResult, aliases *handleAliasRegistry) *AgentListResult {

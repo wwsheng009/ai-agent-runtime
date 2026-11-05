@@ -101,10 +101,41 @@ func TestSQLiteBatchStoreTurnSuspensionRoundTrip(t *testing.T) {
 	if !got.DecisionWindowUntil.Equal(window) {
 		t.Fatalf("decision window = %v, want %v", got.DecisionWindowUntil, window)
 	}
+	if got.ResultsConsumed {
+		t.Fatal("a newly parked record must start with results_consumed=false")
+	}
+
+	marker, okCast := store.(TurnResultsConsumptionStore)
+	if !okCast {
+		t.Fatalf("store type = %T, want TurnResultsConsumptionStore", store)
+	}
+	if err := marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-1"); err != nil {
+		t.Fatalf("MarkTurnResultsConsumed: %v", err)
+	}
+	got, ok, err = store.GetTurnSuspension(ctx, "sess-1", "turn-1")
+	if err != nil || !ok {
+		t.Fatalf("GetTurnSuspension after consume = (%v, %v), want a record", ok, err)
+	}
+	if !got.ResultsConsumed {
+		t.Fatal("MarkTurnResultsConsumed must persist the durable gate")
+	}
+	if err := marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-1"); err != nil {
+		t.Fatalf("MarkTurnResultsConsumed(idempotent): %v", err)
+	}
 
 	// Re-parking the same turn (retry after a crash) overwrites, never duplicates.
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		t.Fatalf("ParkTurnSuspension(re-park): %v", err)
+	}
+	got, ok, err = store.GetTurnSuspension(ctx, "sess-1", "turn-1")
+	if err != nil || !ok {
+		t.Fatalf("GetTurnSuspension after re-park = (%v, %v), want a record", ok, err)
+	}
+	if got.ResultsConsumed {
+		t.Fatal("a re-park carrying a new/unconsumed record must reset results_consumed")
+	}
+	if err := marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-1"); err != nil {
+		t.Fatalf("MarkTurnResultsConsumed before reopen: %v", err)
 	}
 	sqliteStore, okCast := store.(*sqliteBatchStore)
 	if !okCast {
@@ -135,6 +166,9 @@ func TestSQLiteBatchStoreTurnSuspensionRoundTrip(t *testing.T) {
 	}
 	if len(reread.ObligationIDs) != 3 || reread.ObligationIDs[2] != "task-2" {
 		t.Fatalf("reopened obligation ids = %v, want the parked set", reread.ObligationIDs)
+	}
+	if !reread.ResultsConsumed {
+		t.Fatal("results_consumed must survive a store reopen")
 	}
 
 	if err := reopened.ClearTurnSuspension(ctx, "sess-1", "turn-1"); err != nil {

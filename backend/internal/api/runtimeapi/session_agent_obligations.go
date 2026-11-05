@@ -149,6 +149,9 @@ func (c *sessionAgentController) parkAgentChildObligation(ctx context.Context, p
 			return
 		}
 	}
+	// A new result-producing obligation starts an unconsumed segment in the same
+	// park epoch: the parent has not seen this child's result yet.
+	record.ResultsConsumed = false
 	record.ObligationIDs = append(record.ObligationIDs, obligationID)
 	if record.ParkedAt.IsZero() {
 		record.ParkedAt = time.Now().UTC()

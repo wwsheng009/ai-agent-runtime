@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -164,7 +165,104 @@ func (c *handlerSupervisionToolController) SupervisionDescendants(ctx context.Co
 		request.Scope.RootTeamID = targetTeamID
 		request.RootScopeID = targetTeamID
 	}
-	return supervision.BuildSnapshot(ctx, c.service.Store(), request)
+	snapshot, err := supervision.BuildSnapshot(ctx, c.service.Store(), request)
+	if err != nil {
+		return nil, err
+	}
+	effectiveScope := strings.ToLower(strings.TrimSpace(args.Scope))
+	if effectiveScope == "" {
+		effectiveScope = "auto"
+	}
+	switch effectiveScope {
+	case "auto":
+		subjectIDs := c.currentTurnSubjectIDs(ctx, parentSessionID)
+		if len(subjectIDs) > 0 {
+			effectiveScope = "current_turn"
+			snapshot = supervision.FilterSnapshotToSubjectIDs(snapshot, subjectIDs, args.AfterSeq)
+		} else {
+			effectiveScope = "all"
+		}
+	case "current_turn":
+		snapshot = supervision.FilterSnapshotToSubjectIDs(snapshot, c.currentTurnSubjectIDs(ctx, parentSessionID), args.AfterSeq)
+	case "current_batch":
+		snapshot = supervision.FilterSnapshotToSubjectIDs(snapshot, c.currentBatchSubjectIDs(ctx, parentSessionID, args.BatchID), args.AfterSeq)
+	}
+	if snapshot != nil {
+		snapshot.FilterScope = effectiveScope
+	}
+	return snapshot, nil
+}
+
+// currentTurnSubjectIDs resolves the durable subjects owned by the caller's
+// parked/current turn. It is intentionally read-only and fail-open: an
+// unreadable state or missing suspension yields an empty set, so the caller
+// sees an empty current_turn matrix rather than another session's rows.
+func (c *handlerSupervisionToolController) currentTurnSubjectIDs(ctx context.Context, parentSessionID string) []string {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	runtimeStore := c.handler.getSessionRuntimeStore()
+	batchStore := c.handler.peekSubagentBatchStore()
+	if runtimeStore == nil || batchStore == nil {
+		return nil
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return nil
+	}
+	state, err := runtimeStore.LoadState(ctx, parentSessionID)
+	if err != nil || state == nil {
+		return nil
+	}
+	turnID := strings.TrimSpace(state.SuspendedTurnID)
+	if turnID == "" {
+		turnID = strings.TrimSpace(state.CurrentTurnID)
+	}
+	if turnID == "" {
+		return nil
+	}
+	record, ok, err := batchStore.GetTurnSuspension(ctx, parentSessionID, turnID)
+	if err != nil || !ok || record == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(record.ObligationIDs))
+	for _, obligationID := range record.ObligationIDs {
+		if subjectID := subagentbatch.SubjectIDFromObligation(obligationID); subjectID != "" {
+			ids = append(ids, subjectID)
+		}
+	}
+	return ids
+}
+
+func (c *handlerSupervisionToolController) currentBatchSubjectIDs(ctx context.Context, parentSessionID, batchID string) []string {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	batchStore := c.handler.peekSubagentBatchStore()
+	if batchStore == nil {
+		return nil
+	}
+	batchID = strings.TrimSpace(batchID)
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if batchID == "" || parentSessionID == "" {
+		return nil
+	}
+	batch, err := batchStore.GetBatch(ctx, batchID)
+	if err != nil || batch == nil || strings.TrimSpace(batch.ParentSessionID) != parentSessionID {
+		return nil
+	}
+	tasks, err := batchStore.ListTasks(ctx, batchID)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(tasks)+1)
+	ids = append(ids, batchID)
+	for _, task := range tasks {
+		if childSessionID := strings.TrimSpace(task.ChildSessionID); childSessionID != "" {
+			ids = append(ids, childSessionID)
+		}
+	}
+	return ids
 }
 
 func (c *handlerSupervisionToolController) AckLifecycle(ctx context.Context, parentSessionID string, args toolbroker.AckLifecycleArgs) (*supervision.Notification, error) {

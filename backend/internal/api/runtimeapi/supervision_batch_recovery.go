@@ -369,6 +369,12 @@ func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (age
 			// 父忙/预算用尽是 durable 控制面的正常结果；清扫继续。
 			_ = err
 		}
+		if record.HasChildResults() && !record.ResultsConsumed {
+			// Keep the record parked and let the scheduled wake ask the parent
+			// to consume the durable child results. Clearing here would recreate
+			// the exact lost-finalization window the gate exists to prevent.
+			continue
+		}
 		if err := store.ClearTurnSuspension(sweepCtx, record.SessionID, record.TurnID); err != nil {
 			outcome.Failed++
 			continue
@@ -396,13 +402,16 @@ func (h *Handler) publishParkedTurnSettledResume(ctx context.Context, record *su
 		SessionID: record.SessionID,
 		Timestamp: time.Now().UTC(),
 		Payload: map[string]interface{}{
-			"turn_id":          record.TurnID,
-			"session_id":       record.SessionID,
-			"trigger":          runtimeevents.TurnResumedTriggerSettled,
-			"phase":            "settled",
-			"settled":          true,
-			"obligation_count": len(record.ObligationIDs),
-			"sweep":            true,
+			"turn_id":                 record.TurnID,
+			"session_id":              record.SessionID,
+			"trigger":                 runtimeevents.TurnResumedTriggerSettled,
+			"resume_reason":           "obligations_settled",
+			"child_results_available": record.HasChildResults(),
+			"results_consumed":        record.ResultsConsumed,
+			"phase":                   "settled",
+			"settled":                 true,
+			"obligation_count":        len(record.ObligationIDs),
+			"sweep":                   true,
 		},
 	}
 	if store := h.getSessionEventStore(); store != nil {

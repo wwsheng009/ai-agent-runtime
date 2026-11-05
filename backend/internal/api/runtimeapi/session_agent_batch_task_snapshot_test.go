@@ -227,6 +227,26 @@ func TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) 
 	require.Empty(t, missing.Obligations, "unknown targets must not fabricate ledger rows")
 }
 
+func TestWaitAgentPeekReturnsImmediately(t *testing.T) {
+	controller, _ := newAPIBatchSnapshotFixture(t)
+	ctx := toolctx.WithSessionID(context.Background(), apiBatchSnapshotParent)
+
+	started := time.Now()
+	result, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{
+		ID:   apiBatchSnapshotChild,
+		Peek: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Less(t, time.Since(started), time.Second,
+		"peek must not open the active wait window")
+	require.True(t, result.Peek)
+	require.False(t, result.TimedOut)
+	require.Equal(t, 1, result.PendingCount)
+	require.Contains(t, result.NextAction, "peek_pending")
+	require.Zero(t, result.WaitTimeoutMs)
+}
+
 // TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal 钉住直出账本与收尾门的
 // 配合：目标批次已终态时，subagent_wait 立即返回 finalize，且 obligations[] 带终态行
 // （baseline 语义），不会留下"永远再等一次"的空转。

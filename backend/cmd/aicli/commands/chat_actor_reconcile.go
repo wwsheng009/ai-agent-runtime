@@ -349,6 +349,12 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 			rootScopeID,
 		)
 		_ = h.wakeSupervisedParent(sweepCtx, record.SessionID, rootScopeID)
+		if record.HasChildResults() && !record.ResultsConsumed {
+			// Keep the record parked and let the scheduled wake ask the parent
+			// to consume the durable child results. Clearing here would recreate
+			// the exact lost-finalization window the gate exists to prevent.
+			continue
+		}
 		if err := h.SubagentBatches.ClearTurnSuspension(sweepCtx, record.SessionID, record.TurnID); err != nil {
 			outcome.Failed++
 			continue
@@ -377,13 +383,16 @@ func (h *localChatRuntimeHost) publishParkedTurnSettledResume(ctx context.Contex
 		SessionID: record.SessionID,
 		Timestamp: time.Now().UTC(),
 		Payload: map[string]interface{}{
-			"turn_id":          record.TurnID,
-			"session_id":       record.SessionID,
-			"trigger":          runtimeevents.TurnResumedTriggerSettled,
-			"phase":            "settled",
-			"settled":          true,
-			"obligation_count": len(record.ObligationIDs),
-			"sweep":            true,
+			"turn_id":                 record.TurnID,
+			"session_id":              record.SessionID,
+			"trigger":                 runtimeevents.TurnResumedTriggerSettled,
+			"resume_reason":           "obligations_settled",
+			"child_results_available": record.HasChildResults(),
+			"results_consumed":        record.ResultsConsumed,
+			"phase":                   "settled",
+			"settled":                 true,
+			"obligation_count":        len(record.ObligationIDs),
+			"sweep":                   true,
 		},
 	}
 	if h.EventStore != nil {

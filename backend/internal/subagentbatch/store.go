@@ -104,6 +104,17 @@ type BatchStore interface {
 	Close() error
 }
 
+// TurnResultsConsumptionStore is the optional durable mutation used by the
+// parent synthesis gate. It is deliberately separate from BatchStore so older
+// custom stores remain source-compatible: callers type-assert and degrade to
+// the previous settlement behavior when the capability is absent.
+type TurnResultsConsumptionStore interface {
+	// MarkTurnResultsConsumed records that the parent received the child-result
+	// payload for one parked turn. The write is idempotent and must not create
+	// a record when the turn is no longer parked.
+	MarkTurnResultsConsumed(ctx context.Context, sessionID, turnID string) error
+}
+
 // Clock is an injectable time source for deterministic tests.
 type Clock func() time.Time
 

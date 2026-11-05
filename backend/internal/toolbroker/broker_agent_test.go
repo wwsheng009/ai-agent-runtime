@@ -1611,3 +1611,54 @@ func TestFinalizeAgentEventsResult(t *testing.T) {
 		t.Fatalf("empty non-blocking next_action: %#v", result.NextAction)
 	}
 }
+
+func TestFinalizeAgentWaitResultPeekGuidance(t *testing.T) {
+	pending := FinalizeAgentWaitResult(&AgentWaitResult{
+		Peek:         true,
+		PendingCount: 1,
+	}, time.Now().Add(-time.Millisecond))
+	if !pending.Peek || !pending.ExecutionContinues {
+		t.Fatalf("peek pending result must preserve the non-blocking flags: %#v", pending)
+	}
+	if !strings.Contains(pending.NextAction, "peek_pending") {
+		t.Fatalf("peek pending next_action = %q", pending.NextAction)
+	}
+
+	idle := FinalizeAgentWaitResult(&AgentWaitResult{Peek: true}, time.Now().Add(-time.Millisecond))
+	if !strings.Contains(idle.NextAction, "peek_no_changes") {
+		t.Fatalf("peek idle next_action = %q", idle.NextAction)
+	}
+}
+
+func TestBrokerWaitPassesPeekArg(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
+		"id":   "child-1",
+		"peek": true,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !controller.lastWait.Peek {
+		t.Fatalf("peek was dropped before dispatch: %#v", controller.lastWait)
+	}
+}
+
+func TestApplyAgentWaitLedgerPeekPendingOverridesEmptySnapshotGuidance(t *testing.T) {
+	result := ApplyAgentWaitLedger(&AgentWaitResult{
+		Peek:       true,
+		NextAction: "peek_no_changes: no new child status or mailbox event was ready",
+	}, []AgentWaitObligation{{
+		ObligationID: "batch_1",
+		SubjectKind:  "batch",
+		SubjectID:    "batch_1",
+		Terminal:     false,
+	}}, nil)
+	if !strings.Contains(result.NextAction, "peek_pending") {
+		t.Fatalf("pending ledger must win over peek_no_changes: %q", result.NextAction)
+	}
+	if !result.ExecutionContinues {
+		t.Fatal("pending ledger peek must report that child execution continues")
+	}
+}

@@ -45,12 +45,20 @@ func TestSettleParkedTurnOnRunEnd(t *testing.T) {
 	loop.settleParkedTurnOnRunEnd(ctx, "sess-1", "turn-parked")
 	_, ok, err = store.GetTurnSuspension(ctx, "sess-1", "turn-parked")
 	require.NoError(t, err)
-	require.False(t, ok, "terminal obligations must clear the parked record")
+	require.True(t, ok,
+		"a terminal child obligation must stay parked until its result packet was consumed")
+	marker := store.(subagentbatch.TurnResultsConsumptionStore)
+	require.NoError(t, marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-parked"))
+	loop.settleParkedTurnOnRunEnd(ctx, "sess-1", "turn-parked")
+	_, ok, err = store.GetTurnSuspension(ctx, "sess-1", "turn-parked")
+	require.NoError(t, err)
+	require.False(t, ok, "consumed terminal obligations must clear the parked record")
 
 	// The run ctx is routinely canceled on this path (ESC / deadline / step
 	// limit), so the clear must still land through the detached-context fallback.
 	parkAgentSettleTurn(t, store, "turn-canceled-ctx", "batch-done")
 	seedAgentSettleBatch(t, store, "batch-done", subagentbatch.BatchCompleted)
+	require.NoError(t, marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-canceled-ctx"))
 	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
 	loop.settleParkedTurnOnRunEnd(canceledCtx, "sess-1", "turn-canceled-ctx")
@@ -63,6 +71,7 @@ func TestSettleParkedTurnOnRunEnd(t *testing.T) {
 	// 仍欠运行中义务的记录必须保留。
 	parkAgentSettleTurn(t, store, "turn-stale", "batch-stale")
 	seedAgentSettleBatch(t, store, "batch-stale", subagentbatch.BatchCompleted)
+	require.NoError(t, marker.MarkTurnResultsConsumed(ctx, "sess-1", "turn-stale"))
 	parkAgentSettleTurn(t, store, "turn-live", "batch-live")
 	seedAgentSettleBatch(t, store, "batch-live", subagentbatch.BatchRunning)
 

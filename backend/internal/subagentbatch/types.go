@@ -363,6 +363,10 @@ type TaskResult struct {
 	Error       string      `json:"error,omitempty"`
 	UsageTotal  int         `json:"usage_total,omitempty"`
 	ArtifactRef string      `json:"artifact_ref,omitempty"`
+	// RouteWarnings preserves the child's final route/capability diagnostics
+	// (for example an unsupported reasoning effort) so the parent's synthesis
+	// packet can report them without reading the child event log.
+	RouteWarnings []string `json:"route_warnings,omitempty"`
 	// OutputDrain is the same versioned drain ledger used by background jobs.
 	// A batch task capsule is a single result boundary; terminal overwrites are
 	// rejected by RecordTaskResult.

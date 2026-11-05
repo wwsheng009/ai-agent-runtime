@@ -3082,6 +3082,59 @@ func TestLocalActorRegistry_WaitWithoutTargetUsesParentMailbox(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_WaitPeekReadsParentMailboxWithoutBlocking(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+
+	if err := registry.deliverAgentMailboxEvent(context.Background(), rootSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "peek mailbox hello",
+	}); err != nil {
+		t.Fatalf("deliverAgentMailboxEvent: %v", err)
+	}
+
+	started := time.Now()
+	result, err := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{
+		SessionID:   rootSession.ID,
+		MailboxOnly: true,
+		Peek:        true,
+	})
+	if err != nil {
+		t.Fatalf("peek mailbox: %v", err)
+	}
+	if result == nil || result.Event == nil || result.Event.Type != runtimechat.EventMailboxReceived {
+		t.Fatalf("unexpected mailbox peek result: %#v", result)
+	}
+	if !result.Peek || result.TimedOut || result.WaitTimeoutMs != 0 {
+		t.Fatalf("peek must not open a wait window: %#v", result)
+	}
+	if result.Event.Payload["body"] != "peek mailbox hello" {
+		t.Fatalf("unexpected mailbox body: %#v", result.Event.Payload)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("peek blocked for %s", elapsed)
+	}
+}
+
 func TestLocalActorRegistry_ReadEventsWithoutTargetUsesParentMailbox(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {

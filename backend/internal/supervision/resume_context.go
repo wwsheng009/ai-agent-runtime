@@ -185,6 +185,22 @@ type ResumeContext struct {
 	budget ResumeBudget
 }
 
+// HasAgentSessionObligations reports whether this resume owns a lightweight
+// subagent_spawn child. Its result is not part of the batch ledger summary, so
+// the prompt must direct the parent to subagent_wait instead of treating the
+// lifecycle row alone as consumed output.
+func (rc *ResumeContext) HasAgentSessionObligations() bool {
+	if rc == nil {
+		return false
+	}
+	for _, obligation := range rc.Obligations {
+		if strings.EqualFold(strings.TrimSpace(obligation.Kind), "agent_session") {
+			return true
+		}
+	}
+	return false
+}
+
 // ResumeContextRequest is the host-neutral input of the resume projection.
 type ResumeContextRequest struct {
 	ParentSessionID string
@@ -575,6 +591,9 @@ func ResumePrompt(rc *ResumeContext) string {
 		// second copy here only repeated control-plane vocabulary.
 		if rc.PendingCount == 0 {
 			b.WriteString("请直接产出终局报告并结束本 turn，不要重复派发同一工作。\n")
+			if rc.HasAgentSessionObligations() {
+				b.WriteString("agent_session 子代理结果未内联；收尾前请调用 subagent_wait 读取结果。\n")
+			}
 		} else if rc.PendingCount > 0 {
 			b.WriteString("暂时不能收尾：请继续等待或处理仍在运行的子任务。\n")
 		}

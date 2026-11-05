@@ -622,6 +622,50 @@ func TestTaskTypeSubjectColumnsMigrateLegacyDatabase(t *testing.T) {
 	}
 }
 
+// TestTurnSuspensionResultsConsumedMigrationBackfillsLegacyRows pins the upgrade
+// path: records written before the durable synthesis gate existed must be
+// treated as already consumed, otherwise an old settled park record would block
+// every future settlement after the binary is upgraded.
+func TestTurnSuspensionResultsConsumedMigrationBackfillsLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-turn-suspension.db")
+
+	legacy, err := sql.Open("sqlite3", batchDSNOptions(path))
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	legacy.SetMaxOpenConns(1)
+	if err := migrate.Apply(ctx, legacy, batchMigrations[:4]); err != nil {
+		t.Fatalf("apply v4 schema: %v", err)
+	}
+	stamp := Now().UTC().Format(time.RFC3339Nano)
+	if _, err := legacy.ExecContext(ctx, `
+		INSERT INTO turn_suspensions (
+			session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
+			resume_queue_json, updated_at, episode_id, obligation_policies_json
+		) VALUES ('sess-legacy', 'turn-legacy', 'sess-legacy', '["batch-legacy"]', ?, '[]', ?, 'ep-legacy', '{}')`,
+		stamp, stamp); err != nil {
+		t.Fatalf("insert legacy turn suspension: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := NewSQLiteBatchStore(&StoreConfig{Path: path})
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	record, ok, err := store.GetTurnSuspension(ctx, "sess-legacy", "turn-legacy")
+	if err != nil || !ok || record == nil {
+		t.Fatalf("GetTurnSuspension(legacy) = (%v, %v, %v), want a record", record, ok, err)
+	}
+	if !record.ResultsConsumed {
+		t.Fatal("legacy park rows must be backfilled as consumed to preserve pre-gate behavior")
+	}
+}
+
 // TestTaskRecordReadProjectionRoundTripsWriteColumns pins the read projection
 // against the write projection: every column serialized by
 // insertTaskRow/overwriteTaskRow must land back on SubagentTaskRecord through

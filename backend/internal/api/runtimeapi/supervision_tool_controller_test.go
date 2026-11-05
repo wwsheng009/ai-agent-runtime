@@ -12,6 +12,7 @@ import (
 	chat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -178,6 +179,64 @@ func TestHandlerSupervisionToolController_DescendantsCoversWholeBatch(t *testing
 	require.Equal(t, "no progress event", filtered.Descendants[0].Reason)
 	require.Equal(t, supervision.Scope{RootSessionID: "parent-session", Mode: "children"}, provider.scopes[1])
 	require.NotContains(t, provider.scopes[1].RootSessionID, "worker", "the caller scope is never taken from the model")
+}
+
+func TestHandlerSupervisionToolController_AutoScopeUsesCurrentTurnWhenSubjectsExist(t *testing.T) {
+	ctx := context.Background()
+	handler, _ := newAPISupervisionToolTestHandler(t, "api-supervision-auto-scope")
+	batches := newAPISupervisionBatchStore(t)
+	handler.SetSubagentBatchStore(batches)
+	runtimeStore := chat.NewInMemoryRuntimeStore(16)
+	handler.sessionRuntimeStore = runtimeStore
+
+	const (
+		parentSessionID = "parent-auto-scope"
+		turnID          = "turn-auto-scope"
+		batchID         = "batch_auto_scope"
+	)
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSessionID,
+		RootScopeID:   parentSessionID,
+		ObligationIDs: []string{batchID},
+	}))
+	require.NoError(t, runtimeStore.SaveState(ctx, &chat.RuntimeState{
+		SessionID:       parentSessionID,
+		Status:          chat.SessionIdle,
+		SuspendedTurnID: turnID,
+	}))
+
+	handler.SetSupervisionDescendantProvider(&recordingAPIDescendantProvider{states: []supervision.DescendantState{
+		{Kind: supervision.SubjectAgentRun, ID: batchID, ExecutionStatus: "running", SupervisionState: supervision.SupervisionRunning},
+		{Kind: supervision.SubjectAgentRun, ID: "historical", ExecutionStatus: "completed", SupervisionState: supervision.SupervisionTerminated},
+	}})
+	controller := newHandlerSupervisionToolController(handler)
+	require.NotNil(t, controller)
+
+	snapshot, err := controller.SupervisionDescendants(ctx, parentSessionID, toolbroker.SupervisionDescendantsArgs{})
+	require.NoError(t, err)
+	require.Equal(t, "current_turn", snapshot.FilterScope)
+	require.Len(t, snapshot.Descendants, 1)
+	require.Equal(t, batchID, snapshot.Descendants[0].ID)
+
+	all, err := controller.SupervisionDescendants(ctx, parentSessionID, toolbroker.SupervisionDescendantsArgs{Scope: "all"})
+	require.NoError(t, err)
+	require.Equal(t, "all", all.FilterScope)
+	require.Len(t, all.Descendants, 2)
+}
+
+func TestHandlerSupervisionToolController_AutoScopeFallsBackToAllWithoutCurrentTurn(t *testing.T) {
+	handler, _ := newAPISupervisionToolTestHandler(t, "api-supervision-auto-scope-empty")
+	handler.SetSupervisionDescendantProvider(&recordingAPIDescendantProvider{states: []supervision.DescendantState{
+		{Kind: supervision.SubjectAgentRun, ID: "historical", ExecutionStatus: "completed", SupervisionState: supervision.SupervisionTerminated},
+	}})
+	controller := newHandlerSupervisionToolController(handler)
+	require.NotNil(t, controller)
+
+	snapshot, err := controller.SupervisionDescendants(context.Background(), "parent-no-turn", toolbroker.SupervisionDescendantsArgs{})
+	require.NoError(t, err)
+	require.Equal(t, "all", snapshot.FilterScope)
+	require.Len(t, snapshot.Descendants, 1)
 }
 
 // TestHandlerSupervisionToolController_TeamLeadUsesTeamScope pins the team-lead

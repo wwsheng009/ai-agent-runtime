@@ -117,3 +117,49 @@ func TestWaitAgentOnUnboundBatchTaskStaysPending(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(started), 250*time.Millisecond,
 		"wait must actually hold the observation window instead of returning immediately")
 }
+
+func TestWaitAgentPeekReturnsImmediately(t *testing.T) {
+	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-batch-peek")
+	applyFastAgentWaitWindows(host)
+	ctx := context.Background()
+	host.SessionStore = runtimechat.NewInMemoryStorage()
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		RootScopeID:     localWaitLedgerTestSession,
+		ParentSessionID: localWaitLedgerTestSession,
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		Version:         1,
+	}
+	created, err := host.SubagentBatches.CreateBatch(ctx, batch, []subagentbatch.SubagentTaskRecord{{
+		TaskID:     "task-peek",
+		BatchID:    batch.BatchID,
+		Status:     subagentbatch.TaskPending,
+		OrderIndex: 0,
+		UpdatedAt:  now,
+		Version:    1,
+	}})
+	require.NoError(t, err)
+	require.True(t, created)
+
+	registry := newLocalActorRegistry(host)
+	started := time.Now()
+	result, err := registry.Wait(ctx, toolbroker.WaitAgentArgs{
+		ID:   "task-peek",
+		Peek: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Less(t, time.Since(started), time.Second,
+		"peek must not open the active wait window")
+	require.True(t, result.Peek)
+	require.False(t, result.TimedOut)
+	require.Equal(t, 1, result.PendingCount)
+	require.Contains(t, result.NextAction, "peek_pending")
+	require.Zero(t, result.WaitTimeoutMs)
+}

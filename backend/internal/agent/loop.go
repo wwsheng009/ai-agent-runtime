@@ -275,6 +275,20 @@ type ReActLoop struct {
 	// pendingHookContexts accumulates PreToolUse additionalContext for the next
 	// model request. It is run-scoped and cleared after injection.
 	pendingHookContexts []string
+	// synthesisRequired is set after subagent_wait reports that every required
+	// obligation is terminal. The next tool batch is denied so the parent must
+	// synthesize the attached packet instead of exploring internal storage.
+	synthesisRequired bool
+	// synthesisPacket is the compact child-result packet from the terminal
+	// subagent_wait. It is the fallback payload if the synthesis budget expires.
+	synthesisPacket *toolbroker.SynthesisPacket
+	// synthesisDeniedSteps counts denied tool batches after synthesisRequired.
+	// Two denials are enough to distinguish "model needs one nudge" from a loop.
+	synthesisDeniedSteps int
+	// synthesisBudgetExhausted triggers a deterministic finalization-incomplete
+	// result on the next loop iteration instead of letting the model explore
+	// forever after all child obligations are already terminal.
+	synthesisBudgetExhausted bool
 }
 
 // maxStopHookContinues bounds how many extra steps a Stop hook may force in one
@@ -752,6 +766,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.stopHookContinued = false
 	loop.stopHookContinues = 0
 	loop.pendingHookContexts = nil
+	loop.synthesisRequired = false
+	loop.synthesisPacket = nil
+	loop.synthesisDeniedSteps = 0
+	loop.synthesisBudgetExhausted = false
 	// Fork 前缀审计（P2-1'）：同样按 run 重置，重试不自带上一 attempt 的结果。
 	loop.forkAudit = options.ForkAudit
 	loop.forkAuditDone = false
@@ -1153,6 +1171,23 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Duration = *startTime
 			result.Usage = totalUsage.Clone()
 			return result, err
+		}
+		if loop.synthesisBudgetExhausted {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "synthesis_budget_exhausted"
+			result.Output = loop.synthesisFallbackOutput()
+			result.Error = result.Output
+			result.Steps = step - 1
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, result.Steps, result, "synthesis_budget_exhausted")
+			return result, nil
 		}
 
 		if loop.config.Verbose {
@@ -1661,6 +1696,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, err
 		}
+		loop.observeSynthesisWaitResults(currentCtx, traceID, sessionID, toolResults)
 		// Observe completed results, not requested windows: the host may clamp a
 		// timeout or return ready immediately. Use this same observation for the
 		// runtime event and the advisory passed to toolResultsToPayloads below.
@@ -3505,6 +3541,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 
 // act 行动阶段：执行工具调用
 func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step int, depth int, historySnapshot []types.Message, toolCalls []types.ToolCall, toolWhitelist []string) ([]toolExecutionResult, error) {
+	if loop.synthesisRequired && len(toolCalls) > 0 {
+		return loop.denySynthesisToolCalls(ctx, traceID, sessionID, step, toolCalls), nil
+	}
 	for index := range toolCalls {
 		toolCalls[index] = loop.bindFreeformToolCall(ctx, toolCalls[index])
 	}
@@ -3923,6 +3962,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							if store := coordinator.Store(); store != nil {
 								if tasks, listErr := store.ListTasks(ctx, batch.BatchID); listErr == nil && len(tasks) > 0 {
 									rows := make([]map[string]interface{}, 0, len(tasks))
+									taskByID := make(map[string]SubagentTask, len(subtasks))
+									for _, subtask := range subtasks {
+										taskByID[strings.TrimSpace(subtask.ID)] = subtask
+									}
+									var routeWarnings []string
 									for _, task := range tasks {
 										row := map[string]interface{}{
 											"task_id": strings.TrimSpace(task.TaskID),
@@ -3931,9 +3975,30 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 										if childSessionID := strings.TrimSpace(task.ChildSessionID); childSessionID != "" {
 											row["child_session_id"] = childSessionID
 										}
+										if subtask, ok := taskByID[strings.TrimSpace(task.TaskID)]; ok {
+											if len(subtask.RouteWarnings) > 0 {
+												row["route_warnings"] = append([]string(nil), subtask.RouteWarnings...)
+												routeWarnings = append(routeWarnings, subtask.RouteWarnings...)
+											}
+											if value := strings.TrimSpace(subtask.Provider); value != "" {
+												row["provider"] = value
+											}
+											if value := strings.TrimSpace(subtask.Model); value != "" {
+												row["model"] = value
+											}
+											if value := strings.TrimSpace(subtask.ReasoningEffort); value != "" {
+												row["reasoning_effort"] = value
+											}
+											if value := strings.TrimSpace(subtask.RoutingSource); value != "" {
+												row["route_source"] = value
+											}
+										}
 										rows = append(rows, row)
 									}
 									handlePayload["tasks"] = rows
+									if len(routeWarnings) > 0 {
+										handlePayload["route_warnings"] = append([]string(nil), routeWarnings...)
+									}
 								}
 							}
 						}
@@ -4179,6 +4244,162 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	loop.resetReadOnlyDenyStreakOnSuccess(toolCalls, results)
 	loop.resetSurfaceMismatchStreakOnSuccess(toolCalls, results)
 	return results, nil
+}
+
+const synthesisRequiredToolError = "synthesis_required: all required child obligations are terminal; do not call tools; produce the final answer now using the synthesis_packet from subagent_wait"
+
+// observeSynthesisWaitResults enters the bounded synthesis phase when a
+// subagent_wait result proves that every required obligation is terminal. The
+// packet is already in the tool result; the next tool batch is denied so the
+// model cannot drift into internal-storage exploration.
+func (loop *ReActLoop) observeSynthesisWaitResults(ctx context.Context, traceID, sessionID string, results []toolExecutionResult) {
+	if loop == nil {
+		return
+	}
+	for _, result := range results {
+		if !toolregistry.IsSpellingOf(toolbroker.ToolSubagentWait, result.Call.Name) {
+			continue
+		}
+		wait, ok := synthesisWaitResult(result.Output)
+		if !ok || wait == nil {
+			continue
+		}
+		if !wait.FinalizationRequired {
+			continue
+		}
+		packet := wait.Synthesis
+		if packet == nil {
+			packet = toolbroker.BuildSynthesisPacketFromWaitResult(wait)
+		}
+		if packet == nil {
+			continue
+		}
+		resultsConsumed := loop.markTurnResultsConsumed(ctx, sessionID)
+		loop.synthesisRequired = true
+		loop.synthesisPacket = packet
+		loop.synthesisDeniedSteps = 0
+		loop.synthesisBudgetExhausted = false
+		loop.emitRuntimeEvent("tool_loop.synthesis_required", sessionID, result.Call.Name, map[string]interface{}{
+			"trace_id":         traceID,
+			"batch_id":         packet.BatchID,
+			"task_count":       packet.TaskCount,
+			"completion_order": append([]string(nil), packet.CompletionOrder...),
+			"next_action":      "synthesize_and_finalize",
+			"results_consumed": resultsConsumed,
+		})
+		return
+	}
+}
+
+// markTurnResultsConsumed records the durable half of the synthesis gate: the
+// parent has the child-result packet in its current context, so a later
+// settlement may clear the parked turn. The write is best-effort (the in-memory
+// synthesis gate still prevents further tools), but a failed write must not
+// finalize with unread results, so settlement checks the durable flag.
+func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID string) bool {
+	if loop == nil || loop.agent == nil {
+		return true
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return true
+	}
+	store := coordinator.Store()
+	marker, ok := store.(subagentbatch.TurnResultsConsumptionStore)
+	if !ok || marker == nil {
+		// Stores without the optional capability keep the pre-gate behavior.
+		return true
+	}
+	turnID := strings.TrimSpace(loop.turnID)
+	if turnID == "" {
+		turnID = strings.TrimSpace(TurnIDFromContext(ctx))
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || turnID == "" {
+		return true
+	}
+	baseCtx := ctx
+	if baseCtx == nil || baseCtx.Err() != nil {
+		baseCtx = context.Background()
+	}
+	markCtx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
+	defer cancel()
+	return marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID) == nil
+}
+
+func synthesisWaitResult(output interface{}) (*toolbroker.AgentWaitResult, bool) {
+	switch value := output.(type) {
+	case *toolbroker.AgentWaitResult:
+		return value, value != nil
+	case toolbroker.AgentWaitResult:
+		return &value, true
+	}
+	var encoded []byte
+	switch value := output.(type) {
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil, false
+		}
+		encoded = []byte(value)
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, false
+		}
+		encoded = data
+	}
+	var wait toolbroker.AgentWaitResult
+	if err := json.Unmarshal(encoded, &wait); err != nil {
+		return nil, false
+	}
+	return &wait, true
+}
+
+func (loop *ReActLoop) denySynthesisToolCalls(ctx context.Context, traceID, sessionID string, step int, toolCalls []types.ToolCall) []toolExecutionResult {
+	gateway := loop.agent.GetOutputGateway()
+	results := make([]toolExecutionResult, len(toolCalls))
+	loop.synthesisDeniedSteps++
+	for i, tc := range toolCalls {
+		result := toolExecutionResult{Call: tc}
+		metadata := map[string]interface{}{
+			"step":               step,
+			"trace_id":           traceID,
+			"synthesis_required": true,
+		}
+		loop.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, nil))
+		result.Error = synthesisRequiredToolError
+		result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
+			"synthesis_required": true,
+		})
+		results[i] = result
+		loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+	}
+	if loop.synthesisDeniedSteps >= 2 {
+		loop.synthesisBudgetExhausted = true
+	}
+	loop.emitRuntimeEvent("tool_loop.synthesis_tool_denied", sessionID, "", map[string]interface{}{
+		"trace_id":     traceID,
+		"step":         step,
+		"tool_count":   len(toolCalls),
+		"denied_steps": loop.synthesisDeniedSteps,
+	})
+	return results
+}
+
+func (loop *ReActLoop) synthesisFallbackOutput() string {
+	if loop == nil || loop.synthesisPacket == nil {
+		return "synthesis_budget_exhausted: all required child obligations are terminal; synthesize the final answer from the subagent_wait result"
+	}
+	encoded, err := json.MarshalIndent(loop.synthesisPacket, "", "  ")
+	if err != nil {
+		return "synthesis_budget_exhausted: all required child obligations are terminal; synthesize the final answer from the subagent_wait result"
+	}
+	const limit = 16000
+	text := string(encoded)
+	if runes := []rune(text); len(runes) > limit {
+		text = string(runes[:limit]) + "…"
+	}
+	return "synthesis_budget_exhausted: all required child obligations are terminal, but the parent did not finalize within the synthesis budget. Child synthesis packet:\n" + text
 }
 
 // finalizeDeniedToolResult runs gateway reduction for a denied/failed-before-exec
@@ -8976,6 +9197,13 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		if err != nil || !settled {
 			continue
 		}
+		// Child results are only safe to discard after the parent has actually
+		// received them. Keeping the record parked forces another resume episode
+		// (the wake/mailbox remains durable) instead of finalizing with an unread
+		// SynthesisPacket.
+		if record.HasChildResults() && !record.ResultsConsumed {
+			continue
+		}
 		if err := store.ClearTurnSuspension(settleCtx, sessionID, record.TurnID); err != nil {
 			loop.agent.reportSuspensionDegraded(settleCtx, sessionID, "parked-state clear failed: "+err.Error())
 			continue
@@ -8986,15 +9214,22 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		// 真机 E2E：后台批次在父 turn 结束前就完成 ⇒ 永不出现 resume episode）。
 		// 因此补发一次非 wake 的闭合事件：trigger=settled，身份字段与 wake 版一致。
 		loop.emitRuntimeEvent(events.EventTurnResumed, sessionID, "", map[string]interface{}{
-			"turn_id":          record.TurnID,
-			"episode_id":       record.EpisodeID,
-			"session_id":       sessionID,
-			"trigger":          events.TurnResumedTriggerSettled,
-			"phase":            "settled",
-			"settled":          true,
-			"obligation_count": len(record.ObligationIDs),
+			"turn_id":                 record.TurnID,
+			"episode_id":              record.EpisodeID,
+			"session_id":              sessionID,
+			"trigger":                 events.TurnResumedTriggerSettled,
+			"resume_reason":           "obligations_settled",
+			"child_results_available": turnSuspensionHasChildResults(record),
+			"results_consumed":        record.ResultsConsumed,
+			"phase":                   "settled",
+			"settled":                 true,
+			"obligation_count":        len(record.ObligationIDs),
 		})
 	}
+}
+
+func turnSuspensionHasChildResults(record *subagentbatch.TurnSuspension) bool {
+	return record.HasChildResults()
 }
 
 // turnStillParked reports whether the current logical turn still owns a
@@ -9372,7 +9607,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 								"description": "Optional audit-only one-line task summary.",
 							},
 							"provider":         map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
-							"reasoning_effort": map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
+							"reasoning_effort": map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high", "max"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy and reports unsupported values in route_warnings."},
 							"thinking_effort":  map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
 							"completion_requirement": map[string]interface{}{
 								"type":        "string",

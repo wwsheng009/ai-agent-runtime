@@ -33,6 +33,21 @@ type execExitError struct {
 	Exit int
 }
 
+type execFinalizationTimeoutError struct {
+	cause error
+}
+
+func (e *execFinalizationTimeoutError) Error() string {
+	return "parent exec timeout; finalization_incomplete child results preserved"
+}
+
+func (e *execFinalizationTimeoutError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
 func (e *execExitError) Error() string {
 	if e == nil || e.Err == nil {
 		return ""
@@ -429,7 +444,7 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 		}
 	}
 	if err != nil {
-		return handleExecTurnError(ctx, processor, turnID, duration, opts, err)
+		return handleExecTurnError(ctx, session, processor, turnID, duration, opts, err)
 	}
 	if strings.TrimSpace(opts.OutputSchema) != "" {
 		if err := validateExecFinalMessageSchema(opts.OutputSchema, response); err != nil {
@@ -462,13 +477,49 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 	return nil
 }
 
-func handleExecTurnError(ctx context.Context, processor ExecEventProcessor, turnID string, duration time.Duration, opts *ExecOptions, err error) error {
+func handleExecTurnError(ctx context.Context, session *ExecSession, processor ExecEventProcessor, turnID string, duration time.Duration, opts *ExecOptions, err error) error {
 	code := "EXECUTION_FAILED"
 	exitCode := execExitExecutionFailed
 	switch {
 	case ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		code = "TIMEOUT"
 		exitCode = execExitTimeout
+		finalization := buildExecFinalizationIncomplete(ctx, session)
+		message := finalization.Message()
+		var chatSession *ChatSession
+		if session != nil {
+			chatSession = session.ChatSession
+		}
+		usage := execTokenUsage(chatSession)
+		model, provider := "", ""
+		if chatSession != nil {
+			model = chatSession.Model
+			provider = chatSession.ProviderName
+		}
+		result := ExecFinalResult{
+			Status:                     "finalization_incomplete",
+			Message:                    message,
+			SessionID:                  currentRuntimeSessionID(chatSession),
+			Model:                      model,
+			Provider:                   provider,
+			Usage:                      usage,
+			DurationMs:                 duration.Milliseconds(),
+			Profile:                    execProfileMetadata(chatSession),
+			ExecFinalizationIncomplete: finalization,
+		}
+		processor.SetFinalResult(result)
+		processor.OnTurnFailed(TurnFailedEvent{
+			TurnID:                     turnID,
+			Error:                      message,
+			Code:                       code,
+			Status:                     "finalization_incomplete",
+			ExecFinalizationIncomplete: finalization,
+		})
+		processor.OnError(ErrorEvent{Message: message, Code: code})
+		if printErr := processor.PrintFinalOutput(opts); printErr != nil {
+			return newExecExitError(execExitExecutionFailed, "OUTPUT_FAILED", printErr)
+		}
+		return newExecExitError(exitCode, code, &execFinalizationTimeoutError{cause: err})
 	case ctx != nil && errors.Is(ctx.Err(), context.Canceled):
 		code = "INTERRUPTED"
 		exitCode = execExitInterrupted

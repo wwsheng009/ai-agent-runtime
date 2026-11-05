@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -215,7 +216,17 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 		// 可用动作清单，见 ResumePrompt）。resume 为 nil（投影未接线）时
 		// AutoWakePromptFor 逐字节回落 AutoWakePrompt，接线本身不改变旧行为。
 		DeliverResume: func(ctx context.Context, parentSessionID, _ string, _ *supervision.Digest, _ []string, resume *supervision.ResumeContext) error {
-			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePromptFor(resume))
+			err := h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePromptFor(resume))
+			if err == nil && resume != nil && resume.Terminal && resume.PendingCount == 0 &&
+				resume.TotalCount > 0 && !resume.HasAgentSessionObligations() {
+				// SubmitPromptAsync accepted a prompt that already contains the
+				// terminal batch result summaries/artifacts. The parent context
+				// now owns those results, so settlement may clear the park
+				// record. agent_session results stay unclaimed until the parent
+				// reads them through subagent_wait.
+				h.markTurnResultsConsumed(ctx, parentSessionID, resume.TurnID)
+			}
+			return err
 		},
 		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
 		// 事件总线（A+D 契约：落盘 + 回合末尾巴帧），UI/审计据此结束"托管中"表达；
@@ -225,6 +236,31 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 		},
 	}
 	return h.supervisionWake
+}
+
+// markTurnResultsConsumed closes the durable synthesis gate for the API host.
+// Best-effort: stores without the optional capability keep the pre-gate
+// behavior, and a failed write leaves the turn parked rather than losing data.
+func (h *Handler) markTurnResultsConsumed(ctx context.Context, parentSessionID, turnID string) {
+	if h == nil {
+		return
+	}
+	store := h.getSubagentBatchStore()
+	marker, ok := store.(subagentbatch.TurnResultsConsumptionStore)
+	if !ok || marker == nil {
+		return
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	turnID = strings.TrimSpace(turnID)
+	if parentSessionID == "" || turnID == "" {
+		return
+	}
+	if ctx == nil || ctx.Err() != nil {
+		ctx = context.Background()
+	}
+	markCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = marker.MarkTurnResultsConsumed(markCtx, parentSessionID, turnID)
 }
 
 // submitSupervisionWakePrompt 是 API 宿主 wake/resume 的唯一提交通道：Deliver 与

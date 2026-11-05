@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // fakeExecutor is a minimal subagentExecutor seam for coordinator tests. It
@@ -169,6 +170,80 @@ func TestStartBackgroundRunsToTerminal(t *testing.T) {
 			t.Errorf("events %v missing %s", events, want)
 		}
 	}
+}
+
+func TestTerminalPayloadCarriesSynthesisPacket(t *testing.T) {
+	store := testStore(t)
+	exec := &fakeExecutor{
+		results: []SubagentResult{
+			{
+				ID:        "t1",
+				SessionID: "child-1",
+				Success:   true,
+				Summary:   "first result",
+				Route: subagentRouteReceipt{
+					Provider:        "magpie",
+					Model:           "workbuddy-ai/deepseek-v4.1-flash",
+					ReasoningEffort: "max",
+					Warnings:        []string{"reasoning_effort_unsupported_ignored"},
+				},
+			},
+			{
+				ID:        "t2",
+				SessionID: "child-2",
+				Success:   false,
+				Error:     "boom",
+				Summary:   "partial result",
+			},
+		},
+	}
+	payloadCh := make(chan map[string]interface{}, 1)
+	c := &SubagentBatchCoordinator{
+		store:    store,
+		executor: exec,
+		emitter: func(eventType string, payload map[string]interface{}) {
+			if eventType == "subagent.batch.completed" || eventType == "subagent.batch.failed" {
+				payloadCh <- payload
+			}
+		},
+		deadline: time.Minute,
+		cancels:  make(map[string]context.CancelFunc),
+	}
+	batch, err := c.StartBackground(context.Background(), BatchStartOptions{
+		ParentSessionID: "session-1",
+		ParentTurnID:    "turn-1",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+	}, []SubagentTask{
+		{ID: "t1", Goal: "first"},
+		{ID: "t2", Goal: "second"},
+	})
+	require.NoError(t, err)
+	waitTerminal(t, store, batch.BatchID)
+	directPacket := c.buildSynthesisPacket(context.Background(), batch)
+	require.NotNil(t, directPacket, "coordinator must build a synthesis packet from the terminal task ledger")
+
+	var payload map[string]interface{}
+	select {
+	case payload = <-payloadCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal payload was not emitted")
+	}
+	packet, ok := payload["synthesis_packet"].(*toolbroker.SynthesisPacket)
+	require.True(t, ok, "terminal payload must carry a synthesis packet: %#v", payload["synthesis_packet"])
+	require.Equal(t, batch.BatchID, packet.BatchID)
+	require.Equal(t, 2, packet.TaskCount)
+	require.Equal(t, 1, packet.CompletedCount)
+	require.Equal(t, 1, packet.FailedCount)
+	require.Equal(t, "synthesize_and_finalize", packet.NextAction)
+	require.ElementsMatch(t, []string{"t1", "t2"}, packet.CompletionOrder)
+	require.Len(t, packet.Children, 2)
+	children := make(map[string]toolbroker.SynthesisChildResult, len(packet.Children))
+	for _, child := range packet.Children {
+		children[child.TaskID] = child
+	}
+	require.Equal(t, "first result", children["t1"].Summary)
+	require.Equal(t, []string{"reasoning_effort_unsupported_ignored"}, children["t1"].RouteWarnings)
+	require.Equal(t, "boom", children["t2"].Error)
 }
 
 func TestStartBackgroundCancel(t *testing.T) {

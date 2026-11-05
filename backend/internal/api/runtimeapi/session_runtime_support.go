@@ -2271,6 +2271,7 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	obligations, baseline, pending, budgetKey := c.waitLedger(ctx)
 	directOut := false
+	peek := args.Peek
 	if len(obligations) == 0 {
 		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
 		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
@@ -2278,7 +2279,7 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 		directOut = len(obligations) > 0
 	}
 	waitBudgetLimit := c.agentsConfig().MaxConsecutiveWaitWithoutProgress
-	if len(obligations) > 0 && !pending && !directOut {
+	if !peek && len(obligations) > 0 && !pending && !directOut {
 		// 挂起路径的"账本已无待办 ⇒ 立即 finalize"短路（AC-P2-4e）对直出行不适用：
 		// 模型显式等待的目标需要一次快照段来拿 agent 投影（状态/输出/失败原因），
 		// 全终态时该段本就不烧窗口。这里保持原有短路只服务挂起记录。
@@ -2288,7 +2289,7 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 			obligations, baseline,
 		), nil
 	}
-	if len(obligations) > 0 && pending && budgetKey != "" {
+	if !peek && len(obligations) > 0 && pending && budgetKey != "" {
 		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
 		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
 		// 收尾门兜底——subagent_wait 自身不挂起 turn。
@@ -2309,6 +2310,12 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 		return result, err
 	}
 	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+	if peek {
+		if result != nil {
+			result.Peek = true
+		}
+		return result, nil
+	}
 	if len(obligations) > 0 {
 		// 等待段结束后复读账本：terminal_delta 的语义是"本段内新终态"，而预读
 		// 快照的行状态停留在等待前，不复读就永远是空的——这会把等待期间已经
@@ -2574,14 +2581,28 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 		}
 		sessionIDs[index] = resolvedSessionID
 	}
-	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, c.waitTimeoutPolicy())
-	if err != nil {
-		return nil, err
+	var (
+		resolution agentcontrol.WaitTimeoutResolution
+		timeout    time.Duration
+	)
+	if !args.Peek {
+		resolution, err = agentcontrol.ResolveWaitTimeout(args.TimeoutMs, c.waitTimeoutPolicy())
+		if err != nil {
+			return nil, err
+		}
+		timeout = time.Duration(resolution.EffectiveMs) * time.Millisecond
 	}
-	timeout := time.Duration(resolution.EffectiveMs) * time.Millisecond
 	// 与 CLI 宿主同修（2026-09-26 真机）：窗口锚点必须与 waited_ms 的起点
 	// 一致，否则解析/订阅耗时会变成请求窗口之外的"超调"（90000 → 92617）。
-	waitCtx, cancel := context.WithDeadline(ctx, startedAt.Add(timeout))
+	var (
+		waitCtx context.Context
+		cancel  context.CancelFunc
+	)
+	if timeout > 0 {
+		waitCtx, cancel = context.WithDeadline(ctx, startedAt.Add(timeout))
+	} else {
+		waitCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 	wakeCh, unsubscribe := c.subscribeWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
@@ -2634,19 +2655,26 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
-			Agents:                 snapshots,
-			ReadyCount:             readyCount,
-			PendingCount:           pendingCount,
-			ReadyIDs:               readyIDs,
-			PendingIDs:             pendingIDs,
-			WaitTimeoutMs:          int(timeout.Milliseconds()),
-			WaitTimeoutRequestedMs: resolution.RequestedMs,
-			WaitTimeoutClamped:     resolution.Clamped,
+			Agents:       snapshots,
+			ReadyCount:   readyCount,
+			PendingCount: pendingCount,
+			ReadyIDs:     readyIDs,
+			PendingIDs:   pendingIDs,
+		}
+		if args.Peek {
+			waitResult.Peek = true
+		} else {
+			waitResult.WaitTimeoutMs = int(timeout.Milliseconds())
+			waitResult.WaitTimeoutRequestedMs = resolution.RequestedMs
+			waitResult.WaitTimeoutClamped = resolution.Clamped
 		}
 		if matched != nil {
 			waitResult.Agent = matched
 			waitResult.MatchedID = matched.ID
 			waitResult.MatchedSessionID = matched.SessionID
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
+		}
+		if args.Peek {
 			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		}
 		select {
@@ -2668,6 +2696,9 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 // waitForMailboxEvent bounds the mailbox observation window, then delegates to
 // the resolved implementation so the effective window is echoed back.
 func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if args.Peek {
+		return c.peekMailboxEvent(ctx, args)
+	}
 	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, c.waitTimeoutPolicy())
 	if err != nil {
 		return nil, err
@@ -2678,6 +2709,42 @@ func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args t
 		return nil, err
 	}
 	return toolbroker.ApplyAgentWaitTimeout(result, resolution.RequestedMs, resolution.EffectiveMs, resolution.Clamped), nil
+}
+
+// peekMailboxEvent performs one durable mailbox/event read without opening a
+// wait window. It mirrors the first pass of waitForMailboxEventResolved.
+func (c *sessionAgentController) peekMailboxEvent(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if c == nil || c.handler == nil {
+		return nil, fmt.Errorf("handler not configured")
+	}
+	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	startedAt := time.Now()
+	store := c.handler.getSessionEventStore()
+	if store == nil {
+		return nil, fmt.Errorf("session event store not configured")
+	}
+	if events, ok, _, err := listAPIMailboxEvents(ctx, store, sessionID, args.AfterSeq, 64); err != nil {
+		return nil, err
+	} else if ok {
+		if result := buildMailboxWaitResult(sessionID, events); result != nil {
+			result.Peek = true
+			return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
+		}
+	}
+	events, err := store.ListEvents(ctx, sessionID, args.AfterSeq, 64)
+	if err != nil {
+		return nil, err
+	}
+	if result := buildMailboxWaitResult(sessionID, events); result != nil {
+		result.Peek = true
+		return toolbroker.FinalizeAgentWaitResult(result, startedAt), nil
+	}
+	return toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{
+		Peek: true,
+	}, startedAt), nil
 }
 
 func (c *sessionAgentController) waitForMailboxEventResolved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {

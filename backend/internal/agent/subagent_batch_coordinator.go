@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -2709,15 +2711,16 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		if i < len(reports) && reportProduced(reports[i]) {
 			r := reports[i]
 			result = subagentResultForStore{
-				TaskID:     taskID,
-				Role:       task.Role,
-				SessionID:  r.SessionID,
-				UsageTotal: usageTotal(r.Usage),
-				Success:    r.Success && r.Error == "",
-				Summary:    r.Summary,
-				Findings:   r.Findings,
-				Patches:    batchFilePatchesToSpec(r.Patches),
-				Error:      r.Error,
+				TaskID:        taskID,
+				Role:          task.Role,
+				SessionID:     r.SessionID,
+				UsageTotal:    usageTotal(r.Usage),
+				Success:       r.Success && r.Error == "",
+				Summary:       r.Summary,
+				Findings:      r.Findings,
+				Patches:       batchFilePatchesToSpec(r.Patches),
+				Error:         r.Error,
+				RouteWarnings: append([]string(nil), r.Route.Warnings...),
 			}
 			switch {
 			case r.TurnParked && abortReason == batchAbortNone:
@@ -2747,16 +2750,17 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			}
 		}
 		taskResult := &subagentbatch.TaskResult{
-			TaskID:      result.TaskID,
-			Role:        result.Role,
-			SessionID:   result.SessionID,
-			Success:     result.Success,
-			Summary:     result.Summary,
-			Findings:    result.Findings,
-			Patches:     result.Patches,
-			Error:       result.Error,
-			UsageTotal:  result.UsageTotal,
-			ArtifactRef: result.ArtifactRef,
+			TaskID:        result.TaskID,
+			Role:          result.Role,
+			SessionID:     result.SessionID,
+			Success:       result.Success,
+			Summary:       result.Summary,
+			Findings:      result.Findings,
+			Patches:       result.Patches,
+			Error:         result.Error,
+			UsageTotal:    result.UsageTotal,
+			ArtifactRef:   result.ArtifactRef,
+			RouteWarnings: append([]string(nil), result.RouteWarnings...),
 		}
 		// P0-2: a failure that still produced a deliverable is not a bare
 		// failure. The terminal status must say so, otherwise the parent has to
@@ -3093,6 +3097,7 @@ func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batch 
 	if projectionErr := c.projectTerminalLifecycle(ctx, batch, eventType, &summary); projectionErr != nil {
 		payload["supervision_projection_error"] = projectionErr.Error()
 	}
+	c.attachSynthesisPacket(ctx, batch, payload)
 	delivery := c.deliverTerminalOnce(ctx, batch, eventType, deliveryKey, payload)
 	c.recordTerminalDelivery(batchID, eventType, deliveryKey, delivery, payload)
 	if delivery.AlreadyDelivered {
@@ -3296,6 +3301,7 @@ func (c *SubagentBatchCoordinator) deliverTerminalOnce(ctx context.Context, batc
 	if c == nil {
 		return failed(fmt.Errorf("subagent batch coordinator is not configured"))
 	}
+	c.attachSynthesisPacket(ctx, batch, payload)
 	c.terminalMu.Lock()
 	defer c.terminalMu.Unlock()
 	if c.terminalDelivered == nil {
@@ -3375,6 +3381,127 @@ func (c *SubagentBatchCoordinator) deliverTerminalOnce(ctx context.Context, batc
 	return delivery
 }
 
+// attachSynthesisPacket adds the compact child-result packet to a terminal
+// payload. It is best-effort: a missing/unreadable task ledger leaves the
+// original payload untouched rather than failing terminal delivery.
+func (c *SubagentBatchCoordinator) attachSynthesisPacket(ctx context.Context, batch *subagentbatch.SubagentBatch, payload map[string]interface{}) {
+	if c == nil || batch == nil || payload == nil {
+		return
+	}
+	if _, exists := payload["synthesis_packet"]; exists {
+		return
+	}
+	packet := c.buildSynthesisPacket(ctx, batch)
+	if packet == nil {
+		return
+	}
+	payload["synthesis_packet"] = packet
+	payload["next_action"] = "synthesize_and_finalize"
+}
+
+func (c *SubagentBatchCoordinator) buildSynthesisPacket(ctx context.Context, batch *subagentbatch.SubagentBatch) *toolbroker.SynthesisPacket {
+	if c == nil {
+		return nil
+	}
+	return BuildBatchSynthesisPacket(ctx, c.store, batch)
+}
+
+// BuildBatchSynthesisPacket is the host-independent packet builder shared by
+// the coordinator's terminal delivery and headless timeout finalization. It
+// reads the durable task ledger so it remains usable after the worker context
+// was canceled.
+func BuildBatchSynthesisPacket(ctx context.Context, store subagentbatch.BatchStore, batch *subagentbatch.SubagentBatch) *toolbroker.SynthesisPacket {
+	if store == nil || batch == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		// The worker context may already be canceled when the terminal event is
+		// delivered. The task ledger is the authoritative result source and must
+		// still be readable for the synthesis packet.
+		ctx = agentWithoutCancel(ctx)
+	}
+	records, err := store.ListTasks(ctx, batch.BatchID)
+	if err != nil || len(records) == 0 {
+		return nil
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		left, right := records[i].FinishedAt, records[j].FinishedAt
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		return left.Before(*right)
+	})
+	packet := &toolbroker.SynthesisPacket{
+		BatchID:    strings.TrimSpace(batch.BatchID),
+		Status:     string(batch.Status),
+		TaskCount:  len(records),
+		NextAction: "synthesize_and_finalize",
+	}
+	if !batch.CreatedAt.IsZero() && batch.FinishedAt != nil && !batch.FinishedAt.IsZero() {
+		packet.ElapsedMs = batch.FinishedAt.Sub(batch.CreatedAt).Milliseconds()
+	}
+	for _, record := range records {
+		child := toolbroker.SynthesisChildResult{
+			TaskID:      strings.TrimSpace(record.TaskID),
+			SessionID:   strings.TrimSpace(record.ChildSessionID),
+			Status:      string(record.Status),
+			ArtifactRef: strings.TrimSpace(record.ArtifactRef),
+			Error:       strings.TrimSpace(record.ErrorCode),
+		}
+		if record.StartedAt != nil && record.FinishedAt != nil {
+			child.DurationMs = record.FinishedAt.Sub(*record.StartedAt).Milliseconds()
+		}
+		if len(record.ResultSummary) > 0 {
+			var result subagentbatch.TaskResult
+			if json.Unmarshal(record.ResultSummary, &result) == nil {
+				child.Summary = strings.TrimSpace(result.Summary)
+				if strings.TrimSpace(result.Error) != "" {
+					child.Error = strings.TrimSpace(result.Error)
+				}
+				if strings.TrimSpace(result.ArtifactRef) != "" {
+					child.ArtifactRef = strings.TrimSpace(result.ArtifactRef)
+				}
+				if len(result.RouteWarnings) > 0 {
+					child.RouteWarnings = append([]string(nil), result.RouteWarnings...)
+				}
+			}
+		}
+		if len(record.Spec) > 0 {
+			var spec subagentbatch.TaskSpec
+			if json.Unmarshal(record.Spec, &spec) == nil {
+				if len(spec.RouteWarnings) > 0 {
+					child.RouteWarnings = append([]string(nil), spec.RouteWarnings...)
+				}
+			}
+		}
+		if len(packet.Children) < toolbroker.SynthesisChildLimit {
+			packet.Children = append(packet.Children, child)
+		} else {
+			packet.Truncated = true
+		}
+		switch record.Status {
+		case subagentbatch.TaskSucceeded:
+			packet.CompletedCount++
+			packet.CompletionOrder = append(packet.CompletionOrder, child.TaskID)
+		case subagentbatch.TaskFailed, subagentbatch.TaskFailedWithResult:
+			packet.FailedCount++
+			packet.CompletionOrder = append(packet.CompletionOrder, child.TaskID)
+		case subagentbatch.TaskCanceled:
+			packet.CanceledCount++
+			packet.CompletionOrder = append(packet.CompletionOrder, child.TaskID)
+		case subagentbatch.TaskTimedOut:
+			packet.TimedOutCount++
+			packet.CompletionOrder = append(packet.CompletionOrder, child.TaskID)
+		}
+	}
+	return packet
+}
+
 // recordTerminalDelivery annotates the terminal event payload with the durable
 // delivery outcome and emits the companion delivery-failed alert. It must be
 // called without terminalMu held: the alert travels through the same display
@@ -3452,13 +3579,14 @@ type subagentResultForStore struct {
 	// UsageTotal is the child's token total (usageTotal convention: TotalTokens,
 	// nil usage contributes 0). It travels into TaskResult.UsageTotal so
 	// read_agent_result/include_results can report a real total.
-	UsageTotal  int
-	Success     bool
-	Summary     string
-	Findings    []string
-	Patches     []subagentbatch.PatchSpec
-	Error       string
-	ArtifactRef string
+	UsageTotal    int
+	Success       bool
+	Summary       string
+	Findings      []string
+	Patches       []subagentbatch.PatchSpec
+	Error         string
+	ArtifactRef   string
+	RouteWarnings []string
 }
 
 func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {

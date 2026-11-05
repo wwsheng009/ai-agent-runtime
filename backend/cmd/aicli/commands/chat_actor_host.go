@@ -961,14 +961,27 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			return state.Summary().AcceptsResume()
 		},
 		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string) error {
-			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePrompt)
+			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePrompt, "", false)
 		},
 		// C2-1（改动 #4）/ G2：wake 升级为 resume——投递的 prompt 携带同一 turn 的
 		// resume 上下文（turn_id + rollup + I1 终局判据 + 可用动作清单，见
 		// ResumePrompt），父会话不必回溯历史。resume 为 nil（账本/进度投影未接线）
 		// 时 AutoWakePromptFor 逐字节回落 AutoWakePrompt，接线不改变旧行为。
 		DeliverResume: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string, resume *supervision.ResumeContext) error {
-			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePromptFor(resume))
+			resumeTurnID := ""
+			resultsReady := false
+			if resume != nil {
+				resumeTurnID = strings.TrimSpace(resume.TurnID)
+				// Batch result summaries/artifacts are inlined in the resume
+				// prompt. Once this prompt is accepted they are in the parent's
+				// current context, so the durable synthesis gate can be closed.
+				// agent_session results are not inlined; the prompt asks for
+				// subagent_wait and the loop marks the gate when that packet
+				// actually arrives.
+				resultsReady = resume.Terminal && resume.PendingCount == 0 &&
+					resume.TotalCount > 0 && !resume.HasAgentSessionObligations()
+			}
+			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePromptFor(resume), resumeTurnID, resultsReady)
 		},
 		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
 		// 事件总线（A+D 契约：落盘 + 回合末尾巴帧），UI/审计据此结束"托管中"表达；
@@ -1005,7 +1018,7 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 // （调用方是投影/事件回调，不得阻塞在一整轮父 turn 上），prompt 由调用方按是否
 // 携带 resume 上下文选择（AutoWakePrompt / ResumePrompt）。失败路径必须把已认领
 // 的 wake 行重新排队（plan §6-F：只记日志会静默吃掉父会话唯一一次自动唤醒）。
-func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, parentSessionID, rootScopeID string, wakeIDs []string, prompt string) error {
+func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, parentSessionID, rootScopeID string, wakeIDs []string, prompt, resumeTurnID string, resultsReady bool) error {
 	if h == nil || h.ActorRegistry == nil {
 		return fmt.Errorf("actor registry is not ready")
 	}
@@ -1037,6 +1050,9 @@ func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, paren
 			return
 		}
 		defer releaseTurn()
+		if resultsReady {
+			h.markLocalTurnResultsConsumed(runCtx, parentSessionID, resumeTurnID)
+		}
 		if err := h.submitParentWakeTurn(runCtx, parentSessionID, prompt); err != nil {
 			h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
 		}

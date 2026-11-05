@@ -283,6 +283,11 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	require.Equal(t, 0, resumed[0].Payload["pending_count"])
 	require.Equal(t, "failed", resumed[0].Payload["status"])
 	require.Equal(t, true, resumed[0].Payload["terminal"])
+	settled, ok, err := handler.getSubagentBatchStore().GetTurnSuspension(ctx, parentSession, parkedTurnID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, settled.ResultsConsumed,
+		"the terminal resume prompt already contains the result summaries; the durable gate must close")
 
 	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
 		RootScopeID:           parentSession,

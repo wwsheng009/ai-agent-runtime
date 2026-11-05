@@ -30,6 +30,29 @@ func TestLocalHostWiresResumeDelivery(t *testing.T) {
 		"G3：宿主必须接 Announce，否则挂起 → 恢复在 UI/审计面没有闭环信号")
 }
 
+func TestLocalHostMarksTurnResultsConsumed(t *testing.T) {
+	ctx := context.Background()
+	host := newLocalSupervisionTestHost(t)
+	host.SubagentBatches = newTestSubagentBatchStore(t)
+	const (
+		parentSessionID = "parent-results-consumed"
+		turnID          = "turn-results-consumed"
+	)
+	require.NoError(t, host.SubagentBatches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSessionID,
+		RootScopeID:   parentSessionID,
+		ObligationIDs: []string{"batch-results-consumed"},
+	}))
+
+	host.markLocalTurnResultsConsumed(ctx, parentSessionID, turnID)
+
+	record, ok, err := host.SubagentBatches.GetTurnSuspension(ctx, parentSessionID, turnID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, record.ResultsConsumed)
+}
+
 // TestLocalTurnResumedEventPayload 钉住 G3 的 CLI 播报面：supervision 的
 // host-neutral 播报必须被翻成宿主总线上的 turn.resumed（A+D 契约），
 // 且键名与 supervision.EventPayload 的契约一致（前端/审计按同一份键消费）。

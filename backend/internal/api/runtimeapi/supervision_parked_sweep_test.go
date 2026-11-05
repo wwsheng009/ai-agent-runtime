@@ -55,6 +55,8 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 		ResumeQueue:   []string{"batch_orphan"},
 		ParkedAt:      now,
 	}))
+	marker := batches.(subagentbatch.TurnResultsConsumptionStore)
+	require.NoError(t, marker.MarkTurnResultsConsumed(ctx, sessionID, "turn_orphan"))
 
 	_, err = batches.CreateBatch(ctx, &subagentbatch.SubagentBatch{
 		BatchID:         "batch_live",
@@ -108,7 +110,65 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, resumed, 1, "the sweep must announce the settled closure exactly once")
+	require.Equal(t, "obligations_settled", resumed[0].Payload["resume_reason"])
+	require.Equal(t, true, resumed[0].Payload["child_results_available"])
+	require.Equal(t, true, resumed[0].Payload["results_consumed"])
 	require.Equal(t, true, resumed[0].Payload["sweep"])
 	require.True(t, runtimeevents.ProducerPersistedEvent(resumed[0]),
 		"the sweep closure event must carry a seq so it lands in the runtime-events audit")
+}
+
+func TestSweepSettledParkedTurnsKeepsUnconsumedChildResults(t *testing.T) {
+	handler, store := newAPISupervisionBudgetTestHandler(t, "api-parked-sweep-unconsumed")
+	batches := newAPISupervisionBatchStore(t)
+	handler.SetSubagentBatchStore(batches)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	const sessionID = "sess_parent_unconsumed"
+	_, err := batches.CreateBatch(ctx, &subagentbatch.SubagentBatch{
+		BatchID:         "batch_unconsumed",
+		RootScopeID:     sessionID,
+		ParentSessionID: sessionID,
+		ParentTurnID:    "turn_unconsumed",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchCompleted,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Version:         1,
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn_unconsumed",
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{"batch_unconsumed"},
+		ResumeQueue:   []string{"batch_unconsumed"},
+		ParkedAt:      now,
+	}))
+
+	outcome, err := handler.sweepSettledParkedTurns(ctx, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, outcome.Scanned)
+	require.Zero(t, outcome.Cleared,
+		"settled child results must stay parked until the parent consumes them")
+
+	record, ok, err := batches.GetTurnSuspension(ctx, sessionID, "turn_unconsumed")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, record.ResultsConsumed)
+
+	wakes, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           sessionID,
+		TargetParentSessionID: sessionID,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	settled := false
+	for _, wake := range wakes {
+		if wake.WakeReason == supervision.WakeReasonObligationSettled {
+			settled = true
+		}
+	}
+	require.True(t, settled, "the unconsumed record must leave a retry wake")
 }

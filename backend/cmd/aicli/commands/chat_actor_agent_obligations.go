@@ -136,6 +136,9 @@ func (h *localChatRuntimeHost) parkLocalAgentChildObligation(ctx context.Context
 			return true
 		}
 	}
+	// A new result-producing obligation starts an unconsumed segment in the same
+	// park epoch: the parent has not seen this child's result yet.
+	record.ResultsConsumed = false
 	record.ObligationIDs = append(record.ObligationIDs, obligationID)
 	if record.ParkedAt.IsZero() {
 		record.ParkedAt = time.Now().UTC()
@@ -164,6 +167,37 @@ func (h *localChatRuntimeHost) localTurnIDForSession(ctx context.Context, sessio
 		return turnID
 	}
 	return strings.TrimSpace(state.SuspendedTurnID)
+}
+
+// markLocalTurnResultsConsumed closes the durable synthesis gate once the
+// parent has a result-bearing resume prompt or a subagent_wait packet in its
+// current context. Best-effort: the loop-side gate still prevents new tools,
+// and an older store without the capability keeps the pre-gate behavior.
+func (h *localChatRuntimeHost) markLocalTurnResultsConsumed(ctx context.Context, sessionID, turnID string) {
+	if h == nil || h.SubagentBatches == nil {
+		return
+	}
+	marker, ok := h.SubagentBatches.(subagentbatch.TurnResultsConsumptionStore)
+	if !ok || marker == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	if ctx == nil || ctx.Err() != nil {
+		ctx = context.Background()
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		turnID = h.localTurnIDForSession(ctx, sessionID)
+	}
+	if turnID == "" {
+		return
+	}
+	markCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID)
 }
 
 // announceLocalTurnSuspended publishes one §6.8 turn.suspended edge for a

@@ -627,6 +627,10 @@ type WaitAgentArgs struct {
 	AfterSeq    int64    `json:"after_seq,omitempty"`
 	TimeoutMs   int      `json:"timeout_ms,omitempty"`
 	MailboxOnly bool     `json:"mailbox_only,omitempty"`
+	// Peek requests one non-blocking status/mailbox snapshot. It bypasses the
+	// active-wait window and budget entirely; callers that intend to wait must
+	// omit it and use timeout_ms.
+	Peek bool `json:"peek,omitempty"`
 }
 
 // ListAgentsArgs lists lightweight child-agent sessions under a parent/root.
@@ -771,6 +775,9 @@ type AgentWaitResult struct {
 	// AC-P2-4c: such a wait must end immediately and say so, never masquerade as
 	// a timeout.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Peek reports that this result came from a non-blocking snapshot and no
+	// observation window was opened.
+	Peek bool `json:"peek,omitempty"`
 	// Obligations is the wait-time view of the current turn's obligation ledger
 	// (plan §C3-4 统一返回契约). It is read back from the durable §6.12
 	// parked-turn record plus the batch control plane, so a parent sees exactly
@@ -795,6 +802,15 @@ type AgentWaitResult struct {
 	// suspension verdict only when it is already exhausted (F7).
 	WaitBudgetConsecutive int `json:"wait_budget_consecutive,omitempty"`
 	WaitBudgetLimit       int `json:"wait_budget_limit,omitempty"`
+	// Synthesis is the compact child-result packet a parent should use to
+	// synthesize the final answer once all required obligations are terminal.
+	// It is attached to subagent_wait results and batch completion mailboxes so
+	// the parent never needs to query internal storage for child output.
+	Synthesis *SynthesisPacket `json:"synthesis,omitempty"`
+	// FinalizationRequired is true when the obligation ledger has no pending
+	// rows. It is the machine-readable form of next_action=finalize and lets the
+	// host enter a bounded synthesis phase instead of relying on prompt text.
+	FinalizationRequired bool `json:"finalization_required,omitempty"`
 }
 
 // AgentWaitObligation is one row of the wait-time obligation ledger view
@@ -920,6 +936,13 @@ func ApplyAgentWaitLedger(result *AgentWaitResult, obligations []AgentWaitObliga
 	if len(view.TerminalDelta) > 0 {
 		result.TerminalDelta = view.TerminalDelta
 	}
+	if result.Peek && view.PendingCount > 0 && result.ReadyCount == 0 {
+		action := strings.TrimSpace(result.NextAction)
+		if action == "" || strings.HasPrefix(action, "peek_no_changes") || strings.HasPrefix(action, "peek_pending") {
+			result.ExecutionContinues = true
+			result.NextAction = "peek_pending: the current-turn obligation ledger still has pending rows. This non-blocking snapshot did not open a wait window; do useful parent work or inspect subagent_status / subagent_events, then call subagent_wait without peek when you intend to block"
+		}
+	}
 	switch {
 	case view.PendingCount == 0:
 		result.NextAction = "finalize"
@@ -930,7 +953,7 @@ func ApplyAgentWaitLedger(result *AgentWaitResult, obligations []AgentWaitObliga
 			result.NextAction = "inspect"
 		}
 	}
-	return result
+	return AttachSynthesisPacket(result)
 }
 
 // AgentWaitLedgerView is the shared obligation-ledger computation behind both
@@ -1080,10 +1103,15 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 		result.NextAction = "consume_ready_outputs_and_continue_independent_work: use ready child outputs now; keep other independent work moving instead of blocking only on pending agents"
 	} else if result.ReadyCount > 0 {
 		result.NextAction = "consume_ready_outputs: use the returned ready outputs and do not re-wait for already-ready agents"
+	} else if result.Peek && result.PendingCount > 0 {
+		result.ExecutionContinues = true
+		result.NextAction = "peek_pending: this was a non-blocking snapshot and child execution continues. Do useful parent work or inspect subagent_status / subagent_events; when you intend to block for completion, call subagent_wait without peek"
+	} else if result.Peek {
+		result.NextAction = "peek_no_changes: no new child status or mailbox event was ready; this snapshot did not open a wait window"
 	} else if result.TimedOut {
 		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again. Cheap non-blocking evidence: subagent_events(view=tool_progress) or subagent_status"
 	}
-	return result
+	return AttachSynthesisPacket(result)
 }
 
 func agentWaitHasPendingApproval(result *AgentWaitResult) bool {

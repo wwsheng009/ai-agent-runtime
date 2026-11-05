@@ -785,7 +785,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentWait,
-				Description: "Wait for subagent_spawn progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for team_spawn teammate ids. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for subagent_spawn progress or, without ids, for a parent mailbox event. Pass peek=true for one immediate non-blocking snapshot (no wait window, no active-wait budget); omit peek when you intend to block. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for team_spawn teammate ids. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -795,6 +795,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"after_seq":   map[string]interface{}{"type": "integer", "description": "When no id is provided, wait only for parent mailbox/collab events after this session event sequence."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": agentguidance.WaitTimeoutArgText(agentcontrol.DefaultWaitTimeoutMs, agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
+						"peek":        map[string]interface{}{"type": "boolean", "description": "Return one non-blocking snapshot immediately without opening a wait window or consuming the active-wait budget. Use peek only for a cheap readiness check; omit it when you intend to block for completion."},
 					},
 				},
 			},
@@ -977,7 +978,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentWait,
-				Description: "Wait for subagent_spawn children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use team_wait for team_spawn teammates. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for subagent_spawn children to become idle, blocked, failed, or waiting_approval. Pass peek=true for one immediate non-blocking snapshot (no wait window, no active-wait budget); omit peek when you intend to block. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use team_wait for team_spawn teammates. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -986,6 +987,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": agentguidance.WaitTimeoutArgText(agentcontrol.DefaultWaitTimeoutMs, agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
+						"peek":        map[string]interface{}{"type": "boolean", "description": "Return one non-blocking snapshot immediately without opening a wait window or consuming the active-wait budget. Use peek only for a cheap readiness check; omit it when you intend to block for completion."},
 					},
 				},
 			},
@@ -2799,6 +2801,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		} else if ok {
 			request.AfterSeq = value
+		}
+		if value, ok := args["peek"].(bool); ok {
+			request.Peek = value
 		}
 		request.IDs = coerceStringSlice(args["ids"])
 		request.SessionIDs = coerceStringSlice(args["session_ids"])

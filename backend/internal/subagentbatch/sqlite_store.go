@@ -33,6 +33,7 @@ type sqliteBatchStore struct {
 }
 
 var _ BatchStore = (*sqliteBatchStore)(nil)
+var _ TurnResultsConsumptionStore = (*sqliteBatchStore)(nil)
 
 var batchMigrations = []migrate.Migration{
 	{
@@ -149,6 +150,18 @@ ALTER TABLE turn_suspensions ADD COLUMN episode_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE turn_suspensions ADD COLUMN obligation_policies_json TEXT NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_turn_suspensions_episode
 	ON turn_suspensions(session_id, episode_id);
+		`,
+	},
+	{
+		Version: 5,
+		Name:    "turn_suspension_results_consumed",
+		// New park epochs start unconsumed; legacy rows keep the pre-gate
+		// behavior by being marked consumed during the migration. Without the
+		// legacy backfill an old settled record could stay parked forever after
+		// an upgrade, because the parent never had a chance to set the new flag.
+		UpSQL: `
+ALTER TABLE turn_suspensions ADD COLUMN results_consumed INTEGER NOT NULL DEFAULT 0;
+UPDATE turn_suspensions SET results_consumed = 1;
 `,
 	},
 }

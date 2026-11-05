@@ -194,6 +194,7 @@ func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEv
 		"execution_mode", "status", "task_count", "completed_count",
 		"failed_count", "canceled_count", "timed_out_count", "elapsed_ms",
 		"error", "error_class", "cancel_reason", "cancel_requested_at",
+		"synthesis_packet", "next_action",
 	} {
 		if value, ok := payload[key]; ok {
 			metadata[key] = value
@@ -203,12 +204,16 @@ func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEv
 	if status == "" {
 		status = "completed"
 	}
+	body := fmt.Sprintf("Subagent batch %s completed with status %s.", batchID, status)
+	if packet, ok := metadata["synthesis_packet"]; ok && packet != nil {
+		body += " SynthesisPacket attached; synthesize and finalize."
+	}
 	return team.MailMessage{
 		ID:        deliveryKey,
 		FromAgent: "subagent-batch:" + batchID,
 		ToAgent:   "parent",
 		Kind:      SubagentCompletionMailboxKind,
-		Body:      fmt.Sprintf("Subagent batch %s completed with status %s.", batchID, status),
+		Body:      body,
 		Metadata:  metadata,
 		CreatedAt: time.Now().UTC(),
 	}

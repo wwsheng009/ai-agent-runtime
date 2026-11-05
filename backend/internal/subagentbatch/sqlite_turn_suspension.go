@@ -65,6 +65,10 @@ func (s *sqliteBatchStore) ParkTurnSuspension(ctx context.Context, record *TurnS
 	if err != nil {
 		return fmt.Errorf("subagentbatch: encode obligation policies: %w", err)
 	}
+	resultsConsumed := 0
+	if record.ResultsConsumed {
+		resultsConsumed = 1
+	}
 	parkedAt := record.ParkedAt
 	if parkedAt.IsZero() {
 		parkedAt = Now()
@@ -82,8 +86,8 @@ func (s *sqliteBatchStore) ParkTurnSuspension(ctx context.Context, record *TurnS
 INSERT INTO turn_suspensions (
 	session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
 	decision_window_until, resume_queue_json, episode_id,
-	obligation_policies_json, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	obligation_policies_json, results_consumed, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
 	root_scope_id = excluded.root_scope_id,
 	obligation_ids_json = excluded.obligation_ids_json,
@@ -92,10 +96,11 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
 	resume_queue_json = excluded.resume_queue_json,
 	episode_id = excluded.episode_id,
 	obligation_policies_json = excluded.obligation_policies_json,
+	results_consumed = excluded.results_consumed,
 	updated_at = excluded.updated_at
 `, record.SessionID, record.TurnID, record.RootScopeID, string(obligations),
 		parkedAt.UTC().Format(time.RFC3339Nano), decisionWindow, string(resumeQueue),
-		record.EpisodeID, string(policies),
+		record.EpisodeID, string(policies), resultsConsumed,
 		Now().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("subagentbatch: park turn suspension: %w", err)
@@ -116,19 +121,21 @@ func (s *sqliteBatchStore) GetTurnSuspension(ctx context.Context, sessionID, tur
 		return nil, false, err
 	}
 	var (
-		record        TurnSuspension
-		obligations   string
-		resumeQueue   string
-		policies      string
-		parkedAt      sql.NullString
-		decisionUntil sql.NullString
+		record          TurnSuspension
+		obligations     string
+		resumeQueue     string
+		policies        string
+		parkedAt        sql.NullString
+		decisionUntil   sql.NullString
+		resultsConsumed int
 	)
 	err = db.QueryRowContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json,
+	results_consumed
 FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 		Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies)
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies, &resultsConsumed)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, false, nil
@@ -138,6 +145,7 @@ FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 	record.ObligationIDs = decodeJSONIDList(obligations)
 	record.ResumeQueue = decodeJSONIDList(resumeQueue)
 	record.ObligationPolicies = decodeJSONPolicyMap(policies)
+	record.ResultsConsumed = resultsConsumed != 0
 	record.ParkedAt = parseBatchTime(parkedAt.String)
 	if until := parseNullableBatchTime(decisionUntil); until != nil {
 		record.DecisionWindowUntil = *until
@@ -160,7 +168,8 @@ func (s *sqliteBatchStore) ListTurnSuspensions(ctx context.Context, sessionID st
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json,
+	results_consumed
 FROM turn_suspensions WHERE session_id = ?
 ORDER BY parked_at DESC, turn_id ASC`, sessionID)
 	if err != nil {
@@ -170,20 +179,22 @@ ORDER BY parked_at DESC, turn_id ASC`, sessionID)
 	var out []*TurnSuspension
 	for rows.Next() {
 		var (
-			record        TurnSuspension
-			obligations   string
-			resumeQueue   string
-			policies      string
-			parkedAt      sql.NullString
-			decisionUntil sql.NullString
+			record          TurnSuspension
+			obligations     string
+			resumeQueue     string
+			policies        string
+			parkedAt        sql.NullString
+			decisionUntil   sql.NullString
+			resultsConsumed int
 		)
 		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies); err != nil {
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies, &resultsConsumed); err != nil {
 			return nil, fmt.Errorf("subagentbatch: read turn suspension row: %w", err)
 		}
 		record.ObligationIDs = decodeJSONIDList(obligations)
 		record.ResumeQueue = decodeJSONIDList(resumeQueue)
 		record.ObligationPolicies = decodeJSONPolicyMap(policies)
+		record.ResultsConsumed = resultsConsumed != 0
 		record.ParkedAt = parseBatchTime(parkedAt.String)
 		if until := parseNullableBatchTime(decisionUntil); until != nil {
 			record.DecisionWindowUntil = *until
@@ -207,7 +218,8 @@ func (s *sqliteBatchStore) ListAllTurnSuspensions(ctx context.Context) ([]*TurnS
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
-	decision_window_until, resume_queue_json, episode_id, obligation_policies_json
+	decision_window_until, resume_queue_json, episode_id, obligation_policies_json,
+	results_consumed
 FROM turn_suspensions
 ORDER BY parked_at DESC, session_id ASC, turn_id ASC`)
 	if err != nil {
@@ -217,20 +229,22 @@ ORDER BY parked_at DESC, session_id ASC, turn_id ASC`)
 	var out []*TurnSuspension
 	for rows.Next() {
 		var (
-			record        TurnSuspension
-			obligations   string
-			resumeQueue   string
-			policies      string
-			parkedAt      sql.NullString
-			decisionUntil sql.NullString
+			record          TurnSuspension
+			obligations     string
+			resumeQueue     string
+			policies        string
+			parkedAt        sql.NullString
+			decisionUntil   sql.NullString
+			resultsConsumed int
 		)
 		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
-			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies); err != nil {
+			&parkedAt, &decisionUntil, &resumeQueue, &record.EpisodeID, &policies, &resultsConsumed); err != nil {
 			return nil, fmt.Errorf("subagentbatch: read all turn suspension row: %w", err)
 		}
 		record.ObligationIDs = decodeJSONIDList(obligations)
 		record.ResumeQueue = decodeJSONIDList(resumeQueue)
 		record.ObligationPolicies = decodeJSONPolicyMap(policies)
+		record.ResultsConsumed = resultsConsumed != 0
 		record.ParkedAt = parseBatchTime(parkedAt.String)
 		if until := parseNullableBatchTime(decisionUntil); until != nil {
 			record.DecisionWindowUntil = *until
@@ -258,6 +272,30 @@ func (s *sqliteBatchStore) ClearTurnSuspension(ctx context.Context, sessionID, t
 	if _, err := db.ExecContext(ctx,
 		`DELETE FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID); err != nil {
 		return fmt.Errorf("subagentbatch: clear turn suspension: %w", err)
+	}
+	return nil
+}
+
+// MarkTurnResultsConsumed flips the durable synthesis gate for one parked turn.
+// It is monotonic and idempotent: clearing the record concurrently is a no-op,
+// and repeating the call cannot regress the flag. A new obligation must write
+// the record with ResultsConsumed=false instead of calling this method.
+func (s *sqliteBatchStore) MarkTurnResultsConsumed(ctx context.Context, sessionID, turnID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	turnID = strings.TrimSpace(turnID)
+	if sessionID == "" || turnID == "" {
+		return nil
+	}
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `
+UPDATE turn_suspensions
+SET results_consumed = 1, updated_at = ?
+WHERE session_id = ? AND turn_id = ? AND results_consumed = 0`,
+		Now().Format(time.RFC3339Nano), sessionID, turnID); err != nil {
+		return fmt.Errorf("subagentbatch: mark turn results consumed: %w", err)
 	}
 	return nil
 }

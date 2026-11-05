@@ -72,6 +72,15 @@ type TurnSuspension struct {
 	// missing entry means required, which keeps every existing dispatch path
 	// blocking finalization without a schema data migration.
 	ObligationPolicies map[string]FinalizationPolicy
+	// ResultsConsumed records that the parent run has already received the
+	// child-result payload for this park epoch (for example through
+	// subagent_wait). Settlement must not clear a child-result obligation before
+	// this flag is true, otherwise a deadline/crash between child completion and
+	// synthesis could finalize the turn with the results unread.
+	//
+	// Missing/false is the safe default for newly parked records. A new
+	// obligation in the same epoch resets it to false.
+	ResultsConsumed bool `json:"results_consumed,omitempty"`
 }
 
 // Clone returns a deep copy so callers cannot mutate stored slices.
@@ -167,6 +176,22 @@ func (t *TurnSuspension) RequiredObligationIDs() []string {
 	return required
 }
 
+// HasChildResults reports whether this park epoch owns a result-producing
+// obligation (subagent batch or lightweight agent session). Team and background
+// job obligations are intentionally excluded: their completion is delivered by
+// their own control-plane payload and has no SynthesisPacket contract.
+func (t *TurnSuspension) HasChildResults() bool {
+	if t == nil {
+		return false
+	}
+	for _, obligationID := range normalizeIDList(t.ObligationIDs) {
+		if IsAgentSessionObligation(obligationID) || strings.HasPrefix(obligationID, "batch") {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeIDList(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -209,6 +234,24 @@ func AgentSessionIDFromObligation(obligationID string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(trimmed, AgentSessionObligationPrefix))
+}
+
+// SubjectIDFromObligation maps an obligation id to the supervision subject id
+// it gates: batch ids stay as-is; agent-session/team/background-job ids lose
+// their transport prefix. Unknown ids are returned trimmed so callers can still
+// match a future obligation family without silently dropping it.
+func SubjectIDFromObligation(obligationID string) string {
+	trimmed := strings.TrimSpace(obligationID)
+	switch {
+	case IsAgentSessionObligation(trimmed):
+		return AgentSessionIDFromObligation(trimmed)
+	case IsTeamObligation(trimmed):
+		return TeamIDFromObligation(trimmed)
+	case IsBackgroundJobObligation(trimmed):
+		return BackgroundJobIDFromObligation(trimmed)
+	default:
+		return trimmed
+	}
 }
 
 // ObligationAgentSessionIDs lists the child-session obligations in record

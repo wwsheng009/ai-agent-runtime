@@ -79,6 +79,11 @@ type Snapshot struct {
 	// OldestWakePendingAgeMs 是最老的未 claim wake 年龄（§2.5）：与
 	// Summary.WakePendingOverdue 一起让滞留可见。
 	OldestWakePendingAgeMs int64 `json:"oldest_wake_pending_age_ms,omitempty"`
+	// FilterScope is the effective matrix narrowing chosen by the host
+	// (all / current_turn / current_batch). It is distinct from Scope, which
+	// identifies the root session/team. Tool hosts use it to decide whether the
+	// historical lifecycle digest may be attached to the same response.
+	FilterScope string `json:"filter_scope,omitempty"`
 }
 
 // SnapshotSummary is the rollup counters (doc 6.2 summary).
@@ -96,6 +101,60 @@ type SnapshotSummary struct {
 	// WakePendingOverdueThreshold 的数量。
 	PendingWakes       int `json:"pending_wakes,omitempty"`
 	WakePendingOverdue int `json:"wake_pending_overdue,omitempty"`
+}
+
+// FilterSnapshotToSubjectIDs narrows a scoped snapshot to the exact durable
+// subjects owned by the caller's current turn. It is used by the current_turn
+// status scope so historical/resolved rows cannot dominate the model context.
+// The queue-health fields (pending wakes / overdue) are preserved because they
+// are scope-wide observations, not row counters.
+func FilterSnapshotToSubjectIDs(snapshot *Snapshot, subjectIDs []string, afterSeq int64) *Snapshot {
+	if snapshot == nil {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(subjectIDs))
+	for _, id := range subjectIDs {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			wanted[trimmed] = struct{}{}
+		}
+	}
+	filtered := *snapshot
+	filtered.Descendants = make([]SnapshotItem, 0, len(snapshot.Descendants))
+	filtered.Summary = SnapshotSummary{
+		PendingWakes:       snapshot.Summary.PendingWakes,
+		WakePendingOverdue: snapshot.Summary.WakePendingOverdue,
+	}
+	for _, item := range snapshot.Descendants {
+		if _, ok := wanted[strings.TrimSpace(item.ID)]; !ok {
+			continue
+		}
+		filtered.Descendants = append(filtered.Descendants, item)
+		switch item.SupervisionState {
+		case SupervisionRunning, SupervisionHealthy:
+			filtered.Summary.Running++
+		case SupervisionBlocked:
+			filtered.Summary.Blocked++
+		case SupervisionStalled:
+			filtered.Summary.Stalled++
+		case SupervisionTimedOut:
+			filtered.Summary.TimedOut++
+		case SupervisionOrphaned, SupervisionOrphanSuspected:
+			filtered.Summary.Orphaned++
+		case SupervisionInvalid:
+			filtered.Summary.Invalid++
+		case SupervisionCancelRequested, SupervisionCanceling:
+			filtered.Summary.Canceling++
+		case SupervisionTerminated:
+			if item.NotificationID != "" && !item.ActionRequired && item.LastChangeSeq > afterSeq {
+				filtered.Summary.TerminalUnacknowledged++
+			}
+		}
+		if item.ActionRequired {
+			filtered.Summary.ActionRequired++
+		}
+	}
+	filtered.OldestWakePendingAgeMs = snapshot.OldestWakePendingAgeMs
+	return &filtered
 }
 
 // SnapshotItem is one descendant row in the snapshot.

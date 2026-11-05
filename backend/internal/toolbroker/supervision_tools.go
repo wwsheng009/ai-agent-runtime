@@ -57,6 +57,14 @@ type SupervisionSnapshotArgs struct {
 
 // SupervisionDescendantsArgs is the parsed input of supervision_descendants.
 type SupervisionDescendantsArgs struct {
+	// Scope narrows the matrix: auto (default), all, current_turn, or
+	// current_batch. auto resolves to current_turn when the caller owns a
+	// current/suspended turn with obligations, otherwise all.
+	// current_turn keeps only subjects owned by the caller's parked/current turn
+	// obligations; current_batch keeps one durable batch and its child sessions.
+	Scope string
+	// BatchID is required when Scope is current_batch.
+	BatchID string
 	// Mode is children | descendants (empty defaults to descendants).
 	Mode string
 	// Health is any | abnormal | action_required (empty defaults to any).
@@ -208,6 +216,15 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"scope": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"auto", "all", "current_turn", "current_batch"},
+						"description": "auto (default) = current_turn when the caller owns a current/suspended turn with obligations, otherwise all; all = full scoped matrix; current_turn = only subjects owned by the caller's parked/current turn obligations; current_batch = one batch and its child sessions (requires batch_id).",
+					},
+					"batch_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Batch id for scope=current_batch.",
+					},
 					"mode": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"children", "descendants"},
@@ -374,6 +391,15 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"scope": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"auto", "all", "current_turn", "current_batch"},
+						"description": "auto (default) = current_turn when the caller owns a current/suspended turn with obligations, otherwise all; all = full scoped matrix; current_turn = only subjects owned by the caller's parked/current turn obligations; current_batch = one batch and its child sessions (requires batch_id).",
+					},
+					"batch_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Batch id for scope=current_batch.",
+					},
 					"mode": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"children", "descendants"},
@@ -495,8 +521,20 @@ func parseSupervisionSnapshotArgs(args map[string]interface{}) (SupervisionSnaps
 // filtered inspection into a broader one).
 func parseSupervisionDescendantsArgs(args map[string]interface{}) (SupervisionDescendantsArgs, error) {
 	parsed := SupervisionDescendantsArgs{
-		Mode:   strings.ToLower(supervisionArgValue(args, "mode")),
-		Health: strings.ToLower(supervisionArgValue(args, "health")),
+		Scope:   strings.ToLower(supervisionArgValue(args, "scope")),
+		BatchID: strings.TrimSpace(supervisionArgValue(args, "batch_id")),
+		Mode:    strings.ToLower(supervisionArgValue(args, "mode")),
+		Health:  strings.ToLower(supervisionArgValue(args, "health")),
+	}
+	switch parsed.Scope {
+	case "":
+		parsed.Scope = "auto"
+	case "auto", "all", "current_turn", "current_batch":
+	default:
+		return parsed, fmt.Errorf("scope must be auto, all, current_turn or current_batch, got %q", parsed.Scope)
+	}
+	if parsed.Scope == "current_batch" && parsed.BatchID == "" {
+		return parsed, fmt.Errorf("batch_id is required when scope=current_batch")
 	}
 	switch parsed.Mode {
 	case "", "descendants", "children":
@@ -1015,6 +1053,7 @@ func subagentStatusPayload(snapshot *supervision.Snapshot, afterSeq int64) map[s
 	}
 	payload := map[string]interface{}{
 		"scope":          snapshot.Scope,
+		"filter_scope":   snapshot.FilterScope,
 		"generated_at":   snapshot.GeneratedAt,
 		"snapshot_seq":   snapshot.SnapshotSeq,
 		"next_seq":       snapshot.NextSeq,
@@ -1276,16 +1315,32 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 		}
 		payload := subagentStatusPayload(snapshot, request.AfterSeq)
 		if request.IncludeDigest {
-			attachSubagentStatusDigest(ctx, b.Supervision, sessionID, request, payload)
-			// digest 是 stale 规则的权威（2026-09-26 真机）：矩阵行里"subject 已不在
-			// 控制面"的陈旧行不能再驱动"去裁决 action_required 行"的指令，否则
-			// cache_safe_summary 会与它自己的 digest 计数（0 action_required）矛盾，
-			// 模型也会去找一个它无从下手的行。无可用指引时回落到 digest 的下一步。
-			if digest, ok := payload["digest"].(*supervision.Digest); ok && digest != nil {
-				if next := supervisionDescendantsNextActionExcluding(snapshot, staleSubjectKeys(digest)); next != "" {
-					payload["next_action"] = next
-				} else if next, _ := payload["digest_next_action"].(string); strings.TrimSpace(next) != "" {
-					payload["next_action"] = strings.TrimSpace(next)
+			effectiveScope := strings.TrimSpace(request.Scope)
+			if snapshot != nil && strings.TrimSpace(snapshot.FilterScope) != "" {
+				effectiveScope = strings.TrimSpace(snapshot.FilterScope)
+			}
+			if effectiveScope == "" || effectiveScope == "auto" {
+				effectiveScope = "all"
+			}
+			if effectiveScope != "all" {
+				// The lifecycle digest is intentionally historical: it includes
+				// resolved/old notifications that are exactly what scoped reads
+				// want to suppress. Keep the matrix scoped and make the tradeoff
+				// explicit instead of mixing a filtered matrix with an unfiltered
+				// 700-row digest.
+				payload["digest_skipped"] = effectiveScope + " scope suppresses the lifecycle digest; use scope=all when the historical digest is required"
+			} else {
+				attachSubagentStatusDigest(ctx, b.Supervision, sessionID, request, payload)
+				// digest 是 stale 规则的权威（2026-09-26 真机）：矩阵行里"subject 已不在
+				// 控制面"的陈旧行不能再驱动"去裁决 action_required 行"的指令，否则
+				// cache_safe_summary 会与它自己的 digest 计数（0 action_required）矛盾，
+				// 模型也会去找一个它无从下手的行。无可用指引时回落到 digest 的下一步。
+				if digest, ok := payload["digest"].(*supervision.Digest); ok && digest != nil {
+					if next := supervisionDescendantsNextActionExcluding(snapshot, staleSubjectKeys(digest)); next != "" {
+						payload["next_action"] = next
+					} else if next, _ := payload["digest_next_action"].(string); strings.TrimSpace(next) != "" {
+						payload["next_action"] = strings.TrimSpace(next)
+					}
 				}
 			}
 		}

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 const (
@@ -55,6 +57,12 @@ type TurnFailedEvent struct {
 	TurnID string `json:"turn_id"`
 	Error  string `json:"error"`
 	Code   string `json:"code,omitempty"`
+	// Finalization is present when the failure is a structured incomplete
+	// parent finalization (for example the exec deadline fired after child
+	// results were already durable). The embedded fields stay top-level so
+	// existing status/code consumers keep their shape.
+	*ExecFinalizationIncomplete
+	Status string `json:"status,omitempty"`
 }
 
 type TokenUsage struct {
@@ -117,6 +125,42 @@ type ExecFinalResult struct {
 	DurationMs int64      `json:"duration_ms,omitempty"`
 	// Profile 供 CI 断言实际生效的裁剪（D9/FR-10）；无 profile 时省略。
 	Profile *ExecProfileMetadata `json:"profile,omitempty"`
+	// Finalization carries the structured incomplete-finalization payload. Its
+	// fields are embedded so the machine-readable contract is top-level:
+	// status=finalization_incomplete + reason + child_results.
+	*ExecFinalizationIncomplete
+}
+
+// ExecFinalizationIncomplete is the machine-readable deadline output for
+// headless runs. It deliberately preserves the durable child results instead of
+// collapsing the run into a bare context deadline error.
+type ExecFinalizationIncomplete struct {
+	Reason               string                            `json:"reason,omitempty"`
+	ChildResults         []toolbroker.SynthesisChildResult `json:"child_results,omitempty"`
+	CompletedObligations int                               `json:"completed_obligations,omitempty"`
+	PendingObligations   int                               `json:"pending_obligations,omitempty"`
+	BatchIDs             []string                          `json:"batch_ids,omitempty"`
+	Truncated            bool                              `json:"truncated,omitempty"`
+}
+
+// Message renders the exact JSON document used as the final assistant message
+// (and --output-last-message) on a finalization timeout.
+func (f *ExecFinalizationIncomplete) Message() string {
+	if f == nil {
+		return ""
+	}
+	payload := struct {
+		Status string `json:"status"`
+		*ExecFinalizationIncomplete
+	}{
+		Status:                     "finalization_incomplete",
+		ExecFinalizationIncomplete: f,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return `{"status":"finalization_incomplete"}`
+	}
+	return string(encoded)
 }
 
 // ExecProfileMetadata 描述一次 exec 运行实际生效的 profile 面（D9/FR-10）。

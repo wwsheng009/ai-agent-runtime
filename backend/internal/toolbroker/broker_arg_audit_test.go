@@ -93,7 +93,7 @@ func TestAnnotateIgnoredBrokerToolArgs_ReportsDroppedKeys(t *testing.T) {
 		t.Fatalf("next_action must explain the dropped key and the tool that takes it, got %q", next)
 	}
 
-	supported := annotateIgnoredBrokerToolArgs(ToolSubagentWait, map[string]interface{}{"timeout_ms": 5}, nil)
+	supported := annotateIgnoredBrokerToolArgs(ToolSubagentWait, map[string]interface{}{"timeout_ms": 5, "peek": true}, nil)
 	if _, ok := supported["ignored_args"]; ok {
 		t.Fatalf("supported keys must not be reported: %#v", supported)
 	}

@@ -134,6 +134,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"session_ids": toolArgFieldStringOrList,
 		"after_seq":   toolArgFieldNumber,
 		"timeout_ms":  toolArgFieldNumber,
+		"peek":        toolArgFieldBool,
 	},
 	ToolSubagentEvents: {
 		"id":         toolArgFieldString,
