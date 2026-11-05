@@ -192,7 +192,11 @@ func loadMergedStringTimes(ctx context.Context, path string, queries []string) (
 	}
 	defer func() { _ = db.Close() }()
 	for _, query := range queries {
-		if !queryReferencesExistingTable(ctx, db, query) {
+		ok, err := queryReferencesExistingTable(ctx, db, query)
+		if err != nil {
+			return nil, fmt.Errorf("check table for query %q: %w", query, err)
+		}
+		if !ok {
 			continue
 		}
 		values, err := querySessionTimes(ctx, db, query)
@@ -225,7 +229,11 @@ func loadMergedUnixTimes(ctx context.Context, path string, queries []string) (ma
 	}
 	defer func() { _ = db.Close() }()
 	for _, query := range queries {
-		if !queryReferencesExistingTable(ctx, db, query) {
+		ok, err := queryReferencesExistingTable(ctx, db, query)
+		if err != nil {
+			return nil, fmt.Errorf("check table for query %q: %w", query, err)
+		}
+		if !ok {
 			continue
 		}
 		values, err := querySessionUnixTimes(ctx, db, query)
@@ -243,20 +251,23 @@ func loadMergedUnixTimes(ctx context.Context, path string, queries []string) (ma
 
 // queryReferencesExistingTable 从固定查询里取 `FROM <table>` 的表名做存在性门；
 // 查询串都是包内常量，不接受外部输入。
-func queryReferencesExistingTable(ctx context.Context, db *sql.DB, query string) bool {
+func queryReferencesExistingTable(ctx context.Context, db *sql.DB, query string) (bool, error) {
 	lower := strings.ToLower(query)
 	index := strings.Index(lower, " from ")
 	if index < 0 {
-		return false
+		return false, nil
 	}
 	rest := strings.TrimSpace(query[index+6:])
 	fields := strings.Fields(rest)
 	if len(fields) == 0 {
-		return false
+		return false, nil
 	}
 	table := strings.Trim(fields[0], `"`)
 	ok, err := tableExists(ctx, db, table)
-	return err == nil && ok
+	if err != nil {
+		return false, fmt.Errorf("table %s: %w", table, err)
+	}
+	return ok, nil
 }
 
 func loadProtection(ctx context.Context, paths Paths, candidates map[string]string, opts Options) (map[string][]string, error) {
@@ -290,7 +301,7 @@ func loadProtection(ctx context.Context, paths Paths, candidates map[string]stri
 		return nil, err
 	}
 	if opts.IncludeTeam {
-		if err := protectTeamSessions(ctx, paths.Team, add); err != nil {
+		if err := protectTeamSessions(ctx, paths.Team, opts.Now, add); err != nil {
 			return nil, err
 		}
 	}
@@ -491,7 +502,7 @@ func protectScheduleSessions(ctx context.Context, path string, now time.Time, ad
 	return rows.Err()
 }
 
-func protectTeamSessions(ctx context.Context, path string, add func(string, string)) error {
+func protectTeamSessions(ctx context.Context, path string, now time.Time, add func(string, string)) error {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
@@ -522,6 +533,30 @@ func protectTeamSessions(ctx context.Context, path string, add func(string, stri
 			}
 		}
 		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	if ok, _ := tableExists(ctx, db, "orchestrator_owner_leases"); ok {
+		rows, err := db.QueryContext(ctx, `
+			SELECT t.lead_session_id, l.lease_until
+			FROM orchestrator_owner_leases l
+			JOIN teams t ON t.id = l.team_id
+			WHERE t.lead_session_id IS NOT NULL AND t.lead_session_id <> ''
+		`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var sessionID, leaseRaw string
+			if err := rows.Scan(&sessionID, &leaseRaw); err != nil {
+				return err
+			}
+			if lease, ok := parseRuntimeTime(leaseRaw); ok && lease.After(now) {
+				add(sessionID, "team_orchestrator_lease")
+			}
+		}
+		if err := rows.Err(); err != nil {
 			return err
 		}
 	}

@@ -53,10 +53,11 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 		 ('background-protected', ?, NULL),
 		 ('schedule-protected', ?, NULL),
 		 ('team-protected', ?, NULL),
+		 ('lease-protected', ?, NULL),
 		 ('agent-parent', ?, NULL),
 		 ('old-team', ?, NULL),
 		 ('recent-session', ?, NULL)
-	`, old, old, old, old, old, old, old, old, recent)
+	`, old, old, old, old, old, old, old, old, old, recent)
 	execSQL(t, paths.History, `INSERT INTO session_messages (session_id, seq, created_at) VALUES ('old-session', 1, ?), ('protected-session', 1, ?), ('old-team', 1, ?)`, old, old, old)
 	execSQL(t, paths.History, `INSERT INTO session_prompt_messages (session_id, position, created_at) VALUES ('old-session', 1, ?), ('protected-session', 1, ?)`, old, old)
 
@@ -113,6 +114,7 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 		`INSERT INTO analytics_legacy_sessions (session_id) VALUES ('old-session')`,
 		`INSERT INTO usage_routes (session_id, child_session_id) VALUES ('old-session', '')`,
 		`INSERT INTO usage_subagents (parent_session_id, child_session_id) VALUES ('parent-keep', 'old-session')`,
+		`INSERT INTO usage_subagents (parent_session_id, child_session_id) VALUES ('old-session', 'recent-child')`,
 	} {
 		execSQL(t, paths.UsageAnalytics, statement)
 	}
@@ -180,14 +182,17 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 		`CREATE TABLE team_mailbox_receipts (message_id TEXT, team_id TEXT, agent_id TEXT)`,
 		`CREATE TABLE agent_control_task_records (workflow TEXT, task_id TEXT, team_id TEXT, session_id TEXT)`,
 		`CREATE TABLE agent_control_wake_events (id INTEGER PRIMARY KEY AUTOINCREMENT, team_id TEXT, session_id TEXT)`,
-		`CREATE TABLE agent_control_mailbox_records (session_id TEXT)`,
+		`CREATE TABLE agent_control_mailbox_records (session_id TEXT, team_id TEXT)`,
+		`CREATE TABLE orchestrator_owner_leases (team_id TEXT PRIMARY KEY, owner_id TEXT, lease_until TEXT)`,
 	})
 	execSQL(t, paths.Team, `INSERT INTO teams (id, lead_session_id, status, updated_at) VALUES
 		('team-old', 'old-team', 'done', ?),
-		('team-protected', 'team-protected', 'active', ?)`, old, old)
+		('team-protected', 'team-protected', 'active', ?),
+		('team-lease-protected', 'lease-protected', 'done', ?)`, old, old, old)
 	execSQL(t, paths.Team, `INSERT INTO teammates (id, team_id, session_id, state, updated_at) VALUES
 		('mate-old', 'team-old', 'old-team', 'idle', ?),
-		('mate-protected', 'team-protected', 'team-protected', 'idle', ?)`, old, old)
+		('mate-recent', 'team-old', 'team-old__recent', 'idle', ?),
+		('mate-protected', 'team-protected', 'team-protected', 'idle', ?)`, old, recent, old)
 	execSQL(t, paths.Team, `INSERT INTO team_events (team_id) VALUES ('team-old'), ('team-protected')`)
 	execSQL(t, paths.Team, `INSERT INTO team_task_signals (team_id) VALUES ('team-old'), ('team-protected')`)
 	execSQL(t, paths.Team, `INSERT INTO agent_control_task_graph_events (team_id) VALUES ('team-old'), ('team-protected')`)
@@ -197,6 +202,7 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 	execSQL(t, paths.Team, `INSERT INTO agent_control_task_records (workflow, task_id, team_id, session_id) VALUES ('w', 't-old', 'team-old', 'old-team'), ('w', 't-protected', 'team-protected', 'team-protected')`)
 	execSQL(t, paths.Team, `INSERT INTO agent_control_wake_events (team_id, session_id) VALUES ('team-old', 'old-team'), ('team-protected', 'team-protected')`)
 	execSQL(t, paths.Team, `INSERT INTO agent_control_mailbox_records (session_id) VALUES ('old-team'), ('team-protected')`)
+	execSQL(t, paths.Team, `INSERT INTO orchestrator_owner_leases (team_id, owner_id, lease_until) VALUES ('team-old', 'owner-old', ?), ('team-lease-protected', 'owner-active', ?)`, old, future)
 
 	return purgeFixture{paths: paths, now: now}
 }

@@ -3,12 +3,19 @@ package sessionpurge
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
+)
+
+const (
+	artifactPurgeRetryPrefix = ".aicli-purge-retry-"
+	artifactPurgeRetryAge    = time.Hour
 )
 
 type purgeRunner struct {
@@ -190,7 +197,8 @@ func withStore(
 
 func purgeHistoryStore(ctx context.Context, path string, ids []string, opts Options) (StoreResult, error) {
 	var artifactDirs []string
-	return withStore(ctx, path, opts, "history", func(r *purgeRunner) error {
+	root := artifactSessionRoot(path, opts.ArtifactSessionRoot)
+	result, err := withStore(ctx, path, opts, "history", func(r *purgeRunner) error {
 		if err := r.delete("session_messages", []string{"session_id"}, ids); err != nil {
 			return err
 		}
@@ -199,10 +207,6 @@ func purgeHistoryStore(ctx context.Context, path string, ids []string, opts Opti
 		}
 		if err := r.delete("sessions", []string{"id"}, ids); err != nil {
 			return err
-		}
-		root := strings.TrimSpace(opts.ArtifactSessionRoot)
-		if root == "" {
-			root = filepath.Join(filepath.Dir(path), "session-artifacts")
 		}
 		for _, sessionID := range ids {
 			target := filepath.Join(root, sessionID)
@@ -215,21 +219,84 @@ func purgeHistoryStore(ctx context.Context, path string, ids []string, opts Opti
 				return err
 			}
 		}
-		if opts.DryRun {
-			r.result.ArtifactDirs = int64(len(artifactDirs))
-		}
+		r.result.ArtifactDirs = int64(len(artifactDirs))
 		return nil
-	}, func() error {
-		if opts.DryRun {
+	}, nil)
+	if err != nil || opts.DryRun {
+		return result, err
+	}
+	if err := retireArtifactDirs(root, artifactDirs, opts.Now); err != nil {
+		result.Status = "failed"
+		result.Error = err.Error()
+		return result, err
+	}
+	return result, nil
+}
+
+func artifactSessionRoot(historyPath, override string) string {
+	root := strings.TrimSpace(override)
+	if root != "" {
+		return root
+	}
+	if strings.TrimSpace(historyPath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(historyPath), "session-artifacts")
+}
+
+func retireArtifactDirs(root string, dirs []string, now time.Time) error {
+	var errs []error
+	for index, dir := range dirs {
+		if !pathWithin(root, dir) {
+			errs = append(errs, fmt.Errorf("artifact directory escapes root: %s", dir))
+			continue
+		}
+		marker := filepath.Join(root, fmt.Sprintf("%s%d-%d-%d", artifactPurgeRetryPrefix, now.UnixNano(), os.Getpid(), index))
+		if err := os.Rename(dir, marker); err != nil {
+			errs = append(errs, fmt.Errorf("quarantine session artifacts %s: %w", dir, err))
+			continue
+		}
+		if err := os.RemoveAll(marker); err != nil {
+			errs = append(errs, fmt.Errorf("remove quarantined session artifacts %s: %w", marker, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func cleanupArtifactPurgeRetries(root string, now time.Time, minAge time.Duration) error {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		for _, dir := range artifactDirs {
-			if err := os.RemoveAll(dir); err != nil {
-				return fmt.Errorf("remove session artifacts %s: %w", dir, err)
-			}
+		return err
+	}
+	if minAge <= 0 {
+		minAge = artifactPurgeRetryAge
+	}
+	threshold := now.Add(-minAge)
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), artifactPurgeRetryPrefix) {
+			continue
 		}
-		return nil
-	})
+		info, err := entry.Info()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("stat artifact retry %s: %w", entry.Name(), err))
+			continue
+		}
+		if info.ModTime().After(threshold) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("remove artifact retry %s: %w", entry.Name(), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func purgeRuntimeStore(ctx context.Context, path string, ids []string, opts Options) (StoreResult, error) {
@@ -272,7 +339,7 @@ func purgeAnalyticsStore(ctx context.Context, path string, ids []string, opts Op
 			{"analytics_legacy_turns", []string{"session_id"}},
 			{"analytics_legacy_sessions", []string{"session_id"}},
 			{"usage_routes", []string{"session_id", "child_session_id"}},
-			{"usage_subagents", []string{"child_session_id"}},
+			{"usage_subagents", []string{"parent_session_id", "child_session_id"}},
 		}
 		for _, table := range tables {
 			if err := r.delete(table.name, table.columns, ids); err != nil {
@@ -523,12 +590,19 @@ func purgeTeamStore(ctx context.Context, path string, ids []string, opts Options
 				"team_path_claims",
 				"team_mailbox_receipts",
 				"agent_control_task_records",
+				"agent_control_mailbox_records",
 			} {
 				if err := r.delete(table, []string{"team_id"}, teamIDs); err != nil {
 					return err
 				}
 			}
 			if err := r.delete("agent_control_wake_events", []string{"team_id"}, teamIDs); err != nil {
+				return err
+			}
+			if err := r.delete("teammates", []string{"team_id"}, teamIDs); err != nil {
+				return err
+			}
+			if err := r.delete("orchestrator_owner_leases", []string{"team_id"}, teamIDs); err != nil {
 				return err
 			}
 		}

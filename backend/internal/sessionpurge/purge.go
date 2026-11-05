@@ -96,6 +96,11 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 	}
 	if !opts.DryRun {
 		report.Status = "pruned"
+		if root := artifactSessionRoot(paths.History, opts.ArtifactSessionRoot); root != "" {
+			if err := cleanupArtifactPurgeRetries(root, opts.Now, artifactPurgeRetryAge); err != nil {
+				report.Warnings = append(report.Warnings, "artifact retry cleanup failed: "+err.Error())
+			}
+		}
 	}
 
 	history, err := loadHistorySessions(ctx, paths.History)
