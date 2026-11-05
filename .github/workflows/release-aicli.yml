@@ -1,7 +1,8 @@
-name: Release aicli + runtime-server
+name: Release aicli + runtime-server + tools
 
 # 触发条件：
 # 1. 推送形如 v*（含 v1.2.3、v1.2.3-rc.1、aicli-v1.2.3 等）的 tag 时自动编译并发布 Release
+#    发布面：aicli / runtime-server / aicli-remote-tools / aicli-gateway（含 Win7 aicli 包）
 # 2. 手动在 Actions 页面触发（可选自定义版本号，不发布 Release，只产出工件）
 on:
   push:
@@ -39,7 +40,11 @@ env:
   CONSOLE_CMD_PATH: ./cmd/aicli-console
   MESH_CMD_PATH: ./cmd/aicli-mesh
   RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
+  REMOTE_TOOLS_CMD_PATH: ./cmd/aicli-remote-tools
+  GATEWAY_CMD_PATH: ./cmd/gateway
   BIN_NAME: aicli
+  REMOTE_TOOLS_BIN_NAME: aicli-remote-tools
+  GATEWAY_BIN_NAME: aicli-gateway
   WORKDIR: backend
   CGO_ENABLED: '0'
   GOPROXY: https://proxy.golang.org,direct
@@ -261,6 +266,14 @@ jobs:
           # The stacking e2e spawns a real MCP stdio child (this test binary itself)
           # through manager → tools.Manager, so it stays hermetic (no live target).
           go test ./internal/tools/ -run 'TestToolsManagerRunsOverRealMCPStdioChild' -count=1
+
+      - name: Verify aicli-gateway build, version command and gateway packages
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/aicli-gateway-check ./cmd/gateway
+          test "$(/tmp/aicli-gateway-check version)" = "aicli-gateway dev"
+          go test ./cmd/gateway ./internal/gateway/... -count=1
 
       # E4 hard gate: render packages must be green before any release.
       # 历史注记：早期 Phase 0/C0 曾有 4 个 band-scrollback 语义测试「设计上
@@ -639,6 +652,126 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-tools:
+    name: Build aicli-remote-tools + aicli-gateway ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [validate]
+    if: ${{ always() && needs.validate.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION}"
+
+      - name: Build tools
+        shell: bash
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          test "${CGO_ENABLED}" = "0"
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          mkdir -p ../dist
+          LDFLAGS="-s -w -X main.version=${{ steps.ver.outputs.version }}"
+          go build -trimpath -ldflags "${LDFLAGS}" \
+            -o "../dist/${REMOTE_TOOLS_BIN_NAME}-${GOOS}-${GOARCH}${EXT}" \
+            ${REMOTE_TOOLS_CMD_PATH}
+          go build -trimpath -ldflags "${LDFLAGS}" \
+            -o "../dist/${GATEWAY_BIN_NAME}-${GOOS}-${GOARCH}${EXT}" \
+            ${GATEWAY_CMD_PATH}
+          for binary in \
+            "../dist/${REMOTE_TOOLS_BIN_NAME}-${GOOS}-${GOARCH}${EXT}" \
+            "../dist/${GATEWAY_BIN_NAME}-${GOOS}-${GOARCH}${EXT}"; do
+            ls -lh "${binary}"
+            go version -m "${binary}" | sed -n '1,6p'
+          done
+
+      - name: Package tools
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOS="${{ matrix.goos }}"
+          GOARCH="${{ matrix.goarch }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          package_one() {
+            local name="$1"
+            local source="$2"
+            local basename="${name}-${VERSION}-${GOOS}-${GOARCH}"
+            rm -rf dist/release
+            mkdir -p dist/release
+            cp "dist/${source}" "dist/release/${name}${EXT}"
+            [ -f README.md ] && cp README.md dist/release/ || true
+            [ -f LICENSE ] && cp LICENSE dist/release/ || true
+            if [[ "${GOOS}" == "windows" ]]; then
+              (cd dist/release && zip -9 -r "../${basename}.zip" ./* >/dev/null)
+              echo "${basename}.zip"
+            else
+              (cd dist/release && tar -czf "../${basename}.tar.gz" ./* >/dev/null)
+              echo "${basename}.tar.gz"
+            fi
+          }
+          REMOTE_ARCHIVE="$(package_one "${REMOTE_TOOLS_BIN_NAME}" "${REMOTE_TOOLS_BIN_NAME}-${GOOS}-${GOARCH}${EXT}")"
+          GATEWAY_ARCHIVE="$(package_one "${GATEWAY_BIN_NAME}" "${GATEWAY_BIN_NAME}-${GOOS}-${GOARCH}${EXT}")"
+          sha256sum "dist/${REMOTE_ARCHIVE}" > "dist/${REMOTE_ARCHIVE}.sha256"
+          sha256sum "dist/${GATEWAY_ARCHIVE}" > "dist/${GATEWAY_ARCHIVE}.sha256"
+          rm -rf dist/release
+          ls -lh "dist/${REMOTE_ARCHIVE}" "dist/${GATEWAY_ARCHIVE}"
+          echo "remote_archive=${REMOTE_ARCHIVE}" >> "$GITHUB_OUTPUT"
+          echo "gateway_archive=${GATEWAY_ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tools-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.sha }}
+          path: |
+            dist/${{ steps.pkg.outputs.remote_archive }}
+            dist/${{ steps.pkg.outputs.remote_archive }}.sha256
+            dist/${{ steps.pkg.outputs.gateway_archive }}
+            dist/${{ steps.pkg.outputs.gateway_archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
   build-win7:
     name: Build Windows 7 compatible aicli (Go 1.21.4)
     # 独立 job：Go 1.21.4 + go.win7.mod（降级依赖图）+ win7compat build tag
@@ -770,7 +903,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [build, build-server, build-win7]
+    needs: [build, build-server, build-tools, build-win7]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release == 'true'
     permissions:

@@ -39,6 +39,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/notify/channels"
 )
 
+// version is injected at build time (-X main.version=...).
+var version = "dev"
+
 // gatewayMetrics holds simple process counters exposed at /api/metrics.
 type gatewayMetrics struct {
 	requests    atomic.Int64
@@ -127,6 +130,23 @@ func main() {
 	os.Exit(run())
 }
 
+// isVersionRequest accepts the documented `aicli-gateway version` spelling as
+// well as the conventional flags, with the optional leading `serve` position.
+func isVersionRequest(args []string) bool {
+	if len(args) > 0 && args[0] == "serve" {
+		args = args[1:]
+	}
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "version", "--version", "-V":
+		return true
+	default:
+		return false
+	}
+}
+
 // normalizeServeArgs accepts the documented "gateway serve --flag ..." spelling:
 // a single optional positional "serve" is stripped so the flags after it are
 // parsed; anything else is rejected instead of silently ignored (which would
@@ -187,6 +207,7 @@ func usage() {
 	fmt.Fprint(out, `aicli-gateway — session gateway for aicli / runtime-server agents (docs/gateway/)
 
 Usage:
+  aicli-gateway version | --version | -V
   aicli-gateway [serve] --listen <host:port> [flags]
 
   "serve" is an optional positional and is ignored; any other positional exits 2.
@@ -220,12 +241,16 @@ is refused at startup; pass --allow-unprotected to accept that risk explicitly.
 }
 
 func run() int {
+	if isVersionRequest(os.Args[1:]) {
+		fmt.Fprintf(os.Stdout, "aicli-gateway %s\n", version)
+		return 0
+	}
 	flag.Usage = usage
 	var (
 		configPath      = flag.String("config", "", "optional YAML flagfile whose keys mirror flag names; command-line flags win over file entries")
 		listen          = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
 		publicBaseURL   = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
-		serverVersion   = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
+		serverVersion   = flag.String("server-version", version, "server version reported in WELCOME")
 		deviceToken     = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
 		heartbeatSec    = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
 		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
@@ -254,7 +279,7 @@ func run() int {
 		// 通知正文里的会话深链默认压成短址（/s/{code}）：完整深链 ~95 字符，
 		// 会把 IM 正文预算挤掉大半（docs/gateway/08 §5.2）。false = 旧行为。
 		notifyShortLinks = flag.Bool("notify-short-links", true, "use short links (/s/{code}) instead of full console deep links in notification bodies")
-		eventTick       = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
+		eventTick        = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
 		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
 		// without owner password and without any device token" — the combination
 		// that publishes an unauthenticated console AND an open agent tunnel to
