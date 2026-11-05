@@ -170,6 +170,14 @@ export const fencePattern: AnalyticsErrorPattern = {
   count: 4,
 };
 
+// `idle` 是启动期无 run 的镜像事件丢弃，显示层必须标成“非故障诊断”。
+export const idleFencePattern: AnalyticsErrorPattern = {
+  error_code: "RENDER_FENCE_DROPPED_IDLE",
+  failure_category: "render_fence_drop_idle",
+  source: "fence",
+  count: 2,
+};
+
 export function routeStatsResponse(): AnalyticsRouteStatsResponse {
   return {
     schema_version: "usage.analytics.v2",

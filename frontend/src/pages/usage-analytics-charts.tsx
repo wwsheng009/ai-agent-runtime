@@ -21,6 +21,7 @@ import type {
   AnalyticsGroupBucket,
   AnalyticsGroupBy,
 } from "@/types/runtime";
+import { isNonFaultDiagnosticPattern } from "./usage-analytics/failure-classification";
 import { TruncatedTick } from "./usage-analytics/chart-tick";
 
 type UsageAnalyticsChartsProps = {
@@ -96,6 +97,7 @@ export function UsageAnalyticsCharts({
           key,
           label: failurePatternLabel(t, pattern),
           count: pattern.count,
+          nonFault: isNonFaultDiagnosticPattern(pattern),
         };
       })
       .filter((bucket) => bucket.key.length > 0)
@@ -206,7 +208,7 @@ export function UsageAnalyticsCharts({
                   <Tooltip cursor={{ fill: "var(--analytics-chart-hover)" }} content={<FailureChartTooltip />} />
                   <Bar dataKey="count" radius={[0, 3, 3, 0]} maxBarSize={22}>
                     {failureBuckets.map((bucket) => (
-                      <Cell key={bucket.key} fill="var(--analytics-chart-primary)" fillOpacity={selectedFailure && selectedFailure !== bucket.key ? 0.35 : 1} cursor="pointer" role="button" tabIndex={0} aria-label={t("charts.failures.filterAction", { key: bucket.label })} onClick={() => onSelectFailure?.(bucket.key)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectFailure?.(bucket.key); } }} />
+                      <Cell key={bucket.key} fill={bucket.nonFault ? "var(--analytics-chart-secondary)" : "var(--analytics-chart-primary)"} fillOpacity={selectedFailure && selectedFailure !== bucket.key ? 0.35 : 1} cursor="pointer" role="button" tabIndex={0} aria-label={t("charts.failures.filterAction", { key: bucket.label })} onClick={() => onSelectFailure?.(bucket.key)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectFailure?.(bucket.key); } }} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -215,7 +217,19 @@ export function UsageAnalyticsCharts({
             <ul className="divide-y divide-border rounded-card border border-border">
               {visibleFailures.map((bucket) => (
                 <li key={bucket.key} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                  <span className="min-w-0 truncate" title={bucket.label}>{bucket.label}</span>
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 truncate" title={bucket.label}>{bucket.label}</span>
+                    {bucket.nonFault ? (
+                      <span
+                        data-testid="non-fault-diagnostic-badge"
+                        title={t("observability.errors.nonFaultDiagnosticHint")}
+                      >
+                        <Badge className="shrink-0 border-analytics-info-border bg-analytics-info-soft normal-case tracking-normal text-analytics-info">
+                          {t("observability.errors.nonFaultDiagnostic")}
+                        </Badge>
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="tabular-nums text-muted-foreground">{formatNumber(bucket.count)}</span>
                 </li>
               ))}
@@ -272,7 +286,7 @@ function FailureChartTooltip({
   active?: boolean;
   payload?: readonly {
     value?: number | string;
-    payload?: { label?: string; count?: number };
+    payload?: { label?: string; count?: number; nonFault?: boolean };
   }[];
 }) {
   const { t } = useTranslation("usageAnalytics");
@@ -281,6 +295,13 @@ function FailureChartTooltip({
   return (
     <div className="max-w-[min(82vw,360px)] border border-border-strong bg-surface-overlay px-3 py-2 text-xs shadow-xl">
       <div className="break-all font-medium">{bucket?.label ?? "-"}</div>
+      {bucket?.nonFault ? (
+        <div className="mt-1">
+          <Badge className="border-analytics-info-border bg-analytics-info-soft normal-case tracking-normal text-analytics-info">
+            {t("observability.errors.nonFaultDiagnostic")}
+          </Badge>
+        </div>
+      ) : null}
       <div className="mt-1 flex justify-between gap-5 text-muted-foreground">
         <span>{t("observability.errors.columns.count")}</span>
         <span className="tabular-nums text-foreground">

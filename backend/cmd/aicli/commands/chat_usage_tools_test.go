@@ -285,6 +285,24 @@ func TestRenderUsageAnalyticsErrorPatterns(t *testing.T) {
 	if len(brokenLines) != 1 || brokenLines[0] != usageAnalyticsUnavailableHint {
 		t.Fatalf("error pattern degradation = %v", brokenLines)
 	}
+
+	idle := usageErrorPatternLabel(usageanalytics.ErrorPattern{
+		Source:          "fence",
+		ErrorCode:       "RENDER_FENCE_DROPPED_IDLE",
+		FailureCategory: "render_fence_drop_idle",
+		Count:           2,
+	})
+	if !strings.Contains(idle, "非故障诊断") {
+		t.Fatalf("idle fence pattern label = %q, want non-fault diagnostic marker", idle)
+	}
+	closed := usageErrorPatternLabel(usageanalytics.ErrorPattern{
+		Source:          "fence",
+		ErrorCode:       "RENDER_FENCE_DROPPED_CLOSED",
+		FailureCategory: "render_fence_drop_closed",
+	})
+	if strings.Contains(closed, "非故障诊断") {
+		t.Fatalf("closed fence pattern label = %q, must not be marked non-fault", closed)
+	}
 }
 
 // ---------------------------------------------------------------------------

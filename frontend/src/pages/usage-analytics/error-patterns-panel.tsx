@@ -10,10 +10,11 @@ import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
 import type { AnalyticsErrorPattern } from "@/types/runtime";
 import type { TFunction } from "i18next";
-import { AlertTriangleIcon, RefreshCwIcon } from "lucide-react";
+import { AlertTriangleIcon, InfoIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { isNonFaultDiagnosticPattern } from "./failure-classification";
 import { formatNumber } from "./format";
 
 /** 失败分类归一表（backend/internal/llm/failure_category.go）→ i18n key。 */
@@ -214,6 +215,7 @@ export function ErrorPatternsPanel({
             <tbody>
               {patterns.map((pattern, index) => {
                 const label = patternLabel(t, pattern);
+                const nonFault = isNonFaultDiagnosticPattern(pattern);
                 const selected =
                   Boolean(selectedCategory) &&
                   (pattern.failure_category ?? "").trim() === selectedCategory;
@@ -224,11 +226,30 @@ export function ErrorPatternsPanel({
                   >
                     <td className="px-3 py-2.5">
                       <div className="flex items-start gap-2">
-                        <AlertTriangleIcon
-                          size={15}
-                          className="mt-0.5 shrink-0 text-analytics-warning"
-                        />
-                        <span className="min-w-0 break-all font-mono text-xs">{label}</span>
+                        {nonFault ? (
+                          <InfoIcon
+                            size={15}
+                            className="mt-0.5 shrink-0 text-analytics-info"
+                          />
+                        ) : (
+                          <AlertTriangleIcon
+                            size={15}
+                            className="mt-0.5 shrink-0 text-analytics-warning"
+                          />
+                        )}
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="min-w-0 break-all font-mono text-xs">{label}</span>
+                          {nonFault ? (
+                            <span
+                              data-testid="non-fault-diagnostic-badge"
+                              title={t("observability.errors.nonFaultDiagnosticHint")}
+                            >
+                              <Badge className="border-analytics-info-border bg-analytics-info-soft normal-case tracking-normal text-analytics-info">
+                                {t("observability.errors.nonFaultDiagnostic")}
+                              </Badge>
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </td>
                     <td className="px-3 py-2.5">

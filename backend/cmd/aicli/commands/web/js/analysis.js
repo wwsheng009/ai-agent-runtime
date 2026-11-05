@@ -106,6 +106,43 @@ function analysisSubagentOutcome(success) {
   return success ? "完成" : "失败";
 }
 
+// 失败模式标签对齐 React 观测页。idle 是启动期无 run 的渲染围栏镜像事件丢弃，
+// 不代表执行失败，必须用“非故障诊断”徽标从真实围栏信号中区分出来。
+var analysisFailureCategoryLabels = {
+  provider_error: "Provider 错误",
+  rate_limited: "限流",
+  timeout: "超时",
+  context_overflow: "上下文超限",
+  tool_error: "工具错误",
+  budget_exceeded: "预算超限",
+  cancelled: "已取消",
+  interrupted: "已中断",
+  render_fence_drop_idle: "围栏丢弃（无 run）",
+  render_fence_drop_closed: "围栏丢弃（run 已结束）",
+  render_fence_drop_active_mismatch: "围栏丢弃（跨 run 混入）",
+  unknown: "未知",
+};
+
+function analysisFailureCategoryLabel(category) {
+  var normalized = String(category || "").trim().toLowerCase();
+  if (normalized === "") { return "--"; }
+  return analysisFailureCategoryLabels[normalized] || normalized;
+}
+
+function analysisErrorPatternNonFault(pattern) {
+  var category = String((pattern && pattern.failure_category) || "").trim().toLowerCase();
+  var code = String((pattern && pattern.error_code) || "").trim().toUpperCase();
+  return category === "render_fence_drop_idle" || code === "RENDER_FENCE_DROPPED_IDLE";
+}
+
+function analysisFailureCategoryCell(pattern) {
+  var html = esc(analysisFailureCategoryLabel(pattern && pattern.failure_category));
+  if (analysisErrorPatternNonFault(pattern)) {
+    html += ' <span class="cache-badge badge-none" title="启动期无 run 的渲染围栏镜像事件，不代表执行失败">非故障诊断</span>';
+  }
+  return html;
+}
+
 // 失败分类：●key count（次数倒序、键升序）；空对象 → 空串（不显示 0）。
 function analysisCountMapChips(counts) {
   if (!counts) { return ""; }
@@ -564,7 +601,7 @@ function renderAnalysisErrors(result) {
     rows.push("<tr>" +
       "<td>" + esc(analysisOrDash(pattern.source)) + "</td>" +
       "<td>" + esc(analysisOrDash(pattern.error_code)) + "</td>" +
-      "<td>" + esc(analysisOrDash(pattern.failure_category)) + "</td>" +
+      "<td>" + analysisFailureCategoryCell(pattern) + "</td>" +
       "<td>" + analysisInt(pattern.count) + "</td></tr>");
   }
   el.innerHTML = '<div class="cache-detail-title" style="margin-top:10px">失败模式 Top</div>' +
@@ -809,7 +846,7 @@ function analysisPatternTable(patterns) {
     var pattern = patterns[i];
     rows.push("<tr>" +
       "<td>" + esc(analysisOrDash(pattern.error_code)) + "</td>" +
-      "<td>" + esc(analysisOrDash(pattern.failure_category)) + "</td>" +
+      "<td>" + analysisFailureCategoryCell(pattern) + "</td>" +
       "<td>" + analysisInt(pattern.count) + "</td></tr>");
   }
   return '<table class="cache-table"><thead><tr><th>错误码</th><th>失败分类</th><th>次数</th></tr></thead><tbody>' +

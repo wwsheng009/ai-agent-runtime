@@ -775,6 +775,8 @@ export const zhUsageAnalytics = {
       },
       drilldown: "查看 {{key}} 的诊断",
       drilldownUnavailable: "不可下钻",
+      nonFaultDiagnostic: "非故障诊断",
+      nonFaultDiagnosticHint: "启动期无 run 的渲染围栏镜像事件，不代表执行失败",
       filteredBy: "已按 {{key}} 过滤",
       clearFilter: "清除筛选",
       unknown: "未分类",

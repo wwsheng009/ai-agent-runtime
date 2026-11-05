@@ -777,6 +777,8 @@ export const enUsageAnalytics = {
       },
       drilldown: "Open diagnostics for {{key}}",
       drilldownUnavailable: "No drilldown",
+      nonFaultDiagnostic: "Non-fault diagnostic",
+      nonFaultDiagnosticHint: "Pre-run render-fence mirror event; not an execution failure",
       filteredBy: "Filtered by {{key}}",
       clearFilter: "Clear filter",
       unknown: "Unclassified",

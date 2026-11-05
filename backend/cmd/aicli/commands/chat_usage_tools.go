@@ -320,19 +320,33 @@ func usageAttemptLabel(attempt, maxAttempts int) string {
 }
 
 // usageErrorPatternLabel 单条失败模式的 code/category 标签；缺失一律 `--`。
+//
+// `render_fence_drop_idle` 是启动期无 run 的渲染围栏镜像事件计数，不代表执行
+// 失败；CLI 与微 web 同口径标注「非故障诊断」，避免用户按 provider/tool 故障处理。
 func usageErrorPatternLabel(pattern usageanalytics.ErrorPattern) string {
 	code := strings.TrimSpace(pattern.ErrorCode)
 	category := strings.TrimSpace(pattern.FailureCategory)
+	label := "--"
 	switch {
 	case code == "" && category == "":
-		return "--"
+		label = "--"
 	case code == "":
-		return category
+		label = category
 	case category == "" || category == code:
-		return code
+		label = code
 	default:
-		return fmt.Sprintf("%s(%s)", code, category)
+		label = fmt.Sprintf("%s(%s)", code, category)
 	}
+	if usageErrorPatternNonFault(pattern) {
+		label += "（非故障诊断）"
+	}
+	return label
+}
+
+func usageErrorPatternNonFault(pattern usageanalytics.ErrorPattern) bool {
+	category := strings.ToLower(strings.TrimSpace(pattern.FailureCategory))
+	code := strings.ToUpper(strings.TrimSpace(pattern.ErrorCode))
+	return category == "render_fence_drop_idle" || code == "RENDER_FENCE_DROPPED_IDLE"
 }
 
 // usageErrorPatternSummary 把错误码列表压缩为一行「code×count · …」。

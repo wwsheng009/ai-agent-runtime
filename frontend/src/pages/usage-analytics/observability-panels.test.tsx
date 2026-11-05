@@ -36,6 +36,7 @@ import {
   emptySubagentResponse,
   emptyToolResponse,
   fencePattern,
+  idleFencePattern,
   routeEventsResponse,
   routeStatsResponse,
   subagentResponse,
@@ -274,6 +275,41 @@ describe("usage analytics observability panels", () => {
       container.querySelector('button[aria-label*="RENDER_FENCE_DROPPED_CLOSED"]'),
     ).toBeNull();
     expect(container.textContent).toContain("不可下钻");
+    // closed 是真实围栏撕裂信号，不能误标成“非故障诊断”。
+    expect(container.querySelector('[data-testid="non-fault-diagnostic-badge"]')).toBeNull();
+  });
+
+  it("失败模式面板：idle 围栏标记为非故障诊断", async () => {
+    listAnalyticsErrorsMock.mockResolvedValue({
+      schema_version: "usage.analytics.v2",
+      generated_at: "2026-11-05T00:00:00Z",
+      patterns: [idleFencePattern, fencePattern],
+    });
+    act(() => {
+      root.render(
+        <ErrorPatternsPanel
+          sessionId="session-1"
+          onDrilldown={() => {}}
+        />,
+      );
+    });
+    await flush();
+
+    expect(container.textContent).toContain("RENDER_FENCE_DROPPED_IDLE");
+    expect(container.textContent).toContain("围栏丢弃（无 run）");
+    const badges = container.querySelectorAll(
+      '[data-testid="non-fault-diagnostic-badge"]',
+    );
+    expect(badges).toHaveLength(1);
+    expect(badges[0]?.textContent).toContain("非故障诊断");
+
+    const closedRow = Array.from(container.querySelectorAll("tbody tr")).find((row) =>
+      row.textContent?.includes("RENDER_FENCE_DROPPED_CLOSED"),
+    );
+    expect(closedRow).not.toBeUndefined();
+    expect(
+      closedRow?.querySelector('[data-testid="non-fault-diagnostic-badge"]'),
+    ).toBeNull();
   });
 
   it("路由面板：空数组渲染「暂无路由事件」并传会话过滤", async () => {
