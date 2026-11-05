@@ -193,7 +193,7 @@
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
       <button class="tab-btn" id="tab-connectors-btn" type="button" title="IM 连接器（飞书 / QQ / 微信 / Telegram）：配置 / 启停 / 扫码登录 / 日志（与 /api/connectors 同源）">机器人</button>
       <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
-      <button class="tab-btn" id="tab-analysis-btn" type="button" title="工具 / 子代理 / 失败模式聚合（runtime.analytics.v1，与 TUI /usage tools|subagents|errors 同源）">分析</button>
+      <button class="tab-btn" id="tab-analysis-btn" type="button" title="工具 / 子代理 / 失败模式聚合（runtime.analytics.v1，与 TUI /usage tools|subagents|errors 同源；工具表含会话可用但未使用的工具）">分析</button>
       <button class="tab-btn" id="tab-lsp-btn" type="button" title="LSP 池状态与使用读数（lsp.observe.v1，与 TUI /lsp status 同源；事件埋点落地后自动点亮）">LSP</button>
       <button class="tab-btn" id="tab-debug-btn" type="button" title="与 aicli /debug 命令一致的状态文档快照">调试</button>
       <button class="tab-btn" id="tab-about-btn" type="button" title="关于 aicli micro web client">关于</button>
@@ -1216,8 +1216,9 @@
       <div id="cache-requests" class="cache-requests"><div class="cache-empty">加载中…</div></div>
     </div>
     <!-- 分析页签（runtime.analytics.v1）：工具 / 子代理 / 失败模式三区 + 顶部采集健康条。
-         数据由 js/analysis.js 在页签激活时按需拉取（fetch no-store），失败/空库降级
-         在面板内呈现；样式复用缓存页签既有 cache-* 类，不新增 style.css。 -->
+         工具区把 usage 明细与会话可用工具面（available_tools）取并集，未使用工具以
+         0 调用列出；数据由 js/analysis.js 在页签激活时按需拉取（fetch no-store），
+         失败/空库降级在面板内呈现；样式复用缓存页签既有 cache-* 类，不新增 style.css。 -->
     <div id="tab-analysis" class="tab-panel" style="overflow-y:auto;padding:0 4px 10px 4px">
       <div class="cache-toolbar">
         <h2 class="cache-title">分析</h2>

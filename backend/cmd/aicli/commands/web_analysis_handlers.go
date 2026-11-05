@@ -26,7 +26,7 @@ import (
 // 路由（GET；子路径手动解析，与缓存端点同形）：
 //
 //	GET /web/api/analysis/status     采集健康（attached/degraded/db_path/table_counts）
-//	GET /web/api/analysis/tools      工具维度聚合（ToolStatsResult）
+//	GET /web/api/analysis/tools      工具维度聚合（ToolStatsResult + available_tools）
 //	GET /web/api/analysis/subagents  子代理维度聚合（SubagentStatsResult）
 //	GET /web/api/analysis/errors     失败模式 Top-N（ErrorPatternsResult）
 //	GET /web/api/analysis/tool_efficiency  工具效率 / Artifact 链路快照
@@ -102,7 +102,7 @@ func HandleChatWebAPIAnalysis(w http.ResponseWriter, r *http.Request) {
 				chatWebAnalysisErrorBody(chatWebAnalysisInternalCode, "usage analytics query failed"))
 			return
 		}
-		writeWebAPIJSON(w, http.StatusOK, result)
+		writeWebAPIJSON(w, http.StatusOK, chatWebAnalysisToolsPayload(session, values, result))
 	case "subagents":
 		query, err := chatWebAnalysisSubagentStatsQuery(values)
 		if err != nil {

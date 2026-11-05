@@ -1,4 +1,6 @@
 // 分析页签（runtime.analytics.v1）：工具 / 子代理 / 失败模式三张表 + 采集健康条。
+// 工具表把 usage 明细与当前会话可用工具面（available_tools）取并集，未使用工具
+// 以 0 调用列出，并支持「全部 / 已使用 / 未使用」筛选。
 // 数据源 /web/api/analysis/*，与 runtime-server /api/runtime/analytics/* 同一
 // 查询层、同一字段名（HTTP 契约只定义一次）；与 TUI /usage tools|subagents|errors
 // 同库同源（usage_analytics.sqlite）。
@@ -17,6 +19,13 @@ var analysisLoadedSessionID = "";
 var analysisScope = "session";
 // 详情弹层/计分卡使用的最近一次响应快照（null = 本次刷新尚未返回）。
 var analysisToolsData = null;
+// 工具表合并后的行（usage 明细 ∪ 当前会话可用工具面）；详情/筛选/点击共用。
+var analysisToolsRows = [];
+// 本次响应是否真的带有可用工具面（scope=all / 旧服务端 / 不可用时为 false）。
+// 为 false 时不得把「未出现在 available_tools」误标成「当前不可用」。
+var analysisToolsAvailabilityKnown = false;
+// 工具表筛选：all（全部）| used（已使用）| unused（未使用）。
+var analysisToolFilter = "all";
 var analysisSubagentsData = null;
 
 // 路由观测快照（stats + events 分页状态）。
@@ -180,6 +189,8 @@ export function refreshAnalysis() {
   var seq = ++analysisSeq;
   analysisLoadedSessionID = analysisCurrentSessionID();
   analysisToolsData = null;
+  analysisToolsRows = [];
+  analysisToolsAvailabilityKnown = false;
   analysisSubagentsData = null;
   renderAnalysisLoading();
   analysisAPI(analysisBase + "/status" + analysisQuery()).then(function (result) {
@@ -268,6 +279,8 @@ export function stopAnalysisAuto() {
 // ---- 状态区（采集健康 + 计分卡） ----
 
 function renderAnalysisLoading() {
+  analysisToolsRows = [];
+  analysisToolsAvailabilityKnown = false;
   var statusEl = analysisEl("analysis-status");
   if (statusEl) {
     statusEl.className = "cache-capabilities";
@@ -441,6 +454,144 @@ function analysisCard(value, label) {
   return '<div class="cache-card"><div class="cache-card-value">' + esc(value) + '</div><div class="cache-card-label">' + esc(label) + "</div></div>";
 }
 
+// ---- 工具表：usage 明细 ∪ 当前会话可用工具面 ----
+
+function analysisAvailableToolName(item) {
+  if (typeof item === "string") { return analysisText(item); }
+  return analysisText(item && item.name);
+}
+
+function analysisAvailableToolSource(item) {
+  if (!item || typeof item === "string") { return ""; }
+  return analysisText(item.source);
+}
+
+// analysisToolRows 把「使用过的工具」与「会话可用工具」合并成统一行：
+//   - stat 非空 = 统计窗口内使用过（调用数 > 0）；
+//   - available = 当前会话工具面里仍存在；可为 0 次调用。
+// 未使用工具保留零值统计，避免在表格里把「未使用」误显示成"暂无数据"。
+function analysisToolRows(body) {
+  var stats = (body && body.tools) || [];
+  var available = (body && body.available_tools) || [];
+  var byName = Object.create(null);
+  var rows = [];
+  var i;
+  for (i = 0; i < stats.length; i++) {
+    var stat = stats[i];
+    var statName = analysisText(stat && stat.tool_name);
+    if (!statName || byName[statName]) { continue; }
+    var statRow = {
+      tool_name: statName,
+      stat: stat,
+      available: false,
+      source: "",
+      calls: Number(stat.calls) || 0,
+      failures: Number(stat.failures) || 0,
+      empty_results: Number(stat.empty_results) || 0,
+      retried_calls: Number(stat.retried_calls) || 0,
+      average_duration_ms: stat.average_duration_ms,
+      min_duration_ms: stat.min_duration_ms,
+      max_duration_ms: stat.max_duration_ms,
+      p50_duration_ms: stat.p50_duration_ms,
+      p95_duration_ms: stat.p95_duration_ms,
+      error_top: stat.error_top || [],
+    };
+    byName[statName] = statRow;
+    rows.push(statRow);
+  }
+  for (i = 0; i < available.length; i++) {
+    var item = available[i];
+    var name = analysisAvailableToolName(item);
+    if (!name) { continue; }
+    var source = analysisAvailableToolSource(item);
+    if (byName[name]) {
+      byName[name].available = true;
+      byName[name].source = source;
+      continue;
+    }
+    var idleRow = {
+      tool_name: name,
+      stat: null,
+      available: true,
+      source: source,
+      calls: 0,
+      failures: 0,
+      empty_results: 0,
+      retried_calls: 0,
+      average_duration_ms: 0,
+      min_duration_ms: 0,
+      max_duration_ms: 0,
+      p50_duration_ms: 0,
+      p95_duration_ms: 0,
+      error_top: [],
+    };
+    byName[name] = idleRow;
+    rows.push(idleRow);
+  }
+  // 调用次数倒序，未使用（0 次）自然沉底；同次数按名称升序稳定排序。
+  rows.sort(function (a, b) {
+    var aCalls = a.stat ? a.calls : 0;
+    var bCalls = b.stat ? b.calls : 0;
+    if (aCalls !== bCalls) { return bCalls - aCalls; }
+    if (a.tool_name < b.tool_name) { return -1; }
+    if (a.tool_name > b.tool_name) { return 1; }
+    return 0;
+  });
+  return rows;
+}
+
+function analysisToolCounts(rows) {
+  var counts = { total: rows.length, available: 0, used: 0, unused: 0 };
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].available) { counts.available++; }
+    if (rows[i].stat) { counts.used++; }
+    else if (rows[i].available) { counts.unused++; }
+  }
+  return counts;
+}
+
+function analysisFilteredToolRows(rows) {
+  if (analysisToolFilter === "used") {
+    return rows.filter(function (row) { return !!row.stat; });
+  }
+  if (analysisToolFilter === "unused") {
+    return rows.filter(function (row) { return row.available && !row.stat; });
+  }
+  return rows;
+}
+
+function analysisToolFilterButton(key, label, count) {
+  var active = analysisToolFilter === key;
+  var style = "padding:2px 10px;font-size:11px;cursor:pointer;" +
+    (active ? "background:var(--accent);color:var(--userMsgFg,#fff);border-color:var(--accent);" : "");
+  return '<button type="button" data-analysis-tool-filter="' + esc(key) + '"' +
+    ' aria-pressed="' + (active ? "true" : "false") + '" style="' + esc(style) + '">' +
+    esc(label) + " " + analysisInt(count) + "</button>";
+}
+
+function analysisToolStatusBadge(row, hasAvailability) {
+  if (!row.stat) {
+    return '<span class="cache-badge badge-none" title="未使用：在当前可用工具列表中，但统计窗口内没有调用">未使用</span>';
+  }
+  if (!hasAvailability) {
+    return '<span class="cache-badge badge-hit" title="已使用：统计窗口内有调用">已使用</span>';
+  }
+  if (row.available) {
+    return '<span class="cache-badge badge-hit" title="已使用：当前会话工具面内">已使用</span>';
+  }
+  return '<span class="cache-badge badge-write" title="已使用：当前会话工具面已不含该工具">已使用</span>';
+}
+
+function analysisAvailableToolsSourceLabel(source) {
+  switch (analysisText(source)) {
+    case "stable_surface": return "冻结工具面";
+    case "tool_catalog": return "候选工具面";
+    case "session_tool_surface": return "会话工具面";
+    case "disabled": return "工具已禁用";
+    default: return "";
+  }
+}
+
 function analysisSuccessRate(summary) {
   if (!summary || !summary.total || summary.total <= 0) { return "--"; }
   return (Math.round(summary.succeeded / summary.total * 1000) / 10).toFixed(1) + "%";
@@ -458,12 +609,20 @@ function renderAnalysisCards() {
   var cards = [];
   if (analysisToolsData) {
     var totals = analysisToolsData.totals || {};
-    var toolCount = (analysisToolsData.tools || []).length;
-    cards.push(analysisCard(analysisInt(toolCount),
-      "工具（调用 " + analysisInt(totals.calls || 0) + " · 失败 " + analysisInt(totals.failures || 0) +
+    var toolRows = analysisToolRows(analysisToolsData);
+    var toolCounts = analysisToolCounts(toolRows);
+    var toolValue = toolCounts.available > 0 ? toolCounts.available : toolCounts.used;
+    var toolLabel = "工具（";
+    if (toolCounts.available > 0) {
+      toolLabel += "可用 " + analysisInt(toolCounts.available) +
+        " · 已用 " + analysisInt(toolCounts.used) +
+        " · 未用 " + analysisInt(toolCounts.unused) + " · ";
+    }
+    toolLabel += "调用 " + analysisInt(totals.calls || 0) + " · 失败 " + analysisInt(totals.failures || 0) +
       " · 失败率 " + analysisFailureRate(totals.failures || 0, totals.calls || 0) +
       " · 平均耗时 " + analysisDuration(totals.average_duration_ms) +
-      "（最小 " + analysisDuration(totals.min_duration_ms) + " / 最大 " + analysisDuration(totals.max_duration_ms) + "））"));
+      "（最小 " + analysisDuration(totals.min_duration_ms) + " / 最大 " + analysisDuration(totals.max_duration_ms) + "））";
+    cards.push(analysisCard(analysisInt(toolValue), toolLabel));
   }
   if (analysisSubagentsData) {
     var summary = analysisSubagentsData.summary || {};
@@ -498,37 +657,90 @@ function renderAnalysisTools(result) {
   var el = analysisEl("analysis-tools");
   if (!el) { return; }
   if (!result || result.status !== 200 || !result.body) {
+    analysisToolsData = null;
+    analysisToolsRows = [];
+    analysisToolsAvailabilityKnown = false;
     el.innerHTML = analysisUnavailableHTML(result);
     return;
   }
-  analysisToolsData = result.body;
-  var tools = result.body.tools || [];
-  if (tools.length === 0) {
+  renderAnalysisToolsBody(result.body);
+}
+
+function renderAnalysisToolsBody(body) {
+  var el = analysisEl("analysis-tools");
+  if (!el) { return; }
+  analysisToolsData = body;
+  var allRows = analysisToolRows(body);
+  analysisToolsRows = allRows;
+  var counts = analysisToolCounts(allRows);
+  // 全局聚合（或旧服务端）没有 available_tools：不能继续套用 unused 筛选，
+  // 否则会把已使用工具也一起滤空。
+  var hasAvailable = counts.available > 0;
+  analysisToolsAvailabilityKnown = hasAvailable;
+  if (!hasAvailable && analysisToolFilter !== "all") { analysisToolFilter = "all"; }
+  if (allRows.length === 0) {
     el.innerHTML = '<div class="cache-empty">暂无数据</div>';
     renderAnalysisCards();
     return;
   }
-  var rows = [];
-  for (var i = 0; i < tools.length; i++) {
-    var stat = tools[i];
-    rows.push('<tr class="cache-row" data-analysis-tool="' + esc(stat.tool_name) + '">' +
-      "<td>" + esc(analysisOrDash(stat.tool_name)) + "</td>" +
-      "<td>" + analysisInt(stat.calls) + "</td>" +
-      "<td>" + analysisInt(stat.failures) + "</td>" +
-      "<td>" + analysisFailureRate(stat.failures, stat.calls) + "</td>" +
-      "<td>" + analysisInt(stat.empty_results) + "</td>" +
-      "<td>" + analysisInt(stat.retried_calls) + "</td>" +
-      "<td>" + analysisDuration(stat.average_duration_ms) + "</td>" +
-      "<td>" + analysisDuration(stat.min_duration_ms) + "</td>" +
-      "<td>" + analysisDuration(stat.max_duration_ms) + "</td>" +
-      "<td>" + analysisDuration(stat.p50_duration_ms) + "</td>" +
-      "<td>" + analysisDuration(stat.p95_duration_ms) + "</td></tr>");
+  var visibleRows = hasAvailable ? analysisFilteredToolRows(allRows) : allRows;
+  var html = "";
+  if (hasAvailable) {
+    var sourceLabel = analysisAvailableToolsSourceLabel(body.available_tools_source);
+    html += '<div class="cache-dist" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px 0">' +
+      '<span>可用 ' + analysisInt(counts.available) +
+      " · 已使用 " + analysisInt(counts.used) +
+      " · 未使用 " + analysisInt(counts.unused) +
+      (sourceLabel ? " · " + esc(sourceLabel) : "") + "</span>" +
+      '<span style="flex:1 1 auto"></span>' +
+      analysisToolFilterButton("all", "全部", counts.total) +
+      analysisToolFilterButton("used", "已使用", counts.used) +
+      analysisToolFilterButton("unused", "未使用", counts.unused) +
+      "</div>";
+  } else if (analysisScope === "all") {
+    html += '<div class="cache-dist" style="margin:0 0 8px 0">全局视图只统计已使用工具；切回「当前会话」可查看完整可用工具列表。</div>';
+  } else if (analysisText(body.available_tools_source) === "disabled") {
+    html += '<div class="cache-dist" style="margin:0 0 8px 0">当前会话已禁用工具（--no-tools），以下仅列出历史已使用工具。</div>';
+  } else if (analysisText(body.available_tools_source) === "unavailable") {
+    html += '<div class="cache-dist" style="margin:0 0 8px 0">未能读取当前会话可用工具面；以下仅列出已使用工具。</div>';
   }
-  el.innerHTML = '<div style="overflow-x:auto">' +
+  if (visibleRows.length === 0) {
+    var emptyText = analysisToolFilter === "unused"
+      ? "没有未使用的工具（当前可用工具均有调用记录）"
+      : (analysisToolFilter === "used" ? "没有已使用的工具" : "暂无数据");
+    html += '<div class="cache-empty">' + esc(emptyText) + "</div>";
+    el.innerHTML = html;
+    renderAnalysisCards();
+    return;
+  }
+  var rows = [];
+  for (var i = 0; i < visibleRows.length; i++) {
+    var row = visibleRows[i];
+    var nameCell = esc(analysisOrDash(row.tool_name));
+    if (hasAvailable && row.stat && !row.available) {
+      nameCell += ' <span style="font-size:10px;color:var(--fg4)" title="当前会话工具面已不含该工具">（当前不可用）</span>';
+    }
+    var nameTitle = row.source ? ' title="来源：' + esc(row.source) + '"' : "";
+    rows.push('<tr class="cache-row" data-analysis-tool="' + esc(row.tool_name) + '">' +
+      "<td" + nameTitle + ">" + nameCell + "</td>" +
+      "<td>" + analysisToolStatusBadge(row, hasAvailable) + "</td>" +
+      "<td>" + analysisInt(row.calls) + "</td>" +
+      "<td>" + analysisInt(row.failures) + "</td>" +
+      "<td>" + analysisFailureRate(row.failures, row.calls) + "</td>" +
+      "<td>" + analysisInt(row.empty_results) + "</td>" +
+      "<td>" + analysisInt(row.retried_calls) + "</td>" +
+      "<td>" + analysisDuration(row.average_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(row.min_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(row.max_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(row.p50_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(row.p95_duration_ms) + "</td></tr>");
+  }
+  html += '<div style="overflow-x:auto">' +
     '<table class="cache-table"><thead><tr>' +
-    "<th>工具</th><th>调用</th><th>失败</th><th>失败率</th><th>空结果</th><th>重试</th>" +
+    "<th>工具</th><th>状态</th><th>调用</th><th>失败</th><th>失败率</th><th>空结果</th><th>重试</th>" +
     "<th>平均</th><th>最小</th><th>最大</th><th>p50</th><th>p95</th>" +
     "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
+  el.innerHTML = html;
   renderAnalysisCards();
 }
 
@@ -871,17 +1083,32 @@ export function closeAnalysisDetail() {
   if (overlay) { overlay.style.display = "none"; }
 }
 
-function openAnalysisToolDetail(stat) {
-  if (!stat) { return; }
+function openAnalysisToolDetail(row) {
+  if (!row) { return; }
+  var stat = row.stat || null;
+  var availability = analysisToolsAvailabilityKnown
+    ? (row.available ? "可用" : (stat ? "当前会话工具面已不含该工具" : "未在当前可用列表"))
+    : "未知（当前统计范围未提供会话工具面）";
   var html = '<div class="cache-detail-title">工具明细</div>' +
-    analysisKV("工具", analysisOrDash(stat.tool_name)) +
-    analysisKV("调用 / 失败", analysisInt(stat.calls) + " / " + analysisInt(stat.failures) + "（失败率 " + analysisFailureRate(stat.failures, stat.calls) + "）") +
-    analysisKV("空结果 / 重试", analysisInt(stat.empty_results) + " / " + analysisInt(stat.retried_calls)) +
-    analysisKV("平均 / 最小 / 最大", analysisDuration(stat.average_duration_ms) + " / " + analysisDuration(stat.min_duration_ms) + " / " + analysisDuration(stat.max_duration_ms)) +
-    analysisKV("p50 / p95", analysisDuration(stat.p50_duration_ms) + " / " + analysisDuration(stat.p95_duration_ms)) +
-    '<div class="cache-detail-title" style="margin-top:10px">错误 Top</div>' +
-    analysisPatternTable(stat.error_top);
-  openAnalysisDetail("工具：" + analysisOrDash(stat.tool_name), html);
+    analysisKV("工具", analysisOrDash(row.tool_name)) +
+    analysisKV("状态", stat ? "已使用" : "未使用") +
+    analysisKV("当前会话工具面", availability);
+  if (row.source) {
+    html += analysisKV("来源", row.source);
+  }
+  if (!stat) {
+    html += '<div class="cache-dist" style="margin-top:8px">该工具在当前会话可用，但在统计范围/窗口内没有调用记录。</div>' +
+      '<div class="cache-detail-title" style="margin-top:10px">错误 Top</div>' +
+      '<div class="cache-empty">暂无数据</div>';
+  } else {
+    html += analysisKV("调用 / 失败", analysisInt(stat.calls) + " / " + analysisInt(stat.failures) + "（失败率 " + analysisFailureRate(stat.failures, stat.calls) + "）") +
+      analysisKV("空结果 / 重试", analysisInt(stat.empty_results) + " / " + analysisInt(stat.retried_calls)) +
+      analysisKV("平均 / 最小 / 最大", analysisDuration(stat.average_duration_ms) + " / " + analysisDuration(stat.min_duration_ms) + " / " + analysisDuration(stat.max_duration_ms)) +
+      analysisKV("p50 / p95", analysisDuration(stat.p50_duration_ms) + " / " + analysisDuration(stat.p95_duration_ms)) +
+      '<div class="cache-detail-title" style="margin-top:10px">错误 Top</div>' +
+      analysisPatternTable(stat.error_top);
+  }
+  openAnalysisDetail("工具：" + analysisOrDash(row.tool_name), html);
 }
 
 function openAnalysisSubagentDetail(stat) {
@@ -915,11 +1142,27 @@ function analysisClosestAttr(node, attr) {
 }
 
 function handleAnalysisRowClick(ev) {
+  var filter = analysisClosestAttr(ev.target, "data-analysis-tool-filter");
+  if (filter !== null) {
+    analysisToolFilter = filter === "used" || filter === "unused" ? filter : "all";
+    if (analysisToolsData) { renderAnalysisToolsBody(analysisToolsData); }
+    return;
+  }
   var toolName = analysisClosestAttr(ev.target, "data-analysis-tool");
   if (toolName !== null) {
+    for (var i = 0; i < analysisToolsRows.length; i++) {
+      if (analysisToolsRows[i].tool_name === toolName) {
+        openAnalysisToolDetail(analysisToolsRows[i]);
+        return;
+      }
+    }
+    // 兜底：理论上 merges 一定包含表格行；保留旧路径避免旧快照/竞态下点击无响应。
     var tools = analysisToolsData && analysisToolsData.tools ? analysisToolsData.tools : [];
-    for (var i = 0; i < tools.length; i++) {
-      if (tools[i].tool_name === toolName) { openAnalysisToolDetail(tools[i]); return; }
+    for (var j = 0; j < tools.length; j++) {
+      if (tools[j].tool_name === toolName) {
+        openAnalysisToolDetail({ tool_name: toolName, stat: tools[j], available: false, source: "" });
+        return;
+      }
     }
     return;
   }

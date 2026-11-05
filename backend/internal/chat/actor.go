@@ -1009,6 +1009,41 @@ func (a *SessionActor) StateForInspection() *RuntimeState {
 	return a.cloneState(false, false)
 }
 
+// StableToolSurfaceForInspection returns a defensive copy of the session's
+// frozen tool surface without cloning the rest of the runtime state. It returns
+// nil when no turn has frozen a surface yet.
+func (a *SessionActor) StableToolSurfaceForInspection() []runtimetypes.ToolDefinition {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.state == nil || !a.state.StableToolSurfaceSet || len(a.state.StableToolSurface) == 0 {
+		return nil
+	}
+	return cloneRuntimeToolDefinitions(a.state.StableToolSurface)
+}
+
+// ToolCatalogForInspection returns the pre-freeze candidate catalog for the
+// actor's next request. It is the read-only observation counterpart to the
+// frozen StableToolSurface and includes every source the request assembly
+// collects (MCP + scheduler + broker + builtin).
+func (a *SessionActor) ToolCatalogForInspection(ctx context.Context) []runtimetypes.ToolDefinition {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	apiAgent := a.agent
+	a.mu.RUnlock()
+	if apiAgent == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return apiAgent.CollectToolCatalogDefinitions(ctx)
+}
+
 func (a *SessionActor) stateWithoutToolSurfaces() *RuntimeState {
 	return a.cloneState(false, true)
 }

@@ -14,6 +14,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	usageanalytics "github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
@@ -260,6 +261,15 @@ func TestHandleChatWebAPIAnalysis_EmptyDatabase(t *testing.T) {
 	if items := analysisArray(t, body, "tools"); len(items) != 0 {
 		t.Fatalf("tools = %v, want empty array", body["tools"])
 	}
+	// available_tools 是增量契约：空库也必须返回数组而不是省略/null；
+	// 当前 fixture 没有 actor/Bootstrap/ToolSurface，来源应为 unavailable。
+	if items := analysisArray(t, body, "available_tools"); len(items) != 0 {
+		t.Fatalf("available_tools = %v, want empty array", body["available_tools"])
+	}
+	if body["available_tools_source"] != chatWebAnalysisToolsSourceUnavailable {
+		t.Fatalf("available_tools_source = %v, want %s",
+			body["available_tools_source"], chatWebAnalysisToolsSourceUnavailable)
+	}
 
 	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/subagents")
 	if code != http.StatusOK {
@@ -327,6 +337,87 @@ func TestHandleChatWebAPIAnalysis_EmptyDatabase(t *testing.T) {
 	}
 	if body["count"] != float64(0) {
 		t.Fatalf("routing events count = %v, want 0", body["count"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 可用工具面：usage 明细只含调用过的工具；available_tools 必须补齐完整工具面，
+// 前端据此把 0 次调用的工具也列出来。
+// ---------------------------------------------------------------------------
+
+func TestHandleChatWebAPIAnalysis_ToolsAvailableSurface(t *testing.T) {
+	session, bus := newAnalysisTestSession(t)
+	sessionID := session.RuntimeSession.ID
+	publishAnalysisToolCall(t, bus, sessionID, "call-view", "view", nil)
+
+	state := &runtimechat.RuntimeState{
+		SessionID: sessionID,
+		StableToolSurface: []runtimetypes.ToolDefinition{
+			{Name: "view"},
+			{Name: "shell", Metadata: map[string]interface{}{"surface_source": "core"}},
+			{Name: "never_used", Metadata: map[string]interface{}{"mcp_name": "demo"}},
+			{Name: "view"}, // 同名重复必须去重
+		},
+		StableToolSurfaceSet: true,
+		UpdatedAt:            time.Now().UTC(),
+	}
+	if err := session.LocalRuntimeHost.RuntimeStore.SaveState(context.Background(), state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/tools")
+	if code != http.StatusOK {
+		t.Fatalf("tools status = %d, want 200; body: %v", code, body)
+	}
+	if got := body["available_tools_source"]; got != chatWebAnalysisToolsSourceStable {
+		t.Fatalf("available_tools_source = %v, want %s", got, chatWebAnalysisToolsSourceStable)
+	}
+	available := analysisArray(t, body, "available_tools")
+	if len(available) != 3 {
+		t.Fatalf("available_tools = %v, want 3 entries", available)
+	}
+	wantNames := []string{"never_used", "shell", "view"}
+	wantSources := map[string]string{"never_used": "mcp:demo", "shell": "core", "view": ""}
+	for i, item := range available {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			t.Fatalf("available_tools[%d] is not an object: %T", i, item)
+		}
+		if entry["name"] != wantNames[i] {
+			t.Fatalf("available_tools[%d].name = %v, want %s", i, entry["name"], wantNames[i])
+		}
+		if got, _ := entry["source"].(string); got != wantSources[wantNames[i]] {
+			t.Fatalf("available_tools[%d].source = %q, want %q", i, got, wantSources[wantNames[i]])
+		}
+	}
+
+	// 统计结果保持不变：明细仍只含实际调用过的 view。
+	if tools := analysisArray(t, body, "tools"); len(tools) != 1 {
+		t.Fatalf("tools = %v, want only the used view row", body["tools"])
+	}
+
+	// 全局聚合不是当前会话：不得把当前会话工具面当成全局分母。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/tools?scope=all")
+	if code != http.StatusOK {
+		t.Fatalf("scope=all status = %d, want 200", code)
+	}
+	if items := analysisArray(t, body, "available_tools"); len(items) != 0 {
+		t.Fatalf("scope=all available_tools = %v, want empty array", items)
+	}
+	if got := body["available_tools_source"]; got != chatWebAnalysisToolsSourceScopeAll {
+		t.Fatalf("scope=all available_tools_source = %v, want %s", got, chatWebAnalysisToolsSourceScopeAll)
+	}
+
+	// 显式查询其它会话同理：不能借用当前会话的工具面。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/tools?session_id=session-other")
+	if code != http.StatusOK {
+		t.Fatalf("other session status = %d, want 200", code)
+	}
+	if items := analysisArray(t, body, "available_tools"); len(items) != 0 {
+		t.Fatalf("other session available_tools = %v, want empty array", items)
+	}
+	if got := body["available_tools_source"]; got != chatWebAnalysisToolsSourceOther {
+		t.Fatalf("other session available_tools_source = %v, want %s", got, chatWebAnalysisToolsSourceOther)
 	}
 }
 
@@ -870,13 +961,15 @@ func TestHandleChatWebPage_AnalysisModule(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, needle := range []string{
-		"/web/api/analysis",     // 数据源固定为分析端点前缀
-		`cache: "no-store"`,     // 与 cache.js 同模式：禁用浏览器缓存
-		"attached=false",        // 未挂载 → 顶部健康条（§9.1 降级）
-		"暂无数据",                  // 空库渲染
-		"data-analysis-tool",    // 工具行下钻
-		"routing",               // 路由观测
-		"loadMoreRoutingEvents", // 路由分页加载
+		"/web/api/analysis",         // 数据源固定为分析端点前缀
+		`cache: "no-store"`,         // 与 cache.js 同模式：禁用浏览器缓存
+		"attached=false",            // 未挂载 → 顶部健康条（§9.1 降级）
+		"暂无数据",                      // 空库渲染
+		"available_tools",           // 工具表合并会话可用工具面
+		"data-analysis-tool-filter", // 全部 / 已使用 / 未使用筛选
+		"data-analysis-tool",        // 工具行下钻
+		"routing",                   // 路由观测
+		"loadMoreRoutingEvents",     // 路由分页加载
 	} {
 		if !strings.Contains(body, needle) {
 			t.Fatalf("analysis.js missing %q", needle)

@@ -120,7 +120,7 @@ var webDebugEndpoints = []struct {
 	{Method: "GET/PUT/DELETE", Path: "/web/api/mcps/{name}", Note: "查看 / 更新 / 删除单个 MCP"},
 	{Method: "POST", Path: "/web/api/mcps/{name}/enable|disable", Note: "启用/停用 MCP（持久化 + 重连，刷新会话工具）"},
 	{Method: "POST", Path: "/web/api/mcps/reload", Note: "热重载 MCP 配置并重连（MCP 页签）"},
-	{Method: "GET", Path: "/web/api/analysis", Note: "用量分析（/status|/tools|/subagents|/errors|/routing|/routing/events）"},
+	{Method: "GET", Path: "/web/api/analysis", Note: "用量分析（/status|/tools|/subagents|/errors|/routing|/routing/events；/tools 额外返回 available_tools 会话可用工具面，供未使用工具对账）"},
 	{Method: "GET", Path: "/web/api/lsp", Note: "LSP 观测（/status|/overview|/events；池状态与 TUI /lsp status 同源，读数与事件在埋点落地前 available=false）"},
 	{Method: "GET", Path: "/web/api/knowledge", Note: "知识层状态（/status；与 `aicli knowledge status`、runtime-server GET /api/runtime/knowledge/status 同源同形，mode=off 时返回最小载荷而不是 404）"},
 	{Method: "GET", Path: "/web/api/cache", Note: "LLM 缓存分析（/overview|/requests|/messages/{id}/trace）"},
