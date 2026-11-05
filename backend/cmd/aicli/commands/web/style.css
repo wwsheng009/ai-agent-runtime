@@ -3229,6 +3229,73 @@ body.low-bandwidth img {
   flex-wrap: wrap;
   gap: 6px;
 }
+.schedule-select-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.schedule-select-filter {
+  display: flex;
+  min-width: 0;
+}
+.schedule-select-filter select {
+  min-height: 30px;
+  max-width: 220px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: 12px;
+}
+.schedule-select-filter select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.schedule-date-filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+}
+.schedule-date-filter:focus-within {
+  border-color: var(--accent);
+}
+.schedule-date-label {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg4);
+}
+.schedule-date-filter input {
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+}
+.schedule-filter-reset {
+  min-height: 30px;
+  padding: 3px 10px;
+  border: 1px dashed var(--border2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.schedule-filter-reset:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+#tab-schedule [hidden] {
+  display: none !important;
+}
 .schedule-filter {
   display: inline-flex;
   align-items: center;
@@ -3692,6 +3759,11 @@ body.low-bandwidth img {
 @media (max-width: 640px) {
   .schedule-toolbar-secondary { padding: 0; }
   .schedule-search { max-width: none; flex-basis: 100%; }
+  .schedule-select-filters { width: 100%; }
+  .schedule-select-filter { flex: 1 1 140px; }
+  .schedule-select-filter select { width: 100%; max-width: none; }
+  .schedule-date-filter { flex: 1 1 140px; }
+  .schedule-date-filter input { width: 100%; }
   .schedule-facts { grid-template-columns: 1fr; }
   .schedule-head { align-items: flex-start; }
   .schedule-actions { width: 100%; margin-left: 0; justify-content: flex-start; }

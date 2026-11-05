@@ -671,7 +671,7 @@
       <div class="skills-toolbar schedule-toolbar">
         <div class="schedule-heading">
           <h2 class="skills-title">自动化任务</h2>
-          <p class="schedule-subtitle">跨会话定时提醒与无人值守执行；时间按本地时区显示。</p>
+          <p class="schedule-subtitle">跨会话定时提醒与无人值守执行；<span id="schedule-local-zone-label">时间按本地时区显示。</span></p>
         </div>
         <span class="config-toolbar-spacer"></span>
         <button id="schedule-new-btn" type="button" class="primary-btn" title="创建一条自动化任务">＋ 新建任务</button>
@@ -684,9 +684,43 @@
           <button id="schedule-filter-paused" type="button" class="schedule-filter" data-filter="paused" aria-pressed="false">已暂停 <span id="schedule-filter-paused-count" class="schedule-filter-count">0</span></button>
           <button id="schedule-filter-inactive" type="button" class="schedule-filter" data-filter="inactive" aria-pressed="false">未运行 <span id="schedule-filter-inactive-count" class="schedule-filter-count">0</span></button>
         </div>
+        <div class="schedule-select-filters">
+          <label class="schedule-select-filter">
+            <span class="sr-only">按执行方式筛选</span>
+            <select id="schedule-filter-target-kind" aria-label="按执行方式筛选">
+              <option value="all">全部执行方式</option>
+              <option value="session">原会话</option>
+              <option value="headless">无人值守</option>
+              <option value="workspace">工作区</option>
+            </select>
+          </label>
+          <label class="schedule-select-filter">
+            <span class="sr-only">按归属会话筛选</span>
+            <select id="schedule-filter-session" aria-label="按归属会话筛选（目标会话/创建者/子会话）" title="按目标会话或创建者会话筛选；子代理/子会话创建的任务按创建者归类">
+              <option value="all">全部会话（目标/创建者）</option>
+            </select>
+          </label>
+          <label class="schedule-select-filter">
+            <span class="sr-only">按规则类型筛选</span>
+            <select id="schedule-filter-kind" aria-label="按规则类型筛选">
+              <option value="all">全部规则</option>
+              <option value="after">一次性（延迟）</option>
+              <option value="at">一次性（绝对时间）</option>
+              <option value="every">固定间隔</option>
+              <option value="daily">每天</option>
+              <option value="weekly">每周</option>
+              <option value="cron">Cron</option>
+            </select>
+          </label>
+          <label class="schedule-date-filter" title="按本地日期筛选：下次运行/原定运行或最近投递">
+            <span class="schedule-date-label">本地日期</span>
+            <input id="schedule-filter-date" type="date" aria-label="按日期筛选任务">
+          </label>
+        </div>
+        <button id="schedule-filter-reset" type="button" class="schedule-filter-reset" hidden>重置筛选</button>
         <label class="schedule-search">
           <span class="sr-only">搜索任务</span>
-          <input id="schedule-search" type="search" placeholder="搜索名称或内容…" autocomplete="off" spellcheck="false">
+          <input id="schedule-search" type="search" placeholder="搜索名称、内容、会话或日期…" autocomplete="off" spellcheck="false">
         </label>
       </div>
       <p id="schedule-summary" class="schedule-summary" aria-live="polite"></p>
@@ -781,11 +815,11 @@
                   <input id="schedule-form-amount" type="number" min="1" step="1" value="30">
                 </label>
                 <label class="cfg-item" id="schedule-form-time-item" hidden>
-                  <span class="cfg-label" id="schedule-form-time-label">具体时间</span>
+                  <span class="cfg-label" id="schedule-form-time-label">具体时间（本地）</span>
                   <input id="schedule-form-time" type="datetime-local" step="1">
                 </label>
                 <label class="cfg-item" id="schedule-form-clock-item" hidden>
-                  <span class="cfg-label" id="schedule-form-clock-label">本地时间</span>
+                  <span class="cfg-label" id="schedule-form-clock-label">规则时间（HH:MM[:SS]，按所选时区）</span>
                   <input id="schedule-form-clock" type="time" step="1">
                 </label>
                 <label class="cfg-item" id="schedule-form-zone-item" hidden>

@@ -22,6 +22,11 @@ check(html.includes('id="schedule-list"'), "index.html 有 #schedule-list");
 check(html.includes('id="schedule-refresh-btn"'), "index.html 有 #schedule-refresh-btn");
 check(html.includes('id="schedule-filters"'), "index.html 有状态筛选条");
 check(html.includes('id="schedule-search"'), "index.html 有任务搜索框");
+check(html.includes('id="schedule-filter-target-kind"'), "index.html 有执行方式筛选");
+check(html.includes('id="schedule-filter-session"'), "index.html 有会话/子会话筛选");
+check(html.includes('id="schedule-filter-kind"'), "index.html 有规则类型筛选");
+check(html.includes('id="schedule-filter-date"'), "index.html 有日期筛选");
+check(html.includes('id="schedule-filter-reset"'), "index.html 有重置筛选入口");
 check(html.includes('id="schedule-form-error-summary"'), "创建表单有可聚焦错误摘要");
 check(html.includes('id="schedule-form-clock"'), "创建表单有 daily/weekly 本地时间输入");
 check(html.includes('id="schedule-form-target-kind"'), "创建表单有执行上下文选择");
@@ -41,6 +46,10 @@ check(scheduleJs.includes('SCHEDULE_API_BASE + "/runs"') &&
 check(scheduleJs.includes("updateSchedulePreview"), "schedule.js 提供触发时间预览");
 check(scheduleJs.includes("schedule-form-clock"), "schedule.js 使用本地时间输入构造 daily/weekly");
 check(scheduleJs.includes("applyScheduleView"), "schedule.js 的筛选/搜索只重绘视图");
+check(scheduleJs.includes("rebuildSessionFilterOptions") &&
+  scheduleJs.includes("createdBySessionId"), "schedule.js 按目标/创建者会话过滤");
+check(scheduleJs.includes("taskMatchesDate") && scheduleJs.includes("dateSearchFragments"),
+  "schedule.js 支持日期筛选与日期搜索");
 
 // ---- 2. 静态契约：style.css 变量已定义（无未定义的自定义属性——约束见 web-testing.md）----
 const css = readFileSync(path.join(webRoot, "style.css"), "utf8");

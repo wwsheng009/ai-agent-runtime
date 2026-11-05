@@ -15,6 +15,10 @@ var loading = false;
 var allTasks = [];
 var taskCache = [];
 var activeFilter = "all";
+var activeTargetKind = "all";
+var activeSession = "all";
+var activeKind = "all";
+var activeDate = "";
 var searchQuery = "";
 var expandedPromptIds = {};
 var lastFormFocus = null;
@@ -78,7 +82,15 @@ function scheduleStatusLabel(status) {
 // still allowed to manage (edit/pause/resume/delete) it.
 function taskSessionId(task) {
   if (!task) { return ""; }
-  return String(task.sessionId || task.createdBySessionId || currentSessionId || "").trim();
+  return String(task.sessionId || task.createdBySessionId || effectiveScheduleSessionID() || "").trim();
+}
+
+// sessions.js 是当前会话身份的唯一来源；setScheduleSession 是兼容旧调用的
+// 显式注入（测试/嵌入）。两者都为空时返回 ""，不猜测。
+function effectiveScheduleSessionID() {
+  var live = "";
+  try { live = String(getCurrentSessionID() || "").trim(); } catch (_) { /* keep fallback */ }
+  return live || String(currentSessionId || "").trim();
 }
 
 function taskRecordExpectation(task) {
@@ -122,14 +134,148 @@ function filterTasks(tasks) {
   for (var i = 0; i < (tasks || []).length; i++) {
     var task = tasks[i];
     if (activeFilter !== "all" && task.status !== activeFilter) { continue; }
+    var targetKind = task.targetKind || "session";
+    if (activeTargetKind !== "all" && targetKind !== activeTargetKind) { continue; }
+    if (activeKind !== "all" && task.kind !== activeKind) { continue; }
+    if (!matchesSessionFilter(task)) { continue; }
+    if (activeDate && !taskMatchesDate(task, activeDate)) { continue; }
     if (query) {
-      var haystack = [task.title, task.prompt, task.goal, (task.plan || []).join(" "), task.id,
-        task.targetWorkspace, task.targetProfile].join(" ").toLowerCase();
+      var haystack = [
+        task.title, task.prompt, task.goal, (task.plan || []).join(" "), task.id,
+        task.sessionId, task.createdBySessionId, task.targetWorkspace, task.targetProfile,
+        task.time, formatClock(task.time), weekdayLabel(task.weekdays),
+      ].concat(
+        dateSearchFragments(task.scheduledAt),
+        dateSearchFragments(task.lastDelivery && task.lastDelivery.deliveredAt),
+      ).join(" ").toLowerCase();
       if (haystack.indexOf(query) === -1) { continue; }
     }
     result.push(task);
   }
   return result;
+}
+
+function matchesSessionFilter(task) {
+  if (activeSession === "all") { return true; }
+  if (activeSession === "__unbound__") {
+    return !String(task.sessionId || "").trim();
+  }
+  if (activeSession === "__current__") {
+    var current = effectiveScheduleSessionID();
+    if (!current) { return false; }
+    return task.sessionId === current || task.createdBySessionId === current;
+  }
+  return task.sessionId === activeSession || task.createdBySessionId === activeSession;
+}
+
+function localDateKey(value) {
+  if (!value) { return ""; }
+  var parsed = new Date(value);
+  if (isNaN(parsed.getTime())) { return ""; }
+  var pad = function (n) { return String(n).padStart(2, "0"); };
+  return parsed.getFullYear() + "-" + pad(parsed.getMonth() + 1) + "-" + pad(parsed.getDate());
+}
+
+function dateSearchFragments(value) {
+  if (!value) { return []; }
+  var parsed = new Date(value);
+  if (isNaN(parsed.getTime())) { return [String(value)]; }
+  var pad = function (n) { return String(n).padStart(2, "0"); };
+  var dateKey = localDateKey(value);
+  var time = pad(parsed.getHours()) + ":" + pad(parsed.getMinutes()) +
+    ":" + pad(parsed.getSeconds());
+  var fragments = [
+    String(value), dateKey, dateKey.replace(/-/g, "/"),
+    dateKey + " " + time, dateKey + " " + time.slice(0, 5),
+    parsed.toLocaleString(), parsed.toLocaleDateString(), parsed.toLocaleTimeString(),
+  ];
+  return fragments;
+}
+
+function taskMatchesDate(task, dateKey) {
+  if (!dateKey) { return true; }
+  if (localDateKey(task.scheduledAt) === dateKey) { return true; }
+  return !!(task.lastDelivery && localDateKey(task.lastDelivery.deliveredAt) === dateKey);
+}
+
+// 会话筛选的选项来自任务本身：目标会话 + 创建者会话。创建者会话可能就是
+// 子代理/子会话（headless 任务没有目标会话，只保留创建者用于归属与过滤）。
+function rebuildSessionFilterOptions() {
+  var select = document.getElementById("schedule-filter-session");
+  if (!select) { return; }
+  var roles = {};
+  var order = [];
+  var add = function (id, role) {
+    id = String(id || "").trim();
+    if (!id) { return; }
+    if (!roles[id]) {
+      roles[id] = { target: false, creator: false };
+      order.push(id);
+    }
+    roles[id][role] = true;
+  };
+  var hasUnbound = false;
+  for (var i = 0; i < allTasks.length; i++) {
+    var task = allTasks[i];
+    var targetKind = task.targetKind || "session";
+    add(task.sessionId, "target");
+    add(task.createdBySessionId, "creator");
+    if (!String(task.sessionId || "").trim()) {
+      hasUnbound = true;
+    }
+  }
+  order.sort();
+  var present = {};
+  var currentSession = effectiveScheduleSessionID();
+  var options = '<option value="all">全部会话（目标/创建者）</option>';
+  if (currentSession) {
+    options += '<option value="__current__">当前会话</option>';
+  }
+  if (hasUnbound) {
+    options += '<option value="__unbound__">未绑定目标会话</option>';
+  }
+  for (var s = 0; s < order.length; s++) {
+    var id = order[s];
+    var role = roles[id];
+    var roleLabel = role.target && role.creator
+      ? "目标/创建者"
+      : role.target ? "目标" : "创建者会话";
+    var shortId = id.length > 30 ? id.slice(0, 30) + "…" : id;
+    options += '<option value="' + esc(id) + '">' + esc(shortId) + " · " +
+      esc(roleLabel) + "</option>";
+    present[id] = true;
+  }
+  select.innerHTML = options;
+  var allowed = activeSession === "all" ||
+    (activeSession === "__current__" && !!effectiveScheduleSessionID()) ||
+    (activeSession === "__unbound__" && hasUnbound) ||
+    !!present[activeSession];
+  if (!allowed) { activeSession = "all"; }
+  select.value = activeSession;
+}
+
+function hasActiveScheduleFilters() {
+  return activeFilter !== "all" || activeTargetKind !== "all" ||
+    activeSession !== "all" || activeKind !== "all" || !!activeDate || !!searchQuery.trim();
+}
+
+function clearScheduleFilters() {
+  activeFilter = "all";
+  activeTargetKind = "all";
+  activeSession = "all";
+  activeKind = "all";
+  activeDate = "";
+  searchQuery = "";
+  var search = document.getElementById("schedule-search");
+  if (search) { search.value = ""; }
+  var date = document.getElementById("schedule-filter-date");
+  if (date) { date.value = ""; }
+  var selects = ["schedule-filter-target-kind", "schedule-filter-session", "schedule-filter-kind"];
+  for (var i = 0; i < selects.length; i++) {
+    var select = document.getElementById(selects[i]);
+    if (select) { select.value = "all"; }
+  }
+  applyScheduleView();
 }
 
 function updateFilterCounts() {
@@ -169,7 +315,7 @@ function renderSummary() {
   }
   var text = "共 " + allTasks.length + " 个任务 · 已开启 " + counts.active +
     " · 已暂停 " + counts.paused + " · 未运行 " + counts.inactive;
-  if (activeFilter !== "all" || searchQuery.trim()) {
+  if (hasActiveScheduleFilters()) {
     text += " · 当前显示 " + taskCache.length + " 个";
   }
   el.textContent = text;
@@ -208,13 +354,7 @@ function bindListExtraActions() {
   if (retry) { retry.addEventListener("click", function () { loadSchedule(true); }); }
   var clear = document.getElementById("schedule-empty-clear");
   if (clear) {
-    clear.addEventListener("click", function () {
-      activeFilter = "all";
-      searchQuery = "";
-      var search = document.getElementById("schedule-search");
-      if (search) { search.value = ""; }
-      applyScheduleView();
-    });
+    clear.addEventListener("click", clearScheduleFilters);
   }
   var create = document.getElementById("schedule-empty-new");
   if (create) { create.addEventListener("click", function () { openCreateForm(); }); }
@@ -359,7 +499,10 @@ function targetLabel(task) {
 }
 
 function applyScheduleView() {
+  rebuildSessionFilterOptions();
   updateFilterCounts();
+  var reset = document.getElementById("schedule-filter-reset");
+  if (reset) { reset.hidden = !hasActiveScheduleFilters(); }
   renderTasks(filterTasks(allTasks));
 }
 
@@ -404,7 +547,8 @@ function renderTaskHistory(task) {
           '<div class="schedule-history-head">' +
           '<span class="' + (failed ? "schedule-history-badge failed" : "schedule-history-badge") + '">' +
           (failed ? "失败" : "成功") + '</span>' +
-          '<span class="schedule-dim">' + esc(formatLocal(run.finishedAt || run.startedAt)) + '</span>' +
+          '<span class="schedule-dim">完成于 ' +
+          esc(formatLocal(run.finishedAt || run.startedAt, true)) + '（本地）</span>' +
           (run.sessionId ? '<span class="schedule-dim">会话: ' + esc(run.sessionId) + '</span>' : '') +
           '</div>';
         if (run.output) {
@@ -488,24 +632,55 @@ function weekdayLabel(weekdays) {
   return list.length > 0 ? list.join("、") : "（未选择）";
 }
 
-function formatLocal(value) {
+function padLocalPart(value) {
+  return String(value).padStart(2, "0");
+}
+
+// 统一使用浏览器本地时区的 24 小时制：YYYY-MM-DD HH:mm（history 传 true 加秒）。
+// 任务目录/回执中的时间都是 UTC 时间戳，这里只做展示层本地化，不改变存储。
+function formatLocal(value, withSeconds) {
   var parsed = new Date(value);
-  if (isNaN(parsed.getTime())) { return value; }
-  return parsed.toLocaleString();
+  if (isNaN(parsed.getTime())) { return value == null ? "" : String(value); }
+  var text = parsed.getFullYear() + "-" + padLocalPart(parsed.getMonth() + 1) + "-" +
+    padLocalPart(parsed.getDate()) + " " + padLocalPart(parsed.getHours()) + ":" +
+    padLocalPart(parsed.getMinutes());
+  if (withSeconds) { text += ":" + padLocalPart(parsed.getSeconds()); }
+  return text;
+}
+
+function localTimeZoneName() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "本地";
+  } catch (_) {
+    return "本地";
+  }
+}
+
+function updateLocalTimeZoneLabel() {
+  var el = document.getElementById("schedule-local-zone-label");
+  if (!el) { return; }
+  el.textContent = "时间按本地时区（" + localTimeZoneName() +
+    "）显示；规则时间保留配置时区。";
 }
 
 function relative(value) {
   var parsed = new Date(value).getTime();
   if (isNaN(parsed)) { return ""; }
   var delta = Math.round((parsed - Date.now()) / 1000);
-  var sign = delta >= 0 ? "" : "-";
+  var future = delta >= 0;
   var abs = Math.abs(delta);
-  if (abs < 60) { return sign + abs + "s"; }
-  var minutes = Math.floor(abs / 60);
-  if (minutes < 60) { return sign + minutes + "m"; }
-  var hours = Math.floor(minutes / 60);
-  if (hours < 24) { return sign + hours + "h"; }
-  return sign + Math.floor(hours / 24) + "d";
+  if (abs < 10) { return "刚刚"; }
+  var text;
+  if (abs < 60) {
+    text = abs + " 秒";
+  } else if (abs < 3600) {
+    text = Math.floor(abs / 60) + " 分钟";
+  } else if (abs < 86400) {
+    text = Math.floor(abs / 3600) + " 小时";
+  } else {
+    text = Math.floor(abs / 86400) + " 天";
+  }
+  return text + (future ? "后" : "前");
 }
 
 function bindTaskActionButtons(listEl) {
@@ -702,6 +877,7 @@ function setScheduleRefreshBusy(busy) {
 export function initSchedule() {
   var listEl = document.getElementById("schedule-list");
   if (!listEl) { return; }
+  updateLocalTimeZoneLabel();
   var refreshBtn = document.getElementById("schedule-refresh-btn");
   if (refreshBtn) {
     refreshBtn.addEventListener("click", function () { loadSchedule(true); });
@@ -722,6 +898,40 @@ export function initSchedule() {
       searchQuery = search.value || "";
       applyScheduleView();
     });
+  }
+  var targetKindFilter = document.getElementById("schedule-filter-target-kind");
+  if (targetKindFilter) {
+    targetKindFilter.addEventListener("change", function () {
+      activeTargetKind = targetKindFilter.value || "all";
+      applyScheduleView();
+    });
+  }
+  var sessionFilter = document.getElementById("schedule-filter-session");
+  if (sessionFilter) {
+    sessionFilter.addEventListener("change", function () {
+      activeSession = sessionFilter.value || "all";
+      applyScheduleView();
+    });
+  }
+  var kindFilter = document.getElementById("schedule-filter-kind");
+  if (kindFilter) {
+    kindFilter.addEventListener("change", function () {
+      activeKind = kindFilter.value || "all";
+      applyScheduleView();
+    });
+  }
+  var dateFilter = document.getElementById("schedule-filter-date");
+  if (dateFilter) {
+    var applyDateFilter = function () {
+      activeDate = dateFilter.value || "";
+      applyScheduleView();
+    };
+    dateFilter.addEventListener("change", applyDateFilter);
+    dateFilter.addEventListener("input", applyDateFilter);
+  }
+  var resetFilter = document.getElementById("schedule-filter-reset");
+  if (resetFilter) {
+    resetFilter.addEventListener("click", clearScheduleFilters);
   }
   initCreateForm();
 }
@@ -1074,9 +1284,9 @@ function syncCreateFormFields(kind) {
   show("schedule-form-weekdays-item", kind === "weekly");
   show("schedule-form-cron-item", kind === "cron");
   var timeLabel = document.getElementById("schedule-form-time-label");
-  if (timeLabel) { timeLabel.textContent = "具体时间"; }
+  if (timeLabel) { timeLabel.textContent = "具体时间（本地）"; }
   var clockLabel = document.getElementById("schedule-form-clock-label");
-  if (clockLabel) { clockLabel.textContent = "本地时间（HH:MM[:SS]）"; }
+  if (clockLabel) { clockLabel.textContent = "规则时间（HH:MM[:SS]，按所选时区）"; }
 }
 
 // 执行上下文 → 字段可见性与必填性。session 只需要目标会话；headless 需要
@@ -1232,8 +1442,10 @@ function updateSchedulePreview() {
       var seconds = Math.round(minutes * 60);
       var next = new Date(Date.now() + seconds * 1000);
       text = kind === "after"
-        ? "预计在 " + formatLocal(next.toISOString()) + " 触发（" + formatDuration(seconds) + "后）。"
-        : "每 " + formatDuration(seconds) + "触发一次；首次约在 " + formatLocal(next.toISOString()) + "。";
+        ? "预计在 " + formatLocal(next.toISOString()) + "（本地）触发（" +
+          formatDuration(seconds) + "后）。"
+        : "每 " + formatDuration(seconds) + "触发一次；首次约在 " +
+          formatLocal(next.toISOString()) + "（本地）。";
     }
   } else if (kind === "at") {
     var raw = val("schedule-form-time");
@@ -1242,7 +1454,7 @@ function updateSchedulePreview() {
       var parsed = new Date(raw);
       text = isNaN(parsed.getTime())
         ? "时间格式无效。"
-        : "将在 " + formatLocal(parsed.toISOString()) + " 触发。";
+        : "将在 " + formatLocal(parsed.toISOString()) + "（本地）触发。";
     }
   } else if (kind === "daily") {
     var time = val("schedule-form-clock");
