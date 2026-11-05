@@ -1,7 +1,9 @@
 package background
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,12 +20,47 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
+func TestBuildShellCommandReturnsStrictProbeFailure(t *testing.T) {
+	disabled := false
+	runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{AutoDetect: &disabled})
+	runtimeexecutor.InvalidateShellResolution()
+	t.Cleanup(func() {
+		runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{})
+		runtimeexecutor.InvalidateShellResolution()
+	})
+
+	manager := &Manager{config: Config{}}
+	cmd, err := manager.buildShellCommand(context.Background(), "echo should-not-run")
+	if cmd != nil {
+		t.Fatalf("strict failure must not return a fallback command: %#v", cmd.Args)
+	}
+	if !errors.Is(err, runtimeexecutor.ErrShellUnavailable) {
+		t.Fatalf("error = %v, want ErrShellUnavailable", err)
+	}
+}
+
+func TestShellEnvironmentIncludesConfiguredOverrides(t *testing.T) {
+	runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{
+		Env: map[string]string{"AICLI_SHELL_ENV_TEST": "present"},
+	})
+	t.Cleanup(func() {
+		runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{})
+		runtimeexecutor.InvalidateShellResolution()
+	})
+
+	env := (&Manager{}).shellEnvironment()
+	require.Contains(t, env, "AICLI_SHELL_ENV_TEST=present")
+}
+
 func TestBuildShellCommandPrefixesPowerShellUTF8(t *testing.T) {
 	manager := &Manager{config: Config{
 		Shell: runtimeexecutor.Shell{Path: "pwsh.exe", Type: runtimeexecutor.ShellTypePwsh},
 	}}
 
-	cmd := manager.buildShellCommand(context.Background(), "Write-Output '中文'")
+	cmd, err := manager.buildShellCommand(context.Background(), "Write-Output '中文'")
+	if err != nil {
+		t.Fatalf("buildShellCommand: %v", err)
+	}
 	require.NotNil(t, cmd)
 	require.NotEmpty(t, cmd.Args)
 	require.True(t,
@@ -31,6 +68,66 @@ func TestBuildShellCommandPrefixesPowerShellUTF8(t *testing.T) {
 		"PowerShell background shell must emit UTF-8 regardless of the host code page: %#v",
 		cmd.Args,
 	)
+}
+
+func TestBuildShellCommandSendsLongPowerShellThroughStdin(t *testing.T) {
+	manager := &Manager{config: Config{
+		Shell: runtimeexecutor.Shell{Path: "pwsh.exe", Type: runtimeexecutor.ShellTypePwsh},
+	}}
+	command := strings.Repeat("Write-Output x\n", runtimeexecutor.ShellStdinScriptThreshold)
+	cmd, err := manager.buildShellCommand(context.Background(), command)
+	if err != nil {
+		t.Fatalf("buildShellCommand: %v", err)
+	}
+	if cmd == nil || cmd.Stdin == nil {
+		t.Fatalf("long PowerShell command must use stdin")
+	}
+	if !runtimeexecutor.ShellArgsUseStdinScript(cmd.Args) {
+		t.Fatalf("PowerShell stdin launcher missing from argv: %#v", cmd.Args)
+	}
+}
+
+func TestBuildInteractiveShellCommandKeepsStdinFree(t *testing.T) {
+	manager := &Manager{config: Config{
+		Shell: runtimeexecutor.Shell{Path: "pwsh.exe", Type: runtimeexecutor.ShellTypePwsh},
+	}}
+	command := strings.Repeat("Write-Output x\n", runtimeexecutor.ShellStdinScriptThreshold)
+	cmd, cleanup, err := manager.buildInteractiveShellCommand(context.Background(), command)
+	if cleanup != nil {
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+	}
+	if err != nil {
+		t.Fatalf("buildInteractiveShellCommand: %v", err)
+	}
+	if cmd == nil || cmd.Stdin != nil {
+		t.Fatalf("interactive command must leave stdin for write_stdin")
+	}
+	if runtimeexecutor.ShellArgsUseEncodedCommand(cmd.Args) {
+		t.Fatalf("interactive long PowerShell command must not expand into -EncodedCommand: %#v", cmd.Args)
+	}
+	if len(cmd.Args) < 2 || cmd.Args[len(cmd.Args)-2] != "-File" {
+		t.Fatalf("interactive long PowerShell command must use -File: %#v", cmd.Args)
+	}
+	scriptPath := cmd.Args[len(cmd.Args)-1]
+	data, readErr := os.ReadFile(scriptPath)
+	if readErr != nil {
+		t.Fatalf("read interactive script: %v", readErr)
+	}
+	if !bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatalf("interactive PowerShell script must carry a UTF-8 BOM")
+	}
+	if cleanup == nil {
+		t.Fatalf("interactive script file must have a cleanup hook")
+	}
+	cleanup()
+	cleanup = nil
+	if _, statErr := os.Stat(scriptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("interactive script cleanup did not remove %s: %v", scriptPath, statErr)
+	}
 }
 
 func TestBackgroundPowerShellPreservesUTF8Output(t *testing.T) {

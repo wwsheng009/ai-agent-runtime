@@ -1,6 +1,10 @@
 package executor
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -52,6 +56,7 @@ func TestValidateShellConfig(t *testing.T) {
 		{name: "negative timeout", cfg: ShellConfig{ProbeTimeout: -time.Second}, wantErr: "probeTimeout"},
 		{name: "path is not a shell", cfg: ShellConfig{Path: `C:\tmp\evil.exe`}, wantErr: "known shell binary"},
 		{name: "path is bash", cfg: ShellConfig{Path: `C:\Program Files\Git\bin\bash.exe`}},
+		{name: "relative path with directory", cfg: ShellConfig{Path: `tools\bash.exe`}, wantErr: "must be absolute"},
 		{name: "env path override", cfg: ShellConfig{Env: map[string]string{"PATH": "/x"}}, wantErr: "PATH"},
 		{name: "env newline", cfg: ShellConfig{Env: map[string]string{"LANG": "a\nb"}}, wantErr: "newlines"},
 		{name: "env bad key", cfg: ShellConfig{Env: map[string]string{"1BAD": "x"}}, wantErr: "match"},
@@ -69,6 +74,55 @@ func TestValidateShellConfig(t *testing.T) {
 				t.Fatalf("error = %v, want contains %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestResolvePlanCarriesExplicitPathAndBusyboxPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "busybox.exe")
+	if err := os.WriteFile(path, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := resolvePlan(ShellConfig{Path: path})
+	if len(plan) != 1 {
+		t.Fatalf("explicit path must produce one candidate, got %#v", plan)
+	}
+	if plan[0].path != path || plan[0].id != ShellIDBusybox {
+		t.Fatalf("explicit path not carried into candidate: %#v", plan[0])
+	}
+	if len(plan[0].prefix) != 1 || plan[0].prefix[0] != "sh" {
+		t.Fatalf("busybox explicit path must keep the sh applet prefix: %#v", plan[0].prefix)
+	}
+	located, reason := locateShellCandidateSpec(plan[0])
+	if reason != "" {
+		t.Fatalf("explicit path should locate, reason=%q", reason)
+	}
+	if located == "" || filepath.Base(located) != "busybox.exe" {
+		t.Fatalf("explicit path must not be replaced by another candidate: %q", located)
+	}
+}
+
+func TestExplicitMissingPathNeverFallsBackToLookPath(t *testing.T) {
+	// "bash" is almost certainly on PATH on Unix CI. The explicit path is a
+	// different, missing file, and resolver must report it instead of locating
+	// the PATH binary with the same basename.
+	missing := filepath.Join(t.TempDir(), "bash")
+	path, reason := locateExplicitShellPath(missing)
+	if path != "" {
+		t.Fatalf("missing explicit path resolved to %q", path)
+	}
+	if !strings.Contains(reason, "does not exist") {
+		t.Fatalf("unexpected reason: %q", reason)
+	}
+}
+
+func TestCurrentShellEPropagatesStrictProbeFailure(t *testing.T) {
+	ConfigureShell(ShellConfig{AutoDetect: boolPtr(false)})
+	t.Cleanup(func() {
+		ConfigureShell(ShellConfig{})
+		InvalidateShellResolution()
+	})
+	if shell, err := CurrentShellE(); err == nil || shell.Path != "" {
+		t.Fatalf("strict resolution must not return a fallback shell, got %#v err=%v", shell, err)
 	}
 }
 
@@ -100,14 +154,21 @@ func TestDeriveExecInvocationUsesStdinForLongPosixScripts(t *testing.T) {
 		t.Fatalf("long command must travel over stdin")
 	}
 
-	// PowerShell stays on -EncodedCommand until `-Command -` is verified.
+	// PowerShell uses a fixed launcher for long scripts. Both pwsh and Windows
+	// PowerShell were verified with UTF-8 input/output, multi-line blocks,
+	// exit-code preservation and a 50K-character stdin payload; this avoids
+	// -EncodedCommand's command-line expansion limit.
 	ps := Shell{Path: "pwsh", Type: ShellTypePwsh}
-	argv, stdin = ps.DeriveExecInvocation(strings.Repeat("Write-Output x;", 2000), ScriptDeliveryStdin)
-	if stdin != "" {
-		t.Fatalf("PowerShell must not switch to stdin yet")
+	longPowerShellScript := strings.Repeat("Write-Output x;", 2000)
+	argv, stdin = ps.DeriveExecInvocation(longPowerShellScript, ScriptDeliveryStdin)
+	assertShellArgs(t, argv, []string{
+		"pwsh", "-NoProfile", "-NonInteractive", "-Command", PowerShellStdinScriptLauncher,
+	})
+	if stdin != PowerShellCommandPrefix+longPowerShellScript {
+		t.Fatalf("PowerShell long script must travel over stdin with UTF-8 prefix")
 	}
-	if !ShellArgsUseEncodedCommand(argv) {
-		t.Fatalf("PowerShell long script must still use -EncodedCommand, got %#v", argv)
+	if !ShellArgsUseStdinScript(argv) {
+		t.Fatalf("ShellArgsUseStdinScript must recognize PowerShell stdin transport: %#v", argv)
 	}
 
 	// argv delivery is the diagnostic mode: no stdin, always argv.
@@ -129,6 +190,55 @@ func TestBusyboxPrefixShapesArgv(t *testing.T) {
 	}
 	if DialectFor(ShellTypeSh, ShellIDBusybox) != ShellDialectPosixNarrow {
 		t.Fatalf("busybox must be posix-narrow")
+	}
+}
+
+func TestPowerShellLongScriptRunsThroughStdin(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows command-line limit regression")
+	}
+	found := false
+	for _, candidate := range []struct {
+		name string
+		typ  ShellType
+	}{
+		{"pwsh", ShellTypePwsh},
+		{"powershell", ShellTypePowerShell},
+	} {
+		path, err := exec.LookPath(candidate.name)
+		if err != nil {
+			continue
+		}
+		found = true
+		t.Run(candidate.name, func(t *testing.T) {
+			shell := Shell{Path: path, Type: candidate.typ}
+			command := "Write-Output 'stdin-中文-ok'; cmd /c exit 7\nif ($true) {\n" +
+				"  Write-Output 'stdin-block-ok'\n}\n#" +
+				strings.Repeat("x", 50000)
+			argv, stdinScript := shell.DeriveExecInvocation(
+				WrapPowerShellExitCode(shell, command),
+				ScriptDeliveryStdin,
+			)
+			if stdinScript == "" || !ShellArgsUseStdinScript(argv) {
+				t.Fatalf("long PowerShell script did not select stdin: argv=%#v stdin=%d", argv, len(stdinScript))
+			}
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Stdin = strings.NewReader(stdinScript)
+			output, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+				t.Fatalf("exit = %v, want 7; output=%s", err, output)
+			}
+			if !strings.Contains(string(output), "stdin-中文-ok") {
+				t.Fatalf("missing output from stdin script: %s", output)
+			}
+			if !strings.Contains(string(output), "stdin-block-ok") {
+				t.Fatalf("multi-line block was not executed from stdin: %s", output)
+			}
+		})
+	}
+	if !found {
+		t.Skip("no PowerShell host available")
 	}
 }
 

@@ -80,6 +80,9 @@ type candidateSpec struct {
 	typ    ShellType
 	prefix []string
 	source string
+	// path carries shell.path. It is intentionally separate from id so an
+	// explicit path is never re-located through PATH under the same basename.
+	path string
 	// skipReason short-circuits a candidate without touching the filesystem.
 	skipReason string
 }
@@ -91,10 +94,13 @@ type candidateSpec struct {
 //	explicit path > prefer chain > built-in default chain
 func resolvePlan(cfg ShellConfig) []candidateSpec {
 	if path := strings.TrimSpace(cfg.Path); path != "" {
+		prefix := shellPrefixForPath(path)
 		return []candidateSpec{{
 			id:     shellIDForPath(path),
 			typ:    shellTypeForPath(path),
+			prefix: prefix,
 			source: ShellSourceConfigPath,
+			path:   path,
 		}}
 	}
 
@@ -199,6 +205,13 @@ func shellTypeForPath(path string) ShellType {
 	default:
 		return ShellTypeSh
 	}
+}
+
+func shellPrefixForPath(path string) []string {
+	if strings.EqualFold(strings.TrimSuffix(shellBaseName(path), ".exe"), "busybox") {
+		return []string{"sh"}
+	}
+	return nil
 }
 
 // isWSLBashPath reports whether path is one of the two WSL launchers. Both
@@ -669,10 +682,11 @@ func resolveShellUncached(ctx context.Context, cfg ShellConfig) (*ShellResolutio
 func resolveShell(ctx context.Context, cfg ShellConfig, probeAll bool) (*ShellResolution, error) {
 	plan := resolvePlan(cfg)
 
-	// Unix keeps its historical detection verbatim unless the config names
-	// candidates. Probing every Unix start would add a process spawn for zero
-	// benefit: the plan targets Windows.
-	if runtime.GOOS != "windows" && strings.TrimSpace(cfg.Path) == "" && len(cfg.NormalizedPrefer()) == 0 {
+	// Unix keeps its historical detection verbatim for the zero-value config.
+	// Probing every Unix start would add a process spawn for zero benefit. Any
+	// explicit shell config (notably autoDetect=false or strictProbe) must still
+	// go through the normal plan so the documented semantics are honored.
+	if runtime.GOOS != "windows" && cfg.isZero() {
 		shell := DefaultUserShell()
 		shell.Dialect = DialectFor(shell.Type, shell.ID)
 		shell.Source = ShellSourceLegacy
@@ -707,7 +721,7 @@ func resolveShell(ctx context.Context, cfg ShellConfig, probeAll bool) (*ShellRe
 			resolution.Candidates = append(resolution.Candidates, report)
 			continue
 		}
-		path, reason := locateShellCandidate(spec.id)
+		path, reason := locateShellCandidateSpec(spec)
 		if path == "" {
 			report.Status = ShellCandidateSkip
 			report.Reason = reason
@@ -777,6 +791,60 @@ func resolveShell(ctx context.Context, cfg ShellConfig, probeAll bool) (*ShellRe
 		return resolution, fmt.Errorf("%w: %d candidate(s) tried", ErrShellUnavailable, len(plan))
 	}
 	return resolution, nil
+}
+
+func locateShellCandidateSpec(spec candidateSpec) (string, string) {
+	if strings.TrimSpace(spec.path) == "" {
+		return locateShellCandidate(spec.id)
+	}
+	return locateExplicitShellPath(spec.path)
+}
+
+// locateExplicitShellPath honours shell.path exactly. It must never fall back
+// to LookPath when the configured path is missing: doing so would silently run
+// a different binary that happens to have the same basename.
+func locateExplicitShellPath(path string) (string, string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", "shell.path is empty"
+	}
+	if !hasShellPathDirectory(path) {
+		if resolved, err := exec.LookPath(path); err == nil {
+			path = resolved
+		} else {
+			return "", fmt.Sprintf("shell.path %q not found on PATH", path)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Sprintf("shell.path %q does not exist", path)
+		}
+		return "", fmt.Sprintf("cannot stat shell.path %q: %v", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Sprintf("shell.path %q is a directory", path)
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		resolvedBase := strings.ToLower(strings.TrimSuffix(shellBaseName(resolved), ".exe"))
+		if !isKnownShellBinaryName(resolvedBase) {
+			return "", fmt.Sprintf("shell.path %q resolves to a non-shell binary", path)
+		}
+		path = resolved
+	}
+	if !isKnownShellBinaryName(strings.ToLower(strings.TrimSuffix(shellBaseName(path), ".exe"))) {
+		return "", fmt.Sprintf("shell.path %q is not a known shell binary", path)
+	}
+	return path, ""
+}
+
+func isKnownShellBinaryName(base string) bool {
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "bash", "sh", "zsh", "pwsh", "powershell", "cmd", "busybox":
+		return true
+	default:
+		return false
+	}
 }
 
 // fallbackShell is the documented last-resort shell. It is what
@@ -873,18 +941,31 @@ func CurrentScriptDelivery() ScriptDelivery {
 	return ShellConfigSnapshot().EffectiveScriptDelivery()
 }
 
-// CurrentShell returns the shell every execution surface must use.
+// CurrentShell returns the shell every display/guidance surface should use.
 //
-// It lazily performs the probe on first use and then serves the memoized
-// resolution. When resolution fails (strict mode, nothing usable) it degrades to
-// DefaultUserShell() so a broken config cannot brick the runtime — the failure
-// is reported by CurrentResolution, doctor shell and the settings API.
+// Execution surfaces must call CurrentShellE instead: this compatibility
+// accessor keeps a display fallback for prompts and tests, while strict probe
+// failures must fail the command rather than silently switching languages.
 func CurrentShell() Shell {
-	resolution, _ := CurrentResolution()
-	if resolution != nil && strings.TrimSpace(resolution.Shell.Path) != "" {
-		return resolution.Shell
+	shell, err := CurrentShellE()
+	if err == nil && strings.TrimSpace(shell.Path) != "" {
+		return shell
 	}
 	return DefaultUserShell()
+}
+
+// CurrentShellE is the execution-safe resolver. In strict mode a failed probe
+// returns ErrShellUnavailable with no shell, so callers cannot accidentally
+// launch the fallback shell.
+func CurrentShellE() (Shell, error) {
+	resolution, err := CurrentResolution()
+	if err != nil {
+		return Shell{}, err
+	}
+	if resolution == nil || strings.TrimSpace(resolution.Shell.Path) == "" {
+		return Shell{}, fmt.Errorf("%w: resolution returned no shell", ErrShellUnavailable)
+	}
+	return resolution.Shell, nil
 }
 
 // CurrentResolution returns the installed resolution, resolving lazily.

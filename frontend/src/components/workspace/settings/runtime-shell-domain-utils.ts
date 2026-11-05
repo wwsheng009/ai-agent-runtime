@@ -1,4 +1,5 @@
 import { isConfigRecord } from "./runtime-provider-config-utils";
+import type { RuntimeShellSettingsSaveRequest } from "@/types/runtime";
 
 /**
  * `shell:` 段在编辑器草稿里的形状。
@@ -25,6 +26,9 @@ export const runtimeShellCandidateIds = [
   "pwsh",
   "powershell",
   "cmd",
+  "bash",
+  "zsh",
+  "sh",
 ] as const;
 
 export function getRuntimeShellConfig(value: unknown): RuntimeShellConfigSummary {
@@ -90,6 +94,75 @@ export function removeShellPreferItem(prefer: string[], id: string): string[] {
   return prefer.filter((item) => item !== id);
 }
 
+/** Map the camelCase editor draft to the dedicated shell API request shape. */
+export function toRuntimeShellSettingsSaveRequest(
+  config: RuntimeShellConfigSummary,
+): RuntimeShellSettingsSaveRequest {
+  return {
+    auto_detect: config.autoDetect,
+    prefer: config.prefer.map((item) => item.trim().toLowerCase()).filter(Boolean),
+    path: config.path.trim(),
+    probe_timeout: config.probeTimeout.trim(),
+    strict_probe: config.strictProbe,
+    script_delivery: config.scriptDelivery.trim() || "stdin",
+    env: { ...config.env },
+  };
+}
+
+/** Compare only the fields owned by the shell domain. */
+export function runtimeShellConfigsEqual(
+  left: RuntimeShellConfigSummary,
+  right: RuntimeShellConfigSummary,
+): boolean {
+  return (
+    left.autoDetect === right.autoDetect &&
+    left.strictProbe === right.strictProbe &&
+    left.path.trim() === right.path.trim() &&
+    left.probeTimeout.trim() === right.probeTimeout.trim() &&
+    (left.scriptDelivery.trim() || "stdin") ===
+      (right.scriptDelivery.trim() || "stdin") &&
+    left.prefer.join("\u0000") === right.prefer.join("\u0000") &&
+    envRecordsEqual(left.env, right.env)
+  );
+}
+
+/**
+ * Compare the actual `shell` nodes for write routing. This intentionally does
+ * not use the normalized summary: `{}` and `{autoDetect: true}` are equivalent
+ * at runtime, but only the former should stay out of the dedicated writer.
+ */
+export function runtimeShellConfigNodesEqual(
+  leftDocument: unknown,
+  rightDocument: unknown,
+): boolean {
+  return (
+    stableShellNodeJSON(getShellRoot(leftDocument)) ===
+    stableShellNodeJSON(getShellRoot(rightDocument))
+  );
+}
+
+/**
+ * Replace the shell node in a parsed document with another snapshot. The
+ * generic config-document writer uses this to keep shell edits out of its
+ * payload; shell.* is persisted by the dedicated layered API instead.
+ */
+export function withShellConfigFrom(
+  target: unknown,
+  source: unknown,
+): unknown {
+  if (!isConfigRecord(target)) {
+    return target;
+  }
+  const next = JSON.parse(JSON.stringify(target)) as Record<string, unknown>;
+  const sourceShell = getShellRoot(source);
+  if (sourceShell) {
+    next.shell = JSON.parse(JSON.stringify(sourceShell)) as unknown;
+  } else {
+    delete next.shell;
+  }
+  return next;
+}
+
 function getShellRoot(value: unknown) {
   if (!isConfigRecord(value)) {
     return null;
@@ -126,9 +199,37 @@ function readTextRecord(value: unknown): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, item] of Object.entries(value)) {
     const text = readText(item);
-    if (key && text) {
+    // Empty values are meaningful environment overrides: they clear a value
+    // inherited from the parent process. Dropping them here would silently
+    // remove the override on the next save.
+    if (key) {
       result[key] = text;
     }
   }
   return result;
+}
+
+function envRecordsEqual(
+  left: Record<string, string>,
+  right: Record<string, string>,
+): boolean {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.join("\u0000") !== rightKeys.join("\u0000")) {
+    return false;
+  }
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
+function stableShellNodeJSON(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableShellNodeJSON).join(",")}]`;
+  }
+  if (isConfigRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableShellNodeJSON(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

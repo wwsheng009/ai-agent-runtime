@@ -178,7 +178,7 @@ shell:
   strictProbe: true
 
   # 长脚本传递方式：
-  #   stdin  —— sh 类用 `-s` + stdin（推荐）；PowerShell 暂仍用 -EncodedCommand
+  #   stdin  —— sh 类用 `-s`，PowerShell 用固定 `-Command` launcher + stdin（推荐）
   #   argv   —— 一律拼进命令行（仅排障用，会撞 8191/32767 限制）
   scriptDelivery: stdin
 
@@ -202,7 +202,7 @@ shell:
 | `path` | 空 | 不做强制 |
 | `probeTimeout` | `3s` | 从不探测 → 探测一次，增加一次启动开销（约 0.4-1.4s，仅进程内首次） |
 | `strictProbe` | `true` | 从不校验 → 校验 |
-| `scriptDelivery` | `stdin` | sh 类的长脚本从 argv 改为 stdin；PowerShell 暂保持 `-EncodedCommand` 不变（附录 B 第 6 项） |
+| `scriptDelivery` | `stdin` | sh 类使用 `-s`，PowerShell 使用固定 `-Command` launcher + stdin；长脚本不再进入 Windows argv |
 | `env` | 见上 | 新增 `PAGER/GIT_PAGER/TERM/NO_COLOR`，属于预期的行为改善 |
 
 若某项要保持旧行为，可设 `autoDetect: false` + `prefer: [powershell, cmd]`，得到与今天等价的链。
@@ -337,11 +337,13 @@ cmd:         %SystemRoot%\System32\cmd.exe
 cmd := exec.CommandContext(ctx, shell.Path, "--noprofile", "--norc", "-s")
 cmd.Stdin = strings.NewReader(script)
 
-// PowerShell —— 暂保持现状：-EncodedCommand（见附录 B 第 6 项）
-// 验证 `-Command -` 的多行 stdin 行为与退出码配合之后，再切换。
+// PowerShell —— 长脚本走固定 launcher；短脚本仍在 argv 中保持可读性
+cmd := exec.CommandContext(ctx, shell.Path, "-NoProfile", "-NonInteractive",
+	"-Command", runtimeexecutor.PowerShellStdinScriptLauncher)
+cmd.Stdin = strings.NewReader(runtimeexecutor.PowerShellCommandPrefix + script)
 ```
 
-`scriptDelivery: stdin` 对 sh 类立即生效；PowerShell 在附录 B 第 6 项实测通过前仍走 `-EncodedCommand`，避免把一个未验证的传递方式当成缺省。收益仍然成立：sh 类彻底绕开 Windows 命令行长度限制，不再需要 7000 阈值这类经验值。
+`scriptDelivery: stdin` 已覆盖 sh 类与 PowerShell。PowerShell 的 `-EncodedCommand` 会按 UTF-16 + Base64 膨胀（ASCII 约 2.67 倍），仍然受 `CreateProcessW` 命令行上限约束；stdin 传输则彻底绕开该限制。PowerShell 的 `-Command -` 会逐行消费 stdin，不能可靠解析多行控制块，因此实现使用固定 launcher：先把 stdin 完整读成一个脚本文本，再交给 `ScriptBlock::Create` 执行。直接调用 `DeriveExecArgs()` 的少数诊断/兼容路径仍保留 7000 字符阈值。
 
 ### 6.3 进程树终止
 
@@ -838,8 +840,25 @@ if c.Backend == BackendLocal {
 - `go build ./...` 通过；`go vet` 在改动涉及的所有包通过（全仓仅剩既有 `internal/pty/pty_windows.go:162` 的 `unsafe.Pointer` 告警，与本方案无关）。
 - 后端全量回归（`-count=1`）：`internal/background`、`internal/executor`、`internal/config`、`internal/agentconfig`、`internal/runtimeserver`、`internal/toolcore/shellexec`、`internal/prompt`、`internal/api/runtimeapi`、`internal/toolkit/tools`、`cmd/aicli/commands` 共 10 个包全部 PASS。
 - 前端：`tsc -b`、i18n 一致性校验、eslint（新增文件）、`vitest run src/components/workspace/settings`（45 个测试文件 / 272 项）全部通过。
+
+### 17.6 2026-11-04 复审缺口修复
+
+复审发现实现与 §5.1、§9、§14 的四处高优先级偏差，本轮已修复：
+
+1. **显式 `shell.path` 不再被 ID 重定位覆盖**：`candidateSpec` 直接携带配置路径，缺失/不可访问时只报告原因，绝不回退到 PATH 中同名 shell；带目录的非绝对路径在配置校验阶段拒绝；busybox 显式路径保留 `sh` applet 前缀。
+2. **Web shell 设置走专用分层 API**：结构化保存检测 `shell.*` 变更；混合保存先用通用 document writer 保存非 shell 变更（payload 保留旧 shell 节点），再调用 `PUT /api/runtime/config/shell` 作为最后一次写入。这样通用 writer 的读-改-写不会看到新 shell 后把旧节点写回，也不会把 shell 写进错误层或整段重序列化。shell-only 保存只调用专用 API。
+3. **保存后进程级 resolver 立即重装**：`NewLayeredRuntimeShellSettingsPersister` 在落盘成功后执行 `ConfigureShell(next)` + `InvalidateShellResolution()`，不再只更新 RuntimeManager 快照。API 保存后的下一次执行、提示词和 detached/PTY 选择都读取同一新配置。
+4. **strictProbe 不再静默降级执行**：新增执行安全的 `CurrentShellE()`；后台 job、交互 PTY、直接 `/shell`、shellexec/toolkit 执行路径在严格模式无可用 shell 时返回 `SHELL_UNAVAILABLE`，不会启动 `DefaultUserShell()` 兜底。`CurrentShell()` 只保留给展示/兼容调用。
+
+同时补齐：
+
+- detached `.sh` runner 与直接 `/shell` 对超过阈值的 POSIX 脚本使用 stdin/here-doc，36 KB 脚本不再进入 Windows argv。
+- PowerShell 长脚本改用固定 `-Command` launcher + stdin 传输；实测 `pwsh` 7.6.9 与 Windows PowerShell 5.1 均可执行 50K 字符脚本、多行控制块、保留 UTF-8 输入/输出，并能通过 `WrapPowerShellExitCode` 回写退出码 7。原先 `-EncodedCommand` 在 12,500 字符、Base64 33,384 字符时已触发 Windows 命令行上限。交互式 pipe/PTY 会话保留 stdin 给 `write_stdin`，长脚本改走临时 `.ps1` + `-File`，并在子进程退出后删除临时文件。detached `.ps1` runner 与所有临时脚本都使用 UTF-8 BOM，避免 Windows PowerShell 5.1 按 ANSI code page 解析中文命令。
+- `shell.env` 覆盖 detached runner 宿主、PTY 与直接 `/shell` 进程。
+- envd 的零值 `ResolvedShell` 改为显式 POSIX syntax hint。
+- 新增显式路径、busybox 前缀、strict 失败、detached 长脚本、持久化后 resolver 重装、Web shell 保存路由等回归测试。
 - `go run ./cmd/aicli doctor shell --json` 实测选中 `git-bash`（`C:\Program Files\Git\bin\bash.exe`，`5.2.21`，`posix-full`，探针 168 ms），候选矩阵完整。
-- 附录 B 第 5/7/8 项已用端到端实测回填；第 2/3/4/6 项仍为未实测，按"未验证不得按已确认处理"保留标注。
+- 附录 B 第 5/6/7/8 项已用端到端实测回填；第 2/3/4 项仍为未实测，按"未验证不得按已确认处理"保留标注。
 
 ---
 
@@ -861,7 +880,7 @@ PowerShell:    5.1 (System32\WindowsPowerShell\v1.0) / pwsh 7 (C:\Program Files\
 | 3 | `busybox sed -i` 与 GNU `sed -i` 的备份后缀差异 | ❌ 未实测 | 同上，缺样本。文档与提示词不宣称两者等价；`posix-narrow` 方言只禁用 bash 扩展，不声称工具链完全一致。 |
 | 4 | Win7 实机上 Git Bash 2.46.2 与 busybox 并存时的候选排序 | ❌ 未实测 | 无 Win7 实机。`runtime.win7.yaml` 已给出显式链 `git-bash → busybox → msys-bash → powershell → cmd`，但顺序需在实机复验；配置文件里的排序是**设计意图**，不是实测结论。 |
 | 5 | `.sh` runner 在 Windows 下的 `kill -0 $$` 心跳可用性 | ✅ 已实测 | `TestLaunchDetachedShellWithPosixHost` 在 Win11 + Git Bash 上真实跑完 detached 生命周期：runner 写出可被 `strconv.Atoi` 解析的数字心跳时间戳，并把退出码 `7` 回写 status 文件。`TestWriteDetachedRunnerShContentForPosixHost` 另固化脚本内容。 |
-| 6 | `powershell -Command -` / `pwsh -Command -` 读取多行 stdin 脚本 | ❌ 未实测 | 按方案保持保守缺省：PowerShell 长脚本仍走 `-EncodedCommand`，`SupportsStdinScript()` 只对 POSIX 返回 true。切换前必须单独实测 `$LASTEXITCODE` 与 `WrapPowerShellExitCode` 尾声的配合。 |
+| 6 | PowerShell stdin 读取完整多行脚本 | ✅ 已实测 | `-Command -` 直读会逐行解析并漏掉多行控制块；改用固定 `-Command` launcher 后，`pwsh` 7.6.9 与 Windows PowerShell 5.1 均验证了多行脚本、中文 UTF-8 输入/输出、50K 字符输入不受命令行长度限制，以及 `cmd /c exit 7` 经 `WrapPowerShellExitCode` 后仍返回 7。detached 生命周期测试另确认：runner 写临时 `.ps1` 时使用 UTF-8 BOM；外层 runner 同样必须带 BOM，否则 Windows PowerShell 5.1 会在命令进入临时脚本前把中文按 ANSI 解码成乱码。交互式 pipe/PTY 测试在两套 PowerShell 上均验证：长脚本走临时 `.ps1` + `-File` 后，stdin 仍可由 `write_stdin` 正常驱动。 |
 | 7 | **MSYS bash 在 Windows Job Object 内的行为** | ✅ 已实测 | 新增 `TestMSYSBashDescendantsAreInsideWindowsJobObject`（Windows-only）：让 Git Bash fork 一个持续写文件的子进程，用 `QueryInformationJobObject(JobObjectBasicProcessIdList)` 直接观察到 job 内 ≥2 个 PID；取消后 `TerminationReport.Mode == "job_object"`、`TreeKill == true`、`Killed >= 2`，且 liveness 文件停止增长 → **fork 出来的子进程确实继承 job，`TerminateJobObject` 一次杀净，未观察到孤儿残留**。历史上的 Cygwin/MSYS 兼容顾虑在本机 Git Bash 5.2.21 上未复现。 |
 | 8 | **bash 场景下 `CREATE_BREAKAWAY_FROM_JOB` 逃生与 `taskkill /T` 收尾** | ⚠️ 部分实测 | 已实测：`startDetachedProcess(bash.exe, [runner.sh])` 能启动并完成 detached 生命周期（第 5 项）；`TestDetachedPosixRunnerTerminateKillsWholeTree` 验证 `taskkill /T /F` 后 MSYS 后代停止写文件，无孤儿。**注意**：该场景里 runner 由 manager 进程直接启动，并不位于 per-command job 内，因此 `JOB_OBJECT_LIMIT_BREAKAWAY_OK` 的"从 per-command job 脱离"这一半**未构造场景验证**；`startDetachedProcess` 本身也未设置 `CREATE_BREAKAWAY_FROM_JOB`。另实测到 `taskkill /T /F` 在 MSYS 树上可能返回 `exit status 255`，但重试即报"没有找到进程"（树已被杀净），所以生产侧以 `waitProcessGone` 为权威判定，不采信退出码。 |
 

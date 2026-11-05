@@ -499,10 +499,25 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 			Metadata:   metadata,
 		}, nil
 	case "failed", "timed_out":
+		errorCode := strings.TrimSpace(execution.ErrorCode)
+		if errorCode == "" {
+			errorCode = string(runtimeerrors.ErrToolExecution)
+		}
+		nextAction := "inspect the command output and retry with a changed command"
+		if errorCode == string(runtimeerrors.ErrShellUnavailable) {
+			nextAction = "fix shell.path/shell.prefer, or disable shell.strictProbe before retrying"
+		}
+		if execution.Message != "" {
+			metadata["job_message"] = execution.Message
+		}
+		failure := fmt.Errorf("shell job finished with status %s", execution.Status)
+		if execution.Message != "" {
+			failure = fmt.Errorf("%w: %s", failure, execution.Message)
+		}
 		return toolResultFailureWithCode(
-			fmt.Errorf("shell job finished with status %s", execution.Status),
-			string(runtimeerrors.ErrToolExecution),
-			"inspect the command output and retry with a changed command",
+			failure,
+			errorCode,
+			nextAction,
 			metadata,
 		), nil
 	case "cancelled":
@@ -654,8 +669,12 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		cmdCtx = withTimeout
 	}
 
-	// 使用智能 shell 检测
-	shell := runtimeexecutor.CurrentShell()
+	// 使用智能 shell 检测；执行路径必须保留 strictProbe 的失败，不能静默
+	// 退回到另一种语言。
+	shell, err := runtimeexecutor.CurrentShellE()
+	if err != nil {
+		return CommandExecutionResult{}, err
+	}
 	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 
 	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
@@ -1494,6 +1513,8 @@ func classifyHardShellExecutionErrorCode(err error, output string) string {
 	case stderrors.Is(err, context.Canceled),
 		runtimeerrors.Is(err, runtimeerrors.ErrAgentRunCanceled):
 		return string(runtimeerrors.ErrAgentRunCanceled)
+	case stderrors.Is(err, runtimeexecutor.ErrShellUnavailable):
+		return string(runtimeerrors.ErrShellUnavailable)
 	}
 	combined := strings.ToLower(strings.TrimSpace(err.Error() + "\n" + output))
 	switch {
@@ -1572,10 +1593,13 @@ func asIntish(value interface{}) (int, bool) {
 // GetShellEnvironmentInfo returns environment info for error messages,
 // including the detected shell type.
 func GetShellEnvironmentInfo() string {
-	shell := runtimeexecutor.CurrentShell()
 	var parts []string
 	parts = append(parts, fmt.Sprintf("系统类型: %s", runtimeexecutor.GoOS()))
-	parts = append(parts, fmt.Sprintf("Shell: %s (%s)", shell.Type, shell.Path))
+	if shell, err := runtimeexecutor.CurrentShellE(); err == nil {
+		parts = append(parts, fmt.Sprintf("Shell: %s (%s)", shell.Type, shell.Path))
+	} else {
+		parts = append(parts, fmt.Sprintf("Shell: unavailable (%v)", err))
+	}
 	return strings.Join(parts, "\n")
 }
 

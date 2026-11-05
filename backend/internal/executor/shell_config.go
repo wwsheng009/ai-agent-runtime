@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,9 +31,9 @@ const (
 type ScriptDelivery string
 
 const (
-	// ScriptDeliveryStdin passes long scripts over stdin (sh: `-s`, PowerShell
-	// keeps -EncodedCommand until the stdin form is verified — see the plan's
-	// appendix B item 6). Short commands stay on argv.
+	// ScriptDeliveryStdin passes long scripts over stdin (POSIX: `-s`,
+	// PowerShell: a fixed `-Command` launcher plus a stdin script block). Short
+	// commands stay on argv.
 	ScriptDeliveryStdin ScriptDelivery = "stdin"
 	// ScriptDeliveryArgv always appends the script to argv. Diagnostic only:
 	// it runs into the 8191 (cmd) / 32767 (CreateProcess) limits.
@@ -236,6 +237,9 @@ func ValidateShellConfig(cfg *ShellConfig) error {
 			// generic program launcher.
 			return fmt.Errorf("shell.path must point at a known shell binary (bash/sh/zsh/pwsh/powershell/cmd/busybox), got %q", path)
 		}
+		if hasShellPathDirectory(path) && !isAbsoluteShellPath(path) {
+			return fmt.Errorf("shell.path with a directory must be absolute, got %q", path)
+		}
 	}
 	for key, value := range cfg.Env {
 		if !shellEnvKeyPattern.MatchString(key) {
@@ -249,6 +253,35 @@ func ValidateShellConfig(cfg *ShellConfig) error {
 		}
 	}
 	return nil
+}
+
+// hasShellPathDirectory reports whether path contains a directory component.
+// A bare `bash` is intentionally allowed: resolution then uses LookPath and
+// still enforces the known-binary-name guard above.
+func hasShellPathDirectory(path string) bool {
+	return strings.ContainsAny(path, `/\`)
+}
+
+// isAbsoluteShellPath accepts both native absolute paths and Windows drive /
+// UNC paths even when validation runs on a non-Windows build host (the same
+// runtime.yaml can be generated and validated on another OS).
+func isAbsoluteShellPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if filepath.IsAbs(path) {
+		return true
+	}
+	if len(path) >= 3 && isASCIIAlpha(path[0]) && path[1] == ':' &&
+		(path[2] == '\\' || path[2] == '/') {
+		return true
+	}
+	return strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, "//")
+}
+
+func isASCIIAlpha(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 // ShellEnvSlice applies the configured env overrides on top of base.

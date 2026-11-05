@@ -3,6 +3,7 @@ package runtimeapi
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -186,7 +187,13 @@ func (h *Handler) ProbeShellSettings(w http.ResponseWriter, r *http.Request) {
 	probeCfg := cfg
 	if r.Body != nil {
 		var req shellSettingsRequest
-		if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr == nil {
+		decodeErr := json.NewDecoder(r.Body).Decode(&req)
+		if decodeErr != nil && decodeErr != io.EOF {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"failed to parse request body"))
+			return
+		}
+		if decodeErr == nil {
 			// 允许携带「草稿」配置探测：设置页在保存前就能预览顺序调整的效果。
 			if req.Prefer != nil {
 				prefer := make([]string, 0, len(*req.Prefer))
@@ -207,9 +214,20 @@ func (h *Handler) ProbeShellSettings(w http.ResponseWriter, r *http.Request) {
 				probeCfg.StrictProbe = req.StrictProbe
 			}
 			if req.ProbeTimeout != nil {
-				if timeout, parseErr := parseShellProbeTimeout(*req.ProbeTimeout); parseErr == nil {
-					probeCfg.ProbeTimeout = timeout
+				timeout, parseErr := parseShellProbeTimeout(*req.ProbeTimeout)
+				if parseErr != nil {
+					h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, parseErr.Error()))
+					return
 				}
+				probeCfg.ProbeTimeout = timeout
+			}
+			if req.ScriptDelivery != nil {
+				probeCfg.ScriptDelivery = runtimeexecutor.ScriptDelivery(
+					strings.ToLower(strings.TrimSpace(*req.ScriptDelivery)),
+				)
+			}
+			if req.Env != nil {
+				probeCfg.Env = cloneStringMap(*req.Env)
 			}
 			probeCfg = cloneShellConfigForProbe(probeCfg)
 			if validateErr := runtimeexecutor.ValidateShellConfig(&probeCfg); validateErr != nil {
@@ -238,17 +256,17 @@ func (h *Handler) shellSettingsResponse(
 	updated bool,
 ) map[string]interface{} {
 	payload := map[string]interface{}{
-		"auto_detect":     cfg.ShellAutoDetect(),
-		"prefer":          runtimeexecutor.ShellCandidateChain(cfg),
+		"auto_detect":       cfg.ShellAutoDetect(),
+		"prefer":            runtimeexecutor.ShellCandidateChain(cfg),
 		"configured_prefer": cfg.NormalizedPrefer(),
-		"path":            strings.TrimSpace(cfg.Path),
-		"probe_timeout":   cfg.EffectiveProbeTimeout().String(),
-		"strict_probe":    cfg.ShellStrictProbe(),
-		"script_delivery": string(cfg.EffectiveScriptDelivery()),
-		"config_path":     strings.TrimSpace(path),
-		"writable":        strings.TrimSpace(path) != "",
-		"supported_ids":   runtimeexecutor.ShellCandidateIDs(),
-		"updated":         updated,
+		"path":              strings.TrimSpace(cfg.Path),
+		"probe_timeout":     cfg.EffectiveProbeTimeout().String(),
+		"strict_probe":      cfg.ShellStrictProbe(),
+		"script_delivery":   string(cfg.EffectiveScriptDelivery()),
+		"config_path":       strings.TrimSpace(path),
+		"writable":          strings.TrimSpace(path) != "",
+		"supported_ids":     runtimeexecutor.ShellCandidateIDs(),
+		"updated":           updated,
 	}
 	if len(cfg.Env) > 0 {
 		payload["env"] = cfg.Env

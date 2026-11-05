@@ -140,7 +140,12 @@ aicli config --json       # JSON 输出
 aicli config -p <provider>  # 只查看指定 provider
 aicli doctor              # 环境与连通性诊断
 aicli doctor provider     # 诊断 provider
+aicli doctor shell        # 查看 shell 候选链、探针结果与当前方言
+aicli doctor shell --refresh --json
 ```
+
+Shell 自动检测默认开启，无需在 `runtime.yaml` 中额外配置。候选顺序、强制路径、
+WSL 启用方式和 `SHELL_UNAVAILABLE` 排查见 [shell-auto-detection.md](shell-auto-detection.md)。
 
 ### 4.4 `aicli provider` / `login` / `balance`
 
@@ -364,3 +369,4 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | 图片生成 | [docs/aicli/tool_image_generate.md](../aicli/tool_image_generate.md) |
 | Win7 兼容 | [docs/aicli/windows7.md](../aicli/windows7.md)、[windows7-build.md](../aicli/windows7-build.md) |
 | aicli-console 启动器 | [aicli-console.md](aicli-console.md) |
+| Shell 自动检测与配置 | [shell-auto-detection.md](shell-auto-detection.md) |

@@ -1,7 +1,21 @@
 // 由 components/workspace/settings/backend-config-settings-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { getRuntimeConfigDocument, getRuntimeServiceStatus, previewRuntimeConfigDocument, restartRuntimeService, saveRuntimeConfigDocument } from "@/lib/runtime-api";
+import {
+  type RuntimeConfigDocument,
+  getRuntimeConfigDocument,
+  getRuntimeServiceStatus,
+  previewRuntimeConfigDocument,
+  restartRuntimeService,
+  saveRuntimeConfigDocument,
+} from "@/lib/runtime-api";
+import { saveRuntimeShellSettings } from "@/api/runtime/config";
 import { notifyRuntimeModelCatalogChanged } from "@/lib/runtime-model-catalog-sync";
+import {
+  getRuntimeShellConfig,
+  runtimeShellConfigNodesEqual,
+  toRuntimeShellSettingsSaveRequest,
+  withShellConfigFrom,
+} from "../runtime-shell-domain-utils";
 import { buildSaveStatusMessage, sleep } from "./format";
 import { type EditorMode } from "./types";
 import { type ConfigEditorState } from "./use-config-state";
@@ -9,6 +23,7 @@ import { type ConfigEditorState } from "./use-config-state";
 
 export function createConfigEditorActions(state: ConfigEditorState) {
   const {
+    document,
     draftErrorCount,
     draftParsed,
     draftRaw,
@@ -116,15 +131,53 @@ export function createConfigEditorActions(state: ConfigEditorState) {
     setIsSaving(true);
     setError(null);
     try {
-      const nextDocument = await saveRuntimeConfigDocument(
-        mode === "source"
-          ? { changed_by: "workspace_frontend", mode: "raw", raw: draftRaw }
-          : {
-              changed_by: "workspace_frontend",
-              mode: "structured",
-              parsed: draftParsed,
-            },
-      );
+      const shellChanged =
+        mode !== "source" &&
+        document != null &&
+        !runtimeShellConfigNodesEqual(document.parsed, draftParsed);
+
+      // shell.* has its own layered writer. Keep the generic document save from
+      // writing the same edit into config.yaml (or from re-serializing the whole
+      // runtime.yaml), which would bypass the dedicated write target.
+      const parsedWithoutShellChanges = shellChanged
+        ? withShellConfigFrom(draftParsed, document?.parsed)
+        : draftParsed;
+      const shellOnlyChange =
+        shellChanged &&
+        !hasSourceChanges &&
+        JSON.stringify(document?.parsed ?? null) ===
+          JSON.stringify(parsedWithoutShellChanges ?? null);
+
+      let nextDocument: RuntimeConfigDocument;
+      if (shellOnlyChange) {
+        await saveRuntimeShellSettings(
+          toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed)),
+        );
+        nextDocument = await getRuntimeConfigDocument();
+      } else {
+        // The generic writer is a read-modify-write over the same runtime layer.
+        // It must run before the dedicated shell writer; otherwise it sees the
+        // new shell value as its "current" document and reverts the shell node
+        // carried in parsedWithoutShellChanges.
+        nextDocument = await saveRuntimeConfigDocument(
+          mode === "source"
+            ? { changed_by: "workspace_frontend", mode: "raw", raw: draftRaw }
+            : {
+                changed_by: "workspace_frontend",
+                mode: "structured",
+                parsed: parsedWithoutShellChanges,
+              },
+        );
+        if (shellChanged) {
+          await saveRuntimeShellSettings(
+            toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed)),
+          );
+          nextDocument = await getRuntimeConfigDocument().catch(() => ({
+            ...nextDocument,
+            parsed: withShellConfigFrom(nextDocument.parsed, draftParsed),
+          }));
+        }
+      }
       setDocument(nextDocument);
       setDraftParsed(nextDocument.parsed);
       setDraftRaw(nextDocument.raw);

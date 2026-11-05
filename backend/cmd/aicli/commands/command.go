@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -1310,6 +1311,11 @@ func prefixPowershellUTF8ForInteractiveCommand(cmd *exec.Cmd) {
 	if len(cmd.Args) < 3 {
 		return
 	}
+	if runtimeexecutor.ShellArgsUseStdinScript(cmd.Args) {
+		// The stdin payload already starts with the UTF-8 directive. Prefixing
+		// the final "-" would corrupt the -Command - transport.
+		return
+	}
 	lastIdx := len(cmd.Args) - 1
 	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
 }
@@ -1587,10 +1593,20 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 		}()
 	}
 
-	// Use the same detected user shell as tool-based command execution.
-	shell := runtimeexecutor.CurrentShell()
+	// Use the same execution-safe resolver as tool-based command execution.
+	// CurrentShell() is display-only because it must degrade to a fallback.
+	shell, err := runtimeexecutor.CurrentShellE()
+	if err != nil {
+		return result, fmt.Errorf("shell unavailable: %w", err)
+	}
 	result.Shell = shell
-	shellCmd := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, executedCommand), false)
+	shellCmd, stdinScript := shell.DeriveExecInvocation(
+		runtimeexecutor.WrapPowerShellExitCode(shell, executedCommand),
+		runtimeexecutor.CurrentScriptDelivery(),
+	)
+	if len(shellCmd) == 0 {
+		return result, fmt.Errorf("shell unavailable: no executable resolved")
+	}
 
 	if streamOutput {
 		fmt.Printf("\n执行命令: %s\n", executedCommand)
@@ -1603,6 +1619,12 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 
 	// 执行命令
 	cmd := exec.CommandContext(ctx, shellCmd[0], shellCmd[1:]...)
+	if stdinScript != "" {
+		cmd.Stdin = strings.NewReader(stdinScript)
+	}
+	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(
+		runtimeexecutor.ApplyShellEnvOverrides(os.Environ()),
+	)
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
 		prefixPowershellUTF8ForInteractiveCommand(cmd)
 	}

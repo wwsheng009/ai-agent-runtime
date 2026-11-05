@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pty"
 )
 
@@ -82,16 +81,20 @@ const (
 type interactiveSession struct {
 	job   *managedJob
 	stdin io.WriteCloser
+	// cleanup removes any transport artifact (for example a temporary .ps1
+	// script) after the child has exited.
+	cleanup func()
 	// resizer is set only for PTY-backed sessions (2026-10-11).
 	resizer terminalResizer
 
-	mu        sync.Mutex
-	offset    int64
-	closed    bool
-	exited    bool
-	exitCode  *int
-	closeOnce sync.Once
-	doneCh    chan struct{}
+	mu          sync.Mutex
+	offset      int64
+	closed      bool
+	exited      bool
+	exitCode    *int
+	closeOnce   sync.Once
+	cleanupOnce sync.Once
+	doneCh      chan struct{}
 }
 
 // terminalResizer is implemented by a PTY handle that can change its size.
@@ -99,11 +102,12 @@ type terminalResizer interface {
 	Resize(cols, rows int) error
 }
 
-func newInteractiveSession(job *managedJob, stdin io.WriteCloser) *interactiveSession {
+func newInteractiveSession(job *managedJob, stdin io.WriteCloser, cleanup func()) *interactiveSession {
 	return &interactiveSession{
-		job:    job,
-		stdin:  stdin,
-		doneCh: make(chan struct{}),
+		job:     job,
+		stdin:   stdin,
+		cleanup: cleanup,
+		doneCh:  make(chan struct{}),
 	}
 }
 
@@ -148,6 +152,7 @@ func (s *interactiveSession) markExited(code int) {
 	s.exitCode = &exitCode
 	s.mu.Unlock()
 	close(s.doneCh)
+	s.cleanupArtifacts()
 }
 
 func (s *interactiveSession) exitCodePtr() *int {
@@ -175,6 +180,17 @@ func (s *interactiveSession) closeStdin() {
 		s.mu.Unlock()
 		if stdin != nil {
 			_ = stdin.Close()
+		}
+	})
+}
+
+func (s *interactiveSession) cleanupArtifacts() {
+	if s == nil {
+		return
+	}
+	s.cleanupOnce.Do(func() {
+		if s.cleanup != nil {
+			s.cleanup()
 		}
 	})
 }
@@ -376,7 +392,22 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 		return m.openTerminalPTY(jobCtx, managed, args)
 	}
 
-	cmd := m.buildShellCommand(jobCtx, command)
+	// Interactive sessions reserve stdin for write_stdin. Long scripts therefore
+	// use a temporary script file instead of the stdin transport or
+	// -EncodedCommand, both of which would either consume write_stdin or grow
+	// beyond the Windows command-line limit.
+	cmd, cleanup, err := m.buildInteractiveShellCommand(jobCtx, command)
+	if cleanup != nil {
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+	}
+	if err != nil {
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
+		return managed.snapshot(), nil
+	}
 	if cmd == nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return managed.snapshot(), nil
@@ -446,7 +477,8 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 		return managed.snapshot(), nil
 	}
 
-	sess := newInteractiveSession(managed, stdin)
+	sess := newInteractiveSession(managed, stdin, cleanup)
+	cleanup = nil
 	m.mu.Lock()
 	m.interactive[jobID] = sess
 	if sid := strings.TrimSpace(sessionID); sid != "" {
@@ -667,6 +699,7 @@ func (m *Manager) removeInteractive(jobID string) {
 	}
 	jobID = strings.TrimSpace(jobID)
 	m.mu.Lock()
+	sess := m.interactive[jobID]
 	delete(m.interactive, jobID)
 	for sid, mapped := range m.interactiveBySession {
 		if mapped == jobID {
@@ -674,6 +707,7 @@ func (m *Manager) removeInteractive(jobID string) {
 		}
 	}
 	m.mu.Unlock()
+	sess.cleanupArtifacts()
 }
 
 // interactiveSessionBySession returns the live session registered for a session
@@ -711,8 +745,23 @@ func (m *Manager) Resize(ctx context.Context, jobID string, cols, rows int) erro
 // openTerminalPTY starts an interactive session behind a pseudoterminal. It is
 // only reached when pty.Supported() is true (2026-10-11).
 func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args TerminalOpenArgs) (*Job, error) {
-	shell := runtimeexecutor.CurrentShell()
-	argv := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, managed.info.Command), false)
+	shell, err := m.executionShell()
+	if err != nil {
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
+		return managed.snapshot(), nil
+	}
+	argv, cleanup, err := buildInteractiveShellInvocation(shell, managed.info.Command)
+	if cleanup != nil {
+		defer func() {
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+	}
+	if err != nil {
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, err)
+		return managed.snapshot(), nil
+	}
 	if len(argv) == 0 {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return managed.snapshot(), nil
@@ -723,13 +772,14 @@ func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args
 			logFile = file
 		}
 	}
-	options := make([]pty.Option, 0, 2)
+	options := make([]pty.Option, 0, 3)
 	if managed.info.Cwd != "" {
 		options = append(options, pty.WithWorkDir(managed.info.Cwd))
 	}
 	if args.Cols > 0 || args.Rows > 0 {
 		options = append(options, pty.WithSize(args.Cols, args.Rows))
 	}
+	options = append(options, pty.WithEnv(m.shellEnvironment()))
 	p, err := pty.Start(argv[0], argv[1:], options...)
 	if err != nil {
 		if logFile != nil {
@@ -781,7 +831,8 @@ func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args
 	managed.info.TTY = true
 	managed.mu.Unlock()
 
-	sess := newInteractiveSession(managed, p)
+	sess := newInteractiveSession(managed, p, cleanup)
+	cleanup = nil
 	sess.resizer = p
 	m.mu.Lock()
 	m.interactive[managed.info.ID] = sess

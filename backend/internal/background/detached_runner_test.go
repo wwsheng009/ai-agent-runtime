@@ -1,8 +1,10 @@
 package background
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -93,6 +95,27 @@ func TestDetachedRunnerHostFallsBackWhenPosixPathIsGone(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		require.False(t, got.SpeaksPosix(), "fallback host must be PowerShell/cmd, got %q", got.Path)
 	}
+}
+
+func TestDetachedRunnerHostUsesSelectedPowerShellPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("detached .ps1 hosts are Windows-only")
+	}
+	t.Setenv("PATH", "")
+	path := filepath.Join(t.TempDir(), "pwsh.exe")
+	require.NoError(t, os.WriteFile(path, []byte("fixture"), 0o755))
+	stubDetachedRunnerShell(t, runtimeexecutor.Shell{
+		Path:    path,
+		Type:    runtimeexecutor.ShellTypePwsh,
+		ID:      runtimeexecutor.ShellIDPwsh,
+		Dialect: runtimeexecutor.ShellDialectPowerShell,
+	})
+
+	got, posixHost := detachedRunnerHost()
+	require.False(t, posixHost)
+	require.Equal(t, path, got.Path)
+	require.True(t, defaultDetachedRunnerHostAvailable(),
+		"a probed explicit PowerShell path must satisfy the detached host requirement")
 }
 
 // TestDetachedRunnerPosixHostRejectsDirectory makes sure a directory (a very
@@ -199,6 +222,8 @@ func TestWriteDetachedRunnerKeepsPowerShellRunner(t *testing.T) {
 	data, err := os.ReadFile(runnerPath)
 	require.NoError(t, err)
 	require.NotEmpty(t, data)
+	require.True(t, bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}),
+		"Windows PowerShell 5.1 needs a UTF-8 BOM to decode non-ASCII commands")
 	require.False(t, strings.HasPrefix(string(data), "#!/bin/sh"))
 }
 
@@ -231,6 +256,58 @@ func TestLaunchDetachedShellWithPosixHost(t *testing.T) {
 	require.NoError(t, err, "sh runner never wrote a heartbeat")
 	_, err = strconv.Atoi(strings.TrimSpace(string(heartbeat)))
 	require.NoError(t, err, "heartbeat must contain a unix timestamp, got %q", heartbeat)
+}
+
+// TestLaunchDetachedShellWithLongPowerShellCommand exercises the real detached
+// lifecycle for the stdin transport: the generated runner must write the long
+// script to a BOM-prefixed .ps1 file, execute it with -File, preserve the
+// native exit code, and leave no oversized payload on the Windows command line.
+func TestLaunchDetachedShellWithLongPowerShellCommand(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the .ps1 runner is Windows-only")
+	}
+
+	hosts := []struct {
+		name string
+		typ  runtimeexecutor.ShellType
+		id   string
+	}{
+		{name: "pwsh", typ: runtimeexecutor.ShellTypePwsh, id: runtimeexecutor.ShellIDPwsh},
+		{name: "powershell", typ: runtimeexecutor.ShellTypePowerShell, id: runtimeexecutor.ShellIDPowerShell},
+	}
+	for _, host := range hosts {
+		t.Run(host.name, func(t *testing.T) {
+			path, err := exec.LookPath(host.name)
+			if err != nil {
+				t.Skipf("%s is not installed", host.name)
+			}
+			stubDetachedRunnerShell(t, runtimeexecutor.Shell{
+				Path:    path,
+				Type:    host.typ,
+				ID:      host.id,
+				Dialect: runtimeexecutor.ShellDialectPowerShell,
+			})
+
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "job.log")
+			marker := "detached-long-" + host.name + "-中文-ok"
+			command := fmt.Sprintf("Write-Output '%s'\n", marker) +
+				strings.Repeat("# padding\n", 6000) +
+				"cmd /c exit 7\n"
+			require.Greater(t, len(command), runtimeexecutor.ShellStdinScriptThreshold)
+
+			launch, err := launchDetachedShell(command, dir, logPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = terminateProcess(launch.PID) })
+			require.True(t, strings.HasSuffix(launch.RunnerPath, ".ps1"),
+				"PowerShell host must produce a .ps1 runner, got %q", launch.RunnerPath)
+
+			code, ok := waitDetachedStatus(launch.StatusPath, 60*time.Second)
+			require.True(t, ok, "status file never appeared; log: %s", readFileOrEmpty(logPath))
+			require.Equal(t, 7, code)
+			require.Contains(t, readFileOrEmpty(logPath), marker)
+		})
+	}
 }
 
 // TestDetachedPosixRunnerTerminateKillsWholeTree measures appendix B item 8's

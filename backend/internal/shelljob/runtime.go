@@ -41,6 +41,7 @@ type Output struct {
 	Status     string
 	ExitCode   *int
 	LogPath    string
+	ErrorCode  string
 	// Message carries the manager's terminal or pending explanation (queue
 	// saturation, wait-delay settlement, watchdog diagnosis). Dropping it here
 	// is what left remote callers with "still running" and no next step.
@@ -80,6 +81,7 @@ type Execution struct {
 	ExitCode       *int
 	Output         string
 	NextOffset     int64
+	ErrorCode      string
 	TimedOut       bool
 	Promoted       bool
 	LogPath        string
@@ -191,6 +193,7 @@ func Execute(ctx context.Context, runtime Runtime, req Request) (Execution, erro
 		ExitCode:       firstExitCode(output.ExitCode, snapshot.ExitCode),
 		Output:         output.Output,
 		NextOffset:     output.NextOffset,
+		ErrorCode:      output.ErrorCode,
 		TimedOut:       snapshot.TimedOut,
 		Promoted:       snapshot.TimedOut,
 		LogPath:        output.LogPath,
@@ -331,6 +334,7 @@ func (r *ManagerRuntime) ReadShell(ctx context.Context, jobID string, offset int
 		Status:         result.Status,
 		ExitCode:       result.ExitCode,
 		LogPath:        logPath,
+		ErrorCode:      result.ErrorCode,
 		Message:        result.Message,
 		WaitDelayUsed:  waitDelayUsed,
 		WaitDelayMs:    waitDelayMs,

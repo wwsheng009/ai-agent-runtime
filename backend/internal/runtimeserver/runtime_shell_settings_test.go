@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/stretchr/testify/require"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"gopkg.in/yaml.v3"
 )
 
@@ -90,4 +91,36 @@ func TestPersistShellSettingsCreatesMissingFile(t *testing.T) {
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &decoded))
 	require.Equal(t, []string{"busybox", "cmd"}, decoded.Shell.Prefer)
+}
+
+func TestLayeredShellPersisterInstallsProcessResolver(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(t.TempDir()))
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+		runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{})
+		runtimeexecutor.InvalidateShellResolution()
+	})
+
+	manager := runtimecfg.NewRuntimeManager(filepath.Join(home, ".aicli", "runtime.yaml"))
+	previous := manager.Get()
+	next := runtimeexecutor.ShellConfig{
+		AutoDetect:     boolPtrShell(false),
+		Prefer:         []string{"cmd"},
+		ScriptDelivery: runtimeexecutor.ScriptDeliveryStdin,
+	}
+	target, persistErr := NewLayeredRuntimeShellSettingsPersister(manager)(next)
+	require.NoError(t, persistErr)
+	require.NotEmpty(t, target)
+	require.True(t, strings.HasSuffix(filepath.ToSlash(target), "/.aicli/runtime.yaml"))
+
+	// The persister must install the new snapshot, not merely update the
+	// RuntimeManager copy that the settings provider reads.
+	require.Equal(t, []string{"cmd"}, runtimeexecutor.ShellConfigSnapshot().Prefer)
+	require.False(t, runtimeexecutor.ShellConfigSnapshot().ShellAutoDetect())
+	require.Equal(t, previous.Agent.DefaultModel, manager.Get().Agent.DefaultModel)
 }

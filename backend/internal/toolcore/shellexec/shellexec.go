@@ -123,9 +123,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	shell := runtimeexecutor.CurrentShell()
-	if strings.TrimSpace(opts.Shell.Path) != "" || opts.Shell.Type != "" {
-		shell = opts.Shell
+	shell := opts.Shell
+	if strings.TrimSpace(shell.Path) == "" && strings.TrimSpace(string(opts.Shell.Type)) == "" {
+		resolved, err := runtimeexecutor.CurrentShellE()
+		if err != nil {
+			return Result{}, err
+		}
+		shell = resolved
 	}
 
 	var launch Launch
@@ -278,6 +282,11 @@ func prefixPowerShellArgs(args []string, shell runtimeexecutor.Shell, program st
 		return args
 	}
 	if runtimeexecutor.ShellArgsUseEncodedCommand(args) {
+		return args
+	}
+	if runtimeexecutor.ShellArgsUseStdinScript(args) {
+		// DeriveExecInvocation already put the UTF-8 directive in the stdin
+		// stream; the final "-" is a flag, not a PowerShell script.
 		return args
 	}
 	last := len(args) - 1

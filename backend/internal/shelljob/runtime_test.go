@@ -133,6 +133,31 @@ func TestExecutePropagatesQueueAndWaitDelayDiagnostics(t *testing.T) {
 	}
 }
 
+func TestExecutePropagatesTerminalErrorCode(t *testing.T) {
+	runtime := &fakeRuntime{
+		jobID: "job_shell_unavailable",
+		wait:  Snapshot{ID: "job_shell_unavailable", Status: "failed"},
+		output: Output{
+			Status:    "failed",
+			Message:   "no usable shell passed the probe",
+			ErrorCode: "SHELL_UNAVAILABLE",
+		},
+	}
+	execution, err := Execute(context.Background(), runtime, Request{
+		SessionID: "session-a",
+		Command:   "echo never",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if execution.ErrorCode != "SHELL_UNAVAILABLE" {
+		t.Fatalf("terminal error code was dropped: %+v", execution)
+	}
+	if execution.Message == "" {
+		t.Fatalf("terminal message was dropped: %+v", execution)
+	}
+}
+
 func TestExecuteWaitErrorCancelsJob(t *testing.T) {
 	runtime := &fakeRuntime{
 		jobID:   "job_wait",

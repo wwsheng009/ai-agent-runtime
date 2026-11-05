@@ -57,6 +57,7 @@ const (
 	ErrAgentSubagentCircuitOpen ErrorCode = "SUBAGENT_CIRCUIT_OPEN"
 	ErrToolBrokerFailure        ErrorCode = "TOOL_BROKER_FAILURE"
 	ErrProcessStartFailed       ErrorCode = "PROCESS_START_FAILED"
+	ErrShellUnavailable         ErrorCode = "SHELL_UNAVAILABLE"
 	ErrProcessHealthcheck       ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
 	// ErrSearchProviderUnavailable marks a web_search native-routing failure
 	// (P2-5) where mode=force has no usable native target: model capability not

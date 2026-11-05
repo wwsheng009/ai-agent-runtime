@@ -83,11 +83,14 @@ func CurrentEnvironmentValues() map[string]interface{} {
 }
 
 func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[string]interface{} {
-	shell := runtimeexecutor.CurrentShell()
+	shellName := "unavailable"
+	if shell, err := runtimeexecutor.CurrentShellE(); err == nil {
+		shellName = detectedShellName(shell)
+	}
 	now := time.Now()
 	values := map[string]interface{}{
 		"os":           runtime.GOOS,
-		"shell":        detectedShellName(shell),
+		"shell":        shellName,
 		"current_date": now.Format("2006-01-02"),
 		"timezone":     detectedTimezoneLabel(now),
 	}
@@ -110,10 +113,14 @@ func RenderShellExecutionGuidance() string {
 // precomputed (possibly session-frozen) capability section. Pass empty to omit
 // the measured capability appendix.
 func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) string {
-	shell := runtimeexecutor.CurrentShell()
+	shell, shellErr := runtimeexecutor.CurrentShellE()
+	shellName := "unavailable"
+	if shellErr == nil {
+		shellName = detectedShellName(shell)
+	}
 	lines := []string{
 		fmt.Sprintf("Detected operating system: %s.", runtime.GOOS),
-		fmt.Sprintf("Detected user shell: %s.", detectedShellName(shell)),
+		fmt.Sprintf("Detected user shell: %s.", shellName),
 		"Search: shell `rg`/`grep` uses exit 1 for no matches and is easy to break with quotes/regex escapes; toolkit search tools take structured arguments and are unaffected. Choose whichever fits the task.",
 		"Filesystem inspection can be done with toolkit `ls`/`glob`/`view`; builds, tests, git, and package managers run in the shell.",
 		"Never invoke toolkit tool names as shell commands (for example `view -path ...` or `grep -pattern ...` inside bash). Call those tools directly with structured args.",
@@ -123,6 +130,10 @@ func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) strin
 		"If shell search fails with regex/path errors, switch to toolkit `grep` (literal=true for fixed text) rather than repairing complex shell quoting.",
 		"Do not put shell globs in the rg path argument (e.g. `rg pattern backend/**/*.go`); use `rg -g \"*.go\" pattern backend` or toolkit `grep` path+glob.",
 		"Non-zero process exit codes from shell tools are content results (inspect Exit code/Output), not tool crashes; only launch/timeout/cancel/permission failures are hard tool errors.",
+	}
+	if shellErr != nil {
+		lines = append(lines,
+			fmt.Sprintf("Shell execution is unavailable under strictProbe: %v. Fix shell.path/prefer or set strictProbe=false before running commands.", shellErr))
 	}
 
 	switch {

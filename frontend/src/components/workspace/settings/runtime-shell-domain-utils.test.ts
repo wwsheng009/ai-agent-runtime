@@ -7,7 +7,11 @@ import {
   moveShellPreferItem,
   parseShellPreferInput,
   removeShellPreferItem,
+  runtimeShellConfigsEqual,
+  runtimeShellConfigNodesEqual,
   runtimeShellCandidateIds,
+  toRuntimeShellSettingsSaveRequest,
+  withShellConfigFrom,
 } from "./runtime-shell-domain-utils";
 
 describe("getRuntimeShellConfig", () => {
@@ -54,6 +58,14 @@ describe("getRuntimeShellConfig", () => {
     expect(getRuntimeShellConfig({ shell: { scriptDelivery: "  " } }).scriptDelivery).toBe(
       "stdin",
     );
+  });
+
+  it("keeps empty env values as explicit overrides", () => {
+    const config = getRuntimeShellConfig({
+      shell: { env: { EMPTY_VALUE: "", KEEP: "1" } },
+    });
+
+    expect(config.env).toEqual({ EMPTY_VALUE: "", KEEP: "1" });
   });
 });
 
@@ -111,5 +123,76 @@ describe("runtimeShellCandidateIds", () => {
   it("never lists the wsl stub first — the builtin chain starts with git-bash", () => {
     expect(runtimeShellCandidateIds[0]).toBe("git-bash");
     expect(new Set(runtimeShellCandidateIds).size).toBe(runtimeShellCandidateIds.length);
+  });
+
+  it("includes the Unix POSIX candidates accepted by the backend", () => {
+    expect(runtimeShellCandidateIds).toEqual(
+      expect.arrayContaining(["bash", "zsh", "sh"]),
+    );
+  });
+});
+
+describe("dedicated shell settings save mapping", () => {
+  it("maps the editor draft to the shell API request", () => {
+    const config = getRuntimeShellConfig({
+      shell: {
+        autoDetect: false,
+        strictProbe: true,
+        prefer: [" Git-Bash ", "PWSH"],
+        path: " C:\\Program Files\\Git\\bin\\bash.exe ",
+        probeTimeout: " 4s ",
+        scriptDelivery: "argv",
+        env: { MSYS_NO_PATHCONV: "1" },
+      },
+    });
+
+    expect(toRuntimeShellSettingsSaveRequest(config)).toEqual({
+      auto_detect: false,
+      prefer: ["git-bash", "pwsh"],
+      path: "C:\\Program Files\\Git\\bin\\bash.exe",
+      probe_timeout: "4s",
+      strict_probe: true,
+      script_delivery: "argv",
+      env: { MSYS_NO_PATHCONV: "1" },
+    });
+  });
+
+  it("keeps shell edits out of the generic config-document payload", () => {
+    const current = {
+      providers: { default_provider: "p" },
+      shell: { prefer: ["powershell"], strictProbe: true },
+    };
+    const draft = {
+      providers: { default_provider: "p" },
+      shell: { prefer: ["git-bash"], strictProbe: false },
+    };
+
+    expect(withShellConfigFrom(draft, current)).toEqual(current);
+  });
+
+  it("compares only normalized shell-domain fields", () => {
+    const left = getRuntimeShellConfig({
+      shell: { path: " bash ", prefer: ["git-bash"], scriptDelivery: "" },
+    });
+    const right = getRuntimeShellConfig({
+      shell: { path: "bash", prefer: ["git-bash"], scriptDelivery: "stdin" },
+    });
+
+    expect(runtimeShellConfigsEqual(left, right)).toBe(true);
+    expect(
+      runtimeShellConfigsEqual(left, { ...right, strictProbe: false }),
+    ).toBe(false);
+  });
+
+  it("detects raw shell-node changes that normalize to the same runtime values", () => {
+    expect(
+      runtimeShellConfigNodesEqual({}, { shell: { autoDetect: true } }),
+    ).toBe(false);
+    expect(
+      runtimeShellConfigNodesEqual(
+        { shell: { env: { A: "1", B: "2" } } },
+        { shell: { env: { B: "2", A: "1" } } },
+      ),
+    ).toBe(true);
   });
 });

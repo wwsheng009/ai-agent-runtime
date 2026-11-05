@@ -155,6 +155,17 @@ func TestPrefixPowerShellArgsUsesSelectedShell(t *testing.T) {
 	}
 }
 
+func TestPrefixPowerShellArgsLeavesStdinTransportUntouched(t *testing.T) {
+	args := []string{
+		"-NoProfile", "-NonInteractive", "-Command",
+		runtimeexecutor.PowerShellStdinScriptLauncher,
+	}
+	got := prefixPowerShellArgs(args, runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePwsh}, "pwsh")
+	if len(got) != len(args) || got[len(got)-1] != runtimeexecutor.PowerShellStdinScriptLauncher {
+		t.Fatalf("stdin transport flag was corrupted: %#v", got)
+	}
+}
+
 func TestRunTimeoutTerminatesTheTree(t *testing.T) {
 	if runtime.GOOS == "windows" && os.Getenv("CI") == "" {
 		// The helper is still valid on Windows; the Job Object path is covered

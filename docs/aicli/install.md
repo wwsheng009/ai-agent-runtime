@@ -873,6 +873,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、http/shell/images artifacts（兼容旧目录名 runtime-http/local-shell/generated-images）打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。
+- Shell 自动检测默认开启（无需额外配置）；查看当前选择、调整候选链或排查 `SHELL_UNAVAILABLE` 见 [Shell 自动检测与配置](../user-guide/shell-auto-detection.md)。
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。
 - background toolbroker 能力包括 `background_task`、`task_output`（支持 `wait=output|exit` + `timeout_ms` 长轮询，返回 `wait_condition`/`waited_ms`）和 `task_kill`（按 job_id/task_id 终止，已结束/未知 id/已受理三分支可区分）；HTTP 观测入口见 `docs/skill_runtime/runtime_operations_api.md` 的 Background Jobs 章节。
 - shell / background：进程正常结束但 exit≠0 是内容结果，不是工具崩溃。前台 bash 返回 `Success:true` + `exit_code`；background job 状态为 `completed` 并保留 `exit_code`（可选 `non_zero_exit`），仅启动失败、超时、取消、权限/健康检查等硬失败才是 `failed`/`timed_out`/`cancelled` 并带 `error_code`。
@@ -1022,6 +1023,7 @@ tool 参数边界：
 | 临时使用另一份配置 | [faq.md §6](./faq.md#6-临时使用另一份配置) |
 | 日志路径 | [faq.md §7](./faq.md#7-日志在哪里) |
 | 仓库示例配置读不到 | [faq.md §8](./faq.md#8-仓库里的示例配置为什么读不到) |
+| Shell 自动检测是否启用 / 如何覆盖 | [faq.md §11](./faq.md#11-shell-自动检测需要手动开启吗) |
 
 快速自检：
 
@@ -1029,6 +1031,7 @@ tool 参数边界：
 aicli config
 aicli doctor provider
 aicli doctor provider --provider openai --model gpt-4.1
+aicli doctor shell
 ```
 
 最短上手见 [quickstart.md](./quickstart.md)。

@@ -165,10 +165,15 @@ aicli doctor provider --provider openai --model gpt-4.1 --json
 
 # 预览子 Agent / Team 难度路由（不调用模型）
 aicli doctor subagent-route --difficulty hard --goal "review auth changes" --json
+
+# 查看本地命令实际使用哪个 shell（候选链、探针、方言）
+aicli doctor shell
+aicli doctor shell --json
 ```
 
 - `doctor provider`：对指定 provider 跑可复现调用矩阵，适合排查 401、超时、工具链是否暴露
 - `doctor subagent-route`：只 dry-run 路由结果，不会真正调模型
+- `doctor shell`：只读探测本地 shell 候选链，不改配置
 
 ## 10. 网络代理（proxy）怎么配
 
@@ -256,6 +261,35 @@ providers:
         enabled: true
 ```
 
+## 11. Shell 自动检测需要手动开启吗
+
+不需要。当前版本 `autoDetect` 默认是 `true`，`strictProbe` 默认也是 `true`；
+即使 `runtime.yaml` 中没有 `shell:` 段，也会自动探测候选 shell。
+
+```bash
+aicli doctor shell --json
+```
+
+如果输出 `auto_detect: true`、`selected.source: autodetect`，说明默认自动检测已生效。
+Windows 默认顺序为：
+
+```text
+git-bash -> msys-bash -> busybox -> pwsh -> powershell -> cmd
+```
+
+手工配置时先以 `doctor shell` 输出的 `config_path` 为准。CLI 项目层
+`./.aicli/runtime.yaml` 会覆盖用户层 `$HOME/.aicli/runtime.yaml` 的同名字段。
+
+```yaml
+shell:
+  autoDetect: true
+  prefer: [git-bash, pwsh, powershell, cmd]  # 非空时完全替代内置链
+```
+
+想强制指定时使用 `path`；它优先于 `prefer` 和内置链。需要 WSL 时必须把 `wsl`
+显式写进 `prefer`。完整覆盖矩阵、API 入口和 `SHELL_UNAVAILABLE` 排查见
+[Shell 自动检测与配置](../user-guide/shell-auto-detection.md)。
+
 ## 相关文档
 
 - [quickstart.md](./quickstart.md)
@@ -263,3 +297,4 @@ providers:
 - [exec.md](./exec.md)
 - [agents.md](./agents.md)
 - [tool_image_generate.md](./tool_image_generate.md)
+- [Shell 自动检测与配置](../user-guide/shell-auto-detection.md)

@@ -18,19 +18,19 @@ import (
 // (plan §8.3). Text output is derived from the same struct so the two formats
 // cannot drift.
 type doctorShellReport struct {
-	ConfigPath     string                            `json:"config_path,omitempty"`
-	ConfigLayer    string                            `json:"config_layer,omitempty"`
-	Writable       bool                              `json:"writable"`
-	AutoDetect     bool                              `json:"auto_detect"`
-	Prefer         []string                          `json:"prefer"`
-	Path           string                            `json:"path,omitempty"`
-	ProbeTimeout   string                            `json:"probe_timeout"`
-	StrictProbe    bool                              `json:"strict_probe"`
-	ScriptDelivery string                            `json:"script_delivery"`
-	Selected       *doctorShellSelected              `json:"selected,omitempty"`
+	ConfigPath     string                                 `json:"config_path,omitempty"`
+	ConfigLayer    string                                 `json:"config_layer,omitempty"`
+	Writable       bool                                   `json:"writable"`
+	AutoDetect     bool                                   `json:"auto_detect"`
+	Prefer         []string                               `json:"prefer"`
+	Path           string                                 `json:"path,omitempty"`
+	ProbeTimeout   string                                 `json:"probe_timeout"`
+	StrictProbe    bool                                   `json:"strict_probe"`
+	ScriptDelivery string                                 `json:"script_delivery"`
+	Selected       *doctorShellSelected                   `json:"selected,omitempty"`
 	Candidates     []runtimeexecutor.ShellCandidateReport `json:"candidates"`
-	Findings       []string                          `json:"findings,omitempty"`
-	Error          string                            `json:"error,omitempty"`
+	Findings       []string                               `json:"findings,omitempty"`
+	Error          string                                 `json:"error,omitempty"`
 }
 
 type doctorShellSelected struct {
@@ -209,7 +209,7 @@ func doctorShellFindings(report doctorShellReport, resolution *runtimeexecutor.S
 		findings = append(findings, "长脚本走 stdin（bash -s），不进入 Windows 命令行长度限制。")
 	}
 	if resolveErr != nil {
-		findings = append(findings, "严格模式下没有可用 shell；执行路径会退回 DefaultUserShell，配置需要修正。")
+		findings = append(findings, "严格模式下没有可用 shell；执行会返回 SHELL_UNAVAILABLE，配置需要修正。")
 	}
 	if resolution != nil && resolution.Shell.Source == runtimeexecutor.ShellSourceFallback {
 		findings = append(findings, "当前使用最终兜底 shell（strictProbe=false 或全部探针失败）。")

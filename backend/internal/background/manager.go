@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1427,6 +1428,10 @@ func (m *Manager) runJob(managed *managedJob) {
 	if managed == nil {
 		return
 	}
+	if _, err := m.executionShell(); err != nil {
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
+		return
+	}
 	if reason := m.detachedExecutionBlockReason(managed); reason == "" {
 		m.runDetachedJob(managed)
 		return
@@ -1470,7 +1475,11 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
-	cmd := m.buildShellCommand(ctx, managed.info.Command)
+	cmd, err := m.buildShellCommand(ctx, managed.info.Command)
+	if err != nil {
+		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
+		return
+	}
 	if cmd == nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrProcessStartFailed, fmt.Errorf("unsupported shell command"))
 		return
@@ -3501,24 +3510,139 @@ func currentLogSize(path string) int64 {
 	return info.Size()
 }
 
-func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.Cmd {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return nil
-	}
+func (m *Manager) executionShell() (runtimeexecutor.Shell, error) {
 	cfg := Config{}
 	if m != nil {
 		cfg = m.config
 	}
+	if strings.TrimSpace(cfg.Shell.Path) != "" {
+		return cfg.Shell, nil
+	}
+	return runtimeexecutor.CurrentShellE()
+}
+
+func (m *Manager) shellEnvironment() []string {
+	cfg := Config{}
+	if m != nil {
+		cfg = m.config
+	}
+	env := cfg.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	env = runtimeexecutor.ApplyShellEnvOverrides(env)
+	return runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(env))
+}
+
+func (m *Manager) buildShellCommand(ctx context.Context, command string) (*exec.Cmd, error) {
+	return m.buildShellCommandWithDelivery(ctx, command, runtimeexecutor.CurrentScriptDelivery())
+}
+
+// buildInteractiveShellCommand builds a command whose stdin remains available
+// for write_stdin. Long scripts use a temporary script file rather than the
+// stdin transport or PowerShell's command-line-expanding -EncodedCommand.
+func (m *Manager) buildInteractiveShellCommand(ctx context.Context, command string) (*exec.Cmd, func(), error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil, nil, nil
+	}
+	shell, err := m.executionShell()
+	if err != nil {
+		return nil, nil, err
+	}
+	shellArgs, cleanup, err := buildInteractiveShellInvocation(shell, command)
+	if err != nil || shellArgs == nil {
+		return nil, cleanup, err
+	}
+	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
+	cmd.Env = m.shellEnvironment()
+	if m != nil && m.config.PrepareCommand != nil {
+		m.config.PrepareCommand(shell, command, cmd)
+	}
+	return cmd, cleanup, nil
+}
+
+func buildInteractiveShellInvocation(shell runtimeexecutor.Shell, command string) ([]string, func(), error) {
+	wrappedCommand := runtimeexecutor.WrapPowerShellExitCode(shell, command)
+	shellArgs, stdinScript := shell.DeriveExecInvocation(
+		wrappedCommand,
+		runtimeexecutor.CurrentScriptDelivery(),
+	)
+	if stdinScript != "" {
+		scriptPath, cleanup, writeErr := writeInteractiveShellScript(shell, stdinScript)
+		if writeErr != nil {
+			return nil, nil, writeErr
+		}
+		return interactiveScriptArgs(shell, scriptPath), cleanup, nil
+	}
+	if len(shellArgs) == 0 {
+		return nil, nil, nil
+	}
+	return shellexec.HardenPowerShellArgs(shellArgs, shell, shellArgs[0]), nil, nil
+}
+
+func writeInteractiveShellScript(shell runtimeexecutor.Shell, script string) (string, func(), error) {
+	extension := ".sh"
+	payload := []byte(script)
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		extension = ".ps1"
+		payload = append([]byte{0xEF, 0xBB, 0xBF}, payload...)
+	}
+	file, err := os.CreateTemp("", "aicli-interactive-*"+extension)
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := file.Write(payload); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+func interactiveScriptArgs(shell runtimeexecutor.Shell, scriptPath string) []string {
+	argv := make([]string, 0, 1+len(shell.Prefix)+5)
+	argv = append(argv, shell.Path)
+	argv = append(argv, shell.Prefix...)
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		argv = append(argv, "-NoProfile", "-NonInteractive")
+		if runtime.GOOS == "windows" {
+			argv = append(argv, "-ExecutionPolicy", "Bypass")
+		}
+		argv = append(argv, "-File", scriptPath)
+		return argv
+	}
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.ToSlash(scriptPath)
+	}
+	argv = append(argv, scriptPath)
+	return argv
+}
+
+func (m *Manager) buildShellCommandWithDelivery(
+	ctx context.Context,
+	command string,
+	delivery runtimeexecutor.ScriptDelivery,
+) (*exec.Cmd, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil, nil
+	}
 	// 使用智能 shell 检测，与 BashTool 保持一致。CurrentShell 读取进程级
 	// resolver 的结果，避免"前台一种 shell、超时转后台另一种 shell"。
-	shell := cfg.Shell
-	if strings.TrimSpace(shell.Path) == "" {
-		shell = runtimeexecutor.CurrentShell()
+	shell, err := m.executionShell()
+	if err != nil {
+		return nil, err
 	}
 	shellArgs, stdinScript := shell.DeriveExecInvocation(
 		runtimeexecutor.WrapPowerShellExitCode(shell, command),
-		runtimeexecutor.CurrentScriptDelivery(),
+		delivery,
 	)
 	// HardenPowerShellArgs identifies the shell from argv[0]; passing the user
 	// command here made every short PowerShell command skip the UTF-8 prefix.
@@ -3532,16 +3656,11 @@ func (m *Manager) buildShellCommand(ctx context.Context, command string) *exec.C
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
 	// captured background output is unstyled before it reaches the model.
-	env := cfg.Env
-	if env == nil {
-		env = os.Environ()
+	cmd.Env = m.shellEnvironment()
+	if m != nil && m.config.PrepareCommand != nil {
+		m.config.PrepareCommand(shell, command, cmd)
 	}
-	env = runtimeexecutor.ApplyShellEnvOverrides(env)
-	cmd.Env = runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(env))
-	if cfg.PrepareCommand != nil {
-		cfg.PrepareCommand(shell, command, cmd)
-	}
-	return cmd
+	return cmd, nil
 }
 
 func exitCodeFromError(err error) int {

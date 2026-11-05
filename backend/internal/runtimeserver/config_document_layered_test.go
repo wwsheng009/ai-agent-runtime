@@ -9,6 +9,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"gopkg.in/yaml.v3"
 )
 
@@ -125,6 +126,104 @@ aicli:
 	if !strings.Contains(projectRaw, "project-model") {
 		t.Fatalf("unrelated project keys must survive:\n%s", projectRaw)
 	}
+}
+
+func TestLayeredMixedSaveRunsGenericWriterBeforeDedicatedShellWriter(t *testing.T) {
+	home := t.TempDir()
+	previousHome := agentconfig.UserHomeDirForTest()
+	agentconfig.SetUserHomeDirForTest(func() (string, error) { return home, nil })
+	t.Cleanup(func() { agentconfig.SetUserHomeDirForTest(previousHome) })
+
+	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName)
+	writeLayeredConfigFile(t, userConfig, `
+providers:
+  items:
+    openai:
+      base_url: https://user.example
+shell:
+  prefer: [powershell]
+`)
+	projectDir := t.TempDir()
+	projectConfig := filepath.Join(projectDir, ".aicli", aiclipaths.DefaultConfigFileName)
+	writeLayeredConfigFile(t, projectConfig, `
+aicli:
+  chat:
+    default_model: project-model
+`)
+	t.Chdir(projectDir)
+	t.Setenv(agentconfig.MergeConfigEnvVar, "on")
+
+	service := NewLocalConfigDocumentService(projectConfig)
+	doc, err := service.LoadDocument()
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+
+	// Match the settings page order: the generic read-modify-write runs while
+	// the document still carries the old shell value, then the dedicated shell
+	// writer is authoritative.
+	parsed := copyDocumentMap(t, doc.Parsed)
+	items := parsed["providers"].(map[string]interface{})["items"].(map[string]interface{})
+	openai := items["openai"].(map[string]interface{})
+	openai["base_url"] = "https://mixed.example"
+	if _, err := service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
+		Parsed: parsed,
+		Mode:   "structured",
+	}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+	afterGeneric, err := service.LoadDocument()
+	if err != nil {
+		t.Fatalf("LoadDocument after generic save: %v", err)
+	}
+	if got := getRuntimeShellPreferForTest(afterGeneric.Parsed); len(got) != 1 || got[0] != "powershell" {
+		t.Fatalf("generic save changed shell before the dedicated writer: %#v", got)
+	}
+
+	strict := true
+	if err := persistShellSettings(userConfig, runtimeexecutor.ShellConfig{
+		AutoDetect:  &strict,
+		Prefer:      []string{"git-bash"},
+		StrictProbe: &strict,
+	}); err != nil {
+		t.Fatalf("persistShellSettings: %v", err)
+	}
+
+	next, err := service.LoadDocument()
+	if err != nil {
+		t.Fatalf("LoadDocument after shell save: %v", err)
+	}
+	if got := getRuntimeShellPreferForTest(next.Parsed); len(got) != 1 || got[0] != "git-bash" {
+		t.Fatalf("shell prefer = %#v, want [git-bash]", got)
+	}
+	if raw := readLayeredConfigFile(t, userConfig); !strings.Contains(raw, "https://mixed.example") {
+		t.Fatalf("generic provider edit must survive the shell save:\n%s", raw)
+	}
+}
+
+func getRuntimeShellPreferForTest(parsed interface{}) []string {
+	root, ok := parsed.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	shell, ok := root["shell"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	values, ok := shell["prefer"].([]interface{})
+	if !ok {
+		if typed, ok := shell["prefer"].([]string); ok {
+			return typed
+		}
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
 }
 
 // Without layered merging the server keeps its previous single-file behaviour.

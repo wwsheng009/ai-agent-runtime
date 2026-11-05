@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 type fakeShellJobRuntime struct {
@@ -127,6 +129,36 @@ func TestBashJobFirstRequiresOwner(t *testing.T) {
 	}
 	if got := result.Metadata["failure_class"]; got != "owner_required" {
 		t.Fatalf("failure_class = %#v", got)
+	}
+}
+
+func TestBashJobFirstPreservesShellUnavailableErrorCode(t *testing.T) {
+	runtime := &fakeShellJobRuntime{
+		wait: ShellJobSnapshot{ID: "job_shell_unavailable", Status: "failed"},
+		output: ShellJobOutput{
+			Status:    "failed",
+			Message:   "no usable shell passed the probe",
+			ErrorCode: string(runtimeerrors.ErrShellUnavailable),
+		},
+	}
+	tool := newTestBashTool()
+	tool.SetShellJobRuntime(runtime)
+
+	result, err := tool.Execute(toolctx.WithSessionID(context.Background(), "session-job"), map[string]interface{}{
+		"command": "echo never",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("shell-unavailable job must fail: %+v", result)
+	}
+	if got := result.Metadata[toolresult.MetadataErrorCodeKey]; got != string(runtimeerrors.ErrShellUnavailable) {
+		t.Fatalf("error code = %#v, want SHELL_UNAVAILABLE", got)
+	}
+	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(next, "shell.path") || !strings.Contains(next, "strictProbe") {
+		t.Fatalf("next action does not explain shell repair: %q", next)
 	}
 }
 

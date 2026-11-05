@@ -145,7 +145,10 @@ func shellSyntaxHint(shell runtimeexecutor.Shell) string {
 	case runtimeexecutor.ShellTypeBash, runtimeexecutor.ShellTypeZsh, runtimeexecutor.ShellTypeSh:
 		return "Use POSIX shell syntax; `$VAR` expands environment variables; `pwd` shows the current directory; quote paths containing spaces."
 	default:
-		return "Use the command syntax of the selected shell."
+		// envd always executes through /bin/sh -c and deliberately clears
+		// ResolvedShell (Type == ""). Treat the zero value as POSIX rather than
+		// falling back to an ambiguous hint.
+		return "Use POSIX shell syntax; `$VAR` expands environment variables; `pwd` shows the current directory; quote paths containing spaces."
 	}
 }
 

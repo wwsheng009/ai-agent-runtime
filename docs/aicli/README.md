@@ -10,6 +10,8 @@ Recommended entry points:
   - Full install/config guide: configuration loading order, starter bootstrap, `aicli init`, `aicli login`, default `aicli` / `aicli chat` startup, session/resume flags, MCP / skill / plugin / agent CLI overview, shell/background notes, current chat slash commands, subagent difficulty routing dry-run/debug notes, and uninstall.
 - [faq.md](./faq.md)
   - Common troubleshooting: empty providers, login models validation, `/model` switch failures, HTTP 401, Windows PATH, config overrides, logs, and doctor usage.
+- [../user-guide/shell-auto-detection.md](../user-guide/shell-auto-detection.md)
+  - Shell auto-detection defaults, `doctor shell` diagnostics, config-layer overrides (`path` / `prefer` / `autoDetect` / `strictProbe`), WSL opt-in, Web/TUI/API entry points, and `SHELL_UNAVAILABLE` troubleshooting.
 - [storage-maintenance.md](./storage-maintenance.md)
   - 本地 SQLite 数据管理手册：数据库分布、在线保留默认值、`storage prune-runtime` / `storage prune-sessions` / `storage compact` 的分工，按龄会话与 orphan 选择、活跃/lease/job/agent/schedule/team 保护规则、跨库删除范围、dry-run/apply 运行手册、退出码与常见问题。
 - [permissions.md](./permissions.md)

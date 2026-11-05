@@ -98,6 +98,9 @@ func defaultDetachedRunnerHostAvailable() bool {
 	if _, ok := detachedRunnerPosixHost(); ok {
 		return true
 	}
+	if _, ok := detachedRunnerPowerShellHost(); ok {
+		return true
+	}
 	if _, err := exec.LookPath("pwsh"); err == nil {
 		return true
 	}
@@ -122,6 +125,9 @@ func detachedRunnerHost() (runtimeexecutor.Shell, bool) {
 	if shell, ok := detachedRunnerPosixHost(); ok {
 		return shell, true
 	}
+	if shell, ok := detachedRunnerPowerShellHost(); ok {
+		return shell, false
+	}
 	return runtimeexecutor.DefaultUserShell(), false
 }
 
@@ -134,6 +140,28 @@ func detachedRunnerHost() (runtimeexecutor.Shell, bool) {
 func detachedRunnerPosixHost() (runtimeexecutor.Shell, bool) {
 	shell := detachedShellForRunner()
 	if !shell.SpeaksPosix() {
+		return runtimeexecutor.Shell{}, false
+	}
+	path := strings.TrimSpace(shell.Path)
+	if path == "" {
+		return runtimeexecutor.Shell{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return runtimeexecutor.Shell{}, false
+	}
+	return shell, true
+}
+
+// detachedRunnerPowerShellHost accepts the resolver's selected PowerShell even
+// when it is only reachable through shell.path and is not on PATH. The .ps1
+// runner host must be the same executable the resolver proved usable, otherwise
+// a portable pwsh installation silently loses detached execution.
+func detachedRunnerPowerShellHost() (runtimeexecutor.Shell, bool) {
+	shell := detachedShellForRunner()
+	switch shell.Type {
+	case runtimeexecutor.ShellTypePowerShell, runtimeexecutor.ShellTypePwsh:
+	default:
 		return runtimeexecutor.Shell{}, false
 	}
 	path := strings.TrimSpace(shell.Path)
@@ -839,20 +867,23 @@ func writeDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost boo
 	return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath)
 }
 
-// posixRunnerArgv builds the argv the runner script uses to invoke the real
-// shell.
+// posixRunnerInvocation builds the argv and optional stdin payload the runner
+// script uses to invoke the real shell.
 //
 // On Windows the executable path comes back as `C:\Program Files\Git\bin\
 // bash.exe`, and it is about to be embedded in a *sh* line where it may be
 // re-parsed by MSYS. Forward slashes are accepted by both the MSYS path
 // converter and CreateProcess, so normalizing the first argv element removes a
 // class of quoting/escaping surprises without touching the payload.
-func posixRunnerArgv(shell runtimeexecutor.Shell, command string) []string {
-	argv := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+func posixRunnerInvocation(shell runtimeexecutor.Shell, command string) ([]string, string) {
+	argv, stdinScript := shell.DeriveExecInvocation(
+		runtimeexecutor.WrapPowerShellExitCode(shell, command),
+		runtimeexecutor.CurrentScriptDelivery(),
+	)
 	if runtime.GOOS == "windows" && len(argv) > 0 {
 		argv[0] = filepath.ToSlash(argv[0])
 	}
-	return argv
+	return argv, stdinScript
 }
 
 func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
@@ -886,9 +917,19 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 			"fi",
 		)
 	}
-	commandLine := buildShellCommandLine(posixRunnerArgv(shell, command))
+	argv, stdinScript := posixRunnerInvocation(shell, command)
+	commandLine := buildShellCommandLine(argv)
+	if stdinScript == "" {
+		lines = append(lines, fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)))
+	} else {
+		delimiter := posixHeredocDelimiter(stdinScript)
+		lines = append(lines,
+			fmt.Sprintf("%s >> %s 2>&1 <<'%s'", commandLine, shellQuote(logPath), delimiter),
+			stdinScript,
+			delimiter,
+		)
+	}
 	lines = append(lines,
-		fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)),
 		`code=$?`,
 		"printf '%s' \"$(date +%s)\" > \"$heartbeat_path\"",
 		fmt.Sprintf("printf \"%%s\" \"$code\" > %s", shellQuote(statusPath)),
@@ -901,7 +942,10 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 
 func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
 	content := buildWindowsDetachedRunnerContent(shell, command, cwd, logPath, statusPath)
-	return os.WriteFile(path, []byte(content), 0o644)
+	// Windows PowerShell 5.1 decodes a BOM-less .ps1 using the active ANSI code
+	// page. The runner embeds the user command as a PowerShell string, so a
+	// non-ASCII command would corrupt before it reaches the temporary script.
+	return os.WriteFile(path, append([]byte{0xEF, 0xBB, 0xBF}, content...), 0o644)
 }
 
 // posixRunnerHostArgv builds the argv used to start the sh runner with the
@@ -914,7 +958,22 @@ func posixRunnerHostArgv(shell runtimeexecutor.Shell, path string) []string {
 	return argv
 }
 
+// posixHeredocDelimiter picks a delimiter that does not occur in the script.
+// The runner file is written by the runtime, not interpolated through a shell,
+// so only the script content itself can terminate the here-doc early.
+func posixHeredocDelimiter(script string) string {
+	base := "__AICLI_SCRIPT_END__"
+	delimiter := base
+	for suffix := 1; strings.Contains(script, delimiter); suffix++ {
+		delimiter = fmt.Sprintf("%s_%d__", base, suffix)
+	}
+	return delimiter
+}
+
 func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool) (int, error) {
+	env := runtimeexecutor.NeutralizeConsoleStylingEnv(
+		runtimeexecutor.ApplyShellEnvOverrides(os.Environ()),
+	)
 	if runtime.GOOS == "windows" {
 		if posixHost {
 			// POSIX host: the runner is a plain sh script, so the shell that
@@ -926,9 +985,15 @@ func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost boo
 			// Prefix matters: busybox-w32 exposes sh as an applet, so its argv
 			// is `busybox.exe sh runner.sh`. Dropping the prefix would hand the
 			// script to the applet dispatcher as if it were an applet name.
-			return startDetachedProcess(shell.Path, posixRunnerHostArgv(shell, path))
+			return startDetachedProcess(shell.Path, posixRunnerHostArgv(shell, path), env)
 		}
 		launcher := windowsPowerShellHost()
+		switch shell.Type {
+		case runtimeexecutor.ShellTypePowerShell, runtimeexecutor.ShellTypePwsh:
+			if strings.TrimSpace(shell.Path) != "" {
+				launcher = shell.Path
+			}
+		}
 		// Spawn the runner directly instead of bouncing through a per-job
 		// `Start-Process` wrapper: the wrapper waited for a full PowerShell
 		// cold start, measured at ~10-14s per job on a loaded machine, which
@@ -936,10 +1001,12 @@ func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost boo
 		// (2026-09-29). exec.Cmd.Start returns as soon as the process exists.
 		return startDetachedProcess(launcher, []string{
 			"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path,
-		})
+		}, env)
 	}
 	script := fmt.Sprintf("if command -v setsid >/dev/null 2>&1; then setsid /bin/sh %s >/dev/null 2>&1 < /dev/null & echo $!; else nohup /bin/sh %s >/dev/null 2>&1 < /dev/null & echo $!; fi", shellQuote(path), shellQuote(path))
-	out, err := exec.Command("/bin/sh", "-c", script).Output()
+	launcher := exec.Command("/bin/sh", "-c", script)
+	launcher.Env = env
+	out, err := launcher.Output()
 	if err != nil {
 		return 0, err
 	}
@@ -1004,15 +1071,31 @@ func buildShellCommandLine(args []string) string {
 
 func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) string {
 	heartbeatPath := statusPath + ".heartbeat"
-	commandArgs := shell.DeriveExecArgs(runtimeexecutor.WrapPowerShellExitCode(shell, command), false)
+	wrappedCommand := runtimeexecutor.WrapPowerShellExitCode(shell, command)
+	commandArgs := shell.DeriveExecArgs(wrappedCommand, false)
+	scriptFile := ""
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		if argv, stdinScript := shell.DeriveExecInvocation(wrappedCommand, runtimeexecutor.CurrentScriptDelivery()); stdinScript != "" {
+			// A detached runner cannot feed stdin to a child while also keeping
+			// its own heartbeat alive. Write the script to a short temporary
+			// .ps1 path and use -File instead of putting a huge -EncodedCommand
+			// payload back onto the Windows command line.
+			commandArgs = append([]string(nil), argv...)
+			scriptFile = stdinScript
+		}
+	}
 	// The detached runner starts a second PowerShell process for the user
 	// command. Harden that child too, otherwise Git/Node output arrives as UTF-8
 	// bytes and PowerShell's default GBK output encoding turns it into mojibake
 	// before the log writer sees it.
-	commandArgs = shellexec.HardenPowerShellArgs(commandArgs, shell, commandArgs[0])
+	if scriptFile == "" {
+		commandArgs = shellexec.HardenPowerShellArgs(commandArgs, shell, commandArgs[0])
+	}
 	quotedArgs := make([]string, 0, len(commandArgs)-1)
-	for _, arg := range commandArgs[1:] {
-		quotedArgs = append(quotedArgs, powershellQuote(arg))
+	if scriptFile == "" {
+		for _, arg := range commandArgs[1:] {
+			quotedArgs = append(quotedArgs, powershellQuote(arg))
+		}
 	}
 
 	lines := []string{
@@ -1024,7 +1107,15 @@ func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd
 		"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8",
 	}
 	lines = append(lines, fmt.Sprintf("$shellPath = %s", powershellQuote(shell.Path)))
-	lines = append(lines, fmt.Sprintf("$shellArgs = @(%s)", strings.Join(quotedArgs, ", ")))
+	lines = append(lines, "$shellScript = $null", "$shellScriptPath = $null")
+	if scriptFile != "" {
+		lines = append(lines,
+			fmt.Sprintf("$shellScript = %s", powershellQuote(scriptFile)),
+			"$shellArgs = @()",
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("$shellArgs = @(%s)", strings.Join(quotedArgs, ", ")))
+	}
 	lines = append(lines,
 		`$systemRoot = [Environment]::GetEnvironmentVariable('SystemRoot')`,
 		`$env:PATH = "$systemRoot\System32\WindowsPowerShell\v1.0;$systemRoot\System32;$systemRoot;$env:PATH"`,
@@ -1058,6 +1149,14 @@ func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd
 	if strings.TrimSpace(cwd) != "" {
 		lines = append(lines, fmt.Sprintf("  Set-Location -LiteralPath %s", powershellQuote(cwd)))
 	}
+	if scriptFile != "" {
+		lines = append(lines,
+			"  $shellScriptPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ([System.IO.Path]::GetRandomFileName() + '.ps1'))",
+			// Windows PowerShell 5.1 needs the BOM to decode a .ps1 as UTF-8.
+			"  [System.IO.File]::WriteAllText($shellScriptPath, $shellScript, (New-Object System.Text.UTF8Encoding $true))",
+			"  $shellArgs = @('-NoProfile', '-NonInteractive', '-File', $shellScriptPath)",
+		)
+	}
 	lines = append(lines,
 		"  & $shellPath @shellArgs 2>&1 | ForEach-Object { $writer.WriteLine($_) }",
 		"  if ($null -ne $LASTEXITCODE) { $scriptExitCode = $LASTEXITCODE }",
@@ -1071,6 +1170,7 @@ func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd
 		"    Stop-Job -Job $heartbeatJob -ErrorAction SilentlyContinue",
 		"    Remove-Job -Job $heartbeatJob -ErrorAction SilentlyContinue",
 		"  }",
+		"  if ($null -ne $shellScriptPath) { Remove-Item -LiteralPath $shellScriptPath -ErrorAction SilentlyContinue }",
 		"  [System.IO.File]::WriteAllText($heartbeatPath, [DateTimeOffset]::UtcNow.Ticks.ToString())",
 		"  $writer.Dispose()",
 		"}",

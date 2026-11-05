@@ -1,9 +1,12 @@
 import { AlertTriangleIcon, ArrowDownIcon, ArrowUpIcon, CheckCircle2Icon, RefreshCcwIcon, TerminalIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
-import { probeRuntimeShellSettings } from "@/api/runtime/config";
+import {
+  getRuntimeShellSettings,
+  probeRuntimeShellSettings,
+} from "@/api/runtime/config";
 import type { RuntimeShellCandidate, RuntimeShellSettingsResponse } from "@/types/runtime";
 
 import { ConfigFormField } from "./config-form-field";
@@ -47,6 +50,28 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
   const candidates: RuntimeShellCandidate[] = probeResult?.candidates ?? [];
   const effective = probeResult?.effective;
 
+  useEffect(() => {
+    let active = true;
+    getRuntimeShellSettings()
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        setProbeResult(response);
+        if (response.error) {
+          setProbeError(response.error);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setProbeError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   async function handleProbe() {
     setProbing(true);
     setProbeError(null);
@@ -58,6 +83,7 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
         probe_timeout: config.probeTimeout,
         strict_probe: config.strictProbe,
         script_delivery: config.scriptDelivery,
+        env: { ...config.env },
       });
       setProbeResult(response);
       if (response.error) {

@@ -2,6 +2,7 @@ package background
 
 import (
 	"context"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,6 +68,83 @@ func TestOpenTerminalWriteStdinRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, closed)
 	require.True(t, isTerminalStatus(closed.Status))
+}
+
+func TestOpenTerminalLongPowerShellScriptKeepsStdinInteractive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell command-line limit regression")
+	}
+	hosts := []struct {
+		name string
+		typ  runtimeexecutor.ShellType
+	}{
+		{name: "pwsh", typ: runtimeexecutor.ShellTypePwsh},
+		{name: "powershell", typ: runtimeexecutor.ShellTypePowerShell},
+	}
+	transports := []struct {
+		name string
+		tty  bool
+	}{
+		{name: "pipe"},
+		{name: "pty", tty: true},
+	}
+	for _, host := range hosts {
+		for _, transport := range transports {
+			t.Run(host.name+"/"+transport.name, func(t *testing.T) {
+				if transport.tty && !pty.Supported() {
+					t.Skip("ConPTY/pty not supported on this platform")
+				}
+				path, err := exec.LookPath(host.name)
+				if err != nil {
+					t.Skipf("%s is not installed", host.name)
+				}
+				manager := NewManager(Config{
+					LogDir: t.TempDir(),
+					Shell: runtimeexecutor.Shell{
+						Path: path,
+						Type: host.typ,
+					},
+					MonitorInterval: 50 * time.Millisecond,
+				})
+				t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+				command := strings.Repeat("# padding\n", 6000) +
+					`while ($true) { $line = [Console]::ReadLine(); if ($null -eq $line) { break }; Write-Output ("echo:" + $line) }`
+				require.Greater(t, len(command), runtimeexecutor.ShellStdinScriptThreshold)
+				job, err := manager.OpenTerminal(context.Background(),
+					"session-long-powershell-"+host.name+"-"+transport.name,
+					TerminalOpenArgs{Command: command, TTY: transport.tty, Cols: 80, Rows: 30})
+				require.NoError(t, err)
+				require.NotNil(t, job)
+				require.Equal(t, StatusRunning, job.Status)
+
+				if transport.tty {
+					// Drain the ConPTY console-host init sequence before sending
+					// the line; PowerShell needs a short startup window here.
+					for i := 0; i < 5; i++ {
+						res, drainErr := manager.WriteStdin(context.Background(), job.ID, "", 1000)
+						require.NoError(t, drainErr)
+						if res.WaitCondition == "timeout" {
+							break
+						}
+					}
+					output := writeStdinUntilContains(t, manager, job.ID, "hello-long\r", "echo:hello-long", 10*time.Second)
+					require.Contains(t, output, "echo:hello-long")
+				} else {
+					output, writeErr := manager.WriteStdin(context.Background(), job.ID, "hello-long\n", 10_000)
+					require.NoError(t, writeErr)
+					require.Contains(t, output.Output, "echo:hello-long")
+				}
+
+				closed, err := manager.CloseTerminal(context.Background(), job.ID)
+				require.NoError(t, err)
+				require.NotNil(t, closed)
+				if !transport.tty {
+					require.True(t, isTerminalStatus(closed.Status))
+				}
+			})
+		}
+	}
 }
 
 func TestWriteStdinRejectsNonInteractiveJob(t *testing.T) {

@@ -67,6 +67,11 @@ func NewLayeredRuntimeShellSettingsPersister(manager *runtimecfg.RuntimeManager)
 			_ = manager.Update(previous)
 			return target, err
 		}
+		// The API/Web save path must update the process-wide resolver here, not
+		// only the RuntimeManager snapshot. Otherwise the next shell job keeps
+		// using the startup configuration until the process restarts.
+		runtimeexecutor.ConfigureShell(next)
+		runtimeexecutor.InvalidateShellResolution()
 		return target, nil
 	}
 }

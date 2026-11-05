@@ -89,6 +89,10 @@ sessionRuntime:
 
 > 完整配置说明见 [docs/user-guide/README.md](README.md#3-配置)。
 
+Shell 执行环境默认自动检测。可在 Web 控制台的 `/runtime/config` 页面选择
+「Shell 执行环境」查看、探测或修改候选链；字段、WSL 和故障排查见
+[shell-auto-detection.md](shell-auto-detection.md)。
+
 ---
 
 ## 5. 示例
@@ -131,6 +135,20 @@ runtime-server serve --pprof
 | `/api/runtime/images` | 生成图片管理 |
 | `/api/runtime/config` | 运行时配置 |
 | `/api/runtime/mcps` | MCP 管理（列表/新增/编辑/删除/启停/热重载） |
+
+### Shell 配置接口
+
+Shell 自动检测默认开启；以下接口对应 Web「后端配置工作台 → Shell 执行环境」：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/runtime/config/shell` | 读取生效配置、候选矩阵、当前选中 shell 与写入目标 |
+| `PUT` | `/api/runtime/config/shell` | 部分更新 `shell.*`；只改请求中出现的字段 |
+| `POST` | `/api/runtime/config/shell/probe` | 按当前配置或请求中的草稿强制重探，不写文件 |
+
+请求体字段使用 snake_case：`auto_detect`、`prefer`、`path`、`probe_timeout`、
+`strict_probe`、`script_delivery`、`env`。字段语义、候选链优先级和故障排查见
+[shell-auto-detection.md](shell-auto-detection.md)。
 
 ### MCP 管理接口
 

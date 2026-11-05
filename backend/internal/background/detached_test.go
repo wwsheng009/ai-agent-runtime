@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	require.Contains(t, content,
 		`$shellArgs = @('-NoProfile', '-NonInteractive', '-Command', '`+
 			runtimeexecutor.PowerShellCommandPrefix+`git status`)
-	require.Contains(t, content, `$__aicli_ok = $?`)
+	require.Contains(t, content, `if (-not $?) {`)
 	require.Contains(t, content, `$host.SetShouldExit`)
 	require.Contains(t, content, `Set-Location -LiteralPath 'E:\projects\ai\ai-agent-runtime'`)
 	require.Contains(t, content, `[System.IO.File]::WriteAllText('C:\logs\job.status'`)
@@ -43,6 +44,26 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	require.Contains(t, content, `if ($null -ne $heartbeatJob)`)
 	require.NotContains(t, content, `::new(`)
 	require.NotContains(t, content, `Remove-Job -Job $heartbeatJob -Force`)
+}
+
+func TestBuildWindowsDetachedRunnerContentUsesFileForLongPowerShell(t *testing.T) {
+	shell := runtimeexecutor.Shell{Path: `C:\Program Files\PowerShell\7\pwsh.exe`, Type: runtimeexecutor.ShellTypePwsh}
+	command := strings.Repeat("Write-Output x\n", runtimeexecutor.ShellStdinScriptThreshold)
+
+	content := buildWindowsDetachedRunnerContent(
+		shell,
+		command,
+		`E:\projects\ai\ai-agent-runtime`,
+		`C:\logs\job.log`,
+		`C:\logs\job.status`,
+	)
+
+	require.Contains(t, content, `$shellScriptPath = $null`)
+	require.Contains(t, content, `$shellScript = '`)
+	require.Contains(t, content, `-File', $shellScriptPath`)
+	require.Contains(t, content, `System.Text.UTF8Encoding $true`)
+	require.Contains(t, content, `Remove-Item -LiteralPath $shellScriptPath`)
+	require.NotContains(t, content, `-EncodedCommand`)
 }
 
 func TestBuildWindowsDetachedRunnerContentDoesNotPrefixNonPowerShell(t *testing.T) {
@@ -295,6 +316,27 @@ func TestWriteUnixDetachedRunnerUsesDetectedShellAndRecordsCwdFailure(t *testing
 	// covers both.
 	require.Contains(t, content, "printf \"%s\" \"1\" > '"+filepath.ToSlash(statusPath)+"'")
 	require.Contains(t, content, "'/opt/zsh' '-c' 'git status' >> '"+filepath.ToSlash(logPath)+"' 2>&1")
+}
+
+func TestWriteUnixDetachedRunnerSendsLongScriptOverStdin(t *testing.T) {
+	tempDir := t.TempDir()
+	runnerPath := filepath.Join(tempDir, "runner.sh")
+	logPath := filepath.Join(tempDir, "job.log")
+	statusPath := filepath.Join(tempDir, "job.status")
+	shell := runtimeexecutor.Shell{Path: "/bin/bash", Type: runtimeexecutor.ShellTypeBash}
+	script := "printf 'long-script-start\\n'\n" +
+		strings.Repeat("# padding\n", runtimeexecutor.ShellStdinScriptThreshold/10+1) +
+		"printf '__AICLI_SCRIPT_END__\\n'\n"
+
+	require.NoError(t, writeUnixDetachedRunner(runnerPath, shell, script, tempDir, logPath, statusPath))
+	data, err := os.ReadFile(runnerPath)
+	require.NoError(t, err)
+	content := string(data)
+
+	require.Contains(t, content, "'/bin/bash' '--noprofile' '--norc' '-s' >>")
+	require.Contains(t, content, "<<'__AICLI_SCRIPT_END___1__'")
+	require.Contains(t, content, "printf 'long-script-start")
+	require.NotContains(t, content, "'/bin/bash' '-c' 'printf 'long-script-start")
 }
 
 func TestDetachedExecutionBlockReason(t *testing.T) {

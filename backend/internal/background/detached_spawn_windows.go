@@ -17,8 +17,9 @@ import (
 // (`Start-Process ... -PassThru` and waited for the wrapper's stdout), which
 // cost 8-14s per job on a loaded machine. That launch latency fed the
 // scheduler watchdog's "scheduler stuck" misdiagnosis (2026-09-29).
-func startDetachedProcess(exe string, args []string) (int, error) {
+func startDetachedProcess(exe string, args []string, env []string) (int, error) {
 	cmd := exec.Command(exe, args...)
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW,
 	}

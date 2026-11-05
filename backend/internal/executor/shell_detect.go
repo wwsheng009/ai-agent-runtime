@@ -95,6 +95,14 @@ func (s Shell) Metadata() map[string]interface{} {
 // onto -Command payloads by the callers.
 const PowerShellCommandPrefix = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
 
+// PowerShellStdinScriptLauncher reads the rest of stdin as a complete script
+// block. Passing the script itself to `-Command -` makes PowerShell consume
+// input line by line, which cannot parse a multi-line control block. The fixed
+// launcher keeps argv short while preserving normal script parsing from stdin.
+const PowerShellStdinScriptLauncher = "[Console]::InputEncoding=[System.Text.Encoding]::UTF8; " +
+	PowerShellCommandPrefix +
+	"$__aicli_script=[Console]::In.ReadToEnd(); & ([ScriptBlock]::Create($__aicli_script))"
+
 // PowerShellEncodedCommandThreshold is the script length above which
 // DeriveExecArgs passes the script as -EncodedCommand (base64 UTF-16LE) instead
 // of -Command. Long scripts otherwise have to survive the Windows command line
@@ -179,11 +187,12 @@ func (s Shell) SpeaksPosix() bool {
 }
 
 // SupportsStdinScript reports whether the shell can read its script from stdin.
-// Only POSIX shells are wired today; PowerShell's `-Command -` behaviour is
-// still unverified (plan appendix B item 6), so it stays on -EncodedCommand.
+// POSIX shells use -s; pwsh and Windows PowerShell use a fixed -Command launcher
+// that reads the complete script from stdin.
 func (s Shell) SupportsStdinScript() bool {
 	switch s.Type {
-	case ShellTypeBash, ShellTypeZsh, ShellTypeSh:
+	case ShellTypeBash, ShellTypeZsh, ShellTypeSh,
+		ShellTypePowerShell, ShellTypePwsh:
 		return true
 	default:
 		return false
@@ -196,8 +205,8 @@ func (s Shell) SupportsStdinScript() bool {
 // Short commands always go through argv (`-c`): that keeps their stdin free, so
 // `cat`, `git commit -F -` and other stdin consumers behave as before. Long
 // scripts switch to stdin delivery, which removes the Windows command-line
-// length limit entirely — no more 7000-char heuristic deciding between -Command
-// and -EncodedCommand for POSIX shells.
+// length limit entirely, including the UTF-16 + Base64 expansion of PowerShell
+// -EncodedCommand.
 func (s Shell) DeriveExecInvocation(command string, delivery ScriptDelivery) ([]string, string) {
 	if delivery != ScriptDeliveryStdin || !s.SupportsStdinScript() {
 		return s.DeriveExecArgs(command, false), ""
@@ -205,21 +214,32 @@ func (s Shell) DeriveExecInvocation(command string, delivery ScriptDelivery) ([]
 	if len(command) <= ShellStdinScriptThreshold {
 		return s.DeriveExecArgs(command, false), ""
 	}
-	return s.withPrefix(s.stdinFlags()...), command
+	script := command
+	if s.Type == ShellTypePowerShell || s.Type == ShellTypePwsh {
+		// The encoded-command branch embeds this prefix in the payload. The
+		// stdin branch must add it to the stream itself because the argv only
+		// contains the fixed launcher.
+		script = PowerShellCommandPrefix + command
+	}
+	return s.withPrefix(s.stdinFlags()...), script
 }
 
-// ShellStdinScriptThreshold is the script length above which POSIX shells read
-// the script from stdin instead of argv. It matches the historical PowerShell
-// switch-over point so both transports change at the same size.
+// ShellStdinScriptThreshold is the script length above which supported shells
+// read the script from stdin instead of argv. It matches the historical
+// PowerShell switch-over point so both transports change at the same size.
 const ShellStdinScriptThreshold = PowerShellEncodedCommandThreshold
 
 // stdinFlags returns the non-interactive flags for stdin script delivery.
 func (s Shell) stdinFlags() []string {
-	if s.Type == ShellTypeBash {
+	switch s.Type {
+	case ShellTypeBash:
 		return []string{"--noprofile", "--norc", "-s"}
+	case ShellTypePowerShell, ShellTypePwsh:
+		return []string{"-NoProfile", "-NonInteractive", "-Command", PowerShellStdinScriptLauncher}
+	default:
+		// busybox ash / dash do not know --noprofile; -s alone is POSIX.
+		return []string{"-s"}
 	}
-	// busybox ash / dash do not know --noprofile; -s alone is POSIX.
-	return []string{"-s"}
 }
 
 // WrapPowerShellExitCode appends an epilogue that preserves the command's real
@@ -230,6 +250,10 @@ func (s Shell) stdinFlags() []string {
 // formatting (for example Get-Location) is not lost the way a raw `exit` can
 // lose it.
 //
+// Keep the epilogue on one physical line. PowerShell can consume piped scripts
+// line by line, and a multi-line block after a long comment may be dropped
+// instead of executed.
+//
 // The wrapper is a no-op for non-PowerShell shells. Callers that already wrap
 // the same command must not call it twice.
 func WrapPowerShellExitCode(shell Shell, command string) string {
@@ -239,16 +263,7 @@ func WrapPowerShellExitCode(shell Shell, command string) string {
 		return command
 	}
 	return command + `
-$__aicli_ok = $?
-$__aicli_code = $LASTEXITCODE
-if (-not $__aicli_ok) {
-    if ($null -ne $__aicli_code -and [int]$__aicli_code -ne 0) { $host.SetShouldExit([int]$__aicli_code) }
-    else { $host.SetShouldExit(1) }
-} elseif ($null -ne $__aicli_code) {
-    $host.SetShouldExit([int]$__aicli_code)
-} else {
-    $host.SetShouldExit(0)
-}
+if (-not $?) { if ($null -ne $LASTEXITCODE -and [int]$LASTEXITCODE -ne 0) { $host.SetShouldExit([int]$LASTEXITCODE) } else { $host.SetShouldExit(1) } } elseif ($null -ne $LASTEXITCODE) { $host.SetShouldExit([int]$LASTEXITCODE) } else { $host.SetShouldExit(0) }
 `
 }
 
@@ -271,6 +286,25 @@ func EncodePowerShellCommand(command string) string {
 func ShellArgsUseEncodedCommand(args []string) bool {
 	for _, arg := range args {
 		if strings.EqualFold(strings.TrimSpace(arg), "-EncodedCommand") {
+			return true
+		}
+	}
+	return false
+}
+
+// ShellArgsUseStdinScript reports whether argv asks PowerShell to read the
+// script from stdin. The UTF-8 prefix belongs to the stdin stream in that case,
+// so argv-level PowerShell hardening must leave the launcher untouched.
+func ShellArgsUseStdinScript(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	for index, arg := range args[:len(args)-1] {
+		if !strings.EqualFold(strings.TrimSpace(arg), "-Command") {
+			continue
+		}
+		script := strings.TrimSpace(args[index+1])
+		if script == "-" || script == PowerShellStdinScriptLauncher {
 			return true
 		}
 	}

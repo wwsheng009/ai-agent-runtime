@@ -43,6 +43,8 @@
 > 对**正在运行的** aicli TUI 做脚本化远程操作（`/web/api/*`：注入 prompt、SSE 流式、
 > 审批/提问、屏幕快照、会话管理、写令牌）见 [aicli-tui-remote.md](aicli-tui-remote.md)。
 > Hooks（生命周期回调）配置与调试见 [hooks.md](hooks.md)。
+> Shell 自动检测默认开启；如何确认当前 shell、调整候选链或强制指定路径见
+> [shell-auto-detection.md](shell-auto-detection.md)。
 
 ---
 
@@ -186,6 +188,12 @@ pwsh -File ./scripts/build.ps1 -Target win7 -Tools runtime-server -Version win7-
 ```yaml
 version: "v1"
 
+shell:                                     # 默认自动检测；整段省略即使用这些默认值
+  autoDetect: true
+  strictProbe: true
+  probeTimeout: 3s
+  scriptDelivery: stdin
+
 sessions:
   backend: sqlite                          # 会话存储后端（仅支持 sqlite）
   storePath: session_history.sqlite        # 会话数据库路径（与 aicli 共享的主库，相对 sessions.dir）
@@ -221,6 +229,9 @@ sessionRuntime:
   defaultPersistence: memory               # 会话运行时持久化模式（memory 或 file）
   storePath: ../data/runtime/session_runtime.sqlite  # 运行时专用存储路径
 ```
+
+> `shell:` 段可以完全省略，自动检测仍然开启。候选顺序、强制路径、WSL 与配置覆盖规则见
+> [shell-auto-detection.md](shell-auto-detection.md)。
 
 ### 3.3 配置搜索路径
 
@@ -566,6 +577,7 @@ make uninstall-aicli
 | Portable agents | [docs/aicli/agents.md](../aicli/agents.md) |
 | 图片生成工具 | [docs/aicli/tool_image_generate.md](../aicli/tool_image_generate.md) |
 | Win7 构建 | [docs/aicli/windows7-build.md](../aicli/windows7-build.md) |
+| Shell 自动检测与配置 | [shell-auto-detection.md](shell-auto-detection.md) |
 | 运行时 / Skills / Multi-agent | [docs/README.md](../README.md) |
 | 开发指南 | [docs/development-guidelines.md](../development-guidelines.md) |
 | Skills 运行时 | [docs/skill_runtime/README.md](../skill_runtime/README.md) |
