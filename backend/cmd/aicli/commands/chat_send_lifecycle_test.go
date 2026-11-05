@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,49 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 		}
 		if state := coord.currentSurfaceStateForTest(); state != "Ready" {
 			t.Fatalf("state after successful finalization=%q, want Ready", state)
+		}
+	})
+}
+
+func TestSuccessfulSendClearsAttachmentPromptIcon(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	executor := &fakeChatExecutor{output: "final assistant response"}
+	session := &ChatSession{
+		ChatExecutor: executor,
+		cancelCtx:    context.Background(),
+		ImagePaths:   []string{filepath.Join("images", "reference.png")},
+	}
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	session.Surface = surface
+
+	captureSurfaceStdout(t, func() {
+		coord.SetWriter(os.Stdout)
+		coord.SetSurface(surface)
+		coord.PrintPrompt()
+		coord.waitUIActorIdle()
+
+		if line := coord.uiActor.AppState().Bottom.PromptLine; !strings.Contains(line, "📎1") {
+			t.Fatalf("precondition: prompt should show pending attachment, got %q", line)
+		}
+
+		renderSubmittedUserInputEcho(session, "hello")
+		response, err := sendMessage(session, "hello")
+		if err != nil {
+			t.Fatalf("sendMessage: %v", err)
+		}
+		finishSuccessfulChatSend(session, response, true)
+		coord.waitUIActorIdle()
+
+		if len(session.ImagePaths) != 0 {
+			t.Fatalf("expected successful send to clear attachments, got %#v", session.ImagePaths)
+		}
+		if line := coord.uiActor.AppState().Bottom.PromptLine; strings.Contains(line, "📎") {
+			t.Fatalf("successful send left a stale attachment icon in the prompt: %q", line)
 		}
 	})
 }

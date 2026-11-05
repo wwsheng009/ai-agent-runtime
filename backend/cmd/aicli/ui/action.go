@@ -856,6 +856,19 @@ func (ShowPromptAction) isUIAction()         {}
 func (ShowPromptAction) Class() ActionClass  { return ClassDurable }
 func (ShowPromptAction) CoalesceKey() string { return "" }
 
+// SetPromptLineAction refreshes only the prompt prefix while preserving the
+// editor-owned input, focus and row allocation. Attachment counts are rendered
+// in that prefix and can change outside the editor (successful send cleanup,
+// /attach add/remove/clear); those updates must not wait for the next input
+// event, otherwise the old count lingers on the visible composer.
+type SetPromptLineAction struct {
+	Line string
+}
+
+func (SetPromptLineAction) isUIAction()         {}
+func (SetPromptLineAction) Class() ActionClass  { return ClassDurable }
+func (SetPromptLineAction) CoalesceKey() string { return "" }
+
 // PromptSubmittedAction is posted after the user submits a chat prompt in
 // unified interactive mode. The controller treats it as both the explicit
 // composer-clear barrier and a repaint fence. Sequence is the latest editor

@@ -1260,6 +1260,32 @@ func TestUIController_ShowPromptRefreshPreservesTypedInput(t *testing.T) {
 	}
 }
 
+func TestUIController_SetPromptLinePreservesInputAndAllocation(t *testing.T) {
+	c, _ := newP1Controller(t, 0)
+	go c.Run()
+	defer c.Close()
+
+	for _, action := range []UIAction{
+		ShowPromptAction{Line: "> "},
+		InputEvent{Text: "line one\nline two", Cursor: 17, Sequence: 1},
+		SetPromptStateAction{Line: "> [📎2] ", Input: "line one\nline two", Rows: 2, CursorRow: 1, CursorCol: 8, Sequence: 1},
+		SetPromptLineAction{Line: "> "},
+	} {
+		if !c.Post(action) {
+			t.Fatalf("Post(%T) rejected", action)
+		}
+	}
+	c.WaitIdle()
+
+	bottom := c.AppState().Bottom
+	if bottom.PromptLine != "> " {
+		t.Fatalf("prompt line = %q, want refreshed prefix", bottom.PromptLine)
+	}
+	if bottom.PromptInput != "line one\nline two" || bottom.PromptReservedRows != 2 || !bottom.PromptVisible {
+		t.Fatalf("prompt line refresh damaged composer state: %+v", bottom)
+	}
+}
+
 func TestUIController_ClearPromptRowsPreservesTypedInput(t *testing.T) {
 	c, _ := newP1Controller(t, 0)
 	go c.Run()
@@ -1699,6 +1725,7 @@ func TestUIActionClassification(t *testing.T) {
 		{"SetStatusModelAction", SetStatusModelAction{}, ClassDurable, ""},
 		{"SetDynamicStatusModelAction", SetDynamicStatusModelAction{}, ClassDurable, ""},
 		{"ShowPromptAction", ShowPromptAction{}, ClassDurable, ""},
+		{"SetPromptLineAction", SetPromptLineAction{}, ClassDurable, ""},
 		{"PromptSubmittedAction", PromptSubmittedAction{}, ClassDurable, ""},
 		{"DiscardPromptAction", DiscardPromptAction{}, ClassDurable, ""},
 		{"SetPromptStateAction", SetPromptStateAction{}, ClassDurable, ""},

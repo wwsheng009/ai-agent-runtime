@@ -1386,6 +1386,34 @@ func (s *FixedBottomSurface) ShowPrompt(line string) bool {
 	return s.showPromptImpl(line)
 }
 
+// SetPromptLine refreshes the prompt prefix in place without resetting the
+// editor input or the reserved rows. Producers use it for chrome-only changes
+// such as the pending attachment count after a send or /attach mutation.
+func (s *FixedBottomSurface) SetPromptLine(line string) bool {
+	if s.postFacadeAction(SetPromptLineAction{Line: line}) {
+		return true
+	}
+	return s.setPromptLineImpl(line)
+}
+
+func (s *FixedBottomSurface) setPromptLineImpl(line string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	s.promptLine = line
+	if s.promptInput == "" {
+		s.setPromptCursorToLineEndLocked(line)
+	}
+	s.refreshPaintBookkeepingLocked()
+	return true
+}
+
 // showPromptImpl 是 ShowPrompt 的同步实现（legacy adapter 的调用目标）。
 func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 	if s == nil || s.terminal == nil {

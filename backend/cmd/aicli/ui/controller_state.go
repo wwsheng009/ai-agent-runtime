@@ -608,6 +608,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		state.Bottom.PromptReservedRows = 1
 		state.Bottom.PromptVisible = true
 		state.Bottom.Focus = BottomFocusPrompt
+	case SetPromptLineAction:
+		// Attachment counts are part of the prompt prefix but not part of the
+		// editor draft. Refresh the prefix in place so a send cleanup or
+		// /attach mutation cannot leave a stale 📎N badge until the next
+		// keystroke, while preserving input, visibility and row allocation.
+		state.Bottom.PromptLine = strings.TrimRight(SanitizeTerminalText(a.Line), "\r\n")
 	case PromptSubmittedAction:
 		// A coordinator can observe a newer draft before the submitted
 		// snapshot has reached the actor. Sequence zero in that mode means

@@ -1965,6 +1965,7 @@ func buildChatPromptNoticeLine(session *ChatSession) string {
 
 func refreshChatComposerContext(session *ChatSession) {
 	if session != nil && session.Interaction != nil {
+		session.Interaction.RefreshPromptLine()
 		session.Interaction.RefreshStatus("")
 	}
 }
@@ -2441,6 +2442,23 @@ func (c *chatInteractionCoordinator) RefreshStatus(state string) {
 	// "Agent Panel"、"Paste draft ..."）已分别迁移到 SetRetrying / SetNotice，
 	// 这里一律忽略入参并重新从活动标志/agent stage 派生。
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+// RefreshPromptLine repaints just the prompt prefix (including the pending
+// attachment badge) while the composer is visible. Attachment state can change
+// outside the editor on send cleanup or /attach commands; status refreshes do
+// not update the prompt chrome, so the old badge would otherwise remain until
+// the next keystroke.
+func (c *chatInteractionCoordinator) RefreshPromptLine() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || c.session == nil || c.writer != os.Stdout || !c.promptSurfaceActiveLocked() {
+		return
+	}
+	c.surface.SetPromptLine(formatSessionUserPrompt(c.session))
 }
 
 // SetRetrying 用结构化重试状态刷新动态状态行（替代旧的
