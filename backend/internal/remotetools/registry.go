@@ -181,12 +181,12 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		return nil, fmt.Errorf("ls schema: %w", err)
 	}
 	lsTool, err := toolkit.NewRuntimeTool(lscore.NewHandler(toolcore.Definition{
-		Name:                ToolLs,
+		Name:                ToolListDir,
 		Description:         lsBase.describe("List a remote directory (one level) with entry type and size."),
 		Version:             "1.0.0",
 		InputSchema:         lsSchema,
 		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
-		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolLs),
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolListDir),
 		DirectCall:          true,
 	}), func(ctx context.Context) (toolcore.Runtime, error) {
 		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
@@ -268,7 +268,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	}
 	candidates := []registration{
 		{name: ToolView, tool: viewTool},
-		{name: ToolLs, tool: lsTool},
+		{name: ToolListDir, tool: lsTool},
 		{name: ToolGlob, tool: globTool},
 		{name: ToolGrep, tool: grepTool},
 		{name: ToolShell, tool: newRemoteShellTool(cfg, workspace, sandbox, artifacts, jobs)},

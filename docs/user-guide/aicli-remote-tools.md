@@ -377,7 +377,7 @@ remote_srv__shell
 
 - 前缀必须是 `[A-Za-z0-9_-]+`，长度 ≤ 24。
 - 通过 `--remote` 建立 SSH 目标时，客户端会把 `remote_<host>`（点号转横线，例如 `10.0.0.9` → `remote_10-0-0-9`）作为 toolPrefix 传入；HTTP 目标以服务端自身配置为准。
-- 前缀保证远程工具不会遮蔽本地同名工具（`view`/`ls`/`glob`/`grep` 尤其重要）。
+- 前缀保证远程工具不会遮蔽本地同名工具（`view`/`list_dir`/`glob`/`grep` 尤其重要）。
 
 ### 5.3 查看实际暴露面
 

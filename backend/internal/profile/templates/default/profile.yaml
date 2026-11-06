@@ -16,7 +16,7 @@ prompts:
   mode: replace
 
 # 常用工具白名单（只收窄，不放宽安全域）。支持通配：prefix_* 前缀匹配。
-#   读取/检索：view / grep / glob / ls
+#   读取/检索：view / grep / glob / list_dir
 #   编辑：      write / edit / multiedit / apply_patch / append_write
 #   命令执行：  shell / aicli_exec
 #   网络：      fetch / web_search / download
@@ -30,7 +30,7 @@ tools:
     - view
     - grep
     - glob
-    - ls
+    - list_dir
     - write
     - edit
     - multiedit

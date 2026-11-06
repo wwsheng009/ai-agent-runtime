@@ -101,7 +101,7 @@ func main() {
 	if err != nil {
 		fail("tools/list", err)
 	}
-	lsName := *prefix + "__ls"
+	lsName := *prefix + "__list_dir"
 	found := false
 	for _, tool := range tools.Tools {
 		if tool.Name == lsName {
@@ -109,9 +109,9 @@ func main() {
 		}
 	}
 	if !found {
-		fail("ls is advertised", fmt.Errorf("tool %q missing from %d advertised tools", lsName, len(tools.Tools)))
+		fail("list_dir is advertised", fmt.Errorf("tool %q missing from %d advertised tools", lsName, len(tools.Tools)))
 	}
-	fmt.Printf("PASS ls advertised by the local-backend server (%d tools under prefix %q)\n", len(tools.Tools), *prefix)
+	fmt.Printf("PASS list_dir advertised by the local-backend server (%d tools under prefix %q)\n", len(tools.Tools), *prefix)
 
 	// The matrix: every depth and limit pair, compared byte for byte against the
 	// reference walk of the same disk.

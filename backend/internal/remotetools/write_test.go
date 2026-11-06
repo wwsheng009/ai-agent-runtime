@@ -430,7 +430,7 @@ func TestReadOnlyOverridesOpsProfile(t *testing.T) {
 		t.Fatalf("expected only the 5 read tools, got %v", names)
 	}
 	for _, name := range names {
-		if !strings.Contains(name, "view") && !strings.Contains(name, "ls") &&
+		if !strings.Contains(name, "view") && !strings.Contains(name, "list_dir") &&
 			!strings.Contains(name, "glob") && !strings.Contains(name, "grep") &&
 			!strings.Contains(name, "artifact_read") {
 			t.Fatalf("unexpected tool under readOnly: %q", name)

@@ -2,12 +2,46 @@ package toolctl
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 )
+
+// stubShellJobRuntime keeps CLI contract tests focused on policy and argument
+// handling instead of spawning a real background job. Production toolctl still
+// leaves the shell tool fail-closed unless a host injects a runtime.
+type stubShellJobRuntime struct {
+	output string
+}
+
+func (*stubShellJobRuntime) SubmitShell(context.Context, string, string, string) (string, string, error) {
+	return "job_test", "running", nil
+}
+
+func (*stubShellJobRuntime) WaitShell(context.Context, string, time.Duration) (shelljob.Snapshot, error) {
+	exitCode := 0
+	return shelljob.Snapshot{ID: "job_test", Status: "completed", ExitCode: &exitCode}, nil
+}
+
+func (s *stubShellJobRuntime) ReadShell(context.Context, string, int64, int) (shelljob.Output, error) {
+	exitCode := 0
+	return shelljob.Output{
+		Output:     s.output,
+		NextOffset: int64(len(s.output)),
+		Status:     "completed",
+		ExitCode:   &exitCode,
+	}, nil
+}
+
+func (*stubShellJobRuntime) CancelShell(context.Context, string) error { return nil }
+
+func (*stubShellJobRuntime) ForgetShell(context.Context, string, string) error { return nil }
 
 func newTestCLI(t *testing.T) (*CLI, *bytes.Buffer, *bytes.Buffer, string) {
 	t.Helper()
@@ -17,7 +51,11 @@ func newTestCLI(t *testing.T) (*CLI, *bytes.Buffer, *bytes.Buffer, string) {
 	}
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	return &CLI{Stdout: stdout, Stderr: stderr}, stdout, stderr, workspace
+	return &CLI{
+		Stdout:          stdout,
+		Stderr:          stderr,
+		shellJobRuntime: &stubShellJobRuntime{output: "ok\n"},
+	}, stdout, stderr, workspace
 }
 
 func TestListDefaultsToReadOnly(t *testing.T) {
@@ -230,7 +268,7 @@ func TestJSONContractIncludesErrorFields(t *testing.T) {
 // the legacy toolkit-mcp-server wrapper.
 func TestListExcludeToolsNarrowsTheSurface(t *testing.T) {
 	cli, stdout, stderr, workspace := newTestCLI(t)
-	code := cli.Run([]string{"list", "--workspace", workspace, "--json", "--exclude-tools", "ls,glob"})
+	code := cli.Run([]string{"list", "--workspace", workspace, "--json", "--exclude-tools", "list_dir,glob"})
 	if code != ExitOK {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
@@ -239,7 +277,7 @@ func TestListExcludeToolsNarrowsTheSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, def := range defs {
-		if def.Name == "ls" || def.Name == "glob" {
+		if def.Name == "list_dir" || def.Name == "glob" {
 			t.Fatalf("excluded tool %q is still listed", def.Name)
 		}
 	}

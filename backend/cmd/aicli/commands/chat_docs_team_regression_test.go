@@ -512,7 +512,7 @@ func (p *docsTeamRegressionProvider) handleTeammateRequest(sessionID string, req
 		case "":
 			return singleToolResponse(req.Model, "call-docs-arch-spec", toolbroker.ToolTeamTaskSpec, map[string]interface{}{})
 		case "call-docs-arch-spec":
-			return singleToolResponse(req.Model, "call-docs-arch-ls", "ls", map[string]interface{}{
+			return singleToolResponse(req.Model, "call-docs-arch-ls", "list_dir", map[string]interface{}{
 				"path":  filepath.Join(p.workspaceRoot, "docs"),
 				"depth": 2,
 			})
@@ -594,7 +594,7 @@ func (p *docsListTranscriptProvider) Call(ctx context.Context, req *runtimellm.L
 
 	switch {
 	case strings.TrimSpace(lastTool.ToolCallID) == "" && strings.TrimSpace(lastUser.Content) == "查看docs目录的文件":
-		return singleToolResponse(req.Model, "call-list-docs", "ls", map[string]interface{}{
+		return singleToolResponse(req.Model, "call-list-docs", "list_dir", map[string]interface{}{
 			"path":  "docs",
 			"depth": 1,
 		})

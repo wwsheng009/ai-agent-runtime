@@ -795,7 +795,7 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		defer server.Close()
 		want := []string{
 			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
-			"remote_envd__ls", "remote_envd__view", "remote_envd__watch_dir",
+			"remote_envd__list_dir", "remote_envd__view", "remote_envd__watch_dir",
 		}
 		got := server.ToolNames()
 		sort.Strings(got)
@@ -815,7 +815,7 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		want := []string{
 			"remote_envd__append_write", "remote_envd__apply_patch", "remote_envd__edit",
 			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
-			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move",
+			"remote_envd__list_dir", "remote_envd__mkdir", "remote_envd__move",
 			"remote_envd__remove", "remote_envd__view", "remote_envd__watch_dir",
 			"remote_envd__write",
 		}
@@ -840,7 +840,7 @@ func TestEnvDServerTierSurface(t *testing.T) {
 		want := []string{
 			"remote_envd__append_write", "remote_envd__apply_patch", "remote_envd__edit",
 			"remote_envd__glob", "remote_envd__grep", "remote_envd__host_metrics",
-			"remote_envd__ls", "remote_envd__mkdir", "remote_envd__move",
+			"remote_envd__list_dir", "remote_envd__mkdir", "remote_envd__move",
 			"remote_envd__pty_close", "remote_envd__pty_read", "remote_envd__pty_resize",
 			"remote_envd__pty_start", "remote_envd__pty_write", "remote_envd__remove",
 			"remote_envd__shell", "remote_envd__view", "remote_envd__watch_dir",

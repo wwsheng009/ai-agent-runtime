@@ -72,7 +72,7 @@ type ToolDefinitionMetadataProvider interface { ... }
 本会话的环境指引（`AGENTS.md` / 系统提示）明确要求模型：
 
 > Prefer toolkit `grep` for code search instead of shell `rg`/`grep`
-> Prefer toolkit `ls`/`glob`/`view` for filesystem inspection
+> Prefer toolkit `list_dir`/`glob`/`view` for filesystem inspection
 
 即模型**已经有**一套可靠、实时、被反复强化的首选工具。
 在这个前提下引入一个**可能陈旧**的竞争来源，是净负收益——

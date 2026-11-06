@@ -539,8 +539,8 @@ ts=16:51:57 tools=1 projected=simple_goal key=session_20261014141903_lb0uSShK
 ### 13.3 测试
 
 新增 `TestComputeAvailableToolsRecordsSimpleGoalProjectionLedger`（专用夹具
-`projectionLedgerMCPManager` 提供 ls/glob/view/shell/bash 目录）：三断言——
-非投影目标清标记 / 投影命中置标记且目录实际收缩（ElementsMatch ls+glob）/
+`projectionLedgerMCPManager` 提供 list_dir/glob/view/shell/bash 目录）：三断言——
+非投影目标清标记 / 投影命中置标记且目录实际收缩（ElementsMatch list_dir+glob）/
 显式禁用投影不误标。期间修正两处实现缺陷（词表命中但无收缩不置位、loop 复用
 残留标记）——账本语义由此收紧为"只记录真实发生的收缩"。
 

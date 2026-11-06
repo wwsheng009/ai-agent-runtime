@@ -23,6 +23,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shelljob"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
@@ -44,6 +45,10 @@ const (
 type CLI struct {
 	Stdout io.Writer
 	Stderr io.Writer
+	// shellJobRuntime is the shell runtime seam used by contract tests. The
+	// production CLI leaves it nil, so shell remains fail-closed until a host
+	// wires its shared manager into this surface.
+	shellJobRuntime shelljob.Runtime
 }
 
 // Run dispatches one toolctl invocation.
@@ -233,6 +238,7 @@ func (c *CLI) runTool(args []string) int {
 		return ExitUsage
 	}
 	ctx := toolctx.WithWorkspaceRoot(context.Background(), surface.workspace)
+	ctx = toolctx.WithSessionID(ctx, "toolctl")
 	result, execErr := handler.Execute(ctx, &toolcore.Call{
 		Args: arguments,
 		Request: toolcore.RequestInfo{
@@ -642,6 +648,11 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		}
 		if setter, ok := tool.(interface{ SetBasePath(string) }); ok {
 			setter.SetBasePath(workspace)
+		}
+		if c.shellJobRuntime != nil {
+			if setter, ok := tool.(interface{ SetShellJobRuntime(shelljob.Runtime) }); ok {
+				setter.SetShellJobRuntime(c.shellJobRuntime)
+			}
 		}
 		if tool == nil {
 			delete(constructed, name)

@@ -1093,7 +1093,7 @@ func envdView(ctx context.Context, be *envdBackend, params map[string]interface{
 		return envdErrorResult("%s", describeEnvDError(err, target)), nil
 	}
 	if entry.IsDir() {
-		return envdErrorResult("%s is a directory; use ls to list it", target), nil
+		return envdErrorResult("%s is a directory; use list_dir to list it", target), nil
 	}
 	limit := be.viewLimit()
 	size := entry.SizeBytes()
@@ -1404,7 +1404,7 @@ func describeFilesError(err error, target string) string {
 		case envdclient.FilesNotFound:
 			return fmt.Sprintf("path %s does not exist", target)
 		case envdclient.FilesIsDirectory:
-			return fmt.Sprintf("%s is a directory; use ls to list it", target)
+			return fmt.Sprintf("%s is a directory; use list_dir to list it", target)
 		case envdclient.FilesUnauthorized:
 			return fmt.Sprintf("envd refused the file channel for %s: the access token was not accepted", target)
 		case envdclient.FilesChannelMissing:

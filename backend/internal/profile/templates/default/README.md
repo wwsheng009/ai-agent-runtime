@@ -13,7 +13,7 @@
 ## 工具面
 
 - allowlist（只收窄，硬闸门；支持 `prefix_*` 通配）：
-  - 读取/检索：`view` / `grep` / `glob` / `ls`
+  - 读取/检索：`view` / `grep` / `glob` / `list_dir`
   - 编辑：`write` / `edit` / `multiedit` / `apply_patch` / `append_write`
   - 命令执行：`shell` / `aicli_exec`
   - 网络：`fetch` / `web_search` / `download`

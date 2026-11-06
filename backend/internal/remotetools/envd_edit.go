@@ -189,7 +189,7 @@ func envdEdit(ctx context.Context, be *envdBackend, params map[string]interface{
 	}
 	if !state.exists {
 		return envdFailureMeta("NOT_FOUND", map[string]interface{}{"failure_class": "missing_file", "file_path": target},
-			"file not found: %s (verify the path with view or ls)", target), nil
+			"file not found: %s (verify the path with view or list_dir)", target), nil
 	}
 	if mutatecore.LooksBinary(state.raw) {
 		return envdFailureMeta("UNSUPPORTED", map[string]interface{}{"failure_class": "binary_target", "file_path": target},

@@ -36,7 +36,7 @@ func TestRemoteCoreSurfaceComesFromSharedHandlers(t *testing.T) {
 
 	coreNames := map[string]bool{
 		ToolView:         true,
-		ToolLs:           true,
+		ToolListDir:      true,
 		ToolGlob:         true,
 		ToolGrep:         true,
 		ToolWrite:        true,

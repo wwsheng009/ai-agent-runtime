@@ -12,7 +12,7 @@ tools:
     - view
     - grep
     - glob
-    - ls
+    - list_dir
     - write
     - edit
     - multiedit

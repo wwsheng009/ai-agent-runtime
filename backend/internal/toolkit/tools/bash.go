@@ -2034,7 +2034,7 @@ func looksLikeGitIgnoredPathFailure(command, combinedLower string) bool {
 func bashCommandPreflight(command string) (blocked bool, message, nextAction string) {
 	if toolName, ok := looksLikeShellInvokedToolkitCommand(command); ok {
 		return true,
-			fmt.Sprintf("检测到在 shell 中调用 toolkit 命令风格参数（%s ...）。`%s`/`grep`/`ls`/`glob`/`view` 是专用工具，不是 shell 可执行文件。请直接调用 toolkit 工具，不要写成 `bash command=\"%s -path ...\"`。", toolName, toolName, toolName),
+			fmt.Sprintf("检测到在 shell 中调用 toolkit 命令风格参数（%s ...）。`%s` 是专用工具，不是 shell 可执行文件。请直接调用 toolkit 工具，不要写成 `bash command=\"%s -path ...\"`。", toolName, toolName, toolName),
 			fmt.Sprintf("Call the dedicated toolkit `%s` tool directly with structured args (path/file_path/pattern/glob). Do not invoke toolkit tool names as shell commands.", toolName)
 	}
 	// Path-position globs are checked by searchPathGlobLiteralToken after the
@@ -2513,6 +2513,10 @@ func pathTokenHasShellGlob(token string) bool {
 
 // looksLikeShellInvokedToolkitCommand detects model mistakes like
 // `view -path foo.go` or `grep -pattern X` executed via bash.
+//
+// `ls` is deliberately absent: it is a real shell command, and the toolkit
+// tool is now named list_dir. Keeping it here would make ordinary shell
+// commands such as `ls src | Select-Object -First 20` look like toolkit calls.
 func looksLikeShellInvokedToolkitCommand(command string) (string, bool) {
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "" {
@@ -2528,13 +2532,10 @@ func looksLikeShellInvokedToolkitCommand(command string) (string, bool) {
 	primary := strings.ToLower(filepath.Base(strings.TrimSpace(cmdParts[0])))
 	primary = strings.TrimSuffix(primary, ".exe")
 	switch primary {
-	case "view", "ls", "glob", "grep", "write", "edit", "apply_patch", "append_write", "todos", "multiedit":
+	case "view", "list_dir", "glob", "grep", "write", "edit", "apply_patch", "append_write", "todos", "multiedit":
 		// Require at least one toolkit-style flag/arg so we do not block a
 		// hypothetical local binary named "view" with no args, and so that
-		// "ls" alone can still be a shell command (Windows alias/dir).
-		if primary == "ls" && !hasToolkitStyleFlag(cmdParts[1:]) {
-			return "", false
-		}
+		// a real grep invocation stays usable.
 		if primary == "grep" {
 			// Real system grep is common; only block when args look like toolkit schema.
 			if !hasToolkitStyleFlag(cmdParts[1:]) {
@@ -2553,6 +2554,14 @@ func looksLikeShellInvokedToolkitCommand(command string) (string, bool) {
 func hasToolkitStyleFlag(parts []string) bool {
 	for _, part := range parts {
 		lower := strings.ToLower(strings.TrimSpace(part))
+		// Only inspect the primary command's own arguments. A later command in
+		// a pipeline/chain may legitimately contain -path (for example
+		// `find . -not -path '*/node_modules/*'`) and must not turn an
+		// otherwise valid command into a toolkit call.
+		switch lower {
+		case "|", "||", "&&", "&", ";", ">", "<":
+			return false
+		}
 		switch {
 		case strings.HasPrefix(lower, "-path"),
 			strings.HasPrefix(lower, "--path"),

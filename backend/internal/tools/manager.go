@@ -60,9 +60,9 @@ type Manager struct {
 const toolkitMCPName = "toolkit"
 
 // localToolkitPriorityTools 是"本地 toolkit 优先"的读取类工具集合
-// （ls/glob/grep/view 及其现役别名）：拼写表由注册表展开，新增别名不必改这里。
+// （list_dir/glob/grep/view 及其现役别名）：拼写表由注册表展开，新增别名不必改这里。
 var localToolkitPriorityTools = func() map[string]struct{} {
-	names := toolregistry.CallableNames("ls", "glob", "grep", "view")
+	names := toolregistry.CallableNames("list_dir", "glob", "grep", "view")
 	set := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		set[name] = struct{}{}
@@ -132,7 +132,7 @@ func (m *Manager) validateRemoteToolNameCollisionWithScope(info *mcpregistry.Too
 	if rawName == "" {
 		return nil
 	}
-	if _, collides := m.toolkit.Get(rawName); !collides {
+	if _, collides := m.toolkit.Get(canonicalManagedToolName(rawName)); !collides {
 		return nil
 	}
 	return fmt.Errorf(
@@ -678,7 +678,7 @@ func (m *Manager) shouldPreferLocalToolkit(mcpName, toolName string) bool {
 	if m == nil || m.toolkit == nil {
 		return false
 	}
-	toolName = strings.TrimSpace(toolName)
+	toolName = canonicalManagedToolName(toolName)
 	if toolName == "" {
 		return false
 	}
@@ -704,11 +704,18 @@ func (m *Manager) shouldForceLocalToolkitTool(toolName string) bool {
 }
 
 func canonicalManagedToolName(name string) string {
-	canonical := toolnames.CanonicalOpenAIImageGenerateToolName(name)
-	if canonical != "" {
-		return canonical
+	trimmed := strings.TrimSpace(name)
+	if toolnames.IsOpenAIImageGenerateToolName(trimmed) {
+		return toolnames.OpenAIImageGenerateToolName
 	}
-	return strings.TrimSpace(name)
+	// Aliases without an independently registered instance are routed to their
+	// canonical implementation. list_dir's `ls` alias is one of these: keeping
+	// the alias executable preserves old sessions/profiles without exposing a
+	// second `ls` tool on the model surface.
+	if toolregistry.IsSpellingOf("list_dir", trimmed) && toolregistry.Normalize(trimmed) != "list_dir" {
+		return "list_dir"
+	}
+	return trimmed
 }
 
 // codeToolRegistration 是 code.* 构造表的一行（P2 slice 3 收敛点）。

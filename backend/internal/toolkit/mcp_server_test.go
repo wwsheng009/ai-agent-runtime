@@ -41,20 +41,20 @@ func TestToolkitMCPServer_ListToolsIncludesSchema(t *testing.T) {
 		t.Fatalf("list tools failed: %v", err)
 	}
 
-	var lsTool *mcp.Tool
+	var listDirTool *mcp.Tool
 	for _, tool := range res.Tools {
-		if tool != nil && tool.Name == "ls" {
-			lsTool = tool
+		if tool != nil && tool.Name == "list_dir" {
+			listDirTool = tool
 			break
 		}
 	}
-	if lsTool == nil {
-		t.Fatalf("expected ls tool, got %v", res.Tools)
+	if listDirTool == nil {
+		t.Fatalf("expected list_dir tool, got %v", res.Tools)
 	}
 
-	schema, ok := lsTool.InputSchema.(map[string]interface{})
+	schema, ok := listDirTool.InputSchema.(map[string]interface{})
 	if !ok || schema == nil {
-		t.Fatalf("expected ls InputSchema map, got %T", lsTool.InputSchema)
+		t.Fatalf("expected list_dir InputSchema map, got %T", listDirTool.InputSchema)
 	}
 	props, ok := schema["properties"].(map[string]interface{})
 	if !ok || len(props) == 0 {
@@ -63,7 +63,7 @@ func TestToolkitMCPServer_ListToolsIncludesSchema(t *testing.T) {
 	if _, ok := props["path"]; !ok {
 		t.Fatalf("expected path property, got %v", props)
 	}
-	if lsTool.Annotations == nil || !lsTool.Annotations.ReadOnlyHint {
-		t.Fatalf("expected ls readOnlyHint=true, got %+v", lsTool.Annotations)
+	if listDirTool.Annotations == nil || !listDirTool.Annotations.ReadOnlyHint {
+		t.Fatalf("expected list_dir readOnlyHint=true, got %+v", listDirTool.Annotations)
 	}
 }

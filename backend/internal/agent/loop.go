@@ -5137,7 +5137,7 @@ func isSimpleGoalProjectedToolSurface(tools []types.ToolDefinition) bool {
 	}
 	sort.Strings(names)
 	switch strings.Join(names, ",") {
-	case "glob,ls", "glob,grep", "glob", "ls", "view", "grep":
+	case "glob,list_dir", "glob,grep", "glob", "list_dir", "view", "grep":
 		return true
 	}
 	// 单一 shell 面：接受注册表里 shell 家族的任一现役拼写（shell/bash/execute_shell_command），
@@ -5225,7 +5225,7 @@ func simpleGoalToolNames(goal string) map[string]bool {
 	case first == "ls" || first == "dir" || strings.HasPrefix(normalized, "list files") ||
 		strings.HasPrefix(normalized, "list directory") || strings.HasPrefix(normalized, "列出文件") ||
 		strings.HasPrefix(normalized, "列出目录"):
-		return map[string]bool{"ls": true, "glob": true}
+		return map[string]bool{"list_dir": true, "glob": true}
 	case strings.HasPrefix(normalized, "read file") || strings.HasPrefix(normalized, "view file") ||
 		strings.HasPrefix(normalized, "show file") || strings.HasPrefix(normalized, "读取文件") ||
 		strings.HasPrefix(normalized, "查看文件"):
@@ -6092,7 +6092,10 @@ func nextExplorationStallCount(current int, calls []types.ToolCall) int {
 
 func isExplorationOnlyToolCall(call types.ToolCall) bool {
 	switch strings.ToLower(strings.TrimSpace(call.Name)) {
-	case "view", "grep", "glob", "ls", "fetch", "web_search", "sourcegraph", "list_mcp_resources":
+	case "view", "grep", "glob", "list_dir", "fetch", "web_search", "sourcegraph", "list_mcp_resources":
+		return true
+	}
+	if toolregistry.IsSpellingOf("list_dir", call.Name) {
 		return true
 	}
 	// shell 家族按注册表的现役拼写识别（shell / bash / execute_shell_command）：

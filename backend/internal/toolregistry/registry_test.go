@@ -244,6 +244,23 @@ func TestCallableNames(t *testing.T) {
 	require.Empty(t, CallableNames())
 }
 
+// `ls` is a live compatibility alias (executable, not separately exposed);
+// `list_directory`/`list_files`/`ls_dir` are retired diagnostics only.
+func TestListDirCanonicalAndCompatibilityAlias(t *testing.T) {
+	require.Equal(t, "list_dir", Canonical("ls"))
+	require.Equal(t, "list_dir", Canonical("list_directory"))
+	require.Equal(t, "list_dir", Canonical("list_files"))
+	require.Equal(t, "list_dir", Canonical("ls_dir"))
+	require.True(t, IsSpellingOf("list_dir", "ls"))
+	require.False(t, IsSpellingOf("list_dir", "list_directory"))
+
+	entry, ok := LookupLive("ls")
+	require.True(t, ok)
+	require.Equal(t, "list_dir", entry.Name)
+	_, ok = LookupLive("list_directory")
+	require.False(t, ok, "retired spellings must not provide live category facts")
+}
+
 func TestSurfaceRank(t *testing.T) {
 	// 规范名最高，别名按声明顺序递减——必须与 agent/loop.go 压缩工具面时
 	// 原先手写的 3/2/1、2/1 排名完全一致。

@@ -25,7 +25,7 @@ import (
 
 // probeTools 覆盖读 / 文件写 / 执行 / 后台四类。
 var probeTools = []string{
-	"ls", "view", "glob", "grep",
+	"list_dir", "view", "glob", "grep",
 	"write", "edit", "apply_patch", "append_write",
 	"shell", "job_start", "job_input",
 	"job_output", "job_list", "job_cancel",

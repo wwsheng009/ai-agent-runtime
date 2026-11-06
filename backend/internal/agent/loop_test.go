@@ -1662,12 +1662,12 @@ func TestReActLoop_ParentDeadlineIsNotReportedAsRunDurationLimit(t *testing.T) {
 
 func TestProjectSimpleGoalToolSurfaceKeepsOnlyRelevantTools(t *testing.T) {
 	tools := []types.ToolDefinition{
-		{Name: "ls"}, {Name: "glob"}, {Name: "view"}, {Name: "shell"}, {Name: "bash"},
+		{Name: "list_dir"}, {Name: "glob"}, {Name: "view"}, {Name: "shell"}, {Name: "bash"},
 		{Name: "web_search"}, {Name: "spawn_team"}, {Name: "openai_image_generate"},
 	}
 
 	projected := projectSimpleGoalToolSurface("ls file", tools)
-	require.Equal(t, []string{"ls", "glob"}, toolDefinitionNames(projected))
+	require.Equal(t, []string{"list_dir", "glob"}, toolDefinitionNames(projected))
 
 	projected = projectSimpleGoalToolSurface("git status", tools)
 	require.Equal(t, []string{"shell", "bash"}, toolDefinitionNames(projected))
@@ -5045,7 +5045,7 @@ func TestReActLoop_GetAvailableTools_AlwaysExposesCoreFileTools(t *testing.T) {
 	names := toolDefinitionNames(tools)
 	assert.Contains(t, names, "glob")
 	assert.Contains(t, names, "grep")
-	assert.Contains(t, names, "ls")
+	assert.Contains(t, names, "list_dir")
 	assert.Contains(t, names, "view")
 
 	otherTools, err := loop.getAvailableTools(context.Background(), "summarize the current implementation", nil)
@@ -6427,7 +6427,7 @@ type projectionLedgerMCPManager struct{}
 
 func (m *projectionLedgerMCPManager) ListTools() []skill.ToolInfo {
 	return []skill.ToolInfo{
-		{Name: "ls", Description: "list", Enabled: true},
+		{Name: "list_dir", Description: "list", Enabled: true},
 		{Name: "glob", Description: "glob", Enabled: true},
 		{Name: "view", Description: "view", Enabled: true},
 		{Name: "shell", Description: "shell", Enabled: true},
@@ -6464,12 +6464,12 @@ func TestComputeAvailableToolsRecordsSimpleGoalProjectionLedger(t *testing.T) {
 	tools, _, err := loop.computeAvailableTools(context.Background(), "ls file", nil, true)
 	require.NoError(t, err)
 	require.Equal(t, "simple_goal", loop.lastToolSurfaceProjection.Load())
-	require.ElementsMatch(t, []string{"ls", "glob"}, toolDefinitionNames(tools))
+	require.ElementsMatch(t, []string{"list_dir", "glob"}, toolDefinitionNames(tools))
 	// 来源账本（§15.4 修订）：账本在请求级 metadata（tool_surface_sources），
 	// 不写进定义——避免推高 token 估算（compaction recovery 时序依赖此语义）。
 	// 用 SummarizeSources（与 think() 装配同一函数）验证分类。
 	sources := toolsurface.SummarizeSources(tools, loop.toolSurfaceLedger())
-	require.Equal(t, map[string]string{"ls": "core", "glob": "core"}, sources)
+	require.Equal(t, map[string]string{"list_dir": "core", "glob": "core"}, sources)
 
 	// 显式禁用投影（actor 稳定面路径）时不误标。
 	_, _, err = loop.computeAvailableTools(context.Background(), "ls file", nil, false)

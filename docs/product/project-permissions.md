@@ -30,7 +30,7 @@ rules:
     decision: ask
     reason: review_writes
   - name: allow-readonly
-    tools: [view, grep, glob, ls]
+    tools: [view, grep, glob, list_dir]
     decision: allow
 ```
 

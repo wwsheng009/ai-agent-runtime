@@ -50,7 +50,7 @@ func TestEnvDLsListsOneLevel(t *testing.T) {
 	}, nil)
 
 	session, ctx, _ := connectEnvDServerWithProfile(t, stub, remotetools.ProfileReadonly)
-	got := callTool(t, ctx, session, "remote_envd__ls", map[string]interface{}{"path": "."})
+	got := callTool(t, ctx, session, "remote_envd__list_dir", map[string]interface{}{"path": "."})
 	if !strings.Contains(got, "README.md") {
 		t.Fatalf("ls missing the direct child: %s", got)
 	}
@@ -66,7 +66,7 @@ func TestEnvDLsListsOneLevel(t *testing.T) {
 
 	// One level down through the per-call workdir, which the prefix wrapper adds
 	// to every path-taking tool: the listing anchors there, not at the root.
-	anchored := callTool(t, ctx, session, "remote_envd__ls", map[string]interface{}{"path": ".", "workdir": "src"})
+	anchored := callTool(t, ctx, session, "remote_envd__list_dir", map[string]interface{}{"path": ".", "workdir": "src"})
 	if !strings.Contains(anchored, "main.go") {
 		t.Fatalf("workdir listing missed the anchored child: %s", anchored)
 	}

@@ -79,18 +79,18 @@ func TestManager_EnvDBackend_LiveSmoke(t *testing.T) {
 	tools := mgr.ListTools()
 	require.NotEmpty(t, tools, "envd backend exposed no tools")
 
-	var lsTool string
+	var listDirTool string
 	for _, tool := range tools {
 		name := tool.Tool.Name
 		require.True(t, strings.HasPrefix(name, "remote_envd__"),
 			"tool %q should carry the configured prefix", name)
-		if strings.HasSuffix(name, "__ls") {
-			lsTool = name
+		if strings.HasSuffix(name, "__list_dir") {
+			listDirTool = name
 		}
 	}
-	require.NotEmpty(t, lsTool, "envd backend did not expose an ls tool")
+	require.NotEmpty(t, listDirTool, "envd backend did not expose a list_dir tool")
 
-	result, err := mgr.CallTool(context.Background(), "envdtest", lsTool, map[string]interface{}{"path": "."})
+	result, err := mgr.CallTool(context.Background(), "envdtest", listDirTool, map[string]interface{}{"path": "."})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotEmpty(t, result.Content)

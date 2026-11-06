@@ -291,7 +291,7 @@ metachar 拒绝 > destructive 分类）。没有配置任何 `allowedCommands` /
 - 命令条目按 argv[0] 的 basename 匹配：允许 `/bin/sh` 要写 `sh`，
   允许 `~/.local/bin/host-inspect.sh` 要写 `host-inspect.sh`；带参数的条目
   按 argv 前缀匹配（如 `git status`）。
-- 文件工具的路径围栏在目标机解析 symlink：`view`/`ls`/`glob`/`grep`/`write`/`mkdir`
+- 文件工具的路径围栏在目标机解析 symlink：`view`/`list_dir`/`glob`/`grep`/`write`/`mkdir`
   使用规范路径，`remove`/`move` 只解析父目录（因此可以删除/移动 symlink 本身）。
   每次文件工具调用会多一次轻量 `realpath` 进程调用；workspace/allowed root 本身
   禁止删除/移动。

@@ -4,10 +4,48 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 )
+
+// stubShellJobRuntime keeps toolkit-level tests focused on registry/argument
+// behavior without spawning a real background job. Production BashTool remains
+// fail-closed when no runtime is injected.
+type stubShellJobRuntime struct {
+	output string
+}
+
+func (s *stubShellJobRuntime) SubmitShell(context.Context, string, string, string) (string, string, error) {
+	return "job_test", "running", nil
+}
+
+func (s *stubShellJobRuntime) WaitShell(context.Context, string, time.Duration) (tools.ShellJobSnapshot, error) {
+	exitCode := 0
+	return tools.ShellJobSnapshot{ID: "job_test", Status: "completed", ExitCode: &exitCode}, nil
+}
+
+func (s *stubShellJobRuntime) ReadShell(context.Context, string, int64, int) (tools.ShellJobOutput, error) {
+	exitCode := 0
+	return tools.ShellJobOutput{
+		Output:     s.output,
+		NextOffset: int64(len(s.output)),
+		Status:     "completed",
+		ExitCode:   &exitCode,
+	}, nil
+}
+
+func (*stubShellJobRuntime) CancelShell(context.Context, string) error { return nil }
+
+func (*stubShellJobRuntime) ForgetShell(context.Context, string, string) error { return nil }
+
+func newTestBashTool(output string) *tools.BashTool {
+	tool := tools.NewBashTool()
+	tool.SetShellJobRuntime(&stubShellJobRuntime{output: output})
+	return tool
+}
 
 func TestRegistry(t *testing.T) {
 	// 创建注册表
@@ -78,10 +116,10 @@ func TestRegistryList_SortsToolsByName(t *testing.T) {
 
 func TestRegistryExecute_UnwrapsRawArgs(t *testing.T) {
 	registry := toolkit.NewRegistry()
-	if err := registry.Register(tools.NewBashTool()); err != nil {
+	if err := registry.Register(newTestBashTool("registry-raw-ok\n")); err != nil {
 		t.Fatalf("register bash: %v", err)
 	}
-	result, err := registry.Execute(context.Background(), "bash", map[string]interface{}{
+	result, err := registry.Execute(toolctx.WithSessionID(context.Background(), "toolkit-registry-test"), "bash", map[string]interface{}{
 		"_raw": `{"command":"echo registry-raw-ok"}`,
 	})
 	if err != nil {
@@ -96,8 +134,8 @@ func TestRegistryExecute_UnwrapsRawArgs(t *testing.T) {
 }
 
 func TestBashTool(t *testing.T) {
-	ctx := context.Background()
-	bashTool := tools.NewBashTool()
+	ctx := toolctx.WithSessionID(context.Background(), "toolkit-bash-test")
+	bashTool := newTestBashTool("hello\n")
 
 	// 测试参数缺失
 	result, err := bashTool.Execute(ctx, map[string]interface{}{})

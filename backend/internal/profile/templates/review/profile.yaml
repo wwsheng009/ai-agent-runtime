@@ -13,7 +13,7 @@ tools:
     - view
     - grep
     - glob
-    - ls
+    - list_dir
     - web_search
     - fetch
   # 子代理/团队等控制面工具自 2026-10-16 起不再有 essential 豁免：上面的

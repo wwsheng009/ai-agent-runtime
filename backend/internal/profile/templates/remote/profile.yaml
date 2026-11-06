@@ -27,9 +27,9 @@ tools:
   # 只保留远端独有能力（读/写/命令都由 remote 侧提供，且带 toolPrefix）。
   # 因此本地同名的这些工具必须 deny，否则模型可能操作本机。
   denylist:
-    # 本地读取（与远端 view/ls/glob/grep 同名）
+    # 本地读取（与远端 view/list_dir/glob/grep 同名）
     - view
-    - ls
+    - list_dir
     - glob
     - grep
     - read

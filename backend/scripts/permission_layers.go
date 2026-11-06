@@ -35,7 +35,7 @@ import (
 // probeTools are the tool names a remote target commonly serves, ordered from
 // harmless to destructive so the ladder reads top to bottom.
 var probeTools = []string{
-	"ls", "view", "glob", "grep",
+	"list_dir", "view", "glob", "grep",
 	"write", "edit", "apply_patch", "append_write",
 	"shell", "job_start", "job_input",
 	"job_output", "job_list", "job_cancel",

@@ -8,7 +8,9 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-// LsTool 列出目录工具
+// LsTool lists directory entries. The model-facing canonical name is
+// "list_dir"; "ls" is kept as a compatibility alias by the tool registry so
+// shell `ls` and the toolkit tool cannot be confused.
 //
 // It has no implementation of its own: Execute delegates to the shared lscore
 // handler, which is the same code the remote surface runs. Only the sandbox and
@@ -22,7 +24,7 @@ type LsTool struct {
 func NewLsTool() *LsTool {
 	return &LsTool{
 		BaseTool: toolkit.NewBaseTool(
-			"ls",
+			"list_dir",
 			"列出目录内容。优先用合适的 depth 一次取得所需子树；多个独立目录可在同一轮并行调用。",
 			"1.0.0",
 			lscore.Parameters(),

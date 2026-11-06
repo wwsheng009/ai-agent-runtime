@@ -18,7 +18,7 @@ func TestHandlerListsDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "alpha.txt"), []byte("a"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"path": "."},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -40,7 +40,7 @@ func TestHandlerListsDirectory(t *testing.T) {
 // TestHandlerClassifiesMissingDirectory pins the stable NOT_FOUND code instead
 // of returning a raw filesystem error.
 func TestHandlerClassifiesMissingDirectory(t *testing.T) {
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"path": "missing"},
 		Runtime: &fakeRuntime{paths: fakePaths{root: t.TempDir()}},

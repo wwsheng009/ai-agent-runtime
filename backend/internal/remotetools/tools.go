@@ -16,14 +16,14 @@ import (
 // Tool names are the canonical (unprefixed) identities. The registry applies the
 // configured prefix on top of these.
 const (
-	ToolView = "view"
-	ToolLs   = "ls"
-	ToolGlob = "glob"
-	ToolGrep = "grep"
+	ToolView    = "view"
+	ToolListDir = "list_dir"
+	ToolGlob    = "glob"
+	ToolGrep    = "grep"
 )
 
 // readOnlyTools is the P1 surface. Order is stable so tools/list is stable.
-var readOnlyTools = []string{ToolView, ToolLs, ToolGlob, ToolGrep}
+var readOnlyTools = []string{ToolView, ToolListDir, ToolGlob, ToolGrep}
 
 // writeTools is the P2 mutation surface.
 var writeTools = []string{ToolWrite, ToolEdit, ToolAppend, ToolApplyPatch}
@@ -148,7 +148,7 @@ func (c *Config) enabledToolsBase() []string {
 		filtered := make([]string, 0, len(base))
 		for _, name := range base {
 			switch name {
-			case ToolView, ToolLs, ToolGlob, ToolGrep, ToolArtifactRead:
+			case ToolView, ToolListDir, ToolGlob, ToolGrep, ToolArtifactRead:
 				filtered = append(filtered, name)
 			}
 		}

@@ -31,7 +31,7 @@ import (
 type Profile string
 
 const (
-	// ProfileReadonly exposes view/ls/glob/grep only.
+	// ProfileReadonly exposes view/list_dir/glob/grep only.
 	ProfileReadonly Profile = "readonly"
 	// ProfileStandard adds file-mutating tools (write/edit/apply_patch/...).
 	ProfileStandard Profile = "standard"

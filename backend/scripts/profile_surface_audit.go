@@ -20,8 +20,8 @@ import (
 
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
-	profileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	profileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -29,7 +29,7 @@ import (
 // localDenylist is the profile's tools.denylist, kept in sync with
 // .tmp/prof/profiles/remote/profile.yaml.
 var localDenylist = []string{
-	"view", "ls", "glob", "grep", "read", "rg",
+	"view", "list_dir", "glob", "grep", "read", "rg",
 	"write", "edit", "apply_patch", "append_write", "multiedit",
 	"shell", "bash", "execute_shell_command",
 	"job_start", "job_output", "job_cancel", "job_list", "job_search",

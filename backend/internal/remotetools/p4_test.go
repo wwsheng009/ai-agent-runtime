@@ -193,7 +193,7 @@ func TestMutualTLSAuthorizesWithoutToken(t *testing.T) {
 	}
 	defer session.Close()
 
-	body := callTool(t, ctx, session, "remote_dev__ls", map[string]interface{}{"path": "."})
+	body := callTool(t, ctx, session, "remote_dev__list_dir", map[string]interface{}{"path": "."})
 	if !strings.Contains(body, "README.md") {
 		t.Fatalf("mTLS session could not list the workspace: %s", body)
 	}

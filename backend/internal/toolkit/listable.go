@@ -193,7 +193,7 @@ func metadataString(metadata map[string]interface{}, key string) string {
 func isBuiltinCoreToolName(name string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	switch normalized {
-	case "view", "grep", "glob", "ls",
+	case "view", "grep", "glob", "list_dir",
 		"write", "edit", "multiedit", "apply_patch", "append_write",
 		"todos", "artifact_read", "web_search", "fetch", "download",
 		"ask_user_question", "plan_enter", "plan_exit",

@@ -9,7 +9,7 @@ profile:
 prompts:
   mode: replace
 
-# 工具面 = 读取/检索（view/grep/glob/ls）+ 基础编辑（write/edit/apply_patch）+ 命令执行（shell）；
+# 工具面 = 读取/检索（view/grep/glob/list_dir）+ 基础编辑（write/edit/apply_patch）+ 命令执行（shell）；
 # 读取/检索/编辑/执行的最小集，不放行子代理/团队等控制面工具。
 # read_only: false 允许写操作与命令执行，使 agent 能完成基础的文件编辑与命令。
 tools:
@@ -17,7 +17,7 @@ tools:
     - view
     - grep
     - glob
-    - ls
+    - list_dir
     - write
     - edit
     - apply_patch

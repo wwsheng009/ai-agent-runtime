@@ -48,7 +48,7 @@ func TestRemoteTemplateDeniesEveryLocalWriteAndExecTool(t *testing.T) {
 		"shell", "bash", "execute_shell_command",
 		"job_start", "job_output", "job_cancel",
 		// read family: denied so the tool list contains exactly one owner per name
-		"view", "ls", "glob", "grep",
+		"view", "list_dir", "glob", "grep",
 	}
 	for _, tool := range required {
 		if !strings.Contains(text, "- "+tool+"\n") {

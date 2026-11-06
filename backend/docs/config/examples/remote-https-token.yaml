@@ -26,7 +26,7 @@
 # 无 token 访问 → 401 Unauthorized；带正确 token → 200（MCP 握手成功）。
 
 workspace: /srv/app            # 必填：相对路径锚点 + jail 根 + 默认 cwd
-profile: ops                   # 暴露 view/ls/glob/grep/write/edit/apply_patch/shell...
+profile: ops                   # 暴露 view/list_dir/glob/grep/write/edit/apply_patch/shell...
 toolPrefix: remote_srv         # 工具名前缀：remote_srv__view 等
 targetName: srv
 descriptionStyle: explicit     # 描述带 [remote:srv]，模型不会误认成本地文件

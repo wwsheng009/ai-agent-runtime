@@ -70,12 +70,12 @@ func envdSharedCoreTools(base remoteToolBase, backend *envdBackend) ([]toolkit.T
 		return nil, fmt.Errorf("envd ls schema: %w", err)
 	}
 	lsTool, err := toolkit.NewRuntimeTool(lscore.NewHandler(toolcore.Definition{
-		Name:                ToolLs,
+		Name:                ToolListDir,
 		Description:         base.describe("List a remote directory (one level) with entry type and size."),
 		Version:             "1.0.0",
 		InputSchema:         lsSchema,
 		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
-		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolLs),
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolListDir),
 		DirectCall:          true,
 	}), factory)
 	if err != nil {

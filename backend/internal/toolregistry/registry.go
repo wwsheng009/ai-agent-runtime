@@ -213,7 +213,11 @@ var builtinEntries = []Entry{
 	{Name: "view", Aliases: []string{"read"}, Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
 	{Name: "glob", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
 	{Name: "grep", Aliases: []string{"rg"}, Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
-	{Name: "ls", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
+	// The canonical name is list_dir: `ls` is a real shell command, so exposing
+	// the same spelling as a toolkit tool makes shell invocations ambiguous.
+	// `ls` remains a live compatibility alias (routed to list_dir at dispatch)
+	// but is not exposed as a second model-visible tool.
+	{Name: "list_dir", Aliases: []string{"ls"}, Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
 
 	// ---- 写入（edit 组，全部受 plan-write 豁免约束）----
 	{Name: "edit", Group: GroupEdit, Exposure: sharedExposure, WriteLike: true, PlanWrite: true, ToolkitBuiltin: true},

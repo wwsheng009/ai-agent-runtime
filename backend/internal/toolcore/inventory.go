@@ -16,7 +16,7 @@ type CoreTool struct {
 func V1CoreInventory() []CoreTool {
 	return []CoreTool{
 		{Name: "view", Aliases: []string{"read"}, Capabilities: []Capability{CapReadFS}, Phase: 2},
-		{Name: "ls", Capabilities: []Capability{CapReadFS}, Phase: 2},
+		{Name: "list_dir", Capabilities: []Capability{CapReadFS}, Phase: 2},
 		{Name: "glob", Capabilities: []Capability{CapReadFS}, Phase: 2},
 		{Name: "grep", Aliases: []string{"rg"}, Capabilities: []Capability{CapReadFS}, Phase: 2},
 		{Name: "write", Capabilities: []Capability{CapWriteFS}, Phase: 3},

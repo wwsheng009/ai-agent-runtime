@@ -183,7 +183,7 @@ func TestSharedLsRunsOnTheEnvdAccessor(t *testing.T) {
 	access := &envdAccess{api: fake}
 	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: access}
 
-	handler := lscore.NewHandler(toolcore.Definition{Name: "ls", Version: "1.0.0"})
+	handler := lscore.NewHandler(toolcore.Definition{Name: "list_dir", Version: "1.0.0"})
 	result := runHandler(t, handler, map[string]any{"path": "."}, runtime)
 	if !result.Success {
 		t.Fatalf("ls against the accessor failed: %s", result.Content)
@@ -222,7 +222,7 @@ func TestSharedLsDoesNotDescendADirectoryLink(t *testing.T) {
 
 	access := &envdAccess{api: fake}
 	runtime := envdCoreRuntime{paths: envdCorePaths{root: "/srv/work"}, access: access}
-	handler := lscore.NewHandler(toolcore.Definition{Name: "ls", Version: "1.0.0"})
+	handler := lscore.NewHandler(toolcore.Definition{Name: "list_dir", Version: "1.0.0"})
 	result := runHandler(t, handler, map[string]any{"path": ".", "depth": 3}, runtime)
 	if !result.Success {
 		t.Fatalf("ls against the accessor failed: %s", result.Content)

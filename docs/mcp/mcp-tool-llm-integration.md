@@ -43,7 +43,7 @@
   - 去重并注入 `metadata["mcp_name"]`；
   - 经 `filterToolDefinitionsByShouldList` → `optimizeModelToolSurface` → 排序。
 - MCP 与本地 toolkit 合并：`backend/internal/tools/manager.go:74-101`
-  - MCP 工具先入列表；同名时以 MCP 为准（`ls/glob/grep/view` 除外，见 §3.4）；
+  - MCP 工具先入列表；同名时以 MCP 为准（`list_dir/glob/grep/view` 除外，见 §3.4）；
   - 使用 `mcpregistry.CallableToolNames` 的结果作为对外名称。
 - 工具直出（2026-09-18 起）：**不再按目录规模做自动搜索投影**。所有通过 `should_list`/`list_when` 与执行策略的工具（含全部启用的 MCP 工具）直接进入 `tools`；`search_tool` 仅在宿主显式注册时可用。工具规模由「MCP 工具级启用/禁用」配置显式治理。
 - 回合冻结：`resolveAvailableTools` → `freezeToolSurfaceForTurn`（`backend/internal/agent/loop.go:1593-1599, 3765-3770`），保证同一 turn 内 tools 前缀稳定（prompt cache）。

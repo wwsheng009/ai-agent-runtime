@@ -23,7 +23,7 @@ agents:
         - view
         - grep
         - glob
-        - ls
+        - list_dir
         - shell
       denylist:
         - write

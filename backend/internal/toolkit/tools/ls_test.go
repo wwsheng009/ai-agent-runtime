@@ -160,8 +160,8 @@ func TestLsTool_Interface(t *testing.T) {
 
 	var _ toolkit.Tool = tool
 
-	if tool.Name() != "ls" {
-		t.Errorf("expected name 'ls', got '%s'", tool.Name())
+	if tool.Name() != "list_dir" {
+		t.Errorf("expected name 'list_dir', got '%s'", tool.Name())
 	}
 
 	if tool.Description() == "" {

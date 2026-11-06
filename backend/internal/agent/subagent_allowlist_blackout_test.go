@@ -21,7 +21,7 @@ func TestSubagentRoleDefaultsSurviveParentAllowlist(t *testing.T) {
 	parent.SetSubagentScheduler(NewSubagentScheduler(parent, SubagentSchedulerConfig{}))
 	parent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy([]string{
 		"append_write", "apply_patch", "background_task", "edit", "fetch",
-		"glob", "grep", "ls", "search_tool", "shell", "spawn_subagents",
+		"glob", "grep", "list_dir", "search_tool", "shell", "spawn_subagents",
 		"todos", "view", "write",
 	}, false))
 
@@ -33,7 +33,7 @@ func TestSubagentRoleDefaultsSurviveParentAllowlist(t *testing.T) {
 
 	task := prepared[0]
 	require.NotEmpty(t, task.ToolsWhitelist, "child must not end up with an empty allowlist")
-	for _, want := range []string{"view", "grep", "ls", "glob", "shell"} {
+	for _, want := range []string{"view", "grep", "list_dir", "glob", "shell"} {
 		require.Contains(t, task.ToolsWhitelist, want)
 	}
 
@@ -107,7 +107,7 @@ func TestSubagentStaleToolVocabularyFailsFastWithoutParentAllowlist(t *testing.T
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reader-1")
 	require.Contains(t, err.Error(), `"read_file" -> "view"`)
-	require.Contains(t, err.Error(), `"list_directory" -> "ls"`)
+	require.Contains(t, err.Error(), `"list_directory" -> "list_dir"`)
 	require.Equal(t, "tool_vocabulary", classifySubagentDeniedPolicy(err.Error()))
 
 	// Registered names stay accepted for the same unrestricted parent, and the

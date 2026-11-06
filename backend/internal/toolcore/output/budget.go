@@ -59,7 +59,7 @@ func ToolBudget(tool string) int {
 		return GrepOutputBudgetBytes
 	case "glob":
 		return GlobOutputBudgetBytes
-	case "ls":
+	case "ls", "list_dir":
 		return LsOutputBudgetBytes
 	case "shell", "bash", "execute_shell_command":
 		return ShellOutputBudgetBytes

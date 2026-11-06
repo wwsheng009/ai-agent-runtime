@@ -28,7 +28,7 @@ func BuiltinDefinitions() []*Definition {
 		{
 			Name:                  "explore",
 			Description:           "Read-only codebase explorer",
-			Tools:                 []string{"view", "grep", "glob", "ls", "shell"},
+			Tools:                 []string{"view", "grep", "glob", "list_dir", "shell"},
 			DisallowedTools:       []string{"write", "edit", "apply_patch", "append_write", "multiedit"},
 			PermissionMode:        "plan",
 			PromptMode:            PromptModeExtend,
@@ -37,15 +37,15 @@ func BuiltinDefinitions() []*Definition {
 			// role keeps write-like tools denied, but path access follows the
 			// session's external-directory admission (§4.5) like the parent.
 			// Explicit sandbox configs on user/project overrides re-narrow it.
-			ReadOnly:              readOnlyTrue(),
-			Body:                  "You are a read-only explorer. Prefer view/grep/glob/ls. Use shell only for read-only commands. Do not mutate the workspace.",
-			SourcePath:            "builtin:explore",
-			Source:                SourceBuiltin,
+			ReadOnly:   readOnlyTrue(),
+			Body:       "You are a read-only explorer. Prefer view/grep/glob/list_dir. Use shell only for read-only commands. Do not mutate the workspace.",
+			SourcePath: "builtin:explore",
+			Source:     SourceBuiltin,
 		},
 		{
 			Name:                  "plan",
 			Description:           "Planning agent that drafts implementation plans",
-			Tools:                 []string{"view", "grep", "glob", "ls", "shell", "write", "edit", "apply_patch"},
+			Tools:                 []string{"view", "grep", "glob", "list_dir", "shell", "write", "edit", "apply_patch"},
 			PermissionMode:        "plan",
 			PromptMode:            PromptModeExtend,
 			CompletionRequirement: CompletionNone,

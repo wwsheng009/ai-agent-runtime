@@ -125,7 +125,7 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 	// rg is a compatibility alias of grep (same schema/implementation).
 	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewGrepTool() }},
 	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewRGTool() }},
-	{Canonical: "ls", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewLsTool() }},
+	{Canonical: "list_dir", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewLsTool() }},
 	{Canonical: "download", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewDownloadTool() }},
 	{Canonical: "fetch", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewFetchTool() }},
 	{Canonical: "multiedit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMultieditTool() }},

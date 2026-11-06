@@ -66,8 +66,8 @@ func main() {
 	assertContains("view", viewBody, "func main()")
 	assertAbsent("view no metadata block", viewBody, "Metadata:")
 
-	lsBody := mustCall(ctx, session, prefix+"__ls", map[string]interface{}{"path": "src"})
-	assertContains("ls", lsBody, "main.go")
+	lsBody := mustCall(ctx, session, prefix+"__list_dir", map[string]interface{}{"path": "src"})
+	assertContains("list_dir", lsBody, "main.go")
 
 	globBody := mustCall(ctx, session, prefix+"__glob", map[string]interface{}{"pattern": "**/*.go"})
 	assertContains("glob", globBody, "src/main.go")

@@ -32,7 +32,7 @@ func TestFilterToolDefinitionsByShouldList(t *testing.T) {
 func TestSimpleGoalProjectionCollapsesSurface(t *testing.T) {
 	// Direct unit: simple goal projection still collapses to tiny surface.
 	tools := []types.ToolDefinition{
-		{Name: "ls"},
+		{Name: "list_dir"},
 		{Name: "glob"},
 		{Name: "view"},
 		{Name: "extra_remote_helper", Metadata: map[string]interface{}{toolkit.MetaDeferLoading: true}},
@@ -47,7 +47,7 @@ func TestSimpleGoalProjectionCollapsesSurface(t *testing.T) {
 		t.Fatal("expected simple goal tools for ls file")
 	}
 	projected := projectSimpleGoalToolSurface("ls file", tools)
-	require.ElementsMatch(t, []string{"ls", "glob"}, toolDefinitionNames(projected))
+	require.ElementsMatch(t, []string{"list_dir", "glob"}, toolDefinitionNames(projected))
 	require.NotContains(t, toolDefinitionNames(projected), toolkit.ToolSearchName)
 }
 
@@ -137,7 +137,7 @@ func TestReActLoop_GetAvailableTools_ListsAuthorizedToolsWithoutProjection(t *te
 	require.NoError(t, err)
 	simpleNames := toolDefinitionNames(simpleTools)
 	assert.NotContains(t, simpleNames, toolkit.ToolSearchName)
-	assert.Subset(t, []string{"ls", "glob"}, simpleNames)
+	assert.Subset(t, []string{"list_dir", "glob"}, simpleNames)
 }
 
 func TestReActLoop_GetAvailableTools_SessionStableSurfaceIgnoresSimpleGoalProjection(t *testing.T) {
@@ -153,7 +153,7 @@ func TestReActLoop_GetAvailableTools_SessionStableSurfaceIgnoresSimpleGoalProjec
 	require.NoError(t, err)
 	require.False(t, frozen)
 	names := toolDefinitionNames(tools)
-	assert.Contains(t, names, "ls")
+	assert.Contains(t, names, "list_dir")
 	assert.Contains(t, names, "glob")
 	assert.Contains(t, names, "view")
 	assert.Contains(t, names, "grep")
@@ -172,7 +172,7 @@ func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBou
 		refreshable: true,
 		tools: []types.ToolDefinition{
 			{Name: "glob"},
-			{Name: "ls"},
+			{Name: "list_dir"},
 		},
 	}
 	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
@@ -189,7 +189,7 @@ func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBou
 	tools, frozen, _, err = loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
 	require.NoError(t, err)
 	require.True(t, frozen)
-	require.ElementsMatch(t, []string{"glob", "ls"}, toolDefinitionNames(tools))
+	require.ElementsMatch(t, []string{"glob", "list_dir"}, toolDefinitionNames(tools))
 }
 
 type testSessionStableToolSurfaceSnapshot struct {
@@ -243,7 +243,7 @@ func (m *mockSearchCatalogMCPManager) ListTools() []skill.ToolInfo {
 	tools := []skill.ToolInfo{
 		{Name: "view", Description: "Read local files", Enabled: true},
 		{Name: "grep", Description: "Search file contents", Enabled: true},
-		{Name: "ls", Description: "List directory", Enabled: true},
+		{Name: "list_dir", Description: "List directory", Enabled: true},
 		{Name: "glob", Description: "Match file paths", Enabled: true},
 		{
 			Name:        "hidden_tool",

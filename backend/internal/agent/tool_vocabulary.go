@@ -19,7 +19,7 @@ const (
 	toolNameView         = "view"
 	toolNameGrep         = "grep"
 	toolNameGlob         = "glob"
-	toolNameLs           = "ls"
+	toolNameListDir      = "list_dir"
 	toolNameShell        = "shell"
 	toolNameWrite        = "write"
 	toolNameEdit         = "edit"

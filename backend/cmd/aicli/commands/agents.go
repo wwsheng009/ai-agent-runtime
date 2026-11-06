@@ -469,13 +469,13 @@ func agentsTemplateContent(template, name, description string) (string, error) {
 		return fmt.Sprintf(`---
 name: %s
 description: %s
-tools: ["view", "grep", "glob", "ls", "shell"]
+tools: ["view", "grep", "glob", "list_dir", "shell"]
 disallowedTools: ["write", "edit", "apply_patch", "append_write", "multiedit"]
 permissionMode: plan
 sandbox: read-only
 ---
 
-You are a read-only investigator. Prefer view/grep/glob/ls; use shell only for
+You are a read-only investigator. Prefer view/grep/glob/list_dir; use shell only for
 read-only commands. Report findings with file:line evidence and never mutate
 the workspace.
 `, name, description), nil
@@ -483,7 +483,7 @@ the workspace.
 		return fmt.Sprintf(`---
 name: %s
 description: %s
-tools: ["view", "grep", "glob", "ls", "shell", "write", "edit", "multiedit", "apply_patch", "append_write"]
+tools: ["view", "grep", "glob", "list_dir", "shell", "write", "edit", "multiedit", "apply_patch", "append_write"]
 permissionMode: default
 sandbox: workspace
 ---

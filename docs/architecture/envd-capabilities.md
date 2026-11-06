@@ -148,7 +148,7 @@ Connect  接入已存在进程，继续读写它的 I/O
 
 | 方法 | 类比 | 说明 |
 |---|---|---|
-| `ListDir` | `ls` | 列目录，返回 `entries[]` |
+| `ListDir` | `list_dir` | 列目录，返回 `entries[]` |
 | `Stat` | `stat` | 取单个路径的元数据 |
 | `MakeDir` | `mkdir` | 建目录 |
 | `Move` | `mv` | `source` → `destination` |

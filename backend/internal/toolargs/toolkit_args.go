@@ -83,7 +83,7 @@ var toolkitArgAliases = map[string]ToolkitArgAliases{
 			toolkitSearchPathArgPair,
 		},
 	},
-	"ls": {
+	"list_dir": {
 		Args: []ToolkitArgAliasPair{toolkitSearchPathArgPair},
 	},
 	"download": {

@@ -77,7 +77,7 @@ func approvalExplanation(approval *runtimechat.ApprovalRequest) chatApprovalExpl
 			Action: "访问网络",
 			Target: truncateChatRuntimeText(approvalRequestArg(args, "url", "query", "q", "pattern"), 120),
 		}
-	case strings.Contains(tool, "view") || strings.Contains(tool, "read") || strings.Contains(tool, "grep") || strings.Contains(tool, "glob") || strings.Contains(tool, "ls"):
+	case strings.Contains(tool, "view") || strings.Contains(tool, "read") || strings.Contains(tool, "grep") || strings.Contains(tool, "glob") || strings.Contains(tool, "list_dir") || strings.Contains(tool, "ls"):
 		return chatApprovalExplanation{
 			Action: "读取文件内容（只读，不修改磁盘）",
 			Target: truncateChatRuntimeText(approvalRequestArg(args, "path", "file_path", "pattern", "query"), 120),

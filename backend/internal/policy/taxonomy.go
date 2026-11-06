@@ -28,7 +28,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"view":              {Name: "view", Kind: types.ToolKindRead, ReadOnly: true},
 	"grep":              {Name: "grep", Kind: types.ToolKindSearch, ReadOnly: true},
 	"glob":              {Name: "glob", Kind: types.ToolKindSearch, ReadOnly: true},
-	"ls":                {Name: "ls", Kind: types.ToolKindRead, ReadOnly: true},
+	"list_dir":          {Name: "list_dir", Kind: types.ToolKindRead, ReadOnly: true},
 	"sourcegraph":       {Name: "sourcegraph", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
 	"web_search":        {Name: "web_search", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
 	"search_tool":       {Name: "search_tool", Kind: types.ToolKindSearch, ReadOnly: true},

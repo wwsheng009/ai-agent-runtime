@@ -1760,6 +1760,15 @@ func TestBashTool_ShellToolkitCommandPreflight(t *testing.T) {
 	if _, blocked := looksLikeShellInvokedToolkitCommand("ls"); blocked {
 		t.Fatal("bare ls should remain a shell command")
 	}
+	// The reported regression: a shell ls pipeline followed by find -path must
+	// not be mistaken for a toolkit call just because -path appears later.
+	if name, blocked := looksLikeShellInvokedToolkitCommand(`ls itsm-frontend/src/lib/api/ | grep -i tenant; echo ---; find . -name 'TenantUsersDrawer*' -not -path '*/node_modules/*'; echo ---; ls itsm-backend/dto/ | grep -i tenant_user`); blocked {
+		t.Fatalf("did not expect shell ls/find chain to be blocked, got name=%q", name)
+	}
+	// Toolkit-style flags only count inside the primary command segment.
+	if name, blocked := looksLikeShellInvokedToolkitCommand(`grep -n "foo" backend | find . -not -path '*/node_modules/*'`); blocked {
+		t.Fatalf("did not expect -path in a later pipeline segment to block grep, got name=%q", name)
+	}
 }
 
 func TestSearchPathGlobCandidates(t *testing.T) {

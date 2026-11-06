@@ -64,7 +64,7 @@ func TestLocalCoreRuntimeAgreesWithRemoteLs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			remoteOut := callTool(t, ctx, session, "remote_dev__ls", tc.args)
+			remoteOut := callTool(t, ctx, session, "remote_dev__list_dir", tc.args)
 			local := runLocalLs(t, root, tc.args)
 			if !local.Success {
 				t.Fatalf("local ls failed: %+v", local.Error)
@@ -101,7 +101,7 @@ func TestRemoteLsMissingPathIsClassified(t *testing.T) {
 
 	// The remote surface must reach the same classification with the same
 	// message shape; only the candidate's root differs (each surface's workspace).
-	remoteOut := callToolExpectingError(t, ctx, session, "remote_dev__ls", map[string]interface{}{"path": "project/setting"})
+	remoteOut := callToolExpectingError(t, ctx, session, "remote_dev__list_dir", map[string]interface{}{"path": "project/setting"})
 	if !strings.Contains(remoteOut, "路径不存在") {
 		t.Fatalf("remote error must use the same path message, got %q", remoteOut)
 	}

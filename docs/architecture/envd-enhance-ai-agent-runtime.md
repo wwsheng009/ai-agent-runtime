@@ -54,7 +54,7 @@ Web console    ─┘
 
 ### 1.3 工具层：`internal/toolkit/tools`
 
-`bash`、`execute_shell_command`、`edit`、`multiedit`、`apply_patch`、`append_write`、`atomic_write`、`glob`、`grep`、`ls`、`read`、`download`、`fetch`、`code_*`（符号检索/引用/导航）、`git_worktree`、`todos`、`artifact_*`。
+`bash`、`execute_shell_command`、`edit`、`multiedit`、`apply_patch`、`append_write`、`atomic_write`、`glob`、`grep`、`list_dir`、`read`、`download`、`fetch`、`code_*`（符号检索/引用/导航）、`git_worktree`、`todos`、`artifact_*`。
 
 注意 `change_notify.go` 的注释写得很清楚：它是 **agent edit hook 的同步标记侧**，只做去重入队，交给知识层 debounce 后索引。**它不是文件系统监听器**。
 
@@ -248,7 +248,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 | 工具 | envd 后端实现 | 备注 |
 |---|---|---|
 | `view` | `Stat` 判断类型 + 读取（经 process `cat` 或 fs 读流） | 优先复用 envd 原生读，失败回落 shell |
-| `ls` | `ListDir` + 本地排序/分页 | 分页、隐藏文件规则沿用本地实现 |
+| `list_dir` | `ListDir` + 本地排序/分页 | 分页、隐藏文件规则沿用本地实现 |
 | `glob` | `ListDir` 递归 + 本地匹配 | envd 无 glob，需本地算 |
 | `grep` | `process` 跑远端 `rg` | 依赖目标机有 ripgrep，无则回落 `grep` |
 | `write` / `edit` / `apply_patch` | 读取 → 本地计算 diff → 回写 | 回写走 envd `process`（2026-10-27 实测：envd 无写文件 RPC；上限 1 MiB，见 §7 第 1 项） |
@@ -282,7 +282,7 @@ func (c *Client) Metrics(ctx context.Context) (HostMetrics, error)
 
 - `internal/envdclient` 骨架 + `Dial` / `Metrics`
 - `remotetargets.Spec` 支持 `envd://`
-- `view` / `ls` 两个工具走 envd
+- `view` / `list_dir` 两个工具走 envd
 - **验收信号**：`aicli --remote 'envd://host:49983' "读一下 README 前 20 行"` 返回正确内容，且 audit 里有 `executionScopeRemote` 记录
 
 ### P1：流式执行 + PTY（3–5 天）｜ ❌ 实际状态（2026-10-28）：未完成

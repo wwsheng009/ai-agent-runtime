@@ -337,7 +337,7 @@ func (r seamRuntime) FileAccess() toolcore.Access { return r.access }
 
 func runLs(t *testing.T, root string, access toolcore.Access, args map[string]any) *toolcore.Result {
 	t.Helper()
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	runtime := seamRuntime{fakeRuntime: &fakeRuntime{paths: fakePaths{root: root}}, access: access}
 	result, err := handler.Execute(context.Background(), &toolcore.Call{Args: args, Runtime: runtime})
 	if err != nil {

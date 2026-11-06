@@ -258,7 +258,7 @@ func viewAudit() schemaAudit {
 
 func lsAudit() schemaAudit {
 	return schemaAudit{
-		tool: "remote_dev__ls",
+		tool: "remote_dev__list_dir",
 		scan: []scanEntry{
 			{file: lsHandlerPath(), receiver: "handler", name: "Execute"},
 		},

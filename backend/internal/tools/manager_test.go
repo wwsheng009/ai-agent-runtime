@@ -287,7 +287,7 @@ func TestNewDefaultManagerWithRuntimeConfig_PreservesParallelDefinitionMetadata(
 
 	want := map[string]bool{
 		"view":       true,
-		"ls":         true,
+		"list_dir":   true,
 		"glob":       true,
 		"grep":       true,
 		"write":      false,
@@ -315,6 +315,32 @@ func TestNewDefaultManagerWithRuntimeConfig_PreservesParallelDefinitionMetadata(
 				t.Fatalf("expected %s supports_parallel=false, got %#v", name, metadata)
 			}
 		}
+	}
+}
+
+// The model-visible read surface must not expose `ls` again: that spelling is
+// a real shell command and remains a hidden compatibility alias only.
+func TestModelVisibleReadSurfaceExposesListDirNotLs(t *testing.T) {
+	manager := NewDefaultManagerWithRuntimeConfig(nil, runtimecfg.DefaultRuntimeConfig())
+	visible := make(map[string]bool)
+	for _, tool := range manager.ListTools() {
+		visible[tool.Name] = true
+	}
+	if !visible["list_dir"] {
+		t.Fatal("expected list_dir on the model-visible surface")
+	}
+	if visible["ls"] {
+		t.Fatal("ls must not be exposed as a second toolkit tool")
+	}
+
+	// Old sessions/profiles can still call the alias; dispatch routes it to
+	// list_dir without advertising an `ls` tool.
+	output, err := manager.Execute(context.Background(), "ls", map[string]interface{}{"path": t.TempDir()})
+	if err != nil {
+		t.Fatalf("compatibility alias ls failed: %v", err)
+	}
+	if !strings.Contains(output, "目录:") {
+		t.Fatalf("expected local list_dir output for ls alias, got %q", output)
 	}
 }
 
@@ -759,7 +785,7 @@ func TestAgentAdapter_FindTool_PrefersLocalToolkitOverToolkitMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindTool failed: %v", err)
 	}
-	if info.Name != "ls" {
+	if info.Name != "list_dir" {
 		t.Fatalf("unexpected tool info: %+v", info)
 	}
 	if info.MCPName != "" {
@@ -791,7 +817,7 @@ func TestAgentAdapter_FindTool_PrefersLocalToolkitOverExternalFilesystemMCPForWo
 	if err != nil {
 		t.Fatalf("FindTool failed: %v", err)
 	}
-	if info.Name != "ls" {
+	if info.Name != "list_dir" {
 		t.Fatalf("unexpected tool info: %+v", info)
 	}
 	if info.MCPName != "" {

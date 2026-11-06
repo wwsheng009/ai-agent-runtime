@@ -81,7 +81,7 @@ prompts:
 agents:                     # 按 agent 的内联覆盖（provider / model / tools）
   explore:
     tools:
-      allowlist: [view, grep, glob, ls, shell]
+      allowlist: [view, grep, glob, list_dir, shell]
       denylist: [write, edit, apply_patch, append_write, multiedit]
 ```
 

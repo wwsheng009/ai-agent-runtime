@@ -22,7 +22,7 @@ func TestHandlerRendersTreeWithDepth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"depth": 3},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -56,7 +56,7 @@ func TestHandlerDepthOneMatchesOneLevelListing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -81,7 +81,7 @@ func TestHandlerFileTargetReportsSize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"path": "main.go"},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -108,7 +108,7 @@ func TestHandlerEmptyDirectoryIsEmptySuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"path": "empty"},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -143,7 +143,7 @@ func TestHandlerSymlinkedRootIsListedEvenWhenFollowFalse(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"path": "linked-root", "follow": false},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -173,7 +173,7 @@ func TestHandlerClampsDepth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"depth": 999},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},
@@ -193,7 +193,7 @@ func TestHandlerClampsDepth(t *testing.T) {
 // mistake, not a request for the default.
 func TestHandlerRejectsNonPositiveDepth(t *testing.T) {
 	root := t.TempDir()
-	handler := NewHandler(toolcore.Definition{Name: "ls"})
+	handler := NewHandler(toolcore.Definition{Name: "list_dir"})
 	result, err := handler.Execute(context.Background(), &toolcore.Call{
 		Args:    map[string]any{"depth": 0},
 		Runtime: &fakeRuntime{paths: fakePaths{root: root}},

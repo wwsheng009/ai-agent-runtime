@@ -9,7 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
-// Parameters is the schema both surfaces publish. There is one ls tool, so the
+// Parameters is the schema both surfaces publish. There is one list_dir tool, so the
 // local tree listing (depth) and the remote one-level listing are the same
 // capability: depth defaults to 1, which is exactly the old remote behavior.
 func Parameters() map[string]interface{} {
@@ -18,7 +18,7 @@ func Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "目录路径，默认为当前目录。多个独立目录可在同一 assistant 响应中并行发起 ls 调用。",
+				"description": "目录路径，默认为当前目录。多个独立目录可在同一 assistant 响应中并行发起 list_dir 调用。",
 			},
 			"depth": map[string]interface{}{
 				"type":        "integer",
@@ -39,13 +39,13 @@ func Parameters() map[string]interface{} {
 	}
 }
 
-// NewHandler builds the surface-independent ls Handler. The caller supplies
+// NewHandler builds the surface-independent list_dir Handler. The caller supplies
 // the Definition (schema, description, aliases) and injects a Runtime per call;
 // this keeps one listing implementation while local/remote surfaces keep their
 // own schemas and output policy.
 func NewHandler(def toolcore.Definition) toolcore.Handler {
 	if def.Name == "" {
-		def.Name = "ls"
+		def.Name = "list_dir"
 	}
 	if def.Version == "" {
 		def.Version = "1.0.0"
@@ -97,9 +97,9 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check directory permissions",
 			fmt.Errorf("无法访问路径 %s: %w", display, statErr)), nil
 	}
-	// A file path is a valid ls argument: it reports that one file's size and
+	// A file path is a valid list_dir argument: it reports that one file's size and
 	// mode instead of failing or listing its parent. The local tool has always
-	// behaved this way, and `ls <file>` is how a caller confirms a path exists.
+	// behaved this way, and `list_dir <file>` is how a caller confirms a path exists.
 	if !info.IsDir() {
 		metadata := map[string]interface{}{
 			"path":           display,
@@ -179,7 +179,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		"is_truncated": truncated,
 	}
 	if truncated {
-		metadata[toolresult.MetadataNextActionKey] = "目录条目超过 ls 预算已截断；请缩小 depth、分目录查看，或用 glob/grep 精确定位。不要原样重试同一路径。"
+		metadata[toolresult.MetadataNextActionKey] = "目录条目超过 list_dir 预算已截断；请缩小 depth、分目录查看，或用 glob/grep 精确定位。不要原样重试同一路径。"
 	}
 	if listing.Total == 0 {
 		toolresult.MarkEmptySuccess(metadata)

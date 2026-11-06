@@ -152,7 +152,7 @@ func TestStdioTransportEndToEnd(t *testing.T) {
 	}
 
 	// ls
-	lsResult := callTool(t, ctx, session, "remote_dev__ls", map[string]interface{}{"path": "src"})
+	lsResult := callTool(t, ctx, session, "remote_dev__list_dir", map[string]interface{}{"path": "src"})
 	if !strings.Contains(lsResult, "main.go") {
 		t.Fatalf("ls output missing file: %s", lsResult)
 	}
@@ -299,7 +299,7 @@ func TestHTTPEndToEnd(t *testing.T) {
 	}
 	defer session.Close()
 
-	result := callTool(t, ctx, session, "remote_dev__ls", map[string]interface{}{"path": "."})
+	result := callTool(t, ctx, session, "remote_dev__list_dir", map[string]interface{}{"path": "."})
 	if !strings.Contains(result, "README.md") {
 		t.Fatalf("unexpected ls output: %s", result)
 	}

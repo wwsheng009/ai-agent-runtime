@@ -21,8 +21,8 @@ import (
 // 控制面的模板用通配（["*"] / ["subagent_*"]）或显式名单放行；本测试按
 // `KnownToolTaxonomyNames()` 的全量清单计量，两个模板的生效工具面均
 // 远低于 40%：
-//   - minimal 生效 7（view/grep/glob/ls/write/edit/apply_patch，读取 + 基础文件编辑）；
-//   - review 生效 6（fetch/glob/grep/ls/view/web_search）。
+//   - minimal 生效 7（view/grep/glob/list_dir/write/edit/apply_patch，读取 + 基础文件编辑）；
+//   - review 生效 6（fetch/glob/grep/list_dir/view/web_search）。
 //
 // 两个模板被排除的目录工具均未出现在 tools[]（extra=0，无"假裁剪"）。
 func TestBuiltinTemplateToolSurfaceQuantifiedBound(t *testing.T) {

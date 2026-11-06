@@ -252,7 +252,7 @@ func validateTools(tools []*mcp.Tool, prefix string) ([]toolSummary, error) {
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Name < summaries[j].Name })
 
-	for _, suffix := range []string{"view", "ls", "glob", "grep", "shell", "artifact_read"} {
+	for _, suffix := range []string{"view", "list_dir", "glob", "grep", "shell", "artifact_read"} {
 		name := prefix + "__" + suffix
 		if !seen[name] {
 			return nil, fmt.Errorf("missing required tool %q", name)
@@ -273,7 +273,7 @@ func (c *canary) smoke(urlFlag string) {
 	}
 	cases := []readCase{
 		{"view README.md", c.tool("view"), map[string]any{"file_path": "README.md", "limit": 20}},
-		{"ls .", c.tool("ls"), map[string]any{"path": "."}},
+		{"list_dir .", c.tool("list_dir"), map[string]any{"path": "."}},
 		{"glob **/*.md", c.tool("glob"), map[string]any{"pattern": "**/*.md", "path": "."}},
 		{"grep README", c.tool("grep"), map[string]any{"pattern": "README", "path": ".", "glob": "*.md"}},
 		{"shell git status", c.tool("shell"), map[string]any{"command": "git status"}},
@@ -374,7 +374,7 @@ func (c *canary) soak(urlFlag string, count int) {
 		args map[string]any
 	}{
 		{c.tool("view"), map[string]any{"file_path": "README.md", "limit": 20}},
-		{c.tool("ls"), map[string]any{"path": "."}},
+		{c.tool("list_dir"), map[string]any{"path": "."}},
 		{c.tool("glob"), map[string]any{"pattern": "**/*.md", "path": "."}},
 		{c.tool("grep"), map[string]any{"pattern": "README", "path": ".", "glob": "*.md"}},
 		{c.tool("shell"), map[string]any{"command": "git status"}},

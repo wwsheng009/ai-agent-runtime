@@ -49,9 +49,9 @@ var (
 	// 下列名单只写规范名；CallableNames 展开现役别名（bash/rg/read/...），
 	// 使可见性检测对模型可能请求的任意拼写都成立，而拼写表只在
 	// internal/toolregistry 维护一份。
-	shellGuidanceTools       = toolregistry.CallableNames("shell", "aicli_exec", "grep", "view", "ls", "glob")
+	shellGuidanceTools       = toolregistry.CallableNames("shell", "aicli_exec", "grep", "view", "list_dir", "glob")
 	fileEditingGuidanceTools = toolregistry.CallableNames("apply_patch", "edit", "write", "append_write", "multiedit")
-	parallelGuidanceTools    = toolregistry.CallableNames("view", "grep", "glob", "ls", "shell", "aicli_exec")
+	parallelGuidanceTools    = toolregistry.CallableNames("view", "grep", "glob", "list_dir", "shell", "aicli_exec")
 	delegationGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn")
 	multiAgentGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn", "team_spawn", "subagent_wait", "team_wait")
 	todosGuidanceTools       = toolregistry.CallableNames("todos")
