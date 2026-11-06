@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -83,6 +84,229 @@ func TestAgentTranscriptView_SeparatesChildTimelineFromParent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, parentEvents, 1)
 	require.Equal(t, "parent-only answer", payloadStringValue(parentEvents[0].Payload["content"]))
+}
+
+// TestAgentTranscriptView_MergesReasoningStreamDeltas pins the child transcript
+// rendering contract for streaming reasoning: deltas that share one
+// request/stream identity are one logical block. Rendering each transport delta
+// as its own [reasoning] block turns a coherent thought into a fragmented column
+// and is the production shape that produced the "tests all pass (" /
+// "65 lib tests" / "+ integration tests)" output.
+func TestAgentTranscriptView_MergesReasoningStreamDeltas(t *testing.T) {
+	host, rootSession, _ := newLocalQuotaHarness(t, 1, 0)
+	session := chatAgentCleanupHarnessSession(host, rootSession)
+
+	const (
+		childSessionID = "held-child-session"
+		traceID        = "trace_reasoning_stream"
+		requestID      = "llm_req_reasoning_stream"
+		streamID       = "stream_reasoning_stream"
+	)
+	deltas := []string{
+		"Default",
+		" build and",
+		" default",
+		" tests all pass (",
+		"65 lib tests",
+		" + integration tests).",
+		" \n\nNow",
+		" the full feature test",
+		" run.",
+	}
+	for index, delta := range deltas {
+		appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventAssistantReasoning,
+			map[string]interface{}{
+				"trace_id":        traceID,
+				"logical_turn_id": traceID,
+				"llm_request_id":  requestID,
+				"stream_id":       streamID,
+				"step":            7,
+				"sequence":        index + 1,
+				"mode":            "append",
+				"text":            delta,
+				"reasoning": map[string]interface{}{
+					"format":     "stream_delta",
+					"summary":    delta,
+					"streamable": true,
+					"visibility": "summary",
+				},
+			})
+	}
+	appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventToolStarted,
+		map[string]interface{}{"tool_name": "shell", "tool_call_id": "call-after-reasoning"})
+
+	view, err := buildChatAgentTranscriptView(session, chatAgentTranscriptOptions{Target: "/root/held-child"})
+	require.NoError(t, err)
+	text := strings.Join(view.Lines(), "\n")
+
+	require.Equal(t, 1, strings.Count(text, "[reasoning]"),
+		"streaming deltas for one request must render as exactly one reasoning block:\n%s", text)
+	require.Contains(t, text, "Default build and default tests all pass (65 lib tests + integration tests).")
+	require.Contains(t, text, "Now the full feature test run.")
+	require.NotContains(t, text, "[reasoning]\n  Default\n[reasoning]")
+}
+
+// TestAgentTranscriptView_ReasoningSnapshotReplacesDeltas 覆盖 provider 在增量
+// 之后补发权威 summary 的形态：块位置不变，正文整体替换，不能拼接出
+// "partialFull" 之类的重复内容。
+func TestAgentTranscriptView_ReasoningSnapshotReplacesDeltas(t *testing.T) {
+	host, rootSession, _ := newLocalQuotaHarness(t, 1, 0)
+	session := chatAgentCleanupHarnessSession(host, rootSession)
+
+	const childSessionID = "held-child-session"
+	identity := map[string]interface{}{
+		"trace_id":        "trace_reasoning_snapshot",
+		"logical_turn_id": "trace_reasoning_snapshot",
+		"llm_request_id":  "llm_req_reasoning_snapshot",
+		"stream_id":       "stream_reasoning_snapshot",
+		"step":            3,
+	}
+	appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventAssistantReasoning,
+		mergeTestPayload(identity, map[string]interface{}{
+			"sequence": 1,
+			"mode":     "append",
+			"text":     "partial",
+			"reasoning": map[string]interface{}{
+				"format":     "stream_delta",
+				"summary":    "partial",
+				"streamable": true,
+				"visibility": "summary",
+			},
+		}))
+	appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventAssistantReasoning,
+		mergeTestPayload(identity, map[string]interface{}{
+			"mode": "replace",
+			"reasoning": map[string]interface{}{
+				"format":     "summary",
+				"summary":    "authoritative reasoning body",
+				"visibility": "summary",
+			},
+		}))
+
+	view, err := buildChatAgentTranscriptView(session, chatAgentTranscriptOptions{Target: "/root/held-child"})
+	require.NoError(t, err)
+	text := strings.Join(view.Lines(), "\n")
+
+	require.Equal(t, 1, strings.Count(text, "[reasoning]"), "snapshot must replace in place:\n%s", text)
+	require.Contains(t, text, "authoritative reasoning body")
+	require.NotContains(t, text, "partialauthoritative")
+	require.NotContains(t, text, "partial")
+}
+
+// TestAgentTranscriptView_KeepsDistinctReasoningRequestsSeparate guards the other
+// side of the aggregation contract: adjacent reasoning events with different
+// request/stream identity are different thoughts and must keep two blocks.
+func TestAgentTranscriptView_KeepsDistinctReasoningRequestsSeparate(t *testing.T) {
+	host, rootSession, _ := newLocalQuotaHarness(t, 1, 0)
+	session := chatAgentCleanupHarnessSession(host, rootSession)
+	const childSessionID = "held-child-session"
+
+	appendReasoning := func(step int, requestID, text string) {
+		appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventAssistantReasoning,
+			map[string]interface{}{
+				"trace_id":        "trace-reasoning-separate",
+				"logical_turn_id": "trace-reasoning-separate",
+				"llm_request_id":  requestID,
+				"stream_id":       "stream-" + requestID,
+				"step":            step,
+				"mode":            "append",
+				"text":            text,
+				"reasoning": map[string]interface{}{
+					"format":     "stream_delta",
+					"summary":    text,
+					"visibility": "summary",
+				},
+			})
+	}
+	appendReasoning(1, "request-a", "first thought")
+	appendReasoning(2, "request-b", "second thought")
+
+	view, err := buildChatAgentTranscriptView(session, chatAgentTranscriptOptions{Target: "/root/held-child"})
+	require.NoError(t, err)
+	text := strings.Join(view.Lines(), "\n")
+
+	require.Equal(t, 2, strings.Count(text, "[reasoning]"), "distinct requests must not be glued:\n%s", text)
+	require.Contains(t, text, "first thought")
+	require.Contains(t, text, "second thought")
+}
+
+// TestAgentTranscriptBodyBuilder_RetryResetDropsPartialReasoning 锁定
+// assistant_stream_reset 的重试边界：失败 attempt 的 reasoning 增量不得与
+// 新 attempt 粘在一起。
+func TestAgentTranscriptBodyBuilder_RetryResetDropsPartialReasoning(t *testing.T) {
+	builder := newChatAgentTranscriptBodyBuilder()
+	identity := map[string]interface{}{
+		"trace_id":        "trace_reasoning_reset",
+		"logical_turn_id": "trace_reasoning_reset",
+		"llm_request_id":  "llm_req_reasoning_reset",
+		"stream_id":       "stream_reasoning_reset",
+		"step":            1,
+	}
+	builder.appendEvent(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantReasoning,
+		Payload: mergeTestPayload(identity, map[string]interface{}{"mode": "append", "text": "failed attempt"}),
+	})
+	builder.appendEvent(runtimeevents.Event{Type: runtimeevents.EventAssistantStreamReset, Payload: identity})
+	builder.appendEvent(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantReasoning,
+		Payload: mergeTestPayload(identity, map[string]interface{}{"mode": "append", "text": "retry attempt"}),
+	})
+
+	text := strings.Join(builder.lines, "\n")
+	require.Contains(t, text, "retry attempt")
+	require.NotContains(t, text, "failed attempt")
+	require.Equal(t, 1, strings.Count(text, "[reasoning]"), "reset must reuse one ordering slot:\n%s", text)
+}
+
+// TestAgentTranscriptView_DefaultWindowExpandsToRowBudget 锁定默认视图的内容
+// 预算：流式 reasoning 的微增量会让固定 200 条事件只覆盖很少的可见行。默认
+// 视图必须继续向更早事件补页，直到正文能覆盖 400 行窗口或到达会话开头；
+// 显式 limit=N 仍保持精确的事件窗口语义。
+func TestAgentTranscriptView_DefaultWindowExpandsToRowBudget(t *testing.T) {
+	host, rootSession, _ := newLocalQuotaHarness(t, 1, 0)
+	session := chatAgentCleanupHarnessSession(host, rootSession)
+	const childSessionID = "held-child-session"
+
+	const total = chatAgentTranscriptDefaultLimit + 50
+	// The default harness runtime log keeps only 64 events; this test needs a
+	// window large enough to prove default expansion crosses that boundary.
+	store := runtimechat.NewInMemoryRuntimeStore(total + 10)
+	host.EventStore = store
+	host.RuntimeStore = store
+	for index := 0; index < total; index++ {
+		appendChatTranscriptTestEvent(t, host, childSessionID, runtimechat.EventAssistantMessage,
+			map[string]interface{}{"content": fmt.Sprintf("message-%03d", index)})
+	}
+
+	view, err := buildChatAgentTranscriptView(session, chatAgentTranscriptOptions{Target: "/root/held-child"})
+	require.NoError(t, err)
+	require.Len(t, view.Events, total, "default view must expand past the fixed event count")
+	text := strings.Join(view.Lines(), "\n")
+	require.Contains(t, text, "events="+strconv.Itoa(total))
+	require.Contains(t, text, "message-000")
+	require.Contains(t, text, fmt.Sprintf("message-%03d", total-1))
+
+	explicit, err := buildChatAgentTranscriptView(session, chatAgentTranscriptOptions{
+		Target:        "/root/held-child",
+		Limit:         chatAgentTranscriptDefaultLimit,
+		LimitExplicit: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, explicit.Events, chatAgentTranscriptDefaultLimit)
+	explicitText := strings.Join(explicit.Lines(), "\n")
+	require.NotContains(t, explicitText, "message-000")
+	require.Contains(t, explicitText, fmt.Sprintf("message-%03d", total-1))
+}
+
+func mergeTestPayload(base, extra map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{}, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
 }
 
 // TestAgentTranscriptView_EmptyUnknownAndClose 覆盖视图的边界：无事件的子会话
@@ -227,6 +451,34 @@ func TestAgentTranscriptFollow_MergesChildEventsAndStopsOnChildTerminal(t *testi
 	require.Contains(t, strings.Join(view.Lines(), "\n"), "follow-delta")
 	require.True(t, chatAgentTranscriptFollowActive(session, "held-child-session"))
 	require.Empty(t, session.RuntimeSession.History, "follow 增量只进子视图，不得改写父会话状态")
+
+	// Live reasoning deltas use the same aggregation as the snapshot path: one
+	// [reasoning] divider for the logical block, not one per transport chunk.
+	for index, delta := range []string{"live ", "reasoning"} {
+		refreshChatAgentTranscriptFollowPopup(session, session.agentTranscriptFollow, runtimeevents.Event{
+			Type:      runtimechat.EventAssistantReasoning,
+			SessionID: "held-child-session",
+			Payload: map[string]interface{}{
+				"trace_id":        "trace-follow-reasoning",
+				"logical_turn_id": "trace-follow-reasoning",
+				"llm_request_id":  "request-follow-reasoning",
+				"stream_id":       "stream-follow-reasoning",
+				"step":            1,
+				"sequence":        index + 1,
+				"mode":            "append",
+				"text":            delta,
+				"reasoning": map[string]interface{}{
+					"format":     "stream_delta",
+					"summary":    delta,
+					"streamable": true,
+					"visibility": "summary",
+				},
+			},
+		}, false)
+	}
+	followText := strings.Join(view.Lines(), "\n")
+	require.Equal(t, 1, strings.Count(followText, "[reasoning]"), "live reasoning must stay one block:\n%s", followText)
+	require.Contains(t, followText, "live reasoning")
 
 	// 子会话终态：渲染最终快照后解除订阅，视图标记 ended。
 	host.EventBus.Publish(runtimeevents.Event{Type: runtimechat.EventSessionEnd, SessionID: "held-child-session"})

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	renderencoding "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -30,6 +31,13 @@ const (
 
 	chatAgentTranscriptDefaultLimit = 200
 	chatAgentTranscriptMaxLimit     = 2000
+	// chatAgentTranscriptScanPageSize / chatAgentTranscriptMaxScanEvents 控制
+	// 默认视图向更早事件扩窗的粒度与上限。200 条事件对普通对话足够，但流式
+	// reasoning 的每个 token chunk 都是一条事件：只取尾部 200 条会让一个逻辑
+	// 思考块从中间开始，甚至看不到本轮的 assistant/tool 边界。默认视图按
+	// 400 行正文预算向前补页；显式 limit=N 仍保持精确的尾部事件窗口语义。
+	chatAgentTranscriptScanPageSize  = 1000
+	chatAgentTranscriptMaxScanEvents = 20000
 	// chatAgentTranscriptMaxVisibleRows 对齐前端下钻对话框
 	// （frontend/src/components/workspace/trajectory/subagent-session-dialog.tsx）
 	// 的 MAX_VISIBLE_ROWS=400：视图只保留最近 400 行正文，超出部分以
@@ -137,10 +145,11 @@ func executeStructuredAgentTranscriptCommand(session *ChatSession, command strin
 //	/agent [target] [limit=N] [follow] [timeout=10s]
 //	/agents view|open|transcript [target] [limit=N] [follow] [timeout=10s]
 type chatAgentTranscriptOptions struct {
-	Target  string
-	Limit   int
-	Follow  bool
-	Timeout time.Duration
+	Target        string
+	Limit         int
+	LimitExplicit bool
+	Follow        bool
+	Timeout       time.Duration
 }
 
 func parseChatAgentTranscriptArgs(argument string) chatAgentTranscriptOptions {
@@ -162,6 +171,7 @@ func parseChatAgentTranscriptArgs(argument string) chatAgentTranscriptOptions {
 		}
 		if value, ok := chatAgentTranscriptLimitToken(field); ok {
 			opts.Limit = value
+			opts.LimitExplicit = true
 			continue
 		}
 		if duration, ok := chatCollabTimeoutToken(field); ok {
@@ -213,6 +223,254 @@ type chatAgentTranscriptView struct {
 	Body         []string
 	Ended        bool
 	FollowActive bool
+
+	// bodyBuilder 保留 reasoning 流的聚合状态：一条 reasoning 在事件流里通常由
+	// 多个 delta 组成，视图必须按 request/stream 身份把它们合并成一个逻辑块，
+	// 而不是为每条 delta 打印一次 [reasoning] 分隔行。bodyTail 保存事件正文之后
+	// 追加的非事件行（历史回放/待审批提示），重建 Body 时原样保留。
+	bodyBuilder *chatAgentTranscriptBodyBuilder
+	bodyTail    []string
+}
+
+// chatAgentTranscriptReasoningGroup 记录一个 reasoning 逻辑块在 Body 中的行区间，
+// 后续 delta/snapshot 到达时就地替换该区间，而不是追加新块。
+type chatAgentTranscriptReasoningGroup struct {
+	start int
+	end   int
+	// strings.Builder avoids O(N²) copying when a provider streams thousands of
+	// tiny reasoning deltas. Rendered body lines are allocated independently, so
+	// later Reset/Write never aliases a line already in Body.
+	text  strings.Builder
+	final bool
+}
+
+// chatAgentTranscriptBodyBuilder 把事件流投影为 transcript 正文。普通事件直接
+// 追加；reasoning 事件按规范化请求身份合并进已有块，只有新请求才创建新块。
+//
+// 这套身份解析与 chat_runtime_events.go / render/encoding 的 reasoning 聚合保持
+// 同一口径：stream/request 是强身份，step 是逻辑身份；没有身份时才允许相邻
+// reasoning 事件合并。
+type chatAgentTranscriptBodyBuilder struct {
+	lines            []string
+	reasoningGroups  map[string]*chatAgentTranscriptReasoningGroup
+	reasoningAliases map[string]string
+	anonymousKey     string
+}
+
+func newChatAgentTranscriptBodyBuilder() *chatAgentTranscriptBodyBuilder {
+	return &chatAgentTranscriptBodyBuilder{
+		reasoningGroups:  make(map[string]*chatAgentTranscriptReasoningGroup),
+		reasoningAliases: make(map[string]string),
+	}
+}
+
+// appendEvent projects one persisted runtime event into the transcript body.
+func (b *chatAgentTranscriptBodyBuilder) appendEvent(event runtimeevents.Event) {
+	if b == nil {
+		return
+	}
+	if event.Type == runtimeevents.EventAssistantStreamReset {
+		// Retry boundary: the next attempt reuses the same request/stream
+		// identity. Drop the failed attempt's partial reasoning text in place so
+		// the replacement attempt starts a fresh block at the same ordering slot.
+		b.applyReasoningReset(event)
+		b.anonymousKey = ""
+		return
+	}
+	if isChatAgentTranscriptReasoningEvent(event.Type) {
+		b.appendReasoningEvent(event)
+		return
+	}
+	b.anonymousKey = ""
+	if lines := chatAgentTranscriptEventLines(event); len(lines) > 0 {
+		b.lines = append(b.lines, lines...)
+	}
+}
+
+func isChatAgentTranscriptReasoningEvent(eventType string) bool {
+	return eventType == runtimechat.EventAssistantReasoning || eventType == "assistant.reasoning"
+}
+
+func (b *chatAgentTranscriptBodyBuilder) appendReasoningEvent(event runtimeevents.Event) {
+	block := reasoningBlockFromRuntimeEvent(event)
+	if block == nil {
+		return
+	}
+	text := block.RawDisplayText()
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	key := b.reasoningGroupKey(event)
+	if key == "" {
+		return
+	}
+	operation := renderencoding.ReasoningOperationForEvent(event)
+	if group := b.reasoningGroups[key]; group != nil {
+		if group.final && operation == renderencoding.ReasoningOperationAppend {
+			// A terminal snapshot already owns this request. Late transport
+			// deltas must not reopen it or duplicate the body.
+			return
+		}
+		if operation == renderencoding.ReasoningOperationAppend {
+			group.text.WriteString(text)
+		} else {
+			group.text.Reset()
+			group.text.WriteString(text)
+			group.final = true
+		}
+		b.replaceReasoningGroupLines(group)
+		return
+	}
+	group := &chatAgentTranscriptReasoningGroup{
+		start: len(b.lines),
+		final: operation == renderencoding.ReasoningOperationReplace,
+	}
+	group.text.WriteString(text)
+	b.lines = append(b.lines, chatAgentTranscriptReasoningLines(text)...)
+	group.end = len(b.lines)
+	b.reasoningGroups[key] = group
+}
+
+func (b *chatAgentTranscriptBodyBuilder) reasoningGroupKey(event runtimeevents.Event) string {
+	identity := reasoningRenderIdentityFromEvent(event)
+	aliases := append([]string{}, identity.strongAliases()...)
+	aliases = append(aliases, identity.stepAliases()...)
+
+	if key := b.lookupReasoningAlias(aliases); key != "" {
+		b.bindReasoningAliases(key, aliases)
+		b.anonymousKey = ""
+		return key
+	}
+	if len(aliases) == 0 {
+		// No protocol identity at all: only adjacent reasoning events can be
+		// proven to belong to the same block. A non-reasoning event clears the
+		// key so separate unlabelled blocks never glue together.
+		if b.anonymousKey != "" {
+			return b.anonymousKey
+		}
+		key := fmt.Sprintf("anonymous:%d", len(b.reasoningGroups))
+		b.anonymousKey = key
+		return key
+	}
+
+	key := aliases[0]
+	if _, exists := b.reasoningGroups[key]; exists {
+		// Defensive: the alias table should have matched above. Never let two
+		// different requests share one line range if an event omits the alias
+		// that first established the group.
+		key = fmt.Sprintf("%s#%d", key, len(b.reasoningGroups))
+	}
+	b.bindReasoningAliases(key, aliases)
+	b.anonymousKey = ""
+	return key
+}
+
+func (b *chatAgentTranscriptBodyBuilder) lookupReasoningAlias(aliases []string) string {
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		if key := b.reasoningAliases[alias]; key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+func (b *chatAgentTranscriptBodyBuilder) bindReasoningAliases(key string, aliases []string) {
+	if key == "" {
+		return
+	}
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		if b.reasoningAliases[alias] == "" {
+			b.reasoningAliases[alias] = key
+		}
+	}
+}
+
+func (b *chatAgentTranscriptBodyBuilder) applyReasoningReset(event runtimeevents.Event) {
+	identity := reasoningRenderIdentityFromEvent(event)
+	aliases := append([]string{}, identity.strongAliases()...)
+	aliases = append(aliases, identity.stepAliases()...)
+	key := b.lookupReasoningAlias(aliases)
+	if key == "" {
+		return
+	}
+	group := b.reasoningGroups[key]
+	if group == nil {
+		return
+	}
+	group.text.Reset()
+	group.final = false
+	b.replaceReasoningGroupLines(group)
+}
+
+// replaceReasoningGroupLines swaps the group's rendered rows in place and adjusts
+// the recorded ranges of later groups. Reasoning deltas arrive at high frequency;
+// keeping a stable ordering slot avoids the per-delta [reasoning] divider flood.
+func (b *chatAgentTranscriptBodyBuilder) replaceReasoningGroupLines(group *chatAgentTranscriptReasoningGroup) {
+	if group == nil {
+		return
+	}
+	newLines := chatAgentTranscriptReasoningLines(group.text.String())
+	oldStart, oldEnd := group.start, group.end
+	delta := len(newLines) - (oldEnd - oldStart)
+	switch {
+	case delta > 0:
+		b.lines = append(b.lines, make([]string, delta)...)
+		copy(b.lines[oldEnd+delta:], b.lines[oldEnd:])
+		copy(b.lines[oldStart:], newLines)
+	case delta < 0:
+		b.lines = append(b.lines[:oldEnd+delta], b.lines[oldEnd:]...)
+		copy(b.lines[oldStart:], newLines)
+	default:
+		copy(b.lines[oldStart:oldEnd], newLines)
+	}
+	group.end = oldStart + len(newLines)
+	for _, other := range b.reasoningGroups {
+		if other == nil || other == group {
+			continue
+		}
+		if other.start >= oldEnd {
+			other.start += delta
+			other.end += delta
+		}
+	}
+}
+
+func (v *chatAgentTranscriptView) bodyLines() []string {
+	if v == nil || v.bodyBuilder == nil {
+		if v == nil {
+			return nil
+		}
+		return v.Body
+	}
+	if len(v.bodyTail) == 0 {
+		return v.bodyBuilder.lines
+	}
+	lines := make([]string, 0, len(v.bodyBuilder.lines)+len(v.bodyTail))
+	lines = append(lines, v.bodyBuilder.lines...)
+	lines = append(lines, v.bodyTail...)
+	return lines
+}
+
+func (v *chatAgentTranscriptView) appendEvent(event runtimeevents.Event) {
+	if v == nil {
+		return
+	}
+	if v.bodyBuilder == nil {
+		builder := newChatAgentTranscriptBodyBuilder()
+		for _, existing := range v.Events {
+			builder.appendEvent(existing)
+		}
+		v.bodyBuilder = builder
+	}
+	v.Events = append(v.Events, event)
+	v.bodyBuilder.appendEvent(event)
+	v.Body = v.bodyLines()
 }
 
 // buildChatAgentTranscriptView 组装只读视图：解析 target → 读子会话事件 →
@@ -261,6 +519,10 @@ func buildChatAgentTranscriptView(session *ChatSession, opts chatAgentTranscript
 	if err != nil {
 		return nil, fmt.Errorf("读取 agent transcript 失败: %w", err)
 	}
+	limitExplicit := opts.LimitExplicit || (opts.Limit > 0 && opts.Limit != chatAgentTranscriptDefaultLimit)
+	if !limitExplicit {
+		events = expandChatAgentTranscriptEventsForRows(session, sessionID, events, chatAgentTranscriptMaxVisibleRows)
+	}
 	view := &chatAgentTranscriptView{
 		Target:    target,
 		Agent:     *agent,
@@ -268,10 +530,11 @@ func buildChatAgentTranscriptView(session *ChatSession, opts chatAgentTranscript
 		Source:    chatAgentTranscriptSourceEvents,
 		Events:    events,
 	}
-	body := make([]string, 0, len(events))
+	builder := newChatAgentTranscriptBodyBuilder()
 	for _, event := range events {
-		body = append(body, chatAgentTranscriptEventLines(event)...)
+		builder.appendEvent(event)
 	}
+	body := append([]string(nil), builder.lines...)
 	view.Ended = chatAgentTranscriptLastTerminalEvent(events, sessionID) != nil
 	// G9 历史回放：事件流没有覆盖该子会话（已结束且事件被清理，或由其他进程
 	// 写入）时回退到 SessionStore 的 canonical messages。Q2 裁定事件流为主、
@@ -286,6 +549,8 @@ func buildChatAgentTranscriptView(session *ChatSession, opts chatAgentTranscript
 		}
 	}
 	body = append(body, chatAgentTranscriptActionLines(*agent, events)...)
+	view.bodyBuilder = builder
+	view.bodyTail = append([]string(nil), body[len(builder.lines):]...)
 	view.Body = body
 	return view, nil
 }
@@ -308,8 +573,9 @@ func (v *chatAgentTranscriptView) Lines() []string {
 	if v == nil {
 		return nil
 	}
-	body, omitted := capChatAgentTranscriptRows(v.Body, chatAgentTranscriptMaxVisibleRows)
-	visibleRows := len(v.Body)
+	bodyLines := v.bodyLines()
+	body, omitted := capChatAgentTranscriptRows(bodyLines, chatAgentTranscriptMaxVisibleRows)
+	visibleRows := len(bodyLines)
 	if visibleRows > chatAgentTranscriptMaxVisibleRows {
 		visibleRows = chatAgentTranscriptMaxVisibleRows
 	}
@@ -318,7 +584,7 @@ func (v *chatAgentTranscriptView) Lines() []string {
 		source = chatAgentTranscriptSourceEvents
 	}
 	lines := chatAgentTranscriptHeaderLines(v.Agent, v.SessionID, len(v.Events), visibleRows, omitted, source, v.FollowActive, v.Ended)
-	if len(v.Events) == 0 && len(v.Body) == 0 {
+	if len(v.Events) == 0 && len(bodyLines) == 0 {
 		lines = append(lines, "  <empty: 该子会话暂无持久化事件或消息>")
 		return lines
 	}
@@ -385,6 +651,76 @@ func listChatAgentTranscriptEvents(session *ChatSession, sessionID string, limit
 		return tail.ListEventsBefore(ctx, sessionID, math.MaxInt64, limit)
 	}
 	return store.ListEvents(ctx, sessionID, 0, limit)
+}
+
+// expandChatAgentTranscriptEventsForRows widens the default tail window until
+// the rendered body can fill the visible-row budget. A fixed event count is not
+// a content budget: one reasoning stream can be thousands of tiny deltas, so
+// "last 200 events" may be only a few visual lines and can start in the middle
+// of the current thought. Explicit limit=N keeps the historical exact-event
+// window; only the default view auto-expands.
+func expandChatAgentTranscriptEventsForRows(session *ChatSession, sessionID string, events []runtimeevents.Event, targetRows int) []runtimeevents.Event {
+	if session == nil || session.LocalRuntimeHost == nil || targetRows <= 0 || len(events) == 0 {
+		return events
+	}
+	store, ok := session.LocalRuntimeHost.EventStore.(chatAgentTranscriptTailEventStore)
+	if !ok {
+		return events
+	}
+	if chatAgentTranscriptRenderedRowCount(events) >= targetRows {
+		return events
+	}
+	ctx := context.Background()
+	for len(events) < chatAgentTranscriptMaxScanEvents {
+		earliest, ok := chatAgentTranscriptStoredSequence(events[0])
+		if !ok || earliest <= 0 {
+			break
+		}
+		page, err := store.ListEventsBefore(ctx, sessionID, earliest, chatAgentTranscriptScanPageSize)
+		if err != nil || len(page) == 0 {
+			break
+		}
+		if pageEarliest, ok := chatAgentTranscriptStoredSequence(page[0]); !ok || pageEarliest >= earliest {
+			// A tail store must make strict progress towards older sequence
+			// numbers. Fail closed instead of spinning on a malformed window.
+			break
+		}
+		events = append(page, events...)
+		if chatAgentTranscriptRenderedRowCount(events) >= targetRows {
+			break
+		}
+	}
+	return events
+}
+
+func chatAgentTranscriptRenderedRowCount(events []runtimeevents.Event) int {
+	builder := newChatAgentTranscriptBodyBuilder()
+	for _, event := range events {
+		builder.appendEvent(event)
+	}
+	return len(builder.lines)
+}
+
+func chatAgentTranscriptStoredSequence(event runtimeevents.Event) (int64, bool) {
+	if event.Payload == nil {
+		return 0, false
+	}
+	switch value := event.Payload["seq"].(type) {
+	case int64:
+		return value, true
+	case int:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case uint64:
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	default:
+		return 0, false
+	}
 }
 
 // loadChatAgentTranscriptSession 按 session id 读取 SessionStore 中的历史会话
@@ -478,15 +814,7 @@ func chatAgentTranscriptEventLines(event runtimeevents.Event) []string {
 		if block == nil {
 			return nil
 		}
-		text := strings.TrimSpace(firstNonEmptyChatValue(block.Content, block.Summary))
-		if text == "" {
-			return nil
-		}
-		lines := []string{"[reasoning]"}
-		for _, line := range strings.Split(text, "\n") {
-			lines = append(lines, "  "+line)
-		}
-		return lines
+		return chatAgentTranscriptReasoningLines(block.RawDisplayText())
 	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
 		status := "ended"
 		if !payloadBoolValue(event.Payload, "success") {
@@ -502,6 +830,23 @@ func chatAgentTranscriptEventLines(event runtimeevents.Event) []string {
 		return nil
 	}
 	return strings.Split(rendered.Line, "\n")
+}
+
+// chatAgentTranscriptReasoningLines renders one logical reasoning block. Callers
+// must pass the accumulated text, not an individual transport delta: trimming
+// happens once at the block boundary so provider whitespace between deltas is
+// preserved.
+func chatAgentTranscriptReasoningLines(text string) []string {
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	lines := []string{"[reasoning]"}
+	for _, line := range strings.Split(text, "\n") {
+		lines = append(lines, "  "+line)
+	}
+	return lines
 }
 
 // isChatAgentTranscriptTimelineEvent 限定可复用 timeline 渲染的事件类型，
@@ -591,8 +936,7 @@ func refreshChatAgentTranscriptFollowPopup(session *ChatSession, state *chatAgen
 		return
 	}
 	state.mu.Lock()
-	state.view.Events = append(state.view.Events, event)
-	state.view.Body = append(state.view.Body, chatAgentTranscriptEventLines(event)...)
+	state.view.appendEvent(event)
 	if terminal {
 		state.view.Ended = true
 		state.view.FollowActive = false
