@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -13,8 +14,8 @@ import (
 //  1. 本地 runtime host 初始化末尾（initializeLocalChatRuntimeHost →
 //     ensureLocalCacheService）即挂载 collector，不依赖任何
 //     /web/api/cache/* 查询：启动后产生的 llm.request.* 事件全部入账；
-//  2. 终态记录落库 cache_requests，重开 host（等价进程重启 / 重新打开
-//     缓存页）时由 LiveSource 惰性回放，历史明细与 live 记录同源可见。
+//  2. 终态记录落库统一 usage_requests，重开 host（等价进程重启 / 重新打开
+//     缓存页）时由 LiveSource 惰性回放；本地不再写 cache_requests 副本。
 //
 // 回归背景：此前 collector 仅在首次缓存查询时惰性构建，EventBus 订阅
 // 不可回溯，导致"打开缓存页只有 live 记录、没有历史请求"。
@@ -36,8 +37,15 @@ func TestLocalCacheCollectorEagerAttachAndReplay(t *testing.T) {
 		t.Fatal("启动期挂载失败：ensureLocalCacheService 返回 nil")
 	}
 	if !svc.Source().Capabilities().Persisted {
-		t.Fatal("RuntimeStore 未挂上 RequestStore：Persisted=false")
+		t.Fatal("usage_requests replay store 未挂上 RequestStore：Persisted=false")
 	}
+	if host.usageSvc == nil || host.usageSvc.Store() == nil {
+		t.Fatal("cache replay requires the canonical usage analytics store")
+	}
+	t.Cleanup(func() {
+		svc.Close()
+		host.usageSvc.Close()
+	})
 
 	publishCacheStarted(t, bus, sessionID, "req-1", nil)
 	publishCacheFinished(t, bus, sessionID, "req-1", map[string]interface{}{
@@ -48,7 +56,10 @@ func TestLocalCacheCollectorEagerAttachAndReplay(t *testing.T) {
 
 	// 关键断言：未发起任何 HTTP 查询，记录也必须已捕获且已持久化。
 	assertLocalCacheRequestCount(t, svc, sessionID, 2)
-	assertPersistedRequestIDs(t, store, sessionID, "req-1", "req-2")
+	assertPersistedRequestIDs(t, host.usageSvc.Store(), sessionID, "req-1", "req-2")
+	runtimeMirror, err := store.LoadSessionRequests(sessionID)
+	require.NoError(t, err)
+	require.Empty(t, runtimeMirror, "local cache must not write the duplicate cache_requests mirror")
 
 	// 新 host 复用同一 DB：等价重启进程/重新打开缓存页，历史靠回放补齐。
 	bus2 := runtimeevents.NewBus()
@@ -57,6 +68,13 @@ func TestLocalCacheCollectorEagerAttachAndReplay(t *testing.T) {
 	if svc2 == nil {
 		t.Fatal("重开 host 时挂载失败")
 	}
+	if host2.usageSvc == nil || host2.usageSvc.Store() == nil {
+		t.Fatal("reopen cache replay requires the canonical usage analytics store")
+	}
+	t.Cleanup(func() {
+		svc2.Close()
+		host2.usageSvc.Close()
+	})
 	assertLocalCacheRequestCount(t, svc2, sessionID, 2)
 }
 
@@ -71,7 +89,11 @@ func assertLocalCacheRequestCount(t *testing.T, svc *cacheanalytics.Service, ses
 	}
 }
 
-func assertPersistedRequestIDs(t *testing.T, store cacheanalytics.RequestStore, sessionID string, wantIDs ...string) {
+type sessionRequestLoader interface {
+	LoadSessionRequests(sessionID string) ([]cacheanalytics.CacheRequestRecord, error)
+}
+
+func assertPersistedRequestIDs(t *testing.T, store sessionRequestLoader, sessionID string, wantIDs ...string) {
 	t.Helper()
 	records, err := store.LoadSessionRequests(sessionID)
 	if err != nil {

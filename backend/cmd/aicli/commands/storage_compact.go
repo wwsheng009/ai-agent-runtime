@@ -175,6 +175,10 @@ func newStorageCompactCommand() *cobra.Command {
 }
 
 func runStorageCompact(opts storageCompactOptions) int {
+	return runStorageCompactTo(opts, nil)
+}
+
+func runStorageCompactTo(opts storageCompactOptions, captured *[]storageCompactReport) int {
 	if opts.out == nil {
 		opts.out = os.Stdout
 	}
@@ -194,6 +198,7 @@ func runStorageCompact(opts storageCompactOptions) int {
 	}
 	reports := make([]storageCompactReport, 0, len(targets))
 	exit := statsExitOK
+	started := time.Now()
 	for _, target := range targets {
 		report := storageCompactOne(target, opts)
 		reports = append(reports, report)
@@ -202,16 +207,27 @@ func runStorageCompact(opts storageCompactOptions) int {
 		}
 	}
 	if opts.json {
+		if captured != nil {
+			*captured = append([]storageCompactReport(nil), reports...)
+			return exit
+		}
 		encoder := json.NewEncoder(opts.out)
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(map[string]interface{}{
-			"reports": reports,
-			"summary": storageCompactSummary(reports),
+			"reports":     reports,
+			"summary":     storageCompactSummary(reports),
+			"duration_ms": time.Since(started).Milliseconds(),
 		})
 		return exit
 	}
 	storageRenderCompactText(opts.out, reports)
 	return exit
+}
+
+func runStorageCompactCaptured(opts storageCompactOptions) ([]storageCompactReport, int) {
+	var reports []storageCompactReport
+	exit := runStorageCompactTo(opts, &reports)
+	return reports, exit
 }
 
 func storageCompactSummary(reports []storageCompactReport) map[string]int {
@@ -273,7 +289,7 @@ func storageResolveTargetsFromConfig(opts storageCompactOptions, config *runtime
 	if target == "" {
 		target = "all"
 	}
-	known := []string{"all", "runtime", "history", "artifacts", "analytics", "team", "agent-control", "background", "schedule"}
+	known := []string{"all", "runtime", "history", "cells", "artifacts", "analytics", "team", "agent-control", "background", "schedule"}
 	if !storageContainsString(known, target) {
 		return nil, fmt.Errorf("未知 --target %q（可选：%s）", opts.target, strings.Join(known, "|"))
 	}
@@ -285,6 +301,7 @@ func storageResolveTargetsFromConfig(opts storageCompactOptions, config *runtime
 	all := []storageCompactTarget{
 		{Name: "runtime", Path: paths.SessionRuntimeStorePath},
 		{Name: "history", Path: storageHistoryStorePath(config, configFile, paths)},
+		{Name: "cells", Path: filepath.Join(paths.SessionDir, "session_cells.sqlite")},
 		{Name: "artifacts", Path: paths.ArtifactStorePath},
 		{Name: "analytics", Path: usageanalytics.DefaultDBPath()},
 		{Name: "team", Path: paths.TeamStorePath},

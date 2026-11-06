@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
@@ -95,7 +96,28 @@ func TestDeliveryBlockersStopsEviction(t *testing.T) {
 	})
 }
 
-func containsCellID(ids map[scene.CellID]struct{}, want scene.CellID) bool {
-	_, ok := ids[want]
-	return ok
+func containsCellID(ids map[scene.CellID]bool, want scene.CellID) bool {
+	return ids[want]
+}
+
+func TestDeliveredCellIDsSnapshotIsIncremental(t *testing.T) {
+	queue := HistoryEffectQueueState{}
+	if err := queue.enqueue(testHistoryCommit(1, 11, 1)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := queue.markInFlight(1, 1); err != nil {
+		t.Fatalf("markInFlight: %v", err)
+	}
+	if err := queue.ack(1, 1, 1); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	first, known := queue.DeliveredCellIDs()
+	if !known {
+		t.Fatal("delivered projection must be known after ack")
+	}
+	second, _ := queue.DeliveredCellIDs()
+	if reflect.ValueOf(first).Pointer() != reflect.ValueOf(second).Pointer() {
+		t.Fatal("unchanged ledger must reuse the delivered snapshot instead of rebuilding it")
+	}
 }

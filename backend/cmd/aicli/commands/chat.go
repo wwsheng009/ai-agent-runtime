@@ -213,39 +213,39 @@ type ChatSession struct {
 	resumeHistoryGeneration uint64
 	// resumeHistoryTrimmed 记录「装载交付完成后把展示历史裁剪到保留上限」的次数
 	// 与被丢弃的条数，供 §15.3 观测（裁剪不得静默）。
-	resumeHistoryTrimCount  uint64
-	resumeHistoryTrimmedOff int
+	resumeHistoryTrimCount    uint64
+	resumeHistoryTrimmedOff   int
 	HTTPClient                *http.Client
-	cancelCtx                 context.Context                      // 可取消的上下文
-	cancelFunc                context.CancelFunc                   // 取消函数
-	cancelCause               context.CancelCauseFunc              // 与 cancelFunc 同源：记录取消原因（user_interrupt / new_input_cycle）
-	composerWakeMu            sync.Mutex                           // 保护 composer 读取唤醒取消
-	composerWakeCancel        context.CancelFunc                   // 当前 composer 读取的唤醒取消
-	interrupted               atomic.Bool                          // 是否被中断（原子操作，避免竞态）
-	exitRequested             atomic.Bool                          // 外部窗口动作请求优雅退出（网关「关窗口」）
-	escapeStoppingNoticeShown atomic.Bool                          // 重复 Esc 的“停止处理中”提示本中断周期内是否已展示（P2-10）
-	interruptCleanupMu        sync.Mutex                           // 保护当前中断清理完成信号
-	interruptCleanupDone      chan struct{}                        // 阻止下一轮与上一轮异步清理交错
-	interruptCleanupStartedAt time.Time                            // 当前在途中断清理的登记时间（判定超期未关闭，见 interruptCleanupStalled）
-	escapeConsumerMu          sync.Mutex                           // 保护会话级 ESC 消费者注册表（阶段 C）
-	escapeConsumer            *chatEscapeConsumerState             // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
-	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
-	inputArbitration          *chatInputArbitrator                 // 统一输入仲裁器：P0 只观测不改变行为
+	cancelCtx                 context.Context          // 可取消的上下文
+	cancelFunc                context.CancelFunc       // 取消函数
+	cancelCause               context.CancelCauseFunc  // 与 cancelFunc 同源：记录取消原因（user_interrupt / new_input_cycle）
+	composerWakeMu            sync.Mutex               // 保护 composer 读取唤醒取消
+	composerWakeCancel        context.CancelFunc       // 当前 composer 读取的唤醒取消
+	interrupted               atomic.Bool              // 是否被中断（原子操作，避免竞态）
+	exitRequested             atomic.Bool              // 外部窗口动作请求优雅退出（网关「关窗口」）
+	escapeStoppingNoticeShown atomic.Bool              // 重复 Esc 的“停止处理中”提示本中断周期内是否已展示（P2-10）
+	interruptCleanupMu        sync.Mutex               // 保护当前中断清理完成信号
+	interruptCleanupDone      chan struct{}            // 阻止下一轮与上一轮异步清理交错
+	interruptCleanupStartedAt time.Time                // 当前在途中断清理的登记时间（判定超期未关闭，见 interruptCleanupStalled）
+	escapeConsumerMu          sync.Mutex               // 保护会话级 ESC 消费者注册表（阶段 C）
+	escapeConsumer            *chatEscapeConsumerState // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
+	inputArbitrationMu        sync.Mutex               // 保护阶段 F 影子仲裁器（§12.3 P0）
+	inputArbitration          *chatInputArbitrator     // 统一输入仲裁器：P0 只观测不改变行为
 	// 输入仲裁遥测（R4/R5 灰度取样的机读依据）：期望态 vs KeyHandler 实际位的
 	// 分叉在任何模式下都累计，DebugMode 关闭时也能从 /debug 读数。
 	inputArbitrationTelemetryMu sync.Mutex
 	inputArbitrationDivergences int64
 	inputArbitrationLastDiverge chatInputArbitrationDivergence
-	busyInteractiveScreen     atomic.Int32                         // 忙时副屏交互窗口计数（>0 = 忙时 S 档副屏/prompt 通道内；语义见 chat_busy_screen_exec.go）
-	deferredSlashMu           sync.Mutex                           // 保护挂起态暂存的 slash 命令队列
-	deferredSlashCommands     []string                             // 挂起态 deferred 档 slash 命令，会话回到 Ready 后由主循环取出执行
-	FunctionCatalog           *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
-	FunctionRegistry          *functions.FunctionRegistry          // Function 注册表
-	FunctionBuilder           functions.FunctionCallBuilder        // 协议对应的 function/tool builder
-	BuiltinSchemas            []map[string]interface{}             // 预构建的非 skill function schemas
-	stableSharedToolSessionID string                               // shared executor 会话级稳定工具面所属 runtime session
-	stableSharedToolSelection *aicliFunctionSelection              // shared executor 会话级稳定工具面快照，避免跨请求动态 tools
-	pendingSkillTurn          atomic.Pointer[SendSkillTurnRequest] // /skill 回合一次性 pin：dispatch 登记，回合开始消费即焚
+	busyInteractiveScreen       atomic.Int32                         // 忙时副屏交互窗口计数（>0 = 忙时 S 档副屏/prompt 通道内；语义见 chat_busy_screen_exec.go）
+	deferredSlashMu             sync.Mutex                           // 保护挂起态暂存的 slash 命令队列
+	deferredSlashCommands       []string                             // 挂起态 deferred 档 slash 命令，会话回到 Ready 后由主循环取出执行
+	FunctionCatalog             *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
+	FunctionRegistry            *functions.FunctionRegistry          // Function 注册表
+	FunctionBuilder             functions.FunctionCallBuilder        // 协议对应的 function/tool builder
+	BuiltinSchemas              []map[string]interface{}             // 预构建的非 skill function schemas
+	stableSharedToolSessionID   string                               // shared executor 会话级稳定工具面所属 runtime session
+	stableSharedToolSelection   *aicliFunctionSelection              // shared executor 会话级稳定工具面快照，避免跨请求动态 tools
+	pendingSkillTurn            atomic.Pointer[SendSkillTurnRequest] // /skill 回合一次性 pin：dispatch 登记，回合开始消费即焚
 	// SK-3 观测去重：回合内已发布的技能调用（键含 kind）。`/skill` 派发时发布显式
 	// 事件，模型随后再点名同一技能函数时不重复发；每回合 sendMessage 入口重置。
 	skillInvocationSeenMu           sync.Mutex
@@ -485,6 +485,12 @@ type ChatSession struct {
 	todoSnapshotMu        sync.Mutex
 	todoSnapshot          *chatWebTodoSnapshot
 	todoSnapshotSessionID string
+	// todoSnapshotMiss* caches a bounded negative result for the canonical
+	// history fallback. Without it a screen refresh for a session that has never
+	// used todos re-reads up to 3×64 canonical messages every time.
+	todoSnapshotMissAt             time.Time
+	todoSnapshotMissSessionID      string
+	todoSnapshotMissCanonicalCount int
 	// goalStatusMu guards live goal-status turn timing used by the status line.
 	// Codex accrues active-goal elapsed only while an agent turn is running.
 	goalStatusMu                  sync.Mutex

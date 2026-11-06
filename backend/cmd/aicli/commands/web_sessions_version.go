@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,26 +33,34 @@ var (
 // chatWebSessionsVersion 计算会话列表的版本指纹（覆盖响应全部输入）。
 // 必须在任何「渲染回退完整加载」之前调用：指纹命中的请求直接 304，
 // 不产生任何完整加载。
+//
+// 返回固定 64 位 hex digest，而不是完整拼接文本。调用方会把该值同时用作
+// HTTP 弱 ETag 的输入和进程内微缓存 key；旧实现把全部 session metadata
+// 拼成数百 KB 的字符串当 key，32 条缓存会长期保留约 10 MB 只读文本。
 func chatWebSessionsVersion(items []chatWebSessionListItem, currentID, sortBy, scope string, index chatWebMeshSessionIndex) string {
-	var builder strings.Builder
-	builder.WriteString("current=")
-	builder.WriteString(currentID)
-	builder.WriteString("\x00sort=")
-	builder.WriteString(sortBy)
-	builder.WriteString("\x00scope=")
-	builder.WriteString(scope)
+	hasher := sha256.New()
+	writeString := func(value string) {
+		_, _ = hasher.Write([]byte(value))
+	}
+	writeString("current=")
+	writeString(currentID)
+	writeString("\x00sort=")
+	writeString(sortBy)
+	writeString("\x00scope=")
+	writeString(scope)
 	for _, item := range items {
-		fmt.Fprintf(&builder, "\x00%s|%s|%s|%d|%s|%s|%t|%s|%s",
+		fmt.Fprintf(hasher, "\x00%s|%s|%s|%d|%s|%s|%t|%s|%s",
 			item.ID, item.Title, item.Summary, item.MessageCount,
 			item.CreatedAt.UTC().Format(time.RFC3339Nano),
 			item.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			item.Current, item.WorkspacePath, item.WorkspaceName)
 	}
-	builder.WriteString("\x00mesh=")
-	builder.WriteString(chatWebMeshViewDigest(index))
-	builder.WriteString("\x00bindings=")
-	builder.WriteString(chatWebBindingsDigest(index, items))
-	return builder.String()
+	writeString("\x00mesh=")
+	writeString(chatWebMeshViewDigest(index))
+	writeString("\x00bindings=")
+	writeString(chatWebBindingsDigest(index, items))
+	sum := hasher.Sum(nil)
+	return hex.EncodeToString(sum[:])
 }
 
 // chatWebMeshViewDigest 摘要网格视图中会影响会话列表响应的字段。

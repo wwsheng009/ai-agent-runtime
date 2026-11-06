@@ -254,9 +254,13 @@ func (a *SessionActor) applyBacktrackHistory(ctx context.Context, session *Sessi
 	}
 	tombstone := buildBacktrackTombstone(a.id, plan, removed, priorCount)
 
-	// Physical truncate: ReplaceHistory + clear head offset.
+	// Physical truncate: ReplaceHistory + clear head offset. The stable anchor
+	// lets storage cut the append-only canonical transcript even when the visible
+	// history is a compacted projection (summary + retained tail) and therefore
+	// not an exact canonical prefix.
+	anchor := prior[plan.MessageIndex]
 	session.ReplaceHistory(prefix)
-	session.MarkHistoryTruncated()
+	session.MarkHistoryTruncatedAt(anchor, plan.IncludeAnchor, priorCount+256)
 	session.SetHeadOffset(0)
 	// Drop stale observed context token counts after history rewrite.
 	if session.Metadata.Context != nil {

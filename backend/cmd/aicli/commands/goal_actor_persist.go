@@ -24,11 +24,14 @@ func preserveLatestGoalMetadata(ctx context.Context, storage runtimechat.Session
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	latest, err := storage.Load(ctx, strings.TrimSpace(session.ID))
+	latest, err := loadSessionMetadataBestEffort(ctx, storage, strings.TrimSpace(session.ID))
 	if err != nil || latest == nil {
 		return session, nil
 	}
-	prepared := session.Clone()
+	// This hook only merges the latest goal metadata. Cloning every message was
+	// a major persist-path allocation source; keep the same derived-metadata
+	// refresh semantics while copying the history slice rather than its contents.
+	prepared := session.CloneForMetadataUpdate()
 	store := runtimegoal.NewMetadataStore()
 	latestGoal, latestOK, err := store.Get(latest)
 	if err != nil {

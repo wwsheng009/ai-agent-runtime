@@ -1015,7 +1015,9 @@ func (m *manager) mcpStatusLocked(name string) (*config.MCPStatus, error) {
 	// 检查连接状态
 	if cli, ok := m.clients[name]; ok {
 		status.Connected = cli.IsConnected()
-		status.ToolCount = len(m.registry.ListToolsByMCP(name))
+		// 只读计数，不得为了 ToolCount 克隆全部工具与 schema；旧实现会让
+		// 每次 GetMCPStatus 都变成一次 O(tools) 的 JSON 深拷贝。
+		status.ToolCount = m.registry.ToolCountByMCP(name)
 	}
 
 	return status, nil

@@ -19,7 +19,11 @@ type RuntimeRetentionOptions struct {
 	ToolReceiptMaxBytes   int64
 	CacheRequestRetention int
 	EventRetention        int
-	DryRun                bool
+	// StreamingEventRetention bounds high-frequency assistant deltas/reasoning
+	// by age. Zero disables this pass; final assistant messages and tool events
+	// are never selected.
+	StreamingEventRetention time.Duration
+	DryRun                  bool
 }
 
 // RuntimeRetentionStats 是一次离线清理的可审计结果。
@@ -30,6 +34,8 @@ type RuntimeRetentionStats struct {
 	CacheRequestsDeleted               int64 `json:"cache_requests_deleted"`
 	EventsDeleted                      int64 `json:"events_deleted"`
 	EventPayloadBytesDeleted           int64 `json:"event_payload_bytes_deleted"`
+	StreamingEventsDeleted             int64 `json:"streaming_events_deleted"`
+	StreamingEventBytesDeleted         int64 `json:"streaming_event_bytes_deleted"`
 	LegacyInlineSurfacesCompacted      int64 `json:"legacy_inline_surfaces_compacted"`
 	LegacyInlineSurfaceBytesFreed      int64 `json:"legacy_inline_surface_bytes_freed"`
 	RedundantSessionEventsIndexDropped bool  `json:"redundant_session_events_index_dropped"`
@@ -123,6 +129,18 @@ func PruneRuntimeRetention(ctx context.Context, db *sql.DB, opts RuntimeRetentio
 		}
 		stats.EventsDeleted += deleted
 		stats.EventPayloadBytesDeleted += bytes
+	}
+
+	if opts.StreamingEventRetention > 0 {
+		before := time.Now().UTC().Add(-opts.StreamingEventRetention)
+		for _, sessionID := range eventSessions {
+			deleted, bytes, err := pruneStreamingEvents(ctx, db, sessionID, before, opts.DryRun)
+			if err != nil {
+				return stats, fmt.Errorf("prune streaming events for %s: %w", sessionID, err)
+			}
+			stats.StreamingEventsDeleted += deleted
+			stats.StreamingEventBytesDeleted += bytes
+		}
 	}
 
 	compacted, freed, err := compactLegacyToolSurfaces(ctx, db, opts.DryRun)
@@ -320,6 +338,38 @@ func pruneSessionEvents(ctx context.Context, q runtimeRetentionQueryer, sessionI
 	`, sessionID, cutoff)
 	if err != nil {
 		return 0, 0, fmt.Errorf("delete old session events: %w", err)
+	}
+	deleted, _ := result.RowsAffected()
+	return deleted, bytes, nil
+}
+
+// pruneStreamingEvents removes only high-frequency assistant streaming rows
+// older than cut. Final assistant_message and tool/lifecycle events are never
+// selected, so completed transcripts and resume checkpoints remain intact.
+func pruneStreamingEvents(ctx context.Context, q runtimeRetentionQueryer, sessionID string, cut time.Time, dryRun bool) (int64, int64, error) {
+	cutoff := cut.UTC().Format(time.RFC3339Nano)
+	const predicate = `
+		session_id = ?
+		AND type IN ('assistant_delta', 'assistant_reasoning', 'assistant.reasoning')
+		AND datetime(created_at) IS NOT NULL
+		AND datetime(created_at) < datetime(?)
+	`
+	var rows int64
+	var bytes int64
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0)
+		FROM session_events
+		WHERE `+predicate, sessionID, cutoff).Scan(&rows, &bytes); err != nil {
+		return 0, 0, fmt.Errorf("measure streaming events: %w", err)
+	}
+	if rows == 0 || dryRun {
+		return rows, bytes, nil
+	}
+	result, err := q.ExecContext(ctx, `
+		DELETE FROM session_events
+		WHERE `+predicate, sessionID, cutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delete streaming events: %w", err)
 	}
 	deleted, _ := result.RowsAffected()
 	return deleted, bytes, nil

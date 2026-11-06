@@ -129,7 +129,7 @@ func ListUserTurns(messages []runtimetypes.Message, checkpoints ...[]artifact.Ch
 	}
 	turns := make([]UserTurn, 0)
 	for i, msg := range messages {
-		if !isUserRole(msg.Role) {
+		if !isUserRole(msg.Role) || isContextManagementArtifact(msg) {
 			continue
 		}
 		turn := UserTurn{
@@ -241,7 +241,7 @@ func resolveUserTurnByIndex(messages []runtimetypes.Message, turns []UserTurn, r
 		if msgIdx < 0 || msgIdx >= len(messages) {
 			return UserTurn{}, fmt.Errorf("message_index %d out of range [0, %d)", msgIdx, len(messages))
 		}
-		if !isUserRole(messages[msgIdx].Role) {
+		if !isUserRole(messages[msgIdx].Role) || isContextManagementArtifact(messages[msgIdx]) {
 			return UserTurn{}, fmt.Errorf("user turn not found for message_index %d (not a user message)", msgIdx)
 		}
 		for _, turn := range turns {

@@ -88,6 +88,53 @@ func TestSQLiteRuntimeStorePrunesToolReceiptsByBytesAndKeepsNewest(t *testing.T)
 	require.Equal(t, oversized, string(receipts[0].MessageJSON))
 }
 
+func TestPruneRuntimeRetentionDropsOnlyAgedStreamingEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newRetentionTestStore(t, RuntimeStoreConfig{})
+	const sessionID = "streaming-retention"
+	for _, eventType := range []string{
+		EventAssistantDelta,
+		EventAssistantReasoningDelta,
+		EventAssistantMessage,
+		EventToolFinished,
+	} {
+		_, err := store.AppendEvent(ctx, runtimeevents.Event{
+			Type:      eventType,
+			SessionID: sessionID,
+			Payload:   map[string]interface{}{"text": "payload"},
+		})
+		require.NoError(t, err)
+	}
+	old := time.Now().UTC().Add(-72 * time.Hour).Format(time.RFC3339Nano)
+	_, err := store.db.ExecContext(ctx, `
+		UPDATE session_events SET created_at = ?
+		WHERE session_id = ? AND type IN (?, ?, ?)
+	`, old, sessionID, EventAssistantDelta, EventAssistantReasoningDelta, EventAssistantMessage)
+	require.NoError(t, err)
+
+	stats, err := PruneRuntimeRetention(ctx, store.db, RuntimeRetentionOptions{
+		EventRetention:          100,
+		StreamingEventRetention: 48 * time.Hour,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(2), stats.StreamingEventsDeleted)
+
+	for _, eventType := range []string{EventAssistantDelta, EventAssistantReasoningDelta} {
+		var count int
+		require.NoError(t, store.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM session_events WHERE session_id = ? AND type = ?
+		`, sessionID, eventType).Scan(&count))
+		require.Zero(t, count, eventType)
+	}
+	for _, eventType := range []string{EventAssistantMessage, EventToolFinished} {
+		var count int
+		require.NoError(t, store.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM session_events WHERE session_id = ? AND type = ?
+		`, sessionID, eventType).Scan(&count))
+		require.Equal(t, 1, count, eventType)
+	}
+}
+
 func TestSQLiteRuntimeStorePrunesCacheRequestsBySession(t *testing.T) {
 	store := newRetentionTestStore(t, RuntimeStoreConfig{CacheRequestRetention: 3})
 	base := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)

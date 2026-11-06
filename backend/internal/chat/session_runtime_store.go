@@ -1204,6 +1204,7 @@ func (s *InMemoryRuntimeStore) ListEvents(ctx context.Context, sessionID string,
 			break
 		}
 	}
+	s.hydrateInMemoryToolReceiptOutputs(sessionID, result)
 	return result, nil
 }
 
@@ -1241,6 +1242,7 @@ func (s *InMemoryRuntimeStore) ListEventsBefore(ctx context.Context, sessionID s
 	for index := len(descending) - 1; index >= 0; index-- {
 		result = append(result, descending[index])
 	}
+	s.hydrateInMemoryToolReceiptOutputs(sessionID, result)
 	return result, nil
 }
 
@@ -4071,6 +4073,8 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	_ = rows.Close()
+	s.hydrateSQLiteToolReceiptOutputs(ctx, s.readQueryer(), sessionID, events)
 	return events, nil
 }
 
@@ -4150,9 +4154,11 @@ func (s *SQLiteRuntimeStore) ListEventsBefore(ctx context.Context, sessionID str
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	_ = rows.Close()
 	for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
 		events[left], events[right] = events[right], events[left]
 	}
+	s.hydrateSQLiteToolReceiptOutputs(ctx, s.readQueryer(), sessionID, events)
 	return events, nil
 }
 

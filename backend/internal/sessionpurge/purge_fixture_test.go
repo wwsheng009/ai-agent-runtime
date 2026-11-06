@@ -26,6 +26,7 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 
 	paths := Paths{
 		History:        filepath.Join(root, "session_history.sqlite"),
+		Cells:          filepath.Join(root, "session_cells.sqlite"),
 		Runtime:        filepath.Join(runtimeDir, "session_runtime.sqlite"),
 		UsageAnalytics: filepath.Join(runtimeDir, "usage_analytics.sqlite"),
 		Artifacts:      filepath.Join(runtimeDir, "artifacts.sqlite"),
@@ -37,6 +38,7 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-60 * 24 * time.Hour).Format(time.RFC3339Nano)
+	oldNano := now.Add(-60 * 24 * time.Hour).UnixNano()
 	recent := now.Add(-time.Hour).Format(time.RFC3339Nano)
 	future := now.Add(time.Hour).Format(time.RFC3339Nano)
 
@@ -60,6 +62,14 @@ func newPurgeFixture(t *testing.T) purgeFixture {
 	`, old, old, old, old, old, old, old, old, old, recent)
 	execSQL(t, paths.History, `INSERT INTO session_messages (session_id, seq, created_at) VALUES ('old-session', 1, ?), ('protected-session', 1, ?), ('old-team', 1, ?)`, old, old, old)
 	execSQL(t, paths.History, `INSERT INTO session_prompt_messages (session_id, position, created_at) VALUES ('old-session', 1, ?), ('protected-session', 1, ?)`, old, old)
+
+	createSQL(t, paths.Cells, []string{
+		`CREATE TABLE session_cells (session_id TEXT, cell_id INTEGER, revision INTEGER, created_at INTEGER)`,
+	})
+	execSQL(t, paths.Cells, `INSERT INTO session_cells (session_id, cell_id, revision, created_at) VALUES
+		('old-session', 1, 1, ?),
+		('orphan-cells', 1, 1, ?),
+		('recent-session', 1, 1, ?)`, oldNano, oldNano, oldNano)
 
 	createSQL(t, paths.Runtime, []string{
 		`CREATE TABLE session_runtime_state (session_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT)`,

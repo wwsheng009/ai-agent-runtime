@@ -41,6 +41,10 @@ const (
 	// 前端侧栏事件刷新节流是 200ms（MESH_REFRESH_THROTTLE_MS），多 tab / 多
 	// 事件窗口合并用 500ms 覆盖一个刷新周期，同时保证窗口外的请求重建。
 	webHTTPResponseCacheTTL = 500 * time.Millisecond
+	// webHTTPResponseCacheMaxBytes bounds the retained response bodies. The
+	// version digest key is tiny now, but response bodies can still be hundreds
+	// of KB; a 32-entry count-only cache used to retain up to ~10 MB.
+	webHTTPResponseCacheMaxBytes = 8 << 20
 
 	// webHTTPServerTimingHeader 是 Server-Timing 的响应头名。
 	webHTTPServerTimingHeader = "Server-Timing"
@@ -231,11 +235,14 @@ type webHTTPResponseCache struct {
 	ttl      time.Duration
 	now      func() time.Time
 	limit    int
+	maxBytes int
+	bytes    int
 }
 
 type webHTTPResponseCacheEntry struct {
-	body []byte
-	at   time.Time
+	body  []byte
+	at    time.Time
+	bytes int
 }
 
 type webHTTPResponseCacheCall struct {
@@ -254,6 +261,7 @@ func newWebHTTPResponseCache(ttl time.Duration) *webHTTPResponseCache {
 		ttl:      ttl,
 		now:      time.Now,
 		limit:    32,
+		maxBytes: webHTTPResponseCacheMaxBytes,
 	}
 }
 
@@ -268,10 +276,15 @@ func (c *webHTTPResponseCache) get(key string, build func() ([]byte, error)) ([]
 		return body, false, err
 	}
 	c.mu.Lock()
-	if entry, ok := c.entries[key]; ok && c.now().Sub(entry.at) < c.ttl {
-		body := entry.body
-		c.mu.Unlock()
-		return body, true, nil
+	now := c.now()
+	c.evictExpiredLocked(now)
+	if entry, ok := c.entries[key]; ok {
+		if now.Sub(entry.at) < c.ttl {
+			body := entry.body
+			c.mu.Unlock()
+			return body, true, nil
+		}
+		c.removeEntryLocked(key, entry)
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
@@ -287,10 +300,21 @@ func (c *webHTTPResponseCache) get(key string, build func() ([]byte, error)) ([]
 	c.mu.Lock()
 	delete(c.inflight, key)
 	if err == nil {
-		if len(c.entries) >= c.limit {
-			c.evictOldestLocked()
+		now = c.now()
+		c.evictExpiredLocked(now)
+		entryBytes := len(key) + len(body)
+		// A single response larger than the whole cache budget must not evict
+		// everything else and still consume the budget; serve it without caching.
+		if c.maxBytes <= 0 || entryBytes <= c.maxBytes {
+			for (c.limit > 0 && len(c.entries) >= c.limit) ||
+				(c.maxBytes > 0 && c.bytes+entryBytes > c.maxBytes) {
+				if !c.evictOldestLocked() {
+					break
+				}
+			}
+			c.entries[key] = webHTTPResponseCacheEntry{body: body, at: now, bytes: entryBytes}
+			c.bytes += entryBytes
 		}
-		c.entries[key] = webHTTPResponseCacheEntry{body: body, at: c.now()}
 	}
 	c.mu.Unlock()
 
@@ -307,10 +331,27 @@ func (c *webHTTPResponseCache) invalidate() {
 	}
 	c.mu.Lock()
 	c.entries = map[string]webHTTPResponseCacheEntry{}
+	c.bytes = 0
 	c.mu.Unlock()
 }
 
-func (c *webHTTPResponseCache) evictOldestLocked() {
+func (c *webHTTPResponseCache) removeEntryLocked(key string, entry webHTTPResponseCacheEntry) {
+	delete(c.entries, key)
+	c.bytes -= entry.bytes
+	if c.bytes < 0 {
+		c.bytes = 0
+	}
+}
+
+func (c *webHTTPResponseCache) evictExpiredLocked(now time.Time) {
+	for key, entry := range c.entries {
+		if c.ttl > 0 && now.Sub(entry.at) >= c.ttl {
+			c.removeEntryLocked(key, entry)
+		}
+	}
+}
+
+func (c *webHTTPResponseCache) evictOldestLocked() bool {
 	var oldestKey string
 	var oldest time.Time
 	for key, entry := range c.entries {
@@ -319,8 +360,10 @@ func (c *webHTTPResponseCache) evictOldestLocked() {
 		}
 	}
 	if oldestKey != "" {
-		delete(c.entries, oldestKey)
+		c.removeEntryLocked(oldestKey, c.entries[oldestKey])
+		return true
 	}
+	return false
 }
 
 // webAPIJSONContentType 是 Web API 的 JSON 响应 Content-Type（与 writeWebAPIJSON 一致）。

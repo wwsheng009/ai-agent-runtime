@@ -11,6 +11,7 @@ import (
 // Paths 是参与会话清退的本地数据库。空路径表示该库不存在/不参与。
 type Paths struct {
 	History        string
+	Cells          string
 	Runtime        string
 	UsageAnalytics string
 	Artifacts      string
@@ -26,6 +27,13 @@ type Options struct {
 	IncludeOrphans bool
 	IncludeTeam    bool
 	DryRun         bool
+	SkipRowCounts  bool
+	// Profile 输出候选发现、保护检查和各库处理的分阶段耗时，
+	// 用于定位 GB 级 SQLite 上的清理瓶颈，不改变删除语义。
+	Profile bool
+	// FastCandidates 只做按龄候选选择和活跃保护，不扫描明细表寻找 orphan，
+	// 也不逐表统计预计删除行数。用于“命令已验证、无需再次预演”的直接执行。
+	FastCandidates bool
 	Now            time.Time
 	// ArtifactSessionRoot 是 session-artifacts 目录，默认取 history 库同目录。
 	ArtifactSessionRoot string
@@ -66,6 +74,27 @@ type Report struct {
 	Stores              []StoreResult      `json:"stores,omitempty"`
 	Warnings            []string           `json:"warnings,omitempty"`
 	DurationMS          int64              `json:"duration_ms"`
+	TimingsMS           map[string]int64   `json:"timings_ms,omitempty"`
+	FastCandidates      bool               `json:"fast_candidates,omitempty"`
+}
+
+type purgeTimer struct {
+	enabled bool
+	report  *Report
+}
+
+func (t *purgeTimer) stage(name string, fn func() error) error {
+	if t == nil || !t.enabled {
+		return fn()
+	}
+	started := time.Now()
+	defer func() {
+		if t.report.TimingsMS == nil {
+			t.report.TimingsMS = make(map[string]int64)
+		}
+		t.report.TimingsMS[name] = time.Since(started).Milliseconds()
+	}()
+	return fn()
 }
 
 func normalizeOptions(opts Options) Options {
@@ -89,11 +118,13 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 	opts = normalizeOptions(opts)
 	cutoff := opts.Now.Add(-opts.OlderThan)
 	report := Report{
-		Status:      "planned",
-		GeneratedAt: opts.Now,
-		Cutoff:      cutoff,
-		OlderThan:   opts.OlderThan.String(),
+		Status:         "planned",
+		GeneratedAt:    opts.Now,
+		Cutoff:         cutoff,
+		OlderThan:      opts.OlderThan.String(),
+		FastCandidates: opts.FastCandidates,
 	}
+	timer := &purgeTimer{enabled: opts.Profile, report: &report}
 	if !opts.DryRun {
 		report.Status = "pruned"
 		if root := artifactSessionRoot(paths.History, opts.ArtifactSessionRoot); root != "" {
@@ -103,8 +134,11 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 		}
 	}
 
-	history, err := loadHistorySessions(ctx, paths.History)
-	if err != nil {
+	var history []historySession
+	if err := timer.stage("candidate_history", func() (err error) {
+		history, err = loadHistorySessions(ctx, paths.History)
+		return err
+	}); err != nil {
 		return report, err
 	}
 	report.HistorySessions = len(history)
@@ -122,9 +156,12 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 		report.KnownCandidates++
 	}
 
-	if opts.IncludeOrphans {
-		lastSeen, err := loadLastSeen(ctx, paths, opts)
-		if err != nil {
+	if opts.IncludeOrphans && !opts.FastCandidates {
+		var lastSeen map[string]time.Time
+		if err := timer.stage("candidate_last_seen", func() (err error) {
+			lastSeen, err = loadLastSeen(ctx, paths, opts)
+			return err
+		}); err != nil {
 			return report, err
 		}
 		for sessionID, seen := range lastSeen {
@@ -138,8 +175,11 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 		}
 	}
 
-	protection, err := loadProtection(ctx, paths, candidates, opts)
-	if err != nil {
+	var protection map[string][]string
+	if err := timer.stage("protection", func() (err error) {
+		protection, err = loadProtection(ctx, paths, candidates, opts, cutoff, timer)
+		return err
+	}); err != nil {
 		return report, err
 	}
 	finalIDs := make([]string, 0, len(candidates))
@@ -180,6 +220,7 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 		fn   func(context.Context, string, []string, Options) (StoreResult, error)
 	}{
 		{"history", paths.History, purgeHistoryStore},
+		{"cells", paths.Cells, purgeCellsStore},
 		{"runtime", paths.Runtime, purgeRuntimeStore},
 		{"analytics", paths.UsageAnalytics, purgeAnalyticsStore},
 		{"artifacts", paths.Artifacts, purgeArtifactsStore},
@@ -201,8 +242,15 @@ func Run(ctx context.Context, paths Paths, opts Options) (Report, error) {
 	}
 
 	for _, run := range storeRuns {
-		result, err := run.fn(ctx, run.path, finalIDs, opts)
-		if err != nil {
+		var result StoreResult
+		if err := timer.stage("store_"+run.name, func() (err error) {
+			storeOpts := opts
+			if opts.FastCandidates && !opts.DryRun {
+				storeOpts.SkipRowCounts = true
+			}
+			result, err = run.fn(ctx, run.path, finalIDs, storeOpts)
+			return err
+		}); err != nil {
 			result.Status = "failed"
 			result.Error = err.Error()
 			report.Stores = append(report.Stores, result)

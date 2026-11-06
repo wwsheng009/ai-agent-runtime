@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"io"
@@ -136,6 +137,73 @@ func TestWebHTTPResponseCacheSingleFlightAndTTL(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&builds); got != 2 {
 		t.Fatalf("builds = %d, want 2 after expiry", got)
+	}
+}
+
+func TestWebHTTPResponseCacheByteBudget(t *testing.T) {
+	cache := newWebHTTPResponseCache(time.Minute)
+	cache.limit = 10
+	cache.maxBytes = 32
+	body := bytes.Repeat([]byte("x"), 20)
+
+	if _, _, err := cache.get("key-a", func() ([]byte, error) { return body, nil }); err != nil {
+		t.Fatalf("cache key-a: %v", err)
+	}
+	if _, _, err := cache.get("key-b", func() ([]byte, error) { return body, nil }); err != nil {
+		t.Fatalf("cache key-b: %v", err)
+	}
+	if len(cache.entries) != 1 || cache.bytes > cache.maxBytes {
+		t.Fatalf("entries=%d bytes=%d, want one entry within %d-byte budget", len(cache.entries), cache.bytes, cache.maxBytes)
+	}
+	if _, ok := cache.entries["key-b"]; !ok {
+		t.Fatal("newest entry must survive eviction")
+	}
+
+	cache.maxBytes = 10
+	if _, _, err := cache.get("oversize", func() ([]byte, error) { return body, nil }); err != nil {
+		t.Fatalf("cache oversize: %v", err)
+	}
+	if _, ok := cache.entries["oversize"]; ok {
+		t.Fatal("a body larger than the whole byte budget must not be cached")
+	}
+}
+
+func TestWebHTTPResponseCacheEvictsExpiredEntries(t *testing.T) {
+	cache := newWebHTTPResponseCache(time.Minute)
+	if _, _, err := cache.get("key-a", func() ([]byte, error) { return []byte("body"), nil }); err != nil {
+		t.Fatalf("cache key-a: %v", err)
+	}
+	if cache.bytes == 0 {
+		t.Fatal("cache bytes must be counted")
+	}
+
+	cache.mu.Lock()
+	cache.evictExpiredLocked(time.Now().Add(2 * time.Minute))
+	cache.mu.Unlock()
+	if len(cache.entries) != 0 || cache.bytes != 0 {
+		t.Fatalf("expired entries not reclaimed: entries=%d bytes=%d", len(cache.entries), cache.bytes)
+	}
+}
+
+func TestChatWebSessionsVersionReturnsStableDigest(t *testing.T) {
+	items := []chatWebSessionListItem{{
+		ID:           "session-1",
+		Title:        "title",
+		Summary:      "summary",
+		MessageCount: 2,
+		CreatedAt:    time.Unix(1700000000, 0).UTC(),
+		UpdatedAt:    time.Unix(1700000100, 0).UTC(),
+	}}
+	first := chatWebSessionsVersion(items, "current", "", "", chatWebMeshSessionIndex{})
+	second := chatWebSessionsVersion(items, "current", "", "", chatWebMeshSessionIndex{})
+	if first != second || len(first) != 64 {
+		t.Fatalf("digest = %q / %q, want stable 64-char digest", first, second)
+	}
+
+	items[0].Title = "changed"
+	third := chatWebSessionsVersion(items, "current", "", "", chatWebMeshSessionIndex{})
+	if third == first {
+		t.Fatal("digest must change when a response input changes")
 	}
 }
 

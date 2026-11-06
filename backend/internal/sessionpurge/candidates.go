@@ -3,6 +3,7 @@ package sessionpurge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -84,6 +85,14 @@ func loadLastSeen(ctx context.Context, paths Paths, opts Options) (map[string]ti
 	}
 	merge(runtimeSeen)
 
+	cellSeen, err := loadMergedUnixTimes(ctx, paths.Cells, []string{
+		`SELECT session_id, MAX(created_at) FROM session_cells GROUP BY session_id`,
+	})
+	if err != nil {
+		return nil, err
+	}
+	merge(cellSeen)
+
 	usageSeen, err := loadUsageLastSeen(ctx, paths.UsageAnalytics)
 	if err != nil {
 		return nil, err
@@ -139,6 +148,14 @@ func loadRuntimeLastSeen(ctx context.Context, path string) (map[string]time.Time
 func loadUsageLastSeen(ctx context.Context, path string) (map[string]time.Time, error) {
 	return loadMergedUnixTimes(ctx, path, []string{
 		`SELECT session_id, MAX(COALESCE(NULLIF(updated_at_unix_nano, 0), NULLIF(ended_at_unix_nano, 0), NULLIF(started_at_unix_nano, 0), 0)) FROM usage_sessions GROUP BY session_id`,
+		`SELECT session_id, MAX(started_at_unix_nano) FROM usage_requests GROUP BY session_id`,
+		`SELECT session_id, MAX(ended_at_unix_nano) FROM usage_turns GROUP BY session_id`,
+		`SELECT session_id, MAX(started_at_unix_nano) FROM usage_tool_calls GROUP BY session_id`,
+		`SELECT session_id, MAX(started_unix_nano) FROM usage_lsp_requests GROUP BY session_id`,
+		`SELECT session_id, MAX(observed_unix_nano) FROM usage_lsp_first_publish GROUP BY session_id`,
+		`SELECT session_id, MAX(last_at_unix_nano) FROM usage_render_fence_drops GROUP BY session_id`,
+		`SELECT session_id, MAX(recorded_at_unix_nano) FROM usage_routes GROUP BY session_id`,
+		`SELECT parent_session_id AS session_id, MAX(started_at_unix_nano) FROM usage_subagents GROUP BY parent_session_id`,
 	})
 }
 
@@ -267,11 +284,39 @@ func queryReferencesExistingTable(ctx context.Context, db *sql.DB, query string)
 	if err != nil {
 		return false, fmt.Errorf("table %s: %w", table, err)
 	}
+	if !ok {
+		return false, nil
+	}
+	if _, err := db.ExecContext(ctx, "EXPLAIN "+query, explainArgs(query)...); err != nil {
+		if isMissingColumnError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check query %q: %w", query, err)
+	}
 	return ok, nil
 }
 
-func loadProtection(ctx context.Context, paths Paths, candidates map[string]string, opts Options) (map[string][]string, error) {
+func explainArgs(query string) []interface{} {
+	args := make([]interface{}, strings.Count(query, "?"))
+	for index := range args {
+		args[index] = ""
+	}
+	return args
+}
+
+func isMissingColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no such column") || strings.Contains(text, "has no column named")
+}
+
+func loadProtection(ctx context.Context, paths Paths, candidates map[string]string, opts Options, cutoff time.Time, timer *purgeTimer) (map[string][]string, error) {
 	reasons := make(map[string][]string)
+	protect := func(name string, fn func() error) error {
+		return timer.stage(name, fn)
+	}
 	add := func(sessionID, reason string) {
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID == "" {
@@ -288,24 +333,267 @@ func loadProtection(ctx context.Context, paths Paths, candidates map[string]stri
 		reasons[sessionID] = append(reasons[sessionID], reason)
 	}
 
-	if err := protectRuntimeSessions(ctx, paths.Runtime, opts.Now, add); err != nil {
+	if err := protect("protection_runtime", func() error {
+		return protectRuntimeSessions(ctx, paths.Runtime, opts.Now, add)
+	}); err != nil {
 		return nil, err
 	}
-	if err := protectBackgroundSessions(ctx, paths.Background, candidates, add); err != nil {
+	if err := protect("protection_background", func() error {
+		return protectBackgroundSessions(ctx, paths.Background, candidates, add)
+	}); err != nil {
 		return nil, err
 	}
-	if err := protectAgentControlSessions(ctx, paths.AgentControl, add); err != nil {
+	if err := protect("protection_agent_control", func() error {
+		return protectAgentControlSessions(ctx, paths.AgentControl, add)
+	}); err != nil {
 		return nil, err
 	}
-	if err := protectScheduleSessions(ctx, paths.Schedule, opts.Now, add); err != nil {
+	if err := protect("protection_schedule", func() error {
+		return protectScheduleSessions(ctx, paths.Schedule, opts.Now, add)
+	}); err != nil {
 		return nil, err
 	}
 	if opts.IncludeTeam {
-		if err := protectTeamSessions(ctx, paths.Team, opts.Now, add); err != nil {
+		if err := protect("protection_team", func() error {
+			return protectTeamSessions(ctx, paths.Team, opts.Now, add)
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if opts.FastCandidates {
+		if err := protect("protection_recent", func() error {
+			return protectRecentActivity(ctx, paths, candidates, opts, cutoff, add)
+		}); err != nil {
 			return nil, err
 		}
 	}
 	return reasons, nil
+}
+
+func protectRecentActivity(ctx context.Context, paths Paths, candidates map[string]string, opts Options, cutoff time.Time, add func(string, string)) error {
+	cutoffText := cutoff.UTC().Format(time.RFC3339Nano)
+	cutoffNano := cutoff.UnixNano()
+	if err := protectRecentSummaryIDs(ctx, paths, cutoff, add); err != nil {
+		return err
+	}
+	candidateIDs := make([]string, 0, len(candidates))
+	for sessionID := range candidates {
+		candidateIDs = append(candidateIDs, sessionID)
+	}
+	stores := []struct {
+		path    string
+		queries []string
+		unix    bool
+	}{
+		{paths.Runtime, []string{
+			`SELECT session_id FROM session_events WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM session_tool_receipts WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM cache_requests WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM agent_control_mailbox_records WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+		}, false},
+		{paths.UsageAnalytics, []string{
+			`SELECT session_id FROM usage_requests WHERE started_at_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_turns WHERE ended_at_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_tool_calls WHERE started_at_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_lsp_requests WHERE started_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_lsp_first_publish WHERE observed_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_render_fence_drops WHERE last_at_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM usage_routes WHERE recorded_at_unix_nano >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT child_session_id FROM usage_routes WHERE recorded_at_unix_nano >= ? AND child_session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT parent_session_id FROM usage_subagents WHERE COALESCE(NULLIF(completed_at_unix_nano, 0), started_at_unix_nano, 0) >= ? AND parent_session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT child_session_id FROM usage_subagents WHERE COALESCE(NULLIF(completed_at_unix_nano, 0), started_at_unix_nano, 0) >= ? AND child_session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT child_session_id FROM usage_subagents WHERE COALESCE(NULLIF(completed_at_unix_nano, 0), started_at_unix_nano, 0) >= ? AND child_session_id IN (SELECT value FROM json_each(?))`,
+		}, true},
+		{paths.Artifacts, []string{
+			`SELECT session_id FROM artifacts WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM checkpoints WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM memory_entries WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+		}, false},
+		{paths.AgentControl, []string{
+			`SELECT session_id FROM agent_control_agent_wake_events WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT session_id FROM agent_control_global_mailbox_records WHERE created_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+		}, false},
+		{paths.Background, []string{
+			`SELECT session_id FROM background_jobs WHERE COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at) >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+		}, false},
+		{paths.Schedule, []string{
+			`SELECT session_id FROM schedule_tasks WHERE updated_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT created_by_session_id FROM schedule_tasks WHERE updated_at >= ? AND created_by_session_id IN (SELECT value FROM json_each(?))`,
+		}, false},
+	}
+	if opts.IncludeTeam {
+		stores = append(stores, struct {
+			path    string
+			queries []string
+			unix    bool
+		}{paths.Team, []string{
+			`SELECT session_id FROM teammates WHERE updated_at >= ? AND session_id IN (SELECT value FROM json_each(?))`,
+			`SELECT lead_session_id FROM teams WHERE updated_at >= ? AND lead_session_id IN (SELECT value FROM json_each(?))`,
+		}, false})
+	}
+	for _, store := range stores {
+		if err := protectRecentIDsInStore(ctx, store.path, store.queries, store.unix, candidateIDs, cutoffText, cutoffNano, add); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func protectRecentSummaryIDs(ctx context.Context, paths Paths, cutoff time.Time, add func(string, string)) error {
+	stores := []struct {
+		path    string
+		queries []string
+		unix    bool
+	}{
+		{paths.UsageAnalytics, []string{
+			`SELECT session_id, MAX(COALESCE(NULLIF(updated_at_unix_nano, 0), NULLIF(ended_at_unix_nano, 0), NULLIF(started_at_unix_nano, 0), 0)) FROM usage_sessions GROUP BY session_id`,
+			`SELECT session_id, MAX(started_at_unix_nano) FROM usage_requests GROUP BY session_id`,
+			`SELECT session_id, MAX(ended_at_unix_nano) FROM usage_turns GROUP BY session_id`,
+			`SELECT session_id, MAX(started_at_unix_nano) FROM usage_tool_calls GROUP BY session_id`,
+			`SELECT session_id, MAX(started_unix_nano) FROM usage_lsp_requests GROUP BY session_id`,
+			`SELECT session_id, MAX(observed_unix_nano) FROM usage_lsp_first_publish GROUP BY session_id`,
+			`SELECT session_id, MAX(last_at_unix_nano) FROM usage_render_fence_drops GROUP BY session_id`,
+			`SELECT session_id, MAX(recorded_at_unix_nano) FROM usage_routes GROUP BY session_id`,
+			`SELECT parent_session_id AS session_id, MAX(started_at_unix_nano) FROM usage_subagents GROUP BY parent_session_id`,
+		}, true},
+		{paths.Runtime, []string{
+			`SELECT session_id, MAX(updated_at) FROM session_runtime_state GROUP BY session_id`,
+			`SELECT session_id, MAX(heartbeat_at) FROM session_actor_leases GROUP BY session_id`,
+		}, false},
+		{paths.Artifacts, []string{
+			`SELECT session_id, MAX(created_at) FROM artifacts GROUP BY session_id`,
+			`SELECT session_id, MAX(created_at) FROM checkpoints GROUP BY session_id`,
+			`SELECT session_id, MAX(created_at) FROM memory_entries GROUP BY session_id`,
+		}, false},
+		{paths.AgentControl, []string{
+			`SELECT session_id, MAX(updated_at) FROM agent_control_agents GROUP BY session_id`,
+		}, false},
+		{paths.Background, []string{
+			`SELECT session_id, MAX(COALESCE(NULLIF(finished_at, ''), NULLIF(started_at, ''), created_at)) FROM background_jobs WHERE session_id IS NOT NULL AND session_id <> '' GROUP BY session_id`,
+		}, false},
+		{paths.Schedule, []string{
+			`SELECT session_id, MAX(updated_at) FROM schedule_tasks WHERE session_id IS NOT NULL AND session_id <> '' GROUP BY session_id`,
+		}, false},
+	}
+	if _, err := os.Stat(paths.Team); err == nil {
+		stores = append(stores, struct {
+			path    string
+			queries []string
+			unix    bool
+		}{paths.Team, []string{
+			`SELECT session_id, MAX(updated_at) FROM teammates WHERE session_id IS NOT NULL AND session_id <> '' GROUP BY session_id`,
+			`SELECT lead_session_id AS session_id, MAX(updated_at) FROM teams WHERE lead_session_id IS NOT NULL AND lead_session_id <> '' GROUP BY lead_session_id`,
+		}, false})
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	for _, store := range stores {
+		if err := protectRecentSummaryIDsInStore(ctx, store.path, store.queries, store.unix, cutoff, add); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func protectRecentSummaryIDsInStore(ctx context.Context, path string, queries []string, unix bool, cutoff time.Time, add func(string, string)) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	db, err := openRuntimeDB(path, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	for _, query := range queries {
+		ok, err := queryReferencesExistingTable(ctx, db, query)
+		if err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		var values map[string]time.Time
+		if unix {
+			values, err = querySessionUnixTimes(ctx, db, query)
+		} else {
+			values, err = querySessionTimes(ctx, db, query)
+		}
+		if err != nil {
+			return err
+		}
+		for sessionID, seen := range values {
+			if !seen.Before(cutoff) {
+				add(sessionID, "recent_activity")
+			}
+		}
+	}
+	return nil
+}
+
+func protectRecentIDsInStore(ctx context.Context, path string, queries []string, unix bool, candidateIDs []string, cutoffText string, cutoffNano int64, add func(string, string)) error {
+	if len(candidateIDs) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	db, err := openRuntimeDB(path, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	encodedIDs, err := json.Marshal(candidateIDs)
+	if err != nil {
+		return fmt.Errorf("encode purge candidates: %w", err)
+	}
+	for _, query := range queries {
+		ok, err := queryReferencesExistingTable(ctx, db, query)
+		if err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		cutoffValue := interface{}(cutoffText)
+		if unix {
+			cutoffValue = cutoffNano
+		}
+		if err := protectRecentIDsWithQuery(ctx, db, query, cutoffValue, string(encodedIDs), add); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func protectRecentIDsWithQuery(ctx context.Context, db *sql.DB, query string, cutoff interface{}, encodedIDs string, add func(string, string)) error {
+	rows, err := db.QueryContext(ctx, query, cutoff, encodedIDs)
+	if err != nil {
+		if isMissingColumnError(err) {
+			return nil
+		}
+		return fmt.Errorf("recent activity query %q: %w", query, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID sql.NullString
+		if err := rows.Scan(&sessionID); err != nil {
+			return err
+		}
+		add(strings.TrimSpace(sessionID.String), "recent_activity")
+	}
+	return rows.Err()
 }
 
 func protectRuntimeSessions(ctx context.Context, path string, now time.Time, add func(string, string)) error {

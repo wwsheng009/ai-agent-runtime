@@ -188,6 +188,7 @@ func TestStorageResolveTargetsDefaults(t *testing.T) {
 		byName[target.Name] = filepath.Base(target.Path)
 	}
 	require.Equal(t, "session_runtime.sqlite", byName["runtime"])
+	require.Equal(t, "session_cells.sqlite", byName["cells"])
 	require.Equal(t, aiclipaths.DefaultSessionHistoryFileName, byName["history"])
 	require.Equal(t, "artifacts.sqlite", byName["artifacts"])
 	require.Equal(t, "usage_analytics.sqlite", byName["analytics"])
@@ -200,6 +201,12 @@ func TestStorageResolveTargetsDefaults(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, "history", history[0].Name)
+
+	cells, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "cells"}, nil, "")
+	require.NoError(t, err)
+	require.Len(t, cells, 1)
+	require.Equal(t, "cells", cells[0].Name)
+	require.Equal(t, "session_cells.sqlite", filepath.Base(cells[0].Path))
 
 	schedule, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "schedule"}, nil, "")
 	require.NoError(t, err)

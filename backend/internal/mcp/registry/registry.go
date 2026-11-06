@@ -493,6 +493,24 @@ func (r *Registry) ListToolsByMCP(mcpName string) []*ToolInfo {
 	return tools
 }
 
+// ToolCountByMCP returns the number of exposed tools for one MCP server.
+//
+// Status callers only need the count. They must not use
+// len(ListToolsByMCP(...)) for that: ListToolsByMCP clones every tool and its
+// input schema, which turns a status refresh into an O(tools) schema deep copy.
+func (r *Registry) ToolCountByMCP(mcpName string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, info := range r.tools {
+		if info != nil && info.MCPName == mcpName && toolExposed(info) {
+			count++
+		}
+	}
+	return count
+}
+
 // GetTool 获取工具信息
 func (r *Registry) GetTool(mcpName, toolName string) (*ToolInfo, error) {
 	r.mu.RLock()

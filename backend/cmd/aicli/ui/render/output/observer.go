@@ -238,6 +238,12 @@ type eventHub struct {
 	subSeq       uint64
 	drops        uint64 // SubscriberDropCount 累计（observer_drops）
 	journalDrops uint64 // journal 淘汰丢弃计数
+	// The journal is a ring once it reaches its configured item capacity. The
+	// old append/re-slice form kept the discarded prefix reachable and then
+	// allocated a fresh backing array every cycle; these two counters make
+	// eviction O(1) and reuse the slots.
+	journalHead int
+	journalLen  int
 }
 
 // subscription 是 bounded mailbox + dispatcher：hub 只向 mailbox 非阻塞
@@ -397,16 +403,56 @@ func (h *eventHub) submitCutoff(ev OutputEvent, startDrops uint64) EventPublishR
 	}
 }
 
+// appendJournalLocked takes ownership of the value published by the gateway.
+// OutputEvent's reachable pointer fields are immutable snapshots created for
+// that submit; detaching them again here would double every event allocation
+// on the hot render path. External readers and subscriber dispatches still get
+// a detached clone.
 func (h *eventHub) appendJournalLocked(ev OutputEvent) {
-	stored := cloneOutputEvent(ev)
-	h.journal = append(h.journal, stored)
-	h.journalBytes += approxEventBytes(stored)
-	for len(h.journal) > h.limit.MaxItems || h.journalBytes > h.limit.MaxBytes {
-		drop := h.journal[0]
-		h.journal = h.journal[1:]
-		h.journalBytes -= approxEventBytes(drop)
+	h.journalBytes += approxEventBytes(ev)
+	capacity := len(h.journal)
+	switch {
+	case capacity == 0:
+		h.journal = append(h.journal, ev)
+		h.journalHead = 0
+		h.journalLen = 1
+	case h.journalLen < capacity:
+		h.journal[(h.journalHead+h.journalLen)%capacity] = ev
+		h.journalLen++
+	case capacity < h.limit.MaxItems:
+		h.journal = append(h.journal, ev)
+		h.journalLen++
+	default:
+		h.journalBytes -= approxEventBytes(h.journal[h.journalHead])
+		h.journal[h.journalHead] = ev
+		h.journalHead = (h.journalHead + 1) % capacity
 		h.journalDrops++
 	}
+
+	// A byte budget smaller than the item capacity can evict several entries,
+	// including the newly appended event when it alone exceeds the budget.
+	for h.journalBytes > h.limit.MaxBytes && h.journalLen > 0 {
+		h.evictOldestJournalLocked()
+	}
+}
+
+func (h *eventHub) evictOldestJournalLocked() {
+	if h.journalLen == 0 {
+		return
+	}
+	capacity := len(h.journal)
+	if capacity == 0 {
+		h.journalLen = 0
+		h.journalHead = 0
+		return
+	}
+	h.journalBytes -= approxEventBytes(h.journal[h.journalHead])
+	// Clearing the slot releases strings/pointers retained by evicted events
+	// even though the ring itself remains allocated.
+	h.journal[h.journalHead] = OutputEvent{}
+	h.journalHead = (h.journalHead + 1) % capacity
+	h.journalLen--
+	h.journalDrops++
 }
 
 func cloneOutputEvent(ev OutputEvent) OutputEvent {
@@ -423,12 +469,17 @@ func cloneOutputEvent(ev OutputEvent) OutputEvent {
 func (h *eventHub) snapshotEvents(limit int) []OutputEvent {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if limit <= 0 || limit > len(h.journal) {
-		limit = len(h.journal)
+	if limit <= 0 || limit > h.journalLen {
+		limit = h.journalLen
+	}
+	if limit == 0 {
+		return nil
 	}
 	out := make([]OutputEvent, 0, limit)
-	for _, ev := range h.journal[len(h.journal)-limit:] {
-		out = append(out, cloneOutputEvent(ev))
+	capacity := len(h.journal)
+	start := (h.journalHead + h.journalLen - limit) % capacity
+	for index := 0; index < limit; index++ {
+		out = append(out, cloneOutputEvent(h.journal[(start+index)%capacity]))
 	}
 	return out
 }

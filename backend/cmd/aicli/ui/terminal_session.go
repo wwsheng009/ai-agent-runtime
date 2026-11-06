@@ -916,16 +916,20 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	}
 	modelWidth, currentHeight := s.screen.Size()
 	// P3-S2：稳态帧就地事务化，不再每帧 Clone 整张双缓冲网格。结构变更帧
-	// （租约、几何、视口位置或尺寸变化）要 Resize/Invalidate 清空双缓冲，
-	// 零字节失败必须让已确认模型保持原样（既有契约），因此这些帧仍走
-	// 事务性候选克隆；Clone 同时保留为回退开关。PrepareFlush 已改为延迟
-	// 提交（front/投影只在 ConfirmFlush 推进），就地路径的成功/失败语义
-	// 由此与克隆路径一致。
-	structuralChange := s.lease.Active || resizeRebuild ||
-		modelWidth != area.Width || currentHeight != modelHeight || s.viewport != area
+	// 需要清空双缓冲时，直接分配一份脱离已确认状态的空白候选即可；只有
+	// 不改变模型尺寸、但租约/重建要求失效物理投影的结构帧才需要 Clone，
+	// 以便保留已 staged 的非物理内容。PrepareFlush 仍延迟提交，零字节失败
+	// 不会推进已确认模型。
+	needsResize := modelWidth != area.Width || currentHeight != modelHeight ||
+		s.viewport != area
+	structuralChange := s.lease.Active || resizeRebuild || needsResize
 	candidateScreen := s.screen
 	if structuralChange {
-		candidateScreen = s.screen.Clone()
+		if needsResize {
+			candidateScreen = s.screen.NewResizedModel(area.Width, modelHeight)
+		} else {
+			candidateScreen = s.screen.Clone()
+		}
 		if candidateScreen == nil {
 			result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
 			return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Err: ErrTerminalWriterMissing})
@@ -939,8 +943,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	if modelWidth != area.Width || currentHeight != modelHeight || s.viewport != area {
-		candidateScreen.Resize(area.Width, modelHeight)
+	if needsResize {
 		projectionKnown = false
 	}
 

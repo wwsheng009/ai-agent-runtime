@@ -137,11 +137,9 @@ func (b *chatRuntimeEventBridge) deliveryFacts() deliveryFacts {
 		// 无任何交付记录时无法区分，按"不可判定"处理（不阻断既有行为）。
 		return deliveryFacts{}
 	}
-	delivered := make(map[scene.CellID]bool, len(ids))
-	for id := range ids {
-		delivered[id] = true
-	}
-	return deliveryFacts{Known: true, Delivered: delivered}
+	// The ledger maintains an incremental bool snapshot; do not rebuild another
+	// map on every trim check. Callers must treat this projection as read-only.
+	return deliveryFacts{Known: true, Delivered: ids}
 }
 
 // SetSceneTrimPolicy 安装/替换策略（nil 关闭）。

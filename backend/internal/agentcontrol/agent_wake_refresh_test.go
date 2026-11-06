@@ -75,6 +75,82 @@ func TestUpsertAgentControlAgentRefreshKeepsHeartbeatWithoutWakeEvent(t *testing
 	}
 }
 
+// A closed/stale projection is refreshed repeatedly by host materialization.
+// Those passes may carry a zero closed_at even though the durable row already
+// has one; treating that as a state change produced one upsert wake row per
+// pass. The terminal timestamp must be preserved and the wake log must stay
+// quiet.
+func TestUpsertAgentControlAgentTerminalRefreshKeepsClosedAtWithoutWake(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+	closedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	record := AgentRecord{
+		AgentID:       "terminal-refresh-child",
+		RootSessionID: "terminal-refresh-root",
+		SessionID:     "terminal-refresh-session",
+		AgentPath:     "/root/terminal-refresh-child",
+		Depth:         1,
+		AgentType:     AgentTypeChild,
+		Workflow:      WorkflowSpawnAgent,
+		Status:        AgentStatusClosed,
+		ClosedAt:      &closedAt,
+	}
+	first, err := store.UpsertAgentControlAgent(ctx, record)
+	require.NoError(t, err)
+	require.NotNil(t, first.ClosedAt)
+	firstSeq, err := store.LastAgentControlAgentWakeSeq(ctx, AgentWakeFilter{RootSessionID: record.RootSessionID})
+	require.NoError(t, err)
+
+	refreshedInput := record
+	refreshedInput.ClosedAt = nil
+	refreshed, err := store.UpsertAgentControlAgent(ctx, refreshedInput)
+	require.NoError(t, err)
+	require.NotNil(t, refreshed.ClosedAt, "terminal refresh must not clear closed_at")
+	require.True(t, refreshed.ClosedAt.Equal(closedAt))
+
+	refreshedSeq, err := store.LastAgentControlAgentWakeSeq(ctx, AgentWakeFilter{RootSessionID: record.RootSessionID})
+	require.NoError(t, err)
+	require.Equal(t, firstSeq, refreshedSeq, "terminal heartbeat refresh must not append a wake event")
+}
+
+// Upserts are state snapshots, not an append-only history. Repeated meaningful
+// changes must still notify watchers, but the durable log keeps only the latest
+// upsert row per agent; lifecycle transitions remain separate rows.
+func TestUpsertAgentControlAgentCoalescesUpsertWakeRows(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+	record := AgentRecord{
+		AgentID:       "coalesce-agent",
+		RootSessionID: "coalesce-root",
+		SessionID:     "coalesce-session",
+		AgentPath:     "/root/coalesce-agent",
+		Depth:         1,
+		AgentType:     AgentTypeChild,
+		Workflow:      WorkflowSpawnAgent,
+		Status:        AgentStatusActive,
+		Model:         "model-a",
+	}
+	_, err := store.UpsertAgentControlAgent(ctx, record)
+	require.NoError(t, err)
+	record.Model = "model-b"
+	_, err = store.UpsertAgentControlAgent(ctx, record)
+	require.NoError(t, err)
+	record.Model = "model-c"
+	_, err = store.UpsertAgentControlAgent(ctx, record)
+	require.NoError(t, err)
+
+	var upserts int
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM agent_control_agent_wake_events
+		WHERE agent_id = ? AND event_kind = 'upsert'
+	`, record.AgentID).Scan(&upserts))
+	require.Equal(t, 1, upserts, "only the latest upsert snapshot is retained")
+
+	seq, err := store.LastAgentControlAgentWakeSeq(ctx, AgentWakeFilter{RootSessionID: record.RootSessionID})
+	require.NoError(t, err)
+	require.Greater(t, seq, int64(0), "the latest insert must advance the wake watermark")
+}
+
 // TestAgentRecordsShareWakeStateTracksPersistedShape pins the comparison the
 // no-op suppression relies on: only updated_at/created_at/row sequence are
 // allowed to move without producing a wake event.

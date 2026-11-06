@@ -102,6 +102,18 @@ type Session struct {
 	// resurrect pre-compaction messages and re-send them after the next
 	// restore. One-shot: cleared after the next successful Update.
 	HistoryReplaced bool `json:"-" yaml:"-"`
+
+	// HistoryTruncateAnchor identifies the visible-history message at which a
+	// deliberate rewind cuts the canonical transcript. It is only meaningful
+	// together with HistoryTruncated. A compacted prompt projection starts with
+	// a summary that does not exist in session_messages, so the caller's shorter
+	// history is not an exact canonical prefix; the stable message identity is
+	// then the only safe way to map the rewind onto the append-only transcript.
+	// HistoryTruncateKeepAnchor keeps that row and deletes everything after it.
+	// Never serialized; one-shot cleared after the next successful Update.
+	HistoryTruncateAnchor      *types.Message `json:"-" yaml:"-"`
+	HistoryTruncateKeepAnchor  bool           `json:"-" yaml:"-"`
+	HistoryTruncateSearchLimit int            `json:"-" yaml:"-"`
 }
 
 // SessionPreview 会话预览信息
@@ -280,6 +292,25 @@ func (s *Session) MarkHistoryTruncated() {
 		return
 	}
 	s.HistoryTruncated = true
+}
+
+// MarkHistoryTruncatedAt declares a deliberate rewind whose canonical cutoff is
+// identified by anchor rather than by an exact prefix. This is required for a
+// compacted prompt projection (summary + retained tail), which is not a prefix
+// of the append-only canonical transcript. searchLimit bounds the canonical
+// tail scan used to locate the anchor row.
+func (s *Session) MarkHistoryTruncatedAt(anchor types.Message, keepAnchor bool, searchLimit int) {
+	if s == nil {
+		return
+	}
+	s.HistoryTruncated = true
+	cloned := *anchor.Clone()
+	s.HistoryTruncateAnchor = &cloned
+	s.HistoryTruncateKeepAnchor = keepAnchor
+	if searchLimit < 0 {
+		searchLimit = 0
+	}
+	s.HistoryTruncateSearchLimit = searchLimit
 }
 
 // MarkHistoryReplaced declares that the current in-memory history is a
@@ -827,6 +858,21 @@ func (s *Session) Clone() *Session {
 	return clone
 }
 
+// CloneForMetadataUpdate is the metadata-persist path's clone: it copies the
+// session metadata and a shallow history slice, then refreshes derived
+// metadata exactly like Clone. It must not be used when callers will mutate
+// message contents; the goal/persist hook only reads history.
+func (s *Session) CloneForMetadataUpdate() *Session {
+	if s == nil {
+		return nil
+	}
+	clone := s.CloneWithoutHistory()
+	clone.History = append(clone.History, s.History...)
+	clone.HistoryLoaded = s.HistoryLoaded
+	clone.refreshDerivedMetadata()
+	return clone
+}
+
 // CloneWithoutHistory clones session metadata without retaining or copying the
 // prompt projection. HistoryLoaded is false until the caller supplies history.
 func (s *Session) CloneWithoutHistory() *Session {
@@ -841,19 +887,25 @@ func (s *Session) CloneWithoutHistory() *Session {
 	}
 
 	clone := &Session{
-		ID:                    s.ID,
-		UserID:                s.UserID,
-		State:                 s.State,
-		HeadOffset:            s.HeadOffset,
-		CanonicalMessageCount: s.CanonicalMessageCount,
-		Metadata:              s.Metadata,
-		CreatedAt:             s.CreatedAt,
-		UpdatedAt:             s.UpdatedAt,
-		ExpiresAt:             expiresAt,
-		PreserveUpdatedAt:     s.PreserveUpdatedAt,
-		HistoryTruncated:      s.HistoryTruncated,
-		HistoryReplaced:       s.HistoryReplaced,
-		HistoryLoaded:         false,
+		ID:                         s.ID,
+		UserID:                     s.UserID,
+		State:                      s.State,
+		HeadOffset:                 s.HeadOffset,
+		CanonicalMessageCount:      s.CanonicalMessageCount,
+		Metadata:                   s.Metadata,
+		CreatedAt:                  s.CreatedAt,
+		UpdatedAt:                  s.UpdatedAt,
+		ExpiresAt:                  expiresAt,
+		PreserveUpdatedAt:          s.PreserveUpdatedAt,
+		HistoryTruncated:           s.HistoryTruncated,
+		HistoryReplaced:            s.HistoryReplaced,
+		HistoryTruncateKeepAnchor:  s.HistoryTruncateKeepAnchor,
+		HistoryTruncateSearchLimit: s.HistoryTruncateSearchLimit,
+		HistoryLoaded:              false,
+	}
+	if s.HistoryTruncateAnchor != nil {
+		anchor := *s.HistoryTruncateAnchor.Clone()
+		clone.HistoryTruncateAnchor = &anchor
 	}
 
 	// 克隆标签

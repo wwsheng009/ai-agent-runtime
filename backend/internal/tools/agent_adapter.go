@@ -15,6 +15,16 @@ type AgentAdapter struct {
 	manager *Manager
 }
 
+// mcpAdapterStatus is the small governance projection the adapter needs from
+// one MCP server. Keeping it local avoids carrying the full MCPStatus through
+// every descriptor while still fetching each server only once per list call.
+type mcpAdapterStatus struct {
+	trustLevel       string
+	executionMode    string
+	executionScope   string
+	maxParallelCalls int
+}
+
 // NewAgentAdapter wraps a runtime tools manager for the agent loop.
 func NewAgentAdapter(manager *Manager) *AgentAdapter {
 	return &AgentAdapter{manager: manager}
@@ -47,6 +57,7 @@ func (a *AgentAdapter) ListTools() []skill.ToolInfo {
 	}
 	descriptors := a.manager.ListTools()
 	tools := make([]skill.ToolInfo, 0, len(descriptors))
+	statusByMCP := make(map[string]mcpAdapterStatus)
 	for _, descriptor := range descriptors {
 		info := skill.ToolInfo{
 			Name:        descriptor.Name,
@@ -55,17 +66,18 @@ func (a *AgentAdapter) ListTools() []skill.ToolInfo {
 			Metadata:    cloneMetadataMap(descriptor.Metadata),
 			Enabled:     true,
 		}
-		if mcpInfo, ok := a.lookupMCPTool(descriptor.Name); ok {
-			info.MCPName = mcpInfo.MCPName
-			info.MaxParallelCalls = mcpInfo.MaxParallelCalls
-			info.MCPTrustLevel = mcpInfo.MCPTrustLevel
-			info.ExecutionMode = mcpInfo.ExecutionMode
-			info.ExecutionScope = mcpInfo.ExecutionScope
-			// lookupMCPTool stamps fs_owner=tool_server (B2); the descriptor's
-			// metadata comes from the raw MCP registry and lacks it. Merge the
-			// stamped copy over the descriptor so the owner is present without
-			// dropping the callable-name identity fields ListTools already set.
-			info.Metadata = mergeMetadataMaps(info.Metadata, mcpInfo.Metadata)
+		// The manager has already resolved the callable MCP identity and put it
+		// into descriptor.Metadata. Reusing that projection avoids a per-tool
+		// FindTool scan and another JSON deep copy of the schema; the adapter only
+		// needs server governance fields plus the fs_owner stamp (B1/B2).
+		if mcpName, ok := descriptorMCPName(descriptor.Metadata); ok && a.manager.mcp != nil && !a.manager.shouldPreferLocalToolkit(mcpName, descriptor.Name) {
+			status := a.mcpStatusFor(mcpName, statusByMCP)
+			info.MCPName = mcpName
+			info.MaxParallelCalls = status.maxParallelCalls
+			info.MCPTrustLevel = status.trustLevel
+			info.ExecutionMode = status.executionMode
+			info.ExecutionScope = status.executionScope
+			info.Metadata = skill.WithRuntimeMCPMetadata(info.Metadata)
 		}
 		tools = append(tools, info)
 	}
@@ -123,61 +135,49 @@ func (a *AgentAdapter) ResolveToolSource(toolName string) string {
 	return a.manager.resolveToolSource(toolName)
 }
 
-func (a *AgentAdapter) lookupMCPTool(toolName string) (skill.ToolInfo, bool) {
-	if a == nil || a.manager == nil || a.manager.mcp == nil {
-		return skill.ToolInfo{}, false
+func descriptorMCPName(metadata map[string]interface{}) (string, bool) {
+	raw, ok := metadata["mcp_name"]
+	if !ok {
+		return "", false
 	}
-	info, err := a.manager.mcp.FindTool(toolName)
-	if err != nil || info == nil || info.Tool == nil {
-		return skill.ToolInfo{}, false
+	name, ok := raw.(string)
+	if !ok {
+		return "", false
 	}
-	if a.manager.shouldPreferLocalToolkit(info.MCPName, toolName) {
-		return skill.ToolInfo{}, false
-	}
-	// The MCP tool server resolves its own filesystem paths: stamp the owner so
-	// the local preflight stops stat'ing remote paths and the sandbox stops
-	// validating them against the local workspace (review B2).
-	metadata := skill.WithRuntimeMCPMetadata(cloneMetadataMap(info.Metadata))
-	trustLevel, executionMode, executionScope := a.resolveMCPGovernance(info.MCPName)
-	return skill.ToolInfo{
-		Name:             info.Tool.Name,
-		Description:      info.Tool.Description,
-		InputSchema:      normalizeParameters(info.Tool.InputSchema),
-		Metadata:         metadata,
-		MCPName:          info.MCPName,
-		MaxParallelCalls: a.resolveMCPMaxParallelCalls(info.MCPName),
-		MCPTrustLevel:    trustLevel,
-		ExecutionMode:    executionMode,
-		ExecutionScope:   executionScope,
-		Enabled:          info.Enabled,
-	}, true
+	name = strings.TrimSpace(name)
+	return name, name != ""
 }
 
-// resolveMCPGovernance returns the trust level, execution mode and execution
-// scope recorded for one MCP server.
+// mcpStatusFor fetches one MCP server's governance projection at most once per
+// ListTools call.
 //
-// These three values are what ToolExecutionPolicy gates remote writes/shell on
+// The trust level, execution mode and execution scope are what
+// ToolExecutionPolicy gates remote writes/shell on
 // (policy/tool_policy.go AllowToolInfo), so dropping them here silently
 // disabled BlockUntrustedMCP / BlockRemoteWrites for every host that projects
 // tools through this adapter (aicli TUI and runtime-server; review B1).
-func (a *AgentAdapter) resolveMCPGovernance(mcpName string) (trustLevel, executionMode, executionScope string) {
+func (a *AgentAdapter) mcpStatusFor(mcpName string, cache map[string]mcpAdapterStatus) mcpAdapterStatus {
 	if a == nil || a.manager == nil || a.manager.mcp == nil || strings.TrimSpace(mcpName) == "" {
-		return "", "", ""
+		return mcpAdapterStatus{}
 	}
-	status, err := a.manager.mcp.GetMCPStatus(mcpName)
-	if err != nil || status == nil {
-		return "", "", ""
+	name := strings.TrimSpace(mcpName)
+	if cache != nil {
+		if status, ok := cache[name]; ok {
+			return status
+		}
 	}
-	return string(status.TrustLevel), status.ExecutionMode, string(status.ExecutionScope)
-}
-
-func (a *AgentAdapter) resolveMCPMaxParallelCalls(mcpName string) int {
-	if a == nil || a.manager == nil || a.manager.mcp == nil || strings.TrimSpace(mcpName) == "" {
-		return 0
+	networkStatus, err := a.manager.mcp.GetMCPStatus(name)
+	status := mcpAdapterStatus{}
+	if err == nil && networkStatus != nil {
+		status = mcpAdapterStatus{
+			trustLevel:       string(networkStatus.TrustLevel),
+			executionMode:    networkStatus.ExecutionMode,
+			executionScope:   string(networkStatus.ExecutionScope),
+			maxParallelCalls: networkStatus.MaxParallelCalls,
+		}
 	}
-	status, err := a.manager.mcp.GetMCPStatus(mcpName)
-	if err != nil || status == nil {
-		return 0
+	if cache != nil {
+		cache[name] = status
 	}
-	return status.MaxParallelCalls
+	return status
 }

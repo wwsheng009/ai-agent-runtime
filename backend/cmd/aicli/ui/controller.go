@@ -966,7 +966,7 @@ func (c *UIController) HistoryEffectDiagnostics() HistoryEffectDiagnostics {
 // 零 payload 克隆：只读账本条目的 State/CellID，避免 Entries() 在大账本上
 // 逐条复制 Commit.Lines。known=false 表示账本为空、无法判定（调用方据此决定
 // 是否拦截）。
-func (c *UIController) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+func (c *UIController) DeliveredCellIDs() (map[scene.CellID]bool, bool) {
 	if c == nil {
 		return nil, false
 	}

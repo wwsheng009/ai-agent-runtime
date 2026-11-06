@@ -484,6 +484,24 @@ func TestHandleChatWebAPICache_FallsBackToMirrorWhenUsageEmpty(t *testing.T) {
 		"usage_cache_read_tokens": 100,
 	})
 
+	// New local sessions no longer write the cache_requests mirror. Seed one
+	// historical row explicitly: this test still pins the upgrade fallback for
+	// databases that already contain mirror data.
+	mirror, ok := session.LocalRuntimeHost.RuntimeStore.(cacheanalytics.RequestStore)
+	if !ok {
+		t.Fatal("runtime store does not implement cacheanalytics.RequestStore")
+	}
+	finished := time.Now().UTC()
+	if err := mirror.SaveRequest(cacheanalytics.CacheRequestRecord{
+		LLMRequestID: "req-hist",
+		SessionID:    sessionID,
+		Status:       cacheanalytics.RequestStatusSuccess,
+		StartedAt:    finished.Add(-time.Second),
+		FinishedAt:   &finished,
+	}); err != nil {
+		t.Fatalf("seed runtime mirror: %v", err)
+	}
+
 	usageService := ensureLocalUsageService(session.LocalRuntimeHost)
 	if usageService == nil {
 		t.Fatal("expected usage analytics service")

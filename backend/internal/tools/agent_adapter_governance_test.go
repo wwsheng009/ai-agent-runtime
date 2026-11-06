@@ -20,12 +20,13 @@ type governanceMCPManager struct {
 	trustLevel     mcpconfig.MCPTrustLevel
 	executionMode  string
 	executionScope mcpconfig.ExecutionScope
+	statusCalls    int
 }
 
-func (m *governanceMCPManager) LoadConfig(string) error  { return nil }
+func (m *governanceMCPManager) LoadConfig(string) error     { return nil }
 func (m *governanceMCPManager) Start(context.Context) error { return nil }
-func (m *governanceMCPManager) Stop() error              { return nil }
-func (m *governanceMCPManager) ReloadConfig() error      { return nil }
+func (m *governanceMCPManager) Stop() error                 { return nil }
+func (m *governanceMCPManager) ReloadConfig() error         { return nil }
 
 func (m *governanceMCPManager) ListTools() []*mcpregistry.ToolInfo {
 	return []*mcpregistry.ToolInfo{{
@@ -59,6 +60,7 @@ func (m *governanceMCPManager) CallTool(context.Context, string, string, map[str
 func (m *governanceMCPManager) SetMCPEnabled(string, bool) error { return nil }
 
 func (m *governanceMCPManager) GetMCPStatus(name string) (*mcpconfig.MCPStatus, error) {
+	m.statusCalls++
 	return &mcpconfig.MCPStatus{
 		Name:           name,
 		Type:           "stdio",
@@ -81,6 +83,12 @@ func (m *governanceMCPManager) ReadResource(context.Context, string, string) (*p
 
 func newAdapterWithFakeMCP(t *testing.T, serverName, toolName string) *AgentAdapter {
 	t.Helper()
+	adapter, _ := newAdapterAndFakeMCP(t, serverName, toolName)
+	return adapter
+}
+
+func newAdapterAndFakeMCP(t *testing.T, serverName, toolName string) (*AgentAdapter, *governanceMCPManager) {
+	t.Helper()
 	manager := &governanceMCPManager{
 		name:           serverName,
 		toolName:       toolName,
@@ -88,7 +96,7 @@ func newAdapterWithFakeMCP(t *testing.T, serverName, toolName string) *AgentAdap
 		executionMode:  "local_mcp", // SSH-launched stdio reports local_mcp
 		executionScope: mcpconfig.ExecutionScopeRemote,
 	}
-	return NewAgentAdapter(NewDefaultManager(manager))
+	return NewAgentAdapter(NewDefaultManager(manager)), manager
 }
 
 // errToolNotFound keeps the fake manager free of a second error dependency.
@@ -147,4 +155,22 @@ func TestAgentAdapterFindToolStampsFSOwner(t *testing.T) {
 	owner, ok := info.Metadata[runtimetypes.ToolMetadataFSOwnerKey].(string)
 	require.True(t, ok)
 	require.Equal(t, runtimetypes.ToolFSOwnerToolServer, owner)
+}
+
+// TestAgentAdapterMCPStatusFetchIsCachedPerList locks the hot-path invariant:
+// one ListTools pass must not re-fetch the same server status for every tool.
+// The prior implementation called GetMCPStatus twice per descriptor; with a
+// registry-backed status that cloned every tool schema it became O(N²).
+func TestAgentAdapterMCPStatusFetchIsCachedPerList(t *testing.T) {
+	adapter, fake := newAdapterAndFakeMCP(t, "remote-dev", "remote_dev__view")
+
+	cache := map[string]mcpAdapterStatus{}
+	first := adapter.mcpStatusFor("remote-dev", cache)
+	second := adapter.mcpStatusFor("remote-dev", cache)
+
+	require.Equal(t, 1, fake.statusCalls, "one ListTools status cache must fetch each MCP once")
+	require.Equal(t, first, second)
+	require.Equal(t, "trusted_remote", first.trustLevel)
+	require.Equal(t, "local_mcp", first.executionMode)
+	require.Equal(t, "remote", first.executionScope)
 }

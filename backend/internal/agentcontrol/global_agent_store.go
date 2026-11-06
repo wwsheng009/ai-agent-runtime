@@ -416,6 +416,15 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	if err != nil {
 		return AgentRecord{}, err
 	}
+	// Terminal rows are immutable for wake purposes. Projection refreshes often
+	// re-emit the same closed/stale identity with a zero or refreshed closed_at;
+	// rewriting that timestamp makes an otherwise identical row look changed and
+	// appends another upsert wake event. Preserve the stored terminal timestamp
+	// so the wake-state comparison below can suppress heartbeat-only churn.
+	if beforeExists && before.ClosedAt != nil && before.Status == record.Status &&
+		(record.Status == AgentStatusClosed || record.Status == AgentStatusStale) {
+		record.ClosedAt = before.ClosedAt
+	}
 	// 终态行不可被投影复活：宿主投影（materialize）是按会话存储重写的，若一次
 	// 扫描在 spawn 回滚释放预约之前读到旧快照，就会把刚释放的 stale 行写回
 	// active，导致被释放的预约继续占用 agents.maxThreads。守卫必须在 SQL 内
@@ -1450,13 +1459,31 @@ func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Contex
 	if err := s.makeRoomForAgentWakeEvent(ctx, event); err != nil {
 		return AgentWakeEvent{}, err
 	}
-	result, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return AgentWakeEvent{}, fmt.Errorf("begin agent control agent wake transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Upserts are state snapshots, not history: watchers replay current agent
+	// rows via ListAgentControlAgents(AfterSeq) and only use MAX(id) / recent
+	// purge protection from this log. Coalescing prior upserts for the same
+	// agent keeps the durable change feed at "latest state + real transitions"
+	// instead of one row per heartbeat/materialize pass.
+	if eventKind == "upsert" {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM agent_control_agent_wake_events
+			WHERE agent_id = ? AND event_kind = 'upsert'
+		`, event.AgentID); err != nil {
+			return AgentWakeEvent{}, fmt.Errorf("coalesce agent control agent wake events: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_control_agent_wake_events (
-			agent_row_id, agent_id, root_session_id, parent_agent_id, parent_session_id,
+			agent_id, root_session_id, parent_agent_id, parent_session_id,
 			session_id, agent_path, depth, agent_type, workflow, team_id, teammate_id,
 			status, event_kind, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, nullInt64(event.Seq), event.AgentID, event.RootSessionID, nullAgentString(event.ParentAgentID),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.AgentID, event.RootSessionID, nullAgentString(event.ParentAgentID),
 		nullAgentString(event.ParentSessionID), nullAgentString(event.SessionID), event.AgentPath, event.Depth,
 		nullAgentString(event.AgentType), nullAgentString(event.Workflow), nullAgentString(event.TeamID),
 		nullAgentString(event.TeammateID), nullAgentString(event.Status), nullAgentString(event.EventKind),
@@ -1467,6 +1494,9 @@ func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Contex
 	seq, err := result.LastInsertId()
 	if err != nil {
 		return AgentWakeEvent{}, fmt.Errorf("read agent control agent wake sequence: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AgentWakeEvent{}, fmt.Errorf("commit agent control agent wake event: %w", err)
 	}
 	event.Seq = seq
 	return event.Normalize(), nil
@@ -1957,13 +1987,6 @@ func parseRouteWarningsJSON(raw string) []string {
 		return nil
 	}
 	return trimAgentRecordStrings(values)
-}
-
-func nullInt64(value int64) interface{} {
-	if value <= 0 {
-		return nil
-	}
-	return value
 }
 
 func formatAgentTime(value time.Time) string {

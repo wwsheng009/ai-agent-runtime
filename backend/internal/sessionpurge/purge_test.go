@@ -23,10 +23,11 @@ func TestRunPurgesAcrossRelatedStoresWithProtection(t *testing.T) {
 	dryReport, err := Run(context.Background(), fixture.paths, opts)
 	require.NoError(t, err)
 	require.Equal(t, "planned", dryReport.Status)
-	require.Equal(t, 5, dryReport.CandidateCount, "old-session/orphan-runtime/orphan-usage/orphan-artifact/old-team")
+	require.Equal(t, 6, dryReport.CandidateCount, "old-session/orphan-runtime/orphan-cells/orphan-usage/orphan-artifact/old-team")
 	require.Equal(t, 7, dryReport.ProtectedCandidates)
 	require.Contains(t, dryReport.CandidateSamples, "old-session")
 	require.Contains(t, dryReport.CandidateSamples, "orphan-runtime")
+	require.Contains(t, dryReport.CandidateSamples, "orphan-cells")
 	require.Contains(t, dryReport.CandidateSamples, "orphan-usage")
 	require.Contains(t, dryReport.CandidateSamples, "orphan-artifact")
 	require.Contains(t, dryReport.CandidateSamples, "old-team")
@@ -45,6 +46,11 @@ func TestRunPurgesAcrossRelatedStoresWithProtection(t *testing.T) {
 	require.Zero(t, queryInt(t, fixture.paths.History, `SELECT COUNT(*) FROM session_messages WHERE session_id='old-session'`))
 	require.Zero(t, queryInt(t, fixture.paths.History, `SELECT COUNT(*) FROM session_prompt_messages WHERE session_id='old-session'`))
 	require.Zero(t, queryInt(t, fixture.paths.History, `SELECT COUNT(*) FROM sessions WHERE id='old-team'`))
+
+	// cells 级联：缓存跟随会话删除，但其它会话的 cell 保留。
+	require.Zero(t, queryInt(t, fixture.paths.Cells, `SELECT COUNT(*) FROM session_cells WHERE session_id='old-session'`))
+	require.Zero(t, queryInt(t, fixture.paths.Cells, `SELECT COUNT(*) FROM session_cells WHERE session_id='orphan-cells'`))
+	require.Equal(t, int64(1), queryInt(t, fixture.paths.Cells, `SELECT COUNT(*) FROM session_cells WHERE session_id='recent-session'`))
 
 	// runtime 级联
 	for _, table := range []string{
@@ -126,6 +132,33 @@ func TestRunSkipsTeamStoreByDefault(t *testing.T) {
 	for _, store := range report.Stores {
 		require.NotEqual(t, "team", store.Name)
 	}
+}
+
+func TestRunFastApplyProtectsRecentActivityWithoutOrphanScan(t *testing.T) {
+	fixture := newPurgeFixture(t)
+	recent := fixture.now.Add(-time.Hour).Format(time.RFC3339Nano)
+	execSQL(t, fixture.paths.Runtime, `INSERT INTO session_runtime_state (session_id, status, updated_at) VALUES ('fast-recent', 'idle', ?)`, recent)
+	execSQL(t, fixture.paths.Runtime, `INSERT INTO session_events (session_id, created_at) VALUES ('fast-recent', ?)`, recent)
+	execSQL(t, fixture.paths.History, `INSERT INTO sessions (id, updated_at, expires_at) VALUES ('fast-recent', ?, NULL)`, fixture.now.Add(-30*24*time.Hour).Format(time.RFC3339Nano))
+
+	report, err := Run(context.Background(), fixture.paths, Options{
+		OlderThan:      7 * 24 * time.Hour,
+		IncludeOrphans: true,
+		IncludeTeam:    true,
+		DryRun:         false,
+		FastCandidates: true,
+		Profile:        true,
+		Now:            fixture.now,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "pruned", report.Status)
+	require.True(t, report.FastCandidates)
+	require.Contains(t, report.TimingsMS, "protection_recent")
+	require.Zero(t, report.OrphanCandidates)
+	require.Equal(t, int64(1), queryInt(t, fixture.paths.History, `SELECT COUNT(*) FROM sessions WHERE id='fast-recent'`))
+	require.Zero(t, queryInt(t, fixture.paths.History, `SELECT COUNT(*) FROM sessions WHERE id='old-session'`))
+	require.Zero(t, queryInt(t, fixture.paths.Runtime, `SELECT COUNT(*) FROM session_events WHERE session_id='old-session'`))
+	require.Equal(t, int64(1), queryInt(t, fixture.paths.Runtime, `SELECT COUNT(*) FROM session_runtime_state WHERE session_id='recent-orphan'`))
 }
 
 func TestRunCleansStaleArtifactRetryMarkersWithoutCandidates(t *testing.T) {

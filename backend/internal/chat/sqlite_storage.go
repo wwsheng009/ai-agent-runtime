@@ -847,6 +847,7 @@ func (s *SQLiteSessionStorage) createSessionTx(ctx context.Context, tx *sql.Tx, 
 }
 
 func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, session *Session, storedProjection *[]types.Message) error {
+	promptEncoder := newPromptPayloadEncoder()
 	count, err := canonicalMessageCountTx(ctx, tx, session.ID)
 	if err != nil {
 		return err
@@ -858,112 +859,18 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		// stale-window guard treats the shorter history as an outdated view,
 		// keeps the rows in session_messages, and the next GET /history or
 		// Load() resurrects the removed messages on screen.
-		if _, err := s.truncateCanonicalToHistoryTx(ctx, tx, session, &count); err != nil {
-			return err
-		}
-		promptRows, prefixMatches, err := loadMatchingPromptRowsTx(ctx, tx, session.ID, session.History)
+		truncated, err := s.truncateCanonicalToHistoryTx(ctx, tx, session, &count)
 		if err != nil {
 			return err
 		}
-		currentPromptCount := len(promptRows)
-		appendOnly := prefixMatches && len(session.History) > currentPromptCount
-		appendFrom, err := s.canonicalAppendStartTx(ctx, tx, session, promptRows, prefixMatches, count)
-		if err != nil {
-			return err
-		}
-		if appendFrom < len(session.History) {
-			incoming, err := encodeMessages(session.History[appendFrom:])
-			if err != nil {
-				return err
-			}
-			for index := range incoming {
-				count++
-				if err := s.insertCanonicalEncodedTx(ctx, tx, session.ID, count, incoming[index]); err != nil {
-					return err
-				}
-			}
-		}
-		switch {
-		case appendOnly:
-			// The projection grows from its own end: prefixMatches already proved
-			// that promptRows is the stored prefix of the caller's history.
-			for index := currentPromptCount; index < len(session.History); index++ {
-				promptRows, err = s.appendPromptMessageTx(ctx, tx, session.ID, promptRows, session.History[index])
-				if err != nil {
-					return err
-				}
-			}
-			*storedProjection = promptRowMessages(promptRows)
-		case prefixMatches && len(session.History) == currentPromptCount:
-			// Metadata-only updates do not rewrite the bounded prompt projection.
-			*storedProjection = session.History
-		default:
-			// The caller-supplied history may either be:
-			//   (a) a stale/shorter in-memory projection that is merely a window
-			//       of the canonical transcript (e.g. a CLI exit sync racing an
-			//       actor persist) — rebuilding from it would silently drop the
-			//       newest turn, so rebuild from the canonical transcript, or
-			//   (b) a deliberate replacement containing messages that do NOT
-			//       exist in the canonical transcript (e.g. a compaction
-			//       summary) — honor the caller's replacement.
-			//
-			// Deciding between the two used to require decoding the whole
-			// canonical transcript (6472 rows / ~2s per checkpoint on a
-			// production session, 14% of the profile). identity_hash answers the
-			// same question with indexed point queries whenever the incoming
-			// history provably reaches the newest canonical row (see
-			// incomingHistoryReachesNewestFastTx); the full path is kept as the
-			// fallback for stale windows and for pre-v2 rows that have not been
-			// backfilled yet.
-			source := session.History
-			if session.HistoryReplaced {
-				// 压缩替换是一等事实：调用者刚把历史重写成"摘要 + 保留尾巴"，
-				// canonical 转录对压缩只增不减（见 truncateCanonicalToHistoryTx
-				// 注释）。任何"从 canonical 重建"都会把压缩前的消息带回投影，
-				// 下一次 Load/恢复就重新发送全量历史。这里无条件信任调用者；
-				// 一次性标志在本次 Update 成功后清除。
-			} else {
-				// 首选：若已存投影携带压缩边界（context_stage=compaction），
-				// 这次同步只能在该投影上追加，绝不整段覆盖。
-				//
-				// 为什么必须在 proven 之前判断：proven 只证明「调用方的历史到达了
-				// canonical 最新行」，**不证明它就是模型视图**。典型反例是 CLI 把
-				// 展示用全量历史（ResumeHistory，可达 18k 条）同步回来 —— 它确实
-				// 到达最新行，但它是给人看的、没有压缩边界。直接采用就会用全量历史
-				// 覆盖 48 行的「摘要 + 尾巴」，压缩摘要随即消失（canonical 里没有
-				// 摘要行），模型丢失压缩前上下文并对整段原始历史重复压缩。
-				bounded, boundedApplied := s.rebuildProjectionFromStoredBaseTx(ctx, tx, session)
-				if boundedApplied {
-					source = bounded
-					s.canonicalBoundedRebuilds.Add(1)
-				} else {
-					proven := false
-					if !s.forceLegacyProjectionRebuild {
-						proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
-						if err != nil {
-							// 证据查询失败不改变语义：按未证明处理，回退全量路径。
-							proven = false
-						}
-					}
-					if proven {
-						s.canonicalFastProofs.Add(1)
-					} else {
-						canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
-						if loadErr != nil || len(canonical) == 0 {
-							canonical = session.History
-						}
-						source = canonical
-						if incomingHistoryReachesNewest(session.History, canonical) {
-							source = session.History
-						}
-						s.canonicalFullLoads.Add(1)
-						// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
-						// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
-						s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
-					}
-				}
-			}
-			projection, err := s.buildPromptProjection(source)
+		if truncated {
+			// A confirmed rewind is authoritative: the caller already replaced the
+			// visible history with the exact prefix that must remain. This is
+			// deliberately not routed through the generic projection repair path,
+			// which treats a compacted projection as a stored base to append from
+			// and would resurrect the turns the rewind just removed.
+			clampCompactionSummaryAfterTruncate(session, count)
+			projection, err := s.buildPromptProjection(session.History)
 			if err != nil {
 				return err
 			}
@@ -971,6 +878,118 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 				return err
 			}
 			*storedProjection = encodedMessages(projection)
+		} else {
+			promptRows, prefixMatches, err := loadMatchingPromptRowsTx(ctx, tx, session.ID, session.History, promptEncoder)
+			if err != nil {
+				return err
+			}
+			currentPromptCount := len(promptRows)
+			appendOnly := prefixMatches && len(session.History) > currentPromptCount
+			appendFrom, err := s.canonicalAppendStartTx(ctx, tx, session, promptRows, prefixMatches, count)
+			if err != nil {
+				return err
+			}
+			if appendFrom < len(session.History) {
+				incoming, err := encodeMessages(session.History[appendFrom:])
+				if err != nil {
+					return err
+				}
+				for index := range incoming {
+					count++
+					if err := s.insertCanonicalEncodedTx(ctx, tx, session.ID, count, incoming[index]); err != nil {
+						return err
+					}
+				}
+			}
+			switch {
+			case appendOnly:
+				// The projection grows from its own end: prefixMatches already proved
+				// that promptRows is the stored prefix of the caller's history.
+				for index := currentPromptCount; index < len(session.History); index++ {
+					promptRows, err = s.appendPromptMessageTx(ctx, tx, session.ID, promptRows, session.History[index], promptEncoder)
+					if err != nil {
+						return err
+					}
+				}
+				*storedProjection = promptRowMessages(promptRows)
+			case prefixMatches && len(session.History) == currentPromptCount:
+				// Metadata-only updates do not rewrite the bounded prompt projection.
+				*storedProjection = session.History
+			default:
+				// The caller-supplied history may either be:
+				//   (a) a stale/shorter in-memory projection that is merely a window
+				//       of the canonical transcript (e.g. a CLI exit sync racing an
+				//       actor persist) — rebuilding from it would silently drop the
+				//       newest turn, so rebuild from the canonical transcript, or
+				//   (b) a deliberate replacement containing messages that do NOT
+				//       exist in the canonical transcript (e.g. a compaction
+				//       summary) — honor the caller's replacement.
+				//
+				// Deciding between the two used to require decoding the whole
+				// canonical transcript (6472 rows / ~2s per checkpoint on a
+				// production session, 14% of the profile). identity_hash answers the
+				// same question with indexed point queries whenever the incoming
+				// history provably reaches the newest canonical row (see
+				// incomingHistoryReachesNewestFastTx); the full path is kept as the
+				// fallback for stale windows and for pre-v2 rows that have not been
+				// backfilled yet.
+				source := session.History
+				if session.HistoryReplaced {
+					// 压缩替换是一等事实：调用者刚把历史重写成"摘要 + 保留尾巴"，
+					// canonical 转录对压缩只增不减（见 truncateCanonicalToHistoryTx
+					// 注释）。任何"从 canonical 重建"都会把压缩前的消息带回投影，
+					// 下一次 Load/恢复就重新发送全量历史。这里无条件信任调用者；
+					// 一次性标志在本次 Update 成功后清除。
+				} else {
+					// 首选：若已存投影携带压缩边界（context_stage=compaction），
+					// 这次同步只能在该投影上追加，绝不整段覆盖。
+					//
+					// 为什么必须在 proven 之前判断：proven 只证明「调用方的历史到达了
+					// canonical 最新行」，**不证明它就是模型视图**。典型反例是 CLI 把
+					// 展示用全量历史（ResumeHistory，可达 18k 条）同步回来 —— 它确实
+					// 到达最新行，但它是给人看的、没有压缩边界。直接采用就会用全量历史
+					// 覆盖 48 行的「摘要 + 尾巴」，压缩摘要随即消失（canonical 里没有
+					// 摘要行），模型丢失压缩前上下文并对整段原始历史重复压缩。
+					bounded, boundedApplied := s.rebuildProjectionFromStoredBaseTx(ctx, tx, session)
+					if boundedApplied {
+						source = bounded
+						s.canonicalBoundedRebuilds.Add(1)
+					} else {
+						proven := false
+						if !s.forceLegacyProjectionRebuild {
+							proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
+							if err != nil {
+								// 证据查询失败不改变语义：按未证明处理，回退全量路径。
+								proven = false
+							}
+						}
+						if proven {
+							s.canonicalFastProofs.Add(1)
+						} else {
+							canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
+							if loadErr != nil || len(canonical) == 0 {
+								canonical = session.History
+							}
+							source = canonical
+							if incomingHistoryReachesNewest(session.History, canonical) {
+								source = session.History
+							}
+							s.canonicalFullLoads.Add(1)
+							// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
+							// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
+							s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
+						}
+					}
+				}
+				projection, err := s.buildPromptProjection(source)
+				if err != nil {
+					return err
+				}
+				if err := replacePromptMessagesTx(ctx, tx, session.ID, projection); err != nil {
+					return err
+				}
+				*storedProjection = encodedMessages(projection)
+			}
 		}
 	}
 	session.CanonicalMessageCount = count
@@ -985,11 +1004,34 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 	// the same in-memory session (e.g. an exit sync holding a stale window) can
 	// never truncate canonical rows again.
 	session.HistoryTruncated = false
+	session.HistoryTruncateAnchor = nil
+	session.HistoryTruncateKeepAnchor = false
+	session.HistoryTruncateSearchLimit = 0
 	// The compaction replacement (if any) has landed in the prompt projection:
 	// consume the one-shot flag so a later ordinary sync cannot keep
 	// re-asserting the replacement over newer persisted state.
 	session.HistoryReplaced = false
 	return nil
+}
+
+// clampCompactionSummaryAfterTruncate keeps a retained compaction checkpoint
+// consistent with the canonical rows that survived a rewind. Without this, the
+// summary still claims to cover the removed tail; messages appended after the
+// rewind receive sequence numbers inside that stale interval and the compact
+// resume view treats them as pre-compaction content, hiding the new turns.
+func clampCompactionSummaryAfterTruncate(session *Session, cutoff int) {
+	if session == nil || cutoff < 0 {
+		return
+	}
+	for index := range session.History {
+		message := &session.History[index]
+		if !strings.EqualFold(strings.TrimSpace(message.Metadata.GetString(types.MetadataKeyContextStage, "")), "compaction") {
+			continue
+		}
+		if ended := metadataLooseInt(message.Metadata["segment_end"]); ended > cutoff {
+			message.Metadata.Set("segment_end", cutoff)
+		}
+	}
 }
 
 // truncateCanonicalToHistoryTx physically removes the canonical rows (and the
@@ -998,10 +1040,12 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 // A shorter in-memory history alone is ambiguous: it is either a stale window
 // that raced a concurrent persist (see incomingHistoryReachesNewest, e.g. a CLI
 // exit sync) or an intentional truncation. Only the latter sets
-// Session.HistoryTruncated, and the deletion is applied only when the
-// caller-supplied history is an exact prefix of the stored transcript. Anything
-// else — a compaction summary, a rewritten middle, a message swapped in place —
-// leaves the canonical transcript untouched.
+// Session.HistoryTruncated. The preferred mapping is an exact prefix of the
+// stored transcript. A compacted visible history starts with a summary that does
+// not exist in session_messages, so it is not a canonical prefix; for that shape
+// the caller supplies HistoryTruncateAnchor and the canonical cutoff is located
+// by stable message identity. A non-prefix replacement without an anchor keeps
+// the legacy fail-safe behavior (canonical transcript untouched).
 func (s *SQLiteSessionStorage) truncateCanonicalToHistoryTx(ctx context.Context, tx *sql.Tx, session *Session, count *int) (bool, error) {
 	if session == nil || count == nil || !session.HistoryTruncated || !session.HistoryLoaded {
 		return false, nil
@@ -1013,27 +1057,148 @@ func (s *SQLiteSessionStorage) truncateCanonicalToHistoryTx(ctx context.Context,
 	if err != nil {
 		return false, err
 	}
-	if len(prefix) != len(session.History) {
-		return false, nil
-	}
-	for index := range prefix {
+	prefixMatches := len(prefix) == len(session.History)
+	for index := 0; prefixMatches && index < len(prefix); index++ {
 		if !messageIdentityEqual(session.History[index], prefix[index]) {
-			return false, nil
+			prefixMatches = false
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM session_messages WHERE session_id = ? AND seq > ?
-	`, session.ID, cutoff); err != nil {
-		return false, fmt.Errorf("truncate canonical transcript: %w", err)
+	if prefixMatches {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM session_messages WHERE session_id = ? AND seq > ?
+		`, session.ID, cutoff); err != nil {
+			return false, fmt.Errorf("truncate canonical transcript: %w", err)
+		}
+		// The retained rows keep their seq, so the last retained seq (cutoff) is
+		// the highest allocated seq after the truncation. It is not
+		// len(session.History) as soon as the transcript has a hole: session-dedupe
+		// deletes surplus rows by primary key, and resetting the counter to the row
+		// count would make the next append re-use a seq that is still stored — the
+		// insert then fails on the (session_id, seq) primary key.
+		*count = cutoff
+		return true, nil
 	}
-	// The retained rows keep their seq, so the last retained seq (cutoff) is the
-	// highest allocated seq after the truncation. It is not len(session.History)
-	// as soon as the transcript has a hole: session-dedupe deletes surplus rows
-	// by primary key, and resetting the counter to the row count would make the
-	// next append re-use a seq that is still stored — the insert then fails on
-	// the (session_id, seq) primary key.
-	*count = cutoff
+
+	anchor := session.HistoryTruncateAnchor
+	if anchor == nil {
+		return false, nil
+	}
+	if canonicalMessageID(*anchor) == "" {
+		return false, fmt.Errorf("backtrack anchor has no stable message id")
+	}
+	anchorSeq, found, err := s.canonicalAnchorSeqTx(ctx, tx, session, canonicalMessageID(*anchor))
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("backtrack anchor message %q was not found in the canonical transcript", canonicalMessageID(*anchor))
+	}
+	cut, err := s.deleteCanonicalFromAnchorTx(ctx, tx, session.ID, anchorSeq, session.HistoryTruncateKeepAnchor)
+	if err != nil {
+		return false, err
+	}
+	*count = cut
 	return true, nil
+}
+
+// canonicalAnchorSeqTx locates the canonical row for a rewind anchor by stable
+// message id. The search is bounded to the canonical tail because a compacted
+// visible history only spans a bounded suffix of session_messages; the actor
+// supplies that bound from the pre-rewind visible length.
+func (s *SQLiteSessionStorage) canonicalAnchorSeqTx(ctx context.Context, tx *sql.Tx, session *Session, messageID string) (int, bool, error) {
+	if session == nil || strings.TrimSpace(messageID) == "" {
+		return 0, false, nil
+	}
+	limit := session.HistoryTruncateSearchLimit
+	if limit < len(session.History)+1 {
+		limit = len(session.History) + 1
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT seq, preview_json, payload_json, artifact_path, byte_count, sha256
+		FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq DESC
+		LIMIT ?
+	`, session.ID, limit)
+	if err != nil {
+		return 0, false, fmt.Errorf("query canonical backtrack anchor: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq, byteCount int
+		var preview, inline []byte
+		var artifact sql.NullString
+		var digest string
+		if err := rows.Scan(&seq, &preview, &inline, &artifact, &byteCount, &digest); err != nil {
+			return 0, false, fmt.Errorf("scan canonical backtrack anchor: %w", err)
+		}
+		if previewID := storedCanonicalMessageID(preview); previewID != "" {
+			if previewID == messageID {
+				return seq, true, nil
+			}
+			continue
+		}
+		if len(inline) == 0 && !artifact.Valid {
+			continue
+		}
+		payload, readErr := s.readCanonicalPayload(inline, artifact, byteCount, digest)
+		if readErr != nil {
+			continue
+		}
+		var message types.Message
+		if json.Unmarshal(payload, &message) != nil {
+			continue
+		}
+		if canonicalMessageID(message) == messageID {
+			return seq, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	return 0, false, nil
+}
+
+// storedCanonicalMessageID extracts the stable identity from the canonical
+// preview payload. Preview JSON keeps metadata for ordinary messages; oversized
+// messages may have been reduced to a minimal preview without message_id, in
+// which case canonicalAnchorSeqTx falls back to the full payload.
+func storedCanonicalMessageID(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var probe struct {
+		Metadata types.Metadata `json:"metadata"`
+	}
+	if json.Unmarshal(payload, &probe) != nil {
+		return ""
+	}
+	if id := strings.TrimSpace(probe.Metadata.GetString(types.MetadataKeyMessageID, "")); id != "" {
+		return id
+	}
+	return strings.TrimSpace(probe.Metadata.GetString(types.MetadataKeyLegacyMessageID, ""))
+}
+
+// deleteCanonicalFromAnchorTx removes the anchor row (or everything after it
+// when keepAnchor is set) and returns the highest surviving sequence number.
+func (s *SQLiteSessionStorage) deleteCanonicalFromAnchorTx(ctx context.Context, tx *sql.Tx, sessionID string, anchorSeq int, keepAnchor bool) (int, error) {
+	statement := `DELETE FROM session_messages WHERE session_id = ? AND seq >= ?`
+	if keepAnchor {
+		statement = `DELETE FROM session_messages WHERE session_id = ? AND seq > ?`
+	}
+	if _, err := tx.ExecContext(ctx, statement, sessionID, anchorSeq); err != nil {
+		return 0, fmt.Errorf("truncate canonical transcript at anchor seq=%d: %w", anchorSeq, err)
+	}
+	var cutoff int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) FROM session_messages WHERE session_id = ?
+	`, sessionID).Scan(&cutoff); err != nil {
+		return 0, fmt.Errorf("read canonical cutoff after anchor truncation: %w", err)
+	}
+	return cutoff, nil
 }
 
 // canonicalPrefixTx loads the leading canonical rows (up to limit, in transcript
@@ -1407,7 +1572,7 @@ func (s *SQLiteSessionStorage) loadCanonicalTailMessagesTx(ctx context.Context, 
 		return nil, nil
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		SELECT payload_json, artifact_path, byte_count, sha256
 		FROM session_messages
 		WHERE session_id = ?
 		ORDER BY seq DESC
@@ -1419,13 +1584,11 @@ func (s *SQLiteSessionStorage) loadCanonicalTailMessagesTx(ctx context.Context, 
 	defer rows.Close()
 	messages := make([]types.Message, 0, limit)
 	for rows.Next() {
-		var sequence int
 		var inline []byte
 		var artifact sql.NullString
-		var preview []byte
 		var byteCount int
 		var digest string
-		if err := rows.Scan(&sequence, &inline, &artifact, &preview, &byteCount, &digest); err != nil {
+		if err := rows.Scan(&inline, &artifact, &byteCount, &digest); err != nil {
 			return nil, fmt.Errorf("scan canonical message tail: %w", err)
 		}
 		payload, err := s.readCanonicalPayload(inline, artifact, byteCount, digest)
@@ -1850,7 +2013,7 @@ func isLegacyCapTrimmedTail(projection, canonical []types.Message) bool {
 // in-memory projection that would otherwise drop the newest turn).
 func (s *SQLiteSessionStorage) loadCanonicalMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]types.Message, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		SELECT payload_json, artifact_path, byte_count, sha256
 		FROM session_messages
 		WHERE session_id = ?
 		ORDER BY seq ASC
@@ -1866,7 +2029,7 @@ func (s *SQLiteSessionStorage) loadCanonicalMessagesTx(ctx context.Context, tx *
 // projection self-heal on the Load path (no write transaction available).
 func (s *SQLiteSessionStorage) loadCanonicalMessagesReadOnly(ctx context.Context, sessionID string) ([]types.Message, error) {
 	rows, err := s.readPoolHandle().QueryContext(ctx, `
-		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		SELECT payload_json, artifact_path, byte_count, sha256
 		FROM session_messages
 		WHERE session_id = ?
 		ORDER BY seq ASC
@@ -1881,13 +2044,11 @@ func (s *SQLiteSessionStorage) loadCanonicalMessagesReadOnly(ctx context.Context
 func (s *SQLiteSessionStorage) scanCanonicalMessages(rows *sql.Rows) ([]types.Message, error) {
 	var messages []types.Message
 	for rows.Next() {
-		var sequence int
 		var inline []byte
 		var artifact sql.NullString
-		var preview []byte
 		var byteCount int
 		var digest string
-		if err := rows.Scan(&sequence, &inline, &artifact, &preview, &byteCount, &digest); err != nil {
+		if err := rows.Scan(&inline, &artifact, &byteCount, &digest); err != nil {
 			return nil, fmt.Errorf("scan canonical message for projection rebuild: %w", err)
 		}
 		payload, err := s.readCanonicalPayload(inline, artifact, byteCount, digest)
@@ -2106,7 +2267,10 @@ func applyStoredPromptProjection(session *Session, projection []types.Message) {
 	}
 }
 
-func loadMatchingPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string, history []types.Message) ([]promptProjectionRow, bool, error) {
+func loadMatchingPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string, history []types.Message, encoder *promptPayloadEncoder) ([]promptProjectionRow, bool, error) {
+	if encoder == nil {
+		encoder = newPromptPayloadEncoder()
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT position, payload_json, byte_count FROM session_prompt_messages
 		WHERE session_id = ? ORDER BY position ASC
@@ -2126,7 +2290,7 @@ func loadMatchingPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string,
 		if index >= len(history) {
 			return nil, false, nil
 		}
-		incoming, err := json.Marshal(history[index])
+		incoming, err := encoder.encode(history[index])
 		if err != nil {
 			return nil, false, fmt.Errorf("encode message %d: %w", index, err)
 		}
@@ -2178,8 +2342,11 @@ func loadPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]prom
 // the model had already seen, and the truncated history could never reach the
 // compaction trigger. Context pressure is resolved by model-driven compaction
 // (see internal/compactruntime), not by this storage layer.
-func (s *SQLiteSessionStorage) appendPromptMessageTx(ctx context.Context, tx *sql.Tx, sessionID string, rows []promptProjectionRow, message types.Message) ([]promptProjectionRow, error) {
-	newMessage, err := encodePromptMessage(message)
+func (s *SQLiteSessionStorage) appendPromptMessageTx(ctx context.Context, tx *sql.Tx, sessionID string, rows []promptProjectionRow, message types.Message, encoder *promptPayloadEncoder) ([]promptProjectionRow, error) {
+	if encoder == nil {
+		encoder = newPromptPayloadEncoder()
+	}
+	payload, err := encoder.encode(message)
 	if err != nil {
 		return nil, err
 	}
@@ -2190,10 +2357,13 @@ func (s *SQLiteSessionStorage) appendPromptMessageTx(ctx context.Context, tx *sq
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO session_prompt_messages(session_id, position, payload_json, byte_count)
 		VALUES (?, ?, ?, ?)
-	`, sessionID, nextPosition, newMessage.payload, newMessage.size); err != nil {
+	`, sessionID, nextPosition, payload, len(payload)); err != nil {
 		return nil, fmt.Errorf("append prompt projection: %w", err)
 	}
-	return append(rows, promptProjectionRow{position: nextPosition, encoded: newMessage}), nil
+	return append(rows, promptProjectionRow{
+		position: nextPosition,
+		encoded:  encodedSessionMessage{message: message, size: len(payload)},
+	}), nil
 }
 
 func replacePromptMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string, messages []encodedSessionMessage) error {
@@ -2248,12 +2418,20 @@ func (s *SQLiteSessionStorage) insertCanonicalEncodedTx(ctx context.Context, tx 
 	if err != nil {
 		return err
 	}
+	// preview_json is only a render/listing fast path. When it is byte-for-byte
+	// identical to the canonical payload it adds no information: readers already
+	// fall back to payload_json when preview_json is NULL/empty. Keep the
+	// bounded preview only for messages that actually needed truncation.
+	var previewPayload interface{} = preview.payload
+	if bytes.Equal(preview.payload, encoded.payload) {
+		previewPayload = nil
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO session_messages(
 			session_id, seq, payload_json, artifact_path, preview_json, byte_count, sha256, created_at,
 			role, tool_call_count, tool_result, content_part_count, identity_hash
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sessionID, seq, inlinePayload, artifactPath, preview.payload, encoded.size, digest,
+	`, sessionID, seq, inlinePayload, artifactPath, previewPayload, encoded.size, digest,
 		time.Now().UTC().Format(time.RFC3339Nano), encoded.message.Role, len(encoded.message.ToolCalls),
 		boolToSQLiteInt(strings.EqualFold(strings.TrimSpace(encoded.message.Role), "tool")), len(encoded.message.ContentParts),
 		canonicalMessageIdentityHash(encoded.message))
@@ -2331,6 +2509,38 @@ func encodePromptMessage(message types.Message) (encodedSessionMessage, error) {
 		return encodedSessionMessage{}, fmt.Errorf("encode prompt message: %w", err)
 	}
 	return encodedSessionMessage{message: message, payload: payload, size: len(payload)}, nil
+}
+
+// promptPayloadEncoder serializes projection messages into a reusable buffer.
+// Steady checkpoint validation compares the caller's history prefix with the
+// stored projection row by row. json.Encoder has the same output contract as
+// json.Marshal, while the reused buffer avoids allocating a fresh payload for
+// every stored row. Callers must copy or use each payload before the next
+// encode; projection writes consume it synchronously.
+type promptPayloadEncoder struct {
+	buffer  bytes.Buffer
+	encoder *json.Encoder
+}
+
+func newPromptPayloadEncoder() *promptPayloadEncoder {
+	encoder := &promptPayloadEncoder{}
+	encoder.encoder = json.NewEncoder(&encoder.buffer)
+	return encoder
+}
+
+func (e *promptPayloadEncoder) encode(message types.Message) ([]byte, error) {
+	if e == nil {
+		return nil, fmt.Errorf("prompt payload encoder is nil")
+	}
+	e.buffer.Reset()
+	if err := e.encoder.Encode(message); err != nil {
+		return nil, fmt.Errorf("encode prompt message: %w", err)
+	}
+	payload := e.buffer.Bytes()
+	if n := len(payload); n > 0 && payload[n-1] == '\n' {
+		payload = payload[:n-1]
+	}
+	return payload, nil
 }
 
 // maxCanonicalPreviewBytes bounds the canonical row preview_json column only.
@@ -2500,7 +2710,7 @@ func (s *SQLiteSessionStorage) AddMessageWithLimit(ctx context.Context, sessionI
 	session.CanonicalMessageCount = count
 	session.Metadata.TotalTurns = count
 	_ = maxHistory // Fixed history caps are removed; only compaction may shrink history.
-	projectionRows, projectionErr := s.appendPromptMessageTx(ctx, tx, sessionID, promptRows, message)
+	projectionRows, projectionErr := s.appendPromptMessageTx(ctx, tx, sessionID, promptRows, message, newPromptPayloadEncoder())
 	if projectionErr != nil {
 		return projectionErr
 	}

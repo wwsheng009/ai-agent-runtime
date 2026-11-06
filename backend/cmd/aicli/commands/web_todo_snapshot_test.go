@@ -471,6 +471,101 @@ func TestChatLatestTodoSnapshotReadsCanonicalHistoryBeyondHotWindow(t *testing.T
 	}
 }
 
+// TestChatLatestTodoSnapshotNegativeCacheSkipsCanonicalReads 锁定 screen 高频
+// 刷新的负缓存：没有 todo 时，短窗口内不得重复分页读取 canonical；消息计数
+// 变化后必须重新尝试。
+func TestChatLatestTodoSnapshotNegativeCacheSkipsCanonicalReads(t *testing.T) {
+	storage := &chatTodosPagerStorage{pages: []*runtimechat.SessionHistoryPage{
+		{
+			Messages: []runtimetypes.Message{{Role: "assistant", Content: "没有 todo"}},
+			Total:    1,
+			FirstSeq: 1,
+			LastSeq:  1,
+		},
+		{
+			Messages: []runtimetypes.Message{{Role: "assistant", Content: "仍然没有 todo"}},
+			Total:    1,
+			FirstSeq: 1,
+			LastSeq:  1,
+		},
+	}}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{CleanupInterval: 0})
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-no-todos"},
+		SessionManager: manager,
+	}
+
+	if got := chatLatestTodoSnapshot(session); got != nil {
+		t.Fatalf("无 todo 时应返回 nil，实际 %+v", got)
+	}
+	if storage.calls != 1 {
+		t.Fatalf("首次回退分页次数 = %d, want 1", storage.calls)
+	}
+
+	if got := chatLatestTodoSnapshot(session); got != nil {
+		t.Fatalf("负缓存窗口内应返回 nil，实际 %+v", got)
+	}
+	if storage.calls != 1 {
+		t.Fatalf("负缓存窗口内不得重复读 canonical，calls=%d", storage.calls)
+	}
+
+	session.RuntimeSession.CanonicalMessageCount = 2
+	if got := chatLatestTodoSnapshot(session); got != nil {
+		t.Fatalf("新消息计数下仍无 todo 应返回 nil，实际 %+v", got)
+	}
+	if storage.calls != 2 {
+		t.Fatalf("消息计数变化后必须重新尝试 canonical，calls=%d", storage.calls)
+	}
+}
+
+// TestChatLatestTodoSnapshotDoesNotCacheCanonicalPositive ensures the 2-second
+// negative cache is the only new cache introduced by the screen hot path. A
+// canonical-history snapshot is a cold fallback, not the live tool_end event;
+// caching it could hide a newer todo list until session identity changes.
+func TestChatLatestTodoSnapshotDoesNotCacheCanonicalPositive(t *testing.T) {
+	storage := &todoCanonicalAlwaysPagerStorage{}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{CleanupInterval: 0})
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-canonical-positive"},
+		SessionManager: manager,
+	}
+
+	first := chatLatestTodoSnapshot(session)
+	if first == nil || len(first.Items) != 1 || first.Items[0].Content != "历史任务" {
+		t.Fatalf("首次应读取 canonical 历史，实际 %+v", first)
+	}
+	if storage.calls != 1 {
+		t.Fatalf("首次分页读取次数 = %d, want 1", storage.calls)
+	}
+
+	second := chatLatestTodoSnapshot(session)
+	if second == nil || len(second.Items) != 1 || second.Items[0].Content != "历史任务" {
+		t.Fatalf("第二次仍应从 canonical 历史读取，实际 %+v", second)
+	}
+	if storage.calls != 2 {
+		t.Fatalf("canonical 正向结果不得写入 live todo cache，calls=%d", storage.calls)
+	}
+}
+
+type todoCanonicalAlwaysPagerStorage struct {
+	runtimechat.SessionStorage
+	calls int
+}
+
+func (s *todoCanonicalAlwaysPagerStorage) Load(context.Context, string) (*runtimechat.Session, error) {
+	return nil, errors.New("todoCanonicalAlwaysPagerStorage: Load is not used in this test")
+}
+
+func (s *todoCanonicalAlwaysPagerStorage) GetMessagePage(_ context.Context, _ string, _, _ int) (*runtimechat.SessionHistoryPage, error) {
+	s.calls++
+	return &runtimechat.SessionHistoryPage{
+		Messages: []runtimetypes.Message{staleTranscriptTodoMessage("历史任务")},
+		Total:    1,
+		FirstSeq: 1,
+		LastSeq:  1,
+	}, nil
+}
+
 // TestChatTodoSnapshotCacheConcurrentAccess 忙时 /todos（读）与 tool_end 事件
 // 入队（写）天然并发；会话级缓存必须全程加锁（方案 V12 的 -race 口径）。
 func TestChatTodoSnapshotCacheConcurrentAccess(t *testing.T) {

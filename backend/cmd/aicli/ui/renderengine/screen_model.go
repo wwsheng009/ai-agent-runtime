@@ -78,6 +78,27 @@ func (m *ScreenModel) Clone() *ScreenModel {
 	return &clone
 }
 
+// NewResizedModel returns a detached blank candidate for a transaction that is
+// guaranteed to discard both physical buffers. Resize has the same semantics
+// as cloning the old grid and then resizing it, but avoids allocating the
+// confirmed grid twice only to throw it away. The candidate keeps the source
+// model's diagnostic trace and starts unknown/force-repaint, matching Resize.
+func (m *ScreenModel) NewResizedModel(width, height int) *ScreenModel {
+	if m == nil {
+		return nil
+	}
+	width, height = clampSize(width, height)
+	return &ScreenModel{
+		width:        width,
+		height:       height,
+		front:        blankGrid(width, height),
+		back:         blankGrid(width, height),
+		forceRepaint: true,
+		projection:   ProjectionUnknown,
+		trace:        m.trace,
+	}
+}
+
 // Resize discards both physical buffers and makes the next Flush repaint the
 // complete frame. Source-backed content remains owned by the composer.
 func (m *ScreenModel) Resize(width, height int) {

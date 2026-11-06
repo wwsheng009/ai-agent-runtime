@@ -22,18 +22,24 @@ const (
 )
 
 type storagePruneRuntimeOptions struct {
-	out              io.Writer
-	errOut           io.Writer
-	json             bool
-	dbPath           string
-	toolReceiptRows  int
-	toolReceiptBytes int64
-	cacheRequestRows int
-	eventRows        int
-	dryRun           bool
-	requireExclusive bool
-	busyTimeout      time.Duration
-	timeout          time.Duration
+	out                     io.Writer
+	errOut                  io.Writer
+	json                    bool
+	dbPath                  string
+	toolReceiptRows         int
+	toolReceiptBytes        int64
+	cacheRequestRows        int
+	eventRows               int
+	streamingEventRetention time.Duration
+	dryRun                  bool
+	requireExclusive        bool
+	busyTimeout             time.Duration
+	timeout                 time.Duration
+}
+
+func durationFlag(cmd *cobra.Command, name string) time.Duration {
+	value, _ := cmd.Flags().GetDuration(name)
+	return value
 }
 
 type storagePruneRuntimeReport struct {
@@ -59,6 +65,7 @@ func newStoragePruneRuntimeCommand() *cobra.Command {
   - session_tool_receipts: 每会话 2048 条 / 8 MiB
   - cache_requests:       每会话 4096 条
   - session_events:       每会话 2048 条
+  - assistant 流式事件:   默认只保留最近 48h（--streaming-event-retention 可调；0 关闭）
 
 同时把历史内联 stable_tool_surface_json 迁移到内容寻址表。
 
@@ -79,18 +86,19 @@ func newStoragePruneRuntimeCommand() *cobra.Command {
 				return
 			}
 			statsExit(runStoragePruneRuntime(storagePruneRuntimeOptions{
-				out:              cmd.OutOrStdout(),
-				errOut:           cmd.ErrOrStderr(),
-				json:             boolFlag(cmd, "json"),
-				dbPath:           strings.TrimSpace(stringFlag(cmd, "db")),
-				toolReceiptRows:  intFlag(cmd, "tool-receipt-rows"),
-				toolReceiptBytes: int64(intFlag(cmd, "tool-receipt-bytes")),
-				cacheRequestRows: intFlag(cmd, "cache-request-rows"),
-				eventRows:        intFlag(cmd, "event-rows"),
-				dryRun:           dryRun,
-				requireExclusive: boolFlag(cmd, "require-exclusive"),
-				busyTimeout:      time.Duration(intFlag(cmd, "busy-timeout")) * time.Second,
-				timeout:          time.Duration(intFlag(cmd, "timeout")) * time.Second,
+				out:                     cmd.OutOrStdout(),
+				errOut:                  cmd.ErrOrStderr(),
+				json:                    boolFlag(cmd, "json"),
+				dbPath:                  strings.TrimSpace(stringFlag(cmd, "db")),
+				toolReceiptRows:         intFlag(cmd, "tool-receipt-rows"),
+				toolReceiptBytes:        int64(intFlag(cmd, "tool-receipt-bytes")),
+				cacheRequestRows:        intFlag(cmd, "cache-request-rows"),
+				eventRows:               intFlag(cmd, "event-rows"),
+				streamingEventRetention: durationFlag(cmd, "streaming-event-retention"),
+				dryRun:                  dryRun,
+				requireExclusive:        boolFlag(cmd, "require-exclusive"),
+				busyTimeout:             time.Duration(intFlag(cmd, "busy-timeout")) * time.Second,
+				timeout:                 time.Duration(intFlag(cmd, "timeout")) * time.Second,
 			}))
 		},
 	}
@@ -99,6 +107,7 @@ func newStoragePruneRuntimeCommand() *cobra.Command {
 	cmd.Flags().Int("tool-receipt-bytes", 8<<20, "单会话工具回执保留总字节")
 	cmd.Flags().Int("cache-request-rows", 4096, "单会话缓存请求明细保留条数")
 	cmd.Flags().Int("event-rows", 2048, "单会话事件保留条数")
+	cmd.Flags().Duration("streaming-event-retention", 48*time.Hour, "assistant 流式事件按龄保留时长；0 关闭")
 	cmd.Flags().Bool("apply", false, "实际执行删除；缺省只 dry-run")
 	cmd.Flags().Bool("dry-run", false, "显式预演（默认行为；不能与 --apply 同时使用）")
 	cmd.Flags().Bool("require-exclusive", false, "Windows 句柄级独占探测；库仍被其它进程打开时立即失败")
@@ -221,11 +230,12 @@ func runStoragePruneRuntime(opts storagePruneRuntimeOptions) int {
 	}
 
 	stats, err := runtimechat.PruneRuntimeRetention(ctx, db, runtimechat.RuntimeRetentionOptions{
-		ToolReceiptRetention:  opts.toolReceiptRows,
-		ToolReceiptMaxBytes:   opts.toolReceiptBytes,
-		CacheRequestRetention: opts.cacheRequestRows,
-		EventRetention:        opts.eventRows,
-		DryRun:                opts.dryRun,
+		ToolReceiptRetention:    opts.toolReceiptRows,
+		ToolReceiptMaxBytes:     opts.toolReceiptBytes,
+		CacheRequestRetention:   opts.cacheRequestRows,
+		EventRetention:          opts.eventRows,
+		StreamingEventRetention: opts.streamingEventRetention,
+		DryRun:                  opts.dryRun,
 	})
 	if err != nil {
 		report.Status = "failed"
@@ -263,11 +273,12 @@ func writeStoragePruneRuntimeReport(opts storagePruneRuntimeOptions, report stor
 		}
 		fmt.Fprintf(opts.out, "[%s] %s\n", label, report.Target)
 		fmt.Fprintf(opts.out, "  path=%s\n", report.Path)
-		fmt.Fprintf(opts.out, "  sessions=%d tool_receipts=%d (%s) cache_requests=%d events=%d (%s) legacy_surfaces=%d (%s) redundant_index_dropped=%t\n",
+		fmt.Fprintf(opts.out, "  sessions=%d tool_receipts=%d (%s) cache_requests=%d events=%d (%s) streaming_events=%d (%s) legacy_surfaces=%d (%s) redundant_index_dropped=%t\n",
 			report.Stats.SessionsScanned,
 			report.Stats.ToolReceiptsDeleted, storageBytesText(report.Stats.ToolReceiptBytesDeleted),
 			report.Stats.CacheRequestsDeleted,
 			report.Stats.EventsDeleted, storageBytesText(report.Stats.EventPayloadBytesDeleted),
+			report.Stats.StreamingEventsDeleted, storageBytesText(report.Stats.StreamingEventBytesDeleted),
 			report.Stats.LegacyInlineSurfacesCompacted, storageBytesText(report.Stats.LegacyInlineSurfaceBytesFreed),
 			report.Stats.RedundantSessionEventsIndexDropped)
 		fmt.Fprintf(opts.out, "  耗时=%s；接下来运行 aicli storage compact --target runtime --require-exclusive 回收文件空间\n",

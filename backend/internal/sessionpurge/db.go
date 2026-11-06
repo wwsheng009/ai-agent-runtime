@@ -3,6 +3,7 @@ package sessionpurge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,10 +13,9 @@ import (
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
-const deleteChunkSize = 300
-
 type rowQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
 type execer interface {
@@ -157,86 +157,64 @@ func querySessionUnixTimes(ctx context.Context, q rowQueryer, query string) (map
 }
 
 func countRowsByIDs(ctx context.Context, q rowQueryer, table string, columns []string, ids []string) (int64, error) {
-	var total int64
-	for start := 0; start < len(ids); start += deleteChunkSize {
-		end := start + deleteChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		predicate, args := idPredicate(columns, ids[start:end])
-		rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", table, predicate), args...)
-		if err != nil {
-			return total, fmt.Errorf("count %s: %w", table, err)
-		}
-		var count int64
-		if rows.Next() {
-			if err := rows.Scan(&count); err != nil {
-				_ = rows.Close()
-				return total, err
-			}
-		}
-		if err := rows.Close(); err != nil {
-			return total, err
-		}
-		total += count
+	if len(ids) == 0 {
+		return 0, nil
 	}
-	return total, nil
+	predicate, args, err := idSetPredicate(columns, ids)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := q.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", table, predicate), args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count %s: %w", table, err)
+	}
+	return count, nil
 }
 
 func deleteRowsByIDs(ctx context.Context, e execer, table string, columns []string, ids []string) (int64, error) {
-	var total int64
-	for start := 0; start < len(ids); start += deleteChunkSize {
-		end := start + deleteChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		predicate, args := idPredicate(columns, ids[start:end])
-		result, err := e.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", table, predicate), args...)
-		if err != nil {
-			return total, fmt.Errorf("delete %s: %w", table, err)
-		}
-		affected, _ := result.RowsAffected()
-		total += affected
+	if len(ids) == 0 {
+		return 0, nil
 	}
-	return total, nil
+	predicate, args, err := idSetPredicate(columns, ids)
+	if err != nil {
+		return 0, err
+	}
+	result, err := e.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", table, predicate), args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete %s: %w", table, err)
+	}
+	affected, _ := result.RowsAffected()
+	return affected, nil
 }
 
 func queryIDsByColumns(ctx context.Context, q rowQueryer, table, idColumn string, filterColumns []string, ids []string) ([]string, error) {
-	seen := make(map[string]struct{})
-	var result []string
-	for start := 0; start < len(ids); start += deleteChunkSize {
-		end := start + deleteChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		predicate, args := idPredicate(filterColumns, ids[start:end])
-		query := fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s", idColumn, table, predicate)
-		values, err := queryStringIDs(ctx, q, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query %s.%s: %w", table, idColumn, err)
-		}
-		for _, value := range values {
-			if _, exists := seen[value]; exists {
-				continue
-			}
-			seen[value] = struct{}{}
-			result = append(result, value)
-		}
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	return result, nil
+	predicate, args, err := idSetPredicate(filterColumns, ids)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf("SELECT DISTINCT %s FROM %s WHERE %s", idColumn, table, predicate)
+	values, err := queryStringIDs(ctx, q, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query %s.%s: %w", table, idColumn, err)
+	}
+	return values, nil
 }
 
-func idPredicate(columns []string, ids []string) (string, []interface{}) {
-	parts := make([]string, 0, len(columns))
-	args := make([]interface{}, 0, len(columns)*len(ids))
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	for _, column := range columns {
-		parts = append(parts, fmt.Sprintf("%s IN (%s)", column, placeholders))
-		for _, id := range ids {
-			args = append(args, id)
-		}
+func idSetPredicate(columns []string, ids []string) (string, []interface{}, error) {
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode purge ids: %w", err)
 	}
-	return strings.Join(parts, " OR "), args
+	parts := make([]string, 0, len(columns))
+	args := make([]interface{}, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, fmt.Sprintf("%s IN (SELECT value FROM json_each(?))", column))
+		args = append(args, string(encoded))
+	}
+	return strings.Join(parts, " OR "), args, nil
 }
 
 func parseRuntimeTime(raw string) (time.Time, bool) {

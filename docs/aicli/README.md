@@ -14,6 +14,8 @@ Recommended entry points:
   - Shell auto-detection defaults, `doctor shell` diagnostics, config-layer overrides (`path` / `prefer` / `autoDetect` / `strictProbe`), WSL opt-in, Web/TUI/API entry points, and `SHELL_UNAVAILABLE` troubleshooting.
 - [storage-maintenance.md](./storage-maintenance.md)
   - 本地 SQLite 数据管理手册：数据库分布、在线保留默认值、`storage prune-runtime` / `storage prune-sessions` / `storage compact` 的分工，按龄会话与 orphan 选择、活跃/lease/job/agent/schedule/team 保护规则、跨库删除范围、dry-run/apply 运行手册、退出码与常见问题。
+- [storage-databases.md](./storage-databases.md)
+  - 本地九个 SQLite 库的功能与作用总览：每个库的核心表、写入/读取模块、权威数据与派生/镜像/缓存边界、跨库身份键与关系图、生命周期与恢复优先级，以及新增存储时的设计约定。
 - [permissions.md](./permissions.md)
   - aicli 权限手册：一分钟快速版（五种模式 + 最常用 5 条规则）→ 规则语法参考（命令/路径/域名/参数/工具名 specifier 与锚点）→ 决策阶梯（11 级流水线、规则管不到的根/主目录断路器、敏感写、外部目录门）→ 常用 recipes（只读 git、推送前确认、lockfile、`.git/`、CI `dont_ask`、`--add-dir`、三层分层写法）→ 审批与记忆（remember 作用域/grants/拒绝反馈/按需解释）→ 已知限制；项目文件 schema 与合并语义互链 `docs/product/project-permissions.md`。
 - [exec.md](./exec.md)

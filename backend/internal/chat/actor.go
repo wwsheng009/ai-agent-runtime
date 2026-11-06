@@ -3932,12 +3932,14 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	}
 	// Broker tools persist opaque job/session aliases directly into the parent
 	// session while this actor still owns an older in-memory session snapshot.
-	// Reload that broker-owned context immediately before the actor's full-row
-	// update so the end-of-turn write cannot erase handles created in the turn.
-	latest, err := a.sessionStore.Load(ctx, session.ID)
+	// Reload only the broker-owned context immediately before the actor's
+	// full-row update. A metadata-only read is sufficient for all keys merged
+	// below; loading the prompt projection was the largest checkpoint-side
+	// allocator in production pprof.
+	latest, err := a.loadSessionMetadataForMerge(ctx, session.ID)
 	if err != nil && errors.Is(err, ErrSessionNotFound) {
 		if a.tryEnsureSession(ctx) {
-			latest, err = a.sessionStore.Load(ctx, session.ID)
+			latest, err = a.loadSessionMetadataForMerge(ctx, session.ID)
 		}
 	}
 	if err != nil {
@@ -4028,6 +4030,19 @@ func planModeStateRevision(state planmode.State) time.Time {
 		}
 	}
 	return newest
+}
+
+// loadSessionMetadataForMerge reads only the durable session row used for
+// context-key reconciliation. Stores without SessionStorageMetadataReader keep
+// the historical full Load fallback.
+func (a *SessionActor) loadSessionMetadataForMerge(ctx context.Context, sessionID string) (*Session, error) {
+	if a.sessionStore == nil {
+		return nil, fmt.Errorf("session store is not configured")
+	}
+	if reader, ok := a.sessionStore.(SessionStorageMetadataReader); ok {
+		return reader.LoadMetadata(ctx, sessionID)
+	}
+	return a.sessionStore.Load(ctx, sessionID)
 }
 
 // checkpointSessionHistory 是 ReAct 循环 OnHistoryCheckpoint 的落点：把长 turn
@@ -6386,7 +6401,16 @@ func (a *SessionActor) publishToolReceiptEvent(eventType, turnID, source string,
 		payload["args"] = string(receipt.ArgsJSON)
 	}
 	if output := extractToolOutput(receipt.MessageJSON); output != "" {
-		payload["output"] = output
+		if eventType == EventToolReceiptRecorded && len(output) > maxInlineToolReceiptOutputBytes {
+			// The receipt row is the authoritative copy. Keep only a bounded
+			// preview in the event and let ListEvents/ListEventsBefore hydrate
+			// the full output from session_tool_receipts.
+			payload["output_ref"] = toolReceiptOutputRef
+			payload["output_bytes"] = len(output)
+			payload["output_preview"] = truncateUTF8Middle(output, maxInlineToolReceiptOutputBytes)
+		} else {
+			payload["output"] = output
+		}
 	}
 	a.publish(runtimeevents.Event{
 		Type:      eventType,

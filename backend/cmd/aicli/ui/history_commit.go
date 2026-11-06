@@ -337,6 +337,14 @@ type HistoryCommitLedger struct {
 	// 条目计数。只有归零时才能判定“整份已交付”，否则流式单元的剩余分片会被
 	// 误判成重播而永久丢失。
 	openCellRevisions map[historyCommitCellKey]int
+	// deliveredCellCounts tracks unique Delivered CellIDs incrementally. The old
+	// eviction guard rebuilt a set by scanning byToken on every trim check;
+	// production pprof recorded 5–9 GB of transient allocations from this path.
+	deliveredCellCounts map[scene.CellID]int
+	// deliveredCellSnapshot is a read-only materialization reused until the next
+	// Delivered transition. Callers must not mutate it.
+	deliveredCellSnapshot      map[scene.CellID]bool
+	deliveredCellSnapshotValid bool
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
@@ -347,6 +355,7 @@ func NewHistoryCommitLedger() *HistoryCommitLedger {
 		compactedTerminalSources: make(map[historyCommitSourceKey]historyCommitTombstone),
 		completedCells:           make(map[historyCommitCellKey]completedCellDelivery),
 		openCellRevisions:        make(map[historyCommitCellKey]int),
+		deliveredCellCounts:      make(map[scene.CellID]int),
 		tokens:                   make([]uint64, 0, 64),
 	}
 }
@@ -689,6 +698,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	entry.Commit.Lines = nil
 	l.byToken[token] = entry
 	l.noteCellRevisionProgress(entry.Commit, false, true, true)
+	l.noteDeliveredCell(entry.Commit.CellID, 1)
 	l.acksSinceCompact++
 	l.advanceQueueHeadAfterTerminal(token)
 	return nil
@@ -834,18 +844,45 @@ func (l *HistoryCommitLedger) HasPending() bool {
 //
 // 第二个返回值 known 表示"能否判定"：账本为空时为 false —— 既可能是首帧尚未
 // 铸提交，也可能是该装配路径根本不产生提交，无法区分，调用方据此决定是否拦截。
-func (l *HistoryCommitLedger) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+func (l *HistoryCommitLedger) DeliveredCellIDs() (map[scene.CellID]bool, bool) {
 	if l == nil || len(l.byToken) == 0 {
 		return nil, false
 	}
-	delivered := make(map[scene.CellID]struct{}, len(l.byToken))
-	for _, entry := range l.byToken {
-		if entry.State != HistoryCommitDelivered {
-			continue
-		}
-		delivered[entry.Commit.CellID] = struct{}{}
+	if l.deliveredCellSnapshotValid {
+		return l.deliveredCellSnapshot, true
 	}
-	return delivered, true
+	snapshot := make(map[scene.CellID]bool, len(l.deliveredCellCounts))
+	for id, count := range l.deliveredCellCounts {
+		if count > 0 {
+			snapshot[id] = true
+		}
+	}
+	l.deliveredCellSnapshot = snapshot
+	l.deliveredCellSnapshotValid = true
+	return snapshot, true
+}
+
+// noteDeliveredCell maintains the incremental delivered-cell projection. It is
+// called only where an entry enters/leaves the Delivered terminal state, so
+// eviction checks no longer scan byToken.
+func (l *HistoryCommitLedger) noteDeliveredCell(id scene.CellID, delta int) {
+	if l == nil || id == 0 || delta == 0 {
+		return
+	}
+	if l.deliveredCellCounts == nil {
+		if delta < 0 {
+			return
+		}
+		l.deliveredCellCounts = make(map[scene.CellID]int)
+	}
+	count := l.deliveredCellCounts[id] + delta
+	if count <= 0 {
+		delete(l.deliveredCellCounts, id)
+	} else {
+		l.deliveredCellCounts[id] = count
+	}
+	l.deliveredCellSnapshot = nil
+	l.deliveredCellSnapshotValid = false
 }
 
 // DeliveryBlockers 报告"当前是否还有**不可证明交付**的 cell"（§14.3 H3 的
@@ -999,6 +1036,9 @@ func (l *HistoryCommitLedger) pruneResolvedToken(token uint64) bool {
 // tombstone。delete 与 range 组合是安全的：调用点按 token 逐个剪除，不依赖遍历
 // 期间的一致快照。
 func (l *HistoryCommitLedger) pruneEntry(token uint64, entry HistoryCommitEntry) {
+	if entry.State == HistoryCommitDelivered {
+		l.noteDeliveredCell(entry.Commit.CellID, -1)
+	}
 	delete(l.byToken, token)
 	key := historyCommitKey(entry.Commit)
 	// 同一 range key 可能已指向更新 token（Invalidated 非部分写入允许同区间重入队），
@@ -1192,6 +1232,12 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		clone.openCellRevisions = make(map[historyCommitCellKey]int, len(l.openCellRevisions))
 		for key, count := range l.openCellRevisions {
 			clone.openCellRevisions[key] = count
+		}
+	}
+	if len(l.deliveredCellCounts) > 0 {
+		clone.deliveredCellCounts = make(map[scene.CellID]int, len(l.deliveredCellCounts))
+		for id, count := range l.deliveredCellCounts {
+			clone.deliveredCellCounts[id] = count
 		}
 	}
 	if len(l.compactedTerminalSources) > 0 {

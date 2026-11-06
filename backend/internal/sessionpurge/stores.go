@@ -19,11 +19,12 @@ const (
 )
 
 type purgeRunner struct {
-	ctx    context.Context
-	db     *sql.DB
-	tx     *sql.Tx
-	dryRun bool
-	result *StoreResult
+	ctx           context.Context
+	db            *sql.DB
+	tx            *sql.Tx
+	dryRun        bool
+	skipRowCounts bool
+	result        *StoreResult
 }
 
 func (r *purgeRunner) queryer() rowQueryer {
@@ -48,6 +49,9 @@ func (r *purgeRunner) delete(table string, columns []string, ids []string) error
 	if len(ids) == 0 {
 		return nil
 	}
+	if !r.dryRun && r.skipRowCounts {
+		return r.deleteRows(table, columns, ids)
+	}
 	ok, err := r.hasTable(table)
 	if err != nil {
 		return err
@@ -69,6 +73,9 @@ func (r *purgeRunner) delete(table string, columns []string, ids []string) error
 }
 
 func (r *purgeRunner) deleteByQuery(table, detail, query string, args ...interface{}) error {
+	if !r.dryRun && r.skipRowCounts {
+		return r.execDeleteByQuery(table, detail, query, args...)
+	}
 	ok, err := r.hasTable(table)
 	if err != nil {
 		return err
@@ -98,6 +105,32 @@ func (r *purgeRunner) queryIDs(table, idColumn string, filterColumns []string, i
 		return nil, nil
 	}
 	return queryIDsByColumns(r.ctx, r.queryer(), table, idColumn, filterColumns, ids)
+}
+
+func (r *purgeRunner) deleteRows(table string, columns []string, ids []string) error {
+	ok, err := r.hasTable(table)
+	if err != nil || !ok {
+		return err
+	}
+	rows, err := deleteRowsByIDs(r.ctx, r.execer(), table, columns, ids)
+	if err != nil {
+		return err
+	}
+	r.result.Tables = append(r.result.Tables, TableResult{Table: table, Rows: rows})
+	return nil
+}
+
+func (r *purgeRunner) execDeleteByQuery(table, detail, query string, args ...interface{}) error {
+	ok, err := r.hasTable(table)
+	if err != nil || !ok {
+		return err
+	}
+	rows, err := execAffected(r.ctx, r.execer(), query, args...)
+	if err != nil {
+		return err
+	}
+	r.result.Tables = append(r.result.Tables, TableResult{Table: table, Rows: rows, Detail: detail})
+	return nil
 }
 
 func countWithQuery(ctx context.Context, q rowQueryer, query string, args ...interface{}) (int64, error) {
@@ -164,7 +197,14 @@ func withStore(
 			return result, err
 		}
 	}
-	runner := &purgeRunner{ctx: ctx, db: db, tx: tx, dryRun: opts.DryRun, result: &result}
+	runner := &purgeRunner{
+		ctx:           ctx,
+		db:            db,
+		tx:            tx,
+		dryRun:        opts.DryRun,
+		skipRowCounts: opts.SkipRowCounts,
+		result:        &result,
+	}
 	if err := fn(runner); err != nil {
 		if tx != nil {
 			_ = tx.Rollback()
@@ -321,6 +361,15 @@ func purgeRuntimeStore(ctx context.Context, path string, ids []string, opts Opti
 	}, nil)
 }
 
+// purgeCellsStore removes the TUI write-through cell cache for deleted
+// sessions. Cells are rebuildable from history, so they follow the session
+// cascade rather than carrying their own retention policy.
+func purgeCellsStore(ctx context.Context, path string, ids []string, opts Options) (StoreResult, error) {
+	return withStore(ctx, path, opts, "cells", func(r *purgeRunner) error {
+		return r.delete("session_cells", []string{"session_id"}, ids)
+	}, nil)
+}
+
 func purgeAnalyticsStore(ctx context.Context, path string, ids []string, opts Options) (StoreResult, error) {
 	return withStore(ctx, path, opts, "analytics", func(r *purgeRunner) error {
 		tables := []struct {
@@ -390,37 +439,24 @@ func queryArtifactBlobIDs(r *purgeRunner, ids []string) ([]string, error) {
 	if ok, err := r.hasTable("checkpoints"); err != nil || !ok {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
-	var result []string
-	for start := 0; start < len(ids); start += deleteChunkSize {
-		end := start + deleteChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		predicate, args := idPredicate([]string{"session_id"}, ids[start:end])
-		query := fmt.Sprintf(`
-			SELECT DISTINCT before_blob_id FROM checkpoint_files
-			WHERE checkpoint_id IN (SELECT id FROM checkpoints WHERE %s)
-			  AND before_blob_id IS NOT NULL AND before_blob_id <> ''
-			UNION
-			SELECT DISTINCT after_blob_id FROM checkpoint_files
-			WHERE checkpoint_id IN (SELECT id FROM checkpoints WHERE %s)
-			  AND after_blob_id IS NOT NULL AND after_blob_id <> ''
-		`, predicate, predicate)
-		queryArgs := append(append([]interface{}{}, args...), args...)
-		values, err := queryStringIDs(r.ctx, r.queryer(), query, queryArgs...)
-		if err != nil {
-			return nil, err
-		}
-		for _, value := range values {
-			if _, exists := seen[value]; exists {
-				continue
-			}
-			seen[value] = struct{}{}
-			result = append(result, value)
-		}
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	return result, nil
+	predicate, args, err := idSetPredicate([]string{"session_id"}, ids)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`
+		SELECT DISTINCT before_blob_id FROM checkpoint_files
+		WHERE checkpoint_id IN (SELECT id FROM checkpoints WHERE %s)
+		  AND before_blob_id IS NOT NULL AND before_blob_id <> ''
+		UNION
+		SELECT DISTINCT after_blob_id FROM checkpoint_files
+		WHERE checkpoint_id IN (SELECT id FROM checkpoints WHERE %s)
+		  AND after_blob_id IS NOT NULL AND after_blob_id <> ''
+	`, predicate, predicate)
+	queryArgs := append(append([]interface{}{}, args...), args...)
+	return queryStringIDs(r.ctx, r.queryer(), query, queryArgs...)
 }
 
 func deleteUnreferencedBlobs(r *purgeRunner, blobIDs []string, checkpointIDs []string) error {
@@ -436,53 +472,52 @@ func deleteUnreferencedBlobs(r *purgeRunner, blobIDs []string, checkpointIDs []s
 	for _, checkpointID := range checkpointIDs {
 		candidateCheckpoints[checkpointID] = struct{}{}
 	}
-	for start := 0; start < len(blobIDs); start += deleteChunkSize {
-		end := start + deleteChunkSize
-		if end > len(blobIDs) {
-			end = len(blobIDs)
+	predicate, args, err := idSetPredicate([]string{"id"}, blobIDs)
+	if err != nil {
+		return err
+	}
+	if r.dryRun {
+		refPredicate, refArgs, err := idSetPredicate([]string{"before_blob_id", "after_blob_id"}, blobIDs)
+		if err != nil {
+			return err
 		}
-		chunk := blobIDs[start:end]
-		predicate, args := idPredicate([]string{"id"}, chunk)
-		if r.dryRun {
-			refPredicate, refArgs := idPredicate([]string{"before_blob_id", "after_blob_id"}, chunk)
-			rows, err := r.queryer().QueryContext(r.ctx, fmt.Sprintf(`
+		rows, err := r.queryer().QueryContext(r.ctx, fmt.Sprintf(`
 				SELECT before_blob_id, after_blob_id, checkpoint_id
 				FROM checkpoint_files
 				WHERE %s
 			`, refPredicate), refArgs...)
-			if err != nil {
-				return err
-			}
-			chunkSet := make(map[string]struct{}, len(chunk))
-			for _, id := range chunk {
-				chunkSet[id] = struct{}{}
-			}
-			blocked := make(map[string]struct{})
-			for rows.Next() {
-				var before, after, checkpointID sql.NullString
-				if err := rows.Scan(&before, &after, &checkpointID); err != nil {
-					_ = rows.Close()
-					return err
-				}
-				if _, candidateCheckpoint := candidateCheckpoints[checkpointID.String]; candidateCheckpoint {
-					continue
-				}
-				for _, value := range []string{before.String, after.String} {
-					if _, inChunk := chunkSet[value]; inChunk {
-						blocked[value] = struct{}{}
-					}
-				}
-			}
-			if err := rows.Close(); err != nil {
-				return err
-			}
-			for _, id := range chunk {
-				if _, isBlocked := blocked[id]; !isBlocked {
-					total++
-				}
-			}
-			continue
+		if err != nil {
+			return err
 		}
+		chunkSet := make(map[string]struct{}, len(blobIDs))
+		for _, id := range blobIDs {
+			chunkSet[id] = struct{}{}
+		}
+		blocked := make(map[string]struct{})
+		for rows.Next() {
+			var before, after, checkpointID sql.NullString
+			if err := rows.Scan(&before, &after, &checkpointID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if _, candidateCheckpoint := candidateCheckpoints[checkpointID.String]; candidateCheckpoint {
+				continue
+			}
+			for _, value := range []string{before.String, after.String} {
+				if _, inChunk := chunkSet[value]; inChunk {
+					blocked[value] = struct{}{}
+				}
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range blobIDs {
+			if _, isBlocked := blocked[id]; !isBlocked {
+				total++
+			}
+		}
+	} else {
 		affected, err := execAffected(r.ctx, r.execer(), fmt.Sprintf(`
 			DELETE FROM blobs
 			WHERE %s

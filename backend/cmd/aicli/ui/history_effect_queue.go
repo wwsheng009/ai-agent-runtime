@@ -180,7 +180,7 @@ func (s HistoryEffectQueueState) cloneForDiagnostics() HistoryEffectQueueState {
 // DeliveredCellIDs 是 ledger 的只读投影（逐出守卫 §14.3 H3 使用）：不克隆
 // payload，只按 State 收集 CellID。known=false 表示账本为空/不可判定。
 // 调用方必须持有 actor 互斥量（UIController.DeliveredCellIDs 已代为加锁）。
-func (s HistoryEffectQueueState) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+func (s HistoryEffectQueueState) DeliveredCellIDs() (map[scene.CellID]bool, bool) {
 	if s.ledger == nil {
 		return nil, false
 	}

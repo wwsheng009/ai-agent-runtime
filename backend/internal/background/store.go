@@ -916,10 +916,6 @@ func (s *SQLiteStore) AppendEvent(ctx context.Context, jobID, eventType string, 
 	if payload == nil {
 		payload = map[string]interface{}{}
 	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal job event payload: %w", err)
-	}
 	createdAt := time.Now().UTC()
 
 	// 读后写（SELECT MAX(seq)+1 → INSERT）：background.sqlite 由 aicli 与
@@ -928,6 +924,17 @@ func (s *SQLiteStore) AppendEvent(ctx context.Context, jobID, eventType string, 
 	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin job event tx: %w", err)
+	}
+
+	storedPayload, err := backgroundEventPayloadForStorage(ctx, tx, jobID, eventType, payload)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	payloadJSON, err := json.Marshal(storedPayload)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("marshal job event payload: %w", err)
 	}
 
 	var seq int64
@@ -1009,6 +1016,24 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, jobID string, afterSeq int
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	_ = rows.Close()
+	needsHydration := false
+	for index := range events {
+		if backgroundOutputNeedsHydration(&events[index]) {
+			needsHydration = true
+			break
+		}
+	}
+	if needsHydration {
+		var jobLogPath string
+		_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(log_path, '') FROM background_jobs WHERE id = ?`, jobID).Scan(&jobLogPath)
+		if logFile, err := os.Open(strings.TrimSpace(jobLogPath)); err == nil {
+			defer logFile.Close()
+			for index := range events {
+				hydrateBackgroundOutputPayload(&events[index], logFile)
+			}
+		}
 	}
 	return events, nil
 }

@@ -27,6 +27,11 @@ type storagePruneSessionsOptions struct {
 	errOut           io.Writer
 	json             bool
 	apply            bool
+	fast             bool
+	profile          bool
+	compactAfter     bool
+	compactForce     bool
+	skipIntegrity    bool
 	includeOrphans   bool
 	includeTeam      bool
 	requireExclusive bool
@@ -42,6 +47,11 @@ func newStoragePruneSessionsCommand() *cobra.Command {
 		Short: "按最后活动时间清理会话及其关联数据（默认 dry-run）",
 		Long: `按会话最后活动时间，跨 history/runtime/analytics/artifacts/agent-control/
 background/schedule 清理过期会话。默认只预演，必须显式加 --apply 才删除。
+
+已经验证过删除语义且不需要预演时，可以直接执行：
+  aicli storage prune-sessions --older-than 7d --apply --fast --compact-after --json
+--fast 不做 orphan 全表扫描和逐表预计行数统计；--compact-after 在删除成功后
+紧接着 VACUUM 回收空间，避免为同一批数据再次启动命令并重新扫描。
 
 保护规则（候选会话满足任一即跳过）：
   - runtime 状态 running / waiting_approval / waiting_input / rewinding
@@ -66,6 +76,11 @@ background/schedule 清理过期会话。默认只预演，必须显式加 --app
 				errOut:           cmd.ErrOrStderr(),
 				json:             boolFlag(cmd, "json"),
 				apply:            boolFlag(cmd, "apply"),
+				fast:             boolFlag(cmd, "fast"),
+				profile:          boolFlag(cmd, "profile"),
+				compactAfter:     boolFlag(cmd, "compact-after"),
+				compactForce:     boolFlag(cmd, "compact-force"),
+				skipIntegrity:    boolFlag(cmd, "compact-skip-integrity-check"),
 				includeOrphans:   boolFlag(cmd, "include-orphans"),
 				includeTeam:      boolFlag(cmd, "include-team"),
 				requireExclusive: boolFlag(cmd, "require-exclusive"),
@@ -76,6 +91,11 @@ background/schedule 清理过期会话。默认只预演，必须显式加 --app
 	}
 	cmd.Flags().String("older-than", "30d", "最后活动时间阈值，例如 30d、2w、72h")
 	cmd.Flags().Bool("apply", false, "实际删除；缺省只 dry-run")
+	cmd.Flags().Bool("fast", false, "跳过 orphan 全表扫描和逐表预计行数统计；需与 --apply 同用")
+	cmd.Flags().Bool("profile", false, "输出候选/保护/各库阶段耗时")
+	cmd.Flags().Bool("compact-after", false, "apply 成功后接着执行离线 VACUUM；无需再次预演")
+	cmd.Flags().Bool("compact-force", false, "VACUUM 时即使 freelist=0 也重建；仅 compact-after 生效")
+	cmd.Flags().Bool("compact-skip-integrity-check", false, "VACUUM 时跳过 quick_check；仅 compact-after 生效")
 	cmd.Flags().Bool("include-orphans", true, "包含 history 已不存在、但其它库仍有的 orphan 会话")
 	cmd.Flags().Bool("include-team", false, "纳入 team store（teams/teammates 及团队历史）")
 	cmd.Flags().Bool("require-exclusive", false, "Windows 句柄级独占探测；任一库被其它进程打开时立即失败")
@@ -127,6 +147,14 @@ func runStoragePruneSessions(opts storagePruneSessionsOptions) int {
 	if opts.timeout <= 0 {
 		opts.timeout = storagePruneSessionsDefaultTimeout
 	}
+	if opts.fast && !opts.apply {
+		fmt.Fprintln(opts.errOut, "参数错误：--fast 只用于直接执行的 --apply；预演请去掉 --fast。")
+		return statsExitUsage
+	}
+	if opts.compactAfter && !opts.apply {
+		fmt.Fprintln(opts.errOut, "参数错误：--compact-after 只在 --apply 成功后执行 VACUUM。")
+		return statsExitUsage
+	}
 	paths := sessionpurge.Paths{}
 	if opts.paths != nil {
 		paths = *opts.paths
@@ -139,7 +167,7 @@ func runStoragePruneSessions(opts storagePruneSessionsOptions) int {
 		paths = resolved
 	}
 	if opts.requireExclusive {
-		for _, path := range []string{paths.History, paths.Runtime, paths.UsageAnalytics, paths.Artifacts, paths.AgentControl, paths.Background, paths.Schedule, paths.Team} {
+		for _, path := range []string{paths.History, paths.Cells, paths.Runtime, paths.UsageAnalytics, paths.Artifacts, paths.AgentControl, paths.Background, paths.Schedule, paths.Team} {
 			if strings.TrimSpace(path) == "" {
 				continue
 			}
@@ -164,11 +192,41 @@ func runStoragePruneSessions(opts storagePruneSessionsOptions) int {
 		IncludeOrphans: opts.includeOrphans,
 		IncludeTeam:    opts.includeTeam,
 		DryRun:         !opts.apply,
+		FastCandidates: opts.fast,
+		Profile:        opts.profile,
 	})
+	var compactExit int
 	if opts.json {
 		encoder := json.NewEncoder(opts.out)
 		encoder.SetIndent("", "  ")
-		if encodeErr := encoder.Encode(report); encodeErr != nil {
+		var payload interface{} = report
+		if opts.compactAfter {
+			compactReports, exitCode := runStorageCompactCaptured(storageCompactOptions{
+				out:              io.Discard,
+				errOut:           opts.errOut,
+				json:             true,
+				target:           "all",
+				force:            opts.compactForce,
+				requireExclusive: opts.requireExclusive,
+				skipIntegrity:    opts.skipIntegrity,
+				busyTimeout:      storageCompactDefaultBusyTimeout,
+				timeout:          opts.timeout,
+			})
+			compactExit = exitCode
+			payload = struct {
+				Prune       sessionpurge.Report `json:"prune"`
+				Compact     interface{}         `json:"compact"`
+				CompactExit int                 `json:"compact_exit"`
+			}{
+				Prune: report,
+				Compact: map[string]interface{}{
+					"reports": compactReports,
+					"summary": storageCompactSummary(compactReports),
+				},
+				CompactExit: compactExit,
+			}
+		}
+		if encodeErr := encoder.Encode(payload); encodeErr != nil {
 			fmt.Fprintf(opts.errOut, "编码 JSON 失败：%v\n", encodeErr)
 			return statsExitDeterministic
 		}
@@ -179,8 +237,29 @@ func runStoragePruneSessions(opts storagePruneSessionsOptions) int {
 		fmt.Fprintf(opts.errOut, "清理失败：%v\n", err)
 		return statsExitDeterministic
 	}
+	if opts.compactAfter && !opts.json {
+		compactExit := runStorageCompact(storageCompactOptions{
+			out:              opts.out,
+			errOut:           opts.errOut,
+			json:             opts.json,
+			target:           "all",
+			force:            opts.compactForce,
+			requireExclusive: opts.requireExclusive,
+			skipIntegrity:    opts.skipIntegrity,
+			busyTimeout:      storageCompactDefaultBusyTimeout,
+			timeout:          opts.timeout,
+		})
+		if compactExit != statsExitOK {
+			fmt.Fprintln(opts.errOut, "数据已清理，但压缩阶段失败；修复占用/完整性后可单独执行 storage compact。")
+			return compactExit
+		}
+	}
 	if !opts.apply && !opts.json {
 		fmt.Fprintln(opts.out, "dry-run：未修改任何数据；确认后加 --apply 执行。")
+	}
+	if opts.compactAfter && opts.json && compactExit != statsExitOK {
+		fmt.Fprintln(opts.errOut, "数据已清理，但压缩阶段失败；修复占用/完整性后可单独执行 storage compact。")
+		return compactExit
 	}
 	return statsExitOK
 }
@@ -194,6 +273,7 @@ func resolvePruneSessionsPaths() (sessionpurge.Paths, error) {
 	})
 	paths := sessionpurge.Paths{
 		History:        storageHistoryStorePath(config, configFile, resolved),
+		Cells:          filepath.Join(resolved.SessionDir, "session_cells.sqlite"),
 		Runtime:        resolved.SessionRuntimeStorePath,
 		UsageAnalytics: usageanalytics.DefaultDBPath(),
 		Artifacts:      resolved.ArtifactStorePath,
@@ -263,6 +343,9 @@ func renderPruneSessionsReport(out io.Writer, report sessionpurge.Report) {
 	}
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(out, "warning: %s\n", warning)
+	}
+	for name, elapsed := range report.TimingsMS {
+		fmt.Fprintf(out, "timing: %-42s %dms\n", name, elapsed)
 	}
 	fmt.Fprintf(out, "duration=%s\n", time.Duration(report.DurationMS)*time.Millisecond)
 }

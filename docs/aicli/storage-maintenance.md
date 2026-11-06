@@ -2,13 +2,16 @@
 
 > 适用范围：`~/.aicli/sessions/` 下的会话历史、runtime、usage analytics、artifacts、agent-control、background、team 和 schedule 数据。
 >
-> 核心原则：**先预演，再删除；删除后必须离线压缩，文件才会真正变小。** 所有 `prune-*` 命令默认都是 dry-run。
+> 核心原则：**默认预演；已验证的命令可用 `--apply --fast` 直接执行；删除后必须离线压缩，文件才会真正变小。** 所有 `prune-*` 命令默认都是 dry-run。
+
+预演用于首次核对候选范围，不是删除功能本身的前置验证。旧实现每次都重复扫描数 GB 的 runtime events / tool receipts / analytics 明细，属于性能缺口；现在 `--apply --fast` 会跳过 orphan 全库分组扫描和预计删除行数统计，只做按龄候选、活跃保护、索引化级联删除。`--compact-after` 把删除与 `VACUUM` 合并到同一次命令，不再要求为同一批数据先跑一遍 dry-run。
 
 ## 1. 数据分布
 
 | 库 | 默认位置 | 主要内容 |
 |---|---|---|
 | 会话历史 | `~/.aicli/sessions/session_history.sqlite` | `sessions`、`session_messages`、`session_prompt_messages` |
+| TUI cell 缓存 | `~/.aicli/sessions/session_cells.sqlite` | `session_cells`（可重建写穿缓存） |
 | 会话 runtime | `~/.aicli/sessions/runtime/session_runtime.sqlite` | 运行事件、工具回执、缓存请求镜像、runtime state、mailbox、lease |
 | 用量分析 | `~/.aicli/sessions/runtime/usage_analytics.sqlite` | `usage_requests`、turns、tool calls、LSP、subagent、route 等 |
 | Artifacts | `~/.aicli/sessions/runtime/artifacts.sqlite` | artifacts、checkpoints、checkpoint files、memory entries、blobs |
@@ -16,6 +19,9 @@
 | Background | `~/.aicli/sessions/runtime/background.sqlite` | 后台 job、job events |
 | Team | `~/.aicli/sessions/runtime/team_store.sqlite` | teams、teammates、team events、task/wake/mailbox 历史 |
 | Schedule | `~/.aicli/data/schedule/schedule.sqlite` | 自动化任务、pending messages、delivery history/intents |
+
+各库的职责边界、核心表、跨库关联键与权威/派生关系见
+[`storage-databases.md`](./storage-databases.md)；本文只讨论维护与清理动作。
 
 实际路径由 CLI-local `sessionruntime.ResolvePaths` 与 `aiclipaths` 默认值解析；显式配置 `storePath` 时以配置为准。
 
@@ -44,13 +50,30 @@
 
 ## 4. 安全前置
 
-建议顺序：
+首次使用建议顺序：
 
-1. 先备份要处理的数据库及其 `-wal` / `-shm` 文件。
+1. 按需备份要处理的数据库及其 `-wal` / `-shm` 文件；用户明确不需要备份时跳过，命令本身不创建备份。
 2. 退出所有使用这些库的 aicli / runtime-server / scheduled 进程。
-3. 先跑 dry-run，检查候选数、保护数和各表行数。
-4. 确认后加 `--apply`。
-5. 最后跑 `storage compact --target all --require-exclusive`。
+3. 首次可跑 dry-run，检查候选数、保护数和各表行数。
+4. 确认后加 `--apply --fast`；需要阶段耗时时加 `--profile`。
+5. 可以单独跑 `storage compact --target all --require-exclusive`，或直接用 `--compact-after` 合并执行。
+
+已经验证过删除语义、且明确「清理 7 天以前数据并压缩数据库、不备份、不预演」时，使用一条命令：
+
+```powershell
+aicli storage prune-sessions `
+  --older-than 7d `
+  --include-team `
+  --apply `
+  --fast `
+  --compact-after `
+  --require-exclusive `
+  --json
+```
+
+`--fast` 只能与 `--apply` 同用；`--compact-after` 也只在 `--apply` 成功后触发压缩。命令会直接按已验证的候选与保护规则删除，不生成备份，不输出 dry-run 的各表预计删除行数；apply 报告仍记录实际删除行数和各阶段耗时。
+
+> **`--older-than` 不是最终删除边界。** history 会话还要满足 `sessions.expires_at` 不在未来（见 6.3/6.4）；`UpdateState` 关闭/归档会话时会写入 `now + 30d` 的过期时间，所以仍在 TTL 宽限期内的会话即使超过 7 天也不会被删，报告表现为 `history_sessions>0` 但 `known_candidates=0`。同时 `--fast` 会跳过 orphan 扫描，此时 `orphan_candidates=0` 只表示「没扫」，不表示「没有」。要清理 7 天前的残留数据，必须去掉 `--fast`（orphan 扫描在数 GB 库上通常需要十几分钟）。
 
 ```powershell
 $runtime = "$HOME\.aicli\sessions\runtime"
@@ -79,6 +102,7 @@ aicli storage prune-runtime \
   --tool-receipt-bytes 8388608 \
   --cache-request-rows 4096 \
   --event-rows 2048 \
+  --streaming-event-retention 48h \
   --apply
 ```
 
@@ -90,6 +114,7 @@ aicli storage prune-runtime \
 | `--tool-receipt-bytes` | 8388608 | 单会话工具回执 message_json 总字节 |
 | `--cache-request-rows` | 4096 | 单会话缓存请求明细条数 |
 | `--event-rows` | 2048 | 单会话事件条数 |
+| `--streaming-event-retention` | `48h` | `assistant_delta` / `assistant.reasoning` 按龄保留；`0` 关闭 |
 | `--dry-run` | 由 `--apply` 决定 | 显式只统计、不删除；不能与 `--apply` 同时使用 |
 | `--apply` | false | 实际执行删除 |
 | `--json` | false | JSON 报告 |
@@ -98,6 +123,7 @@ aicli storage prune-runtime \
 该命令还会：
 
 - 删除与 `UNIQUE(session_id, seq)` 重复的显式事件索引；
+- 按龄删除 `assistant_delta` / `assistant.reasoning` 流式事件，保留最终 `assistant_message` 与工具事件；
 - 清理历史内联 `stable_tool_surface_json`，迁移到内容寻址表；
 - 不执行 `VACUUM`。
 
@@ -125,6 +151,11 @@ aicli storage prune-sessions \
 |---|---|---|
 | `--older-than` | `30d` | 支持 `30d`、`2w`、`72h`、`90m` |
 | `--apply` | false | 缺省只 dry-run |
+| `--fast` | false | 仅 apply；跳过 orphan 全表扫描和预计行数统计，按候选 ID 走索引化删除 |
+| `--profile` | false | 输出候选/保护/各库阶段耗时 |
+| `--compact-after` | false | apply 成功后立即执行 `storage compact --target all` |
+| `--compact-force` | false | 即使 freelist=0 也执行 VACUUM；仅 `--compact-after` 生效 |
+| `--compact-skip-integrity-check` | false | VACUUM 时跳过 quick_check；仅 `--compact-after` 生效 |
 | `--include-orphans` | true | 包含 history 已不存在、其它库仍有数据的 orphan 会话 |
 | `--include-team` | false | 纳入 team store；默认跳过 team |
 | `--require-exclusive` | false | 任一库仍被其它进程持有句柄即失败 |
@@ -136,7 +167,7 @@ aicli storage prune-sessions \
 候选分为两类：
 
 1. **history 候选**：`sessions.updated_at < cutoff`，且 `expires_at` 不在未来；
-2. **orphan 候选**：history 中没有对应行，但从 runtime、usage analytics、artifacts、agent-control、background、schedule（以及启用时的 team）计算出的最近活动时间仍早于 cutoff。
+2. **orphan 候选**：history 中没有对应行，但从 runtime、cells、usage analytics、artifacts、agent-control、background、schedule（以及启用时的 team）计算出的最近活动时间仍早于 cutoff。
 
 因此即使历史库已经清理过，runtime/analytics 中残留的孤儿会话仍会被发现。
 
@@ -159,6 +190,7 @@ aicli storage prune-sessions \
 | 库 | 删除内容 |
 |---|---|
 | history | `session_messages`、`session_prompt_messages`、`sessions`，以及 `<session-artifacts>/<id>` 目录 |
+| cells | `session_cells`（可重建的 TUI 写穿缓存） |
 | runtime | `session_events`、`session_tool_receipts`、`cache_requests`、`session_runtime_state`、`agent_control_mailbox_records`、`session_actor_leases` |
 | analytics | `usage_requests`、`usage_sessions`、`usage_turns`、`usage_tool_calls`、`usage_session_turn_keys`、`usage_lsp_requests`、`usage_lsp_first_publish`、`usage_render_fence_drops`、`usage_routes`、`usage_subagents`、legacy 表 |
 | artifacts | `artifacts`、`checkpoints`、`checkpoint_files`、`memory_entries`；无引用的 `blobs` 会被删除，仍被其它 checkpoint 引用的 blob 保留 |
@@ -259,7 +291,11 @@ go build -o ..\dist\aicli.exe .\cmd\aicli
 
 ### 9.1 dry-run 很慢
 
-会扫描 runtime events、tool receipts、analytics、artifacts、agent-control 等库。数 GB 库几分钟属于正常；建议加 `--timeout 1800` 或更高。
+旧路径会扫描 runtime events、tool receipts、analytics、artifacts、agent-control 等库；数 GB 库几分钟是查询缺口，不是命令功能必须经过的验证。表里有大量 `(session_id, ...)` 复合索引，但按时间求 `MAX()` / `GROUP BY` 时时间列通常是第二列，SQLite 仍需扫完整索引。实测 2.78 GiB runtime 库上 `session_events` 分组约 6–16 秒、`session_tool_receipts` 可能超过 20 秒；预演又会对每张表做 `COUNT(*)` 统计，进一步放大耗时。
+
+`--apply --fast` 使用小表汇总判断近窗口活跃会话，再对候选 ID 用现有 `(session_id, ...)` 索引做精确探测；不做全库 orphan 分组、不逐表预统计。若确需保留完整 orphan 报告，仍可跑默认 dry-run，并加 `--profile` 看 `candidate_last_seen` / `protection` / `store_*` 各阶段耗时。
+
+数据库中的时间索引情况：多数库有 `(session_id, created_at)` 或 `(session_id, started_at_unix_nano)` 类索引，适合按会话 ID 删除，但不适合独立按 cutoff 找「最近 7 天活跃会话」；`session_events` 只有 `(session_id, seq)`，没有 `created_at` 前导索引。强行补 `created_at` 索引会拖慢写入并增大数 GB 库，当前优化选择复用现有覆盖表与会话 ID 索引，而不是新增全库时间索引。
 
 ### 9.2 为什么 `history_sessions` 有 143，但 `known_candidates=0`
 
@@ -283,18 +319,18 @@ team store 默认跳过；需要显式加 `--include-team`。active team 会自�
 
 ### 9.7 想更激进地清理
 
-先用更短阈值 dry-run 对比：
+首次核对可先用更短阈值 dry-run 对比：
 
 ```bash
 aicli storage prune-sessions --older-than 7d --include-team --json
 aicli storage prune-sessions --older-than 14d --include-team --json
 ```
 
-确认后再执行 `--apply`。不要直接对生产库跳过 dry-run。
+确认后执行 `--apply --fast --compact-after`。命令已通过删除语义测试；以后每次都重跑数 GB 全库预演没有必要。
 
 ### 9.8 删除是否可恢复
 
-`prune-sessions` / `prune-runtime` 删除的是行，不做回收站。正式执行前必须备份；`compact` 后原页也无法恢复。
+`prune-sessions` / `prune-runtime` 删除的是行，不做回收站。需要可恢复性时先自行备份；用户明确不需要备份时命令不会创建备份。`compact` 后原页也无法恢复。
 
 ## 10. 相关实现与测试
 

@@ -34,6 +34,25 @@ type localCacheHistoryLookup struct {
 	store runtimechat.SessionStorage
 }
 
+// usageRequestReplayStore lets cache analytics replay the canonical
+// usage_requests rows without writing the legacy cache_requests mirror. Live
+// request collection is owned by the usage analytics collector attached to the
+// same event bus; SaveRequest is intentionally a no-op here.
+type usageRequestReplayStore struct {
+	store *usageanalytics.Store
+}
+
+func (s usageRequestReplayStore) SaveRequest(cacheanalytics.CacheRequestRecord) error {
+	return nil
+}
+
+func (s usageRequestReplayStore) LoadSessionRequests(sessionID string) ([]cacheanalytics.CacheRequestRecord, error) {
+	if s.store == nil {
+		return []cacheanalytics.CacheRequestRecord{}, nil
+	}
+	return s.store.LoadSessionRequests(sessionID)
+}
+
 func (h *localCacheHistoryLookup) load(sessionID string) (*runtimechat.Session, bool) {
 	if h == nil || h.store == nil || strings.TrimSpace(sessionID) == "" {
 		return nil, false
@@ -143,12 +162,19 @@ func buildLocalCacheService(host *localChatRuntimeHost) *cacheanalytics.Service 
 	if host.SessionStore != nil {
 		history = &localCacheHistoryLookup{store: host.SessionStore}
 	}
-	// Phase 3：终态记录持久化镜像（session_runtime.sqlite cache_requests，
-	// 方案 §375）。SQLiteRuntimeStore 实现 cacheanalytics.RequestStore；
-	// InMemoryRuntimeStore 不实现，断言失败时保持纯内存行为（v1 不变）。
+	// usage_requests 是请求终态的单一事实源。优先让缓存分析回放分析库，
+	// 不再写 session_runtime.sqlite 的 cache_requests 镜像；分析库不可用时
+	// 才回退到旧的 RuntimeStore 镜像，保持降级路径。
 	var store cacheanalytics.RequestStore
-	if runtimeStore, ok := host.RuntimeStore.(cacheanalytics.RequestStore); ok {
-		store = runtimeStore
+	if usageSvc := ensureLocalUsageService(host); usageSvc != nil {
+		if usageStore := usageSvc.Store(); usageStore != nil && !usageStore.ReadOnly() {
+			store = usageRequestReplayStore{store: usageStore}
+		}
+	}
+	if store == nil {
+		if runtimeStore, ok := host.RuntimeStore.(cacheanalytics.RequestStore); ok {
+			store = runtimeStore
+		}
 	}
 	service := cacheanalytics.Attach(host.EventBus, cacheanalytics.Options{Store: store}, history)
 	if service == nil {
@@ -208,7 +234,7 @@ func (l *localSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics.S
 	if l == nil || l.store == nil || strings.TrimSpace(sessionID) == "" {
 		return usageanalytics.SessionMeta{}, false
 	}
-	session, err := l.store.Load(context.Background(), sessionID)
+	session, err := loadSessionMetadataBestEffort(context.Background(), l.store, sessionID)
 	if err != nil || session == nil {
 		return usageanalytics.SessionMeta{}, false
 	}
@@ -237,7 +263,7 @@ func (l *localSessionMetaLookup) SessionLineage(sessionID string) (usageanalytic
 	if l == nil || l.store == nil || strings.TrimSpace(sessionID) == "" {
 		return usageanalytics.SessionLineage{}, false
 	}
-	session, err := l.store.Load(context.Background(), sessionID)
+	session, err := loadSessionMetadataBestEffort(context.Background(), l.store, sessionID)
 	if err != nil || session == nil {
 		return usageanalytics.SessionLineage{}, false
 	}

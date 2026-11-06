@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,6 +185,106 @@ func TestApplySelectedBacktrackReplacesUnifiedCanonicalTranscript(t *testing.T) 
 	}
 	if !strings.Contains(terminal.String(), "backtrack apply: turn=1") {
 		t.Fatalf("TerminalSession did not render backtrack result: %q", terminal.String())
+	}
+}
+
+func TestApplySelectedBacktrackAfterCompactionDoesNotResurrectRemovedTurns(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ctx := context.Background()
+	storage, err := runtimechat.NewSQLiteSessionStorage(runtimechat.DefaultPersistentSessionStorageConfig(t.TempDir()))
+	require.NoError(t, err)
+	manager := runtimechat.NewSessionManager(storage, runtimechat.DefaultSessionManagerConfig())
+	t.Cleanup(manager.Stop)
+
+	persisted, err := manager.Create(ctx, "backtrack-compact-ui-user")
+	require.NoError(t, err)
+	for i := 1; i <= 4; i++ {
+		persisted.AddMessage(*runtimetypes.NewUserMessage(fmt.Sprintf("user turn %d", i)))
+		persisted.AddMessage(*runtimetypes.NewAssistantMessage(fmt.Sprintf("assistant turn %d", i)))
+	}
+	require.NoError(t, manager.Update(ctx, persisted))
+
+	loaded, err := manager.Get(ctx, persisted.ID)
+	require.NoError(t, err)
+	retained := append([]runtimetypes.Message(nil), loaded.History[4:]...)
+	summary := *runtimetypes.NewUserMessage("Compacted context from earlier turns: UI fixture")
+	summary.Metadata.Set(runtimetypes.MetadataKeyContextStage, "compaction")
+	summary.Metadata.Set("segment_start", 0)
+	summary.Metadata.Set("segment_end", len(loaded.History))
+	summary.Metadata.Set("replacement_tail_message_id", runtimetypes.MessageID(retained[len(retained)-1]))
+	loaded.ReplaceHistory(append([]runtimetypes.Message{summary}, retained...))
+	loaded.MarkHistoryReplaced()
+	require.NoError(t, manager.Update(ctx, loaded))
+
+	compacted, err := manager.Get(ctx, persisted.ID)
+	require.NoError(t, err)
+	hub := runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+			Agent:        runtimeagent.NewAgent(&runtimeagent.Config{Name: "backtrack-compact-ui"}, nil),
+			SessionStore: storage,
+			StateStore:   runtimechat.NewInMemoryRuntimeStore(8),
+		})
+	})
+	t.Cleanup(hub.StopAll)
+
+	session := &ChatSession{
+		SessionManager:   manager,
+		RuntimeSession:   compacted,
+		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
+	}
+	require.NoError(t, replaceRuntimeMessages(session, compacted.GetMessages()))
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(88, 30)
+	interaction.SetSurface(surface)
+	var terminal bytes.Buffer
+	require.True(t, interaction.enableUnifiedRendererWithWriter(&terminal))
+	printVisibleChatHistory(session, "")
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+
+	actor, err := chatActorForSession(ctx, session)
+	require.NoError(t, err)
+	turns, err := actor.ListTurns(ctx)
+	require.NoError(t, err)
+	require.Len(t, turns, 2, "compaction summary must not be exposed as a user turn")
+	applySelectedBacktrack(session, actor, ctx, turns[1], runtimechat.BacktrackModeConversation)
+	interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, interaction)
+
+	page, err := storage.GetMessagePage(ctx, compacted.ID, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, page.Messages, 6)
+	require.Equal(t, "assistant turn 3", page.Messages[len(page.Messages)-1].Content)
+
+	resumed, err := manager.Get(ctx, compacted.ID)
+	require.NoError(t, err)
+	require.Len(t, resumed.History, 3)
+	for _, message := range resumed.History {
+		require.NotEqual(t, "user turn 4", message.Content)
+		require.NotEqual(t, "assistant turn 4", message.Content)
+	}
+
+	state := interaction.uiActor.AppState()
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	got := transcript.String()
+	require.Contains(t, got, "已回退到 user turn 1：上方旧消息已失效")
+	require.Contains(t, got, "assistant turn 3")
+	require.NotContains(t, got, "assistant turn 4")
+	for _, cell := range state.Transcript.Cells {
+		if strings.Contains(cell.Source, "backtrack apply:") {
+			// The retained command receipt intentionally echoes the composer
+			// prompt and anchor preview.
+			continue
+		}
+		require.NotEqual(t, "user turn 4", strings.TrimSpace(cell.Source))
 	}
 }
 

@@ -273,6 +273,16 @@ func TestListToolsByMCP(t *testing.T) {
 	if len(tools) != 0 {
 		t.Errorf("Expected 0 tools for nonexistent MCP, got %d", len(tools))
 	}
+
+	if got := reg.ToolCountByMCP("mcp1"); got != 2 {
+		t.Fatalf("ToolCountByMCP(mcp1) = %d, want 2", got)
+	}
+	if got := reg.ToolCountByMCP("mcp2"); got != 1 {
+		t.Fatalf("ToolCountByMCP(mcp2) = %d, want 1", got)
+	}
+	if got := reg.ToolCountByMCP("nonexistent"); got != 0 {
+		t.Fatalf("ToolCountByMCP(nonexistent) = %d, want 0", got)
+	}
 }
 
 func TestListTools_SortsByNameThenMCP(t *testing.T) {

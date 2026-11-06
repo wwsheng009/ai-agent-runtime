@@ -118,8 +118,18 @@ func (m *Manager) validateRemoteToolNameCollision(info *mcpregistry.ToolInfo) er
 	if rawName == "" {
 		return nil
 	}
-	// Only remote-scoped servers are gated.
-	if !m.isRemoteScopedServer(info.MCPName) {
+	return m.validateRemoteToolNameCollisionWithScope(info, m.isRemoteScopedServer(info.MCPName))
+}
+
+// validateRemoteToolNameCollisionWithScope is the cacheable half of the
+// collision guard. ListTools calls it once per server while resolving the scope,
+// then reuses that answer for every tool published by the same server.
+func (m *Manager) validateRemoteToolNameCollisionWithScope(info *mcpregistry.ToolInfo, remote bool) error {
+	if m == nil || info == nil || info.Tool == nil || m.toolkit == nil || !remote {
+		return nil
+	}
+	rawName := strings.TrimSpace(info.Tool.Name)
+	if rawName == "" {
 		return nil
 	}
 	if _, collides := m.toolkit.Get(rawName); !collides {
@@ -289,6 +299,7 @@ func (m *Manager) ListTools() []ToolDescriptor {
 	if m.mcp != nil {
 		mcpTools := m.mcp.ListTools()
 		callableNames := mcpregistry.CallableToolNames(mcpTools)
+		var remoteScopedServers map[string]bool
 		for index, info := range mcpTools {
 			if info == nil || !info.Enabled || info.Tool == nil {
 				continue
@@ -299,7 +310,24 @@ func (m *Manager) ListTools() []ToolDescriptor {
 			// A remote server must not publish a tool under a name the local
 			// toolkit already owns. See validateRemoteToolNameCollision for why
 			// this is a hard error rather than a silent tie-break.
-			if err := m.validateRemoteToolNameCollision(info); err != nil {
+			// The scope is server-level, so resolve it once per server per list
+			// pass. Repeating GetMCPStatus for each tool turns this guard into an
+			// O(tools) status-query fan-out.
+			var remote bool
+			serverName := strings.TrimSpace(info.MCPName)
+			rawToolName := strings.TrimSpace(info.Tool.Name)
+			if m.toolkit != nil && serverName != "" && rawToolName != "" {
+				if remoteScopedServers == nil {
+					remoteScopedServers = make(map[string]bool)
+				}
+				cached, resolved := remoteScopedServers[serverName]
+				if !resolved {
+					cached = m.isRemoteScopedServer(serverName)
+					remoteScopedServers[serverName] = cached
+				}
+				remote = cached
+			}
+			if err := m.validateRemoteToolNameCollisionWithScope(info, remote); err != nil {
 				m.recordRemoteNameCollision(info, err)
 				continue
 			}

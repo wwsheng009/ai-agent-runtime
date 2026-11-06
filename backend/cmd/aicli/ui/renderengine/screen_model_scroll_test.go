@@ -222,6 +222,51 @@ func TestScreenModelCloneIsIndependentTransactionalCandidate(t *testing.T) {
 	}
 }
 
+func TestScreenModelNewResizedModelReturnsDetachedBlankCandidate(t *testing.T) {
+	model := NewScreenModel(4, 2)
+	model.StageFrame([][]vt.Cell{{{Text: "a", SGR: []string{"1"}}}, {{Text: "b"}}})
+	_ = model.PrepareFlush()
+	model.ConfirmFlush()
+	trace := NewPaintTrace()
+	model.AttachTrace(trace)
+
+	candidate := model.NewResizedModel(6, 3)
+	if candidate == nil {
+		t.Fatal("NewResizedModel returned nil")
+	}
+	if width, height := candidate.Size(); width != 6 || height != 3 {
+		t.Fatalf("candidate size = %dx%d, want 6x3", width, height)
+	}
+	if candidate.ProjectionValidity() != ProjectionUnknown || !candidate.forceRepaint {
+		t.Fatalf("candidate projection state = %v forceRepaint=%v",
+			candidate.ProjectionValidity(), candidate.forceRepaint)
+	}
+	if candidate.trace != trace {
+		t.Fatal("candidate did not retain the diagnostic trace")
+	}
+	for row := range candidate.front {
+		if len(candidate.front[row]) != 6 || len(candidate.back[row]) != 6 {
+			t.Fatalf("row %d grid = %dx%d, want width 6", row, len(candidate.front[row]), len(candidate.back[row]))
+		}
+		for column, cell := range candidate.front[row] {
+			if !cellBlank(cell) {
+				t.Fatalf("front[%d][%d] = %#v, want blank", row, column, cell)
+			}
+		}
+		for column, cell := range candidate.back[row] {
+			if !cellBlank(cell) {
+				t.Fatalf("back[%d][%d] = %#v, want blank", row, column, cell)
+			}
+		}
+	}
+
+	candidate.front[0][0].Text = "candidate-only"
+	if model.front[0][0].Text != "a" || model.ProjectionValidity() != ProjectionKnown {
+		t.Fatalf("candidate mutation escaped detached model: %#v projection=%v",
+			model.front[0][0], model.ProjectionValidity())
+	}
+}
+
 func assertScreenModelBuffers(t *testing.T, model *ScreenModel, want [][]vt.Cell) {
 	t.Helper()
 	if !reflect.DeepEqual(model.front, want) {
@@ -246,4 +291,28 @@ func assertPaintedRows(t *testing.T, output string, painted, untouched []int) {
 			t.Errorf("row %d was unexpectedly repainted; output = %q", row, output)
 		}
 	}
+}
+
+// BenchmarkScreenModelStructuralResizeCandidates compares the old transaction
+// allocation (clone confirmed buffers, then discard them in Resize) with the
+// detached blank candidate used by viewport/geometry structural frames.
+func BenchmarkScreenModelStructuralResizeCandidates(b *testing.B) {
+	model := NewScreenModel(120, 30)
+	model.StageFrame(testGrid(120, 30, "baseline"))
+
+	b.Run("CloneResize", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			candidate := model.Clone()
+			candidate.Resize(120, 30)
+		}
+	})
+	b.Run("NewResizedModel", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			model.NewResizedModel(120, 30)
+		}
+	})
 }

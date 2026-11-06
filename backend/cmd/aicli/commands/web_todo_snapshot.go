@@ -153,8 +153,14 @@ func chatLatestTodoSnapshot(session *ChatSession) *chatWebTodoSnapshot {
 	if snapshot := session.latestChatTodoSnapshot(sessionID); snapshot != nil {
 		return snapshot
 	}
-	if snapshot := chatTodosSnapshotFromCanonicalHistory(session, sessionID); snapshot != nil {
-		return snapshot
+	canonicalCount := chatTodoCanonicalCount(session)
+	if !session.todoSnapshotMissFresh(sessionID, canonicalCount) {
+		if snapshot := chatTodosSnapshotFromCanonicalHistory(session, sessionID); snapshot != nil {
+			return snapshot
+		}
+		if strings.TrimSpace(sessionID) != "" {
+			session.rememberChatTodoSnapshotMiss(sessionID, canonicalCount)
+		}
 	}
 	return chatWebTodoSnapshotFromMessages(sessionTranscriptMessages(session), sessionID)
 }
@@ -167,6 +173,9 @@ const (
 	chatTodosCanonicalMaxPages  = 3
 	// 超时按「没有快照」处理并继续内存扫描：fail-soft，不让存储抖动卡住交互。
 	chatTodosCanonicalTimeout = 3 * time.Second
+	// 无 todo 的负结果只缓存一个短窗口；tool_end / canonical 计数变化会立即失效。
+	// 这是高频 screen 刷新的成本上限，不是数据源真相。
+	chatTodosCanonicalMissTTL = 2 * time.Second
 )
 
 // chatTodosSnapshotFromCanonicalHistory 从 canonical 转录按页反向读取最新
@@ -204,8 +213,47 @@ func (session *ChatSession) rememberChatTodoSnapshot(sessionID string, snapshot 
 		return
 	}
 	session.todoSnapshotMu.Lock()
+	if strings.TrimSpace(session.todoSnapshotMissSessionID) == strings.TrimSpace(sessionID) {
+		session.todoSnapshotMissAt = time.Time{}
+		session.todoSnapshotMissSessionID = ""
+		session.todoSnapshotMissCanonicalCount = 0
+	}
 	session.todoSnapshot = snapshot
 	session.todoSnapshotSessionID = strings.TrimSpace(sessionID)
+	session.todoSnapshotMu.Unlock()
+}
+
+func chatTodoCanonicalCount(session *ChatSession) int {
+	if session == nil || session.RuntimeSession == nil {
+		return 0
+	}
+	return session.RuntimeSession.CanonicalMessageCount
+}
+
+func (session *ChatSession) todoSnapshotMissFresh(sessionID string, canonicalCount int) bool {
+	if session == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	session.todoSnapshotMu.Lock()
+	defer session.todoSnapshotMu.Unlock()
+	if strings.TrimSpace(session.todoSnapshotMissSessionID) != strings.TrimSpace(sessionID) {
+		return false
+	}
+	if session.todoSnapshotMissCanonicalCount != canonicalCount {
+		return false
+	}
+	return !session.todoSnapshotMissAt.IsZero() &&
+		time.Since(session.todoSnapshotMissAt) < chatTodosCanonicalMissTTL
+}
+
+func (session *ChatSession) rememberChatTodoSnapshotMiss(sessionID string, canonicalCount int) {
+	if session == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	session.todoSnapshotMu.Lock()
+	session.todoSnapshotMissAt = time.Now()
+	session.todoSnapshotMissSessionID = strings.TrimSpace(sessionID)
+	session.todoSnapshotMissCanonicalCount = canonicalCount
 	session.todoSnapshotMu.Unlock()
 }
 
