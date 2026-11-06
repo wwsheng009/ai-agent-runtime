@@ -75,6 +75,51 @@ func TestSubagentProgressMirrorThrottlesWindowAndKeepsStateChanges(t *testing.T)
 	assert.Equal(t, EventTypeSubagentProgress, first.Type)
 }
 
+func TestSubagentProgressMirrorActivityIsLatestWinsAndForgets(t *testing.T) {
+	mirror := NewSubagentProgressMirror(time.Second)
+	target := SubagentProgressTarget{
+		ParentSessionID: "parent-1",
+		ChildSessionID:  "child-1",
+	}
+	base := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
+
+	_, ok := mirror.Observe(target, progressSourceEvent("progress", "call-1", "step 1", 10), base)
+	require.True(t, ok)
+	mirror.ObserveActivity(target, runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "child-1",
+		ToolName:  "apply_patch",
+	}, base.Add(2*time.Second))
+
+	state, message, at, ok := mirror.Latest("child-1")
+	require.True(t, ok)
+	assert.Equal(t, "tool", state)
+	assert.Equal(t, "apply_patch", message)
+	assert.Equal(t, base.Add(2*time.Second), at)
+
+	// A newer progress stamp wins over the older activity stamp.
+	_, ok = mirror.Observe(target, progressSourceEvent("progress", "call-1", "step 2", 20), base.Add(3*time.Second))
+	require.True(t, ok)
+	state, message, at, ok = mirror.Latest("child-1")
+	require.True(t, ok)
+	assert.Equal(t, "progress", state)
+	assert.Equal(t, "step 2", message)
+	assert.Equal(t, base.Add(3*time.Second), at)
+
+	// Unrecognized event types must not create an activity stamp.
+	mirror.ObserveActivity(target, runtimeevents.Event{
+		Type:      "assistant_delta",
+		SessionID: "child-1",
+	}, base.Add(4*time.Second))
+	_, _, at, ok = mirror.Latest("child-1")
+	require.True(t, ok)
+	assert.Equal(t, base.Add(3*time.Second), at)
+
+	mirror.Forget("child-1")
+	_, _, _, ok = mirror.Latest("child-1")
+	require.False(t, ok)
+}
+
 func TestSubagentProgressMirrorPayloadShapeAndSourceIsolation(t *testing.T) {
 	mirror := NewSubagentProgressMirror(0) // non-positive window falls back to the default
 	assert.Equal(t, DefaultSubagentProgressWindow, mirror.window)

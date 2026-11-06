@@ -33,6 +33,11 @@ const (
 	// subagentProgressStaleFactor drops stamps that stayed idle for
 	// staleFactor windows, so long-running hosts do not accumulate state.
 	subagentProgressStaleFactor = 10
+	// subagentActivityStaleFactor keeps the last lifecycle stamp much longer:
+	// tool events are sparse (a child may think for minutes between calls), and
+	// the parked-turn status line shows the event's age explicitly, so an older
+	// stamp is still useful evidence that the child was working.
+	subagentActivityStaleFactor = 150
 )
 
 // SubagentProgressTarget identifies the child whose progress is mirrored onto
@@ -62,6 +67,12 @@ type SubagentProgressMirror struct {
 	mu     sync.Mutex
 	window time.Duration
 	last   map[string]subagentProgressStamp
+	// activity keeps the newest non-progress lifecycle stamp per child (tool
+	// requested/completed, approval/question). Tool progress is throttled by the
+	// per-call window above; lifecycle events are state changes and must not be
+	// merged away, so they live in a separate latest-wins table. Latest() merges
+	// both and returns whichever is newer.
+	activity map[string]subagentProgressStamp
 }
 
 type subagentProgressStamp struct {
@@ -77,9 +88,75 @@ func NewSubagentProgressMirror(window time.Duration) *SubagentProgressMirror {
 		window = DefaultSubagentProgressWindow
 	}
 	return &SubagentProgressMirror{
-		window: window,
-		last:   make(map[string]subagentProgressStamp),
+		window:   window,
+		last:     make(map[string]subagentProgressStamp),
+		activity: make(map[string]subagentProgressStamp),
 	}
+}
+
+// ObserveActivity records a non-progress child lifecycle event for the
+// "what is this child doing right now" reading used by the parked-turn dynamic
+// status. It deliberately does not publish anything: progress mirrors remain
+// live-only parent-stream enrichment, and this table is a bounded in-memory
+// latest-wins cache.
+//
+// Recognized event types cover the dotted runtime aliases (tool.requested /
+// tool.completed / tool_failed) and the legacy underscore constants
+// (tool_started / tool_finished / tool_failed). Everything else is ignored.
+func (m *SubagentProgressMirror) ObserveActivity(target SubagentProgressTarget, source runtimeevents.Event, now time.Time) {
+	if m == nil {
+		return
+	}
+	childSessionID := strings.TrimSpace(target.ChildSessionID)
+	if childSessionID == "" {
+		return
+	}
+	eventType := strings.ToLower(strings.TrimSpace(source.Type))
+	toolName := firstNonEmptyText(
+		strings.TrimSpace(source.ToolName),
+		stringPayloadText(source.Payload, "tool_name"),
+	)
+	state, message := "", ""
+	switch eventType {
+	case "tool.requested", "tool.started", "tool_started":
+		if toolName == "" {
+			return
+		}
+		state, message = "tool", toolName
+	case "tool.completed", "tool.finished", "tool_finished":
+		if toolName == "" {
+			toolName = "tool"
+		}
+		state, message = "tool_done", toolName+" done"
+	case "tool_failed", "tool.denied", "tool_denied",
+		"tool.cancelled", "tool.canceled", "tool_cancelled", "tool_canceled":
+		if toolName == "" {
+			toolName = "tool"
+		}
+		state, message = "tool_failed", toolName+" failed"
+	case "approval.requested", "approval_requested":
+		state, message = "approval", "waiting for approval"
+	case "approval.resolved", "approval_resolved":
+		state, message = "approval_done", "approval resolved"
+	case "question.asked", "question_asked":
+		state, message = "answer", "waiting for answer"
+	case "question.answered", "question_answered":
+		state, message = "answer_done", "answer received"
+	case "session_end", "session.interrupted", "session_interrupted":
+		state, message = "done", "session ended"
+	default:
+		return
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	m.mu.Lock()
+	if m.activity == nil {
+		m.activity = make(map[string]subagentProgressStamp)
+	}
+	m.activity[childSessionID] = subagentProgressStamp{at: now, state: state, message: message}
+	m.pruneLocked(now)
+	m.mu.Unlock()
 }
 
 // Observe turns one child tool.progress event into a throttled parent mirror.
@@ -152,7 +229,14 @@ func (m *SubagentProgressMirror) Observe(target SubagentProgressTarget, source r
 		m.mu.Unlock()
 		return runtimeevents.Event{}, false
 	}
-	m.last[key] = subagentProgressStamp{at: now, state: state, message: message}
+	// Latest() is also the parent UI's "what is this child doing now" read.
+	// When the source only carries a tool identity (no partial output), keep the
+	// tool name as the display fallback without changing the emitted payload.
+	stampMessage := message
+	if stampMessage == "" {
+		stampMessage = toolName
+	}
+	m.last[key] = subagentProgressStamp{at: now, state: state, message: stampMessage}
 	m.pruneLocked(now)
 	m.mu.Unlock()
 
@@ -240,6 +324,7 @@ func (m *SubagentProgressMirror) Forget(childSessionID string) {
 			delete(m.last, key)
 		}
 	}
+	delete(m.activity, childSessionID)
 }
 
 // Latest returns the newest mirrored stamp for one child session: state,
@@ -258,15 +343,27 @@ func (m *SubagentProgressMirror) Latest(childSessionID string) (state, message s
 	prefix := childSessionID + "\x00"
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var latest subagentProgressStamp
+	found := false
 	for key, stamp := range m.last {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if !ok || stamp.at.After(at) {
-			state, message, at, ok = stamp.state, stamp.message, stamp.at, true
+		if !found || stamp.at.After(latest.at) {
+			latest = stamp
+			found = true
 		}
 	}
-	return state, message, at, ok
+	if stamp, activityOK := m.activity[childSessionID]; activityOK {
+		if !found || stamp.at.After(latest.at) {
+			latest = stamp
+			found = true
+		}
+	}
+	if !found {
+		return "", "", time.Time{}, false
+	}
+	return latest.state, latest.message, latest.at, true
 }
 
 // Pending reports how many throttle entries are currently tracked (tests and
@@ -285,6 +382,31 @@ func (m *SubagentProgressMirror) pruneLocked(now time.Time) {
 	for key, stamp := range m.last {
 		if stamp.at.Before(staleBefore) {
 			delete(m.last, key)
+		}
+	}
+	activityStaleBefore := now.Add(-subagentActivityStaleFactor * m.window)
+	for childSessionID, stamp := range m.activity {
+		if stamp.at.Before(activityStaleBefore) {
+			delete(m.activity, childSessionID)
+		}
+	}
+	if len(m.activity) > subagentProgressMaxEntries {
+		type agedActivity struct {
+			childSessionID string
+			at             time.Time
+		}
+		aged := make([]agedActivity, 0, len(m.activity))
+		for childSessionID, stamp := range m.activity {
+			aged = append(aged, agedActivity{childSessionID: childSessionID, at: stamp.at})
+		}
+		sort.Slice(aged, func(i, j int) bool {
+			if aged[i].at.Equal(aged[j].at) {
+				return aged[i].childSessionID < aged[j].childSessionID
+			}
+			return aged[i].at.Before(aged[j].at)
+		})
+		for index := 0; index < len(aged)-subagentProgressMaxEntries; index++ {
+			delete(m.activity, aged[index].childSessionID)
 		}
 	}
 	if len(m.last) <= subagentProgressMaxEntries {

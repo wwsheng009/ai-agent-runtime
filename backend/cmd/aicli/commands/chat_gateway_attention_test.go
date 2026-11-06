@@ -19,6 +19,14 @@ func TestGatewaySurfaceStatusParkedProjectsWaiting(t *testing.T) {
 	if state != "running" || text != gatewayParkedStatusText {
 		t.Fatalf("parked surface = (%q,%q), want (%q,%q)", state, text, "running", gatewayParkedStatusText)
 	}
+
+	state, text = gatewaySurfaceStatusFor(chatSurfaceStatus{
+		kind:   chatSurfaceStatusParked,
+		detail: "1 running · dOOBEERM cargo build (12s ago)",
+	}, chatInputModeChat)
+	if state != "running" || text != "Waiting for subagents: 1 running · dOOBEERM cargo build (12s ago)" {
+		t.Fatalf("parked detail surface = (%q,%q)", state, text)
+	}
 }
 
 // TestGatewaySurfaceStatusCarriesPendingDetail pins the attention-detail

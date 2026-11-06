@@ -33,7 +33,9 @@ func gatewaySurfaceStatusFor(s chatSurfaceStatus, inputMode chatInputMode) (stri
 	// docs/gateway/08-notifications.md §3 要求挂起投影为 attention=waiting +
 	// 等待子任务文案。因此在这里显式处理，避免挂起被当成"无活动"而丢失投影。
 	if s.kind == chatSurfaceStatusParked {
-		return wire.SessionStateRunning, gatewayParkedStatusText
+		// 动态采样器写入的子代理计数/最近事件随状态行一起上云；空 detail
+		// 保持旧文案，避免未接线宿主的行为变化。
+		return wire.SessionStateRunning, statusTextWithDetail(gatewayParkedStatusText, s.detail)
 	}
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:

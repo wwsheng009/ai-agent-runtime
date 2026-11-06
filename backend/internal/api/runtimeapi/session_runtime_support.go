@@ -1102,6 +1102,12 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 			return
 		}
 		eventType := strings.TrimSpace(event.Type)
+		// Keep the latest tool/approval lifecycle stamp for the parked-turn
+		// dynamic status. This is a bounded in-memory read model; it neither
+		// publishes an event nor touches the child's transcript.
+		if progressMirror != nil {
+			progressMirror.ObserveActivity(progressTarget, event, time.Now().UTC())
+		}
 		// P0-2: a child blocked on an approval/question must reach the parent
 		// even when the parent already ended its turn. Both edges are projected
 		// into the durable inbox and the request edge doubles as a controlled

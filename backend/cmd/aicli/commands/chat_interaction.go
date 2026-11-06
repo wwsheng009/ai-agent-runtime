@@ -271,6 +271,13 @@ type chatInteractionCoordinator struct {
 	dynamicStatusCompletedElapsed time.Duration
 	dynamicStatusCompleted        bool
 	dynamicStatusTimerSeq         uint64
+	// parkedSubagentWatch* belongs to the §6.12 parked surface: a low-frequency
+	// read-only sampler projects subagent counts/latest event into the dynamic
+	// status detail. The cancel handle is non-nil only while parked.
+	parkedSubagentWatchSeq     uint64
+	parkedSubagentWatchCancel  context.CancelFunc
+	parkedSubagentWatchDone    chan struct{}
+	parkedSubagentWatchSession *ChatSession
 	// diagnosticNotice 是后台子系统（mesh peer 断连等）warning 在动态栏上的
 	// 单行展示文本：整行临时覆盖活动行、到期自动清除，绝不写入 transcript
 	// 历史。历史信息流只承载会话语义，后台告警噪声不得淹没正文。
@@ -1202,6 +1209,14 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	if c == nil || c.shutdown {
 		return
 	}
+	// §6.12 动态采样器只写 detail，不改变 surface kind。常见的
+	// updateSurfaceStatusLocked(c.currentSurfaceStateLocked()) 会构造一个无
+	// detail 的 Parked 状态；若直接覆盖，下一次事件到达时刚采到的子代理进度
+	// 就会被抹掉。同状态继承 detail，采样器重新启动后的首帧再刷新它。
+	if s.kind == chatSurfaceStatusParked && strings.TrimSpace(s.detail) == "" &&
+		c.surfaceStatus.kind == chatSurfaceStatusParked {
+		s.detail = c.surfaceStatus.detail
+	}
 	c.surfaceStatus = s
 	if c.session != nil && c.session.TitleNotifier != nil {
 		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(s)))
@@ -1211,6 +1226,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	c.repaintStatusModelsLocked()
 	c.publishGatewaySurfaceStatusLocked(s, now)
 	c.enqueueWebDynamicStatusLocked(s, now)
+	c.syncParkedSubagentWatchLocked(s)
 }
 
 // repaintStatusModelsLocked 用缓存的 surfaceStatus 重建两条状态行模型并重绘。
@@ -1403,7 +1419,9 @@ func (c *chatInteractionCoordinator) webDynamicStatusPayloadLocked(s chatSurface
 	}
 	// 与 TUI 同一规则：完成摘要只属于非运行状态，运行中的内部轮次不能被
 	// 上一轮冻结的 "Worked for …" 覆盖（web 状态行与 TUI 保持一致）。
-	if c.dynamicStatusCompleted && !s.isRunning() {
+	// Parked 与 TUI 同口径：turn 尚未结束，上一段 run 的 "Worked for …"
+	// 不得覆盖"等待子代理"及其子代理进度。
+	if c.dynamicStatusCompleted && !s.isRunning() && s.kind != chatSurfaceStatusParked {
 		payload["active"] = true
 		payload["text"] = "Worked for " + formatChatDynamicStatusElapsed(c.dynamicStatusElapsedLocked(now))
 		payload["role"] = string(style.RoleSuccess)
@@ -3350,6 +3368,9 @@ func chatDynamicStatusAction(s chatSurfaceStatus, inputMode chatInputMode) (stri
 		// 托管挂起（§6.12）：actor 仍 Busy（不接受新 turn），但本会话没有自己的
 		// run —— 只有 durable 义务在跑。绝不能复用 "Analyzing" + 秒表后缀：
 		// 没有活 run 时钟时完成冻结值会渲染成一个永不推进的假倒计时。
+		if detail := compactStatusValue(oneLineStatusDetail(s.detail), chatParkedSubagentEventMaxWidth*2); detail != "" {
+			return "Waiting for subagents · " + detail, style.RoleInfo, false
+		}
 		return "Waiting for subagents", style.RoleInfo, false
 	case chatSurfaceStatusStreaming:
 		return "Generating response", style.RoleProgress, true
@@ -6229,6 +6250,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStreamFrameLocked()
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
+	c.stopParkedSubagentWatchLocked()
 	c.mu.Unlock()
 	// 停止锁外 web 动态状态发布通道（懒创建，可能从未启动/已由 shutdown
 	// 标志保证只关闭一次）。队列中未发布帧在收尾阶段丢弃。

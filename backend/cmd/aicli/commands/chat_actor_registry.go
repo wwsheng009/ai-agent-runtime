@@ -1308,6 +1308,10 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			return
 		}
 		eventType := strings.TrimSpace(event.Type)
+		// Keep the latest tool/approval lifecycle stamp for the parked-turn
+		// dynamic status. This is a bounded in-memory read model; it neither
+		// publishes an event nor touches the child's transcript.
+		r.Host.subagentProgressMirror().ObserveActivity(progressTarget, event, time.Now().UTC())
 		// P0-2: mirror the API host projection so a child blocked on an
 		// approval/question reaches the parent inbox on both hosts.
 		switch eventType {
