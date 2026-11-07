@@ -38,7 +38,7 @@ func TestRenderShellExecutionGuidanceFactsGatesOnShellFamily(t *testing.T) {
 	noShell := &ToolGuidanceFacts{
 		Denied: map[string]bool{
 			"shell": true, "bash": true, "execute_shell_command": true, "aicli_exec": true,
-			"grep": true, "rg": true, "view": true, "read": true, "list_dir": true, "ls": true, "glob": true,
+			"grep": true, "view": true, "read": true, "list_dir": true, "ls": true, "glob": true,
 		},
 	}
 	if got := RenderShellExecutionGuidanceFacts(noShell, ""); got != "" {
@@ -63,7 +63,7 @@ func TestRenderFileEditingGuidanceFactsGatesOnWriteTools(t *testing.T) {
 func TestRenderParallelToolGuidanceFactsGatesOnBatchableTools(t *testing.T) {
 	empty := &ToolGuidanceFacts{
 		Denied: map[string]bool{
-			"view": true, "read": true, "grep": true, "rg": true, "glob": true, "list_dir": true, "ls": true,
+			"view": true, "read": true, "grep": true, "glob": true, "list_dir": true, "ls": true,
 			"shell": true, "bash": true, "execute_shell_command": true, "aicli_exec": true,
 		},
 	}

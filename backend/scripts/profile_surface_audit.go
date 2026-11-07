@@ -29,7 +29,7 @@ import (
 // localDenylist is the profile's tools.denylist, kept in sync with
 // .tmp/prof/profiles/remote/profile.yaml.
 var localDenylist = []string{
-	"view", "list_dir", "glob", "grep", "read", "rg",
+	"view", "list_dir", "glob", "grep", "read",
 	"write", "edit", "apply_patch", "append_write", "multiedit",
 	"shell", "bash", "execute_shell_command",
 	"job_start", "job_output", "job_cancel", "job_list", "job_search",

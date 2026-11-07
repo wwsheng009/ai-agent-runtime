@@ -92,7 +92,7 @@ func sortedPairs(m map[string][2]int) []string {
 
 // aliasCollapse mimics the shipped agent-loop optimization (optimizeModelToolSurface):
 // keep the highest-ranked definition per alias family (shell > bash >
-// execute_shell_command、grep > rg、view > read) so the scenario numbers reflect what
+// execute_shell_command、view > read) so the scenario numbers reflect what
 // a real request ships.
 //
 // 家族与排名全部由 toolregistry 的别名表推导（Canonical + SurfaceRank），不再手写

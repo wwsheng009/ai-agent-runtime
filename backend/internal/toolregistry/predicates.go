@@ -115,7 +115,7 @@ func Normalize(name string) string {
 // replacedNames 是**退役**工具名 → 现役规范名的迁移表。
 //
 // 与 Entry.Aliases 的区别是语义而非解析：Aliases 是"同义现役名"（已真实注册，
-// 如 read/rg/bash），replacedNames 是"运行时已不再提供、只在诊断里给出替代建议"
+// 如 read/bash），replacedNames 是"运行时已不再提供、只在诊断里给出替代建议"
 // 的历史名（如 read_file/git_log）。两者都参与 Canonical 解析，但只有后者会进
 // 入 agent 侧的"请求了一个不可能被授予的名字"告警。
 var replacedNames = map[string]string{

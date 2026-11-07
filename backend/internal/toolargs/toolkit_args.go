@@ -103,12 +103,11 @@ var toolkitArgAliases = map[string]ToolkitArgAliases{
 // NormalizeToolkitToolName canonicalizes a tool name for built-in lookups.
 //
 // 归一到**规范名**，而不是只做小写化：别名（bash / execute_shell_command → shell、
-// rg → grep、read → view）与退役拼写都在 toolregistry.Canonical 那一张表里折叠。
+// read → view）与退役拼写都在 toolregistry.Canonical 那一张表里折叠。
 //
-// 此前本函数只做小写化，于是每个别名必须在表里各占一行手抄——手抄漏了 rg，
-// 结果是 `rg` 调用既拿不到参数别名晋升（executor），也被 policy 当成未登记工具
-// 而退回默认键集（路径参数不再按运行时路径审查）。表里现在只留规范名，
-// 别名自动命中同一份参数契约。
+// 此前本函数只做小写化，于是每个别名必须在表里各占一行手抄；漏抄的别名既拿不到
+// 参数别名晋升（executor），也被 policy 当成未登记工具而退回默认键集（路径参数
+// 不再按运行时路径审查）。表里现在只留规范名，别名自动命中同一份参数契约。
 func NormalizeToolkitToolName(toolName string) string {
 	return toolregistry.Canonical(toolName)
 }

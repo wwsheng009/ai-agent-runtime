@@ -44,7 +44,7 @@ func TestConstructToolsFromCatalogCoversEveryUnconditionalCanonical(t *testing.T
 			t.Fatalf("toolctl constructed %q without binding its required runtime state", name)
 		}
 	}
-	for _, aliasInstance := range []string{"bash", "execute_shell_command", "read", "rg"} {
+	for _, aliasInstance := range []string{"bash", "execute_shell_command", "read"} {
 		if _, ok := constructed[aliasInstance]; ok {
 			t.Fatalf("toolctl constructed alias instance %q; aliases must be projected from the canonical registry entry", aliasInstance)
 		}
@@ -69,7 +69,6 @@ func TestConstructedCanonicalToolsPreserveRegistryAliases(t *testing.T) {
 
 	aliases := map[string]string{
 		"read":                  "view",
-		"rg":                    "grep",
 		"bash":                  "shell",
 		"execute_shell_command": "shell",
 	}
@@ -84,5 +83,8 @@ func TestConstructedCanonicalToolsPreserveRegistryAliases(t *testing.T) {
 		if !surface.visible[canonical] {
 			t.Fatalf("canonical tool %q (alias %q) is not visible", canonical, alias)
 		}
+	}
+	if _, ok := surface.registry.Resolve("rg"); ok {
+		t.Fatal("rg must stay a shell command and must not resolve as a toolkit tool")
 	}
 }

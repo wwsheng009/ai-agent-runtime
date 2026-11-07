@@ -55,7 +55,7 @@ func ToolBudget(tool string) int {
 		return ViewOutputBudgetBytes
 	case "view_batch":
 		return ViewBatchAggregateBudgetBytes
-	case "grep", "rg":
+	case "grep":
 		return GrepOutputBudgetBytes
 	case "glob":
 		return GlobOutputBudgetBytes

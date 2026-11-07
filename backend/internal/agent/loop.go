@@ -5301,13 +5301,11 @@ func simpleGoalHasFileNameCue(normalized string) bool {
 	return false
 }
 
-// grepToolSurfaceRank ranks content-search tool aliases for model surface
+// grepToolSurfaceRank ranks content-search tool spellings for model surface
 // compaction. Higher rank wins; zero means not a content-search surface alias.
-// The registered `rg` alias stays executable through the tool registry, but the
-// model-facing wire advertises only the canonical `grep` name so the model does
-// not face two identical schemas. The ranking itself is derived from the tool
-// registry alias table (canonical highest, aliases in declared order), so adding
-// a content-search alias needs no edit here.
+// Only the canonical `grep` name is registered today (`rg` is a shell command,
+// not a toolkit alias), but the ranking stays derived from the tool registry
+// alias table so any future content-search alias is folded automatically.
 func grepToolSurfaceRank(name string) int {
 	return toolregistry.SurfaceRank("grep", name)
 }

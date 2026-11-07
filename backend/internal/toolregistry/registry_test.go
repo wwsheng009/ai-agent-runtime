@@ -72,7 +72,6 @@ func TestCanonicalResolvesAliasesAndReplacedNames(t *testing.T) {
 		"bash":                  "shell",
 		"execute_shell_command": "shell",
 		"read":                  "view",
-		"rg":                    "grep",
 		"image_generate":        "openai_image_generate",
 		// 契约规范名必须是归一不动点（broker 命名契约 B1–B4）。
 		"job_output":     "job_output",
@@ -114,6 +113,16 @@ func TestCanonicalResolvesAliasesAndReplacedNames(t *testing.T) {
 	for input, want := range cases {
 		require.Equal(t, want, Canonical(input), "Canonical(%q)", input)
 	}
+}
+
+// TestRGIsNotALiveToolkitAlias pins that `rg` stays a shell command: it must
+// not resolve to grep as a live toolkit spelling.
+func TestRGIsNotALiveToolkitAlias(t *testing.T) {
+	require.Equal(t, "rg", Canonical("rg"))
+	require.False(t, IsSpellingOf("grep", "rg"))
+
+	_, live := LookupLive("rg")
+	require.False(t, live, "rg must not provide live category facts")
 }
 
 // TestPredicatesPreserveHeuristicFallback 钉死"未知名字回退启发式"的契约。
@@ -233,7 +242,8 @@ func TestCallableNames(t *testing.T) {
 	// 批量委派入口：规范名在前，旧拼写 spawn_subagents 作为现役别名随后展开。
 	require.Equal(t, []string{"subagent_spawn", "spawn_agent", "subagent_spawn_batch", "spawn_subagents", "team_spawn", "spawn_team"},
 		CallableNames("subagent_spawn", "subagent_spawn_batch", "team_spawn"))
-	require.Equal(t, []string{"grep", "rg"}, CallableNames("rg", "grep"))
+	require.Equal(t, []string{"grep"}, CallableNames("grep"))
+	require.Equal(t, []string{"rg"}, CallableNames("rg"), "rg must not expand to grep")
 
 	// 退役名**不**展开成替代工具，否则拒绝表会把替代工具一起禁掉。
 	require.Equal(t, []string{"run_tests"}, CallableNames("run_tests"))
@@ -263,12 +273,12 @@ func TestListDirCanonicalAndCompatibilityAlias(t *testing.T) {
 
 func TestSurfaceRank(t *testing.T) {
 	// 规范名最高，别名按声明顺序递减——必须与 agent/loop.go 压缩工具面时
-	// 原先手写的 3/2/1、2/1 排名完全一致。
+	// 原先手写的 3/2/1 排名完全一致；grep 已无 rg 别名，规范名排名为 1。
 	require.Equal(t, 3, SurfaceRank("shell", "shell"))
 	require.Equal(t, 2, SurfaceRank("shell", "bash"))
 	require.Equal(t, 1, SurfaceRank("shell", "execute_shell_command"))
-	require.Equal(t, 2, SurfaceRank("grep", "grep"))
-	require.Equal(t, 1, SurfaceRank("grep", "rg"))
+	require.Equal(t, 1, SurfaceRank("grep", "grep"))
+	require.Zero(t, SurfaceRank("grep", "rg"), "rg is a shell command, not a grep alias")
 	require.Equal(t, 2, SurfaceRank("view", "view"))
 	require.Equal(t, 1, SurfaceRank("view", "read"))
 

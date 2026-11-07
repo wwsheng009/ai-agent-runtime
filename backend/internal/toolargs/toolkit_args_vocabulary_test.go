@@ -11,9 +11,9 @@ import (
 
 // TestArgTableCarriesOnlyCanonicalNames 钉住"一份词表"：表键只登记规范名。
 //
-// 别名（bash / execute_shell_command / rg / read）由 NormalizeToolkitToolName
-// 归一到规范名后命中同一行，不再各占一行——手抄的别名行漏过 rg 正是它们该消失
-// 的理由。若有人为了"让别名也能查表"再补一行别名，本测试立刻失败。
+// 别名（bash / execute_shell_command / read）由 NormalizeToolkitToolName
+// 归一到规范名后命中同一行，不再各占一行；手抄别名行是漂移的来源。
+// 若有人为了"让别名也能查表"再补一行别名，本测试立刻失败。
 func TestArgTableCarriesOnlyCanonicalNames(t *testing.T) {
 	names := toolargs.ToolkitToolNames()
 	require.NotEmpty(t, names, "参数别名表不能为空")
@@ -26,13 +26,12 @@ func TestArgTableCarriesOnlyCanonicalNames(t *testing.T) {
 
 // TestArgAliasesResolveToCanonicalSpec 钉住别名与规范名共享**同一份**参数契约：
 // executor 的参数晋升与 policy 的参数分类都按同一个键取表，别名一旦漏登记就会
-// 掉进未登记工具回退（rg 曾经如此：路径参数不再按运行时路径审查，模型发
-// query / target 之类的别名也不会被晋升成 pattern / path）。
+// 掉进未登记工具回退（路径参数不再按运行时路径审查，模型发 query / target
+// 之类的别名也不会被晋升成 pattern / path）。
 func TestArgAliasesResolveToCanonicalSpec(t *testing.T) {
 	for alias, canonical := range map[string]string{
 		"bash":                  "shell",
 		"execute_shell_command": "shell",
-		"rg":                    "grep",
 		"read":                  "view",
 	} {
 		want, ok := toolargs.ToolkitArgAliasesFor(canonical)
@@ -44,6 +43,13 @@ func TestArgAliasesResolveToCanonicalSpec(t *testing.T) {
 		require.Equal(t, want, got,
 			"别名 %q 与规范名 %q 的参数契约必须逐字一致", alias, canonical)
 	}
+}
+
+// TestRGDoesNotResolveAsToolkitArgs pins that `rg` is a shell command, not a
+// toolkit tool: it must not inherit grep's argument contract.
+func TestRGDoesNotResolveAsToolkitArgs(t *testing.T) {
+	_, ok := toolargs.ToolkitArgAliasesFor("rg")
+	require.False(t, ok, "rg 必须保持为 shell 命令，不得解析成 grep 的参数契约")
 }
 
 // TestRegistryAliasesAllResolve 结构性闭合：注册表里任何登记了参数契约的工具，

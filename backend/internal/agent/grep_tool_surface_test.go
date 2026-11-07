@@ -60,15 +60,15 @@ func TestOptimizeModelToolSurfaceKeepsGrepDepthOutOfCodexWireSchema(t *testing.T
 	require.NotContains(t, wireProperties, "max_depth")
 }
 
-// TestOptimizeModelToolSurfacePrefersGrepOverRGAlias pins the alias folding:
-// the registered `rg` alias stays executable, but the model-facing surface
-// advertises only the canonical `grep` tool so no second identical schema is
-// shipped to the provider.
-func TestOptimizeModelToolSurfacePrefersGrepOverRGAlias(t *testing.T) {
+// TestManagerDoesNotRegisterRGTool pins that `rg` is not a toolkit alias:
+// it is a real shell command, and a same-named tool would make shell rg
+// searches ambiguous. The model-facing surface therefore only carries `grep`.
+func TestManagerDoesNotRegisterRGTool(t *testing.T) {
 	manager := runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil))
-	definitions := make([]types.ToolDefinition, 0, 2)
+	definitions := make([]types.ToolDefinition, 0, 1)
 	for _, info := range manager.ListTools() {
-		if info.Name == "grep" || info.Name == "rg" {
+		require.NotEqual(t, "rg", info.Name, "rg must stay a shell command, not a toolkit tool")
+		if info.Name == "grep" {
 			definitions = append(definitions, types.ToolDefinition{
 				Name:        info.Name,
 				Description: info.Description,
@@ -76,7 +76,7 @@ func TestOptimizeModelToolSurfacePrefersGrepOverRGAlias(t *testing.T) {
 			})
 		}
 	}
-	require.Len(t, definitions, 2)
+	require.Len(t, definitions, 1)
 
 	optimized := optimizeModelToolSurface(definitions)
 	require.Len(t, optimized, 1)

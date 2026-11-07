@@ -84,7 +84,7 @@ func TestDeclaredLiveSpellingsAreRoutableOrRegistered(t *testing.T) {
 	}
 
 	for canonical, entry := range declared {
-		// 实例必须落在自己的规范名下：别名实例（read/rg/bash/execute_shell_command）
+		// 实例必须落在自己的规范名下：别名实例（read/bash/execute_shell_command）
 		// 必须仍是该条目的合法拼写。
 		for instance, owner := range instanceOwner {
 			if owner != canonical {
@@ -127,7 +127,7 @@ func TestDeclaredLiveSpellingsAreRoutableOrRegistered(t *testing.T) {
 }
 
 // TestAliasInstancesAreRegistered 显式钉住"别名必须有独立实例"这一历史约定：
-// read / rg / bash / execute_shell_command 各自持有自己的 schema 与描述，模型面
+// read / bash / execute_shell_command 各自持有自己的 schema 与描述，模型面
 // 虽然只折叠展示规范名，但调用别名时必须能命中。
 //
 // 反例是 image_generate：它**没有**独立实例，靠 canonicalManagedToolName 在派发期
@@ -145,7 +145,6 @@ func TestAliasInstancesAreRegistered(t *testing.T) {
 		"bash":                  "shell",
 		"execute_shell_command": "shell",
 		"read":                  "view",
-		"rg":                    "grep",
 	}
 	for instance, canonical := range aliasInstances {
 		require.Equal(t, canonical, instanceOwner[instance],
@@ -155,6 +154,9 @@ func TestAliasInstancesAreRegistered(t *testing.T) {
 	// image_generate 走派发期归一，不应有独立实例。
 	require.NotContains(t, instanceOwner, "image_generate",
 		"image_generate 应在派发期归一到 openai_image_generate，不应注册独立实例")
+	// rg 是 shell 命令，不是 toolkit 别名：必须没有同名实例，否则 shell rg 搜索会被遮蔽。
+	require.NotContains(t, instanceOwner, "rg",
+		"rg 必须保持为 shell 命令，不得注册成 toolkit 工具")
 	require.Equal(t, "openai_image_generate", canonicalManagedToolName("image_generate"))
 	require.NotContains(t, instanceOwner, "openai_image_generate",
 		"图像工具按 provider 可用性条件注册，测试环境不应把它当无条件实例")

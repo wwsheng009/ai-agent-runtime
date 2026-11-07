@@ -33,7 +33,6 @@ tools:
     - glob
     - grep
     - read
-    - rg
     # 本地写入（最危险：模型以为在改远端，实际改本机）
     - write
     - edit

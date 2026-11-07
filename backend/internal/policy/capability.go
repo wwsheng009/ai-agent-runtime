@@ -240,7 +240,7 @@ func normalizeToolName(name string) string {
 }
 
 // canonicalToolName 归一到**规范名**：在拼写归一之上再折叠别名与退役名
-// （read→view、rg→grep、bash/execute_shell_command→shell、spawn_agent→subagent_spawn）。
+// （read→view、bash/execute_shell_command→shell、spawn_agent→subagent_spawn）。
 //
 // 与 normalizeToolName 的分工：需要回答"这个名字属于哪个工具"时用本函数；
 // 只做拼写规范化（例如 taxonomy 行自洽性检查）时用 normalizeToolName。

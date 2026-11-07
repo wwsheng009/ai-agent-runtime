@@ -25,8 +25,9 @@ before you rely on them.
 ## Text, config, and log search: use grep
 
 For literal or pattern search over file contents ("where does this string
-appear", "find this config key", "grep the logs"), use `grep`/`rg`. That is
-still a fine default for most searching; the `code.*` tools are for symbol
+appear", "find this config key", "grep the logs"), use the toolkit `grep` tool.
+`rg` is a shell command; run it through the `shell` tool when you need it. That
+is still a fine default for most searching; the `code.*` tools are for symbol
 structure specifically.
 
 ## Ordinary reads: use view

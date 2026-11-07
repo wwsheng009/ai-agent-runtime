@@ -12,12 +12,12 @@ import (
 // knownToolTaxonomy 只登记**规范名**，即 `Canonical(name) == name`。
 //
 // 旧拼写（spawn_agent / task_output / spawn_team / enter_plan_mode /
-// ack_lifecycle …）与别名（read / rg / bash / execute_shell_command …）都不需要、
+// ack_lifecycle …）与别名（read / bash / execute_shell_command …）都不需要、
 // 也不允许再各占一行：LookupToolTaxonomy 会先经 toolregistry.Canonical 归一，
 // 旧行是永远不可达的第二份名单——正是本项目要消灭的"多入口"。
 //
 // 断言取 Canonical 而非 Normalize：Normalize 只折叠拼写（camelCase / 退役名），
-// 别名由别名表解析，因此旧写法 `Normalize(name) == name` 恰好会放行 read / rg /
+// 别名由别名表解析，因此旧写法 `Normalize(name) == name` 恰好会放行 read /
 // bash 这类别名行——execute_shell_command 当时就是这么被漏掉的。
 func TestTaxonomyCarriesOnlyCanonicalNames(t *testing.T) {
 	names := KnownToolTaxonomyNames()
@@ -35,7 +35,6 @@ func TestToolAliasesResolveToTheirCanonicalRow(t *testing.T) {
 	for alias, canonical := range map[string]string{
 		"bash":                  "shell",
 		"execute_shell_command": "shell",
-		"rg":                    "grep",
 		"read":                  "view",
 	} {
 		want, ok := LookupToolTaxonomy(canonical)
@@ -45,6 +44,13 @@ func TestToolAliasesResolveToTheirCanonicalRow(t *testing.T) {
 		require.True(t, ok, "别名 %q 必须解析到 %q 的 taxonomy 行", alias, canonical)
 		require.Equal(t, want, got, "别名 %q 与规范名 %q 的 taxonomy 必须逐字一致", alias, canonical)
 	}
+}
+
+// TestRGIsNotAToolTaxonomyName pins that `rg` is a shell command, not a toolkit
+// tool: profile validation must not classify it as a grep alias.
+func TestRGIsNotAToolTaxonomyName(t *testing.T) {
+	_, ok := LookupToolTaxonomy("rg")
+	require.False(t, ok, "rg 必须保持为 shell 命令，不得解析成 grep 的 taxonomy")
 }
 
 // TestRetiredSpellingsValidateThroughTheSingleVocabulary 钉住删行的**前提**：

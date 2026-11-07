@@ -23,14 +23,16 @@ func TestBuiltinToolkitCatalogIsACopy(t *testing.T) {
 }
 
 // TestBuiltinToolkitCatalogKeepsCanonicalAliases pins the alias rows that make
-// compatibility spellings routable (bash/execute_shell_command/read/rg).
+// compatibility spellings routable (bash/execute_shell_command/read).
 func TestBuiltinToolkitCatalogKeepsCanonicalAliases(t *testing.T) {
 	rows := map[string]int{}
 	for _, spec := range BuiltinToolkitCatalog() {
 		rows[spec.Canonical]++
 	}
-	for _, canonical := range []string{"shell", "view", "grep"} {
+	for _, canonical := range []string{"shell", "view"} {
 		require.GreaterOrEqual(t, rows[canonical], 2,
 			"canonical %q must keep its alias instance rows", canonical)
 	}
+	require.Equal(t, 1, rows["grep"],
+		"grep must have only its canonical row: rg is a shell command, not a toolkit alias")
 }

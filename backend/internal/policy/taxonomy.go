@@ -21,7 +21,7 @@ type ToolTaxonomy struct {
 // CapabilityResolver prefers this over name heuristics when present.
 //
 // 只登记**规范名**：LookupToolTaxonomy 先经 toolregistry.Canonical 归一，
-// 别名（read / rg / bash / execute_shell_command）命中规范名那一行，不再各占一行。
+// 别名（read / bash / execute_shell_command）命中规范名那一行，不再各占一行。
 // 手抄别名行必然漂移——execute_shell_command 曾经就是漏抄的那一个，于是它的
 // 请求掉进名称启发式回退，而不是按表里的 exec 语义处理。
 var knownToolTaxonomy = map[string]ToolTaxonomy{
@@ -114,7 +114,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 //
 // 归一到**规范名**（toolregistry.Canonical：别名与退役名一并折叠），因此表里只登记
 // 规范名一行。别名与旧拼写仍然可解析——这正是删掉别名行的前提：已落盘的
-// profile / grant 写的是 read / rg / bash / execute_shell_command 也照样命中。
+// profile / grant 写的是 read / bash / execute_shell_command 也照样命中。
 func LookupToolTaxonomy(toolName string) (ToolTaxonomy, bool) {
 	name := canonicalToolName(toolName)
 	tax, ok := knownToolTaxonomy[name]

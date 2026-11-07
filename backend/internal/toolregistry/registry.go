@@ -75,7 +75,7 @@ type Entry struct {
 	// Name 是规范名（模型可见名）。
 	Name string
 	// Aliases 是**现役**兼容别名：已真实注册、执行语义与规范名相同。
-	// 例：view←read、grep←rg、shell←bash（见 tools/manager.go 的注册注释）。
+	// 例：view←read、shell←bash（见 tools/manager.go 的注册注释）。
 	Aliases []string
 	// Group 是功能分组。
 	Group Group
@@ -212,7 +212,9 @@ var builtinEntries = []Entry{
 	// ---- 读取（read 组）----
 	{Name: "view", Aliases: []string{"read"}, Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
 	{Name: "glob", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
-	{Name: "grep", Aliases: []string{"rg"}, Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
+	// `rg` is a real shell command, not a toolkit alias: registering the same
+	// spelling as a tool would make shell rg searches ambiguous. Use `grep`.
+	{Name: "grep", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
 	// The canonical name is list_dir: `ls` is a real shell command, so exposing
 	// the same spelling as a toolkit tool makes shell invocations ambiguous.
 	// `ls` remains a live compatibility alias (routed to list_dir at dispatch)

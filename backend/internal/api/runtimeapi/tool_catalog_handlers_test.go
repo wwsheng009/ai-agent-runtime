@@ -79,7 +79,7 @@ func TestListBuiltinToolCatalog_ProjectsRegistrySingleSource(t *testing.T) {
 	require.Equal(t, wantNames, names, "目录的规范名集合与顺序必须与注册表一致")
 
 	// 别名只是同一身份的兼容拼写，不得各自成为目录条目。
-	for _, alias := range []string{"bash", "execute_shell_command", "read", "rg"} {
+	for _, alias := range []string{"bash", "execute_shell_command", "read"} {
 		require.NotContains(t, names, alias, "别名 %q 不应作为独立条目出现", alias)
 	}
 }
@@ -107,7 +107,7 @@ func TestListBuiltinToolCatalog_AliasesRideWithCanonical(t *testing.T) {
 
 	grep, ok := byName["grep"]
 	require.True(t, ok, "注册表必须有 grep")
-	require.ElementsMatch(t, []string{"rg"}, grep.Aliases)
+	require.Empty(t, grep.Aliases, "rg 是 shell 命令；grep 不应再声明该别名")
 
 	// essential 是控制面语义（取代 policy 的硬编码名单），必须如实投影。
 	teamSpawn, ok := byName["team_spawn"]
