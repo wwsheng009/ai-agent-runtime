@@ -579,13 +579,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		// and open the semantic pager instead, so /history is an actual history
 		// reader rather than a one-time startup side effect.
 		if unifiedDirectInteractiveOutput(session) && hasVisibleChatHistory(session) {
-			printVisibleChatHistory(session, "")
+			printFullVisibleChatHistory(session, "")
 			return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenTranscriptSpec("command"))}, true, nil
 		}
 		// Plain/noninteractive projections retain the established replay behavior.
 		// Claim it here so the unified command gate never sends /history to a
 		// legacy handler merely to show its empty-state message.
-		if printVisibleChatHistory(session, "对话历史") != 0 {
+		if printFullVisibleChatHistory(session, "对话历史") != 0 {
 			return CommandResult{}, true, nil
 		}
 		return CommandResult{

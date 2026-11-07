@@ -762,6 +762,21 @@ func readHistoricalSessionPickWithCurrent(session *ChatSession, sessions []*runt
 	}
 }
 
+// resumeCompactViewEmptyNotice explains the otherwise indistinguishable
+// "resume succeeded but the transcript is blank" state: the latest compact
+// checkpoint is already at the canonical tail, so compact-after has no new
+// messages yet. Keep it in the existing resume summary output rather than
+// adding a second direct writer to printResumeSuccess.
+func resumeCompactViewEmptyNotice(session *ChatSession) string {
+	if session == nil || !session.resumeHistoryCompactViewEmpty() {
+		return ""
+	}
+	if hasVisibleChatHistory(session) {
+		return ""
+	}
+	return "（compact 后暂无新增消息；--full 查看完整历史）"
+}
+
 func printResumeSuccess(session *ChatSession) {
 	// 摘要里的轮数/标题都来自历史，必须读 live session；快照（CloneWithoutHistory）
 	// 不含历史，会让轮数归零、派生标题丢失。
@@ -773,6 +788,9 @@ func printResumeSuccess(session *ChatSession) {
 		// 基线的一部分，不允许在这里新增第二个输出调用。
 		if notice := chatResumeTeamNotice(session); notice != "" {
 			line += notice + "\n"
+		}
+		if notice := resumeCompactViewEmptyNotice(session); notice != "" {
+			line = strings.TrimRight(line, "\n") + notice + "\n"
 		}
 		// Prefer surface WriteOutput so ClearPrompt shrink debt flushes here
 		// instead of attaching to the first history content block.

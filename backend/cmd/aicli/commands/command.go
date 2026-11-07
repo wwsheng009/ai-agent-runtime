@@ -463,7 +463,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return applyStreamShortcut(session, false)
 
 	case "/history", "/h":
-		if printVisibleChatHistory(session, "对话历史") == 0 {
+		if printFullVisibleChatHistory(session, "对话历史") == 0 {
 			printChatCommandOutput(session, "当前会话暂无历史消息")
 		}
 

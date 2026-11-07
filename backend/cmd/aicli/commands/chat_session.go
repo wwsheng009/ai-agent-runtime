@@ -721,10 +721,76 @@ func applyResumeCompactView(session *ChatSession) {
 		return
 	}
 	messages := resumeCompactViewPostCheckpointMessages(session)
+	if len(messages) == 0 {
+		// The latest checkpoint can be a pre-turn compaction whose replacement
+		// tail is already the last canonical/prompt message. In that case there
+		// is no post-checkpoint message yet, but replaying nothing makes resume
+		// look broken. Keep the compact-view contract bounded by showing the
+		// retained tail that is already in the hot projection (the messages
+		// between the checkpoint and its replacement anchor), not the canonical
+		// full transcript.
+		messages = resumeCompactViewRetainedTailMessages(session)
+	}
 	session.setResumeHistory(messages)
 	// setResumeHistory 按「canonical 全量就位」语义复位视图标记，这里必须重置回
 	// compact 视图：展示历史是 checkpoint 之后的切片。
 	session.markResumeHistoryCompactView(true)
+}
+
+// resumeCompactViewRetainedTailMaxMessages bounds the fallback view. The hot
+// projection is already token-bounded, but tool-heavy turns can still contain
+// large payloads; a compact resume should not re-render an unbounded slice.
+const resumeCompactViewRetainedTailMaxMessages = 12
+
+// resumeCompactViewRetainedTailMessages returns the retained messages between
+// the latest compaction checkpoint and its replacement tail anchor. This is the
+// part of the replacement history that is still carried in the model context;
+// unlike the canonical transcript, it is already loaded and cheap to show.
+//
+// The post-anchor slice is preferred by resumeCompactViewPostCheckpointMessages
+// when it has content. This helper only handles the zero-new-message boundary.
+func resumeCompactViewRetainedTailMessages(session *ChatSession) []runtimetypes.Message {
+	if session == nil || len(session.Messages) == 0 {
+		return nil
+	}
+	messages := session.Messages
+	checkpointIndex := -1
+	for index := len(messages) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Metadata.GetString("context_stage", "")), "compaction") {
+			checkpointIndex = index
+			break
+		}
+	}
+	if checkpointIndex < 0 || checkpointIndex+1 >= len(messages) {
+		return nil
+	}
+
+	start, end := checkpointIndex+1, len(messages)
+	anchor := strings.TrimSpace(messages[checkpointIndex].Metadata.GetString("replacement_tail_message_id", ""))
+	if anchor != "" {
+		for index := len(messages) - 1; index > checkpointIndex; index-- {
+			if strings.TrimSpace(messages[index].Metadata.GetString("message_id", "")) != anchor {
+				continue
+			}
+			end = index + 1
+			break
+		}
+	}
+	if start >= end {
+		return nil
+	}
+
+	tail := messages[start:end]
+	if len(tail) > resumeCompactViewRetainedTailMaxMessages {
+		tail = tail[len(tail)-resumeCompactViewRetainedTailMaxMessages:]
+	}
+	// Do not start the visible retained window on an isolated tool result; it
+	// would render without the assistant/tool shape that introduced it. Keep at
+	// least one message so a tool-only hot projection still has visible content.
+	for len(tail) > 1 && strings.EqualFold(strings.TrimSpace(tail[0].Role), "tool") {
+		tail = tail[1:]
+	}
+	return cloneResumeDisplayMessages(tail)
 }
 
 // resumeCompactViewPostCheckpointMessages 从热上下文里切出最近一次 compact
@@ -1038,7 +1104,12 @@ func (s *ChatSession) appendResumeHistoryMessage(message runtimetypes.Message) {
 		return
 	}
 	s.resumeHistoryMu.Lock()
-	if s.ResumeHistory == nil {
+	// A compact-after view may legitimately be empty: the latest checkpoint's
+	// replacement tail can be the last canonical message. In that state the
+	// display snapshot is nil, but subsequent live messages are exactly the
+	// post-compact content this view is supposed to show. Do not let the nil
+	// snapshot suppress them.
+	if s.ResumeHistory == nil && !s.resumeHistoryCompactViewActive() {
 		s.resumeHistoryMu.Unlock()
 		return
 	}
@@ -1479,6 +1550,20 @@ func (s *ChatSession) resumeHistoryTruncated() bool {
 	s.resumeHistoryMu.RLock()
 	defer s.resumeHistoryMu.RUnlock()
 	return s.resumeHistoryTrimmedOff > 0
+}
+
+// resumeHistoryCompactViewEmpty reports the display state where resume chose
+// the compact-after view but the checkpoint has no post-anchor messages yet.
+// This is a valid empty view, not a missing/torn history: /history must reload
+// the canonical transcript on demand, and the resume summary should explain
+// why the initial transcript is blank.
+func (s *ChatSession) resumeHistoryCompactViewEmpty() bool {
+	if s == nil || !s.resumeHistoryCompactViewActive() {
+		return false
+	}
+	s.resumeHistoryMu.RLock()
+	defer s.resumeHistoryMu.RUnlock()
+	return len(s.ResumeHistory) == 0
 }
 
 // streamOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。

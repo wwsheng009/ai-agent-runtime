@@ -99,6 +99,10 @@ type chatTTYConPTYScript struct {
 	// TrimProbeOut 指向的 JSON（父进程据此断言实机行为与进程内一致）。
 	TrimLoadMessages int    `json:"trim_load_messages,omitempty"`
 	TrimProbeOut     string `json:"trim_probe_out,omitempty"`
+	// ResumeCompactTail 让 helper 在真实 chat loop 之前构造一个 pre-turn
+	// compact 的尾部锚点场景，并走生产 resume replay 路径。父进程断言真实
+	// ConPTY 屏幕显示 checkpoint 与锚点之间的保留尾部，而不是空屏。
+	ResumeCompactTail bool `json:"resume_compact_tail,omitempty"`
 }
 
 func encodeChatTTYConPTYScript(script chatTTYConPTYScript) string {
@@ -183,6 +187,9 @@ func driveChatTTYConPTYChildLoop(t *testing.T, script chatTTYConPTYScript) strin
 		t.Fatal("helper: unified renderer did not attach")
 	}
 
+	if script.ResumeCompactTail {
+		driveChatTTYConPTYCompactResume(t, session)
+	}
 	// T8b-6：residency 冷前缀场景必须在真实终端交付路径挂载之后运行（否则
 	// uiActor 没有物理写端，无法证明"已交付前缀不重铸"）。
 	if script.History > 0 && script.ResidencyKeep > 0 {
@@ -211,6 +218,45 @@ func driveChatTTYConPTYChildLoop(t *testing.T, script chatTTYConPTYScript) strin
 		t.Logf("helper: executor saw %d prompt(s)", len(executor.prompts))
 	}
 	return renderSink.String()
+}
+
+// driveChatTTYConPTYCompactResume drives the real resume replay path with a
+// pre-turn compact checkpoint whose replacement tail is already the last
+// message. The production fallback must show the retained messages between the
+// checkpoint and that anchor, not an empty compact-after screen.
+func driveChatTTYConPTYCompactResume(t *testing.T, session *ChatSession) {
+	t.Helper()
+	checkpoint := *runtimetypes.NewUserMessage("CONPTY-COMPACT-SUMMARY-MUST-NOT-RENDER")
+	checkpoint.Metadata["message_id"] = "conpty-compact-summary"
+	checkpoint.Metadata["context_stage"] = "compaction"
+	checkpoint.Metadata["segment_start"] = 0
+	checkpoint.Metadata["segment_end"] = 4
+	checkpoint.Metadata["replacement_tail_message_id"] = "conpty-compact-anchor"
+
+	assistant := *runtimetypes.NewAssistantMessage("CONPTY-COMPACT-TAIL-ASSISTANT")
+	assistant.Metadata["message_id"] = "conpty-compact-assistant"
+	tool := *runtimetypes.NewToolMessage("conpty-compact-tool-call", "CONPTY-COMPACT-TAIL-TOOL")
+	tool.Metadata["message_id"] = "conpty-compact-tool"
+	anchor := *runtimetypes.NewUserMessage("CONPTY-COMPACT-TAIL-ANCHOR")
+	anchor.Metadata["message_id"] = "conpty-compact-anchor"
+
+	session.RuntimeSession = &runtimechat.Session{
+		ID:                    "conpty-compact-resume",
+		CanonicalMessageCount: 4,
+	}
+	session.Messages = []runtimetypes.Message{checkpoint, assistant, tool, anchor}
+	applyResumeCompactView(session)
+	if !session.resumeHistoryCompactViewActive() {
+		t.Fatal("compact-resume probe: compact-after view must be active")
+	}
+	if got := len(session.resumeHistorySnapshot()); got != 3 {
+		t.Fatalf("compact-resume probe: retained tail = %d messages, want 3", got)
+	}
+	if added := printVisibleSessionLoadHistory(session, "已加载历史会话"); added == 0 {
+		t.Fatal("compact-resume probe: resume replay produced no visible history")
+	}
+	session.Interaction.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, session.Interaction)
 }
 
 // driveChatTTYConPTYTrimAfterDelivery 在真实终端交付路径已挂载的前提下，
@@ -864,6 +910,61 @@ func TestChatTTY_LiveLoop_ConPTY_RendersRealScreen(t *testing.T) {
 	}
 	if nonEmpty == 0 {
 		t.Fatalf("屏幕全空：渲染未呈现任何内容; raw=%d bytes", len(raw))
+	}
+}
+
+// TestChatTTY_LiveLoop_ConPTY_CompactResumeShowsRetainedTail 是本次 resume
+// 空屏修复的 L3 ConPTY 回归：真实伪控制台内走生产 resume replay 路径，
+// pre-turn compact 的锚点已在末尾，屏幕必须显示 checkpoint 与锚点之间的
+// 保留尾部（assistant/tool/user），且 compact 摘要本身不得泄漏。
+func TestChatTTY_LiveLoop_ConPTY_CompactResumeShowsRetainedTail(t *testing.T) {
+	script := chatTTYConPTYScript{
+		Reply:             "CONPTY-COMPACT-REPLY-NOT-USED",
+		ResumeCompactTail: true,
+		Steps: []chatTTYConPTYScriptStep{
+			{WaitSignal: "CONPTY-COMPACT-TAIL-ANCHOR", Line: "/exit"},
+		},
+		Wants: []string{
+			"CONPTY-COMPACT-TAIL-ASSISTANT",
+			"CONPTY-COMPACT-TAIL-TOOL",
+			"CONPTY-COMPACT-TAIL-ANCHOR",
+		},
+	}
+	raw := runChatTTYConPTYLiveLoop(t, script, 90*time.Second)
+	normalized := normalizeChatTTYConPTYStream(raw)
+
+	if !strings.Contains(strings.ToLower(normalized), "interactive=true") {
+		t.Fatalf("伪控制台下未观察到 isatty 语义（INTERACTIVE=True）; tail=%q", tailBytes(normalized, 600))
+	}
+	for _, want := range script.Wants {
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("渲染流中未找到保留尾部 %q; normalized tail=%q", want, tailBytes(normalized, 800))
+		}
+	}
+	if strings.Contains(normalized, "CONPTY-COMPACT-SUMMARY-MUST-NOT-RENDER") {
+		t.Fatalf("compact 摘要泄漏到了终端渲染流; tail=%q", tailBytes(normalized, 800))
+	}
+
+	screen := vt.NewScreen(80, 24)
+	screen.Feed(normalized)
+	projected := strings.Join(append(screen.ScrollbackLines(), screen.Lines(1, 24)...), "\n")
+	t.Logf("--- ConPTY compact-resume screen (%d raw bytes) ---\n%s", len(raw), screen.Dump())
+	for _, want := range script.Wants {
+		if count := strings.Count(projected, want); count != 1 {
+			t.Fatalf("保留尾部 %q 在终端投影中出现 %d 次（要求恰好 1 次）\nprojection tail:\n%s",
+				want, count, tailString(projected, 3000))
+		}
+	}
+	assertNoAdjacentDuplicateLines(t, screen.Lines(0, 24))
+
+	nonEmpty := 0
+	for _, line := range screen.Lines(0, 24) {
+		if strings.TrimSpace(line) != "" {
+			nonEmpty++
+		}
+	}
+	if nonEmpty == 0 {
+		t.Fatalf("compact resume 屏幕全空：保留尾部未显示; raw=%d bytes", len(raw))
 	}
 }
 

@@ -683,3 +683,196 @@ func TestResumeCompactViewPrefersReplacementTailAnchor(t *testing.T) {
 		}
 	}
 }
+
+// TestResumeCompactViewTailAnchorShowsRetainedTail 钉住 pre-turn compact 的
+// 零新增消息边界：replacement_tail 已经指向最后一条保留消息时，compact-after
+// 没有新消息，但 resume 必须显示 checkpoint 与锚点之间的保留尾部，不能空屏。
+func TestResumeCompactViewTailAnchorShowsRetainedTail(t *testing.T) {
+	checkpoint := *runtimetypes.NewUserMessage("Compacted context from earlier turns: summary")
+	checkpoint.Metadata["message_id"] = "msg-checkpoint"
+	checkpoint.Metadata["context_stage"] = "compaction"
+	checkpoint.Metadata["replacement_tail_message_id"] = "msg-anchor"
+
+	anchor := *runtimetypes.NewUserMessage("last retained user message")
+	anchor.Metadata["message_id"] = "msg-anchor"
+	assistant := *runtimetypes.NewAssistantMessage("retained assistant message")
+	assistant.Metadata["message_id"] = "msg-assistant"
+
+	session := &ChatSession{
+		Messages:       []runtimetypes.Message{checkpoint, assistant, anchor},
+		RuntimeSession: &runtimechat.Session{CanonicalMessageCount: 3},
+	}
+	applyResumeCompactView(session)
+
+	if !session.resumeHistoryCompactViewActive() {
+		t.Fatal("compact-after view must stay active")
+	}
+	if got := len(session.resumeHistorySnapshot()); got != 2 {
+		t.Fatalf("retained-tail fallback = %d messages, want 2", got)
+	}
+	visible := collectVisibleChatHistory(session)
+	if len(visible) != 2 ||
+		visible[0].Content != "retained assistant message" ||
+		visible[1].Content != "last retained user message" {
+		t.Fatalf("retained-tail fallback lost content: %+v", visible)
+	}
+	if notice := resumeCompactViewEmptyNotice(session); notice != "" {
+		t.Fatalf("retained-tail fallback must not claim the view is empty, got %q", notice)
+	}
+
+	appendRuntimeMessage(session, *runtimetypes.NewUserMessage("live after resume"))
+
+	visible = collectVisibleChatHistory(session)
+	if len(visible) != 3 || visible[len(visible)-1].Content != "live after resume" {
+		t.Fatalf("live message lost after retained-tail fallback: %+v", visible)
+	}
+}
+
+// TestResumeCompactViewReallyEmptyKeepsLiveMessagesVisible 钉住真正的空视图：
+// mid-turn compact 的锚点就是 checkpoint 本身时没有保留尾部，初始展示仍为空；
+// 但后续 live 消息必须能启动展示历史，否则 resume 会永久空屏。
+func TestResumeCompactViewReallyEmptyKeepsLiveMessagesVisible(t *testing.T) {
+	checkpoint := *runtimetypes.NewUserMessage("Compacted context from earlier turns: summary")
+	checkpoint.Metadata["message_id"] = "msg-checkpoint"
+	checkpoint.Metadata["context_stage"] = "compaction"
+	checkpoint.Metadata["replacement_tail_message_id"] = "msg-checkpoint"
+
+	session := &ChatSession{
+		Messages:       []runtimetypes.Message{checkpoint},
+		RuntimeSession: &runtimechat.Session{CanonicalMessageCount: 1},
+	}
+	applyResumeCompactView(session)
+
+	if !session.resumeHistoryCompactViewActive() {
+		t.Fatal("compact-after view must stay active")
+	}
+	if got := len(session.resumeHistorySnapshot()); got != 0 {
+		t.Fatalf("initial compact-after history = %d, want empty", got)
+	}
+	if notice := resumeCompactViewEmptyNotice(session); notice == "" {
+		t.Fatal("empty compact-after view must explain the blank transcript")
+	}
+
+	appendRuntimeMessage(session, *runtimetypes.NewUserMessage("live after resume"))
+
+	visible := collectVisibleChatHistory(session)
+	if len(visible) != 1 || visible[0].Content != "live after resume" {
+		t.Fatalf("live message lost from empty compact-after view: %+v", visible)
+	}
+	if notice := resumeCompactViewEmptyNotice(session); notice != "" {
+		t.Fatalf("empty notice must disappear once live content exists, got %q", notice)
+	}
+}
+
+// TestResumeCompactViewHistoryCommandReloadsCanonical 钉住 /history 的显式
+// 语义：即使 compact 视图已经显示有界的保留尾部，用户主动查看历史时仍必须
+// 从存储重新装载 canonical 完整转录，而不是停在保留窗口。
+func TestResumeCompactViewHistoryCommandReloadsCanonical(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	manager, sessionID, total := newResumeCompactViewTailAnchorFixture(t)
+	ctx := context.Background()
+	loaded, err := manager.Get(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("load compacted session: %v", err)
+	}
+
+	resumed := &ChatSession{SessionManager: manager, SessionUserID: "tester"}
+	if err := restoreChatStateFromRuntimeSession(resumed, loaded); err != nil {
+		t.Fatalf("restore compacted session: %v", err)
+	}
+	loadResumeCanonicalHistoryForStartup(resumed, sessionID)
+
+	if !resumed.resumeHistoryCompactViewActive() {
+		t.Fatal("precondition: compact-after view must be active")
+	}
+	if got := len(resumed.resumeHistorySnapshot()); got == 0 || got >= total {
+		t.Fatalf("precondition: compact-after history = %d, want bounded retained tail below canonical total %d", got, total)
+	}
+
+	var count int
+	output := captureStdout(t, func() {
+		count = printFullVisibleChatHistory(resumed, "对话历史")
+	})
+	if count != total {
+		t.Fatalf("/history visible messages = %d, want canonical total %d\n%s", count, total, output)
+	}
+	if resumed.resumeHistoryCompactViewActive() {
+		t.Fatal("/history must leave the compact-after view after reloading canonical history")
+	}
+	if got := len(resumed.resumeHistorySnapshot()); got != total {
+		t.Fatalf("/history reloaded %d messages, want %d", got, total)
+	}
+}
+
+// newResumeCompactViewTailAnchorFixture 构造一个「compact 检查点已在 canonical
+// 尾部、compact 后没有新增消息」的持久化会话，用于验证保留尾部兜底和 /history
+// 的完整重载。
+func newResumeCompactViewTailAnchorFixture(t *testing.T) (*runtimechat.SessionManager, string, int) {
+	t.Helper()
+	storage, err := runtimechat.NewSQLiteSessionStorage(runtimechat.DefaultPersistentSessionStorageConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new sqlite storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	t.Cleanup(manager.Stop)
+
+	ctx := context.Background()
+	session, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const seedCount = 12
+	seed := make([]runtimetypes.Message, 0, seedCount)
+	for index := 0; index < seedCount; index++ {
+		var message runtimetypes.Message
+		if index%2 == 0 {
+			message = *runtimetypes.NewUserMessage(fmt.Sprintf("seed user %d", index))
+		} else {
+			message = *runtimetypes.NewAssistantMessage(fmt.Sprintf("seed assistant %d", index))
+		}
+		message.Metadata["message_id"] = fmt.Sprintf("seed-%d", index)
+		seed = append(seed, message)
+	}
+	session.ReplaceHistory(seed)
+	if err := storage.Save(ctx, session); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	compactor, err := manager.Get(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("compaction load: %v", err)
+	}
+	history := compactor.GetMessages()
+	if len(history) < 4 {
+		t.Fatalf("projection too short for compaction fixture: %d", len(history))
+	}
+	retained := make([]runtimetypes.Message, 4)
+	copy(retained, history[len(history)-4:])
+
+	summary := *runtimetypes.NewUserMessage("Compacted context from earlier turns: tail anchor view")
+	summary.Metadata["message_id"] = "summary-checkpoint"
+	summary.Metadata["context_stage"] = "compaction"
+	summary.Metadata["segment_start"] = 0
+	summary.Metadata["segment_end"] = len(history)
+	summary.Metadata["replacement_tail_message_id"] = retained[len(retained)-1].Metadata.GetString("message_id", "")
+	compactor.ReplaceHistory(append([]runtimetypes.Message{summary}, retained...))
+	if err := manager.Update(ctx, compactor); err != nil {
+		t.Fatalf("persist compaction: %v", err)
+	}
+
+	reloaded, err := manager.Get(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("reload compacted session: %v", err)
+	}
+	if !resumeHistoryHasCompactionCheckpoint(reloaded.History) {
+		t.Fatalf("fixture lost the compaction checkpoint: %+v", reloaded.History)
+	}
+	return manager, session.ID, reloaded.MessageCount()
+}

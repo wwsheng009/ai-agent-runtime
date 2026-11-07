@@ -130,7 +130,26 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 	// /history 的语义是「完整对话历史」，因此裁剪过的会话必须先从存储重新分页
 	// 读回完整转录，否则用户只能看到保留窗口内的尾部——那是静默的降级。
 	// 读取失败时保留当前窗口并在标题上显式标注，绝不伪装成完整历史。
-	if session != nil && session.resumeHistoryTruncated() {
+	// A compact-after view can be empty when the latest checkpoint's
+	// replacement tail is the last canonical message. Unlike the normal compact
+	// view (which deliberately shows only post-checkpoint messages), /history
+	// is an explicit request for the full transcript: reload canonical history
+	// rather than reporting the empty compact view as "no history".
+	if session != nil && (session.resumeHistoryTruncated() || session.resumeHistoryCompactViewEmpty()) {
+		if !refreshResumeHistoryForReplay(session) {
+			header = appendResumeHistoryPartialNotice(header)
+		}
+	}
+	return printVisibleChatHistoryWithLoadGrant(session, header, false)
+}
+
+// printFullVisibleChatHistory is the explicit /history entry point. Unlike
+// resume replay, which must respect the bounded compact-after view, /history is
+// a request for the complete canonical transcript. Any compact view (including
+// the retained-tail fallback shown when compact-after has no new messages) must
+// first be replaced by a canonical reload.
+func printFullVisibleChatHistory(session *ChatSession, header string) int {
+	if session != nil && (session.resumeHistoryTruncated() || session.resumeHistoryCompactViewActive()) {
 		if !refreshResumeHistoryForReplay(session) {
 			header = appendResumeHistoryPartialNotice(header)
 		}
