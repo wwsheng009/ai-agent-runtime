@@ -226,7 +226,7 @@ provider fails: gegeda≈68, localhost=2, grok.x4188.top=1
 
 **状态（2026-07-26 residual denoise）**
 
-- **简单纯 `rg` 代码搜索软重定向**：无管道/链式/重定向的 standalone `rg` 不再执行，返回 `Success=true` + `shell_search_redirected=true` + next_action 指向 toolkit `grep`（不抬 hard rate）。管道/`rg --files` 等仍可走 shell。  
+- **简单纯 `rg` 代码搜索软重定向（2026-11-08 已取消）**：standalone `rg` 现在正常交给 shell 执行，不再返回 `shell_search_redirected` 或强制 next_action 指向 toolkit `grep`。路径位置 shell glob 的预检软重定向仍保留。
 - **Select-String / findstr no-match**：仅当其为 **primary** 命令时 exit 1 空输出可 soft-empty；`tsc | Select-String` 等过滤管道不伪装 empty，避免吞掉构建失败。  
 - 管道 `rg ... | Select-Object` no-match / regex parse 仍分别走 empty success / content success（既有契约）。  
 - 离线 `analyze_tool_errors.ps1` 已按新契约区分 `hard` / `empty` / `content_nonzero` / `redirected`，避免把 `ok=true` 的 no-match 与 content 非零退出算进 hard。

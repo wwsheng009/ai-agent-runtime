@@ -271,24 +271,6 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			},
 		), nil
 	}
-	if searchTool, redirect := looksLikeSimpleShellCodeSearch(command); redirect {
-		nextAction := "Call toolkit `grep` directly with structured pattern/path/glob arguments; use literal=true for fixed text. Do not replay the same shell search."
-		return &toolkit.ToolResult{
-			Success:    true,
-			OutputKind: toolresult.KindText,
-			Content: fmt.Sprintf(
-				"未执行简单 shell `%s` 代码搜索；runtime 已将其软重定向到专用 toolkit `grep`。这不是无匹配结果，也不是 hard failure。请按 next_action 直接调用 grep。",
-				searchTool,
-			),
-			Metadata: map[string]interface{}{
-				toolresult.MetadataOutcomeKey:    toolresult.OutcomeSuccess,
-				toolresult.MetadataNextActionKey: nextAction,
-				"shell_search_redirected":        true,
-				"redirect_tool":                  "grep",
-				"executed":                       false,
-			},
-		}, nil
-	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
 	// Report and hint against the directory the command will actually run in
@@ -345,7 +327,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - is a legitimate
 	// search and runs normally. A literal-reaching glob is soft-redirected
 	// (executed=false + next_action) instead of hard-failed, so piped/compound
-	// searches share the simple-search redirect contract and a fixable command
+	// searches share the path-glob redirect contract and a fixable command
 	// shape does not poison batch accounting.
 	if globToken, literal := searchPathGlobLiteralToken(command, effectiveWorkdir); literal {
 		return bashSearchPathGlobRedirectResult(globToken), nil
@@ -1924,40 +1906,6 @@ func looksLikeSearchShellCommand(command string) bool {
 		strings.Contains(lower, "grep ")
 }
 
-// looksLikeSimpleShellCodeSearch recognizes standalone rg invocations that can
-// be expressed by the dedicated toolkit grep tool. It intentionally excludes
-// pipelines/chains/redirections and administrative rg modes so shell remains
-// available when it provides behavior the toolkit grep API does not.
-func looksLikeSimpleShellCodeSearch(command string) (string, bool) {
-	parts := runtimeexecutor.SplitCommandTokens(command)
-	if len(parts) < 2 {
-		return "", false
-	}
-	primary := primaryCommandBase(parts)
-	if primary != "rg" && primary != "ripgrep" {
-		return "", false
-	}
-	for _, part := range parts {
-		switch strings.TrimSpace(part) {
-		case "|", "||", "&&", "&", ";", ">", "<":
-			return "", false
-		}
-	}
-	for _, part := range parts[1:] {
-		lower := strings.ToLower(strings.TrimSpace(part))
-		if eq := strings.IndexByte(lower, '='); eq >= 0 {
-			lower = lower[:eq]
-		}
-		switch lower {
-		case "-h", "--help", "-v", "--version", "--pcre2-version",
-			"--files", "--files-with-matches", "--files-without-match",
-			"--type-list", "--type-add", "--type-clear", "--generate":
-			return "", false
-		}
-	}
-	return primary, true
-}
-
 func bashSearchNoMatchNextAction() string {
 	return "Treat this as no-match / empty evidence, not a hard crash. Prefer toolkit `grep` (literal/paths/glob) for code search; change pattern or broaden path/workdir. Do not retry the identical shell query unchanged."
 }
@@ -2310,8 +2258,8 @@ func shellRipgrepAvailable() bool {
 
 // bashSearchPathGlobRedirectResult soft-redirects a shell search whose
 // path-position glob would reach rg/grep literally. The command is not
-// executed; the model gets the same success-shaped contract as the simple
-// shell-search redirect plus a concrete -g rewrite derived from the offending
+// executed; the model gets a success-shaped redirect plus a concrete -g
+// rewrite derived from the offending
 // token (dir/*_test.go -> `rg -g "*_test.go" <pattern> dir`). When no rg can
 // run in the shell, the rewrite is omitted and toolkit grep (whose builtin
 // scanner needs no rg) becomes the only suggested path.

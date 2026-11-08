@@ -601,7 +601,7 @@ func TestBashTool_SearchShellUsesShorterInferredTimeout(t *testing.T) {
 	tool.executer = inspector
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		// Pipeline keeps shell execution (simple pure rg is soft-redirected).
+		// A piped search still uses the shorter inferred search timeout.
 		"command": `rg -n "TodoItem" backend | Select-Object -First 20`,
 	})
 	if err != nil || !result.Success {
@@ -757,7 +757,7 @@ func TestBashTool_PrefersTimeoutSecWhenTimeoutMsIsSchemaNoise(t *testing.T) {
 	tool.executer = inspector
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		// Use a pipeline so soft-redirect does not short-circuit timeout parsing.
+		// A pipeline exercises the search timeout path without short-circuiting.
 		"command":     `rg -n "pattern" backend | Select-Object -First 20`,
 		"timeout_ms":  1,
 		"timeout_sec": 30,
@@ -2096,46 +2096,24 @@ func TestBashCommandFailureNextActionMissingSearchTool(t *testing.T) {
 	}
 }
 
-func TestLooksLikeSimpleShellCodeSearch(t *testing.T) {
-	if tool, ok := looksLikeSimpleShellCodeSearch(`rg -n "foo" backend`); !ok || tool != "rg" {
-		t.Fatalf("expected simple rg code search, got tool=%q ok=%v", tool, ok)
-	}
-	if _, ok := looksLikeSimpleShellCodeSearch(`rg -n "foo" backend | Select-Object -First 20`); ok {
-		t.Fatal("pipelines must not soft-redirect")
-	}
-	if _, ok := looksLikeSimpleShellCodeSearch(`rg --files -g "*.go"`); ok {
-		t.Fatal("rg --files must remain executable")
-	}
-	if _, ok := looksLikeSimpleShellCodeSearch(`grep -n foo backend`); ok {
-		t.Fatal("system grep is not soft-redirected")
-	}
-}
-
-func TestBashTool_SimpleShellCodeSearchSoftRedirect(t *testing.T) {
+func TestBashTool_SimpleShellCodeSearchExecutes(t *testing.T) {
 	tool := newTestBashTool()
-	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "backend/sample.go:1:simple-rg-executed"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "DoesNotExistSymbolXYZ" backend`,
+		"command": `rg -n "simple-rg-executed" backend`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
 	if !result.Success {
-		t.Fatalf("expected soft redirect success, got error: %v", result.Error)
+		t.Fatalf("expected shell rg success, got error: %v", result.Error)
 	}
-	if result.Metadata["shell_search_redirected"] != true {
-		t.Fatalf("expected shell_search_redirected metadata, got %#v", result.Metadata)
+	if result.Metadata["shell_search_redirected"] == true {
+		t.Fatalf("simple shell rg must not be soft-redirected: %#v", result.Metadata)
 	}
-	if result.Metadata["executed"] != false {
-		t.Fatalf("expected executed=false, got %#v", result.Metadata["executed"])
-	}
-	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
-	if !strings.Contains(next, "grep") {
-		t.Fatalf("expected next_action to prefer toolkit grep, got %q", next)
-	}
-	if !strings.Contains(result.Content, "软重定向") && !strings.Contains(result.Content, "toolkit") {
-		t.Fatalf("expected redirect content, got %q", result.Content)
+	if !strings.Contains(result.Content, "simple-rg-executed") {
+		t.Fatalf("expected shell rg output, got %q", result.Content)
 	}
 }
 
