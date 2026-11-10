@@ -337,7 +337,7 @@ Consolidation 不应：
 
 ### 7.4 幂等与冲突
 
-- `content_hash = hash(normalized_text + scope + kind)`；
+- `content_hash = sha256(scope + project_key + kind + normalized_text)`；
 - 重复内容合并 source refs 和 confidence；
 - 冲突时保留 `supersedes_id` 链；
 - 用户删除产生 tombstone，后台清理不是立即物理删除；

@@ -2,7 +2,7 @@
 
 > 状态：目标契约，实施时以本文件为 schema/API 的起点  
 > 约束：SQLite 事实源、Markdown 可重建、scope 默认 project、写入异步。
-> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
+> 修订：2026-11-10，M1 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs 与 schema version 视图；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
 
 ## 1. 数据库
 
@@ -331,6 +331,24 @@ CREATE INDEX idx_memory_jobs_claim
   ON memory_jobs(status, retry_at, priority DESC, created_at);
 ```
 
+### 3.4.1 `memory_session_modes`
+
+会话级 memory mode 独立持久化，不写入 session metadata：
+
+```sql
+CREATE TABLE memory_session_modes (
+    session_id      TEXT PRIMARY KEY,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    project_key     TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL, -- enabled | disabled | polluted
+    updated_at      TEXT NOT NULL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_memory_session_modes_project
+  ON memory_session_modes(project_key, mode, updated_at DESC);
+```
+
 ### 3.5 `memory_summaries`
 
 ```sql
@@ -353,6 +371,15 @@ CREATE TABLE memory_summaries (
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scope, project_key, summary_kind, revision)
 );
+```
+
+只允许一个 active revision；activate/rollback 必须在 `WriteTxOptions` 事务内先
+supersede 旧 revision，再激活新 revision：
+
+```sql
+CREATE UNIQUE INDEX idx_memory_summaries_active
+  ON memory_summaries(scope, project_key, summary_kind)
+  WHERE status = 'active';
 ```
 
 `summary_kind=long_term` 为 v1；`working_digest` 是 v1.1 的近期工作摘要，二者共享 revision/items 契约，但注入预算和内容边界不同。
@@ -395,12 +422,50 @@ summary 只能在验证其输入未被替换/失效后注入：
 
 summary 的 `freshness_status` 是派生状态，不能由 Agent 手动改为 `fresh`；只能由重建/验证流程更新。
 
+`input_watermark` 使用确定性集合 hash（M3 编译器与 M1 gate 共用）：
+
+```text
+summary_input_watermark =
+  "v1:" + sha256(canonical_json([
+    {id, revision, content_hash, status, freshness_status}
+    for each memory_summary_item
+    ordered by id
+  ]))
+```
+
+items 缺失、revision/content_hash/status/freshness 变化都会使 watermark 不一致；
+`summary_rebuild` 的 `job_key` 使用 `summary_id + ":" + current_watermark`。
+
 ### 3.6 `memory_schema_version`
 
 ```sql
 CREATE TABLE memory_schema_version (
     version     INTEGER PRIMARY KEY,
     applied_at  TEXT NOT NULL
+);
+```
+
+实现口径：`internal/migrate` 仍是唯一写入账本 `schema_migrations`；
+`memory_schema_version` 是等价的只读视图（`version, applied_at`），供状态面查询。
+
+### 3.6.1 `memory_migration_runs`
+
+`notes.jsonl` 迁移诊断表；判重仍以 `memory_entries` 的 content hash 唯一索引为准：
+
+```sql
+CREATE TABLE memory_migration_runs (
+    id            TEXT PRIMARY KEY,
+    source_path   TEXT NOT NULL,
+    source_size   INTEGER NOT NULL DEFAULT 0,
+    source_mtime  TEXT,
+    scanned       INTEGER NOT NULL DEFAULT 0,
+    imported      INTEGER NOT NULL DEFAULT 0,
+    skipped       INTEGER NOT NULL DEFAULT 0,
+    corrupt       INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL, -- running | succeeded | failed
+    error         TEXT,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT
 );
 ```
 

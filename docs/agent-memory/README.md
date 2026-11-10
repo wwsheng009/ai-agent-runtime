@@ -1,6 +1,6 @@
 # Agent Memory v2 文档索引
 
-> 状态：**方案基线（Docs Only，v1 范围/阶段 DoD 已确认，尚未实施）**  
+> 状态：**方案基线 + M1 已实施（M2-M5 待实施）**
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
 
@@ -25,7 +25,7 @@
 | [02-current-runtime-gap-analysis.md](./02-current-runtime-gap-analysis.md) | 当前 AAR 记忆相关能力、复用点与差距分析 | 完成 |
 | [03-target-architecture.md](./03-target-architecture.md) | AAR Agent Memory v2 目标架构与读写链路 | 完成 |
 | [04-data-model-and-api.md](./04-data-model-and-api.md) | 数据模型、配置、HTTP API、CLI 与工具契约 | 完成 |
-| [05-implementation-plan.md](./05-implementation-plan.md) | 分阶段实施计划、M1 代码级施工说明、文件落点、提交与回滚策略 | 完成 |
+| [05-implementation-plan.md](./05-implementation-plan.md) | 分阶段实施计划、M1 代码级施工说明、文件落点、提交与回滚策略 | 完成（M1 已实施） |
 | [06-test-and-acceptance.md](./06-test-and-acceptance.md) | 测试矩阵、阶段 DoD、指标与验收证据包 | 完成 |
 | [07-risks-operations-migration.md](./07-risks-operations-migration.md) | 风险、安全、迁移、运维与 M0 默认决策 | 完成 |
 | [08-completeness-review.md](./08-completeness-review.md) | 闭环审查、缺口修复记录、剩余决策与实施就绪度 | 完成 |
@@ -33,7 +33,7 @@
 | [10-nuphus-deepseek-harness-memory-comparison.md](./10-nuphus-deepseek-harness-memory-comparison.md) | Nuphus / DeepSeek Harness / ai-memory 记忆能力对比与借鉴清单 | 完成 |
 | [11-fact-ledger-convergence-decision.md](./11-fact-ledger-convergence-decision.md) | Fact Ledger 收敛决策记录：过程产物/结论切分、实测证据、停止投入理由与重启条件 | **已执行**（本目录其余文档为方案基线） |
 | [12-hermes-agent-memory-system-analysis.md](./12-hermes-agent-memory-system-analysis.md) | Hermes Agent 记忆系统架构与实现分析：短期压缩、内置长期记忆、外部 Provider、会话检索与借鉴边界 | 完成（外部方案分析，Docs Only） |
-| [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已按 P0 修订并回写 03/04/05/06/09；Docs Only，待实施） |
+| [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已回写 03/04/05/06/09；M1 已实施，M2-M5 待实施） |
 
 > `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
 

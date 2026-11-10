@@ -31,6 +31,10 @@
 - 不能说“整体功能已经完成闭环”；
 - 应该说“方案已经补齐为可实施闭环，代码尚未实现”。
 
+2026-11-10 更新：M1 已落地 SQLite schema、`notes.jsonl` 迁移、兼容 facade、
+stable/recall 注入、summary gate、pinned 预算、session mode、records/status/recall
+API 和对应测试。M2 自动抽取、M3 summary 编译器/Consolidation、M4 工具/UI 仍待实施。
+
 ### 1.2 设计状态
 
 原方案已经覆盖主流程，但审查发现以下关键点会导致“看似有方案、实际无法闭环”：
@@ -98,7 +102,7 @@
 | 5 | summary 不可精确重建 | P1 | `04 §3.5.1` 增加 `memory_summary_items` 和 `record_ids_json` |
 | 6 | project key 不稳定 | P1 | `03 §5.5`、`07 §2.3` 定义 git origin/canonical path |
 | 7 | destructive API 权限不清 | P1 | `04 §7.2` 增加管理员/本机授权要求 |
-| 8 | summary/hybrid 预算不明 | P2 | `03 §8.2.1` 增加 60/40 拆分 |
+| 8 | summary/hybrid 预算不明 | P2 | `03 §8.2.1` 增加 pinned 预留与 80/20、50/20/30 拆分 |
 | 9 | 缺用户显式 memory 操作闭环 | P1 | `03 §8.6`、`04 §9`、`05 M4` 增加 add/correct/forget |
 | 10 | 缺 transcript reader/触发边界 | P1 | `03 §7.1` 增加只读 reader 和接入点 |
 | 11 | 子 agent/team 策略不明 | P2 | `03 §5.7`、`04` 增加默认排除/无写权限 |
@@ -195,7 +199,7 @@
 | 阶段 | 是否可以立即开始 | 前置条件 |
 | --- | --- | --- |
 | M0 基线与契约 | 可以 | 按 `07 §8.1` 默认决策转 ADR；记录基线与失败矩阵 |
-| M1 存储与读取 | 可以 | M0 基线；不依赖自动抽取 |
+| M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
 | M2 抽取 | 部分可以 | 必须先有 M1 + session mode + suppression |
 | M3 Consolidation | 部分可以 | 必须先有 M2 candidate、summary items、去重规则 |
 | M4 工具/API/UI | 可以并行设计 | 需要 M0 权限与工具命名决策 |
@@ -205,14 +209,13 @@
 
 **是否完成闭环：**
 
-- **代码功能：没有。** 当前只有 memorystore MVP，自动记忆和 Consolidation 尚未实现。
+- **代码功能：M1 已实现。** SQLite 存储、迁移、stable/recall 注入和管理 API 已落地；自动记忆、Consolidation、summary 编译器和工具/UI 尚未实现。
 - **设计方案：在本次审查修补后，已达到“可实施闭环”。** 从触发、抽取、存储、摘要、注入、引用、纠正、删除、迁移、回滚都有明确契约。
 - **生产可用：还没有。** 必须完成 M1-M5、通过测试与 shadow 评估，才能说生产功能闭环。
 
 ## 8. 下一步建议
 
-1. 在 M0 将 `07-risks-operations-migration.md §8.1` 的默认决策转为 ADR/配置契约；
-2. 先实现 M1，不引入自动抽取；
-3. M1 验收通过后启用 M2 shadow；
-4. 用真实会话建立标注集，再决定 M3 默认策略；
-5. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。
+1. M1 已完成，按 `06-test-and-acceptance.md §8.2` 固化验收证据；
+2. 进入 M2 自动抽取 shadow，不启用自动注入；
+3. 用真实会话建立标注集，再决定 M3 默认策略；
+4. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。
