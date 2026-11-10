@@ -240,6 +240,17 @@ func (s *TuiScene) Cells() []*TranscriptCell {
 	return out
 }
 
+// CellsView 返回场景内部的有序 cell 引用切片，供已持场景锁的只读消费者
+// 使用。调用方不得修改切片内容/顺序，也不得在释放场景锁后保留该切片。
+// 与 Cells 的区别是零分配：裁剪策略每轮只做前缀判定，不需要为快照复制
+// 一份 O(cells) 的指针切片。
+func (s *TuiScene) CellsView() []*TranscriptCell {
+	if s == nil {
+		return nil
+	}
+	return s.cells
+}
+
 // MutableCell 返回当前可消费的可变 cell（P1-1，docs/plan/aicli-stream-
 // pipeline-performance-audit-and-optimization-plan-20261011.md §3）：delta
 // 热路径逐 chunk 调用，此前只能构建 O(cells) 的 Snapshot 再正扫；这里缓存

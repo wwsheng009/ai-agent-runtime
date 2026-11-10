@@ -71,7 +71,11 @@ func ComposeTerminalFramePlan(state AppState) TerminalFramePlan {
 	renderRows := make([]render.Line, len(frame.Rows))
 	for index, row := range frame.Rows {
 		rows[index] = row.Screen
-		renderRows[index] = cloneAppRenderLine(row.Line)
+		// ComposeAppRenderFrame owns a fresh local AppRenderFrame. Its lines are
+		// already detached from the layout cache (or were freshly built), and
+		// the frame is discarded after this call, so TerminalFramePlan can take
+		// ownership without a second per-row span allocation.
+		renderRows[index] = row.Line
 	}
 	return TerminalFramePlan{
 		LayoutGeneration: frame.LayoutGeneration,

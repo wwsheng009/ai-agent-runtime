@@ -215,6 +215,14 @@ type completedCellDelivery struct {
 	// opens a new epoch and deliberately allows the same source to be appended
 	// again (append-only: old rows stay, the loaded history follows them).
 	epoch uint64
+	// sourceHash is the plan-input fingerprint observed for this revision when
+	// the ledger later confirms it is fully settled. Cell IDs and revisions can
+	// be reused when a transcript is replaced (backtrack/session switch), so
+	// revision identity alone is not enough to skip layout. The first
+	// observation records the fingerprint and deliberately lays out once; a
+	// different fingerprint forces the cell back through layout.
+	sourceHash    uint64
+	hasSourceHash bool
 }
 
 func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
@@ -450,6 +458,65 @@ func (l *HistoryCommitLedger) cellRevisionFullyDelivered(commit HistoryCommit) b
 	// A same-generation plan is the ordinary incremental path: remaining
 	// fragments must still flow. Only a generation change proves a re-render.
 	return record.generation != 0 && record.generation != commit.LayoutGeneration
+}
+
+// cellRevisionSettled reports whether a finalized cell revision has no queued
+// work and has already completed delivery in the current delivery epoch.
+//
+// cellRevisionFullyDelivered is deliberately narrower: it only answers "would
+// this candidate re-render content that already crossed the writer under
+// another layout generation?". Planning has a different question: can this
+// *whole cell* be omitted from the layout pass because no fragment can mint a
+// new commit? A revision that completed in the current epoch with zero
+// openCellRevisions has no such fragment, regardless of whether the width
+// changed. Omitting it turns a full re-plan from O(entire history) into O(new
+// or still-unsettled cells).
+func (l *HistoryCommitLedger) cellRevisionSettled(cellID scene.CellID, revision uint64, sourceHash uint64) bool {
+	if !l.cellRevisionSettledCandidate(cellID, revision) {
+		return false
+	}
+	key := historyCommitCellKey{cellID: cellID, revision: revision}
+	record, ok := l.completedCells[key]
+	if !ok {
+		return false
+	}
+	if !record.hasSourceHash {
+		record.sourceHash = sourceHash
+		record.hasSourceHash = true
+		l.completedCells[key] = record
+		// Unknown content: do not skip the first observation. The next plan
+		// can prove that the same layout input has already been delivered.
+		return false
+	}
+	if record.sourceHash != sourceHash {
+		record.sourceHash = sourceHash
+		l.completedCells[key] = record
+		// The cell revision was reused for different content (backtrack or a
+		// replacement transcript). Layout and delivery must run again.
+		return false
+	}
+	return true
+}
+
+// cellRevisionSettledCandidate is the cheap pre-check used before hashing a
+// cell's full source. The source fingerprint is only needed for revisions that
+// already have a same-epoch completed record and zero open fragments; a queued
+// or stream-growing cell must not pay that hash cost on every plan.
+func (l *HistoryCommitLedger) cellRevisionSettledCandidate(cellID scene.CellID, revision uint64) bool {
+	if l == nil || cellID == 0 || revision == 0 {
+		return false
+	}
+	key := historyCommitCellKey{cellID: cellID, revision: revision}
+	if l.openCellRevisions[key] > 0 {
+		return false
+	}
+	record, ok := l.completedCells[key]
+	if !ok {
+		return false
+	}
+	// Same epoch rule as cellRevisionFullyDelivered: a different runtime
+	// session may append the loaded history again, so it must be re-planned.
+	return record.epoch == 0 || record.epoch == l.currentDeliveryEpoch()
 }
 
 // cellRevisionHasQueuedFragmentsFrom reports whether this cell revision still

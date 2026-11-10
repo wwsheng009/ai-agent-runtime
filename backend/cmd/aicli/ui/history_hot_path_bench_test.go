@@ -333,3 +333,41 @@ func BenchmarkTranscriptLayoutRowsResumedSession(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkPlanTranscriptResumedSession 对比 planner 的无缓冲路径与生产
+// reuse 路径：复用 rows backing array 后，单次完整规划不再分配整个
+// transcript 的 []scene.LayoutRow。
+func BenchmarkPlanTranscriptResumedSession(b *testing.B) {
+	makeState := func() AppState {
+		return AppState{
+			Revision:   1,
+			Geometry:   GeometryState{Width: 100, Height: 40, Generation: 1},
+			Transcript: NewTranscriptState(benchResumedSnapshot(3000)),
+		}
+	}
+	state := makeState()
+	b.ReportMetric(float64(len(state.Transcript.Cells)), "cells")
+
+	b.Run("unbuffered", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			commits, _, _ := planEligibleHistoryCommitsWithinTimed(makeState())
+			if len(commits) == 0 {
+				b.Fatal("planner produced no commits")
+			}
+		}
+	})
+
+	b.Run("reuse", func(b *testing.B) {
+		b.ReportAllocs()
+		var buf []scene.LayoutRow
+		b.ResetTimer()
+		for b.Loop() {
+			commits, _, _ := planEligibleHistoryCommitsWithinTimedWithBuffer(makeState(), &buf)
+			if len(commits) == 0 {
+				b.Fatal("planner produced no commits")
+			}
+		}
+	})
+}

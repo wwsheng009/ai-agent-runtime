@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -34,6 +36,7 @@ type transcriptPlanSnapshot struct {
 	cells      []scene.TranscriptCell
 	byID       map[scene.CellID]scene.TranscriptCell
 	mutable    map[scene.CellID]struct{}
+	settled    map[scene.CellID]struct{}
 	layoutRows []scene.LayoutRow
 	width      int
 	generation uint64
@@ -60,16 +63,102 @@ func transcriptPlanMintSnapshotFor(state AppState) transcriptPlanSnapshot {
 // transcriptPlanSnapshotFor 在锁内构造完整快照（同步路径）：layoutRows 与
 // byID/mutable 一次派生完成。
 func transcriptPlanSnapshotFor(state AppState) transcriptPlanSnapshot {
+	var layoutRows []scene.LayoutRow
+	return transcriptPlanSnapshotForWithBuffer(state, &layoutRows)
+}
+
+// transcriptPlanSnapshotForWithBuffer 与 transcriptPlanSnapshotFor 相同，但
+// 复用调用方的 layoutRows backing array。返回快照只在当前 planning pass
+// 内使用；调用方在 pass 结束后方可再次复用 buffer。
+func transcriptPlanSnapshotForWithBuffer(state AppState, layoutRows *[]scene.LayoutRow) transcriptPlanSnapshot {
 	snap := transcriptPlanMintSnapshotFor(state)
 	snap.mutable = mutableTranscriptCellIDs(state.Transcript)
-	snap.layoutRows = state.Transcript.LayoutRows(state.Geometry.Generation)
+	if layoutRows != nil {
+		snap.layoutRows = state.Transcript.LayoutRowsInto(*layoutRows, state.Geometry.Generation)
+		// 保留本轮长度作为下一轮的 previousLen：LayoutTranscriptInto 用它
+		// 清掉 transcript 收缩后不再覆盖的尾部行，避免旧 cell 正文被缓冲
+		// 钉住。下一轮仍从 dst[:0] 开始覆盖。
+		*layoutRows = snap.layoutRows
+	} else {
+		snap.layoutRows = state.Transcript.LayoutRows(state.Geometry.Generation)
+	}
+	snap.settled = settledTranscriptCells(state, snap.cells, snap.width, themeFingerprint(snap.theme))
 	return snap
+}
+
+// settledTranscriptCells returns the finalized cell IDs whose current revision
+// is already fully delivered in this epoch and has no queued work. A cell ID is
+// only skipped when every section carrying that ID is settled; the transcript
+// normally uses unique IDs, but this guard keeps the filter safe for the
+// section-splitting path.
+func settledTranscriptCells(state AppState, cells []scene.TranscriptCell, width int, themeFp string) map[scene.CellID]struct{} {
+	var settled map[scene.CellID]struct{}
+	var unsettled map[scene.CellID]struct{}
+	for _, cell := range cells {
+		if !cellIsFinalizedForHistory(cell) || cell.Source == "" {
+			continue
+		}
+		if state.HistoryEffects.cellRevisionSettled(cell, width, themeFp) {
+			if settled == nil {
+				settled = make(map[scene.CellID]struct{})
+			}
+			settled[cell.ID] = struct{}{}
+			continue
+		}
+		if unsettled == nil {
+			unsettled = make(map[scene.CellID]struct{})
+		}
+		unsettled[cell.ID] = struct{}{}
+	}
+	for id := range unsettled {
+		delete(settled, id)
+	}
+	if len(settled) == 0 {
+		return nil
+	}
+	return settled
+}
+
+// transcriptCellPlanFingerprint identifies the immutable plan inputs for one
+// cell. completedCells is keyed by cellID+revision, but a replacement
+// transcript may reuse both while changing the source. The hash prevents that
+// reuse from suppressing a required layout/delivery.
+func transcriptCellPlanFingerprint(cell scene.TranscriptCell, width int, themeFp string) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	writeUint64 := func(value uint64) {
+		binary.LittleEndian.PutUint64(buf[:], value)
+		_, _ = h.Write(buf[:])
+	}
+	writeUint64(uint64(cell.Kind))
+	writeUint64(uint64(cell.Presentation.Kind))
+	writeUint64(uint64(width))
+	_, _ = h.Write([]byte(themeFp))
+	_, _ = h.Write([]byte(cell.Presentation.DiffLabel))
+	_, _ = h.Write([]byte(cell.Source))
+	return h.Sum64()
 }
 
 // screenTranscriptPlanWindow 是 screening 相位：纯布局，**不读 ledger、
 // 不读 HistoryEffects**，输出即全量布局（无预算单遍）。
 func screenTranscriptPlanWindow(snap transcriptPlanSnapshot) []AppScreenRow {
-	return layoutTranscriptScreenRows(snap.layoutRows, snap.byID, snap.mutable, snap.width, snap.theme)
+	rows := snap.layoutRows
+	if len(snap.settled) > 0 {
+		// Compact in place: layoutRows is owned by this snapshot and is not
+		// read after the plan. Gap rows belong to the successor cell, so a
+		// settled cell's leading gap disappears with it; the next unsettled
+		// cell keeps its own gap. DisplayRange shifts are intentionally ignored
+		// by delivery (historyCommitPresentationEqual excludes it).
+		filtered := rows[:0]
+		for _, row := range rows {
+			if _, skip := snap.settled[row.CellID]; skip {
+				continue
+			}
+			filtered = append(filtered, row)
+		}
+		rows = filtered
+	}
+	return layoutTranscriptScreenRows(rows, snap.byID, snap.mutable, snap.width, snap.theme)
 }
 
 // transcriptPlanRetention 记录"整 cell 提交集可保留"的复用段：cell 内容
@@ -167,11 +256,19 @@ func planEligibleHistoryCommitsWithin(state AppState) ([]HistoryCommit, transcri
 // 额外返回分相位耗时（P16 归因）：screen = 快照 + 全量布局（含并行首渲染墙钟），
 // mint = 铸 commit。apply（reconcile + 入队）由调用方补。
 func planEligibleHistoryCommitsWithinTimed(state AppState) ([]HistoryCommit, transcriptPlanRetention, transcriptPlanPhaseTiming) {
+	var layoutRows []scene.LayoutRow
+	return planEligibleHistoryCommitsWithinTimedWithBuffer(state, &layoutRows)
+}
+
+// planEligibleHistoryCommitsWithinTimedWithBuffer 是 planner 的生产入口：
+// layoutRows 是跨 planning pass 复用的语义行 buffer（见 UIControllerState.
+// transcriptLayoutRows）。结果中的 commits 不引用 rows backing array 的所有权。
+func planEligibleHistoryCommitsWithinTimedWithBuffer(state AppState, layoutRows *[]scene.LayoutRow) ([]HistoryCommit, transcriptPlanRetention, transcriptPlanPhaseTiming) {
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
 		return nil, transcriptPlanRetention{}, transcriptPlanPhaseTiming{}
 	}
 	screenStart := time.Now()
-	snap := transcriptPlanSnapshotFor(state)
+	snap := transcriptPlanSnapshotForWithBuffer(state, layoutRows)
 	snapshotMs := time.Since(screenStart).Milliseconds()
 	layoutHitsBefore, layoutMissesBefore, _, _, _ := sharedCellRows.stats()
 	rows := screenTranscriptPlanWindow(snap)
@@ -672,7 +769,7 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	planPhases := transcriptPlanPhaseTiming{}
 	defer func() { effects.recordTranscriptPlanTiming(time.Since(planStarted), planPhases) }()
 
-	commits, retention, screenPhases := planEligibleHistoryCommitsWithinTimed(state.AppState)
+	commits, retention, screenPhases := planEligibleHistoryCommitsWithinTimedWithBuffer(state.AppState, &state.transcriptLayoutRows)
 	planPhases = screenPhases
 	applyStart := time.Now()
 	applyTranscriptPlan(state, commits, retention)

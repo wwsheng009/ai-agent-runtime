@@ -224,6 +224,36 @@ func TestLayoutSourceInternalBlankPreserved(t *testing.T) {
 	}
 }
 
+func TestLayoutTranscriptIntoReusesAndClearsTail(t *testing.T) {
+	cells := []*TranscriptCell{
+		{ID: 1, Source: "a\nb", Kind: KindAssistant, Phase: CellCommitted},
+		{ID: 2, Source: "c", Kind: KindAssistant, Phase: CellCommitted},
+	}
+	buf := make([]LayoutRow, 10, 64)
+	for i := range buf {
+		buf[i].Text = "sentinel"
+	}
+	first := LayoutTranscriptInto(buf, cells, 1)
+	if len(first) == 0 {
+		t.Fatal("expected rows")
+	}
+	firstPtr := &first[0]
+	second := LayoutTranscriptInto(first, cells, 1)
+	if len(second) != len(first) || &second[0] != firstPtr {
+		t.Fatalf("expected backing array reuse: first=%p second=%p", firstPtr, &second[0])
+	}
+
+	shrunk := LayoutTranscriptInto(second, cells[:1], 1)
+	if len(shrunk) >= len(second) {
+		t.Fatalf("expected smaller layout: before=%d after=%d", len(second), len(shrunk))
+	}
+	for i := len(shrunk); i < len(second); i++ {
+		if second[i].Text != "" || second[i].CellID != 0 {
+			t.Fatalf("stale row retained at %d: %+v", i, second[i])
+		}
+	}
+}
+
 // mustSubmit 便捷提交。
 func mustSubmit(t *testing.T, s *TuiScene, m CellMutation) {
 	t.Helper()

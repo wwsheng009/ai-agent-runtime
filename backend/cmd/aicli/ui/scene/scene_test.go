@@ -184,6 +184,34 @@ func TestSceneSnapshotIsImmutableCopy(t *testing.T) {
 	}
 }
 
+// TestSceneCellsViewIsReadOnlyInternalSlice 锁定裁剪路径的零分配视图：
+// CellsView 返回场景内部 cell 指针，调用方只读；Cells 仍返回独立切片。
+func TestSceneCellsViewIsReadOnlyInternalSlice(t *testing.T) {
+	s := New()
+	if _, err := s.ApplyCellMutation(&AppendCell{Cell: newTestCell(1, KindUser, "u")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyCellMutation(&AppendCell{Cell: newTestCell(2, KindAssistant, "a")}); err != nil {
+		t.Fatal(err)
+	}
+	view := s.CellsView()
+	if len(view) != 2 {
+		t.Fatalf("CellsView len = %d, want 2", len(view))
+	}
+	cell, ok := s.Cell(1)
+	if !ok || view[0] != cell {
+		t.Fatalf("CellsView must return the scene-owned cell pointer, got %p want %p", view[0], cell)
+	}
+	out := s.Cells()
+	if len(out) != 2 || out[0] != view[0] {
+		t.Fatalf("Cells must return an independent slice of the same pointers")
+	}
+	out[0] = nil
+	if view[0] == nil {
+		t.Fatal("Cells slice must own its backing array")
+	}
+}
+
 func TestSceneBoundaryMetaProjection(t *testing.T) {
 	c := newTestCell(1, KindAssistant, "x")
 	c.ChainKey = "chain-1"

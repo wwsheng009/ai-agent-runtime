@@ -373,6 +373,20 @@ func (s HistoryEffectQueueState) cellRevisionFullyDelivered(commit HistoryCommit
 	return s.ledger.cellRevisionFullyDelivered(commit)
 }
 
+// cellRevisionSettled reports whether the finalized cell revision is fully
+// delivered in the current epoch and has no queued work. The planner uses it
+// as a layout skip predicate: a settled revision cannot mint another commit,
+// so laying out its rows again only produces transient allocations.
+func (s HistoryEffectQueueState) cellRevisionSettled(cell scene.TranscriptCell, width int, themeFp string) bool {
+	if s.ledger == nil || cell.Phase == scene.CellMutable || !cellIsFinalizedForHistory(cell) {
+		return false
+	}
+	if !s.ledger.cellRevisionSettledCandidate(cell.ID, cell.Revision) {
+		return false
+	}
+	return s.ledger.cellRevisionSettled(cell.ID, cell.Revision, transcriptCellPlanFingerprint(cell, width, themeFp))
+}
+
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
 // 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
 // 花在规划器上。

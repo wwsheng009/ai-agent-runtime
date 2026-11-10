@@ -185,14 +185,20 @@ func newTranscriptStateFromSnapshot(previous TranscriptState, snapshot *scene.Sn
 // values, so the temporary pointer slice is sufficient isolation for this
 // synchronous layout operation.
 func (s TranscriptState) LayoutRows(policyVersion uint64) []scene.LayoutRow {
+	return s.LayoutRowsInto(nil, policyVersion)
+}
+
+// LayoutRowsInto 是 LayoutRows 的可复用版本：dst 的底层数组会被重新填充
+// 并返回；容量不足时才会分配。调用方必须在下一次复用前消费完返回值。
+func (s TranscriptState) LayoutRowsInto(dst []scene.LayoutRow, policyVersion uint64) []scene.LayoutRow {
 	if len(s.Cells) == 0 {
-		return nil
+		return dst[:0]
 	}
 	cells := make([]*scene.TranscriptCell, len(s.Cells))
 	for index := range s.Cells {
 		cells[index] = &s.Cells[index]
 	}
-	return scene.LayoutTranscript(cells, policyVersion)
+	return scene.LayoutTranscriptInto(dst, cells, policyVersion)
 }
 
 // Snapshot converts the value back into the scene package's read-only view.

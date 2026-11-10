@@ -78,6 +78,19 @@ func BenchmarkLayoutTranscriptResumeScale(b *testing.B) {
 		}
 	})
 
+	// reuse：planner 生产路径复用上一轮的 rows backing array。
+	b.Run("reuse", func(b *testing.B) {
+		b.ReportAllocs()
+		buf := LayoutTranscriptInto(nil, cells, 1) // 预热到满容量
+		if len(buf) == 0 {
+			b.Fatal("no rows")
+		}
+		b.ResetTimer()
+		for b.Loop() {
+			buf = LayoutTranscriptInto(buf, cells, 1)
+		}
+	})
+
 	// append：稳态里最贵的一类 cell 是「正在流式增长的 mutable cell」。
 	// 每轮给它追加一行（revision++），其余 cell 不变。
 	b.Run("append", func(b *testing.B) {

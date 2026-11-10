@@ -21,10 +21,16 @@ type UIControllerState struct {
 	AppState
 	Effects  EffectResultState
 	LastDraw DrawRequested
+	// transcriptLayoutRows 是 syncHistoryEffectsForTranscript 复用的语义行
+	// backing array。长会话每轮规划都会重排全量 transcript；复用后避免
+	// 每次 make 数 MB 的 []scene.LayoutRow。该字段只在 actor 锁内使用，
+	// 发布快照（Clone/CloneForDiagnostics）会清空，防止跨状态共享。
+	transcriptLayoutRows []scene.LayoutRow
 }
 
 func (s UIControllerState) Clone() UIControllerState {
 	s.AppState = s.AppState.Clone()
+	s.transcriptLayoutRows = nil
 	return s
 }
 
@@ -42,6 +48,7 @@ func (s UIControllerState) Clone() UIControllerState {
 // using Clone.
 func (s UIControllerState) CloneForDiagnostics() UIControllerState {
 	s.AppState = s.AppState.cloneForDiagnostics()
+	s.transcriptLayoutRows = nil
 	return s
 }
 

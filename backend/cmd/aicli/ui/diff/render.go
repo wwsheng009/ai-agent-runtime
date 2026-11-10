@@ -42,7 +42,6 @@ func DefaultRenderOptions(width int, theme style.ThemeContext) RenderOptions {
 		SyntaxTheme:     theme.SyntaxName,
 		HighlightLimits: DefaultHighlightLimits(),
 		GutterWidth:     4,
-		Highlighter:     syntax.Default,
 	}
 }
 
@@ -141,6 +140,22 @@ func RenderPlain(fd FileDiff, opts RenderOptions) string {
 
 // RenderText is a convenience that parses unified or edited-supplement text.
 func RenderText(text string, opts RenderOptions) render.Document {
+	key, cacheable := renderTextCacheKeyFor(text, opts)
+	if cacheable {
+		if doc, ok := sharedRenderTextCache.get(key); ok {
+			return doc
+		}
+	}
+	doc := renderTextUncached(text, opts)
+	if cacheable {
+		// Store an independent copy: the caller owns the fresh document and may
+		// mutate its lines/spans after RenderText returns.
+		sharedRenderTextCache.put(key, doc.Clone())
+	}
+	return doc
+}
+
+func renderTextUncached(text string, opts RenderOptions) render.Document {
 	if supplements := ParseSupplementBlocks(text); len(supplements) > 0 {
 		return SupplementDocument(supplements, opts)
 	}

@@ -114,3 +114,41 @@ func TestPlanPlainHistoryCommitsDynamicFields(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanWithReusableLayoutRowsBufferMatchesUnbuffered 验证生产 planner
+// 复用语义行 backing array 时，候选集与无缓冲路径深度一致，且下一次规划
+// 确实复用同一块内存。
+func TestPlanWithReusableLayoutRowsBufferMatchesUnbuffered(t *testing.T) {
+	makeState := func() AppState {
+		return AppState{
+			Geometry: GeometryState{Width: 40, Height: 24, Generation: 1},
+			Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+				{ID: 1, Revision: 1, Kind: scene.KindUser, Source: "alpha\nbeta\n", Phase: scene.CellCommitted},
+			}}),
+		}
+	}
+	state := makeState()
+	want, _, _ := planEligibleHistoryCommitsWithinTimed(state)
+
+	var buf []scene.LayoutRow
+	got, _, _ := planEligibleHistoryCommitsWithinTimedWithBuffer(state, &buf)
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("buffered plan diverged from unbuffered:\nwant: %#v\ngot:  %#v", want, got)
+	}
+	if len(buf) == 0 || cap(buf) == 0 {
+		t.Fatalf("layout rows buffer not populated: len=%d cap=%d", len(buf), cap(buf))
+	}
+	firstPtr := &buf[0]
+
+	state.Transcript.Cells = append(state.Transcript.Cells,
+		scene.TranscriptCell{ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "gamma\n", Phase: scene.CellCommitted})
+	state.Transcript.Revision++
+	want, _, _ = planEligibleHistoryCommitsWithinTimed(state)
+	got, _, _ = planEligibleHistoryCommitsWithinTimedWithBuffer(state, &buf)
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("buffered plan diverged after append:\nwant: %#v\ngot:  %#v", want, got)
+	}
+	if len(buf) == 0 || &buf[0] != firstPtr {
+		t.Fatalf("layout rows backing array was not reused: first=%p second=%p", firstPtr, &buf[0])
+	}
+}

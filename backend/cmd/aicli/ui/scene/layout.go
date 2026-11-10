@@ -48,6 +48,18 @@ type LayoutRow struct {
 // PolicyVersion 由调用方传入（LayoutGeneration 或政策版本），用于
 // BoundaryKey 稳定重算与 handoff 判重。
 func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow {
+	return LayoutTranscriptInto(nil, cells, policyVersion)
+}
+
+// LayoutTranscriptInto 与 LayoutTranscript 输出完全一致，但允许调用方复用
+// 已有的 rows backing array。dst 只作为容量提示：函数返回 dst[:0] 的重新
+// 填充结果；容量不足时才会分配新切片。调用方必须在下一次复用前消费完
+// 返回值（返回值与 dst 共享底层数组）。
+//
+// 生产收益：长会话每有一次 finalized 变化就重排全量语义行，rows 可达数 MB；
+// 旧实现每次 make 一份，pprof 中 LayoutTranscript 累计分配约 24 GB。复用
+// 后每轮只重置长度并覆盖，稳态分配降到 lineSets/字符串切片。
+func LayoutTranscriptInto(dst []LayoutRow, cells []*TranscriptCell, policyVersion uint64) []LayoutRow {
 	// 两遍：先解析每个 cell 的语义行并统计总行数，再一次性分配 rows。
 	// 恢复会话量级（6,719 cells / 146,535 行）下，单遍 append 增长会为
 	// 7.7 MB 的最终切片反复复制（基准实测 ~52 MB/op 分配、其中大半是行切片
@@ -63,7 +75,22 @@ func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow
 		total += len(lines)
 	}
 	// 容量上界：内容行 + 最多 len(cells)-1 个 gap row。
-	rows := make([]LayoutRow, 0, total+len(cells))
+	needed := total + len(cells)
+	rows := dst[:0]
+	previousLen := 0
+	reused := cap(rows) >= needed
+	if reused {
+		previousLen = len(dst)
+	} else {
+		// 预留 12.5% 增长余量：planner 每轮只追加少量 finalized cell，
+		// 精确容量会让下一次 append 立即重分配，复用退化为 O(N) 次拷贝。
+		// 最小 64 行使小 transcript 也能跨多轮复用。
+		capacity := needed + needed/8
+		if capacity < 64 {
+			capacity = 64
+		}
+		rows = make([]LayoutRow, 0, capacity)
+	}
 	index := 0
 	var prev *TranscriptCell
 	for i, c := range cells {
@@ -89,6 +116,11 @@ func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow
 			rows = append(rows, LayoutRow{CellID: c.ID, Text: line, Index: index})
 			index++
 		}
+	}
+	// transcript 收缩（compact/裁剪）时，复用 buffer 的尾部仍会钉住旧行
+	// 字符串；清掉本轮不再覆盖的尾部，避免把已移除 cell 的正文留在活堆里。
+	if reused && len(rows) < previousLen {
+		clear(dst[len(rows):previousLen])
 	}
 	return rows
 }

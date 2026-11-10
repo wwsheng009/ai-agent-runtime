@@ -200,7 +200,9 @@ func (b *chatRuntimeEventBridge) applySceneTrimPolicyLocked() int {
 	// cell（尚未铸提交）一律不可逐出。取连续可逐出前缀，遇到第一个不可逐出 cell
 	// 立即停止（前缀语义，INV-6）。
 	if facts := b.deliveryFacts(); facts.Known {
-		cells := b.renderScene.Cells()
+		// 调用方已持 sceneMu；CellsView 避免每轮裁剪复制 O(cells) 的指针
+		// 切片（生产 pprof 中 TuiScene.Cells 约一半分配来自这里）。
+		cells := b.renderScene.CellsView()
 		evictable := 0
 		for evictable < count {
 			if evictable >= len(cells) || cells[evictable] == nil || !facts.delivered(cells[evictable].ID) {

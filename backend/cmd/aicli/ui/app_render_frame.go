@@ -85,17 +85,25 @@ func ComposeAppRenderFrame(state AppState) AppRenderFrame {
 	}
 	for index, row := range text.Rows {
 		line := appPlainRenderLine(row.Text)
+		sharedTranscriptLine := false
 		switch row.Owner {
 		case renderengine.RowOwnerTranscript:
+			// appTranscriptRenderLine returns the immutable layout-cache line
+			// as-is for structured rows. Everything else it produces is already
+			// a fresh line, so only this case needs a defensive clone.
+			sharedTranscriptLine = len(row.RenderLine.Spans) > 0
 			line = appTranscriptRenderLine(row, transcript)
 		case renderengine.RowOwnerBand, renderengine.RowOwnerStatus:
 			if styled, ok := bottomLines[row.Row]; ok {
 				line = styled
 			}
 		}
+		if sharedTranscriptLine {
+			line = cloneAppRenderLine(line)
+		}
 		frame.Rows[index] = AppRenderRow{
 			Screen: row,
-			Line:   cloneAppRenderLine(line),
+			Line:   line,
 		}
 	}
 	return frame
