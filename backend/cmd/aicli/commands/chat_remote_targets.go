@@ -55,7 +55,8 @@ func loadRemoteTargetsDeclaration(workspace string) (*remoteTargetsDeclaration, 
 //
 // It exists so the startup path can tell "a file that happens to list servers"
 // apart from "this workspace declared the machines it works against". The former
-// degrades to a warning; the latter must fail closed.
+// always degrades to a warning; the latter fails closed in headless/JSON runs and
+// degrades in an interactive TUI (see chatMCPStartupFailsClosed).
 func sessionHasDeclaredRemoteTargets(session *ChatSession) bool {
 	declaration, _ := loadRemoteTargetsDeclaration(chatSessionWorkspaceDir(session))
 	return len(declarationServerNames(declaration)) > 0

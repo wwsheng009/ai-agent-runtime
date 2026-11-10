@@ -165,9 +165,9 @@ func TestLoadRemoteTargetsDeclarationWithoutFile(t *testing.T) {
 	require.Empty(t, warnings)
 }
 
-// TestSessionHasDeclaredRemoteTargets locks the fail-closed trigger used by the
-// startup path: a declared target is something the workspace asked for, so an
-// unreachable one must abort rather than degrade to a warning.
+// TestSessionHasDeclaredRemoteTargets locks the trigger used by the startup path
+// to identify an explicit remote surface. Whether an unreachable one aborts or
+// degrades is decided separately per session mode (headless/JSON versus TUI).
 func TestSessionHasDeclaredRemoteTargets(t *testing.T) {
 	workspace := t.TempDir()
 	writeRemoteTargetsFile(t, workspace, declarationFixture)

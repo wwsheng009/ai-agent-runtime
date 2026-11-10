@@ -334,7 +334,7 @@ func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 			// resolved path is only used for diagnostics at this point.
 			configPath = ""
 		}
-		return initMCPManagerWithRemoteFlag(configPath, resolveChatMCPConfigOverride(cfg, session), chatSessionWorkspaceDir(session), selection, sessionRemoteFlagTarget(session), declaration, true)
+		return initMCPManagerWithRemoteFlag(configPath, resolveChatMCPConfigOverride(cfg, session), chatSessionWorkspaceDir(session), selection, sessionRemoteFlagTarget(session), declaration, true, chatMCPStartupFailsClosed(session))
 	}
 	if !shouldInit {
 		return StopMCPManager()

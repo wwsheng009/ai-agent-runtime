@@ -1190,11 +1190,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_setup.go", Func: "buildChatSession", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "emitChatSandboxWarning", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "finalizeChatSessionWithError", Kind: "fmt.Fprint(os.Std*)", Count: 1},
-		// 能力面按「发现（后台）/ 挂载（主 goroutine）」拆成两个函数后，原
-		// initializeChatCapabilities 的 4 条直写按职责重新归属，总数不变——
-		// 本围栏拦的是「新增直写点」，不是函数名。
-		// 1 = MCP 初始化告警（发现阶段，chat_setup.go:452）。
-		{File: "chat_setup.go", Func: "discoverChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		// 3 = Skills 初始化告警 + cleanup 的 Skills/LSP 停止告警。
 		{File: "chat_setup.go", Func: "attachChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 3},
 		// 退出恢复提示：Interaction.Shutdown 之后的进程退出输出，属 sanctioned

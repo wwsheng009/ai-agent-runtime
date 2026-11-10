@@ -476,21 +476,25 @@ func discoverChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sess
 		useLocalMCP := mcpMode.allowsLocal()
 		if useLocalMCP {
 			if err := prepareChatMCPManager(cfg, session); err != nil {
-				// An MCP failure is normally non-fatal: a broken mcp.yaml should not
-				// prevent a local session from starting. `--remote` is different —
-				// the user named one specific endpoint and asked to work through it,
-				// so continuing without it produces a session that silently cannot do
-				// the job. Fail closed in that case.
+				// An MCP failure is non-fatal in an interactive session: the TUI is
+				// already on screen, and local tools/skills must stay usable when a
+				// remote target is down. The manager keeps its background connect
+				// attempt and reports the concrete failure on its status channel.
 				//
-				// A target declared in remote-targets.yaml carries the same promise:
-				// it is a deliberate statement about which machines this workspace
-				// works against, not a shared file listing servers that may go unused.
-				// Treating an unreachable declaration as a warning let the run print a
-				// normal answer while the tools it was supposed to use were absent.
-				if session.RemoteFlagTarget != nil || sessionHasDeclaredRemoteTargets(session) {
+				// Headless/JSON keeps the fail-closed rule: `--remote` and a
+				// remote-targets.yaml declaration are explicit statements about the
+				// remote surface, so a script must exit non-zero instead of silently
+				// answering without the tools it asked for.
+				failClosed := chatMCPStartupFailsClosed(session)
+				if chatMCPInitFailureIsFatal(session) {
 					return nil, err
 				}
-				fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
+				if !failClosed {
+					// Drop a half-initialized manager so the tool surface is not built
+					// on a manager that failed before StartAsync completed.
+					_ = StopMCPManager()
+				}
+				aicliDiagf("Warning: 初始化 MCP 失败: %v\n", err)
 				logpkg.Warnf("AICLI MCP init failed: %v", err)
 			}
 		} else {

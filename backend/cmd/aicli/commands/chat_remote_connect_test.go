@@ -3,10 +3,14 @@ package commands
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
@@ -102,4 +106,98 @@ func TestVerifyRemoteFlagConnectedWithoutErrorStillFails(t *testing.T) {
 // existing lenient behaviour.
 func TestVerifyRemoteFlagConnectedDefaultsToNil(t *testing.T) {
 	require.NoError(t, verifyRemoteFlagConnected(&statusProbeManager{}, nil))
+}
+
+// TestChatMCPStartupFailsClosed pins the boundary between an interactive TUI
+// and unattended runs: only the TUI may degrade an unreachable explicit target
+// to a warning. A headless/JSON run must keep the fail-closed contract.
+func TestChatMCPStartupFailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		session *ChatSession
+		want    bool
+	}{
+		{name: "nil-session", session: nil, want: true},
+		{name: "headless", session: &ChatSession{NoInteractive: true}, want: true},
+		{name: "json", session: &ChatSession{JSONOutput: true}, want: true},
+		{name: "non-tui", session: &ChatSession{}, want: true},
+		{name: "tui", session: &ChatSession{InteractiveUI: true}, want: false},
+		{name: "tui-with-headless-flag", session: &ChatSession{InteractiveUI: true, NoInteractive: true}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, chatMCPStartupFailsClosed(tc.session))
+		})
+	}
+}
+
+// TestChatMCPInitFailureIsFatal locks the exact branch used by capability
+// discovery: the same explicit target/declaration that is fatal headless must
+// degrade to a warning in the TUI.
+func TestChatMCPInitFailureIsFatal(t *testing.T) {
+	target := &remoteFlagTarget{ServerName: "dead"}
+
+	require.True(t, chatMCPInitFailureIsFatal(&ChatSession{RemoteFlagTarget: target}),
+		"headless --remote failure must stay fatal")
+	require.False(t, chatMCPInitFailureIsFatal(&ChatSession{InteractiveUI: true, RemoteFlagTarget: target}),
+		"TUI --remote failure must degrade")
+	require.False(t, chatMCPInitFailureIsFatal(&ChatSession{InteractiveUI: true}),
+		"TUI without an explicit target never fails closed")
+	require.False(t, chatMCPInitFailureIsFatal(&ChatSession{}),
+		"headless mcp.yaml-only failure stays a warning")
+
+	workspace := t.TempDir()
+	writeRemoteTargetsFile(t, workspace, declarationFixture)
+	tuiDeclaration := &ChatSession{InteractiveUI: true}
+	tuiDeclaration.FolderTrust.ProjectRoot = workspace
+	require.False(t, chatMCPInitFailureIsFatal(tuiDeclaration),
+		"TUI declaration failure must degrade")
+
+	headlessDeclaration := &ChatSession{}
+	headlessDeclaration.FolderTrust.ProjectRoot = workspace
+	require.True(t, chatMCPInitFailureIsFatal(headlessDeclaration),
+		"headless declaration failure must stay fatal")
+}
+
+// TestPrepareChatMCPManager_TUIDoesNotWaitForUnreachableTarget is the regression
+// guard for the reported TUI failure: a dead remote target used to make the
+// background capability load fail after an 8s probe, which then surfaced as
+// "能力面初始化失败" on every turn and blocked the session. In the TUI the
+// manager must start asynchronously, report its own per-server failure, and let
+// capability discovery finish immediately.
+func TestPrepareChatMCPManager_TUIDoesNotWaitForUnreachableTarget(t *testing.T) {
+	isolateProcessMCPManager(t)
+	t.Cleanup(func() { _ = StopMCPManager() })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("MCP_CONFIG_FILE", "")
+	t.Setenv("AICLI_REMOTE_TOKEN", "test-token")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "mcp.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("mcpServers: {}\n"), 0o600))
+
+	target, err := buildRemoteFlagTarget("http://127.0.0.1:1")
+	require.NoError(t, err)
+	require.NotNil(t, target)
+
+	session := &ChatSession{
+		InteractiveUI:    true,
+		RemoteFlagTarget: target,
+	}
+	cfg := &agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			MCP: &agentconfig.AICLIMCPConfig{ConfigFile: configPath},
+		},
+	}
+
+	started := time.Now()
+	err = prepareChatMCPManager(cfg, session)
+	elapsed := time.Since(started)
+
+	require.NoError(t, err, "an unreachable target must not fail TUI capability startup")
+	require.Less(t, elapsed, 3*time.Second, "TUI startup must not run the 8s target probe")
+	require.NotNil(t, MCPManagerInstance, "the manager should still start its background connects")
 }

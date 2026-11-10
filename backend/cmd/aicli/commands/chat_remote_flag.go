@@ -346,7 +346,7 @@ func emitRemoteFlagNotice(target *remoteFlagTarget, added, replaced bool) {
 // because the process-global manager cache is keyed by (configPath, selection,
 // baseDir): a `--remote` session must not reuse a cached manager that was built
 // without the flag, and must not poison the cache for a later plain session.
-func initMCPManagerWithRemoteFlag(configPath, explicitOverride, baseDir string, selection runtimeprofileinput.ResolvedMCPSelection, target *remoteFlagTarget, declaration *remoteTargetsDeclaration, async bool) error {
+func initMCPManagerWithRemoteFlag(configPath, explicitOverride, baseDir string, selection runtimeprofileinput.ResolvedMCPSelection, target *remoteFlagTarget, declaration *remoteTargetsDeclaration, async bool, verifyTargets bool) error {
 	configPath = strings.TrimSpace(configPath)
 	baseDir = strings.TrimSpace(baseDir)
 
@@ -374,6 +374,18 @@ func initMCPManagerWithRemoteFlag(configPath, explicitOverride, baseDir string, 
 		return fmt.Errorf("启动 MCP 失败: %w", err)
 	}
 	wireChatMCPToolSurfaceInvalidation(managerInstance)
+	// verifyTargets is false for an interactive TUI. There, an unreachable MCP
+	// target is a degraded capability, not a startup failure: the main loop must
+	// stay responsive and local tools/skills must remain usable. The manager has
+	// already launched its background connects and reports per-server failures
+	// through its status channel, so skipping this probe loses no diagnostic.
+	//
+	// Headless/JSON runs keep the fail-closed probe below: a script that asked
+	// for a specific remote surface must exit non-zero rather than silently run
+	// without it.
+	if !verifyTargets {
+		return nil
+	}
 	// The flag named a specific endpoint, so a connection failure is NOT a
 	// "configured but unused server" situation — it is the whole point of the
 	// command. Report it now, while the user still associates the run with the
@@ -390,13 +402,39 @@ func initMCPManagerWithRemoteFlag(configPath, explicitOverride, baseDir string, 
 	return nil
 }
 
+// chatMCPStartupFailsClosed reports whether explicit MCP target failures must
+// abort capability startup.
+//
+// Interactive TUI sessions degrade instead: MCP is one capability among local
+// tools and skills, so an unreachable remote target must not turn every first
+// turn into "能力面初始化失败". Headless and JSON runs keep the fail-closed
+// contract so scripts cannot mistake an empty remote surface for success.
+func chatMCPStartupFailsClosed(session *ChatSession) bool {
+	if session == nil {
+		return true
+	}
+	return session.NoInteractive || session.JSONOutput || !session.InteractiveUI
+}
+
+// chatMCPInitFailureIsFatal is the startup-error branch used by capability
+// discovery: only an explicit remote surface can fail closed, and only when the
+// session is not an interactive TUI. A broken shared mcp.yaml stays a warning.
+func chatMCPInitFailureIsFatal(session *ChatSession) bool {
+	if !chatMCPStartupFailsClosed(session) {
+		return false
+	}
+	return session != nil && (session.RemoteFlagTarget != nil || sessionHasDeclaredRemoteTargets(session))
+}
+
 // verifyDeclaredTargetsConnected fails fast when a target generated from the
 // `remoteTargets` declaration cannot be reached.
 //
 // Only declared targets are checked. Ordinary mcp.yaml servers keep the lenient
 // "warn and continue" behaviour: a shared config file lists servers a given session
 // may never need, while a declaration is a deliberate statement about the targets
-// this workspace works against.
+// this workspace works against. Interactive TUI sessions skip this probe entirely;
+// the caller decides whether target failures are fail-closed (headless/JSON) or a
+// background warning (TUI).
 func verifyDeclaredTargetsConnected(mgr manager.Manager, declaration *remoteTargetsDeclaration) error {
 	if mgr == nil || declaration == nil {
 		return nil
