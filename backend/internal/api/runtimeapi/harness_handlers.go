@@ -325,11 +325,12 @@ func (h *Handler) GetHarnessMemory(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace})
+	store, err := h.openMemoryStore(workspace)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	defer store.Close()
 
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
@@ -394,11 +395,12 @@ func (h *Handler) UpdateHarnessMemory(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "text is required"))
 		return
 	}
-	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace})
+	store, err := h.openMemoryStore(workspace)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	defer store.Close()
 	source := strings.TrimSpace(req.Source)
 	if source == "" {
 		source = "settings"

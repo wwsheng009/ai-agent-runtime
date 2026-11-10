@@ -1264,6 +1264,15 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/harness/trust", h.UpdateHarnessTrust).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/memory", h.GetHarnessMemory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/status", h.GetMemoryStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records", h.ListMemoryRecords).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records", h.CreateMemoryRecord).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/records/{id}", h.GetMemoryRecord).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records/{id}", h.PatchMemoryRecord).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/memory/records/{id}", h.DeleteMemoryRecord).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/memory/sessions/{id}/mode", h.SetMemorySessionMode).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/sessions/{id}/context", h.GetMemorySessionContext).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/recall-traces", h.ListMemoryRecallTraces).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/hooks", h.GetHarnessHooks).Methods(http.MethodGet)
@@ -12671,6 +12680,17 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 		return nil
 	}
 	options := make(map[string]interface{})
+	memoryMode := strings.ToLower(strings.TrimSpace(config.Memory.Mode))
+	if memoryMode != "" && memoryMode != "off" {
+		options["memory_mode"] = memoryMode
+		options["memory_manual_enabled"] = config.Memory.Manual.Enabled
+		if strings.TrimSpace(config.Memory.StorePath) != "" {
+			options["memory_store_path"] = strings.TrimSpace(config.Memory.StorePath)
+		}
+		options["memory_injection_enabled"] = config.Memory.Injection.Enabled
+		options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(config.Memory.Injection.Mode))
+		options["memory_pinned_budget_ratio"] = config.Memory.Injection.PinnedBudgetRatio
+	}
 	ctxCfg := config.Context
 	if strings.TrimSpace(ctxCfg.Profile) != "" {
 		options["context_profile"] = strings.TrimSpace(ctxCfg.Profile)
