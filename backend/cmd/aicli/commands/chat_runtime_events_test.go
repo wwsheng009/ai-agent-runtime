@@ -921,6 +921,13 @@ func TestChatRuntimeEventBridge_LLMRequestFinishedFallsBackToEstimateWhenUsageMi
 
 func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToTokenAfter(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
+	// Reproduce the reported incident: a provider-observed structured anchor
+	// from the pre-compaction prompt is still live on the CLI session copy.
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.RuntimeContextAnchorFingerprintKey: "fp-pre-compact",
+		chatRuntimeContextContextTokenCount:            624485,
+		"context_token_count":                          624485,
+	}
 	session := &ChatSession{
 		RuntimeSession:          runtimeSession,
 		TokenCount:              9999,
@@ -952,6 +959,12 @@ func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToToken
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected compact completion to preserve context window token count, got %d", session.ContextWindowTokenCount)
 	}
+	// The status bar reads the anchor first; leaving it intact would keep
+	// showing the pre-compaction ratio (624485/1M = 62%) until the next LLM
+	// response re-anchors.
+	if used, source := resolveChatStatusContextUsedTokensWithSource(session); used != 1200 || source != chatContextUsedSourceSnapshot {
+		t.Fatalf("status bar context after compact = (%d, %q), want (1200, %q)", used, source, chatContextUsedSourceSnapshot)
+	}
 }
 
 func TestChatRuntimeEventBridge_SessionCompactCompletedRestoresRuntimeStateWithoutReentrantDeadlock(t *testing.T) {
@@ -960,6 +973,11 @@ func TestChatRuntimeEventBridge_SessionCompactCompletedRestoresRuntimeStateWitho
 	runtimeSession, err := manager.Create(context.Background(), "tester")
 	if err != nil {
 		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.RuntimeContextAnchorFingerprintKey: "fp-pre-compact",
+		chatRuntimeContextContextTokenCount:            23099,
+		"context_token_count":                          23099,
 	}
 	session := &ChatSession{
 		RuntimeSession:          runtimeSession,
@@ -996,6 +1014,11 @@ func TestChatRuntimeEventBridge_SessionCompactCompletedRestoresRuntimeStateWitho
 	}
 	if session.runtimeSessionUnpersisted {
 		t.Fatal("expected compact completion to restore the runtime session into the CLI session")
+	}
+	// syncRuntimeSessionBackIntoCLI clones the store context map; the anchor
+	// invalidation must survive that restore ordering.
+	if used, source := resolveChatStatusContextUsedTokensWithSource(session); used != 1200 || source != chatContextUsedSourceSnapshot {
+		t.Fatalf("status bar context after compact+sync = (%d, %q), want (1200, %q)", used, source, chatContextUsedSourceSnapshot)
 	}
 }
 
