@@ -1189,31 +1189,77 @@ func looksLikeBingBlockedPage(body string) bool {
 	return false
 }
 
-// parseBingResults 解析 Bing SERP：每个 <li class="b_algo"> 为一个结果，
+// parseBingResults 解析 Bing SERP：每个 <li class="b_algo ..."> 为一个结果。
+// 不能只匹配精确的 class="b_algo"，因为 Bing 会给部分结果附加模板类
+// （如 class="b_algo b_rc_gb_template ..."）；精确匹配会漏掉这类 rich card。
 // 标题取 <h2> 内首个链接文本，摘要取块内首个 <p>（缺失时用标题兜底）。
 func parseBingResults(htmlBody string, count int) []DuckDuckGoResult {
 	results := make([]DuckDuckGoResult, 0)
-	const marker = `class="b_algo"`
 	pos := 0
 	for len(results) < count {
-		algoStart := strings.Index(htmlBody[pos:], marker)
+		algoStart := findBingAlgoBlockStart(htmlBody, pos)
 		if algoStart == -1 {
 			break
 		}
-		algoStart += pos
-		algoEnd := strings.Index(htmlBody[algoStart+len(marker):], marker)
-		if algoEnd == -1 {
-			algoEnd = len(htmlBody)
-		} else {
-			algoEnd += algoStart + len(marker)
+		nextStart := findBingAlgoBlockStart(htmlBody, algoStart+1)
+		algoEnd := len(htmlBody)
+		if nextStart != -1 {
+			algoEnd = nextStart
 		}
 		block := htmlBody[algoStart:algoEnd]
 		if link, ok := extractBingLink(block); ok {
 			results = append(results, link)
 		}
-		pos = algoEnd
+		if nextStart == -1 {
+			break
+		}
+		pos = nextStart
 	}
 	return results
+}
+
+// bingAlgoClassAttrPattern matches a class attribute and captures its value.
+// The leading whitespace/start anchor prevents data-class="..." from matching.
+var bingAlgoClassAttrPattern = regexp.MustCompile(`(?i)(?:^|\s)class\s*=\s*(?:"([^"]*)"|'([^']*)')`)
+
+// findBingAlgoBlockStart returns the start offset of the next <li> whose class
+// attribute contains b_algo as a complete token. Searching for "<li" first also
+// avoids matching the literal string class="b_algo" inside scripts/styles.
+func findBingAlgoBlockStart(htmlBody string, from int) int {
+	for from < len(htmlBody) {
+		rel := strings.Index(htmlBody[from:], "<li")
+		if rel < 0 {
+			return -1
+		}
+		start := from + rel
+		tagEndRel := strings.IndexByte(htmlBody[start:], '>')
+		if tagEndRel < 0 {
+			return -1
+		}
+		tagEnd := start + tagEndRel
+		if bingAlgoClassInTag(htmlBody[start : tagEnd+1]) {
+			return start
+		}
+		from = tagEnd + 1
+	}
+	return -1
+}
+
+// bingAlgoClassInTag reports whether one HTML start tag carries b_algo as a
+// complete class token (not a substring such as b_algo_border).
+func bingAlgoClassInTag(tag string) bool {
+	for _, match := range bingAlgoClassAttrPattern.FindAllStringSubmatch(tag, -1) {
+		value := match[1]
+		if value == "" {
+			value = match[2]
+		}
+		for _, token := range strings.Fields(value) {
+			if strings.EqualFold(token, "b_algo") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractBingLink 从单个 b_algo 块提取标题、链接和摘要。

@@ -366,6 +366,37 @@ func TestWebSearchTool_BingParsesResultsAndDecodesRedirect(t *testing.T) {
 	}
 }
 
+func TestParseBingResultsIncludesRichCardWithExtraClasses(t *testing.T) {
+	body := `<ol id="b_results">` +
+		`<li class="b_algo b_rc_gb_template b_rc_gb_template_bg_1">` +
+		`<h2><a href="https://github.com/liamcain/obsidian-periodic-notes" h="ID=SERP,1.1">GitHub - liamcain/obsidian-periodic-notes</a></h2>` +
+		`<div class="b_caption"><p>Periodic Notes plugin</p></div></li>` +
+		`<li class="b_algo"><h2><a href="https://example.com/next">Next result</a></h2><p>Next snippet</p></li>` +
+		`</ol>`
+
+	results := parseBingResults(body, 10)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d: %#v", len(results), results)
+	}
+	if results[0].Title != "GitHub - liamcain/obsidian-periodic-notes" ||
+		results[0].URL != "https://github.com/liamcain/obsidian-periodic-notes" {
+		t.Fatalf("rich card result not parsed first: %#v", results[0])
+	}
+	if results[1].Title != "Next result" {
+		t.Fatalf("second result mismatch: %#v", results[1])
+	}
+}
+
+func TestParseBingResultsIgnoresAlgoLiteralOutsideListItems(t *testing.T) {
+	body := `<script>const marker = 'class="b_algo"';</script>` +
+		`<ol><li class="b_algo"><h2><a href="https://example.com/">Real</a></h2></li></ol>`
+
+	results := parseBingResults(body, 10)
+	if len(results) != 1 || results[0].Title != "Real" {
+		t.Fatalf("expected only the real list item, got %#v", results)
+	}
+}
+
 func TestWebSearchTool_DefaultChainFallsBackToDDG(t *testing.T) {
 	// 默认链 bing(www 英文版) → duckduckgo → bing_cn：Bing 失败时由
 	// DuckDuckGo 二级备份接管，且不先行触达 cn.bing.com。
