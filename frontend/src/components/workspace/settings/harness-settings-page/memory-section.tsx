@@ -12,6 +12,7 @@ import { editorControlClassName } from "../editor-control-class";
 import { SettingsEmptyState } from "../settings-empty-state";
 import { SettingsPanelCard } from "../settings-panel-card";
 import { SettingsSection } from "../settings-section";
+import { MemoryV2Panel } from "./memory-v2-panel";
 
 export function HarnessMemorySection({
   actionPending,
@@ -112,6 +113,8 @@ export function HarnessMemorySection({
               </Button>
             </div>
           </SettingsPanelCard>
+
+          <MemoryV2Panel t={t} workspacePath={workspacePath} />
 
           {memoryNotes.length > 0 ? (
             <div className="space-y-2">

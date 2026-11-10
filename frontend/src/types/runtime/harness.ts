@@ -99,6 +99,99 @@ export type RuntimeHarnessMemoryAppendRequest = {
   session_id?: string;
 };
 
+export type RuntimeMemoryStatus = {
+  workspace_path: string;
+  mode: string;
+  scope: string;
+  db_path?: string;
+  schema_version: number;
+  total: number;
+  by_status?: Record<string, number>;
+  by_freshness?: Record<string, number>;
+  summary_revision?: number;
+  summary_status?: string;
+  summary_freshness?: string;
+  pinned_count?: number;
+  pinned_budget_ratio?: number;
+  injection_mode?: string;
+  jobs?: Record<string, number>;
+  fallback: boolean;
+  fallback_reason?: string;
+};
+
+export type RuntimeMemoryRecord = {
+  id: string;
+  scope: string;
+  kind: string;
+  status: string;
+  text: string;
+  tags?: string[];
+  confidence?: number;
+  pinned: boolean;
+  retention_class?: string;
+  source_kind: string;
+  source_session_id?: string;
+  source_turn_id?: string;
+  source_refs?: string[];
+  revision: number;
+  created_at?: string;
+  updated_at?: string;
+  last_used_at?: string;
+  use_count?: number;
+  valid_until?: string;
+  freshness_status: string;
+  last_verified_at?: string;
+  revalidate_after?: string;
+  stale_reason?: string;
+};
+
+export type RuntimeMemoryRecordsResponse = {
+  workspace_path: string;
+  items: RuntimeMemoryRecord[];
+  count: number;
+  next_cursor?: string;
+};
+
+export type RuntimeMemorySummary = {
+  id: string;
+  scope: string;
+  project_key: string;
+  summary_kind: string;
+  revision: number;
+  status: string;
+  freshness_status: string;
+  text: string;
+  token_estimate: number;
+  source_count: number;
+  input_watermark?: string;
+  generated_at: string;
+  model?: string;
+  content_hash?: string;
+  record_ids?: string[];
+};
+
+export type RuntimeMemorySummariesResponse = {
+  workspace_path: string;
+  items: RuntimeMemorySummary[];
+  count: number;
+};
+
+export type RuntimeMemoryUsage = {
+  id: string;
+  memory_id: string;
+  session_id: string;
+  turn_id?: string;
+  message_id?: string;
+  used_at: string;
+  use_kind: "cited" | "read" | "injected_only";
+};
+
+export type RuntimeMemoryUsageResponse = {
+  workspace_path: string;
+  items: RuntimeMemoryUsage[];
+  count: number;
+};
+
 export type RuntimeHarnessPlugin = {
   id: string;
   name: string;

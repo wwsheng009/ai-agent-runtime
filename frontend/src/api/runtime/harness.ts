@@ -5,6 +5,11 @@ import type {
   RuntimeHarnessHookUpdateRequest,
   RuntimeHarnessMemoryAppendRequest,
   RuntimeHarnessMemoryResponse,
+  RuntimeMemoryRecord,
+  RuntimeMemoryRecordsResponse,
+  RuntimeMemoryStatus,
+  RuntimeMemorySummariesResponse,
+  RuntimeMemoryUsageResponse,
   RuntimeHarnessPermissionsResponse,
   RuntimeHarnessPluginsResponse,
   RuntimeHarnessPluginUpdateRequest,
@@ -16,6 +21,17 @@ import {
   buildRuntimeUrlWithQuery,
   fetchRuntimeJson,
 } from "./shared";
+import { readAdminToken } from "@/lib/admin-token";
+
+function withMemoryAdminHeaders(
+  headers: Record<string, string> = {},
+): Record<string, string> {
+  const token = readAdminToken();
+  if (token) {
+    headers["X-Skills-Admin-Token"] = token;
+  }
+  return headers;
+}
 
 function withWorkspacePath(
   pathname: string,
@@ -157,6 +173,132 @@ export async function appendHarnessMemory(
       }),
     },
   );
+}
+
+export async function getMemoryStatus(
+  workspacePath?: string,
+): Promise<RuntimeMemoryStatus> {
+  return fetchRuntimeJson<RuntimeMemoryStatus>(
+    withWorkspacePath("/api/runtime/memory/status", workspacePath),
+    { headers: { Accept: "application/json" } },
+  );
+}
+
+export async function getMemoryRecords(
+  workspacePath?: string,
+  query?: { status?: string; kind?: string; q?: string; limit?: number },
+): Promise<RuntimeMemoryRecordsResponse> {
+  return fetchRuntimeJson<RuntimeMemoryRecordsResponse>(
+    withWorkspacePath("/api/runtime/memory/records", workspacePath, {
+      status: query?.status,
+      kind: query?.kind,
+      q: query?.q,
+      limit: query?.limit,
+    }),
+    { headers: { Accept: "application/json" } },
+  );
+}
+
+export async function getMemorySummaries(
+  workspacePath?: string,
+  limit = 20,
+): Promise<RuntimeMemorySummariesResponse> {
+  return fetchRuntimeJson<RuntimeMemorySummariesResponse>(
+    withWorkspacePath("/api/runtime/memory/summaries", workspacePath, { limit }),
+    { headers: { Accept: "application/json" } },
+  );
+}
+
+export async function getMemoryUsage(
+  workspacePath?: string,
+  query?: { memory_id?: string; session_id?: string; use_kind?: string; limit?: number },
+): Promise<RuntimeMemoryUsageResponse> {
+  return fetchRuntimeJson<RuntimeMemoryUsageResponse>(
+    withWorkspacePath("/api/runtime/memory/usage", workspacePath, {
+      memory_id: query?.memory_id,
+      session_id: query?.session_id,
+      use_kind: query?.use_kind,
+      limit: query?.limit,
+    }),
+    { headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function rebuildMemorySummaries(
+  workspacePath?: string,
+): Promise<{ workspace_path: string; rebuilt: number; revision?: number }> {
+  return fetchRuntimeJson(
+    withWorkspacePath("/api/runtime/memory/summaries/rebuild", workspacePath),
+    {
+      method: "POST",
+      headers: withMemoryAdminHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
+      body: JSON.stringify({ workspace_path: workspacePath }),
+    },
+  );
+}
+
+export async function revalidateMemoryRecord(
+  recordId: string,
+  workspacePath?: string,
+): Promise<RuntimeMemoryRecord> {
+  return fetchRuntimeJson<RuntimeMemoryRecord>(
+    withWorkspacePath(
+      `/api/runtime/memory/records/${encodeURIComponent(recordId)}/revalidate`,
+      workspacePath,
+    ),
+    { method: "POST", headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function restoreMemoryRecord(
+  recordId: string,
+  workspacePath?: string,
+): Promise<RuntimeMemoryRecord> {
+  return fetchRuntimeJson<RuntimeMemoryRecord>(
+    withWorkspacePath(
+      `/api/runtime/memory/records/${encodeURIComponent(recordId)}/restore`,
+      workspacePath,
+    ),
+    { method: "POST", headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function deleteMemoryRecord(
+  recordId: string,
+  workspacePath?: string,
+): Promise<{ ok: boolean }> {
+  return fetchRuntimeJson(
+    withWorkspacePath(
+      `/api/runtime/memory/records/${encodeURIComponent(recordId)}`,
+      workspacePath,
+    ),
+    { method: "DELETE", headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function correctMemoryRecord(
+  recordId: string,
+  text: string,
+  workspacePath?: string,
+): Promise<RuntimeMemoryRecord> {
+  return fetchRuntimeJson<RuntimeMemoryRecord>(
+    withWorkspacePath(
+      `/api/runtime/memory/records/${encodeURIComponent(recordId)}`,
+      workspacePath,
+    ),
+    {
+      method: "PATCH",
+      headers: withMemoryAdminHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
+      body: JSON.stringify({ text, workspace_path: workspacePath }),
+    },
+  );
+}
+
+export function memoryExportUrl(
+  workspacePath: string,
+  format: "jsonl" | "markdown",
+): string {
+  return withWorkspacePath("/api/runtime/memory/export", workspacePath, { format });
 }
 
 export async function getHarnessPlugins(
