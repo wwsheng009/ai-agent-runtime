@@ -32,6 +32,10 @@
 | [09-memory-horizons-recall-and-budget.md](./09-memory-horizons-recall-and-budget.md) | 短期/长期/工作区/全局记忆、召回漏斗、Token 预算与可观测性 | 完成 |
 | [10-nuphus-deepseek-harness-memory-comparison.md](./10-nuphus-deepseek-harness-memory-comparison.md) | Nuphus / DeepSeek Harness / ai-memory 记忆能力对比与借鉴清单 | 完成 |
 | [11-fact-ledger-convergence-decision.md](./11-fact-ledger-convergence-decision.md) | Fact Ledger 收敛决策记录：过程产物/结论切分、实测证据、停止投入理由与重启条件 | **已执行**（本目录其余文档为方案基线） |
+| [12-hermes-agent-memory-system-analysis.md](./12-hermes-agent-memory-system-analysis.md) | Hermes Agent 记忆系统架构与实现分析：短期压缩、内置长期记忆、外部 Provider、会话检索与借鉴边界 | 完成（外部方案分析，Docs Only） |
+| [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已按 P0 修订并回写 03/04/05/06/09；Docs Only，待实施） |
+
+> `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
 
 ## 3. 核心结论
 

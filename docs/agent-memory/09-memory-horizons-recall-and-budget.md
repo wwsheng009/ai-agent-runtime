@@ -3,6 +3,7 @@
 > 状态：设计补充（Memory Horizon / Recall / Budget Contract）  
 > 目的：明确短期记忆、长期记忆、workspace/project 记录、user/global 记录、召回逻辑、token 控制和观测口径。  
 > 本文是 `03-target-architecture.md` 与 `04-data-model-and-api.md` 的补充契约。
+> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 pinned 预算、stable/recall 分离、summary invalidation、injected_only exposure。
 
 ## 1. 结论
 
@@ -210,7 +211,8 @@ L2 project active
 - `stale`：默认排除并记录 `dropped_reason=stale`；`warn` 模式仅允许低风险 kind 注入，且必须标记 `possibly stale`；
 - `expired/deleted/suppressed`：永不进入普通候选；
 - `valid_until < now` 直接按 expired 处理；
-- summary 还必须通过 `input_watermark + memory_summary_items freshness` 门禁；
+- summary 还必须通过 `input_watermark + memory_summary_items` 门禁：`status=active`、`freshness_status=fresh`、items 与 `record_ids_json` 的预期集合完整一致（items 为权威内容，`record_ids_json` 为快照校验；`source_count` 仅辅助）、所有 items 仍为 `active+fresh`，且不含 `deleted/suppressed/expired`；
+- summary item 发生 `delete/correct/supersede/expire/stale` 时，包含它的 revision 必须 `stale/superseded`；下一次读不得注入旧 summary；
 - 高风险事实（路径、API、版本、配置）只作为 pointer，回答前回源读取。
 
 ### 5.4 候选生成
@@ -279,6 +281,8 @@ score =
 
 读取路径不允许同步调用 LLM。查询构造、过滤、排序和预算装配均为本地确定性步骤；LLM 只用于离线抽取和 Consolidation。
 
+读取使用反馈：`cited/read` 增加 `use_count`；`injected_only` 只记 exposure/`last_injected_at`，不增加 `use_count`。citation 解析失败时仍写 `injected_only`，避免零反馈；retention 可参考 `last_used_at` 或 `last_injected_at`。
+
 ## 6. Token 控制
 
 必须同时控制三类预算：
@@ -328,11 +332,13 @@ mandatory_prompt_tokens =
 
 - `memory_budget` 不是额外增加总 prompt，而是总预算内的子预算；
 - mandatory layers 先满足；剩余不足时 memory 降至 0；
-- `summary` 模式：summary 独占 memory_budget；
-- `hybrid` 模式：summary <= 60%，records <= 40%；
-- `notes` 模式：records 独占；
+- `pinned_budget = memory_budget × config.memory.injection.pinnedBudgetRatio`；pinned/manual 优先于 summary/records；
+- `summary` 模式：summary ≤ 80%，pinned/manual ≥ 20%；无 pinned 时 summary 用剩余预算；
+- `hybrid` 模式：summary ≤ 50%，pinned/manual ≥ 20%，query records ≤ 30%；
+- `notes` 模式：pinned/manual ≥ 20%，notes ≤ 80%；
+- summary 与 pinned 必须去重：pinned 单独渲染，summary 不重复包含；
 - 超预算时按排序从低到高丢弃；单条超预算时截断正文，但保留 id/kind/tags/source 摘要；
-- 每个逻辑 turn 只注入一次，保持 prompt cache 稳定；
+- 每个逻辑 turn 只注入一组 memory（stable + recall）；稳定 `project_memory`（summary + pinned）与末尾 `project_memory_recall`（query records）分离，保持 prompt cache 稳定；
 - 估算使用 `internal/tokenestimate`，并保留 10-15% 安全余量；
 - provider 返回 usage 时用于事后校准，不改变本轮已经形成的稳定前缀。
 

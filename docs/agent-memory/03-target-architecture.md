@@ -3,6 +3,7 @@
 > 状态：目标方案  
 > 适用范围：`aicli`、`runtime-server`、Web/TUI、ACP 共享的 runtime memory 子系统  
 > 核心约束：不破坏现有 context 装配、prompt cache、工具权限和 SQLite 生命周期。
+> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、stable/recall stage split、pinned 预算、summary invalidation、冲突优先级。
 
 ## 1. 目标
 
@@ -245,13 +246,14 @@ polluted   因外部上下文/MCP/敏感来源被标记，不参与自动生成
 
 ### 7.1 触发方式
 
-支持三种触发：
+支持四种触发：
 
 1. **session-end**：会话正常结束/关闭后触发；
 2. **idle**：会话超过阈值无活动，由 runtime-server 或 CLI 后台任务扫描；
-3. **manual**：用户执行 `/memory extract` 或 API 显式请求。
+3. **both**：idle + session-end 兜底；长 gateway/CLI 混合场景推荐；
+4. **manual**：用户执行 `/memory extract` 或 API 显式请求。
 
-第一版默认只启用 idle/session-end 的后台任务，不在对话请求中同步提取。
+第一版推荐 `both`（至少启用 idle 或 session-end 之一），不在对话请求中同步提取。
 
 建议接入点：
 
@@ -342,6 +344,25 @@ Consolidation 不应：
 - `manual` 优先级高于 `derived`，除非用户明确纠正；
 - `correction` 必须覆盖旧 claim 并保留旧版本审计。
 
+冲突键与优先级：
+
+```text
+conflict_key = (scope, project_key, kind, normalized_subject)
+
+user correction
+  > manual + pinned
+  > manual
+  > verified fact
+  > derived high-confidence
+  > derived low-confidence candidate
+  > stale / expired
+```
+
+- 高优先级覆盖低优先级时写 `supersedes_id` + `memory_events`；
+- `pinned/manual` 不被自动冲突消解删除，只能由用户显式修改；
+- 无法判定的同优先级冲突保留两条并标记 `open_question`，不自动合并；
+- summary 只纳入 `active + fresh` 的记录，被 supersede 的记录不进入新 revision。
+
 ### 7.5 新鲜度与失效
 
 记忆是历史证据，不是当前真值。系统必须能证明“这条记忆最近是否被验证过”，并保证已知 stale 的内容不会静默注入。
@@ -364,7 +385,8 @@ revalidate_after 到期
 - 默认只注入 `fresh`；`unverified` 仅 manual/显式允许时注入；
 - `valid_until` 到期直接按 `expired` 处理，不进入普通注入；
 - 高风险事实（代码路径、API、版本、端口、配置）只存 `source_ref`，回答前回源读取；
-- summary 注入前必须通过 `input_watermark + memory_summary_items freshness` 门禁；
+- summary 注入前必须通过 `input_watermark + memory_summary_items` 门禁：`status=active`、`freshness_status=fresh`、items 与 `record_ids_json` 的预期集合完整一致（items 为权威内容，`record_ids_json` 为快照校验）、所有 items 仍为 `active+fresh`，且不含 `deleted/suppressed/expired`；
+- 任一 summary item 发生 `delete/correct/supersede/expire/stale` 时，包含它的 summary revision 必须标记 `stale/superseded`，并触发 `summary_rebuild`；下一次读不得注入旧 summary；
 - stale summary 不得静默注入；重建失败时回退到 fresh records 或 `notes`；
 - `why-not` 必须能解释 `stale/expired/suppressed/budget` 等丢弃原因。
 
@@ -425,15 +447,15 @@ v1 文本匹配使用关键词/FTS；无 FTS 时回退 LIKE + token overlap。
 
 ### 8.2.1 Token 预算拆分
 
-`tokenBudget` 必须覆盖整个 project_memory block，而不是每条记录各自无限预算：
+`tokenBudget` 必须覆盖 stable `project_memory` + tail `project_memory_recall` 的合计，而不是每条记录各自无限预算：
 
 | 模式 | 预算分配 |
 | --- | --- |
-| `summary` | summary 独占全部预算 |
-| `hybrid` | summary <= 60%，records <= 40%；无 summary 时 records 独占 |
-| `notes` | records 独占全部预算 |
+| `summary` | summary ≤ 80%，pinned/manual ≥ 20%；无 pinned 时 summary 用剩余预算 |
+| `hybrid` | summary ≤ 50%，pinned/manual ≥ 20%，query records ≤ 30% |
+| `notes` | pinned/manual ≥ 20%，notes ≤ 80%；无 pinned 时 notes 独占 |
 
-如果 summary 已超预算：先截断/重编译，不允许记录再超额；如果单条记录超预算：截断正文并保留 id/source 摘要。
+`pinned_budget = memory_budget × config.memory.injection.pinnedBudgetRatio`，pinned/manual 优先于 summary/records。如果 summary 已超预算：先截断/重编译，不允许记录再超额；如果单条记录超预算：截断正文并保留 id/source 摘要。summary 与 pinned 必须去重，pinned 单独渲染。
 
 `summary` 模式的 progressive disclosure 依赖只读 `memory_search`/`memory_read` 工具；工具关闭时仍可用，但 summary 必须自足，且应在状态面标注“无检索工具”。
 
@@ -449,18 +471,21 @@ raw history
 fact_ledger
 observation
 recall
-project_memory（v2）
+project_memory（v2：stable summary + pinned/manual）
 workspace
 team
 knowledge
 todos
+project_memory_recall（v2：query-specific records，可选/最后）
 ```
 
 具体规则：
 
 - 保持 stage 名 `project_memory` 以兼容现有 suppression 逻辑；
-- metadata 增加 `memory_version=2`、`memory_revision`、`memory_ids`；
-- 每个逻辑 turn 最多注入一次；
+- `project_memory` 只放稳定块（summary + pinned/manual），只在 turn 边界/revision/pinned 集合变化时更新；
+- `project_memory_recall` 放 query-specific top-k，仅 `hybrid`/`notes` 模式使用，放在所有稳定 stage 之后；若暂不新增 stage，则必须作为 `project_memory` 的尾部子块，并保持在 `todos` 之后；
+- metadata 增加 `memory_version=2`、`memory_revision`、`memory_ids`、`memory_block_kind=stable|recall`；
+- 每个逻辑 turn 最多一组 memory 注入（stable + recall）；
 - `activeTurnHasReplay` 或本 turn 已有 stage 时抑制重复；
 - 不把动态记忆放在 raw history 之前；
 - 不因记忆变化改写 system/profile 前缀。
@@ -568,21 +593,25 @@ Project durable memory (cross-session historical context):
 
 1. 稳定前缀不因 memory 变化而改写；
 2. 动态 memory 只在 raw history 后；
-3. 同一 turn 不重复追加 memory；
-4. 摘要 revision 只在新的 turn 边界切换；
-5. 记忆注入不改变 tool surface；
-6. memory 内容不进入 system prompt；
-7. 记忆内容明确标记为历史数据，不当作权限或命令。
+3. 稳定 `project_memory`（summary + pinned/manual）与末尾 `project_memory_recall`（query-specific）分离；
+4. 同一 turn 不重复追加 memory；
+5. 稳定块只在 revision/pinned 集合变化时改写；query recall 只影响最后一段；
+6. summary item 变更必须先使旧 summary `stale/superseded`，下一次读不得注入；
+7. pinned/manual 有独立预算，不因 summary 满而被挤掉；
+8. 摘要 revision 只在新的 turn 边界切换；
+9. 记忆注入不改变 tool surface；
+10. memory 内容不进入 system prompt；
+11. 记忆内容明确标记为历史数据，不当作权限或命令。
 
 ## 12. 设计后的最小闭环
 
 ```text
 用户/会话事实
   → memory_entries + sources
-  → summary revision
-  → contextmgr 动态尾部注入
-  → Agent 使用并引用
-  → memory_usage
+  → summary revision（item 变更 → stale/superseded + summary_rebuild）
+  → contextmgr stable project_memory + tail project_memory_recall
+  → Agent 使用/引用/读取
+  → memory_usage（cited/read/injected_only）
   → 下一轮排序 / Consolidation
 ```
 

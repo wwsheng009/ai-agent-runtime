@@ -3,6 +3,7 @@
 > 状态：验收基线（阈值在 M0 校准）  
 > 原则：先建立基线，再设定阈值；所有数字必须能由当前代码路径、测试或真实会话证据复现。  
 > 本文件中的“暂定阈值”在 M0 基线完成后由 owner 校准。
+> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 增加 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、injected_only exposure 验收。
 
 ## 1. 验证目标
 
@@ -85,6 +86,8 @@ E2E / live
 | correction | 新 revision 生效，旧记录 superseded，审计事件存在 |
 | pinned manual | 自动 Consolidation 不 supersede/merge/delete |
 | summary revision | `memory_summary_items` 与 summary revision 一致 |
+| summary item 变更 | entry delete/correct/supersede/expire/stale 后 summary 变 stale/superseded；旧 summary 不注入 |
+| summary 完整性 | items 与 `record_ids_json` 预期集合一致；物理清理缺失时 gate 拒绝 |
 | expired | 过期记录不注入 |
 | scope 过滤 | project/user/profile 不串数据 |
 | 标签过滤 | AND 语义 |
@@ -93,7 +96,9 @@ E2E / live
 | 零结果 | 返回过滤/分词命中诊断，不只返回空 |
 | FTS 不可用 | LIKE fallback 结果语义一致 |
 | token budget | 不超预算；至少允许一条截断策略需固定 |
-| usage 排序 | cited 只增加被引用记录 |
+| usage 排序 | cited/read 只增加被引用/读取记录；injected_only 不计入 use_count |
+| pinned 预算 | summary 模式下 pinned/manual 下一轮可见；不被 summary 挤掉 |
+| exposure | injected_only 只记 exposure，不计入 use_count |
 
 ### 3.3 上下文注入与 prompt cache
 
@@ -101,10 +106,13 @@ E2E / live
 
 - 记忆只出现在 raw history 之后；
 - system/profile/ledger 前缀不被改写；
-- `project_memory` stage 已存在时不重复追加；
+- stable `project_memory` 与 tail `project_memory_recall` 分离；`project_memory` 只放 summary + pinned/manual；
+- `project_memory` 已存在时不重复追加；每个 turn 最多一组 memory 注入；
 - active-turn replay 时抑制；
 - `off` 时 v2 不新增/不改变消息列表；手工 memory 与基线一致；
 - summary 切换只发生在新 turn；
+- pinned/manual 有独立预算，summary 满时仍可见；
+- summary item 变更会使旧 revision 失效，下一次读不注入；
 - tool surface 不变；
 - compact 后仍在动态尾部；
 - resume 后不重复注入旧 memory block。
@@ -115,6 +123,10 @@ E2E / live
 - `TestBuildDoesNotPrependProjectMemory`
 - `TestBuildProjectMemorySuppressedOnActiveReplay`
 - `TestBuildProjectMemorySnapshotStableAcrossSteps`
+- `TestBuildProjectMemoryStableAndRecallSplit`
+- `TestBuildProjectMemoryPinnedVisibleInSummaryMode`
+- `TestBuildProjectMemorySummaryInvalidatedOnItemMutation`
+- `TestBuildProjectMemorySummaryGateRejectsMissingItems`
 - `TestBuildMemoryOffByteIdentical`
 - `TestBuildSummaryRevisionOnlyChangesAtTurnBoundary`
 
@@ -142,25 +154,32 @@ E2E / live
 | 无 candidate | 不生成新 summary |
 | 重复记录 | 合并 sources，不重复注入 |
 | 冲突记录 | 新记录 supersede 旧记录，旧记录不可注入 |
+| 冲突优先级 | correction > manual+pinned > manual > verified fact > derived；无法判定保留 open_question |
 | 用户 correction | 优先于自动记录 |
 | summary 生成失败 | 保留旧 revision |
+| summary item 变更 | 包含它的 revision stale/superseded；入队 summary_rebuild |
+| summary gate 完整性 | items 与 record_ids_json 预期集合一致；缺失/ stale 拒绝注入 |
 | summary 超预算 | 截断/压缩并记录 |
 | manual note | 不被自动删除 |
 | reset | 记录与汇总清理，但源会话不动 |
 | 两个进程同时 Consolidate | 单写者锁生效 |
 | 汇总使用的记录 | 由 `memory_summary_items` 可重建 |
+| pinned 预算 | summary 模式下 pinned/manual 不被挤掉 |
 
 ### 3.6 引用与 usage
 
 | 场景 | 预期 |
 | --- | --- |
 | 无 citation | 不增加 cited 计数 |
+| 无 citation 但有注入 | 写 injected_only exposure，不增加 use_count |
 | 合法 citation | 增加 cited，记录 session/turn |
 | 非法/不存在 id | 记录错误指标，不阻断回答 |
+| citation 解析失败 | 仍为注入集合写 injected_only；不增加 use_count |
 | 本 turn 未注入/未读取的 id | 记为 invalid，不增加 usage |
 | citation 在输出流中 | 不泄漏到最终可见正文 |
 | 记忆被删除 | 旧 citation 保留审计，但后续不注入 |
 | 读取工具使用 | 记录 read，不等同于 cited |
+| retention | 可按 last_used_at 或 last_injected_at；pinned/manual 不受普通 retention |
 | 用户说“忘掉” | 只有显式命令/受权管理 API 可删除；不产生自动删除 |
 | 用户说“记住” | 工具可用时写 manual；工具不可用时提示命令 |
 
@@ -172,6 +191,7 @@ E2E / live
 - delete/reset 确认；
 - `/memory add/list/search/status` 不回归；
 - `/memory show/why/why-not/correct/forget/export` 有正/负向测试；
+- summary status/rebuild、pinned 预算、injected_only exposure 可查询；
 - 子 agent 无写权限。
 - delete/restore/reset/session mode 需要授权，不能只凭 workspace_path。
 
@@ -295,14 +315,19 @@ scripts/test-agent-memory-e2e.ps1
 | `memory_summary_revision` | 当前摘要版本 |
 | `memory_injection_count` | 注入记录数 |
 | `memory_injection_tokens` | 注入 token |
+| `memory_injection_stable_tokens` / `memory_injection_recall_tokens` | stable/recall 分账 |
+| `memory_pinned_budget_used` | pinned/manual 预算占用 |
 | `memory_citations` | 被引用次数 |
 | `memory_reads` | 工具读取次数 |
+| `memory_injected_only` | exposure 次数 |
 | `memory_deleted` | 用户删除数 |
 | `memory_cross_scope_denied` | 越界访问拦截数 |
 | `memory_redaction_drops` | 脱敏丢弃数 |
 | `memory_freshness_status_total` | fresh/stale/unverified 数量 |
 | `memory_revalidate_total` | 回源校验成功/失败 |
 | `memory_stale_summary_blocked_total` | stale summary 被阻止注入次数 |
+| `memory_summary_rebuild_total` | summary rebuild 次数/失败率 |
+| `memory_cache_hit_ratio` | memory stage 相关 cache 命中（若 provider 提供） |
 
 ### 6.2 性能指标
 
@@ -310,6 +335,9 @@ scripts/test-agent-memory-e2e.ps1
 | --- | --- |
 | 正常对话额外延迟 | 0（读取只做本地短查询） |
 | 注入 token p95 | <= 配置预算；默认 <= 600 |
+| stable/recall token 分账 | stable 不随 query 变化；query recall 只影响最后一段 |
+| non-memory prompt 前缀变化 | = 0（除真实模型/工具/压缩变化） |
+| memory stage cache 命中 | 稳定 revision 下 stable 块命中；query recall 允许尾部 miss |
 | 记忆检索 p95 | 暂定 < 20ms（本地 SQLite） |
 | Phase 1 单会话耗时 | 仅后台；有上限 |
 | Phase 2 单项目耗时 | 有 lease/超时；不阻塞聊天 |
@@ -330,6 +358,10 @@ scripts/test-agent-memory-e2e.ps1
 - 过期/矛盾记忆数量；
 - stale/unverified 记录比例、revalidation 成功/失败；
 - stale summary 被阻止注入次数；
+- summary item 变更次数 / `summary_rebuild` 成功/失败；
+- `injected_only` exposure 与 cited/read 比例；
+- pinned 预算占用与 pinned 可见性；
+- stable/recall token 占比与 cache 命中；
 - secret/敏感数据命中数（目标必须为 0）。
 
 **暂定门禁（M0 后校准）：**
@@ -341,7 +373,9 @@ scripts/test-agent-memory-e2e.ps1
 - prompt prefix 变化 = 0（非 memory stage）；
 - 注入 token 超预算 = 0；
 - 删除后再次注入 = 0；
-- 同一 source 重复提取 = 0。
+- 同一 source 重复提取 = 0；
+- summary item 变更后旧 summary 注入 = 0；
+- pinned/manual 在 summary 模式下不可见 = 0；
 
 > 这些不是最终产品阈值；不得在没有 shadow 数据时把它们写成硬编码常量。
 
@@ -428,11 +462,13 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 - [ ] `freshness_status`/`last_verified_at`/`revalidate_after` 持久化正确；stale 默认不注入；
 - [ ] `valid_until` 到期按 expired 处理；
 - [ ] 注入仅在 dynamic tail；`project_memory` 不重复追加；compact/resume 后不重复注入；
-- [ ] memory budget 被总 prompt 预算 clamp；单 turn 最多一个 memory block。
+- [ ] stable `project_memory`（summary + pinned/manual）与 tail `project_memory_recall` 分离；每 turn 最多一组注入；
+- [ ] memory budget 被总 prompt 预算 clamp；pinned/manual 有独立预算且下一轮可见；
+- [ ] summary gate 拒绝缺失/ stale item；summary item 变更会使旧 summary 失效。
 
-**量化门槛：** notes 迁移丢失 = 0；跨 scope 泄漏 = 0；prompt 前缀变化 = 0；本地检索 p95 暂定 < 20ms（M0 校准）。
+**量化门槛：** notes 迁移丢失 = 0；跨 scope 泄漏 = 0；non-memory prompt 前缀变化 = 0；pinned 不可见 = 0；summary item 变更后旧 summary 注入 = 0；本地检索 p95 暂定 < 20ms（M0 校准）。
 
-**证据：** 迁移报告、基线 diff、scope/删除/freshness/cache 测试、SQLite busy 测试、回滚到 `notes` 的记录。
+**证据：** 迁移报告、基线 diff、scope/删除/freshness/cache/summary gate 测试、SQLite busy 测试、回滚到 `notes` 的记录。
 
 ### 8.3 M2：Phase 1 会话提取
 
@@ -440,6 +476,7 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 
 - [ ] 自动抽取只写 `candidate`，不写 `active`；`shadow` 只记录、不注入；
 - [ ] session 选择符合 workspace、mode、idle、watermark、subagent 排除规则；
+- [ ] `generation.trigger=both` 时 idle sweep 与 session-end 都可用；长会话不会永不抽取；
 - [ ] job 具备幂等 key、lease、接管、退避、重试上限和失败可观测性；
 - [ ] 非 JSON、字段缺失/过长、无 source、secret 命中均不落库；
 - [ ] 跨 workspace session 拒绝；工具原始大输出不直接进入抽取；
@@ -455,18 +492,23 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 **退出条件：**
 
 - [ ] hash 去重、source 合并、supersede、correction 优先级正确；
+- [ ] conflict_key 与 correction > manual+pinned > manual > verified fact > derived 优先级正确；无法判定保留 open_question；
 - [ ] manual/pinned 不被自动 supersede/merge/delete；
 - [ ] summary revision 与 `memory_summary_items` 完全一致；可从 DB 重建；
+- [ ] summary gate 校验 items 与 `record_ids_json` 预期集合一致；缺失/ stale 拒绝注入；
+- [ ] summary item 变更会使旧 revision stale/superseded；`summary_rebuild` 幂等；
 - [ ] summary 生成失败保留旧 revision；activate/rollback 有授权和事件记录；
-- [ ] summary 注入前通过 `input_watermark + memory_summary_items freshness` 门禁；
+- [ ] summary 注入前通过 `input_watermark + memory_summary_items` 门禁：items 完整性 + 所有 items `active+fresh`；
 - [ ] summary 不一致/含 stale item 时重建；失败回退 fresh records/notes，不注入旧 summary；
 - [ ] summary/hybrid/notes 的 token 拆分符合预算；summary 超限可截断/压缩；
+- [ ] summary 模式下 pinned/manual 有独立预算且下一轮可见；
 - [ ] citation 只接受本 turn 注入或读取过的 id；非法 citation 不增加 usage、不阻断回答；
+- [ ] citation 解析失败仍写 injected_only exposure；只有 cited/read 增加 use_count；
 - [ ] 删除/纠正后写 suppression，下一轮不再注入，且不会被后续抽取复活。
 
-**量化门槛：** summary 注入超预算 = 0；prompt 前缀变化 = 0；删除后再次注入 = 0；citation 伪造导致的 usage 增长 = 0；summary 长度 p95 不超过配置预算。
+**量化门槛：** summary 注入超预算 = 0；non-memory prompt 前缀变化 = 0；删除后再次注入 = 0；summary item 变更后旧 summary 注入 = 0；pinned 不可见 = 0；citation 伪造导致的 usage 增长 = 0；summary 长度 p95 不超过配置预算。
 
-**证据：** 去重/冲突/回滚测试、summary 重建报告、summary watermark/stale 测试、citation 正负向测试、删除复活测试、token 预算报告。
+**证据：** 去重/冲突/回滚测试、summary 重建报告、summary gate 完整性测试、citation/exposure 正负向测试、删除复活测试、token 预算报告。
 
 ### 8.5 M4：工具、API 与 UI
 
@@ -489,7 +531,7 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 **退出条件：**
 
 - [ ] shadow 运行覆盖 10-20 个真实项目会话，至少一个完整工作日/多个 idle 周期；
-- [ ] 完成人工标注，统计真阳性、假阳性、遗漏、重复、correction、citation 和敏感数据命中；
+- [ ] 完成人工标注，统计真阳性、假阳性、遗漏、重复、correction、citation、injected_only exposure、pinned 可见性、summary rebuild 和敏感数据命中；
 - [ ] 至少一个真实项目完成 `on` + `notes`，再切 `hybrid`；每次只改一个维度；
 - [ ] 完成 `mode=off`、`notes`、summary revision 回滚演练；
 - [ ] 监控、告警、导出、备份、迁移手册和用户说明已更新；
@@ -509,6 +551,8 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 | 同一 source 重复提取 | = 0 |
 | stale summary 注入 | = 0 |
 | stale/unverified 记录默认注入 | = 0 |
+| summary item 变更后旧 summary 注入 | = 0 |
+| pinned/manual 在 summary 模式下不可见 | = 0 |
 | SQLite busy 导致 health 死锁 | = 0 |
 
 ### 8.7 v1.1 能力门禁（不阻塞 v1）
@@ -530,11 +574,14 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 3. 迁移/重建/回滚报告；
 4. 安全检查结果（secret、跨 scope、未授权 API）；
 5. 观测指标和原始数据位置；
-6. 未关闭风险和 owner 签字。
+6. summary gate/invalidation、pinned 预算、exposure/usage 的专项报告；
+7. 未关闭风险和 owner 签字。
 
 ## 9. 不应作为验收证据的内容
 
 - 只看“能生成摘要”，不看来源和错误率；
+- 只看 summary 文本，不验证 item 完整性、失效和 rebuild；
+- 只看 citation，不验证 injected_only exposure 与 retention 影响；
 - 只跑单元测试，不跑 prompt 顺序和 canonical transcript 回归；
 - 只在一个空项目验证，不验证中文路径/空格/Windows；
 - 只看平均延迟，不看 SQLite 锁和 health 死锁；

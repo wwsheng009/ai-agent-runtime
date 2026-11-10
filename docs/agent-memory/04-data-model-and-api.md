@@ -2,6 +2,7 @@
 
 > 状态：目标契约，实施时以本文件为 schema/API 的起点  
 > 约束：SQLite 事实源、Markdown 可重建、scope 默认 project、写入异步。
+> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
 
 ## 1. 数据库
 
@@ -231,9 +232,12 @@ CREATE INDEX idx_memory_usage_session
   ON memory_usage(session_id, used_at DESC);
 ```
 
-- `injected_only` 不计入最终使用率；
+- `injected_only` 作为 exposure，不计入最终使用率/`use_count`；
 - `read` 表示工具读取；
 - `cited` 表示最终答案引用；
+- 只有 `cited` / `read` 增加 `use_count`；`injected_only` 只记 exposure，`last_injected_at` 由 `memory_usage` 聚合；
+- citation 解析失败时仍写 `injected_only`，避免“零反馈”；
+- retention 可配置使用 `last_used_at`（cited/read）或 `last_injected_at`（exposure）；
 - `use_count` 可以由触发器或事务维护，v1 建议显式事务更新。
 - usage 审计不级联删除；物理清理前需按 audit retention 导出。
 
@@ -296,7 +300,7 @@ CREATE INDEX idx_memory_recall_traces_session
 ```sql
 CREATE TABLE memory_jobs (
     id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL, -- phase1_extract | phase2_consolidate | summary_compile | freshness_sweep | cleanup
+    kind            TEXT NOT NULL, -- phase1_extract | phase2_consolidate | summary_compile | summary_rebuild | freshness_sweep | cleanup
     job_key         TEXT NOT NULL,
     scope           TEXT NOT NULL,
     project_key     TEXT NOT NULL DEFAULT '',
@@ -317,6 +321,8 @@ CREATE TABLE memory_jobs (
     UNIQUE(kind, scope, project_key, job_key)
 );
 ```
+
+`summary_rebuild` 的 `job_key` 使用 `summary_id + input_watermark`，保证 entry 变更/重试时幂等；同一失效 revision 不重复排队。
 
 索引：
 
@@ -379,12 +385,13 @@ CREATE INDEX idx_memory_summary_items_memory
 
 summary 只能在验证其输入未被替换/失效后注入：
 
-1. 读取 active summary 的 `input_watermark`；
-2. 与当前记录集 watermark 比较；
-3. 一致且所有 `memory_summary_items` 仍为 `fresh`：允许注入；
-4. 不一致或有 stale item：标记 `freshness_status=stale`，优先重建；
-5. 重建失败：不注入该 summary，回退到 fresh records 或 `notes`；
-6. 任何情况下都不得把 stale summary 当作当前事实静默注入。
+1. 读取 summary，要求 `status=active`、`freshness_status=fresh`；
+2. 读取 `input_watermark`，与当前记录集 watermark 比较；
+3. 一致，且 `memory_summary_items` 与 `record_ids_json` 的预期 id 集合完整一致（以 items 为权威内容，`record_ids_json` 作为快照校验没有因物理清理而缺失；`source_count` 仅作辅助），所有 items 指向的记录仍为 `active + fresh`，且不含 `deleted/suppressed/expired`：允许注入；
+4. 任一 item 发生 `delete/correct/supersede/expire/stale`：立即把包含它的 revision 标记 `freshness_status=stale`；若有新 revision 可替代则标记 `status=superseded`；
+5. 失效 revision 入队 `summary_rebuild`，下一次读不得注入；
+6. 重建失败：不注入该 summary，回退到 fresh records 或 `notes`；
+7. 任何情况下都不得把 stale summary 当作当前事实静默注入。
 
 summary 的 `freshness_status` 是派生状态，不能由 Agent 手动改为 `fresh`；只能由重建/验证流程更新。
 
@@ -596,7 +603,7 @@ memory:
 
   generation:
     enabled: true
-    trigger: idle        # idle | session_end | manual
+    trigger: idle        # idle | session_end | both | manual；on 环境推荐 both
     minIdleHours: 6
     maxSessionsPerRun: 2
     maxRolloutAgeDays: 30
@@ -634,11 +641,18 @@ memory:
     mode: summary        # summary | hybrid | notes
     maxItems: 5
     tokenBudget: 600
+    pinnedBudgetRatio: 0.20  # pinned/manual 预留；summary/hybrid/notes 均生效
+    stageSplit: true     # stable project_memory + tail project_memory_recall
     allowUserScope: false
     recallTrace:
       enabled: false
       sampleRate: 0.01
       retentionDays: 14
+
+  feedback:
+    citationEnabled: true
+    exposureSampling: 1.0      # citation 解析失败时仍记录 injected_only
+    exposureRetentionDays: 30
 
   sessionMode:
     default: enabled     # enabled | disabled
@@ -671,6 +685,10 @@ memory:
 - 现有 `context_max_project_memory` / `context_project_memory_tokens` 作为预算 override 继续生效；
 - `manual.enabled` 独立于 `mode`，保留现有手工笔记行为；
 - `mode=off` 时不启动 v2 自动任务、不注册 v2 工具、不注入 v2 记忆；无手工访问时不创建 v2 DB。
+- `generation.trigger=both` 表示 idle sweep 与 session-end 都启用；长 gateway 推荐 `both`。
+- `injection.pinnedBudgetRatio` 为 pinned/manual 预留注入预算；`injection.stageSplit=true` 时稳定 summary/pinned 放 `project_memory`，query records 放末尾 `project_memory_recall`。
+- `injection.maxItems` 约束 summary 之外的 records/recall；pinned/manual 走独立预算，不被 `maxItems` 挤掉。
+- `feedback.*` 控制 citation/exposure 采样与保留；`injected_only` 只记 exposure，不增加 `use_count`。
 
 ## 7. HTTP API
 
