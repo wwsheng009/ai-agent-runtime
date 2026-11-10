@@ -2,7 +2,7 @@
 
 > 状态：目标契约，实施时以本文件为 schema/API 的起点  
 > 约束：SQLite 事实源、Markdown 可重建、scope 默认 project、写入异步。
-> 修订：2026-11-10，M1 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs 与 schema version 视图；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
+> 修订：2026-11-10，M1/M2 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs、schema version 视图、generation 配置和 job/candidate 契约；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
 
 ## 1. 数据库
 

@@ -33,7 +33,9 @@
 
 2026-11-10 更新：M1 已落地 SQLite schema、`notes.jsonl` 迁移、兼容 facade、
 stable/recall 注入、summary gate、pinned 预算、session mode、records/status/recall
-API 和对应测试。M2 自动抽取、M3 summary 编译器/Consolidation、M4 工具/UI 仍待实施。
+API 和对应测试；M2 已落地 job lease/retry、bounded transcript reader、secret
+redaction、结构化 candidate 写入、session-end/idle/manual 触发。M3 summary
+编译器/Consolidation、M4 工具/UI、M5 shadow 评估仍待实施。
 
 ### 1.2 设计状态
 
@@ -200,7 +202,7 @@ API 和对应测试。M2 自动抽取、M3 summary 编译器/Consolidation、M4 
 | --- | --- | --- |
 | M0 基线与契约 | 可以 | 按 `07 §8.1` 默认决策转 ADR；记录基线与失败矩阵 |
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
-| M2 抽取 | 部分可以 | 必须先有 M1 + session mode + suppression |
+| M2 抽取 | 已实施 core；待 shadow 运营验收 | job/reader/redaction/candidate/trigger 已落地 |
 | M3 Consolidation | 部分可以 | 必须先有 M2 candidate、summary items、去重规则 |
 | M4 工具/API/UI | 可以并行设计 | 需要 M0 权限与工具命名决策 |
 | M5 上线 | 不可以 | 需要 shadow 数据和验收结果 |

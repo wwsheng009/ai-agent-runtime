@@ -1,6 +1,6 @@
 # 测试、指标与验收
 
-> 状态：验收基线（M1 已实施；M2-M5 待实施；阈值在 M0/M5 校准）
+> 状态：验收基线（M1/M2 已实施；M3-M5 待实施；阈值在 M0/M5 校准）
 > 原则：先建立基线，再设定阈值；所有数字必须能由当前代码路径、测试或真实会话证据复现。  
 > 本文件中的“暂定阈值”在 M0 基线完成后由 owner 校准。
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 增加 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、injected_only exposure 验收。
