@@ -1,4 +1,0 @@
-# 批处理文件：测试 SFTP 命令
-ls data/
-stat data/hello.txt
-echo Batch test complete
