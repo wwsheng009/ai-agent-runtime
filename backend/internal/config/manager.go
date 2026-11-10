@@ -122,6 +122,7 @@ type MemoryConfig struct {
 	Consolidation MemoryConsolidationConfig `yaml:"consolidation" json:"consolidation"`
 	Injection     MemoryInjectionConfig     `yaml:"injection" json:"injection"`
 	Feedback      MemoryFeedbackConfig      `yaml:"feedback" json:"feedback"`
+	Tools         MemoryToolsConfig         `yaml:"tools" json:"tools"`
 }
 
 type MemoryManualConfig struct {
@@ -162,6 +163,12 @@ type MemoryFeedbackConfig struct {
 	CitationEnabled       bool    `yaml:"citationEnabled" json:"citationEnabled"`
 	ExposureSampling      float64 `yaml:"exposureSampling" json:"exposureSampling"`
 	ExposureRetentionDays int     `yaml:"exposureRetentionDays" json:"exposureRetentionDays"`
+}
+
+type MemoryToolsConfig struct {
+	Enabled      bool `yaml:"enabled" json:"enabled"`
+	AllowForget  bool `yaml:"allowForget" json:"allowForget"`
+	AllowCorrect bool `yaml:"allowCorrect" json:"allowCorrect"`
 }
 
 // agents.singleWriterMode values: "enforce" (default) keeps the process-wide
@@ -1158,6 +1165,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				ExposureSampling:      1.0,
 				ExposureRetentionDays: 30,
 			},
+			Tools: MemoryToolsConfig{Enabled: false, AllowForget: false, AllowCorrect: false},
 		},
 	}
 }

@@ -127,11 +127,26 @@ func TestMemoryAPIStatusOffDoesNotCreateDB(t *testing.T) {
 	cfg.Workspace.Root = workspace
 	cfg.Memory.Mode = "off"
 	handler.SetRuntimeConfig(cfg, "")
+	handler.SetAdminToken("memory-admin")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/status", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, path := range []string{
+		"/api/runtime/memory/jobs",
+		"/api/runtime/memory/summaries",
+		"/api/runtime/memory/usage",
+		"/api/runtime/memory/metrics",
+		"/api/runtime/memory/audit",
+		"/api/runtime/memory/export",
+	} {
+		offReq := httptest.NewRequest(http.MethodGet, path, nil)
+		offReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		offRec := httptest.NewRecorder()
+		router.ServeHTTP(offRec, offReq)
+		require.Equal(t, http.StatusOK, offRec.Code, path+": "+offRec.Body.String())
+	}
 	if _, err := os.Stat(filepath.Join(workspace, ".aicli", "memory", "memory.db")); !os.IsNotExist(err) {
 		t.Fatalf("off status must not create memory.db, stat err=%v", err)
 	}
@@ -273,4 +288,83 @@ func TestMemoryAPIConsolidateSummariesAndUsage(t *testing.T) {
 	require.Contains(t, rebuildRec.Body.String(), `"rebuilt":1`)
 
 	require.NoError(t, store.Close())
+}
+
+func TestMemoryAPIGovernanceEndpoints(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	createBody := `{"text":"governance endpoint memory","kind":"fact"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusOK, createRec.Code, createRec.Body.String())
+	var created memoryRecordDTO
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	revalidateReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records/"+created.ID+"/revalidate", nil)
+	revalidateReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	revalidateRec := httptest.NewRecorder()
+	router.ServeHTTP(revalidateRec, revalidateReq)
+	require.Equal(t, http.StatusOK, revalidateRec.Code, revalidateRec.Body.String())
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/memory/records/"+created.ID, nil)
+	deleteReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	require.Equal(t, http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records/"+created.ID+"/restore", nil)
+	restoreReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	restoreRec := httptest.NewRecorder()
+	router.ServeHTTP(restoreRec, restoreReq)
+	require.Equal(t, http.StatusOK, restoreRec.Code, restoreRec.Body.String())
+
+	exportReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/export?format=jsonl", nil)
+	exportReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	exportRec := httptest.NewRecorder()
+	router.ServeHTTP(exportRec, exportReq)
+	require.Equal(t, http.StatusOK, exportRec.Code, exportRec.Body.String())
+	require.Contains(t, exportRec.Body.String(), created.ID)
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/audit", nil)
+	auditReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	auditRec := httptest.NewRecorder()
+	router.ServeHTTP(auditRec, auditReq)
+	require.Equal(t, http.StatusOK, auditRec.Code, auditRec.Body.String())
+	require.Contains(t, auditRec.Body.String(), "revalidated")
+
+	freshnessReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/freshness", nil)
+	freshnessRec := httptest.NewRecorder()
+	router.ServeHTTP(freshnessRec, freshnessReq)
+	require.Equal(t, http.StatusOK, freshnessRec.Code, freshnessRec.Body.String())
+
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on", InjectionMode: "summary"})
+	require.NoError(t, err)
+	summary, err := store.CompileSummary(context.Background(), memorystore.Summary{Text: "api summary"}, []string{created.ID})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	activateReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/summaries/"+summary.ID+"/activate", nil)
+	activateReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	activateRec := httptest.NewRecorder()
+	router.ServeHTTP(activateRec, activateReq)
+	require.Equal(t, http.StatusOK, activateRec.Code, activateRec.Body.String())
+
+	unauthorizedExport := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/export", nil)
+	unauthorizedExport.RemoteAddr = "192.0.2.1:1234"
+	unauthorizedRec := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedRec, unauthorizedExport)
+	require.Equal(t, http.StatusForbidden, unauthorizedRec.Code, unauthorizedRec.Body.String())
+
+	resetWithoutConfirm := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/reset", strings.NewReader(`{}`))
+	resetWithoutConfirm.Header.Set("Content-Type", "application/json")
+	resetWithoutConfirm.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	resetRec := httptest.NewRecorder()
+	router.ServeHTTP(resetRec, resetWithoutConfirm)
+	require.Equal(t, http.StatusBadRequest, resetRec.Code, resetRec.Body.String())
+	resetReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/reset", strings.NewReader(`{"confirm":true}`))
+	resetReq.Header.Set("Content-Type", "application/json")
+	resetReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	resetRec = httptest.NewRecorder()
+	router.ServeHTTP(resetRec, resetReq)
+	require.Equal(t, http.StatusOK, resetRec.Code, resetRec.Body.String())
 }

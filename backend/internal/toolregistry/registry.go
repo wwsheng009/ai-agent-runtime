@@ -250,6 +250,16 @@ var builtinEntries = []Entry{
 
 	// ---- 控制面（control 组；运行时自有工具，allowlist 可裁剪，见 Entry.Essential 注释）----
 	{Name: "todos", Group: GroupControl, Exposure: sharedExposure, Essential: true, ToolkitBuiltin: true},
+	{Name: "memory_search", Group: GroupSearch, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_read", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_session_context", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_recent", Group: GroupSearch, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_stats", Group: GroupSearch, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_why", Group: GroupRead, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_why_not", Group: GroupSearch, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "memory_add", Group: GroupEdit, Exposure: sharedExposure, WriteLike: true, PlanWrite: true, ToolkitBuiltin: true},
+	{Name: "memory_correct", Group: GroupEdit, Exposure: sharedExposure, WriteLike: true, PlanWrite: true, ToolkitBuiltin: true},
+	{Name: "memory_forget", Group: GroupEdit, Exposure: sharedExposure, WriteLike: true, PlanWrite: true, ToolkitBuiltin: true},
 	{Name: "get_goal", Group: GroupControl, Exposure: sharedExposure, Essential: true},
 	{Name: "read_goal", Group: GroupControl, Exposure: sharedExposure, Essential: true},
 	{Name: "update_goal", Group: GroupControl, Exposure: sharedExposure, Essential: true},

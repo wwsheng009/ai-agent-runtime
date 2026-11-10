@@ -27,6 +27,8 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.True(t, cfg.Memory.Feedback.CitationEnabled)
 	require.Equal(t, 1.0, cfg.Memory.Feedback.ExposureSampling)
 	require.Equal(t, 30, cfg.Memory.Feedback.ExposureRetentionDays)
+	require.False(t, cfg.Memory.Tools.Enabled)
+	require.False(t, cfg.Memory.Tools.AllowForget)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 }
 

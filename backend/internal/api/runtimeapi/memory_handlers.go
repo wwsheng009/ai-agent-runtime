@@ -18,20 +18,23 @@ import (
 )
 
 type memoryStatusResponse struct {
-	WorkspacePath    string         `json:"workspace_path"`
-	Mode             string         `json:"mode"`
-	Scope            string         `json:"scope"`
-	DBPath           string         `json:"db_path,omitempty"`
-	SchemaVersion    int            `json:"schema_version"`
-	Total            int            `json:"total"`
-	ByStatus         map[string]int `json:"by_status,omitempty"`
-	ByFreshness      map[string]int `json:"by_freshness,omitempty"`
-	SummaryRevision  int64          `json:"summary_revision,omitempty"`
-	SummaryStatus    string         `json:"summary_status,omitempty"`
-	SummaryFreshness string         `json:"summary_freshness,omitempty"`
-	Jobs             map[string]int `json:"jobs,omitempty"`
-	Fallback         bool           `json:"fallback"`
-	FallbackReason   string         `json:"fallback_reason,omitempty"`
+	WorkspacePath     string         `json:"workspace_path"`
+	Mode              string         `json:"mode"`
+	Scope             string         `json:"scope"`
+	DBPath            string         `json:"db_path,omitempty"`
+	SchemaVersion     int            `json:"schema_version"`
+	Total             int            `json:"total"`
+	ByStatus          map[string]int `json:"by_status,omitempty"`
+	ByFreshness       map[string]int `json:"by_freshness,omitempty"`
+	SummaryRevision   int64          `json:"summary_revision,omitempty"`
+	SummaryStatus     string         `json:"summary_status,omitempty"`
+	SummaryFreshness  string         `json:"summary_freshness,omitempty"`
+	PinnedCount       int            `json:"pinned_count,omitempty"`
+	PinnedBudgetRatio float64        `json:"pinned_budget_ratio,omitempty"`
+	InjectionMode     string         `json:"injection_mode,omitempty"`
+	Jobs              map[string]int `json:"jobs,omitempty"`
+	Fallback          bool           `json:"fallback"`
+	FallbackReason    string         `json:"fallback_reason,omitempty"`
 }
 
 type memoryRecordDTO struct {
@@ -96,6 +99,20 @@ type memoryExtractRequest struct {
 	Trigger       string `json:"trigger"`
 }
 
+func (h *Handler) memoryV2Enabled() bool {
+	if h == nil || h.runtimeConfig == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
+	return mode == "shadow" || mode == "on"
+}
+
+type memoryConfirmRequest struct {
+	WorkspacePath string `json:"workspace_path"`
+	Confirm       bool   `json:"confirm"`
+	Format        string `json:"format"`
+}
+
 type memorySummaryListResponse struct {
 	WorkspacePath string                `json:"workspace_path"`
 	Items         []memorystore.Summary `json:"items"`
@@ -144,14 +161,19 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, memoryStatusResponse{
+	response := memoryStatusResponse{
 		WorkspacePath: workspace, Mode: report.Mode, Scope: report.Scope,
 		DBPath: report.DBPath, SchemaVersion: report.SchemaVersion, Total: report.Total,
 		ByStatus: report.ByStatus, ByFreshness: report.ByFreshness,
 		SummaryRevision: report.SummaryRevision, SummaryStatus: report.SummaryStatus,
-		SummaryFreshness: report.SummaryFreshness, Jobs: report.Jobs,
+		SummaryFreshness: report.SummaryFreshness, PinnedCount: report.PinnedCount,
+		InjectionMode: report.InjectionMode, Jobs: report.Jobs,
 		Fallback: report.Fallback, FallbackReason: report.FallbackReason,
-	})
+	}
+	if h.runtimeConfig != nil {
+		response.PinnedBudgetRatio = h.runtimeConfig.Memory.Injection.PinnedBudgetRatio
+	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +252,10 @@ func (h *Handler) CreateMemoryRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "memory record not found"))
+		return
+	}
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -250,6 +276,10 @@ func (h *Handler) GetMemoryRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) PatchMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
 	var req memoryRecordPatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -293,6 +323,10 @@ func (h *Handler) DeleteMemoryRecord(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -314,6 +348,10 @@ func (h *Handler) DeleteMemoryRecord(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) SetMemorySessionMode(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeMemoryAdmin(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
 		return
 	}
 	var req memorySessionModeRequest
@@ -369,6 +407,10 @@ func (h *Handler) GetMemorySessionContext(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) ListMemoryRecallTraces(w http.ResponseWriter, r *http.Request) {
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": []memoryRecallTraceDTO{}, "count": 0})
+		return
+	}
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -452,6 +494,10 @@ func (h *Handler) ExtractMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListMemoryJobs(w http.ResponseWriter, r *http.Request) {
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": []memorystore.MemoryJob{}, "count": 0})
+		return
+	}
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -487,6 +533,12 @@ func (h *Handler) ListMemorySummaries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer store.Close()
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, memorySummaryListResponse{
+			WorkspacePath: workspace, Items: []memorystore.Summary{}, Count: 0,
+		})
+		return
+	}
 	limit := parsePositiveIntQuery(r, "limit", 20)
 	if limit > 100 {
 		limit = 100
@@ -573,6 +625,12 @@ func (h *Handler) ListMemoryUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer store.Close()
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, memoryUsageListResponse{
+			WorkspacePath: workspace, Items: []memorystore.UsageRecord{}, Count: 0,
+		})
+		return
+	}
 	usage, err := store.ListUsage(r.Context(), memorystore.UsageFilter{
 		MemoryID:  strings.TrimSpace(r.URL.Query().Get("memory_id")),
 		SessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
@@ -587,6 +645,292 @@ func (h *Handler) ListMemoryUsage(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, memoryUsageListResponse{
 		WorkspacePath: workspace, Items: usage, Count: len(usage),
 	})
+}
+
+func (h *Handler) GetMemoryMetrics(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, memorystore.MemoryMetrics{})
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	metrics, err := store.Metrics(r.Context())
+	if err != nil {
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, metrics)
+}
+
+func (h *Handler) RestoreMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	record, err := store.RestoreRecord(r.Context(), mux.Vars(r)["id"])
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, memoryRecordToDTO(record))
+}
+
+func (h *Handler) RevalidateMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	record, err := store.RevalidateRecord(r.Context(), mux.Vars(r)["id"])
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, memoryRecordToDTO(record))
+}
+
+func (h *Handler) ActivateMemorySummary(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	summary, err := store.ActivateSummary(r.Context(), mux.Vars(r)["id"])
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, summary)
+}
+
+func (h *Handler) GetMemoryFreshness(w http.ResponseWriter, r *http.Request) {
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	report, err := store.Status(r.Context())
+	if err != nil && !report.Fallback {
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	page, err := store.ListRecords(r.Context(), memorystore.RecordFilter{Status: memorystore.StatusActive, Limit: 200})
+	if err != nil {
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	items := make([]memoryRecordDTO, 0)
+	for _, record := range page.Items {
+		if record.Freshness != memorystore.FreshnessFresh {
+			items = append(items, memoryRecordToDTO(record))
+		}
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"workspace_path": workspace, "by_freshness": report.ByFreshness,
+		"items": items, "count": len(items),
+	})
+}
+
+func (h *Handler) SweepMemoryFreshness(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{"stale": 0})
+		return
+	}
+	var req memoryConfirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, req.WorkspacePath)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	count, err := store.SweepFreshness(r.Context(), time.Now().UTC())
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"workspace_path": workspace, "stale": count})
+}
+
+func (h *Handler) ListMemoryAudit(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": []memorystore.AuditEvent{}, "count": 0})
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	events, err := store.ListEvents(r.Context(), parsePositiveIntQuery(r, "limit", 100))
+	if err != nil {
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"workspace_path": workspace, "items": events, "count": len(events)})
+}
+
+func (h *Handler) ExportMemory(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		w.Header().Set("Content-Type", "application/jsonl")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	var body string
+	contentType := "application/jsonl"
+	switch format {
+	case "", "jsonl":
+		body, err = store.ExportJSONL(r.Context())
+	case "markdown", "md":
+		body, err = store.ExportMarkdown(r.Context())
+		contentType = "text/markdown"
+	default:
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "format must be jsonl or markdown"))
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
+}
+
+func (h *Handler) ResetMemory(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "action": "reset"})
+		return
+	}
+	var req memoryConfirmRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if !req.Confirm {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "reset requires confirm=true"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, req.WorkspacePath)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	if err := store.Reset(r.Context()); err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "action": "reset", "workspace_path": workspace})
 }
 
 func (h *Handler) resolveMemoryWorkspace(r *http.Request, bodyWorkspace string) (string, error) {

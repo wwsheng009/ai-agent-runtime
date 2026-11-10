@@ -101,6 +101,10 @@ memory:
     citationEnabled: true
     exposureSampling: 1.0    # citation 解析失败时仍写 injected_only exposure
     exposureRetentionDays: 30
+  tools:
+    enabled: false           # 只读检索工具也需显式开启
+    allowForget: false       # memory_forget 默认关闭
+    allowCorrect: false      # memory_correct 需用户明确纠正意图
 
 images:
   cacheMaxAge: 1h

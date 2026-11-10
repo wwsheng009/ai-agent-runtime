@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemoryStoreV2AppendListSearchAndReopen(t *testing.T) {
@@ -387,5 +388,143 @@ func TestMemoryStoreCorrectionSupersedesAndSuppresses(t *testing.T) {
 	page, err := store.ListRecords(context.Background(), RecordFilter{Status: StatusActive, Limit: 10})
 	if err != nil || page.Count != 1 || page.Items[0].ID != corrected.ID {
 		t.Fatalf("active records = %+v, %v", page, err)
+	}
+}
+
+func TestMemoryStoreGovernanceLifecycle(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	note, err := store.Append(AppendNoteOptions{Text: "governance lifecycle memory", Kind: "fact"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "governance summary"}, []string{note.ID}); err != nil {
+		t.Fatalf("CompileSummary: %v", err)
+	}
+	db, err := store.ensureV2()
+	if err != nil {
+		t.Fatalf("ensureV2: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memory_entries SET revalidate_after = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), note.ID); err != nil {
+		t.Fatalf("seed revalidate_after: %v", err)
+	}
+	staleCount, err := store.SweepFreshness(context.Background(), time.Now().UTC())
+	if err != nil || staleCount != 1 {
+		t.Fatalf("SweepFreshness = %d, %v", staleCount, err)
+	}
+	stale, err := store.GetRecord(context.Background(), note.ID)
+	if err != nil || stale.Freshness != FreshnessStale || stale.StaleReason != "revalidate_due" {
+		t.Fatalf("stale record = %+v, %v", stale, err)
+	}
+	if summary, _ := store.ActiveSummary(context.Background()); summary == nil || summary.Freshness != FreshnessStale {
+		t.Fatalf("summary not invalidated by sweep: %+v", summary)
+	}
+	fresh, err := store.RevalidateRecord(context.Background(), note.ID)
+	if err != nil || fresh.Freshness != FreshnessFresh || fresh.LastVerifiedAt.IsZero() {
+		t.Fatalf("RevalidateRecord = %+v, %v", fresh, err)
+	}
+	if err := store.DeleteRecord(context.Background(), note.ID); err != nil {
+		t.Fatalf("DeleteRecord: %v", err)
+	}
+	restored, err := store.RestoreRecord(context.Background(), note.ID)
+	if err != nil || restored.Status != StatusActive || !restored.DeletedAt.IsZero() {
+		t.Fatalf("RestoreRecord = %+v, %v", restored, err)
+	}
+	var suppressionCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM memory_suppressions WHERE source_memory_id = ? AND reason = 'deleted'`, note.ID).Scan(&suppressionCount); err != nil {
+		t.Fatalf("count suppression: %v", err)
+	}
+	if suppressionCount != 0 {
+		t.Fatalf("restore must remove deleted suppression, got %d", suppressionCount)
+	}
+	jsonl, err := store.ExportJSONL(context.Background())
+	if err != nil || !strings.Contains(jsonl, note.ID) {
+		t.Fatalf("ExportJSONL = %q, %v", jsonl, err)
+	}
+	markdown, err := store.ExportMarkdown(context.Background())
+	if err != nil || !strings.Contains(markdown, "governance lifecycle memory") {
+		t.Fatalf("ExportMarkdown = %q, %v", markdown, err)
+	}
+	events, err := store.ListEvents(context.Background(), 100)
+	if err != nil || len(events) == 0 {
+		t.Fatalf("ListEvents = %d, %v", len(events), err)
+	}
+}
+
+func TestMemoryStoreActivateSummaryRevision(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	note, err := store.Append(AppendNoteOptions{Text: "activate summary input"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	first, err := store.CompileSummary(context.Background(), Summary{Text: "summary one"}, []string{note.ID})
+	if err != nil {
+		t.Fatalf("CompileSummary first: %v", err)
+	}
+	second, err := store.CompileSummary(context.Background(), Summary{Text: "summary two"}, []string{note.ID})
+	if err != nil {
+		t.Fatalf("CompileSummary second: %v", err)
+	}
+	activated, err := store.ActivateSummary(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("ActivateSummary: %v", err)
+	}
+	if activated.ID != first.ID || activated.Revision != 1 || activated.Status != "active" {
+		t.Fatalf("activated = %+v", activated)
+	}
+	active, err := store.ActiveSummary(context.Background())
+	if err != nil || active == nil || active.ID != first.ID {
+		t.Fatalf("active summary = %+v, %v", active, err)
+	}
+	previous, err := store.GetSummary(context.Background(), second.ID)
+	if err != nil || previous.Status != "superseded" {
+		t.Fatalf("second summary = %+v, %v", previous, err)
+	}
+}
+
+func TestMemoryStoreMetricsAggregatesUsageAndJobs(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	note, err := store.Append(AppendNoteOptions{Text: "metrics input", Kind: "decision"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.RecordExposure(context.Background(), Exposure{
+		MemoryIDs: []string{note.ID}, SessionID: "s1", UseKind: UsageInjectedOnly,
+	}); err != nil {
+		t.Fatalf("RecordExposure: %v", err)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "metrics summary"}, []string{note.ID}); err != nil {
+		t.Fatalf("CompileSummary: %v", err)
+	}
+	if _, err := store.UpdateRecord(context.Background(), note.ID, RecordPatch{Text: stringPtr("metrics input changed")}); err != nil {
+		t.Fatalf("trigger summary rebuild: %v", err)
+	}
+	metrics, err := store.Metrics(context.Background())
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if metrics.PinnedCount != 1 || metrics.ByKind["decision"] == 0 {
+		t.Fatalf("unexpected metrics counts: %+v", metrics)
+	}
+	if metrics.Usage[string(UsageInjectedOnly)] != 1 {
+		t.Fatalf("usage metrics = %+v", metrics.Usage)
+	}
+	if metrics.SummaryRevision != 1 || metrics.SummaryFreshness != "stale" {
+		t.Fatalf("summary metrics = rev=%d freshness=%s", metrics.SummaryRevision, metrics.SummaryFreshness)
+	}
+	if metrics.SummaryRebuildJobs["pending"] == 0 {
+		t.Fatalf("missing summary rebuild job metric: %+v", metrics.SummaryRebuildJobs)
 	}
 }

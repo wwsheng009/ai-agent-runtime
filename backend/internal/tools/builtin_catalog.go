@@ -99,6 +99,22 @@ func ShouldRegisterOpenAIImageGenerateTool(runtimeConfig *runtimecfg.RuntimeConf
 	return err == nil
 }
 
+func ShouldRegisterMemoryTools(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	if runtimeConfig == nil || !runtimeConfig.Memory.Tools.Enabled {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(runtimeConfig.Memory.Mode))
+	return mode == "shadow" || mode == "on"
+}
+
+func ShouldRegisterMemoryForgetTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Tools.AllowForget
+}
+
+func ShouldRegisterMemoryCorrectTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Tools.AllowCorrect
+}
+
 // builtinToolkitRegistrations is the process-wide construction table. It is
 // defined here so every surface imports the same rows; manager.go and toolctl
 // must never duplicate them.
@@ -137,4 +153,14 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 		Condition: ShouldRegisterOpenAIImageGenerateTool,
 		New:       func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewOpenAIImageGenerateTool(cfg) },
 	},
+	{Canonical: "memory_search", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemorySearchTool(cfg) }},
+	{Canonical: "memory_read", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryReadTool(cfg) }},
+	{Canonical: "memory_session_context", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemorySessionContextTool(cfg) }},
+	{Canonical: "memory_recent", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryRecentTool(cfg) }},
+	{Canonical: "memory_stats", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryStatsTool(cfg) }},
+	{Canonical: "memory_add", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryAddTool(cfg) }},
+	{Canonical: "memory_correct", Condition: ShouldRegisterMemoryCorrectTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryCorrectTool(cfg) }},
+	{Canonical: "memory_forget", Condition: ShouldRegisterMemoryForgetTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryForgetTool(cfg) }},
+	{Canonical: "memory_why", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryWhyTool(cfg) }},
+	{Canonical: "memory_why_not", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryWhyNotTool(cfg) }},
 }

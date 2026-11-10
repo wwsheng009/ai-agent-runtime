@@ -852,6 +852,11 @@ WHERE project_key = ? AND status = 'active' ORDER BY revision DESC LIMIT 1
 		report.SummaryStatus = summaryStatus
 		report.SummaryFreshness = summaryFreshness
 	}
+	_ = db.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM memory_entries
+WHERE project_key = ? AND status = 'active' AND pinned = 1
+`, s.cfg.ProjectKey).Scan(&report.PinnedCount)
+	report.InjectionMode = s.cfg.InjectionMode
 	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_jobs WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
 	if err == nil {
 		for rows.Next() {

@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -848,6 +851,166 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			return CommandResult{
 				Blocks: []RenderBlock{{Document: buildChatMemorySearchDocument(hits, query)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "show":
+			id := strings.TrimSpace(firstToken(rest))
+			if id == "" || store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			record, err := store.GetRecord(context.Background(), id)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryRecordDocument(record)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "why":
+			id := strings.TrimSpace(firstToken(rest))
+			if id == "" || store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			record, err := store.GetRecord(context.Background(), id)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			usage, _ := store.ListUsage(context.Background(), memorystore.UsageFilter{MemoryID: id, Limit: 20})
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryWhyDocument(record, usage)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "why-not", "why_not":
+			query := strings.TrimSpace(rest)
+			if query == "" || store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			selection, err := store.SelectForInjectV2(memorystore.InjectOptions{
+				Query: query, Limit: 8, TokenBudget: 600, SessionID: chatSessionID(session),
+			})
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryWhyNotDocument(query, selection)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "correct":
+			id, text := splitFirstToken(rest)
+			if store.Mode() == "off" || strings.TrimSpace(id) == "" || strings.TrimSpace(text) == "" {
+				return CommandResult{}, false, nil
+			}
+			record, err := store.CorrectRecord(context.Background(), strings.TrimSpace(id), strings.TrimSpace(text))
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryCorrectionDocument(record)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "forget":
+			id := strings.TrimSpace(firstToken(rest))
+			if store.Mode() == "off" || id == "" || !strings.Contains(strings.ToLower(rest), "--yes") {
+				return CommandResult{}, false, nil
+			}
+			if err := store.DeleteRecord(context.Background(), id); err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{"提示: 已遗忘 id=" + id + "（tombstone + suppression）"})}},
+				Action: CommandContinue,
+			}, true, nil
+		case "stale":
+			if store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			limit := 10
+			if token := strings.TrimSpace(firstToken(rest)); token != "" {
+				if n, err := strconv.Atoi(token); err == nil && n > 0 {
+					limit = n
+				}
+			}
+			page, err := store.ListRecords(context.Background(), memorystore.RecordFilter{Status: memorystore.StatusActive, Limit: 200})
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			stale := make([]memorystore.Record, 0)
+			for _, record := range page.Items {
+				if record.Freshness != memorystore.FreshnessFresh {
+					stale = append(stale, record)
+					if len(stale) >= limit {
+						break
+					}
+				}
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryStaleDocument(stale)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "jobs":
+			if store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			limit := 20
+			if token := strings.TrimSpace(firstToken(rest)); token != "" {
+				if n, err := strconv.Atoi(token); err == nil && n > 0 {
+					limit = n
+				}
+			}
+			jobs, err := store.ListJobs(context.Background(), limit)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryJobsDocument(jobs)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "consolidate":
+			if store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			runtimeConfig := loadRuntimeToolConfig(session.Config, session)
+			cfg := memoryruntime.Config{Mode: store.Mode(), ProjectKey: store.ProjectKey()}
+			if runtimeConfig != nil {
+				cfg.ConsolidationDisabled = !runtimeConfig.Memory.Consolidation.Enabled
+				cfg.ConsolidationInterval = time.Duration(runtimeConfig.Memory.Consolidation.IntervalHours) * time.Hour
+				cfg.MaxConsolidationRecords = runtimeConfig.Memory.Consolidation.MaxRecords
+				cfg.MaxConsolidationUnusedDays = runtimeConfig.Memory.Consolidation.MaxUnusedDays
+				cfg.SummaryTokenBudget = runtimeConfig.Memory.Consolidation.SummaryTokenBudget
+			}
+			result, err := memoryruntime.NewConsolidator(store, cfg).Run(context.Background())
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryConsolidateDocument(result)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "export":
+			target := strings.TrimSpace(rest)
+			if store.Mode() == "off" || target == "" {
+				return CommandResult{}, false, nil
+			}
+			body, err := store.ExportJSONL(context.Background())
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{fmt.Sprintf("提示: 已导出 %d bytes → %s", len(body), target)})}},
+				Action: CommandContinue,
+			}, true, nil
+		case "reset":
+			if store.Mode() == "off" || !strings.Contains(strings.ToLower(rest), "--yes") {
+				return CommandResult{}, false, nil
+			}
+			if err := store.Reset(context.Background()); err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan("提示: 已重置项目记忆（需重新授权）"))}},
 				Action: CommandContinue,
 			}, true, nil
 		default:

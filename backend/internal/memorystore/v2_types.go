@@ -216,6 +216,8 @@ type StatusReport struct {
 	SummaryRevision  int64
 	SummaryStatus    string
 	SummaryFreshness string
+	PinnedCount      int
+	InjectionMode    string
 	Jobs             map[string]int
 	Fallback         bool
 	FallbackReason   string

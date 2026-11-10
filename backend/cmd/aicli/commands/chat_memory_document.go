@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -91,4 +93,91 @@ func buildChatMemorySearchDocument(hits []memorystore.SearchHit, query string) r
 		)
 	}
 	return textLinesDocument(lines)
+}
+
+func buildChatMemoryRecordDocument(record memorystore.Record) render.Document {
+	lines := []string{
+		fmt.Sprintf("%s kind=%s status=%s freshness=%s pinned=%t revision=%d use=%d",
+			record.ID, record.Kind, record.Status, record.Freshness, record.Pinned, record.Revision, record.UseCount),
+		fmt.Sprintf("source=%s session=%s created=%s updated=%s",
+			record.SourceKind, record.SourceSessionID, record.CreatedAt.Format(time.RFC3339), record.UpdatedAt.Format(time.RFC3339)),
+	}
+	if !record.LastVerifiedAt.IsZero() {
+		line := "last_verified=" + record.LastVerifiedAt.Format(time.RFC3339)
+		if strings.TrimSpace(record.StaleReason) != "" {
+			line += " stale_reason=" + record.StaleReason
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, summarizeMemoryNote(record.Text, 400))
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryWhyDocument(record memorystore.Record, usage []memorystore.UsageRecord) render.Document {
+	lines := []string{
+		fmt.Sprintf("%s source=%s session=%s pinned=%t revision=%d use=%d",
+			record.ID, record.SourceKind, record.SourceSessionID, record.Pinned, record.Revision, record.UseCount),
+		summarizeMemoryNote(record.Text, 400),
+	}
+	if len(usage) == 0 {
+		lines = append(lines, "usage: （无）")
+	} else {
+		lines = append(lines, "usage:")
+		for _, item := range usage {
+			lines = append(lines, fmt.Sprintf("  %s session=%s turn=%s at=%s",
+				item.UseKind, item.SessionID, item.TurnID, item.UsedAt.Format(time.RFC3339)))
+		}
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryWhyNotDocument(query string, selection memorystore.Selection) render.Document {
+	lines := []string{fmt.Sprintf("why-not %q: selected=%d recall=%d tokens=%d",
+		query, len(selection.IDs), len(selection.Recall), selection.TokenEstimate)}
+	if len(selection.Dropped) == 0 {
+		lines = append(lines, "dropped: （无）")
+	} else {
+		for _, dropped := range selection.Dropped {
+			lines = append(lines, fmt.Sprintf("  dropped id=%s reason=%s", dropped.ID, dropped.Reason))
+		}
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryCorrectionDocument(record memorystore.Record) render.Document {
+	return textLinesDocument([]string{
+		fmt.Sprintf("提示: 已创建 correction id=%s supersedes=%s", record.ID, record.SupersedesID),
+		summarizeMemoryNote(record.Text, 200),
+	})
+}
+
+func buildChatMemoryStaleDocument(records []memorystore.Record) render.Document {
+	if len(records) == 0 {
+		return render.SingleLineDoc(render.TextSpan("stale/unverified: （无）"))
+	}
+	lines := make([]string, 0, len(records))
+	for _, record := range records {
+		lines = append(lines, fmt.Sprintf("%s freshness=%s reason=%s %s",
+			record.ID, record.Freshness, record.StaleReason, summarizeMemoryNote(record.Text, 120)))
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryJobsDocument(jobs []memorystore.MemoryJob) render.Document {
+	if len(jobs) == 0 {
+		return render.SingleLineDoc(render.TextSpan("memory jobs: （无）"))
+	}
+	lines := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		lines = append(lines, fmt.Sprintf("%s kind=%s status=%s attempt=%d/%d err=%s",
+			job.ID, job.Kind, job.Status, job.Attempt, job.MaxAttempts, job.LastError))
+	}
+	return textLinesDocument(lines)
+}
+
+func buildChatMemoryConsolidateDocument(result memoryruntime.ConsolidationResult) render.Document {
+	return textLinesDocument([]string{fmt.Sprintf(
+		"consolidation: promoted=%d superseded=%d rebuilt=%d revision=%d tokens=%d",
+		result.Promoted, result.Superseded, result.Rebuilt, result.Revision, result.TokenCount,
+	)})
 }
