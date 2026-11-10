@@ -25,7 +25,7 @@
 | [02-current-runtime-gap-analysis.md](./02-current-runtime-gap-analysis.md) | 当前 AAR 记忆相关能力、复用点与差距分析 | 完成 |
 | [03-target-architecture.md](./03-target-architecture.md) | AAR Agent Memory v2 目标架构与读写链路 | 完成 |
 | [04-data-model-and-api.md](./04-data-model-and-api.md) | 数据模型、配置、HTTP API、CLI 与工具契约 | 完成 |
-| [05-implementation-plan.md](./05-implementation-plan.md) | 分阶段实施计划、文件落点、提交与回滚策略 | 完成 |
+| [05-implementation-plan.md](./05-implementation-plan.md) | 分阶段实施计划、M1 代码级施工说明、文件落点、提交与回滚策略 | 完成 |
 | [06-test-and-acceptance.md](./06-test-and-acceptance.md) | 测试矩阵、阶段 DoD、指标与验收证据包 | 完成 |
 | [07-risks-operations-migration.md](./07-risks-operations-migration.md) | 风险、安全、迁移、运维与 M0 默认决策 | 完成 |
 | [08-completeness-review.md](./08-completeness-review.md) | 闭环审查、缺口修复记录、剩余决策与实施就绪度 | 完成 |

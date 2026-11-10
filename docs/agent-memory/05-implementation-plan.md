@@ -3,7 +3,7 @@
 > 状态：实施计划（已确认，未开工）  
 > 目标：按可验证、可回滚、`off` 行为不变的方式，把现有 memorystore 升级为跨会话记忆系统。  
 > 原则：先存储和读取门面，后自动写入；先 shadow，后 on；先项目级，后 user scope。
-> 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、exposure fallback。
+> 修订：2026-11-10，补 §11 M1 代码级施工说明；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、exposure fallback。
 
 ## 1. 实施总览
 
@@ -601,3 +601,526 @@ test(memory): add shadow/e2e/scope isolation coverage
 - 自动将记忆转成权限。
 
 这些能力只有在 v1 的 delete/audit/scope/quality 数据证明需要时再引入。
+## 11. M1 施工说明（代码级）
+
+> 状态：施工说明，随 M1 实施维护。
+> 目的：把 §3 的 M1 阶段展开为可执行的代码切片、接口契约、迁移顺序、测试命令和提交边界。
+> 范围：只覆盖 M1；不实现 M2 自动抽取、M3 summary 编译器、M4 全量工具/UI、M5 上线评估。
+> 事实源：schema/API 以 `04-data-model-and-api.md` 为准，验收以 `06-test-and-acceptance.md §8.2` 为准。本节新增的 schema/API 细节必须先回写 04，再进入编码；不得让本文件成为第二套数据契约。
+
+### 11.1 当前代码基线与开工前置
+
+当前代码只具备 M1 之前的基础：
+
+| 能力 | 当前落点 | 状态 |
+| --- | --- | --- |
+| durable notes | `backend/internal/memorystore/store.go` | `notes.jsonl` MVP |
+| 注入 | `backend/internal/contextmgr/manager.go` | 单个 `project_memory` block |
+| `/memory` | `backend/cmd/aicli/commands/chat_memory_command.go` | status/add/list/search |
+| harness API | `backend/internal/api/runtimeapi/harness_handlers.go` | GET/POST，JSONL |
+| 配置 | `backend/internal/config/manager.go` | 只有 `Agent.EnableMemory`，无 v2 `memory` 段 |
+| SQLite 基线 | `backend/internal/sqliteutil`、`backend/internal/migrate` | 可复用 |
+| 测试 | `backend/internal/memorystore`、`contextmgr` | 现有测试通过，无 v2 schema/mode 测试 |
+
+M1 开始编码前必须先关闭以下前置项；未关闭时只能做 M0，不应合并 M1 业务代码：
+
+1. `memory.mode`、`manual.enabled`、`injection.*` 配置和默认 `off` 已定义并校验；
+2. `off` 下不创建 v2 DB、不启动 v2 注入的门禁有测试；
+3. `Store` 的 legacy JSONL / SQLite 生命周期和迁移触发条件已选定；
+4. stable/recall 的 selection 返回类型已定义；
+5. 04 已补 `memory_session_modes`、active summary 唯一约束、summary watermark 算法；
+6. `project_memory_recall` 的 stage 生命周期和 compact 行为已明确；
+7. M1 API 的 DTO、分页、workspace 绑定和管理授权已定义。
+
+### 11.2 默认决策（M1 实施口径）
+
+以下决策用于消除当前文档和代码之间的歧义；若 04 尚未同步，应先回写 04，再按此实现。
+
+| 决策 | M1 口径 |
+| --- | --- |
+| `Agent.EnableMemory` | 继续只表示 `internal/memory` 的 observation memory；v2 不使用该字段 |
+| `memory.mode` | `off` / `shadow` / `on`，默认 `off` |
+| `off` 的 DB 行为 | 不创建 DB；没有 DB 时手工 notes 走 JSONL；DB 已存在时允许手工路径只读写 manual records |
+| `off` 的注入口径 | 不注入 v2 summary/records；既有 manual notes 注入按 legacy 路径保留 |
+| `shadow` 的注入口径 | 不注入 v2 stable/recall；既有 manual notes 注入仍可保留 |
+| `on` 的注入口径 | `injection.enabled=true` 时走 v2 stable/recall；否则保留 legacy manual 注入 |
+| M1 自动写入 | 不做；`on` 只读取和人工/API 写入，不自动抽取 |
+| legacy `/memory add` | 写 manual record；`pinned` 默认 `true`（用户显式记忆），可通过 API 显式改为 `false` |
+| 迁移策略 | `mode=on/shadow` 首次打开时幂等迁移 JSONL；JSONL 保留，不自动删除 |
+| 回退 | SQLite 打开/迁移失败时降级为 JSONL 只读，并写诊断事件；不阻断 Agent |
+| user scope | M1 不启用；`allowUserScope` 保持默认 `false` |
+
+> `pinned` 默认值必须与 03/09 的“用户显式记住 → manual active + pinned”一致；如果产品最终选择“manual 默认不 pinned”，应同时修订 03/07 和 M1 API 默认值，不能只改代码。
+
+### 11.3 `memory` 配置和 `off` 门禁
+
+在 `RuntimeConfig` 增加顶层字段，命名与 04 §6 的 YAML 段一致：
+
+```go
+type RuntimeConfig struct {
+    // ... existing fields ...
+    Memory MemoryConfig `yaml:"memory" json:"memory"`
+}
+
+type MemoryConfig struct {
+    Mode       string              `yaml:"mode" json:"mode"`       // off | shadow | on
+    Scope      string              `yaml:"scope" json:"scope"`     // project
+    StorePath  string              `yaml:"storePath" json:"storePath"`
+    Manual     MemoryManualConfig  `yaml:"manual" json:"manual"`
+    Injection  MemoryInjectionConfig `yaml:"injection" json:"injection"`
+}
+```
+
+M1 只要求落地以下子项；其余 04 字段可以保留在结构体中但不得被 M1 代码消费：
+
+```yaml
+memory:
+  mode: off
+  scope: project
+  storePath: ""
+  manual:
+    enabled: true
+  injection:
+    enabled: true
+    mode: notes
+    maxItems: 5
+    tokenBudget: 600
+    pinnedBudgetRatio: 0.20
+    stageSplit: true
+```
+
+实现要求：
+
+1. `DefaultRuntimeConfig()` 显式设置 `Memory.Mode=off`、`Manual.Enabled=true`、`Injection.Mode=notes`、`PinnedBudgetRatio=0.20`、`StageSplit=true`。
+2. `ValidateRuntimeConfig` 校验 `mode`、`scope`、`injection.mode`、`pinnedBudgetRatio` 范围（0–1）；非法值启动失败，而不是静默降级。
+3. `backend/configs/runtime.yaml` 只增加注释/示例，不默认启用 v2；示例默认保持 `mode: off`。
+4. `context_max_project_memory` / `context_project_memory_tokens` 继续作为预算 override。
+5. `off` 门禁测试至少覆盖：
+   - `New`/打开 status 不创建 `memory.db`；
+   - 无手工访问时无 v2 表、无 job、无 event；
+   - legacy `/memory add/list/search` 与当前 JSONL 行为一致；
+   - `on` 打开后才允许创建 v2 DB。
+
+### 11.4 Store 生命周期与 selector 契约
+
+保持 `memorystore.Store` 作为兼容 facade，不把旧调用方直接改成 SQLite 类型。建议新增以下类型和可选接口：
+
+```go
+type BlockKind string
+
+const (
+    BlockStable BlockKind = "stable"
+    BlockRecall BlockKind = "recall"
+)
+
+type Record struct {
+    ID            string
+    Kind          string
+    Scope         string
+    Status        string
+    Text          string
+    Tags          []string
+    Pinned        bool
+    Confidence    float64
+    SourceRefs    []string
+    Revision      int64
+    Freshness     string
+    LastUsedAt    time.Time
+}
+
+type Summary struct {
+    ID            string
+    Revision      int64
+    Text          string
+    TokenEstimate int
+    Freshness     string
+}
+
+type Selection struct {
+    Summary       *Summary
+    Stable        []Record
+    Recall        []Record
+    Revision      int64
+    TokenEstimate int
+    IDs           []string
+    Dropped       []DroppedRecord
+}
+
+type V2Selector interface {
+    SelectForInjectV2(opts InjectOptions) (Selection, error)
+    V2InjectionEnabled() bool
+}
+```
+
+`InjectOptions` 做向后兼容扩展，新增字段不能破坏现有调用：
+
+```go
+type InjectOptions struct {
+    Query       string
+    Limit       int
+    TokenBudget int
+
+    SessionID   string
+    TurnID      string
+    ProjectKey  string
+    Mode        string
+    InjectionMode string
+    Now         time.Time
+}
+```
+
+实现要求：
+
+1. `SelectForInject` 保持现有签名；M1 中只返回 legacy/manual active records，不返回自动生成的 summary/records。
+2. 新增 `SelectForInjectV2`；`contextmgr` 通过类型断言使用它，旧 fake/旧调用方继续使用旧接口。
+3. `V2InjectionEnabled()` 只在 `mode=on && injection.enabled=true`（且 `stageSplit` 允许）时返回 true；`off/shadow` 或 injection 关闭时走 legacy 路径。
+4. `Store` 增加 `Close()`、`DBPath()`、`SchemaVersion()`、`Status()`；现有 `Path()` 继续返回 `notes.jsonl` 以保持兼容。
+5. `Store` 采用 lazy open：构造时不打开 SQLite；首次需要 v2 能力时打开/迁移。`off` 且 DB 不存在时不得创建 DB。
+6. `Store` 不允许同时把 JSONL 和 SQLite 当作可写事实源；`on` 以 SQLite 为准，`off` 的 manual 路径按 11.2 的决策执行。
+7. 任何 DB 打开/迁移错误都返回可诊断错误，并允许 legacy 只读回退；不得静默吞掉。
+
+### 11.5 必须在 M1 前回写 04 的 schema 增补
+
+#### 11.5.1 `memory_session_modes`
+
+M1 的 `POST /sessions/{id}/mode` 和 M2 的 session 选择都需要持久化 session mode；04 当前没有该表。建议增加：
+
+```sql
+CREATE TABLE memory_session_modes (
+    session_id      TEXT PRIMARY KEY,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    project_key     TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL, -- enabled | disabled | polluted
+    updated_at      TEXT NOT NULL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_memory_session_modes_project
+  ON memory_session_modes(project_key, mode, updated_at DESC);
+```
+
+#### 11.5.2 active summary 唯一约束
+
+`memory_summaries` 目前只有 revision 唯一约束，不能防止两个 active revision 同时存在。增加：
+
+```sql
+CREATE UNIQUE INDEX idx_memory_summaries_active
+  ON memory_summaries(scope, project_key, summary_kind)
+  WHERE status = 'active';
+```
+
+activate/rollback 必须在同一个 `WriteTxOptions` 事务内完成“旧 active → superseded、新 revision → active”，否则并发请求可能产生两个 active。
+
+#### 11.5.3 summary watermark
+
+M1 必须冻结一个确定性算法，供 M3 summary 编译和 M1 gate 共用。建议：
+
+```text
+summary_input_watermark =
+  "v1:" + sha256(canonical_json([
+    {id, revision, content_hash, status, freshness_status}
+    for each memory_summary_item
+    ordered by id
+  ]))
+```
+
+规则：
+
+- `memory_summary_items` 是权威输入集合；`record_ids_json` 只是同集合的快照校验；
+- gate 重新读取 items 关联的 entries，计算当前 watermark；
+- item 缺失、revision/content_hash/status/freshness 变化都会导致 watermark 不一致；
+- `summary_rebuild` 的 `job_key` 使用 `summary_id + ":" + current_watermark`；
+- M1 不实现 summary 编译器，但必须实现 watermark 计算函数、gate 判定和 seeded DB 测试。
+
+#### 11.5.4 schema 版本账本
+
+`internal/migrate` 当前写入 `schema_migrations`，而 04 要求 `memory_schema_version`。建议 M1 采用：
+
+- 唯一写入账本：`schema_migrations`；
+- `memory_schema_version` 作为只读兼容视图：
+
+```sql
+CREATE VIEW IF NOT EXISTS memory_schema_version AS
+SELECT version, applied_at FROM schema_migrations;
+```
+
+如果 04 坚持物理表，必须在 M1 migration 内同步维护两处，不能只建表不更新。
+
+#### 11.5.5 迁移状态
+
+为保证迁移可观测，建议增加 `memory_migration_runs`（或在 04 中明确等价位置）：
+
+```sql
+CREATE TABLE memory_migration_runs (
+    id            TEXT PRIMARY KEY,
+    source_path   TEXT NOT NULL,
+    source_size   INTEGER NOT NULL DEFAULT 0,
+    source_mtime  TEXT,
+    scanned       INTEGER NOT NULL DEFAULT 0,
+    imported      INTEGER NOT NULL DEFAULT 0,
+    skipped       INTEGER NOT NULL DEFAULT 0,
+    corrupt       INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL, -- running | succeeded | failed
+    error         TEXT,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT
+);
+```
+
+迁移的 idempotency 仍以 `memory_entries` 的 content hash 唯一索引为准；`memory_migration_runs` 只用于诊断和重试，不作为唯一判重依据。
+
+### 11.6 M1-A：schema、SQLite store 与 notes 迁移
+
+建议新增/调整文件：
+
+```text
+backend/internal/memorystore/
+  types.go              # Scope/Kind/Status/Record/Selection/DroppedRecord
+  config.go             # Config、默认值、mode/manual/injection 解析
+  projectkey.go         # project_key canonicalization
+  schema.go             # migration SQL、schema version
+  sqlite_store.go       # SQLite CRUD/query/tx
+  retrieval.go          # filter/rank/budget/format
+  notes_migration.go    # notes.jsonl -> memory_entries
+  compat.go             # 旧公开方法兼容与 legacy fallback
+  store.go              # facade: New/Append/List/Search/SelectForInject
+```
+
+实施顺序：
+
+1. `types.go`：先定 scope/kind/status/freshness/retention/content hash；`project_key` 规范化函数优先写测试。
+2. `schema.go`：按 04 + 11.5 增补建表；迁移一次事务完成；重复执行不重复插入。
+3. `sqlite_store.go`：仅暴露最小 CRUD/query；所有写事务使用 `sqliteutil.WriteTxOptions`，不把 LLM 调用放进事务。
+4. `notes_migration.go`：逐行解析、损坏行计数、content hash 去重、保留原文件、失败不标记完成。
+5. `compat.go`：旧 `Append/List/Search/SelectForInject` 包装到 v2 或 legacy；`off` 不创建 DB。
+6. `store.go`：lazy open、`Close`、DB path/status、fallback。
+7. 旧调用方接入：`/memory`、harness memory、agent attach 时传入 mode/config；不要直接改 API DTO。
+
+M1-A 必须新增/通过的测试：
+
+- `TestMemoryStore_CreateSchema`
+- `TestMemoryStore_MigrateNotesIdempotent`
+- `TestMemoryStore_CorruptJSONL`
+- `TestMemoryStore_OpenFailureDegrades`
+- `TestMemoryStore_OffDoesNotCreateDB`
+- `TestMemoryStore_OffKeepsManualMemory`
+- `TestMemoryStore_ProjectKeyCanonicalization`
+- `TestMemoryStore_ScopeIsolation`
+- `TestMemoryStore_TombstoneNotInjected`
+- `TestMemoryStore_RevisionEventWritten`
+- `TestMemoryStore_SummaryItemsMatchRevision`
+- `TestMemoryStore_SummaryGateRejectsMissingOrStaleItems`
+- `TestMemoryStore_SummaryInvalidatedOnItemMutation`
+- `TestMemoryStore_PinnedBudgetSurvivesSummaryFull`
+- `TestMemoryStore_WALConcurrentReaders`
+
+### 11.7 M1-B：stable/recall 注入
+
+建议新增 `backend/internal/contextmgr/project_memory.go`，把选择、渲染和 metadata 从 `manager.go` 拆出。
+
+接口兼容策略：
+
+```go
+type ProjectMemoryStore interface {
+    SelectForInject(opts memorystore.InjectOptions) ([]memorystore.Note, error)
+}
+
+type ProjectMemoryV2Store interface {
+    SelectForInjectV2(opts memorystore.InjectOptions) (memorystore.Selection, error)
+    V2InjectionEnabled() bool
+}
+```
+
+`Manager.Build` 的选择顺序：
+
+1. `ProjectMemory` 实现 `ProjectMemoryV2Store` 且 `V2InjectionEnabled()` 为 true → 使用 V2 selection；
+2. 否则使用现有 `SelectForInject` legacy 路径；
+3. 任何 V2 选择错误都只记录 `project_memory_error`，不阻断构建；必要时回退 legacy。
+
+注入位置和 metadata：
+
+| 块 | stage | 位置 | metadata |
+| --- | --- | --- | --- |
+| stable | `project_memory` | 现有 `project_memory` 动态尾部位置 | `memory_version=2`、`memory_block_kind=stable`、`memory_revision`、`memory_ids`、`project_memory_count` |
+| recall | `project_memory_recall` | 所有稳定 stage 之后、active goal 之后 | `memory_version=2`、`memory_block_kind=recall`、`memory_revision`、`memory_ids` |
+| legacy | `project_memory` | 现有位置 | 保持现有 `project_memory_injected/count/ids`，不写 v2 字段 |
+
+每个 turn 的 group guard：
+
+```text
+memoryGroupPresent := stagePresent("project_memory") ||
+                     stagePresent("project_memory_recall") ||
+                     activeTurnHasReplay
+
+if memoryGroupPresent:
+    suppress stable and recall
+else:
+    plan once
+    append stable at project_memory position if non-empty
+    append recall after active_goal if non-empty
+```
+
+关键实现点：
+
+1. stable/recall 必须来自同一次 selection/plan；不能在后续 Build 中重新 query 后追加第二组。
+2. `project_memory_recall` 标记为 turn-local/transient，不进入 durable compact 保留清单；compact 后应由下一次 build 重新生成。
+3. `project_memory` 的 durable 语义保持现状；但 V2 stable 必须带 revision metadata，便于诊断旧 block。
+4. 更新 `contextmgr/compact.go`、`compactruntime/local.go` 的 stage 列表和 `manager.go` 的 trim 分类；至少保证 `project_memory_recall` 会被视为 dynamic tail，不会被误归入 stable history。
+5. legacy 路径保持现有 header、预算、metadata 和 tests；`off` 的 prompt 顺序、hash、消息数必须与基线一致。
+6. V2 渲染必须明确 historical-data 提示，不能使用指令性模板；memory 内容不得进入 system prompt 或 tool schema。
+
+M1-B 必须新增/通过的测试：
+
+- `TestBuildProjectMemoryKeepsDynamicTail`
+- `TestBuildDoesNotPrependProjectMemory`
+- `TestBuildProjectMemorySuppressedOnActiveReplay`
+- `TestBuildProjectMemoryStableAndRecallSplit`
+- `TestBuildProjectMemoryGroupInjectedOncePerTurn`
+- `TestBuildProjectMemoryPinnedVisibleInSummaryMode`
+- `TestBuildProjectMemorySummaryGateRejectsMissingItems`
+- `TestBuildProjectMemorySummaryInvalidatedOnItemMutation`
+- `TestBuildMemoryOffByteIdentical`
+- `TestBuildProjectMemoryCompactResumeNoDuplicate`
+- `go test ./internal/compactruntime -count=1`
+
+### 11.8 M1-C：状态与管理 API
+
+建议新增 `backend/internal/api/runtimeapi/memory_handlers.go`，避免继续膨胀 `harness_handlers.go`；在 `handler.go` 注册：
+
+```text
+GET    /api/runtime/memory/status
+GET    /api/runtime/memory/records
+POST   /api/runtime/memory/records
+GET    /api/runtime/memory/records/{id}
+PATCH  /api/runtime/memory/records/{id}
+DELETE /api/runtime/memory/records/{id}
+POST   /api/runtime/memory/sessions/{id}/mode
+GET    /api/runtime/memory/sessions/{id}/context
+GET    /api/runtime/memory/recall-traces
+```
+
+最小响应契约：
+
+| 接口 | M1 要求 |
+| --- | --- |
+| `status` | mode、scope、db_path、schema_version、record counts by status、freshness counts、summary revision/status、job counts、fallback 状态 |
+| `records` list | `status` 默认 `active`，`limit` 默认 50、最大 200，支持 scope/kind/tag/q/cursor；返回 `items/count/next_cursor` |
+| `records` create | `{text,kind,tags,pinned,source,session_id}`；manual 默认 active；返回 record DTO |
+| `records/{id}` | 详情包含 sources、revision、freshness、usage；删除/纠正不返回 secret 原文 |
+| `sessions/{id}/mode` | 只接受 `enabled/disabled/polluted`，持久化到 `memory_session_modes`，写 audit |
+| `sessions/{id}/context` | 只读有界摘要，不返回完整 transcript 或跨 project source |
+| `recall-traces` | 有界分页；默认配置关闭时返回空；不返回完整 query/正文 |
+
+安全与兼容：
+
+1. 新增 `authorizeMemoryAdmin`：loopback、有效 admin token 或 admin role 三者之一；DELETE、session mode、revalidate/reset 必须走该路径。
+2. `workspace_path` 只用于选择当前 runtime workspace；服务端 canonicalize 后与当前 workspace 不一致则拒绝。不得复用 `resolveHarnessWorkspace` 的 CWD fallback 作为授权依据。
+3. 旧 `/api/runtime/harness/memory` GET/POST 保持响应字段和 append/search 行为；`Path` 继续返回 `notes.jsonl`，另加 `db_path` 时保持向后兼容。
+4. 分页/参数上限、错误码、空结果、DB unavailable、FTS fallback 都要有测试。
+5. M1 不注册 memory tools，不实现 citation parser；相关字段可预留但不得写 usage。
+
+M1-C 必须新增/通过的测试：
+
+- `TestHarnessMemoryListSearchAppend`（保持现有）
+- `TestMemoryAPIStatusOffDoesNotCreateDB`
+- `TestMemoryAPIRecordsPaginationAndFilters`
+- `TestMemoryAPIRecordsWorkspaceBinding`
+- `TestMemoryAPIDestructiveRequiresAdmin`
+- `TestMemoryAPISessionModePersists`
+- `TestMemoryAPIRecallTracesBounded`
+- `TestMemoryAPIRecordsDeleteTombstone`
+- `TestMemoryAPIRecordsPatchRevisionEvent`
+
+### 11.9 验证命令
+
+每个 M1 切片至少运行：
+
+```bash
+cd backend
+go test ./internal/memorystore -count=1
+go test ./internal/contextmgr -count=1
+go test ./internal/compactruntime -count=1
+go test ./internal/config -count=1
+go test ./internal/agent -count=1
+go test ./internal/api/runtimeapi -count=1
+go vet ./internal/memorystore ./internal/contextmgr ./internal/compactruntime ./internal/config ./internal/api/runtimeapi
+```
+
+M1 合并前再运行：
+
+```bash
+cd backend
+go test ./... -count=1
+```
+
+涉及 Windows 路径/锁行为时，额外记录：
+
+- 中文路径和空格路径；
+- 大小写不同的同一 workspace；
+- 两个进程同时打开 `memory.db`；
+- 关闭后重新打开 schema/version；
+- `off` 下 legacy notes 与基线 diff。
+
+### 11.10 提交拆分
+
+建议按以下顺序提交，每个提交独立可构建：
+
+```text
+docs(agent-memory): add M1 code-level implementation guide
+feat(memory): add v2 config and off gate
+feat(memory): add sqlite schema and notes migration
+feat(memory): add compatible store facade
+feat(context): add stable and recall memory injection
+feat(memory): add v2 status and record APIs
+test(memory): add M1 migration, scope, summary gate and exposure coverage
+```
+
+注意：
+
+- `feat(memory): add sqlite schema` 不得顺带启用自动抽取或工具；
+- `feat(context)` 必须保持 `off` 的 prompt baseline；
+- `feat(memory): add APIs` 不得改变 `/harness/memory` 旧响应；
+- 测试提交不能只包含 happy path。
+
+### 11.11 M1 合并门禁与停止条件
+
+满足以下条件才能合并 M1：
+
+- [ ] `off` 下 v2 DB 创建、v2 注入、v2 自动任务均为 0；
+- [ ] legacy `/memory`、harness memory GET/POST 不回归；
+- [ ] `notes.jsonl` 迁移幂等，损坏行有计数，原文件保留；
+- [ ] project scope 隔离、tombstone、suppression、revision/event 测试通过；
+- [ ] summary gate 拒绝缺失/stale item，item 变更后旧 summary 不新增注入；
+- [ ] stable `project_memory` 与 tail `project_memory_recall` 分离，每 turn 最多一组；
+- [ ] pinned/manual 独立预算，下一轮可见；
+- [ ] memory budget 被总 prompt 预算 clamp；
+- [ ] compact/resume 后不重复追加 memory；
+- [ ] 非 memory stage 的 prompt 前缀变化为 0；
+- [ ] SQLite busy/lock 测试无死锁；
+- [ ] `go test ./...` 与 `go vet` 通过。
+
+出现以下任一情况必须停止合并：
+
+- 需要修改 system prompt 或 tool schema 才能让 M1 工作；
+- 需要把 JSONL 和 SQLite 同时作为可写事实源却没有明确同步规则；
+- summary gate 测试被跳过或用 seeded 假数据掩盖真实缺失；
+- `off` 基线 diff 无法解释；
+- 跨 workspace 读取/写入没有 fail closed；
+- M1 顺手引入 M2 自动抽取、M3 summary 编译器或 M4 工具。
+
+### 11.12 施工前回写 04 的清单
+
+进入 M1-A 编码前，先把以下内容并入 04，避免实现与事实源分叉：
+
+1. `memory_session_modes` 表和权限/审计语义；
+2. `memory_summaries` active 唯一索引与 activate/rollback 事务语义；
+3. `input_watermark` 的 canonical_json 算法和 `summary_rebuild` job_key；
+4. `memory_schema_version` 的视图/双写选择；
+5. `memory_migration_runs` 或等价迁移诊断契约；
+6. legacy Note 的 kind/pinned/retention/source 映射；
+7. `memory_recall_traces` 的写入时机和采样开关；
+8. M1 API 的 DTO、分页、错误码和 workspace 绑定；
+9. `project_memory_recall` 的 transient/durable 生命周期；
+10. `off` 已存在 DB 时 manual 路径的读写语义。
+
+完成回写并通过 `git diff --check` 后，再进入 M1-A。
