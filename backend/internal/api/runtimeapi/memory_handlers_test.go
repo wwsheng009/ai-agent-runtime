@@ -1,6 +1,7 @@
 package runtimeapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,11 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
 func newMemoryTestRouter(t *testing.T, workspace string) (*Handler, *mux.Router) {
@@ -153,4 +157,63 @@ func TestMemoryAPISessionModeAndRecallTraces(t *testing.T) {
 	traceRec := httptest.NewRecorder()
 	router.ServeHTTP(traceRec, traceReq)
 	require.Equal(t, http.StatusOK, traceRec.Code, traceRec.Body.String())
+}
+
+type apiMemorySource struct {
+	session memoryruntime.SessionRef
+	tx      memoryruntime.Transcript
+}
+
+func (s *apiMemorySource) ListSessions(context.Context, string, int) ([]memoryruntime.SessionRef, error) {
+	return []memoryruntime.SessionRef{s.session}, nil
+}
+
+func (s *apiMemorySource) ReadTranscript(context.Context, memoryruntime.SessionRef, int) (memoryruntime.Transcript, error) {
+	return s.tx, nil
+}
+
+type apiMemoryExtractor struct{}
+
+func (apiMemoryExtractor) Extract(context.Context, memoryruntime.SessionRef, memoryruntime.Transcript) (memoryruntime.ExtractionResult, error) {
+	return memoryruntime.ExtractionResult{Candidates: []memoryruntime.Candidate{{
+		Kind: "decision", Text: "Use append-only memory writes.", Confidence: 0.9,
+		SourceMessageIDs: []string{"msg-1"},
+	}}}, nil
+}
+
+func TestMemoryAPIManualExtract(t *testing.T) {
+	workspace := t.TempDir()
+	handler, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "shadow"})
+	if err != nil {
+		t.Fatalf("memorystore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	source := &apiMemorySource{
+		session: memoryruntime.SessionRef{ID: "s1", WorkspacePath: workspace, LastActivityAt: now},
+		tx: memoryruntime.Transcript{
+			SessionID: "s1", Hash: "hash-api", Revision: 1,
+			Messages: []memoryruntime.TranscriptMessage{{ID: "msg-1", Seq: 1, Role: "user", Content: "remember this"}},
+		},
+	}
+	rt := memoryruntime.New(store, source, apiMemoryExtractor{}, store, memoryruntime.Config{
+		Mode: "shadow", Workspace: workspace, ProjectKey: store.ProjectKey(),
+		MaxSessionsPerRun: 2, MaxSourceMessages: 10,
+	})
+	handler.SetMemoryRuntime(rt)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/extract", strings.NewReader(`{"session_id":"s1","trigger":"manual"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"candidates":1`)
+
+	jobsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/jobs", nil)
+	jobsRec := httptest.NewRecorder()
+	router.ServeHTTP(jobsRec, jobsReq)
+	require.Equal(t, http.StatusOK, jobsRec.Code, jobsRec.Body.String())
+	require.Contains(t, jobsRec.Body.String(), "phase1_extract")
 }

@@ -1053,7 +1053,8 @@ type runtimeServerApp struct {
 	connectorService io.Closer
 	// scheduleDriver 是调度领导权参与者（S1 联盟式调度）；未参与/装配失败为 nil。
 	// close() 里最先停它：先停驱动、后放租约（让位顺序由 schedulehost.Leader 保证）。
-	scheduleDriver *schedulehost.Leader
+	scheduleDriver      *schedulehost.Leader
+	memoryRuntimeCancel context.CancelFunc
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1245,6 +1246,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	})
 	handler.SetSiteAccountService(siteAccountService)
 	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
+	memoryRuntimeCancel, memoryRuntimeErr := startRuntimeServerMemoryRuntime(ctx, handler, runtimeConfig)
+	if memoryRuntimeErr != nil {
+		logger.Warn("memory runtime unavailable", logger.Err(memoryRuntimeErr))
+	}
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope runtimeapi.UsageScope) *runtimecfg.RuntimeConfig {
 		selectedConfig, selectedPath := runtimeManager.SelectConfigForScopeWithPath(scope.ScopeKey)
@@ -1492,20 +1497,21 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	gatewayController := startRuntimeServerGateway(handler, cfg)
 
 	return &runtimeServerApp{
-		router:            router,
-		handler:           handler,
-		cfg:               cfg,
-		skillsCfg:         skillsCfg,
-		runtimeManager:    runtimeManager,
-		bootstrap:         bootstrapManager,
-		mcpManager:        manager,
-		toolAdapter:       toolAdapterCloser,
-		ledgerStore:       ledgerStore,
-		supervision:       supervisionPlane,
-		subagentBatches:   subagentBatches,
-		knowledge:         knowledgeActivation,
-		gatewayController: gatewayController,
-		connectorService:  connectorService,
+		router:              router,
+		handler:             handler,
+		cfg:                 cfg,
+		skillsCfg:           skillsCfg,
+		runtimeManager:      runtimeManager,
+		bootstrap:           bootstrapManager,
+		mcpManager:          manager,
+		toolAdapter:         toolAdapterCloser,
+		ledgerStore:         ledgerStore,
+		supervision:         supervisionPlane,
+		subagentBatches:     subagentBatches,
+		knowledge:           knowledgeActivation,
+		gatewayController:   gatewayController,
+		connectorService:    connectorService,
+		memoryRuntimeCancel: memoryRuntimeCancel,
 	}, nil
 }
 
@@ -1551,6 +1557,13 @@ func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPa
 func (a *runtimeServerApp) close() {
 	if a == nil {
 		return
+	}
+	if a.memoryRuntimeCancel != nil {
+		a.memoryRuntimeCancel()
+		a.memoryRuntimeCancel = nil
+	}
+	if a.handler != nil {
+		_ = a.handler.CloseMemoryRuntime()
 	}
 	// 调度驱动最先停：它持有 mesh 租约并驱动 schedule.Runtime（"先停驱动、后放
 	// 租约"的顺序由 schedulehost.Leader.Stop 保证），且投递路径依赖 handler hub。

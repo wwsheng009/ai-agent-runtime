@@ -114,15 +114,28 @@ type AgentConfig struct {
 // MemoryConfig 是跨会话长期记忆 v2 的配置。它与 Agent.EnableMemory
 // （进程内 observation memory）独立；默认 mode=off，不改变既有行为。
 type MemoryConfig struct {
-	Mode      string                `yaml:"mode" json:"mode"`
-	Scope     string                `yaml:"scope" json:"scope"`
-	StorePath string                `yaml:"storePath" json:"storePath"`
-	Manual    MemoryManualConfig    `yaml:"manual" json:"manual"`
-	Injection MemoryInjectionConfig `yaml:"injection" json:"injection"`
+	Mode       string                 `yaml:"mode" json:"mode"`
+	Scope      string                 `yaml:"scope" json:"scope"`
+	StorePath  string                 `yaml:"storePath" json:"storePath"`
+	Manual     MemoryManualConfig     `yaml:"manual" json:"manual"`
+	Generation MemoryGenerationConfig `yaml:"generation" json:"generation"`
+	Injection  MemoryInjectionConfig  `yaml:"injection" json:"injection"`
 }
 
 type MemoryManualConfig struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+type MemoryGenerationConfig struct {
+	Enabled              bool   `yaml:"enabled" json:"enabled"`
+	Trigger              string `yaml:"trigger" json:"trigger"`
+	MinIdleHours         int    `yaml:"minIdleHours" json:"minIdleHours"`
+	MaxSessionsPerRun    int    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
+	MaxRolloutAgeDays    int    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
+	IncludeSubagents     bool   `yaml:"includeSubagents" json:"includeSubagents"`
+	Model                string `yaml:"model" json:"model"`
+	ReasoningEffort      string `yaml:"reasoningEffort" json:"reasoningEffort"`
+	MaxRecordsPerSession int    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
 }
 
 type MemoryInjectionConfig struct {
@@ -1101,6 +1114,16 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			Manual: MemoryManualConfig{
 				Enabled: true,
 			},
+			Generation: MemoryGenerationConfig{
+				Enabled:              true,
+				Trigger:              "idle",
+				MinIdleHours:         6,
+				MaxSessionsPerRun:    2,
+				MaxRolloutAgeDays:    30,
+				IncludeSubagents:     false,
+				ReasoningEffort:      "low",
+				MaxRecordsPerSession: 20,
+			},
 			Injection: MemoryInjectionConfig{
 				Enabled:           true,
 				Mode:              "notes",
@@ -1543,6 +1566,15 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 	case "", "summary", "hybrid", "notes":
 	default:
 		return errors.New(errors.ErrValidationFailed, "memory.injection.mode must be summary, hybrid, or notes")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Generation.Trigger)) {
+	case "", "idle", "session_end", "both", "manual":
+	default:
+		return errors.New(errors.ErrValidationFailed, "memory.generation.trigger must be idle, session_end, both, or manual")
+	}
+	if config.Generation.MinIdleHours < 0 || config.Generation.MaxSessionsPerRun < 0 ||
+		config.Generation.MaxRolloutAgeDays < 0 || config.Generation.MaxRecordsPerSession < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.generation limits cannot be negative")
 	}
 	if config.Injection.MaxItems < 0 || config.Injection.TokenBudget < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.injection limits cannot be negative")

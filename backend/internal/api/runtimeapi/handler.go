@@ -44,6 +44,7 @@ import (
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -143,6 +144,8 @@ type Handler struct {
 	approvalExplainCacheOnce sync.Once
 	approvalExplainCache     *approvalExplainCache
 	sessionManager           *chat.SessionManager
+	memoryRuntimeMu          sync.RWMutex
+	memoryRuntime            *memoryruntime.Runtime
 	// sessionViewers 统计 web SSE 订阅者（在场 host 源；docs/bots/10 §4）。
 	sessionViewers sessionViewers
 	// plansStore overrides the process-wide plan artifact store (tests/hosts).
@@ -916,6 +919,7 @@ func (h *Handler) installSessionCloseHook(config *runtimecfg.RuntimeConfig) {
 		if session == nil {
 			return
 		}
+		h.TriggerMemorySessionEnd(session.ID)
 		var base []runtimehooks.HookConfig
 		if config != nil {
 			base = config.Hooks
@@ -1273,6 +1277,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/sessions/{id}/mode", h.SetMemorySessionMode).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/sessions/{id}/context", h.GetMemorySessionContext).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/recall-traces", h.ListMemoryRecallTraces).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/jobs", h.ListMemoryJobs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/extract", h.ExtractMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/hooks", h.GetHarnessHooks).Methods(http.MethodGet)

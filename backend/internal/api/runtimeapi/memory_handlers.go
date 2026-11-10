@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -87,6 +88,12 @@ type memoryRecordPatchRequest struct {
 type memorySessionModeRequest struct {
 	WorkspacePath string `json:"workspace_path"`
 	Mode          string `json:"mode"`
+}
+
+type memoryExtractRequest struct {
+	SessionID     string `json:"session_id"`
+	WorkspacePath string `json:"workspace_path"`
+	Trigger       string `json:"trigger"`
 }
 
 type memoryRecallTraceDTO struct {
@@ -374,6 +381,77 @@ func (h *Handler) ListMemoryRecallTraces(w http.ResponseWriter, r *http.Request)
 		})
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": items, "count": len(items)})
+}
+
+func (h *Handler) ExtractMemory(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	var req memoryExtractRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if _, err := h.resolveMemoryWorkspace(r, req.WorkspacePath); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	rt := h.MemoryRuntime()
+	if rt == nil {
+		var err error
+		rt, err = h.EnableMemoryRuntime()
+		if err != nil {
+			h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrValidationFailed, err.Error()))
+			return
+		}
+	}
+	if rt == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrValidationFailed, "memory runtime is not enabled"))
+		return
+	}
+	trigger := memoryruntime.Trigger(strings.ToLower(strings.TrimSpace(req.Trigger)))
+	if trigger == "" {
+		trigger = memoryruntime.TriggerManual
+	}
+	if trigger != memoryruntime.TriggerManual && trigger != memoryruntime.TriggerSessionEnd {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "trigger must be manual or session_end"))
+		return
+	}
+	result, err := rt.RunSession(r.Context(), trigger, req.SessionID)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"trigger": result.Trigger, "sessions": result.Sessions, "processed": result.Processed,
+		"skipped": result.Skipped, "candidates": result.Candidates, "stale": result.Stale,
+		"failed": result.Failed, "ignored": result.Ignored, "errors": result.Errors,
+	})
+}
+
+func (h *Handler) ListMemoryJobs(w http.ResponseWriter, r *http.Request) {
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	jobs, err := store.ListJobs(r.Context(), parsePositiveIntQuery(r, "limit", 50))
+	if err != nil {
+		if store.Mode() == "off" {
+			jobs = nil
+		} else {
+			h.writeError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": jobs, "count": len(jobs)})
 }
 
 func (h *Handler) resolveMemoryWorkspace(r *http.Request, bodyWorkspace string) (string, error) {

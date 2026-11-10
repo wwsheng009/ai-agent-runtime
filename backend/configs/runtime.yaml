@@ -73,6 +73,16 @@ memory:
   # storePath: ""          # 默认 <workspace>/.aicli/memory/memory.db
   manual:
     enabled: true
+  generation:
+    enabled: true
+    trigger: idle          # idle | session_end | both | manual；长 gateway 推荐 both
+    minIdleHours: 6
+    maxSessionsPerRun: 2
+    maxRolloutAgeDays: 30
+    includeSubagents: false
+    model: ""
+    reasoningEffort: low
+    maxRecordsPerSession: 20
   injection:
     enabled: true
     mode: notes          # notes | hybrid | summary

@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -191,6 +192,7 @@ type localChatRuntimeHost struct {
 	ActorRegistry     *localActorRegistry
 	Supervision       *runtimeserver.SupervisionControlPlane
 	SubagentBatches   subagentbatch.BatchStore
+	MemoryRuntime     *memoryruntime.Runtime
 	supervisionWake   *supervision.WakeConsumer
 	supervisionConfig supervision.Config
 	// executionSupervisor / executionSupervisorStop 是 P0-4 的 CLI 本地
@@ -1477,13 +1479,18 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		ledgerDSN:          strings.TrimSpace(cfg.Database.DSN),
 		ledgerEnabled:      cfg.SkillsRuntime != nil && cfg.SkillsRuntime.UsageLedgerEnabled,
 	}
+	if err := host.initializeMemoryRuntime(session); err != nil {
+		logpkg.Warnf("initialize chat memory runtime failed: %v", err)
+	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
+	host.startMemoryIdleSweep()
 	// Codex-compatible session-scoped SessionEnd: turn-level SessionEnd keeps
 	// scope=turn; this hook fires once when the session is closed.
 	session.SessionManager.SetSessionCloseHook(func(ctx context.Context, closed *runtimechat.Session) {
 		if closed == nil {
 			return
 		}
+		host.triggerMemorySessionEnd(closed.ID)
 		merged := mergeActivePluginHooks(runtimeConfig.Hooks)
 		if len(merged) == 0 {
 			return
