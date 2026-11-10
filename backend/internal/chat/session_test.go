@@ -79,6 +79,19 @@ func TestSessionAddMessageInheritsTurnID(t *testing.T) {
 	}
 }
 
+func TestSessionActivityIgnoresSystemMessages(t *testing.T) {
+	session := NewSession("test-user")
+	session.AddMessage(*types.NewSystemMessage("instruction"))
+	if !session.LastActivityAt.IsZero() {
+		t.Fatalf("system instruction moved activity time: %s", session.LastActivityAt)
+	}
+
+	session.AddMessage(*types.NewUserMessage("real prompt"))
+	if session.LastActivityAt.IsZero() {
+		t.Fatal("user message must move activity time")
+	}
+}
+
 func TestSessionEnsureMessageIdentitiesBackfillsLegacyHistory(t *testing.T) {
 	session := NewSession("test-user")
 	// Bypass AddMessage to simulate pre-Phase-6 persisted history.

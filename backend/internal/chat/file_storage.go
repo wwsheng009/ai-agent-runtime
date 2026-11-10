@@ -1031,10 +1031,11 @@ func sortSessionsByUpdated(sessions []*Session) {
 		if right == nil {
 			return true
 		}
-		if !left.UpdatedAt.Equal(right.UpdatedAt) {
-			return left.UpdatedAt.After(right.UpdatedAt)
+		leftAt, rightAt := left.ActivityAt(), right.ActivityAt()
+		if !leftAt.Equal(rightAt) {
+			return leftAt.After(rightAt)
 		}
-		// Match SQLite ORDER BY updated_at DESC, id ASC so equal-time rows stay deterministic.
+		// Match SQLite ORDER BY last_activity_at DESC, id ASC so equal-time rows stay deterministic.
 		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
 }

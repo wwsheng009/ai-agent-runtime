@@ -1396,7 +1396,7 @@ func TestHandleChatWebAPISessions_OrderingCurrentNotPinned(t *testing.T) {
 	//   - 默认（无 sort 参数）与 ?sort=created_at：按创建时间降序
 	//   - ?sort=updated_at：按更新时间降序
 	// 两种模式下当前会话都不置顶（带 current 标记但不排第一）。
-	// 构造 CreatedAt 与 UpdatedAt 顺序不同的会话（oldest 最后再 Save 一次），
+	// 构造 CreatedAt 与最后活动时间顺序不同的会话（oldest 最后再追加一条消息），
 	// 使两种排序产生不同结果，验证排序参数真实生效。
 	storage := runtimechat.NewInMemoryStorage()
 	manager := runtimechat.NewSessionManager(storage, nil)
@@ -1422,7 +1422,9 @@ func TestHandleChatWebAPISessions_OrderingCurrentNotPinned(t *testing.T) {
 	current := mk("current-mid")          // 创建于中间，设为当前会话
 	newestCreated := mk("newest-created") // CreatedAt 最新
 	time.Sleep(2 * time.Millisecond)
-	// 再 Save 一次 oldestCreated：其 UpdatedAt 变成最新，与 CreatedAt 顺序相反。
+	// 给 oldestCreated 追加新消息：最后活动时间变成最新，与 CreatedAt 顺序相反。
+	// 单纯 Save/元数据同步不得改变活动时间（这正是本次修复的语义）。
+	oldestCreated.AddMessage(*runtimetypes.NewUserMessage("newer activity"))
 	if err := storage.Save(ctx, oldestCreated); err != nil {
 		t.Fatalf("storage.Save(oldestCreated): %v", err)
 	}
@@ -1487,7 +1489,7 @@ func TestHandleChatWebAPISessions_OrderingCurrentNotPinned(t *testing.T) {
 	createdOrder := []string{newestCreated.ID, current.ID, oldestCreated.ID}
 	assertOrder("", createdOrder)
 	assertOrder("created_at", createdOrder)
-	// 更新时间降序：oldestCreated（最后 Save）> newest > current。
+	// 活动时间降序：oldestCreated（最后追加消息）> newest > current。
 	assertOrder("updated_at", []string{oldestCreated.ID, newestCreated.ID, current.ID})
 }
 

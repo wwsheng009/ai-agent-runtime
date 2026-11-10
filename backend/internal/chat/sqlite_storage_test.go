@@ -482,6 +482,9 @@ func TestSQLiteSessionStorageArchivesIdleSessionsInBatches(t *testing.T) {
 	}
 	_, err := store.db.ExecContext(ctx, `UPDATE sessions SET state = ? WHERE id = ?`, StateClosed, ids[3])
 	require.NoError(t, err)
+	var preservedUpdatedAt string
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT updated_at FROM sessions WHERE id = ?`, ids[0]).Scan(&preservedUpdatedAt))
 
 	archived, err := store.ArchiveIdleSessions(ctx, time.Now().Add(-time.Hour), 2)
 	require.NoError(t, err)
@@ -496,12 +499,52 @@ func TestSQLiteSessionStorageArchivesIdleSessionsInBatches(t *testing.T) {
 	require.Equal(t, 3, idleCount)
 	require.Equal(t, 1, activeCount)
 	require.Equal(t, 1, closedCount)
+	// Idle detection is maintenance: it must not turn the row into a fresh
+	// "activity" timestamp and jump the session to the top of every list.
+	var afterUpdatedAt string
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT updated_at FROM sessions WHERE id = ?`, ids[0]).Scan(&afterUpdatedAt))
+	require.Equal(t, preservedUpdatedAt, afterUpdatedAt)
 	stats, err := store.GetStatistics(ctx, "idle-batch-user")
 	require.NoError(t, err)
 	require.Equal(t, 5, stats.Total)
 	require.Equal(t, 3, stats.Idle)
 	require.Equal(t, 1, stats.Active)
 	require.Equal(t, 1, stats.Closed)
+}
+
+func TestSQLiteSessionStorageListUsesMessageActivityNotRowUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, nil)
+
+	session := NewSession("activity-list-user")
+	session.AddMessage(*types.NewUserMessage("hello"))
+	require.NoError(t, store.Save(ctx, session))
+
+	var messageActivity string
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT created_at FROM session_messages
+		WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+	`, session.ID).Scan(&messageActivity))
+	expectedActivity, err := time.Parse(time.RFC3339Nano, messageActivity)
+	require.NoError(t, err)
+
+	// Simulate a maintenance write that pollutes the row timestamp. The list's
+	// user-visible activity must stay anchored to the canonical message row.
+	rowUpdatedAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE sessions SET state = ?, updated_at = ? WHERE id = ?`,
+		StateIdle, rowUpdatedAt, session.ID)
+	require.NoError(t, err)
+
+	listed, err := store.ListMetadataPage(ctx, "activity-list-user", 10, 0)
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	require.Equal(t, StateIdle, listed[0].State)
+	require.True(t, listed[0].ActivityAt().Equal(expectedActivity),
+		"activity=%s want message=%s", listed[0].ActivityAt(), expectedActivity)
+	require.True(t, listed[0].UpdatedAt.After(listed[0].ActivityAt()),
+		"row timestamp should remain independent from activity")
 }
 
 func TestSQLiteSessionStorageCleansMoreThanOneExpiredBatch(t *testing.T) {

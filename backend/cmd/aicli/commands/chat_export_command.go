@@ -845,7 +845,7 @@ func writeChatSessionMarkdownExport(path string, session *ChatSession, runtimeSe
 	}
 	fmt.Fprintf(file, "# %s\n\n- Session: %s\n- State: %s\n- Created: %s\n- Updated: %s\n\n## Conversation\n",
 		markdownPlainLine(title), strings.TrimSpace(runtimeSession.ID), runtimeSession.State,
-		formatChatExportTime(runtimeSession.CreatedAt), formatChatExportTime(runtimeSession.UpdatedAt))
+		formatChatExportTime(runtimeSession.CreatedAt), formatChatExportTime(runtimeSession.ActivityAt()))
 	// trace 模式需要先按 tool_call_id 索引工具结果，才能在助手消息的工具调用块
 	// 里内联输出（结果消息在调用消息之后到达，单遍流式无法回填）。
 	toolOutputs := chatExportToolOutputIndex{}
@@ -1291,7 +1291,7 @@ func renderChatSessionBodyMarkdown(session *runtimechat.Session) string {
 		builder.WriteString(formatChatExportTime(session.CreatedAt))
 		builder.WriteString("\n")
 		builder.WriteString("- Updated: ")
-		builder.WriteString(formatChatExportTime(session.UpdatedAt))
+		builder.WriteString(formatChatExportTime(session.ActivityAt()))
 		builder.WriteString("\n\n")
 	}
 	builder.WriteString("## Conversation\n")

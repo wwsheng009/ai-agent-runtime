@@ -1307,7 +1307,7 @@ func formatResumeSessionCompletionSummary(session *runtimechat.Session, now time
 		title,
 		turnCount,
 		messageCount,
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		formatSessionUpdatedAt(session.ActivityAt(), now),
 	)
 }
 

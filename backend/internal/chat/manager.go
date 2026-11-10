@@ -823,8 +823,14 @@ func (m *SessionManager) ArchiveIdleSessions() {
 
 	for _, session := range sessions {
 		if session.State == StateActive && session.UpdatedAt.Before(idleThreshold) {
+			// The idle transition is maintenance, not user activity. Preserve
+			// UpdatedAt so a sweep cannot jump the session to the top of
+			// recency-sorted lists; the store's Update path would otherwise
+			// stamp "now" on every storage backend.
+			session.PreserveUpdatedAt = true
 			session.UpdateState(StateIdle)
-			m.storage.Update(ctx, session)
+			_ = m.storage.Update(ctx, session)
+			session.PreserveUpdatedAt = false
 		}
 	}
 }

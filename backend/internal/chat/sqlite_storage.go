@@ -40,6 +40,22 @@ import (
 // 单连接；更糟的是“选得出、删不掉”的脏行会让循环无限重扫（见 Cleanup 注释）。
 const sqliteSessionSchemaVersion = 3
 
+// sqliteSessionSelectColumns is the metadata projection used by session reads.
+// last_activity_at is derived from the newest canonical message instead of
+// sessions.updated_at: the latter is a row-maintenance timestamp (idle sweep,
+// metadata sync, TTL bookkeeping) and must not drive user-visible recency.
+const sqliteSessionSelectColumns = `id, user_id, state, title, title_source, summary, message_count,
+	head_offset, tags_json, metadata_json, created_at, updated_at, expires_at,
+	COALESCE(
+		(SELECT m.created_at
+		   FROM session_messages m
+		  WHERE m.session_id = sessions.id
+		    AND LOWER(COALESCE(m.role, '')) <> 'system'
+		  ORDER BY m.seq DESC
+		  LIMIT 1),
+		created_at
+	) AS last_activity_at`
+
 type SQLiteSessionStorage struct {
 	db  *sql.DB
 	cfg PersistentSessionStorageConfig
@@ -1836,8 +1852,7 @@ func (s *SQLiteSessionStorage) LoadMetadata(ctx context.Context, sessionID strin
 	}
 	// 只读：走读池（WAL 下与写并发；读池不可用时自动回落写池）。
 	session, err := scanSQLiteSession(s.readPoolHandle().QueryRowContext(ctx, `
-		SELECT id, user_id, state, title, title_source, summary, message_count,
-		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
+		SELECT `+sqliteSessionSelectColumns+`
 		FROM sessions WHERE id = ?
 	`, sessionID))
 	if err == sql.ErrNoRows {
@@ -1858,12 +1873,12 @@ func scanSQLiteSession(row rowScanner) (*Session, error) {
 	var state string
 	var title, titleSource, summary string
 	var tagsJSON, metadataJSON []byte
-	var createdAt, updatedAt string
+	var createdAt, updatedAt, lastActivityAt string
 	var expiresAt sql.NullString
 	if err := row.Scan(
 		&session.ID, &session.UserID, &state, &title, &titleSource, &summary,
 		&session.CanonicalMessageCount, &session.HeadOffset, &tagsJSON,
-		&metadataJSON, &createdAt, &updatedAt, &expiresAt,
+		&metadataJSON, &createdAt, &updatedAt, &expiresAt, &lastActivityAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1882,6 +1897,7 @@ func scanSQLiteSession(row rowScanner) (*Session, error) {
 	}
 	session.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	session.LastActivityAt, _ = time.Parse(time.RFC3339Nano, lastActivityAt)
 	if expiresAt.Valid && strings.TrimSpace(expiresAt.String) != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, expiresAt.String)
 		if err != nil {
@@ -2733,8 +2749,7 @@ func (s *SQLiteSessionStorage) AddMessageWithLimit(ctx context.Context, sessionI
 
 func loadSQLiteSessionMetadataTx(ctx context.Context, tx *sql.Tx, sessionID string) (*Session, error) {
 	return scanSQLiteSession(tx.QueryRowContext(ctx, `
-		SELECT id, user_id, state, title, title_source, summary, message_count,
-		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
+		SELECT `+sqliteSessionSelectColumns+`
 		FROM sessions WHERE id = ?
 	`, sanitizeSessionID(sessionID)))
 }
@@ -3098,9 +3113,8 @@ func (s *SQLiteSessionStorage) ListAll(ctx context.Context, limit, offset int) (
 
 func (s *SQLiteSessionStorage) listMetadata(ctx context.Context, where string, args []interface{}, limit, offset int) ([]*Session, error) {
 	query := `
-		SELECT id, user_id, state, title, title_source, summary, message_count,
-		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
-		FROM sessions ` + where + ` ORDER BY updated_at DESC, id ASC`
+		SELECT ` + sqliteSessionSelectColumns + `
+		FROM sessions ` + where + ` ORDER BY last_activity_at DESC, id ASC`
 	if limit > 0 {
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, limit, max(offset, 0))
@@ -3130,10 +3144,19 @@ func (s *SQLiteSessionStorage) ListPreviews(ctx context.Context, userID string, 
 	}
 	// 只读：走读池（列表预览不得被写事务排队）。
 	rows, err := s.readPoolHandle().QueryContext(ctx, `
-		SELECT id, user_id, state, title, summary, message_count,
-		       tags_json, created_at, updated_at
-		FROM sessions WHERE user_id = ?
-		ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?
+		SELECT s.id, s.user_id, s.state, s.title, s.summary, s.message_count,
+		       s.tags_json, s.created_at, s.updated_at,
+		       COALESCE(
+		           (SELECT m.created_at
+		              FROM session_messages m
+		             WHERE m.session_id = s.id
+		               AND LOWER(COALESCE(m.role, '')) <> 'system'
+		             ORDER BY m.seq DESC
+		             LIMIT 1),
+		           s.created_at
+		       ) AS last_activity_at
+		FROM sessions s WHERE s.user_id = ?
+		ORDER BY last_activity_at DESC, s.id ASC LIMIT ? OFFSET ?
 	`, userID, limit, max(offset, 0))
 	if err != nil {
 		return nil, err
@@ -3142,15 +3165,16 @@ func (s *SQLiteSessionStorage) ListPreviews(ctx context.Context, userID string, 
 	previews := make([]*SessionPreview, 0, limit)
 	for rows.Next() {
 		var preview SessionPreview
-		var state, createdAt, updatedAt string
+		var state, createdAt, updatedAt, lastActivityAt string
 		var tagsJSON []byte
 		if err := rows.Scan(&preview.ID, &preview.UserID, &state, &preview.Title,
-			&preview.Summary, &preview.MessageCount, &tagsJSON, &createdAt, &updatedAt); err != nil {
+			&preview.Summary, &preview.MessageCount, &tagsJSON, &createdAt, &updatedAt, &lastActivityAt); err != nil {
 			return nil, fmt.Errorf("scan sqlite session preview: %w", err)
 		}
 		preview.State = SessionState(state)
 		preview.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 		preview.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		preview.LastActivityAt, _ = time.Parse(time.RFC3339Nano, lastActivityAt)
 		if len(tagsJSON) > 0 {
 			if err := json.Unmarshal(tagsJSON, &preview.Tags); err != nil {
 				return nil, fmt.Errorf("decode sqlite session preview tags: %w", err)
@@ -3380,18 +3404,21 @@ func (s *SQLiteSessionStorage) ArchiveIdleSessions(ctx context.Context, before t
 		batchSize = 128
 	}
 	archived := 0
-	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for {
+		// Do not touch updated_at here. This is a maintenance state transition,
+		// not user activity; sessions.updated_at is also the TTL fallback, and
+		// treating a sweep as a fresh write both reorders every list and extends
+		// retention behind the operator's back.
 		result, err := s.db.ExecContext(ctx, `
 			UPDATE sessions
-			SET state = ?, updated_at = ?
+			SET state = ?
 			WHERE id IN (
 				SELECT id FROM sessions
 				WHERE state = ? AND updated_at < ?
 				ORDER BY updated_at ASC, id ASC
 				LIMIT ?
 			)
-		`, StateIdle, updatedAt, StateActive, before.UTC().Format(time.RFC3339Nano), batchSize)
+		`, StateIdle, StateActive, before.UTC().Format(time.RFC3339Nano), batchSize)
 		if err != nil {
 			return archived, fmt.Errorf("archive idle sqlite sessions: %w", err)
 		}

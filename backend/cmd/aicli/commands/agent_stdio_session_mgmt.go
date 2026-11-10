@@ -316,8 +316,8 @@ func acpSessionSummaryForStore(session *runtimechat.Session) acp.SessionSummary 
 		Cwd:       acpSessionCwd(session),
 		Title:     strings.TrimSpace(session.Metadata.Title),
 	}
-	if !session.UpdatedAt.IsZero() {
-		summary.UpdatedAt = session.UpdatedAt.UTC().Format(time.RFC3339)
+	if activityAt := session.ActivityAt(); !activityAt.IsZero() {
+		summary.UpdatedAt = activityAt.UTC().Format(time.RFC3339)
 	}
 	return summary
 }
@@ -445,8 +445,8 @@ func acpSessionInfoValues(chat *ChatSession) (string, string) {
 		if trimmed := strings.TrimSpace(chat.RuntimeSession.Metadata.Title); trimmed != "" {
 			title = trimmed
 		}
-		if !chat.RuntimeSession.UpdatedAt.IsZero() {
-			updatedAt = chat.RuntimeSession.UpdatedAt.UTC().Format(time.RFC3339)
+		if activityAt := chat.RuntimeSession.ActivityAt(); !activityAt.IsZero() {
+			updatedAt = activityAt.UTC().Format(time.RFC3339)
 		}
 	}
 	return title, updatedAt

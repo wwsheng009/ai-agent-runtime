@@ -2271,8 +2271,9 @@ func sortChatSessionsByRecency(sessions []*runtimechat.Session) {
 		if right == nil {
 			return true
 		}
-		if !left.UpdatedAt.Equal(right.UpdatedAt) {
-			return left.UpdatedAt.After(right.UpdatedAt)
+		leftAt, rightAt := left.ActivityAt(), right.ActivityAt()
+		if !leftAt.Equal(rightAt) {
+			return leftAt.After(rightAt)
 		}
 		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
@@ -3454,7 +3455,7 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Tim
 	}
 	header += fmt.Sprintf(" 协议=%s 最后更新=%s 轮次=%d 消息=%d",
 		blankToDash(protocol),
-		formatSessionUpdatedAt(session.UpdatedAt, now),
+		formatSessionUpdatedAt(session.ActivityAt(), now),
 		turnCount,
 		messageCount,
 	)
@@ -3493,14 +3494,14 @@ func renderRuntimeResumeCurrentSessionLine(session *runtimechat.Session, now tim
 			generation,
 			turnCount,
 			messageCount,
-			formatSessionRelativeTime(session.UpdatedAt, now),
+			formatSessionRelativeTime(session.ActivityAt(), now),
 		)
 	}
 	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
 		title,
 		turnCount,
 		messageCount,
-		formatSessionRelativeTime(session.UpdatedAt, now),
+		formatSessionRelativeTime(session.ActivityAt(), now),
 	)
 }
 
@@ -3523,14 +3524,14 @@ func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time,
 			generation,
 			turnCount,
 			messageCount,
-			formatSessionRelativeTime(session.UpdatedAt, now),
+			formatSessionRelativeTime(session.ActivityAt(), now),
 		)
 	}
 	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
 		title,
 		turnCount,
 		messageCount,
-		formatSessionRelativeTime(session.UpdatedAt, now),
+		formatSessionRelativeTime(session.ActivityAt(), now),
 	)
 }
 

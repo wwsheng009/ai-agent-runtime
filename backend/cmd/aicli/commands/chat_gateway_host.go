@@ -100,7 +100,7 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 		preview = strings.TrimSpace(p.Summary)
 	}
 	lastRole, lastMessage := chatGatewayLastMessage(session)
-	updatedAt := session.RuntimeSession.UpdatedAt
+	updatedAt := session.RuntimeSession.ActivityAt()
 	summary := wire.SessionSummary{
 		SessionID:       id,
 		Title:           chatMeshSessionTitle(session),

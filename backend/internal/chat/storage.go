@@ -547,8 +547,9 @@ func (s *InMemoryStorage) sortSessionsByUpdated(sessions []*Session) {
 		if right == nil {
 			return true
 		}
-		if !left.UpdatedAt.Equal(right.UpdatedAt) {
-			return left.UpdatedAt.After(right.UpdatedAt)
+		leftAt, rightAt := left.ActivityAt(), right.ActivityAt()
+		if !leftAt.Equal(rightAt) {
+			return leftAt.After(rightAt)
 		}
 		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})

@@ -459,10 +459,14 @@ func printTransferExportWizardSummary(out io.Writer, target string, source *runt
 }
 
 func transferExportSessionTime(session *runtimechat.Session) string {
-	if session == nil || session.UpdatedAt.IsZero() {
+	if session == nil {
 		return "unknown"
 	}
-	return session.UpdatedAt.Format("2006-01-02 15:04")
+	activityAt := session.ActivityAt()
+	if activityAt.IsZero() {
+		return "unknown"
+	}
+	return activityAt.Format("2006-01-02 15:04")
 }
 
 func transferExportSessionPreview(session *runtimechat.Session, summary string) string {

@@ -1355,7 +1355,9 @@ func buildChatWebSessionListItem(s *runtimechat.Session, current bool) chatWebSe
 		item.Summary = strings.TrimSpace(preview.Summary)
 		item.MessageCount = preview.MessageCount
 		item.CreatedAt = preview.CreatedAt
-		item.UpdatedAt = preview.UpdatedAt
+		// updated_at is the sidebar's activity sort key. Use the message-derived
+		// activity time so idle sweeps and metadata syncs cannot reorder it.
+		item.UpdatedAt = preview.ActivityAt()
 	}
 	if item.Title == "" {
 		item.Title = "(untitled)"

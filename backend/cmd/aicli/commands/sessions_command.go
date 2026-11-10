@@ -94,6 +94,8 @@ const sessionsCommandLongHelp = `列出 chat 会话（默认仅当前工作目�
                             {ok:false,command:"sessions",error}。
   --json 的每条会话现在带 launch_entry / launch_args / launch_argv / launch_cwd /
   launch_binary / launch_command / launch_recorded_at（未记录时字段缺省）。
+  updated_at 是最后一条会话消息的活动时间；row_updated_at 是持久化会话行的
+  修改时间（空闲扫描、元数据同步等维护写只影响后者，不影响 updated_at）。
 
 退出码：
   0 = 列出成功（含 0 条结果）
@@ -181,7 +183,11 @@ type sessionsCommandItem struct {
 	Workspace    string    `json:"workspace,omitempty"`
 	MessageCount int       `json:"message_count"`
 	CreatedAt    time.Time `json:"created_at"`
+	// UpdatedAt is the user-visible last conversational activity time. The
+	// persisted sessions.updated_at row timestamp is reported separately as
+	// RowUpdatedAt for diagnostics; maintenance writes must not move UpdatedAt.
 	UpdatedAt    time.Time `json:"updated_at"`
+	RowUpdatedAt time.Time `json:"row_updated_at"`
 	// 启动参数（launch_*）：交互界面与 gateway/mesh 用它把同一个会话按原样
 	// 在新终端里重新拉起；老会话没有记录时全部为零值。
 	LaunchEntry    string    `json:"launch_entry,omitempty"`
@@ -371,7 +377,8 @@ func buildSessionsCommandItems(sessions []*runtimechat.Session) []sessionsComman
 			Workspace:    runtimeSessionWorkspacePath(session),
 			MessageCount: session.MessageCount(),
 			CreatedAt:    session.CreatedAt,
-			UpdatedAt:    session.UpdatedAt,
+			UpdatedAt:    session.ActivityAt(),
+			RowUpdatedAt: session.UpdatedAt,
 		}
 		if preview := session.BuildPreview(); preview != nil {
 			item.Title = strings.TrimSpace(preview.Title)
@@ -424,7 +431,7 @@ func renderSessionsCommandText(result sessionsCommandResult, sessions []*runtime
 		// 兜底放在末尾。其余诊断字段（状态、协议、provider/model、消息数、摘要全文）
 		// 走 --json。
 		row := strings.Join([]string{
-			formatSessionUpdatedAt(session.UpdatedAt, now),
+			formatSessionUpdatedAt(session.ActivityAt(), now),
 			id,
 			sessionsCommandBrief(session),
 			blankToDash(runtimeSessionWorkspacePath(session)),

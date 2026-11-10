@@ -4976,7 +4976,7 @@ func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, reco
 				if session.State == runtimechat.StateClosed || session.State == runtimechat.StateArchived {
 					observation.SessionTerminal = true
 				}
-				observation.SessionIdleSince = session.UpdatedAt
+				observation.SessionIdleSince = session.ActivityAt()
 			}
 		}
 		if sessionID != "" {

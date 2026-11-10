@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
@@ -127,6 +128,54 @@ func TestSessionsCommandAllSpansEveryWorkspace(t *testing.T) {
 	for _, id := range ids {
 		require.True(t, listed[id], "会话 %s 必须在 --all 列表里", id)
 	}
+}
+
+func TestSessionsCommandUsesActivityTimeNotRowMaintenanceTime(t *testing.T) {
+	t.Setenv("AICLI_HOME", t.TempDir())
+	sessionDir := t.TempDir()
+	workspace := t.TempDir()
+
+	manager, userID, _, err := newChatSessionManagerWithRuntimeConfig(
+		sessionDir, nil, "", sessionsCommandTestUser)
+	require.NoError(t, err)
+	ctx := context.Background()
+	session, err := manager.Create(ctx, userID)
+	require.NoError(t, err)
+	session.SetContext(sessionmeta.WorkspacePath, workspace)
+	session.UpdateTitle("activity time")
+	session.AddMessage(*runtimetypes.NewUserMessage("hello"))
+	require.NoError(t, manager.Update(ctx, session))
+
+	// Simulate an old maintenance bug: the row timestamp is far newer than the
+	// last canonical message. The user-visible list must keep the message time.
+	loaded, err := manager.Get(ctx, session.ID)
+	require.NoError(t, err)
+	maintenanceAt := time.Date(2099, 1, 2, 3, 4, 5, 0, time.UTC)
+	loaded.UpdatedAt = maintenanceAt
+	loaded.PreserveUpdatedAt = true
+	require.NoError(t, manager.Update(ctx, loaded))
+	manager.Stop()
+
+	pinSessionsCommandWorkspace(t, workspace)
+	result, sessions, err := collectSessionsCommandResult(&config.Config{}, sessionsCommandRequest{
+		All:        true,
+		SessionDir: sessionDir,
+		User:       sessionsCommandTestUser,
+		Limit:      10,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Sessions, 1)
+	item := result.Sessions[0]
+	require.True(t, item.RowUpdatedAt.Equal(maintenanceAt),
+		"row_updated_at must preserve the persisted maintenance timestamp")
+	require.True(t, item.UpdatedAt.Before(item.RowUpdatedAt),
+		"updated_at must come from message activity, got %s vs row %s", item.UpdatedAt, item.RowUpdatedAt)
+	require.False(t, item.UpdatedAt.IsZero())
+
+	out := captureSessionsCommandStdout(t, func() {
+		renderSessionsCommandText(result, sessions)
+	})
+	require.NotContains(t, out, "2099-01-02", "text list must not render the row-maintenance timestamp")
 }
 
 func TestSessionsCommandQueryAndLimitFilterTheAllScope(t *testing.T) {

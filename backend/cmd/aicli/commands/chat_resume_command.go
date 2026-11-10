@@ -577,7 +577,7 @@ func buildResumeFullScreenItemWithCounts(session *runtimechat.Session, now time.
 		// Row order: relative time, conversation size, title. The workspace path
 		// and the remaining metadata moved to the detail block under the list so a
 		// long path can no longer push the title out of the row.
-		Leading:    fmt.Sprintf("%s 【%s】", formatSessionRelativeTime(session.UpdatedAt, now), rowCounts),
+		Leading:    fmt.Sprintf("%s 【%s】", formatSessionRelativeTime(session.ActivityAt(), now), rowCounts),
 		Title:      title,
 		Preview:    buildResumePickerDetailPreview(session, now, summary, detailCounts),
 		SearchText: searchText,
@@ -613,9 +613,9 @@ func buildResumePickerDetailPreview(session *runtimechat.Session, now time.Time,
 	if id := strings.TrimSpace(session.ID); id != "" {
 		identity = append(identity, "会话 "+id)
 	}
-	if !session.UpdatedAt.IsZero() {
+	if activityAt := session.ActivityAt(); !activityAt.IsZero() {
 		// Absolute timestamp belongs here, not in the row: the list stays scannable.
-		identity = append(identity, "更新 "+formatSessionUpdatedAt(session.UpdatedAt, now))
+		identity = append(identity, "更新 "+formatSessionUpdatedAt(activityAt, now))
 	}
 	if strings.TrimSpace(countsLabel) != "" {
 		identity = append(identity, countsLabel)

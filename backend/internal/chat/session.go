@@ -73,6 +73,12 @@ type Session struct {
 	UpdatedAt             time.Time       `json:"updatedAt" yaml:"updatedAt"`
 	ExpiresAt             *time.Time      `json:"expiresAt,omitempty" yaml:"expiresAt,omitempty"`
 
+	// LastActivityAt is the user-visible conversation activity time. SQLite
+	// populates it from the newest canonical message row; other backends may
+	// leave it zero and fall back to UpdatedAt via ActivityAt. It is transient:
+	// maintenance updates (idle sweeps, metadata syncs) must not move it.
+	LastActivityAt time.Time `json:"-" yaml:"-"`
+
 	// PreserveUpdatedAt 是瞬态标志（不持久化）：置为 true 时，本会话的
 	// UpdatedAt 不会被各 mutator 和存储层 Save/Update 强制刷新。
 	// 仅用于"纯切换/恢复"路径（如 /resume、/load），避免仅仅查看一个会话
@@ -126,7 +132,10 @@ type SessionPreview struct {
 	MessageCount int          `json:"messageCount" yaml:"messageCount"`
 	CreatedAt    time.Time    `json:"createdAt" yaml:"createdAt"`
 	UpdatedAt    time.Time    `json:"updatedAt" yaml:"updatedAt"`
-	Tags         []string     `json:"tags,omitempty" yaml:"tags,omitempty"`
+	// LastActivityAt is the last conversational activity time. UpdatedAt stays
+	// the persisted row-modification time for diagnostics and TTL decisions.
+	LastActivityAt time.Time `json:"lastActivityAt,omitempty" yaml:"lastActivityAt,omitempty"`
+	Tags           []string  `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 
 // NewSession 创建新会话
@@ -150,6 +159,31 @@ func NewSession(userID string) *Session {
 	}
 }
 
+// ActivityAt reports the user-visible last activity time. It deliberately
+// prefers the read-time derived LastActivityAt so row maintenance (idle sweep,
+// metadata sync, tag/title edits) cannot move a session to the top of the list.
+// Backends that do not derive it fall back to the legacy UpdatedAt value.
+func (s *Session) ActivityAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	if !s.LastActivityAt.IsZero() {
+		return s.LastActivityAt
+	}
+	return s.UpdatedAt
+}
+
+// ActivityAt is the preview-side counterpart of Session.ActivityAt.
+func (p *SessionPreview) ActivityAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	if !p.LastActivityAt.IsZero() {
+		return p.LastActivityAt
+	}
+	return p.UpdatedAt
+}
+
 // AddMessage 添加消息到会话
 func (s *Session) AddMessage(msg types.Message) {
 	prevTurnID := ""
@@ -165,6 +199,9 @@ func (s *Session) AddMessage(msg types.Message) {
 	s.History = append(s.History, msg)
 	s.HistoryLoaded = true
 	s.CanonicalMessageCount++
+	if !strings.EqualFold(strings.TrimSpace(msg.Role), "system") {
+		s.LastActivityAt = time.Now()
+	}
 	if s.HeadOffset > 0 {
 		if s.HeadOffset < prevLen {
 			s.HeadOffset++
@@ -789,14 +826,15 @@ func (s *Session) BuildPreview() *SessionPreview {
 	}
 
 	preview := &SessionPreview{
-		ID:           s.ID,
-		UserID:       s.UserID,
-		State:        s.State,
-		Title:        title,
-		Summary:      summary,
-		MessageCount: s.MessageCount(),
-		CreatedAt:    s.CreatedAt,
-		UpdatedAt:    s.UpdatedAt,
+		ID:             s.ID,
+		UserID:         s.UserID,
+		State:          s.State,
+		Title:          title,
+		Summary:        summary,
+		MessageCount:   s.MessageCount(),
+		CreatedAt:      s.CreatedAt,
+		UpdatedAt:      s.UpdatedAt,
+		LastActivityAt: s.ActivityAt(),
 	}
 	if len(s.Metadata.Tags) > 0 {
 		preview.Tags = append([]string(nil), s.Metadata.Tags...)
@@ -895,6 +933,7 @@ func (s *Session) CloneWithoutHistory() *Session {
 		Metadata:                   s.Metadata,
 		CreatedAt:                  s.CreatedAt,
 		UpdatedAt:                  s.UpdatedAt,
+		LastActivityAt:             s.LastActivityAt,
 		ExpiresAt:                  expiresAt,
 		PreserveUpdatedAt:          s.PreserveUpdatedAt,
 		HistoryTruncated:           s.HistoryTruncated,
