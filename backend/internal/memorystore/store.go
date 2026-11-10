@@ -11,8 +11,10 @@ package memorystore
 import (
 	"bufio"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,6 +67,20 @@ type Config struct {
 	// ProfileMemoryDir is an optional profile-scoped memory directory
 	// (e.g. <profile>/memory). Used when ProjectRoot is empty or as fallback.
 	ProfileMemoryDir string
+
+	// V2 long-term memory. Mode="" is normalized to "off" so existing
+	// callers keep the JSONL-only behavior.
+	Mode       string
+	StorePath  string
+	ProjectKey string
+
+	// DisableManual keeps the existing manual note path closed when v2 is on.
+	DisableManual bool
+	// DisableInjection turns off v2 stable/recall injection without disabling
+	// manual storage.
+	DisableInjection  bool
+	InjectionMode     string
+	PinnedBudgetRatio float64
 }
 
 // Store is a file-backed durable project memory.
@@ -72,6 +88,13 @@ type Store struct {
 	mu   sync.RWMutex
 	root string
 	path string
+	cfg  Config
+
+	v2Path string
+	v2Mu   sync.Mutex
+	db     *sql.DB
+	v2Err  error
+	closed bool
 }
 
 // ResolveRoot picks the durable memory directory.
@@ -93,6 +116,7 @@ func ResolveRoot(projectRoot, profileMemoryDir string) string {
 
 // New creates a store rooted at cfg.Root or a resolved default path.
 func New(cfg Config) (*Store, error) {
+	cfg = normalizeConfig(cfg)
 	root := strings.TrimSpace(cfg.Root)
 	if root == "" {
 		root = ResolveRoot(cfg.ProjectRoot, cfg.ProfileMemoryDir)
@@ -105,8 +129,10 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("memorystore: create root %s: %w", root, err)
 	}
 	return &Store{
-		root: root,
-		path: filepath.Join(root, DefaultNotesFile),
+		root:   root,
+		path:   filepath.Join(root, DefaultNotesFile),
+		cfg:    cfg,
+		v2Path: resolveV2Path(cfg, root),
 	}, nil
 }
 
@@ -132,6 +158,10 @@ type AppendNoteOptions struct {
 	Tags      []string
 	Source    string
 	SessionID string
+	// M1 manual mapping. Zero values map to reference/manual/active/fresh.
+	Kind   string
+	Scope  string
+	Pinned *bool
 	// ID optional; generated when empty.
 	ID string
 	// CreatedAt optional; defaults to now UTC.
@@ -140,6 +170,25 @@ type AppendNoteOptions struct {
 
 // Append writes one note to durable storage.
 func (s *Store) Append(opts AppendNoteOptions) (Note, error) {
+	if s == nil {
+		return Note{}, fmt.Errorf("memorystore: store is nil")
+	}
+	if s.cfg.DisableManual {
+		return Note{}, fmt.Errorf("memorystore: manual memory is disabled")
+	}
+	if s != nil && s.v2Configured() {
+		note, err := s.appendV2(opts)
+		if err == nil {
+			return note, nil
+		}
+		if !errors.Is(err, errV2Unavailable) {
+			return Note{}, err
+		}
+	}
+	return s.appendLegacy(opts)
+}
+
+func (s *Store) appendLegacy(opts AppendNoteOptions) (Note, error) {
 	if s == nil {
 		return Note{}, fmt.Errorf("memorystore: store is nil")
 	}
@@ -190,6 +239,19 @@ func (s *Store) Append(opts AppendNoteOptions) (Note, error) {
 
 // List loads notes newest-first. limit <= 0 returns all.
 func (s *Store) List(limit int) ([]Note, error) {
+	if s != nil && s.v2Configured() {
+		notes, err := s.listV2(limit)
+		if err == nil {
+			return notes, nil
+		}
+		if !errors.Is(err, errV2Unavailable) {
+			return nil, err
+		}
+	}
+	return s.listLegacy(limit)
+}
+
+func (s *Store) listLegacy(limit int) ([]Note, error) {
 	notes, err := s.loadAll()
 	if err != nil {
 		return nil, err
@@ -213,6 +275,19 @@ type SearchOptions struct {
 
 // Search ranks notes by simple keyword overlap. Empty query returns recent notes.
 func (s *Store) Search(opts SearchOptions) ([]SearchHit, error) {
+	if s != nil && s.v2Configured() {
+		hits, err := s.searchV2(opts)
+		if err == nil {
+			return hits, nil
+		}
+		if !errors.Is(err, errV2Unavailable) {
+			return nil, err
+		}
+	}
+	return s.searchLegacy(opts)
+}
+
+func (s *Store) searchLegacy(opts SearchOptions) ([]SearchHit, error) {
 	notes, err := s.loadAll()
 	if err != nil {
 		return nil, err
@@ -255,13 +330,23 @@ func (s *Store) Search(opts SearchOptions) ([]SearchHit, error) {
 
 // InjectOptions configures context injection selection.
 type InjectOptions struct {
-	Query       string
-	Limit       int
-	TokenBudget int
+	Query         string
+	Limit         int
+	TokenBudget   int
+	SessionID     string
+	TurnID        string
+	ProjectKey    string
+	Mode          string
+	InjectionMode string
+	Now           time.Time
 }
 
 // SelectForInject returns top-k notes for session start / turn context, under a token budget.
 func (s *Store) SelectForInject(opts InjectOptions) ([]Note, error) {
+	return s.selectForInjectLegacy(opts)
+}
+
+func (s *Store) selectForInjectLegacy(opts InjectOptions) ([]Note, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = DefaultInjectLimit
