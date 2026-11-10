@@ -80,6 +80,7 @@ type Config struct {
 	// manual storage.
 	DisableInjection  bool
 	InjectionMode     string
+	DisableStageSplit bool
 	PinnedBudgetRatio float64
 }
 

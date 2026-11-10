@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
@@ -60,6 +61,7 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
 		InjectionMode:     memoryCfg.Injection.Mode,
 		PinnedBudgetRatio: memoryCfg.Injection.PinnedBudgetRatio,
+		DisableStageSplit: !memoryCfg.Injection.StageSplit,
 		DisableInjection:  !memoryCfg.Injection.Enabled,
 		DisableManual:     !memoryCfg.Manual.Enabled,
 	})
@@ -71,14 +73,21 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 		Mode: mode, GenerationDisabled: !generation.Enabled,
 		Workspace: workspace, ProjectKey: store.ProjectKey(),
 		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
-		MinIdle:                   time.Duration(generation.MinIdleHours) * time.Hour,
-		MaxSessionsPerRun:         generation.MaxSessionsPerRun,
-		MaxRolloutAge:             time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
-		MaxCandidatesPerSession:   generation.MaxRecordsPerSession,
-		MaxAttempts:               3,
-		ExtractionModel:           generation.Model,
-		ExtractionReasoningEffort: generation.ReasoningEffort,
-		WorkerID:                  fmt.Sprintf("runtime-server-%d", os.Getpid()),
+		MinIdle:                    time.Duration(generation.MinIdleHours) * time.Hour,
+		MaxSessionsPerRun:          generation.MaxSessionsPerRun,
+		MaxRolloutAge:              time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
+		MaxCandidatesPerSession:    generation.MaxRecordsPerSession,
+		MaxAttempts:                3,
+		ConsolidationDisabled:      !memoryCfg.Consolidation.Enabled,
+		ConsolidationInterval:      time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
+		MaxConsolidationRecords:    memoryCfg.Consolidation.MaxRecords,
+		MaxConsolidationUnusedDays: memoryCfg.Consolidation.MaxUnusedDays,
+		SummaryTokenBudget:         memoryCfg.Consolidation.SummaryTokenBudget,
+		CitationEnabled:            memoryCfg.Feedback.CitationEnabled,
+		ExposureSampling:           memoryCfg.Feedback.ExposureSampling,
+		ExtractionModel:            generation.Model,
+		ExtractionReasoningEffort:  generation.ReasoningEffort,
+		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
 	}
 	source := &memoryruntime.ChatSessionSource{Manager: h.sessionManager}
 	extractor := &memoryruntime.LLMExtractor{Runtime: h.llmRuntime, Config: cfg}
@@ -142,5 +151,76 @@ func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		_, _ = runtime.RunSession(ctx, memoryruntime.TriggerSessionEnd, sessionID)
+		if runtime.Config.ConsolidationDisabled {
+			return
+		}
+		consolidator := memoryruntime.NewConsolidator(runtime.Store, runtime.Config)
+		if _, err := consolidator.Run(ctx); err != nil {
+			return
+		}
 	}()
+}
+
+func (h *Handler) RunMemoryConsolidation(ctx context.Context) (memoryruntime.ConsolidationResult, error) {
+	runtime := h.MemoryRuntime()
+	if runtime == nil {
+		var err error
+		runtime, err = h.EnableMemoryRuntime()
+		if err != nil {
+			return memoryruntime.ConsolidationResult{}, err
+		}
+	}
+	if runtime == nil || runtime.Store == nil {
+		return memoryruntime.ConsolidationResult{}, nil
+	}
+	consolidator := memoryruntime.NewConsolidator(runtime.Store, runtime.Config)
+	return consolidator.Run(ctx)
+}
+
+func (h *Handler) RunMemoryConsolidationForWorkspace(ctx context.Context, workspace string) (memoryruntime.ConsolidationResult, error) {
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		return memoryruntime.ConsolidationResult{}, err
+	}
+	defer store.Close()
+	mode := "off"
+	consolidation := runtimecfg.MemoryConsolidationConfig{}
+	if h.runtimeConfig != nil {
+		mode = strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
+		consolidation = h.runtimeConfig.Memory.Consolidation
+	}
+	consolidator := memoryruntime.NewConsolidator(store, memoryruntime.Config{
+		Mode: mode, ProjectKey: store.ProjectKey(),
+		ConsolidationDisabled:      !consolidation.Enabled,
+		ConsolidationInterval:      time.Duration(consolidation.IntervalHours) * time.Hour,
+		MaxConsolidationRecords:    consolidation.MaxRecords,
+		MaxConsolidationUnusedDays: consolidation.MaxUnusedDays,
+		SummaryTokenBudget:         consolidation.SummaryTokenBudget,
+		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
+	})
+	return consolidator.Run(ctx)
+}
+
+func (h *Handler) RebuildMemorySummariesForWorkspace(ctx context.Context, workspace string) (memoryruntime.ConsolidationResult, error) {
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		return memoryruntime.ConsolidationResult{}, err
+	}
+	defer store.Close()
+	mode := "off"
+	consolidation := runtimecfg.MemoryConsolidationConfig{}
+	if h.runtimeConfig != nil {
+		mode = strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
+		consolidation = h.runtimeConfig.Memory.Consolidation
+	}
+	consolidator := memoryruntime.NewConsolidator(store, memoryruntime.Config{
+		Mode: mode, ProjectKey: store.ProjectKey(),
+		ConsolidationDisabled:      !consolidation.Enabled,
+		ConsolidationInterval:      time.Duration(consolidation.IntervalHours) * time.Hour,
+		MaxConsolidationRecords:    consolidation.MaxRecords,
+		MaxConsolidationUnusedDays: consolidation.MaxUnusedDays,
+		SummaryTokenBudget:         consolidation.SummaryTokenBudget,
+		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
+	})
+	return consolidator.RebuildStaleSummaries(ctx)
 }

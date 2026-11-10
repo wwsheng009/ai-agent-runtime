@@ -680,6 +680,43 @@ WHERE id = ? AND project_key = ?
 	return record, nil
 }
 
+// MarkConflictOpenQuestion records a non-destructive ambiguity marker. Both
+// records stay active; consolidation must not silently choose one.
+func (s *Store) MarkConflictOpenQuestion(ctx context.Context, ids []string, reason string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "ambiguous_conflict"
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	records := make([]Record, 0, len(ids))
+	for _, id := range uniqueStrings(ids) {
+		record, err := s.GetRecord(ctx, id)
+		if err != nil {
+			return err
+		}
+		records = append(records, record)
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, record := range records {
+		if err := insertEventTx(ctx, tx, record.ID, "open_question", "consolidation", record.SourceSessionID, record.Revision, map[string]interface{}{
+			"reason": reason,
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteRecord(ctx context.Context, id string) error {
 	db, err := s.ensureV2()
 	if err != nil {

@@ -217,3 +217,60 @@ func TestMemoryAPIManualExtract(t *testing.T) {
 	require.Equal(t, http.StatusOK, jobsRec.Code, jobsRec.Body.String())
 	require.Contains(t, jobsRec.Body.String(), "phase1_extract")
 }
+
+func TestMemoryAPIConsolidateSummariesAndUsage(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	candidate, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s1", Kind: "decision", Text: "Use append-only memory writes.",
+		Confidence: 0.9, SourceHash: "hash-api", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+
+	consolidateReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/consolidate", strings.NewReader(`{}`))
+	consolidateReq.Header.Set("Content-Type", "application/json")
+	consolidateReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	consolidateRec := httptest.NewRecorder()
+	router.ServeHTTP(consolidateRec, consolidateReq)
+	require.Equal(t, http.StatusOK, consolidateRec.Code, consolidateRec.Body.String())
+	require.Contains(t, consolidateRec.Body.String(), `"revision":1`)
+
+	summariesReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/summaries", nil)
+	summariesRec := httptest.NewRecorder()
+	router.ServeHTTP(summariesRec, summariesReq)
+	require.Equal(t, http.StatusOK, summariesRec.Code, summariesRec.Body.String())
+	var summaries memorySummaryListResponse
+	require.NoError(t, json.NewDecoder(summariesRec.Body).Decode(&summaries))
+	require.Equal(t, 1, summaries.Count)
+	require.Equal(t, int64(1), summaries.Items[0].Revision)
+
+	_, err = store.RecordExposure(context.Background(), memorystore.Exposure{
+		MemoryIDs: []string{candidate.ID}, SessionID: "s1", TurnID: "turn1",
+		UseKind: memorystore.UsageInjectedOnly,
+	})
+	require.NoError(t, err)
+	usageReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/usage?memory_id="+candidate.ID, nil)
+	usageReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	usageRec := httptest.NewRecorder()
+	router.ServeHTTP(usageRec, usageReq)
+	require.Equal(t, http.StatusOK, usageRec.Code, usageRec.Body.String())
+	var usage memoryUsageListResponse
+	require.NoError(t, json.NewDecoder(usageRec.Body).Decode(&usage))
+	require.Equal(t, 1, usage.Count)
+	require.Equal(t, memorystore.UsageInjectedOnly, usage.Items[0].UseKind)
+
+	corrected := "Use revisioned memory writes."
+	_, err = store.UpdateRecord(context.Background(), candidate.ID, memorystore.RecordPatch{Text: &corrected})
+	require.NoError(t, err)
+	rebuildReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/summaries/rebuild", strings.NewReader(`{}`))
+	rebuildReq.Header.Set("Content-Type", "application/json")
+	rebuildReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	rebuildRec := httptest.NewRecorder()
+	router.ServeHTTP(rebuildRec, rebuildReq)
+	require.Equal(t, http.StatusOK, rebuildRec.Code, rebuildRec.Body.String())
+	require.Contains(t, rebuildRec.Body.String(), `"rebuilt":1`)
+
+	require.NoError(t, store.Close())
+}

@@ -22,27 +22,34 @@ const (
 )
 
 type Config struct {
-	Mode                      string
-	GenerationDisabled        bool
-	Workspace                 string
-	ProjectKey                string
-	IncludeSubagents          bool
-	RequireWorkspaceMatch     bool
-	MinIdle                   time.Duration
-	MaxRolloutAge             time.Duration
-	MaxSessionsPerRun         int
-	MaxSourceMessages         int
-	MaxSourceBytes            int
-	MaxToolOutputRunes        int
-	MaxCandidatesPerSession   int
-	MaxCandidateTextRunes     int
-	MaxTagsPerCandidate       int
-	MaxAttempts               int
-	Lease                     time.Duration
-	WorkerID                  string
-	ExtractionModel           string
-	ExtractionProvider        string
-	ExtractionReasoningEffort string
+	Mode                       string
+	GenerationDisabled         bool
+	Workspace                  string
+	ProjectKey                 string
+	IncludeSubagents           bool
+	RequireWorkspaceMatch      bool
+	MinIdle                    time.Duration
+	MaxRolloutAge              time.Duration
+	MaxSessionsPerRun          int
+	MaxSourceMessages          int
+	MaxSourceBytes             int
+	MaxToolOutputRunes         int
+	MaxCandidatesPerSession    int
+	MaxCandidateTextRunes      int
+	MaxTagsPerCandidate        int
+	MaxAttempts                int
+	ConsolidationDisabled      bool
+	ConsolidationInterval      time.Duration
+	MaxConsolidationRecords    int
+	MaxConsolidationUnusedDays int
+	SummaryTokenBudget         int
+	CitationEnabled            bool
+	ExposureSampling           float64
+	Lease                      time.Duration
+	WorkerID                   string
+	ExtractionModel            string
+	ExtractionProvider         string
+	ExtractionReasoningEffort  string
 }
 
 func (c Config) normalized() Config {
@@ -72,6 +79,18 @@ func (c Config) normalized() Config {
 	}
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = 3
+	}
+	if c.MaxConsolidationRecords <= 0 {
+		c.MaxConsolidationRecords = 256
+	}
+	if c.MaxConsolidationUnusedDays <= 0 {
+		c.MaxConsolidationUnusedDays = 30
+	}
+	if c.SummaryTokenBudget <= 0 {
+		c.SummaryTokenBudget = 800
+	}
+	if c.ConsolidationInterval <= 0 {
+		c.ConsolidationInterval = 24 * time.Hour
 	}
 	if c.Lease <= 0 {
 		c.Lease = 5 * time.Minute
@@ -170,4 +189,16 @@ type RunResult struct {
 	Failed     int
 	Ignored    []string
 	Errors     []string
+}
+
+type ConsolidationResult struct {
+	Promoted      int
+	Superseded    int
+	SummaryID     string
+	Revision      int64
+	SummaryText   string
+	TokenCount    int
+	Rebuilt       int
+	RebuildJobs   int
+	OpenQuestions int
 }

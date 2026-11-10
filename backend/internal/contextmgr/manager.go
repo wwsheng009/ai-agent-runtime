@@ -93,6 +93,12 @@ type ProjectMemoryV2Store interface {
 	V2InjectionEnabled() bool
 }
 
+// ProjectMemoryStageSplitStore reports whether stable summary/pinned and
+// query-specific recall should remain separate context stages.
+type ProjectMemoryStageSplitStore interface {
+	MemoryStageSplitEnabled() bool
+}
+
 // LedgerStore 约束持久 ledger/checkpoint 所需的最小能力。
 type LedgerStore interface {
 	InsertMemoryEntry(ctx context.Context, entry artifact.MemoryEntry) (string, error)

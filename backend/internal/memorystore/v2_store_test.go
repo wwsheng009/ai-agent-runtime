@@ -10,7 +10,7 @@ import (
 
 func TestMemoryStoreV2AppendListSearchAndReopen(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(Config{Root: root, Mode: "on"})
+	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -110,7 +110,7 @@ not-json
 
 func TestMemoryStoreSummaryGateAndInvalidation(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(Config{Root: root, Mode: "on"})
+	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestMemoryStoreSummaryGateAndInvalidation(t *testing.T) {
 
 func TestMemoryStorePinnedBudgetSurvivesSummaryFull(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(Config{Root: root, Mode: "on", PinnedBudgetRatio: 0.2})
+	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary", PinnedBudgetRatio: 0.2})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -211,7 +211,7 @@ func boolPtr(value bool) *bool       { return &value }
 
 func TestMemoryStoreSessionModePersists(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(Config{Root: root, Mode: "on"})
+	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestMemoryStoreDeletedHashNotRecreated(t *testing.T) {
 
 func TestMemoryStoreSummaryGateRejectsMissingItems(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(Config{Root: root, Mode: "on"})
+	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -287,5 +287,105 @@ func TestResolveProjectKeyStable(t *testing.T) {
 	second := ResolveProjectKey(root + string(filepath.Separator) + ".")
 	if first == "" || first != second {
 		t.Fatalf("project key mismatch: %q vs %q", first, second)
+	}
+}
+
+func TestMemoryStoreInjectionModes(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	pinned, err := store.Append(AppendNoteOptions{Text: "stable pinned decision", Kind: "decision"})
+	if err != nil {
+		t.Fatalf("Append pinned: %v", err)
+	}
+	recall, err := store.InsertCandidate(context.Background(), Candidate{
+		SessionID: "s1", Text: "queryTarget workflow", Kind: "workflow",
+		Confidence: 0.9, SourceHash: "hash-recall", SourceRevision: 1,
+	})
+	if err != nil {
+		t.Fatalf("InsertCandidate recall: %v", err)
+	}
+	activeStatus := StatusActive
+	if _, err := store.UpdateRecord(context.Background(), recall.ID, RecordPatch{Status: &activeStatus}); err != nil {
+		t.Fatalf("activate recall: %v", err)
+	}
+	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: "stable summary", TokenEstimate: 20}, []string{pinned.ID}); err != nil {
+		t.Fatalf("createSummary: %v", err)
+	}
+	selection, err := store.SelectForInjectV2(InjectOptions{Query: "queryTarget", Limit: 5, TokenBudget: 800})
+	if err != nil || selection.Summary == nil || len(selection.Recall) != 0 {
+		t.Fatalf("summary mode = %+v, %v", selection, err)
+	}
+	store.cfg.InjectionMode = "hybrid"
+	selection, err = store.SelectForInjectV2(InjectOptions{Query: "queryTarget", Limit: 5, TokenBudget: 800})
+	if err != nil || selection.Summary == nil || len(selection.Recall) != 1 || selection.Recall[0].ID != recall.ID {
+		t.Fatalf("hybrid mode = %+v, %v", selection, err)
+	}
+	store.cfg.InjectionMode = "notes"
+	selection, err = store.SelectForInjectV2(InjectOptions{Query: "queryTarget", Limit: 5, TokenBudget: 800})
+	if err != nil || selection.Summary != nil || len(selection.Recall) != 1 || selection.Recall[0].ID != recall.ID {
+		t.Fatalf("notes mode = %+v, %v", selection, err)
+	}
+}
+
+func TestMemoryStoreSummaryCompileFailurePreservesOldRevision(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	note, err := store.Append(AppendNoteOptions{Text: "stable decision"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	first, err := store.CompileSummary(context.Background(), Summary{Text: "revision one"}, []string{note.ID})
+	if err != nil {
+		t.Fatalf("CompileSummary first: %v", err)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "broken"}, []string{"mem_missing"}); err == nil {
+		t.Fatal("compile with missing item must fail")
+	}
+	active, err := store.ActiveSummary(context.Background())
+	if err != nil || active == nil || active.ID != first.ID || active.Revision != 1 || active.Freshness != FreshnessFresh {
+		t.Fatalf("old summary was not preserved: %+v, %v", active, err)
+	}
+}
+
+func TestMemoryStoreCorrectionSupersedesAndSuppresses(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	old, err := store.Append(AppendNoteOptions{Text: "Use the legacy memory writer.", Kind: "decision"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: "legacy summary"}, []string{old.ID}); err != nil {
+		t.Fatalf("createSummary: %v", err)
+	}
+	corrected, err := store.CorrectRecord(context.Background(), old.ID, "Use the revisioned memory writer.")
+	if err != nil {
+		t.Fatalf("CorrectRecord: %v", err)
+	}
+	if corrected.Kind != "correction" || corrected.SupersedesID != old.ID || corrected.SourceKind != "manual" {
+		t.Fatalf("unexpected correction record: %+v", corrected)
+	}
+	superseded, err := store.GetRecord(context.Background(), old.ID)
+	if err != nil || superseded.Status != StatusSuperseded {
+		t.Fatalf("old record = %+v, %v", superseded, err)
+	}
+	summary, err := store.ActiveSummary(context.Background())
+	if err != nil || summary == nil || summary.Freshness != FreshnessStale {
+		t.Fatalf("summary after correction = %+v, %v", summary, err)
+	}
+	if _, err := store.Append(AppendNoteOptions{Text: "Use the legacy memory writer.", Kind: "decision"}); err == nil {
+		t.Fatal("corrected content must be suppressed from recreation")
+	}
+	page, err := store.ListRecords(context.Background(), RecordFilter{Status: StatusActive, Limit: 10})
+	if err != nil || page.Count != 1 || page.Items[0].ID != corrected.ID {
+		t.Fatalf("active records = %+v, %v", page, err)
 	}
 }

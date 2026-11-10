@@ -86,22 +86,22 @@ type Record struct {
 }
 
 type Summary struct {
-	ID             string
-	Scope          Scope
-	ProjectKey     string
-	SummaryKind    string
-	Revision       int64
-	Status         string
-	Freshness      Freshness
-	Text           string
-	TokenEstimate  int
-	SourceCount    int
-	InputWatermark string
-	GeneratedAt    time.Time
-	Model          string
-	ContentHash    string
-	RecordIDs      []string
-	Metadata       map[string]interface{}
+	ID             string                 `json:"id"`
+	Scope          Scope                  `json:"scope"`
+	ProjectKey     string                 `json:"project_key"`
+	SummaryKind    string                 `json:"summary_kind"`
+	Revision       int64                  `json:"revision"`
+	Status         string                 `json:"status"`
+	Freshness      Freshness              `json:"freshness_status"`
+	Text           string                 `json:"text"`
+	TokenEstimate  int                    `json:"token_estimate"`
+	SourceCount    int                    `json:"source_count"`
+	InputWatermark string                 `json:"input_watermark,omitempty"`
+	GeneratedAt    time.Time              `json:"generated_at"`
+	Model          string                 `json:"model,omitempty"`
+	ContentHash    string                 `json:"content_hash,omitempty"`
+	RecordIDs      []string               `json:"record_ids,omitempty"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type DroppedRecord struct {
@@ -120,25 +120,25 @@ const (
 )
 
 type MemoryJob struct {
-	ID                   string
-	Kind                 string
-	JobKey               string
-	Scope                Scope
-	ProjectKey           string
-	Status               JobStatus
-	Priority             int
-	WorkerID             string
-	LeaseUntil           time.Time
-	Attempt              int
-	MaxAttempts          int
-	RetryAt              time.Time
-	StartedAt            time.Time
-	FinishedAt           time.Time
-	LastError            string
-	InputWatermark       string
-	LastSuccessWatermark string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                   string    `json:"id"`
+	Kind                 string    `json:"kind"`
+	JobKey               string    `json:"job_key"`
+	Scope                Scope     `json:"scope"`
+	ProjectKey           string    `json:"project_key"`
+	Status               JobStatus `json:"status"`
+	Priority             int       `json:"priority"`
+	WorkerID             string    `json:"worker_id,omitempty"`
+	LeaseUntil           time.Time `json:"lease_until,omitempty"`
+	Attempt              int       `json:"attempt"`
+	MaxAttempts          int       `json:"max_attempts"`
+	RetryAt              time.Time `json:"retry_at,omitempty"`
+	StartedAt            time.Time `json:"started_at,omitempty"`
+	FinishedAt           time.Time `json:"finished_at,omitempty"`
+	LastError            string    `json:"last_error,omitempty"`
+	InputWatermark       string    `json:"input_watermark,omitempty"`
+	LastSuccessWatermark string    `json:"last_success_watermark,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type ClaimJobOptions struct {

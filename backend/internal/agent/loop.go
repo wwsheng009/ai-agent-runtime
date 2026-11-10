@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +33,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
@@ -2516,6 +2518,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	action = &AgentAction{}
 	managedHistory := history
 	promptPrefixRewritten := false
+	contextMemoryIDs := []string{}
+	var projectMemoryStore *memorystore.Store
 	countTokens := func(messages []types.Message) int {
 		if loop == nil || loop.llmRuntime == nil {
 			return 0
@@ -2524,6 +2528,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	manager := loop.agent.GetContextManager()
 	if manager != nil {
+		if store, ok := manager.ProjectMemory.(*memorystore.Store); ok {
+			projectMemoryStore = store
+		}
 		taskID := sessionID
 		teamID := ""
 		var profileContext map[string]interface{}
@@ -2561,6 +2568,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			KnowledgeWrite: loop.knowledgeWriteIntent(goal),
 		})
 		managedHistory = built.Messages
+		contextMemoryIDs = memoryIDsFromContextMetadata(built.Metadata)
 		promptPrefixRewritten = promptHistoryPrefixChanged(history, managedHistory)
 		action.Metadata = map[string]interface{}{
 			"context": built.Metadata,
@@ -3319,6 +3327,24 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		return "", nil, discarded, err
 	}
 	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
+	if response != nil && strings.TrimSpace(response.Content) != "" {
+		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && len(contextMemoryIDs) > 0 &&
+			answerExposureEnabled(loop.agent.config.Options) {
+			exposure, exposureErr := projectMemoryStore.RecordAnswerExposure(ctx, memorystore.AnswerExposureInput{
+				Answer: response.Content, SessionID: sessionID,
+				TurnID: firstNonEmptyTrimmed(TurnIDFromContext(ctx), traceID), MessageID: llmRequestID,
+				InjectedIDs: contextMemoryIDs,
+			})
+			if exposureErr == nil {
+				response.Content = exposure.CleanText
+			} else {
+				// Exposure is best-effort and must never block the answer.
+				response.Content = memorystore.ParseMemoryCitations(response.Content, contextMemoryIDs).CleanText
+			}
+		} else {
+			response.Content = memorystore.ParseMemoryCitations(response.Content, contextMemoryIDs).CleanText
+		}
+	}
 	cacheBreaker.ObserveSuccess(promptFingerprintFromRequest(req))
 	// 同一时刻恢复 provider 健康。成功只在半开探测期才真正闭合电路（见
 	// providerhealth 的状态机），所以这里无条件上报是安全的：故障期的零星成功
@@ -3537,6 +3563,63 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 	}
 	return thought, action, usage, nil
+}
+
+func memoryIDsFromContextMetadata(metadata map[string]interface{}) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	for _, key := range []string{"project_memory_ids", "memory_ids"} {
+		switch values := metadata[key].(type) {
+		case []string:
+			for _, id := range values {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		case []interface{}:
+			for _, value := range values {
+				id, _ := value.(string)
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				if _, ok := seen[id]; ok {
+					continue
+				}
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func answerExposureEnabled(options map[string]interface{}) bool {
+	if options == nil {
+		return true
+	}
+	if value, ok := options["memory_citation_enabled"]; ok && !boolValue(value) {
+		return false
+	}
+	if _, ok := options["memory_exposure_sampling"]; ok {
+		ratio, _ := contextOptionFloat(options, "memory_exposure_sampling")
+		if ratio <= 0 {
+			return false
+		}
+		if ratio < 1 && rand.Float64() >= ratio {
+			return false
+		}
+	}
+	return true
 }
 
 // act 行动阶段：执行工具调用

@@ -114,12 +114,14 @@ type AgentConfig struct {
 // MemoryConfig 是跨会话长期记忆 v2 的配置。它与 Agent.EnableMemory
 // （进程内 observation memory）独立；默认 mode=off，不改变既有行为。
 type MemoryConfig struct {
-	Mode       string                 `yaml:"mode" json:"mode"`
-	Scope      string                 `yaml:"scope" json:"scope"`
-	StorePath  string                 `yaml:"storePath" json:"storePath"`
-	Manual     MemoryManualConfig     `yaml:"manual" json:"manual"`
-	Generation MemoryGenerationConfig `yaml:"generation" json:"generation"`
-	Injection  MemoryInjectionConfig  `yaml:"injection" json:"injection"`
+	Mode          string                    `yaml:"mode" json:"mode"`
+	Scope         string                    `yaml:"scope" json:"scope"`
+	StorePath     string                    `yaml:"storePath" json:"storePath"`
+	Manual        MemoryManualConfig        `yaml:"manual" json:"manual"`
+	Generation    MemoryGenerationConfig    `yaml:"generation" json:"generation"`
+	Consolidation MemoryConsolidationConfig `yaml:"consolidation" json:"consolidation"`
+	Injection     MemoryInjectionConfig     `yaml:"injection" json:"injection"`
+	Feedback      MemoryFeedbackConfig      `yaml:"feedback" json:"feedback"`
 }
 
 type MemoryManualConfig struct {
@@ -138,6 +140,15 @@ type MemoryGenerationConfig struct {
 	MaxRecordsPerSession int    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
 }
 
+type MemoryConsolidationConfig struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Model              string `yaml:"model" json:"model"`
+	MaxRecords         int    `yaml:"maxRecords" json:"maxRecords"`
+	MaxUnusedDays      int    `yaml:"maxUnusedDays" json:"maxUnusedDays"`
+	SummaryTokenBudget int    `yaml:"summaryTokenBudget" json:"summaryTokenBudget"`
+	IntervalHours      int    `yaml:"intervalHours" json:"intervalHours"`
+}
+
 type MemoryInjectionConfig struct {
 	Enabled           bool    `yaml:"enabled" json:"enabled"`
 	Mode              string  `yaml:"mode" json:"mode"`
@@ -145,6 +156,12 @@ type MemoryInjectionConfig struct {
 	TokenBudget       int     `yaml:"tokenBudget" json:"tokenBudget"`
 	PinnedBudgetRatio float64 `yaml:"pinnedBudgetRatio" json:"pinnedBudgetRatio"`
 	StageSplit        bool    `yaml:"stageSplit" json:"stageSplit"`
+}
+
+type MemoryFeedbackConfig struct {
+	CitationEnabled       bool    `yaml:"citationEnabled" json:"citationEnabled"`
+	ExposureSampling      float64 `yaml:"exposureSampling" json:"exposureSampling"`
+	ExposureRetentionDays int     `yaml:"exposureRetentionDays" json:"exposureRetentionDays"`
 }
 
 // agents.singleWriterMode values: "enforce" (default) keeps the process-wide
@@ -1124,6 +1141,10 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				ReasoningEffort:      "low",
 				MaxRecordsPerSession: 20,
 			},
+			Consolidation: MemoryConsolidationConfig{
+				Enabled: true, MaxRecords: 256, MaxUnusedDays: 30,
+				SummaryTokenBudget: 800, IntervalHours: 24,
+			},
 			Injection: MemoryInjectionConfig{
 				Enabled:           true,
 				Mode:              "notes",
@@ -1131,6 +1152,11 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				TokenBudget:       600,
 				PinnedBudgetRatio: 0.20,
 				StageSplit:        true,
+			},
+			Feedback: MemoryFeedbackConfig{
+				CitationEnabled:       true,
+				ExposureSampling:      1.0,
+				ExposureRetentionDays: 30,
 			},
 		},
 	}
@@ -1576,11 +1602,21 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 		config.Generation.MaxRolloutAgeDays < 0 || config.Generation.MaxRecordsPerSession < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.generation limits cannot be negative")
 	}
+	if config.Consolidation.MaxRecords < 0 || config.Consolidation.MaxUnusedDays < 0 ||
+		config.Consolidation.SummaryTokenBudget < 0 || config.Consolidation.IntervalHours < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.consolidation limits cannot be negative")
+	}
 	if config.Injection.MaxItems < 0 || config.Injection.TokenBudget < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.injection limits cannot be negative")
 	}
 	if config.Injection.PinnedBudgetRatio < 0 || config.Injection.PinnedBudgetRatio > 1 {
 		return errors.New(errors.ErrValidationFailed, "memory.injection.pinnedBudgetRatio must be between 0 and 1")
+	}
+	if config.Feedback.ExposureSampling < 0 || config.Feedback.ExposureSampling > 1 {
+		return errors.New(errors.ErrValidationFailed, "memory.feedback.exposureSampling must be between 0 and 1")
+	}
+	if config.Feedback.ExposureRetentionDays < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.feedback.exposureRetentionDays cannot be negative")
 	}
 	return nil
 }

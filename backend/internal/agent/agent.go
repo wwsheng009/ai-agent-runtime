@@ -1368,6 +1368,9 @@ func memoryConfigFromOptions(options map[string]interface{}, base memorystore.Co
 	if ratio, ok := contextOptionFloat(options, "memory_pinned_budget_ratio"); ok {
 		base.PinnedBudgetRatio = ratio
 	}
+	if stageSplit, ok := options["memory_stage_split"].(bool); ok {
+		base.DisableStageSplit = !stageSplit
+	}
 	if raw, ok := options["memory_injection_enabled"]; ok {
 		switch value := raw.(type) {
 		case bool:

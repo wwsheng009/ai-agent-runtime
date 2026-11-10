@@ -181,6 +181,10 @@ func (s *Store) V2InjectionEnabled() bool {
 	return s.cfg.Mode == "on" && !s.cfg.DisableInjection
 }
 
+func (s *Store) MemoryStageSplitEnabled() bool {
+	return s != nil && !s.cfg.DisableStageSplit
+}
+
 func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 	db, err := s.ensureV2()
 	if err != nil {
@@ -251,6 +255,18 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 }
 
 func (s *Store) insertRecordTx(ctx context.Context, db *sql.DB, record Record, actor, sessionID string) error {
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin record tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.insertRecordSQLTx(ctx, tx, record, actor, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) insertRecordSQLTx(ctx context.Context, tx *sql.Tx, record Record, actor, sessionID string) error {
 	if record.Status == "" {
 		record.Status = StatusActive
 	}
@@ -266,12 +282,6 @@ func (s *Store) insertRecordTx(ctx context.Context, db *sql.DB, record Record, a
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = record.CreatedAt
 	}
-	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
-	if err != nil {
-		return fmt.Errorf("memorystore: begin record tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	var suppressed int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_suppressions
@@ -286,7 +296,7 @@ WHERE scope = ? AND project_key = ? AND content_hash = ?
 	tagsJSON, _ := json.Marshal(record.Tags)
 	refsJSON, _ := json.Marshal(record.SourceRefs)
 	metadataJSON, _ := json.Marshal(record.Metadata)
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 INSERT INTO memory_entries (
     id, scope, project_key, kind, status, text, normalized_text, tags_json,
     confidence, sensitivity, pinned, retention_class, source_kind,
@@ -322,7 +332,7 @@ INSERT INTO memory_entries (
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func insertSourceTx(ctx context.Context, tx *sql.Tx, record Record, sessionID string) error {
@@ -466,39 +476,50 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	if err != nil {
 		return Selection{}, err
 	}
-	selection := Selection{}
-	if summary, err := s.loadGatedActiveSummary(context.Background(), db, now); err == nil && summary != nil {
-		selection.Summary = summary
-		selection.Revision = summary.Revision
-		selection.TokenEstimate += summary.TokenEstimate
+	mode := strings.ToLower(strings.TrimSpace(s.cfg.InjectionMode))
+	if mode != "summary" && mode != "hybrid" && mode != "notes" {
+		mode = "notes"
 	}
+	supportsSummary := mode == "summary" || mode == "hybrid"
+	supportsRecall := mode == "hybrid" || mode == "notes"
+	selection := Selection{}
 	pinnedBudget := int(float64(budget) * s.cfg.PinnedBudgetRatio)
-	used := 0
+	pinnedUsed := 0
 	stableIDs := map[string]struct{}{}
-	pinnedCount := 0
 	for _, record := range records {
 		if !record.Pinned && strings.ToLower(record.SourceKind) != "manual" {
 			continue
 		}
 		cost := EstimateTokens(record.Text) + 8
-		if used > 0 && used+cost > pinnedBudget {
+		if pinnedUsed > 0 && pinnedUsed+cost > pinnedBudget {
 			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
 			continue
 		}
 		selection.Stable = append(selection.Stable, record)
 		stableIDs[record.ID] = struct{}{}
-		used += cost
-		pinnedCount++
-		if pinnedCount >= limit {
-			break
-		}
+		pinnedUsed += cost
 	}
-	if selection.Summary != nil {
-		if selection.TokenEstimate > budget*80/100 {
-			selection.Summary = nil
-		} else {
-			for _, id := range selection.Summary.RecordIDs {
-				stableIDs[id] = struct{}{}
+	summaryUsed := 0
+	if supportsSummary {
+		if summary, err := s.loadGatedActiveSummary(context.Background(), db, now); err == nil && summary != nil {
+			summaryCap := budget
+			switch mode {
+			case "summary":
+				if len(selection.Stable) > 0 {
+					summaryCap = budget * 80 / 100
+				}
+			case "hybrid":
+				summaryCap = budget * 50 / 100
+			}
+			if summary.TokenEstimate <= summaryCap {
+				selection.Summary = summary
+				selection.Revision = summary.Revision
+				summaryUsed = summary.TokenEstimate
+				for _, id := range summary.RecordIDs {
+					stableIDs[id] = struct{}{}
+				}
+			} else {
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: summary.ID, Reason: "summary_budget"})
 			}
 		}
 	}
@@ -514,31 +535,54 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 		}
 		candidates = append(candidates, SearchHit{Note: note, Score: score})
 	}
+	if !supportsRecall {
+		selection.TokenEstimate = summaryUsed + pinnedUsed
+		selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
+		_ = s.recordRecallTrace(opts, selection)
+		return selection, nil
+	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score == candidates[j].Score {
 			return candidates[i].Note.CreatedAt.After(candidates[j].Note.CreatedAt)
 		}
 		return candidates[i].Score > candidates[j].Score
 	})
+	remaining := budget - summaryUsed - pinnedUsed
+	if remaining < 0 {
+		remaining = 0
+	}
+	recallCap := budget * 80 / 100
+	if mode == "hybrid" {
+		recallCap = budget * 30 / 100
+	}
+	recallUsed := 0
 	for _, hit := range candidates {
 		cost := EstimateTokens(hit.Note.Text) + 8
-		if used+cost+selection.TokenEstimate > budget || len(selection.Recall) >= limit {
+		if recallUsed+cost > remaining || recallUsed+cost > recallCap || len(selection.Recall) >= limit {
 			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
 			continue
 		}
 		record := recordByID(records, hit.Note.ID)
 		selection.Recall = append(selection.Recall, record)
-		used += cost
+		recallUsed += cost
 	}
-	selection.TokenEstimate += used
-	for _, record := range selection.Stable {
-		selection.IDs = append(selection.IDs, record.ID)
-	}
+	selection.TokenEstimate = summaryUsed + pinnedUsed + recallUsed
+	selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
 	for _, record := range selection.Recall {
 		selection.IDs = append(selection.IDs, record.ID)
 	}
 	_ = s.recordRecallTrace(opts, selection)
 	return selection, nil
+}
+
+func appendSelectionIDs(ids []string, stable []Record, summary *Summary) []string {
+	for _, record := range stable {
+		ids = append(ids, record.ID)
+	}
+	if summary != nil {
+		ids = append(ids, summary.RecordIDs...)
+	}
+	return uniqueStrings(ids)
 }
 
 func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.Time) ([]Record, error) {

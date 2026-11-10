@@ -33,6 +33,7 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
 		InjectionMode:     memoryCfg.Injection.Mode,
 		PinnedBudgetRatio: memoryCfg.Injection.PinnedBudgetRatio,
+		DisableStageSplit: !memoryCfg.Injection.StageSplit,
 		DisableInjection:  !memoryCfg.Injection.Enabled,
 		DisableManual:     !memoryCfg.Manual.Enabled,
 	})
@@ -44,14 +45,21 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 		Mode: mode, GenerationDisabled: !generation.Enabled,
 		Workspace: workspace, ProjectKey: store.ProjectKey(),
 		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
-		MinIdle:                   time.Duration(generation.MinIdleHours) * time.Hour,
-		MaxSessionsPerRun:         generation.MaxSessionsPerRun,
-		MaxRolloutAge:             time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
-		MaxCandidatesPerSession:   generation.MaxRecordsPerSession,
-		MaxAttempts:               3,
-		ExtractionModel:           generation.Model,
-		ExtractionReasoningEffort: generation.ReasoningEffort,
-		WorkerID:                  fmt.Sprintf("aicli-%d", os.Getpid()),
+		MinIdle:                    time.Duration(generation.MinIdleHours) * time.Hour,
+		MaxSessionsPerRun:          generation.MaxSessionsPerRun,
+		MaxRolloutAge:              time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
+		MaxCandidatesPerSession:    generation.MaxRecordsPerSession,
+		MaxAttempts:                3,
+		ConsolidationDisabled:      !memoryCfg.Consolidation.Enabled,
+		ConsolidationInterval:      time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
+		MaxConsolidationRecords:    memoryCfg.Consolidation.MaxRecords,
+		MaxConsolidationUnusedDays: memoryCfg.Consolidation.MaxUnusedDays,
+		SummaryTokenBudget:         memoryCfg.Consolidation.SummaryTokenBudget,
+		CitationEnabled:            memoryCfg.Feedback.CitationEnabled,
+		ExposureSampling:           memoryCfg.Feedback.ExposureSampling,
+		ExtractionModel:            generation.Model,
+		ExtractionReasoningEffort:  generation.ReasoningEffort,
+		WorkerID:                   fmt.Sprintf("aicli-%d", os.Getpid()),
 	}
 	source := &memoryruntime.ChatSessionSource{
 		Manager: session.SessionManager, UserID: session.SessionUserID,
@@ -68,11 +76,10 @@ func (h *localChatRuntimeHost) startMemoryIdleSweep() {
 		return
 	}
 	generation := h.RuntimeConfig.Memory.Generation
-	if !generation.Enabled {
-		return
-	}
 	trigger := strings.ToLower(strings.TrimSpace(generation.Trigger))
-	if trigger != "idle" && trigger != "both" {
+	idleEnabled := generation.Enabled && (trigger == "idle" || trigger == "both")
+	consolidationEnabled := h.RuntimeConfig.Memory.Consolidation.Enabled
+	if !idleEnabled && !consolidationEnabled {
 		return
 	}
 	go func() {
@@ -83,7 +90,13 @@ func (h *localChatRuntimeHost) startMemoryIdleSweep() {
 			case <-h.lifecycleCtx.Done():
 				return
 			case <-ticker.C:
-				_, _ = h.MemoryRuntime.Run(h.lifecycleCtx, memoryruntime.TriggerIdle)
+				if idleEnabled {
+					_, _ = h.MemoryRuntime.Run(h.lifecycleCtx, memoryruntime.TriggerIdle)
+				}
+				if consolidationEnabled {
+					consolidator := memoryruntime.NewConsolidator(h.MemoryRuntime.Store, h.MemoryRuntime.Config)
+					_, _ = consolidator.Run(h.lifecycleCtx)
+				}
 			}
 		}
 	}()
@@ -105,5 +118,10 @@ func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		_, _ = h.MemoryRuntime.RunSession(ctx, memoryruntime.TriggerSessionEnd, sessionID)
+		if !h.RuntimeConfig.Memory.Consolidation.Enabled {
+			return
+		}
+		consolidator := memoryruntime.NewConsolidator(h.MemoryRuntime.Store, h.MemoryRuntime.Config)
+		_, _ = consolidator.Run(ctx)
 	}()
 }

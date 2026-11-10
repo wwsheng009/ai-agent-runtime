@@ -83,6 +83,13 @@ memory:
     model: ""
     reasoningEffort: low
     maxRecordsPerSession: 20
+  consolidation:
+    enabled: true
+    model: ""              # 空 = 确定性摘要编译
+    maxRecords: 256
+    maxUnusedDays: 30
+    summaryTokenBudget: 800
+    intervalHours: 24
   injection:
     enabled: true
     mode: notes          # notes | hybrid | summary
@@ -90,6 +97,10 @@ memory:
     tokenBudget: 600
     pinnedBudgetRatio: 0.20
     stageSplit: true
+  feedback:
+    citationEnabled: true
+    exposureSampling: 1.0    # citation 解析失败时仍写 injected_only exposure
+    exposureRetentionDays: 30
 
 images:
   cacheMaxAge: 1h

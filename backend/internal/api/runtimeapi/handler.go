@@ -1279,6 +1279,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/recall-traces", h.ListMemoryRecallTraces).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/jobs", h.ListMemoryJobs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/extract", h.ExtractMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/summaries", h.ListMemorySummaries).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/summaries/rebuild", h.RebuildMemorySummaries).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/consolidate", h.ConsolidateMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/usage", h.ListMemoryUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/hooks", h.GetHarnessHooks).Methods(http.MethodGet)
@@ -12696,6 +12700,9 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 		options["memory_injection_enabled"] = config.Memory.Injection.Enabled
 		options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(config.Memory.Injection.Mode))
 		options["memory_pinned_budget_ratio"] = config.Memory.Injection.PinnedBudgetRatio
+		options["memory_stage_split"] = config.Memory.Injection.StageSplit
+		options["memory_citation_enabled"] = config.Memory.Feedback.CitationEnabled
+		options["memory_exposure_sampling"] = config.Memory.Feedback.ExposureSampling
 	}
 	ctxCfg := config.Context
 	if strings.TrimSpace(ctxCfg.Profile) != "" {

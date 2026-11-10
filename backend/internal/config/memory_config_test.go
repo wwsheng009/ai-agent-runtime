@@ -16,10 +16,17 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, 6, cfg.Memory.Generation.MinIdleHours)
 	require.Equal(t, 2, cfg.Memory.Generation.MaxSessionsPerRun)
 	require.Equal(t, 20, cfg.Memory.Generation.MaxRecordsPerSession)
+	require.True(t, cfg.Memory.Consolidation.Enabled)
+	require.Equal(t, 256, cfg.Memory.Consolidation.MaxRecords)
+	require.Equal(t, 800, cfg.Memory.Consolidation.SummaryTokenBudget)
+	require.Equal(t, 24, cfg.Memory.Consolidation.IntervalHours)
 	require.True(t, cfg.Memory.Injection.Enabled)
 	require.Equal(t, "notes", cfg.Memory.Injection.Mode)
 	require.Equal(t, 0.20, cfg.Memory.Injection.PinnedBudgetRatio)
 	require.True(t, cfg.Memory.Injection.StageSplit)
+	require.True(t, cfg.Memory.Feedback.CitationEnabled)
+	require.Equal(t, 1.0, cfg.Memory.Feedback.ExposureSampling)
+	require.Equal(t, 30, cfg.Memory.Feedback.ExposureRetentionDays)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 }
 
@@ -39,10 +46,17 @@ func TestMemoryConfigValidation(t *testing.T) {
 		{"negative max sessions", func(c *MemoryConfig) { c.Generation.MaxSessionsPerRun = -1 }, false},
 		{"negative max rollout", func(c *MemoryConfig) { c.Generation.MaxRolloutAgeDays = -1 }, false},
 		{"negative max records", func(c *MemoryConfig) { c.Generation.MaxRecordsPerSession = -1 }, false},
+		{"negative consolidation records", func(c *MemoryConfig) { c.Consolidation.MaxRecords = -1 }, false},
+		{"negative consolidation unused days", func(c *MemoryConfig) { c.Consolidation.MaxUnusedDays = -1 }, false},
+		{"negative summary budget", func(c *MemoryConfig) { c.Consolidation.SummaryTokenBudget = -1 }, false},
+		{"negative consolidation interval", func(c *MemoryConfig) { c.Consolidation.IntervalHours = -1 }, false},
 		{"negative max items", func(c *MemoryConfig) { c.Injection.MaxItems = -1 }, false},
 		{"negative token budget", func(c *MemoryConfig) { c.Injection.TokenBudget = -1 }, false},
 		{"ratio too high", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = 1.1 }, false},
 		{"ratio negative", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = -0.1 }, false},
+		{"sampling too high", func(c *MemoryConfig) { c.Feedback.ExposureSampling = 1.1 }, false},
+		{"sampling negative", func(c *MemoryConfig) { c.Feedback.ExposureSampling = -0.1 }, false},
+		{"negative exposure retention", func(c *MemoryConfig) { c.Feedback.ExposureRetentionDays = -1 }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := DefaultRuntimeConfig()

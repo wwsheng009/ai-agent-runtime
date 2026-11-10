@@ -3484,6 +3484,9 @@ func applyLocalChatMemoryOptions(agentConfig *agent.Config, runtimeConfig *runti
 	agentConfig.Options["memory_injection_enabled"] = cfg.Injection.Enabled
 	agentConfig.Options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(cfg.Injection.Mode))
 	agentConfig.Options["memory_pinned_budget_ratio"] = cfg.Injection.PinnedBudgetRatio
+	agentConfig.Options["memory_stage_split"] = cfg.Injection.StageSplit
+	agentConfig.Options["memory_citation_enabled"] = cfg.Feedback.CitationEnabled
+	agentConfig.Options["memory_exposure_sampling"] = cfg.Feedback.ExposureSampling
 }
 
 // applyLocalChatKnowledgeOptions 把知识层装配写入本地 chat agent 的 options

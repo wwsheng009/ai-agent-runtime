@@ -10,8 +10,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
-// startRuntimeServerMemoryRuntime wires the M2 write path and starts the idle
-// sweep. mode=off returns (nil,nil) without creating memory.db.
+// startRuntimeServerMemoryRuntime wires the M2 write path and starts the
+// generation/consolidation ticker. mode=off returns (nil,nil) without creating
+// memory.db.
 func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Handler, cfg *runtimecfg.RuntimeConfig) (context.CancelFunc, error) {
 	if handler == nil || cfg == nil {
 		return nil, nil
@@ -28,7 +29,9 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 		return nil, nil
 	}
 	trigger := strings.ToLower(strings.TrimSpace(cfg.Memory.Generation.Trigger))
-	if !cfg.Memory.Generation.Enabled || (trigger != "idle" && trigger != "both") {
+	idleEnabled := cfg.Memory.Generation.Enabled && (trigger == "idle" || trigger == "both")
+	consolidationEnabled := cfg.Memory.Consolidation.Enabled
+	if !idleEnabled && !consolidationEnabled {
 		return nil, nil
 	}
 	sweepCtx, cancel := context.WithCancel(ctx)
@@ -40,8 +43,15 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 			case <-sweepCtx.Done():
 				return
 			case <-ticker.C:
-				if _, err := handler.RunMemoryIdleSweep(sweepCtx); err != nil {
-					logger.Warn("memory idle sweep failed", logger.Err(err))
+				if idleEnabled {
+					if _, err := handler.RunMemoryIdleSweep(sweepCtx); err != nil {
+						logger.Warn("memory idle sweep failed", logger.Err(err))
+					}
+				}
+				if consolidationEnabled {
+					if _, err := handler.RunMemoryConsolidation(sweepCtx); err != nil {
+						logger.Warn("memory consolidation failed", logger.Err(err))
+					}
 				}
 			}
 		}
