@@ -1364,10 +1364,17 @@ func applyMemoryLimitFromEnv() int64
 
 | 环境变量 | 行为 |
 |---|---|
-| 都未设置 | `debug.SetMemoryLimit(512 MiB)` |
+| 都未设置 | `debug.SetMemoryLimit(384 MiB)` + `debug.SetGCPercent(50)` |
 | `AICLI_MEMORY_LIMIT=512MiB` | 解析后设置（支持 KiB/MiB/GiB 与 KB/MB/GB） |
 | `GOMEMLIMIT=...` | 不干预（runtime 自己解析官方变量） |
 | `AICLI_MEMORY_LIMIT=off/none/0/-1` | 关闭上限 |
+| `AICLI_GOGC=50` | 覆盖默认 GC 百分比（支持 `off/none/0/-1` 关闭） |
+| `GOGC=...` | 不干预（runtime 自己解析官方变量） |
+
+> 2026-11-08 更新：在线 pprof 复采显示存活堆 128–209 MB、HeapSys 402–565 MB，
+> 高水位来自 GOGC=100 的 2x 目标而非泄漏。默认因此收紧为 GOMEMLIMIT=384 MiB
+> + GOGC=50，并新增空闲期 `debug.FreeOSMemory` 归还（见
+> `docs/plan/aicli-memory-hotspot-optimization-tracking-20261105.md` §13）。
 
 **为什么可以安全地设成"低于峰值"**：`GOMEMLIMIT` 是软上限，超限不会
 终止进程，只会提高 GC 频率并让 scavenger 更积极地归还内存。最坏代价是

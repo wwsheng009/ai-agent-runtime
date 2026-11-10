@@ -466,3 +466,135 @@ backend/tmp/aicli-mem-hotspot/aicli-4x-hotspotfix.exe   57 MB
 ```
 
 该二进制尚未被现有三个长生命周期进程加载；运行态 RSS/60–120s pprof delta 需重启后验收。
+## 13. 2026-11-08 在线复采：高水位而非泄漏
+
+### 13.1 现场证据
+
+对 8 个运行中的 `aicli*.exe` 做 pprof + MemStats 采样（新二进制 2026-11-08 09:49 构建）：
+
+| PID | 会话/形态 | HeapAlloc | HeapSys | Private | NextGC |
+|---|---|---:|---:|---:|---:|
+| 9852 | resume，5936 canonical messages | 159.2 MB | 422.8 MB | 437.5 MB | 319.4 MB |
+| 18972 | resume，1924 canonical messages | 128.6 MB | 402.2 MB | 429.9 MB | 258.1 MB |
+| 26800 | aicli-4x，旧二进制 11-07 | 209.4 MB | 564.9 MB | 587.8 MB | 364.0 MB |
+
+结论：
+
+- **没有无界泄漏特征**。强制 GC 后 live heap 稳定在 128–209 MB；8 分钟差分中
+  `inuse_space` 仅小幅波动，没有单调增长。
+- **Private 高来自堆高水位**：`HeapAlloc` 只占 `HeapSys` 的 35–40%，剩余是
+  GOGC=100 允许的扩容余量、未完全清空的 in-use span、以及未归还的空闲 span。
+  `HeapReleased` 只有 47–124 MB，Windows 上空闲期不会立刻把 HeapSys 降回。
+- 新二进制稳态分配已从旧版本的数百 GB 降到约 2 MB/s；当前最大剩余热点是
+  `LayoutTranscript`（8 分钟约 240 MB）和 SQLite canonical tail 解码，但它们是
+  分配抖动，不是 live 泄漏。
+
+### 13.2 本轮修复
+
+1. **默认 GOGC 从 100 收紧到 50**（`memory_limit.go`）。
+   - 存活堆 159 MB 时 NextGC 从约 319 MB 降到约 239 MB；
+   - 用户设置 `GOGC` 或 `AICLI_GOGC` 时仍以用户值为准；
+   - `AICLI_GOGC=off/none/0/-1` 保留显式关闭语义。
+2. **默认 GOMEMLIMIT 从 512 MiB 降到 384 MiB**，给超大存活堆一个软边界
+   （GOMEMLIMIT 不会 OOM-kill，超限只提高 GC 频率）。
+3. **新增空闲堆归还循环**（`memory_reclaim.go`）：
+   - 每 30 秒采样一次 `TotalAlloc`；
+   - 连续 2 分钟累计分配 < 4 MiB 且已提交空闲堆 ≥ 64 MiB 时调用一次
+     `debug.FreeOSMemory`；
+   - 10 分钟冷却，避免把主动归还变成周期性全局 GC；
+   - 只在实际空闲时触发，不干扰流式输出与交互输入。
+   - `AICLI_MEMORY_RECLAIM=off`（或 `GOGC=off` 且未用 `AICLI_GOGC`
+     覆盖）可显式关闭。
+
+### 13.3 验证
+
+```text
+go test ./cmd/aicli -count=1                    PASS
+go vet ./cmd/aicli                              PASS
+GOFLAGS=-modfile=go.win7.mod go test ./cmd/aicli PASS
+GOFLAGS=-modfile=go.win7.mod go vet ./cmd/aicli   PASS
+go build -o tmp/aicli-mem-fix/aicli.exe ./cmd/aicli   PASS
+tmp/aicli-mem-fix/aicli.exe --version           PASS
+gofmt / git diff --check                        clean
+```
+
+新增测试锁定：默认/覆盖/关闭三种 GC 百分比语义、空闲判定边界、冷却窗口与
+循环停止。运行中的旧进程不会自动获得本轮修复，需要替换二进制并重启会话后
+复采 Private/HeapSys 才能看到端到端收益。
+
+### 13.4 第二轮：直接消除分配峰值（2026-11-08）
+
+上一轮的 GOGC/GOMEMLIMIT/空闲归还只是控高水位，没有减少真实分配。本轮按
+pprof 的 `alloc_space` 热点做了四项代码级优化：
+
+1. **请求体序列化不再"整字段 Marshal + 复制"**
+   - `MarshalProviderRequestBody` 直接用 `json.Encoder` 写入最终 `bytes.Buffer`，
+     只去掉 Encoder 追加的结尾换行。
+   - 旧实现对每个顶层字段先 `json.Marshal(body[key])` 出一份同尺寸 `[]byte`，
+     messages 字段在长会话可达数十 MB；新实现不再产生这次峰值副本。
+   - 基准（40 messages + 12 tools 的合成请求）：
+     `21.9 KB/op → 15.5 KB/op`（-29%），`76 → 73 allocs/op`。
+   - 大字段基准（单条 4 MiB message）：
+     `12.6 MB/op → 8.4 MB/op`（-33%），`11.0 ms/op → 9.2 ms/op`；
+     等价于每个请求少一次与 messages 同尺寸的临时副本。
+   - 新增逐字节等价测试，覆盖 HTML 转义、Unicode、嵌套 map、`json.RawMessage`、
+     nil、浮点和大整数。
+
+2. **HTTP 调试指纹不再重复编码大字段**
+   - 新增 `parseHTTPDebugRawFields`：从已经序列化的请求体里切出
+     `messages/input/tools/instructions/prompt_cache_key` 的原始 JSON 字节，
+     直接做 SHA-256；不再为每个字段重新 `json.Encoder.Encode`。
+   - 指纹值与旧路径逐字节一致（包括 Encoder 的结尾换行），因此
+     `messages_sha256/cache_surface_sha256/request_sha256` 的语义不变。
+   - 基准（有 reporter，40 messages + 12 tools）：
+     `36.1 ms/op → 13.2 ms/op`（-63%），`97 → 41 allocs/op`（-58%）。
+   - 大字段基准（单条 4 MiB message）：
+     `1.41 MB/op, 9.60 ms/op` → `3.7 KB/op, 4.43 ms/op`
+     （分配字节 -99.7%，耗时 -54%）。
+   - 新增测试锁定新旧路径指纹等价、非法 body 回退、字段原始切片解析。
+
+3. **transcript 全量布局行复用 backing array**
+   - 新增 `scene.LayoutTranscriptInto(dst, ...)` 与
+     `TranscriptState.LayoutRowsInto`。
+   - planner 的 `syncHistoryEffectsForTranscript` 通过
+     `UIControllerState.transcriptLayoutRows` 跨 planning pass 复用语义行切片；
+     容量不足才重新分配，并预留 12.5% 增长余量。
+   - transcript 收缩时清理复用 buffer 的尾部，避免旧 cell 正文被钉住。
+   - 基准（6,719 cells / ~161k 行）：
+     `hot: 8.93 MB/op, 4.20 ms/op` → `reuse: 0.53 MB/op, 2.85 ms/op`
+     （字节 -94%，耗时 -32%）。
+   - 完整 planner 基准（3,000 cells，含 screen + mint）：
+     `40.3 MB/op, 210,744 allocs/op, 42.3 ms/op` →
+     `31.2 MB/op, 113,619 allocs/op, 24.0 ms/op`
+     （字节 -22.5%，分配次数 -46%，耗时 -43%）。
+   - pprof 中 `LayoutTranscript` 累计约 24 GB；按每轮 rows 分配估算，复用后
+     该路径的累计分配可下降一个数量级。
+
+4. **裁剪路径零分配 CellsView**
+   - `TuiScene` 新增 `CellsView()`，仅供已持 scene 锁的只读消费者使用。
+   - `applySceneTrimPolicyLocked` 改用 `CellsView()`，不再每轮复制 O(cells)
+     的指针切片。旧 pprof 中 `TuiScene.Cells` 约一半分配来自这里。
+   - `Snapshot()` 仍返回独立切片，COW/快照不可变契约不变。
+
+5. **空闲期释放可重建缓存**
+   - `ui.TrimIdleCaches()` 在空闲归还窗口内把三类布局缓存预算临时压到
+     1 MiB 触发逐出，再恢复原预算；同时清空宽度缓存与结构化文档渲染缓存。
+   - 这部分是**真实 live heap 下降**：布局缓存约 24 MB、width cache 约
+     6.5 MB，以及 renderengine document cache。
+   - 只在连续 2 分钟累计分配 < 4 MiB 时触发；下一次用户交互按原预算重新
+     填充，语义状态不受影响。
+
+验证：
+
+```text
+go test ./internal/llm -count=1                 PASS
+go test ./cmd/aicli/ui -count=1                 PASS (298s)
+go test ./cmd/aicli/commands -count=1           PASS (240s)
+go test ./cmd/aicli/ui/scene -count=1           PASS
+go test ./cmd/aicli/commands -run TestSceneTrim|TestResidencyStatus PASS
+go vet ./internal/llm ./cmd/aicli/ui/... ./cmd/aicli/commands ./cmd/aicli PASS
+```
+
+> 结论：本轮优化直接减少了请求构造/调试指纹/全量布局三条最大分配路径的
+> 瞬时峰值与累计字节；上一轮的 GC/上限调整保留为高水位兜底，不再作为主要
+> 修复手段。
