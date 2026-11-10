@@ -31,6 +31,7 @@ func handleMemoryCommand(session *ChatSession, command string) bool {
 		fmt.Printf("错误: 无法打开项目记忆: %v\n", err)
 		return false
 	}
+	defer store.Close()
 
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" || strings.EqualFold(firstToken(arg), "status") {
@@ -123,7 +124,11 @@ func printProjectMemoryStatus(store *memorystore.Store) {
 	}
 	all, _ := store.List(0)
 	fmt.Printf("项目记忆 root=%s\n", store.Root())
-	fmt.Printf("notes=%s total=%d\n", store.Path(), len(all))
+	suffix := ""
+	if store.Mode() != "off" {
+		suffix = fmt.Sprintf(" db=%s mode=%s", store.DBPath(), store.Mode())
+	}
+	fmt.Printf("notes=%s total=%d%s\n", store.Path(), len(all), suffix)
 	if len(notes) == 0 {
 		fmt.Println("最近笔记: （空）")
 		fmt.Println("提示: /memory add <text> 写入跨会话笔记")
@@ -140,7 +145,17 @@ func openChatProjectMemoryStore(session *ChatSession) (*memorystore.Store, error
 	if root == "" {
 		return nil, fmt.Errorf("无法解析项目根目录")
 	}
-	return memorystore.New(memorystore.Config{Root: root})
+	cfg := memorystore.Config{Root: root}
+	runtimeConfig := loadRuntimeToolConfig(nil, session)
+	if runtimeConfig != nil {
+		cfg.Mode = runtimeConfig.Memory.Mode
+		cfg.StorePath = runtimeConfig.Memory.StorePath
+		cfg.InjectionMode = runtimeConfig.Memory.Injection.Mode
+		cfg.PinnedBudgetRatio = runtimeConfig.Memory.Injection.PinnedBudgetRatio
+		cfg.DisableInjection = !runtimeConfig.Memory.Injection.Enabled
+		cfg.DisableManual = !runtimeConfig.Memory.Manual.Enabled
+	}
+	return memorystore.New(cfg)
 }
 
 func resolveChatProjectMemoryRoot(session *ChatSession) string {

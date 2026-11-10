@@ -64,6 +64,23 @@ context:
   #   estimate_only — 回退到旧行为（仅本地估算），用于紧急回退/对照实验。
   # accountingMode: provider_first
 
+memory:
+  # Agent Memory v2（跨会话长期记忆）。默认 off：不创建 v2 DB、不注入
+  # summary/records、不运行自动抽取。现有 /memory 手工 notes 能力保持独立。
+  # mode: shadow 只生成/记录不注入；mode: on 才允许 stable/recall 注入。
+  mode: off
+  scope: project
+  # storePath: ""          # 默认 <workspace>/.aicli/memory/memory.db
+  manual:
+    enabled: true
+  injection:
+    enabled: true
+    mode: notes          # notes | hybrid | summary
+    maxItems: 5
+    tokenBudget: 600
+    pinnedBudgetRatio: 0.20
+    stageSplit: true
+
 images:
   cacheMaxAge: 1h
   generations:

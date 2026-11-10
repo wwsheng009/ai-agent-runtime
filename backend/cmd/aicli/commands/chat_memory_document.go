@@ -31,6 +31,9 @@ func buildChatMemoryStatusDocument(store *memorystore.Store) (render.Document, b
 		"项目记忆 root=" + store.Root(),
 		"notes=" + store.Path() + " total=" + strconv.Itoa(len(all)),
 	}
+	if store.Mode() != "off" {
+		lines = append(lines, "db="+store.DBPath()+" mode="+store.Mode())
+	}
 	if len(notes) == 0 {
 		lines = append(lines,
 			"最近笔记: （空）",

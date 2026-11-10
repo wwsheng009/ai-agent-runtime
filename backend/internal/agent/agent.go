@@ -1336,7 +1336,7 @@ func attachProjectMemory(manager *contextmgr.Manager, cfg *Config) {
 	}
 	if root := strings.TrimSpace(optionString(options, "project_memory_root")); root != "" {
 		// Explicit root overrides workspace-derived path.
-		store, err := memorystore.New(memorystore.Config{Root: root})
+		store, err := memorystore.New(memoryConfigFromOptions(options, memorystore.Config{Root: root}))
 		if err != nil {
 			return
 		}
@@ -1351,14 +1351,46 @@ func attachProjectMemory(manager *contextmgr.Manager, cfg *Config) {
 		// Soft-fail: no usable root; leave ProjectMemory unset.
 		return
 	}
-	store, err := memorystore.New(memorystore.Config{
+	store, err := memorystore.New(memoryConfigFromOptions(options, memorystore.Config{
 		ProjectRoot:      projectRoot,
 		ProfileMemoryDir: profileMemoryDir,
-	})
+	}))
 	if err != nil {
 		return
 	}
 	manager.ProjectMemory = store
+}
+
+func memoryConfigFromOptions(options map[string]interface{}, base memorystore.Config) memorystore.Config {
+	base.Mode = optionString(options, "memory_mode")
+	base.StorePath = optionString(options, "memory_store_path")
+	base.InjectionMode = optionString(options, "memory_injection_mode")
+	if ratio, ok := contextOptionFloat(options, "memory_pinned_budget_ratio"); ok {
+		base.PinnedBudgetRatio = ratio
+	}
+	if raw, ok := options["memory_injection_enabled"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			base.DisableInjection = !value
+		case string:
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "0", "false", "off", "disabled", "no":
+				base.DisableInjection = true
+			}
+		}
+	}
+	if raw, ok := options["memory_manual_enabled"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			base.DisableManual = !value
+		case string:
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "0", "false", "off", "disabled", "no":
+				base.DisableManual = true
+			}
+		}
+	}
+	return base
 }
 
 type lazyWorkspaceContextBuilder struct {

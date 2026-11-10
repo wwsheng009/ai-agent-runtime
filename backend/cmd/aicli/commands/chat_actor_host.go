@@ -3357,6 +3357,7 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if runtimeConfig == nil {
 		return
 	}
+	applyLocalChatMemoryOptions(agentConfig, runtimeConfig)
 	ctxCfg := runtimeConfig.Context
 	wsCfg := runtimeConfig.Workspace
 	hasContextOptions := strings.TrimSpace(ctxCfg.Profile) != "" ||
@@ -3454,6 +3455,28 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if dsn := strings.TrimSpace(runtimeConfig.Artifact.StoreDSN); dsn != "" {
 		agentConfig.Options["artifact_store_dsn"] = dsn
 	}
+}
+
+func applyLocalChatMemoryOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {
+	if agentConfig == nil || runtimeConfig == nil {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(runtimeConfig.Memory.Mode))
+	if mode == "" || mode == "off" {
+		return
+	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	cfg := runtimeConfig.Memory
+	agentConfig.Options["memory_mode"] = mode
+	agentConfig.Options["memory_manual_enabled"] = cfg.Manual.Enabled
+	if strings.TrimSpace(cfg.StorePath) != "" {
+		agentConfig.Options["memory_store_path"] = strings.TrimSpace(cfg.StorePath)
+	}
+	agentConfig.Options["memory_injection_enabled"] = cfg.Injection.Enabled
+	agentConfig.Options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(cfg.Injection.Mode))
+	agentConfig.Options["memory_pinned_budget_ratio"] = cfg.Injection.PinnedBudgetRatio
 }
 
 // applyLocalChatKnowledgeOptions 把知识层装配写入本地 chat agent 的 options

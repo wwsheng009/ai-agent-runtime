@@ -85,6 +85,14 @@ type ProjectMemoryStore interface {
 	SelectForInject(opts memorystore.InjectOptions) ([]memorystore.Note, error)
 }
 
+// ProjectMemoryV2Store is the optional richer selector used when memory.mode=on
+// and injection is enabled. Keeping it optional preserves legacy fakes and the
+// JSONL-only path.
+type ProjectMemoryV2Store interface {
+	SelectForInjectV2(opts memorystore.InjectOptions) (memorystore.Selection, error)
+	V2InjectionEnabled() bool
+}
+
 // LedgerStore 约束持久 ledger/checkpoint 所需的最小能力。
 type LedgerStore interface {
 	InsertMemoryEntry(ctx context.Context, entry artifact.MemoryEntry) (string, error)
@@ -826,41 +834,50 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("recall.performed", input.TraceID, input.SessionID, payload)
 	}
 
-	if stagePresent("project_memory") || activeTurnHasReplay {
+	var projectMemoryRecall *types.Message
+	projectMemoryGroupPresent := stagePresent("project_memory") || stagePresent("project_memory_recall") || activeTurnHasReplay
+	if projectMemoryGroupPresent {
 		if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
 			metrics["suppressed_for_active_turn"] = true
 		}
 	} else if m.ProjectMemory != nil {
-		notes, err := m.ProjectMemory.SelectForInject(memorystore.InjectOptions{
-			Query:       input.Goal,
-			Limit:       budget.MaxProjectMemory,
-			TokenBudget: budget.ProjectMemoryTokens,
-		})
-		if err != nil {
-			result.Metadata["project_memory_error"] = err.Error()
+		plan := m.planProjectMemory(input, budget)
+		if plan.Err != nil {
+			result.Metadata["project_memory_error"] = plan.Err.Error()
 			m.emitEvent("context.project_memory.failed", input.TraceID, input.SessionID, map[string]interface{}{
 				"task_id": input.TaskID,
 				"query":   input.Goal,
-				"error":   err.Error(),
+				"error":   plan.Err.Error(),
 			})
-		} else if msg, noteIDs := buildProjectMemoryMessage(notes, budget.ProjectMemoryTokens); msg != nil {
-			appendDynamic(*msg)
+		}
+		if plan.Stable != nil {
+			appendDynamic(*plan.Stable)
 			result.Metadata["project_memory_injected"] = true
-			result.Metadata["project_memory_count"] = len(noteIDs)
-			if len(noteIDs) > 0 {
-				result.Metadata["project_memory_ids"] = append([]string(nil), noteIDs...)
+			result.Metadata["project_memory_count"] = plan.Stable.Metadata.GetInt("project_memory_count", 0)
+			if plan.V2 {
+				result.Metadata["memory_version"] = 2
+				result.Metadata["memory_block_kind"] = string(memorystore.BlockStable)
+				if revision := metadataInt64(plan.Stable.Metadata, "memory_revision"); revision > 0 {
+					result.Metadata["memory_revision"] = revision
+				}
+			}
+			if ids := metadataStrings(plan.Stable.Metadata, "memory_ids"); len(ids) > 0 {
+				result.Metadata["project_memory_ids"] = append([]string(nil), ids...)
 			}
 			if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
 				metrics["injected"] = true
-				metrics["count"] = len(noteIDs)
+				metrics["count"] = plan.Stable.Metadata.GetInt("project_memory_count", 0)
+				metrics["memory_version"] = plan.V2
 			}
 			m.emitEvent("context.project_memory.injected", input.TraceID, input.SessionID, map[string]interface{}{
 				"task_id": input.TaskID,
 				"query":   input.Goal,
-				"count":   len(noteIDs),
-				"ids":     noteIDs,
+				"count":   plan.Stable.Metadata.GetInt("project_memory_count", 0),
+				"ids":     metadataStrings(plan.Stable.Metadata, "memory_ids"),
+				"version": 2,
 			})
 		}
+		projectMemoryRecall = plan.Recall
 	}
 	if profileMessage != nil && !stagePresent("profile") {
 		// Profile data can change at runtime. Freeze it behind the current user
@@ -1002,6 +1019,25 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	} else if strings.TrimSpace(input.ActiveGoalGuidance) != "" {
 		result.Metadata["active_goal_suppressed_for_snapshot"] = true
+	}
+
+	if projectMemoryRecall != nil {
+		appendDynamic(*projectMemoryRecall)
+		result.Metadata["project_memory_recall_injected"] = true
+		result.Metadata["memory_block_kind"] = string(memorystore.BlockRecall)
+		if ids := metadataStrings(projectMemoryRecall.Metadata, "memory_ids"); len(ids) > 0 {
+			result.Metadata["memory_ids"] = append([]string(nil), ids...)
+		}
+		if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
+			metrics["recall_injected"] = true
+			metrics["recall_count"] = len(metadataStrings(projectMemoryRecall.Metadata, "memory_ids"))
+		}
+		m.emitEvent("context.project_memory_recall.injected", input.TraceID, input.SessionID, map[string]interface{}{
+			"task_id": input.TaskID,
+			"query":   input.Goal,
+			"count":   len(metadataStrings(projectMemoryRecall.Metadata, "memory_ids")),
+			"ids":     metadataStrings(projectMemoryRecall.Metadata, "memory_ids"),
+		})
 	}
 
 	// Final message/token trims are self-limiting (MaxMessages / MaxPromptTokens).
@@ -2115,7 +2151,7 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 			// never reorders them in front of conversation turns.
 			case "ledger", "correction", "profile", "compaction":
 				stableMessages = append(stableMessages, *message.Clone())
-			case "fact_ledger", "workspace", "team", "recall", "warm_memory", "observation", "todo_state", "project_memory":
+			case "fact_ledger", "workspace", "team", "recall", "warm_memory", "observation", "todo_state", "project_memory", "project_memory_recall":
 				dynamicMessages = append(dynamicMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())

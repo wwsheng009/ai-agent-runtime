@@ -46,6 +46,7 @@ type RuntimeConfig struct {
 	Images         ImagesConfig              `yaml:"images" json:"images"`
 	WebSearch      WebSearchConfig           `yaml:"webSearch" json:"webSearch"`
 	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
+	Memory         MemoryConfig              `yaml:"memory" json:"memory"`
 
 	// Shell 决定 agent 用哪个 shell 执行命令（Windows 上优先 POSIX shell，
 	// 见 docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md）。
@@ -108,6 +109,29 @@ type AgentConfig struct {
 	MaxParallelToolCalls int           `yaml:"maxParallelToolCalls" json:"maxParallelToolCalls"`
 	Timeout              time.Duration `yaml:"timeout" json:"timeout"`
 	DefaultPlanningMode  string        `yaml:"defaultPlanningMode,omitempty" json:"defaultPlanningMode,omitempty"`
+}
+
+// MemoryConfig 是跨会话长期记忆 v2 的配置。它与 Agent.EnableMemory
+// （进程内 observation memory）独立；默认 mode=off，不改变既有行为。
+type MemoryConfig struct {
+	Mode      string                `yaml:"mode" json:"mode"`
+	Scope     string                `yaml:"scope" json:"scope"`
+	StorePath string                `yaml:"storePath" json:"storePath"`
+	Manual    MemoryManualConfig    `yaml:"manual" json:"manual"`
+	Injection MemoryInjectionConfig `yaml:"injection" json:"injection"`
+}
+
+type MemoryManualConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+type MemoryInjectionConfig struct {
+	Enabled           bool    `yaml:"enabled" json:"enabled"`
+	Mode              string  `yaml:"mode" json:"mode"`
+	MaxItems          int     `yaml:"maxItems" json:"maxItems"`
+	TokenBudget       int     `yaml:"tokenBudget" json:"tokenBudget"`
+	PinnedBudgetRatio float64 `yaml:"pinnedBudgetRatio" json:"pinnedBudgetRatio"`
+	StageSplit        bool    `yaml:"stageSplit" json:"stageSplit"`
 }
 
 // agents.singleWriterMode values: "enforce" (default) keeps the process-wide
@@ -1071,6 +1095,21 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Knowledge: knowledge.DefaultConfig(),
 		LSP:       runtimelsp.DefaultConfig(),
 		Schedule:  DefaultScheduleConfig(),
+		Memory: MemoryConfig{
+			Mode:  "off",
+			Scope: "project",
+			Manual: MemoryManualConfig{
+				Enabled: true,
+			},
+			Injection: MemoryInjectionConfig{
+				Enabled:           true,
+				Mode:              "notes",
+				MaxItems:          5,
+				TokenBudget:       600,
+				PinnedBudgetRatio: 0.20,
+				StageSplit:        true,
+			},
+		},
 	}
 }
 
@@ -1477,6 +1516,39 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	}
 	if err := ValidateKnowledgeConfig(&config.Knowledge); err != nil {
 		return err
+	}
+	if err := ValidateMemoryConfig(&config.Memory); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateMemoryConfig 只校验 v2 长期记忆配置；Agent.EnableMemory 仍由
+// ValidateAgentConfig 管理，两者不共享开关。
+func ValidateMemoryConfig(config *MemoryConfig) error {
+	if config == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Mode)) {
+	case "", "off", "shadow", "on":
+	default:
+		return errors.New(errors.ErrValidationFailed, "memory.mode must be off, shadow, or on")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Scope)) {
+	case "", "project", "project+user":
+	default:
+		return errors.New(errors.ErrValidationFailed, "memory.scope must be project or project+user")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Injection.Mode)) {
+	case "", "summary", "hybrid", "notes":
+	default:
+		return errors.New(errors.ErrValidationFailed, "memory.injection.mode must be summary, hybrid, or notes")
+	}
+	if config.Injection.MaxItems < 0 || config.Injection.TokenBudget < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection limits cannot be negative")
+	}
+	if config.Injection.PinnedBudgetRatio < 0 || config.Injection.PinnedBudgetRatio > 1 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection.pinnedBudgetRatio must be between 0 and 1")
 	}
 	return nil
 }
