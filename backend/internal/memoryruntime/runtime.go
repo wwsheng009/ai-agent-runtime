@@ -1,0 +1,467 @@
+package memoryruntime
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
+)
+
+type Runtime struct {
+	Store     *memorystore.Store
+	Source    SessionSource
+	Extractor Extractor
+	Modes     SessionModeReader
+	Config    Config
+	Clock     func() time.Time
+	WorkerID  string
+}
+
+func New(store *memorystore.Store, source SessionSource, extractor Extractor, modes SessionModeReader, cfg Config) *Runtime {
+	return &Runtime{
+		Store: store, Source: source, Extractor: extractor, Modes: modes,
+		Config: cfg.normalized(), WorkerID: strings.TrimSpace(cfg.WorkerID),
+		Clock: time.Now,
+	}
+}
+
+func (r *Runtime) now() time.Time {
+	if r != nil && r.Clock != nil {
+		return r.Clock().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (r *Runtime) enabled() bool {
+	if r == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(r.Config.Mode))
+	return mode == "shadow" || mode == "on"
+}
+
+func (r *Runtime) generationAllowed(trigger Trigger) bool {
+	if r == nil {
+		return false
+	}
+	return !r.Config.GenerationDisabled || trigger == TriggerManual
+}
+
+// Run processes idle sessions. Session-end and manual callers should use
+// RunSession so they do not sweep unrelated sessions.
+func (r *Runtime) Run(ctx context.Context, trigger Trigger) (RunResult, error) {
+	result := RunResult{Trigger: trigger}
+	if !r.enabled() {
+		return result, nil
+	}
+	if !r.generationAllowed(trigger) {
+		return result, nil
+	}
+	if r.Source == nil {
+		return result, fmt.Errorf("memoryruntime: session source is nil")
+	}
+	if r.Extractor == nil {
+		return result, fmt.Errorf("memoryruntime: extractor is nil")
+	}
+	limit := r.Config.MaxSessionsPerRun * 10
+	if limit <= 0 {
+		limit = 20
+	}
+	sessions, err := r.Source.ListSessions(ctx, r.Config.Workspace, limit)
+	if err != nil {
+		return result, err
+	}
+	result.Sessions = len(sessions)
+	processedThisRun := 0
+	for _, session := range sessions {
+		if processedThisRun >= r.Config.MaxSessionsPerRun {
+			break
+		}
+		ok, _ := r.eligible(ctx, session, trigger)
+		if !ok {
+			result.Skipped++
+			continue
+		}
+		processed, err := r.RunSession(ctx, trigger, session.ID)
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, session.ID+": "+err.Error())
+			continue
+		}
+		mergeRunResult(&result, processed)
+		if processed.Processed > 0 {
+			processedThisRun++
+		}
+	}
+	return result, nil
+}
+
+func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID string) (RunResult, error) {
+	result := RunResult{Trigger: trigger}
+	if !r.enabled() {
+		return result, nil
+	}
+	if !r.generationAllowed(trigger) {
+		return result, nil
+	}
+	if r.Source == nil || r.Extractor == nil || r.Store == nil {
+		return result, fmt.Errorf("memoryruntime: runtime is not fully configured")
+	}
+	session, err := r.findSession(ctx, sessionID)
+	if err != nil {
+		return result, err
+	}
+	ok, reason := r.eligible(ctx, session, trigger)
+	if !ok {
+		result.Skipped = 1
+		if reason == "job_done" {
+			result.Skipped = 1
+		}
+		return result, nil
+	}
+	transcript, err := r.Source.ReadTranscript(ctx, session, r.Config.MaxSourceMessages)
+	if err != nil {
+		return result, err
+	}
+	if transcript.SessionID == "" {
+		transcript.SessionID = session.ID
+	}
+	if transcript.ProjectKey == "" {
+		transcript.ProjectKey = r.Config.ProjectKey
+	}
+	if transcript.WorkspacePath == "" {
+		transcript.WorkspacePath = session.WorkspacePath
+	}
+	if transcript.Hash == "" {
+		transcript.Hash = TranscriptHash(transcript.Messages)
+	}
+	if transcript.Revision <= 0 {
+		transcript.Revision = int64(len(transcript.Messages))
+	}
+	if len(transcript.Messages) == 0 {
+		result.Skipped = 1
+		return result, nil
+	}
+	jobKey := "session:" + strings.TrimSpace(session.ID) + ":" + transcript.Hash
+	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
+		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
+		MaxAttempts: r.Config.MaxAttempts,
+	})
+	if err != nil {
+		return result, err
+	}
+	now := r.now()
+	if job.Status == memorystore.JobStatusSucceeded || job.Status == memorystore.JobStatusFailed {
+		result.Skipped = 1
+		return result, nil
+	}
+	if job.Status == memorystore.JobStatusRunning && job.LeaseUntil.After(now) {
+		result.Skipped = 1
+		return result, nil
+	}
+	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
+		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey, Limit: 1, Now: now,
+	})
+	if err != nil {
+		return result, err
+	}
+	if len(claimed) == 0 {
+		result.Skipped = 1
+		return result, nil
+	}
+	extraction, err := r.Extractor.Extract(ctx, session, transcript)
+	if err != nil {
+		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+		_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+		return result, err
+	}
+	candidates, reasons := r.validateCandidates(extraction, transcript, now)
+	result.Skipped += len(reasons)
+	result.Ignored = append(result.Ignored, reasons...)
+	stale, err := r.Store.MarkSessionSourceChanged(ctx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
+	if err != nil {
+		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+		_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+		return result, err
+	}
+	result.Stale += stale
+	if len(candidates) == 0 {
+		_ = r.Store.CompleteJob(ctx, claimed[0].ID, transcript.Hash)
+		result.Processed = 1
+		return result, nil
+	}
+	inserted := 0
+	for _, candidate := range candidates {
+		if inserted >= r.Config.MaxCandidatesPerSession {
+			break
+		}
+		if _, err := r.Store.InsertCandidate(ctx, candidate); err != nil {
+			if isCandidateSkipError(err) {
+				result.Skipped++
+				continue
+			}
+			retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+			_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+			return result, err
+		}
+		inserted++
+	}
+	if err := r.Store.CompleteJob(ctx, claimed[0].ID, transcript.Hash); err != nil {
+		return result, err
+	}
+	result.Processed = 1
+	result.Candidates = inserted
+	return result, nil
+}
+
+func (r *Runtime) findSession(ctx context.Context, sessionID string) (SessionRef, error) {
+	if r.Source == nil {
+		return SessionRef{}, fmt.Errorf("memoryruntime: session source is nil")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return SessionRef{}, fmt.Errorf("memoryruntime: session id is required")
+	}
+	sessions, err := r.Source.ListSessions(ctx, r.Config.Workspace, 200)
+	if err != nil {
+		return SessionRef{}, err
+	}
+	for _, session := range sessions {
+		if session.ID == sessionID {
+			return session, nil
+		}
+	}
+	return SessionRef{}, fmt.Errorf("memoryruntime: session %s not found", sessionID)
+}
+
+func (r *Runtime) eligible(ctx context.Context, session SessionRef, trigger Trigger) (bool, string) {
+	if !r.enabled() {
+		return false, "mode_off"
+	}
+	if session.Ephemeral {
+		return false, "ephemeral"
+	}
+	if session.IsSubagent && !r.Config.IncludeSubagents {
+		return false, "subagent"
+	}
+	if r.Modes != nil {
+		mode, err := r.Modes.GetSessionMode(ctx, session.ID)
+		if err != nil {
+			return false, "session_mode_error"
+		}
+		if mode == memorystore.SessionModeDisabled || mode == memorystore.SessionModePolluted {
+			return false, "session_mode_" + string(mode)
+		}
+	}
+	if r.Config.Workspace != "" {
+		if strings.TrimSpace(session.WorkspacePath) == "" {
+			if r.Config.RequireWorkspaceMatch {
+				return false, "workspace_missing"
+			}
+		} else if !sameWorkspace(r.Config.Workspace, session.WorkspacePath) {
+			return false, "workspace_mismatch"
+		}
+	}
+	now := r.now()
+	activity := session.LastActivityAt
+	if activity.IsZero() {
+		activity = session.UpdatedAt
+	}
+	if !activity.IsZero() && now.Sub(activity) > r.Config.MaxRolloutAge {
+		return false, "rollout_age"
+	}
+	if trigger == TriggerIdle || trigger == TriggerBoth {
+		if !activity.IsZero() && now.Sub(activity) < r.Config.MinIdle {
+			return false, "not_idle"
+		}
+	}
+	return true, ""
+}
+
+func (r *Runtime) validateCandidates(extraction ExtractionResult, transcript Transcript, now time.Time) ([]memorystore.Candidate, []string) {
+	allowed := map[string]struct{}{
+		"preference": {}, "decision": {}, "fact": {}, "workflow": {},
+		"pitfall": {}, "reference": {}, "open_question": {}, "correction": {},
+	}
+	validMessageIDs := make(map[string]struct{}, len(transcript.Messages))
+	for _, message := range transcript.Messages {
+		if strings.TrimSpace(message.ID) != "" {
+			validMessageIDs[message.ID] = struct{}{}
+		}
+	}
+	out := make([]memorystore.Candidate, 0, len(extraction.Candidates))
+	reasons := make([]string, 0)
+	for _, candidate := range extraction.Candidates {
+		if len(out) >= r.Config.MaxCandidatesPerSession {
+			break
+		}
+		kind := strings.ToLower(strings.TrimSpace(candidate.Kind))
+		if _, ok := allowed[kind]; !ok {
+			reasons = append(reasons, "kind")
+			continue
+		}
+		text := strings.TrimSpace(candidate.Text)
+		if text == "" || utf8.RuneCountInString(text) > r.Config.MaxCandidateTextRunes {
+			reasons = append(reasons, "text")
+			continue
+		}
+		if rule := DetectSecret(text); rule != "" {
+			reasons = append(reasons, "secret:"+rule)
+			continue
+		}
+		confidence := candidate.Confidence
+		if confidence < 0 || confidence > 1 {
+			reasons = append(reasons, "confidence")
+			continue
+		}
+		sourceIDs := make([]string, 0, len(candidate.SourceMessageIDs))
+		for _, id := range candidate.SourceMessageIDs {
+			id = strings.TrimSpace(id)
+			if _, ok := validMessageIDs[id]; ok {
+				sourceIDs = append(sourceIDs, id)
+			}
+		}
+		if len(sourceIDs) == 0 {
+			reasons = append(reasons, "source")
+			continue
+		}
+		tags := normalizeTags(candidate.Tags)
+		if len(tags) > r.Config.MaxTagsPerCandidate {
+			tags = tags[:r.Config.MaxTagsPerCandidate]
+		}
+		out = append(out, memorystore.Candidate{
+			SessionID: transcript.SessionID, ProjectKey: transcript.ProjectKey,
+			Kind: kind, Text: text, Tags: tags, Confidence: confidence,
+			Sensitivity: firstNonEmpty(candidate.Sensitivity, "internal"),
+			SourceHash:  transcript.Hash, SourceRevision: transcript.Revision,
+			SourceUpdatedAt: transcript.UpdatedAt, SourceMessageIDs: sourceIDs,
+			RetentionClass:  retentionClassForKind(kind),
+			RevalidateAfter: revalidateAfterForKind(kind, now),
+			Model:           firstNonEmpty(extraction.Model, r.Config.ExtractionModel),
+			TokenUsage: map[string]interface{}{
+				"prompt_tokens":     extraction.Usage.PromptTokens,
+				"completion_tokens": extraction.Usage.CompletionTokens,
+				"total_tokens":      extraction.Usage.TotalTokens,
+			},
+		})
+	}
+	return out, reasons
+}
+
+func (r *Runtime) workerID() string {
+	if strings.TrimSpace(r.WorkerID) != "" {
+		return strings.TrimSpace(r.WorkerID)
+	}
+	return "memoryruntime"
+}
+
+func mergeRunResult(dst *RunResult, src RunResult) {
+	dst.Processed += src.Processed
+	dst.Skipped += src.Skipped
+	dst.Candidates += src.Candidates
+	dst.Stale += src.Stale
+	dst.Failed += src.Failed
+	dst.Ignored = append(dst.Ignored, src.Ignored...)
+	dst.Errors = append(dst.Errors, src.Errors...)
+}
+
+func isCandidateSkipError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "suppressed") || strings.Contains(text, "duplicate memory")
+}
+
+func retryBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	wait := 30 * time.Second
+	for i := 1; i < attempt && wait < 30*time.Minute; i++ {
+		wait *= 2
+	}
+	if wait > 30*time.Minute {
+		wait = 30 * time.Minute
+	}
+	return wait
+}
+
+func retentionClassForKind(kind string) string {
+	switch kind {
+	case "preference", "decision", "correction":
+		return "permanent"
+	case "task_trace":
+		return "ephemeral"
+	default:
+		return "standard"
+	}
+}
+
+func revalidateAfterForKind(kind string, now time.Time) time.Time {
+	switch kind {
+	case "preference", "decision", "correction":
+		return time.Time{}
+	case "workflow", "pitfall":
+		return now.Add(180 * 24 * time.Hour)
+	case "fact", "reference":
+		return now.Add(30 * 24 * time.Hour)
+	case "open_question":
+		return now.Add(14 * 24 * time.Hour)
+	default:
+		return now.Add(90 * 24 * time.Hour)
+	}
+}
+
+func normalizeTags(tags []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func sameWorkspace(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(strings.TrimSpace(left))
+	rightAbs, rightErr := filepath.Abs(strings.TrimSpace(right))
+	if leftErr != nil || rightErr != nil {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+}
+
+func TranscriptHash(messages []TranscriptMessage) string {
+	sorted := append([]TranscriptMessage(nil), messages...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Seq < sorted[j].Seq })
+	h := sha256.New()
+	for _, message := range sorted {
+		_, _ = fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00",
+			message.Seq, message.ID, message.Role, message.ToolName, message.ToolCallID, message.Content)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}

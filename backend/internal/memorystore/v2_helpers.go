@@ -35,6 +35,13 @@ func nullableTime(value time.Time) interface{} {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
+func nullableInt64(value int64) interface{} {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1

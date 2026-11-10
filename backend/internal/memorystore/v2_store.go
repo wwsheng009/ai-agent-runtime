@@ -327,16 +327,30 @@ INSERT INTO memory_entries (
 
 func insertSourceTx(ctx context.Context, tx *sql.Tx, record Record, sessionID string) error {
 	sourceID := "src_" + uuid.NewString()
+	messageIDs, _ := json.Marshal(record.SourceMessageIDs)
+	sourceHash := strings.TrimSpace(record.SourceHash)
+	if sourceHash == "" {
+		sourceHash = record.ContentHash
+	}
+	sourceUpdatedAt := record.SourceUpdatedAt
+	if sourceUpdatedAt.IsZero() {
+		sourceUpdatedAt = record.UpdatedAt
+	}
+	sourceObservedAt := record.SourceObservedAt
+	if sourceObservedAt.IsZero() {
+		sourceObservedAt = time.Now().UTC()
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_sources (
     id, memory_id, source_kind, source_id, session_id, turn_id,
     message_ids_json, artifact_refs_json, fact_refs_json, knowledge_refs_json,
-    source_hash, source_updated_at, source_observed_at, quote, created_at
-) VALUES (?, ?, ?, ?, ?, ?, '[]', '[]', '[]', '[]', ?, ?, ?, ?, ?)
+    source_hash, source_revision, source_updated_at, source_observed_at, quote, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
 `, sourceID, record.ID, record.SourceKind, record.ID, nullableString(record.SourceSessionID),
-		nullableString(record.SourceTurnID), record.ContentHash,
-		record.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		nowText(), record.Text, nowText()); err != nil {
+		nullableString(record.SourceTurnID), string(messageIDs), sourceHash,
+		nullableInt64(record.SourceRevision),
+		sourceUpdatedAt.UTC().Format(time.RFC3339Nano),
+		sourceObservedAt.UTC().Format(time.RFC3339Nano), record.Text, nowText()); err != nil {
 		return fmt.Errorf("memorystore: insert source: %w", err)
 	}
 	return nil

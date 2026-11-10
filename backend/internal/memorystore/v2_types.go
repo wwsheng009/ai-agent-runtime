@@ -48,36 +48,41 @@ const (
 )
 
 type Record struct {
-	ID              string
-	Scope           Scope
-	ProjectKey      string
-	Kind            string
-	Status          Status
-	Text            string
-	NormalizedText  string
-	Tags            []string
-	Confidence      float64
-	Pinned          bool
-	RetentionClass  string
-	SourceKind      string
-	SourceSessionID string
-	SourceTurnID    string
-	SourceRefs      []string
-	ContentHash     string
-	SupersedesID    string
-	Revision        int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	LastUsedAt      time.Time
-	UseCount        int
-	ValidFrom       time.Time
-	ValidUntil      time.Time
-	Freshness       Freshness
-	LastVerifiedAt  time.Time
-	RevalidateAfter time.Time
-	StaleReason     string
-	DeletedAt       time.Time
-	Metadata        map[string]interface{}
+	ID               string
+	Scope            Scope
+	ProjectKey       string
+	Kind             string
+	Status           Status
+	Text             string
+	NormalizedText   string
+	Tags             []string
+	Confidence       float64
+	Pinned           bool
+	RetentionClass   string
+	SourceKind       string
+	SourceSessionID  string
+	SourceTurnID     string
+	SourceRefs       []string
+	SourceHash       string
+	SourceRevision   int64
+	SourceUpdatedAt  time.Time
+	SourceObservedAt time.Time
+	SourceMessageIDs []string
+	ContentHash      string
+	SupersedesID     string
+	Revision         int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	LastUsedAt       time.Time
+	UseCount         int
+	ValidFrom        time.Time
+	ValidUntil       time.Time
+	Freshness        Freshness
+	LastVerifiedAt   time.Time
+	RevalidateAfter  time.Time
+	StaleReason      string
+	DeletedAt        time.Time
+	Metadata         map[string]interface{}
 }
 
 type Summary struct {
@@ -102,6 +107,66 @@ type Summary struct {
 type DroppedRecord struct {
 	ID     string `json:"id"`
 	Reason string `json:"reason"`
+}
+
+type JobStatus string
+
+const (
+	JobStatusPending   JobStatus = "pending"
+	JobStatusRunning   JobStatus = "running"
+	JobStatusSucceeded JobStatus = "succeeded"
+	JobStatusFailed    JobStatus = "failed"
+	JobStatusCancelled JobStatus = "cancelled"
+)
+
+type MemoryJob struct {
+	ID                   string
+	Kind                 string
+	JobKey               string
+	Scope                Scope
+	ProjectKey           string
+	Status               JobStatus
+	Priority             int
+	WorkerID             string
+	LeaseUntil           time.Time
+	Attempt              int
+	MaxAttempts          int
+	RetryAt              time.Time
+	StartedAt            time.Time
+	FinishedAt           time.Time
+	LastError            string
+	InputWatermark       string
+	LastSuccessWatermark string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+type ClaimJobOptions struct {
+	WorkerID string
+	Kind     string
+	JobKey   string
+	Lease    time.Duration
+	Limit    int
+	Now      time.Time
+}
+
+type Candidate struct {
+	SessionID        string
+	TurnID           string
+	ProjectKey       string
+	Kind             string
+	Text             string
+	Tags             []string
+	Confidence       float64
+	Sensitivity      string
+	SourceHash       string
+	SourceRevision   int64
+	SourceUpdatedAt  time.Time
+	SourceMessageIDs []string
+	RetentionClass   string
+	RevalidateAfter  time.Time
+	Model            string
+	TokenUsage       map[string]interface{}
 }
 
 type Selection struct {
