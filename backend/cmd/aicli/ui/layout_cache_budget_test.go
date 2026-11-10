@@ -66,3 +66,36 @@ func TestLayoutCacheBudgetsApplyTrimAndReset(t *testing.T) {
 		t.Fatalf("Reset 后应恢复默认预算：entries=%d", entries)
 	}
 }
+
+// TestTrimIdleCachesEvictsAndRestoresBudgets 锁定空闲归还：缓存被压到
+// 1 MiB 以内逐出，随后预算恢复为调用前的有效值；语义状态不受影响。
+func TestTrimIdleCachesEvictsAndRestoresBudgets(t *testing.T) {
+	t.Cleanup(func() { ResetLayoutCacheBudgets() })
+	sharedCellRows.mu.Lock()
+	sharedCellRows.lru = newCellLayoutLRU[cellLayoutKey, []AppScreenRow](cellRowsCacheMax, 16<<20)
+	sharedCellRows.mu.Unlock()
+	ApplyLayoutCacheBudgets(LayoutCacheBudgets{
+		CellRowsMiB:     16,
+		HistoryPlanMiB:  8,
+		FoldOmissionMiB: 8,
+	})
+	for i := 0; i < 8; i++ {
+		key := cellLayoutKey{source: fmt.Sprintf("idle-trim-%d", i), width: 80}
+		sharedCellRows.mu.Lock()
+		sharedCellRows.lru.put(key, []AppScreenRow{{Text: "idle trim row"}}, 512*1024)
+		sharedCellRows.mu.Unlock()
+	}
+	if _, _, _, _, beforeBytes := sharedCellRows.stats(); beforeBytes <= 1<<20 {
+		t.Fatalf("precondition: cache bytes = %d, want > 1MiB", beforeBytes)
+	}
+
+	if reclaimed := TrimIdleCaches(); reclaimed <= 0 {
+		t.Fatalf("expected reclaimed bytes, got %d", reclaimed)
+	}
+	if _, _, _, entries, bytes := sharedCellRows.stats(); bytes > 1<<20 || entries > 2 {
+		t.Fatalf("cache not trimmed to 1MiB: entries=%d bytes=%d", entries, bytes)
+	}
+	if got := LayoutCacheBudgetsSnapshot(); got.CellRowsMiB != 16 || got.HistoryPlanMiB != 8 || got.FoldOmissionMiB != 8 {
+		t.Fatalf("budgets not restored: %+v", got)
+	}
+}

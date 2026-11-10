@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime/debug"
 	"testing"
 )
 
@@ -65,10 +66,10 @@ func TestApplyMemoryLimitDefaultsWhenUnset(t *testing.T) {
 // TestApplyMemoryLimitHonorsAICLIVar 验证项目专用变量被解析并生效。
 func TestApplyMemoryLimitHonorsAICLIVar(t *testing.T) {
 	t.Setenv("GOMEMLIMIT", "")
-	t.Setenv("AICLI_MEMORY_LIMIT", "384MiB")
+	t.Setenv("AICLI_MEMORY_LIMIT", "256MiB")
 	limit := applyMemoryLimitFromEnv()
-	if limit != 384<<20 {
-		t.Fatalf("limit = %d, want %d", limit, 384<<20)
+	if limit != 256<<20 {
+		t.Fatalf("limit = %d, want %d", limit, 256<<20)
 	}
 }
 
@@ -89,5 +90,88 @@ func TestApplyMemoryLimitOffDisables(t *testing.T) {
 	t.Setenv("AICLI_MEMORY_LIMIT", "off")
 	if limit := applyMemoryLimitFromEnv(); limit != 0 {
 		t.Fatalf("limit = %d, want 0 (disabled)", limit)
+	}
+}
+
+func TestParseGCPercent(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want int
+		ok   bool
+	}{
+		{"50", 50, true},
+		{" 75 ", 75, true},
+		{"1", 1, true},
+		{"1000", 1000, true},
+		{"", 0, false},
+		{"abc", 0, false},
+		{"0", 0, false},
+		{"-1", 0, false},
+		{"1001", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := parseGCPercent(tc.raw)
+		if ok != tc.ok {
+			t.Fatalf("parseGCPercent(%q) ok=%v, want %v", tc.raw, ok, tc.ok)
+		}
+		if ok && got != tc.want {
+			t.Fatalf("parseGCPercent(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+}
+
+// TestApplyGCPercentDefaultsWhenUnset 锁定默认 GC 目标：存活堆 1.5x，
+// 而不是 Go 默认的 2x。
+func TestApplyGCPercentDefaultsWhenUnset(t *testing.T) {
+	t.Setenv("AICLI_GOGC", "")
+	t.Setenv("GOGC", "")
+	previous := debug.SetGCPercent(100)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	if got := applyGCPercentFromEnv(); got != defaultGCPercent {
+		t.Fatalf("gc percent = %d, want %d", got, defaultGCPercent)
+	}
+	// 下一次 SetGCPercent 返回当前值，确认默认值真的生效。
+	if current := debug.SetGCPercent(100); current != defaultGCPercent {
+		t.Fatalf("effective gc percent = %d, want %d", current, defaultGCPercent)
+	}
+}
+
+func TestApplyGCPercentHonorsAICLIVar(t *testing.T) {
+	t.Setenv("GOGC", "")
+	t.Setenv("AICLI_GOGC", "75")
+	previous := debug.SetGCPercent(100)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	if got := applyGCPercentFromEnv(); got != 75 {
+		t.Fatalf("gc percent = %d, want 75", got)
+	}
+	if current := debug.SetGCPercent(100); current != 75 {
+		t.Fatalf("effective gc percent = %d, want 75", current)
+	}
+}
+
+// TestApplyGCPercentDefersToGoGC 验证用户设置 Go 官方变量时不再覆盖。
+func TestApplyGCPercentDefersToGoGC(t *testing.T) {
+	t.Setenv("AICLI_GOGC", "")
+	t.Setenv("GOGC", "200")
+	previous := debug.SetGCPercent(77)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	if got := applyGCPercentFromEnv(); got != 0 {
+		t.Fatalf("gc percent = %d, want 0 (deferred to runtime)", got)
+	}
+	if current := debug.SetGCPercent(77); current != 77 {
+		t.Fatalf("gc percent was overridden: current = %d, want 77", current)
+	}
+}
+
+func TestApplyGCPercentOffDisables(t *testing.T) {
+	t.Setenv("GOGC", "")
+	t.Setenv("AICLI_GOGC", "off")
+	previous := debug.SetGCPercent(100)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	if got := applyGCPercentFromEnv(); got != -1 {
+		t.Fatalf("gc percent = %d, want -1 (disabled)", got)
+	}
+	if current := debug.SetGCPercent(100); current != -1 {
+		t.Fatalf("effective gc percent = %d, want -1", current)
 	}
 }

@@ -38,6 +38,13 @@ func main() {
 	// 它是软上限（不会 OOM-kill），因此可以安全地设成"远低于峰值"的值。
 	// 用户已在环境里设置时以用户的为准（不覆盖）。
 	applyMemoryLimitFromEnv()
+	// 同理收紧默认 GC 目标（GOGC=50）：长驻 chat 的 GC 成本很低，但 100%
+	// 的堆目标会把 HeapSys/Private 抬到存活堆两倍以上。用户设置 GOGC 或
+	// AICLI_GOGC 时以用户值为准。
+	applyGCPercentFromEnv()
+	// 长空闲期主动归还空闲 span：Windows 的 scavenger 不保证在进程空闲后
+	// 立刻把 HeapSys 降下来，任务管理器里的私有内存会长期停在历史峰值。
+	startIdleMemoryReclaimer()
 
 	// --console-host 必须先于 .env、配置、日志和终端初始化处理。MobaXterm /
 	// mintty 中的原生 Windows 进程拿到的是 pipe；父进程通过

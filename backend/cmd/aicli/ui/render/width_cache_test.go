@@ -100,6 +100,31 @@ func TestWidthCacheEvictionRescuesRecency(t *testing.T) {
 	m.mu.Unlock()
 }
 
+// TestResetWidthMemoClearsEntries 锁定空闲归还路径：清空条目与 key 字节，
+// 但保留预算配置供下一帧重新填充。
+func TestResetWidthMemoClearsEntries(t *testing.T) {
+	widthMemo.store("reset-width-memo-测试", 42)
+	widthMemo.mu.Lock()
+	if len(widthMemo.byKey) == 0 || widthMemo.keyBytes == 0 {
+		widthMemo.mu.Unlock()
+		t.Fatal("expected primed width cache")
+	}
+	max, maxBytes := widthMemo.max, widthMemo.maxBytes
+	widthMemo.mu.Unlock()
+
+	ResetWidthMemo()
+
+	widthMemo.mu.Lock()
+	defer widthMemo.mu.Unlock()
+	if len(widthMemo.byKey) != 0 || widthMemo.lru.Len() != 0 || widthMemo.keyBytes != 0 {
+		t.Fatalf("cache not cleared: entries=%d lru=%d keyBytes=%d",
+			len(widthMemo.byKey), widthMemo.lru.Len(), widthMemo.keyBytes)
+	}
+	if widthMemo.max != max || widthMemo.maxBytes != maxBytes {
+		t.Fatalf("budget changed: max=%d/%d maxBytes=%d/%d", widthMemo.max, max, widthMemo.maxBytes, maxBytes)
+	}
+}
+
 // TestWidthCacheStoreRefresh asserts re-storing an existing key updates the
 // width and does not duplicate entries.
 func TestWidthCacheStoreRefresh(t *testing.T) {

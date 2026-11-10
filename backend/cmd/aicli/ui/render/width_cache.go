@@ -128,6 +128,16 @@ func (m *widthCacheMemo) evictOldestLocked() {
 	m.evictions++
 }
 
+// ResetWidthMemo clears the width cache for idle-memory reclamation and tests.
+// The max/budget configuration is preserved; the next render refills it.
+func ResetWidthMemo() {
+	widthMemo.mu.Lock()
+	defer widthMemo.mu.Unlock()
+	widthMemo.byKey = make(map[string]*list.Element)
+	widthMemo.lru.Init()
+	widthMemo.keyBytes = 0
+}
+
 // fastASCIIWidth returns the width of a string consisting solely of printable
 // ASCII (0x20..0x7e), each of which occupies exactly one terminal cell. This
 // covers the vast majority of measure calls (markdown prose, code, status
