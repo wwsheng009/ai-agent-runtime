@@ -680,6 +680,7 @@ func applyChatCompactContextUsage(session *ChatSession, result *compactruntime.R
 		}
 		if contextTokens > 0 {
 			applyChatContextTokensReset(session, contextTokens, windowTokens, forceRefresh)
+			clearChatRuntimeSessionContextAnchor(session)
 			return
 		}
 		if forceRefresh && session.Interaction != nil {

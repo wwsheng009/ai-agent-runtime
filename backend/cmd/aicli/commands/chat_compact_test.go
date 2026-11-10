@@ -168,6 +168,52 @@ func TestCompactRefreshesContextStatusAndDynamicActivity(t *testing.T) {
 	}
 }
 
+// TestCompactClearsStaleProviderAnchorFromContextStatus reproduces the
+// 2026-11-06 incident: /compact reported token_before=489144 ->
+// token_after=4399, but the status bar kept showing "Context 62% used" because
+// the provider-observed structured anchor still described the old prompt.
+func TestCompactClearsStaleProviderAnchorFromContextStatus(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.RuntimeContextAnchorFingerprintKey: "fp-pre-compact",
+		chatRuntimeContextContextTokenCount:            624485,
+		"context_token_count":                          624485,
+	}
+	session := &ChatSession{
+		RuntimeSession:          runtimeSession,
+		ContextTokenCount:       624485,
+		ContextWindowTokenCount: 1000000,
+	}
+
+	before, beforeSource := resolveChatStatusContextUsedTokensWithSource(session)
+	if before != 624485 || beforeSource != chatContextUsedSourceAnchorLegacy {
+		t.Fatalf("pre-compact status source = (%d, %q), want (624485, %q)",
+			before, beforeSource, chatContextUsedSourceAnchorLegacy)
+	}
+	if percent := chatStatusContextUsedPercent(before, resolveChatStatusContextWindowTokens(session)); percent != 62 {
+		t.Fatalf("pre-compact context percent = %d, want 62", percent)
+	}
+
+	applyChatCompactContextUsage(session, &compactruntime.Result{
+		Mode:              compactruntime.ModeLocal,
+		TokenBefore:       489144,
+		TokenAfter:        4399,
+		CompactedMessages: 597,
+	}, compactruntime.Status{Mode: compactruntime.ModeLocal, MaxContextTokens: 1000000}, false)
+
+	after, afterSource := resolveChatStatusContextUsedTokensWithSource(session)
+	if after != 4399 || afterSource != chatContextUsedSourceSnapshot {
+		t.Fatalf("post-compact status source = (%d, %q), want (4399, %q)",
+			after, afterSource, chatContextUsedSourceSnapshot)
+	}
+	if percent := chatStatusContextUsedPercent(after, resolveChatStatusContextWindowTokens(session)); percent != 0 {
+		t.Fatalf("post-compact context percent = %d, want 0", percent)
+	}
+	if runtimechat.HasRuntimeSessionContextAnchor(session.RuntimeSession) {
+		t.Fatal("structured context anchor must be invalidated after a history rewrite")
+	}
+}
+
 func TestFormatChatCompactReport_MissingModelCapabilityIncludesConfigHint(t *testing.T) {
 	report := &chatCompactReport{
 		RequestedMode: compactruntime.ModeLocal,

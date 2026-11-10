@@ -7550,17 +7550,22 @@ func (b *chatRuntimeEventBridge) applySessionCompactStatus(event runtimeevents.E
 		contextTokens := firstPositivePayloadInt(event.Payload, "token_after", "context_prompt_tokens", "prompt_tokens_after")
 		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
 		b.session.TurnContextTokenCount = 0
-		if contextTokens > 0 {
-			applyChatContextTokensReset(b.session, contextTokens, windowTokens, true)
-		} else if b.session.Interaction != nil {
-			b.session.Interaction.RefreshStatus("")
-		}
 		// Auto-compact updates title lineage on the runtime session; pull the
 		// new title into the terminal notifier without waiting for the next turn.
+		// The sync clones the entire runtime context map (including the
+		// pre-compaction provider anchor) from the store, so token_after and the
+		// anchor invalidation must land AFTER it: otherwise
+		// restoreChatContextTokenUsage restores the stale anchor value.
 		if err := syncRuntimeSessionBackIntoCLI(b.session); err != nil {
 			logpkg.Debugf("failed to sync session after compact completed: %v", err)
 		}
 		refreshChatTitleMetadata(b.session)
+		if contextTokens > 0 {
+			applyChatContextTokensReset(b.session, contextTokens, windowTokens, true)
+			clearChatRuntimeSessionContextAnchor(b.session)
+		} else if b.session.Interaction != nil {
+			b.session.Interaction.RefreshStatus("")
+		}
 	case runtimechat.EventSessionCompactStarted, runtimechat.EventSessionCompactSkipped, runtimechat.EventSessionCompactFailed:
 		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
 		if windowTokens > 0 && b.session.ContextWindowTokenCount != windowTokens {

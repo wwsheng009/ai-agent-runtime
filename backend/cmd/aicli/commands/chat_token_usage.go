@@ -401,3 +401,32 @@ func updateChatRuntimeSessionContextAnchor(session *ChatSession, inputTokens int
 		ctx[sessionmeta.ContextTokenCount] = inputTokens
 	})
 }
+
+// clearChatRuntimeSessionContextAnchor invalidates the provider-observed
+// context anchor on the CLI-side runtime session copy after a successful
+// compaction.
+//
+// The status bar resolves "Context % used" from this anchor first
+// (resolveChatStatusContextUsedTokensWithSource). The anchor is a
+// prompt-identity-verified InputTotal from the last provider response, so after
+// a history rewrite it still describes the *pre-compaction* prompt. Compaction
+// only ever reset session.ContextTokenCount, a display value, and
+// syncRuntimeSessionFromChatMode deliberately protects a structured anchor from
+// being clobbered by that display value (chat_session.go). Leaving the anchor
+// intact therefore pins the status bar at the pre-compaction ratio until the
+// next LLM response re-anchors -- the "compressed but Context % did not
+// update" report.
+//
+// Mirrors loop.clearContextLedger and the actor backtrack cleanup: a history
+// rewrite invalidates the old prompt identity, and the next provider response
+// writes a fresh anchor through updateChatRuntimeSessionContextAnchor.
+func clearChatRuntimeSessionContextAnchor(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	withRuntimeContextEdit(session, func(ctx map[string]interface{}) {
+		delete(ctx, chatRuntimeContextContextTokenCount)
+		delete(ctx, sessionmeta.ContextTokenCount)
+		delete(ctx, runtimechat.RuntimeContextAnchorFingerprintKey)
+	})
+}
