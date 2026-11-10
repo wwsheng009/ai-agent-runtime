@@ -24,7 +24,10 @@ import (
 type CanonicalRebuildStats struct {
 	FullCanonicalLoads int64
 	FastIdentityProofs int64
-	BackfilledRows     int64
+	// FastAppendStarts 统计 canonical append 起点由 identity_hash 点查直接
+	// 证明、跳过完整 canonical tail 读取/解码的次数。
+	FastAppendStarts int64
+	BackfilledRows   int64
 	// BoundedRebuilds 统计「以已存投影为基线、只追加缺失尾部」的次数：
 	// 这些 checkpoint 既保住了压缩边界，也没有解码整段 canonical。
 	BoundedRebuilds int64
@@ -41,6 +44,7 @@ func (s *SQLiteSessionStorage) CanonicalRebuildStats() CanonicalRebuildStats {
 	return CanonicalRebuildStats{
 		FullCanonicalLoads: s.canonicalFullLoads.Load(),
 		FastIdentityProofs: s.canonicalFastProofs.Load(),
+		FastAppendStarts:   s.canonicalFastAppendStarts.Load(),
 		BackfilledRows:     s.canonicalBackfilledRows.Load(),
 		BoundedRebuilds:    s.canonicalBoundedRebuilds.Load(),
 		BoundedFallbacks:   s.canonicalBoundedFallbacks.Load(),

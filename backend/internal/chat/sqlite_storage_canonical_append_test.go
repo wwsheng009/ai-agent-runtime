@@ -130,6 +130,33 @@ func TestSQLiteSessionStorageUpdateAlignsCanonicalAppendByIdentity(t *testing.T)
 	requireNoDuplicateCanonicalIdentities(t, store, session.ID)
 }
 
+// The append-only checkpoint shape should be proven with indexed identity_hash
+// lookups and skip the full canonical-tail decode. This is the common
+// "one/two new messages" path in a long-running turn.
+func TestSQLiteSessionStorageCanonicalAppendFastPathUsesIdentityIndex(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, nil)
+
+	session := NewSession("canonical-fast-append-user")
+	session.AddMessage(*types.NewUserMessage("first prompt"))
+	session.AddMessage(*types.NewAssistantMessage("first answer"))
+	require.NoError(t, store.Save(ctx, session))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	loaded.AddMessage(*types.NewUserMessage("second prompt"))
+	require.NoError(t, store.Update(ctx, loaded))
+
+	stats := store.CanonicalRebuildStats()
+	require.GreaterOrEqual(t, stats.FastAppendStarts, int64(1),
+		"append-only checkpoint must use the identity_hash fast path")
+	require.Equal(t, []string{
+		"user:first prompt",
+		"assistant:first answer",
+		"user:second prompt",
+	}, rawCanonicalContents(t, store, session.ID))
+}
+
 // TestSQLiteSessionStorageUpdateSkipsAlreadyStoredTail reproduces the exact
 // shape found in a corrupted session: the caller mirrors the newest assistant
 // message a second time (projection lag + system strip) and the next write

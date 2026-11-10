@@ -82,6 +82,9 @@ type SQLiteSessionStorage struct {
 	canonicalFullLoads      atomic.Int64
 	canonicalFastProofs     atomic.Int64
 	canonicalBackfilledRows atomic.Int64
+	// canonicalFastAppendStarts 统计 canonical append 起点由 identity_hash
+	// 点查快路径直接证明、因而跳过完整 tail 读取/解码的次数。
+	canonicalFastAppendStarts atomic.Int64
 	// canonicalBoundedRebuilds 统计「以已存投影为基线、只追加缺失尾部」的次数。
 	// 这些 checkpoint 保住了压缩边界，没有解码整段 canonical。
 	canonicalBoundedRebuilds atomic.Int64
@@ -1285,6 +1288,11 @@ func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *s
 		return 0, nil
 	}
 	legacyStart := legacyCanonicalAppendStart(session, promptRows, prefixMatches, canonicalCount)
+	if start, handled, err := s.canonicalAppendStartFastTx(ctx, tx, session, prefixMatches, canonicalCount, legacyStart); err != nil {
+		return 0, err
+	} else if handled {
+		return start, nil
+	}
 	// One extra row keeps a truncated read detectable: a tail that is exhausted
 	// without an anchor is not trustworthy enough to override the legacy path.
 	tail, err := s.loadCanonicalTailMessagesTx(ctx, tx, session.ID, len(history)+1)
@@ -1323,6 +1331,73 @@ func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *s
 		return legacyStart, nil
 	}
 	return start, nil
+}
+
+// maxCanonicalAppendIdentityProbes bounds the number of point queries the
+// indexed fast path may spend. A larger suffix is better served by one bounded
+// tail read plus full decode than by N independent index lookups.
+const maxCanonicalAppendIdentityProbes = 8
+
+// canonicalAppendStartFastTx proves the common checkpoint shape with indexed
+// identity_hash lookups instead of loading and decoding the entire canonical
+// tail:
+//   - the prompt projection prefix proves history[0:legacyStart] is stored;
+//   - the newest canonical row must be the last prefix message;
+//   - every suffix message must be absent from canonical.
+//
+// Any uncertainty returns handled=false and lets the existing full-tail path
+// decide. In particular, an incomplete identity_hash backfill, a replacement
+// history, extra canonical rows after the prefix anchor, or a stored suffix
+// message all fall back unchanged.
+func (s *SQLiteSessionStorage) canonicalAppendStartFastTx(ctx context.Context, tx *sql.Tx, session *Session, prefixMatches bool, canonicalCount, legacyStart int) (int, bool, error) {
+	if s == nil || session == nil || !prefixMatches || session.HistoryReplaced {
+		return 0, false, nil
+	}
+	history := session.History
+	if legacyStart <= 0 || legacyStart > len(history) || canonicalCount < legacyStart {
+		return 0, false, nil
+	}
+	if len(history)-legacyStart > maxCanonicalAppendIdentityProbes {
+		return 0, false, nil
+	}
+	complete, err := s.canonicalIdentityHashesCompleteTx(ctx, tx, session.ID)
+	if err != nil || !complete {
+		// A failed/partial proof is not a write failure: the full-tail path
+		// remains authoritative and preserves the existing behavior.
+		return 0, false, nil
+	}
+	var newest []byte
+	err = tx.QueryRowContext(ctx, `
+		SELECT identity_hash FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq DESC
+		LIMIT 1
+	`, session.ID).Scan(&newest)
+	if err == sql.ErrNoRows || err != nil || len(newest) == 0 {
+		return 0, false, nil
+	}
+	if !bytes.Equal(newest, canonicalMessageIdentityHash(history[legacyStart-1])) {
+		return 0, false, nil
+	}
+	for index := legacyStart; index < len(history); index++ {
+		want := canonicalMessageIdentityHash(history[index])
+		var exists int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM session_messages
+			WHERE session_id = ? AND identity_hash = ?
+			LIMIT 1
+		`, session.ID, want).Scan(&exists)
+		if err == nil {
+			// The suffix message is already stored (or an older row has the
+			// same identity). Fall back to the full identity/range alignment.
+			return 0, false, nil
+		}
+		if err != sql.ErrNoRows {
+			return 0, false, nil
+		}
+	}
+	s.canonicalFastAppendStarts.Add(1)
+	return legacyStart, true, nil
 }
 
 // unanchoredContinuationAppendStart heals the first-turn shape: the agent loop
@@ -1404,13 +1479,11 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 	if missingIDs > 0 {
 		observeIdentityMissing(missingIDs, len(history))
 	}
-	storedIDs := make(map[string]struct{}, len(canonicalTail))
-	storedContent := make(map[string]struct{}, len(canonicalTail))
+	storedIDs := make(map[canonicalMessageIdentity]struct{}, len(canonicalTail))
 	for index := range canonicalTail {
 		if id := canonicalMessageID(canonicalTail[index]); id != "" {
-			storedIDs[canonicalMessageIdentityKey(canonicalTail[index])] = struct{}{}
+			storedIDs[canonicalMessageIdentityOf(canonicalTail[index])] = struct{}{}
 		}
-		storedContent[canonicalMessageSubstanceKey(canonicalTail[index])] = struct{}{}
 	}
 	incomingIDs := make(map[string]struct{}, len(history))
 	for index := range history {
@@ -1433,9 +1506,9 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 	//
 	// Quotas are consumed newest-first here; the counted pass below still runs
 	// for the anchored=false fallback and keeps its FIRST-claimant order.
-	substanceQuota := make(map[string]int, len(canonicalTail))
+	substanceQuota := make(map[canonicalMessageSubstance]int, len(canonicalTail))
 	for index := range canonicalTail {
-		substanceQuota[canonicalMessageSubstanceKey(canonicalTail[index])]++
+		substanceQuota[canonicalMessageSubstanceOf(canonicalTail[index])]++
 	}
 	for index := len(history) - 1; index >= 0; index-- {
 		if messageAnchorsCanonical(history[index], storedIDs, substanceQuota) {
@@ -1447,7 +1520,7 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 		// turn it belongs to is still open, so appending it would store the same
 		// user turn twice.
 		if isUserTurnMessage(history[index]) {
-			if _, ok := openUserTurns[canonicalMessageSubstanceKey(history[index])]; ok {
+			if _, ok := openUserTurns[canonicalMessageSubstanceOf(history[index])]; ok {
 				return index + 1, true
 			}
 		}
@@ -1461,13 +1534,13 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 	// query, same response pool) keeps its tool rows behind the anchor and is
 	// appended instead of being collapsed (live-fire 2026-10-17: a second
 	// web_search turn stored 1 row instead of 3).
-	quota := make(map[string]int, len(canonicalTail))
+	quota := make(map[canonicalMessageSubstance]int, len(canonicalTail))
 	for index := range canonicalTail {
-		quota[canonicalMessageSubstanceKey(canonicalTail[index])]++
+		quota[canonicalMessageSubstanceOf(canonicalTail[index])]++
 	}
 	lastStored := -1
 	for index := range history {
-		key := canonicalMessageSubstanceKey(history[index])
+		key := canonicalMessageSubstanceOf(history[index])
 		if quota[key] == 0 {
 			continue
 		}
@@ -1495,15 +1568,15 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 //
 // A genuine repetition after a reply is unaffected either way: the reply is a
 // substantive message and closes the turn before it.
-func openUserTurnSubstance(canonicalTail []types.Message, incomingIDs map[string]struct{}) map[string]struct{} {
-	open := make(map[string]struct{})
+func openUserTurnSubstance(canonicalTail []types.Message, incomingIDs map[string]struct{}) map[canonicalMessageSubstance]struct{} {
+	open := make(map[canonicalMessageSubstance]struct{})
 	for index := len(canonicalTail) - 1; index >= 0; index-- {
 		message := canonicalTail[index]
 		if isUserTurnMessage(message) {
 			if _, retained := incomingIDs[canonicalMessageID(message)]; retained && canonicalMessageID(message) != "" {
 				continue
 			}
-			open[canonicalMessageSubstanceKey(message)] = struct{}{}
+			open[canonicalMessageSubstanceOf(message)] = struct{}{}
 			continue
 		}
 		if types.IsRequestScopedContextMessage(message) {
@@ -1534,15 +1607,15 @@ func isUserTurnMessage(message types.Message) bool {
 // message contract for the no-anchor fallback). An id-bearing message whose
 // id matches no stored row does not substance-fallback: a fresh id on
 // identical content marks the rebuilt copy as the new one.
-func messageAnchorsCanonical(message types.Message, storedIDs map[string]struct{}, substanceQuota map[string]int) bool {
+func messageAnchorsCanonical(message types.Message, storedIDs map[canonicalMessageIdentity]struct{}, substanceQuota map[canonicalMessageSubstance]int) bool {
 	if id := canonicalMessageID(message); id != "" {
-		_, ok := storedIDs[canonicalMessageIdentityKey(message)]
+		_, ok := storedIDs[canonicalMessageIdentityOf(message)]
 		if ok {
 			return true
 		}
 		return false
 	}
-	key := canonicalMessageSubstanceKey(message)
+	key := canonicalMessageSubstanceOf(message)
 	if quota := substanceQuota[key]; quota > 0 {
 		substanceQuota[key] = quota - 1
 	}
@@ -1553,17 +1626,44 @@ func canonicalMessageID(message types.Message) string {
 	return strings.TrimSpace(types.MessageID(message))
 }
 
-// canonicalMessageIdentityKey matches a message only against the stored row
-// with the same id *and* the same substance: a caller that rewrote a message in
+// canonicalMessageIdentity matches a message only against the stored row with
+// the same id *and* the same substance: a caller that rewrote a message in
 // place (retry) keeps its id but must still be appended rather than dropped.
-func canonicalMessageIdentityKey(message types.Message) string {
-	return "id\x00" + canonicalMessageID(message) + "\x00" + canonicalMessageSubstanceKey(message)
+type canonicalMessageIdentity struct {
+	id        string
+	substance canonicalMessageSubstance
+}
+
+func canonicalMessageIdentityOf(message types.Message) canonicalMessageIdentity {
+	return canonicalMessageIdentity{
+		id:        canonicalMessageID(message),
+		substance: canonicalMessageSubstanceOf(message),
+	}
 }
 
 // canonicalMessageSubstanceKey identifies a message by its renderable content,
 // used for rows and histories that predate message identities.
 func canonicalMessageSubstanceKey(message types.Message) string {
-	return strings.ToLower(strings.TrimSpace(message.Role)) + "\x00" + message.Content + "\x00" + toolCallSignature(message)
+	substance := canonicalMessageSubstanceOf(message)
+	return substance.role + "\x00" + substance.content + "\x00" + substance.toolSignature
+}
+
+// canonicalMessageSubstance is the allocation-free comparable form of
+// canonicalMessageSubstanceKey. Its string fields reference the message's
+// existing storage; Go map equality compares the bytes without concatenating a
+// new full-content key for every history/tail entry on every checkpoint.
+type canonicalMessageSubstance struct {
+	role          string
+	content       string
+	toolSignature string
+}
+
+func canonicalMessageSubstanceOf(message types.Message) canonicalMessageSubstance {
+	return canonicalMessageSubstance{
+		role:          strings.ToLower(strings.TrimSpace(message.Role)),
+		content:       message.Content,
+		toolSignature: toolCallSignature(message),
+	}
 }
 
 func toolCallSignature(message types.Message) string {
@@ -1685,7 +1785,7 @@ func duplicateMessageIdentity(previous, current types.Message) bool {
 	id := canonicalMessageID(current)
 	return id != "" &&
 		id == canonicalMessageID(previous) &&
-		canonicalMessageSubstanceKey(previous) == canonicalMessageSubstanceKey(current)
+		canonicalMessageSubstanceOf(previous) == canonicalMessageSubstanceOf(current)
 }
 
 func sessionExistsTx(ctx context.Context, tx *sql.Tx, sessionID string) (bool, error) {
