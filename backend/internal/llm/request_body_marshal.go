@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -65,6 +66,7 @@ func MarshalProviderRequestBody(body map[string]interface{}) ([]byte, error) {
 
 	var buf bytes.Buffer
 	buf.WriteByte('{')
+	encoder := json.NewEncoder(&buf)
 	for i, key := range ordered {
 		if i > 0 {
 			buf.WriteByte(',')
@@ -75,11 +77,18 @@ func MarshalProviderRequestBody(body map[string]interface{}) ([]byte, error) {
 		}
 		buf.Write(encodedKey)
 		buf.WriteByte(':')
-		encodedValue, err := json.Marshal(body[key])
-		if err != nil {
+		// 直接把值编码进最终 buffer。旧实现先 json.Marshal 出一份完整
+		// []byte 再 Write 复制一次：长会话的 messages 字段可达数十 MB，
+		// 每次请求都会制造一份同尺寸的临时缓冲。json.Encoder 的默认
+		// 选项与 json.Marshal 一致（compact + HTML 转义），只多一个
+		// 结尾换行，Truncate 掉即可保持逐字节等价。
+		if err := encoder.Encode(body[key]); err != nil {
 			return nil, err
 		}
-		buf.Write(encodedValue)
+		if buf.Len() == 0 || buf.Bytes()[buf.Len()-1] != '\n' {
+			return nil, fmt.Errorf("json encoder did not terminate value for key %q", key)
+		}
+		buf.Truncate(buf.Len() - 1)
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil

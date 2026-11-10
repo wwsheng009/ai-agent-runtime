@@ -146,3 +146,191 @@ func TestBuildHTTPDebugRequestMetadataDetectsToolOrderChanges(t *testing.T) {
 		t.Fatalf("expected cache surface fingerprint to change when tool order changes")
 	}
 }
+
+func TestBuildHTTPDebugRequestDiagnosticsCacheSurfaceTracksEachField(t *testing.T) {
+	base := map[string]interface{}{
+		"messages":     []map[string]interface{}{{"role": "user", "content": "hello"}},
+		"tools":        []map[string]interface{}{{"name": "tool_a"}},
+		"instructions": "system prompt",
+	}
+	baseDebug := buildHTTPDebugRequestDiagnostics("openai", "", base)
+	baseSurface, _ := baseDebug["cache_surface_sha256"].(string)
+	if baseSurface == "" {
+		t.Fatal("expected cache surface fingerprint")
+	}
+
+	changes := []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{name: "messages", body: map[string]interface{}{
+			"messages":     []map[string]interface{}{{"role": "user", "content": "changed"}},
+			"tools":        base["tools"],
+			"instructions": base["instructions"],
+		}},
+		{name: "tools", body: map[string]interface{}{
+			"messages":     base["messages"],
+			"tools":        []map[string]interface{}{{"name": "tool_b"}},
+			"instructions": base["instructions"],
+		}},
+		{name: "instructions", body: map[string]interface{}{
+			"messages":     base["messages"],
+			"tools":        base["tools"],
+			"instructions": "changed system prompt",
+		}},
+		{name: "prompt_cache_key", body: map[string]interface{}{
+			"messages":         base["messages"],
+			"tools":            base["tools"],
+			"instructions":     base["instructions"],
+			"prompt_cache_key": "session-2",
+		}},
+	}
+	for _, change := range changes {
+		t.Run(change.name, func(t *testing.T) {
+			debug := buildHTTPDebugRequestDiagnostics("openai", "", change.body)
+			surface, _ := debug["cache_surface_sha256"].(string)
+			if surface == "" || surface == baseSurface {
+				t.Fatalf("cache surface fingerprint did not change for %q: %q", change.name, surface)
+			}
+		})
+	}
+}
+
+func TestBuildHTTPDebugRequestDiagnosticsRequestFingerprintTracksAllFields(t *testing.T) {
+	base := map[string]interface{}{
+		"model": "bench-model",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+		"tools": []map[string]interface{}{
+			{"name": "tool_a"},
+		},
+		"instructions": "system prompt",
+	}
+	baseDebug := buildHTTPDebugRequestDiagnostics("openai", "", base)
+	baseRequest, _ := baseDebug["request_sha256"].(string)
+	if baseRequest == "" {
+		t.Fatal("expected request fingerprint")
+	}
+	again := buildHTTPDebugRequestDiagnostics("openai", "", base)
+	if again["request_sha256"] != baseRequest {
+		t.Fatal("request fingerprint must be stable for unchanged body")
+	}
+
+	changes := []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{name: "scalar field", body: map[string]interface{}{
+			"model":        "other-model",
+			"messages":     base["messages"],
+			"tools":        base["tools"],
+			"instructions": base["instructions"],
+		}},
+		{name: "messages field", body: map[string]interface{}{
+			"model":        base["model"],
+			"messages":     []map[string]interface{}{{"role": "user", "content": "changed"}},
+			"tools":        base["tools"],
+			"instructions": base["instructions"],
+		}},
+		{name: "extra field", body: map[string]interface{}{
+			"model":        base["model"],
+			"messages":     base["messages"],
+			"tools":        base["tools"],
+			"instructions": base["instructions"],
+			"temperature":  0.5,
+		}},
+	}
+	for _, change := range changes {
+		t.Run(change.name, func(t *testing.T) {
+			debug := buildHTTPDebugRequestDiagnostics("openai", "", change.body)
+			got, _ := debug["request_sha256"].(string)
+			if got == "" || got == baseRequest {
+				t.Fatalf("request fingerprint did not change for %q: %q", change.name, got)
+			}
+		})
+	}
+}
+
+// TestBuildHTTPDebugRequestMetadataWithBodyMatchesMapFingerprints 锁定
+// 复用序列化 body 的快速路径与旧 map 编码路径产生同一组指纹。字段哈希
+// 从"重新 JSON 编码整个 messages/tools/instructions"改为"直接哈希请求体
+// 中对应字段的原始字节"，语义必须完全等价。
+func TestBuildHTTPDebugRequestMetadataWithBodyMatchesMapFingerprints(t *testing.T) {
+	body := map[string]interface{}{
+		"model": "gpt-test",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "1 < 2 & 3"},
+			map[string]interface{}{"role": "assistant", "content": "中文回复"},
+		},
+		"tools": []interface{}{
+			map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "tool_a"}},
+		},
+		"instructions":     "system <prompt>",
+		"prompt_cache_key": "session-1",
+		"stream":           true,
+	}
+	bodyBytes, err := MarshalProviderRequestBody(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	oldMetadata := buildHTTPDebugRequestMetadata(nil, "openai", "bench", body)
+	newMetadata := buildHTTPDebugRequestMetadataWithBody(nil, "openai", "bench", body, bodyBytes)
+	oldDebug, _ := oldMetadata["_request_debug"].(map[string]interface{})
+	newDebug, _ := newMetadata["_request_debug"].(map[string]interface{})
+	if oldDebug == nil || newDebug == nil {
+		t.Fatalf("missing diagnostics: old=%#v new=%#v", oldMetadata, newMetadata)
+	}
+
+	for _, key := range []string{
+		"request_sha256",
+		"cache_surface_sha256",
+		"messages_sha256",
+		"tools_sha256",
+		"instructions_sha256",
+		"message_count",
+		"tool_count",
+		"prompt_cache_key",
+		"protocol",
+		"compatibility_profile",
+	} {
+		if oldDebug[key] != newDebug[key] {
+			t.Fatalf("%s differs: old=%#v new=%#v", key, oldDebug[key], newDebug[key])
+		}
+	}
+}
+
+func TestParseHTTPDebugRawFields(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"text":"a }, \" b"}],"tools":[],"instructions":"sys","prompt_cache_key":"k"}`)
+	fields, ok := parseHTTPDebugRawFields(body)
+	if !ok {
+		t.Fatal("expected compact JSON body to parse")
+	}
+	for _, key := range []string{"messages", "tools", "instructions", "prompt_cache_key"} {
+		if len(fields[key]) == 0 {
+			t.Fatalf("missing raw field %q: %#v", key, fields)
+		}
+	}
+	if string(fields["messages"]) != `[{"text":"a }, \" b"}]` {
+		t.Fatalf("messages raw slice = %q", fields["messages"])
+	}
+	if string(fields["instructions"]) != `"sys"` {
+		t.Fatalf("instructions raw slice = %q", fields["instructions"])
+	}
+	if _, ok := parseHTTPDebugRawFields([]byte(`not-json`)); ok {
+		t.Fatal("invalid body must not parse")
+	}
+}
+
+func TestBuildHTTPDebugRequestDiagnosticsWithBodyFallback(t *testing.T) {
+	body := map[string]interface{}{
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hello"}},
+	}
+	oldDebug := buildHTTPDebugRequestDiagnostics("openai", "", body)
+	newDebug := buildHTTPDebugRequestDiagnosticsWithBody("openai", "", body, []byte(`not-json`))
+	if oldDebug["messages_sha256"] != newDebug["messages_sha256"] ||
+		oldDebug["request_sha256"] != newDebug["request_sha256"] {
+		t.Fatalf("fallback diagnostics differ: old=%#v new=%#v", oldDebug, newDebug)
+	}
+}

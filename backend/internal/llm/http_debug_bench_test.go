@@ -25,9 +25,9 @@ func benchDebugRequestBody() map[string]interface{} {
 		})
 	}
 	return map[string]interface{}{
-		"model":      "bench-model",
-		"messages":   messages,
-		"tools":      tools,
+		"model":        "bench-model",
+		"messages":     messages,
+		"tools":        tools,
 		"instructions": "benchmark system instructions",
 	}
 }
@@ -53,5 +53,46 @@ func BenchmarkBuildHTTPDebugRequestMetadata_WithReporter(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = buildHTTPDebugRequestMetadataActive(ctx, nil, "openai", "bench", body)
+	}
+}
+
+// BenchmarkBuildHTTPDebugRequestMetadata_WithReporterBody 覆盖生产路径：
+// 请求体已经序列化过一次，诊断指纹直接哈希字段原始字节，不再重新编码
+// messages/tools/instructions。
+func BenchmarkBuildHTTPDebugRequestMetadata_WithReporterBody(b *testing.B) {
+	body := benchDebugRequestBody()
+	bodyBytes, err := MarshalProviderRequestBody(body)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := WithHTTPDebugReporter(context.Background(), func(HTTPDebugEvent) {})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = buildHTTPDebugRequestMetadataActiveWithBody(ctx, nil, "openai", "bench", body, bodyBytes)
+	}
+}
+
+func BenchmarkBuildHTTPDebugRequestMetadata_WithReporterLargeBody(b *testing.B) {
+	body := largeProviderRequestBody()
+	ctx := WithHTTPDebugReporter(context.Background(), func(HTTPDebugEvent) {})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = buildHTTPDebugRequestMetadataActive(ctx, nil, "openai", "bench", body)
+	}
+}
+
+func BenchmarkBuildHTTPDebugRequestMetadata_WithReusedLargeBody(b *testing.B) {
+	body := largeProviderRequestBody()
+	bodyBytes, err := MarshalProviderRequestBody(body)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := WithHTTPDebugReporter(context.Background(), func(HTTPDebugEvent) {})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = buildHTTPDebugRequestMetadataActiveWithBody(ctx, nil, "openai", "bench", body, bodyBytes)
 	}
 }

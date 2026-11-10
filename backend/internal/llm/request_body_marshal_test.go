@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
@@ -120,10 +122,137 @@ func TestMarshalProviderRequestBody_DeterministicAndSemanticallyEquivalent(t *te
 	require.Less(t, maxTokensIdx, modelIdx, "易变参数之间保持既有字典序")
 }
 
+// TestMarshalProviderRequestBody_ValueBytesMatchJSONMarshalExactly 锁定
+// 直接写入最终 buffer 的编码路径与 json.Marshal 逐字节一致：字段值不再
+// 先分配一份完整 []byte 再复制，但 HTML 转义、Unicode、嵌套 map 与
+// 数值格式必须完全不变。
+func TestMarshalProviderRequestBody_ValueBytesMatchJSONMarshalExactly(t *testing.T) {
+	values := map[string]interface{}{
+		"html":     "1 < 2 & 3 > 0",
+		"unicode":  "中文/emoji: \U0001F600",
+		"nested":   map[string]interface{}{"b": []interface{}{1, 2.5, true, nil}, "a": "x"},
+		"raw":      json.RawMessage(`{"k":"v"}`),
+		"nil":      nil,
+		"number":   1.23456789012345,
+		"largeint": int64(1 << 53),
+	}
+	for name, value := range values {
+		t.Run(name, func(t *testing.T) {
+			body := map[string]interface{}{"messages": value}
+			got, err := MarshalProviderRequestBody(body)
+			require.NoError(t, err)
+			want, err := json.Marshal(body)
+			require.NoError(t, err)
+			require.Equal(t, string(want), string(got))
+		})
+	}
+}
+
 func TestMarshalProviderRequestBody_EmptyBodyFallsBackToJSONMarshal(t *testing.T) {
 	got, err := MarshalProviderRequestBody(nil)
 	require.NoError(t, err)
 	require.Equal(t, "null", string(got))
+}
+
+func legacyMarshalProviderRequestBody(body map[string]interface{}) ([]byte, error) {
+	if len(body) == 0 {
+		return json.Marshal(body)
+	}
+	ordered := make([]string, 0, len(body))
+	seen := make(map[string]bool, len(body))
+	for _, key := range requestBodyStablePrefixKeys {
+		if _, ok := body[key]; !ok || seen[key] {
+			continue
+		}
+		seen[key] = true
+		ordered = append(ordered, key)
+	}
+	rest := make([]string, 0, len(body)-len(ordered))
+	for key := range body {
+		if !seen[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	ordered = append(ordered, rest...)
+
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, key := range ordered {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		encodedKey, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encodedKey)
+		buf.WriteByte(':')
+		encodedValue, err := json.Marshal(body[key])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encodedValue)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func BenchmarkMarshalProviderRequestBody(b *testing.B) {
+	body := benchDebugRequestBody()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := MarshalProviderRequestBody(body); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMarshalProviderRequestBodyLegacy(b *testing.B) {
+	body := benchDebugRequestBody()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := legacyMarshalProviderRequestBody(body); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func largeProviderRequestBody() map[string]interface{} {
+	return map[string]interface{}{
+		"messages": []interface{}{map[string]interface{}{
+			"role":    "assistant",
+			"content": strings.Repeat("x", 4<<20),
+		}},
+		"model":  "bench-model",
+		"stream": true,
+	}
+}
+
+func BenchmarkMarshalProviderRequestBodyLarge(b *testing.B) {
+	body := largeProviderRequestBody()
+	b.SetBytes(4 << 20)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := MarshalProviderRequestBody(body); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMarshalProviderRequestBodyLargeLegacy(b *testing.B) {
+	body := largeProviderRequestBody()
+	b.SetBytes(4 << 20)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := legacyMarshalProviderRequestBody(body); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 // 审计四个协议适配器的 BuildRequest 键集合后固化契约：内容键必须整体排在
