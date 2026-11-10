@@ -34,8 +34,9 @@
 2026-11-10 更新：M1 已落地 SQLite schema、`notes.jsonl` 迁移、兼容 facade、
 stable/recall 注入、summary gate、pinned 预算、session mode、records/status/recall
 API 和对应测试；M2 已落地 job lease/retry、bounded transcript reader、secret
-redaction、结构化 candidate 写入、session-end/idle/manual 触发。M3 summary
-编译器/Consolidation、M4 工具/UI、M5 shadow 评估仍待实施。
+redaction、结构化 candidate 写入、session-end/idle/manual 触发；M3 已落地
+Consolidation、summary revision/invalidation/rebuild、usage/citation/exposure、
+injection mode 与 pinned 独立预算。M4 工具/UI、M5 shadow 评估仍待实施。
 
 ### 1.2 设计状态
 
@@ -203,7 +204,7 @@ redaction、结构化 candidate 写入、session-end/idle/manual 触发。M3 sum
 | M0 基线与契约 | 可以 | 按 `07 §8.1` 默认决策转 ADR；记录基线与失败矩阵 |
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
 | M2 抽取 | 已实施 core；待 shadow 运营验收 | job/reader/redaction/candidate/trigger 已落地 |
-| M3 Consolidation | 部分可以 | 必须先有 M2 candidate、summary items、去重规则 |
+| M3 Consolidation | 已实施 core；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure 已落地 |
 | M4 工具/API/UI | 可以并行设计 | 需要 M0 权限与工具命名决策 |
 | M5 上线 | 不可以 | 需要 shadow 数据和验收结果 |
 
@@ -218,6 +219,6 @@ redaction、结构化 candidate 写入、session-end/idle/manual 触发。M3 sum
 ## 8. 下一步建议
 
 1. M1 已完成，按 `06-test-and-acceptance.md §8.2` 固化验收证据；
-2. 进入 M2 自动抽取 shadow，不启用自动注入；
-3. 用真实会话建立标注集，再决定 M3 默认策略；
+2. 进入 M3/M4 shadow 运营验收，不启用默认注入；
+3. 用真实会话建立标注集，再决定 M4 工具与 M5 逐项目上线策略；
 4. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。
