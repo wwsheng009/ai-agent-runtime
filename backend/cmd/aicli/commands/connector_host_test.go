@@ -20,6 +20,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -40,6 +41,15 @@ func newTestConnectorService(t *testing.T) (*connectors.Service, *storefile.Conf
 	store := storefile.NewConfigStore(filepath.Join(dir, "config.yaml"), filepath.Join(dir, "data", "connectors", "state.json"))
 	service := connectors.New(connectors.Deps{Store: store, Backend: stubConnectorBackend{}, Logf: func(string, ...any) {}})
 	return service, store
+}
+
+// isolateConnectorState keeps StartLocalConnectors on a test-local ownership
+// ledger. The production path anchors state.json at the user home, so without
+// this override a previous run can leave "owners" records behind and the next
+// test silently skips activation as "held by another host".
+func isolateConnectorState(t *testing.T) {
+	t.Helper()
+	t.Setenv(statepath.EnvOverride, filepath.Join(t.TempDir(), "state.json"))
 }
 
 // ── 用例 ───────────────────────────────────────────────────────────────────
@@ -142,6 +152,8 @@ func TestLocalConnectorHostCloseIsIdempotent(t *testing.T) {
 // 需要 fail-closed 的部署显式把 connectors.Deps.RequireAllowedUsers 置回 true
 // （闸本体测试见 internal/connectors/service_test.go）。
 func TestStartLocalConnectorsAllowsEmptyWhitelist(t *testing.T) {
+	isolateConnectorState(t)
+
 	var mu sync.Mutex
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +212,8 @@ func TestStartLocalConnectorsAllowsEmptyWhitelist(t *testing.T) {
 // aicli 宿主身份为 "aicli"——policy.runtime_owner 指定 runtime-server 的连接器
 // 不得 Activate/轮询（只读配置），指定 aicli 的照常启动。
 func TestStartLocalConnectorsHonorsRuntimeOwnerGate(t *testing.T) {
+	isolateConnectorState(t)
+
 	var mu sync.Mutex
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

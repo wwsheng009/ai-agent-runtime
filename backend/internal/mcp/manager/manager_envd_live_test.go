@@ -100,5 +100,5 @@ func TestManager_EnvDBackend_LiveSmoke(t *testing.T) {
 	// broken wiring above pass. The result must be a real listing.
 	require.False(t, result.IsError, "tool call returned an error result: %.400s", text)
 	require.NotContains(t, text, "INTERNAL_ERROR", "tool call surfaced a failure: %.400s", text)
-	t.Logf("%s returned %d content block(s), first: %.200s", lsTool, len(result.Content), text)
+	t.Logf("%s returned %d content block(s), first: %.200s", listDirTool, len(result.Content), text)
 }
