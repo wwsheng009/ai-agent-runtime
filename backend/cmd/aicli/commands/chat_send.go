@@ -393,5 +393,23 @@ func chatTurnUserPromptIsPendingRetry(session *ChatSession, userMessage string) 
 	if session == nil || len(session.ImagePaths) > 0 {
 		return false
 	}
-	return chatTurnUserMessageMatchesLast(session, prepareChatTurnUserMessage(session, userMessage))
+	prepared := prepareChatTurnUserMessage(session, userMessage)
+	if !chatTurnUserMessageMatchesLast(session, prepared) {
+		return false
+	}
+	// Canonical session.Messages can lag the render plane (for example an
+	// executor that returned a reply without syncing the assistant message back
+	// into the CLI, or a resumed session whose trailing canonical user message
+	// was never rendered). A same-text prompt is a retry only if that user cell
+	// is still the last thing rendered. If an assistant/tool/command cell has
+	// landed after it, this is a new turn and must be echoed; otherwise the
+	// production presenter (which omits finalized transcript rows from the
+	// viewport and delivers them only through HistoryCommit) leaves the user
+	// with no prompt at all.
+	if bridge := session.RuntimeEventBridge; bridge != nil {
+		if retry, known := bridge.trailingUserCellRetryState(prepared.Content); known {
+			return retry
+		}
+	}
+	return true
 }

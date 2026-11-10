@@ -5513,12 +5513,22 @@ func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content st
 // cells. It posts an empty Scene snapshot through the durable
 // ReplaceTranscript path; the follow-up command document then renders as the
 // first cell of the new conversation.
+//
+// It also opens a new history delivery epoch: Scene rebuilds reset cell IDs and
+// revisions, but the delivery ledger is keyed by that identity. Without the new
+// epoch, the fresh session's first cells collide with the previous session's
+// delivered records and are treated as duplicates — the presenter omits
+// finalized transcript rows from the viewport, so the /new confirmation and the
+// first user prompt would never reach the terminal.
 func (c *chatInteractionCoordinator) resetTranscriptForNewSession() {
 	actor := c.currentUIActor()
 	if actor == nil {
 		return
 	}
-	actor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{}})
+	actor.Post(ui.ReplaceTranscriptAction{
+		Snapshot:         &scene.Snapshot{},
+		NewDeliveryEpoch: true,
+	})
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {

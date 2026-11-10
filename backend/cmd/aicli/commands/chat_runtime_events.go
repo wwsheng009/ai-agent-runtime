@@ -3516,6 +3516,53 @@ func (b *chatRuntimeEventBridge) submitUserInput(text string) {
 	})
 }
 
+// trailingUserCellRetryState reports whether the last rendered conversational
+// Scene cell is the same user prompt. The canonical-pending-retry dedupe in
+// chatTurnUserPromptIsPendingRetry must not suppress a new turn merely because
+// session.Messages still ends with an identical user message: the render plane
+// is the source of truth for what the user has already seen. An assistant,
+// tool-chain, command, or different user cell after that prompt proves a later
+// turn happened, so the same text is a fresh prompt rather than a retry.
+//
+// System/error/reasoning/supplement cells are deliberately transparent: they
+// can be produced by the failed turn itself (for example RenderError after a
+// send failure). Skipping them preserves the original dedupe for a genuine
+// retry while still detecting a completed assistant/tool turn.
+//
+// known=false means the Scene has no rendered cell to compare (fresh bridge or
+// a legacy path that never injected the user cell); callers must retain the
+// canonical fallback in that case.
+func (b *chatRuntimeEventBridge) trailingUserCellRetryState(content string) (retry, known bool) {
+	if b == nil {
+		return false, false
+	}
+	snapshot := b.sceneSnapshot()
+	if snapshot == nil {
+		return false, false
+	}
+	for index := len(snapshot.Cells) - 1; index >= 0; index-- {
+		cell := snapshot.Cells[index]
+		if cell == nil || strings.TrimSpace(cell.Source) == "" {
+			continue
+		}
+		switch cell.Kind {
+		case scene.KindUser:
+			normalize := func(text string) string {
+				text = strings.ReplaceAll(text, "\r\n", "\n")
+				return strings.ReplaceAll(text, "\r", "\n")
+			}
+			return normalize(cell.Source) == normalize(content), true
+		case scene.KindAssistant, scene.KindToolChain, scene.KindCommand:
+			return false, true
+		default:
+			// System/error/reasoning/supplement/diagnostic: transparent for turn
+			// identity; keep looking for the last user/conversational cell.
+			continue
+		}
+	}
+	return false, false
+}
+
 // submitAssistant 把没有 runtime assistant 终态事件的 direct response 接入
 // Scene 数据面。runtime event path 已经 Encode 的回复不得调用该入口。
 func (b *chatRuntimeEventBridge) submitAssistant(text string) {

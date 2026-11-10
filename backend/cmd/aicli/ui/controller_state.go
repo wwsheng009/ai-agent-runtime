@@ -386,11 +386,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
-		// 会话切换：授权式装载替换到**不同** runtime session 时开启新的交付
-		// 代次。cell 身份跨会话复用，上一代次的 Delivered 记录若不失效，重证明
-		// 会把它判成"已交付"而零行追加（用户只看到装载确认——假成功）。新代次
-		// 下同一来源可重新铸造：append-only，旧行保留，新会话历史追加在其下方。
-		if a.ArmScrollbackReplay && a.NewDeliveryEpoch {
+		// 会话切换：替换到**不同** runtime session 的 Scene（resume/load 或
+		// /new）时开启新的交付代次。cell 身份跨会话复用，上一代次的 Delivered
+		// 记录若不失效，新会话的 cell 会被判成"已交付"而不再落地：viewport 只
+		// 渲染未终结内容，用户就会看到 prompt/命令确认完全消失。新代次下同一
+		// 来源可重新铸造：append-only，旧行保留，新会话历史追加在其下方。
+		if a.NewDeliveryEpoch {
 			state.HistoryEffects.openDeliveryEpoch()
 		}
 		// 记录一次授权式装载重证明（B）：计划跑完一遍后结算"零新增提交而转录
