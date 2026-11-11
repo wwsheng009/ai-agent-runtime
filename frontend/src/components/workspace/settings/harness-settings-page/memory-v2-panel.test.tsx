@@ -29,6 +29,11 @@ function translator(): TFunction<"settings"> {
     if (key === "harness.memoryRebuildSummary") return "Rebuild summary";
     if (key === "harness.memoryExport") return "Export";
     if (key === "harness.memoryRevalidate") return "Revalidate";
+    if (key === "harness.memoryRestore") return "Restore";
+    if (key === "harness.memoryReset") return "Reset all";
+    if (key === "harness.memoryWhyNotRun") return "Explain recall";
+    if (key === "harness.memoryUnpin") return "Unpin";
+    if (key === "harness.memoryPin") return "Pin";
     if (key === "harness.memoryCorrect") return "Correct";
     if (key === "harness.memoryForget") return "Forget";
     if (key === "harness.refresh") return "Refresh";
@@ -68,6 +73,7 @@ describe("MemoryV2Panel", () => {
     URL.createObjectURL = originalCreateObjectURL;
     URL.revokeObjectURL = originalRevokeObjectURL;
     HTMLAnchorElement.prototype.click = originalAnchorClick;
+    vi.restoreAllMocks();
     window.localStorage.clear();
   });
 
@@ -84,6 +90,16 @@ describe("MemoryV2Panel", () => {
           fallback: false,
         });
       }
+      if (url.includes("/memory/records") && url.includes("status=deleted")) {
+        return jsonResponse({
+          workspace_path: "/tmp/w", count: 1,
+          items: [{
+            id: "mem_deleted", scope: "project", kind: "decision", status: "deleted",
+            text: "Deleted memory.", pinned: false, source_kind: "manual",
+            revision: 2, freshness_status: "fresh", use_count: 0,
+          }],
+        });
+      }
       if (url.includes("/memory/records")) {
         return jsonResponse({
           workspace_path: "/tmp/w", count: 1,
@@ -93,6 +109,21 @@ describe("MemoryV2Panel", () => {
             revision: 1, freshness_status: "fresh", use_count: 2,
           }],
         });
+      }
+      if (url.includes("/memory/why-not")) {
+        return jsonResponse({
+          workspace_path: "/tmp/w", mode: "on", query_preview: "alpha",
+          query_truncated: false, candidate_count: 2, filtered_count: 1,
+          selected: [{ id: "mem_1", stage: "stable", kind: "decision", pinned: true }],
+          dropped: [{ id: "mem_drop", reason: "no_match" }],
+          token_estimate: 12, token_budget: 600, injected: true,
+        });
+      }
+      if (url.includes("/memory/records/mem_deleted/restore")) {
+        return jsonResponse({ id: "mem_deleted", status: "active" });
+      }
+      if (url.includes("/memory/reset")) {
+        return jsonResponse({ ok: true, action: "reset", workspace_path: "/tmp/w" });
       }
       if (url.includes("/memory/summaries/rebuild")) {
         return jsonResponse({ workspace_path: "/tmp/w", rebuilt: 1, revision: 3 });
@@ -166,6 +197,7 @@ describe("MemoryV2Panel", () => {
     expect(container.textContent).toContain("injected_only");
     expect(container.textContent).toContain("rebuild boom");
     expect(container.textContent).toContain("queryTrace");
+    expect(container.textContent).toContain("Deleted memory.");
 
     const rebuildButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Rebuild summary"),
@@ -194,5 +226,73 @@ describe("MemoryV2Panel", () => {
     )).toBe(true);
     expect(URL.createObjectURL).toHaveBeenCalled();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:memory-export");
+
+    const pinButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Unpin"),
+    );
+    expect(pinButton).toBeTruthy();
+    await act(async () => {
+      pinButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/records/mem_1") &&
+      (init?.method ?? "GET").toUpperCase() === "PATCH" &&
+      String(init?.body).includes('"pinned":false'),
+    )).toBe(true);
+
+    const whyNotInput = container.querySelector("input[aria-label]") as HTMLInputElement | null;
+    expect(whyNotInput).toBeTruthy();
+    await act(async () => {
+      if (whyNotInput) {
+        const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setValue?.call(whyNotInput, "alpha");
+        whyNotInput.dispatchEvent(new Event("input", { bubbles: true }));
+        whyNotInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const whyNotButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Explain recall"),
+    );
+    expect(whyNotButton).toBeTruthy();
+    expect((whyNotButton as HTMLButtonElement | undefined)?.disabled).toBe(false);
+    await act(async () => {
+      whyNotButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/memory/why-not") && String(input).includes("q=alpha"),
+    )).toBe(true);
+    expect(container.textContent).toContain("mem_drop: no_match");
+
+    const restoreButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Restore"),
+    );
+    expect(restoreButton).toBeTruthy();
+    await act(async () => {
+      restoreButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/records/mem_deleted/restore") &&
+      (init?.method ?? "GET").toUpperCase() === "POST",
+    )).toBe(true);
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const resetButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Reset all"),
+    );
+    expect(resetButton).toBeTruthy();
+    await act(async () => {
+      resetButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/reset") &&
+      (init?.method ?? "GET").toUpperCase() === "POST" &&
+      String(init?.body).includes('"confirm":true'),
+    )).toBe(true);
   });
 });

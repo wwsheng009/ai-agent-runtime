@@ -12,6 +12,7 @@ import type {
   RuntimeMemoryStatus,
   RuntimeMemorySummariesResponse,
   RuntimeMemoryUsageResponse,
+  RuntimeMemoryWhyNot,
   RuntimeHarnessPermissionsResponse,
   RuntimeHarnessPluginsResponse,
   RuntimeHarnessPluginUpdateRequest,
@@ -251,6 +252,21 @@ export async function getMemoryRecallTraces(
   );
 }
 
+export async function getMemoryWhyNot(
+  workspacePath?: string,
+  query?: { q: string; limit?: number; token_budget?: number; session_id?: string },
+): Promise<RuntimeMemoryWhyNot> {
+  return fetchRuntimeJson<RuntimeMemoryWhyNot>(
+    withWorkspacePath("/api/runtime/memory/why-not", workspacePath, {
+      q: query?.q,
+      limit: query?.limit,
+      token_budget: query?.token_budget,
+      session_id: query?.session_id,
+    }),
+    { headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
 export async function rebuildMemorySummaries(
   workspacePath?: string,
 ): Promise<{ workspace_path: string; rebuilt: number; revision?: number }> {
@@ -277,6 +293,24 @@ export async function revalidateMemoryRecord(
   );
 }
 
+export async function setMemoryRecordPinned(
+  recordId: string,
+  pinned: boolean,
+  workspacePath?: string,
+): Promise<RuntimeMemoryRecord> {
+  return fetchRuntimeJson<RuntimeMemoryRecord>(
+    withWorkspacePath(
+      `/api/runtime/memory/records/${encodeURIComponent(recordId)}`,
+      workspacePath,
+    ),
+    {
+      method: "PATCH",
+      headers: withMemoryAdminHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
+      body: JSON.stringify({ pinned, workspace_path: workspacePath }),
+    },
+  );
+}
+
 export async function restoreMemoryRecord(
   recordId: string,
   workspacePath?: string,
@@ -300,6 +334,19 @@ export async function deleteMemoryRecord(
       workspacePath,
     ),
     { method: "DELETE", headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function resetMemory(
+  workspacePath?: string,
+): Promise<{ ok: boolean; action: string; workspace_path: string }> {
+  return fetchRuntimeJson(
+    withWorkspacePath("/api/runtime/memory/reset", workspacePath),
+    {
+      method: "POST",
+      headers: withMemoryAdminHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
+      body: JSON.stringify({ confirm: true, workspace_path: workspacePath }),
+    },
   );
 }
 

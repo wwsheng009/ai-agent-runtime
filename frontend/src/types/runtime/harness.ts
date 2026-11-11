@@ -245,6 +245,30 @@ export type RuntimeMemoryRecallTracesResponse = {
   count: number;
 };
 
+export type RuntimeMemoryWhyNotSelected = {
+  id: string;
+  stage: "stable" | "recall" | "summary" | string;
+  kind?: string;
+  pinned?: boolean;
+  source_kind?: string;
+  token_estimate?: number;
+};
+
+export type RuntimeMemoryWhyNot = {
+  workspace_path: string;
+  mode: string;
+  query_preview: string;
+  query_truncated: boolean;
+  summary_revision?: number;
+  candidate_count: number;
+  filtered_count: number;
+  selected: RuntimeMemoryWhyNotSelected[];
+  dropped: { id: string; reason: string }[];
+  token_estimate: number;
+  token_budget: number;
+  injected: boolean;
+};
+
 export type RuntimeHarnessPlugin = {
   id: string;
   name: string;

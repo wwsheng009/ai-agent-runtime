@@ -13,8 +13,11 @@ import {
   getMemorySummaries,
   getMemoryUsage,
   rebuildMemorySummaries,
+  resetMemory,
   revalidateMemoryRecord,
+  restoreMemoryRecord,
   RuntimeApiError,
+  setMemoryRecordPinned,
   type RuntimeMemoryRecord,
   type RuntimeMemoryJob,
   type RuntimeMemoryRecallTrace,
@@ -27,6 +30,7 @@ import { Button } from "@/components/ui/button";
 
 import { SettingsEmptyState } from "../settings-empty-state";
 import { SettingsPanelCard } from "../settings-panel-card";
+import { MemoryV2WhyNot } from "./memory-v2-why-not";
 
 function errorMessage(error: unknown) {
   return error instanceof Error && error.message.trim()
@@ -47,6 +51,7 @@ export function MemoryV2Panel({
   const [usage, setUsage] = useState<RuntimeMemoryUsage[]>([]);
   const [jobs, setJobs] = useState<RuntimeMemoryJob[]>([]);
   const [traces, setTraces] = useState<RuntimeMemoryRecallTrace[]>([]);
+  const [deletedRecords, setDeletedRecords] = useState<RuntimeMemoryRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
@@ -59,16 +64,18 @@ export function MemoryV2Panel({
       setUsage([]);
       setJobs([]);
       setTraces([]);
+      setDeletedRecords([]);
       return;
     }
     const requestId = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const [statusResult, recordsResult, summariesResult, usageResult, jobsResult, tracesResult] =
+      const [statusResult, recordsResult, deletedResult, summariesResult, usageResult, jobsResult, tracesResult] =
         await Promise.allSettled([
           getMemoryStatus(workspacePath),
           getMemoryRecords(workspacePath, { status: "active", limit: 20 }),
+          getMemoryRecords(workspacePath, { status: "deleted", limit: 20 }),
           getMemorySummaries(workspacePath, 10),
           getMemoryUsage(workspacePath, { limit: 20 }),
           getMemoryJobs(workspacePath, 20),
@@ -77,6 +84,7 @@ export function MemoryV2Panel({
       if (requestId !== requestSeq.current) return;
       if (statusResult.status === "fulfilled") setStatus(statusResult.value);
       if (recordsResult.status === "fulfilled") setRecords(recordsResult.value.items ?? []);
+      if (deletedResult.status === "fulfilled") setDeletedRecords(deletedResult.value.items ?? []);
       if (summariesResult.status === "fulfilled") setSummaries(summariesResult.value.items ?? []);
       if (usageResult.status === "fulfilled") setUsage(usageResult.value.items ?? []);
       if (jobsResult.status === "fulfilled") setJobs(jobsResult.value.items ?? []);
@@ -84,7 +92,7 @@ export function MemoryV2Panel({
       const failures = [statusResult, recordsResult, summariesResult]
         .filter((result): result is PromiseRejectedResult => result.status === "rejected")
         .map((result) => errorMessage(result.reason));
-      for (const optional of [usageResult, jobsResult, tracesResult]) {
+      for (const optional of [deletedResult, usageResult, jobsResult, tracesResult]) {
         if (optional.status !== "rejected") continue;
         if (optional.reason instanceof RuntimeApiError && optional.reason.status === 403) {
           continue;
@@ -121,6 +129,34 @@ export function MemoryV2Panel({
     setLoading(true);
     try {
       await revalidateMemoryRecord(record.id, workspacePath);
+      await reload();
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function togglePin(record: RuntimeMemoryRecord) {
+    if (!workspacePath) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await setMemoryRecordPinned(record.id, !record.pinned, workspacePath);
+      await reload();
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function restore(record: RuntimeMemoryRecord) {
+    if (!workspacePath) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await restoreMemoryRecord(record.id, workspacePath);
       await reload();
     } catch (actionError) {
       setError(errorMessage(actionError));
@@ -173,6 +209,20 @@ export function MemoryV2Panel({
     }
   }
 
+  async function resetAll() {
+    if (!workspacePath || !window.confirm(t("harness.memoryResetConfirm"))) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await resetMemory(workspacePath);
+      await reload();
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!workspacePath) return null;
   const v2Available = status !== null && status.mode !== "off" && !status.fallback;
   const actionsDisabled = loading || !v2Available;
@@ -215,6 +265,15 @@ export function MemoryV2Panel({
           >
             <DownloadIcon size={14} />
             {t("harness.memoryExportMarkdown")}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="text-danger"
+            disabled={actionsDisabled}
+            onClick={() => void resetAll()}
+          >
+            {t("harness.memoryReset")}
           </Button>
         </div>
       </div>
@@ -289,6 +348,15 @@ export function MemoryV2Panel({
         </>
       ) : null}
 
+      {v2Available ? (
+        <MemoryV2WhyNot
+          t={t}
+          workspacePath={workspacePath}
+          disabled={actionsDisabled}
+          onError={setError}
+        />
+      ) : null}
+
       {v2Available && summaries.length > 0 ? (
         <div className="mt-3 space-y-2">
           {summaries.slice(0, 3).map((summary) => (
@@ -335,6 +403,9 @@ export function MemoryV2Panel({
                 <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void revalidate(record)}>
                   {t("harness.memoryRevalidate")}
                 </Button>
+                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void togglePin(record)}>
+                  {record.pinned ? t("harness.memoryUnpin") : t("harness.memoryPin")}
+                </Button>
                 <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void correct(record)}>
                   {t("harness.memoryCorrect")}
                 </Button>
@@ -348,6 +419,24 @@ export function MemoryV2Panel({
           <SettingsEmptyState variant="dashed">{t("harness.memoryV2Empty")}</SettingsEmptyState>
         ) : null}
       </div> : null}
+
+      {v2Available && deletedRecords.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          <div className="text-xs font-medium text-foreground">{t("harness.memoryDeletedTitle")}</div>
+          {deletedRecords.slice(0, 10).map((record) => (
+            <div key={record.id} className="rounded-card border border-border px-3 py-2 text-xs">
+              <div className="text-muted-foreground">{record.text}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-muted-foreground">
+                <Badge>{record.status}</Badge>
+                <span>{record.id}</span>
+                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void restore(record)}>
+                  {t("harness.memoryRestore")}
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {v2Available && usage.length > 0 ? (
         <div className="mt-3 space-y-1 text-xs text-muted-foreground">
