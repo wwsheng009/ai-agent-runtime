@@ -1,6 +1,6 @@
 # Agent Memory v2 实施计划
 
-> 状态：实施计划（M1/M2/M3/M4 已实施；M5 指标查询已实施，真实项目 shadow 评估/上线待执行）
+> 状态：实施计划（M1/M2/M3/M4 core 已实施，含 import、CLI revalidate/mode、Web job/recall trace；Web why-not/pin/restore/reset 管理仍未补齐；M5 指标查询已实施，真实项目 shadow 评估/上线待执行）
 > 目标：按可验证、可回滚、`off` 行为不变的方式，把现有 memorystore 升级为跨会话记忆系统。  
 > 原则：先存储和读取门面，后自动写入；先 shadow，后 on；先项目级，后 user scope。
 > 修订：2026-11-10，补 §11 M1 代码级施工说明；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、exposure fallback。
@@ -498,7 +498,7 @@ go test ./internal/agent -count=1
 
 ```bash
 cd backend
-go test ./internal/memorytools ./internal/api/runtimeapi ./internal/tools -count=1
+go test ./internal/memorystore ./internal/memoryruntime ./internal/api/runtimeapi ./internal/toolkit/tools ./internal/tools -count=1
 cd ../frontend
 pnpm test
 pnpm build

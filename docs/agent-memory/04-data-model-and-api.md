@@ -2,7 +2,7 @@
 
 > 状态：目标契约，实施时以本文件为 schema/API 的起点  
 > 约束：SQLite 事实源、Markdown 可重建、scope 默认 project、写入异步。
-> 修订：2026-11-10，M1/M2 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs、schema version 视图、generation 配置和 job/candidate 契约；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
+> 修订：2026-11-11，实施回写 import/export、private/deleted 授权、recallTrace 配置、session mode 项目隔离、summary 稳定项去重与预算截断；2026-11-10，M1/M2 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs、schema version 视图、generation 配置和 job/candidate 契约；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
 
 ## 1. 数据库
 
@@ -45,6 +45,8 @@ type SourceKind string // manual | session_extract | consolidation | import | pr
 - `manual` 记录默认 `active`，自动记录默认 `candidate`；
 - 用户明确“记住”可以直接创建 `active` manual；
 - 用户“忘记”只能由显式请求或管理 API 触发。
+- `sensitivity=private` 的记录不进入 stable/recall/summary，也不会被自动提升；非管理端读取返回 403。
+- secret-shaped 文本（API key、token、password assignment 等）在 manual/candidate/summary 落库前拒绝；legacy 迁移与 import 跳过并计数。
 
 ## 3. 表结构
 
@@ -337,12 +339,13 @@ CREATE INDEX idx_memory_jobs_claim
 
 ```sql
 CREATE TABLE memory_session_modes (
-    session_id      TEXT PRIMARY KEY,
     scope           TEXT NOT NULL DEFAULT 'project',
     project_key     TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL,
     mode            TEXT NOT NULL, -- enabled | disabled | polluted
     updated_at      TEXT NOT NULL,
-    metadata_json   TEXT NOT NULL DEFAULT '{}'
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(project_key, session_id)
 );
 
 CREATE INDEX idx_memory_session_modes_project
@@ -657,7 +660,7 @@ memory:
   # on:     生成 + 注入 + 工具
   mode: off
 
-  # project | project+user
+  # 当前仅支持 project；project+user 仍是目标能力，配置校验会拒绝。
   scope: project
 
   # Existing manual notes remain available even when v2 is off.
@@ -685,6 +688,8 @@ memory:
     summaryTokenBudget: 800
     intervalHours: 24
 
+  # 以下 freshness/sessionMode/retention/redaction 为目标字段；当前版本
+  # 保留固定行为，不消费这些配置。已实现字段见 §6.1。
   freshness:
     enabled: true
     staleBehavior: exclude # exclude | warn
@@ -703,12 +708,12 @@ memory:
 
   injection:
     enabled: true
-    mode: summary        # summary | hybrid | notes
+    mode: notes          # summary | hybrid | notes（当前默认 notes）
     maxItems: 5
     tokenBudget: 600
     pinnedBudgetRatio: 0.20  # pinned/manual 预留；summary/hybrid/notes 均生效
     stageSplit: true     # stable project_memory + tail project_memory_recall
-    allowUserScope: false
+    allowUserScope: false # 目标字段；当前仅 project scope
     recallTrace:
       enabled: false
       sampleRate: 0.01
@@ -717,7 +722,7 @@ memory:
   feedback:
     citationEnabled: true
     exposureSampling: 1.0      # citation 解析失败时仍记录 injected_only
-    exposureRetentionDays: 30
+    exposureRetentionDays: 30 # 目标字段；当前未做定时清理
 
   sessionMode:
     default: enabled     # enabled | disabled
@@ -755,6 +760,19 @@ memory:
 - `injection.maxItems` 约束 summary 之外的 records/recall；pinned/manual 走独立预算，不被 `maxItems` 挤掉。
 - `feedback.*` 控制 citation/exposure 采样与保留；`injected_only` 只记 exposure，不增加 `use_count`。
 
+### 6.1 当前实现口径
+
+| 配置 | 状态 |
+| --- | --- |
+| `mode` / `scope(project)` / `storePath` / `manual` | 已实现并生效 |
+| `generation.*` | 已实现，manual 触发可绕过 disabled |
+| `consolidation.enabled/maxRecords/maxUnusedDays/summaryTokenBudget/intervalHours` | 已实现；`model` 仍走确定性编译器 |
+| `injection.enabled/mode/maxItems/tokenBudget/pinnedBudgetRatio/stageSplit` | 已实现并接入 context budget |
+| `injection.recallTrace.enabled/sampleRate` | 已实现；`retentionDays` 尚未定时清理 |
+| `feedback.citationEnabled/exposureSampling` | 已实现；`exposureRetentionDays` 尚未定时清理 |
+| `tools.enabled/allowForget/allowCorrect` | 已实现；`manual.enabled=false` 时不注册 `memory_add` |
+| `freshness.*` / `sessionMode.*` / `retention.*` / `redaction.*` | 目标字段，尚未全部消费 |
+
 ## 7. HTTP API
 
 ### 7.1 兼容面
@@ -781,10 +799,13 @@ memory:
 | `POST` | `/api/runtime/memory/records/{id}/restore` | 显式恢复，移除对应 suppression |
 | `GET` | `/api/runtime/memory/summaries` | summary revision 列表 |
 | `POST` | `/api/runtime/memory/summaries/{id}/activate` | 回滚/激活指定 summary revision |
+| `POST` | `/api/runtime/memory/summaries/rebuild` | 管理端重建 stale summary |
 | `POST` | `/api/runtime/memory/sessions/{id}/mode` | 设置会话 `enabled/disabled/polluted` |
 | `POST` | `/api/runtime/memory/extract` | 手动触发一个 session 的抽取 |
 | `POST` | `/api/runtime/memory/consolidate` | 手动触发项目 Consolidation |
 | `GET` | `/api/runtime/memory/jobs` | 任务列表、错误、lease、watermark |
+| `GET` | `/api/runtime/memory/usage` | 有界 usage/exposure 查询（管理端） |
+| `GET` | `/api/runtime/memory/metrics` | 聚合指标（管理端） |
 | `GET` | `/api/runtime/memory/freshness` | stale/unverified 统计、待校验记录、最后验证时间 |
 | `POST` | `/api/runtime/memory/freshness/sweep` | 管理端触发 freshness sweep |
 | `GET` | `/api/runtime/memory/audit` | 有界审计查询 |
@@ -796,15 +817,18 @@ memory:
 写操作要求：
 
 - 绑定 workspace_path，并由服务端 canonicalize；
-- 只允许当前 workspace 的 project scope；
-- user scope 只有显式配置且具备权限时开放；
-- 普通写（manual add/correct）沿用现有 harness memory 的写权限；
+- 只允许当前 workspace 的 project scope；`scope=user` 返回 400，`memory.scope=project+user` 当前被配置校验拒绝；
+- 普通 v2 records 写（create/correct/patch）当前要求管理员、可信角色或本机访问；
 - `DELETE`、`restore`、`reset`、`consolidate` 和 session mode 修改必须经过管理员/本机授权路径，不能只靠 `workspace_path` 参数；
 - `records/{id}/revalidate` 与 `freshness/sweep` 必须经过管理员/本机授权；
 - delete/reset 必须要求显式确认字段或管理员权限；
+- `usage`、`metrics`、`jobs`、`recall-traces`、`audit`、`export`、`import` 同样要求管理员/本机授权；
+- `private` 或 tombstone 记录的非管理端读取返回 403；列表默认不返回 `private` 记录；
 - restore 只允许恢复 tombstone；若记录已物理清理，返回冲突并要求走导出导入恢复；
 - 返回的 note text 仍经过脱敏展示；
 - 不返回未授权 scope 的 source 内容。
+
+`POST /api/runtime/memory/import` 接受 `ExportJSONL` 产生的 JSONL；`?dry_run=true` 只校验并回滚，响应为 `scanned/imported/summaries/skipped/corrupt/errors`。导入会把源 project key 重映射到目标项目并记录 `imported_from_project_key`，同 id/同内容会去重。
 
 ## 8. CLI / TUI
 

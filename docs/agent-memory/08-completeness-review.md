@@ -37,8 +37,9 @@ API 和对应测试；M2 已落地 job lease/retry、bounded transcript reader�
 redaction、结构化 candidate 写入、session-end/idle/manual 触发；M3 已落地
 Consolidation、summary revision/invalidation/rebuild、usage/citation/exposure、
 injection mode 与 pinned 独立预算；M4 已落地 memory tools、v2 治理 API、
-Web/TUI 管理面、结构化 `/memory` 扩展；M5 指标查询已落地，真实项目 shadow
-评估与逐项目上线仍待执行。
+import/export、Web 基础管理（含 job/recall trace）与结构化 `/memory` 扩展；
+Web why-not/pin/restore/reset 审计面仍待补齐。M5 指标查询已落地，真实项目
+shadow 评估与逐项目上线仍待执行。
 
 ### 1.2 设计状态
 
@@ -207,14 +208,14 @@ Web/TUI 管理面、结构化 `/memory` 扩展；M5 指标查询已落地，真�
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
 | M2 抽取 | 已实施 core；待 shadow 运营验收 | job/reader/redaction/candidate/trigger 已落地 |
 | M3 Consolidation | 已实施 core；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure 已落地 |
-| M4 工具/API/UI | 已实施 core；待运营验收 | tools/API/Web/CLI 已落地；import/restore 边界继续运营验证 |
+| M4 工具/API/UI | 已实施 core；M4 DoD 未全满足 | tools/API/import/restore/CLI 与 job/recall trace 面板已落地；Web 仍缺 why-not/pin/restore/reset 等审计面 |
 | M5 上线 | 部分可以 | 指标查询已落地；需要 shadow 数据和逐项目验收结果 |
 
 ## 7. 最终判断
 
 **是否完成闭环：**
 
-- **代码功能：M1 已实现。** SQLite 存储、迁移、stable/recall 注入和管理 API 已落地；自动记忆、Consolidation、summary 编译器和工具/UI 尚未实现。
+- **代码功能：M1-M4 core 已实现，M4 未完成全部验收。** SQLite 存储、迁移、stable/recall 注入、抽取、Consolidation、summary、工具/API/CLI 与基础 Web 面板（含 job/recall trace）已落地；Web 审计面（why-not、pin/unpin、restore/reset）与 M5 shadow 运营仍未完成。
 - **设计方案：在本次审查修补后，已达到“可实施闭环”。** 从触发、抽取、存储、摘要、注入、引用、纠正、删除、迁移、回滚都有明确契约。
 - **生产可用：还没有。** 必须完成 M1-M5、通过测试与 shadow 评估，才能说生产功能闭环。
 
