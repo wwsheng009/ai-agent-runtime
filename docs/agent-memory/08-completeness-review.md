@@ -45,6 +45,10 @@ import/export、Web 管理（含 job/recall trace、why-not、pin/unpin、restor
 `TestAutomaticMemoryEndToEndWithoutManualSeed`，验证不手工写入时也能从
 transcript 自动生成 candidate、Consolidation、summary 并进入召回。
 
+同日 ConPTY 实测通过：第一会话结束后自动生成 2 条 active fact，phase1/phase2
+job 成功；第二会话的 provider request 包含 memory 内容，recall trace 为
+`injected=1` 且 selected_ids 命中两条记录，usage 记录为 `cited`。
+
 ### 1.2 设计状态
 
 原方案已经覆盖主流程，但审查发现以下关键点会导致“看似有方案、实际无法闭环”：
