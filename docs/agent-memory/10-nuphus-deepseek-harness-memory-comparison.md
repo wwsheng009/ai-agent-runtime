@@ -15,7 +15,7 @@
 | Nuphus | **有** | SQLite + FTS5 + 可选向量、Kind 分层、项目隔离、工作记忆 MD、内存检索工具、Tenet、记忆 UI | 高，适合借鉴 L2/L3 记忆模型与读取闭环 |
 | ai-memory | **有完整长期记忆产品** | Git-backed Markdown wiki + SQLite 派生索引、生命周期 hooks、handoff、零 LLM aging、分层 brief、retrieval fusion、审计 | 很高，适合借鉴记忆生命周期、分层注入、检索与治理 |
 | DeepSeek Harness | **没有完整的原生语义记忆** | Session 事件日志、Session Query/FTS、Session Reference、Compaction、Spill、Token Meter、AGENTS 指令预算 | 高，适合借鉴检索、授权、预算、引用快照与压缩 |
-| AAR Agent Memory v2 | 设计完成，代码未实现 | 两阶段抽取、summary、citation、suppression、pinned、recall trace | 需要吸收这些方案的优势，但保持项目本地优先与安全边界 |
+| AAR Agent Memory v2 | M1-M4 core 已实现，M5 待验收 | 两阶段抽取、summary、citation、suppression、pinned、recall trace | 需要吸收这些方案的优势，但保持项目本地优先与安全边界 |
 
 ---
 
@@ -623,7 +623,7 @@ AAR 已有一部分（suppression、audit、recall trace、canonical project_key
 
 | 能力 | Nuphus | ai-memory | DeepSeek Harness | AAR Agent Memory v2 | 建议 |
 | --- | --- | --- | --- | --- | --- |
-| 原生长期记忆 | 有 | 有完整产品 | 无（MCP 外接） | 设计有，未实现 | AAR 保持内置 |
+| 原生长期记忆 | 有 | 有完整产品 | 无（MCP 外接） | M1-M4 已实现，M5 待验收 | AAR 保持内置 |
 | 事实源 | SQLite + MD | Markdown wiki + 派生 SQLite | 外部 MCP | SQLite + materialized MD | 采用 AAR 现有方向，借可重建索引 |
 | 记忆生命周期 | kind/prune | tier/decay/compaction/dream | 无内置 | candidate/active/superseded/deleted | 借 ai-memory 的 aging |
 | 跨会话续作 | 工作日志 | claim-once handoff | Session Reference | 设计无 handoff | 增加 handoff/续作包 |

@@ -768,8 +768,8 @@ memory:
 | `generation.*` | 已实现，manual 触发可绕过 disabled |
 | `consolidation.enabled/maxRecords/maxUnusedDays/summaryTokenBudget/intervalHours` | 已实现；`model` 仍走确定性编译器 |
 | `injection.enabled/mode/maxItems/tokenBudget/pinnedBudgetRatio/stageSplit` | 已实现并接入 context budget |
-| `injection.recallTrace.enabled/sampleRate` | 已实现；`retentionDays` 尚未定时清理 |
-| `feedback.citationEnabled/exposureSampling` | 已实现；`exposureRetentionDays` 尚未定时清理 |
+| `injection.recallTrace.enabled/sampleRate/retentionDays` | 已实现；retention 由 memory maintenance ticker 定时清理 |
+| `feedback.citationEnabled/exposureSampling/exposureRetentionDays` | 已实现；仅清理 `injected_only` exposure，保留 cited/read usage |
 | `tools.enabled/allowForget/allowCorrect` | 已实现；`manual.enabled=false` 时不注册 `memory_add` |
 | `freshness.*` / `sessionMode.*` / `retention.*` / `redaction.*` | 目标字段，尚未全部消费 |
 
@@ -790,6 +790,7 @@ memory:
 | --- | --- | --- |
 | `GET` | `/api/runtime/memory/status` | mode、scope、DB path、摘要 revision、freshness 统计、job 状态 |
 | `GET` | `/api/runtime/memory/records` | filter by scope/status/kind/tag/query，分页有界 |
+| `GET` | `/api/runtime/memory/why-not?q=...` | 召回诊断：选中项、过滤原因、预算与 token 估算（管理端） |
 | `POST` | `/api/runtime/memory/records` | 用户显式新增 manual record |
 | `GET` | `/api/runtime/memory/records/{id}` | 详情、来源、revision、usage |
 | `POST` | `/api/runtime/memory/records/{id}/revalidate` | 显式回源校验，更新 freshness |
@@ -822,7 +823,7 @@ memory:
 - `DELETE`、`restore`、`reset`、`consolidate` 和 session mode 修改必须经过管理员/本机授权路径，不能只靠 `workspace_path` 参数；
 - `records/{id}/revalidate` 与 `freshness/sweep` 必须经过管理员/本机授权；
 - delete/reset 必须要求显式确认字段或管理员权限；
-- `usage`、`metrics`、`jobs`、`recall-traces`、`audit`、`export`、`import` 同样要求管理员/本机授权；
+- `usage`、`metrics`、`jobs`、`recall-traces`、`why-not`、`audit`、`export`、`import` 同样要求管理员/本机授权；
 - `private` 或 tombstone 记录的非管理端读取返回 403；列表默认不返回 `private` 记录；
 - restore 只允许恢复 tombstone；若记录已物理清理，返回冲突并要求走导出导入恢复；
 - 返回的 note text 仍经过脱敏展示；

@@ -1,6 +1,6 @@
 # 测试、指标与验收
 
-> 状态：验收基线（M1/M2/M3/M4 core 已实施；Web why-not/pin/restore/reset 管理与完整 M4 DoD 待完成；M5 指标查询已实施，shadow 运营验收待执行；阈值在 M5 校准）
+> 状态：验收基线（M1/M2/M3/M4 core 已实施，Web why-not/pin/restore/reset 已实现；M4 正式 E2E/证据包与 M5 shadow 运营验收待执行；阈值在 M5 校准）
 > 原则：先建立基线，再设定阈值；所有数字必须能由当前代码路径、测试或真实会话证据复现。  
 > 本文件中的“暂定阈值”在 M0 基线完成后由 owner 校准。
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 增加 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、injected_only exposure 验收。

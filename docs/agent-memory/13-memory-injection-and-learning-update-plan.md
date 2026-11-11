@@ -1,6 +1,6 @@
 # Agent Memory v2：记忆读取注入与学习更新闭环方案
 
-> 状态：方案（Docs Only，待实施）
+> 状态：M1-M4 已实施；M5 shadow/逐项目上线待执行
 > 基线：`docs/agent-memory/03-target-architecture.md`、`04-data-model-and-api.md`、`09-memory-horizons-recall-and-budget.md`
 > 参考：`docs/agent-memory/12-hermes-agent-memory-system-analysis.md` 的 Hermes 运行时经验
 > 修订：v1.1（2026-11-09），按整体审查 P0-1 ~ P0-6 修订；修订点见第 13 节，03/04/05/06/09 回写记录见第 14 节。
@@ -1118,7 +1118,7 @@ session-end/idle/manual
 |---|---|---|
 | 概念闭环 | **成立** | 读 → 用 → citation/usage → 排序/Consolidation → 下一轮读，链路完整 |
 | 方案闭环 | **已闭合 P0** | summary 失效、pinned 可见性、citation fallback、触发器等已纳入 v1.1 |
-| 生产闭环 | **实现待落地** | 设计已闭合；代码、迁移、测试尚未完成 |
+| 生产闭环 | **M1-M4 已落地，M5 待验收** | 代码、迁移、相关测试与 Web 审计面已落地；真实项目 shadow 与逐项目上线仍待执行 |
 | 读路径效率 | **较好** | 无 LLM、FTS/本地查询、预算内注入、每 turn 一次 |
 | 写路径效率 | **可控但偏贵** | 异步、批量、lease；抽取 + Consolidation 仍需 LLM 成本 |
 | 缓存效率 | **较好** | stable `project_memory` + tail `project_memory_recall`，不再让 query recall 污染稳定 stage |
@@ -1342,7 +1342,7 @@ v1.1 已把审查发现的 P0 纳入方案：
 - 不可回源事实的“真值”语义只能靠用户纠正/回源验证；
 - v1 召回仍是关键词/摘要，不是语义召回；
 - team/subagent、负反馈、query 扩展仍是 P1/P2；
-- 代码、迁移、测试尚未落地。
+- M1-M4 代码、迁移、相关测试与 Web 审计面已落地；M5 shadow 运营验收尚未执行。
 
 **一句话判定：**
 

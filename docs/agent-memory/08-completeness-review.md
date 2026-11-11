@@ -2,7 +2,7 @@
 
 > 审查日期：2026-10-22  
 > 审查对象：`docs/agent-memory/` 全套方案  
-> 结论：**设计层面已基本形成闭环；代码层面尚未闭环，因为目前只有文档、未实施。**  
+> 原始审查结论：**设计层面已基本形成闭环；审查当时代码尚未实施。** 当前实施状态见 §1.1 与 §6。
 > 审查后修订：`03`、`04`、`05`、`06`、`07` 已补齐关键契约；`06 §8` 已形成 M0-M5 + v1.1 的阶段 DoD。
 
 ## 1. 审查结论先说
@@ -26,10 +26,10 @@
   → compact/checkpoint
 ```
 
-**没有**代码层面的自动抽取、Consolidation、summary revision、引用 usage、删除抑制和后台 job 闭环。因此：
+原始审查时**没有**代码层面的自动抽取、Consolidation、summary revision、引用 usage、删除抑制和后台 job 闭环。因此：
 
-- 不能说“整体功能已经完成闭环”；
-- 应该说“方案已经补齐为可实施闭环，代码尚未实现”。
+- 当时不能说“整体功能已经完成闭环”；
+- 当时应说“方案已经补齐为可实施闭环，代码尚未实现”。
 
 2026-11-10 更新：M1 已落地 SQLite schema、`notes.jsonl` 迁移、兼容 facade、
 stable/recall 注入、summary gate、pinned 预算、session mode、records/status/recall
@@ -37,9 +37,9 @@ API 和对应测试；M2 已落地 job lease/retry、bounded transcript reader�
 redaction、结构化 candidate 写入、session-end/idle/manual 触发；M3 已落地
 Consolidation、summary revision/invalidation/rebuild、usage/citation/exposure、
 injection mode 与 pinned 独立预算；M4 已落地 memory tools、v2 治理 API、
-import/export、Web 基础管理（含 job/recall trace）与结构化 `/memory` 扩展；
-Web why-not/pin/restore/reset 审计面仍待补齐。M5 指标查询已落地，真实项目
-shadow 评估与逐项目上线仍待执行。
+import/export、Web 管理（含 job/recall trace、why-not、pin/unpin、restore/reset）
+与结构化 `/memory` 扩展。M5 指标查询已落地，真实项目 shadow 评估与逐项目
+上线仍待执行。
 
 ### 1.2 设计状态
 
@@ -208,20 +208,20 @@ shadow 评估与逐项目上线仍待执行。
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
 | M2 抽取 | 已实施 core；待 shadow 运营验收 | job/reader/redaction/candidate/trigger 已落地 |
 | M3 Consolidation | 已实施 core；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure 已落地 |
-| M4 工具/API/UI | 已实施 core；M4 DoD 未全满足 | tools/API/import/restore/CLI 与 job/recall trace 面板已落地；Web 仍缺 why-not/pin/restore/reset 等审计面 |
+| M4 工具/API/UI | 已实施 core；M4 DoD 证据待补 | tools/API/import/restore/CLI、job/recall trace 与 Web why-not/pin/restore/reset 已落地；尚缺正式 E2E/截图证据包 |
 | M5 上线 | 部分可以 | 指标查询已落地；需要 shadow 数据和逐项目验收结果 |
 
 ## 7. 最终判断
 
 **是否完成闭环：**
 
-- **代码功能：M1-M4 core 已实现，M4 未完成全部验收。** SQLite 存储、迁移、stable/recall 注入、抽取、Consolidation、summary、工具/API/CLI 与基础 Web 面板（含 job/recall trace）已落地；Web 审计面（why-not、pin/unpin、restore/reset）与 M5 shadow 运营仍未完成。
+- **代码功能：M1-M4 core 已实现；M4 仍需正式验收证据。** SQLite 存储、迁移、stable/recall 注入、抽取、Consolidation、summary、工具/API/CLI 与 Web 审计面（job/recall trace、why-not、pin/unpin、restore/reset）已落地；M5 shadow 运营仍未完成。
 - **设计方案：在本次审查修补后，已达到“可实施闭环”。** 从触发、抽取、存储、摘要、注入、引用、纠正、删除、迁移、回滚都有明确契约。
 - **生产可用：还没有。** 必须完成 M1-M5、通过测试与 shadow 评估，才能说生产功能闭环。
 
 ## 8. 下一步建议
 
-1. M1 已完成，按 `06-test-and-acceptance.md §8.2` 固化验收证据；
-2. 进入 M4 shadow 运营验收，不启用默认注入；
+1. M1/M4 已完成代码闭环，按 `06-test-and-acceptance.md §8.2/§8.5` 固化验收证据；
+2. 进入 M5 shadow 运营验收，不启用默认注入；
 3. 用真实会话建立标注集，执行 M5 指标校准与逐项目上线策略；
 4. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。
