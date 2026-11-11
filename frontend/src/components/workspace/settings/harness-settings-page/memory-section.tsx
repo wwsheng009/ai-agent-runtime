@@ -49,6 +49,8 @@ export function HarnessMemorySection({
         description={t("harness.memoryDescription")}
       >
         <div className="space-y-3">
+          <MemoryV2Panel key={workspacePath || "no-workspace"} t={t} workspacePath={workspacePath} />
+
           <SettingsPanelCard
             title={t("harness.memorySearch")}
             icon={
@@ -113,8 +115,6 @@ export function HarnessMemorySection({
               </Button>
             </div>
           </SettingsPanelCard>
-
-          <MemoryV2Panel key={workspacePath || "no-workspace"} t={t} workspacePath={workspacePath} />
 
           {memoryNotes.length > 0 ? (
             <div className="space-y-2">

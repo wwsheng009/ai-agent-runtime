@@ -34,6 +34,7 @@ function translator(): TFunction<"settings"> {
     if (key === "harness.memoryWhyNotRun") return "Explain recall";
     if (key === "harness.memoryUnpin") return "Unpin";
     if (key === "harness.memoryPin") return "Pin";
+    if (key === "harness.memoryAutoLearningEnabled") return `Auto ${options?.trigger}`;
     if (key === "harness.memoryCorrect") return "Correct";
     if (key === "harness.memoryForget") return "Forget";
     if (key === "harness.refresh") return "Refresh";
@@ -87,6 +88,8 @@ describe("MemoryV2Panel", () => {
           schema_version: 3, total: 1, summary_revision: 2,
           summary_status: "active", summary_freshness: "fresh",
           pinned_count: 1, pinned_budget_ratio: 0.2, injection_mode: "hybrid",
+          generation_enabled: true, generation_trigger: "both",
+          consolidation_enabled: true, manual_enabled: true,
           fallback: false,
         });
       }
@@ -192,6 +195,7 @@ describe("MemoryV2Panel", () => {
     });
 
     expect(container.textContent).toContain("hybrid");
+    expect(container.textContent).toContain("Auto both");
     expect(container.textContent).toContain("Stable summary.");
     expect(container.textContent).toContain("Use append-only memory.");
     expect(container.textContent).toContain("injected_only");

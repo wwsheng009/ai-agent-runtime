@@ -313,6 +313,22 @@ export function MemoryV2Panel({
               <div className="mt-1 font-medium text-foreground">{status.injection_mode || "-"}</div>
             </div>
             <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
+              <div className="text-muted-foreground">{t("harness.memoryAutoLearning")}</div>
+              <div className="mt-1 font-medium text-foreground">
+                {status.generation_enabled
+                  ? t("harness.memoryAutoLearningEnabled", {
+                      trigger: status.generation_trigger || "-",
+                    })
+                  : t("harness.memoryDisabled")}
+              </div>
+            </div>
+            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
+              <div className="text-muted-foreground">{t("harness.memoryManualMode")}</div>
+              <div className="mt-1 font-medium text-foreground">
+                {status.manual_enabled ? t("harness.memoryManualExplicit") : t("harness.memoryDisabled")}
+              </div>
+            </div>
+            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
               <div className="text-muted-foreground">{t("harness.memorySummary")}</div>
               <div className="mt-1 font-medium text-foreground">
                 {t("harness.memoryRevision", { revision: String(status.summary_revision ?? 0) })} ·{" "}

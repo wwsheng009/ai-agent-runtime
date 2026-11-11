@@ -114,6 +114,10 @@ export type RuntimeMemoryStatus = {
   pinned_count?: number;
   pinned_budget_ratio?: number;
   injection_mode?: string;
+  generation_enabled: boolean;
+  generation_trigger?: string;
+  consolidation_enabled: boolean;
+  manual_enabled: boolean;
   jobs?: Record<string, number>;
   fallback: boolean;
   fallback_reason?: string;
