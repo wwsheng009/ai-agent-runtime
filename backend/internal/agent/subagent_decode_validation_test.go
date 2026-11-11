@@ -43,9 +43,9 @@ func TestDecodeSubagentTasksRejectsInvalidTopLevelOptions(t *testing.T) {
 			want: `field "execution_mode" must be a JSON string`,
 		},
 		{
-			name: "string wait timeout",
-			args: map[string]interface{}{"agents": []interface{}{agent}, "wait_timeout_sec": "30"},
-			want: `field "wait_timeout_sec" must be a JSON number`,
+			name: "removed wait timeout",
+			args: map[string]interface{}{"agents": []interface{}{agent}, "wait_timeout_sec": 30},
+			want: `field "wait_timeout_sec" is no longer accepted`,
 		},
 		{
 			name: "numeric idempotency key",
@@ -66,7 +66,6 @@ func TestDecodeSubagentTasksRejectsInvalidTopLevelOptions(t *testing.T) {
 	tasks, err := decodeSubagentTasks(map[string]interface{}{
 		"agents":                []interface{}{agent},
 		"execution_mode":        "BACKGROUND",
-		"wait_timeout_sec":      30,
 		"batch_idempotency_key": "parent-turn-1",
 	})
 	if err != nil {
@@ -74,6 +73,28 @@ func TestDecodeSubagentTasksRejectsInvalidTopLevelOptions(t *testing.T) {
 	}
 	if len(tasks) != 1 {
 		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+}
+
+// TestDecodeSubagentTasksRejectsRemovedBatchDeadline pins the 2026-11-11
+// removal of the model-facing wait_timeout_sec knob. The old name looked like
+// a wait window, but the runtime applied it as a whole-batch wall-clock
+// deadline; a 1s value killed every child before its first model call. The
+// replacement path is explicit: omit the field, use subagent_wait(timeout_ms)
+// to wait, and subagent_close/subagent_cancel to converge.
+func TestDecodeSubagentTasksRejectsRemovedBatchDeadline(t *testing.T) {
+	message := decodeSubagentTasksError(t, map[string]interface{}{
+		"agents":           []interface{}{map[string]interface{}{"id": "worker", "goal": "inspect"}},
+		"wait_timeout_sec": 1,
+	})
+	for _, want := range []string{
+		`field "wait_timeout_sec" is no longer accepted`,
+		"subagent_wait(timeout_ms=...)",
+		"subagent_close/subagent_cancel",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not mention %q", message, want)
+		}
 	}
 }
 

@@ -527,7 +527,7 @@ func TestStartBackgroundAfterError(t *testing.T) {
 }
 
 // TestStartBackgroundWithoutDeadlineLeavesBatchUnbounded pins the 2026-10-29
-// behavior: a background batch without an explicit wait_timeout_sec has no
+// behavior: a background batch without an explicit batch deadline has no
 // wall-clock deadline. The parent owns convergence (subagent_close/cancel);
 // the old implicit 30m default killed long audits mid-flight.
 func TestStartBackgroundWithoutDeadlineLeavesBatchUnbounded(t *testing.T) {

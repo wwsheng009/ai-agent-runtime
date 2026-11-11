@@ -8452,17 +8452,37 @@ const (
 // top-level options must use. execution_mode used to fall back to a silent
 // default on a wrong kind or a typo such as "backgroud", which turned an
 // explicit request into an unintended dispatch mode with no diagnostic;
-// wait_timeout_sec and batch_idempotency_key were dropped the same silent way.
+// batch_idempotency_key was dropped the same silent way.
+//
+// wait_timeout_sec is intentionally absent: it was a batch wall-clock deadline,
+// not a wait window, and a short value killed children before their first model
+// call. The model-facing schema no longer advertises it;
+// rejectRemovedSubagentTopLevelFields fails closed for legacy callers.
 var decodedSubagentTopLevelArgTypes = []struct {
 	key  string
 	want string
 }{
 	{"execution_mode", subagentFieldString},
-	{"wait_timeout_sec", subagentFieldNumber},
 	{"batch_idempotency_key", subagentFieldString},
 }
 
+// rejectRemovedSubagentTopLevelFields fails closed for a legacy top-level
+// option that no longer has a safe meaning. Silently ignoring wait_timeout_sec
+// would let an old caller believe its batch is still bounded; treating it as a
+// deadline is exactly the bug that killed short-lived child runs.
+func rejectRemovedSubagentTopLevelFields(args map[string]interface{}) error {
+	if _, present := args["wait_timeout_sec"]; present {
+		return fmt.Errorf(
+			"subagent_spawn_batch field %q is no longer accepted: it was a batch wall-clock deadline, not a wait window, and a short value killed child tasks before they could run. Background dispatch already returns immediately; omit it, use subagent_wait(timeout_ms=...) to wait, and subagent_close/subagent_cancel to converge",
+			"wait_timeout_sec")
+	}
+	return nil
+}
+
 func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
+	if err := rejectRemovedSubagentTopLevelFields(args); err != nil {
+		return err
+	}
 	for _, field := range decodedSubagentTopLevelArgTypes {
 		value, present := args[field.key]
 		if !present || value == nil {
@@ -9349,10 +9369,9 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 	if coordinator == nil {
 		return nil, fmt.Errorf("subagent batch coordinator is not configured")
 	}
-	var deadline time.Time
-	if secs := intValue(tc.Args["wait_timeout_sec"]); secs > 0 {
-		deadline = time.Now().UTC().Add(time.Duration(secs) * time.Second)
-	}
+	// Background batches have no model-set wall-clock deadline. The
+	// coordinator's operator-configured DefaultDeadline still applies when set;
+	// otherwise the parent owns convergence via subagent_close/subagent_cancel.
 	batch, err := coordinator.StartBackground(ctx, BatchStartOptions{
 		TraceID:          traceID,
 		ParentSessionID:  sessionID,
@@ -9367,7 +9386,6 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 		// （batch_progress.go / 协调器），记旧值会让这些批次对巡检不可见。
 		ExecutionMode:  subagentbatch.ExecutionModeBackground,
 		IdempotencyKey: stringValue(tc.Args["batch_idempotency_key"]),
-		BatchDeadline:  deadline,
 	}, subtasks)
 	if err != nil {
 		return nil, err
@@ -9646,7 +9664,7 @@ func cloneOptionValue(value interface{}) interface{} {
 // crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
 // blocking path, so nothing falls back to a synchronous wait any more.
 func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string, caps SubagentCapabilities) types.ToolDefinition {
-	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. Use read_only for the write boundary; read_only does not remove shell. Set shell=false only when the child must have no shell at all. Child lifetime is parent-controlled: there is no per-task timeout field, use subagent_close/subagent_cancel to converge. " + runtimepolicy.SubagentWriterPolicyDescription
+	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. Use read_only for the write boundary; read_only does not remove shell. Set shell=false only when the child must have no shell at all. Child lifetime is parent-controlled: there is no per-task or per-batch model-set timeout field; use subagent_close/subagent_cancel to converge and subagent_wait(timeout_ms=...) to wait. " + runtimepolicy.SubagentWriterPolicyDescription
 	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
 		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
 	}
@@ -9659,10 +9677,6 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"wait_timeout_sec": map[string]interface{}{
-					"type":        "integer",
-					"description": "Optional batch wall-clock deadline (seconds). Omit for no deadline: child sessions are long-lived and the parent controls convergence with subagent_close/subagent_cancel.",
-				},
 				"batch_idempotency_key": map[string]interface{}{
 					"type":        "string",
 					"description": "Optional dedupe key scoped to the parent session: repeating the same key returns the existing background batch instead of creating a duplicate.",

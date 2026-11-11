@@ -42,7 +42,11 @@ type BatchStartOptions struct {
 	ParentPromptCacheKey string
 	ExecutionMode        subagentbatch.ExecutionMode
 	IdempotencyKey       string
-	BatchDeadline        time.Time
+	// BatchDeadline is an internal/operator budget. It is intentionally not
+	// model-facing: the old wait_timeout_sec tool parameter was removed because
+	// callers mistook it for a wait window and short values killed child runs
+	// before their first model call.
+	BatchDeadline time.Time
 }
 
 // BatchEmitter publishes a host-neutral lifecycle event. The loop wires it to

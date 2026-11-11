@@ -111,6 +111,18 @@ func TestSpawnSubagentsSchemaExposesShellAndNoPerTaskTimeout(t *testing.T) {
 	require.NotContains(t, itemProperties, "timeout_sec", "per-task wall-clock timeout must not be model-facing")
 }
 
+func TestSpawnSubagentsSchemaOmitsModelBatchDeadline(t *testing.T) {
+	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
+	properties, ok := definition.Parameters["properties"].(map[string]interface{})
+	require.True(t, ok)
+
+	require.NotContains(t, properties, "wait_timeout_sec",
+		"wait_timeout_sec was removed: it was a batch lifetime, not a wait window")
+	require.Contains(t, properties, "batch_idempotency_key")
+	require.Contains(t, definition.Description, "subagent_wait(timeout_ms=...)")
+	require.Contains(t, definition.Description, "no per-task or per-batch model-set timeout field")
+}
+
 func TestRenderSubagentResultsSurfacesReadOnlyNarrowing(t *testing.T) {
 	text := renderSubagentResults([]SubagentResult{{
 		ID:                    "writer-1",

@@ -36,7 +36,7 @@
 | 返回时机 | 工具调用返回时子任务已跑完 | 立即返回 batch handle，子任务在父 turn 之后继续跑 |
 | 结果携带 | 完整子报告（父 turn 直接可用） | 只有 batch 摘要；结果随后续 lifecycle / 快照 / digest 抵达 |
 | 持久化 | 不落 durable batch | batch 持久化，由 supervisor 投递生命周期更新 |
-| deadline | 受父子等待窗口约束 | `wait_timeout_sec` 覆盖 batch deadline；缺省用协调器 deadline |
+| deadline | 受父子等待窗口约束 | 没有模型可设的 batch deadline；父代理用 `subagent_close`/`subagent_cancel` 收敛，等待用 `subagent_wait(timeout_ms=...)` |
 | 幂等 | 不适用 | `batch_idempotency_key` 作用域=父会话：重复同一 key 返回既有 batch，不重复派活 |
 | 监督面 | 不需要（父 turn 内已收敛） | 需要：`supervision_descendants` 巡查 + digest 汇报 + close 收敛 |
 | 异常面 | 失败直接体现在工具结果里 | 失败/超时/阻塞以 critical 通知 + 唤醒父 turn 的方式暴露 |
