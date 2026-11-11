@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -88,13 +89,14 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		worker = "memoryconsolidator"
 	}
 	claimed, err := c.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
-		WorkerID: worker, Kind: "phase2_consolidate", JobKey: jobKey, Limit: 1, Now: now,
+		WorkerID: worker, Kind: "phase2_consolidate", JobKey: jobKey,
+		ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now,
 	})
 	if err != nil || len(claimed) == 0 {
 		return result, err
 	}
 	fail := func(err error) (ConsolidationResult, error) {
-		_ = c.Store.FailJob(ctx, claimed[0].ID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
+		_ = c.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
 		return result, err
 	}
 
@@ -105,8 +107,14 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return fail(err)
 	}
 	for _, record := range page.Items {
-		status := memorystore.StatusActive
-		if _, err := c.Store.UpdateRecord(ctx, record.ID, memorystore.RecordPatch{Status: &status}); err != nil {
+		if record.Freshness != memorystore.FreshnessFresh || !record.DeletedAt.IsZero() ||
+			record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			continue
+		}
+		if record.Confidence < c.Config.MinCandidateConfidence {
+			continue
+		}
+		if _, err := c.Store.PromoteCandidate(ctx, record.ID); err != nil {
 			return fail(err)
 		}
 		result.Promoted++
@@ -117,7 +125,7 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return fail(err)
 	}
 	if len(active) == 0 {
-		_ = c.Store.CompleteJob(ctx, claimed[0].ID, "")
+		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
 		return result, nil
 	}
 	sort.SliceStable(active, func(i, j int) bool {
@@ -135,14 +143,13 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		}
 		return active[i].UpdatedAt.After(active[j].UpdatedAt)
 	})
-	active, superseded, ambiguous := resolveConflicts(active)
-	for _, id := range superseded {
-		status := memorystore.StatusSuperseded
-		if _, err := c.Store.UpdateRecord(ctx, id, memorystore.RecordPatch{Status: &status}); err != nil {
+	active, supersessions, ambiguous := resolveConflicts(active)
+	for _, resolution := range supersessions {
+		if _, err := c.Store.SupersedeRecord(ctx, resolution.loserID, resolution.winnerID, "consolidation_priority"); err != nil {
 			return fail(err)
 		}
 	}
-	result.Superseded = len(superseded)
+	result.Superseded = len(supersessions)
 	if len(ambiguous) > 0 {
 		if err := c.Store.MarkConflictOpenQuestion(ctx, ambiguous, "same_priority_conflict"); err != nil {
 			return fail(err)
@@ -150,12 +157,13 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		result.OpenQuestions = len(uniqueRecordIDs(ambiguous))
 	}
 	if len(active) == 0 {
-		_ = c.Store.CompleteJob(ctx, claimed[0].ID, "")
+		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
 		return result, nil
 	}
-	text, ids, tokens := deterministicSummary(active, c.Config.SummaryTokenBudget)
+	summaryRecords := summaryEligible(active)
+	text, ids, tokens := deterministicSummary(summaryRecords, c.Config.SummaryTokenBudget)
 	if strings.TrimSpace(text) == "" || len(ids) == 0 {
-		_ = c.Store.CompleteJob(ctx, claimed[0].ID, "")
+		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
 		return result, nil
 	}
 	summary, err := c.Store.CompileSummary(ctx, memorystore.Summary{
@@ -165,7 +173,7 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 	if err != nil {
 		return fail(err)
 	}
-	if err := c.Store.CompleteJob(ctx, claimed[0].ID, summary.InputWatermark); err != nil {
+	if err := c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, summary.InputWatermark); err != nil {
 		return result, err
 	}
 	result.SummaryID = summary.ID
@@ -198,7 +206,8 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 	}
 	for {
 		claimed, err := c.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
-			WorkerID: worker, Kind: "summary_rebuild", Limit: 1, Now: now,
+			WorkerID: worker, Kind: "summary_rebuild",
+			ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now,
 		})
 		if err != nil {
 			return result, err
@@ -209,11 +218,11 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		job := claimed[0]
 		summary, err := c.Store.ActiveSummary(ctx)
 		if err != nil {
-			_ = c.Store.FailJob(ctx, job.ID, err.Error(), now.Add(retryBackoff(job.Attempt)))
+			_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
 			return result, err
 		}
 		if summary == nil || summary.Freshness == memorystore.FreshnessFresh {
-			if err := c.Store.CompleteJob(ctx, job.ID, ""); err != nil {
+			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
 				return result, err
 			}
 			result.RebuildJobs++
@@ -221,23 +230,24 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		}
 		records, err := c.activeFreshRecords(ctx)
 		if err != nil {
-			_ = c.Store.FailJob(ctx, job.ID, err.Error(), now.Add(retryBackoff(job.Attempt)))
+			_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
 			return result, err
 		}
-		if len(records) == 0 {
+		summaryRecords := summaryEligible(records)
+		if len(summaryRecords) == 0 {
 			if _, err := c.Store.RetireActiveSummary(ctx); err != nil {
-				_ = c.Store.FailJob(ctx, job.ID, err.Error(), now.Add(retryBackoff(job.Attempt)))
+				_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
 				return result, err
 			}
-			if err := c.Store.CompleteJob(ctx, job.ID, ""); err != nil {
+			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
 				return result, err
 			}
 			result.RebuildJobs++
 			continue
 		}
-		text, ids, tokens := deterministicSummary(records, c.Config.SummaryTokenBudget)
+		text, ids, tokens := deterministicSummary(summaryRecords, c.Config.SummaryTokenBudget)
 		if strings.TrimSpace(text) == "" || len(ids) == 0 {
-			if err := c.Store.CompleteJob(ctx, job.ID, ""); err != nil {
+			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
 				return result, err
 			}
 			result.RebuildJobs++
@@ -249,11 +259,11 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		}, ids)
 		if err != nil {
 			if rebuilt.ID == "" {
-				_ = c.Store.FailJob(ctx, job.ID, err.Error(), now.Add(retryBackoff(job.Attempt)))
+				_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
 				return result, err
 			}
 		}
-		if err := c.Store.CompleteJob(ctx, job.ID, rebuilt.InputWatermark); err != nil {
+		if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, rebuilt.InputWatermark); err != nil {
 			return result, err
 		}
 		result.RebuildJobs++
@@ -273,9 +283,14 @@ func (c *Consolidator) activeFreshRecords(ctx context.Context) ([]memorystore.Re
 		return nil, err
 	}
 	cutoff := c.now().Add(-time.Duration(c.Config.MaxConsolidationUnusedDays) * 24 * time.Hour)
+	now := c.now()
 	records := make([]memorystore.Record, 0, len(page.Items))
 	for _, record := range page.Items {
-		if record.Freshness != memorystore.FreshnessFresh || !record.DeletedAt.IsZero() {
+		if record.Freshness != memorystore.FreshnessFresh || !record.DeletedAt.IsZero() ||
+			record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			continue
+		}
+		if !record.ValidUntil.IsZero() && !record.ValidUntil.After(now) {
 			continue
 		}
 		lastTouched := record.UpdatedAt
@@ -315,7 +330,7 @@ func deterministicSummary(records []memorystore.Record, tokenBudget int) (string
 	ids := make([]string, 0, len(records))
 	used := memorystore.EstimateTokens(b.String())
 	byKind := map[string][]memorystore.Record{}
-	for _, record := range records {
+	for _, record := range summaryEligible(records) {
 		byKind[record.Kind] = append(byKind[record.Kind], record)
 	}
 	for _, heading := range headings {
@@ -376,7 +391,12 @@ func kindOrder(kind string) int {
 	}
 }
 
-func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []string, []string) {
+type memorySupersession struct {
+	loserID  string
+	winnerID string
+}
+
+func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []memorySupersession, []string) {
 	groups := map[string][]memorystore.Record{}
 	for _, record := range records {
 		subject := strings.ToLower(strings.Join(strings.Fields(record.Text), " "))
@@ -385,7 +405,7 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []str
 		}
 		groups[subject] = append(groups[subject], record)
 	}
-	superseded := make([]string, 0)
+	superseded := make([]memorySupersession, 0)
 	ambiguous := make([]string, 0)
 	drop := make(map[string]struct{})
 	for _, group := range groups {
@@ -409,7 +429,7 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []str
 				continue
 			}
 			if conflictPriority(record) < topPriority {
-				superseded = append(superseded, record.ID)
+				superseded = append(superseded, memorySupersession{loserID: record.ID, winnerID: top.ID})
 				drop[record.ID] = struct{}{}
 			}
 			// Same-priority ambiguity is preserved. The docs' executable
@@ -427,6 +447,23 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []str
 		out = append(out, record)
 	}
 	return out, superseded, ambiguous
+}
+
+// summaryEligible excludes pinned/manual records: those are rendered from the
+// independent stable budget, so including them in the summary would duplicate
+// the same claim in the prompt.
+func summaryEligible(records []memorystore.Record) []memorystore.Record {
+	out := make([]memorystore.Record, 0, len(records))
+	for _, record := range records {
+		if record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			continue
+		}
+		if record.Pinned || strings.EqualFold(record.SourceKind, "manual") {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
 }
 
 func conflictPriority(record memorystore.Record) int {

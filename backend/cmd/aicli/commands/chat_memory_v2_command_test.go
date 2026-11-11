@@ -42,6 +42,7 @@ memory:
 
 	for _, command := range []string{
 		"/memory show " + note.ID,
+		"/memory revalidate " + note.ID,
 		"/memory why " + note.ID,
 		"/memory why-not memory",
 		"/memory correct " + note.ID + " corrected durable memory",
@@ -51,6 +52,8 @@ memory:
 		"/memory export " + filepath.Join(root, "memory-export.jsonl"),
 		"/memory forget " + note.ID + " --yes",
 		"/memory reset --yes",
+		"/memory mode",
+		"/memory mode shadow",
 	} {
 		result, handled, err := tryExecuteStructuredChatCommand(session, command)
 		if err != nil || !handled {
@@ -59,5 +62,12 @@ memory:
 		if strings.TrimSpace(ui.RenderDocumentPlain(result.Document())) == "" {
 			t.Fatalf("%s rendered an empty document", command)
 		}
+	}
+	updated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated runtime config: %v", err)
+	}
+	if !strings.Contains(string(updated), "mode: shadow") {
+		t.Fatalf("memory mode was not persisted: %s", updated)
 	}
 }

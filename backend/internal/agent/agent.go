@@ -1393,6 +1393,20 @@ func memoryConfigFromOptions(options map[string]interface{}, base memorystore.Co
 			}
 		}
 	}
+	if raw, ok := options["memory_recall_trace_enabled"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			base.RecallTraceEnabled = value
+		case string:
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "1", "true", "on", "enabled", "yes":
+				base.RecallTraceEnabled = true
+			}
+		}
+	}
+	if rate, ok := contextOptionFloat(options, "memory_recall_trace_sample_rate"); ok {
+		base.RecallTraceSampleRate = rate
+	}
 	return base
 }
 

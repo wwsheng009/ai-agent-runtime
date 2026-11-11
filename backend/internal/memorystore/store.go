@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
@@ -82,6 +83,10 @@ type Config struct {
 	InjectionMode     string
 	DisableStageSplit bool
 	PinnedBudgetRatio float64
+	// RecallTraceEnabled/SampleRate gate diagnostic recall traces. The default
+	// runtime config keeps traces off until an operator opts in.
+	RecallTraceEnabled    bool
+	RecallTraceSampleRate float64
 }
 
 // Store is a file-backed durable project memory.
@@ -176,6 +181,9 @@ func (s *Store) Append(opts AppendNoteOptions) (Note, error) {
 	}
 	if s.cfg.DisableManual {
 		return Note{}, fmt.Errorf("memorystore: manual memory is disabled")
+	}
+	if rule := memoryredact.DetectSecret(opts.Text); rule != "" {
+		return Note{}, fmt.Errorf("memorystore: refusing to store secret-shaped content (%s)", rule)
 	}
 	if s != nil && s.v2Configured() {
 		note, err := s.appendV2(opts)
@@ -340,6 +348,9 @@ type InjectOptions struct {
 	Mode          string
 	InjectionMode string
 	Now           time.Time
+	// SkipTrace keeps diagnostic callers (memory_why_not, /memory why-not)
+	// from polluting the real recall-trace stream and metrics.
+	SkipTrace bool
 }
 
 // SelectForInject returns top-k notes for session start / turn context, under a token budget.
@@ -597,8 +608,10 @@ func scoreNote(note Note, tokens []string, rawQuery string) float64 {
 			score += 1
 		}
 	}
-	// Mild recency boost (seconds → tiny fraction).
-	if !note.CreatedAt.IsZero() {
+	// Mild recency boost only breaks ties among actual textual/tag matches.
+	// Applying it unconditionally made every record score > 0, defeating the
+	// caller's zero-score filter for non-empty recall queries.
+	if score > 0 && !note.CreatedAt.IsZero() {
 		score += float64(note.CreatedAt.Unix()%10_000) / 100_000
 	}
 	return score

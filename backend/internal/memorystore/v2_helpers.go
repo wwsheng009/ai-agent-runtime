@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
@@ -74,6 +76,15 @@ func normalizeMemoryText(text string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 }
 
+func normalizeSensitivity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "private":
+		return "private"
+	default:
+		return "internal"
+	}
+}
+
 func memoryContentHash(scope, projectKey, kind, text string) string {
 	sum := sha256.Sum256([]byte(scope + "\x00" + projectKey + "\x00" + kind + "\x00" + normalizeMemoryText(text)))
 	return hex.EncodeToString(sum[:])
@@ -97,6 +108,52 @@ func recordByID(records []Record, id string) Record {
 		}
 	}
 	return Record{}
+}
+
+const memoryRecordTokenOverhead = 16
+
+// fitRecordToBudget truncates a single oversized record while preserving its
+// id, kind, tags, and source metadata. The formatted prompt line adds kind/id
+// decoration, so reserve a conservative fixed overhead instead of counting
+// only the body text.
+func fitRecordToBudget(record Record, maxTokens int) (Record, bool) {
+	if maxTokens <= memoryRecordTokenOverhead {
+		return Record{}, false
+	}
+	if EstimateTokens(record.Text)+memoryRecordTokenOverhead <= maxTokens {
+		return record, true
+	}
+	body := truncateTextToTokenBudget(record.Text, maxTokens-memoryRecordTokenOverhead)
+	if strings.TrimSpace(body) == "" {
+		return Record{}, false
+	}
+	record.Text = body
+	return record, true
+}
+
+func truncateTextToTokenBudget(text string, maxTokens int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || maxTokens <= 0 {
+		return ""
+	}
+	if EstimateTokens(text) <= maxTokens {
+		return text
+	}
+	runes := []rune(text)
+	low, high := 0, len(runes)
+	for low < high {
+		mid := (low + high + 1) / 2
+		candidate := strings.TrimSpace(string(runes[:mid])) + "…"
+		if EstimateTokens(candidate) <= maxTokens {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	if low == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(runes[:low])) + "…"
 }
 
 func scanRecord(rows *sql.Rows) (Record, error) {
@@ -173,6 +230,10 @@ ORDER BY revision DESC LIMIT 1
 }
 
 func (s *Store) validateSummaryGate(ctx context.Context, db *sql.DB, summary Summary, now time.Time) (bool, error) {
+	if rule := memoryredact.DetectSecret(summary.Text); rule != "" {
+		_ = s.invalidateSummary(ctx, db, summary, "summary_secret:"+rule)
+		return false, nil
+	}
 	rows, err := db.QueryContext(ctx, `
 SELECT memory_id FROM memory_summary_items WHERE summary_id = ? ORDER BY memory_id
 `, summary.ID)
@@ -209,12 +270,15 @@ SELECT memory_id FROM memory_summary_items WHERE summary_id = ? ORDER BY memory_
 	for _, id := range itemIDs {
 		var (
 			status, freshness, contentHash, validUntil, deletedAt string
+			sourceKind, sensitivity                               string
 			revision                                              int64
+			pinned                                                int
 		)
 		err := db.QueryRowContext(ctx, `
-SELECT status, freshness_status, content_hash, revision, COALESCE(valid_until, ''), COALESCE(deleted_at, '')
+SELECT status, freshness_status, content_hash, revision, COALESCE(valid_until, ''),
+       COALESCE(deleted_at, ''), pinned, source_kind, sensitivity
 FROM memory_entries WHERE id = ?
-`, id).Scan(&status, &freshness, &contentHash, &revision, &validUntil, &deletedAt)
+`, id).Scan(&status, &freshness, &contentHash, &revision, &validUntil, &deletedAt, &pinned, &sourceKind, &sensitivity)
 		if errorsIsNoRows(err) {
 			_ = s.invalidateSummary(ctx, db, summary, "item_missing")
 			return false, nil
@@ -224,6 +288,17 @@ FROM memory_entries WHERE id = ?
 		}
 		if status != string(StatusActive) || freshness != string(FreshnessFresh) || deletedAt != "" {
 			_ = s.invalidateSummary(ctx, db, summary, "item_not_active_fresh")
+			return false, nil
+		}
+		// Pinned/manual records have their own stable budget and rendering. A
+		// summary that also contains them would duplicate the same claim in the
+		// prompt, so fail the gate and let the rebuild path exclude them.
+		if pinned != 0 || strings.EqualFold(sourceKind, "manual") {
+			_ = s.invalidateSummary(ctx, db, summary, "item_stable")
+			return false, nil
+		}
+		if normalizeSensitivity(sensitivity) == "private" {
+			_ = s.invalidateSummary(ctx, db, summary, "item_private")
 			return false, nil
 		}
 		if validUntil != "" {
@@ -254,16 +329,13 @@ func (s *Store) invalidateSummary(ctx context.Context, db *sql.DB, summary Summa
 		return err
 	}
 	jobKey := summary.ID + ":" + summary.InputWatermark
-	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO memory_jobs (
-    id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, input_watermark, created_at, updated_at
-) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', 0, 0, 3, ?, ?, ?)
-`, "job_"+uuid.NewString(), jobKey, string(summary.Scope), summary.ProjectKey,
-		summary.InputWatermark, nowText(), nowText()); err != nil {
+	if _, err := enqueueSummaryRebuild(ctx, tx, jobKey, string(summary.Scope), summary.ProjectKey, summary.InputWatermark); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.clearSummaryArtifacts()
 }
 
 func errorsIsNoRows(err error) bool {
@@ -377,17 +449,41 @@ WHERE i.memory_id = ? AND s.status = 'active'
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_summaries SET freshness_status = 'stale' WHERE id = ?`, summary.id); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO memory_jobs (
-    id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, input_watermark, created_at, updated_at
-) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', 0, 0, 3, ?, ?, ?)
-`, "job_"+uuid.NewString(), summary.id+":"+summary.watermark,
-			summary.scope, summary.projectKey, summary.watermark, nowText(), nowText()); err != nil {
+		if _, err := enqueueSummaryRebuild(ctx, tx, summary.id+":"+summary.watermark,
+			summary.scope, summary.projectKey, summary.watermark); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func enqueueSummaryRebuild(ctx context.Context, execer sqlExecer, jobKey, scope, projectKey, watermark string) (int, error) {
+	now := nowText()
+	result, err := execer.ExecContext(ctx, `
+INSERT INTO memory_jobs (
+    id, kind, job_key, scope, project_key, status, priority, attempt,
+    max_attempts, input_watermark, created_at, updated_at
+) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', 0, 0, 3, ?, ?, ?)
+ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
+    status = 'pending',
+    worker_id = NULL,
+    lease_until = NULL,
+    retry_at = NULL,
+    finished_at = NULL,
+    last_error = NULL,
+    input_watermark = excluded.input_watermark,
+    updated_at = excluded.updated_at
+WHERE memory_jobs.status IN ('failed', 'succeeded', 'cancelled')
+`, "job_"+uuid.NewString(), jobKey, scope, projectKey, watermark, now, now)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
 }
 
 func (s *Store) SelectForInjectV2(opts InjectOptions) (Selection, error) {
@@ -443,7 +539,7 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 	}
 	query := `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
-       confidence, pinned, retention_class, source_kind, source_session_id,
+       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -494,7 +590,7 @@ func (s *Store) GetRecord(ctx context.Context, id string) (Record, error) {
 	}
 	row := db.QueryRowContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
-       confidence, pinned, retention_class, source_kind, source_session_id,
+       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -560,7 +656,7 @@ func legacyNoteToRecord(note Note, projectKey string) Record {
 		ID: note.ID, Scope: ScopeProject, ProjectKey: projectKey,
 		Kind: "reference", Status: StatusActive, Text: note.Text,
 		NormalizedText: normalizeMemoryText(note.Text), Tags: append([]string(nil), note.Tags...),
-		Pinned: true, RetentionClass: "permanent", SourceKind: "manual",
+		Sensitivity: "internal", Pinned: true, RetentionClass: "permanent", SourceKind: "manual",
 		SourceSessionID: note.SessionID, Revision: 1,
 		CreatedAt: note.CreatedAt, UpdatedAt: note.CreatedAt,
 		Freshness: FreshnessFresh,
@@ -585,12 +681,13 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		lastVerifiedAt, revalidateAfter     sql.NullString
 		deletedAt, metadataJSON             sql.NullString
 		confidence                          float64
+		sensitivity                         sql.NullString
 		pinned                              int
 		revision, useCount                  int64
 	)
 	if err := row.Scan(
 		&id, &scope, &projectKey, &kind, &status, &text, &normalizedText, &tagsJSON,
-		&confidence, &pinned, &retentionClass, &sourceKind, &sourceSessionID,
+		&confidence, &sensitivity, &pinned, &retentionClass, &sourceKind, &sourceSessionID,
 		&sourceTurnID, &sourceRefsJSON, &contentHash, &supersedesID, &revision,
 		&createdAt, &updatedAt, &lastUsedAt, &useCount, &validFrom, &validUntil,
 		&freshness, &lastVerifiedAt, &revalidateAfter, &staleReason, &deletedAt,
@@ -601,7 +698,7 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 	record = Record{
 		ID: id.String, Scope: Scope(scope.String), ProjectKey: projectKey.String,
 		Kind: kind.String, Status: Status(status.String), Text: text.String,
-		NormalizedText: normalizedText.String, Confidence: confidence,
+		NormalizedText: normalizedText.String, Confidence: confidence, Sensitivity: sensitivity.String,
 		Pinned: pinned != 0, RetentionClass: retentionClass.String,
 		SourceKind: sourceKind.String, SourceSessionID: sourceSessionID.String,
 		SourceTurnID: sourceTurnID.String, ContentHash: contentHash.String,
@@ -630,10 +727,15 @@ func (s *Store) UpdateRecord(ctx context.Context, id string, patch RecordPatch) 
 	if err != nil {
 		return Record{}, err
 	}
+	expectedRevision := record.Revision
+	expectedStatus := record.Status
 	if patch.Text != nil {
 		text := strings.TrimSpace(*patch.Text)
 		if text == "" {
 			return Record{}, fmt.Errorf("memorystore: record text is required")
+		}
+		if rule := memoryredact.DetectSecret(text); rule != "" {
+			return Record{}, fmt.Errorf("memorystore: refusing to store secret-shaped content (%s)", rule)
 		}
 		record.Text = text
 		record.NormalizedText = normalizeMemoryText(text)
@@ -646,7 +748,24 @@ func (s *Store) UpdateRecord(ctx context.Context, id string, patch RecordPatch) 
 		record.Pinned = *patch.Pinned
 	}
 	if patch.Status != nil {
-		record.Status = *patch.Status
+		next := *patch.Status
+		switch next {
+		case StatusCandidate, StatusActive, StatusSuperseded, StatusExpired:
+		case StatusDeleted:
+			return Record{}, fmt.Errorf("memorystore: use DeleteRecord for tombstone deletion")
+		default:
+			return Record{}, fmt.Errorf("memorystore: invalid status %q", next)
+		}
+		if record.Status == StatusDeleted {
+			return Record{}, fmt.Errorf("memorystore: deleted records must be restored through RestoreRecord")
+		}
+		if next == StatusActive && record.Status != StatusActive && record.Status != StatusCandidate {
+			return Record{}, fmt.Errorf("memorystore: only candidate/active records can be activated")
+		}
+		if next == StatusCandidate && record.Status == StatusSuperseded {
+			return Record{}, fmt.Errorf("memorystore: superseded records cannot return to candidate")
+		}
+		record.Status = next
 	}
 	record.Revision++
 	record.UpdatedAt = time.Now().UTC()
@@ -657,16 +776,20 @@ func (s *Store) UpdateRecord(ctx context.Context, id string, patch RecordPatch) 
 		return Record{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET text = ?, normalized_text = ?, tags_json = ?, pinned = ?, status = ?,
     content_hash = ?, revision = ?, updated_at = ?, metadata_json = ?
-WHERE id = ? AND project_key = ?
+WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
 `, record.Text, record.NormalizedText, string(tagsJSON), boolInt(record.Pinned),
 		string(record.Status), record.ContentHash, record.Revision,
 		record.UpdatedAt.UTC().Format(time.RFC3339Nano), string(metadataJSON),
-		record.ID, s.cfg.ProjectKey); err != nil {
+		record.ID, s.cfg.ProjectKey, expectedRevision, string(expectedStatus))
+	if err != nil {
 		return Record{}, err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", record.ID)
 	}
 	if err := insertEventTx(ctx, tx, record.ID, "updated", "user", record.SourceSessionID, record.Revision, map[string]interface{}{"reason": "manual_patch"}); err != nil {
 		return Record{}, err
@@ -732,11 +855,16 @@ func (s *Store) DeleteRecord(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET status = 'deleted', deleted_at = ?, revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ?
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey); err != nil {
+WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
+`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey,
+		record.Revision, string(record.Status))
+	if err != nil {
 		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return fmt.Errorf("memorystore: record %s changed concurrently", record.ID)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_suppressions (
@@ -773,7 +901,7 @@ func (s *Store) SetSessionMode(ctx context.Context, sessionID string, mode Sessi
 	_, err = db.ExecContext(ctx, `
 INSERT INTO memory_session_modes (session_id, scope, project_key, mode, updated_at, metadata_json)
 VALUES (?, 'project', ?, ?, ?, '{}')
-ON CONFLICT(session_id) DO UPDATE SET mode = excluded.mode, project_key = excluded.project_key,
+ON CONFLICT(project_key, session_id) DO UPDATE SET mode = excluded.mode, scope = excluded.scope,
     updated_at = excluded.updated_at
 `, strings.TrimSpace(sessionID), projectKey, string(mode), nowText())
 	return err
@@ -785,7 +913,9 @@ func (s *Store) GetSessionMode(ctx context.Context, sessionID string) (SessionMo
 		return "", err
 	}
 	var mode string
-	err = db.QueryRowContext(ctx, `SELECT mode FROM memory_session_modes WHERE session_id = ?`, strings.TrimSpace(sessionID)).Scan(&mode)
+	err = db.QueryRowContext(ctx, `
+SELECT mode FROM memory_session_modes WHERE session_id = ? AND project_key = ?
+`, strings.TrimSpace(sessionID), s.cfg.ProjectKey).Scan(&mode)
 	if errorsIsNoRows(err) {
 		return SessionModeEnabled, nil
 	}
@@ -938,6 +1068,16 @@ func (s *Store) recordRecallTrace(opts InjectOptions, selection Selection) error
 	if strings.TrimSpace(opts.SessionID) == "" {
 		return nil
 	}
+	if s == nil || !s.cfg.RecallTraceEnabled {
+		return nil
+	}
+	rate := s.cfg.RecallTraceSampleRate
+	if rate <= 0 {
+		return nil
+	}
+	if rate < 1 && rand.Float64() >= rate {
+		return nil
+	}
 	db, err := s.ensureV2()
 	if err != nil {
 		return err
@@ -950,6 +1090,7 @@ func (s *Store) recordRecallTrace(opts InjectOptions, selection Selection) error
 	selected, _ := json.Marshal(selection.IDs)
 	dropped, _ := json.Marshal(selection.Dropped)
 	preview := strings.TrimSpace(opts.Query)
+	preview, _ = memoryredact.Redact(preview)
 	if runes := []rune(preview); len(runes) > 160 {
 		preview = string(runes[:160]) + "…"
 	}
@@ -958,10 +1099,10 @@ INSERT INTO memory_recall_traces (
     id, session_id, turn_id, project_key, query_hash, query_preview,
     summary_revision, candidate_count, filtered_count, selected_ids_json,
     dropped_json, token_estimate, token_budget, budget_source, injected, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'contextmgr', 1, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'contextmgr', ?, ?)
 `, "trace_"+uuid.NewString(), strings.TrimSpace(opts.SessionID), nullableString(opts.TurnID),
 		s.cfg.ProjectKey, hex.EncodeToString(sum[:]), preview, selection.Revision,
-		len(selection.IDs)+len(selection.Dropped), len(selection.Dropped), string(selected),
-		string(dropped), selection.TokenEstimate, budget, nowText())
+		selection.CandidateCount, selection.FilteredCount, string(selected),
+		string(dropped), selection.TokenEstimate, budget, boolInt(len(selection.IDs) > 0), nowText())
 	return err
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
@@ -38,6 +39,12 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.PinnedBudgetRatio > 1 {
 		cfg.PinnedBudgetRatio = 1
+	}
+	if cfg.RecallTraceSampleRate <= 0 {
+		cfg.RecallTraceSampleRate = 0.01
+	}
+	if cfg.RecallTraceSampleRate > 1 {
+		cfg.RecallTraceSampleRate = 1
 	}
 	if strings.TrimSpace(cfg.ProjectKey) == "" {
 		projectRoot := strings.TrimSpace(cfg.ProjectRoot)
@@ -157,6 +164,13 @@ func (s *Store) ProjectKey() string {
 	return s.cfg.ProjectKey
 }
 
+func (s *Store) InjectionMode() string {
+	if s == nil {
+		return ""
+	}
+	return s.cfg.InjectionMode
+}
+
 func (s *Store) SchemaVersion() (int, error) {
 	if s == nil || !s.v2Configured() {
 		return 0, nil
@@ -236,6 +250,7 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 		NormalizedText:  normalizeMemoryText(text),
 		Tags:            tags,
 		Confidence:      1.0,
+		Sensitivity:     "internal",
 		Pinned:          pinned,
 		RetentionClass:  "permanent",
 		SourceKind:      "manual",
@@ -276,6 +291,7 @@ func (s *Store) insertRecordSQLTx(ctx context.Context, tx *sql.Tx, record Record
 	if record.Revision <= 0 {
 		record.Revision = 1
 	}
+	record.Sensitivity = normalizeSensitivity(record.Sensitivity)
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
@@ -293,6 +309,9 @@ WHERE scope = ? AND project_key = ? AND content_hash = ?
 	if suppressed > 0 {
 		return fmt.Errorf("memorystore: content is suppressed")
 	}
+	if rule := memoryredact.DetectSecret(record.Text); rule != "" {
+		return fmt.Errorf("memorystore: refusing to store secret-shaped content (%s)", rule)
+	}
 	tagsJSON, _ := json.Marshal(record.Tags)
 	refsJSON, _ := json.Marshal(record.SourceRefs)
 	metadataJSON, _ := json.Marshal(record.Metadata)
@@ -304,10 +323,10 @@ INSERT INTO memory_entries (
     supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
     valid_from, valid_until, freshness_status, last_verified_at,
     revalidate_after, stale_reason, deleted_at, metadata_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'internal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
 		record.ID, string(record.Scope), record.ProjectKey, record.Kind, string(record.Status),
-		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence,
+		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence, record.Sensitivity,
 		boolInt(record.Pinned), record.RetentionClass, record.SourceKind,
 		nullableString(record.SourceSessionID), nullableString(record.SourceTurnID),
 		string(refsJSON), record.ContentHash, nullableString(record.SupersedesID),
@@ -482,7 +501,7 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	}
 	supportsSummary := mode == "summary" || mode == "hybrid"
 	supportsRecall := mode == "hybrid" || mode == "notes"
-	selection := Selection{}
+	selection := Selection{CandidateCount: len(records)}
 	pinnedBudget := int(float64(budget) * s.cfg.PinnedBudgetRatio)
 	pinnedUsed := 0
 	stableIDs := map[string]struct{}{}
@@ -490,10 +509,20 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 		if !record.Pinned && strings.ToLower(record.SourceKind) != "manual" {
 			continue
 		}
-		cost := EstimateTokens(record.Text) + 8
-		if pinnedUsed > 0 && pinnedUsed+cost > pinnedBudget {
-			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
-			continue
+		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
+		if cost > pinnedBudget-pinnedUsed {
+			if len(selection.Stable) == 0 {
+				if fitted, ok := fitRecordToBudget(record, pinnedBudget); ok {
+					record = fitted
+					cost = EstimateTokens(record.Text) + memoryRecordTokenOverhead
+				} else {
+					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
+					continue
+				}
+			} else {
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
+				continue
+			}
 		}
 		selection.Stable = append(selection.Stable, record)
 		stableIDs[record.ID] = struct{}{}
@@ -502,6 +531,8 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	summaryUsed := 0
 	if supportsSummary {
 		if summary, err := s.loadGatedActiveSummary(context.Background(), db, now); err == nil && summary != nil {
+			summary.TokenEstimate = EstimateTokens(summary.Text)
+			summaryCost := summary.TokenEstimate
 			summaryCap := budget
 			switch mode {
 			case "summary":
@@ -511,10 +542,10 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 			case "hybrid":
 				summaryCap = budget * 50 / 100
 			}
-			if summary.TokenEstimate <= summaryCap {
+			if summaryCost <= summaryCap && summaryCost+pinnedUsed <= budget {
 				selection.Summary = summary
 				selection.Revision = summary.Revision
-				summaryUsed = summary.TokenEstimate
+				summaryUsed = summaryCost
 				for _, id := range summary.RecordIDs {
 					stableIDs[id] = struct{}{}
 				}
@@ -538,7 +569,10 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	if !supportsRecall {
 		selection.TokenEstimate = summaryUsed + pinnedUsed
 		selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
-		_ = s.recordRecallTrace(opts, selection)
+		selection.FilteredCount = len(selection.Dropped)
+		if !opts.SkipTrace {
+			_ = s.recordRecallTrace(opts, selection)
+		}
 		return selection, nil
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -557,12 +591,30 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	}
 	recallUsed := 0
 	for _, hit := range candidates {
-		cost := EstimateTokens(hit.Note.Text) + 8
-		if recallUsed+cost > remaining || recallUsed+cost > recallCap || len(selection.Recall) >= limit {
+		if len(selection.Recall) >= limit {
 			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
 			continue
 		}
 		record := recordByID(records, hit.Note.ID)
+		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
+		perRecordCap := remaining
+		if recallCap < perRecordCap {
+			perRecordCap = recallCap
+		}
+		if cost > perRecordCap-recallUsed {
+			if len(selection.Recall) == 0 {
+				if fitted, ok := fitRecordToBudget(record, perRecordCap); ok {
+					record = fitted
+					cost = EstimateTokens(record.Text) + memoryRecordTokenOverhead
+				} else {
+					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
+					continue
+				}
+			} else {
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
+				continue
+			}
+		}
 		selection.Recall = append(selection.Recall, record)
 		recallUsed += cost
 	}
@@ -571,7 +623,10 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	for _, record := range selection.Recall {
 		selection.IDs = append(selection.IDs, record.ID)
 	}
-	_ = s.recordRecallTrace(opts, selection)
+	selection.FilteredCount = len(selection.Dropped)
+	if !opts.SkipTrace {
+		_ = s.recordRecallTrace(opts, selection)
+	}
 	return selection, nil
 }
 
@@ -588,13 +643,14 @@ func appendSelectionIDs(ids []string, stable []Record, summary *Summary) []strin
 func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.Time) ([]Record, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
-       confidence, pinned, retention_class, source_kind, source_session_id,
+       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json
 FROM memory_entries
 WHERE scope = ? AND project_key = ? AND status = 'active' AND freshness_status = 'fresh'
+  AND sensitivity != 'private'
   AND (deleted_at IS NULL OR deleted_at = '')
   AND (valid_until IS NULL OR valid_until = '' OR valid_until > ?)
 ORDER BY pinned DESC, use_count DESC, updated_at DESC
@@ -608,6 +664,9 @@ ORDER BY pinned DESC, use_count DESC, updated_at DESC
 		record, err := scanRecord(rows)
 		if err != nil {
 			return nil, err
+		}
+		if memoryredact.DetectSecret(record.Text) != "" {
+			continue
 		}
 		records = append(records, record)
 	}

@@ -49,6 +49,7 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	body := `{"text":"prefer apply_patch for multi-hunk edits","kind":"workflow","tags":["workflow"],"session_id":"s1"}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	createRec := httptest.NewRecorder()
 	router.ServeHTTP(createRec, createReq)
 	require.Equal(t, http.StatusOK, createRec.Code, createRec.Body.String())
@@ -78,9 +79,17 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 
 	patchReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/memory/records/"+created.ID, strings.NewReader(`{"pinned":false}`))
 	patchReq.Header.Set("Content-Type", "application/json")
+	patchReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	patchRec := httptest.NewRecorder()
 	router.ServeHTTP(patchRec, patchReq)
 	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+
+	deleteViaPatch := httptest.NewRequest(http.MethodPatch, "/api/runtime/memory/records/"+created.ID, strings.NewReader(`{"status":"deleted"}`))
+	deleteViaPatch.Header.Set("Content-Type", "application/json")
+	deleteViaPatch.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	deleteViaPatchRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteViaPatchRec, deleteViaPatch)
+	require.Equal(t, http.StatusBadRequest, deleteViaPatchRec.Code, deleteViaPatchRec.Body.String())
 
 	delReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/memory/records/"+created.ID, nil)
 	delReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
@@ -101,9 +110,16 @@ func TestMemoryAPIWorkspaceBindingAndAdmin(t *testing.T) {
 	other := t.TempDir()
 	_, router := newMemoryTestRouter(t, workspace)
 
+	unauthorizedCreate := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(`{"text":"must not write"}`))
+	unauthorizedCreate.Header.Set("Content-Type", "application/json")
+	unauthorizedCreateRec := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedCreateRec, unauthorizedCreate)
+	require.Equal(t, http.StatusForbidden, unauthorizedCreateRec.Code, unauthorizedCreateRec.Body.String())
+
 	body := `{"workspace_path":` + strconv.Quote(other) + `,"text":"must not cross workspace"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -118,6 +134,17 @@ func TestMemoryAPIWorkspaceBindingAndAdmin(t *testing.T) {
 	statusRec := httptest.NewRecorder()
 	router.ServeHTTP(statusRec, statusReq)
 	require.Equal(t, http.StatusBadRequest, statusRec.Code, statusRec.Body.String())
+
+	for _, path := range []string{
+		"/api/runtime/memory/records?scope=user",
+		"/api/runtime/memory/records?status=bogus",
+		"/api/runtime/memory/records?cursor=not-a-number",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code, path+": "+rec.Body.String())
+	}
 }
 
 func TestMemoryAPIStatusOffDoesNotCreateDB(t *testing.T) {
@@ -147,6 +174,11 @@ func TestMemoryAPIStatusOffDoesNotCreateDB(t *testing.T) {
 		router.ServeHTTP(offRec, offReq)
 		require.Equal(t, http.StatusOK, offRec.Code, path+": "+offRec.Body.String())
 	}
+	importReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/import", strings.NewReader(`{"type":"record","record":{"text":"must not create db"}}`))
+	importReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	importRec := httptest.NewRecorder()
+	router.ServeHTTP(importRec, importReq)
+	require.Equal(t, http.StatusConflict, importRec.Code, importRec.Body.String())
 	if _, err := os.Stat(filepath.Join(workspace, ".aicli", "memory", "memory.db")); !os.IsNotExist(err) {
 		t.Fatalf("off status must not create memory.db, stat err=%v", err)
 	}
@@ -169,6 +201,7 @@ func TestMemoryAPISessionModeAndRecallTraces(t *testing.T) {
 	require.Equal(t, http.StatusOK, ctxRec.Code, ctxRec.Body.String())
 
 	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/recall-traces", nil)
+	traceReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	traceRec := httptest.NewRecorder()
 	router.ServeHTTP(traceRec, traceReq)
 	require.Equal(t, http.StatusOK, traceRec.Code, traceRec.Body.String())
@@ -227,6 +260,7 @@ func TestMemoryAPIManualExtract(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"candidates":1`)
 
 	jobsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/jobs", nil)
+	jobsReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	jobsRec := httptest.NewRecorder()
 	router.ServeHTTP(jobsRec, jobsReq)
 	require.Equal(t, http.StatusOK, jobsRec.Code, jobsRec.Body.String())
@@ -296,6 +330,7 @@ func TestMemoryAPIGovernanceEndpoints(t *testing.T) {
 	createBody := `{"text":"governance endpoint memory","kind":"fact"}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(createBody))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	createRec := httptest.NewRecorder()
 	router.ServeHTTP(createRec, createReq)
 	require.Equal(t, http.StatusOK, createRec.Code, createRec.Body.String())
@@ -340,9 +375,17 @@ func TestMemoryAPIGovernanceEndpoints(t *testing.T) {
 
 	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on", InjectionMode: "summary"})
 	require.NoError(t, err)
-	summary, err := store.CompileSummary(context.Background(), memorystore.Summary{Text: "api summary"}, []string{created.ID})
+	t.Cleanup(func() { _ = store.Close() })
+	derived, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s-api", Kind: "decision", Text: "api summary input",
+		Confidence: 0.9, SourceHash: "api-summary", SourceRevision: 1,
+	})
 	require.NoError(t, err)
-	require.NoError(t, store.Close())
+	active := memorystore.StatusActive
+	_, err = store.UpdateRecord(context.Background(), derived.ID, memorystore.RecordPatch{Status: &active})
+	require.NoError(t, err)
+	summary, err := store.CompileSummary(context.Background(), memorystore.Summary{Text: "api summary"}, []string{derived.ID})
+	require.NoError(t, err)
 	activateReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/summaries/"+summary.ID+"/activate", nil)
 	activateReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
 	activateRec := httptest.NewRecorder()
@@ -367,4 +410,120 @@ func TestMemoryAPIGovernanceEndpoints(t *testing.T) {
 	resetRec = httptest.NewRecorder()
 	router.ServeHTTP(resetRec, resetReq)
 	require.Equal(t, http.StatusOK, resetRec.Code, resetRec.Body.String())
+}
+
+func TestMemoryAPIImportExportRoundTrip(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on", InjectionMode: "summary"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	manual, err := store.Append(memorystore.AppendNoteOptions{Text: "round-trip manual memory", Kind: "reference"})
+	require.NoError(t, err)
+	derived, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s-import", Kind: "decision", Text: "round-trip derived decision",
+		Confidence: 0.9, SourceHash: "import-source", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	active := memorystore.StatusActive
+	_, err = store.UpdateRecord(context.Background(), derived.ID, memorystore.RecordPatch{Status: &active})
+	require.NoError(t, err)
+	_, err = store.CompileSummary(context.Background(), memorystore.Summary{Text: "round-trip summary"}, []string{derived.ID})
+	require.NoError(t, err)
+	body, err := store.ExportJSONL(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, body, manual.ID)
+	require.Contains(t, body, derived.ID)
+
+	resetReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/reset", strings.NewReader(`{"confirm":true}`))
+	resetReq.Header.Set("Content-Type", "application/json")
+	resetReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	resetRec := httptest.NewRecorder()
+	router.ServeHTTP(resetRec, resetReq)
+	require.Equal(t, http.StatusOK, resetRec.Code, resetRec.Body.String())
+
+	dryReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/import?dry_run=true", strings.NewReader(body))
+	dryReq.Header.Set("Content-Type", "application/jsonl")
+	dryReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	dryRec := httptest.NewRecorder()
+	router.ServeHTTP(dryRec, dryReq)
+	require.Equal(t, http.StatusOK, dryRec.Code, dryRec.Body.String())
+	var dryResult memorystore.ImportResult
+	require.NoError(t, json.NewDecoder(dryRec.Body).Decode(&dryResult))
+	require.True(t, dryResult.DryRun)
+	require.Equal(t, 2, dryResult.Imported)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records?status=active&limit=10", nil)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	var listed memoryRecordListResponse
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listed))
+	require.Equal(t, 0, listed.Count)
+
+	importReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/import", strings.NewReader(body))
+	importReq.Header.Set("Content-Type", "application/jsonl")
+	importReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	importRec := httptest.NewRecorder()
+	router.ServeHTTP(importRec, importReq)
+	require.Equal(t, http.StatusOK, importRec.Code, importRec.Body.String())
+	var imported memorystore.ImportResult
+	require.NoError(t, json.NewDecoder(importRec.Body).Decode(&imported))
+	require.Equal(t, 2, imported.Imported)
+	require.Equal(t, 1, imported.Summaries)
+	require.Zero(t, imported.Corrupt)
+
+	listReq = httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records?status=active&limit=10", nil)
+	listRec = httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listed))
+	require.Equal(t, 2, listed.Count)
+
+	unauthorized := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/import", strings.NewReader(body))
+	unauthorized.RemoteAddr = "192.0.2.1:1234"
+	unauthorizedRec := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedRec, unauthorized)
+	require.Equal(t, http.StatusForbidden, unauthorizedRec.Code, unauthorizedRec.Body.String())
+}
+
+func TestMemoryAPIPrivateRecordRequiresAdmin(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	private, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s-private", Kind: "fact", Text: "private api record",
+		Confidence: 0.9, Sensitivity: "private", SourceHash: "api-private", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	active := memorystore.StatusActive
+	_, err = store.UpdateRecord(context.Background(), private.ID, memorystore.RecordPatch{Status: &active})
+	require.NoError(t, err)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records?status=active&limit=10", nil)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	var listed memoryRecordListResponse
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listed))
+	require.Zero(t, listed.Count)
+
+	adminList := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records?status=active&limit=10", nil)
+	adminList.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	adminRec := httptest.NewRecorder()
+	router.ServeHTTP(adminRec, adminList)
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+	require.NoError(t, json.NewDecoder(adminRec.Body).Decode(&listed))
+	require.Equal(t, 1, listed.Count)
+	require.Equal(t, "private", listed.Items[0].Sensitivity)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records/"+private.ID, nil)
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	require.Equal(t, http.StatusForbidden, getRec.Code, getRec.Body.String())
+
+	adminGet := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records/"+private.ID, nil)
+	adminGet.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	adminGetRec := httptest.NewRecorder()
+	router.ServeHTTP(adminGetRec, adminGet)
+	require.Equal(t, http.StatusOK, adminGetRec.Code, adminGetRec.Body.String())
 }

@@ -109,6 +109,36 @@ not-json
 	}
 }
 
+func TestMemoryStoreMigrationRetriesLegacyIDCollisionWithDifferentContent(t *testing.T) {
+	root := t.TempDir()
+	legacyPath := filepath.Join(root, DefaultNotesFile)
+	body := `{"id":"legacy-dup","text":"first legacy body","source":"manual","created_at":"2026-01-02T03:04:05Z"}
+{"id":"legacy-dup","text":"second legacy body","source":"manual","created_at":"2026-01-03T03:04:05Z"}
+{"id":"legacy-copy","text":"first legacy body","source":"manual","created_at":"2026-01-04T03:04:05Z"}
+`
+	if err := os.WriteFile(legacyPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	store, err := New(Config{Root: root, Mode: "on"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	page, err := store.ListRecords(context.Background(), RecordFilter{Limit: 10})
+	if err != nil || page.Count != 2 {
+		t.Fatalf("migrated records = %+v, %v", page, err)
+	}
+	foundRetry := false
+	for _, record := range page.Items {
+		if record.Metadata["legacy_id"] == "legacy-dup" {
+			foundRetry = true
+		}
+	}
+	if !foundRetry {
+		t.Fatalf("ID-collision record was not retried with legacy_id metadata: %+v", page.Items)
+	}
+}
+
 func TestMemoryStoreSummaryGateAndInvalidation(t *testing.T) {
 	root := t.TempDir()
 	store, err := New(Config{Root: root, Mode: "on", InjectionMode: "summary"})
@@ -116,14 +146,8 @@ func TestMemoryStoreSummaryGateAndInvalidation(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer store.Close()
-	_, err = store.Append(AppendNoteOptions{Text: "decision: keep memory injections append-only"})
-	if err != nil {
-		t.Fatalf("append decision: %v", err)
-	}
-	_, err = store.Append(AppendNoteOptions{Text: "workflow: run context tests before merging"})
-	if err != nil {
-		t.Fatalf("append workflow: %v", err)
-	}
+	_ = seedActiveDerivedMemory(t, store, "decision: keep memory injections append-only", "decision")
+	_ = seedActiveDerivedMemory(t, store, "workflow: run context tests before merging", "workflow")
 	page, err := store.ListRecords(context.Background(), RecordFilter{Limit: 10})
 	if err != nil || len(page.Items) != 2 {
 		t.Fatalf("ListRecords = %d, %v", len(page.Items), err)
@@ -172,10 +196,7 @@ func TestMemoryStorePinnedBudgetSurvivesSummaryFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append pinned: %v", err)
 	}
-	_, err = store.Append(AppendNoteOptions{Text: strings.Repeat("derived ", 80), Pinned: boolPtr(false)})
-	if err != nil {
-		t.Fatalf("append derived: %v", err)
-	}
+	derived := seedActiveDerivedMemory(t, store, strings.Repeat("derived ", 80), "decision")
 	page, err := store.ListRecords(context.Background(), RecordFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListRecords: %v", err)
@@ -189,7 +210,7 @@ func TestMemoryStorePinnedBudgetSurvivesSummaryFull(t *testing.T) {
 	if pinnedID == "" {
 		t.Fatal("pinned record missing")
 	}
-	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: strings.Repeat("summary ", 80), TokenEstimate: 700}, []string{pinnedID}); err != nil {
+	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: strings.Repeat("summary ", 80), TokenEstimate: 700}, []string{derived.ID}); err != nil {
 		t.Fatalf("createSummary: %v", err)
 	}
 	selection, err := store.SelectForInjectV2(InjectOptions{Query: "pinned", Limit: 5, TokenBudget: 100})
@@ -205,10 +226,30 @@ func TestMemoryStorePinnedBudgetSurvivesSummaryFull(t *testing.T) {
 	if !found {
 		t.Fatal("pinned/manual record must remain visible under budget pressure")
 	}
+	if selection.TokenEstimate > 100 {
+		t.Fatalf("selection exceeded token budget: %d", selection.TokenEstimate)
+	}
 }
 
 func stringPtr(value string) *string { return &value }
 func boolPtr(value bool) *bool       { return &value }
+
+func seedActiveDerivedMemory(t *testing.T, store *Store, text, kind string) Record {
+	t.Helper()
+	candidate, err := store.InsertCandidate(context.Background(), Candidate{
+		SessionID: "test-session", Kind: kind, Text: text, Confidence: 0.9,
+		SourceHash: "test:" + text, SourceRevision: 1,
+	})
+	if err != nil {
+		t.Fatalf("InsertCandidate(%q): %v", text, err)
+	}
+	active := StatusActive
+	record, err := store.UpdateRecord(context.Background(), candidate.ID, RecordPatch{Status: &active})
+	if err != nil {
+		t.Fatalf("activate derived record %s: %v", candidate.ID, err)
+	}
+	return record
+}
 
 func TestMemoryStoreSessionModePersists(t *testing.T) {
 	root := t.TempDir()
@@ -223,6 +264,34 @@ func TestMemoryStoreSessionModePersists(t *testing.T) {
 	mode, err := store.GetSessionMode(context.Background(), "s1")
 	if err != nil || mode != SessionModeDisabled {
 		t.Fatalf("GetSessionMode = %q, %v", mode, err)
+	}
+}
+
+func TestMemoryStoreSessionModeIsProjectScoped(t *testing.T) {
+	sharedDB := filepath.Join(t.TempDir(), "shared-modes.db")
+	p1, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on"})
+	if err != nil {
+		t.Fatalf("p1 New: %v", err)
+	}
+	defer p1.Close()
+	p2, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on"})
+	if err != nil {
+		t.Fatalf("p2 New: %v", err)
+	}
+	defer p2.Close()
+	if err := p1.SetSessionMode(context.Background(), "shared-session", SessionModeDisabled, ""); err != nil {
+		t.Fatalf("p1 SetSessionMode: %v", err)
+	}
+	if err := p2.SetSessionMode(context.Background(), "shared-session", SessionModePolluted, ""); err != nil {
+		t.Fatalf("p2 SetSessionMode: %v", err)
+	}
+	p1Mode, err := p1.GetSessionMode(context.Background(), "shared-session")
+	if err != nil || p1Mode != SessionModeDisabled {
+		t.Fatalf("p1 mode = %q, %v", p1Mode, err)
+	}
+	p2Mode, err := p2.GetSessionMode(context.Background(), "shared-session")
+	if err != nil || p2Mode != SessionModePolluted {
+		t.Fatalf("p2 mode = %q, %v", p2Mode, err)
 	}
 }
 
@@ -282,6 +351,217 @@ func TestMemoryStoreSummaryGateRejectsMissingItems(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreSummaryRejectsPinnedManualItems(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	manual, err := store.Append(AppendNoteOptions{Text: "manual summary input"})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "must fail"}, []string{manual.ID}); err == nil {
+		t.Fatal("summary must reject pinned/manual items so they are not rendered twice")
+	}
+}
+
+func TestMemoryStorePrivateRecordsAreNotInjectedOrSummarized(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "notes"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	candidate, err := store.InsertCandidate(context.Background(), Candidate{
+		SessionID: "s1", Kind: "fact", Text: "private deployment credential note",
+		Confidence: 0.9, Sensitivity: "private", SourceHash: "private-hash", SourceRevision: 1,
+	})
+	if err != nil {
+		t.Fatalf("InsertCandidate: %v", err)
+	}
+	active := StatusActive
+	record, err := store.UpdateRecord(context.Background(), candidate.ID, RecordPatch{Status: &active})
+	if err != nil {
+		t.Fatalf("activate private record: %v", err)
+	}
+	if record.Sensitivity != "private" {
+		t.Fatalf("sensitivity = %q, want private", record.Sensitivity)
+	}
+	selection, err := store.SelectForInjectV2(InjectOptions{Query: "credential", Limit: 5, TokenBudget: 800})
+	if err != nil {
+		t.Fatalf("SelectForInjectV2: %v", err)
+	}
+	if len(selection.Stable) != 0 || len(selection.Recall) != 0 || selection.Summary != nil {
+		t.Fatalf("private record leaked into injection: %+v", selection)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "must fail"}, []string{record.ID}); err == nil {
+		t.Fatal("private record must not be compiled into an injectable summary")
+	}
+}
+
+func TestMemoryStoreSummaryRejectsExpiredItem(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	record := seedActiveDerivedMemory(t, store, "expired summary input", "decision")
+	db, err := store.ensureV2()
+	if err != nil {
+		t.Fatalf("ensureV2: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memory_entries SET valid_until = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatalf("seed valid_until: %v", err)
+	}
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "must fail"}, []string{record.ID}); err == nil {
+		t.Fatal("expired record must not be compiled into an injectable summary")
+	}
+}
+
+func TestMemoryStoreSourceChangeInvalidatesSummaryAndAdvancesRevision(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	record := seedActiveDerivedMemory(t, store, "source change summary input", "decision")
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "source change summary"}, []string{record.ID}); err != nil {
+		t.Fatalf("CompileSummary: %v", err)
+	}
+	changed, err := store.MarkSessionSourceChanged(context.Background(), "test-session", store.ProjectKey(), "new-source-hash", 2)
+	if err != nil || changed != 1 {
+		t.Fatalf("MarkSessionSourceChanged = %d, %v", changed, err)
+	}
+	updated, err := store.GetRecord(context.Background(), record.ID)
+	if err != nil || updated.Freshness != FreshnessStale || updated.Revision <= record.Revision {
+		t.Fatalf("updated record = %+v, %v", updated, err)
+	}
+	summary, err := store.ActiveSummary(context.Background())
+	if err != nil || summary == nil || summary.Freshness != FreshnessStale {
+		t.Fatalf("summary after source change = %+v, %v", summary, err)
+	}
+	jobs, err := store.ListJobs(context.Background(), 10)
+	if err != nil || len(jobs) == 0 || jobs[0].Kind != "summary_rebuild" {
+		t.Fatalf("summary rebuild jobs = %+v, %v", jobs, err)
+	}
+}
+
+func TestMemoryStoreFailedSummaryRebuildCanBeRequeued(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	record := seedActiveDerivedMemory(t, store, "summary rebuild input", "decision")
+	summary, err := store.CompileSummary(context.Background(), Summary{Text: "summary rebuild"}, []string{record.ID})
+	if err != nil {
+		t.Fatalf("CompileSummary: %v", err)
+	}
+	corrected := "summary rebuild input changed"
+	if _, err := store.UpdateRecord(context.Background(), record.ID, RecordPatch{Text: &corrected}); err != nil {
+		t.Fatalf("UpdateRecord: %v", err)
+	}
+	db, err := store.ensureV2()
+	if err != nil {
+		t.Fatalf("ensureV2: %v", err)
+	}
+	if _, err := db.Exec(`
+UPDATE memory_jobs SET status = 'failed', last_error = 'boom', finished_at = ?
+WHERE project_key = ? AND kind = 'summary_rebuild' AND job_key = ?
+`, time.Now().UTC().Format(time.RFC3339Nano), store.ProjectKey(), summary.ID+":"+summary.InputWatermark); err != nil {
+		t.Fatalf("fail job: %v", err)
+	}
+	requeued, err := store.EnqueueStaleSummaryRebuilds(context.Background())
+	if err != nil || requeued != 1 {
+		t.Fatalf("EnqueueStaleSummaryRebuilds = %d, %v", requeued, err)
+	}
+	jobs, err := store.ListJobs(context.Background(), 10)
+	if err != nil || len(jobs) != 1 || jobs[0].Status != JobStatusPending || jobs[0].LastError != "" {
+		t.Fatalf("requeued jobs = %+v, %v", jobs, err)
+	}
+}
+
+func TestMemoryStoreRecallTraceSkipsDiagnosticsAndTracksInjected(t *testing.T) {
+	store, err := New(Config{
+		Root: t.TempDir(), Mode: "on", InjectionMode: "notes",
+		RecallTraceEnabled: true, RecallTraceSampleRate: 1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.SelectForInjectV2(InjectOptions{
+		Query: "diagnostic", SessionID: "s1", SkipTrace: true,
+	}); err != nil {
+		t.Fatalf("diagnostic selection: %v", err)
+	}
+	traces, err := store.ListRecallTraces(context.Background(), "", 10)
+	if err != nil || len(traces) != 0 {
+		t.Fatalf("diagnostic selection wrote traces: %d, %v", len(traces), err)
+	}
+	if _, err := store.SelectForInjectV2(InjectOptions{
+		Query: "empty", SessionID: "s1",
+	}); err != nil {
+		t.Fatalf("context selection: %v", err)
+	}
+	traces, err = store.ListRecallTraces(context.Background(), "", 10)
+	if err != nil || len(traces) != 1 {
+		t.Fatalf("traces = %d, %v", len(traces), err)
+	}
+	if traces[0].Injected {
+		t.Fatal("empty selection must not be recorded as injected")
+	}
+}
+
+func TestMemoryStoreRejectsSecretsAndRedactsTracePreview(t *testing.T) {
+	store, err := New(Config{
+		Root: t.TempDir(), Mode: "on", InjectionMode: "notes",
+		RecallTraceEnabled: true, RecallTraceSampleRate: 1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Append(AppendNoteOptions{Text: "api_key=supersecretvalue123"}); err == nil {
+		t.Fatal("manual append must reject secret-shaped content")
+	}
+	if _, err := store.SelectForInjectV2(InjectOptions{
+		Query: "https://example.test/?token=supersecretvalue123", SessionID: "s1",
+	}); err != nil {
+		t.Fatalf("SelectForInjectV2: %v", err)
+	}
+	traces, err := store.ListRecallTraces(context.Background(), "", 10)
+	if err != nil || len(traces) != 1 {
+		t.Fatalf("traces = %d, %v", len(traces), err)
+	}
+	if strings.Contains(traces[0].QueryPreview, "supersecretvalue123") ||
+		!strings.Contains(traces[0].QueryPreview, "REDACTED") {
+		t.Fatalf("trace preview not redacted: %q", traces[0].QueryPreview)
+	}
+}
+
+func TestMemoryStoreSearchDoesNotMatchUnrelatedRecordsByRecency(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Append(AppendNoteOptions{Text: "unrelated durable note"}); err != nil {
+		t.Fatalf("Append unrelated: %v", err)
+	}
+	if _, err := store.Append(AppendNoteOptions{Text: "apply_patch workflow"}); err != nil {
+		t.Fatalf("Append match: %v", err)
+	}
+	hits, err := store.Search(SearchOptions{Query: "apply_patch", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Note.Text, "apply_patch") {
+		t.Fatalf("unexpected search hits: %+v", hits)
+	}
+}
+
 func TestResolveProjectKeyStable(t *testing.T) {
 	root := t.TempDir()
 	first := ResolveProjectKey(root)
@@ -312,12 +592,16 @@ func TestMemoryStoreInjectionModes(t *testing.T) {
 	if _, err := store.UpdateRecord(context.Background(), recall.ID, RecordPatch{Status: &activeStatus}); err != nil {
 		t.Fatalf("activate recall: %v", err)
 	}
-	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: "stable summary", TokenEstimate: 20}, []string{pinned.ID}); err != nil {
+	summaryInput := seedActiveDerivedMemory(t, store, "summary only decision", "decision")
+	if err := store.createSummary(context.Background(), Summary{Revision: 1, Text: "stable summary", TokenEstimate: 20}, []string{summaryInput.ID}); err != nil {
 		t.Fatalf("createSummary: %v", err)
 	}
 	selection, err := store.SelectForInjectV2(InjectOptions{Query: "queryTarget", Limit: 5, TokenBudget: 800})
 	if err != nil || selection.Summary == nil || len(selection.Recall) != 0 {
 		t.Fatalf("summary mode = %+v, %v", selection, err)
+	}
+	if len(selection.Stable) != 1 || selection.Stable[0].ID != pinned.ID {
+		t.Fatalf("summary mode stable records = %+v", selection.Stable)
 	}
 	store.cfg.InjectionMode = "hybrid"
 	selection, err = store.SelectForInjectV2(InjectOptions{Query: "queryTarget", Limit: 5, TokenBudget: 800})
@@ -337,10 +621,7 @@ func TestMemoryStoreSummaryCompileFailurePreservesOldRevision(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer store.Close()
-	note, err := store.Append(AppendNoteOptions{Text: "stable decision"})
-	if err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	note := seedActiveDerivedMemory(t, store, "stable decision", "decision")
 	first, err := store.CompileSummary(context.Background(), Summary{Text: "revision one"}, []string{note.ID})
 	if err != nil {
 		t.Fatalf("CompileSummary first: %v", err)
@@ -397,10 +678,7 @@ func TestMemoryStoreGovernanceLifecycle(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer store.Close()
-	note, err := store.Append(AppendNoteOptions{Text: "governance lifecycle memory", Kind: "fact"})
-	if err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	note := seedActiveDerivedMemory(t, store, "governance lifecycle memory", "fact")
 	if _, err := store.CompileSummary(context.Background(), Summary{Text: "governance summary"}, []string{note.ID}); err != nil {
 		t.Fatalf("CompileSummary: %v", err)
 	}
@@ -455,16 +733,150 @@ func TestMemoryStoreGovernanceLifecycle(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreImportJSONLIdempotentAndDryRun(t *testing.T) {
+	source, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("source New: %v", err)
+	}
+	defer source.Close()
+	if _, err := source.Append(AppendNoteOptions{Text: "imported manual memory", Kind: "reference"}); err != nil {
+		t.Fatalf("source Append: %v", err)
+	}
+	derived := seedActiveDerivedMemory(t, source, "imported derived decision", "decision")
+	if _, err := source.CompileSummary(context.Background(), Summary{Text: "imported summary"}, []string{derived.ID}); err != nil {
+		t.Fatalf("source CompileSummary: %v", err)
+	}
+	body, err := source.ExportJSONL(context.Background())
+	if err != nil {
+		t.Fatalf("ExportJSONL: %v", err)
+	}
+
+	target, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("target New: %v", err)
+	}
+	defer target.Close()
+	dry, err := target.ImportJSONL(context.Background(), []byte(body), true)
+	if err != nil || !dry.DryRun || dry.Imported != 2 || dry.Corrupt != 0 {
+		t.Fatalf("dry-run import = %+v, %v", dry, err)
+	}
+	if page, err := target.ListRecords(context.Background(), RecordFilter{Limit: 10}); err != nil || page.Count != 0 {
+		t.Fatalf("dry-run changed records: %+v, %v", page, err)
+	}
+	if summary, err := target.ActiveSummary(context.Background()); err != nil || summary != nil {
+		t.Fatalf("dry-run changed summary: %+v, %v", summary, err)
+	}
+
+	imported, err := target.ImportJSONL(context.Background(), []byte(body), false)
+	if err != nil || imported.Imported != 2 || imported.Summaries != 1 || imported.Corrupt != 0 {
+		t.Fatalf("import = %+v, %v", imported, err)
+	}
+	page, err := target.ListRecords(context.Background(), RecordFilter{Limit: 10})
+	if err != nil || page.Count != 2 {
+		t.Fatalf("records after import = %+v, %v", page, err)
+	}
+	summary, err := target.ActiveSummary(context.Background())
+	if err != nil || summary == nil || summary.Text != "imported summary" {
+		t.Fatalf("summary after import = %+v, %v", summary, err)
+	}
+	again, err := target.ImportJSONL(context.Background(), []byte(body), false)
+	if err != nil || again.Imported != 0 || again.Summaries != 0 || again.Skipped != 3 {
+		t.Fatalf("idempotent import = %+v, %v", again, err)
+	}
+}
+
+func TestMemoryStoreProjectScopedAuditExportAndReset(t *testing.T) {
+	sharedDB := filepath.Join(t.TempDir(), "shared-memory.db")
+	p1, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("p1 New: %v", err)
+	}
+	defer p1.Close()
+	p2, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on", InjectionMode: "summary"})
+	if err != nil {
+		t.Fatalf("p2 New: %v", err)
+	}
+	defer p2.Close()
+	if p1.ProjectKey() == p2.ProjectKey() {
+		t.Fatal("test projects must have distinct project keys")
+	}
+	if _, err := p1.Append(AppendNoteOptions{Text: "project one only", Kind: "reference"}); err != nil {
+		t.Fatalf("p1 Append: %v", err)
+	}
+	p1Derived := seedActiveDerivedMemory(t, p1, "project one derived summary input", "decision")
+	if _, err := p1.CompileSummary(context.Background(), Summary{Text: "project one summary"}, []string{p1Derived.ID}); err != nil {
+		t.Fatalf("p1 CompileSummary: %v", err)
+	}
+	p2Note, err := p2.Append(AppendNoteOptions{Text: "project two only", Kind: "reference"})
+	if err != nil {
+		t.Fatalf("p2 Append: %v", err)
+	}
+	p1Events, err := p1.ListEvents(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("p1 ListEvents: %v", err)
+	}
+	for _, event := range p1Events {
+		if event.MemoryID == p2Note.ID {
+			t.Fatalf("p1 audit leaked p2 event: %+v", event)
+		}
+	}
+	p1Markdown, err := p1.ExportMarkdown(context.Background())
+	if err != nil || strings.Contains(p1Markdown, "project two only") || !strings.Contains(p1Markdown, "project one only") {
+		t.Fatalf("p1 markdown export leaked/omitted project data: %q, %v", p1Markdown, err)
+	}
+	if err := p1.Reset(context.Background()); err != nil {
+		t.Fatalf("p1 Reset: %v", err)
+	}
+	if page, err := p1.ListRecords(context.Background(), RecordFilter{Limit: 10}); err != nil || page.Count != 0 {
+		t.Fatalf("p1 records after reset = %+v, %v", page, err)
+	}
+	if page, err := p2.ListRecords(context.Background(), RecordFilter{Limit: 10}); err != nil || page.Count != 1 || page.Items[0].ID != p2Note.ID {
+		t.Fatalf("p2 records after p1 reset = %+v, %v", page, err)
+	}
+	if events, err := p1.ListEvents(context.Background(), 100); err != nil || len(events) != 0 {
+		t.Fatalf("p1 audit after reset = %d, %v", len(events), err)
+	}
+}
+
+func TestMemoryStoreResetDoesNotReimportUnchangedLegacyNotes(t *testing.T) {
+	projectRoot := t.TempDir()
+	legacyPath := filepath.Join(projectRoot, DefaultDirName, DefaultNotesFile)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"id":"legacy-reset","text":"legacy reset note","source":"manual","created_at":"2026-01-02T03:04:05Z"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+	store, err := New(Config{ProjectRoot: projectRoot, Mode: "on"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if page, err := store.ListRecords(context.Background(), RecordFilter{Limit: 10}); err != nil || page.Count != 1 {
+		t.Fatalf("migrated records = %+v, %v", page, err)
+	}
+	if err := store.Reset(context.Background()); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := New(Config{ProjectRoot: projectRoot, Mode: "on"})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if page, err := reopened.ListRecords(context.Background(), RecordFilter{Limit: 10}); err != nil || page.Count != 0 {
+		t.Fatalf("reset legacy notes were re-imported: %+v, %v", page, err)
+	}
+}
+
 func TestMemoryStoreActivateSummaryRevision(t *testing.T) {
 	store, err := New(Config{Root: t.TempDir(), Mode: "on", InjectionMode: "summary"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer store.Close()
-	note, err := store.Append(AppendNoteOptions{Text: "activate summary input"})
-	if err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	note := seedActiveDerivedMemory(t, store, "activate summary input", "decision")
 	first, err := store.CompileSummary(context.Background(), Summary{Text: "summary one"}, []string{note.ID})
 	if err != nil {
 		t.Fatalf("CompileSummary first: %v", err)
@@ -488,6 +900,10 @@ func TestMemoryStoreActivateSummaryRevision(t *testing.T) {
 	if err != nil || previous.Status != "superseded" {
 		t.Fatalf("second summary = %+v, %v", previous, err)
 	}
+	artifact, err := os.ReadFile(filepath.Join(store.Root(), "memory_summary.md"))
+	if err != nil || !strings.Contains(string(artifact), "summary one") {
+		t.Fatalf("activation did not refresh summary artifact: %q, %v", artifact, err)
+	}
 }
 
 func TestMemoryStoreMetricsAggregatesUsageAndJobs(t *testing.T) {
@@ -505,10 +921,11 @@ func TestMemoryStoreMetricsAggregatesUsageAndJobs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordExposure: %v", err)
 	}
-	if _, err := store.CompileSummary(context.Background(), Summary{Text: "metrics summary"}, []string{note.ID}); err != nil {
+	derived := seedActiveDerivedMemory(t, store, "metrics summary input", "decision")
+	if _, err := store.CompileSummary(context.Background(), Summary{Text: "metrics summary"}, []string{derived.ID}); err != nil {
 		t.Fatalf("CompileSummary: %v", err)
 	}
-	if _, err := store.UpdateRecord(context.Background(), note.ID, RecordPatch{Text: stringPtr("metrics input changed")}); err != nil {
+	if _, err := store.UpdateRecord(context.Background(), derived.ID, RecordPatch{Text: stringPtr("metrics input changed")}); err != nil {
 		t.Fatalf("trigger summary rebuild: %v", err)
 	}
 	metrics, err := store.Metrics(context.Background())

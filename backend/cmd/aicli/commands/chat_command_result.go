@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -832,6 +833,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 					limit = n
 				}
 			}
+			if limit > 200 {
+				limit = 200
+			}
 			notes, err := store.List(limit)
 			if err != nil {
 				return CommandResult{}, false, nil
@@ -866,6 +870,19 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Blocks: []RenderBlock{{Document: buildChatMemoryRecordDocument(record)}},
 				Action: CommandContinue,
 			}, true, nil
+		case "revalidate":
+			id := strings.TrimSpace(firstToken(rest))
+			if id == "" || store.Mode() == "off" {
+				return CommandResult{}, false, nil
+			}
+			record, err := store.RevalidateRecord(context.Background(), id)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryRecordDocument(record)}},
+				Action: CommandContinue,
+			}, true, nil
 		case "why":
 			id := strings.TrimSpace(firstToken(rest))
 			if id == "" || store.Mode() == "off" {
@@ -887,6 +904,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			selection, err := store.SelectForInjectV2(memorystore.InjectOptions{
 				Query: query, Limit: 8, TokenBudget: 600, SessionID: chatSessionID(session),
+				SkipTrace: true,
 			})
 			if err != nil {
 				return CommandResult{}, false, nil
@@ -910,7 +928,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}, true, nil
 		case "forget":
 			id := strings.TrimSpace(firstToken(rest))
-			if store.Mode() == "off" || id == "" || !strings.Contains(strings.ToLower(rest), "--yes") {
+			if store.Mode() == "off" || id == "" || !hasExactCommandFlag(rest, "--yes") {
 				return CommandResult{}, false, nil
 			}
 			if err := store.DeleteRecord(context.Background(), id); err != nil {
@@ -988,8 +1006,11 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}, true, nil
 		case "export":
 			target := strings.TrimSpace(rest)
-			if store.Mode() == "off" || target == "" {
+			if store.Mode() == "off" {
 				return CommandResult{}, false, nil
+			}
+			if target == "" {
+				target = filepath.Join(store.Root(), "memory-export.jsonl")
 			}
 			body, err := store.ExportJSONL(context.Background())
 			if err != nil {
@@ -1003,7 +1024,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Action: CommandContinue,
 			}, true, nil
 		case "reset":
-			if store.Mode() == "off" || !strings.Contains(strings.ToLower(rest), "--yes") {
+			if store.Mode() == "off" || !hasExactCommandFlag(rest, "--yes") {
 				return CommandResult{}, false, nil
 			}
 			if err := store.Reset(context.Background()); err != nil {
@@ -1011,6 +1032,29 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			return CommandResult{
 				Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan("提示: 已重置项目记忆（需重新授权）"))}},
+				Action: CommandContinue,
+			}, true, nil
+		case "mode":
+			modeArg := strings.ToLower(strings.TrimSpace(firstToken(rest)))
+			if modeArg == "" || modeArg == "status" {
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: textLinesDocument([]string{
+						fmt.Sprintf("memory.mode=%s", store.Mode()),
+						fmt.Sprintf("injection.mode=%s db=%s", store.InjectionMode(), store.DBPath()),
+						"提示: /memory mode off|shadow|on 写入 runtime.yaml",
+					})}},
+					Action: CommandContinue,
+				}, true, nil
+			}
+			target, changed, err := setChatMemoryMode(session, modeArg)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{
+					fmt.Sprintf("提示: memory.mode=%s 已写入 %s（changed=%d）", modeArg, target, changed),
+					"配置在下一次加载/会话启动生效；off 不会删除已有记忆。",
+				})}},
 				Action: CommandContinue,
 			}, true, nil
 		default:
@@ -1066,6 +1110,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 
 	return CommandResult{}, false, nil
+}
+
+func hasExactCommandFlag(args, flag string) bool {
+	for _, token := range strings.Fields(args) {
+		if strings.EqualFold(token, flag) {
+			return true
+		}
+	}
+	return false
 }
 
 // tryExecuteStructuredDebugCommand retains finite diagnostics, debug toggles,

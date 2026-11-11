@@ -120,6 +120,18 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "list", Summary: "列出最近笔记", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
 			{Command: "search", Summary: "关键词搜索", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
 			{Command: "flush", Summary: "add 的别名", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "show", Summary: "按 id 查看记忆详情", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "why", Summary: "解释来源与使用", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "why-not", Summary: "解释召回过滤与预算", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "stale", Summary: "查看 stale/unverified 记录", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "revalidate", Summary: "重新校验记录", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "correct", Summary: "更正记忆", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "forget", Summary: "遗忘记忆", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "export", Summary: "导出 JSONL", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "jobs", Summary: "查看后台任务", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "consolidate", Summary: "运行 Consolidation", Group: string(chatSlashCommandGroupContext)},
+			{Command: "reset", Summary: "重置项目记忆", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "mode", Summary: "查看/写入 memory.mode", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
 		})
 	case "/permission-mode":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{

@@ -103,8 +103,10 @@ func ShouldRegisterMemoryTools(runtimeConfig *runtimecfg.RuntimeConfig) bool {
 	if runtimeConfig == nil || !runtimeConfig.Memory.Tools.Enabled {
 		return false
 	}
+	// shadow 只生成/记录数据，不进入 prompt，也不向模型暴露 v2 记忆工具。
+	// 只有 on 才允许工具面出现；tools.enabled 仍是第二道显式开关。
 	mode := strings.ToLower(strings.TrimSpace(runtimeConfig.Memory.Mode))
-	return mode == "shadow" || mode == "on"
+	return mode == "on"
 }
 
 func ShouldRegisterMemoryForgetTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
@@ -113,6 +115,10 @@ func ShouldRegisterMemoryForgetTool(runtimeConfig *runtimecfg.RuntimeConfig) boo
 
 func ShouldRegisterMemoryCorrectTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
 	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Tools.AllowCorrect
+}
+
+func ShouldRegisterMemoryAddTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Manual.Enabled
 }
 
 // builtinToolkitRegistrations is the process-wide construction table. It is
@@ -158,7 +164,7 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 	{Canonical: "memory_session_context", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemorySessionContextTool(cfg) }},
 	{Canonical: "memory_recent", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryRecentTool(cfg) }},
 	{Canonical: "memory_stats", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryStatsTool(cfg) }},
-	{Canonical: "memory_add", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryAddTool(cfg) }},
+	{Canonical: "memory_add", Condition: ShouldRegisterMemoryAddTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryAddTool(cfg) }},
 	{Canonical: "memory_correct", Condition: ShouldRegisterMemoryCorrectTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryCorrectTool(cfg) }},
 	{Canonical: "memory_forget", Condition: ShouldRegisterMemoryForgetTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryForgetTool(cfg) }},
 	{Canonical: "memory_why", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryWhyTool(cfg) }},

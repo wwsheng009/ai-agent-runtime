@@ -59,11 +59,13 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 	memoryCfg := h.runtimeConfig.Memory
 	store, err := memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:     memoryCfg.Injection.Mode,
-		PinnedBudgetRatio: memoryCfg.Injection.PinnedBudgetRatio,
-		DisableStageSplit: !memoryCfg.Injection.StageSplit,
-		DisableInjection:  !memoryCfg.Injection.Enabled,
-		DisableManual:     !memoryCfg.Manual.Enabled,
+		InjectionMode:         memoryCfg.Injection.Mode,
+		PinnedBudgetRatio:     memoryCfg.Injection.PinnedBudgetRatio,
+		DisableStageSplit:     !memoryCfg.Injection.StageSplit,
+		DisableInjection:      !memoryCfg.Injection.Enabled,
+		DisableManual:         !memoryCfg.Manual.Enabled,
+		RecallTraceEnabled:    memoryCfg.Injection.RecallTrace.Enabled,
+		RecallTraceSampleRate: memoryCfg.Injection.RecallTrace.SampleRate,
 	})
 	if err != nil {
 		return nil, err

@@ -95,6 +95,13 @@ func (s *Store) ClaimJobs(ctx context.Context, opts ClaimJobOptions) ([]MemoryJo
 	if limit <= 0 {
 		limit = 1
 	}
+	if limit > 100 {
+		limit = 100
+	}
+	projectKey := strings.TrimSpace(opts.ProjectKey)
+	if projectKey == "" {
+		projectKey = s.cfg.ProjectKey
+	}
 	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: begin claim jobs: %w", err)
@@ -103,12 +110,13 @@ func (s *Store) ClaimJobs(ctx context.Context, opts ClaimJobOptions) ([]MemoryJo
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
 SET status = 'pending', worker_id = NULL, lease_until = NULL, updated_at = ?
-WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until != '' AND lease_until <= ?
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+WHERE project_key = ? AND status = 'running'
+  AND lease_until IS NOT NULL AND lease_until != '' AND lease_until <= ?
+`, now.Format(time.RFC3339Nano), projectKey, now.Format(time.RFC3339Nano)); err != nil {
 		return nil, fmt.Errorf("memorystore: reclaim expired jobs: %w", err)
 	}
-	args := []interface{}{string(JobStatusPending), now.Format(time.RFC3339Nano)}
-	where := []string{"status = ?", "(retry_at IS NULL OR retry_at = '' OR retry_at <= ?)"}
+	args := []interface{}{string(JobStatusPending), now.Format(time.RFC3339Nano), projectKey}
+	where := []string{"status = ?", "(retry_at IS NULL OR retry_at = '' OR retry_at <= ?)", "project_key = ?"}
 	if strings.TrimSpace(opts.Kind) != "" {
 		where = append(where, "kind = ?")
 		args = append(args, strings.TrimSpace(opts.Kind))
@@ -185,6 +193,30 @@ WHERE id = ?
 	return err
 }
 
+// CompleteJobForWorker only lets the worker that currently owns the running
+// lease complete it. A stale worker that lost its lease gets a conflict.
+func (s *Store) CompleteJobForWorker(ctx context.Context, id, workerID, watermark string) error {
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	res, err := db.ExecContext(ctx, `
+UPDATE memory_jobs SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
+    finished_at = ?, last_success_watermark = ?, updated_at = ?
+WHERE id = ? AND status = 'running' AND worker_id = ?
+`, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano),
+		id, strings.TrimSpace(workerID))
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("memorystore: job %s is no longer owned by worker %s", id, workerID)
+	}
+	return nil
+}
+
 func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Time) error {
 	db, err := s.ensureV2()
 	if err != nil {
@@ -209,6 +241,37 @@ WHERE id = ?
 `, string(status), nullableTime(retryAt), finishedAt, nullableString(errText),
 		now.Format(time.RFC3339Nano), id)
 	return err
+}
+
+// FailJobForWorker is the lease-owner-safe retry path. If the lease expired
+// and another worker claimed the job, the stale worker's failure is rejected
+// instead of overwriting the new owner's state.
+func (s *Store) FailJobForWorker(ctx context.Context, id, workerID, errText string, retryAt time.Time) error {
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	res, err := db.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'pending' END,
+    worker_id = NULL,
+    lease_until = NULL,
+    retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE ? END,
+    finished_at = CASE WHEN attempt >= max_attempts THEN ? ELSE NULL END,
+    last_error = ?,
+    updated_at = ?
+WHERE id = ? AND status = 'running' AND worker_id = ?
+`, nullableTime(retryAt), now.Format(time.RFC3339Nano), nullableString(errText),
+		now.Format(time.RFC3339Nano), id, strings.TrimSpace(workerID))
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("memorystore: job %s is no longer owned by worker %s", id, workerID)
+	}
+	return nil
 }
 
 // InsertCandidate writes one session-extracted candidate plus source/event
@@ -241,6 +304,7 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		NormalizedText:   normalizeMemoryText(text),
 		Tags:             normalizeTags(candidate.Tags),
 		Confidence:       candidate.Confidence,
+		Sensitivity:      normalizeSensitivity(firstNonEmpty(candidate.Sensitivity, "internal")),
 		Pinned:           false,
 		RetentionClass:   firstNonEmpty(candidate.RetentionClass, "standard"),
 		SourceKind:       "session_extract",
@@ -278,6 +342,115 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 	return s.GetRecord(ctx, record.ID)
 }
 
+// PromoteCandidate promotes a fresh candidate to active after consolidation.
+// It is deliberately separate from the manual UpdateRecord path so audit
+// events retain actor=consolidation instead of being mislabeled as user edits.
+func (s *Store) PromoteCandidate(ctx context.Context, id string) (Record, error) {
+	record, err := s.GetRecord(ctx, id)
+	if err != nil {
+		return Record{}, err
+	}
+	if record.Status != StatusCandidate {
+		return Record{}, fmt.Errorf("memorystore: record %s is not a candidate", id)
+	}
+	if record.Freshness != FreshnessFresh || !record.DeletedAt.IsZero() {
+		return Record{}, fmt.Errorf("memorystore: record %s is not fresh and cannot be promoted", id)
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return Record{}, err
+	}
+	now := time.Now().UTC()
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return Record{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET status = 'active', revision = revision + 1, updated_at = ?
+WHERE id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
+`, now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
+	if err != nil {
+		return Record{}, err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return Record{}, fmt.Errorf("memorystore: candidate %s changed concurrently", record.ID)
+	}
+	if err := insertEventTx(ctx, tx, record.ID, "promoted", "consolidation", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+		"reason": "phase2_consolidation",
+	}); err != nil {
+		return Record{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Record{}, err
+	}
+	return s.GetRecord(ctx, id)
+}
+
+// SupersedeRecord resolves one lower-priority conflict. The losing record is
+// retained as a superseded revision and the winning record gets the
+// supersedes_id chain link when it does not already point at an older claim.
+func (s *Store) SupersedeRecord(ctx context.Context, id, supersededBy, reason string) (Record, error) {
+	id = strings.TrimSpace(id)
+	supersededBy = strings.TrimSpace(supersededBy)
+	if id == "" || supersededBy == "" || id == supersededBy {
+		return Record{}, fmt.Errorf("memorystore: loser and winner ids are required and must differ")
+	}
+	loser, err := s.GetRecord(ctx, id)
+	if err != nil {
+		return Record{}, err
+	}
+	winner, err := s.GetRecord(ctx, supersededBy)
+	if err != nil {
+		return Record{}, err
+	}
+	if loser.Status != StatusActive || winner.Status != StatusActive {
+		return Record{}, fmt.Errorf("memorystore: supersede requires two active records")
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return Record{}, err
+	}
+	now := time.Now().UTC()
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return Record{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET status = 'superseded', revision = revision + 1, updated_at = ?
+WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
+`, now.Format(time.RFC3339Nano), loser.ID, s.cfg.ProjectKey, loser.Revision)
+	if err != nil {
+		return Record{}, err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", loser.ID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET supersedes_id = ?
+WHERE id = ? AND project_key = ?
+  AND (supersedes_id IS NULL OR supersedes_id = '')
+`, loser.ID, winner.ID, s.cfg.ProjectKey); err != nil {
+		return Record{}, err
+	}
+	if err := insertEventTx(ctx, tx, loser.ID, "superseded", "consolidation", loser.SourceSessionID, loser.Revision+1, map[string]interface{}{
+		"reason": strings.TrimSpace(reason), "superseded_by": winner.ID,
+	}); err != nil {
+		return Record{}, err
+	}
+	if err := s.markSummariesStaleForRecordTx(ctx, tx, loser.ID, "record_superseded"); err != nil {
+		return Record{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Record{}, err
+	}
+	return s.GetRecord(ctx, id)
+}
+
 // reviveCandidate treats a repeated extraction of the same content from the
 // same session as a revalidation. Without this, the content-hash unique index
 // would keep the old candidate stale forever after a source/hash change.
@@ -304,14 +477,19 @@ LIMIT 1
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET freshness_status = 'fresh', stale_reason = NULL, last_verified_at = ?,
-    revalidate_after = ?, updated_at = ?, revision = revision + 1
-WHERE id = ?
+    revalidate_after = ?, updated_at = ?, revision = revision + 1,
+    confidence = CASE WHEN confidence < ? THEN ? ELSE confidence END
+WHERE id = ? AND revision = ?
 `, now.Format(time.RFC3339Nano), nullableTime(record.RevalidateAfter),
-		now.Format(time.RFC3339Nano), existingID); err != nil {
+		now.Format(time.RFC3339Nano), record.Confidence, record.Confidence, existingID, existingRevision)
+	if err != nil {
 		return Record{}, false, err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return Record{}, false, fmt.Errorf("memorystore: record %s changed concurrently", existingID)
 	}
 	record.ID = existingID
 	record.Revision = existingRevision + 1
@@ -321,6 +499,9 @@ WHERE id = ?
 	if err := insertEventTx(ctx, tx, existingID, "revalidated", "agent", record.SourceSessionID, record.Revision, map[string]interface{}{
 		"reason": "same_session_reextract",
 	}); err != nil {
+		return Record{}, false, err
+	}
+	if err := s.markSummariesStaleForRecordTx(ctx, tx, existingID, "candidate_revalidated"); err != nil {
 		return Record{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -346,7 +527,7 @@ func (s *Store) MarkSessionSourceChanged(ctx context.Context, sessionID, project
 		projectKey = s.cfg.ProjectKey
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT DISTINCT e.id
+SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
 JOIN memory_sources src ON src.memory_id = e.id
 WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'session_extract'
@@ -359,17 +540,21 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'session
 	if err != nil {
 		return 0, err
 	}
-	var ids []string
+	type staleRecord struct {
+		id       string
+		revision int64
+	}
+	var stale []staleRecord
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var item staleRecord
+		if err := rows.Scan(&item.id, &item.revision); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
-		ids = append(ids, id)
+		stale = append(stale, item)
 	}
 	_ = rows.Close()
-	if len(ids) == 0 {
+	if len(stale) == 0 {
 		return 0, nil
 	}
 	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
@@ -378,23 +563,30 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'session
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `
+	for _, item := range stale {
+		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = 'source_changed',
-    updated_at = ? WHERE id = ?
-`, now.Format(time.RFC3339Nano), id); err != nil {
+    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
+`, now.Format(time.RFC3339Nano), item.id, item.revision)
+		if err != nil {
 			return 0, err
 		}
-		if err := insertEventTx(ctx, tx, id, "stale_marked", "system", sessionID, 0, map[string]interface{}{
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			continue
+		}
+		if err := insertEventTx(ctx, tx, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
 			"reason": "source_changed",
 		}); err != nil {
+			return 0, err
+		}
+		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, "source_changed"); err != nil {
 			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return len(ids), nil
+	return len(stale), nil
 }
 
 type jobRows interface {
@@ -440,6 +632,9 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]MemoryJob, error) {
 	}
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT id, kind, job_key, scope, project_key, status, priority, COALESCE(worker_id, ''),

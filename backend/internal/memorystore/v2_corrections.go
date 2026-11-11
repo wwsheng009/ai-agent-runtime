@@ -38,7 +38,7 @@ func (s *Store) CorrectRecord(ctx context.Context, id, text string) (Record, err
 		ID: "mem_" + uuid.NewString(), Scope: old.Scope, ProjectKey: old.ProjectKey,
 		Kind: "correction", Status: StatusActive, Text: text,
 		NormalizedText: normalizeMemoryText(text), Tags: append([]string(nil), old.Tags...),
-		Confidence: 1.0, Pinned: old.Pinned, RetentionClass: old.RetentionClass,
+		Confidence: 1.0, Sensitivity: old.Sensitivity, Pinned: old.Pinned, RetentionClass: old.RetentionClass,
 		SourceKind: "manual", SourceSessionID: old.SourceSessionID,
 		SourceRefs:   []string{"correction:" + old.ID},
 		ContentHash:  memoryContentHash(string(old.Scope), old.ProjectKey, "correction", text),
@@ -53,10 +53,15 @@ func (s *Store) CorrectRecord(ctx context.Context, id, text string) (Record, err
 	if err := s.insertRecordSQLTx(ctx, tx, record, "user", old.SourceSessionID); err != nil {
 		return Record{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE memory_entries SET status = 'superseded', updated_at = ? WHERE id = ? AND project_key = ?
-`, now.Format(time.RFC3339Nano), old.ID, s.cfg.ProjectKey); err != nil {
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_entries SET status = 'superseded', updated_at = ?
+WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
+`, now.Format(time.RFC3339Nano), old.ID, s.cfg.ProjectKey, old.Revision)
+	if err != nil {
 		return Record{}, err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", old.ID)
 	}
 	if err := insertEventTx(ctx, tx, old.ID, "superseded", "user", old.SourceSessionID, old.Revision, map[string]interface{}{
 		"reason": "corrected", "superseded_by": record.ID,

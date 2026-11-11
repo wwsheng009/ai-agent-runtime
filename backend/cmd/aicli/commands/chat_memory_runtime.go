@@ -31,11 +31,13 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 	memoryCfg := h.RuntimeConfig.Memory
 	store, err := memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:     memoryCfg.Injection.Mode,
-		PinnedBudgetRatio: memoryCfg.Injection.PinnedBudgetRatio,
-		DisableStageSplit: !memoryCfg.Injection.StageSplit,
-		DisableInjection:  !memoryCfg.Injection.Enabled,
-		DisableManual:     !memoryCfg.Manual.Enabled,
+		InjectionMode:         memoryCfg.Injection.Mode,
+		PinnedBudgetRatio:     memoryCfg.Injection.PinnedBudgetRatio,
+		DisableStageSplit:     !memoryCfg.Injection.StageSplit,
+		DisableInjection:      !memoryCfg.Injection.Enabled,
+		DisableManual:         !memoryCfg.Manual.Enabled,
+		RecallTraceEnabled:    memoryCfg.Injection.RecallTrace.Enabled,
+		RecallTraceSampleRate: memoryCfg.Injection.RecallTrace.SampleRate,
 	})
 	if err != nil {
 		return err

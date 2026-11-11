@@ -40,6 +40,16 @@ func (s *Store) migrateNotesV2(ctx context.Context, db *sql.DB) (migrationStats,
 		sourceSize = info.Size()
 		sourceMTime = info.ModTime().UTC().Format(time.RFC3339Nano)
 	}
+	var priorSucceeded int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM memory_migration_runs
+WHERE source_path = ? AND source_size = ? AND source_mtime = ? AND status = 'succeeded'
+`, s.path, sourceSize, sourceMTime).Scan(&priorSucceeded); err == nil && priorSucceeded > 0 {
+		// The source file is unchanged and already migrated. This also keeps a
+		// project reset from being undone by re-importing legacy notes on the
+		// next store open (notes.jsonl itself is intentionally preserved).
+		return stats, nil
+	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO memory_migration_runs (
     id, source_path, source_size, source_mtime, status, started_at
@@ -106,22 +116,39 @@ INSERT INTO memory_migration_runs (
 			},
 		}
 		if err := s.insertRecordTx(ctx, db, record, "system", note.SessionID); err != nil {
-			if isDuplicateMemoryError(err) || isSuppressedMemoryError(err) {
+			if isSuppressedMemoryError(err) {
 				stats.Skipped++
 				continue
 			}
-			// A legacy id collision with different content is recoverable: retry
-			// with a new id and keep the original in metadata.
-			record.ID = "mem_" + uuid.NewString()
-			record.Metadata["legacy_id"] = id
-			record.SourceRefs = []string{"manual:" + record.ID}
-			if retryErr := s.insertRecordTx(ctx, db, record, "system", note.SessionID); retryErr != nil {
-				if isDuplicateMemoryError(retryErr) || isSuppressedMemoryError(retryErr) {
+			if isSecretMemoryError(err) {
+				stats.Corrupt++
+				continue
+			}
+			if isDuplicateMemoryError(err) {
+				existingHash, exists, lookupErr := lookupMemoryContentHash(ctx, db, record.ID, s.cfg.ProjectKey)
+				if lookupErr != nil {
+					return stats, lookupErr
+				}
+				if !exists || existingHash == record.ContentHash {
 					stats.Skipped++
 					continue
 				}
-				return stats, retryErr
+				// A legacy id collision with different content is recoverable:
+				// retry with a new id and keep the original in metadata.
+				record.ID = "mem_" + uuid.NewString()
+				record.Metadata["legacy_id"] = id
+				record.SourceRefs = []string{"manual:" + record.ID}
+				if retryErr := s.insertRecordTx(ctx, db, record, "system", note.SessionID); retryErr != nil {
+					if isDuplicateMemoryError(retryErr) || isSuppressedMemoryError(retryErr) {
+						stats.Skipped++
+						continue
+					}
+					return stats, retryErr
+				}
+				stats.Imported++
+				continue
 			}
+			return stats, err
 		}
 		stats.Imported++
 	}
@@ -147,6 +174,24 @@ func isDuplicateMemoryError(err error) bool {
 
 func isSuppressedMemoryError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "content is suppressed")
+}
+
+func isSecretMemoryError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "secret-shaped content")
+}
+
+func lookupMemoryContentHash(ctx context.Context, db *sql.DB, id, projectKey string) (string, bool, error) {
+	var hash string
+	err := db.QueryRowContext(ctx, `
+SELECT content_hash FROM memory_entries WHERE id = ? AND project_key = ?
+`, id, projectKey).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return hash, true, nil
 }
 
 func ensureMemoryParent(path string) error {

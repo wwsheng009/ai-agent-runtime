@@ -24,6 +24,9 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, "notes", cfg.Memory.Injection.Mode)
 	require.Equal(t, 0.20, cfg.Memory.Injection.PinnedBudgetRatio)
 	require.True(t, cfg.Memory.Injection.StageSplit)
+	require.False(t, cfg.Memory.Injection.RecallTrace.Enabled)
+	require.Equal(t, 0.01, cfg.Memory.Injection.RecallTrace.SampleRate)
+	require.Equal(t, 14, cfg.Memory.Injection.RecallTrace.RetentionDays)
 	require.True(t, cfg.Memory.Feedback.CitationEnabled)
 	require.Equal(t, 1.0, cfg.Memory.Feedback.ExposureSampling)
 	require.Equal(t, 30, cfg.Memory.Feedback.ExposureRetentionDays)
@@ -56,6 +59,9 @@ func TestMemoryConfigValidation(t *testing.T) {
 		{"negative token budget", func(c *MemoryConfig) { c.Injection.TokenBudget = -1 }, false},
 		{"ratio too high", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = 1.1 }, false},
 		{"ratio negative", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = -0.1 }, false},
+		{"recall trace sampling too high", func(c *MemoryConfig) { c.Injection.RecallTrace.SampleRate = 1.1 }, false},
+		{"recall trace sampling negative", func(c *MemoryConfig) { c.Injection.RecallTrace.SampleRate = -0.1 }, false},
+		{"negative recall trace retention", func(c *MemoryConfig) { c.Injection.RecallTrace.RetentionDays = -1 }, false},
 		{"sampling too high", func(c *MemoryConfig) { c.Feedback.ExposureSampling = 1.1 }, false},
 		{"sampling negative", func(c *MemoryConfig) { c.Feedback.ExposureSampling = -0.1 }, false},
 		{"negative exposure retention", func(c *MemoryConfig) { c.Feedback.ExposureRetentionDays = -1 }, false},

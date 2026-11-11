@@ -42,6 +42,7 @@ type Config struct {
 	ConsolidationInterval      time.Duration
 	MaxConsolidationRecords    int
 	MaxConsolidationUnusedDays int
+	MinCandidateConfidence     float64
 	SummaryTokenBudget         int
 	CitationEnabled            bool
 	ExposureSampling           float64
@@ -85,6 +86,9 @@ func (c Config) normalized() Config {
 	}
 	if c.MaxConsolidationUnusedDays <= 0 {
 		c.MaxConsolidationUnusedDays = 30
+	}
+	if c.MinCandidateConfidence <= 0 {
+		c.MinCandidateConfidence = 0.7
 	}
 	if c.SummaryTokenBudget <= 0 {
 		c.SummaryTokenBudget = 800

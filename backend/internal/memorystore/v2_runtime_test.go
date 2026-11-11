@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,8 +58,11 @@ func TestMemoryJobClaimLeaseAndComplete(t *testing.T) {
 	if err != nil || len(claimed) != 1 || claimed[0].Attempt != 2 {
 		t.Fatalf("lease takeover = %+v, %v", claimed, err)
 	}
-	if err := store.CompleteJob(context.Background(), claimed[0].ID, "hash-a"); err != nil {
-		t.Fatalf("CompleteJob: %v", err)
+	if err := store.CompleteJobForWorker(context.Background(), claimed[0].ID, "w1", "stale"); err == nil {
+		t.Fatal("stale worker must not complete a reclaimed job")
+	}
+	if err := store.CompleteJobForWorker(context.Background(), claimed[0].ID, "w2", "hash-a"); err != nil {
+		t.Fatalf("CompleteJobForWorker: %v", err)
 	}
 	job, err = store.getJobByKey(context.Background(), "phase1_extract", ScopeProject, store.ProjectKey(), "session:s1:hash-a")
 	if err != nil || job.Status != JobStatusSucceeded || job.LastSuccessWatermark != "hash-a" {
@@ -101,6 +105,43 @@ func TestMemoryJobRetryExhaustion(t *testing.T) {
 	job, err = store.getJobByKey(context.Background(), "phase1_extract", ScopeProject, store.ProjectKey(), job.JobKey)
 	if err != nil || job.Status != JobStatusFailed {
 		t.Fatalf("retry exhaustion = %+v, %v", job, err)
+	}
+}
+
+func TestMemoryJobClaimIsProjectScopedAndBounded(t *testing.T) {
+	sharedDB := filepath.Join(t.TempDir(), "shared-jobs.db")
+	p1, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on"})
+	if err != nil {
+		t.Fatalf("p1 New: %v", err)
+	}
+	defer p1.Close()
+	p2, err := New(Config{ProjectRoot: t.TempDir(), StorePath: sharedDB, Mode: "on"})
+	if err != nil {
+		t.Fatalf("p2 New: %v", err)
+	}
+	defer p2.Close()
+	if _, err := p1.EnsureJob(context.Background(), MemoryJob{Kind: "phase1_extract", JobKey: "p1-job"}); err != nil {
+		t.Fatalf("p1 EnsureJob: %v", err)
+	}
+	if _, err := p2.EnsureJob(context.Background(), MemoryJob{Kind: "phase1_extract", JobKey: "p2-job"}); err != nil {
+		t.Fatalf("p2 EnsureJob: %v", err)
+	}
+	claimed, err := p1.ClaimJobs(context.Background(), ClaimJobOptions{
+		WorkerID: "p1-worker", Limit: 1_000_000, Now: time.Now().UTC(),
+	})
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("p1 ClaimJobs = %+v, %v", claimed, err)
+	}
+	if claimed[0].ProjectKey != p1.ProjectKey() || claimed[0].JobKey != "p1-job" {
+		t.Fatalf("p1 claimed foreign job: %+v", claimed[0])
+	}
+	p2Job, err := p2.getJobByKey(context.Background(), "phase1_extract", ScopeProject, p2.ProjectKey(), "p2-job")
+	if err != nil || p2Job.Status != JobStatusPending || p2Job.WorkerID != "" {
+		t.Fatalf("p2 job was touched: %+v, %v", p2Job, err)
+	}
+	jobs, err := p2.ListJobs(context.Background(), 1_000_000)
+	if err != nil || len(jobs) != 1 || jobs[0].JobKey != "p2-job" {
+		t.Fatalf("p2 ListJobs = %+v, %v", jobs, err)
 	}
 }
 

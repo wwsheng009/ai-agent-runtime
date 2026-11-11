@@ -1291,6 +1291,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/freshness/sweep", h.SweepMemoryFreshness).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/audit", h.ListMemoryAudit).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/export", h.ExportMemory).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/import", h.ImportMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/reset", h.ResetMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
@@ -12710,8 +12711,16 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 		options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(config.Memory.Injection.Mode))
 		options["memory_pinned_budget_ratio"] = config.Memory.Injection.PinnedBudgetRatio
 		options["memory_stage_split"] = config.Memory.Injection.StageSplit
+		if config.Memory.Injection.MaxItems > 0 {
+			options["context_max_project_memory"] = config.Memory.Injection.MaxItems
+		}
+		if config.Memory.Injection.TokenBudget > 0 {
+			options["context_project_memory_tokens"] = config.Memory.Injection.TokenBudget
+		}
 		options["memory_citation_enabled"] = config.Memory.Feedback.CitationEnabled
 		options["memory_exposure_sampling"] = config.Memory.Feedback.ExposureSampling
+		options["memory_recall_trace_enabled"] = config.Memory.Injection.RecallTrace.Enabled
+		options["memory_recall_trace_sample_rate"] = config.Memory.Injection.RecallTrace.SampleRate
 	}
 	ctxCfg := config.Context
 	if strings.TrimSpace(ctxCfg.Profile) != "" {

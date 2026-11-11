@@ -48,41 +48,42 @@ const (
 )
 
 type Record struct {
-	ID               string
-	Scope            Scope
-	ProjectKey       string
-	Kind             string
-	Status           Status
-	Text             string
-	NormalizedText   string
-	Tags             []string
-	Confidence       float64
-	Pinned           bool
-	RetentionClass   string
-	SourceKind       string
-	SourceSessionID  string
-	SourceTurnID     string
-	SourceRefs       []string
-	SourceHash       string
-	SourceRevision   int64
-	SourceUpdatedAt  time.Time
-	SourceObservedAt time.Time
-	SourceMessageIDs []string
-	ContentHash      string
-	SupersedesID     string
-	Revision         int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	LastUsedAt       time.Time
-	UseCount         int
-	ValidFrom        time.Time
-	ValidUntil       time.Time
-	Freshness        Freshness
-	LastVerifiedAt   time.Time
-	RevalidateAfter  time.Time
-	StaleReason      string
-	DeletedAt        time.Time
-	Metadata         map[string]interface{}
+	ID               string                 `json:"id"`
+	Scope            Scope                  `json:"scope"`
+	ProjectKey       string                 `json:"project_key"`
+	Kind             string                 `json:"kind"`
+	Status           Status                 `json:"status"`
+	Text             string                 `json:"text"`
+	NormalizedText   string                 `json:"normalized_text,omitempty"`
+	Tags             []string               `json:"tags,omitempty"`
+	Confidence       float64                `json:"confidence,omitempty"`
+	Sensitivity      string                 `json:"sensitivity,omitempty"`
+	Pinned           bool                   `json:"pinned"`
+	RetentionClass   string                 `json:"retention_class,omitempty"`
+	SourceKind       string                 `json:"source_kind,omitempty"`
+	SourceSessionID  string                 `json:"source_session_id,omitempty"`
+	SourceTurnID     string                 `json:"source_turn_id,omitempty"`
+	SourceRefs       []string               `json:"source_refs,omitempty"`
+	SourceHash       string                 `json:"source_hash,omitempty"`
+	SourceRevision   int64                  `json:"source_revision,omitempty"`
+	SourceUpdatedAt  time.Time              `json:"source_updated_at,omitempty"`
+	SourceObservedAt time.Time              `json:"source_observed_at,omitempty"`
+	SourceMessageIDs []string               `json:"source_message_ids,omitempty"`
+	ContentHash      string                 `json:"content_hash,omitempty"`
+	SupersedesID     string                 `json:"supersedes_id,omitempty"`
+	Revision         int64                  `json:"revision"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
+	LastUsedAt       time.Time              `json:"last_used_at,omitempty"`
+	UseCount         int                    `json:"use_count,omitempty"`
+	ValidFrom        time.Time              `json:"valid_from,omitempty"`
+	ValidUntil       time.Time              `json:"valid_until,omitempty"`
+	Freshness        Freshness              `json:"freshness_status"`
+	LastVerifiedAt   time.Time              `json:"last_verified_at,omitempty"`
+	RevalidateAfter  time.Time              `json:"revalidate_after,omitempty"`
+	StaleReason      string                 `json:"stale_reason,omitempty"`
+	DeletedAt        time.Time              `json:"deleted_at,omitempty"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type Summary struct {
@@ -142,12 +143,13 @@ type MemoryJob struct {
 }
 
 type ClaimJobOptions struct {
-	WorkerID string
-	Kind     string
-	JobKey   string
-	Lease    time.Duration
-	Limit    int
-	Now      time.Time
+	WorkerID   string
+	Kind       string
+	JobKey     string
+	ProjectKey string
+	Lease      time.Duration
+	Limit      int
+	Now        time.Time
 }
 
 type Candidate struct {
@@ -170,13 +172,15 @@ type Candidate struct {
 }
 
 type Selection struct {
-	Summary       *Summary
-	Stable        []Record
-	Recall        []Record
-	Revision      int64
-	TokenEstimate int
-	IDs           []string
-	Dropped       []DroppedRecord
+	Summary        *Summary
+	Stable         []Record
+	Recall         []Record
+	Revision       int64
+	TokenEstimate  int
+	IDs            []string
+	Dropped        []DroppedRecord
+	CandidateCount int
+	FilteredCount  int
 }
 
 type RecordFilter struct {
@@ -206,21 +210,21 @@ type RecordPatch struct {
 }
 
 type StatusReport struct {
-	Mode             string
-	Scope            string
-	DBPath           string
-	SchemaVersion    int
-	Total            int
-	ByStatus         map[string]int
-	ByFreshness      map[string]int
-	SummaryRevision  int64
-	SummaryStatus    string
-	SummaryFreshness string
-	PinnedCount      int
-	InjectionMode    string
-	Jobs             map[string]int
-	Fallback         bool
-	FallbackReason   string
+	Mode             string         `json:"mode"`
+	Scope            string         `json:"scope"`
+	DBPath           string         `json:"db_path,omitempty"`
+	SchemaVersion    int            `json:"schema_version"`
+	Total            int            `json:"total"`
+	ByStatus         map[string]int `json:"by_status,omitempty"`
+	ByFreshness      map[string]int `json:"by_freshness,omitempty"`
+	SummaryRevision  int64          `json:"summary_revision,omitempty"`
+	SummaryStatus    string         `json:"summary_status,omitempty"`
+	SummaryFreshness string         `json:"summary_freshness,omitempty"`
+	PinnedCount      int            `json:"pinned_count,omitempty"`
+	InjectionMode    string         `json:"injection_mode,omitempty"`
+	Jobs             map[string]int `json:"jobs,omitempty"`
+	Fallback         bool           `json:"fallback"`
+	FallbackReason   string         `json:"fallback_reason,omitempty"`
 }
 
 type RecallTrace struct {

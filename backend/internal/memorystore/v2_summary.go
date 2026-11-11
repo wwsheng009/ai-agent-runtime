@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
@@ -34,15 +35,30 @@ func (s *Store) CompileSummary(ctx context.Context, summary Summary, itemIDs []s
 	for _, id := range itemIDs {
 		var (
 			status, freshness, contentHash string
+			sensitivity                    string
+			validUntil, deletedAt          string
 			revision                       int64
+			pinned                         int
+			sourceKind                     string
 		)
 		if err := db.QueryRowContext(ctx, `
-SELECT status, freshness_status, content_hash, revision FROM memory_entries WHERE id = ?
-`, id).Scan(&status, &freshness, &contentHash, &revision); err != nil {
+SELECT status, freshness_status, content_hash, revision, pinned, source_kind, sensitivity,
+       COALESCE(valid_until, ''), COALESCE(deleted_at, '')
+FROM memory_entries WHERE id = ?
+`, id).Scan(&status, &freshness, &contentHash, &revision, &pinned, &sourceKind, &sensitivity, &validUntil, &deletedAt); err != nil {
 			return Summary{}, err
 		}
-		if status != string(StatusActive) || freshness != string(FreshnessFresh) {
+		if status != string(StatusActive) || freshness != string(FreshnessFresh) || deletedAt != "" {
 			return Summary{}, fmt.Errorf("memorystore: summary item %s is not active+fresh", id)
+		}
+		if until := parseTime(validUntil); !until.IsZero() && !until.After(time.Now().UTC()) {
+			return Summary{}, fmt.Errorf("memorystore: summary item %s is expired", id)
+		}
+		if pinned != 0 || strings.EqualFold(sourceKind, "manual") {
+			return Summary{}, fmt.Errorf("memorystore: summary item %s is pinned/manual and must be rendered separately", id)
+		}
+		if normalizeSensitivity(sensitivity) == "private" {
+			return Summary{}, fmt.Errorf("memorystore: summary item %s is private and cannot be compiled into an injectable summary", id)
 		}
 		states = append(states, summaryItemState{ID: id, Revision: revision, Hash: contentHash, Status: status, Freshness: freshness})
 	}
@@ -73,6 +89,9 @@ WHERE scope = ? AND project_key = ? AND summary_kind = ?
 	summary.InputWatermark = summaryInputWatermark(states)
 	if summary.Text = strings.TrimSpace(summary.Text); summary.Text == "" {
 		return Summary{}, fmt.Errorf("memorystore: summary text is required")
+	}
+	if rule := memoryredact.DetectSecret(summary.Text); rule != "" {
+		return Summary{}, fmt.Errorf("memorystore: refusing to store secret-shaped summary (%s)", rule)
 	}
 	if summary.TokenEstimate <= 0 {
 		summary.TokenEstimate = EstimateTokens(summary.Text)
@@ -143,6 +162,18 @@ func (s *Store) writeSummaryArtifacts(summary Summary) error {
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(s.root, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) clearSummaryArtifacts() error {
+	if s == nil {
+		return nil
+	}
+	for _, name := range []string{"memory_summary.md", "MEMORY.md"} {
+		if err := os.Remove(filepath.Join(s.root, name)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -263,6 +294,11 @@ WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
 		return false, err
 	}
 	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		if err := s.clearSummaryArtifacts(); err != nil {
+			return true, err
+		}
+	}
 	return affected > 0, nil
 }
 
@@ -300,18 +336,12 @@ ORDER BY revision DESC
 	}
 	inserted := 0
 	for _, summary := range summaries {
-		res, err := db.ExecContext(ctx, `
-INSERT OR IGNORE INTO memory_jobs (
-    id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, input_watermark, created_at, updated_at
-) VALUES (?, 'summary_rebuild', ?, ?, ?, 'pending', 0, 0, 3, ?, ?, ?)
-`, "job_"+uuid.NewString(), summary.id+":"+summary.watermark,
-			summary.scope, summary.projectKey, summary.watermark, nowText(), nowText())
+		affected, err := enqueueSummaryRebuild(ctx, db, summary.id+":"+summary.watermark,
+			summary.scope, summary.projectKey, summary.watermark)
 		if err != nil {
 			return inserted, err
 		}
-		affected, _ := res.RowsAffected()
-		inserted += int(affected)
+		inserted += affected
 	}
 	return inserted, nil
 }

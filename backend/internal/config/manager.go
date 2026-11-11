@@ -151,12 +151,19 @@ type MemoryConsolidationConfig struct {
 }
 
 type MemoryInjectionConfig struct {
-	Enabled           bool    `yaml:"enabled" json:"enabled"`
-	Mode              string  `yaml:"mode" json:"mode"`
-	MaxItems          int     `yaml:"maxItems" json:"maxItems"`
-	TokenBudget       int     `yaml:"tokenBudget" json:"tokenBudget"`
-	PinnedBudgetRatio float64 `yaml:"pinnedBudgetRatio" json:"pinnedBudgetRatio"`
-	StageSplit        bool    `yaml:"stageSplit" json:"stageSplit"`
+	Enabled           bool                    `yaml:"enabled" json:"enabled"`
+	Mode              string                  `yaml:"mode" json:"mode"`
+	MaxItems          int                     `yaml:"maxItems" json:"maxItems"`
+	TokenBudget       int                     `yaml:"tokenBudget" json:"tokenBudget"`
+	PinnedBudgetRatio float64                 `yaml:"pinnedBudgetRatio" json:"pinnedBudgetRatio"`
+	StageSplit        bool                    `yaml:"stageSplit" json:"stageSplit"`
+	RecallTrace       MemoryRecallTraceConfig `yaml:"recallTrace" json:"recallTrace"`
+}
+
+type MemoryRecallTraceConfig struct {
+	Enabled       bool    `yaml:"enabled" json:"enabled"`
+	SampleRate    float64 `yaml:"sampleRate" json:"sampleRate"`
+	RetentionDays int     `yaml:"retentionDays" json:"retentionDays"`
 }
 
 type MemoryFeedbackConfig struct {
@@ -1159,6 +1166,9 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				TokenBudget:       600,
 				PinnedBudgetRatio: 0.20,
 				StageSplit:        true,
+				RecallTrace: MemoryRecallTraceConfig{
+					Enabled: false, SampleRate: 0.01, RetentionDays: 14,
+				},
 			},
 			Feedback: MemoryFeedbackConfig{
 				CitationEnabled:       true,
@@ -1592,9 +1602,9 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 		return errors.New(errors.ErrValidationFailed, "memory.mode must be off, shadow, or on")
 	}
 	switch strings.ToLower(strings.TrimSpace(config.Scope)) {
-	case "", "project", "project+user":
+	case "", "project":
 	default:
-		return errors.New(errors.ErrValidationFailed, "memory.scope must be project or project+user")
+		return errors.New(errors.ErrValidationFailed, "memory.scope currently supports only project; user scope is not implemented")
 	}
 	switch strings.ToLower(strings.TrimSpace(config.Injection.Mode)) {
 	case "", "summary", "hybrid", "notes":
@@ -1619,6 +1629,12 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 	}
 	if config.Injection.PinnedBudgetRatio < 0 || config.Injection.PinnedBudgetRatio > 1 {
 		return errors.New(errors.ErrValidationFailed, "memory.injection.pinnedBudgetRatio must be between 0 and 1")
+	}
+	if config.Injection.RecallTrace.SampleRate < 0 || config.Injection.RecallTrace.SampleRate > 1 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection.recallTrace.sampleRate must be between 0 and 1")
+	}
+	if config.Injection.RecallTrace.RetentionDays < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection.recallTrace.retentionDays cannot be negative")
 	}
 	if config.Feedback.ExposureSampling < 0 || config.Feedback.ExposureSampling > 1 {
 		return errors.New(errors.ErrValidationFailed, "memory.feedback.exposureSampling must be between 0 and 1")

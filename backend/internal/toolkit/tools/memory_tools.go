@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -38,11 +39,13 @@ func (t *memoryTool) DefinitionMetadata() map[string]interface{} {
 		kind = runtimetypes.ToolKindEdit
 	}
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:             kind,
-		runtimetypes.ToolMetadataReadOnlyKey:         !t.write,
-		runtimetypes.ToolMetadataMutatesFSKey:        false,
-		runtimetypes.ToolMetadataRequiresNetKey:      false,
-		runtimetypes.ToolMetadataSupportsParallelKey: !t.write,
+		runtimetypes.ToolMetadataKindKey:        kind,
+		runtimetypes.ToolMetadataReadOnlyKey:    !t.write,
+		runtimetypes.ToolMetadataMutatesFSKey:   false,
+		runtimetypes.ToolMetadataRequiresNetKey: false,
+		// memory_read records a best-effort usage row (SQLite write), so keep
+		// it out of parallel read waves even though it is a read operation.
+		runtimetypes.ToolMetadataSupportsParallelKey: !t.write && t.operation != "read",
 	}
 }
 
@@ -71,7 +74,7 @@ func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{})
 		}
 		return memoryToolJSON(report), nil
 	case "add":
-		return t.add(store, params)
+		return t.add(ctx, store, params)
 	case "correct":
 		return t.correct(ctx, store, params)
 	case "forget":
@@ -104,19 +107,24 @@ func (t *memoryTool) openStore() (*memorystore.Store, error) {
 	}
 	return memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: t.cfg.Memory.StorePath,
-		InjectionMode:     t.cfg.Memory.Injection.Mode,
-		PinnedBudgetRatio: t.cfg.Memory.Injection.PinnedBudgetRatio,
-		DisableStageSplit: !t.cfg.Memory.Injection.StageSplit,
-		DisableInjection:  !t.cfg.Memory.Injection.Enabled,
-		DisableManual:     !t.cfg.Memory.Manual.Enabled,
+		InjectionMode:         t.cfg.Memory.Injection.Mode,
+		PinnedBudgetRatio:     t.cfg.Memory.Injection.PinnedBudgetRatio,
+		DisableStageSplit:     !t.cfg.Memory.Injection.StageSplit,
+		DisableInjection:      !t.cfg.Memory.Injection.Enabled,
+		DisableManual:         !t.cfg.Memory.Manual.Enabled,
+		RecallTraceEnabled:    t.cfg.Memory.Injection.RecallTrace.Enabled,
+		RecallTraceSampleRate: t.cfg.Memory.Injection.RecallTrace.SampleRate,
 	})
 }
 
 func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	limit := memoryBoundedIntParam(params, "limit", 20, 100)
-	status := strings.TrimSpace(memoryStringParam(params, "status"))
+	status := strings.ToLower(strings.TrimSpace(memoryStringParam(params, "status")))
 	if status == "" {
 		status = string(memorystore.StatusActive)
+	}
+	if status != string(memorystore.StatusActive) && status != string(memorystore.StatusCandidate) {
+		return memoryToolError(fmt.Errorf("agent memory_search only exposes active or candidate records")), nil
 	}
 	page, err := store.ListRecords(ctx, memorystore.RecordFilter{
 		Status: memorystore.Status(status),
@@ -128,6 +136,8 @@ func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, param
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	page.Items = agentVisibleMemoryRecords(page.Items)
+	page.Count = len(page.Items)
 	return memoryToolJSON(map[string]interface{}{
 		"items": page.Items, "count": page.Count, "next_cursor": page.NextCursor,
 		"diagnostics": map[string]interface{}{"query": memoryStringParam(params, "query"), "limit": limit},
@@ -143,6 +153,15 @@ func (t *memoryTool) read(ctx context.Context, store *memorystore.Store, params 
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	if record.Sensitivity == "private" {
+		return memoryToolError(fmt.Errorf("private memory requires admin authorization")), nil
+	}
+	if memoryredact.DetectSecret(record.Text) != "" {
+		return memoryToolError(fmt.Errorf("secret-shaped memory is not readable through agent tools")), nil
+	}
+	if record.Status == memorystore.StatusDeleted {
+		return memoryToolError(fmt.Errorf("deleted memory is not readable through agent tools")), nil
+	}
 	usage, _ := store.ListUsage(ctx, memorystore.UsageFilter{MemoryID: id, Limit: 20})
 	if sessionID := strings.TrimSpace(toolctx.SessionID(ctx)); sessionID != "" {
 		_, _ = store.RecordExposure(ctx, memorystore.Exposure{
@@ -157,11 +176,20 @@ func (t *memoryTool) sessionContext(ctx context.Context, store *memorystore.Stor
 	if sessionID == "" {
 		return memoryToolError(fmt.Errorf("session_id is required")), nil
 	}
+	currentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if currentSessionID == "" {
+		return memoryToolError(fmt.Errorf("session context requires an active session")), nil
+	}
+	if sessionID != currentSessionID {
+		return memoryToolError(fmt.Errorf("cross-session memory context requires admin authorization")), nil
+	}
 	limit := memoryBoundedIntParam(params, "limit", 20, 100)
 	page, err := store.ListRecords(ctx, memorystore.RecordFilter{SourceSessionID: sessionID, Limit: limit})
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	page.Items = agentVisibleMemoryRecords(page.Items)
+	page.Count = len(page.Items)
 	return memoryToolJSON(map[string]interface{}{"session_id": sessionID, "items": page.Items, "count": page.Count}), nil
 }
 
@@ -173,10 +201,12 @@ func (t *memoryTool) recent(ctx context.Context, store *memorystore.Store, param
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	page.Items = agentVisibleMemoryRecords(page.Items)
+	page.Count = len(page.Items)
 	return memoryToolJSON(map[string]interface{}{"items": page.Items, "count": page.Count}), nil
 }
 
-func (t *memoryTool) add(store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+func (t *memoryTool) add(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	text := strings.TrimSpace(memoryStringParam(params, "text"))
 	if text == "" {
 		return memoryToolError(fmt.Errorf("text is required")), nil
@@ -186,7 +216,8 @@ func (t *memoryTool) add(store *memorystore.Store, params map[string]interface{}
 		pinned = &value
 	}
 	note, err := store.Append(memorystore.AppendNoteOptions{
-		Text: text, Kind: memoryStringParam(params, "kind"), Tags: memoryStringSliceParam(params, "tags"), Pinned: pinned,
+		Text: text, Kind: memoryStringParam(params, "kind"), Tags: memoryStringSliceParam(params, "tags"),
+		Pinned: pinned, Source: "manual", SessionID: strings.TrimSpace(toolctx.SessionID(ctx)),
 	})
 	if err != nil {
 		return memoryToolError(err), nil
@@ -237,6 +268,15 @@ func (t *memoryTool) why(ctx context.Context, store *memorystore.Store, params m
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	if record.Sensitivity == "private" {
+		return memoryToolError(fmt.Errorf("private memory requires admin authorization")), nil
+	}
+	if memoryredact.DetectSecret(record.Text) != "" {
+		return memoryToolError(fmt.Errorf("secret-shaped memory is not readable through agent tools")), nil
+	}
+	if record.Status == memorystore.StatusDeleted {
+		return memoryToolError(fmt.Errorf("deleted memory is not readable through agent tools")), nil
+	}
 	usage, _ := store.ListUsage(ctx, memorystore.UsageFilter{MemoryID: id, Limit: 50})
 	return memoryToolJSON(map[string]interface{}{"record": record, "usage": usage}), nil
 }
@@ -246,6 +286,7 @@ func (t *memoryTool) whyNot(ctx context.Context, store *memorystore.Store, param
 		Query: strings.TrimSpace(memoryStringParam(params, "query")), Limit: memoryBoundedIntParam(params, "limit", 5, 20),
 		TokenBudget: memoryBoundedIntParam(params, "token_budget", 0, 4000),
 		SessionID:   strings.TrimSpace(toolctx.SessionID(ctx)),
+		SkipTrace:   true,
 	})
 	if err != nil {
 		return memoryToolError(err), nil
@@ -263,6 +304,17 @@ func memoryToolJSON(value interface{}) *toolkit.ToolResult {
 		return memoryToolError(err)
 	}
 	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: string(body)}
+}
+
+func agentVisibleMemoryRecords(records []memorystore.Record) []memorystore.Record {
+	out := make([]memorystore.Record, 0, len(records))
+	for _, record := range records {
+		if record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
 }
 
 func memoryToolError(err error) *toolkit.ToolResult {

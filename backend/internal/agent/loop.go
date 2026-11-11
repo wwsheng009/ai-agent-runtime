@@ -3328,7 +3328,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
 	if response != nil && strings.TrimSpace(response.Content) != "" {
-		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && len(contextMemoryIDs) > 0 &&
+		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && projectMemoryStore.V2InjectionEnabled() && len(contextMemoryIDs) > 0 &&
 			answerExposureEnabled(loop.agent.config.Options) {
 			exposure, exposureErr := projectMemoryStore.RecordAnswerExposure(ctx, memorystore.AnswerExposureInput{
 				Answer: response.Content, SessionID: sessionID,

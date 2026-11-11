@@ -246,6 +246,33 @@ CREATE TABLE IF NOT EXISTS memory_migration_runs (
 );
 `,
 		},
+		{
+			Version: 2,
+			Name:    "memory_v2_session_modes_project_scope",
+			UpSQL: `
+CREATE TABLE memory_session_modes_v2 (
+    project_key     TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    mode            TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(project_key, session_id)
+);
+
+INSERT OR REPLACE INTO memory_session_modes_v2 (
+    project_key, session_id, scope, mode, updated_at, metadata_json
+)
+SELECT project_key, session_id, scope, mode, updated_at, metadata_json
+FROM memory_session_modes;
+
+DROP TABLE memory_session_modes;
+ALTER TABLE memory_session_modes_v2 RENAME TO memory_session_modes;
+
+CREATE INDEX IF NOT EXISTS idx_memory_session_modes_project
+  ON memory_session_modes(project_key, mode, updated_at DESC);
+`,
+		},
 	}
 	if err := migrate.Apply(ctx, db, migrations); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)

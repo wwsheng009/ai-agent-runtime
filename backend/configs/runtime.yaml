@@ -97,6 +97,10 @@ memory:
     tokenBudget: 600
     pinnedBudgetRatio: 0.20
     stageSplit: true
+    recallTrace:
+      enabled: false        # 采样诊断 trace；默认关闭，shadow 评估时再开启
+      sampleRate: 0.01
+      retentionDays: 14
   feedback:
     citationEnabled: true
     exposureSampling: 1.0    # citation 解析失败时仍写 injected_only exposure

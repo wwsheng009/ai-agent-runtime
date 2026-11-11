@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
@@ -38,29 +41,31 @@ type memoryStatusResponse struct {
 }
 
 type memoryRecordDTO struct {
-	ID              string   `json:"id"`
-	Scope           string   `json:"scope"`
-	Kind            string   `json:"kind"`
-	Status          string   `json:"status"`
-	Text            string   `json:"text"`
-	Tags            []string `json:"tags,omitempty"`
-	Confidence      float64  `json:"confidence,omitempty"`
-	Pinned          bool     `json:"pinned"`
-	RetentionClass  string   `json:"retention_class,omitempty"`
-	SourceKind      string   `json:"source_kind"`
-	SourceSessionID string   `json:"source_session_id,omitempty"`
-	SourceTurnID    string   `json:"source_turn_id,omitempty"`
-	SourceRefs      []string `json:"source_refs,omitempty"`
-	Revision        int64    `json:"revision"`
-	CreatedAt       string   `json:"created_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at,omitempty"`
-	LastUsedAt      string   `json:"last_used_at,omitempty"`
-	UseCount        int      `json:"use_count,omitempty"`
-	ValidUntil      string   `json:"valid_until,omitempty"`
-	Freshness       string   `json:"freshness_status"`
-	LastVerifiedAt  string   `json:"last_verified_at,omitempty"`
-	RevalidateAfter string   `json:"revalidate_after,omitempty"`
-	StaleReason     string   `json:"stale_reason,omitempty"`
+	ID              string                    `json:"id"`
+	Scope           string                    `json:"scope"`
+	Kind            string                    `json:"kind"`
+	Status          string                    `json:"status"`
+	Text            string                    `json:"text"`
+	Tags            []string                  `json:"tags,omitempty"`
+	Confidence      float64                   `json:"confidence,omitempty"`
+	Sensitivity     string                    `json:"sensitivity,omitempty"`
+	Pinned          bool                      `json:"pinned"`
+	RetentionClass  string                    `json:"retention_class,omitempty"`
+	SourceKind      string                    `json:"source_kind"`
+	SourceSessionID string                    `json:"source_session_id,omitempty"`
+	SourceTurnID    string                    `json:"source_turn_id,omitempty"`
+	SourceRefs      []string                  `json:"source_refs,omitempty"`
+	Revision        int64                     `json:"revision"`
+	CreatedAt       string                    `json:"created_at,omitempty"`
+	UpdatedAt       string                    `json:"updated_at,omitempty"`
+	LastUsedAt      string                    `json:"last_used_at,omitempty"`
+	UseCount        int                       `json:"use_count,omitempty"`
+	ValidUntil      string                    `json:"valid_until,omitempty"`
+	Freshness       string                    `json:"freshness_status"`
+	LastVerifiedAt  string                    `json:"last_verified_at,omitempty"`
+	RevalidateAfter string                    `json:"revalidate_after,omitempty"`
+	StaleReason     string                    `json:"stale_reason,omitempty"`
+	Usage           []memorystore.UsageRecord `json:"usage,omitempty"`
 }
 
 type memoryRecordListResponse struct {
@@ -177,6 +182,27 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "" && !strings.EqualFold(scope, string(memorystore.ScopeProject)) {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "scope currently supports only project"))
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	switch memorystore.Status(strings.ToLower(status)) {
+	case "", memorystore.StatusCandidate, memorystore.StatusActive,
+		memorystore.StatusSuperseded, memorystore.StatusDeleted, memorystore.StatusExpired:
+	default:
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid memory status"))
+		return
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor != "" {
+		offset, cursorErr := strconv.Atoi(cursor)
+		if cursorErr != nil || offset < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "cursor must be a non-negative integer"))
+			return
+		}
+	}
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -191,13 +217,13 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 	limit := parsePositiveIntQuery(r, "limit", 50)
 	filter := memorystore.RecordFilter{
 		Scope:           memorystore.Scope(strings.TrimSpace(r.URL.Query().Get("scope"))),
-		Status:          memorystore.Status(strings.TrimSpace(r.URL.Query().Get("status"))),
+		Status:          memorystore.Status(strings.ToLower(status)),
 		Kind:            strings.TrimSpace(r.URL.Query().Get("kind")),
 		Tag:             strings.TrimSpace(r.URL.Query().Get("tag")),
 		Query:           firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("q")), strings.TrimSpace(r.URL.Query().Get("query"))),
 		SourceSessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
 		Limit:           limit,
-		Cursor:          strings.TrimSpace(r.URL.Query().Get("cursor")),
+		Cursor:          cursor,
 	}
 	page, err := store.ListRecords(r.Context(), filter)
 	if err != nil {
@@ -205,15 +231,27 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]memoryRecordDTO, 0, len(page.Items))
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
+	if strings.EqualFold(status, string(memorystore.StatusDeleted)) && !canViewPrivate {
+		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "deleted memory requires admin authorization"))
+		return
+	}
 	for _, record := range page.Items {
+		if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
+			continue
+		}
 		items = append(items, memoryRecordToDTO(record))
 	}
 	h.writeJSON(w, http.StatusOK, memoryRecordListResponse{
-		WorkspacePath: workspace, Items: items, Count: page.Count, NextCursor: page.NextCursor,
+		WorkspacePath: workspace, Items: items, Count: len(items), NextCursor: page.NextCursor,
 	})
 }
 
 func (h *Handler) CreateMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
 	var req memoryRecordCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -245,7 +283,7 @@ func (h *Handler) CreateMemoryRecord(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, memoryRecordDTO{
 		ID: note.ID, Scope: "project", Kind: firstNonEmpty(req.Kind, "reference"),
 		Status: "active", Text: note.Text, Tags: note.Tags, Pinned: req.Pinned == nil || *req.Pinned,
-		SourceKind: firstNonEmpty(req.Source, "manual"), SourceSessionID: req.SessionID,
+		Sensitivity: "internal", SourceKind: firstNonEmpty(req.Source, "manual"), SourceSessionID: req.SessionID,
 		Revision: 1, CreatedAt: note.CreatedAt.UTC().Format(time.RFC3339),
 		Freshness: "fresh",
 	})
@@ -272,10 +310,23 @@ func (h *Handler) GetMemoryRecord(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "memory record not found"))
 		return
 	}
-	h.writeJSON(w, http.StatusOK, memoryRecordToDTO(record))
+	if h.authorizeMemoryAdmin(r) != nil &&
+		(record.Sensitivity == "private" || record.Status == memorystore.StatusDeleted || memoryredact.DetectSecret(record.Text) != "") {
+		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "private/deleted memory requires admin authorization"))
+		return
+	}
+	dto := memoryRecordToDTO(record)
+	if usage, usageErr := store.ListUsage(r.Context(), memorystore.UsageFilter{MemoryID: record.ID, Limit: 20}); usageErr == nil {
+		dto.Usage = usage
+	}
+	h.writeJSON(w, http.StatusOK, dto)
 }
 
 func (h *Handler) PatchMemoryRecord(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
 	if !h.memoryV2Enabled() {
 		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
 		return
@@ -398,7 +449,11 @@ func (h *Handler) GetMemorySessionContext(w http.ResponseWriter, r *http.Request
 		return
 	}
 	items := make([]memoryRecordDTO, 0, len(page.Items))
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
 	for _, record := range page.Items {
+		if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
+			continue
+		}
 		items = append(items, memoryRecordToDTO(record))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -407,6 +462,10 @@ func (h *Handler) GetMemorySessionContext(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) ListMemoryRecallTraces(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
 	if !h.memoryV2Enabled() {
 		h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": []memoryRecallTraceDTO{}, "count": 0})
 		return
@@ -449,6 +508,10 @@ func (h *Handler) ListMemoryRecallTraces(w http.ResponseWriter, r *http.Request)
 func (h *Handler) ExtractMemory(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeMemoryAdmin(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
 		return
 	}
 	var req memoryExtractRequest
@@ -494,6 +557,10 @@ func (h *Handler) ExtractMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListMemoryJobs(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
 	if !h.memoryV2Enabled() {
 		h.writeJSON(w, http.StatusOK, map[string]interface{}{"items": []memorystore.MemoryJob{}, "count": 0})
 		return
@@ -547,6 +614,16 @@ func (h *Handler) ListMemorySummaries(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeError(w, http.StatusServiceUnavailable, err)
 		return
+	}
+	if h.authorizeMemoryAdmin(r) != nil {
+		filtered := make([]memorystore.Summary, 0, len(summaries))
+		for _, summary := range summaries {
+			if memoryredact.DetectSecret(summary.Text) != "" {
+				continue
+			}
+			filtered = append(filtered, summary)
+		}
+		summaries = filtered
 	}
 	h.writeJSON(w, http.StatusOK, memorySummaryListResponse{
 		WorkspacePath: workspace, Items: summaries, Count: len(summaries),
@@ -782,8 +859,12 @@ func (h *Handler) GetMemoryFreshness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]memoryRecordDTO, 0)
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
 	for _, record := range page.Items {
 		if record.Freshness != memorystore.FreshnessFresh {
+			if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
+				continue
+			}
 			items = append(items, memoryRecordToDTO(record))
 		}
 	}
@@ -799,7 +880,7 @@ func (h *Handler) SweepMemoryFreshness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.memoryV2Enabled() {
-		h.writeJSON(w, http.StatusOK, map[string]interface{}{"stale": 0})
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
 		return
 	}
 	var req memoryConfirmRequest
@@ -861,6 +942,7 @@ func (h *Handler) ExportMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.memoryV2Enabled() {
 		w.Header().Set("Content-Type", "application/jsonl")
+		w.Header().Set("Content-Disposition", `attachment; filename="agent-memory.jsonl"`)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -893,8 +975,48 @@ func (h *Handler) ExportMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
+	filename := "agent-memory.jsonl"
+	if contentType == "text/markdown" {
+		filename = "agent-memory.md"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
+}
+
+func (h *Handler) ImportMemory(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to read import body"))
+		return
+	}
+	dryRun := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("dry_run")), "true") ||
+		strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("dryRun")), "true")
+	result, err := store.ImportJSONL(r.Context(), body, dryRun)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) ResetMemory(w http.ResponseWriter, r *http.Request) {
@@ -903,7 +1025,7 @@ func (h *Handler) ResetMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.memoryV2Enabled() {
-		h.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "action": "reset"})
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
 		return
 	}
 	var req memoryConfirmRequest
@@ -967,12 +1089,21 @@ func (h *Handler) resolveMemoryWorkspace(r *http.Request, bodyWorkspace string) 
 }
 
 func sameWorkspacePath(left, right string) bool {
-	if strings.EqualFold(filepath.Clean(left), filepath.Clean(right)) {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if workspacePathsEqual(left, right) {
 		return true
 	}
 	leftReal, leftErr := filepath.EvalSymlinks(left)
 	rightReal, rightErr := filepath.EvalSymlinks(right)
-	return leftErr == nil && rightErr == nil && strings.EqualFold(filepath.Clean(leftReal), filepath.Clean(rightReal))
+	return leftErr == nil && rightErr == nil && workspacePathsEqual(filepath.Clean(leftReal), filepath.Clean(rightReal))
+}
+
+func workspacePathsEqual(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func (h *Handler) openMemoryStore(workspace string) (*memorystore.Store, error) {
@@ -985,6 +1116,8 @@ func (h *Handler) openMemoryStore(workspace string) (*memorystore.Store, error) 
 		cfg.DisableStageSplit = !h.runtimeConfig.Memory.Injection.StageSplit
 		cfg.DisableInjection = !h.runtimeConfig.Memory.Injection.Enabled
 		cfg.DisableManual = !h.runtimeConfig.Memory.Manual.Enabled
+		cfg.RecallTraceEnabled = h.runtimeConfig.Memory.Injection.RecallTrace.Enabled
+		cfg.RecallTraceSampleRate = h.runtimeConfig.Memory.Injection.RecallTrace.SampleRate
 	}
 	return memorystore.New(cfg)
 }
@@ -1000,7 +1133,8 @@ func memoryRecordToDTO(record memorystore.Record) memoryRecordDTO {
 	return memoryRecordDTO{
 		ID: record.ID, Scope: string(record.Scope), Kind: record.Kind, Status: string(record.Status),
 		Text: record.Text, Tags: append([]string(nil), record.Tags...), Confidence: record.Confidence,
-		Pinned: record.Pinned, RetentionClass: record.RetentionClass, SourceKind: record.SourceKind,
+		Sensitivity: record.Sensitivity,
+		Pinned:      record.Pinned, RetentionClass: record.RetentionClass, SourceKind: record.SourceKind,
 		SourceSessionID: record.SourceSessionID, SourceTurnID: record.SourceTurnID,
 		SourceRefs: append([]string(nil), record.SourceRefs...), Revision: record.Revision,
 		CreatedAt: formatMemoryTime(record.CreatedAt), UpdatedAt: formatMemoryTime(record.UpdatedAt),

@@ -167,7 +167,8 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 		return result, nil
 	}
 	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
-		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey, Limit: 1, Now: now,
+		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey,
+		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now,
 	})
 	if err != nil {
 		return result, err
@@ -179,7 +180,7 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	extraction, err := r.Extractor.Extract(ctx, session, transcript)
 	if err != nil {
 		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
 		return result, err
 	}
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
@@ -188,12 +189,12 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	stale, err := r.Store.MarkSessionSourceChanged(ctx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
 	if err != nil {
 		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
 		return result, err
 	}
 	result.Stale += stale
 	if len(candidates) == 0 {
-		_ = r.Store.CompleteJob(ctx, claimed[0].ID, transcript.Hash)
+		_ = r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash)
 		result.Processed = 1
 		return result, nil
 	}
@@ -208,12 +209,12 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 				continue
 			}
 			retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-			_ = r.Store.FailJob(ctx, claimed[0].ID, err.Error(), retryAt)
+			_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
 			return result, err
 		}
 		inserted++
 	}
-	if err := r.Store.CompleteJob(ctx, claimed[0].ID, transcript.Hash); err != nil {
+	if err := r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
 		return result, err
 	}
 	result.Processed = 1
@@ -377,7 +378,9 @@ func isCandidateSkipError(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "suppressed") || strings.Contains(text, "duplicate memory")
+	return strings.Contains(text, "suppressed") ||
+		strings.Contains(text, "duplicate memory") ||
+		strings.Contains(text, "secret-shaped content")
 }
 
 func retryBackoff(attempt int) time.Duration {

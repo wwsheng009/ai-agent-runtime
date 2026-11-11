@@ -12,7 +12,7 @@ func NewMemorySearchTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 			"query":  memoryStringProp("Search query."),
 			"kind":   memoryStringProp("Optional memory kind filter."),
 			"tag":    memoryStringProp("Optional tag filter."),
-			"status": memoryEnumProp("Optional status filter.", "active", "candidate", "superseded", "deleted", "expired"),
+			"status": memoryEnumProp("Optional status filter (agent surface).", "active", "candidate"),
 			"limit":  memoryIntProp("Maximum results (default 20, max 100).", 1, 100),
 		}), false)
 }

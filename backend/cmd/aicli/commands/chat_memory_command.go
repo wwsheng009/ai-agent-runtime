@@ -154,6 +154,8 @@ func openChatProjectMemoryStore(session *ChatSession) (*memorystore.Store, error
 		cfg.PinnedBudgetRatio = runtimeConfig.Memory.Injection.PinnedBudgetRatio
 		cfg.DisableInjection = !runtimeConfig.Memory.Injection.Enabled
 		cfg.DisableManual = !runtimeConfig.Memory.Manual.Enabled
+		cfg.RecallTraceEnabled = runtimeConfig.Memory.Injection.RecallTrace.Enabled
+		cfg.RecallTraceSampleRate = runtimeConfig.Memory.Injection.RecallTrace.SampleRate
 	}
 	return memorystore.New(cfg)
 }

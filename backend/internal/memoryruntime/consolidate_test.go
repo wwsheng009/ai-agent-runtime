@@ -61,6 +61,28 @@ func TestConsolidatorPromotesCandidatesAndCompilesSummary(t *testing.T) {
 	}
 }
 
+func TestConsolidatorKeepsLowConfidenceCandidatesOutOfActive(t *testing.T) {
+	c, store := newConsolidatorForTest(t)
+	candidate, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s1", Kind: "decision", Text: "Low confidence inference.",
+		Confidence: 0.2, SourceHash: "hash-low", SourceRevision: 1,
+	})
+	if err != nil {
+		t.Fatalf("InsertCandidate: %v", err)
+	}
+	result, err := c.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Consolidator.Run: %v", err)
+	}
+	if result.Promoted != 0 {
+		t.Fatalf("low-confidence candidate promoted: %+v", result)
+	}
+	record, err := store.GetRecord(context.Background(), candidate.ID)
+	if err != nil || record.Status != memorystore.StatusCandidate {
+		t.Fatalf("record = %+v, %v", record, err)
+	}
+}
+
 func TestConsolidatorManualBeatsDerivedConflict(t *testing.T) {
 	c, store := newConsolidatorForTest(t)
 	manual, err := store.Append(memorystore.AppendNoteOptions{
@@ -87,9 +109,35 @@ func TestConsolidatorManualBeatsDerivedConflict(t *testing.T) {
 	if err != nil || manualRecord.Status != memorystore.StatusActive {
 		t.Fatalf("manual status = %+v, %v", manualRecord, err)
 	}
+	if manualRecord.SupersedesID != candidate.ID {
+		t.Fatalf("manual winner supersedes_id = %q, want %q", manualRecord.SupersedesID, candidate.ID)
+	}
 	derived, err := store.GetRecord(context.Background(), candidate.ID)
 	if err != nil || derived.Status != memorystore.StatusSuperseded {
 		t.Fatalf("derived status = %+v, %v", derived, err)
+	}
+	events, err := store.ListEvents(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	foundSupersedeEvent := false
+	for _, event := range events {
+		if event.MemoryID == candidate.ID && event.EventType == "superseded" {
+			foundSupersedeEvent = true
+			if event.Actor != "consolidation" || event.Payload["superseded_by"] != manual.ID {
+				t.Fatalf("unexpected supersede event: %+v", event)
+			}
+		}
+	}
+	if !foundSupersedeEvent {
+		t.Fatal("missing consolidation supersede event")
+	}
+	summaries, err := store.ListSummaries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListSummaries: %v", err)
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("manual-only consolidation must not compile a duplicate summary: %+v", summaries)
 	}
 }
 
