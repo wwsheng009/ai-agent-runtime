@@ -709,6 +709,14 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 		if onDemand := currentLocalConnectorHost(); onDemand != nil {
 			onDemand.Close()
 		}
+		// Session-end is a product event, not only a storage concern: the
+		// memory runtime and plugin hooks are attached to SessionManager.Close.
+		// The CLI previously tore the host down without closing the runtime
+		// session, so automatic memory extraction never ran on /exit.
+		if session.SessionManager != nil && session.RuntimeSession != nil &&
+			strings.TrimSpace(session.RuntimeSession.ID) != "" {
+			_ = session.SessionManager.Close(context.Background(), session.RuntimeSession.ID)
+		}
 		if session.LocalRuntimeHost != nil {
 			registerProcessScheduleService(nil)
 			session.LocalRuntimeHost.Close()

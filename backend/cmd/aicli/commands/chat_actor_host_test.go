@@ -26,6 +26,8 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -616,6 +618,31 @@ func TestBuildLocalChatAgent_DefaultsCheckpointCaptureOff(t *testing.T) {
 	}
 	if manager := apiAgent.GetCheckpointManager(); manager != nil {
 		t.Fatal("restore access must not re-enable checkpoint capture")
+	}
+}
+
+func TestBuildLocalChatAgent_BindsAutomaticMemoryStore(t *testing.T) {
+	store, err := memorystore.New(memorystore.Config{
+		Root: t.TempDir(), Mode: "on", InjectionMode: "hybrid",
+	})
+	if err != nil {
+		t.Fatalf("memorystore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	host := &localChatRuntimeHost{
+		Bootstrap:     &runtimebootstrap.Manager{},
+		MemoryRuntime: &memoryruntime.Runtime{Store: store},
+	}
+	apiAgent := buildLocalChatAgent(&ChatSession{}, host, nil, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	ctxMgr := apiAgent.GetContextManager()
+	if ctxMgr == nil {
+		t.Fatal("expected context manager")
+	}
+	if ctxMgr.ProjectMemory != store {
+		t.Fatal("automatic memory store was not bound to the agent context manager")
 	}
 }
 

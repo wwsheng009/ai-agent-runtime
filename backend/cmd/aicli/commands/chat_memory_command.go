@@ -146,7 +146,7 @@ func openChatProjectMemoryStore(session *ChatSession) (*memorystore.Store, error
 		return nil, fmt.Errorf("无法解析项目根目录")
 	}
 	cfg := memorystore.Config{Root: root}
-	runtimeConfig := loadRuntimeToolConfig(nil, session)
+	runtimeConfig := loadRuntimeToolConfig(session.Config, session)
 	if runtimeConfig != nil {
 		cfg.Mode = runtimeConfig.Memory.Mode
 		cfg.StorePath = runtimeConfig.Memory.StorePath

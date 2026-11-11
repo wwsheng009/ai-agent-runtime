@@ -2475,6 +2475,14 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
+	// The automatic-memory runtime owns the v2 store created from runtime.yaml.
+	// Bind that same store to the agent context manager so the read path does
+	// not fall back to a separate default/off store and silently skip recall.
+	if host.MemoryRuntime != nil && host.MemoryRuntime.Store != nil {
+		if ctxMgr := apiAgent.GetContextManager(); ctxMgr != nil {
+			ctxMgr.ProjectMemory = host.MemoryRuntime.Store
+		}
+	}
 	apiAgent.SetBatchLifecycleProjector(localSubagentBatchLifecycleProjector(host))
 	// P1-4/H12：并发上限透传（过去只透传 Routing，导致每个 background batch
 	// 各自拿到默认 4 路窗口 → 实际并发 4×N）。每批上限 = agents.maxConcurrent

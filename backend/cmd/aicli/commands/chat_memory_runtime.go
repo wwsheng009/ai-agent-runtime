@@ -123,7 +123,9 @@ func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
 	if trigger != "session_end" && trigger != "both" {
 		return
 	}
+	h.asyncWG.Add(1)
 	go func() {
+		defer h.asyncWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		_, _ = h.MemoryRuntime.RunSession(ctx, memoryruntime.TriggerSessionEnd, sessionID)
