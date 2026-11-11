@@ -1,18 +1,23 @@
 import { type TFunction } from "i18next";
 import { DownloadIcon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   correctMemoryRecord,
   deleteMemoryRecord,
+  downloadMemoryExport,
+  getMemoryJobs,
+  getMemoryRecallTraces,
   getMemoryRecords,
   getMemoryStatus,
   getMemorySummaries,
   getMemoryUsage,
-  memoryExportUrl,
   rebuildMemorySummaries,
   revalidateMemoryRecord,
+  RuntimeApiError,
   type RuntimeMemoryRecord,
+  type RuntimeMemoryJob,
+  type RuntimeMemoryRecallTrace,
   type RuntimeMemoryStatus,
   type RuntimeMemorySummary,
   type RuntimeMemoryUsage,
@@ -40,8 +45,11 @@ export function MemoryV2Panel({
   const [records, setRecords] = useState<RuntimeMemoryRecord[]>([]);
   const [summaries, setSummaries] = useState<RuntimeMemorySummary[]>([]);
   const [usage, setUsage] = useState<RuntimeMemoryUsage[]>([]);
+  const [jobs, setJobs] = useState<RuntimeMemoryJob[]>([]);
+  const [traces, setTraces] = useState<RuntimeMemoryRecallTrace[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestSeq = useRef(0);
 
   const reload = useCallback(async () => {
     if (!workspacePath) {
@@ -49,26 +57,45 @@ export function MemoryV2Panel({
       setRecords([]);
       setSummaries([]);
       setUsage([]);
+      setJobs([]);
+      setTraces([]);
       return;
     }
+    const requestId = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const [statusResponse, recordsResponse, summariesResponse, usageResponse] =
-        await Promise.all([
+      const [statusResult, recordsResult, summariesResult, usageResult, jobsResult, tracesResult] =
+        await Promise.allSettled([
           getMemoryStatus(workspacePath),
           getMemoryRecords(workspacePath, { status: "active", limit: 20 }),
           getMemorySummaries(workspacePath, 10),
           getMemoryUsage(workspacePath, { limit: 20 }),
+          getMemoryJobs(workspacePath, 20),
+          getMemoryRecallTraces(workspacePath, { limit: 20 }),
         ]);
-      setStatus(statusResponse);
-      setRecords(recordsResponse.items ?? []);
-      setSummaries(summariesResponse.items ?? []);
-      setUsage(usageResponse.items ?? []);
+      if (requestId !== requestSeq.current) return;
+      if (statusResult.status === "fulfilled") setStatus(statusResult.value);
+      if (recordsResult.status === "fulfilled") setRecords(recordsResult.value.items ?? []);
+      if (summariesResult.status === "fulfilled") setSummaries(summariesResult.value.items ?? []);
+      if (usageResult.status === "fulfilled") setUsage(usageResult.value.items ?? []);
+      if (jobsResult.status === "fulfilled") setJobs(jobsResult.value.items ?? []);
+      if (tracesResult.status === "fulfilled") setTraces(tracesResult.value.items ?? []);
+      const failures = [statusResult, recordsResult, summariesResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => errorMessage(result.reason));
+      for (const optional of [usageResult, jobsResult, tracesResult]) {
+        if (optional.status !== "rejected") continue;
+        if (optional.reason instanceof RuntimeApiError && optional.reason.status === 403) {
+          continue;
+        }
+        failures.push(errorMessage(optional.reason));
+      }
+      if (failures.length > 0) setError(failures.join("; "));
     } catch (loadError) {
-      setError(errorMessage(loadError));
+      if (requestId === requestSeq.current) setError(errorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (requestId === requestSeq.current) setLoading(false);
     }
   }, [workspacePath]);
 
@@ -133,7 +160,24 @@ export function MemoryV2Panel({
     }
   }
 
+  async function exportMemory(format: "jsonl" | "markdown") {
+    if (!workspacePath) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await downloadMemoryExport(workspacePath, format);
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!workspacePath) return null;
+  const v2Available = status !== null && status.mode !== "off" && !status.fallback;
+  const actionsDisabled = loading || !v2Available;
+  const privateBadge = status?.mode === "on";
+  const failedJobs = jobs.filter((job) => job.status === "failed" || job.last_error);
 
   return (
     <SettingsPanelCard title={t("harness.memoryV2Title")}>
@@ -151,34 +195,59 @@ export function MemoryV2Panel({
             <RefreshCwIcon size={14} />
             {t("harness.refresh")}
           </Button>
-          <Button variant="secondary" size="sm" disabled={loading} onClick={() => void rebuild()}>
+          <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void rebuild()}>
             {t("harness.memoryRebuildSummary")}
           </Button>
           <Button
             variant="secondary"
             size="sm"
-            onClick={() =>
-              window.open(memoryExportUrl(workspacePath, "markdown"), "_blank", "noopener,noreferrer")
-            }
+            disabled={actionsDisabled}
+            onClick={() => void exportMemory("jsonl")}
           >
             <DownloadIcon size={14} />
-            {t("harness.memoryExport")}
+            {t("harness.memoryExportJsonl")}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={actionsDisabled}
+            onClick={() => void exportMemory("markdown")}
+          >
+            <DownloadIcon size={14} />
+            {t("harness.memoryExportMarkdown")}
           </Button>
         </div>
       </div>
 
       {error ? (
-        <p className="mt-3 rounded-card border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
+        <p role="alert" className="mt-3 rounded-card border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
           {error}
         </p>
       ) : null}
 
-      {status ? (
+      {status?.fallback || status?.mode === "off" ? (
+        <p className="mt-3 rounded-card border border-border bg-surface-softer px-3 py-2 text-xs text-muted-foreground">
+          {t("harness.memoryV2Unavailable", {
+            reason: status?.fallback_reason || status?.mode || "",
+          })}
+        </p>
+      ) : null}
+
+      <div aria-busy={loading}>
+      {v2Available ? (
         <>
           <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
             <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
               <div className="text-muted-foreground">{t("harness.memoryMode")}</div>
               <div className="mt-1 font-medium text-foreground">{status.mode}</div>
+            </div>
+            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
+              <div className="text-muted-foreground">{t("harness.memoryScope")}</div>
+              <div className="mt-1 font-medium text-foreground">{status.scope}</div>
+            </div>
+            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
+              <div className="text-muted-foreground">{t("harness.memoryRecordCount")}</div>
+              <div className="mt-1 font-medium text-foreground">{status.total ?? 0}</div>
             </div>
             <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
               <div className="text-muted-foreground">{t("harness.memoryInjectionMode")}</div>
@@ -207,10 +276,20 @@ export function MemoryV2Panel({
                 .join(" · ")}
             </p>
           ) : null}
+          {failedJobs.length > 0 ? (
+            <div className="mt-2 space-y-1 text-xs">
+              <div className="font-medium text-foreground">{t("harness.memoryJobErrors")}</div>
+              {failedJobs.slice(0, 5).map((job) => (
+                <div key={job.id} className="text-danger">
+                  {job.kind} · {job.status} · {job.last_error || "-"}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </>
       ) : null}
 
-      {summaries.length > 0 ? (
+      {v2Available && summaries.length > 0 ? (
         <div className="mt-3 space-y-2">
           {summaries.slice(0, 3).map((summary) => (
             <div key={summary.id} className="rounded-card border border-border px-3 py-2 text-xs">
@@ -231,7 +310,7 @@ export function MemoryV2Panel({
         </div>
       ) : null}
 
-      <div className="mt-3 space-y-2">
+      {v2Available ? <div className="mt-3 space-y-2">
         {records.length > 0 ? (
           records.slice(0, 10).map((record) => (
             <div key={record.id} className="rounded-card-lg border border-border bg-surface-softer px-3 py-2.5">
@@ -239,30 +318,38 @@ export function MemoryV2Panel({
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Badge>{record.kind}</Badge>
                 <Badge>{record.freshness_status}</Badge>
+                {privateBadge && record.sensitivity === "private" ? <Badge>{t("harness.memoryPrivate")}</Badge> : null}
                 {record.pinned ? <Badge>{t("harness.memoryPinned")}</Badge> : null}
                 <span>{record.source_kind}</span>
+                {record.source_session_id ? (
+                  <span>{t("harness.memorySourceSession", { id: record.source_session_id })}</span>
+                ) : null}
                 <span>{t("harness.memoryUseCount", { count: record.use_count ?? 0 })}</span>
                 {record.last_verified_at ? <span>{record.last_verified_at}</span> : null}
+                {record.stale_reason ? <span>{record.stale_reason}</span> : null}
+                {(record.tags ?? []).map((tag) => (
+                  <Badge key={`${record.id}-${tag}`}>#{tag}</Badge>
+                ))}
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
-                <Button variant="secondary" size="sm" disabled={loading} onClick={() => void revalidate(record)}>
+                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void revalidate(record)}>
                   {t("harness.memoryRevalidate")}
                 </Button>
-                <Button variant="secondary" size="sm" disabled={loading} onClick={() => void correct(record)}>
+                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void correct(record)}>
                   {t("harness.memoryCorrect")}
                 </Button>
-                <Button variant="secondary" size="sm" disabled={loading} onClick={() => void forget(record)}>
+                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void forget(record)}>
                   {t("harness.memoryForget")}
                 </Button>
               </div>
             </div>
           ))
-        ) : (
+        ) : !loading && !error ? (
           <SettingsEmptyState variant="dashed">{t("harness.memoryV2Empty")}</SettingsEmptyState>
-        )}
-      </div>
+        ) : null}
+      </div> : null}
 
-      {usage.length > 0 ? (
+      {v2Available && usage.length > 0 ? (
         <div className="mt-3 space-y-1 text-xs text-muted-foreground">
           <div className="font-medium text-foreground">{t("harness.memoryUsageTitle")}</div>
           {usage.slice(0, 8).map((item) => (
@@ -274,6 +361,37 @@ export function MemoryV2Panel({
           ))}
         </div>
       ) : null}
+      {v2Available && traces.length > 0 ? (
+        <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+          <div className="font-medium text-foreground">{t("harness.memoryRecallTraceTitle")}</div>
+          {traces.slice(0, 5).map((trace) => (
+            <div key={trace.id} className="rounded-card border border-border px-2 py-1.5">
+              <div className="flex flex-wrap gap-2">
+                <span className="text-foreground">{trace.query_preview || trace.query_hash.slice(0, 12)}</span>
+                <span>
+                  {t("harness.memoryRecallTraceMeta", {
+                    candidates: String(trace.candidate_count),
+                    filtered: String(trace.filtered_count),
+                    tokens: String(trace.token_estimate),
+                    budget: String(trace.token_budget),
+                  })}
+                </span>
+              </div>
+              {trace.dropped && trace.dropped.length > 0 ? (
+                <div>
+                  {t("harness.memoryRecallDropped", {
+                    reason: trace.dropped
+                      .slice(0, 4)
+                      .map((item) => `${item.id}:${item.reason}`)
+                      .join(", "),
+                  })}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      </div>
     </SettingsPanelCard>
   );
 }

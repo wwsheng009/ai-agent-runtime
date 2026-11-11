@@ -7,6 +7,8 @@ import type {
   RuntimeHarnessMemoryResponse,
   RuntimeMemoryRecord,
   RuntimeMemoryRecordsResponse,
+  RuntimeMemoryJobsResponse,
+  RuntimeMemoryRecallTracesResponse,
   RuntimeMemoryStatus,
   RuntimeMemorySummariesResponse,
   RuntimeMemoryUsageResponse,
@@ -20,6 +22,8 @@ import type {
 import {
   buildRuntimeUrlWithQuery,
   fetchRuntimeJson,
+  parseErrorPayload,
+  RuntimeApiError,
 } from "./shared";
 import { readAdminToken } from "@/lib/admin-token";
 
@@ -224,6 +228,29 @@ export async function getMemoryUsage(
   );
 }
 
+export async function getMemoryJobs(
+  workspacePath?: string,
+  limit = 20,
+): Promise<RuntimeMemoryJobsResponse> {
+  return fetchRuntimeJson<RuntimeMemoryJobsResponse>(
+    withWorkspacePath("/api/runtime/memory/jobs", workspacePath, { limit }),
+    { headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
+export async function getMemoryRecallTraces(
+  workspacePath?: string,
+  query?: { session_id?: string; limit?: number },
+): Promise<RuntimeMemoryRecallTracesResponse> {
+  return fetchRuntimeJson<RuntimeMemoryRecallTracesResponse>(
+    withWorkspacePath("/api/runtime/memory/recall-traces", workspacePath, {
+      session_id: query?.session_id,
+      limit: query?.limit,
+    }),
+    { headers: withMemoryAdminHeaders({ Accept: "application/json" }) },
+  );
+}
+
 export async function rebuildMemorySummaries(
   workspacePath?: string,
 ): Promise<{ workspace_path: string; rebuilt: number; revision?: number }> {
@@ -299,6 +326,35 @@ export function memoryExportUrl(
   format: "jsonl" | "markdown",
 ): string {
   return withWorkspacePath("/api/runtime/memory/export", workspacePath, { format });
+}
+
+/**
+ * Export is an admin endpoint. `window.open` cannot attach the
+ * X-Skills-Admin-Token header, so fetch the body with the same header set as
+ * the other governance calls and hand the browser a short-lived blob URL.
+ */
+export async function downloadMemoryExport(
+  workspacePath: string,
+  format: "jsonl" | "markdown",
+): Promise<void> {
+  const response = await fetch(memoryExportUrl(workspacePath, format), {
+    headers: withMemoryAdminHeaders({ Accept: format === "markdown" ? "text/markdown" : "application/jsonl" }),
+  });
+  if (!response.ok) {
+    throw new RuntimeApiError(response.status, await parseErrorPayload(response));
+  }
+  const blob = await response.blob();
+  const href = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = format === "markdown" ? "agent-memory.md" : "agent-memory.jsonl";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    URL.revokeObjectURL(href);
+  }
 }
 
 export async function getHarnessPlugins(

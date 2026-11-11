@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TFunction } from "i18next";
 
 import { MemoryV2Panel } from "./memory-v2-panel";
+import { adminTokenStorageKey } from "@/lib/admin-token";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -42,12 +43,18 @@ describe("MemoryV2Panel", () => {
   let container: HTMLDivElement;
   let root: Root | null;
   const originalFetch = globalThis.fetch;
+  const originalCreateObjectURL = URL.createObjectURL;
+  const originalRevokeObjectURL = URL.revokeObjectURL;
+  const originalAnchorClick = HTMLAnchorElement.prototype.click;
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    URL.createObjectURL = vi.fn(() => "blob:memory-export");
+    URL.revokeObjectURL = vi.fn();
+    HTMLAnchorElement.prototype.click = vi.fn();
   });
 
   afterEach(() => {
@@ -58,10 +65,15 @@ describe("MemoryV2Panel", () => {
     document.body.innerHTML = "";
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
     globalThis.fetch = originalFetch;
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    window.localStorage.clear();
   });
 
   it("renders status, summaries, records, usage and triggers rebuild", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
       const url = String(input);
       if (url.includes("/memory/status")) {
         return jsonResponse({
@@ -105,9 +117,39 @@ describe("MemoryV2Panel", () => {
           }],
         });
       }
+      if (url.includes("/memory/jobs")) {
+        return jsonResponse({
+          items: [{
+            id: "job_1", kind: "summary_rebuild", job_key: "sum_1:wm", scope: "project",
+            project_key: "pk", status: "failed", priority: 0, attempt: 3, max_attempts: 3,
+            last_error: "rebuild boom", created_at: "2026-11-10T00:00:00Z",
+            updated_at: "2026-11-10T00:00:00Z",
+          }],
+          count: 1,
+        });
+      }
+      if (url.includes("/memory/recall-traces")) {
+        return jsonResponse({
+          items: [{
+            id: "trace_1", session_id: "s1", project_key: "pk", query_hash: "hash",
+            query_preview: "queryTrace", candidate_count: 2, filtered_count: 1,
+            dropped: [{ id: "mem_drop", reason: "memory_budget" }],
+            token_estimate: 32, token_budget: 100, injected: true,
+            created_at: "2026-11-10T00:00:00Z",
+          }],
+          count: 1,
+        });
+      }
+      if (url.includes("/memory/export")) {
+        return new Response("# memory export", {
+          status: 200,
+          headers: { "Content-Type": "text/markdown" },
+        });
+      }
       return jsonResponse({});
     });
     globalThis.fetch = fetchMock as typeof fetch;
+    window.localStorage.setItem(adminTokenStorageKey, "memory-admin-token");
 
     await act(async () => {
       root?.render(<MemoryV2Panel t={translator()} workspacePath="/tmp/w" />);
@@ -122,6 +164,8 @@ describe("MemoryV2Panel", () => {
     expect(container.textContent).toContain("Stable summary.");
     expect(container.textContent).toContain("Use append-only memory.");
     expect(container.textContent).toContain("injected_only");
+    expect(container.textContent).toContain("rebuild boom");
+    expect(container.textContent).toContain("queryTrace");
 
     const rebuildButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Rebuild summary"),
@@ -135,5 +179,20 @@ describe("MemoryV2Panel", () => {
       String(input).includes("/memory/summaries/rebuild") &&
       (init?.method ?? "GET").toUpperCase() === "POST",
     )).toBe(true);
+
+    const exportButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Export"),
+    );
+    expect(exportButton).toBeTruthy();
+    await act(async () => {
+      exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/export") &&
+      (init?.headers as Record<string, string>)?.["X-Skills-Admin-Token"] === "memory-admin-token",
+    )).toBe(true);
+    expect(URL.createObjectURL).toHaveBeenCalled();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:memory-export");
   });
 });

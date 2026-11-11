@@ -114,7 +114,7 @@ export function HarnessMemorySection({
             </div>
           </SettingsPanelCard>
 
-          <MemoryV2Panel t={t} workspacePath={workspacePath} />
+          <MemoryV2Panel key={workspacePath || "no-workspace"} t={t} workspacePath={workspacePath} />
 
           {memoryNotes.length > 0 ? (
             <div className="space-y-2">

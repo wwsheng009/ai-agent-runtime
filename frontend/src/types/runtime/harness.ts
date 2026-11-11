@@ -127,6 +127,7 @@ export type RuntimeMemoryRecord = {
   text: string;
   tags?: string[];
   confidence?: number;
+  sensitivity?: string;
   pinned: boolean;
   retention_class?: string;
   source_kind: string;
@@ -143,6 +144,7 @@ export type RuntimeMemoryRecord = {
   last_verified_at?: string;
   revalidate_after?: string;
   stale_reason?: string;
+  usage?: RuntimeMemoryUsage[];
 };
 
 export type RuntimeMemoryRecordsResponse = {
@@ -189,6 +191,57 @@ export type RuntimeMemoryUsage = {
 export type RuntimeMemoryUsageResponse = {
   workspace_path: string;
   items: RuntimeMemoryUsage[];
+  count: number;
+};
+
+export type RuntimeMemoryJob = {
+  id: string;
+  kind: string;
+  job_key: string;
+  scope: string;
+  project_key: string;
+  status: string;
+  priority: number;
+  worker_id?: string;
+  lease_until?: string;
+  attempt: number;
+  max_attempts: number;
+  retry_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  last_error?: string;
+  input_watermark?: string;
+  last_success_watermark?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RuntimeMemoryJobsResponse = {
+  items: RuntimeMemoryJob[];
+  count: number;
+};
+
+export type RuntimeMemoryRecallTrace = {
+  id: string;
+  session_id: string;
+  turn_id?: string;
+  project_key: string;
+  query_hash: string;
+  query_preview?: string;
+  summary_revision?: number;
+  candidate_count: number;
+  filtered_count: number;
+  selected_ids?: string[];
+  dropped?: { id: string; reason: string }[];
+  token_estimate: number;
+  token_budget: number;
+  budget_source?: string;
+  injected: boolean;
+  created_at?: string;
+};
+
+export type RuntimeMemoryRecallTracesResponse = {
+  items: RuntimeMemoryRecallTrace[];
   count: number;
 };
 
