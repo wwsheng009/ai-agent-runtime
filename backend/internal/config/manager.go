@@ -1147,7 +1147,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			},
 			Generation: MemoryGenerationConfig{
 				Enabled:              true,
-				Trigger:              "idle",
+				Trigger:              "both",
 				MinIdleHours:         6,
 				MaxSessionsPerRun:    2,
 				MaxRolloutAgeDays:    30,

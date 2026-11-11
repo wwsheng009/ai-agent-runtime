@@ -21,23 +21,27 @@ import (
 )
 
 type memoryStatusResponse struct {
-	WorkspacePath     string         `json:"workspace_path"`
-	Mode              string         `json:"mode"`
-	Scope             string         `json:"scope"`
-	DBPath            string         `json:"db_path,omitempty"`
-	SchemaVersion     int            `json:"schema_version"`
-	Total             int            `json:"total"`
-	ByStatus          map[string]int `json:"by_status,omitempty"`
-	ByFreshness       map[string]int `json:"by_freshness,omitempty"`
-	SummaryRevision   int64          `json:"summary_revision,omitempty"`
-	SummaryStatus     string         `json:"summary_status,omitempty"`
-	SummaryFreshness  string         `json:"summary_freshness,omitempty"`
-	PinnedCount       int            `json:"pinned_count,omitempty"`
-	PinnedBudgetRatio float64        `json:"pinned_budget_ratio,omitempty"`
-	InjectionMode     string         `json:"injection_mode,omitempty"`
-	Jobs              map[string]int `json:"jobs,omitempty"`
-	Fallback          bool           `json:"fallback"`
-	FallbackReason    string         `json:"fallback_reason,omitempty"`
+	WorkspacePath        string         `json:"workspace_path"`
+	Mode                 string         `json:"mode"`
+	Scope                string         `json:"scope"`
+	DBPath               string         `json:"db_path,omitempty"`
+	SchemaVersion        int            `json:"schema_version"`
+	Total                int            `json:"total"`
+	ByStatus             map[string]int `json:"by_status,omitempty"`
+	ByFreshness          map[string]int `json:"by_freshness,omitempty"`
+	SummaryRevision      int64          `json:"summary_revision,omitempty"`
+	SummaryStatus        string         `json:"summary_status,omitempty"`
+	SummaryFreshness     string         `json:"summary_freshness,omitempty"`
+	PinnedCount          int            `json:"pinned_count,omitempty"`
+	PinnedBudgetRatio    float64        `json:"pinned_budget_ratio,omitempty"`
+	InjectionMode        string         `json:"injection_mode,omitempty"`
+	GenerationEnabled    bool           `json:"generation_enabled"`
+	GenerationTrigger    string         `json:"generation_trigger,omitempty"`
+	ConsolidationEnabled bool           `json:"consolidation_enabled"`
+	ManualEnabled        bool           `json:"manual_enabled"`
+	Jobs                 map[string]int `json:"jobs,omitempty"`
+	Fallback             bool           `json:"fallback"`
+	FallbackReason       string         `json:"fallback_reason,omitempty"`
 }
 
 type memoryRecordDTO struct {
@@ -201,6 +205,10 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.runtimeConfig != nil {
 		response.PinnedBudgetRatio = h.runtimeConfig.Memory.Injection.PinnedBudgetRatio
+		response.GenerationEnabled = h.runtimeConfig.Memory.Generation.Enabled
+		response.GenerationTrigger = h.runtimeConfig.Memory.Generation.Trigger
+		response.ConsolidationEnabled = h.runtimeConfig.Memory.Consolidation.Enabled
+		response.ManualEnabled = h.runtimeConfig.Memory.Manual.Enabled
 	}
 	h.writeJSON(w, http.StatusOK, response)
 }

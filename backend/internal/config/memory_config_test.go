@@ -12,7 +12,7 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, "project", cfg.Memory.Scope)
 	require.True(t, cfg.Memory.Manual.Enabled)
 	require.True(t, cfg.Memory.Generation.Enabled)
-	require.Equal(t, "idle", cfg.Memory.Generation.Trigger)
+	require.Equal(t, "both", cfg.Memory.Generation.Trigger)
 	require.Equal(t, 6, cfg.Memory.Generation.MinIdleHours)
 	require.Equal(t, 2, cfg.Memory.Generation.MaxSessionsPerRun)
 	require.Equal(t, 20, cfg.Memory.Generation.MaxRecordsPerSession)

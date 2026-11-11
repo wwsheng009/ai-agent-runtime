@@ -45,6 +45,10 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.NoError(t, json.NewDecoder(statusRec.Body).Decode(&status))
 	require.Equal(t, "on", status.Mode)
 	require.False(t, status.Fallback)
+	require.True(t, status.GenerationEnabled)
+	require.Equal(t, "both", status.GenerationTrigger)
+	require.True(t, status.ConsolidationEnabled)
+	require.True(t, status.ManualEnabled)
 
 	body := `{"text":"prefer apply_patch for multi-hunk edits","kind":"workflow","tags":["workflow"],"session_id":"s1"}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
