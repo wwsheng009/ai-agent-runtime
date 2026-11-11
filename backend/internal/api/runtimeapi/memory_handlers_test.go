@@ -105,6 +105,53 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.Equal(t, 0, listed.Count)
 }
 
+func TestMemoryAPIWhyNotRequiresAdminAndExplainsSelection(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(`{"text":"why-not alpha record","kind":"fact"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	require.Equal(t, http.StatusOK, createRec.Code, createRec.Body.String())
+	var created memoryRecordDTO
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	whyNotReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/why-not?q=alpha", nil)
+	whyNotReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	whyNotRec := httptest.NewRecorder()
+	router.ServeHTTP(whyNotRec, whyNotReq)
+	require.Equal(t, http.StatusOK, whyNotRec.Code, whyNotRec.Body.String())
+	var explanation memoryWhyNotResponse
+	require.NoError(t, json.NewDecoder(whyNotRec.Body).Decode(&explanation))
+	require.Equal(t, "on", explanation.Mode)
+	require.Equal(t, "alpha", explanation.QueryPreview)
+	require.True(t, explanation.Injected)
+	require.NotEmpty(t, explanation.Selected)
+	require.Equal(t, created.ID, explanation.Selected[0].ID)
+
+	secretReq := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/why-not?q="+url.QueryEscape("sk-abcdefghijklmnop"), nil)
+	secretReq.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	secretRec := httptest.NewRecorder()
+	router.ServeHTTP(secretRec, secretReq)
+	require.Equal(t, http.StatusOK, secretRec.Code, secretRec.Body.String())
+	var secretExplanation memoryWhyNotResponse
+	require.NoError(t, json.NewDecoder(secretRec.Body).Decode(&secretExplanation))
+	require.NotContains(t, secretExplanation.QueryPreview, "sk-abcdefghijklmnop")
+	require.Contains(t, secretExplanation.QueryPreview, "REDACTED")
+
+	missingQuery := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/why-not", nil)
+	missingQuery.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	missingRec := httptest.NewRecorder()
+	router.ServeHTTP(missingRec, missingQuery)
+	require.Equal(t, http.StatusBadRequest, missingRec.Code, missingRec.Body.String())
+
+	unauthorized := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/why-not?q=alpha", nil)
+	unauthorizedRec := httptest.NewRecorder()
+	router.ServeHTTP(unauthorizedRec, unauthorized)
+	require.Equal(t, http.StatusForbidden, unauthorizedRec.Code, unauthorizedRec.Body.String())
+}
+
 func TestMemoryAPIWorkspaceBindingAndAdmin(t *testing.T) {
 	workspace := t.TempDir()
 	other := t.TempDir()

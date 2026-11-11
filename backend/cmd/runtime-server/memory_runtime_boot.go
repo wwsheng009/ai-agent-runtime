@@ -31,7 +31,9 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	trigger := strings.ToLower(strings.TrimSpace(cfg.Memory.Generation.Trigger))
 	idleEnabled := cfg.Memory.Generation.Enabled && (trigger == "idle" || trigger == "both")
 	consolidationEnabled := cfg.Memory.Consolidation.Enabled
-	if !idleEnabled && !consolidationEnabled {
+	retentionEnabled := cfg.Memory.Injection.RecallTrace.RetentionDays > 0 ||
+		cfg.Memory.Feedback.ExposureRetentionDays > 0
+	if !idleEnabled && !consolidationEnabled && !retentionEnabled {
 		return nil, nil
 	}
 	sweepCtx, cancel := context.WithCancel(ctx)
@@ -51,6 +53,11 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 				if consolidationEnabled {
 					if _, err := handler.RunMemoryConsolidation(sweepCtx); err != nil {
 						logger.Warn("memory consolidation failed", logger.Err(err))
+					}
+				}
+				if retentionEnabled {
+					if _, err := rt.Store.PruneDiagnostics(sweepCtx, time.Now().UTC()); err != nil {
+						logger.Warn("memory diagnostics retention failed", logger.Err(err))
 					}
 				}
 			}

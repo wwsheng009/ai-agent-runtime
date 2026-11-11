@@ -1270,6 +1270,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/status", h.GetMemoryStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/records", h.ListMemoryRecords).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/why-not", h.GetMemoryWhyNot).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/records", h.CreateMemoryRecord).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.GetMemoryRecord).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.PatchMemoryRecord).Methods(http.MethodPatch)

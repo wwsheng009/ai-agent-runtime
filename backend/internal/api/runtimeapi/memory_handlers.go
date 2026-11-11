@@ -149,6 +149,30 @@ type memoryRecallTraceDTO struct {
 	CreatedAt       string                      `json:"created_at,omitempty"`
 }
 
+type memoryWhyNotSelectedDTO struct {
+	ID            string `json:"id"`
+	Stage         string `json:"stage"`
+	Kind          string `json:"kind,omitempty"`
+	Pinned        bool   `json:"pinned,omitempty"`
+	SourceKind    string `json:"source_kind,omitempty"`
+	TokenEstimate int    `json:"token_estimate,omitempty"`
+}
+
+type memoryWhyNotResponse struct {
+	WorkspacePath   string                      `json:"workspace_path"`
+	Mode            string                      `json:"mode"`
+	QueryPreview    string                      `json:"query_preview"`
+	QueryTruncated  bool                        `json:"query_truncated"`
+	SummaryRevision int64                       `json:"summary_revision,omitempty"`
+	CandidateCount  int                         `json:"candidate_count"`
+	FilteredCount   int                         `json:"filtered_count"`
+	Selected        []memoryWhyNotSelectedDTO   `json:"selected"`
+	Dropped         []memorystore.DroppedRecord `json:"dropped"`
+	TokenEstimate   int                         `json:"token_estimate"`
+	TokenBudget     int                         `json:"token_budget"`
+	Injected        bool                        `json:"injected"`
+}
+
 func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	workspace, err := h.resolveMemoryWorkspace(r, "")
 	if err != nil {
@@ -244,6 +268,104 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	h.writeJSON(w, http.StatusOK, memoryRecordListResponse{
 		WorkspacePath: workspace, Items: items, Count: len(items), NextCursor: page.NextCursor,
+	})
+}
+
+func (h *Handler) GetMemoryWhyNot(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	query := firstNonEmpty(
+		strings.TrimSpace(r.URL.Query().Get("q")),
+		strings.TrimSpace(r.URL.Query().Get("query")),
+	)
+	if query == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "q is required"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	limit := parsePositiveIntQuery(r, "limit", 8)
+	if limit > 50 {
+		limit = 50
+	}
+	budget := parsePositiveIntQuery(r, "token_budget", 0)
+	if budget <= 0 && h.runtimeConfig != nil {
+		budget = h.runtimeConfig.Memory.Injection.TokenBudget
+	}
+	if budget <= 0 {
+		budget = memorystore.DefaultTokenBudget
+	}
+	if budget > 8000 {
+		budget = 8000
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	selection, err := store.DiagnoseInjection(memorystore.InjectOptions{
+		Query: query, Limit: limit, TokenBudget: budget,
+		SessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
+		SkipTrace: true,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	selected := make([]memoryWhyNotSelectedDTO, 0, len(selection.IDs))
+	seen := make(map[string]struct{}, len(selection.IDs))
+	addSelected := func(record memorystore.Record, stage string) {
+		if _, ok := seen[record.ID]; ok {
+			return
+		}
+		seen[record.ID] = struct{}{}
+		selected = append(selected, memoryWhyNotSelectedDTO{
+			ID: record.ID, Stage: stage, Kind: record.Kind, Pinned: record.Pinned,
+			SourceKind: record.SourceKind, TokenEstimate: memorystore.EstimateTokens(record.Text),
+		})
+	}
+	for _, record := range selection.Stable {
+		addSelected(record, "stable")
+	}
+	for _, record := range selection.Recall {
+		addSelected(record, "recall")
+	}
+	if selection.Summary != nil {
+		for _, id := range selection.Summary.RecordIDs {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			selected = append(selected, memoryWhyNotSelectedDTO{ID: id, Stage: "summary"})
+		}
+	}
+	preview, _ := memoryredact.Redact(query)
+	preview = strings.TrimSpace(preview)
+	truncated := false
+	if runes := []rune(preview); len(runes) > 160 {
+		preview = string(runes[:160]) + "…"
+		truncated = true
+	}
+	dropped := selection.Dropped
+	if dropped == nil {
+		dropped = []memorystore.DroppedRecord{}
+	}
+	h.writeJSON(w, http.StatusOK, memoryWhyNotResponse{
+		WorkspacePath: workspace, Mode: store.Mode(), QueryPreview: preview,
+		QueryTruncated: truncated, SummaryRevision: selection.Revision,
+		CandidateCount: selection.CandidateCount, FilteredCount: selection.FilteredCount,
+		Selected: selected, Dropped: dropped, TokenEstimate: selection.TokenEstimate,
+		TokenBudget: budget, Injected: len(selected) > 0,
 	})
 }
 

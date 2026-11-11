@@ -902,7 +902,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			if query == "" || store.Mode() == "off" {
 				return CommandResult{}, false, nil
 			}
-			selection, err := store.SelectForInjectV2(memorystore.InjectOptions{
+			selection, err := store.DiagnoseInjection(memorystore.InjectOptions{
 				Query: query, Limit: 8, TokenBudget: 600, SessionID: chatSessionID(session),
 				SkipTrace: true,
 			})

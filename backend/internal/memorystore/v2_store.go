@@ -475,6 +475,18 @@ func (s *Store) searchV2(opts SearchOptions) ([]SearchHit, error) {
 }
 
 func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
+	return s.selectForInjectV2Internal(opts, false)
+}
+
+// DiagnoseInjection runs the normal selection pipeline but also explains why
+// otherwise eligible records were excluded (status, freshness, privacy,
+// expiry, suppression, budget or query mismatch). It never writes a recall
+// trace and never exposes record text.
+func (s *Store) DiagnoseInjection(opts InjectOptions) (Selection, error) {
+	return s.selectForInjectV2Internal(opts, true)
+}
+
+func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (Selection, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return Selection{}, err
@@ -491,9 +503,25 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	records, err := s.loadInjectableRecords(context.Background(), db, now)
-	if err != nil {
-		return Selection{}, err
+	var (
+		records           []Record
+		diagnosticRecords []Record
+		initialDropped    []DroppedRecord
+	)
+	if diagnostic {
+		diagnosticRecords, err = s.loadRecordsForInjectionDiagnostics(context.Background(), db, 500)
+		if err != nil {
+			return Selection{}, err
+		}
+		records, initialDropped, err = s.classifyInjectableRecords(context.Background(), db, diagnosticRecords, now)
+		if err != nil {
+			return Selection{}, err
+		}
+	} else {
+		records, err = s.loadInjectableRecords(context.Background(), db, now)
+		if err != nil {
+			return Selection{}, err
+		}
 	}
 	mode := strings.ToLower(strings.TrimSpace(s.cfg.InjectionMode))
 	if mode != "summary" && mode != "hybrid" && mode != "notes" {
@@ -501,7 +529,11 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	}
 	supportsSummary := mode == "summary" || mode == "hybrid"
 	supportsRecall := mode == "hybrid" || mode == "notes"
-	selection := Selection{CandidateCount: len(records)}
+	candidateCount := len(records)
+	if diagnostic {
+		candidateCount = len(diagnosticRecords)
+	}
+	selection := Selection{CandidateCount: candidateCount, Dropped: initialDropped}
 	pinnedBudget := int(float64(budget) * s.cfg.PinnedBudgetRatio)
 	pinnedUsed := 0
 	stableIDs := map[string]struct{}{}
@@ -569,6 +601,9 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	if !supportsRecall {
 		selection.TokenEstimate = summaryUsed + pinnedUsed
 		selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
+		if diagnostic {
+			appendWhyNotNoMatch(&selection, diagnosticRecords, opts.Query)
+		}
 		selection.FilteredCount = len(selection.Dropped)
 		if !opts.SkipTrace {
 			_ = s.recordRecallTrace(opts, selection)
@@ -623,11 +658,129 @@ func (s *Store) selectForInjectV2(opts InjectOptions) (Selection, error) {
 	for _, record := range selection.Recall {
 		selection.IDs = append(selection.IDs, record.ID)
 	}
+	if diagnostic {
+		appendWhyNotNoMatch(&selection, diagnosticRecords, opts.Query)
+	}
 	selection.FilteredCount = len(selection.Dropped)
 	if !opts.SkipTrace {
 		_ = s.recordRecallTrace(opts, selection)
 	}
 	return selection, nil
+}
+
+func (s *Store) loadRecordsForInjectionDiagnostics(ctx context.Context, db *sql.DB, limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
+       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
+       created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
+       freshness_status, last_verified_at, revalidate_after, stale_reason,
+       deleted_at, metadata_json
+FROM memory_entries
+WHERE scope = ? AND project_key = ?
+ORDER BY pinned DESC, use_count DESC, updated_at DESC, id ASC
+LIMIT ?
+`, string(ScopeProject), s.cfg.ProjectKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]Record, 0, 32)
+	for rows.Next() {
+		record, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) classifyInjectableRecords(ctx context.Context, db *sql.DB, records []Record, now time.Time) ([]Record, []DroppedRecord, error) {
+	suppressed, err := s.loadActiveSuppressionHashes(ctx, db, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	eligible := make([]Record, 0, len(records))
+	dropped := make([]DroppedRecord, 0)
+	for _, record := range records {
+		reason := ""
+		switch {
+		case !record.DeletedAt.IsZero():
+			reason = "deleted"
+		case record.Status != StatusActive:
+			reason = "status_" + strings.ToLower(string(record.Status))
+		case !record.ValidUntil.IsZero() && !record.ValidUntil.After(now):
+			reason = "expired"
+		case strings.EqualFold(record.Sensitivity, "private"):
+			reason = "private"
+		case record.Freshness != FreshnessFresh:
+			if strings.TrimSpace(string(record.Freshness)) == "" {
+				reason = "unverified"
+			} else {
+				reason = strings.ToLower(string(record.Freshness))
+			}
+		case memoryredact.DetectSecret(record.Text) != "":
+			reason = "secret"
+		default:
+			if _, ok := suppressed[record.ContentHash]; ok {
+				reason = "suppressed"
+			}
+		}
+		if reason != "" {
+			dropped = append(dropped, DroppedRecord{ID: record.ID, Reason: reason})
+			continue
+		}
+		eligible = append(eligible, record)
+	}
+	return eligible, dropped, nil
+}
+
+func (s *Store) loadActiveSuppressionHashes(ctx context.Context, db *sql.DB, now time.Time) (map[string]struct{}, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT content_hash FROM memory_suppressions
+WHERE scope = ? AND project_key = ?
+  AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
+`, string(ScopeProject), s.cfg.ProjectKey, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		out[hash] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+func appendWhyNotNoMatch(selection *Selection, records []Record, query string) {
+	if selection == nil || strings.TrimSpace(query) == "" {
+		return
+	}
+	selected := make(map[string]struct{}, len(selection.IDs))
+	for _, id := range selection.IDs {
+		selected[id] = struct{}{}
+	}
+	explained := make(map[string]struct{}, len(selection.Dropped))
+	for _, item := range selection.Dropped {
+		explained[item.ID] = struct{}{}
+	}
+	for _, record := range records {
+		if _, ok := selected[record.ID]; ok {
+			continue
+		}
+		if _, ok := explained[record.ID]; ok {
+			continue
+		}
+		selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "no_match"})
+	}
 }
 
 func appendSelectionIDs(ids []string, stable []Record, summary *Summary) []string {

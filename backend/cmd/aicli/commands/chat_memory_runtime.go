@@ -31,13 +31,15 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 	memoryCfg := h.RuntimeConfig.Memory
 	store, err := memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:         memoryCfg.Injection.Mode,
-		PinnedBudgetRatio:     memoryCfg.Injection.PinnedBudgetRatio,
-		DisableStageSplit:     !memoryCfg.Injection.StageSplit,
-		DisableInjection:      !memoryCfg.Injection.Enabled,
-		DisableManual:         !memoryCfg.Manual.Enabled,
-		RecallTraceEnabled:    memoryCfg.Injection.RecallTrace.Enabled,
-		RecallTraceSampleRate: memoryCfg.Injection.RecallTrace.SampleRate,
+		InjectionMode:            memoryCfg.Injection.Mode,
+		PinnedBudgetRatio:        memoryCfg.Injection.PinnedBudgetRatio,
+		DisableStageSplit:        !memoryCfg.Injection.StageSplit,
+		DisableInjection:         !memoryCfg.Injection.Enabled,
+		DisableManual:            !memoryCfg.Manual.Enabled,
+		RecallTraceEnabled:       memoryCfg.Injection.RecallTrace.Enabled,
+		RecallTraceSampleRate:    memoryCfg.Injection.RecallTrace.SampleRate,
+		RecallTraceRetentionDays: memoryCfg.Injection.RecallTrace.RetentionDays,
+		ExposureRetentionDays:    memoryCfg.Feedback.ExposureRetentionDays,
 	})
 	if err != nil {
 		return err
@@ -81,7 +83,9 @@ func (h *localChatRuntimeHost) startMemoryIdleSweep() {
 	trigger := strings.ToLower(strings.TrimSpace(generation.Trigger))
 	idleEnabled := generation.Enabled && (trigger == "idle" || trigger == "both")
 	consolidationEnabled := h.RuntimeConfig.Memory.Consolidation.Enabled
-	if !idleEnabled && !consolidationEnabled {
+	retentionEnabled := h.RuntimeConfig.Memory.Injection.RecallTrace.RetentionDays > 0 ||
+		h.RuntimeConfig.Memory.Feedback.ExposureRetentionDays > 0
+	if !idleEnabled && !consolidationEnabled && !retentionEnabled {
 		return
 	}
 	go func() {
@@ -98,6 +102,9 @@ func (h *localChatRuntimeHost) startMemoryIdleSweep() {
 				if consolidationEnabled {
 					consolidator := memoryruntime.NewConsolidator(h.MemoryRuntime.Store, h.MemoryRuntime.Config)
 					_, _ = consolidator.Run(h.lifecycleCtx)
+				}
+				if retentionEnabled {
+					_, _ = h.MemoryRuntime.Store.PruneDiagnostics(h.lifecycleCtx, time.Now().UTC())
 				}
 			}
 		}

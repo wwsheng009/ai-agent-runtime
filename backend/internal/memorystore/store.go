@@ -87,6 +87,10 @@ type Config struct {
 	// runtime config keeps traces off until an operator opts in.
 	RecallTraceEnabled    bool
 	RecallTraceSampleRate float64
+	// RecallTraceRetentionDays/ExposureRetentionDays bound diagnostic tables.
+	// Zero disables the corresponding cleanup.
+	RecallTraceRetentionDays int
+	ExposureRetentionDays    int
 }
 
 // Store is a file-backed durable project memory.
