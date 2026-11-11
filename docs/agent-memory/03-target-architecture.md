@@ -149,6 +149,7 @@ correction      对旧记忆的修正
 补充规则：
 
 - **手工记忆是既有能力**，由 `manual.enabled` 控制，默认保持现状；
+- **手工 add 不是自动记忆的前置条件**；正常路径由 session-end/idle 自动抽取，手工入口只用于用户显式“记住”和旧数据兼容；
 - `off` 下没有手工访问时，不创建 v2 DB；
 - `off` 下的手工 notes 可继续使用旧 JSONL 兼容路径，或在已迁移项目中只读写 manual records；
 - `shadow` 生成数据但不进入 prompt、不注册记忆工具；

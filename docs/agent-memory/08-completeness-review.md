@@ -41,6 +41,10 @@ import/export、Web 管理（含 job/recall trace、why-not、pin/unpin、restor
 与结构化 `/memory` 扩展。M5 指标查询已落地，真实项目 shadow 评估与逐项目
 上线仍待执行。
 
+2026-11-11 补充：默认自动触发已对齐为 `idle + session_end`；新增
+`TestAutomaticMemoryEndToEndWithoutManualSeed`，验证不手工写入时也能从
+transcript 自动生成 candidate、Consolidation、summary 并进入召回。
+
 ### 1.2 设计状态
 
 原方案已经覆盖主流程，但审查发现以下关键点会导致“看似有方案、实际无法闭环”：

@@ -487,7 +487,7 @@ trigger
 | turn-end | 每轮结束 | **不做自动抽取** | 只做轻量触发记录/usage，不跑 LLM |
 | explicit remember | 用户说“记住/以后都这样” | 手动工具 | manual active + pinned，不等待 Consolidation |
 
-第一版推荐 `both`（idle + session_end 兜底），至少启用 idle 或 session-end 之一；不在对话请求中同步提取。
+第一版推荐 `both`（idle + session_end 兜底），至少启用 idle 或 session-end 之一；不在对话请求中同步提取。正常自动记忆不要求用户手工 `/memory add`；manual add 只用于显式“记住”、迁移和确定性测试种子。
 具体启用哪一个由 `memory.generation.trigger` 决定；`both` 表示 idle sweep 与 session-end 都启用，其他值只启用对应触发器。
 
 接入点建议：

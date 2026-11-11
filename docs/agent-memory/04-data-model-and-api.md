@@ -671,7 +671,7 @@ memory:
 
   generation:
     enabled: true
-    trigger: idle        # idle | session_end | both | manual；on 环境推荐 both
+    trigger: both        # idle | session_end | both | manual；自动记忆默认 idle + session_end
     minIdleHours: 6
     maxSessionsPerRun: 2
     maxRolloutAgeDays: 30
