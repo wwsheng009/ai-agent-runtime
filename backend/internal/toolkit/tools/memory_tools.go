@@ -105,6 +105,11 @@ func (t *memoryTool) openStore() (*memorystore.Store, error) {
 	if mode == "" {
 		mode = "off"
 	}
+	staleBehavior := "exclude"
+	if t.cfg.Memory.Freshness.Enabled &&
+		strings.EqualFold(strings.TrimSpace(t.cfg.Memory.Freshness.StaleBehavior), "warn") {
+		staleBehavior = "warn"
+	}
 	return memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: t.cfg.Memory.StorePath,
 		InjectionMode:         t.cfg.Memory.Injection.Mode,
@@ -114,6 +119,9 @@ func (t *memoryTool) openStore() (*memorystore.Store, error) {
 		DisableManual:         !t.cfg.Memory.Manual.Enabled,
 		RecallTraceEnabled:    t.cfg.Memory.Injection.RecallTrace.Enabled,
 		RecallTraceSampleRate: t.cfg.Memory.Injection.RecallTrace.SampleRate,
+		StaleBehavior:         staleBehavior,
+		DisableSecretFilter:   !t.cfg.Memory.Redaction.Enabled,
+		TurnDigestBatchSize:   t.cfg.Memory.Generation.TurnDigest.MaxTurnsPerBatch,
 	})
 }
 
@@ -282,7 +290,7 @@ func (t *memoryTool) why(ctx context.Context, store *memorystore.Store, params m
 }
 
 func (t *memoryTool) whyNot(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	selection, err := store.SelectForInjectV2(memorystore.InjectOptions{
+	selection, err := store.DiagnoseInjection(memorystore.InjectOptions{
 		Query: strings.TrimSpace(memoryStringParam(params, "query")), Limit: memoryBoundedIntParam(params, "limit", 5, 20),
 		TokenBudget: memoryBoundedIntParam(params, "token_budget", 0, 4000),
 		SessionID:   strings.TrimSpace(toolctx.SessionID(ctx)),

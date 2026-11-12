@@ -3,6 +3,7 @@ import { DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  activateMemorySummary,
   correctMemoryRecord,
   deleteMemoryRecord,
   downloadMemoryExport,
@@ -12,11 +13,13 @@ import {
   getMemoryStatus,
   getMemorySummaries,
   getMemoryUsage,
+  purgeMemoryTurnWindows,
   rebuildMemorySummaries,
   resetMemory,
   revalidateMemoryRecord,
   restoreMemoryRecord,
   RuntimeApiError,
+  setMemorySessionMode,
   setMemoryRecordPinned,
   type RuntimeMemoryRecord,
   type RuntimeMemoryJob,
@@ -30,6 +33,14 @@ import { Button } from "@/components/ui/button";
 
 import { SettingsEmptyState } from "../settings-empty-state";
 import { SettingsPanelCard } from "../settings-panel-card";
+import {
+  MemoryV2Alerts,
+  MemoryV2Diagnostics,
+  MemoryV2SessionGovernance,
+  MemoryV2StatusGrid,
+  MemoryV2Summaries,
+  MemoryV2UsageAndTraces,
+} from "./memory-v2-sections";
 import { MemoryV2WhyNot } from "./memory-v2-why-not";
 
 function errorMessage(error: unknown) {
@@ -52,6 +63,9 @@ export function MemoryV2Panel({
   const [jobs, setJobs] = useState<RuntimeMemoryJob[]>([]);
   const [traces, setTraces] = useState<RuntimeMemoryRecallTrace[]>([]);
   const [deletedRecords, setDeletedRecords] = useState<RuntimeMemoryRecord[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [sessionID, setSessionID] = useState("");
+  const [sessionMode, setSessionMode] = useState<"enabled" | "disabled" | "polluted">("enabled");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
@@ -65,11 +79,13 @@ export function MemoryV2Panel({
       setJobs([]);
       setTraces([]);
       setDeletedRecords([]);
+      setNotice(null);
       return;
     }
     const requestId = ++requestSeq.current;
     setLoading(true);
     setError(null);
+    setNotice(null);
     try {
       const [statusResult, recordsResult, deletedResult, summariesResult, usageResult, jobsResult, tracesResult] =
         await Promise.allSettled([
@@ -117,6 +133,83 @@ export function MemoryV2Panel({
     try {
       await rebuildMemorySummaries(workspacePath);
       await reload();
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function activateRevision(summary: RuntimeMemorySummary) {
+    if (!workspacePath) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await activateMemorySummary(summary.id, workspacePath);
+      await reload();
+      setNotice(
+        t("harness.memoryActivateSummaryDone", {
+          revision: String(summary.revision),
+        }),
+      );
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function applySessionMode() {
+    if (!workspacePath) return;
+    const id = sessionID.trim();
+    if (!id) {
+      setError(t("harness.memorySessionIDRequired"));
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      await setMemorySessionMode(id, sessionMode, workspacePath);
+      await reload();
+      setNotice(
+        t("harness.memorySessionModeApplied", {
+          session: id,
+          mode: sessionMode,
+        }),
+      );
+    } catch (actionError) {
+      setError(errorMessage(actionError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function purgeWindows(all: boolean) {
+    if (!workspacePath) return;
+    const id = sessionID.trim();
+    if (!all && !id) {
+      setError(t("harness.memorySessionIDRequired"));
+      return;
+    }
+    if (!window.confirm(all
+      ? t("harness.memoryPurgeAllWindowsConfirm")
+      : t("harness.memoryPurgeSessionWindowsConfirm", { session: id }))) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await purgeMemoryTurnWindows(
+        workspacePath,
+        all ? { all: true } : { sessionId: id },
+      );
+      await reload();
+      setNotice(
+        t("harness.memoryPurgeWindowsDone", {
+          windows: String(result.windows_deleted),
+          digests: String(result.digests_released),
+        }),
+      );
     } catch (actionError) {
       setError(errorMessage(actionError));
     } finally {
@@ -226,8 +319,6 @@ export function MemoryV2Panel({
   if (!workspacePath) return null;
   const v2Available = status !== null && status.mode !== "off" && !status.fallback;
   const actionsDisabled = loading || !v2Available;
-  const privateBadge = status?.mode === "on";
-  const failedJobs = jobs.filter((job) => job.status === "failed" || job.last_error);
 
   return (
     <SettingsPanelCard title={t("harness.memoryV2Title")}>
@@ -278,11 +369,7 @@ export function MemoryV2Panel({
         </div>
       </div>
 
-      {error ? (
-        <p role="alert" className="mt-3 rounded-card border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
-          {error}
-        </p>
-      ) : null}
+      <MemoryV2Alerts error={error} notice={notice} />
 
       {status?.fallback || status?.mode === "off" ? (
         <p className="mt-3 rounded-card border border-border bg-surface-softer px-3 py-2 text-xs text-muted-foreground">
@@ -295,72 +382,19 @@ export function MemoryV2Panel({
       <div aria-busy={loading}>
       {v2Available ? (
         <>
-          <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryMode")}</div>
-              <div className="mt-1 font-medium text-foreground">{status.mode}</div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryScope")}</div>
-              <div className="mt-1 font-medium text-foreground">{status.scope}</div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryRecordCount")}</div>
-              <div className="mt-1 font-medium text-foreground">{status.total ?? 0}</div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryInjectionMode")}</div>
-              <div className="mt-1 font-medium text-foreground">{status.injection_mode || "-"}</div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryAutoLearning")}</div>
-              <div className="mt-1 font-medium text-foreground">
-                {status.generation_enabled
-                  ? t("harness.memoryAutoLearningEnabled", {
-                      trigger: status.generation_trigger || "-",
-                    })
-                  : t("harness.memoryDisabled")}
-              </div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryManualMode")}</div>
-              <div className="mt-1 font-medium text-foreground">
-                {status.manual_enabled ? t("harness.memoryManualExplicit") : t("harness.memoryDisabled")}
-              </div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memorySummary")}</div>
-              <div className="mt-1 font-medium text-foreground">
-                {t("harness.memoryRevision", { revision: String(status.summary_revision ?? 0) })} ·{" "}
-                {status.summary_status || "-"} ·{" "}
-                {status.summary_freshness || "-"}
-              </div>
-            </div>
-            <div className="rounded-card border border-border bg-surface-softer px-3 py-2">
-              <div className="text-muted-foreground">{t("harness.memoryPinnedBudget")}</div>
-              <div className="mt-1 font-medium text-foreground">
-                {status.pinned_count ?? 0} · {Math.round((status.pinned_budget_ratio ?? 0) * 100)}%
-              </div>
-            </div>
-          </div>
-          {status.jobs && Object.keys(status.jobs).length > 0 ? (
-            <p className="mt-2 text-xs text-muted-foreground">
-              {t("harness.memoryJobs")}:{" "}
-              {Object.entries(status.jobs)
-                .map(([key, value]) => `${key}=${value}`)
-                .join(" · ")}
-            </p>
-          ) : null}
-          {failedJobs.length > 0 ? (
-            <div className="mt-2 space-y-1 text-xs">
-              <div className="font-medium text-foreground">{t("harness.memoryJobErrors")}</div>
-              {failedJobs.slice(0, 5).map((job) => (
-                <div key={job.id} className="text-danger">
-                  {job.kind} · {job.status} · {job.last_error || "-"}
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <MemoryV2StatusGrid t={t} status={status} />
+          <MemoryV2Diagnostics t={t} status={status} jobs={jobs} />
+          <MemoryV2SessionGovernance
+            t={t}
+            sessionID={sessionID}
+            sessionMode={sessionMode}
+            disabled={actionsDisabled}
+            onSessionIDChange={setSessionID}
+            onSessionModeChange={setSessionMode}
+            onApplySessionMode={() => void applySessionMode()}
+            onPurgeSession={() => void purgeWindows(false)}
+            onPurgeAll={() => void purgeWindows(true)}
+          />
         </>
       ) : null}
 
@@ -373,25 +407,13 @@ export function MemoryV2Panel({
         />
       ) : null}
 
-      {v2Available && summaries.length > 0 ? (
-        <div className="mt-3 space-y-2">
-          {summaries.slice(0, 3).map((summary) => (
-            <div key={summary.id} className="rounded-card border border-border px-3 py-2 text-xs">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge>{summary.status}</Badge>
-                <Badge>{summary.freshness_status}</Badge>
-                <span className="text-muted-foreground">
-                  {t("harness.memorySummaryMeta", {
-                    revision: String(summary.revision),
-                    tokens: String(summary.token_estimate),
-                    items: String(summary.source_count),
-                  })}
-                </span>
-              </div>
-              <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-foreground">{summary.text}</p>
-            </div>
-          ))}
-        </div>
+      {v2Available ? (
+        <MemoryV2Summaries
+          t={t}
+          summaries={summaries}
+          disabled={actionsDisabled}
+          onActivate={(summary) => void activateRevision(summary)}
+        />
       ) : null}
 
       {v2Available ? <div className="mt-3 space-y-2">
@@ -402,7 +424,7 @@ export function MemoryV2Panel({
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Badge>{record.kind}</Badge>
                 <Badge>{record.freshness_status}</Badge>
-                {privateBadge && record.sensitivity === "private" ? <Badge>{t("harness.memoryPrivate")}</Badge> : null}
+                {status.mode === "on" && record.sensitivity === "private" ? <Badge>{t("harness.memoryPrivate")}</Badge> : null}
                 {record.pinned ? <Badge>{t("harness.memoryPinned")}</Badge> : null}
                 <span>{record.source_kind}</span>
                 {record.source_session_id ? (
@@ -454,48 +476,7 @@ export function MemoryV2Panel({
         </div>
       ) : null}
 
-      {v2Available && usage.length > 0 ? (
-        <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-          <div className="font-medium text-foreground">{t("harness.memoryUsageTitle")}</div>
-          {usage.slice(0, 8).map((item) => (
-            <div key={item.id} className="flex flex-wrap gap-2">
-              <Badge>{item.use_kind}</Badge>
-              <span>{item.memory_id}</span>
-              <span>{item.used_at}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {v2Available && traces.length > 0 ? (
-        <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-          <div className="font-medium text-foreground">{t("harness.memoryRecallTraceTitle")}</div>
-          {traces.slice(0, 5).map((trace) => (
-            <div key={trace.id} className="rounded-card border border-border px-2 py-1.5">
-              <div className="flex flex-wrap gap-2">
-                <span className="text-foreground">{trace.query_preview || trace.query_hash.slice(0, 12)}</span>
-                <span>
-                  {t("harness.memoryRecallTraceMeta", {
-                    candidates: String(trace.candidate_count),
-                    filtered: String(trace.filtered_count),
-                    tokens: String(trace.token_estimate),
-                    budget: String(trace.token_budget),
-                  })}
-                </span>
-              </div>
-              {trace.dropped && trace.dropped.length > 0 ? (
-                <div>
-                  {t("harness.memoryRecallDropped", {
-                    reason: trace.dropped
-                      .slice(0, 4)
-                      .map((item) => `${item.id}:${item.reason}`)
-                      .join(", "),
-                  })}
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      ) : null}
+      {v2Available ? <MemoryV2UsageAndTraces t={t} usage={usage} traces={traces} /> : null}
       </div>
     </SettingsPanelCard>
   );

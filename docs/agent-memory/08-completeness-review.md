@@ -50,6 +50,62 @@ transcript 自动生成 candidate、Consolidation、summary 并进入召回。
 provider request 包含 memory 内容，recall trace 为 `injected=1` 且 selected_ids
 命中两条记录，usage 记录为 `cited`。
 
+2026-11-11 追加：确认并实现 Turn Digest Outbox Phase 1 core + 基础窗口化读取作为写路径恢复补强。
+turn-end 只写有界、脱敏 digest，不跑 LLM；session-end/idle/startup recovery 消费；
+Phase 1 仍以 canonical transcript 为 source，不把 digest 当第二份 transcript。
+大会话已接入 canonical window reader/job、per-window stale 与 L0→L1→L2 rollup；L0 retention 受 rollup 水位保护，L1 摘要通过 `turn_window` candidate 进入现有 Consolidation。已补真实 SQLite canonical store reopen、abrupt-exit 与 hard-kill E2E；真实终端关闭与 shadow 仍待补。
+compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack 按 canonical cutoff/before range 与 tombstone IDs 精确失效 L0/L1/memory，legacy 事件回退 session 级保守失效。
+只读最近一页时不得把更早 pending digest 标 done。详见
+`patches/2026-11-11-turn-digest-runtime-outbox.md`。
+
+2026-11-12 更新：关闭两个 P1 主链路缺口。
+
+- startup recovery 新增独立 `TriggerStartup`，只处理 closed/archived/orphaned/stale
+  session；active/idle session 留给 session-end/idle sweep。新增 active/idle 负向测试。
+- `retention.*` 已接入 store/runtime maintenance ticker：candidate 过期、standard/ephemeral
+  active 未使用过期、`maxRecords` 上限、tombstone 物理清理、audit/usage 清理与过期
+  suppression 清理；默认 `retention.enabled=false`，避免升级隐式淘汰。
+- `freshness.*` 已消费 per-kind TTL 与 `staleBehavior=warn`（仅低风险 kind；
+  fact/reference/decision 永不禁用 warn gate）。
+- `redaction.enabled/dropOnSecret` 已接入抽取、window summary、turn digest 与检索过滤。
+- schema v7 为 `memory_events` / `memory_usage` 增加 `project_key`，保证 tombstone
+  物理清理后仍能按项目隔离清理审计与 usage。
+- citation allowlist 已合并本 turn 成功 `memory_read` 的 ID；read usage 由工具即时写入，
+  最终答案只补 cited，不再重复计 read。
+- `memory_recent` / `memory_why` / `memory_why_not` 已补专项测试；`why_not` 改走
+  `DiagnoseInjection`，回传 dropped reasons。
+- 定向测试通过：`memorystore` lifecycle、`memoryruntime` startup/freshness/redaction、
+  `config` validation、`memorypolicy` mapping、`contextmgr`。
+
+仍未关闭：M5 shadow 与真实终端关闭证据（Web/TUI parity 已在下方追加关闭）。
+
+2026-11-12 追加：补齐 Web/CLI 控制面与 digest 观测。
+
+- Web memory panel 已展示 `turn_digests` / `turn_windows` 计数、oldest pending age、
+  pending sessions、backlog batches、recovered sessions。
+- Web 已支持 L1 window purge（session/all）、session memory mode 设置、summary revision
+  activate（回滚）。
+- CLI 已补 `/memory session-mode <id> enabled|disabled|polluted` 与
+  `/memory activate <summary-id>`；原有 `/memory mode` 与 `purge-windows` 保留。
+- `memory_runtime_metrics`（schema v8）记录 recovered sessions；`memory/status` 直接读取。
+- 定向验证：frontend `tsc -b`、memory panel vitest、i18n lint、Go memory/API/CLI/toolkit
+  测试通过。
+
+仍未关闭：M5 shadow、真实终端关闭证据、全量 `go test ./...` 稳定绿色。
+
+2026-11-12 追加：摘要与召回质量。
+
+- Consolidation 已消费 `consolidation.model`：优先 LLM Markdown 摘要，保留 deterministic
+  fallback；fallback 原因写 summary metadata，不阻塞 job。
+- 冲突归组从 exact text 改为 normalized subject（去标点/常见意图词、数字值占位、复数归一），
+  可把 `timeout 30s` / `timeout 60s` 识别为同主题冲突。
+- deterministic summary 按 kind 优先级、confidence、usage、recency 排序并去重。
+- recall 新增 CJK Han bigram 分词、query hard gate、correction/decision/preference boost、
+  recency/usage 指数衰减、confidence 权重和 duplicate 抑制。
+- summary 预算改为“每个有内容的 kind 先保底一条，再按 kind 优先级回填”，并做最终
+  渲染级预算裁剪；recall query 使用 goal + 最近 2 条 user message，多 kind 时按
+  `limit/2` 做首轮多样性排序。
+
 ### 1.2 设计状态
 
 原方案已经覆盖主流程，但审查发现以下关键点会导致“看似有方案、实际无法闭环”：
@@ -148,17 +204,17 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 | 维度 | 状态 | 说明 |
 | --- | --- | --- |
 | 手工记忆 | 已存在 | 不能因 v2 上线回归 |
-| 自动抽取 | 设计完成 | 需要 M2 实现 |
-| 会话筛选 | 设计完成 | 需要 session mode |
-| 去重/合并 | 设计完成 | hash + source + Consolidation |
-| 冲突/纠正 | 设计完成 | supersede + pinned + event |
-| 摘要/索引 | 设计完成 | summary revision + items |
-| 注入 | 设计完成 | 动态尾部，受预算 |
-| 按需检索 | 设计完成 | 工具或降级 |
-| 引用/usage | 设计完成 | citation parser + usage |
-| 删除/遗忘 | 设计完成 | tombstone + suppression |
-| 导出/恢复 | 设计完成 | JSONL/Markdown + restore |
-| 后台任务 | 设计完成 | lease/retry/watermark |
+| 自动抽取 | 已实现 core | session-end/idle/manual；shadow 质量待验 |
+| 会话筛选 | 已实现 | `memory_session_modes` 表与 API；配置块仍缺 |
+| 去重/合并 | 已实现 core | hash + source + Consolidation；语义相似仍弱 |
+| 冲突/纠正 | 已实现 core | supersede + pinned + event |
+| 摘要/索引 | 已实现 core | summary revision/items/gate/rebuild |
+| 注入 | 已实现 | stable/recall、pinned budget、stale warn gate |
+| 按需检索 | 已实现 | 工具或降级；recent/why/why-not 已有专项测试 |
+| 引用/usage | 已实现 core | citation parser + usage；tool-read ID allowlist 已接入 |
+| 删除/遗忘 | 已实现 | tombstone + suppression + lifecycle retention |
+| 导出/恢复 | 已实现 | JSONL/Markdown + restore |
+| 后台任务 | 已实现 | lease/retry/watermark + maintenance ticker |
 
 ### 4.2 数据完整性
 
@@ -182,7 +238,7 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 ### 4.4 运维完整性
 
 - 有 status/jobs/audit/export；
-- 有 retention 和 cleanup；
+- 有 retention 和 cleanup（candidate/active/tombstone/audit/usage/suppression）；
 - 有回滚/降级；
 - 有告警指标；
 - 有数据库并发策略。
@@ -190,8 +246,9 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 ### 4.5 测试完整性
 
 - 有迁移、隔离、注入、cache、抽取、Consolidation、usage、删除、权限测试；
+- 已有 lifecycle、startup recovery、freshness/redaction 定向测试；
 - 有 E2E 和 Windows 7 验证计划；
-- 但测试尚未实现，当前只能作为验收清单。
+- 仍缺 M5 shadow、真实终端关闭、SQLite 锁压测和全量测试证据。
 
 ## 5. 仍然存在的残余风险
 
@@ -215,9 +272,9 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 | --- | --- | --- |
 | M0 基线与契约 | 可以 | 按 `07 §8.1` 默认决策转 ADR；记录基线与失败矩阵 |
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
-| M2 抽取 | 已实施 core；待 shadow 运营验收 | job/reader/redaction/candidate/trigger 已落地 |
-| M3 Consolidation | 已实施 core；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure 已落地 |
-| M4 工具/API/UI | 已实施 core；M4 DoD 证据待补 | tools/API/import/restore/CLI、job/recall trace 与 Web why-not/pin/restore/reset 已落地；尚缺正式 E2E/截图证据包 |
+| M2 抽取 | 已实施 core + 定向测试；待 shadow 运营验收 | job/reader/redaction/candidate/trigger、startup terminal-only 已落地 |
+| M3 Consolidation | 已实施 core + 定向测试；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure、lifecycle 已落地 |
+| M4 工具/API/UI | 已实施 core；DoD 证据待补 | tools/API/import/restore/CLI、job/recall trace、Web why-not/pin/restore/reset 已落地；新增 turn digest/window 观测、L1 purge、session mode、summary activate/rollback Web/CLI 控制面 |
 | M5 上线 | 部分可以 | 指标查询已落地；需要 shadow 数据和逐项目验收结果 |
 
 ## 7. 最终判断
@@ -230,7 +287,7 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 
 ## 8. 下一步建议
 
-1. M1/M4 已完成代码闭环，按 `06-test-and-acceptance.md §8.2/§8.5` 固化验收证据；
-2. 进入 M5 shadow 运营验收，不启用默认注入；
-3. 用真实会话建立标注集，执行 M5 指标校准与逐项目上线策略；
+1. 进入 M5 shadow 运营验收，不启用默认注入；
+2. 用真实会话建立标注集，执行 M5 指标校准与逐项目上线策略；
+3. 补真实终端关闭证据与全量测试稳定绿色；
 4. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。

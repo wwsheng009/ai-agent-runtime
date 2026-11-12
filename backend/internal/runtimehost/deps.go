@@ -102,6 +102,9 @@ type Deps struct {
 	RunStallTimeout time.Duration
 	// EventBus 是运行时事件总线（可空）。
 	EventBus *runtimeevents.Bus
+	// TurnDigestSink records bounded turn digests for the memory outbox.
+	// Nil disables the runtime write path without changing actor behavior.
+	TurnDigestSink chat.TurnDigestSink
 	// Logf 是执行核日志（可空）。
 	Logf func(format string, args ...any)
 }

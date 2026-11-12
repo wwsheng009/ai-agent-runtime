@@ -247,6 +247,17 @@ score =
 - 低置信 candidate 在 `on` 模式下不注入；
 - usage 使用时间衰减，避免热门记录垄断。
 
+当前实现（v1）：
+
+- 非空 query 必须先有 text/tag/kind 命中，recency/usage/confidence 只负责重排，不能把零命中记录拉进 recall；
+- correction 有固定优先 boost，decision/preference 有小幅 boost；
+- recency 与 usage 都使用指数衰减，避免旧记录和热门记录垄断；
+- 中文 query 额外生成 Han bigram（如 `摘要逻辑` → `摘要/要逻/逻辑`），不引入 embedding；
+- 相同 kind + 归一化文本的候选只保留最高分，其余记 `duplicate`；
+- query 由当前 goal + 最近 2 条 user message 组成，单个片段截断到 600 runes，不拼接 assistant/tool 文本；
+- 多 kind 命中时按 `limit/2` 做首轮 kind 多样性排序，再回填剩余候选；
+- 预算仍按 stable/pinned/summary/recall 分账，`why-not` 会保留 filtered/budget/duplicate 原因。
+
 ### 5.6 去重与多样性
 
 - 相同 `content_hash` 只保留一条；
@@ -540,8 +551,10 @@ memory_cross_scope_denied_total
 | maxRecordsPerSession | 20 | 抽取上限 |
 | candidateDays | 30 | candidate 保留 |
 | maxUnusedDays | 30 | active 淘汰 |
+| ephemeralDays | 14 | ephemeral active 淘汰 |
 | deletedDays | 30 | tombstone 保留 |
 | auditDays | 180 | 审计保留 |
+| retention.enabled | false | 默认不隐式淘汰；显式开启后生效 |
 | `freshness.staleBehavior` | `exclude` | 默认不注入 stale |
 | `freshness.defaultTtlDays` | 90 | 未配置 kind 的 TTL |
 | `freshness.revalidateBatchSize` | 50 | 单次 sweep 上限 |

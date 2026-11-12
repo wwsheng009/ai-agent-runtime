@@ -2,8 +2,12 @@ package memorystore
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
+
+const MetricRecoveredDigestSessions = "recovered_digest_sessions"
 
 type MemoryMetrics struct {
 	Total              int            `json:"total"`
@@ -105,4 +109,41 @@ GROUP BY status
 	}
 	_ = rows.Close()
 	return metrics, rows.Err()
+}
+
+// IncrementRuntimeMetric bumps a small project-scoped counter used by status
+// diagnostics. Metrics are best-effort operational data, not memory content.
+func (s *Store) IncrementRuntimeMetric(ctx context.Context, metric string, delta int64) error {
+	metric = strings.TrimSpace(metric)
+	if metric == "" {
+		return fmt.Errorf("memorystore: runtime metric name is required")
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+INSERT INTO memory_runtime_metrics (project_key, metric, value, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(project_key, metric) DO UPDATE SET
+    value = memory_runtime_metrics.value + excluded.value,
+    updated_at = excluded.updated_at
+`, s.cfg.ProjectKey, metric, delta, nowText())
+	return err
+}
+
+func (s *Store) RuntimeMetric(ctx context.Context, metric string) (int64, error) {
+	metric = strings.TrimSpace(metric)
+	if metric == "" {
+		return 0, nil
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return 0, err
+	}
+	var value int64
+	err = db.QueryRowContext(ctx, `
+SELECT COALESCE((SELECT value FROM memory_runtime_metrics WHERE project_key = ? AND metric = ?), 0)
+`, s.cfg.ProjectKey, metric).Scan(&value)
+	return value, err
 }

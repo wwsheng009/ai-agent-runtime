@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,6 +36,18 @@ func buildChatMemoryStatusDocument(store *memorystore.Store) (render.Document, b
 	}
 	if store.Mode() != "off" {
 		lines = append(lines, "db="+store.DBPath()+" mode="+store.Mode())
+		if report, statusErr := store.Status(context.Background()); statusErr == nil {
+			lines = append(lines, fmt.Sprintf(
+				"turn_digests: pending=%d done=%d deferred=%d failed=%d",
+				report.TurnDigests["pending"], report.TurnDigests["done"],
+				report.TurnDigests["deferred"], report.TurnDigests["failed"],
+			))
+			lines = append(lines, fmt.Sprintf(
+				"turn_windows: pending=%d done=%d failed=%d invalidated=%d",
+				report.TurnWindows["pending"], report.TurnWindows["done"],
+				report.TurnWindows["failed"], report.TurnWindows["invalidated"],
+			))
+		}
 	}
 	if len(notes) == 0 {
 		lines = append(lines,
@@ -176,8 +189,15 @@ func buildChatMemoryJobsDocument(jobs []memorystore.MemoryJob) render.Document {
 }
 
 func buildChatMemoryConsolidateDocument(result memoryruntime.ConsolidationResult) render.Document {
-	return textLinesDocument([]string{fmt.Sprintf(
-		"consolidation: promoted=%d superseded=%d rebuilt=%d revision=%d tokens=%d",
-		result.Promoted, result.Superseded, result.Rebuilt, result.Revision, result.TokenCount,
-	)})
+	model := strings.TrimSpace(result.SummaryModel)
+	if model == "" {
+		model = "-"
+	}
+	return textLinesDocument([]string{
+		fmt.Sprintf(
+			"consolidation: promoted=%d superseded=%d rebuilt=%d revision=%d tokens=%d",
+			result.Promoted, result.Superseded, result.Rebuilt, result.Revision, result.TokenCount,
+		),
+		"summary_model=" + model,
+	})
 }

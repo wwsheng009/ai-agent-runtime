@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -108,6 +110,131 @@ func recordByID(records []Record, id string) Record {
 		}
 	}
 	return Record{}
+}
+
+// scoreRecordForRecall is the v2 selector's deterministic ranking function.
+// Query match is a hard gate for non-empty queries; recency, usage, confidence,
+// and semantic-kind boosts only reorder records that actually matched.
+func scoreRecordForRecall(record Record, tokens []string, rawQuery string, now time.Time) float64 {
+	text := strings.ToLower(strings.TrimSpace(record.NormalizedText))
+	if text == "" {
+		text = strings.ToLower(record.Text)
+	}
+	tagBlob := strings.ToLower(strings.Join(record.Tags, " "))
+	kind := strings.ToLower(strings.TrimSpace(record.Kind))
+	sourceKind := strings.ToLower(strings.TrimSpace(record.SourceKind))
+	raw := strings.ToLower(strings.TrimSpace(rawQuery))
+
+	match := 0.0
+	if raw == "" {
+		match = 1
+	} else {
+		if strings.Contains(text, raw) {
+			match += 5
+		}
+		for _, token := range tokens {
+			if strings.Contains(text, token) {
+				match += 2
+			}
+			if strings.Contains(tagBlob, token) {
+				match += 3
+			}
+			if kind == token {
+				match += 0.75
+			}
+			if sourceKind == token {
+				match += 0.5
+			}
+		}
+		if match <= 0 {
+			return 0
+		}
+	}
+
+	score := match
+	if kind == "correction" {
+		score += 1.0
+	} else if kind == "decision" || kind == "preference" {
+		score += 0.35
+	}
+	score += 0.4 * clampUnit(record.Confidence)
+
+	lastActivity := record.UpdatedAt
+	if lastActivity.IsZero() {
+		lastActivity = record.CreatedAt
+	}
+	if !lastActivity.IsZero() {
+		ageDays := now.Sub(lastActivity).Hours() / 24
+		score += 0.8 * math.Exp(-math.Max(0, ageDays)/45)
+	}
+	if record.UseCount > 0 {
+		usedAt := record.LastUsedAt
+		if usedAt.IsZero() {
+			usedAt = lastActivity
+		}
+		usageAgeDays := 0.0
+		if !usedAt.IsZero() {
+			usageAgeDays = math.Max(0, now.Sub(usedAt).Hours()/24)
+		}
+		score += 0.65 * math.Log1p(float64(record.UseCount)) * math.Exp(-usageAgeDays/30)
+	}
+	return score
+}
+
+func clampUnit(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
+}
+
+func recallDedupKey(record Record) string {
+	var cleaned strings.Builder
+	for _, r := range strings.ToLower(record.Text) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			cleaned.WriteRune(r)
+			continue
+		}
+		cleaned.WriteByte(' ')
+	}
+	text := strings.Join(strings.Fields(cleaned.String()), " ")
+	if text == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(record.Kind)) + "\x00" + text
+}
+
+// diversifyRecallOrder prevents one kind from filling the first recall slots
+// when several kinds matched. It only reorders candidates; it never drops a
+// record or bypasses the token-budget loop.
+func diversifyRecallOrder(candidates []SearchHit, records []Record, limit int) []SearchHit {
+	if limit <= 1 || len(candidates) < 2 {
+		return candidates
+	}
+	perKindCap := limit / 2
+	if perKindCap < 1 {
+		perKindCap = 1
+	}
+	counts := make(map[string]int)
+	ordered := make([]SearchHit, 0, len(candidates))
+	deferred := make([]SearchHit, 0, len(candidates))
+	for _, hit := range candidates {
+		record := recordByID(records, hit.Note.ID)
+		kind := strings.ToLower(strings.TrimSpace(record.Kind))
+		if kind == "" {
+			kind = "memory"
+		}
+		if counts[kind] < perKindCap {
+			ordered = append(ordered, hit)
+			counts[kind]++
+			continue
+		}
+		deferred = append(deferred, hit)
+	}
+	return append(ordered, deferred...)
 }
 
 const memoryRecordTokenOverhead = 16
@@ -791,7 +918,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", record.ID)
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "updated", "user", record.SourceSessionID, record.Revision, map[string]interface{}{"reason": "manual_patch"}); err != nil {
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "updated", "user", record.SourceSessionID, record.Revision, map[string]interface{}{"reason": "manual_patch"}); err != nil {
 		return Record{}, err
 	}
 	if err := s.markSummariesStaleForRecordTx(ctx, tx, record.ID, "record_updated"); err != nil {
@@ -831,7 +958,7 @@ func (s *Store) MarkConflictOpenQuestion(ctx context.Context, ids []string, reas
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, record := range records {
-		if err := insertEventTx(ctx, tx, record.ID, "open_question", "consolidation", record.SourceSessionID, record.Revision, map[string]interface{}{
+		if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "open_question", "consolidation", record.SourceSessionID, record.Revision, map[string]interface{}{
 			"reason": reason,
 		}); err != nil {
 			return err
@@ -873,7 +1000,7 @@ INSERT OR IGNORE INTO memory_suppressions (
 `, "sup_"+uuid.NewString(), string(record.Scope), record.ProjectKey, record.ContentHash, record.ID, nowText()); err != nil {
 		return err
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "deleted", "user", record.SourceSessionID, record.Revision+1, map[string]interface{}{"reason": "manual_delete"}); err != nil {
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "deleted", "user", record.SourceSessionID, record.Revision+1, map[string]interface{}{"reason": "manual_delete"}); err != nil {
 		return err
 	}
 	if err := s.markSummariesStaleForRecordTx(ctx, tx, record.ID, "record_deleted"); err != nil {
@@ -926,7 +1053,7 @@ SELECT mode FROM memory_session_modes WHERE session_id = ? AND project_key = ?
 }
 
 func (s *Store) Status(ctx context.Context) (StatusReport, error) {
-	report := StatusReport{Mode: s.cfg.Mode, Scope: "project", DBPath: s.v2Path, ByStatus: map[string]int{}, ByFreshness: map[string]int{}, Jobs: map[string]int{}}
+	report := StatusReport{Mode: s.cfg.Mode, Scope: "project", DBPath: s.v2Path, ByStatus: map[string]int{}, ByFreshness: map[string]int{}, Jobs: map[string]int{}, TurnDigests: map[string]int{}, TurnWindows: map[string]int{}}
 	if !s.v2Configured() {
 		notes, err := s.loadAll()
 		if err != nil {
@@ -997,6 +1124,51 @@ WHERE project_key = ? AND status = 'active' AND pinned = 1
 			}
 		}
 		_ = rows.Close()
+	}
+	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_digests WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
+	if err == nil {
+		for rows.Next() {
+			var status string
+			var count int
+			if scanErr := rows.Scan(&status, &count); scanErr == nil {
+				report.TurnDigests[status] = count
+			}
+		}
+		_ = rows.Close()
+	}
+	rows, err = db.QueryContext(ctx, `SELECT status, COUNT(1) FROM memory_turn_windows WHERE project_key = ? GROUP BY status`, s.cfg.ProjectKey)
+	if err == nil {
+		for rows.Next() {
+			var status string
+			var count int
+			if scanErr := rows.Scan(&status, &count); scanErr == nil {
+				report.TurnWindows[status] = count
+			}
+		}
+		_ = rows.Close()
+	}
+	var pendingDigests, pendingSessions int
+	var oldestPending string
+	_ = db.QueryRowContext(ctx, `
+SELECT COUNT(1), COUNT(DISTINCT session_id), COALESCE(MIN(created_at), '')
+FROM memory_turn_digests
+WHERE project_key = ? AND status = 'pending'
+`, s.cfg.ProjectKey).Scan(&pendingDigests, &pendingSessions, &oldestPending)
+	report.PendingDigestSessions = pendingSessions
+	batchSize := s.cfg.TurnDigestBatchSize
+	if batchSize <= 0 {
+		batchSize = 20
+	}
+	if pendingDigests > 0 {
+		report.PendingDigestBacklogBatches = (pendingDigests + batchSize - 1) / batchSize
+	}
+	if oldestPending != "" {
+		if age := time.Since(parseTime(oldestPending)); age > 0 {
+			report.OldestPendingDigestAgeSeconds = int64(age.Seconds())
+		}
+	}
+	if recovered, metricErr := s.RuntimeMetric(ctx, MetricRecoveredDigestSessions); metricErr == nil {
+		report.RecoveredDigestSessions = recovered
 	}
 	return report, nil
 }

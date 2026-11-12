@@ -10,7 +10,7 @@ import (
 
 const (
 	slashCompletionShellHintLine = "Shell 快捷: !git status"
-	slashCompletionKeyHintLine   = "↑↓ 选择 · Tab 补全 · Enter 确认 · Esc 关闭"
+	slashCompletionKeyHintLine   = "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 关闭"
 	slashCompletionPopupOwner    = "slash_completion"
 )
 
@@ -26,6 +26,10 @@ type chatSlashCompletionController struct {
 	renderedSignature string
 	surfaceEnabled    bool
 	editorPasteActive bool
+	// selectionExplicit 标记用户是否用方向键主动移动过候选。空参数位上的
+	// Enter 默认应执行当前命令（/memory list -> submit），只有显式选过候选
+	// 时才把 Enter 用于接受补全。
+	selectionExplicit bool
 }
 
 func newChatSlashCompletionController(session *ChatSession) *chatSlashCompletionController {
@@ -85,6 +89,7 @@ func (c *chatSlashCompletionController) Clear() {
 	c.renderedSignature = ""
 	c.surfaceEnabled = false
 	c.editorPasteActive = false
+	c.selectionExplicit = false
 	c.clearPopupLocked()
 }
 
@@ -107,6 +112,7 @@ func (c *chatSlashCompletionController) Cancel() bool {
 	c.renderedSignature = ""
 	c.surfaceEnabled = false
 	c.editorPasteActive = false
+	c.selectionExplicit = false
 	return true
 }
 
@@ -133,6 +139,7 @@ func (c *chatSlashCompletionController) Navigate(delta int) bool {
 	c.state.Selected = selected
 	c.state.ExactMatch = candidateIsExactMatch(c.state.Candidates[selected], c.state.Query)
 	c.selectedCommand = c.state.Candidates[selected].Command
+	c.selectionExplicit = true
 	c.renderLocked()
 	return true
 }
@@ -188,8 +195,21 @@ func (c *chatSlashCompletionController) ApplySubmission(text string, cursor int)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	explicitSelection := c.selectionExplicit
 	c.applyTextUpdateLocked(text, cursor)
 	if !c.state.Active || len(c.state.Candidates) == 0 {
+		c.clearPopupLocked()
+		c.state = chatSlashCompletionState{Selected: -1}
+		c.selectedCommand = ""
+		c.renderedSignature = ""
+		c.surfaceEnabled = false
+		return text, cursor, false
+	}
+
+	// 光标停在新的空参数位（例如 /memory list 后的空格）时，Enter 是
+	// “执行已输入命令”，不是再次接受默认候选。否则 previousCommand 会让
+	// Enter 反复把同一个 token 追加成 /memory list list list …。
+	if c.argumentTokenEmptyLocked() && !explicitSelection {
 		c.clearPopupLocked()
 		c.state = chatSlashCompletionState{Selected: -1}
 		c.selectedCommand = ""
@@ -226,6 +246,7 @@ func (c *chatSlashCompletionController) ApplySubmission(text string, cursor int)
 func (c *chatSlashCompletionController) applyTextUpdateLocked(text string, cursor int) {
 	c.text = text
 	c.cursor = cursor
+	c.selectionExplicit = false
 	commandState := buildSlashCompletionStateWithPrevious(text, cursor, c.state.Selected, c.selectedCommand)
 	if argsState, ok := buildSlashArgumentCompletionStateWithPrevious(c.session, c.argumentProvider, text, cursor, commandState.Context, c.state.Selected, c.selectedCommand); ok {
 		c.state = argsState
@@ -251,7 +272,60 @@ func (c *chatSlashCompletionController) shouldAcceptExactMatchLocked(candidate c
 	if !candidateIsExactMatch(candidate, c.state.Query) {
 		return true
 	}
-	return c.state.Context.InArguments && candidate.AcceptsArgs
+	if !c.state.Context.InArguments || !candidate.AcceptsArgs {
+		return false
+	}
+	// 只有“参数位里还包含前缀/赋值”才把 Enter 用于补上尾随空格；用户已经
+	// 把子命令完整敲出来时必须提交，例如 /memory list。
+	return !c.exactArgumentTokenMatchesCandidateLocked(candidate)
+}
+
+// argumentTokenEmptyLocked reports whether the cursor is on an empty argument
+// token (typically immediately after the separating space).
+func (c *chatSlashCompletionController) argumentTokenEmptyLocked() bool {
+	start, end, ok := c.argumentTokenRangeLocked()
+	if !ok {
+		return false
+	}
+	runes := []rune(c.text)
+	// `--model=` 是赋值位尚未填值，仍交给补全接受默认/首个候选；空参数位
+	// （`/memory list `）才是“命令已完整，Enter 应执行”的信号。
+	if start > 0 && start <= len(runes) && runes[start-1] == '=' {
+		return false
+	}
+	return strings.TrimSpace(string(runes[start:end])) == ""
+}
+
+// exactArgumentTokenMatchesCandidateLocked distinguishes a fully typed
+// subcommand token from a value embedded in a longer token such as
+// --model=gpt-5.2. The former submits on Enter; the latter can still accept a
+// completion and append a trailing space.
+func (c *chatSlashCompletionController) exactArgumentTokenMatchesCandidateLocked(candidate chatSlashCompletionCandidate) bool {
+	start, end, ok := c.argumentTokenRangeLocked()
+	if !ok {
+		return false
+	}
+	runes := []rune(c.text)
+	// `--model=gpt-5.2` 的补全区间从 `=` 之后开始；它仍是“值位”，不是
+	// 用户完整敲出的二级命令，因此 Enter 可以继续接受补全并补一个空格。
+	if start > 0 && start <= len(runes) && runes[start-1] == '=' {
+		return false
+	}
+	token := strings.TrimSpace(string(runes[start:end]))
+	return token != "" && strings.EqualFold(token, candidate.Command)
+}
+
+func (c *chatSlashCompletionController) argumentTokenRangeLocked() (int, int, bool) {
+	if c == nil || !c.state.Context.InArguments {
+		return 0, 0, false
+	}
+	start := c.state.Context.TokenStart
+	end := c.state.Context.TokenEnd
+	runes := []rune(c.text)
+	if start < 0 || end < start || end > len(runes) {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 func buildSlashArgumentCompletionStateWithPrevious(session *ChatSession, provider chatSlashArgumentProvider, text string, cursor int, context chatSlashCompletionContext, previousSelected int, previousCommand string) (chatSlashCompletionState, bool) {

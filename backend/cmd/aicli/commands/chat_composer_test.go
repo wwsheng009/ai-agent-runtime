@@ -155,7 +155,7 @@ func TestFormatChatComposerEditorStatusIsConditionalAndTracksLogicalLine(t *test
 }
 
 func TestChatComposerControllerAddsSlashCompletionHooksWhenCompletionIsPresent(t *testing.T) {
-	session := &ChatSession{}
+	session := newSlashCompletionArgumentTestSession()
 	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	composer := &chatComposerController{
@@ -182,12 +182,19 @@ func TestChatComposerControllerAddsSlashCompletionHooksWhenCompletionIsPresent(t
 		t.Fatalf("expected unknown command submission to remain unconsumed, got %#v", replacement)
 	}
 
-	replacement, ok = hooks.OnSubmit(ui.LineEditorSnapshot{Text: "/model ", Cursor: len([]rune("/model "))})
+	// 空参数位（/model 后的空格）现在直接提交；未填值的赋值位仍由 Enter
+	// 接受补全，避免 /model --model= 这类命令被半截提交。
+	replacement, ok = hooks.OnSubmit(ui.LineEditorSnapshot{Text: "/model --model=", Cursor: len([]rune("/model --model="))})
 	if !ok {
-		t.Fatal("expected argument-capable exact command submission to be consumed")
+		t.Fatal("expected empty assignment value completion to be consumed")
 	}
-	if !strings.HasPrefix(replacement.Text, "/model") {
-		t.Fatalf("expected slash submission to keep /model command, got %#v", replacement)
+	if !strings.HasPrefix(replacement.Text, "/model --model=") {
+		t.Fatalf("expected slash submission to keep the model assignment prefix, got %#v", replacement)
+	}
+
+	replacement, ok = hooks.OnSubmit(ui.LineEditorSnapshot{Text: "/model ", Cursor: len([]rune("/model "))})
+	if ok {
+		t.Fatalf("expected empty argument slot submission to execute /model, got %#v", replacement)
 	}
 }
 

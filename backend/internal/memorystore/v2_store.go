@@ -46,6 +46,10 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.RecallTraceSampleRate > 1 {
 		cfg.RecallTraceSampleRate = 1
 	}
+	cfg.StaleBehavior = strings.ToLower(strings.TrimSpace(cfg.StaleBehavior))
+	if cfg.StaleBehavior != "warn" {
+		cfg.StaleBehavior = "exclude"
+	}
 	if strings.TrimSpace(cfg.ProjectKey) == "" {
 		projectRoot := strings.TrimSpace(cfg.ProjectRoot)
 		if projectRoot == "" && strings.TrimSpace(cfg.Root) != "" {
@@ -346,7 +350,7 @@ INSERT INTO memory_entries (
 	if err := insertSourceTx(ctx, tx, record, sessionID); err != nil {
 		return err
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "created", actor, sessionID, record.Revision, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "created", actor, sessionID, record.Revision, map[string]interface{}{
 		"kind": record.Kind, "source_kind": record.SourceKind,
 	}); err != nil {
 		return err
@@ -372,11 +376,11 @@ func insertSourceTx(ctx context.Context, tx *sql.Tx, record Record, sessionID st
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_sources (
     id, memory_id, source_kind, source_id, session_id, turn_id,
-    message_ids_json, artifact_refs_json, fact_refs_json, knowledge_refs_json,
+    source_window, message_ids_json, artifact_refs_json, fact_refs_json, knowledge_refs_json,
     source_hash, source_revision, source_updated_at, source_observed_at, quote, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
 `, sourceID, record.ID, record.SourceKind, record.ID, nullableString(record.SourceSessionID),
-		nullableString(record.SourceTurnID), string(messageIDs), sourceHash,
+		nullableString(record.SourceTurnID), nullableString(record.SourceWindow), string(messageIDs), sourceHash,
 		nullableInt64(record.SourceRevision),
 		sourceUpdatedAt.UTC().Format(time.RFC3339Nano),
 		sourceObservedAt.UTC().Format(time.RFC3339Nano), record.Text, nowText()); err != nil {
@@ -385,12 +389,12 @@ INSERT OR IGNORE INTO memory_sources (
 	return nil
 }
 
-func insertEventTx(ctx context.Context, tx *sql.Tx, memoryID, eventType, actor, sessionID string, revision int64, payload map[string]interface{}) error {
+func insertEventTx(ctx context.Context, tx *sql.Tx, projectKey, memoryID, eventType, actor, sessionID string, revision int64, payload map[string]interface{}) error {
 	body, _ := json.Marshal(payload)
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_events (id, memory_id, event_type, actor, session_id, revision, payload_json, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`, "evt_"+uuid.NewString(), memoryID, eventType, actor, nullableString(sessionID), revision, string(body), nowText()); err != nil {
+INSERT INTO memory_events (id, project_key, memory_id, event_type, actor, session_id, revision, payload_json, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, "evt_"+uuid.NewString(), projectKey, memoryID, eventType, actor, nullableString(sessionID), revision, string(body), nowText()); err != nil {
 		return fmt.Errorf("memorystore: insert event: %w", err)
 	}
 	return nil
@@ -587,12 +591,13 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		}
 	}
 	candidates := make([]SearchHit, 0, len(records))
+	queryTokens := tokenize(opts.Query)
 	for _, record := range records {
 		if _, exists := stableIDs[record.ID]; exists {
 			continue
 		}
 		note := recordToNote(record)
-		score := scoreNote(note, tokenize(opts.Query), opts.Query)
+		score := scoreRecordForRecall(record, queryTokens, opts.Query, now)
 		if opts.Query != "" && score <= 0 {
 			continue
 		}
@@ -616,6 +621,7 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		}
 		return candidates[i].Score > candidates[j].Score
 	})
+	candidates = diversifyRecallOrder(candidates, records, limit)
 	remaining := budget - summaryUsed - pinnedUsed
 	if remaining < 0 {
 		remaining = 0
@@ -625,12 +631,20 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		recallCap = budget * 30 / 100
 	}
 	recallUsed := 0
+	seenDuplicates := make(map[string]struct{}, len(candidates))
 	for _, hit := range candidates {
+		record := recordByID(records, hit.Note.ID)
+		if key := recallDedupKey(record); key != "" {
+			if _, seen := seenDuplicates[key]; seen {
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "duplicate"})
+				continue
+			}
+			seenDuplicates[key] = struct{}{}
+		}
 		if len(selection.Recall) >= limit {
 			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
 			continue
 		}
-		record := recordByID(records, hit.Note.ID)
 		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
 		perRecordCap := remaining
 		if recallCap < perRecordCap {
@@ -717,13 +731,14 @@ func (s *Store) classifyInjectableRecords(ctx context.Context, db *sql.DB, recor
 			reason = "expired"
 		case strings.EqualFold(record.Sensitivity, "private"):
 			reason = "private"
-		case record.Freshness != FreshnessFresh:
+		case record.Freshness != FreshnessFresh &&
+			!(s.cfg.StaleBehavior == "warn" && record.Freshness == FreshnessStale && warnInjectableKind(record.Kind)):
 			if strings.TrimSpace(string(record.Freshness)) == "" {
 				reason = "unverified"
 			} else {
 				reason = strings.ToLower(string(record.Freshness))
 			}
-		case memoryredact.DetectSecret(record.Text) != "":
+		case !s.cfg.DisableSecretFilter && memoryredact.DetectSecret(record.Text) != "":
 			reason = "secret"
 		default:
 			if _, ok := suppressed[record.ContentHash]; ok {
@@ -794,6 +809,14 @@ func appendSelectionIDs(ids []string, stable []Record, summary *Summary) []strin
 }
 
 func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.Time) ([]Record, error) {
+	freshnessPredicate := "freshness_status = 'fresh'"
+	if s.cfg.StaleBehavior == "warn" {
+		// staleBehavior=warn is deliberately narrow: high-risk kinds
+		// (fact/reference plus decisions) never enter ordinary recall merely
+		// because they are old.
+		freshnessPredicate = `(freshness_status = 'fresh' OR
+  (freshness_status = 'stale' AND kind IN ('preference', 'workflow', 'pitfall', 'open_question')))`
+	}
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
@@ -802,11 +825,12 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
        deleted_at, metadata_json
 FROM memory_entries
-WHERE scope = ? AND project_key = ? AND status = 'active' AND freshness_status = 'fresh'
+WHERE scope = ? AND project_key = ? AND status = 'active' AND `+freshnessPredicate+`
   AND sensitivity != 'private'
   AND (deleted_at IS NULL OR deleted_at = '')
   AND (valid_until IS NULL OR valid_until = '' OR valid_until > ?)
-ORDER BY pinned DESC, use_count DESC, updated_at DESC
+ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
+         use_count DESC, updated_at DESC
 `, string(ScopeProject), s.cfg.ProjectKey, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
@@ -818,10 +842,22 @@ ORDER BY pinned DESC, use_count DESC, updated_at DESC
 		if err != nil {
 			return nil, err
 		}
-		if memoryredact.DetectSecret(record.Text) != "" {
+		if !s.cfg.DisableSecretFilter && memoryredact.DetectSecret(record.Text) != "" {
 			continue
 		}
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// warnInjectableKind is the staleBehavior=warn allowlist. High-risk kinds
+// (fact/reference) and durable decisions are intentionally absent: an old
+// decision must be revalidated, not rendered with a warning label.
+func warnInjectableKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "preference", "workflow", "pitfall", "open_question":
+		return true
+	default:
+		return false
+	}
 }

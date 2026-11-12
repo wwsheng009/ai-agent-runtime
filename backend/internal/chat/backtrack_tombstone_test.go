@@ -170,6 +170,9 @@ func TestSessionActorBacktrackWritesTombstoneAndEventPayload(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, result.Tombstone.ID, tombPayload["id"])
 	require.EqualValues(t, 4, tombPayload["removed_message_count"])
+	require.EqualValues(t, 6, finished["canonical_message_count_before"])
+	require.EqualValues(t, 2, finished["canonical_cutoff_seq"])
+	require.NotEmpty(t, finished["canonical_cutoff_at"])
 }
 
 func TestSessionActorBacktrackCodeOnlySkipsTombstone(t *testing.T) {

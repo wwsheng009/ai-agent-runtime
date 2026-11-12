@@ -995,6 +995,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				cfg.MaxConsolidationRecords = runtimeConfig.Memory.Consolidation.MaxRecords
 				cfg.MaxConsolidationUnusedDays = runtimeConfig.Memory.Consolidation.MaxUnusedDays
 				cfg.SummaryTokenBudget = runtimeConfig.Memory.Consolidation.SummaryTokenBudget
+				cfg.ConsolidationModel = runtimeConfig.Memory.Consolidation.Model
+			}
+			if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil {
+				cfg = memoryruntime.WithLLMProjectSummarizer(cfg, session.LocalRuntimeHost.Bootstrap.LLMRuntime())
 			}
 			result, err := memoryruntime.NewConsolidator(store, cfg).Run(context.Background())
 			if err != nil {
@@ -1021,6 +1025,30 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			return CommandResult{
 				Blocks: []RenderBlock{{Document: textLinesDocument([]string{fmt.Sprintf("提示: 已导出 %d bytes → %s", len(body), target)})}},
+				Action: CommandContinue,
+			}, true, nil
+		case "purge-windows", "purge_windows":
+			if store.Mode() == "off" || !hasExactCommandFlag(rest, "--yes") {
+				return CommandResult{}, false, nil
+			}
+			sessionID, all, parseErr := parseMemoryTurnWindowPurgeArgs(rest)
+			if parseErr != nil {
+				return commandTextResult("错误: " + parseErr.Error() + "\n用法: /memory purge-windows --yes (--session <id> | --all)"), true, nil
+			}
+			purged, err := store.PurgeTurnWindows(context.Background(), sessionID)
+			if err != nil {
+				return CommandResult{}, false, nil
+			}
+			scope := "project"
+			if !all {
+				scope = "session=" + sessionID
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{
+					fmt.Sprintf("提示: 已清理 L1 turn windows scope=%s", scope),
+					fmt.Sprintf("windows=%d digests_released=%d", purged.Windows, purged.Digests),
+					"L2 memory 未删除。",
+				})}},
 				Action: CommandContinue,
 			}, true, nil
 		case "reset":
@@ -1054,6 +1082,41 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Blocks: []RenderBlock{{Document: textLinesDocument([]string{
 					fmt.Sprintf("提示: memory.mode=%s 已写入 %s（changed=%d）", modeArg, target, changed),
 					"配置在下一次加载/会话启动生效；off 不会删除已有记忆。",
+				})}},
+				Action: CommandContinue,
+			}, true, nil
+		case "session-mode", "session_mode":
+			fields := strings.Fields(rest)
+			if len(fields) != 2 {
+				return commandTextResult("用法: /memory session-mode <session-id> enabled|disabled|polluted"), true, nil
+			}
+			mode := memorystore.SessionMode(strings.ToLower(fields[1]))
+			switch mode {
+			case memorystore.SessionModeEnabled, memorystore.SessionModeDisabled, memorystore.SessionModePolluted:
+			default:
+				return commandTextResult("错误: session mode 必须是 enabled / disabled / polluted"), true, nil
+			}
+			if err := store.SetSessionMode(context.Background(), fields[0], mode, ""); err != nil {
+				return commandTextResult("错误: " + err.Error()), true, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{
+					fmt.Sprintf("提示: session=%s memory_mode=%s", fields[0], mode),
+				})}},
+				Action: CommandContinue,
+			}, true, nil
+		case "activate", "summary-activate", "summary_activate":
+			id := strings.TrimSpace(firstToken(rest))
+			if id == "" {
+				return commandTextResult("用法: /memory activate <summary-id>"), true, nil
+			}
+			summary, err := store.ActivateSummary(context.Background(), id)
+			if err != nil {
+				return commandTextResult("错误: " + err.Error()), true, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: textLinesDocument([]string{
+					fmt.Sprintf("提示: 已激活 summary %s revision=%d", summary.ID, summary.Revision),
 				})}},
 				Action: CommandContinue,
 			}, true, nil
@@ -1119,6 +1182,32 @@ func hasExactCommandFlag(args, flag string) bool {
 		}
 	}
 	return false
+}
+
+func parseMemoryTurnWindowPurgeArgs(args string) (sessionID string, all bool, err error) {
+	fields := strings.Fields(args)
+	for index := 0; index < len(fields); index++ {
+		token := strings.TrimSpace(fields[index])
+		switch {
+		case strings.EqualFold(token, "--yes"):
+			continue
+		case strings.EqualFold(token, "--all"):
+			all = true
+		case strings.EqualFold(token, "--session"):
+			index++
+			if index >= len(fields) || strings.TrimSpace(fields[index]) == "" ||
+				strings.HasPrefix(strings.TrimSpace(fields[index]), "--") {
+				return "", false, fmt.Errorf("--session 需要会话 ID")
+			}
+			sessionID = strings.TrimSpace(fields[index])
+		default:
+			return "", false, fmt.Errorf("无法识别参数 %q", token)
+		}
+	}
+	if all == (sessionID != "") {
+		return "", false, fmt.Errorf("必须且只能指定 --session <id> 或 --all")
+	}
+	return sessionID, all, nil
 }
 
 // tryExecuteStructuredDebugCommand retains finite diagnostics, debug toggles,

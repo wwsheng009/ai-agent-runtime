@@ -26,6 +26,10 @@ type AnswerExposureInput struct {
 	MessageID   string
 	InjectedIDs []string
 	ReadIDs     []string
+	// ReadUsageRecorded is set when memory_read already wrote UsageRead rows
+	// for ReadIDs. The ids still participate in the citation allowlist and
+	// injected_only exclusion, but are not counted twice.
+	ReadUsageRecorded bool
 }
 
 // ParseMemoryCitations strips hidden citation blocks from the user-visible
@@ -127,7 +131,7 @@ func (s *Store) RecordAnswerExposure(ctx context.Context, input AnswerExposureIn
 			return result, err
 		}
 	}
-	if len(input.ReadIDs) > 0 {
+	if len(input.ReadIDs) > 0 && !input.ReadUsageRecorded {
 		if _, err := s.RecordExposure(ctx, Exposure{
 			MemoryIDs: input.ReadIDs, SessionID: input.SessionID, TurnID: input.TurnID,
 			MessageID: input.MessageID, UseKind: UsageRead,

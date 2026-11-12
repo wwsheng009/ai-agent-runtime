@@ -159,6 +159,7 @@ func (a *SessionActor) handleBacktrackTo(cmd BacktrackTo) {
 	})
 
 	eventsEmitted := make([]string, 0, 4)
+	canonicalMessageCountBefore := session.CanonicalMessageCount
 	startPayload := backtrackEventPayload(planned, nil)
 	a.publish(runtimeevents.Event{
 		Type:      EventBacktrackStarted,
@@ -215,6 +216,18 @@ func (a *SessionActor) handleBacktrackTo(cmd BacktrackTo) {
 	})
 
 	finishPayload := backtrackEventPayload(planned, applyErr)
+	if applyErr == nil && planned.Tombstone != nil {
+		canonicalCutoff := session.CanonicalMessageCount
+		if canonicalMessageCountBefore > 0 && canonicalCutoff >= canonicalMessageCountBefore {
+			// Some storage implementations rewrite only the visible history.
+			// Fall back to the planned prefix so the event still carries a
+			// usable cutoff for memory invalidation.
+			canonicalCutoff = planned.TruncatedToMessageCount
+		}
+		finishPayload["canonical_message_count_before"] = canonicalMessageCountBefore
+		finishPayload["canonical_cutoff_seq"] = canonicalCutoff
+		finishPayload["canonical_cutoff_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	a.publish(runtimeevents.Event{
 		Type:      EventBacktrackFinished,
 		SessionID: a.id,

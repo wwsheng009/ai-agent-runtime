@@ -15,33 +15,40 @@ import (
 	"github.com/gorilla/mux"
 
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
 type memoryStatusResponse struct {
-	WorkspacePath        string         `json:"workspace_path"`
-	Mode                 string         `json:"mode"`
-	Scope                string         `json:"scope"`
-	DBPath               string         `json:"db_path,omitempty"`
-	SchemaVersion        int            `json:"schema_version"`
-	Total                int            `json:"total"`
-	ByStatus             map[string]int `json:"by_status,omitempty"`
-	ByFreshness          map[string]int `json:"by_freshness,omitempty"`
-	SummaryRevision      int64          `json:"summary_revision,omitempty"`
-	SummaryStatus        string         `json:"summary_status,omitempty"`
-	SummaryFreshness     string         `json:"summary_freshness,omitempty"`
-	PinnedCount          int            `json:"pinned_count,omitempty"`
-	PinnedBudgetRatio    float64        `json:"pinned_budget_ratio,omitempty"`
-	InjectionMode        string         `json:"injection_mode,omitempty"`
-	GenerationEnabled    bool           `json:"generation_enabled"`
-	GenerationTrigger    string         `json:"generation_trigger,omitempty"`
-	ConsolidationEnabled bool           `json:"consolidation_enabled"`
-	ManualEnabled        bool           `json:"manual_enabled"`
-	Jobs                 map[string]int `json:"jobs,omitempty"`
-	Fallback             bool           `json:"fallback"`
-	FallbackReason       string         `json:"fallback_reason,omitempty"`
+	WorkspacePath                 string         `json:"workspace_path"`
+	Mode                          string         `json:"mode"`
+	Scope                         string         `json:"scope"`
+	DBPath                        string         `json:"db_path,omitempty"`
+	SchemaVersion                 int            `json:"schema_version"`
+	Total                         int            `json:"total"`
+	ByStatus                      map[string]int `json:"by_status,omitempty"`
+	ByFreshness                   map[string]int `json:"by_freshness,omitempty"`
+	SummaryRevision               int64          `json:"summary_revision,omitempty"`
+	SummaryStatus                 string         `json:"summary_status,omitempty"`
+	SummaryFreshness              string         `json:"summary_freshness,omitempty"`
+	PinnedCount                   int            `json:"pinned_count,omitempty"`
+	PinnedBudgetRatio             float64        `json:"pinned_budget_ratio,omitempty"`
+	InjectionMode                 string         `json:"injection_mode,omitempty"`
+	GenerationEnabled             bool           `json:"generation_enabled"`
+	GenerationTrigger             string         `json:"generation_trigger,omitempty"`
+	ConsolidationEnabled          bool           `json:"consolidation_enabled"`
+	ManualEnabled                 bool           `json:"manual_enabled"`
+	Jobs                          map[string]int `json:"jobs,omitempty"`
+	TurnDigests                   map[string]int `json:"turn_digests"`
+	TurnWindows                   map[string]int `json:"turn_windows"`
+	OldestPendingDigestAgeSeconds int64          `json:"oldest_pending_digest_age_seconds,omitempty"`
+	PendingDigestSessions         int            `json:"pending_digest_sessions,omitempty"`
+	PendingDigestBacklogBatches   int            `json:"pending_digest_backlog_batches,omitempty"`
+	RecoveredDigestSessions       int64          `json:"recovered_digest_sessions,omitempty"`
+	Fallback                      bool           `json:"fallback"`
+	FallbackReason                string         `json:"fallback_reason,omitempty"`
 }
 
 type memoryRecordDTO struct {
@@ -122,6 +129,13 @@ type memoryConfirmRequest struct {
 	Format        string `json:"format"`
 }
 
+type memoryTurnWindowPurgeRequest struct {
+	WorkspacePath string `json:"workspace_path"`
+	Confirm       bool   `json:"confirm"`
+	SessionID     string `json:"session_id"`
+	All           bool   `json:"all"`
+}
+
 type memorySummaryListResponse struct {
 	WorkspacePath string                `json:"workspace_path"`
 	Items         []memorystore.Summary `json:"items"`
@@ -200,8 +214,13 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		ByStatus: report.ByStatus, ByFreshness: report.ByFreshness,
 		SummaryRevision: report.SummaryRevision, SummaryStatus: report.SummaryStatus,
 		SummaryFreshness: report.SummaryFreshness, PinnedCount: report.PinnedCount,
-		InjectionMode: report.InjectionMode, Jobs: report.Jobs,
-		Fallback: report.Fallback, FallbackReason: report.FallbackReason,
+		InjectionMode: report.InjectionMode, Jobs: report.Jobs, TurnDigests: report.TurnDigests,
+		TurnWindows:                   report.TurnWindows,
+		OldestPendingDigestAgeSeconds: report.OldestPendingDigestAgeSeconds,
+		PendingDigestSessions:         report.PendingDigestSessions,
+		PendingDigestBacklogBatches:   report.PendingDigestBacklogBatches,
+		RecoveredDigestSessions:       report.RecoveredDigestSessions,
+		Fallback:                      report.Fallback, FallbackReason: report.FallbackReason,
 	}
 	if h.runtimeConfig != nil {
 		response.PinnedBudgetRatio = h.runtimeConfig.Memory.Injection.PinnedBudgetRatio
@@ -1185,6 +1204,56 @@ func (h *Handler) ResetMemory(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "action": "reset", "workspace_path": workspace})
 }
 
+func (h *Handler) PurgeMemoryTurnWindows(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeMemoryAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !h.memoryV2Enabled() {
+		h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, "memory mode is off"))
+		return
+	}
+	var req memoryTurnWindowPurgeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if !req.Confirm {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "purge requires confirm=true"))
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if req.All == (sessionID != "") {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "purge requires exactly one of session_id or all=true"))
+		return
+	}
+	workspace, err := h.resolveMemoryWorkspace(r, req.WorkspacePath)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer store.Close()
+	result, err := store.PurgeTurnWindows(r.Context(), sessionID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	scope := "project"
+	if sessionID != "" {
+		scope = "session"
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "action": "purge_turn_windows", "workspace_path": workspace,
+		"scope": scope, "session_id": sessionID,
+		"windows_deleted": result.Windows, "digests_released": result.Digests,
+	})
+}
+
 func (h *Handler) resolveMemoryWorkspace(r *http.Request, bodyWorkspace string) (string, error) {
 	requested := strings.TrimSpace(bodyWorkspace)
 	if r != nil {
@@ -1248,6 +1317,10 @@ func (h *Handler) openMemoryStore(workspace string) (*memorystore.Store, error) 
 		cfg.DisableManual = !h.runtimeConfig.Memory.Manual.Enabled
 		cfg.RecallTraceEnabled = h.runtimeConfig.Memory.Injection.RecallTrace.Enabled
 		cfg.RecallTraceSampleRate = h.runtimeConfig.Memory.Injection.RecallTrace.SampleRate
+		cfg.Retention = memorypolicy.StoreRetention(h.runtimeConfig.Memory)
+		cfg.StaleBehavior = memorypolicy.StaleBehavior(h.runtimeConfig.Memory)
+		cfg.DisableSecretFilter = memorypolicy.DisableSecretFilter(h.runtimeConfig.Memory)
+		cfg.TurnDigestBatchSize = h.runtimeConfig.Memory.Generation.TurnDigest.MaxTurnsPerBatch
 	}
 	return memorystore.New(cfg)
 }

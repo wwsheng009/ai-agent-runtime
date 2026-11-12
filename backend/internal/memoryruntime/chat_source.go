@@ -3,6 +3,7 @@ package memoryruntime
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -106,6 +107,122 @@ func (s *ChatSessionSource) ReadTranscript(ctx context.Context, session SessionR
 		UpdatedAt:     session.LastActivityAt,
 		Revision:      int64(page.Total),
 		Messages:      messages,
+	}
+	if transcript.UpdatedAt.IsZero() {
+		transcript.UpdatedAt = session.UpdatedAt
+	}
+	transcript.Hash = TranscriptHash(messages)
+	return transcript, nil
+}
+
+// ReadTranscriptWindow reads a bounded canonical message range. The persistent
+// SQLite pager is preferred; the fallback loads the session history and filters
+// by the derived sequence range.
+func (s *ChatSessionSource) ReadTranscriptWindow(ctx context.Context, session SessionRef, startSeq, endSeq, maxMessages int) (Transcript, error) {
+	if s == nil || s.Manager == nil {
+		return Transcript{}, fmt.Errorf("memoryruntime: chat session manager is nil")
+	}
+	if startSeq <= 0 {
+		startSeq = 1
+	}
+	if endSeq < startSeq {
+		return Transcript{}, fmt.Errorf("memoryruntime: invalid transcript window %d-%d", startSeq, endSeq)
+	}
+	if maxMessages <= 0 {
+		maxMessages = 200
+	}
+	storage := s.Manager.GetStorage()
+	if storage == nil {
+		return Transcript{}, fmt.Errorf("memoryruntime: chat session storage is nil")
+	}
+
+	type seqMessage struct {
+		seq     int
+		message types.Message
+	}
+	collected := make([]seqMessage, 0)
+	seen := make(map[int]struct{})
+	appendMessage := func(seq int, message types.Message) {
+		if seq < startSeq || seq > endSeq {
+			return
+		}
+		if _, ok := seen[seq]; ok {
+			return
+		}
+		seen[seq] = struct{}{}
+		collected = append(collected, seqMessage{seq: seq, message: message})
+	}
+
+	if pager, ok := storage.(chat.SessionStorageHistoryPager); ok {
+		beforeSeq := endSeq + 1
+		remaining := endSeq - startSeq + 1
+		if remaining > maxMessages {
+			remaining = maxMessages
+		}
+		for beforeSeq > startSeq && len(collected) < remaining {
+			limit := remaining - len(collected)
+			page, err := pager.GetMessagePage(ctx, session.ID, beforeSeq, limit)
+			if err != nil {
+				return Transcript{}, err
+			}
+			if page == nil || len(page.Messages) == 0 {
+				break
+			}
+			firstSeq := page.FirstSeq
+			if firstSeq <= 0 {
+				firstSeq = beforeSeq - len(page.Messages)
+			}
+			for index, message := range page.Messages {
+				appendMessage(firstSeq+index, message)
+			}
+			if firstSeq <= startSeq || firstSeq >= beforeSeq {
+				break
+			}
+			beforeSeq = firstSeq
+		}
+	} else {
+		loaded, err := storage.Load(ctx, session.ID)
+		if err != nil {
+			return Transcript{}, err
+		}
+		firstSeq := loaded.CanonicalMessageCount - len(loaded.History) + 1
+		if firstSeq <= 0 {
+			firstSeq = 1
+		}
+		for index, message := range loaded.History {
+			appendMessage(firstSeq+index, message)
+		}
+	}
+
+	sort.SliceStable(collected, func(i, j int) bool { return collected[i].seq < collected[j].seq })
+	messages := make([]TranscriptMessage, 0, len(collected))
+	for _, item := range collected {
+		id := strings.TrimSpace(types.MessageID(item.message))
+		if id == "" {
+			id = fmt.Sprintf("msg-%d", item.seq)
+		}
+		content := item.message.Content
+		toolName := strings.TrimSpace(item.message.Metadata.GetString("tool_name", ""))
+		truncated := false
+		if strings.EqualFold(strings.TrimSpace(item.message.Role), "tool") {
+			limit := s.MaxToolOutputRunes
+			if limit <= 0 {
+				limit = 800
+			}
+			if runes := []rune(content); len(runes) > limit {
+				content = string(runes[:limit]) + "\n[tool output truncated]"
+				truncated = true
+			}
+		}
+		messages = append(messages, TranscriptMessage{
+			ID: id, Seq: item.seq, Role: strings.TrimSpace(item.message.Role),
+			Content: content, ToolName: toolName,
+			ToolCallID: strings.TrimSpace(item.message.ToolCallID), Truncated: truncated,
+		})
+	}
+	transcript := Transcript{
+		SessionID: session.ID, WorkspacePath: session.WorkspacePath,
+		UpdatedAt: session.LastActivityAt, Revision: int64(endSeq), Messages: messages,
 	}
 	if transcript.UpdatedAt.IsZero() {
 		transcript.UpdatedAt = session.UpdatedAt

@@ -15,3 +15,14 @@ func RedactForPrompt(text string) (string, []string) {
 func containsInstructionLikeMemory(text string) bool {
 	return memoryredact.ContainsInstructionLikeText(text)
 }
+
+// secretBlocksMemory reports whether a record must be excluded from
+// extraction/consolidation because it still contains a secret-shaped value.
+// An explicit redaction.enabled=false disables this filter; the safe
+// zero-value Config keeps it enabled.
+func secretBlocksMemory(cfg Config, text string) bool {
+	if cfg.RedactionConfigured && !cfg.RedactionEnabled {
+		return false
+	}
+	return memoryredact.DetectSecret(text) != ""
+}

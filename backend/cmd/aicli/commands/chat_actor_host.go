@@ -1919,6 +1919,10 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	applyLocalChatToolObservation(loopConfig, session, h,
 		knowledge.ObservationSourceFor(observationSubagent, sessionCtx.ChildReadOnly), localChatObservationTaskID(session))
 	applyLocalChatCompletionRequirement(loopConfig, session, sessionCtx.ChildAgentType, sessionCtx.ChildCompletionRequirement, workspaceRoot)
+	var turnDigestSink runtimechat.TurnDigestSink
+	if h.MemoryRuntime != nil {
+		turnDigestSink = h.MemoryRuntime
+	}
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.Bootstrap.LLMRuntime(),
@@ -1949,8 +1953,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 			CancelAgentSession: h.cancelSuspendedTurnAgentSession,
 			CancelTeam:         h.cancelSuspendedTurnTeam,
 		},
-		PrepareRun:  localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession, h.ToolSurface),
-		PersistHook: localGoalPersistHook(sessionStore),
+		TurnDigestSink: turnDigestSink,
+		PrepareRun:     localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession, h.ToolSurface),
+		PersistHook:    localGoalPersistHook(sessionStore),
 		// Phase 2 自愈钩子：仅基础会话启用，子会话不得以子 ID 复活基础会话行。
 		EnsureSession: localChatActorEnsureSession(session, isBaseSession),
 		RecoverStale:  true,

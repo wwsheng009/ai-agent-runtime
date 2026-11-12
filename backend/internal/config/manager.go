@@ -122,6 +122,9 @@ type MemoryConfig struct {
 	Consolidation MemoryConsolidationConfig `yaml:"consolidation" json:"consolidation"`
 	Injection     MemoryInjectionConfig     `yaml:"injection" json:"injection"`
 	Feedback      MemoryFeedbackConfig      `yaml:"feedback" json:"feedback"`
+	Retention     MemoryRetentionConfig     `yaml:"retention" json:"retention"`
+	Freshness     MemoryFreshnessConfig     `yaml:"freshness" json:"freshness"`
+	Redaction     MemoryRedactionConfig     `yaml:"redaction" json:"redaction"`
 	Tools         MemoryToolsConfig         `yaml:"tools" json:"tools"`
 }
 
@@ -130,15 +133,37 @@ type MemoryManualConfig struct {
 }
 
 type MemoryGenerationConfig struct {
-	Enabled              bool   `yaml:"enabled" json:"enabled"`
-	Trigger              string `yaml:"trigger" json:"trigger"`
-	MinIdleHours         int    `yaml:"minIdleHours" json:"minIdleHours"`
-	MaxSessionsPerRun    int    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
-	MaxRolloutAgeDays    int    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
-	IncludeSubagents     bool   `yaml:"includeSubagents" json:"includeSubagents"`
-	Model                string `yaml:"model" json:"model"`
-	ReasoningEffort      string `yaml:"reasoningEffort" json:"reasoningEffort"`
-	MaxRecordsPerSession int    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
+	Enabled              bool                   `yaml:"enabled" json:"enabled"`
+	Trigger              string                 `yaml:"trigger" json:"trigger"`
+	MinIdleHours         int                    `yaml:"minIdleHours" json:"minIdleHours"`
+	MaxSessionsPerRun    int                    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
+	MaxRolloutAgeDays    int                    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
+	IncludeSubagents     bool                   `yaml:"includeSubagents" json:"includeSubagents"`
+	Model                string                 `yaml:"model" json:"model"`
+	ReasoningEffort      string                 `yaml:"reasoningEffort" json:"reasoningEffort"`
+	MaxRecordsPerSession int                    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
+	TurnDigest           MemoryTurnDigestConfig `yaml:"turnDigest" json:"turnDigest"`
+}
+
+// MemoryTurnDigestConfig controls the runtime turn outbox introduced for
+// crash/terminal-close recovery. It only records bounded turn summaries; it
+// never performs LLM extraction at turn end.
+type MemoryTurnDigestConfig struct {
+	Enabled              bool `yaml:"enabled" json:"enabled"`
+	StoreText            bool `yaml:"storeText" json:"storeText"`
+	MaxUserChars         int  `yaml:"maxUserChars" json:"maxUserChars"`
+	MaxAssistantChars    int  `yaml:"maxAssistantChars" json:"maxAssistantChars"`
+	RecoveryOnStartup    bool `yaml:"recoveryOnStartup" json:"recoveryOnStartup"`
+	RetentionDays        int  `yaml:"retentionDays" json:"retentionDays"`
+	MaxPendingPerSession int  `yaml:"maxPendingPerSession" json:"maxPendingPerSession"`
+	MaxTurnsPerBatch     int  `yaml:"maxTurnsPerBatch" json:"maxTurnsPerBatch"`
+	MaxBytesPerBatch     int  `yaml:"maxBytesPerBatch" json:"maxBytesPerBatch"`
+	MaxDigestsPerRun     int  `yaml:"maxDigestsPerRun" json:"maxDigestsPerRun"`
+	ExtractEveryNTurns   int  `yaml:"extractEveryNTurns" json:"extractEveryNTurns"`
+	IdleExtractMinutes   int  `yaml:"idleExtractMinutes" json:"idleExtractMinutes"`
+	WindowTurns          int  `yaml:"windowTurns" json:"windowTurns"`
+	WindowRetentionDays  int  `yaml:"windowRetentionDays" json:"windowRetentionDays"`
+	WindowSummaryEnabled bool `yaml:"windowSummaryEnabled" json:"windowSummaryEnabled"`
 }
 
 type MemoryConsolidationConfig struct {
@@ -170,6 +195,48 @@ type MemoryFeedbackConfig struct {
 	CitationEnabled       bool    `yaml:"citationEnabled" json:"citationEnabled"`
 	ExposureSampling      float64 `yaml:"exposureSampling" json:"exposureSampling"`
 	ExposureRetentionDays int     `yaml:"exposureRetentionDays" json:"exposureRetentionDays"`
+}
+
+// MemoryRetentionConfig controls record lifecycle cleanup. Enabled defaults to
+// false so upgrading a dogfood store never starts expiring rows implicitly.
+// Once enabled, zero day/count values keep that dimension disabled
+// (unlimited) rather than silently deleting data.
+type MemoryRetentionConfig struct {
+	Enabled       bool                       `yaml:"enabled" json:"enabled"`
+	CandidateDays int                        `yaml:"candidateDays" json:"candidateDays"`
+	EphemeralDays int                        `yaml:"ephemeralDays" json:"ephemeralDays"`
+	DeletedDays   int                        `yaml:"deletedDays" json:"deletedDays"`
+	AuditDays     int                        `yaml:"auditDays" json:"auditDays"`
+	MaxRecords    int                        `yaml:"maxRecords" json:"maxRecords"`
+	Classes       MemoryRetentionClassConfig `yaml:"classes" json:"classes"`
+}
+
+// MemoryRetentionClassConfig maps record kinds onto the three lifecycle
+// classes used by Consolidation and retention. Kinds omitted from every list
+// fall back to standard.
+type MemoryRetentionClassConfig struct {
+	Permanent []string `yaml:"permanent" json:"permanent"`
+	Standard  []string `yaml:"standard" json:"standard"`
+	Ephemeral []string `yaml:"ephemeral" json:"ephemeral"`
+}
+
+// MemoryFreshnessConfig records the freshness policy consumed by extraction
+// and retrieval. StaleBehavior=exclude is the safe default; warn only applies
+// to low-risk kinds and keeps fact/reference excluded.
+type MemoryFreshnessConfig struct {
+	Enabled                 bool           `yaml:"enabled" json:"enabled"`
+	StaleBehavior           string         `yaml:"staleBehavior" json:"staleBehavior"`
+	DefaultTTLDays          int            `yaml:"defaultTtlDays" json:"defaultTtlDays"`
+	RevalidateBatchSize     int            `yaml:"revalidateBatchSize" json:"revalidateBatchSize"`
+	RevalidateIntervalHours int            `yaml:"revalidateIntervalHours" json:"revalidateIntervalHours"`
+	PerKind                 map[string]int `yaml:"perKind" json:"perKind"`
+}
+
+// MemoryRedactionConfig controls secret handling before any v2 write. Both
+// fields default to true; disabling redaction is an explicit operator choice.
+type MemoryRedactionConfig struct {
+	Enabled      bool `yaml:"enabled" json:"enabled"`
+	DropOnSecret bool `yaml:"dropOnSecret" json:"dropOnSecret"`
 }
 
 type MemoryToolsConfig struct {
@@ -1154,6 +1221,23 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				IncludeSubagents:     false,
 				ReasoningEffort:      "low",
 				MaxRecordsPerSession: 20,
+				TurnDigest: MemoryTurnDigestConfig{
+					Enabled:              true,
+					StoreText:            true,
+					MaxUserChars:         8192,
+					MaxAssistantChars:    16384,
+					RecoveryOnStartup:    true,
+					RetentionDays:        7,
+					MaxPendingPerSession: 200,
+					MaxTurnsPerBatch:     20,
+					MaxBytesPerBatch:     128 * 1024,
+					MaxDigestsPerRun:     200,
+					ExtractEveryNTurns:   50,
+					IdleExtractMinutes:   30,
+					WindowTurns:          100,
+					WindowRetentionDays:  30,
+					WindowSummaryEnabled: true,
+				},
 			},
 			Consolidation: MemoryConsolidationConfig{
 				Enabled: true, MaxRecords: 256, MaxUnusedDays: 30,
@@ -1175,7 +1259,34 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				ExposureSampling:      1.0,
 				ExposureRetentionDays: 30,
 			},
-			Tools: MemoryToolsConfig{Enabled: false, AllowForget: false, AllowCorrect: false},
+			Retention: MemoryRetentionConfig{
+				Enabled:       false,
+				CandidateDays: 30,
+				EphemeralDays: 14,
+				DeletedDays:   30,
+				AuditDays:     180,
+				MaxRecords:    4096,
+				Classes: MemoryRetentionClassConfig{
+					Permanent: []string{"manual", "pattern", "decision", "correction", "preference"},
+					Standard:  []string{"fact", "workflow", "pitfall", "reference", "open_question"},
+					Ephemeral: []string{"task_trace", "low_confidence_candidate"},
+				},
+			},
+			Freshness: MemoryFreshnessConfig{
+				Enabled:                 true,
+				StaleBehavior:           "exclude",
+				DefaultTTLDays:          90,
+				RevalidateBatchSize:     50,
+				RevalidateIntervalHours: 24,
+				PerKind: map[string]int{
+					"preference": 0, "decision": 0, "correction": 0,
+					"workflow": 180, "pitfall": 180,
+					"fact": 30, "reference": 30,
+					"open_question": 14, "task_trace": 14,
+				},
+			},
+			Redaction: MemoryRedactionConfig{Enabled: true, DropOnSecret: true},
+			Tools:     MemoryToolsConfig{Enabled: false, AllowForget: false, AllowCorrect: false},
 		},
 	}
 }
@@ -1620,6 +1731,14 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 		config.Generation.MaxRolloutAgeDays < 0 || config.Generation.MaxRecordsPerSession < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.generation limits cannot be negative")
 	}
+	if config.Generation.TurnDigest.MaxUserChars < 0 || config.Generation.TurnDigest.MaxAssistantChars < 0 ||
+		config.Generation.TurnDigest.RetentionDays < 0 || config.Generation.TurnDigest.MaxPendingPerSession < 0 ||
+		config.Generation.TurnDigest.MaxTurnsPerBatch < 0 || config.Generation.TurnDigest.MaxBytesPerBatch < 0 ||
+		config.Generation.TurnDigest.MaxDigestsPerRun < 0 || config.Generation.TurnDigest.ExtractEveryNTurns < 0 ||
+		config.Generation.TurnDigest.IdleExtractMinutes < 0 || config.Generation.TurnDigest.WindowTurns < 0 ||
+		config.Generation.TurnDigest.WindowRetentionDays < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.generation.turnDigest limits cannot be negative")
+	}
 	if config.Consolidation.MaxRecords < 0 || config.Consolidation.MaxUnusedDays < 0 ||
 		config.Consolidation.SummaryTokenBudget < 0 || config.Consolidation.IntervalHours < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.consolidation limits cannot be negative")
@@ -1641,6 +1760,42 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 	}
 	if config.Feedback.ExposureRetentionDays < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.feedback.exposureRetentionDays cannot be negative")
+	}
+	if config.Retention.CandidateDays < 0 || config.Retention.EphemeralDays < 0 || config.Retention.DeletedDays < 0 ||
+		config.Retention.AuditDays < 0 || config.Retention.MaxRecords < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.retention limits cannot be negative")
+	}
+	classOwner := make(map[string]string)
+	for class, kinds := range map[string][]string{
+		"permanent": config.Retention.Classes.Permanent,
+		"standard":  config.Retention.Classes.Standard,
+		"ephemeral": config.Retention.Classes.Ephemeral,
+	} {
+		for _, kind := range kinds {
+			kind = strings.ToLower(strings.TrimSpace(kind))
+			if kind == "" {
+				return errors.New(errors.ErrValidationFailed, "memory.retention.classes cannot contain an empty kind")
+			}
+			if previous, ok := classOwner[kind]; ok && previous != class {
+				return errors.New(errors.ErrValidationFailed,
+					"memory.retention.classes kind "+kind+" appears in both "+previous+" and "+class)
+			}
+			classOwner[kind] = class
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Freshness.StaleBehavior)) {
+	case "", "exclude", "warn":
+	default:
+		return errors.New(errors.ErrValidationFailed, "memory.freshness.staleBehavior must be exclude or warn")
+	}
+	if config.Freshness.DefaultTTLDays < 0 || config.Freshness.RevalidateBatchSize < 0 ||
+		config.Freshness.RevalidateIntervalHours < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.freshness limits cannot be negative")
+	}
+	for kind, days := range config.Freshness.PerKind {
+		if days < 0 {
+			return errors.New(errors.ErrValidationFailed, "memory.freshness.perKind."+kind+" cannot be negative")
+		}
 	}
 	return nil
 }

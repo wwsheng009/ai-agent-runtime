@@ -4,6 +4,7 @@
 > 适用范围：`aicli`、`runtime-server`、Web/TUI、ACP 共享的 runtime memory 子系统  
 > 核心约束：不破坏现有 context 装配、prompt cache、工具权限和 SQLite 生命周期。
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、stable/recall stage split、pinned 预算、summary invalidation、冲突优先级。
+> 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 
 ## 1. 目标
 
@@ -264,10 +265,23 @@ polluted   因外部上下文/MCP/敏感来源被标记，不参与自动生成
 - 触发记录必须幂等，不能因为进程重启重复抽取；
 - 触发器只入队，不直接执行 LLM。
 
+#### 7.1.1 Turn Digest Outbox（Phase 1，已确认）
+
+为避免终端关闭/崩溃时 `SessionManager.Close` 未执行导致抽取丢失，Phase 1 增加**运行时 Turn Digest Outbox**：
+
+- `internal/chat` 在 turn 终态（`assistant_message` 发布窗口）写一条有界 digest；
+- digest 只保存用户提问、最终 assistant 输出、turn/message 引用、outcome 和 usage；
+- turn-end 不调用 LLM；session-end/idle/startup recovery 再消费；
+- digest 是 outbox/trigger，不是第二份 transcript；抽取仍读取 canonical transcript；
+- startup recovery 只处理 closed/stale/orphaned session，不抽取活跃会话；
+- 大会话按 `digest_seq` 分批，窗口化读取 canonical transcript；只读最近一页时不得把更早的 pending digest 标记为 done；
+- 详细提案：`patches/2026-11-11-turn-digest-runtime-outbox.md`。
+
 需要一个明确的只读 `SessionTranscriptReader` 边界：
 
 - 输入 session id、workspace/project key、消息游标；
 - 输出有界消息摘要、turn boundary、compact boundary、artifact/fact refs；
+- 支持按 `startSeq/endSeq` 窗口读取，避免大会话只能读取最近一页；
 - 不返回其他 workspace、子 agent 越权或敏感附件；
 - 不修改 canonical transcript。
 
@@ -348,7 +362,7 @@ Consolidation 不应：
 冲突键与优先级：
 
 ```text
-conflict_key = (scope, project_key, kind, normalized_subject)
+conflict_key = (scope, project_key, normalized_subject)
 
 user correction
   > manual + pinned

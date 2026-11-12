@@ -187,13 +187,18 @@ type LoopReActConfig struct {
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
 type ReActLoop struct {
-	agent                        *Agent
-	llmRuntime                   *llm.LLMRuntime
-	config                       *LoopReActConfig
-	contextLedger                *contextledger.Ledger
-	contextLedgerOnce            sync.Once
-	turnID                       string
-	episodeID                    string
+	agent             *Agent
+	llmRuntime        *llm.LLMRuntime
+	config            *LoopReActConfig
+	contextLedger     *contextledger.Ledger
+	contextLedgerOnce sync.Once
+	turnID            string
+	episodeID         string
+	// memoryReadMu guards memoryReadIDs, the run-scoped set of ids returned by
+	// successful memory_read calls. These ids join the per-answer citation
+	// allowlist even when the record was not injected into the prompt.
+	memoryReadMu                 sync.Mutex
+	memoryReadIDs                map[string]struct{}
 	toolExecMemory               *toolexec.Memory
 	parallelToolCallsUnsupported atomic.Bool
 	reasoningEffortUnsupported   atomic.Bool
@@ -761,6 +766,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 	loop.turnID = TurnIDFromContext(ctx)
 	loop.episodeID = EpisodeIDFromContext(ctx)
+	loop.resetMemoryReadIDs()
 	// 结构化回执契约（P1-2'）：run-scoped 状态入口重置——同一 loop 的重试
 	// attempt 不得继承上一 attempt 已接受的回执。
 	loop.reportSchema = options.ReportSchema
@@ -3328,21 +3334,26 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
 	if response != nil && strings.TrimSpace(response.Content) != "" {
-		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && projectMemoryStore.V2InjectionEnabled() && len(contextMemoryIDs) > 0 &&
+		readMemoryIDs := loop.memoryReadIDsSnapshot()
+		citationAllowedIDs := append(append([]string(nil), contextMemoryIDs...), readMemoryIDs...)
+		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && projectMemoryStore.V2InjectionEnabled() &&
+			(len(contextMemoryIDs) > 0 || len(readMemoryIDs) > 0) &&
 			answerExposureEnabled(loop.agent.config.Options) {
 			exposure, exposureErr := projectMemoryStore.RecordAnswerExposure(ctx, memorystore.AnswerExposureInput{
 				Answer: response.Content, SessionID: sessionID,
 				TurnID: firstNonEmptyTrimmed(TurnIDFromContext(ctx), traceID), MessageID: llmRequestID,
-				InjectedIDs: contextMemoryIDs,
+				InjectedIDs:       contextMemoryIDs,
+				ReadIDs:           readMemoryIDs,
+				ReadUsageRecorded: true,
 			})
 			if exposureErr == nil {
 				response.Content = exposure.CleanText
 			} else {
 				// Exposure is best-effort and must never block the answer.
-				response.Content = memorystore.ParseMemoryCitations(response.Content, contextMemoryIDs).CleanText
+				response.Content = memorystore.ParseMemoryCitations(response.Content, citationAllowedIDs).CleanText
 			}
 		} else {
-			response.Content = memorystore.ParseMemoryCitations(response.Content, contextMemoryIDs).CleanText
+			response.Content = memorystore.ParseMemoryCitations(response.Content, citationAllowedIDs).CleanText
 		}
 	}
 	cacheBreaker.ObserveSuccess(promptFingerprintFromRequest(req))
@@ -3603,6 +3614,59 @@ func memoryIDsFromContextMetadata(metadata map[string]interface{}) []string {
 	return ids
 }
 
+func (loop *ReActLoop) resetMemoryReadIDs() {
+	if loop == nil {
+		return
+	}
+	loop.memoryReadMu.Lock()
+	loop.memoryReadIDs = nil
+	loop.memoryReadMu.Unlock()
+}
+
+// recordMemoryReadIDs collects successful memory_read targets for the current
+// run. The read tool has already written UsageRead, so the answer path uses
+// these ids only as a citation allowlist (ReadUsageRecorded=true), not as a
+// second read event.
+func (loop *ReActLoop) recordMemoryReadIDs(results []toolExecutionResult) {
+	if loop == nil {
+		return
+	}
+	for _, result := range results {
+		if !strings.EqualFold(strings.TrimSpace(result.Call.Name), "memory_read") ||
+			strings.TrimSpace(result.Error) != "" {
+			continue
+		}
+		id, _ := result.Call.Args["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		loop.memoryReadMu.Lock()
+		if loop.memoryReadIDs == nil {
+			loop.memoryReadIDs = make(map[string]struct{})
+		}
+		loop.memoryReadIDs[id] = struct{}{}
+		loop.memoryReadMu.Unlock()
+	}
+}
+
+func (loop *ReActLoop) memoryReadIDsSnapshot() []string {
+	if loop == nil {
+		return nil
+	}
+	loop.memoryReadMu.Lock()
+	defer loop.memoryReadMu.Unlock()
+	if len(loop.memoryReadIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(loop.memoryReadIDs))
+	for id := range loop.memoryReadIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func answerExposureEnabled(options map[string]interface{}) bool {
 	if options == nil {
 		return true
@@ -3637,6 +3701,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		for i := range parallelResults {
 			loop.observeToolResult(ctx, sessionID, parallelResults[i].Call, parallelResults[i])
 		}
+		loop.recordMemoryReadIDs(parallelResults)
 		return parallelResults, nil
 	}
 	gateway := loop.agent.GetOutputGateway()
@@ -4326,6 +4391,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, results)
 	loop.resetReadOnlyDenyStreakOnSuccess(toolCalls, results)
 	loop.resetSurfaceMismatchStreakOnSuccess(toolCalls, results)
+	loop.recordMemoryReadIDs(results)
 	return results, nil
 }
 
@@ -7537,6 +7603,9 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	completedPayload["token_after"] = result.TokenAfter
 	completedPayload["compacted_messages"] = result.CompactedMessages
 	completedPayload["message_count_after"] = len(result.ReplacementHistory)
+	// Compaction rewrites only the request projection; canonical memory sources
+	// are untouched.
+	completedPayload["canonical_transcript_changed"] = false
 	completedPayload["trigger_token_limit"] = result.TriggerTokenLimit
 	completedPayload["max_context_tokens"] = result.MaxContextTokens
 	if result.Usage != nil {

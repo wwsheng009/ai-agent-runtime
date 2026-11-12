@@ -268,6 +268,9 @@ type SessionActorConfig struct {
 	// Hosts that park such obligations must wire the hooks; a nil hook with
 	// matching obligations keeps the record (retryable, visible) on purpose.
 	SuspendedTurnAbandon SuspendedTurnAbandonHooks
+	// TurnDigestSink records a bounded turn digest at the terminal
+	// assistant_message boundary. It must never run an LLM or block the turn.
+	TurnDigestSink TurnDigestSink
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -327,6 +330,7 @@ type SessionActor struct {
 	// 语义见 SessionActorConfig.CheckpointInterval。
 	checkpointInterval time.Duration
 	lastCheckpointAt   atomic.Int64
+	turnDigestSink     TurnDigestSink
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -419,6 +423,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		onProgress:         cfg.OnProgress,
 		onBudgetProgress:   cfg.OnBudgetProgress,
 		checkpointInterval: resolveSessionCheckpointInterval(cfg.CheckpointInterval),
+		turnDigestSink:     cfg.TurnDigestSink,
 		cmdCh:              make(chan Command, 32),
 		stop:               make(chan struct{}),
 		done:               make(chan struct{}),
@@ -2701,6 +2706,11 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	payload["token_after"] = result.TokenAfter
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
+	// Compaction replaces the prompt projection; the canonical transcript is
+	// append-only and is not truncated by this path. Memory extraction still
+	// reads canonical rows, so this event must not invalidate canonical-derived
+	// memory.
+	payload["canonical_transcript_changed"] = false
 	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
 		payload["compact_generation"] = gen
 	}
@@ -2929,6 +2939,7 @@ func (a *SessionActor) runManualCompact(
 	payload["token_after"] = result.TokenAfter
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
+	payload["canonical_transcript_changed"] = false
 	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
 		payload["compact_generation"] = gen
 	}
@@ -3724,6 +3735,34 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// when content is empty so a reasoning-only/whitespace response can
 		// reconcile its final reasoning snapshot and retire the stream identity.
 		if publishTerminal && result != nil {
+			if a.turnDigestSink != nil {
+				userMessageID, assistantMessageID := turnDigestMessageIDs(session, turnID)
+				outcome := "success"
+				switch {
+				case interrupted || status == SessionStopped:
+					outcome = "interrupted"
+				case !success:
+					outcome = "error"
+				case strings.TrimSpace(result.Output) == "":
+					outcome = "empty"
+				case (resume || strings.TrimSpace(continuation) != "") && strings.TrimSpace(prompt) == "":
+					outcome = "continuation"
+				}
+				a.recordTurnDigest(TurnDigest{
+					SessionID:          a.id,
+					TurnID:             turnID,
+					TraceID:            resultTraceID(result, turnID),
+					Prompt:             prompt,
+					AssistantOutput:    result.Output,
+					Outcome:            outcome,
+					Steps:              resultSteps(result),
+					Usage:              result.Usage,
+					UserMessageID:      userMessageID,
+					AssistantMessageID: assistantMessageID,
+					MessageSeqEnd:      int64(session.CanonicalMessageCount),
+					AssistantStreamID:  result.AssistantStreamID,
+				})
+			}
 			messagePayload := map[string]interface{}{
 				"turn_id":      turnID,
 				"continuation": continuation,

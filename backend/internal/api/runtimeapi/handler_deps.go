@@ -28,6 +28,9 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		EventBus:     h.getRuntimeEventBus(),
 		LLMRuntime:   h.llmRuntime,
 	}
+	if rt := h.MemoryRuntime(); rt != nil {
+		deps.TurnDigestSink = rt
+	}
 	// 会话执行租约：与宿主同源（owner kind = sessionActorLeaseOwnerKind，scope = sessionID）。
 	deps.AcquireSessionLeaseNoWait = func(ctx context.Context, sid string) (*chat.SessionLeaseHandle, error) {
 		return h.acquireSessionLeaseNoWait(ctx, sid, sessionActorLeaseOwnerKind, sid)

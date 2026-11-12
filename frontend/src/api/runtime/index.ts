@@ -59,6 +59,11 @@ export {
   updateHarnessPlugin,
 } from "./harness";
 export {
+  activateMemorySummary,
+  purgeMemoryTurnWindows,
+  setMemorySessionMode,
+} from "./memory-governance";
+export {
   listRuntimeLogs,
   streamRuntimeLogs,
 } from "./logs";

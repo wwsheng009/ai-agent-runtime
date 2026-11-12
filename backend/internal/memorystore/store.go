@@ -91,6 +91,18 @@ type Config struct {
 	// Zero disables the corresponding cleanup.
 	RecallTraceRetentionDays int
 	ExposureRetentionDays    int
+	// Retention controls record lifecycle cleanup. Disabled by default so
+	// existing stores are not expired implicitly on upgrade.
+	Retention RetentionPolicy
+	// StaleBehavior is "exclude" (default) or "warn". Warn admits low-risk
+	// stale kinds into recall while fact/reference stay excluded.
+	StaleBehavior string
+	// DisableSecretFilter is the explicit redaction.enabled=false opt-out for
+	// retrieval-time secret skipping. The default keeps the filter on.
+	DisableSecretFilter bool
+	// TurnDigestBatchSize is the configured maxTurnsPerBatch, used only to
+	// report backlog batches in status. <=0 falls back to 20.
+	TurnDigestBatchSize int
 }
 
 // Store is a file-backed durable project memory.
@@ -578,17 +590,50 @@ func tokenize(query string) []string {
 	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
-	seen := make(map[string]struct{}, len(fields))
-	out := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields)*2)
+	out := make([]string, 0, len(fields)*2)
+	add := func(token string) {
+		if len([]rune(token)) < 2 {
+			return
+		}
+		if _, ok := seen[token]; ok {
+			return
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
 	for _, f := range fields {
-		if len(f) < 2 {
-			continue
+		add(f)
+		// Split mixed-script fields (for example "API超时") so the Latin and
+		// Han parts can match independently.
+		runes := []rune(f)
+		segmentStart := 0
+		hanSegment := len(runes) > 0 && unicode.Is(unicode.Han, runes[0])
+		for i := 1; i <= len(runes); i++ {
+			currentHan := i < len(runes) && unicode.Is(unicode.Han, runes[i])
+			if i < len(runes) && currentHan == hanSegment {
+				continue
+			}
+			if segmentStart < i {
+				segment := string(runes[segmentStart:i])
+				if segment != f {
+					add(segment)
+				}
+			}
+			segmentStart = i
+			hanSegment = currentHan
 		}
-		if _, ok := seen[f]; ok {
-			continue
+		// Chinese queries often arrive as one unspaced field. Add Han bigrams
+		// alongside the full field so keyword recall can match shorter memory
+		// phrases without introducing embeddings or an external tokenizer.
+		for i := 0; i+1 < len(runes); i++ {
+			if unicode.Is(unicode.Han, runes[i]) && unicode.Is(unicode.Han, runes[i+1]) {
+				add(string(runes[i : i+2]))
+			}
 		}
-		seen[f] = struct{}{}
-		out = append(out, f)
+		if len(out) >= 64 {
+			break
+		}
 	}
 	return out
 }

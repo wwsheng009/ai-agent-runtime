@@ -294,6 +294,19 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		return Record{}, fmt.Errorf("memorystore: candidate kind is required")
 	}
 	now := time.Now().UTC()
+	sourceKind := firstNonEmpty(candidate.SourceKind, "session_extract")
+	sourceRefs := append([]string(nil), candidate.SourceRefs...)
+	if len(sourceRefs) == 0 {
+		sourceRefs = []string{"session:" + strings.TrimSpace(candidate.SessionID)}
+	}
+	metadata := map[string]interface{}{
+		"model":       candidate.Model,
+		"token_usage": candidate.TokenUsage,
+		"sensitivity": firstNonEmpty(candidate.Sensitivity, "internal"),
+	}
+	for key, value := range candidate.Metadata {
+		metadata[key] = value
+	}
 	record := Record{
 		ID:               "mem_" + uuid.NewString(),
 		Scope:            ScopeProject,
@@ -307,10 +320,11 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		Sensitivity:      normalizeSensitivity(firstNonEmpty(candidate.Sensitivity, "internal")),
 		Pinned:           false,
 		RetentionClass:   firstNonEmpty(candidate.RetentionClass, "standard"),
-		SourceKind:       "session_extract",
+		SourceKind:       sourceKind,
 		SourceSessionID:  strings.TrimSpace(candidate.SessionID),
 		SourceTurnID:     strings.TrimSpace(candidate.TurnID),
-		SourceRefs:       []string{"session:" + strings.TrimSpace(candidate.SessionID)},
+		SourceWindow:     strings.TrimSpace(candidate.SourceWindow),
+		SourceRefs:       sourceRefs,
 		SourceHash:       candidate.SourceHash,
 		SourceRevision:   candidate.SourceRevision,
 		SourceUpdatedAt:  candidate.SourceUpdatedAt,
@@ -323,11 +337,7 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		Freshness:        FreshnessFresh,
 		LastVerifiedAt:   now,
 		RevalidateAfter:  candidate.RevalidateAfter,
-		Metadata: map[string]interface{}{
-			"model":       candidate.Model,
-			"token_usage": candidate.TokenUsage,
-			"sensitivity": firstNonEmpty(candidate.Sensitivity, "internal"),
-		},
+		Metadata:         metadata,
 	}
 	if err := s.insertRecordTx(ctx, db, record, "agent", candidate.SessionID); err != nil {
 		if isDuplicateMemoryError(err) {
@@ -377,7 +387,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: candidate %s changed concurrently", record.ID)
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "promoted", "consolidation", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "promoted", "consolidation", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "phase2_consolidation",
 	}); err != nil {
 		return Record{}, err
@@ -437,7 +447,7 @@ WHERE id = ? AND project_key = ?
 `, loser.ID, winner.ID, s.cfg.ProjectKey); err != nil {
 		return Record{}, err
 	}
-	if err := insertEventTx(ctx, tx, loser.ID, "superseded", "consolidation", loser.SourceSessionID, loser.Revision+1, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, loser.ProjectKey, loser.ID, "superseded", "consolidation", loser.SourceSessionID, loser.Revision+1, map[string]interface{}{
 		"reason": strings.TrimSpace(reason), "superseded_by": winner.ID,
 	}); err != nil {
 		return Record{}, err
@@ -496,7 +506,7 @@ WHERE id = ? AND revision = ?
 	if err := insertSourceTx(ctx, tx, record, record.SourceSessionID); err != nil {
 		return Record{}, false, err
 	}
-	if err := insertEventTx(ctx, tx, existingID, "revalidated", "agent", record.SourceSessionID, record.Revision, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, record.ProjectKey, existingID, "revalidated", "agent", record.SourceSessionID, record.Revision, map[string]interface{}{
 		"reason": "same_session_reextract",
 	}); err != nil {
 		return Record{}, false, err
@@ -515,6 +525,26 @@ WHERE id = ? AND revision = ?
 // stale when the transcript hash/revision moved. Candidate status is retained;
 // only freshness changes.
 func (s *Store) MarkSessionSourceChanged(ctx context.Context, sessionID, projectKey, newHash string, newRevision int64) (int, error) {
+	return s.markSourceChanged(ctx, sessionID, projectKey, "", "source_changed", newHash, newRevision)
+}
+
+// MarkWindowSourceChanged is the per-window stale check. It only compares
+// sources recorded for the same canonical window, so appending a new window
+// never marks candidates from older windows stale.
+func (s *Store) MarkWindowSourceChanged(ctx context.Context, sessionID, projectKey, sourceWindow, newHash string, newRevision int64) (int, error) {
+	sourceWindow = strings.TrimSpace(sourceWindow)
+	if sourceWindow == "" {
+		return 0, nil
+	}
+	return s.markSourceChanged(ctx, sessionID, projectKey, sourceWindow, "window_source_changed", newHash, newRevision)
+}
+
+// MarkSessionSourcesStale conservatively invalidates every memory record
+// derived from a session, including window-scoped sources. It is used when the
+// canonical transcript was rewritten (compaction) or truncated (backtrack) and
+// the affected window ranges cannot be resolved precisely yet. Pending digest
+// invalidation is handled separately by the runtime outbox.
+func (s *Store) MarkSessionSourcesStale(ctx context.Context, sessionID, projectKey, reason string) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -526,17 +556,18 @@ func (s *Store) MarkSessionSourceChanged(ctx context.Context, sessionID, project
 	if strings.TrimSpace(projectKey) == "" {
 		projectKey = s.cfg.ProjectKey
 	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "source_invalidated"
+	}
 	rows, err := db.QueryContext(ctx, `
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
-JOIN memory_sources src ON src.memory_id = e.id
-WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'session_extract'
+WHERE e.project_key = ? AND e.source_session_id = ?
+  AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
-  AND (
-    (src.source_hash != '' AND src.source_hash != ?)
-    OR (src.source_revision IS NOT NULL AND src.source_revision != ?)
-  )
-`, projectKey, sessionID, strings.TrimSpace(newHash), newRevision)
+  AND e.freshness_status != 'stale'
+`, projectKey, sessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -565,21 +596,104 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'session
 	now := time.Now().UTC()
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
-UPDATE memory_entries SET freshness_status = 'stale', stale_reason = 'source_changed',
+UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
     revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
-`, now.Format(time.RFC3339Nano), item.id, item.revision)
+`, reason, now.Format(time.RFC3339Nano), item.id, item.revision)
 		if err != nil {
 			return 0, err
 		}
 		if affected, _ := res.RowsAffected(); affected == 0 {
 			continue
 		}
-		if err := insertEventTx(ctx, tx, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
-			"reason": "source_changed",
+		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
+			"reason": reason,
 		}); err != nil {
 			return 0, err
 		}
-		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, "source_changed"); err != nil {
+		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, reason); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(stale), nil
+}
+
+func (s *Store) markSourceChanged(ctx context.Context, sessionID, projectKey, sourceWindow, reason, newHash string, newRevision int64) (int, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return 0, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return 0, nil
+	}
+	if strings.TrimSpace(projectKey) == "" {
+		projectKey = s.cfg.ProjectKey
+	}
+	query := `
+SELECT DISTINCT e.id, e.revision
+FROM memory_entries e
+JOIN memory_sources src ON src.memory_id = e.id
+WHERE e.project_key = ? AND e.source_session_id = ?
+  AND e.source_kind IN ('session_extract', 'turn_window')
+  AND e.status IN ('candidate', 'active')
+  AND (
+    (src.source_hash != '' AND src.source_hash != ?)
+    OR (src.source_revision IS NOT NULL AND src.source_revision != ?)
+  )`
+	args := []interface{}{projectKey, sessionID, strings.TrimSpace(newHash), newRevision}
+	if strings.TrimSpace(sourceWindow) == "" {
+		query += ` AND (src.source_window IS NULL OR src.source_window = '')`
+	} else {
+		query += ` AND src.source_window = ?`
+		args = append(args, strings.TrimSpace(sourceWindow))
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	type staleRecord struct {
+		id       string
+		revision int64
+	}
+	var stale []staleRecord
+	for rows.Next() {
+		var item staleRecord
+		if err := rows.Scan(&item.id, &item.revision); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		stale = append(stale, item)
+	}
+	_ = rows.Close()
+	if len(stale) == 0 {
+		return 0, nil
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	for _, item := range stale {
+		res, err := tx.ExecContext(ctx, `
+UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
+    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, item.revision)
+		if err != nil {
+			return 0, err
+		}
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			continue
+		}
+		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
+			"reason": reason,
+		}); err != nil {
+			return 0, err
+		}
+		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, reason); err != nil {
 			return 0, err
 		}
 	}

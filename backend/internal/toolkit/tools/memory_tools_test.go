@@ -131,3 +131,36 @@ func TestMemoryToolsHidePrivateRecordsFromAgentSurface(t *testing.T) {
 		t.Fatalf("memory_read private record = %+v, %v", readResult, err)
 	}
 }
+
+func TestMemoryToolsRecentWhyAndWhyNot(t *testing.T) {
+	cfg := memoryToolTestConfig(t)
+	ctx := toolctx.WithSessionID(context.Background(), "session-diagnostics")
+	add := NewMemoryAddTool(cfg)
+	first, err := add.Execute(ctx, map[string]interface{}{"text": "alpha diagnostic memory", "kind": "fact"})
+	if err != nil || !first.Success {
+		t.Fatalf("memory_add first = %+v, %v", first, err)
+	}
+	second, err := add.Execute(ctx, map[string]interface{}{"text": "beta diagnostic memory", "kind": "fact"})
+	if err != nil || !second.Success {
+		t.Fatalf("memory_add second = %+v, %v", second, err)
+	}
+	var note struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(first.Content), &note); err != nil || note.ID == "" {
+		t.Fatalf("decode note = %q, %v", first.Content, err)
+	}
+
+	recent, err := NewMemoryRecentTool(cfg).Execute(ctx, map[string]interface{}{"limit": 1})
+	if err != nil || !recent.Success || !strings.Contains(recent.Content, `"count": 1`) {
+		t.Fatalf("memory_recent = %+v, %v", recent, err)
+	}
+	why, err := NewMemoryWhyTool(cfg).Execute(ctx, map[string]interface{}{"id": note.ID})
+	if err != nil || !why.Success || !strings.Contains(why.Content, note.ID) || !strings.Contains(why.Content, `"usage"`) {
+		t.Fatalf("memory_why = %+v, %v", why, err)
+	}
+	whyNot, err := NewMemoryWhyNotTool(cfg).Execute(ctx, map[string]interface{}{"query": "alpha"})
+	if err != nil || !whyNot.Success || !strings.Contains(whyNot.Content, "selected_ids") || !strings.Contains(whyNot.Content, "dropped") {
+		t.Fatalf("memory_why_not = %+v, %v", whyNot, err)
+	}
+}

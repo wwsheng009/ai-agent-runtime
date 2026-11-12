@@ -17,6 +17,7 @@ type Trigger string
 const (
 	TriggerIdle       Trigger = "idle"
 	TriggerSessionEnd Trigger = "session_end"
+	TriggerStartup    Trigger = "startup"
 	TriggerBoth       Trigger = "both"
 	TriggerManual     Trigger = "manual"
 )
@@ -51,6 +52,40 @@ type Config struct {
 	ExtractionModel            string
 	ExtractionProvider         string
 	ExtractionReasoningEffort  string
+	ConsolidationModel         string
+	ConsolidationProvider      string
+	Summarizer                 ProjectSummaryGenerator
+
+	// Lifecycle/freshness policy consumed by extraction and consolidation.
+	// Zero-value Config preserves the historical hard-coded kind mapping.
+	RetentionClasses             memorystore.RetentionClasses
+	FreshnessDisabled            bool
+	FreshnessDefaultTTL          time.Duration
+	FreshnessPerKind             map[string]time.Duration
+	FreshnessStaleBehavior       string
+	FreshnessRevalidateBatchSize int
+	RedactionConfigured          bool
+	RedactionEnabled             bool
+	RedactionDropOnSecret        bool
+
+	// TurnDigest controls the runtime outbox written at turn end. It never
+	// triggers extraction by itself; session-end/idle/startup recovery consumes
+	// it through the canonical transcript path.
+	TurnDigestEnabled              bool
+	TurnDigestStoreText            bool
+	TurnDigestMaxUserChars         int
+	TurnDigestMaxAssistantChars    int
+	TurnDigestRetentionDays        int
+	TurnDigestMaxPendingPerSession int
+	TurnDigestMaxTurnsPerBatch     int
+	TurnDigestMaxBytesPerBatch     int
+	TurnDigestMaxDigestsPerRun     int
+	TurnDigestExtractEveryNTurns   int
+	TurnDigestIdleExtractMinutes   int
+	TurnDigestRecoveryOnStartup    bool
+	TurnDigestWindowSummaryEnabled bool
+	TurnDigestWindowTurns          int
+	TurnDigestWindowRetentionDays  int
 }
 
 func (c Config) normalized() Config {
@@ -107,6 +142,46 @@ func (c Config) normalized() Config {
 	}
 	if c.ExtractionReasoningEffort == "" {
 		c.ExtractionReasoningEffort = "low"
+	}
+	if c.TurnDigestMaxUserChars <= 0 {
+		c.TurnDigestMaxUserChars = 8192
+	}
+	if c.TurnDigestMaxAssistantChars <= 0 {
+		c.TurnDigestMaxAssistantChars = 16384
+	}
+	if c.TurnDigestRetentionDays <= 0 {
+		c.TurnDigestRetentionDays = 7
+	}
+	if c.TurnDigestMaxPendingPerSession <= 0 {
+		c.TurnDigestMaxPendingPerSession = 200
+	}
+	if c.TurnDigestMaxTurnsPerBatch <= 0 {
+		c.TurnDigestMaxTurnsPerBatch = 20
+	}
+	if c.TurnDigestMaxBytesPerBatch <= 0 {
+		c.TurnDigestMaxBytesPerBatch = 128 * 1024
+	}
+	if c.TurnDigestMaxDigestsPerRun <= 0 {
+		c.TurnDigestMaxDigestsPerRun = 200
+	}
+	if c.TurnDigestExtractEveryNTurns <= 0 {
+		c.TurnDigestExtractEveryNTurns = 50
+	}
+	if c.TurnDigestIdleExtractMinutes <= 0 {
+		c.TurnDigestIdleExtractMinutes = 30
+	}
+	if c.TurnDigestWindowTurns <= 0 {
+		c.TurnDigestWindowTurns = 100
+	}
+	if c.TurnDigestWindowRetentionDays <= 0 {
+		c.TurnDigestWindowRetentionDays = 30
+	}
+	if c.FreshnessRevalidateBatchSize <= 0 {
+		c.FreshnessRevalidateBatchSize = 50
+	}
+	if !c.RedactionConfigured {
+		c.RedactionEnabled = true
+		c.RedactionDropOnSecret = true
 	}
 	return c
 }
@@ -170,6 +245,25 @@ type ExtractionResult struct {
 	Usage      TokenUsage
 }
 
+// ProjectSummaryInput is the bounded record set handed to an optional
+// Consolidation summary generator. Records have already passed active/fresh,
+// secret, private, pinned/manual, and unused-age filtering.
+type ProjectSummaryInput struct {
+	ProjectKey  string
+	TokenBudget int
+	Records     []memorystore.Record
+}
+
+type ProjectSummaryOutput struct {
+	Text  string
+	Model string
+	Usage TokenUsage
+}
+
+type ProjectSummaryGenerator interface {
+	SummarizeProject(ctx context.Context, input ProjectSummaryInput) (ProjectSummaryOutput, error)
+}
+
 type Extractor interface {
 	Extract(ctx context.Context, session SessionRef, transcript Transcript) (ExtractionResult, error)
 }
@@ -179,20 +273,40 @@ type SessionSource interface {
 	ReadTranscript(ctx context.Context, session SessionRef, maxMessages int) (Transcript, error)
 }
 
+// TranscriptWindowSource is an optional extension for large sessions. It reads
+// a bounded canonical message sequence range without falling back to the
+// latest-page-only reader.
+type TranscriptWindowSource interface {
+	ReadTranscriptWindow(ctx context.Context, session SessionRef, startSeq, endSeq, maxMessages int) (Transcript, error)
+}
+
 type SessionModeReader interface {
 	GetSessionMode(ctx context.Context, sessionID string) (memorystore.SessionMode, error)
 }
 
 type RunResult struct {
-	Trigger    Trigger
-	Sessions   int
-	Processed  int
-	Skipped    int
-	Candidates int
-	Stale      int
-	Failed     int
-	Ignored    []string
-	Errors     []string
+	Trigger      Trigger
+	Sessions     int
+	Processed    int
+	Skipped      int
+	Candidates   int
+	Stale        int
+	Failed       int
+	RolledUp     int
+	RollupFailed int
+	Ignored      []string
+	Errors       []string
+	// SourceHash is set after a canonical transcript was read. It is empty when
+	// the session was skipped before transcript loading.
+	SourceHash string
+}
+
+type RollupResult struct {
+	Examined int
+	RolledUp int
+	Skipped  int
+	Failed   int
+	Errors   []string
 }
 
 type ConsolidationResult struct {
@@ -201,6 +315,7 @@ type ConsolidationResult struct {
 	SummaryID     string
 	Revision      int64
 	SummaryText   string
+	SummaryModel  string
 	TokenCount    int
 	Rebuilt       int
 	RebuildJobs   int

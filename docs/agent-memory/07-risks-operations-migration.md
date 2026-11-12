@@ -11,6 +11,9 @@
 | P0 | secret 写入 memory DB / 日志 / 导出 | 凭证泄漏 |
 | P0 | 记忆内容被当作指令或权限 | 提示注入、越权操作 |
 | P1 | 自动抽取污染长期记忆 | 后续会话被错误偏好影响 |
+| P1 | 终端关闭/崩溃导致 session-end 未执行 | 自动抽取丢失；Turn Digest Outbox + startup recovery |
+| P1 | digest 成为第二份敏感数据副本 | 默认有界、脱敏、TTL；支持只存 message ID |
+| P2 | 大会话 turn 过多导致 backlog/超预算 | 分批、窗口化读取、L0→L1→L2 rollup；rollup 成功前不清理 L0；不得静默丢弃 |
 | P1 | 删除后仍被注入 | 用户信任和隐私问题 |
 | P1 | 删除/纠正后的记忆被重新抽取复活 | 用户无法真正遗忘 |
 | P1 | project key 漂移/大小写差异 | 跨项目误读或记忆丢失 |

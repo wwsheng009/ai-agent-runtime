@@ -119,6 +119,12 @@ export type RuntimeMemoryStatus = {
   consolidation_enabled: boolean;
   manual_enabled: boolean;
   jobs?: Record<string, number>;
+  turn_digests?: Record<string, number>;
+  turn_windows?: Record<string, number>;
+  oldest_pending_digest_age_seconds?: number;
+  pending_digest_sessions?: number;
+  pending_digest_backlog_batches?: number;
+  recovered_digest_sessions?: number;
   fallback: boolean;
   fallback_reason?: string;
 };

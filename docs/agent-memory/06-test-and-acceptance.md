@@ -4,6 +4,7 @@
 > 原则：先建立基线，再设定阈值；所有数字必须能由当前代码路径、测试或真实会话证据复现。  
 > 本文件中的“暂定阈值”在 M0 基线完成后由 owner 校准。
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 增加 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、injected_only exposure 验收。
+> 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 测试已落地；已补 SQLite canonical store reopen、子进程 `os.Exit` 无清理、父进程 hard-kill 三类恢复 E2E；真实终端关闭与 shadow 证据包待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 
 ## 1. 验证目标
 
@@ -56,6 +57,21 @@ E2E / live
 | `off` + 手工 `/memory add` | 保留现有手工 memorystore 行为，不要求 v2 自动能力 |
 | `notes.jsonl` 正常迁移 | 记录数量、文本、tags、manual 来源一致 |
 | retention_class | permanent 不因 maxUnusedDays 自动过期；ephemeral 更短 |
+| retention 默认关闭 | `retention.enabled=false` 不改变任何记录状态；升级不隐式淘汰 |
+| candidate 过期 | 超过 `candidateDays` 未采纳 → `expired` 且写 audit event |
+| active 未使用 | standard 超过 `consolidation.maxUnusedDays`、ephemeral 超过 `ephemeralDays` → `expired`；pinned/manual/permanent 不动 |
+| maxRecords | active+candidate 超上限时只淘汰非 pinned/permanent/manual；不物理删除 |
+| tombstone 清理 | 超过 `deletedDays` 物理删除 entry/source/summary_item；live suppression 保留 |
+| audit/usage retention | events/usage 按 `auditDays` 清理；仅过期 suppression 被删除 |
+| redaction 配置 | `dropOnSecret=true` 丢弃候选；`false` 先脱敏再保留；`enabled=false` 为显式 opt-out |
+| staleBehavior=warn | 仅 preference/workflow/pitfall/open_question 可进入 recall 并标 `possibly stale`；fact/reference/decision 仍排除 |
+| summary compiler | 配置 `consolidation.model` 时调用 LLM；失败/空输出/secret/非法结构回退 deterministic，超预算截断，不阻塞 Consolidation |
+| summary dedupe | 相同 kind + 归一化文本只输出一条；不同数值的同主题冲突按 normalized subject 归组 |
+| recall scoring | 非空 query 零命中不进入 recall；correction/decision/preference、recency、usage、confidence 参与重排 |
+| CJK tokenization | 中文 query 生成 Han bigram，中文记忆可被短查询命中 |
+| recall dedupe | 相同 kind + 归一化文本只保留最高分候选，其余记 `duplicate` |
+| recall query | goal + 最近 2 条 user message；不拼接 assistant/tool 文本，单条截断到 600 runes |
+| recall diversity | 多 kind 命中时先每 kind 取 `limit/2`，再回填剩余候选，避免单一 kind 占满前几个槽位 |
 | 重复迁移 | 不重复插入 |
 | 损坏行 | 跳过并计数，不影响其他行 |
 | JSONL 写入失败/只读 | 迁移失败可诊断，不丢原文件 |
@@ -146,6 +162,42 @@ E2E / live
 | 证据缺失 | 不落 candidate |
 | 任务 lease 过期 | 另一个 worker 可接管 |
 | 重试耗尽 | failed，记录错误，不无限循环 |
+
+### 3.4.1 Turn Digest Outbox
+
+| 场景 | 预期 |
+| --- | --- |
+| turn 终态 | 每个 turn 只写一条 digest，不按 LLM step 写 |
+| 中间 LLM step | 不写 digest |
+| 同 session/turn 重试 | digest 幂等更新，不重复 |
+| secret / 超长文本 | 脱敏、截断；不落原文 secret |
+| session-end | 抽取成功后标记对应 watermark done |
+| idle | 仅补处理 pending；无新 digest 不调用 LLM |
+| startup recovery | 只处理 closed/stale/orphaned session；活跃 session 跳过 |
+| session-end + idle 并发 | 同一 source 只生成一个 job/candidate |
+| interrupted/error turn | 保留 digest 诊断，不自动抽取 |
+| backlog 超限 | 按 oldest-first 分批；不得把未处理 digest 标 done |
+| session-end backlog | 按 `maxDigestsPerRun / maxTurnsPerBatch` 有界 drain；上下文取消/预算耗尽后剩余交后续 sweep |
+| idle extractEveryNTurns | digest ticker 使用 `idleExtractMinutes`；consolidation/diagnostics 使用独立 30m ticker；active session 达到 pending 阈值或 `minIdleHours` 后才提取 |
+| startup recovery | 仅 closed/archived/orphaned/stale；active/idle session 不被 startup 抽取 |
+| startup active 负向 | active session 即使超过 30s 也保持 pending，直到 session-end 或 idle sweep |
+| startup idle 负向 | idle session 留给 idle sweep；startup 不调用 extractor |
+| digest 观测 | status 返回 `oldest_pending_digest_age_seconds`、`pending_digest_sessions`、`pending_digest_backlog_batches`、`recovered_digest_sessions` |
+| Web/CLI parity | Web 可查看 turn digest/window 计数并执行 L1 purge、session mode、summary activate；CLI 支持 session-mode/activate |
+| 大会话只读最近 200 条 | 更早 pending digest 保持 pending |
+| 窗口化读取 | window source IDs 与 `memory_sources` 一致 |
+| 新增窗口 | 不把旧窗口候选误标 stale |
+| per-window stale | 仅同 `source_window` 的 hash/revision 变化触发 stale；session-wide 检查跳过窗口 source |
+| L0 → L1 → L2 rollup | full window / 排空后的 partial tail 生成 L1；L1 成功后生成 `turn_window` L2 seed；L1/L2 seed 成功后才清理 L0，失败保留 L0 |
+| L1 summarizer 失败 | `memory_turn_windows.status=failed`；L0 保持 `rollup_status=pending`；retention 不删除 |
+| windowSummaryEnabled=false | L0 在抽取成功后 `rollup_status=skipped`；retention 可清理；不调用 summarizer |
+| L1 retention | `windowRetentionDays` 只清理 `done/invalidated`；`pending/processing/failed` 保留 |
+| L1 manual purge | API/CLI 要求 confirm + session/all；删除 L1 并把对应 L0 `rollup_status` 释放为 skipped；不删除 L2 memory |
+| session 删除 | runtime-server/web/ACP 显式删除时 best-effort 清理 digest |
+| compaction | canonical transcript 不变时不失效 L0/L1/memory；legacy 无 `canonical_transcript_changed=false` 事件回退保守失效 |
+| backtrack | 按 `canonical_cutoff_seq` / `canonical_message_count_before` 只失效受影响 digest/window/memory；legacy 缺少 cutoff 或 removed IDs 被 cap 时回退 session 级保守失效 |
+| backtrack + 新消息复用 seq | `canonical_cutoff_at` 排除事件后新增的 digest/window/memory；但覆盖旧 L0 的 late L1 仍会因强证据被失效 |
+| `off` 模式 | 不建表、不写 digest、不跑 LLM |
 
 ### 3.5 Phase 2 Consolidation
 
@@ -475,6 +527,13 @@ go test -race ./internal/memorystore ./internal/memoryruntime ./internal/context
 **退出条件：**
 
 - [ ] 自动抽取只写 `candidate`，不写 `active`；`shadow` 只记录、不注入；
+- [ ] turn 终态只写一条 Turn Digest，不按 LLM step 写；turn-end 不跑 LLM；
+- [x] SQLite canonical + store reopen 模拟重启后 pending digest 可恢复，并完成窗口抽取/L1/L2；
+- [x] 子进程写完 digest 后 `os.Exit` 且不关闭 store，父进程 reopen 后可恢复；
+- [x] 父进程 hard-kill 子进程（Windows TerminateProcess / POSIX SIGKILL 等价）后 pending digest 可恢复；
+- [ ] 真实终端关闭后 pending digest 可在 startup/idle 恢复；active session 不被 startup 误抽取；
+- [ ] 大会话按 batch + canonical window 处理；只读最近一页时更早 pending digest 不被标记 done；
+- [ ] session-end 与 idle 并发不重复生成 candidate；digest 清理只在成功后发生；
 - [ ] session 选择符合 workspace、mode、idle、watermark、subagent 排除规则；
 - [ ] `generation.trigger=both` 时 idle sweep 与 session-end 都可用；长会话不会永不抽取；
 - [ ] job 具备幂等 key、lease、接管、退避、重试上限和失败可观测性；

@@ -97,7 +97,7 @@ INSERT OR IGNORE INTO memory_suppressions (
 				return result, err
 			}
 		}
-		if err := insertEventTx(ctx, tx, record.ID, "imported", "admin", record.SourceSessionID, record.Revision, map[string]interface{}{
+		if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "imported", "admin", record.SourceSessionID, record.Revision, map[string]interface{}{
 			"source_kind": record.SourceKind,
 		}); err != nil {
 			return result, err

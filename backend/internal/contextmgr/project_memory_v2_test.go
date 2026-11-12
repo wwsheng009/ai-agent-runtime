@@ -14,14 +14,16 @@ type fakeProjectMemoryV2Store struct {
 	selection         memorystore.Selection
 	calls             int
 	disableStageSplit bool
+	lastOptions       memorystore.InjectOptions
 }
 
 func (f *fakeProjectMemoryV2Store) SelectForInject(memorystore.InjectOptions) ([]memorystore.Note, error) {
 	return nil, nil
 }
 
-func (f *fakeProjectMemoryV2Store) SelectForInjectV2(memorystore.InjectOptions) (memorystore.Selection, error) {
+func (f *fakeProjectMemoryV2Store) SelectForInjectV2(options memorystore.InjectOptions) (memorystore.Selection, error) {
 	f.calls++
+	f.lastOptions = options
 	return f.selection, nil
 }
 
@@ -68,6 +70,8 @@ func TestBuildProjectMemoryStableAndRecallSplit(t *testing.T) {
 	require.Equal(t, "recall", recall.Metadata.GetString("memory_block_kind", ""))
 	require.Equal(t, "project_memory_recall", result.Messages[len(result.Messages)-1].Metadata.GetString("context_stage", ""))
 	require.True(t, result.Metadata["memory_version"] == 2)
+	require.Contains(t, store.lastOptions.Query, "memory injection")
+	require.Contains(t, store.lastOptions.Query, "implement memory")
 }
 
 func TestBuildProjectMemoryGroupInjectedOncePerTurn(t *testing.T) {

@@ -3,6 +3,7 @@
 > 状态：目标契约，实施时以本文件为 schema/API 的起点  
 > 约束：SQLite 事实源、Markdown 可重建、scope 默认 project、写入异步。
 > 修订：2026-11-11，实施回写 import/export、private/deleted 授权、recallTrace 配置、session mode 项目隔离、summary 稳定项去重与预算截断；2026-11-10，M1/M2 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs、schema version 视图、generation 配置和 job/candidate 契约；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
+> 2026-11-11 追加：`memory_turn_digests`（migration v3/v4/v6）与 `generation.turnDigest` Phase 1 core + 窗口化读取 + L0→L1→L2 rollup 已实现；仍以 canonical transcript 为抽取 source。
 
 ## 1. 数据库
 
@@ -123,7 +124,7 @@ CREATE INDEX idx_memory_entries_freshness
 
 | class | 默认对象 | 策略 |
 | --- | --- | --- |
-| `permanent` | manual、pattern、核心 decision | 不自动过期 |
+| `permanent` | manual、pattern、核心 decision、preference、correction | 不自动过期 |
 | `standard` | 普通 project memory | 按 maxUnusedDays |
 | `ephemeral` | 自动 task trace、低置信候选 | 更短 retention |
 
@@ -171,6 +172,7 @@ CREATE TABLE memory_sources (
     source_id       TEXT NOT NULL,
     session_id      TEXT,
     turn_id         TEXT,
+    source_window   TEXT,
     message_ids_json TEXT NOT NULL DEFAULT '[]',
     artifact_refs_json TEXT NOT NULL DEFAULT '[]',
     fact_refs_json  TEXT NOT NULL DEFAULT '[]',
@@ -186,9 +188,13 @@ CREATE TABLE memory_sources (
 );
 ```
 
-`source_kind` 可为 `session_message`、`artifact`、`fact_ledger`、`knowledge`、`manual`、`compact_summary`。派生记录必须至少有一个 source。
+`source_kind` 可为 `session_message`、`artifact`、`fact_ledger`、`knowledge`、`manual`、`compact_summary`、`session_extract`、`turn_window`。派生记录必须至少有一个 source。
 
 `source_updated_at` 表示 source 自身声明的更新时间；`source_observed_at` 表示 AAR 实际读取/验证该 source 的时间。两者都不能替代 `memory_entries.last_verified_at`。
+
+`source_window`（migration v5）记录窗口化抽取的 canonical seq 窗口（例如 `1-4`）。窗口 source 的 stale 比较只在该窗口内进行；session-wide stale 检查会跳过带 `source_window` 的 source。L1 生成的 L2 seed candidate 使用 `source_window=turn_window:<start_digest>-<end_digest>`，因此不会与 canonical message window 的 stale 比较混淆。
+
+迁移版本：`memory_v5_window_source_identity`。
 
 ### 3.2.1 `memory_events`
 
@@ -239,7 +245,8 @@ CREATE INDEX idx_memory_usage_session
 - `cited` 表示最终答案引用；
 - 只有 `cited` / `read` 增加 `use_count`；`injected_only` 只记 exposure，`last_injected_at` 由 `memory_usage` 聚合；
 - citation 解析失败时仍写 `injected_only`，避免“零反馈”；
-- retention 可配置使用 `last_used_at`（cited/read）或 `last_injected_at`（exposure）；
+- exposure 按 `feedback.exposureRetentionDays` 清理 `injected_only`；cited/read 审计按
+  `retention.auditDays` 清理；
 - `use_count` 可以由触发器或事务维护，v1 建议显式事务更新。
 - usage 审计不级联删除；物理清理前需按 audit retention 导出。
 
@@ -351,6 +358,129 @@ CREATE TABLE memory_session_modes (
 CREATE INDEX idx_memory_session_modes_project
   ON memory_session_modes(project_key, mode, updated_at DESC);
 ```
+
+### 3.4.2 `memory_turn_digests`（Phase 1，已确认）
+
+运行时 turn digest outbox。它只负责“turn 已结束、等待记忆抽取”的轻量持久化，不是第二份 canonical transcript；Phase 1 抽取仍读取 canonical transcript。
+
+```sql
+CREATE TABLE memory_turn_digests (
+    digest_seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL UNIQUE,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    project_key     TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    turn_id         TEXT NOT NULL,
+    trace_id        TEXT,
+    parent_session_id TEXT,
+    agent_type      TEXT,
+    user_message_id TEXT,
+    assistant_message_id TEXT,
+    message_seq_end INTEGER NOT NULL DEFAULT 0,
+    user_text       TEXT NOT NULL DEFAULT '',
+    assistant_text  TEXT NOT NULL DEFAULT '',
+    text_truncated  INTEGER NOT NULL DEFAULT 0,
+    outcome         TEXT NOT NULL DEFAULT 'success', -- success | interrupted | error | continuation | empty
+    steps           INTEGER NOT NULL DEFAULT 0,
+    usage_json      TEXT NOT NULL DEFAULT '{}',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    digest_hash     TEXT NOT NULL DEFAULT '',
+    digest_revision INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending', -- pending | processing | done | failed | skipped | deferred | invalidated
+    process_job_id  TEXT,
+    last_error      TEXT,
+    rollup_status   TEXT NOT NULL DEFAULT 'pending', -- pending | done | failed | skipped
+    rollup_window_id TEXT,
+    rolled_up_at    TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    processed_at    TEXT,
+    UNIQUE(project_key, session_id, turn_id)
+);
+
+CREATE INDEX idx_memory_turn_digests_pending
+  ON memory_turn_digests(project_key, session_id, status, digest_seq);
+
+CREATE INDEX idx_memory_turn_digests_session
+  ON memory_turn_digests(session_id, digest_seq);
+
+CREATE INDEX idx_memory_turn_digests_created
+  ON memory_turn_digests(created_at);
+```
+
+语义：
+
+- `turn-end` 只写 digest，不跑 LLM；`session-end` / `idle` / `startup recovery` 再消费；
+- 默认只自动抽取 `outcome=success` 且 `assistant_text` 非空的 turn；
+- `user_text` / `assistant_text` 必须脱敏且有界；`storeText=false` 时只保留 message IDs；
+- `digest_seq` 是全局单调序号，处理时按 session 过滤并用 `MAX(digest_seq)` 作为水位；
+- `digest_hash` / `digest_revision` 在 Phase 1 只用于审计/诊断，不参与现有 `MarkSessionSourceChanged` 的 transcript stale 判定；
+- startup recovery 只处理 closed/stale/orphaned session（含 heartbeat/lease 过期）；不得抽取活跃会话；
+- 大会话按 `digest_seq` 分批；在窗口化 canonical transcript 读取完成前，只处理最近一页时不得把更早的 pending digest 标记为 done；
+- `message_seq_end` 记录 turn 结束时的 canonical message 序号，供窗口化读取确定 `[start, end]`；
+- `rollup_status` 与 extraction `status` 独立：抽取 done 后仍为 `rollup_status=pending`，只有 L1 window 与 L2 seed candidate 成功后才变为 `done`；window summary 关闭时为 `skipped`；
+- 只有 `rollup_status=done/skipped` 的 done/skipped/invalidated 行才按 `turnDigest.retentionDays` 清理；rollup failed/pending 行保留；
+- `deferred` 行保留给窗口化读取；session 删除由应用层清理（memory DB 与 session DB 分离，不能依赖 FK 级联）。
+
+迁移版本：`memory_v3_turn_digests` + `memory_v4_turn_digest_message_seq` + `memory_v6_turn_windows`（rollup 列）。
+
+### 3.4.3 `memory_turn_windows`（L1，已实现）
+
+```sql
+CREATE TABLE memory_turn_windows (
+    window_seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  TEXT NOT NULL UNIQUE,
+    scope               TEXT NOT NULL DEFAULT 'project',
+    project_key         TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    window_index        INTEGER NOT NULL DEFAULT 0,
+    start_digest_seq    INTEGER NOT NULL,
+    end_digest_seq      INTEGER NOT NULL,
+    start_message_seq   INTEGER NOT NULL DEFAULT 0,
+    end_message_seq     INTEGER NOT NULL DEFAULT 0,
+    turn_count          INTEGER NOT NULL DEFAULT 0,
+    summary_text        TEXT NOT NULL DEFAULT '',
+    summary_hash        TEXT NOT NULL DEFAULT '',
+    summary_revision    INTEGER NOT NULL DEFAULT 0,
+    source_hash         TEXT NOT NULL DEFAULT '',
+    source_revision     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'pending', -- pending | processing | done | failed | invalidated
+    model               TEXT,
+    usage_json          TEXT NOT NULL DEFAULT '{}',
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    last_error          TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    processed_at        TEXT,
+    UNIQUE(project_key, session_id, start_digest_seq, end_digest_seq)
+);
+
+CREATE INDEX idx_memory_turn_windows_session
+  ON memory_turn_windows(project_key, session_id, window_seq);
+
+CREATE INDEX idx_memory_turn_windows_status
+  ON memory_turn_windows(project_key, status, window_seq);
+```
+
+语义：
+
+- L1 只汇总 L0 digest，不是 canonical transcript 的第二事实源；
+- `source_hash` 由 L0 digest hash/TurnID/message_seq 计算，digest 内容变化会重置 pending 并 stale 旧 turn-window candidate；
+- `windowTurns` 默认 100；backlog 未排空时只生成完整窗口，排空后才 finalize partial tail；
+- L1 成功后生成 `source_kind=turn_window` 的 candidate，由现有 Consolidation 晋升并进入 L2 summary；
+- L1 使用独立 `windowRetentionDays`（默认 30）；只清理 `done/invalidated`，`pending/processing/failed` 保留；
+- L1/L2 seed 失败时 L0 保持 pending；session 删除清理 L0+L1；compaction 不改 canonical，不失效 canonical 派生记忆；backtrack 按 `canonical_cutoff_seq` / `canonical_message_count_before` 精确失效受影响 L0/L1/memory，legacy 事件回退 session 级保守失效；
+- migration：`memory_v6_turn_windows`。
+
+### 3.4.4 compaction / backtrack invalidation payload
+
+- `session_compact_completed` 增加 `canonical_transcript_changed=false`：compaction 只替换 prompt projection，canonical transcript 不变，因此 canonical 派生的 L0/L1/memory 不失效。
+- `backtrack_finished` 增加：
+  - `canonical_cutoff_seq`：最后保留的 canonical message seq；
+  - `canonical_message_count_before`：截断前 canonical 最大 seq；
+  - `canonical_cutoff_at`：截断事件时间，用于防止误伤截断后复用 seq 的新行；
+  - `tombstone.removed_message_ids` / `removed_turn_ids`：可选证据 ID（受 32 条 cap）。
+- 新事件按 `(canonical_cutoff_seq, canonical_message_count_before]` 精确失效 L0/L1/memory；legacy 事件缺少 cutoff 或 removed IDs 被 cap 时回退 session 级保守失效。
 
 ### 3.5 `memory_summaries`
 
@@ -679,6 +809,22 @@ memory:
     model: ""            # 空 = 当前模型
     reasoningEffort: low
     maxRecordsPerSession: 20
+    turnDigest:          # Phase 1：运行时 outbox；turn-end 只写，不跑 LLM
+      enabled: true
+      storeText: true    # false 时只存 message IDs + metadata；L1 window summary 需要 true
+      maxUserChars: 8192
+      maxAssistantChars: 16384
+      recoveryOnStartup: true
+      retentionDays: 7
+      maxPendingPerSession: 200  # 软上限；达到时触发 batch/rollup，不静默丢弃
+      maxTurnsPerBatch: 20
+      maxBytesPerBatch: 131072
+      maxDigestsPerRun: 200
+      extractEveryNTurns: 50
+      idleExtractMinutes:  30
+      windowTurns:         100
+      windowRetentionDays: 30   # L1 独立 TTL；pending/failed 不自动删除
+      windowSummaryEnabled: true
 
   consolidation:
     enabled: true
@@ -734,13 +880,17 @@ memory:
     allowCorrect: false
 
   retention:
+    enabled: false       # 默认关闭；显式开启后才执行生命周期淘汰
     candidateDays: 30
+    ephemeralDays: 14
     deletedDays: 30
     auditDays: 180
     maxRecords: 4096
     classes:
-      permanent: [manual, pattern, decision]
-      standard: [preference, fact, workflow, pitfall, reference, open_question]
+      # preference/correction 也是用户意图，默认按 permanent 处理，避免被
+      # maxUnusedDays 自动淘汰。
+      permanent: [manual, pattern, decision, correction, preference]
+      standard: [fact, workflow, pitfall, reference, open_question]
       ephemeral: [task_trace, low_confidence_candidate]
 
   redaction:
@@ -766,12 +916,18 @@ memory:
 | --- | --- |
 | `mode` / `scope(project)` / `storePath` / `manual` | 已实现并生效 |
 | `generation.*` | 已实现，manual 触发可绕过 disabled |
-| `consolidation.enabled/maxRecords/maxUnusedDays/summaryTokenBudget/intervalHours` | 已实现；`model` 仍走确定性编译器 |
+| `generation.turnDigest.*` | 已实现；`windowSummaryEnabled=false` 时 rollup 标记 skipped；`windowTurns` 默认 100；`windowRetentionDays` 默认 30；session-end 有界 drain；`idleExtractMinutes` 只控制 digest ticker，consolidation/diagnostics 保持独立 30m ticker；active session 以 `extractEveryNTurns` 为提前阈值 |
+| `consolidation.enabled/maxRecords/maxUnusedDays/summaryTokenBudget/intervalHours/model` | 已实现；配置 `model` 时优先 LLM 摘要，失败/空输出/secret/非法结构时回退确定性编译器，超预算时截断到预算 |
 | `injection.enabled/mode/maxItems/tokenBudget/pinnedBudgetRatio/stageSplit` | 已实现并接入 context budget |
 | `injection.recallTrace.enabled/sampleRate/retentionDays` | 已实现；retention 由 memory maintenance ticker 定时清理 |
-| `feedback.citationEnabled/exposureSampling/exposureRetentionDays` | 已实现；仅清理 `injected_only` exposure，保留 cited/read usage |
+| `feedback.citationEnabled/exposureSampling/exposureRetentionDays` | 已实现；仅清理 `injected_only` exposure；cited/read usage 由 `retention.auditDays` 管理 |
 | `tools.enabled/allowForget/allowCorrect` | 已实现；`manual.enabled=false` 时不注册 `memory_add` |
-| `freshness.*` / `sessionMode.*` / `retention.*` / `redaction.*` | 目标字段，尚未全部消费 |
+| `freshness.enabled/staleBehavior/defaultTtlDays/perKind` | 已实现并生效；`warn` 仅允许 preference/workflow/pitfall/open_question 的 stale 记录注入，fact/reference/decision 永不 warn 注入；summary gate 仍只接受 fresh items |
+| `retention.enabled/candidateDays/ephemeralDays/deletedDays/auditDays/maxRecords/classes` | 已实现；默认 `enabled=false` 防止升级隐式淘汰。candidate/active 超期标记 `expired`，tombstone 到期物理清理；events/usage 按 `auditDays` 清理；live suppression 不自动删除；`maxRecords` 只淘汰非 pinned/permanent/manual |
+| `redaction.enabled/dropOnSecret` | 已实现；默认 true/true。`dropOnSecret=false` 时先脱敏再保留；关闭 redaction 是显式信任边界选择 |
+| `sessionMode.*` | 仍为目标字段；当前 mode 由独立 `memory_session_modes` 表按 API/SQL 管理，无独立配置块 |
+
+Schema v7 为 `memory_events` 和 `memory_usage` 增加 `project_key`，使审计/usage retention 在 tombstone 物理清理后仍可按项目隔离清理。迁移会从 entry/summary 回填旧行。
 
 ## 7. HTTP API
 
@@ -788,7 +944,7 @@ memory:
 
 | Method | Path | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/runtime/memory/status` | mode、scope、DB path、摘要 revision、freshness 统计、job 状态 |
+| `GET` | `/api/runtime/memory/status` | mode、scope、DB path、摘要 revision、freshness 统计、job 状态、`turn_digests` / `turn_windows` 状态计数、oldest pending age、pending sessions、backlog batches、recovered sessions |
 | `GET` | `/api/runtime/memory/records` | filter by scope/status/kind/tag/query，分页有界 |
 | `GET` | `/api/runtime/memory/why-not?q=...` | 召回诊断：选中项、过滤原因、预算与 token 估算（管理端） |
 | `POST` | `/api/runtime/memory/records` | 用户显式新增 manual record |
@@ -814,6 +970,7 @@ memory:
 | `GET` | `/api/runtime/memory/export` | JSONL/Markdown 导出 |
 | `POST` | `/api/runtime/memory/import` | 管理端导入/恢复（校验 schema、先去重） |
 | `POST` | `/api/runtime/memory/reset` | 显式全部重置（二次确认） |
+| `POST` | `/api/runtime/memory/turn-windows/purge` | 手动清理 L1 window（`confirm=true` + `session_id` 或 `all=true`；不删除 L2 memory） |
 
 写操作要求：
 
@@ -856,6 +1013,7 @@ memory:
 /memory export [path]
 /memory jobs [n]
 /memory consolidate
+/memory purge-windows --yes (--session <id> | --all)  # 清 L1，不删 L2
 /memory reset             # 必须二次确认
 /memory mode status|off|shadow|on
 ```

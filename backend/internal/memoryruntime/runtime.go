@@ -15,13 +15,14 @@ import (
 )
 
 type Runtime struct {
-	Store     *memorystore.Store
-	Source    SessionSource
-	Extractor Extractor
-	Modes     SessionModeReader
-	Config    Config
-	Clock     func() time.Time
-	WorkerID  string
+	Store            *memorystore.Store
+	Source           SessionSource
+	Extractor        Extractor
+	WindowSummarizer WindowSummarizer
+	Modes            SessionModeReader
+	Config           Config
+	Clock            func() time.Time
+	WorkerID         string
 }
 
 func New(store *memorystore.Store, source SessionSource, extractor Extractor, modes SessionModeReader, cfg Config) *Runtime {
@@ -37,6 +38,15 @@ func (r *Runtime) now() time.Time {
 		return r.Clock().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// SweepFreshness runs one bounded freshness pass using the configured
+// revalidateBatchSize. It is a no-op when freshness policy is disabled.
+func (r *Runtime) SweepFreshness(ctx context.Context) (int, error) {
+	if r == nil || r.Store == nil || r.Config.FreshnessDisabled {
+		return 0, nil
+	}
+	return r.Store.SweepFreshnessBatch(ctx, r.now(), r.Config.FreshnessRevalidateBatchSize)
 }
 
 func (r *Runtime) enabled() bool {
@@ -87,6 +97,19 @@ func (r *Runtime) Run(ctx context.Context, trigger Trigger) (RunResult, error) {
 		ok, _ := r.eligible(ctx, session, trigger)
 		if !ok {
 			result.Skipped++
+			continue
+		}
+		if session.CanonicalCount > r.Config.MaxSourceMessages {
+			processed, err := r.runPendingTurnDigests(ctx, trigger, session.ID)
+			if err != nil {
+				result.Failed++
+				result.Errors = append(result.Errors, session.ID+": "+err.Error())
+				continue
+			}
+			mergeRunResult(&result, processed)
+			if processed.Processed > 0 {
+				processedThisRun++
+			}
 			continue
 		}
 		processed, err := r.RunSession(ctx, trigger, session.ID)
@@ -149,6 +172,7 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 		result.Skipped = 1
 		return result, nil
 	}
+	result.SourceHash = transcript.Hash
 	jobKey := "session:" + strings.TrimSpace(session.ID) + ":" + transcript.Hash
 	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
 		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
@@ -160,6 +184,11 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	now := r.now()
 	if job.Status == memorystore.JobStatusSucceeded || job.Status == memorystore.JobStatusFailed {
 		result.Skipped = 1
+		if job.Status == memorystore.JobStatusSucceeded {
+			// The canonical source was already extracted. Keep the hash so an
+			// outbox consumer can still advance its digest watermark.
+			result.SourceHash = transcript.Hash
+		}
 		return result, nil
 	}
 	if job.Status == memorystore.JobStatusRunning && job.LeaseUntil.After(now) {
@@ -187,6 +216,140 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
 	stale, err := r.Store.MarkSessionSourceChanged(ctx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
+	if err != nil {
+		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
+		return result, err
+	}
+	result.Stale += stale
+	if len(candidates) == 0 {
+		_ = r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash)
+		result.Processed = 1
+		return result, nil
+	}
+	inserted := 0
+	for _, candidate := range candidates {
+		if inserted >= r.Config.MaxCandidatesPerSession {
+			break
+		}
+		if _, err := r.Store.InsertCandidate(ctx, candidate); err != nil {
+			if isCandidateSkipError(err) {
+				result.Skipped++
+				continue
+			}
+			retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+			_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
+			return result, err
+		}
+		inserted++
+	}
+	if err := r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
+		return result, err
+	}
+	result.Processed = 1
+	result.Candidates = inserted
+	return result, nil
+}
+
+// RunSessionWindow extracts one canonical message window. Windowed runs use a
+// window-scoped job key and MarkWindowSourceChanged so appending a new window
+// does not mark candidates from older windows stale.
+func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, sessionID string, startSeq, endSeq int64) (RunResult, error) {
+	result := RunResult{Trigger: trigger}
+	if !r.enabled() || !r.generationAllowed(trigger) {
+		return result, nil
+	}
+	if r.Source == nil || r.Extractor == nil || r.Store == nil {
+		return result, fmt.Errorf("memoryruntime: runtime is not fully configured")
+	}
+	session, err := r.findSession(ctx, sessionID)
+	if err != nil {
+		return result, err
+	}
+	if ok, _ := r.eligible(ctx, session, trigger); !ok {
+		result.Skipped = 1
+		return result, nil
+	}
+	windowSource, ok := r.Source.(TranscriptWindowSource)
+	if !ok {
+		result.Skipped = 1
+		return result, nil
+	}
+	if startSeq <= 0 {
+		startSeq = 1
+	}
+	if endSeq < startSeq {
+		return result, fmt.Errorf("memoryruntime: invalid window %d-%d", startSeq, endSeq)
+	}
+	transcript, err := windowSource.ReadTranscriptWindow(ctx, session, int(startSeq), int(endSeq), r.Config.MaxSourceMessages)
+	if err != nil {
+		return result, err
+	}
+	if transcript.SessionID == "" {
+		transcript.SessionID = session.ID
+	}
+	if transcript.ProjectKey == "" {
+		transcript.ProjectKey = r.Config.ProjectKey
+	}
+	if transcript.WorkspacePath == "" {
+		transcript.WorkspacePath = session.WorkspacePath
+	}
+	if transcript.Hash == "" {
+		transcript.Hash = TranscriptHash(transcript.Messages)
+	}
+	if transcript.Revision <= 0 {
+		transcript.Revision = endSeq
+	}
+	if len(transcript.Messages) == 0 {
+		result.Skipped = 1
+		return result, nil
+	}
+	result.SourceHash = transcript.Hash
+	jobKey := fmt.Sprintf("session:%s:window:%d-%d:%s", strings.TrimSpace(session.ID), startSeq, endSeq, transcript.Hash)
+	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
+		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
+		MaxAttempts: r.Config.MaxAttempts,
+	})
+	if err != nil {
+		return result, err
+	}
+	now := r.now()
+	if job.Status == memorystore.JobStatusSucceeded || job.Status == memorystore.JobStatusFailed {
+		result.Skipped = 1
+		if job.Status == memorystore.JobStatusSucceeded {
+			result.SourceHash = transcript.Hash
+		}
+		return result, nil
+	}
+	if job.Status == memorystore.JobStatusRunning && job.LeaseUntil.After(now) {
+		result.Skipped = 1
+		return result, nil
+	}
+	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
+		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey,
+		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now,
+	})
+	if err != nil {
+		return result, err
+	}
+	if len(claimed) == 0 {
+		result.Skipped = 1
+		return result, nil
+	}
+	extraction, err := r.Extractor.Extract(ctx, session, transcript)
+	if err != nil {
+		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
+		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
+		return result, err
+	}
+	candidates, reasons := r.validateCandidates(extraction, transcript, now)
+	result.Skipped += len(reasons)
+	result.Ignored = append(result.Ignored, reasons...)
+	windowID := fmt.Sprintf("%d-%d", startSeq, endSeq)
+	for index := range candidates {
+		candidates[index].SourceWindow = windowID
+	}
+	stale, err := r.Store.MarkWindowSourceChanged(ctx, session.ID, r.Config.ProjectKey, windowID, transcript.Hash, transcript.Revision)
 	if err != nil {
 		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
 		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
@@ -313,9 +476,19 @@ func (r *Runtime) validateCandidates(extraction ExtractionResult, transcript Tra
 			reasons = append(reasons, "text")
 			continue
 		}
-		if rule := DetectSecret(text); rule != "" {
-			reasons = append(reasons, "secret:"+rule)
-			continue
+		if r.Config.RedactionEnabled {
+			if rule := DetectSecret(text); rule != "" {
+				if r.Config.RedactionDropOnSecret {
+					reasons = append(reasons, "secret:"+rule)
+					continue
+				}
+				redacted, _ := RedactForPrompt(text)
+				text = strings.TrimSpace(redacted)
+				if text == "" {
+					reasons = append(reasons, "secret:"+rule)
+					continue
+				}
+			}
 		}
 		confidence := candidate.Confidence
 		if confidence < 0 || confidence > 1 {
@@ -343,8 +516,8 @@ func (r *Runtime) validateCandidates(extraction ExtractionResult, transcript Tra
 			Sensitivity: firstNonEmpty(candidate.Sensitivity, "internal"),
 			SourceHash:  transcript.Hash, SourceRevision: transcript.Revision,
 			SourceUpdatedAt: transcript.UpdatedAt, SourceMessageIDs: sourceIDs,
-			RetentionClass:  retentionClassForKind(kind),
-			RevalidateAfter: revalidateAfterForKind(kind, now),
+			RetentionClass:  r.retentionClassForKind(kind),
+			RevalidateAfter: r.revalidateAfterForKind(kind, now),
 			Model:           firstNonEmpty(extraction.Model, r.Config.ExtractionModel),
 			TokenUsage: map[string]interface{}{
 				"prompt_tokens":     extraction.Usage.PromptTokens,
@@ -369,6 +542,8 @@ func mergeRunResult(dst *RunResult, src RunResult) {
 	dst.Candidates += src.Candidates
 	dst.Stale += src.Stale
 	dst.Failed += src.Failed
+	dst.RolledUp += src.RolledUp
+	dst.RollupFailed += src.RollupFailed
 	dst.Ignored = append(dst.Ignored, src.Ignored...)
 	dst.Errors = append(dst.Errors, src.Errors...)
 }
@@ -397,7 +572,10 @@ func retryBackoff(attempt int) time.Duration {
 	return wait
 }
 
-func retentionClassForKind(kind string) string {
+func (r *Runtime) retentionClassForKind(kind string) string {
+	if r != nil && r.Config.RetentionClasses.Configured() {
+		return r.Config.RetentionClasses.ClassForKind(kind)
+	}
 	switch kind {
 	case "preference", "decision", "correction":
 		return "permanent"
@@ -408,7 +586,21 @@ func retentionClassForKind(kind string) string {
 	}
 }
 
-func revalidateAfterForKind(kind string, now time.Time) time.Time {
+func (r *Runtime) revalidateAfterForKind(kind string, now time.Time) time.Time {
+	if r != nil && r.Config.FreshnessDisabled {
+		return time.Time{}
+	}
+	if r != nil && len(r.Config.FreshnessPerKind) > 0 {
+		if ttl, ok := r.Config.FreshnessPerKind[strings.ToLower(strings.TrimSpace(kind))]; ok {
+			if ttl <= 0 {
+				return time.Time{}
+			}
+			return now.Add(ttl)
+		}
+		if r.Config.FreshnessDefaultTTL > 0 {
+			return now.Add(r.Config.FreshnessDefaultTTL)
+		}
+	}
 	switch kind {
 	case "preference", "decision", "correction":
 		return time.Time{}

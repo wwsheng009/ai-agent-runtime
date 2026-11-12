@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -103,4 +104,29 @@ func TestRecordAnswerExposureCitedVsInjectedOnly(t *testing.T) {
 	if err != nil || uncitedRecord.UseCount != 0 {
 		t.Fatalf("uncited usage = %+v, %v", uncitedRecord, err)
 	}
+}
+
+func TestRecordAnswerExposureAcceptsReadIDsWithoutDoubleCounting(t *testing.T) {
+	store, err := memorystore.New(memorystore.Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	readRecord, err := store.Append(memorystore.AppendNoteOptions{Text: "Read through memory_read."})
+	require.NoError(t, err)
+
+	result, err := RecordAnswerExposure(context.Background(), store, AnswerExposureInput{
+		Answer:            "answer\n<agent-memory-citation><entry id=\"" + readRecord.ID + "\" /></agent-memory-citation>",
+		SessionID:         "s1",
+		ReadIDs:           []string{readRecord.ID},
+		ReadUsageRecorded: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{readRecord.ID}, result.Cited)
+
+	updated, err := store.GetRecord(context.Background(), readRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, updated.UseCount, "cited usage counts once; read usage was already recorded by the tool")
+	usage, err := store.ListUsage(context.Background(), memorystore.UsageFilter{MemoryID: readRecord.ID, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, usage, 1)
+	require.Equal(t, memorystore.UsageCited, usage[0].UseKind)
 }

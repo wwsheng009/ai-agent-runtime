@@ -63,7 +63,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", old.ID)
 	}
-	if err := insertEventTx(ctx, tx, old.ID, "superseded", "user", old.SourceSessionID, old.Revision, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, old.ProjectKey, old.ID, "superseded", "user", old.SourceSessionID, old.Revision, map[string]interface{}{
 		"reason": "corrected", "superseded_by": record.ID,
 	}); err != nil {
 		return Record{}, err

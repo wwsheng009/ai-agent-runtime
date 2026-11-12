@@ -169,6 +169,9 @@ func (h *acpSessionHost) DeleteSession(ctx context.Context, req acp.SessionDelet
 			if delErr := manager.Delete(ctx, sessionID); delErr != nil {
 				return fmt.Errorf("delete session %q: %w", sessionID, delErr)
 			}
+			if live != nil {
+				deleteMemoryTurnDigestsForSession(live.chat, sessionID)
+			}
 			return nil
 		}
 	}

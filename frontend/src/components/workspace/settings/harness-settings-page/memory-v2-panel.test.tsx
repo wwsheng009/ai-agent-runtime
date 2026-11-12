@@ -25,6 +25,30 @@ function translator(): TFunction<"settings"> {
     if (key === "harness.memorySummaryMeta") {
       return `r${options?.revision} ${options?.tokens} ${options?.items}`;
     }
+    if (key === "harness.memoryTurnDigests") return "Turn digests";
+    if (key === "harness.memoryTurnWindows") return "Turn windows";
+    if (key === "harness.memoryPendingDigestAge") {
+      return `Oldest pending: ${options?.seconds}s`;
+    }
+    if (key === "harness.memoryPendingDigestSessions") {
+      return `Pending sessions: ${options?.count}`;
+    }
+    if (key === "harness.memoryBacklogBatches") {
+      return `Backlog batches: ${options?.count}`;
+    }
+    if (key === "harness.memoryRecoveredSessions") {
+      return `Recovered sessions: ${options?.count}`;
+    }
+    if (key === "harness.memoryActivateSummary") return "Activate revision";
+    if (key === "harness.memorySessionGovernance") return "Session governance";
+    if (key === "harness.memorySessionIDPlaceholder") return "Session ID";
+    if (key === "harness.memorySessionMode") return "Session mode";
+    if (key === "harness.memorySessionModeEnabled") return "enabled";
+    if (key === "harness.memorySessionModeDisabled") return "disabled";
+    if (key === "harness.memorySessionModePolluted") return "polluted";
+    if (key === "harness.memorySessionModeApply") return "Apply session mode";
+    if (key === "harness.memoryPurgeSessionWindows") return "Purge session L1";
+    if (key === "harness.memoryPurgeAllWindows") return "Purge all L1";
     if (key === "harness.memoryUseCount") return `use ${options?.count}`;
     if (key === "harness.memoryRebuildSummary") return "Rebuild summary";
     if (key === "harness.memoryExport") return "Export";
@@ -90,6 +114,12 @@ describe("MemoryV2Panel", () => {
           pinned_count: 1, pinned_budget_ratio: 0.2, injection_mode: "hybrid",
           generation_enabled: true, generation_trigger: "both",
           consolidation_enabled: true, manual_enabled: true,
+          turn_digests: { pending: 2, done: 1 },
+          turn_windows: { done: 1 },
+          oldest_pending_digest_age_seconds: 120,
+          pending_digest_sessions: 2,
+          pending_digest_backlog_batches: 1,
+          recovered_digest_sessions: 3,
           fallback: false,
         });
       }
@@ -131,15 +161,37 @@ describe("MemoryV2Panel", () => {
       if (url.includes("/memory/summaries/rebuild")) {
         return jsonResponse({ workspace_path: "/tmp/w", rebuilt: 1, revision: 3 });
       }
+      if (url.includes("/memory/summaries/sum_old/activate")) {
+        return jsonResponse({
+          id: "sum_old", revision: 1, status: "active", freshness_status: "fresh",
+        });
+      }
       if (url.includes("/memory/summaries")) {
         return jsonResponse({
-          workspace_path: "/tmp/w", count: 1,
-          items: [{
-            id: "sum_1", scope: "project", project_key: "pk", summary_kind: "long_term",
-            revision: 2, status: "active", freshness_status: "fresh",
-            text: "Stable summary.", token_estimate: 12, source_count: 1,
-            generated_at: "2026-11-10T00:00:00Z",
-          }],
+          workspace_path: "/tmp/w", count: 2,
+          items: [
+            {
+              id: "sum_1", scope: "project", project_key: "pk", summary_kind: "long_term",
+              revision: 2, status: "active", freshness_status: "fresh",
+              text: "Stable summary.", token_estimate: 12, source_count: 1,
+              generated_at: "2026-11-10T00:00:00Z",
+            },
+            {
+              id: "sum_old", scope: "project", project_key: "pk", summary_kind: "long_term",
+              revision: 1, status: "superseded", freshness_status: "fresh",
+              text: "Old summary.", token_estimate: 10, source_count: 1,
+              generated_at: "2026-11-09T00:00:00Z",
+            },
+          ],
+        });
+      }
+      if (url.includes("/memory/sessions/s1/mode")) {
+        return jsonResponse({ ok: true, session_id: "s1", mode: "enabled" });
+      }
+      if (url.includes("/memory/turn-windows/purge")) {
+        return jsonResponse({
+          ok: true, action: "purge_turn_windows", workspace_path: "/tmp/w",
+          scope: "project", windows_deleted: 1, digests_released: 1,
         });
       }
       if (url.includes("/memory/usage")) {
@@ -202,6 +254,9 @@ describe("MemoryV2Panel", () => {
     expect(container.textContent).toContain("rebuild boom");
     expect(container.textContent).toContain("queryTrace");
     expect(container.textContent).toContain("Deleted memory.");
+    expect(container.textContent).toContain("pending=2");
+    expect(container.textContent).toContain("done=1");
+    expect(container.textContent).toContain("Oldest pending: 120s");
 
     const rebuildButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Rebuild summary"),
@@ -214,6 +269,73 @@ describe("MemoryV2Panel", () => {
     expect(fetchMock.mock.calls.some(([input, init]) =>
       String(input).includes("/memory/summaries/rebuild") &&
       (init?.method ?? "GET").toUpperCase() === "POST",
+    )).toBe(true);
+
+    const activateButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Activate revision"),
+    );
+    expect(activateButton).toBeTruthy();
+    await act(async () => {
+      activateButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/summaries/sum_old/activate") &&
+      (init?.method ?? "GET").toUpperCase() === "POST",
+    )).toBe(true);
+
+    const sessionInput = container.querySelector('input[aria-label="Session ID"]') as HTMLInputElement | null;
+    expect(sessionInput).toBeTruthy();
+    await act(async () => {
+      if (sessionInput) {
+        const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setValue?.call(sessionInput, "s1");
+        sessionInput.dispatchEvent(new Event("input", { bubbles: true }));
+        sessionInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    const applySessionModeButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Apply session mode"),
+    );
+    expect(applySessionModeButton).toBeTruthy();
+    await act(async () => {
+      applySessionModeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/sessions/s1/mode") &&
+      (init?.method ?? "GET").toUpperCase() === "POST" &&
+      String(init?.body).includes('"mode":"enabled"'),
+    )).toBe(true);
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const purgeAllButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Purge all L1"),
+    );
+    expect(purgeAllButton).toBeTruthy();
+    await act(async () => {
+      purgeAllButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/turn-windows/purge") &&
+      (init?.method ?? "GET").toUpperCase() === "POST" &&
+      String(init?.body).includes('"all":true'),
+    )).toBe(true);
+
+    const purgeSessionButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Purge session L1"),
+    );
+    expect(purgeSessionButton).toBeTruthy();
+    await act(async () => {
+      purgeSessionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).includes("/memory/turn-windows/purge") &&
+      (init?.method ?? "GET").toUpperCase() === "POST" &&
+      String(init?.body).includes('"session_id":"s1"'),
     )).toBe(true);
 
     const exportButton = Array.from(container.querySelectorAll("button")).find((button) =>
@@ -245,7 +367,7 @@ describe("MemoryV2Panel", () => {
       String(init?.body).includes('"pinned":false'),
     )).toBe(true);
 
-    const whyNotInput = container.querySelector("input[aria-label]") as HTMLInputElement | null;
+    const whyNotInput = container.querySelector('input[aria-label="memoryWhyNotPlaceholder"]') as HTMLInputElement | null;
     expect(whyNotInput).toBeTruthy();
     await act(async () => {
       if (whyNotInput) {
@@ -283,7 +405,6 @@ describe("MemoryV2Panel", () => {
       (init?.method ?? "GET").toUpperCase() === "POST",
     )).toBe(true);
 
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const resetButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Reset all"),
     );

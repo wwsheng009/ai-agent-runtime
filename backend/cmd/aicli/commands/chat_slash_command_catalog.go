@@ -635,7 +635,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/memory",
-			Usage:       "/memory [status|show|why|why-not|stale|revalidate|add|correct|forget|export|jobs|consolidate|reset|mode]",
+			Usage:       "/memory [status|show|why|why-not|stale|revalidate|add|correct|forget|export|jobs|consolidate|purge-windows|reset|mode|session-mode|activate]",
 			Summary:     "查看或写入项目级持久记忆（.aicli/memory）",
 			Group:       string(chatSlashCommandGroupContext),
 			AcceptsArgs: true,
@@ -656,6 +656,9 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "export", Summary: "导出 JSONL（可带路径）"},
 				{Token: "jobs", Summary: "查看后台任务"},
 				{Token: "consolidate", Summary: "运行 Consolidation"},
+				{Token: "purge-windows", Summary: "手动清理 L1 window（需 --yes + --session/--all）"},
+				{Token: "session-mode", Summary: "设置 single session 的 enabled/disabled/polluted"},
+				{Token: "activate", Summary: "激活指定 summary revision"},
 				{Token: "reset", Summary: "重置项目记忆（需 --yes）"},
 				{Token: "mode", Summary: "查看或写入 memory.mode"},
 			},

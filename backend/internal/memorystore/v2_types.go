@@ -1,6 +1,9 @@
 package memorystore
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // V2 long-term memory types. The legacy Note/JSONL surface remains in store.go
 // so existing callers continue to compile and keep their behavior when
@@ -23,6 +26,68 @@ const (
 	StatusDeleted    Status = "deleted"
 	StatusExpired    Status = "expired"
 )
+
+// RetentionClasses mirrors memory.retention.classes. Kinds omitted from every
+// list fall back to standard. "manual" is always permanent regardless of this
+// mapping because user-authored notes must not be auto-expired.
+type RetentionClasses struct {
+	Permanent []string
+	Standard  []string
+	Ephemeral []string
+}
+
+// RetentionPolicy is the store-side lifecycle policy. Zero day/count values
+// disable that dimension; eligible records are marked expired, not physically
+// deleted, except for tombstones that have passed DeletedDays.
+type RetentionPolicy struct {
+	Enabled          bool
+	CandidateDays    int
+	EphemeralDays    int
+	DeletedDays      int
+	AuditDays        int
+	MaxRecords       int
+	ActiveUnusedDays int
+	Classes          RetentionClasses
+}
+
+// RetentionSweepResult reports one bounded lifecycle pass.
+type RetentionSweepResult struct {
+	Reclassified       int64 `json:"reclassified"`
+	CandidatesExpired  int64 `json:"candidates_expired"`
+	ActiveExpired      int64 `json:"active_expired"`
+	MaxRecordsExpired  int64 `json:"max_records_expired"`
+	TombstonesDeleted  int64 `json:"tombstones_deleted"`
+	EventsDeleted      int64 `json:"events_deleted"`
+	UsageDeleted       int64 `json:"usage_deleted"`
+	SuppressionsPurged int64 `json:"suppressions_purged"`
+}
+
+// Configured reports whether an explicit kind mapping was supplied.
+func (c RetentionClasses) Configured() bool {
+	return len(c.Permanent) > 0 || len(c.Standard) > 0 || len(c.Ephemeral) > 0
+}
+
+// ClassForKind returns permanent/standard/ephemeral for a record kind. Listed
+// kinds win in that order; unlisted kinds fall back to standard.
+func (c RetentionClasses) ClassForKind(kind string) string {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	for _, candidate := range c.Permanent {
+		if strings.ToLower(strings.TrimSpace(candidate)) == kind {
+			return "permanent"
+		}
+	}
+	for _, candidate := range c.Ephemeral {
+		if strings.ToLower(strings.TrimSpace(candidate)) == kind {
+			return "ephemeral"
+		}
+	}
+	for _, candidate := range c.Standard {
+		if strings.ToLower(strings.TrimSpace(candidate)) == kind {
+			return "standard"
+		}
+	}
+	return "standard"
+}
 
 type Freshness string
 
@@ -63,6 +128,7 @@ type Record struct {
 	SourceKind       string                 `json:"source_kind,omitempty"`
 	SourceSessionID  string                 `json:"source_session_id,omitempty"`
 	SourceTurnID     string                 `json:"source_turn_id,omitempty"`
+	SourceWindow     string                 `json:"source_window,omitempty"`
 	SourceRefs       []string               `json:"source_refs,omitempty"`
 	SourceHash       string                 `json:"source_hash,omitempty"`
 	SourceRevision   int64                  `json:"source_revision,omitempty"`
@@ -155,6 +221,9 @@ type ClaimJobOptions struct {
 type Candidate struct {
 	SessionID        string
 	TurnID           string
+	SourceWindow     string
+	SourceKind       string
+	SourceRefs       []string
 	ProjectKey       string
 	Kind             string
 	Text             string
@@ -169,6 +238,7 @@ type Candidate struct {
 	RevalidateAfter  time.Time
 	Model            string
 	TokenUsage       map[string]interface{}
+	Metadata         map[string]interface{}
 }
 
 type Selection struct {
@@ -210,21 +280,27 @@ type RecordPatch struct {
 }
 
 type StatusReport struct {
-	Mode             string         `json:"mode"`
-	Scope            string         `json:"scope"`
-	DBPath           string         `json:"db_path,omitempty"`
-	SchemaVersion    int            `json:"schema_version"`
-	Total            int            `json:"total"`
-	ByStatus         map[string]int `json:"by_status,omitempty"`
-	ByFreshness      map[string]int `json:"by_freshness,omitempty"`
-	SummaryRevision  int64          `json:"summary_revision,omitempty"`
-	SummaryStatus    string         `json:"summary_status,omitempty"`
-	SummaryFreshness string         `json:"summary_freshness,omitempty"`
-	PinnedCount      int            `json:"pinned_count,omitempty"`
-	InjectionMode    string         `json:"injection_mode,omitempty"`
-	Jobs             map[string]int `json:"jobs,omitempty"`
-	Fallback         bool           `json:"fallback"`
-	FallbackReason   string         `json:"fallback_reason,omitempty"`
+	Mode                          string         `json:"mode"`
+	Scope                         string         `json:"scope"`
+	DBPath                        string         `json:"db_path,omitempty"`
+	SchemaVersion                 int            `json:"schema_version"`
+	Total                         int            `json:"total"`
+	ByStatus                      map[string]int `json:"by_status,omitempty"`
+	ByFreshness                   map[string]int `json:"by_freshness,omitempty"`
+	SummaryRevision               int64          `json:"summary_revision,omitempty"`
+	SummaryStatus                 string         `json:"summary_status,omitempty"`
+	SummaryFreshness              string         `json:"summary_freshness,omitempty"`
+	PinnedCount                   int            `json:"pinned_count,omitempty"`
+	InjectionMode                 string         `json:"injection_mode,omitempty"`
+	Jobs                          map[string]int `json:"jobs,omitempty"`
+	TurnDigests                   map[string]int `json:"turn_digests,omitempty"`
+	TurnWindows                   map[string]int `json:"turn_windows,omitempty"`
+	OldestPendingDigestAgeSeconds int64          `json:"oldest_pending_digest_age_seconds,omitempty"`
+	PendingDigestSessions         int            `json:"pending_digest_sessions,omitempty"`
+	PendingDigestBacklogBatches   int            `json:"pending_digest_backlog_batches,omitempty"`
+	RecoveredDigestSessions       int64          `json:"recovered_digest_sessions,omitempty"`
+	Fallback                      bool           `json:"fallback"`
+	FallbackReason                string         `json:"fallback_reason,omitempty"`
 }
 
 type RecallTrace struct {

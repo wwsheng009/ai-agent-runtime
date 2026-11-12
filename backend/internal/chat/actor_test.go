@@ -2901,6 +2901,7 @@ func TestSessionActorMaybeAutoCompactSessionFallsBackToLocalWhenRemoteUnsupporte
 	require.Equal(t, compactruntime.ModeLocal, completed["mode"])
 	require.Equal(t, compactruntime.ModeRemote, completed["fallback_from_mode"])
 	require.Equal(t, "remote_compact_unsupported", completed["fallback_reason"])
+	require.Equal(t, false, completed["canonical_transcript_changed"])
 }
 
 func TestSessionActorMaybeAutoCompactSessionUsesObservedContextSnapshot(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
@@ -53,6 +55,7 @@ func (c *Consolidator) Run(ctx context.Context) (ConsolidationResult, error) {
 		result.SummaryID = rebuilt.SummaryID
 		result.Revision = rebuilt.Revision
 		result.SummaryText = rebuilt.SummaryText
+		result.SummaryModel = rebuilt.SummaryModel
 		result.TokenCount = rebuilt.TokenCount
 	}
 	return result, nil
@@ -108,7 +111,7 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 	}
 	for _, record := range page.Items {
 		if record.Freshness != memorystore.FreshnessFresh || !record.DeletedAt.IsZero() ||
-			record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			record.Sensitivity == "private" || secretBlocksMemory(c.Config, record.Text) {
 			continue
 		}
 		if record.Confidence < c.Config.MinCandidateConfidence {
@@ -161,14 +164,13 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return result, nil
 	}
 	summaryRecords := summaryEligible(active)
-	text, ids, tokens := deterministicSummary(summaryRecords, c.Config.SummaryTokenBudget)
+	text, ids, tokens, model, metadata := c.buildSummary(ctx, summaryRecords, reasonPhase2)
 	if strings.TrimSpace(text) == "" || len(ids) == 0 {
 		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
 		return result, nil
 	}
 	summary, err := c.Store.CompileSummary(ctx, memorystore.Summary{
-		Text: text, TokenEstimate: tokens, Model: "deterministic",
-		Metadata: map[string]interface{}{"compiler": "deterministic_v1"},
+		Text: text, TokenEstimate: tokens, Model: model, Metadata: metadata,
 	}, ids)
 	if err != nil {
 		return fail(err)
@@ -179,6 +181,7 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 	result.SummaryID = summary.ID
 	result.Revision = summary.Revision
 	result.SummaryText = summary.Text
+	result.SummaryModel = summary.Model
 	result.TokenCount = summary.TokenEstimate
 	return result, nil
 }
@@ -245,7 +248,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 			result.RebuildJobs++
 			continue
 		}
-		text, ids, tokens := deterministicSummary(summaryRecords, c.Config.SummaryTokenBudget)
+		text, ids, tokens, model, metadata := c.buildSummary(ctx, summaryRecords, reasonSummaryRebuild)
 		if strings.TrimSpace(text) == "" || len(ids) == 0 {
 			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
 				return result, err
@@ -254,8 +257,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 			continue
 		}
 		rebuilt, err := c.Store.CompileSummary(ctx, memorystore.Summary{
-			Text: text, TokenEstimate: tokens, Model: "deterministic",
-			Metadata: map[string]interface{}{"compiler": "deterministic_v1", "reason": "summary_rebuild"},
+			Text: text, TokenEstimate: tokens, Model: model, Metadata: metadata,
 		}, ids)
 		if err != nil {
 			if rebuilt.ID == "" {
@@ -271,6 +273,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		result.SummaryID = rebuilt.ID
 		result.Revision = rebuilt.Revision
 		result.SummaryText = rebuilt.Text
+		result.SummaryModel = rebuilt.Model
 		result.TokenCount = rebuilt.TokenEstimate
 	}
 }
@@ -287,7 +290,7 @@ func (c *Consolidator) activeFreshRecords(ctx context.Context) ([]memorystore.Re
 	records := make([]memorystore.Record, 0, len(page.Items))
 	for _, record := range page.Items {
 		if record.Freshness != memorystore.FreshnessFresh || !record.DeletedAt.IsZero() ||
-			record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+			record.Sensitivity == "private" || secretBlocksMemory(c.Config, record.Text) {
 			continue
 		}
 		if !record.ValidUntil.IsZero() && !record.ValidUntil.After(now) {
@@ -303,6 +306,136 @@ func (c *Consolidator) activeFreshRecords(ctx context.Context) ([]memorystore.Re
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+const (
+	reasonPhase2         = "phase2_consolidation"
+	reasonSummaryRebuild = "summary_rebuild"
+)
+
+// buildSummary prefers the configured LLM summarizer but keeps the
+// deterministic compiler as a fail-open fallback. Consolidation must never
+// fail just because the summary model is unavailable or returns unusable text.
+func (c *Consolidator) buildSummary(ctx context.Context, records []memorystore.Record, reason string) (string, []string, int, string, map[string]interface{}) {
+	if c == nil {
+		return "", nil, 0, "deterministic", map[string]interface{}{"compiler": "deterministic_v1", "reason": reason}
+	}
+	budget := c.Config.SummaryTokenBudget
+	if budget <= 0 {
+		budget = 800
+	}
+	text, ids, tokens := deterministicSummary(records, budget)
+	metadata := map[string]interface{}{
+		"compiler": "deterministic_v1",
+		"reason":   reason,
+	}
+	if c.Config.Summarizer == nil || len(ids) == 0 {
+		return text, ids, tokens, "deterministic", metadata
+	}
+	selectedRecords := filterRecordsByIDs(records, ids)
+	if len(selectedRecords) == 0 {
+		return text, ids, tokens, "deterministic", metadata
+	}
+	output, err := c.Config.Summarizer.SummarizeProject(ctx, ProjectSummaryInput{
+		ProjectKey: c.Store.ProjectKey(), TokenBudget: budget, Records: selectedRecords,
+	})
+	if err != nil {
+		metadata["fallback_reason"] = safeSummaryFallbackReason(err.Error())
+		return text, ids, tokens, "deterministic", metadata
+	}
+	generated := strings.TrimSpace(output.Text)
+	if generated == "" {
+		metadata["fallback_reason"] = "empty_summary"
+		return text, ids, tokens, "deterministic", metadata
+	}
+	if rule := memoryredact.DetectSecret(generated); rule != "" {
+		metadata["fallback_reason"] = "secret:" + rule
+		return text, ids, tokens, "deterministic", metadata
+	}
+	if invalid := projectSummaryValidationError(generated); invalid != "" {
+		metadata["fallback_reason"] = invalid
+		return text, ids, tokens, "deterministic", metadata
+	}
+	if memorystore.EstimateTokens(generated) > budget {
+		generated = truncateSummaryToTokenBudget(generated, budget)
+	}
+	if strings.TrimSpace(generated) == "" {
+		metadata["fallback_reason"] = "empty_after_truncation"
+		return text, ids, tokens, "deterministic", metadata
+	}
+	model := strings.TrimSpace(output.Model)
+	if model == "" {
+		model = firstNonEmpty(c.Config.ConsolidationModel, "llm")
+	}
+	metadata["compiler"] = "llm_v1"
+	metadata["summary_model"] = model
+	if output.Usage != (TokenUsage{}) {
+		metadata["usage"] = map[string]interface{}{
+			"prompt_tokens":     output.Usage.PromptTokens,
+			"completion_tokens": output.Usage.CompletionTokens,
+			"total_tokens":      output.Usage.TotalTokens,
+		}
+	}
+	return generated, ids, memorystore.EstimateTokens(generated), model, metadata
+}
+
+func projectSummaryValidationError(text string) string {
+	if !utf8.ValidString(text) {
+		return "invalid_utf8"
+	}
+	if !strings.Contains(text, "## ") {
+		return "missing_headings"
+	}
+	if !strings.Contains(text, "id=") {
+		return "missing_source_ids"
+	}
+	return ""
+}
+
+func safeSummaryFallbackReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if redacted, _ := memoryredact.Redact(reason); redacted != "" {
+		reason = redacted
+	}
+	if runes := []rune(reason); len(runes) > 240 {
+		reason = string(runes[:237]) + "..."
+	}
+	return reason
+}
+
+func filterRecordsByIDs(records []memorystore.Record, ids []string) []memorystore.Record {
+	byID := make(map[string]memorystore.Record, len(records))
+	for _, record := range records {
+		byID[record.ID] = record
+	}
+	out := make([]memorystore.Record, 0, len(ids))
+	for _, id := range ids {
+		if record, ok := byID[id]; ok {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+func truncateSummaryToTokenBudget(text string, maxTokens int) string {
+	if maxTokens <= 0 || memorystore.EstimateTokens(text) <= maxTokens {
+		return strings.TrimSpace(text)
+	}
+	runes := []rune(strings.TrimSpace(text))
+	low, high := 0, len(runes)
+	for low < high {
+		mid := (low + high + 1) / 2
+		candidate := strings.TrimSpace(string(runes[:mid])) + "…"
+		if memorystore.EstimateTokens(candidate) <= maxTokens {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	if low == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(runes[:low])) + "…"
 }
 
 func deterministicSummary(records []memorystore.Record, tokenBudget int) (string, []string, int) {
@@ -325,39 +458,152 @@ func deterministicSummary(records []memorystore.Record, tokenBudget int) (string
 		{"reference", "References"},
 		{"fact", "Facts"},
 	}
-	var b strings.Builder
-	b.WriteString("v1\n")
-	ids := make([]string, 0, len(records))
-	used := memorystore.EstimateTokens(b.String())
 	byKind := map[string][]memorystore.Record{}
-	for _, record := range summaryEligible(records) {
+	eligible := summaryEligible(records)
+	sort.SliceStable(eligible, func(i, j int) bool {
+		left, right := eligible[i], eligible[j]
+		if leftKind, rightKind := kindOrder(left.Kind), kindOrder(right.Kind); leftKind != rightKind {
+			return leftKind < rightKind
+		}
+		if left.Confidence != right.Confidence {
+			return left.Confidence > right.Confidence
+		}
+		if left.UseCount != right.UseCount {
+			return left.UseCount > right.UseCount
+		}
+		if !left.LastUsedAt.Equal(right.LastUsedAt) {
+			return left.LastUsedAt.After(right.LastUsedAt)
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return left.ID < right.ID
+	})
+	seen := make(map[string]struct{}, len(eligible))
+	for _, record := range eligible {
+		key := summaryBulletKey(record)
+		if key != "" {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
 		byKind[record.Kind] = append(byKind[record.Kind], record)
 	}
+	type bucket struct {
+		title    string
+		items    []memorystore.Record
+		selected []memorystore.Record
+		header   bool
+	}
+	buckets := make([]*bucket, 0, len(headings))
 	for _, heading := range headings {
 		items := byKind[heading.kind]
 		if len(items) == 0 {
 			continue
 		}
-		header := "## " + heading.title + "\n"
-		headerCost := memorystore.EstimateTokens(header)
-		if used+headerCost > tokenBudget {
-			break
+		buckets = append(buckets, &bucket{title: heading.title, items: items})
+	}
+	if len(buckets) == 0 {
+		return "", nil, 0
+	}
+	used := memorystore.EstimateTokens("v1\n")
+	// First pass: every kind with a fitting bullet gets one, so a high-priority
+	// kind cannot starve the rest of the summary.
+	for _, bucket := range buckets {
+		if len(bucket.items) == 0 {
+			continue
 		}
-		b.WriteString(header)
-		used += headerCost
-		for _, record := range items {
-			line := "- " + summarizeRecord(record)
+		header := "## " + bucket.title + "\n"
+		line := "- " + summarizeRecord(bucket.items[0]) + "\n"
+		cost := memorystore.EstimateTokens(header) + memorystore.EstimateTokens(line)
+		if used+cost > tokenBudget {
+			continue
+		}
+		bucket.header = true
+		bucket.selected = append(bucket.selected, bucket.items[0])
+		used += cost
+	}
+	// Second pass: spend the remaining budget in priority order.
+	for _, bucket := range buckets {
+		if !bucket.header {
+			continue
+		}
+		for _, record := range bucket.items[1:] {
+			line := "- " + summarizeRecord(record) + "\n"
 			cost := memorystore.EstimateTokens(line)
 			if used+cost > tokenBudget {
 				break
 			}
-			b.WriteString(line)
-			b.WriteByte('\n')
+			bucket.selected = append(bucket.selected, record)
 			used += cost
-			ids = append(ids, record.ID)
 		}
 	}
-	return strings.TrimRight(b.String(), "\n"), ids, used
+	render := func() (string, []string) {
+		var b strings.Builder
+		b.WriteString("v1\n")
+		ids := make([]string, 0, len(records))
+		for _, bucket := range buckets {
+			if len(bucket.selected) == 0 {
+				continue
+			}
+			b.WriteString("## ")
+			b.WriteString(bucket.title)
+			b.WriteByte('\n')
+			for _, record := range bucket.selected {
+				b.WriteString("- ")
+				b.WriteString(summarizeRecord(record))
+				b.WriteByte('\n')
+				ids = append(ids, record.ID)
+			}
+		}
+		return strings.TrimRight(b.String(), "\n"), ids
+	}
+	text, ids := render()
+	// The token estimator is not strictly additive across small fragments;
+	// trim the lowest-priority tails until the rendered document itself fits.
+	for memorystore.EstimateTokens(text) > tokenBudget {
+		removed := false
+		for i := len(buckets) - 1; i >= 0; i-- {
+			if len(buckets[i].selected) <= 1 {
+				continue
+			}
+			buckets[i].selected = buckets[i].selected[:len(buckets[i].selected)-1]
+			removed = true
+			break
+		}
+		if !removed {
+			for i := len(buckets) - 1; i >= 0; i-- {
+				if len(buckets[i].selected) == 0 {
+					continue
+				}
+				buckets[i].selected = buckets[i].selected[:len(buckets[i].selected)-1]
+				removed = true
+				break
+			}
+		}
+		if !removed {
+			break
+		}
+		text, ids = render()
+	}
+	return text, ids, memorystore.EstimateTokens(text)
+}
+
+func summaryBulletKey(record memorystore.Record) string {
+	var cleaned strings.Builder
+	for _, r := range strings.ToLower(record.Text) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			cleaned.WriteRune(r)
+			continue
+		}
+		cleaned.WriteByte(' ')
+	}
+	text := strings.Join(strings.Fields(cleaned.String()), " ")
+	if text == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(record.Kind)) + "\x00" + text
 }
 
 func summarizeRecord(record memorystore.Record) string {
@@ -399,7 +645,7 @@ type memorySupersession struct {
 func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []memorySupersession, []string) {
 	groups := map[string][]memorystore.Record{}
 	for _, record := range records {
-		subject := strings.ToLower(strings.Join(strings.Fields(record.Text), " "))
+		subject := conflictSubjectKey(record)
 		if subject == "" {
 			continue
 		}
@@ -447,6 +693,72 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 		out = append(out, record)
 	}
 	return out, superseded, ambiguous
+}
+
+// conflictSubjectKey groups records that describe the same subject with
+// different concrete values ("timeout is 30s" vs "timeout is 60s"). It stays
+// deterministic: punctuation is discarded, numeric runs become placeholders,
+// and common intent words are removed. Short subjects fall back to the exact
+// normalized text so unrelated one-word facts do not collide.
+func conflictSubjectKey(record memorystore.Record) string {
+	text := strings.ToLower(strings.TrimSpace(record.Text))
+	if text == "" {
+		return ""
+	}
+	var cleaned strings.Builder
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			cleaned.WriteRune(r)
+			continue
+		}
+		cleaned.WriteByte(' ')
+	}
+	stop := map[string]struct{}{
+		"a": {}, "an": {}, "and": {}, "are": {}, "be": {}, "do": {}, "does": {},
+		"for": {}, "i": {}, "in": {}, "is": {}, "it": {},
+		"of": {}, "on": {}, "or": {}, "prefer": {}, "should": {}, "that": {},
+		"the": {}, "this": {}, "to": {}, "use": {}, "was": {}, "we": {},
+		"were": {}, "with": {}, "you": {},
+	}
+	tokens := make([]string, 0, 8)
+	for _, token := range strings.Fields(cleaned.String()) {
+		if _, skip := stop[token]; skip {
+			continue
+		}
+		token = replaceDigitRuns(token)
+		if len(token) > 3 && strings.HasSuffix(token, "s") {
+			token = strings.TrimSuffix(token, "s")
+		}
+		if token != "" {
+			tokens = append(tokens, token)
+		}
+	}
+	if len(tokens) < 2 {
+		tokens = strings.Fields(cleaned.String())
+	}
+	if len(tokens) == 0 {
+		return ""
+	}
+	// Kind is intentionally not part of the key: a manual decision and a
+	// derived fact can describe the same subject and must still conflict.
+	return strings.Join(tokens, " ")
+}
+
+func replaceDigitRuns(token string) string {
+	var b strings.Builder
+	inDigits := false
+	for _, r := range token {
+		if unicode.IsDigit(r) {
+			if !inDigits {
+				b.WriteByte('#')
+				inDigits = true
+			}
+			continue
+		}
+		inDigits = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // summaryEligible excludes pinned/manual records: those are rendered from the

@@ -20,9 +20,10 @@ func (m *Manager) planProjectMemory(input BuildInput, budget Budget) projectMemo
 	if m == nil || m.ProjectMemory == nil {
 		return projectMemoryPlan{}
 	}
+	query := buildMemoryRecallQuery(input)
 	if selector, ok := m.ProjectMemory.(ProjectMemoryV2Store); ok && selector.V2InjectionEnabled() {
 		selection, err := selector.SelectForInjectV2(memorystore.InjectOptions{
-			Query:       input.Goal,
+			Query:       query,
 			Limit:       budget.MaxProjectMemory,
 			TokenBudget: budget.ProjectMemoryTokens,
 			SessionID:   input.SessionID,
@@ -34,7 +35,7 @@ func (m *Manager) planProjectMemory(input BuildInput, budget Budget) projectMemo
 			// unavailable. This is the documented "DB failure does not block the
 			// agent" path.
 			notes, legacyErr := m.ProjectMemory.SelectForInject(memorystore.InjectOptions{
-				Query:       input.Goal,
+				Query:       query,
 				Limit:       budget.MaxProjectMemory,
 				TokenBudget: budget.ProjectMemoryTokens,
 				SessionID:   input.SessionID,
@@ -58,7 +59,7 @@ func (m *Manager) planProjectMemory(input BuildInput, budget Budget) projectMemo
 		}
 	}
 	notes, err := m.ProjectMemory.SelectForInject(memorystore.InjectOptions{
-		Query:       input.Goal,
+		Query:       query,
 		Limit:       budget.MaxProjectMemory,
 		TokenBudget: budget.ProjectMemoryTokens,
 		SessionID:   input.SessionID,
@@ -69,6 +70,48 @@ func (m *Manager) planProjectMemory(input BuildInput, budget Budget) projectMemo
 	}
 	message, ids := buildProjectMemoryMessage(notes, budget.ProjectMemoryTokens)
 	return projectMemoryPlan{Stable: message, IDs: ids}
+}
+
+// buildMemoryRecallQuery keeps the current goal authoritative but adds the
+// most recent user turns so follow-up requests such as "继续处理" still carry
+// the topic that was established a turn or two earlier. Tool output and
+// assistant text are deliberately excluded.
+func buildMemoryRecallQuery(input BuildInput) string {
+	parts := make([]string, 0, 3)
+	seen := make(map[string]struct{})
+	add := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		if runes := []rune(text); len(runes) > 600 {
+			text = string(runes[:597]) + "..."
+		}
+		key := strings.ToLower(text)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, text)
+	}
+	add(input.Goal)
+	addedUserMessages := 0
+	for i := len(input.History) - 1; i >= 0 && addedUserMessages < 2; i-- {
+		message := input.History[i]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			continue
+		}
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		if len(parts) > 0 && (strings.Contains(parts[0], content) || strings.Contains(content, parts[0])) {
+			continue
+		}
+		add(content)
+		addedUserMessages++
+	}
+	return strings.Join(parts, "\n")
 }
 
 func buildStableMemoryMessage(selection memorystore.Selection) *types.Message {
@@ -149,6 +192,9 @@ func formatMemoryRecord(record memorystore.Record) string {
 	}
 	if record.Pinned {
 		line += " [pinned]"
+	}
+	if record.Freshness == memorystore.FreshnessStale {
+		line += " [possibly stale]"
 	}
 	return line
 }

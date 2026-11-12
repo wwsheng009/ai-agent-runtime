@@ -92,6 +92,7 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 		TriggerTurnDrain:      deps.TriggerTurnDrain,
 		TriggerTurnRunMeta:    deps.TriggerTurnRunMeta,
 		SuspendedTurnAbandon:  deps.SuspendedTurnAbandon,
+		TurnDigestSink:        deps.TurnDigestSink,
 		PersistHook:           deps.PersistHook,
 		EnsureSession:         deps.EnsureSession,
 		CheckpointInterval:    deps.CheckpointInterval,

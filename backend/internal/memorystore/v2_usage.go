@@ -99,9 +99,9 @@ SELECT COUNT(1) FROM memory_entries WHERE id = ? AND project_key = ?
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_usage (id, memory_id, session_id, turn_id, message_id, used_at, use_kind)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`, "usage_"+uuid.NewString(), id, sessionID, nullableString(exposure.TurnID),
+INSERT INTO memory_usage (id, project_key, memory_id, session_id, turn_id, message_id, used_at, use_kind)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, "usage_"+uuid.NewString(), s.cfg.ProjectKey, id, sessionID, nullableString(exposure.TurnID),
 			nullableString(exposure.MessageID), usedAt.Format(time.RFC3339Nano), string(kind)); err != nil {
 			return result, err
 		}

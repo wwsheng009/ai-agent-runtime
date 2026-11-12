@@ -49,6 +49,9 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.Equal(t, "both", status.GenerationTrigger)
 	require.True(t, status.ConsolidationEnabled)
 	require.True(t, status.ManualEnabled)
+	require.NotNil(t, status.TurnDigests)
+	require.NotNil(t, status.TurnWindows)
+	require.GreaterOrEqual(t, status.SchemaVersion, 6)
 
 	body := `{"text":"prefer apply_patch for multi-hunk edits","kind":"workflow","tags":["workflow"],"session_id":"s1"}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
@@ -533,6 +536,85 @@ func TestMemoryAPIImportExportRoundTrip(t *testing.T) {
 	unauthorizedRec := httptest.NewRecorder()
 	router.ServeHTTP(unauthorizedRec, unauthorized)
 	require.Equal(t, http.StatusForbidden, unauthorizedRec.Code, unauthorizedRec.Body.String())
+}
+
+func TestMemoryAPIPurgeTurnWindows(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	ctx := context.Background()
+	createRolledUp := func(sessionID, turnID string) {
+		t.Helper()
+		digest, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
+			SessionID: sessionID, TurnID: turnID, Outcome: "success", MessageSeqEnd: 2,
+		})
+		require.NoError(t, err)
+		_, err = store.MarkTurnDigestsProcessed(ctx, sessionID, digest.DigestSeq, "")
+		require.NoError(t, err)
+		window, _, err := store.EnsureTurnWindow(ctx, memorystore.TurnWindow{
+			ProjectKey: store.ProjectKey(), SessionID: sessionID, WindowIndex: 1,
+			StartDigestSeq: digest.DigestSeq, EndDigestSeq: digest.DigestSeq,
+			StartMessageSeq: 1, EndMessageSeq: 2, TurnCount: 1,
+			SourceHash: "hash-" + sessionID, SourceRevision: digest.DigestSeq,
+			Status: memorystore.TurnWindowPending,
+		})
+		require.NoError(t, err)
+		window, err = store.CompleteTurnWindow(ctx, window.ID, memorystore.TurnWindowSummary{Text: "summary " + sessionID})
+		require.NoError(t, err)
+		_, err = store.MarkTurnDigestsRolledUp(ctx, sessionID, digest.DigestSeq, digest.DigestSeq, window.ID)
+		require.NoError(t, err)
+	}
+	createRolledUp("s1", "turn-1")
+	createRolledUp("s2", "turn-2")
+	require.NoError(t, store.Close())
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/turn-windows/purge", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	require.Equal(t, http.StatusBadRequest, post(`{"confirm":true}`).Code)
+	require.Equal(t, http.StatusBadRequest, post(`{"confirm":true,"all":true,"session_id":"s1"}`).Code)
+
+	sessionRec := post(`{"confirm":true,"session_id":"s1"}`)
+	require.Equal(t, http.StatusOK, sessionRec.Code, sessionRec.Body.String())
+	var sessionResp struct {
+		Scope           string `json:"scope"`
+		WindowsDeleted  int64  `json:"windows_deleted"`
+		DigestsReleased int64  `json:"digests_released"`
+	}
+	require.NoError(t, json.NewDecoder(sessionRec.Body).Decode(&sessionResp))
+	require.Equal(t, "session", sessionResp.Scope)
+	require.EqualValues(t, 1, sessionResp.WindowsDeleted)
+	require.EqualValues(t, 1, sessionResp.DigestsReleased)
+
+	allRec := post(`{"confirm":true,"all":true}`)
+	require.Equal(t, http.StatusOK, allRec.Code, allRec.Body.String())
+	var allResp struct {
+		Scope           string `json:"scope"`
+		WindowsDeleted  int64  `json:"windows_deleted"`
+		DigestsReleased int64  `json:"digests_released"`
+	}
+	require.NoError(t, json.NewDecoder(allRec.Body).Decode(&allResp))
+	require.Equal(t, "project", allResp.Scope)
+	require.EqualValues(t, 1, allResp.WindowsDeleted)
+	require.EqualValues(t, 1, allResp.DigestsReleased)
+
+	reopened, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	status, err := reopened.Status(ctx)
+	require.NoError(t, err)
+	require.Empty(t, status.TurnWindows)
+	for _, sessionID := range []string{"s1", "s2"} {
+		digest, err := reopened.GetTurnDigestByTurn(ctx, sessionID, "turn-"+sessionID[len(sessionID)-1:])
+		require.NoError(t, err)
+		require.Equal(t, memorystore.TurnDigestRollupSkipped, digest.RollupStatus)
+	}
 }
 
 func TestMemoryAPIPrivateRecordRequiresAdmin(t *testing.T) {

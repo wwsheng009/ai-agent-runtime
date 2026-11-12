@@ -105,6 +105,38 @@ memory:
     citationEnabled: true
     exposureSampling: 1.0    # citation 解析失败时仍写 injected_only exposure
     exposureRetentionDays: 30
+  retention:
+    # 默认关闭：升级已有 dogfood 数据时不得隐式开始过期记录。
+    # 显式开启后，0 值表示该维度不限制（不会误删）。
+    enabled: false
+    candidateDays: 30        # candidate 超过该天数未采纳 → expired
+    ephemeralDays: 14        # ephemeral active 未使用 → expired
+    deletedDays: 30          # tombstone 保留期，到期后物理清理
+    auditDays: 180           # memory_events / memory_usage 审计保留
+    maxRecords: 4096         # active+candidate 上限；只淘汰非 pinned/permanent
+    classes:
+      permanent: [manual, pattern, decision, correction, preference]
+      standard: [fact, workflow, pitfall, reference, open_question]
+      ephemeral: [task_trace, low_confidence_candidate]
+  freshness:
+    enabled: true
+    staleBehavior: exclude  # exclude | warn；warn 仅对低风险 kind 生效
+    defaultTtlDays: 90
+    revalidateBatchSize: 50
+    revalidateIntervalHours: 24
+    perKind:
+      preference: 0          # 0 = permanent
+      decision: 0
+      correction: 0
+      workflow: 180
+      pitfall: 180
+      fact: 30
+      reference: 30
+      open_question: 14
+      task_trace: 14
+  redaction:
+    enabled: true            # secret 检测/脱敏；关闭前请确认本地信任边界
+    dropOnSecret: true       # true=丢弃候选；false=脱敏后保留
   tools:
     enabled: false           # 只读检索工具也需显式开启
     allowForget: false       # memory_forget 默认关闭

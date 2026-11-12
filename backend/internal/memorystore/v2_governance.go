@@ -52,7 +52,7 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", record.ID)
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "revalidated", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "revalidated", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "explicit_revalidate",
 	}); err != nil {
 		return Record{}, err
@@ -102,7 +102,7 @@ WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
 `, record.ID, s.cfg.ProjectKey); err != nil {
 		return Record{}, err
 	}
-	if err := insertEventTx(ctx, tx, record.ID, "restored", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "restored", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "explicit_restore",
 	}); err != nil {
 		return Record{}, err
@@ -161,7 +161,7 @@ WHERE id = ? AND project_key = ?
 `, summary.ID, s.cfg.ProjectKey); err != nil {
 		return Summary{}, err
 	}
-	if err := insertEventTx(ctx, tx, summary.ID, "summary_activated", "admin", "", summary.Revision, map[string]interface{}{
+	if err := insertEventTx(ctx, tx, summary.ProjectKey, summary.ID, "summary_activated", "admin", "", summary.Revision, map[string]interface{}{
 		"summary_kind": summary.SummaryKind,
 	}); err != nil {
 		return Summary{}, err
@@ -178,6 +178,12 @@ WHERE id = ? AND project_key = ?
 }
 
 func (s *Store) SweepFreshness(ctx context.Context, now time.Time) (int, error) {
+	return s.SweepFreshnessBatch(ctx, now, 0)
+}
+
+// SweepFreshnessBatch marks at most limit due records stale. A non-positive
+// limit preserves the unbounded admin/API behavior.
+func (s *Store) SweepFreshnessBatch(ctx context.Context, now time.Time, limit int) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -191,12 +197,19 @@ func (s *Store) SweepFreshness(ctx context.Context, now time.Time) (int, error) 
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(ctx, `
+	query := `
 	SELECT id, COALESCE(source_session_id, ''), revision
 FROM memory_entries
 WHERE project_key = ? AND status = 'active' AND freshness_status = 'fresh'
   AND revalidate_after IS NOT NULL AND revalidate_after != '' AND revalidate_after <= ?
-`, s.cfg.ProjectKey, now.Format(time.RFC3339Nano))
+ORDER BY revalidate_after ASC, id ASC
+`
+	args := []interface{}{s.cfg.ProjectKey, now.Format(time.RFC3339Nano)}
+	if limit > 0 {
+		query += "LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -226,7 +239,7 @@ WHERE id = ? AND project_key = ?
 `, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey); err != nil {
 			return 0, err
 		}
-		if err := insertEventTx(ctx, tx, item.id, "stale_marked", "system", item.session, item.revision+1, map[string]interface{}{
+		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", item.session, item.revision+1, map[string]interface{}{
 			"reason": "revalidate_due",
 		}); err != nil {
 			return 0, err
@@ -256,10 +269,12 @@ func (s *Store) ListEvents(ctx context.Context, limit int) ([]AuditEvent, error)
 SELECT id, memory_id, event_type, actor, COALESCE(session_id, ''),
        revision, payload_json, created_at
 FROM memory_events
-WHERE memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
-   OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)
+WHERE project_key = ?
+   OR (project_key = '' AND (
+        memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
+        OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)))
 ORDER BY created_at DESC LIMIT ?
-`, s.cfg.ProjectKey, s.cfg.ProjectKey, limit)
+`, s.cfg.ProjectKey, s.cfg.ProjectKey, s.cfg.ProjectKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -398,16 +413,21 @@ func (s *Store) Reset(ctx context.Context) error {
 		{`DELETE FROM memory_summary_items
 		  WHERE summary_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey}},
 		{`DELETE FROM memory_usage
-		  WHERE memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey}},
+		  WHERE project_key = ?
+		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey, projectKey}},
 		{`DELETE FROM memory_recall_traces WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_suppressions WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_session_modes WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_jobs WHERE project_key = ?`, []interface{}{projectKey}},
+		{`DELETE FROM memory_turn_windows WHERE project_key = ?`, []interface{}{projectKey}},
+		{`DELETE FROM memory_turn_digests WHERE project_key = ?`, []interface{}{projectKey}},
+		{`DELETE FROM memory_runtime_metrics WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_sources
 		  WHERE memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey}},
 		{`DELETE FROM memory_events
-		  WHERE memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
-		     OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey, projectKey}},
+		  WHERE project_key = ?
+		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
+		     OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey, projectKey, projectKey}},
 		{`DELETE FROM memory_summaries WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_entries WHERE project_key = ?`, []interface{}{projectKey}},
 	}

@@ -4,6 +4,7 @@
 > 基线：`docs/agent-memory/03-target-architecture.md`、`04-data-model-and-api.md`、`09-memory-horizons-recall-and-budget.md`
 > 参考：`docs/agent-memory/12-hermes-agent-memory-system-analysis.md` 的 Hermes 运行时经验
 > 修订：v1.1（2026-11-09），按整体审查 P0-1 ~ P0-6 修订；修订点见第 13 节，03/04/05/06/09 回写记录见第 14 节。
+> 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 > 范围：只聚焦两个问题：
 > **A. 记忆如何被读取并插入 Agent 请求（读路径）**
 > **B. 记忆如何被记录、学习、更新（写路径）**
@@ -497,6 +498,21 @@ trigger
 - `backend/internal/api/runtimeapi`：手动 extract/consolidate；
 - 触发器只入队，不直接执行 LLM；
 - 触发记录必须幂等，进程重启不能重复抽取。
+
+#### 4.3.1 Turn Digest Outbox（Phase 1，已确认）
+
+turn-end 仍然**不做自动抽取**，但允许写一条轻量、可恢复的 Turn Digest：
+
+- 写入点：`internal/chat` 的 `assistant_message` 终态窗口；
+- 内容：session/turn/trace、用户提问、最终 assistant 输出、message IDs、outcome、usage；
+- 写入前脱敏、限长；`storeText=false` 时只存引用；
+- `session-end` 立即消费；`idle` 兜底；`startup recovery` 只处理 closed/stale/orphaned session；
+- 默认只自动抽取 `outcome=success` 且 assistant text 非空的 turn；
+- digest 是 outbox，不是第二份 transcript；Phase 1 抽取仍读 canonical transcript；
+- 大会话按 `digest_seq` 分批；窗口化 canonical transcript 读取完成前，只读最近一页时不得把更早 pending digest 标 done；
+- 多 turn 使用 L0 turn digest → L1 window summary → L2 project summary，rollup 成功后才清理 L0。
+
+详细提案：`docs/agent-memory/patches/2026-11-11-turn-digest-runtime-outbox.md`。
 
 ### 4.4 Phase 1：会话提取
 

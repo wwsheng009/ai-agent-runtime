@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
@@ -32,6 +35,55 @@ func (h *Handler) MemoryRuntime() *memoryruntime.Runtime {
 	h.memoryRuntimeMu.RLock()
 	defer h.memoryRuntimeMu.RUnlock()
 	return h.memoryRuntime
+}
+
+// deleteMemoryTurnDigestsForSession is best-effort cleanup for an explicitly
+// deleted session. The memory DB and session DB are separate stores.
+func (h *Handler) deleteMemoryTurnDigestsForSession(sessionID string) {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if runtime := h.MemoryRuntime(); runtime != nil {
+		_, _ = runtime.DeleteSessionDigests(context.Background(), sessionID)
+	}
+}
+
+// BindMemoryDigestInvalidation prevents pending turn digests and existing
+// session-derived memory records from being reused after compaction/backtrack
+// changed the canonical transcript. It returns an unsubscribe function.
+func (h *Handler) BindMemoryDigestInvalidation() func() {
+	if h == nil || h.MemoryRuntime() == nil {
+		return nil
+	}
+	bus := h.getRuntimeEventBus()
+	if bus == nil {
+		return nil
+	}
+	handler := func(event runtimeevents.Event) {
+		if strings.TrimSpace(event.SessionID) == "" {
+			return
+		}
+		runtime := h.MemoryRuntime()
+		if runtime == nil {
+			return
+		}
+		_, _ = runtime.InvalidateFromRuntimeEvent(
+			context.Background(), event.Type, event.SessionID, event.Payload)
+	}
+	unsubs := make([]func(), 0, 2)
+	for _, eventType := range []string{
+		runtimechat.EventSessionCompactCompleted,
+		runtimechat.EventBacktrackFinished,
+	} {
+		if unsubscribe := bus.SubscribeCancelable(eventType, handler); unsubscribe != nil {
+			unsubs = append(unsubs, unsubscribe)
+		}
+	}
+	return func() {
+		for _, unsubscribe := range unsubs {
+			unsubscribe()
+		}
+	}
 }
 
 // EnableMemoryRuntime constructs the M2 write path from the active runtime
@@ -68,6 +120,10 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 		RecallTraceSampleRate:    memoryCfg.Injection.RecallTrace.SampleRate,
 		RecallTraceRetentionDays: memoryCfg.Injection.RecallTrace.RetentionDays,
 		ExposureRetentionDays:    memoryCfg.Feedback.ExposureRetentionDays,
+		Retention:                memorypolicy.StoreRetention(memoryCfg),
+		StaleBehavior:            memorypolicy.StaleBehavior(memoryCfg),
+		DisableSecretFilter:      memorypolicy.DisableSecretFilter(memoryCfg),
+		TurnDigestBatchSize:      memoryCfg.Generation.TurnDigest.MaxTurnsPerBatch,
 	})
 	if err != nil {
 		return nil, err
@@ -77,25 +133,44 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 		Mode: mode, GenerationDisabled: !generation.Enabled,
 		Workspace: workspace, ProjectKey: store.ProjectKey(),
 		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
-		MinIdle:                    time.Duration(generation.MinIdleHours) * time.Hour,
-		MaxSessionsPerRun:          generation.MaxSessionsPerRun,
-		MaxRolloutAge:              time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
-		MaxCandidatesPerSession:    generation.MaxRecordsPerSession,
-		MaxAttempts:                3,
-		ConsolidationDisabled:      !memoryCfg.Consolidation.Enabled,
-		ConsolidationInterval:      time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
-		MaxConsolidationRecords:    memoryCfg.Consolidation.MaxRecords,
-		MaxConsolidationUnusedDays: memoryCfg.Consolidation.MaxUnusedDays,
-		SummaryTokenBudget:         memoryCfg.Consolidation.SummaryTokenBudget,
-		CitationEnabled:            memoryCfg.Feedback.CitationEnabled,
-		ExposureSampling:           memoryCfg.Feedback.ExposureSampling,
-		ExtractionModel:            generation.Model,
-		ExtractionReasoningEffort:  generation.ReasoningEffort,
-		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
+		MinIdle:                        time.Duration(generation.MinIdleHours) * time.Hour,
+		MaxSessionsPerRun:              generation.MaxSessionsPerRun,
+		MaxRolloutAge:                  time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
+		MaxCandidatesPerSession:        generation.MaxRecordsPerSession,
+		MaxAttempts:                    3,
+		ConsolidationDisabled:          !memoryCfg.Consolidation.Enabled,
+		ConsolidationInterval:          time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
+		MaxConsolidationRecords:        memoryCfg.Consolidation.MaxRecords,
+		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
+		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
+		ConsolidationModel:             memoryCfg.Consolidation.Model,
+		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
+		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
+		ExtractionModel:                generation.Model,
+		ExtractionReasoningEffort:      generation.ReasoningEffort,
+		TurnDigestEnabled:              generation.TurnDigest.Enabled,
+		TurnDigestStoreText:            generation.TurnDigest.StoreText,
+		TurnDigestMaxUserChars:         generation.TurnDigest.MaxUserChars,
+		TurnDigestMaxAssistantChars:    generation.TurnDigest.MaxAssistantChars,
+		TurnDigestRetentionDays:        generation.TurnDigest.RetentionDays,
+		TurnDigestMaxPendingPerSession: generation.TurnDigest.MaxPendingPerSession,
+		TurnDigestMaxTurnsPerBatch:     generation.TurnDigest.MaxTurnsPerBatch,
+		TurnDigestMaxBytesPerBatch:     generation.TurnDigest.MaxBytesPerBatch,
+		TurnDigestMaxDigestsPerRun:     generation.TurnDigest.MaxDigestsPerRun,
+		TurnDigestExtractEveryNTurns:   generation.TurnDigest.ExtractEveryNTurns,
+		TurnDigestIdleExtractMinutes:   generation.TurnDigest.IdleExtractMinutes,
+		TurnDigestRecoveryOnStartup:    generation.TurnDigest.RecoveryOnStartup,
+		TurnDigestWindowSummaryEnabled: generation.TurnDigest.WindowSummaryEnabled,
+		TurnDigestWindowTurns:          generation.TurnDigest.WindowTurns,
+		TurnDigestWindowRetentionDays:  generation.TurnDigest.WindowRetentionDays,
+		WorkerID:                       fmt.Sprintf("runtime-server-%d", os.Getpid()),
 	}
+	cfg = memorypolicy.ApplyRuntime(memoryCfg, cfg)
+	cfg = memoryruntime.WithLLMProjectSummarizer(cfg, h.llmRuntime)
 	source := &memoryruntime.ChatSessionSource{Manager: h.sessionManager}
 	extractor := &memoryruntime.LLMExtractor{Runtime: h.llmRuntime, Config: cfg}
 	runtime := memoryruntime.New(store, source, extractor, store, cfg)
+	runtime.WindowSummarizer = &memoryruntime.LLMWindowSummarizer{Runtime: h.llmRuntime, Config: cfg}
 	h.SetMemoryRuntime(runtime)
 	return runtime, nil
 }
@@ -154,7 +229,7 @@ func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		_, _ = runtime.RunSession(ctx, memoryruntime.TriggerSessionEnd, sessionID)
+		_, _ = runtime.RunSessionEnd(ctx, sessionID)
 		if runtime.Config.ConsolidationDisabled {
 			return
 		}
@@ -200,8 +275,12 @@ func (h *Handler) RunMemoryConsolidationForWorkspace(ctx context.Context, worksp
 		MaxConsolidationRecords:    consolidation.MaxRecords,
 		MaxConsolidationUnusedDays: consolidation.MaxUnusedDays,
 		SummaryTokenBudget:         consolidation.SummaryTokenBudget,
+		ConsolidationModel:         consolidation.Model,
 		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
 	})
+	if h.llmRuntime != nil {
+		consolidator.Config = memoryruntime.WithLLMProjectSummarizer(consolidator.Config, h.llmRuntime)
+	}
 	return consolidator.Run(ctx)
 }
 
@@ -224,7 +303,11 @@ func (h *Handler) RebuildMemorySummariesForWorkspace(ctx context.Context, worksp
 		MaxConsolidationRecords:    consolidation.MaxRecords,
 		MaxConsolidationUnusedDays: consolidation.MaxUnusedDays,
 		SummaryTokenBudget:         consolidation.SummaryTokenBudget,
+		ConsolidationModel:         consolidation.Model,
 		WorkerID:                   fmt.Sprintf("runtime-server-%d", os.Getpid()),
 	})
+	if h.llmRuntime != nil {
+		consolidator.Config = memoryruntime.WithLLMProjectSummarizer(consolidator.Config, h.llmRuntime)
+	}
 	return consolidator.RebuildStaleSummaries(ctx)
 }

@@ -1,6 +1,7 @@
 # Agent Memory v2 文档索引
 
 > 状态：**方案基线 + M1/M2/M3/M4 core 已实施（含 Web why-not/pin/restore/reset）；M4 正式 E2E/证据包与 M5 shadow 运营待完成**
+> 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/`）。
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
 
@@ -36,6 +37,14 @@
 | [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已回写 03/04/05/06/09；M1/M2/M3/M4 core 与 Web 审计面已实施，M4 证据包与 M5 运营待执行） |
 
 > `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
+
+### 2.1 变更提案（非基线）
+
+schema / 触发 / 写路径的变更先以 patch proposal 记录；决策确认后再回写基线文档：
+
+| 提案 | 定位 | 当前状态 |
+| --- | --- | --- |
+| [patches/2026-11-11-turn-digest-runtime-outbox.md](./patches/2026-11-11-turn-digest-runtime-outbox.md) | Turn Digest 运行时 Outbox：turn-end 只写轻量 digest，session-end/idle/startup 消费；Phase 1 不把 digest 当作第二份 transcript；含多 turn 分批/窗口化/L0→L1→L2 rollup/range invalidation | **Phase 1 core + 窗口化 + per-window stale + rollup + range invalidation 已实现** |
 
 ## 3. 核心结论
 
@@ -175,6 +184,7 @@ contextmgr 动态尾部注入 + memory_search / memory_read 工具
 - 实施顺序与验收门禁以 `05-implementation-plan.md`、`06-test-and-acceptance.md` 为准。
 - 阶段退出标准（DoD）以 `06-test-and-acceptance.md §8` 为准；未满足不得进入下一阶段。
 - 任何会改变 schema、scope、工具权限、注入位置或删除语义的改动，必须先更新本目录文档并补充测试，再改代码。
+- 尚未评审的变更先放在 `patches/` 下；评审通过后再回写 `03/04/05/06/13` 等基线文档。
 - 不再新增“第 12 份并列设计文档”；新内容优先并入 `03/04/09` 或作为 `10` 的候选借鉴项，并在 `05/06` 登记版本与测试。
 - 本文档不替代现有 `docs/knowledge_Layer/`、`docs/compact/` 或 `docs/product/harness-settings.md` 的既有事实源边界。
 

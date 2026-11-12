@@ -273,6 +273,172 @@ CREATE INDEX IF NOT EXISTS idx_memory_session_modes_project
   ON memory_session_modes(project_key, mode, updated_at DESC);
 `,
 		},
+		{
+			Version: 3,
+			Name:    "memory_v3_turn_digests",
+			UpSQL: `
+CREATE TABLE IF NOT EXISTS memory_turn_digests (
+    digest_seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL UNIQUE,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    project_key     TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    turn_id         TEXT NOT NULL,
+    trace_id        TEXT,
+    parent_session_id TEXT,
+    agent_type      TEXT,
+    user_message_id TEXT,
+    assistant_message_id TEXT,
+    user_text       TEXT NOT NULL DEFAULT '',
+    assistant_text  TEXT NOT NULL DEFAULT '',
+    text_truncated  INTEGER NOT NULL DEFAULT 0,
+    outcome         TEXT NOT NULL DEFAULT 'success',
+    steps           INTEGER NOT NULL DEFAULT 0,
+    usage_json      TEXT NOT NULL DEFAULT '{}',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    digest_hash     TEXT NOT NULL DEFAULT '',
+    digest_revision INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    process_job_id  TEXT,
+    last_error      TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    processed_at    TEXT,
+    UNIQUE(project_key, session_id, turn_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_digests_pending
+  ON memory_turn_digests(project_key, session_id, status, digest_seq);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_digests_session
+  ON memory_turn_digests(session_id, digest_seq);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_digests_created
+  ON memory_turn_digests(created_at);
+`,
+		},
+		{
+			Version: 4,
+			Name:    "memory_v4_turn_digest_message_seq",
+			UpSQL: `
+ALTER TABLE memory_turn_digests
+  ADD COLUMN message_seq_end INTEGER NOT NULL DEFAULT 0;
+`,
+		},
+		{
+			Version: 5,
+			Name:    "memory_v5_window_source_identity",
+			UpSQL: `
+ALTER TABLE memory_sources
+  ADD COLUMN source_window TEXT;
+`,
+		},
+		{
+			Version: 6,
+			Name:    "memory_v6_turn_windows",
+			UpSQL: `
+ALTER TABLE memory_turn_digests
+  ADD COLUMN rollup_status TEXT NOT NULL DEFAULT 'pending';
+
+ALTER TABLE memory_turn_digests
+  ADD COLUMN rollup_window_id TEXT;
+
+ALTER TABLE memory_turn_digests
+  ADD COLUMN rolled_up_at TEXT;
+
+-- Rows created before rollup existed have already been through the old
+-- extraction lifecycle. Mark them skipped so retention is not blocked forever
+-- by an L1 window that can no longer be reconstructed.
+UPDATE memory_turn_digests
+SET rollup_status = 'skipped'
+WHERE status IN ('done', 'skipped', 'invalidated', 'failed');
+
+CREATE TABLE IF NOT EXISTS memory_turn_windows (
+    window_seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  TEXT NOT NULL UNIQUE,
+    scope               TEXT NOT NULL DEFAULT 'project',
+    project_key         TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    window_index        INTEGER NOT NULL DEFAULT 0,
+    start_digest_seq    INTEGER NOT NULL,
+    end_digest_seq      INTEGER NOT NULL,
+    start_message_seq   INTEGER NOT NULL DEFAULT 0,
+    end_message_seq     INTEGER NOT NULL DEFAULT 0,
+    turn_count          INTEGER NOT NULL DEFAULT 0,
+    summary_text        TEXT NOT NULL DEFAULT '',
+    summary_hash        TEXT NOT NULL DEFAULT '',
+    summary_revision    INTEGER NOT NULL DEFAULT 0,
+    source_hash         TEXT NOT NULL DEFAULT '',
+    source_revision     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    model               TEXT,
+    usage_json          TEXT NOT NULL DEFAULT '{}',
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    last_error          TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    processed_at        TEXT,
+    UNIQUE(project_key, session_id, start_digest_seq, end_digest_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_windows_session
+  ON memory_turn_windows(project_key, session_id, window_seq);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_windows_status
+  ON memory_turn_windows(project_key, status, window_seq);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_digests_rollup
+  ON memory_turn_digests(project_key, session_id, status, rollup_status, digest_seq);
+`,
+		},
+		{
+			Version: 7,
+			Name:    "memory_v7_project_scoped_audit_usage",
+			UpSQL: `
+ALTER TABLE memory_events
+  ADD COLUMN project_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_usage
+  ADD COLUMN project_key TEXT NOT NULL DEFAULT '';
+
+-- Backfill the owner project without requiring the source row to survive
+-- future tombstone cleanup. Summaries also emit audit events, so resolve both
+-- entry and summary ids.
+UPDATE memory_events
+SET project_key = COALESCE(
+    (SELECT project_key FROM memory_entries WHERE id = memory_events.memory_id),
+    (SELECT project_key FROM memory_summaries WHERE id = memory_events.memory_id),
+    ''
+)
+WHERE project_key = '';
+
+UPDATE memory_usage
+SET project_key = COALESCE(
+    (SELECT project_key FROM memory_entries WHERE id = memory_usage.memory_id),
+    ''
+)
+WHERE project_key = '';
+
+CREATE INDEX IF NOT EXISTS idx_memory_events_project_created
+  ON memory_events(project_key, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_memory_usage_project_used
+  ON memory_usage(project_key, used_at);
+`,
+		},
+		{
+			Version: 8,
+			Name:    "memory_v8_runtime_metrics",
+			UpSQL: `
+CREATE TABLE IF NOT EXISTS memory_runtime_metrics (
+    project_key TEXT NOT NULL,
+    metric      TEXT NOT NULL,
+    value       INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(project_key, metric)
+);
+`,
+		},
 	}
 	if err := migrate.Apply(ctx, db, migrations); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)

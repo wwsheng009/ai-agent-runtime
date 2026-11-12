@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -209,6 +210,145 @@ func TestConsolidatorRebuildsStaleSummaryIdempotently(t *testing.T) {
 	if summaries[0].Revision != 2 || summaries[0].Status != "active" || summaries[1].Status != "superseded" {
 		t.Fatalf("unexpected summary revisions: %+v", summaries)
 	}
+}
+
+type fakeProjectSummarizer struct {
+	output ProjectSummaryOutput
+	err    error
+	calls  int
+}
+
+func (f *fakeProjectSummarizer) SummarizeProject(context.Context, ProjectSummaryInput) (ProjectSummaryOutput, error) {
+	f.calls++
+	return f.output, f.err
+}
+
+func TestConsolidatorUsesProjectSummaryGenerator(t *testing.T) {
+	c, store := newConsolidatorForTest(t)
+	_, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s1", Kind: "decision", Text: "Use append-only memory writes.",
+		Confidence: 0.9, SourceHash: "hash-llm-summary", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	summarizer := &fakeProjectSummarizer{output: ProjectSummaryOutput{
+		Text:  "## Project decisions\n- Use append-only memory writes. (id=seed)",
+		Model: "custom-summary-model",
+		Usage: TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+	}}
+	c.Config.Summarizer = summarizer
+
+	result, err := c.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, summarizer.calls)
+	require.Equal(t, summarizer.output.Text, result.SummaryText)
+	require.Equal(t, "custom-summary-model", result.SummaryModel)
+
+	summary, err := store.ActiveSummary(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Equal(t, "llm_v1", summary.Metadata["compiler"])
+	require.Equal(t, "custom-summary-model", summary.Model)
+}
+
+func TestConsolidatorFallsBackWhenProjectSummaryGeneratorFails(t *testing.T) {
+	c, store := newConsolidatorForTest(t)
+	_, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s1", Kind: "decision", Text: "Use deterministic fallback.",
+		Confidence: 0.9, SourceHash: "hash-fallback-summary", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	c.Config.Summarizer = &fakeProjectSummarizer{err: context.DeadlineExceeded}
+
+	result, err := c.Run(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, result.SummaryText, "Use deterministic fallback.")
+	summary, err := store.ActiveSummary(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Equal(t, "deterministic_v1", summary.Metadata["compiler"])
+	require.Contains(t, summary.Metadata["fallback_reason"], "deadline")
+}
+
+func TestConsolidatorFallsBackOnInvalidLLMSummaryStructure(t *testing.T) {
+	c, store := newConsolidatorForTest(t)
+	_, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
+		SessionID: "s1", Kind: "decision", Text: "Use structured summary headings.",
+		Confidence: 0.9, SourceHash: "hash-invalid-summary", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	c.Config.Summarizer = &fakeProjectSummarizer{output: ProjectSummaryOutput{
+		Text: "plain summary without headings or source ids", Model: "bad-model",
+	}}
+
+	result, err := c.Run(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, result.SummaryText, "Use structured summary headings.")
+	summary, err := store.ActiveSummary(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	require.Equal(t, "deterministic_v1", summary.Metadata["compiler"])
+	require.Equal(t, "missing_headings", summary.Metadata["fallback_reason"])
+}
+
+func TestDeterministicSummaryDeduplicatesCaseAndWhitespace(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	records := []memorystore.Record{
+		{
+			ID: "mem-1", Kind: "decision", Text: "Use Stable Summary.",
+			SourceKind: "session_extract", Confidence: 0.9, UpdatedAt: now,
+		},
+		{
+			ID: "mem-2", Kind: "decision", Text: "use stable summary.",
+			SourceKind: "session_extract", Confidence: 0.8, UpdatedAt: now,
+		},
+	}
+	text, ids, _ := deterministicSummary(records, 400)
+	require.Len(t, ids, 1)
+	require.Equal(t, "mem-1", ids[0])
+	require.Equal(t, 1, strings.Count(strings.ToLower(text), "use stable summary"))
+}
+
+func TestDeterministicSummaryPreventsKindStarvation(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	records := make([]memorystore.Record, 0, 21)
+	for i := 0; i < 20; i++ {
+		records = append(records, memorystore.Record{
+			ID: "pref-" + string(rune('a'+i)), Kind: "preference",
+			Text:       "Prefer a very specific interaction detail " + string(rune('a'+i)),
+			SourceKind: "session_extract", Confidence: 0.9, UpdatedAt: now,
+		})
+	}
+	records = append(records, memorystore.Record{
+		ID: "fact-1", Kind: "fact", Text: "The canonical bootstrap path is stable.",
+		SourceKind: "session_extract", Confidence: 0.9, UpdatedAt: now,
+	})
+
+	text, ids, tokens := deterministicSummary(records, 220)
+	require.Contains(t, text, "## Facts")
+	require.Contains(t, text, "canonical bootstrap path")
+	require.Contains(t, ids, "fact-1")
+	require.LessOrEqual(t, tokens, 220)
+}
+
+func TestResolveConflictsGroupsDifferentValuesBySubject(t *testing.T) {
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	old := memorystore.Record{
+		ID: "old", Kind: "fact", Text: "API timeout is 30s", SourceKind: "session_extract",
+		Confidence: 0.6, UpdatedAt: now.Add(-time.Hour),
+	}
+	newer := memorystore.Record{
+		ID: "new", Kind: "fact", Text: "API timeout is 60s", SourceKind: "session_extract",
+		Confidence: 0.9, UpdatedAt: now,
+	}
+	require.Equal(t, conflictSubjectKey(old), conflictSubjectKey(newer))
+
+	active, supersessions, ambiguous := resolveConflicts([]memorystore.Record{old, newer})
+	require.Len(t, active, 1)
+	require.Equal(t, "new", active[0].ID)
+	require.Empty(t, ambiguous)
+	require.Len(t, supersessions, 1)
+	require.Equal(t, "old", supersessions[0].loserID)
+	require.Equal(t, "new", supersessions[0].winnerID)
 }
 
 func TestConsolidatorPreservesSamePriorityAmbiguity(t *testing.T) {

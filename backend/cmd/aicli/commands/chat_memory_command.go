@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -156,6 +157,10 @@ func openChatProjectMemoryStore(session *ChatSession) (*memorystore.Store, error
 		cfg.DisableManual = !runtimeConfig.Memory.Manual.Enabled
 		cfg.RecallTraceEnabled = runtimeConfig.Memory.Injection.RecallTrace.Enabled
 		cfg.RecallTraceSampleRate = runtimeConfig.Memory.Injection.RecallTrace.SampleRate
+		cfg.Retention = memorypolicy.StoreRetention(runtimeConfig.Memory)
+		cfg.StaleBehavior = memorypolicy.StaleBehavior(runtimeConfig.Memory)
+		cfg.DisableSecretFilter = memorypolicy.DisableSecretFilter(runtimeConfig.Memory)
+		cfg.TurnDigestBatchSize = runtimeConfig.Memory.Generation.TurnDigest.MaxTurnsPerBatch
 	}
 	return memorystore.New(cfg)
 }

@@ -1294,6 +1294,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/export", h.ExportMemory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/import", h.ImportMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/reset", h.ResetMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/turn-windows/purge", h.PurgeMemoryTurnWindows).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/hooks", h.GetHarnessHooks).Methods(http.MethodGet)
@@ -3491,6 +3492,7 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// 会话已删除：作废其待投递 wake 并解除巡检（best-effort，不影响删除结果）。
 	h.releaseSessionSupervisionObligations(context.Background(), sessionID)
+	h.deleteMemoryTurnDigestsForSession(sessionID)
 
 	// 网关：会话集合变化时增量推送（未接入网关时为 no-op）。
 	h.pushGatewaySessions()
@@ -3777,7 +3779,11 @@ func (h *Handler) ClearSessionHistory(w http.ResponseWriter, r *http.Request) {
 // BatchDeleteSessions 批量删除会话
 func (h *Handler) BatchDeleteSessions(w http.ResponseWriter, r *http.Request) {
 	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
-		return h.sessionManager.Delete(ctx, sessionID)
+		if err := h.sessionManager.Delete(ctx, sessionID); err != nil {
+			return err
+		}
+		h.deleteMemoryTurnDigestsForSession(sessionID)
+		return nil
 	}, "deleted", true)
 }
 
@@ -4585,6 +4591,7 @@ func (h *Handler) maybeAutoCompactSessionHistory(ctx context.Context, session *c
 	payload["token_after"] = result.TokenAfter
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
+	payload["canonical_transcript_changed"] = false
 	if len(result.CheckpointIDs) > 0 {
 		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
 		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
