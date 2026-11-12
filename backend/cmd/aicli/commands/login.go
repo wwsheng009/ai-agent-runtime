@@ -19,6 +19,7 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 		Use:   "login",
 		Short: "新增或更新 provider 登录凭证",
 		Long: `新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回当前配置文件。
+auto + API key 模式会对缺少协议映射的模型发送最小补全探测（可能产生费用）；--skip-model-probe 可跳过。
 
 首次使用常见流程：
   aicli init --global
@@ -52,11 +53,12 @@ chat 内也可使用 /login，与本命令共用同一套登录逻辑。
 	cmd.Flags().String("model-cards", "", "额外模型卡片 catalog 文件路径")
 	cmd.Flags().Bool("no-model-cards", false, "禁用模型卡片元数据补齐")
 	cmd.Flags().Bool("model-cards-strict", false, "模型卡片加载或校验失败时中止登录")
+	cmd.Flags().Bool("skip-model-probe", false, "跳过 auto 模式的模型协议补全探测，仅按模型卡片和列表协议分类")
 	cmd.Flags().String("auth-ref", "", "OAuth auth store 引用名")
 	cmd.Flags().String("oauth-issuer", "", "Codex OAuth issuer（默认 https://auth.openai.com）")
 	cmd.Flags().String("oauth-client-id", "", "Codex OAuth client id")
 	cmd.Flags().Int("oauth-timeout", 900, "Codex OAuth device-code 等待秒数")
-	cmd.Flags().Int("timeout", 60, "models 校验请求超时秒数")
+	cmd.Flags().Int("timeout", 60, "models 校验请求超时秒数；自动补全探测总预算不超过此值和 30 秒")
 	cmd.Flags().String("site-type", "auto", "站点类型（auto|new-api|sub2api|unknown）")
 	cmd.Flags().Bool("skip-site-detect", false, "跳过站点类型自动探测")
 	cmd.Flags().Bool("skip-account", false, "跳过账户余额/订阅同步")
@@ -80,6 +82,7 @@ func HandleLogin(cmd *cobra.Command, configProvider func() *config.Config) {
 	timeoutSec, _ := cmd.Flags().GetInt("timeout")
 	oauthTimeoutSec, _ := cmd.Flags().GetInt("oauth-timeout")
 	req := providerLoginRequest{
+		Context:              cmd.Context(),
 		Config:               cfg,
 		ProviderName:         stringFlag(cmd, "provider"),
 		LoginProtocol:        stringFlag(cmd, "protocol"),
@@ -100,6 +103,7 @@ func HandleLogin(cmd *cobra.Command, configProvider func() *config.Config) {
 		ModelCardCatalogPath: stringFlag(cmd, "model-cards"),
 		DisableModelCards:    boolFlag(cmd, "no-model-cards"),
 		ModelCardsStrict:     boolFlag(cmd, "model-cards-strict"),
+		SkipModelProbe:       boolFlag(cmd, "skip-model-probe"),
 		SiteType:             stringFlag(cmd, "site-type"),
 		SkipSiteDetect:       boolFlag(cmd, "skip-site-detect"),
 		SkipAccount:          boolFlag(cmd, "skip-account"),
@@ -188,6 +192,19 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 			}
 			fmt.Printf("    - %s\n", warning.Message)
 		}
+	}
+	if len(result.ModelProbes) > 0 {
+		fmt.Printf("  Protocol probes: %d models\n", len(result.ModelProbes))
+		for _, model := range result.ModelProbes {
+			verdicts := make([]string, 0, len(model.Probes))
+			for _, probe := range model.Probes {
+				verdicts = append(verdicts, probe.Protocol+"="+probe.Verdict)
+			}
+			fmt.Printf("    - %s: %s\n", model.Model, strings.Join(verdicts, ", "))
+		}
+	}
+	for _, warning := range result.ModelProbeWarnings {
+		fmt.Printf("  Probe warning:   %s\n", warning)
 	}
 	if result.DryRun {
 		fmt.Println("  Config:          dry-run，未写入")

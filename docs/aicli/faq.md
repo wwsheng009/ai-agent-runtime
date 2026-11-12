@@ -56,6 +56,35 @@ aicli login \
 
 若上游 models 路径非默认，务必显式传 `--models-path`。
 
+### `--protocol auto` 如何确认 Responses 等协议
+
+`/v1/models` 返回成功只证明模型列表可读取，不证明某个模型支持
+`/v1/chat/completions` 或 `/v1/responses`。API key 模式下，`login --protocol auto`
+先按模型卡分类，再对**缺少明确协议映射**的模型发送最小补全探测：
+
+- 检查 OpenAI Chat、Codex Responses、Anthropic Messages；模型列表使用 Gemini
+  协议时也检查 Gemini。已有非 fallback 协议卡片、图像模型不做补全探测。
+- 一个模型可同时命中多个实测支持的协议；能力卡片（上下文、推理档位等）仍保留。
+- 鉴权、配额、限流、超时等结果为 `unknown`：保留原兜底分类并显示警告，
+  **不代表该协议或 API key 已验证通过**。原兜底协议被明确拒绝且其他协议均未
+  获成功的模型不会自动导入；全部被排除时登录失败，不写凭据。
+- 每轮最多探测 20 个模型，优先覆盖指定的默认模型；默认并发 6，单请求最多
+  15 秒，整轮最多 `min(--timeout, 30)` 秒。超出数量/时间预算会明确提示未验证。
+- 探测会产生真实补全请求，可能消耗少量额度。`--dry-run` 仍进行探测，但不写
+  provider、auth store 或用户模型卡；探测映射只在本次登录中使用。非 dry-run
+  将最终协议和模型分组按正常登录流程保存。
+
+可先查看证据再正式登录：
+
+```bash
+aicli login --provider gateway --protocol auto --base-url https://gateway.example.com --api-key "$GATEWAY_API_KEY" --dry-run --json
+```
+
+JSON 中 `model_probes` 包含模型 × 协议的判定，`model_probe_warnings` 包含未确认、
+跳过或排除的说明。使用 `--skip-model-probe` 可禁用补全探测，恢复仅根据模型卡
+和列表协议分类的行为；chat 内 `/login` 同样支持此参数。显式 `--protocol`
+以及 OAuth 登录不自动探测。`--no-model-cards` 只禁用能力元数据补齐，不关闭探测。
+
 ## 3. chat 里 `/model` 切换失败
 
 先看状态：

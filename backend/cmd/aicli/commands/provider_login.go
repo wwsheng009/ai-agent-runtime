@@ -97,6 +97,7 @@ type providerLoginRequest struct {
 	ModelCardCatalogPath string
 	DisableModelCards    bool
 	ModelCardsStrict     bool
+	SkipModelProbe       bool
 
 	// Site type / account snapshot options (best-effort unless RequireAccount).
 	SiteType       string
@@ -136,6 +137,8 @@ type providerLoginResult struct {
 	ModelCardsApplied       []providerLoginModelCardAppliedInfo       `json:"model_cards_applied,omitempty"`
 	ModelCardsSkipped       []providerLoginModelCardSkippedInfo       `json:"model_cards_skipped,omitempty"`
 	ModelCardWarnings       []providerLoginModelCardWarning           `json:"model_card_warnings,omitempty"`
+	ModelProbes             []providerops.ModelProbeMatrix            `json:"model_probes,omitempty"`
+	ModelProbeWarnings      []string                                  `json:"model_probe_warnings,omitempty"`
 	Created                 bool                                      `json:"created"`
 	Updated                 bool                                      `json:"updated"`
 	DryRun                  bool                                      `json:"dry_run"`
@@ -195,6 +198,9 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	ctx := req.Context
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	cfg := req.Config
 	if cfg == nil {
@@ -276,8 +282,11 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		candidate.APIKeyRef = apiKeyRef
 	}
 
-	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(cfg, providerName, candidate, loginProtocol, req.ModelsPath, req.Timeout)
+	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(ctx, cfg, providerName, candidate, loginProtocol, req.ModelsPath, req.Timeout)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		fallbackResult, fallbackPath, fallbackProtocol, fallbackErr := resolveProviderLoginModelsManually(req, candidate, loginProtocol, err)
 		if fallbackErr != nil {
 			return nil, fallbackErr
@@ -297,11 +306,48 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	if isAutoLoginProtocol(groupingProtocol) {
 		groupingProtocol = validationLoginProtocol
 	}
+	var modelProbes []providerops.ModelProbeMatrix
+	var modelProbeWarnings []string
+	if isAutoLoginProtocol(loginProtocol) && authMode == providerAuthModeAPIKey && !req.SkipModelProbe {
+		if req.Interactive && req.Prompter != nil {
+			req.Prompter.PrintLine("自动协议识别：对缺少协议映射的模型发送最小补全探测（可能产生少量费用；--skip-model-probe 可跳过）。")
+		}
+		probeProvider := candidate
+		if exists && strings.TrimSpace(existing.Protocol) != "" {
+			// /models may validate as openai even for a saved Codex provider.
+			// Keep its custom completion path attached to its original protocol.
+			probeProvider.Protocol = existing.Protocol
+		}
+		discovery, err := providerops.ProbeUnclassifiedLoginModels(ctx, providerops.LoginProbeRequest{
+			Config: cfg, ProviderName: providerName, LoginProtocol: groupingProtocol,
+			Provider: probeProvider, Models: modelsResult.Models, Catalog: modelCardCatalog,
+			DefaultModel: firstNonEmptyText(req.DefaultModel, candidate.DefaultModel), Timeout: req.Timeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("auto protocol probe: %w", err)
+		}
+		modelCardCatalog, modelsResult.Models = discovery.Catalog, discovery.Models
+		modelProbes, modelProbeWarnings = discovery.Probes, discovery.Warnings
+		if len(modelsResult.Models) == 0 {
+			return nil, fmt.Errorf("no models remain after auto protocol probes: %s", strings.Join(modelProbeWarnings, "; "))
+		}
+	}
 	modelGroups := groupProviderLoginModelsByProviderTemplate(providerName, groupingProtocol, loginProtocol, candidate, modelsResult.Models, modelCardCatalog, authMode)
 	modelGroups = ensureExplicitProviderLoginModelGroup(loginProtocol, candidate, modelsResult.Models, modelGroups, modelCardCatalog, authMode)
 	primaryGroupIndex := selectPrimaryProviderLoginModelGroup(modelGroups, loginProtocol, candidate, modelCardCatalog)
 	if primaryGroupIndex < 0 {
 		return nil, fmt.Errorf("models endpoint returned no supported models")
+	}
+	// Discovery may move the requested default out of the largest fallback
+	// group. In auto mode prefer a group that actually supports that default.
+	if isAutoLoginProtocol(loginProtocol) && strings.TrimSpace(req.DefaultModel) != "" &&
+		!stringInListFold(req.DefaultModel, providerModelIDs(modelGroups[primaryGroupIndex].Models)) {
+		for i, group := range modelGroups {
+			if stringInListFold(req.DefaultModel, providerModelIDs(group.Models)) {
+				primaryGroupIndex = i
+				break
+			}
+		}
 	}
 	primaryGroup := modelGroups[primaryGroupIndex]
 	loginProtocol = primaryGroup.LoginProtocol
@@ -355,6 +401,9 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		return nil, err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !req.DryRun {
 		resolvedConfigPath, err := ensureWritableAICLIConfigPath(cfg, configPath)
 		if err != nil {
@@ -456,6 +505,8 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		ModelCardsApplied:       modelCardsApplied,
 		ModelCardsSkipped:       modelCardsSkipped,
 		ModelCardWarnings:       modelCardWarnings,
+		ModelProbes:             modelProbes,
+		ModelProbeWarnings:      modelProbeWarnings,
 		Created:                 !exists,
 		Updated:                 exists,
 		DryRun:                  req.DryRun,
@@ -1240,6 +1291,7 @@ func providerLoginModelCardWarnings(input []modelcard.Warning) []providerLoginMo
 }
 
 func validateProviderLoginModels(
+	ctx context.Context,
 	cfg *config.Config,
 	providerName string,
 	provider config.Provider,
@@ -1249,7 +1301,7 @@ func validateProviderLoginModels(
 ) (*providerModelsValidationResult, string, string, error) {
 	if !isAutoLoginProtocol(loginProtocol) {
 		resolvedPath := resolveProviderModelsPath(loginProtocol, provider, modelsPath)
-		result, err := validateProviderModels(providerModelsValidationRequest{
+		result, err := providerops.FetchModels(ctx, providerModelsValidationRequest{
 			Config:        cfg,
 			ProviderName:  providerName,
 			Provider:      provider,
@@ -1263,10 +1315,13 @@ func validateProviderLoginModels(
 	attempts := providerLoginAutoValidationProtocols(provider)
 	errors := make([]string, 0, len(attempts))
 	for _, attempt := range attempts {
+		if err := ctx.Err(); err != nil {
+			return nil, "", "", err
+		}
 		candidate := provider
 		candidate.Protocol = runtimeProtocolForLoginProtocol(attempt)
 		resolvedPath := resolveProviderModelsPath(attempt, candidate, modelsPath)
-		result, err := validateProviderModels(providerModelsValidationRequest{
+		result, err := providerops.FetchModels(ctx, providerModelsValidationRequest{
 			Config:        cfg,
 			ProviderName:  providerName,
 			Provider:      candidate,

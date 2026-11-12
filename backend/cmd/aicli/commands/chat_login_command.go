@@ -27,6 +27,7 @@ type chatLoginCommandRequest struct {
 	Switch            bool
 	NoModelCards      bool
 	ModelCardsStrict  bool
+	SkipModelProbe    bool
 	TimeoutSec        int
 	OAuthTimeout      int
 	SiteType          string
@@ -87,6 +88,7 @@ func handleLoginCommand(session *ChatSession, command string, noInteractive bool
 		ModelCardCatalogPath: parsed.ModelCardsPath,
 		DisableModelCards:    parsed.NoModelCards,
 		ModelCardsStrict:     parsed.ModelCardsStrict,
+		SkipModelProbe:       parsed.SkipModelProbe,
 		SiteType:             parsed.SiteType,
 		SkipSiteDetect:       parsed.SkipSiteDetect,
 		SkipAccount:          parsed.SkipAccount,
@@ -296,6 +298,8 @@ func parseChatLoginCommandRequest(command string) (chatLoginCommandRequest, erro
 			req.NoModelCards = true
 		case token == "--model-cards-strict":
 			req.ModelCardsStrict = true
+		case token == "--skip-model-probe":
+			req.SkipModelProbe = true
 		default:
 			if strings.HasPrefix(token, "-") {
 				return req, fmt.Errorf("未知 /login 参数: %s", token)

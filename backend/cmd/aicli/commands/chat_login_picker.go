@@ -205,6 +205,7 @@ func executeStructuredLoginCommand(session *ChatSession, command string) (Comman
 		ModelCardCatalogPath: parsed.ModelCardsPath,
 		DisableModelCards:    parsed.NoModelCards,
 		ModelCardsStrict:     parsed.ModelCardsStrict,
+		SkipModelProbe:       parsed.SkipModelProbe,
 		SiteType:             parsed.SiteType,
 		SkipSiteDetect:       parsed.SkipSiteDetect,
 		SkipAccount:          parsed.SkipAccount,
@@ -297,6 +298,19 @@ func buildChatLoginResultDocument(result *providerLoginResult) render.Document {
 			}
 			lines = append(lines, "    - "+warning.Message)
 		}
+	}
+	if len(result.ModelProbes) > 0 {
+		lines = append(lines, formatChatSessionMetaRow("Protocol probes:", fmt.Sprintf("%d models", len(result.ModelProbes))))
+		for _, model := range result.ModelProbes {
+			verdicts := make([]string, 0, len(model.Probes))
+			for _, probe := range model.Probes {
+				verdicts = append(verdicts, probe.Protocol+"="+probe.Verdict)
+			}
+			lines = append(lines, fmt.Sprintf("    - %s: %s", model.Model, strings.Join(verdicts, ", ")))
+		}
+	}
+	for _, warning := range result.ModelProbeWarnings {
+		lines = append(lines, formatChatSessionMetaRow("Probe warning:", warning))
 	}
 	if result.DryRun {
 		lines = append(lines, formatChatSessionMetaRow("Config:", "dry-run，未写入"))

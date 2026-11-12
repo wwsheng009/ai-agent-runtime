@@ -154,11 +154,22 @@ func probeResponseLooksSuccessful(protocol string, payload map[string]interface{
 		msgType, _ := payload["type"].(string)
 		return strings.TrimSpace(id) != "" && strings.EqualFold(msgType, "message")
 	case "codex":
+		// Gateways may route every path to Chat Completions (which also has an
+		// id). An id alone is not evidence for the Responses protocol.
+		object, _ := payload["object"].(string)
+		if object != "" && !strings.EqualFold(object, "response") {
+			return false
+		}
+		status, _ := payload["status"].(string)
+		switch strings.ToLower(status) {
+		case "failed", "cancelled", "canceled", "queued", "in_progress":
+			return false
+		}
 		if _, ok := payload["output"].([]interface{}); ok {
 			return true
 		}
 		id, _ := payload["id"].(string)
-		return strings.TrimSpace(id) != ""
+		return strings.TrimSpace(id) != "" && strings.EqualFold(object, "response")
 	case "gemini":
 		_, ok := payload["candidates"].([]interface{})
 		return ok
@@ -301,8 +312,13 @@ func providerProbeSessionID() string {
 
 // probeProviderModelOnce 发送一次探测请求并给出结论。网络错误 / 超时一律
 // unknown——传输层失败不能证明模型不支持该协议。
-func probeProviderModelOnce(client *http.Client, provider config.Provider, probeProtocol, modelID string, timeout time.Duration) ModelSingleProbe {
+func probeProviderModelOnce(ctx context.Context, client *http.Client, provider config.Provider, probeProtocol, modelID string, timeout time.Duration) ModelSingleProbe {
 	probe := ModelSingleProbe{Protocol: RuntimeProtocolForLoginProtocol(probeProtocol)}
+	if err := ctx.Err(); err != nil {
+		probe.Verdict = string(probeVerdictUnknown)
+		probe.Detail = "探测未发送（无法定性）: " + err.Error()
+		return probe
+	}
 	endpoint, payload, headers, err := buildProviderModelProbeCall(provider, probe.Protocol, modelID)
 	if err != nil {
 		probe.Verdict = string(probeVerdictUnknown)
@@ -315,7 +331,7 @@ func probeProviderModelOnce(client *http.Client, provider config.Provider, probe
 		probe.Detail = "marshal probe request: " + err.Error()
 		return probe
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawBody))
 	if err != nil {
@@ -343,6 +359,11 @@ func probeProviderModelOnce(client *http.Client, provider config.Provider, probe
 		probe.Detail = "读取探测响应失败: " + err.Error()
 		return probe
 	}
+	if err := ctx.Err(); err != nil {
+		probe.Verdict = string(probeVerdictUnknown)
+		probe.Detail = "探测取消或超时（无法定性）: " + err.Error()
+		return probe
+	}
 	probe.HTTPStatus = resp.StatusCode
 	probe.DurationMS = time.Since(start).Milliseconds()
 	verdict, detail := classifyProviderModelProbeResponse(resp.StatusCode, respBody, probe.Protocol)
@@ -353,6 +374,7 @@ func probeProviderModelOnce(client *http.Client, provider config.Provider, probe
 
 // ProbeMatrixRequest 是一次批量探测的输入。
 type ProbeMatrixRequest struct {
+	Context       context.Context // 可选；nil 等价 Background，取消/截止时间覆盖排队与请求
 	Config        *config.Config
 	Provider      config.Provider
 	Models        []string
@@ -364,6 +386,10 @@ type ProbeMatrixRequest struct {
 // ProbeMatrix 并发执行模型 × 协议探测矩阵。结果按输入顺序排列
 // （按索引写回，无需锁）；默认并发 6、单请求超时 15s，防止探测拖垮上游。
 func ProbeMatrix(req ProbeMatrixRequest) []ModelProbeMatrix {
+	ctx := req.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	provider := req.Provider
 	if req.Config != nil {
 		provider.Headers = config.EffectiveProviderHeaders(req.Config.Providers.Headers, provider.Headers)
@@ -419,7 +445,6 @@ func ProbeMatrix(req ProbeMatrixRequest) []ModelProbeMatrix {
 		model      string
 		protocol   string
 	}
-	tasks := make([]probeTask, 0, len(models)*len(protocols))
 	for i, model := range models {
 		results[i] = ModelProbeMatrix{
 			Model:  model,
@@ -427,21 +452,54 @@ func ProbeMatrix(req ProbeMatrixRequest) []ModelProbeMatrix {
 		}
 		for j, protocol := range protocols {
 			results[i].Probes[j].Protocol = protocol
-			tasks = append(tasks, probeTask{modelIndex: i, probeIndex: j, model: model, protocol: protocol})
 		}
 	}
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-	for _, task := range tasks {
-		wg.Add(1)
-		go func(task probeTask) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[task.modelIndex].Probes[task.probeIndex] = probeProviderModelOnce(client, provider, task.protocol, task.model, timeout)
-		}(task)
+	if len(models) == 0 || len(protocols) == 0 {
+		return results
 	}
+	if taskCount := len(models) * len(protocols); workers > taskCount {
+		workers = taskCount
+	}
+	// 按需提交任务，只创建固定数量的 worker，避免为大型矩阵的排队任务
+	// 各创建一个 goroutine。单请求超时从 worker 开始请求时计算。
+	tasks := make(chan probeTask)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				results[task.modelIndex].Probes[task.probeIndex] = probeProviderModelOnce(ctx, client, provider, task.protocol, task.model, timeout)
+			}
+		}()
+	}
+dispatch:
+	for i, model := range models {
+		for j, protocol := range protocols {
+			if ctx.Err() != nil {
+				break dispatch
+			}
+			select {
+			case <-ctx.Done():
+				break dispatch
+			case tasks <- probeTask{modelIndex: i, probeIndex: j, model: model, protocol: protocol}:
+			}
+		}
+	}
+	close(tasks)
 	wg.Wait()
+	// 等 worker 写回后再补齐取消时尚未发送的条目，不覆盖已完成的结论。
+	if err := ctx.Err(); err != nil {
+		for i := range results {
+			for j := range results[i].Probes {
+				probe := &results[i].Probes[j]
+				if probe.Verdict == "" {
+					probe.Verdict = string(probeVerdictUnknown)
+					probe.Detail = "探测未发送（无法定性）: " + err.Error()
+				}
+			}
+		}
+	}
 	return results
 }
 
