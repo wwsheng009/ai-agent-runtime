@@ -327,6 +327,7 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 		"/title":   "next-turn：Phase A 写 Metadata.Title，下一回合读取",
 		"/gateway": "live：connect/disconnect/reconnect 仅改网关隧道状态，不触碰 turn/会话上下文，忙时可即时执行（docs/gateway/12-connection-control.md）",
 		"/stop":    "live：只调用会话级唯一中断决策点（handleChatEscapeInterruptRequest），与 Esc 等价；不写会话上下文、无 Phase B 效应（2026-10-18 入口审计 R3）",
+		"/queue":   "live：steer 只移动已提交的排队用户输入到当前 actor；不直接修改进行中请求或会话历史，下一次请求边界由 loop 持久化",
 	}
 
 	for name, entry := range runtimeCommandRegistry {

@@ -73,7 +73,7 @@ func TestChatBusyCommandPolicyDefaultOnRegistryRouting(t *testing.T) {
 func TestChatBusyCommandPolicyFirstBatchImmediateWhenEnabled(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 
-	immediate := []string{"/session", "/queue", "/queue status"}
+	immediate := []string{"/session", "/queue", "/queue status", "/queue steer"}
 	for _, text := range immediate {
 		if got := chatSlashCommandBusyPolicyFor(text); got != chatBusyPolicyImmediate {
 			t.Fatalf("%q 应为 immediate，实际 %s", text, got)
@@ -132,6 +132,9 @@ func TestChatBusyCommandPolicySubcommandQueueClear(t *testing.T) {
 	}
 	if got := chatSlashCommandBusyPolicyFor("/queue status"); got != chatBusyPolicyImmediate {
 		t.Fatalf("/queue status 应为 immediate，实际 %s", got)
+	}
+	if got := chatSlashCommandBusyPolicyFor("/queue steer"); got != chatBusyPolicyImmediate {
+		t.Fatalf("/queue steer 应为 immediate，实际 %s", got)
 	}
 }
 

@@ -704,13 +704,14 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/queue",
-			Usage:       "/queue [status|clear]",
-			Summary:     "查看或清空排队输入",
+			Usage:       "/queue [status|clear|steer]",
+			Summary:     "查看、清空或立即追加排队输入",
 			Group:       string(chatSlashCommandGroupContext),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "status", Summary: "查看当前状态"},
 				{Token: "clear", Summary: "清空排队输入"},
+				{Token: "steer", Summary: "下次模型请求前追加排队消息"},
 			},
 		},
 		{

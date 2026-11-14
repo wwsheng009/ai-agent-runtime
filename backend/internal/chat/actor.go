@@ -79,6 +79,10 @@ var ErrSessionActorStopped = errors.New("session actor is stopped")
 // continue returning the error to make concurrent submissions explicit.
 var ErrSessionBusy = errors.New("session is busy")
 
+// ErrLiveUserInputUnavailable is returned when no in-process model run can
+// receive the requested live user input.
+var ErrLiveUserInputUnavailable = errors.New("no active session run for live user input")
+
 var errSessionRunSuperseded = errors.New("session run was superseded")
 
 // errSessionRunTerminal refuses to resume pending work whose run already ended in
@@ -362,6 +366,12 @@ type SessionActor struct {
 	questionWaiters map[string]chan questionWaiterReply
 	// lastApprovalOutcome is guarded by waiterMu.
 	lastApprovalOutcome approvalOutcome
+	// pendingLiveUserInput stores steered messages not yet consumed at a model
+	// request boundary. If the current run finishes first, the next run consumes
+	// them on its first request instead of losing the user's input.
+	// Guarded by mu, including the claim/restore transition at a model boundary.
+	pendingLiveUserInput           []string
+	pendingLiveUserInputGeneration uint64
 	// abandonHooks cascade a parked turn's non-batch obligations on abandon.
 	abandonHooks SuspendedTurnAbandonHooks
 	activeRunWG  sync.WaitGroup
@@ -1113,6 +1123,97 @@ func (a *SessionActor) RunInFlight() bool {
 		return false
 	}
 	return !run.abandoned.Load() && !run.interrupted.Load()
+}
+
+// QueueLiveUserInput hands user messages to the currently executing run. It is
+// deliberately a non-blocking side channel: the actor command loop may be busy
+// waiting on the provider, while the TUI command must still be able to append
+// input. Messages are retained if the run finishes before its next request.
+func (a *SessionActor) QueueLiveUserInput(inputs []string) (int, error) {
+	if a == nil {
+		return 0, ErrLiveUserInputUnavailable
+	}
+	normalized := normalizeLiveUserInputStrings(inputs)
+	if len(normalized) == 0 {
+		return 0, nil
+	}
+	a.mu.Lock()
+	run := a.activeRun
+	if run == nil || run.abandoned.Load() || run.interrupted.Load() || run.finalizing.Load() {
+		a.mu.Unlock()
+		return 0, ErrLiveUserInputUnavailable
+	}
+	a.pendingLiveUserInput = append(a.pendingLiveUserInput, normalized...)
+	a.mu.Unlock()
+	return len(normalized), nil
+}
+
+// LiveUserInputCount reports messages waiting either on the active run or for
+// a following run to reach its next model request.
+func (a *SessionActor) LiveUserInputCount() int {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.pendingLiveUserInput)
+}
+
+// ClearLiveUserInput discards messages accepted by QueueLiveUserInput but not
+// yet persisted by the ReAct loop. It intentionally does not alter session
+// history after the loop has committed those messages.
+func (a *SessionActor) ClearLiveUserInput() int {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cleared := len(a.pendingLiveUserInput)
+	a.pendingLiveUserInput = nil
+	a.pendingLiveUserInputGeneration++
+	return cleared
+}
+
+func normalizeLiveUserInputStrings(inputs []string) []string {
+	if len(inputs) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		if input = strings.TrimSpace(input); input != "" {
+			normalized = append(normalized, input)
+		}
+	}
+	return normalized
+}
+
+func (a *SessionActor) liveUserInputBatch(run *sessionRunControl) agent.LiveUserInputBatch {
+	if a == nil || run == nil {
+		return agent.LiveUserInputBatch{}
+	}
+	a.mu.Lock()
+	owned := a.activeRun == run && !run.abandoned.Load() && !run.interrupted.Load() && !run.finalizing.Load()
+	if !owned {
+		a.mu.Unlock()
+		return agent.LiveUserInputBatch{}
+	}
+	inputs := append([]string(nil), a.pendingLiveUserInput...)
+	a.pendingLiveUserInput = nil
+	generation := a.pendingLiveUserInputGeneration
+	a.mu.Unlock()
+	if len(inputs) == 0 {
+		return agent.LiveUserInputBatch{}
+	}
+	return agent.LiveUserInputBatch{
+		Inputs: inputs,
+		Restore: func() {
+			a.mu.Lock()
+			if a.pendingLiveUserInputGeneration == generation {
+				a.pendingLiveUserInput = append(inputs, a.pendingLiveUserInput...)
+			}
+			a.mu.Unlock()
+		},
+	}
 }
 
 func (a *SessionActor) run() {
@@ -2081,7 +2182,9 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
 	runMeta, _ := team.GetRunMeta(ctx)
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.historyCheckpointLoopConfig(routeOverride, runMeta, session))
+	loopConfig := a.historyCheckpointLoopConfig(routeOverride, runMeta, session)
+	a.bindLiveUserInputSource(ctx, loopConfig)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, loopConfig)
 	return loop.RunWithSession(ctx, prompt, session)
 }
 
@@ -2093,8 +2196,23 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session, route
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
 	runMeta, _ := team.GetRunMeta(ctx)
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.historyCheckpointLoopConfig(routeOverride, runMeta, session))
+	loopConfig := a.historyCheckpointLoopConfig(routeOverride, runMeta, session)
+	a.bindLiveUserInputSource(ctx, loopConfig)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, loopConfig)
 	return loop.ContinueWithSession(ctx, session)
+}
+
+func (a *SessionActor) bindLiveUserInputSource(ctx context.Context, cfg *agent.LoopReActConfig) {
+	if a == nil || cfg == nil {
+		return
+	}
+	run, ok := sessionRunControlFromContext(ctx)
+	if !ok || run == nil {
+		return
+	}
+	cfg.LiveUserInputSource = func() agent.LiveUserInputBatch {
+		return a.liveUserInputBatch(run)
+	}
 }
 
 func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride *RunRouteOverride) *agent.LoopReActConfig {

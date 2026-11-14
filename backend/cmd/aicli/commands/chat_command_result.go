@@ -1302,11 +1302,19 @@ func executeStructuredQueueCommand(session *ChatSession, command string) Command
 	switch strings.ToLower(strings.TrimSpace(extractCommandArgument(command))) {
 	case "", "status":
 		count, draining := queuedInteractiveInputState(session)
+		livePending := 0
+		if actor, ok := liveInputActorForSession(session); ok {
+			livePending = actor.LiveUserInputCount()
+			count += livePending
+		}
 		state := fmt.Sprintf("%d pending", count)
 		if draining {
 			state += " (draining)"
 		}
 		lines := []string{"当前 queued input: " + state}
+		if livePending > 0 {
+			lines = append(lines, fmt.Sprintf("已转发到运行中 turn 的消息: %d（/queue clear 可取消尚未注入模型的消息）", livePending))
+		}
 		if deferred := deferredSlashCommandSnapshot(session); len(deferred) > 0 {
 			lines = append(lines, fmt.Sprintf("暂存 slash 命令 (%d，Ready 后执行；/queue clear 取消): %s",
 				len(deferred), strings.Join(deferred, ", ")))
@@ -1315,11 +1323,56 @@ func executeStructuredQueueCommand(session *ChatSession, command string) Command
 	case "clear":
 		discarded := discardPendingInteractiveInput(session)
 		deferred := clearDeferredSlashCommands(session)
+		if actor, ok := liveInputActorForSession(session); ok {
+			discarded += actor.ClearLiveUserInput()
+		}
 		refreshChatComposerContext(session)
 		return commandTextResult(fmt.Sprintf("已清空 queued input: %d；已清空暂存命令: %d", discarded, deferred))
+	case "steer":
+		return steerQueuedInteractiveInput(session)
 	default:
-		return commandTextResult("错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")
+		return commandTextResult("错误: /queue 仅支持 status、clear 或 steer\n用法: /queue [status|clear|steer]")
 	}
+}
+
+func steerQueuedInteractiveInput(session *ChatSession) CommandResult {
+	if session == nil || session.InputQueue == nil {
+		return commandTextResult("当前没有可转发的排队输入")
+	}
+	actor, ok := liveInputActorForSession(session)
+	if !ok {
+		return commandTextResult("当前执行器不支持运行中消息追加；排队输入未更改")
+	}
+	if !actor.RunInFlight() {
+		return commandTextResult("当前没有正在运行的本地 turn；排队输入未更改")
+	}
+
+	items := session.InputQueue.takeLiveUserInputItems()
+	if len(items) == 0 {
+		return commandTextResult("队列中没有可追加的普通用户消息")
+	}
+	inputs := make([]string, 0, len(items))
+	for _, item := range items {
+		inputs = append(inputs, item.Text)
+	}
+	count, err := actor.QueueLiveUserInput(inputs)
+	if err != nil {
+		session.InputQueue.requeueFrontItems(items)
+		return commandTextResult(fmt.Sprintf("消息追加失败，排队输入已保留：%v", err))
+	}
+	refreshChatComposerContext(session)
+	return commandTextResult(fmt.Sprintf(
+		"已将 %d 条排队消息加入当前 turn；它们会在下一次模型请求前追加到对话中。若当前 turn 先结束，消息会保留到下一次模型请求。",
+		count,
+	))
+}
+
+func liveInputActorForSession(session *ChatSession) (*runtimechat.SessionActor, bool) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		return nil, false
+	}
+	actor, ok := session.LocalRuntimeHost.SessionHub.Get(currentRuntimeSessionID(session))
+	return actor, ok && actor != nil
 }
 
 func executeStructuredAttachmentCommand(session *ChatSession, command string) CommandResult {

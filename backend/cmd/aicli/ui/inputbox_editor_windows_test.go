@@ -128,6 +128,23 @@ func TestConsoleKeyEventRecognizesShiftEnterAsNewline(t *testing.T) {
 	}
 }
 
+func TestConsoleKeyEventRecognizesAltEnterWithoutStealingShiftEnter(t *testing.T) {
+	key := &consoleKeyEventRecord{KeyDown: 1, VirtualKeyCode: windowsVKReturn, UnicodeChar: '\r', ControlKeyState: windowsLeftAltPressed}
+	if !consoleKeyEventIsAltEnterDown(key) {
+		t.Fatal("Alt+Enter must be recognized separately from Shift+Enter")
+	}
+	key.ControlKeyState = windowsRightAltPressed
+	if !consoleKeyEventIsAltEnterDown(key) {
+		t.Fatal("right Alt+Enter must also be recognized")
+	}
+	for _, modifier := range []uint32{0, windowsShiftPressed, windowsLeftAltPressed | windowsShiftPressed, windowsLeftAltPressed | windowsLeftCtrlPressed} {
+		key.ControlKeyState = modifier
+		if consoleKeyEventIsAltEnterDown(key) {
+			t.Fatalf("unexpected Alt+Enter for modifier %#x", modifier)
+		}
+	}
+}
+
 func TestConsoleKeyEventCanProduceInputAcceptsCharactersAndEditingKeys(t *testing.T) {
 	character := &consoleKeyEventRecord{
 		KeyDown:        1,

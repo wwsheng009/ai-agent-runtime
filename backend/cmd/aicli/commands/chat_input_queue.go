@@ -783,6 +783,109 @@ func (q *chatInputQueue) takeQueuedFront() (chatQueuedInput, bool) {
 	return item, true
 }
 
+// takeLiveUserInputItems removes submitted, non-command prompts for
+// /queue steer. Slash and shell commands stay in the normal queue so a command
+// can never be accidentally sent to the model as user content. The operation
+// is lossless: items that are not eligible for steering are put back at the
+// front in their original order.
+func (q *chatInputQueue) takeLiveUserInputItems() []chatQueuedInput {
+	if q == nil {
+		return nil
+	}
+	q.ensureChannels()
+	q.routeMu.Lock()
+	defer q.routeMu.Unlock()
+	q.draftMu.RLock()
+	readyIsCommand := isSubmissionCommand(strings.TrimSpace(normalizeQueuedInputLine(q.readyText)))
+	q.draftMu.RUnlock()
+	if readyIsCommand {
+		return nil
+	}
+	items := make([]chatQueuedInput, 0, q.pendingCount())
+	if ready, ok := q.takeReadyLiveUserInput(); ok {
+		items = append(items, ready)
+	}
+	for {
+		if item, ok := q.takeQueuedFront(); ok {
+			items = append(items, item)
+			continue
+		}
+		select {
+		case item := <-q.lines:
+			q.noteQueuedLineRead()
+			items = append(items, item)
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	live := make([]chatQueuedInput, 0, len(items))
+	deferred := make([]chatQueuedInput, 0)
+	encounteredCommand := false
+	for _, item := range items {
+		text := strings.TrimSpace(normalizeQueuedInputLine(item.Text))
+		if text == "" {
+			continue
+		}
+		if encounteredCommand || isSubmissionCommand(text) {
+			encounteredCommand = true
+			deferred = append(deferred, item)
+			continue
+		}
+		item.Text = text
+		live = append(live, item)
+	}
+	if len(deferred) > 0 {
+		q.requeueFrontItemsLocked(deferred)
+	}
+	return live
+}
+
+func (q *chatInputQueue) takeReadyLiveUserInput() (chatQueuedInput, bool) {
+	if q == nil {
+		return chatQueuedInput{}, false
+	}
+	q.draftMu.Lock()
+	defer q.draftMu.Unlock()
+	text := strings.TrimSpace(normalizeQueuedInputLine(q.readyText))
+	if text == "" || isSubmissionCommand(text) {
+		return chatQueuedInput{}, false
+	}
+	q.readyText = ""
+	return chatQueuedInput{
+		Text:       text,
+		Source:     chatInputSourceStdin,
+		EnqueuedAt: time.Now().UTC(),
+	}, true
+}
+
+func (q *chatInputQueue) requeueFrontItems(items []chatQueuedInput) {
+	if q == nil || len(items) == 0 {
+		return
+	}
+	q.ensureChannels()
+	q.routeMu.Lock()
+	defer q.routeMu.Unlock()
+	q.requeueFrontItemsLocked(items)
+}
+
+func (q *chatInputQueue) requeueFrontItemsLocked(items []chatQueuedInput) {
+	if q == nil || len(items) == 0 {
+		return
+	}
+	q.queuedMu.Lock()
+	front := make([]chatQueuedInput, 0, len(items)+len(q.queuedFront))
+	front = append(front, items...)
+	front = append(front, q.queuedFront...)
+	q.queuedFront = front
+	preview := make([]chatQueuedInput, 0, len(items)+len(q.queuedPreview))
+	preview = append(preview, items...)
+	preview = append(preview, q.queuedPreview...)
+	q.queuedPreview = preview
+	q.queuedMu.Unlock()
+}
+
 func (q *chatInputQueue) noteQueuedLineRead() {
 	if q == nil {
 		return
@@ -1782,6 +1885,21 @@ func (q *chatInputQueue) consoleInputCaptureActive() bool {
 
 func (q *chatInputQueue) routeLine(item chatQueuedInput) chatInputRouteResult {
 	return q.routeLineWithCommandGate(item, false)
+}
+
+// enqueueOrdinaryLine bypasses the priority-answer channel while preserving
+// the FIFO position of a busy composer submission.
+func (q *chatInputQueue) enqueueOrdinaryLine(item chatQueuedInput) {
+	if q == nil {
+		return
+	}
+	q.ensureChannels()
+	q.routeMu.Lock()
+	defer q.routeMu.Unlock()
+	q.queuedMu.Lock()
+	q.queuedPreview = append(q.queuedPreview, item)
+	q.queuedMu.Unlock()
+	q.lines <- item
 }
 
 func (q *chatInputQueue) routeLineWithCommandGate(item chatQueuedInput, enforceCommandGate bool) chatInputRouteResult {

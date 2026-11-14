@@ -76,6 +76,9 @@ type LineEditorHooks struct {
 	// transcript overlay. Returning false preserves the editor's normal
 	// transpose-character behavior, so non-chat editors are unchanged.
 	OnTranscriptRequested func(LineEditorSnapshot) bool
+	// SteerOnAltEnter enables the busy chat capture's submit-and-steer shortcut.
+	// Other editors retain the modified Enter newline behavior.
+	SteerOnAltEnter bool
 	// ActionForChord 把规范化 chord（如 "shift+tab"、"ctrl+t"）解析为已注册的
 	// keymap 动作 id；nil 表示不启用动作路由。
 	ActionForChord func(chord string) (string, bool)

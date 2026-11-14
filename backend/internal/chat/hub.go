@@ -233,6 +233,11 @@ func sessionActorEvictable(actor *SessionActor) bool {
 	if actor == nil {
 		return true
 	}
+	// Steered input may outlive the run it targeted. Keep its actor until the
+	// next model request claims it or the user explicitly clears the queue.
+	if actor.LiveUserInputCount() > 0 {
+		return false
+	}
 	state, ok := actor.StateSummary()
 	if !ok {
 		return true

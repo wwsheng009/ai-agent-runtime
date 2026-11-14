@@ -117,6 +117,10 @@ type LoopReActConfig struct {
 	//
 	// The callback is optional and is never invoked for nil/empty chunks.
 	StreamSink func(llm.StreamChunk) `yaml:"-"`
+	// LiveUserInputSource atomically takes user messages queued by an interactive
+	// host. The loop consumes them immediately before a model request and persists
+	// them in session history. Restore is called if that checkpoint fails.
+	LiveUserInputSource LiveUserInputSource `yaml:"-"`
 	// OnHistoryCheckpoint 在本轮每次提交 durable 历史后调用一次：assistant
 	// 文本、tool 结果、预算/压缩改写等所有历史变更点都会经过它。宿主用它把
 	// 长 turn 的历史增量中途落库，避免 turn 结束前权威会话长时间缺失。
@@ -668,6 +672,41 @@ func (loop *ReActLoop) notifyHistoryCheckpoint(ctx context.Context, messages []t
 	loop.config.OnHistoryCheckpoint(ctx, messages)
 }
 
+func (loop *ReActLoop) injectLiveUserInput(
+	ctx context.Context,
+	identity *BuilderIdentity,
+	builder *MessageBuilder,
+	promptBuilder *MessageBuilder,
+	persist func([]types.Message) error,
+) error {
+	if loop == nil || loop.config == nil || loop.config.LiveUserInputSource == nil ||
+		builder == nil || promptBuilder == nil {
+		return nil
+	}
+	batch := loop.config.LiveUserInputSource()
+	inputs := normalizeLiveUserInputs(batch.Inputs)
+	if len(inputs) == 0 {
+		return nil
+	}
+	for _, input := range inputs {
+		message := types.NewUserMessage(input)
+		if message == nil {
+			continue
+		}
+		identity.GrantMessage(message)
+		builder.Add(*message)
+		promptBuilder.Add(*message)
+	}
+	if err := persistBuilderHistory(builder, persist); err != nil {
+		if batch.Restore != nil {
+			batch.Restore()
+		}
+		return err
+	}
+	loop.notifyHistoryCheckpoint(ctx, builder.Messages())
+	return nil
+}
+
 func sessionGoalID(session HistorySession) string {
 	reader, ok := session.(historySessionContextReader)
 	if !ok {
@@ -1194,6 +1233,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					remainingBudget -= compactUsage.TotalTokens
 				}
 			}
+		}
+
+		// Interactive hosts may move already queued user input into the active
+		// run. Consume it after the pre-turn compaction (so compaction cannot
+		// discard it) and before the next model request. Each item remains a
+		// distinct user message, which preserves FIFO boundaries and makes the
+		// steering visible in the durable transcript.
+		if err := loop.injectLiveUserInput(currentCtx, identity, builder, promptBuilder, options.PersistHistory); err != nil {
+			return nil, err
 		}
 
 		// Codex PreToolUse additionalContext is model-visible context for the

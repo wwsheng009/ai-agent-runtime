@@ -282,6 +282,9 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session.Interaction = coord
 	capture := newChatBusyComposerCapture(session, "> ", false, false)
 	hooks := capture.hooks()
+	if !hooks.SteerOnAltEnter {
+		t.Fatal("ordinary busy composer must enable Alt+Enter steer")
+	}
 	if hooks.ResolveMaxVisibleRows == nil {
 		t.Fatal("expected busy composer viewport budget to be resolved dynamically")
 	}
@@ -302,6 +305,15 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 
 	if !hooks.OnCancel(ui.LineEditorSnapshot{}) || !capture.Cancelled() {
 		t.Fatal("expected busy capture cancel hook to consume input and mark cancellation")
+	}
+}
+
+func TestChatBusyComposerCaptureDoesNotSteerPriorityAnswer(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		capture := newChatBusyComposerCapture(&ChatSession{}, "> ", true, merged)
+		if capture.hooks().SteerOnAltEnter {
+			t.Fatalf("priority answer merged=%v must not steer", merged)
+		}
 	}
 }
 

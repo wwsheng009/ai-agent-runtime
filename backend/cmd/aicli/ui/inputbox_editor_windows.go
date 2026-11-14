@@ -19,6 +19,8 @@ const (
 	windowsVKV                  = 0x56
 	windowsVKReturn             = 0x0D
 	windowsShiftPressed         = 0x0010
+	windowsLeftAltPressed       = 0x0002
+	windowsRightAltPressed      = 0x0001
 	windowsLeftCtrlPressed      = 0x0008
 	windowsRightCtrlPressed     = 0x0004
 	windowsClipboardOpenRetries = 5
@@ -207,6 +209,14 @@ func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
 	for i := range records {
 		if records[i].EventType == consoleKeyEventType {
 			key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
+			if consoleKeyEventIsAltEnterDown(key) {
+				for consumed := 0; consumed <= i; consumed++ {
+					if err := readConsoleInputRecord(handle); err != nil {
+						return editorKey{}, false, err
+					}
+				}
+				return editorKey{kind: editorKeySteer}, true, nil
+			}
 			if consoleKeyEventIsModifiedEnterDown(key) {
 				for consumed := 0; consumed <= i; consumed++ {
 					if err := readConsoleInputRecord(handle); err != nil {
@@ -243,6 +253,12 @@ func consoleKeyEventIsModifiedEnterDown(key *consoleKeyEventRecord) bool {
 		key.KeyDown != 0 &&
 		key.VirtualKeyCode == windowsVKReturn &&
 		key.ControlKeyState&windowsShiftPressed != 0
+}
+
+func consoleKeyEventIsAltEnterDown(key *consoleKeyEventRecord) bool {
+	return key != nil && key.KeyDown != 0 && key.VirtualKeyCode == windowsVKReturn &&
+		key.ControlKeyState&(windowsLeftAltPressed|windowsRightAltPressed) != 0 &&
+		key.ControlKeyState&(windowsShiftPressed|windowsLeftCtrlPressed|windowsRightCtrlPressed) == 0
 }
 
 func consoleInputRecordCanProduceInput(record consoleInputRecord) bool {

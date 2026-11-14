@@ -243,6 +243,11 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			capture := newChatBusyComposerCapture(session, prompt, priorityPrompt, priorityPrompt && queue.priorityAnswerMergedPrompt())
 			line, err := capture.ReadLine(readCtx)
 			cancelRead()
+			if errors.Is(err, ui.ErrInteractiveInputSteerRequested) {
+				capture.ClearPrompt()
+				steerBusyCapturedInput(session, queue, line)
+				continue
+			}
 			select {
 			case <-promptChanged:
 				// Prompt switches only re-own the prompt rows; the next capture
@@ -282,39 +287,8 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 				return
 			}
 			line = strings.TrimSpace(normalizeQueuedInputLine(line))
-			if line == "" {
-				capture.ClearPrompt()
-				continue
-			}
-			result := queue.routeInputText(line)
+			submitBusyCapturedInput(session, queue, line)
 			capture.ClearPrompt()
-			if result.rejected() {
-				continue
-			}
-			if result.immediate() || result.screen() {
-				item := chatQueuedInput{
-					Text:       line,
-					Source:     chatInputSourceStdin,
-					EnqueuedAt: time.Now().UTC(),
-				}
-				if queue.consumeBusyCommand(item) {
-					// 命令已由 busy 通道执行并渲染（P1-5）；不置 queued echo。
-					continue
-				}
-				// 未占有（消费方缺失、执行降级，或 P2-4 副屏未落地）：回退入队，
-				// 绝不丢输入（「占有后必达」兜底）。
-				queue.requeueFront(item)
-				result = chatInputRouteResult{Disposition: chatInputRouteQueued}
-			}
-			if result.queued() {
-				session.setQueuedInputEchoed(true)
-				if session.Interaction != nil {
-					session.Interaction.RefreshStatus("")
-				}
-			}
-			if result.queued() && !isSlashCommandInput(line) && session.InputBox != nil {
-				session.InputBox.AddToHistory(line)
-			}
 		}
 	}()
 
@@ -325,6 +299,78 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// submitBusyCapturedInput is the normal Enter path for busy-capture input:
+// ordinary chat submissions keep their FIFO position, and command submissions
+// still go through the busy command gate. Alt+Enter uses the steer path below.
+func submitBusyCapturedInput(session *ChatSession, queue *chatInputQueue, line string) chatInputRouteResult {
+	if queue == nil {
+		return chatInputRouteResult{Disposition: chatInputRouteQueued}
+	}
+	line = strings.TrimSpace(normalizeQueuedInputLine(line))
+	if line == "" {
+		return chatInputRouteResult{Disposition: chatInputRouteQueued}
+	}
+	result := queue.routeInputText(line)
+	if result.rejected() {
+		return result
+	}
+	if result.immediate() || result.screen() {
+		item := chatQueuedInput{
+			Text:       line,
+			Source:     chatInputSourceStdin,
+			EnqueuedAt: time.Now().UTC(),
+		}
+		if queue.consumeBusyCommand(item) {
+			// 命令已由 busy 通道执行并渲染（P1-5）；不置 queued echo。
+			return chatInputRouteResult{Disposition: chatInputRouteImmediate}
+		}
+		// 未占有（消费方缺失、执行降级，或 P2-4 副屏未落地）：回退入队，
+		// 绝不丢输入（「占有后必达」兜底）。
+		queue.requeueFront(item)
+		result = chatInputRouteResult{Disposition: chatInputRouteQueued}
+	}
+	if result.queued() {
+		if session != nil {
+			session.setQueuedInputEchoed(true)
+			if session.Interaction != nil {
+				session.Interaction.RefreshStatus("")
+			}
+			if !isSlashCommandInput(line) && session.InputBox != nil {
+				session.InputBox.AddToHistory(line)
+			}
+		}
+	}
+	return result
+}
+
+// steerBusyCapturedInput submits the current draft before steering, so the
+// shortcut has the same ordering and command barriers as /queue steer.
+func steerBusyCapturedInput(session *ChatSession, queue *chatInputQueue, line string) {
+	if queue == nil {
+		return
+	}
+	line = strings.TrimSpace(normalizeQueuedInputLine(line))
+	if line != "" {
+		// Always use the ordinary FIFO: a steer draft must never become an
+		// approval/question answer, and a slash command stays behind the
+		// /queue steer barrier instead of being executed by the shortcut.
+		queue.enqueueOrdinaryLine(chatQueuedInput{Text: line, Source: chatInputSourceStdin, EnqueuedAt: time.Now().UTC()})
+		if !isSubmissionCommand(line) && session != nil && session.InputBox != nil {
+			session.InputBox.AddToHistory(line)
+		}
+		if session != nil {
+			session.setQueuedInputEchoed(true)
+		}
+	}
+	if queue.isPriorityMode() {
+		return
+	}
+	command := chatQueuedInput{Text: "/queue steer", Source: chatInputSourceStdin, EnqueuedAt: time.Now().UTC()}
+	// A failed immediate command can have performed a partial side effect; do
+	// not replay it later. The draft stays in the ordinary queue for retry.
+	queue.consumeBusyCommand(command)
 }
 
 func renderBusyInputRouteFeedback(session *ChatSession, input string, result chatInputRouteResult) {

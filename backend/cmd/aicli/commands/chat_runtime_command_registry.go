@@ -395,8 +395,12 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Wildcard: ptrRuntimeSpec(rtSpec("/attach", categoryContextInput, runtimeModePrompt, runtimeEffectNextCall, rtConfirm())),
 	},
 	"/queue": {
-		Bare:     rtBare(rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectRead)),
-		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectRead), "clear": rtSpec("/queue", categoryContextInput, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("确认后丢弃待提交输入"))},
+		Bare: rtBare(rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectRead)),
+		Variants: map[string]runtimeCommandSpec{
+			"status": rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectRead),
+			"clear":  rtSpec("/queue", categoryContextInput, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("确认后丢弃待提交输入")),
+			"steer":  rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectLive),
+		},
 	},
 	"/todos": {
 		Bare: rtBare(rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))),

@@ -135,6 +135,117 @@ func TestChatInputQueue_RejectedSlashDraftRemainsEditable(t *testing.T) {
 	}
 }
 
+func TestChatInputQueue_TakeLiveUserInputPreservesOrderAndSlashCommands(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeLine(chatQueuedInput{Text: "first", Source: chatInputSourceStdin})
+	queue.routeLine(chatQueuedInput{Text: "/help", Source: chatInputSourceStdin})
+	queue.routeLine(chatQueuedInput{Text: "second", Source: chatInputSourceStdin})
+	queue.draftMu.Lock()
+	queue.readyText = "confirmed draft"
+	queue.draftMu.Unlock()
+
+	items := queue.takeLiveUserInputItems()
+	if len(items) != 2 {
+		t.Fatalf("expected confirmed submission and the prompt before the slash command, got %+v", items)
+	}
+	want := []string{"confirmed draft", "first"}
+	for i := range want {
+		if items[i].Text != want[i] {
+			t.Fatalf("steer input %d = %q, want %q", i, items[i].Text, want[i])
+		}
+	}
+	if got := queue.pendingCount(); got != 2 {
+		t.Fatalf("slash command and following prompt must remain queued, pending count = %d", got)
+	}
+	if item, ok := queue.takeQueuedFront(); !ok || item.Text != "/help" {
+		t.Fatalf("slash command should remain at the queue front, got %+v ok=%v", item, ok)
+	}
+	if item, ok := queue.takeQueuedFront(); !ok || item.Text != "second" {
+		t.Fatalf("prompt after slash command should preserve FIFO order, got %+v ok=%v", item, ok)
+	}
+}
+
+func TestChatInputQueue_TakeLiveUserInputStopsAtShellCommand(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeLine(chatQueuedInput{Text: "first", Source: chatInputSourceStdin})
+	queue.routeLine(chatQueuedInput{Text: "!pwd", Source: chatInputSourceStdin})
+	queue.routeLine(chatQueuedInput{Text: "later", Source: chatInputSourceStdin})
+	items := queue.takeLiveUserInputItems()
+	if len(items) != 1 || items[0].Text != "first" {
+		t.Fatalf("only the prompt before the shell command may steer: %+v", items)
+	}
+	for _, want := range []string{"!pwd", "later"} {
+		if got, ok := queue.readAvailableLine(); !ok || got != want {
+			t.Fatalf("queued item = %q, ok=%v, want %q", got, ok, want)
+		}
+	}
+}
+
+func TestQueueSteerWithoutRunningActorLeavesInputQueued(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeLine(chatQueuedInput{Text: "follow-up", Source: chatInputSourceStdin})
+	session := &ChatSession{InputQueue: queue}
+	result := executeStructuredQueueCommand(session, "/queue steer")
+	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "排队输入未更改") {
+		t.Fatalf("unexpected steer result: %s", ui.RenderDocumentPlain(result.Document()))
+	}
+	if got, ok := queue.readAvailableLine(); !ok || got != "follow-up" {
+		t.Fatalf("queued input after failed steer = %q, ok=%v", got, ok)
+	}
+}
+
+func TestSteerBusyCapturedInputRetainsDraftWhenCommandUnavailable(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeLine(chatQueuedInput{Text: "earlier", Source: chatInputSourceStdin})
+	queue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		if item.Text != "/queue steer" {
+			t.Fatalf("unexpected command %q", item.Text)
+		}
+		return false
+	})
+	session := &ChatSession{InputQueue: queue}
+	steerBusyCapturedInput(session, queue, "draft")
+	for _, want := range []string{"earlier", "draft"} {
+		if got, ok := queue.readAvailableLine(); !ok || got != want {
+			t.Fatalf("queued input = %q ok=%v, want %q", got, ok, want)
+		}
+	}
+	if got := queue.pendingCount(); got != 0 {
+		t.Fatalf("failed shortcut must not enqueue a delayed steer command: %d pending", got)
+	}
+}
+
+func TestSteerBusyCapturedInputNeverUsesPriorityAnswerChannel(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setPriorityCapture(true, "[approval] allow? ")
+	defer queue.setPriorityCapture(false, "")
+	session := &ChatSession{InputQueue: queue}
+	steerBusyCapturedInput(session, queue, "ordinary draft")
+	if got, ok := queue.readAvailableLine(); !ok || got != "ordinary draft" {
+		t.Fatalf("draft must stay in normal queue: %q ok=%v", got, ok)
+	}
+	select {
+	case item := <-queue.priorityLines:
+		t.Fatalf("draft leaked into priority answer: %+v", item)
+	default:
+	}
+}
+
+func TestSteerBusyCapturedInputLeavesSlashCommandQueued(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		if item.Text != "/queue steer" {
+			t.Fatalf("shortcut must not execute the draft command %q", item.Text)
+		}
+		return false
+	})
+	session := &ChatSession{InputQueue: queue}
+	steerBusyCapturedInput(session, queue, "/help")
+	if got, ok := queue.readAvailableLine(); !ok || got != "/help" {
+		t.Fatalf("slash command must stay queued behind the steer barrier: %q ok=%v", got, ok)
+	}
+}
+
 func TestRenderBusyInputRouteFeedbackExplainsRejectedQueueClear(t *testing.T) {
 	var output strings.Builder
 	session := &ChatSession{}

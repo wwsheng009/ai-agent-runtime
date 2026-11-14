@@ -76,6 +76,37 @@ func TestDecodeInteractiveKey_ModifiedEnterAndCtrlOInsertNewline(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_AltEnterSteersOnlyWhenBusyCaptureOptsIn(t *testing.T) {
+	for _, sequence := range []string{"\x1b[13;3u", "\x1b[13;3:1u", "\x1b[27;3;13~"} {
+		var output bytes.Buffer
+		line, err := readInteractiveLineWithHooks(strings.NewReader("follow-up"+sequence), &output, UserPromptText(0), nil, nil,
+			&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+		if !errors.Is(err, ErrInteractiveInputSteerRequested) || line != "follow-up" {
+			t.Fatalf("%q: line=%q, err=%v", sequence, line, err)
+		}
+		line, err = readInteractiveLineWithHooks(strings.NewReader("first"+sequence+"second\n"), &output, UserPromptText(0), nil, nil,
+			&LineEditorHooks{}, false, false)
+		if err != nil || line != "first\nsecond" {
+			t.Fatalf("non-busy %q: line=%q, err=%v", sequence, line, err)
+		}
+	}
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(strings.NewReader("first\x1b[13;2:1usecond\n"), &output, UserPromptText(0), nil, nil,
+		&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+	if err != nil || line != "first\nsecond" {
+		t.Fatalf("Shift+Enter event-type sequence must remain newline: line=%q err=%v", line, err)
+	}
+}
+
+func TestReadInteractiveLine_PastedAltEnterDoesNotSteer(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(strings.NewReader("\x1b[200~first\x1b[13;3usecond\x1b[201~\n"), &output, UserPromptText(0), nil, nil,
+		&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+	if err != nil || line != "first\nsecond" {
+		t.Fatalf("pasted modified Enter: line=%q, err=%v", line, err)
+	}
+}
+
 func TestReadInteractiveLine_ModifiedEnterBuildsMultilineDraft(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLineWithHooks(

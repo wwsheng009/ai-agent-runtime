@@ -24,6 +24,7 @@ var fixedChatShortcuts = []struct {
 	{"ctrl+c", "中断当前输入；空输入时退出 chat"},
 	{"ctrl+d", "空输入时退出 chat，否则删除前向字符"},
 	{"ctrl+j / ctrl+o", "插入换行（部分终端把 shift+enter 送成同一序列）"},
+	{"alt+enter", "运行中：提交当前输入并将排队消息追加到下一次模型请求（需终端支持修饰键）"},
 	{"tab", "触发补全（补全弹层持有该键）"},
 	{"up / down / left / right", "光标与历史导航（行编辑器固定键）"},
 }

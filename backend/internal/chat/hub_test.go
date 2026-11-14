@@ -73,6 +73,30 @@ func TestBoundedSessionHubProtectsRunningActor(t *testing.T) {
 	}
 }
 
+func TestBoundedSessionHubRetainsIdleActorWithSteeredInput(t *testing.T) {
+	hub := NewBoundedSessionHub(func(id string) (*SessionActor, error) {
+		return newHubTestActor(id, SessionIdle, nil), nil
+	}, SessionHubOptions{MaxActors: 1, IdleTTL: time.Minute, SweepInterval: time.Hour})
+	t.Cleanup(hub.StopAll)
+	actor, err := hub.GetOrCreate("pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.mu.Lock()
+	actor.pendingLiveUserInput = []string{"steered"}
+	actor.mu.Unlock()
+	hub.mu.Lock()
+	hub.lastAccess["pending"] = time.Now().Add(-2 * time.Minute)
+	hub.mu.Unlock()
+	hub.evictIdle(time.Now())
+	if _, err := hub.GetOrCreate("new"); err != nil {
+		t.Fatal(err)
+	}
+	if retained, ok := hub.Get("pending"); !ok || retained != actor {
+		t.Fatal("pending steered input must prevent idle and capacity eviction")
+	}
+}
+
 func TestBoundedSessionHubEvictsExpiredIdleActorsAndStopsWorker(t *testing.T) {
 	var stopped atomic.Int32
 	hub := NewBoundedSessionHub(func(id string) (*SessionActor, error) {

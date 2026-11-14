@@ -53,6 +53,7 @@ var editorKeyKindNames = map[editorKeyKind]string{
 	editorKeyRune:              "Rune",
 	editorKeyEnter:             "Enter",
 	editorKeyInsertNewline:     "InsertNewline",
+	editorKeySteer:             "Steer",
 	editorKeyComplete:          "Complete",
 	editorKeyCancelPopup:       "CancelPopup",
 	editorKeyBackspace:         "Backspace",
