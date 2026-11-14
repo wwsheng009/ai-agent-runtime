@@ -393,6 +393,7 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 		if opts.SessionTitleFlag != "" && session.RuntimeSession != nil {
 			session.RuntimeSession.UpdateTitle(opts.SessionTitleFlag)
 		}
+		applyChatStartupAllowedRoots(session, opts.AllowedDirs)
 		warnIfChatSessionSyncFails(session, "restore session", syncRuntimeSessionFromChat(session))
 		markChatStartup("resume_metadata")
 		// The bootstrap resume path must use the same canonical transcript as
@@ -411,6 +412,7 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 	if err := createNewRuntimeConversation(session, opts.SessionTitleFlag); err != nil {
 		return fmt.Errorf("创建会话失败: %w", err)
 	}
+	applyChatStartupAllowedRoots(session, opts.AllowedDirs)
 	ensureChatSystemPromptMessage(session)
 	// New sessions stay in-memory until the first user turn so bootstrap does
 	// not open the large session history store for an empty shell.

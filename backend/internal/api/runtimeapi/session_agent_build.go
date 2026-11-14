@@ -134,6 +134,7 @@ func (h *Handler) buildSessionAgentForContext(
 	} else {
 		h.applyAgentExecutionPolicy(apiAgent, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
 	}
+	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
 	if strings.TrimSpace(childAgentType) != "" {
 		applyAPIChildAgentdefToolPolicy(apiAgent, childAgentType, workspacePath)
 	}

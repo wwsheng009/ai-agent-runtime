@@ -17,6 +17,10 @@ type ApprovalRequest struct {
 	Reason     string          `json:"reason,omitempty"`
 	RiskLevel  string          `json:"risk_level,omitempty"`
 	ExpiresAt  time.Time       `json:"expires_at,omitempty"`
+	// ExternalDirs is the engine-derived admission set shown by this request.
+	// Persist it with pending approvals so a recovered approval remembers only
+	// these directories, never roots re-derived from changed tool arguments.
+	ExternalDirs []string `json:"external_dirs,omitempty"`
 	// HardAsk marks a confirmation that a blanket "yes to asks" handler must
 	// not auto-approve (root/home removal breaker, sensitive write). It mirrors
 	// Decision.HardAsk so non-interactive surfaces can honor the same boundary

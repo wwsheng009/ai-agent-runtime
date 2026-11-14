@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -17,23 +18,37 @@ import (
 // 让已知的相邻仓库/共享目录不必逐个调用审批。集合随会话元数据持久化，并在
 // 变更后重建本地 runtime actor，使 agent options 中的 allowed_roots 立即生效。
 
-const chatAllowedRootsContextKey = "allowed_roots"
+const chatAllowedRootsContextKey = runtimechat.AllowedRootsContextKey
 
 // chatAllowedRoots returns the session's admitted external directories.
-// The session field is authoritative; resumed sessions fall back to the
-// persisted metadata context.
+// Runtime metadata includes actor-owned automatic admissions and explicit
+// revocations. The startup field is a fallback only until metadata is present.
 func chatAllowedRoots(session *ChatSession) []string {
 	if session == nil {
 		return nil
 	}
-	if len(session.AllowedRoots) > 0 {
-		return append([]string(nil), session.AllowedRoots...)
+	var roots []string
+	var present bool
+	withChatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) {
+		// A JSON null still records an explicit empty/revoked set.
+		raw, ok := runtimeSession.GetContext(chatAllowedRootsContextKey)
+		present = ok
+		roots = normalizePersistedAllowedRoots(raw)
+	})
+	if present {
+		return roots
 	}
-	raw, ok := chatRuntimeContextRawValue(session, chatAllowedRootsContextKey)
-	if !ok {
-		return nil
+	return append([]string(nil), session.AllowedRoots...)
+}
+
+// applyChatStartupAllowedRoots applies explicitly supplied --add-dir entries
+// once, after restoring session metadata. Never union the cached field during
+// ordinary reads: doing so would resurrect revoked roots on the next turn.
+func applyChatStartupAllowedRoots(session *ChatSession, roots []string) {
+	if session == nil || len(roots) == 0 {
+		return
 	}
-	return normalizePersistedAllowedRoots(raw)
+	setChatAllowedRoots(session, append(chatAllowedRoots(session), roots...))
 }
 
 func normalizePersistedAllowedRoots(raw interface{}) []string {
@@ -359,23 +374,6 @@ func applyChatAddDirFlagArgs(paths []string) ([]string, error) {
 		roots = append(roots, normalized)
 	}
 	return dedupeChatPaths(roots), nil
-}
-
-// chatAllowedRootsPolicyAdmitter wires an approved external_dir:admit decision
-// back into the session set (used by hosts that own the policy engine).
-func chatAllowedRootsPolicyAdmitter(session *ChatSession) func(dirs []string) {
-	if session == nil {
-		return nil
-	}
-	return func(dirs []string) {
-		if len(dirs) == 0 {
-			return
-		}
-		added, _ := addChatAllowedRoots(session, dirs)
-		if len(added) > 0 {
-			_ = refreshChatRuntimeForAllowedRoots(session)
-		}
-	}
 }
 
 // applyACPAdditionalDirectories admits the directories an ACP client sent with

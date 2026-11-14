@@ -199,6 +199,10 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoredRuntimeSession.History = session.Messages
 	restoredRuntimeSession.HistoryLoaded = runtimeSession.HistoryLoaded
 	setChatRuntimeSessionPointer(session, restoredRuntimeSession)
+	// Admission belongs to this session, not the previous CLI conversation.
+	// Startup --add-dir entries are applied separately after restoration.
+	rawRoots, _ := restoredRuntimeSession.GetContext(chatAllowedRootsContextKey)
+	session.AllowedRoots = normalizePersistedAllowedRoots(rawRoots)
 	updateChatRuntimeEventBridgePrimarySession(session)
 	clearChatTurnRecovery(session)
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
@@ -298,6 +302,10 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.TurnRequestCount = 0
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
+	if rotateDiagnostics {
+		session.AllowedRoots = nil
+	}
+	runtimeSession.SetContext(chatAllowedRootsContextKey, append([]string(nil), session.AllowedRoots...))
 	setChatRuntimeSessionPointer(session, runtimeSession)
 	// 方案 2（工作区权威锚点）：新会话建立时解析一次当前工作区并固化。此后
 	// profile 热切换/配置覆盖不再改写它，/profile use 不会漂移工作目录。
@@ -1915,10 +1923,18 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, pla
 	// exited+last_exit_source=user, this merge restored the stored
 	// active+pending_exit_request state, and the update kept plan mode active
 	// while the command still archived the approve round).
-	if !session.runtimeSessionUnpersisted && !planMutated {
+	if !session.runtimeSessionUnpersisted {
 		if stored, loadErr := session.SessionManager.GetStorage().Load(context.Background(), runtimeSession.ID); loadErr == nil && stored != nil {
-			if value, ok := stored.GetContext(planmode.ContextKey); ok {
-				runtimeSession.SetContext(planmode.ContextKey, value)
+			if !planMutated {
+				if value, ok := stored.GetContext(planmode.ContextKey); ok {
+					runtimeSession.SetContext(planmode.ContextKey, value)
+				}
+			}
+			// Automatic admissions are owned by the actor, while /add-dir
+			// already writes its explicit additions/removals through. A stale
+			// CLI checkpoint must preserve the latest set, including empty.
+			if value, ok := stored.GetContext(chatAllowedRootsContextKey); ok {
+				runtimeSession.SetContext(chatAllowedRootsContextKey, normalizePersistedAllowedRoots(value))
 			}
 		}
 	}

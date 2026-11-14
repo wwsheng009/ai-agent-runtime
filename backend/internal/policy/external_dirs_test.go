@@ -46,8 +46,26 @@ func TestExternalDirGateAsksAndAdmitsOutsidePath(t *testing.T) {
 	assert.Equal(t, DecisionAllow, decision.Type)
 	assert.Equal(t, StageAsk, decision.Stage)
 	assert.Equal(t, 1, handler.calls, "an outside write must be admitted by the user")
+	require.Len(t, handler.requests, 1)
+	assert.Equal(t, []string{canonicalExternalPath(outsideDir)}, handler.requests[0].ExternalDirs,
+		"persisted approvals must carry the exact engine-derived admission set")
 	assert.Equal(t, []string{canonicalExternalPath(outsideDir)}, *admitted)
 	assert.Equal(t, []string{canonicalExternalPath(outsideDir)}, decision.ExternalDirs)
+}
+
+func TestExternalDirGateDeniedApprovalDoesNotAdmit(t *testing.T) {
+	workspace, outside := t.TempDir(), t.TempDir()
+	engine, handler, admitted := externalDirTestEngine(t, ModePlan)
+	handler.response.Allowed = false
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), workspace)
+	decision, err := engine.Evaluate(ctx, EvalRequest{
+		ToolName: "view", Args: map[string]interface{}{"file_path": filepath.Join(outside, "notes.txt")},
+	})
+	require.NoError(t, err)
+	require.Equal(t, DecisionDeny, decision.Type)
+	require.Len(t, handler.requests, 1)
+	require.Equal(t, []string{canonicalExternalPath(outside)}, handler.requests[0].ExternalDirs)
+	require.Empty(t, *admitted, "recording an admission request must not grant it")
 }
 
 func TestExternalDirGateAbstainsInsideWorkspace(t *testing.T) {
@@ -144,6 +162,33 @@ func TestExternalDirGateAdmittedRootsAbstain(t *testing.T) {
 	assert.Equal(t, StageReadonlyAuto, decision.Stage, "an admitted root is no longer external")
 	assert.Equal(t, 0, handler.calls)
 	assert.Empty(t, *admitted)
+}
+
+func TestExternalDirGateSessionSourceOverridesStaleSnapshots(t *testing.T) {
+	workspace, outside := t.TempDir(), t.TempDir()
+	engine, handler, _ := externalDirTestEngine(t, ModePlan)
+	ctx := toolctx.WithAllowedRoots(toolctx.WithWorkspaceRoot(context.Background(), workspace), []string{outside})
+	engine.ExternalAllowedRoots = []string{outside}
+	req := EvalRequest{ToolName: "view", Args: map[string]interface{}{"file_path": filepath.Join(outside, "A.java")}}
+	// No dynamic source: preserve the legacy context/static-root contract.
+	require.False(t, engine.RequiresExternalDirectoryAdmission(ctx, req))
+	roots := []string{outside}
+	engine.ExternalAllowedRootsSource = func() []string { return append([]string(nil), roots...) }
+	require.False(t, engine.RequiresExternalDirectoryAdmission(ctx, req))
+	for _, revoked := range [][]string{nil, {}} {
+		roots = revoked
+		require.True(t, engine.RequiresExternalDirectoryAdmission(ctx, req), "empty authoritative set must revoke stale grants")
+		before := handler.calls
+		decision, err := engine.Evaluate(ctx, req)
+		require.NoError(t, err)
+		require.Equal(t, DecisionAllow, decision.Type)
+		require.Equal(t, before+1, handler.calls, "revoked path must require a new approval")
+	}
+	// A current session grant still works; unrelated old grants do not.
+	roots = []string{t.TempDir()}
+	require.True(t, engine.RequiresExternalDirectoryAdmission(ctx, req))
+	req.Args["file_path"] = filepath.Join(roots[0], "B.java")
+	require.False(t, engine.RequiresExternalDirectoryAdmission(ctx, req))
 }
 
 func TestExternalDirGateReadOnlyRootsExemptReadsOnly(t *testing.T) {

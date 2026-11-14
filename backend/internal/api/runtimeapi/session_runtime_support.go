@@ -234,6 +234,13 @@ func teamExpertConcurrencyLimit(routingConfig *agentconfig.AICLISubagentRoutingC
 }
 
 func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Session, sessionID string, args toolbroker.SpawnAgentArgs) (toolbroker.SpawnAgentArgs, error) {
+	if !args.RequestedRouteCaptured {
+		args.RequestedProvider = strings.TrimSpace(args.Provider)
+		args.RequestedModel = strings.TrimSpace(args.Model)
+		args.RequestedReasoningEffort = firstNonEmptyString(strings.TrimSpace(args.ReasoningEffort), strings.TrimSpace(args.ThinkingEffort))
+		args.RequestedPermissionMode = strings.TrimSpace(args.PermissionMode)
+		args.RequestedRouteCaptured = true
+	}
 	parent := c.spawnAgentParentDefaults(parentSession)
 	routingConfig := c.subagentRoutingConfig()
 	// The parent session's own mode is the session-level policy for its
@@ -583,6 +590,8 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		childSession.UserID = userID
 		childSession.UpdateState(chat.StateActive)
 	}
+	// Forked history is not a transfer of session-owned directory approvals.
+	childSession.SetContext(chat.AllowedRootsContextKey, []string{})
 	args, err = c.resolveSpawnAgentRoute(parentSession, childSession.ID, args)
 	if err != nil {
 		_ = storage.Delete(ctx, childSession.ID)
@@ -4816,14 +4825,21 @@ func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspace
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
 
+	// Keep the resolved session approval mode; agentdef plan is only a default.
+	// Read-only is enforced independently by the static policy above.
 	if binding.PermissionMode == runtimepolicy.ModePlan {
 		engine := apiAgent.GetPermissionEngine()
 		if engine == nil {
 			engine = agent.NewPermissionEngine()
+			engine.Mode = binding.PermissionMode
 			apiAgent.SetPermissionEngine(engine)
 		}
-		engine.Mode = runtimepolicy.ModePlan
-		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+		if engine.Mode == "" {
+			engine.Mode = binding.PermissionMode
+		}
+		if engine.Mode == runtimepolicy.ModePlan {
+			runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+		}
 	}
 }
 

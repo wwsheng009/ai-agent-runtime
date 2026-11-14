@@ -28,7 +28,7 @@ func TestParallelToolBatchPlan_RejectsUndeclaredMCPParallelism(t *testing.T) {
 		MaxParallelToolCalls: 2,
 	})
 
-	plan := loop.buildParallelToolBatchPlan([]types.ToolCall{
+	plan := loop.buildParallelToolBatchPlan(context.Background(), []types.ToolCall{
 		{ID: "call-1", Name: "read_a", Args: map[string]interface{}{}},
 		{ID: "call-2", Name: "read_b", Args: map[string]interface{}{}},
 	}, nil)
@@ -53,7 +53,7 @@ func TestParallelToolBatchPlan_RejectsExplicitlyNonParallelTool(t *testing.T) {
 		MaxParallelToolCalls: 2,
 	})
 
-	plan := loop.buildParallelToolBatchPlan([]types.ToolCall{
+	plan := loop.buildParallelToolBatchPlan(context.Background(), []types.ToolCall{
 		{ID: "call-1", Name: "read_a", Args: map[string]interface{}{}},
 		{ID: "call-2", Name: "read_b", Args: map[string]interface{}{}},
 	}, nil)
@@ -75,7 +75,7 @@ func TestParallelToolBatchPlan_RespectsEnvDisable(t *testing.T) {
 		MaxParallelToolCalls: 2,
 	})
 
-	plan := loop.buildParallelToolBatchPlan([]types.ToolCall{
+	plan := loop.buildParallelToolBatchPlan(context.Background(), []types.ToolCall{
 		{ID: "call-1", Name: "read_a", Args: map[string]interface{}{}},
 		{ID: "call-2", Name: "read_b", Args: map[string]interface{}{}},
 	}, nil)
@@ -103,7 +103,7 @@ func TestParallelToolBatch_UsesConcurrentExecution(t *testing.T) {
 		{ID: "call-1", Name: "read_a", Args: map[string]interface{}{"path": "a.txt"}},
 		{ID: "call-2", Name: "read_b", Args: map[string]interface{}{"path": "b.txt"}},
 	}
-	plan := loop.buildParallelToolBatchPlan(toolCalls, nil)
+	plan := loop.buildParallelToolBatchPlan(context.Background(), toolCalls, nil)
 	require.NotNil(t, plan)
 
 	completedCh := make(chan runtimeevents.Event, 2)
@@ -234,7 +234,7 @@ func TestParallelToolBatchPlan_RejectsBrokerTools(t *testing.T) {
 				MaxParallelToolCalls: 2,
 			})
 
-			require.Nil(t, loop.buildParallelToolBatchPlan(tc.calls, nil))
+			require.Nil(t, loop.buildParallelToolBatchPlan(context.Background(), tc.calls, nil))
 		})
 	}
 }
@@ -288,7 +288,7 @@ func TestParallelToolBatchPlan_RejectsCustomPermissionEngineBehavior(t *testing.
 				MaxParallelToolCalls: 2,
 			})
 
-			plan := loop.buildParallelToolBatchPlan([]types.ToolCall{
+			plan := loop.buildParallelToolBatchPlan(context.Background(), []types.ToolCall{
 				{ID: "call-1", Name: "read_a", Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_b", Args: map[string]interface{}{}},
 			}, nil)

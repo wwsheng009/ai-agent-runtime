@@ -701,11 +701,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode, subject to agent-definition defaults and read_only's conservative plan fallback. Implicit read_only children inherit a bypass_permissions parent while their static write boundary stays enforced. Explicit plan and the plan agent's default are preserved; plan may still require external-directory admission. The parent session mode is the ceiling for the session tree: plan and dont_ask cannot be widened, and bypass_permissions pins approval-asking default/accept_edits children. Other requests wider than the parent mode are blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary subagent_spawn sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
-						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
+						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + spawnAgentReadOnlyPermissionDescription},
 						"shell":                  map[string]interface{}{"type": "boolean", "description": "Set false to remove shell-like tools from this child and deny them at execution. Omit or set true to inherit: read_only children can run only read-only commands; writable children get the parent's shell surface. shell only narrows the inherited surface: it cannot add a shell tool the parent policy denies. The parent controls child lifetime; there is no per-child timeout_sec field."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
@@ -894,11 +894,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode, subject to agent-definition defaults and read_only's conservative plan fallback. Implicit read_only children inherit a bypass_permissions parent while their static write boundary stays enforced. Explicit plan and the plan agent's default are preserved; plan may still require external-directory admission. The parent session mode is the ceiling for the session tree: plan and dont_ask cannot be widened, and bypass_permissions pins approval-asking default/accept_edits children. Other requests wider than the parent mode are blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary subagent_spawn sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
-						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
+						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + spawnAgentReadOnlyPermissionDescription},
 						"shell":                  map[string]interface{}{"type": "boolean", "description": "Set false to remove shell-like tools from this child and deny them at execution. Omit or set true to inherit: read_only children can run only read-only commands; writable children get the parent's shell surface. shell only narrows the inherited surface: it cannot add a shell tool the parent policy denies. The parent controls child lifetime; there is no per-child timeout_sec field."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
@@ -2347,9 +2347,6 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			request.ReadOnly = value
 			readOnlyExplicit = true
 		}
-		if request.ReadOnly && !permissionModeExplicit {
-			request.PermissionMode = string(runtimepolicy.ModePlan)
-		}
 		if value, ok := args["shell"].(bool); ok {
 			request.Shell = &value
 		}
@@ -2361,7 +2358,6 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
 			parentPermissionMode = normalizeKnownSpawnAgentPermissionMode(runMeta.PermissionMode)
 		}
-		request = ResolveSpawnAgentPermissionPolicy(request, parentPermissionMode)
 		// completion_requirement belongs to the spawned child and must never be
 		// copied from the parent run's Team task contract.
 		if strings.TrimSpace(request.CompletionRequirement) == "" && strings.TrimSpace(request.AgentType) != "" {
@@ -2380,8 +2376,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if strings.TrimSpace(request.AgentType) != "" {
 			applySpawnAgentAgentdefDefaults(&request, permissionModeExplicit, readOnlyExplicit)
 		}
-		// Agent definitions may narrow the mode (explore -> plan); re-apply the
-		// policy so a session-level pin still wins over the definition.
+		// Resolve only after capturing the original request and applying agentdef
+		// defaults. Inheriting earlier would mask the plan agent's default; an
+		// implicit read_only plan, however, must not override a --yolo parent.
 		request = ResolveSpawnAgentPermissionPolicy(request, parentPermissionMode)
 		request.EffectivePermissionMode = request.PermissionMode
 		if value, ok := args["fork_context"].(bool); ok {
@@ -4923,10 +4920,6 @@ func applySpawnAgentAgentdefDefaults(request *SpawnAgentArgs, permissionModeExpl
 			if normalized, err := normalizeSpawnAgentPermissionMode(mode); err == nil && normalized != "" {
 				request.PermissionMode = normalized
 			}
-		}
-		// sandbox: read-only agents default to plan mode when mode still empty.
-		if request.ReadOnly && strings.TrimSpace(request.PermissionMode) == "" {
-			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
 	}
 	if strings.TrimSpace(request.Provider) == "" {

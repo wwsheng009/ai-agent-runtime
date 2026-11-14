@@ -26,7 +26,7 @@ type parallelToolBatchPlan struct {
 	globalLimit int
 }
 
-func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, toolWhitelist []string) *parallelToolBatchPlan {
+func (loop *ReActLoop) buildParallelToolBatchPlan(ctx context.Context, toolCalls []types.ToolCall, toolWhitelist []string) *parallelToolBatchPlan {
 	if parallelToolsDisabledByEnv() {
 		return nil
 	}
@@ -91,6 +91,17 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 			if err := policy.AllowToolCall(toolInfo, tc.Args); err != nil {
 				return nil
 			}
+		}
+		// The parallel executor runs hard constraints, not the interactive
+		// admission pipeline. Keep unadmitted external reads on the serial
+		// path (including symlink escapes); already admitted reads still
+		// benefit from parallel execution.
+		if engine := loop.agent.GetPermissionEngine(); engine != nil &&
+			engine.RequiresExternalDirectoryAdmission(ctx, runtimepolicy.EvalRequest{
+				ToolName: name, ToolInfo: &toolInfo, Args: tc.Args,
+				Mode: permissionModeFromContext(ctx),
+			}) {
+			return nil
 		}
 		if toolInfo.MCPName != "" && toolInfo.MaxParallelCalls <= 1 {
 			return nil

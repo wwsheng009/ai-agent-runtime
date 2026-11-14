@@ -2711,6 +2711,8 @@ func TestLocalActorRegistry_ForkedChildDropsParentCompleteTaskContext(t *testing
 	}
 	rootSession.SetContext(toolbroker.AgentSessionContextCompletionRequirement, "complete_task")
 	rootSession.SetContext(toolbroker.AgentSessionContextPermissionMode, "bypass_permissions")
+	parentRoots := []string{t.TempDir()}
+	rootSession.SetContext(runtimechat.AllowedRootsContextKey, parentRoots)
 	if err := manager.Update(context.Background(), rootSession); err != nil {
 		t.Fatalf("manager.Update: %v", err)
 	}
@@ -2744,6 +2746,12 @@ func TestLocalActorRegistry_ForkedChildDropsParentCompleteTaskContext(t *testing
 	}
 	if got := agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode); got != "bypass_permissions" {
 		t.Fatalf("expected forked child to keep permission mode, got %q", got)
+	}
+	if raw, ok := child.GetContext(runtimechat.AllowedRootsContextKey); !ok || len(normalizePersistedAllowedRoots(raw)) != 0 {
+		t.Fatalf("forked child must start with its own empty admissions, got %#v", raw)
+	}
+	if raw, _ := rootSession.GetContext(runtimechat.AllowedRootsContextKey); len(normalizePersistedAllowedRoots(raw)) != len(parentRoots) {
+		t.Fatalf("clearing child admissions changed the parent: %#v", raw)
 	}
 	runMeta := host.ActorRegistry.localAgentRunMeta(context.Background(), child.ID)
 	if runMeta == nil || runMeta.CompletionRequirement != "none" {

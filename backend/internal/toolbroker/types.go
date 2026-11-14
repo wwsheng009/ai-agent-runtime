@@ -597,9 +597,12 @@ type SpawnAgentArgs struct {
 	RequestedProvider        string   `json:"-"`
 	RequestedModel           string   `json:"-"`
 	RequestedReasoningEffort string   `json:"-"`
-	RequestedPermissionMode  string   `json:"-"`
-	EffectivePermissionMode  string   `json:"-"`
-	RequestedRouteCaptured   bool     `json:"-"`
+	// RequestedPermissionMode records the original request, not an agentdef
+	// default or inherited mode. When RequestedRouteCaptured is true, empty
+	// means omitted; later permission-policy passes must preserve that fact.
+	RequestedPermissionMode string `json:"-"`
+	EffectivePermissionMode string `json:"-"`
+	RequestedRouteCaptured  bool   `json:"-"`
 }
 
 // SendAgentInputArgs describes a follow-up input for an existing child agent.

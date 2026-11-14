@@ -32,6 +32,16 @@ func TestSpawnAgentReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 		require.NotEmpty(t, description, "%s: subagent_spawn definition missing", name)
 		require.True(t, strings.HasPrefix(description, runtimepolicy.ReadOnlyChildOptionDescription),
 			"%s: read_only description must embed the shared contract, got %q", name, description)
+		for _, clause := range []string{
+			"a bypass_permissions parent keeps bypass_permissions",
+			"independent read_only boundary",
+			"Explicit permission_mode=plan",
+			"plan may still require external-directory admission",
+		} {
+			require.Contains(t, description, clause, "%s: approval inheritance contract missing", name)
+		}
+		require.NotContains(t, description, "Defaults permission_mode to plan when omitted.",
+			"%s: read_only must not advertise unconditional plan-mode coercion", name)
 	}
 }
 

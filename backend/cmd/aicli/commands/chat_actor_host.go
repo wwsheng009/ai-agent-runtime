@@ -1879,6 +1879,10 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	// E3.4a-1：runtime session → SessionContext 派生抽成命名函数（行为零变化）。
 	sessionCtx, workspaceRoot := deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot)
 	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, sessionCtx.ChildAgentType, sessionCtx.RequestedModel, sessionCtx.RequestedProvider, sessionCtx.RequestedReasoningEffort)
+	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
+	if !isBaseSession {
+		clearLocalChildAdmissionSnapshot(apiAgent)
+	}
 	if !isBaseSession && strings.TrimSpace(sessionCtx.ChildAgentType) != "" {
 		toolkitBasePath := ""
 		switch {
@@ -2084,15 +2088,34 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
 
-	// Plan-role children get plan write allow paths even without /plan state.
+	// Agent definitions provide defaults, not a second permission resolution.
+	// In particular, explore's implicit plan must not replace inherited bypass
+	// or an explicit dont_ask. The static read-only policy above still applies.
 	if binding.PermissionMode == runtimepolicy.ModePlan {
 		engine := apiAgent.GetPermissionEngine()
 		if engine == nil {
 			engine = agent.NewPermissionEngine()
+			engine.Mode = binding.PermissionMode
 			apiAgent.SetPermissionEngine(engine)
 		}
-		engine.Mode = runtimepolicy.ModePlan
-		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+		if engine.Mode == "" {
+			engine.Mode = binding.PermissionMode
+		}
+		if engine.Mode == runtimepolicy.ModePlan {
+			runtimepolicy.EnsurePlanWriteAllowPaths(engine)
+		}
+	}
+}
+
+// Children share the base ChatSession for provider/profile construction, not
+// directory grants. The owning SessionActor restores its own durable roots at
+// run start. Drop all option aliases, including when the child has no role.
+func clearLocalChildAdmissionSnapshot(apiAgent *agent.Agent) {
+	if apiAgent == nil || apiAgent.GetConfig() == nil {
+		return
+	}
+	for _, key := range []string{"allowed_roots", "additional_directories", "additionalDirectories"} {
+		delete(apiAgent.GetConfig().Options, key)
 	}
 }
 
@@ -2747,12 +2770,9 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 		// Plan mode may recreate/mutate the engine; re-apply product overlay after it.
 		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)
 		applyChatPermissionsOverlayToAgent(apiAgent, session)
-		// §4.5：批准外部目录 ask 后把目录写回会话集合；引擎同时携带当前集合，
-		// 覆盖 ctx 未携带 allowed_roots 的路径（团队/子代理等）。
-		if engine := apiAgent.GetPermissionEngine(); engine != nil {
-			engine.ApproveExternalDir = chatAllowedRootsPolicyAdmitter(session)
-			engine.ExternalAllowedRoots = chatAllowedRoots(session)
-		}
+		// External-directory admission memory is installed by SessionActor
+		// after PrepareRun, for both base and child sessions. Do not capture
+		// the CLI base session in an engine callback shared with child setup.
 		return nil
 	}
 }

@@ -732,6 +732,8 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 			childSession.ID = sessionID
 		}
 	}
+	// Forked history is not a transfer of session-owned directory approvals.
+	childSession.SetContext(runtimechat.AllowedRootsContextKey, []string{})
 	args, err = r.resolveSpawnAgentRoute(parentSession, childSession.ID, args)
 	if err != nil {
 		return nil, err

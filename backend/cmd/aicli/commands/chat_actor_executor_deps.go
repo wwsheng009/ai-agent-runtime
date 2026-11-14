@@ -50,6 +50,7 @@ func deriveLocalSessionContext(
 	}
 	sessionCtx.ChildCompletionRequirement = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextCompletionRequirement)
 	if !isBaseSession {
+		sessionCtx.PermissionMode = toolbroker.ParentSessionPermissionMode(runtimeSession)
 		// Prefer per-child worktree path so tools and system prompt cwd stay isolated.
 		if path := agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextWorktreePath); path != "" {
 			workspaceRoot = path
@@ -101,6 +102,10 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	// agent 装配（与 buildSessionActor 同序：agent → 工具策略 → loop）。
 	apiAgent := buildLocalChatAgent(baseSession, h, runtimeConfig, effectiveWorkspace,
 		sessionCtx.ChildAgentType, sessionCtx.RequestedModel, sessionCtx.RequestedProvider, sessionCtx.RequestedReasoningEffort)
+	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
+	if !isBaseSession {
+		clearLocalChildAdmissionSnapshot(apiAgent)
+	}
 	if !isBaseSession && strings.TrimSpace(sessionCtx.ChildAgentType) != "" {
 		toolkitBasePath := ""
 		switch {

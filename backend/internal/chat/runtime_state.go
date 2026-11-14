@@ -277,6 +277,7 @@ func (s *RuntimeState) clone(includeToolSurfaces, includeToolResult bool) *Runti
 		if len(approval.ArgsJSON) > 0 {
 			approval.ArgsJSON = append(json.RawMessage(nil), approval.ArgsJSON...)
 		}
+		approval.ExternalDirs = append([]string(nil), approval.ExternalDirs...)
 		clone.PendingApproval = &approval
 	}
 	if s.PendingQuestion != nil {

@@ -649,12 +649,11 @@ func TestBroker_Execute_SpawnAgentExplicitArgsWinOverAgentdef(t *testing.T) {
 	}
 }
 
-func TestBroker_Execute_ReadOnlySpawnDefaultsToPlanMode(t *testing.T) {
+func TestBroker_Execute_ReadOnlySpawnDefaultsToPlanModeWithoutParentMode(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
-	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":   "review only",
 		"read_only": true,
 	})

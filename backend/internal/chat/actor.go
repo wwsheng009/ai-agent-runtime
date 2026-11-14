@@ -288,6 +288,9 @@ type SessionActor struct {
 	grantsOnce    sync.Once
 	sessionGrants *runtimepolicy.MemoryGrantStore
 	projectGrants runtimepolicy.GrantStore
+	// externalDirEngine identifies our run-bound admission callback; custom
+	// host callbacks remain host-owned. Rebinding happens before tools run.
+	externalDirEngine *runtimepolicy.Engine
 	// replayedReceipts 记录本次进程内已从回执库回放并消费掉的 tool_call_id：
 	// 回执在消费后被删除是既有语义（避免陈旧结果被再次回放），因此终局补回执
 	// 时必须跳过这些调用，不能把已消费的回执重新写成"待回放"状态。
@@ -3243,6 +3246,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	// Re-apply plan mode after prepareRun so durable plan_mode context and
 	// session permission mode stay enforced for this turn.
 	a.applyDurablePlanModeToRun(runCtx, session)
+	a.prepareExternalDirectoryAdmission(runCtx, session)
 	if runCtx.Err() != nil || !a.sessionRunOwnsRunningState(run) {
 		abortStartup()
 		return
@@ -3931,7 +3935,11 @@ func (a *SessionActor) loadSession(ctx context.Context) (*Session, error) {
 }
 
 func (a *SessionActor) persistSession(ctx context.Context, session *Session) error {
-	if session == nil || a.sessionStore == nil {
+	return a.persistSessionWithExternalDirs(ctx, session, nil)
+}
+
+func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, session *Session, admitted []string) (persistErr error) {
+	if session == nil {
 		return nil
 	}
 	if ctx == nil {
@@ -3944,6 +3952,11 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	if hasRun && !a.sessionRunOwned(run) {
 		return errSessionRunSuperseded
 	}
+	if a.sessionStore == nil {
+		mergeExternalDirectoryAdmission(session, nil, admitted)
+		return nil
+	}
+	liveSession := session
 	keys := a.activeSessionRunMetadataKeys()
 	if hasRun {
 		keys = run.stripMetadataKeys
@@ -3969,6 +3982,27 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 			session = prepared
 		}
 	}
+	// Admission is transactional even though other checkpoint metadata may be
+	// merged in-place. A failed Update/Save must not leave a grant on the live
+	// snapshot for a later checkpoint to accidentally persist. Preserve missing
+	// versus explicit nil/empty, and publish a hook-provided clone's roots back
+	// to the live session only after the store accepted it.
+	previousRoots, hadRoots := session.GetContext(AllowedRootsContextKey)
+	defer func() {
+		if persistErr != nil {
+			if hadRoots {
+				session.Metadata.Context[AllowedRootsContextKey] = previousRoots
+			} else {
+				delete(session.Metadata.Context, AllowedRootsContextKey)
+			}
+			return
+		}
+		if session != liveSession {
+			if roots, ok := session.GetContext(AllowedRootsContextKey); ok {
+				liveSession.SetContext(AllowedRootsContextKey, normalizeSessionAllowedRoots(roots))
+			}
+		}
+	}()
 	// Broker tools persist opaque job/session aliases directly into the parent
 	// session while this actor still owns an older in-memory session snapshot.
 	// Reload only the broker-owned context immediately before the actor's
@@ -3985,6 +4019,7 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 		if errors.Is(err, ErrSessionNotFound) && a.ensureSession != nil {
 			// The row vanished mid-turn: recreate it from the actor's full
 			// in-memory snapshot instead of failing the turn's persist.
+			mergeExternalDirectoryAdmission(session, nil, admitted)
 			if saveErr := a.sessionStore.Save(ctx, session); saveErr != nil {
 				return wrapSessionStoreError(saveErr, session.ID)
 			}
@@ -3993,6 +4028,7 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 		}
 		return wrapSessionStoreError(err, session.ID)
 	}
+	mergeExternalDirectoryAdmission(session, latest, admitted)
 	if latest != nil {
 		if aliases, ok := latest.GetContext(toolbroker.SessionHandleAliasesContextKey); ok {
 			copiedAliases, err := cloneSessionContextValue(aliases)
@@ -4716,6 +4752,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	}
 	runMeta := state.CurrentRunMeta.Clone()
 	runCtx := team.WithRunMeta(ctx, runMeta)
+	a.rememberResumedExternalDirectoryAdmission(runCtx, session, state.PendingApproval, &pending, len(patchedArgs) > 0)
 	message, err := a.agent.ExecuteApprovedToolCall(runCtx, a.id, runtimetypes.ToolCall{
 		ID:       pending.ToolCallID,
 		Type:     pending.ToolType,
@@ -4870,6 +4907,10 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 		a.releaseSessionRun(run)
 		return
 	}
+	// The remaining batch executes before the normal model-loop run startup.
+	// Rebind admission memory to this recovered run rather than a canceled
+	// approval waiter's closure.
+	a.prepareExternalDirectoryAdmission(runCtx, session)
 	a.activeRunWG.Add(1)
 	go func() {
 		defer a.activeRunWG.Done()
@@ -5481,14 +5522,15 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 		return runtimepolicy.ApprovalResponse{}, err
 	}
 	pending := &ApprovalRequest{
-		ID:         req.ID,
-		SessionID:  req.SessionID,
-		ToolCallID: req.ToolCallID,
-		ToolName:   req.ToolName,
-		ArgsJSON:   req.ArgsJSON,
-		Reason:     req.Reason,
-		RiskLevel:  req.RiskLevel,
-		ExpiresAt:  req.ExpiresAt,
+		ID:           req.ID,
+		SessionID:    req.SessionID,
+		ToolCallID:   req.ToolCallID,
+		ToolName:     req.ToolName,
+		ArgsJSON:     req.ArgsJSON,
+		Reason:       req.Reason,
+		RiskLevel:    req.RiskLevel,
+		ExpiresAt:    req.ExpiresAt,
+		ExternalDirs: append([]string(nil), req.ExternalDirs...),
 	}
 	if err := a.updateState(ctx, func(state *RuntimeState) error {
 		state.PendingTool = pendingTool

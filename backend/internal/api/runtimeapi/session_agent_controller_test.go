@@ -227,6 +227,8 @@ func TestSessionAgentController_ForkedChildDropsParentCompleteTaskContext(t *tes
 	require.NoError(t, err)
 	rootSession.SetContext(toolbroker.AgentSessionContextCompletionRequirement, "complete_task")
 	rootSession.SetContext(toolbroker.AgentSessionContextPermissionMode, "bypass_permissions")
+	parentRoots := []string{t.TempDir()}
+	rootSession.SetContext(chat.AllowedRootsContextKey, parentRoots)
 	require.NoError(t, sessionManager.Update(ctx, rootSession))
 
 	controller := handler.getAgentSessionController()
@@ -244,6 +246,14 @@ func TestSessionAgentController_ForkedChildDropsParentCompleteTaskContext(t *tes
 	require.NoError(t, err)
 	assert.Equal(t, "none", agentcontrol.ContextString(child, toolbroker.AgentSessionContextCompletionRequirement))
 	assert.Equal(t, "bypass_permissions", agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode))
+	raw, present := child.GetContext(chat.AllowedRootsContextKey)
+	require.True(t, present)
+	require.Empty(t, raw, "forked child must not inherit the parent's directory approvals")
+	restoredParent, err := sessionManager.Get(ctx, rootSession.ID)
+	require.NoError(t, err)
+	raw, present = restoredParent.GetContext(chat.AllowedRootsContextKey)
+	require.True(t, present)
+	require.Equal(t, parentRoots, raw)
 
 	runMeta := controller.apiAgentRunMeta(ctx, child.ID)
 	require.NotNil(t, runMeta)

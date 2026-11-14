@@ -160,6 +160,12 @@ type Engine struct {
 	// cannot carry them per run; sessions normally pass roots via
 	// toolctx.WithAllowedRoots.
 	ExternalAllowedRoots []string
+	// ExternalAllowedRootsSource returns the complete session-owned admission
+	// set, including admissions made after the run context was created. When
+	// non-nil it replaces context/static allowed roots, even when it returns an
+	// empty set (revocation). The source must return a concurrency-safe snapshot;
+	// hosts must not mutate ExternalAllowedRoots during evaluation.
+	ExternalAllowedRootsSource func() []string
 	// ExternalReadOnlyRoots lists externally admitted roots whose *reads* are
 	// exempt (registered skill/plugin directories). Writes under them still go
 	// through the gate.
@@ -1094,13 +1100,14 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		}, StageHeadlessDeny, "approval_required"), nil
 	}
 	approvalReq := ApprovalRequest{
-		ID:         firstNonEmpty(req.ToolCallID, req.TraceID),
-		SessionID:  req.SessionID,
-		ToolCallID: req.ToolCallID,
-		ToolName:   req.ToolName,
-		Reason:     decision.Reason,
-		RiskLevel:  riskLevel(req.Capabilities),
-		HardAsk:    decision.HardAsk,
+		ID:           firstNonEmpty(req.ToolCallID, req.TraceID),
+		SessionID:    req.SessionID,
+		ToolCallID:   req.ToolCallID,
+		ToolName:     req.ToolName,
+		Reason:       decision.Reason,
+		RiskLevel:    riskLevel(req.Capabilities),
+		HardAsk:      decision.HardAsk,
+		ExternalDirs: append([]string(nil), decision.ExternalDirs...),
 	}
 	approvalTimeout := e.ApprovalTimeout
 	if approvalTimeout == 0 {

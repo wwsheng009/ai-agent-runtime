@@ -25,6 +25,40 @@ import (
 // externalDirGate returns nil while every inspected target stays inside the
 // workspace or the session's admitted roots.
 func (e *Engine) externalDirGate(ctx context.Context, req EvalRequest, mode Mode) *Decision {
+	dirs := e.externalDirsToAdmit(ctx, req, mode)
+	if len(dirs) == 0 {
+		return nil
+	}
+	detail := strings.Join(dirs, ", ")
+	switch mode {
+	case ModeBypassPermissions:
+		// yolo silently admits the directories instead of prompting (§4.5).
+		e.approveExternalDirs(dirs)
+		decision := withStage(Decision{Type: DecisionAllow, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit_bypass")
+		return &decision
+	case ModeDontAsk:
+		decision := withStage(Decision{Type: DecisionDeny, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit")
+		return &decision
+	default:
+		decision := withStage(Decision{Type: DecisionAsk, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit")
+		return &decision
+	}
+}
+
+// RequiresExternalDirectoryAdmission is a side-effect-free scheduling probe.
+// Even bypass calls must run the full pipeline once to record admission; a
+// parallel read-only fast path must not skip this boundary for plan/default.
+func (e *Engine) RequiresExternalDirectoryAdmission(ctx context.Context, req EvalRequest) bool {
+	if e == nil {
+		return false
+	}
+	if len(req.Capabilities) == 0 {
+		req.Capabilities = e.resolveCapabilities(req)
+	}
+	return len(e.externalDirsToAdmit(ctx, req, e.effectiveMode(req))) > 0
+}
+
+func (e *Engine) externalDirsToAdmit(ctx context.Context, req EvalRequest, mode Mode) []string {
 	if e == nil || e.DisableExternalDirGate {
 		return nil
 	}
@@ -36,8 +70,16 @@ func (e *Engine) externalDirGate(ctx context.Context, req EvalRequest, mode Mode
 	if len(paths) == 0 {
 		return nil
 	}
-	roots := append([]string{root}, toolctx.AllowedRoots(ctx)...)
-	roots = append(roots, e.ExternalAllowedRoots...)
+	roots := []string{root}
+	if e.ExternalAllowedRootsSource != nil {
+		// A session-owned source is authoritative, including an empty set.
+		// Unioning context/static snapshots here would revive revoked grants
+		// or import a parent session's roots into a child actor.
+		roots = append(roots, e.ExternalAllowedRootsSource()...)
+	} else {
+		roots = append(roots, toolctx.AllowedRoots(ctx)...)
+		roots = append(roots, e.ExternalAllowedRoots...)
+	}
 
 	outside := make(map[string]bool)
 	for _, raw := range paths {
@@ -58,21 +100,7 @@ func (e *Engine) externalDirGate(ctx context.Context, req EvalRequest, mode Mode
 		dirs = append(dirs, dir)
 	}
 	sort.Strings(dirs)
-	detail := strings.Join(dirs, ", ")
-	switch mode {
-	case ModeBypassPermissions:
-		// yolo silently admits the directories instead of prompting (§4.5).
-		e.approveExternalDirs(dirs)
-		decision := withStage(Decision{Type: DecisionAllow, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit_bypass")
-		return &decision
-	case ModeDontAsk:
-		// Fail-closed unattended mode: only pre-approved roots run.
-		decision := withStage(Decision{Type: DecisionDeny, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit")
-		return &decision
-	default:
-		decision := withStage(Decision{Type: DecisionAsk, ExternalDirs: dirs, RuleDetail: detail}, StageExternalDir, "admit")
-		return &decision
-	}
+	return dirs
 }
 
 // externalPathExempt reports whether a target outside every root is exempt from
@@ -85,7 +113,9 @@ func (e *Engine) externalPathExempt(ctx context.Context, req EvalRequest, target
 	}
 	// Plan-mode writes to plan files are the plan pipeline's business: the mode
 	// stage and the plan write allowlist still apply to them.
-	if mode == ModePlan && e.planWriteAllowed(ctx, req) {
+	if mode == ModePlan && hasCapability(req.Capabilities, CapWriteFS) &&
+		(len(e.PlanWriteAllowPaths) > 0 || len(e.PlanWriteAllowPathsResolved) > 0) &&
+		e.planWriteAllowed(ctx, req) {
 		return true
 	}
 	// Registered skill/plugin roots are read-only exempt; writes keep the gate.

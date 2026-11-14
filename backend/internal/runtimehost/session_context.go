@@ -26,6 +26,9 @@ type SessionContext struct {
 	ChildReadOnly              bool
 	ChildShellDisabled         bool
 	ChildDepth                 int
+	// PermissionMode is the session's resolved approval mode, not an agentdef
+	// default. Keep it separate from the static ChildReadOnly boundary.
+	PermissionMode string
 	// 模型/提供商/推理强度覆盖。
 	RequestedProvider        string
 	RequestedModel           string
@@ -64,6 +67,7 @@ func ExtractSessionContext(session *chat.Session) SessionContext {
 		RequestedModel:             getString(toolbroker.AgentSessionContextRequestedModel),
 		RequestedReasoningEffort:   getString(sessionmeta.ReasoningEffort),
 		ObservationTaskID:          getString(sessionmeta.ActiveTeamTaskID),
+		PermissionMode:             toolbroker.ParentSessionPermissionMode(session),
 	}
 	if worktreePath := getString(toolbroker.AgentSessionContextWorktreePath); worktreePath != "" {
 		out.WorkspacePath = worktreePath

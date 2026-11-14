@@ -3657,7 +3657,8 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		toolCalls[index] = loop.bindFreeformToolCall(ctx, toolCalls[index])
 	}
 	results := make([]toolExecutionResult, len(toolCalls))
-	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
+	planCtx := toolCallContext(ctx, toolCalls, "", nil, loop.agent, sessionID, depth)
+	if plan := loop.buildParallelToolBatchPlan(planCtx, toolCalls, toolWhitelist); plan != nil {
 		parallelResults := loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan)
 		loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, parallelResults)
 		for i := range parallelResults {
