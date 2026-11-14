@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -174,6 +176,85 @@ func TestRefreshChatPickerProviderModelsWritesFetchedCatalog(t *testing.T) {
 		if !containsFold(got, want) {
 			t.Fatalf("persisted supported_models = %v, want %q present", got, want)
 		}
+	}
+}
+
+func TestRefreshChatPickerProbesNewCodexModelWithoutCard(t *testing.T) {
+	for _, tc := range []struct {
+		name, response string
+		status         int
+		wantAdded      bool
+	}{
+		{name: "responses supported", response: `{"object":"response","id":"resp_test","output":[]}`, wantAdded: true},
+		{name: "wrong format", response: `{"error":{"message":"model is not supported for this format"}}`, status: http.StatusBadRequest},
+		{name: "inconclusive", response: `{"error":{"message":"rate limit exceeded"}}`, status: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var probes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					_, _ = w.Write([]byte(`{"data":[{"id":"gpt-6-astra"},{"id":"gpt-6.1-sol"}]}`))
+				case "/custom/responses":
+					probes.Add(1)
+					var payload map[string]interface{}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload["model"] != "gpt-6.1-sol" || payload["input"] == nil {
+						t.Errorf("unexpected codex probe: %v, %v", payload, err)
+					}
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+					}
+					_, _ = w.Write([]byte(tc.response))
+				default:
+					t.Errorf("unexpected path: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			cfg := chatModelAddTestConfig(t, path, "alpha", "gpt-6-astra", []string{"gpt-6-astra"})
+			provider := cfg.Providers.Items["alpha"]
+			provider.Protocol, provider.BaseURL, provider.APIPath, provider.APIKey = "codex", server.URL, "/custom/responses", "test-key"
+			cfg.Providers.Items["alpha"] = provider
+			result, receipt := refreshChatPickerProviderModelsWithReceipt(&ChatSession{Config: cfg}, "alpha")
+			got := readProviderModelsInConfig(t, path, "alpha")
+			if probes.Load() != 1 || containsFold(got, "gpt-6.1-sol") != tc.wantAdded {
+				t.Fatalf("probe calls=%d models=%v receipt=%+v", probes.Load(), got, receipt)
+			}
+			if tc.wantAdded {
+				if !strings.Contains(receipt.Detail, "新增 gpt-6.1-sol") {
+					t.Fatalf("missing added model in receipt: %+v", receipt)
+				}
+			} else if !strings.Contains(receipt.Detail, "gpt-6.1-sol") || !strings.Contains(receipt.Summary, "协议未确认") {
+				t.Fatalf("missing inconclusive protocol notice: %+v, result=%s", receipt, chatAccountCommandText(t, result))
+			}
+		})
+	}
+}
+
+func TestRefreshChatPickerProbesMultipleNewCodexModels(t *testing.T) {
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-6-astra"},{"id":"gpt-6.1-sol"},{"id":"gpt-6.1-terra"}]}`))
+		case "/v1/responses":
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"object":"response","output":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := chatModelAddTestConfig(t, path, "alpha", "gpt-6-astra", []string{"gpt-6-astra"})
+	provider := cfg.Providers.Items["alpha"]
+	provider.Protocol, provider.BaseURL, provider.APIKey = "codex", server.URL, "test-key"
+	cfg.Providers.Items["alpha"] = provider
+	result, receipt := refreshChatPickerProviderModelsWithReceipt(&ChatSession{Config: cfg}, "alpha")
+	models := readProviderModelsInConfig(t, path, "alpha")
+	if probes.Load() != 2 || !containsFold(models, "gpt-6.1-sol") || !containsFold(models, "gpt-6.1-terra") {
+		t.Fatalf("probe calls=%d models=%v receipt=%+v result=%s", probes.Load(), models, receipt, chatAccountCommandText(t, result))
 	}
 }
 

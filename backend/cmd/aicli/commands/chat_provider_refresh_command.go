@@ -116,6 +116,7 @@ type chatProviderRefreshProviderOutcome struct {
 	Added         []string
 	Removed       []string
 	ChangedModels int
+	Unconfirmed   []string
 	VerifiedAt    string
 	Reason        string // updated | already_up_to_date | fetch_failed: ... | persist_failed: ...
 }
@@ -195,7 +196,8 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 		outcome.Category = providerops.ModelListCategoryName(fetch.Category)
 		outcome.VerifiedAt = strings.TrimSpace(fetch.VerifiedAt)
 
-		fetchedIDs := chatProviderRefreshFetchedModelIDs(item.Name, item.Provider, loginProtocol, fetch.Models, cfg)
+		fetchedIDs, unconfirmed := chatProviderRefreshVerifiedModelIDs(item.Name, item.Provider, loginProtocol, fetch.Models, cfg)
+		outcome.Unconfirmed = unconfirmed
 		outcome.ModelCount = len(fetchedIDs)
 		nextSupported := chatProviderRefreshModelList(fetchedIDs, item.Provider.DefaultModel)
 		outcome.Added, outcome.Removed = diffProviderModelLists(item.Provider.SupportedModels, nextSupported)
@@ -307,6 +309,55 @@ func chatProviderRefreshFetchedModelIDs(
 		return providerops.ModelIDs(selected)
 	}
 	return providerops.ModelIDs(dedupeProviderModels(models))
+}
+
+// A saved non-OpenAI provider can expose models newer than the local model
+// cards. Listing an ID does not establish that its completion endpoint accepts
+// it; verify only new, unclassified IDs against the saved runtime protocol.
+func chatProviderRefreshVerifiedModelIDs(
+	providerName string, provider config.Provider, loginProtocol string,
+	models []providerModelInfo, cfg *config.Config,
+) ([]string, []string) {
+	selected := chatProviderRefreshFetchedModelIDs(providerName, provider, loginProtocol, models, cfg)
+	groupingProtocol := resolveProviderFetchModelsLoginProtocol(loginProtocol, provider)
+	classification := classifyProviderFetchedModels(providerName, provider, groupingProtocol, groupingProtocol, models, cfg)
+	if classification == nil || strings.EqualFold(classification.RuntimeProtocol, "openai") || len(classification.AssumedModels) == 0 {
+		return selected, nil
+	}
+	assumed := providerops.ModelIDs(classification.AssumedModels)
+	known := make(map[string]bool, len(provider.SupportedModels)+1)
+	for _, id := range provider.SupportedModels {
+		known[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	known[strings.ToLower(strings.TrimSpace(provider.DefaultModel))] = true
+	candidates := make([]string, 0, len(assumed))
+	for _, id := range assumed {
+		if !known[strings.ToLower(id)] {
+			candidates = append(candidates, id)
+		}
+	}
+	const maxRefreshProbes = 20
+	probeCount := min(len(candidates), maxRefreshProbes)
+	if probeCount == 0 {
+		return selected, nil
+	}
+	// ProbeMatrix resolves the configured proxy, headers and custom API path.
+	// Bound both the number of requests and the total refresh time.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	results := providerops.ProbeMatrix(providerops.ProbeMatrixRequest{
+		Context: ctx, Config: cfg, Provider: provider, Models: candidates[:probeCount],
+		Protocols: []string{classification.RuntimeProtocol}, Timeout: 15 * time.Second,
+	})
+	unconfirmed := append([]string(nil), candidates[probeCount:]...)
+	for _, result := range results {
+		if len(result.Probes) > 0 && result.Probes[0].Verdict == "supported" {
+			selected = append(selected, result.Model)
+		} else {
+			unconfirmed = append(unconfirmed, result.Model)
+		}
+	}
+	return selected, unconfirmed
 }
 
 // chatProviderRefreshModelList 生成下一版 supported_models：端点清单去重后保留
@@ -438,6 +489,9 @@ func renderChatProviderRefreshOutcome(
 		if len(outcome.Removed) > 0 {
 			lines = append(lines, "    移除: "+strings.Join(outcome.Removed, ", "))
 		}
+		if len(outcome.Unconfirmed) > 0 {
+			lines = append(lines, "    协议未确认（未新增）: "+strings.Join(outcome.Unconfirmed, ", "))
+		}
 		if outcome.VerifiedAt != "" && !strings.HasPrefix(outcome.Reason, "persist_failed") {
 			lines = append(lines, "    verified_at: "+outcome.VerifiedAt)
 		}
@@ -514,6 +568,9 @@ func chatModelPickerRefreshPickerSummary(providerName string, run chatProviderRe
 		return "刷新失败（写入配置）：" + strings.TrimSpace(detail)
 	}
 	if reason == "already_up_to_date" {
+		if len(outcome.Unconfirmed) > 0 {
+			return fmt.Sprintf("列表未变（%d 个模型；%d 个协议未确认）", outcome.ModelCount, len(outcome.Unconfirmed))
+		}
 		return fmt.Sprintf("已是最新（%d 个模型）", outcome.ModelCount)
 	}
 	segments := []string{fmt.Sprintf("共 %d 个模型", outcome.ModelCount)}
@@ -525,6 +582,9 @@ func chatModelPickerRefreshPickerSummary(providerName string, run chatProviderRe
 	}
 	if outcome.ChangedModels > 0 {
 		segments = append(segments, fmt.Sprintf("能力更新 %d 个", outcome.ChangedModels))
+	}
+	if len(outcome.Unconfirmed) > 0 {
+		segments = append(segments, fmt.Sprintf("%d 个协议未确认", len(outcome.Unconfirmed)))
 	}
 	return "已刷新：" + strings.Join(segments, "，")
 }
@@ -555,6 +615,9 @@ func chatProviderRefreshInlineSummary(providerName string, run chatProviderRefre
 		return fmt.Sprintf("刷新 provider %s 失败（写入配置）：%s", providerName, strings.TrimSpace(detail))
 	}
 	if reason == "already_up_to_date" {
+		if len(outcome.Unconfirmed) > 0 {
+			return fmt.Sprintf("provider %s 的模型列表未变（%d 个模型）；%s 的 %s 协议未获确认，未自动新增（可手动添加）", providerName, outcome.ModelCount, strings.Join(outcome.Unconfirmed, "、"), outcome.Protocol)
+		}
 		return fmt.Sprintf("provider %s 的模型列表已是最新（%d 个模型）", providerName, outcome.ModelCount)
 	}
 	segments := []string{fmt.Sprintf("共 %d 个模型", outcome.ModelCount)}
@@ -566,6 +629,9 @@ func chatProviderRefreshInlineSummary(providerName string, run chatProviderRefre
 	}
 	if outcome.ChangedModels > 0 {
 		segments = append(segments, fmt.Sprintf("能力更新 %d 个", outcome.ChangedModels))
+	}
+	if len(outcome.Unconfirmed) > 0 {
+		segments = append(segments, "协议未确认、未新增 "+strings.Join(outcome.Unconfirmed, "、"))
 	}
 	return fmt.Sprintf("已刷新 provider %s 的模型列表：%s（已保存到配置文件）",
 		providerName, strings.Join(segments, "，"))
