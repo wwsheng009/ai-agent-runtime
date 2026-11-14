@@ -231,6 +231,19 @@ ORDER BY revision DESC LIMIT ?
 	return out, rows.Err()
 }
 
+// GatedActiveSummary applies the same provenance/freshness gate used by
+// injection. Summary reuse must not trust an active status alone.
+func (s *Store) GatedActiveSummary(ctx context.Context, now time.Time) (*Summary, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return nil, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return s.loadGatedActiveSummary(ctx, db, now)
+}
+
 // ActiveSummary returns the current active long-term summary without applying
 // the injection gate. Callers that render or inject it must still validate the
 // gate through SelectForInjectV2.

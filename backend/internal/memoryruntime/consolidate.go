@@ -2,7 +2,9 @@ package memoryruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -99,8 +101,15 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return result, err
 	}
 	fail := func(err error) (ConsolidationResult, error) {
-		_ = c.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
+		if persistErr := failMemoryJobForWorker(ctx, c.Store, claimed[0].ID, claimed[0].WorkerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt))); persistErr != nil {
+			return result, errors.Join(err, persistErr)
+		}
 		return result, err
+	}
+	completeJob := func(watermark string) error {
+		commitCtx, cancel := memoryJobCommitContext(ctx)
+		defer cancel()
+		return c.Store.CompleteJobForWorker(commitCtx, claimed[0].ID, claimed[0].WorkerID, watermark)
 	}
 
 	page, err := c.Store.ListRecords(ctx, memorystore.RecordFilter{
@@ -128,7 +137,9 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return fail(err)
 	}
 	if len(active) == 0 {
-		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
+		if err := completeJob(""); err != nil {
+			return fail(err)
+		}
 		return result, nil
 	}
 	sort.SliceStable(active, func(i, j int) bool {
@@ -160,23 +171,37 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		result.OpenQuestions = len(uniqueRecordIDs(ambiguous))
 	}
 	if len(active) == 0 {
-		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
+		if err := completeJob(""); err != nil {
+			return fail(err)
+		}
 		return result, nil
 	}
 	summaryRecords := summaryEligible(active)
-	text, ids, tokens, model, metadata := c.buildSummary(ctx, summaryRecords, reasonPhase2)
-	if strings.TrimSpace(text) == "" || len(ids) == 0 {
-		_ = c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, "")
-		return result, nil
-	}
-	summary, err := c.Store.CompileSummary(ctx, memorystore.Summary{
-		Text: text, TokenEstimate: tokens, Model: model, Metadata: metadata,
-	}, ids)
+	input := c.prepareSummary(summaryRecords)
+	summary, err := c.reusableSummary(ctx, input)
 	if err != nil {
 		return fail(err)
 	}
-	if err := c.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, summary.InputWatermark); err != nil {
-		return result, err
+	if summary == nil {
+		text, ids, tokens, model, metadata := c.buildPreparedSummary(ctx, input, reasonPhase2)
+		if strings.TrimSpace(text) == "" || len(ids) == 0 {
+			if err := completeJob(""); err != nil {
+				return fail(err)
+			}
+			return result, nil
+		}
+		commitCtx, cancel := memoryJobCommitContext(ctx)
+		compiled, err := c.Store.CompileSummary(commitCtx, memorystore.Summary{
+			Text: text, TokenEstimate: tokens, Model: model, Metadata: metadata,
+		}, ids)
+		cancel()
+		if err != nil {
+			return fail(err)
+		}
+		summary = &compiled
+	}
+	if err := completeJob(summary.InputWatermark); err != nil {
+		return fail(err)
 	}
 	result.SummaryID = summary.ID
 	result.Revision = summary.Revision
@@ -219,54 +244,66 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 			return result, nil
 		}
 		job := claimed[0]
+		fail := func(cause error) (ConsolidationResult, error) {
+			if persistErr := failMemoryJobForWorker(ctx, c.Store, job.ID, job.WorkerID, cause.Error(), now.Add(retryBackoff(job.Attempt))); persistErr != nil {
+				return result, errors.Join(cause, persistErr)
+			}
+			return result, cause
+		}
+		complete := func(watermark string) error {
+			commitCtx, cancel := memoryJobCommitContext(ctx)
+			defer cancel()
+			return c.Store.CompleteJobForWorker(commitCtx, job.ID, job.WorkerID, watermark)
+		}
 		summary, err := c.Store.ActiveSummary(ctx)
 		if err != nil {
-			_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
-			return result, err
+			return fail(err)
 		}
 		if summary == nil || summary.Freshness == memorystore.FreshnessFresh {
-			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
-				return result, err
+			if err := complete(""); err != nil {
+				return fail(err)
 			}
 			result.RebuildJobs++
 			continue
 		}
 		records, err := c.activeFreshRecords(ctx)
 		if err != nil {
-			_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
-			return result, err
+			return fail(err)
 		}
 		summaryRecords := summaryEligible(records)
 		if len(summaryRecords) == 0 {
-			if _, err := c.Store.RetireActiveSummary(ctx); err != nil {
-				_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
-				return result, err
+			commitCtx, cancel := memoryJobCommitContext(ctx)
+			_, retireErr := c.Store.RetireActiveSummary(commitCtx)
+			cancel()
+			if retireErr != nil {
+				return fail(retireErr)
 			}
-			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
-				return result, err
+			if err := complete(""); err != nil {
+				return fail(err)
 			}
 			result.RebuildJobs++
 			continue
 		}
 		text, ids, tokens, model, metadata := c.buildSummary(ctx, summaryRecords, reasonSummaryRebuild)
 		if strings.TrimSpace(text) == "" || len(ids) == 0 {
-			if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, ""); err != nil {
-				return result, err
+			if err := complete(""); err != nil {
+				return fail(err)
 			}
 			result.RebuildJobs++
 			continue
 		}
-		rebuilt, err := c.Store.CompileSummary(ctx, memorystore.Summary{
+		commitCtx, cancel := memoryJobCommitContext(ctx)
+		rebuilt, err := c.Store.CompileSummary(commitCtx, memorystore.Summary{
 			Text: text, TokenEstimate: tokens, Model: model, Metadata: metadata,
 		}, ids)
+		cancel()
 		if err != nil {
 			if rebuilt.ID == "" {
-				_ = c.Store.FailJobForWorker(ctx, job.ID, job.WorkerID, err.Error(), now.Add(retryBackoff(job.Attempt)))
-				return result, err
+				return fail(err)
 			}
 		}
-		if err := c.Store.CompleteJobForWorker(ctx, job.ID, job.WorkerID, rebuilt.InputWatermark); err != nil {
-			return result, err
+		if err := complete(rebuilt.InputWatermark); err != nil {
+			return fail(err)
 		}
 		result.RebuildJobs++
 		result.Rebuilt++
@@ -320,19 +357,23 @@ func (c *Consolidator) buildSummary(ctx context.Context, records []memorystore.R
 	if c == nil {
 		return "", nil, 0, "deterministic", map[string]interface{}{"compiler": "deterministic_v1", "reason": reason}
 	}
-	budget := c.Config.SummaryTokenBudget
-	if budget <= 0 {
-		budget = 800
-	}
-	text, ids, tokens := deterministicSummary(records, budget)
+	return c.buildPreparedSummary(ctx, c.prepareSummary(records), reason)
+}
+
+func (c *Consolidator) buildPreparedSummary(ctx context.Context, input preparedProjectSummary, reason string) (string, []string, int, string, map[string]interface{}) {
+	text, ids, tokens, budget := input.text, input.ids, input.tokens, input.budget
 	metadata := map[string]interface{}{
 		"compiler": "deterministic_v1",
 		"reason":   reason,
 	}
+	if input.fingerprint != "" {
+		metadata[summaryInputFingerprintKey] = input.fingerprint
+		metadata["summary_template_version"] = projectSummaryTemplateVersion
+	}
 	if c.Config.Summarizer == nil || len(ids) == 0 {
 		return text, ids, tokens, "deterministic", metadata
 	}
-	selectedRecords := filterRecordsByIDs(records, ids)
+	selectedRecords := input.records
 	if len(selectedRecords) == 0 {
 		return text, ids, tokens, "deterministic", metadata
 	}
@@ -591,15 +632,10 @@ func deterministicSummary(records []memorystore.Record, tokenBudget int) (string
 }
 
 func summaryBulletKey(record memorystore.Record) string {
-	var cleaned strings.Builder
-	for _, r := range strings.ToLower(record.Text) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			cleaned.WriteRune(r)
-			continue
-		}
-		cleaned.WriteByte(' ')
-	}
-	text := strings.Join(strings.Fields(cleaned.String()), " ")
+	// Technical punctuation carries entity identity (C++/C#, v1.2/v1-2).
+	// Normalize case and whitespace only; stripping symbols can hide distinct
+	// records that correctly survived conflict resolution.
+	text := strings.Join(strings.Fields(strings.ToLower(record.Text)), " ")
 	if text == "" {
 		return ""
 	}
@@ -695,70 +731,69 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 	return out, superseded, ambiguous
 }
 
-// conflictSubjectKey groups records that describe the same subject with
-// different concrete values ("timeout is 30s" vs "timeout is 60s"). It stays
-// deterministic: punctuation is discarded, numeric runs become placeholders,
-// and common intent words are removed. Short subjects fall back to the exact
-// normalized text so unrelated one-word facts do not collide.
+// Only a terminal scalar assignment to a known setting provides enough evidence
+// to ignore its value. In particular, "port 8000" can identify an endpoint, while
+// "Server 1 port is 8000" assigns a setting to a separately identified entity.
+// Keep the entire entity prefix, including case, digits and punctuation.
+var conflictSettingAssignment = regexp.MustCompile(`^(.+) (?i:(timeout|ttl|interval|delay|port|retry count|max retries))(?: (?i:is(?: set to)?) | ?[:=] ?)([0-9]+(?:\.[0-9]+)?) ?([a-zA-Zµμ]*)\.?$`)
+
+// conflictSubjectKey is a destructive-conflict gate, not a fuzzy retrieval key.
+// By default only whitespace is normalized: numbers, technical punctuation,
+// case, intent words and plurals may all carry identity or change a claim.
+// Mask a scalar only when its entity, property, assignment and unit are clear;
+// all other apparent similarities remain separate, regardless of priority.
 func conflictSubjectKey(record memorystore.Record) string {
-	text := strings.ToLower(strings.TrimSpace(record.Text))
+	text := strings.Join(strings.Fields(record.Text), " ")
 	if text == "" {
 		return ""
 	}
-	var cleaned strings.Builder
-	for _, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			cleaned.WriteRune(r)
-			continue
+	if match := conflictSettingAssignment.FindStringSubmatch(text); match != nil {
+		entity, property, value, unit := match[1], strings.ToLower(match[2]), match[3], strings.ToLower(match[4])
+		if conflictSettingEntity(entity) && conflictSettingValue(property, value, unit) {
+			// A separate namespace prevents literal placeholder-like text from
+			// colliding with an inferred setting. Units are not converted.
+			return "setting\x00" + entity + "\x00" + property + "\x00" + unit
 		}
-		cleaned.WriteByte(' ')
-	}
-	stop := map[string]struct{}{
-		"a": {}, "an": {}, "and": {}, "are": {}, "be": {}, "do": {}, "does": {},
-		"for": {}, "i": {}, "in": {}, "is": {}, "it": {},
-		"of": {}, "on": {}, "or": {}, "prefer": {}, "should": {}, "that": {},
-		"the": {}, "this": {}, "to": {}, "use": {}, "was": {}, "we": {},
-		"were": {}, "with": {}, "you": {},
-	}
-	tokens := make([]string, 0, 8)
-	for _, token := range strings.Fields(cleaned.String()) {
-		if _, skip := stop[token]; skip {
-			continue
-		}
-		token = replaceDigitRuns(token)
-		if len(token) > 3 && strings.HasSuffix(token, "s") {
-			token = strings.TrimSuffix(token, "s")
-		}
-		if token != "" {
-			tokens = append(tokens, token)
-		}
-	}
-	if len(tokens) < 2 {
-		tokens = strings.Fields(cleaned.String())
-	}
-	if len(tokens) == 0 {
-		return ""
 	}
 	// Kind is intentionally not part of the key: a manual decision and a
-	// derived fact can describe the same subject and must still conflict.
-	return strings.Join(tokens, " ")
+	// derived fact may contain the same claim.
+	return "text\x00" + text
 }
 
-func replaceDigitRuns(token string) string {
-	var b strings.Builder
-	inDigits := false
-	for _, r := range token {
-		if unicode.IsDigit(r) {
-			if !inDigits {
-				b.WriteByte('#')
-				inDigits = true
-			}
+func conflictSettingEntity(entity string) bool {
+	// "The timeout" and "its timeout" do not identify which entity owns the
+	// setting. Ignore such modifiers only for this evidence check, never in
+	// the key itself ("this API" and "that API" must still remain distinct).
+	for _, token := range strings.Fields(entity) {
+		switch strings.ToLower(token) {
+		case "a", "an", "the", "this", "that", "these", "those", "it", "its",
+			"my", "our", "your", "their", "default", "configured", "current":
 			continue
 		}
-		inDigits = false
-		b.WriteRune(r)
+		for _, r := range token {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				return true
+			}
+		}
 	}
-	return b.String()
+	return false
+}
+
+func conflictSettingValue(property, value, unit string) bool {
+	switch property {
+	case "port", "retry count", "max retries":
+		// Decimal versions, endpoint addresses and unit-suffixed identifiers
+		// are not integer setting values.
+		return unit == "" && !strings.Contains(value, ".")
+	case "timeout", "ttl", "interval", "delay":
+		switch unit {
+		case "", "ns", "us", "µs", "μs", "ms", "s", "sec", "secs", "second", "seconds",
+			"min", "mins", "minute", "minutes", "h", "hr", "hrs", "hour", "hours",
+			"d", "day", "days":
+			return true
+		}
+	}
+	return false
 }
 
 // summaryEligible excludes pinned/manual records: those are rendered from the

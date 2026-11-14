@@ -115,9 +115,9 @@ func (s *ChatSessionSource) ReadTranscript(ctx context.Context, session SessionR
 	return transcript, nil
 }
 
-// ReadTranscriptWindow reads a bounded canonical message range. The persistent
-// SQLite pager is preferred; the fallback loads the session history and filters
-// by the derived sequence range.
+// ReadTranscriptWindow reads the first bounded page of a canonical range, never
+// its tail. Runtime.RunSessionWindow advances across all required subwindows.
+// Large histories require a pager; the legacy loader is only for small stores.
 func (s *ChatSessionSource) ReadTranscriptWindow(ctx context.Context, session SessionRef, startSeq, endSeq, maxMessages int) (Transcript, error) {
 	if s == nil || s.Manager == nil {
 		return Transcript{}, fmt.Errorf("memoryruntime: chat session manager is nil")
@@ -130,6 +130,9 @@ func (s *ChatSessionSource) ReadTranscriptWindow(ctx context.Context, session Se
 	}
 	if maxMessages <= 0 {
 		maxMessages = 200
+	}
+	if endSeq-startSeq >= maxMessages {
+		endSeq = startSeq + maxMessages - 1
 	}
 	storage := s.Manager.GetStorage()
 	if storage == nil {
@@ -181,6 +184,9 @@ func (s *ChatSessionSource) ReadTranscriptWindow(ctx context.Context, session Se
 			beforeSeq = firstSeq
 		}
 	} else {
+		if session.CanonicalCount > maxMessages {
+			return Transcript{}, fmt.Errorf("memoryruntime: bounded canonical window reader unavailable for session %s", session.ID)
+		}
 		loaded, err := storage.Load(ctx, session.ID)
 		if err != nil {
 			return Transcript{}, err

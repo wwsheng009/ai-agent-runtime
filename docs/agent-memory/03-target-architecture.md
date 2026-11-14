@@ -375,6 +375,8 @@ user correction
 
 - 高优先级覆盖低优先级时写 `supersedes_id` + `memory_events`；
 - `pinned/manual` 不被自动冲突消解删除，只能由用户显式修改；
+- `normalized_subject` 必须保留实体身份（如 `Server 1` / `Server 2`、版本号及语言名中的符号）；仅有数字或标点归一化后的文本相似，不能证明两条记录是同一主体，不能据此自动 supersede；
+- 只有能明确识别相同主体与属性时，才允许把属性值变化（如同一服务的端口）纳入冲突消解；无法确定主体时保留记录；
 - 无法判定的同优先级冲突保留两条并标记 `open_question`，不自动合并；
 - summary 只纳入 `active + fresh` 的记录，被 supersede 的记录不进入新 revision。
 

@@ -65,8 +65,10 @@ E2E / live
 | audit/usage retention | events/usage 按 `auditDays` 清理；仅过期 suppression 被删除 |
 | redaction 配置 | `dropOnSecret=true` 丢弃候选；`false` 先脱敏再保留；`enabled=false` 为显式 opt-out |
 | staleBehavior=warn | 仅 preference/workflow/pitfall/open_question 可进入 recall 并标 `possibly stale`；fact/reference/decision 仍排除 |
+| 注入策略透传 | CLI 与 Runtime API 构造的 Agent 必须与管理查询使用相同的 staleBehavior/redaction 策略；freshness 关闭仍按统一策略处理 |
 | summary compiler | 配置 `consolidation.model` 时调用 LLM；失败/空输出/secret/非法结构回退 deterministic，超预算截断，不阻塞 Consolidation |
-| summary dedupe | 相同 kind + 归一化文本只输出一条；不同数值的同主题冲突按 normalized subject 归组 |
+| summary dedupe | 相同 kind + 大小写/空白归一化文本只输出一条；保留技术标点，不把 C++/C# 或 v1.2/v1-2 当作重复；明确同主体、同属性的值变化可归组，不以全局数字替换推断主体 |
+| 冲突实体隔离 | Server 1/2、不同版本及 C++/C# 等身份差异必须保留，不能被模糊归组破坏性 supersede |
 | recall scoring | 非空 query 零命中不进入 recall；correction/decision/preference、recency、usage、confidence 参与重排 |
 | CJK tokenization | 中文 query 生成 Han bigram，中文记忆可被短查询命中 |
 | recall dedupe | 相同 kind + 归一化文本只保留最高分候选，其余记 `duplicate` |
@@ -171,8 +173,9 @@ E2E / live
 | 中间 LLM step | 不写 digest |
 | 同 session/turn 重试 | digest 幂等更新，不重复 |
 | secret / 超长文本 | 脱敏、截断；不落原文 secret |
+| producer 隔离 | 写入前读取可信 session metadata；foreign/unknown workspace、excluded subagent、disabled/polluted/ephemeral session 不落文本；身份或模式读取失败不写入 |
 | session-end | 抽取成功后标记对应 watermark done |
-| idle | 仅补处理 pending；无新 digest 不调用 LLM |
+| idle recovery | 无待处理 digest/window 不调用恢复 LLM；独立的历史会话抽取仍受 source job 幂等约束 |
 | startup recovery | 只处理 closed/stale/orphaned session；活跃 session 跳过 |
 | session-end + idle 并发 | 同一 source 只生成一个 job/candidate |
 | interrupted/error turn | 保留 digest 诊断，不自动抽取 |
@@ -186,10 +189,15 @@ E2E / live
 | Web/CLI parity | Web 可查看 turn digest/window 计数并执行 L1 purge、session mode、summary activate；CLI 支持 session-mode/activate |
 | 大会话只读最近 200 条 | 更早 pending digest 保持 pending |
 | 窗口化读取 | window source IDs 与 `memory_sources` 一致 |
+| 单 turn 超过读取上限 | 按连续 canonical 子窗口处理完整范围；任一子窗口缺失/失败，整批不得确认；重试跳过已成功 job |
+| 完成凭证 | 只有成功持久化或相同 source watermark 的 succeeded job 可确认；非空 hash、running lease、backoff、failed 不可确认 |
+| 小会话确认边界 | canonical 完成范围为 1–4、digest 终点为 2/4/6 时，只确认前两条，终点 6 保持 pending；session-end/recovery/显式确认共用覆盖检查，不跨越未覆盖行推进水位 |
+| digest 关闭/历史会话无 digest | 大会话保留有界 transcript 抽取回退，不因缺少 outbox 静默停止生成 |
 | 新增窗口 | 不把旧窗口候选误标 stale |
 | per-window stale | 仅同 `source_window` 的 hash/revision 变化触发 stale；session-wide 检查跳过窗口 source |
 | L0 → L1 → L2 rollup | full window / 排空后的 partial tail 生成 L1；L1 成功后生成 `turn_window` L2 seed；L1/L2 seed 成功后才清理 L0，失败保留 L0 |
 | L1 summarizer 失败 | `memory_turn_windows.status=failed`；L0 保持 `rollup_status=pending`；retention 不删除 |
+| L1 独立恢复 | 即使 extraction-pending 已清空，startup/idle 仍可发现 rollup-pending/failed；遵循项目、会话模式、subagent、终态/idle、lease/backoff 限制 |
 | windowSummaryEnabled=false | L0 在抽取成功后 `rollup_status=skipped`；retention 可清理；不调用 summarizer |
 | L1 retention | `windowRetentionDays` 只清理 `done/invalidated`；`pending/processing/failed` 保留 |
 | L1 manual purge | API/CLI 要求 confirm + session/all；删除 L1 并把对应 L0 `rollup_status` 释放为 skipped；不删除 L2 memory |
@@ -197,6 +205,8 @@ E2E / live
 | compaction | canonical transcript 不变时不失效 L0/L1/memory；legacy 无 `canonical_transcript_changed=false` 事件回退保守失效 |
 | backtrack | 按 `canonical_cutoff_seq` / `canonical_message_count_before` 只失效受影响 digest/window/memory；legacy 缺少 cutoff 或 removed IDs 被 cap 时回退 session 级保守失效 |
 | backtrack + 新消息复用 seq | `canonical_cutoff_at` 排除事件后新增的 digest/window/memory；但覆盖旧 L0 的 late L1 仍会因强证据被失效 |
+| backtrack 后追加 | invalidated digest 不参与 previous message watermark；500→300 后追加到 304，应提取 301–304 而不是构造 501–304 |
+| L0 retention 项目隔离 | 两个 project 共用绝对 StorePath 时，清理只删除当前 project 的 terminal rows |
 | `off` 模式 | 不建表、不写 digest、不跑 LLM |
 
 ### 3.5 Phase 2 Consolidation
@@ -469,6 +479,46 @@ GOFLAGS="-modfile=go.win7.mod" go test -tags win7compat \
 cd backend
 go test -race ./internal/memorystore ./internal/memoryruntime ./internal/contextmgr -count=1
 ```
+
+### 7.1 真实模型服务联调（显式 opt-in）
+
+`TestLiveModelMemoryPipeline` 默认跳过，不会因普通单测意外调用付费服务。开启时必须显式指定配置文件、provider、model 和 reasoning；配置与凭据只读，数据库使用 `t.TempDir()`，输入仅为合成会话，不读取用户历史记忆。当前 wire 断言针对 Codex Responses 协议。
+
+在 `backend` 目录执行（将配置路径替换为本机绝对路径；Windows 使用 `C:/...`）：
+
+```bash
+AICLI_MEMORY_LIVE=1 \
+AICLI_MEMORY_LIVE_CONFIG="/absolute/path/to/config.yaml" \
+AICLI_MEMORY_LIVE_PROVIDER=chengtingkj_codex \
+AICLI_MEMORY_LIVE_MODEL=gpt-6-astra \
+AICLI_MEMORY_LIVE_REASONING=max \
+go test -race ./internal/memoryruntime \
+  -run '^TestLiveModelMemoryPipeline$' -count=1 -v -timeout=12m
+```
+
+验收内容：
+
+- SQLite canonical transcript → 两个有界抽取窗口 → L0 done → 真实 L1 汇总及 L2 seed；
+- 真实项目摘要必须为 `compiler=llm_v1`，不能用 deterministic fallback 冒充真实摘要通过；
+- 保留 `C++` / `C#`、`Server 1` / `Server 2` 的身份，来源可追踪，摘要在预算内，并能被 `SelectForInjectV2` 选中；
+- 核对四次实际 HTTP 请求的 model 和 `reasoning.effort`、HTTP 200、响应 model 与 usage；不记录认证头或原始推理；
+- 重开 canonical 与 memory SQLite 后恢复既有摘要，重复 recovery/consolidation 不增加模型调用。
+
+测试调用使用有界超时且关闭自动重试；服务或结构化输出失败直接报告，不自动更换 provider/model。该用例证明一次合成数据链路，不替代 Web/终端关闭 E2E、长周期 shadow 或质量统计验收。
+
+2026-11-12 实测（Windows，`-race`，上述 provider/model/`max`）：
+
+| 阶段 | 请求数 | 服务调用耗时 | 上报 total tokens |
+| --- | --- | --- | --- |
+| canonical 1–2 抽取 | 1 | 24.272s | 1073 |
+| canonical 3–4 抽取 | 1 | 51.167s | 1190 |
+| L1 window 汇总 | 1 | 16.791s | 760 |
+| 项目摘要 | 1 | 42.273s | 1569 |
+
+- `TestLiveModelMemoryPipeline` 通过，用例耗时 141.49s；四次 HTTP 均为 200，wire 均为 `model=gpt-6-astra` / `reasoning.effort=max`，响应 model 同名。
+- 6 条抽取候选 + 1 条 L2 seed，7 条晋升；L1 done、pending digest 为 0；项目摘要 `compiler=llm_v1`、258 estimated tokens、召回选中 7 个 ID。
+- 重开两套 SQLite 后摘要保持一致，重复恢复/汇总的模型调用数仍为 4。服务上报合计 4592 tokens，仅指四次 memory 请求，不含独立 CLI 连通性检查。
+- 关闭 live 开关后，`memoryruntime` / `memorystore` / `memorypolicy` 全量 race 回归通过。以上为单次功能证据，不作为延迟或质量阈值。
 
 ## 8. 阶段验收标准（Definition of Done）
 

@@ -146,6 +146,10 @@ type Handler struct {
 	sessionManager           *chat.SessionManager
 	memoryRuntimeMu          sync.RWMutex
 	memoryRuntime            *memoryruntime.Runtime
+	memorySessionEndCtx      context.Context
+	memorySessionEndCancel   context.CancelFunc
+	memorySessionEndClosing  bool
+	memorySessionEndWG       sync.WaitGroup
 	// sessionViewers 统计 web SSE 订阅者（在场 host 源；docs/bots/10 §4）。
 	sessionViewers sessionViewers
 	// plansStore overrides the process-wide plan artifact store (tests/hosts).

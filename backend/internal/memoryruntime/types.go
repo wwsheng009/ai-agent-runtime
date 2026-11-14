@@ -54,7 +54,10 @@ type Config struct {
 	ExtractionReasoningEffort  string
 	ConsolidationModel         string
 	ConsolidationProvider      string
-	Summarizer                 ProjectSummaryGenerator
+	// Empty stage overrides inherit ExtractionReasoningEffort.
+	ConsolidationReasoningEffort string
+	WindowSummaryReasoningEffort string
+	Summarizer                   ProjectSummaryGenerator
 
 	// Lifecycle/freshness policy consumed by extraction and consolidation.
 	// Zero-value Config preserves the historical hard-coded kind mapping.
@@ -206,6 +209,10 @@ type TranscriptMessage struct {
 	ToolName   string
 	ToolCallID string
 	Truncated  bool
+	// Fragment offsets are bytes in the redacted message, never secret-bearing
+	// canonical text. A fragment alone is not a completed canonical message.
+	FragmentOffset int
+	FragmentTotal  int
 }
 
 type Transcript struct {
@@ -274,8 +281,8 @@ type SessionSource interface {
 }
 
 // TranscriptWindowSource is an optional extension for large sessions. It reads
-// a bounded canonical message sequence range without falling back to the
-// latest-page-only reader.
+// at most maxMessages from the beginning of the canonical sequence range.
+// Callers must verify coverage; a partial page never proves the range complete.
 type TranscriptWindowSource interface {
 	ReadTranscriptWindow(ctx context.Context, session SessionRef, startSeq, endSeq, maxMessages int) (Transcript, error)
 }
@@ -296,9 +303,16 @@ type RunResult struct {
 	RollupFailed int
 	Ignored      []string
 	Errors       []string
-	// SourceHash is set after a canonical transcript was read. It is empty when
-	// the session was skipped before transcript loading.
-	SourceHash string
+	// Completed is a durable extraction receipt, not an indication that source
+	// loading succeeded. RunSessionWindow sets it only when every subwindow of
+	// the requested range has a successful persisted job. RunSession covers its
+	// bounded transcript page. Aggregate sweeps do not carry this receipt.
+	Completed bool
+	// SourceHash and the inclusive sequence bounds describe completed source
+	// coverage. They remain empty/zero for running, failed, or backoff jobs.
+	SourceHash     string
+	SourceStartSeq int64
+	SourceEndSeq   int64
 }
 
 type RollupResult struct {

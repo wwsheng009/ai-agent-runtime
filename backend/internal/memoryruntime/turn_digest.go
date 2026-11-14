@@ -2,82 +2,17 @@ package memoryruntime
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
-var _ chat.TurnDigestSink = (*Runtime)(nil)
-
-// RecordTurnDigest implements chat.TurnDigestSink. It persists only bounded,
-// redacted turn text and never invokes an LLM.
-func (r *Runtime) RecordTurnDigest(ctx context.Context, digest chat.TurnDigest) error {
-	if r == nil || r.Store == nil || !r.enabled() || r.Config.GenerationDisabled || !r.Config.TurnDigestEnabled {
-		return nil
-	}
-	userText := strings.TrimSpace(digest.Prompt)
-	assistantText := strings.TrimSpace(digest.AssistantOutput)
-	if r.Config.RedactionEnabled {
-		userText, _ = memoryredact.Redact(userText)
-		assistantText, _ = memoryredact.Redact(assistantText)
-	}
-	userText, userTruncated := truncateTurnDigestText(userText, r.Config.TurnDigestMaxUserChars)
-	assistantText, assistantTruncated := truncateTurnDigestText(assistantText, r.Config.TurnDigestMaxAssistantChars)
-	if !r.Config.TurnDigestStoreText {
-		userText = ""
-		assistantText = ""
-	}
-	outcome := strings.TrimSpace(digest.Outcome)
-	if outcome == "" {
-		outcome = "success"
-	}
-	usageJSON := "{}"
-	if digest.Usage != nil {
-		if raw, err := json.Marshal(digest.Usage); err == nil {
-			usageJSON = string(raw)
-		}
-	}
-	metadataJSON := "{}"
-	if raw, err := json.Marshal(map[string]interface{}{
-		"assistant_stream_id": strings.TrimSpace(digest.AssistantStreamID),
-		"store_text":          r.Config.TurnDigestStoreText,
-		"user_truncated":      userTruncated,
-		"assistant_truncated": assistantTruncated,
-	}); err == nil {
-		metadataJSON = string(raw)
-	}
-	now := time.Now().UTC()
-	_, err := r.Store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-		Scope:              memorystore.ScopeProject,
-		ProjectKey:         r.Config.ProjectKey,
-		SessionID:          strings.TrimSpace(digest.SessionID),
-		TurnID:             strings.TrimSpace(digest.TurnID),
-		TraceID:            strings.TrimSpace(digest.TraceID),
-		UserMessageID:      strings.TrimSpace(digest.UserMessageID),
-		AssistantMessageID: strings.TrimSpace(digest.AssistantMessageID),
-		MessageSeqEnd:      digest.MessageSeqEnd,
-		UserText:           userText,
-		AssistantText:      assistantText,
-		TextTruncated:      userTruncated || assistantTruncated,
-		Outcome:            outcome,
-		Steps:              digest.Steps,
-		UsageJSON:          usageJSON,
-		MetadataJSON:       metadataJSON,
-		Status:             memorystore.TurnDigestPending,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-	})
-	return err
-}
-
 // RunSessionEnd handles the session-end boundary. Small sessions use the
-// existing latest-page path; oversized sessions drain one windowed batch.
+// existing latest-page path; oversized sessions with an outbox drain bounded
+// canonical windows. Historical sessions without an outbox retain extraction.
 func (r *Runtime) RunSessionEnd(ctx context.Context, sessionID string) (RunResult, error) {
-	var result RunResult
+	result := RunResult{Trigger: TriggerSessionEnd}
 	if r == nil || !r.enabled() || r.Config.GenerationDisabled {
 		return result, nil
 	}
@@ -88,13 +23,33 @@ func (r *Runtime) RunSessionEnd(ctx context.Context, sessionID string) (RunResul
 	if err != nil {
 		return result, err
 	}
-	if session.CanonicalCount > r.Config.MaxSourceMessages {
-		return r.runSessionEndDrain(ctx, sessionID)
+	useDigests, err := r.useDigestWindows(ctx, session)
+	if err != nil {
+		return result, err
+	}
+	// Snapshot before reading the canonical source. A turn arriving during
+	// extraction must not be acknowledged by that older extraction receipt.
+	digests, err := r.Store.ListPendingTurnDigests(ctx, sessionID, r.Config.TurnDigestMaxPendingPerSession)
+	if err != nil {
+		return result, err
+	}
+	if useDigests {
+		if len(digests) > 0 {
+			return r.runSessionEndDrain(ctx, sessionID)
+		}
+		if ok, _ := r.eligible(ctx, session, TriggerSessionEnd); ok {
+			r.applyRollup(ctx, sessionID, r.shouldFinalizeRollup(ctx, session, true), &result)
+		}
+		return result, nil
 	}
 	result, err = r.RunSession(ctx, TriggerSessionEnd, sessionID)
-	if err == nil && result.SourceHash != "" {
-		_, _ = r.MarkPendingTurnDigestsProcessed(ctx, sessionID)
-		r.applyRollup(ctx, sessionID, true, &result)
+	if err == nil && result.Completed {
+		if maxSeq := coveredTurnDigestSeq(result, session, digests); maxSeq > 0 {
+			if _, err := r.markTurnDigestsProcessed(ctx, sessionID, maxSeq, ""); err != nil {
+				return result, err
+			}
+		}
+		r.applyRollup(ctx, sessionID, r.shouldFinalizeRollup(ctx, session, true), &result)
 	}
 	return result, err
 }
@@ -134,7 +89,11 @@ func (r *Runtime) runSessionEndDrain(ctx context.Context, sessionID string) (Run
 	}
 	for batch := 0; batch < maxBatches; batch++ {
 		if ctx.Err() != nil {
-			break
+			return result, ctx.Err()
+		}
+		before, err := r.Store.ListPendingTurnDigests(ctx, sessionID, 1)
+		if err != nil || len(before) == 0 {
+			return result, err
 		}
 		part, err := r.runPendingTurnDigestsWithFinalize(ctx, TriggerSessionEnd, sessionID, true)
 		if err != nil {
@@ -144,14 +103,14 @@ func (r *Runtime) runSessionEndDrain(ctx context.Context, sessionID string) (Run
 			result.Sessions = part.Sessions
 		}
 		mergeRunResult(&result, part)
-		if part.Processed == 0 || part.Failed > 0 {
+		if part.Failed > 0 {
 			break
 		}
 		pending, err := r.Store.ListPendingTurnDigests(ctx, sessionID, 1)
 		if err != nil {
 			return result, err
 		}
-		if len(pending) == 0 {
+		if len(pending) == 0 || pending[0].DigestSeq <= before[0].DigestSeq {
 			break
 		}
 	}
@@ -167,18 +126,15 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 	if limit <= 0 {
 		limit = 20
 	}
-	pendingSessions, err := r.Store.ListPendingTurnDigestSessions(ctx, r.Config.ProjectKey, limit)
+	pendingSessions, err := r.pendingDigestSessions(ctx, onlySession, limit)
 	if err != nil {
 		return result, err
 	}
 	recoveredSessions := make(map[string]struct{})
 	result.Sessions = len(pendingSessions)
 	for _, pending := range pendingSessions {
-		if onlySession != "" && pending.SessionID != onlySession {
-			continue
-		}
 		if ctx.Err() != nil {
-			break
+			return result, ctx.Err()
 		}
 		session, findErr := r.findSession(ctx, pending.SessionID)
 		if findErr != nil {
@@ -207,7 +163,13 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 		// workspace/rollout/session-mode gates here. Startup terminal-only
 		// semantics are enforced by digestRecoveryEligible below.
 		if ok, reason := r.eligible(ctx, session, TriggerSessionEnd); !ok {
-			_, _ = r.Store.MarkTurnDigestsSkipped(ctx, session.ID, maxSeq, "", "ineligible_"+reason)
+			if reason == "session_mode_error" {
+				result.Skipped++
+				continue
+			}
+			if _, err := r.Store.MarkTurnDigestsSkipped(ctx, session.ID, maxSeq, "", "ineligible_"+reason); err != nil {
+				return result, err
+			}
 			result.Skipped++
 			continue
 		}
@@ -216,13 +178,17 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 			continue
 		}
 		if !hasExtractableTurnDigests(digests) {
-			_, _ = r.Store.MarkTurnDigestsSkipped(ctx, session.ID, maxSeq, "", "no_success_turn")
+			if _, err := r.Store.MarkTurnDigestsSkipped(ctx, session.ID, maxSeq, "", "no_success_turn"); err != nil {
+				return result, err
+			}
 			result.Skipped++
 			continue
 		}
 		if session.CanonicalCount > r.Config.MaxSourceMessages {
 			if _, ok := r.Source.(TranscriptWindowSource); !ok {
-				_, _ = r.Store.MarkTurnDigestsDeferred(ctx, session.ID, maxSeq, "", "window_reader_unavailable")
+				if _, err := r.Store.MarkTurnDigestsDeferred(ctx, session.ID, maxSeq, "", "window_reader_unavailable"); err != nil {
+					return result, err
+				}
 				result.Skipped++
 				continue
 			}
@@ -234,7 +200,9 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 			batchMaxSeq := batch[len(batch)-1].DigestSeq
 			endSeq := batch[len(batch)-1].MessageSeqEnd
 			if endSeq <= 0 {
-				_, _ = r.Store.MarkTurnDigestsDeferred(ctx, session.ID, batchMaxSeq, "", "missing_message_seq")
+				if _, err := r.Store.MarkTurnDigestsDeferred(ctx, session.ID, batchMaxSeq, "", "missing_message_seq"); err != nil {
+					return result, err
+				}
 				result.Skipped++
 				continue
 			}
@@ -246,14 +214,16 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 			}
 			startSeq := prevEnd + 1
 			run, runErr := r.RunSessionWindow(ctx, TriggerSessionEnd, session.ID, startSeq, endSeq)
+			mergeRunResult(&result, run)
 			if runErr != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, session.ID+": "+runErr.Error())
 				continue
 			}
-			mergeRunResult(&result, run)
-			if run.SourceHash != "" {
-				_, _ = r.markTurnDigestsProcessed(ctx, session.ID, batchMaxSeq, "")
+			if run.Completed {
+				if _, err := r.markTurnDigestsProcessed(ctx, session.ID, batchMaxSeq, ""); err != nil {
+					return result, err
+				}
 				r.applyRollup(ctx, session.ID, r.shouldFinalizeRollup(ctx, session, finalize), &result)
 				recoveredSessions[session.ID] = struct{}{}
 			}
@@ -266,14 +236,21 @@ func (r *Runtime) runPendingTurnDigestsWithFinalize(ctx context.Context, trigger
 			continue
 		}
 		mergeRunResult(&result, run)
-		if run.SourceHash != "" {
-			_, _ = r.markTurnDigestsProcessed(ctx, session.ID, maxSeq, "")
+		if maxSeq := coveredTurnDigestSeq(run, session, digests); maxSeq > 0 {
+			if _, err := r.markTurnDigestsProcessed(ctx, session.ID, maxSeq, ""); err != nil {
+				return result, err
+			}
 			r.applyRollup(ctx, session.ID, r.shouldFinalizeRollup(ctx, session, finalize), &result)
 			recoveredSessions[session.ID] = struct{}{}
 		}
 	}
 	if (trigger == TriggerStartup || trigger == TriggerIdle || trigger == TriggerBoth) && len(recoveredSessions) > 0 {
-		_ = r.Store.IncrementRuntimeMetric(ctx, memorystore.MetricRecoveredDigestSessions, int64(len(recoveredSessions)))
+		if err := r.Store.IncrementRuntimeMetric(ctx, memorystore.MetricRecoveredDigestSessions, int64(len(recoveredSessions))); err != nil {
+			return result, err
+		}
+	}
+	if err := r.recoverPendingRollups(ctx, trigger, onlySession, recoveredSessions, &result); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -304,7 +281,7 @@ func (r *Runtime) markTurnDigestsProcessed(ctx context.Context, sessionID string
 	if err == nil && !r.Config.TurnDigestWindowSummaryEnabled {
 		// Window summaries are disabled, so extraction completion is the final
 		// rollup state and the digest must not be pinned by retention.
-		_, _ = r.Store.MarkTurnDigestsRollupSkipped(ctx, sessionID, maxSeq)
+		_, err = r.Store.MarkTurnDigestsRollupSkipped(ctx, sessionID, maxSeq)
 	}
 	return updated, err
 }
@@ -324,9 +301,10 @@ func (r *Runtime) applyRollup(ctx context.Context, sessionID string, finalize bo
 	result.Errors = append(result.Errors, rolled.Errors...)
 }
 
-// MarkPendingTurnDigestsProcessed marks the current pending batch done after a
-// successful session-end extraction. Large sessions are deferred until the
-// windowed canonical reader exists.
+// MarkPendingTurnDigestsProcessed verifies a successful persisted session
+// extraction (running it if necessary) before acknowledging its covered prefix
+// of the captured batch.
+// Oversized sessions must use the windowed recovery consumer instead.
 func (r *Runtime) MarkPendingTurnDigestsProcessed(ctx context.Context, sessionID string) (int64, error) {
 	if r == nil || r.Store == nil || r.Config.GenerationDisabled || !r.Config.TurnDigestEnabled || strings.TrimSpace(sessionID) == "" {
 		return 0, nil
@@ -341,6 +319,9 @@ func (r *Runtime) MarkPendingTurnDigestsProcessed(ctx context.Context, sessionID
 		return 0, findErr
 	}
 	if ok, reason := r.eligible(ctx, session, TriggerSessionEnd); !ok {
+		if reason == "session_mode_error" {
+			return 0, nil
+		}
 		return r.Store.MarkTurnDigestsSkipped(ctx, sessionID, maxSeq, "", "ineligible_"+reason)
 	}
 	if !hasExtractableTurnDigests(digests) {
@@ -348,6 +329,14 @@ func (r *Runtime) MarkPendingTurnDigestsProcessed(ctx context.Context, sessionID
 	}
 	if session.CanonicalCount > r.Config.MaxSourceMessages {
 		return r.Store.MarkTurnDigestsDeferred(ctx, sessionID, maxSeq, "", "oversize_wait_window_reader")
+	}
+	run, err := r.RunSession(ctx, TriggerSessionEnd, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	maxSeq = coveredTurnDigestSeq(run, session, digests)
+	if maxSeq == 0 {
+		return 0, nil
 	}
 	return r.markTurnDigestsProcessed(ctx, sessionID, maxSeq, "")
 }

@@ -3,6 +3,7 @@ package memoryruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -24,14 +25,31 @@ func (s *fakeWindowSummarizer) SummarizeWindow(_ context.Context, input WindowSu
 	return s.result, s.err
 }
 
+// Rollup fixtures must provide canonical evidence for every digest endpoint,
+// rather than acknowledging several turns against a single-turn transcript.
+func rollupTranscript(sessionID string, turns int) Transcript {
+	transcript := validTranscript(sessionID, "")
+	template := transcript.Messages
+	transcript.Messages = nil
+	for index := 0; index < turns*2; index++ {
+		message := template[index%len(template)]
+		message.ID = fmt.Sprintf("msg-%d", index+1)
+		message.Seq = index + 1
+		transcript.Messages = append(transcript.Messages, message)
+	}
+	transcript.Revision = int64(len(transcript.Messages))
+	transcript.Hash = TranscriptHash(transcript.Messages)
+	return transcript
+}
+
 func TestRunSessionEndRollsUpL1AndL2(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	transcript := validTranscript("s1", "hash-a")
+	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
 			ID: "s1", WorkspacePath: "/workspace", State: "closed",
-			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
+			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
 	}
@@ -54,7 +72,7 @@ func TestRunSessionEndRollsUpL1AndL2(t *testing.T) {
 	for index, turnID := range []string{"t1", "t2"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
 			SessionID: "s1", TurnID: turnID, Outcome: "success",
-			UserMessageID: "msg-1", AssistantMessageID: "msg-2",
+			UserMessageID: fmt.Sprintf("msg-%d", index*2+1), AssistantMessageID: fmt.Sprintf("msg-%d", index*2+2),
 			UserText: "question " + turnID, AssistantText: "answer " + turnID,
 			MessageSeqEnd: int64((index + 1) * 2),
 		})
@@ -124,12 +142,13 @@ func TestRunSessionEndRollsUpL1AndL2(t *testing.T) {
 func TestRunSessionEndKeepsL0WhenWindowSummaryFails(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
 			ID: "s1", WorkspacePath: "/workspace", State: "closed",
-			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
+			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
-		transcripts: map[string]Transcript{"s1": validTranscript("s1", "hash-a")},
+		transcripts: map[string]Transcript{"s1": transcript},
 	}
 	extractor := &fakeExtractor{}
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
@@ -169,12 +188,13 @@ func TestRunSessionEndKeepsL0WhenWindowSummaryFails(t *testing.T) {
 func TestRunSessionEndSkipsRollupWhenWindowSummaryDisabled(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
 			ID: "s1", WorkspacePath: "/workspace", State: "closed",
-			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
+			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
-		transcripts: map[string]Transcript{"s1": validTranscript("s1", "hash-a")},
+		transcripts: map[string]Transcript{"s1": transcript},
 	}
 	extractor := &fakeExtractor{}
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
@@ -220,12 +240,13 @@ func TestRunSessionEndSkipsRollupWhenWindowSummaryDisabled(t *testing.T) {
 func TestRunSessionEndFinalizesPartialWindow(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	transcript := rollupTranscript("s1", 3)
 	source := &fakeSource{
 		sessions: []SessionRef{{
 			ID: "s1", WorkspacePath: "/workspace", State: "closed",
-			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
+			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
-		transcripts: map[string]Transcript{"s1": validTranscript("s1", "hash-a")},
+		transcripts: map[string]Transcript{"s1": transcript},
 	}
 	runtime, store := newRuntimeForTest(t, "shadow", source, &fakeExtractor{})
 	runtime.Config.TurnDigestEnabled = true
@@ -269,10 +290,14 @@ func TestRollupWaitsForBacklogBeforePartialWindow(t *testing.T) {
 		}},
 	}
 	window := Transcript{
-		SessionID: "s1", Revision: 2, Hash: "window-hash",
+		SessionID: "s1", Revision: 6,
 		Messages: []TranscriptMessage{
 			{ID: "msg-user", Seq: 1, Role: "user", Content: "question"},
 			{ID: "msg-assistant", Seq: 2, Role: "assistant", Content: "answer"},
+			{ID: "msg-user-2", Seq: 3, Role: "user", Content: "question 2"},
+			{ID: "msg-assistant-2", Seq: 4, Role: "assistant", Content: "answer 2"},
+			{ID: "msg-user-3", Seq: 5, Role: "user", Content: "question 3"},
+			{ID: "msg-assistant-3", Seq: 6, Role: "assistant", Content: "answer 3"},
 		},
 	}
 	source := &fakeWindowSource{fakeSource: base, window: window}
@@ -326,10 +351,14 @@ func TestRunSessionEndDrainsWindowBacklog(t *testing.T) {
 		}},
 	}
 	window := Transcript{
-		SessionID: "s1", Revision: 2, Hash: "window-hash",
+		SessionID: "s1", Revision: 6,
 		Messages: []TranscriptMessage{
 			{ID: "msg-user", Seq: 1, Role: "user", Content: "question"},
 			{ID: "msg-assistant", Seq: 2, Role: "assistant", Content: "answer"},
+			{ID: "msg-user-2", Seq: 3, Role: "user", Content: "question 2"},
+			{ID: "msg-assistant-2", Seq: 4, Role: "assistant", Content: "answer 2"},
+			{ID: "msg-user-3", Seq: 5, Role: "user", Content: "question 3"},
+			{ID: "msg-assistant-3", Seq: 6, Role: "assistant", Content: "answer 3"},
 		},
 	}
 	source := &fakeWindowSource{fakeSource: base, window: window}

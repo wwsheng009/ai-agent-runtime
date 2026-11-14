@@ -45,15 +45,16 @@ func TestE2ESQLiteCanonicalRestartRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page.Messages, 12)
 	sessionID := session.ID
-	require.NoError(t, storage.CloseStorage())
+	writerManager := chat.NewSessionManager(storage, nil)
+	t.Cleanup(writerManager.Stop)
 
 	memoryCfg := memorystore.Config{
 		ProjectRoot: workspace, Root: memoryRoot, Mode: "on",
 	}
 	store, err := memorystore.New(memoryCfg)
 	require.NoError(t, err)
-	writer := New(store, nil, nil, nil, Config{
-		Mode: "shadow", ProjectKey: store.ProjectKey(),
+	writer := New(store, &ChatSessionSource{Manager: writerManager}, nil, store, Config{
+		Mode: "shadow", ProjectKey: store.ProjectKey(), Workspace: workspace,
 		TurnDigestEnabled: true, TurnDigestStoreText: true,
 	})
 	for turn := 0; turn < 3; turn++ {
@@ -71,6 +72,7 @@ func TestE2ESQLiteCanonicalRestartRecovery(t *testing.T) {
 		}))
 	}
 	require.NoError(t, store.Close())
+	writerManager.Stop()
 
 	// Simulate a process restart: reopen both durable stores from disk.
 	storage, err = chat.NewSQLiteSessionStorage(sessionCfg)
@@ -351,8 +353,8 @@ func TestE2ESQLiteCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open crash memory store: %v", err)
 	}
-	writer := New(store, nil, nil, nil, Config{
-		Mode: "shadow", ProjectKey: store.ProjectKey(),
+	writer := New(store, &ChatSessionSource{Manager: chat.NewSessionManager(storage, nil)}, nil, store, Config{
+		Mode: "shadow", ProjectKey: store.ProjectKey(), Workspace: workspace,
 		TurnDigestEnabled: true, TurnDigestStoreText: true,
 	})
 	for turn := 0; turn < 3; turn++ {

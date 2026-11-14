@@ -67,7 +67,7 @@ Rules:
 		},
 		MaxTokens:       summaryModelMaxTokens(budget),
 		Temperature:     0,
-		ReasoningEffort: firstNonEmpty(s.Config.ExtractionReasoningEffort, "low"),
+		ReasoningEffort: firstNonEmpty(s.Config.ConsolidationReasoningEffort, s.Config.ExtractionReasoningEffort, "low"),
 		Metadata: map[string]interface{}{
 			"memory_project_summary": true,
 			"project_key":            input.ProjectKey,

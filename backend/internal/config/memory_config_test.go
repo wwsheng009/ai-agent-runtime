@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestMemoryConfigDefaultsOff(t *testing.T) {
@@ -27,6 +29,8 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, 100, cfg.Memory.Generation.TurnDigest.WindowTurns)
 	require.Equal(t, 30, cfg.Memory.Generation.TurnDigest.WindowRetentionDays)
 	require.True(t, cfg.Memory.Generation.TurnDigest.WindowSummaryEnabled)
+	require.Empty(t, cfg.Memory.Generation.TurnDigest.ReasoningEffort, "inherit generation effort by default")
+	require.Empty(t, cfg.Memory.Consolidation.ReasoningEffort, "inherit generation effort by default")
 	require.True(t, cfg.Memory.Consolidation.Enabled)
 	require.Equal(t, 256, cfg.Memory.Consolidation.MaxRecords)
 	require.Equal(t, 800, cfg.Memory.Consolidation.SummaryTokenBudget)
@@ -59,6 +63,29 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.False(t, cfg.Memory.Tools.Enabled)
 	require.False(t, cfg.Memory.Tools.AllowForget)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
+}
+
+func TestMemoryStageReasoningConfigRoundTrip(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.NoError(t, yaml.Unmarshal([]byte(`
+memory:
+  generation:
+    reasoningEffort: max
+    turnDigest:
+      reasoningEffort: low
+  consolidation:
+    reasoningEffort: medium
+`), cfg))
+	require.NoError(t, ValidateMemoryConfig(&cfg.Memory))
+	require.Equal(t, "max", cfg.Memory.Generation.ReasoningEffort)
+	require.Equal(t, "low", cfg.Memory.Generation.TurnDigest.ReasoningEffort)
+	require.Equal(t, "medium", cfg.Memory.Consolidation.ReasoningEffort)
+	raw, err := json.Marshal(cfg.Memory)
+	require.NoError(t, err)
+	var roundTrip MemoryConfig
+	require.NoError(t, json.Unmarshal(raw, &roundTrip))
+	require.Equal(t, cfg.Memory.Generation.TurnDigest.ReasoningEffort, roundTrip.Generation.TurnDigest.ReasoningEffort)
+	require.Equal(t, cfg.Memory.Consolidation.ReasoningEffort, roundTrip.Consolidation.ReasoningEffort)
 }
 
 func TestMemoryConfigValidation(t *testing.T) {

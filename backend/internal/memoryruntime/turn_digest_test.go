@@ -16,8 +16,9 @@ func TestRecordTurnDigestRedactsAndTruncates(t *testing.T) {
 	store, err := memorystore.New(memorystore.Config{Root: t.TempDir(), Mode: "on"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	rt := New(store, nil, nil, nil, Config{
-		Mode: "shadow", ProjectKey: store.ProjectKey(),
+	source := &fakeSource{sessions: []SessionRef{{ID: "s1", WorkspacePath: "/workspace"}}}
+	rt := New(store, source, nil, nil, Config{
+		Mode: "shadow", ProjectKey: store.ProjectKey(), Workspace: "/workspace",
 		TurnDigestEnabled: true, TurnDigestStoreText: true,
 		TurnDigestMaxUserChars: 12, TurnDigestMaxAssistantChars: 12,
 	})
@@ -285,9 +286,17 @@ type fakeWindowSource struct {
 	windowCalls int
 }
 
-func (s *fakeWindowSource) ReadTranscriptWindow(context.Context, SessionRef, int, int, int) (Transcript, error) {
+func (s *fakeWindowSource) ReadTranscriptWindow(_ context.Context, _ SessionRef, start, end, limit int) (Transcript, error) {
 	s.windowCalls++
-	return s.window, nil
+	window := s.window
+	window.Messages = nil
+	for _, message := range s.window.Messages {
+		if message.Seq >= start && message.Seq <= end && len(window.Messages) < limit {
+			window.Messages = append(window.Messages, message)
+		}
+	}
+	window.Hash = TranscriptHash(window.Messages)
+	return window, nil
 }
 
 func TestRunPendingTurnDigestsUsesCanonicalWindowForOversizedSession(t *testing.T) {
@@ -314,6 +323,12 @@ func TestRunPendingTurnDigestsUsesCanonicalWindowForOversizedSession(t *testing.
 	runtime.Source = source
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
+		SessionID: "s1", TurnID: "previous", Outcome: "success",
+		MessageSeqEnd: 2, Status: memorystore.TurnDigestDone,
+		RollupStatus: memorystore.TurnDigestRollupSkipped,
+	})
+	require.NoError(t, err)
+	_, err = store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
 		SessionID: "s1", TurnID: "t1", Outcome: "success",
 		AssistantText: "large session answer", MessageSeqEnd: 4,
 	})
@@ -321,6 +336,7 @@ func TestRunPendingTurnDigestsUsesCanonicalWindowForOversizedSession(t *testing.
 
 	result, err := runtime.RunPendingTurnDigests(context.Background(), TriggerSessionEnd)
 	require.NoError(t, err)
+	require.Empty(t, result.Errors)
 	require.Equal(t, 1, result.Processed)
 	require.Equal(t, 1, source.windowCalls)
 	require.Equal(t, 1, extractor.calls)

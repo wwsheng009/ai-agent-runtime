@@ -411,14 +411,18 @@ CREATE INDEX idx_memory_turn_digests_created
 语义：
 
 - `turn-end` 只写 digest，不跑 LLM；`session-end` / `idle` / `startup recovery` 再消费；
+- producer 落库前必须核对会话身份、workspace、子 agent 策略与 session memory mode；身份无法确认时 fail closed，不得先保存文本再依赖消费者过滤；
 - 默认只自动抽取 `outcome=success` 且 `assistant_text` 非空的 turn；
 - `user_text` / `assistant_text` 必须脱敏且有界；`storeText=false` 时只保留 message IDs；
-- `digest_seq` 是全局单调序号，处理时按 session 过滤并用 `MAX(digest_seq)` 作为水位；
+- `digest_seq` 是全局单调序号，处理时按 session 过滤；确认水位只能推进到实际 canonical 完成凭证覆盖的连续 digest 前缀，不能直接取待处理批次的 `MAX(digest_seq)`。小会话也必须核对已知的 `message_seq_end`，不能仅凭 session metadata 的消息总数确认；
 - `digest_hash` / `digest_revision` 在 Phase 1 只用于审计/诊断，不参与现有 `MarkSessionSourceChanged` 的 transcript stale 判定；
 - startup recovery 只处理 closed/stale/orphaned session（含 heartbeat/lease 过期）；不得抽取活跃会话；
 - 大会话按 `digest_seq` 分批；在窗口化 canonical transcript 读取完成前，只处理最近一页时不得把更早的 pending digest 标记为 done；
+- completion 必须表示整个请求范围已成功抽取并持久化（或同一 job 此前已成功）；`source_hash` 非空、job 运行中、退避或失败均不是完成凭证。单 turn 超过消息上限也必须按有界子窗口处理，完成前保留 pending；
 - `message_seq_end` 记录 turn 结束时的 canonical message 序号，供窗口化读取确定 `[start, end]`；
+- 回溯后的窗口起点只使用仍有效的 canonical 水位，invalidated digest 不得参与；retention 始终限定当前 `project_key`；
 - `rollup_status` 与 extraction `status` 独立：抽取 done 后仍为 `rollup_status=pending`，只有 L1 window 与 L2 seed candidate 成功后才变为 `done`；window summary 关闭时为 `skipped`；
+- startup/idle 必须独立发现抽取完成但 rollup 未完成的工作，不能仅扫描 extraction-pending。关闭 digest 或遇到升级前无 digest 的会话时，不得隐式关闭原有抽取入口；
 - 只有 `rollup_status=done/skipped` 的 done/skipped/invalidated 行才按 `turnDigest.retentionDays` 清理；rollup failed/pending 行保留；
 - `deferred` 行保留给窗口化读取；session 删除由应用层清理（memory DB 与 session DB 分离，不能依赖 FK 级联）。
 

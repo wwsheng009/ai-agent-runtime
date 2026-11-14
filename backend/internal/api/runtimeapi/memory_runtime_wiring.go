@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 func (h *Handler) SetMemoryRuntime(runtime *memoryruntime.Runtime) {
@@ -21,10 +22,55 @@ func (h *Handler) SetMemoryRuntime(runtime *memoryruntime.Runtime) {
 	}
 	h.memoryRuntimeMu.Lock()
 	previous := h.memoryRuntime
+	var cancel context.CancelFunc
+	if previous != nil && previous != runtime {
+		h.memorySessionEndClosing = true
+		cancel = h.memorySessionEndCancel
+		h.memorySessionEndCancel = nil
+		h.memorySessionEndCtx = nil
+	}
 	h.memoryRuntime = runtime
+	if runtime != nil && (previous == nil || previous == runtime) {
+		h.memorySessionEndClosing = false
+	}
 	h.memoryRuntimeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if previous != nil && previous != runtime {
+		h.memorySessionEndWG.Wait()
+		if runtime != nil {
+			h.memoryRuntimeMu.Lock()
+			h.memorySessionEndClosing = false
+			h.memoryRuntimeMu.Unlock()
+		}
+	}
 	if previous != nil && previous.Store != nil && previous != runtime {
 		_ = previous.Store.Close()
+	}
+}
+
+// SetMemoryRuntimeLifecycleContext supplies the process/service lifetime for
+// asynchronous session-end work. It is deliberately not a request context:
+// closing one session must not cancel its durable extraction, while server
+// shutdown must still stop new work and let existing work drain before the
+// memory store is closed.
+func (h *Handler) SetMemoryRuntimeLifecycleContext(ctx context.Context) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lifecycleCtx, cancel := context.WithCancel(ctx)
+	h.memoryRuntimeMu.Lock()
+	previousCancel := h.memorySessionEndCancel
+	h.memorySessionEndCtx = lifecycleCtx
+	h.memorySessionEndCancel = cancel
+	h.memorySessionEndClosing = false
+	h.memoryRuntimeMu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
 	}
 }
 
@@ -144,10 +190,12 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
 		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
 		ConsolidationModel:             memoryCfg.Consolidation.Model,
+		ConsolidationReasoningEffort:   memoryCfg.Consolidation.ReasoningEffort,
 		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
 		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
 		ExtractionModel:                generation.Model,
 		ExtractionReasoningEffort:      generation.ReasoningEffort,
+		WindowSummaryReasoningEffort:   generation.TurnDigest.ReasoningEffort,
 		TurnDigestEnabled:              generation.TurnDigest.Enabled,
 		TurnDigestStoreText:            generation.TurnDigest.StoreText,
 		TurnDigestMaxUserChars:         generation.TurnDigest.MaxUserChars,
@@ -182,7 +230,15 @@ func (h *Handler) CloseMemoryRuntime() error {
 	h.memoryRuntimeMu.Lock()
 	runtime := h.memoryRuntime
 	h.memoryRuntime = nil
+	cancel := h.memorySessionEndCancel
+	h.memorySessionEndCancel = nil
+	h.memorySessionEndCtx = nil
+	h.memorySessionEndClosing = true
 	h.memoryRuntimeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	h.memorySessionEndWG.Wait()
 	if runtime != nil && runtime.Store != nil {
 		return runtime.Store.Close()
 	}
@@ -212,10 +268,9 @@ func (h *Handler) RunMemoryIdleSweep(ctx context.Context) (memoryruntime.RunResu
 
 // TriggerMemorySessionEnd handles the session-close trigger. It intentionally
 // runs asynchronously at the caller so transcript extraction cannot block
-// session teardown.
+// session teardown, while still being bounded by the service lifetime.
 func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
-	runtime := h.MemoryRuntime()
-	if runtime == nil || h.runtimeConfig == nil || strings.TrimSpace(sessionID) == "" {
+	if h == nil || strings.TrimSpace(sessionID) == "" || h.runtimeConfig == nil {
 		return
 	}
 	generation := h.runtimeConfig.Memory.Generation
@@ -226,16 +281,31 @@ func (h *Handler) TriggerMemorySessionEnd(sessionID string) {
 	if trigger != "session_end" && trigger != "both" {
 		return
 	}
+	h.memoryRuntimeMu.Lock()
+	runtime := h.memoryRuntime
+	if runtime == nil || h.memorySessionEndClosing {
+		h.memoryRuntimeMu.Unlock()
+		return
+	}
+	lifecycleCtx := h.memorySessionEndCtx
+	if lifecycleCtx == nil {
+		lifecycleCtx, h.memorySessionEndCancel = context.WithCancel(context.Background())
+		h.memorySessionEndCtx = lifecycleCtx
+	}
+	if lifecycleCtx.Err() != nil {
+		h.memoryRuntimeMu.Unlock()
+		return
+	}
+	h.memorySessionEndWG.Add(1)
+	h.memoryRuntimeMu.Unlock()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		_, _ = runtime.RunSessionEnd(ctx, sessionID)
-		if runtime.Config.ConsolidationDisabled {
-			return
-		}
-		consolidator := memoryruntime.NewConsolidator(runtime.Store, runtime.Config)
-		if _, err := consolidator.Run(ctx); err != nil {
-			return
+		defer h.memorySessionEndWG.Done()
+		result, err := runtime.RunSessionEndPipeline(lifecycleCtx, sessionID, memoryruntime.SessionEndPipelineOptions{
+			Consolidate: !runtime.Config.ConsolidationDisabled,
+		})
+		if err != nil {
+			logpkg.Warnf("memory session-end failed: session=%s stage=%s processed=%d failed=%d rollup_failed=%d",
+				sessionID, result.Stage, result.Run.Processed, result.Run.Failed, result.Run.RollupFailed)
 		}
 	}()
 }

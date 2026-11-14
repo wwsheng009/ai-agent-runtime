@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -23,6 +24,9 @@ type Runtime struct {
 	Config           Config
 	Clock            func() time.Time
 	WorkerID         string
+
+	rollupRecoveryMu     sync.Mutex
+	rollupRecoveryCursor string
 }
 
 func New(store *memorystore.Store, source SessionSource, extractor Extractor, modes SessionModeReader, cfg Config) *Runtime {
@@ -99,7 +103,13 @@ func (r *Runtime) Run(ctx context.Context, trigger Trigger) (RunResult, error) {
 			result.Skipped++
 			continue
 		}
-		if session.CanonicalCount > r.Config.MaxSourceMessages {
+		useDigests, err := r.useDigestWindows(ctx, session)
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, session.ID+": "+err.Error())
+			continue
+		}
+		if useDigests {
 			processed, err := r.runPendingTurnDigests(ctx, trigger, session.ID)
 			if err != nil {
 				result.Failed++
@@ -122,6 +132,9 @@ func (r *Runtime) Run(ctx context.Context, trigger Trigger) (RunResult, error) {
 		if processed.Processed > 0 {
 			processedThisRun++
 		}
+	}
+	if err := r.recoverPendingRollups(ctx, trigger, "", nil, &result); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -172,7 +185,13 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 		result.Skipped = 1
 		return result, nil
 	}
-	result.SourceHash = transcript.Hash
+	pages, err := planExtractionPages(session, transcript, r.Config)
+	if err != nil {
+		return result, err
+	}
+	if len(pages) > 1 {
+		return r.runExtractionPages(ctx, trigger, session, transcript, pages, "")
+	}
 	jobKey := "session:" + strings.TrimSpace(session.ID) + ":" + transcript.Hash
 	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
 		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
@@ -185,9 +204,10 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	if job.Status == memorystore.JobStatusSucceeded || job.Status == memorystore.JobStatusFailed {
 		result.Skipped = 1
 		if job.Status == memorystore.JobStatusSucceeded {
-			// The canonical source was already extracted. Keep the hash so an
-			// outbox consumer can still advance its digest watermark.
-			result.SourceHash = transcript.Hash
+			if job.LastSuccessWatermark != transcript.Hash {
+				return result, fmt.Errorf("memoryruntime: job %s has no matching success watermark", job.ID)
+			}
+			completeTranscriptResult(&result, transcript)
 		}
 		return result, nil
 	}
@@ -197,7 +217,7 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	}
 	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
 		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey,
-		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now,
+		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now, Lease: r.Config.Lease,
 	})
 	if err != nil {
 		return result, err
@@ -208,22 +228,23 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	}
 	extraction, err := r.Extractor.Extract(ctx, session, transcript)
 	if err != nil {
-		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-		return result, err
+		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}
+	commitCtx, commitCancel := memoryJobCommitContext(ctx)
+	defer commitCancel()
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
-	stale, err := r.Store.MarkSessionSourceChanged(ctx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
+	stale, err := r.Store.MarkSessionSourceChanged(commitCtx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
 	if err != nil {
-		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-		return result, err
+		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}
 	result.Stale += stale
 	if len(candidates) == 0 {
-		_ = r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash)
+		if err := r.Store.CompleteJobForWorker(commitCtx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
+			return result, err
+		}
+		completeTranscriptResult(&result, transcript)
 		result.Processed = 1
 		return result, nil
 	}
@@ -232,28 +253,27 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 		if inserted >= r.Config.MaxCandidatesPerSession {
 			break
 		}
-		if _, err := r.Store.InsertCandidate(ctx, candidate); err != nil {
+		if _, err := r.Store.InsertCandidate(commitCtx, candidate); err != nil {
 			if isCandidateSkipError(err) {
 				result.Skipped++
 				continue
 			}
-			retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-			_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-			return result, err
+			return result, r.failExtractionJob(ctx, claimed[0], err)
 		}
 		inserted++
 	}
-	if err := r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
+	if err := r.Store.CompleteJobForWorker(commitCtx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
 		return result, err
 	}
 	result.Processed = 1
 	result.Candidates = inserted
+	completeTranscriptResult(&result, transcript)
 	return result, nil
 }
 
-// RunSessionWindow extracts one canonical message window. Windowed runs use a
-// window-scoped job key and MarkWindowSourceChanged so appending a new window
-// does not mark candidates from older windows stale.
+// RunSessionWindow extracts an entire canonical range through bounded,
+// contiguous subwindows. Each subwindow has its own durable job, so a restart
+// skips already-persisted work but cannot acknowledge a partly extracted range.
 func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, sessionID string, startSeq, endSeq int64) (RunResult, error) {
 	result := RunResult{Trigger: trigger}
 	if !r.enabled() || !r.generationAllowed(trigger) {
@@ -281,8 +301,46 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	if endSeq < startSeq {
 		return result, fmt.Errorf("memoryruntime: invalid window %d-%d", startSeq, endSeq)
 	}
+	limit := int64(r.Config.MaxSourceMessages)
+	if limit <= 0 {
+		limit = 200
+	}
+	h := sha256.New()
+	for first := startSeq; first <= endSeq; {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		last := endSeq
+		if endSeq-first >= limit {
+			last = first + limit - 1
+		}
+		part, err := r.runSessionWindowPart(ctx, trigger, session, windowSource, first, last)
+		mergeRunResult(&result, part)
+		if err != nil || !part.Completed {
+			return result, err
+		}
+		_, _ = fmt.Fprintf(h, "%d-%d:%s\n", first, last, part.SourceHash)
+		if last == endSeq {
+			result.Completed = true
+			result.SourceStartSeq, result.SourceEndSeq = startSeq, endSeq
+			result.SourceHash = part.SourceHash
+			if first != startSeq {
+				result.SourceHash = hex.EncodeToString(h.Sum(nil))
+			}
+			break
+		}
+		first = last + 1
+	}
+	return result, nil
+}
+
+func (r *Runtime) runSessionWindowPart(ctx context.Context, trigger Trigger, session SessionRef, windowSource TranscriptWindowSource, startSeq, endSeq int64) (RunResult, error) {
+	result := RunResult{Trigger: trigger}
 	transcript, err := windowSource.ReadTranscriptWindow(ctx, session, int(startSeq), int(endSeq), r.Config.MaxSourceMessages)
 	if err != nil {
+		return result, err
+	}
+	if err := verifyTranscriptCoverage(transcript, startSeq, endSeq); err != nil {
 		return result, err
 	}
 	if transcript.SessionID == "" {
@@ -300,11 +358,13 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	if transcript.Revision <= 0 {
 		transcript.Revision = endSeq
 	}
-	if len(transcript.Messages) == 0 {
-		result.Skipped = 1
-		return result, nil
+	pages, err := planExtractionPages(session, transcript, r.Config)
+	if err != nil {
+		return result, err
 	}
-	result.SourceHash = transcript.Hash
+	if len(pages) > 1 {
+		return r.runExtractionPages(ctx, trigger, session, transcript, pages, fmt.Sprintf("%d-%d", startSeq, endSeq))
+	}
 	jobKey := fmt.Sprintf("session:%s:window:%d-%d:%s", strings.TrimSpace(session.ID), startSeq, endSeq, transcript.Hash)
 	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
 		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
@@ -317,7 +377,10 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	if job.Status == memorystore.JobStatusSucceeded || job.Status == memorystore.JobStatusFailed {
 		result.Skipped = 1
 		if job.Status == memorystore.JobStatusSucceeded {
-			result.SourceHash = transcript.Hash
+			if job.LastSuccessWatermark != transcript.Hash {
+				return result, fmt.Errorf("memoryruntime: job %s has no matching success watermark", job.ID)
+			}
+			completeTranscriptResult(&result, transcript)
 		}
 		return result, nil
 	}
@@ -327,7 +390,7 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	}
 	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
 		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey,
-		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now,
+		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now, Lease: r.Config.Lease,
 	})
 	if err != nil {
 		return result, err
@@ -338,10 +401,10 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	}
 	extraction, err := r.Extractor.Extract(ctx, session, transcript)
 	if err != nil {
-		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-		return result, err
+		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}
+	commitCtx, commitCancel := memoryJobCommitContext(ctx)
+	defer commitCancel()
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
@@ -349,15 +412,16 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	for index := range candidates {
 		candidates[index].SourceWindow = windowID
 	}
-	stale, err := r.Store.MarkWindowSourceChanged(ctx, session.ID, r.Config.ProjectKey, windowID, transcript.Hash, transcript.Revision)
+	stale, err := r.Store.MarkWindowSourceChanged(commitCtx, session.ID, r.Config.ProjectKey, windowID, transcript.Hash, transcript.Revision)
 	if err != nil {
-		retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-		_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-		return result, err
+		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}
 	result.Stale += stale
 	if len(candidates) == 0 {
-		_ = r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash)
+		if err := r.Store.CompleteJobForWorker(commitCtx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
+			return result, err
+		}
+		completeTranscriptResult(&result, transcript)
 		result.Processed = 1
 		return result, nil
 	}
@@ -366,22 +430,21 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 		if inserted >= r.Config.MaxCandidatesPerSession {
 			break
 		}
-		if _, err := r.Store.InsertCandidate(ctx, candidate); err != nil {
+		if _, err := r.Store.InsertCandidate(commitCtx, candidate); err != nil {
 			if isCandidateSkipError(err) {
 				result.Skipped++
 				continue
 			}
-			retryAt := now.Add(retryBackoff(claimed[0].Attempt))
-			_ = r.Store.FailJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, err.Error(), retryAt)
-			return result, err
+			return result, r.failExtractionJob(ctx, claimed[0], err)
 		}
 		inserted++
 	}
-	if err := r.Store.CompleteJobForWorker(ctx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
+	if err := r.Store.CompleteJobForWorker(commitCtx, claimed[0].ID, claimed[0].WorkerID, transcript.Hash); err != nil {
 		return result, err
 	}
 	result.Processed = 1
 	result.Candidates = inserted
+	completeTranscriptResult(&result, transcript)
 	return result, nil
 }
 
@@ -392,6 +455,16 @@ func (r *Runtime) findSession(ctx context.Context, sessionID string) (SessionRef
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return SessionRef{}, fmt.Errorf("memoryruntime: session id is required")
+	}
+	if source, ok := r.Source.(SessionIdentitySource); ok {
+		identity, err := source.ReadSessionIdentity(ctx, sessionID)
+		if err != nil {
+			return SessionRef{}, err
+		}
+		if identity.Session.ID != sessionID {
+			return SessionRef{}, fmt.Errorf("memoryruntime: session identity mismatch")
+		}
+		return identity.Session, nil
 	}
 	sessions, err := r.Source.ListSessions(ctx, r.Config.Workspace, 200)
 	if err != nil {
@@ -657,6 +730,9 @@ func TranscriptHash(messages []TranscriptMessage) string {
 	for _, message := range sorted {
 		_, _ = fmt.Fprintf(h, "%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00",
 			message.Seq, message.ID, message.Role, message.ToolName, message.ToolCallID, message.Content)
+		if message.FragmentTotal > 0 {
+			_, _ = fmt.Fprintf(h, "fragment:%d:%d\x00", message.FragmentOffset, message.FragmentTotal)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

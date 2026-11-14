@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) error {
@@ -67,10 +68,12 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
 		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
 		ConsolidationModel:             memoryCfg.Consolidation.Model,
+		ConsolidationReasoningEffort:  memoryCfg.Consolidation.ReasoningEffort,
 		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
 		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
 		ExtractionModel:                generation.Model,
 		ExtractionReasoningEffort:      generation.ReasoningEffort,
+		WindowSummaryReasoningEffort:   generation.TurnDigest.ReasoningEffort,
 		TurnDigestEnabled:              generation.TurnDigest.Enabled,
 		TurnDigestStoreText:            generation.TurnDigest.StoreText,
 		TurnDigestMaxUserChars:         generation.TurnDigest.MaxUserChars,
@@ -223,14 +226,17 @@ func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
 	h.asyncWG.Add(1)
 	go func() {
 		defer h.asyncWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		_, _ = h.MemoryRuntime.RunSessionEnd(ctx, sessionID)
-		if !h.RuntimeConfig.Memory.Consolidation.Enabled {
-			return
+		ctx := h.lifecycleCtx
+		if ctx == nil {
+			ctx = context.Background()
 		}
-		consolidator := memoryruntime.NewConsolidator(h.MemoryRuntime.Store, h.MemoryRuntime.Config)
-		_, _ = consolidator.Run(ctx)
+		result, err := h.MemoryRuntime.RunSessionEndPipeline(ctx, sessionID, memoryruntime.SessionEndPipelineOptions{
+			Consolidate: h.RuntimeConfig.Memory.Consolidation.Enabled,
+		})
+		if err != nil {
+			logpkg.Warnf("memory session-end failed: session=%s stage=%s processed=%d failed=%d rollup_failed=%d",
+				sessionID, result.Stage, result.Run.Processed, result.Run.Failed, result.Run.RollupFailed)
+		}
 	}()
 }
 

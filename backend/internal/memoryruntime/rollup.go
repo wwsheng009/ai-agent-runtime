@@ -3,6 +3,7 @@ package memoryruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -80,7 +81,7 @@ Do not invent facts, do not copy secrets, and do not include transient commands 
 		},
 		MaxTokens:       windowSummaryMaxTokens(s.Config),
 		Temperature:     0,
-		ReasoningEffort: firstNonEmpty(s.Config.ExtractionReasoningEffort, "low"),
+		ReasoningEffort: firstNonEmpty(s.Config.WindowSummaryReasoningEffort, s.Config.ExtractionReasoningEffort, "low"),
 		Metadata: map[string]interface{}{
 			"memory_turn_window": true,
 			"session_id":         input.Session.ID,
@@ -142,7 +143,7 @@ func (r *Runtime) RollupTurnDigests(ctx context.Context, sessionID string, final
 	windowIndex, _ := r.Store.CountTurnWindows(ctx, session.ID)
 	for _, group := range groups {
 		if ctx.Err() != nil {
-			break
+			return result, ctx.Err()
 		}
 		result.Examined++
 		windowIndex++
@@ -249,25 +250,36 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 	}
 	jobID := claimed[0].ID
 	workerID := claimed[0].WorkerID
-	if window.Status == memorystore.TurnWindowDone {
-		rolled, err := r.finalizeTurnWindowRollup(ctx, session, window, digests)
-		if err != nil {
-			_ = r.Store.FailJobForWorker(ctx, jobID, workerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-			result.Failed++
-			result.Errors = append(result.Errors, session.ID+": "+err.Error())
-			return result
+	failClaimed := func(cause error, failWindow bool) RollupResult {
+		cleanupCtx, cancel := memoryJobCleanupContext(ctx)
+		var windowErr error
+		if failWindow {
+			windowErr = r.Store.FailTurnWindow(cleanupCtx, window.ID, cause.Error())
 		}
-		_ = r.Store.CompleteJobForWorker(ctx, jobID, workerID, window.SourceHash)
+		jobErr := r.Store.FailJobForWorker(cleanupCtx, jobID, workerID, cause.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
+		cancel()
+		cause = errors.Join(cause, windowErr, jobErr)
+		result.Failed++
+		result.Errors = append(result.Errors, session.ID+": "+cause.Error())
+		return result
+	}
+	if window.Status == memorystore.TurnWindowDone {
+		commitCtx, commitCancel := memoryJobCommitContext(ctx)
+		defer commitCancel()
+		rolled, err := r.finalizeTurnWindowRollup(commitCtx, session, window, digests)
+		if err != nil {
+			return failClaimed(err, false)
+		}
+		if err := r.Store.CompleteJobForWorker(commitCtx, jobID, workerID, window.SourceHash); err != nil {
+			return failClaimed(err, false)
+		}
 		if rolled > 0 {
 			result.RolledUp++
 		}
 		return result
 	}
 	if err := r.Store.MarkTurnWindowProcessing(ctx, window.ID); err != nil {
-		_ = r.Store.FailJobForWorker(ctx, jobID, workerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+err.Error())
-		return result
+		return failClaimed(err, false)
 	}
 	summary, summarizeErr := r.WindowSummarizer.SummarizeWindow(ctx, WindowSummaryInput{
 		Session:        session,
@@ -278,19 +290,11 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		Digests:        digests,
 	})
 	if summarizeErr != nil {
-		_ = r.Store.FailTurnWindow(ctx, window.ID, summarizeErr.Error())
-		_ = r.Store.FailJobForWorker(ctx, jobID, workerID, summarizeErr.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+summarizeErr.Error())
-		return result
+		return failClaimed(summarizeErr, true)
 	}
 	cleanSummary, sanitizeErr := r.sanitizeWindowSummary(summary)
 	if sanitizeErr != nil {
-		_ = r.Store.FailTurnWindow(ctx, window.ID, sanitizeErr.Error())
-		_ = r.Store.FailJobForWorker(ctx, jobID, workerID, sanitizeErr.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+sanitizeErr.Error())
-		return result
+		return failClaimed(sanitizeErr, true)
 	}
 	metadata := map[string]interface{}{
 		"compiler":          "llm_window_summary_v1",
@@ -302,28 +306,22 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		"turn_count":        len(digests),
 		"source_hash":       sourceHash,
 	}
-	window, err = r.Store.CompleteTurnWindow(ctx, window.ID, memorystore.TurnWindowSummary{
+	commitCtx, commitCancel := memoryJobCommitContext(ctx)
+	defer commitCancel()
+	window, err = r.Store.CompleteTurnWindow(commitCtx, window.ID, memorystore.TurnWindowSummary{
 		Text:         cleanSummary.Text,
 		Model:        cleanSummary.Model,
 		UsageJSON:    windowUsageJSON(cleanSummary.Usage),
 		MetadataJSON: memorystore.EncodeTurnWindowMetadata(metadata),
 	})
 	if err != nil {
-		_ = r.Store.FailJobForWorker(ctx, jobID, workerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+err.Error())
-		return result
+		return failClaimed(err, true)
 	}
-	if _, err := r.finalizeTurnWindowRollup(ctx, session, window, digests); err != nil {
-		_ = r.Store.FailJobForWorker(ctx, jobID, workerID, err.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+err.Error())
-		return result
+	if _, err := r.finalizeTurnWindowRollup(commitCtx, session, window, digests); err != nil {
+		return failClaimed(err, false)
 	}
-	if err := r.Store.CompleteJobForWorker(ctx, jobID, workerID, window.SourceHash); err != nil {
-		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+err.Error())
-		return result
+	if err := r.Store.CompleteJobForWorker(commitCtx, jobID, workerID, window.SourceHash); err != nil {
+		return failClaimed(err, false)
 	}
 	result.RolledUp++
 	return result

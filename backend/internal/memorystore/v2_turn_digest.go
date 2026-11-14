@@ -338,8 +338,9 @@ LIMIT ?
 }
 
 // PreviousTurnDigestMessageSeqEnd returns the highest canonical message seq
-// recorded by an earlier digest for the same session. It is used to derive the
-// start of a windowed extraction batch.
+// recorded by an earlier, non-invalidated digest for the same session. Pending
+// and deferred rows still delimit valid canonical coverage; invalidated rows
+// belong to a removed branch and must not advance the next extraction window.
 func (s *Store) PreviousTurnDigestMessageSeqEnd(ctx context.Context, sessionID string, beforeDigestSeq int64) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
@@ -350,6 +351,7 @@ func (s *Store) PreviousTurnDigestMessageSeqEnd(ctx context.Context, sessionID s
 SELECT COALESCE(MAX(message_seq_end), 0)
 FROM memory_turn_digests
 WHERE project_key = ? AND session_id = ? AND digest_seq < ? AND message_seq_end > 0
+  AND status != 'invalidated'
 `, s.cfg.ProjectKey, strings.TrimSpace(sessionID), beforeDigestSeq).Scan(&seq)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: previous turn digest seq: %w", err)
@@ -532,7 +534,8 @@ SELECT COUNT(1) FROM memory_turn_digests WHERE project_key = ? AND status = 'pen
 	return count, err
 }
 
-// PruneTurnDigests deletes terminal digest rows older than before.
+// PruneTurnDigests deletes terminal digest rows older than before for the
+// configured project, once their rollup is done or skipped.
 func (s *Store) PruneTurnDigests(ctx context.Context, before time.Time) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
@@ -543,10 +546,10 @@ func (s *Store) PruneTurnDigests(ctx context.Context, before time.Time) (int64, 
 	}
 	res, err := db.ExecContext(ctx, `
 DELETE FROM memory_turn_digests
-WHERE status IN ('done', 'skipped', 'invalidated')
+WHERE project_key = ? AND status IN ('done', 'skipped', 'invalidated')
   AND rollup_status IN ('done', 'skipped')
   AND created_at < ?
-`, before.UTC().Format(time.RFC3339Nano))
+`, s.cfg.ProjectKey, before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: prune turn digests: %w", err)
 	}

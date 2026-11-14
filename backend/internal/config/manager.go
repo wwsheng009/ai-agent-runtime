@@ -164,11 +164,14 @@ type MemoryTurnDigestConfig struct {
 	WindowTurns          int  `yaml:"windowTurns" json:"windowTurns"`
 	WindowRetentionDays  int  `yaml:"windowRetentionDays" json:"windowRetentionDays"`
 	WindowSummaryEnabled bool `yaml:"windowSummaryEnabled" json:"windowSummaryEnabled"`
+	// Empty inherits generation.reasoningEffort.
+	ReasoningEffort string `yaml:"reasoningEffort" json:"reasoningEffort"`
 }
 
 type MemoryConsolidationConfig struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	Model              string `yaml:"model" json:"model"`
+	ReasoningEffort    string `yaml:"reasoningEffort" json:"reasoningEffort"`
 	MaxRecords         int    `yaml:"maxRecords" json:"maxRecords"`
 	MaxUnusedDays      int    `yaml:"maxUnusedDays" json:"maxUnusedDays"`
 	SummaryTokenBudget int    `yaml:"summaryTokenBudget" json:"summaryTokenBudget"`

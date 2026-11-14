@@ -29,6 +29,7 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	if rt == nil {
 		return nil, nil
 	}
+	handler.SetMemoryRuntimeLifecycleContext(ctx)
 	trigger := strings.ToLower(strings.TrimSpace(cfg.Memory.Generation.Trigger))
 	idleEnabled := cfg.Memory.Generation.Enabled && (trigger == "idle" || trigger == "both")
 	consolidationEnabled := cfg.Memory.Consolidation.Enabled
@@ -51,7 +52,9 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	}
 	sweepCtx, cancel := context.WithCancel(ctx)
 	unsubscribeDigestInvalidation := handler.BindMemoryDigestInvalidation()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if startupRecoveryEnabled {
 			recoveryCtx, recoveryCancel := context.WithTimeout(sweepCtx, 2*time.Minute)
 			_, _ = rt.RunPendingTurnDigests(recoveryCtx, memoryruntime.TriggerStartup)
@@ -128,5 +131,6 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 			unsubscribeDigestInvalidation()
 		}
 		cancel()
+		<-done
 	}, nil
 }
