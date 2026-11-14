@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -3489,6 +3490,7 @@ func applyLocalChatMemoryOptions(agentConfig *agent.Config, runtimeConfig *runti
 		agentConfig.Options = make(map[string]interface{})
 	}
 	cfg := runtimeConfig.Memory
+	memorypolicy.ApplyReadOptions(cfg, agentConfig.Options)
 	agentConfig.Options["memory_mode"] = mode
 	agentConfig.Options["memory_manual_enabled"] = cfg.Manual.Enabled
 	if strings.TrimSpace(cfg.StorePath) != "" {

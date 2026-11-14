@@ -44,6 +44,7 @@ import (
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
@@ -12714,6 +12715,7 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 	options := make(map[string]interface{})
 	memoryMode := strings.ToLower(strings.TrimSpace(config.Memory.Mode))
 	if memoryMode != "" && memoryMode != "off" {
+		memorypolicy.ApplyReadOptions(config.Memory, options)
 		options["memory_mode"] = memoryMode
 		options["memory_manual_enabled"] = config.Memory.Manual.Enabled
 		if strings.TrimSpace(config.Memory.StorePath) != "" {

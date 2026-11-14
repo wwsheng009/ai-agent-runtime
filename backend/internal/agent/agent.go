@@ -1365,6 +1365,10 @@ func memoryConfigFromOptions(options map[string]interface{}, base memorystore.Co
 	base.Mode = optionString(options, "memory_mode")
 	base.StorePath = optionString(options, "memory_store_path")
 	base.InjectionMode = optionString(options, "memory_injection_mode")
+	base.StaleBehavior = optionString(options, "memory_stale_behavior")
+	if enabled, ok := options["memory_redaction_enabled"].(bool); ok {
+		base.DisableSecretFilter = !enabled
+	}
 	if ratio, ok := contextOptionFloat(options, "memory_pinned_budget_ratio"); ok {
 		base.PinnedBudgetRatio = ratio
 	}

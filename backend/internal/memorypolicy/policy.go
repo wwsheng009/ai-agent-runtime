@@ -48,6 +48,18 @@ func DisableSecretFilter(cfg runtimecfg.MemoryConfig) bool {
 	return !cfg.Redaction.Enabled
 }
 
+// ApplyReadOptions carries retrieval policy through the agent's options
+// boundary. Both hosts must use this mapping so prompt injection agrees with
+// the runtime/admin stores. Agent cannot import this package (runtime depends
+// on chat/agent), so it decodes these primitive values in memoryConfigFromOptions.
+func ApplyReadOptions(cfg runtimecfg.MemoryConfig, options map[string]interface{}) {
+	if options == nil {
+		return
+	}
+	options["memory_stale_behavior"] = StaleBehavior(cfg)
+	options["memory_redaction_enabled"] = cfg.Redaction.Enabled
+}
+
 // ApplyRuntime copies lifecycle/freshness/redaction settings onto a runtime
 // Config built by a host. Boolean flags are expressed as negative/default-on
 // fields so a zero-value Config keeps the historical safe behavior.
