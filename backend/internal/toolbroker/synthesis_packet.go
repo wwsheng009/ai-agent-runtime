@@ -5,7 +5,10 @@ import (
 )
 
 const (
-	synthesisSummaryLimit = 1200
+	// ContinueParentWorkNextAction releases a child wait without deciding
+	// whether the parent's own task is complete.
+	ContinueParentWorkNextAction = "continue_parent_work"
+	synthesisSummaryLimit        = 1200
 	// SynthesisChildLimit bounds the compact packet; full outputs remain in the
 	// wait result / task capsule.
 	SynthesisChildLimit = 16
@@ -26,8 +29,8 @@ type SynthesisChildResult struct {
 }
 
 // SynthesisPacket is the shared resume/synthesis contract for subagent_wait and
-// batch completion mailboxes. It tells the parent what completed, in what
-// order, and that the next action is synthesis rather than further exploration.
+// batch completion mailboxes. It tells the parent what completed and in what
+// order. Receiving child results never decides the parent's lifecycle.
 type SynthesisPacket struct {
 	BatchID         string                 `json:"batch_id,omitempty"`
 	Status          string                 `json:"status,omitempty"`
@@ -100,45 +103,57 @@ func BuildSynthesisPacketFromWaitResult(result *AgentWaitResult) *SynthesisPacke
 			pending++
 		}
 	}
-	if pending == 0 && strings.TrimSpace(packet.NextAction) == "" {
-		packet.NextAction = "synthesize_and_finalize"
+	if isLegacyChildFinalizationAction(packet.NextAction) || (pending == 0 && packet.NextAction == "") {
+		packet.NextAction = ContinueParentWorkNextAction
 	}
 	return packet
 }
 
-// AttachSynthesisPacket refreshes the compact packet and finalization flag on a
-// wait result. It is idempotent and safe to call after ledger attachment.
+// AttachSynthesisPacket refreshes the result packet and child-settlement fact.
+// Settlement only releases waiting; it must not require parent finalization.
+// Recompute from the rows rather than trusting flags from older hosts.
 func AttachSynthesisPacket(result *AgentWaitResult) *AgentWaitResult {
 	if result == nil {
 		return nil
 	}
+	result.FinalizationRequired = false
+	result.ChildrenSettled = false
+	if isLegacyChildFinalizationAction(result.NextAction) {
+		result.NextAction = ContinueParentWorkNextAction
+	}
 	packet := BuildSynthesisPacketFromWaitResult(result)
+	result.Synthesis = packet
 	if packet == nil {
 		return result
 	}
-	result.Synthesis = packet
 	pendingObligations := 0
 	for _, obligation := range result.Obligations {
 		if !obligation.Terminal {
 			pendingObligations++
 		}
 	}
-	result.FinalizationRequired = result.PendingCount == 0 && pendingObligations == 0 &&
+	result.ChildrenSettled = result.PendingCount == 0 && pendingObligations == 0 &&
 		len(result.Obligations) > 0 && packet.TaskCount > 0 &&
 		packet.CompletedCount+packet.FailedCount+packet.CanceledCount+packet.TimedOutCount >= packet.TaskCount
-	if result.FinalizationRequired {
-		packet.NextAction = "synthesize_and_finalize"
-	}
 	return result
+}
+
+func isLegacyChildFinalizationAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "finalize", "synthesize_and_finalize":
+		return true
+	default:
+		return false
+	}
 }
 
 func synthesisStatusClass(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "completed", "complete", "succeeded", "success", "idle":
 		return "completed"
-	case "failed", "failure", "error":
+	case "failed", "failed_with_result", "failure", "error":
 		return "failed"
-	case "canceled", "cancelled", "stopped", "closed":
+	case "canceled", "cancelled", "stopped", "closed", "skipped":
 		return "canceled"
 	case "timed_out", "timeout":
 		return "timed_out"

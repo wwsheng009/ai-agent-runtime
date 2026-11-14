@@ -136,6 +136,7 @@ func TestParkBackgroundTurnStartsFreshEpochAfterSettle(t *testing.T) {
 		batch.Status = subagentbatch.BatchCompleted
 	})
 	require.NoError(t, err)
+	require.NoError(t, store.(subagentbatch.TurnResultsConsumptionStore).MarkTurnResultsConsumed(ctx, "sess-1", "turn-merge"))
 	time.Sleep(5 * time.Millisecond)
 
 	b2 := seedParkBatch(t, store, "sess-1", "batch-2", "task-2", subagentbatch.BatchRunning)
@@ -173,11 +174,13 @@ func TestParkTeamObligationEpochAndMerge(t *testing.T) {
 	require.Equal(t, []string{"batch-1", "task-1", subagentbatch.TeamObligationID("team-1")}, joined.ObligationIDs)
 	require.Equal(t, first.ParkedAt.UTC(), joined.ParkedAt.UTC(), "same episode keeps the epoch")
 
-	// The whole cohort settles; the next dispatch starts a fresh epoch.
+	// The whole cohort settles and its results are consumed; the next dispatch
+	// starts a fresh epoch without carrying already-delivered results.
 	_, err = store.UpdateBatch(ctx, "batch-1", -1, func(batch *subagentbatch.SubagentBatch) {
 		batch.Status = subagentbatch.BatchCompleted
 	})
 	require.NoError(t, err)
+	require.NoError(t, store.(subagentbatch.TurnResultsConsumptionStore).MarkTurnResultsConsumed(ctx, "sess-1", "turn-merge"))
 	time.Sleep(5 * time.Millisecond)
 
 	loop.parkTeamObligation(ctx, "sess-1", "team-2")
@@ -214,7 +217,8 @@ func TestDurableParkAnnouncesFreshEpochAfterSettle(t *testing.T) {
 	events := suspended()
 	require.Len(t, events, 2, "新纪元必须重新播报挂起边（agent.turn.finished 才有配对）")
 	require.Equal(t, "batch-2", events[1].Payload["batch_id"])
-	require.Equal(t, 2, events[1].Payload["obligation_count"])
+	require.Equal(t, 4, events[1].Payload["obligation_count"],
+		"the fresh epoch must retain the previous batch's unread results")
 	require.Equal(t, "turn-merge", events[1].Payload["turn_id"])
 	require.Equal(t, "sess-1", events[1].SessionID)
 }

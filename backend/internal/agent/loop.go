@@ -282,20 +282,6 @@ type ReActLoop struct {
 	// pendingHookContexts accumulates PreToolUse additionalContext for the next
 	// model request. It is run-scoped and cleared after injection.
 	pendingHookContexts []string
-	// synthesisRequired is set after subagent_wait reports that every required
-	// obligation is terminal. The next tool batch is denied so the parent must
-	// synthesize the attached packet instead of exploring internal storage.
-	synthesisRequired bool
-	// synthesisPacket is the compact child-result packet from the terminal
-	// subagent_wait. It is the fallback payload if the synthesis budget expires.
-	synthesisPacket *toolbroker.SynthesisPacket
-	// synthesisDeniedSteps counts denied tool batches after synthesisRequired.
-	// Two denials are enough to distinguish "model needs one nudge" from a loop.
-	synthesisDeniedSteps int
-	// synthesisBudgetExhausted triggers a deterministic finalization-incomplete
-	// result on the next loop iteration instead of letting the model explore
-	// forever after all child obligations are already terminal.
-	synthesisBudgetExhausted bool
 }
 
 // maxStopHookContinues bounds how many extra steps a Stop hook may force in one
@@ -774,10 +760,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.stopHookContinued = false
 	loop.stopHookContinues = 0
 	loop.pendingHookContexts = nil
-	loop.synthesisRequired = false
-	loop.synthesisPacket = nil
-	loop.synthesisDeniedSteps = 0
-	loop.synthesisBudgetExhausted = false
 	// Fork 前缀审计（P2-1'）：同样按 run 重置，重试不自带上一 attempt 的结果。
 	loop.forkAudit = options.ForkAudit
 	loop.forkAuditDone = false
@@ -1179,23 +1161,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Duration = *startTime
 			result.Usage = totalUsage.Clone()
 			return result, err
-		}
-		if loop.synthesisBudgetExhausted {
-			result.Success = false
-			result.LimitReached = true
-			result.LimitReason = "synthesis_budget_exhausted"
-			result.Output = loop.synthesisFallbackOutput()
-			result.Error = result.Output
-			result.Steps = step - 1
-			result.Observations = observations
-			result.Duration = *startTime
-			result.Usage = totalUsage.Clone()
-			builder.AppendAssistantAction(result.Output, nil, nil, nil)
-			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
-				return nil, err
-			}
-			loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, result.Steps, result, "synthesis_budget_exhausted")
-			return result, nil
 		}
 
 		if loop.config.Verbose {
@@ -1704,7 +1669,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, err
 		}
-		loop.observeSynthesisWaitResults(currentCtx, traceID, sessionID, toolResults)
+		loop.observeChildWaitResults(currentCtx, traceID, sessionID, toolResults)
 		// Observe completed results, not requested windows: the host may clamp a
 		// timeout or return ready immediately. Use this same observation for the
 		// runtime event and the advisory passed to toolResultsToPayloads below.
@@ -3688,9 +3653,6 @@ func answerExposureEnabled(options map[string]interface{}) bool {
 
 // act 行动阶段：执行工具调用
 func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step int, depth int, historySnapshot []types.Message, toolCalls []types.ToolCall, toolWhitelist []string) ([]toolExecutionResult, error) {
-	if loop.synthesisRequired && len(toolCalls) > 0 {
-		return loop.denySynthesisToolCalls(ctx, traceID, sessionID, step, toolCalls), nil
-	}
 	for index := range toolCalls {
 		toolCalls[index] = loop.bindFreeformToolCall(ctx, toolCalls[index])
 	}
@@ -4395,56 +4357,47 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	return results, nil
 }
 
-const synthesisRequiredToolError = "synthesis_required: all required child obligations are terminal; do not call tools; produce the final answer now using the synthesis_packet from subagent_wait"
-
-// observeSynthesisWaitResults enters the bounded synthesis phase when a
-// subagent_wait result proves that every required obligation is terminal. The
-// packet is already in the tool result; the next tool batch is denied so the
-// model cannot drift into internal-storage exploration.
-func (loop *ReActLoop) observeSynthesisWaitResults(ctx context.Context, traceID, sessionID string, results []toolExecutionResult) {
+// observeChildWaitResults records delivery of settled child results without
+// changing the parent's execution mode. A child finishing does not imply that
+// the parent has finished review, integration, verification or further work.
+func (loop *ReActLoop) observeChildWaitResults(ctx context.Context, traceID, sessionID string, results []toolExecutionResult) {
 	if loop == nil {
 		return
 	}
 	for _, result := range results {
-		if !toolregistry.IsSpellingOf(toolbroker.ToolSubagentWait, result.Call.Name) {
+		if result.Error != "" || !toolregistry.IsSpellingOf(toolbroker.ToolSubagentWait, result.Call.Name) {
 			continue
 		}
 		wait, ok := synthesisWaitResult(result.Output)
 		if !ok || wait == nil {
 			continue
 		}
-		if !wait.FinalizationRequired {
+		// Normalize legacy finalization_required results too: they are data,
+		// never authority to deny tools or terminate the parent.
+		wait = toolbroker.AttachSynthesisPacket(wait)
+		if !wait.ChildrenSettled {
 			continue
 		}
 		packet := wait.Synthesis
 		if packet == nil {
-			packet = toolbroker.BuildSynthesisPacketFromWaitResult(wait)
-		}
-		if packet == nil {
 			continue
 		}
 		resultsConsumed := loop.markTurnResultsConsumed(ctx, sessionID)
-		loop.synthesisRequired = true
-		loop.synthesisPacket = packet
-		loop.synthesisDeniedSteps = 0
-		loop.synthesisBudgetExhausted = false
-		loop.emitRuntimeEvent("tool_loop.synthesis_required", sessionID, result.Call.Name, map[string]interface{}{
+		loop.emitRuntimeEvent("tool_loop.child_results_received", sessionID, result.Call.Name, map[string]interface{}{
 			"trace_id":         traceID,
 			"batch_id":         packet.BatchID,
 			"task_count":       packet.TaskCount,
 			"completion_order": append([]string(nil), packet.CompletionOrder...),
-			"next_action":      "synthesize_and_finalize",
+			"next_action":      toolbroker.ContinueParentWorkNextAction,
 			"results_consumed": resultsConsumed,
 		})
 		return
 	}
 }
 
-// markTurnResultsConsumed records the durable half of the synthesis gate: the
-// parent has the child-result packet in its current context, so a later
-// settlement may clear the parked turn. The write is best-effort (the in-memory
-// synthesis gate still prevents further tools), but a failed write must not
-// finalize with unread results, so settlement checks the durable flag.
+// markTurnResultsConsumed records that child results reached the parent's
+// context. It does not mean the parent's work is done. A later run-end
+// settlement checks this durable flag before clearing the parked record.
 func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID string) bool {
 	if loop == nil || loop.agent == nil {
 		return true
@@ -4502,53 +4455,6 @@ func synthesisWaitResult(output interface{}) (*toolbroker.AgentWaitResult, bool)
 		return nil, false
 	}
 	return &wait, true
-}
-
-func (loop *ReActLoop) denySynthesisToolCalls(ctx context.Context, traceID, sessionID string, step int, toolCalls []types.ToolCall) []toolExecutionResult {
-	gateway := loop.agent.GetOutputGateway()
-	results := make([]toolExecutionResult, len(toolCalls))
-	loop.synthesisDeniedSteps++
-	for i, tc := range toolCalls {
-		result := toolExecutionResult{Call: tc}
-		metadata := map[string]interface{}{
-			"step":               step,
-			"trace_id":           traceID,
-			"synthesis_required": true,
-		}
-		loop.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, nil))
-		result.Error = synthesisRequiredToolError
-		result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
-			"synthesis_required": true,
-		})
-		results[i] = result
-		loop.agent.runPostToolUseHooks(ctx, sessionID, result)
-	}
-	if loop.synthesisDeniedSteps >= 2 {
-		loop.synthesisBudgetExhausted = true
-	}
-	loop.emitRuntimeEvent("tool_loop.synthesis_tool_denied", sessionID, "", map[string]interface{}{
-		"trace_id":     traceID,
-		"step":         step,
-		"tool_count":   len(toolCalls),
-		"denied_steps": loop.synthesisDeniedSteps,
-	})
-	return results
-}
-
-func (loop *ReActLoop) synthesisFallbackOutput() string {
-	if loop == nil || loop.synthesisPacket == nil {
-		return "synthesis_budget_exhausted: all required child obligations are terminal; synthesize the final answer from the subagent_wait result"
-	}
-	encoded, err := json.MarshalIndent(loop.synthesisPacket, "", "  ")
-	if err != nil {
-		return "synthesis_budget_exhausted: all required child obligations are terminal; synthesize the final answer from the subagent_wait result"
-	}
-	const limit = 16000
-	text := string(encoded)
-	if runes := []rune(text); len(runes) > limit {
-		text = string(runes[:limit]) + "…"
-	}
-	return "synthesis_budget_exhausted: all required child obligations are terminal, but the parent did not finalize within the synthesis budget. Child synthesis packet:\n" + text
 }
 
 // finalizeDeniedToolResult runs gateway reduction for a denied/failed-before-exec
@@ -8943,10 +8849,11 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 // then lose that batch's terminal edge entirely (2026-10-13 field session: two
 // batches dispatched in one turn).
 //
-// Previous episode already settled — every obligation terminal — starts a FRESH
-// epoch: fresh ParkedAt and only the new obligations. Reusing a settled epoch
-// would derive the already-delivered settlement notify key and be suppressed as
-// an event replay, wedging the session on "Waiting for subagents".
+// Previous episode already terminal starts a FRESH epoch with a fresh ParkedAt.
+// Unconsumed child-result obligations still carry forward: terminal does not
+// mean delivered. Once consumed, only the new obligations are needed. Reusing
+// the old epoch would derive the already-delivered settlement notify key and
+// suppress the next wake as an event replay.
 //
 // The returned bool reports whether the write starts a fresh park epoch: the
 // callers use it for the turn.suspended edge, so every episode announces its own
@@ -8967,16 +8874,17 @@ func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentb
 	if episodeID := strings.TrimSpace(existing.EpisodeID); episodeID != "" {
 		candidate.EpisodeID = episodeID
 	}
-	if loop.parkedTurnObligationsSettled(ctx, store, existing) {
+	freshEpoch := loop.parkedTurnObligationsSettled(ctx, store, existing)
+	if freshEpoch && (!existing.HasChildResults() || existing.ResultsConsumed) {
 		return candidate, true
 	}
 	candidate.ObligationIDs = mergeParkedTurnIDs(existing.ObligationIDs, candidate.ObligationIDs)
 	candidate.ResumeQueue = mergeParkedTurnIDs(existing.ResumeQueue, candidate.ResumeQueue)
 	candidate.ObligationPolicies = mergeParkedTurnPolicies(existing.ObligationPolicies, candidate.ObligationPolicies)
-	if !existing.ParkedAt.IsZero() {
+	if !freshEpoch && !existing.ParkedAt.IsZero() {
 		candidate.ParkedAt = existing.ParkedAt
 	}
-	return candidate, false
+	return candidate, freshEpoch
 }
 
 // mergeParkedTurnPolicies keeps the first non-required declaration for an

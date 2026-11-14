@@ -91,7 +91,7 @@ func TestResumeContext_TerminalLedgerRollsUpAndReanchorsTurn(t *testing.T) {
 
 	for _, want := range []string{
 		"[Child lifecycle resume]",
-		"你派发的 2 项子任务/作业已全部结束，可以直接收尾",
+		"你派发的 2 项子任务/作业已全部结束，无需继续等待",
 		"progress:",
 		"各项结果：",
 		"batch-2：已完成（有失败项）（共 3 项，完成 2，失败 1）",
@@ -106,7 +106,10 @@ func TestResumeContext_TerminalLedgerRollsUpAndReanchorsTurn(t *testing.T) {
 
 	prompt := ResumePrompt(rc)
 	require.Contains(t, prompt, "resume：子任务生命周期事件触发**同一 turn 续跑**")
-	require.Contains(t, prompt, "请直接产出终局报告")
+	require.Contains(t, prompt, "子任务结束不代表主任务完成")
+	require.Contains(t, prompt, "请消费结果并继续主任务")
+	require.NotContains(t, prompt, "请直接产出终局报告")
+	require.NotContains(t, prompt, "可以直接收尾")
 	require.NotContains(t, prompt, "can_finalize", "control-plane verdict stays structural")
 	require.NotContains(t, prompt, "turn_id=")
 

@@ -3400,7 +3400,7 @@ func (c *SubagentBatchCoordinator) attachSynthesisPacket(ctx context.Context, ba
 		return
 	}
 	payload["synthesis_packet"] = packet
-	payload["next_action"] = "synthesize_and_finalize"
+	payload["next_action"] = toolbroker.ContinueParentWorkNextAction
 }
 
 func (c *SubagentBatchCoordinator) buildSynthesisPacket(ctx context.Context, batch *subagentbatch.SubagentBatch) *toolbroker.SynthesisPacket {
@@ -3444,7 +3444,7 @@ func BuildBatchSynthesisPacket(ctx context.Context, store subagentbatch.BatchSto
 		BatchID:    strings.TrimSpace(batch.BatchID),
 		Status:     string(batch.Status),
 		TaskCount:  len(records),
-		NextAction: "synthesize_and_finalize",
+		NextAction: toolbroker.ContinueParentWorkNextAction,
 	}
 	if !batch.CreatedAt.IsZero() && batch.FinishedAt != nil && !batch.FinishedAt.IsZero() {
 		packet.ElapsedMs = batch.FinishedAt.Sub(batch.CreatedAt).Milliseconds()

@@ -77,8 +77,8 @@ func TestBrokerExecuteWaitTeamLedgerFinalizesDrainedTaskLedger(t *testing.T) {
 	assert.Equal(t, 0, result.PendingCount)
 	assert.Empty(t, result.TerminalDelta,
 		"tasks already terminal before the segment are the baseline, not the delta")
-	assert.Equal(t, "finalize", result.NextAction,
-		"an all-terminal team ledger is decisive: team_wait shares the subagent_wait finalize rule")
+	assert.Equal(t, ContinueParentWorkNextAction, result.NextAction,
+		"an all-terminal team ledger releases waiting without ending the parent task")
 	assert.Less(t, result.WaitedMs, int64(2000),
 		"a drained ledger returns immediately instead of spending the requested window")
 }

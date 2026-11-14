@@ -145,9 +145,9 @@ type ResumeContext struct {
 	// deduped). It only shapes the prompt wording — the join verdict itself
 	// always comes from the ledger projection.
 	WakeReasons []string `json:"wake_reasons,omitempty"`
-	// TotalCount / PendingCount are the join inputs (pending_count == 0 ⇒
-	// finalize). PendingCount is -1 when no obligation source was wired and the
-	// verdict is therefore unknown ("assume not final" is the safe reading).
+	// TotalCount / PendingCount are child-wait inputs. Zero pending releases
+	// waiting, never decides that parent work is complete. PendingCount is -1
+	// when no obligation source was wired and child settlement is unknown.
 	TotalCount   int `json:"total,omitempty"`
 	PendingCount int `json:"pending_count,omitempty"`
 	// StandaloneCount counts the non-terminal rows without a turn_id (EC-G4:
@@ -429,7 +429,7 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 	// can_finalize=boolean over internal counters.
 	if rc.PendingCount >= 0 {
 		if rc.PendingCount == 0 {
-			fmt.Fprintf(&b, "你派发的 %d 项子任务/作业已全部结束，可以直接收尾。\n", rc.TotalCount)
+			fmt.Fprintf(&b, "你派发的 %d 项子任务/作业已全部结束，无需继续等待；请消费结果并继续主任务。\n", rc.TotalCount)
 		} else {
 			fmt.Fprintf(&b, "你派发的 %d 项子任务/作业中，仍有 %d 项在运行，暂不能收尾。\n",
 				rc.TotalCount, rc.PendingCount)
@@ -590,9 +590,9 @@ func ResumePrompt(rc *ResumeContext) string {
 		// The verdict itself is stated once, in rc.Text, in business terms. A
 		// second copy here only repeated control-plane vocabulary.
 		if rc.PendingCount == 0 {
-			b.WriteString("请直接产出终局报告并结束本 turn，不要重复派发同一工作。\n")
+			b.WriteString("子任务结束不代表主任务完成。请消费结果并继续主任务，按需审查、集成、修复、验证或派发后续工作；仅当主任务目标已完成时才输出最终报告。不要无意义地重复派发同一工作。\n")
 			if rc.HasAgentSessionObligations() {
-				b.WriteString("agent_session 子代理结果未内联；收尾前请调用 subagent_wait 读取结果。\n")
+				b.WriteString("agent_session 子代理结果未内联；请调用 subagent_wait 读取结果后继续主任务。\n")
 			}
 		} else if rc.PendingCount > 0 {
 			b.WriteString("暂时不能收尾：请继续等待或处理仍在运行的子任务。\n")

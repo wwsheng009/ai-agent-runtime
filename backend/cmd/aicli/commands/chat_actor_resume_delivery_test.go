@@ -155,7 +155,9 @@ func TestLocalSupervisionSourcesBuildResumeContextWithVerdict(t *testing.T) {
 	// The turn anchor is carried on the resume payload; the prompt itself speaks
 	// business so the model never parses control-plane fields.
 	require.Equal(t, "turn_parked", resume.TurnID)
-	require.Contains(t, prompt, "请直接产出终局报告")
+	require.Contains(t, prompt, "请消费结果并继续主任务")
+	require.NotContains(t, prompt, "请直接产出终局报告")
+	require.NotContains(t, prompt, "可以直接收尾")
 	require.Contains(t, prompt, "batch_resume_terminal")
 }
 

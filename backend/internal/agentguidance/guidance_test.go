@@ -47,4 +47,16 @@ func TestWaitDisciplineTextJoinsBothRules(t *testing.T) {
 			t.Fatalf("discipline text must contain %q, got: %s", rule, got)
 		}
 	}
+	if strings.Contains(got, "next_action=finalize") {
+		t.Fatal("child settlement must not instruct the parent to finalize")
+	}
+	for _, rule := range []string{
+		"next_action=continue_parent_work",
+		"Child completion never requires the parent to finalize or stop using tools",
+		"pending_count>0 you must not finalize",
+	} {
+		if !strings.Contains(got, rule) {
+			t.Fatalf("missing parent/child lifecycle boundary %q", rule)
+		}
+	}
 }

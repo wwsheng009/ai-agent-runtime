@@ -82,7 +82,7 @@ func TestWaitAgentReturnsFinalizeWithoutBlockingOnTerminalLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.TimedOut, "an all-terminal ledger must not report a timeout")
-	require.Equal(t, "finalize", result.NextAction)
+	require.Equal(t, toolbroker.ContinueParentWorkNextAction, result.NextAction)
 	require.Len(t, result.Obligations, 1)
 	require.Equal(t, batchID, result.Obligations[0].ObligationID)
 	require.Equal(t, "batch", result.Obligations[0].SubjectKind)
@@ -258,8 +258,8 @@ func TestWaitAgentCreditsProgressCompletedDuringWait(t *testing.T) {
 		"progress completed during the wait must not be billed as a no-progress window")
 	require.Contains(t, result.TerminalDelta, batchID,
 		"terminal_delta must report the obligation that finished during this wait segment")
-	require.Equal(t, "finalize", result.NextAction,
-		"the refreshed ledger has no pending row, so the parent may finalize")
+	require.Equal(t, toolbroker.ContinueParentWorkNextAction, result.NextAction,
+		"the refreshed ledger releases waiting, not the parent's remaining work")
 	require.True(t, result.Obligations[0].Terminal)
 }
 

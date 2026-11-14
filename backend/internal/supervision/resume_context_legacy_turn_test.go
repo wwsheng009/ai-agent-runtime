@@ -51,12 +51,13 @@ func TestBatchObligationSource_LegacyRowsWithoutTurnIDDoNotGateFinalize(t *testi
 
 	// ③ 可见性：rollup 里仍有这一行，且被显式标记为 standalone。
 	require.Len(t, rc.Obligations, 2)
-	require.Contains(t, rc.Text, "你派发的 2 项子任务/作业已全部结束，可以直接收尾")
+	require.Contains(t, rc.Text, "你派发的 2 项子任务/作业已全部结束，无需继续等待")
 	require.Contains(t, rc.Text, "batch-legacy：运行中（共 3 项，完成 1，失败 0），尚未结束")
 	// EC-G4 exempts unattributed rows from the join: the row stays visible but
 	// the verdict is finalizable.
 	require.Equal(t, 1, rc.StandaloneCount)
-	require.Contains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
+	require.Contains(t, AutoWakePromptFor(rc), "请消费结果并继续主任务")
+	require.NotContains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
 }
 
 // TestBatchObligationSource_LegacyRowsAloneKeepLegacyNewTurnFallback 覆盖"账本里

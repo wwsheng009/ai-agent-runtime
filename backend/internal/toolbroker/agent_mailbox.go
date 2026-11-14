@@ -205,9 +205,31 @@ func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEv
 		status = "completed"
 	}
 	body := fmt.Sprintf("Subagent batch %s completed with status %s.", batchID, status)
+	metadata["next_action"] = ContinueParentWorkNextAction
 	if packet, ok := metadata["synthesis_packet"]; ok && packet != nil {
-		body += " SynthesisPacket attached; synthesize and finalize."
+		// Terminal deliveries can be replayed from older durable payloads.
+		// Normalize a copy so their old instruction cannot force parent exit.
+		switch value := packet.(type) {
+		case *SynthesisPacket:
+			if value != nil {
+				cloned := *value
+				cloned.NextAction = ContinueParentWorkNextAction
+				metadata["synthesis_packet"] = &cloned
+			}
+		case SynthesisPacket:
+			value.NextAction = ContinueParentWorkNextAction
+			metadata["synthesis_packet"] = value
+		case map[string]interface{}:
+			cloned := make(map[string]interface{}, len(value)+1)
+			for key, field := range value {
+				cloned[key] = field
+			}
+			cloned["next_action"] = ContinueParentWorkNextAction
+			metadata["synthesis_packet"] = cloned
+		}
+		body += " SynthesisPacket attached; consume the child results and continue the parent task."
 	}
+	body += " Child completion does not mean the parent task is complete; review, integrate, verify or delegate further work as needed."
 	return team.MailMessage{
 		ID:        deliveryKey,
 		FromAgent: "subagent-batch:" + batchID,

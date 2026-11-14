@@ -314,5 +314,6 @@ func TestBatchObligationSource_FeedsResumeContext(t *testing.T) {
 	require.Equal(t, 0, rc.PendingCount)
 	require.True(t, rc.Terminal)
 	require.Equal(t, ObligationStateCompleted, rc.Status)
-	require.Contains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
+	require.Contains(t, AutoWakePromptFor(rc), "请消费结果并继续主任务")
+	require.NotContains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
 }

@@ -21,13 +21,35 @@ func TestSuspendAgentWaitResultForBudgetStampsSuspendVerdict(t *testing.T) {
 	require.True(t, got.TimedOut, "an expired observation window still reports itself")
 }
 
-// TestSuspendAgentWaitResultForBudgetNeverOverridesFinalize 钉住放行方向：账本已空
-// 时 finalize 优先，预算判据不得把可以收尾的 turn 拖回挂起。
-func TestSuspendAgentWaitResultForBudgetNeverOverridesFinalize(t *testing.T) {
-	result := &AgentWaitResult{NextAction: "finalize"}
-	got := SuspendAgentWaitResultForBudget(result, 2, 2)
-	require.False(t, got.WaitBudgetExhausted)
-	require.Equal(t, "finalize", got.NextAction)
+// A drained child wait must not suspend ongoing parent work. Normalize old
+// finalize hints without bringing their parent-finalization semantics back.
+func TestSuspendAgentWaitResultForBudgetPreservesParentContinuation(t *testing.T) {
+	for _, action := range []string{ContinueParentWorkNextAction, "finalize"} {
+		got := SuspendAgentWaitResultForBudget(&AgentWaitResult{NextAction: action}, 2, 2)
+		require.False(t, got.WaitBudgetExhausted)
+		require.Equal(t, ContinueParentWorkNextAction, got.NextAction)
+	}
+}
+
+func TestWaitBudgetContinuationHintCannotHidePendingObligations(t *testing.T) {
+	rows := []AgentWaitObligation{{ObligationID: "pending-child"}}
+	agent := SuspendAgentWaitResultForBudget(&AgentWaitResult{
+		NextAction: ContinueParentWorkNextAction, Obligations: rows,
+	}, 2, 2)
+	require.True(t, agent.WaitBudgetExhausted)
+	require.Contains(t, agent.NextAction, "suspend:")
+	team := SuspendWaitTeamResultForBudget(&WaitTeamResult{
+		NextAction: ContinueParentWorkNextAction, Obligations: rows,
+	}, 2, 2)
+	require.True(t, team.WaitBudgetExhausted)
+	require.Contains(t, team.NextAction, "suspend:")
+
+	team = SuspendWaitTeamResultForBudget(&WaitTeamResult{
+		Terminal: true, NextAction: ContinueParentWorkNextAction,
+		Obligations: []AgentWaitObligation{{ObligationID: "done", Terminal: true}},
+	}, 2, 2)
+	require.False(t, team.WaitBudgetExhausted)
+	require.Equal(t, ContinueParentWorkNextAction, team.NextAction)
 }
 
 // TestSuspendAgentWaitResultForBudgetKeepsLedgerView 钉住账本视图不被预算判据冲掉：

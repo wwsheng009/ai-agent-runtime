@@ -6,10 +6,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestApplyAgentWaitLedgerFinalizesOnlyWhenNothingIsPending 钉住 I1 的唯一放行
-// 方向：账本行全部终态才允许 next_action=finalize（AC-P2-4e），且 terminal_delta
-// 只报等待段基线之后完成的行。
-func TestApplyAgentWaitLedgerFinalizesOnlyWhenNothingIsPending(t *testing.T) {
+// Terminal rows release child waiting, not the parent's remaining work.
+// terminal_delta only reports rows completed since the wait baseline.
+func TestApplyAgentWaitLedgerReleasesWaitWithoutFinalizingParent(t *testing.T) {
 	rows := []AgentWaitObligation{
 		{ObligationID: "batch-1", SubjectKind: "batch", State: "completed", Terminal: true},
 		{ObligationID: "batch-2", SubjectKind: "batch", State: "failed", Terminal: true},
@@ -23,8 +22,8 @@ func TestApplyAgentWaitLedgerFinalizesOnlyWhenNothingIsPending(t *testing.T) {
 	require.Equal(t, 2, result.TerminalCount)
 	require.Equal(t, []string{"batch-2"}, result.TerminalDelta,
 		"terminal_delta must report only obligations that finished after the baseline")
-	require.Equal(t, "finalize", result.NextAction,
-		"an all-terminal ledger is decisive: there is nothing left to wait for")
+	require.Equal(t, ContinueParentWorkNextAction, result.NextAction,
+		"an all-terminal ledger releases waiting without requiring parent finalization")
 }
 
 // TestApplyAgentWaitLedgerKeepsParentFromFinalizingWhilePending 钉住 I1 的拦截
@@ -92,8 +91,8 @@ func TestSummarizeAgentWaitLedgerCountsPendingAndDelta(t *testing.T) {
 }
 
 // TestApplyWaitTeamLedgerSharesAgentLedgerComputation 钉住 AC-P2-4g：team 视图复用
-// subagent_wait 的行/计数/增量算法，但 finalize 的放行条件更窄——只有团队本身终态
-// 且无待办任务行时才给出，避免把"尚未规划出任务的在跑团队"误判为可以收尾。
+// subagent_wait 的行/计数/增量算法；团队本身终态且无待办时只解除等待，
+// 不推导主任务已完成。
 func TestApplyWaitTeamLedgerSharesAgentLedgerComputation(t *testing.T) {
 	rows := []AgentWaitObligation{
 		{ObligationID: "task-1", SubjectKind: "team_task", State: "done", Terminal: true},
@@ -112,7 +111,7 @@ func TestApplyWaitTeamLedgerSharesAgentLedgerComputation(t *testing.T) {
 	drained := ApplyWaitTeamLedger(&WaitTeamResult{Terminal: true}, rows[:1], nil)
 	require.Equal(t, 1, drained.TerminalCount)
 	require.Equal(t, 0, drained.PendingCount)
-	require.Equal(t, "finalize", drained.NextAction)
+	require.Equal(t, ContinueParentWorkNextAction, drained.NextAction)
 
 	// 非终态团队即使没有待办行也不得给 finalize（fail-open 方向）。
 	running := ApplyWaitTeamLedger(&WaitTeamResult{Terminal: false}, rows[:1], nil)

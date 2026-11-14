@@ -3240,7 +3240,7 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 }
 
 // Wait 是 subagent_wait 的账本外壳（plan §C3-4 统一返回契约）：等待前先读一次调用方
-// （父会话）本 turn 的 obligation 账本，账本非空且已无待办时立即返回 finalize
+// （父会话）本 turn 的 obligation 账本，账本非空且已无待办时立即返回结果
 // （AC-P2-4e，不空等）；否则按旧语义等待，并在返回结果上附账本视图与
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
 func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -3254,15 +3254,15 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 		directOut = len(obligations) > 0
 	}
 	waitBudgetLimit := r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress
-	if !peek && len(obligations) > 0 && !pending && !directOut {
-		// 挂起路径的"账本已无待办 ⇒ 立即 finalize"短路（AC-P2-4e）对直出行不适用：
-		// 模型显式等待的目标需要一次快照段来拿 agent 投影（状态/输出/失败原因），
-		// 全终态时该段本就不烧窗口（与 API 宿主同口径）。
+	if len(obligations) > 0 && !pending && !directOut {
+		// Do not open a wait window, but still deliver the entire parked
+		// cohort's results so the loop can close its durable synthesis gate.
 		r.localWaitBudget.Reset(budgetKey)
-		return toolbroker.ApplyAgentWaitLedger(
-			toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now()),
-			obligations, baseline,
-		), nil
+		result, err := toolbroker.BuildTerminalAgentWaitResult(ctx, nil, obligations, baseline, r.localTerminalWaitResults)
+		if result != nil {
+			result.Peek = peek
+		}
+		return result, err
 	}
 	if !peek && len(obligations) > 0 && pending && budgetKey != "" {
 		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
@@ -3302,6 +3302,7 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 			switch {
 			case !refreshedPending:
 				r.localWaitBudget.Reset(budgetKey)
+				return toolbroker.BuildTerminalAgentWaitResult(ctx, result, obligations, baseline, r.localTerminalWaitResults)
 			case result.Interrupted:
 				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
 			default:

@@ -274,7 +274,9 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	// 而不是只有"去看摘要"的 legacy 提示。
 	require.Contains(t, prompts[0], "[supervision] resume")
 	// The turn anchor is carried structurally; the prompt speaks business.
-	require.Contains(t, prompts[0], "请直接产出终局报告")
+	require.Contains(t, prompts[0], "请消费结果并继续主任务")
+	require.NotContains(t, prompts[0], "请直接产出终局报告")
+	require.NotContains(t, prompts[0], "可以直接收尾")
 	require.Contains(t, prompts[0], batchID)
 	require.Len(t, resumed, 1, "投递成功的 resume 必须播报一次 turn.resumed")
 	require.Equal(t, parentSession, resumed[0].SessionID)

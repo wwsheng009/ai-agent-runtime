@@ -97,7 +97,8 @@ func TestBatchObligationSource_ProjectsParkedAgentSessionAndTeamObligations(t *t
 	rc = BuildResumeContext(ctx, settled, nil, ResumeContextRequest{ParentSessionID: "root-session-1"})
 	require.Equal(t, 0, rc.PendingCount)
 	require.True(t, rc.Terminal)
-	require.Contains(t, AutoWakePromptFor(rc), "可以直接收尾")
+	require.Contains(t, AutoWakePromptFor(rc), "请消费结果并继续主任务")
+	require.NotContains(t, AutoWakePromptFor(rc), "可以直接收尾")
 }
 
 func TestBatchObligationSource_ProjectsRequiredBackgroundJobs(t *testing.T) {

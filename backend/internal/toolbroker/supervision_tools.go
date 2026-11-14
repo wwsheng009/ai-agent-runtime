@@ -386,7 +386,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Description: "Read the scoped subagent ledger overview (read-only): one call returns every child/descendant row of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, attempt/max_attempts, deadlines, action_required, recommended_action, allowed_actions[] and notification_id, plus the ledger rollup pending_count / terminal_count / terminal_delta[]. " +
 				"Rows include running subagent batch tasks, projected live from the durable batch store, as well as terminal lifecycle notifications: a batch that is still working is never reported as an empty ledger. " +
 				"terminal_delta[] lists the rows that finished since your after_seq cursor, so pass the next_seq of your previous read to see only what changed. Use this as the inspection primitive instead of polling subagent_wait row by row; repeat calls are legitimate observation and are exempt from the anti-polling advisory. " +
-				"An empty ledger returns next_action=finalize immediately (no empty wait); while any row may still be pending, next_action never claims you may finalize. allowed_actions[] is per row: a control action must be one of that row's values and is re-validated by subagent_control. include_results=true attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at). " +
+				"An empty or settled ledger returns next_action=continue_parent_work (no empty wait). Child completion never requires the parent to finalize or stop using tools; consume results and continue review, integration, verification or further delegation as needed. Pending required obligations still block premature finalization. allowed_actions[] is per row: a control action must be one of that row's values and is re-validated by subagent_control. include_results=true attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at). " +
 				"Set include_digest=true to fold the scoped lifecycle digest into the same answer (critical_unresolved / action_required counts, the notification rows with their notification_id + version, the rendered text and next_seq for incremental reads); include_resolved=true additionally lists items resolved after your after_seq cursor. A digest read failure is reported as digest_error and never hides the matrix. Use the digest for lifecycle decisions with subagent_ack_lifecycle. The scope is derived from the caller's own session and cannot be widened by the model.",
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -1032,7 +1032,7 @@ func readAgentResultSummary(payload supervision.ReadResultPayload) string {
 //     the same read with limit/after_seq instead).
 func subagentStatusPayload(snapshot *supervision.Snapshot, afterSeq int64) map[string]interface{} {
 	if snapshot == nil {
-		return map[string]interface{}{"next_action": "finalize"}
+		return map[string]interface{}{"next_action": ContinueParentWorkNextAction}
 	}
 	rows := snapshot.Descendants
 	if rows == nil {
@@ -1100,26 +1100,22 @@ func digestNextAction(digest *supervision.Digest) string {
 	return "no unresolved supervision items for this session"
 }
 
-// subagentStatusNextAction is the ledger-driven next step. An empty ledger
-// (nothing pending, nothing to decide) returns finalize immediately so the
-// caller does not wait on work that does not exist (AC-P2-1c). Every other
-// state reuses the shared matrix guidance; finalize is withheld whenever any
-// row may still be in flight, which is the conservative direction of the
-// fail-open rule (§13.8): never claim a parent may finalize while work may be
-// pending.
+// subagentStatusNextAction is guidance about child supervision, not a verdict
+// on the parent task. An empty or settled ledger releases waiting; every other
+// state reuses the shared matrix guidance.
 func subagentStatusNextAction(snapshot *supervision.Snapshot, pendingCount int) string {
 	if action := supervisionDescendantsNextAction(snapshot); action != "" {
 		return action
 	}
 	if snapshot == nil {
-		return "finalize"
+		return ContinueParentWorkNextAction
 	}
 	summary := snapshot.Summary
 	if pendingCount == 0 &&
 		summary.Stalled == 0 && summary.TimedOut == 0 && summary.Orphaned == 0 &&
 		summary.Invalid == 0 && summary.Canceling == 0 &&
 		summary.ActionRequired == 0 && summary.TerminalUnacknowledged == 0 {
-		return "finalize"
+		return ContinueParentWorkNextAction
 	}
 	return ""
 }
@@ -1141,7 +1137,7 @@ func isTerminalSupervisionState(state supervision.SupervisionState) bool {
 // result cannot hide pending work.
 func subagentStatusSummary(snapshot *supervision.Snapshot, payload map[string]interface{}) string {
 	if snapshot == nil {
-		return "subagent status: empty ledger; next_action=finalize"
+		return "subagent status: empty ledger; next_action=" + ContinueParentWorkNextAction
 	}
 	pending, _ := payload["pending_count"].(int)
 	terminal, _ := payload["terminal_count"].(int)

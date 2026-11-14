@@ -97,5 +97,5 @@ func TestLocalWaitAgentDirectObligationsFinalizeWhenTargetTerminal(t *testing.T)
 	require.Len(t, result.Obligations, 1)
 	require.True(t, result.Obligations[0].Terminal)
 	require.Equal(t, string(subagentbatch.BatchCompleted), result.Obligations[0].State)
-	require.Equal(t, "finalize", result.NextAction)
+	require.Equal(t, toolbroker.ContinueParentWorkNextAction, result.NextAction)
 }

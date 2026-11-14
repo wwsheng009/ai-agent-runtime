@@ -97,13 +97,15 @@ func AgentWaitSuspendNextAction(consecutive, limit int) string {
 
 // SuspendAgentWaitResultForBudget stamps the exhausted-wait-budget verdict onto
 // an already-built wait result. The ledger view (obligations / terminal_delta /
-// counts) is preserved, and a "finalize" verdict is never overridden: when the
-// ledger is drained there is nothing to suspend for.
+// counts) is preserved. Once the child wait is drained there is nothing to
+// suspend for; the parent remains free to continue its own work.
 func SuspendAgentWaitResultForBudget(result *AgentWaitResult, consecutive, limit int) *AgentWaitResult {
 	if result == nil {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(result.NextAction), "finalize") {
+	if result.PendingCount == 0 && SummarizeAgentWaitLedger(result.Obligations, nil).PendingCount == 0 &&
+		(result.NextAction == ContinueParentWorkNextAction || isLegacyChildFinalizationAction(result.NextAction)) {
+		result.NextAction = ContinueParentWorkNextAction
 		return result
 	}
 	result.WaitBudgetExhausted = true
@@ -802,14 +804,14 @@ type AgentWaitResult struct {
 	// suspension verdict only when it is already exhausted (F7).
 	WaitBudgetConsecutive int `json:"wait_budget_consecutive,omitempty"`
 	WaitBudgetLimit       int `json:"wait_budget_limit,omitempty"`
-	// Synthesis is the compact child-result packet a parent should use to
-	// synthesize the final answer once all required obligations are terminal.
-	// It is attached to subagent_wait results and batch completion mailboxes so
-	// the parent never needs to query internal storage for child output.
+	// Synthesis delivers compact child results for the parent's next steps,
+	// including review, integration, verification, or further delegation.
 	Synthesis *SynthesisPacket `json:"synthesis,omitempty"`
-	// FinalizationRequired is true when the obligation ledger has no pending
-	// rows. It is the machine-readable form of next_action=finalize and lets the
-	// host enter a bounded synthesis phase instead of relying on prompt text.
+	// ChildrenSettled reports that the returned children and required obligation
+	// rows are terminal. It is not evidence that the parent's task is complete.
+	ChildrenSettled bool `json:"children_settled,omitempty"`
+	// Deprecated: retained for decoding older hosts only. Child completion must
+	// never force parent finalization; AttachSynthesisPacket always clears it.
 	FinalizationRequired bool `json:"finalization_required,omitempty"`
 }
 
@@ -919,8 +921,8 @@ func ApplyAgentWaitTimeout(result *AgentWaitResult, requestedMs, effectiveMs int
 // exactly what finished during the wait.
 //
 // The ledger is decisive in one direction only: when no row is pending, there
-// is nothing left to wait for, so next_action becomes "finalize" (the
-// empty-ledger rule). When rows are pending the parent must not finalize (I1),
+// is nothing left to wait for, so the parent can continue its own work.
+// When rows are pending the parent must not finalize (I1),
 // so an existing guidance string is preserved and only an empty one is filled
 // with the conservative continue_wait/inspect hint. Call this after
 // FinalizeAgentWaitResult so the ledger rule is the last word on next_action.
@@ -945,7 +947,7 @@ func ApplyAgentWaitLedger(result *AgentWaitResult, obligations []AgentWaitObliga
 	}
 	switch {
 	case view.PendingCount == 0:
-		result.NextAction = "finalize"
+		result.NextAction = ContinueParentWorkNextAction
 	case strings.TrimSpace(result.NextAction) == "":
 		if result.TimedOut {
 			result.NextAction = "continue_wait"
@@ -996,14 +998,9 @@ func SummarizeAgentWaitLedger(obligations []AgentWaitObligation, baselineTermina
 // result using the same row computation as subagent_wait (AC-P2-4g 共享实现). Rows
 // are the awaited team's tasks with subject_kind "team_task".
 //
-// It is decisive in one direction only, and deliberately narrower than the
-// subagent_wait rule: "finalize" is only stamped when the team itself is terminal
-// and no task row is pending. A non-terminal team (e.g. one that has not
-// planned its tasks yet, so the ledger is empty) must never produce "finalize",
-// and more specific guidance already on the result — such as "team is terminal
-// but summary is not ready" — is preserved instead of being flattened. This is
-// the fail-open direction of plan §13.8: never claim the parent may stop while
-// the awaited team is still running.
+// Release the wait only when the team itself is terminal and no task row is
+// pending. This does not finish the parent's task. Preserve more specific
+// guidance such as "team is terminal but summary is not ready".
 func ApplyWaitTeamLedger(result *WaitTeamResult, obligations []AgentWaitObligation, baselineTerminal []string) *WaitTeamResult {
 	if result == nil || len(obligations) == 0 {
 		return result
@@ -1015,8 +1012,9 @@ func ApplyWaitTeamLedger(result *WaitTeamResult, obligations []AgentWaitObligati
 	if len(view.TerminalDelta) > 0 {
 		result.TerminalDelta = view.TerminalDelta
 	}
-	if result.Terminal && view.PendingCount == 0 && strings.TrimSpace(result.NextAction) == "" {
-		result.NextAction = "finalize"
+	if result.Terminal && view.PendingCount == 0 &&
+		(strings.TrimSpace(result.NextAction) == "" || isLegacyChildFinalizationAction(result.NextAction)) {
+		result.NextAction = ContinueParentWorkNextAction
 	}
 	return result
 }
@@ -1050,14 +1048,15 @@ func WaitTeamSuspendNextAction(consecutive, limit int) string {
 }
 
 // SuspendWaitTeamResultForBudget stamps the exhausted-wait-budget verdict onto
-// an already-built team_wait result, preserving the task-ledger view. A
-// "finalize" verdict is never overridden: a drained ledger has nothing to
-// suspend for.
+// an already-built team_wait result, preserving the task-ledger view. A drained
+// child wait has nothing to suspend for, regardless of remaining parent work.
 func SuspendWaitTeamResultForBudget(result *WaitTeamResult, consecutive, limit int) *WaitTeamResult {
 	if result == nil {
 		return nil
 	}
-	if strings.EqualFold(strings.TrimSpace(result.NextAction), "finalize") {
+	if result.PendingCount == 0 && SummarizeAgentWaitLedger(result.Obligations, nil).PendingCount == 0 &&
+		(result.NextAction == ContinueParentWorkNextAction || isLegacyChildFinalizationAction(result.NextAction)) {
+		result.NextAction = ContinueParentWorkNextAction
 		return result
 	}
 	result.WaitBudgetExhausted = true

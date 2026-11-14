@@ -92,9 +92,8 @@ func TestBroker_Execute_SubagentStatusLedgerRollup(t *testing.T) {
 	require.Contains(t, summary, "finished since cursor: child-done")
 }
 
-func TestBroker_Execute_SubagentStatusEmptyLedgerFinalizes(t *testing.T) {
-	// AC-P2-1c: an empty ledger returns immediately with next_action=finalize
-	// instead of leaving the parent to wait on work that does not exist.
+func TestBroker_Execute_SubagentStatusEmptyLedgerContinuesParentWork(t *testing.T) {
+	// An empty child ledger must not keep waiting or end the parent's work.
 	broker := &Broker{Supervision: &fakeSupervisionController{snapshot: &supervision.Snapshot{}}}
 
 	raw, _, err := broker.Execute(context.Background(), "parent-1", ToolSubagentStatus, map[string]interface{}{})
@@ -102,7 +101,20 @@ func TestBroker_Execute_SubagentStatusEmptyLedgerFinalizes(t *testing.T) {
 	payload := subagentPayloadOf(t, raw)
 	require.Equal(t, 0, payload["pending_count"])
 	require.Equal(t, 0, payload["terminal_count"])
-	require.Equal(t, "finalize", payload["next_action"])
+	require.Equal(t, ContinueParentWorkNextAction, payload["next_action"])
+}
+
+func TestSubagentStatusSettledLedgerDoesNotFinalizeParent(t *testing.T) {
+	for _, snapshot := range []*supervision.Snapshot{
+		nil,
+		{Descendants: []supervision.SnapshotItem{
+			supervisionStatusRow("child-done", supervision.SupervisionTerminated, 1),
+		}},
+	} {
+		payload := subagentStatusPayload(snapshot, 1)
+		require.Equal(t, ContinueParentWorkNextAction, payload["next_action"])
+		require.NotContains(t, subagentStatusSummary(snapshot, payload), "next_action=finalize")
+	}
 }
 
 func TestBroker_Execute_SubagentStatusWithholdsFinalizeWhilePending(t *testing.T) {
@@ -245,6 +257,8 @@ func TestSubagentStatusToolsAreRegisteredAndNormalized(t *testing.T) {
 	require.Contains(t, status.Description, "pending_count")
 	require.Contains(t, status.Description, "terminal_delta")
 	require.Contains(t, status.Description, "finalize")
+	require.Contains(t, status.Description, "next_action=continue_parent_work")
+	require.NotContains(t, status.Description, "next_action=finalize")
 
 	inspect := supervisionDefinition(t, defs, ToolSubagentInspectTask)
 	require.Equal(t, false, inspect.Metadata[types.ToolMetadataEmptyReplayCacheKey],

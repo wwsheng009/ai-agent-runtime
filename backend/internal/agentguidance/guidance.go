@@ -36,9 +36,9 @@ const (
 	// tool description (plan line 378 / change #13): a timed-out wait is a
 	// successful observation, a pending obligation ledger forbids finalizing
 	// (I1), subagent_wait never parks a turn by itself, and a drained ledger
-	// finalizes immediately. team_wait shares the same contract with its own
+	// releases waiting without ending parent work. team_wait shares the contract
 	// subject kind, so the two wait paths cannot drift in what the model is told.
-	WaitLedgerBoundaryRule = "Semantics: timed_out is a successful observation, not the end of the turn and not a child failure, so never cancel a child because a wait timed out. When the result reports pending_count>0 you must not finalize the turn: I1 intercepts a premature finalize and converts it into a turn suspension. subagent_wait never parks a turn by itself. When the obligation ledger is empty or fully terminal the call returns immediately with next_action=finalize. team_wait follows the same contract for the awaited team: its obligations[] rows are that team's tasks with subject_kind=team_task, and a team that is not terminal is never reported as finalizable."
+	WaitLedgerBoundaryRule = "Semantics: timed_out is a successful observation, not the end of the turn and not a child failure, so never cancel a child because a wait timed out. When the result reports pending_count>0 you must not finalize the turn: I1 intercepts a premature finalize and converts it into a turn suspension. subagent_wait never parks a turn by itself. When the obligation ledger is empty or fully terminal the call returns immediately with next_action=continue_parent_work: consume available results and continue the parent's task, including review, integration, verification or further delegation. Child completion never requires the parent to finalize or stop using tools; finalize only when the parent's own task is complete. team_wait follows the same contract for the awaited team: its obligations[] rows are that team's tasks with subject_kind=team_task, and a team that is not terminal is never reported as settled."
 
 	// WaitResultEchoNote documents the fields that make a bounded wait
 	// auditable, so a shortened observation is never silent.

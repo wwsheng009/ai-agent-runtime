@@ -1,6 +1,6 @@
 # 主 Agent / 子 Agent 收尾机制优化建议（2026-11-04）
 
-- 状态：`P0/P1 implemented; P2 peek implemented, metrics/UI pending`
+- 状态：`2026-11-12 corrected: child completion does not finalize parent; historical synthesis gate superseded`
 - 日期：2026-11-04
 - 范围：父 turn 的 obligation / finalization、子 Agent 批次完成后的 resume、结果包、收尾阶段、可观测性
 - 关联文档：
@@ -16,6 +16,30 @@
   - `backend/internal/agent/loop.go`
   - `backend/cmd/aicli/commands/exec_finalization.go`
   - `backend/internal/supervision/`
+
+## 2026-11-12 契约纠正（优先于下文历史设计）
+
+**子 Agent 的结束只交付结果并解除等待，不代表主 Agent 的任务已完成。**
+下文关于“全部 terminal 后必须进入 SYNTHESIZING、禁止工具、两次拒绝后
+`synthesis_budget_exhausted`”的设计与验收条件已废止，不得重新引入。
+
+- 删除 ReActLoop 的终态强制收尾状态、全工具拒绝及两次拒绝熔断。
+- `subagent_wait` / `team_wait` 的终态账本以及空/已结清的 `subagent_status`
+  改用 `next_action=continue_parent_work`，不再要求主任务 finalize。
+- completion mailbox、恢复唤醒和共享工具说明统一要求消费结果后继续主任务；
+  主 Agent 可继续审查、补丁、验证、合并工作树、关闭子会话或派发后续阶段。
+- 保留 `SynthesisPacket` 作为结果载体。新增 `children_settled` 事实字段；
+  `finalization_required` 只兼容读取旧结果，刷新时清除，不再控制执行。
+- 保留 `ResultsConsumed`、durable obligations 和 I1：主 Agent 自己决定结束时，
+  若仍有 required obligation 未终态，继续由已有最终化门挂起/恢复。
+- 防空转仍由普通运行预算、重复调用/等待护栏负责，不能将正常后续工作
+  与无进展探索一并禁止。
+
+回归覆盖：成功/失败/取消/超时的子结果之后，主循环继续执行多轮工具并自行
+最终回复；旧终态字段不恢复门禁；CLI/API 的 wait、mailbox 和 wake 文案一致；
+新增 pending obligation 后结清事实失效，未完成子任务的保护继续有效。
+
+以下内容保留为原始故障与实现历史，不代表现行的主 Agent 结束策略。
 
 ## 1. 结论摘要
 
