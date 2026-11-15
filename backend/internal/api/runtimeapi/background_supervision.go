@@ -2,7 +2,6 @@ package runtimeapi
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -48,24 +47,16 @@ func (h *Handler) projectBackgroundJobTerminal(parent context.Context, event bac
 
 	command, observed := h.backgroundJobDigestInfo(ctx, jobID)
 	origin := h.backgroundJobOrigin(ctx, jobID)
-	_, _ = supervision.ProjectBackgroundJobTerminal(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobTerminalInput{
-		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
-		TargetParentSessionID: sessionID,
-		JobID:                 jobID,
-		ParentTurnID:          origin.ParentTurnID,
-		ParentEpisodeID:       origin.ParentEpisodeID,
-		SettlementID:          origin.SettlementID,
-		SettlementCohortID:    origin.SettlementCohortID,
-		FinalizationPolicy:    origin.FinalizationPolicy,
-		Status:                event.Type,
-		Command:               command,
-		ExitCode:              backgroundJobPayloadString(event.Payload["exit_code"]),
-		ErrorCode:             backgroundJobPayloadString(event.Payload["error_code"]),
-		Message:               backgroundJobPayloadString(event.Payload["message"]),
-		CancelSource:          backgroundJobPayloadString(event.Payload["cancel_source"]),
-		Observed:              observed,
-		Epoch:                 backgroundJobTerminalEpoch(event),
-	})
+	rootScopeID := h.backgroundJobRootScope(ctx, sessionID)
+	_, err := supervision.ProjectBackgroundJobTerminal(ctx, store, h.getSupervisionWakeScheduler(),
+		supervision.BackgroundJobTerminalInputFromEvent(
+			event, sessionID, rootScopeID, command, observed, origin))
+	if err != nil || observed {
+		return
+	}
+	// Same one-shot delivery attempt as the CLI host. Busy/rate-limited
+	// parents keep the durable wake for the next runnable transition.
+	_ = h.drainSupervisedParentWake(ctx, rootScopeID, sessionID)
 }
 
 // projectBackgroundJobMonitor is the API host adapter for a scheduled job check:
@@ -95,39 +86,13 @@ func (h *Handler) projectBackgroundJobMonitor(parent context.Context, event back
 
 	command, _ := h.backgroundJobDigestInfo(ctx, jobID)
 	origin := h.backgroundJobOrigin(ctx, jobID)
-	_, _ = supervision.ProjectBackgroundJobMonitor(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobMonitorInput{
-		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
-		TargetParentSessionID: sessionID,
-		JobID:                 jobID,
-		ParentTurnID:          origin.ParentTurnID,
-		ParentEpisodeID:       origin.ParentEpisodeID,
-		SettlementID:          origin.SettlementID,
-		SettlementCohortID:    origin.SettlementCohortID,
-		FinalizationPolicy:    origin.FinalizationPolicy,
-		Status:                backgroundJobPayloadString(event.Payload["status"]),
-		Command:               command,
-		Elapsed:               backgroundJobPayloadDuration(event.Payload["elapsed_ms"]),
-		CheckAfter:            backgroundJobPayloadDuration(event.Payload["check_after_ms"]),
-		MaxDuration:           backgroundJobPayloadDuration(event.Payload["max_duration_ms"]),
-		Epoch:                 backgroundJobTerminalEpoch(event),
-	})
-}
-
-// backgroundJobPayloadDuration reads a millisecond payload field as a duration:
-// the manager writes int64, while a JSON round trip can hand back float64.
-func backgroundJobPayloadDuration(value interface{}) time.Duration {
-	switch typed := value.(type) {
-	case time.Duration:
-		return typed
-	case int64:
-		return time.Duration(typed) * time.Millisecond
-	case int:
-		return time.Duration(typed) * time.Millisecond
-	case float64:
-		return time.Duration(typed) * time.Millisecond
-	default:
-		return 0
+	rootScopeID := h.backgroundJobRootScope(ctx, sessionID)
+	_, err := supervision.ProjectBackgroundJobMonitor(ctx, store, h.getSupervisionWakeScheduler(),
+		supervision.BackgroundJobMonitorInputFromEvent(event, sessionID, rootScopeID, command, origin))
+	if err != nil {
+		return
 	}
+	_ = h.drainSupervisedParentWake(ctx, rootScopeID, sessionID)
 }
 
 // releaseSessionSupervisionObligations 在会话关闭/删除时收口监督面：作废本会话的
@@ -176,19 +141,6 @@ func (h *Handler) backgroundJobRootScope(ctx context.Context, sessionID string) 
 	return sessionID
 }
 
-// backgroundJobTerminalEpoch is the stable per-transition identity used as the
-// notification subject version and wake terminal epoch. The manager stamps
-// every event with CreatedAt, so replaying the same event keeps the epoch while
-// a genuinely new terminal transition (a rerun) gets a new one.
-func backgroundJobTerminalEpoch(event background.JobEvent) int64 {
-	if !event.CreatedAt.IsZero() {
-		if epoch := event.CreatedAt.UTC().UnixNano(); epoch > 0 {
-			return epoch
-		}
-	}
-	return time.Now().UTC().UnixNano()
-}
-
 // backgroundJobDigestInfo reads the job's command for the digest reason plus
 // whether the terminal state was already observed by an in-flight task_output
 // wait (in which case the projection records the inbox item without scheduling
@@ -230,14 +182,4 @@ func (h *Handler) backgroundJobOrigin(ctx context.Context, jobID string) backgro
 		return background.JobOrigin{}
 	}
 	return background.JobOriginFromMetadata(job.Metadata)
-}
-
-func backgroundJobPayloadString(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	return fmt.Sprintf("%v", value)
 }

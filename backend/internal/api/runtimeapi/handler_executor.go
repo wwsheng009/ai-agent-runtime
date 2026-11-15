@@ -85,9 +85,7 @@ func (e *handlerExecutor) Close(context.Context) error {
 	if e == nil || e.handler == nil {
 		return nil
 	}
-	if hub := e.handler.getSessionHub(); hub != nil {
-		hub.StopAll()
-	}
+	e.handler.CloseSessionHub()
 	return nil
 }
 

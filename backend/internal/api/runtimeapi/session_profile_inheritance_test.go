@@ -162,7 +162,7 @@ func TestApplyAPIChildAgentdefToolPolicy_NeverWidensParentProfileAllowlist(t *te
 	apiAgent := agent.NewAgent(&agent.Config{Name: "child", Provider: "test", Model: "test"}, nil)
 	apiAgent.SetToolExecutionPolicy(parentPolicy)
 
-	applyAPIChildAgentdefToolPolicy(apiAgent, "explore", t.TempDir())
+	applyAPIChildAgentdefToolPolicy(apiAgent, "explore", t.TempDir(), "")
 
 	child := apiAgent.GetToolExecutionPolicy()
 	require.NotNil(t, child)

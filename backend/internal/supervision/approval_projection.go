@@ -112,6 +112,12 @@ func ProjectApprovalRequest(ctx context.Context, store Store, wakes *WakeSchedul
 	if notice.RequestID == "" {
 		return Notification{}, fmt.Errorf("supervision: request id is required")
 	}
+	if !notice.ExpiresAt.IsZero() && !time.Now().Before(notice.ExpiresAt) {
+		// A delayed event for an already-expired approval must not create a
+		// critical, wake-generating inbox row. The actor/timer owns the
+		// resolution; this projection would otherwise resurrect it.
+		return Notification{}, nil
+	}
 	eventType := EventAgentApprovalRequested
 	severity := SeverityCritical
 	recommended := string(ActionInspect)
@@ -223,6 +229,12 @@ func ApprovalResolutionFromPayload(payload map[string]interface{}) string {
 		switch strings.ToLower(strings.TrimSpace(text)) {
 		case "expired":
 			return "expired"
+		case "run_terminated":
+			return "run_terminated"
+		case "run_terminal_no_resume":
+			return "run_terminal_no_resume"
+		case "interrupted":
+			return "interrupted"
 		}
 	}
 	if allowed, ok := payload["allowed"].(bool); ok && !allowed {

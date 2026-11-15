@@ -15,6 +15,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentstatus"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -3212,6 +3213,9 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
+	if session, loadErr := r.loadLocalAgentSessionMetadata(ctx, sessionID); loadErr == nil && isClosedLocalAgentSession(session) {
+		return nil, fmt.Errorf("agent session %s is closed", sessionID)
+	}
 	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
 	if err != nil {
 		return nil, err
@@ -3226,7 +3230,8 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 	}
 	// A decision against an already-terminated run is recorded but never applied,
 	// so it is reported as not allowed (P0-3).
-	allowed := args.Allow
+	resolved := strings.TrimSpace(resolution) != ""
+	allowed := args.Allow && resolved
 	if toolbroker.ApprovalResolutionNotApplied(resolution) {
 		allowed = false
 	}
@@ -3234,7 +3239,7 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 		SessionID:  sessionID,
 		RequestID:  requestID,
 		Allowed:    allowed,
-		Resolved:   true,
+		Resolved:   resolved,
 		Resumed:    resumed,
 		Resolution: resolution,
 		Status:     status,
@@ -3246,78 +3251,14 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 // （AC-P2-4e，不空等）；否则按旧语义等待，并在返回结果上附账本视图与
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
 func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
-	obligations, baseline, pending, budgetKey := r.localWaitLedger(ctx)
-	directOut := false
-	peek := args.Peek
-	if len(obligations) == 0 {
-		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
-		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
-		obligations, baseline, pending = r.localWaitTargetObligations(ctx, args)
-		directOut = len(obligations) > 0
-	}
-	waitBudgetLimit := r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress
-	if len(obligations) > 0 && !pending && !directOut {
-		// Do not open a wait window, but still deliver the entire parked
-		// cohort's results so the loop can close its durable synthesis gate.
-		r.localWaitBudget.Reset(budgetKey)
-		result, err := toolbroker.BuildTerminalAgentWaitResult(ctx, nil, obligations, baseline, r.localTerminalWaitResults)
-		if result != nil {
-			result.Peek = peek
-		}
-		return result, err
-	}
-	if !peek && len(obligations) > 0 && pending && budgetKey != "" {
-		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
-		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
-		// 收尾门兜底——subagent_wait 自身不挂起 turn。
-		if consecutive, exhausted := r.localWaitBudget.Exhausted(budgetKey, waitBudgetLimit); exhausted {
-			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
-			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-			return toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit), nil
-		}
-	}
-	result, err := r.waitForLocalAgentObserved(ctx, args)
-	if err != nil || result == nil {
-		return result, err
-	}
-	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-	if peek {
-		if result != nil {
-			result.Peek = true
-		}
-		return result, nil
-	}
-	if len(obligations) > 0 {
-		// 等待段结束后复读账本：terminal_delta 的语义是"本段内新终态"，而预读
-		// 快照的行状态停留在等待前，不复读就永远是空的——这会把等待期间已经
-		// 完成的子任务记成"无进展"，连续几次后误触挂起判据（§16.2/§16.3）。
-		refreshed, _, refreshedPending, refreshedKey := r.localWaitLedger(ctx)
-		switch {
-		case refreshedKey == "":
-			// 复读失败：fail-open，本段不计入预算（不把读不到账本谎报成"无进展"）。
-		case len(refreshed) == 0:
-			// 挂起记录已消失 ⇒ 账本在本段内清空，同样属于进展。
-			r.localWaitBudget.Reset(budgetKey)
-		default:
-			obligations = refreshed
-			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-			switch {
-			case !refreshedPending:
-				r.localWaitBudget.Reset(budgetKey)
-				return toolbroker.BuildTerminalAgentWaitResult(ctx, result, obligations, baseline, r.localTerminalWaitResults)
-			case result.Interrupted:
-				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
-			default:
-				consecutive, exhausted := r.localWaitBudget.Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
-				// F7: always expose the observed budget, not only the exhausted verdict.
-				result = toolbroker.StampAgentWaitBudget(result, consecutive, waitBudgetLimit)
-				if exhausted {
-					result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
-				}
-			}
-		}
-	}
-	return result, nil
+	return (toolbroker.AgentWaitFlow{
+		Budget:       &r.localWaitBudget,
+		BudgetLimit:  r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress,
+		Ledger:       r.localWaitLedger,
+		TargetLedger: r.localWaitTargetObligations,
+		Wait:         r.waitForLocalAgentObserved,
+		TerminalRead: r.localTerminalWaitResults,
+	}).Run(ctx, args)
 }
 
 func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -3871,83 +3812,26 @@ func (r *localActorRegistry) readEventsResolved(ctx context.Context, args toolbr
 		}
 		sessionID = resolvedSessionID
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = 20
-	}
-	waitMs := args.WaitMs
-	if waitMs < 0 {
-		waitMs = 0
-	}
-	readCtx := ctx
-	cancel := func() {}
-	if waitMs > 0 {
-		readCtx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
-	}
-	defer cancel()
-	wakeCh, unsubscribe := r.subscribeLocalAgentReadEvents(readCtx, sessionID)
-	if args.MailboxOnly {
-		unsubscribe()
-		wakeCh, unsubscribe = r.subscribeLocalAgentMailboxEvents(readCtx, sessionID)
-	}
-	defer unsubscribe()
-	for {
-		if args.MailboxOnly {
-			if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(readCtx, sessionID, args.AfterSeq, limit+1); err != nil {
-				if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
-					return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, true)
-				}
-				return nil, err
-			} else if ok {
-				// The extra row only signals that more events are queued; mailbox
-				// unread counts stay unset because presentation seq and
-				// session-mailbox seq are distinct sequences.
-				hasMore := len(events) > limit
-				if hasMore {
-					events = events[:limit]
-				}
-				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
-					return toolbroker.ApplyAgentEventsPagination(buildLocalAgentEventsResult(sessionID, events), hasMore, 0), nil
-				}
-				if hasMailboxRows {
-					select {
-					case <-readCtx.Done():
-						return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, true)
-					case <-wakeCh:
-					case <-time.After(500 * time.Millisecond):
-					}
-					continue
-				}
+	return (toolbroker.AgentEventsFlow{
+		Resolve: r.resolveLocalAgentTargetSessionID,
+		Subscribe: func(readCtx context.Context, sid string, mailboxOnly bool) (<-chan struct{}, func()) {
+			if mailboxOnly {
+				return r.subscribeLocalAgentMailboxEvents(readCtx, sid)
 			}
-		}
-		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit+1)
-		if err != nil {
-			if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
-				return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, args.MailboxOnly)
-			}
-			return nil, err
-		}
-		if args.MailboxOnly {
-			events = filterLocalAgentMailboxWaitEvents(events)
-		}
-		hasMore := len(events) > limit
-		if hasMore {
-			events = events[:limit]
-		}
-		if len(events) > 0 || waitMs == 0 {
-			result := buildLocalAgentEventsResult(sessionID, events)
-			if hasMore {
-				return toolbroker.ApplyAgentEventsPagination(result, true, r.localAgentEventsUnreadCount(ctx, sessionID, result.LatestSeq)), nil
-			}
-			return result, nil
-		}
-		select {
-		case <-readCtx.Done():
-			return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, args.MailboxOnly)
-		case <-wakeCh:
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+			return r.subscribeLocalAgentReadEvents(readCtx, sid)
+		},
+		List: func(readCtx context.Context, sid string, after int64, limit int) ([]runtimeevents.Event, error) {
+			return r.Host.EventStore.ListEvents(readCtx, sid, after, limit)
+		},
+		ListMailbox: func(readCtx context.Context, sid string, after int64, limit int) ([]runtimeevents.Event, bool, bool, error) {
+			return r.listLocalAgentMailboxEvents(readCtx, sid, after, limit)
+		},
+		FilterMailbox: filterLocalAgentMailboxWaitEvents,
+		Build:         buildLocalAgentEventsResult,
+		Unread: func(ctx context.Context, sid string, after int64) int {
+			return r.localAgentEventsUnreadCount(ctx, sid, after)
+		},
+	}).Run(ctx, sessionID, args)
 }
 
 func filterLocalAgentMailboxWaitEvents(events []runtimeevents.Event) []runtimeevents.Event {
@@ -4781,22 +4665,7 @@ func (r *localActorRegistry) agentSnapshot(ctx context.Context, sessionID string
 }
 
 func applyLocalAgentRuntimeState(result *toolbroker.AgentStatusResult, state runtimechat.RuntimeStateSummary) {
-	if result == nil {
-		return
-	}
-	result.Status = string(state.Status)
-	result.PendingApproval = state.PendingApproval
-	if state.PendingApproval {
-		result.PendingApprovalID = strings.TrimSpace(state.PendingApprovalID)
-		result.PendingApprovalReason = strings.TrimSpace(state.PendingApprovalReason)
-		result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApprovalRiskLevel)
-	}
-	result.PendingQuestion = state.PendingQuestion
-	result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
-	if state.PendingTool {
-		result.PendingToolName = strings.TrimSpace(state.PendingToolName)
-		result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
-	}
+	agentstatus.ApplyRuntimeState(result, state)
 }
 
 func (r *localActorRegistry) enrichAgentTeamProjection(ctx context.Context, session *runtimechat.Session, result *toolbroker.AgentStatusResult) error {
@@ -5527,56 +5396,7 @@ func truncateLocalAgentStatusPreview(content string) string {
 // interrupt/lock errors that should surface as soft TimedOut results instead of
 // hard tool failures during subagent_events waits.
 func isLocalAgentReadWaitInterrupted(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	if ctx != nil && (stderrors.Is(ctx.Err(), context.Canceled) || stderrors.Is(ctx.Err(), context.DeadlineExceeded)) {
-		return true
-	}
-	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
-	if message == "" {
-		return false
-	}
-	if strings.Contains(message, "sqlite3: interrupted") ||
-		strings.Contains(message, "database operation interrupted") {
-		return true
-	}
-	return team.IsSQLiteLockError(err)
-}
-
-// softTimeoutLocalAgentEvents performs a best-effort final list with the parent
-// context (no wait budget) and returns TimedOut=true when no events are available.
-func (r *localActorRegistry) softTimeoutLocalAgentEvents(ctx context.Context, sessionID string, afterSeq int64, limit int, mailboxOnly bool) (*toolbroker.AgentEventsResult, error) {
-	parentCtx := ctx
-	if parentCtx == nil {
-		parentCtx = context.Background()
-	}
-	if mailboxOnly {
-		if events, ok, _, err := r.listLocalAgentMailboxEvents(parentCtx, sessionID, afterSeq, limit); err == nil && ok {
-			if len(events) > 0 {
-				return buildLocalAgentEventsResult(sessionID, events), nil
-			}
-		}
-	}
-	if r != nil && r.Host != nil && r.Host.EventStore != nil {
-		if events, err := r.Host.EventStore.ListEvents(parentCtx, sessionID, afterSeq, limit); err == nil {
-			if mailboxOnly {
-				events = filterLocalAgentMailboxWaitEvents(events)
-			}
-			if len(events) > 0 {
-				return buildLocalAgentEventsResult(sessionID, events), nil
-			}
-		}
-	}
-	result := buildLocalAgentEventsResult(sessionID, nil)
-	result.TimedOut = true
-	// buildLocalAgentEventsResult finalizes the empty non-timeout path; re-finalize
-	// after marking TimedOut so timeout-specific next_action wins.
-	result.NextAction = ""
-	return toolbroker.FinalizeAgentEventsResult(result), nil
+	return toolbroker.IsAgentEventsWaitInterrupted(ctx, err)
 }
 
 // localAgentEventsUnreadCount probes how many events remain beyond a returned
@@ -5594,36 +5414,7 @@ func (r *localActorRegistry) localAgentEventsUnreadCount(ctx context.Context, se
 }
 
 func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {
-	result := &toolbroker.AgentEventsResult{
-		SessionID: strings.TrimSpace(sessionID),
-		Count:     len(events),
-	}
-	if len(events) == 0 {
-		return toolbroker.FinalizeAgentEventsResult(result)
-	}
-	items := make([]toolbroker.AgentEventItem, 0, len(events))
-	var latestSeq int64
-	for _, event := range events {
-		item := toolbroker.AgentEventItem{
-			Type:      event.Type,
-			TraceID:   event.TraceID,
-			SessionID: event.SessionID,
-			ToolName:  event.ToolName,
-			AgentName: event.AgentName,
-			Timestamp: event.Timestamp,
-			Payload:   cloneRuntimeEventPayload(event.Payload),
-		}
-		if seq := localAgentEventSeq(event); seq > 0 {
-			item.Seq = seq
-			if seq > latestSeq {
-				latestSeq = seq
-			}
-		}
-		items = append(items, item)
-	}
-	result.Events = items
-	result.LatestSeq = latestSeq
-	return toolbroker.FinalizeAgentEventsResult(result)
+	return toolbroker.BuildAgentEventsResult(sessionID, events)
 }
 
 func buildLocalAgentMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {
@@ -5654,22 +5445,6 @@ func isLocalAgentMailboxWaitEvent(event runtimeevents.Event) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func localAgentEventSeq(event runtimeevents.Event) int64 {
-	if event.Payload == nil {
-		return 0
-	}
-	switch value := event.Payload["seq"].(type) {
-	case int64:
-		return value
-	case int:
-		return int64(value)
-	case float64:
-		return int64(value)
-	default:
-		return 0
 	}
 }
 

@@ -49,6 +49,22 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 	// on the same session for up to the hub idle TTL, which previously caused
 	// same-session 409 self-conflicts even without any concurrent execution.
 	var leaseMu sync.Mutex
+	var (
+		actor *chat.SessionActor
+		err   error
+	)
+	watchLease := func(handle *chat.SessionLeaseHandle) {
+		if handle == nil || actor == nil {
+			return
+		}
+		go func() {
+			select {
+			case <-handle.Lost():
+				actor.MarkLeaseLost(handle.LostError())
+			case <-handle.Done():
+			}
+		}()
+	}
 	ensureLease := func(ctx context.Context) error {
 		leaseMu.Lock()
 		defer leaseMu.Unlock()
@@ -60,6 +76,8 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 			return err
 		}
 		leaseHandle = next
+		actor.ClearLeaseLost()
+		watchLease(next)
 		return nil
 	}
 	releaseLease := func() {
@@ -78,7 +96,13 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 	if deps.LeaseMode.ReleasesOnRunFinished() {
 		onRunFinished = releaseLease
 	}
-	actor, err := chat.NewSessionActor(sessionID, chat.SessionActorConfig{
+	var cleanupOnce sync.Once
+	runCleanup := func() {
+		if deps.Cleanup != nil {
+			cleanupOnce.Do(deps.Cleanup)
+		}
+	}
+	actor, err = chat.NewSessionActor(sessionID, chat.SessionActorConfig{
 		Agent:                 apiAgent,
 		LLMRuntime:            deps.LLMRuntime,
 		SessionStore:          sessionStore,
@@ -105,10 +129,12 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 		OnRunFinished: onRunFinished,
 		OnStop: func() {
 			releaseLease()
+			runCleanup()
 		},
 	})
 	if err != nil {
 		releaseLease()
+		runCleanup()
 		return nil, err
 	}
 	// Actor construction (including loadState/RecoverStale) is complete and
@@ -117,6 +143,11 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 	// E3.4-0：actor-scoped 模式**不**在此释放（aicli 在 actor 生命周期内持锁）。
 	if deps.LeaseMode.ReleasesAfterConstruction() {
 		releaseLease()
+	} else {
+		leaseMu.Lock()
+		initialLease := leaseHandle
+		leaseMu.Unlock()
+		watchLease(initialLease)
 	}
 	return actor, nil
 }

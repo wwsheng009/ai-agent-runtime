@@ -9,9 +9,8 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryassembly"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -19,88 +18,23 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 	if h == nil || h.RuntimeConfig == nil || session == nil || session.SessionManager == nil {
 		return nil
 	}
-	mode := strings.ToLower(strings.TrimSpace(h.RuntimeConfig.Memory.Mode))
-	if mode != "shadow" && mode != "on" {
-		return nil
-	}
 	if h.Bootstrap == nil || h.Bootstrap.LLMRuntime() == nil {
 		return fmt.Errorf("memoryruntime: LLM runtime is not configured")
 	}
 	workspace := resolveLocalWorkspacePath(h.RuntimeConfig, session)
-	if strings.TrimSpace(workspace) == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			workspace = cwd
-		}
-	}
-	memoryCfg := h.RuntimeConfig.Memory
-	store, err := memorystore.New(memorystore.Config{
-		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:            memoryCfg.Injection.Mode,
-		PinnedBudgetRatio:        memoryCfg.Injection.PinnedBudgetRatio,
-		DisableStageSplit:        !memoryCfg.Injection.StageSplit,
-		DisableInjection:         !memoryCfg.Injection.Enabled,
-		DisableManual:            !memoryCfg.Manual.Enabled,
-		RecallTraceEnabled:       memoryCfg.Injection.RecallTrace.Enabled,
-		RecallTraceSampleRate:    memoryCfg.Injection.RecallTrace.SampleRate,
-		RecallTraceRetentionDays: memoryCfg.Injection.RecallTrace.RetentionDays,
-		ExposureRetentionDays:    memoryCfg.Feedback.ExposureRetentionDays,
-		Retention:                memorypolicy.StoreRetention(memoryCfg),
-		StaleBehavior:            memorypolicy.StaleBehavior(memoryCfg),
-		DisableSecretFilter:      memorypolicy.DisableSecretFilter(memoryCfg),
-		TurnDigestBatchSize:      memoryCfg.Generation.TurnDigest.MaxTurnsPerBatch,
+	rt, err := memoryassembly.BuildFromRuntimeConfig(memoryassembly.BuildOptions{
+		RuntimeConfig:  h.RuntimeConfig,
+		Workspace:      workspace,
+		SessionManager: session.SessionManager,
+		LLMRuntime:     h.Bootstrap.LLMRuntime(),
+		UserID:         session.SessionUserID,
+		WorkerID:       fmt.Sprintf("aicli-%d", os.Getpid()),
 	})
-	if err != nil {
+	if err != nil || rt == nil {
 		return err
 	}
-	generation := memoryCfg.Generation
-	cfg := memoryruntime.Config{
-		Mode: mode, GenerationDisabled: !generation.Enabled,
-		Workspace: workspace, ProjectKey: store.ProjectKey(),
-		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
-		MinIdle:                        time.Duration(generation.MinIdleHours) * time.Hour,
-		MaxSessionsPerRun:              generation.MaxSessionsPerRun,
-		MaxRolloutAge:                  time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
-		MaxCandidatesPerSession:        generation.MaxRecordsPerSession,
-		MaxAttempts:                    3,
-		ConsolidationDisabled:          !memoryCfg.Consolidation.Enabled,
-		ConsolidationInterval:          time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
-		MaxConsolidationRecords:        memoryCfg.Consolidation.MaxRecords,
-		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
-		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
-		ConsolidationModel:             memoryCfg.Consolidation.Model,
-		ConsolidationReasoningEffort:  memoryCfg.Consolidation.ReasoningEffort,
-		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
-		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
-		ExtractionModel:                generation.Model,
-		ExtractionReasoningEffort:      generation.ReasoningEffort,
-		WindowSummaryReasoningEffort:   generation.TurnDigest.ReasoningEffort,
-		TurnDigestEnabled:              generation.TurnDigest.Enabled,
-		TurnDigestStoreText:            generation.TurnDigest.StoreText,
-		TurnDigestMaxUserChars:         generation.TurnDigest.MaxUserChars,
-		TurnDigestMaxAssistantChars:    generation.TurnDigest.MaxAssistantChars,
-		TurnDigestRetentionDays:        generation.TurnDigest.RetentionDays,
-		TurnDigestMaxPendingPerSession: generation.TurnDigest.MaxPendingPerSession,
-		TurnDigestMaxTurnsPerBatch:     generation.TurnDigest.MaxTurnsPerBatch,
-		TurnDigestMaxBytesPerBatch:     generation.TurnDigest.MaxBytesPerBatch,
-		TurnDigestMaxDigestsPerRun:     generation.TurnDigest.MaxDigestsPerRun,
-		TurnDigestExtractEveryNTurns:   generation.TurnDigest.ExtractEveryNTurns,
-		TurnDigestIdleExtractMinutes:   generation.TurnDigest.IdleExtractMinutes,
-		TurnDigestRecoveryOnStartup:    generation.TurnDigest.RecoveryOnStartup,
-		TurnDigestWindowSummaryEnabled: generation.TurnDigest.WindowSummaryEnabled,
-		TurnDigestWindowTurns:          generation.TurnDigest.WindowTurns,
-		TurnDigestWindowRetentionDays:  generation.TurnDigest.WindowRetentionDays,
-		WorkerID:                       fmt.Sprintf("aicli-%d", os.Getpid()),
-	}
-	cfg = memorypolicy.ApplyRuntime(memoryCfg, cfg)
-	cfg = memoryruntime.WithLLMProjectSummarizer(cfg, h.Bootstrap.LLMRuntime())
-	source := &memoryruntime.ChatSessionSource{
-		Manager: session.SessionManager, UserID: session.SessionUserID,
-	}
-	extractor := &memoryruntime.LLMExtractor{Runtime: h.Bootstrap.LLMRuntime(), Config: cfg}
-	rt := memoryruntime.New(store, source, extractor, store, cfg)
-	rt.WindowSummarizer = &memoryruntime.LLMWindowSummarizer{Runtime: h.Bootstrap.LLMRuntime(), Config: cfg}
 	h.MemoryRuntime = rt
-	h.cleanupFns = append(h.cleanupFns, func() { _ = store.Close() })
+	h.cleanupFns = append(h.cleanupFns, func() { _ = rt.Store.Close() })
 	h.bindMemoryDigestInvalidation()
 	return nil
 }
@@ -129,86 +63,39 @@ func (h *localChatRuntimeHost) bindMemoryDigestInvalidation() {
 	}
 }
 
-func (h *localChatRuntimeHost) startMemoryIdleSweep() {
+func (h *localChatRuntimeHost) startMemoryIdleSweep() func() {
 	if h == nil || h.MemoryRuntime == nil || h.RuntimeConfig == nil || h.lifecycleCtx == nil {
-		return
+		return func() {}
 	}
-	generation := h.RuntimeConfig.Memory.Generation
-	trigger := strings.ToLower(strings.TrimSpace(generation.Trigger))
-	idleEnabled := generation.Enabled && (trigger == "idle" || trigger == "both")
-	consolidationEnabled := h.RuntimeConfig.Memory.Consolidation.Enabled
-	retentionEnabled := h.RuntimeConfig.Memory.Injection.RecallTrace.RetentionDays > 0 ||
-		h.RuntimeConfig.Memory.Feedback.ExposureRetentionDays > 0
-	lifecycleEnabled := h.RuntimeConfig.Memory.Retention.Enabled
-	freshnessEnabled := h.RuntimeConfig.Memory.Freshness.Enabled
-	freshnessInterval := time.Duration(h.RuntimeConfig.Memory.Freshness.RevalidateIntervalHours) * time.Hour
-	if freshnessInterval <= 0 {
-		freshnessInterval = 24 * time.Hour
+	return memoryassembly.StartMaintenance(h.lifecycleCtx, memoryassembly.MaintenanceOptions{
+		Runtime: h.MemoryRuntime,
+		Config:  h.RuntimeConfig,
+		Host:    localMemoryMaintenanceHost{host: h},
+		OnError: func(stage string, err error) {
+			logpkg.Warnf("memory maintenance failed: stage=%s: %v", stage, err)
+		},
+	})
+}
+
+type localMemoryMaintenanceHost struct {
+	host *localChatRuntimeHost
+}
+
+func (h localMemoryMaintenanceHost) RunIdle(ctx context.Context) error {
+	if h.host == nil || h.host.MemoryRuntime == nil {
+		return nil
 	}
-	turnDigestEnabled := generation.Enabled && generation.TurnDigest.Enabled
-	startupRecoveryEnabled := turnDigestEnabled && generation.TurnDigest.RecoveryOnStartup
-	idleExtractMinutes := h.MemoryRuntime.Config.TurnDigestIdleExtractMinutes
-	if idleExtractMinutes <= 0 {
-		idleExtractMinutes = 30
+	_, err := h.host.MemoryRuntime.Run(ctx, memoryruntime.TriggerIdle)
+	return err
+}
+
+func (h localMemoryMaintenanceHost) RunConsolidation(ctx context.Context) error {
+	if h.host == nil || h.host.MemoryRuntime == nil {
+		return nil
 	}
-	if !idleEnabled && !consolidationEnabled && !retentionEnabled && !lifecycleEnabled && !turnDigestEnabled && !freshnessEnabled {
-		return
-	}
-	go func() {
-		if startupRecoveryEnabled {
-			recoveryCtx, recoveryCancel := context.WithTimeout(h.lifecycleCtx, 2*time.Minute)
-			_, _ = h.MemoryRuntime.RunPendingTurnDigests(recoveryCtx, memoryruntime.TriggerStartup)
-			recoveryCancel()
-		}
-		if freshnessEnabled {
-			_, _ = h.MemoryRuntime.SweepFreshness(h.lifecycleCtx)
-		}
-		digestEnabled := idleEnabled || turnDigestEnabled
-		maintenanceEnabled := consolidationEnabled || retentionEnabled || lifecycleEnabled || freshnessEnabled
-		lastFreshnessSweep := time.Now()
-		var digestTicker, maintenanceTicker *time.Ticker
-		var digestTick, maintenanceTick <-chan time.Time
-		if digestEnabled {
-			digestTicker = time.NewTicker(time.Duration(idleExtractMinutes) * time.Minute)
-			digestTick = digestTicker.C
-			defer digestTicker.Stop()
-		}
-		if maintenanceEnabled {
-			maintenanceTicker = time.NewTicker(30 * time.Minute)
-			maintenanceTick = maintenanceTicker.C
-			defer maintenanceTicker.Stop()
-		}
-		for {
-			select {
-			case <-h.lifecycleCtx.Done():
-				return
-			case <-digestTick:
-				if idleEnabled {
-					_, _ = h.MemoryRuntime.Run(h.lifecycleCtx, memoryruntime.TriggerIdle)
-				}
-				if turnDigestEnabled {
-					_, _ = h.MemoryRuntime.RunPendingTurnDigests(h.lifecycleCtx, memoryruntime.TriggerIdle)
-					_, _ = h.MemoryRuntime.PruneTurnDigests(h.lifecycleCtx)
-					_, _ = h.MemoryRuntime.PruneTurnWindows(h.lifecycleCtx)
-				}
-			case <-maintenanceTick:
-				if consolidationEnabled {
-					consolidator := memoryruntime.NewConsolidator(h.MemoryRuntime.Store, h.MemoryRuntime.Config)
-					_, _ = consolidator.Run(h.lifecycleCtx)
-				}
-				if lifecycleEnabled {
-					_, _ = h.MemoryRuntime.Store.SweepLifecycle(h.lifecycleCtx, time.Now().UTC())
-				}
-				if freshnessEnabled && time.Since(lastFreshnessSweep) >= freshnessInterval {
-					_, _ = h.MemoryRuntime.SweepFreshness(h.lifecycleCtx)
-					lastFreshnessSweep = time.Now()
-				}
-				if retentionEnabled {
-					_, _ = h.MemoryRuntime.Store.PruneDiagnostics(h.lifecycleCtx, time.Now().UTC())
-				}
-			}
-		}
-	}()
+	consolidator := memoryruntime.NewConsolidator(h.host.MemoryRuntime.Store, h.host.MemoryRuntime.Config)
+	_, err := consolidator.Run(ctx)
+	return err
 }
 
 func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
@@ -226,10 +113,15 @@ func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
 	h.asyncWG.Add(1)
 	go func() {
 		defer h.asyncWG.Done()
-		ctx := h.lifecycleCtx
-		if ctx == nil {
-			ctx = context.Background()
+		base := h.lifecycleCtx
+		if base == nil {
+			base = context.Background()
 		}
+		// Session-end extraction is durable work: a host Close must stop new
+		// work but let already-admitted extraction finish before the store is
+		// closed. Keep values, drop cancellation, and bound the drain.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(base), 2*time.Minute)
+		defer cancel()
 		result, err := h.MemoryRuntime.RunSessionEndPipeline(ctx, sessionID, memoryruntime.SessionEndPipelineOptions{
 			Consolidate: h.RuntimeConfig.Memory.Consolidation.Enabled,
 		})

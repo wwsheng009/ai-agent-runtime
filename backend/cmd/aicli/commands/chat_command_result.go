@@ -204,6 +204,14 @@ func (r CommandResult) Document() render.Document {
 // legacy stdout handler.
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	if chatSessionUsesRuntimeServer(session) {
+		if notice, blocked := chatRuntimeServerUnsupportedCommand(cmdLower); blocked {
+			return commandErrorResult(errors.New(notice)), true, nil
+		}
+		if result, handled := tryExecuteRuntimeServerControlCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
 	// /gateway is claimed unconditionally: it has no legacy handler and must be
 	// recognized in every output mode (docs/gateway/12-connection-control.md).
 	if commandMatches(cmdLower, "/gateway") {

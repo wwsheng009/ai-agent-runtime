@@ -13,6 +13,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentstatus"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -22,8 +23,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -33,7 +32,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
@@ -65,17 +63,7 @@ func (c *sessionActorClient) submitPrompt(ctx context.Context, sessionID, prompt
 	if c == nil || c.hub == nil {
 		return nil, fmt.Errorf("session hub not configured")
 	}
-	actor, err := c.hub.GetOrCreate(strings.TrimSpace(sessionID))
-	if err != nil {
-		return nil, err
-	}
-	if c.handler != nil {
-		prompt, err = c.handler.injectSupervisionPreflight(ctx, sessionID, prompt, runMeta)
-		if err != nil {
-			return nil, err
-		}
-	}
-	result, err := actor.SubmitPrompt(ctx, prompt, runMeta, opts...)
+	result, err := c.submitPromptResult(ctx, sessionID, prompt, runMeta, opts...)
 	sessionResult := sessionResultFromActorRun(result, err)
 	if err != nil {
 		if sessionResult != nil {
@@ -87,6 +75,27 @@ func (c *sessionActorClient) submitPrompt(ctx context.Context, sessionID, prompt
 		return nil, fmt.Errorf("session result is nil")
 	}
 	return sessionResult, nil
+}
+
+// submitPromptResult is the single actor submission primitive for both the
+// command endpoint and AgentChat's in-process actor path. It deliberately
+// returns the raw agent result so callers that need usage/observations/tool
+// receipts (AgentChat) do not lose fields in the team.SessionResult projection.
+func (c *sessionActorClient) submitPromptResult(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, opts ...chat.SubmitPromptOption) (*agent.Result, error) {
+	if c == nil || c.hub == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	actor, err := c.hub.GetOrCreate(strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	if c.handler != nil {
+		prompt, err = c.handler.injectSupervisionPreflight(ctx, sessionID, prompt, runMeta)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return actor.SubmitPrompt(ctx, prompt, runMeta, opts...)
 }
 
 func (c *sessionActorClient) TriggerTask(ctx context.Context, request team.TaskTriggerRequest) (*team.SessionResult, error) {
@@ -785,6 +794,21 @@ func (c *sessionAgentController) cleanupAPISpawnIsolation(ctx context.Context, c
 		RepoRoot:  agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot),
 		SessionID: strings.TrimSpace(session.ID),
 	}
+	// Product invariant (same as the CLI host): close must never silently
+	// destroy uncommitted worktree changes. A dirty worktree is kept for an
+	// explicit apply/discard decision; only clean worktrees are removed. A
+	// status failure is treated as "worktree already gone" and falls through to
+	// Remove, matching the CLI cleanup path.
+	if dirty, statusErr := handle.DiffStat(ctx); statusErr == nil && strings.TrimSpace(dirty) != "" {
+		if childSession != nil {
+			childSession.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionKeptUncommitted)
+		}
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionKeptUncommitted)
+		if c != nil && c.handler != nil && c.handler.sessionManager != nil {
+			_ = c.handler.sessionManager.Update(ctx, session)
+		}
+		return nil
+	}
 	if err := handle.Remove(ctx); err != nil {
 		return err
 	}
@@ -815,17 +839,7 @@ func clearAPISpawnWorktreeContext(session *chat.Session, disposition string) {
 // skips the external_dir:admit approval; writes under the repo still go
 // through the gate.
 func apiSessionReadOnlyRoots(session *chat.Session) []string {
-	if session == nil {
-		return nil
-	}
-	if agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation) != worktree.ModeWorktree {
-		return nil
-	}
-	repoRoot := strings.TrimSpace(agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot))
-	if repoRoot == "" {
-		return nil
-	}
-	return []string{repoRoot}
+	return runtimehost.ExtractSessionContext(session).ReadOnlyRoots
 }
 
 func apiSpawnWorktreeHandle(session *chat.Session) (*worktree.Handle, error) {
@@ -2245,6 +2259,11 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 		return nil, err
 	}
 	sessionID = resolvedSessionID
+	if c.handler.sessionManager != nil {
+		if session, loadErr := c.handler.sessionManager.Get(ctx, sessionID); loadErr == nil && isClosedAPIAgentSession(session) {
+			return nil, fmt.Errorf("agent session %s is closed", sessionID)
+		}
+	}
 	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
 	if err != nil {
 		return nil, err
@@ -2260,14 +2279,21 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 	// A decision against an already-terminated run is recorded but never applied,
 	// so it is reported as not allowed (P0-3).
 	allowed := args.Allow
+	resolved := strings.TrimSpace(resolution) != ""
 	if toolbroker.ApprovalResolutionNotApplied(resolution) {
+		allowed = false
+	}
+	if !resolved {
+		// handleApproveTool is deliberately idempotent for a request another
+		// entry already resolved. Without a recorded outcome we must not echo
+		// the caller's allow bit as if this decision had been applied.
 		allowed = false
 	}
 	return &toolbroker.AgentApprovalResult{
 		SessionID:  sessionID,
 		RequestID:  requestID,
 		Allowed:    allowed,
-		Resolved:   true,
+		Resolved:   resolved,
 		Resumed:    resumed,
 		Resolution: resolution,
 		Status:     status,
@@ -2284,84 +2310,19 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 // 批次库、或任一步判读失败，一律退化为旧语义（plan §13.8：判读失败 fail-open，
 // 绝不丢输入也绝不谎报账本）。
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
-	obligations, baseline, pending, budgetKey := c.waitLedger(ctx)
-	directOut := false
-	peek := args.Peek
-	if len(obligations) == 0 {
-		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
-		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
-		obligations, baseline, pending = c.waitTargetObligations(ctx, args)
-		directOut = len(obligations) > 0
-	}
-	waitBudgetLimit := c.agentsConfig().MaxConsecutiveWaitWithoutProgress
-	if len(obligations) > 0 && !pending && !directOut {
-		// No wait window is needed, but an empty result would leave the
-		// durable synthesis gate closed. Deliver the whole parked cohort.
-		c.waitBudget().Reset(budgetKey)
-		result, err := toolbroker.BuildTerminalAgentWaitResult(ctx, nil, obligations, baseline, c.terminalWaitResults)
-		if result != nil {
-			result.Peek = peek
-		}
-		return result, err
-	}
-	if !peek && len(obligations) > 0 && pending && budgetKey != "" {
-		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
-		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
-		// 收尾门兜底——subagent_wait 自身不挂起 turn。
-		if consecutive, exhausted := c.waitBudget().Exhausted(budgetKey, waitBudgetLimit); exhausted {
-			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
-			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-			return toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit), nil
-		}
-	}
-	var result *toolbroker.AgentWaitResult
-	var err error
-	if args.MailboxOnly {
-		result, err = c.waitForMailboxEvent(ctx, args)
-	} else {
-		result, err = c.waitForAgentStatus(ctx, args)
-	}
-	if err != nil || result == nil {
-		return result, err
-	}
-	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-	if peek {
-		if result != nil {
-			result.Peek = true
-		}
-		return result, nil
-	}
-	if len(obligations) > 0 {
-		// 等待段结束后复读账本：terminal_delta 的语义是"本段内新终态"，而预读
-		// 快照的行状态停留在等待前，不复读就永远是空的——这会把等待期间已经
-		// 完成的子任务记成"无进展"，连续几次后误触挂起判据（§16.2/§16.3）。
-		refreshed, _, refreshedPending, refreshedKey := c.waitLedger(ctx)
-		switch {
-		case refreshedKey == "":
-			// 复读失败：fail-open，本段不计入预算（不把读不到账本谎报成"无进展"）。
-		case len(refreshed) == 0:
-			// 挂起记录已消失 ⇒ 账本在本段内清空，同样属于进展。
-			c.waitBudget().Reset(budgetKey)
-		default:
-			obligations = refreshed
-			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
-			switch {
-			case !refreshedPending:
-				c.waitBudget().Reset(budgetKey)
-				return toolbroker.BuildTerminalAgentWaitResult(ctx, result, obligations, baseline, c.terminalWaitResults)
-			case result.Interrupted:
-				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
-			default:
-				consecutive, exhausted := c.waitBudget().Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
-				// F7: always expose the observed budget, not only the exhausted verdict.
-				result = toolbroker.StampAgentWaitBudget(result, consecutive, waitBudgetLimit)
-				if exhausted {
-					result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
-				}
+	return (toolbroker.AgentWaitFlow{
+		Budget:       c.waitBudget(),
+		BudgetLimit:  c.agentsConfig().MaxConsecutiveWaitWithoutProgress,
+		Ledger:       c.waitLedger,
+		TargetLedger: c.waitTargetObligations,
+		Wait: func(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+			if args.MailboxOnly {
+				return c.waitForMailboxEvent(ctx, args)
 			}
-		}
-	}
-	return result, nil
+			return c.waitForAgentStatus(ctx, args)
+		},
+		TerminalRead: c.terminalWaitResults,
+	}).Run(ctx, args)
 }
 
 // waitBudget returns the Handler-owned active-wait budget. A nil handler keeps
@@ -2915,6 +2876,9 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 func (c *sessionAgentController) readEventsResolved(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
 	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	if sessionID == "" {
+		sessionID = strings.TrimSpace(toolctx.SessionID(ctx))
+	}
+	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
 	if !args.MailboxOnly {
@@ -2928,83 +2892,26 @@ func (c *sessionAgentController) readEventsResolved(ctx context.Context, args to
 	if store == nil {
 		return nil, fmt.Errorf("session event store not configured")
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = 20
-	}
-	waitMs := args.WaitMs
-	if waitMs < 0 {
-		waitMs = 0
-	}
-	readCtx := ctx
-	cancel := func() {}
-	if waitMs > 0 {
-		readCtx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
-	}
-	defer cancel()
-	wakeCh, unsubscribe := c.subscribeReadEvents(readCtx, store, sessionID)
-	if args.MailboxOnly {
-		unsubscribe()
-		wakeCh, unsubscribe = c.subscribeMailboxEvents(readCtx, store, sessionID)
-	}
-	defer unsubscribe()
-	for {
-		if args.MailboxOnly {
-			if events, ok, hasMailboxRows, err := listAPIMailboxEvents(readCtx, store, sessionID, args.AfterSeq, limit+1); err != nil {
-				return nil, err
-			} else if ok {
-				// The extra row only signals that more events are queued; mailbox
-				// unread counts stay unset because presentation seq and
-				// session-mailbox seq are distinct sequences.
-				hasMore := len(events) > limit
-				if hasMore {
-					events = events[:limit]
-				}
-				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
-					return toolbroker.ApplyAgentEventsPagination(buildAgentEventsResult(sessionID, events), hasMore, 0), nil
-				}
-				if hasMailboxRows {
-					select {
-					case <-readCtx.Done():
-						result := buildAgentEventsResult(sessionID, nil)
-						result.TimedOut = true
-						result.NextAction = ""
-						return toolbroker.FinalizeAgentEventsResult(result), nil
-					case <-wakeCh:
-					case <-time.After(500 * time.Millisecond):
-					}
-					continue
-				}
+	return (toolbroker.AgentEventsFlow{
+		Resolve: c.resolveTargetSessionID,
+		Subscribe: func(readCtx context.Context, sid string, mailboxOnly bool) (<-chan struct{}, func()) {
+			if mailboxOnly {
+				return c.subscribeMailboxEvents(readCtx, store, sid)
 			}
-		}
-		events, err := store.ListEvents(readCtx, sessionID, args.AfterSeq, limit+1)
-		if err != nil {
-			return nil, err
-		}
-		if args.MailboxOnly {
-			events = filterAPIMailboxWaitEvents(events)
-		}
-		hasMore := len(events) > limit
-		if hasMore {
-			events = events[:limit]
-		}
-		if len(events) > 0 || waitMs == 0 {
-			result := buildAgentEventsResult(sessionID, events)
-			if hasMore {
-				return toolbroker.ApplyAgentEventsPagination(result, true, apiAgentEventsUnreadCount(ctx, store, sessionID, result.LatestSeq)), nil
-			}
-			return result, nil
-		}
-		select {
-		case <-readCtx.Done():
-			result := buildAgentEventsResult(sessionID, nil)
-			result.TimedOut = true
-			result.NextAction = ""
-			return toolbroker.FinalizeAgentEventsResult(result), nil
-		case <-wakeCh:
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+			return c.subscribeReadEvents(readCtx, store, sid)
+		},
+		List: func(readCtx context.Context, sid string, after int64, limit int) ([]runtimeevents.Event, error) {
+			return store.ListEvents(readCtx, sid, after, limit)
+		},
+		ListMailbox: func(readCtx context.Context, sid string, after int64, limit int) ([]runtimeevents.Event, bool, bool, error) {
+			return listAPIMailboxEvents(readCtx, store, sid, after, limit)
+		},
+		FilterMailbox: filterAPIMailboxWaitEvents,
+		Build:         buildAgentEventsResult,
+		Unread: func(ctx context.Context, sid string, after int64) int {
+			return apiAgentEventsUnreadCount(ctx, store, sid, after)
+		},
+	}).Run(ctx, sessionID, args)
 }
 
 func filterAPIMailboxWaitEvents(events []runtimeevents.Event) []runtimeevents.Event {
@@ -3194,7 +3101,21 @@ func (c *sessionAgentController) Close(ctx context.Context, sessionID string) (*
 			continue
 		}
 		if hub := c.handler.getSessionHub(); hub != nil {
-			hub.Stop(closeID)
+			if actor, ok := hub.Get(closeID); ok && actor != nil {
+				// Close is terminal for the session, including a restored
+				// approval/question with no live run. Retire it first so the
+				// durable parent notification closes and a later decision cannot
+				// revive the closed session.
+				if err := actor.RetirePendingInteraction(ctx, "agent_session_closed"); err != nil {
+					logger.Warnf("agent close: retire pending interaction %s: %s", closeID, err)
+				}
+			}
+			// The close tool may run on the target actor's own run goroutine
+			// (self-stop). Waiting synchronously for that actor to exit deadlocks
+			// because the loop can only finish after the run goroutine returns.
+			// StopAsync removes it from the hub and cancels immediately; the
+			// loop drains on its own, matching the CLI host.
+			hub.StopAsync(closeID)
 		}
 		if c.handler.sessionManager != nil {
 			if session, loadErr := c.handler.sessionManager.Get(ctx, closeID); loadErr == nil && session != nil {
@@ -3795,6 +3716,24 @@ func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (
 	if _, err := c.handler.getSessionHub().GetOrCreate(sessionID); err != nil {
 		return nil, err
 	}
+	// Resume is also a registry revival: a stale/closed row must return to
+	// active once the session is owned again, otherwise /agents keeps reporting
+	// the running child as finished.
+	if store := c.handler.getAgentControlAgentStore(); store != nil {
+		if reactivator, ok := store.(agentcontrol.AgentReactivator); ok && reactivator != nil {
+			_, _, _ = reactivator.ReactivateAgentControlAgent(ctx, sessionID)
+		}
+	}
+	// Completion subscriptions are process-memory state registered only at
+	// spawn time. A resumed child needs it rebuilt, or its next terminal state
+	// will not produce a mailbox/notification/wake.
+	if c.handler.sessionManager != nil {
+		if session, loadErr := c.handler.sessionManager.Get(ctx, sessionID); loadErr == nil && session != nil {
+			if parentSessionID := apiChildParentSessionID(session); parentSessionID != "" {
+				c.subscribeAgentCompletion(parentSessionID, session)
+			}
+		}
+	}
 	return c.snapshot(ctx, sessionID)
 }
 
@@ -3855,23 +3794,24 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 		}
 		result.Status = string(chat.SessionIdle)
 	}
+	stateApplied := false
 	if hub := c.handler.getSessionHub(); hub != nil {
 		if actor, ok := hub.Get(sessionID); ok && actor != nil {
 			state, exists := actor.StateSummary()
 			if exists {
-				result.Status = string(state.Status)
-				result.PendingApproval = state.PendingApproval
-				if state.PendingApproval {
-					result.PendingApprovalID = strings.TrimSpace(state.PendingApprovalID)
-					result.PendingApprovalReason = strings.TrimSpace(state.PendingApprovalReason)
-					result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApprovalRiskLevel)
-				}
-				result.PendingQuestion = state.PendingQuestion
-				result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
-				if state.PendingTool {
-					result.PendingToolName = strings.TrimSpace(state.PendingToolName)
-					result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
-				}
+				agentstatus.ApplyRuntimeState(result, state)
+				stateApplied = true
+			}
+		}
+	}
+	if !stateApplied {
+		// No live actor is not the same as no runtime state. After a process
+		// restart the durable row still owns a parked approval/question; the
+		// status projection must show it so callers do not submit a turn into
+		// a pending decision.
+		if store := c.handler.getSessionRuntimeStore(); store != nil {
+			if state, stateErr := store.LoadState(ctx, sessionID); stateErr == nil && state != nil {
+				agentstatus.ApplyRuntimeState(result, state.Summary())
 			}
 		}
 	}
@@ -4624,36 +4564,7 @@ func apiAgentEventsUnreadCount(ctx context.Context, store chat.EventStore, sessi
 }
 
 func buildAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {
-	result := &toolbroker.AgentEventsResult{
-		SessionID: strings.TrimSpace(sessionID),
-		Count:     len(events),
-	}
-	if len(events) == 0 {
-		return toolbroker.FinalizeAgentEventsResult(result)
-	}
-	items := make([]toolbroker.AgentEventItem, 0, len(events))
-	var latestSeq int64
-	for _, event := range events {
-		item := toolbroker.AgentEventItem{
-			Type:      event.Type,
-			TraceID:   event.TraceID,
-			SessionID: event.SessionID,
-			ToolName:  event.ToolName,
-			AgentName: event.AgentName,
-			Timestamp: event.Timestamp,
-			Payload:   cloneProfileContextValues(event.Payload),
-		}
-		if seq := agentEventSeq(event); seq > 0 {
-			item.Seq = seq
-			if seq > latestSeq {
-				latestSeq = seq
-			}
-		}
-		items = append(items, item)
-	}
-	result.Events = items
-	result.LatestSeq = latestSeq
-	return toolbroker.FinalizeAgentEventsResult(result)
+	return toolbroker.BuildAgentEventsResult(sessionID, events)
 }
 
 func buildMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {
@@ -4710,19 +4621,45 @@ func (h *Handler) getSessionHub() *chat.SessionHub {
 
 	h.sessionRuntimeMu.RLock()
 	hub := h.sessionHub
+	closed := h.sessionHubClosed
 	h.sessionRuntimeMu.RUnlock()
+	if closed {
+		return nil
+	}
 	if hub != nil {
 		return hub
 	}
 
 	h.sessionRuntimeMu.Lock()
 	defer h.sessionRuntimeMu.Unlock()
+	if h.sessionHubClosed {
+		return nil
+	}
 	if h.sessionHub == nil {
 		h.sessionHub = chat.NewBoundedSessionHub(func(sessionID string) (*chat.SessionActor, error) {
 			return h.buildSessionActor(sessionID)
 		})
 	}
 	return h.sessionHub
+}
+
+// CloseSessionHub stops every actor owned by the handler and prevents a later
+// lazy getSessionHub call from recreating the hub during shutdown. Host
+// shutdown must call this after the HTTP server stops accepting requests and
+// before event persistence/stores are closed, so actors cannot publish into a
+// closed pipeline.
+func (h *Handler) CloseSessionHub() {
+	if h == nil {
+		return
+	}
+	h.sessionRuntimeMu.Lock()
+	hub := h.sessionHub
+	h.sessionHub = nil
+	h.sessionHubClosed = true
+	h.sessionRuntimeMu.Unlock()
+	if hub != nil {
+		hub.StopAll()
+	}
 }
 
 func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error) {
@@ -4742,134 +4679,48 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 // （例如只设了 maxThreads）里的 0 当成「无上限」，静默抬掉默认深度上限；归一化后
 // 0 只有一个含义——未设置 → 默认上限（见 runtimecfg.NormalizeAgentsConfig）。
 func apiAgentDepthCeiling(cfg *runtimecfg.RuntimeConfig) int {
-	if cfg == nil {
-		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{}).MaxDepth
-	}
-	return runtimecfg.NormalizeAgentsConfig(cfg.Agents).MaxDepth
+	return runtimehost.AgentDepthCeiling(cfg)
 }
 
 func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
-	if apiAgent == nil || maxDepth <= 0 || depth < maxDepth {
-		return
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
-	} else {
-		toolPolicy = toolPolicy.Clone()
-	}
-	if toolPolicy.DeniedTools == nil {
-		toolPolicy.DeniedTools = map[string]bool{}
-	}
-	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
-	for _, toolName := range toolregistry.CallableNames("subagent_spawn", agent.SpawnSubagentsToolName, "team_spawn") {
-		toolPolicy.DeniedTools[toolName] = true
-	}
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
+	runtimehost.ApplyChildDepthPolicy(apiAgent, depth, maxDepth)
 }
 
 // applyAPIChildAgentdefToolPolicy overlays agentdef allow/deny/read-only/sandbox
 // onto an API session actor when agent_type resolves to a portable definition.
 // Mirrors applyLocalChildAgentdefToolPolicy for subagent_spawn / teammate parity.
-func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspaceRoot string) {
-	if apiAgent == nil {
-		return
-	}
+// profileRoot is the profile configuration source directory; projectRoot is the
+// session workspace. Both discovery scopes must match the CLI host.
+func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspaceRoot, profileRoot string) {
 	agentType = strings.TrimSpace(agentType)
 	if !agentdef.IsPortableAgentName(agentType) {
 		return
 	}
 	binding, err := agentdef.ResolvePortableBinding(agentType, agentdef.DiscoverOptions{
 		ProjectRoot: strings.TrimSpace(workspaceRoot),
+		ProfileRoot: strings.TrimSpace(profileRoot),
 	})
 	if err != nil || binding == nil {
 		return
 	}
-	hasSandbox := len(binding.Sandbox) > 0
-	if len(binding.ToolAllowlist) == 0 && len(binding.ToolDenylist) == 0 && (binding.ReadOnly == nil || !*binding.ReadOnly) && !hasSandbox {
-		return
+	warnings, sandboxErr := runtimehost.ApplyChildAgentdefToolPolicy(apiAgent, binding, agentType, workspaceRoot, "")
+	if sandboxErr != nil {
+		logger.Warnf("api child agentdef sandbox materialize failed for %s: %v", agentType, sandboxErr)
 	}
-
-	readOnly := binding.ReadOnly != nil && *binding.ReadOnly
-	var allowlist []string
-	if len(binding.ToolAllowlist) > 0 {
-		allowlist = append([]string(nil), binding.ToolAllowlist...)
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
-	} else {
-		// 与 CLI 宿主同口径：角色必须传下去，否则能力地板缺少 exec_shell，
-		// 内建 general/plan/explore 子代理会在继承到 shell 工具面后被能力门禁拒绝。
-		toolPolicy = toolPolicy.DeriveChildForTask(allowlist, readOnly, agentType, nil)
-	}
-	if len(binding.ToolDenylist) > 0 {
-		if toolPolicy.DeniedTools == nil {
-			toolPolicy.DeniedTools = map[string]bool{}
-		}
-		for _, name := range binding.ToolDenylist {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				toolPolicy.DeniedTools[name] = true
-			}
-		}
-	}
-	if hasSandbox {
-		warnings, err := runtimeprofileinput.MaterializeSandboxForWorkspace(toolPolicy, binding.Sandbox, workspaceRoot)
-		if err != nil {
-			logger.Warnf("api child agentdef sandbox materialize failed for %s: %v", agentType, err)
-		}
-		for _, warning := range warnings {
-			logger.Warnf("api child agentdef sandbox: %s", warning)
-		}
-	}
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
-
-	// Keep the resolved session approval mode; agentdef plan is only a default.
-	// Read-only is enforced independently by the static policy above.
-	if binding.PermissionMode == runtimepolicy.ModePlan {
-		engine := apiAgent.GetPermissionEngine()
-		if engine == nil {
-			engine = agent.NewPermissionEngine()
-			engine.Mode = binding.PermissionMode
-			apiAgent.SetPermissionEngine(engine)
-		}
-		if engine.Mode == "" {
-			engine.Mode = binding.PermissionMode
-		}
-		if engine.Mode == runtimepolicy.ModePlan {
-			runtimepolicy.EnsurePlanWriteAllowPaths(engine)
-		}
+	for _, warning := range warnings {
+		logger.Warnf("api child agentdef sandbox: %s", warning)
 	}
 }
 
 func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedReasoningEffort ...string) *agent.LoopReActConfig {
-	config := &agent.LoopReActConfig{
-		MaxSteps:             0,
-		EnableThought:        true,
-		EnableToolCalls:      true,
-		EnableParallelTools:  true,
-		MaxParallelToolCalls: 4,
-		Temperature:          0.7,
-	}
-	if selectedConfig != nil {
-		config.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
-		config.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
-		config.MaxRunDuration = selectedConfig.Agent.Timeout
-		config.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
-		config.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
-		config.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
-		config.EnableParallelTools = selectedConfig.Agent.EnableParallelTools
-		if selectedConfig.Agent.MaxParallelToolCalls > 0 {
-			config.MaxParallelToolCalls = selectedConfig.Agent.MaxParallelToolCalls
-		}
-	}
+	requested := ""
 	if len(requestedReasoningEffort) > 0 {
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort[0]); reasoningEffort != "" {
-			config.ReasoningEffort = reasoningEffort
-		}
+		requested = requestedReasoningEffort[0]
 	}
-	return config
+	return runtimehost.BuildLoopReActConfig(runtimehost.LoopConfigSpec{
+		RuntimeConfig:            selectedConfig,
+		RequestedReasoningEffort: requested,
+	})
 }
 
 // resolveMainAgentRoutingForSession 按 §4.3 的读取顺序解析主 Agent 路由：
@@ -5021,8 +4872,54 @@ func (h *Handler) getSessionRuntimeStore() chat.RuntimeStateStore {
 		if h.sessionEventStore == nil {
 			h.sessionEventStore = memoryStore
 		}
+		if h.sessionLeaseStore == nil {
+			h.sessionLeaseStore = memoryStore
+		}
 	}
 	return h.sessionRuntimeStore
+}
+
+// getSessionLeaseStore returns the independent cross-process lease domain.
+// Hosts that have not configured a lease store fall back to a lease-capable
+// runtime store, preserving embedded/test behavior.
+func (h *Handler) getSessionLeaseStore() chat.SessionLeaseStore {
+	if h == nil {
+		return nil
+	}
+	h.sessionRuntimeMu.RLock()
+	leaseStore := h.sessionLeaseStore
+	h.sessionRuntimeMu.RUnlock()
+	if leaseStore != nil {
+		return leaseStore
+	}
+	store := h.getSessionRuntimeStore()
+	if typed, ok := store.(chat.SessionLeaseStore); ok {
+		return typed
+	}
+	return nil
+}
+
+// CloseSessionLeaseStore closes the independent lease SQLite handle. Callers
+// must already have stopped all actors; the runtime/event stores are closed
+// separately and are not touched here.
+func (h *Handler) CloseSessionLeaseStore() error {
+	if h == nil {
+		return nil
+	}
+	h.sessionRuntimeMu.Lock()
+	leaseStore := h.sessionLeaseStore
+	h.sessionLeaseStore = nil
+	h.sessionLeaseStoreKey = ""
+	runtimeStore := h.sessionRuntimeStore
+	eventStore := h.sessionEventStore
+	h.sessionRuntimeMu.Unlock()
+	if leaseStore == nil || sameSessionLeaseStore(leaseStore, runtimeStore) || sameSessionLeaseStore(leaseStore, eventStore) {
+		return nil
+	}
+	if closer, ok := leaseStore.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (h *Handler) getSessionEventStore() chat.EventStore {

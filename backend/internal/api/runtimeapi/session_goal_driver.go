@@ -66,6 +66,15 @@ type goalDriverState struct {
 	// 由总线订阅写入，升级注入时消费；有进展（resetStrikes）不自动清除——告警
 	// 多数发生在「有输出但重复工具批」的成功轮，否则信号会在评估时被误清。
 	doomLoopAdvised map[string]struct{}
+	// continuations counts rounds this driver submitted for the current user
+	// intent. It enforces goal.maxConsecutiveContinuations; an external
+	// successful turn or a set/resume kick starts a fresh budget.
+	continuations map[string]int
+	// deciding serializes one per-session decision. Actor supersede semantics
+	// would cancel a live run if two session_end/kick paths submitted at once.
+	deciding map[string]struct{}
+	// wrapUps deduplicates terminal wrap-up prompts by goal_id|status|updated_at.
+	wrapUps map[string]struct{}
 }
 
 func newGoalDriverState() *goalDriverState {
@@ -75,6 +84,9 @@ func newGoalDriverState() *goalDriverState {
 		noProgStrikes:       map[string]int{},
 		escalationAttempted: map[string]struct{}{},
 		doomLoopAdvised:     map[string]struct{}{},
+		continuations:       map[string]int{},
+		deciding:            map[string]struct{}{},
+		wrapUps:             map[string]struct{}{},
 	}
 }
 
@@ -186,14 +198,91 @@ func (s *goalDriverState) resetStrikes(sessionID string) {
 	delete(s.escalationAttempted, sessionID)
 }
 
+func (s *goalDriverState) beginDecision(sessionID string) bool {
+	if s == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, busy := s.deciding[sessionID]; busy {
+		return false
+	}
+	s.deciding[sessionID] = struct{}{}
+	return true
+}
+
+func (s *goalDriverState) endDecision(sessionID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.deciding, sessionID)
+}
+
+func (s *goalDriverState) continuationCount(sessionID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.continuations[sessionID]
+}
+
+func (s *goalDriverState) noteContinuation(sessionID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.continuations[sessionID]++
+	return s.continuations[sessionID]
+}
+
+func (s *goalDriverState) resetContinuations(sessionID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.continuations, sessionID)
+}
+
+func (s *goalDriverState) wrapUpSubmitted(key string) bool {
+	if s == nil || strings.TrimSpace(key) == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.wrapUps[key]
+	return ok
+}
+
+func (s *goalDriverState) markWrapUpSubmitted(key string) {
+	if s == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wrapUps[key] = struct{}{}
+}
+
 // goalDriverTurnOutcome 是一次 turn 终态的驱动器观测输入。
 type goalDriverTurnOutcome struct {
 	SessionID string
+	// RunSource 区分本轮是否由本驱动器提交（driver:goal）。容忍计数只应
+	// 统计续跑轮，不能把用户首轮失败/空响应记到 goal 上；CLI 循环同样只
+	// 统计 ContinueGoal* 的失败与空转。
+	RunSource string
 	Success   bool
 	// ErrMessage / CancelSource 区分真失败与用户中断（中断不计 strike）。
 	ErrMessage   string
 	CancelSource string
 	Output       string
+	// OutputPresent is the actor's trimmed-output signal. partial_summary is
+	// only emitted on failed/canceled runs, so using Output alone would treat
+	// every successful text answer as a no-progress turn.
+	OutputPresent bool
 	// Steps 用于空转近似（<=1 且 Output 为空视为无进展，见文件头登记）。
 	Steps       int
 	UsageTokens int
@@ -208,6 +297,7 @@ func (h *Handler) goalDriverNoteCLI(sessionID string) {
 	state := h.getGoalDriverState()
 	state.markCLISeen(sessionID, time.Now())
 	state.resetStrikes(sessionID)
+	state.resetContinuations(sessionID)
 }
 
 // subscribeGoalDriver 把 actor 终态事件绑定到驱动器（幂等，Once 内调用）。
@@ -224,13 +314,15 @@ func (h *Handler) subscribeGoalDriver(bus *runtimeevents.Bus) {
 		}
 		payload := event.Payload
 		h.sessionGoalDriverEvaluate(goalDriverTurnOutcome{
-			SessionID:    event.SessionID,
-			Success:      boolFromAny(payload["success"]),
-			ErrMessage:   goalDriverStringFromAny(payload["error"]),
-			CancelSource: goalDriverStringFromAny(payload["cancel_source"]),
-			Output:       goalDriverStringFromAny(payload["partial_summary"]),
-			Steps:        intFromAny(payload["steps"]),
-			UsageTokens:  intFromAny(payload["usage_total_tokens"]),
+			SessionID:     event.SessionID,
+			RunSource:     goalDriverStringFromAny(payload["run_source"]),
+			Success:       boolFromAny(payload["success"]),
+			ErrMessage:    goalDriverStringFromAny(payload["error"]),
+			CancelSource:  goalDriverStringFromAny(payload["cancel_source"]),
+			Output:        goalDriverStringFromAny(payload["partial_summary"]),
+			OutputPresent: goalDriverOutputPresent(payload),
+			Steps:         intFromAny(payload["steps"]),
+			UsageTokens:   intFromAny(payload["usage_total_tokens"]),
 		})
 	})
 	// doom_loop 告警上浮（P2-2' 入口 2 的 OR 条件）：agent 循环在同一个语义
@@ -267,7 +359,12 @@ func (h *Handler) goalDriverKick(sessionID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if h.goalDriverHasPendingApproval(sessionID) {
+		if !state.beginDecision(sessionID) {
+			return
+		}
+		defer state.endDecision(sessionID)
+		state.resetContinuations(sessionID)
+		if h.goalDriverHasPendingApproval(ctx, sessionID) {
 			return
 		}
 		if err := h.goalDriverSubmitContinuation(ctx, sessionID); err != nil {
@@ -298,10 +395,18 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 		return
 	}
 
-	// strike 记账（与 CLI 同阈值）：用户中断不是失败；成功且非空转重置。
+	// strike 记账（与 CLI 同阈值）：只统计本驱动器提交的续跑轮。用户首轮
+	// 失败、CLI 轮或其它来源的 run 不能被记成 goal 续跑失败；成功的外部轮
+	// 仍重置计数（用户已把会话拉回可推进状态）。用户中断不是失败。
 	switch {
+	case !goalDriverContinuationRun(outcome):
+		if outcome.Success && strings.TrimSpace(outcome.CancelSource) == "" {
+			state.resetStrikes(sessionID)
+			state.resetContinuations(sessionID)
+		}
 	case outcome.CancelSource != "":
 		// 用户中断/停止：不记账，等用户输入驱动下一轮。
+		return
 	case !outcome.Success:
 		if strikes := state.noteError(sessionID); strikes >= goal.ContinuationErrorStrikeLimit {
 			go func(strikes int) {
@@ -311,7 +416,7 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 			}(strikes)
 			return
 		}
-	case outcome.Output == "" && outcome.Steps <= 1:
+	case !outcome.OutputPresent && outcome.Steps <= 1:
 		if strikes := state.noteNoProgress(sessionID); strikes >= goal.ContinuationNoProgressStrikeLimit {
 			go func(strikes int) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -331,12 +436,17 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	sessionID := outcome.SessionID
+	state := h.getGoalDriverState()
+	if !state.beginDecision(sessionID) {
+		return
+	}
+	defer state.endDecision(sessionID)
 
 	// 1) 记账：本次 turn usage 入 goal；超预算置 budget_limited 并收尾。
 	if outcome.UsageTokens > 0 {
 		if h.goalDriverAccountUsage(ctx, sessionID, outcome.UsageTokens) {
 			h.goalDriverBudgetWrapUp(ctx, sessionID)
-			h.getGoalDriverState().resetStrikes(sessionID)
+			state.resetStrikes(sessionID)
 			return
 		}
 	}
@@ -358,7 +468,7 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	}
 	decision := goal.EvaluateGoalContinuation(current, hasGoal)
 	if !decision.Continue {
-		h.getGoalDriverState().resetStrikes(sessionID)
+		state.resetStrikes(sessionID)
 		// G3 终局收尾（DSH wrapup 借鉴）：模型刚把 goal 置为终态时，提交一次
 		// 收尾轮（向用户交代结果/验证/产物），让会话在自主结束前给用户一个
 		// 交代。仅模型终态（completed_by=model 或系统 blocked）触发；用户命令
@@ -371,10 +481,12 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 			case goal.StatusBlocked:
 				wrapPrompt = goal.BlockedWrapUpPrompt
 			}
-			if wrapPrompt != "" {
+			wrapKey := goalDriverTerminalWrapUpKey(current)
+			if wrapPrompt != "" && !state.wrapUpSubmitted(wrapKey) {
 				if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, wrapPrompt); err != nil {
 					logger.Warnf("goal driver: terminal wrap-up submit %s: %s", sessionID, err)
 				} else {
+					state.markWrapUpSubmitted(wrapKey)
 					logger.Infof("goal driver: terminal wrap-up submitted session=%s status=%s", sessionID, current.Status)
 				}
 			}
@@ -382,14 +494,25 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		return
 	}
 
+	// 3) 挂起审批/工具：等用户决断，不续跑，也不消耗 round/limit 配额。
+	if h.goalDriverHasPendingApproval(ctx, sessionID) {
+		return
+	}
+	if limit := h.goalDriverContinuationLimit(); limit > 0 {
+		if state.continuationCount(sessionID) >= limit {
+			logger.Infof("goal driver: continuation limit reached session=%s limit=%d", sessionID, limit)
+			return
+		}
+	}
+
 	// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
 	//（round-limit），不再提交续跑轮——与 CLI 驱动器同语义（单点
 	// internal/goal.AdmitGoalRound）。
 	if goal.AdmitGoalRound(current) {
-		current.Status = goal.StatusBlocked
-		current.BlockedCode = goal.BlockedCodeRoundLimit
-		current.BlockedReason = fmt.Sprintf("Goal reached its configured limit of %d rounds.", current.MaxRounds)
-		current.UpdatedAt = time.Now()
+		if err := goal.ApplySystemRoundLimit(current, time.Now()); err != nil {
+			logger.Warnf("goal driver: apply round-limit blocked %s: %s", sessionID, err)
+			return
+		}
 		if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
 			logger.Warnf("goal driver: mark round-limit blocked %s: %s", sessionID, err)
 			return
@@ -404,15 +527,9 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		}
 	}
 
-	// 3) 挂起审批/工具：等用户决断，不续跑。
-	if h.goalDriverHasPendingApproval(sessionID) {
-		return
-	}
-
 	// 4) 提交续跑轮（共享 prompt，与 CLI 逐字节同文案）；连续无进展达到共享
 	// 升级阈值、或收到 doom_loop 告警，且部署启用了 iterate_goal 时，本轮改用
 	// 升级提示词（P2-2' 入口 2，同一空转序列至多一次，doom 标记随之消费）。
-	state := h.getGoalDriverState()
 	prompt := goal.ContinuationPrompt
 	doomAdvised := state.doomLoopAdvisedFor(sessionID)
 	if goal.DecideIterationEscalation(state.noProgressStrikes(sessionID), doomAdvised, state.escalationTried(sessionID), h.goalDriverIterationEscalationAvailable()) {
@@ -422,7 +539,9 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	}
 	if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, prompt); err != nil {
 		logger.Warnf("goal driver: submit continuation %s: %s", sessionID, err)
+		return
 	}
+	state.noteContinuation(sessionID)
 }
 
 // goalDriverIterationEscalationAvailable 报告服务端宿主部署是否启用了
@@ -449,6 +568,9 @@ func (h *Handler) goalDriverSubmitContinuationWithPrompt(ctx context.Context, se
 	if h == nil || h.sessionManager == nil {
 		return fmt.Errorf("goal driver: handler/session manager not configured")
 	}
+	if h.goalDriverActorBusy(sessionID) {
+		return fmt.Errorf("goal driver: session %s is busy", sessionID)
+	}
 	hub := h.getSessionHub()
 	if hub == nil {
 		return fmt.Errorf("goal driver: session hub not configured")
@@ -457,7 +579,18 @@ func (h *Handler) goalDriverSubmitContinuationWithPrompt(ctx context.Context, se
 	if err != nil {
 		return err
 	}
-	return actor.SubmitPromptAsync(ctx, prompt, &team.RunMeta{Source: goalDriverRunSource})
+	// The decision context is short-lived and is canceled when this function
+	// returns. ContinueAsync uses its context as the run context, so keep values
+	// but detach cancellation; the actor's own run limits still bound execution.
+	// The shared continuation metadata marks the synthetic prompt hidden and is
+	// stripped before persistence, matching CLI goal continuations.
+	return actor.ContinueAsync(context.WithoutCancel(ctx), &team.RunMeta{Source: goalDriverRunSource}, chat.ContinueOption{
+		ContinuationPrompt: prompt,
+		ContinuationMetadata: map[string]interface{}{
+			goal.ContinuationMetadataKey: true,
+		},
+		StripMetadataKeys: []string{goal.ContinuationMetadataKey},
+	})
 }
 
 // goalDriverBudgetWrapUp 预算耗尽：置 budget_limited（系统写）并跑一次收尾轮
@@ -475,9 +608,61 @@ func (h *Handler) goalDriverBudgetWrapUp(ctx context.Context, sessionID string) 
 		logger.Warnf("goal driver: wrap-up actor %s: %s", sessionID, err)
 		return
 	}
-	if err := actor.SubmitPromptAsync(ctx, goal.BudgetWrapUpPrompt, &team.RunMeta{Source: goalDriverRunSource}); err != nil {
+	if err := actor.ContinueAsync(context.WithoutCancel(ctx), &team.RunMeta{Source: goalDriverRunSource}, chat.ContinueOption{
+		ContinuationPrompt: goal.BudgetWrapUpPrompt,
+		ContinuationMetadata: map[string]interface{}{
+			goal.ContinuationMetadataKey: true,
+		},
+		StripMetadataKeys: []string{goal.ContinuationMetadataKey},
+	}); err != nil {
 		logger.Warnf("goal driver: wrap-up submit %s: %s", sessionID, err)
 	}
+}
+
+func (h *Handler) goalDriverContinuationLimit() int {
+	if h == nil {
+		return 0
+	}
+	cfg := h.resolveRuntimeConfig(UsageScope{})
+	if cfg == nil || cfg.Goal.MaxConsecutiveContinuations <= 0 {
+		return 0
+	}
+	return cfg.Goal.MaxConsecutiveContinuations
+}
+
+func (h *Handler) goalDriverActorBusy(sessionID string) bool {
+	if h == nil {
+		return false
+	}
+	hub := h.getSessionHub()
+	if hub == nil {
+		return false
+	}
+	actor, ok := hub.Get(sessionID)
+	if !ok || actor == nil {
+		return false
+	}
+	state := actor.StateForInspection()
+	if state == nil {
+		return false
+	}
+	if state.HasPendingInteraction() {
+		return true
+	}
+	switch state.Status {
+	case chat.SessionRunning, chat.SessionWaitingApproval, chat.SessionWaitingInput, chat.SessionRewinding:
+		return true
+	default:
+		return false
+	}
+}
+
+func goalDriverTerminalWrapUpKey(current *goal.SessionGoal) string {
+	if current == nil {
+		return ""
+	}
+	return strings.TrimSpace(current.GoalID) + "|" + string(current.Status) + "|" +
+		current.UpdatedAt.UTC().Format(time.RFC3339Nano)
 }
 
 // goalDriverMarkBlocked 把 active goal 置为 blocked（系统写；对齐 CLI 停止语义）。
@@ -488,15 +673,12 @@ func (h *Handler) goalDriverMarkBlocked(ctx context.Context, sessionID, reason s
 	}
 	store := goal.NewMetadataStore()
 	current, hasGoal, err := store.Get(session)
-	if err != nil || !hasGoal || current == nil || current.Status != goal.StatusActive {
+	if err != nil || !hasGoal || current == nil {
 		return false
 	}
-	if err := goal.ValidateStatusTransition(current.Status, goal.StatusBlocked); err != nil {
+	if err := goal.ApplySystemBlocked(current, reason, time.Now()); err != nil {
 		return false
 	}
-	current.Status = goal.StatusBlocked
-	current.BlockedReason = goal.SystemBlockedReason(reason)
-	current.UpdatedAt = time.Now()
 	updated, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem)
 	if err != nil {
 		logger.Warnf("goal driver: mark blocked %s: %s", sessionID, err)
@@ -521,10 +703,9 @@ func (h *Handler) goalDriverAccountUsage(ctx context.Context, sessionID string, 
 	if err != nil || !hasGoal || current == nil {
 		return false
 	}
-	if current.Status != goal.StatusActive && current.Status != goal.StatusBudgetLimited {
+	if !goal.AddTokens(current, usageTokens) {
 		return false
 	}
-	current.TokensUsed += usageTokens
 	current.UpdatedAt = time.Now()
 	updatedGoal, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem)
 	if err != nil {
@@ -547,14 +728,12 @@ func (h *Handler) goalDriverMarkBudgetLimited(ctx context.Context, sessionID str
 	}
 	store := goal.NewMetadataStore()
 	current, hasGoal, err := store.Get(session)
-	if err != nil || !hasGoal || current == nil || current.Status != goal.StatusActive {
+	if err != nil || !hasGoal || current == nil {
 		return false
 	}
-	if err := goal.ValidateStatusTransition(current.Status, goal.StatusBudgetLimited); err != nil {
+	if err := goal.ApplySystemBudgetLimited(current, time.Now()); err != nil {
 		return false
 	}
-	current.Status = goal.StatusBudgetLimited
-	current.UpdatedAt = time.Now()
 	updated, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem)
 	if err != nil {
 		logger.Warnf("goal driver: mark budget_limited %s: %s", sessionID, err)
@@ -604,22 +783,44 @@ func (h *Handler) goalDriverBaseSession(sessionID string) bool {
 	return isBaseSessionContext(runtimehost.ExtractSessionContext(session))
 }
 
-// goalDriverHasPendingApproval 报告会话 actor 是否有挂起审批/工具/提问
-// （有则不续跑，与 CLI 的 queued-input 让位同语义——等用户先决断）。
-func (h *Handler) goalDriverHasPendingApproval(sessionID string) bool {
-	hub := h.getSessionHub()
-	if hub == nil {
+// goalDriverContinuationRun reports whether an outcome belongs to the loop
+// this driver owns. Tolerance must never be polluted by an unrelated user turn.
+func goalDriverContinuationRun(outcome goalDriverTurnOutcome) bool {
+	return strings.TrimSpace(outcome.RunSource) == goalDriverRunSource
+}
+
+// goalDriverHasPendingApproval reports a parked approval/tool/question without
+// requiring a live actor. After a server restart the actor may not exist yet,
+// but the durable runtime state still owns the pending decision; submitting a
+// continuation there would race the approval and turn it into a
+// terminated-run decision. Prefer the live actor, then fall back to the same
+// durable state read used by connector commands.
+func (h *Handler) goalDriverHasPendingApproval(ctx context.Context, sessionID string) bool {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
 		return false
 	}
-	actor, ok := hub.Get(sessionID)
-	if !ok || actor == nil {
-		return false
+	if hub := h.getSessionHub(); hub != nil {
+		if actor, ok := hub.Get(sessionID); ok && actor != nil {
+			if state := actor.StateForInspection(); state != nil {
+				return goalDriverStateHasPendingWork(state)
+			}
+		}
 	}
-	state := actor.State()
-	if state == nil {
-		return false
+	if store := h.getSessionRuntimeStore(); store != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, sessionStoreQueryTimeout)
+		defer cancel()
+		if state, err := store.LoadState(queryCtx, sessionID); err == nil && state != nil {
+			return goalDriverStateHasPendingWork(state)
+		}
 	}
-	return state.PendingApproval != nil || state.PendingTool != nil || state.PendingQuestion != nil
+	return false
+}
+
+func goalDriverStateHasPendingWork(state *chat.RuntimeState) bool {
+	return state.HasPendingInteraction()
 }
 
 // getGoalDriverState 懒初始化驱动器状态（Handler 零值可用，与 activeTurns 同口径）。
@@ -655,6 +856,13 @@ func boolFromAny(v interface{}) bool {
 func goalDriverStringFromAny(v interface{}) string {
 	s, _ := v.(string)
 	return s
+}
+
+func goalDriverOutputPresent(payload map[string]interface{}) bool {
+	if value, ok := payload["output_present"]; ok {
+		return boolFromAny(value)
+	}
+	return strings.TrimSpace(goalDriverStringFromAny(payload["partial_summary"])) != ""
 }
 
 func intFromAny(v interface{}) int {

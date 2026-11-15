@@ -132,6 +132,11 @@ type SessionLeaseHandle struct {
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
+
+	lost     chan struct{}
+	lostOnce sync.Once
+	lostMu   sync.Mutex
+	lostErr  error
 }
 
 // AcquireSessionLease acquires a lease and starts periodic renewal for it.
@@ -150,6 +155,7 @@ func AcquireSessionLease(ctx context.Context, store SessionLeaseStore, req Lease
 		ttl:   req.TTL,
 		stop:  make(chan struct{}),
 		done:  make(chan struct{}),
+		lost:  make(chan struct{}),
 	}
 	go handle.renewLoop()
 	return handle, nil
@@ -161,6 +167,44 @@ func (h *SessionLeaseHandle) Lease() *SessionLease {
 		return nil
 	}
 	return cloneSessionLease(h.lease)
+}
+
+// Lost closes when renewal has permanently stopped without Release being
+// called. Hosts must fence the current writer when this fires.
+func (h *SessionLeaseHandle) Lost() <-chan struct{} {
+	if h == nil {
+		return nil
+	}
+	return h.lost
+}
+
+// LostError reports why renewal stopped. It is nil until Lost closes.
+func (h *SessionLeaseHandle) LostError() error {
+	if h == nil {
+		return nil
+	}
+	h.lostMu.Lock()
+	defer h.lostMu.Unlock()
+	return h.lostErr
+}
+
+// Done closes when the renewal goroutine exits, whether due to Release, stop,
+// or a lost lease.
+func (h *SessionLeaseHandle) Done() <-chan struct{} {
+	if h == nil {
+		return nil
+	}
+	return h.done
+}
+
+func (h *SessionLeaseHandle) signalLost(err error) {
+	if h == nil {
+		return
+	}
+	h.lostMu.Lock()
+	h.lostErr = err
+	h.lostMu.Unlock()
+	h.lostOnce.Do(func() { close(h.lost) })
 }
 
 // Release stops renewal and releases the lease. It is safe to call more than once.
@@ -225,6 +269,7 @@ func (h *SessionLeaseHandle) renewLoop() {
 					continue
 				}
 				logpkg.Warnf("session lease renewal stopped for %s: %v", h.lease.SessionID, err)
+				h.signalLost(err)
 				return
 			}
 			transientRetries = 0

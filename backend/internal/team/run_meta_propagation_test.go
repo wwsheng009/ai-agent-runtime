@@ -93,6 +93,21 @@ func TestTeamRunMetaCloneCopiesRouteWarnings(t *testing.T) {
 	require.Equal(t, []string{"warning-one"}, original.RouteWarnings)
 }
 
+func TestRunMetaCloneCopiesBudgetAndSource(t *testing.T) {
+	original := &RunMeta{
+		Source:         "cli",
+		BudgetTokens:   4200,
+		PermissionMode: "plan",
+		Team:           &TeamRunMeta{TeamID: "team-1"},
+	}
+	clone := original.Clone()
+	require.NotNil(t, clone)
+	require.Equal(t, "cli", clone.Source)
+	require.Equal(t, 4200, clone.BudgetTokens)
+	require.Equal(t, "plan", clone.PermissionMode)
+	require.NotSame(t, original.Team, clone.Team)
+}
+
 func TestLeadPlannerInitialPlanIncludesTeamRunMeta(t *testing.T) {
 	client := &capturingSessionClient{
 		result: &SessionResult{

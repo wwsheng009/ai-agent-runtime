@@ -7,10 +7,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
-	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // buildSessionAgentForContext 组装会话执行所需的 agent 与选中 runtime 配置。
@@ -52,11 +49,12 @@ func (h *Handler) buildSessionAgentForContext(
 		agentModel = defaultAgentModel(h.llmRuntime)
 	}
 
-	agentConfig := &agent.Config{
-		Name:     firstNonEmptyString(strings.TrimSpace(childAgentType), "session-actor"),
-		Provider: agentProvider,
-		Model:    agentModel,
-	}
+	agentConfig := runtimehost.BuildAgentConfig(runtimehost.AgentConfigSpec{
+		Name:          firstNonEmptyString(strings.TrimSpace(childAgentType), "session-actor"),
+		Provider:      agentProvider,
+		Model:         agentModel,
+		RuntimeConfig: selectedConfig,
+	})
 	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, agentProvider)
 	instructionHeadMessages := buildRuntimeInstructionHeadMessages(profileState, workspacePath, agentProvider)
 	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
@@ -64,36 +62,18 @@ func (h *Handler) buildSessionAgentForContext(
 	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
-	if agentConfig.MaxSteps < 0 {
-		agentConfig.MaxSteps = 0
-	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
-		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
-	}
 	if selectedConfig != nil {
-		agentConfig.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
-		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
-		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
-		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
-		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig, h.knowledgeActivation)
 	}
-	if streamRequested || strings.TrimSpace(requestedReasoningEffort) != "" {
-		if agentConfig.Options == nil {
-			agentConfig.Options = make(map[string]interface{})
-		}
-		if streamRequested {
-			agentConfig.Options["stream"] = true
-		}
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort); reasoningEffort != "" {
-			agentConfig.Options["reasoning_effort"] = reasoningEffort
-		}
-	}
+	runtimehost.ApplyAgentRequestOptions(agentConfig, streamRequested, requestedReasoningEffort)
 	if workspacePath != "" {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
 		}
 		agentConfig.Options["workspace_path"] = workspacePath
 	}
+	runtimehost.ApplyToolBasePathOption(agentConfig, workspacePath)
+	runtimehost.ApplySessionRootOptions(agentConfig, sessionCtx.AllowedRoots, sessionCtx.ReadOnlyRoots)
 	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
@@ -107,22 +87,46 @@ func (h *Handler) buildSessionAgentForContext(
 		mergeProfileContextInto(agentConfig.Options, profileState.ContextValues)
 	}
 	if disableTools {
-		if agentConfig.Options == nil {
-			agentConfig.Options = make(map[string]interface{})
-		}
-		agentConfig.Options[llm.MetadataKeyDisableTools] = true
+		runtimehost.ApplyDisableToolsOption(agentConfig, true)
 	}
 	if agentConfig.Options == nil {
 		agentConfig.Options = make(map[string]interface{})
 	}
 	agentConfig.Options[agent.ChildPromptHeadOption] = primarySystemInstructionContent(instructionHeadMessages)
+	// Preserve the same provider-request route metadata as the direct
+	// AgentChat path. The values come from durable session context (written by
+	// the request prelude) and the same provider/model resolvers used below.
+	route := executionRouteTransparency{
+		RequestedProvider:        firstNonEmptyString(sessionCtx.RequestedProvider, agentProvider),
+		EffectiveProvider:        agentProvider,
+		RequestedModel:           firstNonEmptyString(sessionCtx.RequestedModel, agentModel),
+		EffectiveModel:           agentModel,
+		RequestedReasoningEffort: sessionCtx.RequestedReasoningEffort,
+		EffectiveReasoningEffort: sessionCtx.RequestedReasoningEffort,
+		RequestedPermissionMode:  sessionCtx.PermissionMode,
+		EffectivePermissionMode:  sessionCtx.PermissionMode,
+	}
+	agentConfig.Options["route"] = route.payload()
 
 	// Always construct the request catalog. disable_tools is an execution/choice
 	// decision and must not remove definitions from an existing cache lane.
 	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.sessionBaseMCPManagerByID(context.Background(), sessionID), true)
+	skillRegistry := h.skillRegistry
+	embeddingRouter := h.embeddingRouter
+	if profileState != nil {
+		if profileState.Registry != nil {
+			skillRegistry = profileState.Registry
+		}
+		if profileState.Embedding != nil {
+			embeddingRouter = profileState.Embedding
+		}
+		if profileState.MCPAdapter != nil {
+			sessionMCPManager = profileState.MCPAdapter
+		}
+	}
 	apiAgent := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
-		registry:        h.skillRegistry,
-		embeddingRouter: h.embeddingRouter,
+		registry:        skillRegistry,
+		embeddingRouter: embeddingRouter,
 		mcpManager:      sessionMCPManager,
 		llmRuntime:      h.llmRuntime,
 	})
@@ -136,19 +140,14 @@ func (h *Handler) buildSessionAgentForContext(
 	}
 	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
 	if strings.TrimSpace(childAgentType) != "" {
-		applyAPIChildAgentdefToolPolicy(apiAgent, childAgentType, workspacePath)
+		profileRoot := ""
+		if profileState != nil && profileState.Resolved != nil {
+			profileRoot = strings.TrimSpace(profileState.Resolved.ProfileRoot)
+		}
+		applyAPIChildAgentdefToolPolicy(apiAgent, childAgentType, workspacePath, profileRoot)
 	}
 	if childReadOnly {
-		toolPolicy := apiAgent.GetToolExecutionPolicy()
-		if toolPolicy == nil {
-			toolPolicy = agent.NewToolExecutionPolicy(nil, true)
-		} else {
-			toolPolicy = toolPolicy.Clone()
-			toolPolicy.ReadOnly = true
-		}
-		// 与 CLI 宿主同口径：只读边界只能收窄，父策略已带能力面时取交集。
-		toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
-		apiAgent.SetToolExecutionPolicy(toolPolicy)
+		runtimehost.ApplyChildReadOnlyPolicy(apiAgent, true)
 	}
 	applyAPIChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, apiAgentDepthCeiling(selectedConfig))
@@ -164,30 +163,21 @@ func (h *Handler) buildSessionAgentForContext(
 // applyAPIChildShellPolicy applies the explicit shell=false flag persisted by
 // subagent_spawn. A false flag keeps the inherited behavior.
 func applyAPIChildShellPolicy(apiAgent *agent.Agent, shellDisabled bool) {
-	if apiAgent == nil || !shellDisabled {
-		return
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
-	} else {
-		toolPolicy = toolPolicy.Clone()
-	}
-	toolPolicy.SetShellDisabled(true)
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
+	runtimehost.ApplyChildShellPolicy(apiAgent, shellDisabled)
 }
 
 // resolveProfileStateForSessionContext 解析会话 profile 状态。
 // 与原内联块同口径：解析失败不报错，返回 nil（降级为无 profile 行为）。
-func (h *Handler) resolveProfileStateForSessionContext(sessionCtx runtimehost.SessionContext) *profileRuntimeState {
+func (h *Handler) resolveProfileStateForSessionContext(ctx context.Context, sessionCtx runtimehost.SessionContext) (*profileRuntimeState, func()) {
 	if strings.TrimSpace(sessionCtx.ProfileRef) == "" {
-		return nil
+		return nil, nil
 	}
-	resolved, err := h.resolveProfileSessionState(sessionCtx.ProfileRef, sessionCtx.AgentID, sessionCtx.WorkspacePath)
+	resolved, cleanup, err := h.resolveProfileRuntimeState(
+		ctx, sessionCtx.ProfileRef, sessionCtx.AgentID, UsageScope{}, sessionCtx.WorkspacePath)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return resolved
+	return resolved, cleanup
 }
 
 // buildSessionLoopConfigFor 组装会话 loop 配置（E3.1b-2b 接缝）。
@@ -221,7 +211,7 @@ func (h *Handler) buildSessionLoopConfigFor(
 	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
 	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。
 	applyAPISessionMainAgentRouting(loopConfig, h.resolveMainAgentRoutingForSession(sessionCtx.RoutingOverrideRaw, workspacePath),
-		strings.TrimSpace(childAgentType) == "" && childDepth == 0 && !childReadOnly)
+		isBaseSessionContext(sessionCtx))
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, sessionCtx.ChildCompletionRequirement, workspacePath)
 	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
 	// 未注入观察器（知识层 off / 账本不可用）时 hook 为 nil，行为与无知识层一致。

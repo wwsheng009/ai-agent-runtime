@@ -20,6 +20,7 @@ const (
 const (
 	runtimeDirName             = "runtime"
 	sessionRuntimeFileName     = "session_runtime.sqlite"
+	sessionLeaseFileName       = "session_leases.sqlite"
 	legacyChatRuntimeFileName  = "chat_runtime.sqlite"
 	teamStoreFileName          = "team_store.sqlite"
 	agentControlFileName       = "agent_control.sqlite"
@@ -42,6 +43,7 @@ type ResolvedPaths struct {
 	SessionDir                    string `json:"session_dir"`
 	RuntimeDir                    string `json:"runtime_dir"`
 	SessionRuntimeStorePath       string `json:"session_runtime_store_path,omitempty"`
+	SessionLeaseStorePath         string `json:"session_lease_store_path,omitempty"`
 	LegacySessionRuntimeStorePath string `json:"legacy_session_runtime_store_path,omitempty"`
 	TeamStorePath                 string `json:"team_store_path,omitempty"`
 	AgentControlStorePath         string `json:"agent_control_store_path,omitempty"`
@@ -104,6 +106,14 @@ func ResolvePaths(opts ResolveOptions) ResolvedPaths {
 	} else if strings.TrimSpace(cfg.SessionRuntime.StoreDSN) == "" && fileDefaults {
 		paths.SessionRuntimeStorePath = defaultSessionRuntimePath(runtimeDir, legacyRuntimePath)
 	}
+	// Lease storage is intentionally independent of defaultPersistence and
+	// always file-backed unless explicitly overridden: every host on this
+	// sessions.dir must share one cross-process mutex domain.
+	if path := ResolvePath(configFile, cfg.SessionRuntime.LeaseStorePath); path != "" {
+		paths.SessionLeaseStorePath = path
+	} else if strings.TrimSpace(cfg.SessionRuntime.LeaseStoreDSN) == "" {
+		paths.SessionLeaseStorePath = filepath.Join(runtimeDir, sessionLeaseFileName)
+	}
 
 	if path := ResolvePath(configFile, cfg.Team.StorePath); path != "" {
 		paths.TeamStorePath = path
@@ -151,6 +161,7 @@ func ApplyDefaults(config *runtimecfg.RuntimeConfig, opts ResolveOptions) Resolv
 	if config != nil && opts.Config == nil {
 		opts.Config = config
 	}
+	explicitSessionDir := config != nil && strings.TrimSpace(config.Sessions.Dir) != ""
 	paths := ResolvePaths(opts)
 	if config == nil {
 		return paths
@@ -160,6 +171,11 @@ func ApplyDefaults(config *runtimecfg.RuntimeConfig, opts ResolveOptions) Resolv
 		config.SessionRuntime.StorePath = paths.SessionRuntimeStorePath
 	} else if strings.TrimSpace(config.SessionRuntime.StorePath) != "" {
 		config.SessionRuntime.StorePath = paths.SessionRuntimeStorePath
+	}
+	if strings.TrimSpace(config.SessionRuntime.LeaseStorePath) == "" && strings.TrimSpace(config.SessionRuntime.LeaseStoreDSN) == "" && explicitSessionDir {
+		config.SessionRuntime.LeaseStorePath = paths.SessionLeaseStorePath
+	} else if strings.TrimSpace(config.SessionRuntime.LeaseStorePath) != "" {
+		config.SessionRuntime.LeaseStorePath = paths.SessionLeaseStorePath
 	}
 	if strings.TrimSpace(config.Team.StorePath) == "" && strings.TrimSpace(config.Team.StoreDSN) == "" {
 		config.Team.StorePath = paths.TeamStorePath
@@ -233,6 +249,7 @@ func applyDefaultFilePaths(paths *ResolvedPaths) {
 		return
 	}
 	paths.SessionRuntimeStorePath = defaultSessionRuntimePath(paths.RuntimeDir, paths.LegacySessionRuntimeStorePath)
+	paths.SessionLeaseStorePath = filepath.Join(paths.RuntimeDir, sessionLeaseFileName)
 	paths.TeamStorePath = filepath.Join(paths.RuntimeDir, teamStoreFileName)
 	paths.AgentControlStorePath = filepath.Join(paths.RuntimeDir, agentControlFileName)
 	paths.AgentControlMailboxStorePath = paths.AgentControlStorePath

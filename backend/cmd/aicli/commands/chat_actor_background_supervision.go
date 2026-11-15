@@ -2,12 +2,12 @@ package commands
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -96,24 +96,9 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 		}
 	}
 	rootScopeID := h.localBackgroundJobRootScope(sessionID)
-	_, err := supervision.ProjectBackgroundJobTerminal(ctx, h.Supervision.Store, h.Supervision.Wakes, supervision.BackgroundJobTerminalInput{
-		RootScopeID:           rootScopeID,
-		TargetParentSessionID: sessionID,
-		JobID:                 strings.TrimSpace(event.JobID),
-		ParentTurnID:          origin.ParentTurnID,
-		ParentEpisodeID:       origin.ParentEpisodeID,
-		SettlementID:          origin.SettlementID,
-		SettlementCohortID:    origin.SettlementCohortID,
-		FinalizationPolicy:    origin.FinalizationPolicy,
-		Status:                event.Type,
-		Command:               command,
-		ExitCode:              localBackgroundJobEventString(event.Payload["exit_code"]),
-		ErrorCode:             localBackgroundJobEventString(event.Payload["error_code"]),
-		Message:               localBackgroundJobEventString(event.Payload["message"]),
-		CancelSource:          localBackgroundJobEventString(event.Payload["cancel_source"]),
-		Observed:              observed,
-		Epoch:                 localBackgroundJobEventEpoch(event),
-	})
+	_, err := supervision.ProjectBackgroundJobTerminal(ctx, h.Supervision.Store, h.Supervision.Wakes,
+		supervision.BackgroundJobTerminalInputFromEvent(
+			event, sessionID, rootScopeID, command, observed, origin))
 	if err != nil {
 		// 投影失败不改变 job 终态；下一次 turn 的 preflight 仍能读到 job store。
 		return
@@ -146,24 +131,11 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobMonitor(event background
 		}
 	}
 	rootScopeID := h.localBackgroundJobRootScope(sessionID)
-	_, err := supervision.ProjectBackgroundJobMonitor(ctx, h.Supervision.Store, h.Supervision.Wakes, supervision.BackgroundJobMonitorInput{
-		RootScopeID:           rootScopeID,
-		TargetParentSessionID: sessionID,
-		JobID:                 strings.TrimSpace(event.JobID),
-		ParentTurnID:          origin.ParentTurnID,
-		ParentEpisodeID:       origin.ParentEpisodeID,
-		SettlementID:          origin.SettlementID,
-		SettlementCohortID:    origin.SettlementCohortID,
-		FinalizationPolicy:    origin.FinalizationPolicy,
-		Status:                localBackgroundJobEventString(event.Payload["status"]),
-		Command:               command,
-		Elapsed:               localBackgroundJobPayloadDuration(event.Payload["elapsed_ms"]),
-		CheckAfter:            localBackgroundJobPayloadDuration(event.Payload["check_after_ms"]),
-		MaxDuration:           localBackgroundJobPayloadDuration(event.Payload["max_duration_ms"]),
-		Epoch:                 localBackgroundJobEventEpoch(event),
-	})
+	_, err := supervision.ProjectBackgroundJobMonitor(ctx, h.Supervision.Store, h.Supervision.Wakes,
+		supervision.BackgroundJobMonitorInputFromEvent(event, sessionID, rootScopeID, command, origin))
 	if err != nil {
 		// 投影失败不改变 job 状态；下一次 turn 的 preflight 仍能读到 job store。
+		logpkg.Warnf("background job monitor projection failed: job=%s session=%s: %v", event.JobID, sessionID, err)
 		return
 	}
 	_ = h.wakeSupervisedParent(ctx, sessionID, rootScopeID)
@@ -171,18 +143,7 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobMonitor(event background
 
 // localBackgroundJobPayloadDuration 把 manager 事件里的毫秒字段读成 duration。
 func localBackgroundJobPayloadDuration(value interface{}) time.Duration {
-	switch typed := value.(type) {
-	case time.Duration:
-		return typed
-	case int64:
-		return time.Duration(typed) * time.Millisecond
-	case int:
-		return time.Duration(typed) * time.Millisecond
-	case float64:
-		return time.Duration(typed) * time.Millisecond
-	default:
-		return 0
-	}
+	return supervision.BackgroundJobPayloadDuration(value)
 }
 
 // disarmLocalChatSessionMonitors 会话关闭时停掉本会话的巡检计时器：投递目标
@@ -246,20 +207,9 @@ func resolveLocalChatSessionPendingWakes(session *ChatSession) int {
 // localBackgroundJobEventEpoch 与 API 宿主同口径：事件时间戳即「本次终态」的
 // 稳定身份，重放不复发、重跑换 epoch 可再唤一次。
 func localBackgroundJobEventEpoch(event background.JobEvent) int64 {
-	if !event.CreatedAt.IsZero() {
-		if epoch := event.CreatedAt.UTC().UnixNano(); epoch > 0 {
-			return epoch
-		}
-	}
-	return time.Now().UTC().UnixNano()
+	return supervision.BackgroundJobTerminalEpoch(event)
 }
 
 func localBackgroundJobEventString(value interface{}) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	return fmt.Sprintf("%v", value)
+	return supervision.BackgroundJobPayloadString(value)
 }

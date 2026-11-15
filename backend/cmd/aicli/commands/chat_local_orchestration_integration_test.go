@@ -1054,7 +1054,17 @@ func TestAICLIChatActorExecutor_AutoStartTeamClosesNonLeadTeammateSessionAfterTe
 	}
 	defer teamStore.Close()
 
-	provider := &autoStartLocalOrchestrationProvider{teammateDelay: 150 * time.Millisecond}
+	// Hold the teammate before it can report a terminal task state. Without the
+	// gate, a fast teammate can finish and be cleaned up before Execute returns,
+	// making the "actor existed" assertion a scheduling race.
+	releaseTeammate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseTeammate) }) }
+	defer release()
+	provider := &autoStartLocalOrchestrationProvider{
+		teammateDelay: 150 * time.Millisecond,
+		teammateHold:  releaseTeammate,
+	}
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
 		DefaultProvider: "test-provider",
 		DefaultModel:    "test-model",
@@ -1115,6 +1125,7 @@ func TestAICLIChatActorExecutor_AutoStartTeamClosesNonLeadTeammateSessionAfterTe
 		t.Fatalf("expected lead actor %q to remain registered", runtimeSession.ID)
 	}
 
+	release()
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
@@ -1179,7 +1190,14 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 	}
 	defer teamStore.Close()
 
-	provider := &failedAutoStartLocalOrchestrationProvider{teammateDelay: 150 * time.Millisecond}
+	releaseTeammate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseTeammate) }) }
+	defer release()
+	provider := &failedAutoStartLocalOrchestrationProvider{
+		teammateDelay: 150 * time.Millisecond,
+		teammateHold:  releaseTeammate,
+	}
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
 		DefaultProvider: "test-provider",
 		DefaultModel:    "test-model",
@@ -1240,6 +1258,7 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 		t.Fatalf("expected lead actor %q to remain registered", runtimeSession.ID)
 	}
 
+	release()
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-failed"); err != nil {
@@ -2143,6 +2162,7 @@ func (p *emptyReplyAfterSpawnTeamProvider) CheckHealth(ctx context.Context) erro
 
 type failedAutoStartLocalOrchestrationProvider struct {
 	teammateDelay time.Duration
+	teammateHold  <-chan struct{}
 }
 
 func (p *failedAutoStartLocalOrchestrationProvider) Name() string { return "test-provider" }
@@ -2195,6 +2215,13 @@ func (p *failedAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 					},
 				}, nil
 			case strings.Contains(lastUser, "You are teammate"):
+				if p.teammateHold != nil {
+					select {
+					case <-p.teammateHold:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
 				if p.teammateDelay > 0 {
 					time.Sleep(p.teammateDelay)
 				}

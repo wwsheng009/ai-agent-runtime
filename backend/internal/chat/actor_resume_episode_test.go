@@ -43,6 +43,17 @@ type resumeEpisodeHarness struct {
 	parkOnPrepare func(turnID string)
 }
 
+func TestNextTurnIDHonorsContextTurnID(t *testing.T) {
+	actor := &SessionActor{}
+	ctx := agent.WithTurnID(context.Background(), "turn-request-123")
+
+	require.Equal(t, "turn-request-123", actor.nextTurnID(ctx))
+
+	generated := actor.nextTurnID(context.Background())
+	require.True(t, strings.HasPrefix(generated, "turn_"))
+	require.NotEqual(t, "turn-request-123", generated)
+}
+
 func newResumeEpisodeHarness(t *testing.T) *resumeEpisodeHarness {
 	t.Helper()
 	ctx := context.Background()

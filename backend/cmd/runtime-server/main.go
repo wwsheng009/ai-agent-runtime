@@ -1558,13 +1558,6 @@ func (a *runtimeServerApp) close() {
 	if a == nil {
 		return
 	}
-	if a.memoryRuntimeCancel != nil {
-		a.memoryRuntimeCancel()
-		a.memoryRuntimeCancel = nil
-	}
-	if a.handler != nil {
-		_ = a.handler.CloseMemoryRuntime()
-	}
 	// 调度驱动最先停：它持有 mesh 租约并驱动 schedule.Runtime（"先停驱动、后放
 	// 租约"的顺序由 schedulehost.Leader.Stop 保证），且投递路径依赖 handler hub。
 	if a.scheduleDriver != nil {
@@ -1572,6 +1565,20 @@ func (a *runtimeServerApp) close() {
 		a.scheduleDriver.Stop(stopCtx)
 		cancel()
 		a.scheduleDriver = nil
+	}
+	// Actors may still be running turns that touch memory, event persistence, or
+	// session stores. Stop the hub after the schedule driver can no longer
+	// submit work, and before tearing down the resources those actors use.
+	if a.handler != nil {
+		a.handler.CloseSessionHub()
+		_ = a.handler.CloseSessionLeaseStore()
+	}
+	if a.memoryRuntimeCancel != nil {
+		a.memoryRuntimeCancel()
+		a.memoryRuntimeCancel = nil
+	}
+	if a.handler != nil {
+		_ = a.handler.CloseMemoryRuntime()
 	}
 	// 会话级 workspace manager 先于全局 manager 停止（两者都持有 MCP 客户端连接）。
 	if a.handler != nil {

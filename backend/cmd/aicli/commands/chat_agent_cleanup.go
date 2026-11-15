@@ -130,83 +130,30 @@ func runChatAgentCleanupCommand(session *ChatSession, argument string) (string, 
 	observations := registry.observeLocalQuotaChildren(ctx, children)
 	policy := agentcontrol.ReclaimPolicy{IdleTimeout: opts.Idle, Now: now}
 	decisions := agentcontrol.SelectReclaimable(observations, policy)
-
-	lines := []string{"Agent Registry Cleanup:"}
-	lines = append(lines, fmt.Sprintf("  root_session=%s quota_children=%d reclaimable=%d idle_policy=%s",
-		rootSessionID, len(children), len(decisions), chatAgentCleanupIdlePolicyText(opts.Idle)))
-	if len(decisions) == 0 {
-		lines = append(lines, "  没有可安全回收的子 agent（running / waiting_approval / waiting_input 永不回收）")
+	report := agentcontrol.ManualReclaimReport{
+		RootSessionID: rootSessionID,
+		QuotaChildren: len(children),
+		Decisions:     decisions,
+		DryRun:        opts.DryRun,
+		Idle:          opts.Idle,
 	}
 	if opts.DryRun {
-		for _, decision := range decisions {
-			lines = append(lines, chatAgentCleanupDecisionLine("would_reclaim", decision))
-		}
-		lines = append(lines, "  dry_run=true（未执行任何回收）")
-		return strings.Join(lines, "\n"), nil
+		return report.Render(), nil
 	}
 
 	outcome, reclaimErr := agentcontrol.ReclaimAgentQuota(ctx, reclaimStore, rootSessionID, observations, policy)
 	if reclaimErr != nil {
 		return "", reclaimErr
 	}
+	report.Outcome = outcome
+	report.HasOutcome = true
 	if outcome.Reclaimed() > 0 {
 		// P2-8 方案 4：手工清理与 spawn 闸门共用同一产品事件口径，
 		// 只是 source 不同（manual_cleanup），便于 /debug 区分“谁回收的”。
 		registry.recordLocalAgentReclaim(ctx, parentSessionID, rootSessionID, agentcontrol.ReclaimSourceManualCleanup, outcome)
 	}
-	summary := outcome.Summary()
-	if summary == "" {
-		summary = "reclaimed=0"
-	}
-	// 人读面在前（一句话说明发生了什么、是否需要关注），机器可读计数保留在
-	// 紧随其后的 `详情:` 行里：脚本/测试仍按 `reclaimed=`/`reclaim_reasons=`
-	// 契约断言，而操作者不必自己翻译 snake_case 的 reason。
-	if human := outcome.HumanSummary(); human != "" {
-		lines = append(lines, "  "+human)
-	}
-	lines = append(lines, "  详情: "+summary)
-	reclaimed := make(map[string]string, len(outcome.Decisions))
-	for _, decision := range outcome.Decisions {
-		reclaimed[decision.AgentPath] = decision.Reason
-	}
-	for _, decision := range decisions {
-		if reason, closed := reclaimed[decision.AgentPath]; closed {
-			lines = append(lines, chatAgentCleanupDecisionLine("reclaimed", agentcontrol.ReclaimDecision{
-				AgentPath: decision.AgentPath,
-				SessionID: decision.SessionID,
-				Reason:    reason,
-			}))
-			continue
-		}
-		lines = append(lines, chatAgentCleanupDecisionLine("reclaim_failed", decision))
-	}
 	if records, listErr := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{RootSessionID: rootSessionID}); listErr == nil {
-		lines = append(lines, fmt.Sprintf("  remaining_quota_children=%d", len(agentcontrol.QuotaChildren(records))))
+		report.RemainingQuotaChildren = len(agentcontrol.QuotaChildren(records))
 	}
-	if outcome.Failed > 0 && strings.TrimSpace(outcome.FirstError) != "" {
-		lines = append(lines, "  first_error="+strings.TrimSpace(outcome.FirstError))
-	}
-	lines = append(lines, "  提示: /agents cleanup --dry-run 预览；--idle 30m 额外回收长期空闲对象")
-	return strings.Join(lines, "\n"), nil
-}
-
-func chatAgentCleanupDecisionLine(prefix string, decision agentcontrol.ReclaimDecision) string {
-	fields := []string{"  " + prefix}
-	if path := strings.TrimSpace(decision.AgentPath); path != "" {
-		fields = append(fields, "path="+path)
-	}
-	if sessionID := strings.TrimSpace(decision.SessionID); sessionID != "" {
-		fields = append(fields, "session="+sessionID)
-	}
-	if reason := strings.TrimSpace(decision.Reason); reason != "" {
-		fields = append(fields, "reason="+reason)
-	}
-	return strings.Join(fields, " ")
-}
-
-func chatAgentCleanupIdlePolicyText(idle time.Duration) string {
-	if idle <= 0 {
-		return "disabled"
-	}
-	return idle.String()
+	return report.Render(), nil
 }

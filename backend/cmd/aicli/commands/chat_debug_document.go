@@ -223,6 +223,31 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 		}
 	}
 
+	if authority := chatSessionAuthorityInfo(session); authority != nil {
+		builder.heading("运行时 Authority: (GET /debug/chat/status#authority)")
+		builder.meta("Execution Authority:", string(authority.ExecutionAuthority))
+		builder.meta("Authoritative:", chatDebugBool(authority.Authoritative))
+		builder.meta("Authority Source:", chatDebugValueOrNone(authority.AuthoritySource))
+		builder.meta("Authority Domain:", chatDebugValueOrNone(authority.AuthorityDomain))
+		builder.meta("Runtime Store:", chatDebugValueOrNone(authority.RuntimeStoreID))
+		builder.meta("Event Store:", chatDebugValueOrNone(authority.EventStoreID))
+		builder.meta("Lease Store:", chatDebugValueOrNone(authority.LeaseStoreID))
+		builder.meta("Runtime Durable:", chatDebugBool(authority.RuntimeStoreDurable))
+		builder.meta("Event Durable:", chatDebugBool(authority.EventStoreDurable))
+		if authority.LeaseOwnerKind != "" {
+			builder.meta("Lease Owner:", fmt.Sprintf("%s (%s pid=%d host=%s)",
+				chatDebugValueOrNone(authority.LeaseOwnerID),
+				authority.LeaseOwnerKind,
+				authority.LeaseOwnerPID,
+				chatDebugValueOrNone(authority.LeaseOwnerHostname),
+			))
+		}
+		if authority.LeaseExpiresAt != nil {
+			builder.meta("Lease Expires:", authority.LeaseExpiresAt.UTC().Format(time.RFC3339))
+		}
+		builder.blank()
+	}
+
 	builder.heading("运行时调试: (GET /debug/chat/status#runtime)")
 	if session.Config != nil {
 		builder.meta("AICLI Config Path:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.Config.ConfigFilePath)))

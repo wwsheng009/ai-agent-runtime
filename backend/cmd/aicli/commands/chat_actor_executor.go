@@ -584,6 +584,9 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 	if permissionMode := chatSessionPermissionMode(session); permissionMode != "" {
 		runMeta.PermissionMode = string(permissionMode)
 	}
+	if session.TurnBudgetTokens > 0 {
+		runMeta.BudgetTokens = session.TurnBudgetTokens
+	}
 	// Ordinary interactive/child sessions never own a Team completion
 	// contract via session context alone. Force none so a forked or
 	// legacy complete_task value cannot re-enter RunMeta outside a bound
@@ -599,7 +602,8 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 			CurrentTaskID: strings.TrimSpace(binding.TaskID),
 		}
 	}
-	if strings.TrimSpace(runMeta.PermissionMode) == "" && strings.TrimSpace(runMeta.CompletionRequirement) == "" && runMeta.Team == nil {
+	if strings.TrimSpace(runMeta.PermissionMode) == "" && strings.TrimSpace(runMeta.CompletionRequirement) == "" &&
+		runMeta.BudgetTokens == 0 && runMeta.Team == nil {
 		return nil
 	}
 	return runMeta

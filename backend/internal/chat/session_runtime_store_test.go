@@ -427,6 +427,12 @@ func TestSessionLeaseHandleStopsRenewingAfterRenewError(t *testing.T) {
 	})
 	require.NoError(t, err)
 	time.Sleep(80 * time.Millisecond)
+	select {
+	case <-handle.Lost():
+	case <-time.After(2 * time.Second):
+		t.Fatal("renewal failure must close the Lost channel")
+	}
+	require.Error(t, handle.LostError())
 	require.NoError(t, handle.Release(context.Background()))
 
 	renewals, releases := store.counts()

@@ -28,7 +28,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -169,6 +168,7 @@ type localChatRuntimeHost struct {
 	SessionHub         *runtimechat.SessionHub
 	RuntimeStore       runtimechat.RuntimeStateStore
 	EventStore         runtimechat.EventStore
+	LeaseStore         runtimechat.SessionLeaseStore
 	ReceiptStore       runtimechat.ToolReceiptStore
 	TeamStore          team.Store
 	AgentControl       *agentcontrol.RegistryService
@@ -370,6 +370,13 @@ func (h *localChatRuntimeHost) Close() {
 		h.asyncWG.Wait()
 		if waitForSubagentOps && subagentIdle != nil {
 			<-subagentIdle
+		}
+		// Stop actors before the cleanupFns reverse pass closes the event store
+		// and persistence buffer. Otherwise a late actor publish can arrive after
+		// the buffer is closed and be dropped. StopAll is idempotent; the hub's
+		// own cleanup entry remains as a fallback for partially constructed hosts.
+		if h.SessionHub != nil {
+			h.SessionHub.StopAll()
 		}
 		for i := len(h.cleanupFns) - 1; i >= 0; i-- {
 			if h.cleanupFns[i] != nil {
@@ -1125,21 +1132,7 @@ func (h *localChatRuntimeHost) runtimeEventPersistSettings() runtimechat.EventPe
 	if h == nil || h.RuntimeConfig == nil {
 		return runtimechat.EventPersistSettings{}
 	}
-	cfg := h.RuntimeConfig.SessionRuntime.EventPersist
-	return runtimechat.EventPersistSettings{
-		Enabled:         !cfg.Disable,
-		BatchSize:       cfg.BatchSize,
-		FlushInterval:   cfg.FlushInterval,
-		QueueLimit:      cfg.QueueLimit,
-		QueueBytesLimit: cfg.QueueBytesLimit,
-		ShutdownTimeout: cfg.ShutdownTimeout,
-		FailMode:        cfg.FailMode,
-		AsyncDispatch:   !cfg.Disable,
-		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
-		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
-		// P0-1：可重建的正文流式增量溢出丢弃，绝不反压 LLM 回调链。
-		OverflowDropTypes: runtimeevents.IsPersistStreamDeltaEventType,
-	}
+	return runtimehost.ResolveEventPersistSettings(h.RuntimeConfig.SessionRuntime.EventPersist)
 }
 
 // bindRuntimeEventPersistence 安装本地 A 通道桥（总线 → 会话事件库）。
@@ -1181,20 +1174,12 @@ func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
 			}
 		}
 		handler := func(event runtimeevents.Event) {
-			if strings.TrimSpace(event.SessionID) == "" {
+			// 落盘准入、生产者去重与 store 类型别名统一由 runtimehost 提供，
+			// 与 runtime-server 的 A 通道桥共用同一条判定。
+			mapped, persist := runtimehost.PrepareSessionStoreEvent(event)
+			if !persist {
 				return
 			}
-			// 生产者已自行落盘的事件（AppendEvent 后回填 payload["seq"]）不再重复
-			// append；判定收敛在 internal/events.ProducerPersistedEvent，与 runtime
-			// server 的 A 通道桥（api/skills/handler.go）共用同一实现。
-			if runtimeevents.ProducerPersistedEvent(event) {
-				return
-			}
-			if !runtimeevents.IsPersistedEventType(event.Type) {
-				return
-			}
-			mapped := event
-			mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
 			if h.runtimeEventBuffer != nil {
 				// P1.5：只入队（非阻塞），落盘、重试、关闭 flush 由缓冲 worker 负责。
 				h.runtimeEventBuffer.Enqueue(mapped)
@@ -1457,11 +1442,16 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	markChatStartup("host_supervision_plane")
 	configureLocalChatMailboxWriteThrough(globalMailboxStore, runtimeStore, bootstrapManager.TeamStore())
 	eventBus := runtimeevents.NewBusWithRetention(2048)
+	leaseStore, closeLeaseStore := buildLocalChatLeaseStore(session, runtimeConfig)
+	if leaseStore == nil {
+		leaseStore, _ = runtimeStore.(runtimechat.SessionLeaseStore)
+	}
 	host := &localChatRuntimeHost{
 		Bootstrap:          bootstrapManager,
 		RuntimeConfig:      runtimeConfig,
 		RuntimeStore:       runtimeStore,
 		EventStore:         eventStore,
+		LeaseStore:         leaseStore,
 		ReceiptStore:       receiptStore,
 		TeamStore:          bootstrapManager.TeamStore(),
 		AgentControl:       agentControlRegistry,
@@ -1484,7 +1474,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		logpkg.Warnf("initialize chat memory runtime failed: %v", err)
 	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
-	host.startMemoryIdleSweep()
+	stopMemorySweep := host.startMemoryIdleSweep()
 	// Codex-compatible session-scoped SessionEnd: turn-level SessionEnd keeps
 	// scope=turn; this hook fires once when the session is closed.
 	session.SessionManager.SetSessionCloseHook(func(ctx context.Context, closed *runtimechat.Session) {
@@ -1609,6 +1599,12 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		},
 		func() {
 			closeLocalRuntimeStores(runtimeStore, eventStore)
+		},
+		func() {
+			closeLeaseStore()
+		},
+		func() {
+			stopMemorySweep()
 		},
 		func() {
 			if batchStore != nil {
@@ -1858,12 +1854,12 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	if session != nil && session.RuntimeSession != nil {
 		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
 	}
-	isBaseSession := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
+	isBaseSessionByID := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
 	// A1/A2-a entry invariant: an actor must never be built for a base session
 	// whose durable row does not exist yet. Flush deferred-storage shells and
 	// verify the row is loadable (with one host-side restore attempt) so
 	// durable-dependent tools such as enter_plan_mode cannot erupt mid-turn.
-	if isBaseSession && session != nil {
+	if isBaseSessionByID && session != nil {
 		if err := ensureSessionDurableBeforeActor(session); err != nil {
 			return nil, err
 		}
@@ -1877,8 +1873,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return runtimehost.BuildSessionActor(sessionID, h.aicliRuntimeDeps(session, sessionStore, runtimeConfig, workspaceRoot, sessionID))
 	}
 	// E3.4a-1：runtime session → SessionContext 派生抽成命名函数（行为零变化）。
-	sessionCtx, workspaceRoot := deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot)
-	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, sessionCtx.ChildAgentType, sessionCtx.RequestedModel, sessionCtx.RequestedProvider, sessionCtx.RequestedReasoningEffort)
+	sessionCtx, workspaceRoot := deriveLocalSessionContext(sessionStore, sessionID, isBaseSessionByID, workspaceRoot)
+	isBaseSession := runtimehost.IsBaseSession(sessionID, baseSessionID, sessionCtx)
+	requestedProvider, requestedModel, requestedReasoning := localSessionRouteContext(sessionCtx, isBaseSession)
+	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, sessionCtx.ChildAgentType, requestedModel, requestedProvider, requestedReasoning)
+	applyLocalSessionContextRoots(apiAgent, sessionCtx)
 	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
 	if !isBaseSession {
 		clearLocalChildAdmissionSnapshot(apiAgent)
@@ -1896,11 +1895,15 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	applyLocalChildReadOnlyPolicy(apiAgent, sessionCtx.ChildReadOnly)
 	applyLocalChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyLocalChildDepthPolicy(apiAgent, sessionCtx.ChildDepth, localAgentDepthCeiling(runtimeConfig, h))
-	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
+	leaseStore := h.LeaseStore
+	if leaseStore == nil {
+		leaseStore, _ = h.RuntimeStore.(runtimechat.SessionLeaseStore)
+	}
+	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), leaseStore, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
-	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, sessionCtx.RequestedReasoningEffort)
+	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoning)
 	// §6.12 扩展：轻量 subagent_spawn 子代理以 agent_session: 义务写入挂起记录后，
 	// run 收尾的 settle 必须能判读子会话终态——接宿主自己的 durable 判读器
 	// （supervision 通知面；未接线时保持 batch-only 语义，已有挂起不受影响）。
@@ -2039,71 +2042,12 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 	if err != nil || binding == nil {
 		return
 	}
-	hasSandbox := len(binding.Sandbox) > 0
-	if len(binding.ToolAllowlist) == 0 && len(binding.ToolDenylist) == 0 && (binding.ReadOnly == nil || !*binding.ReadOnly) && !hasSandbox {
-		return
+	warnings, sandboxErr := runtimehost.ApplyChildAgentdefToolPolicy(apiAgent, binding, agentType, workspaceRoot, toolkitBasePath)
+	if sandboxErr != nil {
+		logpkg.Warnf("child agentdef sandbox materialize failed for %s: %v", agentType, sandboxErr)
 	}
-
-	readOnly := binding.ReadOnly != nil && *binding.ReadOnly
-	var allowlist []string
-	if len(binding.ToolAllowlist) > 0 {
-		allowlist = append([]string(nil), binding.ToolAllowlist...)
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
-	} else {
-		// 角色必须传下去：DeriveChild 的 role 为空时能力地板只有
-		// read_only+write_fs，内建 general/plan/explore 子代理会在继承到 shell
-		// 工具面后被能力门禁拒绝（真机证据：子代理报
-		// "capability not allowed by execution policy: exec_shell"）。
-		toolPolicy = toolPolicy.DeriveChildForTask(allowlist, readOnly, agentType, nil)
-	}
-	// A freshly created child policy inherits nothing, so seat the toolkit base
-	// path on it before a sandbox is materialized; otherwise its relative path
-	// checks would fall back to the server process directory while the executor
-	// resolves against the registered base path.
-	if strings.TrimSpace(toolPolicy.PathAnchorRoot) == "" {
-		toolPolicy.SetPathAnchorRoot(toolkitBasePath)
-	}
-	if len(binding.ToolDenylist) > 0 {
-		if toolPolicy.DeniedTools == nil {
-			toolPolicy.DeniedTools = map[string]bool{}
-		}
-		for _, name := range binding.ToolDenylist {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				toolPolicy.DeniedTools[name] = true
-			}
-		}
-	}
-	if hasSandbox {
-		warnings, err := runtimeprofileinput.MaterializeSandboxForWorkspace(toolPolicy, binding.Sandbox, workspaceRoot)
-		if err != nil {
-			logpkg.Warnf("child agentdef sandbox materialize failed for %s: %v", agentType, err)
-		}
-		for _, warning := range warnings {
-			logpkg.Warnf("child agentdef sandbox: %s", warning)
-		}
-	}
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
-
-	// Agent definitions provide defaults, not a second permission resolution.
-	// In particular, explore's implicit plan must not replace inherited bypass
-	// or an explicit dont_ask. The static read-only policy above still applies.
-	if binding.PermissionMode == runtimepolicy.ModePlan {
-		engine := apiAgent.GetPermissionEngine()
-		if engine == nil {
-			engine = agent.NewPermissionEngine()
-			engine.Mode = binding.PermissionMode
-			apiAgent.SetPermissionEngine(engine)
-		}
-		if engine.Mode == "" {
-			engine.Mode = binding.PermissionMode
-		}
-		if engine.Mode == runtimepolicy.ModePlan {
-			runtimepolicy.EnsurePlanWriteAllowPaths(engine)
-		}
+	for _, warning := range warnings {
+		logpkg.Warnf("child agentdef sandbox: %s", warning)
 	}
 }
 
@@ -2120,36 +2064,13 @@ func clearLocalChildAdmissionSnapshot(apiAgent *agent.Agent) {
 }
 
 func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
-	if apiAgent == nil || !readOnly {
-		return
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(nil, true)
-	} else {
-		toolPolicy = toolPolicy.Clone()
-		toolPolicy.ReadOnly = true
-	}
-	// 只读边界只能收窄：父策略已带能力面时取交集，避免 read_only 派生反而
-	// 重新拿到父策略没有的 network/agent_management 能力（绝不宽于父会话）。
-	toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
+	runtimehost.ApplyChildReadOnlyPolicy(apiAgent, readOnly)
 }
 
 // applyLocalChildShellPolicy applies the explicit shell=false flag persisted by
 // subagent_spawn. A false flag keeps the inherited behavior.
 func applyLocalChildShellPolicy(apiAgent *agent.Agent, shellDisabled bool) {
-	if apiAgent == nil || !shellDisabled {
-		return
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
-	} else {
-		toolPolicy = toolPolicy.Clone()
-	}
-	toolPolicy.SetShellDisabled(true)
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
+	runtimehost.ApplyChildShellPolicy(apiAgent, shellDisabled)
 }
 
 // localAgentDepthCeiling resolves the effective child-depth ceiling for a child
@@ -2158,41 +2079,25 @@ func applyLocalChildShellPolicy(apiAgent *agent.Agent, shellDisabled bool) {
 func localAgentDepthCeiling(runtimeConfig *runtimecfg.RuntimeConfig, h *localChatRuntimeHost) int {
 	switch {
 	case runtimeConfig != nil:
-		return runtimecfg.NormalizeAgentsConfig(runtimeConfig.Agents).MaxDepth
+		return runtimehost.AgentDepthCeiling(runtimeConfig)
 	case h != nil && h.RuntimeConfig != nil:
-		return runtimecfg.NormalizeAgentsConfig(h.RuntimeConfig.Agents).MaxDepth
+		return runtimehost.AgentDepthCeiling(h.RuntimeConfig)
 	default:
-		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{}).MaxDepth
+		return runtimehost.AgentDepthCeiling(nil)
 	}
 }
 
 func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
-	if apiAgent == nil || maxDepth <= 0 || depth < maxDepth {
-		return
-	}
-	toolPolicy := apiAgent.GetToolExecutionPolicy()
-	if toolPolicy == nil {
-		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
-	} else {
-		toolPolicy = toolPolicy.Clone()
-	}
-	if toolPolicy.DeniedTools == nil {
-		toolPolicy.DeniedTools = map[string]bool{}
-	}
-	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
-	for _, toolName := range toolregistry.CallableNames("subagent_spawn", agent.SpawnSubagentsToolName, "team_spawn") {
-		toolPolicy.DeniedTools[toolName] = true
-	}
-	apiAgent.SetToolExecutionPolicy(toolPolicy)
+	runtimehost.ApplyChildDepthPolicy(apiAgent, depth, maxDepth)
 }
 
-func acquireLocalChatSessionLease(ctx context.Context, store runtimechat.RuntimeStateStore, sessionID string) (*runtimechat.SessionLeaseHandle, error) {
+func acquireLocalChatSessionLease(ctx context.Context, store runtimechat.SessionLeaseStore, sessionID string) (*runtimechat.SessionLeaseHandle, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil, nil
 	}
-	leaseStore, ok := store.(runtimechat.SessionLeaseStore)
-	if !ok || leaseStore == nil {
+	leaseStore := store
+	if leaseStore == nil {
 		return nil, nil
 	}
 	if ctx == nil {
@@ -2402,13 +2307,13 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if len(requestedRoute) > 1 {
 		requestedReasoningEffort = strings.TrimSpace(requestedRoute[1])
 	}
-	agentConfig := &agent.Config{
-		Name:         firstNonEmptyChatValue(strings.TrimSpace(childAgentType), "aicli-chat"),
-		Provider:     resolveLocalChatAgentProvider(session, host),
-		Model:        resolveLocalChatAgentModel(session, host),
-		SystemPrompt: composeLocalChatSystemPrompt(session, nil, workspaceRoot),
-		MaxSteps:     0,
-	}
+	agentConfig := runtimehost.BuildAgentConfig(runtimehost.AgentConfigSpec{
+		Name:          firstNonEmptyChatValue(strings.TrimSpace(childAgentType), "aicli-chat"),
+		Provider:      resolveLocalChatAgentProvider(session, host),
+		Model:         resolveLocalChatAgentModel(session, host),
+		SystemPrompt:  composeLocalChatSystemPrompt(session, nil, workspaceRoot),
+		RuntimeConfig: runtimeConfig,
+	})
 	if session != nil {
 		// Use the Claude Code-style capped request default, not the provider
 		// hard ceiling (max_tokens_limit). The ceiling still clamps via the
@@ -2435,14 +2340,6 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if strings.TrimSpace(requestedModel) != "" {
 		agentConfig.Model = strings.TrimSpace(requestedModel)
 	}
-	if runtimeConfig != nil {
-		agentConfig.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
-		agentConfig.MaxToolCalls = runtimeConfig.Agent.MaxToolCalls
-		agentConfig.MaxRunDuration = runtimeConfig.Agent.Timeout
-		agentConfig.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
-		agentConfig.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
-		agentConfig.MaxRepeatedPollCalls = runtimeConfig.Agent.MaxRepeatedPollCalls
-	}
 	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
 	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
 	allowedRoots := chatAllowedRoots(session)
@@ -2454,42 +2351,31 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		sessionReasoningEffort = session.ReasoningEffort
 	}
 	reasoningEffort := firstNonEmptyChatValue(requestedReasoningEffort, sessionReasoningEffort)
+	runtimehost.ApplyAgentRequestOptions(agentConfig, stream, reasoningEffort)
 	// tool_base_path is always set when a workspace root is known so preflight /
 	// relative path resolution match toolkit SetBasePath even when workspace
 	// context scanning remains disabled by default.
-	if stream || strings.TrimSpace(reasoningEffort) != "" || workspaceRoot != "" || len(allowedRoots) > 0 || len(profileContext) > 0 {
-		agentConfig.Options = make(map[string]interface{})
-		if stream {
-			agentConfig.Options["stream"] = true
-		}
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(reasoningEffort); reasoningEffort != "" {
-			agentConfig.Options["reasoning_effort"] = reasoningEffort
-		}
-		if workspaceRoot != "" {
-			agentConfig.Options["tool_base_path"] = workspaceRoot
+	if workspaceRoot != "" || len(allowedRoots) > 0 || len(profileContext) > 0 {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
 		}
 		if workspaceRoot != "" && workspaceContextEnabled {
 			agentConfig.Options["workspace_path"] = workspaceRoot
 			agentConfig.Options["context_workspace_mode"] = workspaceMode
 			agentConfig.Options["context_min_workspace_query_length"] = 4
 		}
-		// §4.5：会话准入的外部目录随 run 下发，外部目录门据此放行。
-		if len(allowedRoots) > 0 {
-			agentConfig.Options["allowed_roots"] = allowedRoots
-		}
-		// F5：worktree 子代理把主仓库登记为只读外部根，读主仓库不再逐次审批。
-		if readOnlyRoots := chatReadOnlyRoots(session); len(readOnlyRoots) > 0 {
-			agentConfig.Options["read_only_roots"] = readOnlyRoots
-		}
 		if len(profileContext) > 0 {
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(profileContext)
 		}
 	}
+	runtimehost.ApplyToolBasePathOption(agentConfig, workspaceRoot)
+	runtimehost.ApplySessionRootOptions(agentConfig, allowedRoots, chatReadOnlyRoots(session))
 	var knowledgeActivation *knowledge.Activation
 	if session != nil {
 		knowledgeActivation = session.Knowledge
 	}
 	applyLocalChatContextOptions(agentConfig, runtimeConfig, knowledgeActivation)
+	runtimehost.ApplyDisableToolsOption(agentConfig, session != nil && session.DisableTools)
 	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
@@ -2585,22 +2471,6 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			release()
 		}
 	}
-	if registry := host.Bootstrap.Registry(); registry != nil {
-		for _, summary := range registry.ListSummaries() {
-			if summary == nil {
-				continue
-			}
-			_ = apiAgent.RegisterSkill(summary.ToSkillStub())
-		}
-	}
-	if embeddingRouter := host.Bootstrap.EmbeddingRouter(); embeddingRouter != nil {
-		if cloned, err := embeddingRouter.CloneForRegistry(apiAgent.GetSkillRouter().Registry()); err == nil {
-			apiAgent.GetSkillRouter().SetEmbeddingRouter(cloned)
-		}
-	}
-	if host.EventBus != nil {
-		apiAgent.SetEventBus(host.EventBus)
-	}
 	if batchCoordinator != nil {
 		batchCoordinator.SetTerminalSink(localSubagentBatchTerminalSink(host))
 	}
@@ -2618,11 +2488,14 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			MaxCheckpointsPerSession: checkpointConfig.MaxCheckpointsPerSession,
 		},
 	)
-	if host.TeamStore != nil {
-		if ctxMgr := apiAgent.GetContextManager(); ctxMgr != nil {
-			ctxMgr.TeamContext = team.NewContextBuilder(host.TeamStore)
-		}
-	}
+	runtimehost.ApplyAgentServices(apiAgent, runtimehost.AgentServiceSpec{
+		Scheduler:        scheduler,
+		BatchCoordinator: batchCoordinator,
+		SkillRegistry:    host.Bootstrap.Registry(),
+		EmbeddingRouter:  host.Bootstrap.EmbeddingRouter(),
+		EventBus:         host.EventBus,
+		TeamStore:        host.TeamStore,
+	})
 	if host.TeamStore != nil {
 		broker := apiAgent.GetToolBroker()
 		if broker == nil {
@@ -3232,49 +3105,25 @@ func ledgerAttributionSink(svc *usageledger.Service) knowledge.AttributionSink {
 }
 
 func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession, requestedReasoningEffort ...string) *agent.LoopReActConfig {
-	config := &agent.LoopReActConfig{
-		MaxSteps:             0,
-		EnableThought:        true,
-		EnableToolCalls:      true,
-		EnableParallelTools:  true,
-		MaxParallelToolCalls: 4,
-		Temperature:          0.7,
+	requested := ""
+	if len(requestedReasoningEffort) > 0 {
+		requested = requestedReasoningEffort[0]
 	}
-	if runtimeConfig != nil {
-		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
-		config.MaxToolCalls = runtimeConfig.Agent.MaxToolCalls
-		config.MaxRunDuration = runtimeConfig.Agent.Timeout
-		config.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
-		config.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
-		config.MaxRepeatedPollCalls = runtimeConfig.Agent.MaxRepeatedPollCalls
-		config.EnableParallelTools = runtimeConfig.Agent.EnableParallelTools
-		if runtimeConfig.Agent.MaxParallelToolCalls > 0 {
-			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
-		}
-		// context.accountingMode: provider_first（默认）| estimate_only（回退）。
-		// 未配置时保持空值，由 loop 回退到 agent options / 默认 provider_first。
-		if mode := strings.TrimSpace(runtimeConfig.Context.AccountingMode); mode != "" {
-			config.ContextAccountingMode = mode
-		}
-	}
+	fallback := ""
+	budget := 0
 	// PR-4 §6.4（主 chat 接线）：--budget-tokens → ChatSession.TurnBudgetTokens →
 	// LoopReActConfig.TurnBudgetTokens；调用方显式的 loopRunOptions.BudgetTokens
 	// 仍优先（子代理/团队按任务预算），此值只作为缺省。
-	if session != nil && session.TurnBudgetTokens > 0 {
-		config.TurnBudgetTokens = session.TurnBudgetTokens
-	}
-	if len(requestedReasoningEffort) > 0 {
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort[0]); reasoningEffort != "" {
-			config.ReasoningEffort = reasoningEffort
-			return config
-		}
-	}
 	if session != nil {
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
-			config.ReasoningEffort = reasoningEffort
-		}
+		fallback = session.ReasoningEffort
+		budget = session.TurnBudgetTokens
 	}
-	return config
+	return runtimehost.BuildLoopReActConfig(runtimehost.LoopConfigSpec{
+		RuntimeConfig:            runtimeConfig,
+		RequestedReasoningEffort: requested,
+		FallbackReasoningEffort:  fallback,
+		TurnBudgetTokens:         budget,
+	})
 }
 
 // applyLocalChatCompletionRequirement sets LoopReActConfig.CompletionRequirement from,
@@ -3389,113 +3238,7 @@ func localChatTeamRoutingConfig(session *ChatSession) *config.AICLISubagentRouti
 }
 
 func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig, activation *knowledge.Activation) {
-	if agentConfig == nil {
-		return
-	}
-	// W7 激活切片：知识层装配独立于 context/workspace 段是否存在——mode=on 且
-	// 已激活时新增 key；off / shadow / nil 一律零新增（默认 off 逐字节一致）。
-	applyLocalChatKnowledgeOptions(agentConfig, activation)
-	if runtimeConfig == nil {
-		return
-	}
-	applyLocalChatMemoryOptions(agentConfig, runtimeConfig)
-	ctxCfg := runtimeConfig.Context
-	wsCfg := runtimeConfig.Workspace
-	hasContextOptions := strings.TrimSpace(ctxCfg.Profile) != "" ||
-		strings.TrimSpace(ctxCfg.CompactionMode) != "" ||
-		strings.TrimSpace(ctxCfg.RecallMode) != "" ||
-		strings.TrimSpace(ctxCfg.ObservationMode) != "" ||
-		strings.TrimSpace(ctxCfg.WorkspaceMode) != "" ||
-		ctxCfg.MinCompactionMessages > 0 ||
-		ctxCfg.MinRecallQueryLength > 0 ||
-		ctxCfg.LedgerLoadLimit > 0 ||
-		ctxCfg.MaxPromptTokens > 0 ||
-		ctxCfg.FallbackMaxPromptTokens > 0 ||
-		ctxCfg.MaxMessages > 0 ||
-		ctxCfg.KeepRecentMessages > 0 ||
-		ctxCfg.MaxRecallResults > 0 ||
-		ctxCfg.MaxObservationItems > 0
-	hasWorkspaceOptions := wsCfg.MaxFileSize > 0 ||
-		strings.TrimSpace(wsCfg.Mode) != "" ||
-		wsCfg.MaxChunkSize > 0 ||
-		wsCfg.ChunkOverlap > 0 ||
-		len(wsCfg.Include) > 0 ||
-		len(wsCfg.Exclude) > 0
-	if !hasContextOptions && !hasWorkspaceOptions {
-		return
-	}
-	if agentConfig.Options == nil {
-		agentConfig.Options = make(map[string]interface{})
-	}
-	if strings.TrimSpace(ctxCfg.Profile) != "" {
-		agentConfig.Options["context_profile"] = strings.TrimSpace(ctxCfg.Profile)
-	}
-	if strings.TrimSpace(ctxCfg.CompactionMode) != "" {
-		agentConfig.Options["context_compaction_mode"] = strings.TrimSpace(ctxCfg.CompactionMode)
-	}
-	if strings.TrimSpace(ctxCfg.RecallMode) != "" {
-		agentConfig.Options["context_recall_mode"] = strings.TrimSpace(ctxCfg.RecallMode)
-	}
-	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
-		agentConfig.Options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
-	}
-	if strings.TrimSpace(ctxCfg.WorkspaceMode) != "" {
-		agentConfig.Options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(ctxCfg.WorkspaceMode))
-	} else if strings.TrimSpace(wsCfg.Mode) != "" {
-		agentConfig.Options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))
-	}
-	if ctxCfg.MinCompactionMessages > 0 {
-		agentConfig.Options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages
-	}
-	if ctxCfg.MinRecallQueryLength > 0 {
-		agentConfig.Options["context_min_recall_query_length"] = ctxCfg.MinRecallQueryLength
-	}
-	if ctxCfg.LedgerLoadLimit > 0 {
-		agentConfig.Options["context_ledger_load_limit"] = ctxCfg.LedgerLoadLimit
-	}
-	if ctxCfg.MaxPromptTokens > 0 {
-		agentConfig.Options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
-	}
-	if ctxCfg.FallbackMaxPromptTokens > 0 {
-		agentConfig.Options["context_fallback_max_prompt_tokens"] = ctxCfg.FallbackMaxPromptTokens
-	}
-	if ctxCfg.MaxMessages > 0 {
-		agentConfig.Options["context_max_messages"] = ctxCfg.MaxMessages
-	}
-	if ctxCfg.KeepRecentMessages > 0 {
-		agentConfig.Options["context_keep_recent_messages"] = ctxCfg.KeepRecentMessages
-	}
-	if ctxCfg.MaxRecallResults > 0 {
-		agentConfig.Options["context_max_recall_results"] = ctxCfg.MaxRecallResults
-	}
-	if ctxCfg.MaxObservationItems > 0 {
-		agentConfig.Options["context_max_observation_items"] = ctxCfg.MaxObservationItems
-	}
-	if ctxCfg.MaxImageAttachmentTokens != 0 {
-		agentConfig.Options["context_max_image_attachment_tokens"] = ctxCfg.MaxImageAttachmentTokens
-	}
-
-	if wsCfg.MaxFileSize > 0 {
-		agentConfig.Options["workspace_max_file_size"] = wsCfg.MaxFileSize
-	}
-	if wsCfg.MaxChunkSize > 0 {
-		agentConfig.Options["workspace_max_chunk_size"] = wsCfg.MaxChunkSize
-	}
-	if wsCfg.ChunkOverlap > 0 {
-		agentConfig.Options["workspace_chunk_overlap"] = wsCfg.ChunkOverlap
-	}
-	if len(wsCfg.Include) > 0 {
-		agentConfig.Options["workspace_include"] = append([]string(nil), wsCfg.Include...)
-	}
-	if len(wsCfg.Exclude) > 0 {
-		agentConfig.Options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
-	}
-	if path := strings.TrimSpace(runtimeConfig.Artifact.StorePath); path != "" {
-		agentConfig.Options["artifact_store_path"] = path
-	}
-	if dsn := strings.TrimSpace(runtimeConfig.Artifact.StoreDSN); dsn != "" {
-		agentConfig.Options["artifact_store_dsn"] = dsn
-	}
+	runtimehost.ApplyContextOptions(agentConfig, runtimeConfig, activation)
 }
 
 func applyLocalChatMemoryOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {
@@ -3509,62 +3252,7 @@ func applyLocalChatMemoryOptions(agentConfig *agent.Config, runtimeConfig *runti
 	if agentConfig.Options == nil {
 		agentConfig.Options = make(map[string]interface{})
 	}
-	cfg := runtimeConfig.Memory
-	memorypolicy.ApplyReadOptions(cfg, agentConfig.Options)
-	agentConfig.Options["memory_mode"] = mode
-	agentConfig.Options["memory_manual_enabled"] = cfg.Manual.Enabled
-	if strings.TrimSpace(cfg.StorePath) != "" {
-		agentConfig.Options["memory_store_path"] = strings.TrimSpace(cfg.StorePath)
-	}
-	agentConfig.Options["memory_injection_enabled"] = cfg.Injection.Enabled
-	agentConfig.Options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(cfg.Injection.Mode))
-	agentConfig.Options["memory_pinned_budget_ratio"] = cfg.Injection.PinnedBudgetRatio
-	agentConfig.Options["memory_stage_split"] = cfg.Injection.StageSplit
-	if cfg.Injection.MaxItems > 0 {
-		agentConfig.Options["context_max_project_memory"] = cfg.Injection.MaxItems
-	}
-	if cfg.Injection.TokenBudget > 0 {
-		agentConfig.Options["context_project_memory_tokens"] = cfg.Injection.TokenBudget
-	}
-	agentConfig.Options["memory_citation_enabled"] = cfg.Feedback.CitationEnabled
-	agentConfig.Options["memory_exposure_sampling"] = cfg.Feedback.ExposureSampling
-	agentConfig.Options["memory_recall_trace_enabled"] = cfg.Injection.RecallTrace.Enabled
-	agentConfig.Options["memory_recall_trace_sample_rate"] = cfg.Injection.RecallTrace.SampleRate
-}
-
-// applyLocalChatKnowledgeOptions 把知识层装配写入本地 chat agent 的 options
-// （06 §4 Phase 2 W7 激活切片；TUI 与 ACP 共用 buildLocalChatAgent 路径）。
-//
-// 门控与 runtimeapi 的 applyKnowledgeContextOptions 同口径：
-//   - `knowledge.mode=on`：新增 `context_knowledge_mode`（on→signals 保守档）与
-//     `context_knowledge_layer`；
-//   - `knowledge.mode=shadow`：**只**发布 `context_knowledge_layer`，不设 mode。
-//     句柄是编辑类工具的变更接收方（Phase 5 变更源 1），只让索引保鲜，不注入
-//     prompt（contextmgr 在 mode=off 时零调用零注入，ModeShadow 契约不变）；
-//   - off（默认）/ 激活失败（nil）零新增，默认 off 行为与改动前逐字节一致。
-func applyLocalChatKnowledgeOptions(agentConfig *agent.Config, activation *knowledge.Activation) {
-	if agentConfig == nil || activation == nil {
-		return
-	}
-	layer := activation.Layer()
-	if layer == nil {
-		return
-	}
-	mode := contextmgr.KnowledgeModeForLayerMode(layer.Mode())
-	if mode == contextmgr.KnowledgeModeOff {
-		if layer.Mode() == knowledge.ModeShadow {
-			if agentConfig.Options == nil {
-				agentConfig.Options = make(map[string]interface{})
-			}
-			agentConfig.Options["context_knowledge_layer"] = layer
-		}
-		return
-	}
-	if agentConfig.Options == nil {
-		agentConfig.Options = make(map[string]interface{})
-	}
-	agentConfig.Options["context_knowledge_mode"] = mode
-	agentConfig.Options["context_knowledge_layer"] = layer
+	runtimehost.ApplyMemoryOptions(agentConfig.Options, runtimeConfig.Memory)
 }
 
 // chatReadOnlyRoots returns the session's read-only exempt external roots (F5):
@@ -3869,6 +3557,45 @@ func resolveLocalChatRuntimeStorePath(session *ChatSession, runtimeConfig *runti
 		Mode:       sessionruntime.ModeCLILocal,
 	})
 	return paths.SessionRuntimeStorePath
+}
+
+func resolveLocalChatLeaseStorePath(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if session != nil && session.Ephemeral {
+		return ""
+	}
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.LeaseStorePath) != "" {
+		return strings.TrimSpace(runtimeConfig.SessionRuntime.LeaseStorePath)
+	}
+	if session == nil || strings.TrimSpace(session.SessionDir) == "" {
+		return ""
+	}
+	paths := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+		Config:     runtimeConfig,
+		SessionDir: session.SessionDir,
+		Mode:       sessionruntime.ModeCLILocal,
+	})
+	return paths.SessionLeaseStorePath
+}
+
+func buildLocalChatLeaseStore(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) (runtimechat.SessionLeaseStore, func()) {
+	path := resolveLocalChatLeaseStorePath(session, runtimeConfig)
+	dsn := ""
+	if runtimeConfig != nil {
+		dsn = strings.TrimSpace(runtimeConfig.SessionRuntime.LeaseStoreDSN)
+	}
+	if path == "" && dsn == "" {
+		return nil, func() {}
+	}
+	store, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{
+		Path:            path,
+		DSN:             dsn,
+		DisableReadPool: true,
+	})
+	if err != nil {
+		logpkg.Warnf("初始化 session lease store 失败，已回退 runtime store: %v", err)
+		return nil, func() {}
+	}
+	return store, func() { _ = store.Close() }
 }
 
 func resolveLocalChatSubagentBatchStorePath(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {

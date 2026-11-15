@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor"
 )
@@ -22,12 +23,9 @@ func newHandlerTeamLifecycleService(handler *Handler) *handlerTeamLifecycleServi
 		return nil
 	}
 	service := &handlerTeamLifecycleService{handler: handler}
-	supervisorConfig := teamsupervisor.Config{}
+	var supervisorConfig teamsupervisor.Config
 	if handler.runtimeConfig != nil {
-		config := handler.runtimeConfig.Team.Orchestrator
-		supervisorConfig.ScanInterval = config.ReconcileInterval
-		supervisorConfig.RestartBackoff = config.RestartBackoff
-		supervisorConfig.MaxRestartBackoff = config.MaxRestartBackoff
+		supervisorConfig = runtimehost.BuildTeamSupervisorConfig(handler.runtimeConfig)
 	}
 	service.supervisor = teamsupervisor.New(supervisorConfig, teamsupervisor.Hooks{
 		DesiredTeams: service.desiredTeamIDs,

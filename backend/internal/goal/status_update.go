@@ -1,6 +1,7 @@
 package goal
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,4 +35,75 @@ func ApplyUserStatusUpdate(g *SessionGoal, status Status, completedBy, completio
 	if status != StatusBlocked {
 		g.BlockedReason = ""
 	}
+}
+
+// ApplySystemBlocked marks an active goal blocked for a system-observed stop
+// reason. Persistence and logging remain host-owned.
+func ApplySystemBlocked(g *SessionGoal, reason string, now time.Time) error {
+	if g == nil {
+		return nil
+	}
+	if err := ValidateStatusTransition(g.Status, StatusBlocked); err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	g.Status = StatusBlocked
+	g.BlockedReason = SystemBlockedReason(reason)
+	g.UpdatedAt = now
+	return nil
+}
+
+// ApplySystemRoundLimit marks an active goal blocked at its configured round
+// ceiling with the canonical round-limit blocked code.
+func ApplySystemRoundLimit(g *SessionGoal, now time.Time) error {
+	if g == nil {
+		return nil
+	}
+	if err := ValidateStatusTransition(g.Status, StatusBlocked); err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	g.Status = StatusBlocked
+	g.BlockedCode = BlockedCodeRoundLimit
+	g.BlockedReason = "Goal reached its configured round limit."
+	g.UpdatedAt = now
+	if g.MaxRounds > 0 {
+		g.BlockedReason = "Goal reached its configured limit of " + strconv.Itoa(g.MaxRounds) + " rounds."
+	}
+	return nil
+}
+
+// ApplySystemBudgetLimited marks an active goal budget_limited. Raising the
+// budget and resuming remains a user action.
+func ApplySystemBudgetLimited(g *SessionGoal, now time.Time) error {
+	if g == nil {
+		return nil
+	}
+	if err := ValidateStatusTransition(g.Status, StatusBudgetLimited); err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	g.Status = StatusBudgetLimited
+	g.UpdatedAt = now
+	return nil
+}
+
+// AddTokens accumulates provider usage on an active/budget_limited goal.
+// Returns false when the goal is absent, tokens is non-positive, or the status
+// is not usage-accountable; callers must then skip persistence.
+func AddTokens(g *SessionGoal, tokens int) bool {
+	if g == nil || tokens <= 0 {
+		return false
+	}
+	if g.Status != StatusActive && g.Status != StatusBudgetLimited {
+		return false
+	}
+	g.TokensUsed += tokens
+	return true
 }

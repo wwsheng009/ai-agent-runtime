@@ -21,6 +21,10 @@ import "time"
 
 // 续跑容忍阈值（对齐 Codex main：连续错误 ×3、空响应/无进展 ×3；成功一轮即重置）。
 const (
+	// ContinuationMetadataKey marks a hidden goal-continuation user message.
+	// Both hosts set it while running and strip it before persisting, so the
+	// synthetic prompt never leaks into durable conversation history.
+	ContinuationMetadataKey = "aicli_goal_continuation"
 	// ContinuationErrorStrikeLimit 连续续跑失败的容忍阈值：达到即停止自动续跑
 	// 并把目标置为 blocked，防止"无上限 + 持续错误 = 无限重试"。
 	ContinuationErrorStrikeLimit = 3
@@ -185,12 +189,16 @@ func RoundLimitReached(goal *SessionGoal) bool {
 		goal.MaxRounds > 0 && goal.RoundsStarted >= goal.MaxRounds
 }
 
-// AdmitGoalRound 把一轮自动续跑记入 durable 轮数（双宿主驱动器共用：
-// 续跑轮提交成功后调用）。返回已达轮上限；非 active goal 不计数。
+// AdmitGoalRound 在提交一轮自动续跑前记入 durable 轮数（双宿主驱动器共用）。
+// 返回是否已达轮上限：已到达时不递增，调用方必须停止提交；未到达时递增并
+// 放行本轮。这样 MaxRounds=N 恰好允许 N 轮续跑，而不是 N-1 轮。
 func AdmitGoalRound(goal *SessionGoal) bool {
 	if goal == nil || goal.Status != StatusActive {
 		return false
 	}
+	if RoundLimitReached(goal) {
+		return true
+	}
 	goal.RoundsStarted++
-	return goal.MaxRounds > 0 && goal.RoundsStarted >= goal.MaxRounds
+	return false
 }

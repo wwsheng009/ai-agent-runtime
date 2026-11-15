@@ -73,6 +73,13 @@ func sessionAllowedRoots(session *Session) []string {
 	return normalizeSessionAllowedRoots(raw)
 }
 
+// SessionAllowedRoots exposes the durable external-directory admission set to
+// host assemblers. The returned slice is a fresh copy; callers must not use it
+// to widen session state.
+func SessionAllowedRoots(session *Session) []string {
+	return sessionAllowedRoots(session)
+}
+
 // A recovered approval has no in-memory policy waiter, so the ordinary engine
 // callback never runs. Only remember the durable engine-derived set for this
 // exact session/tool. Patched arguments and legacy approvals without the set

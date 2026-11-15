@@ -65,3 +65,55 @@ func TestApplyUserStatusUpdateKeepsBlockedReasonOnlyForBlocked(t *testing.T) {
 		t.Fatalf("BlockedReason = %q, want preserved when entering blocked", g.BlockedReason)
 	}
 }
+
+func TestApplySystemBlockedUsesCanonicalReason(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	g := &SessionGoal{Status: StatusActive}
+	if err := ApplySystemBlocked(g, "no_progress", now); err != nil {
+		t.Fatal(err)
+	}
+	if g.Status != StatusBlocked || g.BlockedReason != SystemBlockedReason("no_progress") || !g.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected blocked state: %+v", g)
+	}
+	if err := ApplySystemBlocked(g, "no_progress", now); err != nil {
+		t.Fatalf("same-status transition must be idempotent: %v", err)
+	}
+}
+
+func TestApplySystemRoundLimitSetsCodeAndReason(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	g := &SessionGoal{Status: StatusActive, MaxRounds: 3}
+	if err := ApplySystemRoundLimit(g, now); err != nil {
+		t.Fatal(err)
+	}
+	if g.Status != StatusBlocked || g.BlockedCode != BlockedCodeRoundLimit {
+		t.Fatalf("unexpected round-limit state: %+v", g)
+	}
+	if g.BlockedReason != "Goal reached its configured limit of 3 rounds." {
+		t.Fatalf("BlockedReason = %q", g.BlockedReason)
+	}
+}
+
+func TestApplySystemBudgetLimitedAndAddTokens(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	g := &SessionGoal{Status: StatusActive, TokenBudget: 100}
+	if !AddTokens(g, 25) || g.TokensUsed != 25 {
+		t.Fatalf("usage not added: %+v", g)
+	}
+	if AddTokens(g, 0) || AddTokens(g, -1) {
+		t.Fatal("non-positive usage must be ignored")
+	}
+	if err := ApplySystemBudgetLimited(g, now); err != nil {
+		t.Fatal(err)
+	}
+	if g.Status != StatusBudgetLimited || !g.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected budget_limited state: %+v", g)
+	}
+	if !AddTokens(g, 75) || g.TokensUsed != 100 {
+		t.Fatalf("budget_limited accounting must remain active: %+v", g)
+	}
+	g.Status = StatusComplete
+	if AddTokens(g, 10) {
+		t.Fatal("terminal goals must not accrue usage")
+	}
+}

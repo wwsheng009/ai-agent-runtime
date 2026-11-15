@@ -2,8 +2,10 @@ package commands
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
@@ -11,9 +13,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-// TestDeriveLocalSessionContext 钉住 E3.4a-1 抽取出的派生语义（与抽取前内联块一致）：
-// 子会话读全量；基础会话只读 agent_type/completion requirement；
-// 存储不可用/会话缺失 → 零值且 workspace 不变。
+// TestDeriveLocalSessionContext pins the host-neutral extraction contract:
+// the same durable row projects to the same SessionContext regardless of the
+// caller's base/child policy decision. base/child policy remains at call sites.
 func TestDeriveLocalSessionContext(t *testing.T) {
 	ctx := context.Background()
 	store := runtimechat.NewInMemoryStorage()
@@ -28,6 +30,13 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 	session.SetContext(toolbroker.AgentSessionContextReadOnly, true)
 	session.SetContext(toolbroker.AgentSessionContextShellDisabled, true)
 	session.SetContext(toolbroker.AgentSessionContextDepth, 2)
+	session.SetContext(sessionmeta.LegacyAPIProfileReference, "profile-ref")
+	session.SetContext(sessionmeta.ProfileAgent, "reviewer")
+	session.SetContext(agentconfig.SessionRoutingOverrideContextKey, `{"main_agent":{"enabled":true}}`)
+	session.SetContext(sessionmeta.ActiveTeamTaskID, "task-1")
+	session.SetContext(sessionmeta.Stream, true)
+	session.SetContext(sessionmeta.DisableTools, true)
+	session.SetContext(toolbroker.AgentSessionContextPermissionMode, "plan")
 	if err := store.Save(ctx, session); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -46,26 +55,26 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 	if !child.ChildReadOnly || child.ChildDepth != 2 || !child.ChildShellDisabled {
 		t.Fatalf("read_only/shell/depth mismatch: %+v", child)
 	}
+	if child.ProfileRef != "profile-ref" || child.AgentID != "reviewer" ||
+		child.RoutingOverrideRaw == "" || child.ObservationTaskID != "task-1" ||
+		!child.StreamRequested || !child.DisableTools || child.PermissionMode != "plan" {
+		t.Fatalf("shared context fields missing: %+v", child)
+	}
 
-	// 基础会话：agent_type/completion 仍读；provider/model/workspace 覆盖不读。
+	// The extraction is role-agnostic; the caller's isBaseSession policy decides
+	// what to apply, not which metadata keys are visible.
 	base, baseWS := deriveLocalSessionContext(store, "child-1", true, "/base")
-	if base.ChildAgentType != "explore" || base.ChildCompletionRequirement != "complete_task" {
-		t.Fatalf("base session must still read agent_type/completion: %+v", base)
-	}
-	if baseWS != "/base" {
-		t.Fatalf("base session must not override workspace, got %q", baseWS)
-	}
-	if base.RequestedModel != "" || base.RequestedProvider != "" || base.ChildReadOnly || base.ChildShellDisabled || base.ChildDepth != 0 {
-		t.Fatalf("base session must not read child-only fields: %+v", base)
+	if !reflect.DeepEqual(base, child) || baseWS != childWS {
+		t.Fatalf("base/child extraction drifted:\nbase=%+v ws=%q\nchild=%+v ws=%q", base, baseWS, child, childWS)
 	}
 
 	// 存储为 nil / 会话不存在 → 零值 + workspace 不变。
 	zero, zeroWS := deriveLocalSessionContext(nil, "child-1", false, "/base")
-	if zero != (runtimehost.SessionContext{}) || zeroWS != "/base" {
+	if !reflect.DeepEqual(zero, runtimehost.SessionContext{}) || zeroWS != "/base" {
 		t.Fatalf("nil store must yield zero context and keep workspace: %+v ws=%q", zero, zeroWS)
 	}
 	missing, missingWS := deriveLocalSessionContext(store, "no-such-session", false, "/base")
-	if missing != (runtimehost.SessionContext{}) || missingWS != "/base" {
+	if !reflect.DeepEqual(missing, runtimehost.SessionContext{}) || missingWS != "/base" {
 		t.Fatalf("missing session must yield zero context and keep workspace: %+v ws=%q", missing, missingWS)
 	}
 }

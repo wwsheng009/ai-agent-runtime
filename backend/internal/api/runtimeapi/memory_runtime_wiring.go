@@ -10,9 +10,8 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryassembly"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -138,87 +137,17 @@ func (h *Handler) EnableMemoryRuntime() (*memoryruntime.Runtime, error) {
 	if h == nil || h.runtimeConfig == nil {
 		return nil, nil
 	}
-	mode := strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
-	if mode != "shadow" && mode != "on" {
-		return nil, nil
-	}
-	if h.sessionManager == nil {
-		return nil, fmt.Errorf("memoryruntime: session manager is not configured")
-	}
-	if h.llmRuntime == nil {
-		return nil, fmt.Errorf("memoryruntime: LLM runtime is not configured")
-	}
 	workspace := strings.TrimSpace(h.runtimeConfig.Workspace.Root)
-	if workspace == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			workspace = cwd
-		}
-	}
-	memoryCfg := h.runtimeConfig.Memory
-	store, err := memorystore.New(memorystore.Config{
-		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:            memoryCfg.Injection.Mode,
-		PinnedBudgetRatio:        memoryCfg.Injection.PinnedBudgetRatio,
-		DisableStageSplit:        !memoryCfg.Injection.StageSplit,
-		DisableInjection:         !memoryCfg.Injection.Enabled,
-		DisableManual:            !memoryCfg.Manual.Enabled,
-		RecallTraceEnabled:       memoryCfg.Injection.RecallTrace.Enabled,
-		RecallTraceSampleRate:    memoryCfg.Injection.RecallTrace.SampleRate,
-		RecallTraceRetentionDays: memoryCfg.Injection.RecallTrace.RetentionDays,
-		ExposureRetentionDays:    memoryCfg.Feedback.ExposureRetentionDays,
-		Retention:                memorypolicy.StoreRetention(memoryCfg),
-		StaleBehavior:            memorypolicy.StaleBehavior(memoryCfg),
-		DisableSecretFilter:      memorypolicy.DisableSecretFilter(memoryCfg),
-		TurnDigestBatchSize:      memoryCfg.Generation.TurnDigest.MaxTurnsPerBatch,
+	runtime, err := memoryassembly.BuildFromRuntimeConfig(memoryassembly.BuildOptions{
+		RuntimeConfig:  h.runtimeConfig,
+		Workspace:      workspace,
+		SessionManager: h.sessionManager,
+		LLMRuntime:     h.llmRuntime,
+		WorkerID:       fmt.Sprintf("runtime-server-%d", os.Getpid()),
 	})
-	if err != nil {
+	if err != nil || runtime == nil {
 		return nil, err
 	}
-	generation := memoryCfg.Generation
-	cfg := memoryruntime.Config{
-		Mode: mode, GenerationDisabled: !generation.Enabled,
-		Workspace: workspace, ProjectKey: store.ProjectKey(),
-		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
-		MinIdle:                        time.Duration(generation.MinIdleHours) * time.Hour,
-		MaxSessionsPerRun:              generation.MaxSessionsPerRun,
-		MaxRolloutAge:                  time.Duration(generation.MaxRolloutAgeDays) * 24 * time.Hour,
-		MaxCandidatesPerSession:        generation.MaxRecordsPerSession,
-		MaxAttempts:                    3,
-		ConsolidationDisabled:          !memoryCfg.Consolidation.Enabled,
-		ConsolidationInterval:          time.Duration(memoryCfg.Consolidation.IntervalHours) * time.Hour,
-		MaxConsolidationRecords:        memoryCfg.Consolidation.MaxRecords,
-		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
-		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
-		ConsolidationModel:             memoryCfg.Consolidation.Model,
-		ConsolidationReasoningEffort:   memoryCfg.Consolidation.ReasoningEffort,
-		CitationEnabled:                memoryCfg.Feedback.CitationEnabled,
-		ExposureSampling:               memoryCfg.Feedback.ExposureSampling,
-		ExtractionModel:                generation.Model,
-		ExtractionReasoningEffort:      generation.ReasoningEffort,
-		WindowSummaryReasoningEffort:   generation.TurnDigest.ReasoningEffort,
-		TurnDigestEnabled:              generation.TurnDigest.Enabled,
-		TurnDigestStoreText:            generation.TurnDigest.StoreText,
-		TurnDigestMaxUserChars:         generation.TurnDigest.MaxUserChars,
-		TurnDigestMaxAssistantChars:    generation.TurnDigest.MaxAssistantChars,
-		TurnDigestRetentionDays:        generation.TurnDigest.RetentionDays,
-		TurnDigestMaxPendingPerSession: generation.TurnDigest.MaxPendingPerSession,
-		TurnDigestMaxTurnsPerBatch:     generation.TurnDigest.MaxTurnsPerBatch,
-		TurnDigestMaxBytesPerBatch:     generation.TurnDigest.MaxBytesPerBatch,
-		TurnDigestMaxDigestsPerRun:     generation.TurnDigest.MaxDigestsPerRun,
-		TurnDigestExtractEveryNTurns:   generation.TurnDigest.ExtractEveryNTurns,
-		TurnDigestIdleExtractMinutes:   generation.TurnDigest.IdleExtractMinutes,
-		TurnDigestRecoveryOnStartup:    generation.TurnDigest.RecoveryOnStartup,
-		TurnDigestWindowSummaryEnabled: generation.TurnDigest.WindowSummaryEnabled,
-		TurnDigestWindowTurns:          generation.TurnDigest.WindowTurns,
-		TurnDigestWindowRetentionDays:  generation.TurnDigest.WindowRetentionDays,
-		WorkerID:                       fmt.Sprintf("runtime-server-%d", os.Getpid()),
-	}
-	cfg = memorypolicy.ApplyRuntime(memoryCfg, cfg)
-	cfg = memoryruntime.WithLLMProjectSummarizer(cfg, h.llmRuntime)
-	source := &memoryruntime.ChatSessionSource{Manager: h.sessionManager}
-	extractor := &memoryruntime.LLMExtractor{Runtime: h.llmRuntime, Config: cfg}
-	runtime := memoryruntime.New(store, source, extractor, store, cfg)
-	runtime.WindowSummarizer = &memoryruntime.LLMWindowSummarizer{Runtime: h.llmRuntime, Config: cfg}
 	h.SetMemoryRuntime(runtime)
 	return runtime, nil
 }

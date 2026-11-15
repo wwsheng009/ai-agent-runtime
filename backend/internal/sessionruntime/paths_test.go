@@ -52,6 +52,8 @@ func TestApplyDefaultsServerFilePersistenceFillsSharedPaths(t *testing.T) {
 	runtimeDir := filepath.Join(sessionDir, "runtime")
 	assertPath(t, paths.SessionRuntimeStorePath, filepath.Join(runtimeDir, "session_runtime.sqlite"))
 	assertPath(t, cfg.SessionRuntime.StorePath, filepath.Join(runtimeDir, "session_runtime.sqlite"))
+	assertPath(t, paths.SessionLeaseStorePath, filepath.Join(runtimeDir, "session_leases.sqlite"))
+	assertPath(t, cfg.SessionRuntime.LeaseStorePath, filepath.Join(runtimeDir, "session_leases.sqlite"))
 	assertPath(t, cfg.Team.StorePath, filepath.Join(runtimeDir, "team_store.sqlite"))
 	assertPath(t, cfg.AgentControl.StorePath, filepath.Join(runtimeDir, "agent_control.sqlite"))
 	assertPath(t, paths.AgentControlMailboxStorePath, filepath.Join(runtimeDir, "agent_control.sqlite"))
@@ -83,6 +85,7 @@ func TestApplyDefaultsCLILocalUsesSharedFilePathsAndLegacyRuntimeStore(t *testin
 		t.Fatal("expected CLI local mode to enable file defaults")
 	}
 	assertPath(t, cfg.SessionRuntime.StorePath, legacyPath)
+	assertPath(t, cfg.SessionRuntime.LeaseStorePath, filepath.Join(runtimeDir, "session_leases.sqlite"))
 	assertPath(t, cfg.Team.StorePath, filepath.Join(runtimeDir, "team_store.sqlite"))
 	assertPath(t, cfg.Artifact.StorePath, filepath.Join(runtimeDir, "artifacts.sqlite"))
 	assertPath(t, cfg.Background.StorePath, filepath.Join(runtimeDir, "background.sqlite"))
@@ -111,6 +114,7 @@ func TestResolvePathsServerFileAndCLILocalShareDefaultStores(t *testing.T) {
 	}
 	assertPath(t, serverPaths.SessionDir, cliPaths.SessionDir)
 	assertPath(t, serverPaths.SessionRuntimeStorePath, cliPaths.SessionRuntimeStorePath)
+	assertPath(t, serverPaths.SessionLeaseStorePath, cliPaths.SessionLeaseStorePath)
 	assertPath(t, serverPaths.TeamStorePath, cliPaths.TeamStorePath)
 	assertPath(t, serverPaths.AgentControlStorePath, cliPaths.AgentControlStorePath)
 	assertPath(t, serverPaths.AgentControlMailboxStorePath, cliPaths.AgentControlMailboxStorePath)
@@ -120,10 +124,31 @@ func TestResolvePathsServerFileAndCLILocalShareDefaultStores(t *testing.T) {
 	assertPath(t, serverPaths.BackgroundLogDir, cliPaths.BackgroundLogDir)
 }
 
+func TestLeaseStorePathIsSharedEvenWhenRuntimePersistenceDiffers(t *testing.T) {
+	sessionDir := t.TempDir()
+	serverCfg := runtimecfg.DefaultRuntimeConfig()
+	serverCfg.Sessions.Dir = sessionDir
+	serverPaths := ResolvePaths(ResolveOptions{Config: serverCfg, Mode: ModeServer})
+
+	cliCfg := runtimecfg.DefaultRuntimeConfig()
+	cliCfg.Sessions.Dir = sessionDir
+	cliPaths := ResolvePaths(ResolveOptions{Config: cliCfg, Mode: ModeCLILocal})
+
+	if serverPaths.SessionRuntimeStorePath != "" {
+		t.Fatalf("server memory-mode runtime store must stay empty, got %q", serverPaths.SessionRuntimeStorePath)
+	}
+	if cliPaths.SessionRuntimeStorePath == "" {
+		t.Fatal("CLI local runtime store must stay file-backed")
+	}
+	assertPath(t, serverPaths.SessionLeaseStorePath, cliPaths.SessionLeaseStorePath)
+	assertPath(t, serverPaths.SessionLeaseStorePath, filepath.Join(sessionDir, "runtime", "session_leases.sqlite"))
+}
+
 func TestApplyDefaultsPreservesExplicitDSNs(t *testing.T) {
 	cfg := runtimecfg.DefaultRuntimeConfig()
 	cfg.Sessions.Dir = t.TempDir()
 	cfg.SessionRuntime.StoreDSN = "file:session-runtime?mode=memory&cache=shared"
+	cfg.SessionRuntime.LeaseStoreDSN = "file:session-leases?mode=memory&cache=shared"
 	cfg.Team.StoreDSN = "file:team?mode=memory&cache=shared"
 	cfg.AgentControl.StoreDSN = "file:agent-control?mode=memory&cache=shared"
 	cfg.Artifact.StoreDSN = "file:artifact?mode=memory&cache=shared"
@@ -136,6 +161,9 @@ func TestApplyDefaultsPreservesExplicitDSNs(t *testing.T) {
 
 	if cfg.SessionRuntime.StorePath != "" {
 		t.Fatalf("expected session runtime path to stay empty when DSN is explicit, got %q", cfg.SessionRuntime.StorePath)
+	}
+	if cfg.SessionRuntime.LeaseStorePath != "" {
+		t.Fatalf("expected lease store path to stay empty when DSN is explicit, got %q", cfg.SessionRuntime.LeaseStorePath)
 	}
 	if cfg.Team.StorePath != "" {
 		t.Fatalf("expected team path to stay empty when DSN is explicit, got %q", cfg.Team.StorePath)

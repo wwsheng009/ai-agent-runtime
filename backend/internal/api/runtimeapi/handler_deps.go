@@ -2,7 +2,6 @@ package runtimeapi
 
 import (
 	"context"
-	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -46,9 +45,11 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	// baseSession 与 CLI 本地路径的 isBaseSession 同口径：只有基础会话才注入逐轮
 	// goal 指引，子代理会话不得被父会话的持久目标驱动。
 	var baseSession bool
+	var profileCleanup func()
 	deps.PrepareAgent = func(ctx context.Context, sid string, sessionCtx runtimehost.SessionContext) (*agent.Agent, *runtimecfg.RuntimeConfig, any) {
 		baseSession = isBaseSessionContext(sessionCtx)
-		profileState := h.resolveProfileStateForSessionContext(sessionCtx)
+		profileState, cleanup := h.resolveProfileStateForSessionContext(ctx, sessionCtx)
+		profileCleanup = cleanup
 		apiAgent, selectedConfig := h.buildSessionAgentForContext(sid, sessionCtx, profileState, h.resolveRuntimeConfig(UsageScope{}))
 		preparedAgent = apiAgent
 		return apiAgent, selectedConfig, profileState
@@ -56,6 +57,11 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	deps.BuildLoopConfig = func(sid string, sessionCtx runtimehost.SessionContext, selectedConfig *runtimecfg.RuntimeConfig, profileHandle any) *agent.LoopReActConfig {
 		profileState, _ := profileHandle.(*profileRuntimeState)
 		return h.buildSessionLoopConfigFor(sid, sessionCtx, selectedConfig, profileState)
+	}
+	deps.Cleanup = func() {
+		if profileCleanup != nil {
+			profileCleanup()
+		}
 	}
 	// run 级进度 / supervision / 挂起放弃 / 持久化钩子（工厂尾部触点）。
 	deps.OnProgress = h.progressRecorderForSession(sessionID)
@@ -99,7 +105,5 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 // 子代理会话不注入父会话的逐轮 goal 指引：子 Agent 不应被父目标驱动，也不应
 // 尝试完成父会话的 goal。
 func isBaseSessionContext(sessionCtx runtimehost.SessionContext) bool {
-	return strings.TrimSpace(sessionCtx.ChildAgentType) == "" &&
-		sessionCtx.ChildDepth == 0 &&
-		!sessionCtx.ChildReadOnly
+	return runtimehost.IsBaseSession("", "", sessionCtx)
 }

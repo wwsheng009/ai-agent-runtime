@@ -51,10 +51,16 @@ func TestAdmitGoalRound(t *testing.T) {
 	if bounded.RoundsStarted != 1 {
 		t.Fatalf("first admit must increment to 1, got %d", bounded.RoundsStarted)
 	}
-	if !AdmitGoalRound(bounded) {
-		t.Fatal("second admitted round must reach the cap of 2")
+	if AdmitGoalRound(bounded) {
+		t.Fatal("second round is still within the cap of 2 and must be admitted")
 	}
 	if bounded.RoundsStarted != 2 {
 		t.Fatalf("second admit must increment to 2, got %d", bounded.RoundsStarted)
+	}
+	if !AdmitGoalRound(bounded) {
+		t.Fatal("a third round past the cap of 2 must be refused")
+	}
+	if bounded.RoundsStarted != 2 {
+		t.Fatalf("a refused round must not increment the counter, got %d", bounded.RoundsStarted)
 	}
 }

@@ -36,7 +36,7 @@ const (
 	// internal/goal 共享常量（字节级同文案，见 shared 层文件头的约束说明：
 	// chat_skill_mentions 按整串相等识别系统生成的续跑提示）。CLI 保留别名。
 	goalAutoContinuationPrompt  = runtimegoal.ContinuationPrompt
-	goalContinuationMetadataKey = "aicli_goal_continuation"
+	goalContinuationMetadataKey = runtimegoal.ContinuationMetadataKey
 	goalBudgetWrapUpPrompt      = runtimegoal.BudgetWrapUpPrompt
 )
 
@@ -432,7 +432,9 @@ func accountActiveGoalTurnUsage(session *ChatSession) (bool, error) {
 		}
 		if delta > 0 {
 			session.goalAccountedTokens = session.TokenCount
-			goal.TokensUsed += delta
+			if !runtimegoal.AddTokens(goal, delta) {
+				return false, nil
+			}
 			updated, err := runtimegoal.NewMetadataStore().PutPersistent(
 				context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
 			if err != nil {
@@ -461,11 +463,9 @@ func markActiveGoalBudgetLimited(session *ChatSession) bool {
 	if err != nil || !ok || goal == nil || goal.Status != runtimegoal.StatusActive {
 		return false
 	}
-	if err := runtimegoal.ValidateStatusTransition(goal.Status, runtimegoal.StatusBudgetLimited); err != nil {
+	if err := runtimegoal.ApplySystemBudgetLimited(goal, time.Now()); err != nil {
 		return false
 	}
-	goal.Status = runtimegoal.StatusBudgetLimited
-	goal.UpdatedAt = time.Now()
 	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
 	if err != nil {
@@ -500,7 +500,9 @@ func admitGoalRoundForSession(session *ChatSession) (bool, error) {
 	if err != nil || !ok || goal == nil {
 		return false, err
 	}
-	if !runtimegoal.AdmitGoalRound(goal) && goal.RoundsStarted == 0 {
+	roundsBefore := goal.RoundsStarted
+	reached := runtimegoal.AdmitGoalRound(goal)
+	if !reached && goal.RoundsStarted == 0 {
 		// 非 active goal：不落库（与记账窗口口径一致）。
 		return false, nil
 	}
@@ -508,13 +510,13 @@ func admitGoalRoundForSession(session *ChatSession) (bool, error) {
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
 	if err != nil {
 		// 持久化失败回退内存增量，避免重复累计。
-		goal.RoundsStarted--
+		goal.RoundsStarted = roundsBefore
 		return false, err
 	}
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
 		return false, err
 	}
-	return runtimegoal.RoundLimitReached(goal), nil
+	return reached, nil
 }
 
 // markActiveGoalBlockedRoundLimit 把 active goal 置为 blocked（系统写，
@@ -527,10 +529,9 @@ func markActiveGoalBlockedRoundLimit(session *ChatSession) bool {
 	if err != nil || !ok || goal == nil || goal.Status != runtimegoal.StatusActive {
 		return false
 	}
-	goal.Status = runtimegoal.StatusBlocked
-	goal.BlockedCode = runtimegoal.BlockedCodeRoundLimit
-	goal.BlockedReason = fmt.Sprintf("Goal reached its configured limit of %d rounds.", goal.MaxRounds)
-	goal.UpdatedAt = time.Now()
+	if err := runtimegoal.ApplySystemRoundLimit(goal, time.Now()); err != nil {
+		return false
+	}
 	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
 	if err != nil {
@@ -646,6 +647,12 @@ func shouldAutoContinueActiveGoalDecision(session *ChatSession) (goalAutoContinu
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
 		return goalAutoContinuationDecision{Reason: "queued_input"}, nil
 	}
+	if sessionChatHasPendingInteraction(session) {
+		// A parked approval/tool/question still owns the run. Starting a goal
+		// continuation here would race the user's decision; the runtime-server
+		// driver uses the same durable-state gate.
+		return goalAutoContinuationDecision{Reason: "pending_interaction"}, nil
+	}
 	goal, ok, err := currentSessionGoal(session)
 	if err != nil {
 		return goalAutoContinuationDecision{}, err
@@ -653,10 +660,32 @@ func shouldAutoContinueActiveGoalDecision(session *ChatSession) (goalAutoContinu
 	if !ok || goal == nil {
 		return goalAutoContinuationDecision{Reason: "goal_missing"}, nil
 	}
-	if goal.Status != runtimegoal.StatusActive {
-		return goalAutoContinuationDecision{Reason: "goal_" + string(goal.Status), GoalStatus: goal.Status}, nil
+	decision := runtimegoal.EvaluateGoalContinuation(goal, ok)
+	return goalAutoContinuationDecision{
+		Continue:   decision.Continue,
+		Reason:     decision.Reason,
+		GoalStatus: decision.GoalStatus,
+	}, nil
+}
+
+// sessionChatHasPendingInteraction reports whether the local actor currently
+// holds a decision the user must resolve. This is a read-only lookup: it never
+// materializes an actor solely to answer the goal driver.
+func sessionChatHasPendingInteraction(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil ||
+		session.RuntimeSession == nil {
+		return false
 	}
-	return goalAutoContinuationDecision{Continue: true, Reason: "goal_active", GoalStatus: goal.Status}, nil
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return false
+	}
+	actor, ok := session.LocalRuntimeHost.SessionHub.Get(sessionID)
+	if !ok || actor == nil {
+		return false
+	}
+	state := actor.StateForInspection()
+	return state.HasPendingInteraction()
 }
 
 func reportGoalAutoContinuationWarning(session *ChatSession, err error) {
@@ -720,12 +749,9 @@ func markActiveGoalBlocked(session *ChatSession, reason string) bool {
 	if err != nil || !ok || goal == nil || goal.Status != runtimegoal.StatusActive {
 		return false
 	}
-	if err := runtimegoal.ValidateStatusTransition(goal.Status, runtimegoal.StatusBlocked); err != nil {
+	if err := runtimegoal.ApplySystemBlocked(goal, reason, time.Now()); err != nil {
 		return false
 	}
-	goal.Status = runtimegoal.StatusBlocked
-	goal.BlockedReason = goalBlockedReasonText(reason)
-	goal.UpdatedAt = time.Now()
 	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
 	if err != nil {
@@ -738,18 +764,6 @@ func markActiveGoalBlocked(session *ChatSession, reason string) bool {
 	}
 	writeSessionDebugInfo(session, "[goal] goal marked blocked reason="+reason, false)
 	return true
-}
-
-// goalBlockedReasonText 把内部停止原因翻译成用户可读的 blocked 说明。
-func goalBlockedReasonText(reason string) string {
-	switch reason {
-	case "consecutive_errors":
-		return "连续续跑失败（系统判定）"
-	case "no_progress":
-		return "连续无实质进展（系统判定）"
-	default:
-		return reason
-	}
 }
 
 // reportGoalAutoContinuationUnavailableOnce 让"当前模式无法调用 update_goal，

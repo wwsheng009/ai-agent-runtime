@@ -107,4 +107,8 @@ type Deps struct {
 	TurnDigestSink chat.TurnDigestSink
 	// Logf 是执行核日志（可空）。
 	Logf func(format string, args ...any)
+	// Cleanup releases host-owned resources created by PrepareAgent (for
+	// example a profile-scoped MCP manager). It runs once when actor
+	// construction fails or the actor stops.
+	Cleanup func()
 }

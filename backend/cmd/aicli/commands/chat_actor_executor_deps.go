@@ -6,72 +6,61 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
-	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
-	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-// deriveLocalSessionContext 从 **runtime session** 派生执行上下文（E3.4a-1）。
+// deriveLocalSessionContext 从 runtime session 派生执行上下文。
 //
-// 与 runtimeapi 的 `runtimehost.ExtractSessionContext`（来源 `chat.Session.Metadata.Context`）
-// **同构但来源不同**——aicli 的会话上下文存在 runtime session store 里，经
-// `GetContext` / `agentcontrol.ContextString` 读取（见 aicli-executor-reuse-design.md §2 D1）。
+// The extraction itself is host-neutral: `runtimehost.ExtractSessionContext`
+// owns the metadata-key mapping so aicli and runtime-server cannot drift on
+// profile / routing / observation / stream / disable-tools / child fields.
+// `isBaseSession` remains a policy decision at the call sites; it must not make
+// the same durable row project to a different SessionContext shape.
 //
-// 语义与抽取前 `buildSessionActor` 的内联块逐条一致（行为零变化）：
-//   - `agent_type` / `completion requirement` 对基础会话与子会话都读取；
-//   - worktree/workspace 覆盖、provider/model/reasoning/read_only/depth **仅子会话**读取；
-//   - 存储不可用 / 会话不存在时返回零值上下文（不报错）。
-//
-// 返回覆盖后的 workspaceRoot（子会话可能被 worktree 或 workspace 覆盖）。
+// 存储不可用 / 会话不存在时返回零值上下文（不报错）。返回覆盖后的
+// workspaceRoot（worktree 或 session workspace 优先）。
 func deriveLocalSessionContext(
 	sessionStore runtimechat.SessionStorage,
 	sessionID string,
-	isBaseSession bool,
+	_ bool,
 	workspaceRoot string,
 ) (runtimehost.SessionContext, string) {
-	sessionCtx := runtimehost.SessionContext{}
 	if sessionStore == nil {
-		return sessionCtx, workspaceRoot
+		return runtimehost.SessionContext{}, workspaceRoot
 	}
 	runtimeSession, err := sessionStore.Load(context.Background(), sessionID)
 	if err != nil || runtimeSession == nil {
-		return sessionCtx, workspaceRoot
+		return runtimehost.SessionContext{}, workspaceRoot
 	}
-	if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
-		if text, ok := value.(string); ok {
-			sessionCtx.ChildAgentType = strings.TrimSpace(text)
-		}
-	}
-	sessionCtx.ChildCompletionRequirement = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextCompletionRequirement)
-	if !isBaseSession {
-		sessionCtx.PermissionMode = toolbroker.ParentSessionPermissionMode(runtimeSession)
-		// Prefer per-child worktree path so tools and system prompt cwd stay isolated.
-		if path := agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextWorktreePath); path != "" {
-			workspaceRoot = path
-		} else if path := agentcontrol.ContextString(runtimeSession, sessionmeta.WorkspacePath); path != "" {
-			workspaceRoot = path
-		}
-		sessionCtx.RequestedProvider = agentcontrol.ContextString(runtimeSession, sessionmeta.ProviderName)
-		sessionCtx.RequestedModel = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextRequestedModel)
-		if sessionCtx.RequestedModel == "" {
-			sessionCtx.RequestedModel = agentcontrol.ContextString(runtimeSession, sessionmeta.Model)
-		}
-		sessionCtx.RequestedReasoningEffort = agentcontrol.ContextString(runtimeSession, sessionmeta.ReasoningEffort)
-		if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextReadOnly); ok {
-			sessionCtx.ChildReadOnly = value
-		}
-		if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextShellDisabled); ok {
-			sessionCtx.ChildShellDisabled = value
-		}
-		sessionCtx.ChildDepth = localAgentSessionDepth(runtimeSession)
+	sessionCtx := runtimehost.ExtractSessionContext(runtimeSession)
+	if strings.TrimSpace(sessionCtx.WorkspacePath) != "" {
+		workspaceRoot = sessionCtx.WorkspacePath
 	}
 	return sessionCtx, workspaceRoot
+}
+
+// localSessionRouteContext keeps child-only route overrides out of base
+// sessions. ExtractSessionContext is intentionally role-agnostic, so the
+// caller must apply the base/child policy decision before passing route
+// fields to the agent builder.
+func localSessionRouteContext(sessionCtx runtimehost.SessionContext, isBaseSession bool) (provider, model, reasoningEffort string) {
+	if isBaseSession {
+		return "", "", ""
+	}
+	return sessionCtx.RequestedProvider, sessionCtx.RequestedModel, sessionCtx.RequestedReasoningEffort
+}
+
+func applyLocalSessionContextRoots(apiAgent *agent.Agent, sessionCtx runtimehost.SessionContext) {
+	if apiAgent == nil {
+		return
+	}
+	runtimehost.ApplySessionRootOptions(apiAgent.GetConfig(), sessionCtx.AllowedRoots, sessionCtx.ReadOnlyRoots)
 }
 
 // aicliRuntimeDeps 为某个 sessionID 装配执行核依赖（E3.4a-2：**只装配、不切换调用点**）。
@@ -83,8 +72,9 @@ func deriveLocalSessionContext(
 //   - 租约为 **actor 生命周期**（`LeaseModeActorScoped`，§11 G1 / §7 O1）；
 //   - `PrepareRun` 捕获 `apiAgent`（§4 D7），故这里**先装配 agent**，再交给 `PrepareRun`。
 //
-// 说明：本函数当前**没有调用方**（E3.4b 才切换 `buildSessionActor`），因此行为不可能改变；
-// 其中的装配逻辑与 `buildSessionActor` 当前实现**暂时重复**，E3.4b 切换后删除旧路径。
+// 说明：`buildSessionActor` 默认调用本函数（E3.4b 已切换）；仅当
+// AICLI_EXECUTOR_REUSE 显式关闭时回退下方 legacy 装配路径。两条路径的
+// 差异只允许是逃生门本身的租约/钩子实现，不得再新增业务语义分叉。
 func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	baseSession *ChatSession,
 	sessionStore runtimechat.SessionStorage,
@@ -96,12 +86,15 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	if baseSession != nil && baseSession.RuntimeSession != nil {
 		baseSessionID = strings.TrimSpace(baseSession.RuntimeSession.ID)
 	}
-	isBaseSession := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
-	sessionCtx, effectiveWorkspace := deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot)
+	isBaseSessionByID := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
+	sessionCtx, effectiveWorkspace := deriveLocalSessionContext(sessionStore, sessionID, isBaseSessionByID, workspaceRoot)
+	isBaseSession := runtimehost.IsBaseSession(sessionID, baseSessionID, sessionCtx)
+	requestedProvider, requestedModel, requestedReasoning := localSessionRouteContext(sessionCtx, isBaseSession)
 
 	// agent 装配（与 buildSessionActor 同序：agent → 工具策略 → loop）。
 	apiAgent := buildLocalChatAgent(baseSession, h, runtimeConfig, effectiveWorkspace,
-		sessionCtx.ChildAgentType, sessionCtx.RequestedModel, sessionCtx.RequestedProvider, sessionCtx.RequestedReasoningEffort)
+		sessionCtx.ChildAgentType, requestedModel, requestedProvider, requestedReasoning)
+	applyLocalSessionContextRoots(apiAgent, sessionCtx)
 	runtimehost.ApplySessionPermissionMode(apiAgent, sessionCtx.PermissionMode)
 	if !isBaseSession {
 		clearLocalChildAdmissionSnapshot(apiAgent)
@@ -120,7 +113,7 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	applyLocalChildShellPolicy(apiAgent, sessionCtx.ChildShellDisabled)
 	applyLocalChildDepthPolicy(apiAgent, sessionCtx.ChildDepth, localAgentDepthCeiling(runtimeConfig, h))
 
-	loopConfig := buildLocalChatLoopConfig(runtimeConfig, baseSession, sessionCtx.RequestedReasoningEffort)
+	loopConfig := buildLocalChatLoopConfig(runtimeConfig, baseSession, requestedReasoning)
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
 	loopConfig.TeamObligations = h.teamObligationResolver()
 	loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
@@ -136,7 +129,13 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 	h.startLocalParkedBatchResumer(apiAgent, sessionID, isBaseSession)
 
 	acquire := func(ctx context.Context, sid string) (*runtimechat.SessionLeaseHandle, error) {
-		return acquireLocalChatSessionLease(ctx, h.RuntimeStore, sid)
+		store := h.LeaseStore
+		if store == nil {
+			if typed, ok := h.RuntimeStore.(runtimechat.SessionLeaseStore); ok {
+				store = typed
+			}
+		}
+		return acquireLocalChatSessionLease(ctx, store, sid)
 	}
 	return runtimehost.Deps{
 		SessionContext:            sessionCtx,
@@ -170,8 +169,11 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 		EnsureSession:      localChatActorEnsureSession(baseSession, isBaseSession),
 		CheckpointInterval: localChatSessionCheckpointIntervalFromEnv(),
 		RunStallTimeout:    localChatRunStallTimeoutFromEnv(),
-		// PrepareRun 捕获 apiAgent（§4 D7）；子会话时 helper 返回 nil → 留给 runtimehost 默认（actor-scoped 下为 no-op）。
-		PrepareRun: localChatPrepareRunHook(apiAgent, baseSession, effectiveWorkspace, isBaseSession, h.ToolSurface),
+		// OnRunPrepare runs **after** the default lease acquisition. Do not use
+		// PrepareRun here: it would replace the default ensureLease path, so a
+		// run that follows an OnRunStalled lease release could execute without
+		// a session lease. The hook itself only refreshes prompt/tool policy.
+		OnRunPrepare: localChatPrepareRunHook(apiAgent, baseSession, effectiveWorkspace, isBaseSession, h.ToolSurface),
 	}
 }
 

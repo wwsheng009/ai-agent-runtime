@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,8 +22,9 @@ import (
 //	生效域: read（只读快照；不写会话、不发 turn、零确认）
 //
 // 数据面与 frontend 面板 / micro web「任务」页签 / schedule_* 工具同源：
-// 直接读 `session.LocalRuntimeHost.Schedule`（in-process；aicli 纯本地模式没有
-// runtime-server，不伪造 HTTP 路径）。服务未启用时如实说明。
+// 本地模式读 `session.LocalRuntimeHost.Schedule`；runtime-server 模式读
+// `GET /api/runtime/schedule/catalog`。两个出口共用 chatScheduleCatalogRows
+// 的字段映射/排序，避免「终端目录」与「Web 目录」各自漂移。
 const (
 	chatScheduleCommandName = "/schedule"
 )
@@ -31,6 +33,22 @@ const (
 func executeStructuredScheduleCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	if chatSessionUsesRuntimeServer(session) {
+		provider, ok := session.ChatExecutor.(runtimeServerScheduleCatalogProvider)
+		if !ok {
+			return commandErrorResult(fmt.Errorf("runtime-server 自动化任务目录接口不可用：当前执行器未实现 schedule catalog"))
+		}
+		entries, err := provider.RuntimeServerScheduleCatalog(context.Background(), session)
+		if err != nil {
+			return commandErrorResult(fmt.Errorf("runtime-server 自动化任务目录读取失败: %w", err))
+		}
+		rows := chatScheduleCatalogRows(entries)
+		filter := strings.ToLower(strings.TrimSpace(extractCommandArgument(command)))
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatScheduleDocument(rows, filter, "数据源: runtime-server")}},
+			Action: CommandContinue,
+		}
 	}
 	var service *schedule.Service
 	if session.LocalRuntimeHost != nil {
@@ -92,6 +110,12 @@ func chatScheduleCatalogTasks(service *schedule.Service) ([]scheduleRow, error) 
 	if err != nil {
 		return nil, err
 	}
+	return chatScheduleCatalogRows(entries), nil
+}
+
+// chatScheduleCatalogRows 是目录条目的纯投影：本地 service 与远程 HTTP
+// 响应共用同一排序/字段映射，避免两个出口各自漂移。
+func chatScheduleCatalogRows(entries []schedule.CatalogEntry) []scheduleRow {
 	rows := make([]scheduleRow, 0, len(entries))
 	for _, entry := range entries {
 		rows = append(rows, scheduleRow{
@@ -111,7 +135,7 @@ func chatScheduleCatalogTasks(service *schedule.Service) ([]scheduleRow, error) 
 		}
 		return rows[i].id < rows[j].id
 	})
-	return rows, nil
+	return rows
 }
 
 // chatScheduleFrequency 是 kind 相关的频次摘要（与 frontend shared 同口径）。

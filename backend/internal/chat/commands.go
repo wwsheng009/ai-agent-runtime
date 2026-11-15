@@ -27,6 +27,8 @@ type SubmitPrompt struct {
 	RouteOverride    *RunRouteOverride
 	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide）。
 	TurnSystemMessages []runtimetypes.Message
+	// ReplaceHistory replaces the durable history before the prompt is appended.
+	ReplaceHistory []runtimetypes.Message
 	// TurnPinnedTools 是本回合一次性工具叠加通道（skill tools-pin 已废除，
 	// /skill 不再填充；通道保留给未来经评审的回合级注入需求），只影响本次
 	// run，不写回会话级稳定工具面。
@@ -43,6 +45,21 @@ type RunRouteOverride struct {
 	Provider        string
 	Model           string
 	ReasoningEffort string
+	// Context-only team/task scope, matching the direct Web branch: these do
+	// not create an active team run or enable team tools.
+	TeamID string
+	TaskID string
+	// DisableTools is a per-run execution override. The request catalog stays
+	// visible while tool choice is forced to none and execution is denied.
+	DisableTools bool
+	// DisableSkillRoute prevents the first run from executing tryRouteSkill.
+	// Callers that only route when explicitly requested set this true.
+	DisableSkillRoute bool
+	// MaxSteps and Thinking are request-scoped loop overrides. They are
+	// intentionally kept out of the persisted session route so a single turn
+	// cannot silently change later turns.
+	MaxSteps int
+	Thinking *runtimetypes.ThinkingConfig
 }
 
 // Clone returns a defensive copy of the route override.
@@ -51,6 +68,7 @@ func (r *RunRouteOverride) Clone() *RunRouteOverride {
 		return nil
 	}
 	clone := *r
+	clone.Thinking = runtimetypes.CloneThinkingConfig(r.Thinking)
 	return &clone
 }
 
@@ -92,6 +110,15 @@ type ApproveTool struct {
 	RememberPattern string
 	Feedback        string
 	Reply           chan error
+}
+
+// RetirePendingInteraction clears a parked approval/tool/question without
+// resuming the run. Used when a session is closed/cancelled: the decision is
+// recorded and published so parent inboxes do not stay unresolved forever.
+type RetirePendingInteraction struct {
+	Ctx    context.Context
+	Reason string
+	Reply  chan error
 }
 
 // AnswerQuestion answers a pending user question request.
@@ -174,14 +201,15 @@ type SubscribeEvents struct {
 	Reply     chan error
 }
 
-func (SubmitPrompt) isCommand()          {}
-func (ContinueSession) isCommand()       {}
-func (ApproveTool) isCommand()           {}
-func (AnswerQuestion) isCommand()        {}
-func (FailQuestion) isCommand()          {}
-func (Interrupt) isCommand()             {}
-func (RewindTo) isCommand()              {}
-func (BacktrackTo) isCommand()           {}
-func (CompactSession) isCommand()        {}
-func (DeliverMailboxMessage) isCommand() {}
-func (SubscribeEvents) isCommand()       {}
+func (SubmitPrompt) isCommand()             {}
+func (ContinueSession) isCommand()          {}
+func (ApproveTool) isCommand()              {}
+func (RetirePendingInteraction) isCommand() {}
+func (AnswerQuestion) isCommand()           {}
+func (FailQuestion) isCommand()             {}
+func (Interrupt) isCommand()                {}
+func (RewindTo) isCommand()                 {}
+func (BacktrackTo) isCommand()              {}
+func (CompactSession) isCommand()           {}
+func (DeliverMailboxMessage) isCommand()    {}
+func (SubscribeEvents) isCommand()          {}

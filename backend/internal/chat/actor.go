@@ -73,6 +73,10 @@ const interruptedRunReplyGrace = 250 * time.Millisecond
 // command loop has already been stopped.
 var ErrSessionActorStopped = errors.New("session actor is stopped")
 
+// ErrSessionLeaseLost fences durable writes after the session lease renewal
+// stops. The actor may be rebuilt by the hub once the lease store recovers.
+var ErrSessionLeaseLost = errors.New("session lease lost")
+
 // ErrSessionBusy is returned when a command that starts a new turn targets an
 // actor that still owns an active turn. Callers that intentionally serialize
 // follow-up work may wait for readiness and retry; control-plane callers can
@@ -351,6 +355,7 @@ type SessionActor struct {
 	mu        sync.RWMutex
 	state     *RuntimeState
 	activeRun *sessionRunControl
+	leaseLost atomic.Bool
 	// pendingStopReason 是下一次"宿主停 actor"（StopAsync/StopContext → cancelActive）
 	// 的原因标签，由 SetNextStopReason 登记、cancelActive 消费。事故复盘（本地实测）：
 	// 运行时刷新硬停 actor 时 session_end 只能给出裸 "actor_stop + context canceled"，
@@ -523,6 +528,48 @@ func (a *SessionActor) IsStopped() bool {
 	}
 }
 
+// MarkLeaseLost fences durable writes and cancels the active run. The lease
+// handle watcher calls this when renewal stops without an explicit Release.
+func (a *SessionActor) MarkLeaseLost(err error) {
+	if a == nil {
+		return
+	}
+	a.leaseLost.Store(true)
+	a.mu.Lock()
+	run := a.activeRun
+	var cancel context.CancelFunc
+	var cancelCause context.CancelCauseFunc
+	if run != nil {
+		cancel = run.cancel
+		cancelCause = run.cancelCause
+		run.cancel = nil
+		run.cancelCause = nil
+	}
+	a.mu.Unlock()
+	if run == nil {
+		return
+	}
+	reason := "lease_lost"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		reason += ": " + strings.TrimSpace(err.Error())
+	}
+	run.setStopReason(reason)
+	cancelSessionRunCause(cancelCause, cancel, runCancelCauseLeaseLost)
+}
+
+// ClearLeaseLost is called after a fresh lease is acquired for the next run.
+func (a *SessionActor) ClearLeaseLost() {
+	if a != nil {
+		a.leaseLost.Store(false)
+	}
+}
+
+// LeaseLost reports whether durable writes are currently fenced by a lost
+// session lease.
+func (a *SessionActor) LeaseLost() bool {
+	return a != nil && a.leaseLost.Load()
+}
+
 func (a *SessionActor) runStopHook() {
 	if a == nil {
 		return
@@ -545,6 +592,10 @@ type SubmitPromptOption struct {
 	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide），
 	// 只进入本次 run 的请求历史，不写入会话持久历史。
 	TurnSystemMessages []runtimetypes.Message
+	// ReplaceHistory is an atomic request-history replacement. It is used by the
+	// Web multi-message replay contract: the request history is authoritative
+	// and the prompt is appended as the new user turn under the same lease.
+	ReplaceHistory []runtimetypes.Message
 	// TurnPinnedTools 是本回合一次性工具叠加通道（skill tools-pin 已废除，
 	// /skill 不再填充；通道保留给未来经评审的回合级注入需求），
 	// 在稳定工具面冻结之后附加，不写回会话级稳定工具面。
@@ -580,6 +631,7 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		RunMeta:            runMeta.Clone(),
 		RouteOverride:      opt.RouteOverride.Clone(),
 		TurnSystemMessages: cloneRuntimeMessages(opt.TurnSystemMessages),
+		ReplaceHistory:     cloneRuntimeMessages(opt.ReplaceHistory),
 		TurnPinnedTools:    cloneRuntimeToolDefinitions(opt.TurnPinnedTools),
 		TriggerTurnAuto:    opt.TriggerTurnAuto,
 		Reply:              reply,
@@ -627,6 +679,31 @@ func (a *SessionActor) Continue(ctx context.Context, runMeta *team.RunMeta, opts
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// ContinueAsync submits a hidden continuation and returns once the command is
+// accepted. The run's result is intentionally not awaited; callers observe
+// session_end like any other background turn. The buffered reply prevents the
+// actor goroutine from blocking on a caller that has already moved on.
+func (a *SessionActor) ContinueAsync(ctx context.Context, runMeta *team.RunMeta, opts ...ContinueOption) error {
+	if a == nil {
+		return fmt.Errorf("session actor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	continuation := mergeContinueOptions(opts)
+	a.Start()
+	reply := make(chan SubmitResult, 1)
+	cmd := ContinueSession{
+		Ctx:                  ctx,
+		ContinuationPrompt:   continuation.ContinuationPrompt,
+		ContinuationMetadata: cloneRuntimeInterfaceMap(continuation.ContinuationMetadata),
+		StripMetadataKeys:    append([]string(nil), continuation.StripMetadataKeys...),
+		RunMeta:              runMeta.Clone(),
+		Reply:                reply,
+	}
+	return a.send(ctx, cmd)
 }
 
 // SubmitPromptAsync submits a prompt without waiting for the final result.
@@ -758,6 +835,32 @@ func (a *SessionActor) AnswerQuestion(ctx context.Context, questionID, answer st
 		Answer:     answer,
 		Reply:      reply,
 	}
+	if err := a.send(ctx, cmd); err != nil {
+		return err
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-a.done:
+		return ErrSessionActorStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RetirePendingInteraction closes a parked approval/tool/question without
+// resuming the run. It is the host close/cancel escape hatch: the durable
+// parent notification is resolved and the decision outcome is recorded.
+func (a *SessionActor) RetirePendingInteraction(ctx context.Context, reason string) error {
+	if a == nil {
+		return fmt.Errorf("session actor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.Start()
+	reply := make(chan error, 1)
+	cmd := RetirePendingInteraction{Ctx: ctx, Reason: reason, Reply: reply}
 	if err := a.send(ctx, cmd); err != nil {
 		return err
 	}
@@ -1027,6 +1130,21 @@ func (a *SessionActor) StateForInspection() *RuntimeState {
 	return a.cloneState(false, false)
 }
 
+// AgentName returns the name of the agent backing this actor. It is used by
+// host adapters that need to preserve their public response metadata when a
+// request is executed through the durable actor core.
+func (a *SessionActor) AgentName() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.agent == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.agent.GetConfig().Name)
+}
+
 // StableToolSurfaceForInspection returns a defensive copy of the session's
 // frozen tool surface without cloning the rest of the runtime state. It returns
 // nil when no turn has frozen a surface yet.
@@ -1241,6 +1359,8 @@ func (a *SessionActor) handle(cmd Command) {
 		a.handleContinueSession(payload)
 	case ApproveTool:
 		a.handleApproveTool(payload)
+	case RetirePendingInteraction:
+		a.handleRetirePendingInteraction(payload)
 	case AnswerQuestion:
 		a.handleAnswerQuestion(payload)
 	case FailQuestion:
@@ -1291,6 +1411,11 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		run.complete(SubmitResult{Err: err})
 		return
 	}
+	historyReplaced := false
+	if len(cmd.ReplaceHistory) > 0 {
+		session.ReplaceHistory(cmd.ReplaceHistory)
+		historyReplaced = true
+	}
 	// Plan-review feedback recorded while plan mode is active is user input for
 	// this turn: deliver it through the request-only system channel and clear
 	// the durable copy so it is never injected twice.
@@ -1330,6 +1455,13 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 			return
 		}
 		appendedPrompt = true
+	}
+	if historyReplaced && !appendedPrompt {
+		if err := a.persistSession(runCtx, session); err != nil {
+			a.releaseSessionRun(run)
+			run.complete(SubmitResult{Err: err})
+			return
+		}
 	}
 
 	if err := a.updateState(ctx, func(state *RuntimeState) error {
@@ -1572,6 +1704,30 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	cmd.Reply <- nil
 }
 
+func (a *SessionActor) handleRetirePendingInteraction(cmd RetirePendingInteraction) {
+	if cmd.Reply == nil {
+		return
+	}
+	ctx := cmd.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state := a.stateWithoutToolSurfaces()
+	if state == nil {
+		cmd.Reply <- nil
+		return
+	}
+	a.publishInterruptedPendingResolution(state)
+	if err := a.updateStateConvergent(ctx, func(runtimeState *RuntimeState) error {
+		stopRecoveredRuntimeState(runtimeState)
+		return nil
+	}); err != nil {
+		cmd.Reply <- err
+		return
+	}
+	cmd.Reply <- nil
+}
+
 func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 	if cmd.Reply == nil {
 		return
@@ -1677,6 +1833,11 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	if cmd.Reply == nil {
 		return
 	}
+	// Capture the parked decision before the state is cleared below. The run
+	// cancellation unblocks the waiter, but it does not resolve the durable
+	// parent notification; this snapshot is the only remaining record of which
+	// request was interrupted.
+	interruptedState := a.stateWithoutToolSurfaces()
 	run := a.interruptActiveSessionRun()
 	// EC-E7 / EC-C5：用户 ESC / interrupt 到达时，挂起 turn（§6.12）必须被放弃：
 	// 级联取消账本 + 清挂起记录。只取消 run 不够 —— 挂起态本身没有 run，记录会
@@ -1740,6 +1901,7 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		TraceID:   sessionRunTurnID(run),
 		Payload:   payload,
 	})
+	a.publishInterruptedPendingResolution(interruptedState)
 	if run != nil {
 		// Give a cancel-aware execution tail a short opportunity to return its
 		// structured Result/telemetry. A provider that ignores cancellation still
@@ -1747,6 +1909,41 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		a.retireInterruptedSessionRunAfter(run, interruptedRunReplyGrace)
 	}
 	cmd.Reply <- nil
+}
+
+// publishInterruptedPendingResolution closes the durable approval/question
+// notification when the user interrupts a parked run. Clearing RuntimeState
+// alone leaves the parent inbox unresolved and lets a later decision look
+// successful against a request that no longer exists.
+func (a *SessionActor) publishInterruptedPendingResolution(state *RuntimeState) {
+	if a == nil || state == nil {
+		return
+	}
+	if state.PendingApproval != nil {
+		requestID := strings.TrimSpace(state.PendingApproval.ID)
+		if requestID != "" {
+			payload := approvalResolvedEventPayload(state, requestID, false)
+			payload["resolution"] = ApprovalResolutionRunTerminated
+			payload["resumed"] = false
+			payload["run_terminal_reason"] = "user_interrupt"
+			a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+			a.recordApprovalOutcome(requestID, ApprovalResolutionRunTerminated, false)
+		}
+	}
+	if state.PendingQuestion != nil {
+		questionID := strings.TrimSpace(state.PendingQuestion.ID)
+		if questionID != "" {
+			a.publish(runtimeevents.Event{
+				Type:      EventQuestionAnswered,
+				SessionID: a.id,
+				Payload: map[string]interface{}{
+					"question_id": questionID,
+					"answer":      "",
+					"resolution":  "interrupted",
+				},
+			})
+		}
+	}
 }
 
 // touchRunActivity marks run as making progress when it still owns the actor
@@ -2175,8 +2372,12 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 	if a.agent == nil {
 		return nil, fmt.Errorf("agent is not configured")
 	}
-	if result, matched, err := a.tryRouteSkill(ctx, prompt, session); matched || err != nil {
-		return result, err
+	restoreOverrides := a.applyRunOverrides(routeOverride)
+	defer restoreOverrides()
+	if routeOverride == nil || !routeOverride.DisableSkillRoute {
+		if result, matched, err := a.tryRouteSkill(ctx, prompt, session); matched || err != nil {
+			return result, err
+		}
 	}
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
@@ -2192,6 +2393,8 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session, route
 	if a.agent == nil {
 		return nil, fmt.Errorf("agent is not configured")
 	}
+	restoreOverrides := a.applyRunOverrides(routeOverride)
+	defer restoreOverrides()
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
@@ -2200,6 +2403,56 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session, route
 	a.bindLiveUserInputSource(ctx, loopConfig)
 	loop := agent.NewReActLoop(a.agent, a.llmRuntime, loopConfig)
 	return loop.ContinueWithSession(ctx, session)
+}
+
+// applyRunOverrides applies request-scoped context and tool execution fields
+// that are not part of the persisted session config. It returns a restore
+// function that must run before the actor accepts its next turn.
+func (a *SessionActor) applyRunOverrides(override *RunRouteOverride) func() {
+	if a == nil || a.agent == nil || override == nil {
+		return func() {}
+	}
+	cfg := a.agent.GetConfig()
+	if cfg == nil {
+		return func() {}
+	}
+	if cfg.Options == nil {
+		cfg.Options = make(map[string]interface{})
+	}
+	keys := []string{"team_id", "task_id", llm.MetadataKeyDisableTools}
+	type savedValue struct {
+		value   interface{}
+		present bool
+	}
+	saved := make(map[string]savedValue, len(keys))
+	for _, key := range keys {
+		value, present := cfg.Options[key]
+		saved[key] = savedValue{value: value, present: present}
+	}
+	if value := strings.TrimSpace(override.TeamID); value != "" {
+		cfg.Options["team_id"] = value
+	}
+	if value := strings.TrimSpace(override.TaskID); value != "" {
+		cfg.Options["task_id"] = value
+	}
+	var previousPolicy *agent.ToolExecutionPolicy
+	if override.DisableTools {
+		previousPolicy = a.agent.GetToolExecutionPolicy()
+		cfg.Options[llm.MetadataKeyDisableTools] = true
+		a.agent.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
+	}
+	return func() {
+		for key, item := range saved {
+			if item.present {
+				cfg.Options[key] = item.value
+			} else {
+				delete(cfg.Options, key)
+			}
+		}
+		if override.DisableTools {
+			a.agent.SetToolExecutionPolicy(previousPolicy)
+		}
+	}
 }
 
 func (a *SessionActor) bindLiveUserInputSource(ctx context.Context, cfg *agent.LoopReActConfig) {
@@ -2243,6 +2496,12 @@ func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride
 		if value := strings.TrimSpace(routeOverride.ReasoningEffort); value != "" {
 			cfg.ReasoningEffort = value
 		}
+		if routeOverride.MaxSteps > 0 {
+			cfg.MaxSteps = routeOverride.MaxSteps
+		}
+		if routeOverride.Thinking != nil {
+			cfg.Thinking = runtimetypes.CloneThinkingConfig(routeOverride.Thinking)
+		}
 	}
 	return &cfg
 }
@@ -2263,6 +2522,9 @@ func cloneLoopConfigForRun(base *agent.LoopReActConfig, routeOverride *RunRouteO
 			StopOnSuccess:        true,
 			MaxIterations:        10,
 		}
+	}
+	if runMeta != nil && runMeta.BudgetTokens > 0 {
+		cfg.TurnBudgetTokens = runMeta.BudgetTokens
 	}
 	// complete_task is a Team task terminal protocol, not a reusable session
 	// default. A profile, persisted session, or lightweight subagent_spawn RunMeta
@@ -3429,10 +3691,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					SessionID: a.id,
 					TraceID:   turnID,
 					Payload: map[string]interface{}{
-						"turn_id": turnID,
-						"success": false,
-						"error":   "user_prompt_submit hook blocked the turn: " + message,
-						"hook":    "user_prompt_submit",
+						"turn_id":           turnID,
+						"success":           false,
+						"error":             "user_prompt_submit hook blocked the turn: " + message,
+						"hook":              "user_prompt_submit",
+						runSourcePayloadKey: runMetaSource(runMeta),
 					},
 				})
 				run.complete(SubmitResult{Err: fmt.Errorf("user_prompt_submit hook blocked the turn: %s", message)})
@@ -3463,10 +3726,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					SessionID: a.id,
 					TraceID:   turnID,
 					Payload: map[string]interface{}{
-						"turn_id": turnID,
-						"success": false,
-						"error":   "session_start hook stopped the session: " + message,
-						"hook":    "session_start",
+						"turn_id":           turnID,
+						"success":           false,
+						"error":             "session_start hook stopped the session: " + message,
+						"hook":              "session_start",
+						runSourcePayloadKey: runMetaSource(runMeta),
 					},
 				})
 				run.complete(SubmitResult{Err: fmt.Errorf("session_start hook stopped the session: %s", message)})
@@ -3793,6 +4057,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			logpkg.Warnf("session run canceled: session=%s turn=%s source=%s cause=%s reason=%s interrupted=%t exec_err=%v",
 				a.id, turnID, cancelSource, cancelDetail, hostedStopReason, interrupted, execErr)
 		}
+		appendRunSourcePayload(payload, runMeta)
 		appendStructuredRunErrorPayload(payload, execErr)
 		// A4：非成功终态（取消/中断/失败）也带上已产出的部分产物，避免
 		// "取消 = 零产出"。字段有界，取源见 actor_partial_product.go。
@@ -3806,6 +4071,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			}
 		}
 		if result != nil {
+			payload["output_present"] = strings.TrimSpace(result.Output) != ""
 			payload["trace_id"] = result.TraceID
 			appendSessionActorUsagePayload(payload, result.Usage)
 			appendSessionActorToolErrorPayload(payload, result)
@@ -4059,6 +4325,9 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, session *Session, admitted []string) (persistErr error) {
 	if session == nil {
 		return nil
+	}
+	if a.LeaseLost() {
+		return ErrSessionLeaseLost
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -4527,6 +4796,7 @@ const (
 	runCancelCauseInterruptGrace = "interrupt_grace"
 	runCancelCauseActorStop      = "actor_stop"
 	runCancelCauseRelease        = "run_released"
+	runCancelCauseLeaseLost      = "lease_lost"
 )
 
 // cancelSessionRunCause 用带 cause 的取消函数中止 run；两个函数都缺失时静默返回。
@@ -4576,6 +4846,9 @@ func sessionRunCancelDetail(runCtx, submitCtx context.Context, cancelSource stri
 func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeState) error) error {
 	if a == nil {
 		return nil
+	}
+	if a.LeaseLost() {
+		return ErrSessionLeaseLost
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -4639,6 +4912,12 @@ func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeStat
 // mutator must be idempotent and must not have side effects: on SaveState
 // failure it is applied a second time to the current in-memory state.
 func (a *SessionActor) updateStateConvergent(ctx context.Context, mutate func(*RuntimeState) error) error {
+	if a == nil {
+		return nil
+	}
+	if a.LeaseLost() {
+		return ErrSessionLeaseLost
+	}
 	err := a.updateState(ctx, mutate)
 	if err == nil || a == nil || mutate == nil {
 		return err
@@ -5692,6 +5971,10 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 		payload["resolution"] = "expired"
 		payload["error_code"] = string(runtimeerrors.ErrApprovalExpired)
 		a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+		// The waiter was retired by the expiry timer, not by a user decision.
+		// Record it so a later approve/deny for this request is reported as
+		// expired/not-applied instead of the zero-value "allowed" outcome.
+		a.recordApprovalOutcome(req.ID, ApprovalResolutionExpired, false)
 		return runtimepolicy.ApprovalResponse{}, expiryErr
 	case <-ctx.Done():
 		if detach, ok := ctx.Value(approvalDetachContextKey{}).(*approvalDetachState); ok && detach != nil {
@@ -6760,6 +7043,9 @@ func (a *SessionActor) publish(event runtimeevents.Event) {
 	if a == nil {
 		return
 	}
+	if a.LeaseLost() {
+		return
+	}
 	if event.SessionID == "" {
 		event.SessionID = a.id
 	}
@@ -6806,6 +7092,24 @@ func durationMillis(result *agent.Result) int64 {
 		return 0
 	}
 	return result.Duration.GetDuration().Milliseconds()
+}
+
+const runSourcePayloadKey = "run_source"
+
+func runMetaSource(runMeta *team.RunMeta) string {
+	if runMeta == nil {
+		return ""
+	}
+	return strings.TrimSpace(runMeta.Source)
+}
+
+func appendRunSourcePayload(payload map[string]interface{}, runMeta *team.RunMeta) {
+	if payload == nil {
+		return
+	}
+	if source := runMetaSource(runMeta); source != "" {
+		payload[runSourcePayloadKey] = source
+	}
 }
 
 func appendSessionActorUsagePayload(payload map[string]interface{}, usage *runtimetypes.TokenUsage) {

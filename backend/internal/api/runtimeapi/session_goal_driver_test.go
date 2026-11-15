@@ -1,9 +1,12 @@
 package runtimeapi
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -176,4 +179,63 @@ func TestUsageTotalTokensFallback(t *testing.T) {
 	if got := usageTotalTokens(&types.TokenUsage{TotalTokens: 42, PromptTokens: 7, CompletionTokens: 3}); got != 42 {
 		t.Fatalf("explicit total must win, got %d", got)
 	}
+}
+
+func TestGoalDriverContinuationRunOnlyOwnSource(t *testing.T) {
+	require.True(t, goalDriverContinuationRun(goalDriverTurnOutcome{RunSource: goalDriverRunSource}))
+	require.True(t, goalDriverContinuationRun(goalDriverTurnOutcome{RunSource: " " + goalDriverRunSource + " "}))
+	require.False(t, goalDriverContinuationRun(goalDriverTurnOutcome{}))
+	require.False(t, goalDriverContinuationRun(goalDriverTurnOutcome{RunSource: "cli"}))
+	require.False(t, goalDriverContinuationRun(goalDriverTurnOutcome{RunSource: "agent_chat"}))
+}
+
+func TestGoalDriverHasPendingApprovalReadsDurableStateWithoutActor(t *testing.T) {
+	handler := &Handler{}
+	store := chat.NewInMemoryRuntimeStore(8)
+	handler.sessionRuntimeStore = store
+
+	sessionID := "sess-driver-durable-approval"
+	require.False(t, handler.goalDriverHasPendingApproval(context.Background(), sessionID))
+
+	require.NoError(t, store.SaveState(context.Background(), &chat.RuntimeState{
+		SessionID: sessionID,
+		Status:    chat.SessionWaitingApproval,
+		PendingApproval: &chat.ApprovalRequest{
+			ID:        "approval-driver-1",
+			SessionID: sessionID,
+			ToolName:  "shell",
+		},
+		UpdatedAt: time.Now().UTC(),
+	}))
+	require.True(t, handler.goalDriverHasPendingApproval(context.Background(), sessionID),
+		"a durable pending approval must block goal continuation even when no actor is materialized")
+}
+
+func TestGoalDriverDecisionAndBudgetGuards(t *testing.T) {
+	state := newGoalDriverState()
+	sessionID := "sess-driver-guards"
+
+	require.True(t, state.beginDecision(sessionID))
+	require.False(t, state.beginDecision(sessionID), "a second concurrent decision must be rejected")
+	state.endDecision(sessionID)
+	require.True(t, state.beginDecision(sessionID))
+	state.endDecision(sessionID)
+
+	require.Equal(t, 1, state.noteContinuation(sessionID))
+	require.Equal(t, 2, state.noteContinuation(sessionID))
+	require.Equal(t, 2, state.continuationCount(sessionID))
+	state.resetContinuations(sessionID)
+	require.Zero(t, state.continuationCount(sessionID))
+
+	require.False(t, state.wrapUpSubmitted("goal|complete|t1"))
+	state.markWrapUpSubmitted("goal|complete|t1")
+	require.True(t, state.wrapUpSubmitted("goal|complete|t1"))
+}
+
+func TestGoalDriverOutputPresentFallback(t *testing.T) {
+	require.True(t, goalDriverOutputPresent(map[string]interface{}{"output_present": true}))
+	require.False(t, goalDriverOutputPresent(map[string]interface{}{"output_present": false}))
+	require.True(t, goalDriverOutputPresent(map[string]interface{}{"partial_summary": "partial"}),
+		"older failure events without output_present still carry their partial summary")
+	require.False(t, goalDriverOutputPresent(map[string]interface{}{"partial_summary": "  "}))
 }

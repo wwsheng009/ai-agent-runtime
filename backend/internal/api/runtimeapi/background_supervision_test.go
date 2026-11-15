@@ -182,6 +182,29 @@ func TestProjectBackgroundJobTerminal_DigestCarriesTheJob(t *testing.T) {
 	require.True(t, foundJob, "digest must carry the job item: %+v", digest.Items)
 }
 
+func TestProjectBackgroundJobTerminal_AttemptsOneShotDelivery(t *testing.T) {
+	handler, store, scheduler := newAPIWakeTestHandler(t, "api-bg-job-delivery")
+	ctx := context.Background()
+	delivered := 0
+	handler.supervisionWake = &supervision.WakeConsumer{
+		Wakes:    scheduler,
+		Runnable: func(context.Context, string, string, string) bool { return true },
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
+			delivered++
+			return nil
+		},
+		DeliverResume: func(context.Context, string, string, *supervision.Digest, []string, *supervision.ResumeContext) error {
+			delivered++
+			return nil
+		},
+	}
+
+	handler.projectBackgroundJobTerminal(ctx, terminalJobEvent("job-delivery", "completed", "sess-delivery", nil), "sess-delivery")
+
+	require.Equal(t, 1, delivered, "terminal projection must attempt one same-cycle delivery")
+	require.Empty(t, pendingWakesFor(t, store, "sess-delivery", "sess-delivery"))
+}
+
 // TestProjectBackgroundJobTerminal_FailureSeverityAndReason pins the failure
 // classification the auto-wake budget consumes.
 func TestProjectBackgroundJobTerminal_FailureSeverityAndReason(t *testing.T) {

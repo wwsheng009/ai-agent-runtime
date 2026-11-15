@@ -382,8 +382,20 @@ func (h *Handler) CloseSessionAgent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	// 子会话已关闭：它的待投递 wake 与巡检计时器同样失去投递目标。
-	h.releaseSessionSupervisionObligations(context.Background(), agentID)
+	// 子会话已关闭：它的待投递 wake 与巡检计时器同样失去投递目标。Use the
+	// resolved session ids, not the caller's alias (path/task/batch): releasing
+	// by alias leaves the real child's obligations behind.
+	cleanupCtx := context.Background()
+	if result != nil {
+		if resolved := strings.TrimSpace(result.SessionID); resolved != "" {
+			h.releaseSessionSupervisionObligations(cleanupCtx, resolved)
+		}
+		for _, closedID := range result.ClosedSessionIDs {
+			h.releaseSessionSupervisionObligations(cleanupCtx, closedID)
+		}
+	} else {
+		h.releaseSessionSupervisionObligations(cleanupCtx, agentID)
+	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agent": result,
 	})
@@ -483,6 +495,7 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 			"session_id":  sessionID,
 			"state":       nil,
 			"active_turn": h.activeTurnSnapshotPayload(sessionID),
+			"authority":   h.sessionAuthoritySnapshot(queryCtx, sessionID),
 		}))
 		return
 	}
@@ -497,6 +510,7 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 	payload := map[string]interface{}{
 		"state":       projectedState,
 		"active_turn": h.activeTurnSnapshotPayload(sessionID),
+		"authority":   h.sessionAuthoritySnapshot(queryCtx, sessionID),
 	}
 	h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 }
@@ -1172,6 +1186,26 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		// The decision may be recorded without being applied when the original
+		// run already reached a terminal cancellation class. Report the same
+		// resolution/resumed facts as connector / toolbroker callers; a bare
+		// {"ok":true} would claim an approval that never reached the tool.
+		resolution, resumed := actor.ApprovalOutcome(requestID)
+		resolved := strings.TrimSpace(resolution) != ""
+		allowed := *req.Allow && resolved
+		if toolbroker.ApprovalResolutionNotApplied(resolution) {
+			allowed = false
+		}
+		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, map[string]interface{}{
+			"ok":         true,
+			"session_id": sessionID,
+			"request_id": requestID,
+			"allowed":    allowed,
+			"resolved":   resolved,
+			"resumed":    resumed,
+			"resolution": resolution,
+		}))
+		return
 
 	case "answer_question", "answer":
 		questionID := strings.TrimSpace(req.QuestionID)

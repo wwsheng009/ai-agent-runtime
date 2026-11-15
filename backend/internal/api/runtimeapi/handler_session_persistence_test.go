@@ -21,6 +21,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestAgentChatReturnsConflictWhenSessionLeaseIsHeld(t *testing.T) {
@@ -81,6 +82,34 @@ func TestAgentChatReturnsConflictWhenSessionLeaseIsHeld(t *testing.T) {
 	}
 	if !payload.Context.Retryable || payload.Context.SuggestedAction == "" {
 		t.Fatalf("expected retry guidance, got %#v", payload.Context)
+	}
+}
+
+func TestSetRuntimeConfigAdoptsBootstrapTeamStore(t *testing.T) {
+	teamPath := filepath.Join(t.TempDir(), "team.db")
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: teamPath})
+	if err != nil {
+		t.Fatalf("new team store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	handler := NewHandler(nil, nil, nil)
+	handler.SetTeamStore(store)
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Sessions.Dir = t.TempDir()
+	cfg.Team.StorePath = teamPath
+	handler.SetRuntimeConfig(cfg, "")
+	t.Cleanup(func() { _ = handler.CloseSessionLeaseStore() })
+
+	handler.teamStoreMu.RLock()
+	got := handler.teamStore
+	key := handler.teamStoreConfigKey
+	handler.teamStoreMu.RUnlock()
+	if got != store {
+		t.Fatal("runtime config refresh must adopt the bootstrap-opened team store")
+	}
+	if key != teamPath+"|" {
+		t.Fatalf("team store key = %q, want %q", key, teamPath+"|")
 	}
 }
 
@@ -515,6 +544,7 @@ func closeHandlerPersistenceStoresForTest(handler *Handler) {
 	if hub != nil {
 		hub.StopAll()
 	}
+	_ = handler.CloseSessionLeaseStore()
 	closeRuntimeStore(stateStore, eventStore)
 
 	handler.teamStoreMu.Lock()

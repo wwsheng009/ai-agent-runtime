@@ -27,6 +27,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -36,6 +37,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -1104,6 +1106,40 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "test-model", route["requested_provider"])
 	assert.Equal(t, "test-model", route["effective_provider"])
+}
+
+func TestAgentChat_EnableReAct_DisableToolsKeepsRequestSurface(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	provider := &testLLMProvider{name: "test-model", content: "tools disabled"}
+	require.NoError(t, runtime.RegisterProvider("test-model", provider))
+	handler.SetLLMRuntime(runtime)
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
+		TTL:             time.Hour,
+		CleanupInterval: time.Hour,
+		AutoArchive:     false,
+		IdleTimeout:     time.Hour,
+	})
+	handler.SetSessionManager(sessionManager)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"user_id":"user-disable-tools","enable_react":true,"disable_tools":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NotEmpty(t, provider.requests)
+	request := provider.requests[0]
+	assert.NotEmpty(t, request.Tools, "disable_tools must retain the request catalog")
+	assert.Equal(t, true, request.Metadata[llm.MetadataKeyDisableTools])
+	assert.Equal(t, "none", request.Metadata["tool_choice"])
 }
 
 func TestAgentChat_EnableReAct_IncludesWorkspaceContextInModelRequest(t *testing.T) {
@@ -2794,6 +2830,39 @@ func TestBuildSessionActor_UsesSharedSessionMetadataContext(t *testing.T) {
 	assert.True(t, messageListContainsText(request.Messages, "difficulty_rationale"))
 }
 
+func TestBuildSessionAgentForContextProjectsDurableRootsAndToolBasePath(t *testing.T) {
+	workspace := t.TempDir()
+	allowedRoot := t.TempDir()
+	repoRoot := t.TempDir()
+
+	handler := NewHandler(skill.NewRegistry(&testMCPManager{}), nil, &testMCPManager{})
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", &testLLMProvider{name: "test-model", content: "ok"}))
+	handler.SetLLMRuntime(runtime)
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+
+	session, err := handler.sessionManager.Create(context.Background(), "user-roots")
+	require.NoError(t, err)
+	session.SetContext(sessionmeta.WorkspacePath, workspace)
+	session.SetContext(chat.AllowedRootsContextKey, []string{allowedRoot})
+	session.SetContext(toolbroker.AgentSessionContextIsolation, worktree.ModeWorktree)
+	session.SetContext(toolbroker.AgentSessionContextWorktreeRepoRoot, repoRoot)
+	require.NoError(t, handler.sessionManager.Update(context.Background(), session))
+
+	apiAgent, _ := handler.buildSessionAgentForContext(
+		session.ID,
+		runtimehost.ExtractSessionContext(session),
+		nil,
+		nil,
+	)
+	require.NotNil(t, apiAgent)
+	options := apiAgent.GetConfig().Options
+	assert.Equal(t, workspace, options["workspace_path"])
+	assert.Equal(t, workspace, options["tool_base_path"])
+	assert.Equal(t, []string{filepath.Clean(allowedRoot)}, options["allowed_roots"])
+	assert.Equal(t, []string{filepath.Clean(repoRoot)}, options["read_only_roots"])
+}
+
 func TestBuildSessionActor_ReadOnlyChildPreservesShellSurface(t *testing.T) {
 	mcpManager := &readOnlyToolSurfaceMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
@@ -2857,7 +2926,7 @@ func TestApplyAPISessionCompletionRequirement_EmptyDefaultsToNone(t *testing.T) 
 
 func TestApplyAPIChildAgentdefToolPolicy_ExploreDeniesWrites(t *testing.T) {
 	apiAgent := agent.NewAgent(&agent.Config{Name: "child", Provider: "test", Model: "test"}, nil)
-	applyAPIChildAgentdefToolPolicy(apiAgent, "explore", t.TempDir())
+	applyAPIChildAgentdefToolPolicy(apiAgent, "explore", t.TempDir(), "")
 	policy := apiAgent.GetToolExecutionPolicy()
 	require.NotNil(t, policy)
 	assert.True(t, policy.ReadOnly)
@@ -2870,7 +2939,7 @@ func TestApplyAPIChildAgentdefToolPolicy_ExploreDeniesWrites(t *testing.T) {
 
 func TestApplyAPIChildAgentdefToolPolicy_SkipsSyntheticTeamTeammate(t *testing.T) {
 	apiAgent := agent.NewAgent(&agent.Config{Name: "child", Provider: "test", Model: "test"}, nil)
-	applyAPIChildAgentdefToolPolicy(apiAgent, "team_teammate", t.TempDir())
+	applyAPIChildAgentdefToolPolicy(apiAgent, "team_teammate", t.TempDir(), "")
 	assert.Nil(t, apiAgent.GetToolExecutionPolicy())
 }
 
@@ -4572,6 +4641,9 @@ func TestGetRuntimeHealth_ReturnsSummary(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"unhealthy_providers":1`)
 	assert.Contains(t, rec.Body.String(), `provider bad-model degraded: provider offline`)
 	assert.Contains(t, rec.Body.String(), `"patch_governance"`)
+	assert.Contains(t, rec.Body.String(), `"entrypoint_execution"`)
+	assert.Contains(t, rec.Body.String(), `"stateless_direct"`)
+	assert.Contains(t, rec.Body.String(), `"session_actor"`)
 	assert.Contains(t, rec.Body.String(), `"blocked":1`)
 	assert.Contains(t, rec.Body.String(), `"profile":"extended"`)
 	assert.Contains(t, rec.Body.String(), `"compaction_mode":"ledger_preferred"`)
@@ -5272,8 +5344,8 @@ func TestAgentChat_StreamSSE_LLMResult_WithPlanning(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "event: planning")
 	assert.Contains(t, rec.Body.String(), `"mode":"planner_preferred"`)
 	assert.Contains(t, rec.Body.String(), `"planning_source":"tool_catalog"`)
-	assert.Contains(t, rec.Body.String(), `"step_count":1`)
-	assert.Contains(t, rec.Body.String(), `"subagent_task_count":1`)
+	assert.Contains(t, rec.Body.String(), `"step_count":3`)
+	assert.Contains(t, rec.Body.String(), `"subagent_task_count":3`)
 	assert.Contains(t, rec.Body.String(), `"subagent_execution_requested":false`)
 	assert.Contains(t, rec.Body.String(), `"subagent_execution_attempted":false`)
 	assert.Contains(t, rec.Body.String(), `"source":"llm_stream"`)

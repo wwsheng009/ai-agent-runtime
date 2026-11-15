@@ -110,6 +110,7 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		{Label: "Collaboration mode", Value: buildChatStatusCollaborationModeValue(session)},
 		{Label: "Reasoning output", Value: buildChatStatusReasoningOutputValue(session)},
 		{Label: "Routing", Value: buildChatStatusRoutingValue(session)},
+		{Label: "Authority", Value: buildChatStatusAuthorityValue(session)},
 	}
 	if chatSessionSupportsFastMode(session) {
 		rows = append(rows, struct {
@@ -150,6 +151,26 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 	}
 	lines = append(lines, "╰"+strings.Repeat("─", contentWidth)+"╯")
 	return lines
+}
+
+func buildChatStatusAuthorityValue(session *ChatSession) string {
+	authority := chatSessionAuthorityInfo(session)
+	if authority == nil {
+		return "unknown (authority not sampled)"
+	}
+	state := "authoritative"
+	if !authority.Authoritative {
+		state = "non-authoritative"
+	}
+	source := strings.TrimSpace(authority.AuthoritySource)
+	if source == "" {
+		source = "unknown"
+	}
+	store := strings.TrimSpace(authority.RuntimeStoreID)
+	if store == "" {
+		store = "store unknown"
+	}
+	return fmt.Sprintf("%s · %s · %s · %s", authority.ExecutionAuthority, state, source, store)
 }
 
 // buildChatStatusRoutingValue 渲染 /status 的 Routing 行（§6.3）：

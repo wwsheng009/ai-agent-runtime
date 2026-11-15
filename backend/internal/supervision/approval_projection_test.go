@@ -96,6 +96,25 @@ func TestProjectApprovalRequest_RequestsParentWake(t *testing.T) {
 	require.Equal(t, WakeEventApproval, pending[0].EventKind)
 }
 
+func TestProjectApprovalRequestSkipsExpiredRequest(t *testing.T) {
+	store := newTestStore(t, "supervision-approval-expired")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
+
+	notice := testApprovalNotice("req-expired")
+	notice.ExpiresAt = time.Now().Add(-time.Second)
+	notification, err := ProjectApprovalRequest(ctx, store, scheduler, notice)
+	require.NoError(t, err)
+	require.Empty(t, notification.NotificationID)
+
+	all, err := store.ListNotifications(ctx, NotificationFilter{RootScopeID: "root-session-1"})
+	require.NoError(t, err)
+	require.Empty(t, all, "an expired approval must not become a critical inbox row")
+	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-session-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "an expired approval must not schedule a wake")
+}
+
 // TestProjectApprovalRequest_QuestionStaysDigestOnly verifies that a child
 // question needs parent attention without spending the critical wake budget.
 func TestProjectApprovalRequest_QuestionStaysDigestOnly(t *testing.T) {
@@ -190,6 +209,9 @@ func TestApprovalNoticeFromEvent(t *testing.T) {
 // and denied decisions.
 func TestApprovalResolutionFromPayload(t *testing.T) {
 	require.Equal(t, "expired", ApprovalResolutionFromPayload(map[string]interface{}{"resolution": "expired"}))
+	require.Equal(t, "run_terminated", ApprovalResolutionFromPayload(map[string]interface{}{"resolution": "run_terminated"}))
+	require.Equal(t, "run_terminal_no_resume", ApprovalResolutionFromPayload(map[string]interface{}{"resolution": "run_terminal_no_resume"}))
+	require.Equal(t, "interrupted", ApprovalResolutionFromPayload(map[string]interface{}{"resolution": "interrupted"}))
 	require.Equal(t, "denied", ApprovalResolutionFromPayload(map[string]interface{}{"allowed": false}))
 	require.Equal(t, "resolved", ApprovalResolutionFromPayload(map[string]interface{}{"allowed": true}))
 	require.Equal(t, "resolved", ApprovalResolutionFromPayload(nil))

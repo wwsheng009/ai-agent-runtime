@@ -44,7 +44,6 @@ import (
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
-	"github.com/wwsheng009/ai-agent-runtime/internal/memorypolicy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
@@ -53,6 +52,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
@@ -373,8 +373,11 @@ type Handler struct {
 
 	sessionRuntimeMu       sync.RWMutex
 	sessionHub             *chat.SessionHub
+	sessionHubClosed       bool
 	sessionRuntimeStore    chat.RuntimeStateStore
 	sessionEventStore      chat.EventStore
+	sessionLeaseStore      chat.SessionLeaseStore
+	sessionLeaseStoreKey   string
 	sessionRuntimeStoreKey string
 
 	// Batch 12（V15/V19 延迟收敛）+ A6：运行时刷新（profile 切换、路由写入）
@@ -1212,6 +1215,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/approve", h.ApproveSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
@@ -1307,6 +1311,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 
 	// Teams
 	runtimeRouter.HandleFunc("/agent-control/agents", h.ListAgentControlAgents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/cleanup", h.AgentControlCleanup).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/mailbox", h.ListAgentControlMailbox).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/tasks", h.ListAgentControlTasks).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/tasks", h.CreateAgentControlTask).Methods(http.MethodPost)
@@ -1320,6 +1325,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/block", h.BlockAgentControlTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.ListAgentControlTaskDependencies).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.CreateAgentControlTaskDependency).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-definitions", h.AgentDefinitions).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)
@@ -1366,6 +1372,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/supervision/snapshot", h.GetSupervisionSnapshot).Methods(http.MethodGet)
 	// C0-E（§7.3）度量基线读数：口径与验收用例同源。
 	runtimeRouter.HandleFunc("/supervision/metrics", h.GetSupervisionMetrics).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/watchdog", h.ExecutionSupervisorSnapshot).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/supervision/actions", h.RequestSupervisionAction).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/actions", h.ListSupervisionActions).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/supervision/actions/{id}", h.GetSupervisionAction).Methods(http.MethodGet)
@@ -1373,6 +1380,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/supervision/actions/{id}/execute", h.ExecuteSupervisionAction).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/notifications/{id}/ack", h.AcknowledgeSupervisionNotification).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/notifications/{id}/defer", h.DeferSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/resolve", h.ResolveSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/control", h.ControlSupervisionNotification).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/wake", h.ScheduleSupervisionWake).Methods(http.MethodPost)
 	// 2026-09-22 手动核查（docs/plan/supervision-manual-audit-plan-20260922.md）：
 	// turn 结束自动核查关闭后，核查与投递只能显式发起——audit 只读聚合
@@ -1958,46 +1967,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-ID", requestID)
 	}
 
-	var req struct {
-		Messages        []map[string]string   `json:"messages"`
-		Profile         string                `json:"profile,omitempty"`
-		Agent           string                `json:"agent,omitempty"`
-		Provider        string                `json:"provider,omitempty"`
-		Model           string                `json:"model,omitempty"`
-		ReasoningEffort string                `json:"reasoning_effort,omitempty"`
-		Thinking        *types.ThinkingConfig `json:"thinking,omitempty"`
-		SessionID       string                `json:"session_id,omitempty"`
-		TeamID          string                `json:"team_id,omitempty"`
-		TaskID          string                `json:"task_id,omitempty"`
-		UserID          string                `json:"user_id,omitempty"`
-		TenantID        string                `json:"tenant_id,omitempty"`
-		ProjectID       string                `json:"project_id,omitempty"`
-		WorkspacePath   string                `json:"workspace_path,omitempty"`
-		MaxSteps        int                   `json:"max_steps,omitempty"`
-		EnableRoute     bool                  `json:"enable_routing,omitempty"`
-		EnableReAct     bool                  `json:"enable_react,omitempty"`
-		// ExposeSkills：本回合显式暴露的 skill 名称列表。运行时把对应 skill 的说明与
-		// 程序清单注入模型上下文，由模型自行选择调用哪些程序（模型驱动），而不是由
-		// 后端确定性直执行。
-		ExposeSkills []string `json:"expose_skills,omitempty"`
-		// SkillArgs：与 ExposeSkills 配套的调用参数（Agent Skills 占位符语义），
-		// 用于替换 skill 文本中的 $ARGUMENTS / $ARGUMENTS[N] / 命名参数。
-		SkillArgs                  []string             `json:"skill_args,omitempty"`
-		PlanningMode               string               `json:"planning_mode,omitempty"`
-		ExecutePlannedSubagents    bool                 `json:"execute_planned_subagents,omitempty"`
-		AllowWritePlannedSubagents bool                 `json:"allow_write_planned_subagents,omitempty"`
-		PatchDecisionPolicy        string               `json:"patch_decision_policy,omitempty"`
-		ApproveBlockedPatches      bool                 `json:"approve_blocked_patches,omitempty"`
-		PatchApprovalNote          string               `json:"patch_approval_note,omitempty"`
-		PatchApproval              *agent.PatchApproval `json:"patch_approval,omitempty"`
-		TurnID                     string               `json:"turn_id,omitempty"`
-		Stream                     bool                 `json:"stream,omitempty"`
-		// ResumeOnDisconnect（P4-刷新续传）：客户端断开（页面刷新/关标签）后
-		// 不取消本回合，run 继续执行并把增量/历史照常落库；刷新后的新页面通过
-		// GET /runtime/stream 按游标续传，并依据 /runtime 的 active_turn 重新
-		// 挂载在途回合身份。缺省 false 保持旧语义（客户端断开即中止）。
-		ResumeOnDisconnect bool `json:"resume_on_disconnect,omitempty"`
-	}
+	var req agentChatRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
@@ -2072,6 +2042,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionIDValue = sessionID(session)
 	timing.mark("session_get")
+	useSessionActor := h.agentChatUsesSessionActor(session, &req)
 
 	// 目录回退（§4.3.2）：请求未显式指定 workspace_path 时，采用会话创建时
 	// 绑定的目录。会话上下文已有值时不覆盖（目录一经绑定不随单轮请求漂移）。
@@ -2120,6 +2091,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// （ledger 不写 profile 键，不猜）。
 	usageScope.Profile = ledgerProfileName(profileState)
 	timing.mark("profile")
+	var actorPreambleLease *chat.SessionLeaseHandle
 	if session != nil {
 		leaseScope := requestID
 		if leaseScope == "" {
@@ -2134,9 +2106,21 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if leaseHandle != nil {
-			defer func() {
-				_ = leaseHandle.Release(context.Background())
-			}()
+			if useSessionActor {
+				// Serialize the request prelude (profile/workspace/sessionmeta)
+				// against other writers, then hand the run to the actor's
+				// run-scoped lease. Holding both would self-conflict.
+				actorPreambleLease = leaseHandle
+				defer func() {
+					if actorPreambleLease != nil {
+						_ = actorPreambleLease.Release(context.Background())
+					}
+				}()
+			} else {
+				defer func() {
+					_ = leaseHandle.Release(context.Background())
+				}()
+			}
 		}
 	}
 	timing.mark("lease")
@@ -2153,6 +2137,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, instructionProvider)
 	instructionHeadMessages := buildRuntimeInstructionHeadMessages(profileState, workspacePath, instructionProvider)
 
+	profileContextChanged := false
 	if session != nil {
 		sessionUpdated := false
 		if ensureSessionInstructionMessages(session, instructionMessages) {
@@ -2160,6 +2145,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 		if !bindingResolveFailed && h.applyProfileSessionContext(session, profileState) {
 			sessionUpdated = true
+			profileContextChanged = true
 		}
 		if sessionUpdated && h.sessionManager != nil {
 			updateCtx, updateCancel := sessionStoreQueryContext(r)
@@ -2246,7 +2232,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// 会话级 MCP 覆盖：AgentChat 绑定会话时收窄该会话的 MCP 工具面/执行面。
 	if sid := sessionID(session); sid != "" {
-		runtimeMCP = h.sessionScopedMCPSurface(ctx, sid, runtimeMCP)
+		// Same wrapper as the actor path: session MCP overrides plus the
+		// persistence-gated goal tool surface.
+		runtimeMCP = h.runtimeServerToolSurfaceForSession(ctx, sid, runtimeMCP, true)
 	}
 
 	// 创建 Agent 配置
@@ -2277,6 +2265,55 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			updateCancel()
 		}
 	}
+	if useSessionActor {
+		if actorPreambleLease != nil {
+			_ = actorPreambleLease.Release(context.Background())
+			actorPreambleLease = nil
+		}
+		if profileContextChanged {
+			// The actor is built from durable session metadata. A profile
+			// change must not be hidden behind a pre-existing idle actor.
+			h.markPendingActorRebuild(sessionID(session), sessionActorRebuildReasonProfileSwitch)
+		}
+		actorPlanningMode := h.resolvePlanningMode(req.PlanningMode, selectedConfig)
+		actorRouteAttempted := req.EnableRoute ||
+			strings.EqualFold(strings.TrimSpace(actorPlanningMode), string(agent.OrchestrationPlannerPreferred)) ||
+			strings.EqualFold(strings.TrimSpace(actorPlanningMode), string(agent.OrchestrationRoutePreferred))
+		var actorRouteCandidates []*skill.RouteResult
+		if actorRouteAttempted {
+			actorRouteCandidates = routeCandidatesWithRuntime(ctx, lastMessage, runtimeRegistry, runtimeEmbedding)
+		}
+		var actorReplaceHistory []types.Message
+		if len(req.Messages) > 1 {
+			normalized := h.normalizeMessages(req.Messages)
+			if len(normalized) > 1 {
+				actorReplaceHistory = append([]types.Message(nil), normalized[:len(normalized)-1]...)
+			}
+		}
+		h.runAgentChatViaSessionActor(ctx, w, r, agentChatActorRun{
+			Session:               session,
+			Request:               &req,
+			ProfileState:          profileState,
+			SelectedConfig:        selectedConfig,
+			WorkspacePath:         workspacePath,
+			AgentContext:          agentContext,
+			WorkspaceContext:      workspaceCtx,
+			Prompt:                lastMessage,
+			TurnID:                turnID,
+			Provider:              agentProvider,
+			Model:                 agentModel,
+			ReasoningEffort:       effectiveReasoningEffort,
+			Route:                 chatRoute,
+			UsageScope:            usageScope,
+			EstimatedPromptTokens: estimatedPromptTokens,
+			TraceID:               requestTraceID,
+			Streaming:             req.Stream || wantsEventStream(r),
+			RouteAttempted:        actorRouteAttempted,
+			RouteCandidates:       actorRouteCandidates,
+			ReplaceHistory:        actorReplaceHistory,
+		})
+		return
+	}
 	if agentProvider != "" {
 		ctx = logger.WithProvider(ctx, agentProvider)
 	}
@@ -2284,25 +2321,23 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		ctx = logger.WithModel(ctx, agentModel)
 	}
 	ctx = llm.WithHTTPDebugReporter(ctx, runtimeHTTPDebugReporter(ctx))
-	agentConfig := &agent.Config{
-		Name:     "api-agent",
-		Provider: agentProvider,
-		Model:    agentModel,
-		MaxSteps: req.MaxSteps,
-	}
+	sessionCtx := runtimehost.ExtractSessionContext(session)
+	agentConfig := runtimehost.BuildAgentConfig(runtimehost.AgentConfigSpec{
+		Name:          "api-agent",
+		Provider:      agentProvider,
+		Model:         agentModel,
+		MaxSteps:      req.MaxSteps,
+		RuntimeConfig: selectedConfig,
+	})
 	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
 		agentConfig.SystemPrompt = systemPrompt
 	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
 	if selectedConfig != nil {
-		agentConfig.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
-		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
-		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
-		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
-		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig, h.knowledgeActivation)
 	}
+	runtimehost.ApplyDisableToolsOption(agentConfig, req.DisableTools)
 	if agentConfig.Options == nil {
 		agentConfig.Options = make(map[string]interface{})
 	}
@@ -2325,25 +2360,13 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 		agentConfig.Options["workspace_path"] = workspacePath
 	}
-	// F5: a worktree-isolated child gets its main repo as a read-only exempt
-	// root so browsing the repo is not an external_dir approval hotspot; writes
-	// under the repo still go through the gate.
-	if readOnlyRoots := apiSessionReadOnlyRoots(session); len(readOnlyRoots) > 0 {
-		if agentConfig.Options == nil {
-			agentConfig.Options = make(map[string]interface{})
-		}
-		agentConfig.Options["read_only_roots"] = readOnlyRoots
-	}
+	runtimehost.ApplyToolBasePathOption(agentConfig, workspacePath)
+	runtimehost.ApplySessionRootOptions(agentConfig, sessionCtx.AllowedRoots, sessionCtx.ReadOnlyRoots)
 	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
 		}
 		agentConfig.Options["profile_context"] = cloneProfileContextValues(profilePack)
-	}
-	if agentConfig.MaxSteps < 0 {
-		agentConfig.MaxSteps = 0
-	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
-		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
 	}
 	// Set the stream option before constructing the API agent.  The ReAct loop
 	// reads this option from the agent configuration when each provider request
@@ -2356,12 +2379,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// 现在所有流式请求统一开流：静态分支的增量经 runtime 通道实时可见，
 	// 回合末的静态快照帧以 mode=replace 收口（见 streamStaticResult），
 	// 不会与已渲染的增量文本重复。
-	if req.Stream || wantsEventStream(r) {
-		if agentConfig.Options == nil {
-			agentConfig.Options = make(map[string]interface{})
-		}
-		agentConfig.Options["stream"] = true
-	}
+	runtimehost.ApplyAgentRequestOptions(agentConfig, req.Stream || wantsEventStream(r), "")
 
 	a := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
 		registry:        runtimeRegistry,
@@ -2372,10 +2390,49 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		_ = a.Close()
 	}()
-	h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	// /api/agent/chat is a stateless request-scoped loop, not a durable actor.
+	// It has no cross-request approval suspension, so install the session
+	// permission mode before the tool loop. Without a PermissionEngine the loop
+	// would only consult the static ToolExecutionPolicy and could execute an
+	// approval-required tool without ever asking. The engine's nil AskHandler
+	// path fail-closes with "approval_required" instead.
+	if session != nil {
+		mode := strings.TrimSpace(sessionPermissionMode(session))
+		if mode == "" {
+			mode = string(runtimepolicy.ModeDefault)
+		}
+		runtimehost.ApplySessionPermissionMode(a, mode)
+	}
+	if req.DisableTools {
+		a.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
+	} else {
+		h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	}
+	// The direct Web turn must apply the same child narrowing as the durable
+	// actor path before hooks/runtime services run: agentdef policy, read-only
+	// floor, shell=false and depth ceiling all protect tools regardless of
+	// whether the turn is hosted by the actor or the stateless direct loop.
+	if childAgentType := strings.TrimSpace(sessionCtx.ChildAgentType); childAgentType != "" {
+		profileRoot := ""
+		if profileState != nil && profileState.Resolved != nil {
+			profileRoot = strings.TrimSpace(profileState.Resolved.ProfileRoot)
+		}
+		applyAPIChildAgentdefToolPolicy(a, childAgentType, workspacePath, profileRoot)
+	}
+	if sessionCtx.ChildReadOnly {
+		runtimehost.ApplyChildReadOnlyPolicy(a, true)
+	}
+	applyAPIChildShellPolicy(a, sessionCtx.ChildShellDisabled)
+	applyAPIAgentChildDepthPolicy(a, sessionCtx.ChildDepth, apiAgentDepthCeiling(selectedConfig))
 	h.applyAgentHooks(a, selectedConfig)
 	h.applyAgentRuntimeServices(a, selectedConfig)
 	a.SetObligationResolvers(h.obligationResolvers())
+	// Web direct turns do not pass through SessionDeps.OnRunPrepare; inject
+	// the same per-turn active-goal guidance the actor path receives so a goal
+	// set on a session is visible on the next web text turn too.
+	if session != nil && isBaseSessionContext(sessionCtx) {
+		h.applyRuntimeServerGoalGuidance(a, session)
+	}
 	usesSessionHistory := session != nil && (len(req.Messages) == 0 || (len(req.Messages) == 1 && strings.EqualFold(strings.TrimSpace(req.Messages[0]["role"]), "user")))
 	if usesSessionHistory {
 		h.maybeAutoCompactSessionHistory(ctx, session, a, agentProvider, agentModel, requestTraceID, req.TaskID)
@@ -2583,37 +2640,18 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				releaseActiveTurn()
 			}()
 
-			reactResult, reactErr := a.RunReActWithSession(runCtx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
-				MaxSteps:             agentConfig.MaxSteps,
-				MaxToolCalls:         agentConfig.MaxToolCalls,
-				MaxRunDuration:       agentConfig.MaxRunDuration,
-				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
-				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
-				MaxRepeatedPollCalls: agentConfig.MaxRepeatedPollCalls,
-				EnableThought:        true,
-				EnableToolCalls:      true,
-				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
-				MaxParallelToolCalls: func() int {
-					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
-						return selectedConfig.Agent.MaxParallelToolCalls
-					}
-					return 1
-				}(),
-				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
-				Thinking:            types.ResolveThinkingConfig(req.Thinking),
-				Temperature:         0.7,
-				StreamSink:          streamSink,
-				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
-
-				// §6.12：Web 回合走 /api/agent/chat 的直连 loop，不经 actor 的
-				// buildSessionLoopConfig；携带 agent_session: 义务的挂起记录同样
-				// 需要 supervision 判读器才能在本 run 末结清。
-				AgentSessionObligations: h.agentSessionObligationResolver(),
-				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
-				TeamObligations: h.teamObligationResolver(),
-				// job: 义务同源：required background job 的终态判读器。
-				BackgroundJobObligations: h.backgroundJobObligationResolver(),
-			})
+			loopConfig := buildAgentChatLoopConfig(agentConfig, selectedConfig, req.ReasoningEffort, req.Thinking, req.BudgetTokens)
+			loopConfig.StreamSink = streamSink
+			loopConfig.OnHistoryCheckpoint = historyCheckpointer.OnCheckpoint
+			// §6.12：Web 回合走 /api/agent/chat 的直连 loop，不经 actor 的
+			// buildSessionLoopConfig；携带 agent_session: 义务的挂起记录同样
+			// 需要 supervision 判读器才能在本 run 末结清。
+			loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
+			// team: 义务同源：run 末 settle 需要 team store 终态判读器。
+			loopConfig.TeamObligations = h.teamObligationResolver()
+			// job: 义务同源：required background job 的终态判读器。
+			loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
+			reactResult, reactErr := a.RunReActWithSession(runCtx, h.llmRuntime, lastMessage, execSession, loopConfig)
 			if reactErr != nil {
 				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
 				// 的 user/assistant/tool 行只存在于事件仓库，权威对话永久缺失。
@@ -2633,6 +2671,17 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				if turnInterrupted.Load() {
 					errorPayload["cancel_source"] = activeTurnCancelSourceUserInterrupt
 				}
+				cancelSource := ""
+				if turnInterrupted.Load() {
+					cancelSource = activeTurnCancelSourceUserInterrupt
+				} else if stderrors.Is(reactErr, context.Canceled) {
+					cancelSource = "context_canceled"
+				}
+				h.observeWebTerminal(goalDriverTurnOutcome{
+					SessionID:    sessionID(session),
+					Success:      false,
+					CancelSource: cancelSource,
+				})
 				emitter.Emit("error", errorPayload)
 				return
 			}
@@ -2657,11 +2706,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 在此显式上报（usage 记账 + active goal 续跑决策）；失败/中断由
 			// error 分支上报。全链路在驱动器内门控，开关关闭时零行为。
 			h.observeWebTerminal(goalDriverTurnOutcome{
-				SessionID:   sessionID(session),
-				Success:     reactResult.Success,
-				Output:      reactResult.Output,
-				Steps:       reactResult.Steps,
-				UsageTokens: usageTotalTokens(reactResult.Usage),
+				SessionID:     sessionID(session),
+				Success:       reactResult.Success,
+				Output:        reactResult.Output,
+				OutputPresent: strings.TrimSpace(reactResult.Output) != "",
+				Steps:         reactResult.Steps,
+				UsageTokens:   usageTotalTokens(reactResult.Usage),
 			})
 
 			// Emit the post-run evidence tail without replaying a full-output
@@ -2946,6 +2996,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			},
 		)
 		defer releaseActiveTurn()
+		loopConfig := buildAgentChatLoopConfig(agentConfig, selectedConfig, req.ReasoningEffort, req.Thinking, req.BudgetTokens)
+		loopConfig.OnHistoryCheckpoint = historyCheckpointer.OnCheckpoint
+		// §6.12：与流式直连路径同源，非流式 Web 回合的 loop 也需要子会话
+		// 义务判读器才能结清挂起 turn。
+		loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
+		// team: 义务同源：run 末 settle 需要 team store 终态判读器。
+		loopConfig.TeamObligations = h.teamObligationResolver()
+		// job: 义务同源：required background job 的终态判读器。
+		loopConfig.BackgroundJobObligations = h.backgroundJobObligationResolver()
 		execResult, reactErr := runtimechatcore.ExecuteNonStream(runCtx, runtimechatcore.ExecuteRequest{
 			Agent:           a,
 			LLMRuntime:      h.llmRuntime,
@@ -2955,34 +3014,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			PreparedHistory: prependContextMessages(historyForAgent, contextMessages),
 			EnableReAct:     true,
 			TurnID:          turnID,
-			ReActConfig: &agent.LoopReActConfig{
-				MaxSteps:             agentConfig.MaxSteps,
-				MaxToolCalls:         agentConfig.MaxToolCalls,
-				MaxRunDuration:       agentConfig.MaxRunDuration,
-				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
-				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
-				EnableThought:        true,
-				EnableToolCalls:      true,
-				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
-				MaxParallelToolCalls: func() int {
-					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
-						return selectedConfig.Agent.MaxParallelToolCalls
-					}
-					return 1
-				}(),
-				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
-				Thinking:            types.ResolveThinkingConfig(req.Thinking),
-				Temperature:         0.7,
-				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
-
-				// §6.12：与流式直连路径同源，非流式 Web 回合的 loop 也需要子会话
-				// 义务判读器才能结清挂起 turn。
-				AgentSessionObligations: h.agentSessionObligationResolver(),
-				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
-				TeamObligations: h.teamObligationResolver(),
-				// job: 义务同源：required background job 的终态判读器。
-				BackgroundJobObligations: h.backgroundJobObligationResolver(),
-			},
+			ReActConfig:     loopConfig,
 		})
 		if reactErr != nil {
 			// 失败（含客户端断开）也要落库：否则本轮已产生的 user/assistant/tool
@@ -2990,6 +3022,17 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
 				logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
 			}
+			cancelSource := ""
+			if turnInterrupted.Load() {
+				cancelSource = activeTurnCancelSourceUserInterrupt
+			} else if stderrors.Is(reactErr, context.Canceled) {
+				cancelSource = "context_canceled"
+			}
+			h.observeWebTerminal(goalDriverTurnOutcome{
+				SessionID:    sessionID(session),
+				Success:      false,
+				CancelSource: cancelSource,
+			})
 			h.writeAgentChatExecutionError(ctx, w, agentChatErrorStatus(reactErr, turnInterrupted.Load()), reactErr, session, requestTraceID)
 			return
 		}
@@ -3020,11 +3063,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 		// gap 3 goal 驱动器：非流式 web 直连 turn 的成功终态上报（同流式分支）。
 		h.observeWebTerminal(goalDriverTurnOutcome{
-			SessionID:   sessionID(session),
-			Success:     reactResult.Success,
-			Output:      reactResult.Output,
-			Steps:       reactResult.Steps,
-			UsageTokens: usageTotalTokens(reactResult.Usage),
+			SessionID:     sessionID(session),
+			Success:       reactResult.Success,
+			Output:        reactResult.Output,
+			OutputPresent: strings.TrimSpace(reactResult.Output) != "",
+			Steps:         reactResult.Steps,
+			UsageTokens:   usageTotalTokens(reactResult.Usage),
 		})
 
 		response := map[string]interface{}{
@@ -4195,9 +4239,8 @@ func (h *Handler) acquireSessionLeaseMode(ctx context.Context, sessionID, ownerK
 	if h == nil || sessionID == "" {
 		return nil, nil
 	}
-	store := h.getSessionRuntimeStore()
-	leaseStore, ok := store.(chat.SessionLeaseStore)
-	if !ok || leaseStore == nil {
+	leaseStore := h.getSessionLeaseStore()
+	if leaseStore == nil {
 		return nil, nil
 	}
 	if ctx == nil {
@@ -4880,7 +4923,9 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	// agent 会惰性创建只属于自己的内存 store，父会话的 progress 投影永远读不到
 	// "batch 进行到哪了"。顺序必须在 SetBatchLifecycleProjector 之后：
 	// SetSubagentBatchCoordinator 从 agent 上取 projector 快照。
+	var batchCoordinator *agent.SubagentBatchCoordinator
 	if coordinator := h.subagentBatchCoordinator(subagentScheduler); coordinator != nil {
+		batchCoordinator = coordinator
 		// terminal sink 必须显式装上：agent 只会从自身回填 emitter/projector，
 		// 没有 sink 时 batch 终态不会写进父会话 mailbox（父会话只能靠 supervision
 		// wake 知道"有事发生"，拿不到那条 durable 汇报消息）。
@@ -4888,25 +4933,14 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 		apiAgent.SetSubagentBatchCoordinator(coordinator)
 	}
 
-	if registry != nil {
-		for _, summary := range registry.ListSummaries() {
-			if summary == nil {
-				continue
-			}
-			_ = apiAgent.RegisterSkill(summary.ToSkillStub())
-		}
-	}
-	if embeddingRouter != nil {
-		if agentEmbeddingRouter, err := embeddingRouter.CloneForRegistry(apiAgent.GetSkillRouter().Registry()); err == nil {
-			apiAgent.GetSkillRouter().SetEmbeddingRouter(agentEmbeddingRouter)
-		}
-	}
-	apiAgent.SetEventBus(h.getRuntimeEventBus())
-	if h.teamStore != nil {
-		if ctxMgr := apiAgent.GetContextManager(); ctxMgr != nil {
-			ctxMgr.TeamContext = team.NewContextBuilder(h.teamStore)
-		}
-	}
+	runtimehost.ApplyAgentServices(apiAgent, runtimehost.AgentServiceSpec{
+		Scheduler:        subagentScheduler,
+		BatchCoordinator: batchCoordinator,
+		SkillRegistry:    registry,
+		EmbeddingRouter:  embeddingRouter,
+		EventBus:         h.getRuntimeEventBus(),
+		TeamStore:        h.teamStore,
+	})
 	if runtime == nil {
 		if gateway := h.getRuntimeToolCatalogGateway(); gateway != nil {
 			gateway.Refresh()
@@ -4929,6 +4963,8 @@ func (h *Handler) attachRuntimeEventBridge() {
 	if h == nil {
 		return
 	}
+	var bufferPtr atomic.Pointer[chat.EventPersistBuffer]
+	attached := false
 	h.runtimeEventBridgeOnce.Do(func() {
 		bus := h.runtimeEventBus
 		if bus == nil {
@@ -4939,18 +4975,16 @@ func (h *Handler) attachRuntimeEventBridge() {
 		// 总线经参数注入（subscribeGoalDriver(bus)）：Once 内再次 getRuntimeEventBus()
 		// 会重入本 Once 自锁，必须先取好再传（2026-10-15 回归）。
 		h.subscribeGoalDriver(bus)
-		// P1.5：批量开关关闭时 buffer 为 nil，下面的回调保持原逐条同步路径。
-		buffer := h.newRuntimeEventPersistBuffer()
 		bus.Subscribe("", func(event runtimeevents.Event) {
-			if !shouldPersistRuntimeSessionEvent(event) {
+			mapped, persist := runtimehost.PrepareSessionStoreEvent(event)
+			if !persist {
 				// P0-2：A 通道的未命中原先完全无声——事件既不落盘（无实时/无回放），
 				// 也不出现在任何日志或指标里。按 runtimeobserve 的已知类型目录记入
 				// runtime_event_delivery（已知但被裁掉 vs 完全未知可区分）。
 				recordRuntimeEventDeliveryDrop(event.Type, event.SessionID)
 				return
 			}
-			mapped := mapRuntimeEventToSession(event)
-			if buffer != nil {
+			if buffer := bufferPtr.Load(); buffer != nil {
 				// P1.5：只入队（非阻塞）；落盘/重试/flush 由 buffer worker 负责，
 				// 失败经 persist.failed 与限频告警可见（P0.5 的可见性要求不回退）。
 				buffer.Enqueue(mapped)
@@ -4965,27 +4999,29 @@ func (h *Handler) attachRuntimeEventBridge() {
 				recordRuntimeEventPersistError(mapped.Type, mapped.SessionID, err)
 			}
 		})
+		attached = true
 	})
+	if !attached {
+		return
+	}
+	// Create the buffer outside the sync.Once critical section. Store resolution
+	// can publish session.runtime.store.reloaded; calling getRuntimeEventBus()
+	// from that publish path would otherwise re-enter the Once and deadlock.
+	// The subscription above is already installed, so the reload event is
+	// classified as a non-persisted control event and returns without recursion.
+	if buffer := h.newRuntimeEventPersistBuffer(); buffer != nil {
+		bufferPtr.Store(buffer)
+	}
 }
 
-// runtimeEventPersistSettings 读取运行时配置中的批量落盘设置（默认关闭）。
+// runtimeEventPersistSettings 读取运行时配置中的批量落盘设置。
+// 解析规则与 aicli 共用 runtimehost.ResolveEventPersistSettings：批量和
+// AsyncDispatch 默认启用，disable=true 是唯一的同步回退开关。
 func (h *Handler) runtimeEventPersistSettings() chat.EventPersistSettings {
 	if h == nil || h.runtimeConfig == nil {
 		return chat.EventPersistSettings{}
 	}
-	cfg := h.runtimeConfig.SessionRuntime.EventPersist
-	return chat.EventPersistSettings{
-		Enabled:         cfg.BatchingEnabled,
-		BatchSize:       cfg.BatchSize,
-		FlushInterval:   cfg.FlushInterval,
-		QueueLimit:      cfg.QueueLimit,
-		QueueBytesLimit: cfg.QueueBytesLimit,
-		ShutdownTimeout: cfg.ShutdownTimeout,
-		FailMode:        cfg.FailMode,
-		AsyncDispatch:   cfg.AsyncDispatch,
-		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
-		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
-	}
+	return runtimehost.ResolveEventPersistSettings(h.runtimeConfig.SessionRuntime.EventPersist)
 }
 
 // newRuntimeEventPersistBuffer 在批量开关开启且 store 支持批量时创建缓冲。
@@ -5060,36 +5096,13 @@ func (h *Handler) runtimeStorePoolSnapshot() (chat.RuntimeStorePoolStats, bool) 
 	return statter.PoolStats(), true
 }
 
-// isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的落盘判定。
-//
-// 清单已收敛到 internal/events 的声明式注册表（Batch 2 事件契约单一真源）：
-// 这里只做委托，不再保留第二份手写白名单——原先「落盘判定」与「交付通道分类」
-// 各持一份清单，漂移时的症状只是前端没反应。新增/调整类型请改
-// internal/events/contract.go 的注册表，契约漂移由 contract_test.go 门禁拦截。
-func isPersistedRuntimeEventType(eventType string) bool {
-	return runtimeevents.IsPersistedEventType(eventType)
-}
-
 func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
-	if strings.TrimSpace(event.SessionID) == "" {
-		return false
-	}
-	// 生产者已自行落盘的事件（如 agent-controller 的 subagent.completed 摘要行，
-	// 见 session_runtime_support.go 的 store.AppendEvent + payload["seq"] 回填）
-	// 不再经 A 通道重复 append：契约里 subagent.completed 带 session_store 位，
-	// 但该类型的「父库摘要行」所有权在生产者，桥只负责其余路径。
-	// 判定收敛在 internal/events.ProducerPersistedEvent（CLI 本地桥共用）。
-	if runtimeevents.ProducerPersistedEvent(event) {
-		return false
-	}
-	return isPersistedRuntimeEventType(event.Type)
+	_, persist := runtimehost.PrepareSessionStoreEvent(event)
+	return persist
 }
 
 func mapRuntimeEventToSession(event runtimeevents.Event) runtimeevents.Event {
-	mapped := event
-	// 别名映射收敛到 internal/events 单一实现（aicli 本地 A 通道桥共用）；
-	// 这里不再保留第二份 switch，避免两处落盘名漂移。
-	mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
+	mapped, _ := runtimehost.PrepareSessionStoreEvent(event)
 	return mapped
 }
 
@@ -5293,6 +5306,18 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 		h.teamStoreMu.Unlock()
 		return false, nil
 	}
+	if currentKey == "" && currentStore != nil && teamStorePathMatches(currentStore, storePath) {
+		// Bootstrap already opened the configured Team store and installed it
+		// through SetTeamStore. Adopt that handle instead of opening a second
+		// SQLite connection and leaving background services pointing at the
+		// closed first handle.
+		h.teamStoreMu.Lock()
+		if h.teamStoreConfigKey == "" {
+			h.teamStoreConfigKey = configKey
+		}
+		h.teamStoreMu.Unlock()
+		return false, nil
+	}
 	if configKey == currentKey {
 		return false, nil
 	}
@@ -5342,6 +5367,17 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 		lifecycle.SyncLoops()
 	}
 	return true, nil
+}
+
+func teamStorePathMatches(store team.Store, storePath string) bool {
+	if store == nil || strings.TrimSpace(storePath) == "" {
+		return false
+	}
+	pathProvider, ok := store.(interface{ Path() string })
+	if !ok || strings.TrimSpace(pathProvider.Path()) == "" {
+		return false
+	}
+	return filepath.Clean(pathProvider.Path()) == filepath.Clean(storePath)
 }
 
 func (h *Handler) refreshAgentControlMailboxStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
@@ -5581,12 +5617,15 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 
 	storePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.StorePath)
 	storeDSN := strings.TrimSpace(config.SessionRuntime.StoreDSN)
+	leasePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.LeaseStorePath)
+	leaseDSN := strings.TrimSpace(config.SessionRuntime.LeaseStoreDSN)
 	readPool := config.SessionRuntime.ReadPool
 	hasStoreConfig := storePath != "" || storeDSN != ""
 	// P1.7：读池配置在构造期生效，故非默认时纳入 store 标识（变更即重建）；
 	// 默认配置保持既有 key 形状，升级不触发无谓重建，也保留"无 store 配置"
 	// 的空键哨兵语义（见下）。
 	configKey := storePath + "|" + storeDSN
+	leaseKey := leasePath + "|" + leaseDSN
 	if readPool != (runtimecfg.ReadPoolConfig{}) {
 		configKey = fmt.Sprintf("%s|%t|%d|%s|%s", configKey,
 			readPool.Disable, readPool.Size,
@@ -5596,6 +5635,7 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 	h.sessionRuntimeMu.RLock()
 	currentKey := h.sessionRuntimeStoreKey
 	currentStore := h.sessionRuntimeStore
+	currentLeaseKey := h.sessionLeaseStoreKey
 	h.sessionRuntimeMu.RUnlock()
 
 	if currentKey == "" && !hasStoreConfig && currentStore != nil {
@@ -5607,7 +5647,33 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 		return false, nil
 	}
 	if configKey == currentKey && currentStore != nil {
-		return false, nil
+		if leaseKey == currentLeaseKey {
+			return false, nil
+		}
+		leaseStore, leaseErr := openSessionLeaseStore(leasePath, leaseDSN, readPool)
+		if leaseErr != nil {
+			return false, leaseErr
+		}
+		h.sessionRuntimeMu.Lock()
+		oldLease := h.sessionLeaseStore
+		oldHub := h.sessionHub
+		h.sessionLeaseStore = leaseStore
+		h.sessionLeaseStoreKey = leaseKey
+		h.sessionHub = nil
+		h.sessionRuntimeMu.Unlock()
+		if oldHub != nil {
+			oldHub.StopAll()
+		}
+		if oldLease != nil && !sameSessionLeaseStore(oldLease, currentStore) && !sameSessionLeaseStore(oldLease, h.getSessionEventStore()) {
+			if closer, ok := oldLease.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
+		h.publishRuntimeEvent("session.runtime.lease_store.reloaded", "", map[string]interface{}{
+			"lease_store_path": leasePath,
+			"lease_uses_dsn":   leaseDSN != "",
+		})
+		return true, nil
 	}
 
 	var (
@@ -5638,13 +5704,29 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 		stateStore = memoryStore
 		eventStore = memoryStore
 	}
+	leaseStore, leaseErr := openSessionLeaseStore(leasePath, leaseDSN, readPool)
+	if leaseErr != nil {
+		closeRuntimeStore(stateStore, eventStore)
+		h.publishRuntimeEvent("session.runtime.lease_store.reload_failed", "", map[string]interface{}{
+			"store_path": leasePath,
+			"uses_dsn":   leaseDSN != "",
+			"error":      leaseErr.Error(),
+		})
+		return false, leaseErr
+	}
+	if leaseStore == nil {
+		leaseStore, _ = stateStore.(chat.SessionLeaseStore)
+	}
 
 	h.sessionRuntimeMu.Lock()
 	oldStore := h.sessionRuntimeStore
 	oldEventStore := h.sessionEventStore
+	oldLeaseStore := h.sessionLeaseStore
 	oldHub := h.sessionHub
 	h.sessionRuntimeStore = stateStore
 	h.sessionEventStore = eventStore
+	h.sessionLeaseStore = leaseStore
+	h.sessionLeaseStoreKey = leaseKey
 	h.sessionRuntimeStoreKey = configKey
 	h.sessionHub = nil
 	h.sessionRuntimeMu.Unlock()
@@ -5653,11 +5735,18 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 		oldHub.StopAll()
 	}
 	closeRuntimeStore(oldStore, oldEventStore)
+	if oldLeaseStore != nil && !sameSessionLeaseStore(oldLeaseStore, oldStore) && !sameSessionLeaseStore(oldLeaseStore, oldEventStore) {
+		if closer, ok := oldLeaseStore.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}
 	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
 
 	h.publishRuntimeEvent("session.runtime.store.reloaded", "", map[string]interface{}{
-		"store_path": storePath,
-		"uses_dsn":   storeDSN != "",
+		"store_path":       storePath,
+		"uses_dsn":         storeDSN != "",
+		"lease_store_path": leasePath,
+		"lease_uses_dsn":   leaseDSN != "",
 	})
 	return true, nil
 }
@@ -5678,6 +5767,29 @@ func closeRuntimeStore(store chat.RuntimeStateStore, eventStore chat.EventStore)
 	}
 	closeStore(store)
 	closeStore(eventStore)
+}
+
+func sameSessionLeaseStore(leaseStore chat.SessionLeaseStore, candidate any) bool {
+	typed, ok := candidate.(chat.SessionLeaseStore)
+	return ok && typed == leaseStore
+}
+
+func openSessionLeaseStore(path, dsn string, readPool runtimecfg.ReadPoolConfig) (chat.SessionLeaseStore, error) {
+	path = strings.TrimSpace(path)
+	dsn = strings.TrimSpace(dsn)
+	if path == "" && dsn == "" {
+		return nil, nil
+	}
+	store, err := chat.NewSQLiteRuntimeStore(&chat.RuntimeStoreConfig{
+		Path:                 path,
+		DSN:                  dsn,
+		DisableReadPool:      true,
+		ReadOperationTimeout: readPool.OperationTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 func (h *Handler) publishRuntimeEvent(eventType, traceID string, payload map[string]interface{}) {
@@ -6109,6 +6221,17 @@ func (h *Handler) getExecutionSupervisor() *supervision.ExecutionSupervisor {
 	h.executionSupervisorStop = cancel
 	go supervisor.RunLoop(ctx)
 	return supervisor
+}
+
+// peekExecutionSupervisor returns the already-built watchdog without starting
+// its lazy construction (read-only debug surfaces must not arm a scan loop).
+func (h *Handler) peekExecutionSupervisor() *supervision.ExecutionSupervisor {
+	if h == nil {
+		return nil
+	}
+	h.executionSupervisorMu.RLock()
+	defer h.executionSupervisorMu.RUnlock()
+	return h.executionSupervisor
 }
 
 // getScheduleService lazily opens the shared schedule store when the schedule
@@ -10925,7 +11048,20 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 	}
 
 	return map[string]interface{}{
-		"execution_core":        chat.SessionActorRuntimeCore(),
+		"execution_core": chat.SessionActorRuntimeCore(),
+		// execution_core 声明服务端具备的统一 actor 能力；本映射声明各入口
+		// 实际使用的执行核心。Web 核心文本路径已走 durable SessionActor；
+		// 多消息重放、Team/规划/补丁等未迁移分支仍显式回退直连 loop。
+		"entrypoint_execution": map[string]interface{}{
+			"/api/agent/chat": map[string]interface{}{
+				"core":                   chat.SessionActorRuntimeCore(),
+				"fallback_core":          "stateless_direct",
+				"durable_state":          true,
+				"cross_request_approval": true,
+				"eligible_scope":         "enable_react plus a last user message; Team/Task are context-only options and disable_tools is a per-run actor override",
+			},
+			"/api/runtime/sessions/{id}/runtime/commands": chat.SessionActorRuntimeCore(),
+		},
 		"default_provider":      defaultAgentProvider(h.llmRuntime),
 		"default_model":         defaultAgentModel(h.llmRuntime),
 		"providers":             providers,
@@ -10962,6 +11098,7 @@ func (h *Handler) sessionPersistenceSnapshot() map[string]interface{} {
 		"session_dir":                  paths.SessionDir,
 		"runtime_dir":                  paths.RuntimeDir,
 		"session_runtime_store_path":   paths.SessionRuntimeStorePath,
+		"session_lease_store_path":     paths.SessionLeaseStorePath,
 		"legacy_runtime_store_path":    paths.LegacySessionRuntimeStorePath,
 		"team_store_path":              paths.TeamStorePath,
 		"agent_control_store_path":     paths.AgentControlStorePath,
@@ -10974,6 +11111,18 @@ func (h *Handler) sessionPersistenceSnapshot() map[string]interface{} {
 		"team_store_active":            h.teamStoreConfigKey,
 		"background_active":            h.backgroundConfigKey,
 	}
+	runtimeStore := h.getSessionRuntimeStore()
+	eventStore := h.getSessionEventStore()
+	runtimeStoreID := sessionruntime.StoreID(runtimeStore)
+	eventStoreID := sessionruntime.StoreID(eventStore)
+	authority := h.sessionAuthoritySnapshot(context.Background(), "")
+	result["execution_authority"] = string(authority.ExecutionAuthority)
+	result["authority_domain"] = authority.AuthorityDomain
+	result["runtime_store_id"] = runtimeStoreID
+	result["event_store_id"] = eventStoreID
+	result["lease_store_id"] = authority.LeaseStoreID
+	result["runtime_store_durable"] = sessionruntime.StoreDurable(runtimeStore)
+	result["event_store_durable"] = sessionruntime.StoreDurable(eventStore)
 	if paths.AgentControlMailboxStorePath != "" {
 		result["agent_control_mailbox_store_path"] = paths.AgentControlMailboxStorePath
 	}
@@ -12709,109 +12858,7 @@ func buildRecoverySummaryFromTraceSummaries(traces []runtimeevents.TraceSummary)
 }
 
 func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activation *knowledge.Activation) map[string]interface{} {
-	if config == nil {
-		return nil
-	}
-	options := make(map[string]interface{})
-	memoryMode := strings.ToLower(strings.TrimSpace(config.Memory.Mode))
-	if memoryMode != "" && memoryMode != "off" {
-		memorypolicy.ApplyReadOptions(config.Memory, options)
-		options["memory_mode"] = memoryMode
-		options["memory_manual_enabled"] = config.Memory.Manual.Enabled
-		if strings.TrimSpace(config.Memory.StorePath) != "" {
-			options["memory_store_path"] = strings.TrimSpace(config.Memory.StorePath)
-		}
-		options["memory_injection_enabled"] = config.Memory.Injection.Enabled
-		options["memory_injection_mode"] = strings.ToLower(strings.TrimSpace(config.Memory.Injection.Mode))
-		options["memory_pinned_budget_ratio"] = config.Memory.Injection.PinnedBudgetRatio
-		options["memory_stage_split"] = config.Memory.Injection.StageSplit
-		if config.Memory.Injection.MaxItems > 0 {
-			options["context_max_project_memory"] = config.Memory.Injection.MaxItems
-		}
-		if config.Memory.Injection.TokenBudget > 0 {
-			options["context_project_memory_tokens"] = config.Memory.Injection.TokenBudget
-		}
-		options["memory_citation_enabled"] = config.Memory.Feedback.CitationEnabled
-		options["memory_exposure_sampling"] = config.Memory.Feedback.ExposureSampling
-		options["memory_recall_trace_enabled"] = config.Memory.Injection.RecallTrace.Enabled
-		options["memory_recall_trace_sample_rate"] = config.Memory.Injection.RecallTrace.SampleRate
-	}
-	ctxCfg := config.Context
-	if strings.TrimSpace(ctxCfg.Profile) != "" {
-		options["context_profile"] = strings.TrimSpace(ctxCfg.Profile)
-	}
-	if strings.TrimSpace(ctxCfg.CompactionMode) != "" {
-		options["context_compaction_mode"] = strings.TrimSpace(ctxCfg.CompactionMode)
-	}
-	if strings.TrimSpace(ctxCfg.RecallMode) != "" {
-		options["context_recall_mode"] = strings.TrimSpace(ctxCfg.RecallMode)
-	}
-	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
-		options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
-	}
-	if strings.TrimSpace(ctxCfg.WorkspaceMode) != "" {
-		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(ctxCfg.WorkspaceMode))
-	}
-	if ctxCfg.MinCompactionMessages > 0 {
-		options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages
-	}
-	if ctxCfg.MinRecallQueryLength > 0 {
-		options["context_min_recall_query_length"] = ctxCfg.MinRecallQueryLength
-	}
-	if ctxCfg.LedgerLoadLimit > 0 {
-		options["context_ledger_load_limit"] = ctxCfg.LedgerLoadLimit
-	}
-	if ctxCfg.MaxPromptTokens > 0 {
-		options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
-	}
-	if ctxCfg.FallbackMaxPromptTokens > 0 {
-		options["context_fallback_max_prompt_tokens"] = ctxCfg.FallbackMaxPromptTokens
-	}
-	if ctxCfg.MaxMessages > 0 {
-		options["context_max_messages"] = ctxCfg.MaxMessages
-	}
-	if ctxCfg.KeepRecentMessages > 0 {
-		options["context_keep_recent_messages"] = ctxCfg.KeepRecentMessages
-	}
-	if ctxCfg.MaxRecallResults > 0 {
-		options["context_max_recall_results"] = ctxCfg.MaxRecallResults
-	}
-	if ctxCfg.MaxObservationItems > 0 {
-		options["context_max_observation_items"] = ctxCfg.MaxObservationItems
-	}
-	if ctxCfg.MaxImageAttachmentTokens != 0 {
-		options["context_max_image_attachment_tokens"] = ctxCfg.MaxImageAttachmentTokens
-	}
-	wsCfg := config.Workspace
-	if strings.TrimSpace(ctxCfg.WorkspaceMode) == "" && strings.TrimSpace(wsCfg.Mode) != "" {
-		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))
-	}
-	if wsCfg.MaxFileSize > 0 {
-		options["workspace_max_file_size"] = wsCfg.MaxFileSize
-	}
-	if wsCfg.MaxChunkSize > 0 {
-		options["workspace_max_chunk_size"] = wsCfg.MaxChunkSize
-	}
-	if wsCfg.ChunkOverlap > 0 {
-		options["workspace_chunk_overlap"] = wsCfg.ChunkOverlap
-	}
-	if len(wsCfg.Include) > 0 {
-		options["workspace_include"] = append([]string(nil), wsCfg.Include...)
-	}
-	if len(wsCfg.Exclude) > 0 {
-		options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
-	}
-	if path := strings.TrimSpace(config.Artifact.StorePath); path != "" {
-		options["artifact_store_path"] = path
-	}
-	if dsn := strings.TrimSpace(config.Artifact.StoreDSN); dsn != "" {
-		options["artifact_store_dsn"] = dsn
-	}
-	applyKnowledgeContextOptions(options, activation)
-	if len(options) == 0 {
-		return nil
-	}
-	return options
+	return runtimehost.BuildContextOptions(config, activation)
 }
 
 // applyKnowledgeContextOptions 把知识层装配写入会话 agent options（06 §4
@@ -12827,22 +12874,7 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 //   - `context_knowledge_layer` 传 `*knowledge.Layer`（补齐 WorkspaceVersion
 //     观测；裸 store Planner 会因版本未知 fail-closed 全转 Explore）。
 func applyKnowledgeContextOptions(options map[string]interface{}, activation *knowledge.Activation) {
-	if options == nil || activation == nil {
-		return
-	}
-	layer := activation.Layer()
-	if layer == nil {
-		return
-	}
-	mode := runtimecontext.KnowledgeModeForLayerMode(layer.Mode())
-	if mode == runtimecontext.KnowledgeModeOff {
-		if layer.Mode() == knowledge.ModeShadow {
-			options["context_knowledge_layer"] = layer
-		}
-		return
-	}
-	options["context_knowledge_mode"] = mode
-	options["context_knowledge_layer"] = layer
+	runtimehost.ApplyKnowledgeContextOptions(options, activation)
 }
 
 func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {

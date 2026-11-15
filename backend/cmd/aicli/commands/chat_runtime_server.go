@@ -24,7 +24,9 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -40,6 +42,32 @@ const (
 	aicliRuntimeServerEventDrainTimeout    = 8 * time.Second
 	aicliRuntimeServerEventLongPollTimeout = 5 * time.Second
 )
+
+// chatSessionUsesRuntimeServer reports whether the session's turn execution is
+// owned by a remote runtime-server. It deliberately checks the executor's
+// optional URL provider instead of only LocalRuntimeHost == nil, so tests and
+// transitional hosts that leave the field nil are not misclassified as remote.
+func chatSessionUsesRuntimeServer(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost != nil || session.ChatExecutor == nil {
+		return false
+	}
+	provider, ok := session.ChatExecutor.(runtimeServerURLProvider)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(provider.RuntimeServerURL()) != ""
+}
+
+// chatRuntimeServerUnsupportedCommand is the explicit capability boundary for
+// commands that still only have a local implementation. Returning a typed
+// notice is mandatory: silently touching a local store while the session is
+// executing on runtime-server is worse than refusing the command.
+func chatRuntimeServerUnsupportedCommand(commandLower string) (string, bool) {
+	switch {
+	default:
+		return "", false
+	}
+}
 
 var errRuntimeServerStreamEnded = errors.New("runtime-server stream ended before completion")
 
@@ -426,6 +454,8 @@ type aicliRuntimeServerChatExecutor struct {
 	serverURL            string
 	toolSurfaceMu        sync.Mutex
 	toolSurfaceBySession map[string]map[string]bool
+	authorityMu          sync.RWMutex
+	authorityBySession   map[string]sessionruntime.AuthorityInfo
 }
 
 type runtimeServerRuntimeCommandResponse struct {
@@ -964,6 +994,29 @@ func (e *aicliRuntimeServerChatExecutor) toolAvailable(ctx context.Context, sess
 	return names[toolName]
 }
 
+// runtimeServerScheduleCatalogProvider is the narrow optional capability used
+// by /schedule in remote mode. It keeps the command layer free of concrete
+// runtime-server executor types.
+type runtimeServerScheduleCatalogProvider interface {
+	RuntimeServerScheduleCatalog(ctx context.Context, session *ChatSession) ([]schedule.CatalogEntry, error)
+}
+
+func (e *aicliRuntimeServerChatExecutor) RuntimeServerScheduleCatalog(ctx context.Context, session *ChatSession) ([]schedule.CatalogEntry, error) {
+	if e == nil {
+		return nil, fmt.Errorf("runtime-server executor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var decoded struct {
+		Tasks []schedule.CatalogEntry `json:"tasks"`
+	}
+	if _, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, "/api/runtime/schedule/catalog", "", nil, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded.Tasks, nil
+}
+
 func (e *aicliRuntimeServerChatExecutor) runtimeServerToolNames(ctx context.Context, session *ChatSession, sessionID string) (map[string]bool, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil || sessionID == "" {
@@ -1115,8 +1168,23 @@ func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Co
 	if rememberScope = strings.ToLower(strings.TrimSpace(rememberScope)); allow && rememberScope != "" {
 		payload["remember_scope"] = rememberScope
 	}
-	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, nil)
-	return err
+	var outcome struct {
+		RequestID  string `json:"request_id"`
+		Allowed    bool   `json:"allowed"`
+		Resolved   bool   `json:"resolved"`
+		Resumed    bool   `json:"resumed"`
+		Resolution string `json:"resolution"`
+	}
+	if _, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, &outcome); err != nil {
+		return err
+	}
+	resolution := strings.TrimSpace(outcome.Resolution)
+	if resolution != "" && toolbroker.ApprovalResolutionNotApplied(resolution) {
+		// Recorded-but-not-applied is not a successful approval. Surface it so
+		// the TUI can report the same fact as the connector and toolbroker paths.
+		return fmt.Errorf("approval %s was recorded but not applied (resolution=%s)", requestID, resolution)
+	}
+	return nil
 }
 
 // runtimeServerApprovalExplanation 对齐 runtimeapi 的 explain 响应体
@@ -1511,13 +1579,42 @@ func (e *aicliRuntimeServerChatExecutor) listRuntimeServerEventsResponse(ctx con
 
 func (e *aicliRuntimeServerChatExecutor) getRuntimeServerState(ctx context.Context, session *ChatSession, sessionID string) (*runtimechat.RuntimeState, error) {
 	var decoded struct {
-		State *runtimechat.RuntimeState `json:"state"`
+		State     *runtimechat.RuntimeState     `json:"state"`
+		Authority *sessionruntime.AuthorityInfo `json:"authority"`
 	}
-	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/runtime/state", "", nil, &decoded)
+	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/runtime", "", nil, &decoded)
 	if err != nil {
 		return nil, err
 	}
+	if decoded.Authority != nil {
+		e.cacheAuthority(sessionID, *decoded.Authority)
+	}
 	return decoded.State, nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) cacheAuthority(sessionID string, authority sessionruntime.AuthorityInfo) {
+	if e == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	e.authorityMu.Lock()
+	defer e.authorityMu.Unlock()
+	if e.authorityBySession == nil {
+		e.authorityBySession = make(map[string]sessionruntime.AuthorityInfo)
+	}
+	e.authorityBySession[strings.TrimSpace(sessionID)] = authority
+}
+
+func (e *aicliRuntimeServerChatExecutor) cachedAuthority(sessionID string) *sessionruntime.AuthorityInfo {
+	if e == nil {
+		return nil
+	}
+	e.authorityMu.RLock()
+	defer e.authorityMu.RUnlock()
+	authority, ok := e.authorityBySession[strings.TrimSpace(sessionID)]
+	if !ok {
+		return nil
+	}
+	return &authority
 }
 
 func runtimeServerStateComplete(state *runtimechat.RuntimeState) bool {

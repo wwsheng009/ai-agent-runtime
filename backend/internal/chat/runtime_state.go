@@ -145,6 +145,14 @@ type RuntimeState struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
+// HasPendingInteraction reports whether the state is parked on a user/decision
+// boundary. Goal drivers must not submit a continuation while any of these are
+// set: the run still owns the pending tool/approval/question.
+func (s *RuntimeState) HasPendingInteraction() bool {
+	return s != nil &&
+		(s.PendingApproval != nil || s.PendingTool != nil || s.PendingQuestion != nil)
+}
+
 // RuntimeStateSummary is the allocation-free projection used by status polls.
 // Large tool schemas and replay receipts intentionally stay out of this view.
 type RuntimeStateSummary struct {

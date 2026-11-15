@@ -522,12 +522,15 @@ type SessionRuntimeConfig struct {
 	StorePath          string `yaml:"storePath" json:"storePath"`
 	StoreDSN           string `yaml:"storeDSN" json:"storeDSN"`
 	DefaultPersistence string `yaml:"defaultPersistence" json:"defaultPersistence"`
-	// EventPersist 是 P1.5 事件持久化批量化的灰度配置；
-	// aicli 本地宿主自 2026-10 起默认启用（disable=false），批量落盘 +
-	// AsyncDispatch 保证 LLM 回调链上零同步磁盘 I/O（P0-1，见
-	// docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）；
+	// LeaseStorePath/LeaseStoreDSN 是跨宿主共享的 session lease 存储。
+	// 与 StorePath 分离，避免为了共享互斥锁而合并 runtime state/events。
+	LeaseStorePath string `yaml:"leaseStorePath" json:"leaseStorePath"`
+	LeaseStoreDSN  string `yaml:"leaseStoreDSN" json:"leaseStoreDSN"`
+	// EventPersist 是 P1.5 事件持久化批量化的配置。
+	// aicli 与 runtime-server 共用 runtimehost.ResolveEventPersistSettings：
+	// 默认启用批量落盘 + AsyncDispatch（LLM 回调链零同步磁盘 I/O，P0-1）；
 	// disable=true 是显式回滚开关（回退逐条同步路径）。
-	// runtime-server 宿主仍按 batchingEnabled 逐字段生效。
+	// batchingEnabled/asyncDispatch 保留用于兼容旧配置往返，不再是默认值来源。
 	EventPersist EventPersistConfig `yaml:"eventPersist" json:"eventPersist"`
 	// ReadPool 是 P1.7 读写双池的灰度配置；默认启用（disable=false），
 	// 回滚时置 disable=true（读回落写池，行为与拆分前逐字节一致）。
@@ -565,10 +568,10 @@ type ReadPoolConfig struct {
 // EventPersistConfig 控制「总线 → session_runtime.sqlite」桥接的批量落盘。
 // 设计基线见 docs/plan/runtime-store-event-persistence-batching-and-async-plan-20260918.md §3.5。
 type EventPersistConfig struct {
+	// Deprecated: 批量默认启用；请使用 disable 显式回退。
 	BatchingEnabled bool `yaml:"batchingEnabled" json:"batchingEnabled"`
-	// Disable 是 P0-1 的显式回滚开关：true 时 aicli 本地宿主关闭批量落盘，
-	// 回退逐条同步路径。默认 false=启用（与 BatchingEnabled 的灰度语义解耦：
-	// 未配置时不再视为"关闭"）。runtime-server 仍只读 BatchingEnabled。
+	// Disable 是 P0-1 的显式回滚开关：true 时两个宿主都关闭批量落盘，
+	// 回退逐条同步路径。默认 false=启用。
 	Disable         bool          `yaml:"disable" json:"disable"`
 	BatchSize       int           `yaml:"batchSize" json:"batchSize"`
 	FlushInterval   time.Duration `yaml:"flushInterval" json:"flushInterval"`
@@ -577,7 +580,7 @@ type EventPersistConfig struct {
 	ShutdownTimeout time.Duration `yaml:"shutdownTimeout" json:"shutdownTimeout"`
 	// FailMode: "" / "block"（默认，溢出同步落盘）| "drop"（显式丢弃并计数）。
 	FailMode string `yaml:"failMode" json:"failMode"`
-	// AsyncDispatch 是 P2.11 独立开关；开启前置条件为 BatchingEnabled=true。
+	// Deprecated: AsyncDispatch 默认随批量落盘启用；disable=true 时一并回退。
 	AsyncDispatch bool `yaml:"asyncDispatch" json:"asyncDispatch"`
 }
 
@@ -1911,6 +1914,9 @@ func ValidateSessionRuntimeConfig(config *SessionRuntimeConfig) error {
 	}
 	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
 		return errors.New(errors.ErrValidationFailed, "sessionRuntime storePath and storeDSN cannot both be set")
+	}
+	if strings.TrimSpace(config.LeaseStorePath) != "" && strings.TrimSpace(config.LeaseStoreDSN) != "" {
+		return errors.New(errors.ErrValidationFailed, "sessionRuntime leaseStorePath and leaseStoreDSN cannot both be set")
 	}
 	switch strings.ToLower(strings.TrimSpace(config.DefaultPersistence)) {
 	case "", "memory", "file":

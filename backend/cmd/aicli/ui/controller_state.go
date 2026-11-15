@@ -540,6 +540,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			}
 			state.Transcript = NewTranscriptState(a.Snapshot)
 			if active, ok := ActiveCellFromTranscript(state.Transcript); ok {
+				if state.SemanticActiveCellProjection && active.Phase == ActiveCellMutable {
+					active = normalizeActiveStableRange(active, active.Enqueued.End)
+				}
 				state.Active = active
 			} else {
 				state.Active = ActiveCellState{}

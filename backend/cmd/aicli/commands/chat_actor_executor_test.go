@@ -210,6 +210,18 @@ func TestCurrentRunMetaForSession_ForcesNoneCompletionRequirementFromRuntimeCont
 	}
 }
 
+func TestCurrentRunMetaForSessionCarriesTurnBudgetTokens(t *testing.T) {
+	session := &ChatSession{TurnBudgetTokens: 4200}
+	runMeta := currentRunMetaForSession(session)
+	if runMeta == nil || runMeta.BudgetTokens != 4200 {
+		t.Fatalf("expected turn budget in run meta, got %+v", runMeta)
+	}
+
+	if got := currentRunMetaForSession(&ChatSession{}); got != nil {
+		t.Fatalf("empty session must keep nil run meta, got %+v", got)
+	}
+}
+
 func TestWaitForAICLIActorReady_FollowsLiveRunInsteadOfTimingOut(t *testing.T) {
 	// A long provider delay keeps the background turn running well past the
 	// stale-state budget. That run is live in this process, so the wait must

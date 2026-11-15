@@ -179,6 +179,14 @@ sessionRuntime:
   # 只看 StorePath 非空即启用专用文件 store。
   defaultPersistence: memory
   storePath: ../data/runtime/session_runtime.sqlite
+  # 跨宿主共享的 session lease 存储：与 runtime state/events 分离，默认
+  # <sessions.dir>/runtime/session_leases.sqlite；两个宿主使用同一 sessions.dir
+  # 时即共享同一跨进程互斥域。显式覆盖：
+  # leaseStorePath: ../data/runtime/session_leases.sqlite
+  # eventPersist 默认启用批量落盘 + AsyncDispatch（与 aicli 共用
+  # runtimehost.ResolveEventPersistSettings）；需要逐条同步落盘时显式：
+  # eventPersist:
+  #   disable: true
   # P1.7 读写双池：默认启用——读走独立只读连接池（逐连接 query_only + 3s 读超时，
   # 只承载只读查询），写池保持单连接/ATTACH/锁序语义不变。下面即默认值，通常无需配置。
   # 回滚：disable: true 恢复单池行为（读回落写池，与拆分前逐字节等价）。

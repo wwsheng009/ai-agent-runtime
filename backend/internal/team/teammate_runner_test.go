@@ -676,7 +676,7 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	assert.Contains(t, client.prompt, "- Difficulty rationale: Requires shared context review.")
 	assert.Contains(t, client.prompt, "team_task_spec or team_task_context")
 	assert.Contains(t, client.prompt, "protocol error")
-	assert.Contains(t, client.prompt, "prefer direct read-only tools such as ls, glob, grep, and view")
+	assert.Contains(t, client.prompt, "prefer direct read-only tools such as list_dir, glob, grep, and view")
 	assert.Contains(t, client.prompt, "The grep tool runs one shared implementation on both the local and remote surfaces")
 	assert.Contains(t, client.prompt, "it prefers ripgrep (rg) when it is available and falls back to a built-in walker otherwise")
 	assert.Contains(t, client.prompt, "It accepts common rg-style options/mental-model mappings")

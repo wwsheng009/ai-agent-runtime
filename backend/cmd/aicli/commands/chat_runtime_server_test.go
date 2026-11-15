@@ -563,7 +563,7 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 				_ = manager.Update(r.Context(), loaded)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "count": len(events)})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/state":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": map[string]interface{}{"session_id": runtimeSession.ID, "status": "running"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
 			var body map[string]interface{}
@@ -777,7 +777,7 @@ func TestAICLIRuntimeServerChatExecutorAnswersRuntimeServerQuestion(t *testing.T
 				_ = manager.Update(r.Context(), loaded)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "count": len(events)})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/state":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": map[string]interface{}{"session_id": runtimeSession.ID, "status": "running"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
 			var body map[string]interface{}

@@ -621,6 +621,17 @@ func TestBuildLocalChatAgent_DefaultsCheckpointCaptureOff(t *testing.T) {
 	}
 }
 
+func TestBuildLocalChatAgent_DisableToolsPublishesMetadataOption(t *testing.T) {
+	host := &localChatRuntimeHost{Bootstrap: &runtimebootstrap.Manager{}}
+	apiAgent := buildLocalChatAgent(&ChatSession{DisableTools: true}, host, nil, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	if got := apiAgent.GetConfig().Options[runtimellm.MetadataKeyDisableTools]; got != true {
+		t.Fatalf("disable_tools metadata option = %#v, want true", got)
+	}
+}
+
 func TestBuildLocalChatAgent_BindsAutomaticMemoryStore(t *testing.T) {
 	store, err := memorystore.New(memorystore.Config{
 		Root: t.TempDir(), Mode: "on", InjectionMode: "hybrid",
@@ -4967,6 +4978,26 @@ func TestLocalChatRuntimeHostCloseWaitsForSubagentOperation(t *testing.T) {
 	case <-cleanupDone:
 	default:
 		t.Fatal("host cleanup did not run after Close")
+	}
+}
+
+func TestBuildLocalChatLeaseStoreUsesIndependentSharedPath(t *testing.T) {
+	sessionDir := t.TempDir()
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Sessions.Dir = sessionDir
+	session := &ChatSession{SessionDir: sessionDir}
+
+	store, closeStore := buildLocalChatLeaseStore(session, cfg)
+	t.Cleanup(closeStore)
+	if store == nil {
+		t.Fatal("lease store must not be nil")
+	}
+	pathProvider, ok := store.(interface{ Path() string })
+	if !ok {
+		t.Fatal("local lease store must be file-backed")
+	}
+	if got, want := filepath.Clean(pathProvider.Path()), filepath.Clean(filepath.Join(sessionDir, "runtime", "session_leases.sqlite")); got != want {
+		t.Fatalf("lease store path = %q, want %q", got, want)
 	}
 }
 

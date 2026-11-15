@@ -644,14 +644,36 @@ func (h *Handler) AcknowledgeSupervisionNotification(w http.ResponseWriter, r *h
 		return
 	}
 	var req struct {
-		ExpectedVersion int64  `json:"expected_version"`
-		Note            string `json:"note,omitempty"`
+		RootScopeID        string `json:"root_scope_id,omitempty"`
+		ExpectedVersion    int64  `json:"expected_version"`
+		HasExpectedVersion bool   `json:"has_expected_version,omitempty"`
+		Note               string `json:"note,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
 	notificationID := mux.Vars(r)["id"]
+	if rootScopeID := strings.TrimSpace(req.RootScopeID); rootScopeID != "" {
+		service := supervision.NewLocalControlService(h.getSupervisionStore(), h.getSupervisionActionService())
+		notification, err := service.Acknowledge(r.Context(), supervision.LifecycleDecisionRequest{
+			NotificationID:     notificationID,
+			Scopes:             []string{rootScopeID},
+			ExpectedVersion:    req.ExpectedVersion,
+			HasExpectedVersion: req.HasExpectedVersion,
+			Note:               strings.TrimSpace(req.Note),
+		})
+		if err != nil {
+			h.writeSupervisionActionError(w, err)
+			return
+		}
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"acknowledged":    true,
+			"notification_id": notificationID,
+			"notification":    notification,
+		})
+		return
+	}
 	ok, err := h.getSupervisionStore().AcknowledgeNotification(r.Context(), notificationID, time.Now().UTC(), req.ExpectedVersion)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -674,9 +696,11 @@ func (h *Handler) DeferSupervisionNotification(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var req struct {
-		Until           string `json:"until"`
-		Reason          string `json:"reason"`
-		ExpectedVersion int64  `json:"expected_version"`
+		RootScopeID        string `json:"root_scope_id,omitempty"`
+		Until              string `json:"until"`
+		Reason             string `json:"reason"`
+		ExpectedVersion    int64  `json:"expected_version"`
+		HasExpectedVersion bool   `json:"has_expected_version,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "failed to parse request body"))
@@ -688,6 +712,28 @@ func (h *Handler) DeferSupervisionNotification(w http.ResponseWriter, r *http.Re
 		return
 	}
 	notificationID := mux.Vars(r)["id"]
+	if rootScopeID := strings.TrimSpace(req.RootScopeID); rootScopeID != "" {
+		service := supervision.NewLocalControlService(h.getSupervisionStore(), h.getSupervisionActionService())
+		notification, err := service.Defer(r.Context(), supervision.LifecycleDecisionRequest{
+			NotificationID:     notificationID,
+			Scopes:             []string{rootScopeID},
+			ExpectedVersion:    req.ExpectedVersion,
+			HasExpectedVersion: req.HasExpectedVersion,
+			Reason:             strings.TrimSpace(req.Reason),
+			Until:              until,
+		})
+		if err != nil {
+			h.writeSupervisionActionError(w, err)
+			return
+		}
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"deferred":        true,
+			"until":           until.UTC(),
+			"notification_id": notificationID,
+			"notification":    notification,
+		})
+		return
+	}
 	ok, err := h.getSupervisionStore().DeferNotification(r.Context(), notificationID, until.UTC(), strings.TrimSpace(req.Reason), req.ExpectedVersion)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -701,6 +747,116 @@ func (h *Handler) DeferSupervisionNotification(w http.ResponseWriter, r *http.Re
 		"deferred":        true,
 		"until":           until.UTC(),
 		"notification_id": notificationID,
+	})
+}
+
+// ResolveSupervisionNotification closes a notification's resolution state
+// through the same scoped LocalControlService used by aicli and the model tool
+// surface. Body: root_scope_id, resolution, expected_version, has_expected_version.
+func (h *Handler) ResolveSupervisionNotification(w http.ResponseWriter, r *http.Request) {
+	if h.supervisionUnavailable(w) {
+		return
+	}
+	var req struct {
+		RootScopeID        string `json:"root_scope_id"`
+		Resolution         string `json:"resolution"`
+		ExpectedVersion    int64  `json:"expected_version"`
+		HasExpectedVersion bool   `json:"has_expected_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	rootScopeID := strings.TrimSpace(req.RootScopeID)
+	if rootScopeID == "" {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "root_scope_id is required"))
+		return
+	}
+	service := supervision.NewLocalControlService(h.getSupervisionStore(), h.getSupervisionActionService())
+	notification, err := service.Resolve(r.Context(), supervision.LifecycleDecisionRequest{
+		NotificationID:     mux.Vars(r)["id"],
+		Scopes:             []string{rootScopeID},
+		Resolution:         supervision.ResolutionState(strings.TrimSpace(req.Resolution)),
+		ExpectedVersion:    req.ExpectedVersion,
+		HasExpectedVersion: req.HasExpectedVersion,
+	})
+	if err != nil {
+		h.writeSupervisionActionError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"notification": notification,
+	})
+}
+
+// ControlSupervisionNotification executes the durable
+// request -> accept -> execute control flow for one notification subject.
+// Body: root_scope_id, action, reason, cascade_mode, expected_version,
+// has_expected_version, extend_by_ms, new_deadline, extend_which.
+func (h *Handler) ControlSupervisionNotification(w http.ResponseWriter, r *http.Request) {
+	if h.supervisionUnavailable(w) {
+		return
+	}
+	var req struct {
+		RootScopeID        string `json:"root_scope_id"`
+		Action             string `json:"action"`
+		Reason             string `json:"reason"`
+		CascadeMode        string `json:"cascade_mode"`
+		ExpectedVersion    int64  `json:"expected_version"`
+		HasExpectedVersion bool   `json:"has_expected_version"`
+		ExtendByMS         int64  `json:"extend_by_ms"`
+		NewDeadline        string `json:"new_deadline"`
+		ExtendWhich        string `json:"extend_which"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	rootScopeID := strings.TrimSpace(req.RootScopeID)
+	if rootScopeID == "" {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "root_scope_id is required"))
+		return
+	}
+	cascade := supervision.CascadeNone
+	switch strings.ToLower(strings.TrimSpace(req.CascadeMode)) {
+	case "", "target", "none":
+		cascade = supervision.CascadeNone
+	case "descendants":
+		cascade = supervision.CascadeDescendants
+	default:
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "cascade_mode must be target or descendants"))
+		return
+	}
+	var newDeadline *time.Time
+	if value := strings.TrimSpace(req.NewDeadline); value != "" {
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "new_deadline must be RFC3339"))
+			return
+		}
+		parsed = parsed.UTC()
+		newDeadline = &parsed
+	}
+	service := supervision.NewLocalControlService(h.getSupervisionStore(), h.getSupervisionActionService())
+	record, err := service.Control(r.Context(), supervision.ControlRequest{
+		NotificationID:     mux.Vars(r)["id"],
+		Scopes:             []string{rootScopeID},
+		RequestedByID:      rootScopeID,
+		Action:             supervision.ActionKind(strings.TrimSpace(req.Action)),
+		Reason:             strings.TrimSpace(req.Reason),
+		CascadeMode:        cascade,
+		ExpectedVersion:    req.ExpectedVersion,
+		HasExpectedVersion: req.HasExpectedVersion,
+		ExtendBy:           time.Duration(req.ExtendByMS) * time.Millisecond,
+		NewDeadline:        newDeadline,
+		ExtendWhich:        strings.TrimSpace(req.ExtendWhich),
+	})
+	if err != nil {
+		h.writeSupervisionActionError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"action": record,
 	})
 }
 

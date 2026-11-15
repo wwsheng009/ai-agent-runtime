@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 )
 
 // ============================================================================
@@ -49,6 +50,7 @@ type chatDebugDisplaySnapshot struct {
 	Session      *chatDebugDisplaySessionInfo    `json:"session,omitempty"`
 	Files        *chatDebugDisplayFilesInfo      `json:"files,omitempty"`
 	Runtime      *chatDebugDisplayRuntimeInfo    `json:"runtime,omitempty"`
+	Authority    *sessionruntime.AuthorityInfo   `json:"authority,omitempty"`
 	Routing      *chatDebugDisplayRoutingInfo    `json:"routing,omitempty"`
 	Components   *chatDebugDisplayComponentsInfo `json:"components,omitempty"`
 	Agents       *chatDebugDisplayAgentsInfo     `json:"agents,omitempty"`
@@ -605,6 +607,7 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 		snap.Files = buildChatDebugDisplayFilesInfo(session)
 	}
 	snap.Runtime = buildChatDebugDisplayRuntimeInfo(session)
+	snap.Authority = chatSessionAuthorityInfo(session)
 	snap.Routing = buildChatDebugDisplayRoutingInfo(session)
 	snap.Components = buildChatDebugDisplayComponentsInfo(session)
 	// agents 区块要读 agent registry（会话库单连接，且与后台 reconciler 争用）：

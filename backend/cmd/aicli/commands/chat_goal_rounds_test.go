@@ -27,7 +27,11 @@ func TestAdmitGoalRoundForSessionReachesConfiguredCap(t *testing.T) {
 
 	reached, err = admitGoalRoundForSession(session)
 	require.NoError(t, err)
-	require.True(t, reached, "second admitted round must reach the cap of 2")
+	require.False(t, reached, "second round is within the cap of 2")
+
+	reached, err = admitGoalRoundForSession(session)
+	require.NoError(t, err)
+	require.True(t, reached, "a third round past the cap of 2 must be refused")
 
 	stored, ok, err := currentSessionGoal(session)
 	require.NoError(t, err)

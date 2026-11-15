@@ -3,9 +3,12 @@ package chat
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 // TestHandleApproveToolForwardsDecisionOptions pins the §4.8 plumbing: the
@@ -57,4 +60,39 @@ func TestApproveToolDecisionNormalizedRememberScope(t *testing.T) {
 	for input, want := range cases {
 		assert.Equal(t, want, ApproveToolDecision{RememberScope: input}.NormalizedRememberScope(), "input=%q", input)
 	}
+}
+
+func TestRequestApprovalExpiryRecordsOutcome(t *testing.T) {
+	ctx := context.Background()
+	actor, _, _, _, _ := newTerminalApprovalTestActor(t, ctx, "")
+	const requestID = "approval-expiry-outcome"
+
+	_, err := actor.RequestApproval(ctx, runtimepolicy.ApprovalRequest{
+		ID:         requestID,
+		ToolCallID: "call-expiry-outcome",
+		ToolName:   "shell",
+		ExpiresAt:  time.Now().Add(20 * time.Millisecond),
+	})
+	require.Error(t, err)
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrApprovalExpired))
+
+	resolution, resumed := actor.ApprovalOutcome(requestID)
+	require.Equal(t, ApprovalResolutionExpired, resolution,
+		"the timeout path must record expired so a later decision cannot report a zero-value allow")
+	require.False(t, resumed)
+}
+
+func TestRetirePendingInteractionClosesParkedApproval(t *testing.T) {
+	ctx := context.Background()
+	actor, _, _, _, _ := newTerminalApprovalTestActor(t, ctx, "")
+
+	require.NoError(t, actor.RetirePendingInteraction(ctx, "agent_session_closed"))
+	resolution, resumed := actor.ApprovalOutcome("approval_late")
+	require.Equal(t, ApprovalResolutionRunTerminated, resolution)
+	require.False(t, resumed)
+
+	state := actor.StateForInspection()
+	require.NotNil(t, state)
+	require.False(t, state.HasPendingInteraction())
+	require.Equal(t, SessionStopped, state.Status)
 }

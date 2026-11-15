@@ -9,6 +9,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor"
 )
@@ -35,12 +36,9 @@ func newLocalTeamLifecycleService(host *localChatRuntimeHost) *localTeamLifecycl
 		return nil
 	}
 	service := &localTeamLifecycleService{Host: host}
-	supervisorConfig := teamsupervisor.Config{}
+	var supervisorConfig teamsupervisor.Config
 	if host.RuntimeConfig != nil {
-		config := host.RuntimeConfig.Team.Orchestrator
-		supervisorConfig.ScanInterval = config.ReconcileInterval
-		supervisorConfig.RestartBackoff = config.RestartBackoff
-		supervisorConfig.MaxRestartBackoff = config.MaxRestartBackoff
+		supervisorConfig = runtimehost.BuildTeamSupervisorConfig(host.RuntimeConfig)
 	}
 	service.supervisor = teamsupervisor.New(supervisorConfig, teamsupervisor.Hooks{
 		DesiredTeams: service.desiredTeamIDs,

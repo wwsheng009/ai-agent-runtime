@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
@@ -50,45 +49,7 @@ func renderAgentDefsList(session *ChatSession) string {
 	if err != nil {
 		return "Agent definitions: discovery failed: " + err.Error()
 	}
-	defs := catalog.List()
-	if len(defs) == 0 {
-		return "Agent definitions: none found."
-	}
-	bySource := make(map[agentdef.Source][]*agentdef.Definition, len(agentsSourceOrder))
-	for _, def := range defs {
-		bySource[def.Source] = append(bySource[def.Source], def)
-	}
-	lines := []string{fmt.Sprintf("Agent definitions (%d):", len(defs))}
-	for _, source := range agentsSourceOrder {
-		group := bySource[source]
-		if len(group) == 0 {
-			continue
-		}
-		sort.Slice(group, func(i, j int) bool { return group[i].Name < group[j].Name })
-		lines = append(lines, fmt.Sprintf("%s (%d)", strings.ToUpper(string(source)), len(group)))
-		for _, def := range group {
-			suffix := ""
-			readOnly := def.Sandbox == "read-only" || def.Sandbox == "readonly"
-			if binding, bindErr := agentdef.BuildBinding(def); bindErr == nil && binding != nil && binding.ReadOnly != nil {
-				readOnly = *binding.ReadOnly
-			}
-			if readOnly {
-				suffix += " [read-only]"
-			}
-			if overridden, ok := catalog.Overridden[def.Name]; ok {
-				suffix += " [overrides " + string(overridden) + "]"
-			}
-			desc := strings.TrimSpace(def.Description)
-			if desc == "" {
-				desc = "(no description)"
-			}
-			lines = append(lines, fmt.Sprintf("  %-20s %s%s", def.Name, desc, suffix))
-		}
-	}
-	if len(catalog.Overridden) > 0 {
-		lines = append(lines, "提示：同名覆盖静默生效；/agents defs lint 可查看全部告警。")
-	}
-	return strings.Join(lines, "\n")
+	return agentdef.RenderCatalog(catalog)
 }
 
 func renderAgentDefsShow(session *ChatSession, name string) string {
@@ -101,36 +62,7 @@ func renderAgentDefsShow(session *ChatSession, name string) string {
 		}
 		return "Agent definition not found: " + err.Error()
 	}
-	binding, bindingErr := agentdef.BuildBinding(def)
-	lines := []string{fmt.Sprintf("Agent definition: %s", def.Name)}
-	if def.Description != "" {
-		lines = append(lines, "  description: "+def.Description)
-	}
-	lines = append(lines,
-		"  source:      "+string(def.Source),
-		"  path:        "+def.SourcePath,
-		"  permission:  "+def.PermissionMode,
-		"  sandbox:     "+def.Sandbox,
-		"  tools:       "+describeAgentsTools(def),
-		"  skills:      "+strings.Join(def.Skills, ", "),
-		fmt.Sprintf("  maxTurns:    %d", def.MaxTurns),
-		"  reasoning:   "+def.ReasoningEffort,
-		fmt.Sprintf("  background:  %t", def.Background),
-		fmt.Sprintf("  showOutput:  %t", def.ShowOutput),
-	)
-	if bindingErr != nil {
-		lines = append(lines, "  binding:     error: "+bindingErr.Error())
-	} else if binding != nil {
-		readOnly := false
-		if binding.ReadOnly != nil {
-			readOnly = *binding.ReadOnly
-		}
-		lines = append(lines, fmt.Sprintf("  effective:   read_only=%t permission=%s", readOnly, binding.PermissionMode))
-	}
-	for _, issue := range agentdef.LintDefinition(def) {
-		lines = append(lines, fmt.Sprintf("  [%s] %s", issue.Severity, issue.Message))
-	}
-	return strings.Join(lines, "\n")
+	return agentdef.RenderDefinition(def)
 }
 
 func renderAgentDefsLint(session *ChatSession) string {
@@ -138,22 +70,5 @@ func renderAgentDefsLint(session *ChatSession) string {
 	if err != nil {
 		return "Agent definitions lint: discovery failed: " + err.Error()
 	}
-	issues := agentdef.LintCatalog(catalog)
-	if len(issues) == 0 {
-		return "Agent definitions lint: OK (0 issues)"
-	}
-	lines := []string{fmt.Sprintf("Agent definitions lint: %d issue(s)", len(issues))}
-	warnings := 0
-	for _, issue := range issues {
-		if issue.Severity == "warning" {
-			warnings++
-		}
-		label := issue.Name
-		if issue.Path != "" {
-			label = issue.Path
-		}
-		lines = append(lines, fmt.Sprintf("[%s] %s: %s", issue.Severity, label, issue.Message))
-	}
-	lines = append(lines, fmt.Sprintf("%d warning(s), %d info", warnings, len(issues)-warnings))
-	return strings.Join(lines, "\n")
+	return agentdef.RenderLint(catalog)
 }

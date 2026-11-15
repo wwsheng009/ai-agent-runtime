@@ -1,8 +1,11 @@
 package runtimehost
 
 import (
+	"strings"
+
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -15,6 +18,11 @@ import (
 type SessionContext struct {
 	// WorkspacePath 是会话绑定的工作目录（worktree 覆盖优先）。
 	WorkspacePath string
+	// AllowedRoots / ReadOnlyRoots are the durable external-directory grants and
+	// worktree-main-repo read exemptions. They are projected onto agent options
+	// at assembly time; SessionActor admission remains the live authority.
+	AllowedRoots  []string
+	ReadOnlyRoots []string
 	// ProfileRef / AgentID 是会话 profile 引用，供调用方解析 profile 状态。
 	ProfileRef string
 	AgentID    string
@@ -38,6 +46,28 @@ type SessionContext struct {
 	DisableTools    bool
 	// ObservationTaskID 是观察任务作用域（团队任务激活时存在；空串 = 无任务语义）。
 	ObservationTaskID string
+}
+
+// IsBaseSession is the shared base/child classifier.
+//
+// It is deliberately the union of the two historical rules:
+//   - any child marker makes the session a child (runtime-server);
+//   - when a base session ID is known, a different ID makes it a child (aicli).
+//
+// Both rules are conservative: a stale child marker on a base row is treated
+// as a child on both hosts, and a child session cannot accidentally receive
+// main-agent routing/goal guidance just because one host knows its base ID.
+func IsBaseSession(sessionID, baseSessionID string, sessionCtx SessionContext) bool {
+	if strings.TrimSpace(sessionCtx.ChildAgentType) != "" ||
+		sessionCtx.ChildDepth > 0 ||
+		sessionCtx.ChildReadOnly {
+		return false
+	}
+	if baseSessionID != "" &&
+		!strings.EqualFold(strings.TrimSpace(sessionID), strings.TrimSpace(baseSessionID)) {
+		return false
+	}
+	return true
 }
 
 // ExtractSessionContext 从已加载的会话派生执行上下文。
@@ -71,6 +101,14 @@ func ExtractSessionContext(session *chat.Session) SessionContext {
 	}
 	if worktreePath := getString(toolbroker.AgentSessionContextWorktreePath); worktreePath != "" {
 		out.WorkspacePath = worktreePath
+	}
+	if roots := chat.SessionAllowedRoots(session); len(roots) > 0 {
+		out.AllowedRoots = roots
+	}
+	if getString(toolbroker.AgentSessionContextIsolation) == worktree.ModeWorktree {
+		if repoRoot := getString(toolbroker.AgentSessionContextWorktreeRepoRoot); repoRoot != "" {
+			out.ReadOnlyRoots = []string{repoRoot}
+		}
 	}
 	if out.RequestedModel == "" {
 		out.RequestedModel = getString(sessionmeta.Model)

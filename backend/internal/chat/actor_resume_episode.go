@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
@@ -32,6 +33,9 @@ import (
 func (a *SessionActor) nextTurnID(ctx context.Context) string {
 	if suspended := a.suspendedTurnID(ctx); suspended != "" {
 		return suspended
+	}
+	if requested := strings.TrimSpace(agent.TurnIDFromContext(ctx)); requested != "" {
+		return requested
 	}
 	return "turn_" + uuid.NewString()
 }

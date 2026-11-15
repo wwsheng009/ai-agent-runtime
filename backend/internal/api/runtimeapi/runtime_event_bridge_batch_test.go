@@ -25,7 +25,7 @@ func newBatchBridgeTestHandler(t *testing.T, enabled bool) (*Handler, *chat.SQLi
 	handler := &Handler{
 		runtimeConfig: &runtimecfg.RuntimeConfig{SessionRuntime: runtimecfg.SessionRuntimeConfig{
 			EventPersist: runtimecfg.EventPersistConfig{
-				BatchingEnabled: enabled,
+				Disable:         !enabled,
 				BatchSize:       2,
 				FlushInterval:   20 * time.Millisecond,
 				ShutdownTimeout: time.Second,
@@ -98,7 +98,7 @@ func TestRuntimeHealthIncludesPersistStatsWhenBatchingEnabled(t *testing.T) {
 	require.False(t, ok, "关闭后 persist 段必须消失")
 }
 
-func TestRuntimeHealthOmitsPersistStatsWhenBatchingDisabled(t *testing.T) {
+func TestRuntimeHealthOmitsPersistStatsWhenEventPersistDisabled(t *testing.T) {
 	handler, _ := newBatchBridgeTestHandler(t, false)
 	snapshot := handler.executionDiagnosticsSnapshot(context.Background())
 	_, ok := snapshot["persist"]

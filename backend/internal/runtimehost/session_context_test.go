@@ -1,10 +1,13 @@
 package runtimehost
 
 import (
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -15,13 +18,15 @@ func sessionWithContext(ctx map[string]interface{}) *chat.Session {
 
 // TestExtractSessionContextNilSession：nil 会话返回零值（不 panic）。
 func TestExtractSessionContextNilSession(t *testing.T) {
-	if got := ExtractSessionContext(nil); got != (SessionContext{}) {
+	if got := ExtractSessionContext(nil); !reflect.DeepEqual(got, SessionContext{}) {
 		t.Fatalf("nil session must yield zero value, got %+v", got)
 	}
 }
 
 // TestExtractSessionContextFull：逐字段核验抽取语义（与抽取前内联块一致）。
 func TestExtractSessionContextFull(t *testing.T) {
+	allowedRoot := t.TempDir()
+	repoRoot := t.TempDir()
 	ctx := map[string]interface{}{
 		sessionmeta.LegacyAPIProfileReference:               "/profiles/coding",
 		sessionmeta.ProfileAgent:                            "agent-1",
@@ -38,6 +43,9 @@ func TestExtractSessionContextFull(t *testing.T) {
 		toolbroker.AgentSessionContextShellDisabled:         true,
 		toolbroker.AgentSessionContextDepth:                 2,
 		sessionmeta.ActiveTeamTaskID:                        "task-9",
+		chat.AllowedRootsContextKey:                         []string{allowedRoot, " ", allowedRoot},
+		toolbroker.AgentSessionContextIsolation:             worktree.ModeWorktree,
+		toolbroker.AgentSessionContextWorktreeRepoRoot:      repoRoot,
 	}
 	got := ExtractSessionContext(sessionWithContext(ctx))
 	want := SessionContext{
@@ -56,8 +64,10 @@ func TestExtractSessionContextFull(t *testing.T) {
 		StreamRequested:            true,
 		DisableTools:               true,
 		ObservationTaskID:          "task-9",
+		AllowedRoots:               []string{filepath.Clean(allowedRoot)},
+		ReadOnlyRoots:              []string{filepath.Clean(repoRoot)},
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ExtractSessionContext mismatch:\n got=%+v\nwant=%+v", got, want)
 	}
 }
@@ -97,7 +107,33 @@ func TestExtractSessionContextAbsentFlagsStayZero(t *testing.T) {
 	if got.StreamRequested || got.DisableTools || got.ChildReadOnly || got.ChildDepth != 0 {
 		t.Fatalf("absent flags must stay zero, got %+v", got)
 	}
-	if got != (SessionContext{}) {
+	if !reflect.DeepEqual(got, SessionContext{}) {
 		t.Fatalf("empty metadata must yield zero value, got %+v", got)
+	}
+}
+
+func TestIsBaseSessionUsesConservativeUnion(t *testing.T) {
+	cases := []struct {
+		name      string
+		sessionID string
+		baseID    string
+		ctx       SessionContext
+		wantBase  bool
+	}{
+		{name: "unknown host, clean", wantBase: true},
+		{name: "base id match", sessionID: "s1", baseID: "s1", wantBase: true},
+		{name: "child id", sessionID: "child", baseID: "s1", wantBase: false},
+		{name: "base id case insensitive", sessionID: "S1", baseID: "s1", wantBase: true},
+		{name: "base id with agent marker", sessionID: "s1", baseID: "s1", ctx: SessionContext{ChildAgentType: "explore"}, wantBase: false},
+		{name: "base id with depth", sessionID: "s1", baseID: "s1", ctx: SessionContext{ChildDepth: 1}, wantBase: false},
+		{name: "base id read only", sessionID: "s1", baseID: "s1", ctx: SessionContext{ChildReadOnly: true}, wantBase: false},
+		{name: "unknown host child marker", ctx: SessionContext{ChildAgentType: "worker"}, wantBase: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsBaseSession(tc.sessionID, tc.baseID, tc.ctx); got != tc.wantBase {
+				t.Fatalf("IsBaseSession(%q, %q, %+v) = %v, want %v", tc.sessionID, tc.baseID, tc.ctx, got, tc.wantBase)
+			}
+		})
 	}
 }

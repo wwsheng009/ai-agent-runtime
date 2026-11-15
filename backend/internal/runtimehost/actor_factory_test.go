@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,46 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
+
+type failingRenewLeaseStore struct {
+	mu    sync.Mutex
+	lease *chat.SessionLease
+}
+
+func (s *failingRenewLeaseStore) AcquireLease(_ context.Context, req chat.LeaseRequest) (*chat.SessionLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	ttl := req.TTL
+	if ttl <= 0 {
+		ttl = 30 * time.Millisecond
+	}
+	s.lease = &chat.SessionLease{
+		SessionID: req.SessionID, OwnerID: req.OwnerID, OwnerKind: req.OwnerKind,
+		PID: req.PID, Hostname: req.Hostname, AcquiredAt: now,
+		HeartbeatAt: now, ExpiresAt: now.Add(ttl),
+	}
+	clone := *s.lease
+	return &clone, nil
+}
+
+func (s *failingRenewLeaseStore) RenewLease(context.Context, string, string, time.Duration) error {
+	return errors.New("renew failed")
+}
+
+func (s *failingRenewLeaseStore) ReleaseLease(context.Context, string, string) error {
+	return nil
+}
+
+func (s *failingRenewLeaseStore) GetLease(context.Context, string) (*chat.SessionLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lease == nil {
+		return nil, nil
+	}
+	clone := *s.lease
+	return &clone, nil
+}
 
 // fakeDeps 构造一套纯内存的执行核依赖（不依赖 runtimeapi）。
 func fakeDeps(t *testing.T) Deps {
@@ -118,6 +159,34 @@ func TestActorScopedKeepsLeaseAfterConstruction(t *testing.T) {
 	}
 	if lease == nil {
 		t.Fatal("actor-scoped must keep the session lease after construction")
+	}
+}
+
+func TestActorScopedLeaseLossFencesActor(t *testing.T) {
+	leaseStore := &failingRenewLeaseStore{}
+	deps := fakeDepsWithLeaseStore(t, leaseStore)
+	deps.LeaseMode = LeaseModeActorScoped
+	acquire := func(ctx context.Context, sessionID string) (*chat.SessionLeaseHandle, error) {
+		return chat.AcquireSessionLease(ctx, leaseStore, chat.LeaseRequest{
+			SessionID: sessionID,
+			OwnerID:   "runtimehost-lease-lost",
+			OwnerKind: "test",
+			TTL:       30 * time.Millisecond,
+		})
+	}
+	deps.AcquireSessionLeaseNoWait = acquire
+	deps.AcquireSessionLease = acquire
+	actor, err := BuildSessionActor("session-lease-lost", deps)
+	if err != nil {
+		t.Fatalf("BuildSessionActor: %v", err)
+	}
+	t.Cleanup(actor.Stop)
+	deadline := time.Now().Add(2 * time.Second)
+	for !actor.LeaseLost() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !actor.LeaseLost() {
+		t.Fatal("lost lease must fence the actor")
 	}
 }
 

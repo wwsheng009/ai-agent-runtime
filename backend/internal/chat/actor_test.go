@@ -331,6 +331,51 @@ func TestCloneLoopConfigForRunPreservesTurnBudgetTokens(t *testing.T) {
 	require.Nil(t, cloneLoopConfigForRun(nil, nil, nil))
 }
 
+func TestCloneLoopConfigForRunAppliesPerRunBudgetOverride(t *testing.T) {
+	base := &agent.LoopReActConfig{TurnBudgetTokens: 42000}
+	got := cloneLoopConfigForRun(base, nil, &team.RunMeta{BudgetTokens: 1200})
+	require.Equal(t, 1200, got.TurnBudgetTokens)
+
+	keep := cloneLoopConfigForRun(base, nil, &team.RunMeta{})
+	require.Equal(t, 42000, keep.TurnBudgetTokens)
+
+	fromMeta := cloneLoopConfigForRun(nil, nil, &team.RunMeta{BudgetTokens: 900})
+	require.NotNil(t, fromMeta)
+	require.Equal(t, 900, fromMeta.TurnBudgetTokens)
+}
+
+func TestRunRouteOverrideCloneCarriesSkillRouteGate(t *testing.T) {
+	original := &RunRouteOverride{DisableSkillRoute: true, Thinking: &types.ThinkingConfig{}}
+	clone := original.Clone()
+	require.NotNil(t, clone)
+	require.True(t, clone.DisableSkillRoute)
+	require.NotSame(t, original.Thinking, clone.Thinking)
+}
+
+func TestCloneLoopConfigWithRouteOverrideAppliesMaxStepsAndThinking(t *testing.T) {
+	budget := 2048
+	thinking := &types.ThinkingConfig{Type: "enabled", BudgetTokens: &budget}
+	base := &agent.LoopReActConfig{MaxSteps: 4}
+
+	got := cloneLoopConfigWithRouteOverride(base, &RunRouteOverride{
+		MaxSteps: 12,
+		Thinking: thinking,
+	})
+
+	require.NotNil(t, got)
+	require.Equal(t, 12, got.MaxSteps)
+	require.NotNil(t, got.Thinking)
+	require.Equal(t, "enabled", got.Thinking.Type)
+	require.NotSame(t, thinking, got.Thinking)
+	require.NotSame(t, thinking.BudgetTokens, got.Thinking.BudgetTokens)
+	require.Equal(t, 2048, *got.Thinking.BudgetTokens)
+
+	// Zero means "no per-run override", not an explicit zero-step loop.
+	kept := cloneLoopConfigWithRouteOverride(base, &RunRouteOverride{})
+	require.Equal(t, 4, kept.MaxSteps)
+	require.Nil(t, kept.Thinking)
+}
+
 func TestAppendSessionActorToolErrorPayloadDistinguishesRecoveredErrors(t *testing.T) {
 	payload := map[string]interface{}{}
 	appendSessionActorToolErrorPayload(payload, &agent.Result{
@@ -874,6 +919,69 @@ func TestSessionActorRequestApprovalExpiresWithStructuredError(t *testing.T) {
 	last := events[len(events)-1]
 	require.Equal(t, EventApprovalResolved, last.Type)
 	require.Equal(t, string(runtimeerrors.ErrApprovalExpired), last.Payload["error_code"])
+}
+
+func TestSessionActorLeaseLostFencesDurableWrites(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "lease-lost-user")
+	require.NoError(t, err)
+
+	apiAgent := agent.NewAgent(&agent.Config{Name: "lease-lost-agent", Model: "test-model"}, nil)
+	runtimeStore := NewInMemoryRuntimeStore(16)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	actor.MarkLeaseLost(errors.New("renew failed"))
+	require.True(t, actor.LeaseLost())
+	require.ErrorIs(t, actor.updateState(ctx, func(*RuntimeState) error { return nil }), ErrSessionLeaseLost)
+	require.ErrorIs(t, actor.persistSession(ctx, session), ErrSessionLeaseLost)
+	actor.publish(runtimeevents.Event{Type: EventSessionEnd})
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	require.Empty(t, events, "lease-lost publish must not append durable events")
+
+	actor.ClearLeaseLost()
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionIdle
+		return nil
+	}))
+}
+
+func TestSessionActorApplyRunOverridesRestoresContextAndToolPolicy(t *testing.T) {
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:    "run-override-agent",
+		Options: map[string]interface{}{"team_id": "old-team"},
+	}, nil)
+	previousPolicy := agent.NewToolExecutionPolicy([]string{"read_file"}, false)
+	apiAgent.SetToolExecutionPolicy(previousPolicy)
+	actor := &SessionActor{agent: apiAgent}
+
+	restore := actor.applyRunOverrides(&RunRouteOverride{
+		TeamID:       "team-run",
+		TaskID:       "task-run",
+		DisableTools: true,
+	})
+	cfg := apiAgent.GetConfig()
+	assert.Equal(t, "team-run", cfg.Options["team_id"])
+	assert.Equal(t, "task-run", cfg.Options["task_id"])
+	assert.Equal(t, true, cfg.Options[llm.MetadataKeyDisableTools])
+	assert.False(t, apiAgent.GetToolExecutionPolicy().AllowsTool("read_file"))
+
+	restore()
+	assert.Equal(t, "old-team", cfg.Options["team_id"])
+	_, hasTask := cfg.Options["task_id"]
+	assert.False(t, hasTask)
+	_, hasDisable := cfg.Options[llm.MetadataKeyDisableTools]
+	assert.False(t, hasDisable)
+	assert.Same(t, previousPolicy, apiAgent.GetToolExecutionPolicy())
 }
 
 func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
@@ -1553,7 +1661,7 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	})
 	require.NoError(t, err)
 
-	result, err := actor.SubmitPrompt(ctx, "Hello there", nil)
+	result, err := actor.SubmitPrompt(ctx, "Hello there", &team.RunMeta{Source: "driver:goal"})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotEmpty(t, strings.TrimSpace(result.Output))
@@ -1608,6 +1716,10 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
 	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
 	require.Equal(t, result.Usage.TotalTokens, sessionEndPayload["usage_total_tokens"])
+	require.Equal(t, "driver:goal", sessionEndPayload["run_source"],
+		"session_end must carry the run source so host drivers can scope tolerance")
+	require.Equal(t, true, sessionEndPayload["output_present"],
+		"session_end must distinguish a real text answer from an empty continuation")
 
 	// Provider usage must be persisted as the observed context measurement so
 	// the next pre-turn auto-compact trigger uses real prompt_tokens instead of
@@ -5625,4 +5737,34 @@ func TestSessionActor_ForeignRunTokenIsDetached(t *testing.T) {
 	if got := (*SessionActor)(nil).detachForeignSessionRunControl(plain); got != plain {
 		t.Fatal("a nil actor must not rewrite the context")
 	}
+}
+
+func TestInterruptPublishesPendingResolution(t *testing.T) {
+	bus := runtimeevents.NewBus()
+	var approvalPayload map[string]interface{}
+	var questionPayload map[string]interface{}
+	bus.Subscribe(EventApprovalResolved, func(event runtimeevents.Event) {
+		approvalPayload = event.Payload
+	})
+	bus.Subscribe(EventQuestionAnswered, func(event runtimeevents.Event) {
+		questionPayload = event.Payload
+	})
+
+	actor := &SessionActor{id: "session-interrupt", eventBus: bus}
+	actor.publishInterruptedPendingResolution(&RuntimeState{
+		PendingApproval: &ApprovalRequest{ID: "approval-interrupt", ToolCallID: "call-interrupt"},
+		PendingQuestion: &UserQuestionRequest{ID: "question-interrupt"},
+	})
+
+	require.Equal(t, "approval-interrupt", approvalPayload["request_id"])
+	require.Equal(t, false, approvalPayload["allowed"])
+	require.Equal(t, ApprovalResolutionRunTerminated, approvalPayload["resolution"])
+	require.Equal(t, false, approvalPayload["resumed"])
+	require.Equal(t, "user_interrupt", approvalPayload["run_terminal_reason"])
+	require.Equal(t, "question-interrupt", questionPayload["question_id"])
+	require.Equal(t, "interrupted", questionPayload["resolution"])
+
+	resolution, resumed := actor.ApprovalOutcome("approval-interrupt")
+	require.Equal(t, ApprovalResolutionRunTerminated, resolution)
+	require.False(t, resumed)
 }

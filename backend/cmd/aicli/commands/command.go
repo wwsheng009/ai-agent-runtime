@@ -146,6 +146,16 @@ func lockChatCommandPhaseA(session *ChatSession) func() {
 func handleCommand(session *ChatSession, command string, noInteractive bool) bool {
 	// 首先检查 /shell 和 /cmd 命令（带参数）
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	if chatSessionUsesRuntimeServer(session) {
+		if notice, blocked := chatRuntimeServerUnsupportedCommand(cmdLower); blocked {
+			printChatCommandOutput(session, "错误: "+notice)
+			return false
+		}
+		if result, handled := tryExecuteRuntimeServerControlCommand(session, command); handled {
+			_ = renderChatCommandResult(session, result, noInteractive)
+			return false
+		}
+	}
 	if commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd") {
 		argument := extractCommandArgument(command)
 		if strings.TrimSpace(argument) == "" {

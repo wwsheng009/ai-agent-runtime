@@ -186,3 +186,22 @@ func TestRuntimeStateSummaryBusyCoversParkedTurn(t *testing.T) {
 		t.Fatalf("restart read-back must keep the parked turn resumable: %+v", summary)
 	}
 }
+
+func TestRuntimeStateHasPendingInteraction(t *testing.T) {
+	var nilState *RuntimeState
+	if nilState.HasPendingInteraction() {
+		t.Fatal("nil runtime state must not report a pending interaction")
+	}
+	if (&RuntimeState{}).HasPendingInteraction() {
+		t.Fatal("idle runtime state must not report a pending interaction")
+	}
+	for name, state := range map[string]*RuntimeState{
+		"approval": {PendingApproval: &ApprovalRequest{ID: "approval-1"}},
+		"tool":     {PendingTool: &PendingToolInvocation{ToolCallID: "call-1"}},
+		"question": {PendingQuestion: &UserQuestionRequest{ID: "question-1"}},
+	} {
+		if !state.HasPendingInteraction() {
+			t.Fatalf("%s state must report a pending interaction", name)
+		}
+	}
+}

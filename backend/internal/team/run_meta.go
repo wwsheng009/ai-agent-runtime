@@ -31,8 +31,11 @@ type RunMeta struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// CompletionRequirement is none|complete_task for worker harness loops.
 	// Team task runs default to complete_task when unset at the runner boundary.
-	CompletionRequirement string       `json:"completion_requirement,omitempty"`
-	Team                  *TeamRunMeta `json:"team,omitempty"`
+	CompletionRequirement string `json:"completion_requirement,omitempty"`
+	// BudgetTokens is the per-run token budget. It overrides the durable session
+	// loop default for this run only; zero keeps the session/loop default.
+	BudgetTokens int          `json:"budget_tokens,omitempty"`
+	Team         *TeamRunMeta `json:"team,omitempty"`
 }
 
 // Clone returns a defensive copy of TeamRunMeta.
@@ -51,8 +54,10 @@ func (m *RunMeta) Clone() *RunMeta {
 		return nil
 	}
 	return &RunMeta{
+		Source:                m.Source,
 		PermissionMode:        m.PermissionMode,
 		CompletionRequirement: m.CompletionRequirement,
+		BudgetTokens:          m.BudgetTokens,
 		Team:                  m.Team.Clone(),
 	}
 }
