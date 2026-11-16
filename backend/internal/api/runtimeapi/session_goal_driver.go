@@ -376,11 +376,23 @@ type goalDriverTurnOutcome struct {
 	// Steps 用于空转近似（<=1 且 Output 为空视为无进展，见文件头登记）。
 	Steps       int
 	UsageTokens int
+	// ResetContinuations marks an explicit user kick (set/resume/budget) that
+	// starts a fresh maxConsecutiveContinuations budget. It is applied after
+	// beginDecision so a concurrent terminal decision's budget is not changed
+	// underneath it.
+	ResetContinuations bool
 }
 
 // goalDriverNoteCLI 是命令通道入口的 CLI 在场上报（CLI 远程模式每轮必经）。
 // 无论驱动器开关状态都执行（开关关闭时只是无害的簿记）。
-func (h *Handler) goalDriverNoteCLI(sessionID string) {
+//
+// A CLI-driven hidden continuation is also an explicit re-arm signal: the CLI
+// goal loop only submits it while its local goal gate is armed. A user
+// "continue" message is the other shared re-arm signal. Both must clear a
+// server-side disarm that was set by an earlier server-owned user_interrupt;
+// otherwise a CLI re-arm stays invisible here and the server driver remains
+// frozen after the CLI leaves (R6c).
+func (h *Handler) goalDriverNoteCLI(sessionID, message string, drivingContinuation bool) {
 	if h == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
@@ -388,6 +400,13 @@ func (h *Handler) goalDriverNoteCLI(sessionID string) {
 	state.markCLISeen(sessionID, time.Now())
 	state.resetStrikes(sessionID)
 	state.resetContinuations(sessionID)
+	if drivingContinuation {
+		h.goalDriverRearm(sessionID, "cli_continuation")
+		return
+	}
+	if goal.IsContinueIntentMessage(message) {
+		h.goalDriverMaybeRearmForUserIntentByID(sessionID, message)
+	}
 }
 
 // goalDriverRearm clears the user-intent gate and starts a fresh continuation
@@ -417,6 +436,24 @@ func (h *Handler) goalDriverMaybeRearmForUserIntent(session *chat.Session, messa
 		return
 	}
 	h.goalDriverRearm(session.ID, "user_continue_intent")
+}
+
+// goalDriverMaybeRearmForUserIntentByID is the command-channel counterpart of
+// goalDriverMaybeRearmForUserIntent: the CLI has already supplied the message
+// but the handler has not loaded the session yet.
+func (h *Handler) goalDriverMaybeRearmForUserIntentByID(sessionID, message string) {
+	if h == nil || strings.TrimSpace(sessionID) == "" || !goal.IsContinueIntentMessage(message) {
+		return
+	}
+	session, ok, err := h.goalDriverLoadSession(context.Background(), sessionID)
+	if err != nil || !ok || session == nil {
+		return
+	}
+	current, hasGoal, err := goal.NewMetadataStore().Get(session)
+	if err != nil || !hasGoal || current == nil || current.Status != goal.StatusActive {
+		return
+	}
+	h.goalDriverRearm(sessionID, "cli_user_continue_intent")
 }
 
 // subscribeGoalDriver 把 actor 终态事件绑定到驱动器（幂等，Once 内调用）。
@@ -481,21 +518,17 @@ func (h *Handler) goalDriverKick(sessionID string) {
 	if !h.goalDriverBaseSession(sessionID) {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if !state.beginDecision(sessionID) {
-			return
-		}
-		defer state.endDecision(sessionID)
-		state.resetContinuations(sessionID)
-		if h.goalDriverHasPendingApproval(ctx, sessionID) {
-			return
-		}
-		if err := h.goalDriverSubmitContinuation(ctx, sessionID); err != nil {
-			logger.Warnf("goal driver: kick continuation %s: %s", sessionID, err)
-		}
-	}()
+	// A kick is a request to evaluate, not an unconditional submit. The
+	// delayed CLI-takeover callback can fire long after the mutation that armed
+	// it; the goal may have been paused/completed/budget-limited or hit a
+	// continuation/round limit in the meantime. Going through the same decision
+	// path as run terminals prevents a stale kick from starting a ghost
+	// continuation turn.
+	go h.sessionGoalDriverDecide(goalDriverTurnOutcome{
+		SessionID:          sessionID,
+		Success:            true,
+		ResetContinuations: true,
+	})
 }
 
 // sessionGoalDriverEvaluate 是驱动器的单一评估路径：门控 + strike 记账 + 决策。
@@ -542,8 +575,12 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 			state.resetContinuations(sessionID)
 		}
 	case outcome.CancelSource != "":
-		// 用户中断/停止：不记账，等用户输入驱动下一轮。
-		return
+		// user_interrupt was handled above and returned. Any other cancel
+		// source (actor stop, runtime refresh, execution context) is a system
+		// cancellation: it must not count as a goal failure, but it also must
+		// not strand an armed goal. Fall through to the decision path, which
+		// matches the CLI driver's non-user terminal handling (D1-a).
+		logger.Debugf("goal driver: re-evaluate after system cancellation session=%s source=%s", sessionID, strings.TrimSpace(outcome.CancelSource))
 	case !outcome.Success:
 		if strikes := state.noteError(sessionID); strikes >= goal.ContinuationErrorStrikeLimit {
 			go func(strikes int) {
@@ -595,14 +632,32 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	defer cancel()
 	sessionID := outcome.SessionID
 	state := h.getGoalDriverState()
+	if !h.goalDriverEnabled() {
+		return
+	}
+	if reason := state.disarmedReason(sessionID); reason != "" {
+		logger.Debugf("goal driver: defer decision session=%s reason=disarmed:%s", sessionID, reason)
+		return
+	}
 	if !state.beginDecision(sessionID) {
 		return
 	}
 	defer state.endDecision(sessionID)
+	if outcome.ResetContinuations {
+		state.resetContinuations(sessionID)
+	}
 
 	// 1) 记账：本次 turn usage 入 goal；超预算置 budget_limited 并收尾。
 	if outcome.UsageTokens > 0 {
 		if h.goalDriverAccountUsage(ctx, sessionID, outcome.UsageTokens) {
+			// A parked approval/question owns the session. Do not start a
+			// budget wrap-up turn into it: mark the budget only after the
+			// user's decision releases the run, matching the CLI decision
+			// order (pending interaction precedes budget wrap-up).
+			if h.goalDriverHasPendingApproval(ctx, sessionID) {
+				logger.Debugf("goal driver: defer budget wrap-up session=%s reason=pending_interaction", sessionID)
+				return
+			}
 			h.goalDriverBudgetWrapUp(ctx, sessionID)
 			state.resetStrikes(sessionID)
 			return
@@ -711,11 +766,6 @@ func (h *Handler) goalDriverIterationEscalationAvailable() bool {
 		return false
 	}
 	return (&sessionAgentController{handler: h}).agentsConfig().IterateGoalEnabled
-}
-
-// goalDriverSubmitContinuation 通过 hub 取（或建）actor 并异步提交默认续跑轮。
-func (h *Handler) goalDriverSubmitContinuation(ctx context.Context, sessionID string) error {
-	return h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, goal.ContinuationPrompt)
 }
 
 // goalDriverSubmitContinuationWithPrompt 通过 hub 取（或建）actor 并异步提交

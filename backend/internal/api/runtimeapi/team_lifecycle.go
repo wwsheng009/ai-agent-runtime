@@ -194,6 +194,13 @@ func (s *handlerTeamLifecycleService) ReplayStoredTerminalEvents(teamID string) 
 // after a team reaches terminal state, stop its non-lead child sessions. The
 // close path is idempotent and best-effort; a team whose status is still active
 // is never torn down.
+//
+// Do not call ReconcileTerminalTeamState here. team.completed is emitted by
+// finalizeTerminalTeamState before it generates and persists the terminal
+// summary; re-entering reconciliation from the event bus lets a second caller
+// win the summary lock and overwrite the original caller's structured summary
+// metadata (trace/error type/fallback details). The terminal event is
+// authoritative: wait for the sessions to settle and close the teammates.
 func (s *handlerTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
 	if s == nil || s.handler == nil {
 		return
@@ -220,26 +227,9 @@ func (s *handlerTeamLifecycleService) closeTerminalTeammatesAsync(teamID string)
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), teamTerminalCleanupTimeout)
 		defer cancel()
-		_, _ = team.ReconcileTerminalTeamState(ctx, s.terminalTeamServices(), teamID)
 		s.waitForTeamSessionsSettled(ctx, teamID)
 		_ = s.closeTerminalTeammates(context.Background(), teamID)
 	}()
-}
-
-func (s *handlerTeamLifecycleService) terminalTeamServices() team.TerminalTeamServices {
-	services := team.TerminalTeamServices{
-		IgnoreBusyTeammates: true,
-	}
-	if s == nil || s.handler == nil {
-		return services
-	}
-	services.Store = s.handler.getTeamStore()
-	if orchestrator := s.handler.getTeamOrchestrator(); orchestrator != nil {
-		services.Planner = orchestrator.LeadPlanner
-		services.Mailbox = orchestrator.Mailbox
-		services.Events = orchestrator.Events
-	}
-	return services
 }
 
 func (s *handlerTeamLifecycleService) waitForTeamSessionsSettled(ctx context.Context, teamID string) {

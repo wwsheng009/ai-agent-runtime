@@ -449,3 +449,15 @@ DriverView {
 - **F2 既有 G3 缺陷（真机首次暴露）**：goal 终态后，reconcile 的粘性 `completed` 使每轮收尾都重新 Store wrap-up prompt → **每次新的前台消息后都会补跑一个隐藏收尾轮**（实测 probe 两次均复现：多一个 4s 收尾轮）。修复：按“`goal_id|status|updated_at`”做终态去重（同一终态只触发一次；resume 后重新终态 `updated_at` 前移可再次触发）。新增回归用例 `TestRequestGoalTerminalWrapUpDeduplicatesSameTerminalState`。
 
 > F2 的真机复验需下一次构建（当前运行中的二进制不含该修复）；单测已覆盖去重与重新终态两条路径。
+
+### 9.6 提交后复审补充（2026-11-16）
+
+§12.14 的跨宿主复审又关闭了五个仍可复现的 Goal 驱动差异，它们属于本节 Phase 1/3 的行为收口，不改变“Phase 2 决策核心仍待抽取”的结论：
+
+- CLI 隐藏续跑 / 显式继续消息现在会把 re-arm 传播到 server，清除 server 侧更早的 `user_interrupt` disarm；CLI 离场后 server 不再永久冻结。
+- 非 `user_interrupt` 的系统取消（如 `execution_context`）不再直接终止评估，而是回到 decision path，避免 armed+active 悬置。
+- 延迟 CLI takeover 的 kick 改为完整重新判定 goal 状态，不再盲提交幽灵续跑。
+- budget wrap-up 在 pending approval/question 期间让位，审批释放后才收敛预算终态。
+- `/goal resume` 从 round-limit blocked 恢复时重置 `RoundsStarted` 并清理 `BlockedCode`，使恢复后能真正继续。
+
+证据与测试见 `docs/review/runtime-server-aicli-tui-core-logic-parity-review-20261114.md` §12.14。

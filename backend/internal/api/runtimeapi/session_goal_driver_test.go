@@ -122,10 +122,64 @@ func TestGoalDriverNoteCLIRefreshesWindow(t *testing.T) {
 	if state.cliActive(sessionID, time.Now()) {
 		t.Fatal("stale CLI mark must be outside the cooldown window")
 	}
-	handler.goalDriverNoteCLI(sessionID)
+	handler.goalDriverNoteCLI(sessionID, "", false)
 	if !state.cliActive(sessionID, time.Now()) {
 		t.Fatal("goalDriverNoteCLI must refresh the CLI presence window")
 	}
+}
+
+func TestGoalDriverCLIContinuationRearmsServerDisarm(t *testing.T) {
+	handler := newGoalDriverTestHandler(t)
+	state := handler.getGoalDriverState()
+	sessionID := "sess-driver-cli-rearm"
+	state.disarm(sessionID, "user_interrupt")
+
+	handler.goalDriverNoteCLI(sessionID, goal.ContinuationPrompt, true)
+
+	require.Empty(t, state.disarmedReason(sessionID))
+}
+
+func TestGoalDriverCLIContinueIntentRearmsServerDisarm(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	state := handler.getGoalDriverState()
+	state.disarm(session.ID, "user_interrupt")
+
+	handler.goalDriverNoteCLI(session.ID, "继续", false)
+
+	require.Empty(t, state.disarmedReason(session.ID))
+}
+
+func TestGoalDriverSystemCancellationReevaluates(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	handler.runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	handler.sessionGoalDriverEvaluate(goalDriverTurnOutcome{
+		SessionID:    session.ID,
+		RunSource:    goalDriverRunSource,
+		CancelSource: "execution_context",
+	})
+
+	// A system cancellation is not a strike, but it must re-enter the decision
+	// path. The admitted round is the observable proof that
+	// sessionGoalDriverDecide ran (the submit fails later because this test
+	// handler has no session hub).
+	require.Eventually(t, func() bool {
+		loaded, err := sessionManager.Get(context.Background(), session.ID)
+		if err != nil || loaded == nil {
+			return false
+		}
+		current, ok, err := goal.NewMetadataStore().Get(loaded)
+		return err == nil && ok && current != nil && current.RoundsStarted == 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Empty(t, handler.getGoalDriverState().disarmedReason(session.ID))
+	require.Zero(t, handler.getGoalDriverState().noProgressStrikes(session.ID))
 }
 
 // TestGoalDriverEscalationStateLifecycle 锁定升级标记的生命周期（P2-2' 入口 2）：
@@ -234,6 +288,66 @@ func TestGoalDriverHasPendingApprovalReadsDurableStateWithoutActor(t *testing.T)
 	}))
 	require.True(t, handler.goalDriverHasPendingApproval(context.Background(), sessionID),
 		"a durable pending approval must block goal continuation even when no actor is materialized")
+}
+
+func TestGoalDriverDefersBudgetWrapUpWhileApprovalPending(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	handler.runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+	runtimeStore := chat.NewInMemoryRuntimeStore(8)
+	handler.sessionRuntimeStore = runtimeStore
+	require.NoError(t, runtimeStore.SaveState(context.Background(), &chat.RuntimeState{
+		SessionID: session.ID,
+		Status:    chat.SessionWaitingApproval,
+		PendingApproval: &chat.ApprovalRequest{
+			ID:        "approval-budget-wrapup",
+			SessionID: session.ID,
+			ToolName:  "shell",
+		},
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	active.TokenBudget = 1
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	handler.sessionGoalDriverDecide(goalDriverTurnOutcome{
+		SessionID:   session.ID,
+		UsageTokens: 2,
+	})
+
+	loaded, err := sessionManager.Get(context.Background(), session.ID)
+	require.NoError(t, err)
+	current, ok, err := goal.NewMetadataStore().Get(loaded)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, goal.StatusActive, current.Status,
+		"pending approval must defer budget_limited transition until the decision resolves")
+	require.Equal(t, 2, current.TokensUsed)
+}
+
+func TestGoalDriverKickRechecksGoalStateAndRoundLimit(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	handler.runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	active.MaxRounds = 1
+	active.RoundsStarted = 1
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	handler.goalDriverKick(session.ID)
+
+	require.Eventually(t, func() bool {
+		loaded, loadErr := sessionManager.Get(context.Background(), session.ID)
+		if loadErr != nil || loaded == nil {
+			return false
+		}
+		current, ok, getErr := goal.NewMetadataStore().Get(loaded)
+		return getErr == nil && ok && current != nil &&
+			current.Status == goal.StatusBlocked &&
+			current.BlockedCode == goal.BlockedCodeRoundLimit
+	}, 2*time.Second, 10*time.Millisecond,
+		"a stale kick must re-evaluate goal state instead of blindly submitting a continuation")
 }
 
 func TestGoalDriverDecisionAndBudgetGuards(t *testing.T) {

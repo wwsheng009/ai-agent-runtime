@@ -1575,7 +1575,7 @@ const (
 | R4 | Goal 外层驱动 shell | CLI 同步循环与 server `session_end` 事件驱动仍是两个入口 shell；策略、阈值、prompt、round、metadata、延迟接管与缺省开关已共享/对齐 | ⚪ | `internal/goal`；`runtimeapi/session_goal_driver.go`；`cmd/aicli/commands/chat_goal_auto_continue.go` |
 | R5 | server 未显式配置 lease 路径时可能回退到 runtime store/memory，与 TUI 的 `<sessions.dir>/runtime/session_leases.sqlite` 分裂 | `resolveServerLeaseStorePath` 在 path/DSN 都为空时按共享 `ResolvePaths` 解析默认 lease 文件；服务端不再因 embedded/未 ApplyDefaults 而落入不同 authority domain。不同 `sessions.dir` 本身仍是显式部署域差异 | ✅ | `runtimeapi/handler.go:resolveServerLeaseStorePath`；`session_lease_path_test.go`；`sessionruntime/paths.go`；`sessionruntime/authority.go` |
 | R6 | server Goal driver 缺少 CLI 的 user-interrupt disarm / explicit-continue rearm 闸 | server 在非 CLI 冷却窗内对 `user_interrupt` 置 disarm；`/goal set/resume/budget` 与保守的显式继续意图消息 rearm；continue-intent 词表下沉到 `internal/goal`，两端共用 | ✅ | `internal/goal/intent.go`；`runtimeapi/session_goal_driver.go`；`session_goal_handlers.go`；`agent_chat_actor.go` |
-| R7 | server Team 完成后不关闭非 lead 子会话 | `team.completed` 触发共享 `team.ReconcileTerminalTeamState`，等待 runtime session 收敛（有界 10s），再通过 AgentSessionController Close 非 lead teammates；重启回放终态事件同样触发 | ✅ | `runtimeapi/team_lifecycle.go`；`runtimeapi/team_handlers.go` |
+| R7 | server Team 完成后不关闭非 lead 子会话 | `team.completed` 触发非 lead 子会话清理：等待 runtime session 收敛（有界 10s），再通过 AgentSessionController Close；重启回放终态事件同样触发。清理监听器**不得**再次调用 `ReconcileTerminalTeamState`（见 §12.14 R9） | ✅ | `runtimeapi/team_lifecycle.go`；`runtimeapi/team_handlers.go` |
 | R8 | TUI `team.completed` 与 `[team summary]` 可能因事件异步投递乱序 | team 已终态但 completed 行尚未渲染时，先合成并渲染 completed 行，再渲染 assistant summary；dedup key 保证迟到事件不重复 | ✅ | `cmd/aicli/commands/chat_runtime_events.go`；`TestAICLIChatActorExecutor_AutoStartQueuedTasksStaySerializedPerTeammate` |
 
 #### 12.13.1 验证
@@ -1587,7 +1587,31 @@ const (
 - ✅ `internal/api/runtimeapi` 全包（lease path / goal disarm / team terminal cleanup 接线）
 - ✅ `cmd/aicli/commands` 全包（含 serialized team timeline `-count=5` 与全包）
 
-> 结论：**可跨宿主复现的行为缺口已全部关闭**。剩余四项为 server-only 兼容入口、宿主展示壳、Goal 外层入口壳与显式部署 authority 边界；不再声称这些路径与 TUI 逐行同一实现。
+> §12.13 时点结论：可跨宿主复现的行为缺口已关闭。剩余四项为 server-only 兼容入口、宿主展示壳、Goal 外层入口壳与显式部署 authority 边界；不再声称这些路径与 TUI 逐行同一实现。
+
+### 12.14 第十二轮切片：提交后复审发现的行为回归
+
+§12.13 的“行为缺口已全部关闭”结论在提交后复审中被推翻：`team.completed` 的清理接线引入了终态摘要锁重入竞争，Goal 驱动器的跨宿主 re-arm、系统取消、延迟 kick、预算收尾与 round-limit resume 也还有可复现差异。本节只记录这些**行为**修复，不改变 §12.13 的四项结构边界。
+
+| # | 缺口 | 本轮处理 | 状态 | 证据 |
+|---|---|---|---|---|
+| R9 | `team.completed` 事件总线订阅再次进入 `ReconcileTerminalTeamState`，与首次终态收敛竞争 summary 锁；第二个调用可能先写入 fallback summary，覆盖首个调用已经生成的 trace/error_type/fallback 元数据 | 清理监听器只等待 runtime session 收敛并关闭非 lead teammates，不再重新 reconcile；终态事件已由首次 `finalizeTerminalTeamState` 持有，summary 生成/持久化仍由原调用方完成 | ✅ | `runtimeapi/team_lifecycle.go:closeTerminalTeammatesAsync`；`TestTerminalTeamSummaryFallbackPublishesStructuredRuntimeEvents` |
+| R10 | CLI 侧显式继续意图 / 隐藏续跑已 rearm，但 server 仍保留更早的 `user_interrupt` disarm；CLI 离场后 server 继续冻结 | 命令通道 `goalDriverNoteCLI` 接收 prompt 与 continuation 标志：CLI 驱动的隐藏续跑和显式继续消息都清除 server disarm；新增 by-ID rearm 入口供命令通道读取持久 goal | ✅ | `runtimeapi/session_goal_driver.go`；`session_runtime_handlers.go`；`TestGoalDriverCLIContinuationRearmsServerDisarm`；`TestGoalDriverCLIContinueIntentRearmsServerDisarm` |
+| R11 | server 驱动器把非 `user_interrupt` 的 `cancel_source`（如 `execution_context`）也当成终止信号直接返回，armed+active goal 可能永久悬置 | 仅 `user_interrupt` disarm；其它取消源不记 strike，但继续进入 decision path，与 CLI 对非用户取消的处理一致 | ✅ | `runtimeapi/session_goal_driver.go:sessionGoalDriverEvaluate`；`TestGoalDriverSystemCancellationReevaluates` |
+| R12 | 延迟 CLI takeover 的 kick 直接提交续跑，不重新读取 goal 状态；期间 goal 已 pause/complete/round-limit 时仍可能起幽灵轮 | kick 改为“请求一次完整决策”，与 run terminal 共用 `sessionGoalDriverDecide`；预算、轮限、continuation limit、pending interaction 与 escalation 均在 kick 时重新判定 | ✅ | `runtimeapi/session_goal_driver.go:goalDriverKick`；`TestGoalDriverKickRechecksGoalStateAndRoundLimit` |
+| R13 | budget wrap-up 在 pending approval/question 之前执行，可能在挂起审批期间提交收尾轮 | 记账后先检查 durable/live pending interaction；挂起时只记账、不置 budget_limited、不提交 wrap-up，待审批释放后的终态再收敛 | ✅ | `runtimeapi/session_goal_driver.go:sessionGoalDriverDecide`；`TestGoalDriverDefersBudgetWrapUpWhileApprovalPending` |
+| R14 | `/goal resume` 从 round-limit blocked 恢复后不清 `RoundsStarted`/`BlockedCode`，下一轮立即再次 blocked | `goal.ApplyUserStatusUpdate` 在用户从 round-limit blocked 恢复 active 时重置本轮预算；离开 blocked 时统一清理 `BlockedCode`。CLI 与 server 共用该状态机 | ✅ | `internal/goal/status_update.go`；`status_update_test.go`；`cmd/aicli/commands/chat_goal_rounds_test.go` |
+
+#### 12.14.1 验证
+
+- ✅ `GOGC=10 GOMAXPROCS=2 go test -p 1 -vet=off -count=1 ./internal/goal ./internal/team`
+- ✅ `TestTerminalTeamSummaryFallbackPublishesStructuredRuntimeEvents`（R9 回归；修复前稳定失败）
+- ✅ `GOGC=10 GOMAXPROCS=2 go test -p 1 -vet=off -count=1 ./internal/api/runtimeapi`（R9–R13 接线）
+- ✅ `GOGC=10 GOMAXPROCS=2 go test -p 1 -vet=off -count=1 ./cmd/aicli/commands`（R14 及既有 goal/team 回归）
+- ✅ `go build -p 1 ./...`
+- ✅ `gofmt -l` 对改动文件无输出；`git diff --check` 无输出
+
+> §12.14 结论：本轮发现并关闭了 §12.13 提交后复审中的 6 个可复现行为缺口。P1 高层 assembler、非 ReAct 兼容直连、Goal 外层 shell、宿主展示壳与不同 `sessions.dir` authority boundary 仍按原边界保留。
 
 ---
 
@@ -1722,4 +1746,5 @@ const (
 > 本轮后的准确表述是：**ReAct 主路径、Goal 策略/轮次、Approval 状态与超时/中断收敛、Remote AgentControl 审批、Memory maintenance、profile-scoped tool surface 已同源；非 ReAct 兼容直连、两层宿主薄包装、Goal 外层驱动 shell 与部署 authority 仍是明确边界。**
 > 收敛顺序执行到：**P1 共享原语 + actor profile 装配已落地 → P2 控制面/审批/Goal 语义单源 → P3 Web ReAct 主路径已 actor 化 → P4 远程命令缺口基本关闭 → P5 lease authority 已独立**。
 > 第十轮（§12.12）进一步关闭了 close/delete 生命周期、server 每轮刷新、profile usage scope、prompt freeze、restored approval/expiry、remote answer、team owner fence/shutdown 与 health 诊断缺口；非 ReAct 兼容直连与双宿主外壳仍按明确边界保留。
+> 第十一轮（§12.13）关闭了 workspace-anchored 通用 skill 发现、lease 默认同域、Goal disarm/rearm、Team 终态清理与 TUI 事件顺序；第十二轮（§12.14）又修复了提交后复审发现的 Team summary 重入竞争与 Goal re-arm/系统取消/延迟 kick/预算收尾/round-limit resume 回归。
 > P0 的契约/诊断护栏与 fail-closed 审批边界继续保持；不得把“非 ReAct 兼容路径”或“不同 sessions.dir 的部署”宣传为全量同源。

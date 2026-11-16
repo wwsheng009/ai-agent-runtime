@@ -21,6 +21,15 @@ func ApplyUserStatusUpdate(g *SessionGoal, status Status, completedBy, completio
 	if now.IsZero() {
 		now = time.Now()
 	}
+	previousStatus := g.Status
+	if status == StatusActive && previousStatus == StatusBlocked &&
+		g.BlockedCode == BlockedCodeRoundLimit {
+		// A user resume is a fresh discretion window: without clearing the
+		// admitted-round counter the next driver iteration immediately
+		// re-applies the same round limit and the goal can never resume.
+		// Pause/resume within an unexhausted window keeps the counter intact.
+		g.RoundsStarted = 0
+	}
 	g.Status = status
 	g.UpdatedAt = now
 	if status == StatusComplete {
@@ -34,6 +43,7 @@ func ApplyUserStatusUpdate(g *SessionGoal, status Status, completedBy, completio
 	}
 	if status != StatusBlocked {
 		g.BlockedReason = ""
+		g.BlockedCode = ""
 	}
 }
 

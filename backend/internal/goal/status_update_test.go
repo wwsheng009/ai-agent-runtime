@@ -27,6 +27,9 @@ func TestApplyUserStatusUpdateComplete(t *testing.T) {
 	if g.BlockedReason != "" {
 		t.Fatalf("BlockedReason = %q, want cleared outside blocked", g.BlockedReason)
 	}
+	if g.BlockedCode != "" {
+		t.Fatalf("BlockedCode = %q, want cleared outside blocked", g.BlockedCode)
+	}
 	if !g.UpdatedAt.Equal(now) {
 		t.Fatalf("UpdatedAt = %v, want %v", g.UpdatedAt, now)
 	}
@@ -63,6 +66,30 @@ func TestApplyUserStatusUpdateKeepsBlockedReasonOnlyForBlocked(t *testing.T) {
 	ApplyUserStatusUpdate(g, StatusBlocked, "", "", time.Time{})
 	if g.BlockedReason != "same blocker x3" {
 		t.Fatalf("BlockedReason = %q, want preserved when entering blocked", g.BlockedReason)
+	}
+}
+
+func TestApplyUserStatusUpdateResumeRoundLimitResetsRoundBudget(t *testing.T) {
+	t.Parallel()
+
+	g := &SessionGoal{
+		Objective:     "x",
+		Status:        StatusBlocked,
+		MaxRounds:     2,
+		RoundsStarted: 2,
+		BlockedCode:   BlockedCodeRoundLimit,
+		BlockedReason: "round limit reached",
+	}
+	ApplyUserStatusUpdate(g, StatusActive, "user", "", time.Time{})
+
+	if g.Status != StatusActive {
+		t.Fatalf("status = %q, want active", g.Status)
+	}
+	if g.RoundsStarted != 0 {
+		t.Fatalf("RoundsStarted = %d, want a fresh round budget", g.RoundsStarted)
+	}
+	if g.BlockedCode != "" || g.BlockedReason != "" {
+		t.Fatalf("blocked markers must be cleared: code=%q reason=%q", g.BlockedCode, g.BlockedReason)
 	}
 }
 

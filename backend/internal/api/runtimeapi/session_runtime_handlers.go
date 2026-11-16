@@ -1060,7 +1060,11 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	// strike——goal 推进、记账与容忍计数全部让给 CLI 决策循环，避免双驱动。
 	// 无论开关状态都上报（开关关闭时只是无害簿记）。
 	if commandType == "submit_prompt" || commandType == "submit" || commandType == "continue" || commandType == "continue_session" {
-		h.goalDriverNoteCLI(sessionID)
+		// A CLI-driven continuation proves its local goal gate is armed; a
+		// user "continue" message is the other shared re-arm signal. Pass both
+		// so a server-side disarm from an earlier server-owned interrupt is
+		// cleared when control moves back to the CLI (R6c).
+		h.goalDriverNoteCLI(sessionID, req.Prompt, commandType == "continue" || commandType == "continue_session")
 	}
 
 	actor, err := hub.GetOrCreate(sessionID)

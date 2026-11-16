@@ -53,5 +53,7 @@ func TestAdmitGoalRoundForSessionReachesConfiguredCap(t *testing.T) {
 	restored, _, err := currentSessionGoal(session)
 	require.NoError(t, err)
 	require.Equal(t, runtimegoal.StatusActive, restored.Status)
+	require.Zero(t, restored.RoundsStarted, "resume must grant a fresh round budget")
+	require.Empty(t, restored.BlockedCode)
 	require.False(t, session.goalContinuationDisarmed.Load(), "/goal resume must re-arm")
 }
