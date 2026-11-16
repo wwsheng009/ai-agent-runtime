@@ -1972,3 +1972,37 @@ func TestSkillsRuntimeBindingAccessorsRaceInPlaceRefresh(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestResolveConfiguredSkillDirsForRootUsesSessionWorkspace pins the session
+// anchor contract: a restored/worktree session must discover project skills
+// under its workspace, not under the process cwd.
+func TestResolveConfiguredSkillDirsForRootUsesSessionWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	projectSkills := filepath.Join(workspace, ".agents", "skills")
+	if err := os.MkdirAll(projectSkills, 0o755); err != nil {
+		t.Fatalf("mkdir project skills: %v", err)
+	}
+
+	resolved := resolveConfiguredSkillDirsForRoot(nil, nil, true, workspace, true)
+	if !containsSkillPath(resolved, projectSkills) {
+		t.Fatalf("workspace skill root %q missing from %#v", projectSkills, resolved)
+	}
+
+	untrusted := resolveConfiguredSkillDirsForRoot(nil, nil, true, workspace, false)
+	if containsSkillPath(untrusted, projectSkills) {
+		t.Fatalf("untrusted workspace must not load project skills: %#v", untrusted)
+	}
+}
+
+func containsSkillPath(paths []string, target string) bool {
+	target = filepath.Clean(target)
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Clean(path), target) {
+			return true
+		}
+	}
+	return false
+}

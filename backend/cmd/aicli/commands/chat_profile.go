@@ -484,7 +484,27 @@ func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs
 			sessionProjectScopeAllowed(session),
 		)
 	}
-	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs, includeDiscovered)
+	return resolveConfiguredSkillDirsForRoot(
+		skillRuntimeConfig(cfg),
+		cliSkillDirs,
+		includeDiscovered,
+		sessionWorkspaceAnchor(session),
+		sessionProjectScopeAllowed(session),
+	)
+}
+
+// sessionWorkspaceAnchor returns the authoritative workspace anchor, falling
+// back to the process cwd for bootstrap paths that run before a session exists.
+func sessionWorkspaceAnchor(session *ChatSession) string {
+	if session != nil {
+		if anchor := strings.TrimSpace(session.WorkspaceAnchor); anchor != "" {
+			return anchor
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return strings.TrimSpace(cwd)
+	}
+	return ""
 }
 
 // resolveChatSkillWatchDirs 返回动态安装的候选监听位（目录可以尚不存在）：
@@ -495,15 +515,15 @@ func resolveChatSkillWatchDirs(cfg *config.Config, session *ChatSession) []strin
 	if session != nil && session.NoSkills {
 		return nil
 	}
-	cwd, err := os.Getwd()
-	if err != nil || strings.TrimSpace(cwd) == "" {
+	projectRoot := strings.TrimSpace(sessionWorkspaceAnchor(session))
+	if projectRoot == "" {
 		return nil
 	}
 	configFile := ""
 	if skillsCfg := skillRuntimeConfig(cfg); skillsCfg != nil {
 		configFile = resolveExistingPathValue(skillsCfg.ConfigFile, false)
 	}
-	return runtimeskill.DiscoverCodexCompatibleSkillWatchDirs(filepath.Clean(cwd), configFile)
+	return runtimeskill.DiscoverCodexCompatibleSkillWatchDirs(filepath.Clean(projectRoot), configFile)
 }
 
 func appendUniqueExistingDirs(base []string, extra []string) []string {

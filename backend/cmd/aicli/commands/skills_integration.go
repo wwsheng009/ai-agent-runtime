@@ -1563,8 +1563,21 @@ func resolveChatRuntimeConfigPath(cfg *config.Config, session *ChatSession) stri
 // includeDiscovered=false（--no-skills）时只保留 CLI 显式目录，跳过配置目录、
 // Codex 兼容发现、cwd 祖先锚点与 plugin 根。
 func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []string, includeDiscovered bool) []string {
+	return resolveConfiguredSkillDirsForRoot(cfg, cliSkillDirs, includeDiscovered, "", projectScopeAllowed())
+}
+
+// resolveConfiguredSkillDirsForRoot is the session-aware variant: project
+// discovery is anchored on the session workspace and project scope follows the
+// session folder-trust decision.
+func resolveConfiguredSkillDirsForRoot(cfg *config.SkillsRuntimeConfig, cliSkillDirs []string, includeDiscovered bool, projectRoot string, projectAllowed bool) []string {
 	if !includeDiscovered {
 		return appendUniqueExistingDirs(nil, cliSkillDirs)
+	}
+	projectRoot = strings.TrimSpace(projectRoot)
+	if projectRoot == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			projectRoot = strings.TrimSpace(cwd)
+		}
 	}
 	seen := make(map[string]struct{})
 	capacity := len(cliSkillDirs) + 6
@@ -1613,6 +1626,20 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 		}
 	}
 	anchorDir := aiclipaths.ResolveRuntimeConfigAnchorPath(resolvedConfigFile)
+	if projectAllowed && projectRoot != "" {
+		anchorDir = projectRoot
+	} else if !projectAllowed {
+		// Untrusted project scope: do not let the project workspace (or a
+		// project-local config file) reintroduce project discovery through the
+		// Codex-compatible anchor. User-home discovery still runs.
+		anchorDir = ""
+		if resolvedConfigFile != "" && projectRoot != "" {
+			if rel, err := filepath.Rel(projectRoot, resolvedConfigFile); err == nil &&
+				rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				resolvedConfigFile = ""
+			}
+		}
+	}
 	for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
 		addDir(dir)
 	}
@@ -1625,14 +1652,14 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 	// loader/registry，chat 的 skill catalog 恒为 total=0。
 	// 扫描范围与 codex 对齐：以项目根（默认 marker .git）为界，不越界到仓库外
 	// 的父目录（internal/skill.ProjectAgentsSkillDirs）。
-	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		for _, dir := range runtimeskill.ProjectAgentsSkillDirs(cwd) {
+	if projectAllowed && projectRoot != "" {
+		for _, dir := range runtimeskill.ProjectAgentsSkillDirs(projectRoot) {
 			addDir(dir)
 		}
 	}
 
 	// Trusted+enabled plugins contribute skill roots into the existing skill loader path.
-	return mergeActivePluginSkillDirs(resolved)
+	return mergeActivePluginSkillDirsForRoot(resolved, projectRoot, projectAllowed)
 }
 
 // disabledSkillNames 返回 skills_runtime.disabled_skills 的归一化名单（SK-6）。

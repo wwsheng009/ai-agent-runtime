@@ -1560,8 +1560,28 @@ const (
 1. **非 ReAct 兼容直连**：`enable_react=false` 的 static/route planning、planned-subagent orchestration、patch approval 继续走 direct `Orchestrate`；ReAct 主路径、多消息、Team/Task context、`disable_tools` 已 actor 化。这是兼容语义，不是同一路径的遗漏。
 2. **宿主薄包装仍双实现**：`buildSessionAgentForContext` / `buildLocalChatAgent`、AgentControl 列表投影、Team lifecycle 的视图/清理方法没有合并为一个包；本轮已统一会改变状态的关键动作（close、approval、owner fence、shutdown），剩余差异属于宿主外壳。
 3. **Goal 外层驱动 shell**：CLI 同步决策循环与 server `session_end` 事件驱动仍是两个 shell；策略、prompt、round、metadata、strike、延迟接管与缺省开关已共享/对齐。部署仍可用 `goal.serverAutoContinuation=false` 显式关闭服务端驱动，避免与 CLI 进程形成双驱动。
-4. **TUI 通用 skill 目录发现**：插件/hook/agentdef 主路径已按会话 workspace 锚定；`skills_integration.resolveConfiguredSkillDirs` 的通用 config 目录链仍以进程 cwd 为启动锚点，需要会话级重构后再宣称完全同源。
+4. **TUI 通用 skill 目录发现**：本节为第九轮时点；第十一轮已把 config/Codex 兼容/热加载候选目录统一锚定到会话 `WorkspaceAnchor`，并受 session folder trust 门控，详见 §12.13。
 5. **Deployment authority**：lease store 已独立且默认同域；不同 `sessions.dir` 或显式 lease 路径仍形成不同 authority domain。
+
+### 12.13 第十一轮切片：剩余可修复边界收敛
+
+第十一轮只处理仍能产生跨宿主行为差异的项；不能在不破坏兼容契约的前提下合并的边界，改为显式产品/部署差异，不再混入“待修缺口”。
+
+| # | 项 | 处理 | 状态 | 证据 |
+|---|---|---|---|---|
+| R1 | TUI 通用 skill 目录发现仍以 cwd 为锚点 | `resolveConfiguredSkillDirsForRoot` / `resolveChatSkillWatchDirs` 改用会话 `WorkspaceAnchor`；project discovery 受 session folder trust 门控；untrusted 时清空 project anchor，防止 Codex 兼容发现重新引入工作区技能 | ✅ | `cmd/aicli/commands/skills_integration.go`；`chat_profile.go`；`skills_integration_test.go:TestResolveConfiguredSkillDirsForRootUsesSessionWorkspace` |
+| R2 | `enable_react=false` 规划/planned-subagent/patch 直连 | 保留为 server-only 兼容入口：TUI 无对应请求面，强行 actor 化会忽略 planned-subagent/patch 字段并改变 API 语义 | ⚪ | `runtimeapi/agent_chat_request.go:agentChatUsesSessionActor` |
+| R3 | 两层宿主薄包装 / Team lifecycle 视图方法双实现 | 状态变更动作（close、approval、owner fence、shutdown、run prepare）已统一；剩余方法是各宿主 API 投影/展示适配，不再复制执行决策 | ⚪ | `§12.12` + `runtimehost/team_owner.go` |
+| R4 | Goal 外层驱动 shell | CLI 同步循环与 server `session_end` 事件驱动仍是两个入口 shell；策略、阈值、prompt、round、metadata、延迟接管与缺省开关已共享/对齐 | ⚪ | `internal/goal`；`runtimeapi/session_goal_driver.go`；`cmd/aicli/commands/chat_goal_auto_continue.go` |
+| R5 | 不同 `sessions.dir` 形成不同 authority domain | 这是部署配置边界，不是执行逻辑分叉：同一 store 路径下 lease/authority 已单源；不同路径必须按不同 authority domain 诊断，禁止伪装成同一权威 | ⚪ | `sessionruntime/authority.go`；`sessionruntime/paths.go` |
+
+#### 12.13.1 验证
+
+- ✅ `go build -p 1 ./...`
+- ✅ `cmd/aicli/commands` 的 skill/plugin/folder-trust 相关测试
+- ✅ `TestResolveConfiguredSkillDirsForRootUsesSessionWorkspace`：workspace skill 在 trusted 下发现、untrusted 下被排除
+
+> 结论：**可跨宿主复现的行为缺口已全部关闭**。剩余四项为 server-only 兼容入口、宿主展示壳、Goal 外层入口壳与显式部署 authority 边界；不再声称这些路径与 TUI 逐行同一实现。
 
 ---
 
