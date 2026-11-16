@@ -46,6 +46,7 @@ func (h *Handler) stopSessionForTerminalState(parent context.Context, sessionID,
 			}
 		}
 	}
+	h.forgetGoalDriverSession(sessionID)
 }
 
 // retireDurablePendingInteraction closes a persisted approval/question that has

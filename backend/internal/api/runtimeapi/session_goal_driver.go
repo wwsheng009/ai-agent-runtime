@@ -168,6 +168,30 @@ func (s *goalDriverState) rearm(sessionID string) bool {
 	return true
 }
 
+// forget releases session-scoped strike, continuation, disarm and delayed
+// CLI-takeover timer state after the session reaches a terminal close/delete.
+// Without this, a long-lived server retains bookkeeping for sessions that can
+// never produce another run. deciding is intentionally left to its in-flight
+// owner; wrap-up dedup keys are goal-scoped and bounded by terminal states.
+func (s *goalDriverState) forget(sessionID string) {
+	if s == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if timer := s.cliRecheck[sessionID]; timer != nil {
+		timer.Stop()
+	}
+	delete(s.cliRecheck, sessionID)
+	delete(s.cliLastSeen, sessionID)
+	delete(s.errorStrikes, sessionID)
+	delete(s.noProgStrikes, sessionID)
+	delete(s.escalationAttempted, sessionID)
+	delete(s.doomLoopAdvised, sessionID)
+	delete(s.continuations, sessionID)
+	delete(s.disarmed, sessionID)
+}
+
 func (s *goalDriverState) disarmedReason(sessionID string) string {
 	if s == nil {
 		return ""
@@ -665,6 +689,10 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	if !ok || session == nil {
 		return
 	}
+	if !h.goalDriverEnabledForSession(session) {
+		logger.Debugf("goal driver: disabled for session scope session=%s", sessionID)
+		return
+	}
 	store := goal.NewMetadataStore()
 	current, hasGoal, err := store.Get(session)
 	if err != nil {
@@ -1013,6 +1041,21 @@ func (h *Handler) goalDriverEnabled() bool {
 	return cfg.Goal.ServerAutoContinuation
 }
 
+// goalDriverEnabledForSession applies the deployment switch to the session's
+// resolved runtime config. The no-session path keeps the deployment default;
+// callers with a durable session must use this variant so a tenant/project
+// override can disable server-side continuation for that scope.
+func (h *Handler) goalDriverEnabledForSession(session *chat.Session) bool {
+	if h == nil {
+		return false
+	}
+	if session == nil {
+		return h.goalDriverEnabled()
+	}
+	cfg := h.resolveRuntimeConfig(h.usageScopeForSession(session))
+	return cfg != nil && cfg.Goal.ServerAutoContinuation
+}
+
 // goalDriverBaseSession 判定是否基础会话（子代理不驱动；与 gap-1 注入同口径）。
 func (h *Handler) goalDriverBaseSession(sessionID string) bool {
 	if h == nil || h.sessionManager == nil {
@@ -1076,6 +1119,15 @@ func (h *Handler) getGoalDriverState() *goalDriverState {
 		h.goalDriver = newGoalDriverState()
 	})
 	return h.goalDriver
+}
+
+func (h *Handler) forgetGoalDriverSession(sessionID string) {
+	if h == nil {
+		return
+	}
+	if state := h.getGoalDriverState(); state != nil {
+		state.forget(sessionID)
+	}
 }
 
 // usageTotalTokens 返回终态 usage 的记账口径：优先 TotalTokens，缺省时退化为

@@ -1634,6 +1634,24 @@ const (
 
 > §12.15 结论：Goal **决策矩阵**已单源化；CLI/server 仍保留各自的读取、持久化、actor 提交和 UI/审计外壳。Phase 2 的 `Loop`/审计事件/驱动者租约，以及 §12.13 的 server-only 兼容入口、非 ReAct 直连、宿主展示壳与 `sessions.dir` authority 边界仍未合并。
 
+### 12.16 第十四轮切片：Goal driver 作用域与生命周期收口
+
+§12.15 之后仍有两个运行期缺口：`goal.serverAutoContinuation` 只按全局 `UsageScope{}` 解析；server 的 per-session strike/disarm/continuation/timer 状态在会话 close/delete 后不释放。
+
+| # | 项 | 处理 | 状态 | 证据 |
+|---|---|---|---|---|
+| R17 | tenant/project 级 `goal.serverAutoContinuation=false` 被全局开关覆盖 | 新增 `goalDriverEnabledForSession`：使用 `usageScopeForSession` 解析真实 runtime config；无 session 的路径仍回退部署默认。`sessionGoalDriverDecide` 在 round admission 前执行该门控。 | ✅ | `runtimeapi/session_goal_driver.go:goalDriverEnabledForSession`；`TestGoalDriverEnabledForSessionUsesScopedConfig`；`TestGoalDriverScopedDisableDoesNotAdmitRound` |
+| R18 | session close/delete 后 server goal driver 仍保留 strikes/continuations/disarm/CLI-takeover timer，长期运行会积累不可再用状态 | 新增 `goalDriverState.forget`，close 统一入口 `stopSessionForTerminalState` 调用 `forgetGoalDriverSession`；停止延迟 recheck timer，清理 session-scoped maps。`deciding` 留给 in-flight owner，wrap-up 去重仍按 goal 终态键。 | ✅ | `runtimeapi/session_goal_driver.go:forget`；`runtimeapi/session_lifecycle_close.go`；`TestGoalDriverForgetSessionClearsBookkeeping` |
+
+#### 12.16.1 验证
+
+- ✅ `internal/api/runtimeapi` 全包通过（185.3s；含 R17/R18 用例）
+- ✅ `internal/goal/driver ./internal/goal ./internal/team`
+- ✅ `go build -p 1 ./...`
+- ✅ `gofmt -l` 对改动文件无输出；`git diff --check` exit 0
+
+> §12.16 结论：Goal driver 的运行时配置作用域与 session 生命周期清理已收口。Goal Loop/审计事件/驱动者租约、P1 assembler、非 ReAct server-only 入口与不同 `sessions.dir` authority 边界仍保留。
+
 ---
 
 ## 附录 A：关键证据索引
@@ -1769,4 +1787,5 @@ const (
 > 第十轮（§12.12）进一步关闭了 close/delete 生命周期、server 每轮刷新、profile usage scope、prompt freeze、restored approval/expiry、remote answer、team owner fence/shutdown 与 health 诊断缺口；非 ReAct 兼容直连与双宿主外壳仍按明确边界保留。
 > 第十一轮（§12.13）关闭了 workspace-anchored 通用 skill 发现、lease 默认同域、Goal disarm/rearm、Team 终态清理与 TUI 事件顺序；第十二轮（§12.14）又修复了提交后复审发现的 Team summary 重入竞争与 Goal re-arm/系统取消/延迟 kick/预算收尾/round-limit resume 回归。
 > 第十三轮（§12.15）把 Goal 决策矩阵抽为 `internal/goal/driver.Decide`，CLI 与 server 共用；session-scoped continuation limit / iterate 可用性也改为按会话解析。Goal 的 Loop/审计/租约与宿主读写外壳仍按明确边界保留。
+> 第十四轮（§12.16）把 `goal.serverAutoContinuation` 纳入会话作用域，并在 close/delete 时清理 Goal driver 的 per-session strikes/continuations/disarm/recheck timer。
 > P0 的契约/诊断护栏与 fail-closed 审批边界继续保持；不得把“非 ReAct 兼容路径”或“不同 sessions.dir 的部署”宣传为全量同源。

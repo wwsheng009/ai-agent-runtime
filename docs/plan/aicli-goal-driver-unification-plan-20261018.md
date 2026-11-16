@@ -472,3 +472,10 @@ DriverView {
 - session-scoped `maxConsecutiveContinuations` / `iterateGoalEnabled` 由 `usageScopeForSession` 解析。
 
 仍未落地（不属于本轮决策矩阵缺口）：`Loop` 事件汇聚/单 in-flight、`goal.driver.decision` 审计事件、驱动者租约、INV-1 stalled 探针；CLI/server 的读取、持久化与提交外壳仍各自保留。详见 review §12.15。
+
+### 9.8 作用域与生命周期收口（2026-11-16）
+
+- `goal.serverAutoContinuation` 现在按会话 `usageScope` 解析；tenant/project 可关闭 server 驱动，全局开关仍是最外层部署闸。
+- session close/delete 统一入口会清理 goal driver 的 strikes、continuations、disarm、doom/escalation 标记与延迟 CLI-takeover timer；`deciding` 由 in-flight owner 释放。
+
+证据与测试见 review §12.16。

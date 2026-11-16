@@ -306,6 +306,100 @@ func TestGoalDriverDecideUsesSessionScopedContinuationLimit(t *testing.T) {
 		"session-scoped continuation limit must stop before admitting another round")
 }
 
+func TestGoalDriverEnabledForSessionUsesScopedConfig(t *testing.T) {
+	handler, _, session := newGoalGuidanceTestHandler(t)
+	base := runtimecfg.DefaultRuntimeConfig()
+	base.Goal.ServerAutoContinuation = true
+	scoped := runtimecfg.DefaultRuntimeConfig()
+	scoped.Goal.ServerAutoContinuation = false
+	handler.runtimeConfig = base
+	handler.SetRuntimeConfigResolver(func(scope UsageScope) *runtimecfg.RuntimeConfig {
+		if scope.TenantID == "tenant-goal" {
+			return scoped
+		}
+		return base
+	})
+	handler.stampSessionUsageScope(context.Background(), session, UsageScope{
+		TenantID: "tenant-goal",
+	})
+
+	require.True(t, handler.goalDriverEnabled())
+	require.False(t, handler.goalDriverEnabledForSession(session))
+}
+
+func TestGoalDriverScopedDisableDoesNotAdmitRound(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	base := runtimecfg.DefaultRuntimeConfig()
+	base.Goal.ServerAutoContinuation = true
+	scoped := runtimecfg.DefaultRuntimeConfig()
+	scoped.Goal.ServerAutoContinuation = false
+	handler.runtimeConfig = base
+	handler.SetRuntimeConfigResolver(func(scope UsageScope) *runtimecfg.RuntimeConfig {
+		if scope.TenantID == "tenant-goal" {
+			return scoped
+		}
+		return base
+	})
+	handler.stampSessionUsageScope(context.Background(), session, UsageScope{
+		TenantID: "tenant-goal",
+	})
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	handler.sessionGoalDriverDecide(goalDriverTurnOutcome{SessionID: session.ID})
+
+	loaded, err := sessionManager.Get(context.Background(), session.ID)
+	require.NoError(t, err)
+	current, ok, err := goal.NewMetadataStore().Get(loaded)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Zero(t, current.RoundsStarted,
+		"a tenant-scoped serverAutoContinuation=false must stop before round admission")
+}
+
+func TestGoalDriverForgetSessionClearsBookkeeping(t *testing.T) {
+	state := newGoalDriverState()
+	sessionID := "sess-driver-forget"
+	state.markCLISeen(sessionID, time.Now())
+	state.noteError(sessionID)
+	state.noteNoProgress(sessionID)
+	state.markEscalationAttempted(sessionID)
+	state.noteDoomLoopWarning(sessionID)
+	state.noteContinuation(sessionID)
+	state.disarm(sessionID, "user_interrupt")
+	state.scheduleCLIRecheck(sessionID, time.Hour, func() {})
+
+	state.forget(sessionID)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if _, ok := state.cliLastSeen[sessionID]; ok {
+		t.Fatal("cliLastSeen must be cleared")
+	}
+	if _, ok := state.cliRecheck[sessionID]; ok {
+		t.Fatal("cliRecheck timer must be cleared")
+	}
+	if _, ok := state.errorStrikes[sessionID]; ok {
+		t.Fatal("errorStrikes must be cleared")
+	}
+	if _, ok := state.noProgStrikes[sessionID]; ok {
+		t.Fatal("noProgStrikes must be cleared")
+	}
+	if _, ok := state.escalationAttempted[sessionID]; ok {
+		t.Fatal("escalationAttempted must be cleared")
+	}
+	if _, ok := state.doomLoopAdvised[sessionID]; ok {
+		t.Fatal("doomLoopAdvised must be cleared")
+	}
+	if _, ok := state.continuations[sessionID]; ok {
+		t.Fatal("continuations must be cleared")
+	}
+	if _, ok := state.disarmed[sessionID]; ok {
+		t.Fatal("disarmed must be cleared")
+	}
+}
+
 func TestUsageTotalTokensFallback(t *testing.T) {
 	if got := usageTotalTokens(nil); got != 0 {
 		t.Fatalf("nil usage must account 0, got %d", got)
