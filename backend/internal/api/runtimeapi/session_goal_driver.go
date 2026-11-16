@@ -39,8 +39,10 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	goaldriver "github.com/wwsheng009/ai-agent-runtime/internal/goal/driver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimehost "github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -647,24 +649,14 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		state.resetContinuations(sessionID)
 	}
 
-	// 1) 记账：本次 turn usage 入 goal；超预算置 budget_limited 并收尾。
+	// 1) 记账：本次 turn usage 入 goal。预算终态由下面的共享 decision 统一
+	// 判定；这里不提前提交 wrap-up，避免绕过 pending interaction / goal 态门控。
 	if outcome.UsageTokens > 0 {
-		if h.goalDriverAccountUsage(ctx, sessionID, outcome.UsageTokens) {
-			// A parked approval/question owns the session. Do not start a
-			// budget wrap-up turn into it: mark the budget only after the
-			// user's decision releases the run, matching the CLI decision
-			// order (pending interaction precedes budget wrap-up).
-			if h.goalDriverHasPendingApproval(ctx, sessionID) {
-				logger.Debugf("goal driver: defer budget wrap-up session=%s reason=pending_interaction", sessionID)
-				return
-			}
-			h.goalDriverBudgetWrapUp(ctx, sessionID)
-			state.resetStrikes(sessionID)
-			return
-		}
+		_ = h.goalDriverAccountUsage(ctx, sessionID, outcome.UsageTokens)
 	}
 
-	// 2) goal 态判定（active 即续，对齐 Codex continue_if_idle）。
+	// 2) 组装共享 decision view。goal 态、预算、continuation/round limit 与
+	// escalation 的优先级只在 internal/goal/driver 中维护，CLI 与 server 共用。
 	session, ok, err := h.goalDriverLoadSession(ctx, sessionID)
 	if err != nil {
 		logger.Warnf("goal driver: load session %s: %s", sessionID, err)
@@ -679,82 +671,78 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		logger.Warnf("goal driver: read goal %s: %s", sessionID, err)
 		return
 	}
-	decision := goal.EvaluateGoalContinuation(current, hasGoal)
-	if !decision.Continue {
+	view := goaldriver.View{
+		Goal:                   current,
+		HasGoal:                hasGoal,
+		DisarmedReason:         state.disarmedReason(sessionID),
+		PendingInteraction:     h.goalDriverHasPendingApproval(ctx, sessionID),
+		BudgetExhausted:        goal.BudgetExhausted(current),
+		ContinuationLimit:      h.goalDriverContinuationLimitForSession(session),
+		ContinuationCount:      state.continuationCount(sessionID),
+		IterationToolAvailable: h.goalDriverIterationEscalationAvailableForSession(session),
+		EscalationAttempted:    state.escalationTried(sessionID),
+		DoomLoopAdvised:        state.doomLoopAdvisedFor(sessionID),
+		NoProgressStrikes:      state.noProgressStrikes(sessionID),
+	}
+	decision := goaldriver.Decide(view)
+	switch decision.Action {
+	case goaldriver.ActionDefer:
+		logger.Debugf("goal driver: defer session=%s reason=%s", sessionID, decision.Reason)
+		return
+	case goaldriver.ActionStop:
+		if decision.Reason == "continuation_limit" {
+			logger.Infof("goal driver: continuation limit reached session=%s limit=%d", sessionID, view.ContinuationLimit)
+			return
+		}
+		state.resetStrikes(sessionID)
+		logger.Debugf("goal driver: stop session=%s reason=%s", sessionID, decision.Reason)
+		return
+	case goaldriver.ActionTerminalWrapUp:
 		state.resetStrikes(sessionID)
 		// G3 终局收尾（DSH wrapup 借鉴）：模型刚把 goal 置为终态时，提交一次
 		// 收尾轮（向用户交代结果/验证/产物），让会话在自主结束前给用户一个
 		// 交代。仅模型终态（completed_by=model 或系统 blocked）触发；用户命令
 		// 终态有自己的确认输出，不需要收尾轮。
-		if current != nil && current.CompletedBy == "model" {
-			var wrapPrompt string
-			switch current.Status {
-			case goal.StatusComplete:
-				wrapPrompt = goal.CompleteWrapUpPrompt
-			case goal.StatusBlocked:
-				wrapPrompt = goal.BlockedWrapUpPrompt
-			}
-			wrapKey := goalDriverTerminalWrapUpKey(current)
-			if wrapPrompt != "" && !state.wrapUpSubmitted(wrapKey) {
-				if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, wrapPrompt); err != nil {
-					logger.Warnf("goal driver: terminal wrap-up submit %s: %s", sessionID, err)
-				} else {
-					state.markWrapUpSubmitted(wrapKey)
-					logger.Infof("goal driver: terminal wrap-up submitted session=%s status=%s", sessionID, current.Status)
-				}
+		wrapKey := goalDriverTerminalWrapUpKey(current)
+		if decision.Prompt != "" && !state.wrapUpSubmitted(wrapKey) {
+			if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, decision.Prompt); err != nil {
+				logger.Warnf("goal driver: terminal wrap-up submit %s: %s", sessionID, err)
+			} else {
+				state.markWrapUpSubmitted(wrapKey)
+				logger.Infof("goal driver: terminal wrap-up submitted session=%s status=%s", sessionID, current.Status)
 			}
 		}
 		return
-	}
-
-	// 3) 挂起审批/工具：等用户决断，不续跑，也不消耗 round/limit 配额。
-	if h.goalDriverHasPendingApproval(ctx, sessionID) {
+	case goaldriver.ActionBudgetWrapUp:
+		h.goalDriverBudgetWrapUp(ctx, sessionID)
+		state.resetStrikes(sessionID)
 		return
-	}
-	if limit := h.goalDriverContinuationLimit(); limit > 0 {
-		if state.continuationCount(sessionID) >= limit {
-			logger.Infof("goal driver: continuation limit reached session=%s limit=%d", sessionID, limit)
-			return
-		}
-	}
-
-	// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
-	//（round-limit），不再提交续跑轮——与 CLI 驱动器同语义（单点
-	// internal/goal.AdmitGoalRound）。
-	if goal.AdmitGoalRound(current) {
-		if err := goal.ApplySystemRoundLimit(current, time.Now()); err != nil {
-			logger.Warnf("goal driver: apply round-limit blocked %s: %s", sessionID, err)
-			return
-		}
-		if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
-			logger.Warnf("goal driver: mark round-limit blocked %s: %s", sessionID, err)
-			return
-		}
-		logger.Infof("goal driver: goal blocked session=%s reason=round-limit rounds=%d/%d", sessionID, current.RoundsStarted, current.MaxRounds)
+	case goaldriver.ActionBlockRoundLimit:
+		_ = h.goalDriverApplyRoundLimit(ctx, sessionID, current)
 		return
-	}
-	if current.RoundsStarted > 0 || current.MaxRounds > 0 {
-		if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
-			logger.Warnf("goal driver: admit round %s: %s", sessionID, err)
+	case goaldriver.ActionSubmitContinuation:
+		// Admit the durable round. Decide already rejected the durable
+		// RoundLimitReached case; keep the return check for a concurrent write.
+		if goal.AdmitGoalRound(current) {
+			_ = h.goalDriverApplyRoundLimit(ctx, sessionID, current)
 			return
 		}
+		if current.RoundsStarted > 0 || current.MaxRounds > 0 {
+			if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
+				logger.Warnf("goal driver: admit round %s: %s", sessionID, err)
+				return
+			}
+		}
+		if decision.Prompt == goal.IterateEscalationPrompt {
+			state.markEscalationAttempted(sessionID)
+			logger.Infof("goal driver: escalating to fresh-context iteration session=%s strikes=%d doom_loop=%v", sessionID, view.NoProgressStrikes, view.DoomLoopAdvised)
+		}
+		if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, decision.Prompt); err != nil {
+			logger.Warnf("goal driver: submit continuation %s: %s", sessionID, err)
+			return
+		}
+		state.noteContinuation(sessionID)
 	}
-
-	// 4) 提交续跑轮（共享 prompt，与 CLI 逐字节同文案）；连续无进展达到共享
-	// 升级阈值、或收到 doom_loop 告警，且部署启用了 iterate_goal 时，本轮改用
-	// 升级提示词（P2-2' 入口 2，同一空转序列至多一次，doom 标记随之消费）。
-	prompt := goal.ContinuationPrompt
-	doomAdvised := state.doomLoopAdvisedFor(sessionID)
-	if goal.DecideIterationEscalation(state.noProgressStrikes(sessionID), doomAdvised, state.escalationTried(sessionID), h.goalDriverIterationEscalationAvailable()) {
-		state.markEscalationAttempted(sessionID)
-		prompt = goal.IterateEscalationPrompt
-		logger.Infof("goal driver: escalating to fresh-context iteration session=%s strikes=%d doom_loop=%v", sessionID, state.noProgressStrikes(sessionID), doomAdvised)
-	}
-	if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, prompt); err != nil {
-		logger.Warnf("goal driver: submit continuation %s: %s", sessionID, err)
-		return
-	}
-	state.noteContinuation(sessionID)
 }
 
 // goalDriverIterationEscalationAvailable 报告服务端宿主部署是否启用了
@@ -762,10 +750,22 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 // 与 CLI 侧 goalIterationEscalationAvailable 同口径。未配置 runtimeConfig 的
 // 宿主由 agentsConfig() 回落默认（false）。
 func (h *Handler) goalDriverIterationEscalationAvailable() bool {
+	return h.goalDriverIterationEscalationAvailableForSession(nil)
+}
+
+// goalDriverIterationEscalationAvailableForSession resolves the same
+// session-scoped runtime config as the actor/profile path. The no-session
+// wrapper keeps the deployment-default behavior for callers that have no
+// durable session identity.
+func (h *Handler) goalDriverIterationEscalationAvailableForSession(session *chat.Session) bool {
 	if h == nil {
 		return false
 	}
-	return (&sessionAgentController{handler: h}).agentsConfig().IterateGoalEnabled
+	cfg := h.resolveRuntimeConfig(h.usageScopeForSession(session))
+	if cfg == nil {
+		return false
+	}
+	return runtimecfg.NormalizeAgentsConfig(cfg.Agents).IterateGoalEnabled
 }
 
 // goalDriverSubmitContinuationWithPrompt 通过 hub 取（或建）actor 并异步提交
@@ -840,10 +840,14 @@ func (h *Handler) goalDriverBudgetWrapUp(ctx context.Context, sessionID string) 
 }
 
 func (h *Handler) goalDriverContinuationLimit() int {
+	return h.goalDriverContinuationLimitForSession(nil)
+}
+
+func (h *Handler) goalDriverContinuationLimitForSession(session *chat.Session) int {
 	if h == nil {
 		return 0
 	}
-	cfg := h.resolveRuntimeConfig(UsageScope{})
+	cfg := h.resolveRuntimeConfig(h.usageScopeForSession(session))
 	if cfg == nil || cfg.Goal.MaxConsecutiveContinuations <= 0 {
 		return 0
 	}
@@ -883,6 +887,25 @@ func goalDriverTerminalWrapUpKey(current *goal.SessionGoal) string {
 	}
 	return strings.TrimSpace(current.GoalID) + "|" + string(current.Status) + "|" +
 		current.UpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// goalDriverApplyRoundLimit marks an active goal blocked at its configured
+// round ceiling. The shared decision core already classified the round-limit
+// action; this helper owns the durable system mutation.
+func (h *Handler) goalDriverApplyRoundLimit(ctx context.Context, sessionID string, current *goal.SessionGoal) error {
+	if h == nil || h.sessionManager == nil || current == nil {
+		return nil
+	}
+	if err := goal.ApplySystemRoundLimit(current, time.Now()); err != nil {
+		logger.Warnf("goal driver: apply round-limit blocked %s: %s", sessionID, err)
+		return err
+	}
+	if _, err := goal.NewMetadataStore().PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
+		logger.Warnf("goal driver: mark round-limit blocked %s: %s", sessionID, err)
+		return err
+	}
+	logger.Infof("goal driver: goal blocked session=%s reason=round-limit rounds=%d/%d", sessionID, current.RoundsStarted, current.MaxRounds)
+	return nil
 }
 
 // goalDriverMarkBlocked 把 active goal 置为 blocked（系统写；对齐 CLI 停止语义）。

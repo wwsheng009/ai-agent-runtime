@@ -248,6 +248,64 @@ func TestGoalDriverEscalationAvailabilityDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestGoalDriverSessionScopedConfigResolution(t *testing.T) {
+	handler, _, session := newGoalGuidanceTestHandler(t)
+	base := runtimecfg.DefaultRuntimeConfig()
+	base.Goal.MaxConsecutiveContinuations = 0
+	base.Agents.IterateGoalEnabled = false
+	scoped := runtimecfg.DefaultRuntimeConfig()
+	scoped.Goal.MaxConsecutiveContinuations = 3
+	scoped.Agents.IterateGoalEnabled = true
+	handler.runtimeConfig = base
+	handler.SetRuntimeConfigResolver(func(scope UsageScope) *runtimecfg.RuntimeConfig {
+		if scope.TenantID == "tenant-goal" && scope.ProjectID == "project-goal" {
+			return scoped
+		}
+		return base
+	})
+	handler.stampSessionUsageScope(context.Background(), session, UsageScope{
+		TenantID:  "tenant-goal",
+		ProjectID: "project-goal",
+	})
+
+	require.Equal(t, 3, handler.goalDriverContinuationLimitForSession(session))
+	require.True(t, handler.goalDriverIterationEscalationAvailableForSession(session))
+	require.Zero(t, handler.goalDriverContinuationLimit())
+	require.False(t, handler.goalDriverIterationEscalationAvailable())
+}
+
+func TestGoalDriverDecideUsesSessionScopedContinuationLimit(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	base := runtimecfg.DefaultRuntimeConfig()
+	base.Goal.MaxConsecutiveContinuations = 0
+	scoped := runtimecfg.DefaultRuntimeConfig()
+	scoped.Goal.MaxConsecutiveContinuations = 1
+	handler.runtimeConfig = base
+	handler.SetRuntimeConfigResolver(func(scope UsageScope) *runtimecfg.RuntimeConfig {
+		if scope.TenantID == "tenant-goal" {
+			return scoped
+		}
+		return base
+	})
+	handler.stampSessionUsageScope(context.Background(), session, UsageScope{
+		TenantID: "tenant-goal",
+	})
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+	handler.getGoalDriverState().noteContinuation(session.ID)
+
+	handler.sessionGoalDriverDecide(goalDriverTurnOutcome{SessionID: session.ID})
+
+	loaded, err := sessionManager.Get(context.Background(), session.ID)
+	require.NoError(t, err)
+	current, ok, err := goal.NewMetadataStore().Get(loaded)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Zero(t, current.RoundsStarted,
+		"session-scoped continuation limit must stop before admitting another round")
+}
+
 func TestUsageTotalTokensFallback(t *testing.T) {
 	if got := usageTotalTokens(nil); got != 0 {
 		t.Fatalf("nil usage must account 0, got %d", got)

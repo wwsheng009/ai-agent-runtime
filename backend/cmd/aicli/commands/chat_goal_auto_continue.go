@@ -15,6 +15,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	goaldriver "github.com/wwsheng009/ai-agent-runtime/internal/goal/driver"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -87,7 +88,6 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	// 见 docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md。
 	// 入口先记账（上一次 turn 的 usage）：恢复已超预算的 goal 时立即收敛。
 	accountGoalTurnUsageBestEffort(session)
-	limit := goalAutoContinuationLimit(session)
 	attempts := 0
 	errorStrikes := 0
 	noProgressStrikes := 0
@@ -95,7 +95,6 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	// 告警（同一语义工具批反复回放）且部署启用了 iterate_goal 时，下一次续跑
 	// 改用 IterateEscalationPrompt（恰好一次）。
 	escalationAttempted := false
-	iterationAvailable := goalIterationEscalationAvailable(session)
 	// doom_loop 信号上浮：本会话循环期间收到 tool_loop.doom_loop_warning 即
 	// 标记升级；升级注入时消费该标记（一次性）。事件处理器可能在其他 goroutine
 	// 派发，因此用 atomic 传递。
@@ -114,22 +113,124 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d", attempts), false)
 			return nil
 		}
-		decision, err := shouldAutoContinueActiveGoalDecision(session)
+		view, err := buildGoalDriverView(session, attempts, noProgressStrikes, escalationAttempted, doomWarned.Load())
 		if err != nil {
 			return err
 		}
-		if !decision.Continue {
+		decision := goaldriver.Decide(view)
+		switch decision.Action {
+		case goaldriver.ActionSubmitContinuation:
+			// 本次续跑循环即将执行续跑轮本身，消费掉此前因瞬时让位而重排的 kick，
+			// 避免同一段工作被 kick 再驱动一遍。
+			session.goalKickPending.Store(false)
+			// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
+			//（round-limit），不再提交续跑轮。放在 attempt 提交前，保证"轮数"与
+			// "实际提交的续跑轮"一一对应。
+			if reached, roundErr := admitGoalRoundForSession(session); roundErr != nil {
+				writeSessionDebugInfo(session, fmt.Sprintf("[goal] round accounting failed: %v", roundErr), false)
+			} else if reached {
+				markActiveGoalBlockedRoundLimit(session)
+				reportGoalRoundLimitReached(session)
+				return nil
+			}
+			attempts++
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation attempt=%d limit=%d status=%s", attempts, view.ContinuationLimit, decision.Status), false)
+			session.goalContinuationAttempt.Store(int32(attempts))
+			attemptCtx, cancel := goalAutoContinuationAttemptContext(ctx, session)
+			toolsBefore := chatTurnToolExecutions(session)
+			var (
+				output      string
+				continueErr error
+			)
+			if decision.Prompt == runtimegoal.IterateEscalationPrompt {
+				escalationAttempted = true
+				doomWarned.Store(false)
+				writeSessionDebugInfo(session, fmt.Sprintf(
+					"[goal] auto continuation escalating to fresh-context iteration strikes=%d/%d doom_loop=%v",
+					noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit, view.DoomLoopAdvised), false)
+				output, continueErr = continuer.ContinueGoalWithPrompt(attemptCtx, session, decision.Prompt)
+			} else {
+				output, continueErr = continuer.ContinueGoal(attemptCtx, session)
+			}
+			cancel()
+			toolsDelta := chatTurnToolExecutions(session) - toolsBefore
+			if continueErr != nil {
+				// 真实取消（用户 ESC / 远程 cancel）：立即停止，不计入错误容忍。
+				if errors.Is(continueErr, context.Canceled) {
+					writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d error=%q", attempts, continueErr.Error()), false)
+					return nil
+				}
+				errorStrikes++
+				writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation retry_after_error attempt=%d strikes=%d/%d error=%q", attempts, errorStrikes, goalAutoContinuationErrorStrikeLimit, continueErr.Error()), false)
+				if errorStrikes >= goalAutoContinuationErrorStrikeLimit {
+					reportGoalAutoContinuationStoppedForErrors(session, errorStrikes)
+					return nil
+				}
+				continue
+			}
+			errorStrikes = 0
+			if exceeded, accErr := accountActiveGoalTurnUsage(session); accErr != nil {
+				writeSessionDebugInfo(session, fmt.Sprintf("[goal] goal usage accounting failed: %v", accErr), false)
+			} else if exceeded {
+				// 预算耗尽：置 budget_limited，并执行一次收尾轮（对齐 budget_limit
+				// steering：不再开新工作，只收尾并给出下一步）。
+				markActiveGoalBudgetLimited(session)
+				wrapCtx, wrapCancel := goalAutoContinuationAttemptContext(ctx, session)
+				_, wrapErr := continuer.ContinueGoalWithPrompt(wrapCtx, session, goalBudgetWrapUpPrompt)
+				wrapCancel()
+				if wrapErr != nil {
+					writeSessionDebugInfo(session, fmt.Sprintf("[goal] budget wrap-up turn failed: %q", wrapErr.Error()), false)
+				}
+				reportGoalBudgetLimited(session)
+				return nil
+			}
+			// 空响应/无进展判定（对齐 Codex 的 empty-response ×3）：本轮既无文本
+			// 产出、也没有工具执行才算空转；连续达到阈值即停止并置 blocked。
+			// 注：工具计数覆盖 CLI/shared 执行路径；计数不可得时按"有文本即非空转"
+			// 保守处理（不误伤）。
+			if strings.TrimSpace(output) == "" && toolsDelta <= 0 {
+				noProgressStrikes++
+				writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation no_progress strike=%d/%d attempt=%d", noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit, attempts), false)
+				if noProgressStrikes >= goalAutoContinuationNoProgressStrikeLimit {
+					reportGoalAutoContinuationStoppedForNoProgress(session, noProgressStrikes)
+					return nil
+				}
+				continue
+			}
+			noProgressStrikes = 0
+			// 有实质进展即重置升级状态：后续若再次连续空转，允许再来一次升级。
+			escalationAttempted = false
+		case goaldriver.ActionBudgetWrapUp:
+			session.goalKickPending.Store(false)
+			if markActiveGoalBudgetLimited(session) {
+				reportGoalBudgetLimited(session)
+			} else {
+				writeSessionDebugInfo(session, "[goal] token budget exhausted but mark budget_limited failed", false)
+			}
+			return nil
+		case goaldriver.ActionBlockRoundLimit:
+			session.goalKickPending.Store(false)
+			markActiveGoalBlockedRoundLimit(session)
+			reportGoalRoundLimitReached(session)
+			return nil
+		case goaldriver.ActionStop:
+			if decision.Reason == "continuation_limit" {
+				session.goalKickPending.Store(false)
+				reportGoalAutoContinuationLimitReached(session, view.ContinuationLimit)
+				return nil
+			}
+			runGoalTerminalWrapUp(ctx, continuer, session)
+			logGoalAutoContinuationStop(session, decision.Reason, attempts)
+			return nil
+		case goaldriver.ActionTerminalWrapUp:
+			runGoalTerminalWrapUp(ctx, continuer, session)
+			logGoalAutoContinuationStop(session, decision.Reason, attempts)
+			return nil
+		case goaldriver.ActionDefer:
 			// G3 终局收尾：本轮模型把 goal 置为终态后循环将退出；先执行一次
 			// 收尾轮（向用户交代结果/验证/产物），再退出。预算收尾轮（已有
 			// goalBudgetWrapUpPrompt 路径）不受影响。
-			if wrapPrompt := consumeGoalTerminalWrapUp(session); wrapPrompt != "" {
-				wrapCtx, wrapCancel := goalAutoContinuationAttemptContext(ctx, session)
-				_, wrapErr := continuer.ContinueGoalWithPrompt(wrapCtx, session, wrapPrompt)
-				wrapCancel()
-				if wrapErr != nil {
-					writeSessionDebugInfo(session, fmt.Sprintf("[goal] terminal wrap-up turn failed: %q", wrapErr.Error()), false)
-				}
-			}
+			runGoalTerminalWrapUp(ctx, continuer, session)
 			// 瞬时让位（queued_input：有排队输入，或排空中的过渡态）不是终局：
 			// 转成一次性 kick 交给清道夫重估（主循环顶部 / 排空落地路径），否则
 			// 主循环随后阻塞在读取上，没有任何事件再触发续跑——2026-10-18 真机：
@@ -144,116 +245,31 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			if decision.Reason == "update_goal_unavailable" {
 				reportGoalAutoContinuationUnavailableOnce(session)
 			}
-			state := "stopped"
-			if attempts == 0 {
-				state = "skipped"
-			}
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation %s reason=%s attempts_completed=%d", state, decision.Reason, attempts), false)
+			logGoalAutoContinuationStop(session, decision.Reason, attempts)
 			return nil
 		}
-		// 本次续跑循环即将执行续跑轮本身，消费掉此前因瞬时让位而重排的 kick，
-		// 避免同一段工作被 kick 再驱动一遍。
-		session.goalKickPending.Store(false)
-		if goalBudgetExhausted(session) {
-			if markActiveGoalBudgetLimited(session) {
-				reportGoalBudgetLimited(session)
-			} else {
-				writeSessionDebugInfo(session, "[goal] token budget exhausted but mark budget_limited failed", false)
-			}
-			return nil
-		}
-		if limit > 0 && attempts >= limit {
-			reportGoalAutoContinuationLimitReached(session, limit)
-			return nil
-		}
-		// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
-		//（round-limit），不再提交续跑轮。放在 attempt 提交前，保证"轮数"与
-		// "实际提交的续跑轮"一一对应。
-		if reached, roundErr := admitGoalRoundForSession(session); roundErr != nil {
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] round accounting failed: %v", roundErr), false)
-		} else if reached {
-			markActiveGoalBlockedRoundLimit(session)
-			reportGoalRoundLimitReached(session)
-			return nil
-		}
-		attempts++
-		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation attempt=%d limit=%d status=%s", attempts, limit, decision.GoalStatus), false)
-		session.goalContinuationAttempt.Store(int32(attempts))
-		attemptCtx, cancel := goalAutoContinuationAttemptContext(ctx, session)
-		toolsBefore := chatTurnToolExecutions(session)
-		output, continueErr := goalContinuationAttemptWithEscalation(
-			attemptCtx, continuer, session, noProgressStrikes, &doomWarned, &escalationAttempted, iterationAvailable)
-		cancel()
-		toolsDelta := chatTurnToolExecutions(session) - toolsBefore
-		if continueErr != nil {
-			// 真实取消（用户 ESC / 远程 cancel）：立即停止，不计入错误容忍。
-			if errors.Is(continueErr, context.Canceled) {
-				writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d error=%q", attempts, continueErr.Error()), false)
-				return nil
-			}
-			errorStrikes++
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation retry_after_error attempt=%d strikes=%d/%d error=%q", attempts, errorStrikes, goalAutoContinuationErrorStrikeLimit, continueErr.Error()), false)
-			if errorStrikes >= goalAutoContinuationErrorStrikeLimit {
-				reportGoalAutoContinuationStoppedForErrors(session, errorStrikes)
-				return nil
-			}
-			continue
-		}
-		errorStrikes = 0
-		if exceeded, accErr := accountActiveGoalTurnUsage(session); accErr != nil {
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] goal usage accounting failed: %v", accErr), false)
-		} else if exceeded {
-			// 预算耗尽：置 budget_limited，并执行一次收尾轮（对齐 budget_limit
-			// steering：不再开新工作，只收尾并给出下一步）。
-			markActiveGoalBudgetLimited(session)
-			wrapCtx, wrapCancel := goalAutoContinuationAttemptContext(ctx, session)
-			_, wrapErr := continuer.ContinueGoalWithPrompt(wrapCtx, session, goalBudgetWrapUpPrompt)
-			wrapCancel()
-			if wrapErr != nil {
-				writeSessionDebugInfo(session, fmt.Sprintf("[goal] budget wrap-up turn failed: %q", wrapErr.Error()), false)
-			}
-			reportGoalBudgetLimited(session)
-			return nil
-		}
-		// 空响应/无进展判定（对齐 Codex 的 empty-response ×3）：本轮既无文本
-		// 产出、也没有工具执行才算空转；连续达到阈值即停止并置 blocked。
-		// 注：工具计数覆盖 CLI/shared 执行路径；计数不可得时按"有文本即非空转"
-		// 保守处理（不误伤）。
-		if strings.TrimSpace(output) == "" && toolsDelta <= 0 {
-			noProgressStrikes++
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation no_progress strike=%d/%d attempt=%d", noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit, attempts), false)
-			if noProgressStrikes >= goalAutoContinuationNoProgressStrikeLimit {
-				reportGoalAutoContinuationStoppedForNoProgress(session, noProgressStrikes)
-				return nil
-			}
-			continue
-		}
-		noProgressStrikes = 0
-		// 有实质进展即重置升级状态：后续若再次连续空转，允许再来一次升级。
-		escalationAttempted = false
 	}
 }
 
-// goalContinuationAttemptWithEscalation 选择本次续跑注入的提示词：连续无进展
-// 达到共享升级阈值、或本会话已收到 doom_loop 告警（doomWarned），且部署启用了
-// iterate_goal（iterationAvailable）且尚未尝试过升级时，改用
-// IterateEscalationPrompt（恰好一次，doom 标记随之消费）。其余情况保持默认续跑提示。
-func goalContinuationAttemptWithEscalation(ctx context.Context, continuer aicliGoalContinuationExecutor, session *ChatSession, noProgressStrikes int, doomWarned *atomic.Bool, escalationAttempted *bool, iterationAvailable bool) (string, error) {
-	doomAdvised := doomWarned != nil && doomWarned.Load()
-	if runtimegoal.DecideIterationEscalation(noProgressStrikes, doomAdvised, escalationAttempted != nil && *escalationAttempted, iterationAvailable) {
-		if escalationAttempted != nil {
-			*escalationAttempted = true
-		}
-		if doomWarned != nil {
-			// 消费一次性信号：升级轮若仍无措，下一次同类告警才可再次升级。
-			doomWarned.Store(false)
-		}
-		writeSessionDebugInfo(session, fmt.Sprintf(
-			"[goal] auto continuation escalating to fresh-context iteration strikes=%d/%d doom_loop=%v",
-			noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit, doomAdvised), false)
-		return continuer.ContinueGoalWithPrompt(ctx, session, runtimegoal.IterateEscalationPrompt)
+func runGoalTerminalWrapUp(ctx context.Context, continuer aicliGoalContinuationExecutor, session *ChatSession) {
+	wrapPrompt := consumeGoalTerminalWrapUp(session)
+	if wrapPrompt == "" {
+		return
 	}
-	return continuer.ContinueGoal(ctx, session)
+	wrapCtx, wrapCancel := goalAutoContinuationAttemptContext(ctx, session)
+	_, wrapErr := continuer.ContinueGoalWithPrompt(wrapCtx, session, wrapPrompt)
+	wrapCancel()
+	if wrapErr != nil {
+		writeSessionDebugInfo(session, fmt.Sprintf("[goal] terminal wrap-up turn failed: %q", wrapErr.Error()), false)
+	}
+}
+
+func logGoalAutoContinuationStop(session *ChatSession, reason string, attempts int) {
+	state := "stopped"
+	if attempts == 0 {
+		state = "skipped"
+	}
+	writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation %s reason=%s attempts_completed=%d", state, reason, attempts), false)
 }
 
 // goalIterationEscalationAvailable 报告本会话部署是否启用了 iterate_goal 工具
@@ -614,43 +630,96 @@ func shouldAutoContinueActiveGoal(session *ChatSession) (bool, error) {
 	return decision.Continue, nil
 }
 
-func shouldAutoContinueActiveGoalDecision(session *ChatSession) (goalAutoContinuationDecision, error) {
+// goalDriverHostGateReason is the CLI host-specific gate shared by the error
+// recovery probe and the full continuation decision view. It intentionally
+// excludes disarmed/queued/pending/goal-state checks: those belong to the
+// shared internal/goal/driver decision core.
+func goalDriverHostGateReason(session *ChatSession) (string, error) {
 	if session == nil {
-		return goalAutoContinuationDecision{Reason: "session_nil"}, nil
+		return "session_nil", nil
 	}
 	if session.NoInteractive {
-		return goalAutoContinuationDecision{Reason: "no_interactive"}, nil
+		return "no_interactive", nil
 	}
 	if session.DisableTools {
-		return goalAutoContinuationDecision{Reason: "tools_disabled"}, nil
+		return "tools_disabled", nil
 	}
 	if session.JSONOutput {
-		return goalAutoContinuationDecision{Reason: "json_output"}, nil
+		return "json_output", nil
 	}
 	if session.IsInterrupted() {
-		return goalAutoContinuationDecision{Reason: "interrupted"}, nil
+		return "interrupted", nil
+	}
+	if session.RuntimeSession == nil {
+		return "runtime_session_missing", nil
+	}
+	if session.SessionManager == nil {
+		return "session_manager_missing", nil
+	}
+	if !canCurrentChatPathUpdateGoal(session) {
+		return "update_goal_unavailable", nil
+	}
+	return "", nil
+}
+
+// buildGoalDriverView is the CLI adapter for internal/goal/driver. It keeps
+// session/actor reads in the host and leaves the priority matrix to the shared
+// pure decision core.
+func buildGoalDriverView(session *ChatSession, continuationCount, noProgressStrikes int, escalationAttempted, doomLoopAdvised bool) (goaldriver.View, error) {
+	view := goaldriver.View{
+		ContinuationCount:      continuationCount,
+		ContinuationLimit:      goalAutoContinuationLimit(session),
+		IterationToolAvailable: goalIterationEscalationAvailable(session),
+		EscalationAttempted:    escalationAttempted,
+		DoomLoopAdvised:        doomLoopAdvised,
+		NoProgressStrikes:      noProgressStrikes,
+	}
+	reason, err := goalDriverHostGateReason(session)
+	if err != nil || reason != "" {
+		view.HostGateReason = reason
+		return view, err
 	}
 	if session.goalContinuationDisarmed.Load() {
 		// G4 rearm 闸：恢复会话后默认不自动续跑（对齐 DSH goal 的 armed/
 		// disarmed 语义）；/goal resume 或带继续意图的用户消息重新武装。
-		return goalAutoContinuationDecision{Reason: "goal_disarmed"}, nil
-	}
-	if session.RuntimeSession == nil {
-		return goalAutoContinuationDecision{Reason: "runtime_session_missing"}, nil
-	}
-	if session.SessionManager == nil {
-		return goalAutoContinuationDecision{Reason: "session_manager_missing"}, nil
-	}
-	if !canCurrentChatPathUpdateGoal(session) {
-		return goalAutoContinuationDecision{Reason: "update_goal_unavailable"}, nil
+		view.DisarmedReason = session.goalContinuationDisarmReasonText()
+		if strings.TrimSpace(view.DisarmedReason) == "" {
+			view.DisarmedReason = "disarmed"
+		}
 	}
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
-		return goalAutoContinuationDecision{Reason: "queued_input"}, nil
+		view.QueuedInput = true
 	}
 	if sessionChatHasPendingInteraction(session) {
 		// A parked approval/tool/question still owns the run. Starting a goal
 		// continuation here would race the user's decision; the runtime-server
 		// driver uses the same durable-state gate.
+		view.PendingInteraction = true
+	}
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil {
+		return view, err
+	}
+	view.Goal = goal
+	view.HasGoal = ok
+	if ok && goal != nil {
+		view.BudgetExhausted = runtimegoal.BudgetExhausted(goal)
+	}
+	return view, nil
+}
+
+func shouldAutoContinueActiveGoalDecision(session *ChatSession) (goalAutoContinuationDecision, error) {
+	reason, err := goalDriverHostGateReason(session)
+	if err != nil || reason != "" {
+		return goalAutoContinuationDecision{Reason: reason}, err
+	}
+	if session.goalContinuationDisarmed.Load() {
+		return goalAutoContinuationDecision{Reason: "goal_disarmed"}, nil
+	}
+	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
+		return goalAutoContinuationDecision{Reason: "queued_input"}, nil
+	}
+	if sessionChatHasPendingInteraction(session) {
 		return goalAutoContinuationDecision{Reason: "pending_interaction"}, nil
 	}
 	goal, ok, err := currentSessionGoal(session)

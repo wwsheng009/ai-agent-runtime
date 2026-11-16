@@ -1613,6 +1613,27 @@ const (
 
 > §12.14 结论：本轮发现并关闭了 §12.13 提交后复审中的 6 个可复现行为缺口。P1 高层 assembler、非 ReAct 兼容直连、Goal 外层 shell、宿主展示壳与不同 `sessions.dir` authority boundary 仍按原边界保留。
 
+### 12.15 第十三轮切片：Goal decision core 单源化
+
+第十二轮之后，CLI 同步循环与 server `sessionGoalDriverDecide` 仍各自维护同一套“让位 → goal 态 → 预算 → continuation limit → round limit → escalation → 提交”的优先级。本轮把决策矩阵抽成纯函数，宿主只保留读取与副作用。
+
+| # | 项 | 处理 | 状态 | 证据 |
+|---|---|---|---|---|
+| R15 | Goal 决策矩阵仍双实现，任何一侧新增/调整门控都可能漂移 | 新增 `internal/goal/driver`：`View`、`Action`、`Decision`、纯 `Decide`。统一 host gate、disarm、queued input、pending interaction、goal 状态/终态 wrap-up、budget、continuation/round limit 与 iteration escalation 的优先级。 | ✅ | `internal/goal/driver/decision.go`；`decision_test.go` |
+| R15a | CLI 主循环仍手写预算/轮限/升级分支 | 新增 `buildGoalDriverView` 适配器；`maybeAutoContinueActiveGoal` 改为执行共享 `Decide` 的 action（defer/stop/terminal wrap-up/budget/block round/submit），错误/空转 strike 仍由宿主记账。 | ✅ | `cmd/aicli/commands/chat_goal_auto_continue.go:buildGoalDriverView` |
+| R15b | server 决策路径仍手写 goal 态/预算/轮限/升级分支 | `sessionGoalDriverDecide` 改为组装 `driver.View` 后执行 action；round admission、持久化、actor 提交与 terminal wrap-up 去重仍由 server 宿主执行。 | ✅ | `runtimeapi/session_goal_driver.go:sessionGoalDriverDecide` |
+| R16 | Goal driver 的 continuation limit / iterate_goal 可用性仍按 `UsageScope{}` 或全局 `runtimeConfig` 解析，租户/项目级配置可能被忽略 | 新增 session-scoped 解析：`goalDriverContinuationLimitForSession`、`goalDriverIterationEscalationAvailableForSession` 复用 `usageScopeForSession`；无 session 的 no-session wrapper 保持部署默认。 | ✅ | `runtimeapi/session_goal_driver.go`；`TestGoalDriverSessionScopedConfigResolution`；`TestGoalDriverDecideUsesSessionScopedContinuationLimit` |
+
+#### 12.15.1 验证
+
+- ✅ `go test ./internal/goal/driver ./internal/goal`（决策矩阵、TerminalWrapUp、budget/limit/round/escalation）
+- ✅ `internal/api/runtimeapi` 全包通过（155.8s；含 session-scoped limit 集成用例）
+- ✅ `cmd/aicli/commands` 全包通过（250.8s；`GOMAXPROCS=1` + `-test.parallel=1` 运行预编译 `-l` 测试二进制；普通 `go test` 的编译阶段受本机 paging file OOM 限制）
+- ✅ `go build -p 1 ./...`
+- ✅ `gofmt -l` 对改动文件无输出
+
+> §12.15 结论：Goal **决策矩阵**已单源化；CLI/server 仍保留各自的读取、持久化、actor 提交和 UI/审计外壳。Phase 2 的 `Loop`/审计事件/驱动者租约，以及 §12.13 的 server-only 兼容入口、非 ReAct 直连、宿主展示壳与 `sessions.dir` authority 边界仍未合并。
+
 ---
 
 ## 附录 A：关键证据索引
@@ -1747,4 +1768,5 @@ const (
 > 收敛顺序执行到：**P1 共享原语 + actor profile 装配已落地 → P2 控制面/审批/Goal 语义单源 → P3 Web ReAct 主路径已 actor 化 → P4 远程命令缺口基本关闭 → P5 lease authority 已独立**。
 > 第十轮（§12.12）进一步关闭了 close/delete 生命周期、server 每轮刷新、profile usage scope、prompt freeze、restored approval/expiry、remote answer、team owner fence/shutdown 与 health 诊断缺口；非 ReAct 兼容直连与双宿主外壳仍按明确边界保留。
 > 第十一轮（§12.13）关闭了 workspace-anchored 通用 skill 发现、lease 默认同域、Goal disarm/rearm、Team 终态清理与 TUI 事件顺序；第十二轮（§12.14）又修复了提交后复审发现的 Team summary 重入竞争与 Goal re-arm/系统取消/延迟 kick/预算收尾/round-limit resume 回归。
+> 第十三轮（§12.15）把 Goal 决策矩阵抽为 `internal/goal/driver.Decide`，CLI 与 server 共用；session-scoped continuation limit / iterate 可用性也改为按会话解析。Goal 的 Loop/审计/租约与宿主读写外壳仍按明确边界保留。
 > P0 的契约/诊断护栏与 fail-closed 审批边界继续保持；不得把“非 ReAct 兼容路径”或“不同 sessions.dir 的部署”宣传为全量同源。
