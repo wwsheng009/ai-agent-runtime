@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -14,9 +16,13 @@ import (
 )
 
 type handlerTeamLifecycleService struct {
-	handler    *Handler
-	supervisor *teamsupervisor.Supervisor
+	handler           *Handler
+	supervisor        *teamsupervisor.Supervisor
+	terminalCleanupMu sync.Mutex
+	terminalCleanup   map[string]struct{}
 }
+
+const teamTerminalCleanupTimeout = 10 * time.Second
 
 func newHandlerTeamLifecycleService(handler *Handler) *handlerTeamLifecycleService {
 	if handler == nil {
@@ -178,7 +184,158 @@ func (s *handlerTeamLifecycleService) ReplayStoredTerminalEvents(teamID string) 
 			Payload:   payload,
 			Timestamp: event.Timestamp,
 		})
+		if strings.EqualFold(strings.TrimSpace(event.Type), "team.completed") {
+			s.closeTerminalTeammatesAsync(teamID)
+		}
 	}
+}
+
+// closeTerminalTeammatesAsync mirrors the CLI host's terminal-team cleanup:
+// after a team reaches terminal state, stop its non-lead child sessions. The
+// close path is idempotent and best-effort; a team whose status is still active
+// is never torn down.
+func (s *handlerTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
+	if s == nil || s.handler == nil {
+		return
+	}
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return
+	}
+	s.terminalCleanupMu.Lock()
+	if s.terminalCleanup == nil {
+		s.terminalCleanup = map[string]struct{}{}
+	}
+	if _, exists := s.terminalCleanup[teamID]; exists {
+		s.terminalCleanupMu.Unlock()
+		return
+	}
+	s.terminalCleanup[teamID] = struct{}{}
+	s.terminalCleanupMu.Unlock()
+	go func() {
+		defer func() {
+			s.terminalCleanupMu.Lock()
+			delete(s.terminalCleanup, teamID)
+			s.terminalCleanupMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), teamTerminalCleanupTimeout)
+		defer cancel()
+		_, _ = team.ReconcileTerminalTeamState(ctx, s.terminalTeamServices(), teamID)
+		s.waitForTeamSessionsSettled(ctx, teamID)
+		_ = s.closeTerminalTeammates(context.Background(), teamID)
+	}()
+}
+
+func (s *handlerTeamLifecycleService) terminalTeamServices() team.TerminalTeamServices {
+	services := team.TerminalTeamServices{
+		IgnoreBusyTeammates: true,
+	}
+	if s == nil || s.handler == nil {
+		return services
+	}
+	services.Store = s.handler.getTeamStore()
+	if orchestrator := s.handler.getTeamOrchestrator(); orchestrator != nil {
+		services.Planner = orchestrator.LeadPlanner
+		services.Mailbox = orchestrator.Mailbox
+		services.Events = orchestrator.Events
+	}
+	return services
+}
+
+func (s *handlerTeamLifecycleService) waitForTeamSessionsSettled(ctx context.Context, teamID string) {
+	if s == nil || s.handler == nil || s.handler.getSessionRuntimeStore() == nil {
+		return
+	}
+	store := s.handler.getTeamStore()
+	if store == nil {
+		return
+	}
+	record, err := store.GetTeam(ctx, teamID)
+	if err != nil || record == nil {
+		return
+	}
+	teammates, err := store.ListTeammates(ctx, teamID)
+	if err != nil {
+		return
+	}
+	sessionIDs := make([]string, 0, len(teammates)+1)
+	if lead := strings.TrimSpace(record.LeadSessionID); lead != "" {
+		sessionIDs = append(sessionIDs, lead)
+	}
+	for _, teammate := range teammates {
+		if sessionID := strings.TrimSpace(teammate.SessionID); sessionID != "" {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+	}
+	runtimeStore := s.handler.getSessionRuntimeStore()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		busy := false
+		for _, sessionID := range sessionIDs {
+			state, stateErr := runtimeStore.LoadState(ctx, sessionID)
+			if stateErr != nil || state == nil {
+				continue
+			}
+			switch state.Status {
+			case chat.SessionRunning, chat.SessionWaitingApproval, chat.SessionWaitingInput, chat.SessionRewinding:
+				busy = true
+			}
+		}
+		if !busy {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *handlerTeamLifecycleService) closeTerminalTeammates(ctx context.Context, teamID string) error {
+	if s == nil || s.handler == nil {
+		return nil
+	}
+	store := s.handler.getTeamStore()
+	if store == nil {
+		return nil
+	}
+	record, err := store.GetTeam(ctx, teamID)
+	if err != nil {
+		return err
+	}
+	if record == nil || record.Status == team.TeamStatusActive {
+		return nil
+	}
+	leadSessionID := strings.TrimSpace(record.LeadSessionID)
+	teammates, err := store.ListTeammates(ctx, teamID)
+	if err != nil {
+		return err
+	}
+	controller := s.handler.getAgentSessionController()
+	var closeErr error
+	for _, teammate := range teammates {
+		sessionID := strings.TrimSpace(teammate.SessionID)
+		if sessionID == "" || strings.EqualFold(sessionID, leadSessionID) ||
+			strings.EqualFold(strings.TrimSpace(teammate.ID), "lead") {
+			continue
+		}
+		if controller != nil {
+			if _, err := controller.Close(ctx, sessionID); err != nil && closeErr == nil {
+				closeErr = err
+			}
+			continue
+		}
+		s.handler.stopSessionForTerminalState(ctx, sessionID, "team_completed")
+		if s.handler.sessionManager != nil {
+			if err := s.handler.sessionManager.Close(ctx, sessionID); err != nil && err != chat.ErrSessionNotFound && closeErr == nil {
+				closeErr = err
+			}
+		}
+		s.handler.releaseSessionSupervisionObligations(ctx, sessionID)
+	}
+	return closeErr
 }
 
 func isReplayableTeamLifecycleEvent(eventType string) bool {

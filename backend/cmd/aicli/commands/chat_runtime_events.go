@@ -8832,6 +8832,7 @@ func (b *chatRuntimeEventBridge) renderAsyncTeamSummaryFallback(event runtimeeve
 		!b.isTerminalTeam(teamID) {
 		return chatRuntimeTimelineEvent{}
 	}
+	b.ensureTerminalTeamCompletedRendered(teamID)
 	content := truncateChatRuntimeText(payloadStringValue(event.Payload["content"]), 200)
 	if content == "" {
 		return chatRuntimeTimelineEvent{}
@@ -9741,6 +9742,38 @@ func (b *chatRuntimeEventBridge) isTerminalTeam(teamID string) bool {
 	return team.IsTerminalTeamStatus(record.Status)
 }
 
+// ensureTerminalTeamCompletedRendered closes a transport reordering gap: an
+// assistant summary can arrive before the team.completed lifecycle callback is
+// rendered. When the durable team is already terminal, emit the completed row
+// first so the user-visible order (completed -> summary) is stable.
+func (b *chatRuntimeEventBridge) ensureTerminalTeamCompletedRendered(teamID string) {
+	if b == nil || b.session == nil || b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.TeamStore == nil {
+		return
+	}
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return
+	}
+	record, err := b.session.LocalRuntimeHost.TeamStore.GetTeam(context.Background(), teamID)
+	if err != nil || record == nil || !team.IsTerminalTeamStatus(record.Status) {
+		return
+	}
+	status := strings.TrimSpace(string(record.Status))
+	if status == "" {
+		status = "done"
+	}
+	rendered := renderChatRuntimeTimelineEvent(runtimeevents.Event{
+		Type: "team.completed",
+		Payload: map[string]interface{}{
+			"team_id": teamID,
+			"status":  status,
+		},
+	})
+	if b.shouldRenderTimelineEvent(rendered) {
+		b.emitTimelineEvent(rendered)
+	}
+}
+
 func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.Event) string {
 	if b == nil || b.session == nil || event.Type != runtimechat.EventAssistantMessage {
 		return ""
@@ -9760,6 +9793,7 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 		!b.isTerminalTeam(teamID) {
 		return ""
 	}
+	b.ensureTerminalTeamCompletedRendered(teamID)
 	content := strings.TrimSpace(payloadStringValue(event.Payload["content"]))
 	if content == "" {
 		return ""

@@ -196,6 +196,7 @@ func (h *Handler) UpdateSessionGoal(w http.ResponseWriter, r *http.Request) {
 	// active goal；resume/budget-raise 把目标恢复 active）。开关关闭或 CLI 在场
 	// 时 kick 内部直接让位，行为同 gap-2。
 	if applied && persisted != nil && persisted.Status == runtimegoal.StatusActive {
+		h.goalDriverRearm(sessionID, "goal_"+action)
 		h.goalDriverKick(sessionID)
 	}
 	h.writeJSON(w, http.StatusOK, resp)

@@ -158,6 +158,7 @@ func (h *Handler) runAgentChatViaSessionActor(ctx context.Context, w http.Respon
 		PermissionMode: strings.TrimSpace(sessionPermissionMode(run.Session)),
 		BudgetTokens:   run.Request.BudgetTokens,
 	}
+	h.goalDriverMaybeRearmForUserIntent(run.Session, run.Prompt)
 	planningMode := h.resolvePlanningMode(run.Request.PlanningMode, run.SelectedConfig)
 	routeRequested := run.Request.EnableRoute ||
 		strings.EqualFold(strings.TrimSpace(planningMode), string(agent.OrchestrationPlannerPreferred)) ||

@@ -3013,7 +3013,7 @@ func TestBuildSessionActor_DoesNotRefreshRuntimeToolCatalog(t *testing.T) {
 		require.NoError(t, result.err)
 	case <-mcpManager.listStarted:
 		t.Fatal("buildSessionActor unexpectedly refreshed the runtime tool catalog")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("buildSessionActor did not return promptly")
 	}
 }

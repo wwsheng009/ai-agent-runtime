@@ -848,29 +848,11 @@ func rearmGoalContinuation(session *ChatSession, reason string) {
 	}
 }
 
-// goalContinueIntentPhrases 是「用户在消息中明示继续」的保守匹配表（G4 的第二
-// 个 rearm 入口；第一个是 /goal resume）。只认短促、无歧义的显式继续指令——
-// 去除首尾空白与常见句末标点后整串相等才命中；「看一下当前状态」这类查询必须
-// 不命中，否则 rearm 后 turn 结束立即恢复自主续跑，正是 G4 要消除的幽灵续跑。
-// 2026-10-18 现场事故修复：此前注释/设计文档承诺该入口，但代码只有 /goal resume。
-var goalContinueIntentPhrases = map[string]struct{}{
-	"继续": {}, "继续吧": {}, "继续执行": {}, "继续干活": {}, "继续工作": {}, "请继续": {},
-	"接着": {}, "接着来": {}, "接着做": {}, "接着干": {}, "往下做": {}, "往下干": {},
-	"恢复": {}, "恢复吧": {}, "恢复执行": {}, "干吧": {},
-	"continue": {}, "continue please": {}, "please continue": {}, "go on": {},
-	"keep going": {}, "carry on": {}, "proceed": {}, "resume": {}, "keep working": {},
-}
-
 // isGoalContinueIntentMessage 判定一条用户消息是否属于显式继续意图。
-// 归一化：去首尾空白 → 去句末标点/省略号 → 小写（ASCII）后整串比对。
+// The phrase table lives in internal/goal so the runtime-server driver applies
+// the same re-arm rule.
 func isGoalContinueIntentMessage(message string) bool {
-	normalized := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(message), "。．.!！?？~～… "))
-	if normalized == "" {
-		return false
-	}
-	normalized = strings.ToLower(normalized)
-	_, ok := goalContinueIntentPhrases[normalized]
-	return ok
+	return runtimegoal.IsContinueIntentMessage(message)
 }
 
 // maybeRearmGoalContinuationForUserIntent 在用户消息进入 turn 前判定显式继续

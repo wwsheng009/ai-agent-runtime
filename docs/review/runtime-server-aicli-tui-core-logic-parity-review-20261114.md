@@ -1561,7 +1561,7 @@ const (
 2. **宿主薄包装仍双实现**：`buildSessionAgentForContext` / `buildLocalChatAgent`、AgentControl 列表投影、Team lifecycle 的视图/清理方法没有合并为一个包；本轮已统一会改变状态的关键动作（close、approval、owner fence、shutdown），剩余差异属于宿主外壳。
 3. **Goal 外层驱动 shell**：CLI 同步决策循环与 server `session_end` 事件驱动仍是两个 shell；策略、prompt、round、metadata、strike、延迟接管与缺省开关已共享/对齐。部署仍可用 `goal.serverAutoContinuation=false` 显式关闭服务端驱动，避免与 CLI 进程形成双驱动。
 4. **TUI 通用 skill 目录发现**：本节为第九轮时点；第十一轮已把 config/Codex 兼容/热加载候选目录统一锚定到会话 `WorkspaceAnchor`，并受 session folder trust 门控，详见 §12.13。
-5. **Deployment authority**：lease store 已独立且默认同域；不同 `sessions.dir` 或显式 lease 路径仍形成不同 authority domain。
+5. **Deployment authority**：server/TUI 在未显式覆盖 lease path/DSN 时现在都解析到同一 `<sessions.dir>/runtime/session_leases.sqlite`；不同 `sessions.dir` 或显式 lease 覆盖仍按不同 authority domain 诊断。
 
 ### 12.13 第十一轮切片：剩余可修复边界收敛
 
@@ -1573,13 +1573,19 @@ const (
 | R2 | `enable_react=false` 规划/planned-subagent/patch 直连 | 保留为 server-only 兼容入口：TUI 无对应请求面，强行 actor 化会忽略 planned-subagent/patch 字段并改变 API 语义 | ⚪ | `runtimeapi/agent_chat_request.go:agentChatUsesSessionActor` |
 | R3 | 两层宿主薄包装 / Team lifecycle 视图方法双实现 | 状态变更动作（close、approval、owner fence、shutdown、run prepare）已统一；剩余方法是各宿主 API 投影/展示适配，不再复制执行决策 | ⚪ | `§12.12` + `runtimehost/team_owner.go` |
 | R4 | Goal 外层驱动 shell | CLI 同步循环与 server `session_end` 事件驱动仍是两个入口 shell；策略、阈值、prompt、round、metadata、延迟接管与缺省开关已共享/对齐 | ⚪ | `internal/goal`；`runtimeapi/session_goal_driver.go`；`cmd/aicli/commands/chat_goal_auto_continue.go` |
-| R5 | 不同 `sessions.dir` 形成不同 authority domain | 这是部署配置边界，不是执行逻辑分叉：同一 store 路径下 lease/authority 已单源；不同路径必须按不同 authority domain 诊断，禁止伪装成同一权威 | ⚪ | `sessionruntime/authority.go`；`sessionruntime/paths.go` |
+| R5 | server 未显式配置 lease 路径时可能回退到 runtime store/memory，与 TUI 的 `<sessions.dir>/runtime/session_leases.sqlite` 分裂 | `resolveServerLeaseStorePath` 在 path/DSN 都为空时按共享 `ResolvePaths` 解析默认 lease 文件；服务端不再因 embedded/未 ApplyDefaults 而落入不同 authority domain。不同 `sessions.dir` 本身仍是显式部署域差异 | ✅ | `runtimeapi/handler.go:resolveServerLeaseStorePath`；`session_lease_path_test.go`；`sessionruntime/paths.go`；`sessionruntime/authority.go` |
+| R6 | server Goal driver 缺少 CLI 的 user-interrupt disarm / explicit-continue rearm 闸 | server 在非 CLI 冷却窗内对 `user_interrupt` 置 disarm；`/goal set/resume/budget` 与保守的显式继续意图消息 rearm；continue-intent 词表下沉到 `internal/goal`，两端共用 | ✅ | `internal/goal/intent.go`；`runtimeapi/session_goal_driver.go`；`session_goal_handlers.go`；`agent_chat_actor.go` |
+| R7 | server Team 完成后不关闭非 lead 子会话 | `team.completed` 触发共享 `team.ReconcileTerminalTeamState`，等待 runtime session 收敛（有界 10s），再通过 AgentSessionController Close 非 lead teammates；重启回放终态事件同样触发 | ✅ | `runtimeapi/team_lifecycle.go`；`runtimeapi/team_handlers.go` |
+| R8 | TUI `team.completed` 与 `[team summary]` 可能因事件异步投递乱序 | team 已终态但 completed 行尚未渲染时，先合成并渲染 completed 行，再渲染 assistant summary；dedup key 保证迟到事件不重复 | ✅ | `cmd/aicli/commands/chat_runtime_events.go`；`TestAICLIChatActorExecutor_AutoStartQueuedTasksStaySerializedPerTeammate` |
 
 #### 12.13.1 验证
 
 - ✅ `go build -p 1 ./...`
 - ✅ `cmd/aicli/commands` 的 skill/plugin/folder-trust 相关测试
 - ✅ `TestResolveConfiguredSkillDirsForRootUsesSessionWorkspace`：workspace skill 在 trusted 下发现、untrusted 下被排除
+- ✅ `internal/goal` intent 测试；`internal/api/runtimeapi` 的 lease path / goal disarm 测试
+- ✅ `internal/api/runtimeapi` 全包（lease path / goal disarm / team terminal cleanup 接线）
+- ✅ `cmd/aicli/commands` 全包（含 serialized team timeline `-count=5` 与全包）
 
 > 结论：**可跨宿主复现的行为缺口已全部关闭**。剩余四项为 server-only 兼容入口、宿主展示壳、Goal 外层入口壳与显式部署 authority 边界；不再声称这些路径与 TUI 逐行同一实现。
 

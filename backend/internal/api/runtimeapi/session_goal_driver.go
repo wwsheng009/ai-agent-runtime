@@ -76,6 +76,10 @@ type goalDriverState struct {
 	deciding map[string]struct{}
 	// wrapUps deduplicates terminal wrap-up prompts by goal_id|status|updated_at.
 	wrapUps map[string]struct{}
+	// disarmed records the user's explicit stop/intent gate. It mirrors the CLI
+	// goalContinuationDisarmed flag: a user interrupt freezes autonomous
+	// continuation until /goal resume or an explicit continue message re-arms.
+	disarmed map[string]string
 }
 
 func newGoalDriverState() *goalDriverState {
@@ -89,6 +93,7 @@ func newGoalDriverState() *goalDriverState {
 		continuations:       map[string]int{},
 		deciding:            map[string]struct{}{},
 		wrapUps:             map[string]struct{}{},
+		disarmed:            map[string]string{},
 	}
 }
 
@@ -130,6 +135,44 @@ func (s *goalDriverState) cliRemaining(sessionID string, now time.Time) (time.Du
 		return 0, false
 	}
 	return remaining, true
+}
+
+func (s *goalDriverState) disarm(sessionID, reason string) bool {
+	if s == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, already := s.disarmed[sessionID]; already {
+		return false
+	}
+	if s.disarmed == nil {
+		s.disarmed = map[string]string{}
+	}
+	s.disarmed[sessionID] = strings.TrimSpace(reason)
+	return true
+}
+
+func (s *goalDriverState) rearm(sessionID string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.disarmed[sessionID]; !ok {
+		return false
+	}
+	delete(s.disarmed, sessionID)
+	return true
+}
+
+func (s *goalDriverState) disarmedReason(sessionID string) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.disarmed[sessionID])
 }
 
 // scheduleCLIRecheck arms one delayed takeover check per session. A newer call
@@ -347,6 +390,35 @@ func (h *Handler) goalDriverNoteCLI(sessionID string) {
 	state.resetContinuations(sessionID)
 }
 
+// goalDriverRearm clears the user-intent gate and starts a fresh continuation
+// budget. It is used by explicit /goal mutations and by a conservative
+// continue-intent user message, mirroring the CLI rearm entries.
+func (h *Handler) goalDriverRearm(sessionID, reason string) {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	state := h.getGoalDriverState()
+	if !state.rearm(sessionID) {
+		return
+	}
+	state.resetStrikes(sessionID)
+	state.resetContinuations(sessionID)
+	logger.Infof("goal driver: rearmed session=%s reason=%s", sessionID, strings.TrimSpace(reason))
+}
+
+// goalDriverMaybeRearmForUserIntent applies the shared continue-intent matcher
+// to a Web user turn. Only an active persisted goal can be re-armed.
+func (h *Handler) goalDriverMaybeRearmForUserIntent(session *chat.Session, message string) {
+	if h == nil || session == nil || !goal.IsContinueIntentMessage(message) {
+		return
+	}
+	current, hasGoal, err := goal.NewMetadataStore().Get(session)
+	if err != nil || !hasGoal || current == nil || current.Status != goal.StatusActive {
+		return
+	}
+	h.goalDriverRearm(session.ID, "user_continue_intent")
+}
+
 // subscribeGoalDriver 把 actor 终态事件绑定到驱动器（幂等，Once 内调用）。
 // bus 由调用方注入：本函数在 attachRuntimeEventBridge 的 Once 内运行，若再经
 // getRuntimeEventBus() 反拉总线会重入同一 sync.Once 自锁——首次取总线即永久
@@ -396,6 +468,10 @@ func (h *Handler) goalDriverKick(sessionID string) {
 		return
 	}
 	state := h.getGoalDriverState()
+	if reason := state.disarmedReason(sessionID); reason != "" {
+		logger.Debugf("goal driver: defer session=%s reason=disarmed:%s", sessionID, reason)
+		return
+	}
 	if state.cliActive(sessionID, time.Now()) {
 		// CLI 在场：续跑先由 CLI 负责；窗口结束后服务端再接管，而不是永久
 		// 丢弃这次 kick。
@@ -434,10 +510,21 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 	if !h.goalDriverEnabled() {
 		return
 	}
-	// CLI 冷却窗内完全让位（必须在 strike 记账之前）：CLI 在场时 goal 推进、
-	// 记账与 strike 全部由 CLI 循环负责，服务端计数不得被 CLI 轮污染。
+	if reason := state.disarmedReason(sessionID); reason != "" {
+		logger.Debugf("goal driver: defer session=%s reason=disarmed:%s", sessionID, reason)
+		return
+	}
+	// CLI-owned runs handle their own disarm/rearm gate. Only a server-owned
+	// user interrupt freezes the server driver; otherwise a CLI re-arm would be
+	// invisible to this process and the server would stay frozen forever.
 	if state.cliActive(sessionID, time.Now()) {
 		h.scheduleGoalDriverCLITakeover(sessionID)
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(outcome.CancelSource), "user_interrupt") {
+		if state.disarm(sessionID, "user_interrupt") {
+			logger.Infof("goal driver: disarmed session=%s reason=user_interrupt", sessionID)
+		}
 		return
 	}
 	// 子代理会话不驱动（与 gap-1 指引注入同口径）。

@@ -2436,6 +2436,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// set on a session is visible on the next web text turn too.
 	if session != nil && isBaseSessionContext(sessionCtx) {
 		h.applyRuntimeServerGoalGuidance(a, session)
+		h.goalDriverMaybeRearmForUserIntent(session, extractLastUserPrompt(req.Messages))
 	}
 	usesSessionHistory := session != nil && (len(req.Messages) == 0 || (len(req.Messages) == 1 && strings.EqualFold(strings.TrimSpace(req.Messages[0]["role"]), "user")))
 	if usesSessionHistory {
@@ -5627,8 +5628,7 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 
 	storePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.StorePath)
 	storeDSN := strings.TrimSpace(config.SessionRuntime.StoreDSN)
-	leasePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.LeaseStorePath)
-	leaseDSN := strings.TrimSpace(config.SessionRuntime.LeaseStoreDSN)
+	leasePath, leaseDSN := resolveServerLeaseStorePath(config, configFile)
 	readPool := config.SessionRuntime.ReadPool
 	hasStoreConfig := storePath != "" || storeDSN != ""
 	// P1.7：读池配置在构造期生效，故非默认时纳入 store 标识（变更即重建）；
@@ -5759,6 +5759,33 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 		"lease_uses_dsn":   leaseDSN != "",
 	})
 	return true, nil
+}
+
+// resolveServerLeaseStorePath resolves the cross-process lease domain. Embedded
+// hosts may not have gone through sessionruntime.ApplyDefaults, so an empty
+// config value must still map to the same shared default path aicli uses rather
+// than falling back to the runtime store or process memory.
+func resolveServerLeaseStorePath(config *runtimecfg.RuntimeConfig, configFile string) (string, string) {
+	if config == nil {
+		return "", ""
+	}
+	path := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.LeaseStorePath)
+	dsn := strings.TrimSpace(config.SessionRuntime.LeaseStoreDSN)
+	if path == "" && dsn == "" {
+		resolved := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+			Config:     config,
+			ConfigFile: configFile,
+			Mode:       sessionruntime.ModeServer,
+		})
+		// Embedded/test hosts that keep the runtime in memory and do not bind an
+		// explicit sessions.dir should not silently open the user-level lease
+		// database. Production/durable hosts (or an explicit sessions.dir) get
+		// the shared default path aicli uses.
+		if resolved.SessionRuntimeStorePath != "" || strings.TrimSpace(config.Sessions.Dir) != "" {
+			path = resolved.SessionLeaseStorePath
+		}
+	}
+	return path, dsn
 }
 
 func closeRuntimeStore(store chat.RuntimeStateStore, eventStore chat.EventStore) {

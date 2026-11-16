@@ -23,10 +23,35 @@ func newGoalDriverTestHandler(t *testing.T) *Handler {
 
 func TestGoalDriverDisabledByDefault(t *testing.T) {
 	handler := newGoalDriverTestHandler(t)
-	// 无配置（resolveRuntimeConfig 零值路径）时开关必须为 false。
+	// A zero-value Handler has no runtime config; only DefaultRuntimeConfig
+	// enables the driver. This pins the nil-config degradation.
 	if handler.goalDriverEnabled() {
-		t.Fatal("server auto-continuation must default to disabled (zero behavior change)")
+		t.Fatal("zero-value handler without runtime config must not enable the driver")
 	}
+}
+
+func TestGoalDriverUserInterruptDisarmsUntilExplicitRearm(t *testing.T) {
+	handler := newGoalDriverTestHandler(t)
+	handler.runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+	state := handler.getGoalDriverState()
+	sessionID := "sess-goal-disarm"
+
+	handler.sessionGoalDriverEvaluate(goalDriverTurnOutcome{
+		SessionID:    sessionID,
+		Success:      false,
+		CancelSource: "user_interrupt",
+	})
+	require.Equal(t, "user_interrupt", state.disarmedReason(sessionID))
+
+	// A later terminal event must not re-enter the driver while disarmed.
+	handler.sessionGoalDriverEvaluate(goalDriverTurnOutcome{
+		SessionID: sessionID,
+		Success:   true,
+	})
+	require.Equal(t, "user_interrupt", state.disarmedReason(sessionID))
+
+	handler.goalDriverRearm(sessionID, "test_rearm")
+	require.Empty(t, state.disarmedReason(sessionID))
 }
 
 func TestGoalDriverCLICooldownBeforeStrikes(t *testing.T) {
