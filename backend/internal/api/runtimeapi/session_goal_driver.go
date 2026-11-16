@@ -59,6 +59,7 @@ const goalDriverCooldown = goal.ContinuationCLICooldownWindow
 type goalDriverState struct {
 	mu                  sync.Mutex
 	cliLastSeen         map[string]time.Time // sessionID → 最近一次 CLI 来源 turn 上报
+	cliRecheck          map[string]*time.Timer
 	errorStrikes        map[string]int
 	noProgStrikes       map[string]int
 	escalationAttempted map[string]struct{}
@@ -80,6 +81,7 @@ type goalDriverState struct {
 func newGoalDriverState() *goalDriverState {
 	return &goalDriverState{
 		cliLastSeen:         map[string]time.Time{},
+		cliRecheck:          map[string]*time.Timer{},
 		errorStrikes:        map[string]int{},
 		noProgStrikes:       map[string]int{},
 		escalationAttempted: map[string]struct{}{},
@@ -110,6 +112,51 @@ func (s *goalDriverState) cliActive(sessionID string, now time.Time) bool {
 		return false
 	}
 	return now.Sub(last) < goalDriverCooldown
+}
+
+// cliRemaining reports how long the CLI presence window still has to run.
+func (s *goalDriverState) cliRemaining(sessionID string, now time.Time) (time.Duration, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, ok := s.cliLastSeen[sessionID]
+	if !ok {
+		return 0, false
+	}
+	remaining := goalDriverCooldown - now.Sub(last)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
+}
+
+// scheduleCLIRecheck arms one delayed takeover check per session. A newer call
+// replaces the previous timer; the callback re-checks CLI presence, so an
+// extended CLI window never causes an early duplicate submission.
+func (s *goalDriverState) scheduleCLIRecheck(sessionID string, delay time.Duration, fn func()) {
+	if s == nil || strings.TrimSpace(sessionID) == "" || fn == nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	s.mu.Lock()
+	if existing := s.cliRecheck[sessionID]; existing != nil {
+		existing.Stop()
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		if s.cliRecheck[sessionID] == timer {
+			delete(s.cliRecheck, sessionID)
+		}
+		s.mu.Unlock()
+		fn()
+	})
+	s.cliRecheck[sessionID] = timer
+	s.mu.Unlock()
 }
 
 func (s *goalDriverState) noteError(sessionID string) int {
@@ -350,7 +397,9 @@ func (h *Handler) goalDriverKick(sessionID string) {
 	}
 	state := h.getGoalDriverState()
 	if state.cliActive(sessionID, time.Now()) {
-		// CLI 在场：resume 后的续跑由 CLI 的 requestGoalContinuationKick 负责。
+		// CLI 在场：续跑先由 CLI 负责；窗口结束后服务端再接管，而不是永久
+		// 丢弃这次 kick。
+		h.scheduleGoalDriverCLITakeover(sessionID)
 		return
 	}
 	if !h.goalDriverBaseSession(sessionID) {
@@ -388,6 +437,7 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 	// CLI 冷却窗内完全让位（必须在 strike 记账之前）：CLI 在场时 goal 推进、
 	// 记账与 strike 全部由 CLI 循环负责，服务端计数不得被 CLI 轮污染。
 	if state.cliActive(sessionID, time.Now()) {
+		h.scheduleGoalDriverCLITakeover(sessionID)
 		return
 	}
 	// 子代理会话不驱动（与 gap-1 指引注入同口径）。
@@ -429,6 +479,27 @@ func (h *Handler) sessionGoalDriverEvaluate(outcome goalDriverTurnOutcome) {
 		state.resetStrikes(sessionID)
 	}
 	go h.sessionGoalDriverDecide(outcome)
+}
+
+// scheduleGoalDriverCLITakeover arms a delayed re-evaluation for the end of the
+// CLI cooldown. The callback goes through the normal kick path, which re-reads
+// goal state and never assumes the CLI left work unfinished.
+func (h *Handler) scheduleGoalDriverCLITakeover(sessionID string) {
+	if h == nil || !h.goalDriverEnabled() {
+		return
+	}
+	state := h.getGoalDriverState()
+	remaining, ok := state.cliRemaining(sessionID, time.Now())
+	if !ok {
+		return
+	}
+	state.scheduleCLIRecheck(sessionID, remaining+10*time.Millisecond, func() {
+		if state.cliActive(sessionID, time.Now()) {
+			h.scheduleGoalDriverCLITakeover(sessionID)
+			return
+		}
+		h.goalDriverKick(sessionID)
+	})
 }
 
 // sessionGoalDriverDecide 在独立 goroutine 中完成记账、goal 态判定与提交。
@@ -568,8 +639,20 @@ func (h *Handler) goalDriverSubmitContinuationWithPrompt(ctx context.Context, se
 	if h == nil || h.sessionManager == nil {
 		return fmt.Errorf("goal driver: handler/session manager not configured")
 	}
-	if h.goalDriverActorBusy(sessionID) {
-		return fmt.Errorf("goal driver: session %s is busy", sessionID)
+	// The decision path can race a just-started external run. Retry within a
+	// bounded window instead of dropping the continuation permanently; if the
+	// run is still active after the window, that run's terminal event re-enters
+	// the driver.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.goalDriverActorBusy(sessionID) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("goal driver: session %s is busy", sessionID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	hub := h.getSessionHub()
 	if hub == nil {
@@ -757,7 +840,8 @@ func (h *Handler) goalDriverLoadSession(ctx context.Context, sessionID string) (
 	return session, session != nil, nil
 }
 
-// goalDriverEnabled 读配置开关（缺省 false = 行为零变化）。
+// goalDriverEnabled 读配置开关（DefaultRuntimeConfig 缺省开启；显式 false
+// 可在部署中关闭）。
 func (h *Handler) goalDriverEnabled() bool {
 	if h == nil {
 		return false

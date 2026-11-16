@@ -478,7 +478,11 @@ func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs
 			// --no-skills：只保留 CLI 显式目录，不再并入会话解析出的自动发现结果。
 			return appendUniqueExistingDirs(nil, cliSkillDirs)
 		}
-		return mergeActivePluginSkillDirs(appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs))
+		return mergeActivePluginSkillDirsForRoot(
+			appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs),
+			session.WorkspaceAnchor,
+			sessionProjectScopeAllowed(session),
+		)
 	}
 	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs, includeDiscovered)
 }

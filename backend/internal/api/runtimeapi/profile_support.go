@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
@@ -17,6 +18,7 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
@@ -193,6 +195,17 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 		}
 	}
 	return state, cleanup, nil
+}
+
+// resolveProfileStateForSession resolves the full runtime surface for an
+// existing session. Callers must run the returned cleanup when they no longer
+// need the state (profile-scoped MCP managers are live resources).
+func (h *Handler) resolveProfileStateForSession(ctx context.Context, session *chat.Session, profileRef, agentID string) (*profileRuntimeState, func(), error) {
+	if session == nil {
+		return nil, nil, nil
+	}
+	sessionCtx := runtimehost.ExtractSessionContext(session)
+	return h.resolveProfileRuntimeState(ctx, profileRef, agentID, usageScopeFromSessionContext(sessionCtx), sessionCtx.WorkspacePath)
 }
 
 func (h *Handler) resolveProfileSessionState(profileRef, agentID string, workspacePath string) (*profileRuntimeState, error) {

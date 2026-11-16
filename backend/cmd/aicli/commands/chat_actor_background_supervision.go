@@ -152,11 +152,14 @@ func disarmLocalChatSessionMonitors(session *ChatSession) int {
 	if session == nil || session.RuntimeSession == nil {
 		return 0
 	}
-	host := session.LocalRuntimeHost
+	return disarmLocalChatSessionMonitorsForHost(session.LocalRuntimeHost, session.RuntimeSession.ID)
+}
+
+func disarmLocalChatSessionMonitorsForHost(host *localChatRuntimeHost, sessionID string) int {
 	if host == nil || host.Background == nil {
 		return 0
 	}
-	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return 0
 	}
@@ -182,7 +185,10 @@ func resolveLocalChatSessionPendingWakes(session *ChatSession) int {
 	if session == nil || session.RuntimeSession == nil {
 		return 0
 	}
-	host := session.LocalRuntimeHost
+	return resolveLocalChatSessionPendingWakesForHost(session.LocalRuntimeHost, session.RuntimeSession.ID)
+}
+
+func resolveLocalChatSessionPendingWakesForHost(host *localChatRuntimeHost, sessionID string) int {
 	if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
 		return 0
 	}
@@ -191,7 +197,7 @@ func resolveLocalChatSessionPendingWakes(session *ChatSession) int {
 	if opened, ok := host.Supervision.Store.(interface{ Opened() bool }); ok && !opened.Opened() {
 		return 0
 	}
-	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return 0
 	}

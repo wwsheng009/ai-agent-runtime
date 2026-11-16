@@ -74,10 +74,20 @@ func (s *handlerTeamLifecycleService) desiredTeamIDs(ctx context.Context) ([]str
 	return teamIDs, nil
 }
 
-// ownerAllowed is the single-host ownership boundary. Durable owner leases and
-// fencing plug into this hook in P5 without changing the reconciler contract.
-func (s *handlerTeamLifecycleService) ownerAllowed(context.Context, string) bool {
-	return true
+// ownerAllowed consults the durable orchestrator lease before starting a loop.
+// The orchestrator still acquires/renews the authoritative lease in
+// RunWithWake; this hook only avoids needlessly starting a guaranteed-loser
+// loop while another live host owns the team.
+func (s *handlerTeamLifecycleService) ownerAllowed(ctx context.Context, teamID string) bool {
+	if s == nil || s.handler == nil {
+		return false
+	}
+	orchestrator := s.handler.getTeamOrchestrator()
+	ownerID := ""
+	if orchestrator != nil {
+		ownerID = strings.TrimSpace(orchestrator.OwnerID)
+	}
+	return runtimehost.TeamOwnerAllowed(ctx, s.handler.getTeamStore(), teamID, ownerID, time.Now().UTC())
 }
 
 func (s *handlerTeamLifecycleService) runLoop(ctx context.Context, teamID string, wake <-chan struct{}) error {

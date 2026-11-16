@@ -57,7 +57,12 @@ func (h *Handler) buildSessionAgentForContext(
 	})
 	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, agentProvider)
 	instructionHeadMessages := buildRuntimeInstructionHeadMessages(profileState, workspacePath, agentProvider)
-	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
+	if frozen := strings.TrimSpace(sessionCtx.FrozenSystemPrompt); frozen != "" {
+		// Provider prompt caching requires messages[0] to stay byte-identical
+		// for the session. Rebuilding an actor must reuse the anchored head
+		// instead of recomposing it from possibly changed workspace inputs.
+		agentConfig.SystemPrompt = frozen
+	} else if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
 		agentConfig.SystemPrompt = systemPrompt
 	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
@@ -173,7 +178,7 @@ func (h *Handler) resolveProfileStateForSessionContext(ctx context.Context, sess
 		return nil, nil
 	}
 	resolved, cleanup, err := h.resolveProfileRuntimeState(
-		ctx, sessionCtx.ProfileRef, sessionCtx.AgentID, UsageScope{}, sessionCtx.WorkspacePath)
+		ctx, sessionCtx.ProfileRef, sessionCtx.AgentID, usageScopeFromSessionContext(sessionCtx), sessionCtx.WorkspacePath)
 	if err != nil {
 		return nil, nil
 	}

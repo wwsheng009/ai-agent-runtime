@@ -3,9 +3,11 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -35,6 +37,7 @@ func newLocalTeamLifecycleService(host *localChatRuntimeHost) *localTeamLifecycl
 	if host == nil {
 		return nil
 	}
+	ensureLocalTeamOrchestratorOwner(host)
 	service := &localTeamLifecycleService{Host: host}
 	var supervisorConfig teamsupervisor.Config
 	if host.RuntimeConfig != nil {
@@ -48,6 +51,24 @@ func newLocalTeamLifecycleService(host *localChatRuntimeHost) *localTeamLifecycl
 		OnSettled:    service.PublishStoredTerminalEvents,
 	})
 	return service
+}
+
+// ensureLocalTeamOrchestratorOwner assigns a stable durable owner identity.
+// The lifecycle service can be constructed before the orchestrator is attached
+// (notably in tests and the bootstrap wiring), so ownerAllowed must call this
+// again rather than relying solely on constructor-time state.
+func ensureLocalTeamOrchestratorOwner(host *localChatRuntimeHost) {
+	if host == nil {
+		return
+	}
+	if orchestrator := host.Orchestrator; orchestrator != nil {
+		if strings.TrimSpace(orchestrator.OwnerID) == "" {
+			orchestrator.OwnerID = fmt.Sprintf("orchestrator-%s-%d-%s", localChatHostname(), os.Getpid(), uuid.NewString()[:8])
+		}
+		if strings.TrimSpace(orchestrator.OwnerInstance) == "" {
+			orchestrator.OwnerInstance = fmt.Sprintf("%s:%d", localChatHostname(), os.Getpid())
+		}
+	}
 }
 
 func (c *localTeamLifecycleService) Apply(event runtimeevents.Event) {
@@ -168,10 +189,18 @@ func (c *localTeamLifecycleService) desiredTeamIDs(ctx context.Context) ([]strin
 	return desired, nil
 }
 
-// ownerAllowed is the single-host ownership boundary reserved for the durable
-// owner lease and fencing implementation in P5.
-func (c *localTeamLifecycleService) ownerAllowed(context.Context, string) bool {
-	return true
+// ownerAllowed consults the durable orchestrator lease before starting a loop.
+// The authoritative acquire/renew fence remains inside RunWithWake.
+func (c *localTeamLifecycleService) ownerAllowed(ctx context.Context, teamID string) bool {
+	if c == nil || c.Host == nil {
+		return false
+	}
+	ensureLocalTeamOrchestratorOwner(c.Host)
+	ownerID := ""
+	if c.Host.Orchestrator != nil {
+		ownerID = strings.TrimSpace(c.Host.Orchestrator.OwnerID)
+	}
+	return runtimehost.TeamOwnerAllowed(ctx, c.Host.TeamStore, teamID, ownerID, time.Now().UTC())
 }
 
 func (c *localTeamLifecycleService) StopLoops() {

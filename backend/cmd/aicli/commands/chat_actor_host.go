@@ -1482,7 +1482,8 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			return
 		}
 		host.triggerMemorySessionEnd(closed.ID)
-		merged := mergeActivePluginHooks(runtimeConfig.Hooks)
+		closedRoot := strings.TrimSpace(runtimehost.ExtractSessionContext(closed).WorkspacePath)
+		merged := mergeActivePluginHooksForRoot(runtimeConfig.Hooks, closedRoot, sessionProjectScopeAllowed(session))
 		if len(merged) == 0 {
 			return
 		}
@@ -2583,7 +2584,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if runtimeConfig != nil {
 		baseHooks = runtimeConfig.Hooks
 	}
-	if mergedHooks := mergeActivePluginHooks(baseHooks); len(mergedHooks) > 0 {
+	if mergedHooks := mergeActivePluginHooksForRoot(baseHooks, workspaceRoot, sessionProjectScopeAllowed(session)); len(mergedHooks) > 0 {
 		apiAgent.SetHookManager(runtimehooks.NewManager(mergedHooks))
 	}
 

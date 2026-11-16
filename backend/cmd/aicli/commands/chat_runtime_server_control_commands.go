@@ -353,6 +353,21 @@ func executeRemoteAgentsCommand(session *ChatSession, command string) CommandRes
 			return commandErrorResult(fmt.Errorf("发送 server agent input 失败: %w", err))
 		}
 		return commandTextResult(remoteJSONText(response))
+	case "answer":
+		_, questionID, answerText := parseChatAgentAnswerArgs(strings.Join(args, " "))
+		if target == "" || questionID == "" {
+			return commandErrorResult(fmt.Errorf("用法: /agents answer <target> <question_id> [text]"))
+		}
+		body := map[string]interface{}{
+			"question_id": questionID,
+			"answer":      answerText,
+		}
+		var response map[string]interface{}
+		path := runtimeServerSessionPath(session, "/agents/"+url.PathEscape(target)+"/answer")
+		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodPost, path, "", body, &response); err != nil {
+			return commandErrorResult(fmt.Errorf("server agent answer 失败: %w", err))
+		}
+		return commandTextResult(remoteJSONText(response))
 	case "approve", "deny":
 		_, requestID := parseChatAgentApprovalArgs(strings.Join(args, " "))
 		if target == "" || requestID == "" {

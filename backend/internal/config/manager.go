@@ -814,10 +814,10 @@ type GoalConfig struct {
 	// 目标置 budget_limited，可用 /goal budget <n> 提高预算后 resume。
 	DefaultTokenBudget int `yaml:"defaultTokenBudget" json:"defaultTokenBudget"`
 	// ServerAutoContinuation 启用 runtime-server 进程内的 goal 自动续跑驱动器
-	// （2026-10-15 gap 3，灰度开关）：SessionActor 的每个 turn 终态后检查 active
-	// goal 并提交续跑轮，使纯 web/connector 会话与 CLI 同语义。缺省 false =
-	// 行为零变化（续跑仍由 CLI 驱动）；开启后服务端在 CLI 冷却窗内让位，避免
-	// 双驱动。安全阀沿用 MaxConsecutiveContinuations。
+	// （2026-10-15 gap 3）：SessionActor 的每个 turn 终态后检查 active goal 并
+	// 提交续跑轮，使纯 web/connector 会话与 CLI 同语义。DefaultRuntimeConfig
+	// 缺省开启；部署可显式设为 false 关闭。服务端在 CLI 冷却窗内让位并在窗口
+	// 结束后延迟接管，避免双驱动。安全阀沿用 MaxConsecutiveContinuations。
 	ServerAutoContinuation bool `yaml:"serverAutoContinuation" json:"serverAutoContinuation"`
 	// MaxRounds 是新建 goal 的默认总轮数上限（0=不限制，对齐 DSH goal 的
 	// maxGoalRounds 缺省注入语义；DSH goal 借鉴 G2，见
@@ -1130,6 +1130,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				MaxRestartBackoff: 5 * time.Minute,
 			},
 		},
+		Goal:           GoalConfig{ServerAutoContinuation: true},
 		AgentControl:   AgentControlConfig{},
 		SessionRuntime: SessionRuntimeConfig{},
 		UsageAnalytics: UsageAnalyticsConfig{

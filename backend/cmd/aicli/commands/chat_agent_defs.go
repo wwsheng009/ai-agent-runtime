@@ -38,10 +38,14 @@ func executeStructuredAgentDefsCommand(session *ChatSession, command string) Com
 
 func agentDefsDiscoverOptions(session *ChatSession) agentdef.DiscoverOptions {
 	profileRoot := ""
+	projectRoot := ""
+	projectAllowed := projectScopeAllowed()
 	if session != nil {
 		profileRoot = strings.TrimSpace(session.ProfileRoot)
+		projectRoot = strings.TrimSpace(session.WorkspaceAnchor)
+		projectAllowed = sessionProjectScopeAllowed(session)
 	}
-	return agentdefDiscoverOptions("", profileRoot, mergeActivePluginAgentDirs(nil))
+	return agentdefDiscoverOptions(projectRoot, profileRoot, mergeActivePluginAgentDirsForRoot(nil, projectRoot, projectAllowed))
 }
 
 func renderAgentDefsList(session *ChatSession) string {

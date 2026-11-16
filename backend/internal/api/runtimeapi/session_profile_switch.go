@@ -9,7 +9,6 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // ── 服务器侧 profile 会话级切换执行核心（Batch 12；D19/D21/D23 的 server 半程） ──
@@ -263,23 +262,25 @@ func (h *Handler) applySessionProfileSwitch(ctx context.Context, sessionID, prof
 	}
 	meta := session.Metadata.Context
 
-	workspacePath := sessionmeta.String(meta, sessionmeta.WorkspacePath)
-	if worktreePath := sessionmeta.String(meta, toolbroker.AgentSessionContextWorktreePath); worktreePath != "" {
-		workspacePath = worktreePath
-	}
 	agentID := sessionmeta.String(meta, sessionmeta.ProfileAgent)
 
 	// 基线：当前绑定解析出的生效面。解析失败不是错误——它只说明基线为空面
 	//（E2E-7：被删除的绑定不能让切换本身失败，只让 diff 退化为「新增」）。
 	before := sessionProfileSurfaceSnapshot{reference: sessionmeta.String(meta, sessionmeta.ProfileRef)}
-	if current, resolveErr := h.resolveProfileSessionState(before.reference, agentID, workspacePath); resolveErr == nil {
+	if current, cleanup, resolveErr := h.resolveProfileStateForSession(ctx, session, before.reference, agentID); resolveErr == nil {
 		before = sessionProfileSurfaceFromState(before.reference, current)
+		if cleanup != nil {
+			cleanup()
+		}
 	}
 
 	// 阶段 1：解析新 profile（与 actor 构建期同一函数，避免第二套解析路径）。
-	state, err := h.resolveProfileSessionState(ref, agentID, workspacePath)
+	state, cleanup, err := h.resolveProfileStateForSession(ctx, session, ref, agentID)
 	if err != nil {
 		return nil, newSessionProfileSwitchValidationError("profile %q 解析失败: %s", ref, err)
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 	if state == nil || state.Resolved == nil {
 		return nil, newSessionProfileSwitchValidationError("profile %q 未解析出有效绑定", ref)

@@ -45,9 +45,15 @@ const (
 	EffectiveReasoningEffort = "effective_reasoning_effort"
 	RequestedPermissionMode  = "requested_permission_mode"
 	EffectivePermissionMode  = "effective_permission_mode"
-	RouteWarnings            = "route_warnings"
-	FallbackUsed             = "fallback_used"
-	FallbackReason           = "fallback_reason"
+	// UsageTenantID / UsageProjectID anchor the request usage scope on the
+	// session so a durable actor rebuild resolves the same profile/runtime
+	// config as the request-scoped direct path. User identity is already the
+	// session owner (chat.Session.UserID).
+	UsageTenantID  = "usage_tenant_id"
+	UsageProjectID = "usage_project_id"
+	RouteWarnings  = "route_warnings"
+	FallbackUsed   = "fallback_used"
+	FallbackReason = "fallback_reason"
 	// EnvironmentContextBlock is the session-frozen rendered <environment_context>
 	// block. It is captured once (session create / first ensure) and reused so
 	// multi-turn history is not rewritten when host PATH/date facts change.

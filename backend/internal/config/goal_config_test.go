@@ -16,6 +16,8 @@ func TestGoalMaxConsecutiveContinuationsPassthrough(t *testing.T) {
 		"absent config must stay 0 = unlimited (Codex-aligned)")
 	require.Zero(t, DefaultRuntimeConfig().Goal.DefaultTokenBudget,
 		"absent config must stay 0 = no default budget")
+	require.True(t, DefaultRuntimeConfig().Goal.ServerAutoContinuation,
+		"runtime-server goal auto-continuation defaults on to match the CLI driver")
 
 	cfg := DefaultRuntimeConfig()
 	require.NoError(t, yaml.Unmarshal([]byte("goal:\n  maxConsecutiveContinuations: 12\n  defaultTokenBudget: 50000\n"), cfg))

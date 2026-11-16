@@ -1520,6 +1520,49 @@ const (
 4. **Approval 恢复策略**：TUI/ACP 有 restored approval 投影与 yolo/expiry 自动处理；server 增加 durable 状态投影、expired 投影与 close/retire，但尚未实现等价的启动/切换会话自动 reconcile。
 5. **P5 部署前提**：lease store 已独立且默认同域；若两宿主使用不同 `sessions.dir` 或显式 lease 路径，仍会形成不同 authority domain。
 
+> 以上为第九轮时点。第十轮对提交后复审列出的 13 项逐项处理，结果见 §12.12。
+
+### 12.12 第十轮切片：提交后复审缺口收敛
+
+第十轮不新增“全量同源”结论，只关闭前一节列出的行为缺口，并把仍然成立的结构性边界单列。状态含义：
+
+- ✅：行为已落地并有测试或静态证据；
+- ◐：关键行为已加护栏，但宿主外壳仍是双实现或需要部署开关；
+- ⚪：明确接受的产品/部署差异，不再作为待修缺口。
+
+| # | 缺口 | 本轮处理 | 状态 | 关键证据 |
+|---|---|---|---|---|
+| G1 | 普通 session close/delete 不停 live actor、不 retire pending | 新增 `stopSessionForTerminalState`：先 retire approval/question，再 `StopAsync`；无 live actor 时回退 durable runtime row；close 与 batch delete 共用同一入口；清理 spawn isolation 后释放 supervision monitors/wakes | ✅ | `runtimeapi/session_lifecycle_close.go`；`runtimeapi/handler.go:3866,3915`；`runtimeapi/session_runtime_support.go:Close` |
+| G2 | AgentControl Close 两端不对称、仅 durable pending 无 resolution | server controller Close 改走同一 terminal helper；TUI `localActorRegistry.Close` 新增 `chat_actor_close_lifecycle.go`，retire live actor、durable fallback、disarm monitors、resolve pending wakes 后再标记 closed | ✅ | `runtimeapi/session_runtime_support.go:Close`；`cmd/aicli/commands/chat_actor_close_lifecycle.go`；`cmd/aicli/commands/chat_actor_registry.go:Close` |
+| G3 | server 每轮只刷新 goal guidance | 新增 `prepareSessionAgentForRun`，在 turn 边界刷新 frozen prompt、allowed/read-only roots、plan/permission mode、goal guidance 与迟到工具 allowlist；`OnRunPrepare` 不再要求 base session | ✅ | `runtimeapi/session_run_prepare.go`；`runtimeapi/handler_deps.go:OnRunPrepare` |
+| G4 | actor profile 固定 `UsageScope{}`；switch/save-as 用轻量解析 | session 元数据持久化 tenant/project；`SessionContext` 派生 usage scope；actor 与 `resolveProfileRuntimeState` 共用完整 profile 解析；profile switch/save-as 改走完整解析并执行 cleanup | ✅ | `sessionmeta.UsageTenantID/UsageProjectID`；`runtimehost/session_context.go`；`runtimeapi/session_usage_scope.go`；`runtimeapi/profile_support.go:resolveProfileStateForSession`；`session_profile_switch.go`；`profiles_saveas_handlers.go` |
+| G5 | server 未复用 session-frozen system prompt | `SessionContext.FrozenSystemPrompt` 从 `sessionmeta.SystemPromptFrozen` 派生；actor 构建优先复用；每轮首个 run 冻结当前 compose 结果；profile switch 仍清锚点 | ✅ | `session_agent_build.go`；`session_run_prepare.go`；`session_profile_switch.go:clearSessionFrozenPromptAnchor` |
+| G6 | TUI project hooks/plugin/agentdef 以进程 cwd 为根 | 新增 root-aware 插件/hook/agentdef 发现：actor 构建、session-end hook、spawn hook、`/agents defs`、profile skill roots 使用 `WorkspaceAnchor` + session folder trust；旧无参函数保留为 cwd 包装 | ✅ | `cmd/aicli/commands/plugin_runtime.go`；`chat_actor_host.go`；`chat_actor_registry.go`；`chat_agent_defs.go`；`chat_profile.go` |
+| G7 | Goal CLI 冷却窗内直接丢弃、busy 提交无重试；server 默认开关与 CLI 不同 | server 在 CLI 冷却窗内 arm 一次延迟接管；回调重查 CLI 在场后走正常 kick；续跑提交对 actor busy 做 5s 有界重试，窗口后由该 run 的 terminal 事件闭环；`DefaultRuntimeConfig` 将 `serverAutoContinuation` 缺省开启，部署仍可显式关闭 | ✅ | `runtimeapi/session_goal_driver.go:scheduleCLIRecheck/scheduleGoalDriverCLITakeover/goalDriverSubmitContinuationWithPrompt`；`internal/config/manager.go` |
+| G8 | Approval restored reconcile 不完整；expired 仍是 500 | durable-only pending approval 在 snapshot/Resume 观察边界按 expiry 收敛并发布 `approval_resolved(expired)`；Resume 对 bypass mode 自动允许 restored approval；expired 决策返回结构化 `resolution=expired`，不再变成 HTTP/tool 500 | ✅ | `chat/pending_retire.go`；`runtimeapi/session_lifecycle_close.go`；`runtimeapi/session_runtime_support.go:snapshot/Resume/ResolveApproval`；`cmd/aicli/commands/chat_actor_registry.go:ResolveApproval` |
+| G9 | TUI Resume 缺 cache lineage | 抽取 `runtimehost.StampResumeCacheLineage`，server controller 与 TUI `localActorRegistry.Resume` 共用；空历史/批子代理仍是 no-op | ✅ | `runtimehost/resume_lineage.go`；`runtimeapi/session_runtime_support.go`；`cmd/aicli/commands/chat_actor_registry.go:Resume` |
+| G10 | remote `/agents answer` 缺位 | 新增 `POST /sessions/{id}/agents/{agent_id}/answer` 与 controller answer 入口；TUI remote `/agents answer` 不再落入未接入；HTTP 与 connector 共用 actor `AnswerQuestion` | ✅ | `runtimeapi/agent_control_answer_handler.go`；`runtimeapi/session_runtime_support.go:AnswerQuestion`；`cmd/aicli/commands/chat_runtime_server_control_commands.go` |
+| G11 | Team owner fence 无条件 true；server shutdown 不停 team loops | 两端 `ownerAllowed` 改查 durable orchestrator lease（仍以 `RunWithWake` 的 acquire/renew 为权威 fence）；TUI 设置稳定 `OwnerID/OwnerInstance`；`CloseSessionHub` 在停 actor 前 `StopAllLoops` | ✅ | `runtimehost/team_owner.go`；`runtimeapi/team_lifecycle.go`；`cmd/aicli/commands/chat_team_lifecycle.go`；`runtimeapi/session_runtime_support.go:CloseSessionHub` |
+| G12 | `enable_react=false` 规划/planned-subagent/patch 仍走 direct | 未把非 ReAct 语义强行塞进 actor；显式保留兼容分支 | ⚪ | `runtimeapi/agent_chat_request.go:agentChatUsesSessionActor` |
+| G13 | 诊断文本过期、health 无入口映射 | 抽取 `ExecutionEntrypointSnapshot`，runtime status 与 `/health` 共用；注释改为“多消息/Team/Task 已 actor 化，仅非 ReAct 兼容分支直连” | ✅ | `runtimeapi/execution_entrypoints.go`；`runtimeapi/handler.go`；`cmd/runtime-server/main.go:runtimeInfoHandler` |
+
+#### 12.12.1 本轮验证
+
+- ✅ `go build ./...`
+- ✅ `GOGC=10 GOMAXPROCS=1 go test -p 1 -vet=off -count=1 ./internal/chat ./internal/runtimehost ./internal/sessionmeta`
+- ✅ `internal/api/runtimeapi` 全包（第十轮新增 close/expiry/run-prepare 测试后）
+- ✅ `cmd/aicli/commands` 全包
+- ✅ 新增测试：`chat.RetireDurablePendingInteraction`、`chat.ExpireDurableApproval`、`TeamOwnerAllowed`、HTTP close cleanup、restored approval sweep、run-prepare root/prompt/plan 对齐
+- ⚠️ 12 包串行组合运行在本机并发 5 个 `aicli --web` 会话（约 1.1 GB）时触发 Windows paging file 不足，部分用例以 `The paging file is too small` panic；单包隔离运行均通过。该组合运行不作为代码失败证据，也不宣称组合全绿。
+
+#### 12.12.2 仍保留的明确边界
+
+1. **非 ReAct 兼容直连**：`enable_react=false` 的 static/route planning、planned-subagent orchestration、patch approval 继续走 direct `Orchestrate`；ReAct 主路径、多消息、Team/Task context、`disable_tools` 已 actor 化。这是兼容语义，不是同一路径的遗漏。
+2. **宿主薄包装仍双实现**：`buildSessionAgentForContext` / `buildLocalChatAgent`、AgentControl 列表投影、Team lifecycle 的视图/清理方法没有合并为一个包；本轮已统一会改变状态的关键动作（close、approval、owner fence、shutdown），剩余差异属于宿主外壳。
+3. **Goal 外层驱动 shell**：CLI 同步决策循环与 server `session_end` 事件驱动仍是两个 shell；策略、prompt、round、metadata、strike、延迟接管与缺省开关已共享/对齐。部署仍可用 `goal.serverAutoContinuation=false` 显式关闭服务端驱动，避免与 CLI 进程形成双驱动。
+4. **TUI 通用 skill 目录发现**：插件/hook/agentdef 主路径已按会话 workspace 锚定；`skills_integration.resolveConfiguredSkillDirs` 的通用 config 目录链仍以进程 cwd 为启动锚点，需要会话级重构后再宣称完全同源。
+5. **Deployment authority**：lease store 已独立且默认同域；不同 `sessions.dir` 或显式 lease 路径仍形成不同 authority domain。
+
 ---
 
 ## 附录 A：关键证据索引
@@ -1652,4 +1695,5 @@ const (
 
 > 本轮后的准确表述是：**ReAct 主路径、Goal 策略/轮次、Approval 状态与超时/中断收敛、Remote AgentControl 审批、Memory maintenance、profile-scoped tool surface 已同源；非 ReAct 兼容直连、两层宿主薄包装、Goal 外层驱动 shell 与部署 authority 仍是明确边界。**
 > 收敛顺序执行到：**P1 共享原语 + actor profile 装配已落地 → P2 控制面/审批/Goal 语义单源 → P3 Web ReAct 主路径已 actor 化 → P4 远程命令缺口基本关闭 → P5 lease authority 已独立**。
+> 第十轮（§12.12）进一步关闭了 close/delete 生命周期、server 每轮刷新、profile usage scope、prompt freeze、restored approval/expiry、remote answer、team owner fence/shutdown 与 health 诊断缺口；非 ReAct 兼容直连与双宿主外壳仍按明确边界保留。
 > P0 的契约/诊断护栏与 fail-closed 审批边界继续保持；不得把“非 ReAct 兼容路径”或“不同 sessions.dir 的部署”宣传为全量同源。

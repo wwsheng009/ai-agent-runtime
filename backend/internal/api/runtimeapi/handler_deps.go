@@ -42,6 +42,7 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	// preparedAgent 供 run 前钩子（OnRunPrepare）刷新 turn 级 goal 指引：
 	// PrepareAgent 只在 actor 构建期调用一次，run 级刷新必须走 OnRunPrepare。
 	var preparedAgent *agent.Agent
+	var preparedProfileState *profileRuntimeState
 	// baseSession 与 CLI 本地路径的 isBaseSession 同口径：只有基础会话才注入逐轮
 	// goal 指引，子代理会话不得被父会话的持久目标驱动。
 	var baseSession bool
@@ -50,8 +51,9 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		baseSession = isBaseSessionContext(sessionCtx)
 		profileState, cleanup := h.resolveProfileStateForSessionContext(ctx, sessionCtx)
 		profileCleanup = cleanup
-		apiAgent, selectedConfig := h.buildSessionAgentForContext(sid, sessionCtx, profileState, h.resolveRuntimeConfig(UsageScope{}))
+		apiAgent, selectedConfig := h.buildSessionAgentForContext(sid, sessionCtx, profileState, h.resolveRuntimeConfig(usageScopeFromSessionContext(sessionCtx)))
 		preparedAgent = apiAgent
+		preparedProfileState = profileState
 		return apiAgent, selectedConfig, profileState
 	}
 	deps.BuildLoopConfig = func(sid string, sessionCtx runtimehost.SessionContext, selectedConfig *runtimecfg.RuntimeConfig, profileHandle any) *agent.LoopReActConfig {
@@ -76,15 +78,11 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		CancelTeam:         h.cancelSuspendedTurnTeam,
 	}
 	deps.PersistHook = h.runtimeServerGoalPersistHook
-	// run 级 goal 指引（gap 修复）：runtime-server 的每次 turn 之前按实时会话刷新
-	// active_goal_guidance。租约仍由 runtimehost 默认 PrepareRun 负责，本钩子只做
-	// agent 刷新（见 runtimehost.Deps.OnRunPrepare 的顺序契约）。
-	deps.OnRunPrepare = func(_ context.Context, session *chat.Session, _ bool) error {
-		if !baseSession {
-			return nil
-		}
-		h.applyRuntimeServerGoalGuidance(preparedAgent, session)
-		return nil
+	// run 级刷新与 CLI 的 localChatPrepareRunHook 同口径：冻结 prompt、实时
+	// 目录授权、plan/permission mode、goal 指引与迟到的工具面都在 turn 边界
+	// 对齐，无需为了会话元数据变化重建 actor。
+	deps.OnRunPrepare = func(ctx context.Context, session *chat.Session, _ bool) error {
+		return h.prepareSessionAgentForRun(ctx, preparedAgent, preparedProfileState, baseSession, session)
 	}
 	if h.sessionManager == nil {
 		return deps

@@ -1216,6 +1216,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/approve", h.ApproveSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/answer", h.AnswerSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
@@ -2042,6 +2043,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionIDValue = sessionID(session)
 	timing.mark("session_get")
+	// Durable actors rebuild from session metadata, not from this request's
+	// UsageScope. Anchor tenant/project before the actor branch is chosen so both
+	// execution paths resolve the same profile/runtime config.
+	h.stampSessionUsageScope(ctx, session, usageScope)
 	useSessionActor := h.agentChatUsesSessionActor(session, &req)
 
 	// 目录回退（§4.3.2）：请求未显式指定 workspace_path 时，采用会话创建时
@@ -2397,11 +2402,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// approval-required tool without ever asking. The engine's nil AskHandler
 	// path fail-closes with "approval_required" instead.
 	if session != nil {
-		mode := strings.TrimSpace(sessionPermissionMode(session))
-		if mode == "" {
-			mode = string(runtimepolicy.ModeDefault)
-		}
-		runtimehost.ApplySessionPermissionMode(a, mode)
+		// Use the same plan-mode reconciler as the actor's turn-boundary hook so
+		// entering/exiting plan mode cannot diverge between direct and durable
+		// Web execution.
+		applySessionPlanModeToAgent(a, session)
 	}
 	if req.DisableTools {
 		a.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
@@ -3862,6 +3866,9 @@ func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, act
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	ctx, cancel := sessionStoreQueryContext(r)
 	defer cancel()
+	if releaseSupervision {
+		h.stopSessionForTerminalState(ctx, sessionID, "session_"+state)
+	}
 	if err := action(ctx, sessionID); err != nil {
 		writeSessionStoreError(w, err)
 		return
@@ -3908,6 +3915,9 @@ func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, act
 	processed := make([]string, 0, len(req.SessionIDs))
 	failures := make(map[string]string)
 	for _, sessionID := range req.SessionIDs {
+		if releaseSupervision {
+			h.stopSessionForTerminalState(ctx, sessionID, "session_"+actionName)
+		}
 		if err := action(ctx, sessionID); err != nil {
 			failures[sessionID] = err.Error()
 			continue
@@ -11050,18 +11060,10 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 	return map[string]interface{}{
 		"execution_core": chat.SessionActorRuntimeCore(),
 		// execution_core 声明服务端具备的统一 actor 能力；本映射声明各入口
-		// 实际使用的执行核心。Web 核心文本路径已走 durable SessionActor；
-		// 多消息重放、Team/规划/补丁等未迁移分支仍显式回退直连 loop。
-		"entrypoint_execution": map[string]interface{}{
-			"/api/agent/chat": map[string]interface{}{
-				"core":                   chat.SessionActorRuntimeCore(),
-				"fallback_core":          "stateless_direct",
-				"durable_state":          true,
-				"cross_request_approval": true,
-				"eligible_scope":         "enable_react plus a last user message; Team/Task are context-only options and disable_tools is a per-run actor override",
-			},
-			"/api/runtime/sessions/{id}/runtime/commands": chat.SessionActorRuntimeCore(),
-		},
+		// 实际使用的执行核心。多消息重放与 Team/Task 上下文已 actor 化；
+		// 只有 enable_react=false 的规划/planned-subagent/patch 兼容分支仍走
+		// stateless direct orchestrator。
+		"entrypoint_execution":  ExecutionEntrypointSnapshot(),
 		"default_provider":      defaultAgentProvider(h.llmRuntime),
 		"default_model":         defaultAgentModel(h.llmRuntime),
 		"providers":             providers,

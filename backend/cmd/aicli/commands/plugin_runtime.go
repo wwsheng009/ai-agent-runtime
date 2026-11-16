@@ -24,13 +24,24 @@ func ClearPluginCatalogCache() {}
 // When folder trust blocks project scope, project plugin roots (.aicli/plugins,
 // .agents/plugins) are skipped; user-home plugins remain available.
 func discoverRuntimePluginCatalog() (*plugins.Catalog, error) {
+	return discoverRuntimePluginCatalogForRoot("", projectScopeAllowed())
+}
+
+// discoverRuntimePluginCatalogForRoot is the session-aware variant. The project
+// root and trust decision come from the session workspace, not the process cwd;
+// worktree sessions therefore load the same plugin/hook scope as the server.
+func discoverRuntimePluginCatalogForRoot(projectRoot string, projectAllowed bool) (*plugins.Catalog, error) {
 	opts := plugins.DiscoverOptions{
 		State: plugins.NewStateStore(""),
 	}
-	if projectScopeAllowed() {
-		if cwd, err := os.Getwd(); err == nil {
-			opts.ProjectRoot = cwd
+	if projectAllowed {
+		projectRoot = strings.TrimSpace(projectRoot)
+		if projectRoot == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				projectRoot = cwd
+			}
 		}
+		opts.ProjectRoot = projectRoot
 	} else {
 		opts.SkipProjectRoot = true
 	}
@@ -39,7 +50,11 @@ func discoverRuntimePluginCatalog() (*plugins.Catalog, error) {
 
 // mergeActivePluginSkillDirs appends skill dirs from trusted+enabled plugins.
 func mergeActivePluginSkillDirs(base []string) []string {
-	catalog, err := discoverRuntimePluginCatalog()
+	return mergeActivePluginSkillDirsForRoot(base, "", projectScopeAllowed())
+}
+
+func mergeActivePluginSkillDirsForRoot(base []string, projectRoot string, projectAllowed bool) []string {
+	catalog, err := discoverRuntimePluginCatalogForRoot(projectRoot, projectAllowed)
 	if err != nil || catalog == nil {
 		return base
 	}
@@ -48,7 +63,11 @@ func mergeActivePluginSkillDirs(base []string) []string {
 
 // mergeActivePluginAgentDirs appends agent definition dirs from active plugins.
 func mergeActivePluginAgentDirs(base []string) []string {
-	catalog, err := discoverRuntimePluginCatalog()
+	return mergeActivePluginAgentDirsForRoot(base, "", projectScopeAllowed())
+}
+
+func mergeActivePluginAgentDirsForRoot(base []string, projectRoot string, projectAllowed bool) []string {
+	catalog, err := discoverRuntimePluginCatalogForRoot(projectRoot, projectAllowed)
 	if err != nil || catalog == nil {
 		return base
 	}
@@ -58,13 +77,21 @@ func mergeActivePluginAgentDirs(base []string) []string {
 // mergeActivePluginHooks appends declarative hooks from user/project scopes and
 // active plugins after base hooks. Project scope follows folder trust.
 func mergeActivePluginHooks(base []hooks.HookConfig) []hooks.HookConfig {
-	catalog, err := discoverRuntimePluginCatalog()
+	return mergeActivePluginHooksForRoot(base, "", projectScopeAllowed())
+}
+
+func mergeActivePluginHooksForRoot(base []hooks.HookConfig, projectRoot string, projectAllowed bool) []hooks.HookConfig {
+	catalog, err := discoverRuntimePluginCatalogForRoot(projectRoot, projectAllowed)
 	if err != nil {
 		catalog = nil
 	}
 	sources := hooks.HostSources{Base: base}
-	if projectScopeAllowed() {
-		sources.ProjectRoot, _ = os.Getwd()
+	if projectAllowed {
+		projectRoot = strings.TrimSpace(projectRoot)
+		if projectRoot == "" {
+			projectRoot, _ = os.Getwd()
+		}
+		sources.ProjectRoot = projectRoot
 	} else {
 		sources.SkipProject = true
 	}

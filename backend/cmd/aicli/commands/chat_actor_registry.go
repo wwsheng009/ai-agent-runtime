@@ -24,7 +24,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
@@ -52,6 +54,14 @@ type localActorRegistry struct {
 	// ready-to-use in-memory budget, so registries built directly in tests keep
 	// working.
 	localWaitBudget agentcontrol.WaitBudget
+}
+
+type localResumeLineageSessionStore struct {
+	runtimechat.SessionStorage
+}
+
+func (s localResumeLineageSessionStore) Get(ctx context.Context, sessionID string) (*runtimechat.Session, error) {
+	return s.Load(ctx, sessionID)
 }
 
 func newLocalActorRegistry(host *localChatRuntimeHost) *localActorRegistry {
@@ -1587,7 +1597,13 @@ func (r *localActorRegistry) dispatchLocalAgentHook(event runtimehooks.Event, pa
 	if r == nil || r.Host == nil || r.Host.RuntimeConfig == nil || len(payload) == 0 {
 		return
 	}
-	merged := mergeActivePluginHooks(r.Host.RuntimeConfig.Hooks)
+	projectRoot := ""
+	projectAllowed := projectScopeAllowed()
+	if r.Host.BaseSession != nil {
+		projectRoot = strings.TrimSpace(r.Host.BaseSession.WorkspaceAnchor)
+		projectAllowed = sessionProjectScopeAllowed(r.Host.BaseSession)
+	}
+	merged := mergeActivePluginHooksForRoot(r.Host.RuntimeConfig.Hooks, projectRoot, projectAllowed)
 	if len(merged) == 0 {
 		return
 	}
@@ -3220,10 +3236,13 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 	if err != nil {
 		return nil, err
 	}
-	if err := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs); err != nil {
-		return nil, err
-	}
+	approveErr := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs)
 	resolution, resumed := actor.ApprovalOutcome(requestID)
+	// Expiry is a recorded outcome (tool result/event were settled) and must be
+	// reported as resolution=expired rather than failing the command.
+	if approveErr != nil && resolution != runtimechat.ApprovalResolutionExpired {
+		return nil, approveErr
+	}
 	status, err := r.agentSnapshot(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -4022,22 +4041,21 @@ func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*tool
 		if closeID == "" {
 			continue
 		}
-		if r != nil && r.Host != nil && r.Host.SessionHub != nil {
-			// Use asynchronous stop: the close tool can execute on the target
-			// actor's own run goroutine (self-stop). Waiting synchronously
-			// there deadlocks — the actor loop only exits after that run
-			// goroutine returns while the run goroutine is stuck waiting for
-			// the loop to exit. The run is cancelled immediately, so the
-			// actor drains on its own.
-			r.Host.SessionHub.StopAsync(closeID)
-		}
+		var runtimeSession *runtimechat.Session
 		if r != nil && r.Host != nil && r.Host.SessionStore != nil {
 			if session, loadErr := r.Host.SessionStore.Load(ctx, closeID); loadErr == nil && session != nil {
-				// Best-effort isolation cleanup before marking closed.
-				_ = r.cleanupLocalSpawnIsolation(ctx, session)
-				session.UpdateState(runtimechat.StateClosed)
-				_ = r.Host.SessionStore.Update(ctx, session)
+				runtimeSession = session
 			}
+		}
+		// Retire pending decisions and stop the actor (self-stop safe) before
+		// marking the durable session closed. This also disarms supervision
+		// monitors and wakes whose delivery target is about to disappear.
+		r.stopLocalAgentForTerminalState(ctx, closeID, runtimeSession)
+		if runtimeSession != nil {
+			// Best-effort isolation cleanup before marking closed.
+			_ = r.cleanupLocalSpawnIsolation(ctx, runtimeSession)
+			runtimeSession.UpdateState(runtimechat.StateClosed)
+			_ = r.Host.SessionStore.Update(ctx, runtimeSession)
 		}
 		closedIDs = append(closedIDs, closeID)
 	}
@@ -4563,6 +4581,14 @@ func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*too
 	sessionID = resolvedSessionID
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
+	}
+	// Resume from durable history carries the same prompt-cache lineage marker
+	// as the API controller. Empty/child sessions without stored history are a
+	// no-op inside the shared helper.
+	if r.Host != nil && r.Host.SessionStore != nil {
+		runtimehost.StampResumeCacheLineage(ctx, localResumeLineageSessionStore{SessionStorage: r.Host.SessionStore}, sessionID, func(err error) {
+			logpkg.Warnf("local agent resume: persist cache lineage resume stamp for %s failed: %v", sessionID, err)
+		})
 	}
 	if _, err := r.Host.SessionHub.GetOrCreate(sessionID); err != nil {
 		return nil, err

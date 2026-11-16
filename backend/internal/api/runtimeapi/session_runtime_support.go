@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -2268,10 +2269,14 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 	if err != nil {
 		return nil, err
 	}
-	if err := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs); err != nil {
-		return nil, err
-	}
+	approveErr := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs)
 	resolution, resumed := actor.ApprovalOutcome(requestID)
+	// Expiry is a recorded terminal decision, not an internal failure. Return the
+	// structured resolution so HTTP and tool callers can report "expired"
+	// without turning a stale approval into a 500.
+	if approveErr != nil && resolution != chat.ApprovalResolutionExpired {
+		return nil, approveErr
+	}
 	status, err := c.snapshot(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -2298,6 +2303,37 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 		Resolution: resolution,
 		Status:     status,
 	}, nil
+}
+
+// AnswerQuestion resolves the target through the same AgentControl identity
+// mapping as approve/close, then delegates to the owning actor. It is the HTTP
+// twin of the TUI /agents answer command and the connector /answer path.
+func (c *sessionAgentController) AnswerQuestion(ctx context.Context, target, questionID, answer string) error {
+	if c == nil || c.handler == nil {
+		return fmt.Errorf("handler not configured")
+	}
+	target = strings.TrimSpace(target)
+	questionID = strings.TrimSpace(questionID)
+	if target == "" {
+		return fmt.Errorf("id is required")
+	}
+	if questionID == "" {
+		return fmt.Errorf("question id is required")
+	}
+	sessionID, err := c.resolveTargetSessionID(ctx, target)
+	if err != nil {
+		return err
+	}
+	if c.handler.sessionManager != nil {
+		if session, loadErr := c.handler.sessionManager.Get(ctx, sessionID); loadErr == nil && isClosedAPIAgentSession(session) {
+			return fmt.Errorf("agent session %s is closed", sessionID)
+		}
+	}
+	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
+	if err != nil {
+		return err
+	}
+	return actor.AnswerQuestion(ctx, questionID, answer)
 }
 
 // Wait 是 subagent_wait 的账本外壳（plan §C3-4 统一返回契约，AC-P2-4d/e）：等待前先读
@@ -3100,29 +3136,15 @@ func (c *sessionAgentController) Close(ctx context.Context, sessionID string) (*
 		if closeID == "" {
 			continue
 		}
-		if hub := c.handler.getSessionHub(); hub != nil {
-			if actor, ok := hub.Get(closeID); ok && actor != nil {
-				// Close is terminal for the session, including a restored
-				// approval/question with no live run. Retire it first so the
-				// durable parent notification closes and a later decision cannot
-				// revive the closed session.
-				if err := actor.RetirePendingInteraction(ctx, "agent_session_closed"); err != nil {
-					logger.Warnf("agent close: retire pending interaction %s: %s", closeID, err)
-				}
-			}
-			// The close tool may run on the target actor's own run goroutine
-			// (self-stop). Waiting synchronously for that actor to exit deadlocks
-			// because the loop can only finish after the run goroutine returns.
-			// StopAsync removes it from the hub and cancels immediately; the
-			// loop drains on its own, matching the CLI host.
-			hub.StopAsync(closeID)
-		}
+		// Close is terminal for the session, including a restored
+		// approval/question with no live run. This helper retires the pending
+		// interaction first, stops the live actor asynchronously (self-stop safe),
+		// and falls back to the durable runtime row when no actor exists.
+		c.handler.stopSessionForTerminalState(ctx, closeID, "agent_session_closed")
 		if c.handler.sessionManager != nil {
-			if session, loadErr := c.handler.sessionManager.Get(ctx, closeID); loadErr == nil && session != nil {
-				_ = c.cleanupAPISpawnIsolation(ctx, session)
-			}
 			_ = c.handler.sessionManager.Close(ctx, closeID)
 		}
+		c.handler.releaseSessionSupervisionObligations(ctx, closeID)
 		closedIDs = append(closedIDs, closeID)
 	}
 	result, err := c.snapshot(ctx, targetSessionID)
@@ -3677,17 +3699,7 @@ type resumeLineageSessionStore interface {
 // resume 就是误导；批子代理会话不落 SessionStore 时读取失败自然跳过。标签不
 // 改变任何行为（缓存键/epoch 不动）；回写失败只走 warn、不影响 resume。
 func stampResumeCacheLineageInSession(ctx context.Context, store resumeLineageSessionStore, sessionID string, warn func(error)) {
-	if store == nil || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	session, err := store.Get(ctx, sessionID)
-	if err != nil || session == nil || len(session.GetMessages()) == 0 {
-		return
-	}
-	session.SetContext(agent.CacheLineageModeSessionContextKey, agent.CacheLineageModeResume)
-	if err := store.Update(ctx, session); err != nil && warn != nil {
-		warn(err)
-	}
+	runtimehost.StampResumeCacheLineage(ctx, store, sessionID, warn)
 }
 
 // stampResumeCacheLineage 是控制面接线：handler 的 sessionManager 满足最小面。
@@ -3713,6 +3725,33 @@ func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (
 	// §8.4 窄读法：resume 是「从持久化历史续接」的入口，先打 cache lineage 标签
 	//（仅当存储里有可续接历史），再重建 actor——随后各轮请求据此携带 resume。
 	c.stampResumeCacheLineage(ctx, sessionID)
+	// A restored approval with no live actor cannot have an in-process expiry
+	// waiter. Resolve it before the normal resume snapshot: bypass mode allows
+	// it (the approval should never have been asked), otherwise an elapsed
+	// window is retired as expired. A live-but-unexpired approval is left for
+	// the user/approval surface.
+	if store := c.handler.getSessionRuntimeStore(); store != nil {
+		if state, loadErr := store.LoadState(ctx, sessionID); loadErr == nil && state != nil && state.PendingApproval != nil {
+			mode := ""
+			if c.handler.sessionManager != nil {
+				if session, sessionErr := c.handler.sessionManager.Get(ctx, sessionID); sessionErr == nil && session != nil {
+					mode = sessionPermissionMode(session)
+				}
+			}
+			if strings.EqualFold(mode, string(runtimepolicy.ModeBypassPermissions)) {
+				requestID := strings.TrimSpace(state.PendingApproval.ID)
+				if requestID != "" {
+					if actor, actorErr := c.handler.getSessionHub().GetOrCreate(sessionID); actorErr == nil && actor != nil {
+						if approveErr := actor.ApproveToolWithArgs(ctx, requestID, true, nil); approveErr != nil {
+							logger.Warnf("agent resume: apply restored bypass approval %s: %v", sessionID, approveErr)
+						}
+					}
+				}
+			} else {
+				_, _ = c.handler.expireDurableApprovalIfNeeded(ctx, sessionID, state)
+			}
+		}
+	}
 	if _, err := c.handler.getSessionHub().GetOrCreate(sessionID); err != nil {
 		return nil, err
 	}
@@ -3811,6 +3850,10 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 		// a pending decision.
 		if store := c.handler.getSessionRuntimeStore(); store != nil {
 			if state, stateErr := store.LoadState(ctx, sessionID); stateErr == nil && state != nil {
+				// A restored approval with no live waiter has no actor-side
+				// expiry timer. Reconcile it lazily at the observation boundary
+				// so AgentControl cleanup does not treat an expired row as busy.
+				state, _ = c.handler.expireDurableApprovalIfNeeded(ctx, sessionID, state)
 				agentstatus.ApplyRuntimeState(result, state.Summary())
 			}
 		}
@@ -4651,6 +4694,15 @@ func (h *Handler) getSessionHub() *chat.SessionHub {
 func (h *Handler) CloseSessionHub() {
 	if h == nil {
 		return
+	}
+	// Team supervisor loops can still dispatch child runs while the HTTP host is
+	// shutting down. Stop them before the session hub so no new actor is started
+	// through a team tick after the hub is closed.
+	h.teamStoreMu.Lock()
+	teamLifecycle := h.teamLifecycle
+	h.teamStoreMu.Unlock()
+	if teamLifecycle != nil {
+		teamLifecycle.StopAllLoops()
 	}
 	h.sessionRuntimeMu.Lock()
 	hub := h.sessionHub

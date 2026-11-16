@@ -14,7 +14,6 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // ── from_session：会话生效面固化（save-as 差分固化，Batch 13 slice 6 / G1 / D24 / D35） ──
@@ -24,8 +23,8 @@ import (
 // "不可声明项"提示（D35）。server 侧只有一处差异，且如实登记：
 //
 //   - CLI 的生效面来自会话内的投影字段（`session.ToolPolicy` 等，启动/切换时投影）；
-//   - server 没有这些投影字段，生效面一律来自**会话绑定 profile 的解析结果**
-//     （`resolveProfileSessionState`，与 `buildSessionActor` / `set_profile` 同一路径）。
+//   - server 没有这些投影字段，生效面一律来自**会话绑定 profile 的完整解析结果**
+//     （`resolveProfileStateForSession`，与 `buildSessionActor` / `set_profile` 同一路径）。
 //     因此 from_session 的产物是"解析后生效面"的差分：把 profile 继承与 agentdef
 //     overlay 展平为一份自包含声明，而不是复制原 profile 文件的字面内容。
 //
@@ -90,14 +89,13 @@ func (h *Handler) renderRuntimeProfileSaveAs(r *http.Request, sessionID, name, a
 		return nil, newRuntimeProfileSaveAsValidationError(
 			"当前无差异，无需固化：会话未绑定 profile（生效面等于内置默认面）；未生成任何文件")
 	}
-	workspacePath := sessionmeta.String(meta, sessionmeta.WorkspacePath)
-	if worktreePath := sessionmeta.String(meta, toolbroker.AgentSessionContextWorktreePath); worktreePath != "" {
-		workspacePath = worktreePath
-	}
 	agentID := strings.TrimSpace(sessionmeta.String(meta, sessionmeta.ProfileAgent))
-	state, err := h.resolveProfileSessionState(ref, agentID, workspacePath)
+	state, cleanup, err := h.resolveProfileStateForSession(ctx, session, ref, agentID)
 	if err != nil {
 		return nil, newRuntimeProfileSaveAsValidationError("会话绑定 profile %q 解析失败: %s", ref, err)
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 	if state == nil || state.Resolved == nil {
 		return nil, newRuntimeProfileSaveAsValidationError("会话绑定 profile %q 未解析出有效生效面", ref)

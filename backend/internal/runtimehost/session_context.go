@@ -26,6 +26,17 @@ type SessionContext struct {
 	// ProfileRef / AgentID 是会话 profile 引用，供调用方解析 profile 状态。
 	ProfileRef string
 	AgentID    string
+	// Usage identity anchors profile/runtime config resolution to the same
+	// tenant/project/user scope the request used. UserID falls back to the
+	// session owner; tenant/project are persisted on the session when a request
+	// first resolves them.
+	TenantID  string
+	ProjectID string
+	UserID    string
+	// FrozenSystemPrompt is the session-anchored outbound instruction head.
+	// Agent construction must reuse it so a later actor rebuild cannot rewrite
+	// the provider prompt-cache prefix.
+	FrozenSystemPrompt string
 	// RoutingOverrideRaw 是会话级路由覆盖（JSON 字符串；主方案 §3.4）。
 	RoutingOverrideRaw string
 	// 子代理标记（agent_type / depth / read_only / completion requirement）。
@@ -89,6 +100,10 @@ func ExtractSessionContext(session *chat.Session) SessionContext {
 	out := SessionContext{
 		ProfileRef:                 getString(sessionmeta.LegacyAPIProfileReference),
 		AgentID:                    getString(sessionmeta.ProfileAgent),
+		TenantID:                   getString(sessionmeta.UsageTenantID),
+		ProjectID:                  getString(sessionmeta.UsageProjectID),
+		UserID:                     strings.TrimSpace(session.UserID),
+		FrozenSystemPrompt:         getString(sessionmeta.SystemPromptFrozen),
 		WorkspacePath:              getString(sessionmeta.WorkspacePath),
 		RoutingOverrideRaw:         getString(agentconfig.SessionRoutingOverrideContextKey),
 		ChildAgentType:             getString(toolbroker.AgentSessionContextAgentType),

@@ -2074,13 +2074,14 @@ func runtimeInfoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":             true,
-		"status":         "ok",
-		"service":        "ai-agent-runtime",
-		"execution_core": runtimechat.SessionActorRuntimeCore(),
-		"backend":        buildinfo.Backend(),
-		"frontend":       webui.Provenance(),
-		"routes":         []string{"/api/agent/chat", "/api/runtime"},
+		"ok":                   true,
+		"status":               "ok",
+		"service":              "ai-agent-runtime",
+		"execution_core":       runtimechat.SessionActorRuntimeCore(),
+		"entrypoint_execution": runtimeapi.ExecutionEntrypointSnapshot(),
+		"backend":              buildinfo.Backend(),
+		"frontend":             webui.Provenance(),
+		"routes":               []string{"/api/agent/chat", "/api/runtime"},
 	})
 }
 

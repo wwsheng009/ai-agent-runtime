@@ -686,6 +686,15 @@ func (a *Agent) GetToolBroker() *ToolBroker {
 	return a.toolBroker
 }
 
+// GetMCPManager returns the live tool surface bound to this agent. Hosts use it
+// at turn boundaries to synchronize any synthesized execution allowlist with
+// tools that finished connecting after agent construction.
+func (a *Agent) GetMCPManager() skill.MCPManager {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.mcpManager
+}
+
 // SetToolBroker sets the runtime tool broker.
 func (a *Agent) SetToolBroker(broker *ToolBroker) {
 	a.mu.Lock()
