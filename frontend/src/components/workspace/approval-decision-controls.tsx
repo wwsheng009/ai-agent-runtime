@@ -20,6 +20,7 @@ import type {
   SessionApprovalRememberScope,
 } from "@/api/runtime/sessions";
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 
 export type ApprovalDecisionOptions = {
@@ -124,11 +125,10 @@ export function ApprovalDecisionControls({
       {pattern ? (
         <div className="space-y-1.5 rounded-field border border-border/70 bg-surface-solid/60 px-2.5 py-2">
           <label className="flex items-center gap-2 text-xs text-foreground">
-            <input
+            <CheckboxInput
               checked={remember}
-              className="size-3.5 accent-[var(--accent-primary)]"
               disabled={disabled}
-              type="checkbox"
+              size="sm"
               onChange={(event) => setRemember(event.target.checked)}
             />
             {labels.remember}
@@ -137,7 +137,7 @@ export function ApprovalDecisionControls({
             {remember ? (
               <select
                 aria-label={labels.rememberScopeLabel}
-                className="h-7 rounded-field border border-border bg-surface-solid px-1.5 text-xs text-foreground"
+                className="h-7 rounded-field border border-border bg-surface-solid px-1.5 text-xs text-foreground outline-none transition focus-visible:border-accent-primary-border focus-visible:ring-2 focus-visible:ring-ring"
                 disabled={disabled}
                 value={scope}
                 onChange={(event) =>

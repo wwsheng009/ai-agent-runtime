@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import type { RuntimeSessionBacktrackMode } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
@@ -181,7 +182,7 @@ export function MessageBacktrackDialog({
               >
                 <input
                   checked={state.mode === value}
-                  className="accent-accent-gold"
+                  className="size-4 accent-accent-gold"
                   disabled={interactionLocked}
                   name="backtrack-mode"
                   onChange={() => onModeChange(value)}
@@ -219,12 +220,11 @@ export function MessageBacktrackDialog({
           </label>
 
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input
+            <CheckboxInput
               checked={state.prefillComposer}
-              className="accent-accent-gold"
               disabled={interactionLocked}
+              tone="gold"
               onChange={(event) => onPrefillChange(event.target.checked)}
-              type="checkbox"
             />
             {t("panels.messages.backtrackDialog.prefillToggle")}
           </label>

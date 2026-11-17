@@ -14,6 +14,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { Input } from "@/components/ui/input";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import type { ComposerProfileCandidate } from "@/lib/composer-profile-options";
 import { cn } from "@/lib/utils";
@@ -152,11 +153,11 @@ function ComposerProfileDialogBody({
     <DialogOverlay onDismiss={onClose}>
       <DialogPanel className="max-h-[32rem] w-full max-w-md overflow-hidden">
         <div className="flex flex-col gap-3 p-4">
-          <h2 className="text-lg font-semibold text-[--text-primary]">
+          <h2 className="text-lg font-semibold text-foreground">
             {t("composer.builtin.profile.dialog.title")}
           </h2>
 
-          <input
+          <Input
             ref={searchRef}
             type="text"
             data-composer-profile-search
@@ -164,31 +165,30 @@ function ComposerProfileDialogBody({
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={t("composer.builtin.profile.dialog.searchPlaceholder")}
-            className="w-full rounded-lg border border-[--border-subtle] bg-[--surface-level-2] px-3 py-2 text-sm text-[--text-primary] placeholder:text-[--text-tertiary] focus:border-[--accent-primary] focus:outline-none"
           />
 
           <div
             ref={listRef}
-            className="max-h-[20rem] min-h-[8rem] overflow-y-auto rounded-lg border border-[--border-subtle]"
+            className="max-h-[20rem] min-h-[8rem] overflow-y-auto rounded-card border border-border"
           >
             {loading ? (
               <div
                 data-composer-profile-dialog-loading
-                className="flex h-32 items-center justify-center text-sm text-[--text-secondary]"
+                className="flex h-32 items-center justify-center text-sm text-muted-foreground"
               >
                 {t("composer.builtin.profile.dialog.loading")}
               </div>
             ) : error ? (
               <div
                 data-composer-profile-dialog-error
-                className="flex h-32 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-[--text-error]"
+                className="flex h-32 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-accent-orange"
               >
                 <span>{error}</span>
                 {onRetry ? (
                   <button
                     type="button"
                     onClick={onRetry}
-                    className="rounded-md border border-[--border-subtle] px-3 py-1 text-xs text-[--text-primary] hover:bg-[--surface-level-3]"
+                    className="rounded-field border border-border bg-surface-solid px-2.5 py-1 text-xs text-foreground outline-none transition hover:bg-surface-soft-hover focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     {t("composer.builtin.profile.dialog.retry")}
                   </button>
@@ -199,14 +199,14 @@ function ComposerProfileDialogBody({
                 data-composer-profile-dialog-empty-state={
                   search.trim() ? "no-match" : "empty"
                 }
-                className="flex h-32 items-center justify-center text-sm text-[--text-secondary]"
+                className="flex h-32 items-center justify-center text-sm text-muted-foreground"
               >
                 {search.trim()
                   ? t("composer.builtin.profile.dialog.noMatch")
                   : t("composer.builtin.profile.dialog.empty")}
               </div>
             ) : (
-              <div className="divide-y divide-[--border-subtle]">
+              <div className="divide-y divide-border">
                 {filtered.map((candidate, index) => (
                   <button
                     key={candidate.ref}
@@ -220,8 +220,8 @@ function ComposerProfileDialogBody({
                     className={cn(
                       "w-full px-4 py-2.5 text-left text-sm transition-colors",
                       index === activeIndex
-                        ? "bg-[--accent-primary] text-white"
-                        : "text-[--text-primary] hover:bg-[--surface-level-3]",
+                        ? "bg-accent-primary text-black"
+                        : "text-foreground hover:bg-surface-soft-hover",
                     )}
                   >
                     <span className="block">{candidate.label}</span>

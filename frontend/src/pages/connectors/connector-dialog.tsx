@@ -21,6 +21,7 @@ import type {
 
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { fieldControlVariants } from "@/components/ui/field-variants";
 import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 
@@ -46,8 +47,10 @@ import {
 } from "./shared";
 import { ConnectorLoginPanel } from "./login-panel";
 
-const inputClassName =
-  "h-9 w-full rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary disabled:opacity-60";
+const inputClassName = fieldControlVariants({
+  size: "md",
+  surface: "soft",
+});
 
 interface ConnectorDialogProps {
   open: boolean;

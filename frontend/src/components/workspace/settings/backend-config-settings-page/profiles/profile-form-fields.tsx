@@ -9,11 +9,16 @@
 import { type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { Select, type SelectOption } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 import { ConfigFormField } from "../../config-form-field";
-import { editorControlClassName, editorToggleRowClassName } from "../../editor-control-class";
+import {
+  editorControlClassName,
+  editorTextareaClassName,
+  editorToggleRowClassName,
+} from "../../editor-control-class";
 import { SettingsBadgeList } from "../../settings-badge-list";
 
 type ProfileFieldProps = {
@@ -83,7 +88,7 @@ export function ProfileTextAreaField({
   return (
     <ConfigFormField description={description} label={label}>
       <textarea
-        className={cn(editorControlClassName, "resize-y font-mono leading-6 disabled:opacity-60")}
+        className={cn(editorTextareaClassName, "font-mono leading-6 disabled:opacity-60")}
         disabled={disabled}
         rows={rows}
         spellCheck={false}
@@ -203,10 +208,9 @@ export function ProfileToggleRow({
           </span>
         ) : null}
       </span>
-      <input
+      <CheckboxInput
         checked={checked}
         disabled={disabled}
-        type="checkbox"
         onChange={(event) => {
           onChange(event.target.checked);
         }}

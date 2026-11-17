@@ -12,6 +12,7 @@ import {
   type RuntimeGatewayStatus,
 } from "@/api/runtime/gateway";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 import { SettingsSection } from "./settings-section";
 import { SettingsToggleCard } from "./settings-toggle-card";
@@ -150,25 +151,22 @@ export function GatewaySettingsPage() {
       >
         <div className="space-y-3">
           <Field label={t("gateway.url")}>
-            <input
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            <Input
               value={url}
               onChange={(event) => setUrl(event.target.value)}
               placeholder={t("gateway.urlPlaceholder")}
             />
           </Field>
           <Field label={t("gateway.name")}>
-            <input
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder={t("gateway.namePlaceholder")}
             />
           </Field>
           <Field label={t("gateway.token")}>
-            <input
+            <Input
               type="password"
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
               value={token}
               onChange={(event) => setToken(event.target.value)}
               placeholder={

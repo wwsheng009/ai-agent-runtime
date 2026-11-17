@@ -11,6 +11,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { Input } from "@/components/ui/input";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import { cn } from "@/lib/utils";
 
@@ -137,40 +138,39 @@ function ComposerSkillDialogBody({
     <DialogOverlay onDismiss={onClose}>
       <DialogPanel className="max-h-[32rem] w-full max-w-md overflow-hidden">
         <div className="flex flex-col gap-3 p-4">
-          <h2 className="text-lg font-semibold text-[--text-primary]">
+          <h2 className="text-lg font-semibold text-foreground">
             {t("composer.builtin.skill.dialog.title")}
           </h2>
 
-          <input
+          <Input
             ref={searchRef}
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={t("composer.builtin.skill.dialog.searchPlaceholder")}
-            className="w-full rounded-lg border border-[--border-subtle] bg-[--surface-level-2] px-3 py-2 text-sm text-[--text-primary] placeholder:text-[--text-tertiary] focus:border-[--accent-primary] focus:outline-none"
           />
 
           <div
             ref={listRef}
-            className="max-h-[20rem] min-h-[8rem] overflow-y-auto rounded-lg border border-[--border-subtle]"
+            className="max-h-[20rem] min-h-[8rem] overflow-y-auto rounded-card border border-border"
           >
             {loading ? (
-              <div className="flex h-32 items-center justify-center text-sm text-[--text-secondary]">
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
                 {t("composer.builtin.skill.dialog.loading")}
               </div>
             ) : error ? (
-              <div className="flex h-32 items-center justify-center text-sm text-[--text-error]">
+              <div className="flex h-32 items-center justify-center text-sm text-accent-orange">
                 {error}
               </div>
             ) : filteredSkills.length === 0 ? (
-              <div className="flex h-32 items-center justify-center text-sm text-[--text-secondary]">
+              <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
                 {search.trim()
                   ? t("composer.builtin.skill.dialog.noMatch")
                   : t("composer.builtin.skill.dialog.empty")}
               </div>
             ) : (
-              <div className="divide-y divide-[--border-subtle]">
+              <div className="divide-y divide-border">
                 {filteredSkills.map((skill, index) => (
                   <button
                     key={skill}
@@ -180,8 +180,8 @@ function ComposerSkillDialogBody({
                     className={cn(
                       "w-full px-4 py-2.5 text-left text-sm transition-colors",
                       index === activeIndex
-                        ? "bg-[--accent-primary] text-white"
-                        : "text-[--text-primary] hover:bg-[--surface-level-3]",
+                        ? "bg-accent-primary text-black"
+                        : "text-foreground hover:bg-surface-soft-hover",
                     )}
                   >
                     {skill}

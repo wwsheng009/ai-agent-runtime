@@ -5,12 +5,26 @@ import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import {
+  fieldControlVariants,
+  fieldTextareaVariants,
+} from "@/components/ui/field-variants";
 import { scheduleKindLabelKey } from "@/components/workspace/schedule-panel-shared";
+import { cn } from "@/lib/utils";
 import type { RuntimeScheduleKind, RuntimeScheduleTargetKind } from "@/types/runtime";
 
 import { createKinds } from "./form-state";
 import type { CreateFormState } from "./form-state";
 import { WeekdayPicker } from "./weekday-picker";
+
+const fieldClassName = fieldControlVariants({
+  size: "sm",
+  surface: "transparent",
+});
+const textareaClassName = fieldTextareaVariants({
+  size: "sm",
+  surface: "transparent",
+});
 
 export type ScheduleCreateFormProps = {
   createForm: CreateFormState;
@@ -36,7 +50,7 @@ export function ScheduleCreateForm({
           <label className="grid gap-1 text-xs">
             <span className="text-muted-foreground">{t("panels.schedule.sessionLabel")}</span>
             <input
-              className="rounded border border-border bg-transparent px-2 py-1"
+              className={fieldClassName}
               onChange={(event) =>
                 setCreateForm({ ...createForm, sessionId: event.target.value })
               }
@@ -48,7 +62,7 @@ export function ScheduleCreateForm({
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.targetLabel")}</span>
           <select
-            className="rounded border border-border bg-transparent px-2 py-1"
+            className={fieldClassName}
             onChange={(event) =>
               setCreateForm({
                 ...createForm,
@@ -68,7 +82,7 @@ export function ScheduleCreateForm({
               {t("panels.schedule.workspaceLabel")}
             </span>
             <input
-              className="rounded border border-border bg-transparent px-2 py-1"
+              className={fieldClassName}
               onChange={(event) =>
                 setCreateForm({ ...createForm, targetWorkspace: event.target.value })
               }
@@ -83,7 +97,7 @@ export function ScheduleCreateForm({
               {t("panels.schedule.profileLabel")}
             </span>
             <input
-              className="rounded border border-border bg-transparent px-2 py-1"
+              className={fieldClassName}
               onChange={(event) =>
                 setCreateForm({ ...createForm, targetProfile: event.target.value })
               }
@@ -95,7 +109,7 @@ export function ScheduleCreateForm({
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.goalLabel")}</span>
           <input
-            className="rounded border border-border bg-transparent px-2 py-1"
+            className={fieldClassName}
             onChange={(event) => setCreateForm({ ...createForm, goal: event.target.value })}
             value={createForm.goal}
           />
@@ -103,7 +117,7 @@ export function ScheduleCreateForm({
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.planLabel")}</span>
           <textarea
-            className="rounded border border-border bg-transparent px-2 py-1"
+            className={textareaClassName}
             onChange={(event) => setCreateForm({ ...createForm, plan: event.target.value })}
             placeholder={t("panels.schedule.planPlaceholder")}
             rows={3}
@@ -113,7 +127,7 @@ export function ScheduleCreateForm({
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.titleLabel")}</span>
           <input
-            className="rounded border border-border bg-transparent px-2 py-1"
+            className={fieldClassName}
             onChange={(event) =>
               setCreateForm({ ...createForm, title: event.target.value })
             }
@@ -124,7 +138,7 @@ export function ScheduleCreateForm({
       <label className="mt-2 grid gap-1 text-xs">
         <span className="text-muted-foreground">{t("panels.schedule.promptLabel")}</span>
         <textarea
-          className="rounded border border-border bg-transparent px-2 py-1 text-xs"
+          className={textareaClassName}
           onChange={(event) =>
             setCreateForm({ ...createForm, prompt: event.target.value })
           }
@@ -141,7 +155,7 @@ export function ScheduleCreateForm({
         <label className="grid gap-1 text-xs">
           <span className="text-muted-foreground">{t("panels.schedule.kindLabel")}</span>
           <select
-            className="rounded border border-border bg-transparent px-2 py-1"
+            className={fieldClassName}
             onChange={(event) =>
               setCreateForm({
                 ...createForm,
@@ -167,7 +181,7 @@ export function ScheduleCreateForm({
               )}
             </span>
             <input
-              className="w-24 rounded border border-border bg-transparent px-2 py-1"
+              className={cn(fieldClassName, "w-24")}
               inputMode="numeric"
               onChange={(event) =>
                 setCreateForm({ ...createForm, amount: event.target.value })
@@ -180,7 +194,7 @@ export function ScheduleCreateForm({
           <label className="grid gap-1 text-xs">
             <span className="text-muted-foreground">{t("panels.schedule.atLabel")}</span>
             <input
-              className="rounded border border-border bg-transparent px-2 py-1"
+              className={fieldClassName}
               onChange={(event) =>
                 setCreateForm({ ...createForm, time: event.target.value })
               }
@@ -194,7 +208,7 @@ export function ScheduleCreateForm({
             <label className="grid gap-1 text-xs">
               <span className="text-muted-foreground">{t("panels.schedule.timeLabel")}</span>
               <input
-                className="w-28 rounded border border-border bg-transparent px-2 py-1"
+                className={cn(fieldClassName, "w-28")}
                 onChange={(event) =>
                   setCreateForm({ ...createForm, time: event.target.value })
                 }
@@ -205,7 +219,7 @@ export function ScheduleCreateForm({
             <label className="grid gap-1 text-xs">
               <span className="text-muted-foreground">{t("panels.schedule.zoneLabel")}</span>
               <input
-                className="rounded border border-border bg-transparent px-2 py-1"
+                className={fieldClassName}
                 onChange={(event) =>
                   setCreateForm({ ...createForm, timeZone: event.target.value })
                 }
@@ -236,7 +250,7 @@ export function ScheduleCreateForm({
           <label className="grid gap-1 text-xs">
             <span className="text-muted-foreground">{t("panels.schedule.cronLabel")}</span>
             <input
-              className="rounded border border-border bg-transparent px-2 py-1"
+              className={fieldClassName}
               onChange={(event) =>
                 setCreateForm({ ...createForm, cron: event.target.value })
               }

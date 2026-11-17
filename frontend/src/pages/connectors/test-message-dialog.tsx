@@ -7,12 +7,15 @@ import { useTranslation } from "react-i18next";
 import { sendConnectorTestMessage } from "@/api/runtime/connectors";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { fieldControlVariants } from "@/components/ui/field-variants";
 import { readAdminToken } from "@/lib/admin-token";
 
 import type { ConnectorView } from "@/types/runtime";
 
-const inputClassName =
-  "h-9 w-full rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary";
+const inputClassName = fieldControlVariants({
+  size: "md",
+  surface: "soft",
+});
 
 interface TestMessageDialogProps {
   open: boolean;

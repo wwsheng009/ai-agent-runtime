@@ -9,6 +9,7 @@
 
 import { getAnalyticsRoutingStats, listAnalyticsRoutingEvents } from "@/api/runtime/analytics";
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { Select } from "@/components/ui/select";
 import type {
   AnalyticsRouteEvent,
@@ -132,11 +133,11 @@ export function RoutingObservabilityPanel({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
+            <CheckboxInput
               checked={warningsOnly}
               onChange={(event) => setWarningsOnly(event.target.checked)}
-              className="size-3.5 accent-current"
+              size="sm"
+              tone="current"
             />
             {t("observability.routing.warningsOnly")}
           </label>

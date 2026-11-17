@@ -122,6 +122,15 @@ describe("Select", () => {
     expect(document.body.querySelector('[role="listbox"]')).toBeNull();
   });
 
+  it("uses the shared md field sizing and visible focus", () => {
+    const { trigger } = renderSelect();
+
+    expect(trigger.className).toContain("h-9");
+    expect(trigger.className).toContain("text-sm");
+    expect(trigger.className).toContain("rounded-field");
+    expect(trigger.className).toContain("focus-visible:ring-2");
+  });
+
   it("selects an option by click and calls onChange", () => {
     const onChange = vi.fn();
     const { trigger } = renderSelect({ onChange });

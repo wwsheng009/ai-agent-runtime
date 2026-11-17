@@ -1,7 +1,8 @@
 import type { TeamDetailsSectionState } from "./types";
 
-export const detailControlClass =
-  "w-full rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2 text-sm text-foreground outline-none";
+import { fieldControlVariants } from "@/components/ui/field-variants";
+
+export const detailControlClass = fieldControlVariants({ size: "md" });
 
 export const detailCardClass =
   "rounded-card border border-border bg-surface-soft px-3 py-2.5";

@@ -14,6 +14,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { Select } from "@/components/ui/select";
 import type { RuntimeLogsConnectionState } from "@/hooks/use-runtime-logs";
@@ -169,7 +170,7 @@ export function LogsHeaderSection({
             />
           </label>
 
-          <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-field border border-border bg-black/10 px-3">
+          <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-field border border-border bg-black/10 px-3 transition focus-within:border-accent-primary-border focus-within:ring-2 focus-within:ring-ring">
             <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {t("levelLabel")}
             </span>
@@ -184,7 +185,7 @@ export function LogsHeaderSection({
             />
           </label>
 
-          <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-field border border-border bg-black/10 px-3 sm:flex-none">
+          <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-field border border-border bg-black/10 px-3 transition focus-within:border-accent-primary-border focus-within:ring-2 focus-within:ring-ring sm:flex-none">
             <span className="flex items-center gap-1.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <ShieldIcon size={12} />
               {t("tokenLabel")}
@@ -221,11 +222,9 @@ export function LogsHeaderSection({
 
           <label className="flex h-8 items-center gap-2.5 rounded-field border border-border bg-black/10 px-3 whitespace-nowrap">
             <span className="app-text-11 font-medium">{t("followLatest")}</span>
-            <input
-              type="checkbox"
+            <CheckboxInput
               checked={follow}
               onChange={(event) => onFollowChange(event.target.checked)}
-              className="h-4 w-4 accent-accent-primary"
             />
           </label>
         </div>

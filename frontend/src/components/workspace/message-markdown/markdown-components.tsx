@@ -4,6 +4,7 @@
 import { isValidElement, type ReactNode } from "react";
 import { type Components } from "react-markdown";
 import { CodeBlock } from "@/components/ui/code-block";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import {
   ArtifactOutputLink,
 } from "./artifact-output-link";
@@ -223,11 +224,12 @@ export function createMarkdownComponents(
     img: ({ alt, src }) => renderMarkdownImage(alt, src, streaming),
     input: ({ checked, type }) =>
       type === "checkbox" ? (
-        <input
+        <CheckboxInput
           checked={checked}
-          className="mr-2 size-3.5 accent-accent-secondary"
+          className="mr-2"
           disabled
-          type="checkbox"
+          size="sm"
+          tone="secondary"
         />
       ) : null,
     li: ({ children }) => (

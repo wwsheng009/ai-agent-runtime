@@ -15,6 +15,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import {
   SESSION_DETAIL_CARD_CLASS,
   SESSION_DETAIL_CHIP_CLASS,
@@ -318,13 +319,14 @@ export function SessionDetailRoutingSection({
 
           {panel?.scope === "main" ? (
             <label className="flex items-start gap-1.5">
-              <input
+              <CheckboxInput
                 checked={enabled}
-                className="mt-0.5 size-3 shrink-0"
+                className="mt-0.5"
                 data-testid="routing-enabled-toggle"
                 disabled={!layerWritable || saving}
                 onChange={(event) => setEnabledDraft(event.target.checked)}
-                type="checkbox"
+                shrink
+                size="xs"
               />
               <span className="grid min-w-0 gap-0.5">
                 <span className="app-text-11 text-foreground">

@@ -165,7 +165,7 @@ export function ArtifactPanelCheckpointDetailSection({
                     >
                       <input
                         checked={restoreMode === option.value}
-                        className="mt-0.5 accent-accent-teal"
+                        className="mt-0.5 size-4 accent-accent-teal"
                         disabled={restorePending}
                         name="checkpoint-restore-mode"
                         onChange={() => setRestoreMode(option.value)}

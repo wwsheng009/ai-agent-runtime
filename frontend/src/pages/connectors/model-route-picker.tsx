@@ -13,6 +13,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { fieldControlVariants } from "@/components/ui/field-variants";
 import type { ConnectorRoutePolicyView } from "@/types/runtime";
 import {
   advanceAfterModelSelect,
@@ -278,7 +279,10 @@ export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerP
         aria-expanded={open}
         onClick={() => (open ? closePanel(true) : openPanel())}
         title={summaryLabel}
-        className="flex h-9 w-full items-center justify-between gap-2 rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none transition hover:border-accent-primary"
+        className={cn(
+          "flex items-center justify-between gap-2",
+          fieldControlVariants({ size: "md", surface: "soft" }),
+        )}
       >
         <span className="min-w-0 truncate">{summaryLabel}</span>
         <ChevronDownIcon size={14} className="shrink-0 text-muted-foreground" />

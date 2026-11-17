@@ -6,6 +6,7 @@
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import type {
   RuntimeMcpConfig,
@@ -498,10 +499,9 @@ export function RuntimeMcpForm({
 
         <label className={cn(editorToggleRowClassName, "lg:col-span-2")}>
           <span className="text-sm text-foreground">{t("mcp.fields.enabled")}</span>
-          <input
+          <CheckboxInput
             aria-label={t("mcp.fields.enabled")}
             checked={draft.enabled}
-            type="checkbox"
             onChange={(event) => patch({ enabled: event.target.checked })}
           />
         </label>

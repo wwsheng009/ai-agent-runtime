@@ -6,10 +6,9 @@
 import { useTranslation } from "react-i18next";
 
 import { CheckboxInput } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import type { ConnectorFieldSchema } from "@/types/runtime";
-
-const inputClassName =
-  "h-9 w-full rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary disabled:opacity-60";
 
 interface FieldControlProps {
   field: ConnectorFieldSchema;
@@ -35,11 +34,11 @@ export function FieldControl({
   if (field.type === "secret") {
     return (
       <div className="flex flex-col gap-1.5">
-        <input
+        <Input
           type="password"
           autoComplete="new-password"
           aria-label={field.label}
-          className={inputClassName}
+          surface="soft"
           placeholder={
             field.placeholder ?? (configured ? t("dialog.secretConfigured") : undefined)
           }
@@ -77,9 +76,9 @@ export function FieldControl({
   }
   if (field.type === "enum") {
     return (
-      <select
+      <NativeSelect
         aria-label={field.label}
-        className={inputClassName}
+        surface="soft"
         value={value}
         onChange={(event) => onValueChange(field.key, event.target.value)}
       >
@@ -89,15 +88,15 @@ export function FieldControl({
             {option.label}
           </option>
         ))}
-      </select>
+      </NativeSelect>
     );
   }
   return (
     <div className="flex flex-col gap-1">
-      <input
+      <Input
         type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
         aria-label={field.label}
-        className={inputClassName}
+        surface="soft"
         placeholder={field.placeholder}
         value={value}
         onChange={(event) => onValueChange(field.key, event.target.value)}

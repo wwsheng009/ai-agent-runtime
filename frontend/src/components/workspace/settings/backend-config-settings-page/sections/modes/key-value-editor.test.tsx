@@ -77,7 +77,7 @@ describe("KeyValueEditor 渲染", () => {
       createKeyValueRow("REGION", "cn"),
     ]);
 
-    expect(markup).not.toContain("aria-invalid");
+    expect(markup).not.toContain('aria-invalid="true"');
     expect(markup).not.toContain("mcp.kv.keyRequired");
     expect(markup).not.toContain("mcp.kv.duplicateKey");
   });

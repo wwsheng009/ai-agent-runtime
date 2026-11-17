@@ -14,6 +14,8 @@ import { RuntimeApiError } from "@/api/runtime/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import {
   parseSessionSearchTagInput,
@@ -152,9 +154,9 @@ export function SessionSearchDialog({
               <span className="font-medium text-foreground">
                 {t("panels.sessionSearch.form.userId")}
               </span>
-              <select
+              <NativeSelect
                 aria-label={t("panels.sessionSearch.form.userId")}
-                className="mt-1 w-full rounded-card border border-border bg-surface-solid px-2 py-1.5 text-sm text-foreground outline-none"
+                className="mt-1"
                 onChange={(event) => setUserId(event.target.value)}
                 value={userId}
               >
@@ -166,16 +168,16 @@ export function SessionSearchDialog({
                     {user.display_name?.trim() || user.user_id}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
 
             <label className="block text-xs text-muted-foreground">
               <span className="font-medium text-foreground">
                 {t("panels.sessionSearch.form.state")}
               </span>
-              <select
+              <NativeSelect
                 aria-label={t("panels.sessionSearch.form.state")}
-                className="mt-1 w-full rounded-card border border-border bg-surface-solid px-2 py-1.5 text-sm text-foreground outline-none"
+                className="mt-1"
                 onChange={(event) => setState(event.target.value)}
                 value={state}
               >
@@ -187,16 +189,16 @@ export function SessionSearchDialog({
                     {t(sessionSearchStateLabelKey(option))}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
 
             <label className="block text-xs text-muted-foreground">
               <span className="font-medium text-foreground">
                 {t("panels.sessionSearch.form.tags")}
               </span>
-              <input
+              <Input
                 aria-label={t("panels.sessionSearch.form.tags")}
-                className="mt-1 w-full rounded-card border border-border bg-surface-solid px-2 py-1.5 text-sm text-foreground outline-none"
+                className="mt-1"
                 onChange={(event) => setTagsInput(event.target.value)}
                 placeholder={t("panels.sessionSearch.form.tagsPlaceholder")}
                 value={tagsInput}

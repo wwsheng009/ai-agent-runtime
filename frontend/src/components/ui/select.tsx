@@ -13,6 +13,10 @@ import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 import {
+  fieldControlVariants,
+  type FieldSize,
+} from "./field-variants";
+import {
   POPOVER_VIEWPORT_PADDING,
   resolvePopoverPosition,
   type PopoverPosition,
@@ -37,6 +41,7 @@ type SelectProps = {
   triggerClassName?: string;
   menuClassName?: string;
   optionClassName?: string;
+  size?: FieldSize;
 };
 
 function findFirstEnabledOptionIndex(options: readonly SelectOption[]) {
@@ -92,6 +97,7 @@ export function Select({
   triggerClassName,
   menuClassName,
   optionClassName,
+  size = "md",
 }: SelectProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -426,7 +432,8 @@ export function Select({
             handleTriggerKeyDown(event);
           }}
           className={cn(
-            "inline-flex w-full items-center justify-between gap-2 rounded-field border border-border bg-surface-solid px-3 py-2 text-left text-foreground outline-none transition hover:border-border-strong hover:bg-surface-soft focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            "inline-flex items-center justify-between gap-2 text-left",
+            fieldControlVariants({ size }),
             triggerClassName,
           )}
         >

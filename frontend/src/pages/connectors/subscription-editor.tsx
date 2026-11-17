@@ -17,6 +17,8 @@ import { useTranslation } from "react-i18next";
 import type { ConnectorEventSubscriptionView } from "@/types/runtime";
 
 import { Button } from "@/components/ui/button";
+import { CheckboxInput } from "@/components/ui/checkbox";
+import { fieldControlVariants } from "@/components/ui/field-variants";
 import { cn } from "@/lib/utils";
 
 import {
@@ -35,8 +37,10 @@ import {
 } from "./subscription-forms";
 import { formatSubscriptionList, parseSubscriptionList } from "./subscription-list";
 
-const inputClassName =
-  "h-9 w-full rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary disabled:opacity-60";
+const inputClassName = fieldControlVariants({
+  size: "md",
+  surface: "soft",
+});
 
 export interface SubscriptionEditorValue {
   enabled: boolean;
@@ -86,11 +90,11 @@ interface TypeOptionProps {
 function TypeOption({ name, hint, checked, onToggle }: TypeOptionProps) {
   return (
     <label className="flex items-center gap-2 text-xs text-foreground">
-      <input
-        type="checkbox"
+      <CheckboxInput
         aria-label={name}
         checked={checked}
         onChange={(event) => onToggle(event.target.checked)}
+        size="sm"
       />
       <span>{name}</span>
       {hint ? (
@@ -190,11 +194,11 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
           {t("connectorDialog.eventsTitle")}
         </span>
         <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
+          <CheckboxInput
             aria-label={t("connectorDialog.eventsEnabled")}
             checked={value.enabled}
             onChange={(event) => onChange({ ...value, enabled: event.target.checked })}
+            size="sm"
           />
           {t("connectorDialog.eventsEnabled")}
         </label>
@@ -322,11 +326,11 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
               </label>
               <div className="flex items-end">
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
+                  <CheckboxInput
                     aria-label={t("connectorDialog.eventsRowEnabled")}
                     checked={sub.enabled !== false}
                     onChange={(event) => updateAt(index, { enabled: event.target.checked })}
+                    size="sm"
                   />
                   {t("connectorDialog.eventsRowEnabled")}
                 </label>
