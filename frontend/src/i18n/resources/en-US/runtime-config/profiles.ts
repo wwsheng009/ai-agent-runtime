@@ -3,8 +3,6 @@
 
 export const enRuntimeConfigProfiles = {
   title: "Profiles",
-  description:
-    "Maintain profile.yaml per scenario: tools, skills, MCP, prompts, agents and preferences in one place, with validation and impact preview before saving.",
   list: {
     refresh: "Refresh",
     create: "New profile",
@@ -46,8 +44,6 @@ export const enRuntimeConfigProfiles = {
   },
   projectBinding: {
     title: "Project binding (this workspace)",
-    description:
-      "The project-level profile referenced by this workspace's .aicli/profile. Discovery is read-only: nothing is activated automatically and the default profile is unchanged.",
     refLabel: "Ref",
     workspaceLabel: "Workspace",
     sourceLabel: "Source",
@@ -94,7 +90,6 @@ export const enRuntimeConfigProfiles = {
   },
   editor: {
     title: "Edit profile: {{name}}",
-    description: "Changes are written to profile.yaml only; the global config.yaml is never touched.",
     nav: "Cards",
     save: "Save profile",
     saving: "Saving…",

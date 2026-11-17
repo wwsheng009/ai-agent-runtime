@@ -7,8 +7,6 @@ export const zhWorkspacePanelsTeamsDispatch = {
   dialog: {
     eyebrow: "Runtime teams",
     title: "团队详情",
-    description:
-      "这里集中显示调度、团队状态、任务、事件、邮箱和路径声明，避免把左侧栏变成长表单。",
     closeAriaLabel: "关闭运行团队详情",
     loading: "正在加载 runtime teams 内容…",
   },
@@ -33,7 +31,6 @@ export const zhWorkspacePanelsTeamsDispatch = {
     teammateNamePrefixPlaceholder: "Fanout Worker",
     teammateProfile: "队友档案",
     teammateProfilePlaceholder: "parallel execution worker",
-    hint: "每个批量创建的团队都会获得一个 lead 会话、一个 worker 会话、一个空闲队友，以及当前的下一任务。",
     submit: "批量创建可运行团队并派发",
   },
   template: {
@@ -64,8 +61,6 @@ export const zhWorkspacePanelsTeamsDispatch = {
     deliverables: "交付物",
     deliverablesPlaceholder: "summary.md\npatch.diff\n验证说明",
     priority: "优先级",
-    statusHint: "任务创建时状态为 `status=ready`，活跃团队的编排器可以领取并执行。",
-    submitHint: "用于将同一个下一任务扇出到多个可执行团队并行执行。",
     submit: "派发下一任务",
     resultCreated: "任务 {{taskId}} 已创建",
     resultFailed: "派发失败",

@@ -3,8 +3,6 @@ export const enWorkspacePanelsAgents = {
   ariaLabel: "Subagent control panel",
   eyebrow: "Runtime · Subagents",
   title: "Subagent control",
-  description:
-    "Where this session sits in the AgentControl identity graph: the root → current lineage chain and every descendant below it, each stoppable or resumable on its own.",
   refresh: "Refresh subagent directory",
   close: "Close subagent control",
   retry: "Retry",

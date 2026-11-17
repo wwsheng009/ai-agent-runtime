@@ -142,10 +142,6 @@ export const enRuntimeConfigEditorFeedback = {
   impact: {
     previewTitle: "Preview impact",
     runtimeTitle: "Runtime impact",
-    previewDescription:
-      "This draft shows how many changes would apply immediately and how many would still require a restart.",
-    runtimeDescription:
-      "This shows the actual effect of the most recently saved config on the current runtime-server.",
     previewBadge: "Based on preview",
     savedBadge: "Latest saved result",
     changedCount: "{{count}} changes",

@@ -110,9 +110,6 @@ export function FilePreviewDialog({
             <p className="mt-1 truncate font-mono app-text-11 text-muted-foreground">
               {preview.requestedPath}
             </p>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {t("panels.filePreview.description")}
-            </p>
           </div>
           <Button
             aria-label={t("panels.filePreview.close")}

@@ -9,8 +9,6 @@ export const enWorkspacePanelsTeamsDispatch = {
   dialog: {
     eyebrow: "Runtime teams",
     title: "Team details",
-    description:
-      "Dispatch, team state, tasks, events, mailbox, and path claims live here so the sidebar can stay compact.",
     closeAriaLabel: "Close runtime team details",
     loading: "Loading runtime teams content…",
   },
@@ -36,7 +34,6 @@ export const enWorkspacePanelsTeamsDispatch = {
     teammateNamePrefixPlaceholder: "Fanout Worker",
     teammateProfile: "Teammate profile",
     teammateProfilePlaceholder: "parallel execution worker",
-    hint: "Each provisioned team gets a lead session, a worker session, one idle teammate, and the current next task.",
     submit: "Provision runnable teams and dispatch",
   },
   template: {
@@ -67,10 +64,6 @@ export const enWorkspacePanelsTeamsDispatch = {
     deliverables: "Deliverables",
     deliverablesPlaceholder: "summary.md\npatch.diff\nvalidation notes",
     priority: "Priority",
-    statusHint:
-      "Tasks are created with `status=ready`, so active team orchestrators can claim and execute them.",
-    submitHint:
-      "Use this to fan out the same next task across multiple executable teams for parallel execution.",
     submit: "Dispatch next task",
     resultCreated: "task {{taskId}} created",
     resultFailed: "dispatch failed",

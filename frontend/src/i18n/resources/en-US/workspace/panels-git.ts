@@ -5,8 +5,6 @@ import type { zhWorkspacePanelsGit } from "../../zh-CN/workspace/panels-git";
 
 export const enWorkspacePanelsGit = {
   ariaLabel: "Git changes",
-  readOnlyNote: "Read-only view: P3 only browses diffs; no stage, unstage, or commit actions.",
-  writeNote: "Stage and unstage are available; commit is out of scope for this round.",
   writeFailed: "Stage action failed: {{message}}",
   writeDismiss: "Dismiss notice",
   repo: {

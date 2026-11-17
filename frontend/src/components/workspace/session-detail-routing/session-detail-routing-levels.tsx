@@ -9,6 +9,7 @@
 
 import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
+import { Input } from "@/components/ui/input";
 
 import {
   SESSION_DETAIL_CHIP_CLASS,
@@ -54,9 +55,6 @@ const TH_CLASS = cn(
   SESSION_DETAIL_SECTION_LABEL_CLASS,
   "px-1 py-0.5 text-left font-normal",
 );
-
-const FIELD_INPUT_CLASS =
-  "h-6 w-full min-w-0 rounded-card border border-border bg-surface-soft px-1 app-text-10 text-foreground outline-none focus:border-accent-primary/40 disabled:cursor-not-allowed disabled:opacity-60";
 
 export type SessionDetailRoutingLevelsProps = {
   levels: readonly RoutingLevelSummary[];
@@ -155,9 +153,11 @@ export function SessionDetailRoutingLevels({
                 </td>
                 {SESSION_ROUTING_EDITABLE_FIELDS.map((field) => (
                   <td className="px-0.5 py-1" key={field}>
-                    <input
+                    <Input
                       aria-label={`${level.level} ${t(FIELD_LABEL_KEY[field])}`}
-                      className={FIELD_INPUT_CLASS}
+                      size="sm"
+                      surface="soft"
+                      className="min-w-0"
                       data-testid={`routing-field-${level.level}-${field}`}
                       disabled={disabled}
                       onChange={(event) =>

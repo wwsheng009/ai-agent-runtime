@@ -5,13 +5,10 @@ import type { zhRuntimeConfigEditorProviders } from "../../zh-CN/runtime-config/
 export const enRuntimeConfigEditorProviders = {
   providers: {
     title: "Providers",
-    description:
-      "Browse providers in a table and edit high-frequency fields, JSON extras, and extension config in a popup form. Detect site type and sync balances through the runtime API.",
     emptyState: "No providers yet. Create a new provider draft to get started.",
     create: "New provider",
     createTitle: "New Provider",
     editTitle: "Edit Provider: {{name}}",
-    saveNote: "After saving, preview the diff before writing back to `config.yaml`.",
     saveButton: "Save provider",
     summary: {
       total: "{{count}} providers",
@@ -109,8 +106,6 @@ export const enRuntimeConfigEditorProviders = {
     },
     account: {
       title: "Site type and account balance",
-      description:
-        "Detect site type, preview balance, or sync an account snapshot into config for a saved provider via the runtime API.",
       undetected: "Not detected",
       authRefBadge: "auth ref",
       siteTypeDescription: "Fill manually, or let Detect / Refresh write it automatically.",
@@ -157,8 +152,6 @@ export const enRuntimeConfigEditorProviders = {
     },
     models: {
       title: "Model list and capability config",
-      description:
-        "Maintain the supported model list manually and configure each model in depth: reasoning, context & output, auto-compact, input modalities, native tools, and replay contracts. Fetch / auto-import / probe actions remain one click away; all edits only touch the current draft.",
       fetch: "Fetch models",
       fetching: "Fetching...",
       autoImport: "Auto import",
@@ -320,8 +313,6 @@ export const enRuntimeConfigEditorProviders = {
     },
     proxy: {
       title: "Provider-level proxy override",
-      description:
-        "Optionally set an HTTP / HTTPS / SOCKS5 proxy for this provider. Leave empty to inherit the global proxy or environment variables.",
       enable: "Enable proxy override",
       http: "HTTP proxy",
       httpDescription: "HTTP request proxy; socks5://host:port is also supported.",
@@ -336,9 +327,6 @@ export const enRuntimeConfigEditorProviders = {
     import: {
       action: "Auto import",
       title: "Auto import provider",
-      description:
-        "Enter a name and Base URL (API key optional). The runtime detects the protocol, fetches models, and builds a provider draft from the result.",
-      note: "Import only fills the current editor draft; save on the page to write it back to config.",
       submit: "Start import",
       submitting: "Importing...",
       failed: "Failed to auto import",

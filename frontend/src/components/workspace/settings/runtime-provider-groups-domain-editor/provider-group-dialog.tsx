@@ -55,11 +55,9 @@ export function ProviderGroupDialog({
               })
             : t("editor.providerGroups.dialog.createTitle")
         }
-        description={t("editor.providerGroups.dialog.description")}
         footer={
           <SettingsDialogFooter
             buttonSize="sm"
-            note={t("editor.providerGroups.dialog.saveNote")}
             confirmLabel={t("editor.providerGroups.actions.save")}
             onCancel={onClose}
             onConfirm={onConfirm}

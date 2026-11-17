@@ -52,7 +52,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
   const canNext = offset + pageSize < total;
   return (
     <section aria-label={t("cache.requestsTitle")} className="surface-panel rounded-panel-lg p-3 sm:p-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{t("cache.requestsTitle")}</h2>
         <div className="flex items-center gap-1 text-xs text-muted-foreground">
           <Button variant="ghost" size="sm" disabled={!canPrev || loading} onClick={() => onPage(Math.max(0, offset - pageSize))}>
@@ -108,12 +108,25 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
               return (
                 <tr
                   key={record.llm_request_id}
+                  role={traceable ? "button" : undefined}
+                  tabIndex={traceable ? 0 : undefined}
+                  aria-label={traceable ? t("cache.traceHint") : undefined}
                   className={cn(
                     "border-b border-border last:border-b-0",
-                    traceable && "cursor-pointer hover:bg-surface-soft",
+                    traceable && "cursor-pointer hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   )}
                   title={traceable ? t("cache.traceHint") : undefined}
                   onClick={traceable ? () => onTrace(record) : undefined}
+                  onKeyDown={
+                    traceable
+                      ? (event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            onTrace(record);
+                          }
+                        }
+                      : undefined
+                  }
                 >
                   <td className="whitespace-nowrap px-2 py-2.5 tabular-nums">{formatCacheTime(record.started_at)}</td>
                   <td className="max-w-52 truncate px-2 py-2.5 font-mono text-xs" title={traceId || undefined}>

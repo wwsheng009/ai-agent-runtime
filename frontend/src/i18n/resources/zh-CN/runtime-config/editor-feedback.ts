@@ -139,10 +139,6 @@ export const zhRuntimeConfigEditorFeedback = {
   impact: {
     previewTitle: "预览影响",
     runtimeTitle: "运行时影响",
-    previewDescription:
-      "这次草稿若保存，会有多少配置即时生效、多少仍需重启。",
-    runtimeDescription:
-      "这里展示最近一次已保存配置对当前 runtime-server 的实际影响。",
     previewBadge: "基于预览",
     savedBadge: "最近保存结果",
     changedCount: "{{count}} 处变更",

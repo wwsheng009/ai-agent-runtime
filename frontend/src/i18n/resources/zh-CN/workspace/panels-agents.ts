@@ -4,8 +4,6 @@ export const zhWorkspacePanelsAgents = {
   ariaLabel: "子代理控制面面板",
   eyebrow: "Runtime · 子代理控制面",
   title: "子代理控制面",
-  description:
-    "当前会话在 AgentControl 身份图中的位置：root → 当前会话的 lineage 链，以及其下全部后代；可对单个子代理独立停止 / 恢复。",
   refresh: "刷新子代理目录",
   close: "关闭子代理控制面",
   retry: "重试",

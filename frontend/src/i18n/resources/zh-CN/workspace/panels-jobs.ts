@@ -4,8 +4,6 @@ export const zhWorkspacePanelsJobs = {
   ariaLabel: "后台任务面板",
   eyebrow: "Runtime · 后台任务",
   title: "后台任务",
-  description:
-    "当前会话的后台作业：运行中任务本地走秒，终态任务显示耗时与退出码；输出按需增量读取。",
   refresh: "刷新后台任务",
   close: "关闭后台任务面板",
   loading: "正在加载后台任务…",

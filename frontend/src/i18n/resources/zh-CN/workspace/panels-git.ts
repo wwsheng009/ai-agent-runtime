@@ -4,8 +4,6 @@
 // 不允许在前端改写或隐藏（诚实纪律见规划文档 §4.6）。
 export const zhWorkspacePanelsGit = {
   ariaLabel: "Git 变更",
-  readOnlyNote: "只读视图：P3 仅浏览 diff，不提供暂存 / 取消暂存 / 提交操作。",
-  writeNote: "暂存 / 取消暂存可用；本期不提供提交（commit 需独立评审）。",
   writeFailed: "暂存操作失败：{{message}}",
   writeDismiss: "关闭提示",
   repo: {

@@ -213,7 +213,6 @@ export const zhWorkspaceBase = {
     directories: {
       add: "添加目录",
       addTitle: "添加工作目录",
-      addHint: "注册一个已存在的文件夹，以便按目录归组会话。目录必须已在运行时主机上存在。",
       pathLabel: "目录路径",
       pathPlaceholder: "例如 E:\\projects\\demo",
       nameLabel: "显示名称（可选）",
@@ -232,7 +231,6 @@ export const zhWorkspaceBase = {
       menu: "工作目录段操作",
       manage: "管理目录",
       manageTitle: "管理工作目录",
-      manageHint: "在这里可以新建会话、重命名别名或移除已注册的目录。",
       manageEmpty: "还没有注册的工作目录。",
       manageUnregisteredTitle: "未注册（来自会话）",
       manageUnregisteredHint:
@@ -376,13 +374,6 @@ export const zhWorkspaceBase = {
       empty: "暂无可用的上下文数据：本会话还没有完成过带用量上报的 LLM 请求。",
       error: "上下文用量不可用",
       unknownValue: "未知",
-      sourceNote: "按最近一次 LLM 请求计算，数据来自会话用量明细（{{source}}）。",
-      source: {
-        context_window: "上下文窗口",
-        prompt_budget: "prompt 预算",
-        compact: "压缩结果",
-        none: "会话用量明细",
-      },
       metrics: {
         used: "已用上下文",
         window: "上下文窗口",

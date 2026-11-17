@@ -5,8 +5,6 @@ export const zhWorkspaceFilePreview = {
   eyebrow: "Runtime · 文件预览",
   title: "运行时文件预览",
   close: "关闭文件预览",
-  description:
-    "内容来自运行时进程可见的本地文件（只读，POST /api/runtime/fs/read-file），不做本地缓存与改写。",
   tabs: {
     ariaLabel: "预览方式",
     raw: "原始",

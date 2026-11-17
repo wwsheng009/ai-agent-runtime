@@ -99,9 +99,6 @@ export function ProviderModelsSection({
           <div className="app-text-13 font-semibold text-foreground">
             {t("editor.providers.models.title")}
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {t("editor.providers.models.description")}
-          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button

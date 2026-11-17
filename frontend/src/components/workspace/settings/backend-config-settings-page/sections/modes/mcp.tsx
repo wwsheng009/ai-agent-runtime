@@ -280,9 +280,6 @@ export function McpModeSection() {
                 value={t("mcp.counts.connected", { count: connectedCount })}
               />
             </div>
-            <p className="mt-1.5 max-w-[46rem] text-xs leading-5 text-muted-foreground">
-              {t("mcp.description")}
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

@@ -6,8 +6,6 @@ export const enWorkspacePanelsJobs = {
   ariaLabel: "Background jobs panel",
   eyebrow: "Runtime · Background jobs",
   title: "Background jobs",
-  description:
-    "Background jobs for this session: live jobs tick locally, settled jobs show duration and exit code, output loads on demand.",
   refresh: "Refresh background jobs",
   close: "Close background jobs panel",
   loading: "Loading background jobs…",

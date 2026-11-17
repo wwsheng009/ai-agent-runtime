@@ -123,11 +123,6 @@ export function RuntimeImpactPanel({
           ? t("editor.impact.previewTitle")
           : t("editor.impact.runtimeTitle")
       }
-      description={
-        isPreview
-          ? t("editor.impact.previewDescription")
-          : t("editor.impact.runtimeDescription")
-      }
     >
       <div className="rounded-panel-lg border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">

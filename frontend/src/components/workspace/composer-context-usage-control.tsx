@@ -325,11 +325,6 @@ export function ComposerContextUsageControl({
                       ))}
                     </dl>
                   </div>
-                  <p className="text-[11px] leading-5 text-muted-foreground">
-                    {t("composer.contextUsage.sourceNote", {
-                      source: t(`composer.contextUsage.source.${snapshot.source}`),
-                    })}
-                  </p>
                 </>
               ) : (
                 <p className="text-xs leading-5 text-muted-foreground">

@@ -94,9 +94,6 @@ export function WorkspaceDirectoryAddDialog({
           <h2 className="text-lg font-semibold tracking-[-0.03em] text-foreground">
             {t("sidebar.directories.addTitle")}
           </h2>
-          <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            {t("sidebar.directories.addHint")}
-          </p>
 
           <label className="mt-4 block">
             <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">

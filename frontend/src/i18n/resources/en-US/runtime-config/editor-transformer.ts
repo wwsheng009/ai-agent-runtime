@@ -152,8 +152,6 @@ export const enRuntimeConfigEditorTransformer = {
     dialog: {
       createTitle: "New Provider Group",
       editTitle: "Edit Provider Group: {{name}}",
-      description: "Maintain routing strategy, failover, truncation, and members here. Keep uncovered extras via JSON.",
-      saveNote: "After saving, review the `provider_groups` diff in preview.",
     },
     validation: {
       pendingTitle: "This draft still has fields to fix:",

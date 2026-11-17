@@ -344,9 +344,6 @@ export function ProfileEditor({ onClose, onSaved, view }: ProfileEditorProps) {
                 : t("profiles.editor.noChanges")}
             </Badge>
           </div>
-          <p className="mt-1.5 max-w-[46rem] text-xs leading-5 text-muted-foreground">
-            {t("profiles.editor.description")}
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button

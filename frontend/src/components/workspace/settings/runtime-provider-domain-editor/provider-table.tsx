@@ -60,7 +60,6 @@ export function ProviderTable({
       <ConfigDomainTable
         title={t("editor.providers.title")}
         titleIcon={BotIcon}
-        description={t("editor.providers.description")}
         items={providers}
         getRowKey={(provider) => provider.name}
         searchable

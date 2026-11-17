@@ -5,8 +5,6 @@ import type { zhRuntimeConfigMcp } from "../../zh-CN/runtime-config/mcp";
 
 export const enRuntimeConfigMcp = {
   title: "MCP management",
-  description:
-    "Inspect the MCP servers registered with the runtime and add, edit, delete, enable/disable, or hot-reload them. Changes are written to the runtime config directly and do not go through the config document draft below.",
   counts: {
     total: "{{count}} MCP servers",
     connected: "{{count}} connected",

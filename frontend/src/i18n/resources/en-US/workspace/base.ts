@@ -223,8 +223,6 @@ export const enWorkspaceBase = {
     directories: {
       add: "Add directory",
       addTitle: "Add workspace directory",
-      addHint:
-        "Register an existing folder so its sessions can be grouped. The directory must already exist on the runtime host.",
       pathLabel: "Directory path",
       pathPlaceholder: "e.g. E:\\projects\\demo",
       nameLabel: "Display name (optional)",
@@ -245,8 +243,6 @@ export const enWorkspaceBase = {
       menu: "Directory section options",
       manage: "Manage directories",
       manageTitle: "Manage workspace directories",
-      manageHint:
-        "Create a session, rename the alias, or remove a registered directory from here.",
       manageEmpty: "No workspace directories registered yet.",
       manageUnregisteredTitle: "Not registered (from sessions)",
       manageUnregisteredHint:
@@ -397,14 +393,6 @@ export const enWorkspaceBase = {
         "No context data yet: this session has no completed LLM request with usage reporting.",
       error: "context usage unavailable",
       unknownValue: "unknown",
-      sourceNote:
-        "Derived from session usage detail ({{source}}), based on the latest LLM request.",
-      source: {
-        context_window: "context window",
-        prompt_budget: "prompt budget",
-        compact: "compact result",
-        none: "session usage detail",
-      },
       metrics: {
         used: "Used",
         window: "Context window",

@@ -150,8 +150,6 @@ export const zhRuntimeConfigEditorTransformer = {
     dialog: {
       createTitle: "新建 Provider Group",
       editTitle: "编辑 Provider Group: {{name}}",
-      description: "基础路由策略、故障切换、截断参数和组成员都在这里维护，未纳入专用字段的扩展配置可通过 JSON 保留。",
-      saveNote: "保存后建议回到预览区检查 `provider_groups` diff。",
     },
     validation: {
       pendingTitle: "当前草稿还有待修正的字段：",

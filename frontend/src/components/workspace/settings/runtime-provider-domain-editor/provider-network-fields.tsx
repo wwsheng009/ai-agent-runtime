@@ -76,9 +76,6 @@ export function ProviderNetworkFields({
                 <div className="app-text-13 font-semibold text-foreground">
                   {t("editor.providers.proxy.title")}
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {t("editor.providers.proxy.description")}
-                </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-foreground">
                 <CheckboxInput

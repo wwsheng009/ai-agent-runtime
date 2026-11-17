@@ -4,8 +4,6 @@
 
 export const zhRuntimeConfigProfiles = {
   title: "Profiles",
-  description:
-    "按场景维护 profile.yaml：工具/技能/MCP/提示词/Agent/偏好一次成型，保存前可先校验并预览影响面。",
   list: {
     refresh: "刷新",
     create: "新建 profile",
@@ -47,8 +45,6 @@ export const zhRuntimeConfigProfiles = {
   },
   projectBinding: {
     title: "项目绑定（本工作区）",
-    description:
-      "本工作区 .aicli/profile 指向的项目级 profile。只读发现：不会自动启用，也不改变默认 profile。",
     refLabel: "引用",
     workspaceLabel: "工作区",
     sourceLabel: "来源",
@@ -94,7 +90,6 @@ export const zhRuntimeConfigProfiles = {
   },
   editor: {
     title: "编辑 profile：{{name}}",
-    description: "改动只写入 profile.yaml，不会触碰全局 config.yaml。",
     nav: "卡片",
     save: "保存 profile",
     saving: "保存中…",

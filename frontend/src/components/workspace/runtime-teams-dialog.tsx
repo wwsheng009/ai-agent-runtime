@@ -95,9 +95,6 @@ export function RuntimeTeamsDialog({
             <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground">
               {t("panels.teamsDispatch.dialog.title")}
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {t("panels.teamsDispatch.dialog.description")}
-            </p>
           </div>
           <Button
             variant="ghost"

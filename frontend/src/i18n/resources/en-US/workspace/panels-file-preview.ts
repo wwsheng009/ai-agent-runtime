@@ -8,8 +8,6 @@ export const enWorkspaceFilePreview = {
   eyebrow: "Runtime · File preview",
   title: "Runtime file preview",
   close: "Close file preview",
-  description:
-    "Content is read from a local file visible to the runtime process (read-only, POST /api/runtime/fs/read-file); nothing is cached or rewritten locally.",
   tabs: {
     ariaLabel: "Preview mode",
     raw: "Raw",

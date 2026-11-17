@@ -100,9 +100,6 @@ export function SessionAgentsPanel({
               <NetworkIcon size={17} className="text-accent-primary" />
               {t("panels.agents.title")}
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {t("panels.agents.description")}
-            </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button

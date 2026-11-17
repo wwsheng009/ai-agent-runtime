@@ -146,12 +146,10 @@ export function ProviderImportDialog({
       open={open}
       onClose={handleClose}
       title={t("editor.providers.import.title")}
-      description={t("editor.providers.import.description")}
       widthClassName="max-w-2xl"
       footer={
         <SettingsDialogFooter
           buttonSize="sm"
-          note={t("editor.providers.import.note")}
           confirmLabel={
             busy
               ? t("editor.providers.import.submitting")

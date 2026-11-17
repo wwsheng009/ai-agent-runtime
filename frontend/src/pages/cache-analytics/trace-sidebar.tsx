@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import type { CacheMessageTrace } from "@/types/runtime";
 
 import { cacheStatusKey } from "./cache-status";
@@ -17,15 +18,26 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
   onClose: () => void;
 }) {
   const { t } = useTranslation("usageAnalytics");
+  useDialogLifecycle(true, onClose);
+
   return (
-    <aside
-      role="dialog"
-      aria-label={t("cache.trace.title")}
-      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-border bg-[var(--surface)] shadow-[0_0_40px_rgba(0,0,0,0.25)]"
-    >
+    <>
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="fixed inset-0 z-30 cursor-default bg-black/30"
+        onClick={onClose}
+      />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("cache.trace.title")}
+        className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-border bg-[var(--surface)] shadow-[0_0_40px_rgba(0,0,0,0.25)]"
+      >
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold">{t("cache.trace.title")}</h2>
-        <Button variant="ghost" size="sm" onClick={onClose} aria-label={t("cache.trace.close")}>
+        <Button autoFocus variant="ghost" size="sm" onClick={onClose} aria-label={t("cache.trace.close")}>
           <XIcon size={14} />
         </Button>
       </div>
@@ -106,6 +118,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
           </div>
         ) : null}
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

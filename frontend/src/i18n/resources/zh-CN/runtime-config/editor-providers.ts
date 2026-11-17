@@ -3,13 +3,10 @@
 export const zhRuntimeConfigEditorProviders = {
   providers: {
     title: "Providers",
-    description:
-      "用表格浏览 provider，用弹出表单编辑高频字段、JSON 附加字段和扩展配置。站点类型与余额通过 runtime API 探测/同步。",
     emptyState: "当前还没有 provider，可直接创建一条新的 provider 草稿。",
     create: "新建 provider",
     createTitle: "新建 Provider",
     editTitle: "编辑 Provider: {{name}}",
-    saveNote: "保存后仍建议先看 diff，再写回 `config.yaml`。",
     saveButton: "保存 provider",
     summary: {
       total: "{{count}} 个 provider",
@@ -104,8 +101,6 @@ export const zhRuntimeConfigEditorProviders = {
     },
     account: {
       title: "站点类型与账户余额",
-      description:
-        "通过 runtime API 探测站点类型、预览余额，或对已保存 provider 同步账户快照到配置。",
       undetected: "未检测",
       authRefBadge: "auth ref",
       siteTypeDescription: "可手填，也可由 Detect / Refresh 自动写入。",
@@ -151,8 +146,6 @@ export const zhRuntimeConfigEditorProviders = {
     },
     models: {
       title: "模型列表与能力配置",
-      description:
-        "维护支持模型列表（可手动增删），并逐模型深入配置能力：reasoning、上下文与输出、自动压缩、输入模态、原生工具与回传契约。fetch / 自动导入 / 探测动作仍可一键执行，所有修改只改当前草稿。",
       fetch: "获取模型列表",
       fetching: "拉取中...",
       autoImport: "自动导入",
@@ -303,8 +296,6 @@ export const zhRuntimeConfigEditorProviders = {
     },
     proxy: {
       title: "Provider 级代理覆盖",
-      description:
-        "可为当前 provider 单独指定 HTTP / HTTPS / SOCKS5 代理，不填则沿用全局代理或环境变量。",
       enable: "启用覆盖代理",
       http: "HTTP 代理",
       httpDescription: "HTTP 请求代理，也支持 socks5://host:port。",
@@ -319,9 +310,6 @@ export const zhRuntimeConfigEditorProviders = {
     import: {
       action: "自动导入",
       title: "自动导入 Provider",
-      description:
-        "填入名称与 Base URL（可选 API Key），由 runtime 探测协议、拉取模型并按结果生成 provider 草稿。",
-      note: "导入只写入当前编辑草稿，仍需在页面上保存并写回配置。",
       submit: "开始导入",
       submitting: "导入中...",
       failed: "自动导入失败",

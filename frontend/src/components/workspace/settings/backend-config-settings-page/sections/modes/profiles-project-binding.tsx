@@ -43,9 +43,6 @@ export function ProfilesProjectBindingCard({ binding }: ProfilesProjectBindingCa
           </Badge>
           <Badge className="normal-case">{profileLayerLabel(t, binding.layer)}</Badge>
         </div>
-        <p className="text-xs leading-5 text-muted-foreground">
-          {t("profiles.projectBinding.description")}
-        </p>
         <p className="break-all font-mono text-xs leading-5 text-muted-foreground">
           {t("profiles.projectBinding.refLabel")}: {binding.ref || "-"}
         </p>

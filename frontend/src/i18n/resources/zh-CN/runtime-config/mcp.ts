@@ -2,8 +2,6 @@
 
 export const zhRuntimeConfigMcp = {
   title: "MCP 管理",
-  description:
-    "查看 runtime 已注册的 MCP Server，支持新增、编辑、删除、启用/停用与热重载。改动直接写入 runtime 配置，不经过下方配置文档草稿。",
   counts: {
     total: "{{count}} 个 MCP",
     connected: "{{count}} 已连接",

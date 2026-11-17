@@ -170,7 +170,6 @@ export function GitSurface({
             </button>
           </span>
         </div>
-        <p className="app-text-10 text-muted-foreground/70">{t("panels.git.writeNote")}</p>
         {git.stageError ? (
           <p
             className="flex items-start gap-1 rounded-control border border-accent-gold/40 bg-accent-gold/10 px-2 py-1 app-text-11 text-accent-gold"

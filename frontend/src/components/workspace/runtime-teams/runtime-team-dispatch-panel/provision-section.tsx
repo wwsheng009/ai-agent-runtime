@@ -124,10 +124,7 @@ export function DispatchProvisionSection({
             />
           </div>
         </div>
-        <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-muted-foreground">
-            {t("panels.teamsDispatch.provision.hint")}
-          </div>
+        <div className="mt-2.5 flex justify-end">
           <Button
             variant="secondary"
             size="sm"

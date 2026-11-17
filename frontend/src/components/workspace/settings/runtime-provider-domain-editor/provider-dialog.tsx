@@ -135,7 +135,6 @@ export function ProviderDialog({
         footer={
           <SettingsDialogFooter
             buttonSize="sm"
-            note={t("editor.providers.saveNote")}
             confirmLabel={t("editor.providers.saveButton")}
             onCancel={onClose}
             onConfirm={onConfirm}
