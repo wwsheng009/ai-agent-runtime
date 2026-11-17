@@ -62,7 +62,7 @@ export function WorkspaceSidebarCollapsedRail({
         title={t("sidebar.expand")}
         variant="ghost"
       >
-        <PanelLeftOpenIcon size={16} />
+        <PanelLeftOpenIcon aria-hidden="true" size={16} />
       </Button>
       <Button
         aria-label={t("sidebar.startNewChat")}
@@ -75,7 +75,11 @@ export function WorkspaceSidebarCollapsedRail({
         title={t("sidebar.startNewChat")}
         variant="ghost"
       >
-        <MessageSquarePlusIcon className="text-accent-primary" size={16} />
+        <MessageSquarePlusIcon
+          aria-hidden="true"
+          className="text-accent-primary"
+          size={16}
+        />
       </Button>
 
       <div className="my-1 h-px w-6 shrink-0 bg-border" />
@@ -91,7 +95,7 @@ export function WorkspaceSidebarCollapsedRail({
             title={label}
             variant="ghost"
           >
-            <Icon className={iconClassName} size={16} />
+            <Icon aria-hidden="true" className={iconClassName} size={16} />
           </Button>
         );
       })}
@@ -106,7 +110,7 @@ export function WorkspaceSidebarCollapsedRail({
           title={t("panels.sessionSearch.triggerHint")}
           variant="ghost"
         >
-          <SearchIcon size={16} />
+          <SearchIcon aria-hidden="true" size={16} />
         </Button>
       ) : null}
       {onOpenSettings ? (
@@ -117,7 +121,7 @@ export function WorkspaceSidebarCollapsedRail({
           title={t("sidebar.openSettings")}
           variant="ghost"
         >
-          <Settings2Icon size={16} />
+          <Settings2Icon aria-hidden="true" size={16} />
         </Button>
       ) : null}
     </div>

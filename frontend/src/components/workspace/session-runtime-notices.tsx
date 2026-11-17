@@ -67,6 +67,7 @@ export function SessionRuntimeNotices({
           >
             <div className="flex items-start gap-2">
               <BellIcon
+                aria-hidden="true"
                 className="mt-0.5 shrink-0 text-accent-primary"
                 size={14}
               />
@@ -78,7 +79,7 @@ export function SessionRuntimeNotices({
                   {t(KIND_BODY_KEYS[notice.kind])}
                 </div>
                 <button
-                  className="mt-1.5 rounded-chip border border-border px-1.5 py-0.5 app-text-10 text-foreground transition hover:bg-surface-soft"
+                  className="mt-1.5 rounded-chip border border-border px-1.5 py-0.5 app-text-10 text-foreground outline-none transition hover:bg-surface-soft focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => onOpenSession(notice.sessionId)}
                   type="button"
                 >
@@ -87,12 +88,12 @@ export function SessionRuntimeNotices({
               </div>
               <button
                 aria-label={t("notices.dismiss")}
-                className="shrink-0 rounded-chip p-0.5 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                className="shrink-0 rounded-chip p-0.5 text-muted-foreground outline-none transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => onDismiss(notice.id)}
                 title={t("notices.dismiss")}
                 type="button"
               >
-                <XIcon size={12} />
+                <XIcon aria-hidden="true" size={12} />
               </button>
             </div>
           </div>

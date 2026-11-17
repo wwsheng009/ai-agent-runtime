@@ -2,12 +2,9 @@
 export const enWorkspacePanelsMessages = {
   messageList: {
     emptyTitle: "The thread timeline is empty",
-    emptyHint:
-      "Start a turn to populate the workspace timeline. Runtime evidence, related items, and streamed output will attach back to the messages that produced them.",
-    emptyInfraOnlyHint:
-      "No conversation messages were persisted for this session: CLI / subagent-batch driven sessions keep only prompt infrastructure rows. See the Trajectory tab for this run's execution record.",
+    emptyInfraOnlyHint: "See the Trajectory tab for execution details.",
     backtrackNavHint:
-      "Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn, Enter to open the confirm dialog, Esc to exit.",
+      "Turn selection · Enter to confirm · Esc to exit",
     loadEarlier: "Load earlier messages",
     loadingEarlier: "Loading earlier messages…",
     streamStalledNotice:
@@ -25,8 +22,6 @@ export const enWorkspacePanelsMessages = {
     copy: "Copy",
     copyAriaLabel: "Copy this user message",
     selected: "Selected this user turn",
-    editHint:
-      "Inline edit seeds the backtrack dialog. Confirm there to truncate later turns and prefill the composer.",
   },
   messageCard: {
     streamingBadge: "Streaming response in progress",

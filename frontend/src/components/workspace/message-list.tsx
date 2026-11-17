@@ -12,8 +12,6 @@ import { resolveBranchAnchors } from "@/lib/chat-view/branch-availability";
 import { useLiveThread } from "@/lib/thread-state/thread-store";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
-import { type ChatStreamPhase } from "@/types/runtime";
-
 import { MessageRow } from "./message-list/message-row";
 import { NoticeRow } from "./message-list/notice-row";
 import { LoadEarlierRow } from "./message-list/load-earlier-row";
@@ -21,14 +19,6 @@ import type { MessageListProps } from "./message-list/types";
 import { useMessageListEarlierEntry } from "./message-list/use-message-list-earlier-entry";
 
 export type { MessageBacktrackOptions } from "./message-list/types";
-
-const PHASE_LABELS: Record<ChatStreamPhase, string> = {
-  connecting: "Connecting to runtime…",
-  "first-token": "Waiting for first output…",
-  streaming: "Streaming output…",
-  tool: "Calling tools…",
-  finalizing: "Finalizing turn…",
-};
 
 export function MessageList({
   artifacts,
@@ -53,7 +43,6 @@ export function MessageList({
   onRetryConnection,
   onSelectBacktrackNavigationMessage,
   onSelectArtifact,
-  phase,
   scrollMemoryKey = null,
   streamStalled = false,
   style,
@@ -211,9 +200,6 @@ export function MessageList({
             <div className="text-sm font-semibold text-foreground">
               {t("panels.messages.messageList.emptyTitle")}
             </div>
-            <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
-              {t("panels.messages.messageList.emptyHint")}
-            </p>
             {renderedMessages.length > 0 ? (
               <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
                 {t("panels.messages.messageList.emptyInfraOnlyHint")}
@@ -271,18 +257,6 @@ export function MessageList({
             totalCount={visibleMessages.length}
           />
         ))}
-
-        {isResponding ? (
-          <div
-            aria-atomic="true"
-            aria-live="polite"
-            className="inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
-            role="status"
-          >
-            <span className="size-2 rounded-full animate-pulse bg-accent-teal" />
-            {phase ? PHASE_LABELS[phase] : "Runtime stream active"}
-          </div>
-        ) : null}
 
         {/* 本页流已死但回合未必结束：不静默收场，明确告知并给恢复入口。
             文案走 i18n（`panels.messages.messageList.streamStalledNotice`），

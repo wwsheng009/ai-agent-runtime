@@ -3,12 +3,9 @@
 export const zhWorkspacePanelsMessages = {
   messageList: {
     emptyTitle: "会话时间线为空",
-    emptyHint:
-      "发起一轮对话即可填充工作区时间线。运行时证据、相关条目与流式输出会回挂到产生它们的消息上。",
-    emptyInfraOnlyHint:
-      "这个会话没有落库的对话消息：CLI / 子代理批次驱动的会话只保留提示基础设施行。这一轮的执行记录请到「轨迹」页签查看。",
+    emptyInfraOnlyHint: "执行记录见「轨迹」页签。",
     backtrackNavHint:
-      "回溯导航已激活 — 用 ↑/↓（或 j/k）选择用户轮次，Enter 打开确认对话框，Esc 退出。",
+      "回溯选择模式 · Enter 确认 · Esc 退出",
     loadEarlier: "加载更早的消息",
     loadingEarlier: "正在加载更早的消息…",
     streamStalledNotice: "服务端回合可能仍在运行 — 本页已停止接收数据。",
@@ -25,8 +22,6 @@ export const zhWorkspacePanelsMessages = {
     copy: "复制",
     copyAriaLabel: "复制这条用户消息",
     selected: "已选中这条用户轮次",
-    editHint:
-      "内联编辑会作为回溯对话框的初始内容。在那里确认后即可截断后续轮次并预填输入框。",
   },
   messageCard: {
     streamingBadge: "响应流式输出中",

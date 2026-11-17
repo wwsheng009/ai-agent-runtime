@@ -42,15 +42,16 @@ export function SidebarSection({
           type="button"
           onClick={() => onToggle(id)}
           aria-expanded={isOpen}
-          className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-field text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <span className="inline-flex items-center gap-2 text-base uppercase tracking-[0.16em] text-muted-foreground">
-            <Icon size={14} className={iconClassName} />
+          <span className="inline-flex items-center gap-2 app-text-11 font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            <Icon aria-hidden="true" size={14} className={iconClassName} />
             {title}
           </span>
           <span className="inline-flex items-center gap-2">
             {count}
             <ChevronDownIcon
+              aria-hidden="true"
               size={14}
               className={cn(
                 "text-muted-foreground transition-transform duration-200",

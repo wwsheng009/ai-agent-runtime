@@ -105,6 +105,10 @@ describe("WorkspaceShellTopbar", () => {
     const props = renderTopbar({ isNewThread: false });
 
     expect(container.textContent).toContain(thread.title);
+    expect(container.textContent).not.toContain("不应显示的副标题");
+    expect(
+      container.querySelector('[title="不应显示的副标题"]'),
+    ).toBeInstanceOf(HTMLElement);
     expect(container.querySelector('[aria-label="新建聊天"]')).toBeInstanceOf(
       HTMLAnchorElement,
     );

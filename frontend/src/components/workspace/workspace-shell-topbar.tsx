@@ -184,15 +184,13 @@ export function WorkspaceShellTopbar({
             <MessageSquarePlusIcon size={15} />
           </Link>
         ) : null}
-        <div className="min-w-0 flex-1">
+        <div
+          className="min-w-0 flex-1"
+          title={isNewThread ? undefined : threadSubtitle || undefined}
+        >
           <div className="truncate app-text-13 font-semibold tracking-[-0.02em]">
             {isNewThread ? t("topbar.newThreadTitle") : selectedThread.title}
           </div>
-          {!isNewThread ? (
-            <div className="hidden truncate app-text-10 text-muted-foreground sm:block">
-              {threadSubtitle}
-            </div>
-          ) : null}
         </div>
         {showLineage ? (
           <div

@@ -30,7 +30,7 @@ export function SessionAttentionBar({
   const label = t("sidebar.attention.summary", { count: sessionIds.length });
   const content = (
     <>
-      <BellRingIcon size={13} />
+      <BellRingIcon aria-hidden="true" size={13} />
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {onOpenSession ? (
         <span className="shrink-0 rounded-chip border border-accent-primary-border px-1.5 py-0.5 app-text-10 text-accent-primary">
@@ -53,7 +53,7 @@ export function SessionAttentionBar({
 
   return (
     <button
-      className={`${className} transition hover:border-accent-primary-border hover:bg-surface-soft`}
+      className={`${className} outline-none transition hover:border-accent-primary-border hover:bg-surface-soft focus-visible:ring-2 focus-visible:ring-ring`}
       data-testid="session-attention-bar"
       onClick={() => onOpenSession()}
       title={t("sidebar.attention.hint")}

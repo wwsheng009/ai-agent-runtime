@@ -77,9 +77,6 @@ export const enWorkspaceBase = {
       completedBy: "Completed by: {{who}}",
       completionSummary: "Completion summary: {{summary}}",
       updatedAt: "Updated {{time}}",
-      derivedNote:
-        "Read-only projection derived from this session's get_goal / update_goal tool results (fallback when the backend snapshot is unavailable; not authoritative).",
-      authoritativeNote: "From the backend snapshot (authoritative).",
       actionPause: "Pause goal",
       actionResume: "Resume goal",
       actionComplete: "Mark complete",

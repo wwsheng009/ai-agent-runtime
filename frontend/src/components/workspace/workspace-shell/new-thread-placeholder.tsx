@@ -29,14 +29,14 @@ export function NewThreadPlaceholder({
   return (
     <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
       <div className="text-center">
-        <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
-          <BotIcon size={20} />
+        <div className="mx-auto grid size-11 place-items-center rounded-panel border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
+          <BotIcon aria-hidden="true" size={20} />
         </div>
         <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-foreground sm:text-[1.7rem]">
           {t("shell.newChatTitle")}
         </h1>
       </div>
-      <div className="mt-5 grid grid-cols-2 gap-2 sm:gap-3">
+      <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3">
         {suggestions.map((suggestion) => {
           const SuggestionIcon = suggestion.icon;
 
@@ -48,12 +48,13 @@ export function NewThreadPlaceholder({
               className="group flex min-h-[5.5rem] items-start gap-3 rounded-panel border border-border bg-surface-softer px-3 py-3 text-left transition hover:border-border-strong hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5"
             >
               <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-field border border-border bg-surface-solid text-accent-secondary">
-                <SuggestionIcon size={15} />
+                <SuggestionIcon aria-hidden="true" size={15} />
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex items-center justify-between gap-2 text-sm font-semibold text-foreground">
                   {suggestion.title}
                   <ArrowUpRightIcon
+                    aria-hidden="true"
                     size={13}
                     className="shrink-0 text-muted-foreground transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-foreground"
                   />

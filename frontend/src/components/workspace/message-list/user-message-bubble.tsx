@@ -169,9 +169,6 @@ export function UserMessageBubble({
                   {t("panels.messages.userBubble.continue")}
                 </Button>
               </div>
-              <p className="app-text-11 leading-5 text-muted-foreground">
-                {t("panels.messages.userBubble.editHint")}
-              </p>
             </div>
           ) : (
             // §12.1.4：空文本段整段不渲染（含外层包裹 div）——空 flex item 会吃掉

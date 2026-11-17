@@ -53,7 +53,6 @@ function usageLabel(goal: SessionGoal, t: TFunction<"workspace">): string {
 function goalTitle(
   goal: SessionGoal,
   label: string,
-  authoritative: boolean,
   t: TFunction<"workspace">,
 ): string {
   const lines = [label];
@@ -76,9 +75,6 @@ function goalTitle(
   if (goal.updatedAt) {
     lines.push(t("topbar.goal.updatedAt", { time: goal.updatedAt }));
   }
-  lines.push(
-    authoritative ? t("topbar.goal.authoritativeNote") : t("topbar.goal.derivedNote"),
-  );
   return lines.join("\n");
 }
 
@@ -140,9 +136,9 @@ export function SessionGoalIndicator({ sessionId }: { sessionId?: string }) {
       data-phase={goal.phase ?? "unknown"}
       data-authoritative={authoritative ? "true" : "false"}
       data-testid="topbar-session-goal"
-      title={goalTitle(goal, label, authoritative, t)}
+      title={goalTitle(goal, label, t)}
     >
-      <TargetIcon className="shrink-0" size={13} />
+      <TargetIcon aria-hidden="true" className="shrink-0" size={13} />
       <span className="app-text-10" data-testid="topbar-session-goal-phase">
         {label}
       </span>

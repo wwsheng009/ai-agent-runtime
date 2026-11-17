@@ -89,6 +89,7 @@ export function WorkspaceSidebarHeader({
             onClick={onRefreshRuntimeTeams}
             disabled={!onRefreshRuntimeTeams}
             aria-label={t("sidebar.refreshRuntimeTeams")}
+            title={t("sidebar.refreshRuntimeTeams")}
           >
             <SparklesIcon size={16} />
           </Button>
@@ -107,7 +108,7 @@ export function WorkspaceSidebarHeader({
         type="button"
         onClick={() => onSelectThread(NEW_THREAD_ID)}
         className={cn(
-          "mt-3 flex w-full items-center justify-center gap-2 rounded-card-lg border px-3 text-base font-medium transition",
+          "mt-3 flex w-full items-center justify-center gap-2 rounded-card-lg border px-3 text-base font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           isCompact ? "py-2" : "py-2.5",
           selectedThreadId === NEW_THREAD_ID
             ? "border-accent-primary-border bg-accent-primary-soft text-foreground"
@@ -124,18 +125,21 @@ export function WorkspaceSidebarHeader({
       {showSearch ? (
         <div
           className={cn(
-            "mt-2.5 flex items-center gap-1.5 rounded-card-lg border border-border bg-surface-solid px-3",
+            "mt-2.5 flex items-center gap-1.5 rounded-card-lg border border-border bg-surface-solid px-3 transition focus-within:border-accent-primary-border focus-within:ring-2 focus-within:ring-ring",
             isCompact ? "py-2" : "py-2.5",
           )}
         >
           <div className="flex min-w-0 flex-1 items-center gap-2.5 text-sm text-muted-foreground">
-            <SearchIcon size={15} />
+            <SearchIcon aria-hidden="true" size={15} />
             <input
+              autoComplete="off"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t("sidebar.searchPlaceholder")}
               aria-label={t("sidebar.searchPlaceholder")}
               className="w-full bg-transparent outline-none"
+              spellCheck={false}
+              type="search"
             />
           </div>
           {onOpenSessionSearch ? (
