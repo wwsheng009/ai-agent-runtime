@@ -147,9 +147,9 @@ export function searchRows(): Element[] {
   return [...document.body.querySelectorAll('[data-testid="file-search-results"] [role="option"]')];
 }
 
-export function searchRowButton(path: string): HTMLButtonElement | null {
-  return document.body.querySelector<HTMLButtonElement>(
-    `[data-testid="file-search-results"] button[title="${path}"]`,
+export function searchRowButton(path: string): HTMLElement | null {
+  return document.body.querySelector<HTMLElement>(
+    `[data-testid="file-search-results"] [role="option"][title="${path}"]`,
   );
 }
 
