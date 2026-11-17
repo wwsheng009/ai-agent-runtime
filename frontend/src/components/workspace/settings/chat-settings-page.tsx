@@ -218,7 +218,7 @@ export function ChatSettingsPage({
                   updateSection("chat", { reasoningEffort: option.value })
                 }
               >
-                <div className="text-base font-semibold text-foreground">
+                <div className="text-sm font-semibold text-foreground">
                   {option.label}
                 </div>
               </SettingsChoiceCard>

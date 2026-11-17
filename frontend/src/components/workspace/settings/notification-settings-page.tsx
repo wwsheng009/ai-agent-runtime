@@ -49,7 +49,7 @@ export function NotificationSettingsPage() {
               enabled: checked,
             })
           }
-          title={t("notifications.desktop")}
+          title={t("notifications.masterSwitch")}
           icon={
             settings.notification.enabled ? (
               <BellDotIcon aria-hidden="true" size={16} />
@@ -58,18 +58,22 @@ export function NotificationSettingsPage() {
             )
           }
         />
+        <SettingsToggleCard
+          checked={settings.notification.desktop}
+          disabled={!settings.notification.enabled || !desktopSupported}
+          onChange={(checked) =>
+            updateSection("notification", {
+              desktop: checked,
+            })
+          }
+          title={t("notifications.desktop")}
+          icon={<MonitorSmartphoneIcon aria-hidden="true" size={16} />}
+        />
       </SettingsSection>
 
       <SettingsSection title={t("notifications.permission")}>
         <SettingsPanelCard
           title={t("notifications.browserPermission")}
-          icon={
-            <MonitorSmartphoneIcon
-              aria-hidden="true"
-              size={16}
-              className="text-accent-secondary"
-            />
-          }
           description={
             permission === "granted"
               ? t("notifications.permissionStates.granted")
@@ -84,24 +88,14 @@ export function NotificationSettingsPage() {
           headerAside={
             <div className="flex flex-wrap gap-2">
               <Button
-                variant="secondary"
-                size="sm"
-                onClick={() =>
-                  updateSection("notification", {
-                    desktop: !settings.notification.desktop,
-                  })
-                }
-                disabled={!desktopSupported || !settings.notification.enabled}
-              >
-                {settings.notification.desktop
-                  ? t("notifications.disableDesktop")
-                  : t("notifications.enableDesktop")}
-              </Button>
-              <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => void requestPermission()}
-                disabled={!desktopSupported || desktopReady}
+                disabled={
+                  !desktopSupported ||
+                  desktopReady ||
+                  !settings.notification.enabled
+                }
               >
                 {t("notifications.requestPermission")}
               </Button>

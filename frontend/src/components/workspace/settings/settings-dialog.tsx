@@ -86,6 +86,7 @@ export function SettingsDialog({
   const { t } = useTranslation("settings");
   const [activeSection, setActiveSection] =
     useState<SettingsSectionId>(defaultSection);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -96,6 +97,7 @@ export function SettingsDialog({
     queueMicrotask(() => {
       if (!cancelled) {
         setActiveSection(defaultSection);
+        setResetNotice(null);
       }
     });
 
@@ -105,6 +107,14 @@ export function SettingsDialog({
   }, [defaultSection, open]);
 
   useDialogLifecycle(open, onClose);
+
+  function handleResetDefaults() {
+    if (!window.confirm(t("dialog.resetFrontendDefaultsConfirm"))) {
+      return;
+    }
+    resetSettings();
+    setResetNotice(t("dialog.resetFrontendDefaultsDone"));
+  }
 
   const sections = useMemo<SettingsNavItem[]>(
     () => [
@@ -159,6 +169,11 @@ export function SettingsDialog({
             <h2 className="text-lg font-semibold tracking-[-0.03em] text-foreground">
               {t("dialog.title")}
             </h2>
+            {resetNotice ? (
+              <p className="mt-1 text-xs text-accent-teal" role="status">
+                {resetNotice}
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Link
@@ -168,7 +183,12 @@ export function SettingsDialog({
             >
               {t("dialog.backendConfig")}
             </Link>
-            <Button variant="ghost" size="sm" onClick={resetSettings}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-accent-orange"
+              onClick={handleResetDefaults}
+            >
               {t("dialog.resetFrontendDefaults")}
             </Button>
             <Button

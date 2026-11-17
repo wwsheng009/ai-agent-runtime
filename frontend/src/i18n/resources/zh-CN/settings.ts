@@ -5,6 +5,9 @@ export const zhSettings = {
     title: "设置",
     backendConfig: "后端配置页",
     resetFrontendDefaults: "恢复前端默认",
+    resetFrontendDefaultsConfirm:
+      "恢复所有前端默认设置？当前外观、工作区与聊天偏好会被立即覆盖。",
+    resetFrontendDefaultsDone: "已恢复前端默认设置。",
     close: "关闭设置",
   },
   sections: {
@@ -308,6 +311,7 @@ export const zhSettings = {
     description:
       "仅在当前标签页不可见时，用于提醒一轮响应完成或运行时出错。",
     desktop: "桌面提醒",
+    masterSwitch: "通知总开关",
     desktopDescription:
       "关闭后，即便浏览器权限已授权，也不会弹出桌面提醒。",
     permission: "权限状态",
@@ -382,6 +386,7 @@ export const zhSettings = {
     noMemoryHits: "没有匹配该查询的笔记。",
     memoryAppendFailed: "追加记忆失败",
     memoryV2Title: "Memory v2 状态与审计",
+    memoryAdvanced: "维护与审计",
     memoryV2Description:
       "查看自动学习状态、summary revision、pinned 预算、freshness、usage/exposure，并执行更正/遗忘。",
     memoryMode: "模式",

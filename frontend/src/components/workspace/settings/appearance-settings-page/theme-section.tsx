@@ -43,7 +43,7 @@ export function AppearanceThemeSection({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-base font-semibold text-foreground">
+                    <div className="text-sm font-semibold text-foreground">
                       {option.label}
                     </div>
                   </div>

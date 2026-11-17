@@ -40,7 +40,7 @@ export function FontSizeControlCard({
 
   return (
     <SettingsPanelCard
-      title={<span className="text-base">{title}</span>}
+      title={<span className="text-sm">{title}</span>}
       headerAside={
         <div className="rounded-control border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground">
           {formatFontSizePx(value)}
@@ -109,7 +109,7 @@ export function FontSizeControlCard({
               }}
               className={editorControlClassName}
             />
-            <span className="shrink-0 text-base text-muted-foreground">
+            <span className="shrink-0 text-sm text-muted-foreground">
               {t("appearance.customPixelsUnit")}
             </span>
           </span>
@@ -120,7 +120,7 @@ export function FontSizeControlCard({
           onClick={() => updateValue(defaultValue)}
           disabled={value === defaultValue}
           className={cn(
-            "rounded-field border px-3 py-2 text-base outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
+            "rounded-field border px-3 py-2 text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
             value === defaultValue
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
@@ -130,12 +130,6 @@ export function FontSizeControlCard({
         </button>
       </div>
 
-      <div className="text-xs leading-5 text-muted-foreground">
-        {t("appearance.sizeHint", {
-          min: String(FONT_SIZE_LIMITS.min),
-          max: String(FONT_SIZE_LIMITS.max),
-        })}
-      </div>
     </SettingsPanelCard>
   );
 }

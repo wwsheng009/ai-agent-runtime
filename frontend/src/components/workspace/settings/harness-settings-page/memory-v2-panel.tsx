@@ -1,5 +1,5 @@
 import { type TFunction } from "i18next";
-import { DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { ChevronDownIcon, DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -322,22 +322,15 @@ export function MemoryV2Panel({
 
   return (
     <SettingsPanelCard title={t("harness.memoryV2Title")}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs leading-5 text-muted-foreground">
-          {t("harness.memoryV2Description")}
-        </p>
-        <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap justify-end gap-2">
           <Button
             variant="secondary"
             size="sm"
             disabled={loading}
             onClick={() => void reload()}
           >
-            <RefreshCwIcon size={14} />
+            <RefreshCwIcon aria-hidden="true" size={14} />
             {t("harness.refresh")}
-          </Button>
-          <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void rebuild()}>
-            {t("harness.memoryRebuildSummary")}
           </Button>
           <Button
             variant="secondary"
@@ -345,7 +338,7 @@ export function MemoryV2Panel({
             disabled={actionsDisabled}
             onClick={() => void exportMemory("jsonl")}
           >
-            <DownloadIcon size={14} />
+            <DownloadIcon aria-hidden="true" size={14} />
             {t("harness.memoryExportJsonl")}
           </Button>
           <Button
@@ -354,19 +347,9 @@ export function MemoryV2Panel({
             disabled={actionsDisabled}
             onClick={() => void exportMemory("markdown")}
           >
-            <DownloadIcon size={14} />
+            <DownloadIcon aria-hidden="true" size={14} />
             {t("harness.memoryExportMarkdown")}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="text-danger"
-            disabled={actionsDisabled}
-            onClick={() => void resetAll()}
-          >
-            {t("harness.memoryReset")}
-          </Button>
-        </div>
       </div>
 
       <MemoryV2Alerts error={error} notice={notice} />
@@ -381,30 +364,7 @@ export function MemoryV2Panel({
 
       <div aria-busy={loading}>
       {v2Available ? (
-        <>
-          <MemoryV2StatusGrid t={t} status={status} />
-          <MemoryV2Diagnostics t={t} status={status} jobs={jobs} />
-          <MemoryV2SessionGovernance
-            t={t}
-            sessionID={sessionID}
-            sessionMode={sessionMode}
-            disabled={actionsDisabled}
-            onSessionIDChange={setSessionID}
-            onSessionModeChange={setSessionMode}
-            onApplySessionMode={() => void applySessionMode()}
-            onPurgeSession={() => void purgeWindows(false)}
-            onPurgeAll={() => void purgeWindows(true)}
-          />
-        </>
-      ) : null}
-
-      {v2Available ? (
-        <MemoryV2WhyNot
-          t={t}
-          workspacePath={workspacePath}
-          disabled={actionsDisabled}
-          onError={setError}
-        />
+        <MemoryV2StatusGrid t={t} status={status} />
       ) : null}
 
       {v2Available ? (
@@ -458,25 +418,85 @@ export function MemoryV2Panel({
         ) : null}
       </div> : null}
 
-      {v2Available && deletedRecords.length > 0 ? (
-        <div className="mt-3 space-y-2">
-          <div className="text-xs font-medium text-foreground">{t("harness.memoryDeletedTitle")}</div>
-          {deletedRecords.slice(0, 10).map((record) => (
-            <div key={record.id} className="rounded-card border border-border px-3 py-2 text-xs">
-              <div className="text-muted-foreground">{record.text}</div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-muted-foreground">
-                <Badge>{record.status}</Badge>
-                <span>{record.id}</span>
-                <Button variant="secondary" size="sm" disabled={actionsDisabled} onClick={() => void restore(record)}>
-                  {t("harness.memoryRestore")}
-                </Button>
+      {v2Available ? (
+        <details className="group mt-3 rounded-card border border-border bg-surface-softer px-3 py-2.5">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-foreground">
+            <span>{t("harness.memoryAdvanced")}</span>
+            <ChevronDownIcon
+              aria-hidden="true"
+              className="transition-transform group-open:rotate-180"
+              size={14}
+            />
+          </summary>
+          <div className="mt-3 space-y-3">
+            <MemoryV2Diagnostics t={t} status={status} jobs={jobs} />
+            <MemoryV2WhyNot
+              t={t}
+              workspacePath={workspacePath}
+              disabled={actionsDisabled}
+              onError={setError}
+            />
+            <MemoryV2SessionGovernance
+              t={t}
+              sessionID={sessionID}
+              sessionMode={sessionMode}
+              disabled={actionsDisabled}
+              onSessionIDChange={setSessionID}
+              onSessionModeChange={setSessionMode}
+              onApplySessionMode={() => void applySessionMode()}
+              onPurgeSession={() => void purgeWindows(false)}
+              onPurgeAll={() => void purgeWindows(true)}
+            />
+            <MemoryV2UsageAndTraces t={t} usage={usage} traces={traces} />
+            {deletedRecords.length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-foreground">
+                  {t("harness.memoryDeletedTitle")}
+                </div>
+                {deletedRecords.slice(0, 10).map((record) => (
+                  <div
+                    key={record.id}
+                    className="rounded-card border border-border px-3 py-2 text-xs"
+                  >
+                    <div className="text-muted-foreground">{record.text}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-muted-foreground">
+                      <Badge>{record.status}</Badge>
+                      <span>{record.id}</span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={actionsDisabled}
+                        onClick={() => void restore(record)}
+                      >
+                        {t("harness.memoryRestore")}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </div>
+            ) : null}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-3">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={actionsDisabled}
+                onClick={() => void rebuild()}
+              >
+                {t("harness.memoryRebuildSummary")}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="text-accent-orange"
+                disabled={actionsDisabled}
+                onClick={() => void resetAll()}
+              >
+                {t("harness.memoryReset")}
+              </Button>
             </div>
-          ))}
-        </div>
+          </div>
+        </details>
       ) : null}
-
-      {v2Available ? <MemoryV2UsageAndTraces t={t} usage={usage} traces={traces} /> : null}
       </div>
     </SettingsPanelCard>
   );

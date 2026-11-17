@@ -44,7 +44,7 @@ export function WorkspaceSettingsPage() {
                   <PanelIcon>
                     <Rows4Icon aria-hidden="true" size={16} />
                   </PanelIcon>
-                  <div className="text-base font-semibold text-foreground">
+                  <div className="text-sm font-semibold text-foreground">
                     {option.label}
                   </div>
                 </div>

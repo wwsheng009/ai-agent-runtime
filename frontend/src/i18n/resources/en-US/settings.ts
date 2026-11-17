@@ -7,6 +7,9 @@ export const enSettings = {
     title: "Settings",
     backendConfig: "Backend config",
     resetFrontendDefaults: "Reset frontend defaults",
+    resetFrontendDefaultsConfirm:
+      "Reset all frontend defaults? Current appearance, workspace, and chat preferences will be overwritten immediately.",
+    resetFrontendDefaultsDone: "Frontend defaults restored.",
     close: "Close settings",
   },
   sections: {
@@ -315,6 +318,7 @@ export const enSettings = {
     description:
       "Only used when the current tab is hidden, to notify you when a response completes or the runtime errors.",
     desktop: "Desktop alerts",
+    masterSwitch: "Notification master switch",
     desktopDescription:
       "If turned off, no desktop notification will appear even when browser permission is granted.",
     permission: "Permission status",
@@ -390,6 +394,7 @@ export const enSettings = {
     noMemoryHits: "No notes matched this query.",
     memoryAppendFailed: "Failed to append memory note",
     memoryV2Title: "Memory v2 status and audit",
+    memoryAdvanced: "Maintenance and audit",
     memoryV2Description:
       "Automatic-learning status, summary revisions, pinned budget, freshness, usage/exposure and destructive controls for the current workspace.",
     memoryMode: "Mode",

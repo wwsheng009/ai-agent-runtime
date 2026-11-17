@@ -23,8 +23,8 @@ export function FontChoiceCard({
 }: FontChoiceCardProps) {
   return (
     <SettingsChoiceCard active={active} onClick={onClick}>
-      <div className="text-base font-semibold text-foreground">{label}</div>
-      <p className="mt-1.5 text-base leading-6 text-muted-foreground">
+      <div className="text-sm font-semibold text-foreground">{label}</div>
+      <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
         {description}
       </p>
       <div

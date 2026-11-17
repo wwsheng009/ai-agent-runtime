@@ -34,6 +34,7 @@ export function GatewaySettingsPage() {
   const [status, setStatus] = useState<RuntimeGatewayStatus | null>(null);
   const [config, setConfig] = useState<RuntimeGatewayConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const [url, setUrl] = useState("");
@@ -74,6 +75,7 @@ export function GatewaySettingsPage() {
 
   const save = useCallback(async () => {
     setBusy(true);
+    setSaveError(null);
     try {
       const snapshot = await updateGatewayConfig({
         url: url.trim(),
@@ -86,7 +88,7 @@ export function GatewaySettingsPage() {
       setToken("");
       setError(null);
     } catch (err) {
-      setError(describeError(err));
+      setSaveError(describeError(err));
     } finally {
       setBusy(false);
     }
@@ -177,6 +179,12 @@ export function GatewaySettingsPage() {
             title={t("gateway.autoConnect")}
             icon={<ServerIcon aria-hidden="true" size={16} />}
           />
+
+          {saveError ? (
+            <p className="text-sm text-destructive" role="alert">
+              {saveError}
+            </p>
+          ) : null}
 
           <Button type="button" disabled={busy} onClick={() => void save()}>
             {t("gateway.save")}

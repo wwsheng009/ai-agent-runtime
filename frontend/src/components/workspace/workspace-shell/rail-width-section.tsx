@@ -63,7 +63,7 @@ export function RailWidthSection() {
       }
       icon={<SlidersHorizontalIcon aria-hidden="true" size={16} />}
       title={
-        <span className="text-base">
+        <span className="text-sm">
           {t("panels.shell.rightRail.widthLabel")}
         </span>
       }
