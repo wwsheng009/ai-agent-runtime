@@ -275,22 +275,19 @@ export function FileSearchResults(props: FileSearchResultsProps) {
             <div
               aria-selected={selected}
               className={cn(
-                "group flex items-center gap-1.5 pr-1.5 text-xs",
+                "group flex cursor-pointer items-center gap-1.5 pr-1.5 text-xs",
                 index === activeIndex && "bg-white/[0.04]",
                 selected && "bg-accent/10 text-foreground",
               )}
               id={`${ROW_ID_PREFIX}${index}`}
               key={item.path}
+              aria-label={item.path}
+              onClick={() => activate(item)}
               onMouseEnter={() => setRawActiveIndex(index)}
               role="option"
+              title={item.path}
             >
-              <button
-                aria-label={item.path}
-                className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
-                onClick={() => activate(item)}
-                title={item.path}
-                type="button"
-              >
+              <span className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left">
                 {searchItemIcon(item, cn("size-3.5 shrink-0", item.type === "inaccessible" && "text-accent-gold"))}
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
@@ -303,7 +300,7 @@ export function FileSearchResults(props: FileSearchResultsProps) {
                   ) : null}
                 </span>
                 {hint ? <span className="shrink-0 app-text-10 text-muted-foreground">{hint}</span> : null}
-              </button>
+              </span>
             </div>
           );
         })}

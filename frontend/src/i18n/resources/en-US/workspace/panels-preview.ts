@@ -2,5 +2,4 @@
 export const enWorkspacePanelsPreview = {
   eyebrow: "Expanded view",
   close: "Close expanded panel",
-  hint: "Press Esc or click the backdrop to close; focus returns to the original window.",
 } as const;

@@ -4,5 +4,4 @@
 export const zhWorkspacePanelsPreview = {
   eyebrow: "放大视图",
   close: "关闭放大面板",
-  hint: "Esc 或点击遮罩关闭；关闭后焦点回到原窗口。",
 } as const;

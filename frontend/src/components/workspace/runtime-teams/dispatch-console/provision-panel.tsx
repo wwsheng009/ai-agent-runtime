@@ -56,6 +56,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.teamCount")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.teamCount")}
             value={provisionTeamCountDraft}
             onChange={(event) => onProvisionTeamCountDraftChange(event.target.value)}
             placeholder="2"
@@ -67,6 +68,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.workspaceId")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.workspaceId")}
             value={provisionWorkspaceDraft}
             onChange={(event) => onProvisionWorkspaceDraftChange(event.target.value)}
             placeholder={t("panels.teamsDispatch.provision.workspaceIdPlaceholder")}
@@ -78,6 +80,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.strategy")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.strategy")}
             value={provisionStrategyDraft}
             onChange={(event) => onProvisionStrategyDraftChange(event.target.value)}
             placeholder={t("panels.teamsDispatch.provision.strategyPlaceholder")}
@@ -89,6 +92,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.userPrefix")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.userPrefix")}
             value={provisionUserPrefixDraft}
             onChange={(event) => onProvisionTaskUserPrefixDraftChange(event.target.value)}
             placeholder={t("panels.teamsDispatch.provision.userPrefixPlaceholder")}
@@ -100,6 +104,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.teammateNamePrefix")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.teammateNamePrefix")}
             value={provisionTeammateNamePrefixDraft}
             onChange={(event) =>
               onProvisionTeammateNamePrefixDraftChange(event.target.value)
@@ -113,6 +118,7 @@ export function DispatchProvisionPanel({
             {t("panels.teamsDispatch.provision.teammateProfile")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.provision.teammateProfile")}
             value={provisionTeammateProfileDraft}
             onChange={(event) => onProvisionTaskProfileDraftChange(event.target.value)}
             placeholder={t("panels.teamsDispatch.provision.teammateProfilePlaceholder")}

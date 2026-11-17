@@ -152,7 +152,7 @@ export function GitChangeList({
           className="app-scrollbar min-h-0 overflow-auto outline-none"
           data-testid="git-change-list-rows"
           onKeyDown={handleKeyDown}
-          role="listbox"
+          role="group"
           tabIndex={0}
         >
           {sections.map((section) => (
@@ -221,60 +221,57 @@ function ChangeRow({
 
   return (
     <div
-      aria-label={t("panels.git.list.rowAria", {
-        path: file.path,
-        badge: t(`panels.git.list.badge.${badge.letter}`),
-        group: t(`panels.git.list.groups.${group}`),
-      })}
-      aria-selected={selected}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 px-2 py-1 text-left hover:bg-white/5",
+        "flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-white/5",
         selected && "bg-white/[0.07]",
       )}
       data-git-path={file.path}
-      onClick={() => onSelect(file.path)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect(file.path);
-        }
-      }}
-      role="option"
-      tabIndex={selected ? 0 : -1}
     >
-      <span
-        className={cn(
-          "flex size-4 shrink-0 items-center justify-center rounded-[4px] border font-mono app-text-10",
-          GIT_STATUS_TONE_CLASS[badge.tone],
-        )}
+      <button
+        aria-label={t("panels.git.list.rowAria", {
+          path: file.path,
+          badge: t(`panels.git.list.badge.${badge.letter}`),
+          group: t(`panels.git.list.groups.${group}`),
+        })}
+        aria-pressed={selected}
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-chip text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => onSelect(file.path)}
+        type="button"
       >
-        {badge.letter === "untracked" ? "?" : badge.letter}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1">
-          {selected ? (
-            <CheckIcon className="shrink-0 text-sky-300" size={12} />
-          ) : null}
-          <span className="min-w-0 truncate font-mono app-text-12" title={file.path}>
-            {file.path}
-          </span>
+        <span
+          className={cn(
+            "flex size-4 shrink-0 items-center justify-center rounded-[4px] border font-mono app-text-10",
+            GIT_STATUS_TONE_CLASS[badge.tone],
+          )}
+        >
+          {badge.letter === "untracked" ? "?" : badge.letter}
         </span>
-        {file.from ? (
-          <span className="block truncate app-text-10 text-muted-foreground/70">
-            {t("panels.git.list.renamedFrom", { path: file.from })}
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1">
+            {selected ? (
+              <CheckIcon className="shrink-0 text-sky-300" size={12} />
+            ) : null}
+            <span className="min-w-0 truncate font-mono app-text-12" title={file.path}>
+              {file.path}
+            </span>
           </span>
-        ) : null}
-      </span>
-      <span className="shrink-0 font-mono app-text-10 text-muted-foreground/80">
-        {file.binary
-          ? t("panels.git.list.binary")
-          : hasStats
-            ? t("panels.git.list.stats", {
-                insertions: String(file.insertions),
-                deletions: String(file.deletions),
-              })
-            : t("panels.git.list.statUnknown")}
-      </span>
+          {file.from ? (
+            <span className="block truncate app-text-10 text-muted-foreground/70">
+              {t("panels.git.list.renamedFrom", { path: file.from })}
+            </span>
+          ) : null}
+        </span>
+        <span className="shrink-0 font-mono app-text-10 text-muted-foreground/80">
+          {file.binary
+            ? t("panels.git.list.binary")
+            : hasStats
+              ? t("panels.git.list.stats", {
+                  insertions: String(file.insertions),
+                  deletions: String(file.deletions),
+                })
+              : t("panels.git.list.statUnknown")}
+        </span>
+      </button>
       {stageAction && onStage ? (
         <StageButton
           action={stageAction}

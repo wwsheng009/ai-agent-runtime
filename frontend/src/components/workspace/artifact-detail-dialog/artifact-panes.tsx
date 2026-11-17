@@ -25,9 +25,6 @@ export function ImageArtifactPane({
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           {t("panels.artifacts.detail.imageTitle")}
         </div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          {t("panels.artifacts.detail.imageHint")}
-        </div>
       </div>
       <div className="p-4">
         <div className="flex min-h-[18rem] items-center justify-center rounded-panel border border-white/8 bg-black/40 p-4">
@@ -133,9 +130,6 @@ export function ArtifactPreviewPane({
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           {t("panels.artifacts.detail.previewTitle")}
         </div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          {t("panels.artifacts.detail.previewHint")}
-        </div>
       </div>
       <div className="p-4">
         <div className="h-[min(70vh,56rem)] min-h-[28rem] rounded-card-lg border border-white/8 bg-white p-3">
@@ -179,9 +173,6 @@ export function ArtifactSourcePane({
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           {t("panels.artifacts.detail.sourceTitle")}
         </div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          {t("panels.artifacts.detail.sourceHint")}
-        </div>
       </div>
       <div className="p-4">
         <CodeBlock
@@ -208,9 +199,6 @@ export function ArtifactSourceReaderCard({
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           {t("panels.artifacts.detail.sourceTitle")}
-        </div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          {t("panels.artifacts.detail.sourceFullHint")}
         </div>
       </div>
       <div className="p-4">

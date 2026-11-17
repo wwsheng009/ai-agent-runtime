@@ -192,7 +192,7 @@ describe("FileSearchResults 结果行", () => {
     const onEnterDir = vi.fn();
     renderResults({ items: [item("src", { type: "dir" })] }, { onEnterDir, onSelect });
 
-    click(document.body.querySelector('button[aria-label="src"]'));
+    click(document.body.querySelector('[role="option"][aria-label="src"]'));
     expect(onEnterDir).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
   });

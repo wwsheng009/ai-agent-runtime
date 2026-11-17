@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
+import { useFocusTrap } from "@/components/ui/use-focus-trap";
 import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import { cn } from "@/lib/utils";
 
@@ -59,8 +60,6 @@ export type ExpandedPreviewDialogProps = {
   closeLabel: string;
   /** 顶部小标题（如「放大视图」）。 */
   eyebrow: string;
-  /** 底部操作口径提示（如 Esc / 遮罩关闭）。 */
-  hint?: string;
   onClose: () => void;
   open: boolean;
   /** 副标题：路径之外的次要信息（大小、对比目标、增删统计）。 */
@@ -76,7 +75,6 @@ export function ExpandedPreviewDialog({
   children,
   closeLabel,
   eyebrow,
-  hint,
   onClose,
   open,
   subtitle,
@@ -87,6 +85,7 @@ export function ExpandedPreviewDialog({
 
   useDialogLifecycle(open, onClose);
   useFocusRestore(open);
+  useFocusTrap(panelRef, open);
 
   useEffect(() => {
     if (open) {
@@ -140,11 +139,6 @@ export function ExpandedPreviewDialog({
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
-        {hint ? (
-          <p className="border-t border-border px-3.5 py-1.5 app-text-10 text-muted-foreground/70">
-            {hint}
-          </p>
-        ) : null}
       </DialogPanel>
     </DialogOverlay>,
     document.body,

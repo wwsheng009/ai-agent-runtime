@@ -33,7 +33,6 @@ function Host() {
         actions={<button data-testid="host-action" type="button">切换视图</button>}
         closeLabel="关闭放大面板"
         eyebrow="放大视图"
-        hint="Esc 或点击遮罩关闭"
         onClose={() => setOpen(false)}
         open={open}
         subtitle="1.2 KB"
@@ -150,5 +149,26 @@ describe("ExpandedPreviewDialog", () => {
 
     click(document.body.querySelector('[data-testid="host-expanded-close"]'));
     expect(document.activeElement).toBe(button);
+  });
+
+  it("焦点纪律：Tab 在面板内循环，不会落回宿主页面", () => {
+    click(trigger());
+    const action = document.body.querySelector<HTMLElement>('[data-testid="host-action"]');
+    const close = document.body.querySelector<HTMLElement>('[data-testid="host-expanded-close"]');
+
+    act(() => {
+      panel()?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(close);
+
+    act(() => {
+      close?.focus();
+      close?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(action);
   });
 });

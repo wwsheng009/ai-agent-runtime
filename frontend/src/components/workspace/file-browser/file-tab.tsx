@@ -204,7 +204,6 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
         ariaLabel={t("panels.fileBrowser.preview.expand")}
         closeLabel={t("panels.preview.close")}
         eyebrow={t("panels.preview.eyebrow")}
-        hint={t("panels.preview.hint")}
         onClose={() => setExpanded(false)}
         open={expanded && canPreviewEntry(meta)}
         subtitle={metaFacts}

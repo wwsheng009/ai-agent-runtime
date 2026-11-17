@@ -4,9 +4,9 @@ import { LoaderCircleIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
-import { consoleInputClass } from "./console-styles";
 import type { DispatchConsoleProps } from "./types";
 
 type DispatchTaskComposerProps = Pick<
@@ -48,67 +48,87 @@ export function DispatchTaskComposer({
   return (
     <>
       <div>
-        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          {t("panels.teamsDispatch.taskComposer.title")}
-        </div>
-        <input
-          value={dispatchTaskTitleDraft}
-          onChange={(event) => onDispatchTaskTitleDraftChange(event.target.value)}
-          placeholder={t("panels.teamsDispatch.taskComposer.titlePlaceholder")}
-          className={consoleInputClass}
-        />
+        <label className="block">
+          <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+            {t("panels.teamsDispatch.taskComposer.title")}
+          </span>
+          <Input
+            size="md"
+            surface="dark"
+            className="mt-2"
+            value={dispatchTaskTitleDraft}
+            onChange={(event) => onDispatchTaskTitleDraftChange(event.target.value)}
+            placeholder={t("panels.teamsDispatch.taskComposer.titlePlaceholder")}
+          />
+        </label>
       </div>
 
       <div>
-        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          {t("panels.teamsDispatch.taskComposer.goal")}
-        </div>
-        <textarea
-          value={dispatchTaskGoalDraft}
-          onChange={(event) => onDispatchTaskGoalDraftChange(event.target.value)}
-          placeholder={t("panels.teamsDispatch.taskComposer.goalPlaceholder")}
-          className={cn(consoleInputClass, "min-h-24 resize-y leading-6")}
-        />
+        <label className="block">
+          <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+            {t("panels.teamsDispatch.taskComposer.goal")}
+          </span>
+          <Textarea
+            size="sm"
+            surface="dark"
+            className="mt-2 leading-6"
+            value={dispatchTaskGoalDraft}
+            onChange={(event) => onDispatchTaskGoalDraftChange(event.target.value)}
+            placeholder={t("panels.teamsDispatch.taskComposer.goalPlaceholder")}
+          />
+        </label>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            {t("panels.teamsDispatch.taskComposer.inputs")}
-          </div>
-          <textarea
-            value={dispatchTaskInputsDraft}
-            onChange={(event) => onDispatchTaskInputsDraftChange(event.target.value)}
-            placeholder={t("panels.teamsDispatch.taskComposer.inputsPlaceholder")}
-            className={cn(consoleInputClass, "min-h-20 resize-y leading-6")}
-          />
+          <label className="block">
+            <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+              {t("panels.teamsDispatch.taskComposer.inputs")}
+            </span>
+            <Textarea
+              size="sm"
+              surface="dark"
+              className="mt-2 min-h-20 leading-6"
+              value={dispatchTaskInputsDraft}
+              onChange={(event) => onDispatchTaskInputsDraftChange(event.target.value)}
+              placeholder={t("panels.teamsDispatch.taskComposer.inputsPlaceholder")}
+            />
+          </label>
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            {t("panels.teamsDispatch.taskComposer.deliverables")}
-          </div>
-          <textarea
-            value={dispatchTaskDeliverablesDraft}
-            onChange={(event) =>
-              onDispatchTaskDeliverablesDraftChange(event.target.value)
-            }
-            placeholder={t("panels.teamsDispatch.taskComposer.deliverablesPlaceholder")}
-            className={cn(consoleInputClass, "min-h-20 resize-y leading-6")}
-          />
+          <label className="block">
+            <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+              {t("panels.teamsDispatch.taskComposer.deliverables")}
+            </span>
+            <Textarea
+              size="sm"
+              surface="dark"
+              className="mt-2 min-h-20 leading-6"
+              value={dispatchTaskDeliverablesDraft}
+              onChange={(event) =>
+                onDispatchTaskDeliverablesDraftChange(event.target.value)
+              }
+              placeholder={t("panels.teamsDispatch.taskComposer.deliverablesPlaceholder")}
+            />
+          </label>
         </div>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            {t("panels.teamsDispatch.taskComposer.priority")}
-          </div>
-          <input
-            value={dispatchTaskPriorityDraft}
-            onChange={(event) => onDispatchTaskPriorityDraftChange(event.target.value)}
-            placeholder="50"
-            className={consoleInputClass}
-          />
+          <label className="block">
+            <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+              {t("panels.teamsDispatch.taskComposer.priority")}
+            </span>
+            <Input
+              size="md"
+              surface="dark"
+              className="mt-2"
+              value={dispatchTaskPriorityDraft}
+              onChange={(event) => onDispatchTaskPriorityDraftChange(event.target.value)}
+              placeholder="50"
+            />
+          </label>
         </div>
       </div>
 

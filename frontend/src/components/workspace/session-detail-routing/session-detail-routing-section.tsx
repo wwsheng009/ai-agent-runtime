@@ -318,7 +318,10 @@ export function SessionDetailRoutingSection({
           />
 
           {panel?.scope === "main" ? (
-            <label className="flex items-start gap-1.5">
+            <label
+              className="flex items-start gap-1.5"
+              title={t("panels.sessionDetail.routing.enableToggle.hint")}
+            >
               <CheckboxInput
                 checked={enabled}
                 className="mt-0.5"
@@ -328,13 +331,8 @@ export function SessionDetailRoutingSection({
                 shrink
                 size="xs"
               />
-              <span className="grid min-w-0 gap-0.5">
-                <span className="app-text-11 text-foreground">
-                  {t("panels.sessionDetail.routing.enableToggle.label")}
-                </span>
-                <span className="app-text-10 leading-4 text-muted-foreground">
-                  {t("panels.sessionDetail.routing.enableToggle.hint")}
-                </span>
+              <span className="app-text-11 text-foreground">
+                {t("panels.sessionDetail.routing.enableToggle.label")}
               </span>
             </label>
           ) : null}

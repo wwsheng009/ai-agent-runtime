@@ -56,7 +56,6 @@ describe("MessageList", () => {
     expect(markup).toContain('id="assistant-1-status"');
     expect(markup).toContain("响应流式输出中");
     expect(markup).toContain('role="status"');
-    expect(markup).toContain("Runtime stream active");
   });
 
   it("renders backtrack and inline edit actions on user messages when enabled", () => {
@@ -124,7 +123,7 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(markup).toContain("回溯导航已激活");
+    expect(markup).toContain("回溯选择模式");
     expect(markup).toContain('aria-current="true"');
     expect(markup).toContain('data-backtrack-selected="true"');
     // A3：元数据不上屏（§5.2），选中态改由 sr-only 标记 + aria-current 表达。
@@ -475,7 +474,7 @@ describe("MessageList", () => {
 
     expect(markup).toContain('aria-label="Empty workspace conversation timeline"');
     expect(markup).toContain("会话时间线为空");
-    expect(markup).toContain("这个会话没有落库的对话消息");
+    expect(markup).toContain("执行记录见「轨迹」页签。");
     expect(markup).toContain("「轨迹」页签");
   });
 

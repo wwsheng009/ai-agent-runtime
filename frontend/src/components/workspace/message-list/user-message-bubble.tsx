@@ -48,9 +48,9 @@ function extractUserBubbleText(message: ChatMessage): string {
     .replace(/\r\n/g, "\n");
 }
 
-/** 动作按钮统一形制：28×28 圆图标，默认三级文本，hover 升二级。 */
+/** 动作按钮统一形制：36×36 圆图标，默认三级文本，hover 升二级。 */
 const ACTION_BUTTON_CLASS =
-  "inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40";
+  "inline-flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40";
 
 export function UserMessageBubble({
   actionsDisabled,
@@ -74,6 +74,18 @@ export function UserMessageBubble({
   const [copied, setCopied] = useState(false);
   const text = extractUserBubbleText(message);
   const flowKind = isSteeringMessage(message) ? "steering" : "user";
+  const navigationInteractive =
+    backtrackNavigationActive &&
+    !isEditing &&
+    typeof onSelectBacktrackNavigationMessage === "function";
+  const selectForBacktrack = () => {
+    if (
+      navigationInteractive &&
+      typeof onSelectBacktrackNavigationMessage === "function"
+    ) {
+      onSelectBacktrackNavigationMessage(message.id);
+    }
+  };
 
   const copy = async () => {
     if (!hasVisibleText(text)) {
@@ -103,6 +115,14 @@ export function UserMessageBubble({
       </span>
 
       <div
+        role={navigationInteractive ? "button" : undefined}
+        tabIndex={navigationInteractive ? 0 : undefined}
+        aria-pressed={navigationInteractive ? isNavigationSelected : undefined}
+        aria-label={
+          navigationInteractive && hasVisibleText(text)
+            ? text.slice(0, 120)
+            : undefined
+        }
         className={cn(
           "app-chat-bubble max-w-[min(calc(var(--app-chat-content-width)*0.702),82%)] rounded-[22px] px-4 py-2.5 transition",
           isNavigationSelected
@@ -112,12 +132,14 @@ export function UserMessageBubble({
             ? "cursor-pointer hover:ring-2 hover:ring-accent-gold/25"
             : null,
         )}
-        onClick={() => {
+        onClick={selectForBacktrack}
+        onKeyDown={(event) => {
           if (
-            backtrackNavigationActive &&
-            typeof onSelectBacktrackNavigationMessage === "function"
+            navigationInteractive &&
+            (event.key === "Enter" || event.key === " ")
           ) {
-            onSelectBacktrackNavigationMessage(message.id);
+            event.preventDefault();
+            selectForBacktrack();
           }
         }}
         onDoubleClick={(event) => {
@@ -196,7 +218,7 @@ export function UserMessageBubble({
       {/* §12.1.4：动作区同样按内容产出——无复制文本且无回溯入口时整行不渲染，
           避免每条用户消息下面吊着一条 28px 空行。 */}
       {hasVisibleText(text) || showBacktrack || isNavigationSelected ? (
-        <div className="flex h-7 items-center gap-1 pr-1 app-hover-reveal">
+        <div className="flex h-9 items-center gap-1 pr-1 app-hover-reveal">
           {/* 元数据不上屏（§5.2）：选中态只保留无障碍标记 + aria-current。 */}
           {isNavigationSelected ? (
             <span className="sr-only">

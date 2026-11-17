@@ -19,8 +19,6 @@ export const enWorkspacePanelsArtifacts = {
     tabPreview: "Preview",
     tabSource: "Source",
     imageTitle: "Rendered image",
-    imageHint:
-      "Inspect the generated image at full width. Use the metadata below for prompt and integrity details.",
     imageUnavailableTitle: "Image unavailable",
     imageUnavailableHint:
       "This artifact was recorded as an image, but the MIME type is not renderable inline.",
@@ -28,12 +26,7 @@ export const enWorkspacePanelsArtifacts = {
     mimeRenderHint: "MIME type {{mime}} cannot be rendered inline.",
     openRawFile: "Open raw file",
     previewTitle: "Rendered preview",
-    previewHint: "Use the full dialog width to inspect the rendered output.",
     sourceTitle: "Source reader",
-    sourceHint:
-      "Inspect the exact file contents without squeezing them into the rail.",
-    sourceFullHint:
-      "Inspect the exact structured payload or file contents in a full-width dialog.",
   },
   tabs: {
     panelTitle: "Artifacts",

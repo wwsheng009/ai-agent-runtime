@@ -1,11 +1,14 @@
 // 由 pages/cache-analytics-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { RefreshCwIcon, XIcon } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useFocusTrap } from "@/components/ui/use-focus-trap";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
+import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import type { CacheMessageTrace } from "@/types/runtime";
 
 import { cacheStatusKey } from "./cache-status";
@@ -18,7 +21,15 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
   onClose: () => void;
 }) {
   const { t } = useTranslation("usageAnalytics");
+  const asideRef = useRef<HTMLElement | null>(null);
+
   useDialogLifecycle(true, onClose);
+  useFocusTrap(asideRef, true);
+  useFocusRestore(true);
+
+  useEffect(() => {
+    asideRef.current?.focus();
+  }, []);
 
   return (
     <>
@@ -28,14 +39,16 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
         onClick={onClose}
       />
       <aside
+        ref={asideRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("cache.trace.title")}
         className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-border bg-[var(--surface)] shadow-[0_0_40px_rgba(0,0,0,0.25)]"
+        tabIndex={-1}
       >
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold">{t("cache.trace.title")}</h2>
-        <Button autoFocus variant="ghost" size="sm" onClick={onClose} aria-label={t("cache.trace.close")}>
+        <Button variant="ghost" size="sm" onClick={onClose} aria-label={t("cache.trace.close")}>
           <XIcon size={14} />
         </Button>
       </div>

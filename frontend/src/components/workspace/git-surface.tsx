@@ -318,7 +318,6 @@ export function GitSurface({
         ariaLabel={t("panels.git.diff.expand")}
         closeLabel={t("panels.preview.close")}
         eyebrow={t("panels.preview.eyebrow")}
-        hint={t("panels.preview.hint")}
         onClose={() => setExpandedDiff(false)}
         open={expandedDiff}
         subtitle={targetLabel}

@@ -66,22 +66,22 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
       </div>
 
       <div className="mt-2 w-full max-w-full overflow-x-auto">
-        <table className="w-full min-w-[1600px] border-collapse text-left text-sm">
+        <table className="w-full min-w-[54rem] border-collapse text-left text-sm xl:min-w-[78rem] 2xl:min-w-[100rem]">
           <thead className="text-xs text-muted-foreground">
             <tr className="border-b border-border">
               <th className="px-2 py-2 font-medium">{t("cache.columns.time")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.trace")}</th>
-              <th className="px-2 py-2 font-medium">{t("cache.columns.childSession")}</th>
-              <th className="px-2 py-2 font-medium">{t("cache.columns.providerModel")}</th>
-              <th className="px-2 py-2 font-medium">{t("cache.columns.message")}</th>
+              <th className="hidden px-2 py-2 font-medium xl:table-cell">{t("cache.columns.childSession")}</th>
+              <th className="hidden px-2 py-2 font-medium xl:table-cell">{t("cache.columns.providerModel")}</th>
+              <th className="hidden px-2 py-2 font-medium 2xl:table-cell">{t("cache.columns.message")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.tokens")}</th>
-              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.uncachedInput")}</th>
-              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.cacheRead")}</th>
-              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.cacheWrite")}</th>
+              <th className="hidden px-2 py-2 text-right font-medium xl:table-cell">{t("cache.columns.uncachedInput")}</th>
+              <th className="hidden px-2 py-2 text-right font-medium lg:table-cell">{t("cache.columns.cacheRead")}</th>
+              <th className="hidden px-2 py-2 text-right font-medium 2xl:table-cell">{t("cache.columns.cacheWrite")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.hitRatio")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.cacheStatus")}</th>
-              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.duration")}</th>
-              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.firstToken")}</th>
+              <th className="hidden px-2 py-2 text-right font-medium xl:table-cell">{t("cache.columns.duration")}</th>
+              <th className="hidden px-2 py-2 text-right font-medium 2xl:table-cell">{t("cache.columns.firstToken")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.outcome")}</th>
             </tr>
           </thead>
@@ -108,31 +108,32 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
               return (
                 <tr
                   key={record.llm_request_id}
-                  role={traceable ? "button" : undefined}
-                  tabIndex={traceable ? 0 : undefined}
-                  aria-label={traceable ? t("cache.traceHint") : undefined}
                   className={cn(
                     "border-b border-border last:border-b-0",
-                    traceable && "cursor-pointer hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    traceable && "cursor-pointer hover:bg-surface-soft",
                   )}
                   title={traceable ? t("cache.traceHint") : undefined}
                   onClick={traceable ? () => onTrace(record) : undefined}
-                  onKeyDown={
-                    traceable
-                      ? (event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            onTrace(record);
-                          }
-                        }
-                      : undefined
-                  }
                 >
                   <td className="whitespace-nowrap px-2 py-2.5 tabular-nums">{formatCacheTime(record.started_at)}</td>
                   <td className="max-w-52 truncate px-2 py-2.5 font-mono text-xs" title={traceId || undefined}>
-                    {traceId ? shortID(traceId) : "-"}
+                    {traceable ? (
+                      <button
+                        type="button"
+                        aria-label={t("cache.traceHint")}
+                        className="max-w-full truncate text-left underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onTrace(record);
+                        }}
+                      >
+                        {shortID(traceId || messageId)}
+                      </button>
+                    ) : (
+                      "-"
+                    )}
                   </td>
-                  <td className="max-w-40 px-2 py-2.5">
+                  <td className="hidden max-w-40 px-2 py-2.5 xl:table-cell">
                     {record.session_id && record.root_session_id && record.root_session_id !== record.session_id ? (
                       <div className="flex items-center gap-1">
                         <Badge className="border-analytics-info-border bg-analytics-info-soft text-analytics-info">{t("cache.childSessionBadge")}</Badge>
@@ -147,11 +148,11 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                       <span className="text-xs text-muted-foreground">-</span>
                     )}
                   </td>
-                  <td className="max-w-52 px-2 py-2.5">
+                  <td className="hidden max-w-52 px-2 py-2.5 xl:table-cell">
                     <div className="truncate">{record.provider || "-"}</div>
                     <div className="truncate text-xs text-muted-foreground">{record.model || "-"}</div>
                   </td>
-                  <td className="max-w-56 px-2 py-2.5">
+                  <td className="hidden max-w-56 px-2 py-2.5 2xl:table-cell">
                     {messageId ? (
                       <div className="truncate font-mono text-xs" title={messageId}>{messageId}</div>
                     ) : (
@@ -164,17 +165,17 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
                     {formatCacheNumber(record.usage?.prompt_tokens ?? 0)} / {formatCacheNumber(record.usage?.completion_tokens ?? 0)}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheUncachedInput(record.usage)}</td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheReportedNumber(record.usage?.cache_read_tokens, record.usage?.cache_read_reported)}</td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheReportedNumber(record.usage?.cache_creation_tokens, record.usage?.cache_creation_reported)}</td>
+                  <td className="hidden whitespace-nowrap px-2 py-2.5 text-right tabular-nums xl:table-cell">{formatCacheUncachedInput(record.usage)}</td>
+                  <td className="hidden whitespace-nowrap px-2 py-2.5 text-right tabular-nums lg:table-cell">{formatCacheReportedNumber(record.usage?.cache_read_tokens, record.usage?.cache_read_reported)}</td>
+                  <td className="hidden whitespace-nowrap px-2 py-2.5 text-right tabular-nums 2xl:table-cell">{formatCacheReportedNumber(record.usage?.cache_creation_tokens, record.usage?.cache_creation_reported)}</td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheRatio(record.cache_hit_ratio)}</td>
                   <td className="px-2 py-2.5">
                     <Badge className={cacheStatusTone(record.cache_status)}>{t(cacheStatusKey(record.cache_status))}</Badge>
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
+                  <td className="hidden whitespace-nowrap px-2 py-2.5 text-right tabular-nums xl:table-cell">
                     {typeof record.duration_ms === "number" ? formatDuration(record.duration_ms) : "—"}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
+                  <td className="hidden whitespace-nowrap px-2 py-2.5 text-right tabular-nums 2xl:table-cell">
                     {formatCacheLatency(record.first_token_ms, t("cache.metrics.notCollected"))}
                   </td>
                   <td className="px-2 py-2.5">

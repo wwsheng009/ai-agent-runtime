@@ -184,7 +184,7 @@ describe("GitChangeList", () => {
     expect(rows[1].textContent).toContain("M");
     expect(rows[2].textContent).toContain("D");
     expect(rows[3].textContent).toContain("?");
-    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    expect(rows[1].querySelector('button[aria-pressed="true"]')).not.toBeNull();
   });
 
   it("行数统计：正常显示 +/−，二进制显示「二进制文件」，-1 显示不可用而不是 0", () => {
@@ -264,15 +264,15 @@ describe("GitChangeList", () => {
         })}
       />,
     );
-    const listbox = container.querySelector('[role="listbox"]');
-    expect(listbox).not.toBeNull();
+    const group = container.querySelector('[role="group"]');
+    expect(group).not.toBeNull();
     act(() => {
-      listbox?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      group?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     });
     expect(onSelect).toHaveBeenCalledWith("b.ts");
 
     act(() => {
-      listbox?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      group?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
     });
     expect(onSelect).toHaveBeenLastCalledWith("b.ts");
   });
@@ -324,8 +324,10 @@ describe("GitChangeList", () => {
         status={snapshot({ data: statusResult({ unstaged: [file("work.ts", ".M")] }) })}
       />,
     );
-    // 组名「未暂存」本身就含「暂存」，不能用子串判断；按写入口按钮断言（缺省无 onStage → 一个按钮都不渲染）。
-    expect(container.querySelectorAll("button").length).toBe(0);
+    // 只读模式仍需保留每行的键盘选择按钮；缺省无 onStage 时不渲染写入口。
+    const rowButtons = container.querySelectorAll('[data-git-path] button');
+    expect(rowButtons.length).toBe(1);
+    expect(rowButtons[0]?.getAttribute("aria-pressed")).toBe("false");
     expect(container.querySelector('[data-testid="git-change-list-rows"]')).not.toBeNull();
   });
 
@@ -407,7 +409,11 @@ describe("GitChangeList", () => {
     );
 
     const conflictGroup = container.querySelector('[data-git-group="conflicts"]');
-    expect(conflictGroup?.querySelectorAll("button")).toHaveLength(0);
+    expect(
+      [...(conflictGroup?.querySelectorAll("button") ?? [])].some((button) =>
+        button.textContent?.includes("暂存"),
+      ),
+    ).toBe(false);
 
     const groupButton = container.querySelector('[data-git-group="unstaged"] button');
     act(() => {
@@ -430,10 +436,16 @@ describe("GitChangeList", () => {
       />,
     );
     const buttons = [...container.querySelectorAll("button")];
-    expect(buttons.every((button) => button.disabled)).toBe(true);
+    const stageButton = buttons.find((button) => button.textContent?.includes("暂存中…"));
+    const selectionButton = container.querySelector<HTMLButtonElement>(
+      '[data-git-path="work.ts"] button[aria-pressed]',
+    );
+    expect(stageButton?.disabled).toBe(true);
+    expect(selectionButton).not.toBeNull();
+    expect(selectionButton?.disabled).toBe(false);
     expect(container.textContent).toContain("暂存中…");
     act(() => {
-      buttons[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      stageButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onStage).not.toHaveBeenCalled();
   });

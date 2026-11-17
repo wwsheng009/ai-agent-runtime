@@ -1,10 +1,13 @@
 // 由 components/workspace/artifact-detail-dialog.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { injectPreviewDocumentSettings } from "@/components/workspace/artifact-preview-document";
+import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
+import { useFocusTrap } from "@/components/ui/use-focus-trap";
 import { useAppSettings } from "@/core/settings";
+import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import { classifyArtifactCategory } from "@/lib/workspace-artifacts";
 
 import {
@@ -35,6 +38,7 @@ export function ArtifactDetailDialog({
   const sourceTabId = useId();
   const previewPanelId = useId();
   const sourcePanelId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [preferredView, setPreferredView] = useState<"preview" | "source">(
     "preview",
   );
@@ -47,38 +51,17 @@ export function ArtifactDetailDialog({
     // P0-2 机械搬迁：保留原「artifact 切换时同步 reading mode」语义。
      
     setPreferredView(artifact.previewHtml ? "preview" : "source");
-  }, [artifact?.id, artifact?.previewHtml]);
+  }, [artifact, artifact?.id, artifact?.previewHtml]);
+
+  useDialogLifecycle(open, onClose);
+  useFocusTrap(panelRef, open);
+  useFocusRestore(open);
 
   useEffect(() => {
-    if (!open || typeof document === "undefined") {
-      return;
+    if (open) {
+      panelRef.current?.focus();
     }
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
   }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onClose, open]);
 
   if (!open || !artifact) {
     return null;
@@ -132,7 +115,16 @@ export function ArtifactDetailDialog({
         }
       }}
     >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-panel-lg border border-border [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]">
+      <div
+        ref={panelRef}
+        aria-describedby={descriptionId}
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-panel-lg border border-border [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]"
+        data-artifact-detail-dialog="true"
+        role="dialog"
+        tabIndex={-1}
+      >
 
         <ArtifactDetailHeader
           artifact={artifact}
@@ -142,14 +134,7 @@ export function ArtifactDetailDialog({
           titleId={titleId}
         />
 
-        <div
-          aria-describedby={descriptionId}
-          aria-labelledby={titleId}
-          className="grid min-h-0 flex-1 gap-0 xl:grid-cols-[18rem_minmax(0,1fr)]"
-          role="dialog"
-          aria-modal="true"
-          data-artifact-detail-dialog="true"
-        >
+        <div className="grid min-h-0 flex-1 gap-0 xl:grid-cols-[18rem_minmax(0,1fr)]">
 
           <ArtifactMetadataAside artifact={artifact} metaItems={metaItems} />
 

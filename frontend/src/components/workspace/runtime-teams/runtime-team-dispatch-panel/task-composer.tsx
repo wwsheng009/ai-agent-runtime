@@ -54,6 +54,7 @@ export function DispatchTaskComposer({
           {t("panels.teamsDispatch.taskComposer.title")}
         </div>
         <input
+          aria-label={t("panels.teamsDispatch.taskComposer.title")}
           value={dispatchTaskTitleDraft}
           onChange={(event) => onDispatchTaskTitleDraftChange(event.target.value)}
           placeholder={t("panels.teamsDispatch.taskComposer.titlePlaceholder")}
@@ -66,6 +67,7 @@ export function DispatchTaskComposer({
           {t("panels.teamsDispatch.taskComposer.goal")}
         </div>
         <textarea
+          aria-label={t("panels.teamsDispatch.taskComposer.goal")}
           value={dispatchTaskGoalDraft}
           onChange={(event) => onDispatchTaskGoalDraftChange(event.target.value)}
           placeholder={t("panels.teamsDispatch.taskComposer.goalPlaceholder")}
@@ -79,6 +81,7 @@ export function DispatchTaskComposer({
             {t("panels.teamsDispatch.taskComposer.inputs")}
           </div>
           <textarea
+            aria-label={t("panels.teamsDispatch.taskComposer.inputs")}
             value={dispatchTaskInputsDraft}
             onChange={(event) => onDispatchTaskInputsDraftChange(event.target.value)}
             placeholder={t("panels.teamsDispatch.taskComposer.inputsPlaceholder")}
@@ -90,6 +93,7 @@ export function DispatchTaskComposer({
             {t("panels.teamsDispatch.taskComposer.deliverables")}
           </div>
           <textarea
+            aria-label={t("panels.teamsDispatch.taskComposer.deliverables")}
             value={dispatchTaskDeliverablesDraft}
             onChange={(event) =>
               onDispatchTaskDeliverablesDraftChange(event.target.value)
@@ -106,6 +110,7 @@ export function DispatchTaskComposer({
             {t("panels.teamsDispatch.taskComposer.priority")}
           </div>
           <input
+            aria-label={t("panels.teamsDispatch.taskComposer.priority")}
             value={dispatchTaskPriorityDraft}
             onChange={(event) => onDispatchTaskPriorityDraftChange(event.target.value)}
             placeholder="50"

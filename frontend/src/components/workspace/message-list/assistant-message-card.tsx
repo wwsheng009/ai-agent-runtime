@@ -167,7 +167,7 @@ export function AssistantMessageCard({
         })}
 
         {streaming ? (
-          <span className="sr-only">
+          <span aria-live="polite" className="sr-only" role="status">
             {t("panels.messages.messageCard.streamingBadge")}
           </span>
         ) : null}

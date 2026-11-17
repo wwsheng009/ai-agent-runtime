@@ -268,7 +268,6 @@ export function ToolRowDiffPanel({
         ariaLabel={t("panels.messages.toolRow.diff.expand")}
         closeLabel={t("panels.preview.close")}
         eyebrow={t("panels.preview.eyebrow")}
-        hint={t("panels.preview.hint")}
         onClose={() => setExpanded(false)}
         open={expanded}
         subtitle={`${t("panels.git.diff.additions", { count: additions })} ${t("panels.git.diff.deletions", { count: removals })}`}
