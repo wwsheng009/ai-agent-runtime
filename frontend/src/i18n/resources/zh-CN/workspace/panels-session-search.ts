@@ -6,8 +6,6 @@ export const zhWorkspaceSessionSearch = {
   ariaLabel: "会话元数据检索",
   eyebrow: "Runtime · 会话检索",
   title: "会话元数据检索",
-  description:
-    "按用户、标签与状态检索服务端会话元数据；结果是服务端过滤，非本地标题匹配。",
   close: "关闭会话检索",
   form: {
     legend: "筛选条件",

@@ -126,9 +126,6 @@ export function SessionSearchDialog({
               <SearchIcon size={17} className="text-accent-primary" />
               {t("panels.sessionSearch.title")}
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {t("panels.sessionSearch.description")}
-            </p>
           </div>
           <Button
             aria-label={t("panels.sessionSearch.close")}

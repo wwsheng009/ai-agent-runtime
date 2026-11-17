@@ -133,7 +133,6 @@ export const enSkills = {
   // Workspace "Skills" tab (after the chat tab): catalog + detail dialog only;
   // hot reload stays on the standalone page.
   workspaceTab: {
-    description: "Skills loaded by the current runtime; select one to inspect its full definition.",
     dialogAriaLabel: "Skill detail",
     closeDialog: "Close skill detail",
   },

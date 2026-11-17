@@ -481,7 +481,14 @@ export function ConnectorsPage() {
                       >
                         {t("page.test")}
                       </Button>
-                      <details className="relative">
+                      <details
+                        className="relative"
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.currentTarget.removeAttribute("open");
+                          }
+                        }}
+                      >
                         <summary
                           className={cn(
                             buttonVariants({ variant: "secondary", size: "sm" }),

@@ -9,8 +9,6 @@ export const enWorkspaceSessionSearch = {
   ariaLabel: "Session metadata search",
   eyebrow: "Runtime · Session search",
   title: "Session metadata search",
-  description:
-    "Search server-side session metadata by user, tags, and state; results are filtered server-side, not by local title matching.",
   close: "Close session search",
   form: {
     legend: "Filters",

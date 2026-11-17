@@ -22,9 +22,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
 
   return (
     <>
-      <button
-        type="button"
-        tabIndex={-1}
+      <div
         aria-hidden="true"
         className="fixed inset-0 z-30 cursor-default bg-black/30"
         onClick={onClose}
