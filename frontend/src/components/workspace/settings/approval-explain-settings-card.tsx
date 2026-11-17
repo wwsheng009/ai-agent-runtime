@@ -54,19 +54,6 @@ export function ApprovalExplainSettingsCard() {
     }
   }
 
-  function modeDescription(value: string) {
-    switch (value) {
-      case "off":
-        return t("chat.approvalExplainModes.off.description");
-      case "on_demand":
-        return t("chat.approvalExplainModes.onDemand.description");
-      case "pre_generate":
-        return t("chat.approvalExplainModes.preGenerate.description");
-      default:
-        return null;
-    }
-  }
-
   const options = (snapshot?.supportedModes ?? []).map((value) => ({
     value,
     label: modeLabel(value),
@@ -103,10 +90,7 @@ export function ApprovalExplainSettingsCard() {
   }
 
   return (
-    <SettingsSection
-      title={t("chat.approvalExplain")}
-      description={t("chat.approvalExplainDescription")}
-    >
+    <SettingsSection title={t("chat.approvalExplain")}>
       <SettingsPanelCard>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <Select
@@ -127,15 +111,6 @@ export function ApprovalExplainSettingsCard() {
             triggerClassName="w-full text-sm"
             optionClassName="text-sm"
           />
-          <p className="text-sm leading-6 text-muted-foreground">
-            {snapshot
-              ? t("chat.approvalExplainCurrent", {
-                  mode: modeLabel(snapshot.mode),
-                })
-              : loading
-                ? t("chat.approvalExplainLoading")
-                : null}
-          </p>
           <Button
             className="sm:ml-auto"
             disabled={saving || loading || snapshot === null || !dirty}
@@ -148,21 +123,10 @@ export function ApprovalExplainSettingsCard() {
               : t("chat.approvalExplainSave")}
           </Button>
         </div>
-        {modeDescription(mode) ? (
-          <p className="mt-3 text-xs leading-6 text-muted-foreground">
-            {modeDescription(mode)}
-          </p>
-        ) : null}
-        <p className="mt-3 text-xs leading-6 text-muted-foreground">
-          {t("chat.approvalExplainPersistenceHint")}
-        </p>
         {error ? (
           <div className="mt-3 space-y-1" role="alert">
             <p className="text-sm leading-6 text-accent-orange">
               {t("chat.approvalExplainUnavailable", { message: error })}
-            </p>
-            <p className="text-xs leading-6 text-muted-foreground">
-              {t("chat.approvalExplainUnavailableHint")}
             </p>
           </div>
         ) : null}

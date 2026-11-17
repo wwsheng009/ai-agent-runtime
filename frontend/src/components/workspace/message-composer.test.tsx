@@ -91,7 +91,6 @@ describe("MessageComposer", () => {
       reasoningEffortOptions: [],
       runtimeModelsError: null,
       runtimeModelsLoading: false,
-      selectedArtifactCount: 0,
       selectedModel: "model-a",
       selectedProvider: "provider-a",
       selectedReasoningEffort: "",
@@ -130,12 +129,10 @@ describe("MessageComposer", () => {
       onStop,
       onSubmit,
       runtimeModelsError: "catalog offline",
-      selectedArtifactCount: 2,
       transport: "error",
     });
 
     expect(container.textContent).toContain("运行时错误");
-    expect(container.textContent).toContain("2 个文件");
     expect(container.textContent).toContain("catalog offline");
 
     const submitButton = container.querySelector(

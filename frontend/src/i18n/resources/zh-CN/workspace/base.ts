@@ -487,7 +487,6 @@ export const zhWorkspaceBase = {
     shortcuts: "Ctrl/Cmd + Enter",
     stop: "停止",
     submitShort: "提交",
-    filesCount: "{{count}} 个文件",
     attachments: {
       attach: "添加附件",
       remove: "移除 {{name}}",

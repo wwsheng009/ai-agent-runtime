@@ -22,10 +22,7 @@ export function AppearanceAccentSection({
   updateSection: UpdateSettingsSection;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.accent")}
-        description={t("appearance.accentDescription")}
-      >
+      <SettingsSection title={t("appearance.accent")}>
         <div className="grid gap-3 lg:grid-cols-3">
           {accentOptions.map((option) => {
             const active = settings.appearance.accentTone === option.id;
@@ -43,11 +40,9 @@ export function AppearanceAccentSection({
                     <div className="text-base font-semibold text-foreground">
                       {option.label}
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                      {option.description}
-                    </p>
                   </div>
                   <SparklesIcon
+                    aria-hidden="true"
                     size={16}
                     className={cn(
                       active

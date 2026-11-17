@@ -94,7 +94,6 @@ describe("MessageComposer trigger menu", () => {
       referenceGroups: REFERENCE_GROUPS,
       runtimeModelsError: null,
       runtimeModelsLoading: false,
-      selectedArtifactCount: 0,
       selectedModel: "model-a",
       selectedProvider: "provider-a",
       selectedReasoningEffort: "",

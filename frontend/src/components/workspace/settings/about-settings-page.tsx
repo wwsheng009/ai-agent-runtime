@@ -57,15 +57,12 @@ export function AboutSettingsPage({
 
   return (
     <div className="space-y-6">
-      <SettingsSection
-        title={t("about.currentWorkspace")}
-        description={t("about.description")}
-      >
+      <SettingsSection title={t("about.currentWorkspace")}>
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             tone="softer"
             title={t("about.apiBase")}
-            icon={<RouteIcon size={16} className="text-accent-primary" />}
+            icon={<RouteIcon aria-hidden="true" size={16} className="text-accent-primary" />}
             description={apiBaseLabel}
             descriptionClassName="break-all"
           />
@@ -75,6 +72,7 @@ export function AboutSettingsPage({
             title={t("about.currentRoute")}
             icon={
               <PanelsTopLeftIcon
+                aria-hidden="true"
                 size={16}
                 className="text-accent-secondary"
               />
@@ -85,16 +83,14 @@ export function AboutSettingsPage({
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("about.runtimeIdentity")}
-        description={t("about.runtimeIdentityDescription")}
-      >
+      <SettingsSection title={t("about.runtimeIdentity")}>
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             tone="softer"
             title={t("about.runtimeUserId")}
             icon={
               <FingerprintIcon
+                aria-hidden="true"
                 size={16}
                 className="text-accent-primary"
               />
@@ -111,7 +107,7 @@ export function AboutSettingsPage({
           <SettingsInfoCard
             tone="softer"
             title={t("about.workspacePath")}
-            icon={<RouteIcon size={16} className="text-accent-secondary" />}
+            icon={<RouteIcon aria-hidden="true" size={16} className="text-accent-secondary" />}
           >
             <p className="app-inline-mono break-all text-muted-foreground">
               {runtimeClient.workspacePath || t("about.notSet")}
@@ -122,26 +118,23 @@ export function AboutSettingsPage({
               className="mt-3 gap-2"
               onClick={onResetRuntimeClientIdentity}
             >
-              <RotateCcwIcon size={14} />
+              <RotateCcwIcon aria-hidden="true" size={14} />
               {t("about.resetRuntimeClientId")}
             </Button>
           </SettingsInfoCard>
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("about.runtimeOverview")}
-        description={t("about.runtimeOverviewDescription")}
-      >
+      <SettingsSection title={t("about.runtimeOverview")}>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
-            icon={<DatabaseIcon size={16} className="text-accent-primary" />}
+            icon={<DatabaseIcon aria-hidden="true" size={16} className="text-accent-primary" />}
             label={t("about.selectedProvider")}
             value={`${providerOptions.length}`}
             detail={`${selectedProvider || t("about.runtimeDefault")} / ${selectedModel || t("about.runtimeDefault")}`}
           />
           <StatCard
-            icon={<HardDriveDownloadIcon size={16} className="text-accent-secondary" />}
+            icon={<HardDriveDownloadIcon aria-hidden="true" size={16} className="text-accent-secondary" />}
             label={t("about.sessionCount")}
             value={`${runtimeSessionsSummary.totalCount}`}
             detail={
@@ -156,7 +149,7 @@ export function AboutSettingsPage({
             }
           />
           <StatCard
-            icon={<PanelsTopLeftIcon size={16} className="text-accent-primary" />}
+            icon={<PanelsTopLeftIcon aria-hidden="true" size={16} className="text-accent-primary" />}
             label={t("about.recoverableSessions")}
             value={`${runtimeSessionsSummary.recoverableCount}`}
             detail={t("about.sessionBreakdown", {
@@ -165,7 +158,7 @@ export function AboutSettingsPage({
             })}
           />
           <StatCard
-            icon={<RouteIcon size={16} className="text-accent-secondary" />}
+            icon={<RouteIcon aria-hidden="true" size={16} className="text-accent-secondary" />}
             label={t("about.activeTeams")}
             value={`${liveTeamCount}`}
             detail={t("about.activeTeamsSummary", { count: runtimeTeams.length })}
@@ -173,10 +166,7 @@ export function AboutSettingsPage({
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("about.localStorage")}
-        description={t("about.localStorageDescription")}
-      >
+      <SettingsSection title={t("about.localStorage")}>
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             title={t("about.settingsKey")}

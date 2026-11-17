@@ -42,10 +42,7 @@ export function HarnessGrantsSection({
   workspacePath: string;
 }) {
   return (
-      <SettingsSection
-        title={t("harness.grantsTitle")}
-        description={t("harness.grantsDescription")}
-      >
+      <SettingsSection title={t("harness.grantsTitle")}>
         <div className="space-y-3">
           <SettingsInfoCard
             tone="softer"
@@ -89,9 +86,6 @@ export function HarnessGrantsSection({
                 {t("harness.remember")}
               </Button>
             </div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {t("harness.grantHint")}
-            </p>
           </SettingsPanelCard>
 
           {grants.length > 0 ? (
@@ -137,7 +131,7 @@ export function HarnessGrantsSection({
                       });
                     }}
                   >
-                    <Trash2Icon size={14} />
+                    <Trash2Icon aria-hidden="true" size={14} />
                     {t("harness.revoke")}
                   </Button>
                 </div>

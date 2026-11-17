@@ -53,7 +53,6 @@ describe("AboutSettingsPage", () => {
       expect(markup).toContain("E:/projects/ai/ai-agent-runtime");
       expect(markup).toContain("最近更新");
       expect(markup).toContain("openai / gpt-5.4");
-      expect(markup).toContain("设置数据存于浏览器 localStorage");
       expect(markup).toContain("重置本地 runtime client id");
       expect(markup).toContain(APP_SETTINGS_STORAGE_KEY);
       expect(markup).toContain(RUNTIME_CLIENT_STORAGE_KEY);

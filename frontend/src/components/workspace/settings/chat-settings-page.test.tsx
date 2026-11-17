@@ -279,8 +279,6 @@ describe("ChatSettingsPage max steps", () => {
       });
 
       expect(approvalExplainTrigger()?.textContent).toContain("按需生成");
-      expect(document.body.textContent).toContain("当前模式：按需生成");
-      expect(document.body.textContent).toContain("该开关不持久化");
 
       await selectApprovalExplainOption("预生成");
       await act(async () => {

@@ -18,7 +18,6 @@ import {
   useCallback,
   useEffect,
   useRef,
-  useState,
   type CSSProperties,
 } from "react";
 
@@ -32,7 +31,6 @@ import {
   getThreadTransportKind,
 } from "@/components/workspace/workspace-shell-shared";
 import {
-  resolveRailSurfaceWidthClass,
   type RightRailWidthController,
 } from "@/hooks/workspace/use-right-rail-width";
 
@@ -86,21 +84,16 @@ export function WorkspaceRightRailSection({
   t,
 }: WorkspaceRightRailSectionProps) {
   const widthController = railWidth ?? FALLBACK_RAIL_WIDTH;
-  const [activeSurface, setActiveSurface] =
-    useState<WorkspacePanelSurfaceId | null>(null);
   const railRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
 
   const visible = rightRailOpen && !isNewThread;
-  // 文件 / Git 等宽内容面在窄视口改用覆盖层抽屉承载（内容型面维持既有「不渲染」策略）。
-  const overlayVisible =
-    visible &&
-    widthController.overlay &&
-    resolveRailSurfaceWidthClass(activeSurface) === "wide";
+  // 窄视口统一改用覆盖层抽屉：任何面都能通过顶栏开关打开，避免出现
+  // “按钮已切换为打开、但内容型面不渲染”的空操作。
+  const overlayVisible = visible && widthController.overlay;
 
   const handleActiveSurfaceChange = useCallback(
     (surface: WorkspacePanelSurfaceId) => {
-      setActiveSurface(surface);
       onActiveSurfaceChange?.(surface);
     },
     [onActiveSurfaceChange],

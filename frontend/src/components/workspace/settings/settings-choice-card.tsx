@@ -25,7 +25,7 @@ export function SettingsChoiceCard({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "text-left transition",
+        "text-left outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
         surfaceCardVariants({ surface: active ? "accent" : "softer" }),
         active ? null : surfaceCardVariants({ state: "hoverable" }),
         disabled ? surfaceCardVariants({ state: "disabled" }) : null,

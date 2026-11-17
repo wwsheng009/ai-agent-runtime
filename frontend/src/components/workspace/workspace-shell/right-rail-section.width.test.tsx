@@ -3,9 +3,9 @@
 //
 // 设计规则（§4.2）：
 // - 容器只注入 `--right-rail-width`（网格第三列读同一变量），组件内不做宽度算术；
-// - `<xl`（或主区放不下最小右栏）且当前面是宽内容面 → 覆盖层抽屉 + 遮罩 + Esc 关闭，
+// - `<xl`（或主区放不下最小右栏）→ 任意面都走覆盖层抽屉 + 遮罩 + Esc 关闭，
 //   关闭后整列不渲染（回归红线 ① 由 workspace-shell 的网格共同保证）；
-// - 激活面上抛契约：`onActiveSurfaceChange`；父代理未接线时按内容型面兜底，UI 不白屏。
+// - 激活面上抛契约：`onActiveSurfaceChange`；父代理未接线时仍可打开抽屉，避免空操作。
 //
 // 回归红线：内容型面（288px）与关闭右栏（`rightRailOpen=false`）行为不变。
 
@@ -201,13 +201,15 @@ describe("WorkspaceRightRailSection（P0-2 宽度）", () => {
     expect(onCloseRightRail).toHaveBeenCalledTimes(1);
   });
 
-  it("窄视口但激活面未接线（兜底 content）→ 不进覆盖层，仍渲染容器与手柄", () => {
-    const rail = render(
-      controller({ widthPx: 288, overlay: true, viewportWidth: 1100 }),
-    );
+  it("窄视口未接线时也进入覆盖层，避免右栏开关无反馈", () => {
+    render(controller({ widthPx: 288, overlay: true, viewportWidth: 1100 }));
 
-    expect(rail).not.toBeNull();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.style.getPropertyValue("--right-rail-width")).toBe("288px");
+    expect(
+      document.querySelector('[data-testid="right-rail-overlay-backdrop"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="right-rail-resize-handle"]'),
     ).not.toBeNull();

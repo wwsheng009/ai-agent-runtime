@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 
 type SettingsToggleCardProps = {
   checked: boolean;
-  description: ReactNode;
+  description?: ReactNode;
   title: ReactNode;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
@@ -31,7 +31,7 @@ export function SettingsToggleCard({
   return (
     <label
       className={cn(
-        "flex items-start gap-3 transition",
+        "flex items-start gap-3 transition focus-within:ring-2 focus-within:ring-ring",
         surfaceCardVariants({
           surface: "softer",
           state: disabled ? "disabled" : "hoverable",
@@ -57,9 +57,11 @@ export function SettingsToggleCard({
             onChange={(event) => onChange(event.target.checked)}
           />
         </span>
-        <span className="mt-2 block text-sm leading-6 text-muted-foreground">
-          {description}
-        </span>
+        {description ? (
+          <span className="mt-2 block text-sm leading-6 text-muted-foreground">
+            {description}
+          </span>
+        ) : null}
       </span>
     </label>
   );

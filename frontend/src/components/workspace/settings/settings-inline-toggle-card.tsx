@@ -26,6 +26,7 @@ export function SettingsInlineToggleCard({
   return (
     <div
       className={cn(
+        "focus-within:ring-2 focus-within:ring-ring",
         surfaceCardVariants({
           surface: "solid",
           radius: "sm",

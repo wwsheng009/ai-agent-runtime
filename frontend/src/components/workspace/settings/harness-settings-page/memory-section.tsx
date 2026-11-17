@@ -44,17 +44,14 @@ export function HarnessMemorySection({
   workspacePath: string;
 }) {
   return (
-      <SettingsSection
-        title={t("harness.memoryTitle")}
-        description={t("harness.memoryDescription")}
-      >
+      <SettingsSection title={t("harness.memoryTitle")}>
         <div className="space-y-3">
           <MemoryV2Panel key={workspacePath || "no-workspace"} t={t} workspacePath={workspacePath} />
 
           <SettingsPanelCard
             title={t("harness.memorySearch")}
             icon={
-              <BrainIcon size={16} className="text-accent-primary" />
+              <BrainIcon aria-hidden="true" size={16} className="text-accent-primary" />
             }
           >
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">

@@ -158,7 +158,7 @@ export function ComposerProfileControl({
         placeholder={t("composer.profile.unbound")}
         side="top"
         align="end"
-        triggerClassName="min-w-[7rem] max-w-[13rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
+        triggerClassName="min-w-[7rem] max-w-[13rem] rounded-[0.6rem] px-2 py-1 text-base leading-none normal-case tracking-normal"
         menuClassName="max-w-[16rem]"
         optionClassName="text-base"
       />

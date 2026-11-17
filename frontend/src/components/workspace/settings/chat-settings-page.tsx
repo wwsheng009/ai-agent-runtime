@@ -1,7 +1,7 @@
 import { BotIcon, RouteIcon } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -15,7 +15,6 @@ import { ApprovalExplainSettingsCard } from "./approval-explain-settings-card";
 import { SettingsChoiceCard } from "./settings-choice-card";
 import { editorControlClassName } from "./editor-control-class";
 import { SettingsFieldCard } from "./settings-field-card";
-import { SettingsInfoCard } from "./settings-info-card";
 import { SettingsPanelCard } from "./settings-panel-card";
 import { SettingsSection } from "./settings-section";
 import { SettingsToggleCard } from "./settings-toggle-card";
@@ -51,7 +50,6 @@ export function ChatSettingsPage({
   selectedProvider,
 }: ChatSettingsPageProps) {
   const { t } = useTranslation("settings");
-  const { t: tCommon } = useTranslation("common");
   const { settings, updateSection } = useAppSettings();
   const {
     error: backendMaxStepsError,
@@ -103,45 +101,36 @@ export function ChatSettingsPage({
   const reasoningOptions: Array<{
     value: ReasoningEffort;
     label: string;
-    description: string;
   }> = [
     {
       value: "",
       label: t("chat.reasoningOptions.default.label"),
-      description: t("chat.reasoningOptions.default.description"),
     },
     {
       value: "minimal",
       label: t("chat.reasoningOptions.minimal.label"),
-      description: t("chat.reasoningOptions.minimal.description"),
     },
     {
       value: "low",
       label: t("chat.reasoningOptions.low.label"),
-      description: t("chat.reasoningOptions.low.description"),
     },
     {
       value: "medium",
       label: t("chat.reasoningOptions.medium.label"),
-      description: t("chat.reasoningOptions.medium.description"),
     },
     {
       value: "high",
       label: t("chat.reasoningOptions.high.label"),
-      description: t("chat.reasoningOptions.high.description"),
     },
   ];
 
   return (
     <div className="space-y-6">
-      <SettingsSection
-        title={t("chat.title")}
-        description={t("chat.description")}
-      >
+      <SettingsSection title={t("chat.title")}>
         <div className="grid gap-3 md:grid-cols-2">
           <SettingsFieldCard
             title={t("chat.defaultProvider")}
-            icon={<BotIcon size={16} className="text-accent-primary" />}
+            icon={<BotIcon aria-hidden="true" size={16} className="text-accent-primary" />}
           >
             <Select
               ariaLabel={t("chat.defaultProvider")}
@@ -162,7 +151,7 @@ export function ChatSettingsPage({
 
           <SettingsFieldCard
             title={t("chat.defaultModel")}
-            icon={<RouteIcon size={16} className="text-accent-secondary" />}
+            icon={<RouteIcon aria-hidden="true" size={16} className="text-accent-secondary" />}
           >
             <Select
               ariaLabel={t("chat.defaultModel")}
@@ -182,20 +171,11 @@ export function ChatSettingsPage({
           </SettingsFieldCard>
         </div>
 
-        <SettingsInfoCard
-          size="compact"
-          description={
-            runtimeModelsError
-              ? runtimeModelsError
-              : runtimeModelsLoading
-                ? t("chat.summaryLoading")
-                : t("chat.summaryTemplate", {
-                    providerCount: String(providerOptions.length),
-                    provider: selectedProvider || tCommon("states.none"),
-                    model: selectedModel || tCommon("states.none"),
-                  })
-          }
-        />
+        {runtimeModelsError ? (
+          <p className="text-sm leading-6 text-accent-orange" role="alert">
+            {runtimeModelsError}
+          </p>
+        ) : null}
 
         <div className="flex flex-wrap items-center gap-2">
           <Link
@@ -213,10 +193,7 @@ export function ChatSettingsPage({
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("chat.executionMode")}
-        description={t("chat.executionModeDescription")}
-      >
+      <SettingsSection title={t("chat.executionMode")}>
         <SettingsToggleCard
           checked={settings.chat.enableReact}
           onChange={(checked) =>
@@ -225,35 +202,10 @@ export function ChatSettingsPage({
             })
           }
           title={t("chat.enableReact")}
-          description={
-            <Trans
-              t={t}
-              i18nKey="chat.enableReactDescription"
-              components={{ code: <code /> }}
-            />
-          }
-        />
-
-        <SettingsInfoCard
-          size="compact"
-          description={
-            <>
-              {t("chat.currentMode")}:{" "}
-              <span className="text-foreground">
-                {settings.chat.enableReact
-                  ? t("chat.reactMode")
-                  : t("chat.routeDirectMode")}
-              </span>
-              。
-            </>
-          }
         />
       </SettingsSection>
 
-      <SettingsSection
-        title={t("chat.reasoning")}
-        description={t("chat.reasoningDescription")}
-      >
+      <SettingsSection title={t("chat.reasoning")}>
         <div className="grid gap-2.5 lg:grid-cols-2">
           {reasoningOptions.map((option) => {
             const active = settings.chat.reasoningEffort === option.value;
@@ -269,19 +221,13 @@ export function ChatSettingsPage({
                 <div className="text-base font-semibold text-foreground">
                   {option.label}
                 </div>
-                <p className="mt-1.5 text-base leading-6 text-muted-foreground">
-                  {option.description}
-                </p>
               </SettingsChoiceCard>
             );
           })}
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("chat.maxSteps")}
-        description={t("chat.maxStepsDescription")}
-      >
+      <SettingsSection title={t("chat.maxSteps")}>
         <SettingsPanelCard>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
@@ -297,10 +243,6 @@ export function ChatSettingsPage({
               }
               className={cn(editorControlClassName, "sm:max-w-[10rem]")}
             />
-            <p className="text-sm leading-6 text-muted-foreground">
-              {t("chat.currentMaxSteps", { count: settings.chat.maxSteps })}{" "}
-              {t("chat.maxStepsAdvice")}
-            </p>
             <Button
               className="sm:ml-auto"
               disabled={savingMaxSteps}
@@ -313,9 +255,6 @@ export function ChatSettingsPage({
                 : t("chat.maxStepsSave")}
             </Button>
           </div>
-          <p className="mt-3 text-xs leading-6 text-muted-foreground">
-            {t("chat.maxStepsSaveHint")}
-          </p>
           {maxStepsStatus ? (
             <p
               className={cn(
@@ -334,7 +273,6 @@ export function ChatSettingsPage({
               {backendMaxSteps
                 ? t("chat.backendMaxStepsDefault", {
                     count: backendMaxSteps.maxSteps,
-                    path: backendMaxSteps.configFile,
                   })
                 : backendMaxStepsLoading
                   ? t("chat.backendMaxStepsLoading")

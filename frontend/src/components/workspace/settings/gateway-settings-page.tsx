@@ -97,10 +97,7 @@ export function GatewaySettingsPage() {
 
   return (
     <div className="space-y-6">
-      <SettingsSection
-        title={t("gateway.title")}
-        description={t("gateway.description")}
-      >
+      <SettingsSection title={t("gateway.title")}>
         {notConfigured ? (
           <p className="text-sm text-muted-foreground">
             {t("gateway.notConfigured")}
@@ -131,24 +128,21 @@ export function GatewaySettingsPage() {
 
         <div className="mt-4 flex flex-wrap gap-2">
           <Button type="button" disabled={disabled} onClick={() => void runAction(connectGateway)}>
-            <PlugZapIcon size={16} />
+            <PlugZapIcon aria-hidden="true" size={16} />
             {t("gateway.connect")}
           </Button>
           <Button type="button" disabled={disabled} onClick={() => void runAction(disconnectGateway)}>
-            <UnplugIcon size={16} />
+            <UnplugIcon aria-hidden="true" size={16} />
             {t("gateway.disconnect")}
           </Button>
           <Button type="button" disabled={disabled} onClick={() => void runAction(reconnectGateway)}>
-            <RefreshCwIcon size={16} />
+            <RefreshCwIcon aria-hidden="true" size={16} />
             {t("gateway.reconnect")}
           </Button>
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("gateway.configTitle")}
-        description={t("gateway.configDescription")}
-      >
+      <SettingsSection title={t("gateway.configTitle")}>
         <div className="space-y-3">
           <Field label={t("gateway.url")}>
             <Input
@@ -181,8 +175,7 @@ export function GatewaySettingsPage() {
             checked={autoConnect}
             onChange={setAutoConnect}
             title={t("gateway.autoConnect")}
-            description={t("gateway.autoConnectDescription")}
-            icon={<ServerIcon size={16} />}
+            icon={<ServerIcon aria-hidden="true" size={16} />}
           />
 
           <Button type="button" disabled={busy} onClick={() => void save()}>
@@ -196,7 +189,7 @@ export function GatewaySettingsPage() {
 
 function StatusRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-border/60 px-3 py-2">
+    <div className="flex items-center justify-between gap-3 rounded-field border border-border/60 px-3 py-2">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="truncate font-mono text-xs">{value}</dd>
     </div>

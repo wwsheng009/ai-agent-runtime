@@ -60,7 +60,6 @@ type SettingsDialogProps = {
 };
 
 type SettingsNavItem = {
-  description: string;
   icon: LucideIcon;
   id: SettingsSectionId;
   label: string;
@@ -112,43 +111,36 @@ export function SettingsDialog({
       {
         id: "appearance",
         label: t("sections.appearance.label"),
-        description: t("sections.appearance.description"),
         icon: PaletteIcon,
       },
       {
         id: "workspace",
         label: t("sections.workspace.label"),
-        description: t("sections.workspace.description"),
         icon: Settings2Icon,
       },
       {
         id: "chat",
         label: t("sections.chat.label"),
-        description: t("sections.chat.description"),
         icon: SlidersHorizontalIcon,
       },
       {
         id: "notifications",
         label: t("sections.notifications.label"),
-        description: t("sections.notifications.description"),
         icon: BellIcon,
       },
       {
         id: "harness",
         label: t("sections.harness.label"),
-        description: t("sections.harness.description"),
         icon: ShieldIcon,
       },
       {
         id: "gateway",
         label: t("sections.gateway.label"),
-        description: t("sections.gateway.description"),
         icon: NetworkIcon,
       },
       {
         id: "about",
         label: t("sections.about.label"),
-        description: t("sections.about.description"),
         icon: InfoIcon,
       },
     ],
@@ -162,19 +154,13 @@ export function SettingsDialog({
   return (
     <DialogOverlay className="z-[120] backdrop-blur-sm" onDismiss={onClose}>
       <DialogPanel className="max-w-6xl">
-        <div className="flex items-start justify-between gap-3 px-3.5 py-3 sm:px-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 px-3.5 py-3 sm:px-4">
           <div>
-            <div className="app-text-11 uppercase tracking-[0.16em] text-accent-primary">
-              {t("dialog.eyebrow")}
-            </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground">
+            <h2 className="text-lg font-semibold tracking-[-0.03em] text-foreground">
               {t("dialog.title")}
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {t("dialog.description")}
-            </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Link
               to="/runtime/config"
               className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
@@ -190,8 +176,9 @@ export function SettingsDialog({
               size="icon"
               onClick={onClose}
               aria-label={t("dialog.close")}
+              title={t("dialog.close")}
             >
-              <XIcon size={16} />
+              <XIcon aria-hidden="true" size={16} />
             </Button>
           </div>
         </div>
@@ -208,8 +195,9 @@ export function SettingsDialog({
                     key={section.id}
                     type="button"
                     onClick={() => setActiveSection(section.id)}
+                    aria-current={active ? "page" : undefined}
                     className={cn(
-                      "w-full rounded-card border px-3 py-2.5 text-left transition",
+                      "w-full rounded-card border px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       active
                         ? "border-accent-primary-border bg-accent-primary-soft"
                         : "border-transparent bg-transparent hover:border-border hover:bg-surface-softer",
@@ -224,15 +212,10 @@ export function SettingsDialog({
                             : "border-border bg-surface-solid text-muted-foreground",
                         )}
                       >
-                        <Icon size={15} />
+                        <Icon aria-hidden="true" size={15} />
                       </span>
-                      <div className="min-w-0">
-                        <div className="text-base font-semibold text-foreground">
-                          {section.label}
-                        </div>
-                        <div className="mt-0.5 text-xs leading-5 text-muted-foreground">
-                          {section.description}
-                        </div>
+                      <div className="min-w-0 text-sm font-semibold text-foreground">
+                        {section.label}
                       </div>
                     </div>
                   </button>
@@ -276,9 +259,6 @@ export function SettingsDialog({
           </div>
         </div>
 
-        <div className="border-t border-border px-3.5 py-2.5 text-xs leading-5 text-muted-foreground sm:px-4">
-          {t("dialog.localStorageFooter")}
-        </div>
       </DialogPanel>
     </DialogOverlay>
   );

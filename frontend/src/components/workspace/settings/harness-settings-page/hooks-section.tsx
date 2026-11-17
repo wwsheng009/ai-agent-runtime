@@ -30,10 +30,7 @@ export function HarnessHooksSection({
   t: TFunction<"settings">;
 }) {
   return (
-    <SettingsSection
-      title={t("harness.hooksTitle")}
-      description={t("harness.hooksDescription")}
-    >
+    <SettingsSection title={t("harness.hooksTitle")}>
       {(warnings.length > 0 || sources.length > 0) && (
         <div className="mb-3 space-y-1 text-xs text-muted-foreground">
           {sources.length > 0 ? (
@@ -54,7 +51,7 @@ export function HarnessHooksSection({
             <SettingsPanelCard
               key={hook.id}
               title={hook.event}
-              icon={<WebhookIcon size={16} className="text-accent-secondary" />}
+              icon={<WebhookIcon aria-hidden="true" size={16} className="text-accent-secondary" />}
               description={hook.matcher || t("harness.hookNoMatcher")}
               headerAside={
                 <div className="flex flex-wrap gap-2">

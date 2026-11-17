@@ -18,21 +18,16 @@ export function WorkspaceSettingsPage() {
     {
       id: "comfortable",
       label: t("workspace.densityOptions.comfortable.label"),
-      description: t("workspace.densityOptions.comfortable.description"),
     },
     {
       id: "compact",
       label: t("workspace.densityOptions.compact.label"),
-      description: t("workspace.densityOptions.compact.description"),
     },
   ] as const;
 
   return (
     <div className="space-y-6">
-      <SettingsSection
-        title={t("workspace.density")}
-        description={t("workspace.densityDescription")}
-      >
+      <SettingsSection title={t("workspace.density")}>
         <div className="grid gap-3 md:grid-cols-2">
           {densityOptions.map((option) => {
             const active = settings.workspace.density === option.id;
@@ -47,25 +42,19 @@ export function WorkspaceSettingsPage() {
               >
                 <div className="flex items-center gap-3">
                   <PanelIcon>
-                    <Rows4Icon size={16} />
+                    <Rows4Icon aria-hidden="true" size={16} />
                   </PanelIcon>
                   <div className="text-base font-semibold text-foreground">
                     {option.label}
                   </div>
                 </div>
-                <p className="mt-2 text-base leading-6 text-muted-foreground">
-                  {option.description}
-                </p>
               </SettingsChoiceCard>
             );
           })}
         </div>
       </SettingsSection>
 
-      <SettingsSection
-        title={t("workspace.fileBar")}
-        description={t("workspace.fileBarDescription")}
-      >
+      <SettingsSection title={t("workspace.fileBar")}>
         <SettingsToggleCard
           checked={settings.workspace.autoOpenArtifacts}
           onChange={(checked) =>
@@ -74,8 +63,7 @@ export function WorkspaceSettingsPage() {
             })
           }
           title={t("workspace.autoOpenArtifacts")}
-          description={t("workspace.autoOpenArtifactsDescription")}
-          icon={<PanelRightOpenIcon size={16} />}
+          icon={<PanelRightOpenIcon aria-hidden="true" size={16} />}
           iconWrapperClassName="text-accent-secondary"
         />
       </SettingsSection>

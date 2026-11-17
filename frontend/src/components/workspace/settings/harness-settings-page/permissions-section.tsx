@@ -27,16 +27,14 @@ export function HarnessPermissionsSection({
   workspacePath: string;
 }) {
   return (
-      <SettingsSection
-        title={t("harness.permissionsTitle")}
-        description={t("harness.permissionsDescription")}
-      >
+      <SettingsSection title={t("harness.permissionsTitle")}>
         <div className="space-y-3">
           <SettingsInfoCard
             tone="softer"
             title={t("harness.permissionsFile")}
             icon={
               <ShieldCheckIcon
+                aria-hidden="true"
                 size={16}
                 className="text-accent-secondary"
               />

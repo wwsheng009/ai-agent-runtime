@@ -27,18 +27,12 @@ export function AppearanceFontFamilySection({
   updateSection: UpdateSettingsSection;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.fontFamily")}
-        description={t("appearance.fontFamilyDescription")}
-      >
+      <SettingsSection title={t("appearance.fontFamily")}>
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="space-y-4">
             <div>
               <div className="text-sm font-semibold text-foreground">
                 {t("appearance.bodyFont")}
-              </div>
-              <div className="mt-1 text-sm leading-6 text-muted-foreground">
-                {t("appearance.bodyFontDescription")}
               </div>
             </div>
             <div className="grid gap-3">
@@ -62,9 +56,6 @@ export function AppearanceFontFamilySection({
             <div>
               <div className="text-sm font-semibold text-foreground">
                 {t("appearance.codeFont")}
-              </div>
-              <div className="mt-1 text-sm leading-6 text-muted-foreground">
-                {t("appearance.codeFontDescription")}
               </div>
             </div>
             <div className="grid gap-3">

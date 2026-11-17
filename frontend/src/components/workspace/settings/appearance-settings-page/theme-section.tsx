@@ -10,7 +10,6 @@ import {
 import { cn } from "@/lib/utils";
 
 import { SettingsChoiceCard } from "../settings-choice-card";
-import { SettingsInfoCard } from "../settings-info-card";
 import { SettingsSection } from "../settings-section";
 import { type ThemeOption } from "./options";
 
@@ -19,21 +18,16 @@ export function AppearanceThemeSection({
   systemTheme,
   t,
   themeOptions,
-  themeValueLabel,
   updateSection,
 }: {
   settings: AppSettings;
   systemTheme: ResolvedTheme;
   t: TFunction<"settings">;
   themeOptions: readonly ThemeOption[];
-  themeValueLabel: string;
   updateSection: UpdateSettingsSection;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.theme")}
-        description={t("appearance.themeDescription")}
-      >
+      <SettingsSection title={t("appearance.theme")}>
         <div className="grid gap-3 lg:grid-cols-3">
           {themeOptions.map((option) => {
             const active = settings.appearance.themeMode === option.id;
@@ -52,11 +46,9 @@ export function AppearanceThemeSection({
                     <div className="text-base font-semibold text-foreground">
                       {option.label}
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                      {option.description}
-                    </p>
                   </div>
                   <Icon
+                    aria-hidden="true"
                     size={16}
                     className={cn(
                       active
@@ -93,19 +85,6 @@ export function AppearanceThemeSection({
             );
           })}
         </div>
-
-      <SettingsInfoCard
-        className="p-3"
-        description={
-          <>
-              {t("appearance.currentlySetTo")}{" "}
-              <span className="text-foreground">
-                {themeValueLabel}
-              </span>
-              。
-          </>
-          }
-        />
       </SettingsSection>
   );
 }

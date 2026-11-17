@@ -30,14 +30,12 @@ export function HarnessWorkspaceSection({
   workspacePath: string;
 }) {
   return (
-      <SettingsSection
-        title={t("harness.title")}
-        description={t("harness.description")}
-      >
+      <SettingsSection title={t("harness.title")}>
         <SettingsPanelCard
           title={t("harness.workspaceTitle")}
           icon={
             <FolderLockIcon
+              aria-hidden="true"
               size={16}
               className="text-accent-primary"
             />
@@ -57,7 +55,7 @@ export function HarnessWorkspaceSection({
                   void reload();
                 }}
               >
-                <RefreshCwIcon size={14} />
+                <RefreshCwIcon aria-hidden="true" size={14} />
                 {t("harness.refresh")}
               </Button>
             </div>

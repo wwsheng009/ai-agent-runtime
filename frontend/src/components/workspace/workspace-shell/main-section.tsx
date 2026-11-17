@@ -435,7 +435,6 @@ export function WorkspaceMainSection({
                     reasoningEffortOptions={reasoningEffortOptions}
                     referenceGroups={composerReferenceGroups}
                     skillGroups={composerSkillGroups}
-                    selectedArtifactCount={selectedThread.artifacts.length}
                     onModelChange={onModelChange}
                     onProviderChange={onProviderChange}
                     onReasoningEffortChange={onReasoningEffortChange}

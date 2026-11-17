@@ -13,7 +13,6 @@ type ComposerStatusRowProps = {
   rejectedAttachmentCount: number;
   onAcknowledgeRejections: () => void;
   isResponding: boolean;
-  selectedArtifactCount: number;
   /** P1-4 子片 3：命令行状态（`/` 命令被识别但尚未提交）。 */
   isCommandLine: boolean;
   /** 命令被阻塞时的可见原因（提示条本体由 composer 渲染，这里只保证状态条占位一致）。 */
@@ -29,7 +28,6 @@ export function ComposerStatusRow({
   rejectedAttachmentCount,
   onAcknowledgeRejections,
   isResponding,
-  selectedArtifactCount,
   isCommandLine,
   hasCommandNotice,
   transport,
@@ -38,7 +36,6 @@ export function ComposerStatusRow({
   const hasAttachments = uploadedAttachmentCount > 0 || unsettledAttachmentCount > 0;
   const visible =
     transport === "error" ||
-    selectedArtifactCount > 0 ||
     isResponding ||
     hasAttachments ||
     rejectedAttachmentCount > 0 ||
@@ -56,9 +53,6 @@ export function ComposerStatusRow({
     >
       {transport === "error" ? (
         <span className="text-[#d8a66d]">{t("composer.transport.error")}</span>
-      ) : null}
-      {selectedArtifactCount > 0 ? (
-        <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
       ) : null}
       {isResponding ? (
         <span className="text-accent-secondary">

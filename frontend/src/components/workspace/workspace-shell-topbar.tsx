@@ -169,7 +169,7 @@ export function WorkspaceShellTopbar({
           aria-label={t("topbar.openSidebar")}
           title={t("topbar.openSidebar")}
         >
-          <PanelLeftOpenIcon size={16} />
+          <PanelLeftOpenIcon aria-hidden="true" size={16} />
         </Button>
         {!isNewThread ? (
           <Link
@@ -181,7 +181,7 @@ export function WorkspaceShellTopbar({
             aria-label={t("topbar.newChat")}
             title={t("topbar.newChat")}
           >
-            <MessageSquarePlusIcon size={15} />
+            <MessageSquarePlusIcon aria-hidden="true" size={15} />
           </Link>
         ) : null}
         <div
@@ -277,22 +277,25 @@ export function WorkspaceShellTopbar({
         ) : null}
         <Link
           to="/logs"
-          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "icon" }),
+            "hidden shrink-0 sm:inline-flex",
+          )}
           aria-label={t("topbar.logs")}
           title={t("topbar.logs")}
         >
-          <TerminalSquareIcon size={16} />
+          <TerminalSquareIcon aria-hidden="true" size={16} />
         </Link>
         {onOpenJobs && !isNewThread ? (
           <Button
             variant="ghost"
             size="sm"
-            className="shrink-0"
+            className="hidden shrink-0 sm:inline-flex"
             onClick={onOpenJobs}
             aria-label={t("topbar.jobs")}
             title={t("topbar.jobs")}
           >
-            <ListChecksIcon size={16} />
+            <ListChecksIcon aria-hidden="true" size={16} />
           </Button>
         ) : null}
         {onOpenJobs && !isNewThread && liveJobsCount > 0 ? (
@@ -310,13 +313,13 @@ export function WorkspaceShellTopbar({
           <Button
             variant="ghost"
             size="sm"
-            className="shrink-0 gap-1"
+            className="hidden shrink-0 gap-1 sm:inline-flex"
             onClick={onOpenAgents}
             aria-label={t("topbar.agents")}
             data-testid="topbar-agents"
             title={t("topbar.agents")}
           >
-            <NetworkIcon size={16} />
+            <NetworkIcon aria-hidden="true" size={16} />
             {agentDescendantCount > 0 ? (
               <span className="app-text-10">{agentDescendantCount}</span>
             ) : null}
@@ -324,19 +327,25 @@ export function WorkspaceShellTopbar({
         ) : null}
         <Link
           to="/usage"
-          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "icon" }),
+            "hidden shrink-0 md:inline-flex",
+          )}
           aria-label={t("topbar.usage")}
           title={t("topbar.usage")}
         >
-          <ChartNoAxesCombinedIcon size={16} />
+          <ChartNoAxesCombinedIcon aria-hidden="true" size={16} />
         </Link>
         <Link
           to="/runtime/config"
-          className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "icon" }),
+            "hidden shrink-0 md:inline-flex",
+          )}
           aria-label={t("topbar.runtime")}
           title={t("topbar.runtime")}
         >
-          <DatabaseIcon size={16} />
+          <DatabaseIcon aria-hidden="true" size={16} />
         </Link>
         <Button
           variant="ghost"
@@ -346,13 +355,13 @@ export function WorkspaceShellTopbar({
           aria-label={t("topbar.settings")}
           title={t("topbar.settings")}
         >
-          <Settings2Icon size={16} />
+          <Settings2Icon aria-hidden="true" size={16} />
         </Button>
         {!isNewThread ? (
           <Button
             variant="ghost"
             size="sm"
-            className="shrink-0"
+            className="hidden shrink-0 md:inline-flex"
             aria-pressed={rightRailOpen}
             data-testid="topbar-toggle-right-rail"
             onClick={onToggleRightRail}
@@ -360,9 +369,9 @@ export function WorkspaceShellTopbar({
             title={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
           >
             {rightRailOpen ? (
-              <PanelRightCloseIcon size={16} />
+              <PanelRightCloseIcon aria-hidden="true" size={16} />
             ) : (
-              <PanelRightOpenIcon size={16} />
+              <PanelRightOpenIcon aria-hidden="true" size={16} />
             )}
           </Button>
         ) : null}

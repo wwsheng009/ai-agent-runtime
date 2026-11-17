@@ -477,6 +477,7 @@ export function ComposerModelPanel({
           className={cn(
             "inline-flex min-w-0 max-w-[22rem] items-center gap-1.5 rounded-[0.6rem] border border-border",
             "bg-surface-soft px-2 py-1 text-left text-base leading-none text-muted-foreground outline-none transition",
+            "normal-case tracking-normal",
             "hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
             "disabled:cursor-not-allowed disabled:opacity-60",
           )}

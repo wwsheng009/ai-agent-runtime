@@ -48,7 +48,6 @@ export function RailWidthSection() {
 
   return (
     <SettingsPanelCard
-      description={t("panels.shell.rightRail.widthDescription")}
       headerAside={
         <div
           className="rounded-control border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground"
@@ -62,7 +61,7 @@ export function RailWidthSection() {
               )}`}
         </div>
       }
-      icon={<SlidersHorizontalIcon size={16} />}
+      icon={<SlidersHorizontalIcon aria-hidden="true" size={16} />}
       title={
         <span className="text-base">
           {t("panels.shell.rightRail.widthLabel")}
@@ -91,7 +90,7 @@ export function RailWidthSection() {
         <button
           type="button"
           className={cn(
-            "inline-flex h-9 shrink-0 items-center justify-center rounded-field border px-3 text-base transition",
+            "inline-flex h-9 shrink-0 items-center justify-center rounded-field border px-3 text-base outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
             isAuto ? resetDisabledClass : resetEnabledClass,
           )}
           data-testid="rail-width-reset-auto"
@@ -103,9 +102,6 @@ export function RailWidthSection() {
           {t("panels.shell.rightRail.resetAuto")}
         </button>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        {t("panels.shell.rightRail.resetAutoHint")}
-      </p>
     </SettingsPanelCard>
   );
 }

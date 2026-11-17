@@ -76,6 +76,7 @@ export function WorkspaceSidebarHeader({
           <Button
             variant="ghost"
             size="icon"
+            data-sidebar-close
             className="xl:hidden"
             onClick={onCloseMobile}
             aria-label={t("sidebar.closeNavigation")}

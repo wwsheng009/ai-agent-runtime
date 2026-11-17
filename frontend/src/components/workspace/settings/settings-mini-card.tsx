@@ -25,7 +25,7 @@ export function SettingsMiniCard({
 }: SettingsMiniCardProps) {
   return (
     <SettingsPanelCard
-      className={className ?? "rounded-[0.75rem] p-3"}
+      className={className ?? "rounded-card p-3"}
       title={title}
       icon={icon}
       description={description}

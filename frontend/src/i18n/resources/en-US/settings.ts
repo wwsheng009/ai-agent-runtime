@@ -4,44 +4,32 @@ import type { zhSettings } from "../zh-CN/settings";
 
 export const enSettings = {
   dialog: {
-    eyebrow: "Workspace settings",
-    title: "Frontend workspace settings",
-    description:
-      "This panel only stores local frontend preferences. Backend config.yaml has moved to the dedicated Runtime Config page.",
+    title: "Settings",
     backendConfig: "Backend config",
     resetFrontendDefaults: "Reset frontend defaults",
     close: "Close settings",
-    localStorageFooter:
-      "Frontend settings are written to the current browser localStorage immediately. Use the Runtime Config page for backend configuration. Open this panel again with Ctrl/Cmd + ,.",
   },
   sections: {
     appearance: {
       label: "Appearance",
-      description: "Accent, theme, fonts, and motion",
     },
     workspace: {
       label: "Workspace",
-      description: "Layout and file bar behavior",
     },
     chat: {
       label: "Chat defaults",
-      description: "Provider, model, and reasoning effort",
     },
     notifications: {
       label: "Notifications",
-      description: "Desktop alerts and permissions",
     },
     harness: {
       label: "Harness",
-      description: "Permissions, memory, and local plugins",
     },
     gateway: {
       label: "Gateway",
-      description: "External session gateway connection",
     },
     about: {
       label: "About",
-      description: "Runtime summary and local storage",
     },
   },
   gateway: {
@@ -165,6 +153,8 @@ export const enSettings = {
     sizeDescription:
       "Controls the base rhythm of the entire site; chat and code sizes override their own high-frequency reading areas.",
     sizeHint: "You can type an exact size directly, in the range {{min}}-{{max}}px.",
+    decreaseFontSize: "Decrease font size",
+    increaseFontSize: "Increase font size",
     customPixels: "Custom pixel value",
     customPixelsUnit: "px",
     restoreDefaultWithValue: "Restore default {{value}}",
@@ -277,8 +267,7 @@ export const enSettings = {
     maxStepsSaved: "Saved: max steps {{count}}, written to {{path}}.",
     maxStepsSaveFailed: "Save failed: {{message}}",
     backendMaxStepsLoading: "Loading the backend default…",
-    backendMaxStepsDefault:
-      "Backend default: {{count}} (used when a request omits max_steps; source {{path}}).",
+    backendMaxStepsDefault: "Backend default: {{count}}",
     backendMaxStepsUnavailable:
       "Could not load the backend default: {{message}}",
     backendMaxStepsAdopt: "Use backend default",
@@ -329,6 +318,7 @@ export const enSettings = {
     desktopDescription:
       "If turned off, no desktop notification will appear even when browser permission is granted.",
     permission: "Permission status",
+    browserPermission: "Browser permission",
     permissionDescription: "Browser permission is required. It will not interrupt you while the page is visible.",
     permissionStates: {
       granted: "Granted. Background completion or error notifications can appear.",

@@ -11,7 +11,6 @@ import { SettingsPanelCard } from "../settings-panel-card";
 
 type FontSizeControlCardProps = {
   defaultValue: number;
-  description: string;
   title: string;
   value: number;
   onChange: (nextValue: number) => void;
@@ -26,7 +25,6 @@ function clampFontSizeValue(value: number) {
 
 export function FontSizeControlCard({
   defaultValue,
-  description,
   title,
   value,
   onChange,
@@ -43,8 +41,6 @@ export function FontSizeControlCard({
   return (
     <SettingsPanelCard
       title={<span className="text-base">{title}</span>}
-      description={description}
-      descriptionClassName="text-base"
       headerAside={
         <div className="rounded-control border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground">
           {formatFontSizePx(value)}
@@ -54,19 +50,21 @@ export function FontSizeControlCard({
     >
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
         <button
+          aria-label={t("appearance.decreaseFontSize")}
           type="button"
           disabled={decrementDisabled}
           onClick={() => updateValue(value - FONT_SIZE_LIMITS.step)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-field border transition",
+            "inline-flex h-9 w-9 items-center justify-center rounded-field border outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
             decrementDisabled
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
           )}
         >
-          <MinusIcon size={16} />
+          <MinusIcon aria-hidden="true" size={16} />
         </button>
         <input
+          aria-label={title}
           type="range"
           min={FONT_SIZE_LIMITS.min}
           max={FONT_SIZE_LIMITS.max}
@@ -76,17 +74,18 @@ export function FontSizeControlCard({
           className="h-2 w-full accent-accent-primary"
         />
         <button
+          aria-label={t("appearance.increaseFontSize")}
           type="button"
           disabled={incrementDisabled}
           onClick={() => updateValue(value + FONT_SIZE_LIMITS.step)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-field border transition",
+            "inline-flex h-9 w-9 items-center justify-center rounded-field border outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
             incrementDisabled
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
           )}
         >
-          <PlusIcon size={16} />
+          <PlusIcon aria-hidden="true" size={16} />
         </button>
       </div>
 
@@ -121,7 +120,7 @@ export function FontSizeControlCard({
           onClick={() => updateValue(defaultValue)}
           disabled={value === defaultValue}
           className={cn(
-            "rounded-field border px-3 py-2 text-base transition",
+            "rounded-field border px-3 py-2 text-base outline-none transition focus-visible:ring-2 focus-visible:ring-ring",
             value === defaultValue
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",

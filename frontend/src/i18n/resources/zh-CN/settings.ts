@@ -2,44 +2,32 @@
 
 export const zhSettings = {
   dialog: {
-    eyebrow: "Workspace settings",
-    title: "前端工作区设置",
-    description:
-      "这里只保留前端本地设置。后端 config.yaml 已迁移到独立的 Runtime Config 页面，避免和前端配置混在同一个对话框里。",
+    title: "设置",
     backendConfig: "后端配置页",
     resetFrontendDefaults: "恢复前端默认",
     close: "关闭设置",
-    localStorageFooter:
-      "前端设置会立即写入当前浏览器的 localStorage。后端配置请使用独立的 Runtime Config 页面。工作区中可用 Ctrl/Cmd + , 快速再次打开此面板。",
   },
   sections: {
     appearance: {
       label: "外观",
-      description: "强调色、主题、字体与动效",
     },
     workspace: {
       label: "工作区",
-      description: "布局与文件栏行为",
     },
     chat: {
       label: "聊天默认值",
-      description: "provider、model、推理强度",
     },
     notifications: {
       label: "通知",
-      description: "桌面提醒与权限",
     },
     harness: {
       label: "Harness",
-      description: "权限、记忆与本地插件",
     },
     gateway: {
       label: "网关",
-      description: "外网会话网关连接",
     },
     about: {
       label: "关于",
-      description: "运行时摘要与本地存储",
     },
   },
   gateway: {
@@ -161,6 +149,8 @@ export const zhSettings = {
     sizeDescription:
       "整体字号控制全站基础文字节奏；聊天和代码字号会覆盖各自的高频阅读区域。",
     sizeHint: "支持直接输入具体字号，范围 {{min}}-{{max}}px。",
+    decreaseFontSize: "减小字号",
+    increaseFontSize: "增大字号",
     customPixels: "自定义像素值",
     customPixelsUnit: "px",
     restoreDefaultWithValue: "恢复默认 {{value}}",
@@ -272,8 +262,7 @@ export const zhSettings = {
     maxStepsSaved: "已保存：最大步骤数 {{count}}，写入 {{path}}。",
     maxStepsSaveFailed: "保存失败：{{message}}",
     backendMaxStepsLoading: "正在读取后端缺省值…",
-    backendMaxStepsDefault:
-      "后端缺省：{{count}}（请求未携带 max_steps 时生效；来源 {{path}}）。",
+    backendMaxStepsDefault: "后端缺省：{{count}}",
     backendMaxStepsUnavailable: "未能读取后端缺省值：{{message}}",
     backendMaxStepsAdopt: "采用后端缺省",
     backendMaxStepsClamped:
@@ -322,6 +311,7 @@ export const zhSettings = {
     desktopDescription:
       "关闭后，即便浏览器权限已授权，也不会弹出桌面提醒。",
     permission: "权限状态",
+    browserPermission: "浏览器权限",
     permissionDescription: "需要浏览器授权。若当前页面可见，则不会打断你。",
     permissionStates: {
       granted: "已授权，可以在后台收到完成或错误通知。",

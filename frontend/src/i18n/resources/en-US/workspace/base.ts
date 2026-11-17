@@ -510,7 +510,6 @@ export const enWorkspaceBase = {
     shortcuts: "Ctrl/Cmd + Enter",
     stop: "stop",
     submitShort: "submit",
-    filesCount: "{{count}} files",
     attachments: {
       attach: "add attachments",
       remove: "remove {{name}}",

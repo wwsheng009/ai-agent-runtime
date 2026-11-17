@@ -32,10 +32,7 @@ export function HarnessPluginsSection({
   ) => Promise<void>;
 }) {
   return (
-      <SettingsSection
-        title={t("harness.pluginsTitle")}
-        description={t("harness.pluginsDescription")}
-      >
+      <SettingsSection title={t("harness.pluginsTitle")}>
         {plugins.length > 0 ? (
           <div className="space-y-2">
             {plugins.map((plugin) => (
@@ -44,6 +41,7 @@ export function HarnessPluginsSection({
                 title={plugin.name || plugin.id}
                 icon={
                   <PlugIcon
+                    aria-hidden="true"
                     size={16}
                     className="text-accent-secondary"
                   />

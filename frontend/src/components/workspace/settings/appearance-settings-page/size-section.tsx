@@ -23,14 +23,10 @@ export function AppearanceSizeSection({
   updateSection: UpdateSettingsSection;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.size")}
-        description={t("appearance.sizeDescription")}
-      >
+      <SettingsSection title={t("appearance.size")}>
         <div className="grid gap-4 xl:grid-cols-3">
           <FontSizeControlCard
             title={t("appearance.workspaceSample")}
-            description={t("appearance.sizeDescription")}
             defaultValue={APP_FONT_SIZE_DEFAULT}
             value={settings.appearance.textSize}
             onChange={(nextValue) =>
@@ -39,7 +35,6 @@ export function AppearanceSizeSection({
           />
           <FontSizeControlCard
             title={t("appearance.chatSample")}
-            description={t("appearance.sizeDescription")}
             defaultValue={CHAT_FONT_SIZE_DEFAULT}
             value={settings.appearance.chatTextSize}
             onChange={(nextValue) =>
@@ -48,7 +43,6 @@ export function AppearanceSizeSection({
           />
           <FontSizeControlCard
             title={t("appearance.codeSample")}
-            description={t("appearance.sizeDescription")}
             defaultValue={CODE_FONT_SIZE_DEFAULT}
             value={settings.appearance.codeTextSize}
             onChange={(nextValue) =>

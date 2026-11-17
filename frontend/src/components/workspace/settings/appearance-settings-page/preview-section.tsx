@@ -8,25 +8,17 @@ import { SettingsInfoCard } from "../settings-info-card";
 import { SettingsSection } from "../settings-section";
 
 export function AppearancePreviewSection({
-  currentCodeFontStack,
-  currentFontStack,
   settings,
   t,
 }: {
-  currentCodeFontStack: string;
-  currentFontStack: { sans: string; serif: string };
   settings: AppSettings;
   t: TFunction<"settings">;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.preview")}
-        description={t("appearance.previewDescription")}
-      >
+      <SettingsSection title={t("appearance.preview")}>
         <div className="grid gap-4 xl:grid-cols-2">
           <SettingsInfoCard
             title={t("appearance.workspaceSample")}
-            description={t("appearance.previewSampleText")}
             className="font-sans"
             contentClassName="space-y-3"
           >
@@ -43,7 +35,6 @@ export function AppearancePreviewSection({
           </SettingsInfoCard>
           <SettingsInfoCard
             title={t("appearance.codeSample")}
-            description={t("appearance.currentCodeStack")}
             contentClassName="space-y-3"
           >
             <div
@@ -52,17 +43,6 @@ export function AppearancePreviewSection({
             >
               <div className="whitespace-pre-wrap leading-6 text-foreground">
                 {`const workspace = await runtime.openThread("new");\nawait workspace.ask("Summarize the failing trace and propose a fix.");\nreturn workspace.receipts.latest();`}
-              </div>
-            </div>
-            <div className="grid gap-2 text-sm leading-6 text-muted-foreground">
-              <div>
-                {t("appearance.currentUIStack")} {currentFontStack.sans}
-              </div>
-              <div>
-                {t("appearance.currentSerifStack")} {currentFontStack.serif}
-              </div>
-              <div>
-                {t("appearance.currentCodeStack")} {currentCodeFontStack}
               </div>
             </div>
           </SettingsInfoCard>

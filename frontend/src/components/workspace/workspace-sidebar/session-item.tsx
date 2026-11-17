@@ -264,7 +264,7 @@ export function SidebarSessionItem({
               // 让位条件与菜单槽显示条件对齐（无菜单时不隐藏时间）：hover 整行，
               // 或键盘焦点落在菜单槽内。不用 `group-focus-within`：点击行后按钮保留焦点会误藏时间。
               showMenu &&
-                "group-hover/session:opacity-0 group-has-[.session-row-actions:focus-within]/session:opacity-0",
+                "group-hover/session:opacity-0 group-has-[.session-row-actions:focus-within]/session:opacity-0 [@media(hover:none)]:opacity-0",
             )}
             data-testid="session-row-time"
           >
@@ -278,7 +278,7 @@ export function SidebarSessionItem({
           的按钮压住、菜单项点不到。 */}
       <div
         className={cn(
-          "session-row-actions absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition",
+          "session-row-actions absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition [@media(hover:none)]:opacity-100",
           // 与时间同槽互换：hover 整行、或键盘焦点落在本槽（图标 / 菜单项）时图标显现。
           showMenu &&
             "group-hover/session:opacity-100 focus-within:opacity-100",

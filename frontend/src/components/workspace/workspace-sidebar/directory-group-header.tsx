@@ -120,7 +120,7 @@ export function WorkspaceSidebarDirectoryGroupHeader({
       */}
       <div
         data-testid="sidebar-directory-actions-slot"
-        className="flex min-w-5 shrink-0 items-center justify-end gap-0.5 opacity-0 transition group-hover/directory-row:opacity-100 focus-within:opacity-100"
+        className="flex min-w-5 shrink-0 items-center justify-end gap-0.5 opacity-0 transition group-hover/directory-row:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
       >
         {actions}
       </div>

@@ -15,7 +15,7 @@ export function SettingsAddButton({
 }: SettingsAddButtonProps) {
   return (
     <Button {...props}>
-      <PlusIcon size={iconSize} />
+      <PlusIcon aria-hidden="true" size={iconSize} />
       {label}
     </Button>
   );

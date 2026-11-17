@@ -18,10 +18,7 @@ export function AppearanceMotionSection({
   updateSection: UpdateSettingsSection;
 }) {
   return (
-      <SettingsSection
-        title={t("appearance.motion")}
-        description={t("appearance.motionDescription")}
-      >
+      <SettingsSection title={t("appearance.motion")}>
         <SettingsToggleCard
           checked={settings.appearance.reducedMotion}
           onChange={(checked) =>
@@ -31,7 +28,7 @@ export function AppearanceMotionSection({
           }
           title={t("appearance.reducedMotion")}
           description={t("appearance.reducedMotionDescription")}
-          icon={<WavesIcon size={16} />}
+          icon={<WavesIcon aria-hidden="true" size={16} />}
           iconWrapperClassName="text-accent-secondary"
         />
       </SettingsSection>

@@ -79,7 +79,6 @@ type MessageComposerProps = {
   referenceGroups?: readonly ComposerReferenceGroup[];
   /** 文本类 skill 的 `$` 提及候选分组（运行时技能目录）。 */
   skillGroups?: readonly ComposerReferenceGroup[];
-  selectedArtifactCount: number;
   selectedModel: string;
   selectedProvider: string;
   selectedReasoningEffort: string;
@@ -124,7 +123,6 @@ export function MessageComposer({
   runtimeModelsLoading,
   referenceGroups = NO_REFERENCE_GROUPS,
   skillGroups = NO_REFERENCE_GROUPS,
-  selectedArtifactCount,
   selectedModel,
   selectedProvider,
   selectedReasoningEffort,
@@ -280,7 +278,6 @@ export function MessageComposer({
         isResponding={isResponding}
         onAcknowledgeRejections={attachments.acknowledgeRejections}
         rejectedAttachmentCount={attachments.rejectedCount}
-        selectedArtifactCount={selectedArtifactCount}
         transport={transport}
         unsettledAttachmentCount={attachments.unsettledCount}
         uploadedAttachmentCount={attachments.uploadedCount}

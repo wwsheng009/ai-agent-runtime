@@ -1,6 +1,6 @@
 // 由 P0-2 第 3 批第 29 项拆分：入口保留状态/派生/副作用与四段侧栏装配，渲染块下沉到 workspace-sidebar/。
 
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { SessionSearchDialog } from "@/components/workspace/session-search-dialog";
 import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
 import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
@@ -71,6 +71,7 @@ export function WorkspaceSidebar({
 }: WorkspaceSidebarProps) {
   const { t } = useTranslation("workspace");
   const isCompact = density === "compact";
+  const asideRef = useRef<HTMLElement | null>(null);
   const [query, setQuery] = useState("");
   const [runtimeTeamsDialogOpen, setRuntimeTeamsDialogOpen] = useState(false);
   /** P2-1A：服务端会话元数据检索弹层（与本地标题过滤并存）。 */
@@ -235,6 +236,68 @@ export function WorkspaceSidebar({
     setOpenSessionDirectories,
   });
 
+  useEffect(() => {
+    if (!mobileOpen) {
+      return;
+    }
+    const node = asideRef.current;
+    if (!node) {
+      return;
+    }
+
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const focusableSelector = [
+      "button:not([disabled])",
+      "a[href]",
+      "input:not([disabled])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      "[tabindex]:not([tabindex='-1'])",
+    ].join(",");
+    const getFocusable = () =>
+      Array.from(node.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+        (element) =>
+          element.getClientRects().length > 0 &&
+          element.getAttribute("aria-hidden") !== "true",
+      );
+    const closeButton =
+      node.querySelector<HTMLElement>("[data-sidebar-close]") ??
+      getFocusable()[0];
+    const focusFrame = requestAnimationFrame(() => closeButton?.focus());
+
+    const handleTab = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    node.addEventListener("keydown", handleTab);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      node.removeEventListener("keydown", handleTab);
+      if (previousFocus?.isConnected) {
+        previousFocus.focus();
+      }
+    };
+  }, [mobileOpen]);
+
   function toggleSection(section: SidebarSectionId) {
     setOpenSections((current) => ({
       ...current,
@@ -289,6 +352,7 @@ export function WorkspaceSidebar({
         />
       ) : null}
       <aside
+        ref={asideRef}
         role={mobileOpen ? "dialog" : "navigation"}
         aria-modal={mobileOpen ? "true" : undefined}
         aria-label={t("sidebar.navigation")}

@@ -18,16 +18,10 @@ export function LocalizationSettings() {
         <div className="app-text-13 font-semibold text-foreground">
           {t("localization.title")}
         </div>
-        <p className="mt-1 text-sm leading-6 text-muted-foreground">
-          {t("localization.description")}
-        </p>
       </div>
       <div className="flex items-end gap-3">
         <div className="min-w-0 flex-1">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-            {t("localization.title")}
-          </div>
-          <div className="mt-2">
+          <div>
             <Select
               ariaLabel={t("localization.title")}
               value={settings.localization.locale}

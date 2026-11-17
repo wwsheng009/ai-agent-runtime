@@ -101,8 +101,8 @@ export function ComposerPermissionModeControl({
           side="top"
           triggerClassName={
             isDangerous
-              ? "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] border-accent-gold/60 px-2 py-1 text-base leading-none text-accent-gold"
-              : "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
+              ? "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] border-accent-gold/60 px-2 py-1 text-base leading-none normal-case tracking-normal text-accent-gold"
+              : "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] px-2 py-1 text-base leading-none normal-case tracking-normal"
           }
           menuClassName="max-w-[16rem]"
           optionClassName="text-base"
