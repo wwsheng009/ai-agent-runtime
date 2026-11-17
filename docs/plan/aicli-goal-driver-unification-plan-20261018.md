@@ -395,7 +395,7 @@ DriverView {
 - A3/A4（提示词单源、CLI 让位）：升级为"决策单源 + 租约互斥"。
 - 本文 F1–F5 的每个缺陷对应到 §4.4 的规则或 §4.9 的租约，均有落点，不留"再补一个调用点"式尾巴。## 9. 实施记录（Phase 1，2026-10-18）
 
-节点：**Phase 0/1 的最小闭环已实施**（默认灰度关闭 `goal.driverEnabled: false`，行为零变化）。截至 §9.7，§4.4 的决策矩阵已抽为 `internal/goal/driver.Decide`；事件汇聚 Loop、审计事件与驱动者租约仍为后续阶段。
+节点：**Phase 0/1 的最小闭环已实施**（默认灰度关闭 `goal.driverEnabled: false`，行为零变化）。截至 §9.7/§9.9，§4.4 的决策矩阵已抽为 `internal/goal/driver.Decide`，决策审计事件已接线；事件汇聚 Loop、驱动者租约与 INV-1 stalled 探针仍为后续阶段。
 
 ### 9.1 已落地变更
 
@@ -429,7 +429,7 @@ DriverView {
 - **应急回退**（隐藏、仅排障）：`AICLI_GOAL_DRIVER_DISABLED=1` → 退回旧行为（续跑仅由前台交互路径驱动）。
 - **退役条件**：Phase 2 决策单源化落地 + 一个观察期后，移除该回退开关，使统一驱动成为唯一形态（届时本节回退条目与代码一并删除）。
 
-遗留（映射 §5 Phase 2/3）：中断 UI 文案按 reason 细分、`goal.driver.decision` 审计事件接线、驱动者租约替代冷却窗、INV-1 `stalled` 探针；决策矩阵已于 §9.7 单源化。### 9.5 真机验证（2026-10-18，session_20261018232712_yM77VVFe）
+遗留（映射 §5 Phase 2/3）：中断 UI 文案按 reason 细分、驱动者租约替代冷却窗、INV-1 `stalled` 探针；决策矩阵已于 §9.7 单源化，决策审计已于 §9.9 接线。### 9.5 真机验证（2026-10-18，session_20261018232712_yM77VVFe）
 
 环境：`aicli-4x`（含本实施全部改动构建），**默认启用、无任何配置**；通过 `/web/api/input|turn|statusbar` 与 debug.log 取证。核心链路 6/6 通过：
 
@@ -479,3 +479,9 @@ DriverView {
 - session close/delete 统一入口会清理 goal driver 的 strikes、continuations、disarm、doom/escalation 标记与延迟 CLI-takeover timer；`deciding` 由 in-flight owner 释放。
 
 证据与测试见 review §12.16。
+
+### 9.9 决策审计事件（2026-11-16）
+
+- 新增 `goal.driver.decision` session-store 事件；payload 由 `internal/goal/driver.BuildAuditPayload` 单源生成，只含句柄、状态、决策与让位原因，不含 objective/prompt 正文。
+- CLI 与 server 在每次 `Decide` 后发布；TUI encoder 将该类型视作 silent-system，不污染可见 transcript。
+- 仍未落地：事件汇聚 `Loop`、驱动者租约、INV-1 `stalled` 探针。

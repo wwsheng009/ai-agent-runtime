@@ -1654,6 +1654,7 @@ func silentSystemEventTypes() []string {
 		"team.task.started",
 		"context.tool_schema.frozen",
 		"tool.reduced",
+		"goal.driver.decision",
 	}
 }
 

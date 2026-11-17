@@ -947,6 +947,7 @@ var knownLegacyEventTypePrefixes = []string{
 	"subagent.",
 	"team.",
 	"tool.",
+	"goal.",
 }
 
 // isKnownLegacyEventType 判断事件类型是否属于已知 legacy 前缀族。
@@ -989,7 +990,8 @@ func isSilentSystemEventType(eventType string) bool {
 		"task.started",
 		"team.task.started",
 		"context.tool_schema.frozen",
-		"tool.reduced":
+		"tool.reduced",
+		"goal.driver.decision":
 		return true
 	}
 	return false

@@ -118,6 +118,7 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			return err
 		}
 		decision := goaldriver.Decide(view)
+		emitGoalDriverDecision(session, "cli_loop", view, decision)
 		switch decision.Action {
 		case goaldriver.ActionSubmitContinuation:
 			// 本次续跑循环即将执行续跑轮本身，消费掉此前因瞬时让位而重排的 kick，
@@ -270,6 +271,22 @@ func logGoalAutoContinuationStop(session *ChatSession, reason string, attempts i
 		state = "skipped"
 	}
 	writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation %s reason=%s attempts_completed=%d", state, reason, attempts), false)
+}
+
+func emitGoalDriverDecision(session *ChatSession, trigger string, view goaldriver.View, decision goaldriver.Decision) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+	if sessionID == "" {
+		return
+	}
+	session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+		Type:      goaldriver.EventTypeDecision,
+		SessionID: sessionID,
+		AgentName: "goal-driver",
+		Payload:   goaldriver.BuildAuditPayload(trigger, view, decision),
+	})
 }
 
 // goalIterationEscalationAvailable 报告本会话部署是否启用了 iterate_goal 工具

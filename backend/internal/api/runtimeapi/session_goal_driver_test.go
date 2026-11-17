@@ -2,13 +2,16 @@ package runtimeapi
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	goaldriver "github.com/wwsheng009/ai-agent-runtime/internal/goal/driver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -398,6 +401,30 @@ func TestGoalDriverForgetSessionClearsBookkeeping(t *testing.T) {
 	if _, ok := state.disarmed[sessionID]; ok {
 		t.Fatal("disarmed must be cleared")
 	}
+}
+
+func TestGoalDriverEmitsDecisionAuditEvent(t *testing.T) {
+	handler, sessionManager, session := newGoalGuidanceTestHandler(t)
+	handler.runtimeConfig = runtimecfg.DefaultRuntimeConfig()
+	active, err := goal.NewSessionGoal(session.ID, "finish the migration", time.Now())
+	require.NoError(t, err)
+	persistGoalForGuidanceTest(t, sessionManager, session, active)
+
+	handler.sessionGoalDriverDecide(goalDriverTurnOutcome{SessionID: session.ID})
+
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		SessionID: session.ID,
+		EventType: goaldriver.EventTypeDecision,
+		Limit:     10,
+	})
+	require.NotEmpty(t, events)
+	payload := events[len(events)-1].Payload
+	require.Equal(t, "goal.driver.decision.v1", payload["schema"])
+	require.Equal(t, "run_terminal", payload["trigger"])
+	require.Equal(t, "goal_active", payload["reason"])
+	require.Equal(t, active.GoalID, payload["goal_id"])
+	require.NotContains(t, fmt.Sprint(payload), "finish the migration",
+		"audit payload must not leak the goal objective")
 }
 
 func TestUsageTotalTokensFallback(t *testing.T) {

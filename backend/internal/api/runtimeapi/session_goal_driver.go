@@ -713,6 +713,12 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		NoProgressStrikes:      state.noProgressStrikes(sessionID),
 	}
 	decision := goaldriver.Decide(view)
+	h.publishSessionRuntimeEvent(
+		goaldriver.EventTypeDecision,
+		"",
+		sessionID,
+		goaldriver.BuildAuditPayload(goalDriverDecisionTrigger(outcome), view, decision),
+	)
 	switch decision.Action {
 	case goaldriver.ActionDefer:
 		logger.Debugf("goal driver: defer session=%s reason=%s", sessionID, decision.Reason)
@@ -771,6 +777,13 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		}
 		state.noteContinuation(sessionID)
 	}
+}
+
+func goalDriverDecisionTrigger(outcome goalDriverTurnOutcome) string {
+	if outcome.ResetContinuations {
+		return "kick"
+	}
+	return "run_terminal"
 }
 
 // goalDriverIterationEscalationAvailable 报告服务端宿主部署是否启用了

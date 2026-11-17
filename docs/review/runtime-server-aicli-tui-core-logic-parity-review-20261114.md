@@ -1652,6 +1652,23 @@ const (
 
 > §12.16 结论：Goal driver 的运行时配置作用域与 session 生命周期清理已收口。Goal Loop/审计事件/驱动者租约、P1 assembler、非 ReAct server-only 入口与不同 `sessions.dir` authority 边界仍保留。
 
+### 12.17 第十五轮切片：Goal 决策审计与事件契约
+
+| # | 项 | 处理 | 状态 | 证据 |
+|---|---|---|---|---|
+| R19 | `internal/goal/driver.Decide` 已单源化，但每次决策没有可回放的审计行，INV-1/让位原因只能看 debug 日志 | 新增 `goal.driver.decision` 事件：共享 `BuildAuditPayload` 输出 schema/trigger/action/reason、goal handle/status/round/tokens、host gate/pending/queued、continuation/round/strike/escalation 状态与 `prompt_kind`；**不携带 objective 或 prompt 正文**。CLI `emitGoalDriverDecision` 与 server `publishSessionRuntimeEvent` 均发布；TUI encoder 将该事件归入 silent-system，不产生可见 cell。 | ✅ | `internal/goal/driver/audit.go`；`chat_goal_auto_continue.go:emitGoalDriverDecision`；`session_goal_driver.go:sessionGoalDriverDecide`；`TestGoalDriverEmitsDecisionAuditEvent`；`TestBuildAuditPayloadIsMinimalAndStable` |
+| R20 | contract 门禁暴露 `tool_loop.child_results_received` 为未登记裸事件（synthesis 子结果进入父上下文时真实发射） | 按 0 通道登记进 `internal/events` 契约，并补 runtimeobserve 已知目录；不改变投递行为，消除“已知但无通道”与“完全未知”的三分法盲区 | ✅ | `internal/events/contract.go`；`internal/runtimeobserve/known_types.go`；`internal/events` contract tests |
+
+#### 12.17.1 验证
+
+- ✅ `go test ./internal/goal/driver ./internal/events ./internal/runtimeobserve`
+- ✅ `cmd/aicli/ui/render/encoding` 的 Silent/Exhaustive 测试
+- ✅ `internal/api/runtimeapi` 全包通过（171.5s；含 audit event 用例）
+- ✅ `cmd/aicli/commands` 全包通过（`GOMAXPROCS=1` + `-test.parallel=1` 运行预编译 `-l` 测试二进制，约 251s）
+- ✅ `go build -p 1 ./...`
+
+> §12.17 结论：Goal 决策已有可回放、数据最小化的 session-scoped 审计事件；同时修复了一个与 Goal 无关但由 contract 门禁暴露的未登记事件。Goal Loop/驱动者租约/INV-1 stalled 探针、P1 assembler、非 ReAct 入口与部署 authority 边界仍保留。
+
 ---
 
 ## 附录 A：关键证据索引
@@ -1788,4 +1805,5 @@ const (
 > 第十一轮（§12.13）关闭了 workspace-anchored 通用 skill 发现、lease 默认同域、Goal disarm/rearm、Team 终态清理与 TUI 事件顺序；第十二轮（§12.14）又修复了提交后复审发现的 Team summary 重入竞争与 Goal re-arm/系统取消/延迟 kick/预算收尾/round-limit resume 回归。
 > 第十三轮（§12.15）把 Goal 决策矩阵抽为 `internal/goal/driver.Decide`，CLI 与 server 共用；session-scoped continuation limit / iterate 可用性也改为按会话解析。Goal 的 Loop/审计/租约与宿主读写外壳仍按明确边界保留。
 > 第十四轮（§12.16）把 `goal.serverAutoContinuation` 纳入会话作用域，并在 close/delete 时清理 Goal driver 的 per-session strikes/continuations/disarm/recheck timer。
+> 第十五轮（§12.17）新增 `goal.driver.decision` 数据最小化审计事件，并补登记 `tool_loop.child_results_received` 这一 contract 门禁暴露的历史裸事件。
 > P0 的契约/诊断护栏与 fail-closed 审批边界继续保持；不得把“非 ReAct 兼容路径”或“不同 sessions.dir 的部署”宣传为全量同源。
