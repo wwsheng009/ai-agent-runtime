@@ -277,6 +277,7 @@ func buildKnownEventTypes() map[string]bool {
 		"subagent.batch.circuit_open",          // agent/scheduler.go（熔断治理信号）
 		"subagent.denied",                      // agent/scheduler.go
 		"subagent.requires_write",              // agent/loop.go
+		"tool_loop.child_results_received",     // agent/loop.go（synthesis 子结果已进入父上下文）
 		"tool_loop.exploration_stall_observed", // agent/loop.go
 		"tool_loop.repeated_prompt_observed",   // agent/loop.go
 	)
@@ -287,6 +288,11 @@ func buildKnownEventTypes() map[string]bool {
 	// 由 internal/events/contract_test.go 的三方一致门禁断言不漂移。
 	add(
 		"session.routing_changed", // events.EventSessionRoutingChanged
+	)
+
+	// 来源 12：Goal driver 决策审计（events/contract.go 登记为 session-store）。
+	add(
+		"goal.driver.decision", // goal/driver.EventTypeDecision
 	)
 
 	// 来源 11：托管 turn 生命周期里程碑（见文件头说明）。常量定义在

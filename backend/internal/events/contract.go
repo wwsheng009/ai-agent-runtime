@@ -97,6 +97,9 @@ var runtimeEventContracts = []Contract{
 	{Type: "session_end", Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: "session_interrupted", Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: "context_reconciled", Channels: ChannelSessionStore},
+	// Goal driver evaluation audit: one row per decision, data-minimal
+	// (goal handle/state + action/reason, never objective or prompt text).
+	{Type: "goal.driver.decision", Channels: ChannelSessionStore},
 	// 方案B：增量打字机事件落盘，供 runtime/stream 长轮询实时消费。
 	// 三者均为 PersistStreamDelta：正文可由终态 assistant_message 重建，
 	// 落盘队列溢出时允许丢弃（见 IsPersistStreamDeltaEventType）。
@@ -286,6 +289,7 @@ var runtimeEventContracts = []Contract{
 	{Type: "subagent.batch.circuit_open"},                      // scheduler.go（熔断治理信号）
 	{Type: "subagent.denied"},                                  // scheduler.go
 	{Type: "subagent.requires_write"},                          // loop.go
+	{Type: "tool_loop.child_results_received"},                 // loop.go（synthesis 子结果已进入父上下文）
 	{Type: "tool_loop.exploration_stall_observed"},             // loop.go
 	{Type: "tool_loop.repeated_prompt_observed"},               // loop.go
 }
