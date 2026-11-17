@@ -20,7 +20,7 @@ describe("ConfigDraftValidationPanel", () => {
     expect(renderToStaticMarkup(<ConfigDraftValidationPanel core={buildCore([])} />)).toBe("");
   });
 
-  it("错误级问题渲染字段路径、文案与阻断提示", () => {
+  it("错误级问题渲染字段路径、文案与错误计数", () => {
     const markup = renderToStaticMarkup(
       <ConfigDraftValidationPanel
         core={buildCore([
@@ -41,10 +41,9 @@ describe("ConfigDraftValidationPanel", () => {
       "editor.draftValidation.providerFieldNotString {&quot;field&quot;:&quot;api_key&quot;}",
     );
     expect(markup).toContain("editor.draftValidation.errorBadge");
-    expect(markup).toContain("editor.draftValidation.blockedHint");
   });
 
-  it("仅提示级问题时给 status 语义且不出现阻断提示", () => {
+  it("仅提示级问题时给 status 语义且不出现错误计数", () => {
     const markup = renderToStaticMarkup(
       <ConfigDraftValidationPanel
         core={buildCore([
@@ -61,7 +60,6 @@ describe("ConfigDraftValidationPanel", () => {
     expect(markup).toContain('role="status"');
     expect(markup).toContain("providers.default_provider");
     expect(markup).toContain("editor.draftValidation.warningBadge");
-    expect(markup).not.toContain("editor.draftValidation.blockedHint");
     expect(markup).not.toContain("editor.draftValidation.errorBadge");
   });
 

@@ -225,9 +225,6 @@ export function RequestAnalysisPanel({ adminToken }: { adminToken: string }) {
           <p className="mt-1 max-w-4xl text-xs leading-5 text-muted-foreground">
             {t("requestAnalysis.description")}
           </p>
-          <p className="mt-1 max-w-4xl text-xs leading-5 text-muted-foreground">
-            {t("requestAnalysis.windowNote")}
-          </p>
         </div>
         <Button
           type="button"

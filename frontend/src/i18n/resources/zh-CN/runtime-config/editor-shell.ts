@@ -2,7 +2,6 @@
 
 export const zhRuntimeConfigEditorShell = {
   title: "后端配置工作台",
-  description: "独立维护 runtime 后端配置，专用表单优先，YAML 作为兜底。",
   independentBadge: "独立后端配置页",
   unsavedBadge: "有未保存草稿",
   configDialog: {
@@ -22,11 +21,6 @@ export const zhRuntimeConfigEditorShell = {
     emptyArray: "当前数组为空，可以先插入一个项目。",
     currentValue: "当前值:",
   },
-  usage: {
-    title: "使用说明",
-    body: "结构化配置树已经移除。常用配置域使用专用控件维护；碰到未覆盖字段，再切到 YAML 模式补充。",
-  },
-  currentFocusPrefix: "当前焦点：",
   sourceFocus: "源码兜底编辑",
   structuredFocus: "专用配置域模式",
   table: {
@@ -47,43 +41,31 @@ export const zhRuntimeConfigEditorShell = {
   },
   panels: {
     editorTitle: "配置编辑区",
-    editorDescription: "左侧切换配置域，右侧使用专用控件编辑。",
     modeTitle: "配置域",
-    modeDescription: "切换专用编辑器或源码模式。",
     summaryTitle: "草稿摘要",
-    summaryDescription: "显示当前草稿规模、预览状态和关键配置摘要。",
   },
   source: {
     title: "原始 YAML 草稿",
     preserveComments: "保留注释",
     lines: "行数",
     chars: "字符数",
-    helpTitle: "YAML 说明",
-    helpBody:
-      "当专用控件尚未覆盖某些配置域，或者你需要完整保留注释和排版时，可在这里直接编辑源码。",
   },
   preview: {
     title: "变更预览",
-    description: "保存前先看文本 diff。",
     added: "新增",
     removed: "删除",
     latest: "最新预览",
     latestWithCount: "最新预览 {{count}} 行",
     expired: "预览已过期",
     needsRestart: "保存后需重启",
-    helpTitle: "预览说明",
-    helpFresh: "当前 diff 对应最新草稿，可以直接保存。",
-    helpStale: "草稿在预览后发生过修改，建议重新生成预览。",
   },
   draftValidation: {
     title: "草稿校验",
-    description: "写入前检查草稿结构；错误会阻断保存与预览，提示仅作参考。",
     errorBadge: "{{count}} 个错误",
     warningBadge: "{{count}} 个提示",
     severityError: "错误",
     severityWarning: "提示",
     blocked: "草稿有 {{count}} 个结构错误，已阻断写入；请先修正再保存或预览。",
-    blockedHint: "错误未清空前，保存 / 生成预览不会发送到后端。",
     rootNotMapping: "根节点必须是映射（对象），当前是其他类型。",
     providersNotMapping: "providers 段必须是映射。",
     providersItemsNotMapping: "providers.items 必须是「provider 名 → 配置」的映射。",
@@ -99,7 +81,6 @@ export const zhRuntimeConfigEditorShell = {
   },
   sticky: {
     unsaved: "未保存草稿",
-    hint: "建议先预览差异，再保存到当前 runtime 配置文档。",
     previewButton: "先看预览",
     saveButton: "直接保存",
     saveAndRestartButton: "保存并重启",

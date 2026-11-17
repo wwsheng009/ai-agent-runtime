@@ -85,10 +85,6 @@ export function ArtifactFlowPanel({
           })}
         </span>
       </div>
-      <p className="mb-3 text-xs text-muted-foreground">
-        {t("observability.artifactFlow.subtitle")}
-      </p>
-
       {flags.length > 0 ? (
         <div
           data-testid="artifact-flow-flags"

@@ -8,7 +8,6 @@ export const enSkills = {
   badge: "Skill market",
   independentPage: "Standalone page",
   title: "Skills / hot reload",
-  description: "Browse the runtime skill catalog, search skill definitions, and manage file watching for skill directories.",
   backToRuntimeConfig: "Back to runtime config",
 
   nav: {

@@ -28,6 +28,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { useEarlierEntryVisibility } from "@/components/workspace/earlier-entry-visibility";
+import { Input } from "@/components/ui/input";
 import type { TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { useTrajectorySnapshot } from "@/hooks/workspace/use-trajectory-snapshot";
 import { exportSessionTrajectoryJsonl } from "@/lib/trajectory/export-session";
@@ -287,9 +288,10 @@ export function TrajectoryView({
             size={13}
             className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
           />
-          <input
+          <Input
             aria-label={t("panels.shell.trajectory.search")}
-            className="w-full rounded-md border border-border bg-surface-solid py-1.5 pl-7 pr-2.5 app-text-12 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-teal/45"
+            size="sm"
+            className="w-full pl-7"
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t("panels.shell.trajectory.searchPlaceholder")}
             value={query}
@@ -301,7 +303,7 @@ export function TrajectoryView({
               key={option.id}
               aria-pressed={filter === option.id}
               className={cn(
-                "rounded-md border px-2.5 py-1 app-text-11 transition",
+                "rounded-md border px-2.5 py-1 app-text-11 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 filter === option.id
                   ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
                   : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
@@ -317,7 +319,7 @@ export function TrajectoryView({
           aria-label={t("panels.shell.trajectory.toggleTimeline")}
           aria-pressed={timelineOpen}
           className={cn(
-            "rounded-md border p-1.5 transition",
+            "rounded-md border p-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             timelineOpen
               ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
               : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
@@ -336,7 +338,7 @@ export function TrajectoryView({
           aria-label={t("panels.shell.trajectory.toggleRedaction")}
           aria-pressed={redactExport}
           className={cn(
-            "rounded-md border p-1.5 transition",
+            "rounded-md border p-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             redactExport
               ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
               : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
@@ -354,7 +356,7 @@ export function TrajectoryView({
         <button
           aria-label={t("panels.shell.trajectory.export")}
           className={cn(
-            "rounded-md border p-1.5 transition",
+            "rounded-md border p-1.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             sessionId && !exporting
               ? "border-border bg-surface-solid text-muted-foreground hover:text-foreground"
               : "cursor-not-allowed border-border bg-surface-solid text-muted-foreground",
@@ -437,7 +439,7 @@ export function TrajectoryView({
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1" data-testid="trajectory-body-region">
+      <div className="relative flex min-h-0 flex-1" data-testid="trajectory-body-region">
         <div
           className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
           data-testid="trajectory-list-region"

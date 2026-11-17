@@ -4,7 +4,15 @@
 // POST /{id}/reload、POST /{id}/test（见 @/api/runtime/connectors）。
 // 表单渲染完全由 Schema 驱动（docs/bots/07-config-ux.md §7），页面不硬编码通道字段。
 
-import { ArrowLeftIcon, BotIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  ArrowLeftIcon,
+  BotIcon,
+  CheckCircle2Icon,
+  MoreHorizontalIcon,
+  PlusIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
@@ -54,6 +62,11 @@ interface ConnectorActionTarget {
   action: ConnectorActionSpec;
 }
 
+interface PageNotice {
+  kind: "success" | "error";
+  message: string;
+}
+
 export function ConnectorsPage() {
   const { t } = useTranslation("connectors");
   const adminToken = readAdminToken();
@@ -64,7 +77,7 @@ export function ConnectorsPage() {
   const [loading, setLoading] = useState(true);
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<PageNotice | null>(null);
   /** 正在执行行内操作（启停/重载/删除）的连接器 id 集合；操作期间同时禁用该条全部按钮。 */
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
 
@@ -181,7 +194,10 @@ export function ConnectorsPage() {
       await action();
       await reloadData();
     } catch (caught) {
-      setNotice(describeFailure(errorText(caught)));
+      setNotice({
+        kind: "error",
+        message: describeFailure(errorText(caught)),
+      });
     } finally {
       clearBusy(item.id);
     }
@@ -199,7 +215,10 @@ export function ConnectorsPage() {
       item,
       async () => {
         await reloadConnector(item.id, { adminToken });
-        setNotice(t("page.reloaded", { name: item.name }));
+        setNotice({
+          kind: "success",
+          message: t("page.reloaded", { name: item.name }),
+        });
       },
       (message) => t("page.reloadFailed", { message }),
     );
@@ -212,7 +231,10 @@ export function ConnectorsPage() {
       item,
       async () => {
         await deleteConnector(item.id, { adminToken });
-        setNotice(t("page.removed", { name: item.name }));
+        setNotice({
+          kind: "success",
+          message: t("page.removed", { name: item.name }),
+        });
       },
       (message) => t("page.removeFailed", { message }),
     );
@@ -231,7 +253,10 @@ export function ConnectorsPage() {
       item,
       async () => {
         await takeoverConnector(item.id, { adminToken });
-        setNotice(t("page.takeoverDone", { name: item.name }));
+        setNotice({
+          kind: "success",
+          message: t("page.takeoverDone", { name: item.name }),
+        });
       },
       (message) => t("page.takeoverFailed", { message }),
     );
@@ -252,8 +277,14 @@ export function ConnectorsPage() {
         const result = summarizeActionPayload(payload);
         setNotice(
           result
-            ? t("page.actionResult", { action: action.label, result })
-            : t("page.actionResultEmpty", { action: action.label }),
+            ? {
+                kind: "success",
+                message: t("page.actionResult", { action: action.label, result }),
+              }
+            : {
+                kind: "success",
+                message: t("page.actionResultEmpty", { action: action.label }),
+              },
         );
       },
       (message) => t("page.actionFailed", { action: action.label, message }),
@@ -320,17 +351,36 @@ export function ConnectorsPage() {
 
         <section className="surface-panel min-h-0 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
           {notice ? (
-            <div className="mb-3 rounded-card border border-accent-orange/25 bg-accent-orange/8 px-3 py-2 text-sm text-muted-foreground">
-              {notice}
+            <div
+              role={notice.kind === "success" ? "status" : "alert"}
+              className={cn(
+                "mb-3 flex items-start gap-2 rounded-card border px-3 py-2 text-sm",
+                notice.kind === "success"
+                  ? "border-analytics-success-border bg-analytics-success-soft text-analytics-success"
+                  : "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger",
+              )}
+            >
+              {notice.kind === "success" ? (
+                <CheckCircle2Icon size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              ) : (
+                <AlertTriangleIcon size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              )}
+              <span className="min-w-0 break-words">{notice.message}</span>
             </div>
           ) : null}
           {loadError ? (
-            <div className="mb-3 rounded-card border border-accent-orange/25 bg-accent-orange/8 px-3 py-2 text-sm text-muted-foreground">
+            <div
+              role="alert"
+              className="mb-3 rounded-card border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2 text-sm text-analytics-danger"
+            >
               {t("page.loadFailed", { message: loadError })}
             </div>
           ) : null}
           {schemaError ? (
-            <div className="mb-3 rounded-card border border-accent-orange/25 bg-accent-orange/8 px-3 py-2 text-sm text-muted-foreground">
+            <div
+              role="alert"
+              className="mb-3 rounded-card border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2 text-sm text-analytics-danger"
+            >
               {t("page.schemaFailed", { message: schemaError })}
             </div>
           ) : null}
@@ -399,16 +449,6 @@ export function ConnectorsPage() {
                           {action.label}
                         </Button>
                       ))}
-                      {takeoverVisible ? (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={busyIds.has(item.id)}
-                          onClick={() => void handleTakeover(item)}
-                        >
-                          {t("page.takeover")}
-                        </Button>
-                      ) : null}
                       <Button
                         variant="secondary"
                         size="sm"
@@ -441,22 +481,55 @@ export function ConnectorsPage() {
                       >
                         {t("page.test")}
                       </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={busyIds.has(item.id)}
-                        onClick={() => void handleReload(item)}
-                      >
-                        {t("page.reload")}
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        disabled={busyIds.has(item.id)}
-                        onClick={() => void handleDelete(item)}
-                      >
-                        {t("page.remove")}
-                      </Button>
+                      <details className="relative">
+                        <summary
+                          className={cn(
+                            buttonVariants({ variant: "secondary", size: "sm" }),
+                            "cursor-pointer list-none marker:hidden [&::-webkit-details-marker]:hidden",
+                          )}
+                          aria-disabled={busyIds.has(item.id)}
+                        >
+                          <MoreHorizontalIcon size={14} aria-hidden="true" />
+                          {t("page.more")}
+                        </summary>
+                        <div className="surface-panel absolute right-0 top-full z-30 mt-1 w-44 rounded-panel p-1 shadow-[var(--elevation-panel)]">
+                          {takeoverVisible ? (
+                            <button
+                              type="button"
+                              className="flex w-full items-center rounded-control px-2 py-1.5 text-left text-sm hover:bg-surface-softer disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busyIds.has(item.id)}
+                              onClick={(event) => {
+                                event.currentTarget.closest("details")?.removeAttribute("open");
+                                void handleTakeover(item);
+                              }}
+                            >
+                              {t("page.takeover")}
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="flex w-full items-center rounded-control px-2 py-1.5 text-left text-sm hover:bg-surface-softer disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyIds.has(item.id)}
+                            onClick={(event) => {
+                              event.currentTarget.closest("details")?.removeAttribute("open");
+                              void handleReload(item);
+                            }}
+                          >
+                            {t("page.reload")}
+                          </button>
+                          <button
+                            type="button"
+                            className="mt-1 flex w-full items-center rounded-control border-t border-border px-2 pb-1.5 pt-2 text-left text-sm text-accent-orange hover:bg-accent-orange/8 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyIds.has(item.id)}
+                            onClick={(event) => {
+                              event.currentTarget.closest("details")?.removeAttribute("open");
+                              void handleDelete(item);
+                            }}
+                          >
+                            {t("page.remove")}
+                          </button>
+                        </div>
+                      </details>
                     </div>
                   </li>
                 );

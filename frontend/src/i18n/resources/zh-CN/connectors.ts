@@ -20,6 +20,7 @@ export const zhConnectors = {
     test: "测试消息",
     reload: "重新加载",
     remove: "删除",
+    more: "更多",
     confirmDelete: "确认删除连接器「{{name}}」？绑定与去重账本将一并清理。",
     removed: "已删除连接器「{{name}}」",
     reloaded: "已重新加载「{{name}}」",

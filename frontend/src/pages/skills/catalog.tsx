@@ -6,10 +6,11 @@
 //   * 目录 / 检索各自独立空态与失败态，检索失败不清空目录；
 //   * 触顶提示用后端返回的 `limit` 与 `count` 计算，不猜。
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { RuntimeSkill, RuntimeSkillSearchResult } from "@/types/runtime";
 
@@ -109,10 +110,19 @@ export function SkillCatalogPanel(props: SkillCatalogPanelProps) {
   const [categoryDraft, setCategoryDraft] = useState(searchCategory);
   const [modeDraft, setModeDraft] = useState<RuntimeSkillSearchModeInput>(searchMode);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const detailRef = useRef<HTMLDivElement | null>(null);
 
   const searching = searchStatus !== "idle";
   const rows = searching && searchResult ? searchResult.results : catalog;
   const selectedSkill = rows.find((skill) => skill.name === selectedName) ?? null;
+
+  useEffect(() => {
+    const node = detailRef.current;
+    if (!selectedSkill || !node) return;
+    if (node.getBoundingClientRect().bottom > window.innerHeight) {
+      node.scrollIntoView({ block: "nearest" });
+    }
+  }, [selectedSkill]);
 
   const submit = () => {
     const query = queryDraft.trim();
@@ -146,21 +156,25 @@ export function SkillCatalogPanel(props: SkillCatalogPanelProps) {
           submit();
         }}
       >
-        <input
+        <Input
+          size="sm"
+          surface="soft"
           value={queryDraft}
           onChange={(event) => setQueryDraft(event.target.value)}
           placeholder={t("catalog.searchPlaceholder")}
           aria-label={t("catalog.searchPlaceholder")}
           data-testid="skills-search-input"
-          className="min-w-0 flex-1 rounded-panel border border-border bg-surface-softer px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus:border-accent-primary-border"
+          className="min-w-0 flex-1"
         />
-        <input
+        <Input
+          size="sm"
+          surface="soft"
           value={categoryDraft}
           onChange={(event) => setCategoryDraft(event.target.value)}
           placeholder={t("catalog.categoryPlaceholder")}
           aria-label={t("catalog.categoryPlaceholder")}
           data-testid="skills-category-input"
-          className="w-full rounded-panel border border-border bg-surface-softer px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus:border-accent-primary-border sm:w-36"
+          className="w-full sm:w-36"
         />
         <div className="flex items-center gap-1" role="group" aria-label={t("catalog.modeLabel")}>
           {skillSearchModes.map((mode) => (
@@ -171,7 +185,7 @@ export function SkillCatalogPanel(props: SkillCatalogPanelProps) {
               aria-pressed={modeDraft === mode}
               data-testid={`skills-mode-${mode}`}
               className={cn(
-                "rounded-panel border border-border px-2 py-1 text-xs text-muted-foreground",
+                "rounded-panel border border-border px-2 py-1 text-xs text-muted-foreground transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 modeDraft === mode && "border-accent-primary-border bg-accent-primary-soft text-accent-primary",
               )}
             >
@@ -261,33 +275,35 @@ export function SkillCatalogPanel(props: SkillCatalogPanelProps) {
       ) : null}
 
       {rows.length > 0 ? (
-        <ul className="mt-3 max-h-[26rem] space-y-2 overflow-auto pr-1" data-testid="skills-list">
-          {rows.map((skill) => (
-            <SkillRow
-              key={skill.name}
-              skill={skill}
-              detail={
-                searching && searchResult
-                  ? searchResult.matches.find((match) => match.skill.name === skill.name)?.details ||
-                    matchSummary(skill)
-                  : undefined
-              }
-              active={skill.name === selectedName}
-              onSelect={() =>
-                setSelectedName((current) => (current === skill.name ? null : skill.name))
-              }
-            />
-          ))}
-        </ul>
-      ) : null}
+        <div className={cn("mt-3 grid min-w-0 gap-3", selectedSkill && "xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.85fr)]")}>
+          <ul className="max-h-[26rem] space-y-2 overflow-auto pr-1" data-testid="skills-list">
+            {rows.map((skill) => (
+              <SkillRow
+                key={skill.name}
+                skill={skill}
+                detail={
+                  searching && searchResult
+                    ? searchResult.matches.find((match) => match.skill.name === skill.name)?.details ||
+                      matchSummary(skill)
+                    : undefined
+                }
+                active={skill.name === selectedName}
+                onSelect={() =>
+                  setSelectedName((current) => (current === skill.name ? null : skill.name))
+                }
+              />
+            ))}
+          </ul>
 
-      {selectedSkill ? (
-        <div className="mt-3">
-          <SkillDetailPanel
-            key={selectedSkill.name}
-            skill={selectedSkill}
-            onClose={() => setSelectedName(null)}
-          />
+          {selectedSkill ? (
+            <div ref={detailRef} className="min-w-0 xl:sticky xl:top-3 xl:self-start">
+              <SkillDetailPanel
+                key={selectedSkill.name}
+                skill={selectedSkill}
+                onClose={() => setSelectedName(null)}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>

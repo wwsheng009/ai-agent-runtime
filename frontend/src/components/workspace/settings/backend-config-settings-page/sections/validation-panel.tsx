@@ -63,10 +63,6 @@ export function ConfigDraftValidationPanel({ core }: { core: ConfigEditorCore })
         ) : null}
       </div>
 
-      <div className="mt-1 text-xs text-muted-foreground">
-        {t("editor.draftValidation.description")}
-      </div>
-
       <ul className="mt-2 space-y-1">
         {draftIssues.map((issue) => (
           <li
@@ -98,11 +94,6 @@ export function ConfigDraftValidationPanel({ core }: { core: ConfigEditorCore })
         ))}
       </ul>
 
-      {hasErrors ? (
-        <div className="mt-2 text-xs text-analytics-danger">
-          {t("editor.draftValidation.blockedHint")}
-        </div>
-      ) : null}
     </div>
   );
 }

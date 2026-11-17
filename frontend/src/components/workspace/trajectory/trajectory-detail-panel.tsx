@@ -65,12 +65,7 @@ export function TrajectoryDetailPanel({
   const { t } = useTranslation("workspace");
 
   if (!item) {
-    return (
-      <aside
-        data-trajectory-detail
-        className="hidden w-80 shrink-0 border-l border-border bg-surface-softer lg:block"
-      />
-    );
+    return null;
   }
 
   const subagentTarget = subagentSessionTarget(item);
@@ -78,7 +73,7 @@ export function TrajectoryDetailPanel({
   return (
     <aside
       data-trajectory-detail
-      className="flex w-80 shrink-0 flex-col overflow-hidden border-l border-border bg-surface-softer"
+      className="absolute inset-y-0 right-0 z-30 flex w-[min(20rem,calc(100vw-1rem))] shrink-0 flex-col overflow-hidden border-l border-border bg-surface-softer shadow-[-8px_0_24px_rgba(0,0,0,0.18)] lg:static lg:z-auto lg:w-80 lg:shadow-none"
     >
       <header className="flex items-center gap-2 border-b border-border px-3 py-2.5">
         <span className="min-w-0 flex-1 truncate app-text-13 font-semibold text-foreground">
@@ -94,7 +89,7 @@ export function TrajectoryDetailPanel({
         </span>
         <button
           aria-label={t("panels.shell.trajectory.closeDetail")}
-          className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+          className="shrink-0 rounded p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={onClose}
           type="button"
         >

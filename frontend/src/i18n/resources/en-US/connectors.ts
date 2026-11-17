@@ -24,6 +24,7 @@ export const enConnectors = {
     test: "Test message",
     reload: "Reload",
     remove: "Delete",
+    more: "More",
     confirmDelete:
       "Delete connector \u201c{{name}}\u201d? Bindings and the dedupe ledger will be removed too.",
     removed: "Deleted connector \u201c{{name}}\u201d",

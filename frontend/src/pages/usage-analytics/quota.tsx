@@ -155,9 +155,6 @@ export function UsageQuotaPanel({ adminToken }: { adminToken: string }) {
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">{t("quota.title")}</h2>
-          <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">
-            {t("quota.description")}
-          </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
           <label className="min-w-[12rem] flex-1 sm:flex-none">

@@ -6,11 +6,14 @@
 //   * 其他 → 原始错误，可重试。
 // 统计只展示后端字段；`watching` 为准，不以本地状态臆测。
 
-import { useState } from "react";
+import { RefreshCwIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import type { RuntimeHotReloadStats } from "@/types/runtime";
 
 import type { HotReloadAction, SkillsStreamStatus } from "@/hooks/use-skills-market";
@@ -58,10 +61,17 @@ export function HotReloadPanel(props: HotReloadPanelProps) {
   const { t } = useTranslation("skills");
 
   const [dirsDraft, setDirsDraft] = useState(() => suggestedDirs.join("\n"));
+  const dirsTouched = useRef(false);
   const [debounceDraft, setDebounceDraft] = useState("");
   const dirs = normalizeSkillDirs(dirsDraft);
   const busy = action !== null;
   const blocked = policyDisabled === true;
+
+  useEffect(() => {
+    if (!dirsTouched.current) {
+      setDirsDraft(suggestedDirs.join("\n"));
+    }
+  }, [suggestedDirs]);
 
   const submitStart = () => {
     if (dirs.length === 0 || busy || blocked) {
@@ -79,13 +89,15 @@ export function HotReloadPanel(props: HotReloadPanelProps) {
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{t("hotReload.title")}</h2>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           onClick={onRefresh}
-          className="text-xs text-muted-foreground underline-offset-2 hover:underline"
         >
+          <RefreshCwIcon size={13} aria-hidden="true" />
           {t("actions.refresh")}
-        </button>
+        </Button>
       </div>
 
       {blocked ? (
@@ -158,30 +170,37 @@ export function HotReloadPanel(props: HotReloadPanelProps) {
 
       <div className="mt-3 space-y-2">
         <label className="block">
-          <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             {t("hotReload.startDirs")}
           </span>
-          <textarea
+          <Textarea
+            size="sm"
+            surface="soft"
             value={dirsDraft}
-            onChange={(event) => setDirsDraft(event.target.value)}
+            onChange={(event) => {
+              dirsTouched.current = true;
+              setDirsDraft(event.target.value);
+            }}
             placeholder={t("hotReload.startDirsPlaceholder")}
             rows={2}
             data-testid="skills-hot-reload-dirs"
-            className="mt-1 w-full rounded-panel border border-border bg-surface-softer px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus:border-accent-primary-border"
+            className="mt-1 min-h-20"
           />
         </label>
         <div className="flex flex-wrap items-end gap-2">
           <label className="block w-32">
-            <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+            <span className="text-xs text-muted-foreground">
               {t("hotReload.debounceMs")}
             </span>
-            <input
+            <Input
+              size="sm"
+              surface="soft"
               value={debounceDraft}
               onChange={(event) => setDebounceDraft(event.target.value)}
               inputMode="numeric"
               placeholder={t("hotReload.debouncePlaceholder")}
               data-testid="skills-hot-reload-debounce"
-              className="mt-1 w-full rounded-panel border border-border bg-surface-softer px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus:border-accent-primary-border"
+              className="mt-1"
             />
           </label>
           <Button

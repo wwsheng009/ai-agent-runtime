@@ -76,6 +76,15 @@ export function UsageOverview() {
   const [modelGroups, setModelGroups] = useState<AnalyticsGroupBucket[]>([]);
 
   const view = resolveOverviewView(searchParams.get("view"));
+  const usesAnalyticsFilters =
+    view === "overview" ||
+    view === "requests" ||
+    view === "models" ||
+    view === "sessions";
+  const usesGroupBy =
+    view === "overview" ||
+    view === "models" ||
+    view === "sessions";
   const groupBy = (searchParams.get("group_by") || "day") as AnalyticsGroupBy;
   const pageOffset = Math.max(0, Number.parseInt(searchParams.get("offset") || "0", 10) || 0);
   const hasActiveFilters = analyticsFilterKeys.some((key) => searchParams.has(key)) || groupBy !== "day" || pageOffset > 0;
@@ -234,54 +243,77 @@ export function UsageOverview() {
             className="surface-panel rounded-panel-lg p-2 sm:px-3"
             onSubmit={(event) => event.preventDefault()}
           >
-            <div className="mb-1.5 flex h-6 min-w-0 items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2">
-                <h2 className="shrink-0 text-xs font-semibold">{t("filters.compactTitle")}</h2>
-                <p className="min-w-0 truncate text-xs text-muted-foreground" title={t("meta.scannedMatched", { scanned: String(scanned), matched: String(matched) })}>
-                  {t("meta.scannedMatched", { scanned: String(scanned), matched: String(matched) })}
-                </p>
+                <h2 className="shrink-0 text-xs font-semibold">
+                  {usesAnalyticsFilters ? t("filters.compactTitle") : t("filters.token")}
+                </h2>
+                {usesAnalyticsFilters ? (
+                  <p
+                    className="min-w-0 truncate text-xs text-muted-foreground"
+                    title={t("meta.scannedMatched", {
+                      scanned: String(scanned),
+                      matched: String(matched),
+                    })}
+                  >
+                    {t("meta.scannedMatched", {
+                      scanned: String(scanned),
+                      matched: String(matched),
+                    })}
+                  </p>
+                ) : null}
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-6 shrink-0 gap-1 px-1.5 text-xs"
-                onClick={resetFilters}
-                disabled={!hasActiveFilters}
-              >
-                <RotateCcwIcon size={12} />
-                {t("actions.resetFilters")}
-              </Button>
+              {usesAnalyticsFilters ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 gap-1 px-1.5 text-xs"
+                  onClick={resetFilters}
+                  disabled={!hasActiveFilters}
+                >
+                  <RotateCcwIcon size={12} />
+                  {t("actions.resetFilters")}
+                </Button>
+              ) : null}
             </div>
 
-            <div className="grid grid-cols-2 gap-1.5 md:grid-cols-4 lg:grid-cols-6">
-              <div className="col-span-2 min-w-0">
-                <FilterInput compact icon={<SearchIcon size={13} />} label={t("filters.search")} value={query.q ?? ""} placeholder={t("filters.searchPlaceholder")} onChange={(value) => updateFilter("q", value)} />
+            {usesAnalyticsFilters ? (
+              <div className="mt-1.5 grid grid-cols-2 gap-1.5 md:grid-cols-4 lg:grid-cols-6">
+                <div className="col-span-2 min-w-0">
+                  <FilterInput compact icon={<SearchIcon size={13} />} label={t("filters.search")} value={query.q ?? ""} placeholder={t("filters.searchPlaceholder")} onChange={(value) => updateFilter("q", value)} />
+                </div>
+                <FilterSelect compact label={t("filters.provider")} value={query.provider ?? ""} options={dimensionOptions(dimensions.providers, query.provider ?? "", t("filters.all"))} onChange={(value) => updateFilter("provider", value)} />
+                <FilterSelect compact label={t("filters.model")} value={query.model ?? ""} options={dimensionOptions(dimensions.models, query.model ?? "", t("filters.all"))} onChange={(value) => updateFilter("model", value)} />
+                <div role="group" aria-label={t("filters.dateRange")} className="col-span-2 flex h-8 min-w-0 items-center gap-1 rounded-field border border-border bg-surface-softer px-1.5 focus-within:border-accent-primary-border focus-within:ring-1 focus-within:ring-ring">
+                  <label className="min-w-0 flex-1">
+                    <span className="sr-only">{t("filters.from")}</span>
+                    <input type="date" title={t("filters.from")} value={query.from ?? ""} onChange={(event) => updateFilter("from", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                  </label>
+                  <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">—</span>
+                  <label className="min-w-0 flex-1">
+                    <span className="sr-only">{t("filters.to")}</span>
+                    <input type="date" title={t("filters.to")} value={query.to ?? ""} onChange={(event) => updateFilter("to", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                  </label>
+                </div>
+                <FilterSelect compact label={t("filters.directory")} value={query.directory ?? ""} options={dimensionOptions(dimensions.directories, query.directory ?? "", t("filters.all"))} onChange={(value) => updateFilter("directory", value)} />
+                <FilterSelect compact label={t("filters.project")} value={query.project ?? ""} options={dimensionOptions(dimensions.projects, query.project ?? "", t("filters.all"))} onChange={(value) => updateFilter("project", value)} />
+                <FilterSelect compact label={t("filters.status")} value={query.status ?? ""} options={dimensionOptions(dimensions.statuses, query.status ?? "", t("filters.all"))} onChange={(value) => updateFilter("status", value)} />
+                {usesGroupBy ? (
+                  <FilterSelect compact label={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} />
+                ) : null}
+                <div className="col-span-2 min-w-0">
+                  <FilterInput compact type="password" autoComplete="off" icon={<ShieldIcon size={12} />} label={t("filters.token")} value={adminToken} onChange={setAdminToken} placeholder={t("filters.tokenPlaceholder")} />
+                </div>
               </div>
-              <FilterSelect compact label={t("filters.provider")} value={query.provider ?? ""} options={dimensionOptions(dimensions.providers, query.provider ?? "", t("filters.all"))} onChange={(value) => updateFilter("provider", value)} />
-              <FilterSelect compact label={t("filters.model")} value={query.model ?? ""} options={dimensionOptions(dimensions.models, query.model ?? "", t("filters.all"))} onChange={(value) => updateFilter("model", value)} />
-              <div role="group" aria-label={t("filters.dateRange")} className="col-span-2 flex h-8 min-w-0 items-center gap-1 rounded-field border border-border bg-surface-softer px-1.5">
-                <label className="min-w-0 flex-1">
-                  <span className="sr-only">{t("filters.from")}</span>
-                  <input type="date" title={t("filters.from")} value={query.from ?? ""} onChange={(event) => updateFilter("from", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-                </label>
-                <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">—</span>
-                <label className="min-w-0 flex-1">
-                  <span className="sr-only">{t("filters.to")}</span>
-                  <input type="date" title={t("filters.to")} value={query.to ?? ""} onChange={(event) => updateFilter("to", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-                </label>
-              </div>
-              <FilterSelect compact label={t("filters.directory")} value={query.directory ?? ""} options={dimensionOptions(dimensions.directories, query.directory ?? "", t("filters.all"))} onChange={(value) => updateFilter("directory", value)} />
-              <FilterSelect compact label={t("filters.project")} value={query.project ?? ""} options={dimensionOptions(dimensions.projects, query.project ?? "", t("filters.all"))} onChange={(value) => updateFilter("project", value)} />
-              <FilterSelect compact label={t("filters.status")} value={query.status ?? ""} options={dimensionOptions(dimensions.statuses, query.status ?? "", t("filters.all"))} onChange={(value) => updateFilter("status", value)} />
-              <FilterSelect compact label={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} />
-              <div className="col-span-2 min-w-0">
+            ) : (
+              <div className="mt-1.5 max-w-xl min-w-0">
                 <FilterInput compact type="password" autoComplete="off" icon={<ShieldIcon size={12} />} label={t("filters.token")} value={adminToken} onChange={setAdminToken} placeholder={t("filters.tokenPlaceholder")} />
               </div>
-            </div>
+            )}
           </form>
 
-          {error ? (
+          {usesAnalyticsFilters && error ? (
             <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
               <span>{t("loadError")}: {error}</span>
               <Button
@@ -294,11 +326,11 @@ export function UsageOverview() {
                 {t("actions.retry")}
               </Button>
             </div>
-          ) : health && (!health.attached || health.degraded) ? (
+          ) : usesAnalyticsFilters && health && (!health.attached || health.degraded) ? (
             <AnalyticsHealthBanner health={health} />
-          ) : (
+          ) : usesAnalyticsFilters ? (
             <QualityNotice coverage={coverage} partial={partial} reasons={partialReasons} />
-          )}
+          ) : null}
 
           {observabilityError && view === "overview" ? (
             <div role="alert" className="rounded-panel border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2 text-xs text-analytics-warning">
@@ -314,8 +346,6 @@ export function UsageOverview() {
             tabIndex={0}
             className="flex min-w-0 flex-col gap-2"
           >
-            <p className="px-1 text-xs leading-5 text-muted-foreground">{t(`overviewTabs.descriptions.${view}`)}</p>
-
             {view === "overview" ? (
               <>
                 <section aria-label={t("metrics.title")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8">

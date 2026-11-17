@@ -78,7 +78,6 @@ export function BackendConfigSettingsPage() {
 
       <SettingsSection
         title={core.t("editor.panels.editorTitle")}
-        description={core.t("editor.panels.editorDescription")}
       >
         <div className="grid gap-3 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[17rem_minmax(0,1fr)]">
           <ConfigEditorMenuPanel core={core} />

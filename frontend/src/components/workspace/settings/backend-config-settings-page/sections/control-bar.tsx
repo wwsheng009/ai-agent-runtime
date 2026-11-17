@@ -3,7 +3,6 @@
 import { FileTextIcon, HardDriveDownloadIcon, LoaderCircleIcon, RefreshCcwIcon, RotateCcwIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getModeLabel } from "../format";
 import { type ConfigEditorCore } from "../use-config-core";
 
 
@@ -30,7 +29,6 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
     statusMessage,
     t,
     tCommon,
-    translatedModeMenuEntries,
   } = core;
 
   return (
@@ -127,19 +125,19 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
           </Button>
         </div>
       </div>
-      <div className="mt-2.5 text-xs text-muted-foreground">
-        {t("editor.currentFocusPrefix")}
-        {mode === "source"
-          ? t("editor.sourceFocus")
-          : getModeLabel(mode, translatedModeMenuEntries)}
-      </div>
       {statusMessage ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-accent-teal/24 bg-accent-teal/10 px-3 py-2.5 text-sm">
+        <div
+          role="status"
+          className="mt-2.5 rounded-[0.75rem] border border-analytics-success-border bg-analytics-success-soft px-3 py-2.5 text-sm text-analytics-success"
+        >
           {statusMessage}
         </div>
       ) : null}
       {error ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-accent-orange/24 bg-accent-orange/10 px-3 py-2.5 text-sm">
+        <div
+          role="alert"
+          className="mt-2.5 rounded-[0.75rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger"
+        >
           {error}
         </div>
       ) : null}

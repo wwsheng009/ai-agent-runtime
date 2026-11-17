@@ -311,7 +311,7 @@ export function LogsPage() {
           streamError={streamError}
         />
 
-        <section className="grid min-h-0 flex-1 gap-2 lg:min-h-0 lg:flex-1 xl:grid-cols-[21rem_minmax(0,1fr)] 2xl:grid-cols-[22rem_minmax(0,1fr)]">
+        <section className="grid min-h-0 flex-1 gap-2 lg:min-h-0 lg:flex-1 lg:grid-cols-[21rem_minmax(0,1fr)] 2xl:grid-cols-[22rem_minmax(0,1fr)]">
           <LogsListPanel
             entries={entries}
             error={error}
@@ -327,9 +327,6 @@ export function LogsPage() {
           <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-panel-lg lg:min-h-0">
             <div className="border-b border-border px-3.5 py-2">
               <div className="app-text-13 font-semibold tracking-[-0.02em]">{t("detailsTitle")}</div>
-              <div className="mt-1 app-text-11 text-muted-foreground">
-                {t("detailsDescription")}
-              </div>
             </div>
 
             {!selectedEntry ? (

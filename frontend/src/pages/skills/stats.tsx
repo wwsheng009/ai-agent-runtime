@@ -7,7 +7,9 @@
 
 import { useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
 import type { RuntimeSkillStats } from "@/types/runtime";
+import { RefreshCwIcon } from "lucide-react";
 
 import type { SkillsStreamStatus } from "@/hooks/use-skills-market";
 
@@ -31,13 +33,15 @@ export function SkillsStatsPanel({ stats, status, error, onRefresh }: SkillsStat
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{t("stats.title")}</h2>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           onClick={onRefresh}
-          className="text-xs text-muted-foreground underline-offset-2 hover:underline"
         >
+          <RefreshCwIcon size={13} aria-hidden="true" />
           {t("actions.refresh")}
-        </button>
+        </Button>
       </div>
 
       {status === "loading" ? (

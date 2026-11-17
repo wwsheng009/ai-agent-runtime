@@ -127,9 +127,6 @@ export function RoutingObservabilityPanel({
           <h3 id="routing-observability-title" className="text-sm font-semibold">
             {t("observability.routing.title")}
           </h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {t("observability.routing.subtitle")}
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1 text-xs text-muted-foreground">

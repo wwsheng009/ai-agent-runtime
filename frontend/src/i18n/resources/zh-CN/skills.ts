@@ -10,7 +10,6 @@ export const zhSkills = {
   badge: "技能市场",
   independentPage: "独立页面",
   title: "技能市场 / 热重载",
-  description: "浏览运行时技能目录、检索技能定义，并管理技能目录的文件热重载。",
   backToRuntimeConfig: "返回运行时配置",
 
   nav: {

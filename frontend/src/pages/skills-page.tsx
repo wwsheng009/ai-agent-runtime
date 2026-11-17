@@ -42,9 +42,6 @@ export function SkillsPage() {
                 <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.1rem]">
                   {t("title")}
                 </h1>
-                <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
-                  {t("description")}
-                </p>
               </div>
             </div>
 

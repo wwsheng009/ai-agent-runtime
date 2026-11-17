@@ -57,9 +57,6 @@ export function LogsListPanel({
           <div className="app-text-12 font-semibold tracking-[-0.02em]">
             {t("listTitle")}
           </div>
-          <div className="app-text-10 text-muted-foreground">
-            {t("listSubtitle")}
-          </div>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             {levelStats
               .filter((stat) => stat.count > 0 || stat.key !== "other")

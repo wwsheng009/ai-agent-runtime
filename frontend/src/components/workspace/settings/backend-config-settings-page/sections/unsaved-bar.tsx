@@ -27,7 +27,6 @@ export function ConfigUnsavedBar({ core }: { core: ConfigEditorCore }) {
           <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               <Badge>{t("editor.sticky.unsaved")}</Badge>
-              <div className="text-sm text-muted-foreground">{t("editor.sticky.hint")}</div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Button

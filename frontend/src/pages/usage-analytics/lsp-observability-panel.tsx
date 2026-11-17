@@ -128,7 +128,7 @@ export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
         <div className="surface-panel rounded-panel-lg p-4">
           <h3 className="text-sm font-semibold">{t("lspPanel.baseline")}</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            {t("lspPanel.baselineNote")} · {t("lspPanel.baselineWindow")}: {baseline.window} ·{" "}
+            {t("lspPanel.baselineWindow")}: {baseline.window} ·{" "}
             {/* 事实源由后端声明（source），不由 UI 猜。数据面读分析库时不扫日志，
                 scan.* 恒为 0 —— 渲染成"扫描 0 文件/0 损坏"会被读成"数据有问题"，
                 所以那条路径下根本不提扫描量。 */}
@@ -245,7 +245,6 @@ export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
 
           <div className="surface-panel rounded-panel-lg p-4">
             <h3 className="text-sm font-semibold">{t("lspPanel.requests")}</h3>
-            <p className="mt-1 text-xs text-muted-foreground">{t("lspPanel.countsNote")}</p>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {outcomes.length === 0 ? (
                 <span className="text-muted-foreground">{t("lspPanel.noRequests")}</span>
