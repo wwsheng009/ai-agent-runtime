@@ -18,6 +18,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { Input } from "@/components/ui/input";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import {
   filterComposerModelGroups,
@@ -196,9 +197,11 @@ function ComposerModelDialogBody({
 
         {hasModels ? (
           <div className="border-b border-border px-3 py-2">
-            <input
+            <Input
               aria-label={t("composer.modelDialog.search.aria")}
-              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 app-text-11 text-foreground outline-none placeholder:text-muted-foreground"
+              size="sm"
+              surface="transparent"
+              className="app-text-11"
               data-composer-model-search
               onChange={(event) => {
                 setSearch(event.currentTarget.value);

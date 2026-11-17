@@ -23,6 +23,7 @@ import {
   type ProviderModelsAction,
 } from "./provider-models-section";
 import { ProviderNetworkFields } from "./provider-network-fields";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type ProviderDialogTab = "basic" | "connection" | "models" | "advanced";
 
@@ -163,9 +164,7 @@ export function ProviderDialog({
 
               <div className="flex flex-wrap gap-3 rounded-card border border-border bg-surface-softer px-3 py-2.5">
                 <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-accent-primary"
+                  <CheckboxInput
                     checked={draft.enabled}
                     onChange={(event) =>
                       setDraft((current) => ({
@@ -177,9 +176,7 @@ export function ProviderDialog({
                   {t("editor.providers.fields.enableProvider")}
                 </label>
                 <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-accent-primary"
+                  <CheckboxInput
                     checked={draft.setAsDefault}
                     onChange={(event) =>
                       setDraft((current) => ({

@@ -16,6 +16,7 @@ import { SettingsNoticeCard } from "../settings-notice-card";
 import { SettingsPanelCard } from "../settings-panel-card";
 import { SettingsPanelIcon } from "../settings-panel-icon";
 import { SettingsSubsectionCard } from "../settings-subsection-card";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export function RuntimeRetryOverviewSection({
   config,
@@ -75,9 +76,7 @@ export function RuntimeRetryOverviewSection({
                   ? t("editor.retry.toggle.enabled")
                   : t("editor.retry.toggle.disabled")}
               </span>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.enabled}
                 onChange={(event) =>
                   onChangeConfig({ ...config, enabled: event.target.checked })
@@ -146,9 +145,7 @@ export function RuntimeRetryOverviewSection({
             title={t("editor.retry.invalidEncrypted.title")}
             description={t("editor.retry.invalidEncrypted.description")}
             headerAside={
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.invalidEncryptedContentStripClientStateOnce}
                 onChange={(event) =>
                   onChangeConfig({
@@ -171,9 +168,7 @@ export function RuntimeRetryOverviewSection({
             title={t("editor.retry.enhancedStrategy.title")}
             description={t("editor.retry.enhancedStrategy.description")}
             headerAside={
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.enhancedStrategyEnabled}
                 onChange={(event) =>
                   onChangeConfig({

@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { CheckboxInput } from "@/components/ui/checkbox";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { RuntimeLogsConnectionState } from "@/hooks/use-runtime-logs";
 import { cn } from "@/lib/utils";
@@ -161,12 +162,13 @@ export function LogsHeaderSection({
               size={14}
               className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground"
             />
-            <input
+            <Input
+              size="sm"
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
               placeholder={t("searchPlaceholder")}
               aria-label={t("searchPlaceholder")}
-              className="h-8 w-full rounded-field border border-border bg-black/15 pl-10 pr-4 app-text-11 text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
+              className="bg-black/15 pl-10 pr-4 app-text-11"
             />
           </label>
 
@@ -190,12 +192,14 @@ export function LogsHeaderSection({
               <ShieldIcon size={12} />
               {t("tokenLabel")}
             </span>
-            <input
+            <Input
               type="password"
+              size="sm"
+              surface="transparent"
               value={adminToken}
               onChange={(event) => onAdminTokenChange(event.target.value)}
               placeholder={t("tokenPlaceholder")}
-              className="min-w-0 flex-1 bg-transparent app-text-11 text-foreground outline-none"
+              className="h-full min-w-0 flex-1 border-0 bg-transparent px-0 py-0 app-text-11 focus-visible:ring-0"
             />
           </label>
 

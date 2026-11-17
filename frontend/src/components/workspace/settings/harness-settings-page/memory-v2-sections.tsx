@@ -9,6 +9,8 @@ import type {
 } from "@/lib/runtime-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 
 function formatCounts(values?: Record<string, number>) {
   const entries = Object.entries(values ?? {});
@@ -195,16 +197,17 @@ export function MemoryV2SessionGovernance({
         {t("harness.memorySessionGovernance")}
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        <input
+        <Input
           aria-label={t("harness.memorySessionIDPlaceholder")}
-          className="min-w-0 flex-1 rounded-card border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-accent"
+          size="sm"
+          className="min-w-0 flex-1"
           placeholder={t("harness.memorySessionIDPlaceholder")}
           value={sessionID}
           onChange={(event) => onSessionIDChange(event.target.value)}
         />
-        <select
+        <NativeSelect
           aria-label={t("harness.memorySessionMode")}
-          className="rounded-card border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-accent"
+          size="sm"
           value={sessionMode}
           onChange={(event) =>
             onSessionModeChange(event.target.value as "enabled" | "disabled" | "polluted")
@@ -213,7 +216,7 @@ export function MemoryV2SessionGovernance({
           <option value="enabled">{t("harness.memorySessionModeEnabled")}</option>
           <option value="disabled">{t("harness.memorySessionModeDisabled")}</option>
           <option value="polluted">{t("harness.memorySessionModePolluted")}</option>
-        </select>
+        </NativeSelect>
         <Button
           variant="secondary"
           size="sm"

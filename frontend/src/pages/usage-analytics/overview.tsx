@@ -1,6 +1,7 @@
 // 由 pages/usage-analytics-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   getAnalyticsSubagents,
   getToolEfficiencySnapshot,
@@ -288,12 +289,12 @@ export function UsageOverview() {
                 <div role="group" aria-label={t("filters.dateRange")} className="col-span-2 flex h-8 min-w-0 items-center gap-1 rounded-field border border-border bg-surface-softer px-1.5 focus-within:border-accent-primary-border focus-within:ring-1 focus-within:ring-ring">
                   <label className="min-w-0 flex-1">
                     <span className="sr-only">{t("filters.from")}</span>
-                    <input type="date" title={t("filters.from")} value={query.from ?? ""} onChange={(event) => updateFilter("from", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                    <Input type="date" size="sm" surface="transparent" title={t("filters.from")} value={query.from ?? ""} onChange={(event) => updateFilter("from", event.target.value)} className="h-7 min-w-0 border-0 bg-transparent px-1 text-xs focus-visible:ring-0" />
                   </label>
                   <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">—</span>
                   <label className="min-w-0 flex-1">
                     <span className="sr-only">{t("filters.to")}</span>
-                    <input type="date" title={t("filters.to")} value={query.to ?? ""} onChange={(event) => updateFilter("to", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                    <Input type="date" size="sm" surface="transparent" title={t("filters.to")} value={query.to ?? ""} onChange={(event) => updateFilter("to", event.target.value)} className="h-7 min-w-0 border-0 bg-transparent px-1 text-xs focus-visible:ring-0" />
                   </label>
                 </div>
                 <FilterSelect compact label={t("filters.directory")} value={query.directory ?? ""} options={dimensionOptions(dimensions.directories, query.directory ?? "", t("filters.all"))} onChange={(value) => updateFilter("directory", value)} />

@@ -9,6 +9,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { type ChatMessage, type MessageSegment } from "@/data/mock";
 import { isSteeringMessage } from "@/lib/chat-view";
 import { hasVisibleText } from "@/lib/chat-view/visible-text";
@@ -131,9 +132,10 @@ export function UserMessageBubble({
         <div className="min-w-0" id={statusId}>
           {isEditing ? (
             <div className="space-y-2">
-              <textarea
+              <Textarea
                 aria-label={t("panels.messages.userBubble.editPromptAriaLabel")}
-                className="min-h-[7rem] w-full resize-y rounded-card-lg border border-border bg-surface-softer px-3 py-2.5 app-chat-bubble text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus-visible:ring-2 focus-visible:ring-ring"
+                size="md"
+                className="min-h-[7rem] app-chat-bubble"
                 onChange={(event) => setInlineEditDraft(event.target.value)}
                 onClick={(event) => event.stopPropagation()}
                 placeholder={t("panels.messages.userBubble.editPromptPlaceholder")}

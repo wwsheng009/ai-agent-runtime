@@ -14,6 +14,7 @@ import { SettingsPanelIcon } from "./settings-panel-icon";
 import { type RuntimeAuthConfigSummary } from "./runtime-config-domain-utils";
 import { SettingsPanelCard } from "./settings-panel-card";
 import { SettingsSubsectionCard } from "./settings-subsection-card";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type RuntimeAuthDomainEditorProps = {
   authConfig: RuntimeAuthConfigSummary;
@@ -129,9 +130,7 @@ export function RuntimeAuthDomainEditor({
           description={t("editor.auth.admin.description")}
           headerAside={
             <label className={editorSectionToggleClassName}>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={authConfig.adminAuthEnabled}
                 onChange={(event) =>
                   update({ adminAuthEnabled: event.target.checked })
@@ -158,9 +157,7 @@ export function RuntimeAuthDomainEditor({
           description={t("editor.auth.access.description")}
           headerAside={
             <label className={editorSectionToggleClassName}>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={authConfig.accessAuthEnabled}
                 onChange={(event) =>
                   update({ accessAuthEnabled: event.target.checked })

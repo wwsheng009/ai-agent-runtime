@@ -9,6 +9,7 @@ import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-reac
 import { useTranslation } from "react-i18next";
 
 import type { PopoverPosition } from "@/components/ui/popover-position";
+import { Input } from "@/components/ui/input";
 import type {
   ComposerModelPanelSection,
   ComposerModelPanelSectionId,
@@ -138,8 +139,10 @@ export function ComposerModelPanelSurface({
           {/* 候选可能很多：检索框固定在列表上方，不随列表一起滚走。 */}
           {filterSection ? (
             <div className="flex shrink-0 items-center gap-1.5 border-b border-border/60 px-2.5 py-2">
-              <input
+              <Input
                 autoComplete="off"
+                size="sm"
+                surface="transparent"
                 aria-label={filterPlaceholder}
                 data-composer-model-panel-filter={filterSection}
                 placeholder={filterPlaceholder}
@@ -148,7 +151,7 @@ export function ComposerModelPanelSurface({
                 onChange={(event) => {
                   changeFilter(event.currentTarget.value);
                 }}
-                className="min-w-0 flex-1 bg-transparent text-base text-foreground outline-none placeholder:text-muted-foreground"
+                className="h-auto min-w-0 flex-1 border-0 bg-transparent px-0 py-0 text-base focus-visible:ring-0"
               />
               {filterQuery ? (
                 <button

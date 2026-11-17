@@ -12,6 +12,8 @@ import { ApprovalDecisionControls } from "@/components/workspace/approval-decisi
 import { useApprovalExplanation } from "@/hooks/workspace/use-approval-explanation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import type {
   SessionApprovalRememberScope,
 } from "@/api/runtime/sessions";
@@ -85,9 +87,10 @@ function QuestionForm({
           ))}
         </div>
       ) : null}
-      <input
+      <Input
         aria-label={t("panels.interactions.question.placeholder")}
-        className="h-8 min-w-0 flex-1 rounded-field border border-border bg-surface-solid px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        size="sm"
+        className="min-w-0 flex-1"
         disabled={disabled}
         placeholder={t("panels.interactions.question.placeholder")}
         value={answerDraft}
@@ -259,9 +262,10 @@ export function PendingInteractionBar({
 
       {interaction.kind === "plan_review" ? (
         <div className="mt-2 space-y-2">
-          <textarea
+          <Textarea
             aria-label={t("panels.artifacts.plan.reviewNotes")}
-            className="min-h-16 w-full resize-y rounded-field border border-border bg-surface-solid px-2.5 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            size="sm"
+            className="min-h-16"
             disabled={planActionPending}
             placeholder={t("panels.artifacts.plan.notesPlaceholder")}
             value={planNotesDraft}

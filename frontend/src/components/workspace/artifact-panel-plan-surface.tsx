@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
 import type { RuntimeSessionPlanMode } from "@/lib/runtime-api";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
@@ -205,8 +206,10 @@ export function ArtifactPanelPlanSurface({
                 >
                   {t("panels.artifacts.plan.reviewNotes")}
                 </label>
-                <textarea
-                  className="min-h-[4.5rem] w-full resize-y rounded-field border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                <Textarea
+                  size="md"
+                  surface="dark"
+                  className="min-h-[4.5rem] leading-6"
                   disabled={!sessionId || planActionPending}
                   id="artifact-panel-plan-notes"
                   onChange={(event) => onNotesDraftChange(event.target.value)}

@@ -21,6 +21,7 @@ import { CheckIcon, FilterIcon, PlusIcon, UndoIcon } from "lucide-react";
 import { useMemo, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
+import { Input } from "@/components/ui/input";
 import type { GitSnapshot } from "@/hooks/workspace/use-git-changes";
 import { flattenGitChanges } from "@/hooks/workspace/use-git-changes";
 import { describeError } from "@/lib/errors";
@@ -120,9 +121,11 @@ export function GitChangeList({
       </div>
       <label className="flex items-center gap-1.5 rounded-control border border-white/8 bg-white/[0.03] px-2 py-1">
         <FilterIcon className="shrink-0 text-muted-foreground" size={13} />
-        <input
+        <Input
           aria-label={t("panels.git.list.filterAriaLabel")}
-          className="min-w-0 flex-1 bg-transparent app-text-12 outline-none placeholder:text-muted-foreground/60"
+          size="sm"
+          surface="transparent"
+          className="h-7 min-w-0 flex-1 border-0 bg-transparent px-0 py-0 app-text-12 focus-visible:ring-0"
           onChange={(event) => setFilter(event.target.value)}
           placeholder={t("panels.git.list.filterPlaceholder")}
           type="text"

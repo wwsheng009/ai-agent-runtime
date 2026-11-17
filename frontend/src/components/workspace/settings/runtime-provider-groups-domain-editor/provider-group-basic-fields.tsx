@@ -20,6 +20,7 @@ import {
   providerGroupTruncationStrategyOptions,
 } from "./draft-utils";
 import { FieldIssueText } from "./field-parts";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type ProviderGroupBasicFieldsProps = {
   draft: ProviderGroupDraftInput;
@@ -112,9 +113,7 @@ export function ProviderGroupBasicFields({
                   </div>
                 </div>
                 <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-accent-primary"
+                  <CheckboxInput
                     checked={draft.failoverEnabled}
                     onChange={(event) =>
                       setDraft((current) => ({
@@ -184,9 +183,7 @@ export function ProviderGroupBasicFields({
                   </div>
                 </div>
                 <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-accent-primary"
+                  <CheckboxInput
                     checked={draft.truncationEnabled}
                     onChange={(event) =>
                       setDraft((current) => ({

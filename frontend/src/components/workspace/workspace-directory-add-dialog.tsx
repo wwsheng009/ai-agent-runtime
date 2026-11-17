@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type WorkspaceDirectoryAddDialogProps = {
   onClose: () => void;
@@ -101,14 +102,14 @@ export function WorkspaceDirectoryAddDialog({
             <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               {t("sidebar.directories.pathLabel")}
             </span>
-            <input
+            <Input
               autoFocus
               required
               value={path}
               onChange={(event) => setPath(event.target.value)}
               placeholder={t("sidebar.directories.pathPlaceholder")}
               spellCheck={false}
-              className="mt-1.5 w-full rounded-field border border-border bg-surface-solid px-3 py-2 text-sm text-foreground outline-none transition focus:border-accent-primary-border"
+              className="mt-1.5"
             />
           </label>
 
@@ -116,11 +117,11 @@ export function WorkspaceDirectoryAddDialog({
             <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               {t("sidebar.directories.nameLabel")}
             </span>
-            <input
+            <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder={t("sidebar.directories.namePlaceholder")}
-              className="mt-1.5 w-full rounded-field border border-border bg-surface-solid px-3 py-2 text-sm text-foreground outline-none transition focus:border-accent-primary-border"
+              className="mt-1.5"
             />
           </label>
 

@@ -10,6 +10,7 @@ import { SettingsDialogFooter } from "../settings-dialog-footer";
 import { SettingsNoticeCard } from "../settings-notice-card";
 
 import { type RetryRuleDraftInput } from "./types";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export function RuntimeRetryRuleDialog({
   dialogError,
@@ -77,9 +78,7 @@ export function RuntimeRetryRuleDialog({
                     ? t("editor.retry.toggle.enabled")
                     : t("editor.retry.toggle.disabled")}
                 </span>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-accent-primary"
+                <CheckboxInput
                   checked={draft.enabled}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -235,9 +234,7 @@ export function RuntimeRetryRuleDialog({
                     ? t("editor.retry.caseSensitive.on")
                     : t("editor.retry.caseSensitive.off")}
                 </span>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-accent-primary"
+                <CheckboxInput
                   checked={draft.keywordCaseSensitive}
                   onChange={(event) =>
                     setDraft((current) => ({

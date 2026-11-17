@@ -7,6 +7,7 @@ import {
   getRuntimeShellSettings,
   probeRuntimeShellSettings,
 } from "@/api/runtime/config";
+import { useRuntimeClientIdentity } from "@/lib/runtime-client";
 import type { RuntimeShellCandidate, RuntimeShellSettingsResponse } from "@/types/runtime";
 
 import { ConfigFormField } from "./config-form-field";
@@ -27,6 +28,7 @@ import {
   runtimeShellCandidateIds,
   type RuntimeShellConfigSummary,
 } from "./runtime-shell-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type RuntimeShellDomainEditorProps = {
   config: RuntimeShellConfigSummary;
@@ -43,6 +45,8 @@ type RuntimeShellDomainEditorProps = {
  */
 export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomainEditorProps) {
   const { t } = useTranslation("runtimeConfig");
+  const runtimeClient = useRuntimeClientIdentity();
+  const workspacePath = runtimeClient.workspacePath?.trim() ?? "";
   const [probeResult, setProbeResult] = useState<RuntimeShellSettingsResponse | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
@@ -52,7 +56,7 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
 
   useEffect(() => {
     let active = true;
-    getRuntimeShellSettings()
+    getRuntimeShellSettings(workspacePath || undefined)
       .then((response) => {
         if (!active) {
           return;
@@ -70,21 +74,24 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
     return () => {
       active = false;
     };
-  }, []);
+  }, [workspacePath]);
 
   async function handleProbe() {
     setProbing(true);
     setProbeError(null);
     try {
-      const response = await probeRuntimeShellSettings({
-        auto_detect: config.autoDetect,
-        prefer: config.prefer,
-        path: config.path,
-        probe_timeout: config.probeTimeout,
-        strict_probe: config.strictProbe,
-        script_delivery: config.scriptDelivery,
-        env: { ...config.env },
-      });
+      const response = await probeRuntimeShellSettings(
+        {
+          auto_detect: config.autoDetect,
+          prefer: config.prefer,
+          path: config.path,
+          probe_timeout: config.probeTimeout,
+          strict_probe: config.strictProbe,
+          script_delivery: config.scriptDelivery,
+          env: { ...config.env },
+        },
+        workspacePath || undefined,
+      );
       setProbeResult(response);
       if (response.error) {
         setProbeError(response.error);
@@ -143,9 +150,7 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
                   ? t("editor.shell.enabled")
                   : t("editor.shell.disabled")}
               </span>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.autoDetect}
                 onChange={(event) =>
                   onChange({ ...config, autoDetect: event.target.checked })
@@ -167,9 +172,7 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
                   ? t("editor.shell.enabled")
                   : t("editor.shell.disabled")}
               </span>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.strictProbe}
                 onChange={(event) =>
                   onChange({ ...config, strictProbe: event.target.checked })

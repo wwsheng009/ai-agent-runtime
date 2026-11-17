@@ -19,9 +19,7 @@ import { cn } from "@/lib/utils";
 import {
   useWorkspaceBotPanel,
 } from "@/hooks/workspace/use-workspace-bot-panel";
-
-const inputClassName =
-  "h-8 w-full rounded-control border border-border bg-surface-soft px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary";
+import { Input } from "@/components/ui/input";
 
 interface WorkspaceBotPanelProps {
   /** 当前选中的 runtime 会话 id（绑定目标）；空 = 无可绑定目标。 */
@@ -180,9 +178,10 @@ export function WorkspaceBotPanel({ selectedSessionId }: WorkspaceBotPanelProps)
 
               {addingFor === connector.id ? (
                 <div className="mt-1.5 flex items-center gap-1">
-                  <input
+                  <Input
                     type="text"
-                    className={inputClassName}
+                    size="sm"
+                    surface="soft"
                     placeholder={t("sidebar.bots.chatPlaceholder")}
                     value={newChat}
                     onChange={(event) => setNewChat(event.target.value)}

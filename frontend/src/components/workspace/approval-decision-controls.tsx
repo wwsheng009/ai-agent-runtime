@@ -21,6 +21,8 @@ import type {
 } from "@/api/runtime/sessions";
 import { Button } from "@/components/ui/button";
 import { CheckboxInput } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { cn } from "@/lib/utils";
 
 export type ApprovalDecisionOptions = {
@@ -135,9 +137,9 @@ export function ApprovalDecisionControls({
           </label>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             {remember ? (
-              <select
+              <NativeSelect
                 aria-label={labels.rememberScopeLabel}
-                className="h-7 rounded-field border border-border bg-surface-solid px-1.5 text-xs text-foreground outline-none transition focus-visible:border-accent-primary-border focus-visible:ring-2 focus-visible:ring-ring"
+                size="sm"
                 disabled={disabled}
                 value={scope}
                 onChange={(event) =>
@@ -148,7 +150,7 @@ export function ApprovalDecisionControls({
               >
                 <option value="session">{labels.rememberScopeSession}</option>
                 <option value="project">{labels.rememberScopeProject}</option>
-              </select>
+              </NativeSelect>
             ) : null}
             {/* 勾选前就展示将记住的模式：让「记住」是可核对的决定而不是盲选。 */}
             <span className="font-mono text-[11px] break-all">
@@ -157,9 +159,9 @@ export function ApprovalDecisionControls({
           </div>
         </div>
       ) : null}
-      <input
+      <Input
         aria-label={labels.feedbackPlaceholder}
-        className="h-8 w-full rounded-field border border-border bg-surface-solid px-2.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        size="sm"
         disabled={disabled}
         placeholder={labels.feedbackPlaceholder}
         value={feedback}

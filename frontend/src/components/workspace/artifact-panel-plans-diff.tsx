@@ -19,6 +19,7 @@ import {
 } from "@/components/workspace/artifact-panel-plans-shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import type { RuntimePlanDiffResult } from "@/types/runtime";
 
 export type ArtifactPlanDiffBlockState = {
@@ -205,8 +206,10 @@ export function ArtifactPlanDiffBlock({
           </div>
           {selection ? (
             <div className="space-y-1">
-              <textarea
-                className="min-h-[3.5rem] w-full rounded-card border border-white/10 bg-black/20 px-2 py-1.5 font-mono text-xs"
+              <Textarea
+                size="md"
+                surface="dark"
+                className="min-h-[3.5rem] font-mono text-xs"
                 data-testid="plan-comment-draft"
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder={t("panels.artifacts.plans.comments.diff.placeholder")}

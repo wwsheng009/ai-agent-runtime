@@ -7,6 +7,7 @@ import { truncateIdentifier } from "../shared";
 
 import { consolePillClass } from "./console-styles";
 import type { DispatchConsoleProps } from "./types";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type DispatchTeamSelectorProps = Pick<
   DispatchConsoleProps,
@@ -50,11 +51,10 @@ export function DispatchTeamSelector({
             )}
           >
             <span className="flex min-w-0 items-center gap-3">
-              <input
-                type="checkbox"
+              <CheckboxInput
                 checked={checked}
                 onChange={() => onToggleDispatchTeam(team.id)}
-                className="size-4 rounded border-white/14 bg-transparent"
+                className="rounded border-white/14 bg-transparent"
               />
               <span className="min-w-0">
                 <span className="block truncate text-sm font-semibold text-foreground">

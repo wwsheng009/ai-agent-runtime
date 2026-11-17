@@ -14,6 +14,7 @@ import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } 
 import { useTranslation } from "react-i18next";
 
 import { fieldControlVariants } from "@/components/ui/field-variants";
+import { Input } from "@/components/ui/input";
 import type { ConnectorRoutePolicyView } from "@/types/runtime";
 import {
   advanceAfterModelSelect,
@@ -335,8 +336,10 @@ export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerP
             <div className="flex min-h-0 flex-col">
               {activeSection.id === "provider" || activeSection.id === "model" ? (
                 <div className="flex shrink-0 items-center gap-1.5 border-b border-border/60 px-2.5 py-2">
-                  <input
+                  <Input
                     autoComplete="off"
+                    size="sm"
+                    surface="transparent"
                     aria-label={t("connectorDialog.routeFilterPlaceholder")}
                     data-composer-model-panel-filter={activeSection.id}
                     placeholder={t("connectorDialog.routeFilterPlaceholder")}
@@ -349,7 +352,7 @@ export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerP
                         setModelQuery(event.currentTarget.value);
                       }
                     }}
-                    className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+                    className="h-auto min-w-0 flex-1 border-0 bg-transparent px-0 py-0 focus-visible:ring-0"
                   />
                 </div>
               ) : null}

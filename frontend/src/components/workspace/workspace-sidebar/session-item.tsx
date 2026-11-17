@@ -3,6 +3,7 @@
 // 2026-09-16 样式优化：相对时间并入标题行末尾，与 hover 菜单图标同槽互换（整行单行高）。
 
 import { useRef, useState, type DragEvent } from "react";
+import { Input } from "@/components/ui/input";
 import { type RuntimeSessionRecord } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 
@@ -36,8 +37,9 @@ export function InlineRenameInput({
   const settledRef = useRef(false);
 
   return (
-    <input
+    <Input
       autoFocus
+      size="sm"
       value={value}
       aria-label={ariaLabel}
       onChange={(event) => setValue(event.target.value)}
@@ -66,7 +68,7 @@ export function InlineRenameInput({
       }}
       placeholder={placeholder}
       spellCheck={false}
-      className="w-full min-w-0 rounded-[0.55rem] border border-accent-primary-border bg-surface-solid px-2 py-1 text-sm text-foreground outline-none"
+      className="h-7 min-w-0 border-accent-primary-border"
     />
   );
 }

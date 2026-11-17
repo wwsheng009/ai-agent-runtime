@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { JobActions } from "@/components/workspace/jobs-panel-job-actions";
 import {
   formatJobDuration,
@@ -165,9 +166,10 @@ export function JobRow({
             void onSendInput(job.id);
           }}
         >
-          <input
+          <Input
             aria-label={t("panels.jobs.input.label", { command: job.command })}
-            className="h-7 min-w-0 flex-1 rounded-card border border-border bg-surface px-2 app-text-11 text-foreground placeholder:text-muted-foreground"
+            size="sm"
+            className="h-7 min-w-0 flex-1 app-text-11"
             data-testid="job-input"
             disabled={input?.sending}
             onChange={(event) => onInputChange(job.id, event.target.value)}

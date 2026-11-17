@@ -5,6 +5,7 @@ import { ConfigFormField } from "../config-form-field";
 import { editorControlClassName } from "../editor-control-class";
 import { type ProviderDraftInput } from "../runtime-provider-domain-form-utils";
 import { ProviderKeyValueRows } from "./provider-key-value-rows";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type ProviderNetworkFieldsProps = {
   draft: ProviderDraftInput;
@@ -80,9 +81,7 @@ export function ProviderNetworkFields({
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-accent-primary"
+                <CheckboxInput
                   checked={draft.proxyEnabled}
                   onChange={(event) =>
                     setDraft((current) => ({

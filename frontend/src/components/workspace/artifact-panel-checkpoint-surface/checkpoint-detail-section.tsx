@@ -21,6 +21,7 @@ import {
   type ArtifactPanelCheckpointSurfaceProps,
   type CheckpointFileSelection,
 } from "./types";
+import { RadioInput } from "@/components/ui/radio";
 
 type ArtifactPanelCheckpointDetailSectionProps = Pick<
   ArtifactPanelCheckpointSurfaceProps,
@@ -163,14 +164,13 @@ export function ArtifactPanelCheckpointDetailSection({
                           : "border-white/8 bg-white/[0.02] text-muted-foreground hover:border-white/14",
                       )}
                     >
-                      <input
+                      <RadioInput
                         checked={restoreMode === option.value}
-                        className="mt-0.5 size-4 accent-accent-teal"
+                        className="mt-0.5"
                         disabled={restorePending}
                         name="checkpoint-restore-mode"
                         onChange={() => setRestoreMode(option.value)}
-                        type="radio"
-                        value={option.value}
+                        value={option.value} tone="teal"
                       />
                       <span className="min-w-0">
                         <span className="block app-text-13">{t(option.labelKey)}</span>

@@ -11,6 +11,7 @@ import {
 import { SettingsPanelCard } from "../settings-panel-card";
 import { SettingsPanelIcon } from "../settings-panel-icon";
 import { type RuntimeProviderQueueConfigSummary } from "../runtime-provider-queue-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export function RuntimeProviderQueueOverflowHeartbeatSection({
   config,
@@ -34,9 +35,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
           descriptionClassName="mt-1 text-xs leading-5"
           headerAside={
             <label className={editorSectionToggleClassName}>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.overflowEnabled}
                 onChange={(event) =>
                   onChangeConfig({ ...config, overflowEnabled: event.target.checked })
@@ -87,9 +86,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
           descriptionClassName="mt-1 text-xs leading-5"
           headerAside={
             <label className={editorSectionToggleClassName}>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.waitHeartbeatEnabled}
                 onChange={(event) =>
                   onChangeConfig({

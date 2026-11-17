@@ -11,6 +11,7 @@ import { SettingsPanelIcon } from "./settings-panel-icon";
 import {
   type RuntimeMonitorConfigSummary,
 } from "./runtime-monitor-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type RuntimeMonitorDomainEditorProps = {
   config: RuntimeMonitorConfigSummary;
@@ -83,9 +84,7 @@ export function RuntimeMonitorDomainEditor({
             </div>
           </div>
           <label className="flex items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-accent-primary"
+            <CheckboxInput
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
@@ -106,9 +105,7 @@ export function RuntimeMonitorDomainEditor({
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.metricsEnabled}
                 onChange={(event) =>
                   update({ metricsEnabled: event.target.checked })
@@ -147,9 +144,7 @@ export function RuntimeMonitorDomainEditor({
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.tracingEnabled}
                 onChange={(event) =>
                   update({ tracingEnabled: event.target.checked })
@@ -202,9 +197,7 @@ export function RuntimeMonitorDomainEditor({
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.alertEnabled}
                 onChange={(event) => update({ alertEnabled: event.target.checked })}
               />
@@ -268,9 +261,7 @@ export function RuntimeMonitorDomainEditor({
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-accent-primary"
+                <CheckboxInput
                   checked={config.pprofEnabled}
                   onChange={(event) => update({ pprofEnabled: event.target.checked })}
                 />
@@ -314,9 +305,7 @@ export function RuntimeMonitorDomainEditor({
                 </div>
               </div>
               <label className="flex items-center gap-2 text-sm text-foreground">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 accent-accent-primary"
+                <CheckboxInput
                   checked={config.memoryEnabled}
                   onChange={(event) => update({ memoryEnabled: event.target.checked })}
                 />

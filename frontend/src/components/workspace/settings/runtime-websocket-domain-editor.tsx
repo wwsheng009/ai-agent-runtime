@@ -9,6 +9,7 @@ import { SettingsBadgeList } from "./settings-badge-list";
 import { SettingsInlineToggleCard } from "./settings-inline-toggle-card";
 import { SettingsPanelIcon } from "./settings-panel-icon";
 import { type RuntimeWebsocketConfigSummary } from "./runtime-websocket-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type RuntimeWebsocketDomainEditorProps = {
   config: RuntimeWebsocketConfigSummary;
@@ -76,9 +77,7 @@ export function RuntimeWebsocketDomainEditor({
             </div>
           </div>
           <label className="flex items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-accent-primary"
+            <CheckboxInput
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
@@ -99,9 +98,7 @@ export function RuntimeWebsocketDomainEditor({
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.responsesIngressEnabled}
                 onChange={(event) =>
                   update({ responsesIngressEnabled: event.target.checked })
@@ -239,9 +236,7 @@ export function RuntimeWebsocketDomainEditor({
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.realtimeIngressEnabled}
                 onChange={(event) =>
                   update({ realtimeIngressEnabled: event.target.checked })

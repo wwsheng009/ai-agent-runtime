@@ -28,6 +28,7 @@ import {
   type RuntimeConcurrencyConfigSummary,
   type RuntimeConcurrencyProviderLimitSummary,
 } from "./runtime-concurrency-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export type ConcurrencyProviderLimitDraftInput = {
   limit: string;
@@ -138,9 +139,7 @@ export function RuntimeConcurrencyDomainEditor({
                   ? t("editor.concurrency.enabled")
                   : t("editor.concurrency.disabled")}
               </span>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={config.enabled}
                 onChange={(event) =>
                   onChange({ ...config, enabled: event.target.checked })

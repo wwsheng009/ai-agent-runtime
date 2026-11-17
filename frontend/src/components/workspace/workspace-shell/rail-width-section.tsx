@@ -71,7 +71,7 @@ export function RailWidthSection() {
       <div className="flex items-center gap-3">
         <input
           aria-label={t("panels.shell.rightRail.sliderLabel")}
-          className="h-2 w-full accent-accent-primary"
+          className="h-2 w-full rounded accent-accent-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           max={max}
           min={min}
           onChange={(event) =>

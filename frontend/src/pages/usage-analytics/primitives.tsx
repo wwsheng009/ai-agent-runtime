@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { AnalyticsCoverage } from "@/types/runtime";
@@ -172,8 +173,10 @@ export function FilterInput({ label, value, placeholder, onChange, icon, type = 
       <span className={cn("text-xs text-muted-foreground", compact ? "shrink-0" : "mb-1 block")}>{label}</span>
       <div className={cn("relative", compact && "h-full min-w-0 flex-1")}>
         {icon ? <span aria-hidden="true" className={cn("pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground", compact ? "left-0" : "left-2.5")}>{icon}</span> : null}
-        <input
+        <Input
           type={type}
+          size={compact ? "sm" : "md"}
+          surface={compact ? "transparent" : "default"}
           value={value}
           autoComplete={autoComplete}
           min={min}
@@ -183,8 +186,8 @@ export function FilterInput({ label, value, placeholder, onChange, icon, type = 
           placeholder={placeholder}
           className={cn(
             compact
-              ? "h-full min-w-0 w-full border-0 bg-transparent p-0 text-xs outline-none"
-              : "h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring",
+              ? "h-full min-w-0 w-full border-0 bg-transparent px-0 py-0 text-xs focus-visible:ring-0"
+              : "bg-surface-softer",
             icon && (compact ? "pl-5" : "pl-8"),
           )}
         />

@@ -29,6 +29,7 @@ import {
   summarizeMembers,
 } from "./draft-utils";
 import { FieldIssueText } from "./field-parts";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type ProviderGroupMembersSectionProps = {
   draft: ProviderGroupDraftInput;
@@ -378,9 +379,7 @@ export function ProviderGroupMembersSection({
                       </td>
                       <td className="px-3 py-2.5">
                         <label className="inline-flex items-center gap-2 text-sm text-foreground">
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 accent-accent-primary"
+                          <CheckboxInput
                             checked={member.enabled}
                             onChange={(event) =>
                               updateDraftMember(index, { enabled: event.target.checked })

@@ -21,6 +21,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { cn } from "@/lib/utils";
 import { FS_SORT_KEY_OPTIONS, normalizeSortKey } from "@/lib/file-browser/entry-sort";
 
@@ -114,9 +116,11 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         <label className="sr-only" htmlFor="file-browser-scope">
           {t("panels.fileBrowser.scope.label")}
         </label>
-        <select
+        <NativeSelect
           aria-label={t("panels.fileBrowser.scope.selectAria")}
-          className="min-w-0 flex-1 truncate rounded border border-border/60 bg-surface-solid px-1.5 py-1 text-xs text-foreground"
+          size="sm"
+          surface="soft"
+          className="min-w-0 flex-1 truncate"
           id="file-browser-scope"
           onChange={(event) => onSelectScope(event.target.value)}
           value={activeScope}
@@ -129,7 +133,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
           {hasFallback && !roots.some((root) => root.scope === activeScope) && activeScope ? (
             <option value={activeScope}>{t("panels.fileBrowser.scope.cwdFallback")}</option>
           ) : null}
-        </select>
+        </NativeSelect>
         <button
           aria-label={t("panels.fileBrowser.scope.up")}
           className="rounded border border-border/60 p-1 text-muted-foreground hover:bg-white/5 disabled:opacity-40"
@@ -162,9 +166,11 @@ export function ScopeHeader(props: ScopeHeaderProps) {
 
       <div className="flex items-center gap-1.5 rounded border border-border/60 bg-surface-solid px-1.5 py-1">
         <SearchIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-        <input
+        <Input
           aria-label={t("panels.fileBrowser.scope.filterAria")}
-          className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
+          size="sm"
+          surface="transparent"
+          className="h-7 min-w-0 flex-1 border-0 bg-transparent px-0 py-0 text-xs focus-visible:ring-0"
           data-testid="file-browser-filter"
           onChange={(event) => onFilterChange(event.target.value)}
           onKeyDown={(event) => {
@@ -235,9 +241,11 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         <label className="sr-only" htmlFor="file-browser-sort">
           {t("panels.fileBrowser.scope.sortAria")}
         </label>
-        <select
+        <NativeSelect
           aria-label={t("panels.fileBrowser.scope.sortAria")}
-          className="rounded border border-border/60 bg-surface-solid px-1.5 py-1 app-text-11 text-foreground disabled:opacity-40"
+          size="sm"
+          surface="soft"
+          className="w-auto app-text-11 disabled:opacity-40"
           disabled={resultsVisible}
           id="file-browser-sort"
           onChange={(event) => onChangeSort(normalizeSortKey(event.target.value))}
@@ -249,7 +257,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
               {t(SORT_LABEL_KEYS[key])}
             </option>
           ))}
-        </select>
+        </NativeSelect>
         <label
           className="inline-flex cursor-pointer items-center gap-1 rounded border border-border/60 px-1.5 py-1 app-text-11 text-muted-foreground hover:bg-white/5"
           title={t("panels.fileBrowser.scope.upload")}

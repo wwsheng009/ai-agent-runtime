@@ -14,6 +14,7 @@ import { SettingsPanelCard } from "./settings-panel-card";
 import { SettingsPanelIcon } from "./settings-panel-icon";
 import { SettingsSubsectionCard } from "./settings-subsection-card";
 import { type RuntimeResourceManagerConfigSummary } from "./runtime-resource-manager-domain-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 type RuntimeResourceManagerDomainEditorProps = {
   config: RuntimeResourceManagerConfigSummary;
@@ -140,9 +141,7 @@ export function RuntimeResourceManagerDomainEditor({
         description={t("editor.resourceManager.healthCheck.description")}
         headerAside={
           <label className={editorSectionToggleClassName}>
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-accent-primary"
+            <CheckboxInput
               checked={config.healthCheckEnabled}
               onChange={(event) =>
                 update({ healthCheckEnabled: event.target.checked })

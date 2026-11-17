@@ -4,6 +4,7 @@ import { MessageSquarePlusIcon, PanelLeftCloseIcon, SearchIcon, Settings2Icon, S
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { cn } from "@/lib/utils";
 import { type Dispatch, type SetStateAction } from "react";
@@ -132,13 +133,15 @@ export function WorkspaceSidebarHeader({
         >
           <div className="flex min-w-0 flex-1 items-center gap-2.5 text-sm text-muted-foreground">
             <SearchIcon aria-hidden="true" size={15} />
-            <input
+            <Input
               autoComplete="off"
+              size="sm"
+              surface="transparent"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t("sidebar.searchPlaceholder")}
               aria-label={t("sidebar.searchPlaceholder")}
-              className="w-full bg-transparent outline-none"
+              className="h-auto border-0 bg-transparent px-0 py-0 focus-visible:ring-0"
               spellCheck={false}
               type="search"
             />

@@ -13,6 +13,7 @@ import {
 } from "../runtime-rate-limit-domain-utils";
 import { SettingsBadgeList } from "../settings-badge-list";
 import { SettingsPanelIcon } from "../settings-panel-icon";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export function RuntimeRateLimitOverviewSection({
   apiKeyLimits,
@@ -78,9 +79,7 @@ export function RuntimeRateLimitOverviewSection({
                 ? t("editor.rateLimit.toggle.enabled")
                 : t("editor.rateLimit.toggle.disabled")}
             </span>
-            <input
-              type="checkbox"
-              className="h-4 w-4 accent-accent-primary"
+            <CheckboxInput
               checked={rateLimitConfig.enabled}
               onChange={(event) =>
                 onChangeConfig({

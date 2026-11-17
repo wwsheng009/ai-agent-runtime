@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { CheckboxInput } from "@/components/ui/checkbox";
+import { RadioInput } from "@/components/ui/radio";
+import { Textarea } from "@/components/ui/textarea";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import type { RuntimeSessionBacktrackMode } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
@@ -180,14 +182,12 @@ export function MessageBacktrackDialog({
                     : "border-white/8 bg-white/[0.02] text-muted-foreground hover:border-white/14",
                 )}
               >
-                <input
+                <RadioInput
                   checked={state.mode === value}
-                  className="size-4 accent-accent-gold"
                   disabled={interactionLocked}
                   name="backtrack-mode"
                   onChange={() => onModeChange(value)}
-                  type="radio"
-                  value={value}
+                  value={value} tone="gold"
                 />
                 <span>{label}</span>
               </label>
@@ -206,9 +206,11 @@ export function MessageBacktrackDialog({
             <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {t("panels.messages.backtrackDialog.editPromptLabel")}
             </span>
-            <textarea
+            <Textarea
               aria-label={t("panels.messages.backtrackDialog.editPromptAriaLabel")}
-              className="min-h-[7.5rem] w-full resize-y rounded-card-lg border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
+              size="md"
+              surface="dark"
+              className="min-h-[7.5rem] leading-6"
               disabled={interactionLocked}
               onChange={(event) => onEditPromptChange(event.target.value)}
               placeholder={t("panels.messages.backtrackDialog.editPromptPlaceholder")}

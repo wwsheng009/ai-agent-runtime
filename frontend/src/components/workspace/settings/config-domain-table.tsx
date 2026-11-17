@@ -9,6 +9,7 @@ import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 
 import { SettingsEmptyState } from "./settings-empty-state";
 
@@ -121,8 +122,9 @@ export function ConfigDomainTable<T>({
               size={14}
               className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
             />
-            <input
+            <Input
               type="search"
+              size="md"
               value={searchText}
               onChange={(event) => {
                 setSearchText(event.target.value);
@@ -130,7 +132,7 @@ export function ConfigDomainTable<T>({
               }}
               placeholder={t("editor.table.searchPlaceholder")}
               aria-label={t("editor.table.searchPlaceholder")}
-              className="h-9 w-full rounded-field border border-border bg-surface-solid pl-8 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
+              className="pl-8"
             />
           </div>
         ) : null}

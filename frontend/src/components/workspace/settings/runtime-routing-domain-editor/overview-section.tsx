@@ -17,6 +17,7 @@ import {
 } from "../runtime-routing-domain-utils";
 import { SettingsBadgeList } from "../settings-badge-list";
 import { SettingsPanelIcon } from "../settings-panel-icon";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 export function RuntimeRoutingOverviewSection({
   onChangeConfig,
@@ -93,9 +94,7 @@ export function RuntimeRoutingOverviewSection({
                   ? t("editor.routing.toggle.enabled")
                   : t("editor.routing.toggle.disabled")}
               </span>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-accent-primary"
+              <CheckboxInput
                 checked={routeConfig.failover}
                 onChange={(event) =>
                   onChangeConfig({

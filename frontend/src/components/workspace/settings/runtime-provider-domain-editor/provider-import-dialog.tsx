@@ -25,6 +25,7 @@ import { SettingsDialogFooter } from "../settings-dialog-footer";
 import { SettingsNoticeCard } from "../settings-notice-card";
 
 import { describeAccountError, providerProtocolOptions } from "./draft-utils";
+import { CheckboxInput } from "@/components/ui/checkbox";
 
 const importProtocolOptions = [
   { value: providerImportAutoProtocol, label: "" },
@@ -251,9 +252,7 @@ export function ProviderImportDialog({
         </div>
 
         <label className="flex items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            className="h-4 w-4 accent-accent-primary"
+          <CheckboxInput
             checked={form.setAsDefault}
             onChange={(event) => updateField("setAsDefault", event.target.checked)}
             disabled={busy}
