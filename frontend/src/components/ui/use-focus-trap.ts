@@ -22,6 +22,10 @@ export function useFocusTrap<T extends HTMLElement>(
         node.querySelectorAll<HTMLElement>(
           'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
         ),
+      ).filter(
+        (element) =>
+          !element.closest("[hidden]") &&
+          element.getAttribute("aria-hidden") !== "true",
       );
 
     const onKeyDown = (event: KeyboardEvent) => {

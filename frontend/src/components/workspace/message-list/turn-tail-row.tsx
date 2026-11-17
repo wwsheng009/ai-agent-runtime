@@ -1,4 +1,4 @@
-// 批次 C2（§8.5 turn-tail）：28px 动作组 + 统计文本（默认隐藏，hover / 键盘焦点显现）。
+// 批次 C2（§8.5 turn-tail）：36px 动作组 + 统计文本（默认隐藏，hover / 键盘焦点显现）。
 // 统计口径说明：本地消息模型无时间戳（无「用时 / 首 token」数据源），故统计轴取既有
 // `lib/turn-usage` 的 token 用量；无完整用量时整段隐藏（不显示 0）。
 //
@@ -34,9 +34,9 @@ type TurnTailRowProps = {
   usage: TurnUsage | null;
 };
 
-/** 动作按钮统一形制：28×28 圆图标，默认三级文本，hover 升二级（与用户气泡同口径）。 */
+/** 动作按钮统一形制：36×36 圆图标，默认三级文本，hover 升二级（与用户气泡同口径）。 */
 const ACTION_BUTTON_CLASS =
-  "app-hover-reveal inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none";
+  "app-hover-reveal inline-flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none";
 
 export function TurnTailRow({
   anchorKey,
@@ -56,7 +56,7 @@ export function TurnTailRow({
   // 双保险：宿主只对锚点下发 `onBranch`（`resolveBranchAnchors` 已排除无正文的消息），
   // 行内再按可见正文兜一层 —— 只有推理 / 只有工具的消息永不渲染分支入口。
   const canBranch = Boolean(onBranch) && hasVisibleText(text);
-  // §12.1.4：没有任何可呈现内容时不渲染整行——28px 动作行会给每个空回合留一条空行。
+  // §12.1.4：没有任何可呈现内容时不渲染整行——36px 动作行会给每个空回合留一条空行。
   const hasActions =
     hasVisibleText(text) || canBranch || Boolean(onRetry) || Boolean(usage);
 
@@ -75,7 +75,7 @@ export function TurnTailRow({
 
   return (
     <div
-      className="group -ml-1.5 flex h-7 items-center gap-2.5"
+      className="group -ml-1.5 flex h-9 items-center gap-2.5"
       data-chat-anchor-key={anchorKey}
       data-chat-flow-key={flowKey}
       data-chat-flow-kind="turn-tail"

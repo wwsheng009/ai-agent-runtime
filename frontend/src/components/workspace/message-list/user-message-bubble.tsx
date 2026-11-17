@@ -2,7 +2,7 @@
 // - 一层底色、无边框、无阴影、无渐变；圆角 22px；
 // - 限宽按列宽比例（525/748 ≈ 0.702，与 82% 取小），随宽度轴同步；
 // - 元数据不上屏：作者/label 只留 sr-only（保留 aria-labelledby 契约）；
-// - 动作区（复制 / 编辑 / 回溯）28×28 圆图标按钮，默认隐藏，hover / 键盘焦点显现。
+// - 动作区（复制 / 编辑 / 回溯）36×36 圆图标按钮，默认隐藏，hover / 键盘焦点显现。
 
 import { CopyIcon, HistoryIcon, LoaderCircleIcon, PencilLineIcon } from "lucide-react";
 import { useState } from "react";
@@ -216,7 +216,7 @@ export function UserMessageBubble({
       </div>
 
       {/* §12.1.4：动作区同样按内容产出——无复制文本且无回溯入口时整行不渲染，
-          避免每条用户消息下面吊着一条 28px 空行。 */}
+          避免每条用户消息下面吊着一条 36px 空行。 */}
       {hasVisibleText(text) || showBacktrack || isNavigationSelected ? (
         <div className="flex h-9 items-center gap-1 pr-1 app-hover-reveal">
           {/* 元数据不上屏（§5.2）：选中态只保留无障碍标记 + aria-current。 */}

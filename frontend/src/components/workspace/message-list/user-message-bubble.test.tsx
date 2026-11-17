@@ -74,7 +74,7 @@ describe("UserMessageBubble 复制入口", () => {
     expect(markup).toContain("看一下入口文件");
   });
 
-  it("无正文且无回溯入口：动作行整行不渲染（不留 28px 空行）", () => {
+  it("无正文且无回溯入口：动作行整行不渲染（不留 36px 空行）", () => {
     const markup = renderBubble(userMessage([]));
 
     expect(markup).not.toContain("app-hover-reveal");
