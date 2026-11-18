@@ -80,6 +80,10 @@ type Options struct {
 	// user shell. Invocation still controls argv; Shell only tells the core how
 	// to harden a PowerShell payload (UTF-8 prefix) and which shell to report.
 	Shell runtimeexecutor.Shell
+	// Runtime carries the per-session/workspace shell selection, script
+	// transport and shell.env overrides. Nil preserves the process-wide
+	// compatibility behavior.
+	Runtime *runtimeexecutor.ShellRuntime
 	// Prepare may rewrite the launch after shell resolution and before Start.
 	// It is the hook for OS-level sandbox wrapping and launcher denials.
 	Prepare func(ctx context.Context, launch Launch) (Launch, error)
@@ -124,12 +128,20 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ctx = context.Background()
 	}
 	shell := opts.Shell
-	if strings.TrimSpace(shell.Path) == "" && strings.TrimSpace(string(opts.Shell.Type)) == "" {
-		resolved, err := runtimeexecutor.CurrentShellE()
+	delivery := runtimeexecutor.CurrentScriptDelivery()
+	if opts.Runtime != nil {
+		if opts.Runtime.ResolveErr != nil {
+			return Result{}, opts.Runtime.ResolveErr
+		}
+		shell = opts.Runtime.Shell
+		delivery = opts.Runtime.EffectiveDelivery()
+	} else if strings.TrimSpace(shell.Path) == "" && strings.TrimSpace(string(opts.Shell.Type)) == "" {
+		runtime, err := runtimeexecutor.CurrentShellRuntime()
 		if err != nil {
 			return Result{}, err
 		}
-		shell = resolved
+		shell = runtime.Shell
+		delivery = runtime.EffectiveDelivery()
 	}
 
 	var launch Launch
@@ -140,7 +152,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		command, args := opts.Invocation(opts.Command)
 		launch = Launch{Command: command, Args: append([]string(nil), args...)}
 	} else {
-		argv, script := shell.DeriveExecInvocation(opts.Command, runtimeexecutor.CurrentScriptDelivery())
+		argv, script := shell.DeriveExecInvocation(opts.Command, delivery)
 		if len(argv) == 0 {
 			return Result{}, fmt.Errorf("shellexec: shell resolution returned no argv")
 		}
@@ -157,8 +169,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		launch.Env = os.Environ()
 	}
 	// shell.env来自 runtime.yaml；放在 neutralisation 之前，让样式类变量
-	// 仍由 NeutralizeConsoleStylingEnv 单点拥有。
-	launch.Env = runtimeexecutor.ApplyShellEnvOverrides(launch.Env)
+	// 仍由 NeutralizeConsoleStylingEnv 单点拥有。Per-session runtimes carry
+	// their own overrides; the global path remains the compatibility fallback.
+	if opts.Runtime != nil {
+		launch.Env = opts.Runtime.ApplyEnv(launch.Env)
+	} else {
+		launch.Env = runtimeexecutor.ApplyShellEnvOverrides(launch.Env)
+	}
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat so captured output is
 	// unstyled before any Prepare hook (bwrap, sudo, sandbox) can wrap it. The

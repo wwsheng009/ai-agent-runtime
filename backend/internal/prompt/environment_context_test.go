@@ -3,6 +3,8 @@ package prompt
 import (
 	"strings"
 	"testing"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 func TestRenderShellExecutionGuidance_DescribesShellVsToolkitWithoutSteering(t *testing.T) {
@@ -50,6 +52,29 @@ func TestRenderShellExecutionGuidance_DescribesShellVsToolkitWithoutSteering(t *
 		if !strings.Contains(gotLower, "os error 123") && !strings.Contains(got, "-g") {
 			t.Fatalf("expected Windows path-glob / os error guidance, got:\n%s", got)
 		}
+	}
+}
+
+func TestCaptureEnvironmentSnapshotUsesProvidedShellRuntime(t *testing.T) {
+	shellRuntime := &runtimeexecutor.ShellRuntime{
+		Shell: runtimeexecutor.Shell{
+			Path:    "/bin/bash",
+			Type:    runtimeexecutor.ShellTypeBash,
+			ID:      runtimeexecutor.ShellIDGitBash,
+			Dialect: runtimeexecutor.ShellDialectPosixFull,
+		},
+		Delivery: runtimeexecutor.ScriptDeliveryStdin,
+	}
+	snapshot := CaptureEnvironmentSnapshot("/workspace/a", shellRuntime)
+	if got := snapshot.Values["shell"]; got != "bash" {
+		t.Fatalf("shell = %v, want bash", got)
+	}
+	if got, _ := snapshot.Values["shell_fingerprint"].(string); !strings.Contains(got, "shell=/bin/bash") {
+		t.Fatalf("shell_fingerprint = %q, want runtime fingerprint", got)
+	}
+	guidance := RenderShellExecutionGuidanceWithCapability("", shellRuntime)
+	if !strings.Contains(guidance, "POSIX") {
+		t.Fatalf("guidance must follow the provided POSIX shell:\n%s", guidance)
 	}
 }
 

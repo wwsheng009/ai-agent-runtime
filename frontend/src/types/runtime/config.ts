@@ -149,10 +149,19 @@ export type RuntimeShellSettingsResponse = RuntimeShellSettings & {
   supported_ids?: string[];
   updated?: boolean;
   error?: string;
+  scope?: string;
+  workspace_path?: string;
+  directory_id?: string;
+};
+
+export type RuntimeShellSettingsScope = {
+  workspace_path?: string;
+  directory_id?: string;
+  scope?: "workspace" | "user" | string;
 };
 
 /** PUT 请求：未提供的字段保持当前值。 */
-export type RuntimeShellSettingsSaveRequest = Partial<RuntimeShellSettings>;
+export type RuntimeShellSettingsSaveRequest = Partial<RuntimeShellSettings> & RuntimeShellSettingsScope;
 
 export type RuntimeAgentRoutePreviewParent = {
   provider?: string;

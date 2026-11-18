@@ -7,9 +7,10 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextpack"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/wwsheng009/ai-agent-runtime/internal/prompt/toolguidance"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/prompt/toolguidance"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
@@ -73,7 +74,11 @@ func buildAgentShellGuidanceMessage(contextValues map[string]interface{}, facts 
 			capability = strings.TrimSpace(value)
 		}
 	}
-	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceFacts(facts, capability))
+	var shellRuntime *runtimeexecutor.ShellRuntime
+	if len(contextValues) > 0 {
+		shellRuntime, _ = contextValues["shell_runtime"].(*runtimeexecutor.ShellRuntime)
+	}
+	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceFacts(facts, capability, shellRuntime))
 	if guidance == "" {
 		return nil
 	}
@@ -120,16 +125,34 @@ func agentContextEnvironmentBlock(contextValues map[string]interface{}, workspac
 // ensureSessionEnvironmentSnapshot freezes measured environment facts onto the
 // durable chat session once. Subsequent turns reuse the stored snapshot so
 // multi-turn history is not rewritten when host PATH/date facts change.
-func ensureSessionEnvironmentSnapshot(session *chat.Session, workspacePath string) runtimeprompt.EnvironmentSnapshot {
+func ensureSessionEnvironmentSnapshot(session *chat.Session, workspacePath string, runtimes ...*runtimeexecutor.ShellRuntime) runtimeprompt.EnvironmentSnapshot {
+	var shellRuntime *runtimeexecutor.ShellRuntime
+	if len(runtimes) > 0 {
+		shellRuntime = runtimes[0]
+	}
 	if session == nil {
-		return runtimeprompt.CaptureEnvironmentSnapshot(workspacePath)
+		return runtimeprompt.CaptureEnvironmentSnapshot(workspacePath, shellRuntime)
 	}
 	if snap, ok := loadSessionEnvironmentSnapshot(session); ok {
-		return snap
+		if !environmentSnapshotShellChanged(snap, shellRuntime) {
+			return snap
+		}
 	}
-	snap := runtimeprompt.CaptureEnvironmentSnapshot(workspacePath)
+	snap := runtimeprompt.CaptureEnvironmentSnapshot(workspacePath, shellRuntime)
 	storeSessionEnvironmentSnapshot(session, snap)
 	return snap
+}
+
+func environmentSnapshotShellChanged(snap runtimeprompt.EnvironmentSnapshot, shellRuntime *runtimeexecutor.ShellRuntime) bool {
+	if shellRuntime == nil {
+		return false
+	}
+	fingerprint := shellRuntime.RuntimeFingerprint()
+	if fingerprint == "" {
+		return false
+	}
+	stored, _ := snap.Values["shell_fingerprint"].(string)
+	return strings.TrimSpace(stored) != fingerprint
 }
 
 func loadSessionEnvironmentSnapshot(session *chat.Session) (runtimeprompt.EnvironmentSnapshot, bool) {

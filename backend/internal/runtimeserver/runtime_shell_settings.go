@@ -34,6 +34,46 @@ func NewRuntimeShellSettingsProvider(manager *runtimecfg.RuntimeManager) runtime
 	}
 }
 
+// NewWorkspaceRuntimeShellSettingsProvider adds a workspace scope on top of the
+// process-global provider. runtime-server must not write a workspace's shell
+// settings into the server installation directory.
+func NewWorkspaceRuntimeShellSettingsProvider(
+	manager *runtimecfg.RuntimeManager,
+	resolver *WorkspaceShellResolver,
+) runtimeapi.ShellSettingsScopeProvider {
+	global := NewRuntimeShellSettingsProvider(manager)
+	return func(scope runtimeapi.ShellSettingsScope) (runtimeexecutor.ShellConfig, string, error) {
+		if !strings.EqualFold(strings.TrimSpace(scope.Scope), "workspace") ||
+			strings.TrimSpace(scope.WorkspacePath) == "" {
+			cfg, path, err := global()
+			return cfg, path, err
+		}
+		workspace := strings.TrimSpace(scope.WorkspacePath)
+		if !WorkspaceTrustedForShell(workspace) {
+			return runtimeexecutor.ShellConfig{}, "", fmt.Errorf("workspace %s is not trusted for project shell settings", workspace)
+		}
+		document, err := config.LoadMergedRuntimeConfigDocumentFrom(workspace)
+		if err != nil {
+			return runtimeexecutor.ShellConfig{}, "", err
+		}
+		cfg := runtimeexecutor.ShellConfig{}
+		if document != nil && len(document.MergedYAML) > 0 {
+			var payload struct {
+				Shell runtimeexecutor.ShellConfig `yaml:"shell"`
+			}
+			if err := yaml.Unmarshal(document.MergedYAML, &payload); err != nil {
+				return runtimeexecutor.ShellConfig{}, "", fmt.Errorf("parse workspace shell settings: %w", err)
+			}
+			cfg = payload.Shell
+		}
+		if err := runtimeexecutor.ValidateShellConfig(&cfg); err != nil {
+			return runtimeexecutor.ShellConfig{}, "", err
+		}
+		target := filepath.Join(workspace, ".aicli", "runtime.yaml")
+		return cfg, target, nil
+	}
+}
+
 // NewLayeredRuntimeShellSettingsPersister 保存 shell 段：
 //
 //  1. 先改内存快照（下一轮请求立即生效），Validate 由 manager.Update 负责；
@@ -72,6 +112,35 @@ func NewLayeredRuntimeShellSettingsPersister(manager *runtimecfg.RuntimeManager)
 		// using the startup configuration until the process restarts.
 		runtimeexecutor.ConfigureShell(next)
 		runtimeexecutor.InvalidateShellResolution()
+		return target, nil
+	}
+}
+
+// NewWorkspaceLayeredRuntimeShellSettingsPersister writes workspace-scoped
+// shell settings to <workspace>/.aicli/runtime.yaml and invalidates only that
+// workspace's resolver cache. It never mutates the process-wide shell for other
+// sessions.
+func NewWorkspaceLayeredRuntimeShellSettingsPersister(
+	manager *runtimecfg.RuntimeManager,
+	resolver *WorkspaceShellResolver,
+) runtimeapi.ShellSettingsScopePersister {
+	global := NewLayeredRuntimeShellSettingsPersister(manager)
+	return func(next runtimeexecutor.ShellConfig, scope runtimeapi.ShellSettingsScope) (string, error) {
+		if !strings.EqualFold(strings.TrimSpace(scope.Scope), "workspace") ||
+			strings.TrimSpace(scope.WorkspacePath) == "" {
+			return global(next)
+		}
+		workspace := strings.TrimSpace(scope.WorkspacePath)
+		if !WorkspaceTrustedForShell(workspace) {
+			return "", fmt.Errorf("workspace %s is not trusted for project shell settings", workspace)
+		}
+		target := filepath.Join(workspace, ".aicli", "runtime.yaml")
+		if err := persistShellSettings(target, next); err != nil {
+			return target, err
+		}
+		if resolver != nil {
+			resolver.Invalidate(workspace)
+		}
 		return target, nil
 	}
 }

@@ -125,8 +125,12 @@ export async function getRuntimeAgentMaxSteps() {
  *
  * 只读：后端不会因为这次读取改动任何配置。
  */
-export async function getRuntimeShellSettings() {
-  return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellUrl);
+export async function getRuntimeShellSettings(workspacePath?: string) {
+  const target = workspacePath?.trim();
+  const url = target
+    ? `${runtimeShellUrl}?workspace_path=${encodeURIComponent(target)}&scope=workspace`
+    : runtimeShellUrl;
+  return fetchRuntimeJson<RuntimeShellSettingsResponse>(url);
 }
 
 /**
@@ -134,13 +138,18 @@ export async function getRuntimeShellSettings() {
  */
 export async function saveRuntimeShellSettings(
   request: RuntimeShellSettingsSaveRequest,
+  workspacePath?: string,
 ) {
+  const target = workspacePath?.trim();
+  const body = target
+    ? { ...request, workspace_path: target, scope: "workspace" }
+    : { ...request, scope: "user" };
   return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellUrl, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
   });
 }
 
@@ -151,13 +160,18 @@ export async function saveRuntimeShellSettings(
  */
 export async function probeRuntimeShellSettings(
   request: RuntimeShellSettingsSaveRequest = {},
+  workspacePath?: string,
 ) {
+  const target = workspacePath?.trim();
+  const body = target
+    ? { ...request, workspace_path: target, scope: "workspace" }
+    : { ...request, scope: "user" };
   return fetchRuntimeJson<RuntimeShellSettingsResponse>(runtimeShellProbeUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
   });
 }
 

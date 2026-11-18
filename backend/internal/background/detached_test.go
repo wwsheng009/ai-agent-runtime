@@ -86,7 +86,7 @@ func TestDetachedLaunchRetriesTransientLauncherFailures(t *testing.T) {
 	defer func() { detachedShellLauncher = original }()
 
 	attempts := 0
-	detachedShellLauncher = func(command, cwd, logPath string) (*detachedLaunch, error) {
+	detachedShellLauncher = func(_ *runtimeexecutor.ShellRuntime, command, cwd, logPath string) (*detachedLaunch, error) {
 		attempts++
 		if attempts < 3 {
 			return nil, errors.New("temporary process creation failure")
@@ -116,7 +116,7 @@ func TestDetachedLaunchDoesNotRetryAmbiguousPostStartFailure(t *testing.T) {
 	defer func() { detachedShellLauncher = original }()
 
 	attempts := 0
-	detachedShellLauncher = func(command, cwd, logPath string) (*detachedLaunch, error) {
+	detachedShellLauncher = func(_ *runtimeexecutor.ShellRuntime, command, cwd, logPath string) (*detachedLaunch, error) {
 		attempts++
 		return nil, &detachedLaunchError{err: errors.New("launcher result is ambiguous"), retryable: false}
 	}

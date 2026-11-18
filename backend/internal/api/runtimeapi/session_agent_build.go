@@ -78,6 +78,8 @@ func (h *Handler) buildSessionAgentForContext(
 		agentConfig.Options["workspace_path"] = workspacePath
 	}
 	runtimehost.ApplyToolBasePathOption(agentConfig, workspacePath)
+	shellRuntime, _, _ := h.sessionShellResolution(workspacePath, profileState)
+	runtimehost.ApplyShellRuntimeOption(agentConfig, shellRuntime)
 	runtimehost.ApplySessionRootOptions(agentConfig, sessionCtx.AllowedRoots, sessionCtx.ReadOnlyRoots)
 	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
 		if agentConfig.Options == nil {

@@ -201,14 +201,31 @@ func DefaultRuntimeConfigSearchPaths() []string {
 // Returns "" when no layer exists on disk; callers then use the built-in
 // defaults without reporting a missing optional config.
 func ResolveRuntimeConfigBootstrapPath(configPath string) string {
+	return ResolveRuntimeConfigBootstrapPathFrom("", configPath)
+}
+
+// ResolveRuntimeConfigBootstrapPathFrom locates runtime.yaml anchored at one
+// workspace directory instead of the process CWD. An empty baseDir preserves
+// the historical behavior.
+//
+// Explicit non-convention overrides still win for every workspace; the
+// workspace anchor only replaces the project-layer probe.
+func ResolveRuntimeConfigBootstrapPathFrom(baseDir, configPath string) string {
 	configPath = expandExplicitConfigPath(configPath)
 	if configPath != "" && !IsRuntimeConfigConventionPath(configPath) {
 		return configPath
 	}
 
-	// Project-level layer: ./.aicli/runtime.yaml in CWD
-	if cwd, err := os.Getwd(); err == nil {
-		projectConfig := filepath.Join(cwd, ".aicli", DefaultRuntimeConfigFileName)
+	projectBase := strings.TrimSpace(baseDir)
+	if projectBase == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			projectBase = cwd
+		}
+	}
+
+	// Project-level layer: <workspace>/.aicli/runtime.yaml
+	if projectBase != "" {
+		projectConfig := filepath.Join(projectBase, ".aicli", DefaultRuntimeConfigFileName)
 		if info, err := os.Stat(projectConfig); err == nil && !info.IsDir() {
 			return filepath.Clean(projectConfig)
 		}

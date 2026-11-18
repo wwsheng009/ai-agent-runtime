@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type RuntimeConfigDocument, type RuntimeServiceStatus, getRuntimeConfigDocument, getRuntimeServiceStatus } from "@/lib/runtime-api";
+import { useRuntimeClientIdentity } from "@/lib/runtime-client";
 import { buildConfigLineDiff } from "../runtime-config-diff";
 import {
   countConfigIssues,
@@ -32,6 +33,8 @@ import { type EditorMode } from "./types";
 export function useConfigEditorState() {
   const { i18n, t } = useTranslation("runtimeConfig");
   const { t: tCommon } = useTranslation("common");
+  const runtimeClient = useRuntimeClientIdentity();
+  const workspacePath = runtimeClient.workspacePath?.trim() ?? "";
   const resolvedLocale = i18n.resolvedLanguage?.startsWith("zh")
     ? "zh-CN"
     : "en-US";
@@ -424,6 +427,7 @@ export function useConfigEditorState() {
 
   return {
     resolvedLocale,
+    workspacePath,
     document,
     setDocument,
     draftParsed,

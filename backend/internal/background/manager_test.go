@@ -25,7 +25,7 @@ func TestBuildShellCommandReturnsStrictProbeFailure(t *testing.T) {
 	runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{AutoDetect: &disabled})
 	runtimeexecutor.InvalidateShellResolution()
 	t.Cleanup(func() {
-		runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{})
+		runtimeexecutor.ConfigureShell(backgroundTestShellConfig())
 		runtimeexecutor.InvalidateShellResolution()
 	})
 
@@ -44,7 +44,7 @@ func TestShellEnvironmentIncludesConfiguredOverrides(t *testing.T) {
 		Env: map[string]string{"AICLI_SHELL_ENV_TEST": "present"},
 	})
 	t.Cleanup(func() {
-		runtimeexecutor.ConfigureShell(runtimeexecutor.ShellConfig{})
+		runtimeexecutor.ConfigureShell(backgroundTestShellConfig())
 		runtimeexecutor.InvalidateShellResolution()
 	})
 

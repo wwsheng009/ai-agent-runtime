@@ -95,7 +95,7 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "单条 Shell 命令。多条独立检查请分别调用。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。Windows 不要使用 bash heredoc（<<EOF）。",
+				"description": "单条 Shell 命令。多条独立检查请分别调用。用 workdir 切换目录；按当前检测到的 shell 使用语法（PowerShell 用 Select-Object 代替 head；PowerShell/cmd 不支持 bash heredoc）。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -140,7 +140,7 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行一条 Shell 命令；命令启动即登记为后台 job，前台只等待结果。等待超时返回 promoted job，不杀进程。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。",
+			"执行一条 Shell 命令；命令启动即登记为后台 job，前台只等待结果。等待超时返回 promoted job，不杀进程。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。按当前检测到的 shell 使用语法；PowerShell 用 Select-Object 代替 head，PowerShell/cmd 不支持 bash heredoc（<<EOF）。",
 			"1.3.4",
 			parameters,
 			true, // 支持直接调用
@@ -262,14 +262,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	if blocked, message, nextAction := bashCommandPreflight(command); blocked {
-		return toolResultFailureWithCode(
-			fmt.Errorf("%s", message),
-			string(runtimeerrors.ErrToolShellCompat),
-			nextAction,
-			map[string]interface{}{
-				"failure_class": "shell_preflight",
-			},
-		), nil
+		return bashPreflightFailureResult(message, nextAction), nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
@@ -329,7 +322,19 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// (executed=false + next_action) instead of hard-failed, so piped/compound
 	// searches share the path-glob redirect contract and a fixable command
 	// shape does not poison batch accounting.
-	if globToken, literal := searchPathGlobLiteralToken(command, effectiveWorkdir); literal {
+	shellRuntime, shellErr := shellRuntimeForContext(ctx)
+	if shellErr != nil {
+		return toolResultFailureWithCode(
+			shellErr,
+			string(runtimeerrors.ErrShellUnavailable),
+			"fix shell.path/shell.prefer, or disable shell.strictProbe before retrying",
+			map[string]interface{}{"failure_class": "shell_unavailable", "executed": false},
+		), nil
+	}
+	if blocked, message, nextAction := bashHeredocPreflight(command, shellRuntime.Shell); blocked {
+		return bashPreflightFailureResult(message, nextAction), nil
+	}
+	if globToken, literal := searchPathGlobLiteralTokenWithShell(shellRuntime.Shell, command, effectiveWorkdir); literal {
 		return bashSearchPathGlobRedirectResult(globToken), nil
 	}
 
@@ -433,7 +438,14 @@ func (b *BashTool) executeJobFirst(ctx context.Context, command, workdir string,
 		}
 	}
 
-	shell := runtimeexecutor.CurrentShell()
+	shellRuntime, _ := shellRuntimeForContext(ctx)
+	shell := runtimeexecutor.Shell{}
+	if shellRuntime != nil {
+		shell = shellRuntime.Shell
+	}
+	if strings.TrimSpace(shell.Path) == "" {
+		shell = runtimeexecutor.CurrentShell()
+	}
 	result := CommandExecutionResult{
 		Output:    execution.Output,
 		ShellType: string(shell.Type),
@@ -652,11 +664,13 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	}
 
 	// 使用智能 shell 检测；执行路径必须保留 strictProbe 的失败，不能静默
-	// 退回到另一种语言。
-	shell, err := runtimeexecutor.CurrentShellE()
+	// 退回到另一种语言。runtime-server 的 workspace 级 runtime 从 ctx 注入，
+	// CLI/单项目路径回落到进程级 resolver。
+	shellRuntime, err := shellRuntimeForContext(ctx)
 	if err != nil {
 		return CommandExecutionResult{}, err
 	}
+	shell := shellRuntime.Shell
 	commandForShell := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 
 	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
@@ -673,6 +687,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		ArtifactRoot:  artifactRoot,
 		Mirror:        outputMirror,
 		Shell:         shell,
+		Runtime:       shellRuntime,
 	})
 	if !execResult.Started && err != nil {
 		return CommandExecutionResult{}, err
@@ -704,7 +719,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		}
 
 		// 检查常见错误并给出友好提示
-		friendlyHint := friendlyHintFor(command, capture.Output, err, cfg.workdir)
+		friendlyHint := friendlyHintForShell(shell, command, capture.Output, err, cfg.workdir)
 		if friendlyHint != "" {
 			result := commandExecutionFromCapture(capture)
 			result.RawOutputArtifactPath = artifactPath
@@ -770,6 +785,23 @@ func applyCommandExecutionShell(result CommandExecutionResult, shell runtimeexec
 	result.ShellType = strings.TrimSpace(string(shell.Type))
 	result.ShellPath = strings.TrimSpace(shell.Path)
 	return result
+}
+
+// shellRuntimeForContext returns the per-session/workspace runtime attached by
+// the agent host, falling back to the process-wide resolver used by aicli and
+// legacy callers. Strict-probe failures are returned together with the runtime
+// so callers can fail closed instead of silently switching dialects.
+func shellRuntimeForContext(ctx context.Context) (*runtimeexecutor.ShellRuntime, error) {
+	if runtime := toolctx.ShellRuntimeFromContext(ctx); runtime != nil {
+		if runtime.ResolveErr != nil {
+			return runtime, runtime.ResolveErr
+		}
+		if strings.TrimSpace(runtime.Shell.Path) == "" {
+			return runtime, fmt.Errorf("%w: session shell runtime has no executable", runtimeexecutor.ErrShellUnavailable)
+		}
+		return runtime, nil
+	}
+	return runtimeexecutor.CurrentShellRuntime()
 }
 
 func applyCommandTimeoutBudget(result *CommandExecutionResult, budget runtimeexecution.TimeoutBudget) {
@@ -1008,8 +1040,14 @@ func resolveWorkdir(workdir string) (string, error) {
 	return filepath.Clean(filepath.Join(cwd, workdir)), nil
 }
 
-// friendlyHintFor returns a user-friendly hint when a command fails.
+// friendlyHintFor returns a user-friendly hint when a command fails. Legacy
+// callers (tests/diagnostics) use the process-wide shell; execution paths use
+// friendlyHintForShell with the session runtime.
 func friendlyHintFor(command string, output string, err error, workdir string) string {
+	return friendlyHintForShell(runtimeexecutor.CurrentShell(), command, output, err, workdir)
+}
+
+func friendlyHintForShell(shell runtimeexecutor.Shell, command string, output string, err error, workdir string) string {
 	cmdLower := strings.ToLower(command)
 	outputLower := strings.ToLower(output)
 	cmdParts := runtimeexecutor.SplitCommandTokens(command)
@@ -1027,30 +1065,26 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 	exitCode := exitCodeFromError(err)
 
 	switch {
-	case mainCmd == "pwd" && runtimeexecutor.IsWindows():
-		shell := runtimeexecutor.CurrentShell()
-		if shell.Type == runtimeexecutor.ShellTypeCmd {
-			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
-		}
-		return ""
-	case runtimeexecutor.IsWindows() && looksLikeBashHeredoc(command):
-		return "提示: Windows PowerShell/cmd 不支持 bash heredoc（<<EOF）。请用 write/append_write 写临时脚本后执行，或改用 python -c / 专用文件工具。"
-	case runtimeexecutor.IsWindows() &&
+	case mainCmd == "pwd" && effectiveShellType(shell) == runtimeexecutor.ShellTypeCmd:
+		return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录。"
+	case looksLikeBashHeredoc(command) && shellRejectsBashHeredoc(shell):
+		return "提示: 当前 shell 不支持 bash heredoc（<<EOF）。请用 write/append_write 写临时脚本后执行，或改用 python -c / 专用文件工具。"
+	case shellUsesNativeWindowsDialect(shell) &&
 		(runtimeexecutor.HasPipedHeadToken(cmdParts) ||
 			mainCmd == "head" ||
 			strings.Contains(outputLower, "the term 'head' is not recognized")):
-		return "提示: Windows PowerShell/pwsh 默认没有 `head`；请改用 `Select-Object -First 200`，例如 `git diff ... | Select-Object -First 200`。"
-	case mainCmd == "ls" && runtimeexecutor.IsWindows():
-		return "提示: Windows 下请使用 `dir` 查看目录内容"
-	case mainCmd == "uname" && runtimeexecutor.IsWindows():
-		return "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
-	case mainCmd == "cat" && runtimeexecutor.IsWindows() && !strings.Contains(cmdLower, "."):
-		return "提示: Windows 下请使用 `type` 查看文件内容"
+		return "提示: PowerShell/cmd 默认没有 `head`；请改用 `Select-Object -First 200`，例如 `git diff ... | Select-Object -First 200`。"
+	case mainCmd == "ls" && effectiveShellType(shell) == runtimeexecutor.ShellTypeCmd:
+		return "提示: cmd.exe 下请使用 `dir` 查看目录内容"
+	case mainCmd == "uname" && shellUsesNativeWindowsDialect(shell):
+		return "提示: 当前 shell 下请使用 `ver` 或 `systeminfo` 查看系统信息"
+	case mainCmd == "cat" && effectiveShellType(shell) == runtimeexecutor.ShellTypeCmd && !strings.Contains(cmdLower, "."):
+		return "提示: cmd.exe 下请使用 `type` 查看文件内容"
 	case isRipgrepOrGrepTool(searchCmd) ||
 		strings.Contains(outputLower, "regex parse error") ||
-		searchPathGlobReachesTool(command, workdir) ||
+		searchPathGlobReachesToolWithShell(shell, command, workdir) ||
 		searchOutputLooksLikePathIOError(output):
-		if hint := friendlyHintForSearchTool(searchCmd, command, output, exitCode, workdir); hint != "" {
+		if hint := friendlyHintForSearchToolShell(shell, searchCmd, command, output, exitCode, workdir); hint != "" {
 			return hint
 		}
 	case exitCode == 127:
@@ -1143,6 +1177,10 @@ func isRipgrepOrGrepTool(name string) bool {
 // friendlyHintForSearchTool explains common rg/grep failures that models treat
 // as hard errors (regex parse, exit 1 = no matches). Prefer the dedicated grep tool.
 func friendlyHintForSearchTool(toolName, command, output string, exitCode int, workdir string) string {
+	return friendlyHintForSearchToolShell(runtimeexecutor.CurrentShell(), toolName, command, output, exitCode, workdir)
+}
+
+func friendlyHintForSearchToolShell(shell runtimeexecutor.Shell, toolName, command, output string, exitCode int, workdir string) string {
 	// Classify against cleaned search body so PowerShell NativeCommandError chrome
 	// does not hide the "exit 1 == no matches" recovery path.
 	cleaned := stripPowerShellNoiseForSearchClassification(output)
@@ -1165,7 +1203,7 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int, w
 			"提示: %s 正则解析失败（常见于 JSON 参数里对引号/`|`/`()` 转义不完整）。优先改用 toolkit `grep`（可设 literal=true 做字面搜索，或 pcre2=true）；若必须 shell 调用，请用单引号包裹 pattern，或改用 `rg -F` 字面匹配。",
 			toolName,
 		)
-	case searchPathGlobReachesTool(command, workdir) ||
+	case searchPathGlobReachesToolWithShell(shell, command, workdir) ||
 		searchOutputLooksLikePathIOError(output) ||
 		searchOutputLooksLikePathIOError(cleaned):
 		return fmt.Sprintf(
@@ -1911,8 +1949,9 @@ func bashSearchNoMatchNextAction() string {
 }
 
 // bashCommandFailureNextAction returns structured recovery guidance for hard
-// shell failures. Search-like failures prefer the dedicated grep tool.
-func bashCommandFailureNextAction(command, output string, err error, workdir string) string {
+// shell failures. Search-like failures prefer the dedicated grep tool. Shell
+// dialect guidance uses the resolved shell, never runtime.GOOS alone.
+func bashCommandFailureNextAction(command, output string, err error, workdir string, shell runtimeexecutor.Shell) string {
 	if err == nil {
 		return ""
 	}
@@ -1943,10 +1982,10 @@ func bashCommandFailureNextAction(command, output string, err error, workdir str
 		strings.Contains(combined, "regex error") {
 		return "Shell search failed. Prefer toolkit `grep` (literal=true for fixed text, or pcre2=true). Fix path/pattern escaping; do not retry the identical shell rg/grep command."
 	}
-	if runtimeexecutor.IsWindows() && looksLikeBashHeredoc(command) {
-		return "Windows shells do not support bash heredoc. Prefer dedicated file tools, `python -c`, or write a temp script with write/append_write then execute it."
+	if looksLikeBashHeredoc(command) && shellRejectsBashHeredoc(shell) {
+		return "The active shell does not support bash heredoc. Prefer dedicated file tools, `python -c`, or write a temp script with write/append_write then execute it."
 	}
-	if runtimeexecutor.IsWindows() &&
+	if shellUsesNativeWindowsDialect(shell) &&
 		(strings.Contains(combined, "the term 'head' is not recognized") ||
 			strings.Contains(combined, "is not recognized as the name of a cmdlet") ||
 			runtimeexecutor.HasPipedHeadToken(runtimeexecutor.SplitCommandTokens(command))) {
@@ -1977,27 +2016,39 @@ func looksLikeGitIgnoredPathFailure(command, combinedLower string) bool {
 	}
 }
 
-// bashCommandPreflight blocks known-invalid shell dialects before execution so
-// models get actionable recovery instead of opaque parser errors.
+// bashCommandPreflight blocks shell-invoked toolkit commands before execution.
+// Heredoc compatibility depends on the resolved shell and is checked later by
+// bashHeredocPreflight, after shell resolution.
 func bashCommandPreflight(command string) (blocked bool, message, nextAction string) {
 	if toolName, ok := looksLikeShellInvokedToolkitCommand(command); ok {
 		return true,
 			fmt.Sprintf("检测到在 shell 中调用 toolkit 命令风格参数（%s ...）。`%s` 是专用工具，不是 shell 可执行文件。请直接调用 toolkit 工具，不要写成 `bash command=\"%s -path ...\"`。", toolName, toolName, toolName),
 			fmt.Sprintf("Call the dedicated toolkit `%s` tool directly with structured args (path/file_path/pattern/glob). Do not invoke toolkit tool names as shell commands.", toolName)
 	}
-	// Path-position globs are checked by searchPathGlobLiteralToken after the
-	// effective workdir is resolved: a glob that really expands to existing
-	// files is a legitimate search; literal-reaching globs are soft-redirected
-	// (not hard-failed) by bashSearchPathGlobRedirectResult.
-	if !runtimeexecutor.IsWindows() {
+	return false, "", ""
+}
+
+// bashHeredocPreflight blocks POSIX heredoc syntax only when the resolved shell
+// is a known non-POSIX dialect. Windows hosts may run Git Bash/MSYS/BusyBox,
+// where heredoc is valid; runtime.GOOS alone cannot decide this.
+func bashHeredocPreflight(command string, shell runtimeexecutor.Shell) (blocked bool, message, nextAction string) {
+	if !looksLikeBashHeredoc(command) || !shellRejectsBashHeredoc(shell) {
 		return false, "", ""
 	}
-	if looksLikeBashHeredoc(command) {
-		return true,
-			"当前 Windows shell 不支持 bash heredoc 语法（<<EOF / <<'PY'）。请改用专用文件工具写入脚本，或使用 python -c / 单行命令。",
-			"Prefer write/append_write + execute, python -c, or dedicated file/search tools. Do not retry bash heredoc on Windows."
-	}
-	return false, "", ""
+	return true,
+		fmt.Sprintf("当前 shell（%s）不支持 bash heredoc 语法（<<EOF / <<'PY'）。请改用专用文件工具写入脚本，或使用 python -c / 单行命令。", shellLabel(shell)),
+		"Prefer write/append_write + execute, python -c, or dedicated file/search tools. Do not retry bash heredoc in this shell."
+}
+
+func bashPreflightFailureResult(message, nextAction string) *toolkit.ToolResult {
+	return toolResultFailureWithCode(
+		fmt.Errorf("%s", message),
+		string(runtimeerrors.ErrToolShellCompat),
+		nextAction,
+		map[string]interface{}{
+			"failure_class": "shell_preflight",
+		},
+	)
 }
 
 // searchPathGlobCandidate is one path-position token of an rg/grep command that
@@ -2093,6 +2144,52 @@ const (
 	// evaluate statically, so preflight must not block it.
 	pathGlobUnknown
 )
+
+// effectiveShellType returns the resolved shell type, falling back to the
+// binary name when a caller supplied only a path.
+func effectiveShellType(shell runtimeexecutor.Shell) runtimeexecutor.ShellType {
+	if typ := runtimeexecutor.ShellType(strings.TrimSpace(string(shell.Type))); typ != "" {
+		return typ
+	}
+	path := strings.TrimSpace(shell.Path)
+	if path == "" {
+		return ""
+	}
+	return runtimeexecutor.DetectShellType(filepath.Base(path))
+}
+
+// shellLabel is the short label used in model-facing shell diagnostics.
+func shellLabel(shell runtimeexecutor.Shell) string {
+	if typ := strings.TrimSpace(string(shell.Type)); typ != "" {
+		return typ
+	}
+	if path := strings.TrimSpace(shell.Path); path != "" {
+		return path
+	}
+	return "unknown"
+}
+
+// shellUsesNativeWindowsDialect reports whether the shell is PowerShell, pwsh,
+// or cmd. These shells reject POSIX heredocs and some Unix utility syntax.
+// Unknown shells remain permissive: only a positively identified incompatible
+// dialect should trigger a preflight block.
+func shellUsesNativeWindowsDialect(shell runtimeexecutor.Shell) bool {
+	switch effectiveShellType(shell) {
+	case runtimeexecutor.ShellTypePowerShell,
+		runtimeexecutor.ShellTypePwsh,
+		runtimeexecutor.ShellTypeCmd:
+		return true
+	default:
+		return false
+	}
+}
+
+// shellRejectsBashHeredoc reports whether the resolved shell is a known
+// non-POSIX dialect. Bash/Zsh/Sh support heredocs on Windows too (Git Bash,
+// MSYS, BusyBox), so this deliberately does not consult runtime.GOOS.
+func shellRejectsBashHeredoc(shell runtimeexecutor.Shell) bool {
+	return shellUsesNativeWindowsDialect(shell)
+}
 
 // shellExpandsUnquotedGlobs reports whether the runtime's active shell performs
 // filename expansion on unquoted tokens. POSIX shells do; PowerShell/cmd pass
@@ -2212,6 +2309,12 @@ func shellVisibleGlobMatches(matches []string, pattern string) []string {
 // really expands - e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - returns
 // ok=false and runs normally.
 func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
+	return searchPathGlobLiteralTokenWithShell(runtimeexecutor.CurrentShell(), command, workdir)
+}
+
+// searchPathGlobLiteralTokenWithShell is the per-session variant: glob
+// expansion depends on the workspace-selected shell, not the process default.
+func searchPathGlobLiteralTokenWithShell(shell runtimeexecutor.Shell, command, workdir string) (string, bool) {
 	candidates := searchPathGlobCandidates(command)
 	if len(candidates) == 0 {
 		return "", false
@@ -2221,7 +2324,6 @@ func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
 		// target, not the effective workdir, so do not guess.
 		return "", false
 	}
-	shell := runtimeexecutor.CurrentShell()
 	expandsGlobs := shellExpandsUnquotedGlobs(shell)
 	for _, candidate := range candidates {
 		if classifyPathGlobResolution(candidate.Token, candidate.Quoted, workdir, shell, expandsGlobs) == pathGlobLiteral {
@@ -2234,7 +2336,11 @@ func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
 // searchPathGlobReachesTool reports whether command contains a path-position
 // glob that would reach rg/grep literally under workdir.
 func searchPathGlobReachesTool(command, workdir string) bool {
-	_, reaches := searchPathGlobLiteralToken(command, workdir)
+	return searchPathGlobReachesToolWithShell(runtimeexecutor.CurrentShell(), command, workdir)
+}
+
+func searchPathGlobReachesToolWithShell(shell runtimeexecutor.Shell, command, workdir string) bool {
+	_, reaches := searchPathGlobLiteralTokenWithShell(shell, command, workdir)
 	return reaches
 }
 

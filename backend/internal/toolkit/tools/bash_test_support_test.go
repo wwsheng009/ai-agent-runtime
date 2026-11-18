@@ -38,7 +38,7 @@ func (b *BashTool) executeDirectForTests(ctx context.Context, command, workdir s
 			content := strings.TrimSpace(stripPowerShellNoiseForSearchClassification(execResult.Output))
 			if content == "" {
 				content = "未匹配到结果（rg/grep exit 1）。这是空证据，不是命令崩溃。优先改用 toolkit `grep`，或更换关键词/扩大 path。"
-			} else if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+			} else if hint := friendlyHintForShell(testShellForContext(ctx, execResult), command, execResult.Output, err, workdir); hint != "" {
 				content = strings.TrimSpace(content + "\n" + hint)
 			}
 			content = formatShellCommandContent(1, execResult.ShellType, workdir, duration, false, content)
@@ -61,11 +61,11 @@ func (b *BashTool) executeDirectForTests(ctx context.Context, command, workdir s
 			if duration > 0 {
 				metadata["duration_ms"] = duration.Milliseconds()
 			}
-			if next := bashCommandFailureNextAction(command, execResult.Output, err, workdir); next != "" {
+			if next := bashCommandFailureNextAction(command, execResult.Output, err, workdir, testShellForContext(ctx, execResult)); next != "" {
 				metadata[toolresult.MetadataNextActionKey] = next
 			}
 			content := formatShellCommandContent(exitCode, execResult.ShellType, workdir, duration, false, execResult.Output)
-			if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+			if hint := friendlyHintForShell(testShellForContext(ctx, execResult), command, execResult.Output, err, workdir); hint != "" {
 				content = strings.TrimRight(content, "\n") + "\n" + hint
 			}
 			return &toolkit.ToolResult{
@@ -83,7 +83,7 @@ func (b *BashTool) executeDirectForTests(ctx context.Context, command, workdir s
 			failureMetadata["exit_code"] = code
 		}
 		annotateTerminationMetadata(failureMetadata, err)
-		if next := bashCommandFailureNextAction(command, execResult.Output, err, workdir); next != "" {
+		if next := bashCommandFailureNextAction(command, execResult.Output, err, workdir, testShellForContext(ctx, execResult)); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
 		recoveryHint := ""
@@ -363,6 +363,21 @@ func bashBatchCommandParams(parent, item map[string]interface{}) map[string]inte
 		params[key] = value
 	}
 	return params
+}
+
+// testShellForContext prefers the shell injected into the test context and
+// falls back to the execution result or the process-wide resolver.
+func testShellForContext(ctx context.Context, result CommandExecutionResult) runtimeexecutor.Shell {
+	if runtime := toolctx.ShellRuntimeFromContext(ctx); runtime != nil {
+		return runtime.Shell
+	}
+	if strings.TrimSpace(result.ShellType) != "" || strings.TrimSpace(result.ShellPath) != "" {
+		return runtimeexecutor.Shell{
+			Type: runtimeexecutor.ShellType(strings.TrimSpace(result.ShellType)),
+			Path: strings.TrimSpace(result.ShellPath),
+		}
+	}
+	return runtimeexecutor.CurrentShell()
 }
 
 func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {

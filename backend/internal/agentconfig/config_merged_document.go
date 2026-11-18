@@ -33,7 +33,41 @@ type MergedConfigDocument struct {
 // has its own schema, so callers decode MergedYAML themselves; the layer and
 // origin metadata is identical to the agent-config document.
 func LoadMergedRuntimeConfigDocument() (*MergedConfigDocument, error) {
-	document, err := loadLayeredDocumentFor(RuntimeConfigLayerStack())
+	return loadMergedRuntimeConfigDocumentFor(RuntimeConfigLayerStack())
+}
+
+// LoadMergedRuntimeConfigDocumentFrom merges the runtime.yaml stack anchored at
+// one session workspace. It is the multi-workspace server entry point; the
+// historical function above keeps using the process CWD for CLI compatibility.
+func LoadMergedRuntimeConfigDocumentFrom(baseDir string) (*MergedConfigDocument, error) {
+	return loadMergedRuntimeConfigDocumentFor(RuntimeConfigLayerStackFrom(baseDir))
+}
+
+// LoadGlobalRuntimeConfigDocument merges only the user-level runtime.yaml. It
+// is the runtime-server process-wide fallback, avoiding the server CWD as an
+// accidental project layer.
+func LoadGlobalRuntimeConfigDocument() (*MergedConfigDocument, error) {
+	return loadMergedRuntimeConfigDocumentFor(GlobalRuntimeConfigLayerStack())
+}
+
+// LoadRuntimeConfigDocumentFile loads one explicitly selected runtime.yaml.
+// It is used for skills_runtime.config_file overrides and profile runtime
+// configs that intentionally bypass the .aicli workspace stack.
+func LoadRuntimeConfigDocumentFile(path string) (*MergedConfigDocument, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	layers := []ConfigLayer{{
+		Kind:    LayerKindProject,
+		Path:    filepath.Clean(path),
+		Present: fileExists(path),
+	}}
+	return loadMergedRuntimeConfigDocumentFor(layers)
+}
+
+func loadMergedRuntimeConfigDocumentFor(layers []ConfigLayer) (*MergedConfigDocument, error) {
+	document, err := loadLayeredDocumentFor(layers)
 	if err != nil {
 		return nil, err
 	}

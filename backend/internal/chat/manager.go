@@ -293,6 +293,20 @@ func (m *SessionManager) List(ctx context.Context, userID string) ([]*Session, e
 	return m.storage.List(ctx, userID)
 }
 
+// ListAll returns sessions across every user. It is used by host-level
+// invalidations that are not scoped to one user (for example a workspace shell
+// settings change).
+func (m *SessionManager) ListAll(ctx context.Context, limit, offset int) ([]*Session, error) {
+	if m == nil || m.storage == nil {
+		return nil, fmt.Errorf("session storage is not configured")
+	}
+	lister, ok := m.storage.(SessionStorageAllLister)
+	if !ok {
+		return nil, fmt.Errorf("session storage does not support listing all sessions")
+	}
+	return lister.ListAll(ctx, limit, offset)
+}
+
 func (m *SessionManager) ListMetadataPage(ctx context.Context, userID string, limit, offset int) ([]*Session, error) {
 	if pager, ok := m.storage.(SessionStorageMetadataPager); ok {
 		return pager.ListMetadataPage(ctx, userID, limit, offset)

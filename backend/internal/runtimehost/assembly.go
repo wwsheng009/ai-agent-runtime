@@ -7,6 +7,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
@@ -97,6 +98,19 @@ func ApplyToolBasePathOption(config *agent.Config, path string) {
 		config.Options = make(map[string]interface{})
 	}
 	config.Options["tool_base_path"] = strings.TrimSpace(path)
+}
+
+// ApplyShellRuntimeOption publishes the workspace/session shell selection to
+// the agent option surface. The agent loop copies it into every tool-call
+// context, so concurrent sessions in different workspaces stay isolated.
+func ApplyShellRuntimeOption(config *agent.Config, runtime *runtimeexecutor.ShellRuntime) {
+	if config == nil || runtime == nil {
+		return
+	}
+	if config.Options == nil {
+		config.Options = make(map[string]interface{})
+	}
+	config.Options["shell_runtime"] = runtime
 }
 
 // ApplySessionRootOptions publishes the durable external-directory grants and

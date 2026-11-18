@@ -150,9 +150,12 @@ export function createConfigEditorActions(state: ConfigEditorState) {
 
       let nextDocument: RuntimeConfigDocument;
       if (shellOnlyChange) {
-        await saveRuntimeShellSettings(
-          toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed)),
-        );
+        const shellRequest = toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed));
+        if (state.workspacePath) {
+          await saveRuntimeShellSettings(shellRequest, state.workspacePath);
+        } else {
+          await saveRuntimeShellSettings(shellRequest);
+        }
         nextDocument = await getRuntimeConfigDocument();
       } else {
         // The generic writer is a read-modify-write over the same runtime layer.
@@ -169,9 +172,12 @@ export function createConfigEditorActions(state: ConfigEditorState) {
               },
         );
         if (shellChanged) {
-          await saveRuntimeShellSettings(
-            toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed)),
-          );
+          const shellRequest = toRuntimeShellSettingsSaveRequest(getRuntimeShellConfig(draftParsed));
+          if (state.workspacePath) {
+            await saveRuntimeShellSettings(shellRequest, state.workspacePath);
+          } else {
+            await saveRuntimeShellSettings(shellRequest);
+          }
           nextDocument = await getRuntimeConfigDocument().catch(() => ({
             ...nextDocument,
             parsed: withShellConfigFrom(nextDocument.parsed, draftParsed),

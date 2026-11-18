@@ -3,6 +3,7 @@ package prompt
 import (
 	"strings"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
@@ -60,11 +61,11 @@ var (
 // RenderShellExecutionGuidanceFacts renders the shell/toolkit guidance only
 // when at least one subject tool is model-visible. Empty guidance keeps hosts
 // from steering the model toward tools it cannot call.
-func RenderShellExecutionGuidanceFacts(facts *ToolGuidanceFacts, capabilityGuidance string) string {
+func RenderShellExecutionGuidanceFacts(facts *ToolGuidanceFacts, capabilityGuidance string, runtimes ...*runtimeexecutor.ShellRuntime) string {
 	if !facts.any(shellGuidanceTools...) {
 		return ""
 	}
-	return RenderShellExecutionGuidanceWithCapability(capabilityGuidance)
+	return RenderShellExecutionGuidanceWithCapability(capabilityGuidance, runtimes...)
 }
 
 // RenderFileEditingGuidanceFacts renders file-editing guidance only when a

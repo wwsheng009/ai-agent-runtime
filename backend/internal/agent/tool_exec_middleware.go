@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
@@ -11,6 +12,17 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// shellRuntimeForAgent returns the workspace/session shell runtime attached to
+// agent options by the host (runtime-server). Nil keeps the process-wide
+// compatibility behavior used by aicli.
+func shellRuntimeForAgent(agent *Agent) *runtimeexecutor.ShellRuntime {
+	if agent == nil || agent.config == nil || len(agent.config.Options) == 0 {
+		return nil
+	}
+	runtime, _ := agent.config.Options["shell_runtime"].(*runtimeexecutor.ShellRuntime)
+	return runtime
+}
 
 // bindFreeformToolCall resolves a custom tool's raw input against its schema
 // before hooks, permission checks, sandbox validation, and preflight run.

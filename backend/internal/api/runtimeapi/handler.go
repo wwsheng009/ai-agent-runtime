@@ -121,6 +121,9 @@ type Handler struct {
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
 	workspaceMCP  *workspaceMCPManagers
+	// workspaceShell resolves the shell runtime for a session workspace.
+	// runtime-server injects it; nil keeps the process-wide resolver behavior.
+	workspaceShell WorkspaceShellRuntimeResolver
 	// 会话级 MCP 临时启用（配置停用 server 的会话私有内存连接，见 session_mcp_temp.go）。
 	sessionMCPTempMu sync.Mutex
 	sessionMCPTemp   map[string]*sessionMCPTempEntry
@@ -240,9 +243,11 @@ type Handler struct {
 	agentMaxStepsProvider       AgentMaxStepsProvider
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
 	// shell 段设置面（docs/plan/windows-posix-shell-detection-and-config-plan-20261104.md §9）。
-	shellSettingsProvider  ShellSettingsProvider
-	shellSettingsPersister ShellSettingsPersister
-	shellSettingsProber    ShellSettingsProber
+	shellSettingsProvider       ShellSettingsProvider
+	shellSettingsPersister      ShellSettingsPersister
+	shellSettingsProber         ShellSettingsProber
+	shellSettingsScopeProvider  ShellSettingsScopeProvider
+	shellSettingsScopePersister ShellSettingsScopePersister
 	// gatewayController is the gateway connection control plane (docs/gateway/12-connection-control.md).
 	gatewayController GatewayController
 	// gateway session-state projection (docs/gateway/08-notifications.md §3).
@@ -406,6 +411,12 @@ type Handler struct {
 
 	workspaceDirectoriesOnce sync.Once
 	workspaceDirectories     *workspaceregistry.Store
+}
+
+// WorkspaceShellRuntimeResolver is the host seam for workspace-anchored shell
+// selection. runtime-server implements it with runtimeserver.WorkspaceShellResolver.
+type WorkspaceShellRuntimeResolver interface {
+	Resolve(workspacePath, profileRuntimePath string) (*executor.ShellRuntime, string, error)
 }
 
 type searchTelemetry struct {
@@ -2193,6 +2204,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if !req.EnableReAct {
 		requestTraceID = "trace_" + uuid.NewString()
 	}
+	sessionShellRuntime, shellSourcePath, shellErr := h.sessionShellResolution(workspacePath, profileState)
+	if shellErr != nil {
+		logger.Warnf("session shell resolution failed: workspace=%s source=%s err=%v",
+			workspacePath, shellSourcePath, shellErr)
+	}
 	contextPack := h.buildContextPack(ctx, session, buildProfileContextPack(profileState), workspaceCtx, chatMessages, lastMessage, workspacePath, req.TeamID, req.TaskID, requestTraceID, selectedConfig)
 	agentContext := map[string]interface{}{
 		"workspace_path":   workspacePath,
@@ -2200,9 +2216,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		"session_id":       sessionID(session),
 		"reasoning_effort": types.ResolveReasoningEffort(req.ReasoningEffort),
 	}
+	if sessionShellRuntime != nil {
+		agentContext["shell_runtime"] = sessionShellRuntime
+	}
+	if strings.TrimSpace(shellSourcePath) != "" {
+		agentContext["shell_runtime_source"] = shellSourcePath
+	}
 	// Freeze measured environment facts once per durable session and reuse them
 	// for multi-turn request assembly. Do not re-probe every agent chat turn.
-	envSnap := ensureSessionEnvironmentSnapshot(session, workspacePath)
+	envSnap := ensureSessionEnvironmentSnapshot(session, workspacePath, sessionShellRuntime)
 	applyEnvironmentSnapshotToAgentContext(agentContext, envSnap)
 	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
 		agentContext["permissions"] = grantedPermissions
@@ -2366,6 +2388,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		agentConfig.Options["workspace_path"] = workspacePath
 	}
 	runtimehost.ApplyToolBasePathOption(agentConfig, workspacePath)
+	runtimehost.ApplyShellRuntimeOption(agentConfig, sessionShellRuntime)
 	runtimehost.ApplySessionRootOptions(agentConfig, sessionCtx.AllowedRoots, sessionCtx.ReadOnlyRoots)
 	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
 		if agentConfig.Options == nil {

@@ -365,7 +365,13 @@ func TestOpenTerminalPTYSessionDrivesStdin(t *testing.T) {
 		t.Skip("windows ConPTY fixture")
 	}
 	ctx := context.Background()
-	manager := NewManager(Config{LogDir: t.TempDir(), MonitorInterval: 50 * time.Millisecond})
+	manager := NewManager(Config{
+		LogDir:          t.TempDir(),
+		MonitorInterval: 50 * time.Millisecond,
+		// `more` must be driven by the native console host; PowerShell's
+		// non-interactive launcher closes stdin before the PTY fixture can type.
+		Shell: runtimeexecutor.Shell{Path: "cmd.exe", Type: runtimeexecutor.ShellTypeCmd},
+	})
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	// `more` echoes every stdin line through the console host, independent of

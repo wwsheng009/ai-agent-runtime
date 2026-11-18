@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/workspaceregistry"
 )
 
 // shell 段的服务端设置面（Web 设置页 / TUI）：
@@ -29,6 +30,20 @@ type ShellSettingsPersister func(next runtimeexecutor.ShellConfig) (string, erro
 // ShellSettingsProber 强制重探候选链并返回完整矩阵（不修改配置）。
 type ShellSettingsProber func(cfg runtimeexecutor.ShellConfig) (*runtimeexecutor.ShellResolution, error)
 
+// ShellSettingsScope identifies the workspace/user scope of a shell settings
+// request. Empty WorkspacePath keeps the historical process-global behavior.
+type ShellSettingsScope struct {
+	WorkspacePath string `json:"workspace_path,omitempty"`
+	DirectoryID   string `json:"directory_id,omitempty"`
+	Scope         string `json:"scope,omitempty"`
+}
+
+// ShellSettingsScopeProvider reads a scoped shell config and its write target.
+type ShellSettingsScopeProvider func(scope ShellSettingsScope) (runtimeexecutor.ShellConfig, string, error)
+
+// ShellSettingsScopePersister writes a scoped shell config.
+type ShellSettingsScopePersister func(next runtimeexecutor.ShellConfig, scope ShellSettingsScope) (string, error)
+
 // SetShellSettingsProvider 设置 shell 配置读取回调（runtime-server 接 RuntimeManager）。
 func (h *Handler) SetShellSettingsProvider(provider ShellSettingsProvider) {
 	h.shellSettingsProvider = provider
@@ -44,6 +59,22 @@ func (h *Handler) SetShellSettingsProber(prober ShellSettingsProber) {
 	h.shellSettingsProber = prober
 }
 
+// SetShellSettingsScopeProvider configures workspace-aware shell settings.
+func (h *Handler) SetShellSettingsScopeProvider(provider ShellSettingsScopeProvider) {
+	if h == nil {
+		return
+	}
+	h.shellSettingsScopeProvider = provider
+}
+
+// SetShellSettingsScopePersister configures workspace-aware shell persistence.
+func (h *Handler) SetShellSettingsScopePersister(persister ShellSettingsScopePersister) {
+	if h == nil {
+		return
+	}
+	h.shellSettingsScopePersister = persister
+}
+
 // shellSettingsRequest 是 PUT 的请求体。字段用指针表示「未提供」：只改用户动过的
 // 键，避免把一次下拉框选择变成整段覆盖。
 type shellSettingsRequest struct {
@@ -54,6 +85,90 @@ type shellSettingsRequest struct {
 	StrictProbe    *bool              `json:"strict_probe"`
 	ScriptDelivery *string            `json:"script_delivery"`
 	Env            *map[string]string `json:"env"`
+	WorkspacePath  *string            `json:"workspace_path"`
+	DirectoryID    *string            `json:"directory_id"`
+	Scope          *string            `json:"scope"`
+}
+
+func (h *Handler) resolveShellSettingsScope(workspacePath, directoryID, scope string) (ShellSettingsScope, error) {
+	workspacePath = strings.TrimSpace(workspacePath)
+	directoryID = strings.TrimSpace(directoryID)
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if directoryID != "" {
+		record, ok := h.workspaceDirectoryRegistry().Get(directoryID)
+		if !ok {
+			return ShellSettingsScope{}, fmt.Errorf("%w: unknown directory id %s", workspaceregistry.ErrNotFound, directoryID)
+		}
+		workspacePath = record.Path
+	}
+	if workspacePath != "" {
+		normalized, err := workspaceregistry.NormalizePath(workspacePath)
+		if err != nil {
+			return ShellSettingsScope{}, err
+		}
+		workspacePath = normalized
+	}
+	if scope == "" {
+		if workspacePath != "" {
+			scope = "workspace"
+		} else {
+			scope = "user"
+		}
+	}
+	switch scope {
+	case "workspace":
+		if workspacePath == "" {
+			return ShellSettingsScope{}, fmt.Errorf("workspace_path or directory_id is required for workspace-scoped shell settings")
+		}
+	case "user", "global", "server":
+		scope = "user"
+		workspacePath = ""
+	default:
+		return ShellSettingsScope{}, fmt.Errorf("invalid shell settings scope %q (want workspace or user)", scope)
+	}
+	return ShellSettingsScope{WorkspacePath: workspacePath, DirectoryID: directoryID, Scope: scope}, nil
+}
+
+func shellSettingsScopeNeedsWorkspace(scope ShellSettingsScope) bool {
+	return strings.EqualFold(strings.TrimSpace(scope.Scope), "workspace") && strings.TrimSpace(scope.WorkspacePath) != ""
+}
+
+func (h *Handler) loadShellSettings(scope ShellSettingsScope) (runtimeexecutor.ShellConfig, string, error) {
+	if shellSettingsScopeNeedsWorkspace(scope) {
+		if h.shellSettingsScopeProvider == nil {
+			return runtimeexecutor.ShellConfig{}, "", fmt.Errorf("workspace-scoped shell settings are not configured")
+		}
+		return h.shellSettingsScopeProvider(scope)
+	}
+	if h.shellSettingsProvider == nil {
+		return runtimeexecutor.ShellConfig{}, "", fmt.Errorf("shell settings provider is not configured")
+	}
+	return h.shellSettingsProvider()
+}
+
+func (h *Handler) persistShellSettings(next runtimeexecutor.ShellConfig, scope ShellSettingsScope) (string, error) {
+	if shellSettingsScopeNeedsWorkspace(scope) {
+		if h.shellSettingsScopePersister == nil {
+			return "", fmt.Errorf("workspace-scoped shell settings are not configured")
+		}
+		path, err := h.shellSettingsScopePersister(next, scope)
+		if err != nil {
+			return path, err
+		}
+		h.invalidateWorkspaceShell(scope.WorkspacePath)
+		h.invalidateSessionRuntimeToolSurfaces()
+		h.markShellSessionsForRebuild(scope.WorkspacePath, false)
+		return path, nil
+	}
+	if h.shellSettingsPersister == nil {
+		return "", fmt.Errorf("shell settings persister is not configured")
+	}
+	path, err := h.shellSettingsPersister(next)
+	if err == nil {
+		h.invalidateSessionRuntimeToolSurfaces()
+		h.markShellSessionsForRebuild("", true)
+	}
+	return path, err
 }
 
 // GetShellSettings 返回生效值、候选矩阵与写入目标。
@@ -64,19 +179,24 @@ func (h *Handler) GetShellSettings(w http.ResponseWriter, r *http.Request) {
 	if h == nil {
 		return
 	}
-	if h.shellSettingsProvider == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
-			"shell settings provider is not configured"))
+	query := r.URL.Query()
+	scope, err := h.resolveShellSettingsScope(
+		query.Get("workspace_path"),
+		query.Get("directory_id"),
+		query.Get("scope"),
+	)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-	cfg, path, err := h.shellSettingsProvider()
+	cfg, path, err := h.loadShellSettings(scope)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid,
 			"failed to load shell settings", err))
 		return
 	}
 	resolution, resolveErr := runtimeexecutor.ProbeShellCandidatesCached(cfg)
-	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(cfg, path, resolution, resolveErr, false))
+	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(cfg, path, resolution, resolveErr, false, scope))
 }
 
 // UpdateShellSettings 保存 shell 配置。
@@ -87,19 +207,31 @@ func (h *Handler) UpdateShellSettings(w http.ResponseWriter, r *http.Request) {
 	if h == nil {
 		return
 	}
-	if h.shellSettingsPersister == nil || h.shellSettingsProvider == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
-			"shell settings persister is not configured"))
-		return
-	}
 	var req shellSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
 			"failed to parse request body"))
 		return
 	}
+	scopeValue := ""
+	if req.Scope != nil {
+		scopeValue = *req.Scope
+	}
+	workspacePath := ""
+	if req.WorkspacePath != nil {
+		workspacePath = *req.WorkspacePath
+	}
+	directoryID := ""
+	if req.DirectoryID != nil {
+		directoryID = *req.DirectoryID
+	}
+	scope, err := h.resolveShellSettingsScope(workspacePath, directoryID, scopeValue)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
 
-	current, _, err := h.shellSettingsProvider()
+	current, _, err := h.loadShellSettings(scope)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid,
 			"failed to load shell settings", err))
@@ -146,15 +278,18 @@ func (h *Handler) UpdateShellSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path, err := h.shellSettingsPersister(next)
+	path, err := h.persistShellSettings(next, scope)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid,
 			"failed to persist shell settings", err))
 		return
 	}
 
-	// 配置变了，下一次执行必须重新探测（以及让提示词的 shell 描述同步更新）。
-	runtimeexecutor.InvalidateShellResolution()
+	// 全局配置变了，下一次执行必须重新探测（以及让提示词的 shell 描述同步更新）。
+	// 工作区配置只失效该 workspace 的解析缓存，不能改写其他会话。
+	if !shellSettingsScopeNeedsWorkspace(scope) {
+		runtimeexecutor.InvalidateShellResolution()
+	}
 
 	resolution, resolveErr := runtimeexecutor.ProbeShellCandidatesCached(next)
 	h.publishSkillsChangedEvent(r, map[string]interface{}{
@@ -164,7 +299,7 @@ func (h *Handler) UpdateShellSettings(w http.ResponseWriter, r *http.Request) {
 		"config_file": strings.TrimSpace(path),
 		"changed_by":  requestChangedBy(r),
 	})
-	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(next, path, resolution, resolveErr, true))
+	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(next, path, resolution, resolveErr, true, scope))
 }
 
 // ProbeShellSettings 强制重探并返回新矩阵，不修改配置（设置页「检测」按钮）。
@@ -172,21 +307,19 @@ func (h *Handler) ProbeShellSettings(w http.ResponseWriter, r *http.Request) {
 	if h == nil {
 		return
 	}
-	if h.shellSettingsProvider == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
-			"shell settings provider is not configured"))
-		return
-	}
-	cfg, path, err := h.shellSettingsProvider()
+	query := r.URL.Query()
+	scope, err := h.resolveShellSettingsScope(
+		query.Get("workspace_path"),
+		query.Get("directory_id"),
+		query.Get("scope"),
+	)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid,
-			"failed to load shell settings", err))
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-
-	probeCfg := cfg
+	var req shellSettingsRequest
+	bodyDecoded := false
 	if r.Body != nil {
-		var req shellSettingsRequest
 		decodeErr := json.NewDecoder(r.Body).Decode(&req)
 		if decodeErr != nil && decodeErr != io.EOF {
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
@@ -194,47 +327,75 @@ func (h *Handler) ProbeShellSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if decodeErr == nil {
-			// 允许携带「草稿」配置探测：设置页在保存前就能预览顺序调整的效果。
-			if req.Prefer != nil {
-				prefer := make([]string, 0, len(*req.Prefer))
-				for _, id := range *req.Prefer {
-					if trimmed := strings.ToLower(strings.TrimSpace(id)); trimmed != "" {
-						prefer = append(prefer, trimmed)
-					}
-				}
-				probeCfg.Prefer = prefer
+			bodyDecoded = true
+			bodyWorkspace := ""
+			if req.WorkspacePath != nil {
+				bodyWorkspace = *req.WorkspacePath
 			}
-			if req.Path != nil {
-				probeCfg.Path = strings.TrimSpace(*req.Path)
+			bodyDirectory := ""
+			if req.DirectoryID != nil {
+				bodyDirectory = *req.DirectoryID
 			}
-			if req.AutoDetect != nil {
-				probeCfg.AutoDetect = req.AutoDetect
+			bodyScope := ""
+			if req.Scope != nil {
+				bodyScope = *req.Scope
 			}
-			if req.StrictProbe != nil {
-				probeCfg.StrictProbe = req.StrictProbe
-			}
-			if req.ProbeTimeout != nil {
-				timeout, parseErr := parseShellProbeTimeout(*req.ProbeTimeout)
-				if parseErr != nil {
-					h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, parseErr.Error()))
+			if bodyWorkspace != "" || bodyDirectory != "" || bodyScope != "" {
+				scope, err = h.resolveShellSettingsScope(bodyWorkspace, bodyDirectory, bodyScope)
+				if err != nil {
+					h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 					return
 				}
-				probeCfg.ProbeTimeout = timeout
-			}
-			if req.ScriptDelivery != nil {
-				probeCfg.ScriptDelivery = runtimeexecutor.ScriptDelivery(
-					strings.ToLower(strings.TrimSpace(*req.ScriptDelivery)),
-				)
-			}
-			if req.Env != nil {
-				probeCfg.Env = cloneStringMap(*req.Env)
-			}
-			probeCfg = cloneShellConfigForProbe(probeCfg)
-			if validateErr := runtimeexecutor.ValidateShellConfig(&probeCfg); validateErr != nil {
-				h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, validateErr.Error()))
-				return
 			}
 		}
+	}
+	cfg, path, err := h.loadShellSettings(scope)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid,
+			"failed to load shell settings", err))
+		return
+	}
+	probeCfg := cloneShellConfigForProbe(cfg)
+	if bodyDecoded {
+		// 允许携带「草稿」配置探测：设置页在保存前就能预览顺序调整的效果。
+		if req.Prefer != nil {
+			prefer := make([]string, 0, len(*req.Prefer))
+			for _, id := range *req.Prefer {
+				if trimmed := strings.ToLower(strings.TrimSpace(id)); trimmed != "" {
+					prefer = append(prefer, trimmed)
+				}
+			}
+			probeCfg.Prefer = prefer
+		}
+		if req.Path != nil {
+			probeCfg.Path = strings.TrimSpace(*req.Path)
+		}
+		if req.AutoDetect != nil {
+			probeCfg.AutoDetect = req.AutoDetect
+		}
+		if req.StrictProbe != nil {
+			probeCfg.StrictProbe = req.StrictProbe
+		}
+		if req.ProbeTimeout != nil {
+			timeout, parseErr := parseShellProbeTimeout(*req.ProbeTimeout)
+			if parseErr != nil {
+				h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, parseErr.Error()))
+				return
+			}
+			probeCfg.ProbeTimeout = timeout
+		}
+		if req.ScriptDelivery != nil {
+			probeCfg.ScriptDelivery = runtimeexecutor.ScriptDelivery(
+				strings.ToLower(strings.TrimSpace(*req.ScriptDelivery)),
+			)
+		}
+		if req.Env != nil {
+			probeCfg.Env = cloneStringMap(*req.Env)
+		}
+	}
+	if err := runtimeexecutor.ValidateShellConfig(&probeCfg); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
 	}
 
 	var resolution *runtimeexecutor.ShellResolution
@@ -244,7 +405,7 @@ func (h *Handler) ProbeShellSettings(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resolution, resolveErr = runtimeexecutor.ProbeShellCandidates(probeCfg)
 	}
-	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(probeCfg, path, resolution, resolveErr, false))
+	h.writeJSON(w, http.StatusOK, h.shellSettingsResponse(probeCfg, path, resolution, resolveErr, false, scope))
 }
 
 // shellSettingsResponse 组装 GET/PUT/PROBE 同构的响应体。
@@ -254,6 +415,7 @@ func (h *Handler) shellSettingsResponse(
 	resolution *runtimeexecutor.ShellResolution,
 	resolveErr error,
 	updated bool,
+	scope ShellSettingsScope,
 ) map[string]interface{} {
 	payload := map[string]interface{}{
 		"auto_detect":       cfg.ShellAutoDetect(),
@@ -267,6 +429,13 @@ func (h *Handler) shellSettingsResponse(
 		"writable":          strings.TrimSpace(path) != "",
 		"supported_ids":     runtimeexecutor.ShellCandidateIDs(),
 		"updated":           updated,
+		"scope":             scope.Scope,
+	}
+	if strings.TrimSpace(scope.WorkspacePath) != "" {
+		payload["workspace_path"] = scope.WorkspacePath
+	}
+	if strings.TrimSpace(scope.DirectoryID) != "" {
+		payload["directory_id"] = scope.DirectoryID
 	}
 	if len(cfg.Env) > 0 {
 		payload["env"] = cfg.Env

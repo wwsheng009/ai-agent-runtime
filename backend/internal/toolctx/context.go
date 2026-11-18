@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 type contextKey string
@@ -20,6 +21,7 @@ const (
 	agentDepthKey              contextKey = "tool_agent_depth"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
+	shellRuntimeKey            contextKey = "tool_shell_runtime"
 	workspaceRootKey           contextKey = "tool_workspace_root"
 	allowedRootsKey            contextKey = "tool_allowed_roots"
 	artifactStoreKey           contextKey = "tool_artifact_store"
@@ -191,6 +193,29 @@ func ShellOutputArtifactDir(ctx context.Context) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// WithShellRuntime binds the shell selected for this session/workspace to the
+// tool execution context. It is process-safe: concurrent sessions may carry
+// different runtimes without mutating the global resolver.
+func WithShellRuntime(ctx context.Context, runtime *runtimeexecutor.ShellRuntime) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if runtime == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, shellRuntimeKey, runtime)
+}
+
+// ShellRuntimeFromContext retrieves the per-session shell runtime, or nil when
+// the caller did not bind one (CLI/legacy paths then use the global resolver).
+func ShellRuntimeFromContext(ctx context.Context) *runtimeexecutor.ShellRuntime {
+	if ctx == nil {
+		return nil
+	}
+	runtime, _ := ctx.Value(shellRuntimeKey).(*runtimeexecutor.ShellRuntime)
+	return runtime
 }
 
 // WithWorkspaceRoot stores the session-bound filesystem root in ctx. Tools use

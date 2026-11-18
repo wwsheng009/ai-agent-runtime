@@ -266,7 +266,7 @@ $HOME/.aicli/runtime.yaml       用户层（低优先级）
 - 在仓库根执行 `aicli doctor shell`：项目层是 `./.aicli/runtime.yaml`。
 - 在 `backend/` 执行 `aicli doctor shell`：项目层是 `backend/.aicli/runtime.yaml`。
 
-因此，手工编辑前应先运行 `doctor shell --json`，以输出的 `config_path` 为准。`backend/configs/runtime.yaml` 是便携/开发配置，通常只在 `runtime-server --config backend/configs/runtime.yaml` 显式指定时读取；它不是上述 `.aicli` 合并链的隐式项目层。
+因此，手工编辑前应先运行 `doctor shell --json`，以输出的 `config_path` 为准。`backend/configs/runtime.yaml` 是便携/开发配置，只有当 `skills_runtime.config_file` 显式指向它时才读取；它不是上述 `.aicli` 合并链的隐式项目层。
 
 ### 5.2 aicli 配置 TUI
 
@@ -283,7 +283,9 @@ aicli config --tui
 
 在菜单中选择「Shell 执行环境」。该页面可调整候选顺序、强制路径、自动检测开关、探针超时和脚本传递方式，也可清缓存重新探测。保存时会显示实际写入文件。
 
-TUI 会立即更新自身进程的解析结果；已经在另一个进程中运行的 `runtime-server` 不会因外部 TUI 保存而自动重载，需重启服务或直接使用 Web 设置页保存。
+TUI 会立即更新自身进程的解析结果；已经在另一个进程中运行的 `runtime-server`
+不会即时重建现有 actor。新会话/下一轮 workspace 解析会读取最新文件；要让已运行
+会话立即切换 shell，请使用 Web 设置页保存（会标记同 workspace 会话重建）或重启服务。
 
 ### 5.3 Web 后端配置工作台
 
@@ -311,6 +313,37 @@ http://localhost:8101/runtime/config
 请求体使用 snake_case 字段：`auto_detect`、`prefer`、`path`、`probe_timeout`、`strict_probe`、`script_delivery`、`env`。`PUT` 只更新请求中出现的字段；`prefer: []` 和 `path: ""` 可清空对应配置。`POST /probe` 接受同样字段作为草稿，未提供的字段沿用当前生效值。
 
 非法候选、非法时长或不合法的 `shell.path` 会返回 `400`，且不会修改内存中的生效配置。
+
+### 5.5 runtime-server 的多 workspace 语义
+
+`runtime-server` 是长期进程，可以同时服务多个项目目录。shell 配置不能只按
+「服务启动目录」解析一次，否则 workspace A 的项目配置会泄漏给 workspace B。
+当前版本的解析规则：
+
+```text
+进程级默认:
+  skills_runtime.config_file 显式覆盖 > $HOME/.aicli/runtime.yaml > 内置默认
+
+某个会话/工作区:
+  profile 显式 runtime.yaml > 工作区 .aicli/runtime.yaml > 用户层 > 进程级默认
+```
+
+- **服务进程 CWD 不再隐式成为所有 workspace 的项目层。** 只有用户级
+  `~/.aicli/runtime.yaml` 和显式 `skills_runtime.config_file` 构成进程级默认。
+- 每个会话按自己的 `workspace_path` 读取 `<workspace>/.aicli/runtime.yaml`。
+  `aicli` TUI 只有当前项目，行为不变。
+- 工作区级 `shell.path` / `shell.env` 只对 **trusted workspace** 生效；未信任目录
+  回退到用户级/进程级 shell，避免项目目录注入任意 shell 或环境变量。
+- `GET/PUT/POST /api/runtime/config/shell` 接受
+  `workspace_path`（或 `directory_id`）与 `scope=workspace|user`。省略时为
+  `scope=user`，保持旧的全局行为。
+- 后台 `shell`/`job_start` 在提交时捕获当时的 shell runtime；之后再修改其他
+  workspace 或全局 shell，不会改变已提交 job 的方言。detached runner 与
+  restart recovery 使用持久化的 shell 身份。
+- prompt 中的 shell 描述也按会话/工作区的 runtime 生成；通过 Web 设置页保存
+  工作区配置后，该工作区的空闲会话会在下一轮重建 actor 并重新读取配置。
+  外部手工编辑 `runtime.yaml` 时，新会话立即读取新值；已运行 actor 通常需要
+  一次 actor 重建或重启服务。
 
 ---
 
@@ -361,7 +394,8 @@ aicli doctor shell --probe-only wsl
 - 确认改的是 `doctor shell` 报告的 `config_path`。
 - 确认项目层没有覆盖用户层同名字段。
 - `doctor shell --refresh` 只能刷新当前命令的读取与探测结果，不能热重载另一个已运行进程。
-- 已有 `runtime-server` 进程在手工修改 YAML 后通常需要重启；通过它的 Web 设置页保存则会即时更新该进程。
+- 手工修改 YAML 后，新会话会读取新值；已有 `runtime-server` actor 通常需要下一轮
+  actor 重建或重启。通过它的 Web 设置页保存会失效对应 workspace 缓存并标记会话重建。
 
 ### 6.5 长命令在 Windows 上失败
 

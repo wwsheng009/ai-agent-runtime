@@ -41,7 +41,10 @@ const (
 	watchdogCodeProcessLost    = "PROCESS_LOST"
 )
 
-var detachedShellLauncher = launchDetachedShell
+// detachedShellLauncher is the test seam. Production uses the same function
+// through launchDetachedShellWithRuntime; the runtime argument keeps each job
+// on the shell it was submitted with.
+var detachedShellLauncher = launchDetachedShellWithRuntime
 
 // detachedShellForRunner is the shell used to build and host the detached
 // runner. It is a variable so the host check and the runner generation can be
@@ -119,16 +122,27 @@ func defaultDetachedRunnerHostAvailable() bool {
 // path from producing a .sh runner that nothing can start: the check and the
 // generation both read this one answer.
 func detachedRunnerHost() (runtimeexecutor.Shell, bool) {
+	return detachedRunnerHostFor(nil)
+}
+
+func detachedRunnerHostFor(shellRuntime *runtimeexecutor.ShellRuntime) (runtimeexecutor.Shell, bool) {
 	if runtime.GOOS != "windows" {
-		return detachedShellForRunner(), true
+		return detachedShellForRuntime(shellRuntime), true
 	}
-	if shell, ok := detachedRunnerPosixHost(); ok {
+	if shell, ok := detachedRunnerPosixHostFor(shellRuntime); ok {
 		return shell, true
 	}
-	if shell, ok := detachedRunnerPowerShellHost(); ok {
+	if shell, ok := detachedRunnerPowerShellHostFor(shellRuntime); ok {
 		return shell, false
 	}
 	return runtimeexecutor.DefaultUserShell(), false
+}
+
+func detachedShellForRuntime(shellRuntime *runtimeexecutor.ShellRuntime) runtimeexecutor.Shell {
+	if shellRuntime != nil && strings.TrimSpace(shellRuntime.Shell.Path) != "" {
+		return shellRuntime.Shell
+	}
+	return detachedShellForRunner()
 }
 
 // detachedRunnerPosixHost returns the POSIX shell that can host a sh runner, if
@@ -138,7 +152,11 @@ func detachedRunnerHost() (runtimeexecutor.Shell, bool) {
 // the config allows a forced path that has since been uninstalled. Trusting it
 // blindly would select a runner that can never start.
 func detachedRunnerPosixHost() (runtimeexecutor.Shell, bool) {
-	shell := detachedShellForRunner()
+	return detachedRunnerPosixHostFor(nil)
+}
+
+func detachedRunnerPosixHostFor(shellRuntime *runtimeexecutor.ShellRuntime) (runtimeexecutor.Shell, bool) {
+	shell := detachedShellForRuntime(shellRuntime)
 	if !shell.SpeaksPosix() {
 		return runtimeexecutor.Shell{}, false
 	}
@@ -158,7 +176,11 @@ func detachedRunnerPosixHost() (runtimeexecutor.Shell, bool) {
 // runner host must be the same executable the resolver proved usable, otherwise
 // a portable pwsh installation silently loses detached execution.
 func detachedRunnerPowerShellHost() (runtimeexecutor.Shell, bool) {
-	shell := detachedShellForRunner()
+	return detachedRunnerPowerShellHostFor(nil)
+}
+
+func detachedRunnerPowerShellHostFor(shellRuntime *runtimeexecutor.ShellRuntime) (runtimeexecutor.Shell, bool) {
+	shell := detachedShellForRuntime(shellRuntime)
 	switch shell.Type {
 	case runtimeexecutor.ShellTypePowerShell, runtimeexecutor.ShellTypePwsh:
 	default:
@@ -441,7 +463,7 @@ func (m *Manager) launchDetachedShellWithRetry(ctx context.Context, managed *man
 		managed.info.Metadata["launch_attempt"] = attempt
 		managed.info.Metadata["launch_max_attempts"] = maxAttempts
 		managed.mu.Unlock()
-		launch, err := detachedShellLauncher(managed.info.Command, managed.info.Cwd, managed.logPath)
+		launch, err := detachedShellLauncher(managed.shellRuntime, managed.info.Command, managed.info.Cwd, managed.logPath)
 		if err == nil {
 			return launch, nil
 		}
@@ -805,10 +827,22 @@ type detachedLaunch struct {
 }
 
 func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) {
+	return launchDetachedShellWithRuntime(nil, command, cwd, logPath)
+}
+
+func launchDetachedShellWithRuntime(runtime *runtimeexecutor.ShellRuntime, command, cwd, logPath string) (*detachedLaunch, error) {
 	logPath = strings.TrimSpace(logPath)
 	command = strings.TrimSpace(command)
 	if logPath == "" || command == "" {
 		return nil, &detachedLaunchError{err: fmt.Errorf("detached launch requires command and log path")}
+	}
+	if runtime != nil {
+		if runtime.ResolveErr != nil {
+			return nil, &detachedLaunchError{err: runtime.ResolveErr}
+		}
+		if strings.TrimSpace(runtime.Shell.Path) == "" {
+			return nil, &detachedLaunchError{err: fmt.Errorf("%w: detached shell runtime has no executable", runtimeexecutor.ErrShellUnavailable)}
+		}
 	}
 	statusPath := strings.TrimSuffix(logPath, filepath.Ext(logPath)) + ".status"
 	heartbeatPath := statusPath + ".heartbeat"
@@ -816,8 +850,18 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	// One host decision drives both the runner format and the process that
 	// starts it, so a Windows box on Git Bash gets a .sh runner hosted by bash
 	// and never a .sh runner handed to PowerShell.
-	shell, posixHost := detachedRunnerHost()
+	hostShell, posixHost := detachedRunnerHostFor(runtime)
+	commandShell := detachedShellForRuntime(runtime)
+	if posixHost {
+		// A sh runner can only host a POSIX command shell; the host decision is
+		// the command decision in that case.
+		commandShell = hostShell
+	}
 	runnerPath += detachedRunnerExtension(posixHost)
+	delivery := runtimeexecutor.CurrentScriptDelivery()
+	if runtime != nil {
+		delivery = runtime.EffectiveDelivery()
+	}
 
 	if err := os.Remove(statusPath); err != nil && !os.IsNotExist(err) {
 		return nil, &detachedLaunchError{err: err, retryable: true}
@@ -825,10 +869,10 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	if err := os.Remove(heartbeatPath); err != nil && !os.IsNotExist(err) {
 		return nil, &detachedLaunchError{err: err, retryable: true}
 	}
-	if err := writeDetachedRunner(runnerPath, shell, posixHost, command, cwd, logPath, statusPath); err != nil {
+	if err := writeDetachedRunner(runnerPath, commandShell, posixHost, command, cwd, logPath, statusPath, delivery); err != nil {
 		return nil, &detachedLaunchError{err: err, retryable: true}
 	}
-	pid, err := startDetachedRunner(runnerPath, shell, posixHost)
+	pid, err := startDetachedRunner(runnerPath, hostShell, posixHost, runtime)
 	if err != nil {
 		return nil, &detachedLaunchError{err: err, retryable: detachedRunnerStartRetryable(err)}
 	}
@@ -860,11 +904,15 @@ func detachedRunnerExtension(posixHost bool) string {
 	return ".ps1"
 }
 
-func writeDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool, command, cwd, logPath, statusPath string) error {
-	if posixHost {
-		return writeUnixDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+func writeDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool, command, cwd, logPath, statusPath string, delivery ...runtimeexecutor.ScriptDelivery) error {
+	scriptDelivery := runtimeexecutor.CurrentScriptDelivery()
+	if len(delivery) > 0 && delivery[0] != "" {
+		scriptDelivery = delivery[0]
 	}
-	return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath)
+	if posixHost {
+		return writeUnixDetachedRunner(path, shell, command, cwd, logPath, statusPath, scriptDelivery)
+	}
+	return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath, scriptDelivery)
 }
 
 // posixRunnerInvocation builds the argv and optional stdin payload the runner
@@ -875,10 +923,14 @@ func writeDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost boo
 // re-parsed by MSYS. Forward slashes are accepted by both the MSYS path
 // converter and CreateProcess, so normalizing the first argv element removes a
 // class of quoting/escaping surprises without touching the payload.
-func posixRunnerInvocation(shell runtimeexecutor.Shell, command string) ([]string, string) {
+func posixRunnerInvocation(shell runtimeexecutor.Shell, command string, delivery ...runtimeexecutor.ScriptDelivery) ([]string, string) {
+	scriptDelivery := runtimeexecutor.CurrentScriptDelivery()
+	if len(delivery) > 0 && delivery[0] != "" {
+		scriptDelivery = delivery[0]
+	}
 	argv, stdinScript := shell.DeriveExecInvocation(
 		runtimeexecutor.WrapPowerShellExitCode(shell, command),
-		runtimeexecutor.CurrentScriptDelivery(),
+		scriptDelivery,
 	)
 	if runtime.GOOS == "windows" && len(argv) > 0 {
 		argv[0] = filepath.ToSlash(argv[0])
@@ -886,7 +938,7 @@ func posixRunnerInvocation(shell runtimeexecutor.Shell, command string) ([]strin
 	return argv, stdinScript
 }
 
-func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
+func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string, delivery ...runtimeexecutor.ScriptDelivery) error {
 	if runtime.GOOS == "windows" {
 		// Every path embedded below reaches either a shell builtin (`cd`) or a
 		// cygwin open()/CreateProcess pair, and `C:/...` is accepted by all of
@@ -917,7 +969,7 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 			"fi",
 		)
 	}
-	argv, stdinScript := posixRunnerInvocation(shell, command)
+	argv, stdinScript := posixRunnerInvocation(shell, command, delivery...)
 	commandLine := buildShellCommandLine(argv)
 	if stdinScript == "" {
 		lines = append(lines, fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)))
@@ -940,8 +992,8 @@ func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, 
 	return os.Chmod(path, 0o755)
 }
 
-func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
-	content := buildWindowsDetachedRunnerContent(shell, command, cwd, logPath, statusPath)
+func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string, delivery ...runtimeexecutor.ScriptDelivery) error {
+	content := buildWindowsDetachedRunnerContent(shell, command, cwd, logPath, statusPath, delivery...)
 	// Windows PowerShell 5.1 decodes a BOM-less .ps1 using the active ANSI code
 	// page. The runner embeds the user command as a PowerShell string, so a
 	// non-ASCII command would corrupt before it reaches the temporary script.
@@ -970,10 +1022,18 @@ func posixHeredocDelimiter(script string) string {
 	return delimiter
 }
 
-func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool) (int, error) {
-	env := runtimeexecutor.NeutralizeConsoleStylingEnv(
-		runtimeexecutor.ApplyShellEnvOverrides(os.Environ()),
-	)
+func startDetachedRunner(path string, shell runtimeexecutor.Shell, posixHost bool, runtimes ...*runtimeexecutor.ShellRuntime) (int, error) {
+	var shellRuntime *runtimeexecutor.ShellRuntime
+	if len(runtimes) > 0 {
+		shellRuntime = runtimes[0]
+	}
+	env := os.Environ()
+	if shellRuntime != nil {
+		env = shellRuntime.ApplyEnv(env)
+	} else {
+		env = runtimeexecutor.ApplyShellEnvOverrides(env)
+	}
+	env = runtimeexecutor.NeutralizeConsoleStylingEnv(env)
 	if runtime.GOOS == "windows" {
 		if posixHost {
 			// POSIX host: the runner is a plain sh script, so the shell that
@@ -1069,13 +1129,17 @@ func buildShellCommandLine(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
-func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) string {
+func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string, delivery ...runtimeexecutor.ScriptDelivery) string {
 	heartbeatPath := statusPath + ".heartbeat"
 	wrappedCommand := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 	commandArgs := shell.DeriveExecArgs(wrappedCommand, false)
 	scriptFile := ""
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
-		if argv, stdinScript := shell.DeriveExecInvocation(wrappedCommand, runtimeexecutor.CurrentScriptDelivery()); stdinScript != "" {
+		scriptDelivery := runtimeexecutor.CurrentScriptDelivery()
+		if len(delivery) > 0 && delivery[0] != "" {
+			scriptDelivery = delivery[0]
+		}
+		if argv, stdinScript := shell.DeriveExecInvocation(wrappedCommand, scriptDelivery); stdinScript != "" {
 			// A detached runner cannot feed stdin to a child while also keeping
 			// its own heartbeat alive. Write the script to a short temporary
 			// .ps1 path and use -File instead of putting a huge -EncodedCommand

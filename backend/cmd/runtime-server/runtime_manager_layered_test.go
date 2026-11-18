@@ -48,3 +48,34 @@ func TestLoadRuntimeServerManagerUsesLayeredRuntimeConfig(t *testing.T) {
 	require.Equal(t, 0, fresh.Get().Agent.MaxMaxSteps, "a fresh install falls back to built-in defaults")
 	require.Equal(t, filepath.Clean(userConfig), filepath.Clean(fresh.GetFilePath()))
 }
+
+func TestLoadRuntimeServerManagerIgnoresServerCWDProjectLayer(t *testing.T) {
+	home := t.TempDir()
+	previous := config.UserHomeDirForTest()
+	config.SetUserHomeDirForTest(func() (string, error) { return home, nil })
+	t.Cleanup(func() { config.SetUserHomeDirForTest(previous) })
+
+	projectDir := t.TempDir()
+	chdirTest(t, projectDir)
+	writeRuntimeServerLayer(t, filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  maxSteps: 7\n")
+	writeRuntimeServerLayer(t, filepath.Join(projectDir, ".aicli", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  maxSteps: 1\n")
+
+	manager := runtimecfg.NewRuntimeManager("")
+	require.NoError(t, loadRuntimeServerManager(manager))
+	require.Equal(t, 7, manager.Get().Agent.MaxMaxSteps,
+		"the server CWD project layer must not become the global default for every workspace")
+}
+
+func TestLoadRuntimeServerManagerHonorsExplicitRuntimeConfig(t *testing.T) {
+	home := t.TempDir()
+	previous := config.UserHomeDirForTest()
+	config.SetUserHomeDirForTest(func() (string, error) { return home, nil })
+	t.Cleanup(func() { config.SetUserHomeDirForTest(previous) })
+	chdirTest(t, t.TempDir())
+
+	explicit := filepath.Join(t.TempDir(), "custom-runtime.yaml")
+	writeRuntimeServerLayer(t, explicit, "agent:\n  maxSteps: 9\n")
+	manager := runtimecfg.NewRuntimeManager(explicit)
+	require.NoError(t, loadRuntimeServerManager(manager, explicit))
+	require.Equal(t, 9, manager.Get().Agent.MaxMaxSteps)
+}

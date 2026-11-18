@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"gopkg.in/yaml.v3"
 )
@@ -103,6 +104,31 @@ shell.prefer 中显式写出 wsl。
 func loadDoctorShellConfig() (runtimeexecutor.ShellConfig, string, string, bool, error) {
 	var cfg runtimeexecutor.ShellConfig
 	var loadErr error
+
+	// The explicit skills_runtime.config_file override is authoritative for
+	// both chat and runtime-server. Doctor/TUI must report and edit the same
+	// file instead of silently describing the .aicli layers.
+	if global := agentconfig.GetGlobalConfig(); global != nil && global.SkillsRuntime != nil &&
+		aiclipaths.IsExplicitRuntimeConfigOverride(global.SkillsRuntime.ConfigFile) {
+		explicitPath := aiclipaths.ResolveRuntimeConfigFilePath(global.SkillsRuntime.ConfigFile)
+		document, err := agentconfig.LoadRuntimeConfigDocumentFile(explicitPath)
+		if err != nil {
+			loadErr = err
+		}
+		if document != nil && len(document.MergedYAML) > 0 {
+			var payload struct {
+				Shell runtimeexecutor.ShellConfig `yaml:"shell"`
+			}
+			if err := yaml.Unmarshal(document.MergedYAML, &payload); err != nil {
+				if loadErr == nil {
+					loadErr = err
+				}
+			} else {
+				cfg = payload.Shell
+			}
+		}
+		return cfg, explicitPath, "explicit", strings.TrimSpace(explicitPath) != "", loadErr
+	}
 
 	document, err := agentconfig.LoadMergedRuntimeConfigDocument()
 	if err != nil {

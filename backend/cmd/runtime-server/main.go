@@ -1057,26 +1057,39 @@ type runtimeServerApp struct {
 	memoryRuntimeCancel context.CancelFunc
 }
 
-// loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
+// loadRuntimeServerManager 加载 runtime-server 的进程级默认配置：
 //
-//   - 层栈只有用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml
-//     （高层只覆盖它显式写的键）；开发仓库布局（configs/runtime.yaml /
-//     backend/configs/runtime.yaml）**不是**隐式来源，只有调用方显式传入
-//     （如 --config backend/configs/runtime.yaml）时才会被读取；
-//   - 读取路径（RuntimeManager.GetFilePath）取「生效来源」= 最高存在层，未改动既有语义
-//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时回落内置默认
-//     （RuntimeManager.Load 对空路径直接返回默认值）；
-//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，仓库布局文件永不被改写。
-func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
-	merged, err := config.LoadMergedRuntimeConfigDocument()
-	if err != nil {
-		return fmt.Errorf("failed to load layered runtime config: %w", err)
+//   - runtime-server 是长期多 workspace 进程，进程 CWD 不是任何一个 session 的
+//     项目目录。因此默认层栈只含用户级 $HOME/.aicli/runtime.yaml，绝不能把
+//     server 启动目录的 ./.aicli/runtime.yaml 当成所有 workspace 的项目层。
+//   - 显式 skills_runtime.config_file 覆盖是用户明确指定的配置，优先读取；
+//     它不再被分层栈静默覆盖（与 aicli chat 的显式覆盖语义对齐）。
+//   - workspace 级 runtime.yaml 由 WorkspaceShellResolver 在会话/回合维度解析，
+//     不在这里加载。
+//   - 全新安装（任何层都不存在）时回落到内置默认，并把写入目标指向用户层。
+func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager, explicitPaths ...string) error {
+	if runtimeManager == nil {
+		return nil
 	}
-	if merged == nil {
+	explicit := ""
+	if len(explicitPaths) > 0 {
+		explicit = strings.TrimSpace(explicitPaths[0])
+	}
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err != nil {
+			return fmt.Errorf("explicit runtime config %s is not readable: %w", explicit, err)
+		}
 		if err := runtimeManager.Load(); err != nil {
-			return fmt.Errorf("failed to load runtime config: %w", err)
+			return fmt.Errorf("failed to load explicit runtime config: %w", err)
 		}
 		return nil
+	}
+	merged, err := config.LoadGlobalRuntimeConfigDocument()
+	if err != nil {
+		return fmt.Errorf("failed to load global runtime config: %w", err)
+	}
+	if merged == nil {
+		return fmt.Errorf("failed to load global runtime config: empty document")
 	}
 	sourcePath := strings.TrimSpace(merged.SourcePath)
 	if sourcePath == "" {
@@ -1145,15 +1158,23 @@ func (h *runtimeDefaultSyncHooks) apply(cfg *config.Config) {
 }
 
 func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
+	explicitRuntimeConfig := ""
+	if cfg != nil && cfg.SkillsRuntime != nil &&
+		aiclipaths.IsExplicitRuntimeConfigOverride(cfg.SkillsRuntime.ConfigFile) {
+		explicitRuntimeConfig = aiclipaths.ResolveRuntimeConfigFilePath(cfg.SkillsRuntime.ConfigFile)
+	}
 	skillsCfg := normalizeSkillsRuntimeConfig(cfg)
 	runtimeManager := runtimecfg.NewRuntimeManager(skillsCfg.ConfigFile)
-	if err := loadRuntimeServerManager(runtimeManager); err != nil {
+	if err := loadRuntimeServerManager(runtimeManager, explicitRuntimeConfig); err != nil {
 		return nil, err
 	}
 	runtimeConfig := runtimeManager.Get()
 	// 进程级 shell resolver：runtime-server 与 CLI 共用同一份 `shell:` 配置，
 	// 否则 web 提交的 job 会用一种 shell、CLI 会话用另一种。
 	runtimeexecutor.ConfigureShell(runtimeConfig.Shell)
+	// The process-wide resolver remains the fallback for unbound sessions. Each
+	// session workspace gets its own ShellRuntime from WorkspaceShellResolver.
+	globalShellRuntime, _ := runtimeexecutor.CurrentShellRuntime()
 	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
 	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
 		Config:     runtimeConfig,
@@ -1227,6 +1248,13 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(m, runtimeConfig))
 		},
 	})
+	workspaceShellResolver := runtimeserver.NewWorkspaceShellResolver(
+		globalShellRuntime,
+		runtimeManager.GetFilePath(),
+		explicitRuntimeConfig,
+		workspaceTrustedForShell,
+	)
+	handler.SetWorkspaceShellResolver(workspaceShellResolver)
 	if manager != nil {
 		if mcpResolution.Path != "" {
 			handler.SetMCPAdminService(mcpadmin.NewService(mcpResolution.Path,
@@ -1292,6 +1320,12 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	)
 	handler.SetShellSettingsPersister(
 		runtimeserver.NewLayeredRuntimeShellSettingsPersister(runtimeManager),
+	)
+	handler.SetShellSettingsScopeProvider(
+		runtimeserver.NewWorkspaceRuntimeShellSettingsProvider(runtimeManager, workspaceShellResolver),
+	)
+	handler.SetShellSettingsScopePersister(
+		runtimeserver.NewWorkspaceLayeredRuntimeShellSettingsPersister(runtimeManager, workspaceShellResolver),
 	)
 	handler.SetProfileSupport(runtimeapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
@@ -1646,6 +1680,13 @@ func loadEnv(args []string) {
 
 func defaultRuntimeServerDotEnvSearchPaths() []string {
 	return config.DotEnvSearchPathsForConfigPaths(defaultRuntimeServerConfigSearchPaths())
+}
+
+// workspaceTrustedForShell gates workspace-owned shell.path/shell.env. A
+// runtime-server never prompts; an undecided workspace is treated as untrusted
+// (fail closed), matching the profile/prompt gate.
+func workspaceTrustedForShell(workspacePath string) bool {
+	return runtimeserver.WorkspaceTrustedForShell(workspacePath)
 }
 
 func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {

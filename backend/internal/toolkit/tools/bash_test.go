@@ -12,6 +12,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -19,6 +20,10 @@ import (
 type fakeExecuter struct {
 	result CommandExecutionResult
 	err    error
+}
+
+func withTestShellRuntime(ctx context.Context, shell runtimeexecutor.Shell) context.Context {
+	return toolctx.WithShellRuntime(ctx, &runtimeexecutor.ShellRuntime{Shell: shell})
 }
 
 func (f fakeExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
@@ -1212,10 +1217,8 @@ func TestBashTool_BatchIgnoresZeroMaxParallelPlaceholder(t *testing.T) {
 }
 
 func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("windows-specific guidance")
-	}
-	hint := friendlyHintFor(
+	hint := friendlyHintForShell(
+		runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePwsh, Path: "pwsh"},
 		`git diff -- internal/gateway/handlers/admin_config.go |head -200`,
 		`head : The term 'head' is not recognized as a name of a cmdlet`,
 		fmt.Errorf("exit status 1"),
@@ -1223,6 +1226,34 @@ func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
 	)
 	if !strings.Contains(hint, "Select-Object -First 200") {
 		t.Fatalf("expected head guidance, got %q", hint)
+	}
+	hint = friendlyHintForShell(
+		runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypeBash, Path: "bash"},
+		`git diff -- internal/gateway/handlers/admin_config.go |head -200`,
+		`head : The term 'head' is not recognized as a name of a cmdlet`,
+		fmt.Errorf("exit status 1"),
+		"",
+	)
+	if hint != "" {
+		t.Fatalf("posix shell must not receive PowerShell head guidance, got %q", hint)
+	}
+}
+
+func TestFriendlyHintForShell_HeredocUsesShellCapability(t *testing.T) {
+	command := "cat > out.txt <<'EOF'\nhello\nEOF"
+	err := fmt.Errorf("exit status 1")
+	if hint := friendlyHintForShell(
+		runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypeBash, Path: "bash"},
+		command, "", err, "",
+	); hint != "" {
+		t.Fatalf("posix shell must not receive heredoc guidance, got %q", hint)
+	}
+	hint := friendlyHintForShell(
+		runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePwsh, Path: "pwsh"},
+		command, "", err, "",
+	)
+	if !strings.Contains(hint, "heredoc") {
+		t.Fatalf("expected heredoc guidance for pwsh, got %q", hint)
 	}
 }
 
@@ -1651,35 +1682,72 @@ func TestParseBashCommandBatch_CoercesBareCommandString(t *testing.T) {
 	}
 }
 
-func TestBashTool_WindowsHeredocPreflight(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("heredoc preflight is Windows-specific")
-	}
-	tool := newTestBashTool()
-	// Ensure we never reach the executer for blocked dialect.
-	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+func TestBashTool_HeredocPreflightUnsupportedShell(t *testing.T) {
+	for _, shell := range []runtimeexecutor.Shell{
+		{Type: runtimeexecutor.ShellTypePwsh, Path: "pwsh"},
+		{Type: runtimeexecutor.ShellTypePowerShell, Path: "powershell"},
+		{Type: runtimeexecutor.ShellTypeCmd, Path: "cmd"},
+	} {
+		t.Run(string(shell.Type), func(t *testing.T) {
+			tool := newTestBashTool()
+			// Ensure we never reach the executer for blocked dialect.
+			tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
 
-	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": "python - <<'PY'\nprint(1)\nPY",
-	})
-	if err != nil {
-		t.Fatalf("unexpected outer error: %v", err)
+			result, err := tool.Execute(withTestShellRuntime(context.Background(), shell), map[string]interface{}{
+				"command": "python - <<'PY'\nprint(1)\nPY",
+			})
+			if err != nil {
+				t.Fatalf("unexpected outer error: %v", err)
+			}
+			if result.Success || result.Error == nil {
+				t.Fatalf("expected heredoc preflight failure, got %#v", result)
+			}
+			if !strings.Contains(result.Error.Error(), "heredoc") {
+				t.Fatalf("expected heredoc guidance, got %q", result.Error.Error())
+			}
+			if !strings.Contains(result.Error.Error(), string(shell.Type)) {
+				t.Fatalf("expected resolved shell %q in guidance, got %q", shell.Type, result.Error.Error())
+			}
+			next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+			if !strings.Contains(strings.ToLower(next), "write") && !strings.Contains(strings.ToLower(next), "python -c") {
+				t.Fatalf("expected next_action to steer away from heredoc, got %q", next)
+			}
+			if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
+				t.Fatalf("expected TOOL_SHELL_COMPAT error_code for heredoc preflight, got %#v", result.Metadata)
+			}
+			if retryable, _ := result.Metadata[toolresult.MetadataRetryableKey].(bool); retryable {
+				t.Fatalf("shell preflight must not be retryable, got %#v", result.Metadata)
+			}
+		})
 	}
-	if result.Success || result.Error == nil {
-		t.Fatalf("expected heredoc preflight failure, got %#v", result)
-	}
-	if !strings.Contains(result.Error.Error(), "heredoc") {
-		t.Fatalf("expected heredoc guidance, got %q", result.Error.Error())
-	}
-	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
-	if !strings.Contains(strings.ToLower(next), "write") && !strings.Contains(strings.ToLower(next), "python -c") {
-		t.Fatalf("expected next_action to steer away from heredoc, got %q", next)
-	}
-	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
-		t.Fatalf("expected TOOL_SHELL_COMPAT error_code for heredoc preflight, got %#v", result.Metadata)
-	}
-	if retryable, _ := result.Metadata[toolresult.MetadataRetryableKey].(bool); retryable {
-		t.Fatalf("shell preflight must not be retryable, got %#v", result.Metadata)
+}
+
+func TestBashTool_HeredocAllowedForPosixShell(t *testing.T) {
+	for _, shell := range []runtimeexecutor.Shell{
+		{Type: runtimeexecutor.ShellTypeBash, Path: "bash"},
+		{Type: runtimeexecutor.ShellTypeZsh, Path: "zsh"},
+		{Type: runtimeexecutor.ShellTypeSh, Path: "sh"},
+	} {
+		t.Run(string(shell.Type), func(t *testing.T) {
+			tool := newTestBashTool()
+			tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "heredoc-ran"}}
+
+			result, err := tool.Execute(withTestShellRuntime(context.Background(), shell), map[string]interface{}{
+				"command": "cat > .tmp-model-shell-e2e/home/.aicli/runtime.yaml <<'EOF'\nsessions:\n  backend: sqlite\nEOF",
+			})
+			if err != nil {
+				t.Fatalf("unexpected outer error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected heredoc to reach execution for %s shell, got error: %v", shell.Type, result.Error)
+			}
+			if !strings.Contains(result.Content, "heredoc-ran") {
+				t.Fatalf("expected executer output for %s shell, got %q", shell.Type, result.Content)
+			}
+			if failureClass, _ := result.Metadata["failure_class"].(string); failureClass == "shell_preflight" {
+				t.Fatalf("posix heredoc must not be preflight-blocked, got %#v", result.Metadata)
+			}
+		})
 	}
 }
 
@@ -1704,9 +1772,34 @@ func TestBashCommandFailureNextAction_SearchRegex(t *testing.T) {
 		"rg: regex parse error:",
 		fmt.Errorf("exit status 2"),
 		"",
+		runtimeexecutor.CurrentShell(),
 	)
 	if !strings.Contains(next, "grep") {
 		t.Fatalf("expected grep recovery next_action, got %q", next)
+	}
+}
+
+func TestBashCommandFailureNextAction_HeredocUsesShellCapability(t *testing.T) {
+	command := "cat > out.txt <<'EOF'\nhello\nEOF"
+	err := fmt.Errorf("exit status 1")
+	for _, shell := range []runtimeexecutor.Shell{
+		{Type: runtimeexecutor.ShellTypeBash, Path: "bash"},
+		{Type: runtimeexecutor.ShellTypeZsh, Path: "zsh"},
+		{Type: runtimeexecutor.ShellTypeSh, Path: "sh"},
+	} {
+		if next := bashCommandFailureNextAction(command, "", err, "", shell); next != "" {
+			t.Fatalf("posix shell %s must not receive heredoc next_action, got %q", shell.Type, next)
+		}
+	}
+	next := bashCommandFailureNextAction(
+		command,
+		"",
+		err,
+		"",
+		runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePwsh, Path: "pwsh"},
+	)
+	if !strings.Contains(strings.ToLower(next), "heredoc") {
+		t.Fatalf("expected heredoc next_action for pwsh, got %q", next)
 	}
 }
 
@@ -2090,6 +2183,7 @@ func TestBashCommandFailureNextActionMissingSearchTool(t *testing.T) {
 		"rg: The term 'rg' is not recognized as a name of a cmdlet.",
 		fmt.Errorf("exit status 127"),
 		"",
+		runtimeexecutor.CurrentShell(),
 	)
 	if !strings.Contains(next, "toolkit `grep`") || !strings.Contains(next, "builtin") {
 		t.Fatalf("expected builtin fallback guidance, got %q", next)
@@ -2157,6 +2251,7 @@ func TestBashCommandFailureNextAction_PathGlob(t *testing.T) {
 		`rg: backend/**/*.go: IO error ... os error 123`,
 		fmt.Errorf("exit status 1"),
 		"",
+		runtimeexecutor.CurrentShell(),
 	)
 	if !strings.Contains(strings.ToLower(next), "glob") && !strings.Contains(next, "-g") {
 		t.Fatalf("expected path-glob next_action, got %q", next)
@@ -2169,6 +2264,7 @@ func TestBashCommandFailureNextAction_GitIgnoredPath(t *testing.T) {
 		"The following paths are ignored by one of your .gitignore files:\nsecrets/token.env\nhint: Use -f if you really want to add them.",
 		fmt.Errorf("exit status 1"),
 		"",
+		runtimeexecutor.CurrentShell(),
 	)
 	if !strings.Contains(next, "git check-ignore") {
 		t.Fatalf("expected check-ignore guidance, got %q", next)

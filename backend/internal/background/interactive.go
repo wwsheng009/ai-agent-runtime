@@ -325,6 +325,8 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 	jobCtx, cancel := context.WithCancel(context.Background())
 	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
 	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
+	shellRuntime := resolveJobShellRuntime(ctx, m.config.Shell)
+	applyShellRuntimeMetadata(metadata, shellRuntime)
 	managed := &managedJob{
 		manager: m,
 		ctx:     jobCtx,
@@ -343,10 +345,11 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 			Rows:        args.Rows,
 			Metadata:    metadata,
 		},
-		request: req,
-		output:  newOutputBuffer(m.config.MaxOutputBytes),
-		logPath: logPath,
-		cancel:  cancel,
+		request:      req,
+		output:       newOutputBuffer(m.config.MaxOutputBytes),
+		logPath:      logPath,
+		cancel:       cancel,
+		shellRuntime: shellRuntime,
 	}
 	managed.outputOffset = currentLogSize(logPath)
 
@@ -396,7 +399,7 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 	// use a temporary script file instead of the stdin transport or
 	// -EncodedCommand, both of which would either consume write_stdin or grow
 	// beyond the Windows command-line limit.
-	cmd, cleanup, err := m.buildInteractiveShellCommand(jobCtx, command)
+	cmd, cleanup, err := m.buildInteractiveShellCommandFor(jobCtx, managed, command)
 	if cleanup != nil {
 		defer func() {
 			if cleanup != nil {
@@ -745,12 +748,12 @@ func (m *Manager) Resize(ctx context.Context, jobID string, cols, rows int) erro
 // openTerminalPTY starts an interactive session behind a pseudoterminal. It is
 // only reached when pty.Supported() is true (2026-10-11).
 func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args TerminalOpenArgs) (*Job, error) {
-	shell, err := m.executionShell()
+	shell, runtime, err := m.executionShellFor(managed)
 	if err != nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
 		return managed.snapshot(), nil
 	}
-	argv, cleanup, err := buildInteractiveShellInvocation(shell, managed.info.Command)
+	argv, cleanup, err := buildInteractiveShellInvocation(shell, managed.info.Command, runtime.EffectiveDelivery())
 	if cleanup != nil {
 		defer func() {
 			if cleanup != nil {
@@ -779,7 +782,7 @@ func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args
 	if args.Cols > 0 || args.Rows > 0 {
 		options = append(options, pty.WithSize(args.Cols, args.Rows))
 	}
-	options = append(options, pty.WithEnv(m.shellEnvironment()))
+	options = append(options, pty.WithEnv(m.shellEnvironmentFor(runtime)))
 	p, err := pty.Start(argv[0], argv[1:], options...)
 	if err != nil {
 		if logFile != nil {

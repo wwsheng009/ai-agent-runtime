@@ -59,9 +59,13 @@ type EnvironmentSnapshot struct {
 // Capability probing happens exactly once per capture: context values and
 // capability guidance are derived from the same report so startup does not
 // re-scan PATH for each prompt fragment.
-func CaptureEnvironmentSnapshot(cwd string) EnvironmentSnapshot {
+func CaptureEnvironmentSnapshot(cwd string, runtimes ...*runtimeexecutor.ShellRuntime) EnvironmentSnapshot {
 	report := DetectEnvironmentCapabilities()
-	values := currentEnvironmentValuesFromReport(report)
+	var shellRuntime *runtimeexecutor.ShellRuntime
+	if len(runtimes) > 0 {
+		shellRuntime = runtimes[0]
+	}
+	values := currentEnvironmentValuesFromReport(report, shellRuntime)
 	probedAt := report.ProbedAt
 	if probedAt.IsZero() {
 		probedAt = time.Now().UTC()
@@ -79,12 +83,26 @@ func CaptureEnvironmentSnapshot(cwd string) EnvironmentSnapshot {
 // CurrentEnvironmentValues returns shell- and time-related runtime facts that
 // are useful both for prompt injection and runtime summaries.
 func CurrentEnvironmentValues() map[string]interface{} {
-	return currentEnvironmentValuesFromReport(DetectEnvironmentCapabilities())
+	return currentEnvironmentValuesFromReport(DetectEnvironmentCapabilities(), nil)
 }
 
-func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[string]interface{} {
+// CurrentEnvironmentValuesWithShell returns the same facts using a
+// workspace/session shell runtime instead of the process-wide resolver.
+func CurrentEnvironmentValuesWithShell(shellRuntime *runtimeexecutor.ShellRuntime) map[string]interface{} {
+	return currentEnvironmentValuesFromReport(DetectEnvironmentCapabilities(), shellRuntime)
+}
+
+func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport, shellRuntime *runtimeexecutor.ShellRuntime) map[string]interface{} {
 	shellName := "unavailable"
-	if shell, err := runtimeexecutor.CurrentShellE(); err == nil {
+	shellFingerprint := ""
+	if shellRuntime != nil {
+		shellFingerprint = shellRuntime.RuntimeFingerprint()
+		if shellRuntime.ResolveErr != nil || strings.TrimSpace(shellRuntime.Shell.Path) == "" {
+			shellName = "unavailable"
+		} else {
+			shellName = detectedShellName(shellRuntime.Shell)
+		}
+	} else if shell, err := runtimeexecutor.CurrentShellE(); err == nil {
 		shellName = detectedShellName(shell)
 	}
 	now := time.Now()
@@ -93,6 +111,9 @@ func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[
 		"shell":        shellName,
 		"current_date": now.Format("2006-01-02"),
 		"timezone":     detectedTimezoneLabel(now),
+	}
+	if shellFingerprint != "" {
+		values["shell_fingerprint"] = shellFingerprint
 	}
 	if available := availableEnvironmentCommandsFromReport(report); len(available) > 0 {
 		values["available_commands"] = available
@@ -106,16 +127,27 @@ func currentEnvironmentValuesFromReport(report EnvironmentCapabilityReport) map[
 // RenderShellExecutionGuidance renders shell-specific guardrails that help the
 // model choose commands compatible with the detected runtime environment.
 func RenderShellExecutionGuidance() string {
-	return RenderShellExecutionGuidanceWithCapability(RenderEnvironmentCapabilityGuidance())
+	return RenderShellExecutionGuidanceWithCapability(RenderEnvironmentCapabilityGuidance(), nil)
 }
 
 // RenderShellExecutionGuidanceWithCapability renders shell guidance using a
 // precomputed (possibly session-frozen) capability section. Pass empty to omit
 // the measured capability appendix.
-func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) string {
-	shell, shellErr := runtimeexecutor.CurrentShellE()
+func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string, runtimes ...*runtimeexecutor.ShellRuntime) string {
 	shellName := "unavailable"
-	if shellErr == nil {
+	var shell runtimeexecutor.Shell
+	var shellErr error
+	var shellRuntime *runtimeexecutor.ShellRuntime
+	if len(runtimes) > 0 {
+		shellRuntime = runtimes[0]
+	}
+	if shellRuntime != nil {
+		shell = shellRuntime.Shell
+		shellErr = shellRuntime.ResolveErr
+	} else {
+		shell, shellErr = runtimeexecutor.CurrentShellE()
+	}
+	if shellErr == nil && strings.TrimSpace(shell.Path) != "" {
 		shellName = detectedShellName(shell)
 	}
 	lines := []string{
@@ -136,39 +168,41 @@ func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) strin
 			fmt.Sprintf("Shell execution is unavailable under strictProbe: %v. Fix shell.path/prefer or set strictProbe=false before running commands.", shellErr))
 	}
 
-	switch {
-	case runtime.GOOS == "windows" && shell.Dialect.IsPosixDialect():
-		lines = append(lines,
-			"Treat the current shell as a POSIX shell (bash), not PowerShell: use `sh` syntax, `&&`/`||`, `$VAR`, and single or double quotes.",
-			"Write Windows paths with forward slashes (`C:/Users/name`); a backslash is an escape character inside a shell word.",
-			"GNU tools (find/sort/sed/awk/grep/tar/xargs) live in the shell's /usr/bin, and native .exe programs can still be called directly.",
-			"Do not use PowerShell cmdlets (`Select-Object`, `Get-Location`, `Set-Content`, `Out-File`).",
-			"When a command needs to call cmd.exe explicitly, use `cmd //c ...` inside the POSIX shell so the `/c` flag is not rewritten as a path.",
-		)
-		if shell.Dialect == runtimeexecutor.ShellDialectPosixNarrow {
+	if shellErr == nil {
+		switch {
+		case runtime.GOOS == "windows" && shell.Dialect.IsPosixDialect():
 			lines = append(lines,
-				"This POSIX shell is a narrow (ash/busybox) build: do not use `[[ ]]`, arrays, `pipefail`, or `local`.",
+				"Treat the current shell as a POSIX shell (bash), not PowerShell: use `sh` syntax, `&&`/`||`, `$VAR`, and single or double quotes.",
+				"Write Windows paths with forward slashes (`C:/Users/name`); a backslash is an escape character inside a shell word.",
+				"GNU tools (find/sort/sed/awk/grep/tar/xargs) live in the shell's /usr/bin, and native .exe programs can still be called directly.",
+				"Do not use PowerShell cmdlets (`Select-Object`, `Get-Location`, `Set-Content`, `Out-File`).",
+				"When a command needs to call cmd.exe explicitly, use `cmd //c ...` inside the POSIX shell so the `/c` flag is not rewritten as a path.",
+			)
+			if shell.Dialect == runtimeexecutor.ShellDialectPosixNarrow {
+				lines = append(lines,
+					"This POSIX shell is a narrow (ash/busybox) build: do not use `[[ ]]`, arrays, `pipefail`, or `local`.",
+				)
+			}
+		case runtime.GOOS == "windows" &&
+			(shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh):
+			lines = append(lines,
+				"Treat the current shell as PowerShell-compatible, not bash-compatible.",
+				"Do not use Unix-only commands such as `head` when a PowerShell-native form exists.",
+				"To limit output, prefer `... | Select-Object -First 200` instead of `... | head -200`.",
+				"To print the current directory, prefer `Get-Location` or `pwd` on PowerShell.",
+				"Do not use bash heredoc (`python - <<'PY'`, `cat <<EOF`); PowerShell does not support that syntax. Prefer dedicated file tools, `python -c`, or write a temp script with `write`/`append_write` then execute it.",
+				"Avoid chaining many search commands with `;` when one failed rg exit 1 can poison the whole command; use toolkit `grep` or shell `commands` with independent items.",
+				"Avoid bash-only operators such as `&&`/`||` chains when PowerShell parsing is unreliable; prefer separate shell `commands` items or native PowerShell control flow.",
+				"On Windows, unexpanded path globs often become os error 123; keep path as a real directory and put filters in `-g`/`--glob` or toolkit `grep`.",
+			)
+		case runtime.GOOS == "windows" && shell.Type == runtimeexecutor.ShellTypeCmd:
+			lines = append(lines,
+				"Treat the current shell as cmd.exe, not bash-compatible.",
+				"Do not use Unix-only commands such as `head`.",
+				"To print the current directory, prefer `cd` or `echo %cd%` on cmd.exe.",
+				"Do not use bash heredoc or Unix pipelines that cmd.exe cannot parse; prefer dedicated file/search tools.",
 			)
 		}
-	case runtime.GOOS == "windows" &&
-		(shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh):
-		lines = append(lines,
-			"Treat the current shell as PowerShell-compatible, not bash-compatible.",
-			"Do not use Unix-only commands such as `head` when a PowerShell-native form exists.",
-			"To limit output, prefer `... | Select-Object -First 200` instead of `... | head -200`.",
-			"To print the current directory, prefer `Get-Location` or `pwd` on PowerShell.",
-			"Do not use bash heredoc (`python - <<'PY'`, `cat <<EOF`); PowerShell does not support that syntax. Prefer dedicated file tools, `python -c`, or write a temp script with `write`/`append_write` then execute it.",
-			"Avoid chaining many search commands with `;` when one failed rg exit 1 can poison the whole command; use toolkit `grep` or shell `commands` with independent items.",
-			"Avoid bash-only operators such as `&&`/`||` chains when PowerShell parsing is unreliable; prefer separate shell `commands` items or native PowerShell control flow.",
-			"On Windows, unexpanded path globs often become os error 123; keep path as a real directory and put filters in `-g`/`--glob` or toolkit `grep`.",
-		)
-	case runtime.GOOS == "windows" && shell.Type == runtimeexecutor.ShellTypeCmd:
-		lines = append(lines,
-			"Treat the current shell as cmd.exe, not bash-compatible.",
-			"Do not use Unix-only commands such as `head`.",
-			"To print the current directory, prefer `cd` or `echo %cd%` on cmd.exe.",
-			"Do not use bash heredoc or Unix pipelines that cmd.exe cannot parse; prefer dedicated file/search tools.",
-		)
 	}
 
 	if len(lines) == 0 {

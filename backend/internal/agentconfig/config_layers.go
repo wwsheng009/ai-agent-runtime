@@ -104,6 +104,16 @@ type ConfigLayer struct {
 // Both layers are merged (a higher layer only overrides the keys it explicitly
 // writes); see LoadMergedRuntimeConfigDocument.
 func RuntimeConfigLayerStack() []ConfigLayer {
+	return RuntimeConfigLayerStackFrom("")
+}
+
+// RuntimeConfigLayerStackFrom returns the workspace-anchored runtime.yaml
+// candidates. baseDir is the session workspace root; an empty baseDir keeps the
+// historical process-CWD behavior.
+//
+// This is the multi-workspace entry point for runtime-server: a long-lived
+// server must never treat its own CWD as every session's project layer.
+func RuntimeConfigLayerStackFrom(baseDir string) []ConfigLayer {
 	name := aiclipaths.DefaultRuntimeConfigFileName
 	layers := make([]ConfigLayer, 0, 2)
 	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
@@ -113,7 +123,30 @@ func RuntimeConfigLayerStack() []ConfigLayer {
 		// resolved, so the write target stays deterministic.
 		layers = append(layers, ConfigLayer{Kind: LayerKindUser, Path: filepath.Join(".aicli", name)})
 	}
-	layers = append(layers, ConfigLayer{Kind: LayerKindProject, Path: filepath.Join(".aicli", name)})
+	projectPath := filepath.Join(".aicli", name)
+	if strings.TrimSpace(baseDir) != "" {
+		projectPath = filepath.Join(filepath.Clean(baseDir), ".aicli", name)
+	}
+	layers = append(layers, ConfigLayer{Kind: LayerKindProject, Path: projectPath})
+	for index := range layers {
+		layers[index].Present = fileExists(layers[index].Path)
+	}
+	return layers
+}
+
+// GlobalRuntimeConfigLayerStack returns the user-level runtime.yaml layer only.
+//
+// runtime-server uses it for its process-wide fallback: the server binary's CWD
+// is an installation directory, not a session workspace, so treating it as a
+// project layer would leak one workspace's shell configuration into all others.
+func GlobalRuntimeConfigLayerStack() []ConfigLayer {
+	name := aiclipaths.DefaultRuntimeConfigFileName
+	layers := make([]ConfigLayer, 0, 1)
+	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		layers = append(layers, ConfigLayer{Kind: LayerKindUser, Path: filepath.Join(home, ".aicli", name)})
+	} else {
+		layers = append(layers, ConfigLayer{Kind: LayerKindUser, Path: filepath.Join(".aicli", name)})
+	}
 	for index := range layers {
 		layers[index].Present = fileExists(layers[index].Path)
 	}

@@ -228,6 +228,9 @@ type managedJob struct {
 	// tree groups the job's process tree (Windows Job Object / Unix pgid) so it
 	// can be killed as one unit (2026-09-28, P2).
 	tree *processTree
+	// shellRuntime is captured at submission time so later workspace/settings
+	// changes cannot rewrite this job's shell/dialect/script transport.
+	shellRuntime *runtimeexecutor.ShellRuntime
 }
 
 // NewManager creates a new background manager.
@@ -422,6 +425,8 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 	jobCtx, cancel := context.WithCancel(context.Background())
 	metadata := metadataFromRequest(req, m.config.DefaultTimeout)
 	ApplyJobOrigin(metadata, JobOriginFromContext(ctx))
+	shellRuntime := resolveJobShellRuntime(ctx, m.config.Shell)
+	applyShellRuntimeMetadata(metadata, shellRuntime)
 	managed := &managedJob{
 		manager: m,
 		ctx:     jobCtx,
@@ -438,10 +443,11 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 			LogPath:       logPath,
 			Metadata:      metadata,
 		},
-		request: sanitizeBackgroundTaskArgs(req),
-		output:  newOutputBuffer(m.config.MaxOutputBytes),
-		logPath: logPath,
-		cancel:  cancel,
+		request:      sanitizeBackgroundTaskArgs(req),
+		output:       newOutputBuffer(m.config.MaxOutputBytes),
+		logPath:      logPath,
+		cancel:       cancel,
+		shellRuntime: shellRuntime,
 	}
 	managed.outputOffset = currentLogSize(logPath)
 
@@ -1428,7 +1434,7 @@ func (m *Manager) runJob(managed *managedJob) {
 	if managed == nil {
 		return
 	}
-	if _, err := m.executionShell(); err != nil {
+	if _, _, err := m.executionShellFor(managed); err != nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
 		return
 	}
@@ -1475,7 +1481,7 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
-	cmd, err := m.buildShellCommand(ctx, managed.info.Command)
+	cmd, err := m.buildShellCommandFor(managed, ctx, managed.info.Command)
 	if err != nil {
 		m.failJobWithErrorCode(managed, runtimeerrors.ErrShellUnavailable, err)
 		return
@@ -3161,14 +3167,15 @@ func (m *Manager) managedJobFromStored(job Job) *managedJob {
 		}
 	}
 	managed := &managedJob{
-		manager:   m,
-		ctx:       jobCtx,
-		info:      job,
-		request:   request,
-		output:    newOutputBuffer(m.config.MaxOutputBytes),
-		logPath:   strings.TrimSpace(job.LogPath),
-		cancel:    cancel,
-		scheduled: false,
+		manager:      m,
+		ctx:          jobCtx,
+		info:         job,
+		request:      request,
+		output:       newOutputBuffer(m.config.MaxOutputBytes),
+		logPath:      strings.TrimSpace(job.LogPath),
+		cancel:       cancel,
+		scheduled:    false,
+		shellRuntime: shellRuntimeFromJobMetadata(job),
 	}
 	managed.outputOffset = currentLogSize(managed.logPath)
 	return managed
@@ -3510,18 +3517,33 @@ func currentLogSize(path string) int64 {
 	return info.Size()
 }
 
-func (m *Manager) executionShell() (runtimeexecutor.Shell, error) {
-	cfg := Config{}
-	if m != nil {
-		cfg = m.config
+func (m *Manager) executionShellFor(managed *managedJob) (runtimeexecutor.Shell, *runtimeexecutor.ShellRuntime, error) {
+	runtime := (*runtimeexecutor.ShellRuntime)(nil)
+	if managed != nil {
+		runtime = managed.shellRuntime
 	}
-	if strings.TrimSpace(cfg.Shell.Path) != "" {
-		return cfg.Shell, nil
+	if runtime == nil {
+		runtime = resolveJobShellRuntime(context.Background(), m.config.Shell)
 	}
-	return runtimeexecutor.CurrentShellE()
+	if runtime == nil {
+		return runtimeexecutor.Shell{}, nil, fmt.Errorf("%w: no shell runtime", runtimeexecutor.ErrShellUnavailable)
+	}
+	if runtime.ResolveErr != nil {
+		return runtime.Shell, runtime, runtime.ResolveErr
+	}
+	if strings.TrimSpace(runtime.Shell.Path) == "" {
+		return runtime.Shell, runtime, fmt.Errorf("%w: shell runtime has no executable", runtimeexecutor.ErrShellUnavailable)
+	}
+	return runtime.Shell, runtime, nil
 }
 
-func (m *Manager) shellEnvironment() []string {
+// executionShell is the legacy helper used by tests and non-job callers.
+func (m *Manager) executionShell() (runtimeexecutor.Shell, error) {
+	shell, _, err := m.executionShellFor(nil)
+	return shell, err
+}
+
+func (m *Manager) shellEnvironmentFor(runtime *runtimeexecutor.ShellRuntime) []string {
 	cfg := Config{}
 	if m != nil {
 		cfg = m.config
@@ -3530,43 +3552,81 @@ func (m *Manager) shellEnvironment() []string {
 	if env == nil {
 		env = os.Environ()
 	}
-	env = runtimeexecutor.ApplyShellEnvOverrides(env)
+	if runtime != nil {
+		env = runtime.ApplyEnv(env)
+	} else {
+		env = runtimeexecutor.ApplyShellEnvOverrides(env)
+	}
 	return runtimeexecutor.NeutralizeConsoleStylingEnv(runtimeexecutor.WithResolvedRipgrepPath(env))
 }
 
-func (m *Manager) buildShellCommand(ctx context.Context, command string) (*exec.Cmd, error) {
-	return m.buildShellCommandWithDelivery(ctx, command, runtimeexecutor.CurrentScriptDelivery())
+func (m *Manager) shellEnvironment() []string {
+	return m.shellEnvironmentFor(nil)
 }
 
-// buildInteractiveShellCommand builds a command whose stdin remains available
-// for write_stdin. Long scripts use a temporary script file rather than the
-// stdin transport or PowerShell's command-line-expanding -EncodedCommand.
+func (m *Manager) buildShellCommand(ctx context.Context, command string) (*exec.Cmd, error) {
+	return m.buildShellCommandWithRuntime(ctx, resolveJobShellRuntime(ctx, m.config.Shell), command)
+}
+
+func (m *Manager) buildShellCommandFor(managed *managedJob, ctx context.Context, command string) (*exec.Cmd, error) {
+	runtime := (*runtimeexecutor.ShellRuntime)(nil)
+	if managed != nil {
+		runtime = managed.shellRuntime
+	}
+	if runtime == nil {
+		runtime = resolveJobShellRuntime(ctx, m.config.Shell)
+	}
+	return m.buildShellCommandWithRuntime(ctx, runtime, command)
+}
+
+// buildInteractiveShellCommand is the legacy no-job wrapper kept for tests and
+// callers that do not have a captured job runtime.
 func (m *Manager) buildInteractiveShellCommand(ctx context.Context, command string) (*exec.Cmd, func(), error) {
+	return m.buildInteractiveShellCommandFor(ctx, nil, command)
+}
+
+// buildInteractiveShellCommandFor builds a command whose stdin remains
+// available for write_stdin. Long scripts use a temporary script file rather
+// than the stdin transport or PowerShell's command-line-expanding
+// -EncodedCommand.
+func (m *Manager) buildInteractiveShellCommandFor(ctx context.Context, managed *managedJob, command string) (*exec.Cmd, func(), error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil, nil, nil
 	}
-	shell, err := m.executionShell()
+	shell, runtime, err := m.executionShellFor(managed)
 	if err != nil {
 		return nil, nil, err
 	}
-	shellArgs, cleanup, err := buildInteractiveShellInvocation(shell, command)
+	shellArgs, cleanup, err := buildInteractiveShellInvocation(shell, command, runtime.EffectiveDelivery())
 	if err != nil || shellArgs == nil {
 		return nil, cleanup, err
 	}
 	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
-	cmd.Env = m.shellEnvironment()
+	cmd.Env = m.shellEnvironmentFor(runtime)
 	if m != nil && m.config.PrepareCommand != nil {
 		m.config.PrepareCommand(shell, command, cmd)
 	}
 	return cmd, cleanup, nil
 }
 
-func buildInteractiveShellInvocation(shell runtimeexecutor.Shell, command string) ([]string, func(), error) {
+// buildShellCommandWithDelivery is the legacy delivery override wrapper.
+func (m *Manager) buildShellCommandWithDelivery(ctx context.Context, command string, delivery runtimeexecutor.ScriptDelivery) (*exec.Cmd, error) {
+	runtime := resolveJobShellRuntime(ctx, m.config.Shell)
+	if runtime != nil {
+		cloned := *runtime
+		cloned.Delivery = delivery
+		cloned.Fingerprint = cloned.RuntimeFingerprint()
+		runtime = &cloned
+	}
+	return m.buildShellCommandWithRuntime(ctx, runtime, command)
+}
+
+func buildInteractiveShellInvocation(shell runtimeexecutor.Shell, command string, delivery runtimeexecutor.ScriptDelivery) ([]string, func(), error) {
 	wrappedCommand := runtimeexecutor.WrapPowerShellExitCode(shell, command)
 	shellArgs, stdinScript := shell.DeriveExecInvocation(
 		wrappedCommand,
-		runtimeexecutor.CurrentScriptDelivery(),
+		delivery,
 	)
 	if stdinScript != "" {
 		scriptPath, cleanup, writeErr := writeInteractiveShellScript(shell, stdinScript)
@@ -3625,24 +3685,31 @@ func interactiveScriptArgs(shell runtimeexecutor.Shell, scriptPath string) []str
 	return argv
 }
 
-func (m *Manager) buildShellCommandWithDelivery(
+func (m *Manager) buildShellCommandWithRuntime(
 	ctx context.Context,
+	runtime *runtimeexecutor.ShellRuntime,
 	command string,
-	delivery runtimeexecutor.ScriptDelivery,
 ) (*exec.Cmd, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil, nil
 	}
-	// 使用智能 shell 检测，与 BashTool 保持一致。CurrentShell 读取进程级
-	// resolver 的结果，避免"前台一种 shell、超时转后台另一种 shell"。
-	shell, err := m.executionShell()
-	if err != nil {
-		return nil, err
+	if runtime == nil {
+		runtime = resolveJobShellRuntime(ctx, m.config.Shell)
+	}
+	if runtime == nil {
+		return nil, fmt.Errorf("%w: no shell runtime", runtimeexecutor.ErrShellUnavailable)
+	}
+	if runtime.ResolveErr != nil {
+		return nil, runtime.ResolveErr
+	}
+	shell := runtime.Shell
+	if strings.TrimSpace(shell.Path) == "" {
+		return nil, fmt.Errorf("%w: shell runtime has no executable", runtimeexecutor.ErrShellUnavailable)
 	}
 	shellArgs, stdinScript := shell.DeriveExecInvocation(
 		runtimeexecutor.WrapPowerShellExitCode(shell, command),
-		delivery,
+		runtime.EffectiveDelivery(),
 	)
 	// HardenPowerShellArgs identifies the shell from argv[0]; passing the user
 	// command here made every short PowerShell command skip the UTF-8 prefix.
@@ -3656,7 +3723,7 @@ func (m *Manager) buildShellCommandWithDelivery(
 	// Neutralize console styling at the source (Codex-style UNIFIED_EXEC_ENV):
 	// force NO_COLOR/TERM=dumb/cleared COLORTERM/pager=cat on the child so the
 	// captured background output is unstyled before it reaches the model.
-	cmd.Env = m.shellEnvironment()
+	cmd.Env = m.shellEnvironmentFor(runtime)
 	if m != nil && m.config.PrepareCommand != nil {
 		m.config.PrepareCommand(shell, command, cmd)
 	}
