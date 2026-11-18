@@ -337,18 +337,20 @@ export const zhWorkspaceBase = {
     },
     submit: {
       stopResponse: "停止响应",
-      startNewThread: "开始新线程",
-      sendTurn: "发送回合",
-      startThread: "开始线程",
+      startNewThread: "开始对话",
+      sendTurn: "发送",
+      startThread: "开始对话",
       blockedInFlight: "消息未发送：会话仍在收尾上一回合，请稍候重试。",
     },
     promptTips: "提示建议",
     promptTipsMenuTitle: "提示建议",
     responseActive: "响应中",
     provider: "Provider",
-    model: "Model",
+    model: "模型",
     reasoning: "推理强度",
     reasoningDefault: "默认",
+      disabledEmpty: "请输入内容后再发送",
+      disabledAttachments: "附件仍在上传，完成后即可发送",
     reasoningDefaultWithValue: "默认（{{effort}}）",
     modelPanel: {
       trigger: "模型与推理",
@@ -374,8 +376,11 @@ export const zhWorkspaceBase = {
       empty: "暂无可用的上下文数据：本会话还没有完成过带用量上报的 LLM 请求。",
       error: "上下文用量不可用",
       unknownValue: "未知",
+      label: "上下文",
       metrics: {
         used: "已用上下文",
+      triggerLabelWithTokens:
+        "会话上下文用量 {{percent}}（{{used}} / {{window}} token）",
         window: "上下文窗口",
         remaining: "剩余可用",
         budget: "prompt 预算",
@@ -425,6 +430,8 @@ export const zhWorkspaceBase = {
         },
         plan: {
           label: "计划模式",
+      dangerBanner: "当前会话会跳过全部权限校验，请只在可信工作区使用。",
+      dangerBannerDismiss: "关闭权限警示",
           description: "只读探索，仅允许写入 plan 文件",
         },
         bypass_permissions: {

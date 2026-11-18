@@ -31,6 +31,7 @@ import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ComposerModelPanelSurface } from "@/components/workspace/composer-model-panel-surface";
+import { useComposerSurface } from "@/components/workspace/composer-surface-store";
 import {
   resolvePopoverPosition,
   type PopoverPosition,
@@ -83,7 +84,9 @@ export function ComposerModelPanel({
   selectedReasoningEffort,
 }: ComposerModelPanelProps) {
   const { t } = useTranslation("workspace");
-  const [open, setOpen] = useState(false);
+  // P1-1：本面板是 composer 浮层仲裁的一位；打开即收起其余浮层。
+  const surface = useComposerSurface("model");
+  const open = surface.open;
   const [position, setPosition] = useState<PopoverPosition | null>(null);
   const [view, setView] = useState<ComposerModelPanelView>({ level: "root" });
   const [pending, setPending] = useState<ComposerModelPanelPending>({
@@ -97,6 +100,8 @@ export function ComposerModelPanel({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // P1-3：pointerdown 先行打开，click 事件只负责避免「开了又立刻关」的竞态。
+  const openedByPointerDownRef = useRef(false);
 
   const unselectedLabel = t("composer.modelPanel.unselected");
   const reselectHint = t("composer.modelPanel.reselectHint");
@@ -192,11 +197,15 @@ export function ComposerModelPanel({
   const modelFilterEmpty = isOptionFilterEmpty(modelOptions, modelQuery);
 
   // 摘要只列「有候选可选」的项：单 provider 不给选择，就不占位置。
-  const summarySegments = [
-    providerOptions.length > 1 ? selectedProvider : "",
-    modelOptions.length > 0 ? selectedModel : "",
-    reasoningEffortOptions.length > 0 ? reasoningLabel : "",
-  ].filter((segment) => segment.length > 0);
+  // 视觉上 provider 是最低优先级，模型名可收缩但推理档位必须保留；
+  // 完整顺序仍保留在 triggerLabel（title / aria-label）中。
+  const providerLabel = providerOptions.length > 1 ? selectedProvider : "";
+  const modelLabel = modelOptions.length > 0 ? selectedModel : "";
+  const reasoningSummaryLabel =
+    reasoningEffortOptions.length > 0 ? reasoningLabel : "";
+  const summarySegments = [providerLabel, modelLabel, reasoningSummaryLabel].filter(
+    (segment) => segment.length > 0,
+  );
   const triggerLabel =
     summarySegments.length > 0
       ? summarySegments.join(" · ")
@@ -236,12 +245,12 @@ export function ComposerModelPanel({
     });
   }
 
-  function closePanel(restoreFocus = false) {
-    setOpen(false);
+  const closePanel = useCallback((restoreFocus = false) => {
+    surface.closeSelf();
     if (restoreFocus) {
       focusTrigger();
     }
-  }
+  }, [surface]);
 
   function openPanel() {
     if (disabled) {
@@ -253,19 +262,16 @@ export function ComposerModelPanel({
     setProviderQuery("");
     setModelQuery("");
     updatePosition();
-    setOpen(true);
+    surface.openSelf();
   }
 
   // 响应开始 / 目录重新加载：禁用即收起，避免停留在无法生效的面板上。
-  // 走 React 官方「prop 变化时调整 state」写法（渲染期比对上一轮的 disabled），不在 effect 里同步 setState，
-  // 也不用派生 `open && !disabled`（那会在禁用结束后把面板弹回来）。
-  const [lastDisabled, setLastDisabled] = useState(disabled);
-  if (lastDisabled !== disabled) {
-    setLastDisabled(disabled);
+  // 这里不派生 `open && !disabled`（那会在禁用结束后把面板弹回来）。
+  useEffect(() => {
     if (disabled && open) {
-      setOpen(false);
+      surface.closeSelf();
     }
-  }
+  }, [disabled, open, surface]);
 
   // 一级 ↔ 二级切换后把焦点放进当前层的条目（二级优先当前选中项），
   // 键盘用户不必先 Tab 穿过表头。
@@ -339,7 +345,7 @@ export function ComposerModelPanel({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
-  }, [open, view]);
+  }, [closePanel, open, view]);
 
   useEffect(() => {
     if (!open || typeof window === "undefined") {
@@ -441,11 +447,11 @@ export function ComposerModelPanel({
 
   return (
     <>
-      <div ref={rootRef} className="inline-flex min-w-0">
+      <div ref={rootRef} className="flex min-w-0 w-full">
         <button
           ref={triggerRef}
           type="button"
-          aria-label={t("composer.modelPanel.trigger")}
+          aria-label={`${t("composer.modelPanel.trigger")}: ${triggerLabel}`}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={open ? panelId : undefined}
@@ -460,10 +466,27 @@ export function ComposerModelPanel({
           }
           onClick={(event) => {
             event.stopPropagation();
+            if (openedByPointerDownRef.current) {
+              openedByPointerDownRef.current = false;
+              return;
+            }
             if (open) {
               closePanel();
               return;
             }
+            openPanel();
+          }}
+          onPointerDown={(event) => {
+            if (
+              event.button !== 0 ||
+              disabled ||
+              open ||
+              openedByPointerDownRef.current
+            ) {
+              return;
+            }
+            event.preventDefault();
+            openedByPointerDownRef.current = true;
             openPanel();
           }}
           onKeyDown={(event) => {
@@ -475,16 +498,68 @@ export function ComposerModelPanel({
             openPanel();
           }}
           className={cn(
-            "inline-flex min-w-0 max-w-[22rem] items-center gap-1.5 rounded-[0.6rem] border border-border",
-            "bg-surface-soft px-2 py-1 text-left text-base leading-none text-muted-foreground outline-none transition",
+            "inline-flex h-8 min-h-8 min-w-0 w-full max-w-none items-center gap-1.5 rounded-field border border-border",
+            "bg-surface-soft px-2 py-0 text-left text-base leading-none text-muted-foreground outline-none transition",
             "normal-case tracking-normal",
             "hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+            "active:scale-[0.98] active:border-border-strong active:bg-surface-soft-hover",
             "disabled:cursor-not-allowed disabled:opacity-60",
           )}
+          data-composer-model-panel-open={open ? "true" : undefined}
         >
           <SlidersHorizontalIcon size={13} aria-hidden="true" className="shrink-0" />
-          <span className="truncate" data-composer-model-panel-summary>
-            {triggerLabel}
+          <span className="shrink-0 text-muted-foreground app-text-9 uppercase tracking-[0.08em]">
+            {t("composer.model")}
+          </span>
+          <span
+            className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap"
+            data-composer-model-panel-summary
+          >
+            {modelLabel ? (
+              <span
+                className="min-w-0 flex-[1_1_auto] truncate"
+                data-composer-model-value
+                title={modelLabel}
+              >
+                {modelLabel}
+              </span>
+            ) : null}
+            {modelLabel && reasoningSummaryLabel ? (
+              <span aria-hidden="true" className="shrink-0">
+                {" · "}
+              </span>
+            ) : null}
+            {reasoningSummaryLabel ? (
+              <span
+                className="shrink-0"
+                data-composer-model-reasoning
+                title={reasoningSummaryLabel}
+              >
+                {reasoningSummaryLabel}
+              </span>
+            ) : null}
+            {providerLabel ? (
+              <>
+                {modelLabel || reasoningSummaryLabel ? (
+                  <span
+                    aria-hidden="true"
+                    className="hidden shrink-0 2xl:inline"
+                  >
+                    {" · "}
+                  </span>
+                ) : null}
+                <span
+                  className={cn(
+                    "min-w-0 max-w-[8rem] shrink-[2] truncate text-muted-foreground",
+                    modelLabel ? "hidden 2xl:inline" : "inline",
+                  )}
+                  data-composer-model-provider
+                  title={providerLabel}
+                >
+                  {providerLabel}
+                </span>
+              </>
+            ) : null}
           </span>
           {/* 面板关着也要能看出「换了供应商、还欠一次确认」。 */}
           {hasPending ? (

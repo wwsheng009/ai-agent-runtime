@@ -196,11 +196,19 @@ describe("ComposerModelPanel", () => {
   }
 
   it("summarizes provider / model / reasoning on the trigger and opens one portal panel", () => {
-    renderPanel();
+    renderPanel({
+      modelOptions: ["auto/deepseek-v4.1-flash-1017"],
+      providerOptions: ["magpie", "other"],
+      reasoningEffortOptions: ["max"],
+      selectedModel: "auto/deepseek-v4.1-flash-1017",
+      selectedProvider: "magpie",
+      selectedReasoningEffort: "max",
+    });
 
     const trigger = queryTrigger();
     expect(trigger).toBeInstanceOf(HTMLButtonElement);
-    expect(querySummary()).toBe("provider-a · model-a · 默认（medium）");
+    expect(querySummary()).toBe("auto/deepseek-v4.1-flash-1017 · max · magpie");
+    expect(trigger?.className).toContain("max-w-none");
     expect(queryTrigger()?.getAttribute("aria-expanded")).toBe("false");
 
     // 关闭时只有触发器，没有残留弹层。
@@ -234,7 +242,7 @@ describe("ComposerModelPanel", () => {
     drillInto("model");
 
     expect(queryLevel()).toBe("section");
-    expect(queryTitle()).toBe("Model");
+    expect(queryTitle()).toBe("模型");
     expect(queryOptions("model")).toHaveLength(2);
     expect(queryOptions("model")[0]?.getAttribute("aria-selected")).toBe("true");
     // 二级只渲染当前这一项。

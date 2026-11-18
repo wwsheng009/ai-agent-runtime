@@ -259,6 +259,7 @@
   --surface-overlay: var(--primitive-ink-8-a985);
   --dialog-bg: linear-gradient(180deg, var(--primitive-ink-5-a985), var(--primitive-ink-9-a990));
   --dialog-backdrop: var(--primitive-ink-11-a740);
+  --composer-menu-scrim: var(--primitive-black-a160);
   --panel-strong-bg: var(--primitive-ink-5-a940);
   --placeholder-foreground: var(--primitive-ink-2-a280);
   --code-block-bg: var(--primitive-ink-10-a720);

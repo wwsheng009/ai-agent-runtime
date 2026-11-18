@@ -38,6 +38,7 @@ import { createComposerSkillTurnRunner } from "@/hooks/workspace/composer/compos
 import { useRuntimeProfileCatalog } from "@/hooks/workspace/composer/use-runtime-profile-catalog";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { useParkedTurnView } from "@/hooks/workspace/use-parked-turns";
+import { usePermissionWarning } from "@/hooks/workspace/use-permission-warning";
 import { imageSubmitNoticeBanner } from "@/hooks/workspace/agent-chat-turn/image-prompt-turn";
 import { cn } from "@/lib/utils";
 
@@ -168,6 +169,7 @@ export function WorkspaceMainSection({
   const agentsSessionId = selectedThread.sessionId?.trim() ?? "";
   const sessionAgents = useSessionAgents({ sessionId: agentsSessionId });
   const [agentsPanelOpen, setAgentsPanelOpen] = useState(false);
+  const permissionWarning = usePermissionWarning(selectedThread.sessionId);
   // §6.8 托管挂起：事件快照 + 任务投影（同一份 AgentControl 目录，挂起边沿补刷一次）。
   const parkedTurnView = useParkedTurnView(parkedTurn, sessionAgents.tree.descendants, sessionAgents.refresh);
   // G8：会话 agents 面板的只读下钻目标（复用子会话 transcript 对话框）。
@@ -401,7 +403,9 @@ export function WorkspaceMainSection({
                   onPlanDecision={onPlanDecision}
                   onPlanNotesChange={onPlanNotesChange}
                   onResolveApproval={onResolvePendingApproval}
+                  onDismissPermissionWarning={permissionWarning.dismissWarning}
                   parkedTurn={parkedTurnView}
+                  permissionDanger={permissionWarning.showWarning}
                   plan={plan ?? null}
                   planActionPending={planActionPending}
                   planNotesDraft={planNotesDraft}
@@ -441,6 +445,7 @@ export function WorkspaceMainSection({
                     permissionModeControl={
                       <ComposerPermissionModeControl
                         lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+                        onModeChange={permissionWarning.onModeChange}
                         runtimeEventCount={selectedThread.runtimeEventCount}
                         sessionId={selectedThread.sessionId}
                       />

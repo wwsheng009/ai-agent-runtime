@@ -27,7 +27,7 @@ export function NewThreadPlaceholder({
   t,
 }: NewThreadPlaceholderProps) {
   return (
-    <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
+    <div className="mx-auto flex w-full max-w-[var(--app-chat-content-width-composer)] flex-1 flex-col justify-center pb-4">
       <div className="text-center">
         <div className="mx-auto grid size-11 place-items-center rounded-panel border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
           <BotIcon aria-hidden="true" size={20} />

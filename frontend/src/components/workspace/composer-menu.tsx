@@ -41,7 +41,7 @@ export function ComposerMenu({
       role="listbox"
       aria-label={t("composer.menu.label")}
       data-composer-menu
-      className="absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[18rem] overflow-y-auto rounded-panel border border-border [background:var(--workspace-composer-bg)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.4)]"
+      className="absolute bottom-full left-0 z-40 mb-2 min-w-[17rem] max-h-[min(70vh,34rem)] w-[min(30rem,100%)] overflow-y-auto rounded-panel border border-border [background:var(--workspace-composer-bg)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.4)]"
     >
       {snapshot.empty && snapshot.groups.length === 0 ? (
         <div
@@ -63,7 +63,7 @@ export function ComposerMenu({
         />
       ))}
       {!snapshot.empty ? (
-        <div className="border-t border-border px-2 pb-1 pt-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
+        <div className="border-t border-border px-2 pb-1 pt-2 app-text-10 text-muted-foreground">
           {t("composer.menu.hint")}
         </div>
       ) : null}
@@ -91,7 +91,7 @@ function ComposerMenuGroupBlock({
   const message = group.statusText ?? group.emptyText;
   return (
     <div role="group" aria-label={label} data-composer-menu-group={group.id}>
-      <div className="px-2 pb-1 pt-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
+      <div className="px-2 pb-1 pt-2 app-text-10 font-medium text-muted-foreground">
         {label}
       </div>
       {group.items.length === 0 && message ? (

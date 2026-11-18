@@ -1,6 +1,7 @@
 import {
   useCallback,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   useEffect,
   useId,
   useRef,
@@ -33,8 +34,15 @@ type SelectProps = {
   options: readonly SelectOption[];
   value: string;
   onChange: (value: string) => void;
+  /** 受控展开态（缺省由组件内部持有）。 */
+  open?: boolean;
+  /** 展开态变化回调；受控模式下宿主必须回写 `open`。 */
+  onOpenChange?: (open: boolean) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** Inline visible field name; keeps toolbar controls self-identifying without an outside label. */
+  triggerPrefix?: ReactNode;
+  triggerPrefixClassName?: string;
   align?: "start" | "end" | "auto";
   side?: "top" | "bottom";
   className?: string;
@@ -42,6 +50,8 @@ type SelectProps = {
   menuClassName?: string;
   optionClassName?: string;
   size?: FieldSize;
+  /** 触发器测试钩子（权限警示条等外部入口需要定位它来还焦）。 */
+  triggerTestId?: string;
 };
 
 function findFirstEnabledOptionIndex(options: readonly SelectOption[]) {
@@ -89,8 +99,12 @@ export function Select({
   options,
   value,
   onChange,
+  open: controlledOpen,
+  onOpenChange,
   placeholder = "Select",
   disabled = false,
+  triggerPrefix,
+  triggerPrefixClassName,
   align = "start",
   side = "bottom",
   className,
@@ -98,12 +112,23 @@ export function Select({
   menuClassName,
   optionClassName,
   size = "md",
+  triggerTestId,
 }: SelectProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const listboxRef = useRef<HTMLDivElement | null>(null);
   const listboxId = useId();
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = useCallback(
+    (next: boolean) => {
+      if (controlledOpen === undefined) {
+        setUncontrolledOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [controlledOpen, onOpenChange],
+  );
   const [menuPosition, setMenuPosition] = useState<(PopoverPosition & { maxWidth?: string }) | null>(null);
   const selectedIndex = options.findIndex((option) => option.value === value);
   const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
@@ -149,9 +174,9 @@ export function Select({
     }
   }, [align, side]);
 
-  function closeMenu() {
+  const closeMenu = useCallback(() => {
     setOpen(false);
-  }
+  }, [setOpen]);
 
   function openMenu(initialIndex?: number) {
     if (isDisabled) {
@@ -288,7 +313,7 @@ export function Select({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
-  }, [open]);
+  }, [closeMenu, open]);
 
   useEffect(() => {
     if (!open || typeof window === "undefined") {
@@ -409,10 +434,11 @@ export function Select({
 
   return (
     <>
-      <div ref={rootRef} className={cn("relative inline-flex", className)}>
+      <div ref={rootRef} className={cn("relative inline-flex min-w-0", className)}>
         <button
           ref={triggerRef}
           type="button"
+          data-testid={triggerTestId}
           aria-label={ariaLabel}
           aria-haspopup="listbox"
           aria-expanded={open}
@@ -432,12 +458,23 @@ export function Select({
             handleTriggerKeyDown(event);
           }}
           className={cn(
-            "inline-flex items-center justify-between gap-2 text-left",
+            "inline-flex min-w-0 items-center justify-between gap-2 text-left",
             fieldControlVariants({ size }),
             triggerClassName,
           )}
         >
-          <span className="truncate">{triggerLabel}</span>
+          {triggerPrefix ? (
+            <span
+              className={cn(
+                "shrink-0 text-muted-foreground app-text-9 uppercase tracking-[0.08em]",
+                triggerPrefixClassName,
+              )}
+              data-select-trigger-prefix
+            >
+              {triggerPrefix}
+            </span>
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">{triggerLabel}</span>
           <ChevronDownIcon
             size={14}
             className={cn(

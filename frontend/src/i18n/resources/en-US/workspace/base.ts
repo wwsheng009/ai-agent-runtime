@@ -354,9 +354,9 @@ export const enWorkspaceBase = {
     },
     submit: {
       stopResponse: "Stop response",
-      startNewThread: "Start new thread",
-      sendTurn: "Send turn",
-      startThread: "Start thread",
+      startNewThread: "Start conversation",
+      sendTurn: "Send",
+      startThread: "Start conversation",
       blockedInFlight:
         "Message not sent: the session is still finishing its previous turn. Please retry in a moment.",
     },
@@ -367,6 +367,8 @@ export const enWorkspaceBase = {
     model: "Model",
     reasoning: "Reasoning",
     reasoningDefault: "Default",
+      disabledEmpty: "Enter a message before sending",
+      disabledAttachments: "Attachments are still uploading",
     reasoningDefaultWithValue: "Default ({{effort}})",
     modelPanel: {
       trigger: "Model & reasoning",
@@ -392,7 +394,10 @@ export const enWorkspaceBase = {
       empty:
         "No context data yet: this session has no completed LLM request with usage reporting.",
       error: "context usage unavailable",
+      label: "Context",
       unknownValue: "unknown",
+      triggerLabelWithTokens:
+        "Session context usage {{percent}} ({{used}} / {{window}} tokens)",
       metrics: {
         used: "Used",
         window: "Context window",
@@ -439,8 +444,13 @@ export const enWorkspaceBase = {
           description: "Confirm every write and command",
         },
         accept_edits: {
+      loading: "Loading permission modes",
+      unavailable: "No modes available",
           label: "Accept edits",
           description: "File edits pass automatically; risky commands still ask",
+      dangerBanner:
+        "This session bypasses all permission checks — use it only in trusted workspaces.",
+      dangerBannerDismiss: "Dismiss permission warning",
         },
         plan: {
           label: "Plan",

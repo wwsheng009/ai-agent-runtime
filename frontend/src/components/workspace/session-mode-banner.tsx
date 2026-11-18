@@ -15,7 +15,7 @@
 // 不承载任何裁决动作——裁决入口仍是 composer 上沿的 pending bar 与右侧计划面板，
 // 避免出现第二套 pending 判定（P1-7 的口径）。
 
-import { HourglassIcon, RotateCcwIcon } from "lucide-react";
+import { HourglassIcon, RotateCcwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -30,12 +30,18 @@ type SessionModeBannerProps = {
   parkedTurn?: ParkedTurnView | null;
   plan: RuntimeSessionPlanMode | null;
   planStatusLabel?: string;
+  /** P1-4：当前会话处于「跳过权限校验」等危险模式。 */
+  permissionDanger?: boolean;
+  /** 危险态警示条关闭（会话内有效）。 */
+  onDismissPermissionWarning?: () => void;
   sessionId?: string;
 };
 
 export function SessionModeBanner({
   className,
   parkedTurn,
+  permissionDanger = false,
+  onDismissPermissionWarning,
   plan,
   planStatusLabel,
   sessionId,
@@ -48,8 +54,8 @@ export function SessionModeBanner({
   const parkedTaskCounts = parkedTurn?.taskCounts ?? null;
   const resumedNotice = parkedTurn?.resumedNotice ?? null;
 
-  // 无会话 / 既无 plan 上下文也无挂起态：不占位（权限模式控件在 composer 底部，不在这里重复）。
-  if (!sessionId || (!planActive && !parkedTurn)) {
+  // 无会话 / 既无 plan 上下文、挂起态也无危险权限：不占位。
+  if (!sessionId || (!planActive && !parkedTurn && !permissionDanger)) {
     return null;
   }
 
@@ -82,7 +88,7 @@ export function SessionModeBanner({
   return (
     <div
       className={cn(
-        "mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5 app-text-10 tracking-[0.08em] text-muted-foreground",
+        "mb-2 flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-0 app-text-10 tracking-[0.08em] text-muted-foreground",
         className,
       )}
       data-parked={parkedTurnSnapshot ? "true" : "false"}
@@ -103,6 +109,29 @@ export function SessionModeBanner({
             </span>
           ) : null}
         </>
+      ) : null}
+      {permissionDanger ? (
+        <span
+          className="flex w-full min-w-0 basis-full items-center gap-1.5 rounded-control border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2 text-analytics-danger"
+          data-testid="session-permission-warning"
+          role="status"
+        >
+          <TriangleAlertIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1 whitespace-normal break-words">
+            {t("composer.permission.dangerBanner")}
+          </span>
+          {onDismissPermissionWarning ? (
+            <button
+              type="button"
+              aria-label={t("composer.permission.dangerBannerDismiss")}
+              className="ml-1 shrink-0 rounded-chip p-0.5 text-analytics-danger transition hover:bg-analytics-danger/15"
+              onClick={onDismissPermissionWarning}
+              title={t("composer.permission.dangerBannerDismiss")}
+            >
+              <XIcon aria-hidden="true" size={12} />
+            </button>
+          ) : null}
+        </span>
       ) : null}
       {parkedTurnSnapshot ? (
         <span

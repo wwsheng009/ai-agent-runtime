@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useComposerSurface } from "@/components/workspace/composer-surface-store";
 import { Select } from "@/components/ui/select";
 import { useSessionPermissionMode } from "@/hooks/workspace/use-session-permission-mode";
 import { type RuntimePermissionModeOption } from "@/lib/runtime-api";
+import { cn } from "@/lib/utils";
 
 import { PermissionModeConfirmDialog } from "./permission-mode-confirm-dialog";
 
@@ -16,6 +18,12 @@ type ComposerPermissionModeControlProps = {
   sessionId?: string;
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
+  /** 模式快照上抛：宿主据此渲染危险态常驻警示条（不重复拉取接口）。 */
+  onModeChange?: (snapshot: {
+    sessionId: string;
+    mode: string;
+    dangerous: boolean;
+  }) => void;
 };
 
 // 文案键直接跟随后端 `supported_modes` 的 value（下划线式 canonical 值）。
@@ -39,8 +47,10 @@ export function ComposerPermissionModeControl({
   sessionId,
   lastRuntimeEventType,
   runtimeEventCount,
+  onModeChange,
 }: ComposerPermissionModeControlProps) {
   const { t } = useTranslation("workspace");
+  const surface = useComposerSurface("permission");
   const { error, loading, mode, options, pending, setPermissionMode } =
     useSessionPermissionMode({
       lastRuntimeEventType,
@@ -58,6 +68,17 @@ export function ComposerPermissionModeControl({
       ? pendingDangerous.mode
       : null;
 
+  // 宿主警示条只消费模式快照，不重复请求接口；会话切换后的旧快照由宿主按 sessionId 忽略。
+  const selectedDangerous = Boolean(
+    options.find((option) => option.value === mode)?.dangerous,
+  );
+  useEffect(() => {
+    if (!sessionId) {
+      return;
+    }
+    onModeChange?.({ sessionId, mode, dangerous: selectedDangerous });
+  }, [mode, onModeChange, selectedDangerous, sessionId]);
+
   if (!sessionId) {
     return null;
   }
@@ -68,6 +89,7 @@ export function ComposerPermissionModeControl({
     value: option.value,
     label: optionLabel(option, translate),
   }));
+  const canSelectMode = selectOptions.length > 0 && mode.length > 0;
   const selectedOption = options.find((option) => option.value === mode);
   const selectedDescription = selectedOption
     ? optionDescription(selectedOption, translate)
@@ -79,34 +101,66 @@ export function ComposerPermissionModeControl({
 
   return (
     <>
-      <label
-        className="inline-flex items-center gap-1.5"
+      <div
+        className="flex min-w-0 shrink items-center gap-1.5"
+        data-composer-permission-danger={isDangerous ? "true" : undefined}
+        data-composer-permission-control
         title={selectedDescription ?? undefined}
       >
-        <span>{t("composer.permission.label")}</span>
-        <Select
-          ariaLabel={t("composer.permission.label")}
-          value={mode}
-          onChange={(value) => {
-            const option = options.find((item) => item.value === value);
-            if (option?.dangerous && sessionId) {
-              // 危险模式先弹确认，确认后才带 confirm: true 调接口。
-              setPendingDangerous({ mode: value, sessionId });
-              return;
-            }
-            void setPermissionMode(value);
-          }}
-          options={selectOptions}
-          disabled={pending || selectOptions.length === 0}
-          side="top"
-          triggerClassName={
-            isDangerous
-              ? "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] border-accent-gold/60 px-2 py-1 text-base leading-none normal-case tracking-normal text-accent-gold"
-              : "min-w-[8rem] max-w-[14rem] rounded-[0.6rem] px-2 py-1 text-base leading-none normal-case tracking-normal"
-          }
-          menuClassName="max-w-[16rem]"
-          optionClassName="text-base"
-        />
+        {canSelectMode ? (
+          <Select
+            className="min-w-0 shrink"
+            ariaLabel={t("composer.permission.label")}
+            open={surface.open}
+            onOpenChange={(next) => {
+              if (next) {
+                surface.openSelf();
+              } else {
+                surface.closeSelf();
+              }
+            }}
+            value={mode}
+            onChange={(value) => {
+              const option = options.find((item) => item.value === value);
+              if (option?.dangerous && sessionId) {
+                // 危险模式先弹确认，确认后才带 confirm: true 调接口。
+                setPendingDangerous({ mode: value, sessionId });
+                return;
+              }
+              void setPermissionMode(value);
+            }}
+            options={selectOptions}
+            disabled={pending || loading}
+            side="top"
+            triggerPrefix={t("composer.permission.label")}
+            triggerClassName={cn(
+              "h-8 w-[clamp(7rem,12vw,9rem)] min-w-0 max-w-full rounded-field px-2 py-0 text-sm leading-none normal-case tracking-normal",
+              isDangerous &&
+                "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger hover:border-analytics-danger-border hover:text-analytics-danger",
+            )}
+            triggerTestId="composer-permission-trigger"
+            size="sm"
+            menuClassName="max-w-[16rem]"
+            optionClassName="text-base"
+          />
+        ) : (
+          <>
+            <span className="shrink-0 text-muted-foreground app-text-9 uppercase tracking-[0.08em]">
+              {t("composer.permission.label")}
+            </span>
+            <span
+              data-composer-permission-unavailable
+              role={loading ? "status" : "note"}
+              className="min-w-0 truncate text-muted-foreground"
+            >
+              {loading
+                ? t("composer.permission.loading")
+                : error
+                  ? t("composer.permission.error")
+                  : t("composer.permission.unavailable")}
+            </span>
+          </>
+        )}
         <span
           data-composer-permission-mode={mode}
           data-composer-permission-pending={pending ? "true" : undefined}
@@ -114,17 +168,21 @@ export function ComposerPermissionModeControl({
         >
           {selectedDescription ?? ""}
         </span>
-        {loading || pending ? (
-          <span data-composer-permission-busy className="text-muted-foreground">
+        {canSelectMode && loading ? (
+          <span data-composer-permission-busy className="min-w-0 truncate text-muted-foreground">
+            {t("composer.permission.loading")}
+          </span>
+        ) : pending ? (
+          <span data-composer-permission-busy className="min-w-0 truncate text-muted-foreground">
             {t("composer.permission.pending")}
           </span>
         ) : null}
-        {error ? (
-          <span data-composer-permission-error className="text-accent-gold">
+        {error && canSelectMode ? (
+          <span data-composer-permission-error className="min-w-0 truncate text-accent-gold">
             {t("composer.permission.error")}
           </span>
         ) : null}
-      </label>
+      </div>
       <PermissionModeConfirmDialog
         open={pendingDangerousMode !== null}
         modeLabel={
@@ -157,8 +215,7 @@ function optionBaseLabel(
 }
 
 function optionLabel(option: RuntimePermissionModeOption, translate: TranslateKey) {
-  const label = optionBaseLabel(option, translate);
-  return option.dangerous ? `${label} ⚠` : label;
+  return optionBaseLabel(option, translate);
 }
 
 function optionDescription(

@@ -164,11 +164,41 @@ describe("ComposerPermissionModeControl", () => {
     expect(container.textContent).toContain("默认");
   });
 
+  it("keeps the dangerous mode recognizable with a solid border and one warning treatment", async () => {
+    apiMocks.getSessionPermissionMode.mockResolvedValue(
+      permissionModeResponse("bypass_permissions"),
+    );
+
+    await render();
+
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-permission-trigger"]',
+    );
+    expect(trigger?.className).toContain("border-analytics-danger-border");
+    expect(trigger?.className).not.toContain("border-dashed");
+    expect(trigger?.textContent).toContain("跳过权限校验");
+    expect(trigger?.textContent).not.toContain("⚠");
+  });
+
   it("does not render without a session", async () => {
     await render(null);
 
     expect(container.textContent).toBe("");
     expect(apiMocks.getSessionPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it("renders a localized status instead of an empty Select when no modes are available", async () => {
+    apiMocks.getSessionPermissionMode.mockResolvedValue(
+      permissionModeResponse("", { supported_modes: [] }),
+    );
+
+    await render();
+
+    expect(container.querySelector('button[aria-label="权限"]')).toBeNull();
+    expect(container.querySelector("[data-composer-permission-unavailable]"))
+      .not.toBeNull();
+    expect(container.textContent).toContain("无可用模式");
+    expect(container.textContent).not.toContain("Select");
   });
 
   it("switches to a non-plan mode through the permission-mode endpoint", async () => {

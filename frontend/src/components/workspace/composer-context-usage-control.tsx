@@ -17,6 +17,7 @@ import { GaugeIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { type SessionCompactOutcome } from "@/api/runtime";
+import { useComposerSurface } from "@/components/workspace/composer-surface-store";
 import { ComposerContextCompactSection } from "@/components/workspace/composer-context-compact-section";
 import {
   formatContextPercent,
@@ -73,6 +74,7 @@ export function ComposerContextUsageControl({
   sessionId,
 }: ComposerContextUsageControlProps) {
   const { t } = useTranslation("workspace");
+  const surface = useComposerSurface("context");
   const normalizedSessionId = sessionId?.trim() ?? "";
   const { error, loading, refresh, sessionMissing, usage } = useSessionUsage({
     live: isResponding,
@@ -81,7 +83,7 @@ export function ComposerContextUsageControl({
     sessionId: normalizedSessionId,
   });
 
-  const [open, setOpen] = useState(false);
+  const open = surface.open;
   const [position, setPosition] = useState<PopoverPosition | null>(null);
   const [compactOverride, setCompactOverride] = useState<CompactOverride | null>(null);
 
@@ -103,10 +105,10 @@ export function ComposerContextUsageControl({
   const level = snapshot?.level ?? "unknown";
 
   const closePanel = useCallback(() => {
-    setOpen(false);
+    surface.closeSelf();
     // 关闭即丢弃覆盖：再次打开时看到的应当是当前状态，而不是上一次的旧结论。
     setCompactOverride(null);
-  }, []);
+  }, [surface]);
 
   const panelPositionFromTrigger = useCallback((): PopoverPosition | null => {
     const rect = triggerRef.current?.getBoundingClientRect();
@@ -164,7 +166,7 @@ export function ComposerContextUsageControl({
     if (next) {
       setPosition(next);
     }
-    setOpen(true);
+    surface.openSelf();
   }
 
   function handleCompacted(outcome: SessionCompactOutcome) {
@@ -176,9 +178,17 @@ export function ComposerContextUsageControl({
   const percentText = formatContextPercent(utilization);
   const ringPercentText = formatContextPercentCompact(utilization);
   const progress = utilization ?? 0;
-  const triggerLabel = t("composer.contextUsage.triggerLabel", {
-    percent: percentText,
-  });
+  // P2-7：环内保留紧凑口径（<1%），hover / aria 给出真实百分比与 token 数。
+  const triggerLabel =
+    snapshot && snapshot.windowTokens > 0
+      ? t("composer.contextUsage.triggerLabelWithTokens", {
+          percent: percentText,
+          used: formatContextTokens(snapshot.usedTokens),
+          window: formatContextTokens(snapshot.windowTokens),
+        })
+      : t("composer.contextUsage.triggerLabel", {
+          percent: percentText,
+        });
   const compactDisabledReason = !normalizedSessionId
     ? t("composer.contextUsage.compact.disabledNoSession")
     : isResponding
@@ -229,7 +239,13 @@ export function ComposerContextUsageControl({
     : [];
 
   return (
-    <div className={cn("flex shrink-0 items-center", className)}>
+    <div className={cn("flex min-w-0 shrink-0 items-center gap-1.5", className)}>
+      <span
+        className="shrink-0 text-muted-foreground app-text-9 uppercase tracking-[0.08em]"
+        data-testid="composer-context-usage-label"
+      >
+        {t("composer.contextUsage.label")}
+      </span>
       <button
         ref={triggerRef}
         type="button"
@@ -239,7 +255,7 @@ export function ComposerContextUsageControl({
         aria-haspopup="dialog"
         title={triggerLabel}
         onClick={togglePanel}
-        className="relative inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-surface-soft p-0 transition-colors hover:border-border-strong"
+        className="relative inline-flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface-soft p-0 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
       >
         <ContextUsageRing
           animated
@@ -247,8 +263,8 @@ export function ComposerContextUsageControl({
           level={level}
           percentText={ringPercentText}
           progress={progress}
-          size={32}
-          textClassName="text-[9px] font-medium"
+          size={24}
+          textClassName="text-[8px] font-semibold"
         />
       </button>
 

@@ -1,10 +1,10 @@
 import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
 import {
-  type ReactNode,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  useId,
 } from "react";
 
 import {
@@ -13,20 +13,19 @@ import {
 } from "@/components/workspace/composer-attachment-rail";
 import {
   ComposerCommandResultNoticeBar,
-  type ComposerCommandResultNotice,
 } from "@/components/workspace/composer-command-result-notice";
 import { ComposerMenu } from "@/components/workspace/composer-menu";
 import { ComposerModelPanel } from "@/components/workspace/composer-model-panel";
 import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
+import { ComposerSurfaceProvider } from "@/components/workspace/composer-surface-context";
+import { useComposerSurface } from "@/components/workspace/composer-surface-store";
+import { type MessageComposerProps } from "@/components/workspace/message-composer-types";
 import { Button } from "@/components/ui/button";
-import { type Thread } from "@/data/mock";
-import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
-import {
-  type ComposerMenuState,
-  useComposerMenu,
-} from "@/hooks/workspace/composer/use-composer-menu";
-import { type ComposerCommand, type ComposerCommandDefinition } from "@/lib/composer-commands";
+import { useComposerMenu } from "@/hooks/workspace/composer/use-composer-menu";
+import { useComposerMenuArbitration } from "@/hooks/workspace/composer/use-composer-menu-arbitration";
+import { type ComposerCommandDefinition } from "@/lib/composer-commands";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
+import { resolveComposerSubmitCopy } from "@/lib/composer/composer-submit-copy";
 import { applyComposerTextareaLayout } from "@/lib/composer-textarea";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -35,67 +34,15 @@ import { useTranslation } from "react-i18next";
 const NO_COMMANDS: readonly ComposerCommandDefinition[] = [];
 const NO_REFERENCE_GROUPS: readonly ComposerReferenceGroup[] = [];
 
-type MessageComposerProps = {
-  /** P1-4 子片 2：附件草稿轨（数据与上传状态由 owner hook 持有）。 */
-  attachments: ComposerAttachmentsController;
-  /** P1-4 子片 3：斜杠命令表（内置命令清单与执行器归 P2-7）。 */
-  commands?: readonly ComposerCommandDefinition[];
-  /** P2-7：命令执行结果通知（宿主已本地化；错误 alert、成功 status）。 */
-  commandResultNotice?: ComposerCommandResultNotice | null;
-  /**
-   * 会话上下文进度控件（宿主注入，composer 不直接耦合 runtime API）。
-   * 座位固定在发送按钮左侧：进度环 + 上下文明细/手动压缩面板。
-   */
-  contextUsageControl?: ReactNode;
-  density: "comfortable" | "compact";
-  draft: string;
-  /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
-  focusKey?: string;
-  hasSession: boolean;
-  isNewThread?: boolean;
-  isResponding: boolean;
-  modelOptions: string[];
-  onModelChange: (value: string) => void;
-  /**
-   * P0：`@` 菜单可见状态回调（宿主用 query 拉取工作区文件候选；菜单关闭时不得触发请求）。
-   */
-  onMenuStateChange?: (state: ComposerMenuState) => void;
-  /** P1-4 子片 3：`/` 命令派发；返回 true 表示已处理（否则给出未接入提示，不降级为 prompt）。 */
-  onCommand?: (command: ComposerCommand, args: string, source: "pick" | "submit") => boolean | void;
-  onProviderChange: (value: string) => void;
-  onDismissCommandResult?: () => void;
-  onReasoningEffortChange: (value: string) => void;
-  /** P1-x：会话权限选择器（由宿主注入，composer 不直接耦合 runtime API）。 */
-  permissionModeControl?: ReactNode;
-  /** Composer profile 切换器（宿主注入；渲染在 context 用量图标左侧，纪律同 permissionModeControl）。 */
-  profileControl?: ReactNode;
-  providerOptions: string[];
-  reasoningEffortDefault: string;
-  reasoningEffortError: string | null;
-  reasoningEffortOptions: string[];
-  runtimeModelsError: string | null;
-  runtimeModelsLoading: boolean;
-  /** P1-4 子片 3：`@` 引用候选分组（文件/会话/子代理）。 */
-  referenceGroups?: readonly ComposerReferenceGroup[];
-  /** 文本类 skill 的 `$` 提及候选分组（运行时技能目录）。 */
-  skillGroups?: readonly ComposerReferenceGroup[];
-  selectedModel: string;
-  selectedProvider: string;
-  selectedReasoningEffort: string;
-  transport?: Thread["transport"];
-  onDraftChange: (value: string) => void;
-  onStop: () => void;
-  /**
-   * 提交回合；返回 false = 被拦下（草稿为空 / 会话未就绪 / 同会话仍有在途
-   * 回合 / 附件未上传完成）。composer 据此给出可见反馈，绝不静默吞掉一次点击。
-   *
-   * `images` 只包含**已上传成功**的服务端路径（S5）；调用方按
-   * `submit_prompt.images` 投递，绝不代发未上传项。
-   */
-  onSubmit: (options?: { images?: readonly string[] }) => boolean | void;
-};
+export function MessageComposer(props: MessageComposerProps) {
+  return (
+    <ComposerSurfaceProvider>
+      <MessageComposerSurface {...props} />
+    </ComposerSurfaceProvider>
+  );
+}
 
-export function MessageComposer({
+function MessageComposerSurface({
   attachments,
   commands = NO_COMMANDS,
   commandResultNotice = null,
@@ -132,17 +79,31 @@ export function MessageComposer({
   onSubmit,
 }: MessageComposerProps) {
   const { t } = useTranslation("workspace");
+  // P1-1：输入菜单也纳入统一浮层仲裁（同一时刻只允许一个 expanded）。
+  const menuSurface = useComposerSurface("menu");
   const isCompact = density === "compact";
   const placeholder = isNewThread
     ? t("composer.placeholder.newThread")
     : t("composer.placeholder.thread");
-  const submitButtonLabel = isResponding
-    ? t("composer.submit.stopResponse")
-    : isNewThread
-      ? t("composer.submit.startNewThread")
-      : hasSession
-        ? t("composer.submit.sendTurn")
-        : t("composer.submit.startThread");
+  // P2-3 / P2-5：发送按钮文案与 disabled 原因（纯结算，见 lib/composer）。
+  const { label: submitButtonLabel, title: submitButtonTitle } =
+    resolveComposerSubmitCopy(
+      {
+        hasSession,
+        isNewThread,
+        isResponding,
+        draftEmpty: !draft.trim(),
+        unsettledAttachmentCount: attachments.unsettledCount,
+      },
+      t,
+    );
+  const submitDisabled =
+    !isResponding && (!draft.trim() || attachments.unsettledCount > 0);
+  const submitDisabledHintId = useId();
+  const submitDisabledHint =
+    attachments.unsettledCount > 0
+      ? t("composer.submit.disabledAttachments")
+      : t("composer.submit.disabledEmpty");
   const showModelPicker = modelOptions.length > 0;
   const runtimeModelStatusLabel = runtimeModelsLoading
     ? t("composer.loadingModels")
@@ -174,6 +135,7 @@ export function MessageComposer({
     ...(onMenuStateChange ? { onMenuStateChange } : {}),
     onCommand,
   });
+  useComposerMenuArbitration(menu, menuSurface);
 
   const commandNoticeText = menu.notice
     ? menu.notice.kind === "unknown-command"
@@ -270,7 +232,12 @@ export function MessageComposer({
   }
 
   return (
-    <div className="relative rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[var(--shadow-lv1)]">
+    <div
+      className={cn(
+        "relative isolate rounded-panel-lg border border-border [background:var(--surface-popover)] shadow-[var(--shadow-lv1)]",
+        menu.open ? "z-50" : null,
+      )}
+    >
       <ComposerStatusRow
         hasCommandNotice={menu.notice !== null}
         isCommandLine={menu.commandLine}
@@ -357,61 +324,73 @@ export function MessageComposer({
             event.target.value = "";
           }}
         />
-        <textarea
-          ref={textareaRef}
-          value={draft}
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={menu.open}
-          aria-controls={menu.open ? menu.listboxId : undefined}
-          aria-activedescendant={menu.activeDescendantId ?? undefined}
-          data-composer-command-line={menu.commandLine ? "true" : undefined}
-          onChange={(event) => {
-            const next = event.target.value;
-            menu.handleValueChange(next, event.target.selectionStart ?? next.length);
-          }}
-          onSelect={(event) => {
-            menu.handleCaretChange(event.currentTarget.selectionStart ?? 0);
-          }}
-          onBlur={() => menu.close()}
-          onPaste={(event) => {
-            const files = event.clipboardData?.files;
-            if (files && files.length > 0) {
-              event.preventDefault();
-              attachments.addFiles(files);
-            }
-          }}
-          onKeyDown={(event) => {
-            // 菜单打开时键盘所有权归菜单（Esc/↑/↓/Tab/Enter），否则走原生编辑行为。
-            if (menu.handleKeyDown(event)) {
-              return;
-            }
-            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-              event.preventDefault();
-              if (isResponding) {
-                handleStop();
+        <div className="relative">
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={menu.open}
+            aria-controls={menu.open ? menu.listboxId : undefined}
+            aria-activedescendant={menu.activeDescendantId ?? undefined}
+            data-composer-command-line={menu.commandLine ? "true" : undefined}
+            onChange={(event) => {
+              const next = event.target.value;
+              menu.handleValueChange(next, event.target.selectionStart ?? next.length);
+            }}
+            onSelect={(event) => {
+              menu.handleCaretChange(event.currentTarget.selectionStart ?? 0);
+            }}
+            onBlur={() => menu.close()}
+            onPaste={(event) => {
+              const files = event.clipboardData?.files;
+              if (files && files.length > 0) {
+                event.preventDefault();
+                attachments.addFiles(files);
+              }
+            }}
+            onKeyDown={(event) => {
+              // 菜单打开时键盘所有权归菜单（Esc/↑/↓/Tab/Enter），否则走原生编辑行为。
+              if (menu.handleKeyDown(event)) {
                 return;
               }
-              handleSubmit();
-            }
-          }}
-          placeholder={placeholder}
-          className={cn(
-            "app-chat-input w-full resize-none bg-transparent text-foreground outline-none",
-            isNewThread
-              ? "min-h-[7rem] px-3.5 py-3.5"
-              : isCompact
-                ? "min-h-[4.25rem] px-3 py-2.5"
-                : "min-h-[5rem] px-3.5 py-3",
-          )}
-        />
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                event.preventDefault();
+                if (isResponding) {
+                  handleStop();
+                  return;
+                }
+                handleSubmit();
+              }
+            }}
+            placeholder={placeholder}
+            className={cn(
+              "app-chat-input block w-full min-w-0 max-w-none resize-none bg-transparent text-foreground outline-none",
+              isNewThread
+                ? "min-h-[7rem] px-3.5 py-3.5 placeholder:text-transparent"
+                : isCompact
+                  ? "min-h-[4.25rem] px-3 py-2.5"
+                  : "min-h-[5rem] px-3.5 py-3",
+            )}
+          />
+          {isNewThread && draft.length === 0 ? (
+            <span
+              aria-hidden="true"
+              data-composer-centered-placeholder
+              className="app-chat-input pointer-events-none absolute inset-0 flex items-center px-3.5 py-3.5 text-muted-foreground"
+            >
+              {placeholder}
+            </span>
+          ) : null}
+        </div>
         <div
           className={cn(
-            "flex items-center justify-between gap-2 border-t border-border px-3",
+            "flex flex-wrap items-center justify-between gap-2 border-t border-border px-3",
             isCompact ? "py-1.5" : "py-2",
           )}
+          data-composer-toolbar
         >
-          <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
+          <div className="min-w-0 flex flex-[1_1_32rem] flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
             <button
               type="button"
               data-composer-menu-trigger
@@ -424,83 +403,109 @@ export function MessageComposer({
                   menu.close();
                   return;
                 }
+                menuSurface.openSelf();
                 menu.openFromButton();
               }}
-              className="inline-flex shrink-0 items-center rounded-[0.6rem] border border-border bg-surface-soft px-2 py-1 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+              className="inline-flex h-8 min-w-8 shrink-0 items-center justify-center rounded-field border border-border bg-surface-soft px-2 py-0 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground active:scale-[0.98] active:bg-surface-soft-hover"
             >
               <PlusIcon size={14} aria-hidden="true" />
               <span className="sr-only">
                 {t("composer.menu.trigger")}
               </span>
             </button>
-            <ComposerModelPanel
-              disabled={runtimeModelsLoading || isResponding}
-              disabledReason={
-                isResponding
-                  ? t("composer.modelPanel.lockedWhileResponding")
-                  : t("composer.loadingModels")
-              }
-              modelOptions={modelOptions}
-              onModelChange={onModelChange}
-              onProviderChange={onProviderChange}
-              onReasoningEffortChange={onReasoningEffortChange}
-              providerOptions={providerOptions}
-              reasoningEffortDefault={reasoningEffortDefault}
-              reasoningEffortOptions={reasoningEffortOptions}
-              selectedModel={selectedModel}
-              selectedProvider={selectedProvider}
-              selectedReasoningEffort={selectedReasoningEffort}
-            />
-            {permissionModeControl}
+            <div className="min-w-0 w-full max-w-[min(100%,28rem)] flex-[1_1_18rem]">
+              <ComposerModelPanel
+                disabled={runtimeModelsLoading || isResponding}
+                disabledReason={
+                  isResponding
+                    ? t("composer.modelPanel.lockedWhileResponding")
+                    : t("composer.loadingModels")
+                }
+                modelOptions={modelOptions}
+                onModelChange={onModelChange}
+                onProviderChange={onProviderChange}
+                onReasoningEffortChange={onReasoningEffortChange}
+                providerOptions={providerOptions}
+                reasoningEffortDefault={reasoningEffortDefault}
+                reasoningEffortOptions={reasoningEffortOptions}
+                selectedModel={selectedModel}
+                selectedProvider={selectedProvider}
+                selectedReasoningEffort={selectedReasoningEffort}
+              />
+            </div>
+            {permissionModeControl ? (
+              <div className="min-w-0 flex-[0_1_10rem]">{permissionModeControl}</div>
+            ) : null}
             {runtimeModelStatusLabel ? (
-              <span className="truncate">{runtimeModelStatusLabel}</span>
+              <span className="min-w-0 max-w-[14rem] truncate">{runtimeModelStatusLabel}</span>
             ) : null}
             {runtimeModelsError ? (
               <>
                 <span className="size-1 shrink-0 rounded-full bg-accent-gold/40" />
-                <span className="truncate text-accent-gold">{runtimeModelsError}</span>
+                <span className="min-w-0 max-w-[14rem] truncate text-accent-gold">
+                  {runtimeModelsError}
+                </span>
               </>
             ) : null}
             {reasoningEffortError ? (
               <>
                 <span className="size-1 shrink-0 rounded-full bg-accent-gold/40" />
-                <span className="truncate text-accent-gold">
+                <span className="min-w-0 max-w-[14rem] truncate text-accent-gold">
                   {reasoningEffortError}
                 </span>
               </>
             ) : null}
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {profileControl}
-            {contextUsageControl}
+          <div
+            className="flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-2"
+            data-composer-trailing-actions
+          >
+            {profileControl ? (
+              <div className="min-w-0 flex-[0_1_10rem]">{profileControl}</div>
+            ) : null}
+            {contextUsageControl ? (
+              <div className="min-w-0 flex-[0_1_auto]">{contextUsageControl}</div>
+            ) : null}
             <Button
               variant="secondary"
               size="icon"
               aria-label={submitButtonLabel}
-              title={`${submitButtonLabel} (${t("composer.shortcuts")})`}
+              aria-describedby={submitDisabled ? submitDisabledHintId : undefined}
+              title={submitButtonTitle}
               className={
                 isResponding
                   ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
-                  : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
+                  : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover disabled:border-2 disabled:border-dashed disabled:border-border-strong disabled:bg-surface-soft-hover disabled:text-foreground disabled:opacity-100"
               }
               onClick={isResponding ? handleStop : handleSubmit}
-              disabled={
-                isResponding ? false : !draft.trim() || attachments.unsettledCount > 0
-              }
+              disabled={submitDisabled}
             >
-              {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}
+              {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={16} strokeWidth={2.5} />}
               <span className="sr-only">{submitButtonLabel}</span>
             </Button>
+            {submitDisabled ? (
+              <span id={submitDisabledHintId} className="sr-only">
+                {submitDisabledHint}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
       {menu.open ? (
-        <ComposerMenu
-          activeId={menu.activeId}
-          onHover={menu.hoverItem}
-          onSelect={menu.selectItem}
-          snapshot={menu.snapshot}
-        />
+        <>
+          <div
+            aria-hidden="true"
+            data-composer-menu-scrim
+            onMouseDown={menu.close}
+            className="pointer-events-auto fixed inset-0 z-30 [background:var(--composer-menu-scrim)]"
+          />
+          <ComposerMenu
+            activeId={menu.activeId}
+            onHover={menu.hoverItem}
+            onSelect={menu.selectItem}
+            snapshot={menu.snapshot}
+          />
+        </>
       ) : null}
       <ComposerDropInvitation visible={attachments.isDragOver} />
     </div>

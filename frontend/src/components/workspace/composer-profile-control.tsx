@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { SessionProfileSwitchReport } from "@/api/runtime/profiles";
+import { useComposerSurface } from "@/components/workspace/composer-surface-store";
 import { Select } from "@/components/ui/select";
 import { composerProfileCandidates } from "@/lib/composer-profile-options";
 import type { RuntimeProfileListResponse } from "@/types/runtime";
@@ -45,6 +46,7 @@ export function ComposerProfileControl({
   onSwitch,
 }: ComposerProfileControlProps) {
   const { t } = useTranslation("workspace");
+  const surface = useComposerSurface("profile");
   // 候选 / 能力广告 / 加载态都派生自同一份目录，不另设第二数据源。
   const candidates = useMemo(() => composerProfileCandidates(catalog), [catalog]);
   const switchSupported = catalog?.sessionSwitch === true;
@@ -144,13 +146,21 @@ export function ComposerProfileControl({
   };
 
   return (
-    <label
-      className="inline-flex items-center gap-1.5"
+    <div
+      className="flex min-w-0 shrink items-center gap-1.5"
       title={t("composer.profile.controlTitle")}
     >
-      <span>{t("composer.profile.controlLabel")}</span>
       <Select
+        className="min-w-0 shrink"
         ariaLabel={t("composer.profile.controlLabel")}
+        open={surface.open}
+        onOpenChange={(next) => {
+          if (next) {
+            surface.openSelf();
+          } else {
+            surface.closeSelf();
+          }
+        }}
         value={currentRef}
         onChange={handleSelect}
         options={options}
@@ -158,7 +168,9 @@ export function ComposerProfileControl({
         placeholder={t("composer.profile.unbound")}
         side="top"
         align="end"
-        triggerClassName="min-w-[7rem] max-w-[13rem] rounded-[0.6rem] px-2 py-1 text-base leading-none normal-case tracking-normal"
+        size="sm"
+        triggerPrefix={t("composer.profile.controlLabel")}
+        triggerClassName="h-8 w-[clamp(7rem,12vw,9rem)] min-w-0 max-w-full rounded-field px-2 py-0 text-sm leading-none normal-case tracking-normal"
         menuClassName="max-w-[16rem]"
         optionClassName="text-base"
       />
@@ -190,6 +202,6 @@ export function ComposerProfileControl({
           {t("composer.profile.unsupported")}
         </span>
       ) : null}
-    </label>
+    </div>
   );
 }

@@ -19,6 +19,9 @@ type SessionInteractionDockProps = {
   onPlanDecision?: (decision: Exclude<RuntimeSessionPlanModeExitDecision, "">) => void;
   onPlanNotesChange?: (value: string) => void;
   onResolveApproval?: (requestId: string, allow: boolean) => void;
+  /** P1-4：危险权限模式常驻警示（会话内可关闭）。 */
+  permissionDanger?: boolean;
+  onDismissPermissionWarning?: () => void;
   /** §6.8 托管挂起：挂起快照 + 任务投影（见 SessionModeBanner 的落点说明）。 */
   parkedTurn?: ParkedTurnView | null;
   plan: RuntimeSessionPlanMode | null;
@@ -34,6 +37,8 @@ export function SessionInteractionDock({
   onPlanDecision,
   onPlanNotesChange,
   onResolveApproval,
+  permissionDanger = false,
+  onDismissPermissionWarning,
   parkedTurn,
   plan,
   planActionPending,
@@ -42,22 +47,26 @@ export function SessionInteractionDock({
   sessionId,
 }: SessionInteractionDockProps) {
   return (
-    <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
+    <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-composer)]">
       <SessionModeBanner
+        onDismissPermissionWarning={onDismissPermissionWarning}
         parkedTurn={parkedTurn ?? null}
+        permissionDanger={permissionDanger}
         plan={plan}
         planStatusLabel={planStatusLabel}
         sessionId={sessionId}
       />
-      <PendingInteractionBar
-        interaction={interaction}
-        onAnswerQuestion={(questionId, answer) => onAnswerQuestion?.(questionId, answer)}
-        onPlanDecision={onPlanDecision}
-        onPlanNotesChange={onPlanNotesChange}
-        onResolveApproval={(requestId, allow) => onResolveApproval?.(requestId, allow)}
-        planActionPending={planActionPending}
-        planNotesDraft={planNotesDraft}
-      />
+      <div className="mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
+        <PendingInteractionBar
+          interaction={interaction}
+          onAnswerQuestion={(questionId, answer) => onAnswerQuestion?.(questionId, answer)}
+          onPlanDecision={onPlanDecision}
+          onPlanNotesChange={onPlanNotesChange}
+          onResolveApproval={(requestId, allow) => onResolveApproval?.(requestId, allow)}
+          planActionPending={planActionPending}
+          planNotesDraft={planNotesDraft}
+        />
+      </div>
     </div>
   );
 }

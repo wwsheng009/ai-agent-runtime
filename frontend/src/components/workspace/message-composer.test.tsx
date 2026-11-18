@@ -111,13 +111,25 @@ describe("MessageComposer", () => {
     expect(container.textContent).not.toContain("Ctrl/Cmd + Enter");
 
     const textarea = container.querySelector("textarea");
+    const toolbar = container.querySelector("[data-composer-toolbar]");
+    const card = container.firstElementChild;
     const submitButton = container.querySelector(
-      'button[aria-label="开始新线程"]',
+      'button[aria-label="开始对话"]',
     ) as HTMLButtonElement | null;
 
     expect(textarea?.className).toContain("min-h-[7rem]");
+    expect(textarea?.className).toContain("max-w-none");
+    expect(textarea?.className).not.toContain("caret-transparent");
+    expect(toolbar?.className).toContain("flex-wrap");
+    expect(toolbar?.className).not.toContain("xl:flex-nowrap");
+    expect(card?.className).toContain("[background:var(--surface-popover)]");
     expect(submitButton?.disabled).toBe(true);
     expect(submitButton?.title).toContain("Ctrl/Cmd + Enter");
+    const describedBy = submitButton?.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy ?? "")?.textContent).toContain(
+      "请输入内容后再发送",
+    );
   });
 
   it("shows only changing status and preserves submit and stop actions", () => {
@@ -136,7 +148,7 @@ describe("MessageComposer", () => {
     expect(container.textContent).toContain("catalog offline");
 
     const submitButton = container.querySelector(
-      'button[aria-label="开始新线程"]',
+      'button[aria-label="开始对话"]',
     );
     act(() => {
       submitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -172,7 +184,7 @@ describe("MessageComposer", () => {
     });
 
     const submitButton = container.querySelector(
-      'button[aria-label="发送回合"]',
+      'button[aria-label="发送"]',
     );
     expect(submitButton).not.toBeNull();
     act(() => {
@@ -202,7 +214,7 @@ describe("MessageComposer", () => {
     });
     act(() => {
       container
-        .querySelector('button[aria-label="发送回合"]')
+        .querySelector('button[aria-label="发送"]')
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(
@@ -221,7 +233,14 @@ describe("MessageComposer", () => {
       "[data-composer-model-panel-trigger]",
     ) as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain("模型");
     expect(trigger?.textContent).toContain(
+      "model-a · 默认（medium） · provider-a",
+    );
+    expect(
+      trigger?.querySelector("[data-composer-model-reasoning]")?.className,
+    ).toContain("shrink-0");
+    expect(trigger?.getAttribute("aria-label")).toContain(
       "provider-a · model-a · 默认（medium）",
     );
     expect(trigger?.disabled).toBe(false);
@@ -352,7 +371,7 @@ describe("MessageComposer", () => {
 
     act(() => textarea.blur());
     const submitButton = container.querySelector(
-      'button[aria-label="开始新线程"]',
+      'button[aria-label="开始对话"]',
     );
     act(() => {
       submitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -438,7 +457,7 @@ describe("MessageComposer", () => {
     expect(container.textContent).toContain("1 个附件未上传完成");
 
     const submitButton = container.querySelector(
-      'button[aria-label="开始新线程"]',
+      'button[aria-label="开始对话"]',
     ) as HTMLButtonElement | null;
     expect(submitButton?.disabled).toBe(true);
     act(() => {
@@ -517,7 +536,7 @@ describe("MessageComposer", () => {
     });
     act(() => {
       container
-        .querySelector('button[aria-label="发送回合"]')
+        .querySelector('button[aria-label="发送"]')
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onSubmit).toHaveBeenCalledWith({ images: ["/srv/uploads/shot.png"] });
