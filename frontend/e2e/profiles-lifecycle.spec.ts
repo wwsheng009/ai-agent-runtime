@@ -9,7 +9,7 @@
 //   * 导入绝不自动激活（D28）：成功文案明示「not activated」，且 `default_profile` 不变；
 //   * 「使用」= 会话内 builtin 命令 `/profile <ref>`（设置页 apply 无会话上下文，A12）。
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
 import { resetMockState, seedProfiles, seedSession } from "./support";
@@ -27,13 +27,50 @@ const composer = (page: Page) => page.locator(".app-chat-input");
 const commandNotice = (page: Page) => page.locator("[data-composer-command-result]");
 const dialog = (page: Page) => page.getByRole("dialog");
 
+async function expectCenteredDialog(panel: Locator): Promise<void> {
+  await expect(panel).toHaveAttribute("aria-modal", "true");
+  const title = panel.locator("h2");
+  await expect(title).toBeVisible();
+  const titleId = await title.getAttribute("id");
+  expect(titleId).toBeTruthy();
+  await expect(panel).toHaveAttribute("aria-labelledby", titleId!);
+  await expect(panel).toHaveAccessibleName((await title.innerText()).trim());
+  const geometry = await panel.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const overlay = element.parentElement;
+    return {
+      centerX: rect.x + rect.width / 2,
+      centerY: rect.y + rect.height / 2,
+      height: rect.height,
+      overlayPosition: overlay ? getComputedStyle(overlay).position : "",
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      width: rect.width,
+    };
+  });
+  expect(geometry.overlayPosition).toBe("fixed");
+  expect(geometry.width).toBeGreaterThan(0);
+  expect(geometry.height).toBeGreaterThan(0);
+  expect(Math.abs(geometry.centerX - geometry.viewportWidth / 2)).toBeLessThan(2);
+  expect(Math.abs(geometry.centerY - geometry.viewportHeight / 2)).toBeLessThan(2);
+}
+
 /** 设置页 → Profiles 模式（模式入口是按钮列表；URL 上没有 mode 参数）。 */
 async function openProfilesMode(page: Page): Promise<void> {
-  await page.goto("/runtime/config");
-  // 标题与导航项同名，按 role 取 h1，避免 strict mode 撞名。
-  await expect(
-    page.getByRole("heading", { name: "Backend config workspace" }),
-  ).toBeVisible({ timeout: 30_000 });
+  // Load the SPA at a one-segment URL first: Vite's relative asset base makes
+  // direct deep-link document loads resolve assets under /runtime/.
+  await page.goto("/workspace");
+  // Runtime is intentionally inside the topbar's More menu on the workspace
+  // screen; the link is not mounted until that menu is opened.
+  await page.getByTestId("topbar-more-trigger").click();
+  const runtimeEntry = page.locator('a[href="/runtime/config"]').first();
+  await expect(runtimeEntry).toBeVisible({ timeout: 30_000 });
+  await runtimeEntry.click();
+  await expect(page).toHaveURL((url) => url.pathname === "/runtime/config");
+  // Wait for the real mode control; the runtime shell has no duplicate h1.
+  await expect(page.getByRole("button", { name: "Profiles" })).toBeVisible({
+    timeout: 30_000,
+  });
   await page.getByRole("button", { name: "Profiles" }).click();
   await expect(page.getByTestId("profiles-list")).toBeVisible();
 }
@@ -47,8 +84,18 @@ function isRefRequest(url: string, ref: string): boolean {
 }
 
 /** 会话内 `/profile <ref>` 切换：命令行提交走 Ctrl+Enter（纯 Enter 归候选菜单）。 */
-async function switchProfileInSession(page: Page, ref: string): Promise<void> {
-  await page.goto(`/workspace/chats/${SESSION_ID}`);
+async function switchProfileInSession(
+  page: Page,
+  ref: string,
+  sessionTitle: string,
+): Promise<void> {
+  // Nested routes use relative assets in the preview build; enter at the
+  // workspace route and select the seeded session through the SPA instead.
+  await page.goto("/workspace");
+  const sessionRow = page.getByRole("treeitem").filter({ hasText: sessionTitle });
+  await expect(sessionRow).toBeVisible({ timeout: 30_000 });
+  await sessionRow.getByRole("button", { name: sessionTitle, exact: true }).click();
+  await expect(page).toHaveURL((url) => url.pathname === `/workspace/sessions/${SESSION_ID}`);
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
   await composer(page).fill(`/profile ${ref}`);
   const pending = page.waitForRequest(
@@ -81,11 +128,21 @@ test("E2E-5: 删除被 default_profile 引用的 profile：先阻止，强制后
 
   const deleteAction = page.getByTestId(`profiles-action-delete-${DEFAULTED_REF}`);
   await expect(deleteAction).toBeVisible();
+  await deleteAction.focus();
   await deleteAction.click();
 
   const panel = dialog(page);
   const confirm = page.getByTestId("profiles-dialog-confirm");
   await expect(panel).toContainText("Delete profile");
+  await expectCenteredDialog(panel);
+  await expect(panel.getByRole("button").first()).toBeFocused();
+
+  // Verify Escape dismissal and focus restoration before exercising deletion.
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(deleteAction).toBeFocused();
+  await deleteAction.click();
+  await expect(panel).toBeVisible();
 
   // 第一次删除不带 force：后端 409（仍被 default_profile 引用）→ 对话框留下、确认禁用。
   const firstDelete = page.waitForRequest(
@@ -147,6 +204,7 @@ test("E2E-4: 导出 → 导入（先预演后落盘、不自动激活）→ 会�
   await page.getByTestId("profiles-import-open").click();
   const panel = dialog(page);
   await expect(panel).toContainText("Import a profile bundle");
+  await expectCenteredDialog(panel);
   const confirm = page.getByTestId("profiles-dialog-confirm");
   const preview = page.getByTestId("profiles-import-preview");
   await expect(preview).toBeDisabled();
@@ -177,5 +235,5 @@ test("E2E-4: 导出 → 导入（先预演后落盘、不自动激活）→ 会�
   expect(imported?.is_default ?? false).toBe(false);
 
   // 使用：导入后 validate 通过，会话内可切换（切换回执即生效面）。
-  await switchProfileInSession(page, imported!.ref);
+  await switchProfileInSession(page, imported!.ref, "profile lifecycle");
 });

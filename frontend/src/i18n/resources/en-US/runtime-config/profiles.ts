@@ -101,6 +101,7 @@ export const enRuntimeConfigProfiles = {
     changeCount: "{{count}} changes",
     noChanges: "No changes",
     dirtyHint: "There are unsaved changes; save or discard before closing.",
+    closeConfirm: "Discard unsaved changes and close this editor?",
     discard: "Discard changes",
     savedAt: "Last saved: {{time}}",
     conflict: "This profile was modified by another process; reload before saving again.",

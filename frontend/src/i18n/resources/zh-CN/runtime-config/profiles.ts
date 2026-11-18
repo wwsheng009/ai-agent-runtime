@@ -101,6 +101,7 @@ export const zhRuntimeConfigProfiles = {
     changeCount: "{{count}} 处改动",
     noChanges: "无改动",
     dirtyHint: "存在未保存改动，关闭前请先保存或放弃。",
+    closeConfirm: "仍有未保存改动。放弃改动并关闭编辑器吗？",
     discard: "放弃改动",
     savedAt: "最近一次保存：{{time}}",
     conflict: "该 profile 已被其他进程修改，请重新加载后再保存。",

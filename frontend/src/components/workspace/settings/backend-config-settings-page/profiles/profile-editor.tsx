@@ -1,4 +1,4 @@
-// Profiles 9 卡片编辑器（内联面板）：草稿 / 校验 / 预览 / 保存 / 冲突的唯一状态机。
+// Profiles 9 卡片编辑器（弹出面板）：草稿 / 校验 / 预览 / 保存 / 冲突的唯一状态机。
 //
 // 分工纪律：
 //   * 卡片层无状态，只消费 ProfileCardContext；
@@ -12,12 +12,10 @@ import {
   FileTextIcon,
   InfoIcon,
   LayersIcon,
-  RefreshCcwIcon,
   ServerIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   WrenchIcon,
-  XIcon,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -43,6 +41,7 @@ import { ProfileAgentsCard, ProfilePromptsCard } from "./profile-card-agent";
 import { ProfileBasicsCard, ProfilePreferencesCard } from "./profile-card-basic";
 import { ProfileOverridesCard, ProfileValidationCard } from "./profile-card-overrides";
 import { ProfileMcpCard, ProfileSkillsCard, ProfileToolsCard } from "./profile-card-scope";
+import { ProfileEditorDialog } from "./profile-editor-dialog";
 import {
   profileCardForIssuePath,
   profileCardIds,
@@ -304,6 +303,16 @@ export function ProfileEditor({ onClose, onSaved, view }: ProfileEditorProps) {
     setError(null);
   }, [applyDraft, view]);
 
+  const closeEditor = useCallback(() => {
+    if (busy) {
+      return;
+    }
+    if (isDirty && !window.confirm(t("profiles.editor.closeConfirm"))) {
+      return;
+    }
+    onClose();
+  }, [busy, isDirty, onClose, t]);
+
   const ctx: ProfileCardContext = {
     addOverride,
     changes,
@@ -324,73 +333,73 @@ export function ProfileEditor({ onClose, onSaved, view }: ProfileEditorProps) {
     report,
   };
 
-  return (
-    <div
-      className="rounded-panel border border-border bg-surface-softer p-3"
-      data-profile-editor={view.ref}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex size-6 items-center justify-center rounded-field border border-border bg-surface-solid text-accent-primary">
-              <InfoIcon size={13} />
-            </span>
-            <div className="text-base font-semibold text-foreground">
-              {t("profiles.editor.title", { name: draft.name || view.name })}
-            </div>
-            <Badge className={cn("normal-case", isDirty ? "text-accent-orange" : undefined)}>
-              {isDirty
-                ? t("profiles.editor.changeCount", { count: changes.length })
-                : t("profiles.editor.noChanges")}
-            </Badge>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            disabled={busy}
-            size="sm"
-            type="button"
-            variant="secondary"
-            onClick={() => {
-              void reload();
-            }}
-          >
-            <RefreshCcwIcon size={14} />
-            {t("profiles.editor.reload")}
-          </Button>
-          <Button
-            disabled={busy}
-            size="sm"
-            type="button"
-            variant="ghost"
-            onClick={onClose}
-          >
-            <XIcon size={14} />
-            {t("profiles.editor.close")}
-          </Button>
-        </div>
-      </div>
+  const title = t("profiles.editor.title", { name: draft.name || view.name });
 
+  return (
+    <ProfileEditorDialog
+      changeCount={changes.length}
+      dirty={isDirty}
+      footer={
+        <>
+          <div className="text-xs leading-5 text-muted-foreground">
+            {t("profiles.editor.issueCount", {
+              errorCount: String(issues.length),
+              warningCount: String(
+                report?.issues.filter((issue) => issue.severity === "warning").length ?? 0,
+              ),
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              disabled={busy || !isDirty}
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={discard}
+            >
+              {t("profiles.editor.discard")}
+            </Button>
+            <Button
+              disabled={busy}
+              size="sm"
+              type="button"
+              onClick={() => {
+                void save();
+              }}
+            >
+              {isSaving ? t("profiles.editor.saving") : t("profiles.editor.save")}
+            </Button>
+          </div>
+        </>
+      }
+      isBusy={busy}
+      onClose={closeEditor}
+      onReload={() => {
+        void reload();
+      }}
+      profileRef={view.ref}
+      title={title}
+    >
       {statusMessage ? (
-        <SettingsNoticeCard className="mt-3" tone="neutral">
+        <SettingsNoticeCard className="mt-0" tone="neutral">
           <span role="status">{statusMessage}</span>
         </SettingsNoticeCard>
       ) : null}
-
       {error ? (
-        <SettingsNoticeCard className="mt-3" tone="warning">
+        <SettingsNoticeCard className="mt-0" tone="warning">
           <span role="alert">{error}</span>
         </SettingsNoticeCard>
       ) : null}
-
       {isDirty ? (
-        <div className="mt-3 text-xs leading-5 text-accent-orange">
+        <div className="text-xs leading-5 text-accent-orange">
           {t("profiles.editor.dirtyHint")}
         </div>
       ) : null}
-
-      <div className="mt-3 grid gap-3 lg:grid-cols-[208px_minmax(0,1fr)]">
-        <nav className="flex min-w-0 flex-wrap gap-1.5 lg:flex-col lg:flex-nowrap" aria-label={t("profiles.editor.nav")}>
+      <div className="grid gap-3 lg:grid-cols-[208px_minmax(0,1fr)]">
+        <nav
+          className="flex min-w-0 flex-wrap gap-1.5 lg:flex-col lg:flex-nowrap"
+          aria-label={t("profiles.editor.nav")}
+        >
           {profileCardIds.map((card) => {
             const meta = PROFILE_CARD_META[card];
             const Icon = meta.icon;
@@ -423,7 +432,6 @@ export function ProfileEditor({ onClose, onSaved, view }: ProfileEditorProps) {
             );
           })}
         </nav>
-
         <div className="min-w-0 rounded-card border border-border bg-surface-solid p-3">
           {renderProfileCard(activeCard, ctx, validationState, {
             onPreview: () => {
@@ -435,39 +443,7 @@ export function ProfileEditor({ onClose, onSaved, view }: ProfileEditorProps) {
           })}
         </div>
       </div>
-
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-        <div className="text-xs leading-5 text-muted-foreground">
-          {t("profiles.editor.issueCount", {
-            errorCount: String(issues.length),
-            warningCount: String(
-              report?.issues.filter((issue) => issue.severity === "warning").length ?? 0,
-            ),
-          })}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            disabled={busy || !isDirty}
-            size="sm"
-            type="button"
-            variant="ghost"
-            onClick={discard}
-          >
-            {t("profiles.editor.discard")}
-          </Button>
-          <Button
-            disabled={busy}
-            size="sm"
-            type="button"
-            onClick={() => {
-              void save();
-            }}
-          >
-            {isSaving ? t("profiles.editor.saving") : t("profiles.editor.save")}
-          </Button>
-        </div>
-      </div>
-    </div>
+    </ProfileEditorDialog>
   );
 }
 

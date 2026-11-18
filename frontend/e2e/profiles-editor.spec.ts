@@ -11,7 +11,7 @@
 //
 // 断言只依赖 `data-*` 稳定钩子、testid 与下载事件，不绑定内部 DOM 结构。
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
 import { resetMockState, seedProfiles, seedSession } from "./support";
@@ -31,13 +31,51 @@ const editorNav = (page: Page) => editor(page).locator("nav button");
 const toolsCard = (page: Page) => editorNav(page).nth(1);
 const validationCard = (page: Page) => editorNav(page).nth(8);
 
+async function expectCenteredDialog(panel: Locator): Promise<void> {
+  await expect(panel).toHaveAttribute("aria-modal", "true");
+  const title = panel.locator("h2");
+  await expect(title).toBeVisible();
+  const titleId = await title.getAttribute("id");
+  expect(titleId).toBeTruthy();
+  await expect(panel).toHaveAttribute("aria-labelledby", titleId!);
+  await expect(panel).toHaveAccessibleName((await title.innerText()).trim());
+  const geometry = await panel.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const overlay = element.parentElement;
+    return {
+      centerX: rect.x + rect.width / 2,
+      centerY: rect.y + rect.height / 2,
+      height: rect.height,
+      overlayPosition: overlay ? getComputedStyle(overlay).position : "",
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      width: rect.width,
+    };
+  });
+  expect(geometry.overlayPosition).toBe("fixed");
+  expect(geometry.width).toBeGreaterThan(0);
+  expect(geometry.height).toBeGreaterThan(0);
+  expect(Math.abs(geometry.centerX - geometry.viewportWidth / 2)).toBeLessThan(2);
+  expect(Math.abs(geometry.centerY - geometry.viewportHeight / 2)).toBeLessThan(2);
+}
+
 /** 设置页 → Profiles 模式（模式入口是按钮列表；URL 上没有 mode 参数）。 */
 async function openProfilesMode(page: Page): Promise<void> {
-  await page.goto("/runtime/config");
-  // 标题与导航项同名，按 role 取 h1，避免 strict mode 撞名。
-  await expect(
-    page.getByRole("heading", { name: "Backend config workspace" }),
-  ).toBeVisible({ timeout: 30_000 });
+  // Load the SPA at a one-segment URL first: Vite's relative asset base makes
+  // direct deep-link document loads resolve assets under /runtime/.
+  await page.goto("/workspace");
+  // Runtime is intentionally inside the topbar's More menu on the workspace
+  // screen; the link is not mounted until that menu is opened.
+  await page.getByTestId("topbar-more-trigger").click();
+  const runtimeEntry = page.locator('a[href="/runtime/config"]').first();
+  await expect(runtimeEntry).toBeVisible({ timeout: 30_000 });
+  await runtimeEntry.click();
+  await expect(page).toHaveURL((url) => url.pathname === "/runtime/config");
+  // The page shell exposes the mode menu rather than a duplicate h1 title.
+  // Waiting for the actual mode control also covers the async config load.
+  await expect(page.getByRole("button", { name: "Profiles" })).toBeVisible({
+    timeout: 30_000,
+  });
   await page.getByRole("button", { name: "Profiles" }).click();
   await expect(page.getByTestId("profiles-list")).toBeVisible();
 }
@@ -64,9 +102,21 @@ async function createProfileViaWizard(
   template: string,
   layer = "project",
 ): Promise<void> {
-  await page.getByTestId("profiles-create-open").click();
+  const openTrigger = page.getByTestId("profiles-create-open");
+  await openTrigger.focus();
+  await openTrigger.click();
   const panel = dialog(page);
   await expect(panel).toContainText("New profile");
+  await expectCenteredDialog(panel);
+  await expect(panel.getByRole("button").first()).toBeFocused();
+
+  // Escape closes the modal and returns focus to the control that opened it.
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(openTrigger).toBeFocused();
+  await openTrigger.click();
+  await expect(panel).toBeVisible();
+
   await panel.locator('input[type="text"]').fill(name);
   await page.getByTestId("profiles-create-next").click();
   await pickSelectOption(page, "Template", template);
@@ -83,8 +133,18 @@ async function createProfileViaWizard(
  * 提交口径与 P1-4 一致：命令行有候选菜单时纯 Enter 归菜单所有，命令行走 Ctrl+Enter。
  * 回执面同时钉两件事：请求体是 `set_profile` + 原文 ref（契约），通知条给出成功回执（UI）。
  */
-async function switchProfileInSession(page: Page, ref: string): Promise<void> {
-  await page.goto(`/workspace/chats/${SESSION_ID}`);
+async function switchProfileInSession(
+  page: Page,
+  ref: string,
+  sessionTitle: string,
+): Promise<void> {
+  // Nested routes use relative assets in the preview build; enter at the
+  // workspace route and select the seeded session through the SPA instead.
+  await page.goto("/workspace");
+  const sessionRow = page.getByRole("treeitem").filter({ hasText: sessionTitle });
+  await expect(sessionRow).toBeVisible({ timeout: 30_000 });
+  await sessionRow.getByRole("button", { name: sessionTitle, exact: true }).click();
+  await expect(page).toHaveURL((url) => url.pathname === `/workspace/sessions/${SESSION_ID}`);
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
   await composer(page).fill(`/profile ${ref}`);
   const pending = page.waitForRequest(
@@ -123,6 +183,7 @@ test("E2E-1: 新建向导（模板 review）→ 校验 → 会话内切换", asy
   await editAction.click();
   const root = editor(page);
   await expect(root).toHaveAttribute("data-profile-editor", "project:reviewer-plan");
+  await expectCenteredDialog(root);
   await toolsCard(page).click();
   await expect(root.locator("textarea")).toHaveCount(2);
   await expect(root.locator("textarea").first()).toHaveValue(/read_file/);
@@ -136,7 +197,7 @@ test("E2E-1: 新建向导（模板 review）→ 校验 → 会话内切换", asy
   await expect(page.locator('[data-profile-report="valid"]')).toBeVisible();
 
   // 切换（前端半程的「立即切换」）：会话内 builtin 命令 + 成功回执。
-  await switchProfileInSession(page, "project:reviewer-plan");
+  await switchProfileInSession(page, "project:reviewer-plan", "profile editor");
 });
 
 test("E2E-3: 改 deny 列表 → Preview impact → 保存 → 会话内切换", async ({ page }) => {
@@ -155,9 +216,19 @@ test("E2E-3: 改 deny 列表 → Preview impact → 保存 → 会话内切换",
   });
   await openProfilesMode(page);
 
-  await page.getByTestId("profiles-action-edit-project:coder").click();
+  const editTrigger = page.getByTestId("profiles-action-edit-project:coder");
+  await editTrigger.focus();
+  await editTrigger.click();
   const root = editor(page);
   await expect(root).toHaveAttribute("data-profile-editor", "project:coder");
+  await expectCenteredDialog(root);
+  const focusables = root.locator(
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  );
+  await expect(focusables.first()).toBeFocused();
+  await focusables.last().focus();
+  await page.keyboard.press("Tab");
+  await expect(focusables.first()).toBeFocused();
 
   await toolsCard(page).click();
   const deny = root.locator("textarea").nth(1);
@@ -172,6 +243,24 @@ test("E2E-3: 改 deny 列表 → Preview impact → 保存 → 会话内切换",
   await expect(changedPaths).toBeVisible();
   await expect(changedPaths).toHaveAttribute("data-profile-changes", /^[1-9]\d*$/);
   await expect(changedPaths).toContainText("tools");
+  await expect(page.getByRole("button", { name: "Discard changes" })).toBeEnabled();
+
+  // Escape must not silently discard a dirty draft; cancelling the close
+  // confirmation leaves both the dialog and the edited value intact.
+  await page.evaluate(() => {
+    window.confirm = (message) => {
+      window.sessionStorage.setItem("profile-editor-close-confirm", message);
+      return false;
+    };
+  });
+  await page.keyboard.press("Escape");
+  await expect
+    .poll(() => page.evaluate(() => window.sessionStorage.getItem("profile-editor-close-confirm")))
+    .toBe("Discard unsaved changes and close this editor?");
+  await expect(root).toBeVisible();
+  // 切回草稿所在卡片后确认关闭被取消时内容仍保留；上一张 Validation 卡片不渲染 textarea。
+  await toolsCard(page).click();
+  await expect(deny).toHaveValue("shell\nnetwork");
 
   // 保存：落盘后草稿不再 dirty（Discard changes 只在 dirty 时可用）。
   await page.getByRole("button", { name: "Save profile" }).click();
@@ -190,6 +279,11 @@ test("E2E-3: 改 deny 列表 → Preview impact → 保存 → 会话内切换",
     )
     .toContain("network");
 
+  // Closing from the keyboard must restore focus to the exact edit trigger.
+  await page.keyboard.press("Escape");
+  await expect(root).toHaveCount(0);
+  await expect(editTrigger).toBeFocused();
+
   // 切换后断言生效（前端半程 = 切换回执；下一轮工具面由 server 半程覆盖）。
-  await switchProfileInSession(page, "project:coder");
+  await switchProfileInSession(page, "project:coder", "profile editor");
 });
