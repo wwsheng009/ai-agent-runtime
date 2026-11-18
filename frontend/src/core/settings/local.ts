@@ -6,6 +6,11 @@ import {
   RAIL_WIDTH_MAX_PX,
   type RailWidthMode,
 } from "../../lib/layout/rail-width";
+import {
+  WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX,
+  WORKSPACE_SIDEBAR_WIDTH_MAX_PX,
+  WORKSPACE_SIDEBAR_WIDTH_MIN_PX,
+} from "../../lib/layout/sidebar-width";
 
 export const APP_SETTINGS_STORAGE_KEY = "ai-agent-runtime.workspace.settings";
 
@@ -109,6 +114,8 @@ export interface AppSettings {
     rightRailWidthMode: RailWidthMode;
     /** P0-2：manual 模式的宽度意图（px）；auto 下保留但不用，便于一键切回 manual。 */
     rightRailWidthPx: number;
+    /** 工作区左侧导航栏宽度（px），桌面端拖拽后持久化。 */
+    sidebarWidthPx: number;
   };
   notification: {
     enabled: boolean;
@@ -150,6 +157,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     sessionGrouping: "directory",
     rightRailWidthMode: "auto",
     rightRailWidthPx: RAIL_WIDTH_CONTENT_PX,
+    sidebarWidthPx: WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX,
   },
   notification: {
     enabled: true,
@@ -244,6 +252,18 @@ function normalizeRightRailWidthPx(value: unknown): number {
   );
 }
 
+function normalizeSidebarWidthPx(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_APP_SETTINGS.workspace.sidebarWidthPx;
+  }
+
+  return Math.min(
+    WORKSPACE_SIDEBAR_WIDTH_MAX_PX,
+    Math.max(WORKSPACE_SIDEBAR_WIDTH_MIN_PX, Math.round(parsed)),
+  );
+}
+
 /** 只认两种排序模式，未知值回落到默认（不做隐式映射）。 */
 function normalizeSessionOrderPreference(
   value: unknown,
@@ -334,6 +354,7 @@ export function mergeAppSettings(
       rightRailWidthPx: normalizeRightRailWidthPx(
         value?.workspace?.rightRailWidthPx,
       ),
+      sidebarWidthPx: normalizeSidebarWidthPx(value?.workspace?.sidebarWidthPx),
       sessionOrder: normalizeSessionOrderPreference(
         value?.workspace?.sessionOrder,
       ),

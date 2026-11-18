@@ -22,6 +22,9 @@ export const zhWorkspacePanelsShell = {
     overlayLabel: "右侧栏（覆盖层）",
     overlayClose: "关闭右侧栏",
   },
+  leftSidebar: {
+    resizeHandle: "调整左侧栏宽度",
+  },
   threadStrip: {
     activeThread: "活跃线程",
     updatedAt: "{{time}} 更新",

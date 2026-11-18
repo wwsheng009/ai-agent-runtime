@@ -17,13 +17,16 @@ import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection"
 import { RAIL_GRID_MIN_VIEWPORT_PX } from "@/lib/layout/rail-width";
 import {
   WORKSPACE_SIDEBAR_COLLAPSED_WIDTH,
-  WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
+  WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX,
+  clampWorkspaceSidebarWidth,
+  resolveWorkspaceSidebarWidthMax,
 } from "@/lib/layout/sidebar-width";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceMainSection } from "./workspace-shell/main-section";
 import { WorkspaceOverlaysSection } from "./workspace-shell/overlays-section";
 import { WorkspaceRightRailSection } from "./workspace-shell/right-rail-section";
+import { SidebarResizeHandle } from "./workspace-shell/sidebar-resize-handle";
 import { WorkspaceSidebarSection } from "./workspace-shell/sidebar-section";
 import {
   type WorkspaceShellProps,
@@ -139,7 +142,7 @@ export function WorkspaceShell({
   trajectoryStore = null,
   trajectoryEarlier,
 }: WorkspaceShellProps) {
-  const { settings } = useAppSettings();
+  const { settings, updateSection } = useAppSettings();
   const { t } = useTranslation("workspace");
   const isNewThread = selectedThread.id === NEW_THREAD_ID;
   const isCompact = settings.workspace.density === "compact";
@@ -176,10 +179,15 @@ export function WorkspaceShell({
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   /** 根容器：复用既有 ResizeObserver 监听它，拿到视口宽度的变化时机。 */
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const shellGridRef = useRef<HTMLDivElement | null>(null);
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   /** 桌面（xl+）左栏收起：整列只剩图标；移动抽屉不受影响（见 workspace-sidebar 的 xl 门控）。 */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** 拖拽提交后先保留本地几何，避免设置持久化异步落盘时把 CSS 变量闪回默认值。 */
+  const [sidebarWidthOverride, setSidebarWidthOverride] = useState<number | null>(
+    null,
+  );
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
   /** P0-2：视口宽度（右栏 auto 宽度与 `<xl` 降级判定共用）。 */
@@ -200,6 +208,17 @@ export function WorkspaceShell({
     surface: railSurface,
     viewportWidth: shellViewportWidth,
   });
+  const reservedRightRailWidth =
+    rightRailVisible && !railWidth.overlay ? railWidth.widthPx : 0;
+  const sidebarWidthMaxPx = resolveWorkspaceSidebarWidthMax(
+    shellViewportWidth,
+    reservedRightRailWidth,
+  );
+  const sidebarWidthPx = clampWorkspaceSidebarWidth(
+    sidebarWidthOverride ?? settings.workspace.sidebarWidthPx,
+    shellViewportWidth,
+    reservedRightRailWidth,
+  );
 
   const transportLabel = getThreadTransportLabel(selectedThread, {
     live: t("topbar.threadTransport.live"),
@@ -259,6 +278,17 @@ export function WorkspaceShell({
   }, [isNewThread]);
 
   useEffect(() => {
+    const handleViewportResize = () => {
+      const nextViewportWidth = readViewportWidth();
+      setShellViewportWidth((currentWidth) =>
+        currentWidth === nextViewportWidth ? currentWidth : nextViewportWidth,
+      );
+    };
+    window.addEventListener("resize", handleViewportResize);
+    return () => window.removeEventListener("resize", handleViewportResize);
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
@@ -301,7 +331,7 @@ export function WorkspaceShell({
   const shellGridStyle = {
     "--workspace-sidebar-width": sidebarCollapsed
       ? WORKSPACE_SIDEBAR_COLLAPSED_WIDTH
-      : WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
+      : `${sidebarWidthPx}px`,
     ...(rightRailVisible
       ? { "--right-rail-width": `${railWidth.widthPx}px` }
       : {}),
@@ -314,11 +344,12 @@ export function WorkspaceShell({
     >
       <div
         className={cn(
-          "grid h-full min-h-0 grid-cols-1 gap-0",
+          "relative grid h-full min-h-0 grid-cols-1 gap-0",
           rightRailVisible
             ? "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)_var(--right-rail-width,18rem)]"
             : "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)]",
         )}
+        ref={shellGridRef}
         style={shellGridStyle}
       >
         <WorkspaceSidebarSection
@@ -362,6 +393,26 @@ export function WorkspaceShell({
           workspaceDirectoriesLoading={workspaceDirectoriesLoading}
           workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
         />
+        {!sidebarCollapsed ? (
+          <SidebarResizeHandle
+            containerRef={shellGridRef}
+            label={t("panels.shell.leftSidebar.resizeHandle")}
+            maxWidthPx={sidebarWidthMaxPx}
+            onCommit={(widthPx) => {
+              setSidebarWidthOverride(widthPx);
+              updateSection("workspace", { sidebarWidthPx: widthPx });
+            }}
+            onReset={() => {
+              setSidebarWidthOverride(WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX);
+              updateSection("workspace", {
+                sidebarWidthPx: WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX,
+              });
+            }}
+            reservedRightRailWidth={reservedRightRailWidth}
+            value={sidebarWidthPx}
+            viewportWidth={shellViewportWidth}
+          />
+        ) : null}
         <WorkspaceMainSection
           backtrackError={backtrackError}
           backtrackNavigationActive={backtrackNavigationActive}

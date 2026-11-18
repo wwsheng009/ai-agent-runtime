@@ -23,6 +23,9 @@ export const enWorkspacePanelsShell = {
     overlayLabel: "Right rail (overlay)",
     overlayClose: "Close right rail",
   },
+  leftSidebar: {
+    resizeHandle: "Resize left sidebar",
+  },
   threadStrip: {
     activeThread: "Active thread",
     updatedAt: "{{time}} updated",

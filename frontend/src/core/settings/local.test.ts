@@ -53,6 +53,7 @@ describe("app settings storage helpers", () => {
         },
         workspace: {
           density: "compact",
+          sidebarWidthPx: 400,
         },
         notification: {
           desktop: true,
@@ -85,6 +86,7 @@ describe("app settings storage helpers", () => {
         // P0-2：右栏可变宽度的默认值（auto + 18rem，与改造前的固定列宽一致）。
         rightRailWidthMode: "auto",
         rightRailWidthPx: 288,
+        sidebarWidthPx: 400,
       },
       notification: {
         enabled: true,
@@ -138,6 +140,17 @@ describe("app settings storage helpers", () => {
         maxSteps: 20,
       },
     });
+  });
+
+  it("clamps the persisted sidebar width to its supported range", () => {
+    expect(
+      mergeAppSettings({ workspace: { sidebarWidthPx: 999 } }).workspace
+        .sidebarWidthPx,
+    ).toBe(480);
+    expect(
+      mergeAppSettings({ workspace: { sidebarWidthPx: 100 } }).workspace
+        .sidebarWidthPx,
+    ).toBe(208);
   });
 
   it("round-trips settings through storage", () => {
