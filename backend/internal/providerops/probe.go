@@ -391,6 +391,10 @@ func ProbeMatrix(req ProbeMatrixRequest) []ModelProbeMatrix {
 		ctx = context.Background()
 	}
 	provider := req.Provider
+	// Resolve a key-pool credential once per matrix. Selecting a random key for
+	// every model/protocol request makes one discovery run intermittently mix
+	// valid and stale credentials, which looks like protocol incompatibility.
+	provider.APIKey = APIKey(provider)
 	if req.Config != nil {
 		provider.Headers = config.EffectiveProviderHeaders(req.Config.Providers.Headers, provider.Headers)
 	}

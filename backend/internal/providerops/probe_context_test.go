@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -256,5 +257,52 @@ func TestProbeMatrixNilContextPreservesExistingBehavior(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&requests); got != 12 {
 		t.Fatalf("got %d HTTP requests, want 12 (model duplicates preserved, protocols normalized/deduplicated)", got)
+	}
+}
+
+func TestProbeMatrixPinsOneKeyForTheWholeMatrix(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		keys = make(map[string]struct{})
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimSpace(r.Header.Get("Authorization"))
+		if key != "" {
+			key = strings.TrimSpace(strings.TrimPrefix(key, "Bearer "))
+		}
+		if key == "" {
+			key = strings.TrimSpace(r.Header.Get("x-api-key"))
+		}
+		if key == "" {
+			key = strings.TrimSpace(r.Header.Get("x-goog-api-key"))
+		}
+		mu.Lock()
+		keys[key] = struct{}{}
+		mu.Unlock()
+		_, _ = io.WriteString(w, probeContextSuccessResponse)
+	}))
+	defer server.Close()
+
+	models := make([]string, 32)
+	for i := range models {
+		models[i] = "model-" + string(rune('a'+i))
+	}
+	matrix := ProbeMatrix(ProbeMatrixRequest{
+		Provider:  config.Provider{Protocol: "openai", BaseURL: server.URL, APIKeys: []string{"key-a", "key-b"}},
+		Models:    models,
+		Protocols: []string{"openai", "codex", "anthropic", "gemini"},
+	})
+	if len(matrix) != len(models) {
+		t.Fatalf("got %d models, want %d", len(matrix), len(models))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) != 1 {
+		t.Fatalf("probe matrix used %d distinct API keys; want exactly one: %v", len(keys), keys)
+	}
+	for key := range keys {
+		if key != "key-a" && key != "key-b" {
+			t.Fatalf("probe matrix used unexpected API key %q", key)
+		}
 	}
 }

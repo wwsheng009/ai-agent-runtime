@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
+
+const defaultFetchModelsTimeout = 30 * time.Second
 
 type ModelInfo struct {
 	ID          string `json:"id"`
@@ -69,6 +72,10 @@ func FetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResul
 
 func fetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResult, error) {
 	provider := req.Provider
+	// GetAPIKey may randomly select from a configured key pool. Resolve it once
+	// for this request so the validation check and generated auth header cannot
+	// observe different credentials.
+	provider.APIKey = APIKey(provider)
 	if req.Config != nil {
 		provider.Headers = config.EffectiveProviderHeaders(req.Config.Providers.Headers, provider.Headers)
 	}
@@ -78,11 +85,17 @@ func fetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResul
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(provider.GetAPIKey()) == "" && !strings.EqualFold(provider.AuthMode, "oauth") {
+	if strings.TrimSpace(APIKey(provider)) == "" && !strings.EqualFold(provider.AuthMode, "oauth") {
 		return nil, fmt.Errorf("api key is required for provider models validation")
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = defaultFetchModelsTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create models request: %w", err)
 	}
@@ -99,11 +112,9 @@ func fetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResul
 	if req.Config != nil {
 		client = httpclient.GetHTTPClientWithProvider(req.Config, &provider)
 	}
-	if req.Timeout > 0 {
-		cloned := *client
-		cloned.Timeout = req.Timeout
-		client = &cloned
-	}
+	cloned := *client
+	cloned.Timeout = timeout
+	client = &cloned
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -235,16 +246,45 @@ func buildProviderModelsHeaders(provider config.Provider, loginProtocol string) 
 	})
 }
 
-// APIKey 返回 models 校验请求使用的 API key。
-// 内联配置的 APIKey 字段优先：login 交互中输入的新 key 写入该字段，而
-// api_key_ref 仍指向 auth store 中的旧凭据，若按常规优先读 ref 会用旧 key
-// 校验新输入（httptest 之外的实测表现为 HTTP 401 Invalid access key）。
-// 非 login 路径（运行时/doctor 等）APIKey 字段为空，行为与 GetAPIKey 一致。
+// APIKey 返回 models 校验请求使用的单个 API key。内联 APIKey 优先于
+// api_key_ref（login 交互中输入的新 key 不能被旧 ref 覆盖）；多 key 池随机
+// 选择一个非空 key，避免把逗号分隔列表或空池条目直接用于鉴权。
 func APIKey(provider config.Provider) string {
-	if strings.TrimSpace(provider.APIKey) != "" {
-		return strings.TrimSpace(provider.APIKey)
+	// An explicitly supplied inline key wins over an auth-store reference
+	// (notably during login). The config format also permits comma-separated
+	// inline keys; do not send that whole list as one Authorization value.
+	if inline := strings.TrimSpace(provider.APIKey); inline != "" {
+		keys := splitProviderAPIKeys(inline)
+		return chooseProviderAPIKey(keys)
 	}
-	return provider.GetAPIKey()
+	// GetAllAPIKeys preserves reference precedence but may include empty entries
+	// in a configured pool. Filter them before random selection so a blank pool
+	// slot cannot make /models and protocol probes fail intermittently.
+	return chooseProviderAPIKey(provider.GetAllAPIKeys())
+}
+
+func splitProviderAPIKeys(value string) []string {
+	parts := strings.Split(value, ",")
+	keys := make([]string, 0, len(parts))
+	for _, key := range parts {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func chooseProviderAPIKey(keys []string) string {
+	usable := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key = strings.TrimSpace(key); key != "" {
+			usable = append(usable, key)
+		}
+	}
+	if len(usable) == 0 {
+		return ""
+	}
+	return usable[rand.Intn(len(usable))]
 }
 
 func resolveProviderModelsPath(loginProtocol string, provider config.Provider, override string) string {

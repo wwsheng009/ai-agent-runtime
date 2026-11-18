@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -129,7 +128,7 @@ func (p chatLoginPrompter) runPickerItems(title, kind string, items []ui.FullScr
 		Hooks: loginPickerLeaseHooks(),
 		Run: func(s *ChatSession, lease ui.ScreenLease) error {
 			var stageErr error
-			index, cancelled, stageErr = chatPickerStage(context.Background(), s, lease, ui.FullScreenListOptions{
+			index, cancelled, stageErr = chatPickerStage(chatSessionOperationContext(s), s, lease, ui.FullScreenListOptions{
 				Title:        title,
 				Subtitle:     "Enter 确认，Esc 取消",
 				EmptyMessage: fmt.Sprintf("没有匹配的 %s", kind),
@@ -185,7 +184,7 @@ func executeStructuredLoginCommand(session *ChatSession, command string) (Comman
 		oauthTimeout = 15 * time.Minute
 	}
 	req := providerLoginRequest{
-		Context:              context.Background(),
+		Context:              chatSessionOperationContext(session),
 		Config:               session.Config,
 		ProviderName:         parsed.Provider,
 		LoginProtocol:        parsed.Protocol,

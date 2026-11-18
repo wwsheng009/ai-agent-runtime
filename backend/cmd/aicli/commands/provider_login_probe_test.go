@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
@@ -317,5 +318,35 @@ func TestRunProviderLogin_CancelDuringProbeDoesNotWrite(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("cancelled login wrote %s: %v", path, err)
 		}
+	}
+}
+
+func TestValidateProviderLoginModelsAutoSharesOneTimeoutAcrossAttempts(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+
+	_, _, _, err := validateProviderLoginModels(
+		context.Background(),
+		nil,
+		"slow",
+		config.Provider{BaseURL: server.URL, APIKey: "sk-test"},
+		"auto",
+		"",
+		350*time.Millisecond,
+	)
+	if err == nil {
+		t.Fatal("expected the shared auto-validation deadline to expire")
+	}
+	if calls.Load() > 2 {
+		t.Fatalf("auto validation made %d requests with a 350ms total timeout; want at most 2", calls.Load())
 	}
 }

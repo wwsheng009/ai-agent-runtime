@@ -445,8 +445,13 @@ func SelectPrimaryProviderLoginModelGroup(groups []LoginModelGroup, requestedLog
 			best = i
 			continue
 		}
-		if len(groups[i].Models) == len(groups[best].Models) && providerLoginProtocolRank(groups[i].RuntimeProtocol) < providerLoginProtocolRank(groups[best].RuntimeProtocol) {
-			best = i
+		if len(groups[i].Models) == len(groups[best].Models) {
+			leftRank := providerLoginProtocolRank(groups[i].RuntimeProtocol)
+			rightRank := providerLoginProtocolRank(groups[best].RuntimeProtocol)
+			if leftRank < rightRank ||
+				(leftRank == rightRank && providerLoginGroupStableKey(groups[i]) < providerLoginGroupStableKey(groups[best])) {
+				best = i
+			}
 		}
 	}
 	return best
@@ -472,4 +477,12 @@ func providerLoginProtocolRank(protocol string) int {
 	default:
 		return 10
 	}
+}
+
+func providerLoginGroupStableKey(group LoginModelGroup) string {
+	templateID := strings.ToLower(strings.TrimSpace(group.ProviderTemplate.ID))
+	if templateID == "" {
+		templateID = strings.ToLower(strings.TrimSpace(group.Key))
+	}
+	return templateID + "\x00" + strings.ToLower(strings.TrimSpace(group.RuntimeProtocol))
 }

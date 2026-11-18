@@ -194,7 +194,7 @@ func TestRefreshChatPickerProbesNewCodexModelWithoutCard(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/models":
-					_, _ = w.Write([]byte(`{"data":[{"id":"gpt-6-astra"},{"id":"gpt-6.1-sol"}]}`))
+					_, _ = w.Write([]byte(`{"data":[{"id":"gpt-6-astra"},{"id":"legacy-custom-model"},{"id":"gpt-6.1-sol"}]}`))
 				case "/custom/responses":
 					probes.Add(1)
 					var payload map[string]interface{}
@@ -212,7 +212,7 @@ func TestRefreshChatPickerProbesNewCodexModelWithoutCard(t *testing.T) {
 			}))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			cfg := chatModelAddTestConfig(t, path, "alpha", "gpt-6-astra", []string{"gpt-6-astra"})
+			cfg := chatModelAddTestConfig(t, path, "alpha", "gpt-6-astra", []string{"gpt-6-astra", "legacy-custom-model"})
 			provider := cfg.Providers.Items["alpha"]
 			provider.Protocol, provider.BaseURL, provider.APIPath, provider.APIKey = "codex", server.URL, "/custom/responses", "test-key"
 			cfg.Providers.Items["alpha"] = provider
@@ -220,6 +220,9 @@ func TestRefreshChatPickerProbesNewCodexModelWithoutCard(t *testing.T) {
 			got := readProviderModelsInConfig(t, path, "alpha")
 			if probes.Load() != 1 || containsFold(got, "gpt-6.1-sol") != tc.wantAdded {
 				t.Fatalf("probe calls=%d models=%v receipt=%+v", probes.Load(), got, receipt)
+			}
+			if !containsFold(got, "legacy-custom-model") {
+				t.Fatalf("refresh removed previously supported, still-listed model after an inconclusive/new-model probe: %v", got)
 			}
 			if tc.wantAdded {
 				if !strings.Contains(receipt.Detail, "新增 gpt-6.1-sol") {

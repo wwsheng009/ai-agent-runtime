@@ -38,6 +38,17 @@ type chatLoginCommandRequest struct {
 	NewAPIUserID      string
 }
 
+// chatSessionOperationContext is the cancellation boundary for network-backed
+// slash commands. The chat loop replaces cancelCtx for each input cycle and
+// cancels it on Esc/Ctrl-C or when a new cycle starts. Falling back to
+// Background keeps directly constructed/test sessions usable.
+func chatSessionOperationContext(session *ChatSession) context.Context {
+	if session != nil && session.cancelCtx != nil {
+		return session.cancelCtx
+	}
+	return context.Background()
+}
+
 func handleLoginCommand(session *ChatSession, command string, noInteractive bool) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredLoginCommand(session, command); handled {
@@ -68,7 +79,7 @@ func handleLoginCommand(session *ChatSession, command string, noInteractive bool
 		oauthTimeout = 15 * time.Minute
 	}
 	req := providerLoginRequest{
-		Context:              context.Background(),
+		Context:              chatSessionOperationContext(session),
 		Config:               session.Config,
 		ProviderName:         parsed.Provider,
 		LoginProtocol:        parsed.Protocol,

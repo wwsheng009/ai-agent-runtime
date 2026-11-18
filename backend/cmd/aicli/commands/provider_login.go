@@ -282,7 +282,17 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		candidate.APIKeyRef = apiKeyRef
 	}
 
-	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(ctx, cfg, providerName, candidate, loginProtocol, req.ModelsPath, req.Timeout)
+	modelsTimeout := req.Timeout
+	if modelsTimeout <= 0 {
+		modelsTimeout = 60 * time.Second
+	}
+	// Model-list validation and protocol probing are one discovery operation.
+	// Sharing a deadline prevents a slow /models response from being followed
+	// by a second full probe budget, which otherwise makes login latency vary
+	// substantially with the number of protocol fallbacks.
+	modelsCtx, cancelModels := context.WithTimeout(ctx, modelsTimeout)
+	defer cancelModels()
+	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(modelsCtx, cfg, providerName, candidate, loginProtocol, req.ModelsPath, modelsTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -318,10 +328,10 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 			// Keep its custom completion path attached to its original protocol.
 			probeProvider.Protocol = existing.Protocol
 		}
-		discovery, err := providerops.ProbeUnclassifiedLoginModels(ctx, providerops.LoginProbeRequest{
+		discovery, err := providerops.ProbeUnclassifiedLoginModels(modelsCtx, providerops.LoginProbeRequest{
 			Config: cfg, ProviderName: providerName, LoginProtocol: groupingProtocol,
 			Provider: probeProvider, Models: modelsResult.Models, Catalog: modelCardCatalog,
-			DefaultModel: firstNonEmptyText(req.DefaultModel, candidate.DefaultModel), Timeout: req.Timeout,
+			DefaultModel: firstNonEmptyText(req.DefaultModel, candidate.DefaultModel), Timeout: modelsTimeout,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("auto protocol probe: %w", err)
@@ -1299,6 +1309,13 @@ func validateProviderLoginModels(
 	modelsPath string,
 	timeout time.Duration,
 ) (*providerModelsValidationResult, string, string, error) {
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	// A provider may have a rotating key pool. Keep all protocol fallback
+	// attempts in this validation run on one credential; otherwise an auth
+	// failure on one randomly selected key can be mistaken for protocol failure.
+	provider.APIKey = providerops.APIKey(provider)
 	if !isAutoLoginProtocol(loginProtocol) {
 		resolvedPath := resolveProviderModelsPath(loginProtocol, provider, modelsPath)
 		result, err := providerops.FetchModels(ctx, providerModelsValidationRequest{
@@ -1314,25 +1331,39 @@ func validateProviderLoginModels(
 
 	attempts := providerLoginAutoValidationProtocols(provider)
 	errors := make([]string, 0, len(attempts))
+	validationCtx := ctx
+	var cancel context.CancelFunc
+	validationCtx, cancel = context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for _, attempt := range attempts {
-		if err := ctx.Err(); err != nil {
+		if err := validationCtx.Err(); err != nil {
 			return nil, "", "", err
+		}
+		attemptTimeout := timeout
+		if deadline, ok := validationCtx.Deadline(); ok {
+			attemptTimeout = time.Until(deadline)
+			if attemptTimeout <= 0 {
+				return nil, "", "", context.DeadlineExceeded
+			}
 		}
 		candidate := provider
 		candidate.Protocol = runtimeProtocolForLoginProtocol(attempt)
 		resolvedPath := resolveProviderModelsPath(attempt, candidate, modelsPath)
-		result, err := providerops.FetchModels(ctx, providerModelsValidationRequest{
+		result, err := providerops.FetchModels(validationCtx, providerModelsValidationRequest{
 			Config:        cfg,
 			ProviderName:  providerName,
 			Provider:      candidate,
 			LoginProtocol: attempt,
 			ModelsPath:    resolvedPath,
-			Timeout:       timeout,
+			Timeout:       attemptTimeout,
 		})
 		if err == nil {
 			return result, resolvedPath, attempt, nil
 		}
 		errors = append(errors, fmt.Sprintf("%s: %v", attempt, err))
+		if validationCtx.Err() != nil {
+			return nil, "", "", validationCtx.Err()
+		}
 	}
 	return nil, "", "", fmt.Errorf("auto protocol models validation failed; attempts: %s", strings.Join(errors, " | "))
 }

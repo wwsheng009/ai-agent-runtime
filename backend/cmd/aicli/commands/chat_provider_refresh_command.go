@@ -164,28 +164,50 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 	}
 
 	timeout := time.Duration(request.TimeoutSec) * time.Second
+	operationCtx := chatSessionOperationContext(session)
 	outcomes := make([]chatProviderRefreshProviderOutcome, 0, len(selected))
 	warnings := make([]error, 0)
 	updatedProviders := make([]string, 0, len(selected))
 	totalAdded, totalRemoved, totalChanged := 0, 0, 0
 
 	for _, item := range selected {
+		if err := operationCtx.Err(); err != nil {
+			return chatProviderRefreshRun{}, warnings, err
+		}
+		discoveryTimeout := timeout
+		if discoveryTimeout <= 0 {
+			discoveryTimeout = 30 * time.Second
+		}
+		// /models retrieval and protocol probes are one discovery operation.
+		// Keep a single per-provider deadline so a slow list request cannot be
+		// followed by a fresh, full probe timeout.
+		providerCtx, cancelProvider := context.WithTimeout(operationCtx, discoveryTimeout)
+		defer cancelProvider()
 		loginProtocol := loginProtocolFromProvider(item.Provider, item.Provider.AuthMode)
+		provider := item.Provider
+		// A key pool may rotate on every GetAPIKey call. Pin one key for the
+		// complete fetch + protocol-probe refresh so these stages observe the
+		// same credentials and cannot disagree due to random key selection.
+		provider.APIKey = providerops.APIKey(provider)
 		outcome := chatProviderRefreshProviderOutcome{
 			Name:          item.Name,
-			Protocol:      item.Provider.GetProtocol(),
+			Protocol:      provider.GetProtocol(),
 			LoginProtocol: loginProtocol,
 		}
 
-		fetch, fetchErr := providerops.FetchModels(context.Background(), providerops.FetchModelsRequest{
+		fetch, fetchErr := providerops.FetchModels(providerCtx, providerops.FetchModelsRequest{
 			Config:        cfg,
 			ProviderName:  item.Name,
-			Provider:      item.Provider,
+			Provider:      provider,
 			LoginProtocol: loginProtocol,
 			ModelsPath:    request.ModelsPath,
 			Timeout:       timeout,
 		})
 		if fetchErr != nil {
+			if err := operationCtx.Err(); err != nil {
+				return chatProviderRefreshRun{}, warnings, err
+			}
+			cancelProvider()
 			outcome.Reason = "fetch_failed: " + fetchErr.Error()
 			warnings = append(warnings, fmt.Errorf("%s: 拉取模型列表失败: %v", item.Name, fetchErr))
 			outcomes = append(outcomes, outcome)
@@ -196,10 +218,13 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 		outcome.Category = providerops.ModelListCategoryName(fetch.Category)
 		outcome.VerifiedAt = strings.TrimSpace(fetch.VerifiedAt)
 
-		fetchedIDs, unconfirmed := chatProviderRefreshVerifiedModelIDs(item.Name, item.Provider, loginProtocol, fetch.Models, cfg)
+		fetchedIDs, unconfirmed := chatProviderRefreshVerifiedModelIDs(providerCtx, item.Name, provider, loginProtocol, fetch.Models, cfg)
+		if err := operationCtx.Err(); err != nil {
+			return chatProviderRefreshRun{}, warnings, err
+		}
 		outcome.Unconfirmed = unconfirmed
 		outcome.ModelCount = len(fetchedIDs)
-		nextSupported := chatProviderRefreshModelList(fetchedIDs, item.Provider.DefaultModel)
+		nextSupported := chatProviderRefreshModelList(fetchedIDs, provider.DefaultModel)
 		outcome.Added, outcome.Removed = diffProviderModelLists(item.Provider.SupportedModels, nextSupported)
 
 		build := refreshProviderModelCapabilitiesFromEndpoint(item.Name, loginProtocol, item.Provider, fetch.Models)
@@ -207,6 +232,7 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 
 		listsChanged := len(outcome.Added) > 0 || len(outcome.Removed) > 0
 		if !listsChanged && !build.summary.Updated {
+			cancelProvider()
 			outcome.Reason = "already_up_to_date"
 			outcomes = append(outcomes, outcome)
 			continue
@@ -217,6 +243,7 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 		totalChanged += build.summary.ChangedModels
 
 		if request.DryRun {
+			cancelProvider()
 			outcome.Reason = "updated"
 			outcomes = append(outcomes, outcome)
 			continue
@@ -243,6 +270,7 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 
 		persisted, persistErr := config.UpdateProviderConfig(configPath, update)
 		if persistErr != nil {
+			cancelProvider()
 			outcome.Reason = "persist_failed: " + persistErr.Error()
 			warnings = append(warnings, fmt.Errorf("%s: 写入配置失败: %v", item.Name, persistErr))
 			outcomes = append(outcomes, outcome)
@@ -260,6 +288,7 @@ func chatProviderRefreshProviders(session *ChatSession, request chatProviderRefr
 			}
 		}
 		updatedProviders = append(updatedProviders, item.Name)
+		cancelProvider()
 		outcome.Reason = "updated"
 		outcomes = append(outcomes, outcome)
 	}
@@ -315,7 +344,7 @@ func chatProviderRefreshFetchedModelIDs(
 // cards. Listing an ID does not establish that its completion endpoint accepts
 // it; verify only new, unclassified IDs against the saved runtime protocol.
 func chatProviderRefreshVerifiedModelIDs(
-	providerName string, provider config.Provider, loginProtocol string,
+	ctx context.Context, providerName string, provider config.Provider, loginProtocol string,
 	models []providerModelInfo, cfg *config.Config,
 ) ([]string, []string) {
 	selected := chatProviderRefreshFetchedModelIDs(providerName, provider, loginProtocol, models, cfg)
@@ -332,9 +361,16 @@ func chatProviderRefreshVerifiedModelIDs(
 	known[strings.ToLower(strings.TrimSpace(provider.DefaultModel))] = true
 	candidates := make([]string, 0, len(assumed))
 	for _, id := range assumed {
-		if !known[strings.ToLower(id)] {
-			candidates = append(candidates, id)
+		key := strings.ToLower(strings.TrimSpace(id))
+		if known[key] {
+			// A saved model already accepted by this provider is prior evidence.
+			// Keep it if it is still listed, even when the current protocol probe
+			// is inconclusive; otherwise a transient timeout/auth issue can erase
+			// working models from supported_models during refresh.
+			selected = append(selected, id)
+			continue
 		}
+		candidates = append(candidates, id)
 	}
 	const maxRefreshProbes = 20
 	probeCount := min(len(candidates), maxRefreshProbes)
@@ -343,7 +379,10 @@ func chatProviderRefreshVerifiedModelIDs(
 	}
 	// ProbeMatrix resolves the configured proxy, headers and custom API path.
 	// Bound both the number of requests and the total refresh time.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	results := providerops.ProbeMatrix(providerops.ProbeMatrixRequest{
 		Context: ctx, Config: cfg, Provider: provider, Models: candidates[:probeCount],
