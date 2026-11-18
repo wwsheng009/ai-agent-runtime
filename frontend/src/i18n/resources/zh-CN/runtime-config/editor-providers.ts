@@ -43,11 +43,6 @@ export const zhRuntimeConfigEditorProviders = {
       edit: "编辑 {{name}}",
       delete: "删除 {{name}}",
     },
-    pageTabs: {
-      aria: "Provider 配置视图",
-      list: "Provider 列表",
-      models: "模型配置",
-    },
     dialogTabs: {
       aria: "Provider 编辑分区",
       basic: "基础信息",
@@ -273,25 +268,6 @@ export const zhRuntimeConfigEditorProviders = {
           noteHonored: "text / image 会被运行时消费；audio / video / file 仅写入配置。",
           noteInert: "audio / video / file 当前运行时不消费。",
         },
-      },
-      workspace: {
-        noProviders:
-          "当前还没有 provider；先在「Provider 列表」里创建并保存后再配置模型。",
-        noProviderSelected: "请选择一个 provider。",
-        selectLabel: "Provider",
-        selectAria: "选择要配置模型的 provider",
-        reload: "重新载入",
-        applyHint:
-          "面板内的修改先落在工作副本；点「应用修改」写入页面草稿，最后由页面「保存」写回 config.yaml。",
-        apply: "应用修改",
-        applied: "已把「{{name}}」的模型列表与能力配置写入页面草稿；别忘了在页面底部保存。",
-        fetch: "获取模型列表",
-        fetching: "拉取中...",
-        fetchEmpty: "接口返回成功，但没有可用模型。",
-        fetchFailed: "获取模型列表失败",
-        fetchSuccess:
-          "已获取 {{count}} 个模型；可直接逐模型编辑能力后应用。{{warnings}}",
-        supportedModelsPreview: "supported_models：{{models}}",
       },
     },
     proxy: {

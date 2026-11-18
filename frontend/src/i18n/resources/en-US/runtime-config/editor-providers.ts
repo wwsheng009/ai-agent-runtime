@@ -45,11 +45,6 @@ export const enRuntimeConfigEditorProviders = {
       edit: "Edit {{name}}",
       delete: "Delete {{name}}",
     },
-    pageTabs: {
-      aria: "Provider config views",
-      list: "Providers",
-      models: "Models",
-    },
     dialogTabs: {
       aria: "Provider editor sections",
       basic: "Basics",
@@ -289,26 +284,6 @@ export const enRuntimeConfigEditorProviders = {
             "text / image are consumed by the runtime; audio / video / file are written to config only.",
           noteInert: "audio / video / file are not consumed by the current runtime.",
         },
-      },
-      workspace: {
-        noProviders:
-          "No providers yet. Create and save one under the Providers tab before configuring models.",
-        noProviderSelected: "Select a provider.",
-        selectLabel: "Provider",
-        selectAria: "Select the provider whose models to configure",
-        reload: "Reload",
-        applyHint:
-          "Edits land in a working copy first; click Apply changes to write them into the page draft, then save on the page to persist config.yaml.",
-        apply: "Apply changes",
-        applied:
-          "Wrote the model list and capabilities of \"{{name}}\" into the page draft; remember to save at the bottom of the page.",
-        fetch: "Fetch models",
-        fetching: "Fetching...",
-        fetchEmpty: "The endpoint succeeded but returned no usable models.",
-        fetchFailed: "Failed to fetch models",
-        fetchSuccess:
-          "Fetched {{count}} models; configure capabilities per model, then apply.{{warnings}}",
-        supportedModelsPreview: "supported_models: {{models}}",
       },
     },
     proxy: {
