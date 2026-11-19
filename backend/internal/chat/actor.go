@@ -146,11 +146,12 @@ type sessionRunControl struct {
 	// cancelCause 与 cancel 同源，携带取消来源标记（sessionRunCancelCause）。
 	// session_end 的 cancel_cause 与告警日志据此把 execution_context 细化到
 	// 具体调用点；旧路径只调用 cancel，cause 退化为 context.Canceled。
-	cancelCause  context.CancelCauseFunc
-	interrupted  atomic.Bool
-	abandoned    atomic.Bool
-	finalizing   atomic.Bool
-	lastActivity atomic.Int64
+	cancelCause            context.CancelCauseFunc
+	interrupted            atomic.Bool
+	abandoned              atomic.Bool
+	finalizing             atomic.Bool
+	terminalEventPublished atomic.Bool
+	lastActivity           atomic.Int64
 	// stopReason 记录本 run 被宿主停止的原因标签（由 cancelActive 在取消前写入）。
 	// 取消发生在 actor 命令环 goroutine，payload 由 run goroutine 在 ctx 取消后读取；
 	// 用原子指针避免任何数据竞争。空值表示非宿主停 actor 的取消。
@@ -164,6 +165,48 @@ type sessionRunControl struct {
 	// 引用：run 接管 session 时挂载，终结时解除。恢复路径经 RunLiveSession 在
 	// 真身上操作，禁止 loadSession 副本写回（见 session_run_live.go）。
 	live liveSessionRef
+}
+
+type sessionRunPanicError struct {
+	value any
+}
+
+func (e *sessionRunPanicError) Error() string {
+	return fmt.Sprintf("session run panicked: %v", e.value)
+}
+
+func sessionRunPanicked(err error) bool {
+	var panicErr *sessionRunPanicError
+	return errors.As(err, &panicErr)
+}
+
+func runSessionExecutionSafely(execute func() (*agent.Result, error)) (result *agent.Result, execErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			execErr = &sessionRunPanicError{value: recovered}
+		}
+	}()
+	return execute()
+}
+
+func runManualCompactSafely(a *SessionActor, ctx context.Context, session *Session) (result *compactruntime.Result, status compactruntime.Status, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			err = &sessionRunPanicError{value: recovered}
+		}
+	}()
+	return a.runManualCompact(ctx, session, compactruntime.ModeLocal)
+}
+
+func executePendingBatchSafely(a *SessionActor, ctx context.Context, session *Session, pending *PendingToolInvocation) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &sessionRunPanicError{value: recovered}
+		}
+	}()
+	return a.executeRemainingPendingBatch(ctx, session, pending)
 }
 
 // runPartialProduct 是一份不可变的有界产物快照（整体替换，读取无需加锁）。
@@ -1336,17 +1379,57 @@ func (a *SessionActor) liveUserInputBatch(run *sessionRunControl) agent.LiveUser
 
 func (a *SessionActor) run() {
 	defer func() {
+		// Keep the actor's terminal signal reliable even if a stop hook (or an
+		// unexpected panic in the command loop) misbehaves. Callers use done as
+		// the fallback for in-flight submissions, so it must always close.
+		defer close(a.done)
+		_ = recover()
 		a.runStopHook()
-		close(a.done)
 	}()
 	for {
 		select {
 		case cmd := <-a.cmdCh:
-			a.handle(cmd)
+			a.handleSafely(cmd)
 		case <-a.stop:
 			a.cancelActive()
 			a.activeRunWG.Wait()
 			return
+		}
+	}
+}
+
+// handleSafely isolates the command loop from a malformed command handler. A
+// panic must not strand SubmitPrompt's acceptance or result channels: both are
+// caller-owned, buffered channels and are deliberately completed rather than
+// closed (the latter could race a run goroutine that still owns the writer).
+func (a *SessionActor) handleSafely(cmd Command) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			a.completeCommandAfterFailure(cmd, fmt.Errorf("session actor command panic: %v", recovered))
+		}
+	}()
+	a.handle(cmd)
+}
+
+func (a *SessionActor) completeCommandAfterFailure(cmd Command, err error) {
+	if err == nil {
+		err = ErrSessionActorStopped
+	}
+	switch payload := cmd.(type) {
+	case SubmitPrompt:
+		payload.acknowledgeAccepted(err)
+		if payload.Reply != nil {
+			select {
+			case payload.Reply <- SubmitResult{Err: err}:
+			default:
+			}
+		}
+	case ContinueSession:
+		if payload.Reply != nil {
+			select {
+			case payload.Reply <- SubmitResult{Err: err}:
+			default:
+			}
 		}
 	}
 }
@@ -3517,6 +3600,26 @@ func normalizedMetadataKeys(keys []string) []string {
 }
 
 func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, injection *turnInjection, reply chan SubmitResult, appendedPrompt bool, run *sessionRunControl) {
+	// Startup runs on the actor command loop until the asynchronous execution
+	// goroutine is created. In particular, pre-turn compaction and the
+	// SessionStart event can call provider/event integrations directly. A panic
+	// here must use the same conservative cleanup as a panic in the run
+	// goroutine; otherwise handleSafely would only report an error while leaving
+	// the claimed run and running state stranded.
+	runStarted := false
+	runWaitTracked := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// trackSessionRunWait happens before the goroutine is launched. If
+			// startup panics in the small window after tracking but before the
+			// go statement, there is no goroutine defer to balance the wait
+			// group. Release it here before the common panic cleanup.
+			if !runStarted && runWaitTracked {
+				a.releaseSessionRunWait(run)
+			}
+			a.finishSessionRunAfterPanic(session, turnID, run, recovered)
+		}
+	}()
 	if a == nil || session == nil {
 		if a != nil {
 			a.releaseSessionRun(run)
@@ -3686,18 +3789,20 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					return nil
 				})
 				a.releaseSessionRun(run)
-				a.publish(runtimeevents.Event{
-					Type:      EventSessionEnd,
-					SessionID: a.id,
-					TraceID:   turnID,
-					Payload: map[string]interface{}{
-						"turn_id":           turnID,
-						"success":           false,
-						"error":             "user_prompt_submit hook blocked the turn: " + message,
-						"hook":              "user_prompt_submit",
-						runSourcePayloadKey: runMetaSource(runMeta),
-					},
-				})
+				if run.terminalEventPublished.CompareAndSwap(false, true) {
+					a.publish(runtimeevents.Event{
+						Type:      EventSessionEnd,
+						SessionID: a.id,
+						TraceID:   turnID,
+						Payload: map[string]interface{}{
+							"turn_id":           turnID,
+							"success":           false,
+							"error":             "user_prompt_submit hook blocked the turn: " + message,
+							"hook":              "user_prompt_submit",
+							runSourcePayloadKey: runMetaSource(runMeta),
+						},
+					})
+				}
 				run.complete(SubmitResult{Err: fmt.Errorf("user_prompt_submit hook blocked the turn: %s", message)})
 				return
 			}
@@ -3721,18 +3826,20 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					return nil
 				})
 				a.releaseSessionRun(run)
-				a.publish(runtimeevents.Event{
-					Type:      EventSessionEnd,
-					SessionID: a.id,
-					TraceID:   turnID,
-					Payload: map[string]interface{}{
-						"turn_id":           turnID,
-						"success":           false,
-						"error":             "session_start hook stopped the session: " + message,
-						"hook":              "session_start",
-						runSourcePayloadKey: runMetaSource(runMeta),
-					},
-				})
+				if run.terminalEventPublished.CompareAndSwap(false, true) {
+					a.publish(runtimeevents.Event{
+						Type:      EventSessionEnd,
+						SessionID: a.id,
+						TraceID:   turnID,
+						Payload: map[string]interface{}{
+							"turn_id":           turnID,
+							"success":           false,
+							"error":             "session_start hook stopped the session: " + message,
+							"hook":              "session_start",
+							runSourcePayloadKey: runMetaSource(runMeta),
+						},
+					})
+				}
 				run.complete(SubmitResult{Err: fmt.Errorf("session_start hook stopped the session: %s", message)})
 				return
 			}
@@ -3774,23 +3881,44 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 
 	runStartedAt := time.Now()
 	a.trackSessionRunWait(run)
+	runWaitTracked = true
 	stopStallWatchdog := a.startRunStallWatchdog(runCtx, run)
 	go func() {
 		defer a.releaseSessionRunWait(run)
 		defer stopStallWatchdog()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				a.finishSessionRunAfterPanic(session, turnID, run, recovered)
+			}
+		}()
 		var (
 			result  *agent.Result
 			execErr error
 		)
 		if resume {
-			result, execErr = a.continueLoop(runCtx, session, routeOverride)
+			result, execErr = runSessionExecutionSafely(func() (*agent.Result, error) {
+				return a.continueLoop(runCtx, session, routeOverride)
+			})
 		} else {
-			result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
+			result, execErr = runSessionExecutionSafely(func() (*agent.Result, error) {
+				return a.runLoop(runCtx, prompt, session, routeOverride)
+			})
 			if preflightErr, ok := agent.AsPromptPreflightError(execErr); ok && preflightErr != nil {
-				if compactResult, _, compactErr := a.runManualCompact(runCtx, session, compactruntime.ModeLocal); compactErr == nil && compactResult != nil {
-					result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
+				compactResult, _, compactErr := runManualCompactSafely(a, runCtx, session)
+				if compactErr == nil && compactResult != nil {
+					result, execErr = runSessionExecutionSafely(func() (*agent.Result, error) {
+						return a.runLoop(runCtx, prompt, session, routeOverride)
+					})
+				} else if sessionRunPanicked(compactErr) {
+					execErr = compactErr
 				}
 			}
+		}
+		if execErr != nil && sessionRunPanicked(execErr) {
+			logpkg.Warnf("session run panic recovered: session=%s turn=%s error=%v", a.id, turnID, execErr)
+			stopStallWatchdog()
+			a.finishSessionRunAfterPanic(session, turnID, run, execErr)
+			return
 		}
 		if result != nil {
 			// The actor owns the durable turn identity. Stamp it here as the
@@ -4184,12 +4312,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// complete any buffered streaming output before session teardown.
 		if publishTerminal {
 			annotateLogicalTurnPayload(payload, logicalEpisodeID, logicalTurnPhase)
-			a.publish(runtimeevents.Event{
-				Type:      EventSessionEnd,
-				SessionID: a.id,
-				TraceID:   resultTraceID(result, turnID),
-				Payload:   payload,
-			})
+			if run.terminalEventPublished.CompareAndSwap(false, true) {
+				a.publish(runtimeevents.Event{
+					Type:      EventSessionEnd,
+					SessionID: a.id,
+					TraceID:   resultTraceID(result, turnID),
+					Payload:   payload,
+				})
+			}
 		}
 		// Harness backstop (report §4.5): a clean run that stopped while plan
 		// mode stayed active announces the unreviewed revision, so the user has
@@ -4218,7 +4348,82 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			go a.drainTriggerTurnMailbox()
 		}
 	}()
+	runStarted = true
 	a.runLifecycleMu.Unlock()
+}
+
+func (a *SessionActor) finishSessionRunAfterPanic(session *Session, turnID string, run *sessionRunControl, recovered any) {
+	if run == nil {
+		return
+	}
+	sessionID := ""
+	if a != nil {
+		sessionID = a.id
+	}
+	panicErr := &sessionRunPanicError{value: recovered}
+	if recoveredErr, ok := recovered.(error); ok {
+		var existing *sessionRunPanicError
+		if errors.As(recoveredErr, &existing) {
+			panicErr = existing
+		}
+	}
+	defer func() {
+		if cleanupPanic := recover(); cleanupPanic != nil {
+			logpkg.Warnf("session run panic cleanup panicked: session=%s turn=%s panic=%v cleanup_panic=%v",
+				sessionID, turnID, panicErr, cleanupPanic)
+		}
+		safely := func(operation string, fn func()) {
+			defer func() {
+				if cleanupPanic := recover(); cleanupPanic != nil {
+					logpkg.Warnf("session run panic cleanup operation panicked: session=%s turn=%s operation=%s panic=%v",
+						sessionID, turnID, operation, cleanupPanic)
+				}
+			}()
+			fn()
+		}
+		safely("release", func() { a.releaseSessionRun(run) })
+		safely("complete", func() { run.complete(SubmitResult{Err: panicErr}) })
+	}()
+	logpkg.Warnf("session run tail panic recovered: session=%s turn=%s error=%v", sessionID, turnID, panicErr)
+
+	// This is deliberately a non-finalizing fallback. It releases only the
+	// in-process run and marks an active episode canceled; it never clears a
+	// suspension, changes its identity, or records a finalized turn.
+	if a.sessionRunOwned(run) {
+		if err := a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+			if strings.TrimSpace(state.CurrentTurnID) != strings.TrimSpace(turnID) {
+				return nil
+			}
+			state.Status = SessionStopped
+			state.CurrentTurnID = ""
+			state.CurrentEpisodeID = ""
+			if state.TurnPhase == ParentTurnPhaseRunning || state.TurnPhase == ParentTurnPhaseFinalizing || state.TurnPhase == "" {
+				state.TurnPhase = ParentTurnPhaseCanceled
+			}
+			state.CurrentRunMeta = nil
+			resetFrozenTurnTools(state)
+			state.UpdatedAt = time.Now().UTC()
+			return nil
+		}); err != nil {
+			logpkg.Warnf("session run panic state cleanup failed: session=%s turn=%s error=%v", sessionID, turnID, err)
+		}
+	}
+
+	if run.terminalEventPublished.CompareAndSwap(false, true) {
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionEnd,
+			SessionID: a.id,
+			TraceID:   strings.TrimSpace(turnID),
+			Payload: map[string]interface{}{
+				"turn_id": turnID,
+				"success": false,
+				"error":   panicErr.Error(),
+				"status":  SessionStopped,
+				"panic":   true,
+			},
+		})
+	}
+	_ = session // The panic fallback intentionally avoids persisting a potentially partial session snapshot.
 }
 
 // sessionNotFoundError builds a typed SESSION_NOT_FOUND error for a missing
@@ -5311,9 +5516,18 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 	a.activeRunWG.Add(1)
 	go func() {
 		defer a.activeRunWG.Done()
-		if err := a.executeRemainingPendingBatch(runCtx, session, pending); err != nil {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				a.finishSessionRunAfterPanic(session, turnID, run, recovered)
+			}
+		}()
+		if err := executePendingBatchSafely(a, runCtx, session, pending); err != nil {
 			cancel()
 			a.clearSessionRunCancel(run)
+			if sessionRunPanicked(err) {
+				a.finishSessionRunAfterPanic(session, turnID, run, err)
+				return
+			}
 			a.finishPendingBatchRecovery(session, turnID, err, run)
 			return
 		}
@@ -5397,14 +5611,16 @@ func (a *SessionActor) finishPendingBatchRecovery(session *Session, turnID strin
 			state.UpdatedAt = time.Now().UTC()
 			return nil
 		})
-		a.publish(runtimeevents.Event{
-			Type:      EventSessionEnd,
-			SessionID: a.id,
-			TraceID:   strings.TrimSpace(turnID),
-			// A4：resume 型终态同样带出已产出的部分产物（取源与主路径一致，
-			// 见 actor_partial_product.go 的 pendingBatchRecoveryPayload）。
-			Payload: pendingBatchRecoveryPayload(turnID, execErr, status, session),
-		})
+		if run.terminalEventPublished.CompareAndSwap(false, true) {
+			a.publish(runtimeevents.Event{
+				Type:      EventSessionEnd,
+				SessionID: a.id,
+				TraceID:   strings.TrimSpace(turnID),
+				// A4：resume 型终态同样带出已产出的部分产物（取源与主路径一致，
+				// 见 actor_partial_product.go 的 pendingBatchRecoveryPayload）。
+				Payload: pendingBatchRecoveryPayload(turnID, execErr, status, session),
+			})
+		}
 	}
 	a.releaseSessionRun(run)
 }

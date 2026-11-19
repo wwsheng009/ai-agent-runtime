@@ -84,6 +84,36 @@ type failingRuntimeStateStore struct {
 	saveCalls atomic.Int32
 }
 
+type panicChatProvider struct{}
+
+func (panicChatProvider) Name() string {
+	return "panic-chat-provider"
+}
+
+func (panicChatProvider) Call(context.Context, *llm.LLMRequest) (*llm.LLMResponse, error) {
+	panic("injected provider panic")
+}
+
+func (panicChatProvider) Stream(context.Context, *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	panic("injected provider stream panic")
+}
+
+func (panicChatProvider) CountTokens(string) int {
+	return 1
+}
+
+func (panicChatProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		MaxOutputTokens:  4096,
+		SupportsTools:    true,
+	}
+}
+
+func (panicChatProvider) CheckHealth(context.Context) error {
+	return nil
+}
+
 func (s *failingRuntimeStateStore) SaveState(ctx context.Context, state *RuntimeState) error {
 	s.saveCalls.Add(1)
 	return errors.New("save state failed")
@@ -222,6 +252,177 @@ func TestSessionActorUpdateStateConvergentAdvancesLocalStateAfterFailedSave(t *t
 	require.NotNil(t, state)
 	require.Equal(t, SessionStopped, state.Status)
 	require.Empty(t, state.CurrentTurnID)
+}
+
+func TestSessionActorRunPanicReleasesRunWithoutFinalizingTurn(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	session, err := NewSessionManager(storage, nil).CreateSession(ctx, "panic-user")
+	require.NoError(t, err)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "panic-model",
+		MaxRetries:   1,
+	})
+	provider := panicChatProvider{}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	require.NoError(t, runtime.RegisterProviderAlias("panic-model", provider.Name()))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "panic-agent",
+		Model:    "panic-model",
+		MaxSteps: 1,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	result, err := actor.SubmitPrompt(ctx, "panic now", nil)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "session run panicked")
+
+	state := actor.StateForInspection()
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+	require.Equal(t, ParentTurnPhaseCanceled, state.TurnPhase)
+	require.Empty(t, state.FinalizedTurnID)
+	require.Empty(t, state.SuspendedTurnID)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	sessionEndCount := 0
+	finalizedCount := 0
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEndCount++
+		}
+		if event.Type == "parent.turn.finalized" {
+			finalizedCount++
+		}
+	}
+	require.Equal(t, 1, sessionEndCount, "panic must publish at most one terminal session event")
+	require.Zero(t, finalizedCount, "panic must not claim parent-turn finalization")
+}
+
+func TestSessionActorPanicCleanupCompletesReplyWhenRunFinishedHookPanics(t *testing.T) {
+	reply := make(chan SubmitResult, 1)
+	run := &sessionRunControl{
+		generation: 1,
+		turnID:     "turn_panic_cleanup",
+		reply:      reply,
+	}
+	actor := &SessionActor{
+		id: "panic-cleanup-session",
+		state: &RuntimeState{
+			SessionID:       "panic-cleanup-session",
+			Status:          SessionRunning,
+			CurrentTurnID:   run.turnID,
+			TurnPhase:       ParentTurnPhaseRunning,
+			SuspendedTurnID: "turn_suspended",
+		},
+		activeRun: run,
+		onRunFinished: func() {
+			panic("injected run-finished hook panic")
+		},
+	}
+
+	require.NotPanics(t, func() {
+		actor.finishSessionRunAfterPanic(nil, run.turnID, run, "injected execution panic")
+	})
+	require.Nil(t, actor.activeRun, "panic cleanup must release the active run even if the host callback panics")
+	require.Equal(t, ParentTurnPhaseCanceled, actor.StateForInspection().TurnPhase)
+	require.Equal(t, "turn_suspended", actor.StateForInspection().SuspendedTurnID,
+		"panic cleanup must preserve the suspension")
+	require.Empty(t, actor.StateForInspection().FinalizedTurnID)
+
+	select {
+	case result := <-reply:
+		require.Error(t, result.Err)
+		require.Contains(t, result.Err.Error(), "session run panicked")
+	default:
+		t.Fatal("panic cleanup did not complete the waiting caller")
+	}
+	select {
+	case extra := <-reply:
+		t.Fatalf("panic cleanup completed the reply more than once: %+v", extra)
+	default:
+	}
+}
+
+func TestSessionActorStartupPanicReleasesRunWithoutFinalizingSuspension(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	session, err := NewSessionManager(storage, nil).CreateSession(ctx, "startup-panic-user")
+	require.NoError(t, err)
+
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	const turnID = "turn_startup_panic"
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:       session.ID,
+		Status:          SessionRunning,
+		CurrentTurnID:   turnID,
+		TurnPhase:       ParentTurnPhaseRunning,
+		SuspendedTurnID: "turn_suspended",
+		UpdatedAt:       time.Now().UTC(),
+	}))
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        agent.NewAgent(&agent.Config{Name: "startup-panic-agent"}, nil),
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+		PrepareRun: func(context.Context, *Session, bool) error {
+			panic("injected startup panic")
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	reply := make(chan SubmitResult, 1)
+	run := actor.claimSessionRun(turnID, nil, reply)
+	go actor.startSessionRun(ctx, session, "startup panic", false, turnID, nil, nil, nil, reply, false, run)
+
+	select {
+	case result := <-reply:
+		require.Nil(t, result.Result)
+		require.Error(t, result.Err)
+		require.Contains(t, result.Err.Error(), "session run panicked")
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup panic did not complete the waiting caller")
+	}
+
+	require.Nil(t, actor.activeRun, "startup panic must release the active run")
+	state := actor.StateForInspection()
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+	require.Equal(t, ParentTurnPhaseCanceled, state.TurnPhase)
+	require.Equal(t, "turn_suspended", state.SuspendedTurnID,
+		"startup panic must preserve the existing suspension")
+	require.Empty(t, state.FinalizedTurnID)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	sessionEndCount := 0
+	finalizedCount := 0
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEndCount++
+		}
+		if event.Type == "parent.turn.finalized" {
+			finalizedCount++
+		}
+	}
+	require.Equal(t, 1, sessionEndCount, "startup panic must publish at most one terminal session event")
+	require.Zero(t, finalizedCount, "startup panic must not claim parent-turn finalization")
 }
 
 func TestSessionActorClaimDoesNotCancelFinalizingRun(t *testing.T) {
