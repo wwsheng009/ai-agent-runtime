@@ -1872,7 +1872,6 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			SupportedModels:       append([]string(nil), provider.SupportedModels...),
 			ModelMappings:         cloneStringMap(provider.ModelMappings),
 			ModelCapabilities:     cloneProviderModelCapabilities(provider.ModelCapabilities),
-			EnableImageGeneration: provider.EnableImageGeneration,
 			StreamReadTimeout:     runtimellm.ProviderStreamReadTimeoutFromAgentConfig(cfg),
 			ResponseHeaderTimeout: runtimellm.ProviderResponseHeaderTimeoutFromAgentConfig(cfg),
 			Headers:               config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),

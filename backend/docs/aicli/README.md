@@ -7,7 +7,7 @@
 - `tool_output_contract.md`：工具输出在 runtime / CLI / LLM 三条链路中的契约，包括 `output_kind`、`tool_source`、JSON 文本化和 CLI 截断策略。
 - `prompt-layout-debug-note.md`：`llm.request.started` 阶段 `[prompt] ...` 诊断行的关闭记录与验证结果。
 
-Provider 配置字段说明见 `backend/docs/config/`，其中 `enable_image_generation.md` 描述 Codex 原生图片工具的 provider 级 opt-in。
+Provider 配置字段说明见 `backend/docs/config/`，其中 `codex-native-image-generation.md` 描述 Codex 原生图片工具的模型级 capability 配置。
 
 启动入口说明：
 

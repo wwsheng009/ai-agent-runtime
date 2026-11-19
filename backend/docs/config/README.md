@@ -14,7 +14,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [enable_image_generation.md](./enable_image_generation.md) | Codex 原生 `image_generation` 的 **provider 级 opt-in** 开关 |
+| [codex-native-image-generation.md](./codex-native-image-generation.md) | Codex 原生 `image_generation` 的模型级能力配置 |
 | [examples/codex-native-image-generation.yaml](./examples/codex-native-image-generation.yaml) | 可复制的 Codex 原生图片生成配置示例 |
 
 ## 相关实现

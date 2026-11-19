@@ -933,12 +933,10 @@ func TestProviderWrapper_CodexCall_SavesGeneratedImagesAndReturnsMetadata(t *tes
 	defer server.Close()
 
 	outputDir := t.TempDir()
-	enabledImageGeneration := true
 	provider, err := NewProvider(&ProviderConfig{
-		Type:                  "codex",
-		BaseURL:               server.URL,
-		DefaultModel:          "gpt-5.4",
-		EnableImageGeneration: &enabledImageGeneration,
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
 		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
 			"gpt-5.4": {
 				InputModalities: []string{"text", "image"},

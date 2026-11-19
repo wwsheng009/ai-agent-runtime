@@ -27,7 +27,7 @@ func TestBuildToolDefinitionsForRequest_CodexAddsImageGenerationWhenModelCapabil
 				ImageGeneration: true,
 			},
 		},
-	}, false, true)
+	}, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
@@ -57,7 +57,7 @@ func TestBuildToolDefinitionsForRequest_DoesNotAddImageGenerationWithoutTextImag
 				ImageGeneration: true,
 			},
 		},
-	}, false, true)
+	}, false)
 
 	require.Nil(t, got)
 }
@@ -70,7 +70,7 @@ func TestBuildToolDefinitionsForRequest_DefaultsNilParametersToEmptyObjectSchema
 		},
 	}
 
-	got := BuildToolDefinitionsForRequest(defs, "codex", "gpt-5.4", nil, false, false)
+	got := BuildToolDefinitionsForRequest(defs, "codex", "gpt-5.4", nil, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
@@ -96,7 +96,7 @@ func TestBuildToolDefinitionsForRequest_RepairsNullParameterProperties(t *testin
 		},
 	}
 
-	got := BuildToolDefinitionsForRequest(defs, "openai", "deepseek-v4-pro", nil, false, false)
+	got := BuildToolDefinitionsForRequest(defs, "openai", "deepseek-v4-pro", nil, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
@@ -135,7 +135,7 @@ func TestBuildToolDefinitionsForRequest_CodexNativeImageHidesOpenAIImageGenerate
 				ImageGeneration: true,
 			},
 		},
-	}, false, true)
+	}, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
@@ -174,7 +174,7 @@ func TestBuildToolDefinitionsForRequest_KeepsOpenAIImageGenerateToolWhenCodexNat
 				ImageGeneration: true,
 			},
 		},
-	}, false, true)
+	}, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
@@ -182,7 +182,7 @@ func TestBuildToolDefinitionsForRequest_KeepsOpenAIImageGenerateToolWhenCodexNat
 	require.Equal(t, toolnames.OpenAIImageGenerateToolName, toolList[0]["name"])
 }
 
-func TestBuildToolDefinitionsForRequest_DoesNotAddImageGenerationWhenProviderDisabled(t *testing.T) {
+func TestBuildToolDefinitionsForRequest_AddsImageGenerationFromModelCapability(t *testing.T) {
 	caps := map[string]agentconfig.ModelCapabilitySpec{
 		"gpt-5.4": {
 			InputModalities: []string{"text", "image"},
@@ -192,22 +192,24 @@ func TestBuildToolDefinitionsForRequest_DoesNotAddImageGenerationWhenProviderDis
 		},
 	}
 
-	got := BuildToolDefinitionsForRequest(nil, "codex", "gpt-5.4", caps, false, false)
-	require.Nil(t, got)
+	got := BuildToolDefinitionsForRequest(nil, "codex", "gpt-5.4", caps, false)
+	tools, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	require.Equal(t, codexImageGenerationToolType, tools[0]["type"])
 
 	got = BuildToolDefinitionsForRequest([]types.ToolDefinition{
 		{Name: "bash", Description: "run shell", Parameters: map[string]interface{}{"type": "object"}},
-	}, "codex", "gpt-5.4", caps, false, false)
+	}, "codex", "gpt-5.4", caps, false)
 
 	toolList, ok := got.([]map[string]interface{})
 	require.True(t, ok)
-	require.Len(t, toolList, 1)
+	require.Len(t, toolList, 2)
 	require.Equal(t, "bash", toolList[0]["name"])
+	require.Equal(t, codexImageGenerationToolType, toolList[1]["type"])
 }
 
-func TestCodexNativeImageGenerationEnabled_RequiresProviderOptIn(t *testing.T) {
-	enabled := true
-	disabled := false
+func TestCodexNativeImageGenerationEnabled_UsesModelCapability(t *testing.T) {
 	capable := agentconfig.Provider{
 		Protocol: "codex",
 		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
@@ -220,13 +222,8 @@ func TestCodexNativeImageGenerationEnabled_RequiresProviderOptIn(t *testing.T) {
 		},
 	}
 
-	require.False(t, CodexNativeImageGenerationEnabled(capable, "gpt-5.4"))
-
-	capable.EnableImageGeneration = &disabled
-	require.False(t, CodexNativeImageGenerationEnabled(capable, "gpt-5.4"))
-
-	capable.EnableImageGeneration = &enabled
 	require.True(t, CodexNativeImageGenerationEnabled(capable, "gpt-5.4"))
+	require.False(t, CodexNativeImageGenerationEnabled(capable, "gpt-5.5"))
 }
 
 func TestProcessCodexAssistantImageGeneration_SavesImagesAndSanitizesReplayMetadata(t *testing.T) {

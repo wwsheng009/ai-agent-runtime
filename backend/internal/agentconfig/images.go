@@ -230,15 +230,11 @@ func ProviderHasImagesGenerationsAPI(provider Provider, model string) bool {
 // ProviderHasCodexNativeImageGeneration reports whether the provider/model pair
 // can expose Codex native image_generation.
 //
-// Both gates are required:
-//  1. provider enable_image_generation: true (default off when unset)
-//  2. model_capabilities.<model>.native_tools.image_generation: true
-//     with input_modalities including both text and image
+// The selected model must advertise native image generation and accept both
+// text and image inputs. Capability is model-scoped so one provider can expose
+// this tool for supported models without enabling it for every model.
 func ProviderHasCodexNativeImageGeneration(provider Provider, model string) bool {
 	if !strings.EqualFold(provider.GetProtocol(), "codex") {
-		return false
-	}
-	if !provider.AllowsCodexImageGeneration() {
 		return false
 	}
 	spec, ok := ResolveModelCapabilitySpec(model, provider.ModelCapabilities)

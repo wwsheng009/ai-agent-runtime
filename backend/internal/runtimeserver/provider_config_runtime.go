@@ -54,7 +54,6 @@ func BuildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			SupportedModels:         cloneRuntimeStringSlice(provider.SupportedModels),
 			ModelMappings:           cloneRuntimeStringMap(provider.ModelMappings),
 			ModelCapabilities:       cloneRuntimeModelCapabilities(provider.ModelCapabilities),
-			EnableImageGeneration:   provider.EnableImageGeneration,
 			StreamReadTimeout:       runtimellm.ProviderStreamReadTimeoutFromAgentConfig(cfg),
 			ResponseHeaderTimeout:   runtimellm.ProviderResponseHeaderTimeoutFromAgentConfig(cfg),
 			Headers:                 agentconfig.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),

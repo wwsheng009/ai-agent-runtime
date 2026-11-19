@@ -1,8 +1,7 @@
 # Codex 原生 image_generation 配置示例
 #
 # 复制到 providers.items 下后，按需修改 name / base_url / api_key。
-# 默认全局行为是关闭自动注入；只有显式 enable_image_generation: true
-# 且 model capability 完整时，才会向 Codex Responses 请求追加：
+# 只有目标 model 的 capability 完整时，才会向 Codex Responses 请求追加：
 #   {"type":"image_generation","output_format":"png"}
 
 providers:
@@ -20,8 +19,6 @@ providers:
         - gpt-5.4
         - gpt-5.4-mini
         - "*"
-      # Provider-level opt-in. Omit or set false to keep native tool injection off.
-      enable_image_generation: true
       model_capabilities:
         "*":
           input_modalities:
@@ -47,7 +44,7 @@ providers:
             images_generations_api: false
       timeout: 300s
 
-    # 对比：仅有 model capability、未 opt-in 时，不会注入 native tool。
+    # 对比：没有 image 输入模态或 image_generation capability 时，不会注入。
     CODEX_COMPAT_NO_NATIVE_IMAGE:
       enabled: true
       protocol: codex
@@ -56,7 +53,6 @@ providers:
       forward_url: /v1/responses
       api_key: ${CODEX_COMPAT_API_KEY:-}
       default_model: gpt-5.4
-      # enable_image_generation 缺省 = 关闭
       model_capabilities:
         gpt-5.4:
           input_modalities:

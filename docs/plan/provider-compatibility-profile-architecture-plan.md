@@ -206,7 +206,7 @@ HTTP response/stream
 
 #### 问题三：缺少显式且可审计的 wire compatibility 配置
 
-`agentconfig.Provider` 已包含 protocol、base URL、API path、模型能力、headers、`SupportsMaxOutputTokens`、`EnableImageGeneration` 等信息，但没有兼容 profile。
+`agentconfig.Provider` 已包含 protocol、base URL、API path、模型能力、headers、`SupportsMaxOutputTokens` 等信息，但没有兼容 profile。
 
 现有 `site_type` 是站点/账号检测、余额和认证相关语义，**不能复用为协议兼容 profile**：站点账户类型与 endpoint 能否接受 developer 或 content array 是两个正交维度。
 

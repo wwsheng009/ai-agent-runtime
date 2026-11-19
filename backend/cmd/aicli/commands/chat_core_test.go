@@ -1686,12 +1686,10 @@ func TestBuildToolLoopRequestMetadataFromExposureReport_IncludesTelemetryCounts(
 	}
 }
 
-func TestAdapterRequestConfig_CodexInjectsImageGenerationToolWhenProviderOptsInAndModelCapabilityAllows(t *testing.T) {
-	enabled := true
+func TestAdapterRequestConfig_CodexInjectsImageGenerationToolWhenModelCapabilityAllows(t *testing.T) {
 	session := &ChatSession{
 		Provider: config.Provider{
-			Protocol:              "codex",
-			EnableImageGeneration: &enabled,
+			Protocol: "codex",
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4": {
 					InputModalities: []string{"text", "image"},
@@ -1720,25 +1718,17 @@ func TestAdapterRequestConfig_CodexInjectsImageGenerationToolWhenProviderOptsInA
 	}
 }
 
-func TestAdapterRequestConfig_CodexDoesNotInjectImageGenerationToolWithoutProviderOptIn(t *testing.T) {
+func TestAdapterRequestConfig_CodexDoesNotInjectImageGenerationToolWithoutModelCapability(t *testing.T) {
 	session := &ChatSession{
 		Provider: config.Provider{
 			Protocol: "codex",
-			ModelCapabilities: map[string]config.ModelCapabilitySpec{
-				"gpt-5.4": {
-					InputModalities: []string{"text", "image"},
-					NativeTools: config.NativeToolCapabilities{
-						ImageGeneration: true,
-					},
-				},
-			},
 		},
 		Model: "gpt-5.4",
 	}
 
 	req := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{})
 	if req.Functions != nil {
-		t.Fatalf("expected no native image tool without provider opt-in, got %#v", req.Functions)
+		t.Fatalf("expected no native image tool without model capability, got %#v", req.Functions)
 	}
 }
 

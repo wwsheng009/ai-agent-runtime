@@ -163,30 +163,27 @@ type ChoiceChunk struct {
 type ProviderConfig struct {
 	// Name is the stable configured provider identity. It is distinct from Type,
 	// which identifies the protocol adapter.
-	Name                 string                                     `json:"name,omitempty"`
-	Type                 string                                     `json:"type"` // openai, anthropic, gemini, codex
-	APIKey               string                                     `json:"apiKey"`
-	BaseURL              string                                     `json:"baseUrl"`
-	APIPath              string                                     `json:"apiPath,omitempty"`
-	CompatibilityProfile string                                     `json:"compatibilityProfile,omitempty"`
-	Timeout              time.Duration                              `json:"timeout"`
-	MaxRetries           int                                        `json:"maxRetries"`
-	MaxTransportRetries  int                                        `json:"maxTransportRetries"`
-	RetryTuning          RetryTuning                                `json:"retryTuning,omitempty"`
-	RetryRules           []RetryRule                                `json:"retryRules,omitempty"`
-	DefaultModel         string                                     `json:"defaultModel,omitempty"`
-	SupportedModels      []string                                   `json:"supportedModels,omitempty"`
-	ModelMappings        map[string]string                          `json:"modelMappings,omitempty"`
-	ModelCapabilities    map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
-	// EnableImageGeneration opts into Codex native image_generation injection.
-	// Nil/false keeps the tool out of request payloads by default.
-	EnableImageGeneration   *bool                    `json:"enableImageGeneration,omitempty"`
-	Headers                 map[string]string        `json:"headers,omitempty"`
-	HeaderMappings          map[string]string        `json:"headerMappings,omitempty"`
-	HeaderMappingRules      []HeaderMappingRule      `json:"headerMappingRules,omitempty"`
-	SupportsMaxOutputTokens *bool                    `json:"supportsMaxOutputTokens,omitempty"`
-	Proxy                   *agentconfig.ProxyConfig `json:"proxy,omitempty"`
-	RequestsPerMinute       int                      `json:"requestsPerMinute,omitempty"`
+	Name                    string                                     `json:"name,omitempty"`
+	Type                    string                                     `json:"type"` // openai, anthropic, gemini, codex
+	APIKey                  string                                     `json:"apiKey"`
+	BaseURL                 string                                     `json:"baseUrl"`
+	APIPath                 string                                     `json:"apiPath,omitempty"`
+	CompatibilityProfile    string                                     `json:"compatibilityProfile,omitempty"`
+	Timeout                 time.Duration                              `json:"timeout"`
+	MaxRetries              int                                        `json:"maxRetries"`
+	MaxTransportRetries     int                                        `json:"maxTransportRetries"`
+	RetryTuning             RetryTuning                                `json:"retryTuning,omitempty"`
+	RetryRules              []RetryRule                                `json:"retryRules,omitempty"`
+	DefaultModel            string                                     `json:"defaultModel,omitempty"`
+	SupportedModels         []string                                   `json:"supportedModels,omitempty"`
+	ModelMappings           map[string]string                          `json:"modelMappings,omitempty"`
+	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	Headers                 map[string]string                          `json:"headers,omitempty"`
+	HeaderMappings          map[string]string                          `json:"headerMappings,omitempty"`
+	HeaderMappingRules      []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
+	SupportsMaxOutputTokens *bool                                      `json:"supportsMaxOutputTokens,omitempty"`
+	Proxy                   *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
+	RequestsPerMinute       int                                        `json:"requestsPerMinute,omitempty"`
 	// ResponseMarkerRules carries provider-scoped response marker strip rules.
 	// They are resolved against the effective model per request and applied
 	// before adapter parsing (stream chunks via providercompat, non-stream
@@ -2256,7 +2253,6 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		Model:                   resolvedModel,
 		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
 		ModelCapabilities:       p.modelCapabilities(),
-		EnableImageGeneration:   p.config.EnableImageGeneration,
 		Messages:                messages,
 		Tools:                   chatToolsToToolDefinitions(request.Tools),
 		Metadata:                metadata,
@@ -2273,15 +2269,12 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 
 // convertTools 转换工具定义（从 OpenAI 嵌套格式转换为协议特定格式）
 func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string, includeMeta bool) interface{} {
-	enableNativeImageGeneration := p != nil && p.config != nil &&
-		p.config.EnableImageGeneration != nil && *p.config.EnableImageGeneration
 	return BuildToolDefinitionsForRequest(
 		chatToolsToToolDefinitions(tools),
 		protocol,
 		model,
 		p.config.ModelCapabilities,
 		includeMeta,
-		enableNativeImageGeneration,
 	)
 }
 

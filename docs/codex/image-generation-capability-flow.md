@@ -1,45 +1,43 @@
 # Codex Image Generation Capability Flow
 
 本文说明 `model_capabilities.native_tools.image_generation` 及其配套
-`input_modalities`，以及 provider 级 `enable_image_generation` 对 Codex 请求构造、
-模型可见工具、响应处理和图片落盘的影响。
+`input_modalities` 对 Codex 请求构造、模型可见工具、响应处理和图片落盘的影响。
 
 ## 相关参数
 
-配置分两层：
-
-1. **Provider 级 opt-in**（默认关闭）
-2. **Model 级 capability**（能力声明）
+配置以 **Model 级 capability**（能力声明）为准。provider 只负责声明
+`protocol: codex`；同一个 provider 下的不同模型可以分别启用或禁用图片生成。
 
 完整示例：
 
 ```yaml
-enable_image_generation: true   # provider 级；缺省或 false 时绝不自动注入
-model_capabilities:
-  "*":
-    input_modalities:
-      - text
-    native_tools:
-      image_generation: false
-  gpt-5.4-mini:
-    input_modalities:
-      - text
-      - image
-    native_tools:
-      image_generation: true
+providers:
+  items:
+    CODEX:
+      enabled: true
+      protocol: codex
+      model_capabilities:
+        "*":
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+        gpt-5.4-mini:
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
 ```
 
 字段含义：
 
-- `enable_image_generation`: provider 是否允许使用 Codex 原生 `image_generation`。
-  默认关闭，避免第三方兼容站因未知 tool 拒请求。
-- `native_tools.image_generation`: 表示该 provider/model 组合允许向 Codex Responses 请求暴露原生 `image_generation` tool。
+- `native_tools.image_generation`: 表示该模型允许向 Codex Responses 请求暴露原生 `image_generation` tool。
 - `input_modalities`: 必须同时包含 `text` 和 `image`，否则即使 `image_generation: true`，本地也不会注入图片生成工具。
 - `"*"`: 通配能力。精确 model 没命中时会回退到这里。
-
 配置说明文档：
 
-- `backend/docs/config/enable_image_generation.md`
+- `backend/docs/config/codex-native-image-generation.md`
 - `backend/docs/config/examples/codex-native-image-generation.yaml`
 
 能力解析逻辑在 `backend/internal/llm/model_capability.go`：
@@ -48,9 +46,9 @@ model_capabilities:
 2. 精确匹配不存在时，回退到 `"*"`。
 3. 如果 `"*"` 是 text-only 且 `image_generation: false`，该 model 就不会获得图片生成能力。
 
-## 开关判定
+## 能力判定
 
-最终是否注入 native tool，必须同时满足 **provider opt-in** 与 **model capability**。
+最终是否注入 native tool，只由 provider 协议和当前模型 capability 决定：
 
 ### Model capability（能力声明）
 
@@ -63,32 +61,15 @@ model_capabilities:
 
 任一条件不满足，返回 `false`。
 
-### Provider opt-in（总闸）
-
-`agentconfig.Provider.AllowsCodexImageGeneration()`：
-
-1. `enable_image_generation` 必须显式为 `true`。
-2. 字段缺失或 `false` 时返回 `false`。
-
-综合判定：
-
-- `agentconfig.ProviderHasCodexNativeImageGeneration(provider, model)`
-- `llm.CodexNativeImageGenerationEnabled(provider, model)`
-
-请求构造时：
-
-```text
-enableNativeImageGeneration && CodexImageGenerationEnabled(...)
-```
-
-其中 `enableNativeImageGeneration` 来自 provider 配置，而不是 model card 自动推导。
+`agentconfig.ProviderHasCodexNativeImageGeneration(provider, model)` 和
+`llm.CodexNativeImageGenerationEnabled(provider, model)` 都会检查 provider
+协议以及当前模型的 capability。
 
 ## 请求构造影响
 
 请求工具列表由 `BuildToolDefinitionsForRequest` 生成。
 
-当 provider 已 opt-in 且 `CodexImageGenerationEnabled(...) == true` 时，会在已有本地 function tools
-后追加一个原生工具：
+当 `CodexImageGenerationEnabled(...) == true` 时，会在已有本地 function tools 后追加一个原生工具：
 
 ```json
 {
@@ -100,7 +81,7 @@ enableNativeImageGeneration && CodexImageGenerationEnabled(...)
 这就是模型在请求 payload 里能看到的能力。模型不会只因为 skill 文本提到
 image generation 就获得该工具；必须由本地 runtime 在 `tools` 数组中显式注入。
 
-当开关为 `false` 时：
+当模型 capability 不满足时：
 
 - `tools` 里仍可能包含普通 function tools，例如 `execute_shell_command`、`apply_patch`。
 - `tools` 里不会包含 `{"type":"image_generation"}`。
@@ -175,10 +156,7 @@ gpt-5.4-mini:
     image_generation: true
 ```
 
-但仅有上述 model capability 还不够：provider 还必须显式设置
-`enable_image_generation: true`。当前很多 Codex 兼容 provider 默认不写该字段，
-因此即使 model card 已声明图片能力，chat 也不会自动注入 native tool。这是有意
-为之的安全默认值。
+上述 model capability 满足条件时即可注入 native tool。
 
 但 `backend/configs/config.runtime.snapshot.yaml` 中的 `codex_fox` 仍只声明了
 `"*"` 和 `gpt-5.4`，没有 `gpt-5.4-mini`。如果运行时加载的是 snapshot，
@@ -203,21 +181,18 @@ gpt-5.4-mini:
 2. 查响应是否有 `image_generation_call`。
 3. 查响应 `tool_usage.image_gen.total_tokens` 是否大于 0。
 4. 查 `generated_image_output_dir` 是否存在，以及目录下是否有 `.png`。
-5. 查 provider 是否显式设置了 `enable_image_generation: true`（默认关闭）。
-6. 查实际加载的 provider 配置是否包含精确 model 能力。
-7. 如果精确 model 不存在，检查 `"*"` 是否把图片能力关闭。
-8. 对比 `config.yaml` 和 `config.runtime.snapshot.yaml`，确认运行时使用的配置没有落后。
+5. 查实际加载的 provider 配置是否包含精确 model 能力。
+6. 如果精确 model 不存在，检查 `"*"` 是否把图片能力关闭。
+7. 对比 `config.yaml` 和 `config.runtime.snapshot.yaml`，确认运行时使用的配置没有落后。
 
 ## 行为总结
 
-`enable_image_generation` 是 provider 总闸；`native_tools.image_generation` 是 model
-能力声明。两者缺一不可。它们都不直接生成或保存图片。
+`native_tools.image_generation` 和 `input_modalities` 是 model 能力声明，不直接生成或保存图片。
 
 真正影响链路如下：
 
 ```text
-provider.enable_image_generation
-  -> AllowsCodexImageGeneration
+provider.protocol == codex
   +
 provider model_capabilities
   -> ResolveModelCapabilitySpec

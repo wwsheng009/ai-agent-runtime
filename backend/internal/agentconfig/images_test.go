@@ -274,16 +274,14 @@ func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
 }
 
 func TestSelectAllCodexNativeImageGenerationProviders_SelectsTextImageCodexModel(t *testing.T) {
-	enabled := true
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"CODEX_NATIVE": {
-					Enabled:               true,
-					Protocol:              "codex",
-					DefaultModel:          "gpt-5.4",
-					SupportedModels:       []string{"gpt-5.4"},
-					EnableImageGeneration: &enabled,
+					Enabled:         true,
+					Protocol:        "codex",
+					DefaultModel:    "gpt-5.4",
+					SupportedModels: []string{"gpt-5.4"},
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-5.4": {
 							InputModalities: []string{"text", "image"},
@@ -320,15 +318,13 @@ func TestSelectAllCodexNativeImageGenerationProviders_SelectsTextImageCodexModel
 }
 
 func TestSelectAllCodexNativeImageGenerationProviders_RejectsTextOnlyModel(t *testing.T) {
-	enabled := true
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"CODEX_TEXT": {
-					Enabled:               true,
-					Protocol:              "codex",
-					DefaultModel:          "gpt-5.4",
-					EnableImageGeneration: &enabled,
+					Enabled:      true,
+					Protocol:     "codex",
+					DefaultModel: "gpt-5.4",
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-5.4": {
 							InputModalities: []string{"text"},
@@ -347,7 +343,7 @@ func TestSelectAllCodexNativeImageGenerationProviders_RejectsTextOnlyModel(t *te
 	}
 }
 
-func TestSelectAllCodexNativeImageGenerationProviders_RejectsProviderWithoutOptIn(t *testing.T) {
+func TestSelectAllCodexNativeImageGenerationProviders_DoesNotRequireProviderOptIn(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
@@ -368,7 +364,11 @@ func TestSelectAllCodexNativeImageGenerationProviders_RejectsProviderWithoutOptI
 		},
 	}
 
-	if _, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{}); err == nil {
-		t.Fatal("expected error when provider has not opted in to native image generation")
+	selections, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{})
+	if err != nil {
+		t.Fatalf("native selection should rely on model capability: %v", err)
+	}
+	if len(selections) != 1 || selections[0].Model != "gpt-5.4" {
+		t.Fatalf("unexpected native selection without provider opt-in: %+v", selections)
 	}
 }

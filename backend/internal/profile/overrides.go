@@ -90,7 +90,6 @@ var providerItemAllowFields = map[string]struct{}{
 	"supports_max_output_tokens": {},
 	"timeout":                    {},
 	"requests_per_minute":        {},
-	"enable_image_generation":    {},
 }
 
 // overrideDenyRules 是 D14 的硬拒绝域（安全/信任边界）。deny 先于 allow 判定，

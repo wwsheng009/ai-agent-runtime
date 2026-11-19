@@ -36,15 +36,14 @@ type ProviderConfigUpdate struct {
 	// (providers.items.<name>.headers). Nil leaves headers untouched; a
 	// non-nil empty map removes the headers node. Header values may contain
 	// {session_id}-style template placeholders, resolved at request time.
-	Headers               *map[string]string
-	ModelsPath            *string
-	ModelsVerifiedAt      *string
-	SupportedModels       *[]string
-	DefaultModel          *string
-	SupportTypes          *[]string
-	MaxTokensLimit        *int
-	EnableImageGeneration *bool
-	ModelCapabilities     *map[string]ModelCapabilitySpec
+	Headers           *map[string]string
+	ModelsPath        *string
+	ModelsVerifiedAt  *string
+	SupportedModels   *[]string
+	DefaultModel      *string
+	SupportTypes      *[]string
+	MaxTokensLimit    *int
+	ModelCapabilities *map[string]ModelCapabilitySpec
 
 	// Site / account snapshot fields.
 	SiteType           *string
@@ -165,9 +164,6 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 		} else {
 			upsertYAMLMappingValue(node, "max_tokens_limit", intYAMLNode(*update.MaxTokensLimit))
 		}
-	}
-	if update.EnableImageGeneration != nil {
-		upsertYAMLMappingValue(node, "enable_image_generation", boolYAMLNode(*update.EnableImageGeneration))
 	}
 	if update.ModelCapabilities != nil {
 		if len(*update.ModelCapabilities) == 0 {

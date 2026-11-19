@@ -3359,7 +3359,6 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			SupportedModels:       append([]string(nil), session.Provider.SupportedModels...),
 			ModelMappings:         cloneStringMap(session.Provider.ModelMappings),
 			ModelCapabilities:     cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
-			EnableImageGeneration: session.Provider.EnableImageGeneration,
 			Headers:               effectiveChatProviderHeaders(session),
 			HeaderMappings:        cloneStringMap(session.Provider.HeaderMappings),
 			ResponseMarkerRules:   cloneResponseMarkerRules(session.Provider.ResponseMarkerRules),

@@ -19,9 +19,6 @@ type providerAdapterRequestInput struct {
 	Model                   string
 	SupportsMaxOutputTokens *bool
 	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec
-	// EnableImageGeneration is the provider-level Codex native image_generation
-	// opt-in. Nil/false keeps the tool out of request payloads by default.
-	EnableImageGeneration *bool
 
 	Messages []map[string]interface{}
 	Tools    []types.ToolDefinition
@@ -98,8 +95,7 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		}
 	}
 	var tools interface{}
-	enableNativeImageGeneration := input.EnableImageGeneration != nil && *input.EnableImageGeneration
-	if len(input.Tools) > 0 || enableNativeImageGeneration {
+	if len(input.Tools) > 0 || CodexImageGenerationEnabled(input.Protocol, input.Model, modelCapabilities) {
 		tools = BuildToolDefinitionsForRequestWithImageOptions(
 			input.Tools,
 			input.Protocol,
@@ -107,7 +103,6 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 			modelCapabilities,
 			false,
 			CodexImageGenerationOptionsFromMetadata(metadata),
-			enableNativeImageGeneration,
 		)
 	}
 

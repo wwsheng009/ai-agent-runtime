@@ -85,7 +85,7 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 		{Name: "bash", Description: "执行 Shell 命令", Parameters: map[string]interface{}{"type": "object"}},
 	}
 
-	got := client.convertTools(tools, "codex", "", nil, false, false)
+	got := client.convertTools(tools, "codex", "", nil, false)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}
@@ -118,7 +118,7 @@ func TestGatewayClient_ConvertTools_CodexAddsImageGenerationWhenModelCapabilityA
 				ImageGeneration: true,
 			},
 		},
-	}, true, true)
+	}, false)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}
@@ -168,8 +168,6 @@ func TestGatewayClientCall_FallbackScopesCacheKeyToFinalWireToolGeneration(t *te
 	}))
 	defer server.Close()
 
-	enabled := true
-	disabled := false
 	nativeCapability := map[string]agentconfig.ModelCapabilitySpec{
 		"gpt-5.4": {
 			InputModalities: []string{"text", "image"},
@@ -181,22 +179,24 @@ func TestGatewayClientCall_FallbackScopesCacheKeyToFinalWireToolGeneration(t *te
 	rm := &gatewaySequenceResourceManager{selected: []*SelectedResource{
 		{
 			Provider: &ProviderResource{
-				Name:                  "codex-native-image",
-				Type:                  "codex",
-				BaseURL:               server.URL,
-				EnableImageGeneration: &enabled,
-				ModelCapabilities:     nativeCapability,
+				Name:              "codex-native-image",
+				Type:              "codex",
+				BaseURL:           server.URL,
+				ModelCapabilities: nativeCapability,
 			},
 			KeyValue: "test-key",
 			Model:    "gpt-5.4",
 		},
 		{
 			Provider: &ProviderResource{
-				Name:                  "codex-local-image-tool",
-				Type:                  "codex",
-				BaseURL:               server.URL,
-				EnableImageGeneration: &disabled,
-				ModelCapabilities:     nativeCapability,
+				Name:    "codex-local-image-tool",
+				Type:    "codex",
+				BaseURL: server.URL,
+				ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+					"gpt-5.4": {
+						InputModalities: []string{"text"},
+					},
+				},
 			},
 			KeyValue: "test-key",
 			Model:    "gpt-5.4",
@@ -367,7 +367,7 @@ func TestGatewayClientCall_RepeatedIdenticalRequestsReusePromptCacheKey(t *testi
 	require.Equal(t, bodies[0]["tools"], bodies[1]["tools"])
 }
 
-func TestGatewayClient_ConvertTools_CodexDoesNotAddImageGenerationWhenProviderDisabled(t *testing.T) {
+func TestGatewayClient_ConvertTools_CodexAddsImageGenerationFromModelCapability(t *testing.T) {
 	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
 	caps := map[string]agentconfig.ModelCapabilitySpec{
 		"gpt-5.4": {
@@ -378,60 +378,11 @@ func TestGatewayClient_ConvertTools_CodexDoesNotAddImageGenerationWhenProviderDi
 		},
 	}
 
-	got := client.convertTools(nil, "codex", "gpt-5.4", caps, false, false)
-	assert.Nil(t, got)
-}
-
-func TestEnableImageGenerationFromSelected(t *testing.T) {
-	enabled := true
-	disabled := false
-
-	t.Run("nil selected", func(t *testing.T) {
-		assert.Nil(t, enableImageGenerationFromSelected(nil))
-	})
-
-	t.Run("prefers top-level field", func(t *testing.T) {
-		got := enableImageGenerationFromSelected(&SelectedResource{
-			Provider: &ProviderResource{
-				EnableImageGeneration: &enabled,
-				Config: agentconfig.Provider{
-					EnableImageGeneration: &disabled,
-				},
-			},
-		})
-		require.NotNil(t, got)
-		assert.True(t, *got)
-	})
-
-	t.Run("falls back to config value", func(t *testing.T) {
-		got := enableImageGenerationFromSelected(&SelectedResource{
-			Provider: &ProviderResource{
-				Config: agentconfig.Provider{
-					EnableImageGeneration: &enabled,
-				},
-			},
-		})
-		require.NotNil(t, got)
-		assert.True(t, *got)
-	})
-
-	t.Run("falls back to config pointer", func(t *testing.T) {
-		got := enableImageGenerationFromSelected(&SelectedResource{
-			Provider: &ProviderResource{
-				Config: &agentconfig.Provider{
-					EnableImageGeneration: &enabled,
-				},
-			},
-		})
-		require.NotNil(t, got)
-		assert.True(t, *got)
-	})
-
-	t.Run("defaults off when unset", func(t *testing.T) {
-		assert.Nil(t, enableImageGenerationFromSelected(&SelectedResource{
-			Provider: &ProviderResource{},
-		}))
-	})
+	got := client.convertTools(nil, "codex", "gpt-5.4", caps, false)
+	toolList, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolList, 1)
+	assert.Equal(t, "image_generation", toolList[0]["type"])
 }
 
 func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
@@ -725,7 +676,6 @@ func TestGatewayClient_CallProvider_SavesGeneratedImagesAndReturnsMetadata(t *te
 	}))
 	defer server.Close()
 
-	enabledImageGeneration := true
 	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
 	selected := &SelectedResource{
 		Provider: &ProviderResource{
@@ -741,8 +691,7 @@ func TestGatewayClient_CallProvider_SavesGeneratedImagesAndReturnsMetadata(t *te
 				},
 			},
 			Config: agentconfig.Provider{
-				Protocol:              "codex",
-				EnableImageGeneration: &enabledImageGeneration,
+				Protocol: "codex",
 			},
 		},
 		KeyValue: "test-key",

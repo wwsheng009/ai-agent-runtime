@@ -40,7 +40,7 @@ Main sections:
 - `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`
 - `agent-memory/` - Agent Memory v2 专题：Codex 记忆机制分析、当前运行时差距、目标架构、数据模型/API、实施与验收方案
 - `dsh-superagent-prototype/` - dsh-superagent 原型借鉴与利用分析：授权分诊、工单生命周期、durable 副作用/出站回执、Source 连接器契约，及面向 AAR 既有设施的落点矩阵与落地顺序（分析入口 `dsh-superagent-prototype/README.md`；实施方案 `dsh-superagent-prototype/implementation-plan.md`）
-- Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
+- Provider configuration and model capability references live under `backend/docs/config/`
 
 Recommended starting points:
 
