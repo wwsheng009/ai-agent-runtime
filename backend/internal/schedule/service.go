@@ -19,13 +19,22 @@ type CatalogEntry struct {
 	Status    Status `json:"status"`
 	Origin    Origin `json:"origin,omitempty"`
 	// J1/J3：执行上下文与创建者（前端展示 / 归属）。
-	TargetKind      TargetKind `json:"targetKind,omitempty"`
+	// 不使用 omitempty：空值被省略时前端无法区分“会话任务”与“字段缺失”，
+	// 会退化成按会话任务校验，导致无人值守/工作区任务被误判。
+	TargetKind      TargetKind `json:"targetKind"`
 	TargetWorkspace string     `json:"targetWorkspace,omitempty"`
 	TargetProfile   string     `json:"targetProfile,omitempty"`
 	// CreatedBySessionID lets management surfaces act on non-session targets
 	// (headless/workspace) without pretending they are bound to a session.
 	CreatedBySessionID string           `json:"createdBySessionId,omitempty"`
 	LastDelivery       *DeliveryReceipt `json:"lastDelivery,omitempty"`
+	LastErrorCode      string           `json:"lastErrorCode,omitempty"`
+	LastError          string           `json:"lastError,omitempty"`
+	// Delivery bookkeeping is exposed for management UIs: a failed delivery must
+	// be visible even before the next successful receipt (LastDelivery stays old).
+	AttemptCount   int        `json:"attemptCount,omitempty"`
+	LastAttemptAt  *time.Time `json:"lastAttemptAt,omitempty"`
+	DeadLetteredAt *time.Time `json:"deadLetteredAt,omitempty"`
 }
 
 // DeleteResult 是删除结果（含非变更的未找到）。
@@ -281,6 +290,11 @@ func (s *Service) Catalog() ([]CatalogEntry, error) {
 			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin,
 			TargetKind: task.TargetKind, TargetWorkspace: task.TargetWorkspace, TargetProfile: task.TargetProfile,
 			CreatedBySessionID: task.CreatedBySessionID, LastDelivery: task.LastDelivery,
+			LastErrorCode:  task.LastErrorCode,
+			LastError:      task.LastError,
+			AttemptCount:   task.AttemptCount,
+			LastAttemptAt:  task.LastAttemptAt,
+			DeadLetteredAt: task.DeadLetteredAt,
 		})
 	}
 	return entries, nil
@@ -385,7 +399,11 @@ func (s *Service) Delete(sessionID, id string) (DeleteResult, error) {
 		return DeleteResult{}, err
 	}
 	if !ok || !taskOwnedBy(task, sessionID) {
-		return DeleteResult{ID: id, Deleted: false, Code: CodeNotFound}, nil
+		code := CodeNotFound
+		if ok {
+			code = taskAccessDeniedCode(task, sessionID)
+		}
+		return DeleteResult{ID: id, Deleted: false, Code: code}, nil
 	}
 	deleted, err := s.store.Delete(id)
 	if err != nil {
@@ -398,7 +416,7 @@ func (s *Service) Delete(sessionID, id string) (DeleteResult, error) {
 	return DeleteResult{ID: id, Deleted: true}, nil
 }
 
-// Update 以完整 expected 记录比较并原地修改名称、指令与时间。
+// Update 以完整 expected 记录比较并原地修改内容、执行上下文与时间。
 func (s *Service) Update(sessionID, id string, expected Record, content UpdateContent, change *TimingChange) (UpdateResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -407,9 +425,16 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 		return UpdateResult{}, err
 	}
 	if !ok || !taskOwnedBy(current, sessionID) {
-		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
+		code := CodeNotFound
+		if ok {
+			code = taskAccessDeniedCode(current, sessionID)
+		}
+		return UpdateResult{ID: id, Updated: false, Code: code}, nil
 	}
-	if current.Status != StatusActive && current.Status != StatusPaused {
+	if current.Status != StatusActive &&
+		current.Status != StatusPaused &&
+		current.Status != StatusBlocked &&
+		current.Status != StatusInactive {
 		return UpdateResult{ID: id, Updated: false, Code: CodeEnded}, nil
 	}
 	if !recordsEqual(current.Record, expected) {
@@ -431,6 +456,14 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 		}
 		prompt = validated
 	}
+	goal := current.Record.Goal
+	if content.Goal != nil {
+		goal = strings.TrimSpace(*content.Goal)
+	}
+	plan := current.Record.Plan
+	if content.Plan != nil {
+		plan = normalizePlan(*content.Plan)
+	}
 	updated := current.Record
 	if change != nil {
 		replaced, err := applyTimingChange(current.Record, prompt, title, change, s.clock())
@@ -442,12 +475,38 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 		updated.Title = title
 		updated.Prompt = prompt
 	}
-	if recordsEqual(updated, current.Record) {
+	updated.Goal = goal
+	updated.Plan = plan
+
+	target, targetChanged, err := resolveUpdateTarget(current, sessionID, content)
+	if err != nil {
+		return updateInputFailure(id, err)
+	}
+	if target.kind != TargetSession && strings.TrimSpace(updated.Goal) == "" {
+		return updateInputFailure(id, inputError(CodeInvalidRule,
+			"goal is required when target_kind is workspace or headless"))
+	}
+	if recordsEqual(updated, current.Record) && !targetChanged {
 		record := current.Record
 		return UpdateResult{ID: id, Updated: false, Record: &record, Status: current.Status}, nil
 	}
 	next := current
 	next.Record = updated
+	next.SessionID = target.sessionID
+	next.TargetKind = target.kind
+	next.TargetWorkspace = target.workspace
+	next.TargetProfile = target.profile
+	next.CreatedBySessionID = target.createdBySessionID
+	nextStatus := current.Status
+	// A timing edit explicitly re-arms an ended one-shot task. Content-only edits
+	// keep the task inactive so fixing a label never causes an accidental delivery.
+	if current.Status == StatusInactive && change != nil {
+		nextStatus = StatusActive
+		next.AttemptCount = 0
+		next.LastAttemptAt = nil
+		next.DeadLetteredAt = nil
+	}
+	next.Status = nextStatus
 	applied, err := s.store.UpdateCAS(next, current.StateVersion)
 	if err != nil {
 		return UpdateResult{}, err
@@ -455,8 +514,90 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 	if !applied {
 		return UpdateResult{ID: id, Updated: false, Code: CodeConflict}, nil
 	}
+	if current.Status == StatusInactive && change != nil {
+		// Re-arming a task starts a fresh retry budget; attempt columns are
+		// bookkeeping outside state_version, so persist the reset explicitly.
+		if attempts, ok := s.store.(TaskAttemptStore); ok {
+			_ = attempts.ClearTaskAttempts(id)
+		}
+	}
 	s.emitChanged()
-	return UpdateResult{ID: id, Updated: true, Record: &updated, Status: current.Status}, nil
+	return UpdateResult{ID: id, Updated: true, Record: &updated, Status: nextStatus}, nil
+}
+
+type updateTargetState struct {
+	createdBySessionID string
+	kind               TargetKind
+	profile            string
+	sessionID          string
+	workspace          string
+}
+
+func resolveUpdateTarget(
+	current Task,
+	actorSessionID string,
+	content UpdateContent,
+) (updateTargetState, bool, error) {
+	currentKind := NormalizeTargetKind(string(current.TargetKind))
+	kind := currentKind
+	if content.TargetKind != nil {
+		kind = NormalizeTargetKind(string(*content.TargetKind))
+	}
+
+	workspace := strings.TrimSpace(current.TargetWorkspace)
+	if content.TargetWorkspace != nil {
+		workspace = strings.TrimSpace(*content.TargetWorkspace)
+	}
+	profile := strings.TrimSpace(current.TargetProfile)
+	if content.TargetProfile != nil {
+		profile = strings.TrimSpace(*content.TargetProfile)
+	}
+	sessionID := strings.TrimSpace(current.SessionID)
+	if content.TargetSessionID != nil {
+		sessionID = strings.TrimSpace(*content.TargetSessionID)
+	}
+	creator := strings.TrimSpace(current.CreatedBySessionID)
+	actor := strings.TrimSpace(actorSessionID)
+	if creator == "" {
+		creator = actor
+	}
+
+	switch kind {
+	case TargetSession:
+		if sessionID == "" {
+			sessionID = creator
+		}
+		if sessionID == "" {
+			return updateTargetState{}, false, inputError(CodeInvalidRule,
+				"target_session_id is required when target_kind=session")
+		}
+		// Session targets do not execute in a separate workspace/profile.
+		workspace = ""
+		profile = ""
+	case TargetWorkspace:
+		sessionID = ""
+		if workspace == "" {
+			return updateTargetState{}, false, inputError(CodeInvalidRule,
+				"target_workspace is required when target_kind=workspace")
+		}
+	case TargetHeadless:
+		sessionID = ""
+		workspace = ""
+	}
+
+	next := updateTargetState{
+		createdBySessionID: creator,
+		kind:               kind,
+		profile:            profile,
+		sessionID:          sessionID,
+		workspace:          workspace,
+	}
+	changed := kind != currentKind ||
+		next.sessionID != strings.TrimSpace(current.SessionID) ||
+		next.workspace != strings.TrimSpace(current.TargetWorkspace) ||
+		next.profile != strings.TrimSpace(current.TargetProfile) ||
+		next.createdBySessionID != strings.TrimSpace(current.CreatedBySessionID)
+	return next, changed, nil
 }
 
 // Pause moves an active task to the non-terminal paused state. Paused tasks
@@ -470,7 +611,11 @@ func (s *Service) Pause(sessionID, id string) (UpdateResult, error) {
 		return UpdateResult{}, err
 	}
 	if !ok || !taskOwnedBy(current, sessionID) {
-		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
+		code := CodeNotFound
+		if ok {
+			code = taskAccessDeniedCode(current, sessionID)
+		}
+		return UpdateResult{ID: id, Updated: false, Code: code}, nil
 	}
 	switch current.Status {
 	case StatusPaused:
@@ -496,7 +641,7 @@ func (s *Service) Pause(sessionID, id string) (UpdateResult, error) {
 	return UpdateResult{ID: id, Updated: true, Record: &record, Status: StatusPaused}, nil
 }
 
-// Resume makes a paused task schedulable again. If its committed target is
+// Resume makes a paused or inactive task schedulable again. If its committed target is
 // still in the future it is preserved. Once the target has passed, recurring
 // rules advance to a fresh future occurrence; one-shot "after" gets a fresh
 // delay, while a passed "at" target must be edited explicitly (never silently
@@ -509,14 +654,19 @@ func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
 		return UpdateResult{}, err
 	}
 	if !ok || !taskOwnedBy(current, sessionID) {
-		return UpdateResult{ID: id, Updated: false, Code: CodeNotFound}, nil
+		code := CodeNotFound
+		if ok {
+			code = taskAccessDeniedCode(current, sessionID)
+		}
+		return UpdateResult{ID: id, Updated: false, Code: code}, nil
 	}
 	switch current.Status {
 	case StatusActive:
 		record := current.Record
 		return UpdateResult{ID: id, Updated: false, Record: &record, Status: StatusActive}, nil
-	case StatusPaused:
-		// Continue below.
+	case StatusPaused, StatusBlocked, StatusInactive:
+		// Continue below. Inactive one-shot tasks get the same explicit re-arm
+		// behavior as paused tasks; an expired absolute "at" still needs editing.
 	default:
 		return UpdateResult{ID: id, Updated: false, Status: current.Status, Code: CodeEnded,
 			Message: "ended tasks cannot be resumed; create a new task instead"}, nil
@@ -529,6 +679,8 @@ func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
 	next := current
 	next.Record = record
 	next.Status = StatusActive
+	next.LastError = ""
+	next.LastErrorCode = ""
 	// A manual resume is an explicit recovery action; old delivery failures
 	// must not immediately dead-letter the task again.
 	next.AttemptCount = 0
@@ -541,6 +693,11 @@ func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
 	if !applied {
 		return UpdateResult{ID: id, Updated: false, Status: StatusPaused, Code: CodeConflict}, nil
 	}
+	// Attempt columns are bookkeeping outside state_version: clear them
+	// explicitly so a resumed task does not inherit the old dead-letter budget.
+	if attempts, ok := s.store.(TaskAttemptStore); ok {
+		_ = attempts.ClearTaskAttempts(id)
+	}
 	s.emitChanged()
 	return UpdateResult{ID: id, Updated: true, Record: &record, Status: StatusActive}, nil
 }
@@ -548,9 +705,28 @@ func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
 func taskOwnedBy(task Task, sessionID string) bool {
 	owner := strings.TrimSpace(sessionID)
 	if owner == "" {
-		return false
+		// A management surface may have no session context at all (the global
+		// schedule page). Non-session tasks are addressed by their unguessable ID,
+		// not by a session binding, so they remain manageable. Session-bound
+		// tasks still require their binding or creator session.
+		if NormalizeTargetKind(string(task.TargetKind)) != TargetSession {
+			return true
+		}
+		return strings.TrimSpace(task.SessionID) == "" &&
+			strings.TrimSpace(task.CreatedBySessionID) == ""
 	}
 	return task.SessionID == owner || task.CreatedBySessionID == owner
+}
+
+// taskAccessDeniedCode 区分“任务不存在”和“会话型任务缺少管理会话”。
+// 前端据此给出可操作提示，而不是把缺会话误报成任务已消失。
+func taskAccessDeniedCode(task Task, sessionID string) Code {
+	if strings.TrimSpace(sessionID) == "" &&
+		NormalizeTargetKind(string(task.TargetKind)) == TargetSession &&
+		(strings.TrimSpace(task.SessionID) != "" || strings.TrimSpace(task.CreatedBySessionID) != "") {
+		return CodeSessionRequired
+	}
+	return CodeNotFound
 }
 
 // resumeScheduleRecord advances a paused record to a safe future target.
@@ -597,9 +773,14 @@ func updateInputFailure(id string, err error) (UpdateResult, error) {
 	return UpdateResult{}, err
 }
 
-// applyTimingChange 计算新的记录（P0 支持 at/every；after 仅创建时可用）。
+// applyTimingChange 计算新的记录；after 以本次编辑提交时间为新起点。
 func applyTimingChange(current Record, prompt, title string, change *TimingChange, now time.Time) (Record, error) {
 	switch change.Kind {
+	case KindAfter:
+		if change.AfterSeconds == nil {
+			return Record{}, inputError(CodeInvalidRule, "after timing change requires after_seconds.")
+		}
+		return CreateAfter(current.ID, prompt, title, *change.AfterSeconds, now)
 	case KindAt:
 		if change.At == nil {
 			return Record{}, inputError(CodeInvalidRule, "at timing change requires at.")

@@ -128,17 +128,24 @@ func (h *Handler) GetScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 type scheduleUpdateRequest struct {
-	SessionID string                `json:"session_id"`
-	ID        string                `json:"id"`
-	Expected  schedule.Record       `json:"expected"`
-	Title     *string               `json:"title,omitempty"`
-	Prompt    *string               `json:"prompt,omitempty"`
-	Change    *scheduleTimingChange `json:"change,omitempty"`
+	SessionID       string                `json:"session_id"`
+	ID              string                `json:"id"`
+	Expected        schedule.Record       `json:"expected"`
+	Title           *string               `json:"title,omitempty"`
+	Prompt          *string               `json:"prompt,omitempty"`
+	Goal            *string               `json:"goal,omitempty"`
+	Plan            *[]string             `json:"plan,omitempty"`
+	TargetKind      *string               `json:"target_kind,omitempty"`
+	TargetWorkspace *string               `json:"target_workspace,omitempty"`
+	TargetProfile   *string               `json:"target_profile,omitempty"`
+	TargetSessionID *string               `json:"target_session_id,omitempty"`
+	Change          *scheduleTimingChange `json:"change,omitempty"`
 }
 
 type scheduleTimingChange struct {
 	Kind         schedule.Kind `json:"kind"`
 	At           *string       `json:"at,omitempty"`
+	AfterSeconds *int64        `json:"after_seconds,omitempty"`
 	EverySeconds *int64        `json:"every_seconds,omitempty"`
 	Daily        *struct {
 		Time     string `json:"time"`
@@ -190,7 +197,10 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	// J1：只有 session 目标要求 session_id；workspace/headless 目标不绑会话。
 	if schedule.NormalizeTargetKind(request.TargetKind) == schedule.TargetSession && strings.TrimSpace(request.SessionID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id is required for target_kind=session"))
+		h.writeScheduleInputError(w, http.StatusBadRequest, &schedule.InputError{
+			Code:    schedule.CodeInvalidSelector,
+			Message: "session_id is required for target_kind=session",
+		})
 		return
 	}
 	req := schedule.CreateRequest{
@@ -211,7 +221,7 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 	record, err := service.Create(request.SessionID, req, schedule.OriginManual)
 	if err != nil {
 		if input, ok := schedule.IsInputError(err); ok {
-			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, string(input.Code)+": "+input.Message))
+			h.writeScheduleInputError(w, http.StatusBadRequest, input)
 			return
 		}
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -230,6 +240,23 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeScheduleInputError keeps the stable schedule business code separate
+// from the human-readable message. Clients can now localize invalid_selector,
+// not_future, and related input failures without parsing a concatenated string.
+func (h *Handler) writeScheduleInputError(w http.ResponseWriter, status int, input *schedule.InputError) {
+	if input == nil {
+		h.writeError(w, status, errors.New(errors.ErrValidationFailed, "invalid schedule input"))
+		return
+	}
+	h.writeJSON(w, status, map[string]interface{}{
+		"error": input.Message,
+		"code":  string(input.Code),
+		"context": map[string]interface{}{
+			"schedule_code": string(input.Code),
+		},
+	})
+}
+
 // UpdateScheduleTask edits one reminder in place within its original Session binding.
 func (h *Handler) UpdateScheduleTask(w http.ResponseWriter, r *http.Request) {
 	service := h.getScheduleService()
@@ -242,11 +269,26 @@ func (h *Handler) UpdateScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
 		return
 	}
-	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+	// Non-session targets (headless/workspace) have no session binding; the
+	// management surface addresses them by task id alone. Session ownership is
+	// still enforced by the service when session_id is present or required.
+	if strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
 		return
 	}
-	content := schedule.UpdateContent{Title: request.Title, Prompt: request.Prompt}
+	content := schedule.UpdateContent{
+		Title:           request.Title,
+		Prompt:          request.Prompt,
+		Goal:            request.Goal,
+		Plan:            request.Plan,
+		TargetWorkspace: request.TargetWorkspace,
+		TargetProfile:   request.TargetProfile,
+		TargetSessionID: request.TargetSessionID,
+	}
+	if request.TargetKind != nil {
+		targetKind := schedule.NormalizeTargetKind(*request.TargetKind)
+		content.TargetKind = &targetKind
+	}
 	result, err := service.Update(request.SessionID, request.ID, request.Expected, content, toTimingChange(request.Change))
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -279,8 +321,8 @@ func (h *Handler) PauseScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
 		return
 	}
-	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+	if strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
 		return
 	}
 	result, err := service.Pause(request.SessionID, request.ID)
@@ -291,9 +333,9 @@ func (h *Handler) PauseScheduleTask(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, result)
 }
 
-// ResumeScheduleTask re-arms a paused reminder. A future committed target is
-// preserved; recurring rules advance once their old target has passed, while a
-// past absolute "at" target requires an explicit edit first.
+// ResumeScheduleTask re-arms a paused or inactive reminder. A future committed
+// target is preserved; recurring rules advance once their old target has
+// passed, while a past absolute "at" target requires an explicit edit first.
 func (h *Handler) ResumeScheduleTask(w http.ResponseWriter, r *http.Request) {
 	service := h.getScheduleService()
 	if service == nil {
@@ -305,8 +347,8 @@ func (h *Handler) ResumeScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
 		return
 	}
-	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+	if strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
 		return
 	}
 	result, err := service.Resume(request.SessionID, request.ID)
@@ -329,8 +371,8 @@ func (h *Handler) DeleteScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
 		return
 	}
-	if strings.TrimSpace(request.SessionID) == "" || strings.TrimSpace(request.ID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+	if strings.TrimSpace(request.ID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
 		return
 	}
 	result, err := service.Delete(request.SessionID, request.ID)
@@ -345,7 +387,12 @@ func toTimingChange(change *scheduleTimingChange) *schedule.TimingChange {
 	if change == nil {
 		return nil
 	}
-	out := &schedule.TimingChange{Kind: change.Kind, At: change.At, EverySeconds: change.EverySeconds}
+	out := &schedule.TimingChange{
+		Kind:         change.Kind,
+		At:           change.At,
+		AfterSeconds: change.AfterSeconds,
+		EverySeconds: change.EverySeconds,
+	}
 	if change.Daily != nil {
 		out.Daily = &schedule.DailyInput{Time: change.Daily.Time, TimeZone: change.Daily.TimeZone}
 	}

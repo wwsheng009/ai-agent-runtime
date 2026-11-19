@@ -7,11 +7,11 @@ import (
 )
 
 // TestStoreSchemaVersionRoundTrip 钉住 S3 版本握手的两个事实：
-// ① SupportedSchemaVersion 不低于 v6（交付账本引入档）；② 新库迁移后
+// ① SupportedSchemaVersion 不低于 v9（错误码引入档）；② 新库迁移后
 // SchemaVersion 读到与支持档一致的版本——能力位标记与选主自检都依赖它。
 func TestStoreSchemaVersionRoundTrip(t *testing.T) {
-	if SupportedSchemaVersion() < 6 {
-		t.Fatalf("supported schema = %d, want >= 6 (delivery ledger)", SupportedSchemaVersion())
+	if SupportedSchemaVersion() < 9 {
+		t.Fatalf("supported schema = %d, want >= 9 (schedule error codes)", SupportedSchemaVersion())
 	}
 	store, err := OpenStore(filepath.Join(t.TempDir(), "schedule.sqlite"))
 	if err != nil {

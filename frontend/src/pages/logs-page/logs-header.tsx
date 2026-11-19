@@ -9,6 +9,7 @@ import {
   ShieldIcon,
   TerminalSquareIcon,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
@@ -74,6 +75,19 @@ export function LogsHeaderSection({
 }: LogsHeaderSectionProps) {
   const { t } = useTranslation("logs");
   const { t: tCommon } = useTranslation("common");
+  // The URL is the shareable source of truth, but it updates through React
+  // Router's transition. Binding the input directly to it lets a deferred
+  // render reset the field between keystrokes ("headless" → "hes"). Keep a
+  // local draft while the field is focused; adopt external URL changes (chip
+  // clear / back-forward) whenever focus is elsewhere.
+  const [queryDraft, setQueryDraft] = useState(query);
+  const queryFocusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!queryFocusedRef.current && query !== queryDraft) {
+      setQueryDraft(query);
+    }
+  }, [query, queryDraft]);
 
   const levelFilterOptions = [
     { value: "", label: t("allLevels") },
@@ -164,8 +178,24 @@ export function LogsHeaderSection({
             />
             <Input
               size="sm"
-              value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
+              value={queryDraft}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setQueryDraft(nextValue);
+                onQueryChange(nextValue);
+              }}
+              onFocus={() => {
+                queryFocusedRef.current = true;
+              }}
+              onBlur={() => {
+                queryFocusedRef.current = false;
+                // Flush the final draft once focus leaves; otherwise a lagging
+                // transition could leave the visible field and the filter URL
+                // out of sync.
+                if (query !== queryDraft) {
+                  onQueryChange(queryDraft);
+                }
+              }}
               placeholder={t("searchPlaceholder")}
               aria-label={t("searchPlaceholder")}
               className="bg-black/15 pl-10 pr-4 app-text-11"

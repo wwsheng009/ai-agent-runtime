@@ -111,6 +111,19 @@ function normalizeTargetKind(value: unknown): RuntimeScheduleTargetKind {
   return raw === "workspace" || raw === "headless" ? raw : "session";
 }
 
+function normalizeScheduleStatus(value: unknown): RuntimeScheduleTask["status"] {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (
+    raw === "inactive" ||
+    raw === "paused" ||
+    raw === "blocked" ||
+    raw === "failed"
+  ) {
+    return raw;
+  }
+  return "active";
+}
+
 /** 归一化一条记录（`Record` 与 `CatalogEntry` 共用的规则字段部分）。 */
 export function normalizeScheduleRecord(raw: unknown): RuntimeScheduleRecord {
   const record = asRecord(raw) ?? {};
@@ -138,13 +151,26 @@ export function normalizeScheduleTask(raw: unknown): RuntimeScheduleTask {
   const base = normalizeScheduleRecord(raw);
   const lastDeliveryRaw = asRecord(record.lastDelivery ?? record.LastDelivery);
   const origin = pickString(record, "origin", "Origin");
-  const rawStatus = pickString(record, "status", "Status").trim().toLowerCase();
-  const status =
-    rawStatus === "inactive" ? "inactive" : rawStatus === "paused" ? "paused" : "active";
+  const status = normalizeScheduleStatus(
+    pickString(record, "status", "Status"),
+  );
   return {
     ...base,
     sessionId: pickString(record, "sessionId", "SessionID", "session_id"),
     status,
+    lastErrorCode:
+      pickString(record, "lastErrorCode", "LastErrorCode", "last_error_code") ||
+      undefined,
+    lastError:
+      pickString(record, "lastError", "LastError", "last_error") || undefined,
+    attemptCount:
+      pickNumber(record, "attemptCount", "AttemptCount", "attempt_count"),
+    lastAttemptAt:
+      pickString(record, "lastAttemptAt", "LastAttemptAt", "last_attempt_at") ||
+      undefined,
+    deadLetteredAt:
+      pickString(record, "deadLetteredAt", "DeadLetteredAt", "dead_lettered_at") ||
+      undefined,
     origin: (origin === "manual" ? "manual" : "model") as RuntimeScheduleOrigin,
     targetKind: normalizeTargetKind(record.targetKind ?? record.TargetKind ?? record.target_kind),
     targetWorkspace:
@@ -230,7 +256,7 @@ export async function fetchScheduleHistory(
 
 /** 读取某作业的运行历史（J3；新到旧，limit 有界）。 */
 export async function fetchScheduleJobRuns(
-  sessionId: string,
+  sessionId: string | undefined,
   id: string,
   limit = 20,
 ): Promise<RuntimeScheduleJobRunsResponse> {
@@ -262,6 +288,8 @@ function normalizeJobRun(raw: unknown): RuntimeScheduleJobRun {
     status: (status === "failed" ? "failed" : "done") as RuntimeScheduleJobRunStatus,
     output: pickString(run, "output", "Output") || undefined,
     error: pickString(run, "error", "Error") || undefined,
+    errorCode:
+      pickString(run, "errorCode", "ErrorCode", "error_code") || undefined,
     sessionId: pickString(run, "sessionId", "SessionID", "session_id") || undefined,
     startedAt: pickString(run, "startedAt", "StartedAt"),
     finishedAt: pickString(run, "finishedAt", "FinishedAt"),
@@ -280,6 +308,12 @@ export async function updateScheduleTask(
       expected: request.expected,
       title: request.title,
       prompt: request.prompt,
+      goal: request.goal,
+      plan: request.plan,
+      target_kind: request.target_kind,
+      target_workspace: request.target_workspace,
+      target_profile: request.target_profile,
+      target_session_id: request.target_session_id,
       change: request.change,
     }),
   });
@@ -295,7 +329,11 @@ function normalizeScheduleUpdateResponse(payload: unknown): RuntimeScheduleUpdat
     record:
       record.record !== undefined ? normalizeScheduleRecord(record.record) : undefined,
     status:
-      rawStatus === "active" || rawStatus === "paused" || rawStatus === "inactive"
+      rawStatus === "active" ||
+      rawStatus === "paused" ||
+      rawStatus === "blocked" ||
+      rawStatus === "failed" ||
+      rawStatus === "inactive"
         ? rawStatus
         : undefined,
     code: pickString(record, "code", "Code") || undefined,
@@ -351,10 +389,30 @@ export async function deleteScheduleTask(
 export async function createScheduleTask(
   request: RuntimeScheduleCreateRequest,
 ): Promise<RuntimeScheduleCreateResponse> {
+  // Keep the public form/request model camelCase where it is convenient for
+  // React, but make the HTTP boundary explicit. The schedule handler only
+  // accepts snake_case JSON (notably session_id); serializing request directly
+  // makes the default session target fail validation.
+  const requestBody = {
+    session_id: request.sessionId,
+    title: request.title,
+    prompt: request.prompt,
+    after_seconds: request.after_seconds,
+    at: request.at,
+    every_seconds: request.every_seconds,
+    daily: request.daily,
+    weekly: request.weekly,
+    cron: request.cron,
+    goal: request.goal,
+    plan: request.plan,
+    target_kind: request.target_kind ?? "session",
+    target_workspace: request.target_workspace,
+    target_profile: request.target_profile,
+  };
   const payload = await fetchRuntimeJson<unknown>(`${SCHEDULE_PATH}/create`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify(requestBody),
   });
   const record = asRecord(payload) ?? {};
   const created = normalizeScheduleRecord(record.record ?? record.Record);

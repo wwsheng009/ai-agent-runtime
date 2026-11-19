@@ -204,6 +204,22 @@ ALTER TABLE schedule_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE schedule_tasks ADD COLUMN last_attempt_at TEXT;
 ALTER TABLE schedule_tasks ADD COLUMN dead_lettered_at TEXT;
 `,
+	}, {
+		Version: 8,
+		Name:    "schedule_blocked_reason_and_run_key",
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_job_runs ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_job_runs_idempotency
+ON schedule_job_runs(idempotency_key) WHERE idempotency_key <> '';
+`,
+	}, {
+		Version: 9,
+		Name:    "schedule_error_codes",
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN last_error_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_job_runs ADD COLUMN error_code TEXT NOT NULL DEFAULT '';
+`,
 	}}
 }
 
@@ -323,7 +339,7 @@ const taskColumns = `id, session_id, kind, title, prompt, scheduled_at, after_se
     local_time, time_zone, weekdays_json, expression, status,
     last_scheduled_at, last_delivered_at, last_message_id, state_version, origin,
     goal, plan_json, target_kind, target_workspace, target_profile, created_by_session_id,
-    attempt_count, last_attempt_at, dead_lettered_at`
+    attempt_count, last_attempt_at, dead_lettered_at, last_error, last_error_code`
 
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var (
@@ -352,12 +368,14 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 		attempts    int64
 		lastAttempt sql.NullString
 		deadLetter  sql.NullString
+		lastError     string
+		lastErrorCode string
 	)
 	if err := scanner.Scan(&id, &task.SessionID, &kind, &task.Record.Title, &task.Record.Prompt, &scheduledAt,
 		&afterRaw, &everyRaw, &localTime, &timeZone, &weekdaysRaw, &expression, &status,
 		&lastSched, &lastDeliv, &lastMsgID, &version, &origin,
 		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &createdBy,
-		&attempts, &lastAttempt, &deadLetter); err != nil {
+		&attempts, &lastAttempt, &deadLetter, &lastError, &lastErrorCode); err != nil {
 		return Task{}, err
 	}
 	target, err := parseInstant(scheduledAt)
@@ -393,6 +411,8 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 		}
 	}
 	task.Status = Status(status)
+	task.LastError = lastError
+	task.LastErrorCode = lastErrorCode
 	task.StateVersion = version
 	// 未知/空来源回落 model：旧数据与外部写入零迁移语义。
 	if origin == string(OriginManual) {
@@ -560,12 +580,12 @@ func (s *SQLiteStore) Put(task Task) error {
 	_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO schedule_tasks (`+taskColumns+`, owner_instance_id, lease_expires_at, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
 		append(recordArgs(task), task.StateVersion, originArg(task),
 			task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
 			task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID,
 			int64(task.AttemptCount), nullableInstant(task.LastAttemptAt), nullableInstant(task.DeadLetteredAt),
-			now, now)...)
+			task.LastError, task.LastErrorCode, now, now)...)
 	if err != nil {
 		return fmt.Errorf("insert schedule task %s: %w", task.Record.ID, err)
 	}
@@ -581,6 +601,7 @@ UPDATE schedule_tasks SET
     after_seconds = ?, every_seconds = ?, local_time = ?, time_zone = ?, weekdays_json = ?, expression = ?,
     goal = ?, plan_json = ?, target_kind = ?, target_workspace = ?, target_profile = ?,
     created_by_session_id = ?,
+    last_error = ?, last_error_code = ?,
     status = ?, last_scheduled_at = ?, last_delivered_at = ?, last_message_id = ?,
     state_version = state_version + 1, updated_at = ?
 WHERE id = ? AND state_version = ?`,
@@ -588,7 +609,7 @@ WHERE id = ? AND state_version = ?`,
 		nullableInt(task.Record.AfterSeconds), nullableInt(task.Record.EverySeconds), nullableString(task.Record.Time),
 		nullableString(task.Record.TimeZone), encodeWeekdays(task.Record.Weekdays), nullableString(task.Record.Expression),
 		task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
-		task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID,
+		task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID, task.LastError, task.LastErrorCode,
 		string(task.Status), lastScheduled(task), lastDelivered(task), lastMessageID(task),
 		now, task.Record.ID, expectedVersion)
 	if err != nil {
@@ -823,10 +844,11 @@ func (s *SQLiteStore) MarkPendingConsumedBySchedule(scheduleID string, now time.
 // AppendJobRun 追加一条作业运行记录（J3：运行历史）。
 func (s *SQLiteStore) AppendJobRun(run JobRun) error {
 	_, err := s.db.Exec(`
-INSERT INTO schedule_job_runs (schedule_id, status, output, error, session_id, started_at, finished_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		run.ScheduleID, string(run.Status), run.Output, run.Error, run.SessionID,
-		formatInstant(run.StartedAt), formatInstant(run.FinishedAt))
+INSERT INTO schedule_job_runs (schedule_id, status, output, error, error_code, session_id, started_at, finished_at, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(idempotency_key) WHERE idempotency_key <> '' DO NOTHING`,
+		run.ScheduleID, string(run.Status), run.Output, run.Error, run.ErrorCode, run.SessionID,
+		formatInstant(run.StartedAt), formatInstant(run.FinishedAt), run.IdempotencyKey)
 	if err != nil {
 		return fmt.Errorf("append job run: %w", err)
 	}
@@ -839,7 +861,7 @@ func (s *SQLiteStore) ListJobRuns(scheduleID string, limit int) ([]JobRun, error
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-SELECT id, schedule_id, status, output, error, session_id, started_at, finished_at
+SELECT id, schedule_id, status, output, error, error_code, session_id, started_at, finished_at
 FROM schedule_job_runs WHERE schedule_id = ? ORDER BY id DESC LIMIT ?`, scheduleID, limit)
 	if err != nil {
 		return nil, err
@@ -854,7 +876,7 @@ FROM schedule_job_runs WHERE schedule_id = ? ORDER BY id DESC LIMIT ?`, schedule
 			finishedRaw string
 		)
 		if err := rows.Scan(&run.ID, &run.ScheduleID, &status, &run.Output, &run.Error,
-			&run.SessionID, &startedRaw, &finishedRaw); err != nil {
+			&run.ErrorCode, &run.SessionID, &startedRaw, &finishedRaw); err != nil {
 			return nil, err
 		}
 		run.Status = JobRunStatus(status)

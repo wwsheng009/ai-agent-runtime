@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"sync"
 	"testing"
@@ -84,8 +85,8 @@ func TestHeadlessJobExecutesAndCommits(t *testing.T) {
 	}
 }
 
-// TestHeadlessJobDeferredWithoutHeadlessExecutor 验证 J2：执行核不支持 headless 时，
-// 非 session 目标被**延后**（保持 active、不空转、不计死信、不落 pending）。
+// TestHeadlessJobBlockedWithoutHeadlessExecutor verifies missing capability is
+// persisted as a recoverable block and does not spin on repeated drives.
 func TestHeadlessJobDeferredWithoutHeadlessExecutor(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
@@ -120,14 +121,51 @@ func TestHeadlessJobDeferredWithoutHeadlessExecutor(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
-	if task.Status != StatusActive {
-		t.Fatalf("deferred headless job must stay active, got %s", task.Status)
+	if task.Status != StatusBlocked ||
+		task.LastError != missingHeadlessExecutorError ||
+		task.LastErrorCode != string(CodeHeadlessExecutorUnavailable) {
+		t.Fatalf("headless job must be blocked with stable reason, got status=%s error=%q code=%q",
+			task.Status, task.LastError, task.LastErrorCode)
+	}
+	if task.AttemptCount != 0 || task.LastAttemptAt != nil || task.DeadLetteredAt != nil {
+		t.Fatalf("blocking must clear delivery attempts/dead-letter state, got attempts=%d last=%v dead=%v",
+			task.AttemptCount, task.LastAttemptAt, task.DeadLetteredAt)
+	}
+	var owner, lease sql.NullString
+	if err := store.db.QueryRow(
+		`SELECT owner_instance_id, lease_expires_at FROM schedule_tasks WHERE id = ?`,
+		rec.ID,
+	).Scan(&owner, &lease); err != nil {
+		t.Fatalf("read blocked task claim: %v", err)
+	}
+	if owner.Valid || lease.Valid {
+		t.Fatalf("blocked task claim must be released, got owner=%q lease=%q", owner.String, lease.String)
 	}
 	if snap := rt.Metrics(); snap.DeadLetterTotal != 0 {
 		t.Fatalf("deferral must not count as dead letter, got %d", snap.DeadLetterTotal)
 	}
 	if pending, _ := store.ListPendingMessages("", 10); len(pending) != 0 {
 		t.Fatalf("headless job has no session to fall back to; pending must stay empty, got %d", len(pending))
+	}
+	rt.RequestDrive()
+	time.Sleep(150 * time.Millisecond)
+	runs, err := store.ListJobRuns(rec.ID, 10)
+	if err != nil {
+		t.Fatalf("ListJobRuns: %v", err)
+	}
+	if len(runs) != 1 ||
+		runs[0].Status != JobRunFailed ||
+		runs[0].Error != missingHeadlessExecutorError ||
+		runs[0].ErrorCode != string(CodeHeadlessExecutorUnavailable) {
+		t.Fatalf("expected one idempotent failed run, got %+v", runs)
+	}
+	catalog, err := svc.Catalog()
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if len(catalog) != 1 || catalog[0].Status != StatusBlocked ||
+		catalog[0].LastErrorCode != string(CodeHeadlessExecutorUnavailable) {
+		t.Fatalf("catalog must expose blocked error code, got %+v", catalog)
 	}
 }
 

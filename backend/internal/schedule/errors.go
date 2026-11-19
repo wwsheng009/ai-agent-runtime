@@ -37,6 +37,12 @@ const (
 	CodeCursorNotFound Code = "delivery_cursor_not_found"
 	// CodeInternal 表示不应外泄存储细节的内部失败。
 	CodeInternal Code = "internal_error"
+	// CodeHeadlessExecutorUnavailable 表示当前运行时没有无人值守执行器。
+	CodeHeadlessExecutorUnavailable Code = "headless_executor_unavailable"
+	// CodeDeliveryFailed 表示投递在重试耗尽后进入可恢复的 blocked 状态。
+	CodeDeliveryFailed Code = "delivery_failed"
+	// CodeSessionRequired 表示会话型任务的管理操作缺少目标会话。
+	CodeSessionRequired Code = "session_required"
 )
 
 // InputError 是调用方可修正的输入错误；Code 直接面向模型。

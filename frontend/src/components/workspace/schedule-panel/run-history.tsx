@@ -69,9 +69,12 @@ export function ScheduleRunHistory({
                       {t("panels.schedule.runOutput")}: {run.output}
                     </div>
                   ) : null}
-                  {run.error ? (
+                  {run.error || run.errorCode ? (
                     <div className="mt-1 text-destructive">
-                      {t("panels.schedule.runError")}: {run.error}
+                      {t("panels.schedule.runError")}:{" "}
+                      {run.errorCode === "headless_executor_unavailable"
+                        ? t("panels.schedule.errorCode.headless_executor_unavailable")
+                        : t("panels.schedule.runFailure")}
                     </div>
                   ) : null}
                 </li>

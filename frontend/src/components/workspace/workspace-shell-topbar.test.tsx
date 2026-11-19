@@ -83,14 +83,27 @@ describe("WorkspaceShellTopbar", () => {
     for (const label of [
       "打开聊天导航",
       "日志",
-      "使用分析",
-      "Runtime",
+      "更多入口",
       "设置",
     ]) {
       expect(container.querySelector(`[aria-label="${label}"]`)).toBeInstanceOf(
         HTMLElement,
       );
     }
+
+    const moreTrigger = container.querySelector(
+      '[data-testid="topbar-more-trigger"]',
+    );
+    expect(moreTrigger).toBeInstanceOf(HTMLButtonElement);
+    act(() => {
+      moreTrigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.querySelector('[aria-label="使用分析"]')).toBeInstanceOf(
+      HTMLElement,
+    );
+    expect(container.querySelector('[aria-label="Runtime"]')).toBeInstanceOf(
+      HTMLElement,
+    );
 
     const openSidebarButton = container.querySelector(
       'button[aria-label="打开聊天导航"]',
@@ -99,6 +112,16 @@ describe("WorkspaceShellTopbar", () => {
       openSidebarButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(props.onOpenSidebar).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the logs link above fixed composer scrims", () => {
+    renderTopbar();
+
+    const link = container.querySelector<HTMLAnchorElement>('a[aria-label="日志"]');
+    if (!link) throw new Error("missing logs link");
+    expect(link.getAttribute("href")).toBe("/logs");
+    // composer 命令菜单的固定 scrim 是 z-30；同层会被它吞掉点击。
+    expect(link.closest("header")?.className).toContain("z-40");
   });
 
   it("keeps existing-thread new-chat and right rail actions accessible", () => {
@@ -126,7 +149,7 @@ describe("WorkspaceShellTopbar", () => {
     expect(props.onToggleRightRail).toHaveBeenCalledTimes(1);
   });
 
-  it("reflects the right rail open state and hides the toggle on new threads", () => {
+  it("reflects the right rail open state and keeps the toggle on new threads", () => {
     renderTopbar({ isNewThread: false, rightRailOpen: true });
 
     const railToggle = container.querySelector(
@@ -136,10 +159,18 @@ describe("WorkspaceShellTopbar", () => {
     expect(railToggle?.getAttribute("aria-label")).toBe("收起右侧栏");
     expect(railToggle?.getAttribute("aria-pressed")).toBe("true");
 
-    renderTopbar();
-    expect(
-      container.querySelector('[data-testid="topbar-toggle-right-rail"]'),
-    ).toBeNull();
+    const newThreadProps = renderTopbar({ rightRailOpen: false });
+    const newThreadRailToggle = container.querySelector(
+      '[data-testid="topbar-toggle-right-rail"]',
+    );
+    expect(newThreadRailToggle).toBeInstanceOf(HTMLButtonElement);
+    expect(newThreadRailToggle?.getAttribute("aria-label")).toBe("展开右侧栏");
+    expect(newThreadRailToggle?.getAttribute("aria-pressed")).toBe("false");
+
+    act(() => {
+      newThreadRailToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(newThreadProps.onToggleRightRail).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a non-online connection status with manual retry", () => {

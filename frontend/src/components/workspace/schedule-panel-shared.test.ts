@@ -34,10 +34,12 @@ describe("splitScheduleTasks", () => {
       task({ id: "c", status: "active" }),
       task({ id: "d", status: "paused" }),
     ];
-    const { active, paused, inactive } = splitScheduleTasks(input);
+    const { active, paused, inactive, blocked, failed } = splitScheduleTasks(input);
     expect(active.map((item) => item.id)).toEqual(["a", "c"]);
     expect(paused.map((item) => item.id)).toEqual(["d"]);
     expect(inactive.map((item) => item.id)).toEqual(["b"]);
+    expect(blocked).toEqual([]);
+    expect(failed).toEqual([]);
   });
 });
 
@@ -59,8 +61,29 @@ describe("isPausedScheduleStatus", () => {
 
 describe("scheduleFrequencySummary", () => {
   it("按 kind 输出摘要", () => {
-    expect(scheduleFrequencySummary(task({ kind: "after", afterSeconds: 600 }))).toBe("600s");
-    expect(scheduleFrequencySummary(task({ kind: "every", everySeconds: 300 }))).toBe("300s");
+    const beforeTarget = Date.parse("2026-10-11T11:00:00.000Z");
+    expect(
+      scheduleFrequencySummary(
+        task({ kind: "after", afterSeconds: 600 }),
+        "zh-CN",
+        beforeTarget,
+      ),
+    ).toBe("10 分钟后");
+    expect(
+      scheduleFrequencySummary(
+        task({ kind: "after", afterSeconds: 1800 }),
+        "zh-CN",
+        beforeTarget,
+      ),
+    ).toBe("30 分钟后");
+    expect(scheduleFrequencySummary(task({ kind: "every", everySeconds: 300 }))).toBe("每 5 分钟");
+    expect(
+      scheduleFrequencySummary(
+        task({ kind: "after", afterSeconds: 1800 }),
+        "en-US",
+        beforeTarget,
+      ),
+    ).toBe("in 30 minutes");
     expect(
       scheduleFrequencySummary(
         task({ kind: "weekly", time: "09:00:00.000", weekdays: [1, 3] }),
@@ -69,6 +92,24 @@ describe("scheduleFrequencySummary", () => {
     expect(scheduleFrequencySummary(task({ kind: "cron", expression: "*/15 * * * *" }))).toBe(
       "*/15 * * * *",
     );
+  });
+
+  it("after 目标过期后不再显示静态的“N 分钟后”", () => {
+    const afterTarget = Date.parse("2026-10-12T00:00:00.000Z");
+    expect(
+      scheduleFrequencySummary(
+        task({ kind: "after", afterSeconds: 1800 }),
+        "zh-CN",
+        afterTarget,
+      ),
+    ).toBe("已到期");
+    expect(
+      scheduleFrequencySummary(
+        task({ kind: "after", afterSeconds: 1800 }),
+        "en-US",
+        afterTarget,
+      ),
+    ).toBe("Due");
   });
 });
 
@@ -90,7 +131,10 @@ describe("formatScheduleRelative", () => {
   it("未来为正、过去为负", () => {
     const now = new Date("2026-10-11T12:00:00Z").getTime();
     expect(formatScheduleRelative("2026-10-11T12:00:30Z", now)).toBe("30s");
-    expect(formatScheduleRelative("2026-10-11T11:59:30Z", now)).toBe("-30s");
+    expect(formatScheduleRelative("2026-10-11T11:59:30Z", now)).toBe("已逾期 30s");
+    expect(formatScheduleRelative("2026-10-11T11:59:30Z", now, "en-US")).toBe(
+      "Overdue by 30s",
+    );
     expect(formatScheduleRelative("2026-10-11T13:00:00Z", now)).toBe("1h");
   });
 });

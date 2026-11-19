@@ -323,7 +323,7 @@ func (r *Runtime) drive() {
 			}
 			r.mtr.deliveryFailedTotal.Add(int64(len(group)))
 			for _, member := range group {
-				r.markFailed(member.Record.ID, now)
+				r.markFailed(member, deliverErr, now)
 			}
 			// 兜底（存储文档 §4.3 / 守护进程文档 D1）：失败即落持久 pending
 			// 消息，宿主恢复后消费——宿主离线时消息不丢。
@@ -347,12 +347,11 @@ func (r *Runtime) drive() {
 
 // driveHeadless 执行不绑会话的作业（J2：workspace/headless 目标）。
 //
-// 无 headless 执行能力时**延后**（不空转、不计死信），等待具备能力的宿主接管。
+// 无 headless 执行能力时进入可恢复 blocked 状态，并记录一次失败运行。
 func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	exec, ok := r.opts.Executor.(HeadlessExecutor)
 	if !ok || exec == nil {
-		r.deferTask(task.Record.ID, now.Add(headlessDeferInterval))
-		r.opts.Logf("schedule: job %s (%s) deferred: no headless executor configured", task.Record.ID, task.TargetKind)
+		r.blockMissingHeadless(task, now)
 		return
 	}
 	// S4：长执行前续期 claim（与内嵌路径同口径）。
@@ -373,7 +372,7 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	if err != nil {
 		r.mtr.deliveryFailedTotal.Add(int64(len(group)))
 		for _, member := range group {
-			r.markFailed(member.Record.ID, now)
+			r.markFailed(member, err, now)
 		}
 		r.opts.Logf("schedule: headless job %s failed: %v", task.Record.ID, err)
 		return
@@ -388,21 +387,101 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	r.deliverJobResult(task, result)
 }
 
+const missingHeadlessExecutorError = "no headless executor configured"
+
+func (r *Runtime) blockMissingHeadless(task Task, now time.Time) {
+	sqlStore, ok := r.opts.Store.(*SQLiteStore)
+	if !ok {
+		r.opts.Logf("schedule: job %s cannot persist blocked state (%T): %s",
+			task.Record.ID, r.opts.Store, missingHeadlessExecutorError)
+		r.releaseBlockedTask(task.Record.ID)
+		return
+	}
+	current, found, err := sqlStore.Get(task.Record.ID)
+	if err != nil || !found {
+		if err != nil {
+			r.opts.Logf("schedule: read job %s for blocking: %v", task.Record.ID, err)
+		}
+		r.releaseBlockedTask(task.Record.ID)
+		return
+	}
+	// The task may have been paused, ended, deleted, or changed to a session
+	// target after the due scan but before we acquired/read its claim. Never
+	// overwrite that newer user decision with a blocked state.
+	if current.Status != StatusActive &&
+		!(current.Status == StatusBlocked &&
+			current.LastError == missingHeadlessExecutorError &&
+			current.LastErrorCode == string(CodeHeadlessExecutorUnavailable)) {
+		r.releaseBlockedTask(task.Record.ID)
+		return
+	}
+	if current.TargetKind == TargetSession {
+		r.releaseBlockedTask(task.Record.ID)
+		return
+	}
+	if current.Status != StatusBlocked ||
+		current.LastError != missingHeadlessExecutorError ||
+		current.LastErrorCode != string(CodeHeadlessExecutorUnavailable) {
+		current.Status = StatusBlocked
+		current.LastError = missingHeadlessExecutorError
+		current.LastErrorCode = string(CodeHeadlessExecutorUnavailable)
+		if applied, uerr := sqlStore.UpdateCAS(current, current.StateVersion); uerr != nil {
+			r.opts.Logf("schedule: block job %s: %v", task.Record.ID, uerr)
+			r.releaseBlockedTask(task.Record.ID)
+			return
+		} else if !applied {
+			r.releaseBlockedTask(task.Record.ID)
+			return
+		}
+	}
+	r.recordJobRunWithKey(current, now, HeadlessTurnResult{}, fmt.Errorf("%s", missingHeadlessExecutorError), now,
+		"blocked:no-headless:"+task.Record.ID+":"+formatInstant(task.Record.ScheduledAt),
+		CodeHeadlessExecutorUnavailable)
+	r.releaseBlockedTask(task.Record.ID)
+	r.opts.Logf("schedule: job %s blocked: %s", task.Record.ID, missingHeadlessExecutorError)
+}
+
+func (r *Runtime) releaseBlockedTask(id string) {
+	if attempts, ok := r.opts.Store.(TaskAttemptStore); ok {
+		if err := attempts.ClearTaskAttempts(id); err != nil {
+			r.opts.Logf("schedule: clear attempts for blocked job %s: %v", id, err)
+		}
+	}
+	if claimer, ok := r.opts.Store.(TaskClaimer); ok {
+		if err := claimer.ReleaseTaskClaims([]string{id}, r.opts.InstanceID); err != nil {
+			r.opts.Logf("schedule: release claim for blocked job %s: %v", id, err)
+		}
+	}
+	r.mu.Lock()
+	delete(r.attempts, id)
+	delete(r.failedUntil, id)
+	r.mu.Unlock()
+	r.notifyChanged()
+}
+
 // recordJobRun 落一条作业运行历史（J3；best-effort，失败只记日志）。
 func (r *Runtime) recordJobRun(task Task, started time.Time, result HeadlessTurnResult, runErr error, now time.Time) {
+	r.recordJobRunWithKey(task, started, result, runErr, now, "")
+}
+
+func (r *Runtime) recordJobRunWithKey(task Task, started time.Time, result HeadlessTurnResult, runErr error, now time.Time, key string, errorCodes ...Code) {
 	sqlStore, ok := r.opts.Store.(*SQLiteStore)
 	if !ok {
 		return
 	}
 	run := JobRun{
-		ScheduleID: task.Record.ID,
-		SessionID:  result.SessionID,
-		StartedAt:  started.UTC(),
-		FinishedAt: now.UTC(),
+		ScheduleID:     task.Record.ID,
+		SessionID:      result.SessionID,
+		StartedAt:      started.UTC(),
+		FinishedAt:     now.UTC(),
+		IdempotencyKey: key,
 	}
 	if runErr != nil {
 		run.Status = JobRunFailed
 		run.Error = runErr.Error()
+		if len(errorCodes) > 0 {
+			run.ErrorCode = string(errorCodes[0])
+		}
 	} else {
 		run.Status = JobRunDone
 		run.Output = result.Output
@@ -478,24 +557,85 @@ func (r *Runtime) admitted(id string, now time.Time) bool {
 	return !ok || !now.Before(until)
 }
 
-func (r *Runtime) markFailed(id string, now time.Time) {
+func (r *Runtime) markFailed(task Task, failure error, now time.Time) {
+	id := task.Record.ID
 	r.mu.Lock()
 	r.attempts[id]++
 	attempt := r.attempts[id]
 	deadLettered := attempt >= r.opts.MaxAttempts
 	if deadLettered {
-		r.opts.Logf("schedule: reminder %s reached max delivery attempts (%d)", id, attempt)
 		r.mtr.deadLetterTotal.Add(1)
 	}
 	r.mtr.retriesScheduled.Add(1)
 	r.failedUntil[id] = now.Add(deliveryBackoff(attempt))
 	r.mu.Unlock()
+	message := "delivery failed"
+	if failure != nil {
+		if text := strings.TrimSpace(failure.Error()); text != "" {
+			message = text
+		}
+	}
 	// S4（§4.3 ③）：attempts/死信持久化——leader 易主后退避不归零、状态可查。
 	if attempts, ok := r.opts.Store.(TaskAttemptStore); ok {
 		if _, err := attempts.RecordTaskAttempt(id, now, deadLettered); err != nil {
 			r.opts.Logf("schedule: persist attempt for %s: %v", id, err)
 		}
 	}
+	// A dead-lettered task must stop spinning: persist a visible blocked state
+	// (with the failing stage details) so the panel moves it to "需要处理" and
+	// the due scanner no longer retries it until the user explicitly resumes.
+	r.persistDeliveryFailure(id, deadLettered, message, now)
+	if deadLettered {
+		r.opts.Logf("schedule: reminder %s reached max delivery attempts (%d); marked blocked", id, attempt)
+		r.releaseExhaustedTask(id)
+	}
+}
+
+// persistDeliveryFailure writes the latest failure back to the task row.
+// CAS keeps a concurrent user pause/edit authoritative: if the row changed
+// after the due scan, we leave the newer decision untouched.
+func (r *Runtime) persistDeliveryFailure(id string, deadLettered bool, message string, now time.Time) {
+	current, ok, err := r.opts.Store.Get(id)
+	if err != nil {
+		r.opts.Logf("schedule: read task %s for failure state: %v", id, err)
+		return
+	}
+	if !ok || current.Status != StatusActive {
+		return
+	}
+	next := current
+	next.LastError = message
+	next.LastErrorCode = string(CodeDeliveryFailed)
+	if deadLettered {
+		next.Status = StatusBlocked
+		if next.DeadLetteredAt == nil {
+			stamp := now.UTC()
+			next.DeadLetteredAt = &stamp
+		}
+	}
+	applied, err := r.opts.Store.UpdateCAS(next, current.StateVersion)
+	if err != nil {
+		r.opts.Logf("schedule: persist failure state for %s: %v", id, err)
+		return
+	}
+	if !applied {
+		return
+	}
+	r.notifyChanged()
+}
+
+// releaseExhaustedTask frees the claim and in-memory backoff for a task that
+// has been moved to blocked. Attempt history stays in the store for diagnosis.
+func (r *Runtime) releaseExhaustedTask(id string) {
+	if claimer, ok := r.opts.Store.(TaskClaimer); ok {
+		if err := claimer.ReleaseTaskClaims([]string{id}, r.opts.InstanceID); err != nil {
+			r.opts.Logf("schedule: release claim for blocked task %s: %v", id, err)
+		}
+	}
+	r.mu.Lock()
+	delete(r.attempts, id)
+	delete(r.failedUntil, id)
+	r.mu.Unlock()
 }
 
 // deliveryBackoff 是第 attempt 次失败后的退避（30s × n，封顶 10m）。
@@ -715,9 +855,13 @@ func (r *Runtime) advanceTaskAfterDrain(scheduleID string, now time.Time) {
 	if err != nil || !ok {
 		return
 	}
-	if task.Status != StatusActive || now.Before(task.Record.ScheduledAt) {
+	if (task.Status != StatusActive && task.Status != StatusBlocked) ||
+		now.Before(task.Record.ScheduledAt) {
 		return
 	}
+	// A blocked session task may still have a pending fallback message from the
+	// failed delivery. Draining it means the reminder did reach its session, so
+	// advance the occurrence (commit clears the failure marker).
 	r.commit(task, now)
 }
 
@@ -733,6 +877,10 @@ func (r *Runtime) commit(task Task, now time.Time) {
 		DeliveredAt: now.UTC(),
 		MessageID:   syntheticMessageID(task.Record.ID, occurrence.OccurrenceAt),
 	}
+	// A successful delivery clears the visible retry/dead-letter history. Without
+	// this, the panel would keep showing the last failure after recovery.
+	next.LastError = ""
+	next.LastErrorCode = ""
 	next.LastDelivery = receipt
 	next.DeliveryHistory = appendHistory(task, receipt)
 	if occurrence.NextScheduledAt == nil {

@@ -6,6 +6,7 @@ import {
   LinkIcon,
   ListChecksIcon,
   MessageSquarePlusIcon,
+  MoreHorizontalIcon,
   NetworkIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
@@ -18,6 +19,7 @@ import {
   WifiOffIcon,
   type LucideIcon,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { SessionGoalIndicator } from "@/components/workspace/session-goal-indicator";
@@ -126,6 +128,9 @@ export function WorkspaceShellTopbar({
   const isCompact = density === "compact";
   const { t } = useTranslation("workspace");
   const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const lineage = agentBreadcrumb ?? [];
   const showLineage = !isNewThread && lineage.length > 1;
   const transportKind = getThreadTransportKind(selectedThread);
@@ -153,8 +158,46 @@ export function WorkspaceShellTopbar({
     ? t("topbar.refreshingSession")
     : t("topbar.refreshSession");
 
+  useEffect(() => {
+    if (!moreOpen) {
+      return;
+    }
+
+    moreMenuRef.current
+      ?.querySelector<HTMLElement>('[role="menuitem"]')
+      ?.focus();
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (
+        !moreMenuRef.current?.contains(target) &&
+        !moreTriggerRef.current?.contains(target)
+      ) {
+        setMoreOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMoreOpen(false);
+        moreTriggerRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [moreOpen]);
+
+  // z-40：高于 composer 命令菜单的固定 scrim（z-30）。二者同为固定覆盖层时，
+  // 同层后渲染的 scrim 会吞掉顶栏「日志」等导航点击，表现为“点了不跳转”。
   return (
-    <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
+    <header className="absolute inset-x-0 top-0 z-40 flex justify-center px-3 pt-1.5 sm:px-4">
       <div
         className={cn(
           "flex w-full max-w-[72rem] items-center gap-1 rounded-panel border border-border bg-workspace-topbar-bg shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
@@ -286,18 +329,6 @@ export function WorkspaceShellTopbar({
         >
           <TerminalSquareIcon aria-hidden="true" size={16} />
         </Link>
-        {onOpenJobs && !isNewThread ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="hidden shrink-0 sm:inline-flex"
-            onClick={onOpenJobs}
-            aria-label={t("topbar.jobs")}
-            title={t("topbar.jobs")}
-          >
-            <ListChecksIcon aria-hidden="true" size={16} />
-          </Button>
-        ) : null}
         {onOpenJobs && !isNewThread && liveJobsCount > 0 ? (
           <button
             type="button"
@@ -309,44 +340,119 @@ export function WorkspaceShellTopbar({
             <span className="app-text-10">{t("topbar.jobsRunning", { count: liveJobsCount })}</span>
           </button>
         ) : null}
-        {onOpenAgents && !isNewThread ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="hidden shrink-0 gap-1 sm:inline-flex"
-            onClick={onOpenAgents}
-            aria-label={t("topbar.agents")}
-            data-testid="topbar-agents"
-            title={t("topbar.agents")}
+        <div className="relative shrink-0">
+          <button
+            ref={moreTriggerRef}
+            type="button"
+            aria-expanded={moreOpen}
+            aria-haspopup="menu"
+            aria-label={t("topbar.more")}
+            data-testid="topbar-more-trigger"
+            title={t("topbar.more")}
+            className={buttonVariants({ variant: "ghost", size: "sm" })}
+            onClick={() => setMoreOpen((current) => !current)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setMoreOpen(true);
+              }
+            }}
           >
-            <NetworkIcon aria-hidden="true" size={16} />
-            {agentDescendantCount > 0 ? (
-              <span className="app-text-10">{agentDescendantCount}</span>
-            ) : null}
-          </Button>
-        ) : null}
-        <Link
-          to="/usage"
-          className={cn(
-            buttonVariants({ variant: "ghost", size: "icon" }),
-            "hidden shrink-0 md:inline-flex",
-          )}
-          aria-label={t("topbar.usage")}
-          title={t("topbar.usage")}
-        >
-          <ChartNoAxesCombinedIcon aria-hidden="true" size={16} />
-        </Link>
-        <Link
-          to="/runtime/config"
-          className={cn(
-            buttonVariants({ variant: "ghost", size: "icon" }),
-            "hidden shrink-0 md:inline-flex",
-          )}
-          aria-label={t("topbar.runtime")}
-          title={t("topbar.runtime")}
-        >
-          <DatabaseIcon aria-hidden="true" size={16} />
-        </Link>
+            <MoreHorizontalIcon aria-hidden="true" size={16} />
+          </button>
+          {moreOpen ? (
+            <div
+              ref={moreMenuRef}
+              role="menu"
+              aria-label={t("topbar.more")}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMoreOpen(false);
+                  moreTriggerRef.current?.focus();
+                  return;
+                }
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+                  return;
+                }
+                event.preventDefault();
+                const items = Array.from(
+                  moreMenuRef.current?.querySelectorAll<HTMLElement>(
+                    '[role="menuitem"]',
+                  ) ?? [],
+                );
+                const current = items.findIndex(
+                  (item) => item === document.activeElement,
+                );
+                const step = event.key === "ArrowDown" ? 1 : -1;
+                const next =
+                  items.length > 0
+                    ? (current + step + items.length) % items.length
+                    : -1;
+                if (next >= 0) {
+                  items[next]?.focus();
+                }
+              }}
+              className="absolute right-0 top-full z-50 mt-1 w-max min-w-[13rem] rounded-card-lg border border-border bg-surface-overlay p-1.5 shadow-[0_10px_24px_rgba(0,0,0,0.24)]"
+            >
+              {onOpenJobs && !isNewThread ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onOpenJobs();
+                  }}
+                >
+                  <ListChecksIcon aria-hidden="true" size={14} />
+                  <span className="min-w-0 flex-1">{t("topbar.jobs")}</span>
+                  {liveJobsCount > 0 ? (
+                    <span className="app-text-10">{liveJobsCount}</span>
+                  ) : null}
+                </button>
+              ) : null}
+              {onOpenAgents && !isNewThread ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  data-testid="topbar-agents"
+                  className="flex w-full items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                  onClick={() => {
+                    setMoreOpen(false);
+                    onOpenAgents();
+                  }}
+                >
+                  <NetworkIcon aria-hidden="true" size={14} />
+                  <span className="min-w-0 flex-1">{t("topbar.agents")}</span>
+                  {agentDescendantCount > 0 ? (
+                    <span className="app-text-10">{agentDescendantCount}</span>
+                  ) : null}
+                </button>
+              ) : null}
+              <Link
+                to="/usage"
+                role="menuitem"
+                aria-label={t("topbar.usage")}
+                className="flex w-full items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                onClick={() => setMoreOpen(false)}
+              >
+                <ChartNoAxesCombinedIcon aria-hidden="true" size={14} />
+                <span className="min-w-0 flex-1">{t("topbar.usage")}</span>
+              </Link>
+              <Link
+                to="/runtime/config"
+                role="menuitem"
+                aria-label={t("topbar.runtime")}
+                className="flex w-full items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                onClick={() => setMoreOpen(false)}
+              >
+                <DatabaseIcon aria-hidden="true" size={14} />
+                <span className="min-w-0 flex-1">{t("topbar.runtime")}</span>
+              </Link>
+            </div>
+          ) : null}
+        </div>
         <Button
           variant="ghost"
           size="sm"
@@ -357,24 +463,22 @@ export function WorkspaceShellTopbar({
         >
           <Settings2Icon aria-hidden="true" size={16} />
         </Button>
-        {!isNewThread ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="hidden shrink-0 md:inline-flex"
-            aria-pressed={rightRailOpen}
-            data-testid="topbar-toggle-right-rail"
-            onClick={onToggleRightRail}
-            aria-label={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
-            title={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
-          >
-            {rightRailOpen ? (
-              <PanelRightCloseIcon aria-hidden="true" size={16} />
-            ) : (
-              <PanelRightOpenIcon aria-hidden="true" size={16} />
-            )}
-          </Button>
-        ) : null}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="hidden shrink-0 md:inline-flex"
+          aria-pressed={rightRailOpen}
+          data-testid="topbar-toggle-right-rail"
+          onClick={onToggleRightRail}
+          aria-label={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
+          title={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
+        >
+          {rightRailOpen ? (
+            <PanelRightCloseIcon aria-hidden="true" size={16} />
+          ) : (
+            <PanelRightOpenIcon aria-hidden="true" size={16} />
+          )}
+        </Button>
       </div>
     </header>
   );

@@ -1,7 +1,13 @@
-// P3：自动化任务（Schedule）单行：状态/摘要/行内编辑草稿/删除确认/运行历史。
-// 由 components/workspace/schedule-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// P3：自动化任务（Schedule）单行：状态/摘要/运行历史/操作栏。
+// 编辑改由独立表单对话框承载；行内保留暂停、恢复与删除确认。
 
-import { Trash2Icon } from "lucide-react";
+import {
+  LoaderCircleIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
+  Trash2Icon,
+} from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -17,278 +23,303 @@ import {
 import { cn } from "@/lib/utils";
 import type { RuntimeScheduleJobRun, RuntimeScheduleTask } from "@/types/runtime";
 
-import type { DraftState } from "./form-state";
 import { ScheduleRunHistory } from "./run-history";
 
 export type ScheduleTaskRowProps = {
-  cancelEdit: () => void;
   confirmingId: string;
   control: (task: RuntimeScheduleTask, action: "pause" | "resume") => void;
   controllingAction: "pause" | "resume" | null;
   controllingId: string;
+  deleteLocked?: boolean;
   deletingId: string;
-  draft: DraftState | null;
   editingId: string;
   expandedRunId: string;
   live: boolean;
   remove: (task: RuntimeScheduleTask) => void;
   runsByTask: Record<string, RuntimeScheduleJobRun[]>;
   runsStatus: Record<string, "loading" | "error">;
-  save: (task: RuntimeScheduleTask) => void;
-  savingId: string;
   setConfirmingId: Dispatch<SetStateAction<string>>;
-  setDraft: Dispatch<SetStateAction<DraftState | null>>;
   startEdit: (task: RuntimeScheduleTask) => void;
   task: RuntimeScheduleTask;
   toggleRuns: (taskId: string) => void;
 };
 
 export function ScheduleTaskRow({
-  cancelEdit,
   confirmingId,
   control,
   controllingAction,
   controllingId,
+  deleteLocked = false,
   deletingId,
-  draft,
   editingId,
   expandedRunId,
   live,
   remove,
   runsByTask,
   runsStatus,
-  save,
-  savingId,
   setConfirmingId,
-  setDraft,
   startEdit,
   task,
   toggleRuns,
 }: ScheduleTaskRowProps) {
-  const { t } = useTranslation("workspace");
-  const editing = editingId === task.id;
+  const { i18n, t } = useTranslation("workspace");
   const controlling = controllingId === task.id;
   const active = task.status === "active";
   const paused = task.status === "paused";
+  const blocked = task.status === "blocked";
+  const failed = task.status === "failed";
+  const editing = editingId === task.id;
+  const deleting = deletingId === task.id;
+  const pauseBusy = controlling && controllingAction === "pause";
+  const resumeBusy = controlling && controllingAction === "resume";
+
   return (
-    <li
-      className="rounded-panel border border-border p-3"
-      key={task.id}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <Badge
-              className={cn(
-                active && "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
-                paused && "border-amber-500/40 text-amber-600 dark:text-amber-400",
-              )}
-            >
-              {t(scheduleStatusLabelKey(task.status))}
-            </Badge>
-            {task.origin === "manual" && (
-              <Badge className="border-amber-500/40 text-amber-600 dark:text-amber-400">
-                {t("panels.schedule.originManual")}
-              </Badge>
+    <li className="rounded-panel border border-border p-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            className={cn(
+              active &&
+                "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+              paused &&
+                "border-amber-500/40 text-amber-600 dark:text-amber-400",
+              blocked &&
+                "border-destructive/50 bg-destructive/10 text-destructive",
+              failed &&
+                "border-destructive/50 bg-destructive/10 text-destructive",
             )}
-            <span className="truncate text-sm font-medium">
-              {editing && draft ? (
-                <input
-                  aria-label={t("panels.schedule.titleLabel")}
-                  className="w-full rounded border border-border bg-transparent px-1 py-0.5"
-                  onChange={(event) =>
-                    setDraft({ ...draft, title: event.target.value })
-                  }
-                  value={draft.title}
-                />
-              ) : (
-                task.title
-              )}
+          >
+            {t(scheduleStatusLabelKey(task.status))}
+          </Badge>
+          {task.origin === "manual" ? (
+            <Badge className="border-amber-500/40 text-amber-600 dark:text-amber-400">
+              {t("panels.schedule.originManual")}
+            </Badge>
+          ) : null}
+          <span className="min-w-0 truncate text-sm font-medium">
+            {task.title}
+          </span>
+        </div>
+
+        <div className="mt-1 text-xs text-muted-foreground">
+          {t(scheduleKindLabelKey(task.kind))}
+          {" · "}
+          {scheduleFrequencySummary(task, i18n.language)}
+          {task.timeZone ? ` · ${task.timeZone}` : ""}
+        </div>
+        {live ? (
+          <div className="mt-1 text-xs">
+            {t("panels.schedule.nextRun")}:{" "}
+            {formatScheduleTimestamp(task.scheduledAt)}
+            <span className="ml-2 text-muted-foreground">
+              ({formatScheduleRelative(task.scheduledAt, Date.now(), i18n.language)})
             </span>
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {t(scheduleKindLabelKey(task.kind))}
-            {" · "}
-            {scheduleFrequencySummary(task)}
-            {task.timeZone ? ` · ${task.timeZone}` : ""}
+        ) : paused ? (
+          <div className="mt-1 text-xs">
+            {t("panels.schedule.pausedNextRun")}:{" "}
+            {formatScheduleTimestamp(task.scheduledAt)}
+            <span className="ml-2 text-muted-foreground">
+              ({formatScheduleRelative(task.scheduledAt, Date.now(), i18n.language)})
+            </span>
           </div>
-          {live ? (
-            <div className="mt-1 text-xs">
-              {t("panels.schedule.nextRun")}:{" "}
-              {formatScheduleTimestamp(task.scheduledAt)}
-              <span className="ml-2 text-muted-foreground">
-                ({formatScheduleRelative(task.scheduledAt, Date.now())})
-              </span>
-            </div>
-          ) : paused ? (
-            <div className="mt-1 text-xs">
-              {t("panels.schedule.pausedNextRun")}:{" "}
-              {formatScheduleTimestamp(task.scheduledAt)}
-              <span className="ml-2 text-muted-foreground">
-                ({formatScheduleRelative(task.scheduledAt, Date.now())})
-              </span>
-            </div>
-          ) : task.lastDelivery ? (
-            <div className="mt-1 text-xs text-muted-foreground">
-              {t("panels.schedule.lastDelivery")}:{" "}
-              {formatScheduleTimestamp(task.lastDelivery.deliveredAt)}
-            </div>
-          ) : null}
-          {/* J0/J1：作业目标、计划与执行上下文（仅在有值时展示）。 */}
-          {task.goal || (task.plan && task.plan.length > 0) || (task.targetKind && task.targetKind !== "session") ? (
-            <div className="mt-1 space-y-1 text-xs text-muted-foreground">
-              {task.goal ? (
-                <div>
-                  {t("panels.schedule.goalLabel")}: {task.goal}
-                </div>
-              ) : null}
-              {task.plan && task.plan.length > 0 ? (
-                <div>
-                  {t("panels.schedule.planLabel")}:
-                  <ol className="ml-4 list-decimal">
-                    {task.plan.map((step, index) => (
-                      <li key={`${task.id}-plan-${index}`}>{step}</li>
-                    ))}
-                  </ol>
-                </div>
-              ) : null}
-              {task.targetKind === "workspace" ? (
-                <div>
-                  {t("panels.schedule.targetLabel")}: {t("panels.schedule.target.workspace")}
-                </div>
-              ) : task.targetKind === "headless" ? (
-                <div>
-                  {t("panels.schedule.targetLabel")}: {t("panels.schedule.target.headless")}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {/* J3：运行历史（按需展开）。 */}
+        ) : blocked || failed ? (
+          <div className="mt-1 text-xs">
+            {t("panels.schedule.scheduledTarget")}:{" "}
+            {formatScheduleTimestamp(task.scheduledAt)}
+            <span className="ml-2 text-muted-foreground">
+              ({formatScheduleRelative(task.scheduledAt, Date.now(), i18n.language)})
+            </span>
+          </div>
+        ) : null}
+
+        {!live && task.lastDelivery ? (
+          <div className="mt-1 text-xs text-muted-foreground">
+            {t("panels.schedule.lastDelivery")}:{" "}
+            {formatScheduleTimestamp(task.lastDelivery.deliveredAt)}
+          </div>
+        ) : null}
+
+        {task.lastAttemptAt ? (
+          <div className="mt-1 text-xs text-muted-foreground">
+            {t("panels.schedule.lastAttempt")}:{" "}
+            {formatScheduleTimestamp(task.lastAttemptAt)}
+          </div>
+        ) : null}
+
+        {task.goal ||
+        (task.plan && task.plan.length > 0) ||
+        (task.targetKind && task.targetKind !== "session") ? (
+          <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+            {task.goal ? (
+              <div>
+                {t("panels.schedule.goalLabel")}: {task.goal}
+              </div>
+            ) : null}
+            {task.plan && task.plan.length > 0 ? (
+              <div>
+                {t("panels.schedule.planLabel")}:
+                <ol className="ml-4 list-decimal">
+                  {task.plan.map((step, index) => (
+                    <li key={`${task.id}-plan-${index}`}>{step}</li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+            {task.targetKind === "workspace" ? (
+              <div>
+                {t("panels.schedule.targetLabel")}:{" "}
+                {t("panels.schedule.target.workspace")}
+                {task.targetWorkspace ? ` · ${task.targetWorkspace}` : ""}
+              </div>
+            ) : task.targetKind === "headless" ? (
+              <div>
+                {t("panels.schedule.targetLabel")}:{" "}
+                {t("panels.schedule.target.headless")}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {task.targetKind === "headless" || task.targetKind === "workspace" ? (
           <ScheduleRunHistory
             expanded={expandedRunId === task.id}
             onToggle={() => void toggleRuns(task.id)}
             runs={runsByTask[task.id] ?? []}
             status={runsStatus[task.id]}
           />
-          {editing && draft ? (
-            <div className="mt-2 space-y-2">
-              <textarea
-                aria-label={t("panels.schedule.promptLabel")}
-                className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs"
-                onChange={(event) =>
-                  setDraft({ ...draft, prompt: event.target.value })
-                }
-                rows={2}
-                value={draft.prompt}
+        ) : null}
+
+        {task.lastError || task.lastErrorCode ? (
+          <p className="mt-1 rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
+            {task.lastErrorCode === "headless_executor_unavailable"
+              ? t("panels.schedule.errorCode.headless_executor_unavailable")
+              : task.lastErrorCode === "delivery_failed"
+                ? t(
+                    blocked || failed
+                      ? "panels.schedule.errorCode.delivery_failed"
+                      : "panels.schedule.errorCode.delivery_retrying",
+                  )
+              : t("panels.schedule.errorCode.generic")}
+          </p>
+        ) : null}
+
+        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+          {task.prompt}
+        </p>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-border/70 pt-2">
+        {active ? (
+          <Button
+            disabled={controlling}
+            onClick={() => control(task, "pause")}
+            size="sm"
+            variant="ghost"
+          >
+            {pauseBusy ? (
+              <LoaderCircleIcon
+                aria-hidden="true"
+                className="size-3.5 animate-spin"
               />
-              {(task.kind === "daily" || task.kind === "weekly") && (
-                <div className="flex gap-2">
-                  <input
-                    aria-label={t("panels.schedule.timeLabel")}
-                    className="w-28 rounded border border-border bg-transparent px-2 py-1 text-xs"
-                    onChange={(event) =>
-                      setDraft({ ...draft, time: event.target.value })
-                    }
-                    placeholder={t("panels.schedule.timePlaceholder")}
-                    value={draft.time}
-                  />
-                  <input
-                    aria-label={t("panels.schedule.zoneLabel")}
-                    className="flex-1 rounded border border-border bg-transparent px-2 py-1 text-xs"
-                    onChange={(event) =>
-                      setDraft({ ...draft, timeZone: event.target.value })
-                    }
-                    placeholder={t("panels.schedule.zonePlaceholder")}
-                    value={draft.timeZone}
-                  />
-                </div>
-              )}
-            </div>
-          ) : (
-            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-              {task.prompt}
-            </p>
-          )}
-        </div>
-        <div className="flex shrink-0 flex-col gap-1">
-          {editing ? (
-            <>
+            ) : (
+              <PauseIcon aria-hidden="true" className="size-3.5" />
+            )}
+            {pauseBusy
+              ? t("panels.schedule.pausing")
+              : t("panels.schedule.pause")}
+          </Button>
+        ) : null}
+
+        {paused || blocked || failed ? (
+          <Button
+            disabled={controlling}
+            onClick={() => control(task, "resume")}
+            size="sm"
+            variant="ghost"
+          >
+            {resumeBusy ? (
+              <LoaderCircleIcon
+                aria-hidden="true"
+                className="size-3.5 animate-spin"
+              />
+            ) : (
+              <PlayIcon aria-hidden="true" className="size-3.5" />
+            )}
+            {resumeBusy
+              ? t("panels.schedule.resuming")
+              : blocked || failed
+                ? t("panels.schedule.retry")
+                : t("panels.schedule.resume")}
+          </Button>
+        ) : null}
+
+        {task.status === "inactive" ? (
+          <Button
+            disabled={controlling}
+            onClick={() => control(task, "resume")}
+            size="sm"
+            variant="ghost"
+          >
+            {resumeBusy ? (
+              <LoaderCircleIcon
+                aria-hidden="true"
+                className="size-3.5 animate-spin"
+              />
+            ) : (
+              <PlayIcon aria-hidden="true" className="size-3.5" />
+            )}
+            {resumeBusy
+              ? t("panels.schedule.enabling")
+              : t("panels.schedule.enable")}
+          </Button>
+        ) : null}
+
+        <Button
+          aria-expanded={editing}
+          aria-haspopup="dialog"
+          disabled={controlling}
+          onClick={() => startEdit(task)}
+          size="sm"
+          variant="ghost"
+        >
+          <PencilIcon aria-hidden="true" className="size-3.5" />
+          {t("panels.schedule.edit")}
+        </Button>
+
+        <div className="ml-auto">
+          {confirmingId === task.id ? (
+            <div className="flex items-center gap-1">
               <Button
-                disabled={savingId === task.id}
-                onClick={() => void save(task)}
+                disabled={deleting || deleteLocked}
+                onClick={() => void remove(task)}
                 size="sm"
+                variant="destructive"
               >
-                {t("panels.schedule.save")}
+                {deleting
+                  ? t("panels.schedule.deleting")
+                  : t("panels.schedule.confirmDelete")}
               </Button>
-              <Button onClick={cancelEdit} size="sm" variant="ghost">
+              <Button
+                disabled={deleting || deleteLocked}
+                onClick={() => setConfirmingId("")}
+                size="sm"
+                variant="ghost"
+              >
                 {t("panels.schedule.cancel")}
               </Button>
-            </>
+            </div>
           ) : (
-            <>
-              {active ? (
-                <Button
-                  disabled={controlling}
-                  onClick={() => control(task, "pause")}
-                  size="sm"
-                  variant="ghost"
-                >
-                  {controlling && controllingAction === "pause"
-                    ? t("panels.schedule.pausing")
-                    : t("panels.schedule.pause")}
-                </Button>
-              ) : null}
-              {paused ? (
-                <Button
-                  disabled={controlling}
-                  onClick={() => control(task, "resume")}
-                  size="sm"
-                  variant="ghost"
-                >
-                  {controlling && controllingAction === "resume"
-                    ? t("panels.schedule.resuming")
-                    : t("panels.schedule.resume")}
-                </Button>
-              ) : null}
-              {active || paused ? (
-                <Button
-                  disabled={controlling}
-                  onClick={() => startEdit(task)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  {t("panels.schedule.edit")}
-                </Button>
-              ) : null}
-              {confirmingId === task.id ? (
-                <div className="flex gap-1">
-                  <Button
-                    disabled={deletingId === task.id}
-                    onClick={() => void remove(task)}
-                    size="sm"
-                    variant="destructive"
-                  >
-                    {t("panels.schedule.confirmDelete")}
-                  </Button>
-                  <Button
-                    onClick={() => setConfirmingId("")}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {t("panels.schedule.cancel")}
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  aria-label={t("panels.schedule.delete")}
-                  onClick={() => setConfirmingId(task.id)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  <Trash2Icon className="size-4" />
-                </Button>
-              )}
-            </>
+            <Button
+              aria-label={t("panels.schedule.delete")}
+              disabled={deleting || deleteLocked}
+              onClick={() => setConfirmingId(task.id)}
+              size="icon"
+              title={t("panels.schedule.delete")}
+              variant="ghost"
+            >
+              <Trash2Icon aria-hidden="true" className="size-3.5" />
+            </Button>
           )}
         </div>
       </div>

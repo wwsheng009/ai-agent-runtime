@@ -10,7 +10,7 @@ import "sync/atomic"
 //   - EmbeddedTotal：内嵌执行成功次数
 //   - EmbeddedSkippedTotal：内嵌被租约仲裁拒绝次数（会话被宿主持有）
 //   - RetriesScheduled：退避重排次数（markFailed 调用数）
-//   - DeadLetterTotal：达到 MaxDeliveryAttempts 的任务数（转 inactive 留痕）
+//   - DeadLetterTotal：达到 MaxDeliveryAttempts 的任务数（转 blocked 留痕，可重试）
 //   - DuplicateSkippedTotal：交付账本命中（已送达）而跳过的任务数（S2，§12.1）
 //   - ClaimConflictsTotal：任务级 claim 抢失败而跳过的任务数（S4，§4.3）
 //   - MisfireSkippedTotal：一次性任务超宽限窗口未投递即转 inactive 的数量（S4b，§4.4）

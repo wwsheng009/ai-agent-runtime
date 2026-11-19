@@ -99,6 +99,40 @@ func TestServiceResumePastAtRequiresEdit(t *testing.T) {
 	}
 }
 
+func TestServiceResumeRearmsInactiveAfterTask(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, func() time.Time { return now })
+	delay := int64(60)
+	rec, err := svc.Create("session-1", CreateRequest{
+		Prompt: "ping", Title: "Ping", AfterSeconds: &delay,
+	}, OriginManual)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	current, ok, err := store.Get(rec.ID)
+	if err != nil || !ok {
+		t.Fatalf("Get created task: ok=%v err=%v", ok, err)
+	}
+	current.Status = StatusInactive
+	if applied, err := store.UpdateCAS(current, current.StateVersion); err != nil || !applied {
+		t.Fatalf("mark inactive: applied=%v err=%v", applied, err)
+	}
+
+	now = rec.ScheduledAt.Add(time.Minute)
+	resumed, err := svc.Resume("session-1", rec.ID)
+	if err != nil || !resumed.Updated || resumed.Status != StatusActive {
+		t.Fatalf("Resume inactive = %+v, err=%v", resumed, err)
+	}
+	if resumed.Record == nil || !resumed.Record.ScheduledAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("inactive after task should receive a fresh delay, got %+v", resumed.Record)
+	}
+}
+
 func TestServiceHeadlessTaskManagedByCreatorSession(t *testing.T) {
 	store, err := NewMemoryStore()
 	if err != nil {
@@ -124,5 +158,75 @@ func TestServiceHeadlessTaskManagedByCreatorSession(t *testing.T) {
 	deleted, err := svc.Delete("creator-session", rec.ID)
 	if err != nil || !deleted.Deleted {
 		t.Fatalf("Delete by creator = %+v, err=%v", deleted, err)
+	}
+}
+
+// TestServiceSessionlessTargetsRemainManageable 钉住全局管理面：headless 任务
+// 可以没有创建者会话，此时按任务 id 管理，而不是被“缺 session_id”拦住。
+func TestServiceSessionlessTargetsRemainManageable(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, func() time.Time { return now })
+	delay := int64(60)
+	rec, err := svc.Create("", CreateRequest{
+		Prompt: "nightly", Title: "Nightly", AfterSeconds: &delay,
+		Goal: "run nightly check", TargetKind: TargetHeadless,
+	}, OriginManual)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	paused, err := svc.Pause("", rec.ID)
+	if err != nil || !paused.Updated || paused.Status != StatusPaused {
+		t.Fatalf("sessionless Pause = %+v, err=%v", paused, err)
+	}
+
+	title := "Nightly edited"
+	updated, err := svc.Update("", rec.ID, rec, UpdateContent{Title: &title}, nil)
+	if err != nil || !updated.Updated {
+		t.Fatalf("sessionless Update = %+v, err=%v", updated, err)
+	}
+	if updated.Record == nil || updated.Record.Title != title {
+		t.Fatalf("updated record = %+v", updated.Record)
+	}
+
+	resumed, err := svc.Resume("", rec.ID)
+	if err != nil || !resumed.Updated || resumed.Status != StatusActive {
+		t.Fatalf("sessionless Resume = %+v, err=%v", resumed, err)
+	}
+
+	deleted, err := svc.Delete("", rec.ID)
+	if err != nil || !deleted.Deleted {
+		t.Fatalf("sessionless Delete = %+v, err=%v", deleted, err)
+	}
+}
+
+// TestServiceSessionTargetStillRequiresSession 确认放宽只对非会话目标生效。
+func TestServiceSessionTargetStillRequiresSession(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, func() time.Time { return now })
+	delay := int64(60)
+	rec, err := svc.Create("session-1", CreateRequest{
+		Prompt: "ping", Title: "Ping", AfterSeconds: &delay,
+	}, OriginManual)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	paused, err := svc.Pause("", rec.ID)
+	if err != nil {
+		t.Fatalf("Pause returned transport error: %v", err)
+	}
+	if paused.Updated || paused.Code != CodeSessionRequired {
+		t.Fatalf("session task without session must be rejected, got %+v", paused)
 	}
 }

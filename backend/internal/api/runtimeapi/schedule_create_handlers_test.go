@@ -75,39 +75,39 @@ func TestCreateScheduleTask_ManualOrigin(t *testing.T) {
 // TestCreateScheduleTask_ReusesServiceValidation pins that the HTTP entry
 // applies the same validation pipeline as the model tool: zero or two
 // selectors, empty prompt, and an at target in the past are all rejected with
-// the service-side error code in the message.
+// the service-side error code as a structured response field.
 func TestCreateScheduleTask_ReusesServiceValidation(t *testing.T) {
 	_, router := newScheduleTestHandler(t)
 
 	cases := []struct {
-		name    string
-		body    string
-		wantMsg string
+		name     string
+		body     string
+		wantCode string
 	}{
 		{
-			name:    "zero selectors",
-			body:    `{"session_id":"s","title":"t","prompt":"p"}`,
-			wantMsg: "invalid_selector",
+			name:     "zero selectors",
+			body:     `{"session_id":"s","title":"t","prompt":"p"}`,
+			wantCode: "invalid_selector",
 		},
 		{
-			name:    "two selectors",
-			body:    `{"session_id":"s","title":"t","prompt":"p","after_seconds":60,"every_seconds":60}`,
-			wantMsg: "invalid_selector",
+			name:     "two selectors",
+			body:     `{"session_id":"s","title":"t","prompt":"p","after_seconds":60,"every_seconds":60}`,
+			wantCode: "invalid_selector",
 		},
 		{
-			name:    "empty prompt",
-			body:    `{"session_id":"s","title":"t","prompt":"   ","after_seconds":60}`,
-			wantMsg: "invalid_prompt",
+			name:     "empty prompt",
+			body:     `{"session_id":"s","title":"t","prompt":"   ","after_seconds":60}`,
+			wantCode: "invalid_prompt",
 		},
 		{
-			name:    "at in the past",
-			body:    `{"session_id":"s","title":"t","prompt":"p","at":"2000-01-01T00:00:00Z"}`,
-			wantMsg: "not_future",
+			name:     "at in the past",
+			body:     `{"session_id":"s","title":"t","prompt":"p","at":"2000-01-01T00:00:00Z"}`,
+			wantCode: "not_future",
 		},
 		{
-			name:    "missing session_id",
-			body:    `{"title":"t","prompt":"p","after_seconds":60}`,
-			wantMsg: "session_id is required",
+			name:     "missing session_id",
+			body:     `{"title":"t","prompt":"p","after_seconds":60}`,
+			wantCode: "invalid_selector",
 		},
 	}
 	for _, tc := range cases {
@@ -116,7 +116,16 @@ func TestCreateScheduleTask_ReusesServiceValidation(t *testing.T) {
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 			require.Equal(t, http.StatusBadRequest, rec.Code)
-			require.Contains(t, rec.Body.String(), tc.wantMsg)
+			var response struct {
+				Error   string                 `json:"error"`
+				Code    string                 `json:"code"`
+				Context map[string]interface{} `json:"context"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, tc.wantCode, response.Code)
+			require.Equal(t, tc.wantCode, response.Context["schedule_code"])
+			require.NotEmpty(t, response.Error)
+			require.NotContains(t, response.Error, tc.wantCode+":")
 		})
 	}
 }
@@ -175,4 +184,146 @@ func TestScheduleTaskPauseResumeEndpoints(t *testing.T) {
 			require.Equal(t, schedule.StatusActive, result.Status)
 		}
 	}
+}
+
+// TestSessionlessHeadlessTaskManagementEndpoints 钉住全局管理面：headless 任务
+// 没有创建者会话时，暂停/编辑/恢复/删除都只凭任务 id 即可完成。
+func TestSessionlessHeadlessTaskManagementEndpoints(t *testing.T) {
+	_, router := newScheduleTestHandler(t)
+
+	body := `{"title":"Nightly","prompt":"run checks","after_seconds":600,"goal":"keep healthy","target_kind":"headless"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created struct {
+		Record schedule.Record `json:"record"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Record.ID)
+
+	idBody := func() string {
+		encoded, err := json.Marshal(map[string]any{"id": created.Record.ID})
+		require.NoError(t, err)
+		return string(encoded)
+	}
+	for _, path := range []string{"/api/runtime/schedule/pause", "/api/runtime/schedule/resume"} {
+		req = httptest.NewRequest(http.MethodPost, path, strings.NewReader(idBody()))
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var result schedule.UpdateResult
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+		require.True(t, result.Updated)
+	}
+
+	updatePayload, err := json.Marshal(map[string]any{
+		"id":             created.Record.ID,
+		"expected":       created.Record,
+		"title":          "Nightly edited",
+		"target_kind":    "headless",
+		"target_profile": "scheduled",
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/update", strings.NewReader(string(updatePayload)))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var updated schedule.UpdateResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &updated))
+	require.True(t, updated.Updated)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/delete", strings.NewReader(idBody()))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var deleted schedule.DeleteResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &deleted))
+	require.True(t, deleted.Deleted)
+}
+
+// TestSessionTaskStillRequiresSessionAtHTTPBoundary 确认放宽只覆盖非会话目标。
+func TestSessionTaskStillRequiresSessionAtHTTPBoundary(t *testing.T) {
+	_, router := newScheduleTestHandler(t)
+
+	body := `{"session_id":"sess-owner","title":"Ping","prompt":"p","after_seconds":600}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created struct {
+		Record schedule.Record `json:"record"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	idBody, err := json.Marshal(map[string]any{"id": created.Record.ID})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/pause", strings.NewReader(string(idBody)))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var result schedule.UpdateResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	require.False(t, result.Updated)
+	require.Equal(t, schedule.CodeSessionRequired, result.Code)
+}
+
+// TestUpdateScheduleTask_FullJobFieldsAndAfterRule 钉住 HTTP 编辑面：
+// goal/plan/执行上下文与 after 时间规则都通过同一 update 端点落库。
+func TestUpdateScheduleTask_FullJobFieldsAndAfterRule(t *testing.T) {
+	_, router := newScheduleTestHandler(t)
+
+	createBody := `{"session_id":"sess-edit","title":"Old title","prompt":"old prompt","every_seconds":300}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(createBody))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created struct {
+		Record schedule.Record `json:"record"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+
+	updatePayload, err := json.Marshal(map[string]any{
+		"session_id":     "sess-edit",
+		"id":             created.Record.ID,
+		"expected":       created.Record,
+		"title":          "Edited title",
+		"prompt":         "edited prompt",
+		"goal":           "edited goal",
+		"plan":           []string{"step one", "step two"},
+		"target_kind":    "headless",
+		"target_profile": "scheduled",
+		"change": map[string]any{
+			"kind":          "after",
+			"after_seconds": 120,
+		},
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/update", strings.NewReader(string(updatePayload)))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var updated schedule.UpdateResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &updated))
+	require.True(t, updated.Updated)
+	require.NotNil(t, updated.Record)
+	require.Equal(t, schedule.KindAfter, updated.Record.Kind)
+	require.Equal(t, int64(120), updated.Record.AfterSeconds)
+	require.Equal(t, "edited goal", updated.Record.Goal)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/schedule/catalog", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var catalog struct {
+		Tasks []schedule.CatalogEntry `json:"tasks"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
+	require.Len(t, catalog.Tasks, 1)
+	entry := catalog.Tasks[0]
+	require.Equal(t, "", entry.SessionID)
+	require.Equal(t, "sess-edit", entry.CreatedBySessionID)
+	require.Equal(t, schedule.TargetHeadless, entry.TargetKind)
+	require.Equal(t, "scheduled", entry.TargetProfile)
+	require.Equal(t, []string{"step one", "step two"}, entry.Plan)
 }

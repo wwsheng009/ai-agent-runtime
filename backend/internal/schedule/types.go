@@ -33,6 +33,9 @@ const (
 	// StatusPaused 表示用户主动暂停的任务：不参与到期扫描，也不是终态。
 	// 暂停保留原 scheduledAt；恢复时若目标已过去，会按规则重算出下一个目标。
 	StatusPaused Status = "paused"
+	// StatusBlocked is a visible, recoverable state for tasks that cannot run
+	// because the configured runtime lacks a required capability.
+	StatusBlocked Status = "blocked"
 	// StatusInactive 表示任务已结束（一次性已投递，或无未来目标）。
 	StatusInactive Status = "inactive"
 )
@@ -157,6 +160,8 @@ type Task struct {
 	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
 	// DeadLetteredAt 是首次达到 MaxAttempts 的时间（显式死信留痕，可查询）。
 	DeadLetteredAt *time.Time `json:"deadLetteredAt,omitempty"`
+	LastErrorCode  string     `json:"lastErrorCode,omitempty"`
+	LastError      string     `json:"lastError,omitempty"`
 }
 
 // JobRunStatus 是一次作业运行的结果状态。
@@ -177,11 +182,14 @@ type JobRun struct {
 	// Output 是运行产出的文本（成功时）。
 	Output string `json:"output,omitempty"`
 	// Error 是失败原因（失败时）。
-	Error string `json:"error,omitempty"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode string `json:"errorCode,omitempty"`
 	// SessionID 是本次运行所用的临时会话（headless/workspace；可空）。
 	SessionID  string    `json:"sessionId,omitempty"`
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt"`
+	// IdempotencyKey deduplicates synthetic/system runs across repeated drives.
+	IdempotencyKey string `json:"-"`
 }
 
 // View 是模型可见的提醒视图。
@@ -242,16 +250,24 @@ type CronInput struct {
 	TimeZone   string `json:"time_zone"`
 }
 
-// UpdateContent 是可选的名称/指令替换。
+// UpdateContent 是编辑时的可选字段替换。指针用于区分“未提供”与“显式清空”；
+// 时间规则由 TimingChange 单独表达。
 type UpdateContent struct {
-	Title  *string
-	Prompt *string
+	Title           *string
+	Prompt          *string
+	Goal            *string
+	Plan            *[]string
+	TargetKind      *TargetKind
+	TargetWorkspace *string
+	TargetProfile   *string
+	TargetSessionID *string
 }
 
-// TimingChange 是时间替换（P0 支持 at/every；after 仅创建时可用）。
+// TimingChange 是时间替换；after 以编辑提交时刻重新计算延迟目标。
 type TimingChange struct {
 	Kind         Kind
 	At           *string
+	AfterSeconds *int64
 	EverySeconds *int64
 	Daily        *DailyInput
 	Weekly       *WeeklyInput

@@ -12,7 +12,12 @@ export type RuntimeScheduleKind =
   | "weekly"
   | "cron";
 
-export type RuntimeScheduleStatus = "active" | "paused" | "inactive";
+export type RuntimeScheduleStatus =
+  | "active"
+  | "paused"
+  | "inactive"
+  | "blocked"
+  | "failed";
 
 export type RuntimeScheduleState = "scheduled" | "overdue";
 
@@ -66,6 +71,12 @@ export type RuntimeScheduleTask = {
   expression?: string;
   sessionId: string;
   status: RuntimeScheduleStatus;
+  lastErrorCode?: string;
+  lastError?: string;
+  /** 投递尝试簿记：失败/退避即使没有成功回执也应可见。 */
+  attemptCount?: number;
+  lastAttemptAt?: string;
+  deadLetteredAt?: string;
   /** 创建来源：model=模型工具；manual=人工管理端（旧数据回落 model）。 */
   origin?: RuntimeScheduleOrigin;
   /** 执行上下文（J1；缺省回落 session）。 */
@@ -122,6 +133,7 @@ export type RuntimeScheduleJobRun = {
   status: RuntimeScheduleJobRunStatus;
   output?: string;
   error?: string;
+  errorCode?: string;
   /** 本次运行所用的临时会话（headless/workspace；可空）。 */
   sessionId?: string;
   startedAt: string;
@@ -153,6 +165,7 @@ export type RuntimeScheduleUpdateResponse = {
 export type RuntimeScheduleTimingChange = {
   kind: RuntimeScheduleKind;
   at?: string;
+  after_seconds?: number;
   every_seconds?: number;
   daily?: { time: string; time_zone: string };
   weekly?: { time: string; time_zone: string; weekdays: number[] };
@@ -165,6 +178,13 @@ export type RuntimeScheduleUpdateRequest = {
   expected: RuntimeScheduleRecord;
   title?: string;
   prompt?: string;
+  goal?: string;
+  plan?: string[];
+  target_kind?: RuntimeScheduleTargetKind;
+  target_workspace?: string;
+  target_profile?: string;
+  /** session 目标编辑时显式指定目标会话；非 session 目标忽略。 */
+  target_session_id?: string;
   change?: RuntimeScheduleTimingChange;
 };
 

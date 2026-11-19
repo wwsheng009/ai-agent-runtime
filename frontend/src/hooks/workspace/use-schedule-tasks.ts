@@ -19,8 +19,10 @@ import {
   resumeScheduleTask,
   updateScheduleTask,
 } from "@/api/runtime/schedule";
+import { RuntimeApiError } from "@/api/runtime/shared";
 import type {
   RuntimeScheduleCreateRequest,
+  RuntimeScheduleTargetKind,
   RuntimeScheduleTask,
   RuntimeScheduleUpdateRequest,
 } from "@/types/runtime";
@@ -41,9 +43,38 @@ export type UseScheduleTasksOptions = {
 
 export type ScheduleDeleteOutcome =
   | { ok: true }
-  | { ok: false; message: string };
+  | { ok: false; message: string; code?: string };
+
+function scheduleApiErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof RuntimeApiError)) return undefined;
+  const contextCode = error.payload?.context?.schedule_code;
+  if (typeof contextCode === "string" && contextCode.trim()) {
+    return contextCode.trim();
+  }
+  const code = error.payload?.code?.trim();
+  return code && code !== "VALIDATION_FAILED" ? code : undefined;
+}
 
 export type ScheduleControlAction = "pause" | "resume";
+
+/**
+ * 管理动作实际携带的会话：优先绑定会话，其次创建者，最后面板兜底。
+ * 非 session 目标（headless/workspace）允许空会话，按任务 id 管理。
+ */
+export function resolveScheduleTaskSession(
+  task: RuntimeScheduleTask | undefined,
+  fallback: string,
+  targetKind?: RuntimeScheduleTargetKind,
+): { sessionId: string; requiresSession: boolean } {
+  const sessionId =
+    task?.sessionId?.trim() ||
+    task?.createdBySessionId?.trim() ||
+    fallback.trim();
+  // 目标类型未知时不要臆测为 session：否则任务尚未载入或已被重新拉取时，
+  // 合法的 headless/workspace 任务会被误判成“需要会话”而永久无法重试/保存。
+  const kind = targetKind ?? task?.targetKind;
+  return { sessionId, requiresSession: kind === "session" && sessionId === "" };
+}
 
 export function useScheduleTasks({
   enabled,
@@ -128,7 +159,8 @@ export function useScheduleTasks({
       } catch (caught) {
         if (requestIdRef.current === requestId) {
           // 失败保留最近已知数据（方案 S11：error 态不清空）。
-          setError(caught instanceof Error ? caught.message : String(caught));
+          // UI 只消费稳定错误码并展示本地化兜底，不把后端原始英文详情泄露出来。
+          setError(scheduleApiErrorCode(caught) ?? "request_failed");
         }
       } finally {
         if (requestIdRef.current === requestId) {
@@ -144,15 +176,19 @@ export function useScheduleTasks({
   const removeTask = useCallback(
     async (id: string): Promise<ScheduleDeleteOutcome> => {
       const target = tasks.find((task) => task.id === id);
-      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
-      if (!taskSession) {
-        return { ok: false, message: "session id unavailable" };
+      const taskSession = resolveScheduleTaskSession(target, sid);
+      if (taskSession.requiresSession) {
+        return {
+          ok: false,
+          code: "session_required",
+          message: "",
+        };
       }
       setDeletingId(id);
       try {
-        const response = await deleteScheduleTask(taskSession, id);
+        const response = await deleteScheduleTask(taskSession.sessionId, id);
         if (!response.deleted && response.code && response.code !== "schedule_not_found") {
-          return { ok: false, message: response.code };
+          return { ok: false, message: response.code, code: response.code };
         }
         setRefreshToken((token) => token + 1);
         return { ok: true };
@@ -160,6 +196,7 @@ export function useScheduleTasks({
         return {
           ok: false,
           message: caught instanceof Error ? caught.message : String(caught),
+          code: scheduleApiErrorCode(caught) ?? "request_failed",
         };
       } finally {
         setDeletingId("");
@@ -174,20 +211,26 @@ export function useScheduleTasks({
       request: Omit<RuntimeScheduleUpdateRequest, "sessionId">,
     ): Promise<ScheduleDeleteOutcome> => {
       const target = tasks.find((task) => task.id === request.id);
-      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
-      if (!taskSession) {
-        return { ok: false, message: "session id unavailable" };
+      const targetKind = request.target_kind ?? target?.targetKind;
+      const taskSession = resolveScheduleTaskSession(target, sid, targetKind);
+      if (taskSession.requiresSession) {
+        return {
+          ok: false,
+          code: "session_required",
+          message: "",
+        };
       }
       setSavingId(request.id);
       try {
         const response = await updateScheduleTask({
           ...request,
-          sessionId: taskSession,
+          sessionId: taskSession.sessionId,
         });
         if (!response.updated && response.code) {
           return {
             ok: false,
             message: response.message || response.code,
+            code: response.code,
           };
         }
         setRefreshToken((token) => token + 1);
@@ -196,6 +239,7 @@ export function useScheduleTasks({
         return {
           ok: false,
           message: caught instanceof Error ? caught.message : String(caught),
+          code: scheduleApiErrorCode(caught) ?? "request_failed",
         };
       } finally {
         setSavingId("");
@@ -211,7 +255,11 @@ export function useScheduleTasks({
     ): Promise<ScheduleDeleteOutcome> => {
       const targetKind = request.target_kind ?? "session";
       if (targetKind === "session" && !request.sessionId.trim()) {
-        return { ok: false, message: "session id unavailable" };
+        return {
+          ok: false,
+          code: "session_required",
+          message: "",
+        };
       }
       setCreating(true);
       try {
@@ -222,6 +270,7 @@ export function useScheduleTasks({
         return {
           ok: false,
           message: caught instanceof Error ? caught.message : String(caught),
+          code: scheduleApiErrorCode(caught),
         };
       } finally {
         setCreating(false);
@@ -238,23 +287,28 @@ export function useScheduleTasks({
     ): Promise<ScheduleDeleteOutcome> => {
       const targetId = id.trim();
       if (!targetId) {
-        return { ok: false, message: "task id unavailable" };
+        return { ok: false, code: "task_required", message: "" };
       }
       const target = tasks.find((task) => task.id === targetId);
-      const taskSession = target?.sessionId || target?.createdBySessionId || sid;
-      if (!taskSession) {
-        return { ok: false, message: "session id unavailable" };
+      const taskSession = resolveScheduleTaskSession(target, sid);
+      if (taskSession.requiresSession) {
+        return {
+          ok: false,
+          code: "session_required",
+          message: "",
+        };
       }
       setControlling({ id: targetId, action });
       try {
         const response =
           action === "pause"
-            ? await pauseScheduleTask(taskSession, targetId)
-            : await resumeScheduleTask(taskSession, targetId);
+            ? await pauseScheduleTask(taskSession.sessionId, targetId)
+            : await resumeScheduleTask(taskSession.sessionId, targetId);
         if (!response.updated && response.code) {
           return {
             ok: false,
             message: response.message || response.code,
+            code: response.code,
           };
         }
         setRefreshToken((token) => token + 1);
@@ -263,6 +317,7 @@ export function useScheduleTasks({
         return {
           ok: false,
           message: caught instanceof Error ? caught.message : String(caught),
+          code: scheduleApiErrorCode(caught) ?? "request_failed",
         };
       } finally {
         setControlling(null);

@@ -1,6 +1,6 @@
 // P0-2：原 893 行入口拆分后的容器，仅保留状态编排与组合，逻辑不变。
 
-import { lazy, startTransition, Suspense, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
@@ -176,16 +176,19 @@ export function LogsPage() {
   function updateUrlState(
     updater: (currentState: RuntimeLogsUrlState) => RuntimeLogsUrlState,
   ) {
-    startTransition(() => {
-      setSearchParams(
-        (currentSearchParams) =>
-          writeRuntimeLogsUrlState(
-            currentSearchParams,
-            updater(readRuntimeLogsUrlState(currentSearchParams)),
-          ),
-        { replace: true },
-      );
-    });
+    // Search input is a controlled field backed by URL state. Deferring this
+    // navigation (startTransition) lets React re-render with the previous
+    // value between keystrokes, which demonstrably swallowed characters
+    // ("headless" → "hes"). Keep query/filter edits synchronous; fetching is
+    // already deferred downstream via useDeferredValue.
+    setSearchParams(
+      (currentSearchParams) =>
+        writeRuntimeLogsUrlState(
+          currentSearchParams,
+          updater(readRuntimeLogsUrlState(currentSearchParams)),
+        ),
+      { replace: true },
+    );
   }
 
   function setQuery(
