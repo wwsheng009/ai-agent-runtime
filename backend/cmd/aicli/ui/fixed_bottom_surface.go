@@ -4182,13 +4182,6 @@ func terminalMoveToSequence(row, col int) string {
 	return fmt.Sprintf("\x1b[%d;%dH", row, col)
 }
 
-func terminalScrollDownSequence(rows int) string {
-	if rows < 1 {
-		return ""
-	}
-	return fmt.Sprintf("\x1b[%dT", rows)
-}
-
 func outputBottomRowForHeight(height int, bottomRows int) int {
 	bottom := height - effectiveBottomRowsForHeight(height, bottomRows)
 	if bottom < 1 {

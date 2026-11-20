@@ -85,10 +85,6 @@ func SessionInfoDocument(info SessionInfo, width int) render.Document {
 	return constrainInfoDocument(render.LinesDoc(lines...), width)
 }
 
-func sessionInfoChildPrefix(theme *Theme) string {
-	return strings.Repeat(" ", render.Width(theme.SystemIcon+" "))
-}
-
 func sessionInfoRow(prefix, label, value string, valueRole style.Role) render.Line {
 	labelLine := render.Pad(render.Line{Spans: []render.Span{{
 		Text:  label,

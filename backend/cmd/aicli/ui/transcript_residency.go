@@ -230,13 +230,6 @@ func noteTranscriptResidencyBodyStorePut(failed bool) {
 	}
 }
 
-func noteTranscriptResidencyBodyStoreGet(missed bool) {
-	residencyBodyStoreGets.Add(1)
-	if missed {
-		residencyBodyStoreGetMisses.Add(1)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // T8b-5：导出记录入口（commands 的 bridge 写穿裁剪路径调用）+ 真实快照分区。
 

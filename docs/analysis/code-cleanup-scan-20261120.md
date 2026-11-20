@@ -280,6 +280,19 @@
 - 验证：`cmd/aicli/ui` 的 `-short` 测试通过，链接阶段使用
   `-ldflags="-s -w"` 规避 Windows 页面文件不足。
 
+### 0.21 第二十一批已执行（2026-11-20）
+
+- 将 8 个仅测试引用的生产 helper 迁移到 `_test.go`：
+  - `cmd/aicli/ui`：`newSuffixProjector`、`noteTranscriptResidencyBodyStoreGet`、
+    `sessionInfoChildPrefix`、`terminalScrollDownSequence` → `cleanup_helpers_test.go`；
+  - `cmd/runtime-server`：`defaultRuntimeServerDotEnvSearchPaths` →
+    `config_test_helpers_test.go`；
+  - `internal/usageanalytics`：`sortedStrings` → `query_test_helpers_test.go`；
+  - `internal/pkg/httpclient`：`recordDialResultAt` → `pool_test_helpers_test.go`。
+- 验证：`cmd/aicli/ui`、`cmd/runtime-server`、`internal/usageanalytics`、
+  `internal/pkg/httpclient` 的 `-short` 测试通过；`cmd/aicli/ui` 使用
+  `-ldflags="-s -w"` 规避 Windows 页面文件不足。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

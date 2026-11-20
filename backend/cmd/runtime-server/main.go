@@ -1699,10 +1699,6 @@ func loadEnv(args []string) {
 	_ = godotenv.Load(path)
 }
 
-func defaultRuntimeServerDotEnvSearchPaths() []string {
-	return config.DotEnvSearchPathsForConfigPaths(defaultRuntimeServerConfigSearchPaths())
-}
-
 // workspaceTrustedForShell gates workspace-owned shell.path/shell.env. A
 // runtime-server never prompts; an undecided workspace is treated as untrusted
 // (fail closed), matching the profile/prompt gate.

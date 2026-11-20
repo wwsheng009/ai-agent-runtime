@@ -329,13 +329,6 @@ type suffixProjector struct {
 	lastOK    bool
 }
 
-func newSuffixProjector(source string, start, width int, theme style.ThemeContext, reasoning bool, highlighter syntax.Highlighter) *suffixProjector {
-	if highlighter == nil {
-		highlighter = newActiveBandHighlighter()
-	}
-	return &suffixProjector{source: source, start: start, width: width, theme: theme, reasoning: reasoning, highlighter: highlighter}
-}
-
 // band renders one source span the same way the finalized commit does.
 func (p *suffixProjector) band(source string) []render.Line {
 	if p.reasoning {

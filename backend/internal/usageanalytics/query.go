@@ -462,15 +462,6 @@ func jsonUnmarshalRecord(raw []byte, out interface{}) error {
 	return json.Unmarshal([]byte(trimmed), out)
 }
 
-func sortedStrings(values map[string]struct{}) []string {
-	out := make([]string, 0, len(values))
-	for value := range values {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // ListSessions：DB 分页（LIMIT/OFFSET + COUNT(*)）。
 // ---------------------------------------------------------------------------
