@@ -18,7 +18,9 @@ const SOURCE_ROW_TITLE = `Runtime session ${SOURCE_ID.slice(0, 10)}`;
 
 async function gotoWorkspace(page: Page) {
   await page.goto("/workspace");
-  await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("textarea.app-chat-input")).toBeVisible({
+    timeout: 30_000,
+  });
 }
 
 /**
@@ -70,9 +72,8 @@ test.beforeEach(async ({ page }) => {
   await seedSession(page.request, { id: SOURCE_ID });
 });
 
-// Phase 2 回归断言（合并方案 §7-1）：目录段与会话段合并后，同一会话在侧栏只渲染一行。
-// 合并前同一会话会在「工作目录 → Unscoped sessions」与「会话」两处各出现一次。
-test("同一会话在侧栏只渲染一行", async ({ page }) => {
+// 常规目录列表只渲染一行；最近会话快捷区的重复行由下方重命名回归用例覆盖。
+test("普通目录列表中同一会话只渲染一行", async ({ page }) => {
   await gotoWorkspace(page);
 
   await expect(
@@ -194,12 +195,9 @@ test("归档会话后从默认列表隐藏，可从归档区恢复", async ({ pa
   await expect(archivedToggle).toContainText("Hide archived");
 });
 
-// 回归用例（2026-09-14 的重复编辑器缺陷 → 2026-09-15 合并后口径）：
-// 合并前同一会话在两个分区各渲染一行，重命名状态只按 id 记录时两行会同时挂载行内
-// 输入框（都是 `autoFocus`）：后挂载者抢走焦点触发先挂载者的 `onBlur → onCancel`，
-// 状态立刻清空、编辑器一帧内卸载 —— 用户看到的就是「点铅笔没反应」。
-// 合并后（方案 §3.5-E）同一会话只有一行、重命名状态退化为 `string | null`，
-// 该冲突在结构上消失；本用例守住「进入编辑态 → 跨帧存活 → 提交 / Esc 取消」链路。
+// 重命名回归用例：最近会话快捷区与目录列表可能同时展示同一会话。
+// 两行必须以独立的渲染 key 管理编辑态，否则两个 autoFocus 输入框会互相触发
+// `onBlur → onCancel`，使编辑器立即卸载，看起来像「点击重命名没反应」。
 // 2026-09-15 样式优化：行内铅笔并入行菜单，入口变为「hover 行 → 行菜单 → 重命名会话」，
 // 断言口径（PATCH 落库 / 跨帧存活 / Esc 不写回）保持不变。
 test("菜单重命名：单一入口进入编辑态、提交后再次进入并 Esc 取消", async ({
@@ -251,4 +249,64 @@ test("菜单重命名：单一入口进入编辑态、提交后再次进入并 E
   await editor.press("Escape");
   await expect(editor).toHaveCount(0);
   expect(patchBodies).toHaveLength(1);
+});
+
+test("最近会话快捷行重命名时，同一会话的目录行不会抢焦点取消编辑", async ({
+  page,
+}) => {
+  // 将 seed 会话的时间改成当前时间，使其同时出现在最近会话快捷区和目录列表。
+  await page.route(
+    (url) => url.pathname === "/api/runtime/sessions",
+    async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        sessions: Array<Record<string, unknown>>;
+      };
+      const now = new Date().toISOString();
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          sessions: body.sessions.map((session) => ({
+            ...session,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        },
+      });
+    },
+  );
+
+  await gotoWorkspace(page);
+
+  const sessionName = new RegExp(SOURCE_ID.slice(0, 10));
+  const recentRow = page
+    .getByTestId("sidebar-recent-sessions")
+    .getByRole("button", { name: sessionName });
+  const directoryRow = workspaceSection(page)
+    .getByTestId("sidebar-session-list")
+    .getByRole("button", { name: sessionName });
+  await expect(recentRow).toBeVisible();
+  await expect(directoryRow).toBeVisible();
+
+  await recentRow.hover();
+  await recentRow
+    .locator("xpath=..")
+    .getByRole("button", { name: "Session actions" })
+    .click();
+  await page.getByRole("menuitem", { name: "Rename" }).click();
+
+  const editor = page.getByRole("textbox", { name: "Rename" });
+  await expect(editor).toBeVisible();
+  // 等过焦点自动转移帧，确保目录副本不会 blur/cancel 最近会话的编辑器。
+  await page.waitForTimeout(300);
+  await expect(editor).toHaveCount(1);
+  await expect(directoryRow).toBeVisible();
+  await editor.press("Escape");
+  await expect(editor).toHaveCount(0);
 });

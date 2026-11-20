@@ -111,7 +111,7 @@ export type SidebarSessionItemProps = {
   onCancelRename: () => void;
   onRenameSubmit: (sessionId: string, title: string) => void;
   onSelect: () => void;
-  onStartRename: (sessionId: string, currentTitle: string) => void;
+  onStartRename: () => void;
   renameLabels: {
     placeholder: string;
     rename: string;
@@ -295,7 +295,7 @@ export function SidebarSessionItem({
             onArchive={onArchive}
             onDelete={onDelete}
             onFork={onFork}
-            onRename={() => onStartRename(session.id, title)}
+            onRename={onStartRename}
             onRestore={onRestore}
             onStop={onStop}
             renameLabel={renameLabels.rename}

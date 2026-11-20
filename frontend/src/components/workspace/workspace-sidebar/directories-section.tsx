@@ -64,7 +64,7 @@ export function WorkspaceSidebarDirectoriesSection({
   openSections,
   openSessionDirectories,
   renamingDirectoryId,
-  renamingSessionId,
+  renamingSessionKey,
   registeringDirectoryPath,
   selectedThreadId,
   sessionActivity,
@@ -162,9 +162,9 @@ export function WorkspaceSidebarDirectoriesSection({
         }}
         onRestore={onRestoreSession}
         onSelectThread={onSelectThread}
-        onStartRename={startSessionRename}
+        onStartRename={() => startSessionRename(`recent:${session.id}`)}
         onStop={onStopSession}
-        renaming={renamingSessionId === session.id}
+        renaming={renamingSessionKey === `recent:${session.id}`}
         selectedThreadId={selectedThreadId}
         session={session}
         sessionThread={sessionThreadById.get(session.id)}
@@ -442,9 +442,16 @@ export function WorkspaceSidebarDirectoriesSection({
                             }}
                             onRestore={onRestoreSession}
                             onSelectThread={onSelectThread}
-                            onStartRename={startSessionRename}
+                            onStartRename={() =>
+                              startSessionRename(
+                                `directory:${group.key}:${session.id}`,
+                              )
+                            }
                             onStop={onStopSession}
-                            renaming={renamingSessionId === session.id}
+                            renaming={
+                              renamingSessionKey ===
+                              `directory:${group.key}:${session.id}`
+                            }
                             selectedThreadId={selectedThreadId}
                             session={session}
                             sessionThread={sessionThreadById.get(session.id)}

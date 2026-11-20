@@ -84,8 +84,8 @@ export function WorkspaceSidebar({
   const [openSessionDirectories, setOpenSessionDirectories] = useState<
     Record<string, boolean>
   >({});
-  /** 合并为单段后同一会话只有一处编辑器，不再需要按分区下发（方案 §3.5-E）。 */
-  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  /** 用渲染行 key 区分「最近会话」快捷行与目录树中的同一会话副本。 */
+  const [renamingSessionKey, setRenamingSessionKey] = useState<string | null>(null);
   /** P1-9：归档会话默认隐藏，可一键展开/收起（本次会话内有效）。 */
   const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
@@ -321,7 +321,7 @@ export function WorkspaceSidebar({
   }
 
   async function handleRenameSession(sessionId: string, title: string) {
-    setRenamingSessionId(null);
+    setRenamingSessionKey(null);
     try {
       await onRenameRuntimeSession(sessionId, title);
     } catch (renameError) {
@@ -331,14 +331,13 @@ export function WorkspaceSidebar({
     }
   }
 
-  /** 合并为单段后不再区分发起分区，同一会话在整段内只有一处行内编辑器（方案 §3.5-E）。 */
-  function startSessionRename(sessionId: string) {
+  function startSessionRename(renameKey: string) {
     setSidebarActionError(null);
-    setRenamingSessionId(sessionId);
+    setRenamingSessionKey(renameKey);
   }
 
   function cancelSessionRename() {
-    setRenamingSessionId(null);
+    setRenamingSessionKey(null);
   }
 
   return (
@@ -453,7 +452,7 @@ export function WorkspaceSidebar({
               openSections={openSections}
               openSessionDirectories={openSessionDirectories}
               renamingDirectoryId={renamingDirectoryId}
-              renamingSessionId={renamingSessionId}
+              renamingSessionKey={renamingSessionKey}
               registeringDirectoryPath={registeringDirectoryPath}
               selectedThreadId={selectedThreadId}
               sessionActivity={sessionActivity}

@@ -30,7 +30,7 @@ export type WorkspaceSidebarSessionRowProps = {
   onRestore?: ((sessionId: string) => void) | undefined;
   onStop?: ((sessionId: string) => void) | undefined;
   onSelectThread: (threadId: string) => void;
-  onStartRename: (sessionId: string) => void;
+  onStartRename: () => void;
   renaming: boolean;
   selectedThreadId: string;
   session: RuntimeSessionRecord;

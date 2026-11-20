@@ -86,12 +86,12 @@ export type WorkspaceSidebarDirectoriesSectionProps = {
   onSelectThread: (threadId: string) => void;
   openSections: SidebarSectionState;
   openSessionDirectories: Record<string, boolean>;
-  renamingSessionId: string | null;
+  renamingSessionKey: string | null;
   selectedThreadId: string;
   showWorkspaceSection: boolean;
   sidebarActionError: string | null;
   setSidebarActionError: Dispatch<SetStateAction<string | null>>;
-  startSessionRename: (sessionId: string) => void;
+  startSessionRename: (renameKey: string) => void;
   t: TFunction<"workspace">;
   toggleSection: (section: SidebarSectionId) => void;
   toggleSessionDirectory: (directoryKey: string) => void;
