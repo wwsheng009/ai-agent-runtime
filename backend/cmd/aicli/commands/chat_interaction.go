@@ -535,27 +535,6 @@ func normalizeChatAgentStage(stage chatAgentStage) chatAgentStage {
 	}
 }
 
-func chatAgentStageSurfaceLabel(stage chatAgentStage) string {
-	switch normalizeChatAgentStage(stage) {
-	case chatAgentStagePlanning:
-		return "Planning"
-	case chatAgentStageToolRunning:
-		return "Tool running"
-	case chatAgentStageAwaitingApproval:
-		return "Awaiting approval"
-	case chatAgentStageAwaitingAnswer:
-		return "Awaiting answer"
-	case chatAgentStageStopping:
-		return "Stopping"
-	case chatAgentStageCompleted, chatAgentStageFailed:
-		// Codex-aligned: once a task is no longer running, the composer surface
-		// shows Ready rather than sticky Completed/Failed.
-		return ""
-	default:
-		return ""
-	}
-}
-
 func chatAgentStageIsTerminal(stage chatAgentStage) bool {
 	stage = normalizeChatAgentStage(stage)
 	return stage == chatAgentStageCompleted || stage == chatAgentStageFailed
@@ -1977,10 +1956,6 @@ func chatSurfaceTitleState(s chatSurfaceStatus) string {
 	}
 }
 
-func buildChatPromptNoticeLine(session *ChatSession) string {
-	return buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, ui.GetTerminalWidth())
-}
-
 func refreshChatComposerContext(session *ChatSession) {
 	if session != nil && session.Interaction != nil {
 		session.Interaction.RefreshPromptLine()
@@ -2113,10 +2088,6 @@ func queuedInteractiveInputPreviewLines(session *ChatSession, limit int) []strin
 		return nil
 	}
 	return session.InputQueue.queuedPreviewLines(limit)
-}
-
-func compactPromptNoticeMessagePreview(text string) string {
-	return compactPromptNoticeMessagePreviewForWidth(text, 96)
 }
 
 func compactPromptNoticeMessagePreviewForWidth(text string, maxWidth int) string {
@@ -4425,19 +4396,6 @@ func resolveChatStatusUsedTokens(session *ChatSession) int {
 	return resolveChatContextSnapshotTokens(session, nil)
 }
 
-func resolveChatStatusMessageCount(session *ChatSession) int {
-	if session == nil {
-		return 0
-	}
-	if session.StatusMessageCount > 0 {
-		return session.StatusMessageCount
-	}
-	if count := countChatStatusMessages(session.Messages); count > 0 {
-		return count
-	}
-	return session.MsgCount
-}
-
 func applyChatStatusMessageCount(session *ChatSession, count int, forceRefresh bool) {
 	if session == nil || count <= 0 {
 		return
@@ -4456,14 +4414,6 @@ func compactStatusValue(value string, maxWidth int) string {
 	}
 	if maxWidth > 0 && ui.DisplayWidth(value) > maxWidth {
 		return truncateStatusValue(value, maxWidth)
-	}
-	return value
-}
-
-func compactStatusValueOrDash(value string, maxWidth int) string {
-	value = compactStatusValue(value, maxWidth)
-	if value == "" {
-		return "-"
 	}
 	return value
 }
@@ -6542,13 +6492,6 @@ func (c *chatInteractionCoordinator) currentPromptDisplayRowsLocked() int {
 	return interactivePromptDisplayRows(promptDisplayText(c.session)+draft.text, termWidth)
 }
 
-func clearPromptDisplayRows(writer io.Writer, rows int) {
-	if writer == nil {
-		return
-	}
-	_, _ = ui.WriteTerminalText(writer, clearPromptDisplayRowsSequence(rows))
-}
-
 func clearPromptDisplayRowsSequence(rows int) string {
 	if rows < 1 {
 		rows = 1
@@ -8594,13 +8537,6 @@ func shouldStartTextStreaming(content string) bool {
 		return true
 	}
 	return len([]rune(trimmed)) >= 32
-}
-
-func renderedLineCount(text string) int {
-	if text == "" {
-		return 0
-	}
-	return strings.Count(text, "\n") + 1
 }
 
 func (c *chatInteractionCoordinator) SchedulePromptRedraw() {

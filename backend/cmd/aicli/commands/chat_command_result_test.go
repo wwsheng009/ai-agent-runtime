@@ -1122,7 +1122,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		// 与 loadRuntimeToolConfig 的告警回退同一套约定。
 		{File: "chat_gateway_window.go", Func: "notifyGatewayWindowDiagnostic", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_image_command.go", Func: "handleImageGenerationCommand", Kind: "fmt.Print", Count: 4},
-		{File: "chat_interaction.go", Func: "clearPromptDisplayRows", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_interaction.go", Func: "method writeFormatLocked", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_interaction.go", Func: "method writeTextLocked", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_logger_suppression.go", Func: "suppressChatConsoleLogger", Kind: "fmt.Fprint(os.Std*)", Count: 3},

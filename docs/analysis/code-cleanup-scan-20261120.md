@@ -130,6 +130,15 @@
   `make test-full` 仍会覆盖。
 - 验证：两个包在默认模式与 `-tags integration` 模式下均编译通过。
 
+### 0.9 第九批已执行（2026-11-20）
+
+- 删除 `chat_interaction.go` 中 7 个零引用 helper：
+  `chatAgentStageSurfaceLabel`、`buildChatPromptNoticeLine`、
+  `compactPromptNoticeMessagePreview`、`resolveChatStatusMessageCount`、
+  `compactStatusValueOrDash`、`clearPromptDisplayRows`、`renderedLineCount`。
+- 同步下调 DirectWriter inventory 基线。
+- 验证：commands 的 Interaction/Debug/inventory 定向测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
