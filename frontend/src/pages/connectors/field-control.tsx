@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { CheckboxInput } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 import type { ConnectorFieldSchema } from "@/types/runtime";
 
 interface FieldControlProps {
@@ -76,19 +76,20 @@ export function FieldControl({
   }
   if (field.type === "enum") {
     return (
-      <NativeSelect
-        aria-label={field.label}
+      <Select
+        ariaLabel={field.label}
+        className="w-full"
+        options={[
+          { value: "", label: t("dialog.optionUnset") },
+          ...(field.options ?? []).map((option) => ({
+            value: option.value,
+            label: option.label,
+          })),
+        ]}
         surface="soft"
         value={value}
-        onChange={(event) => onValueChange(field.key, event.target.value)}
-      >
-        <option value="">{t("dialog.optionUnset")}</option>
-        {(field.options ?? []).map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </NativeSelect>
+        onChange={(nextValue) => onValueChange(field.key, nextValue)}
+      />
     );
   }
   return (

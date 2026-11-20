@@ -104,6 +104,7 @@ describe("usage analytics observability panels", () => {
     await flush();
 
     expect(container.textContent).toContain("shell");
+    expect(container.textContent).toContain("Shell");
     expect(container.textContent).toContain("25.0%");
     expect(container.textContent).toContain("5.0 s");
     // 页头耗时指标：平均 + 最小/最大区间；行内最小列 300 ms。

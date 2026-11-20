@@ -672,6 +672,11 @@ export const zhUsageAnalytics = {
       outcomeFailed: "仅失败",
       outcomeEmpty: "仅空结果",
       outcomePartial: "仅重试/部分",
+      categories: {
+        builtin: "内置工具",
+        mcp: "MCP",
+        shell: "Shell",
+      },
       metrics: {
         calls: "调用",
         failures: "失败",

@@ -35,7 +35,6 @@ export function TruncatedTick({
       dx={-12}
       dy={4}
       fill="var(--analytics-chart-axis)"
-      fontSize={12}
       textAnchor={textAnchor}
       style={{
         maxWidth: "200px",

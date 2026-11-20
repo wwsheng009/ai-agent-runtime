@@ -115,6 +115,20 @@ describe("ConnectorsPage", () => {
     await act(async () => undefined);
   }
 
+  it("嵌入配置编辑区时保留连接器管理操作且隐藏独立页面导航", async () => {
+    vi.mocked(getConnectorSchema).mockResolvedValue(SCHEMA);
+    vi.mocked(listConnectors).mockResolvedValue([]);
+
+    await render(<ConnectorsPage embedded />);
+
+    expect(document.querySelector("h2")).toBeNull();
+    expect(document.body.textContent).toContain("IM 连接器");
+    expect(findButton("新增连接器")).not.toBeNull();
+    expect(document.body.textContent).not.toContain("独立页面");
+    expect(document.querySelector('a[href="/workspace/chats/new"]')).toBeNull();
+    expect(document.querySelector('a[href="/runtime/config"]')).toBeNull();
+  });
+
   it("行内操作期间禁用该条编辑/测试按钮，完成后恢复", async () => {
     vi.mocked(getConnectorSchema).mockResolvedValue(SCHEMA);
     vi.mocked(listConnectors).mockResolvedValue([CONNECTOR]);

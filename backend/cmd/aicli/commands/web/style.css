@@ -2334,6 +2334,20 @@ body.sidebar-collapsed #sidebar {
 .cache-badge.badge-zero { color: var(--reasoningFg, #b8860b); border-color: var(--reasoningFg, #b8860b); background: transparent; }
 .cache-badge.badge-error { color: var(--red, #e5534b); border-color: var(--red, #e5534b); background: var(--redBg); }
 .cache-badge.badge-none { color: var(--fg4); }
+.cache-badge.tool-category-badge {
+  margin-right: 4px; padding: 0 6px; font-size: 10px; line-height: 16px;
+  font-weight: 600; white-space: nowrap; vertical-align: middle;
+}
+.cache-badge.tool-category-badge.category-builtin {
+  color: var(--fg2); border-color: var(--border2); background: var(--bg3);
+}
+.cache-badge.tool-category-badge.category-mcp {
+  color: var(--accent2); border-color: var(--accent); background: var(--hoverBg);
+}
+.cache-badge.tool-category-badge.category-shell {
+  color: var(--reasoningFg, #b8860b);
+  border-color: var(--reasoningFg, #b8860b); background: var(--reasoningBg);
+}
 .cache-child-id { font-family: var(--mono, monospace); font-size: 11px; color: var(--fg3, var(--fg4)); }
 .cache-child-none { color: var(--fg4); }
 .cache-hint { margin-top: 6px; font-size: 11px; color: var(--fg4); }

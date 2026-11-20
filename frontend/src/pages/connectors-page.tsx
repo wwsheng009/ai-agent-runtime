@@ -67,7 +67,7 @@ interface PageNotice {
   message: string;
 }
 
-export function ConnectorsPage() {
+export function ConnectorsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { t } = useTranslation("connectors");
   const adminToken = readAdminToken();
 
@@ -294,11 +294,28 @@ export function ConnectorsPage() {
   const handleRefilled = useCallback(() => {
     void reloadData();
   }, [reloadData]);
-
   return (
-    <div className="min-h-screen [background:var(--workspace-shell-bg)] text-foreground lg:h-dvh lg:overflow-hidden">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3 lg:h-full lg:min-h-0">
-        <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3.5 py-3">
+    <div
+      className={
+        embedded
+          ? "space-y-3 text-foreground"
+          : "min-h-screen [background:var(--workspace-shell-bg)] text-foreground lg:h-dvh lg:overflow-hidden"
+      }
+    >
+      <div
+        className={
+          embedded
+            ? "space-y-3"
+            : "mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3 lg:h-full lg:min-h-0"
+        }
+      >
+        <header
+          className={
+            embedded
+              ? "rounded-panel border border-border bg-surface-softer px-3 py-3"
+              : "surface-panel relative overflow-hidden rounded-panel-lg px-3.5 py-3"
+          }
+        >
           <div className="relative flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2">
@@ -306,27 +323,33 @@ export function ConnectorsPage() {
                   <BotIcon size={13} />
                   {t("page.badge")}
                 </Badge>
-                <Badge>{t("page.independentPage")}</Badge>
+                {!embedded ? <Badge>{t("page.independentPage")}</Badge> : null}
               </div>
-              <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.1rem]">
-                {t("page.title")}
-              </h1>
+              {!embedded ? (
+                <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.1rem]">
+                  {t("page.title")}
+                </h1>
+              ) : null}
             </div>
 
             <nav className="flex flex-wrap items-center gap-2" aria-label={t("page.title")}>
-              <Link
-                to="/workspace/chats/new"
-                className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
-              >
-                <ArrowLeftIcon size={14} />
-                {t("page.backToWorkspace")}
-              </Link>
-              <Link
-                to="/runtime/config"
-                className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-              >
-                {t("page.runtimeConfig")}
-              </Link>
+              {!embedded ? (
+                <>
+                  <Link
+                    to="/workspace/chats/new"
+                    className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
+                  >
+                    <ArrowLeftIcon size={14} />
+                    {t("page.backToWorkspace")}
+                  </Link>
+                  <Link
+                    to="/runtime/config"
+                    className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+                  >
+                    {t("page.runtimeConfig")}
+                  </Link>
+                </>
+              ) : null}
               <Button
                 variant="ghost"
                 size="sm"
@@ -349,7 +372,13 @@ export function ConnectorsPage() {
           </div>
         </header>
 
-        <section className="surface-panel min-h-0 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
+        <section
+          className={
+            embedded
+              ? "min-h-0 rounded-panel border border-border bg-surface-softer px-3 py-3.5 sm:px-4"
+              : "surface-panel min-h-0 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto"
+          }
+        >
           {notice ? (
             <div
               role={notice.kind === "success" ? "status" : "alert"}

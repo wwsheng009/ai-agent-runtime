@@ -219,12 +219,12 @@ export function ConnectorLogsDialog({
             )}
           </div>
           {hasRuntimeView && runtimeStats?.last_activity_at ? (
-            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+            <p className="mt-1 font-mono app-text-11 text-muted-foreground">
               {t("logs.lastActivity", { time: runtimeStats.last_activity_at })}
             </p>
           ) : null}
           {hasRuntimeView && runtimeStats?.last_error ? (
-            <p className="mt-1 break-words font-mono text-[11px] text-analytics-danger">
+            <p className="mt-1 break-words font-mono app-text-11 text-analytics-danger">
               {t("logs.lastError", { message: runtimeStats.last_error })}
             </p>
           ) : null}
@@ -249,11 +249,11 @@ export function ConnectorLogsDialog({
                   key={`${entry.time}-${index}`}
                   className="flex flex-col gap-1 rounded-card border border-border bg-surface-soft px-2.5 py-2"
                 >
-                  <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                  <div className="flex flex-wrap items-center gap-2 font-mono app-text-11">
                     <span className="text-muted-foreground">{entry.time}</span>
                     <span
                       className={cn(
-                        "rounded-chip border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.08em]",
+                        "rounded-chip border px-1.5 py-0.5 app-text-10 font-medium uppercase tracking-[0.08em]",
                         levelTone(entry.level),
                       )}
                     >
@@ -268,7 +268,7 @@ export function ConnectorLogsDialog({
                       </span>
                     ) : null}
                   </div>
-                  <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-foreground">
+                  <p className="whitespace-pre-wrap break-words font-mono app-text-11 leading-5 text-foreground">
                     {entry.summary}
                   </p>
                 </li>

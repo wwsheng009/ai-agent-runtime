@@ -674,6 +674,11 @@ export const enUsageAnalytics = {
       outcomeFailed: "Failures only",
       outcomeEmpty: "Empty results only",
       outcomePartial: "Retried / partial only",
+      categories: {
+        builtin: "Built-in",
+        mcp: "MCP",
+        shell: "Shell",
+      },
       metrics: {
         calls: "Calls",
         failures: "Failures",

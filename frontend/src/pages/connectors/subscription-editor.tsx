@@ -19,6 +19,7 @@ import type { ConnectorEventSubscriptionView } from "@/types/runtime";
 import { Button } from "@/components/ui/button";
 import { CheckboxInput } from "@/components/ui/checkbox";
 import { fieldControlVariants } from "@/components/ui/field-variants";
+import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 import {
@@ -98,7 +99,7 @@ function TypeOption({ name, hint, checked, onToggle }: TypeOptionProps) {
       />
       <span>{name}</span>
       {hint ? (
-        <span className="ml-auto text-[11px] text-muted-foreground">{hint}</span>
+        <span className="ml-auto app-text-11 text-muted-foreground">{hint}</span>
       ) : null}
     </label>
   );
@@ -253,47 +254,46 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
               </label>
               <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                 {t("connectorDialog.eventsMode")}
-                <select
-                  aria-label={t("connectorDialog.eventsMode")}
-                  className={inputClassName}
+                <Select
+                  ariaLabel={t("connectorDialog.eventsMode")}
+                  className="w-full"
                   value={mode}
-                  onChange={(event) =>
+                  onChange={(nextMode) =>
                     updateSessions(index, {
-                      mode: event.target.value as NonNullable<
+                      mode: nextMode as NonNullable<
                         ConnectorEventSubscriptionView["sessions"]
                       >["mode"],
                     })
                   }
-                >
-                  {MODES.map((item) => (
-                    <option key={item} value={item}>
-                      {item === "bound"
+                  options={MODES.map((item) => ({
+                    value: item,
+                    label:
+                      item === "bound"
                         ? t("connectorDialog.eventsModeBound")
                         : item === "ids"
                           ? t("connectorDialog.eventsModeIds")
-                          : t("connectorDialog.eventsModeAll")}
-                    </option>
-                  ))}
-                </select>
+                          : t("connectorDialog.eventsModeAll"),
+                  }))}
+                  triggerClassName={inputClassName}
+                />
               </label>
               <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                 {t("connectorDialog.eventsDeliver")}
-                <select
-                  aria-label={t("connectorDialog.eventsDeliver")}
-                  className={inputClassName}
+                <Select
+                  ariaLabel={t("connectorDialog.eventsDeliver")}
+                  className="w-full"
                   value={resolved.deliver}
                   disabled={resolved.locked}
-                  onChange={(event) =>
-                    updateAt(index, { deliver: event.target.value as SubscriptionDeliver })
+                  onChange={(deliver) =>
+                    updateAt(index, { deliver: deliver as SubscriptionDeliver })
                   }
-                >
-                  {resolved.options.map((option) => (
-                    <option key={option} value={option}>
-                      {t(DELIVER_LABEL_KEYS[option])}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-[11px] text-muted-foreground">
+                  options={resolved.options.map((option) => ({
+                    value: option,
+                    label: t(DELIVER_LABEL_KEYS[option]),
+                  }))}
+                  triggerClassName={inputClassName}
+                />
+                <span className="app-text-11 text-muted-foreground">
                   {resolved.locked
                     ? t("connectorDialog.eventsDeliverDerived")
                     : resolved.free
@@ -347,7 +347,7 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
                 <div className="mt-2 flex max-h-56 flex-col gap-1.5 overflow-y-auto">
                   {visibleSections.map((section) => (
                     <div key={section.form} className="flex flex-col gap-1">
-                      <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                      <span className="app-text-11 font-medium uppercase tracking-[0.12em] text-muted-foreground">
                         {t(SECTION_LABEL_KEYS[section.form] ?? "connectorDialog.eventsGroupUnwired")}
                       </span>
                       {section.types.map((name) => {
@@ -370,7 +370,7 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
                   ))}
                   {customTypes.length ? (
                     <div className="flex flex-col gap-1">
-                      <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                      <span className="app-text-11 font-medium uppercase tracking-[0.12em] text-muted-foreground">
                         {t("connectorDialog.eventsGroupCustom")}
                       </span>
                       {customTypes.map((name) => (

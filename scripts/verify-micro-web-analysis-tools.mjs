@@ -5,7 +5,8 @@
 //   2. 未使用工具以 0 调用 + 「未使用」徽标列出，不是「暂无数据」；
 //   3. 汇总条 / 计分卡显示可用 / 已用 / 未用计数；
 //   4. 全部 / 已使用 / 未使用筛选按钮按 aria-pressed 工作；
-//   5. scope=all 的响应没有 available_tools 时，忽略筛选并显示全局视图说明。
+//   5. 工具名称旁显示内置 / MCP / Shell 分类徽标；
+//   6. scope=all 的响应没有 available_tools 时，忽略筛选并显示全局视图说明。
 import assert from "node:assert";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -95,7 +96,7 @@ const usedTool = {
   error_top: [{ error_code: "E_TIMEOUT", failure_category: "timeout", count: 1 }],
 };
 const availableTools = [
-  { name: "shell", source: "core" },
+  { name: "aicli_exec", source: "core" },
   { name: "view", source: "core" },
   { name: "never_used", source: "mcp:demo" },
 ];
@@ -179,9 +180,15 @@ check("未使用工具以 0 调用列出", () => {
   assert.ok(toolsHTML().indexOf(">0<") >= 0, "未使用工具应显示 0 次调用");
 });
 check("已使用工具保留统计与来源 title", () => {
-  assert.ok(toolsHTML().indexOf(">view<") >= 0, "缺少已使用工具 view");
+  assert.ok(toolsHTML().indexOf("</span> view") >= 0, "缺少已使用工具 view");
   assert.ok(toolsHTML().indexOf(">已使用<") >= 0, "缺少已使用状态徽标");
   assert.ok(toolsHTML().indexOf('title="来源：mcp:demo"') >= 0, "未使用工具缺少来源 title");
+});
+check("工具名称显示内置 / MCP / Shell 分类徽标", () => {
+  assert.ok(toolsHTML().indexOf('title="工具分类：内置工具">内置工具</span>') >= 0, "缺少内置工具分类徽标");
+  assert.ok(toolsHTML().indexOf('title="工具分类：MCP">MCP</span>') >= 0, "缺少 MCP 分类徽标");
+  assert.ok(toolsHTML().indexOf('title="工具分类：Shell">Shell</span>') >= 0, "缺少 Shell 分类徽标");
+  assert.ok(toolsHTML().indexOf("aicli_exec") >= 0, "缺少 aicli_exec 工具");
 });
 check("汇总条与筛选按钮", () => {
   assert.ok(toolsHTML().indexOf("可用 3") >= 0, "缺少可用数");
@@ -200,13 +207,13 @@ console.log("[2] 全部 / 已使用 / 未使用筛选");
 clickFilter("unused");
 check("未使用筛选只保留 available && 无调用行", () => {
   assert.ok(toolsHTML().indexOf("never_used") >= 0, "未使用筛选应保留 never_used");
-  assert.ok(toolsHTML().indexOf("shell") >= 0, "未使用筛选应保留 shell");
-  assert.ok(toolsHTML().indexOf(">view<") < 0, "未使用筛选不应保留已使用工具 view");
+  assert.ok(toolsHTML().indexOf("aicli_exec") >= 0, "未使用筛选应保留 aicli_exec");
+  assert.ok(toolsHTML().indexOf("</span> view") < 0, "未使用筛选不应保留已使用工具 view");
   assert.ok(toolsHTML().indexOf('aria-pressed="true"') >= 0, "筛选按钮缺少 aria-pressed=true");
 });
 clickFilter("used");
 check("已使用筛选只保留 usage 明细行", () => {
-  assert.ok(toolsHTML().indexOf(">view<") >= 0, "已使用筛选应保留 view");
+  assert.ok(toolsHTML().indexOf("</span> view") >= 0, "已使用筛选应保留 view");
   assert.ok(toolsHTML().indexOf("never_used") < 0, "已使用筛选不应保留 never_used");
 });
 
@@ -217,7 +224,7 @@ await flush();
 check("全局视图显示说明且不再展示未使用筛选", () => {
   assert.ok(toolsHTML().indexOf("全局视图只统计已使用工具") >= 0, "缺少全局视图说明");
   assert.ok(toolsHTML().indexOf('data-analysis-tool-filter="unused"') < 0, "全局视图不应展示未使用筛选");
-  assert.ok(toolsHTML().indexOf(">view<") >= 0, "全局视图应保留已使用工具行: " + toolsHTML());
+  assert.ok(toolsHTML().indexOf("</span> view") >= 0, "全局视图应保留已使用工具行: " + toolsHTML());
 });
 
 console.log(failures === 0 ? "\n全部通过" : "\n失败 " + failures + " 项");

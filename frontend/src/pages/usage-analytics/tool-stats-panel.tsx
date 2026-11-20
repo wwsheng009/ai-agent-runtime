@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 
 import { formatDuration, formatNumber, formatPercent } from "./format";
 import { Metric } from "./primitives";
+import { classifyToolCategory, type ToolCategory } from "./tool-category";
 
 // 失败分类归一表（backend/internal/llm/failure_category.go）→ i18n key。
 // 本文件导出 React 组件，helper 不导出（react-refresh/only-export-components）。
@@ -62,6 +63,17 @@ const EMPTY_TOOL_STAT: AnalyticsToolStat = {
 // 沿用 micro web / TUI 的「未上报 → --」口径，避免把缺失伪造成 0。
 function formatToolDuration(value: number): string {
   return value > 0 ? formatDuration(value) : "--";
+}
+
+function toolCategoryClassName(category: ToolCategory): string {
+  switch (category) {
+    case "mcp":
+      return "border-analytics-info-border bg-analytics-info-soft text-analytics-info";
+    case "shell":
+      return "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning";
+    default:
+      return "border-accent-primary-border bg-accent-primary-soft text-accent-primary";
+  }
 }
 
 export function ToolStatsPanel({
@@ -258,11 +270,17 @@ function ToolRow({
   onToggle: () => void;
 }) {
   const { t } = useTranslation("usageAnalytics");
+  const category = classifyToolCategory(tool.tool_name);
   return (
     <>
       <tr className="border-b border-border/70 last:border-b-0 hover:bg-surface-soft-hover">
         <td className="px-3 py-2.5">
-          <div className="font-medium">{tool.tool_name}</div>
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Badge className={toolCategoryClassName(category)}>
+              {t(`observability.tools.categories.${category}`)}
+            </Badge>
+            <div className="min-w-0 break-all font-medium">{tool.tool_name}</div>
+          </div>
         </td>
         <td className="px-3 py-2.5 tabular-nums">{formatNumber(tool.calls)}</td>
         <td className="px-3 py-2.5 tabular-nums">

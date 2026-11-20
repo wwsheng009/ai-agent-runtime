@@ -32,7 +32,7 @@ export function DistributionList({
                 />
               </div>
               {entry.detail ? (
-                <div className="mt-0.5 text-[0.7rem] text-muted-foreground">{entry.detail}</div>
+                <div className="mt-0.5 app-text-11 text-muted-foreground">{entry.detail}</div>
               ) : null}
             </li>
           ))}

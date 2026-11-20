@@ -32,7 +32,7 @@ export function ConnectorRuntimeSummary({
       {runtime.stats.last_error ? (
         <details className="text-xs text-muted-foreground">
           <summary className="cursor-pointer select-none">{t("page.lastError")}</summary>
-          <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-analytics-danger">
+          <p className="mt-1 whitespace-pre-wrap break-words font-mono app-text-11 text-analytics-danger">
             {runtime.stats.last_error}
             {runtime.stats.last_error_at ? ` · ${runtime.stats.last_error_at}` : ""}
           </p>

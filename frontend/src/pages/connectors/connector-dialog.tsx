@@ -22,6 +22,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { fieldControlVariants } from "@/components/ui/field-variants";
+import { Select } from "@/components/ui/select";
 import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 
@@ -367,22 +368,21 @@ export function ConnectorDialog({
             <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               {t("dialog.provider")}
               {isCreate ? (
-                <select
-                  aria-label={t("dialog.provider")}
-                  className={inputClassName}
+                <Select
+                  ariaLabel={t("dialog.provider")}
+                  className="w-full"
+                  options={(schema?.providers ?? []).map((provider) => ({
+                    value: provider.provider,
+                    label: provider.label,
+                  }))}
                   value={form.provider}
-                  onChange={(event) =>
+                  onChange={(provider) =>
                     setForm((prev) =>
-                      ensureCreateId(switchProvider(prev, schema, event.target.value), schema),
+                      ensureCreateId(switchProvider(prev, schema, provider), schema),
                     )
                   }
-                >
-                  {(schema?.providers ?? []).map((provider) => (
-                    <option key={provider.provider} value={provider.provider}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
+                  triggerClassName={inputClassName}
+                />
               ) : (
                 <span className="inline-flex h-9 items-center rounded-control border border-border bg-surface-softer px-2.5 text-sm text-foreground">
                   {providerSchema?.label ?? form.provider}
@@ -426,20 +426,19 @@ export function ConnectorDialog({
             {!modeFieldPresent && (providerSchema?.modes?.length ?? 0) > 0 ? (
               <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                 {t("dialog.mode")}
-                <select
-                  aria-label={t("dialog.mode")}
-                  className={inputClassName}
+                <Select
+                  ariaLabel={t("dialog.mode")}
+                  className="w-full"
+                  options={(providerSchema?.modes ?? []).map((mode) => ({
+                    value: mode,
+                    label: mode,
+                  }))}
                   value={form.mode}
-                  onChange={(event) =>
-                    setForm((prev) => ({ ...prev, mode: event.target.value }))
+                  onChange={(mode) =>
+                    setForm((prev) => ({ ...prev, mode }))
                   }
-                >
-                  {(providerSchema?.modes ?? []).map((mode) => (
-                    <option key={mode} value={mode}>
-                      {mode}
-                    </option>
-                  ))}
-                </select>
+                  triggerClassName={inputClassName}
+                />
               </label>
             ) : null}
           </div>

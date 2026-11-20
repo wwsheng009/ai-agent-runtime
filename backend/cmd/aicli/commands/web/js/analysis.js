@@ -582,6 +582,26 @@ function analysisToolStatusBadge(row, hasAvailability) {
   return '<span class="cache-badge badge-write" title="已使用：当前会话工具面已不含该工具">已使用</span>';
 }
 
+// analysisToolCategory 按工具面来源优先、工具名兜底归类。来源带有 mcp:<server>
+// 时优先视为 MCP；历史统计行没有来源时，mcp__ 前缀仍可保留 MCP 归类。
+function analysisToolCategory(row) {
+  var name = analysisText(row && row.tool_name).toLowerCase();
+  var source = analysisText(row && row.source).toLowerCase();
+  if (source === "mcp" || source.indexOf("mcp:") === 0 || name.indexOf("mcp__") === 0) {
+    return { key: "mcp", label: "MCP" };
+  }
+  if (name === "shell" || name === "bash" || name === "execute_shell_command" || name === "aicli_exec") {
+    return { key: "shell", label: "Shell" };
+  }
+  return { key: "builtin", label: "内置工具" };
+}
+
+function analysisToolCategoryBadge(row) {
+  var category = analysisToolCategory(row);
+  return '<span class="cache-badge tool-category-badge category-' + category.key +
+    '" title="工具分类：' + esc(category.label) + '">' + esc(category.label) + "</span>";
+}
+
 function analysisAvailableToolsSourceLabel(source) {
   switch (analysisText(source)) {
     case "stable_surface": return "冻结工具面";
@@ -716,7 +736,7 @@ function renderAnalysisToolsBody(body) {
   var rows = [];
   for (var i = 0; i < visibleRows.length; i++) {
     var row = visibleRows[i];
-    var nameCell = esc(analysisOrDash(row.tool_name));
+    var nameCell = analysisToolCategoryBadge(row) + " " + esc(analysisOrDash(row.tool_name));
     if (hasAvailable && row.stat && !row.available) {
       nameCell += ' <span style="font-size:10px;color:var(--fg4)" title="当前会话工具面已不含该工具">（当前不可用）</span>';
     }
