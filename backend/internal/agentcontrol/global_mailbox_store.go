@@ -704,18 +704,6 @@ func getGlobalMailboxRecordSQL(ctx context.Context, runner globalMailboxSQLRunne
 	return record, nil
 }
 
-func (s *SQLiteGlobalMailboxRegistryStore) getGlobalMailboxRecordByPrimaryKey(ctx context.Context, primaryKey string) (MailboxRecord, error) {
-	primaryKey = strings.TrimSpace(primaryKey)
-	if primaryKey == "" {
-		return MailboxRecord{}, fmt.Errorf("global mailbox primary key is required")
-	}
-	db, err := s.dbHandle()
-	if err != nil {
-		return MailboxRecord{}, err
-	}
-	return getGlobalMailboxRecordByPrimaryKeySQL(ctx, db, "agent_control_global_mailbox_records", primaryKey)
-}
-
 func getGlobalMailboxRecordByPrimaryKeySQL(ctx context.Context, runner globalMailboxSQLRunner, tableName string, primaryKey string) (MailboxRecord, error) {
 	primaryKey = strings.TrimSpace(primaryKey)
 	if primaryKey == "" {

@@ -293,6 +293,18 @@
   `internal/pkg/httpclient` 的 `-short` 测试通过；`cmd/aicli/ui` 使用
   `-ldflags="-s -w"` 规避 Windows 页面文件不足。
 
+### 0.22 第二十二批已执行（2026-11-20）
+
+- 将 8 个仅测试引用的生产 helper 迁移到 `_test.go`：
+  - `internal/llm`：`buildHTTPDebugRequestDiagnosticsWithBody`、
+    `providerSupportsCodexMaxOutputTokens`；
+  - `internal/agentcontrol`：`SQLiteGlobalMailboxRegistryStore.getGlobalMailboxRecordByPrimaryKey`；
+  - `internal/toolkit/tools`：`bashSearchNoMatchNextAction`、`buildBashBatchFailureError`、
+    `isShellTimeoutError`、`normalizeRipgrepOutput`、`writeContentRevision`。
+- 验证：`internal/llm`、`internal/agentcontrol`、`internal/toolkit/tools`
+  的 `-short` 测试通过。`toolkit/tools` 的并行度测试要求 `GOMAXPROCS=2`；
+  `GOMAXPROCS=1` 时默认并行度被限制为 1，不属于代码回归。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

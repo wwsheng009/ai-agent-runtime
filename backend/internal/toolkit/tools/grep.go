@@ -3913,11 +3913,6 @@ func (s *grepStats) renderSummary() string {
 	return strings.Join(lines, "\n")
 }
 
-func normalizeRipgrepOutput(output []byte) []string {
-	lines, _ := normalizeRipgrepOutputWithStats(output)
-	return lines
-}
-
 func normalizeRipgrepJSONOutput(output []byte, scope grepSearchScope, mode grepMode) ([]string, *grepStats) {
 	normalized := strings.TrimRight(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
 	if strings.TrimSpace(normalized) == "" {
