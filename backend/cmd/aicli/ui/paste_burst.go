@@ -430,13 +430,3 @@ func retroStartIndex(before string, retroChars int) int {
 	}
 	return idx
 }
-
-func charBurstCount(now time.Time, prev time.Time) int {
-	if prev.IsZero() {
-		return 1
-	}
-	if now.Sub(prev) <= pasteBurstCharInterval {
-		return 2
-	}
-	return 1
-}

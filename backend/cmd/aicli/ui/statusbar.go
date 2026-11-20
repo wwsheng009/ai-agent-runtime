@@ -188,13 +188,6 @@ func (s *StatusBar) Document(width int) render.Document {
 	return s.documentLocked(width)
 }
 
-func (s *StatusBar) renderDocumentLocked(doc render.Document) string {
-	if s.terminal != nil && s.terminal.driver != nil {
-		return renderDocumentWithThemeProfile(doc, s.theme, s.terminal.driver.ColorProfile())
-	}
-	return renderDocumentWithProfile(doc, s.theme)
-}
-
 // Row 返回状态栏所在的行号
 func (s *StatusBar) Row() int {
 	s.mu.RLock()

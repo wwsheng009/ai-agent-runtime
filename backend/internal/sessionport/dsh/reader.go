@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionport"
 )
@@ -201,14 +200,4 @@ func hasDSHData(root string) bool {
 	}
 	info, err := os.Stat(loc.SessionsDir)
 	return err == nil && info.IsDir()
-}
-
-func refUpdatedAt(ref sessionport.SessionRef) time.Time {
-	if !ref.UpdatedAt.IsZero() {
-		return ref.UpdatedAt
-	}
-	if info, err := os.Stat(ref.File); err == nil {
-		return info.ModTime()
-	}
-	return time.Time{}
 }

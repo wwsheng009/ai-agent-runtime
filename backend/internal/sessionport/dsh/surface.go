@@ -3,7 +3,6 @@ package dsh
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 func isSurfaceType(value string) bool {
@@ -133,25 +132,4 @@ func containsInt(values []int, target int) bool {
 		}
 	}
 	return false
-}
-
-func eventSourceKind(event Event) string {
-	switch event.Type {
-	case "user/message":
-		var data userMessageData
-		if json.Unmarshal(event.Data, &data) == nil {
-			return strings.TrimSpace(data.Source.Kind)
-		}
-	case "assistant/message":
-		var data assistantMessageData
-		if json.Unmarshal(event.Data, &data) == nil {
-			return strings.TrimSpace(data.Message.Source.Kind)
-		}
-	case "tool/result":
-		var data toolResultData
-		if json.Unmarshal(event.Data, &data) == nil {
-			return strings.TrimSpace(data.Message.Source.Kind)
-		}
-	}
-	return ""
 }

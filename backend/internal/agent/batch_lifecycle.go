@@ -37,14 +37,6 @@ type BatchTerminalLifecycle struct {
 // result or prevent compatibility terminal delivery.
 type BatchLifecycleProjector func(context.Context, BatchTerminalLifecycle) error
 
-func (a *Agent) projectBatchLifecycle(ctx context.Context, event BatchTerminalLifecycle) error {
-	projector := a.batchLifecycleProjectorSnapshot()
-	if projector == nil {
-		return nil
-	}
-	return projector(ctx, event.normalized())
-}
-
 func (e BatchTerminalLifecycle) normalized() BatchTerminalLifecycle {
 	e.BatchID = strings.TrimSpace(e.BatchID)
 	e.RootScopeID = strings.TrimSpace(e.RootScopeID)

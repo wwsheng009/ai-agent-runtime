@@ -6378,14 +6378,6 @@ func persistBuilderHistory(builder *MessageBuilder, persist func([]types.Message
 	return persist(DurableMessagesForPersist(builder.Messages()))
 }
 
-func hasLeadingSystemPrompt(history []types.Message, systemPrompt string) bool {
-	if len(history) == 0 {
-		return false
-	}
-	first := history[0]
-	return first.Role == "system" && first.Content == systemPrompt
-}
-
 func mergeConfiguredSystemPrompt(history []types.Message, systemPrompt string) []types.Message {
 	desired := strings.TrimSpace(systemPrompt)
 	if desired == "" {

@@ -227,30 +227,6 @@ func parseLogFilename(name string) (int, string, bool) {
 	return version, compression, true
 }
 
-func decodeSegment(segment string) (string, error) {
-	if segment == "" {
-		return "", fmt.Errorf("空 session 目录名")
-	}
-	var builder strings.Builder
-	for i := 0; i < len(segment); {
-		if segment[i] != '~' {
-			builder.WriteByte(segment[i])
-			i++
-			continue
-		}
-		if i+5 > len(segment) {
-			return "", fmt.Errorf("非法 session 目录编码: %s", segment)
-		}
-		value, err := strconv.ParseUint(segment[i+1:i+5], 16, 16)
-		if err != nil {
-			return "", fmt.Errorf("非法 session 目录编码: %s", segment)
-		}
-		builder.WriteRune(rune(value))
-		i += 5
-	}
-	return builder.String(), nil
-}
-
 // readHeaderFile reads only the first JSONL record, decompressing only the
 // needed prefix for zstd artifacts.
 func readHeaderFile(path string) (Header, error) {

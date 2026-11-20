@@ -932,37 +932,6 @@ func transcriptFenceFoldString(h uint64, s string, prime uint64) uint64 {
 	return h
 }
 
-// transcriptPlanInputs 是 transcriptPlanMemoHit 与截断续跑游标共享的输入指纹：
-// 任何一项变化都同时让 memo 与游标失效。字段与 memo 的比较项一一对应（fence 是
-// 逐 cell 的 finalized 指纹，不含 mutable 前沿；themeKey 用 themeFingerprint；
-// terminalEpoch 保留为语义代输入——当前没有生产推进点，整体 ledger 替换由
-// invalidateTranscriptPlanMemo 显式失效覆盖）。
-type transcriptPlanInputs struct {
-	sceneID       uint64
-	fence         uint64
-	finalized     int
-	layoutGen     uint64
-	width         int
-	height        int
-	projection    bool
-	themeKey      string
-	terminalEpoch uint64
-}
-
-func currentTranscriptPlanInputs(state *UIControllerState) transcriptPlanInputs {
-	return transcriptPlanInputs{
-		sceneID:       state.Transcript.SceneID,
-		fence:         transcriptFinalizedPrefixFence(state.Transcript),
-		finalized:     transcriptFinalizedCellCount(state.Transcript),
-		layoutGen:     state.Geometry.Generation,
-		width:         state.Geometry.Width,
-		height:        state.Geometry.Height,
-		projection:    state.SemanticActiveCellProjection,
-		themeKey:      themeFingerprint(state.Theme),
-		terminalEpoch: state.HistoryEffects.TerminalEpoch,
-	}
-}
-
 // transcriptPlanMemoHit reports whether the finalized-prefix plan inputs are
 // identical to the ones that produced the last full transcript plan. The plan
 // (planEligibleHistoryCommits) is pure over the finalized transcript fence,

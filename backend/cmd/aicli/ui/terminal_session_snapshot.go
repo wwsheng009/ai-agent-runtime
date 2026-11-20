@@ -183,15 +183,6 @@ func (b *terminalHistoryBatchBudget) admit(commit HistoryCommit) bool {
 	return true
 }
 
-func (c *UIController) terminalSessionHasPending() bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.state.HistoryEffects.HasPending()
-}
-
 // terminalSessionHasActionableWork reports whether the executor may continue
 // immediately after one transaction: an eligible pending history token or a
 // lease/freeze-unblocked recovery obligation. Executor-published actions advance

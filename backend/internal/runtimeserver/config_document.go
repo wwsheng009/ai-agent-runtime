@@ -393,19 +393,6 @@ func attachConfigDocumentPathLayers(
 	}
 }
 
-func (s *LocalConfigDocumentService) loadCurrentDocumentBytes() ([]byte, string, error) {
-	sourcePath := s.currentSourcePath()
-	if strings.TrimSpace(sourcePath) == "" {
-		return nil, "", fmt.Errorf("config path is required")
-	}
-
-	raw, err := os.ReadFile(sourcePath)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, "", fmt.Errorf("read config document: %w", err)
-	}
-	return raw, sourcePath, nil
-}
-
 func (s *LocalConfigDocumentService) snapshotWarning(sourcePath string, recovered bool) []string {
 	if s == nil || strings.TrimSpace(s.snapshotPath) == "" {
 		return nil

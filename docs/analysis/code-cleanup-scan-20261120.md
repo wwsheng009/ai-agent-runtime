@@ -252,6 +252,21 @@
 - 验证：`background`、`sessionpurge`、`team`、`toolcore/output`、`memoryruntime`
   的 `-short` 测试通过；`team`、`memoryruntime` 逐包运行以规避 Windows 页面文件不足。
 
+### 0.19 第十九批已执行（2026-11-20）
+
+- 删除零引用 helper：
+  - `internal/sessionport/dsh`：`decodeSegment`、`eventSourceKind`、`refUpdatedAt`；
+  - `internal/runtimeserver`：`LocalConfigDocumentService.loadCurrentDocumentBytes`；
+  - `internal/agent`：`hasLeadingSystemPrompt`、`Agent.projectBatchLifecycle`；
+  - `cmd/aicli/ui`：`appendClearInteractiveInputRows`、`charBurstCount`、
+    `currentTranscriptPlanInputs`（及其未引用 `transcriptPlanInputs`）、
+    `StatusBar.renderDocumentLocked`、`UIController.terminalSessionHasPending`。
+- 保留 `BatchTerminalLifecycle.normalized`：虽不再被 `projectBatchLifecycle` 使用，
+  但仍由 `subagent_batch_coordinator` 的投影路径直接调用。
+- 验证：`sessionport/dsh`、`runtimeserver`、`cmd/aicli/ui` 的 `-short` 测试通过；
+  `agent` 运行生命周期与 system prompt 相关定向测试通过。`cmd/aicli/ui` 链接阶段
+  使用 `-ldflags="-s -w"` 规避 Windows 页面文件不足。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

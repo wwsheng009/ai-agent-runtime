@@ -1826,22 +1826,6 @@ func renderInteractiveInputForTerminal(line []rune) string {
 	return builder.String()
 }
 
-func appendClearInteractiveInputRows(builder *strings.Builder, rows int) {
-	if builder == nil {
-		return
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	for i := 0; i < rows; i++ {
-		builder.WriteString("\x1b[K")
-		if i < rows-1 {
-			builder.WriteString("\x1b[1B\r")
-		}
-	}
-	builder.WriteString(cursorRestoreSequence)
-}
-
 func interactiveInputDisplayRows(line []rune, startCol, termWidth int) int {
 	pos := interactiveInputVisualPosition(line, len(line), startCol, termWidth)
 	return pos.row + 1
