@@ -12,15 +12,7 @@ import (
 // it to fall back to the fail-closed non-interactive message.
 var errACPQuestionUnavailable = fmt.Errorf("acp question panel unavailable: %w", acp.ErrClientQuestionUnsupported)
 
-// acpQuestionRequesterAware is implemented by the ACP session host so the
-// server can hand it the client-bound question requester after initialize.
-// It mirrors acp.SessionEmitterAware: hosts that do not implement it simply
-// keep the non-interactive default answer.
-type acpQuestionRequesterAware interface {
-	SetQuestionRequester(requester acp.QuestionRequester)
-}
-
-// SetQuestionRequester implements acpQuestionRequesterAware.
+// SetQuestionRequester implements the ACP server's question-requester binding.
 func (h *acpSessionHost) SetQuestionRequester(requester acp.QuestionRequester) {
 	if h == nil {
 		return
@@ -28,14 +20,7 @@ func (h *acpSessionHost) SetQuestionRequester(requester acp.QuestionRequester) {
 	h.questionRequester = requester
 }
 
-// acpElicitationRequesterAware is implemented by the ACP session host so the
-// server can hand it the standard-protocol elicitation requester after
-// initialize. Hosts that do not implement it simply keep the legacy path.
-type acpElicitationRequesterAware interface {
-	SetElicitationRequester(requester acp.ElicitationRequester)
-}
-
-// SetElicitationRequester implements acpElicitationRequesterAware.
+// SetElicitationRequester implements the ACP server's elicitation binding.
 func (h *acpSessionHost) SetElicitationRequester(requester acp.ElicitationRequester) {
 	if h == nil {
 		return

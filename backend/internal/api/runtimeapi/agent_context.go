@@ -402,17 +402,6 @@ func reduceAgentContextPack(pack map[string]interface{}) map[string]interface{} 
 	return contextpack.Reduce(pack)
 }
 
-func summarizeAgentContextString(value string, limit int) string {
-	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	if value == "" || limit <= 0 || len(value) <= limit {
-		return value
-	}
-	if limit <= 3 {
-		return value[:limit]
-	}
-	return value[:limit-3] + "..."
-}
-
 func agentContextStringSlice(value interface{}) []string {
 	switch typed := value.(type) {
 	case []string:
@@ -427,22 +416,6 @@ func agentContextStringSlice(value interface{}) []string {
 		return out
 	default:
 		return nil
-	}
-}
-
-func limitAgentContextStrings(values []string, limit int) []string {
-	if limit <= 0 || len(values) <= limit {
-		return values
-	}
-	return values[:limit]
-}
-
-func copyAgentContextString(target map[string]interface{}, key string, value interface{}) {
-	if target == nil {
-		return
-	}
-	if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-		target[key] = strings.TrimSpace(text)
 	}
 }
 
@@ -461,22 +434,5 @@ func agentContextScalar(value interface{}) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func agentContextInt(value interface{}) (int, bool) {
-	switch typed := value.(type) {
-	case int:
-		return typed, true
-	case int32:
-		return int(typed), true
-	case int64:
-		return int(typed), true
-	case float32:
-		return int(typed), true
-	case float64:
-		return int(typed), true
-	default:
-		return 0, false
 	}
 }

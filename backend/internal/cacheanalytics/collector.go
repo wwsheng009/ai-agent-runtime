@@ -246,7 +246,7 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
 	c.mu.Unlock()
-	c.correlation.registerStarted(sessionID, llmRequestID, traceID, turnID)
+	c.correlation.registerStarted(llmRequestID, traceID, turnID)
 }
 
 func (c *Collector) onRequestFinished(event runtimeevents.Event) {

@@ -48,6 +48,23 @@
   - `cmd/aicli/commands` 的 DirectWriter inventory 测试通过；
   - `cmd/aicli/ui` 的迁移测试、`cmd/runtime-server` connector 测试、`internal/{prompt,embedding,toolsurface,toolschema,logger,llm,gateway/agent,chat}` 定向测试通过。
 
+### 0.2 第二批已执行（2026-11-20）
+
+- 删除 `internal/api/runtimeapi/agent_context.go` 4 个零引用 helper：
+  `summarizeAgentContextString`、`limitAgentContextStrings`、
+  `copyAgentContextString`、`agentContextInt`。
+- 删除 `internal/cacheanalytics/correlation.go` 4 个零引用方法及随之失效的
+  `turnUser` / `turnOrder` / `turnSeen` 状态，`registerStarted` 去掉未使用的
+  `sessionID` 参数。
+- 删除 `internal/toolkit/tools/file_encoding.go` 的 3 个零引用包装与 2 个未使用
+  常量，保留仍然活跃的 UTF-8 BOM / UTF-16LE 路径。
+- 删除 `cmd/aicli/commands/chat_debug.go` 中 5 个已被
+  `*WithReadWindow` 取代的旧 wrapper。
+- 删除 `cmd/aicli/commands/agent_stdio_question.go` 中两个已被
+  `internal/acp` 接口取代的本地 requester interface 类型。
+- 验证：`go build -p 2 ./...`、`internal/cacheanalytics` 全包测试、
+  `cmd/aicli/commands` 的 DirectWriter/Debug 定向测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

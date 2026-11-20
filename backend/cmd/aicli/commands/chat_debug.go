@@ -3093,10 +3093,6 @@ type chatCollabMailboxTarget struct {
 	Status    string
 }
 
-func chatCollabAllLines(session *ChatSession, limit int) []string {
-	return chatCollabAllLinesWithReadWindow(session, limit, 0)
-}
-
 func chatCollabAllLinesWithReadWindow(session *ChatSession, limit int, readLimit int) []string {
 	targets, err := chatCollabMailboxTargets(session)
 	if err != nil {
@@ -3274,10 +3270,6 @@ func chatCollabFollowUpdateLine(update chatCollabFollowUpdate) string {
 	return strings.Join(parts, " ")
 }
 
-func chatCollabLinesForSession(session *ChatSession, sessionID string, limit int) []string {
-	return chatCollabLinesForSessionWithReadWindow(session, sessionID, limit, 0)
-}
-
 func chatCollabLinesForSessionWithReadWindow(session *ChatSession, sessionID string, limit int, readLimit int) []string {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventStore == nil || session.RuntimeSession == nil {
 		return []string{"  <none>"}
@@ -3327,12 +3319,6 @@ func chatCollabLinesForSessionWithReadWindow(session *ChatSession, sessionID str
 	return lines
 }
 
-func chatCollabAgentControlMailboxLines(ctx context.Context, reader runtimechat.AgentControlMailboxReaderStore, store interface {
-	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
-}, sessionID string, limit int) []string {
-	return chatCollabAgentControlMailboxLinesWithReadWindow(ctx, reader, store, sessionID, limit, 0)
-}
-
 func chatCollabAgentControlMailboxLinesWithReadWindow(ctx context.Context, reader runtimechat.AgentControlMailboxReaderStore, store interface {
 	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
 }, sessionID string, limit int, readLimit int) []string {
@@ -3357,12 +3343,6 @@ func chatCollabAgentControlMailboxLinesWithReadWindow(ctx context.Context, reade
 		messages = allMessages
 	}
 	return chatCollabMailboxSubstrateLinesWithReadWindow(ctx, nil, store, sessionID, limit, "agent_control+mailbox", len(controlMessages), readLimit, messages...)
-}
-
-func chatCollabMailboxSubstrateLines(ctx context.Context, reader runtimechat.MailboxReaderStore, eventStore interface {
-	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
-}, sessionID string, limit int, source string, controlCount int, preloadedMessages ...team.MailMessage) []string {
-	return chatCollabMailboxSubstrateLinesWithReadWindow(ctx, reader, eventStore, sessionID, limit, source, controlCount, 0, preloadedMessages...)
 }
 
 func chatCollabMailboxSubstrateLinesWithReadWindow(ctx context.Context, reader runtimechat.MailboxReaderStore, eventStore interface {
@@ -3420,12 +3400,6 @@ func recentChatCollabMailboxEntries(messages []team.MailMessage, extras []runtim
 		entries = entries[len(entries)-limit:]
 	}
 	return entries
-}
-
-func listChatCollabNonMailboxEvents(ctx context.Context, eventStore interface {
-	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
-}, sessionID string) ([]runtimeevents.Event, error) {
-	return listChatCollabNonMailboxEventsWithReadWindow(ctx, eventStore, sessionID, 0)
 }
 
 func listChatCollabNonMailboxEventsWithReadWindow(ctx context.Context, eventStore interface {
