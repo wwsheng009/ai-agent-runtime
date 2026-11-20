@@ -3052,34 +3052,6 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 	s.applyLayoutWithSizeLocked(width, height)
 }
 
-func (s *FixedBottomSurface) appendApplyLayoutSequenceWithSizeLocked(builder *strings.Builder, width, height int) {
-	if builder == nil {
-		return
-	}
-	if s.ownedViewport {
-		s.applyOwnedViewportGeometryLocked(width, height)
-		return
-	}
-	if width <= 0 {
-		width = 80
-	}
-	if height <= 0 {
-		height = 24
-	}
-	bottomRows := s.effectiveBottomRowsLocked(height)
-	sizeChanged := width != s.lastWidth || height != s.lastHeight
-	s.lastWidth = width
-	s.lastHeight = height
-	s.lastBottomRows = bottomRows
-	// Retired legacy path: keep layout bookkeeping coherent for the
-	// compatibility surface, but no scroll-region sequence is emitted.
-	s.legacyReserve.ScrollCompensatedRows = 0
-	s.legacyReserve.PendingScrollDownRows = 0
-	if sizeChanged {
-		s.legacyReserve.OutputScrollDebtRows = 0
-	}
-}
-
 func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int) {
 	if width <= 0 {
 		width = 80
@@ -3179,10 +3151,6 @@ func (s *FixedBottomSurface) moveToOutputLocked() {
 		return
 	}
 	s.terminal.MoveTo(s.outputBottomRowLocked(), 1)
-}
-
-func (s *FixedBottomSurface) moveToPromptLocked() {
-	s.terminal.MoveTo(s.promptBottomRowLocked(), 1)
 }
 
 func (s *FixedBottomSurface) restoreStoredPromptCursorLocked() {
@@ -3397,61 +3365,6 @@ func (s *FixedBottomSurface) effectiveBottomRowsLocked(height int) int {
 		return 1
 	}
 	return rows
-}
-
-func (s *FixedBottomSurface) popupVisibleRowCountLocked() int {
-	if s == nil || s.terminal == nil {
-		return 0
-	}
-	state := s.bottomPaneStateLocked()
-	return state.popupVisibleRowCount(s.terminal.Height())
-}
-
-func (s *FixedBottomSurface) maxPopupRowsLocked() int {
-	state := s.bottomPaneStateLocked()
-	reservedRows := state.composerVisibleRowCount() + state.popupTopReservedRowCount()
-	return maxBottomPanePopupRows(s.terminal.Height(), reservedRows, state.popupBottomGapRowCount())
-}
-
-func (s *FixedBottomSurface) popupVisibleLinesLocked() []string {
-	state := s.bottomPaneStateLocked()
-	return state.VisiblePopupLines(s.terminal.Height())
-}
-
-func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
-	if rows < 1 {
-		rows = 1
-	}
-	bottom := s.promptBottomRowLocked()
-	if bottom < 1 {
-		return
-	}
-	state := s.bottomPaneStateLocked()
-	capToVisiblePrompt := false
-	if reservedRows := state.promptVisibleRowCount(); reservedRows > 0 {
-		rows = reservedRows
-		capToVisiblePrompt = true
-	} else if state.popupInputGapRowCount() > 0 && rows > 1 {
-		rows = 1
-	}
-	if capToVisiblePrompt {
-		if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
-			rows = maxRows
-		}
-	}
-	rows += state.dynamicStatusVisibleRowCount() + state.promptNoticeVisibleRowCount() + state.promptTopMarginRowCount()
-	startRow := bottom - rows + 1
-	if startRow < 1 {
-		startRow = 1
-	}
-	endRow := bottom + state.promptBottomMarginRowCount()
-	if endRow >= s.statusRowLocked() {
-		endRow = s.statusRowLocked() - 1
-	}
-	for row := startRow; row <= endRow; row++ {
-		s.terminal.MoveTo(row, 1)
-		s.terminal.ClearLine()
-	}
 }
 
 func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
@@ -4274,13 +4187,6 @@ func terminalScrollDownSequence(rows int) string {
 		return ""
 	}
 	return fmt.Sprintf("\x1b[%dT", rows)
-}
-
-func terminalResetScrollRegionSequence(height int) string {
-	// Bare CSI r is the portable full-screen reset; keep height for call-site
-	// clarity and future hosts that need an explicit 1;height form.
-	_ = height
-	return "\x1b[r"
 }
 
 func outputBottomRowForHeight(height int, bottomRows int) int {

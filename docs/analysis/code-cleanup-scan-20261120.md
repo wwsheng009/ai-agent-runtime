@@ -267,6 +267,19 @@
   `agent` 运行生命周期与 system prompt 相关定向测试通过。`cmd/aicli/ui` 链接阶段
   使用 `-ldflags="-s -w"` 规避 Windows 页面文件不足。
 
+### 0.20 第二十批已执行（2026-11-20）
+
+- 删除 `cmd/aicli/ui/fixed_bottom_surface.go` 中 7 个零引用旧布局/弹窗 helper：
+  - `appendApplyLayoutSequenceWithSizeLocked`；
+  - `moveToPromptLocked`；
+  - `popupVisibleRowCountLocked`；
+  - `maxPopupRowsLocked`；
+  - `popupVisibleLinesLocked`；
+  - `clearPromptRowsLocked`；
+  - `terminalResetScrollRegionSequence`。
+- 验证：`cmd/aicli/ui` 的 `-short` 测试通过，链接阶段使用
+  `-ldflags="-s -w"` 规避 Windows 页面文件不足。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
