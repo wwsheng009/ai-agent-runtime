@@ -77,6 +77,27 @@ func (e *memoryStageError) Unwrap() error {
 	return e.cause
 }
 
+// memorySanitizedError keeps errors.Is/errors.As working while replacing the
+// persisted/displayed text with a redacted form.
+type memorySanitizedError struct {
+	cause error
+	text  string
+}
+
+func (e *memorySanitizedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.text
+}
+
+func (e *memorySanitizedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
 func safeMemoryError(err error) error {
 	if err == nil {
 		return nil
@@ -87,7 +108,11 @@ func safeMemoryError(err error) error {
 	if errors.As(err, &stageErr) {
 		return stageErr
 	}
-	return errors.New(safeMemoryErrorText(err))
+	var sanitized *memorySanitizedError
+	if errors.As(err, &sanitized) {
+		return sanitized
+	}
+	return &memorySanitizedError{cause: err, text: safeMemoryErrorText(err)}
 }
 
 func safeMemoryErrorText(err error) string {
