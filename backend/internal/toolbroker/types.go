@@ -415,9 +415,6 @@ type ReportTaskOutcomeResult struct {
 	ReplanError     string   `json:"replan_error,omitempty"`
 }
 
-// BlockCurrentTaskArgs marks the current team task as blocked.
-type BlockCurrentTaskArgs = ReportTaskOutcomeArgs
-
 // BlockCurrentTaskResult reports the blocked task outcome.
 type BlockCurrentTaskResult = ReportTaskOutcomeResult
 

@@ -39,14 +39,6 @@ type codeIndexEntry struct {
 
 var codeIndexCacheGlobal = &codeIndexCache{entries: map[string]*codeIndexEntry{}}
 
-// newCodeIndexResolver 返回按调用时刻 workspace 解析只读索引的解析器。
-//
-// workspace 解析顺序：ctx 的 workspace root（会话级绑定，优先）→ 管理器配置
-// 的 workspace root（进程级）。两者都没有时视为不可用（fail closed）。
-func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.CodeIndexResolver {
-	return newCodeIndexResolverWithShared(cfg, workspaceRoot, nil)
-}
-
 // newCodeIndexResolverWithShared 是带宿主语言服务器借用缝的解析器构造。
 //
 // shared != nil 时语义通道只借用诊断池的进程（单实例），不再自己 spawn。

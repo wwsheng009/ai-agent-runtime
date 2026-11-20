@@ -190,6 +190,17 @@
 - 验证：`skill`、`memorystore`、`supervision`、`llm/adapter` 的 `-short` 测试
   全部通过。
 
+### 0.14 第十四批已执行（2026-11-20）
+
+- `internal/toolbroker`：删除零引用 `BlockCurrentTaskArgs` 别名。
+- `internal/llm`：删除零引用 `attachReasoningToAssistantMessage`。
+- test-only seam 迁移：
+  - `CodexAdapter.convertMessagesToCodexInput` 移入
+    `internal/llm/adapter/codex_test_helpers_test.go`；
+  - `newCodeIndexResolver` 移入
+    `internal/tools/code_index_resolver_test_helpers_test.go`。
+- 验证：`toolbroker`、`llm`、`llm/adapter`、`tools` 的 `-short` 测试全部通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

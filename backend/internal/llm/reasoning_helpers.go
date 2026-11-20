@@ -20,33 +20,6 @@ const (
 	codexResponseOutputItemsMessageKey   = "response_output_items"
 )
 
-func attachReasoningToAssistantMessage(msg map[string]interface{}, reasoning *types.ReasoningBlock) map[string]interface{} {
-	if len(msg) == 0 || reasoning == nil {
-		return msg
-	}
-	if strings.TrimSpace(reasoning.DisplayText()) == "" && strings.TrimSpace(reasoning.OpaqueState) == "" && len(reasoning.Metadata) == 0 {
-		return msg
-	}
-	if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
-		if _, exists := msg["reasoning_content"]; !exists {
-			msg["reasoning_content"] = text
-		}
-	}
-	if outputItems := canonicalizeCodexOutputItems(reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
-		msg[codexResponseOutputItemsMessageKey] = outputItems
-	}
-	if encoded := reasoning.ToMap(); len(encoded) > 0 {
-		if metadata := decodeMapAny(encoded["metadata"]); metadata != nil {
-			if outputItems := canonicalizeCodexOutputItems(metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
-				metadata[reasoningMetadataCodexOutputItemsKey] = outputItems
-				encoded["metadata"] = metadata
-			}
-		}
-		msg[assistantReasoningDetailsKey] = encoded
-	}
-	return msg
-}
-
 // ReasoningBlockFromAssistantMessage 从 assistant 消息中恢复统一 reasoning 信息。
 // 优先使用 reasoning_details，其次回退到 Codex 的 response_output_items，最后才使用纯文本 reasoning_content。
 func ReasoningBlockFromAssistantMessage(msg map[string]interface{}) *types.ReasoningBlock {

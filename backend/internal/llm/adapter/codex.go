@@ -636,18 +636,6 @@ func NormalizeCodexReasoningEffort(effort string) string {
 	return strings.TrimSpace(effort)
 }
 
-// convertMessagesToCodexInput 将 OpenAI 格式的 messages 转换为 Codex 格式的 input 数组。
-// Leading system/developer messages are handled as top-level instructions in
-// BuildRequest. Later system/developer turn-context messages stay in input.
-// OpenAI 格式: {"role": "user/assistant/tool/developer", "content": "...", "tool_calls": [...]}
-// Codex 格式: {"type": "message", "role": "user/assistant/developer", "content": [...]}
-//
-//	或 {"type": "function_call", "call_id": "...", "name": "...", "arguments": "..."}
-//	或 {"type": "function_call_output", "call_id": "...", "output": "..."}
-func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interface{}) []map[string]interface{} {
-	return a.convertMessagesToCodexInputWithOptions(messages, codexInputOptions{})
-}
-
 // codexInputOptions carries per-request input assembly switches.
 type codexInputOptions struct {
 	// StripReasoningItems drops replayed reasoning items, which are the items
