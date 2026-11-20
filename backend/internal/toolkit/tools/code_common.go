@@ -99,10 +99,6 @@ const (
 	codeConfidenceFuzzy = 0.80
 	codeConfidenceNone  = 0.00
 
-	// codeExploreBelow 是 on 档"索引结果不足 → 补一次 grep"的硬下限，
-	// 与 04 §4.4 的探索下界同口径（0.50）。
-	codeExploreBelow = 0.50
-
 	// codeSearchDefaultLimit / codeSearchMaxLimit 是 code.search 的条数窗口。
 	codeSearchDefaultLimit = 20
 	codeSearchMaxLimit     = 100
@@ -363,10 +359,6 @@ type codeToolBase struct {
 	resolver CodeIndexResolver
 	grep     *GrepTool
 	view     *ViewTool
-}
-
-func newCodeToolBase() codeToolBase {
-	return codeToolBase{grep: NewGrepTool(), view: NewViewTool()}
 }
 
 // SetBasePath 与既有工具一致：把 workspace 根同时交给 fallback 工具。
@@ -904,14 +896,6 @@ func codeParamInt(params map[string]interface{}, key string, fallback int) int {
 		}
 	}
 	return fallback
-}
-
-func codeParamBool(params map[string]interface{}, key string) bool {
-	if params == nil {
-		return false
-	}
-	value, ok := params[key].(bool)
-	return ok && value
 }
 
 // codeClampLimit 归一化条数窗口：<=0 取默认，超上限夹取并报告 truncated。

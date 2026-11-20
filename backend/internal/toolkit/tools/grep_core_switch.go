@@ -114,21 +114,3 @@ func (g *GrepTool) executeCoreSearch(ctx context.Context, params map[string]inte
 	}
 	return converted, true
 }
-
-func boolParamValue(params map[string]interface{}, key string) bool {
-	value, _ := params[key].(bool)
-	return value
-}
-
-func intParamValue(params map[string]interface{}, key string) int {
-	switch value := params[key].(type) {
-	case int:
-		return value
-	case int64:
-		return int(value)
-	case float64:
-		return int(value)
-	default:
-		return 0
-	}
-}

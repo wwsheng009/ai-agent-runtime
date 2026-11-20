@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -428,13 +427,4 @@ func sourcegraphRequestID(header http.Header) string {
 func isSourcegraphTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
-}
-
-// buildSearchURL 构建搜索 URL（备用方法，使用 REST API）
-func (s *SourcegraphTool) buildSearchURL(query string) string {
-	u, _ := url.Parse("https://sourcegraph.com/.api/search")
-	q := u.Query()
-	q.Set("q", query)
-	u.RawQuery = q.Encode()
-	return u.String()
 }

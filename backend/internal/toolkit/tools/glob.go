@@ -9,8 +9,6 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const defaultGlobLimit = searchcore.DefaultGlobLimit
-
 // GlobTool 文件名模式匹配工具
 type GlobTool struct {
 	*toolkit.BaseTool

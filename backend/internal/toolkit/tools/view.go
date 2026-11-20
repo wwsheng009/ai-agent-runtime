@@ -21,8 +21,6 @@ import (
 // reading the same numbers the handler applies.
 const viewBatchDefaultLimit = viewcore.BatchDefaultLimit
 
-const viewCompactHeadLines = viewcore.BatchCompactHeadLines
-
 // Window bounds live in the shared reader. The default stays deliberately
 // small for context economy: view owns its own 32 KiB byte budget and stamps
 // skip_render_truncation, so callers page with offset/limit instead of

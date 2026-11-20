@@ -43,15 +43,3 @@ func looksLikeUnsupportedBraceGlob(pattern string) bool {
 func matchGlobPattern(pattern, relPath string) (bool, error) {
 	return searchcore.MatchGlobPath(pattern, relPath, false)
 }
-
-func normalizeGlobPattern(pattern string) string {
-	return searchcore.NormalizeGlobPattern(pattern)
-}
-
-func splitGlobSegments(value string) []string {
-	return searchcore.SplitGlobSegments(value)
-}
-
-func containsDoubleStar(parts []string) bool {
-	return searchcore.ContainsDoubleStar(parts)
-}

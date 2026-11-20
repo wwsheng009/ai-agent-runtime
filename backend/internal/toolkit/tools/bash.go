@@ -1799,10 +1799,6 @@ func hasExplicitShellTimeout(params map[string]interface{}) bool {
 	return false
 }
 
-func shellCommandTimeoutError(timeout time.Duration) error {
-	return fmt.Errorf("命令执行超时（超过 %v）。如需继续运行长命令，请重试并显式设置 timeout（例如 2m、5m）或 timeout_ms/timeout_sec", timeout)
-}
-
 func resolveDefaultShellCommandTimeout() time.Duration {
 	return resolveShellTimeoutFromEnv(shellCommandTimeoutMSEnv, shellCommandTimeoutEnv, defaultShellCommandTimeout)
 }
@@ -2303,15 +2299,11 @@ func shellVisibleGlobMatches(matches []string, pattern string) []string {
 	return visible
 }
 
-// searchPathGlobLiteralToken returns the first path-position glob in command
+// searchPathGlobLiteralTokenWithShell returns the first path-position glob in command
 // that would reach rg/grep literally under workdir: the runtime shell never
 // expands it, the token is quoted, or no existing path matches. A glob that
 // really expands - e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - returns
 // ok=false and runs normally.
-func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
-	return searchPathGlobLiteralTokenWithShell(runtimeexecutor.CurrentShell(), command, workdir)
-}
-
 // searchPathGlobLiteralTokenWithShell is the per-session variant: glob
 // expansion depends on the workspace-selected shell, not the process default.
 func searchPathGlobLiteralTokenWithShell(shell runtimeexecutor.Shell, command, workdir string) (string, bool) {

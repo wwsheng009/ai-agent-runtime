@@ -65,6 +65,19 @@
 - 验证：`go build -p 2 ./...`、`internal/cacheanalytics` 全包测试、
   `cmd/aicli/commands` 的 DirectWriter/Debug 定向测试通过。
 
+### 0.3 第三批已执行（2026-11-20）
+
+- 清理 `internal/toolkit/tools` 中零引用小包装：
+  - `shellCommandTimeoutError`、`searchPathGlobLiteralToken`；
+  - `codeExploreBelow`、`newCodeToolBase`、`codeParamBool`；
+  - `defaultGlobLimit`、`normalizeGlobPattern`、`splitGlobSegments`、
+    `containsDoubleStar`；
+  - `boolParamValue`、`intParamValue`；
+  - `SourcegraphTool.buildSearchURL`；
+  - `toolResultFailure`、`viewCompactHeadLines`。
+- 同步清理 `sourcegraph.go` 因此不再使用的 `net/url` import。
+- 验证：`go build -p 2 ./...`、`internal/toolkit/tools` 定向测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

@@ -8,11 +8,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
-// toolResultFailure builds a failed ToolResult with optional structured next_action.
-func toolResultFailure(err error, nextAction string) *toolkit.ToolResult {
-	return toolResultFailureWithCode(err, "", nextAction, nil)
-}
-
 // toolResultFailureWithCode builds a failed ToolResult with optional error_code,
 // next_action, and extra metadata fields (file_path, failure_class, etc.).
 func toolResultFailureWithCode(err error, errorCode, nextAction string, extra map[string]interface{}) *toolkit.ToolResult {
