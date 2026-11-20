@@ -1,7 +1,6 @@
 package remotetools
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -141,28 +140,4 @@ func isDeniedResult(metadata map[string]interface{}) bool {
 	default:
 		return false
 	}
-}
-
-// metricsContextKey carries per-request metric labels into a tool execution.
-type metricsContextKey struct{}
-
-// WithMetrics attaches the server counter set to a context so the audit wrapper can
-// observe without holding a direct reference.
-func WithMetrics(ctx context.Context, metrics *Metrics) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if metrics == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, metricsContextKey{}, metrics)
-}
-
-// metricsFromContext retrieves the counter set, if any.
-func metricsFromContext(ctx context.Context) *Metrics {
-	if ctx == nil {
-		return nil
-	}
-	metrics, _ := ctx.Value(metricsContextKey{}).(*Metrics)
-	return metrics
 }

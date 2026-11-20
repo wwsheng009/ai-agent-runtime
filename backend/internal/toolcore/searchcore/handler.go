@@ -1034,14 +1034,6 @@ func grepPatternFilesFromArgs(ctx context.Context, access toolcore.Access, call 
 	return resolved, nil
 }
 
-// grepPageUnit names the pagination unit for the truncation notice.
-func grepPageUnit(mode GrepMode) string {
-	if mode == GrepModeContent {
-		return "matches"
-	}
-	return "files"
-}
-
 // grepPatternSource names where the effective pattern list came from, the same
 // way the local tool reported it.
 func grepPatternSource(patterns []string) string {

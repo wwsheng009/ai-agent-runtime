@@ -763,10 +763,6 @@ func joinPatchBody(lines []string, trailing bool, newline string) string {
 	return joined
 }
 
-func pathFromDirective(line, prefix string) string {
-	return SanitizePatchPath(strings.TrimPrefix(line, prefix))
-}
-
 // SanitizePatchPath trims whitespace and common model punctuation that leaks
 // into Add/Update/Delete headers (quotes, trailing sentence/JSON crumbs). It
 // does not rewrite valid relative/absolute paths or intentional inner spaces.

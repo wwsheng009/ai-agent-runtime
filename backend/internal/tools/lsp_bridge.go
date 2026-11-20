@@ -35,12 +35,6 @@ const (
 // a follow-up round trip.
 const lspInlineDiagnosticsHint = "启用 LSP 时，本工具成功后会把同一文件的最新诊断追加在返回文本尾部（追加不改写原文）；无需再调用 lsp_diagnostics 复核本次改动。LSP 可能不存在、不可用或未覆盖该文件：此时本工具照常返回编辑结果，只是没有诊断追加，编辑本身不受影响。"
 
-// newLSPBridge builds the tool-layer facade. It returns nil when the LSP
-// section is disabled so every call site can treat LSP as absent (A11).
-func newLSPBridge(config *runtimecfg.RuntimeConfig, workspaceRoot string) *lsp.Bridge {
-	return newLSPBridgeWith(config, workspaceRoot, nil, nil)
-}
-
 // newLSPBridgeWith is the injectable seam (dial, observer). The bridge logs
 // lifecycle/diagnostics events through the runtime logger, and
 // `lsp.prewarm` starts the pool here instead of on the first edit.
@@ -283,7 +277,7 @@ func registerSemanticChannelStatus(registry *toolkit.Registry, fn func() (knowle
 	if registry == nil || fn == nil {
 		return
 	}
-tool, ok := registry.Get(LSPServersToolName)
+	tool, ok := registry.Get(LSPServersToolName)
 	if !ok {
 		return
 	}

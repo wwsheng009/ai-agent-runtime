@@ -109,16 +109,17 @@ func TestEnvDShellFailsClosedWithNoAllowlist(t *testing.T) {
 }
 
 // A command started outside the workspace can touch anything its user can, so the
-// cwd is jailed like every other path.
-func TestEnvDShellRefusesEscapeThroughCwd(t *testing.T) {
+// workdir is jailed like every other path. The deprecated cwd input alias is
+// covered separately by TestEnvdDirParam.
+func TestEnvDShellRefusesEscapeThroughWorkdir(t *testing.T) {
 	stub := newEnvdStub(t, map[string]string{"/etc/passwd": "root:x:0:0\n"}, nil)
 	session, ctx := connectEnvDOps(t, stub, allowCommands("cat"))
 
 	refused := callEnvDExpectError(t, ctx, session, "remote_envd__shell", map[string]interface{}{
-		"command": "cat passwd", "cwd": "../etc",
+		"command": "cat passwd", "workdir": "../etc",
 	})
 	if !strings.Contains(refused, "outside the workspace") {
-		t.Fatalf("cwd escape refusal = %q", refused)
+		t.Fatalf("workdir escape refusal = %q", refused)
 	}
 }
 

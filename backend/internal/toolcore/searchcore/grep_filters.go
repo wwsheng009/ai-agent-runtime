@@ -10,10 +10,6 @@ type grepGlobFilter struct {
 	caseInsensitive bool
 }
 
-func newGrepGlobFilter(patterns []string) (*grepGlobFilter, error) {
-	return newGrepGlobFilterWithCase(patterns, false)
-}
-
 // newGrepGlobFilterWithCase builds a filter whose patterns may compare
 // case-insensitively (rg --glob-case-insensitive). The matcher keeps the parsed
 // pattern list; the comparison mode is a property of the filter, so one pattern

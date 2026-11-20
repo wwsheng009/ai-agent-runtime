@@ -161,6 +161,23 @@
   `TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure`，
   与本次删除无关。
 
+### 0.12 第十二批已执行（2026-11-20）
+
+- 清理不依赖 `internal/chat` 的安全包：
+  - `toolcore/searchcore`：删除 `newGrepGlobFilter`、`grepPageUnit`；
+  - `toolcore/viewcore`：删除未使用的 `batchDefaultLimit`、`compactHeadLines`；
+  - `toolcore/mutatecore`：删除 `pathFromDirective`；
+  - `toolexec`：删除 `defaultPathExists`；
+  - `remotetools`：删除 `remoteToolBase.maxViewBytes`、未使用的 metrics context
+    注入/读取 API；
+  - `tools`：删除 `formatMCPResultWithSource`、`mergeMetadataMaps`、
+    `newLSPBridge`。
+- 将 envd 的 `cwd` 逃逸测试改用 canonical `workdir`；旧 `cwd` 解析兼容继续由
+  `TestEnvdDirParam` 覆盖。
+- 验证：`toolcore/...`、`toolexec`、`tools` 的 `-short` 测试通过；
+  `remotetools` 定向测试通过。`remotetools` 全包测试出现过一次 PowerShell
+  CLR 初始化失败，单独重跑对应用例通过，属于环境级不稳定。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

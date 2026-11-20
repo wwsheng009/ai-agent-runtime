@@ -1888,24 +1888,6 @@ func resolvePreflightPath(path, workspaceRoot string) string {
 	return filepath.Clean(filepath.Join(root, trimmed))
 }
 
-func defaultPathExists(path string) bool {
-	// Prefer the path as given (already workspace-resolved when applicable).
-	if statPathProbe(path) == PathProbeExists {
-		return true
-	}
-	// Fall back to process-cwd absolute form for bare relative paths when no
-	// workspace root was supplied.
-	trimmed := strings.TrimSpace(path)
-	if trimmed != "" && !filepath.IsAbs(trimmed) {
-		if abs, err := filepath.Abs(trimmed); err == nil {
-			if statPathProbe(abs) == PathProbeExists {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 const maxNearbyPathCandidates = 5
 
 // minPathAutoHealScore is the confidence floor for silently rewriting a missing

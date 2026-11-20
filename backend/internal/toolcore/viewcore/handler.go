@@ -13,11 +13,6 @@ import (
 )
 
 const (
-	// batchDefaultLimit matches the builtin view batch default: batch calls are
-	// for scanning many files, not for pulling whole files.
-	batchDefaultLimit = 200
-	// compactHeadLines matches the builtin view compact head window.
-	compactHeadLines = 10
 	// DefaultByteBudget is the window one read may spend when the surface does
 	// not set one: the tool's own model-visible budget. A zero Options.ByteBudget
 	// must not silently degrade into "one line per window".

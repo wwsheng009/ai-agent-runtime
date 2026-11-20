@@ -926,11 +926,6 @@ func formatMCPResult(result *protocol.CallToolResult) (string, map[string]interf
 	return rendered, metadata, nil
 }
 
-func formatMCPResultWithSource(result *protocol.CallToolResult, source string) (string, map[string]interface{}, error) {
-	output, metadata, err := formatMCPResult(result)
-	return output, toolresult.WithSource(metadata, source), err
-}
-
 // formatMCPResultWithContext is the trust-aware MCP entry point. The context is
 // resolved from local server configuration before the remote body is allowed
 // to influence the render-layer budget.
@@ -949,23 +944,6 @@ func cloneMetadataMap(input map[string]any) map[string]interface{} {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-// mergeMetadataMaps returns base with overlay's keys applied on top. It is used
-// when an adapter must combine the descriptor metadata (identity fields) with a
-// stamped copy (fs_owner etc.) without dropping either side.
-func mergeMetadataMaps(base, overlay map[string]interface{}) map[string]interface{} {
-	if len(base) == 0 && len(overlay) == 0 {
-		return nil
-	}
-	merged := make(map[string]interface{}, len(base)+len(overlay))
-	for key, value := range base {
-		merged[key] = value
-	}
-	for key, value := range overlay {
-		merged[key] = value
-	}
-	return merged
 }
 
 func withMCPIdentity(metadata map[string]interface{}, info *mcpregistry.ToolInfo, callableName string) map[string]interface{} {

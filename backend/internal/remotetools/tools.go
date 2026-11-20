@@ -226,20 +226,6 @@ func (b remoteToolBase) resolve(ctx context.Context, raw string) (string, error)
 	return ws.Resolve(raw)
 }
 
-// maxViewBytes resolves the payload ceiling for this call.
-func (b remoteToolBase) maxViewBytes() int {
-	if b.cfg == nil {
-		return DefaultMaxBytesPerCall
-	}
-	if b.cfg.Limits.CaptureLimit > 0 {
-		return b.cfg.Limits.CaptureLimit
-	}
-	if b.cfg.Limits.MaxBytesPerCall > 0 {
-		return b.cfg.Limits.MaxBytesPerCall
-	}
-	return DefaultMaxBytesPerCall
-}
-
 // modelVisibleCap resolves the remote trust ceiling for this target.
 func (b remoteToolBase) modelVisibleCap() int {
 	if b.cfg == nil || b.cfg.Limits.ModelVisibleCap <= 0 {
