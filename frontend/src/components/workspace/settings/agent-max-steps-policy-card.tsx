@@ -9,7 +9,6 @@ import { saveRuntimeAgentMaxSteps } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 
 import { editorControlClassName } from "./editor-control-class";
-import { SettingsInfoCard } from "./settings-info-card";
 import { SettingsPanelCard } from "./settings-panel-card";
 
 const maxStepsFallbackLimit = 100;
@@ -150,43 +149,77 @@ export function AgentMaxStepsPolicyCard({ className }: { className?: string }) {
         </p>
       ) : null}
 
-      <div className="mt-3 space-y-2">
-        <SettingsInfoCard
-          size="compact"
-          description={
-            snapshot
-              ? t("editor.agentMaxSteps.configFile", {
-                  path: snapshot.configFile,
-                })
-              : t("editor.agentMaxSteps.scopeNote")
-          }
-        />
-        {snapshot && snapshot.layers.length > 0 ? (
-          <SettingsInfoCard
-            size="compact"
-            description={t("editor.agentMaxSteps.layerSummary", {
-              layers: snapshot.layers
-                .map((layer) =>
-                  [
-                    layer.kind,
-                    layer.path,
-                    layer.read_only
-                      ? t("editor.agentMaxSteps.layerReadOnly")
-                      : layer.present
-                        ? t("editor.agentMaxSteps.layerWritable")
-                        : t("editor.agentMaxSteps.layerCandidate"),
-                  ].join(" · "),
-                )
-                .join("  |  "),
-            })}
-          />
-        ) : null}
-        <SettingsInfoCard
-          size="compact"
-          description={t("editor.agentMaxSteps.workspaceValue", {
-            count: settings.chat.maxSteps,
-          })}
-        />
+      <div className="mt-3 rounded-card border border-border bg-surface-softer px-3 py-2.5">
+        <div className="app-text-11 font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+          {t("editor.agentMaxSteps.metadataTitle")}
+        </div>
+        <dl className="mt-2 grid gap-x-4 gap-y-2 sm:grid-cols-2">
+          <div className="min-w-0">
+            <dt className="app-text-11 text-muted-foreground">
+              {t("editor.agentMaxSteps.configFileLabel")}
+            </dt>
+            <dd
+              className="truncate text-xs font-medium text-foreground"
+              title={
+                snapshot?.configFile ?? t("editor.agentMaxSteps.scopeNote")
+              }
+            >
+              {snapshot?.configFile ?? t("editor.agentMaxSteps.scopeNote")}
+            </dd>
+          </div>
+          {snapshot && snapshot.layers.length > 0 ? (
+            <div className="min-w-0">
+              <dt className="app-text-11 text-muted-foreground">
+                {t("editor.agentMaxSteps.layerLabel")}
+              </dt>
+              <dd
+                className="truncate text-xs font-medium text-foreground"
+                title={t("editor.agentMaxSteps.layerSummary", {
+                  layers: snapshot.layers
+                    .map((layer) =>
+                      [
+                        layer.kind,
+                        layer.path,
+                        layer.read_only
+                          ? t("editor.agentMaxSteps.layerReadOnly")
+                          : layer.present
+                            ? t("editor.agentMaxSteps.layerWritable")
+                            : t("editor.agentMaxSteps.layerCandidate"),
+                      ].join(" · "),
+                    )
+                    .join("  |  "),
+                })}
+              >
+                {snapshot.layers
+                  .map((layer) =>
+                    [
+                      layer.kind,
+                      layer.path,
+                      layer.read_only
+                        ? t("editor.agentMaxSteps.layerReadOnly")
+                        : layer.present
+                          ? t("editor.agentMaxSteps.layerWritable")
+                          : t("editor.agentMaxSteps.layerCandidate"),
+                    ].join(" · "),
+                  )
+                  .join(" · ")}
+              </dd>
+            </div>
+          ) : null}
+          <div className="min-w-0 sm:col-span-2">
+            <dt className="app-text-11 text-muted-foreground">
+              {t("editor.agentMaxSteps.workspaceLabel")}
+            </dt>
+            <dd
+              className="truncate text-xs font-medium text-foreground"
+              title={t("editor.agentMaxSteps.workspaceValue", {
+                count: settings.chat.maxSteps,
+              })}
+            >
+              {settings.chat.maxSteps}
+            </dd>
+          </div>
+        </dl>
       </div>
     </SettingsPanelCard>
   );

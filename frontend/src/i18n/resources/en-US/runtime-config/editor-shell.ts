@@ -5,6 +5,8 @@ import type { zhRuntimeConfigEditorShell } from "../../zh-CN/runtime-config/edit
 export const enRuntimeConfigEditorShell = {
   title: "Backend config workspace",
   independentBadge: "Independent backend config page",
+  providerFileBadge: "providers.yaml",
+  providerFileBadgeTitle: "Provider configuration comes from {{path}}",
   unsavedBadge: "Unsaved draft",
   configDialog: {
     eyebrow: "Config editor",
@@ -28,6 +30,7 @@ export const enRuntimeConfigEditorShell = {
   table: {
     searchPlaceholder: "Search…",
     noSearchResults: "No matching entries. Try a different keyword.",
+    sortBy: "Sort by {{column}}",
     pagination: {
       showing: "Showing {{start}}-{{end}} of {{total}}",
       prev: "Previous page",

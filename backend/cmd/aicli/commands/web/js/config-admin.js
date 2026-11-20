@@ -46,6 +46,15 @@ export function setCfgStatus(el, text, kind) {
 function renderConfigAdmin() {
   var pathEl = configEl("config-path");
   if (pathEl) { pathEl.textContent = configData.config_path || "（未识别到配置文件）"; }
+  var providersPathEl = configEl("config-providers-path");
+  if (providersPathEl) {
+    providersPathEl.textContent = configData.providers_config_path
+      ? "providers: " + configData.providers_config_path
+      : "providers: inline";
+    providersPathEl.title = configData.providers_config_path
+      ? "provider 配置来源文件"
+      : "provider 配置当前在 config.yaml 中";
+  }
 
   var providers = configData.providers || [];
 

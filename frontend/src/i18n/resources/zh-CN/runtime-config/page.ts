@@ -3,6 +3,8 @@
 export const zhRuntimeConfigPage = {
     badge: "Runtime config",
     independentPage: "独立页面",
+    breadcrumb: "Runtime 配置",
+    navigationLabel: "全局导航",
     title: "后端配置工作台",
     backToWorkspace: "返回工作台",
     logs: "日志",

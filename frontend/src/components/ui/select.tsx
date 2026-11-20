@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import {
   fieldControlVariants,
   type FieldSize,
+  type FieldSurface,
 } from "./field-variants";
 import {
   POPOVER_VIEWPORT_PADDING,
@@ -50,6 +51,9 @@ type SelectProps = {
   menuClassName?: string;
   optionClassName?: string;
   size?: FieldSize;
+  surface?: FieldSurface;
+  id?: string;
+  title?: string;
   /** 触发器测试钩子（权限警示条等外部入口需要定位它来还焦）。 */
   triggerTestId?: string;
 };
@@ -112,6 +116,9 @@ export function Select({
   menuClassName,
   optionClassName,
   size = "md",
+  surface = "default",
+  id,
+  title,
   triggerTestId,
 }: SelectProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -437,13 +444,14 @@ export function Select({
       <div ref={rootRef} className={cn("relative inline-flex min-w-0", className)}>
         <button
           ref={triggerRef}
+          id={id}
           type="button"
           data-testid={triggerTestId}
           aria-label={ariaLabel}
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={listboxId}
-          title={triggerLabel}
+          title={title ?? triggerLabel}
           disabled={isDisabled}
           onClick={(event) => {
             event.stopPropagation();
@@ -459,7 +467,7 @@ export function Select({
           }}
           className={cn(
             "inline-flex min-w-0 items-center justify-between gap-2 text-left",
-            fieldControlVariants({ size }),
+            fieldControlVariants({ size, surface }),
             triggerClassName,
           )}
         >

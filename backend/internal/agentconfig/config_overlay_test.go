@@ -18,6 +18,7 @@ func overlayTestBaseConfig() *Config {
 	cfg.ConfigOrigins = map[string]string{"providers.default_provider": "C:/tmp/aicli.yaml"}
 	cfg.ConfigOriginFiles = map[string]string{"providers.default_provider": "C:/tmp/aicli.yaml"}
 	cfg.ConfigMergeMode = MergeModeOn
+	cfg.ConfigExplicitPath = "C:/tmp/aicli.yaml"
 	return cfg
 }
 
@@ -58,6 +59,9 @@ func TestApplyConfigOverlayYAMLMergesSparseKeysWithoutTouchingBase(t *testing.T)
 	}
 	if merged.ConfigMergeMode != MergeModeOn {
 		t.Fatalf("ConfigMergeMode = %q, want %q", merged.ConfigMergeMode, MergeModeOn)
+	}
+	if merged.ConfigExplicitPath != base.ConfigExplicitPath {
+		t.Fatalf("ConfigExplicitPath = %q, want %q", merged.ConfigExplicitPath, base.ConfigExplicitPath)
 	}
 	if len(merged.ConfigLayers) != len(base.ConfigLayers) {
 		t.Fatalf("ConfigLayers = %#v, want %#v", merged.ConfigLayers, base.ConfigLayers)

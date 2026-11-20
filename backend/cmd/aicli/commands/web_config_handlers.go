@@ -48,10 +48,21 @@ const (
 // chatWebConfigSnapshot 是 GET /web/api/config 的响应体：本地配置文件里
 // provider 的完整状态（含禁用项）与 aicli.chat 默认偏好。
 type chatWebConfigSnapshot struct {
-	ConfigPath      string                  `json:"config_path"`
-	DefaultProvider string                  `json:"default_provider"`
-	Providers       []chatWebConfigProvider `json:"providers"`
-	Chat            chatWebConfigChat       `json:"chat"`
+	ConfigPath          string                  `json:"config_path"`
+	ProvidersConfigPath string                  `json:"providers_config_path,omitempty"`
+	ConfigLayers        []chatWebConfigLayer    `json:"config_layers,omitempty"`
+	DefaultProvider     string                  `json:"default_provider"`
+	Providers           []chatWebConfigProvider `json:"providers"`
+	Chat                chatWebConfigChat       `json:"chat"`
+}
+
+type chatWebConfigLayer struct {
+	Kind     string `json:"kind"`
+	Path     string `json:"path"`
+	Present  bool   `json:"present"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+	Fragment bool   `json:"fragment,omitempty"`
+	Section  string `json:"section,omitempty"`
 }
 
 type chatWebConfigProvider struct {
@@ -77,8 +88,8 @@ type chatWebConfigProvider struct {
 	SupportedModels []string             `json:"supported_models,omitempty"`
 	Models          []chatWebConfigModel `json:"models,omitempty"`
 	// Headers 是该 provider 生效的请求头（preset 合并后的值，含模板占位符
-	// 原文如 {session_id}）。它同时是编辑入口：保存时整体写回用户
-	// config.yaml 的 providers.items.<name>.headers（presets.yaml 只读）。
+	// 原文如 {session_id}）。它同时是编辑入口：保存时整体写回该 provider
+	// 所属的配置文件（providers.yaml 若存在，否则 config.yaml；presets.yaml 只读）。
 	Headers map[string]string `json:"headers,omitempty"`
 	// EffectiveHeaders 是最终发往上游的请求头（全局 providers.headers 合并
 	// provider.headers 后的结果），仅用于展示。
@@ -613,6 +624,19 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := session.Config
+	for _, layer := range cfg.ConfigLayers {
+		snap.ConfigLayers = append(snap.ConfigLayers, chatWebConfigLayer{
+			Kind:     string(layer.Kind),
+			Path:     layer.Path,
+			Present:  layer.Present,
+			ReadOnly: layer.ReadOnly,
+			Fragment: layer.Fragment,
+			Section:  layer.Section,
+		})
+		if layer.Fragment && layer.Present {
+			snap.ProvidersConfigPath = layer.Path
+		}
+	}
 	snap.DefaultProvider = strings.TrimSpace(cfg.Providers.DefaultProvider)
 	if cfg.AICLI != nil && cfg.AICLI.Chat != nil {
 		snap.Chat.DefaultProvider = strings.TrimSpace(cfg.AICLI.Chat.DefaultProvider)
@@ -1189,7 +1213,8 @@ func HandleChatWebAPIConfigProvidersProbeModels(w http.ResponseWriter, r *http.R
 // 完全同源（复用 provider_login.go 的 runProviderLogin）：探测/校验协议、
 // 拉取并校验 models 列表、按 model card 分组生成 api_path / forward_url /
 // default_model / supported_models / model_capabilities，并把 API key 写入
-// Key Store（auth.json），config.yaml 只落 api_key_ref。无交互（Interactive
+// Key Store（auth.json），provider 定义落所属配置（providers.yaml 若存在），
+// 只落 api_key_ref。无交互（Interactive
 // 关闭），任何需要人工输入的环节直接报错，不会挂起。
 func HandleChatWebAPIConfigProvidersAutoImport(w http.ResponseWriter, r *http.Request) {
 	if !chatWebRequireMethod(w, r, http.MethodPost) {

@@ -1,9 +1,8 @@
 // P0-2：页面壳（state/actions 由 useConfigEditorCore 提供，域处理器与 section 分模块）。
 
-import { SettingsSection } from "./settings-section";
-
 import { AgentMaxStepsPolicyCard } from "./agent-max-steps-policy-card";
 import { useConfigEditorCore } from "./backend-config-settings-page/use-config-core";
+import { ConnectorsPage } from "@/pages/connectors-page";
 
 import { createProvidersDomain } from "./backend-config-settings-page/domains/providers";
 import { createAgentRoutingDomain } from "./backend-config-settings-page/domains/agent-routing";
@@ -74,16 +73,14 @@ export function BackendConfigSettingsPage() {
 
       <ConfigImpactSection core={core} />
 
-      <AgentMaxStepsPolicyCard />
-
-      <SettingsSection
-        title={core.t("editor.panels.editorTitle")}
-      >
+      <section className="space-y-3">
         <div className="grid gap-3 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[17rem_minmax(0,1fr)]">
           <ConfigEditorMenuPanel core={core} />
 
           <div className="min-w-0 space-y-3">
             <ConfigDraftValidationPanel core={core} />
+            {core.mode === "agentExecution" ? <AgentMaxStepsPolicyCard /> : null}
+            {core.mode === "connectors" ? <ConnectorsPage embedded /> : null}
             {core.mode === "providers" ? (
               <ProvidersModeSection core={core} domain={providersDomain} />
             ) : null}
@@ -139,7 +136,7 @@ export function BackendConfigSettingsPage() {
             ) : null}
           </div>
         </div>
-      </SettingsSection>
+      </section>
 
       <ConfigPreviewSection core={core} />
 

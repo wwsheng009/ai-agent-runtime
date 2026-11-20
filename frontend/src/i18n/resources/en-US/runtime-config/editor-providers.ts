@@ -24,6 +24,10 @@ export const enRuntimeConfigEditorProviders = {
       status: "Status",
       actions: "Actions",
     },
+    filters: {
+      status: "Filter status",
+      protocol: "Filter protocol",
+    },
     row: {
       noBaseUrl: "base_url not set",
       noSupportTypes: "No types set",
@@ -36,6 +40,7 @@ export const enRuntimeConfigEditorProviders = {
       proxyOverride: "Proxy override",
       proxyConfigured: "Proxy configured",
       extraFields: "{{count}} extra fields",
+      extraFieldsCompact: "+{{count}}",
       defaultBadge: "default",
     },
     actions: {
@@ -44,6 +49,8 @@ export const enRuntimeConfigEditorProviders = {
       copyConfig: "Copy create config for {{name}}",
       edit: "Edit {{name}}",
       delete: "Delete {{name}}",
+      openMenu: "Open more actions for {{name}}",
+      menu: "More actions for {{name}}",
     },
     dialogTabs: {
       aria: "Provider editor sections",

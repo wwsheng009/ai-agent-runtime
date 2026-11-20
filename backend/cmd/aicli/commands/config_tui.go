@@ -42,7 +42,8 @@ func runConfigTUI(reader io.Reader, writer io.Writer, cfg *config.Config) error 
 func (t *configTUI) run() error {
 	for {
 		t.printHeader("AICLI Config TUI")
-		fmt.Fprintf(t.writer, "Config: %s\n\n", emptyIfBlank(t.cfg.ConfigFilePath))
+		fmt.Fprintf(t.writer, "Config: %s\n", emptyIfBlank(t.cfg.ConfigFilePath))
+		fmt.Fprintf(t.writer, "Providers: %s\n\n", configTUIProviderLayerSummary(t.cfg))
 		fmt.Fprintln(t.writer, "  1. 概览")
 		fmt.Fprintln(t.writer, "  2. Provider 管理")
 		fmt.Fprintln(t.writer, "  3. AICLI Chat 偏好")
@@ -84,6 +85,22 @@ func (t *configTUI) run() error {
 			t.notice("未知选项: " + input)
 		}
 	}
+}
+
+func configTUIProviderLayerSummary(cfg *config.Config) string {
+	if cfg == nil {
+		return "inline (config.yaml)"
+	}
+	parts := make([]string, 0, 2)
+	for _, layer := range cfg.ConfigLayers {
+		if layer.Fragment && layer.Present {
+			parts = append(parts, fmt.Sprintf("%s (%s)", layer.Path, layer.Kind))
+		}
+	}
+	if len(parts) == 0 {
+		return "inline (config.yaml)"
+	}
+	return strings.Join(parts, " > ")
 }
 
 func (t *configTUI) runProviders() error {

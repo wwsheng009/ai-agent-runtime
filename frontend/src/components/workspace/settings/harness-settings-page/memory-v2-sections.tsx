@@ -10,7 +10,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 
 function formatCounts(values?: Record<string, number>) {
   const entries = Object.entries(values ?? {});
@@ -205,18 +205,20 @@ export function MemoryV2SessionGovernance({
           value={sessionID}
           onChange={(event) => onSessionIDChange(event.target.value)}
         />
-        <NativeSelect
-          aria-label={t("harness.memorySessionMode")}
+        <Select
+          ariaLabel={t("harness.memorySessionMode")}
+          className="w-auto"
           size="sm"
+          options={[
+            { value: "enabled", label: t("harness.memorySessionModeEnabled") },
+            { value: "disabled", label: t("harness.memorySessionModeDisabled") },
+            { value: "polluted", label: t("harness.memorySessionModePolluted") },
+          ]}
           value={sessionMode}
-          onChange={(event) =>
-            onSessionModeChange(event.target.value as "enabled" | "disabled" | "polluted")
+          onChange={(mode) =>
+            onSessionModeChange(mode as "enabled" | "disabled" | "polluted")
           }
-        >
-          <option value="enabled">{t("harness.memorySessionModeEnabled")}</option>
-          <option value="disabled">{t("harness.memorySessionModeDisabled")}</option>
-          <option value="polluted">{t("harness.memorySessionModePolluted")}</option>
-        </NativeSelect>
+        />
         <Button
           variant="secondary"
           size="sm"

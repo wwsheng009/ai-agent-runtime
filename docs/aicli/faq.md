@@ -109,6 +109,9 @@ aicli doctor provider --provider <name> --model <model>
 - 目标 provider 未启用，或 `supported_models` 未包含该模型
 - 当前配置文件不可写，偏好没有落盘
 - 启动参数 `--provider/--model` 覆盖了 session / 配置默认值
+- 使用了独立 `~/.aicli/providers.yaml`：provider 在 fragment 中，通用配置仍在
+  `config.yaml`；`aicli config` 的 `Providers:` 行会显示来源文件。不要在两处
+  重复维护同一个 provider；迁移可用 `aicli config split-providers`（默认 dry-run）。
 
 ## 4. HTTP 401 / Invalid API key
 

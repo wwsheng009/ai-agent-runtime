@@ -1,7 +1,7 @@
 // 由 components/workspace/settings/backend-config-settings-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { MenuButton } from "../primitives";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 import { type EditorMode } from "../types";
 import { type ConfigEditorCore } from "../use-config-core";
 
@@ -21,23 +21,21 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
         <span className="block text-sm font-semibold text-foreground">
           {t("editor.panels.modeTitle")}
         </span>
-        <NativeSelect
+        <Select
+          ariaLabel={t("editor.panels.modeTitle")}
+          className="mt-3 w-full"
+          disabled={isModeSwitching}
+          onChange={(nextMode) => {
+            void switchMode(nextMode as EditorMode);
+          }}
+          options={translatedModeMenuEntries.map((entry) => ({
+            value: entry.mode,
+            label: entry.label,
+          }))}
           size="md"
           surface="soft"
           value={mode}
-          disabled={isModeSwitching}
-          aria-label={t("editor.panels.modeTitle")}
-          onChange={(event) => {
-            void switchMode(event.target.value as EditorMode);
-          }}
-          className="mt-3"
-        >
-          {translatedModeMenuEntries.map((entry) => (
-            <option key={entry.mode} value={entry.mode}>
-              {entry.label}
-            </option>
-          ))}
-        </NativeSelect>
+        />
       </label>
 
       <div className="hidden lg:block">

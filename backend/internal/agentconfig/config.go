@@ -54,6 +54,10 @@ type Config struct {
 	// them, which is what write routing (see config_write_route.go) needs.
 	ConfigOriginFiles map[string]string `yaml:"-" mapstructure:"-"`
 	ConfigMergeMode   MergeMode         `yaml:"-" mapstructure:"-"`
+	// ConfigExplicitPath records the --config path that selected single-file
+	// semantics. ReloadGlobalConfig must keep that mode even when the explicit
+	// path happens to be one of the layer-stack candidates.
+	ConfigExplicitPath string `yaml:"-" mapstructure:"-"`
 }
 
 // GatewayConfig configures the external session gateway connection

@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { CheckboxInput } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
+import { Select } from "@/components/ui/select";
 import type {
   RuntimeMcpConfig,
   RuntimeMcpTransportType,
@@ -336,20 +337,19 @@ export function RuntimeMcpForm({
         </ConfigFormField>
 
         <ConfigFormField label={t("mcp.fields.type")}>
-          <select
-            aria-label={t("mcp.fields.type")}
-            className={editorControlClassName}
+          <Select
+            ariaLabel={t("mcp.fields.type")}
+            className="w-full"
+            options={MCP_TRANSPORT_TYPES.map((type) => ({
+              value: type,
+              label: t(MCP_TYPE_LABEL_KEYS[type]),
+            }))}
             value={draft.type}
-            onChange={(event) =>
-              patch({ type: event.target.value as RuntimeMcpTransportType })
+            onChange={(type) =>
+              patch({ type: type as RuntimeMcpTransportType })
             }
-          >
-            {MCP_TRANSPORT_TYPES.map((type) => (
-              <option key={type} value={type}>
-                {t(MCP_TYPE_LABEL_KEYS[type])}
-              </option>
-            ))}
-          </select>
+            triggerClassName={editorControlClassName}
+          />
         </ConfigFormField>
 
         <ConfigFormField label={t("mcp.fields.description")}>
@@ -366,23 +366,24 @@ export function RuntimeMcpForm({
           description={t("mcp.trustLevels.inherit")}
           label={t("mcp.fields.trustLevel")}
         >
-          <select
-            aria-label={t("mcp.fields.trustLevel")}
-            className={editorControlClassName}
+          <Select
+            ariaLabel={t("mcp.fields.trustLevel")}
+            className="w-full"
+            options={[
+              { value: "", label: t("mcp.trustLevels.inherit") },
+              ...MCP_TRUST_LEVELS.map((level) => ({
+                value: level,
+                label: t(MCP_TRUST_LEVEL_LABEL_KEYS[level]),
+              })),
+            ]}
             value={draft.trustLevel}
-            onChange={(event) =>
+            onChange={(trustLevel) =>
               patch({
-                trustLevel: event.target.value as "" | RuntimeMcpTrustLevel,
+                trustLevel: trustLevel as "" | RuntimeMcpTrustLevel,
               })
             }
-          >
-            <option value="">{t("mcp.trustLevels.inherit")}</option>
-            {MCP_TRUST_LEVELS.map((level) => (
-              <option key={level} value={level}>
-                {t(MCP_TRUST_LEVEL_LABEL_KEYS[level])}
-              </option>
-            ))}
-          </select>
+            triggerClassName={editorControlClassName}
+          />
         </ConfigFormField>
 
         {isStdio ? (

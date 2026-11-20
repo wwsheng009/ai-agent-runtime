@@ -10,6 +10,14 @@ export const zhRuntimeConfigEditorModes = {
       label: "Agent 难度路由",
       description: "按 easy、normal、hard、expert 为子 Agent 和 Team 选择 provider 与模型。",
     },
+    agentExecution: {
+      label: "Agent 执行策略",
+      description: "设置 Agent 请求未指定最大步骤数时使用的服务端缺省值。",
+    },
+    connectors: {
+      label: "连接器",
+      description: "管理 Telegram 等 IM 连接器、运行状态、绑定会话和通道操作。",
+    },
     shell: {
       label: "Shell 执行环境",
       description: "选择工具执行命令时使用的 shell（自动探测或强制路径）。",

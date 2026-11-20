@@ -3,6 +3,7 @@ package runtimeserver
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -15,6 +16,20 @@ type AgentConfigSnapshotInfo struct {
 	ActivePath     string
 	SnapshotExists bool
 }
+
+// AgentConfigLoadOptions selects the runtime-server agent-config load semantics.
+// Explicit=true means the caller passed --config and only that file (plus the
+// preset baseline) may contribute; Explicit=false keeps the historical layered
+// behavior used by default discovery.
+type AgentConfigLoadOptions struct {
+	Path     string
+	Explicit bool
+}
+
+// activeExplicitAgentConfigPath keeps the process-wide explicit --config
+// selection visible to legacy LoadRuntimeAgentConfig callers (for example
+// siteaccount refreshes). It is cleared when a different path is loaded.
+var activeExplicitAgentConfigPath string
 
 // ResolveAgentConfigSnapshotInfo returns the base config path as the only active runtime config.
 func ResolveAgentConfigSnapshotInfo(configPath string) AgentConfigSnapshotInfo {
@@ -33,9 +48,22 @@ func ResolveAgentConfigSnapshotInfo(configPath string) AgentConfigSnapshotInfo {
 // 否则会出现「配置页按分层合并展示 N 个 provider，运行时只注册单文件层的 1 个」
 // 的分叉。
 func LoadRuntimeAgentConfig(configPath string) (*agentconfig.Config, AgentConfigSnapshotInfo, error) {
-	info := ResolveAgentConfigSnapshotInfo(configPath)
+	explicit := sameRuntimeConfigPath(configPath, activeExplicitAgentConfigPath)
+	return LoadRuntimeAgentConfigWithOptions(AgentConfigLoadOptions{Path: configPath, Explicit: explicit})
+}
+
+// LoadRuntimeAgentConfigWithOptions is the explicit-aware variant used by
+// runtime-server serve --config.
+func LoadRuntimeAgentConfigWithOptions(options AgentConfigLoadOptions) (*agentconfig.Config, AgentConfigSnapshotInfo, error) {
+	cleanedPath := strings.TrimSpace(options.Path)
+	if options.Explicit {
+		activeExplicitAgentConfigPath = cleanedPath
+	} else if !sameRuntimeConfigPath(cleanedPath, activeExplicitAgentConfigPath) {
+		activeExplicitAgentConfigPath = ""
+	}
+	info := ResolveAgentConfigSnapshotInfo(options.Path)
 	format := detectConfigDocumentFormat(info.ActivePath)
-	raw, err := loadRuntimeAgentConfigRaw(info, format)
+	raw, err := loadRuntimeAgentConfigRaw(info, format, options.Explicit)
 	if err != nil {
 		return nil, info, err
 	}
@@ -53,8 +81,27 @@ func LoadRuntimeAgentConfig(configPath string) (*agentconfig.Config, AgentConfig
 	if err != nil {
 		return nil, info, err
 	}
+	if options.Explicit {
+		cfg.ConfigExplicitPath = strings.TrimSpace(options.Path)
+	}
 	agentconfig.SetGlobalConfig(cfg)
 	return cfg, info, nil
+}
+
+func sameRuntimeConfigPath(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	normalize := func(path string) string {
+		cleaned := filepath.Clean(path)
+		if absolute, err := filepath.Abs(cleaned); err == nil && absolute != "" {
+			return absolute
+		}
+		return cleaned
+	}
+	return strings.EqualFold(normalize(left), normalize(right))
 }
 
 // loadRuntimeAgentConfigRaw 返回运行时生效的配置原文：
@@ -64,8 +111,9 @@ func LoadRuntimeAgentConfig(configPath string) (*agentconfig.Config, AgentConfig
 func loadRuntimeAgentConfigRaw(
 	info AgentConfigSnapshotInfo,
 	format string,
+	explicit bool,
 ) ([]byte, error) {
-	if agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn {
+	if !explicit && agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn {
 		merged, err := agentconfig.LoadMergedConfigDocument()
 		if err != nil {
 			return nil, err

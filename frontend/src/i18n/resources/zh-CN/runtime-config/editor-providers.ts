@@ -22,6 +22,10 @@ export const zhRuntimeConfigEditorProviders = {
       status: "状态",
       actions: "操作",
     },
+    filters: {
+      status: "状态筛选",
+      protocol: "协议筛选",
+    },
     row: {
       noBaseUrl: "未设置 base_url",
       noSupportTypes: "未设类型",
@@ -34,6 +38,7 @@ export const zhRuntimeConfigEditorProviders = {
       proxyOverride: "代理覆盖",
       proxyConfigured: "代理已配置",
       extraFields: "{{count}} 个扩展字段",
+      extraFieldsCompact: "+{{count}}",
       defaultBadge: "default",
     },
     actions: {
@@ -42,6 +47,8 @@ export const zhRuntimeConfigEditorProviders = {
       copyConfig: "复制 {{name}} 的创建配置",
       edit: "编辑 {{name}}",
       delete: "删除 {{name}}",
+      openMenu: "打开 {{name}} 的更多操作",
+      menu: "{{name}} 的更多操作",
     },
     dialogTabs: {
       aria: "Provider 编辑分区",

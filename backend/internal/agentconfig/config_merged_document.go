@@ -88,7 +88,7 @@ func loadMergedRuntimeConfigDocumentFor(layers []ConfigLayer) (*MergedConfigDocu
 		OverriddenKeys: document.OverriddenKeys,
 		SourcePath:     document.SourcePath,
 	}
-	if layer, ok := WritableLayer(document.Layers); ok || strings.TrimSpace(layer.Path) != "" {
+	if layer, ok := WritableMainLayer(document.Layers); ok || strings.TrimSpace(layer.Path) != "" {
 		merged.DefaultWriteLayer = &layer
 	}
 	return merged, nil
@@ -108,7 +108,7 @@ func LoadMergedConfigDocument() (*MergedConfigDocument, error) {
 			present = append(present, layer)
 		}
 	}
-	return &MergedConfigDocument{
+	merged := &MergedConfigDocument{
 		Merged:         document.Merged,
 		MergedYAML:     document.MergedYAML,
 		Layers:         document.Layers,
@@ -118,13 +118,31 @@ func LoadMergedConfigDocument() (*MergedConfigDocument, error) {
 		FallbackKeys:   document.FallbackKeys,
 		OverriddenKeys: document.OverriddenKeys,
 		SourcePath:     document.SourcePath,
-	}, nil
+	}
+	if layer, ok := WritableMainLayer(document.Layers); ok || strings.TrimSpace(layer.Path) != "" {
+		merged.DefaultWriteLayer = &layer
+	}
+	return merged, nil
 }
 
-// MultiLayer reports whether more than one layer exists on disk. Single-layer
-// setups keep byte-identical single-file behaviour everywhere.
+// MultiLayer reports whether the merged view is required. A single provider
+// fragment also counts, because the main config may be implicit/empty.
 func (m *MergedConfigDocument) MultiLayer() bool {
-	return m != nil && len(m.PresentLayers) > 1
+	if m == nil {
+		return false
+	}
+	if len(m.PresentLayers) > 1 {
+		return true
+	}
+	// A single provider fragment still requires the merged view: the main
+	// config may be implicit/empty (runtime-server default discovery), and the
+	// fragment must not be ignored just because it is the only present layer.
+	for _, layer := range m.PresentLayers {
+		if layer.Fragment {
+			return true
+		}
+	}
+	return false
 }
 
 // DocumentChange is one leaf-level edit to apply to a layer file.
@@ -192,7 +210,7 @@ func (m *MergedConfigDocument) targetFileFor(dottedPath, fallback string) string
 		ConfigOriginFiles: m.OriginFiles,
 		ConfigMergeMode:   MergeModeOn,
 	}
-	if target := router.WriteTargetForKeys(dottedPath); target != "" && !m.isReadOnlyLayer(target) {
+	if target := router.WriteTargetForKeysInFile(fallback, dottedPath); target != "" && !m.isReadOnlyLayer(target) {
 		return target
 	}
 	// Brand-new keys and keys owned by a read-only (portable) layer both go to
@@ -310,24 +328,42 @@ func (m *MergedConfigDocument) OriginKindFor(key string) string {
 // (matching the fallback ApplyMergedDocumentChanges uses for new keys). This is
 // what the config UI uses to attribute a pending change (design §9 H4).
 func (m *MergedConfigDocument) WriteLayerKindFor(key string) string {
-	if kind := m.OriginKindFor(key); kind != "" {
-		// A read-only origin is only a default: the write still lands in the
-		// writable layer, and the attribution must say so.
-		if origin := m.OriginFiles[key]; origin == "" || !m.isReadOnlyLayer(origin) {
-			return kind
-		}
-		if m.DefaultWriteLayer != nil && strings.TrimSpace(string(m.DefaultWriteLayer.Kind)) != "" {
-			return string(m.DefaultWriteLayer.Kind)
-		}
-		return kind
+	if m == nil {
+		return ""
+	}
+	fallback := ""
+	if m.DefaultWriteLayer != nil {
+		fallback = strings.TrimSpace(m.DefaultWriteLayer.Path)
+	}
+	target := m.targetFileFor(key, fallback)
+	if kind := m.layerKindForPath(target); kind != "" {
+		return string(kind)
 	}
 	if m.DefaultWriteLayer != nil && strings.TrimSpace(string(m.DefaultWriteLayer.Kind)) != "" {
 		return string(m.DefaultWriteLayer.Kind)
 	}
-	if m == nil || len(m.PresentLayers) == 0 {
+	if len(m.PresentLayers) == 0 {
 		return ""
 	}
-	return string(m.PresentLayers[len(m.PresentLayers)-1].Kind)
+	for index := len(m.PresentLayers) - 1; index >= 0; index-- {
+		if !m.PresentLayers[index].Fragment {
+			return string(m.PresentLayers[index].Kind)
+		}
+	}
+	return ""
+}
+
+func (m *MergedConfigDocument) layerKindForPath(path string) ConfigLayerKind {
+	cleaned := cleanLayerComparisonPath(path)
+	if cleaned == "" {
+		return ""
+	}
+	for _, layer := range m.Layers {
+		if cleanLayerComparisonPath(layer.Path) == cleaned {
+			return layer.Kind
+		}
+	}
+	return ""
 }
 
 // collectDocumentChanges walks both documents and records set/delete edits.
@@ -410,7 +446,11 @@ func applyDocumentChanges(file string, changes []DocumentChange) error {
 	if err != nil {
 		return fmt.Errorf("encode config layer %s: %w", file, err)
 	}
-	if err := writeFileAtomic(file, out); err != nil {
+	mode := os.FileMode(0)
+	if IsProviderFragmentPath(file) {
+		mode = 0o600
+	}
+	if err := writeFileAtomicWithMode(file, out, mode); err != nil {
 		return err
 	}
 	return nil

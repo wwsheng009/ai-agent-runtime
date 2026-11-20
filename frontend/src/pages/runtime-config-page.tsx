@@ -1,7 +1,6 @@
 import {
   ArrowLeftIcon,
   BarChart3Icon,
-  BotIcon,
   DatabaseIcon,
   SparklesIcon,
   TerminalSquareIcon,
@@ -23,22 +22,19 @@ export function RuntimeConfigPage() {
         <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3.5 py-3">
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(240,199,123,0.18),transparent_28%),radial-gradient(circle_at_right,rgba(103,215,230,0.12),transparent_22%)]" />
           <div className="relative flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
+            <div>
+              <nav
+                className="flex flex-wrap items-center gap-2"
+                aria-label={t("page.breadcrumb")}
+              >
                 <Badge className="border-accent-primary-border bg-accent-primary-soft text-accent-primary">
                   <DatabaseIcon size={13} />
                   {t("page.badge")}
                 </Badge>
-                <Badge>{t("page.independentPage")}</Badge>
-              </div>
-              <div>
-                <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.1rem]">
-                  {t("page.title")}
-                </h1>
-              </div>
+              </nav>
             </div>
 
-            <nav className="flex flex-wrap items-center gap-2" aria-label={t("page.title")}>
+            <nav className="flex flex-wrap items-center gap-2" aria-label={t("page.navigationLabel")}>
               <Link
                 to="/workspace/chats/new"
                 className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
@@ -67,18 +63,11 @@ export function RuntimeConfigPage() {
                 <SparklesIcon size={14} />
                 {t("page.skills")}
               </Link>
-              <Link
-                to="/runtime/connectors"
-                className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-              >
-                <BotIcon size={14} />
-                {t("page.connectors")}
-              </Link>
             </nav>
           </div>
         </header>
 
-        <section className="surface-panel min-h-0 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
+        <section className="surface-panel min-h-0 scroll-pt-28 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
           <BackendConfigSettingsPage />
         </section>
       </div>

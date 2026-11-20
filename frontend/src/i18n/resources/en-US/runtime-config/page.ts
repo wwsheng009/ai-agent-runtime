@@ -5,6 +5,8 @@ import type { zhRuntimeConfigPage } from "../../zh-CN/runtime-config/page";
 export const enRuntimeConfigPage = {
     badge: "Runtime config",
     independentPage: "Independent page",
+    breadcrumb: "Breadcrumb navigation",
+    navigationLabel: "Global navigation",
     title: "Backend config workspace",
     backToWorkspace: "Back to workspace",
     logs: "Logs",

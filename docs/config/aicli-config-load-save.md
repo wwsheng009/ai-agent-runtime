@@ -7,8 +7,8 @@
 
 | 位置 | 角色 | 典型内容 |
 |---|---|---|
-| `~/.aicli/`（用户层，decision D4 默认写目标） | 全局用户配置 + 运行数据 | `config.yaml`、`runtime.yaml`、`.env`、`auth.json`、`presets.yaml`、`model_cards.yaml`、`workspace_directories.yaml` |
-| `./.aicli/`（项目层，最高优先级） | 项目级覆盖，仅显式创建（`aicli init --project`）才出现 | `config.yaml`、`runtime.yaml`、`mcp.yaml`、`model_cards.yaml`、`agent-worktrees/`、`memory/` |
+| `~/.aicli/`（用户层，decision D4 默认写目标） | 全局用户配置 + 运行数据 | `config.yaml`、`providers.yaml`（可选）、`runtime.yaml`、`.env`、`auth.json`、`presets.yaml`、`model_cards.yaml`、`workspace_directories.yaml` |
+| `./.aicli/`（项目层，最高优先级） | 项目级覆盖，仅显式创建（`aicli init --project`）才出现 | `config.yaml`、`providers.yaml`（可选）、`runtime.yaml`、`mcp.yaml`、`model_cards.yaml`、`agent-worktrees/`、`memory/` |
 | `~/.aicli/workspace/<hash>/`（D5 workspace 层） | 按 cwd 哈希隔离的 chat 偏好 | `chat-prefs.yaml` |
 | `~/.aicli/sessions/`、`chat-logs/`、`cache/`、`data/`、`logs/`、`.backups/` | 运行时数据，非配置 | `session_history.sqlite` 等 |
 
@@ -18,7 +18,8 @@
 
 | 文件 | 职责 | 典型键 | 明确不包含 |
 |---|---|---|---|
-| `~/.aicli/config.yaml`、`./.aicli/config.yaml`（`agentconfig.Config`） | 引导与入口：选谁、连哪、偏好与开关 | `providers` 与凭据、`aicli.chat` 偏好、`profiles`、`supervision`、`log`、`skills_runtime`（技能系统**入口与对话行为**：`enabled`、`skill_dirs`、`mention_*`、`catalog_resident`、`discipline_block`、`argument_substitution`、`disabled_skills`） | 运行时执行参数：workspace、agent 循环、工具与 sandbox、知识层、checkpoint、background、images、performance、hotReload、rollout、observe、lsp |
+| `~/.aicli/config.yaml`、`./.aicli/config.yaml`（`agentconfig.Config`） | 引导与入口：选谁、连哪、偏好与开关 | `aicli.chat` 偏好、`profiles`、`supervision`、`log`、`skills_runtime`（技能系统**入口与对话行为**：`enabled`、`skill_dirs`、`mention_*`、`catalog_resident`、`discipline_block`、`argument_substitution`、`disabled_skills`）；未拆分时仍可含 `providers` | 运行时执行参数：workspace、agent 循环、工具与 sandbox、知识层、checkpoint、background、images、performance、hotReload、rollout、observe、lsp |
+| `~/.aicli/providers.yaml`、`./.aicli/providers.yaml`（`agentconfig` fragment，可选） | provider/model 定义专用补充文档 | `providers`、`provider_groups`；不包含 `aicli`、`gateway`、`log` 等通用配置 | 凭据本体（继续用 `auth.json` / `api_key_ref` / `auth_ref`）；chat/routing 选择键仍在 `config.yaml` |
 | `runtime.yaml` 层栈：`./.aicli/runtime.yaml`（project）→ `~/.aicli/runtime.yaml`（user），`internal/config.RuntimeConfig` | 运行时执行层：进程/引擎怎么跑 | `workspace`、`agent`/`agents`、`router`/`embedding`、`context`（compact/recall）、`tools`/`sandbox`、`knowledge`、`lsp`、`checkpoint`、`background`、`images`、`performance`、`hotReload`、`rollout`、`observe`、`catalog`（技能引擎侧） | providers/凭据、`aicli.chat`、`skills_runtime` 对话行为开关 |
 | `skills_runtime.config_file`（config.yaml 内） | **仅"显式覆盖"指针**，不是开关、不是层栈成员 | `config_file: /abs/path/runtime.yaml` | 约定值（裸 `runtime.yaml`、`configs/runtime.yaml`、`backend/configs/runtime.yaml`、`.`）会被识别并忽略，自动回落到 `.aicli` 层栈；缺省（空串）同样走层栈 |
 
@@ -38,9 +39,9 @@
 
 | 模式 | 行为 |
 |---|---|
-| `off`（默认） | 历史单文件行为：层栈中第一个存在的候选文件生效 |
+| `off` | 历史单文件行为：层栈中第一个存在的候选文件生效 |
 | `dry-run` | 只计算合并结果，不落盘 |
-| `on` | 从低到高逐层深合并，高层只覆盖其显式写的 key；显式 `null` 为 Helm 式"屏蔽下层" |
+| `on`（默认） | 从低到高逐层深合并，高层只覆盖其显式写的 key；显式 `null` 为 Helm 式"屏蔽下层" |
 
 ### bootstrap config 层栈（`ConfigLayerStack()`，从低到高）
 
@@ -53,6 +54,33 @@
 ```
 
 `runtime.yaml` 有独立层栈（`RuntimeConfigLayerStack()`）：`~/.aicli/runtime.yaml`（user）→ `./.aicli/runtime.yaml`（project，最高）。两层**合并**读取（`LoadMergedRuntimeConfigDocument`）：高层只覆盖其显式写的 key，低层其余设置保留；生效来源 = 最高存在层，写回落在最高可写层（全新安装创建 user 层）。
+
+### provider 补充文档层栈（`providers.yaml`，可选，2026-11-17）
+
+`providers.yaml` **不是完整配置候选**，不进入 `ConfigLayerStack()`：它只允许
+`providers` / `provider_groups` 两个顶层键，由 `ProviderConfigLayerStack()` 作为
+同层补充文档插入。合并顺序（低 → 高）：
+
+```
+1. ~/.aicli/config.yaml          user 主配置
+2. ~/.aicli/providers.yaml       user provider 补充层
+3. ./.aicli/config.yaml          project 主配置
+4. ./.aicli/providers.yaml       project provider 补充层
+```
+
+- `SourcePath` / `ConfigFilePath` 永远取主配置层（最后存在的非 fragment 层），
+  `DefaultWriteLayer` 也不会选 provider 文件。
+- 已存在 provider 键按 origin 写回；新 provider 子树键写同层 `providers.yaml`
+  （文件存在时）。混合了 `aicli.chat` 等多 section 的写入仍走主配置。
+- 首次写入缺失的 provider 文件只创建最小骨架（`providers: items: {}`，0600），
+  不会落全量 starter。
+- `AICLI_PROVIDERS_FILE=off` 可紧急关闭；`--config` 显式路径和
+  `AICLI_CONFIG_MERGE=off` 下不读取 provider 文件。
+- `provider_groups` / `providers.default_provider` / `aicli.chat.default_provider`
+  / `skills_runtime.gateway_provider_name` 若仍在主配置而 provider 在
+  `providers.yaml`，删除 provider 会被跨文件引用检查阻断；先迁移或切换引用。
+- 迁移：`aicli config split-providers`（默认 dry-run；`--write --keep-main`
+  安全迁移，`--prune-main` 清理主配置副本）。
 
 `configs/runtime.yaml` / `backend/configs/runtime.yaml` 是**开发目录布局，不再是隐式配置层**：CLI 解析顺序为「显式非约定覆盖 → `./.aicli/runtime.yaml` → `~/.aicli/runtime.yaml` → 空」，空表示使用内置默认值且不告警。只有调用方显式传入该文件时才读取（例如 runtime-server 的 `--config`）；旧模板里遗留的这两个约定值会被识别并忽略，不会报"未找到配置文件"。
 
@@ -94,7 +122,8 @@ godotenv **不覆盖已有进程环境变量**——因此 `~/.aicli/.env` 的 `
 
 ## 三、启动保存：写路由（decision D3 / D4）
 
-- **写目标路由**（`config_write_route.go`）：merge 模式开启时，加载阶段记录 `ConfigOriginFiles`（每个 key 来自哪一层）。写入时按 key 的 origin 找归属层；跨层写入取最高层；"新 key 落到最高可写层"。安全三前提：merge on + 路径在层栈内 + 至少一个 key 有 origin。
+- **写目标路由**（`config_write_route.go`）：merge 模式开启时，加载阶段记录 `ConfigOriginFiles`（每个 key 来自哪一层）。写入时按 key 的 origin 找归属层；跨层写入取最高层；新 provider 子树 key 落同层 `providers.yaml`（文件存在时），其它新 key 落最高可写主层。安全前提：merge on + 路径在层栈内 +（至少一个 origin 或 provider 子树目标 fragment）。
+- **provider 补充层**：provider 文件是 fragment，不是完整配置；`SourcePath`/`ConfigFilePath`/`DefaultWriteLayer` 均排除 fragment。混有 `aicli.chat` 等多 section 的写入不会被路由进 provider 文件；`UpdateAICLIChatPreferences` 只按 `aicli.chat` 键路由。
 - **默认写目标**（D4）：无显式路径时一律写 `~/.aicli/<config>`（`ResolveWritableConfigPath`）；project 文件只在显式创建时出现。runtime.yaml 的 fallback 同理（`RuntimeConfigWriteTarget`）。
 - **文档级 diff 写回**（`config_merged_document.go`）：`ApplyMergedDocumentChanges` 把 merged 与 updated 的叶子差异写回各自拥有该 key 的层；消失的 key 写显式 `null` 屏蔽；不重写未触碰的层，保住 `${VAR}` 占位符和手工格式。`GET /config/document` 把 merged 视图同时喂给 CLI 与 Web UI，三方看到同一份有效配置。
 

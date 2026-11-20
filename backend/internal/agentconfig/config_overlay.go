@@ -73,4 +73,5 @@ func CopyConfigRuntimeMetadata(cfg, base *Config) {
 	cfg.ConfigOrigins = base.ConfigOrigins
 	cfg.ConfigOriginFiles = base.ConfigOriginFiles
 	cfg.ConfigMergeMode = base.ConfigMergeMode
+	cfg.ConfigExplicitPath = base.ConfigExplicitPath
 }

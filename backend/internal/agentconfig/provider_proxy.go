@@ -195,6 +195,7 @@ func SetGlobalProxyConfig(configPath string, update GlobalProxyUpdate) (*GlobalP
 	if configPath == "" {
 		return nil, fmt.Errorf("config path is required")
 	}
+	configPath = routeConfigWritePath(configPath, "providers.proxy")
 
 	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
 	unlock := LockConfigFileWrite(configPath)
@@ -254,6 +255,7 @@ func RemoveGlobalProxyConfig(configPath string) (*GlobalProxyResult, error) {
 	if configPath == "" {
 		return nil, fmt.Errorf("config path is required")
 	}
+	configPath = routeConfigWritePath(configPath, "providers.proxy")
 
 	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
 	unlock := LockConfigFileWrite(configPath)

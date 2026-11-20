@@ -3,6 +3,8 @@
 export const zhRuntimeConfigEditorShell = {
   title: "后端配置工作台",
   independentBadge: "独立后端配置页",
+  providerFileBadge: "providers.yaml",
+  providerFileBadgeTitle: "Provider 配置来自 {{path}}",
   unsavedBadge: "有未保存草稿",
   configDialog: {
     eyebrow: "配置编辑器",
@@ -26,6 +28,7 @@ export const zhRuntimeConfigEditorShell = {
   table: {
     searchPlaceholder: "搜索…",
     noSearchResults: "没有匹配的条目，试试其他关键词。",
+    sortBy: "按{{column}}排序",
     pagination: {
       showing: "第 {{start}}-{{end}} 条，共 {{total}} 条",
       prev: "上一页",

@@ -36,7 +36,7 @@ export function StatCard({
           </div>
         </div>
       </div>
-      <p className="mt-1 truncate text-[11px] leading-4 text-muted-foreground">
+      <p className="mt-1 truncate app-text-11 leading-4 text-muted-foreground">
         {detail}
       </p>
     </div>
@@ -112,16 +112,34 @@ export function MenuButton({
           : "border-border bg-surface-solid hover:border-border-strong hover:bg-surface-soft",
       )}
     >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
           <span className="rounded-control border border-border bg-surface-softer p-1.5 text-accent-primary">
             <Icon size={14} />
           </span>
-          <div className="min-w-0 truncate app-text-13 font-semibold text-foreground">
+          <div className="min-w-0 flex-1 truncate app-text-13 font-semibold text-foreground">
             {label}
           </div>
         </div>
-        {badge ? <Badge>{badge}</Badge> : null}
+        {badge ? (
+          badge.trim().length > 18 ? (
+            <Badge
+              role="img"
+              aria-label={badge}
+              title={badge}
+              className="shrink-0 whitespace-nowrap px-1.5"
+            >
+              <InfoIcon size={12} />
+            </Badge>
+          ) : (
+            <Badge
+              title={badge}
+              className="shrink-0 whitespace-nowrap"
+            >
+              {badge}
+            </Badge>
+          )
+        ) : null}
       </div>
     </button>
   );

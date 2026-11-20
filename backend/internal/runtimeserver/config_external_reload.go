@@ -209,7 +209,14 @@ func ConfigSourceSignature() string {
 // 签名只用于「是否变了」的判定，不承载内容语义——真正的内容校验由加载器负责
 // （解析失败会走保持旧快照的降级路径）。
 func ConfigSourceSignatureFor(configPath string) string {
-	return configSourceSignatureForPaths(configSourceWatchPaths(configPath))
+	return ConfigSourceSignatureForOptions(configPath, false)
+}
+
+// ConfigSourceSignatureForOptions is the explicit-aware variant. Explicit=true
+// means --config selected a single file: the signature covers that file plus
+// the preset layer, not the global layer stack or providers.yaml.
+func ConfigSourceSignatureForOptions(configPath string, explicit bool) string {
+	return configSourceSignatureForPaths(configSourceWatchPaths(configPath, explicit))
 }
 
 // configSourceWatchPaths 汇总运行实例的全部配置来源路径（去重、去空）。
@@ -218,12 +225,17 @@ func ConfigSourceSignatureFor(configPath string) string {
 // `configs/aicli.yaml`），去重后不影响集合内容，只保证不重复 stat。
 // 相对路径（搜索栈候选）按进程 cwd 解析——与加载器一致：runtime-server 启动后不再
 // chdir，因此轮询期与加载期看到的是同一组文件。
-func configSourceWatchPaths(configPath string) []string {
+func configSourceWatchPaths(configPath string, explicit bool) []string {
 	candidates := make([]string, 0, 12)
 	if path := strings.TrimSpace(configPath); path != "" {
 		candidates = append(candidates, path)
 	}
-	candidates = append(candidates, configSourceLayerPaths()...)
+	if !explicit {
+		candidates = append(candidates, configSourceLayerPaths()...)
+		if agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn {
+			candidates = append(candidates, agentconfig.ProviderConfigLayerPaths()...)
+		}
+	}
 	if path := strings.TrimSpace(agentconfig.UserPresetsPath()); path != "" {
 		candidates = append(candidates, path)
 	}

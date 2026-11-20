@@ -10,6 +10,19 @@ export type RuntimeConfigDocumentRuntimeImpact = {
   restart_required_paths?: string[];
   inactive_paths?: string[];
   applied_paths?: string[];
+  /** 每个变更 key 预计写入的层（origin 层或新 key 的默认写层）。 */
+  path_layers?: Record<string, string>;
+};
+
+export type RuntimeConfigDocumentLayer = {
+  kind: string;
+  path: string;
+  present: boolean;
+  read_only?: boolean;
+  /** 专用补充文档（当前为 providers.yaml）。 */
+  fragment?: boolean;
+  /** 补充文档所属 section（providers）。 */
+  section?: string;
 };
 
 export type RuntimeConfigDocument = {
@@ -24,6 +37,9 @@ export type RuntimeConfigDocument = {
   restart_required?: boolean;
   supports_structured_save?: boolean;
   runtime_impact?: RuntimeConfigDocumentRuntimeImpact;
+  /** 分层配置的候选文件与来源层。 */
+  layers?: RuntimeConfigDocumentLayer[];
+  origins?: Record<string, string>;
 };
 
 export type RuntimeConfigDocumentResponse = {

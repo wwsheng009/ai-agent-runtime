@@ -144,4 +144,89 @@ describe("ConfigDomainTable", () => {
     expect(afterSecondNext).toContain("第 21-23 条，共 23 条");
     expect(afterSecondNext).toContain("3 / 3");
   });
+
+  it("sorts rows and combines column filters with the search and pagination", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const actEnvironment = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    };
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+
+    await act(async () => {
+      root.render(
+        renderTable({
+          searchable: true,
+          getSearchText: searchText,
+          pageSize: 10,
+          filters: [
+            {
+              key: "tag",
+              label: "Tag",
+              getValue: (row) => row.tags[0] ?? "",
+              options: [
+                { value: "openai", label: "OpenAI" },
+                { value: "azure", label: "Azure" },
+              ],
+            },
+          ],
+          columns: [
+            {
+              header: "Name",
+              sortKey: "name",
+              sortValue: (row) => row.name,
+              cell: (row) => row.name,
+            },
+            {
+              header: "Tags",
+              sticky: "right",
+              className: "min-w-[8rem]",
+              cell: (row) => row.tags.join(", "),
+            },
+          ],
+        }),
+      );
+    });
+
+    const nameSortButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("thead button"),
+    ).find((button) => button.textContent?.includes("Name"));
+    expect(nameSortButton).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => {
+      nameSortButton?.click();
+      nameSortButton?.click();
+    });
+
+    expect(nameSortButton?.closest("th")?.getAttribute("aria-sort")).toBe(
+      "descending",
+    );
+    expect(container.textContent).toContain("provider-23");
+    expect(container.textContent).not.toContain("provider-01");
+
+    const tagFilter = container.querySelector(
+      'select[aria-label="Tag"]',
+    ) as HTMLSelectElement | null;
+    expect(tagFilter).toBeInstanceOf(HTMLSelectElement);
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(tagFilter, "azure");
+      tagFilter?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("第 1-10 条，共 15 条");
+    expect(container.textContent).toContain("provider-23");
+    expect(container.querySelector("th[aria-sort='descending']")).not.toBeNull();
+    expect(container.querySelector(".overflow-x-auto")).not.toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
 });

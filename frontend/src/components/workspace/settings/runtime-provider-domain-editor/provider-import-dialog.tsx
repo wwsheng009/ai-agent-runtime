@@ -16,6 +16,7 @@ import { autoImportRuntimeProvider } from "@/api/runtime";
 import { ConfigDomainDialog } from "../config-domain-dialog";
 import { ConfigFormField } from "../config-form-field";
 import { editorControlClassName } from "../editor-control-class";
+import { Select } from "@/components/ui/select";
 import {
   buildProviderDraftFromAutoImport,
   providerImportAutoProtocol,
@@ -182,21 +183,21 @@ export function ProviderImportDialog({
             label={t("editor.providers.fields.protocol")}
             description={t("editor.providers.import.protocolDescription")}
           >
-            <select
-              className={editorControlClassName}
-              aria-label={t("editor.providers.import.protocolAria")}
-              value={form.protocol}
-              onChange={(event) => updateField("protocol", event.target.value)}
-              disabled={busy}
-            >
-              {importProtocolOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.value === providerImportAutoProtocol
+            <Select
+              ariaLabel={t("editor.providers.import.protocolAria")}
+              className="w-full"
+              options={importProtocolOptions.map((option) => ({
+                value: option.value,
+                label:
+                  option.value === providerImportAutoProtocol
                     ? t("editor.providers.import.protocolAuto")
-                    : option.label}
-                </option>
-              ))}
-            </select>
+                    : option.label,
+              }))}
+              value={form.protocol}
+              onChange={(protocol) => updateField("protocol", protocol)}
+              disabled={busy}
+              triggerClassName={editorControlClassName}
+            />
           </ConfigFormField>
           <ConfigFormField
             label={t("editor.providers.fields.baseUrl")}

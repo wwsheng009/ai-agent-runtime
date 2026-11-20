@@ -35,6 +35,10 @@ type ConfigDocumentLayer struct {
 	// ReadOnly marks a layer that only supplies defaults (runtime.yaml's
 	// portable/repository file): writes are routed to a writable layer.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// Fragment marks a dedicated section document (currently providers.yaml).
+	Fragment bool `json:"fragment,omitempty"`
+	// Section names the fragment section ("providers").
+	Section string `json:"section,omitempty"`
 }
 
 type ConfigDocumentRuntimeImpact struct {

@@ -39,13 +39,22 @@ func chatConfigFingerprintForPath(configPath string) (string, error) {
 	if trimmed == "" {
 		return "", nil
 	}
-	if config.MergeModeFromEnv() == config.MergeModeOn && chatConfigPathIsLayer(trimmed) {
+	if config.MergeModeFromEnv() == config.MergeModeOn &&
+		chatConfigPathIsLayer(trimmed) &&
+		!config.IsExplicitConfigPath(trimmed) {
 		parts := make([]string, 0, 4)
 		for _, layer := range config.ConfigLayerStack() {
 			if !layer.Present {
 				continue
 			}
 			part, err := chatConfigFileFingerprint(layer.Path)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, part)
+		}
+		for _, providerPath := range config.ProviderConfigLayerPaths() {
+			part, err := chatConfigFileFingerprint(providerPath)
 			if err != nil {
 				return "", err
 			}

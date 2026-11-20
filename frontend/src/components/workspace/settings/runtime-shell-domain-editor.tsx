@@ -29,6 +29,7 @@ import {
   type RuntimeShellConfigSummary,
 } from "./runtime-shell-domain-utils";
 import { CheckboxInput } from "@/components/ui/checkbox";
+import { Select } from "@/components/ui/select";
 
 type RuntimeShellDomainEditorProps = {
   config: RuntimeShellConfigSummary;
@@ -204,20 +205,25 @@ export function RuntimeShellDomainEditor({ config, onChange }: RuntimeShellDomai
               />
             </ConfigFormField>
             <ConfigFormField label={t("editor.shell.fields.scriptDelivery")}>
-              <select
-                className={editorControlClassName}
+              <Select
+                ariaLabel={t("editor.shell.fields.scriptDelivery")}
+                className="w-full"
+                options={[
+                  {
+                    value: "stdin",
+                    label: t("editor.shell.deliveryOptions.stdin"),
+                  },
+                  {
+                    value: "argv",
+                    label: t("editor.shell.deliveryOptions.argv"),
+                  },
+                ]}
                 value={config.scriptDelivery}
-                onChange={(event) =>
-                  onChange({ ...config, scriptDelivery: event.target.value })
+                onChange={(scriptDelivery) =>
+                  onChange({ ...config, scriptDelivery })
                 }
-              >
-                <option value="stdin">
-                  {t("editor.shell.deliveryOptions.stdin")}
-                </option>
-                <option value="argv">
-                  {t("editor.shell.deliveryOptions.argv")}
-                </option>
-              </select>
+                triggerClassName={editorControlClassName}
+              />
             </ConfigFormField>
           </div>
         </div>

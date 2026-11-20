@@ -190,19 +190,19 @@ export function McpToolsDialog({ name, onClose }: McpToolsDialogProps) {
                         {tool.name}
                       </span>
                       {tool.configured_enabled === false ? (
-                        <span className="text-[11px] text-accent-orange">
+                        <span className="app-text-11 text-accent-orange">
                           {t("mcp.tools.disabled")}
                         </span>
                       ) : null}
                       {tool.healthy === false ? (
-                        <span className="text-[11px] text-accent-orange">
+                        <span className="app-text-11 text-accent-orange">
                           {t("mcp.tools.unhealthy")}
                         </span>
                       ) : null}
                       {tool.enabled === false &&
                       tool.configured_enabled !== false &&
                       tool.healthy !== false ? (
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="app-text-11 text-muted-foreground">
                           {t("mcp.tools.notExposed")}
                         </span>
                       ) : null}
@@ -240,7 +240,7 @@ export function McpToolsDialog({ name, onClose }: McpToolsDialogProps) {
                         <summary className="cursor-pointer text-xs text-muted-foreground">
                           {t("mcp.tools.schema")}
                         </summary>
-                        <pre className="mt-1 max-h-60 overflow-auto rounded-panel border border-border bg-muted/30 p-2 text-[11px] leading-relaxed">
+                        <pre className="mt-1 max-h-60 overflow-auto rounded-panel border border-border bg-muted/30 p-2 font-mono app-text-11 leading-relaxed">
                           {JSON.stringify(tool.inputSchema, null, 2)}
                         </pre>
                       </details>

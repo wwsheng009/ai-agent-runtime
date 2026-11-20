@@ -205,6 +205,14 @@ export function useConfigEditorState() {
         return t("editor.counts.providers", { count: providers.length });
       case "agentRouting":
         return getAgentRoutingStatusLabel();
+      case "agentExecution":
+        // The execution policy reads from its dedicated endpoint; avoid a
+        // duplicate request just to render a menu badge.
+        return "";
+      case "connectors":
+        // Connector data comes from its dedicated management API; keep the
+        // menu badge free of an extra list request.
+        return "";
       case "providerGroups":
         return t("editor.counts.providerGroups", {
           count: providerGroups.length,
@@ -304,6 +312,10 @@ export function useConfigEditorState() {
         return t("editor.summary.providers");
       case "agentRouting":
         return t("editor.summary.agentRouting");
+      case "agentExecution":
+        return t("editor.modes.agentExecution.description");
+      case "connectors":
+        return t("editor.modes.connectors.description");
       case "providerGroups":
         return t("editor.summary.groups");
       case "networkProxy":

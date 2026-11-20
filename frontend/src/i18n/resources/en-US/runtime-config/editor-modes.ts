@@ -13,6 +13,16 @@ export const enRuntimeConfigEditorModes = {
       description:
         "Choose providers and models for subagents and teams at easy, normal, hard, and expert difficulty.",
     },
+    agentExecution: {
+      label: "Agent execution policy",
+      description:
+        "Set the server default used when an Agent request does not specify a maximum step count.",
+    },
+    connectors: {
+      label: "Connectors",
+      description:
+        "Manage IM connectors such as Telegram, including runtime status, bindings, and channel actions.",
+    },
     shell: {
       label: "Shell environment",
       description:

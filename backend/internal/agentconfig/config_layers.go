@@ -33,6 +33,15 @@ const (
 	// MergeConfigEnvVar selects the merge mode; see ParseMergeMode.
 	MergeConfigEnvVar = "AICLI_CONFIG_MERGE"
 
+	// ProviderConfigFileName is the dedicated provider/model fragment file.
+	// It is not a complete config candidate: it may only carry providers and
+	// provider_groups.
+	ProviderConfigFileName = "providers.yaml"
+
+	// ProviderConfigEnvVar is the kill switch for the provider fragment file.
+	// Empty/on enable it; off/0/false disable reading and write routing.
+	ProviderConfigEnvVar = "AICLI_PROVIDERS_FILE"
+
 	// dryRunReportKeyLimit caps how many key names a dry-run report lists.
 	dryRunReportKeyLimit = 20
 )
@@ -74,6 +83,10 @@ const (
 	LayerKindUser ConfigLayerKind = "user"
 	// LayerKindProject is ./.aicli/<config> (highest precedence).
 	LayerKindProject ConfigLayerKind = "project"
+	// LayerKindUserProviders is $HOME/.aicli/providers.yaml (user fragment).
+	LayerKindUserProviders ConfigLayerKind = "user-providers"
+	// LayerKindProjectProviders is ./.aicli/providers.yaml (project fragment).
+	LayerKindProjectProviders ConfigLayerKind = "project-providers"
 )
 
 // ConfigLayer is one bootstrap config candidate in precedence order.
@@ -87,6 +100,12 @@ type ConfigLayer struct {
 	// stack is user + project only (see RuntimeConfigLayerStack) — but the flag
 	// stays part of the layer contract for bundle-style stacks.
 	ReadOnly bool
+	// Fragment marks a dedicated section document (currently providers.yaml)
+	// that participates in merging/origins but never defines SourcePath or the
+	// default write layer.
+	Fragment bool
+	// Section names the fragment section; empty for complete config layers.
+	Section string
 }
 
 // RuntimeConfigLayerStack returns the runtime.yaml candidates ordered from the
@@ -177,12 +196,87 @@ func WritableLayer(layers []ConfigLayer) (ConfigLayer, bool) {
 	return ConfigLayer{}, false
 }
 
+// WritableMainLayer is WritableLayer restricted to complete config layers.
+// Provider fragments must never become the default target for new general
+// keys (new gateway/log/aicli keys would otherwise land in providers.yaml).
+func WritableMainLayer(layers []ConfigLayer) (ConfigLayer, bool) {
+	main := make([]ConfigLayer, 0, len(layers))
+	for _, layer := range layers {
+		if !layer.Fragment {
+			main = append(main, layer)
+		}
+	}
+	return WritableLayer(main)
+}
+
+// ProviderFragmentForMainPath returns the fragment at the same precedence level
+// as the supplied main config path. Legacy/portable paths intentionally have no
+// fragment.
+func ProviderFragmentForMainPath(mainPath string) (ConfigLayer, bool) {
+	mainKind, ok := configLayerKindForPath(mainPath, ConfigLayerStack())
+	if !ok {
+		return ConfigLayer{}, false
+	}
+	var want ConfigLayerKind
+	switch mainKind {
+	case LayerKindUser:
+		want = LayerKindUserProviders
+	case LayerKindProject:
+		want = LayerKindProjectProviders
+	default:
+		return ConfigLayer{}, false
+	}
+	for _, layer := range ProviderConfigLayerStack() {
+		if layer.Kind == want && layer.Present && !layer.ReadOnly {
+			return layer, true
+		}
+	}
+	return ConfigLayer{}, false
+}
+
+func configLayerKindForPath(path string, layers []ConfigLayer) (ConfigLayerKind, bool) {
+	normalized := normalizeLayerPath(path)
+	if normalized == "" {
+		return "", false
+	}
+	for _, layer := range layers {
+		if normalizeLayerPath(layer.Path) == normalized {
+			return layer.Kind, true
+		}
+	}
+	return "", false
+}
+
+// IsProviderFragmentPath reports whether path is one of the configured
+// providers.yaml candidates (used for minimal-skeleton creation and 0600 mode).
+func IsProviderFragmentPath(path string) bool {
+	if !ProviderConfigFileEnabled() {
+		return false
+	}
+	normalized := normalizeLayerPath(path)
+	if normalized == "" {
+		return false
+	}
+	for _, layer := range ProviderConfigLayerStack() {
+		if normalizeLayerPath(layer.Path) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
 // RuntimeConfigWriteTarget returns the file a runtime.yaml write belongs to
 // when the key has no origin: the highest writable layer that exists, otherwise
 // the user-level path (so the first edit creates ~/.aicli/runtime.yaml instead
 // of touching a repository file).
 func RuntimeConfigWriteTarget() (string, ConfigLayerKind) {
-	layer, _ := WritableLayer(RuntimeConfigLayerStack())
+	return RuntimeConfigWriteTargetFrom("")
+}
+
+// RuntimeConfigWriteTargetFrom returns the write target for a workspace-anchored
+// runtime.yaml stack. An empty baseDir keeps the process-CWD behavior.
+func RuntimeConfigWriteTargetFrom(baseDir string) (string, ConfigLayerKind) {
+	layer, _ := WritableLayer(RuntimeConfigLayerStackFrom(baseDir))
 	if strings.TrimSpace(layer.Path) == "" {
 		return "", ""
 	}
@@ -225,6 +319,106 @@ func ConfigLayerStack() []ConfigLayer {
 		layers[index].Present = fileExists(layers[index].Path)
 	}
 	return layers
+}
+
+// ProviderConfigFileEnabled reports whether the dedicated providers.yaml
+// fragment participates in loading and write routing.
+func ProviderConfigFileEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ProviderConfigEnvVar))) {
+	case "off", "false", "0", "no", "disabled":
+		return false
+	default:
+		return true
+	}
+}
+
+// ProviderConfigLayerStack returns the providers.yaml fragment candidates in
+// precedence order (lowest to highest). They are deliberately NOT part of
+// ConfigLayerStack: a fragment is not a complete config candidate.
+func ProviderConfigLayerStack() []ConfigLayer {
+	enabled := ProviderConfigFileEnabled()
+	layers := make([]ConfigLayer, 0, 2)
+	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		layers = append(layers, ConfigLayer{
+			Kind:     LayerKindUserProviders,
+			Path:     filepath.Join(home, ".aicli", ProviderConfigFileName),
+			Fragment: true,
+			Section:  "providers",
+		})
+	}
+	layers = append(layers, ConfigLayer{
+		Kind:     LayerKindProjectProviders,
+		Path:     filepath.Join(".aicli", ProviderConfigFileName),
+		Fragment: true,
+		Section:  "providers",
+	})
+	if enabled {
+		for index := range layers {
+			layers[index].Present = fileExists(layers[index].Path)
+		}
+	}
+	return layers
+}
+
+// ProviderConfigLayerPaths returns the fragment paths that must be watched for
+// hot reload/fingerprint changes. It returns nil when the feature is disabled.
+func ProviderConfigLayerPaths() []string {
+	if !ProviderConfigFileEnabled() {
+		return nil
+	}
+	layers := ProviderConfigLayerStack()
+	paths := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		if path := strings.TrimSpace(layer.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// configLayerStackWithFragments interleaves provider fragments at their
+// same-precedence position: user main -> user providers, project main ->
+// project providers. SourcePath/default-write selection must ignore fragments.
+func configLayerStackWithFragments() []ConfigLayer {
+	mainLayers := ConfigLayerStack()
+	if !ProviderConfigFileEnabled() {
+		return mainLayers
+	}
+	fragments := ProviderConfigLayerStack()
+	byKind := make(map[ConfigLayerKind]ConfigLayer, len(fragments))
+	for _, layer := range fragments {
+		byKind[layer.Kind] = layer
+	}
+
+	out := make([]ConfigLayer, 0, len(mainLayers)+len(fragments))
+	insertedUser, insertedProject := false, false
+	for index, layer := range mainLayers {
+		out = append(out, layer)
+		nextKind := ConfigLayerKind("")
+		if index+1 < len(mainLayers) {
+			nextKind = mainLayers[index+1].Kind
+		}
+		if layer.Kind == LayerKindUser && nextKind != LayerKindUser && !insertedUser {
+			if fragment, ok := byKind[LayerKindUserProviders]; ok {
+				out = append(out, fragment)
+				insertedUser = true
+			}
+		}
+		if layer.Kind == LayerKindProject && nextKind != LayerKindProject && !insertedProject {
+			if fragment, ok := byKind[LayerKindProjectProviders]; ok {
+				out = append(out, fragment)
+				insertedProject = true
+			}
+		}
+	}
+	// Defensive: a build profile without user/project main candidates still
+	// gets the project fragment appended at the end.
+	if !insertedProject {
+		if fragment, ok := byKind[LayerKindProjectProviders]; ok {
+			out = append(out, fragment)
+		}
+	}
+	return out
 }
 
 // ConfigLayerSearchPaths returns the layer paths ordered from the highest
@@ -339,7 +533,7 @@ type configLayerDocument struct {
 // placeholders per layer before merging (the same pre-decode point the
 // single-file loader uses).
 func loadLayeredConfigDocument() (*layeredConfigDocument, error) {
-	return loadLayeredDocumentFor(ConfigLayerStack())
+	return loadLayeredDocumentFor(configLayerStackWithFragments())
 }
 
 // loadLayeredDocumentFor merges every present layer of the given stack,
@@ -368,6 +562,11 @@ func loadLayeredDocumentFor(layers []ConfigLayer) (*layeredConfigDocument, error
 		values, err := yamlToMergeMap([]byte(expandEnvVars(string(data))))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse config layer %s: %w", absolutePath, err)
+		}
+		if layers[index].Fragment {
+			if err := validateProviderFragmentValues(values, absolutePath); err != nil {
+				return nil, err
+			}
 		}
 		layers[index].Path = absolutePath
 		documents = append(documents, configLayerDocument{layer: layers[index], values: values})
@@ -408,10 +607,31 @@ func loadLayeredDocumentFor(layers []ConfigLayer) (*layeredConfigDocument, error
 		FallbackKeys:   fallbackKeys,
 		OverriddenKeys: overriddenKeys,
 	}
-	if len(documents) > 0 {
-		document.SourcePath = documents[len(documents)-1].layer.Path
+	for index := len(documents) - 1; index >= 0; index-- {
+		if documents[index].layer.Fragment {
+			continue
+		}
+		document.SourcePath = documents[index].layer.Path
+		break
 	}
 	return document, nil
+}
+
+// validateProviderFragmentValues enforces the narrow schema of providers.yaml.
+// Keeping the fragment limited to provider-owned top-level keys is what makes
+// write routing safe: aicli/gateway/log sections must never be split by
+// accident.
+func validateProviderFragmentValues(values map[string]interface{}, path string) error {
+	if values == nil {
+		return nil
+	}
+	for key := range values {
+		if strings.EqualFold(key, "providers") || strings.EqualFold(key, "provider_groups") {
+			continue
+		}
+		return fmt.Errorf("provider config %s: unsupported top-level key %q (only providers/provider_groups are allowed)", path, key)
+	}
+	return nil
 }
 
 // collectConfigOrigins walks the merged document and records, for every leaf
@@ -482,6 +702,9 @@ func InitGlobalConfigLayered(resolvedPath, explicitPath string) (*Config, error)
 		if err != nil {
 			return nil, err
 		}
+		if strings.TrimSpace(explicitPath) != "" {
+			cfg.ConfigExplicitPath = normalizeConfigPath(strings.TrimSpace(explicitPath))
+		}
 		attachLayerObservability(cfg, mode)
 		if mode == MergeModeDryRun {
 			reportLayeredMergePreview()
@@ -551,6 +774,10 @@ func attachLayerObservability(cfg *Config, mode MergeMode) {
 // while a custom path outside the stack keeps explicit single-file semantics.
 func ReloadGlobalConfig(configPath string) (*Config, error) {
 	trimmed := strings.TrimSpace(configPath)
+	if trimmed != "" && globalConfig != nil &&
+		sameLayerPath(globalConfig.ConfigExplicitPath, trimmed) {
+		return InitGlobalConfigLayered(trimmed, trimmed)
+	}
 	if trimmed != "" && !isConfigLayerPath(trimmed) {
 		return InitGlobalConfigLayered(trimmed, trimmed)
 	}
@@ -581,6 +808,18 @@ func normalizeLayerPath(path string) string {
 		return absolute
 	}
 	return cleaned
+}
+
+func sameLayerPath(left, right string) bool {
+	a := normalizeLayerPath(left)
+	b := normalizeLayerPath(right)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+// IsExplicitConfigPath reports whether path was selected with --config and the
+// active config therefore uses single-file semantics.
+func IsExplicitConfigPath(path string) bool {
+	return globalConfig != nil && sameLayerPath(globalConfig.ConfigExplicitPath, path)
 }
 
 // reportLayeredMergePreview logs what enabling the merge would change, without

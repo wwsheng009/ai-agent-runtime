@@ -231,14 +231,23 @@ func decodeYAMLNode(node *yaml.Node, target interface{}) error {
 }
 
 func writeFileAtomic(path string, data []byte) error {
+	return writeFileAtomicWithMode(path, data, 0)
+}
+
+// writeFileAtomicWithMode writes data through a same-directory temp file and
+// renames it into place. mode=0 preserves the existing mode (or 0644 for a new
+// file); an explicit mode (for example 0600 for providers.yaml) always wins.
+func writeFileAtomicWithMode(path string, data []byte, mode os.FileMode) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("config path is required")
 	}
 
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode()
+	if mode == 0 {
+		mode = os.FileMode(0o644)
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode()
+		}
 	}
 
 	dir := filepath.Dir(path)

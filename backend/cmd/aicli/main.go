@@ -447,6 +447,7 @@ func main() {
 	configCmd.Flags().Bool("no-tui", false, "禁用默认交互界面，使用传统摘要输出")
 	configCmd.Flags().String("output", "", "输出格式（text|json）")
 	configCmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")
+	configCmd.AddCommand(commands.NewConfigSplitProvidersCommand())
 	rootCmd.AddCommand(configCmd)
 
 	// init 子命令

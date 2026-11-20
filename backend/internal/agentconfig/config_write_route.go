@@ -11,13 +11,14 @@ import "strings"
 // effect. The router below therefore resolves the target file from the key
 // paths a write touches, using the origins recorded at load time.
 //
-// Safety properties (all three must hold before a write is rerouted):
+// Safety properties (all must hold before a write is rerouted):
 //
 //  1. the active config was loaded with MergeModeOn;
 //  2. the path the caller passed is a member of that config's layer stack
 //     (custom/explicit paths, temp files and runtime-server paths are never
 //     touched);
-//  3. at least one written key has a recorded origin layer.
+//  3. either a written key has a recorded origin layer, or every written key
+//     belongs to the provider subtree and a same-level providers.yaml exists.
 
 // WriteTargetForKeys returns the layer file that writes for the given dotted
 // key paths should target, or "" when no routing applies.
@@ -26,13 +27,37 @@ import "strings"
 //   - keys with a recorded origin go to the file that supplied their value;
 //   - when a write spans several layers the highest-precedence file wins, so a
 //     single write never splits across files;
-//   - keys that do not exist yet return "" (callers keep their default target,
-//     which is the highest layer, i.e. "new keys go to the highest writable
-//     layer").
+//   - new keys belonging entirely to providers/provider_groups go to the
+//     same-level providers.yaml when it exists;
+//   - other new keys return "" (callers keep their default target, which is
+//     the highest writable main layer).
 func (c *Config) WriteTargetForKeys(keys ...string) string {
-	if c == nil || c.ConfigMergeMode != MergeModeOn || len(c.ConfigOriginFiles) == 0 {
+	mainPath := ""
+	if c != nil {
+		mainPath = c.ConfigFilePath
+	}
+	return c.WriteTargetForKeysInFile(mainPath, keys...)
+}
+
+// WriteTargetForKeysInFile is WriteTargetForKeys with an explicit main config
+// path. Callers that hold a resolved config path (for example routeConfigWritePath
+// or MergedConfigDocument.targetFileFor) should use this variant so a new
+// provider can be routed to the same-level providers.yaml fragment.
+func (c *Config) WriteTargetForKeysInFile(mainPath string, keys ...string) string {
+	if c == nil || c.ConfigMergeMode != MergeModeOn || len(keys) == 0 {
 		return ""
 	}
+
+	hasProvider, hasNonProvider := false, false
+	for _, key := range keys {
+		if c.isProviderSubtreeKey(key) {
+			hasProvider = true
+		} else {
+			hasNonProvider = true
+		}
+	}
+	mixed := hasProvider && hasNonProvider
+
 	target := ""
 	for _, key := range keys {
 		file := c.originFileFor(key)
@@ -43,7 +68,94 @@ func (c *Config) WriteTargetForKeys(keys ...string) string {
 			target = file
 		}
 	}
-	return target
+	if target != "" {
+		// A multi-section write must never be pinned into providers.yaml (for
+		// example aicli.chat + providers.default_provider). When all keys already
+		// resolve to the same main file, preserving that target is safe and keeps
+		// the historical layered behavior.
+		if mixed && c.isFragmentLayerPath(target) {
+			return ""
+		}
+		return target
+	}
+
+	if mixed {
+		return ""
+	}
+
+	if hasProvider {
+		if fragment, ok := c.providerFragmentForMainPath(mainPath); ok {
+			return fragment.Path
+		}
+	}
+	return ""
+}
+
+func (c *Config) isFragmentLayerPath(path string) bool {
+	normalized := normalizeLayerPath(path)
+	if normalized == "" {
+		return false
+	}
+	for _, layer := range c.ConfigLayers {
+		if layer.Fragment && normalizeLayerPath(layer.Path) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+// isProviderSubtreeKey reports whether key belongs to the dedicated provider
+// document (providers.* or provider_groups.*).
+func (c *Config) isProviderSubtreeKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return false
+	}
+	return trimmed == "providers" ||
+		strings.HasPrefix(trimmed, "providers.") ||
+		trimmed == "provider_groups" ||
+		strings.HasPrefix(trimmed, "provider_groups.")
+}
+
+// providerFragmentForMainPath returns the writable provider fragment at the
+// same precedence level as mainPath. Legacy/portable main layers have no
+// fragment and deliberately keep the old "write to the passed file" behavior.
+func (c *Config) providerFragmentForMainPath(mainPath string) (ConfigLayer, bool) {
+	if c == nil || !ProviderConfigFileEnabled() {
+		return ConfigLayer{}, false
+	}
+	normalizedMain := normalizeLayerPath(mainPath)
+	if normalizedMain == "" {
+		return ConfigLayer{}, false
+	}
+	if len(c.ConfigLayers) == 0 {
+		return ProviderFragmentForMainPath(mainPath)
+	}
+	mainKind := ConfigLayerKind("")
+	for _, layer := range c.ConfigLayers {
+		if !layer.Fragment && normalizeLayerPath(layer.Path) == normalizedMain {
+			mainKind = layer.Kind
+			break
+		}
+	}
+	if mainKind == "" {
+		return ConfigLayer{}, false
+	}
+	var want ConfigLayerKind
+	switch mainKind {
+	case LayerKindUser:
+		want = LayerKindUserProviders
+	case LayerKindProject:
+		want = LayerKindProjectProviders
+	default:
+		return ConfigLayer{}, false
+	}
+	for _, layer := range c.ConfigLayers {
+		if layer.Fragment && layer.Kind == want && layer.Present && !layer.ReadOnly {
+			return layer, true
+		}
+	}
+	return ConfigLayer{}, false
 }
 
 func (c *Config) originFileFor(key string) string {
@@ -135,7 +247,7 @@ func routeConfigWritePath(configPath string, keys ...string) string {
 	if !current.isLayerPath(configPath) {
 		return configPath
 	}
-	if target := current.WriteTargetForKeys(keys...); target != "" {
+	if target := current.WriteTargetForKeysInFile(configPath, keys...); target != "" {
 		return target
 	}
 	return configPath
@@ -185,9 +297,6 @@ func providerKnownToMergedConfig(name string) bool {
 // chatUpdateWriteKeys lists the config key paths a chat preference update touches.
 func chatUpdateWriteKeys(update AICLIChatPreferenceUpdate) []string {
 	keys := []string{"aicli.chat"}
-	if update.DefaultProvider != nil {
-		keys = append(keys, "providers.default_provider")
-	}
 	if update.Routing != nil {
 		keys = append(keys, "aicli.chat.routing.main_agent", "aicli.chat.routing.sub_agent")
 	}

@@ -59,6 +59,10 @@ func (s *LocalConfigDocumentService) LoadDocument() (*runtimeapi.ConfigDocument,
 		buildConfigDocumentWarnings(nil, nil, nil),
 		s.snapshotWarning(effectiveDocument.SourcePath, effectiveDocument.SnapshotRecovered)...,
 	)
+	if effectiveDocument.Layered != nil && configDocumentHasProviderFragment(effectiveDocument.Layered.Layers) {
+		warnings = append(warnings,
+			"provider 配置来自独立的 providers.yaml；保存时 provider 相关键会写回该文件，通用配置仍写回 config.yaml。")
+	}
 	warnings = append(warnings,
 		"结构化保存会重新序列化整个文档，注释和手工排版可能会丢失；原始 YAML 模式更适合保留注释。",
 	)
@@ -277,6 +281,10 @@ func (s *LocalConfigDocumentService) SaveDocument(req runtimeapi.ConfigDocumentS
 	if currentDocument.Layered != nil {
 		doc.Warnings = append(doc.Warnings,
 			"分层配置已启用：本次保存按层分摊写回，每个改动键写入它来源的配置文件，未改动的文件不受影响。")
+		if configDocumentHasProviderFragment(currentDocument.Layered.Layers) {
+			doc.Warnings = append(doc.Warnings,
+				"provider 配置已拆分到 providers.yaml：provider 键写回该文件，非 provider 键写回主配置。")
+		}
 	}
 	if !strings.EqualFold(strings.TrimSpace(req.Mode), "raw") {
 		doc.Warnings = append(doc.Warnings,
@@ -314,7 +322,8 @@ func (s *LocalConfigDocumentService) loadEffectiveDocument(
 	}
 	// Layered mode: serve the same merged document the CLI computes. Single
 	// layer setups keep the byte-identical single-file path below.
-	if agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn {
+	if agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn &&
+		!agentconfig.IsExplicitConfigPath(s.baseConfigPath) {
 		merged, err := agentconfig.LoadMergedConfigDocument()
 		if err != nil {
 			return nil, err
@@ -343,12 +352,24 @@ func configDocumentLayers(merged *agentconfig.MergedConfigDocument) []runtimeapi
 	layers := make([]runtimeapi.ConfigDocumentLayer, 0, len(merged.Layers))
 	for _, layer := range merged.Layers {
 		layers = append(layers, runtimeapi.ConfigDocumentLayer{
-			Kind:    string(layer.Kind),
-			Path:    resolveAbsolutePath(layer.Path),
-			Present: layer.Present,
+			Kind:     string(layer.Kind),
+			Path:     resolveAbsolutePath(layer.Path),
+			Present:  layer.Present,
+			ReadOnly: layer.ReadOnly,
+			Fragment: layer.Fragment,
+			Section:  layer.Section,
 		})
 	}
 	return layers
+}
+
+func configDocumentHasProviderFragment(layers []agentconfig.ConfigLayer) bool {
+	for _, layer := range layers {
+		if layer.Present && layer.Fragment && layer.Section == "providers" {
+			return true
+		}
+	}
+	return false
 }
 
 // attachConfigDocumentPathLayers attributes every changed path to the layer its

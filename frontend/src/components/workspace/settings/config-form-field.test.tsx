@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import { Select } from "@/components/ui/select";
+
 import { ConfigFormField } from "./config-form-field";
 
 describe("ConfigFormField", () => {
@@ -23,7 +25,13 @@ describe("ConfigFormField", () => {
     const markup = renderToStaticMarkup(
       <ConfigFormField label="group">
         <div className="space-y-2">
-          <select className="editor" />
+          <Select
+            ariaLabel="mode"
+            className="editor"
+            options={[{ value: "one", label: "One" }]}
+            value="one"
+            onChange={() => undefined}
+          />
           <input className="editor" />
         </div>
       </ConfigFormField>,

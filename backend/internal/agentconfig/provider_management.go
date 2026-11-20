@@ -183,6 +183,7 @@ func DeleteProvidersConfig(configPath string, req ProviderDeleteRequest) (*Provi
 	if len(deleteSet) == 0 {
 		return result, nil
 	}
+	result.Blocked = append(result.Blocked, crossLayerProviderDeleteBlockers(configPath, deleteSet)...)
 
 	replacementDefault := strings.TrimSpace(req.ReplacementDefault)
 	if replacementDefault != "" {
@@ -386,6 +387,15 @@ func readProviderConfigDocument(configPath string) (*yaml.Node, *yaml.Node, erro
 	}
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
+		if os.IsNotExist(err) && IsProviderFragmentPath(configPath) {
+			document := &yaml.Node{
+				Kind: yaml.DocumentNode,
+				Content: []*yaml.Node{{
+					Kind: yaml.MappingNode,
+				}},
+			}
+			return document, document.Content[0], nil
+		}
 		return nil, nil, fmt.Errorf("read config file %s: %w", configPath, err)
 	}
 	document, err := parseYAMLDocument(raw)
@@ -410,7 +420,11 @@ func writeProviderConfigDocument(configPath string, document *yaml.Node) error {
 	if err := encoder.Close(); err != nil {
 		return fmt.Errorf("finalize config yaml: %w", err)
 	}
-	return writeFileAtomic(configPath, output.Bytes())
+	mode := os.FileMode(0)
+	if IsProviderFragmentPath(configPath) {
+		mode = 0o600
+	}
+	return writeFileAtomicWithMode(configPath, output.Bytes(), mode)
 }
 
 func normalizeProviderManagementNames(names []string) []string {

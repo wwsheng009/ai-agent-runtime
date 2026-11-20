@@ -63,6 +63,9 @@ type runtimeServerCommandOptions struct {
 	Pprof      bool
 	WebPort    int
 	WebPortSet bool
+	// ConfigExplicit records whether --config was passed. Explicit selection
+	// keeps single-file semantics (no other main layers, no providers.yaml).
+	ConfigExplicit bool
 }
 
 type runtimeServerStartConflict struct {
@@ -221,6 +224,7 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 		return opts, err
 	}
 	opts.WebPortSet = flags.Changed("web-port")
+	opts.ConfigExplicit = flags.Changed("config")
 	return opts, nil
 }
 
@@ -244,6 +248,7 @@ func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 		return opts, err
 	}
 	opts.WebPortSet = flags.Changed("web-port")
+	opts.ConfigExplicit = flags.Changed("config")
 	return opts, nil
 }
 
@@ -271,7 +276,11 @@ func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
 	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
-	return opts, flags.Parse(args)
+	if err := flags.Parse(args); err != nil {
+		return opts, err
+	}
+	opts.ConfigExplicit = flags.Changed("config")
+	return opts, nil
 }
 
 func resolveRuntimeServerConfigPath(configPath string) string {
@@ -353,7 +362,10 @@ func runServe(args []string) int {
 			len(seeded), filepath.Dir(seeded[0].Root), strings.Join(profilesys.BuiltinProfileNames(), ", "))
 	}
 
-	cfg, configSnapshotInfo, err := runtimeserver.LoadRuntimeAgentConfig(opts.ConfigPath)
+	cfg, configSnapshotInfo, err := runtimeserver.LoadRuntimeAgentConfigWithOptions(runtimeserver.AgentConfigLoadOptions{
+		Path:     opts.ConfigPath,
+		Explicit: opts.ConfigExplicit,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		return 1
@@ -433,7 +445,7 @@ func runServe(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	app, err := newRuntimeServerApp(ctx, cfg, opts.ConfigPath)
+	app, err := newRuntimeServerApp(ctx, cfg, opts.ConfigPath, opts.ConfigExplicit)
 	if err != nil {
 		logger.Error("Failed to initialize runtime server", logger.Err(err))
 		return 1
@@ -557,7 +569,13 @@ func runStart(args []string) int {
 		return 1
 	}
 
-	commandArgs := []string{"serve", "--config", opts.ConfigPath, "--pid-file", pidFile}
+	commandArgs := []string{"serve", "--pid-file", pidFile}
+	if opts.ConfigExplicit && strings.TrimSpace(opts.ConfigPath) != "" {
+		// Only forward --config when the caller explicitly selected it. Passing a
+		// default-discovered path as --config would flip child serve into
+		// single-file mode and silently drop layered/provider file merging.
+		commandArgs = append(commandArgs, "--config", opts.ConfigPath)
+	}
 	if strings.TrimSpace(opts.ListenAddr) != "" {
 		commandArgs = append(commandArgs, "--listen", strings.TrimSpace(opts.ListenAddr))
 	}
@@ -1157,7 +1175,7 @@ func (h *runtimeDefaultSyncHooks) apply(cfg *config.Config) {
 	syncLLMRuntimeDefaults(h.bootstrapManager, cfg)
 }
 
-func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
+func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string, configExplicit bool) (*runtimeServerApp, error) {
 	explicitRuntimeConfig := ""
 	if cfg != nil && cfg.SkillsRuntime != nil &&
 		aiclipaths.IsExplicitRuntimeConfigOverride(cfg.SkillsRuntime.ConfigFile) {
@@ -1359,10 +1377,13 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	if external := runtimeserver.NewConfigExternalReloader(
 		configHotReloader,
 		func() (*config.Config, error) {
-			next, _, err := runtimeserver.LoadRuntimeAgentConfig(configPath)
+			next, _, err := runtimeserver.LoadRuntimeAgentConfigWithOptions(runtimeserver.AgentConfigLoadOptions{
+				Path:     configPath,
+				Explicit: configExplicit,
+			})
 			return next, err
 		},
-		func() string { return runtimeserver.ConfigSourceSignatureFor(configPath) },
+		func() string { return runtimeserver.ConfigSourceSignatureForOptions(configPath, configExplicit) },
 		0,
 	); external != nil {
 		go external.Run(ctx)

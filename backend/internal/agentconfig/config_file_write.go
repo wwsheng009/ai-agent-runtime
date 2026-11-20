@@ -69,7 +69,11 @@ func updateConfigFileDocumentLocked(path string, opts configDocumentWriteOptions
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, out)
+	mode := os.FileMode(0)
+	if IsProviderFragmentPath(path) {
+		mode = 0o600
+	}
+	return writeFileAtomicWithMode(path, out, mode)
 }
 
 // readConfigFileForWrite 读取配置文件的原始字节；开启 createStarterWhenMissing 时，
@@ -85,14 +89,43 @@ func readConfigFileForWrite(path string, opts configDocumentWriteOptions) ([]byt
 	if !opts.createStarterWhenMissing {
 		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
-	if _, _, starterErr := ensureStarterConfigAtPathLocked(path); starterErr != nil {
-		return nil, starterErr
+	if IsProviderFragmentPath(path) {
+		if _, _, fragmentErr := ensureProviderFragmentAtPathLocked(path); fragmentErr != nil {
+			return nil, fragmentErr
+		}
+	} else {
+		if _, _, starterErr := ensureStarterConfigAtPathLocked(path); starterErr != nil {
+			return nil, starterErr
+		}
 	}
 	raw, err = os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read starter config file %s: %w", path, err)
 	}
 	return raw, nil
+}
+
+// ensureProviderFragmentAtPathLocked creates the minimal providers.yaml
+// fragment. It deliberately does not reuse the full starter config: a fragment
+// must never grow an aicli/gateway/log section by accident.
+func ensureProviderFragmentAtPathLocked(path string) (string, bool, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false, fmt.Errorf("provider config path is required")
+	}
+	if info, err := os.Stat(path); err == nil {
+		if info.IsDir() {
+			return "", false, fmt.Errorf("provider config path exists as a directory: %s", path)
+		}
+		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("check provider config %s: %w", path, err)
+	}
+	skeleton := []byte("providers:\n  items: {}\n")
+	if err := writeFileAtomicWithMode(path, skeleton, 0o600); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }
 
 // encodeYAMLDocument 以既有写点一致的 2 空格缩进编码 YAML 文档。
@@ -108,4 +141,12 @@ func encodeYAMLDocument(document *yaml.Node) ([]byte, error) {
 		return nil, fmt.Errorf("finalize config yaml: %w", err)
 	}
 	return output.Bytes(), nil
+}
+
+// WriteConfigFileAtomic is the exported atomic-write entry point for commands
+// that build a config document themselves (for example the provider split
+// migration). The caller must hold LockConfigFileWrite(path) for the whole
+// read/modify/write transaction. mode=0 preserves the existing mode / uses 0644.
+func WriteConfigFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return writeFileAtomicWithMode(path, data, mode)
 }
