@@ -388,24 +388,3 @@ func renderResourceSection(name, path, language, content string, truncated bool)
 	}
 	return strings.Join(lines, "\n")
 }
-
-func decodeSandboxConfig(raw map[string]interface{}) (*runtimeexecutor.SandboxConfig, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	result, err := runtimeexecutor.ResolveSandboxMap(raw, runtimeexecutor.SandboxProfileOptions{})
-	if err != nil {
-		return nil, err
-	}
-	cfg := result.Config
-	if !cfg.Enabled {
-		cfg.Enabled = runtimeexecutor.SandboxConfigActive(cfg)
-	}
-	if !cfg.Enabled && !runtimeexecutor.SandboxConfigActive(cfg) {
-		// Named mode off / empty after resolution.
-		if result.Effective == runtimeexecutor.SandboxProfileOff || result.Effective == "" {
-			return &cfg, nil
-		}
-	}
-	return &cfg, nil
-}

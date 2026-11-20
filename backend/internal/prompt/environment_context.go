@@ -399,10 +399,6 @@ func environmentValueStringSlice(value interface{}) []string {
 	}
 }
 
-func highValueUnavailableCommands() []string {
-	return highValueUnavailableCommandsFromReport(DetectEnvironmentCapabilities())
-}
-
 func highValueUnavailableCommandsFromReport(report EnvironmentCapabilityReport) []string {
 	unavailable := unavailableEnvironmentCommandsFromReport(report)
 	if len(unavailable) == 0 {

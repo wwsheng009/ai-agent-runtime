@@ -1336,14 +1336,6 @@ func ApplyRecoveryEventForAPI(summary *RecoveryView, event Event) {
 	applyRecoveryEvent(summary, event)
 }
 
-func isGovernanceDeniedEvent(eventType string) bool {
-	return eventType == "tool.denied" || eventType == "subagent.denied"
-}
-
-func isGovernanceAuditEvent(eventType string) bool {
-	return isGovernanceDeniedEvent(eventType) || eventType == "patch.decision"
-}
-
 func stringPayloadValue(payload map[string]interface{}, key string) (string, bool) {
 	if len(payload) == 0 {
 		return "", false

@@ -196,14 +196,6 @@ func MimeForName(name string, isDir bool) string {
 	return "application/octet-stream"
 }
 
-// isTextMime 判定 MIME 是否属于可内联展示的文本类（供预览分流使用）。
-func isTextMime(value string) bool {
-	lower := strings.ToLower(value)
-	return strings.HasPrefix(lower, "text/") ||
-		strings.Contains(lower, "json") || strings.Contains(lower, "xml") ||
-		strings.Contains(lower, "javascript") || strings.Contains(lower, "yaml")
-}
-
 // isImageName 判定图片扩展名（图片走 base64 内联，限额独立）。
 func isImageName(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {

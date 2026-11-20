@@ -201,6 +201,25 @@
     `internal/tools/code_index_resolver_test_helpers_test.go`。
 - 验证：`toolbroker`、`llm`、`llm/adapter`、`tools` 的 `-short` 测试全部通过。
 
+### 0.15 第十五批已执行（2026-11-20）
+
+- 删除多个安全包中的零引用小工具：
+  - `events`：`isGovernanceDeniedEvent`、`isGovernanceAuditEvent`；
+  - `filebrowse`：`isTextMime`；
+  - `historyguard`：`latestReplayBlockStart`；
+  - `pkg/logger`：`getCallerInfo` / `shortenCaller`；
+  - `policy`：`splitCommandFields`；
+  - `profileinput`：`decodeSandboxConfig`；
+  - `prompt`：`highValueUnavailableCommands`；
+  - `runtimeobserve`：`sortStringKeys`；
+  - `usageanalytics`：`errorCategoryForRequest`；
+  - `workspace`：`codePatterns`；
+  - `pkg/httpclient`：`recordDialResult`。
+- 同步清理不再需要的 `sort` / `llm` import。
+- 验证：除 `events` 外，上述包的 `-short` 测试通过。`events` 的失败为既有
+  `TestEmitRuntimeEventLiteralsAreRegistered`（`tool_loop.child_results_consumption_failed`
+  未登记），与本次删除无关。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

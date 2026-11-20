@@ -434,13 +434,6 @@ func mostRepeatedToolCalls(calls map[string]*summarizedToolCall, limit int) []su
 	return result
 }
 
-func latestReplayBlockStart(messages []types.Message, userIndex int) int {
-	if userIndex < 0 {
-		return len(messages)
-	}
-	return replayBlockStart(messages, userIndex)
-}
-
 // replayBlockStart is latestReplayBlockStart with an anchor that may be -1 for
 // an anchor-less (compacted/rewritten) history: the scan floor is then the head
 // of the message list instead of a user message index.

@@ -1,7 +1,6 @@
 package runtimeobserve
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -494,14 +493,4 @@ func fnv1a(s string) uint64 {
 		h *= 1099511628211
 	}
 	return h
-}
-
-// sortStringKeys 供测试与诊断使用。
-func sortStringKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

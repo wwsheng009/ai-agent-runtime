@@ -909,34 +909,6 @@ func isReadOnlyGoCommand(args []string) bool {
 	}
 }
 
-func splitCommandFields(command string) []string {
-	// Lightweight split: respects simple double quotes.
-	var (
-		fields []string
-		cur    strings.Builder
-		inQQ   bool
-	)
-	flush := func() {
-		if cur.Len() == 0 {
-			return
-		}
-		fields = append(fields, cur.String())
-		cur.Reset()
-	}
-	for _, r := range command {
-		switch {
-		case r == '"':
-			inQQ = !inQQ
-		case (r == ' ' || r == '\t') && !inQQ:
-			flush()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	flush()
-	return fields
-}
-
 // ExtractShellCommand returns the primary command string from tool args.
 func ExtractShellCommand(args map[string]interface{}) string {
 	if cmd, ok := firstStringArg(args, "command", "cmd"); ok {

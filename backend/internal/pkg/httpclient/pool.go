@@ -459,10 +459,6 @@ func (o *observedRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, err
 }
 
-func recordDialResult(success bool, latency time.Duration) {
-	recordDialResultAt(time.Now(), success, latency)
-}
-
 func recordDialResultAt(now time.Time, success bool, latency time.Duration) {
 	recordDialResultAtWithStore(getSharedMetricsStore(), now, success, latency)
 }

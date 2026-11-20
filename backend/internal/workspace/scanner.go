@@ -45,10 +45,6 @@ var extensionToLang = map[string]Language{
 
 // Pattern 文件模式
 var (
-	// 代码文件模式
-	codePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`.*\.(go|py|js|ts|tsx|jsx|java|rs|cpp|cc|cxx|c|h|hpp)$`),
-	}
 	// 忽略模式
 	ignorePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`^\.git`),

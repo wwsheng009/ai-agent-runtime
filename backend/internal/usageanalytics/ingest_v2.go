@@ -6,7 +6,6 @@ import (
 	"time"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
 // ---------------------------------------------------------------------------
@@ -484,12 +483,6 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
 	); err != nil {
 		c.reportWriteFailure("usage_turns", err)
 	}
-}
-
-// errorCategoryForRequest 复用 D5 分类（llm 错误码 → 失败分类），
-// 供 usage_requests.error_category 的读取侧诊断使用。
-func errorCategoryForRequest(errorCode string) string {
-	return llm.FailureCategoryFromErrorCode(errorCode)
 }
 
 func boolToInt(value bool) int {
