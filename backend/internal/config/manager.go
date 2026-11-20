@@ -133,12 +133,12 @@ type MemoryManualConfig struct {
 }
 
 type MemoryGenerationConfig struct {
-	Enabled              bool                   `yaml:"enabled" json:"enabled"`
-	Trigger              string                 `yaml:"trigger" json:"trigger"`
-	MinIdleHours         int                    `yaml:"minIdleHours" json:"minIdleHours"`
-	MaxSessionsPerRun    int                    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
-	MaxRolloutAgeDays    int                    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
-	IncludeSubagents     bool                   `yaml:"includeSubagents" json:"includeSubagents"`
+	Enabled           bool   `yaml:"enabled" json:"enabled"`
+	Trigger           string `yaml:"trigger" json:"trigger"`
+	MinIdleHours      int    `yaml:"minIdleHours" json:"minIdleHours"`
+	MaxSessionsPerRun int    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
+	MaxRolloutAgeDays int    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
+	IncludeSubagents  bool   `yaml:"includeSubagents" json:"includeSubagents"`
 	// Provider optionally pins extraction and turn-window summarization to a
 	// configured LLM provider. Empty preserves LLMRuntime automatic routing.
 	Provider             string                 `yaml:"provider" json:"provider"`
@@ -172,7 +172,7 @@ type MemoryTurnDigestConfig struct {
 }
 
 type MemoryConsolidationConfig struct {
-	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Provider optionally pins project-summary generation to a configured LLM
 	// provider. Empty inherits the extraction provider/automatic routing.
 	Provider           string `yaml:"provider" json:"provider"`
