@@ -8,10 +8,6 @@ import (
 
 type ThinkingConfig = runtimetypes.ThinkingConfig
 
-func cloneThinkingConfig(thinking *ThinkingConfig) *ThinkingConfig {
-	return runtimetypes.CloneThinkingConfig(thinking)
-}
-
 func resolveThinkingConfig(explicit *ThinkingConfig, containers ...map[string]interface{}) *ThinkingConfig {
 	return runtimetypes.ResolveThinkingConfig(explicit, containers...)
 }

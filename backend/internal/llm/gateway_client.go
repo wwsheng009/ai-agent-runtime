@@ -1755,18 +1755,6 @@ func isRetryableGatewayProviderError(err error) bool {
 	return true
 }
 
-func isRetryableGatewayHTTPStatus(statusCode int) bool {
-	switch statusCode {
-	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
-		return true
-	}
-	return statusCode >= 500
-}
-
-func isRetryableGatewayResponseError(err error) bool {
-	return isRetryableProviderResponseError(err)
-}
-
 func gatewaySelectedProviderName(selected *SelectedResource) string {
 	if selected == nil || selected.Provider == nil {
 		return ""

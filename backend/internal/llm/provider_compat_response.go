@@ -32,10 +32,6 @@ func (p *ProviderWrapper) prepareRequestBody(model string, body map[string]inter
 	return providercompat.PrepareRequestBody(p.providerCompatContext(model), body)
 }
 
-func (p *ProviderWrapper) normalizeStreamReader(model string, reader io.Reader) io.Reader {
-	return providercompat.NormalizeStreamReader(p.providerCompatContext(model), reader)
-}
-
 func (p *ProviderWrapper) normalizeStreamReadCloser(model string, reader io.Reader) io.ReadCloser {
 	return providercompat.NormalizeStreamReadCloser(p.providerCompatContext(model), reader)
 }
@@ -87,10 +83,6 @@ func normalizeGatewayAssistantMessage(selected *SelectedResource, protocol, mode
 
 func prepareGatewayRequestBody(selected *SelectedResource, protocol, model string, body map[string]interface{}) map[string]interface{} {
 	return providercompat.PrepareRequestBody(gatewayProviderCompatContext(selected, protocol, model), body)
-}
-
-func normalizeGatewayStreamReader(selected *SelectedResource, protocol, model string, reader io.Reader) io.Reader {
-	return providercompat.NormalizeStreamReader(gatewayProviderCompatContext(selected, protocol, model), reader)
 }
 
 func normalizeGatewayStreamReadCloser(selected *SelectedResource, protocol, model string, reader io.Reader) io.ReadCloser {

@@ -53,10 +53,6 @@ func (e *providerHTTPError) RetryAfterDelay() time.Duration {
 	return e.retryAfter
 }
 
-func isRetryableProviderCallError(err error) bool {
-	return classifyRetryableLLMError(err).Retryable
-}
-
 // isMissingToolOutputError identifies deterministic tool-trace defects. These
 // errors describe the request history already sent by the runtime, so a
 // byte-for-byte replay cannot repair them. Keep this predicate independent of

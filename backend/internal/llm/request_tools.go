@@ -19,13 +19,6 @@ func metadataDisablesTools(metadata map[string]interface{}) bool {
 	return strings.EqualFold(strings.TrimSpace(stringValue(metadata[MetadataKeyInternalOperation])), "compact")
 }
 
-func metadataDisablesMetaTools(metadata map[string]interface{}) bool {
-	if metadataDisablesTools(metadata) {
-		return true
-	}
-	return metadataBool(metadata[MetadataKeyDisableMetaTools])
-}
-
 func metadataBool(value interface{}) bool {
 	switch typed := value.(type) {
 	case bool:

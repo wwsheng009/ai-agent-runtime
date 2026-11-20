@@ -139,6 +139,18 @@
 - 同步下调 DirectWriter inventory 基线。
 - 验证：commands 的 Interaction/Debug/inventory 定向测试通过。
 
+### 0.10 第十批已执行（2026-11-20）
+
+- 删除 `internal/llm` 中 10 个零引用 helper：
+  - `selectedProviderSupportsCodexMaxOutputTokens`、
+    `isChatGPTCodexBackendBaseURL`；
+  - `isRetryableGatewayHTTPStatus`、`isRetryableGatewayResponseError`；
+  - `truncateHTTPDebugText`；
+  - `ProviderWrapper.normalizeStreamReader`、`normalizeGatewayStreamReader`；
+  - `isRetryableProviderCallError`；
+  - `lastAppendedUserRole`、`metadataDisablesMetaTools`、`cloneThinkingConfig`。
+- 验证：`internal/llm` 的 `-short` 全包测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

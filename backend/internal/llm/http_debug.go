@@ -234,17 +234,6 @@ func withHTTPDebugRetryAttempt(ctx context.Context, attempt int, maxAttempts int
 	})
 }
 
-func truncateHTTPDebugText(text string, maxBytes int) string {
-	if text == "" || maxBytes <= 0 || len(text) <= maxBytes {
-		return text
-	}
-	end := maxBytes
-	for end > 0 && !utf8.ValidString(text[:end]) {
-		end--
-	}
-	return text[:end]
-}
-
 func truncateHTTPDebugBytes(data []byte, maxBytes int) string {
 	if len(data) == 0 || maxBytes <= 0 {
 		return ""

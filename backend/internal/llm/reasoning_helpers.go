@@ -896,18 +896,6 @@ func msgValueString(msg map[string]interface{}, key string) string {
 	return fmt.Sprintf("%v", value)
 }
 
-func lastAppendedUserRole(messages []map[string]interface{}) map[string]interface{} {
-	if len(messages) == 0 {
-		return nil
-	}
-	last := messages[len(messages)-1]
-	role, _ := last["role"].(string)
-	if !strings.EqualFold(strings.TrimSpace(role), "user") {
-		return nil
-	}
-	return last
-}
-
 func protocolMessageToolCallIDs(message map[string]interface{}) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for _, toolCall := range decodeSliceOfMaps(message["tool_calls"]) {
