@@ -151,6 +151,16 @@
   - `lastAppendedUserRole`、`metadataDisablesMetaTools`、`cloneThinkingConfig`。
 - 验证：`internal/llm` 的 `-short` 全包测试通过。
 
+### 0.11 第十一批已执行（2026-11-20）
+
+- 删除 `internal/agent` 中 3 个零引用 helper：
+  `hasLeadingSystemPromptInMessages`、`recordToolFailureMetadata`、
+  `copyRuntimeErrorMetadata`。
+- 验证：`internal/agent` 可编译并运行；`-short` 全包测试仍有一个在
+  `44930655` clean worktree 上可复现的既有失败
+  `TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure`，
+  与本次删除无关。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

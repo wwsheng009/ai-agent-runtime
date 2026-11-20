@@ -184,29 +184,6 @@ func classifyGenericToolExecutionError(err error) *runtimeerrors.RuntimeError {
 	return runtimeerrors.Wrap(code, "tool execution failed", err)
 }
 
-func recordToolFailureMetadata(metadata map[string]interface{}, code runtimeerrors.ErrorCode, message string) {
-	if metadata == nil || code == "" {
-		return
-	}
-	metadata["error_code"] = string(code)
-	if message = strings.TrimSpace(message); message != "" {
-		metadata["error_message"] = message
-	}
-}
-
-func copyRuntimeErrorMetadata(target map[string]interface{}, runtimeErr *runtimeerrors.RuntimeError) {
-	if target == nil || runtimeErr == nil {
-		return
-	}
-	target["error_code"] = string(runtimeErr.Code)
-	if runtimeErr.Message != "" {
-		target["error_message"] = runtimeErr.Message
-	}
-	for key, value := range runtimeErr.GetContext() {
-		target[key] = value
-	}
-}
-
 // newRawToolResult builds a gateway input that carries call args so recovery
 // contracts can compact-inject attempted_args without tool-name branches.
 func newRawToolResult(sessionID string, call types.ToolCall, step int, content interface{}, toolErr string, metadata map[string]interface{}) output.RawToolResult {

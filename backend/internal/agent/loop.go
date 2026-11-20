@@ -6459,10 +6459,6 @@ func hasSystemPrompt(history []types.Message, systemPrompt string) bool {
 	return false
 }
 
-func hasLeadingSystemPromptInMessages(messages []types.Message, systemPrompt string) bool {
-	return hasLeadingSystemPrompt(messages, systemPrompt)
-}
-
 func cloneMessageHistory(history []types.Message) []types.Message {
 	cloned := make([]types.Message, len(history))
 	for index := range history {
