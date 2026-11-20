@@ -41,6 +41,12 @@ export type SessionMcpRowsProps = {
   pendingName: string;
   /** 会话配置面可用（scope 字段存在）时展示持久化启停与删除。 */
   manageEnabled: boolean;
+  /** 是否展示本会话临时覆盖操作；draft workspace 只有持久化操作。 */
+  sessionControlsEnabled?: boolean;
+  /** 有 workspace 目标时，不得把进程级 fallback 条目标成可编辑的 workspace 条目。 */
+  hideGlobalFallbackActions?: boolean;
+  /** 工具列表端点绑定 session；draft workspace 不伪造 session 工具面。 */
+  toolsEnabled?: boolean;
   onViewTools: (entry: RuntimeSessionMcpEntry) => void;
   onToggleSession: (entry: RuntimeSessionMcpEntry) => void;
   onTogglePersist: (entry: RuntimeSessionMcpEntry) => void;
@@ -53,6 +59,9 @@ export function SessionMcpRows({
   tempEnabledSet,
   pendingName,
   manageEnabled,
+  sessionControlsEnabled = true,
+  hideGlobalFallbackActions = false,
+  toolsEnabled = true,
   onViewTools,
   onToggleSession,
   onTogglePersist,
@@ -75,6 +84,9 @@ export function SessionMcpRows({
         const tempEnabled = tempEnabledSet.has(name);
         const pending = pendingName === name;
         const toolCount = entry.status?.toolCount ?? 0;
+        const entryManageEnabled =
+          manageEnabled &&
+          !(hideGlobalFallbackActions && entry.source === "global");
 
         return (
           <li
@@ -171,19 +183,21 @@ export function SessionMcpRows({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  aria-label={t("panels.sessionMcp.toolsAction")}
-                  className="h-7 w-7 px-0 text-muted-foreground"
-                  data-testid="session-mcp-tools"
-                  disabled={pending}
-                  onClick={() => onViewTools(entry)}
-                  size="sm"
-                  title={t("panels.sessionMcp.toolsAction")}
-                  variant="ghost"
-                >
-                  <ListIcon size={13} />
-                </Button>
-                {manageEnabled ? (
+                {toolsEnabled ? (
+                  <Button
+                    aria-label={t("panels.sessionMcp.toolsAction")}
+                    className="h-7 w-7 px-0 text-muted-foreground"
+                    data-testid="session-mcp-tools"
+                    disabled={pending}
+                    onClick={() => onViewTools(entry)}
+                    size="sm"
+                    title={t("panels.sessionMcp.toolsAction")}
+                    variant="ghost"
+                  >
+                    <ListIcon size={13} />
+                  </Button>
+                ) : null}
+                {entryManageEnabled ? (
                   <Button
                     className="h-7 px-2 text-xs"
                     data-testid="session-mcp-persist-toggle"
@@ -200,32 +214,34 @@ export function SessionMcpRows({
                     )}
                   </Button>
                 ) : null}
-                <Button
-                  className="h-7 shrink-0 px-2 text-xs"
-                  data-testid="session-mcp-toggle"
-                  disabled={pending}
-                  onClick={() => onToggleSession(entry)}
-                  size="sm"
-                  title={
-                    sessionDisabled
-                      ? t("panels.sessionMcp.enableTitle")
-                      : tempEnabled
-                        ? t("panels.sessionMcp.sessionTempDisableTitle")
-                        : !enabled
-                          ? t("panels.sessionMcp.sessionTempEnableTitle")
-                          : t("panels.sessionMcp.disableTitle")
-                  }
-                  variant="ghost"
-                >
-                  {t(
-                    sessionDisabled
-                      ? "panels.sessionMcp.enableAction"
-                      : tempEnabled || enabled
-                        ? "panels.sessionMcp.disableAction"
-                        : "panels.sessionMcp.sessionTempEnableAction",
-                  )}
-                </Button>
-                {manageEnabled ? (
+                {sessionControlsEnabled ? (
+                  <Button
+                    className="h-7 shrink-0 px-2 text-xs"
+                    data-testid="session-mcp-toggle"
+                    disabled={pending}
+                    onClick={() => onToggleSession(entry)}
+                    size="sm"
+                    title={
+                      sessionDisabled
+                        ? t("panels.sessionMcp.enableTitle")
+                        : tempEnabled
+                          ? t("panels.sessionMcp.sessionTempDisableTitle")
+                          : !enabled
+                            ? t("panels.sessionMcp.sessionTempEnableTitle")
+                            : t("panels.sessionMcp.disableTitle")
+                    }
+                    variant="ghost"
+                  >
+                    {t(
+                      sessionDisabled
+                        ? "panels.sessionMcp.enableAction"
+                        : tempEnabled || enabled
+                          ? "panels.sessionMcp.disableAction"
+                          : "panels.sessionMcp.sessionTempEnableAction",
+                    )}
+                  </Button>
+                ) : null}
+                {entryManageEnabled ? (
                   <Button
                     aria-label={t("panels.sessionMcp.deleteAction")}
                     className="h-7 w-7 px-0 text-muted-foreground"

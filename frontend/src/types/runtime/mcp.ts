@@ -266,3 +266,51 @@ export type RuntimeSessionMcpToggleResponse = {
   /** 持久化启停写入的文件（scope=workspace/global 时返回）。 */
   config_path?: string;
 };
+
+/** 工作区 MCP 管理面返回的读/写路径诊断。 */
+export type RuntimeWorkspaceMcpPath = {
+  path: string;
+  source: string;
+  exists: boolean;
+};
+
+/**
+ * 工作区 MCP 配置面。
+ *
+ * workspace API 只返回该工作区自己的条目；当尚未创建工作区配置时，
+ * `workspace_fallback` 仅描述当前生效链会回退到全局，不会把全局条目混入
+ * `mcps`。
+ */
+export type RuntimeWorkspaceMcpScope = {
+  scope: "workspace";
+  workspace_path: string;
+  config_path: string;
+  workspace_fallback: boolean;
+  read: RuntimeWorkspaceMcpPath;
+  write: RuntimeWorkspaceMcpPath;
+  candidates?: RuntimeMcpConfigCandidate[];
+};
+
+export type RuntimeWorkspaceMcpEntry = RuntimeMcpEntry & {
+  source: "workspace";
+};
+
+export type RuntimeWorkspaceMcpListResponse = RuntimeWorkspaceMcpScope & {
+  count: number;
+  mcps: RuntimeWorkspaceMcpEntry[];
+  summary?: RuntimeMcpListSummary;
+};
+
+export type RuntimeWorkspaceMcpMutationResponse = {
+  config?: RuntimeMcpConfig;
+  status?: RuntimeMcpStatus | null;
+  name?: string;
+  removed?: boolean;
+  enabled?: boolean;
+  changed?: boolean;
+  reloaded?: boolean;
+  scope: "workspace";
+  workspace_path: string;
+  config_path: string;
+  message?: string;
+};

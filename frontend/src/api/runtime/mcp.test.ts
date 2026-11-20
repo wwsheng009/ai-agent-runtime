@@ -13,15 +13,26 @@ import {
   buildRuntimeMcpReloadUrl,
   buildRuntimeMcpToolsUrl,
   buildRuntimeMcpUrl,
+  buildRuntimeWorkspaceMcpDisableUrl,
+  buildRuntimeWorkspaceMcpEnableUrl,
+  buildRuntimeWorkspaceMcpReloadUrl,
+  buildRuntimeWorkspaceMcpUrl,
+  buildRuntimeWorkspaceMcpsUrl,
+  createRuntimeWorkspaceMcp,
   createRuntimeMcp,
   deleteRuntimeMcp,
+  deleteRuntimeWorkspaceMcp,
   listRuntimeMcps,
   listRuntimeMcpTools,
   listRuntimeSessionMcps,
+  listRuntimeWorkspaceMcps,
   reloadRuntimeMcps,
+  reloadRuntimeWorkspaceMcps,
   setRuntimeMcpEnabled,
   setRuntimeSessionMcpEnabled,
+  setRuntimeWorkspaceMcpEnabled,
   updateRuntimeMcp,
+  updateRuntimeWorkspaceMcp,
 } from "@/api/runtime/mcp";
 import {
   isRuntimeApiErrorCode,
@@ -347,5 +358,152 @@ describe("runtime 会话级 MCP 覆盖客户端", () => {
     await expect(
       setRuntimeSessionMcpEnabled(SESSION_ID, "off-mcp", true),
     ).rejects.toBeInstanceOf(RuntimeApiError);
+  });
+});
+
+describe("runtime 工作区 MCP 配置客户端", () => {
+  const workspacePath = "E:/my work/alpha";
+  const query = new URLSearchParams({
+    workspace_path: workspacePath,
+  }).toString();
+  const workspaceEntry = {
+    ...MCP_ENTRY,
+    source: "workspace" as const,
+  };
+  const listPayload = {
+    scope: "workspace" as const,
+    workspace_path: workspacePath,
+    config_path: "E:/my work/alpha/.aicli/mcp.yaml",
+    workspace_fallback: true,
+    read: {
+      path: "E:/my work/alpha/.aicli/mcp.yaml",
+      source: "project",
+      exists: false,
+    },
+    write: {
+      path: "E:/my work/alpha/.aicli/mcp.yaml",
+      source: "project",
+      exists: false,
+    },
+    count: 1,
+    mcps: [workspaceEntry],
+  };
+
+  it("编码 workspace_path/name，并且列表只接受 workspace 来源", async () => {
+    expect(buildRuntimeWorkspaceMcpsUrl(workspacePath)).toBe(
+      `/api/runtime/workspaces/mcps?${query}`,
+    );
+    expect(buildRuntimeWorkspaceMcpUrl(workspacePath, "my/mcp")).toBe(
+      `/api/runtime/workspaces/mcps/my%2Fmcp?${query}`,
+    );
+    expect(buildRuntimeWorkspaceMcpEnableUrl(workspacePath, "my/mcp")).toBe(
+      `/api/runtime/workspaces/mcps/my%2Fmcp/enable?${query}`,
+    );
+    expect(buildRuntimeWorkspaceMcpDisableUrl(workspacePath, "my/mcp")).toBe(
+      `/api/runtime/workspaces/mcps/my%2Fmcp/disable?${query}`,
+    );
+
+    const fetchMock = mockFetch(async (input, init) => {
+      expect(String(input)).toBe(buildRuntimeWorkspaceMcpsUrl(workspacePath));
+      expect((init?.method ?? "GET").toUpperCase()).toBe("GET");
+      return jsonResponse({
+        ...listPayload,
+        count: 2,
+        mcps: [
+          workspaceEntry,
+          { ...MCP_ENTRY, source: "global" },
+        ],
+      });
+    });
+
+    const result = await listRuntimeWorkspaceMcps(workspacePath);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.mcps).toEqual([workspaceEntry]);
+    expect(result.count).toBe(1);
+  });
+
+  it("workspace list 缺少 mcps 或不是 workspace scope 时抛错", async () => {
+    mockFetch(async () => jsonResponse({ scope: "global", mcps: [] }));
+
+    await expect(listRuntimeWorkspaceMcps(workspacePath)).rejects.toThrow(
+      /invalid runtime workspace MCP payload/,
+    );
+  });
+
+  it("POST 新增不接受客户端 config_path，持久化目标由服务端决定", async () => {
+    const request = {
+      name: MCP_NAME,
+      type: "stdio" as const,
+      command: "npx",
+      args: ["-y", "@chrome/mcp"],
+    };
+    const fetchMock = mockFetch(async (input, init) => {
+      expect(String(input)).toBe(buildRuntimeWorkspaceMcpsUrl(workspacePath));
+      expect((init?.method ?? "").toUpperCase()).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual(request);
+      return jsonResponse({
+        config: MCP_ENTRY.config,
+        status: null,
+        scope: "workspace",
+        workspace_path: workspacePath,
+        config_path: listPayload.config_path,
+      }, 201);
+    });
+
+    const result = await createRuntimeWorkspaceMcp(workspacePath, request);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.scope).toBe("workspace");
+    expect(result.config_path).toBe(listPayload.config_path);
+  });
+
+  it("update/delete/enable/disable/reload 都绑定同一 workspace", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    mockFetch(async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: (init?.method ?? "GET").toUpperCase(),
+      });
+      return jsonResponse({
+        scope: "workspace",
+        workspace_path: workspacePath,
+        config_path: listPayload.config_path,
+        name: MCP_NAME,
+        removed: true,
+        enabled: true,
+        reloaded: true,
+      });
+    });
+
+    await updateRuntimeWorkspaceMcp(workspacePath, MCP_NAME, {
+      name: MCP_NAME,
+      type: "stdio",
+    });
+    await deleteRuntimeWorkspaceMcp(workspacePath, MCP_NAME);
+    await setRuntimeWorkspaceMcpEnabled(workspacePath, MCP_NAME, true);
+    await setRuntimeWorkspaceMcpEnabled(workspacePath, MCP_NAME, false);
+    await reloadRuntimeWorkspaceMcps(workspacePath);
+
+    expect(calls).toEqual([
+      {
+        url: `${buildRuntimeWorkspaceMcpUrl(workspacePath, MCP_NAME)}`,
+        method: "PUT",
+      },
+      {
+        url: `${buildRuntimeWorkspaceMcpUrl(workspacePath, MCP_NAME)}`,
+        method: "DELETE",
+      },
+      {
+        url: buildRuntimeWorkspaceMcpEnableUrl(workspacePath, MCP_NAME),
+        method: "POST",
+      },
+      {
+        url: buildRuntimeWorkspaceMcpDisableUrl(workspacePath, MCP_NAME),
+        method: "POST",
+      },
+      {
+        url: buildRuntimeWorkspaceMcpReloadUrl(workspacePath),
+        method: "POST",
+      },
+    ]);
   });
 });

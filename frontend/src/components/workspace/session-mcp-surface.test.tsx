@@ -25,6 +25,10 @@ const {
   createRuntimeSessionMcpMock,
   deleteRuntimeSessionMcpMock,
   listRuntimeSessionMcpToolsMock,
+  listRuntimeWorkspaceMcpsMock,
+  createRuntimeWorkspaceMcpMock,
+  deleteRuntimeWorkspaceMcpMock,
+  setRuntimeWorkspaceMcpEnabledMock,
 } = vi.hoisted(() => ({
   listRuntimeMcpsMock: vi.fn(),
   listRuntimeSessionMcpsMock: vi.fn(),
@@ -32,7 +36,27 @@ const {
   createRuntimeSessionMcpMock: vi.fn(),
   deleteRuntimeSessionMcpMock: vi.fn(),
   listRuntimeSessionMcpToolsMock: vi.fn(),
+  listRuntimeWorkspaceMcpsMock: vi.fn(),
+  createRuntimeWorkspaceMcpMock: vi.fn(),
+  deleteRuntimeWorkspaceMcpMock: vi.fn(),
+  setRuntimeWorkspaceMcpEnabledMock: vi.fn(),
 }));
+
+const WORKSPACE_PATH = "E:/workspace";
+
+function buildWorkspacePayload(entries: ReturnType<typeof buildEntry>[] = []) {
+  const configPath = `${WORKSPACE_PATH}/.aicli/mcp.yaml`;
+  return {
+    scope: "workspace" as const,
+    workspace_path: WORKSPACE_PATH,
+    config_path: configPath,
+    workspace_fallback: true,
+    read: { path: configPath, source: "project", exists: false },
+    write: { path: configPath, source: "project", exists: false },
+    count: entries.length,
+    mcps: entries.map((entry) => ({ ...entry, source: "workspace" as const })),
+  };
+}
 
 vi.mock("@/api/runtime/mcp", () => ({
   listRuntimeMcps: listRuntimeMcpsMock,
@@ -41,6 +65,10 @@ vi.mock("@/api/runtime/mcp", () => ({
   createRuntimeSessionMcp: createRuntimeSessionMcpMock,
   deleteRuntimeSessionMcp: deleteRuntimeSessionMcpMock,
   listRuntimeSessionMcpTools: listRuntimeSessionMcpToolsMock,
+  listRuntimeWorkspaceMcps: listRuntimeWorkspaceMcpsMock,
+  createRuntimeWorkspaceMcp: createRuntimeWorkspaceMcpMock,
+  deleteRuntimeWorkspaceMcp: deleteRuntimeWorkspaceMcpMock,
+  setRuntimeWorkspaceMcpEnabled: setRuntimeWorkspaceMcpEnabledMock,
 }));
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
@@ -55,6 +83,10 @@ describe("SessionMcpSurface", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    // jsdom 未实现 scrollIntoView；MCP 表单使用自定义 Select，展开时会调用它。
+    if (!Element.prototype.scrollIntoView) {
+      Element.prototype.scrollIntoView = () => {};
+    }
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
     listRuntimeMcpsMock.mockReset();
     listRuntimeSessionMcpsMock.mockReset();
@@ -62,6 +94,10 @@ describe("SessionMcpSurface", () => {
     createRuntimeSessionMcpMock.mockReset();
     deleteRuntimeSessionMcpMock.mockReset();
     listRuntimeSessionMcpToolsMock.mockReset();
+    listRuntimeWorkspaceMcpsMock.mockReset();
+    createRuntimeWorkspaceMcpMock.mockReset();
+    deleteRuntimeWorkspaceMcpMock.mockReset();
+    setRuntimeWorkspaceMcpEnabledMock.mockReset();
   });
 
   afterEach(() => {
@@ -82,6 +118,7 @@ describe("SessionMcpSurface", () => {
 
   async function renderSurface(props: {
     sessionId?: string;
+    workspacePath?: string;
     lastRuntimeEventType?: string;
     runtimeEventCount?: number;
   } = {}) {
@@ -97,6 +134,36 @@ describe("SessionMcpSurface", () => {
         '[data-testid="session-mcp-toggle"]',
       ),
     );
+  }
+
+  function fillInput(input: HTMLInputElement | null, value: string) {
+    if (!input) {
+      throw new Error("expected form input");
+    }
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function selectValue(select: HTMLButtonElement | null, value: string) {
+    if (!select) {
+      throw new Error("expected form select");
+    }
+    act(() => {
+      select.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]'),
+    ).find((candidate) => candidate.textContent?.includes(value));
+    if (!option) {
+      throw new Error(`expected form option ${value}`);
+    }
+    act(() => {
+      option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
   }
 
   it("renders rows, disables globally-off servers, and round-trips the session toggle", async () => {
@@ -504,5 +571,143 @@ describe("SessionMcpSurface", () => {
       '[data-testid="session-mcp-toggle"]',
     );
     expect(afterEnable?.textContent).toContain("本会话停用");
+  });
+
+  it("manages a draft workspace without creating or calling session APIs", async () => {
+    listRuntimeWorkspaceMcpsMock.mockResolvedValue(buildWorkspacePayload());
+    createRuntimeWorkspaceMcpMock.mockResolvedValue({
+      scope: "workspace",
+      workspace_path: WORKSPACE_PATH,
+      config_path: `${WORKSPACE_PATH}/.aicli/mcp.yaml`,
+      config: { name: "draft-mcp", type: "stdio", command: "node" },
+    });
+
+    await renderSurface({ sessionId: "", workspacePath: WORKSPACE_PATH });
+
+    expect(listRuntimeWorkspaceMcpsMock).toHaveBeenCalledWith(WORKSPACE_PATH);
+    expect(listRuntimeSessionMcpsMock).not.toHaveBeenCalled();
+    expect(listRuntimeMcpsMock).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="session-mcp-toggle"]')).toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="session-mcp-add"]')
+        ?.click();
+    });
+    const form = container.querySelector<HTMLFormElement>(
+      '[data-testid="session-mcp-add-form"] form',
+    );
+    expect(form).not.toBeNull();
+    selectValue(
+      form?.querySelector<HTMLButtonElement>(
+        'button[aria-haspopup="listbox"]',
+      ) ?? null,
+      "stdio",
+    );
+    const inputs = form?.querySelectorAll<HTMLInputElement>("input") ?? [];
+    await act(async () => {
+      fillInput(inputs[0] ?? null, "draft-mcp");
+      // name, description, command（type is a select）
+      fillInput(inputs[2] ?? null, "node");
+    });
+
+    await act(async () => {
+      const save = Array.from(form?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent?.includes("保存"),
+      );
+      save?.click();
+    });
+    await flush();
+
+    expect(createRuntimeWorkspaceMcpMock).toHaveBeenCalledWith(
+      WORKSPACE_PATH,
+      expect.objectContaining({
+        name: "draft-mcp",
+        type: "stdio",
+        command: "node",
+      }),
+    );
+    expect(createRuntimeSessionMcpMock).not.toHaveBeenCalled();
+    expect(listRuntimeSessionMcpsMock).not.toHaveBeenCalled();
+  });
+
+  it("uses workspace persistence controls for draft rows, but not session overrides", async () => {
+    listRuntimeWorkspaceMcpsMock.mockResolvedValue(
+      buildWorkspacePayload([buildEntry("draft-mcp")]),
+    );
+    setRuntimeWorkspaceMcpEnabledMock.mockResolvedValue({
+      scope: "workspace",
+      workspace_path: WORKSPACE_PATH,
+      config_path: `${WORKSPACE_PATH}/.aicli/mcp.yaml`,
+      name: "draft-mcp",
+      enabled: false,
+      changed: true,
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    deleteRuntimeWorkspaceMcpMock.mockResolvedValue({
+      scope: "workspace",
+      workspace_path: WORKSPACE_PATH,
+      config_path: `${WORKSPACE_PATH}/.aicli/mcp.yaml`,
+      name: "draft-mcp",
+      removed: true,
+    });
+
+    await renderSurface({ sessionId: "", workspacePath: WORKSPACE_PATH });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="session-mcp-persist-toggle"]')
+        ?.click();
+    });
+    await flush();
+
+    expect(setRuntimeWorkspaceMcpEnabledMock).toHaveBeenCalledWith(
+      WORKSPACE_PATH,
+      "draft-mcp",
+      false,
+    );
+    expect(setRuntimeSessionMcpEnabledMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="session-mcp-delete"]')
+        ?.click();
+    });
+    await flush();
+
+    expect(deleteRuntimeWorkspaceMcpMock).toHaveBeenCalledWith(
+      WORKSPACE_PATH,
+      "draft-mcp",
+    );
+    expect(deleteRuntimeSessionMcpMock).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("does not expose workspace mutation buttons for global fallback entries", async () => {
+    listRuntimeWorkspaceMcpsMock.mockResolvedValue(buildWorkspacePayload());
+    listRuntimeSessionMcpsMock.mockResolvedValue(
+      buildScopedPayload({
+        fallback: true,
+        entries: [
+          { ...buildEntry("global-fallback"), source: "global" },
+        ],
+      }),
+    );
+
+    await renderSurface({ workspacePath: WORKSPACE_PATH });
+
+    const row = container.querySelector('[data-testid="session-mcp-row"]');
+    expect(row?.getAttribute("data-source")).toBe("global");
+    expect(row?.querySelector('[data-testid="session-mcp-persist-toggle"]')).toBeNull();
+    expect(row?.querySelector('[data-testid="session-mcp-delete"]')).toBeNull();
+    expect(row?.querySelector('[data-testid="session-mcp-toggle"]')).not.toBeNull();
+  });
+
+  it("explains that workspace management is unavailable without session or workspace", async () => {
+    await renderSurface({ sessionId: "" });
+
+    expect(container.querySelector('[data-testid="session-mcp-unavailable"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="session-mcp-add"]')).toBeNull();
+    expect(listRuntimeWorkspaceMcpsMock).not.toHaveBeenCalled();
+    expect(listRuntimeSessionMcpsMock).not.toHaveBeenCalled();
   });
 });

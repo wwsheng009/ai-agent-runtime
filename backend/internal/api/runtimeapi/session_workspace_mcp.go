@@ -264,6 +264,55 @@ func (s *workspaceMCPManagers) evictLocked() []*workspaceMCPEntry {
 	return evicted
 }
 
+// invalidateWorkspace removes cached managers that may represent a workspace
+// configuration before or after a mutation. The resolver can change winners
+// after the first workspace file is written (for example from the global
+// fallback to <workspace>/.aicli/mcp.yaml), so callers may also provide the
+// scope's pre-mutation read/write paths.
+//
+// The process-global manager is never removed here. A workspace that resolves
+// to the global path must not acquire ownership of that manager.
+func (s *workspaceMCPManagers) invalidateWorkspace(workspacePath string, paths ...string) int {
+	if s == nil {
+		return 0
+	}
+	keys := make(map[string]struct{}, len(paths)+1)
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || samePath(path, s.cfg.GlobalPath) {
+			return
+		}
+		keys[workspaceMCPKey(path)] = struct{}{}
+	}
+	if base := strings.TrimSpace(workspacePath); base != "" {
+		addPath(s.resolve(base).Path)
+	}
+	for _, path := range paths {
+		addPath(path)
+	}
+	if len(keys) == 0 {
+		return 0
+	}
+
+	s.mu.Lock()
+	var removed []*workspaceMCPEntry
+	for key, entry := range s.entries {
+		if _, ok := keys[key]; !ok {
+			continue
+		}
+		delete(s.entries, key)
+		if entry != nil {
+			removed = append(removed, entry)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, entry := range removed {
+		closeWorkspaceMCPEntry(entry)
+	}
+	return len(removed)
+}
+
 // Close 停止全部会话级 manager（服务关闭时调用；幂等）。
 func (s *workspaceMCPManagers) Close() {
 	if s == nil {

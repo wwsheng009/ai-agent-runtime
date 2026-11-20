@@ -100,7 +100,7 @@ func (h *Handler) handleSessionWorkspaceMCPToggle(w http.ResponseWriter, r *http
 		h.writeMCPAdminError(w, err, "failed to update MCP enabled state")
 		return
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
+	h.invalidateSessionOrWorkspaceMCPRuntimeSurface(r.Context(), sessionID, scope)
 	eventType := "mcp.disabled"
 	if enabled {
 		eventType = "mcp.enabled"
@@ -148,9 +148,9 @@ func (h *Handler) AddSessionRuntimeMCP(w http.ResponseWriter, r *http.Request) {
 		h.writeMCPAdminError(w, err, "failed to add MCP")
 		return
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
 	h.afterRuntimeMCPMutation(r.Context(), "mcp.created", request.Name)
 	h.writeMCPAdminResult(w, service, r, request.Name, http.StatusCreated)
+	h.invalidateSessionOrWorkspaceMCPRuntimeSurface(r.Context(), sessionID, scope)
 }
 
 // UpdateSessionRuntimeMCP 更新会话配置文件中的 MCP 并热重载。
@@ -177,9 +177,9 @@ func (h *Handler) UpdateSessionRuntimeMCP(w http.ResponseWriter, r *http.Request
 		h.writeMCPAdminError(w, err, "failed to update MCP")
 		return
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
 	h.afterRuntimeMCPMutation(r.Context(), "mcp.updated", name)
 	h.writeMCPAdminResult(w, service, r, name, http.StatusOK)
+	h.invalidateSessionOrWorkspaceMCPRuntimeSurface(r.Context(), sessionID, scope)
 }
 
 // RemoveSessionRuntimeMCP 删除会话配置文件中的 MCP 并热重载。
@@ -201,7 +201,7 @@ func (h *Handler) RemoveSessionRuntimeMCP(w http.ResponseWriter, r *http.Request
 		h.writeMCPAdminError(w, err, "failed to remove MCP")
 		return
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
+	h.invalidateSessionOrWorkspaceMCPRuntimeSurface(r.Context(), sessionID, scope)
 	h.afterRuntimeMCPMutation(r.Context(), "mcp.removed", name)
 	// 配置条目已删除：回收该 server 若存在的会话级临时连接。
 	h.dropSessionMCPTempName(r.Context(), sessionID, name)
@@ -232,7 +232,7 @@ func (h *Handler) ReloadSessionRuntimeMCP(w http.ResponseWriter, r *http.Request
 		h.writeMCPAdminError(w, err, "failed to reload MCP config")
 		return
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
+	h.invalidateSessionOrWorkspaceMCPRuntimeSurface(r.Context(), sessionID, scope)
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": sessionID,
 		"reloaded":   true,

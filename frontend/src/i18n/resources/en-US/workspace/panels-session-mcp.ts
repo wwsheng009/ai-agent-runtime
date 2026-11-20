@@ -79,4 +79,8 @@ export const enWorkspacePanelsSessionMcp = {
     "This tool cannot be called right now (connection unavailable or handshake incomplete).",
   toolsScopeWorkspace: "Workspace config",
   toolsScopeGlobal: "Global config",
+  workspaceImpact:
+    "Workspace changes affect other sessions in the same workspace; session-only overrides still do not write config files.",
+  unavailableNoWorkspace: "No session or workspace is available for MCP management.",
+  disabledNoWorkspace: "A session or workspace directory is required",
 } satisfies DeepStringShape<typeof zhWorkspacePanelsSessionMcp>;

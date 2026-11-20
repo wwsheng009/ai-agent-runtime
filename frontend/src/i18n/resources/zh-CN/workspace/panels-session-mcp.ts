@@ -72,4 +72,8 @@ export const zhWorkspacePanelsSessionMcp = {
   toolsUnhealthyHint: "该工具当前不可调用（连接不可用或握手未完成）。",
   toolsScopeWorkspace: "工作区配置",
   toolsScopeGlobal: "全局配置",
+  workspaceImpact:
+    "工作区启停和删除会影响同一工作区的其他会话；本会话临时停用仍不会写入配置文件。",
+  unavailableNoWorkspace: "当前没有可用的会话或工作区，无法管理 MCP。",
+  disabledNoWorkspace: "需要当前会话或工作区目录",
 } as const;

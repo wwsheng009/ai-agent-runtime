@@ -18,9 +18,15 @@ import type {
   RuntimeSessionMcpScopeResponse,
   RuntimeSessionMcpToolsResponse,
   RuntimeSessionMcpToggleResponse,
+  RuntimeWorkspaceMcpListResponse,
+  RuntimeWorkspaceMcpMutationResponse,
 } from "@/types/runtime";
 
-import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
+import {
+  buildRuntimeUrl,
+  buildRuntimeUrlWithQuery,
+  fetchRuntimeJson,
+} from "./shared";
 
 const runtimeMcpsUrl = buildRuntimeUrl("/api/runtime/mcps");
 
@@ -370,4 +376,134 @@ export async function reloadRuntimeSessionMcps(sessionId: string) {
     scope: string;
     path: string;
   }>(`${buildRuntimeSessionMcpsUrl(sessionId)}/reload`, { method: "POST" });
+}
+
+// ---- 工作区 MCP 配置面（不依赖 session；绝不接受客户端指定 config_path） ----
+
+/** 工作区配置列表 URL；workspace_path 始终作为编码后的 query 参数发送。 */
+export function buildRuntimeWorkspaceMcpsUrl(workspacePath: string) {
+  return buildRuntimeUrlWithQuery("/api/runtime/workspaces/mcps", {
+    workspace_path: workspacePath,
+  });
+}
+
+/** 单个工作区 MCP 资源 URL；名称整段编码，写入目标只由服务端解析。 */
+export function buildRuntimeWorkspaceMcpUrl(
+  workspacePath: string,
+  name: string,
+) {
+  return buildRuntimeUrlWithQuery(
+    `/api/runtime/workspaces/mcps/${encodeURIComponent(name)}`,
+    { workspace_path: workspacePath },
+  );
+}
+
+export function buildRuntimeWorkspaceMcpEnableUrl(
+  workspacePath: string,
+  name: string,
+) {
+  return buildRuntimeUrlWithQuery(
+    `/api/runtime/workspaces/mcps/${encodeURIComponent(name)}/enable`,
+    { workspace_path: workspacePath },
+  );
+}
+
+export function buildRuntimeWorkspaceMcpDisableUrl(
+  workspacePath: string,
+  name: string,
+) {
+  return buildRuntimeUrlWithQuery(
+    `/api/runtime/workspaces/mcps/${encodeURIComponent(name)}/disable`,
+    { workspace_path: workspacePath },
+  );
+}
+
+export function buildRuntimeWorkspaceMcpReloadUrl(workspacePath: string) {
+  return buildRuntimeUrlWithQuery("/api/runtime/workspaces/mcps/reload", {
+    workspace_path: workspacePath,
+  });
+}
+
+export async function listRuntimeWorkspaceMcps(workspacePath: string) {
+  const payload = await fetchRuntimeJson<RuntimeWorkspaceMcpListResponse>(
+    buildRuntimeWorkspaceMcpsUrl(workspacePath),
+  );
+  if (
+    !payload ||
+    payload.scope !== "workspace" ||
+    typeof payload.workspace_path !== "string" ||
+    typeof payload.config_path !== "string" ||
+    !Array.isArray(payload.mcps)
+  ) {
+    throw new Error("invalid runtime workspace MCP payload");
+  }
+  const mcps = payload.mcps.filter(
+    (entry) =>
+      Boolean(entry && typeof entry === "object" && entry.config) &&
+      entry.source === "workspace",
+  );
+  return {
+    ...payload,
+    count: mcps.length,
+    mcps,
+  } satisfies RuntimeWorkspaceMcpListResponse;
+}
+
+export async function createRuntimeWorkspaceMcp(
+  workspacePath: string,
+  request: RuntimeMcpUpsertRequest,
+) {
+  return fetchRuntimeJson<RuntimeWorkspaceMcpMutationResponse>(
+    buildRuntimeWorkspaceMcpsUrl(workspacePath),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function updateRuntimeWorkspaceMcp(
+  workspacePath: string,
+  name: string,
+  request: RuntimeMcpUpsertRequest,
+) {
+  return fetchRuntimeJson<RuntimeWorkspaceMcpMutationResponse>(
+    buildRuntimeWorkspaceMcpUrl(workspacePath, name),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function deleteRuntimeWorkspaceMcp(
+  workspacePath: string,
+  name: string,
+) {
+  return fetchRuntimeJson<RuntimeWorkspaceMcpMutationResponse>(
+    buildRuntimeWorkspaceMcpUrl(workspacePath, name),
+    { method: "DELETE" },
+  );
+}
+
+export async function setRuntimeWorkspaceMcpEnabled(
+  workspacePath: string,
+  name: string,
+  enabled: boolean,
+) {
+  return fetchRuntimeJson<RuntimeWorkspaceMcpMutationResponse>(
+    enabled
+      ? buildRuntimeWorkspaceMcpEnableUrl(workspacePath, name)
+      : buildRuntimeWorkspaceMcpDisableUrl(workspacePath, name),
+    { method: "POST" },
+  );
+}
+
+export async function reloadRuntimeWorkspaceMcps(workspacePath: string) {
+  return fetchRuntimeJson<RuntimeWorkspaceMcpMutationResponse>(
+    buildRuntimeWorkspaceMcpReloadUrl(workspacePath),
+    { method: "POST" },
+  );
 }

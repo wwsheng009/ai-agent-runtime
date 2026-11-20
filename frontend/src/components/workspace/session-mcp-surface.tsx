@@ -21,10 +21,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  createRuntimeWorkspaceMcp,
   createRuntimeSessionMcp,
+  deleteRuntimeWorkspaceMcp,
   deleteRuntimeSessionMcp,
   listRuntimeMcps,
   listRuntimeSessionMcps,
+  listRuntimeWorkspaceMcps,
+  setRuntimeWorkspaceMcpEnabled,
   setRuntimeSessionMcpEnabled,
 } from "@/api/runtime/mcp";
 import { type WorkspacePanelSurfaceProps } from "@/components/workspace/panel-registry";
@@ -46,6 +50,7 @@ import { cn } from "@/lib/utils";
 import {
   type RuntimeSessionMcpEntry,
   type RuntimeSessionMcpScope,
+  type RuntimeWorkspaceMcpListResponse,
 } from "@/types/runtime";
 
 type LoadStatus = "loading" | "ready" | "error";
@@ -63,10 +68,24 @@ function formatMcpError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sessionScopeFromWorkspace(
+  response: RuntimeWorkspaceMcpListResponse,
+): RuntimeSessionMcpScope {
+  return {
+    workspace: response.workspace_path,
+    workspace_scoped: true,
+    workspace_fallback: response.workspace_fallback,
+    read: response.read,
+    write: response.write,
+    candidates: response.candidates,
+  };
+}
+
 export function SessionMcpSurface({
   lastRuntimeEventType,
   runtimeEventCount,
   sessionId,
+  workspacePath,
 }: WorkspacePanelSurfaceProps) {
   const { t } = useTranslation("workspace");
   const [entries, setEntries] = useState<RuntimeSessionMcpEntry[]>([]);
@@ -82,6 +101,10 @@ export function SessionMcpSurface({
   const [draft, setDraft] = useState<McpDraft | null>(null);
   /** 工具列表弹窗的目标 server；null = 关闭。 */
   const [toolsFor, setToolsFor] = useState<string | null>(null);
+  const normalizedSessionId = sessionId.trim();
+  const normalizedWorkspacePath = workspacePath?.trim() ?? "";
+  const hasSession = normalizedSessionId !== "";
+  const hasWorkspace = normalizedWorkspacePath !== "";
 
   const disabledSet = useMemo(() => new Set(disabledNames), [disabledNames]);
   const tempEnabledSet = useMemo(
@@ -91,16 +114,85 @@ export function SessionMcpSurface({
 
   const refresh = useCallback(async () => {
     const normalizedSessionId = sessionId.trim();
+    const normalizedWorkspacePath = workspacePath?.trim() ?? "";
+    setEntries([]);
+    setScope(null);
+    setStatus("loading");
+    setError("");
+
+    if (normalizedWorkspacePath && !normalizedSessionId) {
+      try {
+        const workspace = await listRuntimeWorkspaceMcps(normalizedWorkspacePath);
+        setDisabledNames([]);
+        setTempEnabledNames([]);
+        setEntries(workspace.mcps);
+        setScope(sessionScopeFromWorkspace(workspace));
+        setStatus("ready");
+      } catch (loadError) {
+        setDisabledNames([]);
+        setTempEnabledNames([]);
+        setError(formatMcpError(loadError));
+        setStatus("error");
+      }
+      return;
+    }
+
+    if (normalizedWorkspacePath && normalizedSessionId) {
+      try {
+        const [workspace, scoped] = await Promise.all([
+          listRuntimeWorkspaceMcps(normalizedWorkspacePath),
+          listRuntimeSessionMcps(normalizedSessionId),
+        ]);
+        setDisabledNames(scoped.disabled);
+        setTempEnabledNames(scoped.enabled ?? []);
+        setScope(sessionScopeFromWorkspace(workspace));
+
+        const sessionEntries = scoped.mcps ?? [];
+        const sessionEntriesByName = new Map(
+          sessionEntries.map((entry) => [
+            entry.config?.name?.trim() || entry.status?.name?.trim() || "",
+            entry,
+          ]),
+        );
+        const workspaceNames = new Set(
+          workspace.mcps
+            .map((entry) => entry.config?.name?.trim() ?? "")
+            .filter(Boolean),
+        );
+        const workspaceEntries = workspace.mcps.map((entry) => {
+          const name = entry.config?.name?.trim() ?? "";
+          const sessionEntry = sessionEntriesByName.get(name);
+          return {
+            ...entry,
+            ...sessionEntry,
+            source: "workspace" as const,
+          };
+        });
+        // The session API may expose process-global entries while the workspace
+        // has no local file. Keep them visible for session-only controls, but
+        // mark them global so workspace persistence actions stay unavailable.
+        const globalFallbackEntries = sessionEntries.filter((entry) => {
+          const name = entry.config?.name?.trim() || entry.status?.name?.trim() || "";
+          return entry.source === "global" && !workspaceNames.has(name);
+        });
+        setEntries([...workspaceEntries, ...globalFallbackEntries]);
+        setStatus("ready");
+      } catch (loadError) {
+        setDisabledNames([]);
+        setTempEnabledNames([]);
+        setError(formatMcpError(loadError));
+        setStatus("error");
+      }
+      return;
+    }
+
     if (!normalizedSessionId) {
-      setEntries([]);
       setDisabledNames([]);
       setTempEnabledNames([]);
-      setScope(null);
       setStatus("ready");
       return;
     }
-    setStatus("loading");
-    setError("");
+
     try {
       const scoped = await listRuntimeSessionMcps(normalizedSessionId);
       setDisabledNames(scoped.disabled);
@@ -119,7 +211,7 @@ export function SessionMcpSurface({
       setError(formatMcpError(loadError));
       setStatus("error");
     }
-  }, [sessionId]);
+  }, [sessionId, workspacePath]);
 
   useEffect(() => {
     void refresh();
@@ -204,7 +296,9 @@ export function SessionMcpSurface({
   const handlePersistToggle = useCallback(
     async (entry: RuntimeSessionMcpEntry) => {
       const name = entry.config?.name?.trim() || entry.status?.name?.trim();
-      if (!name || !sessionId.trim()) {
+      const workspace = workspacePath?.trim() ?? "";
+      const normalizedSessionId = sessionId.trim();
+      if (!name || (!workspace && !normalizedSessionId)) {
         return;
       }
       const enabled = entry.status?.enabled ?? entry.config?.enabled ?? true;
@@ -213,12 +307,18 @@ export function SessionMcpSurface({
       setNotice("");
       setError("");
       try {
-        const result = await setRuntimeSessionMcpEnabled(
-          sessionId,
-          name,
-          targetEnabled,
-          "workspace",
-        );
+        const result = workspace
+          ? await setRuntimeWorkspaceMcpEnabled(
+              workspace,
+              name,
+              targetEnabled,
+            )
+          : await setRuntimeSessionMcpEnabled(
+              normalizedSessionId,
+              name,
+              targetEnabled,
+              "workspace",
+            );
         setNotice(
           result.message ||
             t(
@@ -235,14 +335,16 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [refresh, sessionId, t],
+    [refresh, sessionId, t, workspacePath],
   );
 
   /** 删除：从会话生效的配置文件中移除（写文件 + 热重载）。 */
   const handleDelete = useCallback(
     async (entry: RuntimeSessionMcpEntry) => {
       const name = entry.config?.name?.trim() || entry.status?.name?.trim();
-      if (!name || !sessionId.trim()) {
+      const workspace = workspacePath?.trim() ?? "";
+      const normalizedSessionId = sessionId.trim();
+      if (!name || (!workspace && !normalizedSessionId)) {
         return;
       }
       if (!window.confirm(t("panels.sessionMcp.deleteConfirm", { name }))) {
@@ -252,7 +354,11 @@ export function SessionMcpSurface({
       setNotice("");
       setError("");
       try {
-        await deleteRuntimeSessionMcp(sessionId, name);
+        if (workspace) {
+          await deleteRuntimeWorkspaceMcp(workspace, name);
+        } else {
+          await deleteRuntimeSessionMcp(normalizedSessionId, name);
+        }
         setNotice(t("panels.sessionMcp.deleteSuccess", { name }));
         await refresh();
       } catch (deleteError) {
@@ -261,12 +367,14 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [refresh, sessionId, t],
+    [refresh, sessionId, t, workspacePath],
   );
 
   /** 新增：写入会话生效的配置文件（工作区锚定时即工作区 mcp.yaml）。 */
   const submitAdd = useCallback(async () => {
-    if (!draft || !sessionId.trim() || pendingName) {
+    const workspace = workspacePath?.trim() ?? "";
+    const normalizedSessionId = sessionId.trim();
+    if (!draft || (!workspace && !normalizedSessionId) || pendingName) {
       return;
     }
     const built = buildMcpUpsertRequest(draft);
@@ -279,7 +387,11 @@ export function SessionMcpSurface({
     setError("");
     setNotice("");
     try {
-      await createRuntimeSessionMcp(sessionId, built.request);
+      if (workspace) {
+        await createRuntimeWorkspaceMcp(workspace, built.request);
+      } else {
+        await createRuntimeSessionMcp(normalizedSessionId, built.request);
+      }
       setNotice(t("panels.sessionMcp.createSuccess", { name }));
       setDraft(null);
       await refresh();
@@ -288,7 +400,7 @@ export function SessionMcpSurface({
     } finally {
       setPendingName("");
     }
-  }, [draft, pendingName, refresh, sessionId, t]);
+  }, [draft, pendingName, refresh, sessionId, t, workspacePath]);
 
   const loading = status === "loading";
   const loadFailed = status === "error";
@@ -322,7 +434,7 @@ export function SessionMcpSurface({
               aria-label={t("panels.sessionMcp.addAction")}
               className="h-7 w-7 shrink-0 px-0"
               data-testid="session-mcp-add"
-              disabled={loading || !sessionId.trim()}
+              disabled={loading || (!hasSession && !hasWorkspace)}
               onClick={() => setDraft(createMcpDraft())}
               size="sm"
               title={t("panels.sessionMcp.addTitle")}
@@ -334,7 +446,7 @@ export function SessionMcpSurface({
           <Button
             aria-label={t("panels.sessionMcp.refresh")}
             className="h-7 w-7 shrink-0 px-0"
-            disabled={loading || !sessionId.trim()}
+            disabled={loading || (!hasSession && !hasWorkspace)}
             onClick={() => void refresh()}
             size="sm"
             title={t("panels.sessionMcp.refresh")}
@@ -346,6 +458,31 @@ export function SessionMcpSurface({
       </header>
 
       {scope ? <SessionMcpScopeCard scope={scope} /> : null}
+
+      {hasWorkspace && hasSession ? (
+        <p
+          className={cn(
+            SESSION_DETAIL_CARD_CLASS,
+            "app-text-11 leading-4 text-muted-foreground",
+          )}
+          data-testid="session-mcp-workspace-impact"
+        >
+          {t("panels.sessionMcp.workspaceImpact")}
+        </p>
+      ) : null}
+
+      {!hasSession && !hasWorkspace ? (
+        <p
+          className={cn(
+            SESSION_DETAIL_CARD_CLASS,
+            "app-text-11 leading-4 text-muted-foreground",
+          )}
+          data-testid="session-mcp-unavailable"
+          role="status"
+        >
+          {t("panels.sessionMcp.unavailableNoWorkspace")}
+        </p>
+      ) : null}
 
       {draft ? (
         <div data-testid="session-mcp-add-form">
@@ -441,7 +578,7 @@ export function SessionMcpSurface({
         <SessionMcpRows
           disabledSet={disabledSet}
           entries={entries}
-          manageEnabled={scope !== null}
+          manageEnabled={scope !== null && (hasWorkspace || hasSession)}
           onDelete={(entry) => {
             void handleDelete(entry);
           }}
@@ -459,11 +596,14 @@ export function SessionMcpSurface({
             }
           }}
           pendingName={pendingName}
+          hideGlobalFallbackActions={hasWorkspace}
+          sessionControlsEnabled={hasSession}
+          toolsEnabled={hasSession}
           tempEnabledSet={tempEnabledSet}
         />
       ) : null}
 
-      {toolsFor && sessionId.trim() ? (
+      {toolsFor && hasSession ? (
         <SessionMcpToolsDialog
           name={toolsFor}
           onClose={() => setToolsFor(null)}
