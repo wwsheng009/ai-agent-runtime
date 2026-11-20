@@ -35,7 +35,21 @@ type SubmitPrompt struct {
 	TurnPinnedTools []runtimetypes.ToolDefinition
 	// TriggerTurnAuto marks a prompt submitted by the P0-3b trigger_turn drain.
 	TriggerTurnAuto bool
-	Reply           chan SubmitResult
+	// Accepted is notified after the prompt has been appended to session history,
+	// persisted, and the run has claimed runtime state. It is a delivery receipt,
+	// not a turn-completion/finalization signal.
+	Accepted chan error
+	Reply    chan SubmitResult
+}
+
+func (cmd SubmitPrompt) acknowledgeAccepted(err error) {
+	if cmd.Accepted == nil {
+		return
+	}
+	select {
+	case cmd.Accepted <- err:
+	default:
+	}
 }
 
 // RunRouteOverride carries per-run model routing values for a chat execution.

@@ -22,7 +22,7 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 		return fmt.Errorf("memoryruntime: LLM runtime is not configured")
 	}
 	workspace := resolveLocalWorkspacePath(h.RuntimeConfig, session)
-	rt, err := memoryassembly.BuildFromRuntimeConfig(memoryassembly.BuildOptions{
+	rt, release, err := acquireSharedMemoryRuntime(memoryassembly.BuildOptions{
 		RuntimeConfig:  h.RuntimeConfig,
 		Workspace:      workspace,
 		SessionManager: session.SessionManager,
@@ -34,9 +34,31 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 		return err
 	}
 	h.MemoryRuntime = rt
-	h.cleanupFns = append(h.cleanupFns, func() { _ = rt.Store.Close() })
+	h.memoryMaintenanceShared = true
+	session.SessionManager.SetSessionPurgeCoordinatorV2(func(
+		ctx context.Context, sessionID string, sessionGeneration, purgeGeneration int64,
+	) error {
+		_, err := rt.PurgeSessionWithGenerations(ctx, sessionID, sessionGeneration, purgeGeneration)
+		return err
+	})
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := session.SessionManager.ResumePendingSessionPurges(recoveryCtx); err != nil {
+		logpkg.Warnf("memory session purge recovery failed: %v", err)
+	}
+	cancelRecovery()
+	h.cleanupFns = append(h.cleanupFns, release)
 	h.bindMemoryDigestInvalidation()
 	return nil
+}
+
+// localTurnDigestSink is the single wiring point for both actor assembly paths
+// (legacy buildSessionActor and runtimehost.Deps). Keeping it here prevents the
+// unified executor path from silently dropping the memory outbox.
+func localTurnDigestSink(h *localChatRuntimeHost) runtimechat.TurnDigestSink {
+	if h == nil || h.MemoryRuntime == nil {
+		return nil
+	}
+	return h.MemoryRuntime
 }
 
 // bindMemoryDigestInvalidation prevents pending turn digests and existing
@@ -64,6 +86,9 @@ func (h *localChatRuntimeHost) bindMemoryDigestInvalidation() {
 }
 
 func (h *localChatRuntimeHost) startMemoryIdleSweep() func() {
+	if h != nil && h.memoryMaintenanceShared {
+		return func() {}
+	}
 	if h == nil || h.MemoryRuntime == nil || h.RuntimeConfig == nil || h.lifecycleCtx == nil {
 		return func() {}
 	}
@@ -79,14 +104,6 @@ func (h *localChatRuntimeHost) startMemoryIdleSweep() func() {
 
 type localMemoryMaintenanceHost struct {
 	host *localChatRuntimeHost
-}
-
-func (h localMemoryMaintenanceHost) RunIdle(ctx context.Context) error {
-	if h.host == nil || h.host.MemoryRuntime == nil {
-		return nil
-	}
-	_, err := h.host.MemoryRuntime.Run(ctx, memoryruntime.TriggerIdle)
-	return err
 }
 
 func (h localMemoryMaintenanceHost) RunConsolidation(ctx context.Context) error {
@@ -130,14 +147,4 @@ func (h *localChatRuntimeHost) triggerMemorySessionEnd(sessionID string) {
 				sessionID, result.Stage, result.Run.Processed, result.Run.Failed, result.Run.RollupFailed)
 		}
 	}()
-}
-
-// deleteMemoryTurnDigestsForSession is best-effort cleanup for an explicitly
-// deleted session. The memory DB and session DB are separate stores.
-func deleteMemoryTurnDigestsForSession(session *ChatSession, sessionID string) {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.MemoryRuntime == nil {
-		return
-	}
-	_, _ = session.LocalRuntimeHost.MemoryRuntime.DeleteSessionDigests(
-		context.Background(), strings.TrimSpace(sessionID))
 }

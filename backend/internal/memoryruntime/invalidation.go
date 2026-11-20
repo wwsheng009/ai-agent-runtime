@@ -11,10 +11,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
-// InvalidateFromRuntimeEvent applies the precise invalidation policy for
-// compaction/backtrack events. New events carry a canonical range. Legacy
-// payloads without enough evidence fall back to the old session-wide
-// conservative invalidation.
+// InvalidateFromRuntimeEvent applies generation-scoped invalidation for
+// compaction/backtrack events. Events without a positive session generation
+// are quarantined because a reused session ID cannot safely identify a source
+// incarnation.
 func (r *Runtime) InvalidateFromRuntimeEvent(ctx context.Context, eventType, sessionID string, payload map[string]interface{}) (memorystore.SessionRangeInvalidationResult, error) {
 	result := memorystore.SessionRangeInvalidationResult{}
 	if r == nil || r.Store == nil || strings.TrimSpace(sessionID) == "" {
@@ -28,7 +28,13 @@ func (r *Runtime) InvalidateFromRuntimeEvent(ctx context.Context, eventType, ses
 		if changed, ok := payloadBool(payload, "canonical_transcript_changed"); ok && !changed {
 			return result, nil
 		}
-		return r.invalidateSessionAll(ctx, sessionID, "compaction")
+		generation := payloadSessionGeneration(payload)
+		if generation == nil {
+			// Session IDs can be reused. Legacy events without a trustworthy
+			// incarnation must not invalidate every generation sharing the ID.
+			return result, nil
+		}
+		return r.invalidateSessionAllGeneration(ctx, sessionID, "compaction", *generation)
 	case chat.EventBacktrackFinished:
 		return r.invalidateBacktrackRange(ctx, sessionID, payload)
 	default:
@@ -42,20 +48,29 @@ func (r *Runtime) InvalidateSessionRange(ctx context.Context, sessionID string, 
 	if r == nil || r.Store == nil || strings.TrimSpace(sessionID) == "" {
 		return memorystore.SessionRangeInvalidationResult{}, nil
 	}
+	if inv.SessionGeneration == nil || *inv.SessionGeneration <= 0 {
+		return memorystore.SessionRangeInvalidationResult{}, nil
+	}
 	return r.Store.InvalidateSessionRange(ctx, strings.TrimSpace(sessionID), inv, reason)
 }
 
 func (r *Runtime) invalidateBacktrackRange(ctx context.Context, sessionID string, payload map[string]interface{}) (memorystore.SessionRangeInvalidationResult, error) {
 	result := memorystore.SessionRangeInvalidationResult{}
 	mode := strings.ToLower(strings.TrimSpace(payloadString(payload, "mode")))
+	generation := payloadSessionGeneration(payload)
 	if mode == string(chat.BacktrackModeCode) {
+		return result, nil
+	}
+	if generation == nil {
+		// Range seqs and message IDs are not sufficient to establish which
+		// incarnation they belong to after a session ID has been reused.
 		return result, nil
 	}
 	if strings.TrimSpace(payloadString(payload, "error")) != "" {
 		// The rewind may have partially persisted before failing. Fall back to
 		// the conservative session-wide invalidation for conversation modes.
 		if mode == string(chat.BacktrackModeConversation) || mode == string(chat.BacktrackModeBoth) {
-			return r.invalidateSessionAll(ctx, sessionID, "backtrack")
+			return r.invalidateSessionAllGeneration(ctx, sessionID, "backtrack", *generation)
 		}
 		return result, nil
 	}
@@ -84,43 +99,62 @@ func (r *Runtime) invalidateBacktrackRange(ctx context.Context, sessionID string
 	}
 	if cutoff > 0 && before > cutoff {
 		return r.InvalidateSessionRange(ctx, sessionID, memorystore.SessionRangeInvalidation{
-			CutoffMessageSeq: cutoff,
-			BeforeMessageSeq: before,
-			MessageIDs:       messageIDs,
-			TurnIDs:          turnIDs,
-			CutoffAt:         cutoffAt,
+			CutoffMessageSeq:  cutoff,
+			BeforeMessageSeq:  before,
+			MessageIDs:        messageIDs,
+			TurnIDs:           turnIDs,
+			SessionGeneration: generation,
+			CutoffAt:          cutoffAt,
 		}, "backtrack")
 	}
 	if len(messageIDs) > 0 || len(turnIDs) > 0 {
 		if cutoff <= 0 && removedCount > int64(len(messageIDs)) {
 			// Legacy tombstones cap removed ids. Without a canonical cutoff the
 			// remaining range cannot be reconstructed safely.
-			return r.invalidateSessionAll(ctx, sessionID, "backtrack")
+			return r.invalidateSessionAllGeneration(ctx, sessionID, "backtrack", *generation)
 		}
 		return r.InvalidateSessionRange(ctx, sessionID, memorystore.SessionRangeInvalidation{
-			MessageIDs: messageIDs,
-			TurnIDs:    turnIDs,
+			MessageIDs:        messageIDs,
+			TurnIDs:           turnIDs,
+			SessionGeneration: generation,
 		}, "backtrack")
 	}
 	if removedCount > 0 {
-		return r.invalidateSessionAll(ctx, sessionID, "backtrack")
+		return r.invalidateSessionAllGeneration(ctx, sessionID, "backtrack", *generation)
 	}
 	return result, nil
 }
 
-func (r *Runtime) invalidateSessionAll(ctx context.Context, sessionID, reason string) (memorystore.SessionRangeInvalidationResult, error) {
+func (r *Runtime) invalidateSessionAllGeneration(ctx context.Context, sessionID, reason string, generation int64) (memorystore.SessionRangeInvalidationResult, error) {
 	result := memorystore.SessionRangeInvalidationResult{}
-	affected, err := r.InvalidateSessionDigests(ctx, sessionID)
+	if generation <= 0 {
+		return result, nil
+	}
+	affected, err := r.InvalidateSessionDigestsForGeneration(ctx, sessionID, generation)
 	if err != nil {
 		return result, err
 	}
 	result.Digests = affected
-	memories, err := r.InvalidateSessionMemories(ctx, sessionID, reason)
+	memories, err := r.InvalidateSessionMemoriesForGeneration(ctx, sessionID, generation, reason)
 	if err != nil {
 		return result, err
 	}
 	result.Memories = memories
 	return result, nil
+}
+
+func payloadSessionGeneration(payload map[string]interface{}) *int64 {
+	if payload == nil {
+		return nil
+	}
+	if _, ok := payload["session_generation"]; !ok {
+		return nil
+	}
+	generation := payloadInt64(payload, "session_generation")
+	if generation <= 0 {
+		return nil
+	}
+	return &generation
 }
 
 func payloadInt64(payload map[string]interface{}, key string) int64 {

@@ -8,6 +8,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -86,6 +87,17 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 // 单测环境没有 bootstrap/LLM runtime（会 nil deref）。该断言在 **E3.4b** 切换后
 // 由真实调用路径 + 契约测试覆盖（见设计 §6）。
 var _ func(*localChatRuntimeHost, *ChatSession, runtimechat.SessionStorage, *runtimecfg.RuntimeConfig, string, string) runtimehost.Deps = (*localChatRuntimeHost).aicliRuntimeDeps
+
+func TestLocalTurnDigestSinkWiresBothActorPaths(t *testing.T) {
+	if got := localTurnDigestSink(nil); got != nil {
+		t.Fatalf("nil host must not wire a digest sink: %#v", got)
+	}
+	runtime := &memoryruntime.Runtime{}
+	host := &localChatRuntimeHost{MemoryRuntime: runtime}
+	if got := localTurnDigestSink(host); got != runtime {
+		t.Fatalf("digest sink mismatch: got %#v want %#v", got, runtime)
+	}
+}
 
 // TestAicliExecutorReuseEnabled 验证灰度开关语义（第 3 步：**默认开启**）：
 // 未设置/空串/任意未识别值 → 启用；显式回退值（0/false/off/no）→ 旧路径。

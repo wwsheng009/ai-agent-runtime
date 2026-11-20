@@ -161,6 +161,7 @@ func (a *SessionActor) handleBacktrackTo(cmd BacktrackTo) {
 	eventsEmitted := make([]string, 0, 4)
 	canonicalMessageCountBefore := session.CanonicalMessageCount
 	startPayload := backtrackEventPayload(planned, nil)
+	startPayload["session_generation"] = session.SessionGeneration
 	a.publish(runtimeevents.Event{
 		Type:      EventBacktrackStarted,
 		SessionID: a.id,
@@ -216,6 +217,7 @@ func (a *SessionActor) handleBacktrackTo(cmd BacktrackTo) {
 	})
 
 	finishPayload := backtrackEventPayload(planned, applyErr)
+	finishPayload["session_generation"] = session.SessionGeneration
 	if applyErr == nil && planned.Tombstone != nil {
 		canonicalCutoff := session.CanonicalMessageCount
 		if canonicalMessageCountBefore > 0 && canonicalCutoff >= canonicalMessageCountBefore {

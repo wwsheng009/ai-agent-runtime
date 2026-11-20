@@ -201,3 +201,53 @@ func TestMemoryCandidateSuppressionAndDuplicateAreNotActive(t *testing.T) {
 		t.Fatalf("active records after suppression = %d, %v", page.Count, err)
 	}
 }
+
+func TestCancelStaleBaseExtractionJobsKeepsWindowAndCurrentHash(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	jobs := []MemoryJob{
+		{Kind: "phase1_extract", JobKey: "session:s1:hash-old"},
+		{Kind: "phase1_extract", JobKey: "session:s1:hash-current"},
+		{Kind: "phase1_extract", JobKey: "session:s1:window:1-20:hash-old"},
+		{Kind: "phase1_extract", JobKey: "session:s1:byte-pages-v1:1-20:hash-old:0:page-old"},
+	}
+	for _, job := range jobs {
+		job.ProjectKey = store.ProjectKey()
+		if _, err := store.EnsureJob(ctx, job); err != nil {
+			t.Fatalf("EnsureJob(%s): %v", job.JobKey, err)
+		}
+	}
+
+	cancelled, err := store.CancelStaleBaseExtractionJobs(ctx, "s1", "hash-current", "superseded")
+	if err != nil {
+		t.Fatalf("CancelStaleBaseExtractionJobs: %v", err)
+	}
+	if cancelled != 1 {
+		t.Fatalf("cancelled = %d, want 1", cancelled)
+	}
+	all, err := store.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	statuses := make(map[string]JobStatus)
+	for _, job := range all {
+		statuses[job.JobKey] = job.Status
+	}
+	if statuses["session:s1:hash-old"] != JobStatusCancelled {
+		t.Fatalf("old base job status = %s, want cancelled", statuses["session:s1:hash-old"])
+	}
+	if statuses["session:s1:hash-current"] != JobStatusPending {
+		t.Fatalf("current base job status = %s, want pending", statuses["session:s1:hash-current"])
+	}
+	if statuses["session:s1:window:1-20:hash-old"] != JobStatusPending {
+		t.Fatalf("window job must be preserved, status = %s", statuses["session:s1:window:1-20:hash-old"])
+	}
+	if statuses["session:s1:byte-pages-v1:1-20:hash-old:0:page-old"] != JobStatusPending {
+		t.Fatalf("byte-page job must be preserved")
+	}
+}

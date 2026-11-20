@@ -754,6 +754,66 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 	return a.submitPromptAsync(ctx, ctx, nil, prompt, runMeta, opts...)
 }
 
+// SubmitPromptAsyncWithReceipt submits a prompt and waits until it is present in
+// the persisted session history and the actor has claimed the run state. The
+// returned channel reports the eventual model-run result; a nil method error is
+// only a durable prompt-delivery receipt, never a turn-finalization signal.
+func (a *SessionActor) SubmitPromptAsyncWithReceipt(ctx context.Context, prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) (<-chan SubmitResult, error) {
+	if a == nil {
+		return nil, fmt.Errorf("session actor is nil")
+	}
+	if a.sessionStore == nil {
+		return nil, fmt.Errorf("chat: durable prompt receipt requires a session store")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.Start()
+	reply := make(chan SubmitResult, 1)
+	accepted := make(chan error, 1)
+	var opt SubmitPromptOption
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	cmd := SubmitPrompt{
+		Ctx:                ctx,
+		Prompt:             prompt,
+		ImagePaths:         opt.ImagePaths,
+		ImageArtifactDir:   opt.ImageArtifactDir,
+		RunMeta:            runMeta.Clone(),
+		RouteOverride:      opt.RouteOverride.Clone(),
+		TurnSystemMessages: cloneRuntimeMessages(opt.TurnSystemMessages),
+		ReplaceHistory:     cloneRuntimeMessages(opt.ReplaceHistory),
+		TurnPinnedTools:    cloneRuntimeToolDefinitions(opt.TurnPinnedTools),
+		TriggerTurnAuto:    opt.TriggerTurnAuto,
+		Accepted:           accepted,
+		Reply:              reply,
+	}
+	if err := a.send(ctx, cmd); err != nil {
+		return nil, err
+	}
+	// Once the command is queued, wait for the actor's explicit acknowledgement
+	// rather than returning on ctx cancellation: the prompt may already have
+	// crossed the persistence boundary and a caller retry could duplicate it.
+	select {
+	case err := <-accepted:
+		if err != nil {
+			return nil, err
+		}
+		return reply, nil
+	case <-a.done:
+		select {
+		case err := <-accepted:
+			if err != nil {
+				return nil, err
+			}
+			return reply, nil
+		default:
+			return nil, ErrSessionActorStopped
+		}
+	}
+}
+
 func (a *SessionActor) submitPromptAsync(submitCtx, runCtx context.Context, release func(), prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) error {
 	if release == nil {
 		release = func() {}
@@ -1468,16 +1528,22 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	if reply == nil {
 		return
 	}
+	acceptanceErr := error(nil)
+	defer func() {
+		cmd.acknowledgeAccepted(acceptanceErr)
+	}()
 	ctx := cmd.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	prompt := strings.TrimSpace(cmd.Prompt)
 	if prompt == "" {
-		reply <- SubmitResult{Err: fmt.Errorf("prompt is empty")}
+		acceptanceErr = fmt.Errorf("prompt is empty")
+		reply <- SubmitResult{Err: acceptanceErr}
 		return
 	}
 	if err := a.ensureReady(); err != nil {
+		acceptanceErr = err
 		reply <- SubmitResult{Err: err}
 		return
 	}
@@ -1491,6 +1557,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	session, err := a.loadSession(runCtx)
 	if err != nil {
 		a.releaseSessionRun(run)
+		acceptanceErr = err
 		run.complete(SubmitResult{Err: err})
 		return
 	}
@@ -1510,7 +1577,8 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		msg, err := llm.NewUserPromptMessageWithImages(prompt, cmd.ImagePaths)
 		if err != nil {
 			a.releaseSessionRun(run)
-			run.complete(SubmitResult{Err: fmt.Errorf("resolving image attachments: %w", err)})
+			acceptanceErr = fmt.Errorf("resolving image attachments: %w", err)
+			run.complete(SubmitResult{Err: acceptanceErr})
 			return
 		}
 		preparedPrompt = msg
@@ -1534,6 +1602,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		session.AddMessage(*preparedPrompt)
 		if err := a.persistSession(runCtx, session); err != nil {
 			a.releaseSessionRun(run)
+			acceptanceErr = err
 			run.complete(SubmitResult{Err: err})
 			return
 		}
@@ -1542,6 +1611,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	if historyReplaced && !appendedPrompt {
 		if err := a.persistSession(runCtx, session); err != nil {
 			a.releaseSessionRun(run)
+			acceptanceErr = err
 			run.complete(SubmitResult{Err: err})
 			return
 		}
@@ -1564,6 +1634,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		return nil
 	}); err != nil {
 		a.releaseSessionRun(run)
+		acceptanceErr = err
 		run.complete(SubmitResult{Err: err})
 		return
 	}
@@ -3177,6 +3248,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	// reads canonical rows, so this event must not invalidate canonical-derived
 	// memory.
 	payload["canonical_transcript_changed"] = false
+	payload["session_generation"] = session.SessionGeneration
 	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
 		payload["compact_generation"] = gen
 	}
@@ -3406,6 +3478,7 @@ func (a *SessionActor) runManualCompact(
 	payload["compacted_messages"] = result.CompactedMessages
 	payload["message_count_after"] = len(result.ReplacementHistory)
 	payload["canonical_transcript_changed"] = false
+	payload["session_generation"] = session.SessionGeneration
 	if gen := contextIntValue(session.Metadata.Context, ContextCompactGeneration); gen > 0 {
 		payload["compact_generation"] = gen
 	}
@@ -3963,6 +4036,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// turn starts. Only the current ownership token may mutate or persist
 		// session state.
 		publishTerminal := false
+		var captureReceipt *TurnCaptureReceipt
 		logicalTurnPhase := ParentTurnPhaseFinalizing
 		logicalEpisodeID := strings.TrimSpace(run.episodeID)
 		if a.sessionRunOwned(run) {
@@ -3984,6 +4058,25 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				// Persist history before exposing an idle/stopped runtime state.
 				// Once the state is non-busy, a successor is allowed to load and
 				// append to this durable snapshot.
+				_, canCapture := a.sessionStore.(SessionStorageTurnCaptureCommitter)
+				if !approvalDetached && a.turnDigestSink != nil && canCapture && sessionContainsTurn(session, turnID) {
+					usageJSON := "{}"
+					if result != nil && result.Usage != nil {
+						if encoded, marshalErr := json.Marshal(result.Usage); marshalErr == nil {
+							usageJSON = string(encoded)
+						}
+					}
+					captureReceipt = &TurnCaptureReceipt{
+						SessionID:     a.id,
+						TurnID:        turnID,
+						MessageSeqEnd: int64(session.CanonicalMessageCount),
+						TraceID:       resultTraceID(result, turnID),
+						Outcome:       terminalTurnOutcome(interrupted, status, execErr, result),
+						Steps:         resultSteps(result),
+						UsageJSON:     usageJSON,
+					}
+					finalizeCtx = withTurnCaptureReceipt(finalizeCtx, captureReceipt)
+				}
 				if persistErr := a.persistSession(finalizeCtx, session); persistErr != nil &&
 					!errors.Is(persistErr, errSessionRunSuperseded) && execErr == nil {
 					execErr = persistErr
@@ -4251,33 +4344,28 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// when content is empty so a reasoning-only/whitespace response can
 		// reconcile its final reasoning snapshot and retire the stream identity.
 		if publishTerminal && result != nil {
-			if a.turnDigestSink != nil {
+			if a.turnDigestSink != nil && captureReceipt != nil && strings.TrimSpace(captureReceipt.ID) != "" {
 				userMessageID, assistantMessageID := turnDigestMessageIDs(session, turnID)
-				outcome := "success"
-				switch {
-				case interrupted || status == SessionStopped:
-					outcome = "interrupted"
-				case !success:
-					outcome = "error"
-				case strings.TrimSpace(result.Output) == "":
-					outcome = "empty"
-				case (resume || strings.TrimSpace(continuation) != "") && strings.TrimSpace(prompt) == "":
-					outcome = "continuation"
-				}
-				a.recordTurnDigest(TurnDigest{
+				digest := TurnDigest{
 					SessionID:          a.id,
 					TurnID:             turnID,
 					TraceID:            resultTraceID(result, turnID),
 					Prompt:             prompt,
 					AssistantOutput:    result.Output,
-					Outcome:            outcome,
+					Outcome:            captureReceipt.Outcome,
 					Steps:              resultSteps(result),
 					Usage:              result.Usage,
 					UserMessageID:      userMessageID,
 					AssistantMessageID: assistantMessageID,
 					MessageSeqEnd:      int64(session.CanonicalMessageCount),
 					AssistantStreamID:  result.AssistantStreamID,
-				})
+					CaptureReceiptID:   captureReceipt.ID,
+				}
+				// The canonical receipt is already durable in the terminal
+				// session transaction. Cross-store materialization is an
+				// at-least-once background handoff and must not delay terminal
+				// event delivery or turn completion.
+				go a.recordTurnDigest(digest)
 			}
 			messagePayload := map[string]interface{}{
 				"turn_id":      turnID,
@@ -4545,6 +4633,9 @@ func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, sessi
 		return errSessionRunSuperseded
 	}
 	if a.sessionStore == nil {
+		if _, ok := turnCaptureReceiptFromContext(ctx); ok {
+			return fmt.Errorf("chat: terminal capture requires a durable session store")
+		}
 		mergeExternalDirectoryAdmission(session, nil, admitted)
 		return nil
 	}
@@ -4612,7 +4703,7 @@ func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, sessi
 			// The row vanished mid-turn: recreate it from the actor's full
 			// in-memory snapshot instead of failing the turn's persist.
 			mergeExternalDirectoryAdmission(session, nil, admitted)
-			if saveErr := a.sessionStore.Save(ctx, session); saveErr != nil {
+			if saveErr := a.persistSessionSnapshot(ctx, session, true); saveErr != nil {
 				return wrapSessionStoreError(saveErr, session.ID)
 			}
 			a.publishSessionRecovered("persist_reload")
@@ -4662,11 +4753,11 @@ func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, sessi
 	if hasRun && !a.sessionRunOwned(run) {
 		return errSessionRunSuperseded
 	}
-	if err := a.sessionStore.Update(ctx, session); err != nil {
+	if err := a.persistSessionSnapshot(ctx, session, false); err != nil {
 		if errors.Is(err, ErrSessionNotFound) && a.ensureSession != nil {
 			// Lost a race with an external delete between reload and update:
 			// fall back to create semantics with the current snapshot.
-			if saveErr := a.sessionStore.Save(ctx, session); saveErr != nil {
+			if saveErr := a.persistSessionSnapshot(ctx, session, true); saveErr != nil {
 				return wrapSessionStoreError(saveErr, session.ID)
 			}
 			a.publishSessionRecovered("persist_update")
@@ -4675,6 +4766,31 @@ func (a *SessionActor) persistSessionWithExternalDirs(ctx context.Context, sessi
 		return wrapSessionStoreError(err, session.ID)
 	}
 	return nil
+}
+
+func (a *SessionActor) persistSessionSnapshot(ctx context.Context, session *Session, create bool) error {
+	receipt, capturesTurn := turnCaptureReceiptFromContext(ctx)
+	if !capturesTurn {
+		if create {
+			return a.sessionStore.Save(ctx, session)
+		}
+		return a.sessionStore.Update(ctx, session)
+	}
+	committer, ok := a.sessionStore.(SessionStorageTurnCaptureCommitter)
+	if !ok {
+		return fmt.Errorf("chat: session store does not support atomic turn capture receipts")
+	}
+	var committed TurnCaptureReceipt
+	var err error
+	if create {
+		committed, err = committer.SaveWithTurnCapture(ctx, session, *receipt)
+	} else {
+		committed, err = committer.UpdateWithTurnCapture(ctx, session, *receipt)
+	}
+	if err == nil {
+		*receipt = committed
+	}
+	return err
 }
 
 // planModeStateRevision reports the newest lifecycle timestamp recorded in a
@@ -7436,5 +7552,30 @@ func chatActorConfigValue(cfg *agent.Config, field string) string {
 		return strings.TrimSpace(cfg.Model)
 	default:
 		return ""
+	}
+}
+
+func sessionContainsTurn(session *Session, turnID string) bool {
+	if session == nil || strings.TrimSpace(turnID) == "" {
+		return false
+	}
+	for _, message := range session.History {
+		if strings.TrimSpace(runtimetypes.TurnID(message)) == strings.TrimSpace(turnID) {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalTurnOutcome(interrupted bool, status SessionStatus, execErr error, result *agent.Result) string {
+	switch {
+	case interrupted || status == SessionStopped:
+		return "interrupted"
+	case execErr != nil || result == nil || !result.Success:
+		return "error"
+	case strings.TrimSpace(result.Output) == "":
+		return "empty"
+	default:
+		return "success"
 	}
 }

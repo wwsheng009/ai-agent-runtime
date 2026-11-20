@@ -144,6 +144,7 @@ func (h *localChatRuntimeHost) aicliRuntimeDeps(
 		EventStore:                h.EventStore,
 		LLMRuntime:                aicliHostLLMRuntime(h),
 		EventBus:                  h.EventBus,
+		TurnDigestSink:            localTurnDigestSink(h),
 		AcquireSessionLeaseNoWait: acquire,
 		AcquireSessionLease:       acquire,
 		// O1：aicli 在 actor 生命周期内持锁（仅 stalled/stop 释放）。

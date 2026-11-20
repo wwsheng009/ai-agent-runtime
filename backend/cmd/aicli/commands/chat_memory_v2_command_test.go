@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -71,6 +72,39 @@ memory:
 	}
 	if !strings.Contains(string(updated), "mode: shadow") {
 		t.Fatalf("memory mode was not persisted: %s", updated)
+	}
+}
+
+func TestChatMemoryStatusReportsRuntimePresence(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	store, err := memorystore.New(memorystore.Config{Root: t.TempDir(), Mode: "on"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	doc, ok := buildChatMemoryStatusDocument(store, chatMemoryRuntimeStatus{
+		Ready: true, Trigger: "both", Generation: true, TurnDigest: true,
+		Digest: memoryruntime.DigestStats{Written: 2, Skipped: 1, LastSkipReason: "workspace_mismatch"},
+	})
+	if !ok {
+		t.Fatal("status document not ready")
+	}
+	rendered := ui.RenderDocumentPlain(doc)
+	if !strings.Contains(rendered, "runtime=ready") ||
+		!strings.Contains(rendered, "trigger=both") ||
+		!strings.Contains(rendered, "digest=true") ||
+		!strings.Contains(rendered, "digest_runtime: written=2 skipped=1 failed=0") ||
+		!strings.Contains(rendered, "last_skip=workspace_mismatch") {
+		t.Fatalf("status document missing runtime evidence:\n%s", rendered)
+	}
+
+	doc, ok = buildChatMemoryStatusDocument(store, chatMemoryRuntimeStatus{})
+	if !ok {
+		t.Fatal("status document not ready without runtime")
+	}
+	if rendered = ui.RenderDocumentPlain(doc); !strings.Contains(rendered, "runtime=not_initialized") {
+		t.Fatalf("status document must expose missing runtime:\n%s", rendered)
 	}
 }
 

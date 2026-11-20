@@ -5,6 +5,83 @@
 > 修订：2026-11-11，实施回写 import/export、private/deleted 授权、recallTrace 配置、session mode 项目隔离、summary 稳定项去重与预算截断；2026-11-10，M1/M2 实施回写 `memory_session_modes`、active summary 唯一约束、summary watermark、migration runs、schema version 视图、generation 配置和 job/candidate 契约；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、pinnedBudgetRatio/stageSplit、summary gate、summary_rebuild job、injected_only exposure。
 > 2026-11-11 追加：`memory_turn_digests`（migration v3/v4/v6）与 `generation.turnDigest` Phase 1 core + 窗口化读取 + L0→L1→L2 rollup 已实现；仍以 canonical transcript 为抽取 source。
 
+## 0. 2026-11-19 收敛后的对象与交接契约
+
+本文件中的 schema/API 必须按下面的唯一正常路径解释：
+
+```text
+canonical chat turn commit
+  -> canonical capture receipt
+  -> memory materialization
+  -> phase1_extract/v2 job
+  -> candidate records + output receipt
+  -> consolidation
+  -> active memory
+  -> retrieval/injection
+```
+
+### 0.1 唯一事实源和对象职责
+
+| 对象 | 所有者 | 唯一职责 | 不能承担的职责 |
+| --- | --- | --- | --- |
+| canonical transcript | chat/session SQLite | 消息事实源 | 不由 memory digest/window 反向替代 |
+| `session_turn_capture_receipts` | canonical SQLite | 在 canonical turn commit 同一事务中记录可重放 handoff | 不是第二个 transcript/event source |
+| `memory_turn_digests` | memory SQLite | memory-side materialization/progress；保存有界、脱敏的诊断字段 | 不是 canonical transcript，也不是新的触发事实源 |
+| `memory_jobs` | memory SQLite | 可租约、可重试的 work item | 不是输入事实或完成凭证 |
+| `phase1_extract/v2` | memory worker | receipt 固定 range 的 extraction job | 不得与 legacy `phase1_extract` 同时消费同一 turn |
+| candidate/output receipt | memory SQLite | extraction 输出及提交凭证 | 不得绕过 job/candidate commit 直接激活记忆 |
+| `memory_turn_windows` / `TurnWindow` | memory SQLite | 从已完成 turn/range 派生的 L1 rollup/summary | 不是 transcript 或新的 event source |
+| `RunSession*` / legacy `phase1_extract` | runtime | pre-receipt/historical compatibility、migration、recovery | 不是 receipt-backed 新回合的隐式入口 |
+
+canonical SQLite 与 memory SQLite 之间没有跨库事务。交接是
+**at-least-once**：以 receipt ID、`(session, turn, canonical revision,
+range hash)`、job key、candidate identity 和 output receipt 幂等；以
+session generation/incarnation、purge fence、worker lease、stale source
+validation 和 candidate commit 防止旧工作污染新数据。测试全绿只能证明
+验收边界，不代表历史 rows 已完成迁移。
+
+### 0.2 Receipt-backed 与 legacy 的路由边界
+
+- receipt-capable source 的新回合只由 materializer/capture worker 处理；
+  `Runtime.Run` 不再把同一 source 交给 session-wide replay。
+- `phase1_extract/v2` 使用 capture receipt 固定的 canonical
+  `[message_seq_start, message_seq_end]` 和 `canonical_revision`；
+  extraction 前后都必须重新校验 range/hash/revision。
+- `capture_receipt_id <> ''` 的 memory rows 只属于 v2 capture worker；
+  legacy digest 查询、claim、状态更新必须带
+  `capture_receipt_id = ''`。
+- `RunSession`、`RunSessionWindow`、`RunPendingTurnDigests`、
+  `RecoverPendingPhase1` 只处理 pre-receipt/historical rows。receipt-backed
+  session 使用 session-level routing fence，即使旧 digest 仍存在也必须跳过。
+- generation disabled 时仍可 materialize canonical receipt，但不得运行 LLM，
+  也不得 fallback 到 legacy extraction。
+
+### 0.3 Canonical capture receipt 逻辑 schema
+
+canonical SQLite 至少需要以下字段（实际迁移以 `chat` schema 为准）：
+
+```sql
+CREATE TABLE session_turn_capture_receipts (
+    id                 TEXT PRIMARY KEY,
+    session_id         TEXT NOT NULL,
+    session_generation INTEGER NOT NULL DEFAULT 0,
+    turn_id            TEXT NOT NULL,
+    message_seq_start  INTEGER NOT NULL,
+    message_seq_end    INTEGER NOT NULL,
+    canonical_revision INTEGER NOT NULL,
+    range_hash         TEXT NOT NULL,
+    state              TEXT NOT NULL, -- captured | materializing | materialized | deferred
+    attempt_count      INTEGER NOT NULL DEFAULT 0,
+    retry_at           TEXT,
+    created_at         TEXT NOT NULL,
+    materialized_at    TEXT
+);
+```
+
+receipt 必须在 canonical turn commit 的同一 SQLite transaction 中写入；跨库
+materializer 成功后才推进 `materialized`。memory 侧的 digest/job/candidate
+提交和 canonical receipt acknowledgement 都必须可重试、可观测、可幂等。
+
 ## 1. 数据库
 
 ### 1.1 路径
@@ -309,7 +386,7 @@ CREATE INDEX idx_memory_recall_traces_session
 ```sql
 CREATE TABLE memory_jobs (
     id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL, -- phase1_extract | phase2_consolidate | summary_compile | summary_rebuild | freshness_sweep | cleanup
+    kind            TEXT NOT NULL, -- phase1_extract/v2 | phase1_extract (legacy) | phase2_consolidate | summary_compile | summary_rebuild | freshness_sweep | cleanup
     job_key         TEXT NOT NULL,
     scope           TEXT NOT NULL,
     project_key     TEXT NOT NULL DEFAULT '',
@@ -359,9 +436,12 @@ CREATE INDEX idx_memory_session_modes_project
   ON memory_session_modes(project_key, mode, updated_at DESC);
 ```
 
-### 3.4.2 `memory_turn_digests`（Phase 1，已确认）
+### 3.4.2 `memory_turn_digests`（memory-side materialization/progress）
 
-运行时 turn digest outbox。它只负责“turn 已结束、等待记忆抽取”的轻量持久化，不是第二份 canonical transcript；Phase 1 抽取仍读取 canonical transcript。
+这是 memory-side materialization/progress row。它保存 receipt 固定 range 的有界
+诊断信息，但不是第二份 canonical transcript；正常新回合由
+`phase1_extract/v2` 消费。`capture_receipt_id=''` 的 rows 才属于下面描述的
+pre-receipt/historical legacy recovery。
 
 ```sql
 CREATE TABLE memory_turn_digests (
@@ -371,6 +451,9 @@ CREATE TABLE memory_turn_digests (
     project_key     TEXT NOT NULL,
     session_id      TEXT NOT NULL,
     turn_id         TEXT NOT NULL,
+    capture_receipt_id TEXT NOT NULL DEFAULT '',
+    source_revision INTEGER NOT NULL DEFAULT 0,
+    range_hash      TEXT NOT NULL DEFAULT '',
     trace_id        TEXT,
     parent_session_id TEXT,
     agent_type      TEXT,
@@ -410,19 +493,26 @@ CREATE INDEX idx_memory_turn_digests_created
 
 语义：
 
-- `turn-end` 只写 digest，不跑 LLM；`session-end` / `idle` / `startup recovery` 再消费；
+- receipt-backed turn 由 canonical commit 同事务写 receipt，再由 materializer
+  写入本表并创建 `phase1_extract/v2` job；capture worker 消费固定 range，不跑
+  session-wide replay；
+- `turn-end` legacy digest 只写 bounded row，不跑 LLM；只有
+  `capture_receipt_id=''` 的 pre-receipt/historical rows 才由显式
+  `session-end` / `idle` / `startup recovery` compatibility 入口消费；
 - producer 落库前必须核对会话身份、workspace、子 agent 策略与 session memory mode；身份无法确认时 fail closed，不得先保存文本再依赖消费者过滤；
 - 默认只自动抽取 `outcome=success` 且 `assistant_text` 非空的 turn；
 - `user_text` / `assistant_text` 必须脱敏且有界；`storeText=false` 时只保留 message IDs；
 - `digest_seq` 是全局单调序号，处理时按 session 过滤；确认水位只能推进到实际 canonical 完成凭证覆盖的连续 digest 前缀，不能直接取待处理批次的 `MAX(digest_seq)`。小会话也必须核对已知的 `message_seq_end`，不能仅凭 session metadata 的消息总数确认；
 - `digest_hash` / `digest_revision` 在 Phase 1 只用于审计/诊断，不参与现有 `MarkSessionSourceChanged` 的 transcript stale 判定；
-- startup recovery 只处理 closed/stale/orphaned session（含 heartbeat/lease 过期）；不得抽取活跃会话；
+- legacy startup recovery 只处理无 receipt 的 closed/stale/orphaned session（含 heartbeat/lease 过期）；receipt-backed session 由 capture recovery 处理，不得进入 legacy replay；
 - 大会话按 `digest_seq` 分批；在窗口化 canonical transcript 读取完成前，只处理最近一页时不得把更早的 pending digest 标记为 done；
 - completion 必须表示整个请求范围已成功抽取并持久化（或同一 job 此前已成功）；`source_hash` 非空、job 运行中、退避或失败均不是完成凭证。单 turn 超过消息上限也必须按有界子窗口处理，完成前保留 pending；
 - `message_seq_end` 记录 turn 结束时的 canonical message 序号，供窗口化读取确定 `[start, end]`；
 - 回溯后的窗口起点只使用仍有效的 canonical 水位，invalidated digest 不得参与；retention 始终限定当前 `project_key`；
 - `rollup_status` 与 extraction `status` 独立：抽取 done 后仍为 `rollup_status=pending`，只有 L1 window 与 L2 seed candidate 成功后才变为 `done`；window summary 关闭时为 `skipped`；
-- startup/idle 必须独立发现抽取完成但 rollup 未完成的工作，不能仅扫描 extraction-pending。关闭 digest 或遇到升级前无 digest 的会话时，不得隐式关闭原有抽取入口；
+- capture worker 与 legacy recovery 必须独立发现抽取完成但 rollup 未完成的工作；
+  receipt-backed session 不得进入 legacy sweep。升级前无 receipt 的会话可以保留
+  bounded compatibility extraction，但不能成为 receipt-backed 新回合的 fallback；
 - 只有 `rollup_status=done/skipped` 的 done/skipped/invalidated 行才按 `turnDigest.retentionDays` 清理；rollup failed/pending 行保留；
 - `deferred` 行保留给窗口化读取；session 删除由应用层清理（memory DB 与 session DB 分离，不能依赖 FK 级联）。
 
@@ -909,7 +999,8 @@ memory:
 - 现有 `context_max_project_memory` / `context_project_memory_tokens` 作为预算 override 继续生效；
 - `manual.enabled` 独立于 `mode`，保留现有手工笔记行为；
 - `mode=off` 时不启动 v2 自动任务、不注册 v2 工具、不注入 v2 记忆；无手工访问时不创建 v2 DB。
-- `generation.trigger=both` 表示 idle sweep 与 session-end 都启用；长 gateway 推荐 `both`。
+- `generation.trigger=both` 表示同一个 capture worker 有 idle 与 session-end 两个
+  调度时机；两者必须通过 receipt/job 幂等合并，不能各自做一遍 session replay。
 - `injection.pinnedBudgetRatio` 为 pinned/manual 预留注入预算；`injection.stageSplit=true` 时稳定 summary/pinned 放 `project_memory`，query records 放末尾 `project_memory_recall`。
 - `injection.maxItems` 约束 summary 之外的 records/recall；pinned/manual 走独立预算，不被 `maxItems` 挤掉。
 - `feedback.*` 控制 citation/exposure 采样与保留；`injected_only` 只记 exposure，不增加 `use_count`。
@@ -920,7 +1011,7 @@ memory:
 | --- | --- |
 | `mode` / `scope(project)` / `storePath` / `manual` | 已实现并生效 |
 | `generation.*` | 已实现，manual 触发可绕过 disabled |
-| `generation.turnDigest.*` | 已实现；`windowSummaryEnabled=false` 时 rollup 标记 skipped；`windowTurns` 默认 100；`windowRetentionDays` 默认 30；session-end 有界 drain；`idleExtractMinutes` 只控制 digest ticker，consolidation/diagnostics 保持独立 30m ticker；active session 以 `extractEveryNTurns` 为提前阈值 |
+| `generation.turnDigest.*` | 已实现；receipt-backed turn 由 materializer/capture worker 处理；`windowSummaryEnabled=false` 时 rollup 标记 skipped；`windowTurns` 默认 100；`windowRetentionDays` 默认 30；无 receipt 历史 rows 才由 legacy session-end/idle recovery 有界 drain；`idleExtractMinutes` 只控制 capture 调度，consolidation/diagnostics 保持独立 30m ticker |
 | `consolidation.enabled/maxRecords/maxUnusedDays/summaryTokenBudget/intervalHours/model` | 已实现；配置 `model` 时优先 LLM 摘要，失败/空输出/secret/非法结构时回退确定性编译器，超预算时截断到预算 |
 | `injection.enabled/mode/maxItems/tokenBudget/pinnedBudgetRatio/stageSplit` | 已实现并接入 context budget |
 | `injection.recallTrace.enabled/sampleRate/retentionDays` | 已实现；retention 由 memory maintenance ticker 定时清理 |

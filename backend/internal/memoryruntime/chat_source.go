@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -18,6 +19,168 @@ type ChatSessionSource struct {
 	Manager            *chat.SessionManager
 	UserID             string
 	MaxToolOutputRunes int
+}
+
+var (
+	_ TurnCaptureReceiptSource                  = (*ChatSessionSource)(nil)
+	_ SessionTurnCaptureReceiptSource           = (*ChatSessionSource)(nil)
+	_ SessionTurnCaptureReceiptGenerationSource = (*ChatSessionSource)(nil)
+)
+
+func (s *ChatSessionSource) receiptStore() (chat.SessionStorageTurnCaptureReceiptStore, error) {
+	if s == nil || s.Manager == nil || s.Manager.GetStorage() == nil {
+		return nil, fmt.Errorf("memoryruntime: chat session storage is nil")
+	}
+	store, ok := s.Manager.GetStorage().(chat.SessionStorageTurnCaptureReceiptStore)
+	if !ok {
+		return nil, fmt.Errorf("memoryruntime: chat session storage has no turn capture receipt store")
+	}
+	return store, nil
+}
+
+func (s *ChatSessionSource) ListTurnCaptureReceipts(ctx context.Context, limit int) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListTurnCaptureReceipts(ctx, limit)
+}
+
+func (s *ChatSessionSource) ListTurnCaptureReceiptsForSession(ctx context.Context, sessionID string, limit int) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListTurnCaptureReceiptsForSession(ctx, sessionID, limit)
+}
+
+func (s *ChatSessionSource) ListMaterializedTurnCaptureReceipts(ctx context.Context, limit int) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListMaterializedTurnCaptureReceipts(ctx, limit)
+}
+
+func (s *ChatSessionSource) ListMaterializedTurnCaptureReceiptsPage(
+	ctx context.Context,
+	after *chat.TurnCaptureReceipt,
+	limit int,
+) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListMaterializedTurnCaptureReceiptsPage(ctx, after, limit)
+}
+
+func (s *ChatSessionSource) ListMaterializedTurnCaptureReceiptsForSession(ctx context.Context, sessionID string, limit int) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListMaterializedTurnCaptureReceiptsForSession(ctx, sessionID, limit)
+}
+
+func (s *ChatSessionSource) ListMaterializedTurnCaptureReceiptsForSessionPage(
+	ctx context.Context,
+	sessionID string,
+	after *chat.TurnCaptureReceipt,
+	limit int,
+) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListMaterializedTurnCaptureReceiptsForSessionPage(ctx, sessionID, after, limit)
+}
+
+func (s *ChatSessionSource) ListMaterializedTurnCaptureReceiptsForSessionGenerationPage(
+	ctx context.Context,
+	sessionID string,
+	generation int64,
+	after *chat.TurnCaptureReceipt,
+	limit int,
+) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	generationStore, ok := store.(chat.SessionStorageMaterializedTurnCaptureReceiptGenerationPageStore)
+	if !ok {
+		return nil, fmt.Errorf("memoryruntime: chat session storage has no generation-scoped materialized capture receipt page")
+	}
+	return generationStore.ListMaterializedTurnCaptureReceiptsForSessionGenerationPage(
+		ctx, sessionID, generation, after, limit,
+	)
+}
+
+func (s *ChatSessionSource) HasTurnCaptureReceiptsForSession(ctx context.Context, sessionID string) (bool, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return false, err
+	}
+	return store.HasTurnCaptureReceiptsForSession(ctx, sessionID)
+}
+
+func (s *ChatSessionSource) ListTurnCaptureReceiptsForSessionGeneration(
+	ctx context.Context, sessionID string, generation int64, limit int,
+) ([]chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return nil, err
+	}
+	generationStore, ok := store.(chat.SessionStorageTurnCaptureReceiptGenerationStore)
+	if !ok {
+		return nil, fmt.Errorf("memoryruntime: chat session storage has no generation-scoped capture receipt store")
+	}
+	return generationStore.ListTurnCaptureReceiptsForSessionGeneration(ctx, sessionID, generation, limit)
+}
+
+func (s *ChatSessionSource) HasTurnCaptureReceiptsForSessionGeneration(
+	ctx context.Context, sessionID string, generation int64,
+) (bool, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return false, err
+	}
+	generationStore, ok := store.(chat.SessionStorageTurnCaptureReceiptGenerationStore)
+	if !ok {
+		return false, fmt.Errorf("memoryruntime: chat session storage has no generation-scoped capture receipt store")
+	}
+	return generationStore.HasTurnCaptureReceiptsForSessionGeneration(ctx, sessionID, generation)
+}
+
+func (s *ChatSessionSource) GetTurnCaptureReceipt(ctx context.Context, id string) (chat.TurnCaptureReceipt, error) {
+	store, err := s.receiptStore()
+	if err != nil {
+		return chat.TurnCaptureReceipt{}, err
+	}
+	return store.GetTurnCaptureReceipt(ctx, id)
+}
+
+func (s *ChatSessionSource) ValidateTurnCaptureReceipt(ctx context.Context, receipt chat.TurnCaptureReceipt) error {
+	store, err := s.receiptStore()
+	if err != nil {
+		return err
+	}
+	return store.ValidateTurnCaptureReceipt(ctx, receipt)
+}
+
+func (s *ChatSessionSource) MarkTurnCaptureReceiptMaterialized(ctx context.Context, id string) error {
+	store, err := s.receiptStore()
+	if err != nil {
+		return err
+	}
+	return store.MarkTurnCaptureReceiptMaterialized(ctx, id)
+}
+
+func (s *ChatSessionSource) DeferTurnCaptureReceipt(ctx context.Context, id, reason string, retryAt time.Time) error {
+	store, err := s.receiptStore()
+	if err != nil {
+		return err
+	}
+	return store.DeferTurnCaptureReceipt(ctx, id, reason, retryAt)
 }
 
 func (s *ChatSessionSource) ListSessions(ctx context.Context, workspace string, limit int) ([]SessionRef, error) {
@@ -295,7 +458,7 @@ func (s *ChatSessionSource) toSessionRef(session *chat.Session) SessionRef {
 		}
 	}
 	return SessionRef{
-		ID: session.ID, UserID: session.UserID, WorkspacePath: workspace,
+		ID: session.ID, UserID: session.UserID, SessionGeneration: session.SessionGeneration, WorkspacePath: workspace,
 		State: string(session.State), IsSubagent: parentSessionID != "" || agentType != "",
 		Ephemeral: ephemeral, UpdatedAt: session.UpdatedAt,
 		LastActivityAt: session.ActivityAt(), CanonicalCount: session.CanonicalMessageCount,

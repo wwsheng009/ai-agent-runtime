@@ -19,6 +19,7 @@ func TestInvalidateFromRuntimeEventCompactionKeepsCanonicalMemory(t *testing.T) 
 
 	result, err := runtime.InvalidateFromRuntimeEvent(ctx, chat.EventSessionCompactCompleted, "session-compact", map[string]interface{}{
 		"canonical_transcript_changed": false,
+		"session_generation":           int64(1),
 	})
 	require.NoError(t, err)
 	require.Zero(t, result.Digests)
@@ -31,9 +32,19 @@ func TestInvalidateFromRuntimeEventCompactionKeepsCanonicalMemory(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, memorystore.FreshnessFresh, record.Freshness)
 
-	// Legacy compaction events without the canonical flag keep the old
-	// conservative behavior.
+	// Missing generation is quarantined; the session ID alone is not enough to
+	// safely identify an incarnation.
 	result, err = runtime.InvalidateFromRuntimeEvent(ctx, chat.EventSessionCompactCompleted, "session-compact", map[string]interface{}{})
+	require.NoError(t, err)
+	require.Zero(t, result.Digests)
+	require.Zero(t, result.Memories)
+	same, err = store.GetTurnDigestByTurn(ctx, "session-compact", "turn-1")
+	require.NoError(t, err)
+	require.Equal(t, memorystore.TurnDigestDone, same.Status)
+
+	result, err = runtime.InvalidateFromRuntimeEvent(ctx, chat.EventSessionCompactCompleted, "session-compact", map[string]interface{}{
+		"session_generation": int64(1),
+	})
 	require.NoError(t, err)
 	require.NotZero(t, result.Digests)
 	require.NotZero(t, result.Memories)
@@ -57,6 +68,7 @@ func TestInvalidateFromRuntimeEventBacktrackUsesCanonicalRange(t *testing.T) {
 
 	result, err := runtime.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, "session-backtrack", map[string]interface{}{
 		"mode":                           string(chat.BacktrackModeConversation),
+		"session_generation":             int64(1),
 		"error":                          "",
 		"canonical_cutoff_seq":           int64(2),
 		"canonical_message_count_before": int64(4),
@@ -96,7 +108,8 @@ func TestInvalidateFromRuntimeEventLegacyBacktrackFallsBack(t *testing.T) {
 	require.NoError(t, err)
 
 	result, err := runtime.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, "session-legacy", map[string]interface{}{
-		"mode": string(chat.BacktrackModeConversation),
+		"mode":               string(chat.BacktrackModeConversation),
+		"session_generation": int64(1),
 		"tombstone": map[string]interface{}{
 			"removed_message_count": int64(40),
 			"removed_message_ids":   []interface{}{"m3"},
@@ -137,8 +150,9 @@ func TestInvalidateFromRuntimeEventBacktrackErrorFallsBack(t *testing.T) {
 	require.NoError(t, err)
 
 	result, err := runtime.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, "session-error", map[string]interface{}{
-		"mode":  string(chat.BacktrackModeConversation),
-		"error": "persist failed",
+		"mode":               string(chat.BacktrackModeConversation),
+		"session_generation": int64(1),
+		"error":              "persist failed",
 	})
 	require.NoError(t, err)
 	require.EqualValues(t, 1, result.Digests)
@@ -161,7 +175,7 @@ func newInvalidationRuntimeForTest(t *testing.T) (*Runtime, *memorystore.Store) 
 func recordInvalidationDigest(t *testing.T, store *memorystore.Store, sessionID, turnID, userMessageID, assistantMessageID string, seq int64) memorystore.TurnDigest {
 	t.Helper()
 	digest, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: sessionID, TurnID: turnID, Outcome: "success",
+		SessionID: sessionID, SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 		UserMessageID: userMessageID, AssistantMessageID: assistantMessageID,
 		UserText: "question", AssistantText: "answer", MessageSeqEnd: seq,
 	})
@@ -172,7 +186,7 @@ func recordInvalidationDigest(t *testing.T, store *memorystore.Store, sessionID,
 func insertInvalidationCandidate(t *testing.T, store *memorystore.Store, sessionID, messageID string, seq int64, text string) memorystore.Record {
 	t.Helper()
 	record, err := store.InsertCandidate(context.Background(), memorystore.Candidate{
-		SessionID: sessionID, ProjectKey: store.ProjectKey(),
+		SessionID: sessionID, SessionGeneration: 1, ProjectKey: store.ProjectKey(),
 		SourceKind: "session_extract", Kind: "decision", Text: text,
 		Confidence: 0.9, SourceMessageIDs: []string{messageID},
 		SourceHash: "hash-" + messageID, SourceRevision: seq,

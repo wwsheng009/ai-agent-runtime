@@ -24,10 +24,11 @@ type lazySessionStorage struct {
 	// aicli/runtime-server process holding the sqlite write lock) is NOT
 	// cached permanently: the next operation retries the open so a transient
 	// "database is locked" cannot wedge the whole process until restart.
-	mu      sync.Mutex
-	inner   SessionStorage
-	openErr error
-	closed  bool
+	mu                  sync.Mutex
+	inner               SessionStorage
+	openErr             error
+	closed              bool
+	purgeMemoryRequired bool
 }
 
 // OpenPersistentSessionStorage creates the configured durable session store.
@@ -96,6 +97,7 @@ func (s *lazySessionStorage) ensure(ctx context.Context) (SessionStorage, error)
 		s.openErr = err
 		return nil, err
 	}
+	store.SetSessionPurgeMemoryRequired(s.purgeMemoryRequired)
 	s.openErr = nil
 	s.inner = store
 	return store, nil
@@ -186,6 +188,114 @@ func (s *lazySessionStorage) Delete(ctx context.Context, sessionID string) error
 		return err
 	}
 	return store.Delete(ctx, sessionID)
+}
+
+func (s *lazySessionStorage) purgeProtocol(ctx context.Context) (SessionStoragePurgeProtocol, error) {
+	store, err := s.ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	protocol, ok := store.(SessionStoragePurgeProtocol)
+	if !ok {
+		return nil, fmt.Errorf("session storage does not support the purge protocol")
+	}
+	return protocol, nil
+}
+
+func (s *lazySessionStorage) BeginSessionPurge(ctx context.Context, sessionID, reason string) (SessionPurgeRecord, error) {
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return SessionPurgeRecord{}, err
+	}
+	return protocol.BeginSessionPurge(ctx, sessionID, reason)
+}
+
+func (s *lazySessionStorage) AcknowledgeSessionMemoryPurge(ctx context.Context, sessionID string, generation int64) error {
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return err
+	}
+	return protocol.AcknowledgeSessionMemoryPurge(ctx, sessionID, generation)
+}
+
+func (s *lazySessionStorage) AcknowledgeSessionMemoryPurgeWithGenerations(
+	ctx context.Context,
+	sessionID string,
+	sessionGeneration, purgeGeneration int64,
+) error {
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return err
+	}
+	qualified, ok := protocol.(SessionStoragePurgeProtocolV2)
+	if !ok {
+		return fmt.Errorf("session storage does not support generation-qualified purge acknowledgements")
+	}
+	return qualified.AcknowledgeSessionMemoryPurgeWithGenerations(
+		ctx, sessionID, sessionGeneration, purgeGeneration)
+}
+
+func (s *lazySessionStorage) CompleteSessionPurge(ctx context.Context, sessionID string, generation int64) error {
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return err
+	}
+	return protocol.CompleteSessionPurge(ctx, sessionID, generation)
+}
+
+func (s *lazySessionStorage) CompleteSessionPurgeWithGenerations(
+	ctx context.Context,
+	sessionID string,
+	sessionGeneration, purgeGeneration int64,
+) error {
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return err
+	}
+	qualified, ok := protocol.(SessionStoragePurgeProtocolV2)
+	if !ok {
+		return fmt.Errorf("session storage does not support generation-qualified purge completion")
+	}
+	return qualified.CompleteSessionPurgeWithGenerations(
+		ctx, sessionID, sessionGeneration, purgeGeneration)
+}
+
+func (s *lazySessionStorage) ListPendingSessionPurges(ctx context.Context, limit int) ([]SessionPurgeRecord, error) {
+	if !s.shouldOpenForMaintenance() {
+		return []SessionPurgeRecord{}, nil
+	}
+	protocol, err := s.purgeProtocol(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.ListPendingSessionPurges(ctx, limit)
+}
+
+func (s *lazySessionStorage) SetSessionPurgeMemoryRequired(required bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeMemoryRequired = required
+	if requirement, ok := s.inner.(SessionStoragePurgeRequirement); ok {
+		requirement.SetSessionPurgeMemoryRequired(required)
+	}
+}
+
+func (s *lazySessionStorage) ListExpiredSessionIDs(ctx context.Context, now, olderThan time.Time, limit int) ([]string, error) {
+	if !s.shouldOpenForMaintenance() {
+		return []string{}, nil
+	}
+	store, err := s.ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lister, ok := store.(SessionStorageExpiredLister)
+	if !ok {
+		return nil, fmt.Errorf("session storage does not list expired sessions")
+	}
+	return lister.ListExpiredSessionIDs(ctx, now, olderThan, limit)
 }
 
 // UpdatePreviewMetadata 只写回预览元数据（见 SessionStoragePreviewWriter）。

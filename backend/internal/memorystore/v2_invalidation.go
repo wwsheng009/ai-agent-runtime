@@ -20,6 +20,9 @@ type SessionRangeInvalidation struct {
 	BeforeMessageSeq int64
 	MessageIDs       []string
 	TurnIDs          []string
+	// SessionGeneration scopes invalidation to one canonical session
+	// incarnation. Nil preserves the legacy session-wide behavior.
+	SessionGeneration *int64
 	// CutoffAt is the event time used to avoid invalidating new rows that
 	// re-used a canonical seq after the rewind. Zero disables the time bound.
 	CutoffAt time.Time
@@ -99,7 +102,7 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	digestRefs, err := queryInvalidationDigests(ctx, tx, s.cfg.ProjectKey, sessionID, criteria, criteriaArgs)
+	digestRefs, err := queryInvalidationDigests(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration, criteria, criteriaArgs)
 	if err != nil {
 		return result, err
 	}
@@ -132,12 +135,12 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	for seq := range affectedDigestSeqs {
 		affectedDigestList = append(affectedDigestList, seq)
 	}
-	result.Digests, err = invalidateDigestSeqs(ctx, tx, s.cfg.ProjectKey, sessionID, affectedDigestList, reason, now)
+	result.Digests, err = invalidateDigestSeqs(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration, affectedDigestList, reason, now)
 	if err != nil {
 		return result, err
 	}
 
-	windows, err := queryInvalidationWindows(ctx, tx, s.cfg.ProjectKey, sessionID)
+	windows, err := queryInvalidationWindows(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
 	if err != nil {
 		return result, err
 	}
@@ -151,7 +154,11 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 		if !strong && !inv.CutoffAt.IsZero() && window.createdAt.After(inv.CutoffAt) {
 			continue
 		}
-		affectedWindowIDs[TurnWindowSourceWindow(window.startDigestSeq, window.endDigestSeq)] = struct{}{}
+		sourceWindow := TurnWindowSourceWindow(window.startDigestSeq, window.endDigestSeq)
+		if inv.SessionGeneration != nil {
+			sourceWindow = TurnWindowSourceWindowGeneration(*inv.SessionGeneration, window.startDigestSeq, window.endDigestSeq)
+		}
+		affectedWindowIDs[sourceWindow] = struct{}{}
 		affectedWindowSeqs = append(affectedWindowSeqs, window.windowSeq)
 	}
 	if len(affectedWindowSeqs) > 0 {
@@ -161,11 +168,16 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 		for _, seq := range affectedWindowSeqs {
 			args = append(args, seq)
 		}
+		windowScope := ""
+		if inv.SessionGeneration != nil {
+			windowScope = ` AND session_generation = ?`
+			args = append(args, *inv.SessionGeneration)
+		}
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'invalidated', last_error = ?,
     processed_at = COALESCE(processed_at, ?), updated_at = ?
-WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'
+WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'`+windowScope+`
 `, args...)
 		if err != nil {
 			return result, fmt.Errorf("memorystore: invalidate window range: %w", err)
@@ -173,7 +185,7 @@ WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'
 		result.Windows, _ = res.RowsAffected()
 	}
 
-	sourceRefs, err := queryInvalidationSources(ctx, tx, s.cfg.ProjectKey, sessionID)
+	sourceRefs, err := queryInvalidationSources(ctx, tx, s.cfg.ProjectKey, sessionID, inv.SessionGeneration)
 	if err != nil {
 		return result, err
 	}
@@ -256,17 +268,23 @@ func buildRangeDigestCriteria(cutoff, before int64, messageIDs, turnIDs []string
 	return "(" + strings.Join(clauses, " OR ") + ")", args
 }
 
-func queryInvalidationDigests(ctx context.Context, tx *sql.Tx, projectKey, sessionID, criteria string, criteriaArgs []interface{}) ([]invalidationDigestRef, error) {
-	args := make([]interface{}, 0, 2+len(criteriaArgs))
-	args = append(args, projectKey, sessionID)
-	args = append(args, criteriaArgs...)
-	rows, err := tx.QueryContext(ctx, `
+func queryInvalidationDigests(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64, criteria string, criteriaArgs []interface{}) ([]invalidationDigestRef, error) {
+	query := `
 SELECT digest_seq, COALESCE(turn_id, ''), COALESCE(user_message_id, ''),
        COALESCE(assistant_message_id, ''), message_seq_end, created_at
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND `+criteria+`
+WHERE project_key = ? AND session_id = ?`
+	args := make([]interface{}, 0, 3+len(criteriaArgs))
+	args = append(args, projectKey, sessionID)
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	args = append(args, criteriaArgs...)
+	query += ` AND ` + criteria + `
 ORDER BY digest_seq ASC
-`, args...)
+`
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: query digest invalidation range: %w", err)
 	}
@@ -284,7 +302,7 @@ ORDER BY digest_seq ASC
 	return out, rows.Err()
 }
 
-func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, digestSeqs []int64, reason, now string) (int64, error) {
+func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64, digestSeqs []int64, reason, now string) (int64, error) {
 	if len(digestSeqs) == 0 {
 		return 0, nil
 	}
@@ -296,8 +314,13 @@ func invalidateDigestSeqs(ctx context.Context, tx *sql.Tx, projectKey, sessionID
 		}
 		batch := digestSeqs[start:end]
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
-		args := make([]interface{}, 0, 5+len(batch))
+		args := make([]interface{}, 0, 6+len(batch))
 		args = append(args, now, reason, now, projectKey, sessionID)
+		generationFilter := ""
+		if generation != nil {
+			generationFilter = ` AND session_generation = ?`
+			args = append(args, *generation)
+		}
 		for _, seq := range batch {
 			args = append(args, seq)
 		}
@@ -307,6 +330,7 @@ SET status = 'invalidated', rollup_status = 'skipped',
     rollup_window_id = NULL, rolled_up_at = NULL,
     processed_at = ?, last_error = ?, updated_at = ?
 WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
+  `+generationFilter+`
   AND digest_seq IN (`+placeholders+`)
 `, args...)
 		if err != nil {
@@ -318,14 +342,22 @@ WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
 	return total, nil
 }
 
-func queryInvalidationWindows(ctx context.Context, tx *sql.Tx, projectKey, sessionID string) ([]invalidationWindowRef, error) {
-	rows, err := tx.QueryContext(ctx, `
+func queryInvalidationWindows(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64) ([]invalidationWindowRef, error) {
+	query := `
 SELECT window_seq, start_digest_seq, end_digest_seq,
        start_message_seq, end_message_seq, created_at
 FROM memory_turn_windows
 WHERE project_key = ? AND session_id = ?
+`
+	args := []interface{}{projectKey, sessionID}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += `
 ORDER BY window_seq ASC
-`, projectKey, sessionID)
+`
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: query window invalidation range: %w", err)
 	}
@@ -361,8 +393,8 @@ func windowOverlapsInvalidation(window invalidationWindowRef, cutoff, before int
 	return window.startMessageSeq <= cutoff || window.startMessageSeq <= before, false
 }
 
-func queryInvalidationSources(ctx context.Context, tx *sql.Tx, projectKey, sessionID string) ([]invalidationSourceRef, error) {
-	rows, err := tx.QueryContext(ctx, `
+func queryInvalidationSources(ctx context.Context, tx *sql.Tx, projectKey, sessionID string, generation *int64) ([]invalidationSourceRef, error) {
+	query := `
 SELECT e.id, e.revision, e.source_kind,
        COALESCE(src.turn_id, ''), COALESCE(src.message_ids_json, '[]'),
        COALESCE(src.source_window, ''), e.created_at
@@ -372,7 +404,13 @@ WHERE e.project_key = ? AND e.source_session_id = ?
   AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
-`, projectKey, sessionID)
+`
+	args := []interface{}{projectKey, sessionID}
+	if generation != nil {
+		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
+		args = append(args, *generation, *generation)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: query source invalidation range: %w", err)
 	}

@@ -6,6 +6,42 @@
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 增加 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、injected_only exposure 验收。
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 测试已落地；已补 SQLite canonical store reopen、子进程 `os.Exit` 无清理、父进程 hard-kill 三类恢复 E2E；真实终端关闭与 shadow 证据包待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 
+## 0. 2026-11-19 架构收敛验收基线
+
+测试必须证明同一 receipt-backed turn **只有一条正常 extraction 路径**：
+
+```text
+canonical turn commit
+  -> durable capture receipt
+  -> memory materialization
+  -> phase1_extract/v2 capture worker
+  -> candidate + output receipt
+  -> consolidation
+```
+
+以下契约优先于本文后续保留的历史 Turn Digest / session extraction 验收项：
+
+- 一个 receipt-backed turn/session 不得同时进入 v2 capture worker 与
+  `RunSession` / `RunSessionWindow` / legacy `phase1_extract`。
+- `RunSession*`、`RunPendingTurnDigests`、`RecoverPendingPhase1` 只允许作为
+  pre-receipt/historical compatibility、migration 或 recovery；memory legacy
+  查询、claim、完成/失效更新必须隔离 `capture_receipt_id = ''`。
+- receipt-backed routing fence 必须覆盖 canonical source 已有 receipt 与
+  memory 已 materialize digest 两种状态；receipt-aware source 无法查询 session
+  receipt 状态时必须 fail closed。
+- maintenance startup/ticker 必须先 materialize，再运行 capture extraction；
+  不得通过 `RunIdle` 或无条件 legacy digest sweep 形成第二条正常抽取路径。
+- generation disabled 时允许 receipt materialization，但 LLM 调用数必须为 0，
+  且不得 fallback 到 legacy session extraction。
+- `phase1_extract/v2` 只能读取 receipt 固定的 canonical range，并在抽取前后
+  校验 range/hash/revision、session generation/incarnation 和 purge fence。
+- canonical SQLite 与 memory SQLite 不存在跨库事务；handoff 按 at-least-once
+  验收，receipt/job/candidate/output receipt 必须幂等，并验证 worker lease、
+  stale source validation 与 candidate commit。
+- `TurnWindow` 只验收为已完成 turn/range 派生的 rollup/summary，不是事实源、
+  transcript 替代物或触发入口。
+- 测试通过只证明所覆盖行为，不证明历史 rows 已迁移或线上积压已排空。
+
 ## 1. 验证目标
 
 Agent Memory v2 的验证必须同时满足：
@@ -167,6 +203,10 @@ E2E / live
 
 ### 3.4.1 Turn Digest Outbox
 
+> 本节旧有 session-end/idle/startup 行为只适用于
+> `capture_receipt_id = ''` 的 pre-receipt/historical compatibility。它们不能
+> 被解释成 receipt-backed 新回合的第二套正常链路；新路由见 §0 和 §3.4.2。
+
 | 场景 | 预期 |
 | --- | --- |
 | turn 终态 | 每个 turn 只写一条 digest，不按 LLM step 写 |
@@ -174,17 +214,17 @@ E2E / live
 | 同 session/turn 重试 | digest 幂等更新，不重复 |
 | secret / 超长文本 | 脱敏、截断；不落原文 secret |
 | producer 隔离 | 写入前读取可信 session metadata；foreign/unknown workspace、excluded subagent、disabled/polluted/ephemeral session 不落文本；身份或模式读取失败不写入 |
-| session-end | 抽取成功后标记对应 watermark done |
-| idle recovery | 无待处理 digest/window 不调用恢复 LLM；独立的历史会话抽取仍受 source job 幂等约束 |
-| startup recovery | 只处理 closed/stale/orphaned session；活跃 session 跳过 |
-| session-end + idle 并发 | 同一 source 只生成一个 job/candidate |
+| legacy session-end | 仅对无 receipt 的历史 digest 抽取成功后标记对应 watermark done |
+| legacy idle recovery | 只恢复无 receipt 的历史 digest/window；无待处理项不调用恢复 LLM |
+| legacy startup recovery | 只处理 closed/stale/orphaned 的 pre-receipt session；receipt-backed session 跳过 |
+| legacy session-end + idle 并发 | 同一无 receipt source 只生成一个 job/candidate |
 | interrupted/error turn | 保留 digest 诊断，不自动抽取 |
 | backlog 超限 | 按 oldest-first 分批；不得把未处理 digest 标 done |
-| session-end backlog | 按 `maxDigestsPerRun / maxTurnsPerBatch` 有界 drain；上下文取消/预算耗尽后剩余交后续 sweep |
-| idle extractEveryNTurns | digest ticker 使用 `idleExtractMinutes`；consolidation/diagnostics 使用独立 30m ticker；active session 达到 pending 阈值或 `minIdleHours` 后才提取 |
-| startup recovery | 仅 closed/archived/orphaned/stale；active/idle session 不被 startup 抽取 |
-| startup active 负向 | active session 即使超过 30s 也保持 pending，直到 session-end 或 idle sweep |
-| startup idle 负向 | idle session 留给 idle sweep；startup 不调用 extractor |
+| legacy session-end backlog | 按 `maxDigestsPerRun / maxTurnsPerBatch` 有界 drain；上下文取消/预算耗尽后剩余交后续 recovery |
+| legacy idle extraction | 只适用于无 receipt 历史 rows；不得由该 ticker 回放 receipt-backed session |
+| legacy startup recovery | 仅处理无 receipt 的 closed/archived/orphaned/stale session；receipt-backed turn 由 capture recovery 处理 |
+| legacy startup active 负向 | active pre-receipt session 即使超过 30s 也保持 pending；receipt-backed turn 由 capture worker 独立处理 |
+| legacy startup idle 负向 | 无 receipt idle session 留给 legacy recovery；startup 不调用 extractor |
 | digest 观测 | status 返回 `oldest_pending_digest_age_seconds`、`pending_digest_sessions`、`pending_digest_backlog_batches`、`recovered_digest_sessions` |
 | Web/CLI parity | Web 可查看 turn digest/window 计数并执行 L1 purge、session mode、summary activate；CLI 支持 session-mode/activate |
 | 大会话只读最近 200 条 | 更早 pending digest 保持 pending |
@@ -192,7 +232,7 @@ E2E / live
 | 单 turn 超过读取上限 | 按连续 canonical 子窗口处理完整范围；任一子窗口缺失/失败，整批不得确认；重试跳过已成功 job |
 | 完成凭证 | 只有成功持久化或相同 source watermark 的 succeeded job 可确认；非空 hash、running lease、backoff、failed 不可确认 |
 | 小会话确认边界 | canonical 完成范围为 1–4、digest 终点为 2/4/6 时，只确认前两条，终点 6 保持 pending；session-end/recovery/显式确认共用覆盖检查，不跨越未覆盖行推进水位 |
-| digest 关闭/历史会话无 digest | 大会话保留有界 transcript 抽取回退，不因缺少 outbox 静默停止生成 |
+| digest 关闭/历史会话无 digest | 仅允许 bounded pre-receipt compatibility fallback；receipt-backed session 不得因此进入 session-wide replay |
 | 新增窗口 | 不把旧窗口候选误标 stale |
 | per-window stale | 仅同 `source_window` 的 hash/revision 变化触发 stale；session-wide 检查跳过窗口 source |
 | L0 → L1 → L2 rollup | full window / 排空后的 partial tail 生成 L1；L1 成功后生成 `turn_window` L2 seed；L1/L2 seed 成功后才清理 L0，失败保留 L0 |
@@ -208,6 +248,25 @@ E2E / live
 | backtrack 后追加 | invalidated digest 不参与 previous message watermark；500→300 后追加到 304，应提取 301–304 而不是构造 501–304 |
 | L0 retention 项目隔离 | 两个 project 共用绝对 StorePath 时，清理只删除当前 project 的 terminal rows |
 | `off` 模式 | 不建表、不写 digest、不跑 LLM |
+
+### 3.4.2 Receipt-backed 唯一路由
+
+| 场景 | 预期 |
+| --- | --- |
+| `Runtime.Run` + receipt-capable source | 只 materialize receipt 并调度 capture worker；不再调用 legacy digest/session replay |
+| `RunSession` / `RunSessionWindow` 命中 receipt-backed session | routing fence 跳过 session-wide extraction |
+| `RunSessionEnd` 命中 receipt-backed session | 只 drain capture receipts；不消费 legacy digest、不调用 `RunSession`，也不因功能关闭而 fallback |
+| legacy recovery 查询/claim/状态更新 | 只选择 `capture_receipt_id = ''` 的 rows/jobs |
+| startup legacy phase1 recovery | 遇到 receipt-backed session 时跳过，即便旧 legacy phase1 job 尚存 |
+| capture worker 输入 | 仅读取 receipt 固定的 `[message_seq_start, message_seq_end]` 和 revision/range hash |
+| extraction 前后 source 变化 | range/hash/revision 不匹配时不提交 candidate/output receipt；任务保持可重试或进入受控失败态 |
+| generation disabled | receipt 仍 materialize；extractor 调用和 legacy fallback 均为 0 |
+| maintenance startup | materialization → capture extraction recovery → legacy phase1 recovery（仅兼容） |
+| maintenance ticker | 可调度 materialization/capture recovery；不得调用 `RunIdle` 或无条件 legacy digest sweep |
+| canonical 与 memory 分库 | 模拟 materialize 成功但 receipt acknowledgement 失败、重启重放；结果幂等且不重复 candidate |
+| generation/purge fence | 旧 generation、purged session、过期 lease 的迟到 worker 不能提交输出 |
+| output receipt/candidate commit | 重试不得重复写入；只有成功提交的 output receipt 才能确认完成 |
+| TurnWindow | 只能从完成范围派生；不能成为 extraction source of truth 或触发源 |
 
 ### 3.5 Phase 2 Consolidation
 
@@ -576,16 +635,24 @@ go test -race ./internal/memoryruntime \
 
 **退出条件：**
 
+- [ ] receipt-backed 新回合只有 canonical receipt → materialization → `phase1_extract/v2` → candidate/output receipt 一条正常路径；legacy extraction 不得并行消费；
+- [ ] `Runtime.Run`、`RunSessionEnd`、`RunSession*` 与 `RecoverPendingPhase1` 均有 receipt-backed 与 legacy source 的正/负向 routing test；
+- [ ] legacy digest 查询、claim、状态更新只覆盖 `capture_receipt_id = ''`；receipt-backed session 即使有旧 digest/phase1 job 也被 fence 跳过；
+- [ ] maintenance startup/ticker 的调用顺序与集合有测试证明：materialize 在 capture recovery 前；无 `RunIdle` host extraction 和无条件 legacy digest sweep；
+- [ ] generation disabled 仍 materialize receipt，extractor 调用数为 0，且没有 legacy fallback；
+- [ ] v2 job 仅消费 receipt 固定的 canonical range；前后 stale validation、generation/incarnation、purge fence、lease、candidate commit 和 output receipt 均有重试/并发测试；
+- [ ] canonical 与 memory SQLite 分库故障注入覆盖 materialization 成功但 receipt acknowledgement 失败后的 at-least-once replay，且不重复 candidate；
+- [ ] `TurnWindow` 仅作为完成 range 的派生 rollup/summary，不作为 transcript、事实源或触发入口；
 - [ ] 自动抽取只写 `candidate`，不写 `active`；`shadow` 只记录、不注入；
 - [ ] turn 终态只写一条 Turn Digest，不按 LLM step 写；turn-end 不跑 LLM；
 - [x] SQLite canonical + store reopen 模拟重启后 pending digest 可恢复，并完成窗口抽取/L1/L2；
 - [x] 子进程写完 digest 后 `os.Exit` 且不关闭 store，父进程 reopen 后可恢复；
 - [x] 父进程 hard-kill 子进程（Windows TerminateProcess / POSIX SIGKILL 等价）后 pending digest 可恢复；
-- [ ] 真实终端关闭后 pending digest 可在 startup/idle 恢复；active session 不被 startup 误抽取；
+- [ ] 真实终端关闭后 pending receipt 可由 capture recovery 恢复；历史无 receipt session 按 bounded legacy recovery 处理；active session 不被 startup 误抽取；
 - [ ] 大会话按 batch + canonical window 处理；只读最近一页时更早 pending digest 不被标记 done；
-- [ ] session-end 与 idle 并发不重复生成 candidate；digest 清理只在成功后发生；
+- [ ] 多个调度时机并发消费同一 capture receipt 不重复生成 candidate；legacy session-end/idle 并发只作用于无 receipt rows；
 - [ ] session 选择符合 workspace、mode、idle、watermark、subagent 排除规则；
-- [ ] `generation.trigger=both` 时 idle sweep 与 session-end 都可用；长会话不会永不抽取；
+- [ ] `generation.trigger=both` 只表示同一 capture worker 有多个调度时机；长会话可恢复，不形成双重 session replay；
 - [ ] job 具备幂等 key、lease、接管、退避、重试上限和失败可观测性；
 - [ ] 非 JSON、字段缺失/过长、无 source、secret 命中均不落库；
 - [ ] 跨 workspace session 拒绝；工具原始大输出不直接进入抽取；

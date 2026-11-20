@@ -437,6 +437,367 @@ CREATE TABLE IF NOT EXISTS memory_runtime_metrics (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY(project_key, metric)
 );
+			`,
+		},
+		{
+			Version: 9,
+			Name:    "memory_v9_turn_capture_identity",
+			UpSQL: `
+ALTER TABLE memory_turn_digests
+  ADD COLUMN message_seq_start INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_turn_digests
+  ADD COLUMN capture_receipt_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests
+  ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_turn_digests
+  ADD COLUMN range_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests
+  ADD COLUMN enqueued_at TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_turn_digests_capture_receipt
+  ON memory_turn_digests(project_key, capture_receipt_id)
+  WHERE capture_receipt_id <> '';
+CREATE INDEX IF NOT EXISTS idx_memory_turn_digests_capture_pending
+  ON memory_turn_digests(project_key, capture_receipt_id, status);
+`,
+		},
+		{
+			Version: 10,
+			Name:    "memory_v10_turn_capture_output_receipts",
+			UpSQL: `
+CREATE TABLE IF NOT EXISTS memory_turn_output_receipts (
+    id                  TEXT PRIMARY KEY,
+    project_key         TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    turn_id             TEXT NOT NULL,
+    capture_receipt_id  TEXT NOT NULL,
+    digest_id           TEXT NOT NULL,
+    job_id              TEXT NOT NULL UNIQUE,
+    source_revision     INTEGER NOT NULL,
+    range_hash          TEXT NOT NULL,
+    output_hash         TEXT NOT NULL,
+    candidate_count     INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    UNIQUE(project_key, capture_receipt_id, source_revision, range_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_turn_output_receipts_session
+  ON memory_turn_output_receipts(project_key, session_id, turn_id, created_at);
+`,
+		},
+		{
+			Version: 11,
+			Name:    "memory_v11_maintenance_leases",
+			UpSQL: `
+CREATE TABLE IF NOT EXISTS memory_maintenance_leases (
+    project_key     TEXT PRIMARY KEY,
+    owner_id        TEXT NOT NULL,
+    owner_kind      TEXT NOT NULL,
+    acquired_at_ms  INTEGER NOT NULL,
+    heartbeat_at_ms INTEGER NOT NULL,
+    expires_at_ms   INTEGER NOT NULL,
+    fencing_token   INTEGER NOT NULL DEFAULT 1
+);
+`,
+		},
+		{
+			Version: 12,
+			Name:    "memory_v12_session_purge_fences",
+			UpSQL: `
+CREATE TABLE IF NOT EXISTS memory_session_purges (
+    project_key TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    generation  INTEGER NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'purged',
+    reason      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(project_key, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_session_purges_generation
+  ON memory_session_purges(project_key, generation);
+
+-- Capture generations are separate from the digest projection so existing
+-- digest readers do not need a wider SELECT/scan contract. They bind a
+-- canonical receipt and its session incarnation to every materialized job.
+CREATE TABLE IF NOT EXISTS memory_turn_capture_generations (
+    project_key        TEXT NOT NULL,
+    capture_receipt_id TEXT NOT NULL,
+    session_id         TEXT NOT NULL,
+    turn_id            TEXT NOT NULL,
+    generation         INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    PRIMARY KEY(project_key, capture_receipt_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_turn_capture_generations_session
+  ON memory_turn_capture_generations(project_key, session_id, generation);
+`,
+		},
+		{
+			Version: 13,
+			Name:    "memory_v13_generation_qualified_turn_capture",
+			UpSQL: `
+-- The original table-level UNIQUE(project_key, session_id, turn_id) made a
+-- changed canonical revision collide with the first capture of that turn.
+-- Rebuild while preserving digest_seq and every persisted legacy projection.
+ALTER TABLE memory_turn_digests RENAME TO memory_turn_digests_v12;
+DROP INDEX IF EXISTS idx_memory_turn_digests_pending;
+DROP INDEX IF EXISTS idx_memory_turn_digests_session;
+DROP INDEX IF EXISTS idx_memory_turn_digests_created;
+DROP INDEX IF EXISTS idx_memory_turn_digests_rollup;
+DROP INDEX IF EXISTS idx_memory_turn_digests_capture_receipt;
+DROP INDEX IF EXISTS idx_memory_turn_digests_capture_pending;
+CREATE TABLE memory_turn_digests (
+    digest_seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL UNIQUE,
+    scope           TEXT NOT NULL DEFAULT 'project',
+    project_key     TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    session_generation INTEGER NOT NULL DEFAULT 0,
+    turn_id         TEXT NOT NULL,
+    trace_id        TEXT,
+    parent_session_id TEXT,
+    agent_type      TEXT,
+    user_message_id TEXT,
+    assistant_message_id TEXT,
+    user_text       TEXT NOT NULL DEFAULT '',
+    assistant_text  TEXT NOT NULL DEFAULT '',
+    text_truncated  INTEGER NOT NULL DEFAULT 0,
+    outcome         TEXT NOT NULL DEFAULT 'success',
+    steps           INTEGER NOT NULL DEFAULT 0,
+    usage_json      TEXT NOT NULL DEFAULT '{}',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    digest_hash     TEXT NOT NULL DEFAULT '',
+    digest_revision INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    process_job_id  TEXT,
+    last_error      TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    processed_at    TEXT,
+    message_seq_end INTEGER NOT NULL DEFAULT 0,
+    rollup_status   TEXT NOT NULL DEFAULT 'pending',
+    rollup_window_id TEXT,
+    rolled_up_at    TEXT,
+    message_seq_start INTEGER NOT NULL DEFAULT 0,
+    capture_receipt_id TEXT NOT NULL DEFAULT '',
+    source_revision INTEGER NOT NULL DEFAULT 0,
+    range_hash      TEXT NOT NULL DEFAULT '',
+    enqueued_at     TEXT
+);
+INSERT INTO memory_turn_digests (
+    digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
+    trace_id, parent_session_id, agent_type, user_message_id, assistant_message_id,
+    user_text, assistant_text, text_truncated, outcome, steps, usage_json,
+    metadata_json, digest_hash, digest_revision, status, process_job_id, last_error,
+    created_at, updated_at, processed_at, message_seq_end, rollup_status,
+    rollup_window_id, rolled_up_at, message_seq_start, capture_receipt_id,
+    source_revision, range_hash, enqueued_at
+)
+SELECT digest_seq, id, scope, project_key, session_id, 0, turn_id,
+       trace_id, parent_session_id, agent_type, user_message_id, assistant_message_id,
+       user_text, assistant_text, text_truncated, outcome, steps, usage_json,
+       metadata_json, digest_hash, digest_revision, status, process_job_id, last_error,
+       created_at, updated_at, processed_at, message_seq_end, rollup_status,
+       rollup_window_id, rolled_up_at, message_seq_start, capture_receipt_id,
+       source_revision, range_hash, enqueued_at
+FROM memory_turn_digests_v12;
+DROP TABLE memory_turn_digests_v12;
+
+CREATE UNIQUE INDEX idx_memory_turn_digests_legacy_turn
+  ON memory_turn_digests(project_key, session_id, turn_id)
+  WHERE capture_receipt_id = '';
+CREATE UNIQUE INDEX idx_memory_turn_digests_capture_receipt
+  ON memory_turn_digests(project_key, capture_receipt_id)
+  WHERE capture_receipt_id <> '';
+CREATE INDEX idx_memory_turn_digests_capture_pending
+  ON memory_turn_digests(project_key, capture_receipt_id, status);
+CREATE INDEX idx_memory_turn_digests_pending
+  ON memory_turn_digests(project_key, session_id, status, digest_seq);
+CREATE INDEX idx_memory_turn_digests_session
+  ON memory_turn_digests(session_id, digest_seq);
+CREATE INDEX idx_memory_turn_digests_created
+  ON memory_turn_digests(created_at);
+CREATE INDEX idx_memory_turn_digests_rollup
+  ON memory_turn_digests(project_key, session_id, status, rollup_status, digest_seq);
+
+-- A v2 job carries a structured identity; a v2 row migrated without its full
+-- identity is quarantined rather than being claimed by an unsafe worker.
+ALTER TABLE memory_jobs ADD COLUMN session_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_jobs ADD COLUMN capture_receipt_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN source_start_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_jobs ADD COLUMN source_end_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_jobs ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_jobs ADD COLUMN source_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN available_at TEXT;
+ALTER TABLE memory_jobs ADD COLUMN deadline_at TEXT;
+ALTER TABLE memory_jobs ADD COLUMN heartbeat_at TEXT;
+ALTER TABLE memory_jobs ADD COLUMN deferred_until TEXT;
+ALTER TABLE memory_jobs ADD COLUMN dead_letter_at TEXT;
+ALTER TABLE memory_jobs ADD COLUMN dead_letter_reason TEXT;
+ALTER TABLE memory_jobs ADD COLUMN repair_only INTEGER NOT NULL DEFAULT 0;
+
+UPDATE memory_jobs
+SET session_id = (
+        SELECT COALESCE((
+            SELECT d.session_id FROM memory_turn_digests d
+            WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+            LIMIT 1
+        ), '')
+    ),
+    session_generation = COALESCE((
+        SELECT g.generation
+        FROM memory_turn_digests d
+        JOIN memory_turn_capture_generations g
+          ON g.project_key = d.project_key AND g.capture_receipt_id = d.capture_receipt_id
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), 0),
+    capture_receipt_id = COALESCE((
+        SELECT d.capture_receipt_id FROM memory_turn_digests d
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), ''),
+    source_start_seq = COALESCE((
+        SELECT d.message_seq_start FROM memory_turn_digests d
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), 0),
+    source_end_seq = COALESCE((
+        SELECT d.message_seq_end FROM memory_turn_digests d
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), 0),
+    source_revision = COALESCE((
+        SELECT d.source_revision FROM memory_turn_digests d
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), 0),
+    source_hash = COALESCE((
+        SELECT d.range_hash FROM memory_turn_digests d
+        WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+        LIMIT 1
+    ), ''),
+    repair_only = CASE
+        WHEN kind = 'phase1_extract/v2' AND (
+            COALESCE((
+                SELECT g.generation
+                FROM memory_turn_digests d
+                JOIN memory_turn_capture_generations g
+                  ON g.project_key = d.project_key AND g.capture_receipt_id = d.capture_receipt_id
+                WHERE d.process_job_id = memory_jobs.id AND d.capture_receipt_id <> ''
+                LIMIT 1
+            ), 0) <= 0
+        ) THEN 1 ELSE repair_only
+    END
+WHERE kind = 'phase1_extract/v2';
+
+CREATE INDEX idx_memory_jobs_capture_identity
+  ON memory_jobs(project_key, session_id, session_generation, capture_receipt_id);
+CREATE INDEX idx_memory_jobs_available
+  ON memory_jobs(project_key, kind, status, available_at, priority DESC, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_session_extraction_leases (
+    project_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    session_generation INTEGER NOT NULL,
+    owner_id TEXT NOT NULL,
+    lease_until TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(project_key, session_id, session_generation)
+);
+
+ALTER TABLE memory_session_purges
+  ADD COLUMN fenced_session_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_session_purges
+  ADD COLUMN purge_generation INTEGER NOT NULL DEFAULT 0;
+UPDATE memory_session_purges
+SET fenced_session_generation = generation,
+    purge_generation = generation
+WHERE fenced_session_generation = 0 OR purge_generation = 0;
+`,
+		},
+		{
+			Version: 14,
+			Name:    "memory_v14_record_source_session_generation",
+			UpSQL: `
+ALTER TABLE memory_entries
+  ADD COLUMN source_session_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_sources
+  ADD COLUMN source_session_generation INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX idx_memory_entries_source_session_generation
+  ON memory_entries(project_key, source_session_id, source_session_generation);
+CREATE INDEX idx_memory_sources_session_generation
+  ON memory_sources(session_id, source_session_generation, memory_id);
+`,
+		},
+		{
+			Version: 15,
+			Name:    "memory_v15_generation_qualified_turn_identity",
+			UpSQL: `
+DROP INDEX IF EXISTS idx_memory_turn_digests_legacy_turn;
+CREATE UNIQUE INDEX idx_memory_turn_digests_legacy_turn
+  ON memory_turn_digests(project_key, session_id, session_generation, turn_id)
+  WHERE capture_receipt_id = '';
+`,
+		},
+		{
+			Version: 16,
+			Name:    "memory_v16_generation_qualified_turn_windows",
+			UpSQL: `
+-- Existing windows have no trustworthy incarnation identity. Keep them as
+-- generation zero (legacy/quarantined) rather than inferring from digest seq.
+DROP INDEX IF EXISTS idx_memory_turn_windows_session;
+DROP INDEX IF EXISTS idx_memory_turn_windows_status;
+ALTER TABLE memory_turn_windows RENAME TO memory_turn_windows_v15;
+CREATE TABLE memory_turn_windows (
+    window_seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  TEXT NOT NULL UNIQUE,
+    scope               TEXT NOT NULL DEFAULT 'project',
+    project_key         TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    session_generation  INTEGER NOT NULL DEFAULT 0,
+    window_index        INTEGER NOT NULL DEFAULT 0,
+    start_digest_seq    INTEGER NOT NULL,
+    end_digest_seq      INTEGER NOT NULL,
+    start_message_seq   INTEGER NOT NULL DEFAULT 0,
+    end_message_seq     INTEGER NOT NULL DEFAULT 0,
+    turn_count          INTEGER NOT NULL DEFAULT 0,
+    summary_text        TEXT NOT NULL DEFAULT '',
+    summary_hash        TEXT NOT NULL DEFAULT '',
+    summary_revision    INTEGER NOT NULL DEFAULT 0,
+    source_hash         TEXT NOT NULL DEFAULT '',
+    source_revision     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    model               TEXT,
+    usage_json          TEXT NOT NULL DEFAULT '{}',
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    last_error          TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    processed_at        TEXT,
+    UNIQUE(project_key, session_id, session_generation, start_digest_seq, end_digest_seq)
+);
+INSERT INTO memory_turn_windows (
+    window_seq, id, scope, project_key, session_id, session_generation, window_index,
+    start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
+    summary_text, summary_hash, summary_revision, source_hash, source_revision, status,
+    model, usage_json, metadata_json, last_error, created_at, updated_at, processed_at
+)
+SELECT window_seq, id, scope, project_key, session_id, 0, window_index,
+       start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
+       summary_text, summary_hash, summary_revision, source_hash, source_revision, status,
+       model, usage_json, metadata_json, last_error, created_at, updated_at, processed_at
+FROM memory_turn_windows_v15;
+DROP TABLE memory_turn_windows_v15;
+CREATE INDEX idx_memory_turn_windows_session
+  ON memory_turn_windows(project_key, session_id, session_generation, window_seq);
+CREATE INDEX idx_memory_turn_windows_status
+  ON memory_turn_windows(project_key, status, window_seq);
 `,
 		},
 	}

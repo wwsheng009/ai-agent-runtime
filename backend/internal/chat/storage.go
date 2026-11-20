@@ -25,6 +25,17 @@ var (
 	// ErrCleanupStalled 表示清理循环选中了候选会话但一轮下来没有任何实际
 	// 删除进展。调用方必须停止循环而不是原地重扫（旧实现会无限空转）。
 	ErrCleanupStalled = errors.New("session cleanup stalled")
+	// ErrSessionPurgeCoordinatorUnavailable means the canonical store has
+	// durably fenced a session, but its memory-store purge coordinator is not
+	// available yet. The purge journal remains recoverable and the session must
+	// not be made visible again.
+	ErrSessionPurgeCoordinatorUnavailable = errors.New("session purge coordinator unavailable")
+	// ErrSessionPurgeInProgress is returned when a canonical write races with
+	// a session deletion fence.
+	ErrSessionPurgeInProgress = errors.New("session purge in progress")
+	// ErrSessionPurgeGenerationMismatch prevents an acknowledgement or
+	// completion from an older deletion attempt from affecting a newer one.
+	ErrSessionPurgeGenerationMismatch = errors.New("session purge generation mismatch")
 )
 
 // SessionStorage 会话存储接口
@@ -99,6 +110,66 @@ type SessionStoragePreviewWriter interface {
 	UpdatePreviewMetadata(ctx context.Context, sessionID, title, titleSource, summary string) error
 }
 
+// SessionPurgeRecord is the durable cross-store deletion journal entry.
+// MemoryRequired is fixed when the canonical deletion fence is first created;
+// MemoryAcknowledged records the memory-store side of the protocol.
+type SessionPurgeRecord struct {
+	SessionID          string
+	// SessionGeneration identifies the canonical session incarnation.
+	SessionGeneration  int64
+	// PurgeGeneration identifies this deletion attempt. Generation is retained
+	// as a compatibility alias for older callers and equals PurgeGeneration.
+	PurgeGeneration    int64
+	Generation         int64
+	Reason             string
+	State              string
+	MemoryRequired     bool
+	MemoryAcknowledged bool
+	UpdatedAt          time.Time
+}
+
+// SessionStoragePurgeProtocol is implemented by durable session stores that
+// can fence writes before coordinating deletion with the separate memory DB.
+type SessionStoragePurgeProtocol interface {
+	BeginSessionPurge(ctx context.Context, sessionID, reason string) (SessionPurgeRecord, error)
+	AcknowledgeSessionMemoryPurge(ctx context.Context, sessionID string, generation int64) error
+	CompleteSessionPurge(ctx context.Context, sessionID string, generation int64) error
+	ListPendingSessionPurges(ctx context.Context, limit int) ([]SessionPurgeRecord, error)
+}
+
+// SessionStoragePurgeRequirement is an optional control surface used by the
+// application wiring to tell a durable session store whether a separate
+// memory store must acknowledge each purge. The requirement is snapshotted
+// into the journal when BeginSessionPurge commits.
+type SessionStoragePurgeRequirement interface {
+	SetSessionPurgeMemoryRequired(required bool)
+}
+
+// SessionStoragePurgeProtocolV2 carries both independent fencing tokens.
+// The legacy protocol remains available for non-memory stores and older
+// integrations.
+type SessionStoragePurgeProtocolV2 interface {
+	AcknowledgeSessionMemoryPurgeWithGenerations(ctx context.Context, sessionID string, sessionGeneration, purgeGeneration int64) error
+	CompleteSessionPurgeWithGenerations(ctx context.Context, sessionID string, sessionGeneration, purgeGeneration int64) error
+}
+
+// SessionStorageExpiredLister lets SessionManager route TTL deletion through
+// the same purge protocol as explicit deletion rather than bypassing it with a
+// bulk DELETE.
+type SessionStorageExpiredLister interface {
+	ListExpiredSessionIDs(ctx context.Context, now, olderThan time.Time, limit int) ([]string, error)
+}
+
+// SessionPurgeCoordinator fences/cancels memory work for one canonical purge
+// generation. Implementations must be idempotent because crash recovery may
+// replay the same generation.
+type SessionPurgeCoordinator func(ctx context.Context, sessionID string, generation int64) error
+
+// SessionPurgeCoordinatorV2 is the generation-qualified coordinator used by
+// memory runtime wiring. It prevents a purge acknowledgement from one
+// canonical incarnation being applied to another incarnation with the same ID.
+type SessionPurgeCoordinatorV2 func(ctx context.Context, sessionID string, sessionGeneration, purgeGeneration int64) error
+
 // SessionStatistics 会话统计信息
 type SessionStatistics struct {
 	Total         int            `json:"total" yaml:"total"`
@@ -115,6 +186,7 @@ type InMemoryStorage struct {
 	sessions    map[string]*Session
 	mu          sync.RWMutex
 	sessionTags map[string]map[string]bool // tag -> sessionIDs
+	receipts    map[string]TurnCaptureReceipt
 }
 
 // NewInMemoryStorage 创建内存存储
@@ -122,6 +194,7 @@ func NewInMemoryStorage() *InMemoryStorage {
 	return &InMemoryStorage{
 		sessions:    make(map[string]*Session),
 		sessionTags: make(map[string]map[string]bool),
+		receipts:    make(map[string]TurnCaptureReceipt),
 	}
 }
 

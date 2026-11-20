@@ -9,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
@@ -190,15 +191,16 @@ func (c Config) normalized() Config {
 }
 
 type SessionRef struct {
-	ID             string
-	UserID         string
-	WorkspacePath  string
-	State          string
-	IsSubagent     bool
-	Ephemeral      bool
-	UpdatedAt      time.Time
-	LastActivityAt time.Time
-	CanonicalCount int
+	ID                string
+	UserID            string
+	SessionGeneration int64
+	WorkspacePath     string
+	State             string
+	IsSubagent        bool
+	Ephemeral         bool
+	UpdatedAt         time.Time
+	LastActivityAt    time.Time
+	CanonicalCount    int
 }
 
 type TranscriptMessage struct {
@@ -278,6 +280,51 @@ type Extractor interface {
 type SessionSource interface {
 	ListSessions(ctx context.Context, workspace string, limit int) ([]SessionRef, error)
 	ReadTranscript(ctx context.Context, session SessionRef, maxMessages int) (Transcript, error)
+}
+
+// TurnCaptureReceiptSource is implemented by canonical stores that expose the
+// durable turn-end handoff. It is intentionally an optional extension so old
+// session backends remain usable for legacy digest recovery.
+type TurnCaptureReceiptSource interface {
+	ListTurnCaptureReceipts(context.Context, int) ([]chat.TurnCaptureReceipt, error)
+	ListMaterializedTurnCaptureReceipts(context.Context, int) ([]chat.TurnCaptureReceipt, error)
+	GetTurnCaptureReceipt(context.Context, string) (chat.TurnCaptureReceipt, error)
+	ValidateTurnCaptureReceipt(context.Context, chat.TurnCaptureReceipt) error
+	MarkTurnCaptureReceiptMaterialized(context.Context, string) error
+	DeferTurnCaptureReceipt(context.Context, string, string, time.Time) error
+}
+
+// SessionTurnCaptureReceiptSource is an optional scoped listing extension used
+// by session-end flushes so a busy global outbox cannot hide this session's
+// receipts behind the page limit.
+type SessionTurnCaptureReceiptSource interface {
+	ListTurnCaptureReceiptsForSession(context.Context, string, int) ([]chat.TurnCaptureReceipt, error)
+	ListMaterializedTurnCaptureReceiptsForSession(context.Context, string, int) ([]chat.TurnCaptureReceipt, error)
+	HasTurnCaptureReceiptsForSession(context.Context, string) (bool, error)
+}
+
+// SessionTurnCaptureReceiptGenerationSource scopes receipt routing and
+// session-end materialization to one canonical incarnation.
+type SessionTurnCaptureReceiptGenerationSource interface {
+	ListTurnCaptureReceiptsForSessionGeneration(context.Context, string, int64, int) ([]chat.TurnCaptureReceipt, error)
+	HasTurnCaptureReceiptsForSessionGeneration(context.Context, string, int64) (bool, error)
+}
+
+// MaterializedTurnCaptureReceiptPageSource adds a keyset-paginated recovery
+// listing. The page cursor is the last receipt returned by the previous page;
+// it lets recovery skip already-completed materialized receipts without
+// confusing canonical receipt state with extraction state.
+type MaterializedTurnCaptureReceiptPageSource interface {
+	ListMaterializedTurnCaptureReceiptsPage(context.Context, *chat.TurnCaptureReceipt, int) ([]chat.TurnCaptureReceipt, error)
+	ListMaterializedTurnCaptureReceiptsForSessionPage(context.Context, string, *chat.TurnCaptureReceipt, int) ([]chat.TurnCaptureReceipt, error)
+}
+
+// SessionGenerationMaterializedTurnCaptureReceiptPageSource prevents receipts
+// from an older incarnation from occupying a newer incarnation's recovery page.
+type SessionGenerationMaterializedTurnCaptureReceiptPageSource interface {
+	ListMaterializedTurnCaptureReceiptsForSessionGenerationPage(
+		context.Context, string, int64, *chat.TurnCaptureReceipt, int,
+	) ([]chat.TurnCaptureReceipt, error)
 }
 
 // TranscriptWindowSource is an optional extension for large sessions. It reads

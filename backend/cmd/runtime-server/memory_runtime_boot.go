@@ -52,14 +52,6 @@ type runtimeServerMemoryMaintenanceHost struct {
 	handler *runtimeapi.Handler
 }
 
-func (h runtimeServerMemoryMaintenanceHost) RunIdle(ctx context.Context) error {
-	if h.handler == nil {
-		return nil
-	}
-	_, err := h.handler.RunMemoryIdleSweep(ctx)
-	return err
-}
-
 func (h runtimeServerMemoryMaintenanceHost) RunConsolidation(ctx context.Context) error {
 	if h.handler == nil {
 		return nil

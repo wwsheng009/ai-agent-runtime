@@ -52,6 +52,8 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.NotNil(t, status.TurnDigests)
 	require.NotNil(t, status.TurnWindows)
 	require.GreaterOrEqual(t, status.SchemaVersion, 6)
+	require.False(t, status.MemoryRuntimePresent)
+	require.Nil(t, status.DigestRuntime)
 
 	body := `{"text":"prefer apply_patch for multi-hunk edits","kind":"workflow","tags":["workflow"],"session_id":"s1"}`
 	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
@@ -110,6 +112,31 @@ func TestMemoryAPIRecordsLifecycleAndStatus(t *testing.T) {
 	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
 	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listed))
 	require.Equal(t, 0, listed.Count)
+}
+
+func TestMemoryStatusReportsRuntimeDigestStats(t *testing.T) {
+	workspace := t.TempDir()
+	handler, router := newMemoryTestRouter(t, workspace)
+	store, err := memorystore.New(memorystore.Config{ProjectRoot: workspace, Mode: "on"})
+	require.NoError(t, err)
+	rt := memoryruntime.New(store, nil, nil, nil, memoryruntime.Config{
+		Mode: "on", Workspace: workspace, ProjectKey: store.ProjectKey(),
+	})
+	handler.SetMemoryRuntime(rt)
+	t.Cleanup(func() { _ = handler.CloseMemoryRuntime() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/status", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var status memoryStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&status))
+	require.True(t, status.MemoryRuntimePresent)
+	require.Equal(t, workspace, status.MemoryRuntimeWorkspace)
+	require.NotNil(t, status.DigestRuntime)
+	require.Zero(t, status.DigestRuntime.Written)
+	require.Zero(t, status.DigestRuntime.Failed)
 }
 
 func TestMemoryAPIWhyNotRequiresAdminAndExplainsSelection(t *testing.T) {

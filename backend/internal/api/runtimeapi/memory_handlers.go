@@ -22,33 +22,36 @@ import (
 )
 
 type memoryStatusResponse struct {
-	WorkspacePath                 string         `json:"workspace_path"`
-	Mode                          string         `json:"mode"`
-	Scope                         string         `json:"scope"`
-	DBPath                        string         `json:"db_path,omitempty"`
-	SchemaVersion                 int            `json:"schema_version"`
-	Total                         int            `json:"total"`
-	ByStatus                      map[string]int `json:"by_status,omitempty"`
-	ByFreshness                   map[string]int `json:"by_freshness,omitempty"`
-	SummaryRevision               int64          `json:"summary_revision,omitempty"`
-	SummaryStatus                 string         `json:"summary_status,omitempty"`
-	SummaryFreshness              string         `json:"summary_freshness,omitempty"`
-	PinnedCount                   int            `json:"pinned_count,omitempty"`
-	PinnedBudgetRatio             float64        `json:"pinned_budget_ratio,omitempty"`
-	InjectionMode                 string         `json:"injection_mode,omitempty"`
-	GenerationEnabled             bool           `json:"generation_enabled"`
-	GenerationTrigger             string         `json:"generation_trigger,omitempty"`
-	ConsolidationEnabled          bool           `json:"consolidation_enabled"`
-	ManualEnabled                 bool           `json:"manual_enabled"`
-	Jobs                          map[string]int `json:"jobs,omitempty"`
-	TurnDigests                   map[string]int `json:"turn_digests"`
-	TurnWindows                   map[string]int `json:"turn_windows"`
-	OldestPendingDigestAgeSeconds int64          `json:"oldest_pending_digest_age_seconds,omitempty"`
-	PendingDigestSessions         int            `json:"pending_digest_sessions,omitempty"`
-	PendingDigestBacklogBatches   int            `json:"pending_digest_backlog_batches,omitempty"`
-	RecoveredDigestSessions       int64          `json:"recovered_digest_sessions,omitempty"`
-	Fallback                      bool           `json:"fallback"`
-	FallbackReason                string         `json:"fallback_reason,omitempty"`
+	WorkspacePath                 string                     `json:"workspace_path"`
+	Mode                          string                     `json:"mode"`
+	Scope                         string                     `json:"scope"`
+	DBPath                        string                     `json:"db_path,omitempty"`
+	SchemaVersion                 int                        `json:"schema_version"`
+	Total                         int                        `json:"total"`
+	ByStatus                      map[string]int             `json:"by_status,omitempty"`
+	ByFreshness                   map[string]int             `json:"by_freshness,omitempty"`
+	SummaryRevision               int64                      `json:"summary_revision,omitempty"`
+	SummaryStatus                 string                     `json:"summary_status,omitempty"`
+	SummaryFreshness              string                     `json:"summary_freshness,omitempty"`
+	PinnedCount                   int                        `json:"pinned_count,omitempty"`
+	PinnedBudgetRatio             float64                    `json:"pinned_budget_ratio,omitempty"`
+	InjectionMode                 string                     `json:"injection_mode,omitempty"`
+	GenerationEnabled             bool                       `json:"generation_enabled"`
+	GenerationTrigger             string                     `json:"generation_trigger,omitempty"`
+	ConsolidationEnabled          bool                       `json:"consolidation_enabled"`
+	ManualEnabled                 bool                       `json:"manual_enabled"`
+	Jobs                          map[string]int             `json:"jobs,omitempty"`
+	TurnDigests                   map[string]int             `json:"turn_digests"`
+	TurnWindows                   map[string]int             `json:"turn_windows"`
+	OldestPendingDigestAgeSeconds int64                      `json:"oldest_pending_digest_age_seconds,omitempty"`
+	PendingDigestSessions         int                        `json:"pending_digest_sessions,omitempty"`
+	PendingDigestBacklogBatches   int                        `json:"pending_digest_backlog_batches,omitempty"`
+	RecoveredDigestSessions       int64                      `json:"recovered_digest_sessions,omitempty"`
+	Fallback                      bool                       `json:"fallback"`
+	FallbackReason                string                     `json:"fallback_reason,omitempty"`
+	MemoryRuntimePresent          bool                       `json:"memory_runtime_present"`
+	MemoryRuntimeWorkspace        string                     `json:"memory_runtime_workspace,omitempty"`
+	DigestRuntime                 *memoryruntime.DigestStats `json:"digest_runtime,omitempty"`
 }
 
 type memoryRecordDTO struct {
@@ -228,6 +231,14 @@ func (h *Handler) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 		response.GenerationTrigger = h.runtimeConfig.Memory.Generation.Trigger
 		response.ConsolidationEnabled = h.runtimeConfig.Memory.Consolidation.Enabled
 		response.ManualEnabled = h.runtimeConfig.Memory.Manual.Enabled
+	}
+	if rt := h.MemoryRuntime(); rt != nil {
+		response.MemoryRuntimePresent = true
+		response.MemoryRuntimeWorkspace = rt.Config.Workspace
+		if workspacePathsEqual(workspace, rt.Config.Workspace) {
+			stats := rt.DigestStats()
+			response.DigestRuntime = &stats
+		}
 	}
 	h.writeJSON(w, http.StatusOK, response)
 }

@@ -16,7 +16,8 @@ func (r *Runtime) failExtractionJob(ctx context.Context, job memorystore.MemoryJ
 	// This is a bounded bookkeeping context, never a continuation of model work.
 	cleanupCtx, cancel := memoryJobCleanupContext(ctx)
 	defer cancel()
-	err := r.Store.FailJobForWorker(cleanupCtx, job.ID, job.WorkerID, cause.Error(), r.now().Add(retryBackoff(job.Attempt)))
+	err := r.Store.FailJobForWorkerAttempt(cleanupCtx, job.ID, job.WorkerID, job.Attempt,
+		cause.Error(), r.now().Add(retryBackoff(job.Attempt)))
 	if err != nil {
 		return errors.Join(cause, fmt.Errorf("memoryruntime: persist extraction failure: %w", err))
 	}

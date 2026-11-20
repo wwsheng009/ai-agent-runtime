@@ -132,15 +132,22 @@ func (r *Runtime) RollupTurnDigests(ctx context.Context, sessionID string, final
 	if configured := r.Config.TurnDigestMaxDigestsPerRun; configured > 0 && configured < limit {
 		limit = configured
 	}
-	digests, err := r.Store.ListTurnDigestsForRollup(ctx, session.ID, limit)
+	digests, err := r.Store.ListTurnDigestsForRollupGeneration(ctx, session.ID, session.SessionGeneration, limit)
 	if err != nil {
 		return result, err
+	}
+	for _, digest := range digests {
+		if digest.SessionGeneration != session.SessionGeneration {
+			result.Failed++
+			result.Errors = append(result.Errors, session.ID+": rollup digest generation mismatch")
+			return result, nil
+		}
 	}
 	groups := selectTurnWindowGroups(digests, r.Config.TurnDigestWindowTurns, finalize)
 	if len(groups) == 0 {
 		return result, nil
 	}
-	windowIndex, _ := r.Store.CountTurnWindows(ctx, session.ID)
+	windowIndex, _ := r.Store.CountTurnWindowsForGeneration(ctx, session.ID, &session.SessionGeneration)
 	for _, group := range groups {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -168,9 +175,9 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		return result
 	}
 	sourceHash := memorystore.TurnWindowHash(digests)
-	sourceWindow := memorystore.TurnWindowSourceWindow(startDigestSeq, endDigestSeq)
+	sourceWindow := memorystore.TurnWindowSourceWindowGeneration(session.SessionGeneration, startDigestSeq, endDigestSeq)
 	startMessageSeq := int64(1)
-	if previousEnd, err := r.Store.PreviousTurnDigestMessageSeqEnd(ctx, session.ID, startDigestSeq); err == nil && previousEnd > 0 {
+	if previousEnd, err := r.Store.PreviousTurnDigestMessageSeqEndForGeneration(ctx, session.ID, session.SessionGeneration, startDigestSeq); err == nil && previousEnd > 0 {
 		startMessageSeq = previousEnd + 1
 	}
 	endMessageSeq := int64(0)
@@ -181,18 +188,19 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		}
 	}
 	window, sourceChanged, err := r.Store.EnsureTurnWindow(ctx, memorystore.TurnWindow{
-		Scope:           memorystore.ScopeProject,
-		ProjectKey:      r.Config.ProjectKey,
-		SessionID:       session.ID,
-		WindowIndex:     windowIndex,
-		StartDigestSeq:  startDigestSeq,
-		EndDigestSeq:    endDigestSeq,
-		StartMessageSeq: startMessageSeq,
-		EndMessageSeq:   endMessageSeq,
-		TurnCount:       len(digests),
-		SourceHash:      sourceHash,
-		SourceRevision:  endDigestSeq,
-		Status:          memorystore.TurnWindowPending,
+		Scope:             memorystore.ScopeProject,
+		ProjectKey:        r.Config.ProjectKey,
+		SessionID:         session.ID,
+		SessionGeneration: session.SessionGeneration,
+		WindowIndex:       windowIndex,
+		StartDigestSeq:    startDigestSeq,
+		EndDigestSeq:      endDigestSeq,
+		StartMessageSeq:   startMessageSeq,
+		EndMessageSeq:     endMessageSeq,
+		TurnCount:         len(digests),
+		SourceHash:        sourceHash,
+		SourceRevision:    endDigestSeq,
+		Status:            memorystore.TurnWindowPending,
 	})
 	if err != nil {
 		result.Failed++
@@ -200,13 +208,13 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		return result
 	}
 	if sourceChanged {
-		_, _ = r.Store.MarkTurnWindowCandidatesStale(ctx, session.ID, sourceWindow, "turn_window_source_changed")
+		_, _ = r.Store.MarkTurnWindowCandidatesStaleForGeneration(ctx, session.ID, session.SessionGeneration, sourceWindow, "turn_window_source_changed")
 	}
 	if window.Status == memorystore.TurnWindowInvalidated {
 		result.Skipped++
 		return result
 	}
-	jobKey := fmt.Sprintf("session:%s:rollup:%d-%d:%s", session.ID, startDigestSeq, endDigestSeq, sourceHash)
+	jobKey := fmt.Sprintf("session:%s:g%d:rollup:%d-%d:%s", session.ID, session.SessionGeneration, startDigestSeq, endDigestSeq, sourceHash)
 	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
 		Kind: turnWindowRollupJobKind, JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
 		MaxAttempts: r.Config.MaxAttempts,
@@ -297,14 +305,15 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		return failClaimed(sanitizeErr, true)
 	}
 	metadata := map[string]interface{}{
-		"compiler":          "llm_window_summary_v1",
-		"window_index":      windowIndex,
-		"start_digest_seq":  startDigestSeq,
-		"end_digest_seq":    endDigestSeq,
-		"start_message_seq": startMessageSeq,
-		"end_message_seq":   endMessageSeq,
-		"turn_count":        len(digests),
-		"source_hash":       sourceHash,
+		"compiler":           "llm_window_summary_v1",
+		"window_index":       windowIndex,
+		"start_digest_seq":   startDigestSeq,
+		"end_digest_seq":     endDigestSeq,
+		"start_message_seq":  startMessageSeq,
+		"end_message_seq":    endMessageSeq,
+		"turn_count":         len(digests),
+		"source_hash":        sourceHash,
+		"session_generation": session.SessionGeneration,
 	}
 	commitCtx, commitCancel := memoryJobCommitContext(ctx)
 	defer commitCancel()
@@ -331,7 +340,7 @@ func (r *Runtime) finalizeTurnWindowRollup(ctx context.Context, session SessionR
 	if err := r.ensureTurnWindowCandidate(ctx, session, window, digests); err != nil {
 		return 0, err
 	}
-	return r.Store.MarkTurnDigestsRolledUp(ctx, session.ID, window.StartDigestSeq, window.EndDigestSeq, window.ID)
+	return r.Store.MarkTurnDigestsRolledUpForGeneration(ctx, session.ID, session.SessionGeneration, window.StartDigestSeq, window.EndDigestSeq, window.ID)
 }
 
 func (r *Runtime) ensureTurnWindowCandidate(ctx context.Context, session SessionRef, window memorystore.TurnWindow, digests []memorystore.TurnDigest) error {
@@ -355,34 +364,36 @@ func (r *Runtime) ensureTurnWindowCandidate(ctx context.Context, session Session
 		}
 	}
 	now := r.now()
-	sourceWindow := memorystore.TurnWindowSourceWindow(window.StartDigestSeq, window.EndDigestSeq)
+	sourceWindow := memorystore.TurnWindowSourceWindowGeneration(session.SessionGeneration, window.StartDigestSeq, window.EndDigestSeq)
 	_, err := r.Store.InsertCandidate(ctx, memorystore.Candidate{
-		SessionID:        session.ID,
-		SourceWindow:     sourceWindow,
-		SourceKind:       "turn_window",
-		SourceRefs:       []string{"session:" + session.ID, "turn_window:" + window.ID},
-		ProjectKey:       r.Config.ProjectKey,
-		Kind:             "reference",
-		Text:             text,
-		Tags:             []string{"turn_window", "window_summary"},
-		Confidence:       1,
-		Sensitivity:      "internal",
-		SourceHash:       window.SourceHash,
-		SourceRevision:   window.SourceRevision,
-		SourceUpdatedAt:  window.ProcessedAt,
-		SourceMessageIDs: messageIDs,
-		RetentionClass:   r.retentionClassForKind("reference"),
-		RevalidateAfter:  r.revalidateAfterForKind("reference", now),
-		Model:            window.Model,
-		TokenUsage:       decodeUsageJSON(window.UsageJSON),
+		SessionID:         session.ID,
+		SessionGeneration: session.SessionGeneration,
+		SourceWindow:      sourceWindow,
+		SourceKind:        "turn_window",
+		SourceRefs:        []string{"session:" + session.ID, "turn_window:" + window.ID},
+		ProjectKey:        r.Config.ProjectKey,
+		Kind:              "reference",
+		Text:              text,
+		Tags:              []string{"turn_window", "window_summary"},
+		Confidence:        1,
+		Sensitivity:       "internal",
+		SourceHash:        window.SourceHash,
+		SourceRevision:    window.SourceRevision,
+		SourceUpdatedAt:   window.ProcessedAt,
+		SourceMessageIDs:  messageIDs,
+		RetentionClass:    r.retentionClassForKind("reference"),
+		RevalidateAfter:   r.revalidateAfterForKind("reference", now),
+		Model:             window.Model,
+		TokenUsage:        decodeUsageJSON(window.UsageJSON),
 		Metadata: map[string]interface{}{
-			"window_id":        window.ID,
-			"window_index":     window.WindowIndex,
-			"start_digest_seq": window.StartDigestSeq,
-			"end_digest_seq":   window.EndDigestSeq,
-			"turn_count":       window.TurnCount,
-			"summary_hash":     window.SummaryHash,
-			"summary_revision": window.SummaryRevision,
+			"window_id":          window.ID,
+			"window_index":       window.WindowIndex,
+			"start_digest_seq":   window.StartDigestSeq,
+			"end_digest_seq":     window.EndDigestSeq,
+			"turn_count":         window.TurnCount,
+			"summary_hash":       window.SummaryHash,
+			"summary_revision":   window.SummaryRevision,
+			"session_generation": session.SessionGeneration,
 		},
 	})
 	if err != nil && isCandidateSkipError(err) {
@@ -455,7 +466,9 @@ func (r *Runtime) shouldFinalizeRollup(ctx context.Context, session SessionRef, 
 	if !requested && !isTerminalSessionState(session.State) {
 		return false
 	}
-	pending, err := r.Store.ListPendingTurnDigests(ctx, session.ID, 1)
+	pending, err := r.Store.ListPendingTurnDigestsForGeneration(
+		ctx, session.ID, session.SessionGeneration, 1,
+	)
 	if err != nil {
 		// Fail closed: keep full-window behavior rather than creating a partial
 		// L1 window while the L0 backlog may still be draining.

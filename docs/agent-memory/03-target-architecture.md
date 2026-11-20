@@ -6,6 +6,64 @@
 > 修订：2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 trigger both、stable/recall stage split、pinned 预算、summary invalidation、冲突优先级。
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 
+## 0. 2026-11-19 正常路径与兼容边界
+
+目标架构只允许以下新回合正常路径：
+
+```text
+canonical chat turn commit
+  -> durable capture receipt
+  -> memory materialization
+  -> phase1_extract/v2 job
+  -> candidate records + output receipt
+  -> consolidation
+  -> active memory
+  -> retrieval/injection
+```
+
+`canonical transcript` 仍是消息事实源；receipt 只表示 canonical → memory
+的 durable handoff。memory digest 只记录 materialization/progress，extraction
+job 只记录待执行工作，二者都不能被当作 transcript。`TurnWindow` 只能由
+已完成的 turn/range 派生为 L1 rollup/summary，不能成为新的事件源。
+
+### 0.1 路由不变量
+
+- 实现 `TurnCaptureReceiptSource` 的 source，`Runtime.Run` 只负责
+  materialization 与 capture worker；maintenance 只调这条路径，不再通过
+  `RunIdle` 或无条件 `RunPendingTurnDigests` 产生重复抽取。
+- 没有 receipt contract 的 source 是 legacy adapter，可保留 bounded sweep
+  以支持迁移/兼容；这不是新回合的正常路径。
+- `RunSession`、`RunSessionWindow`、`RunPendingTurnDigests`、
+  `RecoverPendingPhase1` 均为显式 compatibility/recovery 入口。它们只消费
+  pre-receipt/historical 数据；receipt-backed session 必须被 routing fence
+  跳过。
+- legacy `memory_turn_digests` 的发现和状态更新以
+  `capture_receipt_id = ''` 为硬边界；receipt-backed rows 只能由 v2 capture
+  worker 处理。
+- session generation/incarnation、receipt/turn/range/revision 幂等身份、
+  purge fence、worker lease、stale source validation、output receipt 和
+  candidate commit 都是协议的一部分，不能用增加另一套 digest/window/receipt
+  名称替代。
+- canonical SQLite 与 memory SQLite 不共享事务；handoff 是 at-least-once，
+  依靠唯一键和补偿扫描收敛。
+
+### 0.2 对象职责
+
+| 对象 | 唯一职责 |
+| --- | --- |
+| canonical receipt | canonical chat turn handoff |
+| memory digest | memory-side materialization/progress record |
+| extraction job | extraction work item |
+| candidate | extraction output |
+| TurnWindow | derived rollup/summary |
+| RunSession | legacy compatibility/recovery |
+| RunSessionWindow | legacy bounded-range recovery |
+| RunPendingTurnDigests | legacy digest recovery |
+| RecoverPendingPhase1 | pre-receipt phase1 job recovery |
+
+本节优先于本文件中描述旧 outbox 触发方式的历史段落；旧机制只可按上述
+兼容边界解释。durable capture patch 仍保持“方案提案，待评审；未实施”。
+
 ## 1. 目标
 
 Agent Memory v2 要提供：
@@ -250,17 +308,19 @@ polluted   因外部上下文/MCP/敏感来源被标记，不参与自动生成
 
 支持四种触发：
 
-1. **session-end**：会话正常结束/关闭后触发；
-2. **idle**：会话超过阈值无活动，由 runtime-server 或 CLI 后台任务扫描；
-3. **both**：idle + session-end 兜底；长 gateway/CLI 混合场景推荐；
+1. **session-end**：会话正常结束/关闭后调度同一个 capture worker；
+2. **idle**：会话超过阈值无活动，由 maintenance 调度同一个 capture worker；
+3. **both**：同一 capture worker 的 idle + session-end 两个调度时机，通过 receipt/job 幂等合并；
 4. **manual**：用户执行 `/memory extract` 或 API 显式请求。
 
-第一版推荐 `both`（至少启用 idle 或 session-end 之一），不在对话请求中同步提取。
+第一版推荐 `both`（至少启用 idle 或 session-end 之一），不在对话请求中同步提取；
+这不是两套 session replay。
 
 建议接入点：
 
-- `backend/internal/chat/actor.go`：turn 终态/会话关闭后写入候选触发记录；
-- `backend/cmd/runtime-server` 或 `backend/internal/runtimeserver`：周期扫描 idle session；
+- `backend/internal/chat/actor.go`：turn 终态在 canonical commit 中写 capture receipt；
+- `backend/cmd/runtime-server` 或 `backend/internal/runtimeserver`：调度
+  materializer/capture worker；不得直接启动 legacy session replay；
 - `backend/internal/api/runtimeapi`：手动 extract/consolidate；
 - 触发记录必须幂等，不能因为进程重启重复抽取；
 - 触发器只入队，不直接执行 LLM。
@@ -269,11 +329,14 @@ polluted   因外部上下文/MCP/敏感来源被标记，不参与自动生成
 
 为避免终端关闭/崩溃时 `SessionManager.Close` 未执行导致抽取丢失，Phase 1 增加**运行时 Turn Digest Outbox**：
 
-- `internal/chat` 在 turn 终态（`assistant_message` 发布窗口）写一条有界 digest；
-- digest 只保存用户提问、最终 assistant 输出、turn/message 引用、outcome 和 usage；
-- turn-end 不调用 LLM；session-end/idle/startup recovery 再消费；
-- digest 是 outbox/trigger，不是第二份 transcript；抽取仍读取 canonical transcript；
-- startup recovery 只处理 closed/stale/orphaned session，不抽取活跃会话；
+- `internal/chat` 在 turn 终态（`assistant_message` 发布窗口）写 durable capture receipt；
+- receipt 固定 session/turn/range/revision；memory materializer 再写有界 digest/progress
+  与 `phase1_extract/v2` job；
+- turn-end 不调用 LLM；receipt-backed 新回合由 capture worker 消费；
+- digest 是 memory-side outbox/progress，不是第二份 transcript；v2 抽取仍读取
+  receipt 固定范围的 canonical transcript；
+- startup legacy recovery 只处理无 receipt 的 closed/stale/orphaned session，不抽取
+  receipt-backed 活跃会话；
 - 大会话按 `digest_seq` 分批，窗口化读取 canonical transcript；只读最近一页时不得把更早的 pending digest 标记为 done；
 - 详细提案：`patches/2026-11-11-turn-digest-runtime-outbox.md`。
 

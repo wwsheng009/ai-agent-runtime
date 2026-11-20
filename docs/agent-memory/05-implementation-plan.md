@@ -6,6 +6,36 @@
 > 修订：2026-11-10，补 §11 M1 代码级施工说明；2026-11-09，按 `13-memory-injection-and-learning-update-plan.md` v1.1 回写 stable/recall split、pinned 预算、summary invalidation/summary_rebuild、trigger both、exposure fallback。
 > 2026-11-11 追加：M2 Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E 待补（见 `patches/2026-11-11-turn-digest-runtime-outbox.md`）。
 
+## 0. 2026-11-19 收敛后的实施顺序
+
+本计划不再把 durable capture、Turn Digest、session extraction 视为三条
+并行正常链路。新回合只能按以下顺序实施和验收：
+
+1. canonical turn commit 在同一 canonical SQLite transaction 写
+   `session_turn_capture_receipts`；
+2. materializer 将 receipt 固定的 session/turn/range/revision 投递到 memory
+   SQLite；
+3. `phase1_extract/v2` worker 按 receipt 固定 range 读取 canonical transcript；
+4. worker 在 extraction 前后校验 generation/incarnation、purge fence、
+   canonical revision/range hash 和 source freshness；
+5. 在 memory transaction 中提交 candidates、output receipt、digest/job 终态；
+6. consolidation 将 candidate 晋升为 active memory，随后才进入
+   retrieval/injection；
+7. 旧 `phase1_extract`、`RunSession`、`RunSessionWindow`、
+   `RunPendingTurnDigests`、`RecoverPendingPhase1` 仅作为 pre-receipt/historical
+   compatibility、migration 或 recovery。
+
+实施不变量：
+
+- receipt-backed session 不得同时被 v2 worker 和 legacy session replay 消费；
+- canonical SQLite 与 memory SQLite 没有跨库事务，使用 at-least-once handoff；
+- 幂等 identity 必须包含 receipt/turn/range/revision，且保留 output receipt、
+  candidate commit、worker lease、stale validation、purge fence；
+- generation disabled 可以完成 materialization，但不得执行 LLM 或 fallback；
+- 不新增第三套 digest/window/receipt/phase 名称来“解决”历史兼容问题；
+- durable capture patch 仍为**方案提案，待评审；未实施**，本计划的实现状态
+  只描述当前代码已经存在的路由收敛，不表示该 patch 已获批准。
+
 ## 1. 实施总览
 
 | 阶段 | 目标 | 主要产物 | 默认状态 |
@@ -213,16 +243,19 @@ go test ./internal/api/runtimeapi -count=1
 
 ### 4.1 目标
 
-从 canonical transcript 生成 candidate memories，默认 shadow 只记录不注入。
+从 receipt 固定的 canonical transcript range 生成 candidate memories，默认
+shadow 只记录不注入。没有 receipt contract 的 source 只能走 bounded legacy
+adapter，不能被当作新回合的第二条正常路径。
 
 ### 4.2 工作项
 
 1. 新增 `memoryruntime` 包骨架；
-2. 实现 session 选择：
+2. 实现 bounded legacy adapter 的 session 选择（receipt-backed v2 只选择已 materialize 的 receipt）：
    - workspace 匹配；
    - memory mode enabled；
    - `generation.trigger` 允许 `idle` / `session_end` / `both` / `manual`；
-   - `both` 时 idle sweep 与 session-end 都触发；
+   - `both` 只表示同一 capture worker 有两个调度时机；不得让 idle sweep
+     和 session-end 各自做一遍 session replay；
    - 非 ephemeral；
    - 默认排除 subagent；
    - idle >= `minIdleHours`；
@@ -264,15 +297,18 @@ go test ./internal/api/runtimeapi -count=1
    - summary 文件可选生成；
    - 记录 model/token usage。
 8. 触发：
-   - CLI session end 后入队；
-   - runtime-server idle scheduler；
-   - 长 gateway/CLI 混合场景使用 `both`，idle sweep 兜底；
-   - 手动 `/memory extract`/API；
-   - 不做同步对话触发。
+   - canonical turn commit 写 receipt；
+   - materializer/capture worker 负责 receipt-backed 新回合；
+   - 手动 `/memory extract`/API 只能复用同一 capture/compatibility contract；
+   - 不做同步对话触发；
+   - `RunIdle`/无条件 legacy digest sweep 不再作为 receipt-backed 新回合入口。
 
 ### 4.2.1 Turn Digest Outbox（Phase 1，已确认）
 
-目的：解决终端关闭/崩溃时 `SessionManager.Close` 未执行导致自动抽取丢失，并为大会话提供可恢复的 pending 列表。
+目的：解决终端关闭/崩溃时 `SessionManager.Close` 未执行导致 canonical
+receipt handoff 丢失，并为大会话提供可恢复的 pending 列表。Turn Digest
+是 memory-side materialization/progress，不是第二份 transcript；旧 digest
+逻辑仅保留给 pre-receipt/historical compatibility。
 
 工作项：
 
@@ -281,11 +317,15 @@ go test ./internal/api/runtimeapi -count=1
 3. 写入前脱敏、限长；`storeText=false` 时只存引用；
 4. `memory_turn_digests` migration v3 + CRUD + retention；
 5. session-end 成功后标记 processed；
-6. idle/startup 扫描 pending digest；startup 只处理 closed/stale/orphaned session；
+6. capture worker 扫描 materialized receipt；legacy idle/startup 只扫描
+   `capture_receipt_id=''` 的 pending digest，startup 只处理
+   closed/stale/orphaned session；
 7. 默认只自动抽取 `outcome=success` 且 assistant text 非空的 turn；
 8. 大会话按 `maxTurnsPerBatch` / `maxBytesPerBatch` / `maxDigestsPerRun` 分批；
 9. 窗口化 canonical transcript 读取（已完成）：按 seq/turn 窗口抽取；per-window stale + L0→L1→L2 rollup 已接入；只读最近一页时不得把更早 pending 标 done；
-10. 状态/指标：pending、done、failed、oldest_pending_age、backlog_batches、recovered。
+10. 状态/指标：pending、done、failed、oldest_pending_age、backlog_batches、recovered；
+    同一 receipt 的 output receipt、candidate commit、generation/purge fence、
+    lease 和 stale validation 必须可审计。
 
 详细设计：`docs/agent-memory/patches/2026-11-11-turn-digest-runtime-outbox.md`。
 
@@ -342,8 +382,8 @@ go test ./internal/agent -count=1
 - source 变化会标记 stale；
 - 新 candidate 的 freshness/TTL 初始化正确；
 - `shadow` 不注入；
-- 长 gateway 不结束也会被 idle sweep 触发；
-- `trigger=both` 不会重复入队同一 source；
+- 长 gateway 不结束也会由 capture worker 的 idle 调度兜底；
+- `trigger=both` 只调度同一 capture worker，不能重复入队或触发另一套 session replay；
 - `off` 零调用。
 
 ### 4.5 门禁

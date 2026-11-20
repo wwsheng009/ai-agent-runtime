@@ -489,7 +489,10 @@ trigger
 | explicit remember | 用户说“记住/以后都这样” | 手动工具 | manual active + pinned，不等待 Consolidation |
 
 第一版推荐 `both`（idle + session_end 兜底），至少启用 idle 或 session-end 之一；不在对话请求中同步提取。正常自动记忆不要求用户手工 `/memory add`；manual add 只用于显式“记住”、迁移和确定性测试种子。
-具体启用哪一个由 `memory.generation.trigger` 决定；`both` 表示 idle sweep 与 session-end 都启用，其他值只启用对应触发器。
+具体启用哪一个由 `memory.generation.trigger` 决定；当前架构中 `both` 表示
+idle 与 session-end 都调度同一个 capture worker，并通过 receipt/job 幂等合并，
+不表示两套 session replay。旧版 `idle sweep` / `session-end` 文字只描述调度时机，
+receipt-backed 新回合的路由以 `README §0` / `03 §7.1` 为准；其他值只启用对应调度时机。
 
 接入点建议：
 

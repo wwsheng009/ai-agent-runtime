@@ -114,9 +114,24 @@ func (r *Runtime) recoverPendingRollups(ctx context.Context, trigger Trigger, on
 		if (trigger == TriggerIdle || trigger == TriggerBoth) && !r.pendingDigestIdleEligible(session, pending.Pending) {
 			continue
 		}
+		// Discovery is session-keyed for compatibility, but the actionable
+		// backlog must be re-read after loading the canonical incarnation.
+		// This prevents an old generation from supplying the watermark used
+		// by the current session.
+		generationDigests, err := r.Store.ListTurnDigestsForRollupGeneration(
+			ctx, session.ID, session.SessionGeneration, r.Config.TurnDigestMaxPendingPerSession,
+		)
+		if err != nil {
+			return err
+		}
+		if len(generationDigests) == 0 {
+			continue
+		}
+		pending.Pending = len(generationDigests)
+		pending.MaxSeq = generationDigests[len(generationDigests)-1].DigestSeq
 		processed++
 		if !r.Config.TurnDigestWindowSummaryEnabled {
-			if _, err := r.Store.MarkTurnDigestsRollupSkipped(ctx, session.ID, pending.MaxSeq); err != nil {
+			if _, err := r.Store.MarkTurnDigestsRollupSkippedForGeneration(ctx, session.ID, session.SessionGeneration, pending.MaxSeq); err != nil {
 				return err
 			}
 			continue

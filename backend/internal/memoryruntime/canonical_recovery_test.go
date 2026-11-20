@@ -63,7 +63,7 @@ func TestRecoverySQLiteCoversEntireCanonicalRangeAcrossRestart(t *testing.T) {
 				}
 				for index, endpoint := range endpoints {
 					_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-						SessionID: session.ID, TurnID: fmt.Sprintf("turn-%d", index),
+						SessionID: session.ID, SessionGeneration: 1, TurnID: fmt.Sprintf("turn-%d", index),
 						MessageSeqEnd: int64(endpoint), Outcome: "success", AssistantText: "bounded digest",
 					})
 					require.NoError(t, err)

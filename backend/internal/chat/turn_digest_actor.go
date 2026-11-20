@@ -6,18 +6,44 @@ import (
 	"time"
 
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
+
+const (
+	// Turn digest writes include a session-identity read plus a memory SQLite
+	// write. Keep the budget above sqliteutil.DefaultBusyTimeoutMS (5s) so a
+	// transient writer does not silently discard the turn outbox entry.
+	memoryTurnDigestWriteTimeout = 8 * time.Second
+	memoryTurnDigestRetryDelay   = 200 * time.Millisecond
 )
 
 func (a *SessionActor) recordTurnDigest(digest TurnDigest) {
 	if a == nil || a.turnDigestSink == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), memoryTurnDigestWriteTimeout)
 	defer cancel()
-	if err := a.turnDigestSink.RecordTurnDigest(ctx, digest); err != nil {
-		logpkg.Warnf("memory turn digest write failed: session=%s turn=%s: %v", a.id, digest.TurnID, err)
+	var lastErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		lastErr = a.turnDigestSink.RecordTurnDigest(ctx, digest)
+		if lastErr == nil {
+			return
+		}
+		if attempt == 2 || !sqliteutil.IsBusyError(lastErr) {
+			break
+		}
+		select {
+		case <-time.After(memoryTurnDigestRetryDelay):
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+			break
+		}
 	}
+	logpkg.Warnf("memory turn digest write failed: session=%s turn=%s: %v", a.id, digest.TurnID, lastErr)
 }
 
 // turnDigestMessageIDs resolves canonical message IDs for the final user and

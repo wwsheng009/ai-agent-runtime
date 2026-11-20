@@ -12,7 +12,7 @@ import (
 func TestBacktrackThenAppendExtractsNewCanonicalBranch(t *testing.T) {
 	ctx := context.Background()
 	base := &fakeSource{sessions: []SessionRef{{
-		ID: "s1", WorkspacePath: "/workspace", State: "closed", CanonicalCount: 304,
+		ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed", CanonicalCount: 304,
 	}}}
 	source := &fakeWindowSource{fakeSource: base, window: Transcript{
 		SessionID: "s1", Revision: 304,
@@ -34,6 +34,7 @@ func TestBacktrackThenAppendExtractsNewCanonicalBranch(t *testing.T) {
 	require.NoError(t, err)
 	invalidated, err := rt.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, "s1", map[string]interface{}{
 		"mode":                           string(chat.BacktrackModeConversation),
+		"session_generation":             int64(1),
 		"canonical_cutoff_seq":           300,
 		"canonical_message_count_before": 500,
 		"removed_message_count":          200,

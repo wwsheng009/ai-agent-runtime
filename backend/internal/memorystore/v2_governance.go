@@ -149,6 +149,9 @@ func (s *Store) ActivateSummary(ctx context.Context, id string) (Summary, error)
 		return Summary{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, summary.ProjectKey); err != nil {
+		return Summary{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded'
 WHERE scope = ? AND project_key = ? AND summary_kind = ? AND status = 'active'
@@ -171,7 +174,7 @@ WHERE id = ? AND project_key = ?
 	}
 	summary.Status = "active"
 	summary.Freshness = FreshnessFresh
-	if err := s.writeSummaryArtifacts(summary); err != nil {
+	if err := s.writeSummaryArtifactsIfCurrent(ctx, summary); err != nil {
 		return summary, err
 	}
 	return summary, nil
@@ -197,6 +200,9 @@ func (s *Store) SweepFreshnessBatch(ctx context.Context, now time.Time, limit in
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
 	query := `
 	SELECT id, COALESCE(source_session_id, ''), revision
 FROM memory_entries
@@ -311,6 +317,7 @@ func (s *Store) ExportJSONL(ctx context.Context) (string, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -359,6 +366,7 @@ func (s *Store) ExportMarkdown(ctx context.Context) (string, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -406,6 +414,9 @@ func (s *Store) Reset(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	projectKey := s.cfg.ProjectKey
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return err
+	}
 	statements := []struct {
 		query string
 		args  []interface{}
@@ -439,7 +450,7 @@ func (s *Store) Reset(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return s.clearSummaryArtifacts()
+	return s.clearSummaryArtifactsIfNoFreshActiveSummary(ctx, projectKey)
 }
 
 func scanSummary(row interface{ Scan(...interface{}) error }) (Summary, error) {

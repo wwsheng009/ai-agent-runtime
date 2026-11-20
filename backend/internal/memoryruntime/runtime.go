@@ -27,6 +27,9 @@ type Runtime struct {
 
 	rollupRecoveryMu     sync.Mutex
 	rollupRecoveryCursor string
+
+	digestStatsMu sync.Mutex
+	digestStats   DigestStats
 }
 
 func New(store *memorystore.Store, source SessionSource, extractor Extractor, modes SessionModeReader, cfg Config) *Runtime {
@@ -68,18 +71,49 @@ func (r *Runtime) generationAllowed(trigger Trigger) bool {
 	return !r.Config.GenerationDisabled || trigger == TriggerManual
 }
 
-// Run processes idle sessions. Session-end and manual callers should use
-// RunSession so they do not sweep unrelated sessions.
+// Run is the normal background entry point. A receipt-capable source owns the
+// normal path: materialize and process durable turn captures, then return.
+// It must not fall through to session-wide extraction because that would make
+// the same canonical turn eligible for both the capture worker and a legacy
+// session replay. Historical extraction is exposed only through the explicit
+// compatibility/recovery entry points.
 func (r *Runtime) Run(ctx context.Context, trigger Trigger) (RunResult, error) {
 	result := RunResult{Trigger: trigger}
 	if !r.enabled() {
 		return result, nil
 	}
+	if r.Source == nil {
+		return result, fmt.Errorf("memoryruntime: session source is nil")
+	}
+	if _, receiptSource := r.Source.(TurnCaptureReceiptSource); !receiptSource {
+		// A source without the receipt contract is a legacy adapter. Keep its
+		// bounded sweep for migration/recovery callers, but never use this
+		// branch for canonical receipt-capable sources.
+		return r.runLegacySweep(ctx, trigger)
+	}
+	if r.Store == nil {
+		return result, fmt.Errorf("memoryruntime: memory store is nil")
+	}
+	// Materialization is deliberately independent of the LLM generation
+	// gate. A disabled generator must not strand the canonical handoff.
+	if _, err := r.MaterializeTurnCaptureReceipts(ctx, r.Config.TurnDigestMaxDigestsPerRun); err != nil {
+		return result, err
+	}
 	if !r.generationAllowed(trigger) {
 		return result, nil
 	}
-	if r.Source == nil {
-		return result, fmt.Errorf("memoryruntime: session source is nil")
+	captureRun, err := r.RunPendingTurnCaptureReceipts(ctx, trigger)
+	mergeRunResult(&result, captureRun)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (r *Runtime) runLegacySweep(ctx context.Context, trigger Trigger) (RunResult, error) {
+	result := RunResult{Trigger: trigger}
+	if !r.generationAllowed(trigger) {
+		return result, nil
 	}
 	if r.Extractor == nil {
 		return result, fmt.Errorf("memoryruntime: extractor is nil")
@@ -153,6 +187,12 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	session, err := r.findSession(ctx, sessionID)
 	if err != nil {
 		return result, err
+	}
+	if captureBacked, err := r.captureBackedSession(ctx, session); err != nil {
+		return result, err
+	} else if captureBacked {
+		result.Skipped = 1
+		return result, nil
 	}
 	ok, reason := r.eligible(ctx, session, trigger)
 	if !ok {
@@ -286,6 +326,12 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	if err != nil {
 		return result, err
 	}
+	if captureBacked, err := r.captureBackedSession(ctx, session); err != nil {
+		return result, err
+	} else if captureBacked {
+		result.Skipped = 1
+		return result, nil
+	}
 	if ok, _ := r.eligible(ctx, session, trigger); !ok {
 		result.Skipped = 1
 		return result, nil
@@ -334,7 +380,44 @@ func (r *Runtime) RunSessionWindow(ctx context.Context, trigger Trigger, session
 	return result, nil
 }
 
+// captureBackedSession is the routing fence between the canonical receipt
+// path and historical session extraction. The memory-side check covers rows
+// that have already crossed the SQLite boundary; the canonical-side check
+// covers receipts that are still captured/deferred and have not materialized.
+func (r *Runtime) captureBackedSession(ctx context.Context, session SessionRef) (bool, error) {
+	if r == nil || r.Store == nil || strings.TrimSpace(session.ID) == "" {
+		return false, nil
+	}
+	if backed, err := r.Store.HasTurnCaptureDigestsForSessionGeneration(
+		ctx, session.ID, session.SessionGeneration,
+	); err != nil {
+		return false, err
+	} else if backed {
+		return true, nil
+	}
+	if source, ok := r.Source.(SessionTurnCaptureReceiptGenerationSource); ok {
+		return source.HasTurnCaptureReceiptsForSessionGeneration(
+			ctx, session.ID, session.SessionGeneration,
+		)
+	}
+	if source, ok := r.Source.(SessionTurnCaptureReceiptSource); ok {
+		// A source that cannot scope receipts by generation cannot prove that
+		// a reused session ID is safe for legacy extraction. Fail closed.
+		return source.HasTurnCaptureReceiptsForSession(ctx, session.ID)
+	}
+	if _, receiptSource := r.Source.(TurnCaptureReceiptSource); receiptSource {
+		// Receipt-aware sources without a scoped existence query cannot prove
+		// that session-wide replay is safe. Fail closed instead of guessing.
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *Runtime) runSessionWindowPart(ctx context.Context, trigger Trigger, session SessionRef, windowSource TranscriptWindowSource, startSeq, endSeq int64) (RunResult, error) {
+	return r.runSessionWindowPartWithJob(ctx, trigger, session, windowSource, startSeq, endSeq, "", "")
+}
+
+func (r *Runtime) runSessionWindowPartWithJob(ctx context.Context, trigger Trigger, session SessionRef, windowSource TranscriptWindowSource, startSeq, endSeq int64, jobKind, jobKey string) (RunResult, error) {
 	result := RunResult{Trigger: trigger}
 	transcript, err := windowSource.ReadTranscriptWindow(ctx, session, int(startSeq), int(endSeq), r.Config.MaxSourceMessages)
 	if err != nil {
@@ -365,9 +448,14 @@ func (r *Runtime) runSessionWindowPart(ctx context.Context, trigger Trigger, ses
 	if len(pages) > 1 {
 		return r.runExtractionPages(ctx, trigger, session, transcript, pages, fmt.Sprintf("%d-%d", startSeq, endSeq))
 	}
-	jobKey := fmt.Sprintf("session:%s:window:%d-%d:%s", strings.TrimSpace(session.ID), startSeq, endSeq, transcript.Hash)
+	if strings.TrimSpace(jobKind) == "" {
+		jobKind = "phase1_extract"
+	}
+	if strings.TrimSpace(jobKey) == "" {
+		jobKey = fmt.Sprintf("session:%s:window:%d-%d:%s", strings.TrimSpace(session.ID), startSeq, endSeq, transcript.Hash)
+	}
 	job, err := r.Store.EnsureJob(ctx, memorystore.MemoryJob{
-		Kind: "phase1_extract", JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
+		Kind: jobKind, JobKey: jobKey, ProjectKey: r.Config.ProjectKey,
 		MaxAttempts: r.Config.MaxAttempts,
 	})
 	if err != nil {
@@ -389,7 +477,7 @@ func (r *Runtime) runSessionWindowPart(ctx context.Context, trigger Trigger, ses
 		return result, nil
 	}
 	claimed, err := r.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
-		WorkerID: r.workerID(), Kind: "phase1_extract", JobKey: jobKey,
+		WorkerID: r.workerID(), Kind: jobKind, JobKey: jobKey,
 		ProjectKey: r.Config.ProjectKey, Limit: 1, Now: now, Lease: r.Config.Lease,
 	})
 	if err != nil {

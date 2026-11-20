@@ -197,6 +197,14 @@ func TestSweepLifecycleCapsNonPermanentRecords(t *testing.T) {
 	}
 	db, err := store.ensureV2()
 	require.NoError(t, err)
+	// Pin every row to the test clock; insertion uses time.Now and would make
+	// the max-records ordering depend on the real wall clock.
+	_, err = db.ExecContext(ctx, `
+UPDATE memory_entries SET created_at = ?, updated_at = ?
+WHERE id IN (?, ?, ?)
+`, now.Add(-2*time.Hour).Format(time.RFC3339Nano),
+		now.Add(-2*time.Hour).Format(time.RFC3339Nano), ids[0], ids[1], ids[2])
+	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
 UPDATE memory_entries SET use_count = 5, last_used_at = ? WHERE id = ?
 `, now.Add(-time.Hour).Format(time.RFC3339Nano), ids[1])

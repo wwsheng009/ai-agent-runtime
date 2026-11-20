@@ -18,10 +18,33 @@ import (
 // use their own renderer. Store open/append/list/search errors stay on the
 // legacy path so the error message remains visible in every mode.
 
+type chatMemoryRuntimeStatus struct {
+	Ready      bool
+	Trigger    string
+	Generation bool
+	TurnDigest bool
+	Digest     memoryruntime.DigestStats
+}
+
+func chatMemoryRuntimeStatusForSession(session *ChatSession) chatMemoryRuntimeStatus {
+	host := localChatRuntimeHostOf(session)
+	if host == nil || host.MemoryRuntime == nil || host.RuntimeConfig == nil {
+		return chatMemoryRuntimeStatus{}
+	}
+	generation := host.RuntimeConfig.Memory.Generation
+	return chatMemoryRuntimeStatus{
+		Ready:      true,
+		Trigger:    generation.Trigger,
+		Generation: generation.Enabled,
+		TurnDigest: generation.TurnDigest.Enabled,
+		Digest:     host.MemoryRuntime.DigestStats(),
+	}
+}
+
 // buildChatMemoryStatusDocument renders the /memory status view. It returns
 // ready=false for store read errors (legacy error path); "项目记忆: 未配置"
 // only applies to a nil store, which the structured branch never reaches.
-func buildChatMemoryStatusDocument(store *memorystore.Store) (render.Document, bool) {
+func buildChatMemoryStatusDocument(store *memorystore.Store, runtimeStatus chatMemoryRuntimeStatus) (render.Document, bool) {
 	if store == nil {
 		return render.SingleLineDoc(render.TextSpan("项目记忆: 未配置")), true
 	}
@@ -36,6 +59,29 @@ func buildChatMemoryStatusDocument(store *memorystore.Store) (render.Document, b
 	}
 	if store.Mode() != "off" {
 		lines = append(lines, "db="+store.DBPath()+" mode="+store.Mode())
+		if runtimeStatus.Ready {
+			lines = append(lines, fmt.Sprintf(
+				"runtime=ready trigger=%s generation=%t digest=%t",
+				runtimeStatus.Trigger, runtimeStatus.Generation, runtimeStatus.TurnDigest,
+			))
+			stats := runtimeStatus.Digest
+			line := fmt.Sprintf(
+				"digest_runtime: written=%d skipped=%d failed=%d",
+				stats.Written, stats.Skipped, stats.Failed,
+			)
+			if stats.LastSkipReason != "" {
+				line += " last_skip=" + stats.LastSkipReason
+			}
+			if stats.LastError != "" {
+				line += " last_error=" + summarizeMemoryNote(stats.LastError, 120)
+			}
+			if !stats.LastWrittenAt.IsZero() {
+				line += " last_write=" + stats.LastWrittenAt.Format(time.RFC3339)
+			}
+			lines = append(lines, line)
+		} else {
+			lines = append(lines, "runtime=not_initialized (自动抽取未挂载)")
+		}
 		if report, statusErr := store.Status(context.Background()); statusErr == nil {
 			lines = append(lines, fmt.Sprintf(
 				"turn_digests: pending=%d done=%d deferred=%d failed=%d",

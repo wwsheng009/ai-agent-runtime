@@ -32,30 +32,31 @@ const (
 // digests. It is derived data: the canonical transcript remains the source of
 // truth for extraction and memory sources.
 type TurnWindow struct {
-	WindowSeq       int64
-	ID              string
-	Scope           Scope
-	ProjectKey      string
-	SessionID       string
-	WindowIndex     int
-	StartDigestSeq  int64
-	EndDigestSeq    int64
-	StartMessageSeq int64
-	EndMessageSeq   int64
-	TurnCount       int
-	SummaryText     string
-	SummaryHash     string
-	SummaryRevision int64
-	SourceHash      string
-	SourceRevision  int64
-	Status          TurnWindowStatus
-	Model           string
-	UsageJSON       string
-	MetadataJSON    string
-	LastError       string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	ProcessedAt     time.Time
+	WindowSeq         int64
+	ID                string
+	Scope             Scope
+	ProjectKey        string
+	SessionID         string
+	SessionGeneration int64
+	WindowIndex       int
+	StartDigestSeq    int64
+	EndDigestSeq      int64
+	StartMessageSeq   int64
+	EndMessageSeq     int64
+	TurnCount         int
+	SummaryText       string
+	SummaryHash       string
+	SummaryRevision   int64
+	SourceHash        string
+	SourceRevision    int64
+	Status            TurnWindowStatus
+	Model             string
+	UsageJSON         string
+	MetadataJSON      string
+	LastError         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	ProcessedAt       time.Time
 }
 
 // TurnWindowSummary is the bounded output of a window summarizer.
@@ -76,6 +77,12 @@ type TurnWindowPurgeResult struct {
 // derived L2 candidate for an L1 window.
 func TurnWindowSourceWindow(startDigestSeq, endDigestSeq int64) string {
 	return fmt.Sprintf("turn_window:%d-%d", startDigestSeq, endDigestSeq)
+}
+
+// TurnWindowSourceWindowGeneration returns a source identity that cannot be
+// reused by a different canonical incarnation of the same session.
+func TurnWindowSourceWindowGeneration(generation, startDigestSeq, endDigestSeq int64) string {
+	return fmt.Sprintf("turn_window:g%d:%d-%d", generation, startDigestSeq, endDigestSeq)
 }
 
 // TurnWindowHash computes a stable hash for the L0 input covered by an L1
@@ -127,7 +134,19 @@ func (s *Store) EnsureTurnWindow(ctx context.Context, window TurnWindow) (TurnWi
 	if window.MetadataJSON == "" {
 		window.MetadataJSON = "{}"
 	}
-	existing, getErr := s.getTurnWindowByRange(ctx, window.ProjectKey, window.SessionID, window.StartDigestSeq, window.EndDigestSeq)
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return TurnWindow{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, window.ProjectKey); err != nil {
+		return TurnWindow{}, false, err
+	}
+	existing, getErr := scanTurnWindow(tx.QueryRowContext(ctx, `SELECT `+turnWindowColumns+`
+FROM memory_turn_windows
+WHERE project_key = ? AND session_id = ? AND session_generation = ?
+  AND start_digest_seq = ? AND end_digest_seq = ?`,
+		window.ProjectKey, window.SessionID, window.SessionGeneration, window.StartDigestSeq, window.EndDigestSeq))
 	if getErr != nil && getErr != sql.ErrNoRows {
 		return TurnWindow{}, false, getErr
 	}
@@ -148,7 +167,7 @@ func (s *Store) EnsureTurnWindow(ctx context.Context, window TurnWindow) (TurnWi
 			window.LastError = existing.LastError
 			window.ProcessedAt = existing.ProcessedAt
 		}
-		_, err = db.ExecContext(ctx, `
+		_, err = tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET window_index = ?, start_message_seq = ?, end_message_seq = ?, turn_count = ?,
     source_hash = ?, source_revision = ?, status = ?,
@@ -165,18 +184,21 @@ WHERE id = ?
 		if err != nil {
 			return TurnWindow{}, false, fmt.Errorf("memorystore: refresh turn window: %w", err)
 		}
+		if err := tx.Commit(); err != nil {
+			return TurnWindow{}, false, err
+		}
 		refreshed, err := s.getTurnWindowByID(ctx, window.ID)
 		return refreshed, sourceChanged, err
 	}
-	_, err = db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO memory_turn_windows (
-    id, scope, project_key, session_id, window_index,
+    id, scope, project_key, session_id, session_generation, window_index,
     start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
     summary_text, summary_hash, summary_revision, source_hash, source_revision,
     status, model, usage_json, metadata_json, last_error,
     created_at, updated_at, processed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, window.ID, string(window.Scope), window.ProjectKey, window.SessionID, window.WindowIndex,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, window.ID, string(window.Scope), window.ProjectKey, window.SessionID, window.SessionGeneration, window.WindowIndex,
 		window.StartDigestSeq, window.EndDigestSeq, window.StartMessageSeq, window.EndMessageSeq, window.TurnCount,
 		window.SummaryText, window.SummaryHash, window.SummaryRevision, window.SourceHash, window.SourceRevision,
 		string(window.Status), nullableString(window.Model), window.UsageJSON, window.MetadataJSON,
@@ -184,6 +206,9 @@ INSERT INTO memory_turn_windows (
 		window.UpdatedAt.Format(time.RFC3339Nano), nullableTime(window.ProcessedAt))
 	if err != nil {
 		return TurnWindow{}, false, fmt.Errorf("memorystore: insert turn window: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return TurnWindow{}, false, err
 	}
 	created, err := s.getTurnWindowByID(ctx, window.ID)
 	return created, false, err
@@ -196,14 +221,24 @@ func (s *Store) GetTurnWindow(ctx context.Context, id string) (TurnWindow, error
 
 // CountTurnWindows returns the number of windows for one session.
 func (s *Store) CountTurnWindows(ctx context.Context, sessionID string) (int, error) {
+	return s.CountTurnWindowsForGeneration(ctx, sessionID, nil)
+}
+
+// CountTurnWindowsForGeneration counts windows for one session incarnation.
+// A nil generation preserves the legacy diagnostic behavior.
+func (s *Store) CountTurnWindowsForGeneration(ctx context.Context, sessionID string, generation *int64) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
 	}
 	var count int
-	err = db.QueryRowContext(ctx, `
-SELECT COUNT(1) FROM memory_turn_windows WHERE project_key = ? AND session_id = ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID)).Scan(&count)
+	query := `SELECT COUNT(1) FROM memory_turn_windows WHERE project_key = ? AND session_id = ?`
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	err = db.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: count turn windows: %w", err)
 	}
@@ -212,6 +247,16 @@ SELECT COUNT(1) FROM memory_turn_windows WHERE project_key = ? AND session_id = 
 
 // ListTurnWindows returns windows newest-first for diagnostics and tests.
 func (s *Store) ListTurnWindows(ctx context.Context, sessionID string, limit int) ([]TurnWindow, error) {
+	return s.listTurnWindows(ctx, sessionID, nil, limit)
+}
+
+// ListTurnWindowsForGeneration returns only windows owned by one canonical
+// session incarnation.
+func (s *Store) ListTurnWindowsForGeneration(ctx context.Context, sessionID string, generation int64, limit int) ([]TurnWindow, error) {
+	return s.listTurnWindows(ctx, sessionID, &generation, limit)
+}
+
+func (s *Store) listTurnWindows(ctx context.Context, sessionID string, generation *int64, limit int) ([]TurnWindow, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return nil, err
@@ -219,16 +264,20 @@ func (s *Store) ListTurnWindows(ctx context.Context, sessionID string, limit int
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT window_seq, id, scope, project_key, session_id, window_index,
-       start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
-       summary_text, summary_hash, summary_revision, source_hash, source_revision,
-       status, COALESCE(model, ''), usage_json, metadata_json, COALESCE(last_error, ''),
-       created_at, updated_at, COALESCE(processed_at, '')
-FROM memory_turn_windows
-WHERE project_key = ? AND session_id = ?
-ORDER BY window_seq DESC LIMIT ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID), limit)
+	query := `
+	SELECT ` + turnWindowColumns + `
+ FROM memory_turn_windows
+ WHERE project_key = ? AND session_id = ?`
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += `
+ ORDER BY window_seq DESC LIMIT ?
+	`
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list turn windows: %w", err)
 	}
@@ -260,7 +309,15 @@ func (s *Store) CompleteTurnWindow(ctx context.Context, id string, summary TurnW
 	}
 	now := time.Now().UTC()
 	sum := sha256.Sum256([]byte(text))
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return TurnWindow{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return TurnWindow{}, err
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET summary_text = ?, summary_hash = ?, summary_revision = summary_revision + 1,
     status = 'done', model = ?, usage_json = ?, metadata_json = ?,
@@ -276,6 +333,9 @@ WHERE id = ?
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return TurnWindow{}, sql.ErrNoRows
 	}
+	if err := tx.Commit(); err != nil {
+		return TurnWindow{}, err
+	}
 	return s.getTurnWindowByID(ctx, id)
 }
 
@@ -286,7 +346,15 @@ func (s *Store) FailTurnWindow(ctx context.Context, id, reason string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'failed', last_error = ?, updated_at = ?
 WHERE id = ? AND status != 'done'
@@ -295,7 +363,7 @@ WHERE id = ? AND status != 'done'
 	if err != nil {
 		return fmt.Errorf("memorystore: fail turn window: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // MarkTurnWindowProcessing records that a summarizer claim is active.
@@ -305,7 +373,15 @@ func (s *Store) MarkTurnWindowProcessing(ctx context.Context, id string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'processing', last_error = NULL, updated_at = ?
 WHERE id = ? AND status IN ('pending', 'failed', 'processing')
@@ -313,27 +389,58 @@ WHERE id = ? AND status IN ('pending', 'failed', 'processing')
 	if err != nil {
 		return fmt.Errorf("memorystore: mark turn window processing: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // InvalidateTurnWindowsForSession prevents old L1 summaries from being reused
 // after compaction/backtrack. Candidate stale handling remains session-wide and
 // conservative until precise window ranges are available.
 func (s *Store) InvalidateTurnWindowsForSession(ctx context.Context, sessionID, reason string) (int64, error) {
+	return s.invalidateTurnWindowsForSession(ctx, sessionID, nil, reason)
+}
+
+// InvalidateTurnWindowsForSessionGeneration invalidates windows associated
+// with one canonical session incarnation through their L0 digest range.
+func (s *Store) InvalidateTurnWindowsForSessionGeneration(ctx context.Context, sessionID string, generation int64, reason string) (int64, error) {
+	return s.invalidateTurnWindowsForSession(ctx, sessionID, &generation, reason)
+}
+
+func (s *Store) invalidateTurnWindowsForSession(ctx context.Context, sessionID string, generation *int64, reason string) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	query := `
 UPDATE memory_turn_windows
 SET status = 'invalidated', last_error = ?, processed_at = COALESCE(processed_at, ?), updated_at = ?
 WHERE project_key = ? AND session_id = ? AND status != 'invalidated'
-`, nullableString(reason), now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID))
+`
+	args := []interface{}{nullableString(reason), now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: invalidate turn windows: %w", err)
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 // DeleteTurnWindowsForSession removes L1 rows for an explicitly deleted
@@ -363,7 +470,15 @@ func (s *Store) PruneTurnWindows(ctx context.Context, before time.Time) (int64, 
 	if before.IsZero() {
 		before = time.Now().UTC()
 	}
-	rows, err := db.QueryContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, fmt.Errorf("memorystore: begin prune turn windows: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `
 SELECT window_seq, created_at
 FROM memory_turn_windows
 WHERE project_key = ? AND status IN ('done', 'invalidated')
@@ -399,7 +514,7 @@ WHERE project_key = ? AND status IN ('done', 'invalidated')
 		for _, seq := range batch {
 			args = append(args, seq)
 		}
-		res, err := db.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 DELETE FROM memory_turn_windows
 WHERE project_key = ? AND status IN ('done', 'invalidated')
   AND window_seq IN (`+placeholders+`)
@@ -409,6 +524,9 @@ WHERE project_key = ? AND status IN ('done', 'invalidated')
 		}
 		affected, _ := res.RowsAffected()
 		deleted += affected
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("memorystore: commit prune turn windows: %w", err)
 	}
 	return deleted, nil
 }
@@ -428,6 +546,9 @@ func (s *Store) PurgeTurnWindows(ctx context.Context, sessionID string) (TurnWin
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return result, err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	digestWhere := "project_key = ? AND rollup_status = 'done' AND rollup_window_id IS NOT NULL"
@@ -465,6 +586,17 @@ WHERE `+digestWhere, digestArgs...)
 // MarkTurnWindowCandidatesStale marks the derived L2 seed candidate for a
 // window stale when its L0 input changed.
 func (s *Store) MarkTurnWindowCandidatesStale(ctx context.Context, sessionID, sourceWindow, reason string) (int, error) {
+	return s.markTurnWindowCandidatesStale(ctx, sessionID, nil, sourceWindow, reason)
+}
+
+// MarkTurnWindowCandidatesStaleForGeneration scopes stale marking to one
+// canonical incarnation. The source_window is generation-qualified by the
+// caller, so a reused digest range cannot stale a later candidate.
+func (s *Store) MarkTurnWindowCandidatesStaleForGeneration(ctx context.Context, sessionID string, generation int64, sourceWindow, reason string) (int, error) {
+	return s.markTurnWindowCandidatesStale(ctx, sessionID, &generation, sourceWindow, reason)
+}
+
+func (s *Store) markTurnWindowCandidatesStale(ctx context.Context, sessionID string, generation *int64, sourceWindow, reason string) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -475,14 +607,20 @@ func (s *Store) MarkTurnWindowCandidatesStale(ctx context.Context, sessionID, so
 		return 0, nil
 	}
 	reason = firstNonEmpty(reason, "turn_window_source_changed")
-	rows, err := db.QueryContext(ctx, `
+	query := `
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
 JOIN memory_sources src ON src.memory_id = e.id
 WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_window'
   AND src.source_window = ? AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
-`, s.cfg.ProjectKey, sessionID, sourceWindow)
+`
+	args := []interface{}{s.cfg.ProjectKey, sessionID, sourceWindow}
+	if generation != nil {
+		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
+		args = append(args, *generation, *generation)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -508,6 +646,9 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_wi
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
@@ -565,7 +706,7 @@ SELECT status, COUNT(1) FROM memory_turn_windows WHERE project_key = ? GROUP BY 
 }
 
 const turnWindowColumns = `
-window_seq, id, scope, project_key, session_id, window_index,
+window_seq, id, scope, project_key, session_id, session_generation, window_index,
 start_digest_seq, end_digest_seq, start_message_seq, end_message_seq, turn_count,
 summary_text, summary_hash, summary_revision, source_hash, source_revision,
 status, COALESCE(model, ''), usage_json, metadata_json, COALESCE(last_error, ''),
@@ -581,15 +722,22 @@ func (s *Store) getTurnWindowByID(ctx context.Context, id string) (TurnWindow, e
 	return scanTurnWindow(row)
 }
 
-func (s *Store) getTurnWindowByRange(ctx context.Context, projectKey, sessionID string, startSeq, endSeq int64) (TurnWindow, error) {
+func (s *Store) getTurnWindowByRange(ctx context.Context, projectKey, sessionID string, generation *int64, startSeq, endSeq int64) (TurnWindow, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return TurnWindow{}, err
 	}
-	row := db.QueryRowContext(ctx, `SELECT `+turnWindowColumns+`
+	query := `SELECT ` + turnWindowColumns + `
 FROM memory_turn_windows
-WHERE project_key = ? AND session_id = ? AND start_digest_seq = ? AND end_digest_seq = ?`,
-		projectKey, sessionID, startSeq, endSeq)
+WHERE project_key = ? AND session_id = ?`
+	args := []interface{}{projectKey, sessionID}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += ` AND start_digest_seq = ? AND end_digest_seq = ?`
+	args = append(args, startSeq, endSeq)
+	row := db.QueryRowContext(ctx, query, args...)
 	return scanTurnWindow(row)
 }
 
@@ -597,7 +745,7 @@ func scanTurnWindow(scanner turnDigestScanner) (TurnWindow, error) {
 	var item TurnWindow
 	var scope, status, createdAt, updatedAt, processedAt string
 	if err := scanner.Scan(
-		&item.WindowSeq, &item.ID, &scope, &item.ProjectKey, &item.SessionID, &item.WindowIndex,
+		&item.WindowSeq, &item.ID, &scope, &item.ProjectKey, &item.SessionID, &item.SessionGeneration, &item.WindowIndex,
 		&item.StartDigestSeq, &item.EndDigestSeq, &item.StartMessageSeq, &item.EndMessageSeq, &item.TurnCount,
 		&item.SummaryText, &item.SummaryHash, &item.SummaryRevision, &item.SourceHash, &item.SourceRevision,
 		&status, &item.Model, &item.UsageJSON, &item.MetadataJSON, &item.LastError,

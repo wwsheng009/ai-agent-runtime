@@ -64,6 +64,10 @@ type SessionMetadata struct {
 type Session struct {
 	ID                    string          `json:"id" yaml:"id"`
 	UserID                string          `json:"userId" yaml:"userId"`
+	// SessionGeneration is the durable canonical incarnation token. It is
+	// intentionally not part of the public session payload: memory/runtime
+	// producers use it as an internal isolation fence.
+	SessionGeneration     int64           `json:"-" yaml:"-"`
 	State                 SessionState    `json:"state" yaml:"state"`
 	History               []types.Message `json:"history" yaml:"history"`
 	HeadOffset            int             `json:"headOffset,omitempty" yaml:"headOffset,omitempty"`

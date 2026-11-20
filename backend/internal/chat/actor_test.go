@@ -254,6 +254,33 @@ func TestSessionActorUpdateStateConvergentAdvancesLocalStateAfterFailedSave(t *t
 	require.Empty(t, state.CurrentTurnID)
 }
 
+func TestSessionActorSubmitPromptAsyncWithReceiptReturnsStateFailure(t *testing.T) {
+	ctx := context.Background()
+	sessionStore := NewInMemoryStorage()
+	session := NewSession("receipt-state-failure")
+	require.NoError(t, sessionStore.Save(ctx, session))
+
+	stateStore := &failingRuntimeStateStore{}
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        agent.NewAgent(&agent.Config{Name: "receipt-state-failure"}, nil),
+		SessionStore: sessionStore,
+		StateStore:   stateStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	resultCh, err := actor.SubmitPromptAsyncWithReceipt(ctx, "wake parent", nil)
+	require.Nil(t, resultCh, "a failed state claim must not produce a prompt receipt")
+	require.EqualError(t, err, "save state failed")
+
+	persisted, err := sessionStore.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	require.Contains(t, persisted.LastMessage().Content, "wake parent")
+	require.Equal(t, SessionIdle, actor.State().Status,
+		"failed runtime-state persistence must not install a running state")
+}
+
 func TestSessionActorRunPanicReleasesRunWithoutFinalizingTurn(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

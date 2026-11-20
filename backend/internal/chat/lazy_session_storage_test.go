@@ -134,6 +134,85 @@ func TestLazySessionStorage_ListAllDelegatesToDurableBackend(t *testing.T) {
 	require.Equal(t, "anonymous", byID[second.ID])
 }
 
+func TestLazySessionStorage_ExposesPurgeProtocolAndRequirementBeforeOpen(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = filepath.Join(dir, "session_history.sqlite")
+	cfg.ImportLegacyJSON = false
+
+	store, err := OpenPersistentSessionStorage(cfg)
+	require.NoError(t, err)
+	lazy, ok := store.(*lazySessionStorage)
+	require.True(t, ok)
+	require.False(t, lazy.Opened())
+
+	manager := NewSessionManager(store, &SessionManagerConfig{
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	t.Cleanup(manager.Stop)
+
+	var purgedSessionID string
+	var purgedGeneration int64
+	manager.SetSessionPurgeCoordinator(func(_ context.Context, sessionID string, generation int64) error {
+		purgedSessionID = sessionID
+		purgedGeneration = generation
+		return nil
+	})
+
+	session, err := manager.Create(context.Background(), "lazy-purge-user")
+	require.NoError(t, err)
+	require.True(t, lazy.Opened())
+
+	require.NoError(t, manager.Delete(context.Background(), session.ID))
+	require.Equal(t, session.ID, purgedSessionID)
+	require.Positive(t, purgedGeneration)
+	_, err = manager.Get(context.Background(), session.ID)
+	require.ErrorIs(t, err, ErrSessionNotFound)
+}
+
+func TestLazySessionStorage_ResumePendingPurgeAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = filepath.Join(dir, "session_history.sqlite")
+	cfg.ImportLegacyJSON = false
+
+	first, err := OpenPersistentSessionStorage(cfg)
+	require.NoError(t, err)
+	firstManager := NewSessionManager(first, &SessionManagerConfig{
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	session, err := firstManager.Create(context.Background(), "lazy-recovery-user")
+	require.NoError(t, err)
+	protocol, ok := first.(SessionStoragePurgeProtocol)
+	require.True(t, ok)
+	purge, err := protocol.BeginSessionPurge(context.Background(), session.ID, "crash-recovery-test")
+	require.NoError(t, err)
+	require.NoError(t, first.(SessionStorageCloser).CloseStorage())
+	firstManager.Stop()
+
+	second, err := OpenPersistentSessionStorage(cfg)
+	require.NoError(t, err)
+	secondManager := NewSessionManager(second, &SessionManagerConfig{
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+	t.Cleanup(secondManager.Stop)
+	t.Cleanup(func() { require.NoError(t, second.(SessionStorageCloser).CloseStorage()) })
+
+	secondManager.SetSessionPurgeCoordinator(func(_ context.Context, sessionID string, generation int64) error {
+		require.Equal(t, session.ID, sessionID)
+		require.Equal(t, purge.Generation, generation)
+		return nil
+	})
+	completed, err := secondManager.ResumePendingSessionPurges(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, completed)
+	_, err = secondManager.Get(context.Background(), session.ID)
+	require.ErrorIs(t, err, ErrSessionNotFound)
+}
+
 // TestLazySessionStorage_OpenLockFailureRecoversAfterRelease proves that a
 // failed first open (a concurrent process holding the sqlite write lock) is
 // not cached permanently: once the lock is released, the next operation

@@ -113,43 +113,44 @@ const (
 )
 
 type Record struct {
-	ID               string                 `json:"id"`
-	Scope            Scope                  `json:"scope"`
-	ProjectKey       string                 `json:"project_key"`
-	Kind             string                 `json:"kind"`
-	Status           Status                 `json:"status"`
-	Text             string                 `json:"text"`
-	NormalizedText   string                 `json:"normalized_text,omitempty"`
-	Tags             []string               `json:"tags,omitempty"`
-	Confidence       float64                `json:"confidence,omitempty"`
-	Sensitivity      string                 `json:"sensitivity,omitempty"`
-	Pinned           bool                   `json:"pinned"`
-	RetentionClass   string                 `json:"retention_class,omitempty"`
-	SourceKind       string                 `json:"source_kind,omitempty"`
-	SourceSessionID  string                 `json:"source_session_id,omitempty"`
-	SourceTurnID     string                 `json:"source_turn_id,omitempty"`
-	SourceWindow     string                 `json:"source_window,omitempty"`
-	SourceRefs       []string               `json:"source_refs,omitempty"`
-	SourceHash       string                 `json:"source_hash,omitempty"`
-	SourceRevision   int64                  `json:"source_revision,omitempty"`
-	SourceUpdatedAt  time.Time              `json:"source_updated_at,omitempty"`
-	SourceObservedAt time.Time              `json:"source_observed_at,omitempty"`
-	SourceMessageIDs []string               `json:"source_message_ids,omitempty"`
-	ContentHash      string                 `json:"content_hash,omitempty"`
-	SupersedesID     string                 `json:"supersedes_id,omitempty"`
-	Revision         int64                  `json:"revision"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
-	LastUsedAt       time.Time              `json:"last_used_at,omitempty"`
-	UseCount         int                    `json:"use_count,omitempty"`
-	ValidFrom        time.Time              `json:"valid_from,omitempty"`
-	ValidUntil       time.Time              `json:"valid_until,omitempty"`
-	Freshness        Freshness              `json:"freshness_status"`
-	LastVerifiedAt   time.Time              `json:"last_verified_at,omitempty"`
-	RevalidateAfter  time.Time              `json:"revalidate_after,omitempty"`
-	StaleReason      string                 `json:"stale_reason,omitempty"`
-	DeletedAt        time.Time              `json:"deleted_at,omitempty"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+	ID                      string                 `json:"id"`
+	Scope                   Scope                  `json:"scope"`
+	ProjectKey              string                 `json:"project_key"`
+	Kind                    string                 `json:"kind"`
+	Status                  Status                 `json:"status"`
+	Text                    string                 `json:"text"`
+	NormalizedText          string                 `json:"normalized_text,omitempty"`
+	Tags                    []string               `json:"tags,omitempty"`
+	Confidence              float64                `json:"confidence,omitempty"`
+	Sensitivity             string                 `json:"sensitivity,omitempty"`
+	Pinned                  bool                   `json:"pinned"`
+	RetentionClass          string                 `json:"retention_class,omitempty"`
+	SourceKind              string                 `json:"source_kind,omitempty"`
+	SourceSessionID         string                 `json:"source_session_id,omitempty"`
+	SourceSessionGeneration int64                  `json:"source_session_generation,omitempty"`
+	SourceTurnID            string                 `json:"source_turn_id,omitempty"`
+	SourceWindow            string                 `json:"source_window,omitempty"`
+	SourceRefs              []string               `json:"source_refs,omitempty"`
+	SourceHash              string                 `json:"source_hash,omitempty"`
+	SourceRevision          int64                  `json:"source_revision,omitempty"`
+	SourceUpdatedAt         time.Time              `json:"source_updated_at,omitempty"`
+	SourceObservedAt        time.Time              `json:"source_observed_at,omitempty"`
+	SourceMessageIDs        []string               `json:"source_message_ids,omitempty"`
+	ContentHash             string                 `json:"content_hash,omitempty"`
+	SupersedesID            string                 `json:"supersedes_id,omitempty"`
+	Revision                int64                  `json:"revision"`
+	CreatedAt               time.Time              `json:"created_at"`
+	UpdatedAt               time.Time              `json:"updated_at"`
+	LastUsedAt              time.Time              `json:"last_used_at,omitempty"`
+	UseCount                int                    `json:"use_count,omitempty"`
+	ValidFrom               time.Time              `json:"valid_from,omitempty"`
+	ValidUntil              time.Time              `json:"valid_until,omitempty"`
+	Freshness               Freshness              `json:"freshness_status"`
+	LastVerifiedAt          time.Time              `json:"last_verified_at,omitempty"`
+	RevalidateAfter         time.Time              `json:"revalidate_after,omitempty"`
+	StaleReason             string                 `json:"stale_reason,omitempty"`
+	DeletedAt               time.Time              `json:"deleted_at,omitempty"`
+	Metadata                map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type Summary struct {
@@ -192,6 +193,20 @@ type MemoryJob struct {
 	JobKey               string    `json:"job_key"`
 	Scope                Scope     `json:"scope"`
 	ProjectKey           string    `json:"project_key"`
+	SessionID            string    `json:"session_id,omitempty"`
+	SessionGeneration    int64     `json:"session_generation,omitempty"`
+	CaptureReceiptID     string    `json:"capture_receipt_id,omitempty"`
+	SourceStartSeq       int64     `json:"source_start_seq,omitempty"`
+	SourceEndSeq         int64     `json:"source_end_seq,omitempty"`
+	SourceRevision       int64     `json:"source_revision,omitempty"`
+	SourceHash           string    `json:"source_hash,omitempty"`
+	AvailableAt          time.Time `json:"available_at,omitempty"`
+	DeadlineAt           time.Time `json:"deadline_at,omitempty"`
+	HeartbeatAt          time.Time `json:"heartbeat_at,omitempty"`
+	DeferredUntil        time.Time `json:"deferred_until,omitempty"`
+	DeadLetterAt         time.Time `json:"dead_letter_at,omitempty"`
+	DeadLetterReason     string    `json:"dead_letter_reason,omitempty"`
+	RepairOnly           bool      `json:"repair_only,omitempty"`
 	Status               JobStatus `json:"status"`
 	Priority             int       `json:"priority"`
 	WorkerID             string    `json:"worker_id,omitempty"`
@@ -219,26 +234,27 @@ type ClaimJobOptions struct {
 }
 
 type Candidate struct {
-	SessionID        string
-	TurnID           string
-	SourceWindow     string
-	SourceKind       string
-	SourceRefs       []string
-	ProjectKey       string
-	Kind             string
-	Text             string
-	Tags             []string
-	Confidence       float64
-	Sensitivity      string
-	SourceHash       string
-	SourceRevision   int64
-	SourceUpdatedAt  time.Time
-	SourceMessageIDs []string
-	RetentionClass   string
-	RevalidateAfter  time.Time
-	Model            string
-	TokenUsage       map[string]interface{}
-	Metadata         map[string]interface{}
+	SessionID         string
+	SessionGeneration int64
+	TurnID            string
+	SourceWindow      string
+	SourceKind        string
+	SourceRefs        []string
+	ProjectKey        string
+	Kind              string
+	Text              string
+	Tags              []string
+	Confidence        float64
+	Sensitivity       string
+	SourceHash        string
+	SourceRevision    int64
+	SourceUpdatedAt   time.Time
+	SourceMessageIDs  []string
+	RetentionClass    string
+	RevalidateAfter   time.Time
+	Model             string
+	TokenUsage        map[string]interface{}
+	Metadata          map[string]interface{}
 }
 
 type Selection struct {
@@ -254,16 +270,17 @@ type Selection struct {
 }
 
 type RecordFilter struct {
-	Scope            Scope
-	ProjectKey       string
-	Status           Status
-	Kind             string
-	Tag              string
-	Query            string
-	SourceSessionID  string
-	IncludeCandidate bool
-	Limit            int
-	Cursor           string
+	Scope                   Scope
+	ProjectKey              string
+	Status                  Status
+	Kind                    string
+	Tag                     string
+	Query                   string
+	SourceSessionID         string
+	SourceSessionGeneration *int64
+	IncludeCandidate        bool
+	Limit                   int
+	Cursor                  string
 }
 
 type RecordPage struct {

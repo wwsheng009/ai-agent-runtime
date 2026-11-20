@@ -2,8 +2,49 @@
 
 > 状态：**方案基线 + M1/M2/M3/M4 core 已实施（含 Web why-not/pin/restore/reset）；M4 正式 E2E/证据包与 M5 shadow 运营待完成**
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/`）。
+> 2026-11-18 追加：统一执行核 `TurnDigestSink` 接线修复；真实 ConPTY 双会话 E2E PASS，覆盖 digest → phase1 → phase2 → 跨会话注入/召回（见 `14-runtime-gap-audit-and-fix-20261117.md`）。
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
+
+## 0. 2026-11-19 架构收敛更新
+
+本目录的统一口径是：**新回合只有一条正常写入/处理链路**，不得让
+receipt、digest、window 三套对象各自成为事实源：
+
+```text
+canonical chat turn commit
+  -> durable capture receipt
+  -> memory materialization
+  -> phase1_extract/v2 job
+  -> candidate records + output receipt
+  -> consolidation
+  -> active memory
+  -> retrieval/injection
+```
+
+边界和兼容规则：
+
+- canonical receipt 是 canonical chat turn 的 handoff，不是第二个 event source；
+- memory digest 是 memory-side materialization/progress record，不是第二份 transcript；
+- extraction job 是可租约的 work item，不是事实源；
+- `TurnWindow` 只是派生 rollup/summary，不是新的 transcript 或事实源；
+- `RunSession`、`RunSessionWindow`、`RunPendingTurnDigests` 和
+  `RecoverPendingPhase1` 必须保留，但只服务于 pre-receipt/historical
+  数据的 compatibility、migration 或 recovery；
+- receipt-capable source 的正常入口只走 materialization/capture worker；
+  maintenance 不再通过 `RunIdle` 或无条件 legacy digest sweep 产生第二条
+  extraction 路径。没有 receipt contract 的 source 仅作为 legacy adapter；
+- legacy digest 查询和状态更新必须限制 `capture_receipt_id = ''`，receipt-backed
+  session 对 legacy consumer 采用 session-level routing fence；
+- canonical SQLite 到 memory SQLite 没有跨库事务，交接是 at-least-once，
+  依靠 receipt、turn/range/revision 幂等身份、generation/incarnation、
+  purge fence、worker lease、stale source validation、output receipt 和
+  candidate commit 收敛；
+- 测试全绿只证明验收边界，不自动证明历史数据已经迁移或架构已经完全收敛。
+
+对象职责表、数据字段和验收门禁分别以 `03`、`04`、`06` 为准；实现差距和
+尚未消除的历史迁移风险以 `08` 为准。`patches/2026-11-18-turn-end-durable-capture-and-async-extraction.md`
+仍是**方案提案，待评审；未实施**，不能把本文的收敛说明当作该提案的批准记录。
 
 ## 1. 这套文档要解决什么
 
@@ -35,6 +76,7 @@
 | [11-fact-ledger-convergence-decision.md](./11-fact-ledger-convergence-decision.md) | Fact Ledger 收敛决策记录：过程产物/结论切分、实测证据、停止投入理由与重启条件 | **已执行**（本目录其余文档为方案基线） |
 | [12-hermes-agent-memory-system-analysis.md](./12-hermes-agent-memory-system-analysis.md) | Hermes Agent 记忆系统架构与实现分析：短期压缩、内置长期记忆、外部 Provider、会话检索与借鉴边界 | 完成（外部方案分析，Docs Only） |
 | [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已回写 03/04/05/06/09；M1/M2/M3/M4 core 与 Web 审计面已实施，M4 证据包与 M5 运营待执行） |
+| [14-runtime-gap-audit-and-fix-20261117.md](./14-runtime-gap-audit-and-fix-20261117.md) | 运行时缺口审查：多 workspace DB 证据、Turn Digest 断点、host 生命周期/超时/恢复问题与本次修复记录 | 第三轮优化 + 统一执行核 TurnDigestSink 修复完成；真实 ConPTY 双会话 E2E PASS；崩溃后 stale-active digest 恢复仍待设计 |
 
 > `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
 
@@ -44,7 +86,8 @@ schema / 触发 / 写路径的变更先以 patch proposal 记录；决策确认�
 
 | 提案 | 定位 | 当前状态 |
 | --- | --- | --- |
-| [patches/2026-11-11-turn-digest-runtime-outbox.md](./patches/2026-11-11-turn-digest-runtime-outbox.md) | Turn Digest 运行时 Outbox：turn-end 只写轻量 digest，session-end/idle/startup 消费；Phase 1 不把 digest 当作第二份 transcript；含多 turn 分批/窗口化/L0→L1→L2 rollup/range invalidation | **Phase 1 core + 窗口化 + per-window stale + rollup + range invalidation 已实现** |
+| [patches/2026-11-11-turn-digest-runtime-outbox.md](./patches/2026-11-11-turn-digest-runtime-outbox.md) | Turn Digest 运行时 Outbox：turn-end 只写轻量 digest；receipt-backed 新回合由 capture worker 消费，无 receipt 历史由 session-end/idle/startup compatibility recovery 消费；Phase 1 不把 digest 当作第二份 transcript；含多 turn 分批/窗口化/L0→L1→L2 rollup/range invalidation | **Phase 1 core + 窗口化 + per-window stale + rollup + range invalidation 已实现；新回合路由以 2026-11-19 收敛规则为准** |
+| [patches/2026-11-18-turn-end-durable-capture-and-async-extraction.md](./patches/2026-11-18-turn-end-durable-capture-and-async-extraction.md) | 写路径修正提案：turn 终态 durable capture + immediate enqueue；turn-range extraction job；session liveness/orphaned recovery；maintenance owner；session TTL drain/dead-letter | **方案提案，待评审；未实施** |
 
 ## 3. 核心结论
 

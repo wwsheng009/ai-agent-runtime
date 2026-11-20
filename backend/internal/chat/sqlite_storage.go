@@ -38,13 +38,13 @@ import (
 // v3: sessions 清理谓词索引（expires_at,id）/（updated_at,id）。没有索引时
 // Cleanup 退化为全表扫描 + 临时 B 树排序，在 WASM SQLite 上会长时间占满
 // 单连接；更糟的是“选得出、删不掉”的脏行会让循环无限重扫（见 Cleanup 注释）。
-const sqliteSessionSchemaVersion = 3
+const sqliteSessionSchemaVersion = 7
 
 // sqliteSessionSelectColumns is the metadata projection used by session reads.
 // last_activity_at is derived from the newest canonical message instead of
 // sessions.updated_at: the latter is a row-maintenance timestamp (idle sweep,
 // metadata sync, TTL bookkeeping) and must not drive user-visible recency.
-const sqliteSessionSelectColumns = `id, user_id, state, title, title_source, summary, message_count,
+const sqliteSessionSelectColumns = `id, user_id, session_generation, state, title, title_source, summary, message_count,
 	head_offset, tags_json, metadata_json, created_at, updated_at, expires_at,
 	COALESCE(
 		(SELECT m.created_at
@@ -77,6 +77,9 @@ type SQLiteSessionStorage struct {
 	snapshotDSNOverride string
 	// snapshotAfterCopyHook 仅供测试注入复制后故障以验证一致性门禁，生产恒为 nil。
 	snapshotAfterCopyHook func(context.Context, *sql.Conn, string)
+	// memoryPurgeRequired is changed by runtime wiring and snapshotted into
+	// session_purge_journal when a fence is created.
+	memoryPurgeRequired atomic.Bool
 
 	// checkpoint 投影重建的归因计数（P0-3 步骤 0）：见 CanonicalRebuildStats。
 	canonicalFullLoads      atomic.Int64
@@ -561,11 +564,43 @@ func (s *SQLiteSessionStorage) migrateSchema(ctx context.Context) error {
 		{name: "content_part_count", definition: "INTEGER NOT NULL DEFAULT -1"},
 		// v2：role+content 身份指纹（惰性回填），用于跳过投影重建的全量解码。
 		{name: "identity_hash", definition: "BLOB"},
+		// v4: turn identity supports exact terminal capture ranges.
+		{name: "turn_id", definition: "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range columns {
 		if err := ensureSQLiteColumn(ctx, s.db, "session_messages", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	// v5: deletion fence prevents new canonical turns/receipts while a
+	// cross-store purge is being drained. These columns belong to sessions,
+	// not session_messages; keep them separate so v4 databases migrate cleanly.
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "purge_state", definition: "TEXT NOT NULL DEFAULT 'active'"},
+		{name: "delete_generation", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "session_generation", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "purge_generation", definition: "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureSQLiteColumn(ctx, s.db, "sessions", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	// v7 separates the canonical incarnation from its deletion token. Legacy
+	// delete_generation values represented both; preserve them as the best
+	// available incarnation value while the journal's generation remains the
+	// compatibility purge-generation value.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET session_generation = CASE
+			WHEN session_generation > 0 THEN session_generation
+			WHEN delete_generation > 0 THEN delete_generation
+			ELSE 1
+		END;
+	`); err != nil {
+		return fmt.Errorf("backfill canonical session generations: %w", err)
 	}
 	// identity_hash 的等值查找（新消息判定）必须走索引：否则每次 checkpoint
 	// 退化为对全会话行数的扫描。
@@ -574,6 +609,124 @@ func (s *SQLiteSessionStorage) migrateSchema(ctx context.Context) error {
 		ON session_messages(session_id, identity_hash)
 	`); err != nil {
 		return fmt.Errorf("create session_messages identity index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_session_messages_turn
+		ON session_messages(session_id, turn_id, seq)
+	`); err != nil {
+		return fmt.Errorf("create session_messages turn index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS session_canonical_revisions (
+			session_id TEXT PRIMARY KEY,
+			revision INTEGER NOT NULL DEFAULT 1
+		);
+	CREATE TABLE IF NOT EXISTS session_turn_capture_receipts (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			session_generation INTEGER NOT NULL DEFAULT 0,
+			turn_id TEXT NOT NULL,
+			message_seq_start INTEGER NOT NULL,
+			message_seq_end INTEGER NOT NULL,
+			canonical_revision INTEGER NOT NULL,
+			range_hash TEXT NOT NULL,
+			trace_id TEXT NOT NULL DEFAULT '',
+			user_message_id TEXT NOT NULL DEFAULT '',
+			assistant_message_id TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL DEFAULT 'success',
+			steps INTEGER NOT NULL DEFAULT 0,
+			usage_json TEXT NOT NULL DEFAULT '{}',
+			state TEXT NOT NULL DEFAULT 'captured',
+			created_at TEXT NOT NULL,
+			materialized_at TEXT,
+			last_error TEXT,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			retry_at TEXT,
+			UNIQUE(session_id, turn_id, canonical_revision, range_hash)
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_capture_receipts_pending
+			ON session_turn_capture_receipts(state, retry_at, created_at);
+		CREATE INDEX IF NOT EXISTS idx_session_capture_receipts_session
+			ON session_turn_capture_receipts(session_id, turn_id, canonical_revision);
+	`); err != nil {
+		return fmt.Errorf("create turn capture receipt schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(ctx, s.db, "session_turn_capture_receipts",
+		"session_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE session_turn_capture_receipts
+		SET session_generation = (
+			SELECT session_generation FROM sessions
+			WHERE sessions.id = session_turn_capture_receipts.session_id
+		)
+		WHERE session_generation <= 0
+		  AND EXISTS (SELECT 1 FROM sessions
+		              WHERE sessions.id = session_turn_capture_receipts.session_id);
+	`); err != nil {
+		return fmt.Errorf("backfill capture receipt session generations: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS session_purge_journal (
+			session_id TEXT PRIMARY KEY,
+			generation INTEGER NOT NULL,
+			session_generation INTEGER NOT NULL DEFAULT 0,
+			purge_generation INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT 'draining',
+			memory_required INTEGER NOT NULL DEFAULT 0,
+			memory_ack_generation INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_session_purge_journal_pending
+			ON session_purge_journal(state, updated_at);
+		CREATE TRIGGER IF NOT EXISTS trg_session_messages_reject_purging_insert
+		BEFORE INSERT ON session_messages
+		WHEN COALESCE((SELECT purge_state FROM sessions WHERE id = NEW.session_id), 'active') <> 'active'
+		BEGIN
+			SELECT RAISE(ABORT, 'session is fenced for deletion');
+		END;
+		CREATE TRIGGER IF NOT EXISTS trg_session_prompt_reject_purging_insert
+		BEFORE INSERT ON session_prompt_messages
+		WHEN COALESCE((SELECT purge_state FROM sessions WHERE id = NEW.session_id), 'active') <> 'active'
+		BEGIN
+			SELECT RAISE(ABORT, 'session is fenced for deletion');
+		END;
+		CREATE TRIGGER IF NOT EXISTS trg_session_capture_reject_purging_insert
+		BEFORE INSERT ON session_turn_capture_receipts
+		WHEN COALESCE((SELECT purge_state FROM sessions WHERE id = NEW.session_id), 'active') <> 'active'
+		BEGIN
+			SELECT RAISE(ABORT, 'session is fenced for deletion');
+		END;
+	`); err != nil {
+		return fmt.Errorf("create session purge fence schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(ctx, s.db, "session_purge_journal",
+		"session_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(ctx, s.db, "session_purge_journal",
+		"purge_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE session_purge_journal
+		SET session_generation = CASE
+			WHEN session_generation > 0 THEN session_generation
+			WHEN generation > 0 THEN generation
+			ELSE 1
+		END,
+		purge_generation = CASE
+			WHEN purge_generation > 0 THEN purge_generation
+			WHEN generation > 0 THEN generation
+			ELSE 1
+		END,
+		state = CASE WHEN state = 'complete' THEN 'purged' ELSE state END
+		WHERE session_generation <= 0 OR state = 'complete';
+	`); err != nil {
+		return fmt.Errorf("backfill session purge journal generations: %w", err)
 	}
 	return nil
 }
@@ -592,7 +745,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     metadata_json BLOB NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT
+    expires_at TEXT,
+    purge_state TEXT NOT NULL DEFAULT 'active',
+    delete_generation INTEGER NOT NULL DEFAULT 0,
+    session_generation INTEGER NOT NULL DEFAULT 0,
+    purge_generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_updated
 ON sessions(user_id, updated_at DESC, id);
@@ -613,6 +770,7 @@ CREATE TABLE IF NOT EXISTS session_messages (
     artifact_path TEXT,
 	preview_json BLOB,
 	role TEXT NOT NULL DEFAULT '',
+	turn_id TEXT NOT NULL DEFAULT '',
 	tool_call_count INTEGER NOT NULL DEFAULT -1,
 	tool_result INTEGER NOT NULL DEFAULT -1,
 	content_part_count INTEGER NOT NULL DEFAULT -1,
@@ -648,7 +806,11 @@ CREATE TABLE snapshot.sessions (
     metadata_json BLOB NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT
+    expires_at TEXT,
+    purge_state TEXT NOT NULL DEFAULT 'active',
+    delete_generation INTEGER NOT NULL DEFAULT 0,
+    session_generation INTEGER NOT NULL DEFAULT 0,
+    purge_generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE snapshot.session_messages (
     session_id TEXT NOT NULL,
@@ -657,6 +819,7 @@ CREATE TABLE snapshot.session_messages (
     artifact_path TEXT,
     preview_json BLOB,
     role TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
     tool_call_count INTEGER NOT NULL DEFAULT -1,
     tool_result INTEGER NOT NULL DEFAULT -1,
     content_part_count INTEGER NOT NULL DEFAULT -1,
@@ -679,14 +842,16 @@ func copySQLiteSessionSnapshot(ctx context.Context, connection *sql.Conn, sessio
 	statements := []string{
 		`INSERT INTO snapshot.sessions(
 			id, user_id, state, title, title_source, summary, message_count, head_offset,
-			tags_json, metadata_json, created_at, updated_at, expires_at
+			tags_json, metadata_json, created_at, updated_at, expires_at,
+			purge_state, delete_generation, session_generation, purge_generation
 		) SELECT id, user_id, state, title, title_source, summary, message_count, head_offset,
-		         tags_json, metadata_json, created_at, updated_at, expires_at
+		         tags_json, metadata_json, created_at, updated_at, expires_at,
+		         purge_state, delete_generation, session_generation, purge_generation
 		  FROM main.sessions WHERE id = ?`,
 		`INSERT INTO snapshot.session_messages(
-			session_id, seq, payload_json, artifact_path, preview_json, role,
+			session_id, seq, payload_json, artifact_path, preview_json, role, turn_id,
 			tool_call_count, tool_result, content_part_count, byte_count, sha256, identity_hash, created_at
-		) SELECT session_id, seq, payload_json, artifact_path, preview_json, role,
+		) SELECT session_id, seq, payload_json, artifact_path, preview_json, role, turn_id,
 		         tool_call_count, tool_result, content_part_count, byte_count, sha256, identity_hash, created_at
 		  FROM main.session_messages WHERE session_id = ?`,
 		`INSERT INTO snapshot.session_prompt_messages(session_id, position, payload_json, byte_count)
@@ -733,11 +898,20 @@ func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, column, definiti
 }
 
 func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error {
+	_, err := s.save(ctx, session, nil)
+	return err
+}
+
+func (s *SQLiteSessionStorage) SaveWithTurnCapture(ctx context.Context, session *Session, receipt TurnCaptureReceipt) (TurnCaptureReceipt, error) {
+	return s.save(ctx, session, &receipt)
+}
+
+func (s *SQLiteSessionStorage) save(ctx context.Context, session *Session, receipt *TurnCaptureReceipt) (TurnCaptureReceipt, error) {
 	if session == nil {
-		return ErrInvalidSession
+		return TurnCaptureReceipt{}, ErrInvalidSession
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
 	}
 	if strings.TrimSpace(session.ID) == "" {
 		session.ID = generateSessionID()
@@ -746,7 +920,7 @@ func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error
 		// 落库就会产生“写得进、读不出”的脏行，进而卡死清理循环。
 		normalized, err := normalizeSessionIDForWrite(session.ID)
 		if err != nil {
-			return err
+			return TurnCaptureReceipt{}, err
 		}
 		if normalized != session.ID {
 			if logger := logpkg.S(); logger != nil {
@@ -764,7 +938,7 @@ func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error
 
 	ctx, tx, tracker, err := s.beginWriteTx(ctx)
 	if err != nil {
-		return fmt.Errorf("begin save session: %w", err)
+		return TurnCaptureReceipt{}, fmt.Errorf("begin save session: %w", err)
 	}
 	committed := false
 	var storedProjection []types.Message
@@ -776,35 +950,60 @@ func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error
 
 	exists, err := sessionExistsTx(ctx, tx, session.ID)
 	if err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
 	}
 	if exists {
+		if err := ensureSessionActiveTx(ctx, tx, session.ID); err != nil {
+			return TurnCaptureReceipt{}, err
+		}
+		if err := ensureCanonicalRevisionTx(ctx, tx, session.ID); err != nil {
+			return TurnCaptureReceipt{}, err
+		}
 		if err := s.updateSessionTx(ctx, tx, session, &storedProjection); err != nil {
-			return err
+			return TurnCaptureReceipt{}, err
 		}
 	} else {
 		if err := s.createSessionTx(ctx, tx, session, &storedProjection); err != nil {
-			return err
+			return TurnCaptureReceipt{}, err
 		}
 	}
+	if receipt != nil {
+		committedReceipt, err := s.insertTurnCaptureReceiptTx(ctx, tx, *receipt)
+		if err != nil {
+			return TurnCaptureReceipt{}, err
+		}
+		*receipt = committedReceipt
+	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit save session: %w", err)
+		return TurnCaptureReceipt{}, fmt.Errorf("commit save session: %w", err)
 	}
 	committed = true
 	applyStoredPromptProjection(session, storedProjection)
-	return nil
+	if receipt == nil {
+		return TurnCaptureReceipt{}, nil
+	}
+	return *receipt, nil
 }
 
 func (s *SQLiteSessionStorage) Update(ctx context.Context, session *Session) error {
+	_, err := s.update(ctx, session, nil)
+	return err
+}
+
+func (s *SQLiteSessionStorage) UpdateWithTurnCapture(ctx context.Context, session *Session, receipt TurnCaptureReceipt) (TurnCaptureReceipt, error) {
+	return s.update(ctx, session, &receipt)
+}
+
+func (s *SQLiteSessionStorage) update(ctx context.Context, session *Session, receipt *TurnCaptureReceipt) (TurnCaptureReceipt, error) {
 	if session == nil || strings.TrimSpace(session.ID) == "" {
-		return ErrInvalidSession
+		return TurnCaptureReceipt{}, ErrInvalidSession
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
 	}
 	normalized, err := normalizeSessionIDForWrite(session.ID)
 	if err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
 	}
 	if normalized != session.ID {
 		if logger := logpkg.S(); logger != nil {
@@ -814,7 +1013,7 @@ func (s *SQLiteSessionStorage) Update(ctx context.Context, session *Session) err
 	}
 	ctx, tx, tracker, err := s.beginWriteTx(ctx)
 	if err != nil {
-		return fmt.Errorf("begin update session: %w", err)
+		return TurnCaptureReceipt{}, fmt.Errorf("begin update session: %w", err)
 	}
 	committed := false
 	var storedProjection []types.Message
@@ -825,24 +1024,43 @@ func (s *SQLiteSessionStorage) Update(ctx context.Context, session *Session) err
 	}()
 	exists, err := sessionExistsTx(ctx, tx, session.ID)
 	if err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
 	}
 	if !exists {
-		return ErrSessionNotFound
+		return TurnCaptureReceipt{}, ErrSessionNotFound
+	}
+	if err := ensureSessionActiveTx(ctx, tx, session.ID); err != nil {
+		return TurnCaptureReceipt{}, err
+	}
+	if err := ensureCanonicalRevisionTx(ctx, tx, session.ID); err != nil {
+		return TurnCaptureReceipt{}, err
 	}
 	if err := s.updateSessionTx(ctx, tx, session, &storedProjection); err != nil {
-		return err
+		return TurnCaptureReceipt{}, err
+	}
+	if receipt != nil {
+		committedReceipt, err := s.insertTurnCaptureReceiptTx(ctx, tx, *receipt)
+		if err != nil {
+			return TurnCaptureReceipt{}, err
+		}
+		*receipt = committedReceipt
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit update session: %w", err)
+		return TurnCaptureReceipt{}, fmt.Errorf("commit update session: %w", err)
 	}
 	committed = true
 	applyStoredPromptProjection(session, storedProjection)
-	return nil
+	if receipt == nil {
+		return TurnCaptureReceipt{}, nil
+	}
+	return *receipt, nil
 }
 
 func (s *SQLiteSessionStorage) createSessionTx(ctx context.Context, tx *sql.Tx, session *Session, storedProjection *[]types.Message) error {
 	if err := s.upsertSessionMetadataTx(ctx, tx, session, 0); err != nil {
+		return err
+	}
+	if err := ensureCanonicalRevisionTx(ctx, tx, session.ID); err != nil {
 		return err
 	}
 	for index := range session.History {
@@ -883,6 +1101,13 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 			return err
 		}
 		if truncated {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE session_canonical_revisions
+SET revision = revision + 1
+WHERE session_id = ?
+`, session.ID); err != nil {
+				return fmt.Errorf("advance canonical revision after truncate: %w", err)
+			}
 			// A confirmed rewind is authoritative: the caller already replaced the
 			// visible history with the exact prefix that must remain. This is
 			// deliberately not routed through the generic projection repair path,
@@ -1800,6 +2025,23 @@ func sessionExistsTx(ctx context.Context, tx *sql.Tx, sessionID string) (bool, e
 	return true, nil
 }
 
+func ensureSessionActiveTx(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	var state string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(purge_state, 'active')
+		FROM sessions WHERE id = ?
+	`, sessionID).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read session purge state: %w", err)
+	}
+	if state != "active" {
+		return fmt.Errorf("%w: session=%s state=%s", ErrSessionPurgeInProgress, sessionID, state)
+	}
+	return nil
+}
+
 func canonicalMessageCountTx(ctx context.Context, tx *sql.Tx, sessionID string) (int, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT message_count FROM sessions WHERE id = ?`, sessionID).Scan(&count); err != nil {
@@ -1828,11 +2070,50 @@ func (s *SQLiteSessionStorage) upsertSessionMetadataTx(ctx context.Context, tx *
 	if session.ExpiresAt != nil {
 		expiresAt = session.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
+	var sessionGeneration, purgeGeneration int64
+	var purgeState string
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(session_generation, 0), COALESCE(purge_generation, 0),
+		       COALESCE(purge_state, 'active')
+		FROM sessions WHERE id = ?
+	`, session.ID).Scan(&sessionGeneration, &purgeGeneration, &purgeState)
+	switch {
+	case err == nil:
+		if purgeState != "active" {
+			return fmt.Errorf("%w: session=%s state=%s", ErrSessionPurgeInProgress, session.ID, purgeState)
+		}
+		if sessionGeneration <= 0 {
+			sessionGeneration = 1
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		var journalState string
+		err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(session_generation, 0), COALESCE(purge_generation, generation),
+			       state
+			FROM session_purge_journal WHERE session_id = ?
+		`, session.ID).Scan(&sessionGeneration, &purgeGeneration, &journalState)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read prior session generation: %w", err)
+		}
+		if err == nil && journalState != "purged" && journalState != "complete" {
+			return fmt.Errorf("%w: session=%s state=%s", ErrSessionPurgeInProgress, session.ID, journalState)
+		}
+		sessionGeneration++
+		if sessionGeneration <= 0 {
+			sessionGeneration = 1
+		}
+		// A new incarnation starts with no active purge token. The journal keeps
+		// the previous purge generation and is only advanced on the next purge.
+		purgeGeneration = 0
+	default:
+		return fmt.Errorf("read session generation: %w", err)
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO sessions (
 			id, user_id, state, title, title_source, summary, message_count,
-			head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			head_offset, tags_json, metadata_json, created_at, updated_at, expires_at,
+			delete_generation, session_generation, purge_generation
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			user_id = excluded.user_id,
 			state = excluded.state,
@@ -1849,7 +2130,8 @@ func (s *SQLiteSessionStorage) upsertSessionMetadataTx(ctx context.Context, tx *
 		session.Metadata.TitleSource, session.Metadata.Summary, count,
 		session.HeadOffset, tagsJSON, metadataJSON,
 		session.CreatedAt.UTC().Format(time.RFC3339Nano),
-		session.UpdatedAt.UTC().Format(time.RFC3339Nano), expiresAt)
+		session.UpdatedAt.UTC().Format(time.RFC3339Nano), expiresAt,
+		sessionGeneration, sessionGeneration, purgeGeneration)
 	if err != nil {
 		return fmt.Errorf("save session metadata: %w", err)
 	}
@@ -1971,17 +2253,19 @@ type rowScanner interface {
 func scanSQLiteSession(row rowScanner) (*Session, error) {
 	var session Session
 	var state string
+	var sessionGeneration int64
 	var title, titleSource, summary string
 	var tagsJSON, metadataJSON []byte
 	var createdAt, updatedAt, lastActivityAt string
 	var expiresAt sql.NullString
 	if err := row.Scan(
-		&session.ID, &session.UserID, &state, &title, &titleSource, &summary,
+		&session.ID, &session.UserID, &sessionGeneration, &state, &title, &titleSource, &summary,
 		&session.CanonicalMessageCount, &session.HeadOffset, &tagsJSON,
 		&metadataJSON, &createdAt, &updatedAt, &expiresAt, &lastActivityAt,
 	); err != nil {
 		return nil, err
 	}
+	session.SessionGeneration = sessionGeneration
 	if len(metadataJSON) > 0 {
 		if err := json.Unmarshal(metadataJSON, &session.Metadata); err != nil {
 			return nil, fmt.Errorf("decode session metadata: %w", err)
@@ -2545,10 +2829,10 @@ func (s *SQLiteSessionStorage) insertCanonicalEncodedTx(ctx context.Context, tx 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO session_messages(
 			session_id, seq, payload_json, artifact_path, preview_json, byte_count, sha256, created_at,
-			role, tool_call_count, tool_result, content_part_count, identity_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			role, turn_id, tool_call_count, tool_result, content_part_count, identity_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sessionID, seq, inlinePayload, artifactPath, previewPayload, encoded.size, digest,
-		time.Now().UTC().Format(time.RFC3339Nano), encoded.message.Role, len(encoded.message.ToolCalls),
+		time.Now().UTC().Format(time.RFC3339Nano), encoded.message.Role, types.TurnID(encoded.message), len(encoded.message.ToolCalls),
 		boolToSQLiteInt(strings.EqualFold(strings.TrimSpace(encoded.message.Role), "tool")), len(encoded.message.ContentParts),
 		canonicalMessageIdentityHash(encoded.message))
 	if err != nil {
@@ -2807,6 +3091,9 @@ func (s *SQLiteSessionStorage) AddMessageWithLimit(ctx context.Context, sessionI
 		return ErrSessionNotFound
 	}
 	if err != nil {
+		return err
+	}
+	if err := ensureSessionActiveTx(ctx, tx, sessionID); err != nil {
 		return err
 	}
 	promptRows, err := loadPromptRowsTx(ctx, tx, sessionID)
@@ -3285,50 +3572,463 @@ func (s *SQLiteSessionStorage) ListPreviews(ctx context.Context, userID string, 
 	return previews, rows.Err()
 }
 
-func (s *SQLiteSessionStorage) Delete(ctx context.Context, sessionID string) error {
-	return s.deleteSession(ctx, sessionID, true)
+// SetSessionPurgeMemoryRequired controls whether newly-created purge journal
+// entries wait for the separate memory store. Existing journal rows retain
+// their original requirement so changing runtime wiring cannot weaken a
+// deletion that is already draining.
+func (s *SQLiteSessionStorage) SetSessionPurgeMemoryRequired(required bool) {
+	if s == nil {
+		return
+	}
+	s.memoryPurgeRequired.Store(required)
 }
 
-// deleteSession 删除外部传入的会话 ID：先按读取侧同一套规则规范化。
-func (s *SQLiteSessionStorage) deleteSession(ctx context.Context, sessionID string, reclaim bool) error {
-	return s.deleteSessionByID(ctx, sanitizeSessionID(sessionID), reclaim)
+func purgeRecordFromRow(
+	sessionID, state, reason string,
+	sessionGeneration, purgeGeneration, memoryAckGeneration int64,
+	memoryRequired int,
+	updatedAt string,
+) SessionPurgeRecord {
+	updated, _ := time.Parse(time.RFC3339Nano, updatedAt)
+	return SessionPurgeRecord{
+		SessionID:          sessionID,
+		SessionGeneration:  sessionGeneration,
+		PurgeGeneration:    purgeGeneration,
+		Generation:         purgeGeneration,
+		Reason:             reason,
+		State:              state,
+		MemoryRequired:     memoryRequired != 0,
+		MemoryAcknowledged: memoryAckGeneration == purgeGeneration && purgeGeneration > 0,
+		UpdatedAt:          updated,
+	}
 }
 
-// deleteSessionExact 按数据库中原样存储的 ID 删除（清理循环专用）。
-//
-// 不能对已落库的 ID 再跑 sanitizeSessionID："/root/p26s3" 会被改写成
-// "p26s3"，DELETE 命中 0 行并返回 ErrSessionNotFound；旧清理循环把该错误
-// 当作“已被并发删除”吞掉，于是这类行永远留在表里，循环无限重扫。
-func (s *SQLiteSessionStorage) deleteSessionExact(ctx context.Context, sessionID string, reclaim bool) error {
-	return s.deleteSessionByID(ctx, sessionID, reclaim)
-}
-
-func (s *SQLiteSessionStorage) deleteSessionByID(ctx context.Context, sessionID string, reclaim bool) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
+// BeginSessionPurge atomically fences the canonical session and records the
+// generation that the memory side must acknowledge. Repeating the call while
+// the same session is draining returns the existing journal row.
+func (s *SQLiteSessionStorage) BeginSessionPurge(ctx context.Context, sessionID, reason string) (SessionPurgeRecord, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return SessionPurgeRecord{}, ErrInvalidSession
+	}
+	if err := ctx.Err(); err != nil {
+		return SessionPurgeRecord{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
-		return fmt.Errorf("delete sqlite session: %w", err)
+		return SessionPurgeRecord{}, fmt.Errorf("begin session purge fence: %w", err)
+	}
+	defer tx.Rollback()
+
+	var purgeState string
+	var sessionGeneration, currentPurgeGeneration int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(purge_state, 'active'),
+		       COALESCE(session_generation, delete_generation, 0),
+		       COALESCE(purge_generation, 0)
+		FROM sessions WHERE id = ?
+	`, sessionID).Scan(&purgeState, &sessionGeneration, &currentPurgeGeneration); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SessionPurgeRecord{}, ErrSessionNotFound
+		}
+		return SessionPurgeRecord{}, fmt.Errorf("read session purge state: %w", err)
+	}
+
+	if purgeState != "active" {
+		if purgeState != "draining" {
+			return SessionPurgeRecord{}, fmt.Errorf("%w: state=%s", ErrSessionPurgeInProgress, purgeState)
+		}
+		var record SessionPurgeRecord
+		var memoryRequired, memoryAckGeneration int
+		var purgeGeneration int64
+		var updatedAt string
+		err := tx.QueryRowContext(ctx, `
+			SELECT session_id, session_generation, purge_generation, reason, state, memory_required,
+			       memory_ack_generation, updated_at
+			FROM session_purge_journal
+			WHERE session_id = ?
+		`, sessionID).Scan(
+			&record.SessionID, &record.SessionGeneration, &purgeGeneration, &record.Reason, &record.State,
+			&memoryRequired, &memoryAckGeneration, &updatedAt,
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return SessionPurgeRecord{}, fmt.Errorf("draining session %s has no purge journal", sessionID)
+			}
+			return SessionPurgeRecord{}, fmt.Errorf("read session purge journal: %w", err)
+		}
+		record.PurgeGeneration = purgeGeneration
+		record.Generation = purgeGeneration
+		record.MemoryRequired = memoryRequired != 0
+		record.MemoryAcknowledged = int64(memoryAckGeneration) == purgeGeneration && purgeGeneration > 0
+		record.UpdatedAt = purgeTime(updatedAt)
+		if err := tx.Commit(); err != nil {
+			return SessionPurgeRecord{}, fmt.Errorf("commit repeated session purge fence: %w", err)
+		}
+		return record, nil
+	}
+
+	if sessionGeneration <= 0 {
+		sessionGeneration = 1
+	}
+	var priorPurgeGeneration int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(purge_generation, generation, 0)
+		FROM session_purge_journal WHERE session_id = ?
+	`, sessionID).Scan(&priorPurgeGeneration); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return SessionPurgeRecord{}, fmt.Errorf("read prior session purge generation: %w", err)
+	}
+	purgeGeneration := priorPurgeGeneration + 1
+	if currentPurgeGeneration >= purgeGeneration {
+		purgeGeneration = currentPurgeGeneration + 1
+	}
+	if purgeGeneration <= 0 {
+		purgeGeneration = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE sessions
+		SET purge_state = 'draining',
+		    purge_generation = ?,
+		    session_generation = CASE
+		        WHEN COALESCE(session_generation, delete_generation, 0) > 0
+		        THEN session_generation
+		        ELSE ?
+		    END
+		WHERE id = ? AND COALESCE(purge_state, 'active') = 'active'
+	`, purgeGeneration, sessionGeneration, sessionID); err != nil {
+		return SessionPurgeRecord{}, fmt.Errorf("fence session for purge: %w", err)
+	}
+	memoryRequired := s.memoryPurgeRequired.Load()
+	memoryRequiredValue := 0
+	if memoryRequired {
+		memoryRequiredValue = 1
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO session_purge_journal(
+			session_id, generation, session_generation, purge_generation, reason, state, memory_required,
+			memory_ack_generation, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, 'draining', ?, 0, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			generation = excluded.purge_generation,
+			session_generation = excluded.session_generation,
+			purge_generation = excluded.purge_generation,
+			reason = excluded.reason,
+			state = 'draining',
+			memory_required = excluded.memory_required,
+			memory_ack_generation = 0,
+			created_at = excluded.created_at,
+			updated_at = excluded.updated_at
+	`, sessionID, purgeGeneration, sessionGeneration, purgeGeneration,
+		strings.TrimSpace(reason), memoryRequiredValue, now, now); err != nil {
+		return SessionPurgeRecord{}, fmt.Errorf("write session purge journal: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return SessionPurgeRecord{}, fmt.Errorf("commit session purge fence: %w", err)
+	}
+	return SessionPurgeRecord{
+		SessionID:         sessionID,
+		SessionGeneration: sessionGeneration,
+		PurgeGeneration:   purgeGeneration,
+		Generation:        purgeGeneration,
+		Reason:            strings.TrimSpace(reason),
+		State:             "draining",
+		MemoryRequired:    memoryRequired,
+		UpdatedAt:         purgeTime(now),
+	}, nil
+}
+
+// AcknowledgeSessionMemoryPurge records the memory-store side of a purge.
+// Acknowledgements are generation-scoped and therefore safe to replay.
+func (s *SQLiteSessionStorage) AcknowledgeSessionMemoryPurge(ctx context.Context, sessionID string, generation int64) error {
+	if generation <= 0 {
+		return fmt.Errorf("%w: invalid generation %d", ErrSessionPurgeGenerationMismatch, generation)
+	}
+	var sessionGeneration, purgeGeneration int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT session_generation, purge_generation
+		FROM session_purge_journal WHERE session_id = ?
+	`, sessionID).Scan(&sessionGeneration, &purgeGeneration)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read session purge acknowledgement generations: %w", err)
+	}
+	if purgeGeneration != generation {
+		return fmt.Errorf("%w: session=%s want=%d got=%d",
+			ErrSessionPurgeGenerationMismatch, sessionID, purgeGeneration, generation)
+	}
+	return s.AcknowledgeSessionMemoryPurgeWithGenerations(
+		ctx, sessionID, sessionGeneration, purgeGeneration)
+}
+
+// AcknowledgeSessionMemoryPurgeWithGenerations is the incarnation-qualified
+// acknowledgement path. Both tokens are checked in the transaction so a
+// delayed ack cannot be applied to a recreated session that reuses the ID.
+func (s *SQLiteSessionStorage) AcknowledgeSessionMemoryPurgeWithGenerations(
+	ctx context.Context,
+	sessionID string,
+	sessionGeneration, purgeGeneration int64,
+) error {
+	if sessionGeneration <= 0 || purgeGeneration <= 0 {
+		return fmt.Errorf("%w: invalid session/purge generations %d/%d",
+			ErrSessionPurgeGenerationMismatch, sessionGeneration, purgeGeneration)
+	}
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("begin session purge acknowledgement: %w", err)
+	}
+	defer tx.Rollback()
+	var state string
+	var storedSessionGeneration, storedPurgeGeneration, ackGeneration int64
+	var memoryRequired int
+	err = tx.QueryRowContext(ctx, `
+		SELECT state, session_generation, purge_generation, memory_required, memory_ack_generation
+		FROM session_purge_journal WHERE session_id = ?
+	`, sessionID).Scan(
+		&state, &storedSessionGeneration, &storedPurgeGeneration, &memoryRequired, &ackGeneration)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read session purge acknowledgement: %w", err)
+	}
+	if storedSessionGeneration != sessionGeneration || storedPurgeGeneration != purgeGeneration {
+		return fmt.Errorf("%w: session=%s want_session=%d got_session=%d want_purge=%d got_purge=%d",
+			ErrSessionPurgeGenerationMismatch, sessionID, storedSessionGeneration, sessionGeneration,
+			storedPurgeGeneration, purgeGeneration)
+	}
+	if state == "complete" || state == "purged" || ackGeneration == purgeGeneration {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit idempotent session purge acknowledgement: %w", err)
+		}
+		return nil
+	}
+	if state != "draining" {
+		return fmt.Errorf("%w: state=%s", ErrSessionPurgeInProgress, state)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_purge_journal
+		SET memory_ack_generation = ?, updated_at = ?
+		WHERE session_id = ? AND session_generation = ? AND purge_generation = ? AND state = 'draining'
+	`, purgeGeneration, now, sessionID, sessionGeneration, purgeGeneration)
+	if err != nil {
+		return fmt.Errorf("acknowledge session memory purge: %w", err)
 	}
 	affected, _ := result.RowsAffected()
-	if affected == 0 {
+	if affected != 1 {
+		return fmt.Errorf("%w: session=%s", ErrSessionPurgeGenerationMismatch, sessionID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session purge acknowledgement: %w", err)
+	}
+	_ = memoryRequired // retained for row-shape clarity and future policy checks
+	return nil
+}
+
+// CompleteSessionPurge removes all canonical rows only after the matching
+// generation has been acknowledged when a memory store is required. The
+// terminal journal row remains as a replay marker.
+func (s *SQLiteSessionStorage) CompleteSessionPurge(ctx context.Context, sessionID string, generation int64) error {
+	if generation <= 0 {
+		return fmt.Errorf("%w: invalid generation %d", ErrSessionPurgeGenerationMismatch, generation)
+	}
+	var sessionGeneration, purgeGeneration int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT session_generation, purge_generation
+		FROM session_purge_journal WHERE session_id = ?
+	`, sessionID).Scan(&sessionGeneration, &purgeGeneration)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read session purge completion generations: %w", err)
+	}
+	if purgeGeneration != generation {
+		return fmt.Errorf("%w: session=%s want=%d got=%d",
+			ErrSessionPurgeGenerationMismatch, sessionID, purgeGeneration, generation)
+	}
+	return s.CompleteSessionPurgeWithGenerations(ctx, sessionID, sessionGeneration, purgeGeneration)
+}
+
+// CompleteSessionPurgeWithGenerations removes canonical rows only when both
+// the session incarnation and purge attempt still match the durable fence.
+func (s *SQLiteSessionStorage) CompleteSessionPurgeWithGenerations(
+	ctx context.Context,
+	sessionID string,
+	sessionGeneration, purgeGeneration int64,
+) error {
+	if sessionGeneration <= 0 || purgeGeneration <= 0 {
+		return fmt.Errorf("%w: invalid session/purge generations %d/%d",
+			ErrSessionPurgeGenerationMismatch, sessionGeneration, purgeGeneration)
+	}
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("begin complete session purge: %w", err)
+	}
+	defer tx.Rollback()
+
+	var journalState string
+	var storedSessionGeneration, storedPurgeGeneration, ackGeneration int64
+	var memoryRequired int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT state, session_generation, purge_generation, memory_required, memory_ack_generation
+		FROM session_purge_journal WHERE session_id = ?
+	`, sessionID).Scan(
+		&journalState, &storedSessionGeneration, &storedPurgeGeneration, &memoryRequired, &ackGeneration); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read session purge completion journal: %w", err)
+	}
+	if storedSessionGeneration != sessionGeneration || storedPurgeGeneration != purgeGeneration {
+		return fmt.Errorf("%w: session=%s want_session=%d got_session=%d want_purge=%d got_purge=%d",
+			ErrSessionPurgeGenerationMismatch, sessionID, storedSessionGeneration, sessionGeneration,
+			storedPurgeGeneration, purgeGeneration)
+	}
+	if journalState == "complete" || journalState == "purged" {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit idempotent completed session purge: %w", err)
+		}
+		return nil
+	}
+	if journalState != "draining" {
+		return fmt.Errorf("%w: state=%s", ErrSessionPurgeInProgress, journalState)
+	}
+	if memoryRequired != 0 && ackGeneration != purgeGeneration {
+		return fmt.Errorf("%w: session=%s generation=%d",
+			ErrSessionPurgeCoordinatorUnavailable, sessionID, purgeGeneration)
+	}
+
+	var sessionState string
+	var storedSessionPurgeGeneration int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(purge_state, 'active'),
+		       COALESCE(session_generation, 0),
+		       COALESCE(purge_generation, 0)
+		FROM sessions WHERE id = ?
+	`, sessionID).Scan(&sessionState, &storedSessionGeneration, &storedSessionPurgeGeneration); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("read fenced session for purge completion: %w", err)
+	}
+	if sessionState != "draining" ||
+		storedSessionGeneration != sessionGeneration ||
+		storedSessionPurgeGeneration != purgeGeneration {
+		return fmt.Errorf("%w: session=%s want_session=%d got_session=%d want_purge=%d got_purge=%d state=%s",
+			ErrSessionPurgeGenerationMismatch, sessionID, sessionGeneration, storedSessionGeneration,
+			purgeGeneration, storedSessionPurgeGeneration, sessionState)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_turn_capture_receipts WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("delete session capture receipts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_canonical_revisions WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("delete session canonical revision: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_purge_journal
+		SET state = 'complete', updated_at = ?
+		WHERE session_id = ? AND session_generation = ? AND purge_generation = ? AND state = 'draining'
+	`, now, sessionID, sessionGeneration, purgeGeneration)
+	if err != nil {
+		return fmt.Errorf("mark session purge complete: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return fmt.Errorf("%w: session=%s", ErrSessionPurgeGenerationMismatch, sessionID)
+	}
+	result, err = tx.ExecContext(ctx, `
+		DELETE FROM sessions
+		WHERE id = ? AND purge_state = 'draining'
+		  AND session_generation = ? AND purge_generation = ?
+	`, sessionID, sessionGeneration, purgeGeneration)
+	if err != nil {
+		return fmt.Errorf("delete purged session: %w", err)
+	}
+	affected, _ = result.RowsAffected()
+	if affected != 1 {
 		return ErrSessionNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete session purge: %w", err)
+	}
+	s.removeSessionArtifacts(sessionID)
+	return nil
+}
+
+func (s *SQLiteSessionStorage) ListPendingSessionPurges(ctx context.Context, limit int) ([]SessionPurgeRecord, error) {
+	if limit <= 0 || limit > sessionCleanupBatchSize {
+		limit = sessionCleanupBatchSize
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session_id, session_generation, purge_generation, reason, state,
+		       memory_required, memory_ack_generation, updated_at
+		FROM session_purge_journal
+		WHERE state = 'draining'
+		ORDER BY updated_at ASC, session_id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending session purges: %w", err)
+	}
+	defer rows.Close()
+	pending := make([]SessionPurgeRecord, 0, limit)
+	for rows.Next() {
+		var sessionID, reason, state, updatedAt string
+		var sessionGeneration, purgeGeneration, memoryAckGeneration int64
+		var memoryRequired int
+		if err := rows.Scan(&sessionID, &sessionGeneration, &purgeGeneration,
+			&reason, &state, &memoryRequired,
+			&memoryAckGeneration, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan pending session purge: %w", err)
+		}
+		pending = append(pending, purgeRecordFromRow(sessionID, state, reason,
+			sessionGeneration, purgeGeneration, memoryAckGeneration, memoryRequired, updatedAt))
+	}
+	return pending, rows.Err()
+}
+
+func (s *SQLiteSessionStorage) ListExpiredSessionIDs(ctx context.Context, now, olderThan time.Time, limit int) ([]string, error) {
+	if limit <= 0 || limit > sessionCleanupBatchSize {
+		limit = sessionCleanupBatchSize
+	}
+	return s.expiredSessionBatch(ctx, now.UTC().Format(time.RFC3339Nano),
+		olderThan.UTC().Format(time.RFC3339Nano), limit)
+}
+
+func (s *SQLiteSessionStorage) Delete(ctx context.Context, sessionID string) error {
+	sessionID = sanitizeSessionID(sessionID)
+	purge, err := s.BeginSessionPurge(ctx, sessionID, "direct_delete")
+	if err != nil {
+		return err
+	}
+	if purge.MemoryRequired {
+		return ErrSessionPurgeCoordinatorUnavailable
+	}
+	if err := s.AcknowledgeSessionMemoryPurge(ctx, purge.SessionID, purge.Generation); err != nil {
+		return err
+	}
+	return s.CompleteSessionPurge(ctx, purge.SessionID, purge.Generation)
+}
+
+func purgeTime(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
+}
+
+func (s *SQLiteSessionStorage) removeSessionArtifacts(sessionID string) {
 	baseDir := s.cfg.Dir
 	if strings.TrimSpace(baseDir) == "" {
 		baseDir = filepath.Dir(s.cfg.Path)
 	}
 	artifactRoot := filepath.Join(baseDir, "session-artifacts")
 	artifactDir := filepath.Join(artifactRoot, sessionID)
-	if !pathWithin(artifactRoot, artifactDir) {
-		return fmt.Errorf("refusing to remove session artifact path outside artifact root")
+	if pathWithin(artifactRoot, artifactDir) {
+		_ = os.RemoveAll(artifactDir)
 	}
-	if err := os.RemoveAll(artifactDir); err != nil {
-		return fmt.Errorf("remove session artifacts: %w", err)
-	}
-	// reclaim 保留参数语义（调用方用于“删除后回收空间”的意图），但在线页回收
-	// （incremental_vacuum）已整体移除：空闲页留在 freelist，由离线 compaction
-	// （独占访问时手动 VACUUM）回收。
-	_ = reclaim
-	return nil
 }
 
 func (s *SQLiteSessionStorage) ClearMessages(ctx context.Context, sessionID string) error {
@@ -3400,16 +4100,9 @@ func (s *SQLiteSessionStorage) Close(ctx context.Context, sessionID string) erro
 // sessionCleanupBatchSize 是单轮清理的最大候选数。
 const sessionCleanupBatchSize = 128
 
-// Cleanup 删除过期会话。
-//
-// 两个关键不变量（v3 修复）：
-//  1. 候选行来自 sessions 表本身，必须按落库原样 ID 删除（deleteSessionExact）。
-//     旧实现对候选 ID 再跑 sanitizeSessionID，"/root/x" 被改写成 "x" 后命中
-//     0 行；循环又把 ErrSessionNotFound 当成“已被并发删除”吞掉并继续重扫，
-//     于是清理 goroutine 会永久空转（生产事故：~1 核 + 数百 MB/s 重读，直到
-//     进程重启）。这里只有真正删除成功才计入 removed。
-//  2. 一轮下来没有任何实际删除进展时必须退出（ErrCleanupStalled），无论
-//     原因是什么，都不能原地重扫同一批行。
+// Cleanup 删除过期会话。它保留为存储层独立使用时的安全清理入口，但没有
+// 应用层 memory coordinator；因此 memory purge 被标为 required 时只建立
+// durable fence 并返回 ErrSessionPurgeCoordinatorUnavailable，不会删除源行。
 func (s *SQLiteSessionStorage) Cleanup(ctx context.Context, after time.Time) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	threshold := after.UTC().Format(time.RFC3339Nano)
@@ -3423,29 +4116,39 @@ func (s *SQLiteSessionStorage) Cleanup(ctx context.Context, after time.Time) (in
 			break
 		}
 		deleted := 0
-		var undeletable []string
+		undeletable := 0
 		for _, id := range ids {
-			err := s.deleteSessionExact(ctx, id, false)
-			switch {
-			case err == nil:
-				deleted++
-			case errors.Is(err, ErrSessionNotFound):
-				// 行可能已被并发进程删掉（正常）；也可能本身不可寻址（脏数据）。
-				undeletable = append(undeletable, id)
-			default:
+			purge, purgeErr := s.BeginSessionPurge(ctx, id, "ttl_expired")
+			if errors.Is(purgeErr, ErrSessionNotFound) {
+				// Another process may have completed the purge after this batch
+				// was read. Its terminal journal marker makes that replay safe.
+				continue
+			}
+			if purgeErr != nil {
+				return removed, purgeErr
+			}
+			if purge.MemoryRequired && !purge.MemoryAcknowledged {
+				return removed, ErrSessionPurgeCoordinatorUnavailable
+			}
+			if !purge.MemoryAcknowledged {
+				if err := s.AcknowledgeSessionMemoryPurge(ctx, purge.SessionID, purge.Generation); err != nil {
+					return removed, err
+				}
+			}
+			if err := s.CompleteSessionPurge(ctx, purge.SessionID, purge.Generation); err != nil {
+				if errors.Is(err, ErrSessionNotFound) {
+					// A trigger or external constraint can make the canonical
+					// delete a no-op while leaving the durable fence intact.
+					undeletable++
+					continue
+				}
 				return removed, err
 			}
+			deleted++
 		}
 		removed += deleted
 		if deleted == 0 {
-			sample := ""
-			if len(undeletable) > 0 {
-				sample = undeletable[0]
-			}
-			if logger := logpkg.S(); logger != nil {
-				logger.Warnf("[session-history] cleanup stalled: %d candidate sessions not deletable (sample=%q)", len(ids), sample)
-			}
-			return removed, fmt.Errorf("%w: %d candidate sessions not deletable (sample=%q)", ErrCleanupStalled, len(ids), sample)
+			return removed, fmt.Errorf("%w: %d candidate sessions not purgeable", ErrCleanupStalled, undeletable)
 		}
 	}
 	// 在线页回收已移除（见 applyBootstrapPRAGMAs 注释）：删除后的空闲页留在
@@ -3468,13 +4171,15 @@ func (s *SQLiteSessionStorage) expiredSessionBatch(ctx context.Context, now, thr
 	}{
 		{`
 			SELECT id FROM sessions
-			WHERE expires_at IS NOT NULL AND expires_at < ?
+			WHERE COALESCE(purge_state, 'active') = 'active'
+			  AND expires_at IS NOT NULL AND expires_at < ?
 			ORDER BY expires_at ASC, updated_at ASC, id ASC
 			LIMIT ?
 		`, now},
 		{`
 			SELECT id FROM sessions
-			WHERE expires_at IS NULL AND updated_at < ?
+			WHERE COALESCE(purge_state, 'active') = 'active'
+			  AND expires_at IS NULL AND updated_at < ?
 			ORDER BY updated_at ASC, id ASC
 			LIMIT ?
 		`, threshold},

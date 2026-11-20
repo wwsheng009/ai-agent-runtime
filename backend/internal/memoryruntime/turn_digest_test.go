@@ -37,6 +37,11 @@ func TestRecordTurnDigestRedactsAndTruncates(t *testing.T) {
 	require.Contains(t, digests[0].AssistantText, "…")
 	require.True(t, digests[0].TextTruncated)
 	require.JSONEq(t, `{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}`, digests[0].UsageJSON)
+	stats := rt.DigestStats()
+	require.EqualValues(t, 1, stats.Written)
+	require.Zero(t, stats.Skipped)
+	require.Zero(t, stats.Failed)
+	require.False(t, stats.LastWrittenAt.IsZero())
 }
 
 func TestRecordTurnDigestSkipsWhenGenerationDisabled(t *testing.T) {
@@ -54,6 +59,9 @@ func TestRecordTurnDigestSkipsWhenGenerationDisabled(t *testing.T) {
 	count, err := store.CountPendingTurnDigests(context.Background(), "")
 	require.NoError(t, err)
 	require.Zero(t, count)
+	stats := rt.DigestStats()
+	require.EqualValues(t, 1, stats.Skipped)
+	require.Equal(t, "generation_disabled", stats.LastSkipReason)
 }
 
 func TestConfigNormalizesTurnDigestSchedulingDefaults(t *testing.T) {
@@ -289,8 +297,9 @@ type fakeWindowSource struct {
 func (s *fakeWindowSource) ReadTranscriptWindow(_ context.Context, _ SessionRef, start, end, limit int) (Transcript, error) {
 	s.windowCalls++
 	window := s.window
+	sourceMessages := window.Messages
 	window.Messages = nil
-	for _, message := range s.window.Messages {
+	for _, message := range sourceMessages {
 		if message.Seq >= start && message.Seq <= end && len(window.Messages) < limit {
 			window.Messages = append(window.Messages, message)
 		}

@@ -109,6 +109,9 @@ WHERE scope = ? AND project_key = ? AND summary_kind = ?
 		return Summary{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, summary.ProjectKey); err != nil {
+		return Summary{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded'
 WHERE scope = ? AND project_key = ? AND summary_kind = ? AND status = 'active'
@@ -139,7 +142,7 @@ VALUES (?, ?, ?, 0, 'summary_compile')
 	if err := tx.Commit(); err != nil {
 		return Summary{}, err
 	}
-	if err := s.writeSummaryArtifacts(summary); err != nil {
+	if err := s.writeSummaryArtifactsIfCurrent(ctx, summary); err != nil {
 		return summary, err
 	}
 	return summary, nil
@@ -178,6 +181,74 @@ func (s *Store) clearSummaryArtifacts() error {
 		}
 	}
 	return nil
+}
+
+// writeSummaryArtifactsIfCurrent serializes materialized-view writes with
+// memory-store writers. The DB transaction both fences maintenance ownership
+// and confirms this summary is still active before publishing its files.
+func (s *Store) writeSummaryArtifactsIfCurrent(ctx context.Context, summary Summary) error {
+	if s == nil {
+		return nil
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, summary.ProjectKey); err != nil {
+		return err
+	}
+	var current int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM memory_summaries
+WHERE id = ? AND project_key = ? AND status = 'active' AND freshness_status = 'fresh'
+`, summary.ID, summary.ProjectKey).Scan(&current); err != nil {
+		return err
+	}
+	if current == 0 {
+		return tx.Commit()
+	}
+	if err := s.writeSummaryArtifacts(summary); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// clearSummaryArtifactsIfNoFreshActiveSummary avoids an invalidation or
+// retirement racing with a newer summary publication.
+func (s *Store) clearSummaryArtifactsIfNoFreshActiveSummary(ctx context.Context, projectKey string) error {
+	if s == nil {
+		return nil
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	var current int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM memory_summaries
+WHERE project_key = ? AND status = 'active' AND freshness_status = 'fresh'
+`, projectKey).Scan(&current); err != nil {
+		return err
+	}
+	if current == 0 {
+		if err := s.clearSummaryArtifacts(); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListSummaries(ctx context.Context, limit int) ([]Summary, error) {
@@ -299,7 +370,15 @@ func (s *Store) RetireActiveSummary(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return false, err
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_summaries SET status = 'superseded', freshness_status = 'stale'
 WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
 `, s.cfg.ProjectKey)
@@ -307,8 +386,11 @@ WHERE project_key = ? AND summary_kind = 'long_term' AND status = 'active'
 		return false, err
 	}
 	affected, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	if affected > 0 {
-		if err := s.clearSummaryArtifacts(); err != nil {
+		if err := s.clearSummaryArtifactsIfNoFreshActiveSummary(ctx, s.cfg.ProjectKey); err != nil {
 			return true, err
 		}
 	}
@@ -347,14 +429,25 @@ ORDER BY revision DESC
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
 	inserted := 0
 	for _, summary := range summaries {
-		affected, err := enqueueSummaryRebuild(ctx, db, summary.id+":"+summary.watermark,
+		affected, err := enqueueSummaryRebuild(ctx, tx, summary.id+":"+summary.watermark,
 			summary.scope, summary.projectKey, summary.watermark)
 		if err != nil {
 			return inserted, err
 		}
 		inserted += affected
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return inserted, nil
 }

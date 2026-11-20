@@ -42,6 +42,9 @@ func (s *Store) PruneDiagnostics(ctx context.Context, now time.Time) (Diagnostic
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return result, err
+	}
 	if traceDays > 0 {
 		cutoff := now.UTC().Add(-time.Duration(traceDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 		res, err := tx.ExecContext(ctx, `
@@ -109,6 +112,9 @@ func (s *Store) SweepLifecycle(ctx context.Context, now time.Time) (RetentionSwe
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return result, err
+	}
 
 	if policy.Classes.Configured() {
 		rows, err := tx.QueryContext(ctx, `

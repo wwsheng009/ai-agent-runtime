@@ -279,6 +279,12 @@ func (s *Store) insertRecordTx(ctx context.Context, db *sql.DB, record Record, a
 		return fmt.Errorf("memorystore: begin record tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
+		return err
+	}
 	if err := s.insertRecordSQLTx(ctx, tx, record, actor, sessionID); err != nil {
 		return err
 	}
@@ -323,16 +329,16 @@ WHERE scope = ? AND project_key = ? AND content_hash = ?
 INSERT INTO memory_entries (
     id, scope, project_key, kind, status, text, normalized_text, tags_json,
     confidence, sensitivity, pinned, retention_class, source_kind,
-    source_session_id, source_turn_id, source_refs_json, content_hash,
+	    source_session_id, source_session_generation, source_turn_id, source_refs_json, content_hash,
     supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
     valid_from, valid_until, freshness_status, last_verified_at,
     revalidate_after, stale_reason, deleted_at, metadata_json
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.ID, string(record.Scope), record.ProjectKey, record.Kind, string(record.Status),
 		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence, record.Sensitivity,
 		boolInt(record.Pinned), record.RetentionClass, record.SourceKind,
-		nullableString(record.SourceSessionID), nullableString(record.SourceTurnID),
+		nullableString(record.SourceSessionID), record.SourceSessionGeneration, nullableString(record.SourceTurnID),
 		string(refsJSON), record.ContentHash, nullableString(record.SupersedesID),
 		record.Revision, record.CreatedAt.UTC().Format(time.RFC3339Nano),
 		record.UpdatedAt.UTC().Format(time.RFC3339Nano), nullableTime(record.LastUsedAt),
@@ -375,12 +381,12 @@ func insertSourceTx(ctx context.Context, tx *sql.Tx, record Record, sessionID st
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_sources (
-    id, memory_id, source_kind, source_id, session_id, turn_id,
+	    id, memory_id, source_kind, source_id, session_id, source_session_generation, turn_id,
     source_window, message_ids_json, artifact_refs_json, fact_refs_json, knowledge_refs_json,
     source_hash, source_revision, source_updated_at, source_observed_at, quote, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
-`, sourceID, record.ID, record.SourceKind, record.ID, nullableString(record.SourceSessionID),
-		nullableString(record.SourceTurnID), nullableString(record.SourceWindow), string(messageIDs), sourceHash,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+	`, sourceID, record.ID, record.SourceKind, record.ID, nullableString(record.SourceSessionID),
+		record.SourceSessionGeneration, nullableString(record.SourceTurnID), nullableString(record.SourceWindow), string(messageIDs), sourceHash,
 		nullableInt64(record.SourceRevision),
 		sourceUpdatedAt.UTC().Format(time.RFC3339Nano),
 		sourceObservedAt.UTC().Format(time.RFC3339Nano), record.Text, nowText()); err != nil {
@@ -689,6 +695,7 @@ func (s *Store) loadRecordsForInjectionDiagnostics(ctx context.Context, db *sql.
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -820,6 +827,7 @@ func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,

@@ -5,6 +5,43 @@
 > 原始审查结论：**设计层面已基本形成闭环；审查当时代码尚未实施。** 当前实施状态见 §1.1 与 §6。
 > 审查后修订：`03`、`04`、`05`、`06`、`07` 已补齐关键契约；`06 §8` 已形成 M0-M5 + v1.1 的阶段 DoD。
 
+## 0. 2026-11-19 架构收敛状态
+
+本轮审查不是再增加一套抽取实现，而是把已有入口收敛为一条
+receipt-first 正常路径：
+
+```text
+canonical turn commit
+  -> durable capture receipt
+  -> memory materialization
+  -> phase1_extract/v2
+  -> candidate + output receipt
+  -> consolidation
+  -> active memory
+  -> retrieval/injection
+```
+
+当前代码已完成 receipt-backed 路由收敛：
+
+- `Runtime.Run` 对 receipt-capable source 先 materialize，再运行 capture
+  extraction；不再把同一 source 自动送入 legacy digest/session replay。
+- `RunSession`、`RunSessionWindow`、`RunPendingTurnDigests`、
+  `RecoverPendingPhase1` 保留为 pre-receipt/historical compatibility、
+  migration 或 recovery；receipt-backed session 有 routing fence。
+- legacy digest 查询、claim、状态更新隔离 `capture_receipt_id = ''`；
+  `phase1_extract/v2` 使用 receipt 固定 range，并做 generation/incarnation、
+  purge fence、lease、stale source validation。
+- maintenance startup/ticker 已移除无条件 legacy digest sweep 和 host
+  `RunIdle` extraction helper；startup 顺序为 materialization → capture
+  recovery → legacy phase1 recovery → maintenance。
+- generation disabled 仍可 materialize receipt，但不执行 LLM，也不 fallback
+  到 legacy extraction。
+
+这不是“所有历史数据已迁移”或“生产闭环已验收”：canonical SQLite 与 memory
+SQLite 仍是两个 store，交接是 at-least-once；output receipt、candidate commit
+和幂等重放必须继续由测试与运营证据证明。durable capture 提案文件仍保持
+**方案提案（待评审，未实施）**，不能把提案内容当成已批准的 schema migration。
+
 ## 1. 审查结论先说
 
 ### 1.1 当前实际功能状态
@@ -51,8 +88,10 @@ provider request 包含 memory 内容，recall trace 为 `injected=1` 且 select
 命中两条记录，usage 记录为 `cited`。
 
 2026-11-11 追加：确认并实现 Turn Digest Outbox Phase 1 core + 基础窗口化读取作为写路径恢复补强。
-turn-end 只写有界、脱敏 digest，不跑 LLM；session-end/idle/startup recovery 消费；
-Phase 1 仍以 canonical transcript 为 source，不把 digest 当第二份 transcript。
+turn-end 只写有界、脱敏 digest，不跑 LLM；receipt-backed 新回合由
+materializer/capture worker 消费；session-end/idle/startup recovery 只保留给
+无 receipt 的 pre-receipt/historical compatibility。Phase 1 仍以 canonical
+transcript 为 source，不把 digest 当第二份 transcript。
 大会话已接入 canonical window reader/job、per-window stale 与 L0→L1→L2 rollup；L0 retention 受 rollup 水位保护，L1 摘要通过 `turn_window` candidate 进入现有 Consolidation。已补真实 SQLite canonical store reopen、abrupt-exit 与 hard-kill E2E；真实终端关闭与 shadow 仍待补。
 compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack 按 canonical cutoff/before range 与 tombstone IDs 精确失效 L0/L1/memory，legacy 事件回退 session 级保守失效。
 只读最近一页时不得把更早 pending digest 标 done。详见
@@ -61,7 +100,7 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 2026-11-12 更新：关闭两个 P1 主链路缺口。
 
 - startup recovery 新增独立 `TriggerStartup`，只处理 closed/archived/orphaned/stale
-  session；active/idle session 留给 session-end/idle sweep。新增 active/idle 负向测试。
+  session；active/idle session 留给相应 capture/legacy recovery。新增 active/idle 负向测试。
 - `retention.*` 已接入 store/runtime maintenance ticker：candidate 过期、standard/ephemeral
   active 未使用过期、`maxRecords` 上限、tombstone 物理清理、audit/usage 清理与过期
   suppression 清理；默认 `retention.enabled=false`，避免升级隐式淘汰。
@@ -204,7 +243,7 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 | 维度 | 状态 | 说明 |
 | --- | --- | --- |
 | 手工记忆 | 已存在 | 不能因 v2 上线回归 |
-| 自动抽取 | 已实现 core | session-end/idle/manual；shadow 质量待验 |
+| 自动抽取 | 已实现 receipt-first core | receipt-backed 新回合只走 capture worker；legacy session-end/idle/manual 仅兼容无 receipt 历史；shadow 质量待验 |
 | 会话筛选 | 已实现 | `memory_session_modes` 表与 API；配置块仍缺 |
 | 去重/合并 | 已实现 core | hash + source + Consolidation；语义相似仍弱 |
 | 冲突/纠正 | 已实现 core | supersede + pinned + event |
@@ -247,8 +286,13 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 
 - 有迁移、隔离、注入、cache、抽取、Consolidation、usage、删除、权限测试；
 - 已有 lifecycle、startup recovery、freshness/redaction 定向测试；
+- 已有 receipt-backed capture worker、session-end routing fence、legacy recovery
+  隔离、generation disabled materialization、canonical range stale validation、
+  candidate/output 幂等与 maintenance schedule 定向测试；
 - 有 E2E 和 Windows 7 验证计划；
-- 仍缺 M5 shadow、真实终端关闭、SQLite 锁压测和全量测试证据。
+- 受影响 backend 包定向测试已通过，但仍缺 M5 shadow、真实终端关闭、
+  SQLite 锁压测和全量 `go test ./...` 稳定绿色证据；
+- 测试全绿不等于历史 digest/session extraction rows 已迁移或积压已排空。
 
 ## 5. 仍然存在的残余风险
 
@@ -265,6 +309,9 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 9. **项目移动/克隆的 project key 语义**：设计有规则，需真实路径测试。
 10. **自动记忆的成本**：需要 shadow 数据决定默认触发频率和模型。
 11. **源变化检测依赖 source hash/revision**：无法访问的 source 只能标记 `stale`，不能证明 `fresh`；per-kind TTL 仍需 M0 基线校准。
+12. **历史双路径残留**：旧 digest、legacy phase1 job 与 receipt-backed 数据可能同时存在；当前以 routing fence、`capture_receipt_id=''` 隔离和启动 recovery 跳过保护，仍需迁移盘点与线上积压观测。
+13. **跨 SQLite 崩溃窗口**：materialization 成功但 canonical receipt acknowledgement 失败时会 at-least-once 重放；必须持续验证 receipt/job/output receipt/candidate 幂等，不能假设跨库原子提交。
+14. **提案与实现边界**：`2026-11-18-turn-end-durable-capture-and-async-extraction.md` 仍未评审/实施；任何 schema 或终端关闭结论都不能仅以该提案为证据。
 
 ## 6. 可实施性判断
 
@@ -272,7 +319,7 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 | --- | --- | --- |
 | M0 基线与契约 | 可以 | 按 `07 §8.1` 默认决策转 ADR；记录基线与失败矩阵 |
 | M1 存储与读取 | 已实施 | M1-A/B/C 与目标测试已完成 |
-| M2 抽取 | 已实施 core + 定向测试；待 shadow 运营验收 | job/reader/redaction/candidate/trigger、startup terminal-only 已落地 |
+| M2 抽取 | 已实施 receipt-first core + 定向测试；待 shadow 运营验收 | capture materialization/v2 worker、routing fence、legacy terminal-only recovery、job/reader/redaction/candidate/trigger 已落地；历史迁移与真实关闭证据待补 |
 | M3 Consolidation | 已实施 core + 定向测试；待 shadow 运营验收 | Consolidation、summary gate/rebuild、conflict、exposure、lifecycle 已落地 |
 | M4 工具/API/UI | 已实施 core；DoD 证据待补 | tools/API/import/restore/CLI、job/recall trace、Web why-not/pin/restore/reset 已落地；新增 turn digest/window 观测、L1 purge、session mode、summary activate/rollback Web/CLI 控制面 |
 | M5 上线 | 部分可以 | 指标查询已落地；需要 shadow 数据和逐项目验收结果 |
@@ -281,13 +328,17 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 
 **是否完成闭环：**
 
-- **代码功能：M1-M4 core 已实现；M4 仍需正式验收证据。** SQLite 存储、迁移、stable/recall 注入、抽取、Consolidation、summary、工具/API/CLI 与 Web 审计面（job/recall trace、why-not、pin/unpin、restore/reset）已落地；M5 shadow 运营仍未完成。
-- **设计方案：在本次审查修补后，已达到“可实施闭环”。** 从触发、抽取、存储、摘要、注入、引用、纠正、删除、迁移、回滚都有明确契约。
-- **生产可用：还没有。** 必须完成 M1-M5、通过测试与 shadow 评估，才能说生产功能闭环。
+- **代码功能：M1-M4 core 已实现；M2 新回合 extraction 已收敛为 receipt-first；M4 仍需正式验收证据。** SQLite 存储、迁移、stable/recall 注入、capture/v2 抽取、Consolidation、summary、工具/API/CLI 与 Web 审计面（job/recall trace、why-not、pin/unpin、restore/reset）已落地；legacy 逻辑保留但仅用于 compatibility/recovery；M5 shadow 运营仍未完成。
+- **设计方案：在本次审查修补后，已达到“可实施闭环”，但应以唯一 receipt-first 正常路径理解。** 从 receipt handoff、固定 range 抽取、存储、摘要、注入、引用、纠正、删除、迁移、回滚都有明确契约；legacy 入口不是第二条新回合路径。
+- **生产可用：还没有。** 必须完成 M1-M5、历史 rows 迁移/盘点、真实终端关闭、SQLite 锁与全量测试证据及 shadow 评估，才能说生产功能闭环。
 
 ## 8. 下一步建议
 
 1. 进入 M5 shadow 运营验收，不启用默认注入；
 2. 用真实会话建立标注集，执行 M5 指标校准与逐项目上线策略；
-3. 补真实终端关闭证据与全量测试稳定绿色；
-4. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，重点验证删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项 P0/P1 门禁。
+3. 盘点并迁移/隔离历史 `capture_receipt_id=''` rows 与旧 `phase1_extract`
+   jobs，验证 receipt-backed session 不再被 legacy recovery 消费；
+4. 补真实终端关闭证据、跨 SQLite 崩溃重放证据、SQLite 锁压测与全量测试稳定绿色；
+5. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，
+   重点验证单路径路由、删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项
+   P0/P1 门禁；不得以未评审 durable capture 提案替代实现证据。

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // TurnDigestStatus is the lifecycle of a runtime turn digest row.
@@ -47,13 +49,19 @@ type TurnDigest struct {
 	Scope              Scope
 	ProjectKey         string
 	SessionID          string
+	SessionGeneration  int64
 	TurnID             string
 	TraceID            string
 	ParentSessionID    string
 	AgentType          string
 	UserMessageID      string
 	AssistantMessageID string
+	MessageSeqStart    int64
 	MessageSeqEnd      int64
+	CaptureReceiptID   string
+	SourceRevision     int64
+	RangeHash          string
+	EnqueuedAt         time.Time
 	UserText           string
 	AssistantText      string
 	TextTruncated      bool
@@ -137,22 +145,47 @@ func (s *Store) RecordTurnDigest(ctx context.Context, digest TurnDigest) (TurnDi
 	if digest.MetadataJSON == "" {
 		digest.MetadataJSON = "{}"
 	}
-	_, err = db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return TurnDigest{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, digest.ProjectKey); err != nil {
+		return TurnDigest{}, err
+	}
+	if digest.SessionGeneration > 0 {
+		if err := checkSessionPurgeGenerationTx(ctx, tx, digest.ProjectKey,
+			digest.SessionID, digest.SessionGeneration); err != nil {
+			return TurnDigest{}, err
+		}
+	} else if err := checkLegacySessionPurgeFenceTx(ctx, tx,
+		digest.ProjectKey, digest.SessionID); err != nil {
+		// Legacy outbox writers do not carry enough information to distinguish
+		// a deleted incarnation from a recreated session with the same ID.
+		return TurnDigest{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO memory_turn_digests (
-    id, scope, project_key, session_id, turn_id, trace_id,
-    parent_session_id, agent_type, user_message_id, assistant_message_id, message_seq_end,
+    id, scope, project_key, session_id, session_generation, turn_id, trace_id,
+    parent_session_id, agent_type, user_message_id, assistant_message_id,
+    message_seq_start, message_seq_end, capture_receipt_id, source_revision, range_hash, enqueued_at,
     user_text, assistant_text, text_truncated, outcome, steps,
     usage_json, metadata_json, digest_hash, digest_revision, status,
     process_job_id, last_error, rollup_status, rollup_window_id, rolled_up_at,
     created_at, updated_at, processed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-ON CONFLICT(project_key, session_id, turn_id) DO UPDATE SET
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+ON CONFLICT(project_key, session_id, session_generation, turn_id) WHERE capture_receipt_id = '' DO UPDATE SET
     trace_id = excluded.trace_id,
     parent_session_id = excluded.parent_session_id,
     agent_type = excluded.agent_type,
     user_message_id = excluded.user_message_id,
     assistant_message_id = excluded.assistant_message_id,
+    message_seq_start = excluded.message_seq_start,
     message_seq_end = excluded.message_seq_end,
+    capture_receipt_id = COALESCE(NULLIF(excluded.capture_receipt_id, ''), memory_turn_digests.capture_receipt_id),
+    source_revision = CASE WHEN excluded.source_revision > 0 THEN excluded.source_revision ELSE memory_turn_digests.source_revision END,
+    range_hash = COALESCE(NULLIF(excluded.range_hash, ''), memory_turn_digests.range_hash),
+    enqueued_at = COALESCE(memory_turn_digests.enqueued_at, excluded.enqueued_at),
     user_text = excluded.user_text,
     assistant_text = excluded.assistant_text,
     text_truncated = excluded.text_truncated,
@@ -205,10 +238,12 @@ ON CONFLICT(project_key, session_id, turn_id) DO UPDATE SET
         ELSE NULL
     END,
     updated_at = excluded.updated_at
-`, digest.ID, string(digest.Scope), digest.ProjectKey, digest.SessionID, digest.TurnID,
+`, digest.ID, string(digest.Scope), digest.ProjectKey, digest.SessionID, digest.SessionGeneration, digest.TurnID,
 		nullableString(digest.TraceID), nullableString(digest.ParentSessionID),
 		nullableString(digest.AgentType), nullableString(digest.UserMessageID),
-		nullableString(digest.AssistantMessageID), digest.MessageSeqEnd, digest.UserText, digest.AssistantText,
+		nullableString(digest.AssistantMessageID), digest.MessageSeqStart, digest.MessageSeqEnd,
+		digest.CaptureReceiptID, digest.SourceRevision, digest.RangeHash,
+		nullableTime(digest.EnqueuedAt), digest.UserText, digest.AssistantText,
 		boolInt(digest.TextTruncated), digest.Outcome, digest.Steps, digest.UsageJSON,
 		digest.MetadataJSON, digest.DigestHash, digest.DigestRevision, string(digest.Status),
 		nullableString(digest.ProcessJobID), nullableString(digest.LastError),
@@ -218,7 +253,10 @@ ON CONFLICT(project_key, session_id, turn_id) DO UPDATE SET
 	if err != nil {
 		return TurnDigest{}, fmt.Errorf("memorystore: record turn digest: %w", err)
 	}
-	return s.getTurnDigestByTurn(ctx, digest.ProjectKey, digest.SessionID, digest.TurnID)
+	if err := tx.Commit(); err != nil {
+		return TurnDigest{}, err
+	}
+	return s.getTurnDigestByTurnGeneration(ctx, digest.ProjectKey, digest.SessionID, digest.TurnID, &digest.SessionGeneration)
 }
 
 // TurnDigestHash computes a stable hash for a digest row.
@@ -226,6 +264,7 @@ func TurnDigestHash(digest TurnDigest) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		strings.TrimSpace(digest.ProjectKey),
 		strings.TrimSpace(digest.SessionID),
+		fmt.Sprintf("%d", digest.SessionGeneration),
 		strings.TrimSpace(digest.TurnID),
 		strings.TrimSpace(digest.UserMessageID),
 		strings.TrimSpace(digest.AssistantMessageID),
@@ -238,22 +277,59 @@ func TurnDigestHash(digest TurnDigest) string {
 }
 
 func (s *Store) getTurnDigestByTurn(ctx context.Context, projectKey, sessionID, turnID string) (TurnDigest, error) {
+	return s.getTurnDigestByTurnGeneration(ctx, projectKey, sessionID, turnID, nil)
+}
+
+func (s *Store) getTurnDigestByTurnGeneration(ctx context.Context, projectKey, sessionID, turnID string, generation *int64) (TurnDigest, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return TurnDigest{}, err
+	}
+	query := `
+ SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
+       COALESCE(trace_id, ''), COALESCE(parent_session_id, ''), COALESCE(agent_type, ''),
+       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''),
+       message_seq_start, message_seq_end, COALESCE(capture_receipt_id, ''),
+       source_revision, COALESCE(range_hash, ''), COALESCE(enqueued_at, ''),
+       user_text, assistant_text, text_truncated, outcome, steps,
+       usage_json, metadata_json, digest_hash, digest_revision, status,
+       COALESCE(process_job_id, ''), COALESCE(last_error, ''),
+       rollup_status, COALESCE(rollup_window_id, ''),
+       COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
+ FROM memory_turn_digests
+ WHERE project_key = ? AND session_id = ? AND turn_id = ?
+`
+	args := []interface{}{projectKey, sessionID, turnID}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += ` ORDER BY digest_seq DESC LIMIT 1`
+	row := db.QueryRowContext(ctx, query, args...)
+	return scanTurnDigest(row)
+}
+
+// GetTurnDigestByCaptureReceipt resolves the digest that belongs to one
+// canonical handoff without relying on a mutable turn watermark.
+func (s *Store) GetTurnDigestByCaptureReceipt(ctx context.Context, receiptID string) (TurnDigest, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return TurnDigest{}, err
 	}
 	row := db.QueryRowContext(ctx, `
-SELECT digest_seq, id, scope, project_key, session_id, turn_id,
+ SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
        COALESCE(trace_id, ''), COALESCE(parent_session_id, ''), COALESCE(agent_type, ''),
-       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''), message_seq_end,
+       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''),
+       message_seq_start, message_seq_end, COALESCE(capture_receipt_id, ''),
+       source_revision, COALESCE(range_hash, ''), COALESCE(enqueued_at, ''),
        user_text, assistant_text, text_truncated, outcome, steps,
        usage_json, metadata_json, digest_hash, digest_revision, status,
        COALESCE(process_job_id, ''), COALESCE(last_error, ''),
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
 FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND turn_id = ?
-`, projectKey, sessionID, turnID)
+WHERE project_key = ? AND capture_receipt_id = ?
+`, s.cfg.ProjectKey, strings.TrimSpace(receiptID))
 	return scanTurnDigest(row)
 }
 
@@ -261,6 +337,13 @@ WHERE project_key = ? AND session_id = ? AND turn_id = ?
 // event-handler tests.
 func (s *Store) GetTurnDigestByTurn(ctx context.Context, sessionID, turnID string) (TurnDigest, error) {
 	return s.getTurnDigestByTurn(ctx, s.cfg.ProjectKey, strings.TrimSpace(sessionID), strings.TrimSpace(turnID))
+}
+
+// GetTurnDigestByTurnGeneration resolves one incarnation-qualified turn. The
+// unqualified GetTurnDigestByTurn remains for legacy callers and diagnostics.
+func (s *Store) GetTurnDigestByTurnGeneration(ctx context.Context, sessionID, turnID string, generation int64) (TurnDigest, error) {
+	return s.getTurnDigestByTurnGeneration(ctx, s.cfg.ProjectKey,
+		strings.TrimSpace(sessionID), strings.TrimSpace(turnID), &generation)
 }
 
 // ListPendingTurnDigestSessions returns sessions with pending digest rows,
@@ -280,6 +363,7 @@ func (s *Store) ListPendingTurnDigestSessions(ctx context.Context, projectKey st
 SELECT project_key, session_id, COUNT(1), MIN(digest_seq), MAX(digest_seq)
 FROM memory_turn_digests
 WHERE project_key = ? AND status = 'pending'
+  AND capture_receipt_id = ''
 GROUP BY project_key, session_id
 ORDER BY MIN(digest_seq) ASC
 LIMIT ?
@@ -301,6 +385,16 @@ LIMIT ?
 
 // ListPendingTurnDigests returns pending rows for one session in seq order.
 func (s *Store) ListPendingTurnDigests(ctx context.Context, sessionID string, limit int) ([]TurnDigest, error) {
+	return s.listPendingTurnDigests(ctx, sessionID, nil, limit)
+}
+
+// ListPendingTurnDigestsForGeneration excludes legacy and other-incarnation
+// rows from extraction recovery for the current canonical session.
+func (s *Store) ListPendingTurnDigestsForGeneration(ctx context.Context, sessionID string, generation int64, limit int) ([]TurnDigest, error) {
+	return s.listPendingTurnDigests(ctx, sessionID, &generation, limit)
+}
+
+func (s *Store) listPendingTurnDigests(ctx context.Context, sessionID string, generation *int64, limit int) ([]TurnDigest, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return nil, err
@@ -308,20 +402,29 @@ func (s *Store) ListPendingTurnDigests(ctx context.Context, sessionID string, li
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT digest_seq, id, scope, project_key, session_id, turn_id,
+	query := `
+ SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
        COALESCE(trace_id, ''), COALESCE(parent_session_id, ''), COALESCE(agent_type, ''),
-       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''), message_seq_end,
+       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''),
+       message_seq_start, message_seq_end, COALESCE(capture_receipt_id, ''),
+       source_revision, COALESCE(range_hash, ''), COALESCE(enqueued_at, ''),
        user_text, assistant_text, text_truncated, outcome, steps,
        usage_json, metadata_json, digest_hash, digest_revision, status,
        COALESCE(process_job_id, ''), COALESCE(last_error, ''),
        rollup_status, COALESCE(rollup_window_id, ''),
        COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
-FROM memory_turn_digests
-WHERE project_key = ? AND session_id = ? AND status = 'pending'
-ORDER BY digest_seq ASC
-LIMIT ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID), limit)
+	FROM memory_turn_digests
+	WHERE project_key = ? AND session_id = ? AND status = 'pending'
+   AND capture_receipt_id = ''
+ `
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += ` ORDER BY digest_seq ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list pending turn digests: %w", err)
 	}
@@ -337,22 +440,74 @@ LIMIT ?
 	return out, rows.Err()
 }
 
+// HasTurnCaptureDigestsForSession distinguishes canonical-receipt turns from
+// legacy outbox rows so session-end fallback never re-extracts the full session
+// after a v2 turn job has already been materialized.
+func (s *Store) HasTurnCaptureDigestsForSession(ctx context.Context, sessionID string) (bool, error) {
+	return s.hasTurnCaptureDigestsForSession(ctx, sessionID, nil)
+}
+
+// HasTurnCaptureDigestsForSessionGeneration keeps capture-backed routing
+// scoped to the canonical incarnation currently being processed.
+func (s *Store) HasTurnCaptureDigestsForSessionGeneration(ctx context.Context, sessionID string, generation int64) (bool, error) {
+	return s.hasTurnCaptureDigestsForSession(ctx, sessionID, &generation)
+}
+
+func (s *Store) hasTurnCaptureDigestsForSession(ctx context.Context, sessionID string, generation *int64) (bool, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return false, err
+	}
+	query := `
+SELECT EXISTS(
+  SELECT 1 FROM memory_turn_digests
+  WHERE project_key = ? AND session_id = ? AND capture_receipt_id <> ''
+`
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += `)`
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&exists); err != nil {
+		return false, fmt.Errorf("memorystore: check turn capture digests: %w", err)
+	}
+	return exists, nil
+}
+
 // PreviousTurnDigestMessageSeqEnd returns the highest canonical message seq
 // recorded by an earlier, non-invalidated digest for the same session. Pending
 // and deferred rows still delimit valid canonical coverage; invalidated rows
 // belong to a removed branch and must not advance the next extraction window.
 func (s *Store) PreviousTurnDigestMessageSeqEnd(ctx context.Context, sessionID string, beforeDigestSeq int64) (int64, error) {
+	return s.previousTurnDigestMessageSeqEnd(ctx, sessionID, nil, beforeDigestSeq)
+}
+
+// PreviousTurnDigestMessageSeqEndForGeneration keeps message watermarks within
+// one canonical session incarnation.
+func (s *Store) PreviousTurnDigestMessageSeqEndForGeneration(ctx context.Context, sessionID string, generation, beforeDigestSeq int64) (int64, error) {
+	return s.previousTurnDigestMessageSeqEnd(ctx, sessionID, &generation, beforeDigestSeq)
+}
+
+func (s *Store) previousTurnDigestMessageSeqEnd(ctx context.Context, sessionID string, generation *int64, beforeDigestSeq int64) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
 	}
 	var seq int64
-	err = db.QueryRowContext(ctx, `
+	query := `
 SELECT COALESCE(MAX(message_seq_end), 0)
 FROM memory_turn_digests
 WHERE project_key = ? AND session_id = ? AND digest_seq < ? AND message_seq_end > 0
   AND status != 'invalidated'
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID), beforeDigestSeq).Scan(&seq)
+`
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID), beforeDigestSeq}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	err = db.QueryRowContext(ctx, query, args...).Scan(&seq)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: previous turn digest seq: %w", err)
 	}
@@ -364,10 +519,18 @@ func (s *Store) MarkTurnDigestsProcessed(ctx context.Context, sessionID string, 
 	return s.updateTurnDigestStatus(ctx, sessionID, maxSeq, TurnDigestDone, jobID, "")
 }
 
+func (s *Store) MarkTurnDigestsProcessedForGeneration(ctx context.Context, sessionID string, generation, maxSeq int64, jobID string) (int64, error) {
+	return s.updateTurnDigestStatusForGeneration(ctx, sessionID, &generation, maxSeq, TurnDigestDone, jobID, "")
+}
+
 // MarkTurnDigestsSkipped marks rows as skipped (e.g. oversized session waiting
 // for the Phase 1.5 window reader).
 func (s *Store) MarkTurnDigestsSkipped(ctx context.Context, sessionID string, maxSeq int64, jobID, reason string) (int64, error) {
 	return s.updateTurnDigestStatus(ctx, sessionID, maxSeq, TurnDigestSkipped, jobID, reason)
+}
+
+func (s *Store) MarkTurnDigestsSkippedForGeneration(ctx context.Context, sessionID string, generation, maxSeq int64, jobID, reason string) (int64, error) {
+	return s.updateTurnDigestStatusForGeneration(ctx, sessionID, &generation, maxSeq, TurnDigestSkipped, jobID, reason)
 }
 
 // MarkTurnDigestsDeferred keeps rows for the Phase 1.5 windowed reader without
@@ -376,14 +539,32 @@ func (s *Store) MarkTurnDigestsDeferred(ctx context.Context, sessionID string, m
 	return s.updateTurnDigestStatus(ctx, sessionID, maxSeq, TurnDigestDeferred, jobID, reason)
 }
 
+func (s *Store) MarkTurnDigestsDeferredForGeneration(ctx context.Context, sessionID string, generation, maxSeq int64, jobID, reason string) (int64, error) {
+	return s.updateTurnDigestStatusForGeneration(ctx, sessionID, &generation, maxSeq, TurnDigestDeferred, jobID, reason)
+}
+
 // MarkTurnDigestsFailed marks rows as failed for operator visibility.
 func (s *Store) MarkTurnDigestsFailed(ctx context.Context, sessionID string, maxSeq int64, jobID, reason string) (int64, error) {
 	return s.updateTurnDigestStatus(ctx, sessionID, maxSeq, TurnDigestFailed, jobID, reason)
 }
 
+func (s *Store) MarkTurnDigestsFailedForGeneration(ctx context.Context, sessionID string, generation, maxSeq int64, jobID, reason string) (int64, error) {
+	return s.updateTurnDigestStatusForGeneration(ctx, sessionID, &generation, maxSeq, TurnDigestFailed, jobID, reason)
+}
+
 // ListTurnDigestsForRollup returns extraction-done rows that still need an L1
 // window summary. Rows with rollup skipped already have no required rollup.
 func (s *Store) ListTurnDigestsForRollup(ctx context.Context, sessionID string, limit int) ([]TurnDigest, error) {
+	return s.listTurnDigestsForRollup(ctx, sessionID, nil, limit)
+}
+
+// ListTurnDigestsForRollupGeneration returns only rollup-ready rows for one
+// canonical session incarnation.
+func (s *Store) ListTurnDigestsForRollupGeneration(ctx context.Context, sessionID string, generation int64, limit int) ([]TurnDigest, error) {
+	return s.listTurnDigestsForRollup(ctx, sessionID, &generation, limit)
+}
+
+func (s *Store) listTurnDigestsForRollup(ctx context.Context, sessionID string, generation *int64, limit int) ([]TurnDigest, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return nil, err
@@ -391,10 +572,12 @@ func (s *Store) ListTurnDigestsForRollup(ctx context.Context, sessionID string, 
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT digest_seq, id, scope, project_key, session_id, turn_id,
+	query := `
+ SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
        COALESCE(trace_id, ''), COALESCE(parent_session_id, ''), COALESCE(agent_type, ''),
-       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''), message_seq_end,
+       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''),
+       message_seq_start, message_seq_end, COALESCE(capture_receipt_id, ''),
+       source_revision, COALESCE(range_hash, ''), COALESCE(enqueued_at, ''),
        user_text, assistant_text, text_truncated, outcome, steps,
        usage_json, metadata_json, digest_hash, digest_revision, status,
        COALESCE(process_job_id, ''), COALESCE(last_error, ''),
@@ -403,9 +586,15 @@ SELECT digest_seq, id, scope, project_key, session_id, turn_id,
 FROM memory_turn_digests
 WHERE project_key = ? AND session_id = ? AND status = 'done'
   AND rollup_status IN ('pending', 'failed')
-ORDER BY digest_seq ASC
-LIMIT ?
-`, s.cfg.ProjectKey, strings.TrimSpace(sessionID), limit)
+`
+	args := []interface{}{s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	query += ` ORDER BY digest_seq ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("memorystore: list turn digests for rollup: %w", err)
 	}
@@ -424,6 +613,14 @@ LIMIT ?
 // MarkTurnDigestsRollupSkipped releases done rows from retention when window
 // summaries are disabled by configuration.
 func (s *Store) MarkTurnDigestsRollupSkipped(ctx context.Context, sessionID string, maxSeq int64) (int64, error) {
+	return s.markTurnDigestsRollupSkipped(ctx, sessionID, nil, maxSeq)
+}
+
+func (s *Store) MarkTurnDigestsRollupSkippedForGeneration(ctx context.Context, sessionID string, generation, maxSeq int64) (int64, error) {
+	return s.markTurnDigestsRollupSkipped(ctx, sessionID, &generation, maxSeq)
+}
+
+func (s *Store) markTurnDigestsRollupSkipped(ctx context.Context, sessionID string, generation *int64, maxSeq int64) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -432,21 +629,50 @@ func (s *Store) MarkTurnDigestsRollupSkipped(ctx context.Context, sessionID stri
 		return 0, nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	query := `
 UPDATE memory_turn_digests
 SET rollup_status = 'skipped', rollup_window_id = NULL, rolled_up_at = NULL, updated_at = ?
 WHERE project_key = ? AND session_id = ? AND digest_seq <= ?
   AND status = 'done' AND rollup_status IN ('pending', 'failed')
-`, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq)
+`
+	args := []interface{}{now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: skip turn digest rollup: %w", err)
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 // MarkTurnDigestsRolledUp records that the digest range is now covered by a
 // durable L1 window. This must only run after the L1 summary has been stored.
 func (s *Store) MarkTurnDigestsRolledUp(ctx context.Context, sessionID string, startSeq, endSeq int64, windowID string) (int64, error) {
+	return s.markTurnDigestsRolledUp(ctx, sessionID, nil, startSeq, endSeq, windowID)
+}
+
+func (s *Store) MarkTurnDigestsRolledUpForGeneration(ctx context.Context, sessionID string, generation, startSeq, endSeq int64, windowID string) (int64, error) {
+	return s.markTurnDigestsRolledUp(ctx, sessionID, &generation, startSeq, endSeq, windowID)
+}
+
+func (s *Store) markTurnDigestsRolledUp(ctx context.Context, sessionID string, generation *int64, startSeq, endSeq int64, windowID string) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -455,20 +681,45 @@ func (s *Store) MarkTurnDigestsRolledUp(ctx context.Context, sessionID string, s
 		return 0, nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	query := `
 UPDATE memory_turn_digests
 SET rollup_status = 'done', rollup_window_id = ?, rolled_up_at = ?, updated_at = ?
 WHERE project_key = ? AND session_id = ? AND digest_seq BETWEEN ? AND ?
   AND status = 'done' AND rollup_status IN ('pending', 'failed')
-`, strings.TrimSpace(windowID), now, now,
-		s.cfg.ProjectKey, strings.TrimSpace(sessionID), startSeq, endSeq)
+`
+	args := []interface{}{strings.TrimSpace(windowID), now, now,
+		s.cfg.ProjectKey, strings.TrimSpace(sessionID), startSeq, endSeq}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: mark turn digests rolled up: %w", err)
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 func (s *Store) updateTurnDigestStatus(ctx context.Context, sessionID string, maxSeq int64, status TurnDigestStatus, jobID, reason string) (int64, error) {
+	return s.updateTurnDigestStatusForGeneration(ctx, sessionID, nil, maxSeq, status, jobID, reason)
+}
+
+func (s *Store) updateTurnDigestStatusForGeneration(ctx context.Context, sessionID string, generation *int64, maxSeq int64, status TurnDigestStatus, jobID, reason string) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -484,7 +735,15 @@ func (s *Store) updateTurnDigestStatus(ctx context.Context, sessionID string, ma
 	if status == TurnDigestInvalidated {
 		processedAt = now
 	}
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	query := `
 UPDATE memory_turn_digests
 SET status = ?, process_job_id = ?, last_error = ?,
     processed_at = CASE
@@ -506,16 +765,30 @@ SET status = ?, process_job_id = ?, last_error = ?,
     END,
     updated_at = ?
 WHERE project_key = ? AND session_id = ? AND digest_seq <= ?
+  AND capture_receipt_id = ''
   AND status IN ('pending', 'processing', 'failed')
-`, string(status), nullableString(jobID), nullableString(reason),
+`
+	args := []interface{}{string(status), nullableString(jobID), nullableString(reason),
 		string(status), processedAt,
 		string(status), string(status),
 		string(status), string(status),
-		now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq)
+		now, s.cfg.ProjectKey, strings.TrimSpace(sessionID), maxSeq}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: update turn digest status: %w", err)
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 // CountPendingTurnDigests returns the pending backlog for a project.
@@ -544,7 +817,15 @@ func (s *Store) PruneTurnDigests(ctx context.Context, before time.Time) (int64, 
 	if before.IsZero() {
 		before = time.Now().UTC()
 	}
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, fmt.Errorf("memorystore: begin prune turn digests: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
 DELETE FROM memory_turn_digests
 WHERE project_key = ? AND status IN ('done', 'skipped', 'invalidated')
   AND rollup_status IN ('done', 'skipped')
@@ -553,7 +834,14 @@ WHERE project_key = ? AND status IN ('done', 'skipped', 'invalidated')
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: prune turn digests: %w", err)
 	}
-	return res.RowsAffected()
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("memorystore: commit prune turn digests: %w", err)
+	}
+	return deleted, nil
 }
 
 // DeleteTurnDigestsForSession removes all digest rows for a deleted session.
@@ -574,12 +862,30 @@ DELETE FROM memory_turn_digests WHERE project_key = ? AND session_id = ?
 // InvalidateTurnDigestsForSession prevents pending rows from being processed
 // after a backtrack/compaction or an explicit session invalidation.
 func (s *Store) InvalidateTurnDigestsForSession(ctx context.Context, sessionID string) (int64, error) {
+	return s.invalidateTurnDigestsForSession(ctx, sessionID, nil)
+}
+
+// InvalidateTurnDigestsForSessionGeneration invalidates only one canonical
+// session incarnation.
+func (s *Store) InvalidateTurnDigestsForSessionGeneration(ctx context.Context, sessionID string, generation int64) (int64, error) {
+	return s.invalidateTurnDigestsForSession(ctx, sessionID, &generation)
+}
+
+func (s *Store) invalidateTurnDigestsForSession(ctx context.Context, sessionID string, generation *int64) (int64, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return 0, err
+	}
+	query := `
 UPDATE memory_turn_digests
 SET status = 'invalidated', rollup_status = 'skipped',
     rollup_window_id = NULL, rolled_up_at = NULL,
@@ -587,11 +893,24 @@ SET status = 'invalidated', rollup_status = 'skipped',
 WHERE project_key = ? AND session_id = ?
   AND status IN ('pending', 'processing', 'done', 'deferred', 'failed')
   AND rollup_status IN ('pending', 'failed')
-`, now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID))
+`
+	args := []interface{}{now, now, s.cfg.ProjectKey, strings.TrimSpace(sessionID)}
+	if generation != nil {
+		query += ` AND session_generation = ?`
+		args = append(args, *generation)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: invalidate turn digests: %w", err)
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 type turnDigestScanner interface {
@@ -600,12 +919,14 @@ type turnDigestScanner interface {
 
 func scanTurnDigest(scanner turnDigestScanner) (TurnDigest, error) {
 	var item TurnDigest
-	var scope, status, rollupStatus, rolledUpAt, createdAt, updatedAt, processedAt string
+	var scope, status, rollupStatus, rolledUpAt, createdAt, updatedAt, processedAt, enqueuedAt string
 	var truncated int
 	if err := scanner.Scan(
-		&item.DigestSeq, &item.ID, &scope, &item.ProjectKey, &item.SessionID, &item.TurnID,
+		&item.DigestSeq, &item.ID, &scope, &item.ProjectKey, &item.SessionID,
+		&item.SessionGeneration, &item.TurnID,
 		&item.TraceID, &item.ParentSessionID, &item.AgentType,
-		&item.UserMessageID, &item.AssistantMessageID, &item.MessageSeqEnd,
+		&item.UserMessageID, &item.AssistantMessageID, &item.MessageSeqStart, &item.MessageSeqEnd,
+		&item.CaptureReceiptID, &item.SourceRevision, &item.RangeHash, &enqueuedAt,
 		&item.UserText, &item.AssistantText, &truncated, &item.Outcome, &item.Steps,
 		&item.UsageJSON, &item.MetadataJSON, &item.DigestHash, &item.DigestRevision, &status,
 		&item.ProcessJobID, &item.LastError, &rollupStatus, &item.RollupWindowID,
@@ -621,5 +942,6 @@ func scanTurnDigest(scanner turnDigestScanner) (TurnDigest, error) {
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
 	item.ProcessedAt = parseTime(processedAt)
+	item.EnqueuedAt = parseTime(enqueuedAt)
 	return item, nil
 }

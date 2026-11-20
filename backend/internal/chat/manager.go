@@ -29,6 +29,9 @@ type SessionManager struct {
 	// to the agent/hook implementation.
 	closeHookMu sync.RWMutex
 	closeHook   func(ctx context.Context, session *Session)
+	purgeHookMu sync.RWMutex
+	purgeHook   SessionPurgeCoordinator
+	purgeHookV2 SessionPurgeCoordinatorV2
 	// closedSessions makes the close hook idempotent: repeated Close calls must
 	// not emit duplicate session-scoped SessionEnd hooks.
 	closedMu       sync.Mutex
@@ -52,6 +55,55 @@ func (m *SessionManager) SetSessionCloseHook(hook func(ctx context.Context, sess
 	m.closeHookMu.Lock()
 	defer m.closeHookMu.Unlock()
 	m.closeHook = hook
+}
+
+// SetSessionPurgeCoordinator installs the application-level half of the
+// canonical/session-memory deletion protocol. The canonical storage owns the
+// durable fence and invokes this callback after the fence is committed but
+// before the source rows are removed.
+func (m *SessionManager) SetSessionPurgeCoordinator(coordinator SessionPurgeCoordinator) {
+	if m == nil {
+		return
+	}
+	m.purgeHookMu.Lock()
+	m.purgeHook = coordinator
+	m.purgeHookMu.Unlock()
+	if requirement, ok := m.storage.(SessionStoragePurgeRequirement); ok {
+		requirement.SetSessionPurgeMemoryRequired(coordinator != nil)
+	}
+}
+
+// SetSessionPurgeCoordinatorV2 installs the generation-qualified memory purge
+// coordinator. The legacy coordinator, when present, remains as a fallback for
+// integrations that have not migrated yet.
+func (m *SessionManager) SetSessionPurgeCoordinatorV2(coordinator SessionPurgeCoordinatorV2) {
+	if m == nil {
+		return
+	}
+	m.purgeHookMu.Lock()
+	m.purgeHookV2 = coordinator
+	m.purgeHookMu.Unlock()
+	if requirement, ok := m.storage.(SessionStoragePurgeRequirement); ok {
+		requirement.SetSessionPurgeMemoryRequired(coordinator != nil || m.sessionPurgeCoordinator() != nil)
+	}
+}
+
+func (m *SessionManager) sessionPurgeCoordinator() SessionPurgeCoordinator {
+	if m == nil {
+		return nil
+	}
+	m.purgeHookMu.RLock()
+	defer m.purgeHookMu.RUnlock()
+	return m.purgeHook
+}
+
+func (m *SessionManager) sessionPurgeCoordinatorV2() SessionPurgeCoordinatorV2 {
+	if m == nil {
+		return nil
+	}
+	m.purgeHookMu.RLock()
+	defer m.purgeHookMu.RUnlock()
+	return m.purgeHookV2
 }
 
 // DefaultSessionManagerConfig 默认配置
@@ -114,7 +166,7 @@ func (m *SessionManager) Get(ctx context.Context, sessionID string) (*Session, e
 
 	// 检查是否过期
 	if session.IsExpired() {
-		_ = m.storage.Delete(ctx, sessionID)
+		_ = m.Delete(ctx, sessionID)
 		return nil, ErrSessionExpired
 	}
 
@@ -141,7 +193,7 @@ func (m *SessionManager) GetMetadata(ctx context.Context, sessionID string) (*Se
 
 	// 过期检查与 Get 保持同一条语义：过期即回收并报 ErrSessionExpired。
 	if session.IsExpired() {
-		_ = m.storage.Delete(ctx, sessionID)
+		_ = m.Delete(ctx, sessionID)
 		return nil, ErrSessionExpired
 	}
 
@@ -285,7 +337,71 @@ func (m *SessionManager) Close(ctx context.Context, sessionID string) error {
 
 // Delete 删除会话
 func (m *SessionManager) Delete(ctx context.Context, sessionID string) error {
+	if protocol, ok := m.storage.(SessionStoragePurgeProtocol); ok {
+		purge, err := protocol.BeginSessionPurge(ctx, sanitizeSessionID(sessionID), "explicit_delete")
+		if err != nil {
+			return err
+		}
+		return m.finishSessionPurge(ctx, protocol, purge)
+	}
 	return m.storage.Delete(ctx, sessionID)
+}
+
+func (m *SessionManager) finishSessionPurge(
+	ctx context.Context,
+	protocol SessionStoragePurgeProtocol,
+	purge SessionPurgeRecord,
+) error {
+	if coordinator := m.sessionPurgeCoordinatorV2(); coordinator != nil {
+		if err := coordinator(ctx, purge.SessionID, purge.SessionGeneration, purge.PurgeGeneration); err != nil {
+			return err
+		}
+	} else if coordinator := m.sessionPurgeCoordinator(); coordinator != nil {
+		if err := coordinator(ctx, purge.SessionID, purge.Generation); err != nil {
+			return err
+		}
+	} else if purge.MemoryRequired && !purge.MemoryAcknowledged {
+		return ErrSessionPurgeCoordinatorUnavailable
+	}
+	if qualified, ok := protocol.(SessionStoragePurgeProtocolV2); ok {
+		if err := qualified.AcknowledgeSessionMemoryPurgeWithGenerations(
+			ctx, purge.SessionID, purge.SessionGeneration, purge.PurgeGeneration); err != nil {
+			return err
+		}
+	} else if err := protocol.AcknowledgeSessionMemoryPurge(ctx, purge.SessionID, purge.Generation); err != nil {
+		return err
+	}
+	if qualified, ok := protocol.(SessionStoragePurgeProtocolV2); ok {
+		return qualified.CompleteSessionPurgeWithGenerations(
+			ctx, purge.SessionID, purge.SessionGeneration, purge.PurgeGeneration)
+	}
+	return protocol.CompleteSessionPurge(ctx, purge.SessionID, purge.Generation)
+}
+
+// ResumePendingSessionPurges replays durable deletion journal entries after
+// the memory runtime becomes available. Both sides of the protocol are
+// idempotent, so a crash at any phase can be retried safely.
+func (m *SessionManager) ResumePendingSessionPurges(ctx context.Context) (int, error) {
+	protocol, ok := m.storage.(SessionStoragePurgeProtocol)
+	if !ok {
+		return 0, nil
+	}
+	if m.sessionPurgeCoordinator() == nil && m.sessionPurgeCoordinatorV2() == nil {
+		return 0, nil
+	}
+	pending, err := protocol.ListPendingSessionPurges(ctx, sessionCleanupBatchSize)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, purge := range pending {
+		if err := m.finishSessionPurge(ctx, protocol, purge); err != nil {
+			return completed, fmt.Errorf("resume session purge %s generation %d: %w",
+				purge.SessionID, purge.Generation, err)
+		}
+		completed++
+	}
+	return completed, nil
 }
 
 // List 列出用户的所有会话
@@ -668,9 +784,8 @@ func (m *SessionManager) startArchive() {
 // Cleanup 清理过期会话
 func (m *SessionManager) Cleanup() int {
 	ctx := context.Background()
-	after := time.Now().Add(-m.config.TTL)
 
-	removed, err := m.storage.Cleanup(ctx, after)
+	removed, err := m.CleanupExpired(ctx)
 	if err != nil {
 		// log error
 		return 0
@@ -683,11 +798,51 @@ func (m *SessionManager) Cleanup() int {
 func (m *SessionManager) CleanupExpired(ctx context.Context) (int, error) {
 	after := time.Now().Add(-m.config.TTL)
 
+	if protocol, ok := m.storage.(SessionStoragePurgeProtocol); ok {
+		lister, listOK := m.storage.(SessionStorageExpiredLister)
+		if !listOK {
+			return 0, fmt.Errorf("failed to cleanup expired sessions: storage does not list expired sessions")
+		}
+		if _, err := m.ResumePendingSessionPurges(ctx); err != nil {
+			return 0, fmt.Errorf("failed to resume pending session purges: %w", err)
+		}
+		now := time.Now()
+		removed := 0
+		for {
+			ids, err := lister.ListExpiredSessionIDs(ctx, now, after, sessionCleanupBatchSize)
+			if err != nil {
+				return removed, fmt.Errorf("failed to list expired sessions: %w", err)
+			}
+			if len(ids) == 0 {
+				return removed, nil
+			}
+			deleted := 0
+			for _, id := range ids {
+				purge, err := protocol.BeginSessionPurge(ctx, id, "ttl_expired")
+				if err != nil {
+					if errors.Is(err, ErrSessionNotFound) {
+						continue
+					}
+					return removed, fmt.Errorf("failed to fence expired session %s: %w", id, err)
+				}
+				if err := m.finishSessionPurge(ctx, protocol, purge); err != nil {
+					if errors.Is(err, ErrSessionNotFound) {
+						continue
+					}
+					return removed, fmt.Errorf("failed to purge expired session %s: %w", id, err)
+				}
+				deleted++
+			}
+			removed += deleted
+			if deleted == 0 {
+				return removed, fmt.Errorf("%w: no expired session made purge progress", ErrCleanupStalled)
+			}
+		}
+	}
 	removed, err := m.storage.Cleanup(ctx, after)
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup expired sessions: %w", err)
 	}
-
 	return removed, nil
 }
 

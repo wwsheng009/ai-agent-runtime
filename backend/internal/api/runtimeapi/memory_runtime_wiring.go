@@ -47,6 +47,40 @@ func (h *Handler) SetMemoryRuntime(runtime *memoryruntime.Runtime) {
 	if previous != nil && previous.Store != nil && previous != runtime {
 		_ = previous.Store.Close()
 	}
+	if h.sessionManager != nil {
+		wireSessionMemoryPurgeCoordinator(h.sessionManager, runtime)
+	}
+}
+
+func wireSessionMemoryPurgeCoordinator(manager *runtimechat.SessionManager, runtime *memoryruntime.Runtime) {
+	if manager == nil {
+		return
+	}
+	var coordinator runtimechat.SessionPurgeCoordinatorV2
+	if runtime != nil && runtime.Store != nil {
+		coordinator = func(
+			ctx context.Context,
+			sessionID string,
+			sessionGeneration, purgeGeneration int64,
+		) error {
+			_, err := runtime.PurgeSessionWithGenerations(
+				ctx,
+				sessionID,
+				sessionGeneration,
+				purgeGeneration,
+			)
+			return err
+		}
+	}
+	manager.SetSessionPurgeCoordinatorV2(coordinator)
+	if coordinator == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := manager.ResumePendingSessionPurges(ctx); err != nil {
+		logpkg.Warnf("memory session purge recovery failed: %v", err)
+	}
 }
 
 // SetMemoryRuntimeLifecycleContext supplies the process/service lifetime for
@@ -80,17 +114,6 @@ func (h *Handler) MemoryRuntime() *memoryruntime.Runtime {
 	h.memoryRuntimeMu.RLock()
 	defer h.memoryRuntimeMu.RUnlock()
 	return h.memoryRuntime
-}
-
-// deleteMemoryTurnDigestsForSession is best-effort cleanup for an explicitly
-// deleted session. The memory DB and session DB are separate stores.
-func (h *Handler) deleteMemoryTurnDigestsForSession(sessionID string) {
-	if h == nil || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	if runtime := h.MemoryRuntime(); runtime != nil {
-		_, _ = runtime.DeleteSessionDigests(context.Background(), sessionID)
-	}
 }
 
 // BindMemoryDigestInvalidation prevents pending turn digests and existing

@@ -452,6 +452,9 @@ func (s *Store) invalidateSummary(ctx context.Context, db *sql.DB, summary Summa
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, summary.ProjectKey); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_summaries SET freshness_status = 'stale' WHERE id = ? AND status = 'active'`, summary.ID); err != nil {
 		return err
 	}
@@ -462,7 +465,7 @@ func (s *Store) invalidateSummary(ctx context.Context, db *sql.DB, summary Summa
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return s.clearSummaryArtifacts()
+	return s.clearSummaryArtifactsIfNoFreshActiveSummary(ctx, summary.ProjectKey)
 }
 
 func errorsIsNoRows(err error) bool {
@@ -664,9 +667,14 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 		where = append(where, "source_session_id = ?")
 		args = append(args, strings.TrimSpace(filter.SourceSessionID))
 	}
+	if filter.SourceSessionGeneration != nil {
+		where = append(where, "source_session_generation = ?")
+		args = append(args, *filter.SourceSessionGeneration)
+	}
 	query := `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -718,6 +726,7 @@ func (s *Store) GetRecord(ctx context.Context, id string) (Record, error) {
 	row := db.QueryRowContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
@@ -796,26 +805,26 @@ type rowScanner interface {
 
 func scanRecordColumns(row rowScanner) (Record, error) {
 	var (
-		record                              Record
-		id, scope, projectKey, kind, status sql.NullString
-		text, normalizedText, tagsJSON      sql.NullString
-		retentionClass, sourceKind          sql.NullString
-		sourceSessionID, sourceTurnID       sql.NullString
-		sourceRefsJSON, contentHash         sql.NullString
-		supersedesID, freshness             sql.NullString
-		staleReason, createdAt, updatedAt   sql.NullString
-		lastUsedAt, validFrom, validUntil   sql.NullString
-		lastVerifiedAt, revalidateAfter     sql.NullString
-		deletedAt, metadataJSON             sql.NullString
-		confidence                          float64
-		sensitivity                         sql.NullString
-		pinned                              int
-		revision, useCount                  int64
+		record                                      Record
+		id, scope, projectKey, kind, status         sql.NullString
+		text, normalizedText, tagsJSON              sql.NullString
+		retentionClass, sourceKind                  sql.NullString
+		sourceSessionID, sourceTurnID               sql.NullString
+		sourceRefsJSON, contentHash                 sql.NullString
+		supersedesID, freshness                     sql.NullString
+		staleReason, createdAt, updatedAt           sql.NullString
+		lastUsedAt, validFrom, validUntil           sql.NullString
+		lastVerifiedAt, revalidateAfter             sql.NullString
+		deletedAt, metadataJSON                     sql.NullString
+		confidence                                  float64
+		sensitivity                                 sql.NullString
+		pinned                                      int
+		revision, useCount, sourceSessionGeneration int64
 	)
 	if err := row.Scan(
 		&id, &scope, &projectKey, &kind, &status, &text, &normalizedText, &tagsJSON,
 		&confidence, &sensitivity, &pinned, &retentionClass, &sourceKind, &sourceSessionID,
-		&sourceTurnID, &sourceRefsJSON, &contentHash, &supersedesID, &revision,
+		&sourceSessionGeneration, &sourceTurnID, &sourceRefsJSON, &contentHash, &supersedesID, &revision,
 		&createdAt, &updatedAt, &lastUsedAt, &useCount, &validFrom, &validUntil,
 		&freshness, &lastVerifiedAt, &revalidateAfter, &staleReason, &deletedAt,
 		&metadataJSON,
@@ -828,7 +837,8 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		NormalizedText: normalizedText.String, Confidence: confidence, Sensitivity: sensitivity.String,
 		Pinned: pinned != 0, RetentionClass: retentionClass.String,
 		SourceKind: sourceKind.String, SourceSessionID: sourceSessionID.String,
-		SourceTurnID: sourceTurnID.String, ContentHash: contentHash.String,
+		SourceSessionGeneration: sourceSessionGeneration,
+		SourceTurnID:            sourceTurnID.String, ContentHash: contentHash.String,
 		SupersedesID: supersedesID.String, Revision: revision,
 		CreatedAt: parseTime(createdAt.String), UpdatedAt: parseTime(updatedAt.String),
 		LastUsedAt: parseTime(lastUsedAt.String), UseCount: int(useCount),
@@ -957,6 +967,9 @@ func (s *Store) MarkConflictOpenQuestion(ctx context.Context, ids []string, reas
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
 	for _, record := range records {
 		if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "open_question", "consolidation", record.SourceSessionID, record.Revision, map[string]interface{}{
 			"reason": reason,

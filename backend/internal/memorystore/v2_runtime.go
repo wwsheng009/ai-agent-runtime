@@ -3,6 +3,7 @@ package memorystore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -35,6 +36,21 @@ func (s *Store) EnsureJob(ctx context.Context, job MemoryJob) (MemoryJob, error)
 	if job.Status == "" {
 		job.Status = JobStatusPending
 	}
+	if job.Kind == "phase1_extract/v2" && !job.RepairOnly {
+		// A receipt-backed v2 job is only executable when its complete source
+		// identity is present.  Keep malformed rows out of the claim path
+		// rather than silently treating them as a legacy session extraction.
+		hasIdentity := strings.TrimSpace(job.SessionID) != "" ||
+			job.SessionGeneration != 0 || strings.TrimSpace(job.CaptureReceiptID) != "" ||
+			job.SourceStartSeq != 0 || job.SourceEndSeq != 0 ||
+			job.SourceRevision != 0 || strings.TrimSpace(job.SourceHash) != ""
+		if hasIdentity && (strings.TrimSpace(job.SessionID) == "" ||
+			strings.TrimSpace(job.CaptureReceiptID) == "" || job.SourceStartSeq <= 0 ||
+			job.SessionGeneration <= 0 || job.SourceEndSeq < job.SourceStartSeq || job.SourceRevision <= 0 ||
+			strings.TrimSpace(job.SourceHash) == "") {
+			job.RepairOnly = true
+		}
+	}
 	if job.MaxAttempts <= 0 {
 		job.MaxAttempts = 3
 	}
@@ -45,17 +61,41 @@ func (s *Store) EnsureJob(ctx context.Context, job MemoryJob) (MemoryJob, error)
 	if job.UpdatedAt.IsZero() {
 		job.UpdatedAt = now
 	}
-	_, err = db.ExecContext(ctx, `
-INSERT OR IGNORE INTO memory_jobs (
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return MemoryJob{}, fmt.Errorf("memorystore: begin ensure job: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, job.ProjectKey); err != nil {
+		return MemoryJob{}, err
+	}
+	if err := checkJobPurgeFenceIdentityTx(ctx, tx, job.ProjectKey, job.Kind,
+		job.JobKey, job.SessionID, job.SessionGeneration, job.CaptureReceiptID); err != nil {
+		return MemoryJob{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO memory_jobs (
     id, kind, job_key, scope, project_key, status, priority, attempt,
-    max_attempts, retry_at, last_error, input_watermark, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    max_attempts, retry_at, last_error, input_watermark, created_at, updated_at,
+    session_id, session_generation, capture_receipt_id, source_start_seq,
+    source_end_seq, source_revision, source_hash, available_at, deadline_at,
+    heartbeat_at, deferred_until, dead_letter_at, dead_letter_reason, repair_only
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 `, job.ID, job.Kind, job.JobKey, string(job.Scope), job.ProjectKey, string(job.Status),
 		job.Priority, job.Attempt, job.MaxAttempts, nullableTime(job.RetryAt),
 		nullableString(job.LastError), nullableString(job.InputWatermark),
-		job.CreatedAt.UTC().Format(time.RFC3339Nano), job.UpdatedAt.UTC().Format(time.RFC3339Nano))
+		job.CreatedAt.UTC().Format(time.RFC3339Nano), job.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		strings.TrimSpace(job.SessionID), job.SessionGeneration, strings.TrimSpace(job.CaptureReceiptID),
+		job.SourceStartSeq, job.SourceEndSeq, job.SourceRevision, strings.TrimSpace(job.SourceHash),
+		nullableTime(job.AvailableAt), nullableTime(job.DeadlineAt), nullableTime(job.HeartbeatAt),
+		nullableTime(job.DeferredUntil), nullableTime(job.DeadLetterAt),
+		nullableString(job.DeadLetterReason), boolInt(job.RepairOnly))
 	if err != nil {
 		return MemoryJob{}, fmt.Errorf("memorystore: ensure job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryJob{}, fmt.Errorf("memorystore: commit ensure job: %w", err)
 	}
 	return s.getJobByKey(ctx, job.Kind, job.Scope, job.ProjectKey, job.JobKey)
 }
@@ -66,11 +106,16 @@ func (s *Store) getJobByKey(ctx context.Context, kind string, scope Scope, proje
 		return MemoryJob{}, err
 	}
 	row := db.QueryRowContext(ctx, `
-SELECT id, kind, job_key, scope, project_key, status, priority, COALESCE(worker_id, ''),
-       COALESCE(lease_until, ''), attempt, max_attempts, COALESCE(retry_at, ''),
-       COALESCE(started_at, ''), COALESCE(finished_at, ''), COALESCE(last_error, ''),
-       COALESCE(input_watermark, ''), COALESCE(last_success_watermark, ''),
-       created_at, updated_at
+SELECT id, kind, job_key, scope, project_key, status, priority,
+       COALESCE(worker_id, ''), COALESCE(lease_until, ''), attempt, max_attempts,
+       COALESCE(retry_at, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''),
+       COALESCE(last_error, ''), COALESCE(input_watermark, ''),
+       COALESCE(last_success_watermark, ''), created_at, updated_at,
+       COALESCE(session_id, ''), session_generation, COALESCE(capture_receipt_id, ''),
+       source_start_seq, source_end_seq, source_revision, COALESCE(source_hash, ''),
+       COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
+       COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
+       COALESCE(dead_letter_reason, ''), repair_only
 FROM memory_jobs WHERE kind = ? AND scope = ? AND project_key = ? AND job_key = ?
 `, kind, string(scope), projectKey, jobKey)
 	return scanMemoryJobRow(row)
@@ -107,9 +152,13 @@ func (s *Store) ClaimJobs(ctx context.Context, opts ClaimJobOptions) ([]MemoryJo
 		return nil, fmt.Errorf("memorystore: begin claim jobs: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
-SET status = 'pending', worker_id = NULL, lease_until = NULL, updated_at = ?
+SET status = 'pending', worker_id = NULL, lease_until = NULL,
+    deadline_at = NULL, heartbeat_at = NULL, updated_at = ?
 WHERE project_key = ? AND status = 'running'
   AND lease_until IS NOT NULL AND lease_until != '' AND lease_until <= ?
 `, now.Format(time.RFC3339Nano), projectKey, now.Format(time.RFC3339Nano)); err != nil {
@@ -125,13 +174,31 @@ WHERE project_key = ? AND status = 'running'
 		where = append(where, "job_key = ?")
 		args = append(args, strings.TrimSpace(opts.JobKey))
 	}
+	if strings.TrimSpace(opts.Kind) == "phase1_extract/v2" {
+		where = append(where,
+			"kind = 'phase1_extract/v2'",
+			"repair_only = 0",
+			"(capture_receipt_id = '' OR (session_id != '' AND source_start_seq > 0 AND source_end_seq >= source_start_seq AND source_revision > 0 AND source_hash != ''))",
+			"(available_at IS NULL OR available_at = '' OR available_at <= ?)",
+			"(deferred_until IS NULL OR deferred_until = '' OR deferred_until <= ?)",
+		)
+		args = append(args, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	} else {
+		// Legacy consumers must never claim a receipt-backed row.
+		where = append(where, "COALESCE(capture_receipt_id, '') = ''")
+	}
 	args = append(args, limit)
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, kind, job_key, scope, project_key, status, priority, COALESCE(worker_id, ''),
-       COALESCE(lease_until, ''), attempt, max_attempts, COALESCE(retry_at, ''),
-       COALESCE(started_at, ''), COALESCE(finished_at, ''), COALESCE(last_error, ''),
-       COALESCE(input_watermark, ''), COALESCE(last_success_watermark, ''),
-       created_at, updated_at
+ SELECT id, kind, job_key, scope, project_key, status, priority,
+        COALESCE(worker_id, ''), COALESCE(lease_until, ''), attempt, max_attempts,
+        COALESCE(retry_at, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''),
+        COALESCE(last_error, ''), COALESCE(input_watermark, ''),
+        COALESCE(last_success_watermark, ''), created_at, updated_at,
+        COALESCE(session_id, ''), session_generation, COALESCE(capture_receipt_id, ''),
+        source_start_seq, source_end_seq, source_revision, COALESCE(source_hash, ''),
+        COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
+        COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
+        COALESCE(dead_letter_reason, ''), repair_only
 FROM memory_jobs
 WHERE `+strings.Join(where, " AND ")+`
 ORDER BY priority DESC, created_at ASC LIMIT ?
@@ -151,14 +218,27 @@ ORDER BY priority DESC, created_at ASC LIMIT ?
 	_ = rows.Close()
 	claimed := make([]MemoryJob, 0, len(candidates))
 	for _, job := range candidates {
+		if err := checkJobPurgeFenceByIDTx(ctx, tx, job.ID, projectKey); err != nil {
+			if errors.Is(err, ErrSessionPurgeGenerationMismatch) {
+				_, _ = tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = 'cancelled', worker_id = NULL, lease_until = NULL,
+    last_error = ?, finished_at = ?, updated_at = ?
+WHERE id = ? AND status = 'pending'
+`, err.Error(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID)
+				continue
+			}
+			return nil, err
+		}
 		leaseUntil := now.Add(lease).UTC().Format(time.RFC3339Nano)
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
 SET status = 'running', worker_id = ?, lease_until = ?, attempt = attempt + 1,
-    started_at = COALESCE(started_at, ?), updated_at = ?
+    started_at = COALESCE(started_at, ?), heartbeat_at = ?,
+    deadline_at = ?, updated_at = ?
 WHERE id = ? AND status = 'pending'
 `, strings.TrimSpace(opts.WorkerID), leaseUntil, now.Format(time.RFC3339Nano),
-			now.Format(time.RFC3339Nano), job.ID)
+			now.Format(time.RFC3339Nano), leaseUntil, now.Format(time.RFC3339Nano), job.ID)
 		if err != nil {
 			return nil, fmt.Errorf("memorystore: claim job %s: %w", job.ID, err)
 		}
@@ -169,6 +249,8 @@ WHERE id = ? AND status = 'pending'
 		job.Status = JobStatusRunning
 		job.WorkerID = strings.TrimSpace(opts.WorkerID)
 		job.LeaseUntil = now.Add(lease).UTC()
+		job.HeartbeatAt = now
+		job.DeadlineAt = now.Add(lease).UTC()
 		job.Attempt++
 		job.UpdatedAt = now
 		claimed = append(claimed, job)
@@ -184,13 +266,25 @@ func (s *Store) CompleteJob(ctx context.Context, id, watermark string) error {
 	if err != nil {
 		return err
 	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin complete job: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	_, err = db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
+    deadline_at = NULL, heartbeat_at = NULL,
     finished_at = ?, last_success_watermark = ?, updated_at = ?
 WHERE id = ?
-`, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano), id)
-	return err
+  AND project_key = ?
+`, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CompleteJobForWorker only lets the worker that currently owns the running
@@ -200,13 +294,25 @@ func (s *Store) CompleteJobForWorker(ctx context.Context, id, workerID, watermar
 	if err != nil {
 		return err
 	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin complete job: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
+    deadline_at = NULL, heartbeat_at = NULL,
     finished_at = ?, last_success_watermark = ?, updated_at = ?
-WHERE id = ? AND status = 'running' AND worker_id = ?
+WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
 `, now.Format(time.RFC3339Nano), nullableString(watermark), now.Format(time.RFC3339Nano),
-		id, strings.TrimSpace(workerID))
+		id, s.cfg.ProjectKey, strings.TrimSpace(workerID))
 	if err != nil {
 		return err
 	}
@@ -214,7 +320,7 @@ WHERE id = ? AND status = 'running' AND worker_id = ?
 	if affected == 0 {
 		return fmt.Errorf("memorystore: job %s is no longer owned by worker %s", id, workerID)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Time) error {
@@ -222,8 +328,17 @@ func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Ti
 	if err != nil {
 		return err
 	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin fail job: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
 	var attempt, maxAttempts int
-	if err := db.QueryRowContext(ctx, `SELECT attempt, max_attempts FROM memory_jobs WHERE id = ?`, id).Scan(&attempt, &maxAttempts); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT attempt, max_attempts FROM memory_jobs WHERE id = ? AND project_key = ?`,
+		id, s.cfg.ProjectKey).Scan(&attempt, &maxAttempts); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -234,13 +349,17 @@ func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Ti
 		finishedAt = now.Format(time.RFC3339Nano)
 		retryAt = time.Time{}
 	}
-	_, err = db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs SET status = ?, worker_id = NULL, lease_until = NULL,
+    deadline_at = NULL, heartbeat_at = NULL,
     retry_at = ?, finished_at = ?, last_error = ?, updated_at = ?
 WHERE id = ?
+  AND project_key = ?
 `, string(status), nullableTime(retryAt), finishedAt, nullableString(errText),
-		now.Format(time.RFC3339Nano), id)
-	return err
+		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // FailJobForWorker is the lease-owner-safe retry path. If the lease expired
@@ -251,19 +370,32 @@ func (s *Store) FailJobForWorker(ctx context.Context, id, workerID, errText stri
 	if err != nil {
 		return err
 	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin fail job: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
-	res, err := db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
 SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'pending' END,
     worker_id = NULL,
     lease_until = NULL,
+    deadline_at = NULL,
+    heartbeat_at = NULL,
     retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE ? END,
     finished_at = CASE WHEN attempt >= max_attempts THEN ? ELSE NULL END,
     last_error = ?,
     updated_at = ?
-WHERE id = ? AND status = 'running' AND worker_id = ?
+WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
 `, nullableTime(retryAt), now.Format(time.RFC3339Nano), nullableString(errText),
-		now.Format(time.RFC3339Nano), id, strings.TrimSpace(workerID))
+		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, strings.TrimSpace(workerID))
 	if err != nil {
 		return err
 	}
@@ -271,7 +403,55 @@ WHERE id = ? AND status = 'running' AND worker_id = ?
 	if affected == 0 {
 		return fmt.Errorf("memorystore: job %s is no longer owned by worker %s", id, workerID)
 	}
-	return nil
+	return tx.Commit()
+}
+
+// FailJobForWorkerAttempt is the fenced retry path for workers that retain a
+// claimed job across a lease boundary. The attempt is the claim incarnation,
+// so reusing a worker ID after reclaim cannot let a stale worker clear the new
+// owner's lease.
+func (s *Store) FailJobForWorkerAttempt(ctx context.Context, id, workerID string, attempt int, errText string, retryAt time.Time) error {
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	if attempt <= 0 {
+		return fmt.Errorf("memorystore: job %s has invalid claim attempt %d", id, attempt)
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin fail job attempt: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'pending' END,
+    worker_id = NULL,
+    lease_until = NULL,
+    deadline_at = NULL,
+    heartbeat_at = NULL,
+    retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE ? END,
+    finished_at = CASE WHEN attempt >= max_attempts THEN ? ELSE NULL END,
+    last_error = ?,
+    updated_at = ?
+WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ? AND attempt = ?
+`, nullableTime(retryAt), now.Format(time.RFC3339Nano), nullableString(errText),
+		now.Format(time.RFC3339Nano), id, s.cfg.ProjectKey, strings.TrimSpace(workerID), attempt)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("memorystore: job %s claim attempt %d is no longer owned by worker %s", id, attempt, workerID)
+	}
+	return tx.Commit()
 }
 
 // InsertCandidate writes one session-extracted candidate plus source/event
@@ -308,36 +488,37 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		metadata[key] = value
 	}
 	record := Record{
-		ID:               "mem_" + uuid.NewString(),
-		Scope:            ScopeProject,
-		ProjectKey:       projectKey,
-		Kind:             kind,
-		Status:           StatusCandidate,
-		Text:             text,
-		NormalizedText:   normalizeMemoryText(text),
-		Tags:             normalizeTags(candidate.Tags),
-		Confidence:       candidate.Confidence,
-		Sensitivity:      normalizeSensitivity(firstNonEmpty(candidate.Sensitivity, "internal")),
-		Pinned:           false,
-		RetentionClass:   firstNonEmpty(candidate.RetentionClass, "standard"),
-		SourceKind:       sourceKind,
-		SourceSessionID:  strings.TrimSpace(candidate.SessionID),
-		SourceTurnID:     strings.TrimSpace(candidate.TurnID),
-		SourceWindow:     strings.TrimSpace(candidate.SourceWindow),
-		SourceRefs:       sourceRefs,
-		SourceHash:       candidate.SourceHash,
-		SourceRevision:   candidate.SourceRevision,
-		SourceUpdatedAt:  candidate.SourceUpdatedAt,
-		SourceObservedAt: now,
-		SourceMessageIDs: append([]string(nil), candidate.SourceMessageIDs...),
-		ContentHash:      memoryContentHash(string(ScopeProject), projectKey, kind, text),
-		Revision:         1,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-		Freshness:        FreshnessFresh,
-		LastVerifiedAt:   now,
-		RevalidateAfter:  candidate.RevalidateAfter,
-		Metadata:         metadata,
+		ID:                      "mem_" + uuid.NewString(),
+		Scope:                   ScopeProject,
+		ProjectKey:              projectKey,
+		Kind:                    kind,
+		Status:                  StatusCandidate,
+		Text:                    text,
+		NormalizedText:          normalizeMemoryText(text),
+		Tags:                    normalizeTags(candidate.Tags),
+		Confidence:              candidate.Confidence,
+		Sensitivity:             normalizeSensitivity(firstNonEmpty(candidate.Sensitivity, "internal")),
+		Pinned:                  false,
+		RetentionClass:          firstNonEmpty(candidate.RetentionClass, "standard"),
+		SourceKind:              sourceKind,
+		SourceSessionID:         strings.TrimSpace(candidate.SessionID),
+		SourceSessionGeneration: candidate.SessionGeneration,
+		SourceTurnID:            strings.TrimSpace(candidate.TurnID),
+		SourceWindow:            strings.TrimSpace(candidate.SourceWindow),
+		SourceRefs:              sourceRefs,
+		SourceHash:              candidate.SourceHash,
+		SourceRevision:          candidate.SourceRevision,
+		SourceUpdatedAt:         candidate.SourceUpdatedAt,
+		SourceObservedAt:        now,
+		SourceMessageIDs:        append([]string(nil), candidate.SourceMessageIDs...),
+		ContentHash:             memoryContentHash(string(ScopeProject), projectKey, kind, text),
+		Revision:                1,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+		Freshness:               FreshnessFresh,
+		LastVerifiedAt:          now,
+		RevalidateAfter:         candidate.RevalidateAfter,
+		Metadata:                metadata,
 	}
 	if err := s.insertRecordTx(ctx, db, record, "agent", candidate.SessionID); err != nil {
 		if isDuplicateMemoryError(err) {
@@ -376,6 +557,9 @@ func (s *Store) PromoteCandidate(ctx context.Context, id string) (Record, error)
 		return Record{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
+		return Record{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'active', revision = revision + 1, updated_at = ?
@@ -428,6 +612,9 @@ func (s *Store) SupersedeRecord(ctx context.Context, id, supersededBy, reason st
 		return Record{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, loser.ProjectKey); err != nil {
+		return Record{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'superseded', revision = revision + 1, updated_at = ?
@@ -466,19 +653,23 @@ WHERE id = ? AND project_key = ?
 // would keep the old candidate stale forever after a source/hash change.
 func (s *Store) reviveCandidate(ctx context.Context, db *sql.DB, record Record) (Record, bool, error) {
 	var existingID, existingSession string
-	var existingRevision int64
+	var existingGeneration, existingRevision int64
 	err := db.QueryRowContext(ctx, `
-SELECT id, COALESCE(source_session_id, ''), revision FROM memory_entries
-WHERE project_key = ? AND content_hash = ? AND status IN ('candidate', 'active')
-LIMIT 1
-`, record.ProjectKey, record.ContentHash).Scan(&existingID, &existingSession, &existingRevision)
+ SELECT id, COALESCE(source_session_id, ''), source_session_generation, revision
+ FROM memory_entries
+ WHERE project_key = ? AND content_hash = ? AND status IN ('candidate', 'active')
+ LIMIT 1
+ `, record.ProjectKey, record.ContentHash).Scan(
+		&existingID, &existingSession, &existingGeneration, &existingRevision,
+	)
 	if err == sql.ErrNoRows {
 		return Record{}, false, nil
 	}
 	if err != nil {
 		return Record{}, false, err
 	}
-	if existingSession != strings.TrimSpace(record.SourceSessionID) {
+	if existingSession != strings.TrimSpace(record.SourceSessionID) ||
+		existingGeneration != record.SourceSessionGeneration {
 		return Record{}, false, nil
 	}
 	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
@@ -486,6 +677,12 @@ LIMIT 1
 		return Record{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
+		return Record{}, false, err
+	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
+		return Record{}, false, err
+	}
 	now := time.Now().UTC()
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
@@ -525,7 +722,13 @@ WHERE id = ? AND revision = ?
 // stale when the transcript hash/revision moved. Candidate status is retained;
 // only freshness changes.
 func (s *Store) MarkSessionSourceChanged(ctx context.Context, sessionID, projectKey, newHash string, newRevision int64) (int, error) {
-	return s.markSourceChanged(ctx, sessionID, projectKey, "", "source_changed", newHash, newRevision)
+	return s.markSourceChanged(ctx, sessionID, projectKey, nil, "", "source_changed", newHash, newRevision)
+}
+
+// MarkSessionSourceChangedForGeneration limits stale marking to one canonical
+// session incarnation.
+func (s *Store) MarkSessionSourceChangedForGeneration(ctx context.Context, sessionID, projectKey string, generation int64, newHash string, newRevision int64) (int, error) {
+	return s.markSourceChanged(ctx, sessionID, projectKey, &generation, "", "source_changed", newHash, newRevision)
 }
 
 // MarkWindowSourceChanged is the per-window stale check. It only compares
@@ -536,7 +739,17 @@ func (s *Store) MarkWindowSourceChanged(ctx context.Context, sessionID, projectK
 	if sourceWindow == "" {
 		return 0, nil
 	}
-	return s.markSourceChanged(ctx, sessionID, projectKey, sourceWindow, "window_source_changed", newHash, newRevision)
+	return s.markSourceChanged(ctx, sessionID, projectKey, nil, sourceWindow, "window_source_changed", newHash, newRevision)
+}
+
+// MarkWindowSourceChangedForGeneration limits stale marking to one canonical
+// session incarnation and one source window.
+func (s *Store) MarkWindowSourceChangedForGeneration(ctx context.Context, sessionID, projectKey string, generation int64, sourceWindow, newHash string, newRevision int64) (int, error) {
+	sourceWindow = strings.TrimSpace(sourceWindow)
+	if sourceWindow == "" {
+		return 0, nil
+	}
+	return s.markSourceChanged(ctx, sessionID, projectKey, &generation, sourceWindow, "window_source_changed", newHash, newRevision)
 }
 
 // MarkSessionSourcesStale conservatively invalidates every memory record
@@ -545,6 +758,16 @@ func (s *Store) MarkWindowSourceChanged(ctx context.Context, sessionID, projectK
 // the affected window ranges cannot be resolved precisely yet. Pending digest
 // invalidation is handled separately by the runtime outbox.
 func (s *Store) MarkSessionSourcesStale(ctx context.Context, sessionID, projectKey, reason string) (int, error) {
+	return s.markSessionSourcesStale(ctx, sessionID, projectKey, nil, reason)
+}
+
+// MarkSessionSourcesStaleForGeneration conservatively invalidates only records
+// from one canonical session incarnation.
+func (s *Store) MarkSessionSourcesStaleForGeneration(ctx context.Context, sessionID, projectKey string, generation int64, reason string) (int, error) {
+	return s.markSessionSourcesStale(ctx, sessionID, projectKey, &generation, reason)
+}
+
+func (s *Store) markSessionSourcesStale(ctx context.Context, sessionID, projectKey string, generation *int64, reason string) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -560,14 +783,20 @@ func (s *Store) MarkSessionSourcesStale(ctx context.Context, sessionID, projectK
 	if reason == "" {
 		reason = "source_invalidated"
 	}
-	rows, err := db.QueryContext(ctx, `
+	query := `
 SELECT DISTINCT e.id, e.revision
 FROM memory_entries e
 WHERE e.project_key = ? AND e.source_session_id = ?
   AND e.source_kind IN ('session_extract', 'turn_window')
   AND e.status IN ('candidate', 'active')
   AND e.freshness_status != 'stale'
-`, projectKey, sessionID)
+`
+	args := []interface{}{projectKey, sessionID}
+	if generation != nil {
+		query += ` AND e.source_session_generation = ?`
+		args = append(args, *generation)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -593,6 +822,9 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
@@ -620,7 +852,7 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 	return len(stale), nil
 }
 
-func (s *Store) markSourceChanged(ctx context.Context, sessionID, projectKey, sourceWindow, reason, newHash string, newRevision int64) (int, error) {
+func (s *Store) markSourceChanged(ctx context.Context, sessionID, projectKey string, generation *int64, sourceWindow, reason, newHash string, newRevision int64) (int, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return 0, err
@@ -644,6 +876,10 @@ WHERE e.project_key = ? AND e.source_session_id = ?
     OR (src.source_revision IS NOT NULL AND src.source_revision != ?)
   )`
 	args := []interface{}{projectKey, sessionID, strings.TrimSpace(newHash), newRevision}
+	if generation != nil {
+		query += ` AND e.source_session_generation = ? AND src.source_session_generation = ?`
+		args = append(args, *generation, *generation)
+	}
 	if strings.TrimSpace(sourceWindow) == "" {
 		query += ` AND (src.source_window IS NULL OR src.source_window = '')`
 	} else {
@@ -676,6 +912,9 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC()
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
@@ -719,11 +958,22 @@ func scanMemoryJob(rows jobRows) (MemoryJob, error) {
 		started, finished, lastError     sql.NullString
 		inputWatermark, successWatermark sql.NullString
 		createdAt, updatedAt             sql.NullString
+		sessionID, receiptID, sourceHash sql.NullString
+		availableAt, deadlineAt          sql.NullString
+		heartbeatAt, deferredUntil       sql.NullString
+		deadLetterAt, deadLetterReason   sql.NullString
+		sessionGeneration                sql.NullInt64
+		sourceStartSeq, sourceEndSeq     sql.NullInt64
+		sourceRevision                   sql.NullInt64
+		repairOnly                       sql.NullInt64
 		priority, attempt, maxAttempts   int
 	)
 	if err := rows.Scan(&id, &kind, &key, &scope, &project, &status, &priority, &worker,
 		&lease, &attempt, &maxAttempts, &retry, &started, &finished, &lastError,
-		&inputWatermark, &successWatermark, &createdAt, &updatedAt); err != nil {
+		&inputWatermark, &successWatermark, &createdAt, &updatedAt,
+		&sessionID, &sessionGeneration, &receiptID, &sourceStartSeq, &sourceEndSeq,
+		&sourceRevision, &sourceHash, &availableAt, &deadlineAt, &heartbeatAt,
+		&deferredUntil, &deadLetterAt, &deadLetterReason, &repairOnly); err != nil {
 		return MemoryJob{}, err
 	}
 	job = MemoryJob{
@@ -735,6 +985,20 @@ func scanMemoryJob(rows jobRows) (MemoryJob, error) {
 		LastError: lastError.String, InputWatermark: inputWatermark.String,
 		LastSuccessWatermark: successWatermark.String,
 		CreatedAt:            parseTime(createdAt.String), UpdatedAt: parseTime(updatedAt.String),
+		SessionID:         sessionID.String,
+		SessionGeneration: sessionGeneration.Int64,
+		CaptureReceiptID:  receiptID.String,
+		SourceStartSeq:    sourceStartSeq.Int64,
+		SourceEndSeq:      sourceEndSeq.Int64,
+		SourceRevision:    sourceRevision.Int64,
+		SourceHash:        sourceHash.String,
+		AvailableAt:       parseTime(availableAt.String),
+		DeadlineAt:        parseTime(deadlineAt.String),
+		HeartbeatAt:       parseTime(heartbeatAt.String),
+		DeferredUntil:     parseTime(deferredUntil.String),
+		DeadLetterAt:      parseTime(deadLetterAt.String),
+		DeadLetterReason:  deadLetterReason.String,
+		RepairOnly:        repairOnly.Int64 != 0,
 	}
 	return job, nil
 }
@@ -751,11 +1015,16 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]MemoryJob, error) {
 		limit = 500
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT id, kind, job_key, scope, project_key, status, priority, COALESCE(worker_id, ''),
-       COALESCE(lease_until, ''), attempt, max_attempts, COALESCE(retry_at, ''),
-       COALESCE(started_at, ''), COALESCE(finished_at, ''), COALESCE(last_error, ''),
-       COALESCE(input_watermark, ''), COALESCE(last_success_watermark, ''),
-       created_at, updated_at
+SELECT id, kind, job_key, scope, project_key, status, priority,
+       COALESCE(worker_id, ''), COALESCE(lease_until, ''), attempt, max_attempts,
+       COALESCE(retry_at, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''),
+       COALESCE(last_error, ''), COALESCE(input_watermark, ''),
+       COALESCE(last_success_watermark, ''), created_at, updated_at,
+       COALESCE(session_id, ''), session_generation, COALESCE(capture_receipt_id, ''),
+       source_start_seq, source_end_seq, source_revision, COALESCE(source_hash, ''),
+       COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
+       COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
+       COALESCE(dead_letter_reason, ''), repair_only
 FROM memory_jobs WHERE project_key = ? ORDER BY created_at DESC LIMIT ?
 `, s.cfg.ProjectKey, limit)
 	if err != nil {
@@ -771,6 +1040,43 @@ FROM memory_jobs WHERE project_key = ? ORDER BY created_at DESC LIMIT ?
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+// CancelStaleBaseExtractionJobs cancels pending base-session extraction jobs
+// whose transcript hash no longer matches the current canonical hash. Window
+// and byte-page jobs are intentionally excluded because their job keys carry
+// range/page hashes rather than the current session hash.
+func (s *Store) CancelStaleBaseExtractionJobs(ctx context.Context, sessionID, currentHash, reason string) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("memorystore: store is nil")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	currentHash = strings.TrimSpace(currentHash)
+	if sessionID == "" || currentHash == "" {
+		return 0, nil
+	}
+	db, err := s.ensureV2()
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	keepKey := "session:" + sessionID + ":" + currentHash
+	res, err := db.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = 'cancelled', worker_id = NULL, lease_until = NULL,
+    retry_at = NULL, finished_at = ?, last_error = ?, updated_at = ?
+WHERE project_key = ? AND kind = 'phase1_extract' AND status = 'pending'
+  AND job_key GLOB 'session:' || ? || ':*'
+  AND job_key NOT GLOB 'session:' || ? || ':window:*'
+  AND job_key NOT GLOB 'session:' || ? || ':byte-pages-v1:*'
+  AND job_key != ?
+`, now, strings.TrimSpace(reason), now, s.cfg.ProjectKey,
+		sessionID, sessionID, sessionID, keepKey)
+	if err != nil {
+		return 0, fmt.Errorf("memorystore: cancel stale base extraction jobs: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
 }
 
 func firstNonEmpty(values ...string) string {
