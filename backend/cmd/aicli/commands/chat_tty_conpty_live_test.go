@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows && integration
 
 // L3 ConPTY 化：真实 chat 主循环在真终端语义（isatty）下运行，无头 CI 可跑。
 //

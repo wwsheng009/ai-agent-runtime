@@ -87,6 +87,18 @@
   测试时长与内存峰值；新增 `test-full` 保留完整后端测试。
 - 验证：`internal/remotetools` 定向测试通过。
 
+### 0.5 第五批已执行（2026-11-20）
+
+- 将默认 Windows 测试面中最重的 E2E 移入 `integration` tag：
+  - `chat_tty_conpty_live_test.go`（5 个测试，570s 预算）；
+  - `chat_residency_trim_conpty_test.go`（2 个测试，480s 预算）；
+  - `chat_startup_normal_mode_e2e_test.go`（60s/30s 等待）；
+  - `stdio_tree_windows_test.go`（`ping -n 600` 进程树测试）。
+- `Makefile` 的 `test-full` 增加 `-tags integration`，完整目标仍可运行这些测试；
+  默认 `test` 继续使用 `-short -p 1`，不再编译这批 Windows E2E。
+- 验证：默认 commands 测试、`integration` tag 的 commands 编译与
+  `integration` tag 的 transport 编译均通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

@@ -60,9 +60,9 @@ package-server:
 test:
 	cd $(BACKEND_DIR) && go test -short -p 1 ./...
 
-# Full backend suite, including tests that only run without -short.
+# Full backend suite, including integration-tagged Windows E2E tests.
 test-full:
-	cd $(BACKEND_DIR) && go test -p 1 -timeout 30m ./...
+	cd $(BACKEND_DIR) && go test -tags integration -p 1 -timeout 30m ./...
 
 test-background:
 	cd $(BACKEND_DIR) && go test -p 1 ./internal/background -count=1

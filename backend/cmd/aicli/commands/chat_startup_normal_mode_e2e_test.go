@@ -1,3 +1,5 @@
+//go:build integration
+
 package commands
 
 // e2e：复现 win11 正常模式（unified renderer）下

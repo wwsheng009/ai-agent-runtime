@@ -1,4 +1,4 @@
-//go:build windows && !win7compat
+//go:build windows && !win7compat && integration
 
 package transport
 
