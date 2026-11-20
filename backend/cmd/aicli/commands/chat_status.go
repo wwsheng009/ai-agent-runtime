@@ -399,6 +399,9 @@ func buildChatStatusPermissionsValue(session *ChatSession) string {
 	mode := chatSessionPermissionMode(session)
 	switch runtimepolicy.Mode(strings.TrimSpace(string(mode))) {
 	case runtimepolicy.ModeBypassPermissions:
+		if chatSessionEffectiveReadOnly(session) {
+			return chatReadOnlyApprovalBypassedLabel
+		}
 		return "Full Access"
 	case runtimepolicy.ModeAcceptEdits:
 		return "Accept Edits"

@@ -11,8 +11,10 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestChatSurfacePlanModeStatusSegmentModes(t *testing.T) {
@@ -32,6 +34,20 @@ func TestChatSurfacePlanModeStatusSegmentModes(t *testing.T) {
 	}
 	if bypass.role != style.RoleWarning {
 		t.Fatalf("bypass segment must carry the warning role, got %q", bypass.role)
+	}
+
+	readOnlyRuntimeSession := runtimechat.NewSession("tester")
+	readOnlyRuntimeSession.SetContext(toolbroker.AgentSessionContextAgentType, "explore")
+	readOnlyRuntimeSession.SetContext(toolbroker.AgentSessionContextReadOnly, true)
+	readOnlyBypass := chatSurfacePlanModeStatusSegment(&ChatSession{
+		PermissionMode: runtimepolicy.ModeBypassPermissions,
+		RuntimeSession: readOnlyRuntimeSession,
+	})
+	if readOnlyBypass.full != chatReadOnlyApprovalBypassedLabel || readOnlyBypass.compact != chatReadOnlyApprovalBypassedLabel {
+		t.Fatalf("read-only bypass should report both effective capability and approval mode, got %+v", readOnlyBypass)
+	}
+	if readOnlyBypass.role != style.RoleWarning {
+		t.Fatalf("read-only bypass must retain the warning role, got %q", readOnlyBypass.role)
 	}
 
 	// accept_edits：常驻可见但中性角色（Web 同为 neutral）。

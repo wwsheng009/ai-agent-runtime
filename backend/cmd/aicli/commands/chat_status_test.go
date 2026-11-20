@@ -12,6 +12,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *testing.T) {
@@ -129,6 +130,35 @@ func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
 
 	if got := buildChatStatusTokenCountValue(session); got != "2.1m" {
 		t.Fatalf("expected compact cumulative token count, got %q", got)
+	}
+}
+
+func TestBuildChatStatusPermissionsValueSeparatesReadOnlyFromApprovalMode(t *testing.T) {
+	ordinary := &ChatSession{PermissionMode: runtimepolicy.ModeBypassPermissions}
+	if got := buildChatStatusPermissionsValue(ordinary); got != "Full Access" {
+		t.Fatalf("ordinary bypass session should preserve the existing label, got %q", got)
+	}
+
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.SetContext(toolbroker.AgentSessionContextAgentType, "explore")
+	runtimeSession.SetContext(toolbroker.AgentSessionContextReadOnly, true)
+	readOnly := &ChatSession{
+		PermissionMode: runtimepolicy.ModeBypassPermissions,
+		RuntimeSession: runtimeSession,
+	}
+	if got := buildChatStatusPermissionsValue(readOnly); got != chatReadOnlyApprovalBypassedLabel {
+		t.Fatalf("read-only bypass session should show both capability and approval mode, got %q", got)
+	}
+
+	// The descriptive agent type alone is not treated as the enforced boundary.
+	typeOnlyRuntimeSession := runtimechat.NewSession("tester")
+	typeOnlyRuntimeSession.SetContext(toolbroker.AgentSessionContextAgentType, "explore")
+	typeOnly := &ChatSession{
+		PermissionMode: runtimepolicy.ModeBypassPermissions,
+		RuntimeSession: typeOnlyRuntimeSession,
+	}
+	if got := buildChatStatusPermissionsValue(typeOnly); got != "Full Access" {
+		t.Fatalf("agent type without the runtime read_only flag must not imply a read-only boundary, got %q", got)
 	}
 }
 

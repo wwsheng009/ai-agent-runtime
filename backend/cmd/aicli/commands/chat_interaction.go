@@ -3664,7 +3664,15 @@ func chatSurfacePlanModeStatusSegment(session *ChatSession) chatStatusSegment {
 	}
 	switch chatSessionPermissionMode(session) {
 	case runtimepolicy.ModeBypassPermissions:
-		// Web 用 danger tone 突出「已跳权」；页脚同样常驻，别让用户忘了自己在全权模式。
+		// Web 用 danger tone 突出「已跳权」；页脚同样常驻。只读边界
+		// 即使 bypass 也不会被放宽，因此把审批状态与有效能力同时显示。
+		if chatSessionEffectiveReadOnly(session) {
+			return chatStatusSegment{
+				full:    chatReadOnlyApprovalBypassedLabel,
+				compact: chatReadOnlyApprovalBypassedLabel,
+				role:    style.RoleWarning,
+			}
+		}
 		return chatStatusSegment{full: "Full Access", compact: "Full Access", role: style.RoleWarning}
 	case runtimepolicy.ModeAcceptEdits:
 		return chatStatusSegment{full: "Accept edits", compact: "Accept edits"}
