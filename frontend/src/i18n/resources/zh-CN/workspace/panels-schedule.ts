@@ -308,6 +308,9 @@ export const zhWorkspacePanelsSchedule = {
     editTitle: "编辑自动化模板",
     editorDescription:
       "将任务内容、执行上下文与运行规则保存为可重复使用的预设。",
+    optionCatalogLoadFailed:
+      "部分执行选项加载失败，可手动输入对应值。",
+    optionCatalogEmpty: "没有可选的执行选项，可手动输入对应值。",
     closeEditor: "关闭模板编辑器",
     saving: "保存中…",
     save: "保存模板",
@@ -329,6 +332,7 @@ export const zhWorkspacePanelsSchedule = {
       rule: "运行规则",
     },
     validation: {
+      summary: "请修正标出的字段后重试。",
       required: "请填写此字段。",
       positive: "请输入有效的正数。",
       clock: "请输入 HH:MM 或 HH:MM:SS 格式的本地时间。",

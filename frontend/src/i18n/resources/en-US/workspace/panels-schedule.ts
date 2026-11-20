@@ -330,6 +330,10 @@ export const enWorkspacePanelsSchedule: DeepStringShape<
     editTitle: "Edit automation template",
     editorDescription:
       "Save the task content, execution context, and schedule as a reusable preset.",
+    optionCatalogLoadFailed:
+      "Some execution options could not be loaded; enter the values manually.",
+    optionCatalogEmpty:
+      "No execution options are available; enter the values manually.",
     closeEditor: "Close template editor",
     saving: "Saving…",
     save: "Save template",
@@ -351,6 +355,7 @@ export const enWorkspacePanelsSchedule: DeepStringShape<
       rule: "Run rule",
     },
     validation: {
+      summary: "Fix the highlighted fields and try again.",
       required: "This field is required.",
       positive: "Enter a valid positive number.",
       clock: "Use a local time in HH:MM or HH:MM:SS format.",

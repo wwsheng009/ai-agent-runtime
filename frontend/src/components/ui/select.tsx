@@ -32,6 +32,10 @@ export type SelectOption = {
 
 type SelectProps = {
   ariaLabel: string;
+  /** Optional helper/error text ids announced with the trigger. */
+  ariaDescribedBy?: string;
+  /** Exposes an invalid state when the selected value fails form validation. */
+  ariaInvalid?: boolean;
   options: readonly SelectOption[];
   value: string;
   onChange: (value: string) => void;
@@ -100,6 +104,8 @@ function findNextEnabledOptionIndex(
 
 export function Select({
   ariaLabel,
+  ariaDescribedBy,
+  ariaInvalid = false,
   options,
   value,
   onChange,
@@ -448,6 +454,8 @@ export function Select({
           type="button"
           data-testid={triggerTestId}
           aria-label={ariaLabel}
+          aria-describedby={ariaDescribedBy}
+          aria-invalid={ariaInvalid || undefined}
           aria-haspopup="listbox"
           aria-expanded={open}
           aria-controls={listboxId}

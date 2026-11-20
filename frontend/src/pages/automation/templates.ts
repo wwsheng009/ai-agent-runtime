@@ -56,7 +56,7 @@ const ICON_BY_CATEGORY: Record<string, LucideIcon> = {
   knowledge: BookOpenCheckIcon,
 };
 
-function localTimeZone(): string {
+export function localTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
@@ -194,6 +194,7 @@ export function templateFormFrom(
       template.kind === "at"
         ? localDateTimeInput(template.atTime)
         : template.atTime,
+    timeZone: template.timeZone.trim() || localTimeZone(),
     weekdays: [...template.weekdays],
   };
 }

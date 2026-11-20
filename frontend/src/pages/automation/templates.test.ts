@@ -6,6 +6,7 @@ import type { RuntimeScheduleTemplate } from "@/types/runtime";
 import {
   buildAutomationTemplates,
   emptyAutomationTemplateForm,
+  localTimeZone,
   templateFormFrom,
   templateRequestFromForm,
   validateAutomationTemplateForm,
@@ -86,6 +87,23 @@ describe("buildAutomationTemplates", () => {
 });
 
 describe("automation template form conversion", () => {
+  it("defaults new templates and templates without a zone to the user's current timezone", () => {
+    const currentZone =
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+    expect(emptyAutomationTemplateForm().timeZone).toBe(currentZone);
+    expect(templateFormFrom(template({ timeZone: "" })).timeZone).toBe(
+      currentZone,
+    );
+    expect(localTimeZone()).toBe(currentZone);
+  });
+
+  it("preserves an explicit timezone from a persisted template", () => {
+    expect(
+      templateFormFrom(template({ timeZone: "Europe/Berlin" })).timeZone,
+    ).toBe("Europe/Berlin");
+  });
+
   it("copies editable values without persisted timestamps", () => {
     const form = templateFormFrom(template());
 
