@@ -146,6 +146,11 @@ describe("ConfigDomainTable", () => {
   });
 
   it("sorts rows and combines column filters with the search and pagination", async () => {
+    // jsdom 未实现 scrollIntoView；Select 展开菜单时会调用它。
+    if (!Element.prototype.scrollIntoView) {
+      Element.prototype.scrollIntoView = () => {};
+    }
+
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -205,18 +210,21 @@ describe("ConfigDomainTable", () => {
     expect(container.textContent).toContain("provider-23");
     expect(container.textContent).not.toContain("provider-01");
 
-    const tagFilter = container.querySelector(
-      'select[aria-label="Tag"]',
-    ) as HTMLSelectElement | null;
-    expect(tagFilter).toBeInstanceOf(HTMLSelectElement);
+    const tagFilter = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Tag"]',
+    );
+    expect(tagFilter).toBeInstanceOf(HTMLButtonElement);
 
     await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLSelectElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(tagFilter, "azure");
-      tagFilter?.dispatchEvent(new Event("change", { bubbles: true }));
+      tagFilter?.click();
+    });
+    const azureOption = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((option) => option.textContent?.includes("Azure"));
+    expect(azureOption).toBeDefined();
+
+    await act(async () => {
+      azureOption?.click();
     });
 
     expect(container.textContent).toContain("第 1-10 条，共 15 条");
