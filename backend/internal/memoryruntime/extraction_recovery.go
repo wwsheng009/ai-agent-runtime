@@ -16,12 +16,13 @@ func (r *Runtime) failExtractionJob(ctx context.Context, job memorystore.MemoryJ
 	// This is a bounded bookkeeping context, never a continuation of model work.
 	cleanupCtx, cancel := memoryJobCleanupContext(ctx)
 	defer cancel()
+	safeCause := safeMemoryError(cause)
 	err := r.Store.FailJobForWorkerAttempt(cleanupCtx, job.ID, job.WorkerID, job.Attempt,
-		cause.Error(), r.now().Add(retryBackoff(job.Attempt)))
+		safeMemoryErrorText(safeCause), r.now().Add(retryBackoff(job.Attempt)))
 	if err != nil {
-		return errors.Join(cause, fmt.Errorf("memoryruntime: persist extraction failure: %w", err))
+		return errors.Join(safeCause, fmt.Errorf("memoryruntime: persist extraction failure: %w", err))
 	}
-	return cause
+	return safeCause
 }
 
 func memoryJobCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -35,7 +36,7 @@ func memoryJobCommitContext(ctx context.Context) (context.Context, context.Cance
 func failMemoryJobForWorker(ctx context.Context, store *memorystore.Store, id, workerID, errText string, retryAt time.Time) error {
 	cleanupCtx, cancel := memoryJobCleanupContext(ctx)
 	defer cancel()
-	return store.FailJobForWorker(cleanupCtx, id, workerID, errText, retryAt)
+	return store.FailJobForWorker(cleanupCtx, id, workerID, safeMemoryErrorText(errors.New(errText)), retryAt)
 }
 
 func verifyTranscriptCoverage(transcript Transcript, startSeq, endSeq int64) error {

@@ -139,6 +139,9 @@ type MemoryGenerationConfig struct {
 	MaxSessionsPerRun    int                    `yaml:"maxSessionsPerRun" json:"maxSessionsPerRun"`
 	MaxRolloutAgeDays    int                    `yaml:"maxRolloutAgeDays" json:"maxRolloutAgeDays"`
 	IncludeSubagents     bool                   `yaml:"includeSubagents" json:"includeSubagents"`
+	// Provider optionally pins extraction and turn-window summarization to a
+	// configured LLM provider. Empty preserves LLMRuntime automatic routing.
+	Provider             string                 `yaml:"provider" json:"provider"`
 	Model                string                 `yaml:"model" json:"model"`
 	ReasoningEffort      string                 `yaml:"reasoningEffort" json:"reasoningEffort"`
 	MaxRecordsPerSession int                    `yaml:"maxRecordsPerSession" json:"maxRecordsPerSession"`
@@ -170,6 +173,9 @@ type MemoryTurnDigestConfig struct {
 
 type MemoryConsolidationConfig struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	// Provider optionally pins project-summary generation to a configured LLM
+	// provider. Empty inherits the extraction provider/automatic routing.
+	Provider           string `yaml:"provider" json:"provider"`
 	Model              string `yaml:"model" json:"model"`
 	ReasoningEffort    string `yaml:"reasoningEffort" json:"reasoningEffort"`
 	MaxRecords         int    `yaml:"maxRecords" json:"maxRecords"`

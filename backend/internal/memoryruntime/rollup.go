@@ -70,7 +70,7 @@ func (s *LLMWindowSummarizer) SummarizeWindow(ctx context.Context, input WindowS
 		return WindowSummary{}, fmt.Errorf("memoryruntime: turn digest text is unavailable; enable turnDigest.storeText for L1 summaries")
 	}
 	user := renderWindowSummaryPrompt(input, s.Config)
-	response, err := s.Runtime.Call(ctx, &llm.LLMRequest{
+	request := &llm.LLMRequest{
 		Provider: s.Config.ExtractionProvider,
 		Model:    s.Config.ExtractionModel,
 		Messages: []types.Message{
@@ -87,9 +87,12 @@ Do not invent facts, do not copy secrets, and do not include transient commands 
 			"session_id":         input.Session.ID,
 			"window_id":          input.WindowID,
 		},
-	})
+	}
+	response, err := s.Runtime.Call(ctx, request)
 	if err != nil {
-		return WindowSummary{}, err
+		return WindowSummary{}, newMemoryStageError(
+			"turn_window_summary", s.Config.ExtractionProvider, request.Provider,
+			s.Config.ExtractionModel, request.Model, err)
 	}
 	text := strings.TrimSpace(response.Content)
 	if text == "" {
@@ -262,13 +265,13 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		cleanupCtx, cancel := memoryJobCleanupContext(ctx)
 		var windowErr error
 		if failWindow {
-			windowErr = r.Store.FailTurnWindow(cleanupCtx, window.ID, cause.Error())
+			windowErr = r.Store.FailTurnWindow(cleanupCtx, window.ID, safeMemoryErrorText(cause))
 		}
-		jobErr := r.Store.FailJobForWorker(cleanupCtx, jobID, workerID, cause.Error(), now.Add(retryBackoff(claimed[0].Attempt)))
+		jobErr := r.Store.FailJobForWorker(cleanupCtx, jobID, workerID, safeMemoryErrorText(cause), now.Add(retryBackoff(claimed[0].Attempt)))
 		cancel()
 		cause = errors.Join(cause, windowErr, jobErr)
 		result.Failed++
-		result.Errors = append(result.Errors, session.ID+": "+cause.Error())
+		result.Errors = append(result.Errors, session.ID+": "+safeMemoryErrorText(cause))
 		return result
 	}
 	if window.Status == memorystore.TurnWindowDone {

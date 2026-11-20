@@ -245,10 +245,11 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		}
 		job := claimed[0]
 		fail := func(cause error) (ConsolidationResult, error) {
-			if persistErr := failMemoryJobForWorker(ctx, c.Store, job.ID, job.WorkerID, cause.Error(), now.Add(retryBackoff(job.Attempt))); persistErr != nil {
-				return result, errors.Join(cause, persistErr)
+			safeCause := safeMemoryError(cause)
+			if persistErr := failMemoryJobForWorker(ctx, c.Store, job.ID, job.WorkerID, safeMemoryErrorText(safeCause), now.Add(retryBackoff(job.Attempt))); persistErr != nil {
+				return result, errors.Join(safeCause, persistErr)
 			}
-			return result, cause
+			return result, safeCause
 		}
 		complete := func(watermark string) error {
 			commitCtx, cancel := memoryJobCommitContext(ctx)

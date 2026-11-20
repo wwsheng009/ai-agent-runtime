@@ -52,7 +52,7 @@ Every record MUST include at least one source_message_id from the transcript. Ke
 	if err != nil {
 		return ExtractionResult{}, err
 	}
-	response, err := e.Runtime.Call(ctx, &llm.LLMRequest{
+	request := &llm.LLMRequest{
 		Provider: e.Config.ExtractionProvider,
 		Model:    e.Config.ExtractionModel,
 		Messages: []types.Message{
@@ -66,9 +66,12 @@ Every record MUST include at least one source_message_id from the transcript. Ke
 			"memory_extraction": true,
 			"session_id":        session.ID,
 		},
-	})
+	}
+	response, err := e.Runtime.Call(ctx, request)
 	if err != nil {
-		return ExtractionResult{}, err
+		return ExtractionResult{}, newMemoryStageError(
+			"extraction", e.Config.ExtractionProvider, request.Provider,
+			e.Config.ExtractionModel, request.Model, err)
 	}
 	content := strings.TrimSpace(response.Content)
 	if content == "" {
