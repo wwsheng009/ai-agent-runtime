@@ -57,6 +57,44 @@ func isRetryableProviderCallError(err error) bool {
 	return classifyRetryableLLMError(err).Retryable
 }
 
+// isMissingToolOutputError identifies deterministic tool-trace defects. These
+// errors describe the request history already sent by the runtime, so a
+// byte-for-byte replay cannot repair them. Keep this predicate independent of
+// HTTP status and configurable retry rules: gateways may wrap the same defect
+// in HTTP 400 (or another envelope), and a deployment rule must not turn it
+// back into an automatic retry.
+func isMissingToolOutputError(err error) bool {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		lower := strings.ToLower(candidate.Error())
+		if containsAny(lower,
+			"tool_output_missing",
+			"tool output missing",
+			"tool call is missing its matching output",
+			"tool call missing its matching output",
+			"no tool call found for function call output",
+			"no tool call found for function call",
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCodexToolTraceValidationError identifies errors raised by the local
+// Responses-input validator. These errors are deterministic defects in the
+// replayed conversation, not provider availability failures; sending the same
+// history again cannot repair them.
+func isCodexToolTraceValidationError(err error) bool {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		lower := strings.ToLower(candidate.Error())
+		if strings.Contains(lower, "codex_tool_trace_invalid") ||
+			strings.Contains(lower, "tool_output_missing") {
+			return true
+		}
+	}
+	return false
+}
+
 func isRetryableProviderResponseError(err error) bool {
 	if err == nil {
 		return true
@@ -71,6 +109,10 @@ func isRetryableProviderResponseError(err error) bool {
 		return false
 	}
 
+	if isCodexToolTraceValidationError(err) || isMissingToolOutputError(err) {
+		return false
+	}
+
 	if IsContextWindowError(err) {
 		return false
 	}
@@ -78,6 +120,8 @@ func isRetryableProviderResponseError(err error) bool {
 	for _, needle := range []string{
 		"invalid_request_error",
 		"missing required parameter",
+		"tool_output_missing",
+		"tool call is missing its matching output",
 		"no tool call found for function call output",
 		"no tool call found for function call",
 		"unsupported parameter",

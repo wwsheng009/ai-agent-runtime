@@ -151,6 +151,45 @@ func TestClassifyRetryableLLMErrorWithRules_ConfiguredStopUsesStructuredCode(t *
 	assert.Equal(t, "resource_exhausted_stop", decision.Reason)
 }
 
+func TestClassifyRetryableLLMError_ToolOutputMissingIsNeverRetried(t *testing.T) {
+	err := newProviderHTTPError(http.StatusBadRequest,
+		`{"error":{"code":"tool_output_missing","message":"A tool call is missing its matching output"}}`,
+		nil)
+	retryRule := RetryRule{
+		Name:    "retry_all_400s",
+		Enabled: true,
+		Action:  RetryRuleActionRetry,
+		StatusCode: RetryStatusCodeMatcher{
+			Codes: []int{http.StatusBadRequest},
+		},
+	}
+
+	decision := classifyRetryableLLMErrorWithRules(err, []RetryRule{retryRule})
+	assert.False(t, decision.Retryable,
+		"the deterministic tool trace defect must take precedence over RetryRule")
+	assert.Equal(t, "invalid_request", decision.Reason)
+	assert.False(t, isRetryableProviderResponseError(err))
+	assert.Equal(t, "UPSTREAM_INVALID_REQUEST", ClassifyFailureCode(err))
+
+	diagnostic := DiagnoseFailure(err)
+	assert.False(t, diagnostic.Retryable)
+	assert.Equal(t, "UPSTREAM_INVALID_REQUEST", diagnostic.ErrorCode)
+	assert.Contains(t, diagnostic.NextAction, "matching tool output")
+	assert.Contains(t, diagnostic.NextAction, "do not retry the unchanged request")
+}
+
+func TestClassifyRetryableLLMError_ToolTraceValidationErrorsStayTerminalWhenWrapped(t *testing.T) {
+	local := fmt.Errorf("codex request rejected: %w",
+		fmt.Errorf("codex_tool_trace_invalid: duplicate tool call_id %q", "call_1"))
+	wrapped := fmt.Errorf("provider response wrapper: %w", local)
+
+	decision := classifyRetryableLLMError(wrapped)
+	assert.False(t, decision.Retryable)
+	assert.Equal(t, "invalid_request", decision.Reason)
+	assert.False(t, isRetryableProviderResponseError(wrapped))
+	assert.Equal(t, "UPSTREAM_INVALID_REQUEST", ClassifyFailureCode(wrapped))
+}
+
 func TestClassifyRetryableLLMError_DoesNotRetryContextOverflowBehind5xx(t *testing.T) {
 	tests := []string{
 		"HTTP 502: Your input exceeds the context window of this model.",

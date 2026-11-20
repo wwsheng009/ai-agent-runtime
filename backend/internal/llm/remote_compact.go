@@ -49,16 +49,8 @@ const remoteCompactPlaceholder = "Compacted context stored remotely."
 // ordinary chat turns so the compact request can stay on the same cache route.
 func buildCodexRemoteCompactRequest(model string, history []types.Message, promptCacheKey string) map[string]interface{} {
 	codexAdapter := &adapter.CodexAdapter{}
-	metadata := map[string]interface{}{}
-	if key := strings.TrimSpace(promptCacheKey); key != "" {
-		metadata["session_id"] = key
-		metadata["prompt_cache_key"] = key
-	}
-	built := codexAdapter.BuildRequest(adapter.RequestConfig{
-		Model:    strings.TrimSpace(model),
-		Messages: RuntimeMessagesToProtocolMessages(history, "codex", model),
-		Metadata: metadata,
-	})
+	config := codexRemoteCompactAdapterRequest(model, history, promptCacheKey)
+	built := codexAdapter.BuildRequest(config)
 
 	request := map[string]interface{}{
 		"model":               built["model"],
@@ -87,6 +79,23 @@ func buildCodexRemoteCompactRequest(model string, history []types.Message, promp
 		request["text"] = text
 	}
 	return request
+}
+
+func validateCodexRemoteCompactHistory(model string, history []types.Message, promptCacheKey string) error {
+	return (&adapter.CodexAdapter{}).ValidateRequest(codexRemoteCompactAdapterRequest(model, history, promptCacheKey))
+}
+
+func codexRemoteCompactAdapterRequest(model string, history []types.Message, promptCacheKey string) adapter.RequestConfig {
+	metadata := map[string]interface{}{}
+	if key := strings.TrimSpace(promptCacheKey); key != "" {
+		metadata["session_id"] = key
+		metadata["prompt_cache_key"] = key
+	}
+	return adapter.RequestConfig{
+		Model:    strings.TrimSpace(model),
+		Messages: RuntimeMessagesToProtocolMessages(history, "codex", model),
+		Metadata: metadata,
+	}
 }
 
 func decodeCodexRemoteCompactResponse(history []types.Message, body []byte) (*RemoteCompactResponse, error) {

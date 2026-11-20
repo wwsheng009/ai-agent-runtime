@@ -239,6 +239,9 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 	}
 
 	resolvedModel := resolveGatewaySelectedModel(selected, model)
+	if err := validateCodexRemoteCompactHistory(resolvedModel, req.History, req.SessionID); err != nil {
+		return nil, err
+	}
 	requestBody := buildCodexRemoteCompactRequest(resolvedModel, req.History, req.SessionID)
 	url := resolveCompactURL(selected.Provider.BaseURL, selected.Provider.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
 	bodyBytes, marshalErr := json.Marshal(requestBody)
@@ -525,6 +528,9 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 
 	// 构建请求体
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
+	if err := validateCodexRequest(adpt, adapterRequest); err != nil {
+		return nil, err
+	}
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
@@ -786,6 +792,9 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
+	if err := validateCodexRequest(adpt, adapterRequest); err != nil {
+		return nil, err
+	}
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
@@ -1092,6 +1101,9 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	// 构建请求体
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
+	if err := validateCodexRequest(adpt, adapterRequest); err != nil {
+		return nil, err
+	}
 	requestBody := adpt.BuildRequest(adapterRequest)
 	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, req.Metadata, protocol)
@@ -1728,6 +1740,12 @@ func gatewayProviderErrorStatusCode(err error) int {
 
 func isRetryableGatewayProviderError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// Local Codex input validation runs before the HTTP request is built. Keep
+	// its deterministic trace errors out of the gateway retry loop even when
+	// the error has not yet been wrapped in gatewayProviderError.
+	if isCodexToolTraceValidationError(err) || isMissingToolOutputError(err) {
 		return false
 	}
 	var providerErr *gatewayProviderError

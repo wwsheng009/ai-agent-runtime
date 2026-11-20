@@ -440,7 +440,6 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 	if session.FastMode && chatSessionSupportsFastMode(session) {
 		config.Metadata["service_tier"] = codexServiceTierPriority
 	}
-	enableNativeImageGeneration := session.Provider.AllowsCodexImageGeneration()
 	if defs := req.Tools; len(defs) > 0 {
 		if strings.EqualFold(strings.TrimSpace(session.Provider.GetProtocol()), "codex") {
 			config.Functions = runtimellm.BuildToolDefinitionsForRequest(
@@ -449,7 +448,6 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 				session.Model,
 				session.Provider.ModelCapabilities,
 				false,
-				enableNativeImageGeneration,
 			)
 		} else {
 			catalog := ensureFunctionCatalog(session)
@@ -463,7 +461,6 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 			session.Model,
 			session.Provider.ModelCapabilities,
 			false,
-			enableNativeImageGeneration,
 		)
 	}
 	return config

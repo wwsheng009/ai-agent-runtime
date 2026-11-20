@@ -943,6 +943,9 @@ func DiagnoseFailure(err error) FailureDiagnostic {
 	}
 
 	nextAction := llmFailureNextAction(code, decision)
+	if isMissingToolOutputError(err) {
+		nextAction = "Repair the tool-call history by adding the matching tool output, then start a new request; do not retry the unchanged request."
+	}
 	if code == "PERMISSION_DENIED" && isCredentialExpiredError(err) {
 		nextAction = "Replace or refresh the expired provider credential, then retry; do not retry with the same credential."
 	}
@@ -1170,6 +1173,14 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 
 	if stderrs.Is(err, context.Canceled) {
 		return retryDecision{Retryable: false, Reason: "context_canceled"}
+	}
+
+	// A replayed tool call without its matching output is a deterministic
+	// request-history defect. It must be classified before RetryRule matching:
+	// retrying the same normalized input can only send the same invalid trace
+	// again, and a deployment rule must not override this safety boundary.
+	if isCodexToolTraceValidationError(err) || isMissingToolOutputError(err) {
+		return retryDecision{Retryable: false, Reason: "invalid_request"}
 	}
 
 	if decision, ok := decisionFromRetryRules(err, rules); ok {

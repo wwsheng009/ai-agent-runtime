@@ -504,6 +504,38 @@ func TestLLMRuntime_Call_DoesNotRetryMissingRequiredParameterErrors(t *testing.T
 	assert.Equal(t, 1, provider.calls)
 }
 
+func TestLLMRuntime_Call_DoesNotRetryToolOutputMissingEvenWith400RetryRule(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+		RetryRules: []RetryRule{{
+			Name:    "retry_all_400s",
+			Enabled: true,
+			Action:  RetryRuleActionRetry,
+			StatusCode: RetryStatusCodeMatcher{
+				Codes: []int{http.StatusBadRequest},
+			},
+		}},
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{newProviderHTTPError(
+			http.StatusBadRequest,
+			`{"error":{"code":"tool_output_missing","message":"A tool call is missing its matching output"}}`,
+			nil,
+		)},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_missing")
+	assert.Equal(t, 1, provider.calls)
+}
+
 func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -530,6 +562,30 @@ func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "recovered", resp.Content)
 	assert.Equal(t, 3, provider.calls)
+}
+
+func TestLLMRuntime_Stream_DoesNotRetryToolOutputMissing(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &streamSequenceProvider{
+		name: "provider-a",
+		streamErrs: []error{newProviderHTTPError(
+			http.StatusBadRequest,
+			`{"error":{"code":"tool_output_missing","message":"A tool call is missing its matching output"}}`,
+			nil,
+		)},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Stream(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_missing")
+	assert.Equal(t, 1, provider.calls)
 }
 
 func TestLLMRuntime_Call_RequestCanDisableRetries(t *testing.T) {

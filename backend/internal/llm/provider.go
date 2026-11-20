@@ -371,6 +371,9 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 	}
 
 	model := strings.TrimSpace(p.resolveModel(req.Model))
+	if err := validateCodexRemoteCompactHistory(model, req.History, req.SessionID); err != nil {
+		return nil, err
+	}
 	requestBody := buildCodexRemoteCompactRequest(model, req.History, req.SessionID)
 	url := resolveCompactURL(p.config.BaseURL, p.config.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
 	bodyBytes, marshalErr := json.Marshal(requestBody)
@@ -618,6 +621,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	adapterRequest := p.convertRequest(request)
 
 	// 构建请求体
+	if err := validateCodexRequest(p.adapter, adapterRequest); err != nil {
+		return nil, err
+	}
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
@@ -881,6 +887,9 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	adapterRequest.Stream = true
 
 	// 构建请求体
+	if err := validateCodexRequest(p.adapter, adapterRequest); err != nil {
+		return err
+	}
 	requestBody := p.adapter.BuildRequest(adapterRequest)
 	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	propagatePromptCacheKey(requestBody, request.Metadata, p.config.Type)
@@ -1116,6 +1125,12 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	}
 
 	chatReq := p.toChatRequest(req)
+	// Validate once before entering the provider retry loop. The Codex
+	// Responses input is deterministic for a given history; a malformed tool
+	// trace cannot be repaired by replaying it or rotating a provider.
+	if err := validateCodexRequest(p.adapter, p.convertRequest(chatReq)); err != nil {
+		return nil, err
+	}
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.MaxTransportRetries, p.config.RetryTuning, p.config.RetryRules)
 	policy = applyRequestRetryPolicy(policy, req.Metadata)
 	var lastErr error
@@ -1445,6 +1460,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	buildStreamingBody := func(chatReq ChatRequest) (adapter.RequestConfig, map[string]interface{}, []byte, map[string]string, error) {
 		adapterRequest := p.convertRequest(chatReq)
 		adapterRequest.Stream = true
+		if err := validateCodexRequest(p.adapter, adapterRequest); err != nil {
+			return adapter.RequestConfig{}, nil, nil, nil, err
+		}
 		requestBody := p.adapter.BuildRequest(adapterRequest)
 		requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 		propagatePromptCacheKey(requestBody, chatReq.Metadata, p.config.Type)

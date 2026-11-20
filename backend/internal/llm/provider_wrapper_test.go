@@ -1735,6 +1735,42 @@ func TestProviderWrapper_CodexCall_RetriesSSEErrorBeforeOutput(t *testing.T) {
 	assert.Equal(t, 2, requests)
 }
 
+func TestProviderWrapper_CodexCallRejectsUnpairedToolCallBeforeHTTP(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
+		MaxRetries:   3,
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{
+			{Role: "user", Content: "run the command"},
+			{
+				Role: "assistant",
+				ToolCalls: []types.ToolCall{{
+					ID:   "call_orphan",
+					Type: "function",
+					Name: "shell",
+					Args: map[string]interface{}{"command": "pwd"},
+				}},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_missing")
+	assert.Equal(t, 0, requests, "invalid tool history must be rejected before provider retry/HTTP")
+}
+
 // Partial-output replay policy: transient SSE errors keep retrying even after
 // user-visible text was emitted; duplicated partial output is accepted.
 func TestProviderWrapper_CodexCall_RetriesTransientSSEErrorAfterText(t *testing.T) {

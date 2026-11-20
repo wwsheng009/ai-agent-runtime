@@ -1451,6 +1451,52 @@ func TestGatewayClientCall_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) 
 	assert.True(t, rm.results[1].success)
 }
 
+func TestGatewayClientCall_StreamDoesNotRetryToolOutputMissingEvenWith400Rule(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":"tool_output_missing","message":"A tool call is missing its matching output"}}`)
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "codex",
+				Type:    "codex",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+	client.SetRetryRules([]RetryRule{{
+		Name:       "retry_all_400s",
+		Enabled:    true,
+		Action:     RetryRuleActionRetry,
+		StatusCode: RetryStatusCodeMatcher{Codes: []int{http.StatusBadRequest}},
+	}})
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model:  "gpt-5.4-mini",
+		Stream: true,
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_missing")
+	assert.Equal(t, 1, requests, "a deterministic Responses tool-trace error must not replay the request")
+	assert.Equal(t, 1, rm.selectCalls)
+	require.Len(t, rm.results, 1)
+	assert.False(t, rm.results[0].success)
+	assert.Equal(t, http.StatusBadRequest, rm.results[0].statusCode)
+}
+
 func TestGatewayClientCall_UsesRetryAfterHeaderAndReportsRetryDebugEvent(t *testing.T) {
 	requests := 0
 	var events []HTTPDebugEvent

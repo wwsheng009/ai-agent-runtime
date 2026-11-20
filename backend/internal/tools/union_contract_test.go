@@ -40,7 +40,7 @@ func TestAdvertisedSchemasHaveNoUnionProperties(t *testing.T) {
 
 	for _, includeMeta := range []bool{false, true} {
 		for _, protocol := range []string{"openai", "anthropic", "gemini"} {
-			payload := llm.BuildToolDefinitionsForRequest(definitions, protocol, "", nil, includeMeta, false)
+			payload := llm.BuildToolDefinitionsForRequest(definitions, protocol, "", nil, includeMeta)
 			schemas := protocolSchemaMaps(payload)
 			if len(schemas) == 0 {
 				t.Fatalf("protocol %s (includeMeta=%t) produced no tool schemas", protocol, includeMeta)
@@ -93,7 +93,7 @@ func TestGrepUnionParamsRenderPerProvider(t *testing.T) {
 	definitions := []types.ToolDefinition{*grepDefinition}
 	for _, includeMeta := range []bool{false, true} {
 		for _, protocol := range []string{"openai", "anthropic", "gemini"} {
-			payload := llm.BuildToolDefinitionsForRequest(definitions, protocol, "", nil, includeMeta, false)
+			payload := llm.BuildToolDefinitionsForRequest(definitions, protocol, "", nil, includeMeta)
 			schemas := protocolSchemaMaps(payload)
 			params := schemas["grep"]
 			if params == nil {
