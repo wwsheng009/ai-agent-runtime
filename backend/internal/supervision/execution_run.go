@@ -223,14 +223,6 @@ func formatRunTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-// formatRunTimePtr serializes an optional time.
-func formatRunTimePtr(t *time.Time) string {
-	if t == nil || t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
 // runTimeSQL returns a SQL parameter for an optional time: NULL when unset so
 // `IS NULL` predicates match (empty strings would not).
 func runTimeSQL(t *time.Time) interface{} {

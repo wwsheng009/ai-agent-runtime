@@ -444,16 +444,6 @@ func NewAnthropicStreamState() *AnthropicStreamState {
 	}
 }
 
-// getOrCreateBlock 获取或创建指定 index 的 tool call block
-func (s *AnthropicStreamState) getOrCreateBlock(index int) *AnthropicToolCall {
-	if tc, exists := s.blocks[index]; exists {
-		return tc
-	}
-	tc := &AnthropicToolCall{Index: index}
-	s.blocks[index] = tc
-	return tc
-}
-
 // ToMap 将累积结果转换为 map 格式（OpenAI 兼容）
 func (s *AnthropicStreamState) ToMap() map[string]interface{} {
 	result := map[string]interface{}{

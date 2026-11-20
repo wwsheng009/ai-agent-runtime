@@ -178,6 +178,18 @@
   `remotetools` 定向测试通过。`remotetools` 全包测试出现过一次 PowerShell
   CLR 初始化失败，单独重跑对应用例通过，属于环境级不稳定。
 
+### 0.13 第十三批已执行（2026-11-20）
+
+- `internal/skill`：删除 `isCodexMetadataPath`、`skillCacheKey`、
+  `skillToolLoopEnabled`、`Executor.buildDAG`、`Executor.checkDependencies`。
+- `internal/memorystore`：删除零引用 `Store.getTurnWindowByRange`。
+- `internal/supervision`：删除 `formatRunTimePtr`、
+  `hasResultsConsumptionRetryWake`。
+- `internal/llm/adapter`：删除 `getOrCreateBlock`、`codexToolName`、
+  `getReasoningModels`、`checkFinishReason`。
+- 验证：`skill`、`memorystore`、`supervision`、`llm/adapter` 的 `-short` 测试
+  全部通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

@@ -3270,14 +3270,6 @@ func mergeCodexTools(groups ...interface{}) []map[string]interface{} {
 	return merged
 }
 
-func codexToolName(tool map[string]interface{}) string {
-	if tool == nil {
-		return ""
-	}
-	name, _ := tool["name"].(string)
-	return strings.TrimSpace(name)
-}
-
 // getSummaryIndex 从事件中获取 summary_index 字段
 func getSummaryIndex(event map[string]interface{}) int {
 	if summaryIndex, ok := numericValue(event["summary_index"]); ok {

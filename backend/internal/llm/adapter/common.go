@@ -157,11 +157,6 @@ var reasoningModels = []string{
 	"gpt-5", "gpt-5-preview",
 }
 
-// getReasoningModels 获取推理模型列表
-func getReasoningModels() []string {
-	return reasoningModels
-}
-
 // isReasoningModelPrefix 检查是否为推理模型前缀
 func isReasoningModelPrefix(model string) bool {
 	for _, prefix := range reasoningModels {
@@ -216,16 +211,4 @@ func attachReasoningBlock(msg map[string]interface{}, reasoning *runtimetypes.Re
 		msg[assistantReasoningDetailsKey] = encoded
 	}
 	return msg
-}
-
-// checkFinishReason 检查完成原因
-func checkFinishReason(result map[string]interface{}) string {
-	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
-		if choice, ok := choices[0].(map[string]interface{}); ok {
-			if finishReason, ok := choice["finish_reason"].(string); ok {
-				return finishReason
-			}
-		}
-	}
-	return ""
 }

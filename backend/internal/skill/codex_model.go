@@ -308,17 +308,6 @@ func normalizeStandardToolList(values []string) []string {
 	return result
 }
 
-func isCodexMetadataPath(path string) bool {
-	path = filepath.Clean(strings.TrimSpace(path))
-	if path == "." || path == "" {
-		return false
-	}
-	if !strings.EqualFold(filepath.Base(path), "openai.yaml") {
-		return false
-	}
-	return strings.EqualFold(filepath.Base(filepath.Dir(path)), "agents")
-}
-
 func codexMetadataPathForSkillPath(skillPath string) string {
 	skillPath = filepath.Clean(strings.TrimSpace(skillPath))
 	if skillPath == "." || skillPath == "" {
@@ -390,21 +379,6 @@ func skillIdentityPath(skill *Skill) string {
 		return path
 	}
 	return ""
-}
-
-func skillCacheKey(skill *Skill) string {
-	if skill == nil {
-		return ""
-	}
-	if isCodexSkillSource(skill) {
-		if key := skillIdentityPath(skill); key != "" {
-			return key
-		}
-	}
-	if key := strings.TrimSpace(skill.Name); key != "" {
-		return key
-	}
-	return skillIdentityPath(skill)
 }
 
 func skillCacheKeyFromPath(path string) string {

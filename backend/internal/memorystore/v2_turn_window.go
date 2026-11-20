@@ -722,25 +722,6 @@ func (s *Store) getTurnWindowByID(ctx context.Context, id string) (TurnWindow, e
 	return scanTurnWindow(row)
 }
 
-func (s *Store) getTurnWindowByRange(ctx context.Context, projectKey, sessionID string, generation *int64, startSeq, endSeq int64) (TurnWindow, error) {
-	db, err := s.ensureV2()
-	if err != nil {
-		return TurnWindow{}, err
-	}
-	query := `SELECT ` + turnWindowColumns + `
-FROM memory_turn_windows
-WHERE project_key = ? AND session_id = ?`
-	args := []interface{}{projectKey, sessionID}
-	if generation != nil {
-		query += ` AND session_generation = ?`
-		args = append(args, *generation)
-	}
-	query += ` AND start_digest_seq = ? AND end_digest_seq = ?`
-	args = append(args, startSeq, endSeq)
-	row := db.QueryRowContext(ctx, query, args...)
-	return scanTurnWindow(row)
-}
-
 func scanTurnWindow(scanner turnDigestScanner) (TurnWindow, error) {
 	var item TurnWindow
 	var scope, status, createdAt, updatedAt, processedAt string

@@ -27,15 +27,6 @@ func IsResultsConsumptionRetryWake(reason string) bool {
 		strings.HasPrefix(strings.ToLower(reason), strings.ToLower(WakeReasonResultsConsumptionRetryPrefix)+":")
 }
 
-func hasResultsConsumptionRetryWake(wakes []WakePending) bool {
-	for _, wake := range wakes {
-		if IsResultsConsumptionRetryWake(wake.WakeReason) {
-			return true
-		}
-	}
-	return false
-}
-
 // AcceptedDeliveryError reports a failure that happened after the host had
 // durably accepted the wake prompt.  The acceptance boundary is deliberately
 // separate from the post-acceptance work: a caller must not submit the same

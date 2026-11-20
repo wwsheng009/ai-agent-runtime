@@ -634,19 +634,6 @@ const (
 	dsmlMarkerASCII                = "||DSML||"
 )
 
-// skillToolLoopEnabled 读取调用方显式开启的工具循环选项。默认关闭，保持旧
-// 调用方的单次调用语义；aicli 的 /skill 路径会为说明型技能开启它。
-func skillToolLoopEnabled(req *types.Request) bool {
-	if req == nil || len(req.Options) == 0 {
-		return false
-	}
-	value, ok := req.Options[skillToolLoopOptionKey]
-	if !ok {
-		return false
-	}
-	return skillOptionTruthy(value)
-}
-
 // skillToolLoopRequested 在显式选项缺省时按执行模式回落：模型驱动模式默认开启
 // 工具循环；调用方显式给 `tool_loop=false` 时仍尊重显式关闭。
 func skillToolLoopRequested(req *types.Request) bool {
@@ -1451,33 +1438,6 @@ func mergeSystemIntoUserPrompt(systemParts []string, userContent string) string 
 	}
 }
 
-// buildDAG 构建依赖图
-func (e *Executor) buildDAG(workflow *Workflow) *DAG {
-	dag := &DAG{
-		Nodes: make(map[string]*Node),
-	}
-
-	for _, step := range workflow.Steps {
-		dag.Nodes[step.ID] = &Node{
-			ID:         step.ID,
-			Data:       step,
-			Deps:       step.DependsOn,
-			Dependents: []string{},
-		}
-	}
-
-	// 建立反向依赖
-	for _, step := range workflow.Steps {
-		for _, dep := range step.DependsOn {
-			if node, ok := dag.Nodes[dep]; ok {
-				node.Dependents = append(node.Dependents, step.ID)
-			}
-		}
-	}
-
-	return dag
-}
-
 // findStep 查找步骤
 func (e *Executor) findStep(workflow *Workflow, stepID string) *WorkflowStep {
 	for _, step := range workflow.Steps {
@@ -1486,21 +1446,6 @@ func (e *Executor) findStep(workflow *Workflow, stepID string) *WorkflowStep {
 		}
 	}
 	return nil
-}
-
-// checkDependencies 检查依赖是否满足
-func (e *Executor) checkDependencies(step *WorkflowStep, results map[string]interface{}) bool {
-	if len(step.DependsOn) == 0 {
-		return true
-	}
-
-	for _, dep := range step.DependsOn {
-		if _, ok := results[dep]; !ok {
-			return false
-		}
-	}
-
-	return true
 }
 
 // prepareArgs 准备参数
