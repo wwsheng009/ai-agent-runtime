@@ -615,10 +615,6 @@ func parseChatAgentMessageCommand(argument string) (string, string) {
 	return strings.TrimSpace(target), strings.TrimSpace(rest)
 }
 
-func printChatAgentMessageResult(trigger bool, result *toolbroker.AgentMessageResult) {
-	fmt.Println(chatAgentMessageResultText(trigger, result))
-}
-
 func chatAgentMessageResultText(trigger bool, result *toolbroker.AgentMessageResult) string {
 	action := "sent"
 	if trigger {
@@ -1463,21 +1459,6 @@ func chatAgentPickerSelectionLines(agent toolbroker.AgentStatusResult) []string 
 	return lines
 }
 
-func printChatDebugAgentGraph(session *ChatSession) {
-	fmt.Println("Agent Graph:")
-	for _, line := range chatAgentGraphLines(session) {
-		fmt.Println(line)
-	}
-}
-
-func printChatDebugAgentControl(session *ChatSession) {
-	fmt.Println("AgentControl Registry:")
-	fmt.Println(chatAgentPanelRegistryLine(session))
-	for _, line := range chatAgentControlConsistencyLines(session) {
-		fmt.Println(line)
-	}
-}
-
 // chatAgentRegistryAuditTimeout 限定诊断审计的等待上限。审计是只读诊断：会话库
 // 连接池恒为单连接，启动期历史分页会长时间占用它。诊断必须降级（<error> /
 // consistency=error）而不是把 /web/api/status 快照挂死到客户端超时。
@@ -1699,10 +1680,6 @@ func chatAgentPanelLoadingLines(session *ChatSession) []string {
 
 func shouldUseChatAgentPanelModal(session *ChatSession) bool {
 	return useRuntimeSelectionPopup(session) && shouldUseInteractiveLineEditor(session)
-}
-
-func parseChatAgentPanelLimit(argument string, fallback int) int {
-	return parseChatAgentPanelOptions(argument, fallback).Limit
 }
 
 type chatAgentPanelOptions struct {
@@ -2700,11 +2677,6 @@ func chatCollabCommandText(session *ChatSession, command string) string {
 	lines := []string{heading}
 	lines = append(lines, chatCollabCommandLines(session, command)...)
 	return strings.Join(lines, "\n")
-}
-
-func parseChatTimelineLimit(command string, fallback int) int {
-	_, limit := parseChatTimelineTargetAndLimit(command, fallback)
-	return limit
 }
 
 func parseChatTimelineTargetAndLimit(command string, fallback int) (string, int) {

@@ -1086,16 +1086,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_debug.go", Func: "handleChatAgentTargetCommand", Kind: "fmt.Print", Count: 3},
 		{File: "chat_debug.go", Func: "handleChatAgentsCommand", Kind: "fmt.Print", Count: 6},
 		{File: "chat_debug.go", Func: "pickChatAgent", Kind: "fmt.Print", Count: 3},
-		// /agents send|followup 的打印已迁到命令包装函数 runChatAgentMessageCommand
-		// 的调用方：printChatAgentMessageResult 2→1、sendChatAgentMessageCommand 0→1，
-		// 该文件直接写入者总数不变（仅位置迁移，不是新增特性写入者）。
-		{File: "chat_debug.go", Func: "printChatAgentMessageResult", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatAgentPanel", Kind: "fmt.Print", Count: 4},
 		{File: "chat_debug.go", Func: "printChatAgentRoutingUsage", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatAgents", Kind: "fmt.Print", Count: 3},
 		{File: "chat_debug.go", Func: "printChatCollab", Kind: "fmt.Print", Count: 1},
-		{File: "chat_debug.go", Func: "printChatDebugAgentControl", Kind: "fmt.Print", Count: 3},
-		{File: "chat_debug.go", Func: "printChatDebugAgentGraph", Kind: "fmt.Print", Count: 2},
 		{File: "chat_debug.go", Func: "printChatDebugMailbox", Kind: "fmt.Print", Count: 2},
 		{File: "chat_debug.go", Func: "printChatDebugRoutingSummary", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatRouteLevels", Kind: "fmt.Print", Count: 1},

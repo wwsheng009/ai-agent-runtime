@@ -20,8 +20,8 @@ import (
 //   - renderSharedChatToolEvent：只允许 decode / 兼容回退路径调用；
 //   - SubmitToolResultDisplay：只允许旧事件日志与空白归一差异回退调用；
 //   - bridge 的 submitToolRequested / submitToolResultDisplay 兼容包装：
-//     生产代码不得再调用（coordinator 已改用 Block 变体），仅在测试与旧路径
-//     文档中保留。
+//     生产代码不得再调用（coordinator 已改用 Block 变体），且已移入
+//     chat_cleanup_test_helpers_test.go，仅在测试中保留。
 //
 // 新增调用点必须先证明它属于 decode/兼容路径，并同步本白名单与 §16.2。
 func TestToolRenderStringAPICallSitesFrozen(t *testing.T) {
@@ -40,8 +40,6 @@ func TestToolRenderStringAPICallSitesFrozen(t *testing.T) {
 		// 历史种子：旧日志或空白归一差异下的不透明导入回退。
 		"chat_history_reconcile.go :: method (persistedHistorySeedUnit) apply":       1,
 		"chat_history_reconcile.go :: method (persistedHistorySeedUnit) applyBefore": 1,
-		// bridge 兼容包装（生产调用方已迁移，仅测试使用）。
-		"chat_runtime_events.go :: method (*chatRuntimeEventBridge) submitToolResultDisplay": 1,
 	}
 	if !reflect.DeepEqual(got, want) {
 		var lines []string

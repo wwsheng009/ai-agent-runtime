@@ -3742,26 +3742,6 @@ func (b *chatRuntimeEventBridge) clearPriorityTranscriptTarget(target chatRuntim
 	b.renderMu.Unlock()
 }
 
-// submitToolRequested 将 chat-core 的 direct tool 请求接入统一编码器。
-// 与 runtime event 一样，编码器负责稳定 call identity 与 mutable chain
-// 生命周期；调用方不得再为同一请求调用 submitSupplement。
-//
-// 兼容入口：生产调用方已迁移到 submitToolRequestedBlock（结构化运行态文本）；
-// 本方法仅为测试与旧路径保留。
-func (b *chatRuntimeEventBridge) submitToolRequested(toolCallID, toolName string, args map[string]interface{}) {
-	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
-		return
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	payload := cloneRuntimeEventLogPayload(args)
-	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
-	payload["tool_name"] = strings.TrimSpace(toolName)
-	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
-	b.applyChangeSet(b.renderEncoder.SubmitToolCall(toolCallID, toolName, args))
-	b.appendEventLog(event)
-}
-
 // submitToolRequestedBlock 是 submitToolRequested 的结构化形态：运行态 head
 // 与上下文续行随 tool.requested 事件一起落账，Scene 运行 head 与 ActiveBand
 // 文本取自同一装配（见 compactToolRequestedBlock）；老日志没有这两个字段时
@@ -3783,85 +3763,6 @@ func (b *chatRuntimeEventBridge) submitToolRequestedBlock(toolCallID, toolName s
 	}
 	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
 	b.applyChangeSet(b.renderEncoder.SubmitToolCallRunning(toolCallID, toolName, args, block.head, block.lines))
-	b.appendEventLog(event)
-}
-
-// submitToolProgress 更新 direct tool 的 mutable source。进度没有独立
-// committed cell，不产生额外 transcript boundary。
-func (b *chatRuntimeEventBridge) submitToolProgress(toolCallID, toolName, progress string) {
-	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(progress) == "" {
-		return
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	event := runtimeevents.Event{
-		Type:     "tool.progress",
-		ToolName: toolName,
-		Payload:  map[string]interface{}{"tool_call_id": strings.TrimSpace(toolCallID), "tool_name": strings.TrimSpace(toolName), "progress": progress},
-	}
-	b.applyChangeSet(b.renderEncoder.SubmitToolProgress(toolCallID, toolName, progress))
-	b.appendEventLog(event)
-}
-
-// submitToolResult 完成 direct tool chain。结果与请求共享一个 Scene cell，
-// 并由 Encode 路径落入同一 runtime event log，replay 时不再另造 supplement。
-func (b *chatRuntimeEventBridge) submitToolResult(toolCallID, toolName, output, toolErr string, success bool) {
-	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" {
-		return
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	payload := map[string]interface{}{
-		"tool_call_id": strings.TrimSpace(toolCallID),
-		"tool_name":    strings.TrimSpace(toolName),
-		"success":      success,
-	}
-	if strings.TrimSpace(output) != "" {
-		payload["output"] = output
-	}
-	if strings.TrimSpace(toolErr) != "" {
-		payload["error"] = toolErr
-	}
-	typeName := "tool.completed"
-	if !success {
-		typeName = "tool.failed"
-	}
-	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
-	b.applyChangeSet(b.renderEncoder.SubmitToolResult(toolCallID, toolName, output, toolErr, success))
-	b.appendEventLog(event)
-}
-
-// submitToolResultDisplay completes a chat-core tool from its already
-// normalized transcript block. The raw result remains in the event log for
-// diagnostics, while display_head is the authoritative transcript source used
-// by both live Scene mapping and replay.
-//
-// 兼容入口：生产调用方已迁移到 submitToolResultBlock；本方法仅为测试与旧路径
-// 保留。
-func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, output, toolErr string, success bool, display string) {
-	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
-		return
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	payload := map[string]interface{}{
-		"tool_call_id": strings.TrimSpace(toolCallID),
-		"tool_name":    strings.TrimSpace(toolName),
-		"success":      success,
-		"display_head": display,
-	}
-	if strings.TrimSpace(output) != "" {
-		payload["output"] = output
-	}
-	if strings.TrimSpace(toolErr) != "" {
-		payload["error"] = toolErr
-	}
-	typeName := "tool.completed"
-	if !success {
-		typeName = "tool.failed"
-	}
-	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
-	b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(toolCallID, display))
 	b.appendEventLog(event)
 }
 

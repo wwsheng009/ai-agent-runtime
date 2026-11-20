@@ -3,11 +3,55 @@ package commands
 import (
 	"io"
 	"os"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
+
+// submitToolRequested and submitToolResultDisplay are test-only compatibility
+// wrappers. Production callers use the structured *Block APIs.
+func (b *chatRuntimeEventBridge) submitToolRequested(toolCallID, toolName string, args map[string]interface{}) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := cloneRuntimeEventLogPayload(args)
+	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
+	payload["tool_name"] = strings.TrimSpace(toolName)
+	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolCall(toolCallID, toolName, args))
+	b.appendEventLog(event)
+}
+
+func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, output, toolErr string, success bool, display string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := map[string]interface{}{
+		"tool_call_id": strings.TrimSpace(toolCallID),
+		"tool_name":    strings.TrimSpace(toolName),
+		"success":      success,
+		"display_head": display,
+	}
+	if strings.TrimSpace(output) != "" {
+		payload["output"] = output
+	}
+	if strings.TrimSpace(toolErr) != "" {
+		payload["error"] = toolErr
+	}
+	typeName := "tool.completed"
+	if !success {
+		typeName = "tool.failed"
+	}
+	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(toolCallID, display))
+	b.appendEventLog(event)
+}
 
 func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, string, error) {
 	return newChatSessionManagerWithRuntimeConfig(dir, nil, "", "")

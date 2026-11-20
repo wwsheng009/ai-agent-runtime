@@ -99,6 +99,20 @@
 - 验证：默认 commands 测试、`integration` tag 的 commands 编译与
   `integration` tag 的 transport 编译均通过。
 
+### 0.6 第六批已执行（2026-11-20）
+
+- `chatRuntimeEventBridge`：
+  - `submitToolRequested`、`submitToolResultDisplay` 移入
+    `chat_cleanup_test_helpers_test.go`；
+  - 删除零引用的 `submitToolProgress`、`submitToolResult`；
+  - 同步更新 tool-render freeze 白名单。
+- 删除 `chat_debug.go` 中 5 个零引用函数：
+  `printChatAgentMessageResult`、`printChatDebugAgentGraph`、
+  `printChatDebugAgentControl`、`parseChatAgentPanelLimit`、
+  `parseChatTimelineLimit`；同步降低 DirectWriter inventory 基线。
+- 验证：commands 的 Debug、tool-render freeze、DirectWriter inventory 与 history
+  display 定向测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
