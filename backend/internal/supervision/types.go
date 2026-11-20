@@ -310,7 +310,20 @@ type WakePending struct {
 	CreatedAt time.Time  `json:"created_at,omitempty"`
 	ClaimedAt *time.Time `json:"claimed_at,omitempty"`
 	ClaimedBy string     `json:"claimed_by,omitempty"`
+	// DeliveryState is a durable prompt-acceptance fence. Empty means the
+	// prompt may be submitted; submitting is ambiguous and must never be
+	// blindly submitted again; accepted means the host returned an acceptance
+	// receipt and only control-plane repair/ledger work may remain.
+	DeliveryState string `json:"delivery_state,omitempty"`
+	// MarkerRepairRequired records the accepted-delivery marker obligation.
+	// It is independent of the delivery ledger so either repair may be retried.
+	MarkerRepairRequired bool `json:"marker_repair_required,omitempty"`
 }
+
+const (
+	WakeDeliveryStateSubmitting = "submitting"
+	WakeDeliveryStateAccepted   = "accepted"
+)
 
 // WakeDelivered is the durable notification delivery ledger (C2-4 #15 / B4,
 // doc 6.6). It records that one notify_key was delivered, which makes the

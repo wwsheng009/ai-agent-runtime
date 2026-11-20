@@ -591,14 +591,53 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 	if len(pending) == 0 {
 		return nil, nil, nil
 	}
-	// The runnable check only matters when there is a wake to consume: a
-	// busy parent with nothing pending is a cheap no-op, not an error.
-	if runnable != nil && !runnable(ctx, rootScopeID, parentSessionID, parentTeamID) {
+	// Results-consumption retries are control-plane work, not model turns.
+	// Drain them alone so unrelated model wakes stay pending and the repair
+	// neither spends the auto-wake budget nor marks lifecycle notices delivered.
+	//
+	// A non-empty delivery fence is never eligible for an ordinary prompt.
+	// Accepted rows can be repaired by the control plane, but submitting (and
+	// any future/unknown fence state) is ambiguous: after a restart there is no
+	// durable proof that the host did not accept the prompt. Leave those rows
+	// untouched until an explicit recovery decision changes the fence.
+	eligible := make([]WakePending, 0, len(pending))
+	for _, wake := range pending {
+		state := strings.TrimSpace(wake.DeliveryState)
+		if state != "" && state != WakeDeliveryStateAccepted {
+			continue
+		}
+		eligible = append(eligible, wake)
+	}
+	pending = eligible
+	if len(pending) == 0 {
+		return nil, nil, nil
+	}
+	markerOnlyDrain := false
+	for _, wake := range pending {
+		if IsResultsConsumptionRetryWake(wake.WakeReason) || strings.EqualFold(strings.TrimSpace(wake.DeliveryState), WakeDeliveryStateAccepted) {
+			markerOnlyDrain = true
+			break
+		}
+	}
+	if markerOnlyDrain {
+		markerWakes := make([]WakePending, 0, len(pending))
+		for _, wake := range pending {
+			if IsResultsConsumptionRetryWake(wake.WakeReason) || strings.EqualFold(strings.TrimSpace(wake.DeliveryState), WakeDeliveryStateAccepted) {
+				markerWakes = append(markerWakes, wake)
+			}
+		}
+		pending = markerWakes
+	}
+	// Marker-only repairs never start a model turn and therefore do not need
+	// the parent actor to be runnable. A parked/busy parent must not strand a
+	// durable results-consumption repair behind the model-turn admission gate.
+	// The runnable check only matters for ordinary wakes.
+	if !markerOnlyDrain && runnable != nil && !runnable(ctx, rootScopeID, parentSessionID, parentTeamID) {
 		return nil, nil, ErrWakeParentBusy
 	}
 
 	now := s.now().UTC()
-	if admission != nil {
+	if admission != nil && !markerOnlyDrain {
 		kept := make([]WakePending, 0, len(pending))
 		for _, w := range pending {
 			decision, admitErr := admission(ctx, w)
@@ -633,6 +672,10 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 	for _, w := range pending {
 		class := WakeBudgetClassOf(w.WakeReason)
 		if _, ok := allowed[class]; ok {
+			continue
+		}
+		if markerOnlyDrain || IsResultsConsumptionRetryWake(w.WakeReason) {
+			allowed[class] = true
 			continue
 		}
 		allowed[class] = s.AllowAutoWake(ctx, rootScopeID, class, now)
@@ -672,9 +715,11 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 		if w.NotificationSeq > 0 && (firstNotificationSeq == 0 || w.NotificationSeq < firstNotificationSeq) {
 			firstNotificationSeq = w.NotificationSeq
 		}
-		claimedByClass[class]++
-		if _, ok := classReasons[class]; !ok {
-			classReasons[class] = w.WakeReason
+		if !IsResultsConsumptionRetryWake(w.WakeReason) {
+			claimedByClass[class]++
+			if _, ok := classReasons[class]; !ok {
+				classReasons[class] = w.WakeReason
+			}
 		}
 		claimed = append(claimed, w)
 	}
@@ -683,6 +728,9 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 	}
 	if firstNotificationSeq > 0 {
 		afterSeq = firstNotificationSeq - 1
+	}
+	if markerOnlyDrain {
+		return claimed, nil, nil
 	}
 
 	digest, err := BuildDigest(ctx, s.store, DigestRequest{
@@ -700,24 +748,26 @@ func (s *WakeScheduler) drainRunnable(ctx context.Context, parentSessionID, pare
 	if err != nil {
 		return claimed, nil, err
 	}
-	// Mark delivered: a wake counts as a delivery attempt toward the parent.
-	for _, item := range digest.Items {
-		if item.NotificationID == "" {
-			continue
+	if !markerOnlyDrain {
+		// Mark delivered: a wake counts as a delivery attempt toward the parent.
+		for _, item := range digest.Items {
+			if item.NotificationID == "" {
+				continue
+			}
+			// Rows that already travelled that far are skipped so a repeated drain
+			// cannot churn version/updated_at on an unchanged row (plan §4.3).
+			if item.DeliveryState == DeliveryDelivered || item.DeliveryState == DeliverySeen {
+				continue
+			}
+			_ = s.store.MarkNotificationDelivered(ctx, item.NotificationID, now)
 		}
-		// Rows that already travelled that far are skipped so a repeated drain
-		// cannot churn version/updated_at on an unchanged row (plan §4.3).
-		if item.DeliveryState == DeliveryDelivered || item.DeliveryState == DeliverySeen {
-			continue
-		}
-		_ = s.store.MarkNotificationDelivered(ctx, item.NotificationID, now)
 	}
 	// Only a digest that actually turns into a parent turn spends budget:
 	// claiming a stale wake whose notification was resolved while the parent
 	// was busy must not consume the next window, while a progress-only digest
 	// (which is delivered, see WakeConsumer) must, or the opt-in progress
 	// check would flood the parent with report turns once per tick.
-	if digestDeliverable(claimed, digest) {
+	if !markerOnlyDrain && digestDeliverable(claimed, digest) {
 		for class, count := range claimedByClass {
 			if count == 0 {
 				continue
@@ -736,7 +786,7 @@ func (s *WakeScheduler) markConsumed(ctx context.Context, w WakePending, consump
 		return nil
 	}
 	if key := strings.TrimSpace(w.NotifyKey); key != "" {
-		_ = s.store.MarkWakeDelivered(ctx, WakeDelivered{
+		if err := s.store.MarkWakeDelivered(ctx, WakeDelivered{
 			NotifyKey:             key,
 			RootScopeID:           w.RootScopeID,
 			TargetParentSessionID: w.TargetParentSessionID,
@@ -750,7 +800,11 @@ func (s *WakeScheduler) markConsumed(ctx context.Context, w WakePending, consump
 			DeliveredBy:           WakeClaimOwner,
 			Consumption:           consumption,
 			Reason:                reason,
-		})
+		}); err != nil {
+			// The pending row is the retry evidence. Never resolve it when the
+			// replay-suppression ledger did not make it to durable storage.
+			return err
+		}
 	}
 	return s.store.ResolveWakePending(ctx, w.WakeID)
 }
@@ -898,6 +952,15 @@ func (s *WakeScheduler) FilterDeliveredWakes(ctx context.Context, wakes []WakePe
 // (AC-P1-4b). Recording is best-effort per wake; the first error is returned
 // so callers can log it without losing the remaining keys.
 func (s *WakeScheduler) RecordWakeDelivery(ctx context.Context, wakes []WakePending) error {
+	return s.RecordWakeConsumption(ctx, wakes, "model_turn", "")
+}
+
+// RecordWakeConsumption persists the delivery ledger for a wake that was
+// consumed without necessarily starting a model turn (for example, the
+// marker-only results-consumption repair). The ledger is written before the
+// pending row is resolved so a crash cannot turn a consumed control action
+// into an unbounded replay.
+func (s *WakeScheduler) RecordWakeConsumption(ctx context.Context, wakes []WakePending, consumption, reason string) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
@@ -906,6 +969,14 @@ func (s *WakeScheduler) RecordWakeDelivery(ctx context.Context, wakes []WakePend
 	for _, w := range wakes {
 		key := strings.TrimSpace(w.NotifyKey)
 		if key == "" {
+			continue
+		}
+		// A partial batch write is expected after a transient database error.
+		// Skip keys that already have a durable ledger row so a retry only
+		// attempts the missing suffix; MarkWakeDelivered remains idempotent as
+		// a second line of defence.
+		delivered, lookupErr := s.store.IsWakeDelivered(ctx, key)
+		if lookupErr == nil && delivered {
 			continue
 		}
 		err := s.store.MarkWakeDelivered(ctx, WakeDelivered{
@@ -920,10 +991,14 @@ func (s *WakeScheduler) RecordWakeDelivery(ctx context.Context, wakes []WakePend
 			EventSeq:              w.EventSeq,
 			DeliveredAt:           now,
 			DeliveredBy:           "wake_consumer",
-			Consumption:           "model_turn",
+			Consumption:           strings.TrimSpace(consumption),
+			Reason:                strings.TrimSpace(reason),
 		})
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if lookupErr != nil {
+			firstErr = joinDeliveryErrors(firstErr, lookupErr)
+		}
+		if err != nil {
+			firstErr = joinDeliveryErrors(firstErr, err)
 		}
 	}
 	return firstErr

@@ -2,6 +2,8 @@ package runtimeapi
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -16,6 +18,15 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
+
+type apiMarkerFailureBatchStore struct {
+	subagentbatch.BatchStore
+	err error
+}
+
+func (s apiMarkerFailureBatchStore) MarkTurnResultsConsumed(context.Context, string, string) error {
+	return s.err
+}
 
 // TestAPIBatchLifecycleProjector_FailedBatchIsDurable 钉住 API 宿主对后台 batch
 // 终态的对等能力（此前只有 CLI 有线）：失败 batch 必须落成 critical/unresolved
@@ -175,7 +186,12 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 
 	// §6.12 挂起记录的唯一事实来源是 durable batch 控制面（actor 的 turnSuspended
 	// 回查它；缺了它 parked 状态会自愈成"未挂起"）。
-	handler.SetSubagentBatchStore(newAPISupervisionBatchStore(t))
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "api-batch-parked-resume.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	handler.SetSubagentBatchStore(batchStore)
 	now := time.Now().UTC()
 	created, err := handler.getSubagentBatchStore().CreateBatch(ctx, &subagentbatch.SubagentBatch{
 		BatchID:         batchID,
@@ -243,10 +259,10 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 		"G2：API 宿主必须接 DeliverResume，否则 resume 上下文永远到不了父 turn 的 prompt")
 	deliveries := 0
 	prompts := make([]string, 0, 1)
-	handler.supervisionWakeSubmit = func(_ context.Context, _, prompt string) error {
+	handler.supervisionWakeSubmit = func(_ context.Context, _, prompt string) (bool, error) {
 		deliveries++
 		prompts = append(prompts, prompt)
-		return nil
+		return true, nil
 	}
 	// G3：投递成功的 resume 必须在宿主总线上播报一次 turn.resumed（挂起 → 恢复的
 	// 可观测闭环）；投递失败路径见 supervision 包的单测（不播报）。
@@ -298,6 +314,170 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	})
 	require.NoError(t, err)
 	require.Empty(t, pending, "投递成功后 wake 必须离开 pending（认领 + release）")
+}
+
+func TestAPIResumeMarkerFailureSchedulesMarkerOnlyRetry(t *testing.T) {
+	handler, supervisionStore := newAPISupervisionBudgetTestHandler(t, "api-resume-marker-failure")
+	ctx := context.Background()
+	const (
+		parentSession = "sess_marker_failure"
+		turnID        = "turn_marker_failure"
+		rootScope     = "sess_marker_failure"
+	)
+	baseBatchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "api-resume-marker-failure.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = baseBatchStore.Close() })
+	require.True(t, baseBatchStore.IsDurable())
+	store := apiMarkerFailureBatchStore{
+		BatchStore: baseBatchStore,
+		err:        errors.New("marker write failed"),
+	}
+	handler.SetSubagentBatchStore(store)
+	require.NoError(t, store.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSession,
+		RootScopeID:   rootScope,
+		ObligationIDs: []string{"batch-marker-failure"},
+		ParkedAt:      time.Now().UTC(),
+	}))
+	_, err = supervision.ProjectLifecycle(ctx, supervisionStore, handler.getSupervisionWakeScheduler(), supervision.LifecycleProjection{
+		RootScopeID:           rootScope,
+		TargetParentSessionID: parentSession,
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "batch-marker-failure",
+		EventType:             "subagent.batch.failed",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionTerminated,
+		Reason:                "batch failed",
+		ResolutionState:       supervision.ResolutionUnresolved,
+		TurnID:                turnID,
+	})
+	require.NoError(t, err)
+
+	deliveries := 0
+	handler.supervisionWakeSubmit = func(context.Context, string, string) (bool, error) {
+		deliveries++
+		return true, nil
+	}
+	consumer := handler.supervisionWakeConsumer(handler.getSupervisionWakeScheduler())
+	require.NotNil(t, consumer)
+	consumer.Admission = nil
+	consumer.Runnable = func(context.Context, string, string, string) bool { return true }
+	consumer.ResumeBuilder = func(_ context.Context, req supervision.ResumeContextRequest) *supervision.ResumeContext {
+		return &supervision.ResumeContext{
+			TurnID:          req.TurnID,
+			ParentSessionID: req.ParentSessionID,
+			RootScopeID:     req.RootScopeID,
+			TotalCount:      1,
+			PendingCount:    0,
+			Terminal:        true,
+			Text:            "terminal batch results are available",
+		}
+	}
+
+	err = consumer.MaybeWakeParent(ctx, parentSession, "", rootScope)
+	require.ErrorContains(t, err, "marker write failed")
+	require.Equal(t, 1, deliveries, "the prompt receipt succeeded before marker persistence failed")
+
+	pending, err := supervisionStore.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           rootScope,
+		TargetParentSessionID: parentSession,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "accepted prompt must not be resubmitted; only the marker repair remains pending")
+	require.True(t, supervision.IsResultsConsumptionRetryWake(pending[0].WakeReason))
+	require.Equal(t, supervision.ResultsConsumptionRetryWakeReason(turnID), pending[0].WakeReason)
+	require.Equal(t, turnID, pending[0].ParentTurnID)
+	record, ok, err := baseBatchStore.GetTurnSuspension(ctx, parentSession, turnID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, record.ResultsConsumed, "failed durable receipt must keep the synthesis gate closed")
+
+}
+
+func TestAPIResumeWithoutAcceptanceReceiptKeepsWakeAndMarkerClosed(t *testing.T) {
+	handler, supervisionStore := newAPISupervisionBudgetTestHandler(t, "api-resume-unconfirmed-receipt")
+	ctx := context.Background()
+	const (
+		parentSession = "sess_unconfirmed_receipt"
+		turnID        = "turn_unconfirmed_receipt"
+		rootScope     = "sess_unconfirmed_receipt"
+	)
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "api-resume-unconfirmed-receipt.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	require.True(t, batchStore.IsDurable())
+	handler.SetSubagentBatchStore(batchStore)
+	require.NoError(t, batchStore.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSession,
+		RootScopeID:   rootScope,
+		ObligationIDs: []string{"batch-unconfirmed-receipt"},
+		ParkedAt:      time.Now().UTC(),
+	}))
+	_, err = supervision.ProjectLifecycle(ctx, supervisionStore, handler.getSupervisionWakeScheduler(), supervision.LifecycleProjection{
+		RootScopeID:           rootScope,
+		TargetParentSessionID: parentSession,
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "batch-unconfirmed-receipt",
+		EventType:             "subagent.batch.failed",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionTerminated,
+		Reason:                "batch failed",
+		ResolutionState:       supervision.ResolutionUnresolved,
+		TurnID:                turnID,
+	})
+	require.NoError(t, err)
+
+	submissions := 0
+	handler.supervisionWakeSubmit = func(context.Context, string, string) (bool, error) {
+		submissions++
+		return false, nil
+	}
+	var resumed []runtimeevents.Event
+	handler.getRuntimeEventBus().Subscribe(runtimeevents.EventTurnResumed, func(event runtimeevents.Event) {
+		resumed = append(resumed, event)
+	})
+	consumer := handler.supervisionWakeConsumer(handler.getSupervisionWakeScheduler())
+	require.NotNil(t, consumer)
+	consumer.Admission = nil
+	consumer.Runnable = func(context.Context, string, string, string) bool { return true }
+	consumer.ResumeBuilder = func(_ context.Context, req supervision.ResumeContextRequest) *supervision.ResumeContext {
+		return &supervision.ResumeContext{
+			TurnID:          req.TurnID,
+			ParentSessionID: req.ParentSessionID,
+			RootScopeID:     req.RootScopeID,
+			TotalCount:      1,
+			PendingCount:    0,
+			Terminal:        true,
+			Text:            "terminal batch results are available",
+		}
+	}
+
+	err = consumer.MaybeWakeParent(ctx, parentSession, "", rootScope)
+	require.ErrorContains(t, err, "did not return a durable acceptance receipt")
+	require.Equal(t, 1, submissions)
+	require.Empty(t, resumed, "an unconfirmed submission must not announce turn.resumed")
+
+	record, ok, err := batchStore.GetTurnSuspension(ctx, parentSession, turnID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, record.ResultsConsumed, "without an acceptance receipt, the synthesis gate must remain closed")
+
+	pending, err := supervisionStore.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           rootScope,
+		TargetParentSessionID: parentSession,
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "the original wake must be released for retry")
+	require.False(t, supervision.IsResultsConsumptionRetryWake(pending[0].WakeReason),
+		"marker-only repair is valid only after prompt acceptance")
 }
 
 // TestAPIBatchLifecycleProjector_CompletedBatchSchedulesSettledWake 是 CLI

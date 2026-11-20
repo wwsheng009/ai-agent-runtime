@@ -62,6 +62,20 @@ type Store interface {
 	// untouched. Reports whether a row was actually returned to pending.
 	ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error)
 	ResolveWakePending(ctx context.Context, wakeID string) error
+	// MarkWakeDeliverySubmitting creates a durable no-replay fence before the
+	// host acceptance boundary. A crash while submitting is ambiguous and may
+	// only be handled by control-plane recovery.
+	MarkWakeDeliverySubmitting(ctx context.Context, wakeIDs []string, retryMarker bool) error
+	// MarkWakeDeliveryRejected removes only a submitting fence after the host
+	// has explicitly reported that no prompt was accepted.
+	MarkWakeDeliveryRejected(ctx context.Context, wakeIDs []string) error
+	// MarkWakeDeliveryAccepted records the receipt boundary and releases the
+	// wake rows for idempotent marker/ledger recovery.
+	MarkWakeDeliveryAccepted(ctx context.Context, wakeIDs []string, retryMarker bool) error
+	// ReleaseStaleSubmittingWakePending makes ambiguous submission rows
+	// available for control-plane recovery without clearing their no-replay
+	// fence.
+	ReleaseStaleSubmittingWakePending(ctx context.Context, claimedBefore time.Time) (int64, error)
 	// IsWakeDelivered reports whether a notify_key was already delivered
 	// (C2-4 #15 / B4). An empty key reports false: legacy wakes without an
 	// idempotency key keep the coalescing-only behavior.

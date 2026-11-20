@@ -494,6 +494,17 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 				ALTER TABLE supervision_resume_claims ADD COLUMN recovered_at TEXT;
 			`,
 		},
+		{
+			// Prompt acceptance is a durable fence. Once the host has accepted a
+			// wake, recovery must never mistake an unclaimed row for permission to
+			// submit the original prompt again.
+			Version: 12,
+			Name:    "wake_delivery_acceptance_fence",
+			UpSQL: `
+				ALTER TABLE supervision_wake_pending ADD COLUMN delivery_state TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN marker_repair_required INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -1292,9 +1303,9 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 			wake_id, root_scope_id, target_parent_session_id, target_parent_team_id,
 			parent_turn_id, parent_episode_id, finalization_policy, settlement_id, settlement_cohort_id,
 			wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by,
-			notify_key, event_kind, obligation_id, event_seq
+			notify_key, event_kind, obligation_id, event_seq, delivery_state, marker_repair_required
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE ? = '' OR NOT EXISTS (
 			SELECT 1 FROM supervision_wake_delivered WHERE notify_key = ?
 		)
@@ -1320,6 +1331,8 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 		strings.TrimSpace(w.EventKind),
 		strings.TrimSpace(w.ObligationID),
 		w.EventSeq,
+		strings.TrimSpace(w.DeliveryState),
+		supervisionBoolToSQLiteInt(w.MarkerRepairRequired),
 		notifyKey,
 		notifyKey,
 	)
@@ -1351,7 +1364,7 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 	if filter.UnclaimedOnly {
 		clauses = append(clauses, "claimed_at IS NULL")
 	}
-	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, parent_turn_id, parent_episode_id, finalization_policy, settlement_id, settlement_cohort_id, wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by, notify_key, event_kind, obligation_id, event_seq FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
+	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, parent_turn_id, parent_episode_id, finalization_policy, settlement_id, settlement_cohort_id, wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by, notify_key, event_kind, obligation_id, event_seq, delivery_state, marker_repair_required FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
 	if filter.Limit > 0 {
 		query += " LIMIT " + fmt.Sprintf("%d", filter.Limit)
 	}
@@ -1365,16 +1378,19 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 		var w WakePending
 		var createdAt, claimedAt sql.NullString
 		var targetParentSession, targetParentTeam sql.NullString
+		var markerRepairRequired int
 		if err := rows.Scan(&w.WakeID, &w.RootScopeID, &targetParentSession, &targetParentTeam,
 			&w.ParentTurnID, &w.ParentEpisodeID, &w.FinalizationPolicy, &w.SettlementID, &w.SettlementCohortID,
 			&w.WakeReason, &w.NotificationSeq, &w.TurnID, &w.DedupKey, &createdAt, &claimedAt,
-			&w.ClaimedBy, &w.NotifyKey, &w.EventKind, &w.ObligationID, &w.EventSeq); err != nil {
+			&w.ClaimedBy, &w.NotifyKey, &w.EventKind, &w.ObligationID, &w.EventSeq,
+			&w.DeliveryState, &markerRepairRequired); err != nil {
 			return nil, err
 		}
 		w.TargetParentSessionID = targetParentSession.String
 		w.TargetParentTeamID = targetParentTeam.String
 		w.CreatedAt = parseSupervisionTime(createdAt)
 		w.ClaimedAt = parseNullableSupervisionTime(claimedAt)
+		w.MarkerRepairRequired = markerRepairRequired != 0
 		records = append(records, w)
 	}
 	return records, rows.Err()
@@ -1433,6 +1449,156 @@ func (s *SQLiteSupervisionStore) ResolveWakePending(ctx context.Context, wakeID 
 		return fmt.Errorf("resolve wake pending: %w", err)
 	}
 	return nil
+}
+
+// MarkWakeDeliverySubmitting durably closes the replay window before crossing
+// the host acceptance boundary. On restart, a submitting row is ambiguous and
+// must follow control-plane recovery rather than another prompt submission.
+func (s *SQLiteSupervisionStore) MarkWakeDeliverySubmitting(ctx context.Context, wakeIDs []string, retryMarker bool) error {
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, WakeDeliveryStateSubmitting, retryMarker)
+}
+
+// MarkWakeDeliveryRejected clears a submitting fence only when the host
+// explicitly confirmed that it accepted no prompt. Accepted/ambiguous rows
+// cannot be made eligible for normal prompt delivery again.
+func (s *SQLiteSupervisionStore) MarkWakeDeliveryRejected(ctx context.Context, wakeIDs []string) error {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return err
+	}
+	ids := uniqueWakeIDs(wakeIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin rejected wake delivery: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET delivery_state = '', marker_repair_required = 0,
+			claimed_at = NULL, claimed_by = ''
+		WHERE delivery_state = 'submitting' AND wake_id IN (`+placeholders+`)
+	`, args...)
+	if err != nil {
+		return fmt.Errorf("mark wake delivery rejected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rejected wake delivery: %w", err)
+	}
+	return nil
+}
+
+// MarkWakeDeliveryAccepted records the host's durable prompt receipt. The
+// accepted state is monotonic: retries may add a marker-repair obligation, but
+// neither accepted nor submitting rows can return to normal prompt delivery.
+func (s *SQLiteSupervisionStore) MarkWakeDeliveryAccepted(ctx context.Context, wakeIDs []string, retryMarker bool) error {
+	return s.updateWakeDeliveryFence(ctx, wakeIDs, WakeDeliveryStateAccepted, retryMarker)
+}
+
+// ReleaseStaleSubmittingWakePending clears stale claims without clearing the
+// submitting fence. The rows become visible to recovery, but never eligible
+// for another prompt submission.
+func (s *SQLiteSupervisionStore) ReleaseStaleSubmittingWakePending(ctx context.Context, claimedBefore time.Time) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET claimed_at = NULL, claimed_by = ''
+		WHERE delivery_state = 'submitting' AND claimed_at IS NOT NULL AND claimed_at < ?
+	`, formatSupervisionTime(claimedBefore))
+	if err != nil {
+		return 0, fmt.Errorf("release stale submitting wakes: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count released stale submitting wakes: %w", err)
+	}
+	return affected, nil
+}
+
+func (s *SQLiteSupervisionStore) updateWakeDeliveryFence(ctx context.Context, wakeIDs []string, state string, retryMarker bool) error {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return err
+	}
+	ids := uniqueWakeIDs(wakeIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := []interface{}{
+		WakeDeliveryStateAccepted,
+		state,
+		state,
+		supervisionBoolToSQLiteInt(retryMarker),
+		state,
+		state,
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin wake delivery fence: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET delivery_state = CASE
+				WHEN delivery_state = ? AND ? = 'submitting' THEN delivery_state
+				ELSE ?
+			END,
+			marker_repair_required = CASE
+				WHEN marker_repair_required != 0 OR ? != 0 THEN 1
+				ELSE marker_repair_required
+			END,
+			claimed_at = CASE WHEN ? = 'accepted' THEN NULL ELSE claimed_at END,
+			claimed_by = CASE WHEN ? = 'accepted' THEN '' ELSE claimed_by END
+		WHERE wake_id IN (`+placeholders+`)
+	`,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("update wake delivery fence: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit wake delivery fence: %w", err)
+	}
+	return nil
+}
+
+func uniqueWakeIDs(wakeIDs []string) []string {
+	ids := make([]string, 0, len(wakeIDs))
+	seen := make(map[string]struct{}, len(wakeIDs))
+	for _, id := range wakeIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func supervisionBoolToSQLiteInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // --- Wake budget claims ---

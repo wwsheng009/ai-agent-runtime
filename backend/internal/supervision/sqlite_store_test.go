@@ -273,6 +273,102 @@ func TestSQLiteStore_WakePending_ClaimIdempotent(t *testing.T) {
 	require.Len(t, items, 0)
 }
 
+func TestSQLiteStore_WakePending_AcceptanceFenceIsDurableAndMonotonic(t *testing.T) {
+	store := newTestStore(t, "supervision-wake-acceptance-fence")
+	ctx := context.Background()
+	require.NoError(t, store.InsertWakePending(ctx, WakePending{
+		WakeID:      "wake-fence-1",
+		RootScopeID: "root-fence",
+		WakeReason:  "timeout",
+		DedupKey:    "root-fence|wake-fence-1",
+	}))
+	claimed, err := store.ClaimWakePending(ctx, "wake-fence-1", WakeClaimOwner, time.Now().UTC())
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	require.NoError(t, store.MarkWakeDeliverySubmitting(ctx, []string{"wake-fence-1"}, false))
+	items, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-fence"})
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, WakeDeliveryStateSubmitting, items[0].DeliveryState)
+
+	require.NoError(t, store.MarkWakeDeliveryAccepted(ctx, []string{"wake-fence-1"}, true))
+	items, err = store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-fence", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, WakeDeliveryStateAccepted, items[0].DeliveryState)
+	require.True(t, items[0].MarkerRepairRequired)
+	require.Nil(t, items[0].ClaimedAt)
+
+	// A replay of the fence is idempotent and must not clear an already required
+	// marker repair obligation.
+	require.NoError(t, store.MarkWakeDeliveryAccepted(ctx, []string{"wake-fence-1"}, false))
+	items, err = store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-fence"})
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, WakeDeliveryStateAccepted, items[0].DeliveryState)
+	require.True(t, items[0].MarkerRepairRequired)
+}
+
+func TestSQLiteStore_WakePending_RejectedAndStaleSubmittingTransitions(t *testing.T) {
+	store := newTestStore(t, "supervision-wake-rejected-stale")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, wakeID := range []string{"wake-rejected", "wake-stale", "wake-fresh"} {
+		require.NoError(t, store.InsertWakePending(ctx, WakePending{
+			WakeID:      wakeID,
+			RootScopeID: "root-fence",
+			WakeReason:  "timeout",
+			DedupKey:    "root-fence|" + wakeID,
+		}))
+	}
+
+	for _, item := range []struct {
+		id string
+		at time.Time
+	}{
+		{id: "wake-rejected", at: now},
+		{id: "wake-stale", at: now.Add(-2 * time.Hour)},
+		{id: "wake-fresh", at: now},
+	} {
+		claimed, err := store.ClaimWakePending(ctx, item.id, WakeClaimOwner, item.at)
+		require.NoError(t, err)
+		require.True(t, claimed)
+		require.NoError(t, store.MarkWakeDeliverySubmitting(ctx, []string{item.id}, true))
+	}
+
+	released, err := store.ReleaseStaleSubmittingWakePending(ctx, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, released)
+
+	items, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-fence"})
+	require.NoError(t, err)
+	require.Len(t, items, 3)
+	byID := make(map[string]WakePending, len(items))
+	for _, item := range items {
+		byID[item.WakeID] = item
+	}
+	require.Equal(t, WakeDeliveryStateSubmitting, byID["wake-stale"].DeliveryState)
+	require.Nil(t, byID["wake-stale"].ClaimedAt, "stale ambiguous claim is released for recovery")
+	require.True(t, byID["wake-stale"].MarkerRepairRequired, "recovery metadata is preserved")
+	require.Equal(t, WakeDeliveryStateSubmitting, byID["wake-fresh"].DeliveryState)
+	require.NotNil(t, byID["wake-fresh"].ClaimedAt, "fresh claim remains owned")
+
+	require.NoError(t, store.MarkWakeDeliveryAccepted(ctx, []string{"wake-stale"}, false))
+	require.NoError(t, store.MarkWakeDeliveryRejected(ctx, []string{"wake-rejected", "wake-stale"}))
+	items, err = store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-fence"})
+	require.NoError(t, err)
+	byID = make(map[string]WakePending, len(items))
+	for _, item := range items {
+		byID[item.WakeID] = item
+	}
+	require.Empty(t, byID["wake-rejected"].DeliveryState)
+	require.False(t, byID["wake-rejected"].MarkerRepairRequired)
+	require.Nil(t, byID["wake-rejected"].ClaimedAt)
+	require.Equal(t, WakeDeliveryStateAccepted, byID["wake-stale"].DeliveryState, "explicit rejection cannot roll back an accepted fence")
+	require.True(t, byID["wake-stale"].MarkerRepairRequired)
+}
+
 // TestSQLiteStore_TeamEdge_AncestorsAndCycle verifies the durable Team->Team
 // parent edges (doc 6.1/6.7): root-first ancestor chains and cycle rejection.
 func TestSQLiteStore_TeamEdge_AncestorsAndCycle(t *testing.T) {

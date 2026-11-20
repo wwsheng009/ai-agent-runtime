@@ -1717,7 +1717,12 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, err
 		}
-		loop.observeChildWaitResults(currentCtx, traceID, sessionID, toolResults)
+		if err := loop.observeChildWaitResults(currentCtx, traceID, sessionID, toolResults); err != nil {
+			// The result packet is still available to the parent, but a failed
+			// durable receipt must remain visible and must not open the settlement
+			// gate. Run-end settlement will keep the parked turn for recovery.
+			loop.agent.AddError("child results consumption receipt failed: " + err.Error())
+		}
 		// Observe completed results, not requested windows: the host may clamp a
 		// timeout or return ready immediately. Use this same observation for the
 		// runtime event and the advisory passed to toolResultsToPayloads below.
@@ -4409,9 +4414,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 // observeChildWaitResults records delivery of settled child results without
 // changing the parent's execution mode. A child finishing does not imply that
 // the parent has finished review, integration, verification or further work.
-func (loop *ReActLoop) observeChildWaitResults(ctx context.Context, traceID, sessionID string, results []toolExecutionResult) {
+func (loop *ReActLoop) observeChildWaitResults(ctx context.Context, traceID, sessionID string, results []toolExecutionResult) error {
 	if loop == nil {
-		return
+		return nil
 	}
 	for _, result := range results {
 		if result.Error != "" || !toolregistry.IsSpellingOf(toolbroker.ToolSubagentWait, result.Call.Name) {
@@ -4431,35 +4436,55 @@ func (loop *ReActLoop) observeChildWaitResults(ctx context.Context, traceID, ses
 		if packet == nil {
 			continue
 		}
-		resultsConsumed := loop.markTurnResultsConsumed(ctx, sessionID)
-		loop.emitRuntimeEvent("tool_loop.child_results_received", sessionID, result.Call.Name, map[string]interface{}{
-			"trace_id":         traceID,
-			"batch_id":         packet.BatchID,
-			"task_count":       packet.TaskCount,
-			"completion_order": append([]string(nil), packet.CompletionOrder...),
-			"next_action":      toolbroker.ContinueParentWorkNextAction,
-			"results_consumed": resultsConsumed,
-		})
-		return
+		consumption, markErr := loop.markTurnResultsConsumed(ctx, sessionID)
+		payload := map[string]interface{}{
+			"trace_id":                   traceID,
+			"batch_id":                   packet.BatchID,
+			"task_count":                 packet.TaskCount,
+			"completion_order":           append([]string(nil), packet.CompletionOrder...),
+			"next_action":                toolbroker.ContinueParentWorkNextAction,
+			"results_consumed":           consumption == turnResultsConsumptionMarked,
+			"results_consumption_status": string(consumption),
+		}
+		if markErr != nil {
+			payload["results_consumption_error"] = markErr.Error()
+			loop.emitRuntimeEvent("tool_loop.child_results_consumption_failed", sessionID, result.Call.Name, payload)
+		}
+		loop.emitRuntimeEvent("tool_loop.child_results_received", sessionID, result.Call.Name, payload)
+		return markErr
 	}
+	return nil
 }
+
+type turnResultsConsumptionStatus string
+
+const (
+	turnResultsConsumptionNotApplicable turnResultsConsumptionStatus = "not_applicable"
+	turnResultsConsumptionMarked        turnResultsConsumptionStatus = "marked"
+	turnResultsConsumptionUnavailable   turnResultsConsumptionStatus = "unavailable"
+	turnResultsConsumptionFailed        turnResultsConsumptionStatus = "failed"
+)
 
 // markTurnResultsConsumed records that child results reached the parent's
 // context. It does not mean the parent's work is done. A later run-end
 // settlement checks this durable flag before clearing the parked record.
-func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID string) bool {
+// Durable stores must support the marker and both identities must be known;
+// absence/failure is never reported as a successful receipt.
+func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID string) (turnResultsConsumptionStatus, error) {
 	if loop == nil || loop.agent == nil {
-		return true
+		return turnResultsConsumptionNotApplicable, nil
 	}
 	coordinator := loop.agent.GetSubagentBatchCoordinator()
 	if coordinator == nil {
-		return true
+		return turnResultsConsumptionNotApplicable, nil
 	}
 	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return turnResultsConsumptionNotApplicable, nil
+	}
 	marker, ok := store.(subagentbatch.TurnResultsConsumptionStore)
 	if !ok || marker == nil {
-		// Stores without the optional capability keep the pre-gate behavior.
-		return true
+		return turnResultsConsumptionUnavailable, fmt.Errorf("durable batch store does not support turn result consumption receipts")
 	}
 	turnID := strings.TrimSpace(loop.turnID)
 	if turnID == "" {
@@ -4467,7 +4492,7 @@ func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID st
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || turnID == "" {
-		return true
+		return turnResultsConsumptionUnavailable, fmt.Errorf("cannot mark turn results consumed without session and turn identity")
 	}
 	baseCtx := ctx
 	if baseCtx == nil || baseCtx.Err() != nil {
@@ -4475,7 +4500,10 @@ func (loop *ReActLoop) markTurnResultsConsumed(ctx context.Context, sessionID st
 	}
 	markCtx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
 	defer cancel()
-	return marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID) == nil
+	if err := marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID); err != nil {
+		return turnResultsConsumptionFailed, fmt.Errorf("mark turn results consumed (%s/%s): %w", sessionID, turnID, err)
+	}
+	return turnResultsConsumptionMarked, nil
 }
 
 func synthesisWaitResult(output interface{}) (*toolbroker.AgentWaitResult, bool) {

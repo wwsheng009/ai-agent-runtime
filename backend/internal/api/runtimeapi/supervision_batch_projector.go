@@ -209,23 +209,57 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 			return ok && state.AcceptsResume()
 		},
 		Deliver: func(ctx context.Context, parentSessionID, _ string, _ *supervision.Digest, _ []string) error {
-			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePrompt)
+			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePrompt, nil)
 		},
 		// C2-1（改动 #4）/ G2：wake 升级为 resume——投递的不再是"去看摘要"的固定
 		// 提示，而是同一 turn 的 resume 上下文（turn_id + rollup + I1 终局判据 +
 		// 可用动作清单，见 ResumePrompt）。resume 为 nil（投影未接线）时
 		// AutoWakePromptFor 逐字节回落 AutoWakePrompt，接线本身不改变旧行为。
 		DeliverResume: func(ctx context.Context, parentSessionID, _ string, _ *supervision.Digest, _ []string, resume *supervision.ResumeContext) error {
-			err := h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePromptFor(resume))
-			if err == nil && resume != nil && resume.Terminal && resume.PendingCount == 0 &&
-				resume.TotalCount > 0 && !resume.HasAgentSessionObligations() {
-				// SubmitPromptAsync accepted a prompt that already contains the
-				// terminal batch result summaries/artifacts. The parent context
-				// now owns those results, so settlement may clear the park
-				// record. agent_session results stay unclaimed until the parent
-				// reads them through subagent_wait.
-				h.markTurnResultsConsumed(ctx, parentSessionID, resume.TurnID)
+			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePromptFor(resume), func() error {
+				if resume == nil || !resume.Terminal || resume.PendingCount != 0 ||
+					resume.TotalCount <= 0 || resume.HasAgentSessionObligations() {
+					return nil
+				}
+				// The durable prompt receipt proves that the terminal batch
+				// summaries/artifacts crossed the actor boundary. It does not
+				// mean the parent turn has finalized.
+				_, err := h.markTurnResultsConsumed(ctx, parentSessionID, resume.TurnID)
+				return err
+			})
+		},
+		OnAcceptedDeliveryError: func(ctx context.Context, parentSessionID, rootScopeID string, _ *supervision.Digest, wakes []supervision.WakePending, resume *supervision.ResumeContext, _ error) error {
+			turnID := ""
+			episodeID := ""
+			if resume != nil {
+				turnID = strings.TrimSpace(resume.TurnID)
 			}
+			for _, wake := range wakes {
+				if turnID == "" {
+					turnID = strings.TrimSpace(wake.ParentTurnID)
+					if turnID == "" {
+						turnID = strings.TrimSpace(wake.TurnID)
+					}
+				}
+				if episodeID == "" {
+					episodeID = strings.TrimSpace(wake.ParentEpisodeID)
+				}
+			}
+			if turnID == "" {
+				return fmt.Errorf("cannot schedule results-consumption repair without turn identity")
+			}
+			_, err := scheduler.ScheduleWake(ctx, supervision.WakeRequest{
+				RootScopeID:           rootScopeID,
+				TargetParentSessionID: parentSessionID,
+				TurnID:                turnID,
+				ParentTurnID:          turnID,
+				ParentEpisodeID:       episodeID,
+				WakeReason:            supervision.ResultsConsumptionRetryWakeReason(turnID),
+			})
+			return err
+		},
+		DeliverResultsConsumptionRetry: func(ctx context.Context, parentSessionID, _ string, turnID string) error {
+			_, err := h.markTurnResultsConsumed(ctx, parentSessionID, turnID)
 			return err
 		},
 		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
@@ -239,42 +273,69 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 }
 
 // markTurnResultsConsumed closes the durable synthesis gate for the API host.
-// Best-effort: stores without the optional capability keep the pre-gate
-// behavior, and a failed write leaves the turn parked rather than losing data.
-func (h *Handler) markTurnResultsConsumed(ctx context.Context, parentSessionID, turnID string) {
+// In-memory/absent stores keep the legacy behavior. Durable stores must expose
+// the marker and both identities must be known; a failed write is returned so
+// the caller can preserve the durable retry path.
+func (h *Handler) markTurnResultsConsumed(ctx context.Context, parentSessionID, turnID string) (bool, error) {
 	if h == nil {
-		return
+		return false, nil
 	}
 	store := h.getSubagentBatchStore()
+	if store == nil || !store.IsDurable() {
+		return false, nil
+	}
 	marker, ok := store.(subagentbatch.TurnResultsConsumptionStore)
 	if !ok || marker == nil {
-		return
+		return true, fmt.Errorf("durable batch store does not support turn result consumption receipts")
 	}
 	parentSessionID = strings.TrimSpace(parentSessionID)
 	turnID = strings.TrimSpace(turnID)
 	if parentSessionID == "" || turnID == "" {
-		return
+		return true, fmt.Errorf("cannot mark turn results consumed without session and turn identity")
 	}
 	if ctx == nil || ctx.Err() != nil {
 		ctx = context.Background()
 	}
 	markCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_ = marker.MarkTurnResultsConsumed(markCtx, parentSessionID, turnID)
+	if err := marker.MarkTurnResultsConsumed(markCtx, parentSessionID, turnID); err != nil {
+		return true, fmt.Errorf("mark turn results consumed (%s/%s): %w", parentSessionID, turnID, err)
+	}
+	return true, nil
 }
 
 // submitSupervisionWakePrompt 是 API 宿主 wake/resume 的唯一提交通道：Deliver 与
-// DeliverResume 共用它，避免两条投递路径的 actor 解析 / RunMeta 漂移。异步提交
-// （SubmitPromptAsync）保持既有契约：投递回调不阻塞投影方。
-func (h *Handler) submitSupervisionWakePrompt(ctx context.Context, parentSessionID, prompt string) error {
+// DeliverResume 共用它，避免两条投递路径的 actor 解析 / RunMeta 漂移。成功返回
+// 表示 prompt 已持久化并被 actor 接管，而非父 turn 已完成。
+func (h *Handler) submitSupervisionWakePrompt(ctx context.Context, parentSessionID, prompt string, afterAccepted func() error) error {
 	if h != nil && h.supervisionWakeSubmit != nil {
-		return h.supervisionWakeSubmit(ctx, parentSessionID, prompt)
+		accepted, err := h.supervisionWakeSubmit(ctx, parentSessionID, prompt)
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			return fmt.Errorf("supervision wake submit did not return a durable acceptance receipt")
+		}
+		if afterAccepted != nil {
+			if err := afterAccepted(); err != nil {
+				return supervision.NewAcceptedDeliveryError(err, true)
+			}
+		}
+		return nil
 	}
 	actor := h.apiSessionActor(parentSessionID)
 	if actor == nil {
 		return fmt.Errorf("parent actor not found")
 	}
-	return actor.SubmitPromptAsync(ctx, prompt, h.apiSessionRunMeta(ctx, parentSessionID))
+	if _, err := actor.SubmitPromptAsyncWithReceipt(ctx, prompt, h.apiSessionRunMeta(ctx, parentSessionID)); err != nil {
+		return err
+	}
+	if afterAccepted != nil {
+		if err := afterAccepted(); err != nil {
+			return supervision.NewAcceptedDeliveryError(err, true)
+		}
+	}
+	return nil
 }
 
 // resumePolicyView 返回 A6 的**静态**派发门控视图（深度）。口径与

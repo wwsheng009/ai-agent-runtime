@@ -79,6 +79,13 @@ type WakeConsumer struct {
 	// and must not announce a resume that never started. Like the other hooks it
 	// is best-effort: a nil hook is a no-op and panics are contained.
 	Announce func(ctx context.Context, announcement ResumeAnnouncement)
+	// OnAcceptedDeliveryError repairs a failure that happened after the host
+	// durably accepted the prompt. The hook must persist a marker-only retry
+	// before returning; the original prompt is never made retryable.
+	OnAcceptedDeliveryError func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakes []WakePending, resume *ResumeContext, cause error) error
+	// DeliverResultsConsumptionRetry handles the marker-only wake created by
+	// OnAcceptedDeliveryError. It must not submit a model prompt.
+	DeliverResultsConsumptionRetry func(ctx context.Context, parentSessionID, rootScopeID, turnID string) error
 	// Admission is the shared resume-admission service. When set, only wakes
 	// that resolve to ResumeSameParkedTurn (or the P0 legacy bridge) may start a
 	// model turn; late/detached settlements are consumed as durable
@@ -111,6 +118,12 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	if c.Admission != nil {
 		claimed, digest, err = c.Wakes.DrainRunnableWithAdmission(ctx, parentSessionID, parentTeamID, rootScopeID, c.Runnable,
 			func(admitCtx context.Context, w WakePending) (ResumeAdmissionDecision, error) {
+				// A results-consumption retry is control-plane-only and must
+				// remain eligible even when the parent turn has already ended:
+				// it never starts a model turn.
+				if IsResultsConsumptionRetryWake(w.WakeReason) {
+					return ResumeLegacy, nil
+				}
 				result, admitErr := c.Admission.Evaluate(admitCtx, ResumeAdmissionInputFromWake(w))
 				if admitErr != nil {
 					// A read failure is retryable, never "idle means resume".
@@ -126,9 +139,23 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 		// ErrWakeParentBusy / ErrWakeRateLimited: keep the wake durable;
 		// the next runnable point (or the next natural turn preflight)
 		// delivers the digest.
+		if hasControlPlaneWake(claimed) {
+			ids := wakeIDsOf(claimed)
+			if releaseErr := c.releaseForRetry(ctx, ids); releaseErr != nil {
+				return joinDeliveryErrors(err, releaseErr)
+			}
+		}
 		return err
 	}
-	if len(claimed) == 0 || digest == nil {
+	if len(claimed) == 0 {
+		return nil
+	}
+	// Marker-only repair must run before digest delivery checks. It does not
+	// need lifecycle content and must never reach Deliver/DeliverResume.
+	if hasControlPlaneWake(claimed) {
+		return c.deliverResultsConsumptionRetry(ctx, parentSessionID, rootScopeID, claimed)
+	}
+	if digest == nil {
 		return nil
 	}
 	// The underlying notification may have been acknowledged, actioned, or
@@ -228,31 +255,21 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// authoritative identity is the ledger's ParentTurnID, which the builder
 	// prefers when it is present (I3 保底).
 	resume := c.buildResume(ctx, parentSessionID, rootScopeID, deliverable, digest)
+	// Close the replay window before crossing the host's acceptance boundary.
+	// A submitting row is intentionally ambiguous: recovery may repair it, but
+	// no later drain may submit the original prompt a second time.
+	if err := c.Wakes.store.MarkWakeDeliverySubmitting(ctx, wakeIDs, false); err != nil {
+		return joinDeliveryErrors(err, c.releaseForRetry(ctx, wakeIDs))
+	}
 	delivered := false
 	if c.DeliverResume != nil {
 		if err := c.DeliverResume(ctx, parentSessionID, rootScopeID, digest, wakeIDs, resume); err != nil {
-			// Delivery failed: release the claims anyway. The notification
-			// stays durable in the inbox and the next natural parent turn
-			// injects it via preflight; keeping the row claimed would block
-			// coalescing of later events for the same dedup key.
-			for _, held := range claims {
-				_ = c.Admission.Release(ctx, held)
-			}
-			c.release(ctx, wakeIDs)
-			return err
+			return c.handleDeliveryError(ctx, parentSessionID, rootScopeID, digest, deliverable, resume, wakeIDs, claims, err)
 		}
 		delivered = true
 	} else if c.Deliver != nil {
 		if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, wakeIDs); err != nil {
-			// Delivery failed: release the claims anyway. The notification
-			// stays durable in the inbox and the next natural parent turn
-			// injects it via preflight; keeping the row claimed would block
-			// coalescing of later events for the same dedup key.
-			for _, held := range claims {
-				_ = c.Admission.Release(ctx, held)
-			}
-			c.release(ctx, wakeIDs)
-			return err
+			return c.handleDeliveryError(ctx, parentSessionID, rootScopeID, digest, deliverable, resume, wakeIDs, claims, err)
 		}
 		delivered = true
 	}
@@ -260,20 +277,204 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// 仍留在 durable 队列里等下一次可运行窗口，播报会与事实相反。
 	if delivered {
 		c.announceResume(ctx, parentSessionID, rootScopeID, deliverable, resume)
-		if c.Admission != nil {
-			for _, held := range claims {
-				_ = c.Admission.MarkSubmitted(ctx, held, resumeClaimModelTurnID(held, strings.Join(wakeIDs, ",")))
-			}
-		}
 	}
+	var submittedErr error
+	if delivered && c.Admission != nil {
+		submittedErr = c.markClaimsSubmitted(ctx, claims, wakeIDs)
+	}
+	acceptedErr := c.Wakes.store.MarkWakeDeliveryAccepted(ctx, wakeIDs, false)
 	// The delivery ledger is written only after a delivery actually happened
 	// (AC-P1-4b): a failed delivery is never recorded, so the retry reuses the
 	// same notify key and still reaches the parent.
-	_ = c.Wakes.RecordWakeDelivery(ctx, deliverable)
+	recordErr := c.Wakes.RecordWakeDelivery(ctx, deliverable)
 	// The turn delivery consumed the wakes: a later event for the same
 	// root + parent + reason must coalesce into a fresh row again.
-	c.release(ctx, wakeIDs)
-	return nil
+	var resolveErr error
+	if acceptedErr == nil && recordErr == nil {
+		resolveErr = c.resolveWakeIDs(ctx, wakeIDs)
+	} else {
+		// Keep the accepted/submitting row observable for control-plane
+		// recovery. Releasing the claim is safe because the fence prevents
+		// normal prompt delivery.
+		resolveErr = c.releaseForRetry(ctx, wakeIDs)
+	}
+	return joinDeliveryErrors(joinDeliveryErrors(acceptedErr, submittedErr), joinDeliveryErrors(recordErr, resolveErr))
+}
+
+func (c *WakeConsumer) handleDeliveryError(
+	ctx context.Context,
+	parentSessionID, rootScopeID string,
+	digest *Digest,
+	deliverable []WakePending,
+	resume *ResumeContext,
+	wakeIDs []string,
+	claims map[string]ResumeClaim,
+	deliveryErr error,
+) error {
+	accepted, wasAccepted := AcceptedDelivery(deliveryErr)
+	if !wasAccepted {
+		var claimErr error
+		for _, held := range claims {
+			if c.Admission != nil {
+				claimErr = joinDeliveryErrors(claimErr, c.Admission.Release(ctx, held))
+			}
+		}
+		rejectErr := c.Wakes.store.MarkWakeDeliveryRejected(ctx, wakeIDs)
+		releaseErr := c.releaseForRetry(ctx, wakeIDs)
+		return joinDeliveryErrors(deliveryErr, joinDeliveryErrors(claimErr, joinDeliveryErrors(rejectErr, releaseErr)))
+	}
+
+	acceptedFenceErr := c.Wakes.store.MarkWakeDeliveryAccepted(ctx, wakeIDs, accepted.RetryMarker)
+	var repairErr error
+	if accepted.RetryMarker {
+		if c.OnAcceptedDeliveryError == nil {
+			repairErr = fmt.Errorf("accepted wake requires marker repair but no post-acceptance repair hook is configured")
+		} else {
+			repairErr = c.OnAcceptedDeliveryError(ctx, parentSessionID, rootScopeID, digest, deliverable, resume, accepted)
+		}
+	}
+
+	// The actor accepted the prompt; even a later model error must not put the
+	// original prompt back on the queue. Preserve evidence before closing it.
+	c.announceResume(ctx, parentSessionID, rootScopeID, deliverable, resume)
+	submittedErr := c.markClaimsSubmitted(ctx, claims, wakeIDs)
+	recordErr := c.Wakes.RecordWakeDelivery(ctx, deliverable)
+	var resolveErr error
+	if acceptedFenceErr == nil && repairErr == nil && recordErr == nil {
+		resolveErr = c.resolveWakeIDs(ctx, wakeIDs)
+	} else {
+		resolveErr = c.releaseForRetry(ctx, wakeIDs)
+	}
+	return joinDeliveryErrors(accepted, joinDeliveryErrors(acceptedFenceErr, joinDeliveryErrors(repairErr, joinDeliveryErrors(submittedErr, joinDeliveryErrors(recordErr, resolveErr)))))
+}
+
+// hasControlPlaneWake identifies rows that must never re-enter model delivery.
+// The durable acceptance fence is authoritative even when the original wake
+// reason was an ordinary lifecycle reason.
+func hasControlPlaneWake(wakes []WakePending) bool {
+	for _, wake := range wakes {
+		if IsResultsConsumptionRetryWake(wake.WakeReason) ||
+			strings.EqualFold(strings.TrimSpace(wake.DeliveryState), WakeDeliveryStateAccepted) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *WakeConsumer) markClaimsSubmitted(ctx context.Context, claims map[string]ResumeClaim, wakeIDs []string) error {
+	if c == nil || c.Admission == nil {
+		return nil
+	}
+	var firstErr error
+	wakeID := strings.Join(wakeIDs, ",")
+	for _, held := range claims {
+		if err := c.Admission.MarkSubmitted(ctx, held, resumeClaimModelTurnID(held, wakeID)); err != nil {
+			firstErr = joinDeliveryErrors(firstErr, err)
+		}
+	}
+	return firstErr
+}
+
+func (c *WakeConsumer) resolveWakeIDs(ctx context.Context, wakeIDs []string) error {
+	if c == nil || c.Wakes == nil {
+		return nil
+	}
+	var firstErr error
+	for _, id := range wakeIDs {
+		if err := c.Wakes.ResolveWake(ctx, id); err != nil {
+			firstErr = joinDeliveryErrors(firstErr, fmt.Errorf("resolve wake %s: %w", id, err))
+		}
+	}
+	return firstErr
+}
+
+func (c *WakeConsumer) deliverResultsConsumptionRetry(ctx context.Context, parentSessionID, rootScopeID string, claimed []WakePending) error {
+	var repairWakes, otherWakes []WakePending
+	for _, wake := range claimed {
+		if IsResultsConsumptionRetryWake(wake.WakeReason) ||
+			strings.EqualFold(strings.TrimSpace(wake.DeliveryState), WakeDeliveryStateAccepted) {
+			repairWakes = append(repairWakes, wake)
+		} else {
+			otherWakes = append(otherWakes, wake)
+		}
+	}
+	releaseOtherErr := c.releaseForRetry(ctx, wakeIDsOf(otherWakes))
+	if len(repairWakes) == 0 {
+		return releaseOtherErr
+	}
+	groups := make(map[string][]WakePending)
+	var turnIDs []string
+	for _, wake := range repairWakes {
+		turnID := firstNonEmptyString(strings.TrimSpace(wake.ParentTurnID), strings.TrimSpace(wake.TurnID))
+		// Accepted rows whose marker was already recorded only need the
+		// delivery ledger/replay fence and can be repaired without a turn
+		// identity. Results-consumption retry wakes and accepted rows carrying
+		// marker_repair_required still need the parent turn identity for the
+		// marker-only host callback.
+		if turnID == "" && (IsResultsConsumptionRetryWake(wake.WakeReason) || wake.MarkerRepairRequired) {
+			releaseErr := c.releaseForRetry(ctx, wakeIDsOf(repairWakes))
+			return joinDeliveryErrors(fmt.Errorf("results-consumption retry wake %s has no turn identity", wake.WakeID), joinDeliveryErrors(releaseOtherErr, releaseErr))
+		}
+		if turnID == "" {
+			turnID = wake.WakeID
+		}
+		if _, exists := groups[turnID]; !exists {
+			turnIDs = append(turnIDs, turnID)
+		}
+		groups[turnID] = append(groups[turnID], wake)
+	}
+	for groupIndex, turnID := range turnIDs {
+		groupWakes := groups[turnID]
+		needsMarkerRepair := false
+		for _, wake := range groupWakes {
+			if IsResultsConsumptionRetryWake(wake.WakeReason) || wake.MarkerRepairRequired {
+				needsMarkerRepair = true
+				break
+			}
+		}
+		if needsMarkerRepair {
+			if c.DeliverResultsConsumptionRetry == nil {
+				releaseErr := c.releaseResultsConsumptionRetryGroups(ctx, turnIDs[groupIndex:], groups)
+				return joinDeliveryErrors(fmt.Errorf("results-consumption retry handler is not configured"), joinDeliveryErrors(releaseOtherErr, releaseErr))
+			}
+			if err := c.DeliverResultsConsumptionRetry(ctx, parentSessionID, rootScopeID, turnID); err != nil {
+				releaseErr := c.releaseResultsConsumptionRetryGroups(ctx, turnIDs[groupIndex:], groups)
+				return joinDeliveryErrors(err, joinDeliveryErrors(releaseOtherErr, releaseErr))
+			}
+		}
+		recordErr := c.Wakes.RecordWakeConsumption(ctx, groupWakes, "results_consumption_repair", "marker_repaired")
+		if recordErr != nil {
+			releaseErr := c.releaseResultsConsumptionRetryGroups(ctx, turnIDs[groupIndex:], groups)
+			return joinDeliveryErrors(recordErr, joinDeliveryErrors(releaseOtherErr, releaseErr))
+		}
+		resolvedErr := c.resolveWakeIDs(ctx, wakeIDsOf(groupWakes))
+		if resolvedErr != nil {
+			// The marker write is idempotent; leave the wake retryable if its
+			// own durable resolution failed. Earlier groups are already
+			// committed and must not be reopened.
+			releaseErr := c.releaseResultsConsumptionRetryGroups(ctx, turnIDs[groupIndex:], groups)
+			return joinDeliveryErrors(resolvedErr, joinDeliveryErrors(releaseOtherErr, releaseErr))
+		}
+	}
+	return releaseOtherErr
+}
+
+func (c *WakeConsumer) releaseResultsConsumptionRetryGroups(ctx context.Context, turnIDs []string, groups map[string][]WakePending) error {
+	var remaining []WakePending
+	for _, turnID := range turnIDs {
+		remaining = append(remaining, groups[turnID]...)
+	}
+	return c.releaseForRetry(ctx, wakeIDsOf(remaining))
+}
+
+func wakeIDsOf(wakes []WakePending) []string {
+	ids := make([]string, 0, len(wakes))
+	for _, wake := range wakes {
+		if id := strings.TrimSpace(wake.WakeID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // resumeCapacityRequest describes the resume the claimed wakes would start, in
@@ -484,6 +685,23 @@ func (c *WakeConsumer) release(ctx context.Context, wakeIDs []string) {
 	for _, id := range wakeIDs {
 		_ = c.Wakes.ResolveWake(ctx, id)
 	}
+}
+
+// releaseForRetry drops the current claim without resolving the durable wake.
+// A failed delivery has no receipt, so a later runnable-point drain must be
+// able to retry the same wake instead of depending on a new lifecycle event.
+func (c *WakeConsumer) releaseForRetry(ctx context.Context, wakeIDs []string) error {
+	var releaseErr error
+	for _, id := range wakeIDs {
+		if err := c.Wakes.ReleaseWake(ctx, id, WakeClaimOwner); err != nil {
+			if releaseErr == nil {
+				releaseErr = fmt.Errorf("wake %s: %w", id, err)
+			} else {
+				releaseErr = fmt.Errorf("%v; wake %s: %w", releaseErr, id, err)
+			}
+		}
+	}
+	return releaseErr
 }
 
 // releasePending resolves the claimed rows that admission/coalescing left out
