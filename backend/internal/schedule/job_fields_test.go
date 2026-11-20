@@ -82,14 +82,17 @@ func TestCreateRequestPersistsJobFields(t *testing.T) {
 	svc := NewService(store, func() time.Time { return now })
 	delay := int64(600)
 	rec, err := svc.Create("session-1", CreateRequest{
-		Prompt:          "p",
-		Title:           "t",
-		AfterSeconds:    &delay,
-		Goal:            "  做一次系统检查  ",
-		Plan:            []string{" 检查磁盘 ", "", "检查内存"},
-		TargetKind:      TargetHeadless,
-		TargetWorkspace: " /ws ",
-		TargetProfile:   " scheduled ",
+		Prompt:                "p",
+		Title:                 "t",
+		AfterSeconds:          &delay,
+		Goal:                  "  做一次系统检查  ",
+		Plan:                  []string{" 检查磁盘 ", "", "检查内存"},
+		TargetKind:            TargetHeadless,
+		TargetWorkspace:       " /ws ",
+		TargetProfile:         " scheduled ",
+		TargetProvider:        " gateway ",
+		TargetModel:           " model-a ",
+		TargetReasoningEffort: " high ",
 	}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -114,6 +117,48 @@ func TestCreateRequestPersistsJobFields(t *testing.T) {
 	}
 	if task.TargetKind != TargetHeadless || task.TargetWorkspace != "/ws" || task.TargetProfile != "scheduled" {
 		t.Fatalf("stored target mismatch: kind=%q ws=%q profile=%q", task.TargetKind, task.TargetWorkspace, task.TargetProfile)
+	}
+	if task.TargetProvider != "gateway" || task.TargetModel != "model-a" || task.TargetReasoningEffort != "high" {
+		t.Fatalf("stored route overrides mismatch: provider=%q model=%q reasoning=%q",
+			task.TargetProvider, task.TargetModel, task.TargetReasoningEffort)
+	}
+}
+
+func TestCreateSessionTargetClearsWorkspaceExecutionOverrides(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, func() time.Time { return now })
+	delay := int64(600)
+	rec, err := svc.Create("session-1", CreateRequest{
+		Prompt:                "p",
+		Title:                 "t",
+		AfterSeconds:          &delay,
+		TargetKind:            TargetSession,
+		TargetWorkspace:       " /stale/workspace ",
+		TargetProfile:         " stale-profile ",
+		TargetProvider:        " stale-provider ",
+		TargetModel:           " stale-model ",
+		TargetReasoningEffort: " high ",
+	}, OriginManual)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	task, ok, err := store.Get(rec.ID)
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if task.TargetKind != TargetSession || task.SessionID != "session-1" {
+		t.Fatalf("session target binding mismatch: kind=%q session=%q", task.TargetKind, task.SessionID)
+	}
+	if task.TargetWorkspace != "" || task.TargetProfile != "" ||
+		task.TargetProvider != "" || task.TargetModel != "" || task.TargetReasoningEffort != "" {
+		t.Fatalf("session target retained workspace execution overrides: %+v", task)
 	}
 }
 

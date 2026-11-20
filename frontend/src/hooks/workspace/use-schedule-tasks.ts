@@ -45,8 +45,22 @@ export type ScheduleDeleteOutcome =
   | { ok: true }
   | { ok: false; message: string; code?: string };
 
+/**
+ * 请求超时判定：fetch 被 AbortSignal.timeout 中断时抛 TimeoutError/DOMException，
+ * 它不携带任何后端错误码。若不单独识别，面板会落到 createFailedGeneric
+ * （「请检查输入并重试」）——但超时并不代表输入有误，而且服务端可能已经落库，
+ * 用户会据此重复提交。故显式映射为 request_timeout 走专属文案。
+ */
+function isRequestTimeoutError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const name = (error as { name?: unknown }).name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 function scheduleApiErrorCode(error: unknown): string | undefined {
-  if (!(error instanceof RuntimeApiError)) return undefined;
+  if (!(error instanceof RuntimeApiError)) {
+    return isRequestTimeoutError(error) ? "request_timeout" : undefined;
+  }
   const contextCode = error.payload?.context?.schedule_code;
   if (typeof contextCode === "string" && contextCode.trim()) {
     return contextCode.trim();

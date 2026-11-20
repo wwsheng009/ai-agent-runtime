@@ -191,7 +191,7 @@ func TestScheduleTaskPauseResumeEndpoints(t *testing.T) {
 func TestSessionlessHeadlessTaskManagementEndpoints(t *testing.T) {
 	_, router := newScheduleTestHandler(t)
 
-	body := `{"title":"Nightly","prompt":"run checks","after_seconds":600,"goal":"keep healthy","target_kind":"headless"}`
+	body := `{"title":"Nightly","prompt":"run checks","after_seconds":600,"goal":"keep healthy","target_kind":"headless","target_provider":"gateway","target_model":"model-a","target_reasoning_effort":"high"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -201,6 +201,19 @@ func TestSessionlessHeadlessTaskManagementEndpoints(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 	require.NotEmpty(t, created.Record.ID)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/schedule/catalog", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var catalog struct {
+		Tasks []schedule.CatalogEntry `json:"tasks"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
+	require.Len(t, catalog.Tasks, 1)
+	require.Equal(t, "gateway", catalog.Tasks[0].TargetProvider)
+	require.Equal(t, "model-a", catalog.Tasks[0].TargetModel)
+	require.Equal(t, "high", catalog.Tasks[0].TargetReasoningEffort)
 
 	idBody := func() string {
 		encoded, err := json.Marshal(map[string]any{"id": created.Record.ID})
@@ -284,15 +297,18 @@ func TestUpdateScheduleTask_FullJobFieldsAndAfterRule(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 
 	updatePayload, err := json.Marshal(map[string]any{
-		"session_id":     "sess-edit",
-		"id":             created.Record.ID,
-		"expected":       created.Record,
-		"title":          "Edited title",
-		"prompt":         "edited prompt",
-		"goal":           "edited goal",
-		"plan":           []string{"step one", "step two"},
-		"target_kind":    "headless",
-		"target_profile": "scheduled",
+		"session_id":              "sess-edit",
+		"id":                      created.Record.ID,
+		"expected":                created.Record,
+		"title":                   "Edited title",
+		"prompt":                  "edited prompt",
+		"goal":                    "edited goal",
+		"plan":                    []string{"step one", "step two"},
+		"target_kind":             "headless",
+		"target_profile":          "scheduled",
+		"target_provider":         "gateway",
+		"target_model":            "model-b",
+		"target_reasoning_effort": "medium",
 		"change": map[string]any{
 			"kind":          "after",
 			"after_seconds": 120,
@@ -326,4 +342,7 @@ func TestUpdateScheduleTask_FullJobFieldsAndAfterRule(t *testing.T) {
 	require.Equal(t, schedule.TargetHeadless, entry.TargetKind)
 	require.Equal(t, "scheduled", entry.TargetProfile)
 	require.Equal(t, []string{"step one", "step two"}, entry.Plan)
+	require.Equal(t, "gateway", entry.TargetProvider)
+	require.Equal(t, "model-b", entry.TargetModel)
+	require.Equal(t, "medium", entry.TargetReasoningEffort)
 }

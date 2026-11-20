@@ -1774,7 +1774,6 @@ func HandleChatWebAPISessionsDelete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	deleteMemoryTurnDigestsForSession(session, targetID)
 
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{
 		"status":     "ok",

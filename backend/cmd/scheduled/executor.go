@@ -7,11 +7,14 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // headlessSessionUserID 是 daemon 为 headless 作业创建临时会话时使用的合成用户。
@@ -24,6 +27,8 @@ type scheduleExecutorAdapter struct {
 	profile string
 	// createSession 为 headless/workspace 目标创建临时会话（可空 → headless 不可用）。
 	createSession func(ctx context.Context, userID string) (string, error)
+	// initializeSession 在首次 actor 构造前持久化目标 workspace 与模型路由元数据。
+	initializeSession func(ctx context.Context, sessionID string, req schedule.HeadlessTurnRequest) error
 	// archiveSession 在 headless turn 结束后归档临时会话（可空 → 不归档）。
 	archiveSession func(ctx context.Context, sessionID string) error
 }
@@ -50,18 +55,25 @@ func (a scheduleExecutorAdapter) ExecuteTurn(ctx context.Context, sessionID, pro
 
 // ExecuteHeadlessTurn 执行不绑会话的作业（J2）：先创建临时会话，再提交目标/计划。
 func (a scheduleExecutorAdapter) ExecuteHeadlessTurn(ctx context.Context, req schedule.HeadlessTurnRequest) (schedule.HeadlessTurnResult, error) {
-	if a.exec == nil || a.createSession == nil {
+	if a.exec == nil || a.createSession == nil || a.initializeSession == nil {
 		return schedule.HeadlessTurnResult{}, fmt.Errorf("scheduled: headless executor not configured")
 	}
 	sessionID, err := a.createSession(ctx, headlessSessionUserID)
 	if err != nil {
 		return schedule.HeadlessTurnResult{}, fmt.Errorf("scheduled: create headless session: %w", err)
 	}
+	if err := a.initializeSession(ctx, sessionID, req); err != nil {
+		return schedule.HeadlessTurnResult{SessionID: sessionID}, fmt.Errorf("scheduled: initialize headless session: %w", err)
+	}
 	turn, err := a.exec.SubmitTurn(ctx, runtimehost.TurnRequest{
-		SessionID: sessionID,
-		Prompt:    buildHeadlessPrompt(req),
-		RunMeta:   &team.RunMeta{PermissionMode: string(runtimepolicy.ModeDontAsk)},
-		Profile:   req.Profile,
+		SessionID:       sessionID,
+		Prompt:          buildHeadlessPrompt(req),
+		RunMeta:         &team.RunMeta{PermissionMode: string(runtimepolicy.ModeDontAsk)},
+		Profile:         req.Profile,
+		Provider:        req.Provider,
+		Model:           req.Model,
+		ReasoningEffort: req.ReasoningEffort,
+		Workspace:       req.Workspace,
 	})
 	if err != nil {
 		return schedule.HeadlessTurnResult{SessionID: sessionID}, err
@@ -104,10 +116,11 @@ func buildHeadlessPrompt(req schedule.HeadlessTurnRequest) string {
 
 // headlessRuntime 是 daemon 内嵌执行核及其关闭函数。
 type headlessRuntime struct {
-	executor       runtimehost.Executor
-	createSession  func(ctx context.Context, userID string) (string, error)
-	archiveSession func(ctx context.Context, sessionID string) error
-	close          func()
+	executor          runtimehost.Executor
+	createSession     func(ctx context.Context, userID string) (string, error)
+	initializeSession func(ctx context.Context, sessionID string, req schedule.HeadlessTurnRequest) error
+	archiveSession    func(ctx context.Context, sessionID string) error
+	close             func()
 }
 
 // buildHeadlessExecutor 组装内嵌执行核（E3.3 路径 A：bootstrap + runtimeapi.Handler，
@@ -145,6 +158,9 @@ func buildHeadlessExecutor(runtimeConfig *runtimecfg.RuntimeConfig, configPath s
 		}
 		return session.ID, nil
 	}
+	initializeSession := func(ctx context.Context, sessionID string, req schedule.HeadlessTurnRequest) error {
+		return initializeScheduledSession(ctx, manager.SessionManager(), sessionID, req)
+	}
 	archiveSession := func(ctx context.Context, sessionID string) error {
 		sessionManager := manager.SessionManager()
 		if sessionManager == nil {
@@ -153,9 +169,42 @@ func buildHeadlessExecutor(runtimeConfig *runtimecfg.RuntimeConfig, configPath s
 		return sessionManager.Archive(ctx, sessionID)
 	}
 	return &headlessRuntime{
-		executor:       handler.Executor(),
-		createSession:  createSession,
-		archiveSession: archiveSession,
-		close:          func() { _ = manager.Stop() },
+		executor:          handler.Executor(),
+		createSession:     createSession,
+		initializeSession: initializeSession,
+		archiveSession:    archiveSession,
+		close:             func() { _ = manager.Stop() },
 	}, nil
+}
+
+// initializeScheduledSession persists the execution context before SubmitTurn
+// can construct the durable actor from the session row.
+func initializeScheduledSession(
+	ctx context.Context,
+	sessionManager *chat.SessionManager,
+	sessionID string,
+	req schedule.HeadlessTurnRequest,
+) error {
+	if sessionManager == nil {
+		return fmt.Errorf("session manager not configured")
+	}
+	session, err := sessionManager.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
+	if session == nil {
+		return fmt.Errorf("session not found")
+	}
+
+	workspace := ""
+	if req.TargetKind == schedule.TargetWorkspace {
+		workspace = strings.TrimSpace(req.Workspace)
+	}
+	model := strings.TrimSpace(req.Model)
+	session.SetContext(sessionmeta.WorkspacePath, workspace)
+	session.SetContext(sessionmeta.ProviderName, strings.TrimSpace(req.Provider))
+	session.SetContext(sessionmeta.Model, model)
+	session.SetContext(toolbroker.AgentSessionContextRequestedModel, model)
+	session.SetContext(sessionmeta.ReasoningEffort, strings.TrimSpace(req.ReasoningEffort))
+	return sessionManager.Update(ctx, session)
 }

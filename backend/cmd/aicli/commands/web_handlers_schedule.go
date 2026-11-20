@@ -30,11 +30,14 @@ type chatWebScheduleCreateRequest struct {
 	Weekly       *schedule.WeeklyInput `json:"weekly,omitempty"`
 	Cron         *schedule.CronInput   `json:"cron,omitempty"`
 
-	Goal            string   `json:"goal,omitempty"`
-	Plan            []string `json:"plan,omitempty"`
-	TargetKind      string   `json:"target_kind,omitempty"`
-	TargetWorkspace string   `json:"target_workspace,omitempty"`
-	TargetProfile   string   `json:"target_profile,omitempty"`
+	Goal                  string   `json:"goal,omitempty"`
+	Plan                  []string `json:"plan,omitempty"`
+	TargetKind            string   `json:"target_kind,omitempty"`
+	TargetWorkspace       string   `json:"target_workspace,omitempty"`
+	TargetProfile         string   `json:"target_profile,omitempty"`
+	TargetProvider        string   `json:"target_provider,omitempty"`
+	TargetModel           string   `json:"target_model,omitempty"`
+	TargetReasoningEffort string   `json:"target_reasoning_effort,omitempty"`
 }
 
 type chatWebScheduleDeleteRequest struct {
@@ -48,12 +51,15 @@ type chatWebScheduleControlRequest struct {
 }
 
 type chatWebScheduleUpdateRequest struct {
-	SessionID string          `json:"session_id"`
-	ID        string          `json:"id"`
-	Expected  schedule.Record `json:"expected"`
-	Title     *string         `json:"title,omitempty"`
-	Prompt    *string         `json:"prompt,omitempty"`
-	Change    *struct {
+	SessionID             string          `json:"session_id"`
+	ID                    string          `json:"id"`
+	Expected              schedule.Record `json:"expected"`
+	Title                 *string         `json:"title,omitempty"`
+	Prompt                *string         `json:"prompt,omitempty"`
+	TargetProvider        *string         `json:"target_provider,omitempty"`
+	TargetModel           *string         `json:"target_model,omitempty"`
+	TargetReasoningEffort *string         `json:"target_reasoning_effort,omitempty"`
+	Change                *struct {
 		Kind         schedule.Kind `json:"kind"`
 		At           *string       `json:"at,omitempty"`
 		EverySeconds *int64        `json:"every_seconds,omitempty"`
@@ -147,19 +153,22 @@ func handleChatWebScheduleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	record, err := service.Create(creatorSessionID, schedule.CreateRequest{
-		Prompt:          request.Prompt,
-		Title:           request.Title,
-		AfterSeconds:    request.AfterSeconds,
-		At:              request.At,
-		EverySeconds:    request.EverySeconds,
-		Daily:           request.Daily,
-		Weekly:          request.Weekly,
-		Cron:            request.Cron,
-		Goal:            request.Goal,
-		Plan:            request.Plan,
-		TargetKind:      targetKind,
-		TargetWorkspace: request.TargetWorkspace,
-		TargetProfile:   request.TargetProfile,
+		Prompt:                request.Prompt,
+		Title:                 request.Title,
+		AfterSeconds:          request.AfterSeconds,
+		At:                    request.At,
+		EverySeconds:          request.EverySeconds,
+		Daily:                 request.Daily,
+		Weekly:                request.Weekly,
+		Cron:                  request.Cron,
+		Goal:                  request.Goal,
+		Plan:                  request.Plan,
+		TargetKind:            targetKind,
+		TargetWorkspace:       request.TargetWorkspace,
+		TargetProfile:         request.TargetProfile,
+		TargetProvider:        request.TargetProvider,
+		TargetModel:           request.TargetModel,
+		TargetReasoningEffort: request.TargetReasoningEffort,
 	}, schedule.OriginManual)
 	if err != nil {
 		if input, ok := schedule.IsInputError(err); ok {
@@ -226,7 +235,9 @@ func handleChatWebScheduleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result, err := service.Update(sessionID, id, request.Expected,
-		schedule.UpdateContent{Title: request.Title, Prompt: request.Prompt}, change)
+		schedule.UpdateContent{Title: request.Title, Prompt: request.Prompt,
+			TargetProvider: request.TargetProvider, TargetModel: request.TargetModel,
+			TargetReasoningEffort: request.TargetReasoningEffort}, change)
 	if err != nil {
 		writeChatWebScheduleError(w, http.StatusInternalServerError, string(schedule.CodeInternal),
 			"update schedule task failed: "+err.Error())

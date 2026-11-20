@@ -111,10 +111,11 @@ func run(args []string) error {
 			logf("scheduled: warning: embedded executor unavailable (%v); embedded stays disabled", headlessErr)
 		} else {
 			embeddedExecutor = scheduleExecutorAdapter{
-				exec:           headless.executor,
-				profile:        cfg.Execution.Profile,
-				createSession:  headless.createSession,
-				archiveSession: headless.archiveSession,
+				exec:              headless.executor,
+				profile:           cfg.Execution.Profile,
+				createSession:     headless.createSession,
+				initializeSession: headless.initializeSession,
+				archiveSession:    headless.archiveSession,
 			}
 			defer headless.close()
 		}

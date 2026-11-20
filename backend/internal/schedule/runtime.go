@@ -359,13 +359,16 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
 	defer cancel()
 	result, err := exec.ExecuteHeadlessTurn(ctx, HeadlessTurnRequest{
-		JobID:      task.Record.ID,
-		Goal:       task.Record.Goal,
-		Plan:       task.Record.Plan,
-		Prompt:     task.Record.Prompt,
-		Profile:    task.TargetProfile,
-		Workspace:  task.TargetWorkspace,
-		TargetKind: task.TargetKind,
+		JobID:           task.Record.ID,
+		Goal:            task.Record.Goal,
+		Plan:            task.Record.Plan,
+		Prompt:          task.Record.Prompt,
+		Profile:         task.TargetProfile,
+		Provider:        task.TargetProvider,
+		Model:           task.TargetModel,
+		ReasoningEffort: task.TargetReasoningEffort,
+		Workspace:       task.TargetWorkspace,
+		TargetKind:      task.TargetKind,
 	})
 	// J3：无论成败都落一条运行历史。
 	r.recordJobRun(task, now, result, err, now)

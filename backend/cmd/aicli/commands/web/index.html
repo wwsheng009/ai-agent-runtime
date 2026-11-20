@@ -779,6 +779,18 @@
                   <span class="cfg-label">执行 Profile（可选）</span>
                   <input id="schedule-form-profile" placeholder="例如：scheduled">
                 </label>
+                <label class="cfg-item" id="schedule-form-provider-item" hidden>
+                  <span class="cfg-label">Provider（可选，留空使用默认）</span>
+                  <select id="schedule-form-provider"><option value="">默认 provider</option></select>
+                </label>
+                <label class="cfg-item" id="schedule-form-model-item" hidden>
+                  <span class="cfg-label">Model（可选，留空使用默认）</span>
+                  <select id="schedule-form-model"><option value="">默认 model</option></select>
+                </label>
+                <label class="cfg-item" id="schedule-form-reasoning-item" hidden>
+                  <span class="cfg-label">Reasoning effort（可选，留空使用默认）</span>
+                  <select id="schedule-form-reasoning"><option value="">默认 reasoning</option></select>
+                </label>
               </div>
               <p class="schedule-target-description" id="schedule-target-description"></p>
               <div class="config-form-grid">
@@ -873,6 +885,7 @@
       <div class="config-toolbar">
         <h2 class="config-title">配置管理</h2>
         <span class="config-path" id="config-path" title="本地配置文件路径"></span>
+        <span class="config-path" id="config-providers-path" title="provider 补充配置文件路径"></span>
         <span class="config-toolbar-spacer"></span>
         <button id="config-refresh-btn" type="button" title="重新读取配置文件">⟳ 刷新</button>
         <button id="config-add-provider-btn" type="button" class="primary-btn" title="新增 provider">＋ 新增 Provider</button>

@@ -105,6 +105,27 @@ func TestChatWebScheduleCreateHeadlessWithoutSessionID(t *testing.T) {
 	require.Equal(t, "", task["sessionId"])
 }
 
+func TestChatWebScheduleSessionCreateClearsExecutionOverrides(t *testing.T) {
+	withWebScheduleTestService(t)
+
+	code, created := scheduleRequest(t, http.MethodPost, ChatWebAPISchedulePath+"/create",
+		`{"session_id":"sess-web","title":"Session task","prompt":"ping","target_kind":"session","target_workspace":"/stale/workspace","target_profile":"stale-profile","target_provider":"stale-provider","target_model":"stale-model","target_reasoning_effort":"high","after_seconds":60}`)
+	require.Equal(t, http.StatusOK, code, created)
+
+	code, catalog := scheduleRequest(t, http.MethodGet, ChatWebAPISchedulePath+"/catalog", "")
+	require.Equal(t, http.StatusOK, code, catalog)
+	tasks := catalog["tasks"].([]any)
+	require.Len(t, tasks, 1)
+	task := tasks[0].(map[string]any)
+	require.Equal(t, "session", task["targetKind"])
+	require.Equal(t, "sess-web", task["sessionId"])
+	require.Empty(t, task["targetWorkspace"])
+	require.Empty(t, task["targetProfile"])
+	require.Empty(t, task["target_provider"])
+	require.Empty(t, task["target_model"])
+	require.Empty(t, task["target_reasoning_effort"])
+}
+
 func TestChatWebScheduleHeadlessCreatorCanManage(t *testing.T) {
 	withWebScheduleTestService(t)
 

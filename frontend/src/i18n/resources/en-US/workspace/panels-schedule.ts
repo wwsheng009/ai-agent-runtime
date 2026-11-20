@@ -2,7 +2,9 @@
 import type { DeepStringShape } from "../../shape";
 import type { zhWorkspacePanelsSchedule } from "../../zh-CN/workspace/panels-schedule";
 
-export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanelsSchedule> = {
+export const enWorkspacePanelsSchedule: DeepStringShape<
+  typeof zhWorkspacePanelsSchedule
+> = {
   title: "Automation tasks",
   independentPage: "Independent page",
   description:
@@ -34,6 +36,7 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   zonePlaceholder: "Asia/Shanghai",
   zonePresetLabel: "Pick a time zone",
   zoneCustomOption: "Custom…",
+  dialogHelpLabel: "dialog help",
   helpLabel: "About {{field}}",
   help: {
     timeZone:
@@ -145,7 +148,8 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   sectionRule: "Run rule",
   sectionRuleHint:
     "Choose a one-shot or recurring rule and complete the matching timing fields.",
-  createIncomplete: "Complete the required fields (session ID, title, instruction, and timing rule)",
+  createIncomplete:
+    "Complete the required fields (session ID, title, instruction, and timing rule)",
   createIncompleteJob:
     "Complete the required fields (title, instruction, and timing rule; unattended jobs need a goal, workspace jobs also need a target workspace)",
   createValidationFailed: "Fix the highlighted fields and try again.",
@@ -166,18 +170,25 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
     invalid_prompt: "The task name or instruction is invalid.",
     invalid_selector: "The execution target or timing rule is invalid.",
     invalid_rule: "The run rule is invalid; check the timing settings.",
-    invalid_time_zone: "The time zone is invalid; use an IANA zone such as Asia/Shanghai.",
+    invalid_time_zone:
+      "The time zone is invalid; use an IANA zone such as Asia/Shanghai.",
     not_future: "The selected time must be in the future.",
     time_out_of_range: "The selected time is outside the schedulable range.",
     frequency_too_high: "The interval is too short; increase it and try again.",
     subagent_session: "This type of task cannot target a sub-agent session.",
+    request_timeout:
+      "The request timed out; the task may already have been created. Refresh the task list before retrying to avoid duplicates.",
   },
   sessionLabel: "Target session ID",
   sessionPlaceholder: "Session ID copied from the session list",
   sessionSelectPlaceholder: "Select a session",
   sessionLoading: "Loading sessions…",
-  sessionLoadFailed: "Could not load sessions; you can enter a session ID manually below.",
-  sessionListEmpty: "No selectable sessions; you can enter a session ID manually below.",
+  sessionLoadFailed:
+    "Could not load sessions; you can enter a session ID manually below.",
+  sessionListEmpty:
+    "No selectable sessions; you can enter a session ID manually below.",
+  sessionManualToggle: "Enter ID manually",
+  sessionPickToggle: "Choose from list",
   sessionManualHint: "You can also enter a session ID manually.",
   sessionRequired: "Select or enter a target session ID first.",
   taskRequired: "The task identifier is missing; refresh and try again.",
@@ -192,11 +203,13 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
       "Delivery kept failing, so automatic retries stopped. Check that the target session is available, then retry.",
     delivery_retrying:
       "The latest delivery failed; automatic retries are backing off.",
-    schedule_conflict: "This task was changed by another editor. Refresh and try again.",
+    schedule_conflict:
+      "This task was changed by another editor. Refresh and try again.",
     schedule_not_found: "This task could not be found. Refresh the list.",
     schedule_ended: "This task has ended and cannot be changed.",
     request_failed: "The request failed. Try again later.",
-    generic: "The task could not run. Check the runtime configuration and retry.",
+    generic:
+      "The task could not run. Check the runtime configuration and retry.",
   },
   kindLabel: "Rule kind",
   minutesAfter: "Minutes from now",
@@ -210,9 +223,24 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   planPlaceholder: "One step per line (optional)",
   targetLabel: "Execution target",
   workspaceLabel: "Target workspace (absolute path)",
+  workspaceHint:
+    "The task runs in the selected workspace directory once due. Directories come from your workspace list and are matched by path.",
+  workspacePickPlaceholder: "Select a workspace directory",
+  workspaceLoading: "Loading workspaces…",
+  workspaceLoadFailed: "Could not load workspaces. Enter a path manually.",
+  profileHint:
+    "Profile used for this run. Leave empty to use the default profile.",
   workspacePlaceholder: "E:/projects/demo",
   profileLabel: "Execution profile (optional)",
-  profilePlaceholder: "scheduled",
+  profilePlaceholder: "Use default profile",
+  providerLabel: "Model provider (optional)",
+  providerDefault: "Use default provider",
+  modelLabel: "Model (optional)",
+  modelDefault: "Use default model",
+  reasoningEffortLabel: "Reasoning effort (optional)",
+  reasoningEffortDefault: "Use default reasoning effort",
+  modelHint:
+    "Leave empty to use the runtime default. Changing the provider or model updates available options.",
   targetHint:
     "Unattended/workspace targets do not bind an existing session; a temporary session is created when the task runs and archived afterwards. The current session is recorded only as creator for later management.",
   target: {
@@ -222,7 +250,8 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   },
   targetDescription: {
     session: "Deliver the reminder back to the current session when due.",
-    headless: "Create a temporary session on demand; no existing session needed.",
+    headless:
+      "Create a temporary session on demand; no existing session needed.",
     workspace: "Create a temporary session in the specified workspace.",
   },
   // J3: run history.
@@ -236,6 +265,154 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   runError: "Error",
   runFailure: "The run failed. Check the runtime configuration and try again.",
   tabListLabel: "Automation task views",
+  syncing: "Syncing…",
+  tabs: {
+    list: "Task list",
+    runs: "Run logs",
+    templates: "Templates",
+  },
+  listTitle: "All automations",
+  listDescription:
+    "Manage cross-session tasks in one place and find them by status, target, or keyword.",
+  filters: {
+    allStatuses: "All statuses",
+    allTargets: "All targets",
+    searchLabel: "Search automation tasks",
+    searchPlaceholder: "Search names, instructions, targets, or task IDs",
+    statusLabel: "Filter by status",
+    targetLabel: "Filter by execution target",
+    noMatches: "No automation tasks match the current filters.",
+  },
+  metrics: {
+    label: "Automation overview",
+    total: "All tasks",
+    active: "Active",
+    paused: "Paused",
+    attention: "Needs attention",
+  },
+  runs: {
+    title: "Run logs",
+    description:
+      "Review the latest {{count}} runs for the selected automation, including output and failures.",
+    taskLabel: "Choose an automation task",
+    taskPlaceholder: "Select a task",
+    refresh: "Refresh run logs",
+    noTasks: "No automation tasks to inspect",
+    noTasksHint: "Create a task and its execution history will appear here.",
+    loading: "Loading run logs…",
+    loadError: "Run logs could not be loaded.",
+    retry: "Retry",
+    empty: "No runs yet",
+    emptyHint:
+      "Output and execution results will appear here after the first run.",
+    noOutput: "This run returned no output.",
+    started: "Started",
+    finished: "Finished",
+    duration: "Duration",
+    session: "Temporary session",
+  },
+  templates: {
+    title: "Automation templates",
+    builtIn: "Built in",
+    description:
+      "Start from a common workflow with its goal, steps, and schedule prefilled.",
+    note: "Templates only provide creation presets; the submitted task remains editable through the runtime API.",
+    use: "Use this template",
+    create: "New template",
+    edit: "Edit",
+    delete: "Delete",
+    deleting: "Deleting…",
+    retry: "Retry",
+    loading: "Loading templates…",
+    empty: "No automation templates yet",
+    emptyHint: "Create a reusable workflow preset to make future tasks faster.",
+    createTitle: "Create automation template",
+    editTitle: "Edit automation template",
+    editorDescription:
+      "Save the task content, execution context, and schedule as a reusable preset.",
+    closeEditor: "Close template editor",
+    saving: "Saving…",
+    save: "Save template",
+    saveFailed: "Save failed: {{message}}",
+    deleteFailed: "Delete failed: {{message}}",
+    confirmDelete:
+      'Delete the template "{{title}}"? Tasks already created from it will not change.',
+    loadError: "Templates could not be loaded.",
+    customCategory: "Custom",
+    titleLabel: "Template name",
+    taskTitleLabel: "Task title",
+    categoryLabel: "Category",
+    categoryPlaceholder: "e.g. reporting",
+    descriptionLabel: "Description",
+    sections: {
+      identity: "Template identity",
+      content: "Task content",
+      context: "Execution context",
+      rule: "Run rule",
+    },
+    validation: {
+      required: "This field is required.",
+      positive: "Enter a valid positive number.",
+      clock: "Use a local time in HH:MM or HH:MM:SS format.",
+      invalid: "Check this value and try again.",
+    },
+    categories: {
+      productivity: "Productivity",
+      reporting: "Reporting",
+      maintenance: "Maintenance",
+      knowledge: "Knowledge",
+    },
+    entries: {
+      weekdayDigest: {
+        title: "Weekday morning digest",
+        description:
+          "Summarize priorities, progress, and unfinished work each weekday morning.",
+        taskTitle: "Weekday morning digest",
+        prompt:
+          "Summarize recent project progress, unfinished work, and what deserves priority today.",
+        goal: "Produce a clear, actionable weekday morning digest.",
+        stepOne: "Scan recent sessions, tasks, and project changes.",
+        stepTwo: "Extract blockers and today's priorities.",
+        stepThree: "Write a concise digest with next-step suggestions.",
+      },
+      weeklyReview: {
+        title: "Weekly review",
+        description:
+          "Close the week with a summary of outcomes, risks, and next actions.",
+        taskTitle: "Weekly review",
+        prompt:
+          "Review this week's work records and organize outcomes, risks, open questions, and next week's plan.",
+        goal: "Create a reviewable, trackable weekly retrospective.",
+        stepOne: "Summarize completed and delayed work from this week.",
+        stepTwo: "Identify risks, blockers, and repeated effort.",
+        stepThree: "Propose the three most important actions for next week.",
+      },
+      projectHealth: {
+        title: "Project health check",
+        description:
+          "Regularly inspect project state, test signals, and outstanding risks.",
+        taskTitle: "Project health check",
+        prompt:
+          "Inspect the current project structure, dependencies, tests, and recent changes for potential risks.",
+        goal: "Detect changes in project health and recommend prioritized fixes.",
+        stepOne: "Check version-control status and recent changes.",
+        stepTwo: "Run or inspect key test and build signals.",
+        stepThree: "Report risks ordered by impact and urgency.",
+      },
+      knowledgeGarden: {
+        title: "Knowledge garden cleanup",
+        description:
+          "Turn important conclusions, decisions, and reusable lessons into knowledge entries.",
+        taskTitle: "Knowledge garden cleanup",
+        prompt:
+          "Organize recent conclusions, decisions, and reusable lessons into durable knowledge entries.",
+        goal: "Maintain a clear, searchable project knowledge summary.",
+        stepOne: "Select recent conclusions and important decisions.",
+        stepTwo: "Merge duplicates and add missing context.",
+        stepThree: "Write entries that are easy to retrieve later.",
+      },
+    },
+  },
   weekdayLabel: "Run weekdays",
   weekday: {
     "1": "Mon",

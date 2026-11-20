@@ -128,18 +128,21 @@ func (h *Handler) GetScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 type scheduleUpdateRequest struct {
-	SessionID       string                `json:"session_id"`
-	ID              string                `json:"id"`
-	Expected        schedule.Record       `json:"expected"`
-	Title           *string               `json:"title,omitempty"`
-	Prompt          *string               `json:"prompt,omitempty"`
-	Goal            *string               `json:"goal,omitempty"`
-	Plan            *[]string             `json:"plan,omitempty"`
-	TargetKind      *string               `json:"target_kind,omitempty"`
-	TargetWorkspace *string               `json:"target_workspace,omitempty"`
-	TargetProfile   *string               `json:"target_profile,omitempty"`
-	TargetSessionID *string               `json:"target_session_id,omitempty"`
-	Change          *scheduleTimingChange `json:"change,omitempty"`
+	SessionID             string                `json:"session_id"`
+	ID                    string                `json:"id"`
+	Expected              schedule.Record       `json:"expected"`
+	Title                 *string               `json:"title,omitempty"`
+	Prompt                *string               `json:"prompt,omitempty"`
+	Goal                  *string               `json:"goal,omitempty"`
+	Plan                  *[]string             `json:"plan,omitempty"`
+	TargetKind            *string               `json:"target_kind,omitempty"`
+	TargetWorkspace       *string               `json:"target_workspace,omitempty"`
+	TargetProfile         *string               `json:"target_profile,omitempty"`
+	TargetProvider        *string               `json:"target_provider,omitempty"`
+	TargetModel           *string               `json:"target_model,omitempty"`
+	TargetReasoningEffort *string               `json:"target_reasoning_effort,omitempty"`
+	TargetSessionID       *string               `json:"target_session_id,omitempty"`
+	Change                *scheduleTimingChange `json:"change,omitempty"`
 }
 
 type scheduleTimingChange struct {
@@ -173,11 +176,14 @@ type scheduleCreateRequest struct {
 	Weekly       *schedule.WeeklyInput `json:"weekly,omitempty"`
 	Cron         *schedule.CronInput   `json:"cron,omitempty"`
 	// J0：作业通用化字段（全部可选）。
-	Goal            string   `json:"goal,omitempty"`
-	Plan            []string `json:"plan,omitempty"`
-	TargetKind      string   `json:"target_kind,omitempty"`
-	TargetWorkspace string   `json:"target_workspace,omitempty"`
-	TargetProfile   string   `json:"target_profile,omitempty"`
+	Goal                  string   `json:"goal,omitempty"`
+	Plan                  []string `json:"plan,omitempty"`
+	TargetKind            string   `json:"target_kind,omitempty"`
+	TargetWorkspace       string   `json:"target_workspace,omitempty"`
+	TargetProfile         string   `json:"target_profile,omitempty"`
+	TargetProvider        string   `json:"target_provider,omitempty"`
+	TargetModel           string   `json:"target_model,omitempty"`
+	TargetReasoningEffort string   `json:"target_reasoning_effort,omitempty"`
 }
 
 // CreateScheduleTask creates one reminder bound to a Session through the
@@ -217,6 +223,7 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 		TargetKind:      schedule.NormalizeTargetKind(request.TargetKind),
 		TargetWorkspace: request.TargetWorkspace,
 		TargetProfile:   request.TargetProfile,
+		TargetProvider:  request.TargetProvider, TargetModel: request.TargetModel, TargetReasoningEffort: request.TargetReasoningEffort,
 	}
 	record, err := service.Create(request.SessionID, req, schedule.OriginManual)
 	if err != nil {
@@ -283,6 +290,7 @@ func (h *Handler) UpdateScheduleTask(w http.ResponseWriter, r *http.Request) {
 		Plan:            request.Plan,
 		TargetWorkspace: request.TargetWorkspace,
 		TargetProfile:   request.TargetProfile,
+		TargetProvider:  request.TargetProvider, TargetModel: request.TargetModel, TargetReasoningEffort: request.TargetReasoningEffort,
 		TargetSessionID: request.TargetSessionID,
 	}
 	if request.TargetKind != nil {

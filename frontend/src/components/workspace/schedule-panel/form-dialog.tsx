@@ -26,6 +26,8 @@ import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 
+import { HelpTip } from "./help-tip";
+
 import {
   ScheduleContentFields,
   ScheduleContextFields,
@@ -69,7 +71,6 @@ export function ScheduleFormDialog({
 }: ScheduleFormDialogProps) {
   const { t } = useTranslation("workspace");
   const titleId = useId();
-  const descriptionId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -156,9 +157,6 @@ export function ScheduleFormDialog({
   const closeLabel = editing
     ? t("panels.schedule.closeEdit")
     : t("panels.schedule.closeCreate");
-  const footerHint = editing
-    ? t("panels.schedule.editFooterHint")
-    : t("panels.schedule.createFooterHint");
   const busyLabel = editing
     ? t("panels.schedule.saving")
     : t("panels.schedule.creating");
@@ -173,7 +171,6 @@ export function ScheduleFormDialog({
   return createPortal(
     <DialogOverlay className="z-[120] backdrop-blur-sm" onDismiss={onClose}>
       <DialogPanel
-        aria-describedby={descriptionId}
         aria-labelledby={titleId}
         aria-modal="true"
         className="max-h-[calc(100dvh-2rem)] max-w-3xl"
@@ -193,22 +190,15 @@ export function ScheduleFormDialog({
             <span className="grid size-10 shrink-0 place-items-center rounded-panel border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
               <CalendarClockIcon aria-hidden="true" size={18} />
             </span>
-            <div className="min-w-0 flex-1">
-              <p className="app-text-11 uppercase tracking-[0.16em] text-accent-primary">
-                {t("panels.schedule.title")}
-              </p>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
               <h2
-                className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground"
+                className="min-w-0 text-[15px] font-semibold tracking-[-0.02em] text-foreground"
                 id={titleId}
               >
                 {titleLabel}
               </h2>
-              <p
-                className="mt-1 max-w-xl text-sm leading-6 text-muted-foreground"
-                id={descriptionId}
-              >
-                {description}
-              </p>
+              {/* 头部只保留标题：整段说明收进问号气泡，需要时再看。 */}
+              <HelpTip label={t("panels.schedule.dialogHelpLabel")} text={description} />
             </div>
             <Button
               aria-label={closeLabel}
@@ -258,11 +248,9 @@ export function ScheduleFormDialog({
             </div>
           </div>
 
+          {/* 底部只留操作按钮：原先左侧那行提示信息量低，长期占据首屏视线。 */}
           <footer className="flex flex-col-reverse gap-3 border-t border-border bg-surface-softer px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-            <p className="text-[11px] leading-5 text-muted-foreground">
-              {footerHint}
-            </p>
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center justify-end gap-2 sm:ml-auto">
               <Button
                 disabled={busy}
                 onClick={onClose}

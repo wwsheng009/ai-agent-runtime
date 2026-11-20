@@ -37,7 +37,10 @@ type HeadlessTurnRequest struct {
 	// Prompt 是作业正文（无 goal/plan 时即提醒文本）。
 	Prompt string
 	// Profile 限定工具面（可空）。
-	Profile string
+	Profile         string
+	Provider        string
+	Model           string
+	ReasoningEffort string
 	// Workspace 是 workspace 目标绑定的工作区（headless 为空）。
 	Workspace string
 	// TargetKind 是执行上下文类型。

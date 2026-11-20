@@ -45,6 +45,9 @@ export type CreateFormState = {
   targetWorkspace: string;
   /** J1：workspace/headless 可选执行 profile。 */
   targetProfile: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
 };
 
 export function emptyCreateForm(sessionId = ""): CreateFormState {
@@ -64,6 +67,9 @@ export function emptyCreateForm(sessionId = ""): CreateFormState {
     targetKind: "session",
     targetWorkspace: "",
     targetProfile: "",
+    provider: "",
+    model: "",
+    reasoningEffort: "",
   };
 }
 
@@ -233,6 +239,15 @@ export function createRequestFrom(
     ...(form.targetKind !== "session" && form.targetProfile.trim()
       ? { target_profile: form.targetProfile.trim() }
       : {}),
+    ...(form.targetKind !== "session" && form.provider.trim()
+      ? { provider: form.provider.trim() }
+      : {}),
+    ...(form.targetKind !== "session" && form.model.trim()
+      ? { model: form.model.trim() }
+      : {}),
+    ...(form.targetKind !== "session" && form.reasoningEffort.trim()
+      ? { reasoning_effort: form.reasoningEffort.trim() }
+      : {}),
   };
   switch (form.kind) {
     case "after": {
@@ -355,6 +370,9 @@ export function editFormFromTask(
     targetKind: task.targetKind ?? "session",
     targetWorkspace: task.targetWorkspace ?? "",
     targetProfile: task.targetProfile ?? "",
+    provider: task.provider ?? "",
+    model: task.model ?? "",
+    reasoningEffort: task.reasoningEffort ?? "",
   };
 }
 
@@ -539,6 +557,10 @@ export function updateRequestFrom(
       form.targetKind === "workspace" ? form.targetWorkspace.trim() : "",
     target_profile:
       form.targetKind === "session" ? "" : form.targetProfile.trim(),
+    provider: form.targetKind === "session" ? "" : form.provider.trim(),
+    model: form.targetKind === "session" ? "" : form.model.trim(),
+    reasoning_effort:
+      form.targetKind === "session" ? "" : form.reasoningEffort.trim(),
     target_session_id:
       form.targetKind === "session" ? form.sessionId.trim() : undefined,
     ...(change ? { change } : {}),

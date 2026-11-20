@@ -31,6 +31,7 @@ var confirmDeleteTimer = null;
 var historyByTask = {};
 var historyLoading = {};
 var historyErrors = {};
+var scheduleRuntimeMeta = null;
 
 var SCHEDULE_API_BASE = "/web/api/schedule";
 
@@ -983,6 +984,24 @@ function initCreateForm() {
       updateSchedulePreview();
     });
   }
+  var providerSelect = document.getElementById("schedule-form-provider");
+  if (providerSelect) {
+    providerSelect.addEventListener("change", function () {
+      var model = document.getElementById("schedule-form-model");
+      var reasoning = document.getElementById("schedule-form-reasoning");
+      if (model) { model.value = ""; }
+      if (reasoning) { reasoning.value = ""; }
+      renderScheduleModelOptions();
+    });
+  }
+  var modelSelect = document.getElementById("schedule-form-model");
+  if (modelSelect) {
+    modelSelect.addEventListener("change", function () {
+      var reasoning = document.getElementById("schedule-form-reasoning");
+      if (reasoning) { reasoning.value = ""; }
+      renderScheduleModelOptions();
+    });
+  }
   form.addEventListener("input", function () {
     clearScheduleFieldError(document.activeElement);
     clearScheduleErrorSummary();
@@ -1011,6 +1030,7 @@ function openCreateForm(seedTask, again) {
   clearScheduleFormErrors();
   fillSessionSelect();
   fillZoneSelect();
+  loadScheduleRuntimeModels();
   var targetKind = document.getElementById("schedule-form-target-kind");
   if (targetKind) {
     targetKind.disabled = false;
@@ -1056,6 +1076,7 @@ function openEditTask(task) {
   clearScheduleFormErrors();
   fillSessionSelect();
   fillZoneSelect();
+  loadScheduleRuntimeModels();
   fillFormFromTask(task, true);
   var targetKind = document.getElementById("schedule-form-target-kind");
   if (targetKind) {
@@ -1107,6 +1128,9 @@ function fillFormFromTask(task, editing) {
   setValue("schedule-form-goal", task.goal || "");
   setValue("schedule-form-workspace", task.targetWorkspace || "");
   setValue("schedule-form-profile", task.targetProfile || "");
+  setValue("schedule-form-provider", task.target_provider || "");
+  setValue("schedule-form-model", task.target_model || "");
+  setValue("schedule-form-reasoning", task.target_reasoning_effort || "");
   setValue("schedule-form-plan", (task.plan || []).join("\n"));
   setValue("schedule-form-target-kind", task.targetKind || "session");
   setSessionValue(taskSessionId(task));
@@ -1301,6 +1325,9 @@ function syncScheduleTargetFields(targetKind) {
   show("schedule-form-session-item", isSession);
   show("schedule-form-workspace-item", isWorkspace);
   show("schedule-form-profile-item", !isSession);
+  show("schedule-form-provider-item", !isSession);
+  show("schedule-form-model-item", !isSession);
+  show("schedule-form-reasoning-item", !isSession);
   show("schedule-form-goal-item", !isSession);
   show("schedule-form-plan-item", !isSession);
   show("schedule-form-target-hint", !isSession);
@@ -1315,6 +1342,45 @@ function syncScheduleTargetFields(targetKind) {
         ? "到期在指定工作区创建临时会话，按作业目标与执行步骤运行，完成后归档。"
         : "到期在默认工作区创建临时会话执行；执行 Profile 可指定运行配置（可选）。";
   }
+}
+
+function loadScheduleRuntimeModels() {
+  apiFetch("/web/api/runtime", { cache: "no-store" }).then(function (res) {
+    return res.ok ? res.json() : null;
+  }).then(function (meta) {
+    if (meta) { scheduleRuntimeMeta = meta; renderScheduleModelOptions(); }
+  }).catch(function () {});
+}
+
+function renderScheduleModelOptions() {
+  var provider = document.getElementById("schedule-form-provider");
+  var model = document.getElementById("schedule-form-model");
+  var reasoning = document.getElementById("schedule-form-reasoning");
+  if (!provider || !model || !reasoning) { return; }
+  var providers = (scheduleRuntimeMeta && scheduleRuntimeMeta.providers) || [];
+  var pv = provider.value, mv = model.value, rv = reasoning.value;
+  provider.innerHTML = '<option value="">默认 provider</option>';
+  providers.forEach(function (p) {
+    var name = p.name || p.provider || "";
+    if (name) { provider.appendChild(new Option(name, name)); }
+  });
+  provider.value = pv;
+  var selected = providers.filter(function (p) { return (p.name || p.provider) === provider.value; })[0];
+  var models = selected && (selected.models || selected.supported_models) || [];
+  model.innerHTML = '<option value="">默认 model</option>';
+  models.forEach(function (m) {
+    var name = typeof m === "string" ? m : (m.id || m.name || "");
+    if (name) { model.appendChild(new Option(name, name)); }
+  });
+  model.value = mv;
+  reasoning.innerHTML = '<option value="">默认 reasoning</option>';
+  var detail = selected && (selected.model_details || []).filter(function (m) {
+    return m.name === model.value;
+  })[0];
+  (detail && (detail.reasoning_efforts || detail.reasoning_options) || []).forEach(function (r) {
+    reasoning.appendChild(new Option(r, r));
+  });
+  reasoning.value = rv;
 }
 
 function setScheduleRequired(id, required) {
@@ -1527,6 +1593,9 @@ function buildCreateRequest() {
     var creatorSessionId = getCurrentSessionID();
     if (creatorSessionId) { base.session_id = creatorSessionId; }
     base.target_kind = targetKind;
+    base.target_provider = val("schedule-form-provider");
+    base.target_model = val("schedule-form-model");
+    base.target_reasoning_effort = val("schedule-form-reasoning");
     base.goal = goal;
     if (plan.length > 0) { base.plan = plan; }
     if (targetProfile) { base.target_profile = targetProfile; }
@@ -1611,6 +1680,17 @@ function buildUpdateRequest(task) {
     title: title,
     prompt: prompt,
   };
+  if ((task.targetKind || "session") === "session") {
+    // Send explicit empties so stale route overrides on legacy/session tasks
+    // are cleared by the update service.
+    request.target_provider = "";
+    request.target_model = "";
+    request.target_reasoning_effort = "";
+  } else {
+    request.target_provider = val("schedule-form-provider");
+    request.target_model = val("schedule-form-model");
+    request.target_reasoning_effort = val("schedule-form-reasoning");
+  }
   if (task.kind === "after") {
     return request;
   }

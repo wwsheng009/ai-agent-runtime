@@ -146,8 +146,11 @@ type Task struct {
 	// TargetKind 是执行上下文类型（空回落 session；J0）。
 	TargetKind TargetKind `json:"targetKind,omitempty"`
 	// TargetWorkspace / TargetProfile 是 workspace/headless 目标的绑定（J0）。
-	TargetWorkspace string `json:"targetWorkspace,omitempty"`
-	TargetProfile   string `json:"targetProfile,omitempty"`
+	TargetWorkspace       string `json:"targetWorkspace,omitempty"`
+	TargetProfile         string `json:"targetProfile,omitempty"`
+	TargetProvider        string `json:"target_provider,omitempty"`
+	TargetModel           string `json:"target_model,omitempty"`
+	TargetReasoningEffort string `json:"target_reasoning_effort,omitempty"`
 	// CreatedBySessionID 是创建该作业的会话（J3：结果回投目标；非 session 目标也保留）。
 	CreatedBySessionID string           `json:"createdBySessionId,omitempty"`
 	LastDelivery       *DeliveryReceipt `json:"lastDelivery,omitempty"`
@@ -222,11 +225,14 @@ type CreateRequest struct {
 	Weekly       *WeeklyInput
 	Cron         *CronInput
 	// J0：作业通用化字段（全部可选；空则沿用现状语义）。
-	Goal            string
-	Plan            []string
-	TargetKind      TargetKind
-	TargetWorkspace string
-	TargetProfile   string
+	Goal                  string
+	Plan                  []string
+	TargetKind            TargetKind
+	TargetWorkspace       string
+	TargetProfile         string
+	TargetProvider        string
+	TargetModel           string
+	TargetReasoningEffort string
 }
 
 // DailyInput 是每日本地钟表时间选择器。
@@ -253,14 +259,17 @@ type CronInput struct {
 // UpdateContent 是编辑时的可选字段替换。指针用于区分“未提供”与“显式清空”；
 // 时间规则由 TimingChange 单独表达。
 type UpdateContent struct {
-	Title           *string
-	Prompt          *string
-	Goal            *string
-	Plan            *[]string
-	TargetKind      *TargetKind
-	TargetWorkspace *string
-	TargetProfile   *string
-	TargetSessionID *string
+	Title                 *string
+	Prompt                *string
+	Goal                  *string
+	Plan                  *[]string
+	TargetKind            *TargetKind
+	TargetWorkspace       *string
+	TargetProfile         *string
+	TargetProvider        *string
+	TargetModel           *string
+	TargetReasoningEffort *string
+	TargetSessionID       *string
 }
 
 // TimingChange 是时间替换；after 以编辑提交时刻重新计算延迟目标。

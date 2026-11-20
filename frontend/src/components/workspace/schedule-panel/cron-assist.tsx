@@ -155,6 +155,14 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
     };
   }, [open]);
 
+  // 打开后把焦点移进面板：触发器仍在「新建任务」弹窗里，若焦点留在触发器上，
+  // Esc 会先被弹窗接管并把整个对话框关掉；焦点进面板后 Esc 才由面板自己消费。
+  useEffect(() => {
+    if (open && position) {
+      panelRef.current?.focus();
+    }
+  }, [open, position]);
+
   // 点外部 / Esc 关闭；面板内的下拉菜单是独立 portal，需排除它，否则一点选项就关面板。
   useEffect(() => {
     if (!open) {
@@ -193,7 +201,7 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
     testId: string,
   ) => (
     <label className="grid gap-1">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <span className="app-text-11 text-muted-foreground">{label}</span>
       <input
         aria-label={label}
         className={cn(fieldControlVariants({ size: "sm" }), "w-full")}
@@ -231,15 +239,21 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
         role="dialog"
         data-testid="schedule-cron-panel"
         tabIndex={-1}
-        style={{ position: "fixed", ...position }}
+        style={{
+          position: "fixed",
+          // 固定 22rem：不设宽度时 fixed 元素按内容收缩-包裹，预览长句会把面板撑到
+          // 640px 以上；这个宽度与表单字段的视觉尺度一致，预设按钮也能自然换行。
+          width: "min(22rem, calc(100vw - 1rem))",
+          ...position,
+        }}
       >
         <div className="grid gap-3">
           <div className="grid gap-1">
-            <span className="text-[11px] font-medium text-foreground">
+            <span className="app-text-11 font-medium text-foreground">
               {t("panels.schedule.cron.previewLabel")}
             </span>
             <p
-              className="rounded-field bg-surface-soft px-2.5 py-1.5 text-[11px] leading-4 text-muted-foreground"
+              className="rounded-field bg-surface-soft px-2.5 py-1.5 app-text-11 leading-4 text-muted-foreground"
               data-testid="schedule-cron-preview"
             >
               {preview}
@@ -247,14 +261,14 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
           </div>
 
           <div className="grid gap-1">
-            <span className="text-[11px] text-muted-foreground">
+            <span className="app-text-11 text-muted-foreground">
               {t("panels.schedule.cron.presetsLabel")}
             </span>
             <div className="flex flex-wrap gap-1.5">
               {CRON_PRESETS.map((preset, index) => (
                 <button
                   className={cn(
-                    "rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground",
+                    "rounded-full border border-border px-2 py-0.5 app-text-11 text-muted-foreground",
                     "transition-colors hover:border-accent-secondary hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     preset === value.trim() &&
@@ -272,7 +286,7 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
           </div>
 
           <div className="grid gap-2 border-t border-border/70 pt-2.5">
-            <span className="text-[11px] text-muted-foreground">
+            <span className="app-text-11 text-muted-foreground">
               {t("panels.schedule.cron.builderLabel")}
             </span>
             <Select
@@ -371,7 +385,7 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
 
             <button
               className={cn(
-                "w-full rounded-field border border-border px-2.5 py-1.5 text-[11px]",
+                "w-full rounded-field border border-border px-2.5 py-1.5 app-text-11",
                 "text-muted-foreground transition-colors hover:border-accent-secondary hover:text-foreground",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               )}
@@ -394,7 +408,7 @@ export function CronAssist({ onPick, value }: CronAssistProps) {
         aria-haspopup="dialog"
         aria-label={t("panels.schedule.cron.panelTrigger")}
         className={cn(
-          "inline-flex items-center gap-1 rounded-control px-1.5 py-0.5 text-[11px] text-muted-foreground",
+          "inline-flex items-center gap-1 rounded-control px-1.5 py-0.5 app-text-11 text-muted-foreground",
           "transition-colors hover:bg-surface-soft hover:text-foreground",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           open && "bg-surface-soft text-foreground",

@@ -220,6 +220,108 @@ ON schedule_job_runs(idempotency_key) WHERE idempotency_key <> '';
 ALTER TABLE schedule_tasks ADD COLUMN last_error_code TEXT NOT NULL DEFAULT '';
 ALTER TABLE schedule_job_runs ADD COLUMN error_code TEXT NOT NULL DEFAULT '';
 `,
+	}, {
+		Version: 10,
+		Name:    "schedule_task_route_overrides",
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN target_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_tasks ADD COLUMN target_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_tasks ADD COLUMN target_reasoning_effort TEXT NOT NULL DEFAULT '';
+`,
+	}, {
+		Version: 11,
+		Name:    "schedule_automation_templates",
+		UpSQL: `
+CREATE TABLE IF NOT EXISTS schedule_templates (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    amount TEXT NOT NULL DEFAULT '',
+    at_time TEXT NOT NULL DEFAULT '',
+    clock_time TEXT NOT NULL DEFAULT '',
+    time_zone TEXT NOT NULL DEFAULT '',
+    weekdays_json TEXT NOT NULL DEFAULT '',
+    cron TEXT NOT NULL DEFAULT '',
+    goal TEXT NOT NULL DEFAULT '',
+    plan TEXT NOT NULL DEFAULT '',
+    target_kind TEXT NOT NULL DEFAULT 'session',
+    target_workspace TEXT NOT NULL DEFAULT '',
+    target_profile TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_templates_updated ON schedule_templates(updated_at, id);
+`,
+	}, {
+		Version: 12,
+		Name:    "schedule_automation_template_defaults",
+		UpSQL: `
+ALTER TABLE schedule_templates ADD COLUMN task_title TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_templates ADD COLUMN category TEXT NOT NULL DEFAULT '';
+
+INSERT OR IGNORE INTO schedule_templates (
+    id, title, description, prompt, kind, amount, at_time, clock_time, time_zone,
+    weekdays_json, cron, goal, plan, target_kind, target_workspace, target_profile,
+    provider, model, reasoning_effort, created_at, updated_at, task_title, category
+) VALUES
+(
+    'weekday-digest', 'Weekday morning digest',
+    'Summarize priorities, progress, and unfinished work each weekday morning.',
+    'Summarize recent project progress, unfinished work, and what deserves priority today.',
+    'weekly', '', '', '09:00', 'UTC', '[1,2,3,4,5]', '',
+    'Produce a clear, actionable weekday morning digest.',
+    'Scan recent sessions, tasks, and project changes.
+Extract blockers and today''s priorities.
+Write a concise digest with next-step suggestions.',
+    'headless', '', '', '', '', '',
+    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+    'Weekday morning digest', 'productivity'
+),
+(
+    'weekly-review', 'Weekly review',
+    'Close the week with a summary of outcomes, risks, and next actions.',
+    'Review this week''s work records and organize outcomes, risks, open questions, and next week''s plan.',
+    'weekly', '', '', '17:00', 'UTC', '[5]', '',
+    'Create a reviewable, trackable weekly retrospective.',
+    'Summarize completed and delayed work from this week.
+Identify risks, blockers, and repeated effort.
+Propose the three most important actions for next week.',
+    'headless', '', '', '', '', '',
+    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+    'Weekly review', 'reporting'
+),
+(
+    'project-health', 'Project health check',
+    'Regularly inspect project state, test signals, and outstanding risks.',
+    'Inspect the current project structure, dependencies, tests, and recent changes for potential risks.',
+    'daily', '', '', '10:00', 'UTC', '', '',
+    'Detect changes in project health and recommend prioritized fixes.',
+    'Check version-control status and recent changes.
+Run or inspect key test and build signals.
+Report risks ordered by impact and urgency.',
+    'headless', '', '', '', '', '',
+    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+    'Project health check', 'maintenance'
+),
+(
+    'knowledge-garden', 'Knowledge garden cleanup',
+    'Turn important conclusions, decisions, and reusable lessons into knowledge entries.',
+    'Organize recent conclusions, decisions, and reusable lessons into durable knowledge entries.',
+    'weekly', '', '', '20:00', 'UTC', '[7]', '',
+    'Maintain a clear, searchable project knowledge summary.',
+    'Select recent conclusions and important decisions.
+Merge duplicates and add missing context.
+Write entries that are easy to retrieve later.',
+    'headless', '', '', '', '', '',
+    strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+    'Knowledge garden cleanup', 'knowledge'
+);
+`,
 	}}
 }
 
@@ -338,43 +440,46 @@ func (s *SQLiteStore) ExecRaw(query string, args ...any) error {
 const taskColumns = `id, session_id, kind, title, prompt, scheduled_at, after_seconds, every_seconds,
     local_time, time_zone, weekdays_json, expression, status,
     last_scheduled_at, last_delivered_at, last_message_id, state_version, origin,
-    goal, plan_json, target_kind, target_workspace, target_profile, created_by_session_id,
+    goal, plan_json, target_kind, target_workspace, target_profile, target_provider, target_model, target_reasoning_effort, created_by_session_id,
     attempt_count, last_attempt_at, dead_lettered_at, last_error, last_error_code`
 
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var (
-		task        Task
-		id          string
-		kind        string
-		scheduledAt string
-		afterRaw    sql.NullInt64
-		everyRaw    sql.NullInt64
-		localTime   sql.NullString
-		timeZone    sql.NullString
-		weekdaysRaw sql.NullString
-		expression  sql.NullString
-		status      string
-		lastSched   sql.NullString
-		lastDeliv   sql.NullString
-		lastMsgID   sql.NullString
-		version     int64
-		origin      string
-		goal        string
-		planJSON    string
-		targetKind  string
-		targetWS    string
-		targetProf  string
-		createdBy   string
-		attempts    int64
-		lastAttempt sql.NullString
-		deadLetter  sql.NullString
-		lastError     string
-		lastErrorCode string
+		task            Task
+		id              string
+		kind            string
+		scheduledAt     string
+		afterRaw        sql.NullInt64
+		everyRaw        sql.NullInt64
+		localTime       sql.NullString
+		timeZone        sql.NullString
+		weekdaysRaw     sql.NullString
+		expression      sql.NullString
+		status          string
+		lastSched       sql.NullString
+		lastDeliv       sql.NullString
+		lastMsgID       sql.NullString
+		version         int64
+		origin          string
+		goal            string
+		planJSON        string
+		targetKind      string
+		targetWS        string
+		targetProf      string
+		targetProvider  string
+		targetModel     string
+		targetReasoning string
+		createdBy       string
+		attempts        int64
+		lastAttempt     sql.NullString
+		deadLetter      sql.NullString
+		lastError       string
+		lastErrorCode   string
 	)
 	if err := scanner.Scan(&id, &task.SessionID, &kind, &task.Record.Title, &task.Record.Prompt, &scheduledAt,
 		&afterRaw, &everyRaw, &localTime, &timeZone, &weekdaysRaw, &expression, &status,
 		&lastSched, &lastDeliv, &lastMsgID, &version, &origin,
-		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &createdBy,
+		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &targetProvider, &targetModel, &targetReasoning, &createdBy,
 		&attempts, &lastAttempt, &deadLetter, &lastError, &lastErrorCode); err != nil {
 		return Task{}, err
 	}
@@ -397,6 +502,7 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	task.TargetKind = NormalizeTargetKind(targetKind)
 	task.TargetWorkspace = targetWS
 	task.TargetProfile = targetProf
+	task.TargetProvider, task.TargetModel, task.TargetReasoningEffort = targetProvider, targetModel, targetReasoning
 	task.CreatedBySessionID = createdBy
 	// S4：attempts/死信为簿记字段——坏值降级为 0/nil，不让整行读取失败。
 	task.AttemptCount = int(attempts)
@@ -580,10 +686,10 @@ func (s *SQLiteStore) Put(task Task) error {
 	_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO schedule_tasks (`+taskColumns+`, owner_instance_id, lease_expires_at, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
 		append(recordArgs(task), task.StateVersion, originArg(task),
 			task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
-			task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID,
+			task.TargetWorkspace, task.TargetProfile, task.TargetProvider, task.TargetModel, task.TargetReasoningEffort, task.CreatedBySessionID,
 			int64(task.AttemptCount), nullableInstant(task.LastAttemptAt), nullableInstant(task.DeadLetteredAt),
 			task.LastError, task.LastErrorCode, now, now)...)
 	if err != nil {
@@ -600,6 +706,7 @@ UPDATE schedule_tasks SET
     session_id = ?, kind = ?, title = ?, prompt = ?, scheduled_at = ?,
     after_seconds = ?, every_seconds = ?, local_time = ?, time_zone = ?, weekdays_json = ?, expression = ?,
     goal = ?, plan_json = ?, target_kind = ?, target_workspace = ?, target_profile = ?,
+    target_provider = ?, target_model = ?, target_reasoning_effort = ?,
     created_by_session_id = ?,
     last_error = ?, last_error_code = ?,
     status = ?, last_scheduled_at = ?, last_delivered_at = ?, last_message_id = ?,
@@ -609,7 +716,7 @@ WHERE id = ? AND state_version = ?`,
 		nullableInt(task.Record.AfterSeconds), nullableInt(task.Record.EverySeconds), nullableString(task.Record.Time),
 		nullableString(task.Record.TimeZone), encodeWeekdays(task.Record.Weekdays), nullableString(task.Record.Expression),
 		task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
-		task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID, task.LastError, task.LastErrorCode,
+		task.TargetWorkspace, task.TargetProfile, task.TargetProvider, task.TargetModel, task.TargetReasoningEffort, task.CreatedBySessionID, task.LastError, task.LastErrorCode,
 		string(task.Status), lastScheduled(task), lastDelivered(task), lastMessageID(task),
 		now, task.Record.ID, expectedVersion)
 	if err != nil {

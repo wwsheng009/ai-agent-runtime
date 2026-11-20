@@ -14,7 +14,10 @@ import { fetchScheduleJobRuns } from "@/api/runtime/schedule";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { splitScheduleTasks } from "@/components/workspace/schedule-panel-shared";
-import { useScheduleTasks } from "@/hooks/workspace/use-schedule-tasks";
+import {
+  useScheduleTasks,
+  type ScheduleTasksController,
+} from "@/hooks/workspace/use-schedule-tasks";
 import { cn } from "@/lib/utils";
 import type {
   RuntimeScheduleJobRun,
@@ -42,6 +45,7 @@ const scheduleInputErrorKeys: Record<string, string> = {
   time_out_of_range: "panels.schedule.createErrorCode.time_out_of_range",
   frequency_too_high: "panels.schedule.createErrorCode.frequency_too_high",
   subagent_session: "panels.schedule.createErrorCode.subagent_session",
+  request_timeout: "panels.schedule.createErrorCode.request_timeout",
 };
 
 export type SchedulePanelProps = {
@@ -49,20 +53,37 @@ export type SchedulePanelProps = {
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
   workspacePath?: string;
+  /** 全局页可向列表和汇总视图共享同一份目录数据。 */
+  controller?: ScheduleTasksController;
+  /** 全局页可用：只展示符合当前筛选器的任务。 */
+  taskFilter?: (task: RuntimeScheduleTask) => boolean;
+  emptyMessage?: string;
+  /** 从模板页发起一次预填创建。key 变化时打开创建对话框。 */
+  createRequest?: {
+    key: string;
+    preset?: Partial<CreateFormState>;
+  };
+  onCreateRequestHandled?: (key: string) => void;
 };
 
 export function SchedulePanel({
   sessionId,
   lastRuntimeEventType,
   runtimeEventCount,
+  controller: suppliedController,
+  taskFilter,
+  emptyMessage,
+  createRequest,
+  onCreateRequestHandled,
 }: SchedulePanelProps) {
   const { t } = useTranslation("workspace");
-  const controller = useScheduleTasks({
-    enabled: true,
+  const ownedController = useScheduleTasks({
+    enabled: suppliedController === undefined,
     lastRuntimeEventType,
     runtimeEventCount,
     sessionId,
   });
+  const controller = suppliedController ?? ownedController;
   const {
     controlTask,
     controllingAction,
@@ -177,9 +198,11 @@ export function SchedulePanel({
   const visibleTasks = useMemo(
     () =>
       pendingDelete
-        ? tasks.filter((task) => task.id !== pendingDelete.id)
-        : tasks,
-    [pendingDelete, tasks],
+        ? tasks.filter(
+            (task) => task.id !== pendingDelete.id && taskFilter?.(task) !== false,
+          )
+        : tasks.filter((task) => taskFilter?.(task) !== false),
+    [pendingDelete, taskFilter, tasks],
   );
   const { active, paused, inactive, blocked, failed } = useMemo(
     () => splitScheduleTasks(visibleTasks),
@@ -362,6 +385,24 @@ export function SchedulePanel({
     setCreateForm(emptyCreateForm(sessionId));
   }, [sessionId]);
 
+  useEffect(() => {
+    if (!createRequest?.key) {
+      return;
+    }
+    setCreateError(null);
+    setCreateFieldErrors({});
+    setCreateForm({
+      ...emptyCreateForm(sessionId),
+      ...createRequest.preset,
+    });
+    onCreateRequestHandled?.(createRequest.key);
+  }, [
+    createRequest?.key,
+    createRequest?.preset,
+    onCreateRequestHandled,
+    sessionId,
+  ]);
+
   const closeCreate = useCallback(() => {
     if (creating) {
       return;
@@ -485,7 +526,7 @@ export function SchedulePanel({
 
       {visibleTasks.length === 0 && !loading ? (
         <p className="text-sm text-muted-foreground">
-          {t("panels.schedule.empty")}
+          {emptyMessage ?? t("panels.schedule.empty")}
         </p>
       ) : null}
 

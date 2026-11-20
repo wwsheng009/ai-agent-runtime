@@ -21,9 +21,12 @@ type CatalogEntry struct {
 	// J1/J3：执行上下文与创建者（前端展示 / 归属）。
 	// 不使用 omitempty：空值被省略时前端无法区分“会话任务”与“字段缺失”，
 	// 会退化成按会话任务校验，导致无人值守/工作区任务被误判。
-	TargetKind      TargetKind `json:"targetKind"`
-	TargetWorkspace string     `json:"targetWorkspace,omitempty"`
-	TargetProfile   string     `json:"targetProfile,omitempty"`
+	TargetKind            TargetKind `json:"targetKind"`
+	TargetWorkspace       string     `json:"targetWorkspace,omitempty"`
+	TargetProfile         string     `json:"targetProfile,omitempty"`
+	TargetProvider        string     `json:"target_provider,omitempty"`
+	TargetModel           string     `json:"target_model,omitempty"`
+	TargetReasoningEffort string     `json:"target_reasoning_effort,omitempty"`
 	// CreatedBySessionID lets management surfaces act on non-session targets
 	// (headless/workspace) without pretending they are bound to a session.
 	CreatedBySessionID string           `json:"createdBySessionId,omitempty"`
@@ -237,16 +240,33 @@ func (s *Service) Create(sessionID string, req CreateRequest, origin Origin) (Re
 	if targetKind != TargetSession {
 		boundSession = ""
 	}
+	targetWorkspace := strings.TrimSpace(req.TargetWorkspace)
+	targetProfile := strings.TrimSpace(req.TargetProfile)
+	targetProvider := strings.TrimSpace(req.TargetProvider)
+	targetModel := strings.TrimSpace(req.TargetModel)
+	targetReasoningEffort := strings.TrimSpace(req.TargetReasoningEffort)
+	if targetKind == TargetSession {
+		// Session reminders use the existing conversation route. Do not retain
+		// workspace-only execution settings supplied by stale or non-UI clients.
+		targetWorkspace = ""
+		targetProfile = ""
+		targetProvider = ""
+		targetModel = ""
+		targetReasoningEffort = ""
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task := Task{
-		SessionID:       boundSession,
-		Record:          record,
-		Status:          StatusActive,
-		Origin:          origin,
-		TargetKind:      targetKind,
-		TargetWorkspace: strings.TrimSpace(req.TargetWorkspace),
-		TargetProfile:   strings.TrimSpace(req.TargetProfile),
+		SessionID:             boundSession,
+		Record:                record,
+		Status:                StatusActive,
+		Origin:                origin,
+		TargetKind:            targetKind,
+		TargetWorkspace:       targetWorkspace,
+		TargetProfile:         targetProfile,
+		TargetProvider:        targetProvider,
+		TargetModel:           targetModel,
+		TargetReasoningEffort: targetReasoningEffort,
 		// J3：保留创建者会话（非 session 目标也记，用于结果回投）。
 		CreatedBySessionID: strings.TrimSpace(sessionID),
 		DeliveryHistory:    &DeliveryHistory{Records: []DeliveryRecord{}},
@@ -289,6 +309,7 @@ func (s *Service) Catalog() ([]CatalogEntry, error) {
 		entries = append(entries, CatalogEntry{
 			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin,
 			TargetKind: task.TargetKind, TargetWorkspace: task.TargetWorkspace, TargetProfile: task.TargetProfile,
+			TargetProvider: task.TargetProvider, TargetModel: task.TargetModel, TargetReasoningEffort: task.TargetReasoningEffort,
 			CreatedBySessionID: task.CreatedBySessionID, LastDelivery: task.LastDelivery,
 			LastErrorCode:  task.LastErrorCode,
 			LastError:      task.LastError,
@@ -496,6 +517,9 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 	next.TargetKind = target.kind
 	next.TargetWorkspace = target.workspace
 	next.TargetProfile = target.profile
+	next.TargetProvider = target.provider
+	next.TargetModel = target.model
+	next.TargetReasoningEffort = target.reasoning
 	next.CreatedBySessionID = target.createdBySessionID
 	nextStatus := current.Status
 	// A timing edit explicitly re-arms an ended one-shot task. Content-only edits
@@ -531,6 +555,9 @@ type updateTargetState struct {
 	profile            string
 	sessionID          string
 	workspace          string
+	provider           string
+	model              string
+	reasoning          string
 }
 
 func resolveUpdateTarget(
@@ -551,6 +578,16 @@ func resolveUpdateTarget(
 	profile := strings.TrimSpace(current.TargetProfile)
 	if content.TargetProfile != nil {
 		profile = strings.TrimSpace(*content.TargetProfile)
+	}
+	provider, model, reasoning := strings.TrimSpace(current.TargetProvider), strings.TrimSpace(current.TargetModel), strings.TrimSpace(current.TargetReasoningEffort)
+	if content.TargetProvider != nil {
+		provider = strings.TrimSpace(*content.TargetProvider)
+	}
+	if content.TargetModel != nil {
+		model = strings.TrimSpace(*content.TargetModel)
+	}
+	if content.TargetReasoningEffort != nil {
+		reasoning = strings.TrimSpace(*content.TargetReasoningEffort)
 	}
 	sessionID := strings.TrimSpace(current.SessionID)
 	if content.TargetSessionID != nil {
@@ -574,6 +611,9 @@ func resolveUpdateTarget(
 		// Session targets do not execute in a separate workspace/profile.
 		workspace = ""
 		profile = ""
+		provider = ""
+		model = ""
+		reasoning = ""
 	case TargetWorkspace:
 		sessionID = ""
 		if workspace == "" {
@@ -591,11 +631,15 @@ func resolveUpdateTarget(
 		profile:            profile,
 		sessionID:          sessionID,
 		workspace:          workspace,
+		provider:           provider, model: model, reasoning: reasoning,
 	}
 	changed := kind != currentKind ||
 		next.sessionID != strings.TrimSpace(current.SessionID) ||
 		next.workspace != strings.TrimSpace(current.TargetWorkspace) ||
 		next.profile != strings.TrimSpace(current.TargetProfile) ||
+		next.provider != strings.TrimSpace(current.TargetProvider) ||
+		next.model != strings.TrimSpace(current.TargetModel) ||
+		next.reasoning != strings.TrimSpace(current.TargetReasoningEffort) ||
 		next.createdBySessionID != strings.TrimSpace(current.CreatedBySessionID)
 	return next, changed, nil
 }

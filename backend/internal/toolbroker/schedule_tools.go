@@ -58,6 +58,9 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 						"type":        "string",
 						"description": "Optional tool/profile restriction used when the job runs unattended.",
 					},
+					"target_provider":         map[string]interface{}{"type": "string", "description": "Optional model provider override."},
+					"target_model":            map[string]interface{}{"type": "string", "description": "Optional model override."},
+					"target_reasoning_effort": map[string]interface{}{"type": "string", "description": "Optional reasoning effort override."},
 					"after_seconds": map[string]interface{}{
 						"type":        "integer",
 						"description": "Positive delay in whole seconds (one-shot).",
@@ -123,6 +126,9 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 						"type":        "string",
 						"description": "New reminder content.",
 					},
+					"target_provider":         map[string]interface{}{"type": "string"},
+					"target_model":            map[string]interface{}{"type": "string"},
+					"target_reasoning_effort": map[string]interface{}{"type": "string"},
 					"at": map[string]interface{}{
 						"type":        "string",
 						"description": "New absolute RFC 3339 target with an explicit offset.",
@@ -235,6 +241,9 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	req.TargetKind = schedule.NormalizeTargetKind(stringArg(args, "target_kind"))
 	req.TargetWorkspace = stringArg(args, "target_workspace")
 	req.TargetProfile = stringArg(args, "target_profile")
+	req.TargetProvider = stringArg(args, "target_provider")
+	req.TargetModel = stringArg(args, "target_model")
+	req.TargetReasoningEffort = stringArg(args, "target_reasoning_effort")
 	if value, ok, err := int64Arg(args, "after_seconds"); err != nil {
 		return scheduleError(schedule.CodeInvalidRule, err.Error()), nil, nil
 	} else if ok {
@@ -307,6 +316,15 @@ func (b *Broker) executeScheduleUpdate(sessionID string, args map[string]interfa
 	}
 	if value, ok := args["prompt"].(string); ok {
 		content.Prompt = &value
+	}
+	if value, ok := args["target_provider"].(string); ok {
+		content.TargetProvider = &value
+	}
+	if value, ok := args["target_model"].(string); ok {
+		content.TargetModel = &value
+	}
+	if value, ok := args["target_reasoning_effort"].(string); ok {
+		content.TargetReasoningEffort = &value
 	}
 	var change *schedule.TimingChange
 	if value, ok := args["at"].(string); ok && strings.TrimSpace(value) != "" {

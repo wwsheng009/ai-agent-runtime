@@ -32,6 +32,10 @@ const loadSchedulePage: LazySurfaceLoader = () =>
   import("@/pages/schedule-page").then((module) => ({
     default: module.SchedulePage,
   }));
+const loadAutomationPage: LazySurfaceLoader = () =>
+  import("@/pages/automation-page").then((module) => ({
+    default: module.AutomationPage,
+  }));
 const loadConnectorsPage: LazySurfaceLoader = () =>
   import("@/pages/connectors-page").then((module) => ({
     default: module.ConnectorsPage,
@@ -123,6 +127,15 @@ export default function App() {
               <RetryableLazyRoute
                 fallback={<AppRouteFallback />}
                 loader={loadSchedulePage}
+              />
+            }
+          />
+          <Route
+            path="/automation"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadAutomationPage}
               />
             }
           />

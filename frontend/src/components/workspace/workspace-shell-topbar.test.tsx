@@ -82,6 +82,7 @@ describe("WorkspaceShellTopbar", () => {
 
     for (const label of [
       "打开聊天导航",
+      "自动化中心",
       "日志",
       "更多入口",
       "设置",
@@ -90,6 +91,13 @@ describe("WorkspaceShellTopbar", () => {
         HTMLElement,
       );
     }
+
+    const automationLink = container.querySelector<HTMLAnchorElement>(
+      'a[data-testid="topbar-automation"]',
+    );
+    expect(automationLink).toBeInstanceOf(HTMLAnchorElement);
+    expect(automationLink?.getAttribute("href")).toBe("/automation");
+    expect(automationLink?.querySelector("svg")).toBeInstanceOf(SVGElement);
 
     const moreTrigger = container.querySelector(
       '[data-testid="topbar-more-trigger"]',

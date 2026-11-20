@@ -45,14 +45,47 @@ describe("createRequestFrom targets", () => {
       targetKind: "headless",
       goal: "keep the system healthy",
       plan: "check disk\ncheck memory",
+      provider: " gateway ",
+      model: " model-a ",
+      reasoningEffort: " high ",
     });
     expect(request).toMatchObject({
       sessionId: "",
       target_kind: "headless",
       goal: "keep the system healthy",
       plan: ["check disk", "check memory"],
+      provider: "gateway",
+      model: "model-a",
+      reasoning_effort: "high",
       after_seconds: 1800,
     });
+  });
+
+  it("session target omits route overrides even when stale form values exist", () => {
+    const request = createRequestFrom({
+      ...emptyCreateForm("session-1"),
+      title: "session reminder",
+      prompt: "run checks",
+      provider: "stale-provider",
+      model: "stale-model",
+      reasoningEffort: "stale-effort",
+    });
+    expect(request).not.toHaveProperty("provider");
+    expect(request).not.toHaveProperty("model");
+    expect(request).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("leaves the optional profile unset and omits it from the request", () => {
+    const form = {
+      ...emptyCreateForm(),
+      title: "nightly",
+      prompt: "run checks",
+      targetKind: "headless" as const,
+      goal: "keep the system healthy",
+    };
+
+    expect(form.targetProfile).toBe("");
+    expect(createRequestFrom(form)).not.toHaveProperty("target_profile");
   });
 
   it("workspace target requires an absolute workspace path", () => {
@@ -74,6 +107,27 @@ describe("createRequestFrom targets", () => {
       target_kind: "workspace",
       target_workspace: "E:/projects/demo",
       target_profile: "scheduled",
+    });
+  });
+
+  it("workspace target carries route overrides", () => {
+    const request = createRequestFrom({
+      ...emptyCreateForm(),
+      title: "workspace",
+      prompt: "run checks",
+      targetKind: "workspace",
+      targetWorkspace: "E:/projects/demo",
+      goal: "keep the workspace healthy",
+      provider: " gateway ",
+      model: " model-a ",
+      reasoningEffort: " high ",
+    });
+    expect(request).toMatchObject({
+      target_kind: "workspace",
+      target_workspace: "E:/projects/demo",
+      provider: "gateway",
+      model: "model-a",
+      reasoning_effort: "high",
     });
   });
 });
@@ -156,6 +210,9 @@ describe("editFormFromTask", () => {
         targetKind: "workspace",
         targetWorkspace: "E:/projects/demo",
         targetProfile: "scheduled",
+        provider: "gateway",
+        model: "model-a",
+        reasoningEffort: "high",
       }),
     );
 
@@ -170,6 +227,9 @@ describe("editFormFromTask", () => {
       targetKind: "workspace",
       targetWorkspace: "E:/projects/demo",
       targetProfile: "scheduled",
+      provider: "gateway",
+      model: "model-a",
+      reasoningEffort: "high",
     });
   });
 });
@@ -185,6 +245,9 @@ describe("updateRequestFrom", () => {
       plan: " step one \n\n step two ",
       targetKind: "headless" as const,
       targetProfile: " scheduled ",
+      provider: " gateway ",
+      model: " model-a ",
+      reasoningEffort: " high ",
     };
 
     expect(updateRequestFrom(form, base)).toMatchObject({
@@ -204,6 +267,9 @@ describe("updateRequestFrom", () => {
       target_profile: "scheduled",
       target_workspace: "",
       target_session_id: undefined,
+      provider: "gateway",
+      model: "model-a",
+      reasoning_effort: "high",
     });
     expect(updateRequestFrom(form, base)?.change).toBeUndefined();
   });
@@ -239,6 +305,34 @@ describe("updateRequestFrom", () => {
       title: "Nightly edited",
       target_kind: "headless",
       target_session_id: undefined,
+    });
+  });
+
+  it("session target update explicitly clears route overrides", () => {
+    const base = task({
+      sessionId: "",
+      targetKind: "headless",
+      provider: "old-provider",
+      model: "old-model",
+      reasoningEffort: "old-effort",
+    });
+    const form = {
+      ...editFormFromTask(base),
+      targetKind: "session" as const,
+      sessionId: "session-2",
+      provider: "stale-provider",
+      model: "stale-model",
+      reasoningEffort: "stale-effort",
+    };
+
+    expect(updateRequestFrom(form, base)).toMatchObject({
+      target_kind: "session",
+      target_session_id: "session-2",
+      target_workspace: "",
+      target_profile: "",
+      provider: "",
+      model: "",
+      reasoning_effort: "",
     });
   });
 

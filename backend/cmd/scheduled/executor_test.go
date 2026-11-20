@@ -2,20 +2,27 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // fakeExecutor 记录提交的 turn（E3.3 适配器单测替身）。
 type fakeExecutor struct {
-	reqs []runtimehost.TurnRequest
+	reqs       []runtimehost.TurnRequest
+	submitHook func(runtimehost.TurnRequest)
 }
 
 func (f *fakeExecutor) SubmitTurn(_ context.Context, req runtimehost.TurnRequest) (runtimehost.TurnResult, error) {
+	if f.submitHook != nil {
+		f.submitHook(req)
+	}
 	f.reqs = append(f.reqs, req)
 	return runtimehost.TurnResult{SessionID: req.SessionID, Completed: true}, nil
 }
@@ -63,6 +70,9 @@ func TestScheduleExecutorAdapterHeadlessCreatesSession(t *testing.T) {
 			createdUser = userID
 			return "session-headless-1", nil
 		},
+		initializeSession: func(context.Context, string, schedule.HeadlessTurnRequest) error {
+			return nil
+		},
 	}
 	_, err := adapter.ExecuteHeadlessTurn(context.Background(), schedule.HeadlessTurnRequest{
 		JobID: "job-1", Goal: "做系统检查", Plan: []string{"检查磁盘"},
@@ -89,11 +99,93 @@ func TestScheduleExecutorAdapterHeadlessCreatesSession(t *testing.T) {
 	}
 }
 
-// TestScheduleExecutorAdapterHeadlessFailsClosed 验证无会话工厂时 fail-closed。
+// TestScheduleExecutorAdapterHeadlessMapsExecutionContext 验证初始化顺序以及
+// provider/model/reasoning/workspace 映射。
+func TestScheduleExecutorAdapterHeadlessMapsExecutionContext(t *testing.T) {
+	events := []string{}
+	fake := &fakeExecutor{
+		submitHook: func(runtimehost.TurnRequest) {
+			events = append(events, "submit")
+		},
+	}
+	adapter := scheduleExecutorAdapter{
+		exec:    fake,
+		profile: "adapter-profile",
+		createSession: func(context.Context, string) (string, error) {
+			events = append(events, "create")
+			return "session-workspace-1", nil
+		},
+		initializeSession: func(_ context.Context, sessionID string, req schedule.HeadlessTurnRequest) error {
+			if sessionID != "session-workspace-1" {
+				t.Fatalf("initialize received session %q", sessionID)
+			}
+			if req.TargetKind != schedule.TargetWorkspace {
+				t.Fatalf("initialize received target kind %q", req.TargetKind)
+			}
+			events = append(events, "initialize")
+			return nil
+		},
+	}
+	_, err := adapter.ExecuteHeadlessTurn(context.Background(), schedule.HeadlessTurnRequest{
+		JobID:           "job-workspace-1",
+		Goal:            "检查工作区",
+		TargetKind:      schedule.TargetWorkspace,
+		Profile:         "scheduled",
+		Provider:        " provider-a ",
+		Model:           " model-a ",
+		ReasoningEffort: " high ",
+		Workspace:       "E:/projects/demo",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteHeadlessTurn: %v", err)
+	}
+	if got, want := strings.Join(events, ","), "create,initialize,submit"; got != want {
+		t.Fatalf("execution order = %q, want %q", got, want)
+	}
+	if len(fake.reqs) != 1 {
+		t.Fatalf("expected exactly one headless turn, got %d", len(fake.reqs))
+	}
+	req := fake.reqs[0]
+	if req.Profile != "scheduled" ||
+		req.Provider != " provider-a " ||
+		req.Model != " model-a " ||
+		req.ReasoningEffort != " high " ||
+		req.Workspace != "E:/projects/demo" {
+		t.Fatalf("execution context was not mapped: %+v", req)
+	}
+}
+
+// TestScheduleExecutorAdapterHeadlessInitializationFailure 验证初始化失败时
+// 不会构造/提交 actor turn。
+func TestScheduleExecutorAdapterHeadlessInitializationFailure(t *testing.T) {
+	fake := &fakeExecutor{}
+	adapter := scheduleExecutorAdapter{
+		exec: fake,
+		createSession: func(context.Context, string) (string, error) {
+			return "session-init-failure", nil
+		},
+		initializeSession: func(context.Context, string, schedule.HeadlessTurnRequest) error {
+			return errors.New("metadata write failed")
+		},
+	}
+	result, err := adapter.ExecuteHeadlessTurn(context.Background(), schedule.HeadlessTurnRequest{})
+	if err == nil || !strings.Contains(err.Error(), "initialize headless session") {
+		t.Fatalf("initialization failure must be returned, got result=%+v err=%v", result, err)
+	}
+	if result.SessionID != "session-init-failure" {
+		t.Fatalf("failed initialization should preserve session id, got %q", result.SessionID)
+	}
+	if len(fake.reqs) != 0 {
+		t.Fatalf("SubmitTurn must not run after initialization failure, got %d requests", len(fake.reqs))
+	}
+}
+
+// TestScheduleExecutorAdapterHeadlessFailsClosed 验证缺少会话工厂或初始化回调时
+// fail-closed。
 func TestScheduleExecutorAdapterHeadlessFailsClosed(t *testing.T) {
 	adapter := scheduleExecutorAdapter{exec: &fakeExecutor{}}
 	if _, err := adapter.ExecuteHeadlessTurn(context.Background(), schedule.HeadlessTurnRequest{}); err == nil {
-		t.Fatal("headless without a session factory must error")
+		t.Fatal("headless without a session factory/initializer must error")
 	}
 }
 
@@ -107,6 +199,9 @@ func TestScheduleExecutorAdapterHeadlessArchivesSession(t *testing.T) {
 		profile: "scheduled",
 		createSession: func(context.Context, string) (string, error) {
 			return "session-ephemeral", nil
+		},
+		initializeSession: func(context.Context, string, schedule.HeadlessTurnRequest) error {
+			return nil
 		},
 		archiveSession: func(_ context.Context, sessionID string) error {
 			archived = sessionID
@@ -124,5 +219,76 @@ func TestScheduleExecutorAdapterHeadlessArchivesSession(t *testing.T) {
 	}
 	if archived != "session-ephemeral" {
 		t.Fatalf("ephemeral session must be archived after a completed turn, got %q", archived)
+	}
+}
+
+func TestInitializeScheduledSessionPersistsExecutionContext(t *testing.T) {
+	ctx := context.Background()
+	manager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(manager.Stop)
+
+	tests := []struct {
+		name          string
+		targetKind    schedule.TargetKind
+		requestedPath string
+		wantPath      string
+	}{
+		{
+			name:          "workspace keeps workspace path",
+			targetKind:    schedule.TargetWorkspace,
+			requestedPath: " E:/projects/demo ",
+			wantPath:      "E:/projects/demo",
+		},
+		{
+			name:          "headless clears workspace path",
+			targetKind:    schedule.TargetHeadless,
+			requestedPath: "E:/projects/should-not-leak",
+			wantPath:      "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session, err := manager.Create(ctx, "scheduled-test-user")
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			err = initializeScheduledSession(ctx, manager, session.ID, schedule.HeadlessTurnRequest{
+				TargetKind:      tt.targetKind,
+				Workspace:       tt.requestedPath,
+				Provider:        " provider-a ",
+				Model:           " model-a ",
+				ReasoningEffort: " high ",
+			})
+			if err != nil {
+				t.Fatalf("initializeScheduledSession: %v", err)
+			}
+			persisted, err := manager.Get(ctx, session.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			assertSessionContextString(t, persisted, sessionmeta.WorkspacePath, tt.wantPath)
+			assertSessionContextString(t, persisted, sessionmeta.ProviderName, "provider-a")
+			assertSessionContextString(t, persisted, sessionmeta.Model, "model-a")
+			assertSessionContextString(t, persisted, toolbroker.AgentSessionContextRequestedModel, "model-a")
+			assertSessionContextString(t, persisted, sessionmeta.ReasoningEffort, "high")
+		})
+	}
+}
+
+func assertSessionContextString(t *testing.T, session *chat.Session, key, want string) {
+	t.Helper()
+	value, ok := session.GetContext(key)
+	if !ok {
+		if want == "" {
+			return
+		}
+		t.Fatalf("session context %q is missing, want %q", key, want)
+	}
+	got, ok := value.(string)
+	if !ok {
+		t.Fatalf("session context %q has type %T, want string", key, value)
+	}
+	if got != want {
+		t.Fatalf("session context %q = %q, want %q", key, got, want)
 	}
 }

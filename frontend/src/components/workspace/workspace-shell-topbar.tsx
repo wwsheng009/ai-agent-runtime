@@ -1,4 +1,5 @@
 import {
+  CalendarClockIcon,
   ChartNoAxesCombinedIcon,
   DatabaseIcon,
   EyeIcon,
@@ -318,6 +319,18 @@ export function WorkspaceShellTopbar({
             ) : null}
           </>
         ) : null}
+        <Link
+          to="/automation"
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "icon" }),
+            "shrink-0",
+          )}
+          aria-label={t("sidebar.automationPage")}
+          title={t("sidebar.automationPage")}
+          data-testid="topbar-automation"
+        >
+          <CalendarClockIcon aria-hidden="true" size={16} />
+        </Link>
         <Link
           to="/logs"
           className={cn(

@@ -98,11 +98,12 @@ func submitOptionsForTurn(req runtimehost.TurnRequest) []chat.SubmitPromptOption
 			images = append(images, trimmed)
 		}
 	}
-	if len(images) == 0 {
+	opt := chat.SubmitPromptOption{ImagePaths: images, ImageArtifactDir: RuntimeUploadRootDir()}
+	if req.Provider != "" || req.Model != "" || req.ReasoningEffort != "" {
+		opt.RouteOverride = &chat.RunRouteOverride{Provider: req.Provider, Model: req.Model, ReasoningEffort: req.ReasoningEffort}
+	}
+	if len(images) == 0 && opt.RouteOverride == nil {
 		return nil
 	}
-	return []chat.SubmitPromptOption{{
-		ImagePaths:       images,
-		ImageArtifactDir: RuntimeUploadRootDir(),
-	}}
+	return []chat.SubmitPromptOption{opt}
 }

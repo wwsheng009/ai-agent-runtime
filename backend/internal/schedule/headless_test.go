@@ -54,7 +54,8 @@ func TestHeadlessJobExecutesAndCommits(t *testing.T) {
 	rec := newHeadlessJob(t, svc, CreateRequest{
 		Prompt: "p", Title: "t", AfterSeconds: &delay,
 		Goal: "做一次系统检查", Plan: []string{"检查磁盘", "检查内存"},
-		TargetKind: TargetHeadless,
+		TargetKind: TargetHeadless, TargetProvider: " gateway ",
+		TargetModel: " model-a ", TargetReasoningEffort: " high ",
 	})
 
 	exec := &fakeHeadlessExecutor{}
@@ -73,7 +74,8 @@ func TestHeadlessJobExecutesAndCommits(t *testing.T) {
 		t.Fatalf("headless job must execute exactly once, got %d", exec.count())
 	}
 	got := exec.reqs[0]
-	if got.JobID != rec.ID || got.Goal != "做一次系统检查" || len(got.Plan) != 2 || got.TargetKind != TargetHeadless {
+	if got.JobID != rec.ID || got.Goal != "做一次系统检查" || len(got.Plan) != 2 || got.TargetKind != TargetHeadless ||
+		got.Provider != "gateway" || got.Model != "model-a" || got.ReasoningEffort != "high" {
 		t.Fatalf("headless request mismatch: %+v", got)
 	}
 	task, ok, err := store.Get(rec.ID)

@@ -37,7 +37,11 @@ type TurnRequest struct {
 	// Images 是本次消息附带的图片路径（可选）。
 	Images []string
 	// Profile 限定本次执行的工具面（可选；E3.1+ 生效，E3.0 适配器忽略）。
-	Profile string
+	Profile         string
+	Provider        string
+	Model           string
+	ReasoningEffort string
+	Workspace       string
 }
 
 // TurnResult 是一次 turn 的终态（或"已接受未完成"的中间态）。

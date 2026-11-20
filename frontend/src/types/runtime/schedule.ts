@@ -27,6 +27,54 @@ export type RuntimeScheduleState = "scheduled" | "overdue";
  */
 export type RuntimeScheduleTargetKind = "session" | "workspace" | "headless";
 
+/** Persisted automation preset served by the Schedule store. */
+export type RuntimeScheduleTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  taskTitle: string;
+  category: string;
+  prompt: string;
+  kind: RuntimeScheduleKind;
+  amount: string;
+  atTime: string;
+  clockTime: string;
+  timeZone: string;
+  weekdays: number[];
+  cron: string;
+  goal: string;
+  /** Stored as one step per line so the API remains presentation-neutral. */
+  plan: string;
+  targetKind: RuntimeScheduleTargetKind;
+  targetWorkspace: string;
+  targetProfile: string;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+/** Create/update payload. The server supplies timestamps. */
+export type RuntimeScheduleTemplateRequest = Omit<
+  RuntimeScheduleTemplate,
+  "createdAt" | "updatedAt"
+>;
+
+export type RuntimeScheduleTemplatesResponse = {
+  templates: RuntimeScheduleTemplate[];
+  count: number;
+};
+
+export type RuntimeScheduleTemplateResponse = {
+  template: RuntimeScheduleTemplate;
+};
+
+export type RuntimeScheduleTemplateDeleteResponse = {
+  id: string;
+  deleted: boolean;
+};
+
 /** 一条提醒的规则与已提交目标（`scheduledAt` 为 UTC RFC3339）。 */
 export type RuntimeScheduleRecord = {
   id: string;
@@ -50,6 +98,10 @@ export type RuntimeScheduleRecord = {
   weekdays?: number[];
   /** kind=cron（规范化五字段） */
   expression?: string;
+  /** Optional model execution overrides; empty/absent means runtime default. */
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
 };
 
 /** 目录条目：记录 + 原会话绑定 + 生命周期 + 最近回执。 */
@@ -83,6 +135,9 @@ export type RuntimeScheduleTask = {
   targetKind?: RuntimeScheduleTargetKind;
   targetWorkspace?: string;
   targetProfile?: string;
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
   /** 创建者会话（J3；非 session 目标也保留，用于结果回投）。 */
   createdBySessionId?: string;
   lastDelivery?: {
@@ -183,6 +238,9 @@ export type RuntimeScheduleUpdateRequest = {
   target_kind?: RuntimeScheduleTargetKind;
   target_workspace?: string;
   target_profile?: string;
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
   /** session 目标编辑时显式指定目标会话；非 session 目标忽略。 */
   target_session_id?: string;
   change?: RuntimeScheduleTimingChange;
@@ -206,6 +264,9 @@ export type RuntimeScheduleCreateRequest = {
   target_kind?: RuntimeScheduleTargetKind;
   target_workspace?: string;
   target_profile?: string;
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
 };
 
 export type RuntimeScheduleCreateResponse = {

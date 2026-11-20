@@ -159,6 +159,7 @@ func TestServiceUpdateCanRebindHeadlessJobToSession(t *testing.T) {
 	rec, err := svc.Create("creator-session", CreateRequest{
 		Prompt: "p", Title: "t", AfterSeconds: &delay,
 		Goal: "goal", TargetKind: TargetHeadless,
+		TargetProvider: "provider-a", TargetModel: "model-a", TargetReasoningEffort: "high",
 	}, OriginManual)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -185,6 +186,9 @@ func TestServiceUpdateCanRebindHeadlessJobToSession(t *testing.T) {
 	}
 	if task.TargetWorkspace != "" || task.TargetProfile != "" {
 		t.Fatalf("session target must clear workspace/profile: %+v", task)
+	}
+	if task.TargetProvider != "" || task.TargetModel != "" || task.TargetReasoningEffort != "" {
+		t.Fatalf("session target must clear provider/model/reasoning: %+v", task)
 	}
 }
 
