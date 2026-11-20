@@ -282,7 +282,7 @@
 
 ### 0.21 第二十一批已执行（2026-11-20）
 
-- 将 8 个仅测试引用的生产 helper 迁移到 `_test.go`：
+- 将 7 个仅测试引用的生产 helper 迁移到 `_test.go`：
   - `cmd/aicli/ui`：`newSuffixProjector`、`noteTranscriptResidencyBodyStoreGet`、
     `sessionInfoChildPrefix`、`terminalScrollDownSequence` → `cleanup_helpers_test.go`；
   - `cmd/runtime-server`：`defaultRuntimeServerDotEnvSearchPaths` →
