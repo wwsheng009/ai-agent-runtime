@@ -22,7 +22,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { FS_SORT_KEY_OPTIONS, normalizeSortKey } from "@/lib/file-browser/entry-sort";
 
@@ -116,24 +116,24 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         <label className="sr-only" htmlFor="file-browser-scope">
           {t("panels.fileBrowser.scope.label")}
         </label>
-        <NativeSelect
-          aria-label={t("panels.fileBrowser.scope.selectAria")}
+        <Select
+          ariaLabel={t("panels.fileBrowser.scope.selectAria")}
           size="sm"
           surface="soft"
           className="min-w-0 flex-1 truncate"
           id="file-browser-scope"
-          onChange={(event) => onSelectScope(event.target.value)}
+          onChange={onSelectScope}
+          options={[
+            ...roots.map((root) => ({
+              value: root.scope,
+              label: root.name || root.path || root.scope,
+            })),
+            ...(hasFallback && !roots.some((root) => root.scope === activeScope) && activeScope
+              ? [{ value: activeScope, label: t("panels.fileBrowser.scope.cwdFallback") }]
+              : []),
+          ]}
           value={activeScope}
-        >
-          {roots.map((root) => (
-            <option key={root.scope} value={root.scope}>
-              {root.name || root.path || root.scope}
-            </option>
-          ))}
-          {hasFallback && !roots.some((root) => root.scope === activeScope) && activeScope ? (
-            <option value={activeScope}>{t("panels.fileBrowser.scope.cwdFallback")}</option>
-          ) : null}
-        </NativeSelect>
+        />
         <button
           aria-label={t("panels.fileBrowser.scope.up")}
           className="rounded border border-border/60 p-1 text-muted-foreground hover:bg-white/5 disabled:opacity-40"
@@ -241,23 +241,21 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         <label className="sr-only" htmlFor="file-browser-sort">
           {t("panels.fileBrowser.scope.sortAria")}
         </label>
-        <NativeSelect
-          aria-label={t("panels.fileBrowser.scope.sortAria")}
+        <Select
+          ariaLabel={t("panels.fileBrowser.scope.sortAria")}
           size="sm"
           surface="soft"
           className="w-auto app-text-11 disabled:opacity-40"
           disabled={resultsVisible}
           id="file-browser-sort"
-          onChange={(event) => onChangeSort(normalizeSortKey(event.target.value))}
+          onChange={(key) => onChangeSort(normalizeSortKey(key))}
+          options={FS_SORT_KEY_OPTIONS.map((key) => ({
+            value: key,
+            label: t(SORT_LABEL_KEYS[key]),
+          }))}
           title={resultsVisible ? t("panels.fileBrowser.search.sortHint") : undefined}
           value={sortKey}
-        >
-          {FS_SORT_KEY_OPTIONS.map((key) => (
-            <option key={key} value={key}>
-              {t(SORT_LABEL_KEYS[key])}
-            </option>
-          ))}
-        </NativeSelect>
+        />
         <label
           className="inline-flex cursor-pointer items-center gap-1 rounded border border-border/60 px-1.5 py-1 app-text-11 text-muted-foreground hover:bg-white/5"
           title={t("panels.fileBrowser.scope.upload")}

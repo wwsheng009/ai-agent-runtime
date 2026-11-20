@@ -30,7 +30,9 @@ const referenceGroups: ComposerReferenceGroup[] = [
   { id: "empty", label: "空组", items: [] },
 ];
 
-function source(overrides: Partial<ComposerMenuSource> = {}): ComposerMenuSource {
+function source(
+  overrides: Partial<ComposerMenuSource> = {},
+): ComposerMenuSource {
   return {
     mode: "all",
     level: { kind: "root" },
@@ -44,24 +46,30 @@ function source(overrides: Partial<ComposerMenuSource> = {}): ComposerMenuSource
 }
 
 describe("buildComposerMenu", () => {
-  it("merges commands, actions and reference launchers from a single source", () => {
+  it("builds category launchers at the + root instead of flattening leaves", () => {
     const snapshot = buildComposerMenu(source());
 
     expect(snapshot.groups.map((group) => group.id)).toEqual([
-      "commands",
       "actions",
-      "artifacts",
+      "references",
+      "commands",
     ]);
     expect(snapshot.empty).toBe(false);
     expect(snapshot.activeId).toBe(snapshot.items[0].id);
+    expect(snapshot.items.every((item) => item.level === "launcher")).toBe(true);
+    expect(snapshot.items.map((item) => item.id)).toEqual([
+      "launcher:actions",
+      "launcher:references",
+      "launcher:commands",
+    ]);
     // 空分组与未请求的模式不进入菜单。
     expect(snapshot.items.some((item) => item.groupId === "empty")).toBe(false);
   });
 
   it("shows only the requested entry mode", () => {
-    expect(buildComposerMenu(source({ mode: "commands" })).groups.map((g) => g.id)).toEqual([
-      "commands",
-    ]);
+    expect(
+      buildComposerMenu(source({ mode: "commands" })).groups.map((g) => g.id),
+    ).toEqual(["commands"]);
     expect(
       buildComposerMenu(source({ mode: "references" })).groups.map((g) => g.id),
     ).toEqual(["artifacts"]);
@@ -69,7 +77,10 @@ describe("buildComposerMenu", () => {
 
   it("drills into a reference group instead of repeating launchers", () => {
     const snapshot = buildComposerMenu(
-      source({ mode: "references", level: { kind: "group", groupId: "artifacts" } }),
+      source({
+        mode: "references",
+        level: { kind: "group", groupId: "artifacts" },
+      }),
     );
 
     expect(snapshot.groups.map((group) => group.id)).toEqual(["artifacts"]);
@@ -78,31 +89,44 @@ describe("buildComposerMenu", () => {
       "my report.md",
     ]);
     expect(snapshot.items.every((item) => item.level === "leaf")).toBe(true);
-    expect(findComposerMenuItem(snapshot.items, "reference:artifacts:a1")?.action).toEqual({
+    expect(
+      findComposerMenuItem(snapshot.items, "reference:artifacts:a1")?.action,
+    ).toEqual({
       kind: "reference",
       text: "src/app.tsx",
     });
   });
 
   it("filters by query with prefix matches ranked first", () => {
-    const snapshot = buildComposerMenu(source({ mode: "all", query: "pl" }));
+    const snapshot = buildComposerMenu(
+      source({
+        mode: "all",
+        level: { kind: "group", groupId: "commands" },
+        query: "pl",
+      }),
+    );
     expect(snapshot.items.map((item) => item.label)).toEqual(["/plan"]);
     expect(snapshot.groups.map((group) => group.id)).toEqual(["commands"]);
   });
 
   it("reports an empty snapshot when nothing matches", () => {
-    const snapshot = buildComposerMenu(source({ query: "zzz" }));
+    const snapshot = buildComposerMenu(
+      source({ mode: "commands", query: "zzz" }),
+    );
     expect(snapshot.empty).toBe(true);
     expect(snapshot.items).toEqual([]);
     expect(snapshot.activeId).toBeNull();
   });
 
   it("caps each group at the declared limit", () => {
-    const many = Array.from({ length: COMPOSER_MENU_MAX_ITEMS_PER_GROUP + 4 }, (_, index) => ({
-      id: `f${index}`,
-      label: `file-${index}.ts`,
-      insertText: `file-${index}.ts`,
-    }));
+    const many = Array.from(
+      { length: COMPOSER_MENU_MAX_ITEMS_PER_GROUP + 4 },
+      (_, index) => ({
+        id: `f${index}`,
+        label: `file-${index}.ts`,
+        insertText: `file-${index}.ts`,
+      }),
+    );
     const snapshot = buildComposerMenu(
       source({
         mode: "references",
@@ -114,8 +138,132 @@ describe("buildComposerMenu", () => {
   });
 
   it("omits the attach action when the host does not provide it", () => {
-    const snapshot = buildComposerMenu(source({ hasAttachAction: false }));
-    expect(snapshot.items.some((item) => item.action.kind === "attach")).toBe(false);
+    const root = buildComposerMenu(source({ hasAttachAction: false }));
+    expect(root.groups.some((group) => group.id === "actions")).toBe(false);
+
+    const drilled = buildComposerMenu(
+      source({
+        level: { kind: "group", groupId: "actions" },
+        hasAttachAction: false,
+      }),
+    );
+    expect(drilled.items).toEqual([]);
+  });
+
+  it("adds selectable workspace options only when the host provides workspace data", () => {
+    const snapshot = buildComposerMenu(
+      source({
+        workspaceSelection: {
+          label: "工作区",
+          options: [
+            { id: "repo", label: "项目", path: "E:/projects/demo" },
+            { id: "docs", label: "文档", path: "E:/docs" },
+          ],
+          selectedId: "repo",
+          clearLabel: "不选择工作区",
+        },
+      }),
+    );
+    const workspaceLauncher = snapshot.items.find(
+      (item) => item.id === "launcher:workspace",
+    );
+    expect(workspaceLauncher).toMatchObject({
+      level: "launcher",
+      count: 3,
+    });
+
+    const drilled = buildComposerMenu(
+      source({
+        level: { kind: "group", groupId: "workspace" },
+        workspaceSelection: {
+          label: "工作区",
+          options: [
+            { id: "repo", label: "项目", path: "E:/projects/demo" },
+            { id: "docs", label: "文档", path: "E:/docs" },
+          ],
+          selectedId: "repo",
+          clearLabel: "不选择工作区",
+        },
+      }),
+    );
+    const workspaceItems = drilled.items.filter(
+      (item) => item.action.kind === "workspace",
+    );
+
+    expect(snapshot.groups.map((group) => group.id)).toContain("workspace");
+    expect(workspaceItems).toMatchObject([
+      {
+        id: "workspace:none",
+        selected: false,
+        action: { kind: "workspace", directoryId: null },
+      },
+      {
+        id: "workspace:repo",
+        selected: true,
+        description: "E:/projects/demo",
+        action: { kind: "workspace", directoryId: "repo" },
+      },
+      {
+        id: "workspace:docs",
+        selected: false,
+        action: { kind: "workspace", directoryId: "docs" },
+      },
+    ]);
+    expect(
+      buildComposerMenu(source()).items.some(
+        (item) => item.action.kind === "workspace",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a workspace group visible while directory data is loading or empty", () => {
+    const root = buildComposerMenu(
+      source({
+        workspaceSelection: {
+          label: "工作区",
+          options: [],
+          selectedId: null,
+          clearLabel: "不选择工作区",
+          statusText: "正在加载…",
+        },
+      }),
+    );
+    expect(root.groups.map((group) => group.id)).toContain("workspace");
+
+    const loading = buildComposerMenu(
+      source({
+        level: { kind: "group", groupId: "workspace" },
+        workspaceSelection: {
+          label: "工作区",
+          options: [],
+          selectedId: null,
+          clearLabel: "不选择工作区",
+          statusText: "正在加载…",
+        },
+      }),
+    );
+    expect(
+      loading.groups.find((group) => group.id === "workspace"),
+    ).toMatchObject({
+      statusText: "正在加载…",
+      items: [{ action: { kind: "workspace", directoryId: null } }],
+    });
+
+    const empty = buildComposerMenu(
+      source({
+        level: { kind: "group", groupId: "workspace" },
+        workspaceSelection: {
+          label: "工作区",
+          options: [],
+          selectedId: null,
+          clearLabel: "不选择工作区",
+          emptyText: "暂无工作区",
+        },
+      }),
+    );
+    expect(
+      empty.groups.find((group) => group.id === "workspace")?.emptyText,
+    ).toBe("暂无工作区");
   });
 });
 
@@ -136,7 +284,10 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
     },
   ];
 
-  function leafSource(group: ComposerReferenceGroup, query: string): ComposerMenuSource {
+  function leafSource(
+    group: ComposerReferenceGroup,
+    query: string,
+  ): ComposerMenuSource {
     return source({
       mode: "references",
       level: { kind: "group", groupId: group.id },
@@ -148,7 +299,12 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
   it("serverFiltered 组跳过客户端过滤与重排，保留服务端顺序", () => {
     const snapshot = buildComposerMenu(
       leafSource(
-        { id: "workspace-files", label: "工作区文件", items: serverItems, serverFiltered: true },
+        {
+          id: "workspace-files",
+          label: "工作区文件",
+          items: serverItems,
+          serverFiltered: true,
+        },
         "cmpmenu",
       ),
     );
@@ -165,7 +321,10 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
 
   it("未标记 serverFiltered 的组仍按客户端子串过滤（产物组语义不变）", () => {
     const snapshot = buildComposerMenu(
-      leafSource({ id: "workspace-files", label: "工作区文件", items: serverItems }, "cmpmenu"),
+      leafSource(
+        { id: "workspace-files", label: "工作区文件", items: serverItems },
+        "cmpmenu",
+      ),
     );
 
     expect(snapshot.items).toEqual([]);
@@ -189,7 +348,9 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
       }),
     );
 
-    expect(snapshot.groups.map((group) => group.id)).toEqual(["workspace-files"]);
+    expect(snapshot.groups.map((group) => group.id)).toEqual([
+      "workspace-files",
+    ]);
     expect(snapshot.groups[0]).toMatchObject({
       status: "loading",
       statusText: "正在读取工作区文件…",
@@ -213,8 +374,12 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
     );
 
     expect(snapshot.items).toEqual([]);
-    expect(snapshot.groups.map((group) => group.id)).toEqual(["workspace-files"]);
-    expect(snapshot.groups[0].emptyText).toBe("未找到匹配文件，可继续输入缩小范围");
+    expect(snapshot.groups.map((group) => group.id)).toEqual([
+      "workspace-files",
+    ]);
+    expect(snapshot.groups[0].emptyText).toBe(
+      "未找到匹配文件，可继续输入缩小范围",
+    );
     expect(snapshot.empty).toBe(true);
   });
 
@@ -257,8 +422,13 @@ describe("composer reference groups（工作区文件数据源扩展）", () => 
       ),
     );
 
-    expect(snapshot.groups.map((group) => group.id)).toEqual(["workspace-files"]);
-    expect(snapshot.groups[0]).toMatchObject({ status: "error", statusText: "工作区文件不可用" });
+    expect(snapshot.groups.map((group) => group.id)).toEqual([
+      "workspace-files",
+    ]);
+    expect(snapshot.groups[0]).toMatchObject({
+      status: "error",
+      statusText: "工作区文件不可用",
+    });
   });
 });
 
@@ -276,13 +446,19 @@ describe("composer command option level", () => {
     commandName: "model",
     label: "model",
     options: [
-      { value: "deepseek-chat", label: "deepseek-chat", description: "deepseek" },
+      {
+        value: "deepseek-chat",
+        label: "deepseek-chat",
+        description: "deepseek",
+      },
       { value: "gpt-5", label: "gpt-5", description: "openai" },
       { value: "gpt-5-mini", label: "gpt-5-mini", description: "openai" },
     ],
   };
 
-  function optionSource(overrides: Partial<ComposerMenuSource> = {}): ComposerMenuSource {
+  function optionSource(
+    overrides: Partial<ComposerMenuSource> = {},
+  ): ComposerMenuSource {
     return source({
       mode: "all",
       level: { kind: "command-options", commandKey: "model" },
@@ -295,7 +471,9 @@ describe("composer command option level", () => {
   it("候选独占一层：不混入命令 / 引用 / 附件，动作携带命令名与参数原文", () => {
     const snapshot = buildComposerMenu(optionSource());
 
-    expect(snapshot.groups.map((group) => group.id)).toEqual(["command-options:model"]);
+    expect(snapshot.groups.map((group) => group.id)).toEqual([
+      "command-options:model",
+    ]);
     expect(snapshot.items.map((item) => item.label)).toEqual([
       "deepseek-chat",
       "gpt-5",
@@ -311,7 +489,9 @@ describe("composer command option level", () => {
 
   it("按 query 过滤候选，全落空视为空快照", () => {
     expect(
-      buildComposerMenu(optionSource({ query: "gpt" })).items.map((item) => item.label),
+      buildComposerMenu(optionSource({ query: "gpt" })).items.map(
+        (item) => item.label,
+      ),
     ).toEqual(["gpt-5", "gpt-5-mini"]);
 
     const empty = buildComposerMenu(optionSource({ query: "zzz" }));
@@ -359,7 +539,10 @@ describe("composer menu highlight movement", () => {
     expect(resolveComposerMenuTab(root.items, launcher.id)).toBe("drill");
 
     const leaf = buildComposerMenu(
-      source({ mode: "references", level: { kind: "group", groupId: "artifacts" } }),
+      source({
+        mode: "references",
+        level: { kind: "group", groupId: "artifacts" },
+      }),
     ).items[0];
     expect(resolveComposerMenuTab([leaf], leaf.id)).toBe("pick");
     expect(resolveComposerMenuTab(root.items, null)).toBe("pass");
@@ -373,7 +556,12 @@ describe("composer skill groups（`$` 技能提及）", () => {
       id: "skills",
       label: "技能",
       items: [
-        { id: "brand", label: "brand", insertText: "brand", description: "design" },
+        {
+          id: "brand",
+          label: "brand",
+          insertText: "brand",
+          description: "design",
+        },
         { id: "docx", label: "docx", insertText: "docx", description: "docs" },
       ],
     },
@@ -385,16 +573,22 @@ describe("composer skill groups（`$` 技能提及）", () => {
     expect(snapshot.groups.map((group) => group.id)).toEqual(["skills"]);
     expect(snapshot.items.map((item) => item.label)).toEqual(["brand", "docx"]);
     expect(snapshot.items.every((item) => item.level === "leaf")).toBe(true);
-    expect(findComposerMenuItem(snapshot.items, "skill:skills:brand")?.action).toEqual({
+    expect(
+      findComposerMenuItem(snapshot.items, "skill:skills:brand")?.action,
+    ).toEqual({
       kind: "skill",
       name: "brand",
     });
     // `$` 模式不混入命令/引用/附件。
-    expect(snapshot.groups.some((group) => group.id === "commands")).toBe(false);
+    expect(snapshot.groups.some((group) => group.id === "commands")).toBe(
+      false,
+    );
   });
 
   it("filters skills by name / description with prefix matches ranked first", () => {
-    const byName = buildComposerMenu(source({ mode: "skills", skillGroups, query: "do" }));
+    const byName = buildComposerMenu(
+      source({ mode: "skills", skillGroups, query: "do" }),
+    );
     expect(byName.items.map((item) => item.label)).toEqual(["docx"]);
 
     const byDescription = buildComposerMenu(
@@ -402,7 +596,9 @@ describe("composer skill groups（`$` 技能提及）", () => {
     );
     expect(byDescription.items.map((item) => item.label)).toEqual(["brand"]);
 
-    const none = buildComposerMenu(source({ mode: "skills", skillGroups, query: "zzz" }));
+    const none = buildComposerMenu(
+      source({ mode: "skills", skillGroups, query: "zzz" }),
+    );
     expect(none.empty).toBe(true);
     expect(none.groups).toEqual([]);
   });
@@ -411,7 +607,14 @@ describe("composer skill groups（`$` 技能提及）", () => {
     const empty = buildComposerMenu(
       source({
         mode: "skills",
-        skillGroups: [{ id: "skills", label: "技能", items: [], emptyText: "未找到匹配技能" }],
+        skillGroups: [
+          {
+            id: "skills",
+            label: "技能",
+            items: [],
+            emptyText: "未找到匹配技能",
+          },
+        ],
       }),
     );
     expect(empty.groups.map((group) => group.id)).toEqual(["skills"]);
@@ -422,7 +625,13 @@ describe("composer skill groups（`$` 技能提及）", () => {
       source({
         mode: "skills",
         skillGroups: [
-          { id: "skills", label: "技能", items: [], status: "loading", statusText: "加载中…" },
+          {
+            id: "skills",
+            label: "技能",
+            items: [],
+            status: "loading",
+            statusText: "加载中…",
+          },
         ],
       }),
     );
@@ -440,23 +649,43 @@ describe("composer skill groups（`$` 技能提及）", () => {
     });
 
     const drilled = buildComposerMenu(
-      source({ mode: "all", level: { kind: "group", groupId: "skills" }, skillGroups }),
+      source({
+        mode: "all",
+        level: { kind: "group", groupId: "skills" },
+        skillGroups,
+      }),
     );
     expect(drilled.groups.map((group) => group.id)).toEqual(["skills"]);
     expect(drilled.items.every((item) => item.level === "leaf")).toBe(true);
     expect(drilled.items[0]?.action).toMatchObject({ kind: "skill" });
   });
 
-  it("lists skill leaves directly when the `+` menu carries a query", () => {
-    const snapshot = buildComposerMenu(source({ mode: "all", query: "doc", skillGroups }));
+  it("filters skill leaves after entering the skills category from `+`", () => {
+    const snapshot = buildComposerMenu(
+      source({
+        mode: "all",
+        level: { kind: "group", groupId: "skills" },
+        query: "doc",
+        skillGroups,
+      }),
+    );
     expect(snapshot.groups.some((group) => group.id === "skills")).toBe(true);
-    expect(snapshot.items.some((item) => item.action.kind === "skill")).toBe(true);
+    expect(snapshot.items.map((item) => item.label)).toEqual(["docx"]);
+    expect(snapshot.items.every((item) => item.level === "leaf")).toBe(true);
   });
 
   it("ignores skill groups outside the `$` mode", () => {
-    const references = buildComposerMenu(source({ mode: "references", skillGroups }));
-    expect(references.items.some((item) => item.action.kind === "skill")).toBe(false);
-    const commands = buildComposerMenu(source({ mode: "commands", skillGroups }));
-    expect(commands.items.some((item) => item.action.kind === "skill")).toBe(false);
+    const references = buildComposerMenu(
+      source({ mode: "references", skillGroups }),
+    );
+    expect(references.items.some((item) => item.action.kind === "skill")).toBe(
+      false,
+    );
+    const commands = buildComposerMenu(
+      source({ mode: "commands", skillGroups }),
+    );
+    expect(commands.items.some((item) => item.action.kind === "skill")).toBe(
+      false,
+    );
   });
 });

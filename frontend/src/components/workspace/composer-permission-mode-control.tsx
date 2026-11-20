@@ -16,6 +16,10 @@ import { PermissionModeConfirmDialog } from "./permission-mode-confirm-dialog";
 // 未知 value 回落后端自带的 label，避免前后端枚举漂移时出现空选项。
 type ComposerPermissionModeControlProps = {
   sessionId?: string;
+  isNewThread?: boolean;
+  pendingMode?: string;
+  onPendingModeChange?: (mode: string) => void;
+  onPendingModeConfirmChange?: (confirmed: boolean) => void;
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
   /** 模式快照上抛：宿主据此渲染危险态常驻警示条（不重复拉取接口）。 */
@@ -32,8 +36,19 @@ const KNOWN_MODE_VALUES = new Set([
   "accept_edits",
   "bypass_permissions",
   "default",
+  "dont_ask",
   "plan",
 ]);
+
+// Presentation-only candidates for a sessionless draft. The runtime remains
+// authoritative and validates the first turn's requested mode.
+const NEW_THREAD_MODE_OPTIONS: RuntimePermissionModeOption[] = [
+  { value: "default", label: "default" },
+  { value: "accept_edits", label: "accept_edits" },
+  { value: "plan", label: "plan", requires_plan_entry: true },
+  { value: "dont_ask", label: "dont_ask" },
+  { value: "bypass_permissions", label: "bypass_permissions", dangerous: true },
+];
 
 type TranslateKey = (key: string) => string;
 
@@ -45,6 +60,10 @@ function modeTextKey(value: string, leaf: "description" | "label") {
 
 export function ComposerPermissionModeControl({
   sessionId,
+  isNewThread = false,
+  pendingMode = "",
+  onPendingModeChange,
+  onPendingModeConfirmChange,
   lastRuntimeEventType,
   runtimeEventCount,
   onModeChange,
@@ -57,46 +76,50 @@ export function ComposerPermissionModeControl({
       runtimeEventCount,
       sessionId,
     });
+  const newThread = isNewThread && !sessionId;
+  const displayedOptions = newThread ? NEW_THREAD_MODE_OPTIONS : options;
+  const displayedMode = newThread ? pendingMode || "default" : mode;
   // 待确认的危险模式（含所属会话）；确认前不发起切换请求。
   const [pendingDangerous, setPendingDangerous] = useState<{
     mode: string;
-    sessionId: string;
+    scope: string;
   } | null>(null);
   // 会话切换后旧确认自动失效（派生判断，避免在 effect 里 setState）。
+  const pendingScope = newThread ? "new-thread" : (sessionId ?? "");
   const pendingDangerousMode =
-    pendingDangerous && pendingDangerous.sessionId === sessionId
+    pendingDangerous && pendingDangerous.scope === pendingScope
       ? pendingDangerous.mode
       : null;
 
   // 宿主警示条只消费模式快照，不重复请求接口；会话切换后的旧快照由宿主按 sessionId 忽略。
   const selectedDangerous = Boolean(
-    options.find((option) => option.value === mode)?.dangerous,
+    displayedOptions.find((option) => option.value === displayedMode)?.dangerous,
   );
   useEffect(() => {
-    if (!sessionId) {
+    if (!sessionId || newThread) {
       return;
     }
-    onModeChange?.({ sessionId, mode, dangerous: selectedDangerous });
-  }, [mode, onModeChange, selectedDangerous, sessionId]);
+    onModeChange?.({ sessionId, mode: displayedMode, dangerous: selectedDangerous });
+  }, [displayedMode, newThread, onModeChange, selectedDangerous, sessionId]);
 
-  if (!sessionId) {
+  if (!sessionId && !newThread) {
     return null;
   }
 
   // i18next 的类型收窄对动态键不友好，这里收敛成一个普通查表函数。
   const translate: TranslateKey = (key) => t(key as never) as string;
-  const selectOptions = options.map((option) => ({
+  const selectOptions = displayedOptions.map((option) => ({
     value: option.value,
     label: optionLabel(option, translate),
   }));
-  const canSelectMode = selectOptions.length > 0 && mode.length > 0;
-  const selectedOption = options.find((option) => option.value === mode);
+  const canSelectMode = selectOptions.length > 0 && displayedMode.length > 0;
+  const selectedOption = displayedOptions.find((option) => option.value === displayedMode);
   const selectedDescription = selectedOption
     ? optionDescription(selectedOption, translate)
     : null;
   const isDangerous = Boolean(selectedOption?.dangerous);
   const pendingDangerousOption = pendingDangerousMode
-    ? options.find((option) => option.value === pendingDangerousMode)
+    ? displayedOptions.find((option) => option.value === pendingDangerousMode)
     : undefined;
 
   return (
@@ -119,18 +142,23 @@ export function ComposerPermissionModeControl({
                 surface.closeSelf();
               }
             }}
-            value={mode}
+            value={displayedMode}
             onChange={(value) => {
-              const option = options.find((item) => item.value === value);
-              if (option?.dangerous && sessionId) {
+              const option = displayedOptions.find((item) => item.value === value);
+              if (option?.dangerous && (sessionId || newThread)) {
                 // 危险模式先弹确认，确认后才带 confirm: true 调接口。
-                setPendingDangerous({ mode: value, sessionId });
+                setPendingDangerous({ mode: value, scope: pendingScope });
                 return;
               }
-              void setPermissionMode(value);
+              if (newThread) {
+                onPendingModeChange?.(value);
+                onPendingModeConfirmChange?.(false);
+              } else {
+                void setPermissionMode(value);
+              }
             }}
             options={selectOptions}
-            disabled={pending || loading}
+            disabled={pending || (!newThread && loading)}
             side="top"
             triggerPrefix={t("composer.permission.label")}
             triggerClassName={cn(
@@ -162,7 +190,7 @@ export function ComposerPermissionModeControl({
           </>
         )}
         <span
-          data-composer-permission-mode={mode}
+          data-composer-permission-mode={displayedMode}
           data-composer-permission-pending={pending ? "true" : undefined}
           className="sr-only"
         >
@@ -198,7 +226,12 @@ export function ComposerPermissionModeControl({
           const modeToConfirm = pendingDangerousMode;
           setPendingDangerous(null);
           if (modeToConfirm) {
-            void setPermissionMode(modeToConfirm, { confirm: true });
+            if (newThread) {
+              onPendingModeChange?.(modeToConfirm);
+              onPendingModeConfirmChange?.(true);
+            } else {
+              void setPermissionMode(modeToConfirm, { confirm: true });
+            }
           }
         }}
       />

@@ -8,7 +8,6 @@ import {
 
 import {
   buildSkillLeafGroup,
-  buildSkillLauncherGroup,
   rankMatch,
   sortByRank,
   COMPOSER_MENU_MAX_ITEMS_PER_GROUP,
@@ -32,6 +31,8 @@ export type ComposerMenuItemAction =
   | { kind: "reference"; text: string }
   /** `$` 技能提及：在触发 token 处补全为 `$name `。 */
   | { kind: "skill"; name: string }
+  /** 工作区选择由宿主持有状态；不写入 composer 草稿。 */
+  | { kind: "workspace"; directoryId: string | null }
   | { kind: "attach" };
 
 export type ComposerMenuItem = {
@@ -44,6 +45,8 @@ export type ComposerMenuItem = {
   descriptionKey?: string;
   /** 分组 launcher 的候选数量（drill-down 前的「单组 launcher」）。 */
   count?: number;
+  /** 非当前键盘焦点的持久选择状态（例如当前已选工作区）。 */
+  selected?: boolean;
   level: "launcher" | "leaf";
   action: ComposerMenuItemAction;
 };
@@ -115,6 +118,23 @@ export type ComposerReferenceGroup = {
   truncatedText?: string;
 };
 
+export type ComposerWorkspaceOption = {
+  id: string;
+  label: string;
+  path: string;
+};
+
+/** `+` 菜单中新会话可用的工作区选择数据；文案由宿主本地化。 */
+export type ComposerWorkspaceSelection = {
+  label: string;
+  options: readonly ComposerWorkspaceOption[];
+  selectedId: string | null;
+  clearLabel: string;
+  clearDescription?: string;
+  statusText?: string;
+  emptyText?: string;
+};
+
 export type ComposerMenuSource = {
   mode: ComposerMenuMode;
   level: ComposerMenuLevel;
@@ -129,6 +149,8 @@ export type ComposerMenuSource = {
   hasAttachAction: boolean;
   /** 「添加附件」的本地化文案（模型不持文案）。 */
   attachLabel: string;
+  /** 仅新会话传入；未提供时不展示工作区选择。 */
+  workspaceSelection?: ComposerWorkspaceSelection;
 };
 
 export type ComposerCommandOptionsSource = {
@@ -143,8 +165,15 @@ export type ComposerCommandOptionsSource = {
 function buildCommandGroup(
   commands: readonly ComposerCommand[],
   query: string,
+  hideAdvanced = false,
 ): ComposerMenuGroup | null {
   const ranked = commands
+    // 高频命令在底部工具栏已有等价控件：`+` 菜单不再重复出现，
+    // 但输入 `/` 与命令提交路径保持不变（这里只影响展开菜单）。
+    .filter(
+      (command) =>
+        !(hideAdvanced && COMPOSER_MENU_ADVANCED_COMMANDS.has(command.name)),
+    )
     .map((command) => ({
       item: {
         id: `command:${command.key}`,
@@ -168,6 +197,8 @@ function buildCommandGroup(
     items: sortByRank(ranked).slice(0, COMPOSER_MENU_MAX_ITEMS_PER_GROUP),
   };
 }
+
+const COMPOSER_MENU_ADVANCED_COMMANDS = new Set(["model", "rename"]);
 
 function buildAttachGroup(
   hasAttachAction: boolean,
@@ -197,7 +228,96 @@ function buildAttachGroup(
   };
 }
 
-function buildReferenceLauncherGroup(group: ComposerReferenceGroup): ComposerMenuGroup | null {
+function buildWorkspaceGroup(
+  selection: ComposerWorkspaceSelection,
+  query: string,
+): ComposerMenuGroup | null {
+  const groupId = "workspace";
+  const options = [
+    {
+      id: "none",
+      label: selection.clearLabel,
+      description: selection.clearDescription,
+      directoryId: null,
+      selected: selection.selectedId === null,
+    },
+    ...selection.options.map((option) => ({
+      id: option.id,
+      label: option.label,
+      description: option.path,
+      directoryId: option.id,
+      selected: option.id === selection.selectedId,
+    })),
+  ];
+  const items = options
+    .map((option) => ({
+      item: {
+        id: `workspace:${option.id}`,
+        groupId,
+        label: option.label,
+        description: option.description,
+        selected: option.selected,
+        level: "leaf" as const,
+        action: {
+          kind: "workspace" as const,
+          directoryId: option.directoryId,
+        },
+      },
+      rank: rankMatch(option.label, option.description ?? "", query),
+    }))
+    .filter((entry) => entry.rank >= 0)
+    .sort((left, right) => left.rank - right.rank)
+    .slice(0, COMPOSER_MENU_MAX_ITEMS_PER_GROUP)
+    .map((entry) => entry.item);
+
+  if (items.length === 0 && !selection.statusText && !selection.emptyText) {
+    return null;
+  }
+  return {
+    id: groupId,
+    label: selection.label,
+    labelKey: "composer.menu.workspace",
+    items,
+    statusText: selection.statusText,
+    emptyText: selection.emptyText,
+  };
+}
+
+function buildCategoryLauncherGroup(
+  id: string,
+  label: string,
+  labelKey: string,
+  count: number,
+  action: ComposerMenuItemAction,
+): ComposerMenuGroup {
+  return {
+    id,
+    label,
+    labelKey,
+    items: [
+      {
+        id: `launcher:${id}`,
+        groupId: id,
+        label,
+        labelKey,
+        count,
+        level: "launcher",
+        action,
+      },
+    ],
+  };
+}
+
+function hasReferenceGroupContent(group: ComposerReferenceGroup): boolean {
+  return (
+    group.items.length > 0 ||
+    Boolean(group.status || group.statusText || group.emptyText)
+  );
+}
+
+function buildReferenceLauncherGroup(
+  group: ComposerReferenceGroup,
+): ComposerMenuGroup | null {
   const loading = group.status === "loading";
   // loading 中的空组也要进 launcher：打开菜单瞬间显示"加载中"而不是整段闪空。
   if (group.items.length === 0 && !loading) {
@@ -270,13 +390,22 @@ function buildReferenceLeafGroup(
         level: "leaf" as const,
         action: { kind: "reference" as const, text: reference.insertText },
       },
-      rank: rankMatch(reference.label, `${reference.id} ${reference.insertText}`, query),
+      rank: rankMatch(
+        reference.label,
+        `${reference.id} ${reference.insertText}`,
+        query,
+      ),
     }))
     .filter((entry) => entry.rank >= 0);
 
   // 本地过滤后为空时，仍保留带状态/空态文案的分组（异步数据源需要可解释的空态行）；
   // 既有的同步空组（无任何文案）行为不变：整组剔除。
-  if (ranked.length === 0 && !group.statusText && !group.emptyText && !group.status) {
+  if (
+    ranked.length === 0 &&
+    !group.statusText &&
+    !group.emptyText &&
+    !group.status
+  ) {
     return null;
   }
   return {
@@ -329,9 +458,12 @@ function buildCommandOptionGroup(
 }
 
 /** 组装菜单快照；空分组一律剔除，`empty` 表示整体无候选。 */
-export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnapshot {
+export function buildComposerMenu(
+  source: ComposerMenuSource,
+): ComposerMenuSnapshot {
   const query = source.query.trim().toLowerCase();
-  const drilledGroupId = source.level.kind === "group" ? source.level.groupId : null;
+  const drilledGroupId =
+    source.level.kind === "group" ? source.level.groupId : null;
   const groups: ComposerMenuGroup[] = [];
 
   // 命令专属候选独占一层：不再混入命令 / 引用 / 附件分组，避免与其它入口互相干扰。
@@ -352,38 +484,154 @@ export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnaps
     };
   }
 
-  const allowCommands = source.mode === "commands" || source.mode === "all";
-  const allowReferences = source.mode === "references" || source.mode === "all";
-  // `$`（skills）直接给叶子候选；`+`（all）根层给 launcher 下钻（与引用组一致），
-  // 点选后在光标处插入 `$name `（插入点由 composer 具现化），不再是死入口。
-  const allowSkills = source.mode === "skills" || source.mode === "all";
-  const drilled = (groupId: string) => drilledGroupId === null || drilledGroupId === groupId;
+  if (source.mode === "all") {
+    const groups: ComposerMenuGroup[] = [];
 
-  if (allowCommands && drilled("commands")) {
-    const commandGroup = buildCommandGroup(source.commands, query);
-    if (commandGroup) {
-      groups.push(commandGroup);
+    if (source.level.kind === "root") {
+      if (source.hasAttachAction) {
+        groups.push(
+          buildCategoryLauncherGroup(
+            "actions",
+            "actions",
+            "composer.menu.actions",
+            1,
+            { kind: "attach" },
+          ),
+        );
+      }
+      if (source.workspaceSelection) {
+        groups.push(
+          buildCategoryLauncherGroup(
+            "workspace",
+            "workspace",
+            "composer.menu.workspace",
+            source.workspaceSelection.options.length + 1,
+            { kind: "workspace", directoryId: null },
+          ),
+        );
+      }
+
+      const skillGroups = (source.skillGroups ?? []).filter(
+        hasReferenceGroupContent,
+      );
+      const skillCount = skillGroups.reduce(
+        (count, group) => count + group.items.length,
+        0,
+      );
+      if (skillGroups.length > 0) {
+        groups.push(
+          buildCategoryLauncherGroup(
+            "skills",
+            "skills",
+            "composer.references.skills",
+            skillCount,
+            { kind: "skill", name: "" },
+          ),
+        );
+      }
+
+      const referenceGroups = source.referenceGroups.filter(
+        hasReferenceGroupContent,
+      );
+      const referenceCount = referenceGroups.reduce(
+        (count, group) => count + group.items.length,
+        0,
+      );
+      if (referenceGroups.length > 0) {
+        groups.push(
+          buildCategoryLauncherGroup(
+            "references",
+            "files",
+            "composer.references.files",
+            referenceCount,
+            { kind: "reference", text: "" },
+          ),
+        );
+      }
+
+      const commandGroup = buildCommandGroup(source.commands, query, true);
+      if (commandGroup) {
+        groups.push(
+          buildCategoryLauncherGroup(
+            "commands",
+            "commands",
+            "composer.menu.commands",
+            commandGroup.items.length,
+            { kind: "command", name: "" },
+          ),
+        );
+      }
+    } else if (source.level.kind === "group") {
+      const groupId = source.level.groupId;
+      if (groupId === "actions") {
+        const attachGroup = buildAttachGroup(
+          source.hasAttachAction,
+          source.attachLabel,
+          query,
+        );
+        if (attachGroup) {
+          groups.push(attachGroup);
+        }
+      } else if (groupId === "workspace") {
+        if (source.workspaceSelection) {
+          const workspaceGroup = buildWorkspaceGroup(
+            source.workspaceSelection,
+            query,
+          );
+          if (workspaceGroup) {
+            groups.push(workspaceGroup);
+          }
+        }
+      } else if (groupId === "skills") {
+        for (const skillGroup of source.skillGroups ?? []) {
+          const skillLeaves = buildSkillLeafGroup(skillGroup, query);
+          if (skillLeaves) {
+            groups.push(skillLeaves);
+          }
+        }
+      } else if (groupId === "references") {
+        for (const referenceGroup of source.referenceGroups) {
+          const referenceLeaves = buildReferenceLeafGroup(
+            referenceGroup,
+            query,
+          );
+          if (referenceLeaves) {
+            groups.push(referenceLeaves);
+          }
+        }
+      } else if (groupId === "commands") {
+        const commandGroup = buildCommandGroup(source.commands, query, true);
+        if (commandGroup) {
+          groups.push(commandGroup);
+        }
+      }
     }
+
+    const items = groups.flatMap((group) => group.items);
+    return {
+      mode: source.mode,
+      level: source.level,
+      query: source.query,
+      groups,
+      items,
+      activeId: clampComposerMenuActive(items, null),
+      empty: items.length === 0,
+    };
   }
 
-  if (source.mode === "all" && drilled("actions")) {
-    const attachGroup = buildAttachGroup(source.hasAttachAction, source.attachLabel, query);
-    if (attachGroup) {
-      groups.push(attachGroup);
-    }
-  }
+  const allowCommands = source.mode === "commands";
+  const allowReferences = source.mode === "references";
+  // `$`（skills）直接给叶子候选；`+`（all）根层/分组候选已在上方统一处理。
+  const allowSkills = source.mode === "skills";
+  const drilled = (groupId: string) =>
+    drilledGroupId === null || drilledGroupId === groupId;
 
   if (allowSkills) {
-    // `$` 模式对齐 TUI：不做 launcher 下钻，空查询也直接给叶子候选。
-    const skillLaunchers =
-      source.mode === "all" && drilledGroupId === null && query.length === 0;
     for (const skillGroup of source.skillGroups ?? []) {
       if (!drilled(skillGroup.id)) {
         continue;
       }
-      const group = skillLaunchers
-        ? buildSkillLauncherGroup(skillGroup)
-        : buildSkillLeafGroup(skillGroup, query);
+      const group = buildSkillLeafGroup(skillGroup, query);
       if (group) {
         groups.push(group);
       }
@@ -402,6 +650,17 @@ export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnaps
       if (group) {
         groups.push(group);
       }
+    }
+  }
+
+  if (allowCommands && drilled("commands")) {
+    const commandGroup = buildCommandGroup(
+      source.commands,
+      query,
+      false,
+    );
+    if (commandGroup) {
+      groups.push(commandGroup);
     }
   }
 

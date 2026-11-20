@@ -146,7 +146,7 @@ export function WorkspaceBotPanel({ selectedSessionId }: WorkspaceBotPanelProps)
                         </div>
                         {/* 所在会话与节点（docs/bots/09 §5.3）：bot 的每个 IM 会话绑定
                             指向哪个 agent 会话、由哪个 mesh 节点在服务，一眼可见。 */}
-                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] text-muted-foreground">
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 app-text-10 text-muted-foreground">
                           {binding.session_id ? (
                             <>
                               <span className="truncate" title={binding.session_id}>

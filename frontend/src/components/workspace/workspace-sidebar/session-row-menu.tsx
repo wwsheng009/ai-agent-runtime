@@ -172,7 +172,7 @@ export function SessionRowMenu({
                 onRename();
                 closeMenu(true);
               }}
-              className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+              className="block w-full px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft"
             >
               <PencilIcon size={12} className="inline-block mr-2" />
               {renameLabel}
@@ -187,7 +187,7 @@ export function SessionRowMenu({
                 onFork(sessionId);
                 closeMenu(true);
               }}
-              className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+              className="block w-full px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft"
             >
               <GitBranchIcon size={12} className="inline-block mr-2" />
               {actionLabels.fork}
@@ -204,7 +204,7 @@ export function SessionRowMenu({
                 onStop(sessionId);
                 closeMenu(true);
               }}
-              className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+              className="block w-full px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft"
             >
               <StopCircleIcon size={12} className="inline-block mr-2" />
               {actionLabels.stop}
@@ -220,7 +220,7 @@ export function SessionRowMenu({
                   onRestore(sessionId);
                   closeMenu(true);
                 }}
-                className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+                className="block w-full px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft"
               >
                 <ArchiveRestoreIcon size={12} className="inline-block mr-2" />
                 {actionLabels.restore}
@@ -235,7 +235,7 @@ export function SessionRowMenu({
                 onArchive(sessionId);
                 closeMenu(true);
               }}
-              className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+              className="block w-full px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft"
             >
               <ArchiveIcon size={12} className="inline-block mr-2" />
               {actionLabels.archive}
@@ -250,7 +250,7 @@ export function SessionRowMenu({
                 onDelete(sessionId);
                 closeMenu(true);
               }}
-              className="block w-full px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+              className="block w-full px-2.5 py-1.5 text-left app-text-12 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
             >
               <Trash2Icon size={12} className="inline-block mr-2" />
               {actionLabels.delete}

@@ -1,6 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { MessageSquarePlusIcon, PanelLeftCloseIcon, SearchIcon, Settings2Icon, SlidersHorizontalIcon, SparklesIcon, XIcon } from "lucide-react";
+import { MessageSquarePlusIcon, PanelLeftCloseIcon, SearchIcon, Settings2Icon, SparklesIcon, XIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,6 @@ type WorkspaceSidebarHeaderProps = {
   /** 桌面（xl+）才可收起：移动抽屉靠遮罩/关闭按钮退出，不提供收起态。 */
   onCollapsedChange?: (collapsed: boolean) => void;
   onCloseMobile?: () => void;
-  onOpenSessionSearch?: () => void;
   onOpenSettings?: () => void;
   onRefreshRuntimeTeams?: () => void;
   onSelectThread: (threadId: string) => void;
@@ -30,7 +29,6 @@ export function WorkspaceSidebarHeader({
   isCompact,
   onCollapsedChange,
   onCloseMobile,
-  onOpenSessionSearch,
   onOpenSettings,
   onRefreshRuntimeTeams,
   onSelectThread,
@@ -146,19 +144,6 @@ export function WorkspaceSidebarHeader({
               type="search"
             />
           </div>
-          {onOpenSessionSearch ? (
-            <Button
-              aria-label={t("panels.sessionSearch.trigger")}
-              className="shrink-0"
-              data-testid="session-search-trigger"
-              onClick={onOpenSessionSearch}
-              size="icon"
-              title={t("panels.sessionSearch.triggerHint")}
-              variant="ghost"
-            >
-              <SlidersHorizontalIcon size={15} />
-            </Button>
-          ) : null}
         </div>
       ) : null}
     </div>

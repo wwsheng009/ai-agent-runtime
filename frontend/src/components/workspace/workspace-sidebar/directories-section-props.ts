@@ -57,6 +57,10 @@ export type WorkspaceSidebarDirectoriesSectionProps = {
   onDeleteSession?: (sessionId: string) => void;
   onForkSession?: (sessionId: string, sourceTitle: string) => void;
   onMoveSessionToGroup: (sessionId: string, groupKey: string) => void;
+  /** P1-6：全库会话检索入口（本地过滤之外的显式出口）。 */
+  onOpenSessionSearch?: () => void;
+  /** 全库会话总数（用于「在所有 N 个会话中搜索」）。 */
+  sessionSearchScopeCount?: number;
   onRefreshSessionStats: () => void;
   onReorderSessions: (accountKey: string, order: readonly string[]) => void;
   onRestoreSession?: (sessionId: string) => void;

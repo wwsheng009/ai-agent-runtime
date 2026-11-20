@@ -9,6 +9,8 @@ export const enWorkspacePanelsArtifacts = {
   },
   list: {
     empty: "Artifacts appear here as the thread runs.",
+    selectedAnnouncement: "{{category}} {{name}} selected. Opens in dialog.",
+    readyAnnouncement: "Artifact rail ready. Select an item to open it in a dialog.",
   },
   detail: {
     categoryEvidence: "Runtime evidence",
@@ -31,6 +33,12 @@ export const enWorkspacePanelsArtifacts = {
   tabs: {
     panelTitle: "Artifacts",
     tabListLabel: "Artifact panel surfaces",
+    more: "More",
+    groups: {
+      artifacts: "Artifacts",
+      session: "Session",
+      operations: "Operations",
+    },
     items: "Items",
     plan: "Plan",
     planLive: "live",

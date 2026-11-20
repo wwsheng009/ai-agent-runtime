@@ -1,6 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { CompassIcon, LoaderCircleIcon } from "lucide-react";
+import { CalendarClockIcon, CompassIcon, LoaderCircleIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -169,6 +169,17 @@ export function WorkspaceSidebarRuntimeSection({
           )}
         >
           {t("sidebar.skillsPage")}
+        </Link>
+        <Link
+          to="/automation"
+          onClick={onCloseMobile}
+          className={cn(
+            buttonVariants({ variant: "secondary", size: "sm" }),
+            "mt-2 w-full",
+          )}
+        >
+          <CalendarClockIcon aria-hidden="true" className="size-3.5" />
+          {t("sidebar.automationPage")}
         </Link>
 
         <WorkspaceBotPanel selectedSessionId={selectedSessionId} />

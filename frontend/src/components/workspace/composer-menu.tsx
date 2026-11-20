@@ -1,7 +1,7 @@
 // P1-4 子片 3：Composer 触发菜单的展示层（`/` 命令、`@` 引用、`+` 按钮三入口同源）。
 // 键盘所有权在 textarea（aria-activedescendant），此处只负责渲染、指针高亮与点选。
 
-import { ChevronRightIcon } from "lucide-react";
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 
 type ComposerMenuProps = {
   activeId: string | null;
+  onBack: () => void;
   onHover: (itemId: string) => void;
   onSelect: (itemId: string) => void;
   snapshot: ComposerMenuSnapshot;
@@ -24,6 +25,7 @@ type ComposerMenuProps = {
 
 export function ComposerMenu({
   activeId,
+  onBack,
   onHover,
   onSelect,
   snapshot,
@@ -35,35 +37,80 @@ export function ComposerMenu({
     return labelKey ? (t(labelKey as never) as string) : label;
   }
 
+  const sectionTitle =
+    snapshot.level.kind === "group"
+      ? snapshot.level.groupId === "references"
+        ? t("composer.references.files")
+        : snapshot.groups[0]
+          ? resolveLabel(snapshot.groups[0].label, snapshot.groups[0].labelKey)
+          : t("composer.menu.label")
+      : "";
+
   return (
     <div
-      id={COMPOSER_MENU_LISTBOX_ID}
-      role="listbox"
-      aria-label={t("composer.menu.label")}
       data-composer-menu
-      className="absolute bottom-full left-0 z-40 mb-2 min-w-[17rem] max-h-[min(70vh,34rem)] w-[min(30rem,100%)] overflow-y-auto rounded-panel border border-border [background:var(--workspace-composer-bg)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.4)]"
+      data-composer-menu-level={snapshot.level.kind}
+      className="absolute bottom-full left-0 z-40 flex max-h-[min(70vh,34rem)] w-[min(30rem,calc(100vw-1rem))] min-w-[min(17rem,calc(100vw-1rem))] flex-col overflow-hidden rounded-panel border border-border [background:var(--workspace-composer-bg)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.4)]"
     >
-      {snapshot.empty && snapshot.groups.length === 0 ? (
-        <div
-          role="presentation"
-          data-composer-menu-empty
-          className="px-2 py-2 app-text-11 text-muted-foreground"
+      {snapshot.level.kind === "group" ? (
+        <header
+          className="flex shrink-0 items-center gap-2 border-b border-border px-1 pb-1.5"
+          data-composer-menu-header
         >
-          {t("composer.menu.empty")}
-        </div>
+          <button
+            type="button"
+            data-composer-menu-back
+            aria-label={t("composer.modelPanel.back")}
+            title={t("composer.modelPanel.back")}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onBack}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <ChevronLeftIcon size={14} aria-hidden="true" />
+          </button>
+          <span
+            id={`${COMPOSER_MENU_LISTBOX_ID}-heading`}
+            className="min-w-0 truncate app-text-10 font-medium uppercase tracking-[0.1em] text-muted-foreground"
+          >
+            {sectionTitle}
+          </span>
+        </header>
       ) : null}
-      {snapshot.groups.map((group) => (
-        <ComposerMenuGroupBlock
-          key={group.id}
-          activeId={activeId}
-          group={group}
-          onHover={onHover}
-          onSelect={onSelect}
-          resolveLabel={resolveLabel}
-        />
-      ))}
+      <div
+        id={COMPOSER_MENU_LISTBOX_ID}
+        role="listbox"
+        aria-label={
+          snapshot.level.kind === "root" ? t("composer.menu.label") : undefined
+        }
+        aria-labelledby={
+          snapshot.level.kind === "group"
+            ? `${COMPOSER_MENU_LISTBOX_ID}-heading`
+            : undefined
+        }
+        className="min-h-0 flex-1 overflow-y-auto py-1"
+      >
+        {snapshot.empty && snapshot.groups.length === 0 ? (
+          <div
+            role="presentation"
+            data-composer-menu-empty
+            className="px-2 py-2 text-base text-muted-foreground"
+          >
+            {t("composer.menu.empty")}
+          </div>
+        ) : null}
+        {snapshot.groups.map((group) => (
+          <ComposerMenuGroupBlock
+            key={group.id}
+            activeId={activeId}
+            group={group}
+            onHover={onHover}
+            onSelect={onSelect}
+            resolveLabel={resolveLabel}
+          />
+        ))}
+      </div>
       {!snapshot.empty ? (
-        <div className="border-t border-border px-2 pb-1 pt-2 app-text-10 text-muted-foreground">
+        <div className="shrink-0 border-t border-border px-2 pb-1 pt-2 app-text-10 text-muted-foreground">
           {t("composer.menu.hint")}
         </div>
       ) : null}
@@ -89,11 +136,16 @@ function ComposerMenuGroupBlock({
   const { t } = useTranslation("workspace");
   const label = resolveLabel(group.label, group.labelKey);
   const message = group.statusText ?? group.emptyText;
+  const launcherGroup =
+    group.items.length > 0 &&
+    group.items.every((item) => item.level === "launcher");
   return (
     <div role="group" aria-label={label} data-composer-menu-group={group.id}>
-      <div className="px-2 pb-1 pt-2 app-text-10 font-medium text-muted-foreground">
-        {label}
-      </div>
+      {!launcherGroup ? (
+        <div className="px-2 pb-1 pt-2 app-text-10 font-medium text-muted-foreground">
+          {label}
+        </div>
+      ) : null}
       {group.items.length === 0 && message ? (
         <div
           role="presentation"
@@ -111,7 +163,9 @@ function ComposerMenuGroupBlock({
           onHover={onHover}
           onSelect={onSelect}
           resolveLabel={resolveLabel}
-          countLabel={item.count ? t("composer.menu.count", { count: item.count }) : null}
+          countLabel={
+            item.count ? t("composer.menu.count", { count: item.count }) : null
+          }
         />
       ))}
       {group.items.length > 0 && message ? (
@@ -155,26 +209,38 @@ function ComposerMenuOption({
 }: ComposerMenuOptionProps) {
   const { t } = useTranslation("workspace");
   const dataAttribute =
-    item.action.kind === "attach"
-      ? { "data-composer-attach": "" }
-      : item.action.kind === "command"
-        ? { "data-composer-command-option": item.action.name }
-        : item.action.kind === "command-option"
+    item.level === "launcher"
+      ? { "data-composer-menu-launcher": item.groupId }
+      : item.action.kind === "attach"
+        ? { "data-composer-attach": "" }
+        : item.action.kind === "workspace"
           ? {
-              "data-composer-command-option": item.action.name,
-              "data-composer-command-option-value": item.action.value,
+              "data-composer-workspace-option": item.action.directoryId ?? "",
+              "data-composer-workspace-selected": item.selected
+                ? "true"
+                : "false",
             }
-          : item.action.kind === "skill"
-            ? { "data-composer-skill-option": item.action.name }
-            : { "data-composer-reference-option": item.action.text };
+          : item.action.kind === "command"
+            ? { "data-composer-command-option": item.action.name }
+            : item.action.kind === "command-option"
+              ? {
+                  "data-composer-command-option": item.action.name,
+                  "data-composer-command-option-value": item.action.value,
+                }
+              : item.action.kind === "skill"
+                ? { "data-composer-skill-option": item.action.name }
+                : { "data-composer-reference-option": item.action.text };
   // `$` 技能行：名称优先完整展示（必要时按字符折行，绝不省略号截断），
   // 描述降为次级信息并限宽截断，避免长描述把技能名挤没。
   const isSkill = item.action.kind === "skill";
+  const isWorkspace = item.action.kind === "workspace";
   return (
     <div
       id={composerMenuItemDomId(item.id)}
       role="option"
-      aria-selected={active}
+      aria-haspopup={item.level === "launcher" ? "listbox" : undefined}
+      // listbox 的 aria-selected 表示持久选择；其它菜单项沿用既有 active descendant 语义。
+      aria-selected={isWorkspace ? item.selected === true : active}
       data-composer-menu-item={item.id}
       {...dataAttribute}
       onMouseDown={(event) => {
@@ -184,26 +250,39 @@ function ComposerMenuOption({
       onMouseMove={() => onHover(item.id)}
       onClick={() => onSelect(item.id)}
       className={cn(
-        "flex cursor-pointer items-center gap-2 rounded-[0.5rem] px-2 py-1.5 app-text-11",
+        "flex cursor-pointer items-center gap-2 rounded-[0.5rem] px-2 py-1.5 text-base",
         active
           ? "bg-surface-soft text-foreground"
           : "text-muted-foreground hover:bg-surface-soft",
       )}
     >
-      <span className={cn(isSkill ? "min-w-0 break-all" : "truncate")}>
+      <span className={cn(isSkill ? "min-w-0 break-all" : "min-w-0 truncate")}>
         {resolveLabel(item.label, item.labelKey)}
       </span>
       {item.descriptionKey ? (
-        <span className={cn("truncate app-text-9 text-muted-foreground/70", isSkill && "max-w-[40%]")}>
+        <span
+          className={cn(
+            "truncate app-text-9 text-muted-foreground/70",
+            isSkill && "max-w-[40%]",
+          )}
+        >
           {t(item.descriptionKey as never) as string}
         </span>
       ) : item.description ? (
-        <span className={cn("truncate app-text-9 text-muted-foreground/70", isSkill && "max-w-[40%]")}>
+        <span
+          className={cn(
+            "truncate app-text-9 text-muted-foreground/70",
+            isSkill && "max-w-[40%]",
+          )}
+        >
           {item.description}
         </span>
       ) : null}
       <span className="ml-auto flex shrink-0 items-center gap-1 app-text-9 text-muted-foreground/70">
         {countLabel}
+        {isWorkspace && item.selected ? (
+          <CheckIcon aria-hidden="true" size={13} />
+        ) : null}
         {item.level === "launcher" ? (
           <ChevronRightIcon size={12} aria-hidden="true" />
         ) : null}

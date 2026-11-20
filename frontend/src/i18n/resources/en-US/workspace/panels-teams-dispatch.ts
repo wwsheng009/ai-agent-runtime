@@ -23,6 +23,7 @@ export const enWorkspacePanelsTeamsDispatch = {
   },
   provision: {
     heading: "Provision runnable teams and dispatch",
+    hint: "Create one runnable team per teammate and let them receive the same next task in parallel.",
     teamCount: "Team count",
     workspaceId: "Workspace id",
     workspaceIdPlaceholder: "fanout-workspace",
@@ -55,6 +56,8 @@ export const enWorkspacePanelsTeamsDispatch = {
   },
   taskComposer: {
     title: "Task title",
+    statusHint: "Fill in the task to dispatch; each selected team runs independently.",
+    submitHint: "Submitting creates a task for every selected team; follow progress in the monitor below.",
     titlePlaceholder: "Parallel review of runtime stream stability",
     goal: "Goal",
     goalPlaceholder:

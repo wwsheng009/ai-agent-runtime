@@ -9,7 +9,10 @@ import {
   type ComposerCommand,
   type ComposerCommandDefinition,
 } from "@/lib/composer-commands";
-import { type ComposerReferenceGroup } from "@/lib/composer-menu";
+import {
+  type ComposerReferenceGroup,
+  type ComposerWorkspaceSelection,
+} from "@/lib/composer-menu";
 
 export type MessageComposerProps = {
   /** P1-4 子片 2：附件草稿轨（数据与上传状态由 owner hook 持有）。 */
@@ -59,6 +62,9 @@ export type MessageComposerProps = {
   referenceGroups?: readonly ComposerReferenceGroup[];
   /** 文本类 skill 的 `$` 提及候选分组（运行时技能目录）。 */
   skillGroups?: readonly ComposerReferenceGroup[];
+  /** 新会话可选工作区；选择不进入草稿。 */
+  workspaceSelection?: ComposerWorkspaceSelection;
+  onWorkspaceSelect?: (directoryId: string | null) => void;
   selectedModel: string;
   selectedProvider: string;
   selectedReasoningEffort: string;

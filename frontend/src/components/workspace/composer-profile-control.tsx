@@ -20,11 +20,12 @@ import type { RuntimeProfileListResponse } from "@/types/runtime";
 //   而不是把触发器退回 placeholder；
 // - 切换成功后本地采用 report.to 作为当前值（下一轮生效的权威事实），
 //   会话列表回读（profile_ref）追上后自动收敛为服务端真值；
-// - 新会话未登记（无 sessionId）时不渲染：`set_profile` 对未登记会话必然
-//   失败，显示一个必然失败的选择器是假承诺。
+// - 新会话未登记时仅更新页面级 pending profile，不调用 session switch API。
 type ComposerProfileControlProps = {
-  /** 当前会话 id；空值（新会话未登记）时不渲染。 */
+  /** 当前会话 id；新会话尚未登记时为空。 */
   sessionId?: string;
+  /** 只有明确的新线程才启用本地 pending 分支。 */
+  isNewThread?: boolean;
   /** 会话绑定的 profile 引用（metadata.context.profile_ref）。 */
   profileRef?: string;
   /** 绑定 profile 的显示名（profile_name；缺失时回退 profileRef）。 */
@@ -35,6 +36,9 @@ type ComposerProfileControlProps = {
   catalogError?: string | null;
   /** 切换动作（宿主 handleProfileSwitch）；失败时抛错，组件如实呈现。 */
   onSwitch: (profileRef: string) => Promise<SessionProfileSwitchReport>;
+  /** 新线程首轮尚未有 session 时的本地选择。 */
+  pendingProfileRef?: string;
+  onPendingProfileChange?: (profileRef: string) => void;
 };
 
 export function ComposerProfileControl({
@@ -43,24 +47,29 @@ export function ComposerProfileControl({
   profileName,
   catalog,
   catalogError = null,
+  isNewThread = false,
   onSwitch,
+  onPendingProfileChange,
+  pendingProfileRef = "",
 }: ComposerProfileControlProps) {
   const { t } = useTranslation("workspace");
   const surface = useComposerSurface("profile");
   // 候选 / 能力广告 / 加载态都派生自同一份目录，不另设第二数据源。
   const candidates = useMemo(() => composerProfileCandidates(catalog), [catalog]);
-  const switchSupported = catalog?.sessionSwitch === true;
+  const selectable = useMemo(
+    () => candidates.filter((candidate) => candidate.valid),
+    [candidates],
+  );
+  const newThread = isNewThread && !sessionId;
+  const switchSupported = newThread
+    ? selectable.length > 0
+    : catalog?.sessionSwitch === true;
   const catalogLoading = !catalog && !catalogError;
   const [pendingRef, setPendingRef] = useState("");
   const [error, setError] = useState<string | null>(null);
   // 切换成功后的本地真值（report.to），覆盖列表回读的旧快照。
   const [appliedRef, setAppliedRef] = useState<{ sessionId: string; ref: string } | null>(
     null,
-  );
-
-  const selectable = useMemo(
-    () => candidates.filter((candidate) => candidate.valid),
-    [candidates],
   );
 
   const sessionProfileRef = (profileRef ?? "").trim();
@@ -83,7 +92,11 @@ export function ComposerProfileControl({
       null
     );
   }, [candidates, selectable.length, sessionProfileName, sessionProfileRef]);
-  const currentRef = appliedOverride || boundCandidate?.ref || sessionProfileRef;
+  const pendingProfile = pendingProfileRef.trim();
+  const defaultCandidate = candidates.find((candidate) => candidate.isDefault && candidate.valid);
+  const currentRef = newThread
+    ? pendingProfile || defaultCandidate?.ref || ""
+    : appliedOverride || boundCandidate?.ref || sessionProfileRef;
 
   // 会话本身切换时清掉残留的错误与 pending 视图。
   useEffect(() => {
@@ -91,7 +104,10 @@ export function ComposerProfileControl({
     setPendingRef("");
   }, [sessionId]);
 
-  const currentLabel = boundCandidate?.label || sessionProfileName || currentRef;
+  const currentCandidate = newThread
+    ? candidates.find((candidate) => candidate.ref === currentRef)
+    : boundCandidate;
+  const currentLabel = currentCandidate?.label || sessionProfileName || currentRef;
 
   const options = useMemo(() => {
     const items = selectable.map((candidate) => ({
@@ -110,7 +126,7 @@ export function ComposerProfileControl({
     return items;
   }, [currentLabel, currentRef, selectable, t]);
 
-  if (!sessionId) {
+  if (!sessionId && !newThread) {
     return null;
   }
 
@@ -120,6 +136,14 @@ export function ComposerProfileControl({
 
   const handleSelect = (nextRef: string) => {
     if (nextRef === currentRef || busy) {
+      return;
+    }
+    if (newThread) {
+      setError(null);
+      onPendingProfileChange?.(nextRef);
+      return;
+    }
+    if (!sessionId) {
       return;
     }
     setPendingRef(nextRef);

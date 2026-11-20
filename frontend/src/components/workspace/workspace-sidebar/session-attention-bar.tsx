@@ -41,7 +41,7 @@ export function SessionAttentionBar({
   );
 
   const className =
-    "flex w-full items-center gap-2 rounded-card border border-accent-primary-border bg-accent-primary-soft px-2.5 py-1.5 text-xs font-medium text-foreground";
+    "flex w-full items-center gap-2 rounded-card border border-accent-primary-border bg-accent-primary-soft px-2.5 py-1.5 app-text-12 font-medium text-foreground";
 
   if (!onOpenSession) {
     return (

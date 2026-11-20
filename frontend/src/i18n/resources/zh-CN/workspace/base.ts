@@ -7,22 +7,26 @@ export const zhWorkspaceBase = {
       analyze: {
         title: "分析项目",
         description: "了解代码、依赖与当前状态",
-        prompt: "请先分析当前项目的目录、依赖和工作区状态，给出关键发现后再建议下一步。",
+        prompt:
+          "请先分析当前项目的目录、依赖和工作区状态，给出关键发现后再建议下一步。",
       },
       implement: {
         title: "实现需求",
         description: "修改代码并完成必要验证",
-        prompt: "请分析这项需求，制定简洁的实施步骤，然后修改代码并运行必要验证。",
+        prompt:
+          "请分析这项需求，制定简洁的实施步骤，然后修改代码并运行必要验证。",
       },
       review: {
         title: "审查代码",
         description: "发现缺陷、风险与改进机会",
-        prompt: "请审查当前代码变更，优先找出缺陷、回归风险和缺失的测试，并给出可执行的改进。",
+        prompt:
+          "请审查当前代码变更，优先找出缺陷、回归风险和缺失的测试，并给出可执行的改进。",
       },
       plan: {
         title: "制定计划",
         description: "拆解任务并逐步推进",
-        prompt: "请梳理目标和约束，制定分阶段实施计划，并从优先级最高的步骤开始执行。",
+        prompt:
+          "请梳理目标和约束，制定分阶段实施计划，并从优先级最高的步骤开始执行。",
       },
     },
     loadingSettingsPanel: "正在加载设置面板…",
@@ -83,6 +87,7 @@ export const zhWorkspaceBase = {
     },
     usage: "使用分析",
     runtime: "Runtime",
+    more: "更多入口",
     settings: "设置",
     openSidebar: "打开聊天导航",
     showRail: "展开右侧栏",
@@ -139,6 +144,13 @@ export const zhWorkspaceBase = {
     expand: "展开侧栏",
     startNewChat: "新建聊天",
     searchPlaceholder: "搜索线程",
+    searchAll: "在所有 {{count}} 个会话中搜索",
+    searchAllWithQuery: "在所有 {{count}} 个会话中搜索「{{query}}」",
+    recent: {
+      title: "最近会话",
+      today: "今天",
+      yesterday: "昨天",
+    },
     sections: {
       chats: "本地聊天",
       directories: "工作目录",
@@ -279,6 +291,7 @@ export const zhWorkspaceBase = {
     openRuntimeTeamDetails: "打开运行时团队详情",
     backendConfigPage: "后端配置页",
     skillsPage: "技能市场",
+    automationPage: "自动化中心",
     active: "{{count}} 个活跃",
     unknown: "未知",
     bots: {
@@ -341,6 +354,8 @@ export const zhWorkspaceBase = {
       sendTurn: "发送",
       startThread: "开始对话",
       blockedInFlight: "消息未发送：会话仍在收尾上一回合，请稍候重试。",
+      disabledEmpty: "请输入内容后再发送",
+      disabledAttachments: "附件仍在上传，完成后即可发送",
     },
     promptTips: "提示建议",
     promptTipsMenuTitle: "提示建议",
@@ -349,8 +364,6 @@ export const zhWorkspaceBase = {
     model: "模型",
     reasoning: "推理强度",
     reasoningDefault: "默认",
-      disabledEmpty: "请输入内容后再发送",
-      disabledAttachments: "附件仍在上传，完成后即可发送",
     reasoningDefaultWithValue: "默认（{{effort}}）",
     modelPanel: {
       trigger: "模型与推理",
@@ -368,7 +381,10 @@ export const zhWorkspaceBase = {
       filterClear: "清除筛选",
     },
     contextUsage: {
+      label: "上下文",
       triggerLabel: "会话上下文用量 {{percent}}",
+      triggerLabelWithTokens:
+        "会话上下文用量 {{percent}}（{{used}} / {{window}} token）",
       title: "会话上下文",
       close: "关闭",
       refresh: "刷新上下文用量",
@@ -376,11 +392,8 @@ export const zhWorkspaceBase = {
       empty: "暂无可用的上下文数据：本会话还没有完成过带用量上报的 LLM 请求。",
       error: "上下文用量不可用",
       unknownValue: "未知",
-      label: "上下文",
       metrics: {
         used: "已用上下文",
-      triggerLabelWithTokens:
-        "会话上下文用量 {{percent}}（{{used}} / {{window}} token）",
         window: "上下文窗口",
         remaining: "剩余可用",
         budget: "prompt 预算",
@@ -417,8 +430,12 @@ export const zhWorkspaceBase = {
     },
     permission: {
       label: "权限",
+      loading: "正在加载权限模式",
+      unavailable: "无可用模式",
       pending: "切换中",
       error: "权限模式不可用",
+      dangerBanner: "当前会话会跳过全部权限校验，请只在可信工作区使用。",
+      dangerBannerDismiss: "关闭权限警示",
       mode: {
         default: {
           label: "默认",
@@ -430,18 +447,21 @@ export const zhWorkspaceBase = {
         },
         plan: {
           label: "计划模式",
-      dangerBanner: "当前会话会跳过全部权限校验，请只在可信工作区使用。",
-      dangerBannerDismiss: "关闭权限警示",
           description: "只读探索，仅允许写入 plan 文件",
         },
         bypass_permissions: {
           label: "跳过权限校验",
           description: "全部工具调用直接放行，仅在可信工作区使用",
         },
+        dont_ask: {
+          label: "不询问",
+          description: "拒绝需要审批的动作，仅运行已允许的读取与规则",
+        },
       },
       confirmDialog: {
         title: "切换到危险权限模式",
-        message: "「{{mode}}」会跳过全部工具调用的权限校验，仅在可信工作区使用。确认切换？",
+        message:
+          "「{{mode}}」会跳过全部工具调用的权限校验，仅在可信工作区使用。确认切换？",
         confirm: "确认切换",
         cancel: "取消",
       },
@@ -457,7 +477,8 @@ export const zhWorkspaceBase = {
     // §6.8 托管挂起（parked turn）：等待子 Agent / Team 义务终态期间的常驻状态表达。
     parkedTurn: {
       waiting: "托管中：等待 {{count}} 个义务",
-      tasks: "托管中：{{running}} 个任务运行中（{{completed}} 完成 / {{failed}} 异常）",
+      tasks:
+        "托管中：{{running}} 个任务运行中（{{completed}} 完成 / {{failed}} 异常）",
       // gap 3b 迟到唤醒：父 turn 早已正常结束、从未 suspended 时的瞬时恢复提示。
       resumed: "已由监督自动恢复（trigger={{trigger}}）",
       resumedFallback: "已由监督自动恢复",
@@ -520,6 +541,12 @@ export const zhWorkspaceBase = {
       count: "{{count}} 项",
       commands: "命令",
       actions: "操作",
+      workspace: "工作区",
+      workspaceClear: "不选择工作区",
+      workspaceClearDescription: "使用运行时默认目录",
+      workspaceLoading: "正在加载可用工作区…",
+      workspaceEmpty: "暂无已注册工作区",
+      workspaceError: "工作区不可用：{{message}}",
       moreResults: "结果较多，继续输入以缩小范围",
     },
     commands: {
@@ -550,10 +577,10 @@ export const zhWorkspaceBase = {
         unavailable: "当前没有可重命名的会话",
       },
       feedback: {
-        description: "记录一条反馈（本地日志，本版本不上报）",
+        description: "发送一条反馈",
         argumentHint: "<反馈内容>",
         needText: "请给出反馈内容：/feedback <内容>",
-        recorded: "反馈已记录到本地日志（本版本未接入上报渠道，不会外发）",
+        recorded: "反馈已记录",
       },
       model: {
         description: "切换当前会话模型",
@@ -583,7 +610,8 @@ export const zhWorkspaceBase = {
         description: "切换当前会话的 profile（下一轮生效）",
         argumentHint: "[profile | save-as <名称> [--to user|project]]",
         applied: "已切换 profile：{{profile}}（下一轮生效）",
-        appliedAfterTurn: "已切换 profile：{{profile}}（当前回合仍在途，下一轮生效）",
+        appliedAfterTurn:
+          "已切换 profile：{{profile}}（当前回合仍在途，下一轮生效）",
         appliedWithWarnings:
           "已切换 profile：{{profile}}（下一轮生效；{{count}} 条差异提示，首条：{{warning}}）",
         notFound: "运行时 profile 目录里没有 {{profile}}",
@@ -592,7 +620,8 @@ export const zhWorkspaceBase = {
         noSession: "当前没有可切换 profile 的会话",
         failed: "切换 profile 失败：{{message}}",
         saveAs: {
-          needName: "请提供新 profile 名称：/profile save-as <名称> [--to user|project]",
+          needName:
+            "请提供新 profile 名称：/profile save-as <名称> [--to user|project]",
           unknownFlag: "未知开关：{{flag}}",
           badLayer: "层级只支持 user 或 project：{{value}}",
           unexpectedArgument: "多余的参数：{{value}}",

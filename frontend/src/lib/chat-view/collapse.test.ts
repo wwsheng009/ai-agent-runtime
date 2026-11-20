@@ -59,7 +59,7 @@ describe("findFinalAnswerStart", () => {
 });
 
 describe("summarizeCollapsedEvidence", () => {
-  it("汇总工具数与带回复条数并省略零值段", () => {
+  it("汇总工具数与子代理数并省略零值段（带回复条数只保留在诊断字段）", () => {
     const nodes = nodesOf([
       { type: "tool", name: "read", status: "finished", resultSummary: "ok" },
       { type: "tool", name: "edit", status: "error", errorMessage: "boom" },
@@ -71,10 +71,7 @@ describe("summarizeCollapsedEvidence", () => {
 
     expect(summary.tools).toBe(3);
     expect(summary.replies).toBe(2);
-    expect(summary.parts).toEqual([
-      { kind: "tools", count: 3 },
-      { kind: "replies", count: 2 },
-    ]);
+    expect(summary.parts).toEqual([{ kind: "tools", count: 3 }]);
     expect(summary.empty).toBe(false);
   });
 
@@ -97,7 +94,6 @@ describe("summarizeCollapsedEvidence", () => {
 
     expect(summary.parts).toEqual([
       { kind: "tools", count: 1 },
-      { kind: "replies", count: 1 },
       { kind: "subagents", count: 2 },
     ]);
   });

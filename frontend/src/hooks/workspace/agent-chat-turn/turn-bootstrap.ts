@@ -36,6 +36,12 @@ export type AgentChatSubmitOptions = {
   prompt?: string;
   exposeSkills?: readonly string[];
   images?: readonly string[];
+  /** 仅首轮新线程使用的 profile 覆盖。 */
+  profile?: string;
+  /** 仅首轮新线程使用的权限模式覆盖。 */
+  permissionMode?: string;
+  /** 首轮初始化 bypass_permissions 时的显式确认。 */
+  permissionModeConfirm?: boolean;
 };
 
 export type AgentChatTurnBootstrapInput = {
@@ -54,6 +60,12 @@ export type AgentChatTurnBootstrapInput = {
   settings: AppSettings;
   /** P2：本回合暴露给模型的 skill 名单（省略/空数组 = 不发送该字段）。 */
   exposeSkills?: readonly string[];
+  /** 新线程首轮的 profile 覆盖；已有会话会被 prepareAgentChatTurn 忽略。 */
+  profile?: string;
+  /** 新线程首轮的权限模式；已有会话会被 prepareAgentChatTurn 忽略。 */
+  permissionMode?: string;
+  /** 新线程首轮 bypass_permissions 的显式确认。 */
+  permissionModeConfirm?: boolean;
 };
 
 export type AgentChatTurnBootstrap = {
@@ -106,6 +118,16 @@ export function prepareAgentChatTurn(
   };
   const requestPayload: AgentChatRequest = {
     messages: [{ role: "user" as const, content: prompt }],
+    ...(selectedThread.id === NEW_THREAD_ID && input.profile?.trim()
+      ? { profile: input.profile.trim() }
+      : {}),
+    ...(selectedThread.id === NEW_THREAD_ID && input.permissionMode?.trim()
+      ? { permission_mode: input.permissionMode.trim() }
+      : {}),
+    ...(selectedThread.id === NEW_THREAD_ID &&
+    input.permissionModeConfirm === true
+      ? { permission_mode_confirm: true }
+      : {}),
     session_id: threadSnapshot.sessionId,
     turn_id: turnId,
     user_id: input.userId || undefined,

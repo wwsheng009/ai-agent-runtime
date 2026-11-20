@@ -1,7 +1,12 @@
 // 由 components/workspace/workspace-shell.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Code2Icon, FileSearchIcon, ListTodoIcon, ShieldCheckIcon } from "lucide-react";
+import {
+  Code2Icon,
+  FileSearchIcon,
+  ListTodoIcon,
+  ShieldCheckIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
@@ -59,6 +64,9 @@ export function WorkspaceShell({
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
   workspaceDirectoriesRefreshing,
+  selectedWorkspaceDirectory,
+  selectedWorkspaceDirectoryId,
+  onSelectWorkspaceDirectory,
   onAddWorkspaceDirectory,
   onRenameWorkspaceDirectory,
   onRemoveWorkspaceDirectory,
@@ -82,6 +90,11 @@ export function WorkspaceShell({
   composerAttachments,
   connectionStatus = null,
   draft,
+  pendingPermissionMode = "",
+  pendingProfileRef = "",
+  onPendingPermissionModeChange,
+  onPendingPermissionModeConfirmChange,
+  onPendingProfileChange,
   imageSubmitFeedback = null,
   isResponding,
   modelOptions,
@@ -185,25 +198,25 @@ export function WorkspaceShell({
   /** 桌面（xl+）左栏收起：整列只剩图标；移动抽屉不受影响（见 workspace-sidebar 的 xl 门控）。 */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   /** 拖拽提交后先保留本地几何，避免设置持久化异步落盘时把 CSS 变量闪回默认值。 */
-  const [sidebarWidthOverride, setSidebarWidthOverride] = useState<number | null>(
-    null,
-  );
+  const [sidebarWidthOverride, setSidebarWidthOverride] = useState<
+    number | null
+  >(null);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
   /** P0-2：视口宽度（右栏 auto 宽度与 `<xl` 降级判定共用）。 */
-  const [shellViewportWidth, setShellViewportWidth] = useState(readViewportWidth);
+  const [shellViewportWidth, setShellViewportWidth] =
+    useState(readViewportWidth);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
   const [rightRailManualOpen, setRightRailManualOpen] = useState(
     Boolean(settings.workspace.autoOpenArtifacts),
   );
   // 右侧栏是「条目 / 计划 / 还原 / 会话用量」合并后的单一可折叠面板。
-  const rightRailOpen = !isNewThread && rightRailManualOpen;
+  const rightRailOpen = rightRailManualOpen;
   const rightRailVisible = rightRailOpen;
   // P0-2：右栏宽度状态源（模式 + 视口重算 + 提交持久化）；宽度算术只在 lib/layout/rail-width.ts。
-  const [railSurface, setRailSurface] = useState<WorkspacePanelSurfaceId | null>(
-    null,
-  );
+  const [railSurface, setRailSurface] =
+    useState<WorkspacePanelSurfaceId | null>(null);
   const railWidth = useRightRailWidth({
     surface: railSurface,
     viewportWidth: shellViewportWidth,
@@ -230,13 +243,17 @@ export function WorkspaceShell({
     previewThread: t("topbar.threadStatus.previewThread"),
     newThread: t("topbar.threadStatus.newThread"),
   });
-  const threadSubtitle = getThreadTopbarSubtitle(selectedThread, transportLabel, {
-    needsRestoreWithSession: (sessionId) =>
-      t("topbar.subtitle.needsRestoreWithSession", { sessionId }),
-    needsRestore: t("topbar.subtitle.needsRestore"),
-    viaSource: (source) => t("topbar.subtitle.viaSource", { source }),
-    session: (sessionId) => t("topbar.subtitle.session", { sessionId }),
-  });
+  const threadSubtitle = getThreadTopbarSubtitle(
+    selectedThread,
+    transportLabel,
+    {
+      needsRestoreWithSession: (sessionId) =>
+        t("topbar.subtitle.needsRestoreWithSession", { sessionId }),
+      needsRestore: t("topbar.subtitle.needsRestore"),
+      viaSource: (source) => t("topbar.subtitle.viaSource", { source }),
+      session: (sessionId) => t("topbar.subtitle.session", { sessionId }),
+    },
+  );
 
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
@@ -305,7 +322,7 @@ export function WorkspaceShell({
 
   useEffect(() => {
     // P0-2 机械搬迁：保留原「autoOpenArtifacts 变化即同步刷新右侧栏开合」语义。
-     
+
     setRightRailManualOpen(settings.workspace.autoOpenArtifacts);
   }, [settings.workspace.autoOpenArtifacts]);
 
@@ -428,6 +445,13 @@ export function WorkspaceShell({
           connectionStatus={connectionStatus}
           density={settings.workspace.density}
           draft={draft}
+          pendingPermissionMode={pendingPermissionMode}
+          pendingProfileRef={pendingProfileRef}
+          onPendingPermissionModeChange={onPendingPermissionModeChange}
+          onPendingPermissionModeConfirmChange={
+            onPendingPermissionModeConfirmChange
+          }
+          onPendingProfileChange={onPendingProfileChange}
           handleOpenArtifact={handleOpenArtifact}
           isCompact={isCompact}
           isNewThread={isNewThread}
@@ -455,10 +479,14 @@ export function WorkspaceShell({
           onRefreshSession={onRefreshSession}
           onRetryConnection={onRetryConnection}
           streamStalled={streamStalled}
-          onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+          onSelectBacktrackNavigationMessage={
+            onSelectBacktrackNavigationMessage
+          }
           onStopResponding={onStopResponding}
           onSubmit={onSubmit}
-          onToggleRightRail={() => setRightRailManualOpen((current) => !current)}
+          onToggleRightRail={() =>
+            setRightRailManualOpen((current) => !current)
+          }
           openSettings={openSettings}
           pendingInteraction={pendingInteraction}
           parkedTurn={parkedTurn}
@@ -478,6 +506,11 @@ export function WorkspaceShell({
           selectedProvider={selectedProvider}
           selectedReasoningEffort={selectedReasoningEffort}
           selectedThread={selectedThread}
+          workspaceDirectories={workspaceDirectories}
+          workspaceDirectoriesError={workspaceDirectoriesError}
+          workspaceDirectoriesLoading={workspaceDirectoriesLoading}
+          selectedWorkspaceDirectoryId={selectedWorkspaceDirectoryId ?? null}
+          onSelectWorkspaceDirectory={onSelectWorkspaceDirectory}
           rightRailOpen={rightRailOpen}
           sessionRefreshing={sessionRefreshing}
           setMobileSidebarOpen={setMobileSidebarOpen}
@@ -492,7 +525,6 @@ export function WorkspaceShell({
         />
         <WorkspaceRightRailSection
           handleOpenArtifact={handleOpenArtifact}
-          isNewThread={isNewThread}
           isResponding={isResponding}
           onActiveSurfaceChange={setRailSurface}
           onCloseRightRail={() => setRightRailManualOpen(false)}
@@ -501,6 +533,11 @@ export function WorkspaceShell({
           selectedArtifactId={selectedArtifactId}
           selectedThread={selectedThread}
           t={t}
+          workspacePath={
+            isNewThread
+              ? selectedWorkspaceDirectory?.path
+              : runtimeClient.workspacePath
+          }
         />
       </div>
       <WorkspaceOverlaysSection

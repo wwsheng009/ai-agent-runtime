@@ -22,7 +22,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { CheckboxInput } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 export type ApprovalDecisionOptions = {
@@ -137,23 +137,24 @@ export function ApprovalDecisionControls({
           </label>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             {remember ? (
-              <NativeSelect
-                aria-label={labels.rememberScopeLabel}
+              <Select
+                ariaLabel={labels.rememberScopeLabel}
+                className="w-auto"
                 size="sm"
-                disabled={disabled}
-                value={scope}
-                onChange={(event) =>
-                  setScope(
-                    event.target.value === "project" ? "project" : "session",
-                  )
+                options={[
+                  { value: "session", label: labels.rememberScopeSession },
+                  { value: "project", label: labels.rememberScopeProject },
+                ]}
+                onChange={(nextScope) =>
+                  setScope(nextScope === "project" ? "project" : "session")
                 }
-              >
-                <option value="session">{labels.rememberScopeSession}</option>
-                <option value="project">{labels.rememberScopeProject}</option>
-              </NativeSelect>
+                disabled={disabled}
+                surface="default"
+                value={scope}
+              />
             ) : null}
             {/* 勾选前就展示将记住的模式：让「记住」是可核对的决定而不是盲选。 */}
-            <span className="font-mono text-[11px] break-all">
+            <span className="font-mono app-text-11 break-all">
               {labels.rememberPattern}
             </span>
           </div>
@@ -211,7 +212,7 @@ export function ApprovalDecisionControls({
           <p className="whitespace-pre-wrap text-xs leading-5 text-foreground">
             {explanation.explanation}
           </p>
-          <p className="text-[10px] text-muted-foreground">
+          <p className="app-text-10 text-muted-foreground">
             {explanation.source === "model" && explanation.model
               ? labels.explanationSourceModel(explanation.model)
               : labels.explanationSourceRules}

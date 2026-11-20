@@ -33,7 +33,6 @@ import { useRuntimeCheckpoints } from "@/hooks/workspace/use-runtime-checkpoints
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import {
   classifyArtifactCategory,
-  formatArtifactCategory,
 } from "@/lib/workspace-artifacts";
 
 export function ArtifactPanel({
@@ -53,7 +52,9 @@ export function ArtifactPanel({
   const asideDescriptionId = useId();
   const tabIdBase = useId();
   const [uncontrolledSurface, setUncontrolledSurface] =
-    useState<ArtifactPanelSurface>(artifacts.length > 0 ? "artifacts" : "plan");
+    useState<ArtifactPanelSurface>(
+      artifacts.length > 0 ? "artifacts" : sessionId?.trim() ? "plan" : "files",
+    );
   // 用户显式点选页签后不再被自动回落覆盖，保证「会话用量」等页签可稳定停留。
   const [surfacePinnedByUser, setSurfacePinnedByUser] = useState(false);
   const selectSurface = (surface: ArtifactPanelSurface) => {
@@ -111,13 +112,27 @@ export function ArtifactPanel({
     sessionId,
   });
 
-  const resolvedActiveSurface = surfacePinnedByUser
-    ? activeSurface
-    : artifacts.length === 0 && plan?.active
-      ? "plan"
-      : artifacts.length === 0 && checkpoints.length > 0 && !plan?.active
-        ? "checkpoints"
-        : activeSurface;
+  const activeSurfaceUnavailable = WORKSPACE_PANEL_SURFACES.some((spec) => {
+    if (spec.id !== activeSurface) {
+      return false;
+    }
+    if (spec.id === "sessionMcp") {
+      return !sessionId?.trim() && !workspacePath?.trim();
+    }
+    return spec.requiresSession && !sessionId?.trim();
+  });
+  const resolvedActiveSurface =
+    !sessionId?.trim() && activeSurfaceUnavailable
+      ? artifacts.length > 0
+        ? "artifacts"
+        : "files"
+      : surfacePinnedByUser
+        ? activeSurface
+        : artifacts.length === 0 && plan?.active
+          ? "plan"
+          : artifacts.length === 0 && checkpoints.length > 0 && !plan?.active
+            ? "checkpoints"
+            : activeSurface;
   const evidenceArtifacts = artifacts.filter(
     (artifact) => classifyArtifactCategory(artifact) === "evidence",
   );
@@ -131,10 +146,15 @@ export function ArtifactPanel({
     ? classifyArtifactCategory(selectedArtifact)
     : null;
   const artifactSelectionAnnouncement = selectedArtifact
-    ? `${formatArtifactCategory(selectedArtifactCategory ?? "file")} selected: ${
-        selectedArtifact.name
-      }. Opens in dialog.`
-    : "Artifact rail ready. Select an item to open it in a dialog.";
+    ? t("panels.artifacts.list.selectedAnnouncement", {
+        category: t(
+          selectedArtifactCategory === "evidence"
+            ? "panels.artifacts.detail.categoryEvidence"
+            : "panels.artifacts.detail.categoryOutput",
+        ),
+        name: selectedArtifact.name,
+      })
+    : t("panels.artifacts.list.readyAnnouncement");
 
   const surfaceTabIds = useMemo(
     () =>
@@ -151,17 +171,24 @@ export function ArtifactPanel({
   const surfaceDisabledReasons = useMemo(() => {
     const reasons: Partial<Record<WorkspacePanelSurfaceId, string>> = {};
     for (const spec of WORKSPACE_PANEL_SURFACES) {
-      if (spec.requiresSession && !sessionId) {
+      const unavailable =
+        spec.id === "sessionMcp"
+          ? !sessionId?.trim() && !workspacePath?.trim()
+          : spec.requiresSession && !sessionId?.trim();
+      if (unavailable) {
         // 注册表以 string 下发键名，这里按仓库惯例收窄到 i18n 键类型。
         reasons[spec.id] = t(
-          (spec.disabledReasonKey ?? "panels.shell.panelTabs.disabledNoSession") as never,
+          (spec.disabledReasonKey ??
+            "panels.shell.panelTabs.disabledNoSession") as never,
         ) as string;
       }
     }
     return reasons;
-  }, [sessionId, t]);
+  }, [sessionId, t, workspacePath]);
 
   const surfaceBadges: Partial<Record<WorkspacePanelSurfaceId, ReactNode>> = {
+    artifacts:
+      artifacts.length > 0 ? <Badge>{artifacts.length}</Badge> : null,
     plan: plan?.active ? (
       <span className={surfaceBadgeClass("plan")}>
         {t("panels.artifacts.tabs.planLive")}
@@ -191,16 +218,22 @@ export function ArtifactPanel({
         {artifactSelectionAnnouncement}
       </div>
       <div className="sr-only" id={asideDescriptionId}>
-        {t("panels.artifacts.panel.description")}
+        {resolvedActiveSurface === "schedule"
+          ? t("panels.schedule.description")
+          : t("panels.artifacts.panel.description")}
       </div>
 
       <ArtifactPanelSurfaceTabs
         activeSurface={resolvedActiveSurface}
         badges={surfaceBadges}
         disabledReasons={surfaceDisabledReasons}
+        tabListLabel={
+          resolvedActiveSurface === "schedule"
+            ? t("panels.schedule.tabListLabel")
+            : undefined
+        }
         tabIds={surfaceTabIds}
         titleId={asideTitleId}
-        trailingBadge={<Badge>{artifacts.length}</Badge>}
         onSelectSurface={selectSurface}
       />
 

@@ -186,6 +186,21 @@ describe("ComposerProfileControl", () => {
     expect(container.textContent).toBe("");
   });
 
+  it("renders the default profile and stages a new-thread selection locally", async () => {
+    const onPendingProfileChange = vi.fn();
+    await render({
+      sessionId: undefined,
+      isNewThread: true,
+      onPendingProfileChange,
+    });
+
+    expect(currentRef()).toBe("coder");
+    await pickOption("Reviewer");
+
+    expect(onPendingProfileChange).toHaveBeenCalledWith("reviewer");
+    expect(onSwitch).not.toHaveBeenCalled();
+  });
+
   it("marks the default candidate and hides invalid ones from selection", async () => {
     await render();
 

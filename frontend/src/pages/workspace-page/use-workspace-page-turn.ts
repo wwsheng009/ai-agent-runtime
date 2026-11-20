@@ -1,6 +1,6 @@
 // P0-2：workspace-page.tsx 机械拆分「回合 / 交互 / 轨迹 / live」区块——仅搬迁不改逻辑。
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
@@ -13,6 +13,7 @@ import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
 import { useWorkspaceLive } from "@/hooks/workspace/use-workspace-live";
 import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
+import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { ingestJobOutputEvent } from "@/lib/job-output-stream/store";
 import { normalizeSessionId } from "@/lib/session-id";
 import { applySessionHistoryToThread } from "@/lib/workspace-thread-state";
@@ -26,6 +27,7 @@ export function useWorkspacePageTurn() {
     routeSessionId,
     runtimeClient,
     runtimeDeltaCoordinator,
+    selectedWorkspaceDirectory,
     selectedRuntimeSessionUserId,
     selectedThread,
     setSelectedArtifactId,
@@ -34,6 +36,22 @@ export function useWorkspacePageTurn() {
     trajectoryStore,
     trajectoryStorePool,
   } = session;
+  const workspacePath =
+    selectedThread?.id === NEW_THREAD_ID
+      ? selectedWorkspaceDirectory?.path
+      : runtimeClient.workspacePath;
+  const [pendingPermissionMode, setPendingPermissionMode] = useState("");
+  const [pendingPermissionModeConfirm, setPendingPermissionModeConfirm] =
+    useState(false);
+  const [pendingProfileRef, setPendingProfileRef] = useState("");
+  useEffect(() => {
+    if (selectedThread?.id === NEW_THREAD_ID) {
+      return;
+    }
+    setPendingPermissionMode("");
+    setPendingPermissionModeConfirm(false);
+    setPendingProfileRef("");
+  }, [selectedThread?.id]);
   const {
     activeSessionKeys,
     activeTurnId,
@@ -66,6 +84,9 @@ export function useWorkspacePageTurn() {
     submitPrompt,
   } = useWorkspaceAgentChatTurn({
     onSessionTouched: handleRefreshRuntimeSessions,
+    pendingPermissionMode,
+    pendingPermissionModeConfirm,
+    pendingProfileRef,
     selectedThread,
     setSelectedArtifactId,
     setThreads,
@@ -73,7 +94,7 @@ export function useWorkspacePageTurn() {
     trajectoryStore,
     trajectoryStorePool,
     userId: selectedRuntimeSessionUserId || runtimeClient.userId,
-    workspacePath: runtimeClient.workspacePath,
+    workspacePath,
   });
 
   // P1-9：会话行动作（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建）由
@@ -193,21 +214,26 @@ export function useWorkspacePageTurn() {
   });
   // P4-刷新续传：live 通道（续传回合认领 → 在途回合身份统一 → /runtime/stream 按
   // 游标重连并继续渲染增量）整链路收口在 use-workspace-live。
-  const { connectionStatus, currentSessionResponding, parkedTurn, retryConnection, stopResumedTurn } =
-    useWorkspaceLive({
-      deltaCoordinator: runtimeDeltaCoordinator,
-      localResponding: isResponding,
-      localTurnId: activeTurnId,
-      onRuntimeEvent: handleRuntimeEvent,
-      refreshRuntimeState: refreshSessionRuntimeState,
-      selectedThread,
-      sessionActiveTurn,
-      sessionId: selectedThread?.sessionId,
-      setThreads,
-      setThreadsLive,
-      trajectoryReady: trajectoryReplay.ready,
-      trajectoryStore,
-    });
+  const {
+    connectionStatus,
+    currentSessionResponding,
+    parkedTurn,
+    retryConnection,
+    stopResumedTurn,
+  } = useWorkspaceLive({
+    deltaCoordinator: runtimeDeltaCoordinator,
+    localResponding: isResponding,
+    localTurnId: activeTurnId,
+    onRuntimeEvent: handleRuntimeEvent,
+    refreshRuntimeState: refreshSessionRuntimeState,
+    selectedThread,
+    sessionActiveTurn,
+    sessionId: selectedThread?.sessionId,
+    setThreads,
+    setThreadsLive,
+    trajectoryReady: trajectoryReplay.ready,
+    trajectoryStore,
+  });
   // 权威历史同步排在 live 通道之后：降级态收敛（断流自愈）必须等**服务端回合**
   // 结束才允许对齐——chat POST 被掐断后本地立即空闲，而服务端回合仍在跑
   // （resume_on_disconnect），此时拉到的历史不含最终消息，过早对齐会留下截断又
@@ -256,6 +282,12 @@ export function useWorkspacePageTurn() {
     onPlanNotesChange,
     parkedTurn,
     pendingInteraction,
+    pendingPermissionMode,
+    pendingPermissionModeConfirm,
+    pendingProfileRef,
+    setPendingPermissionMode,
+    setPendingPermissionModeConfirm,
+    setPendingProfileRef,
     phase,
     planActionPending,
     planNotesDraft,
@@ -276,6 +308,7 @@ export function useWorkspacePageTurn() {
     runtimeSkills,
     runtimeSkillsError,
     runtimeSkillsLoading,
+    workspacePath,
     selectedModel,
     selectedProvider,
     selectedReasoningEffort,

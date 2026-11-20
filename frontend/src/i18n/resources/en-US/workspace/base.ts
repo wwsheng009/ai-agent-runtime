@@ -59,7 +59,8 @@ export const enWorkspaceBase = {
     },
     quality: "Quality {{quality}} · coverage {{coverage}}",
     updatedAt: "Updated {{time}}",
-    partial: "This session has partial usage data; see the usage page for details.",
+    partial:
+      "This session has partial usage data; see the usage page for details.",
   },
   topbar: {
     home: "Home",
@@ -91,6 +92,7 @@ export const enWorkspaceBase = {
     },
     usage: "Usage",
     runtime: "Runtime",
+    more: "More actions",
     settings: "Settings",
     openSidebar: "Open chat navigation",
     showRail: "Expand right panel",
@@ -148,6 +150,13 @@ export const enWorkspaceBase = {
     expand: "Expand sidebar",
     startNewChat: "Start new chat",
     searchPlaceholder: "Search threads",
+    searchAll: "Search across all {{count}} sessions",
+    searchAllWithQuery: 'Search "{{query}}" across all {{count}} sessions',
+    recent: {
+      title: "Recent sessions",
+      today: "Today",
+      yesterday: "Yesterday",
+    },
     sections: {
       chats: "Local chats",
       directories: "Directories",
@@ -170,7 +179,8 @@ export const enWorkspaceBase = {
       restore: "Restore",
       showArchived: "Show archived ({{count}})",
       stop: "Stop",
-      stopHint: "Stop the in-flight turn (works for sessions running in the background)",
+      stopHint:
+        "Stop the in-flight turn (works for sessions running in the background)",
       switchTitle: "Session is still responding",
       switchMessage: "Switch to {{title}}?",
       switchHint:
@@ -197,8 +207,10 @@ export const enWorkspaceBase = {
       groupLabel: "Session grouping view",
       directory: "By directory",
       flat: "Flat",
-      directoryHint: "Group by workspace directory; drag sessions across groups to move",
-      flatHint: "Single flat list without directory groups; switch to By directory to move sessions across groups",
+      directoryHint:
+        "Group by workspace directory; drag sessions across groups to move",
+      flatHint:
+        "Single flat list without directory groups; switch to By directory to move sessions across groups",
       collapse: "Collapse",
       showMore: "Show {{count}} more sessions",
     },
@@ -271,7 +283,8 @@ export const enWorkspaceBase = {
       error:
         "The session exists, but the latest sync failed and needs another restore attempt.",
       restored: "Recovered from runtime session history and ready to continue.",
-      attached: "Attached to a live runtime session from the active workspace flow.",
+      attached:
+        "Attached to a live runtime session from the active workspace flow.",
     },
     emptyChats: {
       search: "No local chats match the current search.",
@@ -281,8 +294,7 @@ export const enWorkspaceBase = {
     emptySessions: {
       allArchived: "All sessions are archived — use “Show archived” above.",
       search: "No sessions match the current search.",
-      default:
-        "Recoverable runtime sessions will appear here after loading.",
+      default: "Recoverable runtime sessions will appear here after loading.",
     },
     runtimeStats: {
       sessions: "{{count}} sessions",
@@ -294,6 +306,7 @@ export const enWorkspaceBase = {
     openRuntimeTeamDetails: "Open runtime team details",
     backendConfigPage: "Backend config page",
     skillsPage: "Skill market",
+    automationPage: "Automation center",
     active: "{{count}} active",
     unknown: "unknown",
     bots: {
@@ -330,7 +343,8 @@ export const enWorkspaceBase = {
       plan_review: "“{{session}}” needs plan review",
     },
     bodies: {
-      turn_finished: "The background turn finished; switch back to see the result.",
+      turn_finished:
+        "The background turn finished; switch back to see the result.",
       approval: "A tool call is waiting for your approval.",
       question: "The runtime is waiting for your answer.",
       plan_review: "A plan review is waiting for your decision.",
@@ -359,6 +373,8 @@ export const enWorkspaceBase = {
       startThread: "Start conversation",
       blockedInFlight:
         "Message not sent: the session is still finishing its previous turn. Please retry in a moment.",
+      disabledEmpty: "Enter a message before sending",
+      disabledAttachments: "Attachments are still uploading",
     },
     promptTips: "prompt tips",
     promptTipsMenuTitle: "Prompt tips",
@@ -367,8 +383,6 @@ export const enWorkspaceBase = {
     model: "Model",
     reasoning: "Reasoning",
     reasoningDefault: "Default",
-      disabledEmpty: "Enter a message before sending",
-      disabledAttachments: "Attachments are still uploading",
     reasoningDefaultWithValue: "Default ({{effort}})",
     modelPanel: {
       trigger: "Model & reasoning",
@@ -386,7 +400,10 @@ export const enWorkspaceBase = {
       filterClear: "Clear filter",
     },
     contextUsage: {
+      label: "Context",
       triggerLabel: "Session context usage {{percent}}",
+      triggerLabelWithTokens:
+        "Session context usage {{percent}} ({{used}} / {{window}} tokens)",
       title: "Session context",
       close: "Close",
       refresh: "Refresh context usage",
@@ -394,10 +411,7 @@ export const enWorkspaceBase = {
       empty:
         "No context data yet: this session has no completed LLM request with usage reporting.",
       error: "context usage unavailable",
-      label: "Context",
       unknownValue: "unknown",
-      triggerLabelWithTokens:
-        "Session context usage {{percent}} ({{used}} / {{window}} tokens)",
       metrics: {
         used: "Used",
         window: "Context window",
@@ -407,15 +421,18 @@ export const enWorkspaceBase = {
       },
       compact: {
         title: "Compact context",
-        description: "Fold older history into checkpoints to free the context window now.",
+        description:
+          "Fold older history into checkpoints to free the context window now.",
         mode: "Compact mode",
         modeAuto: "Auto",
         modeLocal: "Local",
         modeRemote: "Remote",
         action: "Compact session",
         pending: "Compacting",
-        disabledResponding: "Cannot compact while responding — stop the turn first.",
-        disabledNoSession: "Session is not persisted yet — compaction unavailable.",
+        disabledResponding:
+          "Cannot compact while responding — stop the turn first.",
+        disabledNoSession:
+          "Session is not persisted yet — compaction unavailable.",
         skipped: "Nothing was compacted (reason: {{reason}}).",
         skippedUnknown: "Nothing was compacted.",
         done: "Compacted {{messages}} messages: {{before}} → {{after}} tokens",
@@ -436,21 +453,22 @@ export const enWorkspaceBase = {
     },
     permission: {
       label: "Permission",
+      loading: "Loading permission modes",
+      unavailable: "No modes available",
       pending: "switching",
       error: "permission mode unavailable",
+      dangerBanner:
+        "This session bypasses all permission checks — use it only in trusted workspaces.",
+      dangerBannerDismiss: "Dismiss permission warning",
       mode: {
         default: {
           label: "Default",
           description: "Confirm every write and command",
         },
         accept_edits: {
-      loading: "Loading permission modes",
-      unavailable: "No modes available",
           label: "Accept edits",
-          description: "File edits pass automatically; risky commands still ask",
-      dangerBanner:
-        "This session bypasses all permission checks — use it only in trusted workspaces.",
-      dangerBannerDismiss: "Dismiss permission warning",
+          description:
+            "File edits pass automatically; risky commands still ask",
         },
         plan: {
           label: "Plan",
@@ -458,7 +476,13 @@ export const enWorkspaceBase = {
         },
         bypass_permissions: {
           label: "Bypass permissions",
-          description: "Every tool call runs without asking — trusted workspaces only",
+          description:
+            "Every tool call runs without asking — trusted workspaces only",
+        },
+        dont_ask: {
+          label: "Don't ask",
+          description:
+            "Deny actions that would require approval; keep allowed reads and rules",
         },
       },
       confirmDialog: {
@@ -472,7 +496,8 @@ export const enWorkspaceBase = {
     // §4.6 plan context (top-of-chat status row): plan state reading; the permission mode lives in the composer footer control.
     modeBanner: {
       hint: {
-        modelRequested: "The model asked for a verdict — approve or request changes.",
+        modelRequested:
+          "The model asked for a verdict — approve or request changes.",
         ready: "The plan is ready to review.",
         waiting: "No plan text yet; waiting for the model.",
       },
@@ -480,7 +505,8 @@ export const enWorkspaceBase = {
     // §6.8 hosted suspension (parked turn): persistent state while obligations settle.
     parkedTurn: {
       waiting: "Parked: waiting on {{count}} obligation(s)",
-      tasks: "Parked: {{running}} task(s) running ({{completed}} done / {{failed}} failed)",
+      tasks:
+        "Parked: {{running}} task(s) running ({{completed}} done / {{failed}} failed)",
       // Gap 3b late wake: transient notice when a turn is auto-resumed after it already finished.
       resumed: "Auto-resumed by supervision (trigger={{trigger}})",
       resumedFallback: "Auto-resumed by supervision",
@@ -530,7 +556,8 @@ export const enWorkspaceBase = {
         "session is busy — this turn was not submitted; attachments stay in the draft rail",
       sendFailed: "image prompt failed: {{reason}}",
       sendUnavailable: "image prompt endpoint unavailable: {{reason}}",
-      rejected: "ignored {{count}} file(s) (duplicate, too large, or over limit)",
+      rejected:
+        "ignored {{count}} file(s) (duplicate, too large, or over limit)",
       dropInvitation: "drop to attach files",
       error: {
         unavailable: "attachment upload endpoint unavailable",
@@ -547,6 +574,13 @@ export const enWorkspaceBase = {
       count: "{{count}} item(s)",
       commands: "commands",
       actions: "actions",
+      workspace: "workspace",
+      workspaceClear: "No workspace",
+      workspaceClearDescription:
+        "Use the runtime default without a selected workspace",
+      workspaceLoading: "Loading available workspaces…",
+      workspaceEmpty: "No registered workspaces available",
+      workspaceError: "Workspaces unavailable: {{message}}",
       moreResults: "more results — keep typing to narrow down",
     },
     commands: {
@@ -578,18 +612,18 @@ export const enWorkspaceBase = {
         unavailable: "there is no session to rename",
       },
       feedback: {
-        description: "record feedback (local log only, not sent in this build)",
+        description: "send feedback",
         argumentHint: "<feedback>",
         needText: "provide feedback text: /feedback <text>",
-        recorded:
-          "feedback written to the local log (no submission channel in this build — nothing was sent)",
+        recorded: "feedback recorded",
       },
       model: {
         description: "switch the model for the current session",
         argumentHint: "[model]",
         applied: "model switched to {{model}}",
         notFound: "the runtime model catalog has no {{model}}",
-        unavailable: "the runtime model catalog is not ready — cannot switch models",
+        unavailable:
+          "the runtime model catalog is not ready — cannot switch models",
       },
       skill: {
         description: "execute a skill by name",
@@ -609,7 +643,8 @@ export const enWorkspaceBase = {
         },
       },
       profile: {
-        description: "switch the profile for the current session (takes effect next turn)",
+        description:
+          "switch the profile for the current session (takes effect next turn)",
         argumentHint: "[profile | save-as <name> [--to user|project]]",
         applied: "profile switched to {{profile}} (takes effect next turn)",
         appliedAfterTurn:
@@ -618,18 +653,21 @@ export const enWorkspaceBase = {
           "profile switched to {{profile}} (takes effect next turn; {{count}} difference warning(s), first: {{warning}})",
         notFound: "the runtime profile catalog has no {{profile}}",
         invalid: "profile {{profile}} exists but is unavailable: {{reason}}",
-        unavailable: "the runtime profile catalog is not ready — cannot switch profiles",
+        unavailable:
+          "the runtime profile catalog is not ready — cannot switch profiles",
         noSession: "there is no session to switch profiles for",
         failed: "profile switch failed: {{message}}",
         saveAs: {
-          needName: "provide a new profile name: /profile save-as <name> [--to user|project]",
+          needName:
+            "provide a new profile name: /profile save-as <name> [--to user|project]",
           unknownFlag: "unknown flag: {{flag}}",
           badLayer: "layer must be user or project: {{value}}",
           unexpectedArgument: "unexpected argument: {{value}}",
           noSession: "there is no session to save as a profile",
           inProgress: "a previous save-as is still running — please wait",
           done: "profile created from the current session: {{profile}} ({{fields}} diff field(s); {{omitted}} item(s) not included, e.g. prompts; not activated — switch with /profile {{profile}})",
-          failed: "creating a profile from the current session failed: {{message}}",
+          failed:
+            "creating a profile from the current session failed: {{message}}",
         },
         dialog: {
           title: "Select Profile",

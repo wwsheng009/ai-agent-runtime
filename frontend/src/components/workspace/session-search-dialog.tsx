@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
+import { Select } from "@/components/ui/select";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import {
   parseSessionSearchTagInput,
@@ -151,42 +151,44 @@ export function SessionSearchDialog({
               <span className="font-medium text-foreground">
                 {t("panels.sessionSearch.form.userId")}
               </span>
-              <NativeSelect
-                aria-label={t("panels.sessionSearch.form.userId")}
-                className="mt-1"
-                onChange={(event) => setUserId(event.target.value)}
+              <Select
+                ariaLabel={t("panels.sessionSearch.form.userId")}
+                className="mt-1 w-full"
+                onChange={setUserId}
+                options={[
+                  {
+                    value: "",
+                    label: t("panels.sessionSearch.form.userIdAny"),
+                  },
+                  ...users.map((user) => ({
+                    value: user.user_id,
+                    label: user.display_name?.trim() || user.user_id,
+                  })),
+                ]}
                 value={userId}
-              >
-                <option value="">
-                  {t("panels.sessionSearch.form.userIdAny")}
-                </option>
-                {users.map((user) => (
-                  <option key={user.user_id} value={user.user_id}>
-                    {user.display_name?.trim() || user.user_id}
-                  </option>
-                ))}
-              </NativeSelect>
+              />
             </label>
 
             <label className="block text-xs text-muted-foreground">
               <span className="font-medium text-foreground">
                 {t("panels.sessionSearch.form.state")}
               </span>
-              <NativeSelect
-                aria-label={t("panels.sessionSearch.form.state")}
-                className="mt-1"
-                onChange={(event) => setState(event.target.value)}
+              <Select
+                ariaLabel={t("panels.sessionSearch.form.state")}
+                className="mt-1 w-full"
+                onChange={setState}
+                options={[
+                  {
+                    value: "",
+                    label: t("panels.sessionSearch.form.stateAny"),
+                  },
+                  ...sessionStateOptions.map((option) => ({
+                    value: option,
+                    label: t(sessionSearchStateLabelKey(option)),
+                  })),
+                ]}
                 value={state}
-              >
-                <option value="">
-                  {t("panels.sessionSearch.form.stateAny")}
-                </option>
-                {sessionStateOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {t(sessionSearchStateLabelKey(option))}
-                  </option>
-                ))}
-              </NativeSelect>
+              />
             </label>
 
             <label className="block text-xs text-muted-foreground">

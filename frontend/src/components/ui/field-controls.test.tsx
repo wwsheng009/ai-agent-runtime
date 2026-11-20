@@ -2,16 +2,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { Input } from "./input";
-import { NativeSelect } from "./native-select";
+import { Select } from "./select";
 import { Textarea } from "./textarea";
 
 describe("field controls", () => {
   it("renders single-line controls on the shared md size axis", () => {
     const inputMarkup = renderToStaticMarkup(<Input aria-label="name" />);
     const selectMarkup = renderToStaticMarkup(
-      <NativeSelect aria-label="kind">
-        <option value="a">A</option>
-      </NativeSelect>,
+      <Select
+        ariaLabel="kind"
+        options={[{ value: "a", label: "A" }]}
+        value="a"
+        onChange={() => undefined}
+      />,
     );
 
     for (const markup of [inputMarkup, selectMarkup]) {

@@ -27,8 +27,8 @@ export const zhWorkspacePanelsMessages = {
     streamingBadge: "响应流式输出中",
   },
   collapsedSummary: {
-    tools: "{{count}} 个工具调用",
-    replies: "{{count}} 条带回复",
+    tools: "{{count}} 次工具调用",
+    replies: "{{count}} 条回复",
     subagents: "{{count}} 个子代理",
     empty: "思考了一会儿",
     expand: "展开过程证据",

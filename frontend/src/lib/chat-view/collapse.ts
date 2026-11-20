@@ -40,7 +40,9 @@ function toolHasReply(segment: MessageSegment): boolean {
 }
 
 /**
- * 折叠摘要：工具数 / 带回复消息数 / 子代理数。
+ * 折叠摘要：工具数 / 子代理数。
+ * 带回复条数仍保留在返回值里（诊断/测试可用），但不再进入摘要文案——
+ * 「工具调用 · 带回复」两个相近数字并排会让读者无法判断差异（UX 审查 P2-4）。
  * 零值段省略；全零时 empty = true（渲染层显示统一占位，如 "Thought for a while"）。
  */
 export function summarizeCollapsedEvidence(
@@ -54,7 +56,6 @@ export function summarizeCollapsedEvidence(
 
   const parts: CollapsedSummaryPart[] = [];
   if (tools > 0) parts.push({ kind: "tools", count: tools });
-  if (replies > 0) parts.push({ kind: "replies", count: replies });
   if (subagents > 0) parts.push({ kind: "subagents", count: subagents });
 
   return {

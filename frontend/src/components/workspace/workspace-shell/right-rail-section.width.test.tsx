@@ -117,7 +117,6 @@ describe("WorkspaceRightRailSection（P0-2 宽度）", () => {
       root.render(
         <WorkspaceRightRailSection
           handleOpenArtifact={vi.fn()}
-          isNewThread={false}
           isResponding={false}
           onCloseRightRail={onCloseRightRail}
           railWidth={railWidth}

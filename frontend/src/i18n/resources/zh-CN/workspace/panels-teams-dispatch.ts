@@ -20,6 +20,7 @@ export const zhWorkspacePanelsTeamsDispatch = {
   },
   provision: {
     heading: "批量创建可运行团队并派发",
+    hint: "为每个队友创建一个独立团队，并让它们并行接收同一个下一任务。",
     teamCount: "团队数量",
     workspaceId: "工作区 ID",
     workspaceIdPlaceholder: "fanout-workspace",
@@ -52,6 +53,8 @@ export const zhWorkspacePanelsTeamsDispatch = {
   },
   taskComposer: {
     title: "任务标题",
+    statusHint: "填写任务后即可派发；每个选中的团队会独立执行。",
+    submitHint: "提交后会为每个选中团队创建任务，过程可在下方监控中查看。",
     titlePlaceholder: "运行时流稳定性的并行评审",
     goal: "目标",
     goalPlaceholder:

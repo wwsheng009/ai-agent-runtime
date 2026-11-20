@@ -9,7 +9,8 @@
 // - `<xl`（或主区放不下最小右栏）且当前面是宽内容面（files/git）→ 覆盖层抽屉 + 遮罩 + Esc 关闭；
 //   其它面在 `<xl` 仍沿用既有「不渲染右栏列」策略。
 //
-// 回归红线：① 关闭右栏不渲染（不占位）；② 新建会话不渲染；③ 面板抛错时容器仍在；
+// 回归红线：① 关闭右栏不渲染（不占位）；② 无会话时仍可用全局面；
+// ③ 面板抛错时容器仍在；
 // ④ auto + 内容型面 = 288px（由 rail-width 保证，本组件不覆盖）。
 
 import { type TFunction } from "i18next";
@@ -45,7 +46,6 @@ type WorkspaceRightRailSectionProps = Pick<
   | "selectedThread"
 > & {
   handleOpenArtifact: (artifactId: string) => void;
-  isNewThread: boolean;
   /** 合并面板的开合：由顶栏开关控制；关闭时整列不占位。 */
   rightRailOpen: boolean;
   t: TFunction<"workspace">;
@@ -55,6 +55,8 @@ type WorkspaceRightRailSectionProps = Pick<
   onActiveSurfaceChange?: (surface: WorkspacePanelSurfaceId) => void;
   /** 覆盖层抽屉的关闭入口（Esc / 遮罩点击）；缺省时不注册 Esc。 */
   onCloseRightRail?: () => void;
+  /** 当前 workspace 目录；draft MCP 面板据此在无 session 时工作。 */
+  workspacePath?: string;
 };
 
 const noop = () => {};
@@ -74,7 +76,6 @@ const FALLBACK_RAIL_WIDTH: RightRailWidthController = {
 
 export function WorkspaceRightRailSection({
   handleOpenArtifact,
-  isNewThread,
   onActiveSurfaceChange,
   onCloseRightRail,
   railWidth,
@@ -82,12 +83,13 @@ export function WorkspaceRightRailSection({
   selectedArtifactId,
   selectedThread,
   t,
+  workspacePath,
 }: WorkspaceRightRailSectionProps) {
   const widthController = railWidth ?? FALLBACK_RAIL_WIDTH;
   const railRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
 
-  const visible = rightRailOpen && !isNewThread;
+  const visible = rightRailOpen;
   // 窄视口统一改用覆盖层抽屉：任何面都能通过顶栏开关打开，避免出现
   // “按钮已切换为打开、但内容型面不渲染”的空操作。
   const overlayVisible = visible && widthController.overlay;
@@ -99,15 +101,28 @@ export function WorkspaceRightRailSection({
     [onActiveSurfaceChange],
   );
 
+  // P0-1：覆盖层关闭后把焦点还给顶栏「展开右侧栏」开关。
+  const closeOverlay = useCallback(() => {
+    onCloseRightRail?.();
+    if (typeof requestAnimationFrame !== "function") {
+      return;
+    }
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>('[data-testid="topbar-toggle-right-rail"]')
+        ?.focus();
+    });
+  }, [onCloseRightRail]);
+
   useEffect(() => {
-    if (!overlayVisible || !onCloseRightRail) {
+    if (!overlayVisible) {
       return;
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onCloseRightRail();
+        closeOverlay();
       }
     };
 
@@ -115,7 +130,7 @@ export function WorkspaceRightRailSection({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [overlayVisible, onCloseRightRail]);
+  }, [closeOverlay, overlayVisible]);
 
   if (!visible) {
     return null;
@@ -164,6 +179,7 @@ export function WorkspaceRightRailSection({
               selectedArtifactId={selectedArtifactId}
               sessionId={selectedThread.sessionId}
               threadRelation={threadRelation}
+              workspacePath={workspacePath}
             />
           </Suspense>
         </PanelErrorBoundary>
@@ -178,7 +194,7 @@ export function WorkspaceRightRailSection({
           aria-hidden="true"
           className="fixed inset-0 z-[95] bg-dialog-backdrop xl:hidden"
           data-testid="right-rail-overlay-backdrop"
-          onClick={onCloseRightRail}
+          onClick={closeOverlay}
           role="presentation"
         />
         <div

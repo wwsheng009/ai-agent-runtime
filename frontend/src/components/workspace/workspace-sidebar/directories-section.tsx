@@ -8,13 +8,16 @@
 // 用户切换卡片，会话树直接落在段正文；跨组移动失败的就地提示改由本段直接渲染。
 
 import {
+  Clock3Icon,
   FolderIcon,
   FolderPlusIcon,
   LoaderCircleIcon,
+  SearchIcon,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { buildRecentSessionBuckets } from "@/lib/workspace/session-recency";
 
 import { appendEmptyRegisteredGroups } from "../workspace-sidebar-shared";
 import { DirectoriesEmptyState } from "./directories-empty-state";
@@ -46,6 +49,7 @@ export function WorkspaceSidebarDirectoriesSection({
   onDeleteSession,
   onForkSession,
   onMoveSessionToGroup,
+  onOpenSessionSearch,
   onRefreshSessionStats,
   onReorderSessions,
   onRegisterAndCreateSession,
@@ -72,6 +76,7 @@ export function WorkspaceSidebarDirectoriesSection({
   sessionStatsError,
   sessionStatsStatus,
   sessionStatsUnavailable,
+  sessionSearchScopeCount,
   sessionThreadById,
   sessionThreads,
   setDirectoryAddOpen,
@@ -105,6 +110,12 @@ export function WorkspaceSidebarDirectoriesSection({
   const hasRegisteredDirectories =
     workspaceDirectories.length > 0 ||
     mergedDirectoryGroups.some((group) => group.registered);
+  const sessionSearchScope = sessionSearchScopeCount ?? sessionThreads.length;
+  // P1-7：跨目录的「今天 / 昨天」快捷带；目录树本身的分组与顺序不改。
+  const recentSessionBuckets = buildRecentSessionBuckets(
+    sessionDirectoryGroups.flatMap((group) => group.sessions),
+    { limitPerBucket: 3 },
+  );
 
   // 刷新目录下的会话：同时刷新目录元数据和会话数据
   const handleRefreshDirectory = () => {
@@ -131,6 +142,36 @@ export function WorkspaceSidebarDirectoriesSection({
       return groupKey;
     }
     return group.fullPath ? group.label : t("sidebar.sessionDirectoryUnscoped");
+  }
+
+  function renderRecentSessionRow(
+    session: (typeof recentSessionBuckets)[number]["sessions"][number],
+    bucketSessions: readonly (typeof recentSessionBuckets)[number]["sessions"][number][],
+  ) {
+    return (
+      <WorkspaceSidebarSessionRow
+        activity={sessionActivity?.[session.id]}
+        canStop={shouldOfferSessionStop(sessionActivity?.[session.id])}
+        key={`recent-${session.id}`}
+        onArchive={onArchiveSession}
+        onCancelRename={cancelSessionRename}
+        onDelete={onDeleteSession}
+        onFork={onForkSession}
+        onRenameSubmit={(sessionId, value) => {
+          void handleRenameSession(sessionId, value);
+        }}
+        onRestore={onRestoreSession}
+        onSelectThread={onSelectThread}
+        onStartRename={startSessionRename}
+        onStop={onStopSession}
+        renaming={renamingSessionId === session.id}
+        selectedThreadId={selectedThreadId}
+        session={session}
+        sessionThread={sessionThreadById.get(session.id)}
+        t={t}
+        visibleSessions={bucketSessions}
+      />
+    );
   }
 
   // P2-6：组内拖拽重排 + （按目录视图下的）跨组移动。
@@ -239,6 +280,31 @@ export function WorkspaceSidebarDirectoriesSection({
         {sidebarActionError ? (
           <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
             {sidebarActionError}
+          </div>
+        ) : null}
+        {recentSessionBuckets.length > 0 ? (
+          <div
+            className="rounded-[0.75rem] border border-border/70 bg-surface-softer/70 p-2"
+            data-testid="sidebar-recent-sessions"
+          >
+            <div className="flex items-center gap-1.5 px-1 pb-1 app-text-10 font-medium text-muted-foreground">
+              <Clock3Icon aria-hidden="true" size={12} />
+              {t("sidebar.recent.title")}
+            </div>
+            {recentSessionBuckets.map((bucket) => (
+              <div key={bucket.id} className="pt-1">
+                <div className="px-1 pb-1 app-text-10 text-muted-foreground/80">
+                  {bucket.id === "today"
+                    ? t("sidebar.recent.today")
+                    : t("sidebar.recent.yesterday")}
+                </div>
+                <div className="space-y-1">
+                  {bucket.sessions.map((session) =>
+                    renderRecentSessionRow(session, bucket.sessions),
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         ) : null}
         <div className="space-y-1.5">
@@ -406,6 +472,26 @@ export function WorkspaceSidebarDirectoriesSection({
               })
             : emptyState}
         </div>
+        {onOpenSessionSearch && sessionSearchScope > 0 ? (
+          <button
+            type="button"
+            onClick={onOpenSessionSearch}
+            data-testid="sidebar-session-search-all"
+            className="mt-2 flex w-full items-center gap-1.5 rounded-control border border-dashed border-border px-2.5 py-1.5 text-left app-text-10 text-muted-foreground transition hover:border-border-strong hover:bg-surface-soft hover:text-foreground"
+          >
+            <SearchIcon aria-hidden="true" size={12} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              {deferredQuery
+                ? t("sidebar.searchAllWithQuery", {
+                    count: sessionSearchScope,
+                    query: deferredQuery,
+                  })
+                : t("sidebar.searchAll", {
+                    count: sessionSearchScope,
+                  })}
+            </span>
+          </button>
+        ) : null}
       </div>
       {/* 拖拽重排的无障碍播报：只播报结果，不占用视觉空间。 */}
       <div

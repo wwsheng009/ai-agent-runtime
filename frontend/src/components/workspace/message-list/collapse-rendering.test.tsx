@@ -50,7 +50,8 @@ describe("AssistantMessageCard 折叠渲染", () => {
       ]),
     );
 
-    expect(markup).toContain("1 个工具调用 · 1 条带回复");
+    expect(markup).toContain("1 次工具调用");
+    expect(markup).not.toContain("条带回复");
     expect(markup).toContain("展开过程证据");
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain("结论：入口文件共 42 行。");
@@ -68,7 +69,7 @@ describe("AssistantMessageCard 折叠渲染", () => {
 
     expect(markup).toContain("推理过程");
     expect(markup).toContain("run_tests");
-    expect(markup).not.toContain("个工具调用");
+    expect(markup).not.toContain("次工具调用");
     expect(markup).not.toContain("展开过程证据");
   });
 
@@ -94,7 +95,8 @@ describe("AssistantMessageCard 折叠渲染", () => {
       ]),
     );
 
-    expect(markup).toContain("2 个工具调用 · 2 条带回复");
+    expect(markup).toContain("2 次工具调用");
+    expect(markup).not.toContain("条带回复");
     expect(markup).toContain("重试后已读取成功。");
     expect(markup).not.toContain("read_file");
   });
@@ -107,7 +109,7 @@ describe("AssistantMessageCard 折叠渲染", () => {
       ]),
     );
 
-    expect(markup).toContain("1 个工具调用");
+    expect(markup).toContain("1 次工具调用");
     expect(markup).not.toContain("条带回复");
     expect(markup).not.toContain("个子代理");
   });
@@ -123,8 +125,8 @@ describe("AssistantMessageCard 折叠渲染", () => {
       assistantMessage([...segments, { type: "text", content: "补充一句。" }]),
     );
 
-    expect(before).toContain("1 个工具调用 · 1 条带回复");
-    expect(after).toContain("1 个工具调用 · 1 条带回复");
+    expect(before).toContain("1 次工具调用");
+    expect(after).toContain("1 次工具调用");
     expect(after.split("展开过程证据")).toHaveLength(2);
     expect(after).toContain("结论如下。");
     expect(after).toContain("补充一句。");

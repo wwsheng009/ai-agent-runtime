@@ -125,6 +125,9 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
       RENAME_LABEL,
       REMOVE_LABEL,
     ]);
+    expect(
+      menuItems().every((item) => item.classList.contains("app-text-12")),
+    ).toBe(true);
   });
 
   it("点击菜单项触发回调并关闭菜单", () => {

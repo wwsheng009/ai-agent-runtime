@@ -111,7 +111,7 @@ export function ComposerContextCompactSection({
       <h4 className="text-xs font-semibold text-foreground">
         {t("composer.contextUsage.compact.title")}
       </h4>
-      <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+      <p className="mt-1 app-text-11 leading-5 text-muted-foreground">
         {t("composer.contextUsage.compact.description")}
       </p>
       <div className="mt-2 flex items-center gap-2">
@@ -143,14 +143,14 @@ export function ComposerContextCompactSection({
         </Button>
       </div>
       {disabledReason ? (
-        <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">
+        <p className="mt-1.5 app-text-11 leading-5 text-muted-foreground">
           {disabledReason}
         </p>
       ) : null}
       {notice ? (
         <p
           className={cn(
-            "mt-1.5 text-[11px] leading-5",
+            "mt-1.5 app-text-11 leading-5",
             notice.tone === "error"
               ? "text-accent-orange"
               : notice.tone === "success"
@@ -163,7 +163,7 @@ export function ComposerContextCompactSection({
         </p>
       ) : null}
       {result && result.checkpointIds.length > 0 ? (
-        <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+        <p className="mt-1 app-text-11 leading-5 text-muted-foreground">
           {t("composer.contextUsage.compact.checkpoints", {
             count: result.checkpointIds.length,
           })}

@@ -61,7 +61,6 @@ describe("WorkspaceRightRailSection（单一合并面板）", () => {
 
   function renderRightRail(
     overrides: {
-      isNewThread?: boolean;
       rightRailOpen?: boolean;
       thread?: Thread;
     } = {},
@@ -72,7 +71,6 @@ describe("WorkspaceRightRailSection（单一合并面板）", () => {
       root.render(
         <WorkspaceRightRailSection
           handleOpenArtifact={vi.fn()}
-          isNewThread={overrides.isNewThread ?? false}
           isResponding={false}
           rightRailOpen={overrides.rightRailOpen ?? true}
           selectedArtifactId={null}
@@ -97,10 +95,10 @@ describe("WorkspaceRightRailSection（单一合并面板）", () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it("新建会话不渲染右栏", () => {
-    renderRightRail({ isNewThread: true });
+  it("没有运行时会话时仍渲染右栏供全局面板使用", () => {
+    renderRightRail({ thread: { ...thread, sessionId: undefined } });
 
-    expect(container.firstElementChild).toBeNull();
+    expect(container.querySelector('[data-testid="artifact-panel-stub"]')).not.toBeNull();
   });
 
   it("面板抛错时就地显示面板错误面，右栏容器仍在", () => {

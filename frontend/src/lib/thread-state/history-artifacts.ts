@@ -191,7 +191,7 @@ function buildSessionHistoryArtifact(response: SessionHistoryResponse) {
   return createLazyJsonArtifact(
     `session-history-${response.session_id}`,
     `session-history-${response.session_id}.json`,
-    "Authoritative session history loaded from /api/runtime/sessions/{id}/history.",
+    "会话历史（来自运行时）。",
     () => response,
   );
 }
@@ -205,7 +205,7 @@ export function buildSessionRuntimeEventsArtifact(
   return createLazyJsonArtifact(
     `session-runtime-events-${sessionId}`,
     `session-runtime-events-${sessionId}.json`,
-    "Runtime events streamed from /api/runtime/sessions/{id}/runtime/stream.",
+    "运行时事件流（实时）。",
     () => ({
       session_id: sessionId,
       count: events.length,

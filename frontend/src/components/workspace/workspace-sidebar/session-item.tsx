@@ -262,7 +262,7 @@ export function SidebarSessionItem({
         {time ? (
           <span
             className={cn(
-              "shrink-0 truncate app-text-10 text-muted-foreground transition",
+              "min-w-[4.5rem] shrink-0 truncate text-right tabular-nums app-text-10 text-muted-foreground transition",
               // 让位条件与菜单槽显示条件对齐（无菜单时不隐藏时间）：hover 整行，
               // 或键盘焦点落在菜单槽内。不用 `group-focus-within`：点击行后按钮保留焦点会误藏时间。
               showMenu &&

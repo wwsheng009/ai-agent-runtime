@@ -81,7 +81,7 @@ export type WorkspacePanelSurfaceSpec = {
   id: WorkspacePanelSurfaceId;
   /** i18n key（`workspace` 命名空间），不是字面量文案。 */
   labelKey: string;
-  icon: ComponentType<{ size?: number }>;
+  icon: ComponentType<{ size?: number; className?: string }>;
   tone: WorkspacePanelSurfaceTone;
   /** 该面是否依赖当前会话；为 true 且无会话时禁用页签并展示禁用原因。 */
   requiresSession: boolean;
@@ -188,15 +188,15 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     ),
   },
   {
-    // 会话级 MCP 工具面：按会话启停（不写配置），与 CLI `--session` / chat web
-    // `?scope=session`、runtime-server `/sessions/{id}/runtime/mcps` 同一语义。
+    // MCP 配置面同时支持 draft workspace 的持久化管理和已有会话覆盖。
+    // 无 session 时需由 ArtifactPanel 额外验证 workspacePath。
     id: "sessionMcp",
     labelKey: "panels.sessionMcp.tabLabel",
     icon: ServerIcon,
     tone: "artifact",
-    requiresSession: true,
+    requiresSession: false,
     widthClass: "content",
-    disabledReasonKey: "panels.shell.panelTabs.disabledNoSession",
+    disabledReasonKey: "panels.sessionMcp.disabledNoWorkspace",
     surface: lazySurface(() =>
       import("@/components/workspace/session-mcp-surface").then((module) => ({
         default: module.SessionMcpSurface,
@@ -219,6 +219,42 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     ),
   },
 ];
+
+/**
+ * 页签栏的一等公民（P0-3）：高频产物面常驻，其余面收进「更多」。
+ * 顺序即渲染顺序；注册表仍是唯一事实来源，这里只声明呈现分层。
+ */
+export const WORKSPACE_PANEL_PRIMARY_SURFACE_IDS = [
+  "artifacts",
+  "files",
+  "git",
+] as const satisfies readonly WorkspacePanelSurfaceId[];
+
+export type WorkspacePanelPrimarySurfaceId =
+  (typeof WORKSPACE_PANEL_PRIMARY_SURFACE_IDS)[number];
+
+/** 「更多」菜单的分组（产物类 / 会话类 / 运维类）。 */
+export const WORKSPACE_PANEL_SECONDARY_GROUPS = [
+  {
+    id: "artifacts",
+    labelKey: "panels.artifacts.tabs.groups.artifacts",
+    surfaceIds: ["plan", "plans", "checkpoints"],
+  },
+  {
+    id: "session",
+    labelKey: "panels.artifacts.tabs.groups.session",
+    surfaceIds: ["sessionDetail", "sessionMcp"],
+  },
+  {
+    id: "operations",
+    labelKey: "panels.artifacts.tabs.groups.operations",
+    surfaceIds: ["schedule"],
+  },
+] as const satisfies readonly {
+  id: string;
+  labelKey: string;
+  surfaceIds: readonly WorkspacePanelSurfaceId[];
+}[];
 
 export type WorkspacePanelSurfaceTabIds = {
   panelId: string;

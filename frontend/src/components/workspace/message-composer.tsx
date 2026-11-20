@@ -1,19 +1,11 @@
 import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  useId,
-} from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useId } from "react";
 
 import {
   ComposerAttachmentRail,
   ComposerDropInvitation,
 } from "@/components/workspace/composer-attachment-rail";
-import {
-  ComposerCommandResultNoticeBar,
-} from "@/components/workspace/composer-command-result-notice";
+import { ComposerCommandResultNoticeBar } from "@/components/workspace/composer-command-result-notice";
 import { ComposerMenu } from "@/components/workspace/composer-menu";
 import { ComposerModelPanel } from "@/components/workspace/composer-model-panel";
 import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
@@ -74,6 +66,8 @@ function MessageComposerSurface({
   selectedProvider,
   selectedReasoningEffort,
   transport,
+  workspaceSelection,
+  onWorkspaceSelect,
   onDraftChange,
   onStop,
   onSubmit,
@@ -130,6 +124,8 @@ function MessageComposerSurface({
     skillGroups,
     hasAttachAction: true,
     attachLabel: t("composer.attachments.attach"),
+    workspaceSelection,
+    onWorkspaceSelect,
     onValueChange: onDraftChange,
     onAttachRequest: () => fileInputRef.current?.click(),
     ...(onMenuStateChange ? { onMenuStateChange } : {}),
@@ -336,7 +332,10 @@ function MessageComposerSurface({
             data-composer-command-line={menu.commandLine ? "true" : undefined}
             onChange={(event) => {
               const next = event.target.value;
-              menu.handleValueChange(next, event.target.selectionStart ?? next.length);
+              menu.handleValueChange(
+                next,
+                event.target.selectionStart ?? next.length,
+              );
             }}
             onSelect={(event) => {
               menu.handleCaretChange(event.currentTarget.selectionStart ?? 0);
@@ -391,28 +390,40 @@ function MessageComposerSurface({
           data-composer-toolbar
         >
           <div className="min-w-0 flex flex-[1_1_32rem] flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
-            <button
-              type="button"
-              data-composer-menu-trigger
-              aria-label={t("composer.menu.trigger")}
-              aria-haspopup="listbox"
-              aria-expanded={menu.open}
-              title={t("composer.menu.trigger")}
-              onClick={() => {
-                if (menu.open) {
-                  menu.close();
-                  return;
-                }
-                menuSurface.openSelf();
-                menu.openFromButton();
-              }}
-              className="inline-flex h-8 min-w-8 shrink-0 items-center justify-center rounded-field border border-border bg-surface-soft px-2 py-0 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground active:scale-[0.98] active:bg-surface-soft-hover"
+            <div
+              className="relative shrink-0"
+              data-composer-menu-anchor
             >
-              <PlusIcon size={14} aria-hidden="true" />
-              <span className="sr-only">
-                {t("composer.menu.trigger")}
-              </span>
-            </button>
+              <button
+                type="button"
+                data-composer-menu-trigger
+                aria-label={t("composer.menu.trigger")}
+                aria-haspopup="listbox"
+                aria-expanded={menu.open}
+                title={t("composer.menu.trigger")}
+                onClick={() => {
+                  if (menu.open) {
+                    menu.close();
+                    return;
+                  }
+                  menuSurface.openSelf();
+                  menu.openFromButton();
+                }}
+                className="inline-flex h-8 min-w-8 shrink-0 items-center justify-center rounded-field border border-border bg-surface-soft px-2 py-0 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground active:scale-[0.98] active:bg-surface-soft-hover"
+              >
+                <PlusIcon size={14} aria-hidden="true" />
+                <span className="sr-only">{t("composer.menu.trigger")}</span>
+              </button>
+              {menu.open ? (
+                <ComposerMenu
+                  activeId={menu.activeId}
+                  onBack={menu.backToRoot}
+                  onHover={menu.hoverItem}
+                  onSelect={menu.selectItem}
+                  snapshot={menu.snapshot}
+                />
+              ) : null}
+            </div>
             <div className="min-w-0 w-full max-w-[min(100%,28rem)] flex-[1_1_18rem]">
               <ComposerModelPanel
                 disabled={runtimeModelsLoading || isResponding}
@@ -434,10 +445,14 @@ function MessageComposerSurface({
               />
             </div>
             {permissionModeControl ? (
-              <div className="min-w-0 flex-[0_1_10rem]">{permissionModeControl}</div>
+              <div className="min-w-0 flex-[0_1_10rem]">
+                {permissionModeControl}
+              </div>
             ) : null}
             {runtimeModelStatusLabel ? (
-              <span className="min-w-0 max-w-[14rem] truncate">{runtimeModelStatusLabel}</span>
+              <span className="min-w-0 max-w-[14rem] truncate">
+                {runtimeModelStatusLabel}
+              </span>
             ) : null}
             {runtimeModelsError ? (
               <>
@@ -464,13 +479,17 @@ function MessageComposerSurface({
               <div className="min-w-0 flex-[0_1_10rem]">{profileControl}</div>
             ) : null}
             {contextUsageControl ? (
-              <div className="min-w-0 flex-[0_1_auto]">{contextUsageControl}</div>
+              <div className="min-w-0 flex-[0_1_auto]">
+                {contextUsageControl}
+              </div>
             ) : null}
             <Button
               variant="secondary"
               size="icon"
               aria-label={submitButtonLabel}
-              aria-describedby={submitDisabled ? submitDisabledHintId : undefined}
+              aria-describedby={
+                submitDisabled ? submitDisabledHintId : undefined
+              }
               title={submitButtonTitle}
               className={
                 isResponding
@@ -480,7 +499,11 @@ function MessageComposerSurface({
               onClick={isResponding ? handleStop : handleSubmit}
               disabled={submitDisabled}
             >
-              {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={16} strokeWidth={2.5} />}
+              {isResponding ? (
+                <SquareIcon size={14} />
+              ) : (
+                <ArrowUpIcon size={16} strokeWidth={2.5} />
+              )}
               <span className="sr-only">{submitButtonLabel}</span>
             </Button>
             {submitDisabled ? (
@@ -498,12 +521,6 @@ function MessageComposerSurface({
             data-composer-menu-scrim
             onMouseDown={menu.close}
             className="pointer-events-auto fixed inset-0 z-30 [background:var(--composer-menu-scrim)]"
-          />
-          <ComposerMenu
-            activeId={menu.activeId}
-            onHover={menu.hoverItem}
-            onSelect={menu.selectItem}
-            snapshot={menu.snapshot}
           />
         </>
       ) : null}

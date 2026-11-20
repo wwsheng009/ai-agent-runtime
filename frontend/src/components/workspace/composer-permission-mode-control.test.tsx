@@ -103,11 +103,17 @@ describe("ComposerPermissionModeControl", () => {
 
   // 注意：不能用 `string | undefined = "session-1"` 的默认参数写法，
   // 显式传 undefined 会触发默认值，导致「无会话」用例实际渲染出会话控件。
-  async function render(sessionId: string | null = "session-1") {
+  async function render(
+    sessionId: string | null = "session-1",
+    props: Partial<Parameters<typeof ComposerPermissionModeControl>[0]> = {},
+  ) {
     root = createRoot(container);
     await act(async () => {
       root?.render(
-        <ComposerPermissionModeControl sessionId={sessionId ?? undefined} />,
+        <ComposerPermissionModeControl
+          {...props}
+          sessionId={sessionId ?? undefined}
+        />,
       );
     });
     await flush();
@@ -185,6 +191,63 @@ describe("ComposerPermissionModeControl", () => {
 
     expect(container.textContent).toBe("");
     expect(apiMocks.getSessionPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it("stages a safe new-thread mode locally without calling session APIs", async () => {
+    const onPendingModeChange = vi.fn();
+    const onPendingModeConfirmChange = vi.fn();
+    await render(null, {
+      isNewThread: true,
+      onPendingModeChange,
+      onPendingModeConfirmChange,
+    });
+
+    expect(currentMode()).toBe("default");
+    await selectMode("自动接受编辑");
+
+    expect(onPendingModeChange).toHaveBeenCalledWith("accept_edits");
+    expect(onPendingModeConfirmChange).toHaveBeenCalledWith(false);
+    expect(apiMocks.getSessionPermissionMode).not.toHaveBeenCalled();
+    expect(apiMocks.updateSessionPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it("confirms a dangerous new-thread mode before staging it", async () => {
+    const onPendingModeChange = vi.fn();
+    const onPendingModeConfirmChange = vi.fn();
+    await render(null, {
+      isNewThread: true,
+      onPendingModeChange,
+      onPendingModeConfirmChange,
+    });
+
+    await selectMode("跳过权限校验");
+
+    expect(dialog()).not.toBeNull();
+    expect(onPendingModeChange).not.toHaveBeenCalled();
+    expect(onPendingModeConfirmChange).not.toHaveBeenCalled();
+
+    await clickDialogButton("确认切换");
+
+    expect(onPendingModeChange).toHaveBeenCalledWith("bypass_permissions");
+    expect(onPendingModeConfirmChange).toHaveBeenCalledWith(true);
+    expect(apiMocks.updateSessionPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it("cancels a dangerous new-thread mode without changing pending state", async () => {
+    const onPendingModeChange = vi.fn();
+    const onPendingModeConfirmChange = vi.fn();
+    await render(null, {
+      isNewThread: true,
+      onPendingModeChange,
+      onPendingModeConfirmChange,
+    });
+
+    await selectMode("跳过权限校验");
+    await clickDialogButton("取消");
+
+    expect(dialog()).toBeNull();
+    expect(onPendingModeChange).not.toHaveBeenCalled();
+    expect(onPendingModeConfirmChange).not.toHaveBeenCalled();
   });
 
   it("renders a localized status instead of an empty Select when no modes are available", async () => {

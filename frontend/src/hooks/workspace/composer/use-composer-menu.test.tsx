@@ -153,7 +153,7 @@ describe("useComposerMenu skill tab extension", () => {
   it("inserts a reference from the + menu at the caret", () => {
     act(() => controllerRef.current?.handleValueChange("see  for details", 4));
     act(() => controllerRef.current?.openFromButton());
-    act(() => controllerRef.current?.selectItem("launcher:artifacts"));
+    act(() => controllerRef.current?.selectItem("launcher:references"));
     act(() => controllerRef.current?.selectItem("reference:artifacts:a1"));
     expect(controllerRef.current?.value).toBe("see @src/app.tsx for details");
     expect(controllerRef.current?.open).toBe(false);

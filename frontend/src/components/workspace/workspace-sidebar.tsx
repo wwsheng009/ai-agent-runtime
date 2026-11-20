@@ -373,7 +373,6 @@ export function WorkspaceSidebar({
             onCollapsedChange={onCollapsedChange}
             isCompact={isCompact}
             onCloseMobile={onCloseMobile}
-            onOpenSessionSearch={() => setSessionSearchOpen(true)}
             onOpenSettings={onOpenSettings}
             onRefreshRuntimeTeams={onRefreshRuntimeTeams}
             onSelectThread={onSelectThread}
@@ -437,6 +436,7 @@ export function WorkspaceSidebar({
               onMoveSessionToGroup={(sessionId, groupKey) => {
                 void moveSessionToGroup(sessionId, groupKey);
               }}
+              onOpenSessionSearch={() => setSessionSearchOpen(true)}
               onRefreshSessionStats={sessionStats.refresh}
               onReorderSessions={commitSessionOrder}
               onRegisterAndCreateSession={handleRegisterAndCreateSession}
@@ -457,6 +457,7 @@ export function WorkspaceSidebar({
               registeringDirectoryPath={registeringDirectoryPath}
               selectedThreadId={selectedThreadId}
               sessionActivity={sessionActivity}
+              sessionSearchScopeCount={runtimeSessions.length}
               sessionDirectoryGroups={orderedSessionDirectoryGroups}
               sessionGroupingMode={sessionGroupingMode}
               sessionMoveError={sessionMoveError}

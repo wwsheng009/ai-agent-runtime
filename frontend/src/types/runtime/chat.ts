@@ -5,6 +5,12 @@ export type AgentChatMessage = {
 
 export type AgentChatRequest = {
   messages: AgentChatMessage[];
+  /** 首轮新会话的 profile 覆盖；已有会话不应由每轮请求覆盖。 */
+  profile?: string;
+  /** 首轮新会话的权限模式初始化；已有会话不应由每轮请求覆盖。 */
+  permission_mode?: string;
+  /** 仅用于首轮初始化 bypass_permissions 的显式确认。 */
+  permission_mode_confirm?: boolean;
   session_id?: string;
   turn_id?: string;
   user_id?: string;

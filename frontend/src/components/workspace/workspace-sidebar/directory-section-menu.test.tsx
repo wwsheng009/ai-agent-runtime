@@ -152,9 +152,15 @@ describe("WorkspaceSidebarDirectorySectionMenu", () => {
     expect(testId("sidebar-directories-manage-entry")?.textContent).toContain(
       "sidebar.directories.manage",
     );
+    expect(
+      testId("sidebar-directories-manage-entry")?.classList.contains("app-text-12"),
+    ).toBe(true);
     expect(testId("sidebar-session-archived-toggle")?.textContent).toContain(
       "sidebar.session.showArchived#3",
     );
+    expect(
+      testId("sidebar-session-archived-toggle")?.classList.contains("app-text-12"),
+    ).toBe(true);
   });
 
   it("无会话组时不给排序 / 分组空控件，统计与管理目录仍在", () => {

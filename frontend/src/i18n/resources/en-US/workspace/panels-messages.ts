@@ -28,7 +28,7 @@ export const enWorkspacePanelsMessages = {
   },
   collapsedSummary: {
     tools: "{{count}} tool calls",
-    replies: "{{count}} with replies",
+    replies: "{{count}} replies",
     subagents: "{{count}} subagents",
     empty: "Thought for a while",
     expand: "Expand process details",

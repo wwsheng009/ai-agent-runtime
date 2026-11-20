@@ -60,6 +60,10 @@ export type WorkspaceShellProps = {
   workspaceDirectoriesError: string | null;
   workspaceDirectoriesLoading: boolean;
   workspaceDirectoriesRefreshing?: boolean;
+  /** 新会话临时工作区选择；只用于未创建的草稿线程。 */
+  selectedWorkspaceDirectory?: RuntimeWorkspaceDirectory | null;
+  selectedWorkspaceDirectoryId?: string | null;
+  onSelectWorkspaceDirectory?: (directoryId: string | null) => void;
   /**
    * 注册一个工作目录（POST 注册表）。返回后端登记的目录记录：
    * 方案 §15 的「注册并新建会话」要用它的 id 绑定新会话。
@@ -121,6 +125,12 @@ export type WorkspaceShellProps = {
   /** P1-8：会话运行时流连接状态（顶栏与消息流尾统一呈现）。 */
   connectionStatus?: ConnectionStatus | null;
   draft: string;
+  /** 新线程尚未登记会话时，composer 暂存的首轮 profile / 权限模式。 */
+  pendingPermissionMode?: string;
+  pendingProfileRef?: string;
+  onPendingPermissionModeChange?: (mode: string) => void;
+  onPendingPermissionModeConfirmChange?: (confirmed: boolean) => void;
+  onPendingProfileChange?: (profileRef: string) => void;
   /** 会话是否在生成回复（本地回合或刷新后认领的续传回合）：composer 停止态与流尾提示都按它判定。 */
   isResponding: boolean;
   /** 读侧静默看门狗命中：本页 chat 流已停止接收（服务端回合可能仍在跑）。 */
@@ -130,7 +140,8 @@ export type WorkspaceShellProps = {
   reasoningEffortDefault: string;
   reasoningEffortError: string | null;
   reasoningEffortOptions: string[];
-  trajectoryStore?: import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
+  trajectoryStore?:
+    import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
   /** 尾部优先回放的「加载更早」入口（可选：无窗口语义时不传）。 */
   trajectoryEarlier?: TrajectoryEarlierEntry;
   /** 对话面「加载更早」入口（会话历史尾部优先分页；可选：无分页元数据时不传）。 */

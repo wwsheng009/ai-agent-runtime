@@ -37,9 +37,12 @@ function createAttachmentsStub(
     attachments,
     isDragOver: false,
     rejectedCount: 0,
-    uploadingCount: attachments.filter((item) => item.status === "uploading").length,
-    uploadedCount: attachments.filter((item) => item.status === "uploaded").length,
-    unsettledCount: attachments.filter((item) => item.status !== "uploaded").length,
+    uploadingCount: attachments.filter((item) => item.status === "uploading")
+      .length,
+    uploadedCount: attachments.filter((item) => item.status === "uploaded")
+      .length,
+    unsettledCount: attachments.filter((item) => item.status !== "uploaded")
+      .length,
     uploadedPaths: [],
     addFiles: vi.fn(),
     removeAttachment: vi.fn(),
@@ -105,7 +108,11 @@ describe("MessageComposer trigger menu", () => {
   }
 
   // 受控宿主：草稿更新回灌成 props，模拟真实页面（否则 hook 的 value 与 DOM 脱节）。
-  function ComposerHarness({ props }: { props: React.ComponentProps<typeof MessageComposer> }) {
+  function ComposerHarness({
+    props,
+  }: {
+    props: React.ComponentProps<typeof MessageComposer>;
+  }) {
     const [draft, setDraft] = useState(props.draft);
     return (
       <MessageComposer
@@ -149,7 +156,7 @@ describe("MessageComposer trigger menu", () => {
     });
   }
 
-  it("opens the same menu from the + button for attach and references", () => {
+  it("opens category launchers from the + button and drills into each leaf group", () => {
     renderComposer();
 
     const trigger = container.querySelector(
@@ -160,10 +167,172 @@ describe("MessageComposer trigger menu", () => {
 
     act(() => trigger.click());
     expect(menu()).not.toBeNull();
-    expect(container.querySelector("[data-composer-attach]")).not.toBeNull();
-    expect(container.querySelector("[data-composer-command-option='export']")).not.toBeNull();
-    expect(container.querySelector("[data-composer-reference-option='']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-item]")?.className,
+    ).toContain("text-base");
+    expect(trigger.parentElement).toBe(
+      container.querySelector("[data-composer-menu-anchor]"),
+    );
+    expect(trigger.parentElement?.querySelector("[data-composer-menu]")).toBe(
+      menu(),
+    );
+    expect(menu()?.className).toContain("bottom-full");
+    expect(menu()?.className).not.toContain("mb-2");
+    expect(
+      container.querySelector("[data-composer-menu-level='root']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-launcher='actions']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-launcher='references']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-launcher='commands']"),
+    ).not.toBeNull();
+    expect(container.querySelector("[data-composer-attach]")).toBeNull();
+    expect(
+      container.querySelector("[data-composer-command-option='export']"),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-composer-reference-option='']"),
+    ).toBeNull();
 
+    act(() =>
+      (
+        container.querySelector(
+          "[data-composer-menu-launcher='actions']",
+        ) as HTMLElement
+      ).click(),
+    );
+    expect(
+      container.querySelector("[data-composer-menu-level='group']"),
+    ).not.toBeNull();
+    expect(container.querySelector("[data-composer-attach]")).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-back]"),
+    ).not.toBeNull();
+
+    act(() =>
+      (
+        container.querySelector("[data-composer-menu-back]") as HTMLElement
+      ).click(),
+    );
+    expect(
+      container.querySelector("[data-composer-menu-level='root']"),
+    ).not.toBeNull();
+
+    act(() =>
+      (
+        container.querySelector(
+          "[data-composer-menu-launcher='references']",
+        ) as HTMLElement
+      ).click(),
+    );
+    expect(
+      container.querySelector("[data-composer-reference-option='src/app.tsx']"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-command-option='export']"),
+    ).toBeNull();
+
+    act(() =>
+      (
+        container.querySelector("[data-composer-menu-back]") as HTMLElement
+      ).click(),
+    );
+    act(() =>
+      (
+        container.querySelector(
+          "[data-composer-menu-launcher='commands']",
+        ) as HTMLElement
+      ).click(),
+    );
+    expect(
+      container.querySelector("[data-composer-command-option='export']"),
+    ).not.toBeNull();
+
+    press("Escape");
+    expect(
+      container.querySelector("[data-composer-menu-level='root']"),
+    ).not.toBeNull();
+    press("Escape");
+    expect(menu()).toBeNull();
+  });
+
+  it("selects a workspace from + without changing the draft and closes the menu", () => {
+    const onDraftChange = vi.fn();
+    const onWorkspaceSelect = vi.fn();
+    renderComposer({
+      draft: "keep this draft",
+      isNewThread: true,
+      onDraftChange,
+      onWorkspaceSelect,
+      workspaceSelection: {
+        label: "Workspace",
+        options: [
+          { id: "repo", label: "Demo project", path: "E:/projects/demo" },
+        ],
+        selectedId: "repo",
+        clearLabel: "No workspace",
+      },
+    });
+
+    const trigger = container.querySelector(
+      "button[data-composer-menu-trigger]",
+    ) as HTMLButtonElement;
+    act(() => trigger.click());
+
+    act(() =>
+      (
+        container.querySelector(
+          "[data-composer-menu-launcher='workspace']",
+        ) as HTMLElement
+      ).click(),
+    );
+    const selectedOption = container.querySelector(
+      "[data-composer-workspace-option='repo']",
+    ) as HTMLElement;
+    expect(selectedOption.getAttribute("aria-selected")).toBe("true");
+    expect(
+      container.querySelector(
+        "[data-composer-workspace-option='repo'][data-composer-workspace-selected='true']",
+      ),
+    ).not.toBeNull();
+
+    act(() => selectedOption.click());
+
+    expect(onWorkspaceSelect).toHaveBeenCalledWith("repo");
+    expect(onDraftChange).not.toHaveBeenCalled();
+    expect(menu()).toBeNull();
+  });
+
+  it("supports keyboard drill-down and returning from the second level", () => {
+    renderComposer();
+    const trigger = container.querySelector(
+      "button[data-composer-menu-trigger]",
+    ) as HTMLButtonElement;
+    act(() => trigger.click());
+
+    press("ArrowRight");
+    expect(
+      container.querySelector("[data-composer-menu-level='group']"),
+    ).not.toBeNull();
+
+    press("ArrowLeft");
+    expect(
+      container.querySelector("[data-composer-menu-level='root']"),
+    ).not.toBeNull();
+
+    press("Tab");
+    expect(
+      container.querySelector("[data-composer-menu-level='group']"),
+    ).not.toBeNull();
+
+    press("Escape");
+    expect(
+      container.querySelector("[data-composer-menu-level='root']"),
+    ).not.toBeNull();
     press("Escape");
     expect(menu()).toBeNull();
   });
@@ -193,10 +362,14 @@ describe("MessageComposer trigger menu", () => {
     renderComposer();
     type("@app");
 
-    const options = container.querySelectorAll("[data-composer-reference-option]");
-    expect(Array.from(options).map((option) => option.getAttribute("data-composer-reference-option"))).toEqual([
-      "src/app.tsx",
-    ]);
+    const options = container.querySelectorAll(
+      "[data-composer-reference-option]",
+    );
+    expect(
+      Array.from(options).map((option) =>
+        option.getAttribute("data-composer-reference-option"),
+      ),
+    ).toEqual(["src/app.tsx"]);
   });
 
   it("reports menu state changes (open/mode/query) to the host", () => {
@@ -253,7 +426,9 @@ describe("MessageComposer trigger menu", () => {
 
     expect(event.defaultPrevented).toBe(true);
     expect(container.querySelector("[data-composer-menu]")).not.toBeNull();
-    expect(container.querySelector("[data-composer-menu-empty]")).not.toBeNull();
+    expect(
+      container.querySelector("[data-composer-menu-empty]"),
+    ).not.toBeNull();
   });
 
   it("drills into a loading workspace group and renders the status note", () => {
@@ -271,7 +446,9 @@ describe("MessageComposer trigger menu", () => {
     type("@");
     press("Enter");
 
-    const note = container.querySelector("[data-composer-menu-group-note='workspace-files']");
+    const note = container.querySelector(
+      "[data-composer-menu-group-note='workspace-files']",
+    );
     expect(note?.textContent).toBe("正在读取工作区文件…");
     // 有分组状态行时不再落「无匹配候选」根空态。
     expect(container.querySelector("[data-composer-menu-empty]")).toBeNull();
@@ -302,7 +479,11 @@ describe("MessageComposer trigger menu", () => {
 
   it("drills into a popupSelect command's own options and dispatches the picked value", () => {
     const onCommand = vi.fn(
-      (command: { name: string; kind: string }, args: string, source: "pick" | "submit") => {
+      (
+        command: { name: string; kind: string },
+        args: string,
+        source: "pick" | "submit",
+      ) => {
         void command;
         void args;
         void source;
@@ -316,7 +497,11 @@ describe("MessageComposer trigger menu", () => {
           name: "model",
           kind: "popupSelect",
           options: [
-            { value: "deepseek-chat", label: "deepseek-chat", description: "deepseek" },
+            {
+              value: "deepseek-chat",
+              label: "deepseek-chat",
+              description: "deepseek",
+            },
             { value: "gpt-5", label: "gpt-5", description: "openai" },
           ],
         },
@@ -374,20 +559,31 @@ describe("MessageComposer trigger menu", () => {
         ) as HTMLButtonElement
       ).click(),
     );
-    expect(container.querySelector("[data-composer-command-notice]")).toBeNull();
+    expect(
+      container.querySelector("[data-composer-command-notice]"),
+    ).toBeNull();
   });
 
   it("dispatches a known command to the host instead of sending a prompt", () => {
     const onSubmit = vi.fn();
     const onCommand = vi.fn(
-      (command: { name: string; kind: string }, args: string, source: "pick" | "submit") => {
+      (
+        command: { name: string; kind: string },
+        args: string,
+        source: "pick" | "submit",
+      ) => {
         void command;
         void args;
         void source;
         return true;
       },
     );
-    renderComposer({ commands: COMMANDS, draft: "/export --json", onSubmit, onCommand });
+    renderComposer({
+      commands: COMMANDS,
+      draft: "/export --json",
+      onSubmit,
+      onCommand,
+    });
 
     const submit = container.querySelector(
       'button[title*="Ctrl/Cmd"]',
@@ -396,7 +592,10 @@ describe("MessageComposer trigger menu", () => {
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onCommand.mock.calls[0][0]).toMatchObject({ name: "export", kind: "action" });
+    expect(onCommand.mock.calls[0][0]).toMatchObject({
+      name: "export",
+      kind: "action",
+    });
     expect(onCommand.mock.calls[0][1]).toBe("--json");
     expect(onCommand.mock.calls[0][2]).toBe("submit");
   });
@@ -465,7 +664,9 @@ describe("MessageComposer trigger menu", () => {
     act(() => submit.click());
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(container.querySelector("[data-composer-command-notice]")).toBeNull();
+    expect(
+      container.querySelector("[data-composer-command-notice]"),
+    ).toBeNull();
   });
 
   const SKILL_GROUPS: readonly ComposerReferenceGroup[] = [
@@ -473,7 +674,12 @@ describe("MessageComposer trigger menu", () => {
       id: "skills",
       label: "技能",
       items: [
-        { id: "brand", label: "brand", insertText: "brand", description: "design" },
+        {
+          id: "brand",
+          label: "brand",
+          insertText: "brand",
+          description: "design",
+        },
         { id: "docx", label: "docx", insertText: "docx", description: "docs" },
       ],
       emptyText: "未找到匹配技能",
@@ -486,11 +692,14 @@ describe("MessageComposer trigger menu", () => {
 
     type("$");
     expect(menu()).not.toBeNull();
-    const options = Array.from(container.querySelectorAll("[data-composer-skill-option]"));
-    expect(options.map((option) => option.getAttribute("data-composer-skill-option"))).toEqual([
-      "brand",
-      "docx",
-    ]);
+    const options = Array.from(
+      container.querySelectorAll("[data-composer-skill-option]"),
+    );
+    expect(
+      options.map((option) =>
+        option.getAttribute("data-composer-skill-option"),
+      ),
+    ).toEqual(["brand", "docx"]);
     // 技能名必须完整展示：不得省略号截断（必要时折行），描述限宽为次级信息。
     const label = options[0].querySelector("span");
     expect(label?.className).toContain("break-all");
@@ -501,9 +710,9 @@ describe("MessageComposer trigger menu", () => {
 
     type("$br");
     expect(
-      Array.from(container.querySelectorAll("[data-composer-skill-option]")).map((option) =>
-        option.getAttribute("data-composer-skill-option"),
-      ),
+      Array.from(
+        container.querySelectorAll("[data-composer-skill-option]"),
+      ).map((option) => option.getAttribute("data-composer-skill-option")),
     ).toEqual(["brand"]);
 
     press("Enter");
@@ -542,7 +751,9 @@ describe("MessageComposer trigger menu", () => {
     type("$zzz");
 
     expect(container.querySelector("[data-composer-menu]")).not.toBeNull();
-    const note = container.querySelector("[data-composer-menu-group-note='skills']");
+    const note = container.querySelector(
+      "[data-composer-menu-group-note='skills']",
+    );
     expect(note?.textContent).toBe("未找到匹配技能");
 
     const event = new KeyboardEvent("keydown", {

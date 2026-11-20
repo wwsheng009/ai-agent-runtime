@@ -1,12 +1,15 @@
 // P0-2：workspace-page.tsx（原 517 非空行）机械拆分「会话数据与选择」区块——仅搬迁不改逻辑。
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeWorkspaceDirectories } from "@/hooks/workspace/use-runtime-workspace-directories";
-import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
+import {
+  NEW_THREAD_ID,
+  useWorkspaceThreadSelection,
+} from "@/hooks/workspace/use-workspace-thread-selection";
 import { useWorkspaceTrajectoryStore } from "@/hooks/workspace/use-trajectory-store-pool";
 import {
   resetStoredRuntimeClientId,
@@ -77,8 +80,50 @@ export function useWorkspacePageSessionContext() {
     initialThreads: [],
     runtimeSessions,
   });
+  const [selectedWorkspaceDirectoryId, setSelectedWorkspaceDirectoryId] =
+    useState<string | null>(null);
+  const selectedWorkspaceDirectory = useMemo(
+    () =>
+      workspaceDirectories.find(
+        (directory) => directory.id === selectedWorkspaceDirectoryId,
+      ) ?? null,
+    [selectedWorkspaceDirectoryId, workspaceDirectories],
+  );
+  useEffect(() => {
+    if (selectedThread?.id !== NEW_THREAD_ID) {
+      setSelectedWorkspaceDirectoryId(null);
+      return;
+    }
+    if (
+      !workspaceDirectoriesLoading &&
+      selectedWorkspaceDirectoryId &&
+      !selectedWorkspaceDirectory
+    ) {
+      setSelectedWorkspaceDirectoryId(null);
+    }
+  }, [
+    selectedThread?.id,
+    selectedWorkspaceDirectoryId,
+    selectedWorkspaceDirectory,
+    workspaceDirectoriesLoading,
+  ]);
+  const handleSelectWorkspaceDirectory = useCallback(
+    (directoryId: string | null) => {
+      if (selectedThread?.id !== NEW_THREAD_ID) {
+        return;
+      }
+      const exists =
+        directoryId === null ||
+        workspaceDirectories.some((directory) => directory.id === directoryId);
+      if (exists) {
+        setSelectedWorkspaceDirectoryId(directoryId);
+      }
+    },
+    [selectedThread?.id, workspaceDirectories],
+  );
   // Batch 1：轨迹 store 池——切换会话不再 reset（切回不重放），快照随会话保留。
-  const { pool: trajectoryStorePool, store: trajectoryStore } = useWorkspaceTrajectoryStore(selectedThread);
+  const { pool: trajectoryStorePool, store: trajectoryStore } =
+    useWorkspaceTrajectoryStore(selectedThread);
 
   return {
     runtimeClient,
@@ -103,6 +148,9 @@ export function useWorkspacePageSessionContext() {
     workspaceDirectoriesError,
     workspaceDirectoriesLoading,
     workspaceDirectoriesRefreshing,
+    selectedWorkspaceDirectory,
+    selectedWorkspaceDirectoryId,
+    handleSelectWorkspaceDirectory,
     refreshWorkspaceDirectories,
     addWorkspaceDirectory,
     renameWorkspaceDirectory,

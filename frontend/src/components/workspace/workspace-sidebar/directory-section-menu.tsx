@@ -100,7 +100,7 @@ export function WorkspaceSidebarDirectorySectionMenu({
   }
 
   const itemClassName =
-    "flex w-full items-center gap-1.5 rounded-[0.5rem] px-1.5 py-1 text-left text-xs transition hover:bg-surface-soft";
+    "flex w-full items-center gap-1.5 rounded-[0.5rem] px-1.5 py-1 text-left app-text-12 transition hover:bg-surface-soft";
 
   return (
     <div

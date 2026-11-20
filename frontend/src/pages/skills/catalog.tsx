@@ -77,7 +77,7 @@ function SkillRow({
         {skill.tags.length > 0 ? (
           <div className="mt-1 flex flex-wrap gap-1">
             {skill.tags.map((tag) => (
-              <span key={tag} className="rounded-full border border-border px-1.5 py-0.5 text-[0.65rem] text-muted-foreground">
+              <span key={tag} className="rounded-full border border-border px-1.5 py-0.5 app-text-10 text-muted-foreground">
                 {tag}
               </span>
             ))}

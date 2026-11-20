@@ -6,6 +6,8 @@ export const zhWorkspacePanelsArtifacts = {
   },
   list: {
     empty: "会话运行过程中，文件产物会出现在这里。",
+    selectedAnnouncement: "已选中{{category}}{{name}}，将在对话框中打开。",
+    readyAnnouncement: "产物栏已就绪。选择条目即可在对话框中打开。",
   },
   detail: {
     categoryEvidence: "运行时证据",
@@ -27,6 +29,12 @@ export const zhWorkspacePanelsArtifacts = {
   tabs: {
     panelTitle: "文件产物",
     tabListLabel: "文件面板视图",
+    more: "更多",
+    groups: {
+      artifacts: "产物类",
+      session: "会话类",
+      operations: "运维类",
+    },
     items: "条目",
     plan: "计划",
     planLive: "进行中",

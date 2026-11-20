@@ -264,7 +264,7 @@ export function ComposerContextUsageControl({
           percentText={ringPercentText}
           progress={progress}
           size={24}
-          textClassName="text-[8px] font-semibold"
+          textClassName="app-text-9 font-semibold"
         />
       </button>
 

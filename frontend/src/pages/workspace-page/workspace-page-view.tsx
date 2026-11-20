@@ -30,6 +30,9 @@ export function WorkspacePage() {
     workspaceDirectoriesError,
     workspaceDirectoriesLoading,
     workspaceDirectoriesRefreshing,
+    selectedWorkspaceDirectory,
+    selectedWorkspaceDirectoryId,
+    handleSelectWorkspaceDirectory,
     refreshWorkspaceDirectories,
     addWorkspaceDirectory,
     renameWorkspaceDirectory,
@@ -59,6 +62,8 @@ export function WorkspacePage() {
     onPlanNotesChange,
     parkedTurn,
     pendingInteraction,
+    pendingPermissionMode,
+    pendingProfileRef,
     phase,
     planActionPending,
     planNotesDraft,
@@ -80,6 +85,9 @@ export function WorkspacePage() {
     selectedProvider,
     selectedReasoningEffort,
     setDraft,
+    setPendingPermissionMode,
+    setPendingPermissionModeConfirm,
+    setPendingProfileRef,
     setReasoningEffort,
     setSelectedModel,
     setSelectedProvider,
@@ -140,6 +148,9 @@ export function WorkspacePage() {
       workspaceDirectoriesError={workspaceDirectoriesError}
       workspaceDirectoriesLoading={workspaceDirectoriesLoading}
       workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
+      selectedWorkspaceDirectory={selectedWorkspaceDirectory}
+      selectedWorkspaceDirectoryId={selectedWorkspaceDirectoryId}
+      onSelectWorkspaceDirectory={handleSelectWorkspaceDirectory}
       onRefreshWorkspaceDirectories={refreshWorkspaceDirectories}
       onAddWorkspaceDirectory={addWorkspaceDirectory}
       onRenameWorkspaceDirectory={renameWorkspaceDirectory}
@@ -167,6 +178,8 @@ export function WorkspacePage() {
       composerAttachments={composerAttachments}
       connectionStatus={connectionStatusForUi}
       draft={draft}
+      pendingPermissionMode={pendingPermissionMode}
+      pendingProfileRef={pendingProfileRef}
       isResponding={currentSessionResponding}
       streamStalled={streamStalled}
       modelOptions={modelOptions}
@@ -178,6 +191,9 @@ export function WorkspacePage() {
       trajectoryEarlier={trajectoryEarlier}
       earlierLoader={earlierLoader}
       onDraftChange={setDraft}
+      onPendingPermissionModeChange={setPendingPermissionMode}
+      onPendingPermissionModeConfirmChange={setPendingPermissionModeConfirm}
+      onPendingProfileChange={setPendingProfileRef}
       onModelChange={setSelectedModel}
       onProviderChange={setSelectedProvider}
       onReasoningEffortChange={setReasoningEffort}
@@ -241,7 +257,9 @@ export function WorkspacePage() {
         notices={sessionRuntimeNotices.notices}
         onDismiss={sessionRuntimeNotices.dismiss}
         onOpenSession={handleOpenRuntimeNoticeSession}
-        resolveSessionTitle={(sessionId) => threadBySessionId.get(normalizeSessionId(sessionId))?.title}
+        resolveSessionTitle={(sessionId) =>
+          threadBySessionId.get(normalizeSessionId(sessionId))?.title
+        }
       />
     </>
   );

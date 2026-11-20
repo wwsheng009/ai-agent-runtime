@@ -245,6 +245,9 @@ describe("ComposerModelPanel", () => {
     expect(queryTitle()).toBe("模型");
     expect(queryOptions("model")).toHaveLength(2);
     expect(queryOptions("model")[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      queryOptions("model")[0]?.querySelector(".truncate")?.className,
+    ).toContain("text-base");
     // 二级只渲染当前这一项。
     expect(querySection("provider")).toBeNull();
     expect(querySection("reasoning")).toBeNull();

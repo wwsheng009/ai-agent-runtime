@@ -62,6 +62,9 @@ export function WorkspaceMainSection({
   onBranchFromMessage,
   onDraftChange,
   onModelChange,
+  onPendingPermissionModeChange,
+  onPendingPermissionModeConfirmChange,
+  onPendingProfileChange,
   onProviderChange,
   onReasoningEffortChange,
   onRenameRuntimeSession,
@@ -70,6 +73,8 @@ export function WorkspaceMainSection({
   onSubmit,
   parkedTurn,
   pendingInteraction,
+  pendingPermissionMode,
+  pendingProfileRef,
   onResolvePendingApproval,
   onRefreshSession,
   onRetryConnection,
@@ -98,6 +103,11 @@ export function WorkspaceMainSection({
   streamStalled,
   trajectoryStore,
   trajectoryEarlier,
+  workspaceDirectories,
+  workspaceDirectoriesError,
+  workspaceDirectoriesLoading,
+  selectedWorkspaceDirectoryId,
+  onSelectWorkspaceDirectory,
   composerOverlayHeight,
   composerOverlayRef,
   density,
@@ -121,18 +131,25 @@ export function WorkspaceMainSection({
 }: WorkspaceMainSectionProps) {
   // P0：`@` 引用候选 = 工作区文件（fs/roots 解析作用域 + fs/list 首屏小批量）+ 线程交付物兜底。
   // 菜单查询串只在 useComposerMenu 内部持有，这里通过 onMenuStateChange 回调同步出来。
-  const [composerMenuState, setComposerMenuState] = useState<ComposerMenuState>({
-    open: false,
-    mode: "references",
-    query: "",
-  });
-  const handleComposerMenuStateChange = useCallback((next: ComposerMenuState) => {
-    setComposerMenuState((previous) =>
-      previous.open === next.open && previous.mode === next.mode && previous.query === next.query
-        ? previous
-        : next,
-    );
-  }, []);
+  const [composerMenuState, setComposerMenuState] = useState<ComposerMenuState>(
+    {
+      open: false,
+      mode: "references",
+      query: "",
+    },
+  );
+  const handleComposerMenuStateChange = useCallback(
+    (next: ComposerMenuState) => {
+      setComposerMenuState((previous) =>
+        previous.open === next.open &&
+        previous.mode === next.mode &&
+        previous.query === next.query
+          ? previous
+          : next,
+      );
+    },
+    [],
+  );
   const fileReferences = useComposerFileReferences({
     sessionId: selectedThread.sessionId,
     query: composerMenuState.query,
@@ -152,7 +169,34 @@ export function WorkspaceMainSection({
     selectedThread.artifacts,
   );
   // 文本类 skill 的 `$` 提及候选（与 `/skill` 弹窗同源的运行时技能目录）。
-  const composerSkillGroups = useComposerSkillGroups(runtimeSkills, runtimeSkillsError);
+  const composerSkillGroups = useComposerSkillGroups(
+    runtimeSkills,
+    runtimeSkillsError,
+  );
+  const workspaceSelection = isNewThread
+    ? {
+        label: t("composer.menu.workspace"),
+        options: workspaceDirectories.map((directory) => ({
+          id: directory.id,
+          label: directory.name?.trim() || directory.path,
+          path: directory.path,
+        })),
+        selectedId: selectedWorkspaceDirectoryId ?? null,
+        clearLabel: t("composer.menu.workspaceClear"),
+        clearDescription: t("composer.menu.workspaceClearDescription"),
+        ...(workspaceDirectoriesLoading
+          ? { statusText: t("composer.menu.workspaceLoading") }
+          : workspaceDirectoriesError
+            ? {
+                statusText: t("composer.menu.workspaceError", {
+                  message: workspaceDirectoriesError,
+                }),
+              }
+            : workspaceDirectories.length === 0
+              ? { emptyText: t("composer.menu.workspaceEmpty") }
+              : {}),
+      }
+    : undefined;
 
   // P2-1A / P2-9：后台任务（Jobs）——shell owner 单例加载一次，
   // 顶栏常驻状态条与弹层共用同一份数据（计数天然一致，不做第二次拉取）。
@@ -171,11 +215,14 @@ export function WorkspaceMainSection({
   const [agentsPanelOpen, setAgentsPanelOpen] = useState(false);
   const permissionWarning = usePermissionWarning(selectedThread.sessionId);
   // §6.8 托管挂起：事件快照 + 任务投影（同一份 AgentControl 目录，挂起边沿补刷一次）。
-  const parkedTurnView = useParkedTurnView(parkedTurn, sessionAgents.tree.descendants, sessionAgents.refresh);
-  // G8：会话 agents 面板的只读下钻目标（复用子会话 transcript 对话框）。
-  const [agentTranscriptTarget, setAgentTranscriptTarget] = useState<SubagentSessionTarget | null>(
-    null,
+  const parkedTurnView = useParkedTurnView(
+    parkedTurn,
+    sessionAgents.tree.descendants,
+    sessionAgents.refresh,
   );
+  // G8：会话 agents 面板的只读下钻目标（复用子会话 transcript 对话框）。
+  const [agentTranscriptTarget, setAgentTranscriptTarget] =
+    useState<SubagentSessionTarget | null>(null);
   const agentBreadcrumb = useMemo(
     () =>
       sessionAgents.tree.lineage.map((agent) => ({
@@ -200,7 +247,9 @@ export function WorkspaceMainSection({
   // Batch 12：`/profile` 运行时目录（宿主数据源，一次拉取）+ 切换动作（单一处理器：
   // 命令行提交、弹窗点选与常驻切换器都经它派发，回执文案一致）。
   const runtimeProfileCatalog = useRuntimeProfileCatalog();
-  const handleProfileSwitch = useComposerProfileSwitch(selectedThread.sessionId);
+  const handleProfileSwitch = useComposerProfileSwitch(
+    selectedThread.sessionId,
+  );
   const composerCommandSurface = useComposerCommandSurface({
     runtimeModels,
     runtimeSkills,
@@ -241,7 +290,9 @@ export function WorkspaceMainSection({
         isNewThread={isNewThread}
         liveJobsCount={jobs.liveCount}
         liveTeamCount={liveTeamCount}
-        onOpenAgents={agentsSessionId ? () => setAgentsPanelOpen(true) : undefined}
+        onOpenAgents={
+          agentsSessionId ? () => setAgentsPanelOpen(true) : undefined
+        }
         onOpenJobs={jobsSessionId ? () => setJobsPanelOpen(true) : undefined}
         onOpenSidebar={() => setMobileSidebarOpen(true)}
         onOpenSettings={() => openSettings("appearance")}
@@ -279,7 +330,10 @@ export function WorkspaceMainSection({
         />
       ) : null}
 
-      <FilePreviewDialog composerInsetPx={composerOverlayHeight} preview={filePreview} />
+      <FilePreviewDialog
+        composerInsetPx={composerOverlayHeight}
+        preview={filePreview}
+      />
 
       <SubagentSessionDialog
         onClose={() => setAgentTranscriptTarget(null)}
@@ -290,7 +344,7 @@ export function WorkspaceMainSection({
         className={cn(
           "flex min-h-0 flex-1 justify-center overflow-hidden",
           isNewThread
-            ? "items-center px-3 pb-4 pt-14 sm:px-4"
+            ? "items-center pb-4 pt-14"
             : isCompact
               ? "pt-[2.95rem]"
               : "pt-[3.2rem]",
@@ -300,8 +354,8 @@ export function WorkspaceMainSection({
           className={cn(
             // 批次 F2：本容器是宽度轴（--app-chat-content-width）的查询容器，
             // 让转录列 / 停靠卡 / 输入卡共享同一 64cqw 基准（不受滚动条宽度影响）。
+            // 新会话不单独限宽或加水平内边距，确保其 composer 与会话使用相同宽度轴。
             "relative flex h-full min-h-0 w-full flex-col [container-type:inline-size]",
-            isNewThread ? "max-w-[48rem]" : null,
           )}
         >
           {!isNewThread ? (
@@ -327,7 +381,10 @@ export function WorkspaceMainSection({
                   branchError={branchError}
                   branchPendingMessageId={branchPendingMessageId}
                   canBacktrack={canBacktrack}
-                  className={cn("h-full px-3 sm:px-4 lg:px-5", isCompact ? "pt-3" : "pt-4")}
+                  className={cn(
+                    "h-full px-3 sm:px-4 lg:px-5",
+                    isCompact ? "pt-3" : "pt-4",
+                  )}
                   connectionStatus={connectionStatus}
                   contentClassName={cn(
                     // 列宽由 message-list 的宽度轴（W）提供，此处只覆盖行间距。
@@ -341,10 +398,14 @@ export function WorkspaceMainSection({
                   onBranchFromMessage={onBranchFromMessage}
                   onPreviewFilePath={filePreview.open}
                   onRetryConnection={onRetryConnection}
-                  onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+                  onSelectBacktrackNavigationMessage={
+                    onSelectBacktrackNavigationMessage
+                  }
                   onSelectArtifact={handleOpenArtifact}
                   phase={phase}
-                  scrollMemoryKey={selectedThread.sessionId ?? selectedThread.id}
+                  scrollMemoryKey={
+                    selectedThread.sessionId ?? selectedThread.id
+                  }
                   streamStalled={streamStalled}
                   style={messageListStyle}
                   threadId={selectedThread.id}
@@ -364,11 +425,13 @@ export function WorkspaceMainSection({
               )}
             </div>
           ) : (
-            <NewThreadPlaceholder
-              onDraftChange={onDraftChange}
-              suggestions={newThreadSuggestions}
-              t={t}
-            />
+            <div className="flex min-h-0 flex-1 px-3 sm:px-4">
+              <NewThreadPlaceholder
+                onDraftChange={onDraftChange}
+                suggestions={newThreadSuggestions}
+                t={t}
+              />
+            </div>
           )}
 
           {!isNewThread ? (
@@ -421,7 +484,9 @@ export function WorkspaceMainSection({
                     contextUsageControl={
                       <ComposerContextUsageControl
                         isResponding={isResponding}
-                        lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+                        lastRuntimeEventType={
+                          selectedThread.lastRuntimeEventType
+                        }
                         runtimeEventCount={selectedThread.runtimeEventCount}
                         sessionId={selectedThread.sessionId}
                       />
@@ -439,13 +504,23 @@ export function WorkspaceMainSection({
                     reasoningEffortOptions={reasoningEffortOptions}
                     referenceGroups={composerReferenceGroups}
                     skillGroups={composerSkillGroups}
+                    workspaceSelection={workspaceSelection}
+                    onWorkspaceSelect={onSelectWorkspaceDirectory}
                     onModelChange={onModelChange}
                     onProviderChange={onProviderChange}
                     onReasoningEffortChange={onReasoningEffortChange}
                     permissionModeControl={
                       <ComposerPermissionModeControl
-                        lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+                        isNewThread={isNewThread}
+                        lastRuntimeEventType={
+                          selectedThread.lastRuntimeEventType
+                        }
                         onModeChange={permissionWarning.onModeChange}
+                        onPendingModeChange={onPendingPermissionModeChange}
+                        onPendingModeConfirmChange={
+                          onPendingPermissionModeConfirmChange
+                        }
+                        pendingMode={pendingPermissionMode}
                         runtimeEventCount={selectedThread.runtimeEventCount}
                         sessionId={selectedThread.sessionId}
                       />
@@ -454,7 +529,10 @@ export function WorkspaceMainSection({
                       <ComposerProfileControl
                         catalog={runtimeProfileCatalog.catalog}
                         catalogError={runtimeProfileCatalog.error}
+                        isNewThread={isNewThread}
                         onSwitch={handleProfileSwitch}
+                        onPendingProfileChange={onPendingProfileChange}
+                        pendingProfileRef={pendingProfileRef}
                         profileName={selectedThread.profileName}
                         profileRef={selectedThread.profileRef}
                         sessionId={selectedThread.sessionId}

@@ -5,7 +5,12 @@
 // 也不需要像抽组件那样重新梳理 render 依赖；与 workspace-shell.tsx
 // 的机械拆分同一思路，仅搬迁不改语义。
 
-import { type CSSProperties, type Dispatch, type RefObject, type SetStateAction } from "react";
+import {
+  type CSSProperties,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from "react";
 import { type TFunction } from "i18next";
 
 import { type SettingsSectionId } from "@/components/workspace/settings";
@@ -29,6 +34,11 @@ export type WorkspaceMainSectionProps = Pick<
   | "composerAttachments"
   | "connectionStatus"
   | "draft"
+  | "pendingPermissionMode"
+  | "pendingProfileRef"
+  | "onPendingPermissionModeChange"
+  | "onPendingPermissionModeConfirmChange"
+  | "onPendingProfileChange"
   | "earlierLoader"
   | "isResponding"
   | "imageSubmitFeedback"
@@ -70,6 +80,11 @@ export type WorkspaceMainSectionProps = Pick<
   | "selectedProvider"
   | "selectedReasoningEffort"
   | "selectedThread"
+  | "workspaceDirectories"
+  | "workspaceDirectoriesError"
+  | "workspaceDirectoriesLoading"
+  | "selectedWorkspaceDirectoryId"
+  | "onSelectWorkspaceDirectory"
   | "sessionRefreshing"
   | "streamStalled"
   | "trajectoryStore"

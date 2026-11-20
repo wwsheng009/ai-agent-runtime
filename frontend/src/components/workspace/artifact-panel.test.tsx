@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Artifact } from "@/data/mock";
 
 import { ArtifactPanel } from "./artifact-panel";
+import { type ArtifactPanelSurface } from "./artifact-panel/types";
 
 // 附着会话后计划/还原/回溯审计会各自拉一次数据；这里静默返回空态，避免测试触发真实网络。
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
@@ -25,6 +26,9 @@ vi.mock("@/lib/runtime-api", async (importOriginal) => {
     listSessionCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [] }),
   };
 });
+vi.mock("@/components/workspace/file-browser-surface", () => ({
+  FileBrowserSurface: () => <div data-testid="file-browser-surface" />,
+}));
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -55,6 +59,7 @@ describe("ArtifactPanel", () => {
   function renderArtifactPanel(
     artifacts: Artifact[],
     options?: {
+      activeSurface?: ArtifactPanelSurface;
       onOpenArtifact?: (artifactId: string) => void;
       selectedArtifactId?: string | null;
       sessionId?: string;
@@ -66,6 +71,7 @@ describe("ArtifactPanel", () => {
       root?.render(
         <ArtifactPanel
           artifacts={artifacts}
+          activeSurface={options?.activeSurface}
           onOpenArtifact={options?.onOpenArtifact ?? (() => {})}
           selectedArtifactId={options?.selectedArtifactId ?? null}
           sessionId={options?.sessionId}
@@ -153,19 +159,55 @@ describe("ArtifactPanel", () => {
     const evidenceTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
       (button) => button.textContent?.includes("条目"),
     );
-    const planTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("计划"),
-    );
-    const restorePointsTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("还原"),
-    );
 
     expect(container.querySelector('[role="tablist"]')).toBeInstanceOf(HTMLElement);
     expect(evidenceTab?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      container.querySelector('[data-testid="artifact-panel-tab-plan"]'),
+    ).toBeNull();
+
+    const moreTrigger = container.querySelector(
+      '[data-testid="artifact-panel-more-trigger"]',
+    ) as HTMLButtonElement | null;
+    act(() => {
+      moreTrigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const planTab = container.querySelector(
+      '[data-testid="artifact-panel-more-item-plan"]',
+    );
+    const restorePointsTab = container.querySelector(
+      '[data-testid="artifact-panel-more-item-checkpoints"]',
+    );
     expect(planTab).toBeInstanceOf(HTMLButtonElement);
     expect((planTab as HTMLButtonElement).disabled).toBe(true);
     expect(restorePointsTab).toBeInstanceOf(HTMLButtonElement);
     expect((restorePointsTab as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("without a session defaults to a usable global surface", async () => {
+    renderArtifactPanel([]);
+
+    const filesTab = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-tab-files"]',
+    );
+    expect(filesTab?.getAttribute("aria-selected")).toBe("true");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector('[data-testid="file-browser-surface"]')).not.toBeNull();
+  });
+
+  it("falls back to a global surface if the selected panel requires a session", () => {
+    renderArtifactPanel([], { activeSurface: "plan" });
+
+    expect(
+      container
+        .querySelector('[data-testid="artifact-panel-tab-files"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(
+      container.querySelector('[data-testid="artifact-panel-tab-plan"]'),
+    ).toBeNull();
   });
 
   // 会话用量已从合并面板中移除（改由会话详情面呈现），这里守住「页签不再回归」。

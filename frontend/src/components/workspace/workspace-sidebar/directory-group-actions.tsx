@@ -84,7 +84,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
   }
 
   const itemClassName =
-    "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft disabled:opacity-50";
+    "flex w-full items-center gap-2 px-2.5 py-1.5 text-left app-text-12 text-foreground transition hover:bg-surface-soft disabled:opacity-50";
 
   return (
     <div

@@ -62,6 +62,9 @@ import {
 type WorkspaceAgentChatTurnOptions = {
   deltaCoordinator?: RuntimeDeltaCoordinator;
   onSessionTouched?: () => void;
+  pendingPermissionMode?: string;
+  pendingPermissionModeConfirm?: boolean;
+  pendingProfileRef?: string;
   selectedThread: Thread | undefined;
   setSelectedArtifactId: (artifactId: string | null) => void;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
@@ -81,6 +84,9 @@ export {
 export function useWorkspaceAgentChatTurn({
   deltaCoordinator,
   onSessionTouched,
+  pendingPermissionMode = "",
+  pendingPermissionModeConfirm = false,
+  pendingProfileRef = "",
   selectedThread,
   setSelectedArtifactId,
   setThreads,
@@ -155,20 +161,23 @@ export function useWorkspaceAgentChatTurn({
     clearAttachments: composerAttachments.clearAttachments,
     deltaCoordinator,
     onSessionTouched,
-    prepareTurn: (prompt, thread) =>
-      prepareAgentChatTurn({
-        deltaCoordinator,
-        prompt,
-        selectedModel,
-        selectedProvider,
-        selectedReasoningEffort,
-        selectedThread: thread,
-        settings,
-        trajectoryStore,
-        trajectoryStorePool,
-        userId,
-        workspacePath,
-      }),
+      prepareTurn: (prompt, thread) =>
+        prepareAgentChatTurn({
+          deltaCoordinator,
+          prompt,
+          selectedModel,
+          selectedProvider,
+          selectedReasoningEffort,
+          selectedThread: thread,
+          settings,
+          trajectoryStore,
+          trajectoryStorePool,
+          userId,
+          workspacePath,
+          permissionMode: pendingPermissionMode,
+          permissionModeConfirm: pendingPermissionModeConfirm,
+          profile: pendingProfileRef,
+        }),
     selectedThread,
     selectedTurnKey,
     setDraft,
@@ -222,6 +231,10 @@ export function useWorkspaceAgentChatTurn({
       userId,
       workspacePath,
       exposeSkills: options?.exposeSkills,
+      permissionMode: options?.permissionMode ?? pendingPermissionMode,
+      permissionModeConfirm:
+        options?.permissionModeConfirm ?? pendingPermissionModeConfirm,
+      profile: options?.profile ?? pendingProfileRef,
     });
     turnRegistry.beginTurn({
       key: turnKey,
