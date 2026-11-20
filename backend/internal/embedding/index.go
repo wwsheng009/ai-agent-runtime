@@ -93,20 +93,12 @@ type LocalEmbeddingGenerator struct {
 	dim int
 }
 
-// MockEmbeddingGenerator 兼容旧名称
-type MockEmbeddingGenerator = LocalEmbeddingGenerator
-
 // NewLocalEmbeddingGenerator 创建本地嵌入生成器
 func NewLocalEmbeddingGenerator(dim int) *LocalEmbeddingGenerator {
 	if dim <= 0 {
 		dim = VectorDim
 	}
 	return &LocalEmbeddingGenerator{dim: dim}
-}
-
-// NewMockEmbeddingGenerator 创建兼容旧名称的本地嵌入生成器
-func NewMockEmbeddingGenerator(dim int) *MockEmbeddingGenerator {
-	return NewLocalEmbeddingGenerator(dim)
 }
 
 // Generate 生成文本的本地嵌入

@@ -58,10 +58,6 @@ type ChatSessionListFilter struct {
 	Limit     int
 }
 
-func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, string, error) {
-	return newChatSessionManagerWithRuntimeConfig(dir, nil, "", "")
-}
-
 func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecfg.RuntimeConfig, runtimeConfigFile, explicitUserID string) (*runtimechat.SessionManager, string, string, error) {
 	resolvedDir := strings.TrimSpace(dir)
 	if resolvedDir == "" {

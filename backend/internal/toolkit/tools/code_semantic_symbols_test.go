@@ -261,8 +261,3 @@ func containsInt(values []int, want int) bool {
 	}
 	return false
 }
-
-func TestSemanticSymbolKindMapsUnknownToUnknown(t *testing.T) {
-	// 语义通道的位置/kind 口径由 knowledge 层负责（见 adapter_lsp_symbols_test.go）；
-	// 这里只锁工具侧不依赖任何 kind 具体值即可编译运行（防止误引入导入）。
-}

@@ -223,9 +223,8 @@ func BenchmarkAppendEventLegacy(b *testing.B) {
 
 func benchmarkAppendEventPath(b *testing.B, legacy bool) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
-		Path:                         filepath.Join(b.TempDir(), "runtime-bench.sqlite"),
-		DisableBackgroundMaintenance: true,
-		DisableSQLiteReturning:       legacy,
+		Path:                   filepath.Join(b.TempDir(), "runtime-bench.sqlite"),
+		DisableSQLiteReturning: legacy,
 	})
 	if err != nil {
 		b.Fatalf("create store: %v", err)

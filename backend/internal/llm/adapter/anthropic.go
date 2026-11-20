@@ -766,38 +766,6 @@ func (a *AnthropicAdapter) IsReasoningModel(model string) bool {
 	return false
 }
 
-// AccumulateStreamData 累积流式数据块（向后兼容）
-func (a *AnthropicAdapter) AccumulateStreamData(streamData map[string]interface{}, chunkData map[string]interface{}) bool {
-	// 初始化
-	if _, exists := streamData["content"]; !exists {
-		streamData["content"] = ""
-		streamData["finish_reason"] = ""
-		streamData["tool_calls"] = []map[string]interface{}{}
-	}
-
-	// 检查事件类型
-	eventType, _ := chunkData["type"].(string)
-	switch eventType {
-	case "content_block_delta":
-		if delta, ok := chunkData["delta"].(map[string]interface{}); ok {
-			if text, ok := delta["text"].(string); ok {
-				streamData["content"] = streamData["content"].(string) + text
-			}
-		}
-	case "message_delta":
-		if delta, ok := chunkData["delta"].(map[string]interface{}); ok {
-			if stopReason, ok := delta["stop_reason"].(string); ok {
-				streamData["finish_reason"] = stopReason
-				return stopReason != ""
-			}
-		}
-	case "content_block_stop", "message_stop":
-		return true
-	}
-
-	return false
-}
-
 // GetAPIPath 获取默认 API 路径
 func (a *AnthropicAdapter) GetAPIPath() string {
 	return "/v1/messages"

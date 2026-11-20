@@ -305,12 +305,6 @@ func TestProviderHeaderGuardHandoffRetriesAtRuntimeLayer(t *testing.T) {
 	}
 }
 
-// TestProviderRetriesTransientErrorsNormally guards against the fail-fast
-// guard firing for non-header errors: a 5xx retry still uses both retries.
-func TestProviderRetriesTransientErrorsNormally(t *testing.T) {
-	t.Skip("covered by existing retry tests in retry_executor_test.go / gateway tests")
-}
-
 // TestTrackHeaderTimeoutStreak exercises the hung-upstream streak state
 // machine, including the interleaving that a naive boolean "previous attempt
 // timed out" guard gets wrong: hang (#1), transient error (#2), hang (#3),

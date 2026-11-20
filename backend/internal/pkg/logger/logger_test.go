@@ -128,10 +128,6 @@ func TestInitLogger_ConsoleWritesToStderr(t *testing.T) {
 	assert.Contains(t, string(stderrData), `"key":"value"`)
 }
 
-func TestInitLogger_File_SkipOnWindows(t *testing.T) {
-	t.Skip("Skipping file logger test on Windows due to lumberjack file lock issue")
-}
-
 func TestInitLogger_FileNoPath(t *testing.T) {
 	cfg := &LogConfig{
 		Level:    "info",

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
@@ -22,8 +22,8 @@ func findRowWithText(t *testing.T, frame [][]vt.Cell, needle string) int {
 	return -1
 }
 
-func validRowOwner(o viewport.RowOwner) bool {
-	return o >= viewport.RowOwnerGap && o <= viewport.RowOwnerStatus
+func validRowOwner(o renderengine.RowOwner) bool {
+	return o >= renderengine.RowOwnerGap && o <= renderengine.RowOwnerStatus
 }
 
 // TestOwnedRowPlanCoversEveryRowWithoutUndeclaredRows pins the stage C layout
@@ -45,11 +45,11 @@ func TestOwnedRowPlanCoversEveryRowWithoutUndeclaredRows(t *testing.T) {
 			t.Fatalf("row %d has undeclared owner %v", i+1, owner)
 		}
 	}
-	if got := owners[height-1]; got != viewport.RowOwnerStatus {
+	if got := owners[height-1]; got != renderengine.RowOwnerStatus {
 		t.Fatalf("status row owner=%v want status", got)
 	}
 	for i := 0; i < height-1; i++ {
-		if owners[i] != viewport.RowOwnerGap {
+		if owners[i] != renderengine.RowOwnerGap {
 			t.Fatalf("idle row %d owner=%v want gap", i+1, owners[i])
 		}
 	}
@@ -98,12 +98,12 @@ func TestOwnedRowPlanContentRowsHaveOwners(t *testing.T) {
 		if strings.TrimSpace(cellRowPlainText(cells)) == "" {
 			continue
 		}
-		if owners[i] == viewport.RowOwnerGap {
+		if owners[i] == renderengine.RowOwnerGap {
 			t.Fatalf("row %d has content %q but owner gap", i+1, strings.TrimSpace(cellRowPlainText(cells)))
 		}
 	}
 
-	assertOwner := func(needle string, want viewport.RowOwner) {
+	assertOwner := func(needle string, want renderengine.RowOwner) {
 		t.Helper()
 		row := findRowWithText(t, frame, needle)
 		if row < 0 {
@@ -113,15 +113,15 @@ func TestOwnedRowPlanContentRowsHaveOwners(t *testing.T) {
 			t.Fatalf("row %d (%q) owner=%v want %v", row, needle, got, want)
 		}
 	}
-	assertOwner("B1", viewport.RowOwnerBand)
-	assertOwner("B2", viewport.RowOwnerBand)
-	assertOwner("P1", viewport.RowOwnerPopup)
-	assertOwner("P2", viewport.RowOwnerPopup)
-	assertOwner("notice: n1", viewport.RowOwnerPrompt)
-	assertOwner(">", viewport.RowOwnerPrompt)
-	assertOwner("hello", viewport.RowOwnerPrompt)
-	assertOwner("◦ Analyzing", viewport.RowOwnerStatus)
-	assertOwner("Plan OFF", viewport.RowOwnerStatus)
+	assertOwner("B1", renderengine.RowOwnerBand)
+	assertOwner("B2", renderengine.RowOwnerBand)
+	assertOwner("P1", renderengine.RowOwnerPopup)
+	assertOwner("P2", renderengine.RowOwnerPopup)
+	assertOwner("notice: n1", renderengine.RowOwnerPrompt)
+	assertOwner(">", renderengine.RowOwnerPrompt)
+	assertOwner("hello", renderengine.RowOwnerPrompt)
+	assertOwner("◦ Analyzing", renderengine.RowOwnerStatus)
+	assertOwner("Plan OFF", renderengine.RowOwnerStatus)
 }
 
 // TestOwnedRowPlanBandGapRowsAreOwned pins that band margin/gap rows inside
@@ -145,11 +145,11 @@ func TestOwnedRowPlanBandGapRowsAreOwned(t *testing.T) {
 			t.Fatalf("row %d has undeclared owner %v", i+1, owner)
 		}
 		switch owner {
-		case viewport.RowOwnerBand:
+		case renderengine.RowOwnerBand:
 			bandRows++
-		case viewport.RowOwnerGap:
+		case renderengine.RowOwnerGap:
 			gapRows++
-		case viewport.RowOwnerStatus:
+		case renderengine.RowOwnerStatus:
 			if i != height-1 {
 				t.Fatalf("status owner on non-terminal row %d", i+1)
 			}

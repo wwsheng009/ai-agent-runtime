@@ -4756,13 +4756,6 @@ func stableCodexReasoningItemID(item map[string]interface{}) string {
 	return fmt.Sprintf("rs_%x", hasher.Sum64())
 }
 
-// AccumulateStreamData 累积流式数据块
-func (a *CodexAdapter) AccumulateStreamData(streamData map[string]interface{}, chunkData map[string]interface{}) bool {
-	// Codex 使用事件驱动，不使用传统的累积方式
-	// 这里保留接口兼容性
-	return false
-}
-
 // IsCodexModel 判断是否为 Codex 模型
 func IsCodexModel(model string) bool {
 	model = strings.ToLower(model)

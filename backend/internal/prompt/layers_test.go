@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestLayersCompileInstructionMessages_PreservesDeveloperForCodex(t *testing.T) {
@@ -85,26 +87,35 @@ Read AGENTS`
 	}
 }
 
-func TestSummarizeRenderedLayout_ExtractsLayersAndSources(t *testing.T) {
-	layout := `[base/system]
-# Base
-Source: system.md
-Base guardrail
-
-[developer/developer]
-# Tools
-Source: tools.md
-Prefer rg
-
-[user/developer]
-# Workspace
-Source: E:\projects\ai\ai-agent-runtime\AGENTS.md
-Read AGENTS`
-
-	summary := SummarizeRenderedLayout(layout)
-	if summary.Length != len(layout) {
-		t.Fatalf("expected layout length %d, got %d", len(layout), summary.Length)
+func TestSummarizeInstructionMessages_ExtractsLayersAndSources(t *testing.T) {
+	messages := []runtimetypes.Message{
+		{
+			Role:    RoleSystem,
+			Content: "Base guardrail",
+			Metadata: runtimetypes.Metadata{
+				"prompt_layer":  "base",
+				"prompt_source": "system.md",
+			},
+		},
+		{
+			Role:    RoleDeveloper,
+			Content: "Prefer rg",
+			Metadata: runtimetypes.Metadata{
+				"prompt_layer":  "developer",
+				"prompt_source": "tools.md",
+			},
+		},
+		{
+			Role:    RoleDeveloper,
+			Content: "Read AGENTS",
+			Metadata: runtimetypes.Metadata{
+				"prompt_layer":  "user",
+				"prompt_source": `E:\projects\ai\ai-agent-runtime\AGENTS.md`,
+			},
+		},
 	}
+
+	summary := SummarizeInstructionMessages(messages)
 	expectedSummary := "layers=base/system -> developer/developer -> user/developer | sources=system.md, tools.md, AGENTS.md"
 	if summary.Summary != expectedSummary {
 		t.Fatalf("unexpected layout summary: %q", summary.Summary)

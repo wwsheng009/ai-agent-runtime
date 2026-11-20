@@ -76,7 +76,7 @@ var unionListKeys = []string{
 func scalarizeUnionsNode(node map[string]interface{}) {
 	// 节点自身是 $ref 时任何改写都可能改变语义（draft-07 里 $ref 与兄弟键
 	// 的关系按实现而不同），保守跳过；分支内部的 $ref 由
-	// preferredUnionBranch 单独把关。
+	// compatibleUnionBranch 单独把关。
 	if _, hasRef := node["$ref"]; hasRef {
 		return
 	}
@@ -170,38 +170,6 @@ func compatibleUnionBranch(node map[string]interface{}, branches []interface{}) 
 		}
 		if !unionBranchCompatibleWithSiblings(node, branch) {
 			continue
-		}
-		if first == nil {
-			first = branch
-		}
-		if typ, _ := branch["type"].(string); typ == "string" && stringBranch == nil {
-			stringBranch = branch
-		}
-	}
-	if stringBranch != nil {
-		return stringBranch
-	}
-	return first
-}
-
-// preferredUnionBranch prefers the string branch: models overwhelmingly send
-// the scalar spelling, and the runtime coerces scalars into arrays during
-// argument normalization. Non-map branches or $ref make the rewrite unsafe.
-//
-// Deprecated: use compatibleUnionBranch, which also verifies that the chosen
-// branch does not contradict the surviving sibling constraints.
-func preferredUnionBranch(branches []interface{}) map[string]interface{} {
-	if len(branches) == 0 {
-		return nil
-	}
-	var first, stringBranch map[string]interface{}
-	for _, raw := range branches {
-		branch, ok := raw.(map[string]interface{})
-		if !ok {
-			return nil
-		}
-		if _, hasRef := branch["$ref"]; hasRef {
-			return nil
 		}
 		if first == nil {
 			first = branch

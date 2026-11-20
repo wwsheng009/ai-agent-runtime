@@ -10071,10 +10071,6 @@ func (b *chatRuntimeEventBridge) emitTimelineEvent(rendered chatRuntimeTimelineE
 	}
 }
 
-func renderChatRuntimeEvent(event runtimeevents.Event) string {
-	return renderChatRuntimeTimelineEvent(event).Line
-}
-
 func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
 	teamID := payloadStringValue(event.Payload["team_id"])
 	switch event.Type {

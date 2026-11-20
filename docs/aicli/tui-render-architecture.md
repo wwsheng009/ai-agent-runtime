@@ -112,7 +112,7 @@ flowchart TB
 | `chat_command_output.go`（结构化命令输出 allowlist） | owned 交互 → `RenderCommandDocument`；plain/JSON/非交互 → 兼容 writer；`writeLegacyChatDebugDisplay` 仅供直接调用者 | 混合：allowlist 保留；guard 分支统一模式下 dead | `chat_command_output.go:10-12,25,31,45` |
 | `chat_legacy_console_*.go` / `chat_pipe_console_line.go` | plain/compat/win7 与 pipe/PTY 的行输入与编辑器 | 保留（非统一交互模式） | `chat_setup.go:120,130,135`；`chat_legacy_console_line.go:90,117`；`chat_pipe_console_line.go:67,114` |
 | `chat_interaction.go` 中 `if c.unifiedRenderer { return }` 早退守卫 | 统一交互模式下 dead；plain/compat 交互仍执行 | 混合 | grep 实测 15 处（`chat_interaction.go` 13、`chat_ui_actor.go` 2） |
-| `chat_ui_actor.go` `enableUnifiedRendererWithWriter` | 仅测试调用 | TEST-ONLY（可移入 `_test.go`） | `chat_setup.go:225` 注释；`chat_ui_actor.go:231-234`；调用者均为 `*_test.go` |
+| `chat_ui_actor.go` `enableUnifiedRendererWithWriter` | 仅测试调用 | 已移入 `chat_cleanup_test_helpers_test.go`（2026-11-20） | 调用者均为 `*_test.go`；生产文件不再保留该方法 |
 
 ### 3.3 复活风险评估
 
@@ -167,7 +167,7 @@ legacy 层包含两个正交维度：**"在统一交互模式下是否可达"** 
 
 ### 5.4 C 类：可立即清理的小件
 
-- `enableUnifiedRendererWithWriter`：仅测试调用，可移入 `_test.go`（保持行为不变）；
+- `enableUnifiedRendererWithWriter`：已移入 `cmd/aicli/commands/chat_cleanup_test_helpers_test.go`（2026-11-20）；
 - 6 个 `*ForTest` 方法：若无外部包引用，可收敛为内部快照断言；
 - `legacy_reserve.go` 头注释勘误：修正"字段只被清零"的过时描述（实际 `CursorOnBlankRow` 仍被写入）。
 

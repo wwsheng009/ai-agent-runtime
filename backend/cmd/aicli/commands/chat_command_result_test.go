@@ -1273,7 +1273,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_surface_output.go", Func: "writeDirectInteractiveOutput", Kind: "os.Std*", Count: 1},
 		{File: "chat_tool_executor.go", Func: "withLiveChatToolOutput", Kind: "os.Std*", Count: 2},
 		{File: "chat_ui_actor.go", Func: "method EnableUnifiedRendererGateway", Kind: "os.Std*", Count: 1},
-		{File: "chat_ui_actor.go", Func: "method enableUnifiedRendererWithWriter", Kind: "os.Std*", Count: 1},
 		// exec_event_processor.go：审计点名 glob 外（exec 子进程/流输出通道），本轮纳入门禁。
 		{File: "exec_event_processor.go", Func: "NewExecEventProcessor", Kind: "os.Std*", Count: 2},
 		{File: "exec_event_processor.go", Func: "method OnStreamDelta", Kind: "ui.WriteTerminal*", Count: 1},

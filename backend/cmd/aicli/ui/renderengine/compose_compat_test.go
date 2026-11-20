@@ -1,4 +1,4 @@
-package viewport
+package renderengine
 
 import (
 	"strings"
@@ -24,7 +24,7 @@ func TestCompose_GrowShrinkKeepsHistoryAnchored(t *testing.T) {
 	status := [][]vt.Cell{lineCells(w, "STATUS")}
 	band3 := [][]vt.Cell{lineCells(w, "B1"), lineCells(w, "B2"), lineCells(w, "STATUS")}
 
-	b := New(w, h)
+	b := NewScreenModel(w, h)
 	screen := vt.NewScreen(w, h)
 
 	// Frame A: reserve = 1 row. Output region shows L1..L5.
@@ -64,7 +64,7 @@ func TestCompose_WindowSelectsRecentHistory(t *testing.T) {
 	}
 	status := [][]vt.Cell{lineCells(w, "s")}
 
-	b := New(w, h)
+	b := NewScreenModel(w, h)
 	b.StageFrame(Compose(w, h, history, status))
 	screen := vt.NewScreen(w, h)
 	screen.Feed(b.Flush())
@@ -84,7 +84,7 @@ func TestCompose_ShortHistoryLeavesHeadroomAboveReserve(t *testing.T) {
 	history := [][]vt.Cell{lineCells(w, "one"), lineCells(w, "two")}
 	status := [][]vt.Cell{lineCells(w, "s")}
 
-	b := New(w, h)
+	b := NewScreenModel(w, h)
 	b.StageFrame(Compose(w, h, history, status))
 	screen := vt.NewScreen(w, h)
 	screen.Feed(b.Flush())

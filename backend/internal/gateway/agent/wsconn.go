@@ -33,8 +33,6 @@ type WSConnector struct {
 	AgentVersion string
 	// Register supplies the REGISTER payload. Required.
 	Register RegisterFunc
-	// Dialer overrides the WebSocket dialer (tests use it to shorten timeouts).
-	Dialer *websocket.Dialer // deprecated: use Config.ProxyURL
 	// HeartbeatInterval overrides the default heartbeat cadence. WELCOME may
 	// still shorten it.
 	HeartbeatInterval time.Duration

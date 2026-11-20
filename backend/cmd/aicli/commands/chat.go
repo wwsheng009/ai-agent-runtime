@@ -1159,11 +1159,6 @@ func printWelcome() {
 	ui.PrintWelcome()
 }
 
-// selectProvider 选择 Provider
-func selectProvider(cfg *config.Config) string {
-	return selectProviderWithReader(cfg, newTrackedStdinReader())
-}
-
 // chatStartupProviderCreateRowTitle is the leading row of the startup
 // provider picker: it routes into the interactive login flow (template-based
 // or fully-custom) instead of selecting an existing provider.
@@ -1411,11 +1406,6 @@ func providerSelectionURL(provider config.Provider) string {
 	return strings.TrimSpace(provider.BaseURL)
 }
 
-// selectModel 选择 Model
-func selectModel(provider config.Provider) string {
-	return selectModelWithReader(provider, newTrackedStdinReader())
-}
-
 func selectModelWithReader(provider config.Provider, reader *bufio.Reader) string {
 	// Mirror the provider stage: prefer the /model-style searchable full-screen
 	// picker (fuzzy search, arrow navigation, default marker) when the terminal
@@ -1509,11 +1499,6 @@ func selectModelWithReaderNumeric(provider config.Provider, reader *bufio.Reader
 
 		return input
 	}
-}
-
-// selectStreamMode 选择流式模式
-func selectStreamMode() bool {
-	return selectStreamModeWithReader(newTrackedStdinReader())
 }
 
 func selectStreamModeWithReader(reader *bufio.Reader) bool {

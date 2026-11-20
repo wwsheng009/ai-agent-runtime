@@ -4,11 +4,11 @@ import (
 	"testing"
 )
 
-func TestNewMockEmbeddingGenerator(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+func TestNewLocalEmbeddingGenerator(t *testing.T) {
+	generator := NewLocalEmbeddingGenerator(768)
 
 	if generator == nil {
-		t.Fatal("NewMockEmbeddingGenerator() returned nil")
+		t.Fatal("NewLocalEmbeddingGenerator() returned nil")
 	}
 
 	if generator.dim != 768 {
@@ -16,16 +16,16 @@ func TestNewMockEmbeddingGenerator(t *testing.T) {
 	}
 }
 
-func TestNewMockEmbeddingGenerator_DefaultDim(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(0)
+func TestNewLocalEmbeddingGenerator_DefaultDim(t *testing.T) {
+	generator := NewLocalEmbeddingGenerator(0)
 
 	if generator.dim != VectorDim {
 		t.Errorf("dim = %v, want %v", generator.dim, VectorDim)
 	}
 }
 
-func TestMockEmbeddingGenerator_Generate(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+func TestLocalEmbeddingGenerator_Generate(t *testing.T) {
+	generator := NewLocalEmbeddingGenerator(768)
 
 	embedding, err := generator.Generate("test text")
 	if err != nil {
@@ -41,8 +41,8 @@ func TestMockEmbeddingGenerator_Generate(t *testing.T) {
 	}
 }
 
-func TestMockEmbeddingGenerator_GenerateBatch(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+func TestLocalEmbeddingGenerator_GenerateBatch(t *testing.T) {
+	generator := NewLocalEmbeddingGenerator(768)
 
 	texts := []string{"text1", "text2", "text3"}
 	embeddings, err := generator.GenerateBatch(texts)
@@ -163,7 +163,7 @@ func TestEmbedding_CosineSimilarity_DifferentVectors(t *testing.T) {
 }
 
 func TestNewVectorIndex(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, err := NewVectorIndex(generator)
 
 	if err != nil {
@@ -196,7 +196,7 @@ func TestNewVectorIndex_NilGenerator(t *testing.T) {
 }
 
 func TestVectorIndex_Add(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	err := index.Add("test-id", "test content", map[string]any{"key": "value"})
@@ -223,7 +223,7 @@ func TestVectorIndex_Add(t *testing.T) {
 }
 
 func TestVectorIndex_AddBatch(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	items := []struct {
@@ -247,7 +247,7 @@ func TestVectorIndex_AddBatch(t *testing.T) {
 }
 
 func TestVectorIndex_Search(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	// Add some items
@@ -301,7 +301,7 @@ func TestLocalEmbeddingGenerator_SemanticOverlap(t *testing.T) {
 }
 
 func TestVectorIndex_SearchByVector(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	// Add item
@@ -322,7 +322,7 @@ func TestVectorIndex_SearchByVector(t *testing.T) {
 }
 
 func TestVectorIndex_Delete(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	index.Add("test-id", "test content", nil)
@@ -347,7 +347,7 @@ func TestVectorIndex_Delete(t *testing.T) {
 }
 
 func TestVectorIndex_Update(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	index.Add("test-id", "old content", map[string]any{"old": true})
@@ -376,7 +376,7 @@ func TestVectorIndex_Update(t *testing.T) {
 }
 
 func TestVectorIndex_Get_NonExistent(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	_, err := index.Get("non-existent-id")
@@ -386,7 +386,7 @@ func TestVectorIndex_Get_NonExistent(t *testing.T) {
 }
 
 func TestVectorIndex_List(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	items := []struct {
@@ -408,7 +408,7 @@ func TestVectorIndex_List(t *testing.T) {
 }
 
 func TestVectorIndex_Clear(t *testing.T) {
-	generator := NewMockEmbeddingGenerator(768)
+	generator := NewLocalEmbeddingGenerator(768)
 	index, _ := NewVectorIndex(generator)
 
 	items := []struct {

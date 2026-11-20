@@ -41,11 +41,6 @@ const (
 	// runtime contract (for example "output_contract"). It is not a grant
 	// decision: an explicit profile allowlist can also admit the same tool.
 	MetadataContractSource = "contract_source"
-	// MetadataGrantedBy is kept for source compatibility with earlier
-	// observation payloads. Enrich no longer writes it: deriving provenance
-	// from the registry alone cannot tell an explicit profile grant from the
-	// runtime contract grant.
-	MetadataGrantedBy = "granted_by"
 )
 
 // FilterReason 是 filtered[] 的裁剪原因取值域（§2.2-A）。

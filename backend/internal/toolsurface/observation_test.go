@@ -64,7 +64,7 @@ func TestEnrichMarksContractOriginWithoutClaimingGrant(t *testing.T) {
 	require.Equal(t, "output_contract", metadata[MetadataContractSource])
 	// Registry membership alone cannot prove this request admitted the tool
 	// through the contract rather than an explicit profile allowlist.
-	require.NotContains(t, metadata, MetadataGrantedBy)
+	require.NotContains(t, metadata, "granted_by")
 }
 
 // 退役名不是现役登记：外部来源（MCP）恰好暴露同名工具时不得被套上替代工具的类别。

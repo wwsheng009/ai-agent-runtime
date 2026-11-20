@@ -334,10 +334,6 @@ type RuntimeStoreConfig struct {
 	// 回退到 legacy 两条语句实现（P1.6/D1）。零值=false 表示默认启用；
 	// 能力探测失败时无论该开关如何都会自动回退。
 	DisableSQLiteReturning bool
-	// DisableBackgroundMaintenance 已废弃：后台 incremental_vacuum 维护（P1.6/D4）
-	// 因在线搬页的高风险已整体移除（见 runtime_store_append_stats.go 的文件头说明）。
-	// 保留字段仅为兼容既有调用方，设置与否都不再改变行为。
-	DisableBackgroundMaintenance bool
 	// DisableReadPool 关闭读写双池拆分（P1.7 回滚开关）：读走写池，
 	// 行为与拆分前逐字节一致。零值=false 表示按 ReadPoolSize 启用。
 	DisableReadPool bool

@@ -16,7 +16,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -301,78 +300,6 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 	actor.WaitIdle()
 	presenter := ui.NewTerminalSessionPresenterWithOutput(actor, port, c.primaryTerminalGeometry)
 	if c.SetPrimaryPresenter(presenter) {
-		return true
-	}
-	c.mu.Lock()
-	if c.primaryPresenter == nil {
-		c.unifiedRenderer = false
-	}
-	c.refreshTerminalWriterSnapshotLocked()
-	c.mu.Unlock()
-	return false
-}
-
-// enableUnifiedRendererWithWriter 构造直写 writer 模式的 unified renderer。
-// Test-only：生产 interactive 会话禁止使用——直写模式不经 gateway，违反
-// "所有 interactive terminal effects 经 session-scoped gateway" 收敛目标。
-// 生产入口是 EnableUnifiedRendererGateway（PhysicalSink→RenderOutputGateway）。
-func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.Writer) bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	if c.shutdown {
-		c.mu.Unlock()
-		return false
-	}
-	if c.primaryPresenter != nil {
-		c.mu.Unlock()
-		return true
-	}
-	surface := c.surface
-	c.unifiedRenderer = true
-	c.refreshTerminalWriterSnapshotLocked()
-	c.mu.Unlock()
-	if writer == nil {
-		// 登记（A1-8c）：测试/legacy 直写辅助入口；生产经
-		// EnableUnifiedRendererGateway（PhysicalSink）进入，不触达这里。
-		writer = os.Stdout
-	}
-	if surface != nil {
-		// No physical surface operation may race the forthcoming presenter
-		// attach. Logical facade state remains available to existing adapters.
-		surface.SetPhysicalWritesEnabled(false)
-	}
-
-	actor := c.ensureUIActor()
-	if actor == nil {
-		c.mu.Lock()
-		c.unifiedRenderer = false
-		c.refreshTerminalWriterSnapshotLocked()
-		c.mu.Unlock()
-		return false
-	}
-	// Establish the semantic active-cell projection before a physical presenter
-	// can consume effects. This is a one-way production authority boundary: a
-	// delayed ActiveBand facade action must not replace a Scene mutable cell in
-	// the first unified frame.
-	if !actor.Post(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()}) ||
-		!actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
-		c.mu.Lock()
-		c.unifiedRenderer = false
-		c.refreshTerminalWriterSnapshotLocked()
-		c.mu.Unlock()
-		if chatDebugFlagEnabled() {
-			aicliDiagRawln("[aicli-diag] enableUnifiedRendererWithWriter: actor.Post failed -> unified renderer OFF")
-		}
-		return false
-	}
-	actor.WaitIdle()
-	presenter := ui.NewTerminalSessionPresenter(actor, writer, c.primaryTerminalGeometry)
-	if c.SetPrimaryPresenter(presenter) {
-		if chatDebugFlagEnabled() {
-			aicliDiagRawln("[aicli-diag] enableUnifiedRendererWithWriter: presenter attached -> unified renderer ON")
-		}
 		return true
 	}
 	c.mu.Lock()
@@ -1546,16 +1473,6 @@ func (c *chatInteractionCoordinator) uiActionRejectedAfterShutdown() bool {
 	shuttingDown := c.shutdown
 	c.mu.Unlock()
 	return shuttingDown
-}
-
-// waitUIActorIdle 等待 UI actor 排空当前队列（测试辅助与确定性路径）。
-// actor 尚未创建时立即返回。生产代码不应依赖（producer 只 Post）。
-func (c *chatInteractionCoordinator) waitUIActorIdle() {
-	actor := c.currentUIActor()
-	if actor == nil {
-		return
-	}
-	actor.WaitIdle()
 }
 
 func (c *chatInteractionCoordinator) waitUIActorIdleTimeout(timeout time.Duration) bool {

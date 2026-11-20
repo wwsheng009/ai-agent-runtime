@@ -408,14 +408,6 @@ func TestRuntimeHandlerConnectorPendingLookupsReadDurableState(t *testing.T) {
 	require.Empty(t, approvalID)
 }
 
-func TestConnectorAttentionNoticeForEventMapping(t *testing.T) {
-	t.Skip("映射/去重断言已迁至 internal/connectors/attention_test.go（三宿主单一实现点）；本文件保留端到端链路测试")
-}
-
-func TestConnectorAttentionDeduperEvictsOldest(t *testing.T) {
-	t.Skip("同上：去重窗口测试已迁至 internal/connectors/attention_test.go")
-}
-
 // ── 注意力出站端到端（真实总线 + 真实 Service） ─────────────────────────────
 
 func TestSubscribeRuntimeConnectorAttentionDeliversToBoundChatOnce(t *testing.T) {

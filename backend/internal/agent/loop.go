@@ -8059,11 +8059,6 @@ func resolvePromptFallbackBudget(agent *Agent, managerBudget int, hasManagerBudg
 	return "default_context_fallback_max_prompt_tokens", contextmgr.DefaultFallbackMaxPromptTokens, "contextmgr.DefaultFallbackMaxPromptTokens"
 }
 
-func hasPromptPreflightContextBudgetOverride(agent *Agent) bool {
-	_, ok := promptPreflightContextBudgetOverride(agent)
-	return ok
-}
-
 func promptPreflightContextBudgetOverride(agent *Agent) (int, bool) {
 	if agent == nil || agent.config == nil || len(agent.config.Options) == 0 {
 		return 0, false

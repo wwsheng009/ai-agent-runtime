@@ -9,13 +9,6 @@ import (
 
 const renderedLayoutSummaryMaxSources = 4
 
-type RenderedLayoutSummary struct {
-	Summary string   `json:"summary,omitempty"`
-	Length  int      `json:"length,omitempty"`
-	Layers  []string `json:"layers,omitempty"`
-	Sources []string `json:"sources,omitempty"`
-}
-
 // InstructionMessagesSummary carries a summary of the instruction (system/developer)
 // prefix and the total size of all messages that will be sent to the model.
 type InstructionMessagesSummary struct {
@@ -29,10 +22,10 @@ type InstructionMessagesSummary struct {
 }
 
 // SummarizeInstructionMessages extracts layer/source information directly from
-// structured messages, avoiding the fragile render→parse round-trip that
-// SummarizeRenderedLayout requires.  It also records both the instruction
-// prefix length and the total message content length so that callers can
-// distinguish "system prompt size" from "full prompt size".
+// structured messages, avoiding a fragile render→parse round-trip. It also
+// records both the instruction prefix length and the total message content
+// length so that callers can distinguish "system prompt size" from "full prompt
+// size".
 func SummarizeInstructionMessages(messages []types.Message) InstructionMessagesSummary {
 	if len(messages) == 0 {
 		return InstructionMessagesSummary{}
@@ -112,47 +105,6 @@ func SummarizeInstructionMessagesWithTokens(messages []types.Message, tokenCount
 	}
 	result.InstructionTokens = instructionTokens
 	result.TotalTokens = totalTokens
-	return result
-}
-
-// SummarizeRenderedLayout remains for backwards-compatible layout rendering.
-// Prefer SummarizeInstructionMessages when the original messages are available.
-func SummarizeRenderedLayout(layout string) RenderedLayoutSummary {
-	layout = strings.TrimSpace(strings.ReplaceAll(layout, "\r\n", "\n"))
-	if layout == "" {
-		return RenderedLayoutSummary{}
-	}
-
-	result := RenderedLayoutSummary{
-		Length:  len(layout),
-		Layers:  make([]string, 0, 4),
-		Sources: make([]string, 0, 4),
-	}
-
-	blocks := strings.Split(layout, "\n\n")
-	for _, block := range blocks {
-		lines := strings.Split(strings.TrimSpace(block), "\n")
-		if len(lines) == 0 {
-			continue
-		}
-		header := strings.TrimSpace(lines[0])
-		if strings.HasPrefix(header, "[") && strings.HasSuffix(header, "]") {
-			result.Layers = appendUniqueRenderedLayoutValue(result.Layers, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(header, "["), "]")))
-		}
-		for _, line := range lines[1:] {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "Source:") {
-				continue
-			}
-			source := strings.TrimSpace(strings.TrimPrefix(line, "Source:"))
-			if source == "" {
-				continue
-			}
-			result.Sources = appendUniqueRenderedLayoutValue(result.Sources, sourceBaseName(source))
-		}
-	}
-
-	result.Summary = buildRenderedLayoutSummaryTextFromParts(result.Layers, result.Sources)
 	return result
 }
 

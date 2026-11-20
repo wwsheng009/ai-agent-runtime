@@ -12,7 +12,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/viewport"
 )
 
 func TestFixedBottomSurfaceAdoptsEnginePresenter(t *testing.T) {
@@ -1623,7 +1622,7 @@ func newTestFixedBottomSurfaceWithSize(width, height int) *FixedBottomSurface {
 func newOwnedTestFixedBottomSurfaceWithSize(width, height int) *FixedBottomSurface {
 	surface := newTestFixedBottomSurfaceWithSize(width, height)
 	surface.ownedViewport = true
-	surface.viewportBackend = viewport.New(width, height)
+	surface.viewportBackend = renderengine.NewScreenModel(width, height)
 	surface.viewportBackend.Invalidate()
 	return surface
 }

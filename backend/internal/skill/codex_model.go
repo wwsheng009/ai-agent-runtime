@@ -271,21 +271,6 @@ func (p *CodexSkillPolicy) AllowImplicitInvocation() bool {
 	return *p.AllowImplicitInvocationValue
 }
 
-// LegacyToolNames returns the non-empty dependency values for compatibility layers.
-func (d *CodexSkillDependencies) LegacyToolNames() []string {
-	if d == nil || len(d.Tools) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(d.Tools))
-	for _, tool := range d.Tools {
-		if strings.TrimSpace(tool.Value) == "" {
-			continue
-		}
-		names = append(names, strings.TrimSpace(tool.Value))
-	}
-	return names
-}
-
 func collapseWhitespace(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {

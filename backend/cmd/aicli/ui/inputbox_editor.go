@@ -261,21 +261,6 @@ func readBufferedLine(reader io.Reader) (string, error) {
 	return "", nil
 }
 
-// readInteractiveLine / readInteractiveLineWithOptions / readInteractiveLineWithHooks
-// 是无 hooks 的编辑器测试入口：生产交互读经 readPromptWithHooksContext，
-// 这三者仅由包内测试（editor/keymap/completion）使用。
-func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string)) (string, error) {
-	return readInteractiveLineWithOptions(reader, writer, prompt, history, onChange, true, defaultPasteBurstHoldFirstRune())
-}
-
-func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), echoSubmit bool, holdFirstRune bool) (string, error) {
-	return readInteractiveLineWithHooks(reader, writer, prompt, history, onChange, nil, echoSubmit, holdFirstRune)
-}
-
-func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
-	return readInteractiveLineWithHooksContext(context.Background(), reader, writer, prompt, history, onChange, hooks, echoSubmit, holdFirstRune)
-}
-
 // SupportsCancelableInteractiveInputRead reports whether the current stdin can
 // be polled before a raw-mode read. Background readers must require this so a
 // context cancellation cannot leave a stale goroutine blocked inside Read.

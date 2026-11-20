@@ -7,9 +7,9 @@ import (
 
 // Engine is the renderengine facade and the shared owner of the render
 // pipeline's scheduler, presenter, screen model, composer, and markdown
-// cache. The historical ui/viewport package now delegates to these owned
-// primitives for source compatibility; SceneState remains the next migration
-// boundary for production owned viewport paths.
+// cache. The historical ui/viewport compatibility package has been removed;
+// SceneState remains the next migration boundary for production owned viewport
+// paths.
 type Engine struct {
 	pump      *FramePump
 	presenter *Presenter

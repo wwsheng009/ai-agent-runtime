@@ -576,50 +576,6 @@ func (a *GeminiAdapter) IsReasoningModel(model string) bool {
 	return false
 }
 
-// AccumulateStreamData 累积流式数据块
-// 保留向后兼容
-func (a *GeminiAdapter) AccumulateStreamData(streamData map[string]interface{}, chunkData map[string]interface{}) bool {
-	// 初始化
-	if _, exists := streamData["content"]; !exists {
-		streamData["content"] = ""
-		streamData["finish_reason"] = ""
-		streamData["tool_calls"] = []map[string]interface{}{}
-	}
-
-	// 提取 candidates
-	if candidates, ok := chunkData["candidates"].([]interface{}); ok && len(candidates) > 0 {
-		if candidate, ok := candidates[0].(map[string]interface{}); ok {
-			// 检查 finishReason
-			if finishReason, ok := candidate["finishReason"].(string); ok {
-				streamData["finish_reason"] = finishReason
-				if finishReason != "" {
-					return true
-				}
-			}
-
-			if content, ok := candidate["content"].(map[string]interface{}); ok {
-				if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
-					for _, part := range parts {
-						if partMap, ok := part.(map[string]interface{}); ok {
-							// 提取 text 内容
-							if text, ok := partMap["text"].(string); ok {
-								streamData["content"] = streamData["content"].(string) + text
-							}
-							// 提取 Function Call（单次完整传输，不需要增量合并）
-							if functionCall, ok := partMap["functionCall"].(map[string]interface{}); ok {
-								existingCalls := streamData["tool_calls"].([]map[string]interface{})
-								streamData["tool_calls"] = append(existingCalls, functionCall)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return false
-}
-
 // GetAPIPath 获取默认 API 路径
 func (a *GeminiAdapter) GetAPIPath() string {
 	// Gemini 使用 v1beta API

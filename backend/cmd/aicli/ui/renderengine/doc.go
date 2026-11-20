@@ -15,8 +15,7 @@
 // budget. The Engine is the facade, the Presenter assembles a frame in
 // memory before one target Write, owned viewport composition emits row owners,
 // and markdown documents use the shared RenderCache. ScreenModel, row
-// ownership, and composition live here; ui/viewport is now a compatibility
-// wrapper while the Scene migration proceeds.
+// ownership, and composition live here.
 package renderengine
 
 import "strings"

@@ -1,4 +1,4 @@
-package viewport
+package renderengine
 
 import (
 	"reflect"
@@ -26,6 +26,20 @@ func gridFromFeed(width, height int, stream string) [][]vt.Cell {
 	return g
 }
 
+func blankGrid(width, height int) [][]vt.Cell {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	grid := make([][]vt.Cell, height)
+	for row := range grid {
+		grid[row] = make([]vt.Cell, width)
+	}
+	return grid
+}
+
 var cupPattern = regexp.MustCompile("\x1b\\[(\\d+);(\\d+)H")
 
 // cupRows returns the set of 1-based rows addressed by CUP in a diff.
@@ -44,7 +58,7 @@ func cupRows(diff string) map[int]bool {
 // TestBackend_NoChangeEmitsNothing pins that a blank frame and a repeated frame
 // both diff to an empty string (idempotent Flush).
 func TestBackend_NoChangeEmitsNothing(t *testing.T) {
-	b := New(20, 4)
+	b := NewScreenModel(20, 4)
 	if got := b.Flush(); got != "" {
 		t.Fatalf("blank->blank Flush should be empty, got %q", got)
 	}
@@ -60,7 +74,7 @@ func TestBackend_NoChangeEmitsNothing(t *testing.T) {
 }
 
 func TestBackend_InvalidateRepaintsBlankCells(t *testing.T) {
-	b := New(4, 2)
+	b := NewScreenModel(4, 2)
 	b.Invalidate()
 	diff := b.Flush()
 	if diff == "" {
@@ -81,7 +95,7 @@ func TestBackend_InvalidateRepaintsBlankCells(t *testing.T) {
 // clearing occupied cells must leave Text="" (via EL), not residual ' ' glyphs
 // that would diverge from Compose's true blank cells.
 func TestBackend_DiffBlankingUsesELNotSpaces(t *testing.T) {
-	b := New(8, 2)
+	b := NewScreenModel(8, 2)
 	b.StageFrame(gridFromFeed(8, 2, "active-1\nactive-2"))
 	if diff := b.Flush(); diff == "" {
 		t.Fatal("expected initial paint")
@@ -130,7 +144,7 @@ func TestBackend_RoundTripThroughVTScreen(t *testing.T) {
 			front := gridFromFeed(tc.w, tc.h, tc.front)
 			back := gridFromFeed(tc.w, tc.h, tc.back)
 
-			b := New(tc.w, tc.h)
+			b := NewScreenModel(tc.w, tc.h)
 			b.StageFrame(front)
 			frontDiff := b.Flush()
 			b.StageFrame(back)
@@ -140,7 +154,7 @@ func TestBackend_RoundTripThroughVTScreen(t *testing.T) {
 			replayed.Feed(frontDiff)
 			replayed.Feed(diff)
 
-			tb := New(tc.w, tc.h)
+			tb := NewScreenModel(tc.w, tc.h)
 			tb.StageFrame(back)
 			target := vt.NewScreen(tc.w, tc.h)
 			target.Feed(tb.Flush())
@@ -170,7 +184,7 @@ func TestBackend_SingleRowChangeIsLocal(t *testing.T) {
 	front := gridFromFeed(w, h, "a\nb\nc\nd\ne")
 	back := gridFromFeed(w, h, "a\nb\nX\nd\ne")
 
-	b := New(w, h)
+	b := NewScreenModel(w, h)
 	b.StageFrame(front)
 	_ = b.Flush()
 	b.StageFrame(back)
@@ -185,7 +199,7 @@ func TestBackend_SingleRowChangeIsLocal(t *testing.T) {
 // TestBackend_ResizeRepaints pins that Resize clears the front buffer so the
 // next Flush repaints the whole frame.
 func TestBackend_ResizeRepaints(t *testing.T) {
-	b := New(10, 4)
+	b := NewScreenModel(10, 4)
 	b.StageFrame(gridFromFeed(10, 4, "hi"))
 	_ = b.Flush()
 
