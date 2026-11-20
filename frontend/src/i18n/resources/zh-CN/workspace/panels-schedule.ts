@@ -273,14 +273,18 @@ export const zhWorkspacePanelsSchedule = {
   },
   runs: {
     title: "运行日志",
-    description: "查看所选自动化最近 {{count}} 条执行记录、输出与失败原因。",
-    taskLabel: "选择自动化任务",
+    description:
+      "默认展示全部自动化任务最近 {{count}} 条执行记录；可按任务筛选。",
+    allTasks: "全部任务",
+    taskLabel: "按自动化任务筛选",
     taskPlaceholder: "选择一个任务",
     refresh: "刷新运行日志",
     noTasks: "暂无可查看的自动化任务",
     noTasksHint: "创建任务后，它的执行历史会显示在这里。",
     loading: "正在加载运行日志…",
     loadError: "运行日志加载失败。",
+    partialLoadError:
+      "部分任务的运行日志加载失败，当前展示已成功加载的记录。",
     retry: "重试",
     empty: "还没有运行记录",
     emptyHint: "任务首次运行后，输出与执行结果会显示在这里。",

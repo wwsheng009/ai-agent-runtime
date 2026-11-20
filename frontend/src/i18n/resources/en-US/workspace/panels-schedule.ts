@@ -293,14 +293,17 @@ export const enWorkspacePanelsSchedule: DeepStringShape<
   runs: {
     title: "Run logs",
     description:
-      "Review the latest {{count}} runs for the selected automation, including output and failures.",
-    taskLabel: "Choose an automation task",
+      "Shows the latest {{count}} runs across all automation tasks by default; filter by task when needed.",
+    allTasks: "All tasks",
+    taskLabel: "Filter by automation task",
     taskPlaceholder: "Select a task",
     refresh: "Refresh run logs",
     noTasks: "No automation tasks to inspect",
     noTasksHint: "Create a task and its execution history will appear here.",
     loading: "Loading run logs…",
     loadError: "Run logs could not be loaded.",
+    partialLoadError:
+      "Some task runs could not be loaded; successfully loaded runs are shown.",
     retry: "Retry",
     empty: "No runs yet",
     emptyHint:
