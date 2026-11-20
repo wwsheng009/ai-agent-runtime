@@ -80,12 +80,6 @@ func (t *transport) setNotificationHandler(h notificationHandler) {
 	t.mu.Unlock()
 }
 
-func (t *transport) setRequestHandler(h requestHandler) {
-	t.mu.Lock()
-	t.onRequest = h
-	t.mu.Unlock()
-}
-
 func (t *transport) start() {
 	go t.readLoop()
 }

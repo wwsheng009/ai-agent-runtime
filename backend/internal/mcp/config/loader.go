@@ -191,43 +191,6 @@ func ApplyDefaults(config *Config) {
 	}
 }
 
-// findConfigFile 查找配置文件
-func findConfigFile(configPath string) (string, error) {
-	// 如果提供了绝对路径，直接使用
-	if filepath.IsAbs(configPath) {
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, nil
-		}
-	}
-
-	// 检查相对路径
-	paths := []string{
-		configPath,
-		filepath.Join(".", configPath),
-		filepath.Join("~", ".aicli", configPath),
-		filepath.Join("~", ".config", "aicli", configPath),
-		"/etc/aicli/" + configPath,
-	}
-
-	for _, p := range paths {
-		// 展开 ~
-		if strings.HasPrefix(p, "~") {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				continue
-			}
-			p = filepath.Join(home, p[2:])
-		}
-
-		// 检查文件是否存在
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-
-	return "", fmt.Errorf("找不到配置文件: %s", configPath)
-}
-
 // Validate 验证配置
 func (l *Loader) validate(config *Config) error {
 	// 验证传输类型

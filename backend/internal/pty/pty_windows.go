@@ -334,13 +334,6 @@ func closeHandles(handles ...windows.Handle) error {
 	return firstErr
 }
 
-// osCommandOutput runs a helper command hidden (lifecycle diagnostics/tests).
-func osCommandOutput(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Output()
-}
-
 // StartPipeForBench starts the same command through a plain pipe pair (no
 // pseudoconsole) so benchmarks can compare pipe vs ConPTY throughput.
 // Diagnostics-only entry point; the interactive manager always picks via

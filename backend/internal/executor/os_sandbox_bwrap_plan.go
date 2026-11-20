@@ -173,17 +173,3 @@ func defaultBwrapHostRoots() []string {
 		"/run",
 	}
 }
-
-// formatBwrapPlan is a test/debug helper that renders planned argv.
-func formatBwrapPlan(command string, args []string) string {
-	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, command)
-	for _, a := range args {
-		if strings.ContainsAny(a, " \t\"'") {
-			parts = append(parts, fmt.Sprintf("%q", a))
-			continue
-		}
-		parts = append(parts, a)
-	}
-	return strings.Join(parts, " ")
-}

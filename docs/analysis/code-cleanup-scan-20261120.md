@@ -229,6 +229,18 @@
   `getGlobalMailboxRecord`、`resolveGlobalAgentDSN`、`resolveGlobalMailboxDSN`。
 - 验证：`subagentbatch`、`agentcontrol` 的 `-short` 测试通过。
 
+### 0.17 第十七批已执行（2026-11-20）
+
+- 删除安全包中的零引用小工具：
+  - `envdclient`：`Client.doUnaryRaw`；
+  - `executor`：`formatBwrapPlan`（test/debug helper）；
+  - `lsp`：`transport.setRequestHandler`；
+  - `mcp/config`：`findConfigFile`；
+  - `pty`：`osCommandOutput`（test/debug helper）；
+  - `toolresult`：`nextActionForPartialBatch`；
+  - `providerops`：`runModelProbes`。
+- 验证：上述 7 个包的 `-short` 测试全部通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

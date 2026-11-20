@@ -507,11 +507,6 @@ dispatch:
 	return results
 }
 
-// runModelProbes 是包内既有点名的内部包装。
-func runModelProbes(req ProbeMatrixRequest) []ModelProbeMatrix {
-	return ProbeMatrix(req)
-}
-
 // ---------------------------------------------------------------------------
 // 探测结果写回：把 supported 结论沉淀为用户级 model_cards.yaml 里的探测
 // 卡片，让后续 fetch-models / login 的分类链路把它们从 assumed 升级成

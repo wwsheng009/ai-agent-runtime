@@ -766,10 +766,6 @@ func NextActionForPartialBatch(failed, requested int, items []FailedItem) string
 	return nextActionForPartialBatchItems(failed, requested, items)
 }
 
-func nextActionForPartialBatch(failed, requested int) string {
-	return NextActionForPartialBatch(failed, requested, nil)
-}
-
 func nextActionForPartialBatchItems(failed, requested int, items []FailedItem) string {
 	base := fmt.Sprintf(
 		"Batch finished with %d/%d item failure(s). Reuse successful item outputs; fix or re-run only the failed items with corrected inputs. Do not re-run the entire batch unchanged.",

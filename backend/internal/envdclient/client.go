@@ -244,39 +244,6 @@ func (c *Client) doUnary(ctx context.Context, service, method string, request, r
 	return nil
 }
 
-// doUnaryRaw performs a unary call and returns the raw body, for endpoints that
-// are not JSON (metrics).
-func (c *Client) doUnaryRaw(ctx context.Context, service, method string, request any) ([]byte, error) {
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return nil, fmt.Errorf("envdclient: encode %s.%s request: %w", service, method, err)
-	}
-	ctx, cancel := context.WithTimeout(ctx, c.tmo)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL(service, method), bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("envdclient: build %s.%s request: %w", service, method, err)
-	}
-	req.Header.Set("Content-Type", contentTypeUnary)
-	c.applyHeaders(req)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("envdclient: call %s.%s: %w", service, method, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFramePayload))
-	if err != nil {
-		return nil, fmt.Errorf("envdclient: read %s.%s response: %w", service, method, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, decodeUnaryError(resp.StatusCode, body)
-	}
-	return body, nil
-}
-
 // decodeUnaryError turns a non-200 unary response into an error.
 func decodeUnaryError(status int, body []byte) error {
 	var connectErr ConnectError
