@@ -294,8 +294,9 @@ type Handler struct {
 	supervisionWake   *supervision.WakeConsumer
 	// supervisionWakeSubmit 是 wake/resume 提示词真正落到父会话上的提交口（默认
 	// 异步提交给父 actor）。测试可覆盖它观察"实际投递的 prompt"——这是有意的
-	// 测试缝（与 supervisionWake 同形）；生产路径保持 nil。
-	supervisionWakeSubmit func(ctx context.Context, parentSessionID, prompt string) error
+	// 测试缝（与 supervisionWake 同形）；自定义实现必须显式返回 accepted=true
+	// 才代表 durable receipt。生产路径保持 nil，并直接使用 actor receipt。
+	supervisionWakeSubmit func(ctx context.Context, parentSessionID, prompt string) (accepted bool, err error)
 
 	executionSupervisorMu   sync.RWMutex
 	executionSupervisor     *supervision.ExecutionSupervisor
@@ -801,6 +802,9 @@ func cloneBoolPointer(value *bool) *bool {
 func (h *Handler) SetSessionManager(manager *chat.SessionManager) {
 	h.sessionManager = manager
 	h.installSessionCloseHook(h.runtimeConfig)
+	if manager != nil {
+		wireSessionMemoryPurgeCoordinator(manager, h.MemoryRuntime())
+	}
 }
 
 // SetHotReload 设置 HotReload
@@ -1147,6 +1151,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// Automation tasks (Schedule). Distinct from /background/jobs: schedule_*
 	// registers reminders that deliver to their original Session when due.
 	runtimeRouter.HandleFunc("/schedule/catalog", h.GetScheduleCatalog).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/templates", h.ListScheduleTemplates).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/templates", h.CreateScheduleTemplate).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/schedule/templates/{id}", h.UpdateScheduleTemplate).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/schedule/templates/{id}", h.DeleteScheduleTemplate).Methods(http.MethodDelete)
 	runtimeRouter.HandleFunc("/schedule/list", h.ListScheduleTasks).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/history", h.GetScheduleDeliveryHistory).Methods(http.MethodGet)
 	// J3：作业运行历史（headless/workspace 作业的执行记录）。
@@ -1159,6 +1167,16 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/schedule/resume", h.ResumeScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/delete", h.DeleteScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)
+	// 工作区持久化 MCP 配置：不依赖 session，workspace_path 统一通过 query
+	// 参数提供并由 workspaceMCPAdminScopeFromRequest 规范化/校验。
+	// reload 必须在动态 /{name} 路由之前注册，避免被名称路由吞掉。
+	runtimeRouter.HandleFunc("/workspaces/mcps", h.ListWorkspaceRuntimeMCPs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/workspaces/mcps", h.AddWorkspaceRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/workspaces/mcps/reload", h.ReloadWorkspaceRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/workspaces/mcps/{name}", h.UpdateWorkspaceRuntimeMCP).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/workspaces/mcps/{name}", h.RemoveWorkspaceRuntimeMCP).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/workspaces/mcps/{name}/enable", h.EnableWorkspaceRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/workspaces/mcps/{name}/disable", h.DisableWorkspaceRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps/{name}", h.UpdateRuntimeMCP).Methods(http.MethodPut)
@@ -1992,6 +2010,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			"messages is required"))
 		return
 	}
+	initialPermissionMode, initializePermissionMode, permissionModeErr := initialAgentChatPermissionMode(&req)
+	if permissionModeErr != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, permissionModeErr.Error()))
+		return
+	}
+	if initializePermissionMode && h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager is required to initialize a permission mode"))
+		return
+	}
 
 	// expose_skills 依赖 ReAct 回合把 skill 程序清单交给模型执行：显式暴露 skill 时
 	// 强制打开 ReAct，避免宿主漏配 enable_react 时"文档注入了却没有工具面可用"。
@@ -2189,14 +2217,36 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// explicit workspace_path would reuse it and fail again). A bound path is
 	// never overwritten — directory binding must not drift with per-turn
 	// explicit request paths (§4.3 一经绑定不漂移).
+	sessionUpdated := false
 	if sessionNeedsWorkspacePathMaterialization(session, workspacePath) && h.sessionManager != nil {
 		if session.Metadata.Context == nil {
 			session.Metadata.Context = make(map[string]interface{})
 		}
 		sessionmeta.Set(session.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+		sessionUpdated = true
+	}
+	if initializePermissionMode {
+		if initialPermissionMode == runtimepolicy.ModeBypassPermissions &&
+			runtimepolicy.BypassDisabledForWorkspace(workspacePath) {
+			h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission,
+				"disable_bypass 已启用（permissions 分层），无法切换到 bypass_permissions"))
+			return
+		}
+		if err := applyInitialAgentChatPermissionMode(session, initialPermissionMode); err != nil {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+			return
+		}
+		sessionUpdated = true
+	}
+	if sessionUpdated && h.sessionManager != nil {
 		updateCtx, updateCancel := sessionStoreQueryContext(r)
 		if updateErr := h.sessionManager.Update(updateCtx, session); updateErr != nil {
-			logger.Warnf("agent chat: materialize session workspace_path failed: %s", updateErr)
+			if initializePermissionMode {
+				updateCancel()
+				writeSessionStoreError(w, updateErr)
+				return
+			}
+			logger.Warnf("agent chat: persist session initialization failed: %s", updateErr)
 		}
 		updateCancel()
 	}
@@ -3569,7 +3619,6 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// 会话已删除：作废其待投递 wake 并解除巡检（best-effort，不影响删除结果）。
 	h.releaseSessionSupervisionObligations(context.Background(), sessionID)
-	h.deleteMemoryTurnDigestsForSession(sessionID)
 
 	// 网关：会话集合变化时增量推送（未接入网关时为 no-op）。
 	h.pushGatewaySessions()
@@ -3859,7 +3908,6 @@ func (h *Handler) BatchDeleteSessions(w http.ResponseWriter, r *http.Request) {
 		if err := h.sessionManager.Delete(ctx, sessionID); err != nil {
 			return err
 		}
-		h.deleteMemoryTurnDigestsForSession(sessionID)
 		return nil
 	}, "deleted", true)
 }
