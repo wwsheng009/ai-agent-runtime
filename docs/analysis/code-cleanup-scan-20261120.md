@@ -122,6 +122,14 @@
 - 验证：commands 的 Debug、tool-render freeze、DirectWriter inventory 定向测试
   通过（首次编译遇到环境 OOM，降低 `GOMAXPROCS`/`GOGC` 后复跑通过）。
 
+### 0.8 第八批已执行（2026-11-20）
+
+- `internal/lsp/realserver_test.go` 与
+  `internal/tools/mcp_stack_e2e_test.go` 移入 `integration` tag：
+  默认测试不再拉起真实 rust-analyzer 或真实 MCP stdio 子进程；
+  `make test-full` 仍会覆盖。
+- 验证：两个包在默认模式与 `-tags integration` 模式下均编译通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

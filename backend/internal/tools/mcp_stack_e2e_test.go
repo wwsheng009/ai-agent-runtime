@@ -1,4 +1,4 @@
-//go:build !win7compat
+//go:build !win7compat && integration
 
 package tools
 
