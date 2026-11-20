@@ -99,17 +99,6 @@ func NewSQLiteGlobalAgentRegistryStore(cfg *GlobalAgentStoreConfig) (*SQLiteGlob
 	return store, nil
 }
 
-func newSQLiteGlobalAgentRegistryStoreWithDB(ctx context.Context, db *sql.DB, dsn string) (*SQLiteGlobalAgentRegistryStore, error) {
-	if db == nil {
-		return nil, fmt.Errorf("agent control agent registry db is not initialized")
-	}
-	store := &SQLiteGlobalAgentRegistryStore{db: db, dsn: strings.TrimSpace(dsn)}
-	if err := store.init(ctx); err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
 // Opened reports whether the durable backend has been opened.
 func (s *SQLiteGlobalAgentRegistryStore) Opened() bool {
 	if s == nil {
@@ -1948,13 +1937,6 @@ func resolveLazyGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, string, err
 	// cache=shared 内存库，互相看到对方的行（artifact/background/chat 的
 	// 默认内存 DSN 同样使用 uuid）。
 	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-agent-registry-%s?mode=memory&cache=shared", uuid.NewString())), "", nil
-}
-
-// resolveGlobalAgentDSN keeps the historical helper for callers/tests that only
-// need a DSN. Directory creation is deferred until ensure().
-func resolveGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, error) {
-	dsn, _, err := resolveLazyGlobalAgentDSN(cfg)
-	return dsn, err
 }
 
 func nullAgentString(value string) interface{} {

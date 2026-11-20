@@ -410,7 +410,3 @@ func (t *TurnSuspension) ObligationBatchIDs() []string {
 	}
 	return nil
 }
-
-func (t *TurnSuspension) obligationBatchIDs() []string {
-	return t.ObligationBatchIDs()
-}

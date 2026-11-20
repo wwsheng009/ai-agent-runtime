@@ -77,17 +77,6 @@ func NewSQLiteGlobalMailboxRegistryStore(cfg *GlobalMailboxStoreConfig) (*SQLite
 	return store, nil
 }
 
-func newSQLiteGlobalMailboxRegistryStoreWithDB(ctx context.Context, db *sql.DB, dsn string) (*SQLiteGlobalMailboxRegistryStore, error) {
-	if db == nil {
-		return nil, fmt.Errorf("agent control mailbox registry db is not initialized")
-	}
-	store := &SQLiteGlobalMailboxRegistryStore{db: db, dsn: strings.TrimSpace(dsn)}
-	if err := store.init(ctx); err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
 // Opened reports whether the durable backend has been opened.
 func (s *SQLiteGlobalMailboxRegistryStore) Opened() bool {
 	if s == nil {
@@ -698,17 +687,6 @@ func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxRecordSeq(ctx 
 	return seq, nil
 }
 
-func (s *SQLiteGlobalMailboxRegistryStore) getGlobalMailboxRecord(ctx context.Context, seq int64) (MailboxRecord, error) {
-	if seq <= 0 {
-		return MailboxRecord{}, fmt.Errorf("global mailbox sequence is required")
-	}
-	db, err := s.dbHandle()
-	if err != nil {
-		return MailboxRecord{}, err
-	}
-	return getGlobalMailboxRecordSQL(ctx, db, "agent_control_global_mailbox_records", seq)
-}
-
 func getGlobalMailboxRecordSQL(ctx context.Context, runner globalMailboxSQLRunner, tableName string, seq int64) (MailboxRecord, error) {
 	if seq <= 0 {
 		return MailboxRecord{}, fmt.Errorf("global mailbox sequence is required")
@@ -1113,13 +1091,6 @@ func ensureAgentControlStoreDirectory(path string) error {
 		return fmt.Errorf("create agent control store directory: %w", err)
 	}
 	return nil
-}
-
-// resolveGlobalMailboxDSN keeps the historical helper for callers/tests that
-// only need a DSN. Directory creation is deferred until ensure().
-func resolveGlobalMailboxDSN(cfg *GlobalMailboxStoreConfig) (string, error) {
-	dsn, _, err := resolveLazyGlobalMailboxDSN(cfg)
-	return dsn, err
 }
 
 func ensureGlobalMailboxDSNOptions(dsn string) string {

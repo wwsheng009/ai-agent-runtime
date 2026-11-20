@@ -220,6 +220,15 @@
   `TestEmitRuntimeEventLiteralsAreRegistered`（`tool_loop.child_results_consumption_failed`
   未登记），与本次删除无关。
 
+### 0.16 第十六批已执行（2026-11-20）
+
+- `internal/subagentbatch`：删除零引用 `TurnSuspension.obligationBatchIDs`。
+- `internal/agentcontrol`：删除 5 个零引用 DB/DSN helper：
+  `newSQLiteGlobalAgentRegistryStoreWithDB`、
+  `newSQLiteGlobalMailboxRegistryStoreWithDB`、
+  `getGlobalMailboxRecord`、`resolveGlobalAgentDSN`、`resolveGlobalMailboxDSN`。
+- 验证：`subagentbatch`、`agentcontrol` 的 `-short` 测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
