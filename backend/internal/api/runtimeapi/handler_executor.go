@@ -17,6 +17,8 @@ type handlerExecutor struct {
 	handler *Handler
 }
 
+var _ runtimehost.TurnWaiter = (*handlerExecutor)(nil)
+
 // Executor 返回会话执行核的稳定接口（E3.0：适配现有执行栈，行为零变化）。
 // 适配器无状态，可安全重复调用。
 func (h *Handler) Executor() runtimehost.Executor {
@@ -54,6 +56,28 @@ func (e *handlerExecutor) SubmitTurn(ctx context.Context, req runtimehost.TurnRe
 	}
 	result.Completed = completed
 	result.State = state
+	if submitResult != nil {
+		result.Output = submitResult.Output
+		result.Success = submitResult.Success
+		result.Error = submitResult.Error
+	}
+	return result, nil
+}
+
+// SubmitTurnWait waits for the terminal turn result. HTTP callers intentionally
+// use the short-budget SubmitTurn receipt; automation jobs use this method so a
+// completed model turn is not mistaken for an incomplete submission.
+func (e *handlerExecutor) SubmitTurnWait(ctx context.Context, req runtimehost.TurnRequest) (runtimehost.TurnResult, error) {
+	result := runtimehost.TurnResult{SessionID: strings.TrimSpace(req.SessionID)}
+	actor, err := e.actorFor(req.SessionID)
+	if err != nil {
+		return result, err
+	}
+	submitResult, err := actor.SubmitPrompt(ctx, req.Prompt, req.RunMeta, submitOptionsForTurn(req)...)
+	if err != nil {
+		return result, err
+	}
+	result.Completed = true
 	if submitResult != nil {
 		result.Output = submitResult.Output
 		result.Success = submitResult.Success

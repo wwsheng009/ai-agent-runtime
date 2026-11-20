@@ -22,10 +22,6 @@ const idleSweepInterval = time.Minute
 // embeddedTurnTimeout 是一次内嵌 turn 的上限（方案 E2：maxTurnDuration 默认 10m）。
 const embeddedTurnTimeout = 10 * time.Minute
 
-// headlessDeferInterval 是「无 headless 执行能力」时对非 session 目标的延后间隔
-// （J2：不空转、不计死信，等具备能力的宿主接管）。
-const headlessDeferInterval = 5 * time.Minute
-
 // 执行模式取值（与 config.ScheduleMode* 对齐；本包不 import config，避免反向依赖）。
 const (
 	// ModeDelegate 只经 HTTP 委派宿主执行，永不内嵌。
@@ -169,6 +165,15 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 // Start 启动：立即驱动一次（含启动扫描），随后按最近目标排定定时器。
 // ctx 目前未使用（保留签名以便后续接取消）。
 func (r *Runtime) Start(_ context.Context) {
+	if r != nil && r.opts.Service != nil {
+		if _, ok := r.opts.Executor.(HeadlessExecutor); ok {
+			if count, err := r.opts.Service.RequeueBlockedHeadlessJobs(); err != nil {
+				r.opts.Logf("schedule: requeue blocked headless jobs: %v", err)
+			} else if count > 0 {
+				r.opts.Logf("schedule: requeued %d blocked headless job(s) now that an executor is available", count)
+			}
+		}
+	}
 	r.RequestDrive()
 }
 
@@ -358,6 +363,7 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	r.renewClaimsForLongWork(group, now)
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
 	defer cancel()
+	runStarted := r.opts.Clock()
 	result, err := exec.ExecuteHeadlessTurn(ctx, HeadlessTurnRequest{
 		JobID:           task.Record.ID,
 		Goal:            task.Record.Goal,
@@ -370,12 +376,16 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 		Workspace:       task.TargetWorkspace,
 		TargetKind:      task.TargetKind,
 	})
+	runFinished := r.opts.Clock()
+	if runFinished.Before(runStarted) {
+		runFinished = runStarted
+	}
 	// J3：无论成败都落一条运行历史。
-	r.recordJobRun(task, now, result, err, now)
+	r.recordJobRun(task, runStarted, result, err, runFinished)
 	if err != nil {
 		r.mtr.deliveryFailedTotal.Add(int64(len(group)))
 		for _, member := range group {
-			r.markFailed(member, err, now)
+			r.markFailed(member, err, runFinished)
 		}
 		r.opts.Logf("schedule: headless job %s failed: %v", task.Record.ID, err)
 		return
@@ -383,7 +393,7 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 	r.mtr.embeddedTotal.Add(int64(len(group)))
 	r.mtr.deliveredTotal.Add(int64(len(group)))
 	for _, member := range group {
-		r.commit(member, now)
+		r.commit(member, runFinished)
 	}
 	// J3：结果回投必须在 commit **之后**——commit 会清理该作业的 pending（正常投递
 	// 成功的语义），若先回投则失败兜底的 pending 会被立刻抹掉。

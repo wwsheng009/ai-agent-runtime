@@ -1159,6 +1159,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/schedule/history", h.GetScheduleDeliveryHistory).Methods(http.MethodGet)
 	// J3：作业运行历史（headless/workspace 作业的执行记录）。
 	runtimeRouter.HandleFunc("/schedule/runs", h.GetScheduleJobRuns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/runs/clear", h.ClearScheduleJobRuns).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/schedule/runs/clear-all", h.ClearAllScheduleJobRuns).Methods(http.MethodPost)
 	// Manual creation entry (origin=manual): the service-side validation is the
 	// same pipeline the model tool uses; see CreateScheduleTask.
 	runtimeRouter.HandleFunc("/schedule/create", h.CreateScheduleTask).Methods(http.MethodPost)

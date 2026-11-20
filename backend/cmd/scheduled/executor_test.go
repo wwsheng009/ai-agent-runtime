@@ -99,6 +99,29 @@ func TestScheduleExecutorAdapterHeadlessCreatesSession(t *testing.T) {
 	}
 }
 
+func TestScheduleExecutorAdapterHeadlessUsesConfiguredProfileFallback(t *testing.T) {
+	fake := &fakeExecutor{}
+	adapter := scheduleExecutorAdapter{
+		exec:    fake,
+		profile: "scheduled",
+		createSession: func(context.Context, string) (string, error) {
+			return "session-headless-profile", nil
+		},
+		initializeSession: func(context.Context, string, schedule.HeadlessTurnRequest) error {
+			return nil
+		},
+	}
+	_, err := adapter.ExecuteHeadlessTurn(context.Background(), schedule.HeadlessTurnRequest{
+		Prompt: "p", TargetKind: schedule.TargetHeadless,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteHeadlessTurn: %v", err)
+	}
+	if len(fake.reqs) != 1 || fake.reqs[0].Profile != "scheduled" {
+		t.Fatalf("headless run must fall back to execution.profile, got %+v", fake.reqs)
+	}
+}
+
 // TestScheduleExecutorAdapterHeadlessMapsExecutionContext 验证初始化顺序以及
 // provider/model/reasoning/workspace 映射。
 func TestScheduleExecutorAdapterHeadlessMapsExecutionContext(t *testing.T) {

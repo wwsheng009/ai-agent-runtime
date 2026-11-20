@@ -127,6 +127,62 @@ func (h *Handler) GetScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "runs": runs, "count": len(runs)})
 }
 
+// ClearScheduleJobRuns removes the execution history for one owned job while
+// keeping the schedule and its delivery state intact.
+func (h *Handler) ClearScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	var request scheduleControlRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
+		return
+	}
+	id := strings.TrimSpace(request.ID)
+	if id == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
+		return
+	}
+	deleted, err := service.ClearJobRuns(request.SessionID, id)
+	if err != nil {
+		if input, ok := schedule.IsInputError(err); ok {
+			status := http.StatusBadRequest
+			if input.Code == schedule.CodeNotFound {
+				status = http.StatusNotFound
+			}
+			h.writeError(w, status, errors.New(errors.ErrValidationFailed, input.Message))
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":           id,
+		"deletedCount": deleted,
+	})
+}
+
+// ClearAllScheduleJobRuns removes every execution-history row. This has a
+// separate endpoint so an omitted task id can never broaden a task-scoped
+// clear request into a global deletion.
+func (h *Handler) ClearAllScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	deleted, err := service.ClearAllJobRuns()
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deletedCount": deleted,
+	})
+}
+
 type scheduleUpdateRequest struct {
 	SessionID             string                `json:"session_id"`
 	ID                    string                `json:"id"`

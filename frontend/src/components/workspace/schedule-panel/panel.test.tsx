@@ -246,6 +246,124 @@ describe("SchedulePanel actions", () => {
     expect(controlTask).toHaveBeenCalledWith("task-1", "resume");
   });
 
+  it("任务行提供查看作业历史的入口并回传目标任务", () => {
+    const onViewHistory = vi.fn();
+    useScheduleTasksMock.mockReturnValue({
+      controlTask: vi.fn(),
+      controllingAction: null,
+      controllingId: "",
+      createTask: vi.fn().mockResolvedValue({ ok: true }),
+      creating: false,
+      deletingId: "",
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      removeTask: vi.fn(),
+      saveTask: vi.fn().mockResolvedValue({ ok: true }),
+      savingId: "",
+      tasks: [task()],
+    });
+
+    act(() => {
+      root?.render(
+        <SchedulePanel
+          onViewHistory={onViewHistory}
+          sessionId="session-1"
+        />,
+      );
+    });
+
+    const history = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "查看历史");
+    if (!history) {
+      throw new Error("missing view history action");
+    }
+    act(() => history.click());
+
+    expect(onViewHistory).toHaveBeenCalledTimes(1);
+    expect(onViewHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1", title: "Ping" }),
+    );
+  });
+
+  it("展示关联会话并提供打开会话入口", () => {
+    const onOpenSession = vi.fn();
+    useScheduleTasksMock.mockReturnValue({
+      controlTask: vi.fn(),
+      controllingAction: null,
+      controllingId: "",
+      createTask: vi.fn().mockResolvedValue({ ok: true }),
+      creating: false,
+      deletingId: "",
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      removeTask: vi.fn(),
+      saveTask: vi.fn().mockResolvedValue({ ok: true }),
+      savingId: "",
+      tasks: [task()],
+    });
+
+    act(() => {
+      root?.render(
+        <SchedulePanel
+          onOpenSession={onOpenSession}
+          sessionId="session-1"
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("关联会话");
+    expect(container.textContent).toContain("session-1");
+    const openSession = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "打开会话");
+    if (!openSession) {
+      throw new Error("missing open session action");
+    }
+    act(() => openSession.click());
+
+    expect(onOpenSession).toHaveBeenCalledTimes(1);
+    expect(onOpenSession).toHaveBeenCalledWith("session-1");
+  });
+
+  it("仅右侧栏宿主显式开启时显示全局自动化入口", () => {
+    useScheduleTasksMock.mockReturnValue({
+      controlTask: vi.fn(),
+      controllingAction: null,
+      controllingId: "",
+      createTask: vi.fn().mockResolvedValue({ ok: true }),
+      creating: false,
+      deletingId: "",
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+      removeTask: vi.fn(),
+      saveTask: vi.fn().mockResolvedValue({ ok: true }),
+      savingId: "",
+      tasks: [],
+    });
+
+    act(() => {
+      root?.render(
+        <SchedulePanel sessionId="session-1" showGlobalAutomationLink />,
+      );
+    });
+    const link = container.querySelector<HTMLAnchorElement>(
+      '[data-testid="schedule-global-automation"]',
+    );
+    expect(link).toBeInstanceOf(HTMLAnchorElement);
+    expect(link?.getAttribute("href")).toBe("/automation");
+
+    act(() => {
+      root?.render(<SchedulePanel sessionId="session-1" />);
+    });
+    expect(
+      container.querySelector('[data-testid="schedule-global-automation"]'),
+    ).toBeNull();
+  });
+
   it("未运行任务可重新启用且仍显示编辑入口", async () => {
     const controlTask = vi.fn().mockResolvedValue({ ok: true });
     useScheduleTasksMock.mockReturnValue({

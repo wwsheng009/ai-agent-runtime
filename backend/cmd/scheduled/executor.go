@@ -65,16 +65,26 @@ func (a scheduleExecutorAdapter) ExecuteHeadlessTurn(ctx context.Context, req sc
 	if err := a.initializeSession(ctx, sessionID, req); err != nil {
 		return schedule.HeadlessTurnResult{SessionID: sessionID}, fmt.Errorf("scheduled: initialize headless session: %w", err)
 	}
-	turn, err := a.exec.SubmitTurn(ctx, runtimehost.TurnRequest{
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" {
+		profile = strings.TrimSpace(a.profile)
+	}
+	turnReq := runtimehost.TurnRequest{
 		SessionID:       sessionID,
 		Prompt:          buildHeadlessPrompt(req),
 		RunMeta:         &team.RunMeta{PermissionMode: string(runtimepolicy.ModeDontAsk)},
-		Profile:         req.Profile,
+		Profile:         profile,
 		Provider:        req.Provider,
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
 		Workspace:       req.Workspace,
-	})
+	}
+	var turn runtimehost.TurnResult
+	if waiter, ok := a.exec.(runtimehost.TurnWaiter); ok {
+		turn, err = waiter.SubmitTurnWait(ctx, turnReq)
+	} else {
+		turn, err = a.exec.SubmitTurn(ctx, turnReq)
+	}
 	if err != nil {
 		return schedule.HeadlessTurnResult{SessionID: sessionID}, err
 	}

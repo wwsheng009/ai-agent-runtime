@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -2045,13 +2046,54 @@ func (p *ProviderWrapper) GetCapabilities() *ModelCapabilities {
 	return caps
 }
 
-// CheckHealth ?? Provider ????????
+// CheckHealth probes the configured endpoint instead of only validating the
+// in-process adapter. Without a network probe a local provider can be reported
+// healthy while its base URL (for example http://127.0.0.1:7863) is not
+// listening at all, which makes the UI and automation diagnostics misleading.
+//
+// The probe intentionally uses HEAD and treats any non-5xx response as
+// reachable: 401/403/404 still prove that the endpoint is serving HTTP, while
+// 502/503/504 usually indicate an upstream or local gateway failure. Providers
+// without an explicit base URL keep the legacy configuration-level check
+// because their adapter may use a non-HTTP transport or an internal default.
 func (p *ProviderWrapper) CheckHealth(ctx context.Context) error {
 	if p == nil || p.config == nil {
 		return fmt.Errorf("provider config is required")
 	}
 	if p.adapter == nil {
 		return fmt.Errorf("provider adapter is required")
+	}
+	baseURL := strings.TrimSpace(p.config.BaseURL)
+	if baseURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid provider base URL %q", baseURL)
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+	default:
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, baseURL, nil)
+	if err != nil {
+		return fmt.Errorf("build provider health request: %w", err)
+	}
+	req.Header.Set("User-Agent", "aicli-provider-health/1")
+	resp, err := p.providerHTTPClient(false).Do(req)
+	if err != nil {
+		return fmt.Errorf("provider endpoint %s unreachable: %w", parsed.Host, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return fmt.Errorf("provider endpoint %s returned HTTP %d", parsed.Host, resp.StatusCode)
 	}
 	return nil
 }

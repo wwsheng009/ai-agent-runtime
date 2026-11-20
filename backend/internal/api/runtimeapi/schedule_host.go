@@ -4,11 +4,29 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 )
+
+// scheduleSessionReminderRunTimeout 是会话提醒真正执行 turn 的上限。
+// 不能复用调度器 Deliver 的 30s 上下文：Deliver 返回后 Runtime.drive 会立即
+// cancel 该 ctx，actor 的 run 会以 cause=parent_context 被取消。
+const scheduleSessionReminderRunTimeout = 10 * time.Minute
+
+// scheduleReminderRunContext returns the run-scoped context for a session
+// reminder. It deliberately detaches from the delivery context's cancellation:
+// the scheduler cancels that context as soon as Deliver returns, while the
+// actor's turn must keep running. The bounded timeout prevents a reminder from
+// pinning a session forever.
+func scheduleReminderRunContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), scheduleSessionReminderRunTimeout)
+}
 
 // scheduleSessionDeliverer 以进程内方式把兜底提醒投递进目标会话 actor
 // （D1：宿主恢复后 drain pending）。提交语义为"被 actor 接受"
@@ -18,8 +36,26 @@ type scheduleSessionDeliverer struct {
 }
 
 func (d scheduleSessionDeliverer) Deliver(ctx context.Context, sessionID, text string) error {
+	return d.DeliverEnvelope(ctx, schedule.DeliveryEnvelope{SessionID: sessionID, Text: text})
+}
+
+// DeliverEnvelope 在 legacy Deliver 的基础上携带 occurrence 键，并要求 actor
+// 返回“提示词已经持久化、run 已被接收”的回执。旧的 SubmitPromptAsync 只保证
+// 命令进入 channel：actor 随后在 ensureReady/loadSession/persist/prepareRun
+// 失败时，错误会落在无人读取的 reply 里，调度器却把 occurrence 记成 delivered，
+// 最终表现为“已投递、无历史、无 run、无日志”。这里改用带回执的提交，把这类
+// 失败重新变成可重试的投递失败。
+func (d scheduleSessionDeliverer) DeliverEnvelope(ctx context.Context, env schedule.DeliveryEnvelope) error {
 	if d.handler == nil {
 		return fmt.Errorf("schedule: handler not configured")
+	}
+	sessionID := strings.TrimSpace(env.SessionID)
+	text := strings.TrimSpace(env.Text)
+	if sessionID == "" {
+		return fmt.Errorf("schedule: session id is required")
+	}
+	if text == "" {
+		return fmt.Errorf("schedule: delivery text is required")
 	}
 	// S2b（§3.3 L1 前置）：只服务本进程确实托管的会话——已有活 actor，或会话
 	// 可从本进程会话库加载且**绑定持有者就是本进程**；否则返回错误让组合投递器
@@ -33,13 +69,51 @@ func (d scheduleSessionDeliverer) Deliver(ctx context.Context, sessionID, text s
 	if hub == nil {
 		return fmt.Errorf("schedule: session hub not configured")
 	}
-	actor, err := hub.GetOrCreate(strings.TrimSpace(sessionID))
+	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
 		return fmt.Errorf("schedule: get session actor %s: %w", sessionID, err)
 	}
-	if err := actor.SubmitPromptAsync(ctx, text, nil); err != nil {
+	occurrences := strings.Join(env.Occurrences, ",")
+	// 回执等待和真正执行都必须脱离调度器的短上下文：Runtime.drive 在
+	// Deliver 返回后立即 cancel 传入的 30s ctx，actor 的 run 不能继承它。
+	// WithoutCancel 保留请求作用域值，10m 超时防止提醒永久占用会话。
+	runCtx, cancelRun := scheduleReminderRunContext(ctx)
+	resultCh, err := actor.SubmitPromptAsyncWithReceipt(runCtx, text, nil)
+	if err != nil {
+		cancelRun()
+		logger.Warn("schedule: session reminder rejected",
+			logger.String("session", sessionID),
+			logger.String("occurrences", occurrences),
+			logger.Err(err))
 		return fmt.Errorf("schedule: submit prompt to %s: %w", sessionID, err)
 	}
+	logger.Info("schedule: session reminder accepted",
+		logger.String("session", sessionID),
+		logger.String("occurrences", occurrences))
+	go func() {
+		defer cancelRun()
+		select {
+		case result, ok := <-resultCh:
+			if !ok {
+				return
+			}
+			if result.Err != nil {
+				logger.Warn("schedule: session reminder run failed",
+					logger.String("session", sessionID),
+					logger.String("occurrences", occurrences),
+					logger.Err(result.Err))
+				return
+			}
+			logger.Info("schedule: session reminder completed",
+				logger.String("session", sessionID),
+				logger.String("occurrences", occurrences))
+		case <-runCtx.Done():
+			logger.Warn("schedule: session reminder run timed out",
+				logger.String("session", sessionID),
+				logger.String("occurrences", occurrences),
+				logger.Err(runCtx.Err()))
+		}
+	}()
 	return nil
 }
 

@@ -6,13 +6,18 @@
 // 数据由 hook `useScheduleTasks` 提供（面板只渲染与转发动作）。
 // P0-2 机械拆分：子组件/表单纯函数已拆至 ./schedule-panel/*，仅搬迁不改语义。
 
-import { CalendarClockIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  ExternalLinkIcon,
+  PlusIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { fetchScheduleJobRuns } from "@/api/runtime/schedule";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { splitScheduleTasks } from "@/components/workspace/schedule-panel-shared";
 import {
   useScheduleTasks,
@@ -64,6 +69,12 @@ export type SchedulePanelProps = {
     preset?: Partial<CreateFormState>;
   };
   onCreateRequestHandled?: (key: string) => void;
+  /** Optional session link for hosts that can navigate the workspace. */
+  onOpenSession?: (sessionId: string) => void;
+  /** Optional rich-history entry point for hosts with a dedicated runs view. */
+  onViewHistory?: (task: RuntimeScheduleTask) => void;
+  /** Show the global automation catalog shortcut (right-rail host only). */
+  showGlobalAutomationLink?: boolean;
 };
 
 export function SchedulePanel({
@@ -75,6 +86,9 @@ export function SchedulePanel({
   emptyMessage,
   createRequest,
   onCreateRequestHandled,
+  onOpenSession,
+  onViewHistory,
+  showGlobalAutomationLink = false,
 }: SchedulePanelProps) {
   const { t } = useTranslation("workspace");
   const ownedController = useScheduleTasks({
@@ -445,6 +459,8 @@ export function SchedulePanel({
     setConfirmingId,
     startEdit,
     toggleRuns,
+    onOpenSession,
+    onViewHistory,
   };
 
   return (
@@ -482,6 +498,17 @@ export function SchedulePanel({
               className={cn("size-4", loading && "animate-spin")}
             />
           </Button>
+          {showGlobalAutomationLink ? (
+            <a
+              aria-label={t("panels.schedule.openGlobalAutomation")}
+              className={cn(buttonVariants({ variant: "ghost", size: "icon" }))}
+              data-testid="schedule-global-automation"
+              href="/automation"
+              title={t("panels.schedule.openGlobalAutomation")}
+            >
+              <ExternalLinkIcon aria-hidden="true" className="size-4" />
+            </a>
+          ) : null}
         </div>
       </div>
 

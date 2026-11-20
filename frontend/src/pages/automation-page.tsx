@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -28,7 +28,10 @@ import type {
 } from "@/types/runtime";
 
 import { AutomationListPanel } from "./automation/list-panel";
-import { AutomationRunsPanel } from "./automation/runs-panel";
+import {
+  AUTOMATION_RUNS_ALL_TASKS,
+  AutomationRunsPanel,
+} from "./automation/runs-panel";
 import { AutomationSummary } from "./automation/summary";
 import {
   buildAutomationTemplates,
@@ -60,8 +63,10 @@ const views: Array<{
 
 export function AutomationPage() {
   const { t } = useTranslation("workspace");
+  const navigate = useNavigate();
   const controller = useScheduleTasks({ enabled: true, sessionId: "" });
   const [view, setView] = useState<AutomationView>("list");
+  const [runsTaskId, setRunsTaskId] = useState(AUTOMATION_RUNS_ALL_TASKS);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] =
     useState<AutomationStatusFilter>("all");
@@ -88,6 +93,7 @@ export function AutomationPage() {
   const requestSequence = useRef(0);
   const templateLoadSequence = useRef(0);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const pendingHistoryFocus = useRef(false);
   const templates = useMemo(
     () => buildAutomationTemplates(templateRecords, t),
     [templateRecords, t],
@@ -267,6 +273,39 @@ export function AutomationPage() {
     [],
   );
 
+  const openView = useCallback((nextView: AutomationView) => {
+    if (nextView === "runs") {
+      setRunsTaskId(AUTOMATION_RUNS_ALL_TASKS);
+    }
+    setView(nextView);
+  }, []);
+
+  const handleViewHistory = useCallback((task: RuntimeScheduleTask) => {
+    pendingHistoryFocus.current = true;
+    setRunsTaskId(task.id);
+    setView("runs");
+  }, []);
+
+  const handleOpenSession = useCallback(
+    (sessionId: string) => {
+      const normalized = sessionId.trim();
+      if (!normalized) {
+        return;
+      }
+      navigate(`/workspace/sessions/${encodeURIComponent(normalized)}`);
+    },
+    [navigate],
+  );
+
+  useEffect(() => {
+    if (view !== "runs" || !pendingHistoryFocus.current) {
+      return;
+    }
+    pendingHistoryFocus.current = false;
+    const runsTabIndex = views.findIndex((item) => item.id === "runs");
+    tabRefs.current[runsTabIndex]?.focus();
+  }, [view]);
+
   const handleCreateRequestHandled = useCallback((key: string) => {
     setCreateRequest((current) => (current?.key === key ? null : current));
   }, []);
@@ -365,7 +404,7 @@ export function AutomationPage() {
                     )}
                     id={`automation-tab-${id}`}
                     key={id}
-                    onClick={() => setView(id)}
+                    onClick={() => openView(id)}
                     onKeyDown={(event) => {
                       let nextIndex: number | null = null;
                       if (event.key === "ArrowRight") {
@@ -381,7 +420,7 @@ export function AutomationPage() {
                       event.preventDefault();
                       const nextView = views[nextIndex];
                       if (!nextView) return;
-                      setView(nextView.id);
+                      openView(nextView.id);
                       tabRefs.current[nextIndex]?.focus();
                     }}
                     role="tab"
@@ -416,6 +455,8 @@ export function AutomationPage() {
                 }
                 filteredCount={filteredCount}
                 onCreateRequestHandled={handleCreateRequestHandled}
+                onOpenSession={handleOpenSession}
+                onViewHistory={handleViewHistory}
                 onQueryChange={setQuery}
                 onStatusFilterChange={setStatusFilter}
                 onTargetFilterChange={setTargetFilter}
@@ -426,7 +467,11 @@ export function AutomationPage() {
               />
             ) : null}
             {view === "runs" ? (
-              <AutomationRunsPanel tasks={controller.tasks} />
+              <AutomationRunsPanel
+                onSelectedTaskIdChange={setRunsTaskId}
+                selectedTaskId={runsTaskId}
+                tasks={controller.tasks}
+              />
             ) : null}
             {view === "templates" ? (
               <AutomationTemplatesPanel

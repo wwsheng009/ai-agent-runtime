@@ -24,17 +24,17 @@ import (
 //     （schedulehost 的优先级让位 v2，DeferToHigherPriority）；
 //   - 对方上线时主动释放租约（不等 TTL），避免交互进程与常驻调度者争抢。
 //
-// 投递组合：L1 当前会话注入 → L2 mesh 就近（其它节点）→ L3 HTTP delegate；
-// 不装配内嵌执行核（aicli 的 embedded 复用属 E3.4，另行设计——拿不到执行核
-// 时 Runtime 的 tryEmbedded 自然为 false，退回 mailbox 兜底）。
+// 投递组合：L1 当前会话注入 → L2 mesh 就近（其它节点）→ L3 HTTP delegate。
+// 本地 actor host 挂载后注入共享 scheduleexec.Executor（session + headless）；
+// runtime-server 模式下本地 host 不挂载，因此 aicli 不参与本地调度。
 // ============================================================================
 
 var chatScheduleDriver struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	leader *schedulehost.Leader
-	// owned 是驱动自建的 service（远端 runtime-server 执行器模式下没有本地宿主）；
-	// 停止时负责关闭其 store。复用本地宿主的 service 时保持 nil（宿主自己关）。
+	// owned 是驱动自建的 service（调用方没有提供 localService 时）；停止时负责
+	// 关闭其 store。复用本地宿主的 service 时保持 nil（宿主自己关）。
 	owned *schedule.Service
 }
 
@@ -82,11 +82,15 @@ func chatScheduleDriverWarnf(format string, args ...any) {
 	fmt.Fprintln(os.Stderr, line)
 }
 
-// startChatScheduleDriver 在会话宿主挂载点尝试启动 aicli 调度者（幂等）。
-// localService 为本地宿主的调度服务（远端 runtime-server 执行器模式下为 nil，
-// 此时驱动自带 store/service）。未启用 / 未 opt-in / 缺 mesh 身份 / 已在运行时
-// 静默跳过——绝不阻断会话。
-func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *schedule.Service) {
+// startChatScheduleDriver 在本地会话执行核挂载后启动 aicli 调度者（幂等）。
+// 只有拿到真实的 runtimehost 执行核才参战，避免「在岗但不能执行」的假调度者。
+// localService 为本地宿主的调度服务；nil 时驱动自带 store/service。
+func startChatScheduleDriver(
+	runtimeCfg *config.RuntimeConfig,
+	localService *schedule.Service,
+	session *ChatSession,
+	localHost *localChatRuntimeHost,
+) {
 	if runtimeCfg == nil {
 		return
 	}
@@ -98,6 +102,11 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 	if !sc.DriverAllows(config.ScheduleRoleAICLI) {
 		// 显式配置 participants 且未包含 aicli → 不参战。
 		chatScheduleDriverWarnf(`not opted in (schedule.driver.participants excludes "aicli"); aicli stays out of scheduling`)
+		return
+	}
+	executor, execErr := newAICLIScheduleExecutor(runtimeCfg, session, localHost)
+	if execErr != nil {
+		chatScheduleDriverWarnf("executor unavailable; aicli stays out of scheduling: %v", execErr)
 		return
 	}
 	host := mesh.Current()
@@ -176,6 +185,7 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 		Store:             store,
 		Service:           service,
 		Deliverer:         deliverer,
+		Executor:          executor,
 		Mode:              sc.Execution.Mode,
 		MaxAttempts:       sc.MaxDeliveryAttempts,
 		FallbackToMailbox: sc.Execution.FallbackToMailbox,

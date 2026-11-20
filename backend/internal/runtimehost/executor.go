@@ -28,6 +28,14 @@ type Executor interface {
 	Close(ctx context.Context) error
 }
 
+// TurnWaiter is an optional extension for callers that need the terminal
+// result, not only the "prompt accepted" receipt. SubmitTurn intentionally
+// returns completed=false after a short submit budget for interactive HTTP
+// requests; automation jobs must use this seam to wait for the actual turn.
+type TurnWaiter interface {
+	SubmitTurnWait(ctx context.Context, req TurnRequest) (TurnResult, error)
+}
+
 // TurnRequest 是一次会话 turn 请求。
 type TurnRequest struct {
 	SessionID string

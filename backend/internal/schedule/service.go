@@ -746,6 +746,60 @@ func (s *Service) Resume(sessionID, id string) (UpdateResult, error) {
 	return UpdateResult{ID: id, Updated: true, Record: &record, Status: StatusActive}, nil
 }
 
+// RequeueBlockedHeadlessJobs re-arms jobs that were blocked solely because the
+// previous scheduler leader had no headless executor. It is called by a new
+// leader that actually has the shared execution core, so a capability upgrade
+// (for example runtime-server/aicli gaining an executor, or the scheduled
+// daemon starting) does not leave old jobs permanently blocked.
+//
+// The recovery occurrence is "now": the original occurrence was already
+// missed. Recurring rules then advance normally after this run; one-shot jobs
+// complete normally. Delivery-failure blocks and user pauses are untouched.
+func (s *Service) RequeueBlockedHeadlessJobs() (int, error) {
+	if s == nil || s.store == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tasks, err := s.store.List()
+	if err != nil {
+		return 0, err
+	}
+	now := s.clock().UTC()
+	requeued := 0
+	for _, task := range tasks {
+		if task.Status != StatusBlocked ||
+			task.LastErrorCode != string(CodeHeadlessExecutorUnavailable) ||
+			task.TargetKind == TargetSession {
+			continue
+		}
+		next := task
+		next.Status = StatusActive
+		next.Record.ScheduledAt = now
+		next.LastError = ""
+		next.LastErrorCode = ""
+		next.AttemptCount = 0
+		next.LastAttemptAt = nil
+		next.DeadLetteredAt = nil
+		applied, updateErr := s.store.UpdateCAS(next, task.StateVersion)
+		if updateErr != nil {
+			return requeued, updateErr
+		}
+		if !applied {
+			continue
+		}
+		if attempts, ok := s.store.(TaskAttemptStore); ok {
+			_ = attempts.ClearTaskAttempts(task.Record.ID)
+		}
+		requeued++
+	}
+	if requeued > 0 {
+		s.emitChanged()
+	}
+	return requeued, nil
+}
+
 func taskOwnedBy(task Task, sessionID string) bool {
 	owner := strings.TrimSpace(sessionID)
 	if owner == "" {

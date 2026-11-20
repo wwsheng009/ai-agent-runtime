@@ -661,6 +661,16 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 	session.ChatExecutor = newAICLIActorChatExecutor()
 	startChatActorWarmup(session)
 	markChatStartup("capabilities_runtime_host")
+	// S5：只有本地会话执行核真正挂载后才参与调度领导权。旧路径在能力面之前
+	// 启动 driver，导致 aicli 可能在“没有 executor”的状态下当选并把 headless
+	// 作业阻塞；现在把“在岗”与“能执行”绑定在同一挂载点，runtime-server 模式
+	// 也自然不参与（该分支在前面已返回）。
+	startChatScheduleDriver(
+		loadRuntimeToolConfig(cfg, session),
+		localRuntimeHost.Schedule,
+		session,
+		localRuntimeHost,
+	)
 
 	// IM 连接器宿主（docs/bots/04-migration-roadmap.md P0「宿主接线」）：
 	// 配置/账本与 runtime-server 共用同一份 config.yaml + state.json，
@@ -830,8 +840,8 @@ func prepareChatCapabilitiesAsync(cfg *config.Config, opts *chatCommandOptions, 
 	var cleanupAllOnce sync.Once
 	cleanupAll := func() {
 		cleanupAllOnce.Do(func() {
-			// S5：调度者与会话宿主生命周期解耦——启动早于宿主挂载、这里无条件停止
-			// （不依赖能力面是否装载成功，见 chat_schedule_driver.go）。
+			// S5：调度者只在本地 actor host 挂载后启动；这里无条件停止，覆盖
+			// 挂载成功后的正常退出与异常清理两条路径（幂等，见 chat_schedule_driver.go）。
 			stopChatScheduleDriver()
 			load := currentChatCapabilityLoad(session)
 			if load != nil {
@@ -865,11 +875,6 @@ func prepareChatCapabilitiesAsync(cfg *config.Config, opts *chatCommandOptions, 
 		capabilitiesCleanupMu.Unlock()
 		return cleanup, nil
 	})
-	// S5：aicli 以最低优先级参与调度领导权（opt-in：schedule.driver.participants
-	// 含 aicli 才生效）。在这里启动而不是等能力面挂载：交互式 TUI 的挂载是异步的
-	// （可能到首个 turn 才发生），而"开着 aicli 就有调度"应当从会话建立即成立。
-	// 驱动自带 store/service（不依赖本地宿主），更高优先级在岗时自动让位。
-	startChatScheduleDriver(loadRuntimeToolConfig(cfg, session), nil)
 	start = func() {
 		go runChatCapabilitiesLoad(session)
 	}

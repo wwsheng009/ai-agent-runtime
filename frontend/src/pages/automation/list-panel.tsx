@@ -26,6 +26,8 @@ type AutomationListPanelProps = {
   emptyMessage?: string;
   createRequest: AutomationCreateRequest | null;
   onCreateRequestHandled: (key: string) => void;
+  onOpenSession?: (sessionId: string) => void;
+  onViewHistory?: (task: RuntimeScheduleTask) => void;
 };
 
 export function AutomationListPanel({
@@ -41,6 +43,8 @@ export function AutomationListPanel({
   emptyMessage,
   createRequest,
   onCreateRequestHandled,
+  onOpenSession,
+  onViewHistory,
 }: AutomationListPanelProps) {
   const { t } = useTranslation("workspace");
   const statusOptions: SelectOption[] = [
@@ -116,6 +120,8 @@ export function AutomationListPanel({
           createRequest={createRequest ?? undefined}
           emptyMessage={emptyMessage}
           onCreateRequestHandled={onCreateRequestHandled}
+          onOpenSession={onOpenSession}
+          onViewHistory={onViewHistory}
           sessionId=""
           taskFilter={taskFilter}
         />

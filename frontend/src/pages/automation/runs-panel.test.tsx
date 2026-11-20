@@ -12,10 +12,14 @@ import type {
 import { AutomationRunsPanel } from "./runs-panel";
 
 const scheduleApi = vi.hoisted(() => ({
+  clearAllScheduleJobRuns: vi.fn(),
+  clearScheduleJobRuns: vi.fn(),
   fetchScheduleJobRuns: vi.fn(),
 }));
 
 vi.mock("@/api/runtime/schedule", () => ({
+  clearAllScheduleJobRuns: scheduleApi.clearAllScheduleJobRuns,
+  clearScheduleJobRuns: scheduleApi.clearScheduleJobRuns,
   fetchScheduleJobRuns: scheduleApi.fetchScheduleJobRuns,
 }));
 
@@ -106,6 +110,8 @@ describe("AutomationRunsPanel", () => {
     document.body.innerHTML = "";
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
     vi.unstubAllGlobals();
+    scheduleApi.clearAllScheduleJobRuns.mockReset();
+    scheduleApi.clearScheduleJobRuns.mockReset();
     scheduleApi.fetchScheduleJobRuns.mockReset();
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -144,6 +150,110 @@ describe("AutomationRunsPanel", () => {
     expect(rows[2]).toContain("#1");
     expect(rows[0]).toContain("Task A");
     expect(rows[1]).toContain("Task B");
+  });
+
+  it("opens an explicit all-runs confirmation and cancel leaves the API untouched", async () => {
+    scheduleApi.fetchScheduleJobRuns.mockResolvedValue({
+      id: "task-a",
+      runs: [run(1, "task-a")],
+      count: 1,
+    });
+    render([task("task-a", "Task A")]);
+    await flush();
+
+    const clearAllButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="automation-clear-all-runs"]',
+    );
+    expect(clearAllButton).not.toBeNull();
+    expect(clearAllButton?.disabled).toBe(false);
+    click(clearAllButton as HTMLButtonElement);
+
+    const confirmation = document.body.querySelector(
+      '[data-testid="automation-clear-runs-dialog"]',
+    );
+    expect(confirmation?.textContent).toContain("清理全部运行日志");
+    expect(confirmation?.textContent).toContain(
+      "包括已删除任务",
+    );
+    expect(confirmation?.textContent).not.toContain("任务“Task A”");
+
+    const cancelButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("取消"));
+    expect(cancelButton).toBeDefined();
+    click(cancelButton as HTMLButtonElement);
+
+    expect(scheduleApi.clearAllScheduleJobRuns).not.toHaveBeenCalled();
+    expect(
+      document.body.querySelector('[data-testid="automation-clear-runs-dialog"]'),
+    ).toBeNull();
+  });
+
+  it("confirms and clears all loaded runs without sending a task id", async () => {
+    scheduleApi.fetchScheduleJobRuns.mockImplementation(
+      async (_sessionId: string | undefined, id: string) => ({
+        id,
+        runs: [run(id === "task-a" ? 1 : 2, id)],
+        count: 1,
+      }),
+    );
+    scheduleApi.clearAllScheduleJobRuns.mockResolvedValue({
+      deletedCount: 2,
+    });
+    render([task("task-a", "Task A"), task("task-b", "Task B")]);
+    await flush();
+
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-testid="automation-clear-all-runs"]',
+      ) as HTMLButtonElement,
+    );
+    expect(document.body.textContent).toContain("确认清理全部");
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("确认清理全部"));
+    expect(confirmButton).toBeDefined();
+    click(confirmButton as HTMLButtonElement);
+    await flush();
+
+    expect(scheduleApi.clearAllScheduleJobRuns).toHaveBeenCalledOnce();
+    expect(scheduleApi.clearAllScheduleJobRuns).toHaveBeenCalledWith();
+    expect(scheduleApi.clearScheduleJobRuns).not.toHaveBeenCalled();
+    expect(document.body.querySelector("ol")).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="automation-clear-runs-dialog"]'),
+    ).toBeNull();
+  });
+
+  it("honors a preselected task from the task list history action", async () => {
+    scheduleApi.fetchScheduleJobRuns.mockImplementation(
+      async (_sessionId: string | undefined, id: string) => ({
+        id,
+        runs: [run(id === "task-a" ? 1 : 2, id)],
+        count: 1,
+      }),
+    );
+
+    act(() => {
+      root?.render(
+        <AutomationRunsPanel
+          onSelectedTaskIdChange={vi.fn()}
+          selectedTaskId="task-b"
+          tasks={[task("task-a", "Task A"), task("task-b", "Task B")]}
+        />,
+      );
+    });
+    await flush();
+
+    expect(scheduleApi.fetchScheduleJobRuns).toHaveBeenCalledTimes(1);
+    expect(scheduleApi.fetchScheduleJobRuns).toHaveBeenCalledWith(
+      "session-task-b",
+      "task-b",
+      50,
+    );
+    expect(document.body.textContent).toContain("#2");
+    expect(document.body.textContent).not.toContain("#1");
   });
 
   it("keeps the task filter optional and requests one task after selection", async () => {
@@ -197,5 +307,74 @@ describe("AutomationRunsPanel", () => {
     );
     expect(document.body.textContent).toContain("#1");
     expect(document.body.textContent).toContain("Task A");
+  });
+
+  it("opens run details from a compact log row", async () => {
+    scheduleApi.fetchScheduleJobRuns.mockResolvedValue({
+      id: "task-a",
+      runs: [run(1, "task-a")],
+      count: 1,
+    });
+    render([task("task-a", "Task A")]);
+    await flush();
+
+    click(
+      document.body.querySelector(
+        '[data-testid="automation-run-row-1"]',
+      ) as HTMLElement,
+    );
+
+    expect(
+      document.body.querySelector('[data-testid="automation-run-details-dialog"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain("output-1");
+    expect(document.body.textContent).toContain("运行日志详情");
+  });
+
+  it("confirms and clears logs for the selected task", async () => {
+    scheduleApi.fetchScheduleJobRuns.mockResolvedValue({
+      id: "task-a",
+      runs: [run(1, "task-a")],
+      count: 1,
+    });
+    scheduleApi.clearScheduleJobRuns.mockResolvedValue({
+      id: "task-a",
+      deletedCount: 1,
+    });
+    render([task("task-a", "Task A")]);
+    await flush();
+
+    click(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-testid="automation-runs-task-filter"]',
+      ) as HTMLButtonElement,
+    );
+    chooseOption("Task A");
+    await flush();
+
+    const clearButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("清理日志"));
+    expect(clearButton).toBeDefined();
+    click(clearButton as HTMLButtonElement);
+    expect(
+      document.body.querySelector('[data-testid="automation-clear-runs-dialog"]'),
+    ).not.toBeNull();
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("确认清理"));
+    expect(confirmButton).toBeDefined();
+    click(confirmButton as HTMLButtonElement);
+    await flush();
+
+    expect(scheduleApi.clearScheduleJobRuns).toHaveBeenCalledWith(
+      "session-task-a",
+      "task-a",
+    );
+    expect(document.body.querySelector('[data-testid="automation-run-row-1"]')).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="automation-clear-runs-dialog"]'),
+    ).toBeNull();
   });
 });

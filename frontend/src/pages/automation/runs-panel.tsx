@@ -1,15 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangleIcon,
+  ChevronRightIcon,
   Clock3Icon,
   HistoryIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
+  Trash2Icon,
   WorkflowIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { fetchScheduleJobRuns } from "@/api/runtime/schedule";
+import {
+  clearAllScheduleJobRuns,
+  clearScheduleJobRuns,
+  fetchScheduleJobRuns,
+} from "@/api/runtime/schedule";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, type SelectOption } from "@/components/ui/select";
@@ -20,10 +26,16 @@ import type {
   RuntimeScheduleTask,
 } from "@/types/runtime";
 
+import { ClearRunsDialog, RunDetailsDialog } from "./runs-dialogs";
+
 const RUNS_LIMIT = 50;
-const ALL_TASKS = "__all_tasks__";
+export const AUTOMATION_RUNS_ALL_TASKS = "__all_tasks__";
+const ALL_TASKS = AUTOMATION_RUNS_ALL_TASKS;
 
 type AutomationRunsPanelProps = {
+  /** Optional controlled selection. Omit to keep the panel self-managed. */
+  onSelectedTaskIdChange?: (taskId: string) => void;
+  selectedTaskId?: string;
   tasks: RuntimeScheduleTask[];
 };
 
@@ -40,14 +52,35 @@ function runDuration(run: RuntimeScheduleJobRun): string | null {
   return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
-export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
+export function AutomationRunsPanel({
+  onSelectedTaskIdChange,
+  selectedTaskId: controlledTaskId,
+  tasks,
+}: AutomationRunsPanelProps) {
   const { t } = useTranslation("workspace");
-  const [selectedTaskId, setSelectedTaskId] = useState(ALL_TASKS);
+  const [internalTaskId, setInternalTaskId] = useState(ALL_TASKS);
+  const selectedTaskId = controlledTaskId ?? internalTaskId;
+  const setSelectedTaskId = useCallback(
+    (taskId: string) => {
+      if (onSelectedTaskIdChange) {
+        onSelectedTaskIdChange(taskId);
+        return;
+      }
+      setInternalTaskId(taskId);
+    },
+    [onSelectedTaskIdChange],
+  );
   const [refreshToken, setRefreshToken] = useState(0);
   const [runs, setRuns] = useState<RuntimeScheduleJobRun[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const [partialError, setPartialError] = useState(false);
+  const [selectedRun, setSelectedRun] =
+    useState<RuntimeScheduleJobRun | null>(null);
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [clearDialogAllTasks, setClearDialogAllTasks] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearError, setClearError] = useState(false);
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const taskRequestSignature = useMemo(
@@ -78,6 +111,10 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
     () => new Map(tasks.map((task) => [task.id, task])),
     [tasks],
   );
+  const selectedTask =
+    selectedTaskId === ALL_TASKS ? undefined : taskById.get(selectedTaskId);
+  const selectedTaskTitle =
+    selectedTask?.title?.trim() || selectedTask?.id || "";
 
   useEffect(() => {
     if (
@@ -86,7 +123,14 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
     ) {
       setSelectedTaskId(ALL_TASKS);
     }
-  }, [selectedTaskId, tasks]);
+  }, [selectedTaskId, setSelectedTaskId, tasks]);
+
+  useEffect(() => {
+    setSelectedRun(null);
+    setClearDialogOpen(false);
+    setClearDialogAllTasks(false);
+    setClearError(false);
+  }, [selectedTaskId]);
 
   useEffect(() => {
     const currentTasks = tasksRef.current;
@@ -150,6 +194,52 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
     };
   }, [refreshToken, selectedTaskId, taskRequestSignature]);
 
+  const handleTaskChange = (value: string) => {
+    setSelectedTaskId(value);
+  };
+
+  const openClearDialog = (allTasks: boolean) => {
+    setClearDialogAllTasks(allTasks);
+    setClearError(false);
+    setClearDialogOpen(true);
+  };
+
+  const handleClearRuns = async () => {
+    if (clearing) {
+      return;
+    }
+    const taskToClear = selectedTask;
+    if (!clearDialogAllTasks && !taskToClear) {
+      return;
+    }
+    setClearing(true);
+    setClearError(false);
+    try {
+      if (clearDialogAllTasks) {
+        await clearAllScheduleJobRuns();
+        setRuns([]);
+        setPartialError(false);
+      } else if (taskToClear) {
+        await clearScheduleJobRuns(
+          taskToClear.sessionId ||
+            taskToClear.createdBySessionId ||
+            undefined,
+          taskToClear.id,
+        );
+        setRuns((currentRuns) =>
+          currentRuns.filter((run) => run.scheduleId !== taskToClear.id),
+        );
+      }
+      setSelectedRun(null);
+      setClearDialogOpen(false);
+      setClearDialogAllTasks(false);
+    } catch {
+      setClearError(true);
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <section
       aria-labelledby="automation-runs-title"
@@ -175,13 +265,42 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
             <Select
               ariaLabel={t("panels.schedule.runs.taskLabel")}
               disabled={tasks.length === 0}
-              onChange={setSelectedTaskId}
+              onChange={handleTaskChange}
               options={taskOptions}
               placeholder={t("panels.schedule.runs.allTasks")}
               triggerTestId="automation-runs-task-filter"
               value={selectedTaskId}
             />
           </label>
+          {selectedTask ? (
+            <Button
+              aria-label={t("panels.schedule.runs.clear")}
+              data-testid="automation-clear-task-runs"
+              disabled={
+                loading ||
+                clearing ||
+                !runs.some((run) => run.scheduleId === selectedTask.id)
+              }
+              onClick={() => openClearDialog(false)}
+              size="sm"
+              variant="destructive"
+            >
+              <Trash2Icon aria-hidden="true" size={14} />
+              <span>{t("panels.schedule.runs.clear")}</span>
+            </Button>
+          ) : selectedTaskId === ALL_TASKS ? (
+            <Button
+              aria-label={t("panels.schedule.runs.clearAll")}
+              data-testid="automation-clear-all-runs"
+              disabled={loading || clearing}
+              onClick={() => openClearDialog(true)}
+              size="sm"
+              variant="destructive"
+            >
+              <Trash2Icon aria-hidden="true" size={14} />
+              <span>{t("panels.schedule.runs.clearAll")}</span>
+            </Button>
+          ) : null}
           <Button
             aria-label={t("panels.schedule.runs.refresh")}
             disabled={tasks.length === 0 || loading}
@@ -246,104 +365,56 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
               </p>
             </div>
           ) : (
-            <ol className="mt-3 space-y-2">
+            <ol
+              aria-label={t("panels.schedule.runs.listLabel")}
+              className="mt-3 divide-y divide-border overflow-hidden rounded-panel border border-border bg-surface-softer"
+            >
               {runs.map((run) => {
                 const task = taskById.get(run.scheduleId);
                 const taskTitle = task?.title?.trim() || run.scheduleId;
                 return (
-                  <li
-                    className="grid gap-3 rounded-panel border border-border bg-surface-softer p-3 sm:grid-cols-[minmax(11rem,0.7fr)_minmax(0,1.3fr)]"
-                    key={run.id}
-                  >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge
-                          className={
-                            run.status === "failed"
-                              ? "border-destructive/40 bg-destructive/5 text-destructive"
-                              : "border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
-                          }
-                        >
-                          {run.status === "failed"
-                            ? t("panels.schedule.runStatus.failed")
-                            : t("panels.schedule.runStatus.done")}
-                        </Badge>
-                        <span className="text-xs text-muted-foreground">
-                          #{run.id}
-                        </span>
-                        <span
-                          className="max-w-full truncate rounded-full border border-border bg-surface-solid px-2 py-0.5 text-xs text-muted-foreground"
-                          title={run.scheduleId}
-                        >
-                          {taskTitle}
-                        </span>
-                      </div>
-                      <dl className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
-                        <div>
-                          <dt className="inline font-medium text-foreground">
-                            {t("panels.schedule.runs.started")}:{" "}
-                          </dt>
-                          <dd className="inline">
-                            {formatScheduleTimestamp(run.startedAt)}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="inline font-medium text-foreground">
-                            {t("panels.schedule.runs.finished")}:{" "}
-                          </dt>
-                          <dd className="inline">
-                            {formatScheduleTimestamp(run.finishedAt)}
-                          </dd>
-                        </div>
-                        {runDuration(run) ? (
-                          <div>
-                            <dt className="inline font-medium text-foreground">
-                              {t("panels.schedule.runs.duration")}:{" "}
-                            </dt>
-                            <dd className="inline">{runDuration(run)}</dd>
-                          </div>
-                        ) : null}
-                        {run.sessionId ? (
-                          <div className="break-all">
-                            <dt className="inline font-medium text-foreground">
-                              {t("panels.schedule.runs.session")}:{" "}
-                            </dt>
-                            <dd className="inline">{run.sessionId}</dd>
-                          </div>
-                        ) : null}
-                      </dl>
-                    </div>
-                    <div className="min-w-0 space-y-2 border-t border-border/70 pt-2 text-xs leading-5 sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0">
-                      {run.output ? (
-                        <div>
-                          <h3 className="font-semibold text-foreground">
-                            {t("panels.schedule.runOutput")}
-                          </h3>
-                          <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-control border border-border bg-surface-solid p-2 font-sans text-muted-foreground">
-                            {run.output}
-                          </pre>
-                        </div>
-                      ) : null}
-                      {run.error || run.errorCode ? (
-                        <div className="rounded-control border border-destructive/30 bg-destructive/5 p-2 text-destructive">
-                          <h3 className="font-semibold">
-                            {t("panels.schedule.runError")}
-                          </h3>
-                          <p className="mt-1">
-                            {run.errorCode === "headless_executor_unavailable"
-                              ? t(
-                                  "panels.schedule.errorCode.headless_executor_unavailable",
-                                )
-                              : t("panels.schedule.runFailure")}
-                          </p>
-                        </div>
-                      ) : null}
-                      {!run.output && !run.error && !run.errorCode ? (
-                        <p className="text-muted-foreground">
-                          {t("panels.schedule.runs.noOutput")}
-                        </p>
-                      ) : null}
-                    </div>
+                  <li className="min-w-0" key={`${run.scheduleId}:${run.id}`}>
+                    <button
+                      aria-label={t("panels.schedule.runs.openDetails", {
+                        taskTitle,
+                        runId: String(run.id),
+                      })}
+                      className="group flex min-h-11 w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface/70 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      data-testid={`automation-run-row-${run.id}`}
+                      onClick={() => setSelectedRun(run)}
+                      type="button"
+                    >
+                      <Badge
+                        className={
+                          run.status === "failed"
+                            ? "border-destructive/40 bg-destructive/5 text-destructive"
+                            : "border-emerald-500/40 text-emerald-700 dark:text-emerald-300"
+                        }
+                      >
+                        {run.status === "failed"
+                          ? t("panels.schedule.runStatus.failed")
+                          : t("panels.schedule.runStatus.done")}
+                      </Badge>
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
+                        {taskTitle}
+                      </span>
+                      <span
+                        className="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+                        title={t("panels.schedule.runs.finished")}
+                      >
+                        {formatScheduleTimestamp(run.finishedAt)}
+                      </span>
+                      <span className="hidden shrink-0 text-xs text-muted-foreground md:inline">
+                        {runDuration(run) ?? "—"}
+                      </span>
+                      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                        #{run.id}
+                      </span>
+                      <ChevronRightIcon
+                        aria-hidden="true"
+                        className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                      />
+                    </button>
                   </li>
                 );
               })}
@@ -351,6 +422,28 @@ export function AutomationRunsPanel({ tasks }: AutomationRunsPanelProps) {
           )}
         </>
       )}
+      <RunDetailsDialog
+        duration={selectedRun ? runDuration(selectedRun) : null}
+        onClose={() => setSelectedRun(null)}
+        run={selectedRun}
+        taskTitle={
+          selectedRun
+            ? taskById.get(selectedRun.scheduleId)?.title?.trim() ||
+              selectedRun.scheduleId
+            : ""
+        }
+      />
+      <ClearRunsDialog
+        allTasks={clearDialogAllTasks}
+        busy={clearing}
+        error={clearError}
+        onCancel={() => {
+          if (!clearing) setClearDialogOpen(false);
+        }}
+        onConfirm={() => void handleClearRuns()}
+        open={clearDialogOpen}
+        taskTitle={clearDialogAllTasks ? "" : selectedTaskTitle}
+      />
     </section>
   );
 }

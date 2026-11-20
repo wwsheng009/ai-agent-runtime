@@ -168,8 +168,8 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     requiresSession: false,
     widthClass: "content",
     surface: lazySurface(() =>
-      import("@/components/workspace/schedule-panel").then((module) => ({
-        default: module.SchedulePanel,
+      import("@/components/workspace/schedule-panel/right-rail-schedule-panel").then((module) => ({
+        default: module.RightRailSchedulePanel,
       })),
     ),
   },

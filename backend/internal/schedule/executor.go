@@ -49,8 +49,9 @@ type HeadlessTurnRequest struct {
 
 // HeadlessExecutor 是 J2 的可选执行接缝：执行不绑会话的作业。
 //
-// Runtime 通过类型断言发现它；未实现时非 session 目标的到期任务会被**延后**
-// （不空转、不计入死信），等待具备 headless 执行能力的宿主接管。
+// Runtime 通过类型断言发现它；未实现时非 session 目标的到期任务会被标记为
+// 可恢复的 blocked（不空转、不计入死信）。具备 headless 执行能力的新 leader
+// 启动时会自动 requeue 这类任务（见 Service.RequeueBlockedHeadlessJobs）。
 type HeadlessExecutor interface {
 	ExecuteHeadlessTurn(ctx context.Context, req HeadlessTurnRequest) (HeadlessTurnResult, error)
 }

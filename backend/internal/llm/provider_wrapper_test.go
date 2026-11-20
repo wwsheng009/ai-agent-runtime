@@ -27,6 +27,42 @@ func TestProviderWrapperBuildURLDedupesVersionPrefixInBaseURL(t *testing.T) {
 	assert.Equal(t, "https://api.example.com/v1/responses", provider.buildURL("/v1/responses"))
 }
 
+func TestProviderWrapperCheckHealthProbesEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("health probe method = %s, want HEAD", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+	require.NoError(t, provider.CheckHealth(context.Background()))
+
+	server.Close()
+	err = provider.CheckHealth(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unreachable")
+}
+
+func TestProviderWrapperCheckHealthRejectsServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+	err = provider.CheckHealth(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "HTTP 503")
+}
+
 func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)

@@ -201,6 +201,15 @@ export type RuntimeScheduleJobRunsResponse = {
   count: number;
 };
 
+export type RuntimeScheduleJobRunsClearResponse = {
+  id: string;
+  deletedCount: number;
+};
+
+export type RuntimeScheduleJobRunsClearAllResponse = {
+  deletedCount: number;
+};
+
 export type RuntimeScheduleDeleteResponse = {
   id: string;
   deleted: boolean;

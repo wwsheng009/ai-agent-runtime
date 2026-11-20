@@ -20,6 +20,8 @@ import type {
   RuntimeScheduleHistoryResponse,
   RuntimeScheduleJobRun,
   RuntimeScheduleJobRunsResponse,
+  RuntimeScheduleJobRunsClearAllResponse,
+  RuntimeScheduleJobRunsClearResponse,
   RuntimeScheduleJobRunStatus,
   RuntimeScheduleKind,
   RuntimeScheduleListResponse,
@@ -512,6 +514,46 @@ export async function fetchScheduleJobRuns(
     id: pickString(record, "id", "ID"),
     runs,
     count: pickNumber(record, "count") ?? runs.length,
+  };
+}
+
+/** 清理某作业的全部运行历史，但保留作业本身。 */
+export async function clearScheduleJobRuns(
+  sessionId: string | undefined,
+  id: string,
+): Promise<RuntimeScheduleJobRunsClearResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    `${SCHEDULE_PATH}/runs/clear`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId ?? "",
+        id,
+      }),
+    },
+  );
+  const record = asRecord(payload) ?? {};
+  return {
+    id: pickString(record, "id", "ID"),
+    deletedCount:
+      pickNumber(record, "deletedCount", "DeletedCount", "deleted_count") ?? 0,
+  };
+}
+
+/** 清理全部自动化任务的运行历史，任务和投递状态保持不变。 */
+export async function clearAllScheduleJobRuns(): Promise<RuntimeScheduleJobRunsClearAllResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    `${SCHEDULE_PATH}/runs/clear-all`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    },
+  );
+  const record = asRecord(payload) ?? {};
+  return {
+    deletedCount:
+      pickNumber(record, "deletedCount", "DeletedCount", "deleted_count") ?? 0,
   };
 }
 

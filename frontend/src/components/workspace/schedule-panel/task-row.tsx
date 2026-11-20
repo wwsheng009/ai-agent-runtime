@@ -2,7 +2,9 @@
 // 编辑改由独立表单对话框承载；行内保留暂停、恢复与删除确认。
 
 import {
+  HistoryIcon,
   LoaderCircleIcon,
+  MessageSquareIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
@@ -35,6 +37,8 @@ export type ScheduleTaskRowProps = {
   editingId: string;
   expandedRunId: string;
   live: boolean;
+  onOpenSession?: (sessionId: string) => void;
+  onViewHistory?: (task: RuntimeScheduleTask) => void;
   remove: (task: RuntimeScheduleTask) => void;
   runsByTask: Record<string, RuntimeScheduleJobRun[]>;
   runsStatus: Record<string, "loading" | "error">;
@@ -54,6 +58,8 @@ export function ScheduleTaskRow({
   editingId,
   expandedRunId,
   live,
+  onOpenSession,
+  onViewHistory,
   remove,
   runsByTask,
   runsStatus,
@@ -72,6 +78,15 @@ export function ScheduleTaskRow({
   const deleting = deletingId === task.id;
   const pauseBusy = controlling && controllingAction === "pause";
   const resumeBusy = controlling && controllingAction === "resume";
+  const targetSessionId =
+    (task.targetKind ?? "session") === "session"
+      ? task.sessionId?.trim() || ""
+      : "";
+  const creatorSessionId = task.createdBySessionId?.trim() || "";
+  const associatedSessionId = targetSessionId || creatorSessionId;
+  const sessionLabelKey = targetSessionId
+    ? "panels.schedule.associatedSession"
+    : "panels.schedule.creatorSession";
 
   return (
     <li className="rounded-panel border border-border p-3">
@@ -147,6 +162,29 @@ export function ScheduleTaskRow({
           </div>
         ) : null}
 
+        {onOpenSession && associatedSessionId ? (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span>{t(sessionLabelKey)}:</span>
+            <code className="break-all rounded bg-surface-soft px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+              {associatedSessionId}
+            </code>
+            {onOpenSession ? (
+              <Button
+                aria-label={t("panels.schedule.openSessionFor", {
+                  title: task.title || task.id,
+                })}
+                className="h-6 px-2 text-xs"
+                onClick={() => onOpenSession(associatedSessionId)}
+                size="sm"
+                variant="ghost"
+              >
+                <MessageSquareIcon aria-hidden="true" className="size-3.5" />
+                {t("panels.schedule.openSession")}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
         {task.goal ||
         (task.plan && task.plan.length > 0) ||
         (task.targetKind && task.targetKind !== "session") ? (
@@ -181,7 +219,7 @@ export function ScheduleTaskRow({
           </div>
         ) : null}
 
-        {task.targetKind === "headless" || task.targetKind === "workspace" ? (
+        {!onViewHistory ? (
           <ScheduleRunHistory
             expanded={expandedRunId === task.id}
             onToggle={() => void toggleRuns(task.id)}
@@ -272,6 +310,20 @@ export function ScheduleTaskRow({
             {resumeBusy
               ? t("panels.schedule.enabling")
               : t("panels.schedule.enable")}
+          </Button>
+        ) : null}
+
+        {onViewHistory ? (
+          <Button
+            aria-label={t("panels.schedule.viewHistoryFor", {
+              title: task.title || task.id,
+            })}
+            onClick={() => onViewHistory(task)}
+            size="sm"
+            variant="ghost"
+          >
+            <HistoryIcon aria-hidden="true" className="size-3.5" />
+            {t("panels.schedule.viewHistory")}
           </Button>
         ) : null}
 

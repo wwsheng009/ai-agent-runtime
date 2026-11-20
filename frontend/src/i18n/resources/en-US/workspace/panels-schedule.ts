@@ -256,6 +256,13 @@ export const enWorkspacePanelsSchedule: DeepStringShape<
   },
   // J3: run history.
   runHistory: "Run history",
+  associatedSession: "Linked session",
+  creatorSession: "Creator session",
+  openSession: "Open session",
+  openSessionFor: "Open the session linked to {{title}}",
+  viewHistory: "View history",
+  viewHistoryFor: "View history for {{title}}",
+  openGlobalAutomation: "Open the global automation page",
   runStatus: {
     done: "Succeeded",
     failed: "Failed",
@@ -313,6 +320,24 @@ export const enWorkspacePanelsSchedule: DeepStringShape<
     finished: "Finished",
     duration: "Duration",
     session: "Temporary session",
+    clear: "Clear logs",
+    clearAll: "Clear all logs",
+    confirmClearTitle: "Clear run logs",
+    confirmClearMessage:
+      'Clear all run logs for "{{taskTitle}}"? This removes logs only and keeps the task.',
+    confirmClearAllTitle: "Clear all run logs",
+    confirmClearAllMessage:
+      "Clear run history for every automation task? This permanently removes run history for all tasks, including deleted tasks, but keeps tasks, delivery records, and pending messages.",
+    confirmClear: "Clear logs",
+    confirmClearAll: "Clear all",
+    clearing: "Clearing…",
+    clearFailed: "Run logs could not be cleared. Try again.",
+    detailsTitle: "Run log details",
+    closeDetails: "Close run log details",
+    task: "Task",
+    runId: "Run ID",
+    listLabel: "Run log list",
+    openDetails: 'Open details for "{{taskTitle}}" run {{runId}}',
   },
   templates: {
     title: "Automation templates",

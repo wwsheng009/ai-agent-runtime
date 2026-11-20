@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearAllScheduleJobRuns,
+  clearScheduleJobRuns,
   createScheduleTemplate,
   createScheduleTask,
   deleteScheduleTemplate,
@@ -220,6 +222,65 @@ describe("fetchScheduleJobRuns", () => {
   });
 });
 
+describe("clearScheduleJobRuns", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts the owner and task id and normalizes the deleted count", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        ID: "job-1",
+        deleted_count: 3,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(clearScheduleJobRuns(undefined, "job-1")).resolves.toEqual({
+      id: "job-1",
+      deletedCount: 3,
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("/api/runtime/schedule/runs/clear");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      session_id: "",
+      id: "job-1",
+    });
+  });
+});
+
+describe("clearAllScheduleJobRuns", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("posts to the explicit global-clear endpoint and normalizes the deleted count", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ deleted_count: 7 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(clearAllScheduleJobRuns()).resolves.toEqual({
+      deletedCount: 7,
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("/api/runtime/schedule/runs/clear-all");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+  });
+});
+
 describe("schedule template API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -308,12 +369,14 @@ describe("schedule template API", () => {
   });
 
   it("fetches and normalizes persisted templates", async () => {
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      jsonResponse({
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return jsonResponse({
         templates: [{ ...templateRequest, createdAt: "2026-11-20T00:00:00Z" }],
         count: 1,
-      }),
-    );
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const response = await fetchScheduleTemplates();
@@ -361,9 +424,11 @@ describe("schedule template API", () => {
   });
 
   it("deletes a template and consumes the JSON deletion response", async () => {
-    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
-      jsonResponse({ id: "weekly-review", deleted: true }),
-    );
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      void _url;
+      void _init;
+      return jsonResponse({ id: "weekly-review", deleted: true });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(deleteScheduleTemplate("weekly-review")).resolves.toEqual({

@@ -33,7 +33,7 @@ export function ScheduleRunHistory({
         type="button"
         variant="ghost"
       >
-        <HistoryIcon className="mr-1 h-3 w-3" />
+        <HistoryIcon aria-hidden="true" className="mr-1 h-3 w-3" />
         {t("panels.schedule.runHistory")}
       </Button>
       {expanded ? (

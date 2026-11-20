@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/scheduleexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
@@ -72,11 +73,30 @@ func startRuntimeServerScheduleDriver(ctx context.Context, app *runtimeServerApp
 		return
 	}
 
+	// The runtime-server already owns the shared session actor core. Inject the
+	// same execution seam used by the standalone daemon so a runtime-server
+	// leader can execute both session-target and headless/workspace jobs.
+	if app.bootstrap == nil {
+		logger.Warn("schedule driver disabled: runtime bootstrap is not available")
+		return
+	}
+	executor, execErr := scheduleexec.New(scheduleexec.Options{
+		Executor:       app.handler.Executor(),
+		Sessions:       app.bootstrap.SessionManager(),
+		Profile:        scheduleCfg.Execution.Profile,
+		HeadlessUserID: "scheduled-runtime-server",
+	})
+	if execErr != nil {
+		logger.Warn("schedule driver disabled: executor unavailable", logger.Err(execErr))
+		return
+	}
+
 	leader, err := schedulehost.NewLeader(schedulehost.LeaderOptions{
 		Store:             store,
 		Service:           service,
 		Deliverer:         deliverer,
 		Mode:              scheduleCfg.Execution.Mode,
+		Executor:          executor,
 		MaxAttempts:       scheduleCfg.MaxDeliveryAttempts,
 		FallbackToMailbox: scheduleCfg.Execution.FallbackToMailbox,
 		// S4b（§4.4）：一次性任务补发宽限窗口（0=总是补发）。

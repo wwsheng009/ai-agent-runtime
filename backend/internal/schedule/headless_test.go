@@ -15,6 +15,37 @@ type fakeHeadlessExecutor struct {
 	reqs []HeadlessTurnRequest
 }
 
+type clockState struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clockState) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *clockState) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+type advancingHeadlessExecutor struct {
+	clock   *clockState
+	advance time.Duration
+}
+
+func (e *advancingHeadlessExecutor) ExecuteTurn(context.Context, string, string) error {
+	return nil
+}
+
+func (e *advancingHeadlessExecutor) ExecuteHeadlessTurn(_ context.Context, req HeadlessTurnRequest) (HeadlessTurnResult, error) {
+	e.clock.Advance(e.advance)
+	return HeadlessTurnResult{SessionID: "ephemeral-" + req.JobID, Output: "job output"}, nil
+}
+
 func (e *fakeHeadlessExecutor) ExecuteTurn(context.Context, string, string) error { return nil }
 
 func (e *fakeHeadlessExecutor) ExecuteHeadlessTurn(_ context.Context, req HeadlessTurnRequest) (HeadlessTurnResult, error) {
@@ -171,6 +202,55 @@ func TestHeadlessJobDeferredWithoutHeadlessExecutor(t *testing.T) {
 	}
 }
 
+// TestHeadlessJobRecoversWhenExecutorAppears verifies that a new leader with a
+// headless-capable executor re-arms jobs blocked by a previous incapable
+// leader. This is the runtime-server/aicli upgrade path: capability restoration
+// must not require a manual user resume.
+func TestHeadlessJobRecoversWhenExecutorAppears(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, func() time.Time { return now })
+	delay := int64(60)
+	rec := newHeadlessJob(t, svc, CreateRequest{
+		Prompt: "p", Title: "t", AfterSeconds: &delay, Goal: "做一次系统检查", TargetKind: TargetHeadless,
+	})
+
+	// First leader: session-only executor. The job is blocked by capability.
+	incapable := NewRuntime(RuntimeOptions{
+		Store: store, Service: svc, Clock: func() time.Time { return now },
+		Deliverer: &flakyDeliverer{}, MaxAttempts: 3, FallbackToMailbox: true,
+		Mode: ModeEmbedded, Executor: &embeddedExecutor{},
+	})
+	now = now.Add(2 * time.Minute)
+	incapable.RequestDrive()
+	waitFor(t, 5*time.Second, func() bool {
+		task, ok, getErr := store.Get(rec.ID)
+		return getErr == nil && ok && task.Status == StatusBlocked
+	}, "job blocked without executor")
+	incapable.Stop()
+
+	// Second leader: the shared runtime core is available. Start must requeue
+	// the capability block and execute without a manual resume.
+	exec := &fakeHeadlessExecutor{}
+	capable := NewRuntime(RuntimeOptions{
+		Store: store, Service: svc, Clock: func() time.Time { return now },
+		Deliverer: &flakyDeliverer{}, MaxAttempts: 3, FallbackToMailbox: true,
+		Mode: ModeEmbedded, Executor: exec,
+	})
+	defer capable.Stop()
+	capable.Start(context.Background())
+
+	waitFor(t, 5*time.Second, func() bool {
+		task, ok, getErr := store.Get(rec.ID)
+		return getErr == nil && ok && task.Status == StatusInactive && exec.count() == 1
+	}, "blocked job recovered and executed")
+}
+
 // TestHeadlessJobRecordsRunAndDeliversResult 验证 J3：headless 作业执行后
 // 落运行历史（含输出）并把结果回投给创建者会话。
 func TestHeadlessJobRecordsRunAndDeliversResult(t *testing.T) {
@@ -233,6 +313,47 @@ func TestHeadlessJobRecordsRunAndDeliversResult(t *testing.T) {
 	}
 	if !strings.Contains(deliverer.records[0], "[SCHEDULE JOB RESULT]") {
 		t.Fatalf("result framing missing, got %q", deliverer.records[0])
+	}
+}
+
+func TestHeadlessJobRecordsActualRunWindow(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+
+	clock := &clockState{now: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)}
+	svc := NewService(store, clock.Now)
+	delay := int64(60)
+	rec := newHeadlessJob(t, svc, CreateRequest{
+		Prompt: "p", Title: "t", AfterSeconds: &delay, Goal: "做一次系统检查",
+		TargetKind: TargetHeadless,
+	})
+
+	exec := &advancingHeadlessExecutor{clock: clock, advance: 90 * time.Second}
+	rt := NewRuntime(RuntimeOptions{
+		Store: store, Service: svc, Clock: clock.Now,
+		Deliverer: &flakyDeliverer{}, MaxAttempts: 3, Mode: ModeEmbedded, Executor: exec,
+	})
+	defer rt.Stop()
+
+	clock.Advance(2 * time.Minute)
+	rt.RequestDrive()
+	waitFor(t, 5*time.Second, func() bool {
+		runs, listErr := store.ListJobRuns(rec.ID, 10)
+		return listErr == nil && len(runs) == 1
+	}, "headless run recorded")
+
+	runs, err := store.ListJobRuns(rec.ID, 10)
+	if err != nil {
+		t.Fatalf("ListJobRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected one job run, got %d", len(runs))
+	}
+	if got := runs[0].FinishedAt.Sub(runs[0].StartedAt); got != 90*time.Second {
+		t.Fatalf("run window = %s, want 90s", got)
 	}
 }
 

@@ -648,7 +648,7 @@ type ScheduleConfig struct {
 
 // ScheduleExecutionConfig selects the reminder execution mode.
 type ScheduleExecutionConfig struct {
-	// Mode is one of delegate | embedded | auto (default delegate).
+	// Mode is one of delegate | embedded | auto (default auto).
 	Mode string `yaml:"mode" json:"mode"`
 	// RuntimeServerURL is the delegate target.
 	RuntimeServerURL string `yaml:"runtimeServerURL" json:"runtimeServerURL"`
@@ -766,7 +766,7 @@ func DefaultScheduleConfig() ScheduleConfig {
 		DeliveryHistoryRecords: 200,
 		MaxDeliveryAttempts:    5,
 		Execution: ScheduleExecutionConfig{
-			Mode:                    ScheduleModeDelegate,
+			Mode:                    ScheduleModeAuto,
 			MaxConcurrentExecutions: 1,
 			MaxTurnDuration:         10 * time.Minute,
 			FallbackToMailbox:       true,

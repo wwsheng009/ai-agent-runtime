@@ -238,6 +238,13 @@ export const zhWorkspacePanelsSchedule = {
   },
   // J3：运行历史。
   runHistory: "运行历史",
+  associatedSession: "关联会话",
+  creatorSession: "创建者会话",
+  openSession: "打开会话",
+  openSessionFor: "打开「{{title}}」的关联会话",
+  viewHistory: "查看历史",
+  viewHistoryFor: "查看「{{title}}」的作业历史",
+  openGlobalAutomation: "打开全局自动化页面",
   runStatus: {
     done: "成功",
     failed: "失败",
@@ -293,6 +300,24 @@ export const zhWorkspacePanelsSchedule = {
     finished: "完成",
     duration: "耗时",
     session: "临时会话",
+    clear: "清理日志",
+    clearAll: "清理全部日志",
+    confirmClearTitle: "清理运行日志",
+    confirmClearMessage:
+      "确定清理任务“{{taskTitle}}”的全部运行日志吗？此操作只删除日志，不会删除任务。",
+    confirmClearAllTitle: "清理全部运行日志",
+    confirmClearAllMessage:
+      "确定清理所有自动化任务的运行日志吗？此操作会永久删除所有任务（包括已删除任务）的运行历史，但不会删除任务、投递记录或待处理消息。",
+    confirmClear: "确认清理",
+    confirmClearAll: "确认清理全部",
+    clearing: "清理中…",
+    clearFailed: "运行日志清理失败，请稍后重试。",
+    detailsTitle: "运行日志详情",
+    closeDetails: "关闭日志详情",
+    task: "任务",
+    runId: "运行编号",
+    listLabel: "运行日志列表",
+    openDetails: "打开任务“{{taskTitle}}”运行编号 {{runId}} 的详情",
   },
   templates: {
     title: "自动化模板",
