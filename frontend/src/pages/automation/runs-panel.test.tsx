@@ -226,6 +226,31 @@ describe("AutomationRunsPanel", () => {
     ).toBeNull();
   });
 
+  it("keeps global cleanup available when no tasks remain", async () => {
+    scheduleApi.clearAllScheduleJobRuns.mockResolvedValue({
+      deletedCount: 1,
+    });
+    render([]);
+    await flush();
+
+    const clearAllButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="automation-clear-all-runs"]',
+    );
+    expect(clearAllButton).not.toBeNull();
+    click(clearAllButton as HTMLButtonElement);
+    expect(document.body.textContent).toContain("包括已删除任务");
+
+    const confirmButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("确认清理全部"));
+    expect(confirmButton).toBeDefined();
+    click(confirmButton as HTMLButtonElement);
+    await flush();
+
+    expect(scheduleApi.clearAllScheduleJobRuns).toHaveBeenCalledOnce();
+    expect(scheduleApi.clearAllScheduleJobRuns).toHaveBeenCalledWith();
+  });
+
   it("honors a preselected task from the task list history action", async () => {
     scheduleApi.fetchScheduleJobRuns.mockImplementation(
       async (_sessionId: string | undefined, id: string) => ({
