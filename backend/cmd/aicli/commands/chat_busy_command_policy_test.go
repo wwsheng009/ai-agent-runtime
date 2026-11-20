@@ -138,6 +138,36 @@ func TestChatBusyCommandPolicySubcommandQueueClear(t *testing.T) {
 	}
 }
 
+func TestChatInputCommandBusyPolicyUsesRegistryWhileConsoleCaptureActive(t *testing.T) {
+	t.Setenv(chatBusyCommandEnv, "on")
+
+	session := &ChatSession{}
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	queue := newChatInputQueue(nil)
+	session.InputQueue = queue
+
+	if !coord.IsReady() {
+		t.Fatal("precondition: coordinator must start Ready")
+	}
+	if got := chatInputCommandBusyPolicy(session, "/queue steer"); got != chatBusyPolicyDeferred {
+		t.Fatalf("ready without a busy capture = %s, want deferred", got)
+	}
+
+	queue.setExternalInputCaptureActive(true)
+	if got := chatInputCommandBusyPolicy(session, "/queue steer"); got != chatBusyPolicyImmediate {
+		t.Fatalf("active TUI busy capture = %s, want immediate", got)
+	}
+	queue.setExternalInputCaptureActive(false)
+
+	// Web/remote capture must keep the INV-8 deferred semantics.
+	queue.setWebInputCaptureActive(true)
+	defer queue.setWebInputCaptureActive(false)
+	if got := chatInputCommandBusyPolicy(session, "/queue steer"); got != chatBusyPolicyDeferred {
+		t.Fatalf("web capture = %s, want deferred", got)
+	}
+}
+
 func TestChatBusyCommandPolicyArgsGuardAndAliases(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 

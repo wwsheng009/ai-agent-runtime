@@ -1466,6 +1466,21 @@ func TestHandleCommand_QueueStatusAndClear(t *testing.T) {
 	}
 }
 
+func TestHandleCommand_QueueSteerLegacyPathReportsUnavailable(t *testing.T) {
+	session := &ChatSession{InputQueue: newChatInputQueue(nil)}
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/queue steer", false); quit {
+			t.Fatal("expected queue steer command not to exit")
+		}
+	})
+	if !strings.Contains(output, "排队输入未更改") {
+		t.Fatalf("expected legacy /queue steer to render the structured result, got %q", output)
+	}
+	if strings.Contains(output, "仅支持空参数或 clear") {
+		t.Fatalf("legacy /queue steer must not fall back to the old error: %q", output)
+	}
+}
+
 func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {

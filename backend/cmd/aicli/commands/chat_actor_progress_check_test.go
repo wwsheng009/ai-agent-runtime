@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,6 +21,19 @@ const localProgressCheckTestSession = "parent-session"
 func newTestSubagentBatchStore(t *testing.T) subagentbatch.BatchStore {
 	t.Helper()
 	store, err := subagentbatch.NewSQLiteBatchStore(nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// newDurableTestSubagentBatchStore is used by tests that exercise a durable
+// receipt/capability. The nil-config SQLite store is intentionally in-memory
+// and must not satisfy the production durability gate.
+func newDurableTestSubagentBatchStore(t *testing.T) subagentbatch.BatchStore {
+	t.Helper()
+	store, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store

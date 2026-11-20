@@ -806,7 +806,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		defer store.Close()
 		arg := strings.TrimSpace(extractCommandArgument(command))
 		if arg == "" || strings.EqualFold(firstToken(arg), "status") {
-			doc, ready := buildChatMemoryStatusDocument(store)
+			doc, ready := buildChatMemoryStatusDocument(store, chatMemoryRuntimeStatusForSession(session))
 			if !ready {
 				return CommandResult{}, false, nil
 			}

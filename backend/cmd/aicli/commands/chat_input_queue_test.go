@@ -306,6 +306,41 @@ func TestChatInputCommandQueuableAllowsSafeSlashWhileBusy(t *testing.T) {
 	}
 }
 
+func TestChatInputQueueRoutesQueueSteerImmediatelyDuringConsoleCapture(t *testing.T) {
+	t.Setenv(chatBusyCommandEnv, "on")
+
+	session := &ChatSession{}
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	queue := newChatInputQueue(nil)
+	session.InputQueue = queue
+	queue.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
+		return chatInputCommandBusyPolicy(session, text)
+	})
+	queue.setExternalInputCaptureActive(true)
+	defer queue.setExternalInputCaptureActive(false)
+
+	var consumed []string
+	queue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		consumed = append(consumed, item.Text)
+		return true
+	})
+
+	result := queue.routeInputText("/queue steer")
+	if !result.immediate() {
+		t.Fatalf("/queue steer must route immediately during a console capture, got %+v", result)
+	}
+	if !queue.consumeBusyCommand(chatQueuedInput{Text: "/queue steer", Source: chatInputSourceStdin}) {
+		t.Fatal("busy executor must consume /queue steer")
+	}
+	if len(consumed) != 1 || consumed[0] != "/queue steer" {
+		t.Fatalf("busy executor received %v, want /queue steer", consumed)
+	}
+	if got := queue.pendingCount(); got != 0 {
+		t.Fatalf("/queue steer must not be left in the queue, pending=%d", got)
+	}
+}
+
 func TestInterruptChatTurnFromBusyInputCancelRestoresPendingInputToDraft(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

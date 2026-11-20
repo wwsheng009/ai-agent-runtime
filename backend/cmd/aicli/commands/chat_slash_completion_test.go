@@ -800,6 +800,31 @@ func TestChatSlashArgumentCompletionAttach(t *testing.T) {
 	}
 }
 
+func TestChatSlashArgumentCompletionQueueIncludesSteer(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/queue ", len([]rune("/queue ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /queue args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"status", "clear", "steer"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /queue candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/queue st", len([]rune("/queue st")))
+	if len(controller.state.Candidates) != 2 {
+		t.Fatalf("expected status + steer candidates for /queue st, got %#v", controller.state.Candidates)
+	}
+	for _, command := range []string{"status", "steer"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /queue st candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+}
+
 func TestChatSlashArgumentCompletionApprovalReuseStatusAndClear(t *testing.T) {
 	t.Parallel()
 

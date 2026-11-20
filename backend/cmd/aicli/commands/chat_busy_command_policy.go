@@ -138,11 +138,14 @@ func chatBusyCommandNameAndArgs(text string) (string, []string, bool) {
 // chatInputCommandBusyPolicy 是 chatInputCommandQueuable 的策略化等价物（P1-3
 // 起由输入队列路由使用）：Ready 状态沿用旧语义（deferred，交主循环/队列处理），
 // 忙时按目标策略解析；非 slash 输入返回 inherit（由非命令路径处理）。
+// TUI busy capture 已接管输入时，即使 UI 状态短暂仍报 Ready，也必须按忙时
+// 注册表解析——否则 /queue steer 等 immediate 命令会被错误地排入队列。
 func chatInputCommandBusyPolicy(session *ChatSession, text string) chatBusyCommandPolicy {
 	if !isSlashCommandInput(text) {
 		return chatBusyPolicyInherit
 	}
-	if session != nil && session.Interaction != nil && session.Interaction.IsReady() {
+	if session != nil && session.Interaction != nil && session.Interaction.IsReady() &&
+		(session.InputQueue == nil || !session.InputQueue.consoleInputCaptureActive()) {
 		return chatBusyPolicyDeferred
 	}
 	return chatSlashCommandBusyPolicyFor(text)

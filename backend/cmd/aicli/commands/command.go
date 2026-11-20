@@ -869,8 +869,14 @@ func handleQueueCommand(session *ChatSession, command string) bool {
 		refreshChatComposerContext(session)
 		printfChatCommandOutput(session, "已清空 queued input: %d；已清空暂存命令: %d", discarded, deferred)
 		return false
+	case "steer":
+		result := steerQueuedInteractiveInput(session)
+		for _, block := range result.Blocks {
+			printChatCommandOutput(session, ui.RenderDocumentPlain(block.Document))
+		}
+		return false
 	default:
-		printChatCommandOutput(session, "错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")
+		printChatCommandOutput(session, "错误: /queue 仅支持 status、clear 或 steer\n用法: /queue [status|clear|steer]")
 		return false
 	}
 }

@@ -303,7 +303,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 
 // submitBusyCapturedInput is the normal Enter path for busy-capture input:
 // ordinary chat submissions keep their FIFO position, and command submissions
-// still go through the busy command gate. Alt+Enter uses the steer path below.
+// still go through the busy command gate. Ctrl+Alt+Enter uses the steer path below.
 func submitBusyCapturedInput(session *ChatSession, queue *chatInputQueue, line string) chatInputRouteResult {
 	if queue == nil {
 		return chatInputRouteResult{Disposition: chatInputRouteQueued}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -389,7 +390,7 @@ func chatGoalElapsedSecondsForAccounting(goal *runtimegoal.SessionGoal, activeTu
 // goal metadata，返回待持久化的快照。调用方随后必须调用
 // persistChatGoalElapsed；不要把存储 I/O 放进 coordinator 的 UI 锁。
 func accountChatGoalElapsedInMemory(session *ChatSession, activeTurnStartedAt, now time.Time) *chatGoalElapsedAccounting {
-	if session == nil || session.RuntimeSession == nil || activeTurnStartedAt.IsZero() {
+	if session == nil || chatRuntimeSessionPointer(session) == nil || activeTurnStartedAt.IsZero() {
 		return nil
 	}
 	goal, ok, err := currentSessionGoal(session)
@@ -401,8 +402,12 @@ func accountChatGoalElapsedInMemory(session *ChatSession, activeTurnStartedAt, n
 		return nil
 	}
 	goal.TimeUsedSeconds += delta
-	if err := runtimegoal.NewMetadataStore().Put(session.RuntimeSession, *goal); err != nil {
-		writeSessionDebugInfo(session, "[goal] in-memory elapsed accounting failed: "+err.Error(), false)
+	var putErr error
+	withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+		putErr = runtimegoal.NewMetadataStore().Put(runtimeSession, *goal)
+	})
+	if putErr != nil {
+		writeSessionDebugInfo(session, "[goal] in-memory elapsed accounting failed: "+putErr.Error(), false)
 		return nil
 	}
 	return &chatGoalElapsedAccounting{Goal: *goal, Seconds: delta}
@@ -413,7 +418,7 @@ func accountChatGoalElapsedInMemory(session *ChatSession, activeTurnStartedAt, n
 // 带上该内存快照。
 func persistChatGoalElapsed(session *ChatSession, accounting *chatGoalElapsedAccounting) {
 	if session == nil || accounting == nil || accounting.Seconds <= 0 ||
-		session.SessionManager == nil || session.RuntimeSession == nil {
+		session.SessionManager == nil || chatRuntimeSessionPointer(session) == nil {
 		return
 	}
 	_, err := runtimegoal.NewMetadataStore().PutPersistent(

@@ -129,6 +129,50 @@ func (r *localActorRegistry) submitPrompt(ctx context.Context, sessionID, prompt
 	}, nil
 }
 
+// submitPromptWithReceipt is the supervision variant of submitPrompt: it runs
+// the normal preflight and actor-claim path, invokes afterAccepted only after
+// the user prompt is persisted, then returns the eventual model result channel.
+// A non-nil result channel is the durable acceptance receipt; an error alongside
+// it is necessarily post-acceptance and must never retry the prompt.
+func (r *localActorRegistry) submitPromptWithReceipt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, afterAccepted func() error) (<-chan runtimechat.SubmitResult, error) {
+	if r == nil || r.Host == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if r.Host.Supervision != nil {
+		var injectErr error
+		prompt, injectErr = injectLocalSupervisionPreflight(ctx, r.Host, sessionID, prompt, runMeta)
+		if injectErr != nil {
+			return nil, injectErr
+		}
+	}
+	if r.Host.SessionHub == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	if err := r.ensureSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	releaseSubmitClaim := r.Host.beginActorSubmitClaim(sessionID)
+	defer releaseSubmitClaim()
+	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	resultCh, err := actor.SubmitPromptAsyncWithReceipt(ctx, prompt, runMeta, runtimechat.SubmitPromptOption{})
+	if err != nil {
+		return nil, err
+	}
+	if afterAccepted != nil {
+		if err := afterAccepted(); err != nil {
+			return resultCh, supervision.NewAcceptedDeliveryError(err, true)
+		}
+	}
+	return resultCh, nil
+}
+
 func (r *localActorRegistry) TriggerTask(ctx context.Context, request team.TaskTriggerRequest) (*team.SessionResult, error) {
 	store := team.Store(nil)
 	if r != nil && r.Host != nil {

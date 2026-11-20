@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -171,19 +172,23 @@ func (h *localChatRuntimeHost) localTurnIDForSession(ctx context.Context, sessio
 
 // markLocalTurnResultsConsumed closes the durable synthesis gate once the
 // parent has a result-bearing resume prompt or a subagent_wait packet in its
-// current context. Best-effort: the loop-side gate still prevents new tools,
-// and an older store without the capability keeps the pre-gate behavior.
-func (h *localChatRuntimeHost) markLocalTurnResultsConsumed(ctx context.Context, sessionID, turnID string) {
+// current context. An absent or in-memory store remains a no-op for legacy
+// paths; a durable store without the marker capability, an unresolved identity,
+// or a real marker write error is returned so callers can preserve suspension.
+func (h *localChatRuntimeHost) markLocalTurnResultsConsumed(ctx context.Context, sessionID, turnID string) error {
 	if h == nil || h.SubagentBatches == nil {
-		return
+		return nil
+	}
+	if !h.SubagentBatches.IsDurable() {
+		return nil
 	}
 	marker, ok := h.SubagentBatches.(subagentbatch.TurnResultsConsumptionStore)
 	if !ok || marker == nil {
-		return
+		return fmt.Errorf("durable batch store does not support turn result consumption receipts")
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return
+		return fmt.Errorf("cannot mark turn results consumed without session identity")
 	}
 	if ctx == nil || ctx.Err() != nil {
 		ctx = context.Background()
@@ -193,11 +198,14 @@ func (h *localChatRuntimeHost) markLocalTurnResultsConsumed(ctx context.Context,
 		turnID = h.localTurnIDForSession(ctx, sessionID)
 	}
 	if turnID == "" {
-		return
+		return fmt.Errorf("cannot mark turn results consumed without turn identity")
 	}
 	markCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_ = marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID)
+	if err := marker.MarkTurnResultsConsumed(markCtx, sessionID, turnID); err != nil {
+		return fmt.Errorf("mark turn results consumed (%s/%s): %w", sessionID, turnID, err)
+	}
+	return nil
 }
 
 // announceLocalTurnSuspended publishes one §6.8 turn.suspended edge for a

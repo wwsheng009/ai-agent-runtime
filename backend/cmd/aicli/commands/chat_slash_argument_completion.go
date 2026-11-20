@@ -178,6 +178,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupContext)},
 			{Command: "clear", Summary: "清空排队输入", Group: string(chatSlashCommandGroupContext)},
+			{Command: "steer", Summary: "下次模型请求前追加排队消息", Group: string(chatSlashCommandGroupContext)},
 		})
 	case "/goal":
 		return completeGoalSlashArgs(argsText, cursor)

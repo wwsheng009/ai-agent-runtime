@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,6 +13,15 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
+
+type localMarkerFailureBatchStore struct {
+	subagentbatch.BatchStore
+	err error
+}
+
+func (s localMarkerFailureBatchStore) MarkTurnResultsConsumed(context.Context, string, string) error {
+	return s.err
+}
 
 // TestLocalHostWiresResumeDelivery 守护 G2 的宿主接线（缺口就是"能力在包内、
 // 宿主没接线"）：控制面就绪的 CLI 宿主必须给 wake consumer 装上 DeliverResume，
@@ -33,7 +43,7 @@ func TestLocalHostWiresResumeDelivery(t *testing.T) {
 func TestLocalHostMarksTurnResultsConsumed(t *testing.T) {
 	ctx := context.Background()
 	host := newLocalSupervisionTestHost(t)
-	host.SubagentBatches = newTestSubagentBatchStore(t)
+	host.SubagentBatches = newDurableTestSubagentBatchStore(t)
 	const (
 		parentSessionID = "parent-results-consumed"
 		turnID          = "turn-results-consumed"
@@ -51,6 +61,32 @@ func TestLocalHostMarksTurnResultsConsumed(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.True(t, record.ResultsConsumed)
+}
+
+func TestLocalHostMarkerFailureIsReturnedWithoutClosingGate(t *testing.T) {
+	ctx := context.Background()
+	host := newLocalSupervisionTestHost(t)
+	baseStore := newDurableTestSubagentBatchStore(t)
+	markerErr := errors.New("marker write failed")
+	host.SubagentBatches = localMarkerFailureBatchStore{BatchStore: baseStore, err: markerErr}
+	const (
+		parentSessionID = "parent-marker-failure"
+		turnID          = "turn-marker-failure"
+	)
+	require.NoError(t, baseStore.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSessionID,
+		RootScopeID:   parentSessionID,
+		ObligationIDs: []string{"batch-marker-failure"},
+	}))
+
+	err := host.markLocalTurnResultsConsumed(ctx, parentSessionID, turnID)
+	require.ErrorIs(t, err, markerErr)
+
+	record, ok, err := baseStore.GetTurnSuspension(ctx, parentSessionID, turnID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, record.ResultsConsumed, "a failed marker write must keep the durable gate open")
 }
 
 // TestLocalTurnResumedEventPayload 钉住 G3 的 CLI 播报面：supervision 的

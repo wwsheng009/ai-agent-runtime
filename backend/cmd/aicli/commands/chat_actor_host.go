@@ -187,15 +187,18 @@ type localChatRuntimeHost struct {
 	// 遇到认领时改为登记延迟重建（下一轮兑现），绝不把 actor 从提交脚下驱逐
 	//（否则提交拿到的 actor 可能在 BeginRun 前被 Stop，形成静默撕裂）。
 	// map 惰性创建：大量测试以结构体字面量构造 host，不要求构造器参与。
-	actorClaimMu      sync.Mutex
-	actorClaims       map[string]int
-	TeamLifecycle     teamLifecycleService
-	ActorRegistry     *localActorRegistry
-	Supervision       *runtimeserver.SupervisionControlPlane
-	SubagentBatches   subagentbatch.BatchStore
-	MemoryRuntime     *memoryruntime.Runtime
-	supervisionWake   *supervision.WakeConsumer
-	supervisionConfig supervision.Config
+	actorClaimMu    sync.Mutex
+	actorClaims     map[string]int
+	TeamLifecycle   teamLifecycleService
+	ActorRegistry   *localActorRegistry
+	Supervision     *runtimeserver.SupervisionControlPlane
+	SubagentBatches subagentbatch.BatchStore
+	MemoryRuntime   *memoryruntime.Runtime
+	// memoryMaintenanceShared means MemoryRuntime is owned by the process-wide
+	// workspace registry; its store/ticker must not be closed by this host.
+	memoryMaintenanceShared bool
+	supervisionWake         *supervision.WakeConsumer
+	supervisionConfig       supervision.Config
 	// executionSupervisor / executionSupervisorStop 是 P0-4 的 CLI 本地
 	// child-run 看门狗：与 API 侧共用 supervision.ExecutionRunStore，惰性构建，
 	// 关闭 host 时随 lifecycleCtx 一起停止。
@@ -388,6 +391,16 @@ func (h *localChatRuntimeHost) Close() {
 		// 子会话未结束就关闭 host 也不残留订阅）。
 		h.releaseAllChildEventSubscriptions()
 	})
+}
+
+// appendLocalChatHostCleanup appends host cleanup callbacks without replacing
+// callbacks installed earlier during host construction (notably the memory
+// store Close and digest-invalidation unsubscribe functions).
+func appendLocalChatHostCleanup(host *localChatRuntimeHost, fns ...func()) {
+	if host == nil || len(fns) == 0 {
+		return
+	}
+	host.cleanupFns = append(host.cleanupFns, fns...)
 }
 
 func (h *localChatRuntimeHost) registerSubagentCoordinator(coordinator *agent.SubagentBatchCoordinator) bool {
@@ -993,6 +1006,39 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			}
 			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePromptFor(resume), resumeTurnID, resultsReady)
 		},
+		OnAcceptedDeliveryError: func(ctx context.Context, parentSessionID, rootScopeID string, _ *supervision.Digest, wakes []supervision.WakePending, resume *supervision.ResumeContext, _ error) error {
+			turnID := ""
+			episodeID := ""
+			if resume != nil {
+				turnID = strings.TrimSpace(resume.TurnID)
+			}
+			for _, wake := range wakes {
+				if turnID == "" {
+					turnID = strings.TrimSpace(wake.ParentTurnID)
+					if turnID == "" {
+						turnID = strings.TrimSpace(wake.TurnID)
+					}
+				}
+				if episodeID == "" {
+					episodeID = strings.TrimSpace(wake.ParentEpisodeID)
+				}
+			}
+			if turnID == "" {
+				return fmt.Errorf("cannot schedule results-consumption repair without turn identity")
+			}
+			_, err := h.Supervision.Wakes.ScheduleWake(ctx, supervision.WakeRequest{
+				RootScopeID:           rootScopeID,
+				TargetParentSessionID: parentSessionID,
+				TurnID:                turnID,
+				ParentTurnID:          turnID,
+				ParentEpisodeID:       episodeID,
+				WakeReason:            supervision.ResultsConsumptionRetryWakeReason(turnID),
+			})
+			return err
+		},
+		DeliverResultsConsumptionRetry: func(ctx context.Context, parentSessionID, _ string, turnID string) error {
+			return h.markLocalTurnResultsConsumed(ctx, parentSessionID, turnID)
+		},
 		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
 		// 事件总线（A+D 契约：落盘 + 回合末尾巴帧），UI/审计据此结束"托管中"表达；
 		// 投递失败不发（wake 仍在 durable 队列里，播报会与事实相反）。
@@ -1026,8 +1072,9 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 
 // deliverSupervisionWake 是本地宿主的 wake/resume 投递通道：异步起一轮父 turn
 // （调用方是投影/事件回调，不得阻塞在一整轮父 turn 上），prompt 由调用方按是否
-// 携带 resume 上下文选择（AutoWakePrompt / ResumePrompt）。失败路径必须把已认领
-// 的 wake 行重新排队（plan §6-F：只记日志会静默吃掉父会话唯一一次自动唤醒）。
+// 携带 resume 上下文选择（AutoWakePrompt / ResumePrompt）。这里等待的只是
+// durable prompt receipt，而不是完整模型回合；这样 WakeConsumer 能区分
+// "actor 尚未接管，可安全重试" 与 "prompt 已接管，后续 marker 失败不可重投"。
 func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, parentSessionID, rootScopeID string, wakeIDs []string, prompt, resumeTurnID string, resultsReady bool) error {
 	if h == nil || h.ActorRegistry == nil {
 		return fmt.Errorf("actor registry is not ready")
@@ -1036,7 +1083,10 @@ func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, paren
 		prompt = supervision.AutoWakePrompt
 	}
 	// Deliver asynchronously: the caller is a projection / event handler and
-	// must not block on a full parent turn.
+	// must not block on a full parent turn. The small result channel carries
+	// only the prompt-acceptance boundary, so the consumer can persist the
+	// correct delivery classification before resolving the wake.
+	accepted := make(chan error, 1)
 	go func() {
 		// The wake turn must never wedge the parent UI into a
 		// non-interruptible state: bind its ctx to the host lifecycle so
@@ -1050,24 +1100,16 @@ func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, paren
 			baseCtx = h.lifecycleCtx
 		}
 		runCtx, cancel := context.WithTimeout(baseCtx, 30*time.Minute)
-		defer cancel()
 		releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
 		if err != nil {
-			// Plan §6-F: the claimed wake rows are resolved as soon as this
-			// callback returns, so a failure that is only logged would
-			// silently consume the parent's only auto-wake.
-			h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
+			cancel()
+			accepted <- err
 			return
 		}
 		defer releaseTurn()
-		if resultsReady {
-			h.markLocalTurnResultsConsumed(runCtx, parentSessionID, resumeTurnID)
-		}
-		if err := h.submitParentWakeTurn(runCtx, parentSessionID, prompt); err != nil {
-			h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
-		}
+		accepted <- h.submitParentWakeTurn(runCtx, parentSessionID, prompt, resumeTurnID, resultsReady, cancel)
 	}()
-	return nil
+	return <-accepted
 }
 
 // chatHostSessionInteractive reports whether the local host base session is
@@ -1108,18 +1150,56 @@ func (h *localChatRuntimeHost) beginWakeTurnRun(prompt string) func() {
 	return func() {}
 }
 
-// submitParentWakeTurn delivers one supervision wake turn on the parent
-// actor, wrapped in the UI run-epoch protocol (BeginRun/EndRun).
-func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentSessionID, prompt string) error {
+// submitParentWakeTurn delivers one supervision wake turn on the parent actor,
+// wrapped in the UI run-epoch protocol (BeginRun/EndRun). The result marker is
+// written only from the actor's durable prompt receipt callback; prompt
+// acceptance and parent-turn finalization remain separate milestones. The UI
+// epoch remains open until the eventual result channel completes, even though
+// this function returns at the prompt receipt boundary.
+func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentSessionID, prompt, resumeTurnID string, resultsReady bool, finishRun func()) error {
+	if finishRun == nil {
+		finishRun = func() {}
+	}
 	if h == nil || h.ActorRegistry == nil {
+		finishRun()
 		return fmt.Errorf("actor registry is not ready")
 	}
 	if strings.TrimSpace(prompt) == "" {
 		prompt = supervision.AutoWakePrompt
 	}
 	endRun := h.beginWakeTurnRun(prompt)
-	defer endRun()
-	_, err := h.ActorRegistry.SubmitPrompt(ctx, parentSessionID, prompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
+	resultCh, err := h.ActorRegistry.submitPromptWithReceipt(ctx, parentSessionID, prompt,
+		&team.RunMeta{PermissionMode: "bypass_permissions"},
+		func() error {
+			if resultsReady {
+				return h.markLocalTurnResultsConsumed(ctx, parentSessionID, resumeTurnID)
+			}
+			return nil
+		})
+	if resultCh != nil {
+		go func() {
+			// resultCh is owned by the actor and intentionally is not closed by
+			// the host. Normally it receives the run terminal result; the
+			// context fallback prevents a parked UI epoch from surviving a
+			// host/actor shutdown if delivery is interrupted before that send.
+			var once sync.Once
+			cleanup := func() {
+				once.Do(func() {
+					endRun()
+					finishRun()
+				})
+			}
+			select {
+			case <-resultCh:
+				cleanup()
+			case <-ctx.Done():
+				cleanup()
+			}
+		}()
+	} else {
+		endRun()
+		finishRun()
+	}
 	return err
 }
 
@@ -1589,7 +1669,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	host.SessionHub = runtimechat.NewBoundedSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
 		return host.buildSessionActor(sessionID, session, sessionStore, runtimeConfig, workspaceRoot)
 	})
-	host.cleanupFns = []func(){
+	appendLocalChatHostCleanup(host,
 		func() {
 			_ = bootstrapManager.Stop()
 		},
@@ -1647,7 +1727,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		func() {
 			host.shutdownSubagentCoordinators()
 		},
-	}
+	)
 
 	// A 通道桥：先把总线 → 会话事件库的落盘管道接上（方案 §0.2），
 	// 再接采集器；两者都只按订阅生效，顺序不影响各自语义。
@@ -1928,10 +2008,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	applyLocalChatToolObservation(loopConfig, session, h,
 		knowledge.ObservationSourceFor(observationSubagent, sessionCtx.ChildReadOnly), localChatObservationTaskID(session))
 	applyLocalChatCompletionRequirement(loopConfig, session, sessionCtx.ChildAgentType, sessionCtx.ChildCompletionRequirement, workspaceRoot)
-	var turnDigestSink runtimechat.TurnDigestSink
-	if h.MemoryRuntime != nil {
-		turnDigestSink = h.MemoryRuntime
-	}
+	turnDigestSink := localTurnDigestSink(h)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.Bootstrap.LLMRuntime(),

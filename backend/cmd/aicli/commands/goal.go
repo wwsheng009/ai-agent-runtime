@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
 
@@ -46,7 +47,7 @@ func applyGoalStatusChange(session *ChatSession, status runtimegoal.Status, mess
 		rearmGoalContinuation(session, "goal_resume_command")
 	}
 	store := runtimegoal.NewMetadataStore()
-	goal, ok, err := store.Get(session.RuntimeSession)
+	goal, ok, err := currentSessionGoal(session)
 	if err != nil {
 		return runtimegoal.SessionGoal{}, err
 	}
@@ -109,7 +110,7 @@ func setGoalCore(session *ChatSession, objective string) (runtimegoal.SessionGoa
 	}
 	store := runtimegoal.NewMetadataStore()
 	replaced := ""
-	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
+	if existing, ok, err := currentSessionGoal(session); err != nil {
 		return runtimegoal.SessionGoal{}, "", err
 	} else if ok && existing != nil {
 		replaced = fmt.Sprintf("（已替换原 %s goal）", existing.Status)
@@ -302,7 +303,7 @@ func applyGoalBudgetCommand(session *ChatSession, arg string) (string, error) {
 		return "", err
 	}
 	store := runtimegoal.NewMetadataStore()
-	goal, ok, err := store.Get(session.RuntimeSession)
+	goal, ok, err := currentSessionGoal(session)
 	if err != nil {
 		return "", err
 	}
@@ -346,14 +347,26 @@ func applyGoalBudgetCommand(session *ChatSession, arg string) (string, error) {
 }
 
 func currentSessionGoal(session *ChatSession) (*runtimegoal.SessionGoal, bool, error) {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return nil, false, nil
 	}
-	return runtimegoal.NewMetadataStore().Get(session.RuntimeSession)
+	type result struct {
+		goal *runtimegoal.SessionGoal
+		ok   bool
+		err  error
+	}
+	read, ok := chatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) result {
+		goal, found, err := runtimegoal.NewMetadataStore().Get(runtimeSession)
+		return result{goal: goal, ok: found, err: err}
+	})
+	if !ok {
+		return nil, false, nil
+	}
+	return read.goal, read.ok, read.err
 }
 
 func requireGoalPersistence(session *ChatSession) error {
-	if session == nil || session.RuntimeSession == nil || session.SessionManager == nil {
+	if session == nil || chatRuntimeSessionPointer(session) == nil || session.SessionManager == nil {
 		return fmt.Errorf(goalPersistenceRequiredMessage)
 	}
 	return nil

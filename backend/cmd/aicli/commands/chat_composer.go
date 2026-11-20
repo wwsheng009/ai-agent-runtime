@@ -578,7 +578,7 @@ func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 		OnTerminalWrite:       c.onTerminalWrite,
 		OnTerminalControl:     c.onTerminalControl,
 		OnCancel:              c.onCancel,
-		SteerOnAltEnter:       !c.answerPrompt && c.trackPrompt,
+		SteerOnCtrlAltEnter:   !c.answerPrompt && c.trackPrompt,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),

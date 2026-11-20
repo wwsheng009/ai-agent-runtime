@@ -6,11 +6,12 @@ import (
 	"strings"
 	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
 
 func reconcileGoalCompletionFromToolMessages(session *ChatSession) (bool, error) {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil || chatRuntimeSessionPointer(session) == nil {
 		return false, nil
 	}
 	// P2-1（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md §4）：
@@ -61,15 +62,21 @@ func reconcileGoalCompletionFromToolMessages(session *ChatSession) (bool, error)
 	}
 	store := runtimegoal.NewMetadataStore()
 	if session.SessionManager != nil && session.SessionManager.GetStorage() != nil {
-		updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), session.RuntimeSession.ID, *completed, runtimegoal.MutationModel)
+		updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *completed, runtimegoal.MutationModel)
 		if err != nil {
 			return false, err
 		}
 		if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
 			return false, err
 		}
-	} else if err := store.Put(session.RuntimeSession, *completed); err != nil {
-		return false, err
+	} else {
+		var putErr error
+		withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+			putErr = store.Put(runtimeSession, *completed)
+		})
+		if putErr != nil {
+			return false, putErr
+		}
 	}
 	ensureChatSystemPromptMessage(session)
 	requestGoalTerminalWrapUp(session, completed)

@@ -3,8 +3,10 @@ package commands
 import (
 	"sync"
 	"testing"
+	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 )
 
@@ -115,4 +117,54 @@ func TestChatRuntimeContextMapSnapshot_IsDetached(t *testing.T) {
 	if got := chatRuntimeContextString(session, sessionmeta.WorkspacePath); got != "E:/ws/one" {
 		t.Fatalf("session snapshot leaked into live map: %q", got)
 	}
+}
+
+// TestCurrentSessionGoal_ConcurrentReadersAndWriters protects the status-bar
+// notifier path from the original goal.MetadataStore.Get map race. Goal reads
+// must hold the same ChatSession lock as in-memory metadata writes.
+func TestCurrentSessionGoal_ConcurrentReadersAndWriters(t *testing.T) {
+	session := &ChatSession{RuntimeSession: runtimechat.NewSession("tester")}
+	goal, err := runtimegoal.NewSessionGoal(session.RuntimeSession.ID, "concurrent goal", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+		err = runtimegoal.NewMetadataStore().Put(runtimeSession, goal)
+	})
+	if err != nil {
+		t.Fatalf("seed goal metadata: %v", err)
+	}
+
+	const iterations = 1000
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			current, ok, readErr := currentSessionGoal(session)
+			if readErr != nil || !ok || current == nil {
+				t.Errorf("currentSessionGoal: goal=%+v ok=%v err=%v", current, ok, readErr)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			goal.TimeUsedSeconds = int64(i)
+			var putErr error
+			withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+				putErr = runtimegoal.NewMetadataStore().Put(runtimeSession, goal)
+			})
+			if putErr != nil {
+				t.Errorf("write goal metadata: %v", putErr)
+				return
+			}
+		}
+	}()
+	close(start)
+	wg.Wait()
 }
