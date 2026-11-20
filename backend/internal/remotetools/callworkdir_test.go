@@ -201,3 +201,27 @@ func TestEnvdDirParam(t *testing.T) {
 		t.Fatalf("no directory requested: dir=%q conflict=%q", dir, conflict)
 	}
 }
+
+func TestEnvdSchemasExposeWorkdirNotCwd(t *testing.T) {
+	specs := append(envdProcessToolSpecs(remoteToolBase{}), envdPtyToolSpecs(remoteToolBase{})...)
+	for _, name := range []string{ToolShell, ToolPtyStart} {
+		var props map[string]interface{}
+		for _, spec := range specs {
+			if spec.name != name {
+				continue
+			}
+			params, _ := spec.parameters["properties"].(map[string]interface{})
+			props = params
+			break
+		}
+		if props == nil {
+			t.Fatalf("%s schema not found", name)
+		}
+		if _, ok := props["workdir"]; !ok {
+			t.Errorf("%s schema must expose workdir", name)
+		}
+		if _, ok := props["cwd"]; ok {
+			t.Errorf("%s schema must not expose the deprecated cwd alias", name)
+		}
+	}
+}

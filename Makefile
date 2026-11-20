@@ -56,8 +56,13 @@ uninstall-aicli:
 package-server:
 	pwsh scripts/package-runtime-server.ps1 -Version $(VERSION) -OutputDir dist
 
+# Fast local feedback loop: skip long-running/live tests that honor -short.
 test:
-	cd $(BACKEND_DIR) && go test ./...
+	cd $(BACKEND_DIR) && go test -short -p 1 ./...
+
+# Full backend suite, including tests that only run without -short.
+test-full:
+	cd $(BACKEND_DIR) && go test -p 1 -timeout 30m ./...
 
 test-background:
 	cd $(BACKEND_DIR) && go test -p 1 ./internal/background -count=1

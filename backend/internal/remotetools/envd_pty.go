@@ -205,7 +205,6 @@ func envdPtyToolSpecs(base remoteToolBase) []envdToolSpec {
 				"properties": map[string]interface{}{
 					"command": envdStringProp("Command to run under the pty."),
 					"workdir": envdStringProp("Working directory for the pty process (jailed). An absolute path is used as-is; a relative path is resolved against the workspace root. Omit to use the workspace root. The directory must already exist."),
-					"cwd":     envdStringProp("Deprecated alias of workdir, kept for compatibility. If both workdir and cwd are supplied they must be identical."),
 					"cols":    intProp("Terminal columns (default 80)."),
 					"rows":    intProp("Terminal rows (default 24)."),
 				},

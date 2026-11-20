@@ -52,7 +52,6 @@ func envdProcessToolSpecs(base remoteToolBase) []envdToolSpec {
 				"properties": map[string]interface{}{
 					"command": envdStringProp("Command line to execute on the target."),
 					"workdir": envdStringProp("Working directory for THIS command only (equivalent to workdir on the local backend). An absolute path is used as-is; a relative path is resolved against the workspace root. Omit to use the workspace root. The choice is not remembered by later calls and the directory must already exist."),
-					"cwd":     envdStringProp("Deprecated alias of workdir, kept for compatibility. If both workdir and cwd are supplied they must be identical."),
 				},
 				"required": []string{"command"},
 			},

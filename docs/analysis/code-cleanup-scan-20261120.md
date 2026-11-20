@@ -78,6 +78,15 @@
 - 同步清理 `sourcegraph.go` 因此不再使用的 `net/url` import。
 - 验证：`go build -p 2 ./...`、`internal/toolkit/tools` 定向测试通过。
 
+### 0.4 第四批已执行（2026-11-20）
+
+- envd 模型可见 schema 移除 deprecated `cwd` 属性（`shell` 与 `pty_start`），
+  handler 仍接受 `cwd` 旧入参并保留冲突检测；新增 schema 防回归测试
+  `TestEnvdSchemasExposeWorkdirNotCwd`。
+- `Makefile` 默认 `test` 改为 `go test -short -p 1 ./...`，降低本地反馈回路的
+  测试时长与内存峰值；新增 `test-full` 保留完整后端测试。
+- 验证：`internal/remotetools` 定向测试通过。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
