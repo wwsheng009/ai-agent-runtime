@@ -17,7 +17,6 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -34,38 +33,6 @@ type chatAgentControlHealthCacheEntry struct {
 
 func printChatDebugInfo(session *ChatSession) {
 	_ = writeLegacyChatDebugDisplay(session)
-}
-
-func printChatDebugPermissions(session *ChatSession) {
-	if session == nil {
-		printChatSessionMetaRow("Permission Rules:", "<no session>")
-		return
-	}
-	overlay := session.PermissionsOverlay
-	summary := runtimepolicy.FormatPermissionsOverlaySummary(overlay)
-	printChatSessionMetaRow("Permission Rules:", chatDebugValueOrNone(summary))
-	if path := strings.TrimSpace(overlay.SourcePath); path != "" {
-		printChatSessionMetaRow("Permissions File:", chatDebugValueOrNone(resolveAbsoluteChatPath(path)))
-	}
-	if len(session.CLIAllowTools) > 0 {
-		printChatSessionMetaRow("CLI Allow Tools:", strings.Join(session.CLIAllowTools, ", "))
-	}
-	if len(session.CLIDenyTools) > 0 {
-		printChatSessionMetaRow("CLI Deny Tools:", strings.Join(session.CLIDenyTools, ", "))
-	}
-	printChatDebugFolderTrust(session)
-	if len(overlay.Rules) == 0 {
-		return
-	}
-	names := make([]string, 0, len(overlay.Rules))
-	for _, rule := range overlay.Rules {
-		name := strings.TrimSpace(rule.Name)
-		if name == "" {
-			name = string(rule.Decision)
-		}
-		names = append(names, name)
-	}
-	printChatSessionMetaRow("Permission Rule Names:", strings.Join(names, ", "))
 }
 
 func printChatDebugFolderTrust(session *ChatSession) {
@@ -3583,13 +3550,6 @@ func chatCollabEventSeq(event runtimeevents.Event) int64 {
 		return int64(value)
 	default:
 		return 0
-	}
-}
-
-func printChatDebugMailbox(session *ChatSession) {
-	fmt.Println("Mailbox Pending:")
-	for _, line := range chatDebugMailboxLines(session) {
-		fmt.Println(line)
 	}
 }
 

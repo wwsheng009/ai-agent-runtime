@@ -1090,7 +1090,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_debug.go", Func: "printChatAgentRoutingUsage", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatAgents", Kind: "fmt.Print", Count: 3},
 		{File: "chat_debug.go", Func: "printChatCollab", Kind: "fmt.Print", Count: 1},
-		{File: "chat_debug.go", Func: "printChatDebugMailbox", Kind: "fmt.Print", Count: 2},
 		{File: "chat_debug.go", Func: "printChatDebugRoutingSummary", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatRouteLevels", Kind: "fmt.Print", Count: 1},
 		{File: "chat_debug.go", Func: "printChatRouteRoles", Kind: "fmt.Print", Count: 1},

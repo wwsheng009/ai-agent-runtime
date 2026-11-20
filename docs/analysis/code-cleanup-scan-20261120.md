@@ -113,6 +113,15 @@
 - 验证：commands 的 Debug、tool-render freeze、DirectWriter inventory 与 history
   display 定向测试通过。
 
+### 0.7 第七批已执行（2026-11-20）
+
+- 删除 `chat_debug.go` 最后两个零引用诊断入口：
+  `printChatDebugPermissions`、`printChatDebugMailbox`；
+  同步移除不再使用的 `internal/policy` import。
+- DirectWriter inventory 基线继续下调。
+- 验证：commands 的 Debug、tool-render freeze、DirectWriter inventory 定向测试
+  通过（首次编译遇到环境 OOM，降低 `GOMAXPROCS`/`GOGC` 后复跑通过）。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。
