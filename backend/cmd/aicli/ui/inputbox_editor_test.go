@@ -76,11 +76,11 @@ func TestDecodeInteractiveKey_ModifiedEnterAndCtrlOInsertNewline(t *testing.T) {
 	}
 }
 
-func TestReadInteractiveLine_AltEnterSteersOnlyWhenBusyCaptureOptsIn(t *testing.T) {
-	for _, sequence := range []string{"\x1b[13;3u", "\x1b[13;3:1u", "\x1b[27;3;13~"} {
+func TestReadInteractiveLine_CtrlAltEnterSteersOnlyWhenBusyCaptureOptsIn(t *testing.T) {
+	for _, sequence := range []string{"\x1b[13;7u", "\x1b[13;7:1u", "\x1b[27;7;13~"} {
 		var output bytes.Buffer
 		line, err := readInteractiveLineWithHooks(strings.NewReader("follow-up"+sequence), &output, UserPromptText(0), nil, nil,
-			&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+			&LineEditorHooks{SteerOnCtrlAltEnter: true}, false, false)
 		if !errors.Is(err, ErrInteractiveInputSteerRequested) || line != "follow-up" {
 			t.Fatalf("%q: line=%q, err=%v", sequence, line, err)
 		}
@@ -92,16 +92,21 @@ func TestReadInteractiveLine_AltEnterSteersOnlyWhenBusyCaptureOptsIn(t *testing.
 	}
 	var output bytes.Buffer
 	line, err := readInteractiveLineWithHooks(strings.NewReader("first\x1b[13;2:1usecond\n"), &output, UserPromptText(0), nil, nil,
-		&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+		&LineEditorHooks{SteerOnCtrlAltEnter: true}, false, false)
 	if err != nil || line != "first\nsecond" {
 		t.Fatalf("Shift+Enter event-type sequence must remain newline: line=%q err=%v", line, err)
 	}
+	line, err = readInteractiveLineWithHooks(strings.NewReader("first\x1b[13;3usecond\n"), &output, UserPromptText(0), nil, nil,
+		&LineEditorHooks{SteerOnCtrlAltEnter: true}, false, false)
+	if err != nil || line != "first\nsecond" {
+		t.Fatalf("Alt+Enter must remain newline and not steer: line=%q err=%v", line, err)
+	}
 }
 
-func TestReadInteractiveLine_PastedAltEnterDoesNotSteer(t *testing.T) {
+func TestReadInteractiveLine_PastedCtrlAltEnterDoesNotSteer(t *testing.T) {
 	var output bytes.Buffer
-	line, err := readInteractiveLineWithHooks(strings.NewReader("\x1b[200~first\x1b[13;3usecond\x1b[201~\n"), &output, UserPromptText(0), nil, nil,
-		&LineEditorHooks{SteerOnAltEnter: true}, false, false)
+	line, err := readInteractiveLineWithHooks(strings.NewReader("\x1b[200~first\x1b[13;7usecond\x1b[201~\n"), &output, UserPromptText(0), nil, nil,
+		&LineEditorHooks{SteerOnCtrlAltEnter: true}, false, false)
 	if err != nil || line != "first\nsecond" {
 		t.Fatalf("pasted modified Enter: line=%q, err=%v", line, err)
 	}
@@ -1640,7 +1645,7 @@ func TestReadInteractiveLine_EscOnEmptyLineRequestsBacktrack(t *testing.T) {
 func TestReadInteractiveLine_EscWithTypedContentKeepsDraft(t *testing.T) {
 	var output bytes.Buffer
 	// Deliver bare Esc as its own chunk so the decoder treats it as CancelPopup,
-	// not Alt+Enter (ESC followed immediately by LF in one buffer).
+	// not modified Enter (ESC followed immediately by LF in one buffer).
 	line, err := readInteractiveLine(
 		io.MultiReader(
 			strings.NewReader("hello"),

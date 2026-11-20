@@ -128,20 +128,33 @@ func TestConsoleKeyEventRecognizesShiftEnterAsNewline(t *testing.T) {
 	}
 }
 
-func TestConsoleKeyEventRecognizesAltEnterWithoutStealingShiftEnter(t *testing.T) {
-	key := &consoleKeyEventRecord{KeyDown: 1, VirtualKeyCode: windowsVKReturn, UnicodeChar: '\r', ControlKeyState: windowsLeftAltPressed}
-	if !consoleKeyEventIsAltEnterDown(key) {
-		t.Fatal("Alt+Enter must be recognized separately from Shift+Enter")
+func TestConsoleKeyEventRecognizesCtrlAltEnterWithoutStealingAltEnter(t *testing.T) {
+	key := &consoleKeyEventRecord{KeyDown: 1, VirtualKeyCode: windowsVKReturn, UnicodeChar: '\r',
+		ControlKeyState: windowsLeftCtrlPressed | windowsLeftAltPressed}
+	if !consoleKeyEventIsCtrlAltEnterDown(key) {
+		t.Fatal("Ctrl+Alt+Enter must be recognized as steer")
 	}
-	key.ControlKeyState = windowsRightAltPressed
-	if !consoleKeyEventIsAltEnterDown(key) {
-		t.Fatal("right Alt+Enter must also be recognized")
+	key.ControlKeyState = windowsRightCtrlPressed | windowsRightAltPressed
+	if !consoleKeyEventIsCtrlAltEnterDown(key) {
+		t.Fatal("right Ctrl+Alt+Enter must also be recognized")
 	}
-	for _, modifier := range []uint32{0, windowsShiftPressed, windowsLeftAltPressed | windowsShiftPressed, windowsLeftAltPressed | windowsLeftCtrlPressed} {
+	for _, modifier := range []uint32{
+		0,
+		windowsLeftAltPressed,
+		windowsShiftPressed,
+		windowsLeftCtrlPressed,
+		windowsLeftCtrlPressed | windowsShiftPressed,
+		windowsLeftCtrlPressed | windowsLeftAltPressed | windowsShiftPressed,
+	} {
 		key.ControlKeyState = modifier
-		if consoleKeyEventIsAltEnterDown(key) {
-			t.Fatalf("unexpected Alt+Enter for modifier %#x", modifier)
+		if consoleKeyEventIsCtrlAltEnterDown(key) {
+			t.Fatalf("unexpected Ctrl+Alt+Enter for modifier %#x", modifier)
 		}
+	}
+	// Alt-only must remain available to Windows / the terminal (fullscreen).
+	key.ControlKeyState = windowsLeftAltPressed
+	if consoleKeyEventIsCtrlAltEnterDown(key) {
+		t.Fatal("Alt+Enter must not be captured by the steer shortcut")
 	}
 }
 

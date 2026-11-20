@@ -209,7 +209,7 @@ func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
 	for i := range records {
 		if records[i].EventType == consoleKeyEventType {
 			key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
-			if consoleKeyEventIsAltEnterDown(key) {
+			if consoleKeyEventIsCtrlAltEnterDown(key) {
 				for consumed := 0; consumed <= i; consumed++ {
 					if err := readConsoleInputRecord(handle); err != nil {
 						return editorKey{}, false, err
@@ -255,10 +255,14 @@ func consoleKeyEventIsModifiedEnterDown(key *consoleKeyEventRecord) bool {
 		key.ControlKeyState&windowsShiftPressed != 0
 }
 
-func consoleKeyEventIsAltEnterDown(key *consoleKeyEventRecord) bool {
-	return key != nil && key.KeyDown != 0 && key.VirtualKeyCode == windowsVKReturn &&
-		key.ControlKeyState&(windowsLeftAltPressed|windowsRightAltPressed) != 0 &&
-		key.ControlKeyState&(windowsShiftPressed|windowsLeftCtrlPressed|windowsRightCtrlPressed) == 0
+func consoleKeyEventIsCtrlAltEnterDown(key *consoleKeyEventRecord) bool {
+	if key == nil || key.KeyDown == 0 || key.VirtualKeyCode != windowsVKReturn {
+		return false
+	}
+	ctrl := key.ControlKeyState&(windowsLeftCtrlPressed|windowsRightCtrlPressed) != 0
+	alt := key.ControlKeyState&(windowsLeftAltPressed|windowsRightAltPressed) != 0
+	shift := key.ControlKeyState&windowsShiftPressed != 0
+	return ctrl && alt && !shift
 }
 
 func consoleInputRecordCanProduceInput(record consoleInputRecord) bool {

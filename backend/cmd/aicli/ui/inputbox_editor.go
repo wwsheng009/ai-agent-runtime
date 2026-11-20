@@ -27,8 +27,8 @@ var ErrInteractiveInputExitRequested = errors.New("interactive input exit reques
 var ErrInteractiveInputTranscriptRequested = errors.New("interactive input transcript requested")
 
 // ErrInteractiveInputSteerRequested returns the current draft to a busy chat
-// capture for queuing and immediate steering. Other editors keep Alt+Enter as
-// a newline when they do not opt in.
+// capture for queuing and immediate steering. Other editors keep modified
+// Enter as a newline when they do not opt in.
 var ErrInteractiveInputSteerRequested = errors.New("interactive input steer requested")
 
 // ErrInteractiveInputBacktrackRequested signals bare Esc on an empty composer.
@@ -1260,7 +1260,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		case editorKeySteer:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
-			if hooks != nil && hooks.SteerOnAltEnter {
+			if hooks != nil && hooks.SteerOnCtrlAltEnter {
 				if onChange != nil {
 					onChange("")
 				}
@@ -2280,7 +2280,7 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		case '[':
 			switch b {
 			case 'u':
-				if isAltEnterSequence(string(pending[2:i])) {
+				if isCtrlAltEnterSequence(string(pending[2:i])) {
 					return decodedInteractiveKey{key: editorKey{kind: editorKeySteer}, consumed: i + 1}, true
 				}
 				if isModifiedEnterSequence(string(pending[2:i])) {
@@ -2314,11 +2314,11 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 			case 'O':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyFocusLost}, consumed: i + 1}, true
 			case '~':
-				if isAltEnterSequence(string(pending[2:i])) {
+				if isCtrlAltEnterSequence(string(pending[2:i])) {
 					return decodedInteractiveKey{key: editorKey{kind: editorKeySteer}, consumed: i + 1}, true
 				}
 				switch string(pending[2:i]) {
-				case "13;2", "27;2;13", "27;5;13":
+				case "13;2", "13;3", "27;2;13", "27;3;13", "27;5;13":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: i + 1}, true
 				case "1", "7":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
@@ -2375,7 +2375,7 @@ func isModifiedEnterSequence(params string) bool {
 	return modifier == "2" || modifier == "3" || modifier == "5"
 }
 
-func isAltEnterSequence(params string) bool {
+func isCtrlAltEnterSequence(params string) bool {
 	parts := strings.Split(params, ";")
 	if len(parts) < 2 {
 		return false
@@ -2385,9 +2385,9 @@ func isAltEnterSequence(params string) bool {
 		modifier = modifier[:index]
 	}
 	if parts[0] == "13" {
-		return modifier == "3"
+		return modifier == "7"
 	}
-	return parts[0] == "27" && modifier == "3" && len(parts) >= 3 && parts[2] == "13"
+	return parts[0] == "27" && modifier == "7" && len(parts) >= 3 && parts[2] == "13"
 }
 
 func isWordMovementModifierSequence(params []byte) bool {
