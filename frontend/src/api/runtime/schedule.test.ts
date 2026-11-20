@@ -308,7 +308,7 @@ describe("schedule template API", () => {
   });
 
   it("fetches and normalizes persisted templates", async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({
         templates: [{ ...templateRequest, createdAt: "2026-11-20T00:00:00Z" }],
         count: 1,
@@ -361,7 +361,7 @@ describe("schedule template API", () => {
   });
 
   it("deletes a template and consumes the JSON deletion response", async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ id: "weekly-review", deleted: true }),
     );
     vi.stubGlobal("fetch", fetchMock);
