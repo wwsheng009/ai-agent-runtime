@@ -1114,10 +1114,6 @@ func shellQuote(text string) string {
 	return "'" + strings.ReplaceAll(text, "'", `'\''`) + "'"
 }
 
-func escapeBatchPath(text string) string {
-	return strings.ReplaceAll(text, `"`, `""`)
-}
-
 func buildShellCommandLine(args []string) string {
 	if len(args) == 0 {
 		return ""

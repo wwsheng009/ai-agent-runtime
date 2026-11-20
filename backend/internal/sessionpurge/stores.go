@@ -72,30 +72,6 @@ func (r *purgeRunner) delete(table string, columns []string, ids []string) error
 	return nil
 }
 
-func (r *purgeRunner) deleteByQuery(table, detail, query string, args ...interface{}) error {
-	if !r.dryRun && r.skipRowCounts {
-		return r.execDeleteByQuery(table, detail, query, args...)
-	}
-	ok, err := r.hasTable(table)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-	var rows int64
-	if r.dryRun {
-		rows, err = countWithQuery(r.ctx, r.queryer(), query, args...)
-	} else {
-		rows, err = execAffected(r.ctx, r.execer(), query, args...)
-	}
-	if err != nil {
-		return err
-	}
-	r.result.Tables = append(r.result.Tables, TableResult{Table: table, Rows: rows, Detail: detail})
-	return nil
-}
-
 func (r *purgeRunner) queryIDs(table, idColumn string, filterColumns []string, ids []string) ([]string, error) {
 	ok, err := r.hasTable(table)
 	if err != nil {
@@ -118,35 +94,6 @@ func (r *purgeRunner) deleteRows(table string, columns []string, ids []string) e
 	}
 	r.result.Tables = append(r.result.Tables, TableResult{Table: table, Rows: rows})
 	return nil
-}
-
-func (r *purgeRunner) execDeleteByQuery(table, detail, query string, args ...interface{}) error {
-	ok, err := r.hasTable(table)
-	if err != nil || !ok {
-		return err
-	}
-	rows, err := execAffected(r.ctx, r.execer(), query, args...)
-	if err != nil {
-		return err
-	}
-	r.result.Tables = append(r.result.Tables, TableResult{Table: table, Rows: rows, Detail: detail})
-	return nil
-}
-
-func countWithQuery(ctx context.Context, q rowQueryer, query string, args ...interface{}) (int64, error) {
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return 0, rows.Err()
-	}
-	var count int64
-	if err := rows.Scan(&count); err != nil {
-		return 0, err
-	}
-	return count, rows.Err()
 }
 
 func execAffected(ctx context.Context, e execer, query string, args ...interface{}) (int64, error) {

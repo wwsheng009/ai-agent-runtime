@@ -241,6 +241,17 @@
   - `providerops`：`runModelProbes`。
 - 验证：上述 7 个包的 `-short` 测试全部通过。
 
+### 0.18 第十八批已执行（2026-11-20）
+
+- 删除零引用 helper：
+  - `internal/background`：`escapeBatchPath`、`failJobWithCode`；
+  - `internal/sessionpurge`：`deleteByQuery`、`execDeleteByQuery`、`countWithQuery`；
+  - `internal/team`：`upsertAgentControlTaskDependencyRecord`；
+  - `internal/toolcore/output`：`shellWindowNotice`（`shellWindowNoticeFor` 的未使用包装）；
+  - `internal/memoryruntime`：`containsInstructionLikeMemory`。
+- 验证：`background`、`sessionpurge`、`team`、`toolcore/output`、`memoryruntime`
+  的 `-short` 测试通过；`team`、`memoryruntime` 逐包运行以规避 Windows 页面文件不足。
+
 ## 1. 扫描方法与证据
 
 - `go build -p 2 ./...`：通过。

@@ -1740,44 +1740,6 @@ func (s *SQLiteStore) CreateAgentControlTaskDependencyRecord(ctx context.Context
 	return nil
 }
 
-func (s *SQLiteStore) upsertAgentControlTaskDependencyRecord(ctx context.Context, dependencyID, taskID, dependsOnID string, createdAt time.Time) error {
-	if s == nil {
-		return fmt.Errorf("team store is not initialized")
-	}
-	if err := s.ensure(); err != nil {
-		return err
-	}
-	dependencyID = strings.TrimSpace(dependencyID)
-	taskID = strings.TrimSpace(taskID)
-	dependsOnID = strings.TrimSpace(dependsOnID)
-	if dependencyID == "" || taskID == "" || dependsOnID == "" {
-		return nil
-	}
-	task, err := s.GetTask(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if task == nil || strings.TrimSpace(task.TeamID) == "" {
-		return nil
-	}
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agent_control_task_dependencies (
-			workflow, dependency_id, team_id, task_id, depends_on_id, created_at
-		) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workflow, task_id, depends_on_id) DO UPDATE SET
-			dependency_id = excluded.dependency_id,
-			team_id = excluded.team_id,
-			created_at = excluded.created_at
-	`, agentcontrol.WorkflowSpawnTeam, dependencyID, strings.TrimSpace(task.TeamID), taskID, dependsOnID, formatTime(createdAt))
-	if err != nil {
-		return fmt.Errorf("upsert agent control task dependency: %w", err)
-	}
-	return nil
-}
-
 func (s *SQLiteStore) appendTaskDependencyCreatedEvent(ctx context.Context, dependencyID, taskID, dependsOnID string) error {
 	task, err := s.GetTask(ctx, taskID)
 	if err != nil {

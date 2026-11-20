@@ -133,10 +133,6 @@ func ShapeShellWindowWithArchive(tool, content string, metadata map[string]any, 
 	return folded, metadata, stats, didFold
 }
 
-func shellWindowNotice(omittedStart, omittedEnd, totalBytes, totalLines, pageBytes int) string {
-	return shellWindowNoticeFor(omittedStart, omittedEnd, totalBytes, totalLines, pageBytes, true)
-}
-
 // shellWindowNoticeFor renders the fold notice. archived tells the reader
 // whether the omitted middle can actually be retrieved: when no artifact store
 // is configured there is no archive and no artifact_read tool, so promising

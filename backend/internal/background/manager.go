@@ -2341,10 +2341,6 @@ func (m *Manager) failJobWithErrorCode(managed *managedJob, code runtimeerrors.E
 	m.failJobWithCodeAndError(managed, exitCodeFromError(err), code, message)
 }
 
-func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message string) {
-	m.failJobWithCodeAndError(managed, exitCode, runtimeerrors.ErrToolExecution, message)
-}
-
 func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, code runtimeerrors.ErrorCode, message string) {
 	finishedAt := time.Now().UTC()
 	managed.mu.Lock()
