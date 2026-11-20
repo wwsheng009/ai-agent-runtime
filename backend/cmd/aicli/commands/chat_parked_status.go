@@ -95,6 +95,7 @@ func collectChatParkedSubagentActivity(ctx context.Context, session *ChatSession
 	host := session.LocalRuntimeHost
 
 	var obligations []string
+	var batchIDs []string
 	obligationsRead := false
 	hasRecord := false
 	if host.SubagentBatches != nil {
@@ -106,6 +107,7 @@ func collectChatParkedSubagentActivity(ctx context.Context, session *ChatSession
 				// ListTurnSuspensions returns newest parked first. Only the current
 				// park epoch is shown; historical records must not inflate counts.
 				obligations = records[0].RequiredObligationIDs()
+				batchIDs = records[0].ObligationBatchIDs()
 			}
 		}
 	}
@@ -122,7 +124,11 @@ func collectChatParkedSubagentActivity(ctx context.Context, session *ChatSession
 	var groups []supervision.ProgressGroup
 	if chatParkedObligationsNeedBatchProgress(obligations) {
 		if source := host.newLocalBatchProgressSource(); source != nil {
-			if list, err := source.ListProgress(ctx, supervision.ProgressRequest{ParentSessionID: parentID, RowLimit: 8}); err == nil {
+			if list, err := source.ListProgress(ctx, supervision.ProgressRequest{
+				ParentSessionID: parentID,
+				RowLimit:        8,
+				BatchIDs:        batchIDs,
+			}); err == nil {
 				groups = list
 			}
 		}
@@ -187,6 +193,13 @@ func buildChatParkedSubagentActivity(
 		groupID := strings.TrimSpace(group.GroupID)
 		if groupID != "" {
 			groupsByID[groupID] = group
+		}
+		for _, taskID := range group.TaskIDs {
+			taskID = strings.TrimSpace(taskID)
+			if taskID == "" || groupID == "" {
+				continue
+			}
+			taskGroupByID[taskID] = groupID
 		}
 		for _, task := range group.RunningTasks {
 			taskID := strings.TrimSpace(task.TaskID)
@@ -256,6 +269,25 @@ func buildChatParkedSubagentActivity(
 				continue
 			}
 			countEach(false)
+			continue
+		}
+
+		// The task is already terminal (or at least no longer in RunningTasks)
+		// but belongs to a batch group we know: account for that group once
+		// instead of treating the individual task obligation as still running.
+		// This is the case that made a completed batch older than the
+		// recent-terminal window render as "3 running · 1 done".
+		if groupID, ok := taskGroupByID[subjectID]; ok {
+			group, hasGroup := groupsByID[groupID]
+			if !hasGroup || handledGroups[groupID] {
+				continue
+			}
+			handledGroups[groupID] = true
+			activity.Running += group.Running + group.Pending
+			activity.Done += group.Completed + group.Failed + group.Skipped
+			for _, task := range group.RunningTasks {
+				addChild(task.ChildSessionID)
+			}
 			continue
 		}
 

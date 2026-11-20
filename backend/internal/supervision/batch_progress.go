@@ -125,11 +125,63 @@ func (s *BatchProgressSource) ListProgress(ctx context.Context, req ProgressRequ
 	})
 
 	ordered := append(active, recent...)
+	seen := make(map[string]struct{}, len(ordered))
+	for _, batch := range ordered {
+		if id := strings.TrimSpace(batch.BatchID); id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	// Explicitly requested groups are pulled even when they are older than the
+	// recent-terminal window. The parked-turn status sampler uses this to keep
+	// a settled batch visible while its results are still unconsumed; otherwise
+	// the aged-out batch would be indistinguishable from an unknown/running
+	// obligation.
+	for _, batchID := range boundedProgressBatchIDs(req.BatchIDs) {
+		if _, exists := seen[batchID]; exists {
+			continue
+		}
+		batch, err := s.Store.GetBatch(ctx, batchID)
+		if err != nil || batch == nil {
+			// Best-effort: one unreadable explicit row must not erase the
+			// normal active/recent projection.
+			continue
+		}
+		if parent := strings.TrimSpace(batch.ParentSessionID); parent != "" && !strings.EqualFold(parent, parentSessionID) {
+			continue
+		}
+		seen[batchID] = struct{}{}
+		ordered = append(ordered, *batch)
+	}
 	groups := make([]ProgressGroup, 0, len(ordered))
 	for _, batch := range ordered {
 		groups = append(groups, s.progressGroup(ctx, batch))
 	}
 	return groups, nil
+}
+
+// boundedProgressBatchIDs normalizes and bounds explicit group requests. The
+// parked-turn sampler passes the suspension's batch ids, which are already
+// bounded by the ledger, but the source still enforces its own ceiling so a
+// malformed caller cannot turn one progress read into an unbounded scan.
+func boundedProgressBatchIDs(ids []string) []string {
+	const maxExplicitBatchIDs = 8
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= maxExplicitBatchIDs {
+			break
+		}
+	}
+	return out
 }
 
 func (s *BatchProgressSource) progressGroup(ctx context.Context, batch subagentbatch.SubagentBatch) ProgressGroup {
@@ -151,6 +203,12 @@ func (s *BatchProgressSource) progressGroup(ctx context.Context, batch subagentb
 		// 任务级读取失败只降级这一组的运行期明细，批次计数仍然可见：
 		// 进度投影是 best-effort，不能因此让整块进度消失。
 		return group
+	}
+	group.TaskIDs = make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if taskID := strings.TrimSpace(task.TaskID); taskID != "" {
+			group.TaskIDs = append(group.TaskIDs, taskID)
+		}
 	}
 	counts := subagentbatch.DeriveTaskCounts(tasks)
 	if counts.Total > 0 || group.Total == 0 {

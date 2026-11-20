@@ -36,34 +36,58 @@ const localAgentObligationSpawnNextAction = "obligation_registered: this child s
 // alone stays active until an explicit close/reclaim, so it cannot answer
 // "did the child finish".
 type localAgentSessionObligationResolver struct {
-	store supervision.Store
+	store    supervision.Store
+	registry agentcontrol.AgentRegistryStore
 }
 
 func (r localAgentSessionObligationResolver) AgentSessionTerminal(ctx context.Context, sessionID string) (bool, bool, error) {
 	sessionID = strings.TrimSpace(sessionID)
-	if r.store == nil || sessionID == "" {
+	if sessionID == "" {
 		return false, false, nil
 	}
-	rows, err := r.store.ListNotifications(ctx, supervision.NotificationFilter{
-		SubjectKind:     supervision.SubjectAgentSession,
-		SubjectID:       sessionID,
-		IncludeResolved: true,
-		Limit:           32,
-	})
-	if err != nil {
-		return false, false, err
-	}
-	if len(rows) == 0 {
-		// No durable lifecycle row yet: the child has not reached a terminal
-		// projection (a missing row is never evidence of completion).
-		return false, false, nil
-	}
-	for _, row := range rows {
-		if row.SupervisionState == supervision.SupervisionTerminated {
-			return true, true, nil
+	if r.store != nil {
+		rows, err := r.store.ListNotifications(ctx, supervision.NotificationFilter{
+			SubjectKind:     supervision.SubjectAgentSession,
+			SubjectID:       sessionID,
+			IncludeResolved: true,
+			Limit:           32,
+		})
+		if err != nil {
+			return false, false, err
+		}
+		if len(rows) > 0 {
+			for _, row := range rows {
+				if row.SupervisionState == supervision.SupervisionTerminated {
+					return true, true, nil
+				}
+			}
+			return false, true, nil
 		}
 	}
-	return false, true, nil
+	// The lifecycle notification is the primary evidence, but it can be
+	// missing after an unclean shutdown or a bridge error. The durable agent
+	// registry still knows whether the child was explicitly closed; a closed
+	// row is terminal evidence and must settle the turn, otherwise the parent
+	// stays parked forever. An active row remains pending (never guess done).
+	if r.registry != nil {
+		records, err := r.registry.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			SessionID:     sessionID,
+			IncludeClosed: true,
+			Limit:         4,
+		})
+		if err != nil {
+			return false, false, err
+		}
+		for _, record := range records {
+			if !strings.EqualFold(record.Normalize().SessionID, sessionID) {
+				continue
+			}
+			return record.Closed(), true, nil
+		}
+	}
+	// No durable lifecycle row and no registry row: the child has not reached
+	// a terminal projection (a missing row is never evidence of completion).
+	return false, false, nil
 }
 
 // agentSessionObligationResolver returns the durable child-session reader for
@@ -74,7 +98,10 @@ func (h *localChatRuntimeHost) agentSessionObligationResolver() subagentbatch.Ag
 	if h == nil || h.Supervision == nil || h.Supervision.Store == nil {
 		return nil
 	}
-	return localAgentSessionObligationResolver{store: h.Supervision.Store}
+	return localAgentSessionObligationResolver{
+		store:    h.Supervision.Store,
+		registry: h.AgentRegistryStore,
+	}
 }
 
 // parkLocalAgentChildObligation records that the current parent turn handed

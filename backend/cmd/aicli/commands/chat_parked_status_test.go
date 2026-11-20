@@ -108,6 +108,38 @@ func TestBuildChatParkedSubagentActivityBatchCountsOnce(t *testing.T) {
 	}
 }
 
+// A completed batch can leave the progress source's recent-terminal window
+// before the parent consumes its results. Its task-id obligations are then no
+// longer in RunningTasks, so the projection must use the batch group's TaskIDs
+// and count the group once instead of reporting each terminal task as running.
+func TestBuildChatParkedSubagentActivityTerminalTaskObligationsCountBatchOnce(t *testing.T) {
+	obligations := []string{
+		"agent_session:child-done",
+		"batch-1",
+		"task-1",
+		"task-2",
+	}
+	states := []supervision.DescendantState{{
+		Kind:             supervision.SubjectAgentSession,
+		ID:               "child-done",
+		ExecutionStatus:  "closed",
+		SupervisionState: supervision.SupervisionTerminated,
+	}}
+	groups := []supervision.ProgressGroup{{
+		GroupID:   "batch-1",
+		Total:     2,
+		Completed: 2,
+		Terminal:  true,
+		TaskIDs:   []string{"task-1", "task-2"},
+	}}
+
+	activity := buildChatParkedSubagentActivity(obligations, states, groups, nil)
+	if activity.Running != 0 || activity.Done != 3 || activity.Total != 3 {
+		t.Fatalf("counts = running:%d done:%d total:%d, want 0/3/3",
+			activity.Running, activity.Done, activity.Total)
+	}
+}
+
 func TestBuildChatParkedSubagentActivityTaskWithoutBatchRowCountsOnce(t *testing.T) {
 	now := time.Date(2026, 11, 6, 5, 50, 0, 0, time.UTC)
 	obligations := []string{"task-1", "task-2"}

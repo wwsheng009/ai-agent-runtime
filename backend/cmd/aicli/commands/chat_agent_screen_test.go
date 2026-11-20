@@ -10,6 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // newUnifiedChatScreenTestSession 构造一个已启用统一渲染器的测试会话：
@@ -102,6 +103,23 @@ func TestChatScreenAgentsListSpecPlaceholderKeepsScreenPath(t *testing.T) {
 	require.NotNil(t, result.Screen)
 	require.Equal(t, chatScreenList, result.Screen.Kind)
 	require.Empty(t, result.Blocks)
+}
+
+// Batch-backed rows keep the session-level status for wait readiness
+// (succeeded => idle), so the screen detail must also carry the durable task
+// outcome. Otherwise a completed worker is indistinguishable from an idle one
+// and contradicts the task ledger.
+func TestChatAgentListRowDetailIncludesBatchTaskStatus(t *testing.T) {
+	detail := chatAgentListRowDetail(toolbroker.AgentStatusResult{
+		SessionID:         "subagent_task_batch_1",
+		AgentType:         "subagent",
+		Status:            string(runtimechat.SessionIdle),
+		CurrentTaskID:     "task-review",
+		CurrentTaskStatus: "succeeded",
+	})
+	require.Contains(t, detail, "status=idle")
+	require.Contains(t, detail, "task=task-review")
+	require.Contains(t, detail, "task_status=succeeded")
 }
 
 // TestDispatchChatAgentsOpensAlternateScreenList 锁定主分派器路径：

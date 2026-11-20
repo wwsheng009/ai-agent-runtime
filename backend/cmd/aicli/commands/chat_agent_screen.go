@@ -70,6 +70,16 @@ func chatAgentListRowDetail(agent toolbroker.AgentStatusResult) string {
 	if agent.SessionState != "" {
 		parts = append(parts, "state="+agent.SessionState)
 	}
+	// Batch-backed rows use the session-level status for wait readiness
+	// (succeeded => idle, failed => stopped), so the list must also expose the
+	// durable task outcome. Without it `/agents` renders a completed worker as
+	// "status=idle" and hides that the ledger says succeeded/failed.
+	if agent.CurrentTaskID != "" {
+		parts = append(parts, "task="+agent.CurrentTaskID)
+	}
+	if agent.CurrentTaskStatus != "" {
+		parts = append(parts, "task_status="+agent.CurrentTaskStatus)
+	}
 	if agent.Depth > 0 {
 		parts = append(parts, fmt.Sprintf("depth=%d", agent.Depth))
 	}

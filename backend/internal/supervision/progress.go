@@ -37,6 +37,12 @@ type ProgressRequest struct {
 	ParentSessionID string
 	// RowLimit caps how many non-terminal tasks one group may carry.
 	RowLimit int
+	// BatchIDs asks a batch-backed source to include these groups even when
+	// they are outside its recent-terminal window. A parked parent can still
+	// owe unconsumed results from a batch that finished longer ago than the
+	// window, and the status/progress projection must not treat that settled
+	// batch as still running merely because it aged out.
+	BatchIDs []string
 }
 
 // ProgressTask is one non-terminal child task of a group.
@@ -71,6 +77,10 @@ type ProgressGroup struct {
 	LastProgressAt time.Time
 	// RunningTasks carries the non-terminal children, newest progress first.
 	RunningTasks []ProgressTask
+	// TaskIDs lists every task row in the group, including terminal rows. It
+	// lets callers that receive individual task-id obligations suppress a
+	// second count when the batch group was already accounted for.
+	TaskIDs []string
 }
 
 // ProgressSummary is the digest-facing, bounded projection of one group.

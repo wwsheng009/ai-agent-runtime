@@ -92,6 +92,63 @@ func TestLocalAgentSessionObligationResolverReadsTerminalProjection(t *testing.T
 	require.True(t, terminal)
 }
 
+// A lifecycle projection can be missing after an unclean shutdown even though
+// the child was explicitly closed in the durable identity registry. The
+// registry row is still safe terminal evidence (it can only be closed after the
+// run ended), and without this fallback the parent turn stays parked forever:
+// the missing notification is treated as "still running".
+func TestLocalAgentSessionObligationResolverFallsBackToClosedRegistryRow(t *testing.T) {
+	host := newLocalAgentObligationTestHost(t, "resolver-registry")
+	ctx := agent.WithTurnID(context.Background(), "turn-registry-settle")
+	parent := host.BaseSession.RuntimeSession.ID
+	require.True(t, host.parkLocalAgentChildObligation(ctx, parent, "child-closed"))
+
+	closedAt := time.Now().UTC()
+	_, err := host.AgentRegistryStore.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         "child-closed",
+		RootSessionID:   parent,
+		ParentSessionID: parent,
+		SessionID:       "child-closed",
+		AgentPath:       "/root/child-closed",
+		Depth:           1,
+		AgentType:       agentcontrol.AgentTypeChild,
+		Status:          agentcontrol.AgentStatusClosed,
+		ClosedAt:        &closedAt,
+	})
+	require.NoError(t, err)
+
+	resolver := host.agentSessionObligationResolver()
+	terminal, found, err := resolver.AgentSessionTerminal(ctx, "child-closed")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, terminal, "a closed registry row is terminal even without a lifecycle projection")
+
+	record, ok, err := host.SubagentBatches.GetTurnSuspension(ctx, parent, "turn-registry-settle")
+	require.NoError(t, err)
+	require.True(t, ok)
+	settled, err := subagentbatch.TurnObligationsSettledWith(ctx, host.SubagentBatches, record, resolver)
+	require.NoError(t, err)
+	require.True(t, settled, "the parked turn must settle from the closed registry row")
+
+	// An active registry row is still pending: the fallback must never guess
+	// completion from the presence of an identity row alone.
+	_, err = host.AgentRegistryStore.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         "child-active",
+		RootSessionID:   parent,
+		ParentSessionID: parent,
+		SessionID:       "child-active",
+		AgentPath:       "/root/child-active",
+		Depth:           1,
+		AgentType:       agentcontrol.AgentTypeChild,
+		Status:          agentcontrol.AgentStatusActive,
+	})
+	require.NoError(t, err)
+	terminal, found, err = resolver.AgentSessionTerminal(ctx, "child-active")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, terminal)
+}
+
 // TestLocalSpawnParkWritesAgentSessionObligationAndAnnouncesOnce pins the
 // dispatch-time park: each queued subagent_spawn child becomes one
 // agent_session: obligation on the current turn, the first park announces one

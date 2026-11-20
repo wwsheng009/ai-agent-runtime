@@ -53,6 +53,16 @@ func (f *fakeBatchStore) ListBatches(_ context.Context, filter subagentbatch.Bat
 	return out, nil
 }
 
+func (f *fakeBatchStore) GetBatch(_ context.Context, id string) (*subagentbatch.SubagentBatch, error) {
+	for i := range f.batches {
+		if f.batches[i].BatchID == id {
+			batch := f.batches[i]
+			return &batch, nil
+		}
+	}
+	return nil, nil
+}
+
 func (f *fakeBatchStore) ListTasks(_ context.Context, batchID string) ([]subagentbatch.SubagentTaskRecord, error) {
 	f.taskCalls = append(f.taskCalls, batchID)
 	if f.taskErr != nil {
@@ -242,6 +252,57 @@ func TestBatchProgressSource_KeepsRecentTerminalButDropsOldOnes(t *testing.T) {
 		require.NotEqual(t, "batch-old", group.GroupID)
 		require.NotEqual(t, "batch-other-parent", group.GroupID)
 	}
+}
+
+// A parked turn can still owe unconsumed results from a terminal batch that is
+// older than the recent-terminal window. The parked status projection requests
+// that exact batch id so it must be included, and the terminal TaskIDs must be
+// visible to suppress double-counting individual task obligations.
+func TestBatchProgressSource_IncludesExplicitOldTerminalBatch(t *testing.T) {
+	now := time.Now().UTC()
+	finishedOld := now.Add(-90 * time.Minute)
+	store := &fakeBatchStore{
+		batches: []subagentbatch.SubagentBatch{
+			{
+				BatchID:         "batch-old",
+				ParentSessionID: "root-session-1",
+				ExecutionMode:   subagentbatch.ExecutionModeBackground,
+				Status:          subagentbatch.BatchCompleted,
+				TaskCount:       2,
+				CompletedCount:  2,
+				FinishedAt:      &finishedOld,
+				UpdatedAt:       finishedOld,
+			},
+			{
+				BatchID:         "batch-other-parent",
+				ParentSessionID: "some-other-session",
+				ExecutionMode:   subagentbatch.ExecutionModeBackground,
+				Status:          subagentbatch.BatchCompleted,
+				TaskCount:       1,
+				CompletedCount:  1,
+				FinishedAt:      &finishedOld,
+				UpdatedAt:       finishedOld,
+			},
+		},
+		tasks: map[string][]subagentbatch.SubagentTaskRecord{
+			"batch-old": {
+				{TaskID: "task-a", BatchID: "batch-old", Status: subagentbatch.TaskSucceeded},
+				{TaskID: "task-b", BatchID: "batch-old", Status: subagentbatch.TaskSucceeded},
+			},
+		},
+	}
+	source := &BatchProgressSource{Store: store}
+
+	groups, err := source.ListProgress(context.Background(), ProgressRequest{
+		ParentSessionID: "root-session-1",
+		BatchIDs:        []string{"batch-old", "batch-other-parent", "batch-missing"},
+	})
+	require.NoError(t, err)
+	require.Len(t, groups, 1, "only the scoped explicit batch may be added")
+	require.Equal(t, "batch-old", groups[0].GroupID)
+	require.True(t, groups[0].Terminal)
+	require.Equal(t, 2, groups[0].Completed)
+	require.Equal(t, []string{"task-a", "task-b"}, groups[0].TaskIDs)
 }
 
 func TestBatchProgressSource_ReadFailuresDegradeGracefully(t *testing.T) {
