@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useComposerSurface } from "@/components/workspace/composer-surface-store";
@@ -22,12 +22,6 @@ type ComposerPermissionModeControlProps = {
   onPendingModeConfirmChange?: (confirmed: boolean) => void;
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
-  /** 模式快照上抛：宿主据此渲染危险态常驻警示条（不重复拉取接口）。 */
-  onModeChange?: (snapshot: {
-    sessionId: string;
-    mode: string;
-    dangerous: boolean;
-  }) => void;
 };
 
 // 文案键直接跟随后端 `supported_modes` 的 value（下划线式 canonical 值）。
@@ -66,7 +60,6 @@ export function ComposerPermissionModeControl({
   onPendingModeConfirmChange,
   lastRuntimeEventType,
   runtimeEventCount,
-  onModeChange,
 }: ComposerPermissionModeControlProps) {
   const { t } = useTranslation("workspace");
   const surface = useComposerSurface("permission");
@@ -90,17 +83,6 @@ export function ComposerPermissionModeControl({
     pendingDangerous && pendingDangerous.scope === pendingScope
       ? pendingDangerous.mode
       : null;
-
-  // 宿主警示条只消费模式快照，不重复请求接口；会话切换后的旧快照由宿主按 sessionId 忽略。
-  const selectedDangerous = Boolean(
-    displayedOptions.find((option) => option.value === displayedMode)?.dangerous,
-  );
-  useEffect(() => {
-    if (!sessionId || newThread) {
-      return;
-    }
-    onModeChange?.({ sessionId, mode: displayedMode, dangerous: selectedDangerous });
-  }, [displayedMode, newThread, onModeChange, selectedDangerous, sessionId]);
 
   if (!sessionId && !newThread) {
     return null;

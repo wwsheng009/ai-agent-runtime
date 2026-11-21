@@ -6,7 +6,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SessionModeBanner } from "./session-mode-banner";
 import type { RuntimeSessionPlanMode } from "@/lib/runtime-api";
@@ -124,31 +124,6 @@ describe("SessionModeBanner", () => {
 
     renderBanner({ plan: plan({ permission_mode: "  " }), sessionId: "session-1" });
     expect(banner()).toBeNull();
-  });
-
-  it("危险权限模式常驻警示条可关闭", () => {
-    const onDismissPermissionWarning = vi.fn();
-    renderBanner({
-      plan: null,
-      permissionDanger: true,
-      onDismissPermissionWarning,
-      sessionId: "session-1",
-    });
-
-    const warning = container.querySelector(
-      '[data-testid="session-permission-warning"]',
-    );
-    expect(warning).not.toBeNull();
-    expect(warning?.textContent).toContain("跳过全部权限校验");
-    expect(warning?.className).toContain("basis-full");
-    expect(warning?.className).toContain("w-full");
-
-    act(() => {
-      (
-        warning?.querySelector("button") as HTMLButtonElement | null
-      )?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    expect(onDismissPermissionWarning).toHaveBeenCalledTimes(1);
   });
 
   it("plan active：补状态徽标、计划路径与状态读法（模型已请求裁决优先）", () => {

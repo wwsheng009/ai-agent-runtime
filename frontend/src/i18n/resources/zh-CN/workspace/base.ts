@@ -434,8 +434,6 @@ export const zhWorkspaceBase = {
       unavailable: "无可用模式",
       pending: "切换中",
       error: "权限模式不可用",
-      dangerBanner: "当前会话会跳过全部权限校验，请只在可信工作区使用。",
-      dangerBannerDismiss: "关闭权限警示",
       mode: {
         default: {
           label: "默认",

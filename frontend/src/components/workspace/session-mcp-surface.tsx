@@ -17,7 +17,7 @@ import {
   RefreshCwIcon,
   ServerIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -25,9 +25,6 @@ import {
   createRuntimeSessionMcp,
   deleteRuntimeWorkspaceMcp,
   deleteRuntimeSessionMcp,
-  listRuntimeMcps,
-  listRuntimeSessionMcps,
-  listRuntimeWorkspaceMcps,
   setRuntimeWorkspaceMcpEnabled,
   setRuntimeSessionMcpEnabled,
 } from "@/api/runtime/mcp";
@@ -47,13 +44,11 @@ import {
 } from "@/components/workspace/settings/backend-config-settings-page/sections/modes/mcp-form";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import type { RuntimeSessionMcpEntry } from "@/types/runtime";
 import {
-  type RuntimeSessionMcpEntry,
-  type RuntimeSessionMcpScope,
-  type RuntimeWorkspaceMcpListResponse,
-} from "@/types/runtime";
-
-type LoadStatus = "loading" | "ready" | "error";
+  formatMcpError,
+  useSessionMcpSurfaceData,
+} from "./use-session-mcp-surface-data";
 
 const VALIDATION_MESSAGE_KEYS = {
   name: "panels.sessionMcp.validationNameRequired",
@@ -64,23 +59,6 @@ const VALIDATION_MESSAGE_KEYS = {
   duplicateKey: "panels.sessionMcp.validationDuplicateKey",
 } as const satisfies Record<McpValidationError, string>;
 
-function formatMcpError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function sessionScopeFromWorkspace(
-  response: RuntimeWorkspaceMcpListResponse,
-): RuntimeSessionMcpScope {
-  return {
-    workspace: response.workspace_path,
-    workspace_scoped: true,
-    workspace_fallback: response.workspace_fallback,
-    read: response.read,
-    write: response.write,
-    candidates: response.candidates,
-  };
-}
-
 export function SessionMcpSurface({
   lastRuntimeEventType,
   runtimeEventCount,
@@ -88,14 +66,23 @@ export function SessionMcpSurface({
   workspacePath,
 }: WorkspacePanelSurfaceProps) {
   const { t } = useTranslation("workspace");
-  const [entries, setEntries] = useState<RuntimeSessionMcpEntry[]>([]);
-  const [disabledNames, setDisabledNames] = useState<string[]>([]);
-  /** 「本会话临时启用」名单（配置停用 + 会话私有内存连接）。 */
-  const [tempEnabledNames, setTempEnabledNames] = useState<string[]>([]);
-  /** 会话生效的配置面（新后端返回；旧后端缺省 → 隐藏持久化管理入口）。 */
-  const [scope, setScope] = useState<RuntimeSessionMcpScope | null>(null);
-  const [status, setStatus] = useState<LoadStatus>("loading");
-  const [error, setError] = useState("");
+  const {
+    entries,
+    disabledNames,
+    setDisabledNames,
+    tempEnabledNames,
+    setTempEnabledNames,
+    scope,
+    status,
+    error,
+    setError,
+    refresh,
+  } = useSessionMcpSurfaceData({
+    sessionId,
+    workspacePath,
+    lastRuntimeEventType,
+    runtimeEventCount,
+  });
   const [notice, setNotice] = useState("");
   const [pendingName, setPendingName] = useState("");
   const [draft, setDraft] = useState<McpDraft | null>(null);
@@ -111,130 +98,6 @@ export function SessionMcpSurface({
     () => new Set(tempEnabledNames),
     [tempEnabledNames],
   );
-
-  const refresh = useCallback(async () => {
-    const normalizedSessionId = sessionId.trim();
-    const normalizedWorkspacePath = workspacePath?.trim() ?? "";
-    setEntries([]);
-    setScope(null);
-    setStatus("loading");
-    setError("");
-
-    if (normalizedWorkspacePath && !normalizedSessionId) {
-      try {
-        const workspace = await listRuntimeWorkspaceMcps(normalizedWorkspacePath);
-        setDisabledNames([]);
-        setTempEnabledNames([]);
-        setEntries(workspace.mcps);
-        setScope(sessionScopeFromWorkspace(workspace));
-        setStatus("ready");
-      } catch (loadError) {
-        setDisabledNames([]);
-        setTempEnabledNames([]);
-        setError(formatMcpError(loadError));
-        setStatus("error");
-      }
-      return;
-    }
-
-    if (normalizedWorkspacePath && normalizedSessionId) {
-      try {
-        const [workspace, scoped] = await Promise.all([
-          listRuntimeWorkspaceMcps(normalizedWorkspacePath),
-          listRuntimeSessionMcps(normalizedSessionId),
-        ]);
-        setDisabledNames(scoped.disabled);
-        setTempEnabledNames(scoped.enabled ?? []);
-        setScope(sessionScopeFromWorkspace(workspace));
-
-        const sessionEntries = scoped.mcps ?? [];
-        const sessionEntriesByName = new Map(
-          sessionEntries.map((entry) => [
-            entry.config?.name?.trim() || entry.status?.name?.trim() || "",
-            entry,
-          ]),
-        );
-        const workspaceNames = new Set(
-          workspace.mcps
-            .map((entry) => entry.config?.name?.trim() ?? "")
-            .filter(Boolean),
-        );
-        const workspaceEntries = workspace.mcps.map((entry) => {
-          const name = entry.config?.name?.trim() ?? "";
-          const sessionEntry = sessionEntriesByName.get(name);
-          return {
-            ...entry,
-            ...sessionEntry,
-            source: "workspace" as const,
-          };
-        });
-        // The session API may expose process-global entries while the workspace
-        // has no local file. Keep them visible for session-only controls, but
-        // mark them global so workspace persistence actions stay unavailable.
-        const globalFallbackEntries = sessionEntries.filter((entry) => {
-          const name = entry.config?.name?.trim() || entry.status?.name?.trim() || "";
-          return entry.source === "global" && !workspaceNames.has(name);
-        });
-        setEntries([...workspaceEntries, ...globalFallbackEntries]);
-        setStatus("ready");
-      } catch (loadError) {
-        setDisabledNames([]);
-        setTempEnabledNames([]);
-        setError(formatMcpError(loadError));
-        setStatus("error");
-      }
-      return;
-    }
-
-    if (!normalizedSessionId) {
-      setDisabledNames([]);
-      setTempEnabledNames([]);
-      setStatus("ready");
-      return;
-    }
-
-    try {
-      const scoped = await listRuntimeSessionMcps(normalizedSessionId);
-      setDisabledNames(scoped.disabled);
-      setTempEnabledNames(scoped.enabled ?? []);
-      setScope(scoped.scope ?? null);
-      if (scoped.mcps) {
-        // 新后端：条目即会话实际生效的配置面（工作区锚定）。
-        setEntries(scoped.mcps);
-      } else {
-        // 旧后端只返回覆盖清单：回退全局列表，行为与旧版一致。
-        const global = await listRuntimeMcps();
-        setEntries(global.mcps);
-      }
-      setStatus("ready");
-    } catch (loadError) {
-      setError(formatMcpError(loadError));
-      setStatus("error");
-    }
-  }, [sessionId, workspacePath]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  // `mcp.*` 运行时事件 → 重载；首帧只记录基线，不额外触发一次请求。
-  const lastEventRef = useRef<{ count?: number }>({
-    count: runtimeEventCount,
-  });
-  useEffect(() => {
-    const previousCount = lastEventRef.current.count;
-    lastEventRef.current = { count: runtimeEventCount };
-    if (runtimeEventCount === undefined || previousCount === undefined) {
-      return;
-    }
-    if (runtimeEventCount === previousCount) {
-      return;
-    }
-    if (!(lastRuntimeEventType ?? "").startsWith("mcp")) {
-      return;
-    }
-    void refresh();
-  }, [lastRuntimeEventType, refresh, runtimeEventCount]);
 
   const handleToggle = useCallback(
     async (entry: RuntimeSessionMcpEntry) => {
@@ -289,7 +152,7 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [disabledSet, tempEnabledSet, sessionId, t],
+    [disabledSet, tempEnabledSet, sessionId, setDisabledNames, setError, setTempEnabledNames, t],
   );
 
   /** 持久化启停：写入会话生效的配置文件并热重载（影响共享该配置的会话）。 */
@@ -335,7 +198,7 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [refresh, sessionId, t, workspacePath],
+    [refresh, sessionId, setError, t, workspacePath],
   );
 
   /** 删除：从会话生效的配置文件中移除（写文件 + 热重载）。 */
@@ -367,7 +230,7 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [refresh, sessionId, t, workspacePath],
+    [refresh, sessionId, setError, t, workspacePath],
   );
 
   /** 新增：写入会话生效的配置文件（工作区锚定时即工作区 mcp.yaml）。 */
@@ -400,7 +263,7 @@ export function SessionMcpSurface({
     } finally {
       setPendingName("");
     }
-  }, [draft, pendingName, refresh, sessionId, t, workspacePath]);
+  }, [draft, pendingName, refresh, sessionId, setError, t, workspacePath]);
 
   const loading = status === "loading";
   const loadFailed = status === "error";

@@ -457,9 +457,6 @@ export const enWorkspaceBase = {
       unavailable: "No modes available",
       pending: "switching",
       error: "permission mode unavailable",
-      dangerBanner:
-        "This session bypasses all permission checks — use it only in trusted workspaces.",
-      dangerBannerDismiss: "Dismiss permission warning",
       mode: {
         default: {
           label: "Default",

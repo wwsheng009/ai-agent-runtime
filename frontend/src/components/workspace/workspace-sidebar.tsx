@@ -1,6 +1,6 @@
 // 由 P0-2 第 3 批第 29 项拆分：入口保留状态/派生/副作用与四段侧栏装配，渲染块下沉到 workspace-sidebar/。
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { SessionSearchDialog } from "@/components/workspace/session-search-dialog";
 import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
 import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
@@ -18,6 +18,8 @@ import { useDirectoryRegistry } from "@/components/workspace/workspace-sidebar/u
 import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace-sidebar/runtime-section";
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
+import { useSidebarMobileFocusTrap } from "@/components/workspace/workspace-sidebar/use-sidebar-mobile-focus-trap";
+import { useSidebarSessionRename } from "@/components/workspace/workspace-sidebar/use-sidebar-session-rename";
 import { SessionAttentionBar } from "@/components/workspace/workspace-sidebar/session-attention-bar";
 import { collectAttentionSessionIds } from "@/components/workspace/workspace-sidebar/session-attention";
 import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
@@ -84,8 +86,6 @@ export function WorkspaceSidebar({
   const [openSessionDirectories, setOpenSessionDirectories] = useState<
     Record<string, boolean>
   >({});
-  /** 用渲染行 key 区分「最近会话」快捷行与目录树中的同一会话副本。 */
-  const [renamingSessionKey, setRenamingSessionKey] = useState<string | null>(null);
   /** P1-9：归档会话默认隐藏，可一键展开/收起（本次会话内有效）。 */
   const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
@@ -175,6 +175,15 @@ export function WorkspaceSidebar({
     onRegisterWorkspaceDirectory: onAddWorkspaceDirectory,
     onRenameWorkspaceDirectory,
   });
+  const {
+    cancelSessionRename,
+    handleRenameSession,
+    renamingSessionKey,
+    startSessionRename,
+  } = useSidebarSessionRename({
+    onRenameRuntimeSession,
+    setSidebarActionError,
+  });
   const sessionThreadById = useMemo(() => {
     const byId = new Map<string, Thread>();
     for (const thread of sessionThreads) {
@@ -236,67 +245,7 @@ export function WorkspaceSidebar({
     setOpenSessionDirectories,
   });
 
-  useEffect(() => {
-    if (!mobileOpen) {
-      return;
-    }
-    const node = asideRef.current;
-    if (!node) {
-      return;
-    }
-
-    const previousFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    const focusableSelector = [
-      "button:not([disabled])",
-      "a[href]",
-      "input:not([disabled])",
-      "select:not([disabled])",
-      "textarea:not([disabled])",
-      "[tabindex]:not([tabindex='-1'])",
-    ].join(",");
-    const getFocusable = () =>
-      Array.from(node.querySelectorAll<HTMLElement>(focusableSelector)).filter(
-        (element) =>
-          element.getClientRects().length > 0 &&
-          element.getAttribute("aria-hidden") !== "true",
-      );
-    const closeButton =
-      node.querySelector<HTMLElement>("[data-sidebar-close]") ??
-      getFocusable()[0];
-    const focusFrame = requestAnimationFrame(() => closeButton?.focus());
-
-    const handleTab = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") {
-        return;
-      }
-      const focusable = getFocusable();
-      if (focusable.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    node.addEventListener("keydown", handleTab);
-    return () => {
-      cancelAnimationFrame(focusFrame);
-      node.removeEventListener("keydown", handleTab);
-      if (previousFocus?.isConnected) {
-        previousFocus.focus();
-      }
-    };
-  }, [mobileOpen]);
+  useSidebarMobileFocusTrap({ asideRef, mobileOpen });
 
   function toggleSection(section: SidebarSectionId) {
     setOpenSections((current) => ({
@@ -318,26 +267,6 @@ export function WorkspaceSidebar({
       current[section] ? current : { ...current, [section]: true },
     );
     onCollapsedChange?.(false);
-  }
-
-  async function handleRenameSession(sessionId: string, title: string) {
-    setRenamingSessionKey(null);
-    try {
-      await onRenameRuntimeSession(sessionId, title);
-    } catch (renameError) {
-      setSidebarActionError(
-        renameError instanceof Error ? renameError.message : String(renameError),
-      );
-    }
-  }
-
-  function startSessionRename(renameKey: string) {
-    setSidebarActionError(null);
-    setRenamingSessionKey(renameKey);
-  }
-
-  function cancelSessionRename() {
-    setRenamingSessionKey(null);
   }
 
   return (

@@ -1,12 +1,6 @@
 // 由 components/workspace/workspace-shell.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import {
-  Code2Icon,
-  FileSearchIcon,
-  ListTodoIcon,
-  ShieldCheckIcon,
-} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
@@ -19,7 +13,6 @@ import {
 import { useAppSettings } from "@/core/settings";
 import { useRightRailWidth } from "@/hooks/workspace/use-right-rail-width";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
-import { RAIL_GRID_MIN_VIEWPORT_PX } from "@/lib/layout/rail-width";
 import {
   WORKSPACE_SIDEBAR_COLLAPSED_WIDTH,
   WORKSPACE_SIDEBAR_WIDTH_DEFAULT_PX,
@@ -29,23 +22,16 @@ import {
 import { cn } from "@/lib/utils";
 
 import { WorkspaceMainSection } from "./workspace-shell/main-section";
+import { buildNewThreadSuggestions } from "./workspace-shell/new-thread-suggestions";
 import { WorkspaceOverlaysSection } from "./workspace-shell/overlays-section";
 import { WorkspaceRightRailSection } from "./workspace-shell/right-rail-section";
 import { SidebarResizeHandle } from "./workspace-shell/sidebar-resize-handle";
 import { WorkspaceSidebarSection } from "./workspace-shell/sidebar-section";
+import { useShellViewport } from "./workspace-shell/use-shell-viewport";
 import {
   type WorkspaceShellProps,
   type WorkspaceViewMode,
 } from "./workspace-shell/types";
-
-/** P0-2：视口宽度兜底读取（无 window 时按 xl 断点处理，避免 NaN 宽度）。 */
-function readViewportWidth() {
-  if (typeof window === "undefined") {
-    return RAIL_GRID_MIN_VIEWPORT_PX;
-  }
-
-  return Math.round(window.innerWidth);
-}
 
 export function WorkspaceShell({
   threads,
@@ -159,39 +145,13 @@ export function WorkspaceShell({
   const { t } = useTranslation("workspace");
   const isNewThread = selectedThread.id === NEW_THREAD_ID;
   const isCompact = settings.workspace.density === "compact";
-  const newThreadSuggestions = [
-    {
-      key: "analyze",
-      icon: FileSearchIcon,
-      title: t("shell.suggestions.analyze.title"),
-      description: t("shell.suggestions.analyze.description"),
-      prompt: t("shell.suggestions.analyze.prompt"),
-    },
-    {
-      key: "implement",
-      icon: Code2Icon,
-      title: t("shell.suggestions.implement.title"),
-      description: t("shell.suggestions.implement.description"),
-      prompt: t("shell.suggestions.implement.prompt"),
-    },
-    {
-      key: "review",
-      icon: ShieldCheckIcon,
-      title: t("shell.suggestions.review.title"),
-      description: t("shell.suggestions.review.description"),
-      prompt: t("shell.suggestions.review.prompt"),
-    },
-    {
-      key: "plan",
-      icon: ListTodoIcon,
-      title: t("shell.suggestions.plan.title"),
-      description: t("shell.suggestions.plan.description"),
-      prompt: t("shell.suggestions.plan.prompt"),
-    },
-  ];
-  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
-  /** 根容器：复用既有 ResizeObserver 监听它，拿到视口宽度的变化时机。 */
-  const shellRef = useRef<HTMLDivElement | null>(null);
+  const newThreadSuggestions = buildNewThreadSuggestions(t);
+  const {
+    composerOverlayHeight,
+    composerOverlayRef,
+    shellRef,
+    shellViewportWidth,
+  } = useShellViewport(isNewThread);
   const shellGridRef = useRef<HTMLDivElement | null>(null);
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -203,9 +163,6 @@ export function WorkspaceShell({
   >(null);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
-  /** P0-2：视口宽度（右栏 auto 宽度与 `<xl` 降级判定共用）。 */
-  const [shellViewportWidth, setShellViewportWidth] =
-    useState(readViewportWidth);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
   const [rightRailManualOpen, setRightRailManualOpen] = useState(
@@ -258,52 +215,6 @@ export function WorkspaceShell({
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
   ).length;
-  const [composerOverlayHeight, setComposerOverlayHeight] = useState(220);
-
-  useEffect(() => {
-    if (isNewThread) {
-      return;
-    }
-
-    const node = composerOverlayRef.current;
-    if (!node || typeof ResizeObserver === "undefined") {
-      return;
-    }
-
-    // P0-2：同一个 observer 兼听根容器，视口尺寸变化时重算右栏 auto 宽度（不新增监听）。
-    const shellNode = shellRef.current;
-
-    const observer = new ResizeObserver(() => {
-      const nextHeight = Math.ceil(node.getBoundingClientRect().height);
-      setComposerOverlayHeight((currentHeight) =>
-        currentHeight === nextHeight ? currentHeight : nextHeight,
-      );
-      const nextViewportWidth = readViewportWidth();
-      setShellViewportWidth((currentWidth) =>
-        currentWidth === nextViewportWidth ? currentWidth : nextViewportWidth,
-      );
-    });
-
-    observer.observe(node);
-    if (shellNode) {
-      observer.observe(shellNode);
-    }
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [isNewThread]);
-
-  useEffect(() => {
-    const handleViewportResize = () => {
-      const nextViewportWidth = readViewportWidth();
-      setShellViewportWidth((currentWidth) =>
-        currentWidth === nextViewportWidth ? currentWidth : nextViewportWidth,
-      );
-    };
-    window.addEventListener("resize", handleViewportResize);
-    return () => window.removeEventListener("resize", handleViewportResize);
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
