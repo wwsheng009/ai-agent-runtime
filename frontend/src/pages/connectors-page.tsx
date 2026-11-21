@@ -9,7 +9,6 @@ import {
   ArrowLeftIcon,
   BotIcon,
   CheckCircle2Icon,
-  MoreHorizontalIcon,
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
@@ -45,11 +44,9 @@ import type {
 
 import { summarizeActionPayload } from "./connectors/action-payload";
 import { ConnectorActionDialog } from "./connectors/action-dialog";
-import { ConnectorBindingsList } from "./connectors/bindings-list";
 import { ConnectorDialog } from "./connectors/connector-dialog";
 import { ConnectorLogsDialog } from "./connectors/logs-dialog";
-import { ConnectorRuntimeSummary } from "./connectors/runtime-summary";
-import { findProviderSchema } from "./connectors/shared";
+import { ConnectorRow } from "./connectors/connector-row";
 import { TestMessageDialog } from "./connectors/test-message-dialog";
 
 function errorText(error: unknown): string {
@@ -420,156 +417,23 @@ export function ConnectorsPage({ embedded = false }: { embedded?: boolean } = {}
             <p className="text-sm text-muted-foreground">{t("page.empty")}</p>
           ) : (
             <ul className="flex flex-col gap-2">
-              {items.map((item) => {
-                const providerActions =
-                  findProviderSchema(schema, item.provider)?.actions ?? [];
-                const takeoverVisible =
-                  item.enabled &&
-                  !item.owned_by_current_host &&
-                  Boolean(item.active_owner);
-                return (
-                  <li
-                    key={item.id}
-                    className="flex flex-col gap-2 rounded-card border border-border bg-surface-soft px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-medium text-foreground">
-                          {item.name}
-                        </span>
-                        <Badge>{item.provider}</Badge>
-                        {item.mode ? <Badge>{item.mode}</Badge> : null}
-                        <Badge>{item.enabled ? t("page.enabled") : t("page.disabled")}</Badge>
-                        {item.policy.runtime_owner ? (
-                          <span className="text-xs text-muted-foreground">
-                            {t("page.owner", { owner: item.policy.runtime_owner })}
-                          </span>
-                        ) : null}
-                        {/* 运行归属（active_owner）：本宿主高亮，空=未运行。 */}
-                        <span
-                          className={cn(
-                            "text-xs",
-                            item.owned_by_current_host
-                              ? "font-medium text-accent-primary"
-                              : "text-muted-foreground",
-                          )}
-                        >
-                          {item.active_owner
-                            ? t("page.activeOwner", { owner: item.active_owner })
-                            : t("page.unclaimed")}
-                        </span>
-                      </div>
-                      <span className="truncate text-xs text-muted-foreground">{item.id}</span>
-                      {/* 运行计数与最近错误（runtime additive；缺失时不展示）。 */}
-                      <ConnectorRuntimeSummary runtime={item.runtime} />
-                      {/* 所在会话与节点（docs/bots/09 §5.3）。 */}
-                      <ConnectorBindingsList bindings={bindingsOf(item.id)} />
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {providerActions.map((action) => (
-                        <Button
-                          key={action.key}
-                          variant="secondary"
-                          size="sm"
-                          disabled={busyIds.has(item.id) || !item.enabled}
-                          onClick={() => void handleRunAction(item, action)}
-                        >
-                          {action.label}
-                        </Button>
-                      ))}
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={busyIds.has(item.id)}
-                        onClick={() => setLogsTarget(item)}
-                      >
-                        {t("page.logs")}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={busyIds.has(item.id)}
-                        onClick={() => void handleToggle(item)}
-                      >
-                        {item.enabled ? t("page.disable") : t("page.enable")}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={!schema || busyIds.has(item.id)}
-                        onClick={() => openEdit(item)}
-                      >
-                        {t("page.edit")}
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={busyIds.has(item.id)}
-                        onClick={() => setTestTarget(item)}
-                      >
-                        {t("page.test")}
-                      </Button>
-                      <details
-                        className="relative"
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            event.currentTarget.removeAttribute("open");
-                          }
-                        }}
-                      >
-                        <summary
-                          className={cn(
-                            buttonVariants({ variant: "secondary", size: "sm" }),
-                            "cursor-pointer list-none marker:hidden [&::-webkit-details-marker]:hidden",
-                          )}
-                          aria-disabled={busyIds.has(item.id)}
-                        >
-                          <MoreHorizontalIcon size={14} aria-hidden="true" />
-                          {t("page.more")}
-                        </summary>
-                        <div className="surface-panel absolute right-0 top-full z-30 mt-1 w-44 rounded-panel p-1 shadow-[var(--elevation-panel)]">
-                          {takeoverVisible ? (
-                            <button
-                              type="button"
-                              className="flex w-full items-center rounded-control px-2 py-1.5 text-left text-sm hover:bg-surface-softer disabled:cursor-not-allowed disabled:opacity-50"
-                              disabled={busyIds.has(item.id)}
-                              onClick={(event) => {
-                                event.currentTarget.closest("details")?.removeAttribute("open");
-                                void handleTakeover(item);
-                              }}
-                            >
-                              {t("page.takeover")}
-                            </button>
-                          ) : null}
-                          <button
-                            type="button"
-                            className="flex w-full items-center rounded-control px-2 py-1.5 text-left text-sm hover:bg-surface-softer disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyIds.has(item.id)}
-                            onClick={(event) => {
-                              event.currentTarget.closest("details")?.removeAttribute("open");
-                              void handleReload(item);
-                            }}
-                          >
-                            {t("page.reload")}
-                          </button>
-                          <button
-                            type="button"
-                            className="mt-1 flex w-full items-center rounded-control border-t border-border px-2 pb-1.5 pt-2 text-left text-sm text-accent-orange hover:bg-accent-orange/8 disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={busyIds.has(item.id)}
-                            onClick={(event) => {
-                              event.currentTarget.closest("details")?.removeAttribute("open");
-                              void handleDelete(item);
-                            }}
-                          >
-                            {t("page.remove")}
-                          </button>
-                        </div>
-                      </details>
-                    </div>
-                  </li>
-                );
-              })}
+              {items.map((item) => (
+                <ConnectorRow
+                  key={item.id}
+                  item={item}
+                  schema={schema}
+                  bindings={bindingsOf(item.id)}
+                  busy={busyIds.has(item.id)}
+                  onRunAction={handleRunAction}
+                  onSetLogs={setLogsTarget}
+                  onToggle={(next) => void handleToggle(next)}
+                  onEdit={openEdit}
+                  onSetTest={setTestTarget}
+                  onTakeover={(next) => void handleTakeover(next)}
+                  onReload={(next) => void handleReload(next)}
+                  onDelete={(next) => void handleDelete(next)}
+                />
+              ))}
             </ul>
           )}
         </section>
