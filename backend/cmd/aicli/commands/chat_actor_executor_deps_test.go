@@ -92,10 +92,14 @@ func TestLocalTurnDigestSinkWiresBothActorPaths(t *testing.T) {
 	if got := localTurnDigestSink(nil); got != nil {
 		t.Fatalf("nil host must not wire a digest sink: %#v", got)
 	}
-	runtime := &memoryruntime.Runtime{}
+	runtime := &memoryruntime.Runtime{Config: memoryruntime.Config{TurnDigestEnabled: true}}
 	host := &localChatRuntimeHost{MemoryRuntime: runtime}
 	if got := localTurnDigestSink(host); got != runtime {
 		t.Fatalf("digest sink mismatch: got %#v want %#v", got, runtime)
+	}
+	disabled := &memoryruntime.Runtime{Config: memoryruntime.Config{TurnDigestEnabled: false}}
+	if got := localTurnDigestSink(&localChatRuntimeHost{MemoryRuntime: disabled}); got != nil {
+		t.Fatalf("disabled turn digest must not wire a sink: %#v", got)
 	}
 }
 

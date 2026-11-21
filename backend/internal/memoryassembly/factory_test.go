@@ -50,6 +50,85 @@ func TestBuildFromRuntimeConfigWiresSharedMemoryRuntime(t *testing.T) {
 	require.Equal(t, "user-1", source.UserID)
 }
 
+func TestBuildFromRuntimeConfigWiresMemoryStageProviders(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Memory.Mode = "on"
+	cfg.Memory.StorePath = filepath.Join(t.TempDir(), "memory.db")
+	cfg.Memory.Generation.Provider = "extract-provider"
+	cfg.Memory.Generation.Model = "extract-model"
+	cfg.Memory.Consolidation.Provider = "summary-provider"
+	cfg.Memory.Consolidation.Model = "summary-model"
+
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), nil)
+	defer manager.Stop()
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "default-model"})
+
+	rt, err := BuildFromRuntimeConfig(BuildOptions{
+		RuntimeConfig:  cfg,
+		Workspace:      t.TempDir(),
+		SessionManager: manager,
+		LLMRuntime:     llmRuntime,
+		UserID:         "user-1",
+		WorkerID:       "worker-test",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, rt)
+	defer rt.Store.Close()
+
+	require.Equal(t, "extract-provider", rt.Config.ExtractionProvider)
+	require.Equal(t, "extract-model", rt.Config.ExtractionModel)
+	require.Equal(t, "summary-provider", rt.Config.ConsolidationProvider)
+	require.Equal(t, "summary-model", rt.Config.ConsolidationModel)
+
+	extractor, ok := rt.Extractor.(*memoryruntime.LLMExtractor)
+	require.True(t, ok)
+	require.Equal(t, "extract-provider", extractor.Config.ExtractionProvider)
+	require.Equal(t, "extract-model", extractor.Config.ExtractionModel)
+
+	windowSummarizer, ok := rt.WindowSummarizer.(*memoryruntime.LLMWindowSummarizer)
+	require.True(t, ok)
+	require.Equal(t, "extract-provider", windowSummarizer.Config.ExtractionProvider)
+	require.Equal(t, "extract-model", windowSummarizer.Config.ExtractionModel)
+
+	projectSummarizer, ok := rt.Config.Summarizer.(*memoryruntime.LLMProjectSummarizer)
+	require.True(t, ok)
+	require.Equal(t, "summary-provider", projectSummarizer.Config.ConsolidationProvider)
+	require.Equal(t, "summary-model", projectSummarizer.Config.ConsolidationModel)
+}
+
+func TestBuildFromRuntimeConfigConsolidationProviderFallsBackToExtraction(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Memory.Mode = "on"
+	cfg.Memory.StorePath = filepath.Join(t.TempDir(), "memory.db")
+	cfg.Memory.Generation.Provider = "extract-provider"
+	cfg.Memory.Generation.Model = "extract-model"
+	cfg.Memory.Consolidation.Provider = ""
+	cfg.Memory.Consolidation.Model = ""
+
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), nil)
+	defer manager.Stop()
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "default-model"})
+
+	rt, err := BuildFromRuntimeConfig(BuildOptions{
+		RuntimeConfig:  cfg,
+		Workspace:      t.TempDir(),
+		SessionManager: manager,
+		LLMRuntime:     llmRuntime,
+		UserID:         "user-1",
+		WorkerID:       "worker-test",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, rt)
+	defer rt.Store.Close()
+
+	projectSummarizer, ok := rt.Config.Summarizer.(*memoryruntime.LLMProjectSummarizer)
+	require.True(t, ok)
+	require.Empty(t, projectSummarizer.Config.ConsolidationProvider)
+	require.Empty(t, projectSummarizer.Config.ConsolidationModel)
+	require.Equal(t, "extract-provider", projectSummarizer.Config.ExtractionProvider)
+	require.Equal(t, "extract-model", projectSummarizer.Config.ExtractionModel)
+}
+
 func TestBuildFromRuntimeConfigRequiresHosts(t *testing.T) {
 	cfg := runtimecfg.DefaultRuntimeConfig()
 	cfg.Memory.Mode = "on"

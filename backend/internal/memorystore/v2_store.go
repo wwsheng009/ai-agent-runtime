@@ -596,22 +596,26 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 			}
 		}
 	}
-	candidates := make([]SearchHit, 0, len(records))
+	candidates := make([]recallCandidate, 0, len(records))
 	queryTokens := tokenize(opts.Query)
-	for _, record := range records {
+	for recordIndex, record := range records {
 		if _, exists := stableIDs[record.ID]; exists {
 			continue
 		}
-		note := recordToNote(record)
 		score := scoreRecordForRecall(record, queryTokens, opts.Query, now)
 		if opts.Query != "" && score <= 0 {
 			continue
 		}
-		candidates = append(candidates, SearchHit{Note: note, Score: score})
+		candidates = append(candidates, recallCandidate{recordIndex: recordIndex, score: score})
 	}
 	if !supportsRecall {
 		selection.TokenEstimate = summaryUsed + pinnedUsed
 		selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
+		if !diagnostic {
+			if err := s.hydrateSelectionRecords(context.Background(), db, &selection); err != nil {
+				return Selection{}, err
+			}
+		}
 		if diagnostic {
 			appendWhyNotNoMatch(&selection, diagnosticRecords, opts.Query)
 		}
@@ -622,10 +626,11 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		return selection, nil
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score == candidates[j].Score {
-			return candidates[i].Note.CreatedAt.After(candidates[j].Note.CreatedAt)
+		if candidates[i].score == candidates[j].score {
+			return records[candidates[i].recordIndex].CreatedAt.After(
+				records[candidates[j].recordIndex].CreatedAt)
 		}
-		return candidates[i].Score > candidates[j].Score
+		return candidates[i].score > candidates[j].score
 	})
 	candidates = diversifyRecallOrder(candidates, records, limit)
 	remaining := budget - summaryUsed - pinnedUsed
@@ -639,16 +644,19 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 	recallUsed := 0
 	seenDuplicates := make(map[string]struct{}, len(candidates))
 	for _, hit := range candidates {
-		record := recordByID(records, hit.Note.ID)
+		if hit.recordIndex < 0 || hit.recordIndex >= len(records) {
+			continue
+		}
+		record := records[hit.recordIndex]
 		if key := recallDedupKey(record); key != "" {
 			if _, seen := seenDuplicates[key]; seen {
-				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "duplicate"})
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "duplicate"})
 				continue
 			}
 			seenDuplicates[key] = struct{}{}
 		}
 		if len(selection.Recall) >= limit {
-			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
+			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
 			continue
 		}
 		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
@@ -662,11 +670,11 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 					record = fitted
 					cost = EstimateTokens(record.Text) + memoryRecordTokenOverhead
 				} else {
-					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
+					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
 					continue
 				}
 			} else {
-				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: hit.Note.ID, Reason: "memory_budget"})
+				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
 				continue
 			}
 		}
@@ -680,6 +688,11 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 	}
 	if diagnostic {
 		appendWhyNotNoMatch(&selection, diagnosticRecords, opts.Query)
+	}
+	if !diagnostic {
+		if err := s.hydrateSelectionRecords(context.Background(), db, &selection); err != nil {
+			return Selection{}, err
+		}
 	}
 	selection.FilteredCount = len(selection.Dropped)
 	if !opts.SkipTrace {
@@ -825,13 +838,9 @@ func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.
   (freshness_status = 'stale' AND kind IN ('preference', 'workflow', 'pitfall', 'open_question')))`
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
-       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
-       source_session_generation,
-       source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
-       created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
-       freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json
+SELECT id, kind, text, normalized_text, tags_json, confidence, pinned,
+       source_kind, source_session_id, created_at, updated_at, last_used_at,
+       use_count
 FROM memory_entries
 WHERE scope = ? AND project_key = ? AND status = 'active' AND `+freshnessPredicate+`
   AND sensitivity != 'private'
@@ -846,7 +855,7 @@ ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
 	defer rows.Close()
 	records := make([]Record, 0, 32)
 	for rows.Next() {
-		record, err := scanRecord(rows)
+		record, err := scanInjectableRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -856,6 +865,118 @@ ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// scanInjectableRecord is the bounded projection used by the per-turn recall
+// selector. It intentionally omits provenance JSON and lifecycle fields that
+// neither scoring nor prompt rendering reads. Full records remain available
+// through GetRecord and the diagnostic injection path.
+func scanInjectableRecord(rows *sql.Rows) (Record, error) {
+	var (
+		record                                   Record
+		id, kind, text, normalizedText, tagsJSON sql.NullString
+		sourceKind, sourceSessionID              sql.NullString
+		createdAt, updatedAt, lastUsedAt         sql.NullString
+		confidence                               float64
+		pinned                                   int
+		useCount                                 int64
+	)
+	if err := rows.Scan(
+		&id, &kind, &text, &normalizedText, &tagsJSON, &confidence, &pinned,
+		&sourceKind, &sourceSessionID, &createdAt, &updatedAt, &lastUsedAt,
+		&useCount,
+	); err != nil {
+		return Record{}, err
+	}
+	record = Record{
+		ID: id.String, Kind: kind.String, Text: text.String,
+		NormalizedText: normalizedText.String, Confidence: confidence,
+		Pinned: pinned != 0, SourceKind: sourceKind.String,
+		SourceSessionID: sourceSessionID.String,
+		CreatedAt:       parseTime(createdAt.String),
+		UpdatedAt:       parseTime(updatedAt.String),
+		LastUsedAt:      parseTime(lastUsedAt.String),
+		UseCount:        int(useCount),
+	}
+	_ = json.Unmarshal([]byte(tagsJSON.String), &record.Tags)
+	return record, nil
+}
+
+func (s *Store) hydrateSelectionRecords(
+	ctx context.Context,
+	db *sql.DB,
+	selection *Selection,
+) error {
+	if selection == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(selection.Stable)+len(selection.Recall))
+	seen := make(map[string]struct{}, len(selection.Stable)+len(selection.Recall))
+	for _, record := range selection.Stable {
+		if _, ok := seen[record.ID]; ok || strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		seen[record.ID] = struct{}{}
+		ids = append(ids, record.ID)
+	}
+	for _, record := range selection.Recall {
+		if _, ok := seen[record.ID]; ok || strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		seen[record.ID] = struct{}{}
+		ids = append(ids, record.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids)+2)
+	args = append(args, string(ScopeProject), s.cfg.ProjectKey)
+	for index, id := range ids {
+		placeholders[index] = "?"
+		args = append(args, id)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
+       confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
+       source_session_generation,
+       source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
+       created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
+       freshness_status, last_verified_at, revalidate_after, stale_reason,
+       deleted_at, metadata_json
+FROM memory_entries
+WHERE scope = ? AND project_key = ? AND id IN (`+strings.Join(placeholders, ", ")+`)
+`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	fullByID := make(map[string]Record, len(ids))
+	for rows.Next() {
+		record, scanErr := scanRecord(rows)
+		if scanErr != nil {
+			return scanErr
+		}
+		fullByID[record.ID] = record
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	hydrate := func(records []Record) {
+		for index, selected := range records {
+			full, ok := fullByID[selected.ID]
+			if !ok {
+				continue
+			}
+			// Preserve the already fitted text; all other fields come from the
+			// authoritative row.
+			full.Text = selected.Text
+			records[index] = full
+		}
+	}
+	hydrate(selection.Stable)
+	hydrate(selection.Recall)
+	return nil
 }
 
 // warnInjectableKind is the staleBehavior=warn allowlist. High-risk kinds

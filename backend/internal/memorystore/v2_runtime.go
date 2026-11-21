@@ -13,6 +13,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
+// ErrJobLeaseLost means the caller no longer owns the live claim attempt for a
+// running job. A lease cannot be revived after expiry or another claim.
+var ErrJobLeaseLost = errors.New("memorystore: job lease is no longer owned")
+
 // EnsureJob creates an idempotent memory job. If the unique
 // (kind, scope, project_key, job_key) already exists, the existing row is
 // returned so callers can skip succeeded/running work.
@@ -259,6 +263,63 @@ WHERE id = ? AND status = 'pending'
 		return nil, fmt.Errorf("memorystore: commit claim jobs: %w", err)
 	}
 	return claimed, nil
+}
+
+// HeartbeatJobForWorkerAttempt extends a live claim only when the exact owner
+// and attempt still hold an unexpired lease. Expired or reassigned work is
+// never revived by a late heartbeat.
+func (s *Store) HeartbeatJobForWorkerAttempt(
+	ctx context.Context,
+	id, workerID string,
+	attempt int,
+	lease time.Duration,
+) error {
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	workerID = strings.TrimSpace(workerID)
+	if id == "" || workerID == "" || attempt <= 0 || lease <= 0 {
+		return fmt.Errorf("memorystore: heartbeat requires job, worker, positive attempt and lease")
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin job heartbeat: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease).UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET lease_until = ?, deadline_at = ?, heartbeat_at = ?, updated_at = ?
+WHERE id = ? AND project_key = ? AND status = 'running'
+  AND worker_id = ? AND attempt = ?
+  AND lease_until IS NOT NULL AND lease_until != '' AND lease_until > ?
+`, leaseUntil.Format(time.RFC3339Nano), leaseUntil.Format(time.RFC3339Nano),
+		nowText, nowText, id, s.cfg.ProjectKey, workerID, attempt, nowText)
+	if err != nil {
+		return fmt.Errorf("memorystore: heartbeat job %s: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: job=%s worker=%s attempt=%d",
+			ErrJobLeaseLost, id, workerID, attempt)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memorystore: commit job heartbeat: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CompleteJob(ctx context.Context, id, watermark string) error {

@@ -76,7 +76,7 @@ func TestRunPendingTurnDigestsProcessesEligibleSession(t *testing.T) {
 	transcript := validTranscript("s1", "hash-a")
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -88,7 +88,7 @@ func TestRunPendingTurnDigestsProcessesEligibleSession(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "remember the digest path",
 	})
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ func TestRunPendingTurnDigestsStartupSkipsActiveSession(t *testing.T) {
 	transcript := validTranscript("s1", "hash-a")
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "active",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "active",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -123,7 +123,7 @@ func TestRunPendingTurnDigestsStartupSkipsActiveSession(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "startup must not extract a live session",
 	})
 	require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestRunPendingTurnDigestsStartupProcessesTerminalSession(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
 		}},
 		transcripts: map[string]Transcript{"s1": validTranscript("s1", "hash-a")},
@@ -165,7 +165,7 @@ func TestRunPendingTurnDigestsStartupProcessesTerminalSession(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "recover a closed session",
 	})
 	require.NoError(t, err)
@@ -183,7 +183,7 @@ func TestRunPendingTurnDigestsStartupSkipsIdleSessionUntilIdleSweep(t *testing.T
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			LastActivityAt: now.Add(-2 * time.Hour), CanonicalCount: 2,
 		}},
 		transcripts: map[string]Transcript{"s1": validTranscript("s1", "hash-a")},
@@ -195,7 +195,7 @@ func TestRunPendingTurnDigestsStartupSkipsIdleSessionUntilIdleSweep(t *testing.T
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "idle sweep owns the idle session",
 	})
 	require.NoError(t, err)
@@ -215,7 +215,7 @@ func TestRunPendingTurnDigestsDefersOversizedSession(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 21,
 		}},
 	}
@@ -223,7 +223,7 @@ func TestRunPendingTurnDigestsDefersOversizedSession(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "too large for the current reader",
 	})
 	require.NoError(t, err)
@@ -241,7 +241,7 @@ func TestRunPendingTurnDigestsSkipsNonSuccessTurns(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
 		}},
 	}
@@ -249,7 +249,7 @@ func TestRunPendingTurnDigestsSkipsNonSuccessTurns(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "interrupted",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "interrupted",
 		AssistantText: "partial output",
 	})
 	require.NoError(t, err)
@@ -267,7 +267,7 @@ func TestRunPendingTurnDigestsSkipsIneligibleSubagent(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			IsSubagent: true, LastActivityAt: now.Add(-time.Hour), CanonicalCount: 2,
 		}},
 	}
@@ -275,7 +275,7 @@ func TestRunPendingTurnDigestsSkipsIneligibleSubagent(t *testing.T) {
 	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 	})
 	require.NoError(t, err)
 
@@ -312,7 +312,7 @@ func TestRunPendingTurnDigestsUsesCanonicalWindowForOversizedSession(t *testing.
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	base := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "idle",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "idle",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 21,
 		}},
 	}
@@ -332,13 +332,13 @@ func TestRunPendingTurnDigestsUsesCanonicalWindowForOversizedSession(t *testing.
 	runtime.Source = source
 	runtime.Config.TurnDigestEnabled = true
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "previous", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "previous", Outcome: "success",
 		MessageSeqEnd: 2, Status: memorystore.TurnDigestDone,
 		RollupStatus: memorystore.TurnDigestRollupSkipped,
 	})
 	require.NoError(t, err)
 	_, err = store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t1", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t1", Outcome: "success",
 		AssistantText: "large session answer", MessageSeqEnd: 4,
 	})
 	require.NoError(t, err)

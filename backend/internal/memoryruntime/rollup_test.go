@@ -48,7 +48,7 @@ func TestRunSessionEndRollsUpL1AndL2(t *testing.T) {
 	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -71,7 +71,7 @@ func TestRunSessionEndRollsUpL1AndL2(t *testing.T) {
 
 	for index, turnID := range []string{"t1", "t2"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			UserMessageID: fmt.Sprintf("msg-%d", index*2+1), AssistantMessageID: fmt.Sprintf("msg-%d", index*2+2),
 			UserText: "question " + turnID, AssistantText: "answer " + turnID,
 			MessageSeqEnd: int64((index + 1) * 2),
@@ -145,7 +145,7 @@ func TestRunSessionEndKeepsL0WhenWindowSummaryFails(t *testing.T) {
 	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -159,7 +159,7 @@ func TestRunSessionEndKeepsL0WhenWindowSummaryFails(t *testing.T) {
 
 	for index, turnID := range []string{"t1", "t2"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: int64((index + 1) * 2),
 		})
 		require.NoError(t, err)
@@ -191,7 +191,7 @@ func TestRunSessionEndSkipsRollupWhenWindowSummaryDisabled(t *testing.T) {
 	transcript := rollupTranscript("s1", 2)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -206,7 +206,7 @@ func TestRunSessionEndSkipsRollupWhenWindowSummaryDisabled(t *testing.T) {
 	digests := make([]memorystore.TurnDigest, 0, 2)
 	for index, turnID := range []string{"t1", "t2"} {
 		digest, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: int64((index + 1) * 2),
 		})
 		require.NoError(t, err)
@@ -224,7 +224,7 @@ func TestRunSessionEndSkipsRollupWhenWindowSummaryDisabled(t *testing.T) {
 
 	for _, digest := range digests {
 		same, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: digest.TurnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: digest.TurnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: digest.MessageSeqEnd,
 		})
 		require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestRunSessionEndFinalizesPartialWindow(t *testing.T) {
 	transcript := rollupTranscript("s1", 3)
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: len(transcript.Messages),
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -257,7 +257,7 @@ func TestRunSessionEndFinalizesPartialWindow(t *testing.T) {
 
 	for index, turnID := range []string{"t1", "t2", "t3"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer " + strings.Repeat("x", index+1),
 			MessageSeqEnd: int64((index + 1) * 2),
 		})
@@ -285,7 +285,7 @@ func TestRollupWaitsForBacklogBeforePartialWindow(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	base := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 21,
 		}},
 	}
@@ -312,7 +312,7 @@ func TestRollupWaitsForBacklogBeforePartialWindow(t *testing.T) {
 
 	for index, turnID := range []string{"t1", "t2", "t3"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: int64((index + 1) * 2),
 		})
 		require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestRunSessionEndDrainsWindowBacklog(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	base := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "closed",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed",
 			LastActivityAt: now.Add(-time.Hour), CanonicalCount: 21,
 		}},
 	}
@@ -375,7 +375,7 @@ func TestRunSessionEndDrainsWindowBacklog(t *testing.T) {
 
 	for index, turnID := range []string{"t1", "t2", "t3"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: int64((index + 1) * 2),
 		})
 		require.NoError(t, err)
@@ -404,7 +404,7 @@ func TestIdleSweepWaitsForExtractEveryNTurns(t *testing.T) {
 	transcript := validTranscript("s1", "hash-a")
 	source := &fakeSource{
 		sessions: []SessionRef{{
-			ID: "s1", WorkspacePath: "/workspace", State: "active",
+			ID: "s1", SessionGeneration: 1, WorkspacePath: "/workspace", State: "active",
 			LastActivityAt: now.Add(-time.Minute), CanonicalCount: 2,
 		}},
 		transcripts: map[string]Transcript{"s1": transcript},
@@ -416,7 +416,7 @@ func TestIdleSweepWaitsForExtractEveryNTurns(t *testing.T) {
 
 	for _, turnID := range []string{"t1", "t2"} {
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: "s1", TurnID: turnID, Outcome: "success",
+			SessionID: "s1", SessionGeneration: 1, TurnID: turnID, Outcome: "success",
 			AssistantText: "answer", MessageSeqEnd: 2,
 		})
 		require.NoError(t, err)
@@ -430,7 +430,7 @@ func TestIdleSweepWaitsForExtractEveryNTurns(t *testing.T) {
 	require.Len(t, pending, 2)
 
 	_, err = store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-		SessionID: "s1", TurnID: "t3", Outcome: "success",
+		SessionID: "s1", SessionGeneration: 1, TurnID: "t3", Outcome: "success",
 		AssistantText: "answer", MessageSeqEnd: 2,
 	})
 	require.NoError(t, err)

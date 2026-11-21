@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestOpenPersistentSessionStorage_SQLiteIsLazyUntilFirstUse(t *testing.T) {
@@ -44,6 +45,43 @@ func TestOpenPersistentSessionStorage_SQLiteIsLazyUntilFirstUse(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, session.ID, loaded.ID)
 	require.NoError(t, store.(SessionStorageCloser).CloseStorage())
+}
+
+func TestLazySessionStorage_ExposesTurnCaptureContracts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultPersistentSessionStorageConfig(dir)
+	cfg.Path = filepath.Join(dir, "session_history.sqlite")
+	cfg.ImportLegacyJSON = false
+
+	store, err := OpenPersistentSessionStorage(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.(SessionStorageCloser).CloseStorage()) })
+
+	// The actor and memory source receive the manager's storage interface
+	// directly. A lazy wrapper must therefore preserve the optional receipt
+	// contracts instead of making the terminal capture predicate false.
+	committer, ok := store.(SessionStorageTurnCaptureCommitter)
+	require.True(t, ok, "lazy session storage must expose atomic turn capture commits")
+	_, ok = store.(SessionStorageTurnCaptureReceiptStore)
+	require.True(t, ok, "lazy session storage must expose turn capture receipts")
+	_, ok = store.(SessionStorageTurnCaptureReceiptGenerationStore)
+	require.True(t, ok, "lazy session storage must expose generation-scoped receipts")
+	_, ok = store.(SessionStorageMaterializedTurnCaptureReceiptGenerationPageStore)
+	require.True(t, ok, "lazy session storage must expose generation-scoped materialized receipt pages")
+
+	session := NewSession("lazy-capture-user")
+	require.NoError(t, store.Save(context.Background(), session))
+	receipt := TurnCaptureReceipt{SessionID: session.ID, TurnID: "turn-lazy-capture"}
+	message := types.NewUserMessage("capture me")
+	message.Metadata.Set(types.MetadataKeyTurnID, receipt.TurnID)
+	session.History = append(session.History, *message)
+	_, err = committer.UpdateWithTurnCapture(context.Background(), session, receipt)
+	require.NoError(t, err)
+	receipts, err := store.(SessionStorageTurnCaptureReceiptStore).
+		ListTurnCaptureReceiptsForSession(context.Background(), session.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, receipts, 1)
+	require.Equal(t, receipt.TurnID, receipts[0].TurnID)
 }
 
 func TestOpenEagerPersistentSessionStorage_OpensImmediately(t *testing.T) {

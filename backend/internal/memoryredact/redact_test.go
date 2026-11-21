@@ -16,3 +16,27 @@ func TestDetectAndRedactSecretShapes(t *testing.T) {
 		t.Fatalf("Redact = %q, %v", redacted, rules)
 	}
 }
+
+func TestDetectSecretRuleCoverageAndFastReject(t *testing.T) {
+	tests := []struct {
+		text string
+		rule string
+	}{
+		{"sk-" + strings.Repeat("a", 20), "openai_key"},
+		{"Authorization: Bearer " + strings.Repeat("a", 20), "bearer_token"},
+		{"ghp_" + strings.Repeat("a", 20), "github_token"},
+		{"AKIA" + strings.Repeat("A", 16), "aws_access_key"},
+		{"-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----", "private_key"},
+		{"password=supersecret", "password_assignment"},
+		{"api_key=supersecretvalue123", "api_key_assignment"},
+		{"https://example.test/?token=supersecretvalue123", "url_query_secret"},
+		{"MY_SECRET_KEY=supersecretvalue", "env_secret_line"},
+		{"ordinary deployment note", ""},
+		{"ordinary deployment note about a tokenizer", ""},
+	}
+	for _, test := range tests {
+		if got := DetectSecret(test.text); got != test.rule {
+			t.Fatalf("DetectSecret(%q) = %q, want %q", test.text, got, test.rule)
+		}
+	}
+}

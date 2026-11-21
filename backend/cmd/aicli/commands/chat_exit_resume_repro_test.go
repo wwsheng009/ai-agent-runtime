@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -160,8 +161,10 @@ func TestSendMessagePersistsUserPromptAtInputTime(t *testing.T) {
 	}
 
 	prompt := "last turn prompt entered by user"
-	// 模拟 sendMessage 在 ensureChatExecutor 之前立即持久化用户输入。
-	appendChatTurnUserMessage(cli, prompt)
+	// 模拟 actor executor：先请求一个 turn identity，之后必须带同一 ID
+	// 进入 actor，确保 capture 门禁能在 canonical user 行上命中它。
+	turnID := "turn_" + uuid.NewString()
+	appendChatTurnUserMessageWithTurnID(cli, prompt, turnID)
 
 	if count := len(cli.Messages); count == 0 {
 		t.Fatalf("session.Messages empty after appendChatTurnUserMessage")
@@ -183,9 +186,34 @@ func TestSendMessagePersistsUserPromptAtInputTime(t *testing.T) {
 		t.Fatalf("stored last message = %q/%q, want user/%q (last turn lost on exit?)",
 			lastStored.Role, lastStored.Content, prompt)
 	}
+	if got := runtimetypes.TurnID(lastStored); got != turnID {
+		t.Fatalf("pre-persisted user turn_id = %q, want actor request %q", got, turnID)
+	}
 
-	// 幂等：重复调用同一 prompt 不应追加重复消息。
-	appendChatTurnUserMessage(cli, prompt)
+	// durable suspension may override the provisional ID. Re-key the same
+	// trailing user row rather than persisting a duplicate prompt.
+	selectedTurnID := "turn_parked"
+	before := len(cli.Messages)
+	appendChatTurnUserMessageWithTurnID(cli, prompt, selectedTurnID)
+	if len(cli.Messages) != before {
+		t.Fatalf("actor identity change duplicated prompt: before=%d after=%d", before, len(cli.Messages))
+	}
+	if got := runtimetypes.TurnID(cli.Messages[len(cli.Messages)-1]); got != selectedTurnID {
+		t.Fatalf("re-keyed in-memory user turn_id = %q, want actor-selected %q", got, selectedTurnID)
+	}
+	rekeyed, err := manager.Get(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("reload re-keyed session: %v", err)
+	}
+	if got := runtimetypes.TurnID(rekeyed.History[len(rekeyed.History)-1]); got != selectedTurnID {
+		t.Fatalf("re-keyed stored user turn_id = %q, want actor-selected %q", got, selectedTurnID)
+	}
+
+	// 重复应用同一 actor 选择应幂等。
+	appendChatTurnUserMessageWithTurnID(cli, prompt, selectedTurnID)
+	if len(cli.Messages) != before {
+		t.Fatalf("same turn prompt appended again: before=%d after=%d", before, len(cli.Messages))
+	}
 	if count := len(cli.Messages); count == 0 || cli.Messages[count-1].Content != prompt {
 		t.Fatalf("dedup failed: last in-memory message no longer the prompt")
 	}

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 )
@@ -54,4 +55,15 @@ func TestSessionDepsUnknownSessionIsZeroContext(t *testing.T) {
 func TestSessionDepsNilHandlerIsZero(t *testing.T) {
 	var handler *Handler
 	require.Equal(t, runtimehost.Deps{}, handler.SessionDeps("s"))
+}
+
+func TestSessionDepsWiresTurnDigestSinkOnlyWhenEnabled(t *testing.T) {
+	handler := NewHandler(nil, nil, nil)
+	runtime := &memoryruntime.Runtime{Config: memoryruntime.Config{TurnDigestEnabled: true}}
+	handler.SetMemoryRuntime(runtime)
+	require.Same(t, runtime, handler.SessionDeps("s").TurnDigestSink)
+
+	disabled := &memoryruntime.Runtime{Config: memoryruntime.Config{TurnDigestEnabled: false}}
+	handler.SetMemoryRuntime(disabled)
+	require.Nil(t, handler.SessionDeps("s").TurnDigestSink)
 }

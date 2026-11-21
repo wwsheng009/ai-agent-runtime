@@ -18,6 +18,7 @@ func TestRecoveryRollupOnlyWorkSurvivesFailureAndRestart(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/provider_failure=%t", trigger, providerFailure), func(t *testing.T) {
 				ctx := context.Background()
 				rt, source, store := newRecoveryRuntime(t, 2, 4)
+				source.session.SessionGeneration = 1
 				rt.Config.TurnDigestWindowSummaryEnabled = true
 				rt.Config.TurnDigestWindowTurns = 2
 				extractCalls := 0
@@ -29,7 +30,7 @@ func TestRecoveryRollupOnlyWorkSurvivesFailureAndRestart(t *testing.T) {
 				summarizer := &fakeWindowSummarizer{err: errors.New("rollup provider unavailable")}
 				rt.WindowSummarizer = summarizer
 				digest, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-					SessionID: source.session.ID, TurnID: "turn", MessageSeqEnd: 2,
+					SessionID: source.session.ID, SessionGeneration: 1, TurnID: "turn", MessageSeqEnd: 2,
 					Outcome: "success", AssistantText: "a durable decision",
 				})
 				require.NoError(t, err)
@@ -158,13 +159,13 @@ func TestRecoveryRollupDiscoveryAdvancesPastIneligibleFirstPage(t *testing.T) {
 	for index := 0; index < 12; index++ {
 		id := fmt.Sprintf("session-%02d", index)
 		source.sessions = append(source.sessions, SessionRef{
-			ID: id, WorkspacePath: "/workspace", State: "closed", LastActivityAt: rt.now(), CanonicalCount: 2,
+			ID: id, SessionGeneration: 1, WorkspacePath: "/workspace", State: "closed", LastActivityAt: rt.now(), CanonicalCount: 2,
 		})
 		if index < 11 {
 			modes[id] = memorystore.SessionModeDisabled
 		}
 		_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-			SessionID: id, TurnID: "turn", MessageSeqEnd: 2, Outcome: "success",
+			SessionID: id, SessionGeneration: 1, TurnID: "turn", MessageSeqEnd: 2, Outcome: "success",
 			AssistantText: "answer", Status: memorystore.TurnDigestDone,
 		})
 		require.NoError(t, err)
@@ -187,11 +188,12 @@ func TestRecoveryRollupDiscoveryAdvancesPastIneligibleFirstPage(t *testing.T) {
 func TestRecoveryIdleRunRepairsRollupOnlyWork(t *testing.T) {
 	ctx := context.Background()
 	rt, source, store := newRecoveryRuntime(t, 2, 4)
+	source.session.SessionGeneration = 1
 	rt.Config.TurnDigestWindowSummaryEnabled = true
 	summarizer := &fakeWindowSummarizer{result: WindowSummary{Text: "Independent idle rollup summary"}}
 	rt.WindowSummarizer = summarizer
 	_, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
-		SessionID: source.session.ID, TurnID: "turn", MessageSeqEnd: 2, Outcome: "success",
+		SessionID: source.session.ID, SessionGeneration: 1, TurnID: "turn", MessageSeqEnd: 2, Outcome: "success",
 		AssistantText: "answer", Status: memorystore.TurnDigestDone,
 	})
 	require.NoError(t, err)

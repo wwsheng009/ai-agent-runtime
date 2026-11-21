@@ -391,9 +391,15 @@ func TestCommitTurnCaptureExtractionIsAtomicAndLeaseBound(t *testing.T) {
 		SourceHash: capture.RangeHash, SourceRevision: capture.CanonicalRevision,
 		SourceMessageIDs: []string{"message-2"},
 	}
-	_, err = store.CommitTurnCaptureExtraction(ctx, claimed[0].ID, "stale-worker", claimed[0].Attempt,
-		capture, materialized.DigestID, "output-hash", []Candidate{candidate})
+	_, err = store.CommitTurnCaptureExtractionWithDigestText(ctx, claimed[0].ID, "stale-worker", claimed[0].Attempt,
+		capture, materialized.DigestID, "output-hash",
+		TurnCaptureDigestText{UserText: "stale user text", AssistantText: "stale assistant text"},
+		[]Candidate{candidate})
 	require.Error(t, err)
+	pendingDigest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
+	require.NoError(t, err)
+	require.Empty(t, pendingDigest.UserText, "a stale owner must not update digest text")
+	require.Empty(t, pendingDigest.AssistantText, "a stale owner must not update digest text")
 	var entries int
 	require.NoError(t, store.db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM memory_entries WHERE project_key = ?`, store.ProjectKey()).Scan(&entries))
@@ -408,9 +414,15 @@ func TestCommitTurnCaptureExtractionIsAtomicAndLeaseBound(t *testing.T) {
 	require.Len(t, reclaimed, 1)
 	require.Equal(t, claimed[0].Attempt+1, reclaimed[0].Attempt)
 
-	_, err = store.CommitTurnCaptureExtraction(ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt,
-		capture, materialized.DigestID, "old-output-hash", []Candidate{candidate})
+	_, err = store.CommitTurnCaptureExtractionWithDigestText(ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt,
+		capture, materialized.DigestID, "old-output-hash",
+		TurnCaptureDigestText{UserText: "old user text", AssistantText: "old assistant text"},
+		[]Candidate{candidate})
 	require.Error(t, err, "the old claim must be fenced even when the worker id is reused")
+	pendingDigest, err = store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
+	require.NoError(t, err)
+	require.Empty(t, pendingDigest.UserText, "the expired claim must not update digest text")
+	require.Empty(t, pendingDigest.AssistantText, "the expired claim must not update digest text")
 	require.NoError(t, store.db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM memory_entries WHERE project_key = ?`, store.ProjectKey()).Scan(&entries))
 	require.Zero(t, entries, "a fenced claim must not expose candidates")
@@ -422,17 +434,25 @@ func TestCommitTurnCaptureExtractionIsAtomicAndLeaseBound(t *testing.T) {
 	require.Equal(t, JobStatusRunning, currentJob.Status)
 	require.Equal(t, reclaimed[0].Attempt, currentJob.Attempt)
 
-	inserted, err := store.CommitTurnCaptureExtraction(ctx, reclaimed[0].ID, reclaimed[0].WorkerID, reclaimed[0].Attempt,
-		capture, materialized.DigestID, "output-hash", []Candidate{candidate})
+	digestText := TurnCaptureDigestText{
+		UserText: "bounded user evidence", AssistantText: "bounded assistant evidence", TextTruncated: true,
+	}
+	inserted, err := store.CommitTurnCaptureExtractionWithDigestText(
+		ctx, reclaimed[0].ID, reclaimed[0].WorkerID, reclaimed[0].Attempt,
+		capture, materialized.DigestID, "output-hash", digestText, []Candidate{candidate})
 	require.NoError(t, err)
 	require.Equal(t, 1, inserted)
-	replayed, err := store.CommitTurnCaptureExtraction(ctx, reclaimed[0].ID, reclaimed[0].WorkerID, reclaimed[0].Attempt,
-		capture, materialized.DigestID, "output-hash", []Candidate{candidate})
+	replayed, err := store.CommitTurnCaptureExtractionWithDigestText(
+		ctx, reclaimed[0].ID, reclaimed[0].WorkerID, reclaimed[0].Attempt,
+		capture, materialized.DigestID, "output-hash", digestText, []Candidate{candidate})
 	require.NoError(t, err, "a committed extraction replay should return its durable output receipt")
 	require.Equal(t, inserted, replayed)
 	digest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
 	require.NoError(t, err)
 	require.Equal(t, TurnDigestDone, digest.Status)
+	require.Equal(t, digestText.UserText, digest.UserText)
+	require.Equal(t, digestText.AssistantText, digest.AssistantText)
+	require.True(t, digest.TextTruncated)
 	require.NoError(t, store.db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM memory_entries WHERE project_key = ?`, store.ProjectKey()).Scan(&entries))
 	require.Equal(t, 1, entries, "replaying the completed worker must not duplicate candidates")

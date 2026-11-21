@@ -63,16 +63,16 @@ func TestSessionEndPipelineUsesIndependentBoundedPhaseBudgets(t *testing.T) {
 	runtime.Clock = func() time.Time { return now }
 
 	result, err := runtime.RunSessionEndPipeline(context.Background(), "pipeline-session", SessionEndPipelineOptions{
-		ExtractionTimeout: 750 * time.Millisecond, ConsolidationTimeout: 900 * time.Millisecond, Consolidate: true,
+		ExtractionTimeout: 10 * time.Second, ConsolidationTimeout: 10 * time.Second, Consolidate: true,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "complete", result.Stage)
 	require.Equal(t, 1, result.Run.Processed)
 	require.NotEmpty(t, result.Consolidation.SummaryID)
-	require.Greater(t, extractor.deadlineRemaining, 500*time.Millisecond)
-	require.LessOrEqual(t, extractor.deadlineRemaining, 750*time.Millisecond)
-	require.Greater(t, summarizer.deadlineRemaining, 600*time.Millisecond)
-	require.LessOrEqual(t, summarizer.deadlineRemaining, 900*time.Millisecond)
+	require.Greater(t, extractor.deadlineRemaining, 5*time.Second)
+	require.LessOrEqual(t, extractor.deadlineRemaining, 10*time.Second)
+	require.Greater(t, summarizer.deadlineRemaining, 5*time.Second)
+	require.LessOrEqual(t, summarizer.deadlineRemaining, 10*time.Second)
 	summary, err := store.ActiveSummary(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, summary)

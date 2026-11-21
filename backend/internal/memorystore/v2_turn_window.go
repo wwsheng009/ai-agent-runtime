@@ -100,7 +100,23 @@ func TurnWindowHash(digests []TurnDigest) string {
 // EnsureTurnWindow creates or refreshes the identity of a digest range. The
 // returned bool reports that the L0 input changed and any previous L1 summary
 // was reset, allowing the caller to stale the old derived candidate.
+//
+// Callers processing canonical session data should use
+// EnsureTurnWindowForGeneration. This legacy entrypoint remains available for
+// migration/diagnostic callers and may create a generation-zero quarantined
+// row when SessionGeneration is omitted.
 func (s *Store) EnsureTurnWindow(ctx context.Context, window TurnWindow) (TurnWindow, bool, error) {
+	return s.ensureTurnWindow(ctx, window, false)
+}
+
+// EnsureTurnWindowForGeneration is the fail-closed entrypoint for canonical
+// session data. A positive generation is mandatory so a reused session ID
+// cannot refresh a window belonging to another incarnation.
+func (s *Store) EnsureTurnWindowForGeneration(ctx context.Context, window TurnWindow) (TurnWindow, bool, error) {
+	return s.ensureTurnWindow(ctx, window, true)
+}
+
+func (s *Store) ensureTurnWindow(ctx context.Context, window TurnWindow, requireGeneration bool) (TurnWindow, bool, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return TurnWindow{}, false, err
@@ -110,9 +126,18 @@ func (s *Store) EnsureTurnWindow(ctx context.Context, window TurnWindow) (TurnWi
 	}
 	window.ProjectKey = strings.TrimSpace(window.ProjectKey)
 	window.SessionID = strings.TrimSpace(window.SessionID)
+	window.SourceHash = strings.TrimSpace(window.SourceHash)
 	if window.ProjectKey == "" || window.SessionID == "" ||
 		window.StartDigestSeq <= 0 || window.EndDigestSeq < window.StartDigestSeq {
 		return TurnWindow{}, false, fmt.Errorf("memorystore: invalid turn window identity")
+	}
+	if requireGeneration {
+		if window.SessionGeneration <= 0 {
+			return TurnWindow{}, false, fmt.Errorf("memorystore: positive session generation required for turn window")
+		}
+		if window.SourceHash == "" {
+			return TurnWindow{}, false, fmt.Errorf("memorystore: turn window source hash required")
+		}
 	}
 	if window.Scope == "" {
 		window.Scope = ScopeProject
@@ -142,6 +167,10 @@ func (s *Store) EnsureTurnWindow(ctx context.Context, window TurnWindow) (TurnWi
 	if err := validateMaintenanceLeaseTx(ctx, tx, window.ProjectKey); err != nil {
 		return TurnWindow{}, false, err
 	}
+	if err := checkTurnWindowIdentityPurgeFenceTx(ctx, tx,
+		window.ProjectKey, window.SessionID, window.SessionGeneration); err != nil {
+		return TurnWindow{}, false, err
+	}
 	existing, getErr := scanTurnWindow(tx.QueryRowContext(ctx, `SELECT `+turnWindowColumns+`
 FROM memory_turn_windows
 WHERE project_key = ? AND session_id = ? AND session_generation = ?
@@ -155,7 +184,13 @@ WHERE project_key = ? AND session_id = ? AND session_generation = ?
 		window.CreatedAt = existing.CreatedAt
 		window.SummaryRevision = existing.SummaryRevision
 		sourceChanged := strings.TrimSpace(existing.SourceHash) != "" &&
-			existing.SourceHash != strings.TrimSpace(window.SourceHash)
+			existing.SourceHash != window.SourceHash
+		if requireGeneration && existing.SourceHash == "" {
+			// A positive-generation window without a source hash cannot prove
+			// which input produced its summary. Treat it as changed instead of
+			// reusing unverified derived state.
+			sourceChanged = true
+		}
 		if !sourceChanged {
 			window.Status = existing.Status
 			window.SummaryText = existing.SummaryText
@@ -296,6 +331,23 @@ func (s *Store) listTurnWindows(ctx context.Context, sessionID string, generatio
 // CompleteTurnWindow stores the L1 summary. It never marks L0 digests rolled
 // up; that is a separate step after the derived L2 candidate is durable.
 func (s *Store) CompleteTurnWindow(ctx context.Context, id string, summary TurnWindowSummary) (TurnWindow, error) {
+	return s.completeTurnWindow(ctx, id, nil, nil, summary)
+}
+
+// CompleteTurnWindowForGeneration stores a summary only when the window
+// belongs to the expected canonical session incarnation.
+func (s *Store) CompleteTurnWindowForGeneration(ctx context.Context, id string, generation int64, sourceHash string, summary TurnWindowSummary) (TurnWindow, error) {
+	if generation <= 0 {
+		return TurnWindow{}, fmt.Errorf("memorystore: positive session generation required for turn window")
+	}
+	sourceHash = strings.TrimSpace(sourceHash)
+	if sourceHash == "" {
+		return TurnWindow{}, fmt.Errorf("memorystore: turn window source hash required")
+	}
+	return s.completeTurnWindow(ctx, id, &generation, &sourceHash, summary)
+}
+
+func (s *Store) completeTurnWindow(ctx context.Context, id string, generation *int64, sourceHash *string, summary TurnWindowSummary) (TurnWindow, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return TurnWindow{}, err
@@ -317,16 +369,31 @@ func (s *Store) CompleteTurnWindow(ctx context.Context, id string, summary TurnW
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return TurnWindow{}, err
 	}
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+		return TurnWindow{}, err
+	}
+	where := "id = ? AND status != 'invalidated'"
+	whereArgs := []interface{}{strings.TrimSpace(id)}
+	if generation != nil {
+		where += " AND session_generation = ?"
+		whereArgs = append(whereArgs, *generation)
+	}
+	if sourceHash != nil {
+		where += " AND source_hash = ?"
+		whereArgs = append(whereArgs, *sourceHash)
+	}
+	args := []interface{}{
+		text, hex.EncodeToString(sum[:]), nullableString(summary.Model),
+		firstNonEmpty(summary.UsageJSON, "{}"), firstNonEmpty(summary.MetadataJSON, "{}"),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+	}
+	args = append(args, whereArgs...)
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET summary_text = ?, summary_hash = ?, summary_revision = summary_revision + 1,
     status = 'done', model = ?, usage_json = ?, metadata_json = ?,
     last_error = NULL, processed_at = ?, updated_at = ?
-WHERE id = ?
-  AND status != 'invalidated'
-`, text, hex.EncodeToString(sum[:]), nullableString(summary.Model),
-		firstNonEmpty(summary.UsageJSON, "{}"), firstNonEmpty(summary.MetadataJSON, "{}"),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), strings.TrimSpace(id))
+WHERE `+where, args...)
 	if err != nil {
 		return TurnWindow{}, fmt.Errorf("memorystore: complete turn window: %w", err)
 	}
@@ -341,6 +408,23 @@ WHERE id = ?
 
 // FailTurnWindow records a summarizer failure. L0 rows remain pending.
 func (s *Store) FailTurnWindow(ctx context.Context, id, reason string) error {
+	return s.failTurnWindow(ctx, id, nil, nil, reason)
+}
+
+// FailTurnWindowForGeneration marks a window failed only if both its canonical
+// generation and source hash still match the worker's input.
+func (s *Store) FailTurnWindowForGeneration(ctx context.Context, id string, generation int64, sourceHash, reason string) error {
+	if generation <= 0 {
+		return fmt.Errorf("memorystore: positive session generation required for turn window")
+	}
+	sourceHash = strings.TrimSpace(sourceHash)
+	if sourceHash == "" {
+		return fmt.Errorf("memorystore: turn window source hash required")
+	}
+	return s.failTurnWindow(ctx, id, &generation, &sourceHash, reason)
+}
+
+func (s *Store) failTurnWindow(ctx context.Context, id string, generation *int64, sourceHash *string, reason string) error {
 	db, err := s.ensureV2()
 	if err != nil {
 		return err
@@ -354,20 +438,57 @@ func (s *Store) FailTurnWindow(ctx context.Context, id, reason string) error {
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+		return err
+	}
+	where := "id = ? AND status != 'done' AND status != 'invalidated'"
+	args := []interface{}{nullableString(reason), now, strings.TrimSpace(id)}
+	if generation != nil {
+		where += " AND session_generation = ?"
+		args = append(args, *generation)
+	}
+	if sourceHash != nil {
+		where += " AND source_hash = ?"
+		args = append(args, *sourceHash)
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'failed', last_error = ?, updated_at = ?
-WHERE id = ? AND status != 'done'
-  AND status != 'invalidated'
-`, nullableString(reason), now, strings.TrimSpace(id))
+WHERE `+where, args...)
 	if err != nil {
 		return fmt.Errorf("memorystore: fail turn window: %w", err)
+	}
+	if generation != nil || sourceHash != nil {
+		affected, affectedErr := res.RowsAffected()
+		if affectedErr != nil {
+			return affectedErr
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
 	}
 	return tx.Commit()
 }
 
 // MarkTurnWindowProcessing records that a summarizer claim is active.
 func (s *Store) MarkTurnWindowProcessing(ctx context.Context, id string) error {
+	return s.markTurnWindowProcessing(ctx, id, nil, nil)
+}
+
+// MarkTurnWindowProcessingForGeneration claims a window only if its canonical
+// generation and source hash still match the worker's input.
+func (s *Store) MarkTurnWindowProcessingForGeneration(ctx context.Context, id string, generation int64, sourceHash string) error {
+	if generation <= 0 {
+		return fmt.Errorf("memorystore: positive session generation required for turn window")
+	}
+	sourceHash = strings.TrimSpace(sourceHash)
+	if sourceHash == "" {
+		return fmt.Errorf("memorystore: turn window source hash required")
+	}
+	return s.markTurnWindowProcessing(ctx, id, &generation, &sourceHash)
+}
+
+func (s *Store) markTurnWindowProcessing(ctx context.Context, id string, generation *int64, sourceHash *string) error {
 	db, err := s.ensureV2()
 	if err != nil {
 		return err
@@ -381,15 +502,77 @@ func (s *Store) MarkTurnWindowProcessing(ctx context.Context, id string) error {
 	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	if err := checkTurnWindowPurgeFenceTx(ctx, tx, id); err != nil {
+		return err
+	}
+	where := "id = ? AND status IN ('pending', 'failed', 'processing')"
+	args := []interface{}{now, strings.TrimSpace(id)}
+	if generation != nil {
+		where += " AND session_generation = ?"
+		args = append(args, *generation)
+	}
+	if sourceHash != nil {
+		where += " AND source_hash = ?"
+		args = append(args, *sourceHash)
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE memory_turn_windows
 SET status = 'processing', last_error = NULL, updated_at = ?
-WHERE id = ? AND status IN ('pending', 'failed', 'processing')
-`, now, strings.TrimSpace(id))
+WHERE `+where, args...)
 	if err != nil {
 		return fmt.Errorf("memorystore: mark turn window processing: %w", err)
 	}
+	if generation != nil || sourceHash != nil {
+		affected, affectedErr := res.RowsAffected()
+		if affectedErr != nil {
+			return affectedErr
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
+	}
 	return tx.Commit()
+}
+
+// checkTurnWindowPurgeFenceTx resolves the stored incarnation before a state
+// transition. The window row can outlive its canonical session only when it
+// has no trustworthy generation; such legacy rows must nevertheless stop being
+// mutated once any tombstone exists for the reusable session ID.
+func checkTurnWindowPurgeFenceTx(ctx context.Context, tx *sql.Tx, id string) error {
+	var projectKey, sessionID string
+	var generation int64
+	err := tx.QueryRowContext(ctx, `
+SELECT project_key, session_id, session_generation
+FROM memory_turn_windows
+WHERE id = ?
+`, strings.TrimSpace(id)).Scan(&projectKey, &sessionID, &generation)
+	if err == sql.ErrNoRows {
+		// Preserve the existing conditional-update contract: a missing row
+		// still yields zero affected rows and sql.ErrNoRows at the caller.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("memorystore: read turn window purge identity: %w", err)
+	}
+	return checkTurnWindowIdentityPurgeFenceTx(ctx, tx, projectKey, sessionID, generation)
+}
+
+func checkTurnWindowIdentityPurgeFenceTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectKey, sessionID string,
+	generation int64,
+) error {
+	projectKey = strings.TrimSpace(projectKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("%w: turn window lacks a session identity",
+			ErrSessionPurgeGenerationMismatch)
+	}
+	if generation > 0 {
+		return checkSessionPurgeGenerationTx(ctx, tx, projectKey, sessionID, generation)
+	}
+	return checkLegacySessionPurgeFenceTx(ctx, tx, projectKey, sessionID)
 }
 
 // InvalidateTurnWindowsForSession prevents old L1 summaries from being reused

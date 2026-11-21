@@ -2,6 +2,7 @@ package memoryruntime
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -159,6 +160,108 @@ func TestInvalidateFromRuntimeEventBacktrackErrorFallsBack(t *testing.T) {
 	same, err := store.GetTurnDigestByTurn(ctx, "session-error", "turn-1")
 	require.NoError(t, err)
 	require.Equal(t, memorystore.TurnDigestInvalidated, same.Status)
+}
+
+func TestInvalidateFromRuntimeEventBacktrackIsolatesMixedGenerations(t *testing.T) {
+	ctx := context.Background()
+	runtime, store := newInvalidationRuntimeForTest(t)
+	const sessionID = "session-event-mixed-generations"
+	type fixture struct {
+		generation int64
+		digest     memorystore.TurnDigest
+		window     memorystore.TurnWindow
+		memories   []memorystore.Record
+	}
+	fixtures := make([]fixture, 0, 3)
+
+	// Reuse turn/message IDs and canonical sequence numbers intentionally: the
+	// generation must be the incarnation discriminator at every persistence
+	// layer, including when legacy generation-0 rows coexist.
+	for _, generation := range []int64{0, 1, 2} {
+		digest, err := store.RecordTurnDigest(ctx, memorystore.TurnDigest{
+			SessionID: sessionID, SessionGeneration: generation, TurnID: "same-turn",
+			Outcome: "success", UserMessageID: "same-user", AssistantMessageID: "same-assistant",
+			UserText: "question", AssistantText: "answer", MessageSeqEnd: 2,
+		})
+		require.NoError(t, err)
+		window, _, err := store.EnsureTurnWindow(ctx, memorystore.TurnWindow{
+			ProjectKey: store.ProjectKey(), SessionID: sessionID, SessionGeneration: generation,
+			WindowIndex: int(generation) + 1, StartDigestSeq: digest.DigestSeq,
+			EndDigestSeq: digest.DigestSeq, StartMessageSeq: 1, EndMessageSeq: 2,
+			TurnCount: 1, SourceHash: memorystore.TurnWindowHash([]memorystore.TurnDigest{digest}),
+			SourceRevision: digest.DigestSeq, Status: memorystore.TurnWindowPending,
+		})
+		require.NoError(t, err)
+		window, err = store.CompleteTurnWindow(ctx, window.ID, memorystore.TurnWindowSummary{Text: "summary"})
+		require.NoError(t, err)
+
+		sessionMemory, err := store.InsertCandidate(ctx, memorystore.Candidate{
+			SessionID: sessionID, SessionGeneration: generation, ProjectKey: store.ProjectKey(),
+			SourceKind: "session_extract", SourceWindow: "1-2",
+			SourceMessageIDs: []string{"same-user"}, TurnID: "same-turn",
+			Kind: "fact", Text: fmt.Sprintf("session evidence generation %d", generation), Confidence: 0.9,
+			SourceHash: fmt.Sprintf("session-evidence-generation-%d", generation), SourceRevision: 2,
+		})
+		require.NoError(t, err)
+		windowMemory, err := store.InsertCandidate(ctx, memorystore.Candidate{
+			SessionID: sessionID, SessionGeneration: generation, ProjectKey: store.ProjectKey(),
+			SourceKind:   "turn_window",
+			SourceWindow: memorystore.TurnWindowSourceWindowGeneration(generation, digest.DigestSeq, digest.DigestSeq),
+			Kind:         "reference", Text: fmt.Sprintf("window evidence generation %d", generation), Confidence: 1,
+			SourceHash: fmt.Sprintf("%s-generation-%d", window.SourceHash, generation), SourceRevision: window.SourceRevision,
+		})
+		require.NoError(t, err)
+		fixtures = append(fixtures, fixture{
+			generation: generation, digest: digest, window: window,
+			memories: []memorystore.Record{sessionMemory, windowMemory},
+		})
+	}
+
+	// Missing generation cannot safely select among these incarnations.
+	result, err := runtime.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, sessionID, map[string]interface{}{
+		"mode":                 string(chat.BacktrackModeConversation),
+		"canonical_cutoff_seq": int64(1), "canonical_message_count_before": int64(2),
+		"removed_message_ids":   []interface{}{"same-user", "same-assistant"},
+		"removed_turn_ids":      []interface{}{"same-turn"},
+		"removed_message_count": int64(1),
+	})
+	require.NoError(t, err)
+	require.Zero(t, result)
+
+	result, err = runtime.InvalidateFromRuntimeEvent(ctx, chat.EventBacktrackFinished, sessionID, map[string]interface{}{
+		"mode": string(chat.BacktrackModeConversation), "session_generation": int64(2),
+		"canonical_cutoff_seq": int64(1), "canonical_message_count_before": int64(2),
+		"removed_message_ids":   []interface{}{"same-user", "same-assistant"},
+		"removed_turn_ids":      []interface{}{"same-turn"},
+		"removed_message_count": int64(1),
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, result.Digests)
+	require.EqualValues(t, 1, result.Windows)
+	require.Equal(t, 2, result.Memories)
+
+	for _, item := range fixtures {
+		gotDigest, err := store.GetTurnDigestByTurnGeneration(ctx, sessionID, "same-turn", item.generation)
+		require.NoError(t, err)
+		gotWindow, err := store.GetTurnWindow(ctx, item.window.ID)
+		require.NoError(t, err)
+		if item.generation == 2 {
+			require.Equal(t, memorystore.TurnDigestInvalidated, gotDigest.Status)
+			require.Equal(t, memorystore.TurnWindowInvalidated, gotWindow.Status)
+		} else {
+			require.NotEqual(t, memorystore.TurnDigestInvalidated, gotDigest.Status)
+			require.Equal(t, memorystore.TurnWindowDone, gotWindow.Status)
+		}
+		for _, memory := range item.memories {
+			got, err := store.GetRecord(ctx, memory.ID)
+			require.NoError(t, err)
+			if item.generation == 2 {
+				require.Equal(t, memorystore.FreshnessStale, got.Freshness)
+			} else {
+				require.Equal(t, memorystore.FreshnessFresh, got.Freshness)
+			}
+		}
+	}
 }
 
 func newInvalidationRuntimeForTest(t *testing.T) (*Runtime, *memorystore.Store) {

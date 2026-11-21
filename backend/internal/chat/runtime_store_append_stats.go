@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // P1.6：AppendEvent 热路径优化（RETURNING 单语句 + prune 拆分）。
@@ -44,6 +45,22 @@ type runtimeAppendCounters struct {
 	batchedEvents   atomic.Int64
 	batchTotalNs    atomic.Int64
 	batchLockHoldNs atomic.Int64
+}
+
+// elapsedNanoseconds returns a positive sample for a completed operation.
+//
+// time.Now carries a monotonic clock, but the clock source can have a
+// resolution coarser than one nanosecond (this is observable on Windows).
+// A successful, very short transaction can therefore start and finish on the
+// same clock tick and time.Since(...).Nanoseconds() returns zero.  Recording a
+// one-nanosecond floor preserves the fact that the operation completed while
+// keeping the exported duration counters bounded and monotonic.
+func elapsedNanoseconds(start time.Time) int64 {
+	elapsed := time.Since(start).Nanoseconds()
+	if elapsed <= 0 {
+		return 1
+	}
+	return elapsed
 }
 
 // AppendTimingStats 是 append 热路径的统计快照（P1.6/D5）。

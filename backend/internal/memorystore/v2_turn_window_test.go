@@ -89,6 +89,166 @@ func TestTurnWindowRollupGatesL0Retention(t *testing.T) {
 	require.Equal(t, "Window summary: the runtime was updated.", windows[0].SummaryText)
 }
 
+func TestGenerationQualifiedTurnWindowStateTransitionsFenceStaleWorker(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	_, _, err = store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-fence",
+		SessionGeneration: 0, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "source-g1", Status: TurnWindowPending,
+	})
+	require.EqualError(t, err, "memorystore: positive session generation required for turn window")
+
+	_, _, err = store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-fence",
+		SessionGeneration: 1, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		Status: TurnWindowPending,
+	})
+	require.EqualError(t, err, "memorystore: turn window source hash required")
+
+	window, _, err := store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-fence",
+		SessionGeneration: 1, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "source-g1", Status: TurnWindowPending,
+	})
+	require.NoError(t, err)
+
+	require.ErrorIs(t, store.MarkTurnWindowProcessingForGeneration(ctx, window.ID, 2, window.SourceHash), sql.ErrNoRows)
+	current, err := store.GetTurnWindow(ctx, window.ID)
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowPending, current.Status)
+
+	require.NoError(t, store.MarkTurnWindowProcessingForGeneration(ctx, window.ID, 1, window.SourceHash))
+	staleSourceHash := window.SourceHash
+	window, sourceChanged, err := store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-fence",
+		SessionGeneration: 1, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "source-g1-updated", Status: TurnWindowPending,
+	})
+	require.NoError(t, err)
+	require.True(t, sourceChanged)
+	require.Equal(t, TurnWindowPending, window.Status)
+	_, err = store.CompleteTurnWindowForGeneration(ctx, window.ID, 2, window.SourceHash,
+		TurnWindowSummary{Text: "stale generation summary"})
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	current, err = store.GetTurnWindow(ctx, window.ID)
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowPending, current.Status)
+	require.Empty(t, current.SummaryText)
+
+	require.ErrorIs(t, store.MarkTurnWindowProcessingForGeneration(ctx, window.ID, 1, staleSourceHash), sql.ErrNoRows)
+	_, err = store.CompleteTurnWindowForGeneration(ctx, window.ID, 1, staleSourceHash,
+		TurnWindowSummary{Text: "stale source summary"})
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.ErrorIs(t, store.FailTurnWindowForGeneration(ctx, window.ID, 1, staleSourceHash, "stale failure"), sql.ErrNoRows)
+	current, err = store.GetTurnWindow(ctx, window.ID)
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowPending, current.Status)
+	require.Empty(t, current.SummaryText)
+
+	require.NoError(t, store.MarkTurnWindowProcessingForGeneration(ctx, window.ID, 1, window.SourceHash))
+	completed, err := store.CompleteTurnWindowForGeneration(ctx, window.ID, 1, window.SourceHash,
+		TurnWindowSummary{Text: "current summary"})
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowDone, completed.Status)
+	require.Equal(t, "current summary", completed.SummaryText)
+
+	// A positive-generation row with no source hash cannot prove which input
+	// produced its summary. The generation-qualified path must reset it rather
+	// than carrying unverified derived state forward.
+	unverified, _, err := store.EnsureTurnWindow(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-unknown-source",
+		SessionGeneration: 1, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		Status: TurnWindowPending,
+	})
+	require.NoError(t, err)
+	unverified, err = store.CompleteTurnWindow(ctx, unverified.ID, TurnWindowSummary{Text: "unverified legacy summary"})
+	require.NoError(t, err)
+
+	refreshed, sourceChanged, err := store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: "session-window-unknown-source",
+		SessionGeneration: 1, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "verified-source", Status: TurnWindowPending,
+	})
+	require.NoError(t, err)
+	require.True(t, sourceChanged)
+	require.Equal(t, TurnWindowPending, refreshed.Status)
+	require.Empty(t, refreshed.SummaryText)
+}
+
+func TestTurnWindowWritesRespectSessionPurgeFence(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	const sessionID = "session-window-purge"
+
+	legacy, _, err := store.EnsureTurnWindow(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: sessionID,
+		SessionGeneration: 0, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "legacy-source", Status: TurnWindowPending,
+	})
+	require.NoError(t, err)
+	legacy, err = store.CompleteTurnWindow(ctx, legacy.ID, TurnWindowSummary{
+		Text: "legacy summary before purge",
+	})
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowDone, legacy.Status)
+
+	_, err = store.PurgeSessionWithGenerations(ctx, sessionID, 1, 1)
+	require.NoError(t, err)
+	current, err := store.GetTurnWindow(ctx, legacy.ID)
+	require.NoError(t, err, "generation-specific purge must leave generationless quarantine rows")
+	require.Zero(t, current.SessionGeneration)
+	require.Equal(t, TurnWindowDone, current.Status)
+
+	_, _, err = store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: sessionID,
+		SessionGeneration: 1, WindowIndex: 2, StartDigestSeq: 2, EndDigestSeq: 2,
+		SourceHash: "stale-source", Status: TurnWindowPending,
+	})
+	require.ErrorIs(t, err, ErrSessionPurgeGenerationMismatch,
+		"a worker from the purged incarnation must not create a window")
+
+	_, _, err = store.EnsureTurnWindow(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: sessionID,
+		SessionGeneration: 0, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "legacy-source-refresh", Status: TurnWindowPending,
+	})
+	require.ErrorIs(t, err, ErrSessionPurgeGenerationMismatch,
+		"generationless writes cannot prove incarnation after any tombstone")
+
+	require.ErrorIs(t,
+		store.MarkTurnWindowProcessing(ctx, legacy.ID),
+		ErrSessionPurgeGenerationMismatch)
+	_, err = store.CompleteTurnWindow(ctx, legacy.ID, TurnWindowSummary{Text: "late legacy summary"})
+	require.ErrorIs(t, err, ErrSessionPurgeGenerationMismatch)
+	require.ErrorIs(t,
+		store.FailTurnWindow(ctx, legacy.ID, "late legacy failure"),
+		ErrSessionPurgeGenerationMismatch)
+	current, err = store.GetTurnWindow(ctx, legacy.ID)
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowDone, current.Status)
+	require.Equal(t, "legacy summary before purge", current.SummaryText)
+
+	modern, _, err := store.EnsureTurnWindowForGeneration(ctx, TurnWindow{
+		ProjectKey: store.ProjectKey(), SessionID: sessionID,
+		SessionGeneration: 2, WindowIndex: 1, StartDigestSeq: 1, EndDigestSeq: 1,
+		SourceHash: "modern-source", Status: TurnWindowPending,
+	})
+	require.NoError(t, err, "a newer incarnation must be able to create its own window")
+	require.EqualValues(t, 2, modern.SessionGeneration)
+	require.NoError(t, store.MarkTurnWindowProcessingForGeneration(
+		ctx, modern.ID, 2, modern.SourceHash))
+	modern, err = store.CompleteTurnWindowForGeneration(
+		ctx, modern.ID, 2, modern.SourceHash, TurnWindowSummary{Text: "modern summary"})
+	require.NoError(t, err)
+	require.Equal(t, TurnWindowDone, modern.Status)
+}
+
 func TestTurnWindowSourceChangeResetsAndInvalidation(t *testing.T) {
 	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
 	require.NoError(t, err)

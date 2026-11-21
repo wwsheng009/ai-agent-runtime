@@ -3,6 +3,7 @@ package memoryruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -32,6 +33,10 @@ func (r *Runtime) RecordTurnDigest(ctx context.Context, digest chat.TurnDigest) 
 		// This is only the bounded receipt -> digest/job handoff. The extractor
 		// is exclusively run by the asynchronous worker/maintenance consumer.
 		if err := r.MaterializeTurnCaptureReceipt(ctx, receiptID); err != nil {
+			if errors.Is(err, errCaptureReceiptIneligible) ||
+				errors.Is(err, errCaptureReceiptGenerationMismatch) {
+				return nil
+			}
 			r.recordDigestFailed(err)
 			return err
 		}

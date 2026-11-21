@@ -92,26 +92,6 @@ func memoryContentHash(scope, projectKey, kind, text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func recordToNote(record Record) Note {
-	return Note{
-		ID:        record.ID,
-		Text:      record.Text,
-		Tags:      append([]string(nil), record.Tags...),
-		Source:    record.SourceKind,
-		SessionID: record.SourceSessionID,
-		CreatedAt: record.CreatedAt,
-	}
-}
-
-func recordByID(records []Record, id string) Record {
-	for _, record := range records {
-		if record.ID == id {
-			return record
-		}
-	}
-	return Record{}
-}
-
 // scoreRecordForRecall is the v2 selector's deterministic ranking function.
 // Query match is a hard gate for non-empty queries; recency, usage, confidence,
 // and semantic-kind boosts only reorder records that actually matched.
@@ -192,25 +172,47 @@ func clampUnit(value float64) float64 {
 }
 
 func recallDedupKey(record Record) string {
+	kind := strings.ToLower(strings.TrimSpace(record.Kind))
+	text := strings.ToLower(record.Text)
 	var cleaned strings.Builder
-	for _, r := range strings.ToLower(record.Text) {
+	cleaned.Grow(len(kind) + 1 + len(text))
+	cleaned.WriteString(kind)
+	cleaned.WriteByte(0)
+	wroteContent := false
+	pendingSpace := false
+	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if pendingSpace && wroteContent {
+				cleaned.WriteByte(' ')
+			}
 			cleaned.WriteRune(r)
+			wroteContent = true
+			pendingSpace = false
 			continue
 		}
-		cleaned.WriteByte(' ')
+		if wroteContent {
+			pendingSpace = true
+		}
 	}
-	text := strings.Join(strings.Fields(cleaned.String()), " ")
-	if text == "" {
+	if !wroteContent {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(record.Kind)) + "\x00" + text
+	return cleaned.String()
+}
+
+type recallCandidate struct {
+	recordIndex int
+	score       float64
 }
 
 // diversifyRecallOrder prevents one kind from filling the first recall slots
 // when several kinds matched. It only reorders candidates; it never drops a
 // record or bypasses the token-budget loop.
-func diversifyRecallOrder(candidates []SearchHit, records []Record, limit int) []SearchHit {
+func diversifyRecallOrder(
+	candidates []recallCandidate,
+	records []Record,
+	limit int,
+) []recallCandidate {
 	if limit <= 1 || len(candidates) < 2 {
 		return candidates
 	}
@@ -219,10 +221,14 @@ func diversifyRecallOrder(candidates []SearchHit, records []Record, limit int) [
 		perKindCap = 1
 	}
 	counts := make(map[string]int)
-	ordered := make([]SearchHit, 0, len(candidates))
-	deferred := make([]SearchHit, 0, len(candidates))
+	ordered := make([]recallCandidate, 0, len(candidates))
+	deferred := make([]recallCandidate, 0, len(candidates))
 	for _, hit := range candidates {
-		record := recordByID(records, hit.Note.ID)
+		if hit.recordIndex < 0 || hit.recordIndex >= len(records) {
+			deferred = append(deferred, hit)
+			continue
+		}
+		record := records[hit.recordIndex]
 		kind := strings.ToLower(strings.TrimSpace(record.Kind))
 		if kind == "" {
 			kind = "memory"

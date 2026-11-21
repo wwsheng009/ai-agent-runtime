@@ -342,3 +342,470 @@ compaction 不改 canonical 时不再失效 canonical 派生记忆；backtrack �
 5. 任何默认开启前，先通过 `06-test-and-acceptance.md §8` 的对应阶段 DoD，
    重点验证单路径路由、删除复活、跨项目隔离、prompt cache 和 SQLite 锁四项
    P0/P1 门禁；不得以未评审 durable capture 提案替代实现证据。
+
+
+## 本轮 Memory ConPTY turn identity 进展（2026-11-20）
+
+CLI actor 提交已补充 authoritative turn identity 回调：先传入 provisional ID，再由 actor 在 durable suspension 查找后返回最终 ID；若该值取代 provisional ID，仅重键末尾同内容 user 行，避免重复 transcript 行，并使 capture receipt 的 turn membership 检查可命中。actor 单测覆盖 durable suspension 覆盖 provisional ID，CLI 临时 SQLite 测试覆盖持久化重键与幂等。相关针对性 Go 测试通过，具体记录见 durable-capture 提案 §19。
+
+该改动尚未通过真实 Memory ConPTY E2E；provider/auth 与跨会话召回没有验证，hard-kill、跨 SQLite 崩溃恢复、性能/并发门禁及 shadow 运营验证继续未完成。`/memory status runtime=ready`、HTTP 200 或代码单测都不作为 capture 成功或生产验收证据。
+
+## 本轮增量记录：active-session hard-kill、generation 审计与锁统计（2026-11-20）
+
+本记录只追加验证证据，不改变本文对生产状态的判断，也不把未评审的 durable-capture 提案视为已验收。
+
+### 已新增并通过的 active-session 故障覆盖
+
+`backend/internal/memoryruntime/e2e_sqlite_test.go` 新增
+`TestE2ESQLiteActiveCaptureHardKillRecovery`。child 进程保持
+`chat.StateActive`，连续通过真实 `SaveWithTurnCapture` 与
+`UpdateWithTurnCapture` 写入两轮；canonical session 与 capture receipt 在同一
+canonical SQLite 事务提交。父进程 hard-kill 后重新打开 canonical/memory 两个
+临时 SQLite，验证 active 状态、4 条 canonical message、两个 receipt 的
+generation/revision/range hash、receipt 校验、`1-2`/`3-4` ranges，以及
+materialization/extraction recovery 的幂等性（第二次 recovery 不增加 extractor
+调用）。
+
+本轮证据：
+
+- `TestE2ESQLiteActiveCaptureHardKillRecovery`：通过；
+- 与既有 `TestE2ESQLiteHardKillRecovery`、`TestE2ESQLiteCanonicalRestartRecovery`
+  一起定向运行：通过；
+- 测试只使用临时目录，未修改真实 SQLite 实例数据或 suspension 状态。
+
+这关闭了“hard-kill 前先把 session 改为 closed”的测试缺口，但不等于关闭了
+所有跨 SQLite 故障边界；receipt materialization、receipt ack、candidate/output
+receipt、purge 各阶段的完整 hard-kill 矩阵仍待执行。
+
+### generation / purge 审计结果
+
+现有 generation-qualified 路径已核对：
+
+- receipt、capture materialization、turn digest/job、candidate provenance 和
+  output receipt 使用正的 `session_generation`；generation 不匹配时跳过或
+  fail closed；
+- `PurgeSessionWithGenerations` 在 memory SQLite 单事务写 tombstone，并对
+  entries/digests/jobs/windows 等带 incarnation 的数据使用精确 generation；
+  已完成 purge 的旧 incarnation 重试不会按 session ID 清理新 incarnation；
+- claim/complete/fail/candidate commit 会再次检查 purge fence；没有可证明
+  incarnation 的 generationless legacy job 在 fence 后不可继续；
+- 相关定向测试（purge 幂等、新 incarnation 隔离、claimed commit fence、
+  candidate writer fence、generation binding、legacy job fence）均通过。
+
+这次审计没有证据要求扩大 session-ID 级删除或修改 purge 实现。仍未关闭的边界
+包括 generationless/混合代数 window、window 状态转换的完整 generation fence、
+未版本化 recall trace/session mode，以及跨 SQLite purge 崩溃矩阵；不得把这些
+数据混代读取或把 generationless 数据当成严格 purge 证据。
+
+### AppendEvents 锁计时零值根因与修复
+
+此前 `TestAppendEventsLockHoldBudget` 在 `Batches == 1` 的同时偶发
+`BatchLockHoldNs == 0`。根因已复现：Windows 上 `time.Now()` 携带的 monotonic
+clock 分辨率可能粗于 1ns，极短的成功事务在两个相同 clock tick 之间完成，
+因此 `time.Since(txStart).Nanoseconds()` 返回 0；批次计数在事务返回后仍会递增，
+于是出现“批次存在但锁耗时样本为零”的表象。独立 Go micro-probe 在本机
+1,000,000 次 `time.Now(); time.Since(start)` 中观察到大量零值。
+
+实现保留性能预算和断言不变，新增共享的 `elapsedNanoseconds` 计时转换：成功
+操作若被平台时钟量化为零，只记录 1ns 下限；单条/批量总耗时和锁持有耗时均使用
+该转换，不能把已完成操作与“没有样本”混淆。没有放宽 500ms 上限，也没有改变
+SQLite 写事务、锁范围或重试策略。`TestAppendEventsLockHoldBudget -count=50`
+现已全部通过（其中少数样本显示为 1ns，说明正是时钟量化路径）。
+
+### 本轮定向与包级验证
+
+- `go test ./internal/memoryruntime ./internal/memorystore`：通过；
+- `go test ./internal/chat`：通过；
+- active hard-kill、canonical restart、purge/generation 和锁预算定向测试：通过。
+
+仍未完成：真实 Memory ConPTY/provider/auth 与跨会话召回、跨 SQLite 全交接步骤的
+故障注入矩阵、全量性能/并发门禁、历史 legacy backlog 盘点以及 M5 shadow 运营
+验收。因此本轮不宣称生产验收通过；`go test` 的局部绿色也不能替代上述证据。
+
+
+### 本轮增量记录：memory materialization/receipt ack hard-kill 窗口（2026-11-18）
+
+新增 `TestE2ESQLiteMaterializationAckHardKillRecovery`，在独立临时 workspace 中使用两份真实 SQLite 文件：child 先以 `SaveWithTurnCapture` 原子提交 active canonical session 与 receipt，再提交 memory 侧 digest/job 事务，随后在 canonical receipt ack 前由 parent hard-kill。重启后验证 receipt 仍为 `captured`、digest/job 仍为同一稳定 ID 且只有一份 pending job；materializer 重试完成 canonical ack，不新建 digest/job，worker 仅抽取一次并将 candidate/job 置为终态。再次 materialize/recovery 不增加 extractor 调用。
+
+本轮定向证据：
+
+- `go test ./internal/memoryruntime -run 'TestE2ESQLite(MaterializationAckHardKillRecovery|ActiveCaptureHardKillRecovery|CrashRecovery)$' -count=20`：通过；
+- `go test ./internal/memoryruntime -count=1`：通过；
+- `go test ./internal/memorystore -count=1`：通过；
+- `go test ./internal/chat -run 'TestAppendEventsLockHoldBudget|Test.*TurnCapture|Test.*Generation' -count=5`：通过。
+
+该测试只使用 `t.TempDir()`，没有读写真实 SQLite 实例或 suspension 状态。它关闭的是“memory 事务已提交、canonical ack 尚未提交”的测试缺口；仍未关闭跨 SQLite purge/worker output receipt 的完整 hard-kill 矩阵、真实终端/ConPTY、全量性能并发门禁及 M5 shadow 运营验收，因此本轮仍不宣称生产验收通过。
+
+
+### 全量复核补充（2026-11-18）
+
+尝试运行 `go test ./...` 后，受当前工作树其他改动影响仍未全绿；本轮没有为避免扩大范围而修改这些非 memory handoff 文件。当前可复现的阻塞包括：
+
+- `cmd/aicli/ui/renderengine` 测试编译失败：`blankGrid` 在 `screen_model.go` 与 `screen_model_compat_test.go` 重复定义；
+- `cmd/contractgen` 的 `TestGeneratedFileIsUpToDate`：frontend `event-contract.ts` 与 events 注册表不一致；
+- `internal/events` 的 `TestEmitRuntimeEventLiteralsAreRegistered`：`tool_loop.child_results_consumption_failed` 尚未登记。
+
+`cmd/scheduled` 与 `internal/agent` 的相应定向测试复跑通过，但不能抵消全量门禁未通过的事实。上述问题与本轮新增的跨 SQLite handoff 测试无直接代码路径关系，仍需在独立变更中收敛后才能重新评估全量验收。
+
+
+## 本轮增量记录：跨 SQLite session purge hard-kill 恢复矩阵（2026-11-18）
+
+本轮仅追加临时 SQLite 故障注入证据，不改变本文对生产状态的判断，也不把 durable-capture 提案视为已批准或已验收。
+
+`backend/internal/memoryruntime/e2e_sqlite_test.go` 新增
+`TestE2ESQLiteSessionPurgeHardKillRecovery`，child 在同一临时 workspace 中创建
+canonical session（带正 `session_generation`）和 generation-qualified memory
+candidate，然后分别在以下持久化边界写 marker 并等待 parent hard-kill：
+
+- canonical `BeginSessionPurge` fence/journal 提交后、memory tombstone 提交前；
+- memory purge/tombstone 单事务提交后、canonical memory ack 前；
+- canonical memory ack 提交后、canonical complete/delete 前。
+
+parent 重开两份 SQLite 后先检查边界状态，再通过真实
+`SessionManager.ResumePendingSessionPurges` 和 V2 generation-qualified coordinator
+恢复。恢复验证包括：目标 incarnation 的 candidate 精确删除、memory tombstone
+`purged` 及 generation/purge generation 一致、canonical session 删除、journal
+进入 `complete`，以及第二次 recovery 返回零并不重复写入。marker 只包含 session ID、
+generation、purge generation 和阶段，不含 transcript、凭证或上游响应。
+
+本轮证据：
+
+- `go test ./internal/memoryruntime -run TestE2ESQLiteSessionPurgeHardKillRecovery -count=1`：通过；
+- `go test ./internal/chat ./internal/memorystore ./internal/memoryruntime`：通过；
+- `git diff --check`：通过。
+
+测试只使用 `t.TempDir()`，没有修改真实 SQLite 实例数据或 suspension 状态。该矩阵
+关闭了当前实现中 canonical fence、memory purge、canonical ack/complete 之间的
+基本 restart recovery 覆盖缺口，但不等于跨 SQLite 并发注入、真实 Memory ConPTY/
+provider/auth、跨会话召回、性能/并发门禁或 shadow 运营验收完成。因此本轮仍不宣称
+生产验收通过；generationless/混代派生状态等既有边界仍按前述风险处理。
+## 本轮增量记录：turn window generation/source fence（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把 durable-capture 提案视为已批准或已验收。
+
+本轮补入并接入 generation-qualified turn window 状态转换：
+
+- `EnsureTurnWindowForGeneration` 要求正 `session_generation` 与非空
+  `source_hash`；`CompleteTurnWindowForGeneration`、`FailTurnWindowForGeneration`
+  和 `MarkTurnWindowProcessingForGeneration` 只按
+  `id + session_generation + source_hash + 预期状态` 条件更新，条件不匹配时返回
+  `sql.ErrNoRows`，旧 worker 不能覆盖新 source 或新 incarnation 的状态。
+- canonical rollup 路径已全部切换到上述 API；legacy
+  `EnsureTurnWindow/CompleteTurnWindow/FailTurnWindow/MarkTurnWindowProcessing`
+  仅保留给 migration/diagnostic 与测试调用，不再作为 canonical rollup 路径。
+- 正 generation 但 `source_hash` 为空的既有 window 不能证明摘要来源；再次通过
+  generation-qualified 入口刷新时按 source changed 处理，不复用旧 summary
+  正文/状态作为当前 source 的已验证输出。
+- 未增加 session-ID 级 purge/fence；generationless 或混合代数 window 仍不能作为
+  严格 purge 完成证据，也不把不同 incarnation 的数据混读。
+
+本轮验证（仅使用 `t.TempDir()` 临时 SQLite，未读写真实 SQLite 实例或 suspension
+状态）：
+
+```text
+go vet ./internal/memoryruntime ./internal/memorystore
+go test -run '^$' ./internal/memoryruntime ./internal/memorystore
+go test ./internal/memorystore -run '^TestGenerationQualifiedTurnWindowStateTransitionsFenceStaleWorker$' -count=1
+go test ./internal/memoryruntime -run '^(TestRunSessionEndRollsUpL1AndL2|TestRunSessionEndKeepsL0WhenWindowSummaryFails|TestRecoveryRollupOnlyWorkSurvivesFailureAndRestart|TestRecoveryIdleRunRepairsRollupOnlyWork|TestRollupCancellationPersistsFailureAndRecoversWithoutExtraction)$' -count=1
+go test -race ./internal/memoryruntime -run '^TestSessionEndPipelineUsesIndependentBoundedPhaseBudgets$' -count=1
+go test ./internal/memoryruntime ./internal/memorystore -count=1
+```
+
+以上命令均通过。此前该 race 用例的失败来自测试预算过紧（750ms/900ms 在 race
+instrumentation 下不足），本轮只调整测试超时为 10s 与相应断言，未修改生产阶段
+预算实现；race 用例已复跑通过。
+
+依赖包编译检查
+`go test -run '^$' ./internal/chat ./internal/memoryassembly ./internal/api/runtimeapi ./cmd/aicli/commands`
+通过，未执行这些包的测试逻辑。
+
+仍未完成：跨 SQLite 全交接步骤的 hard-kill/并发故障矩阵、真实 Memory ConPTY/
+provider/auth 与跨会话召回、全量性能/并发门禁、legacy backlog 盘点和 M5 shadow
+运营验收。因此本轮仍不宣称生产验收通过；局部测试通过不能替代上述证据。
+### 本轮增量记录：capture worker claim/commit hard-kill 边界（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把 durable-capture 提案视为已批准或已验收。
+
+`backend/internal/memoryruntime/e2e_sqlite_test.go` 新增
+`TestE2ESQLiteCaptureWorkerHardKillRecovery`，使用 `t.TempDir()` 下两份真实
+SQLite（canonical `sessions.sqlite` 与 memory SQLite），覆盖两个此前缺失的
+worker 重启边界：
+
+- `worker_claimed`：child 原子提交 canonical turn/receipt，物化 memory
+  digest/job 并 ack receipt，随后只 claim job（45s lease）便写 marker 并等待
+  hard-kill。parent 重开后确认 digest 仍 pending、job 仍 running、candidate/
+  output receipt 均为 0；通过注入 worker 时钟越过 lease，复用同一 job ID 重新
+  claim，完成一次抽取与原子 commit，最终为 done/succeeded、candidate=1、
+  output receipt=1；再次 recovery 不增加 extractor 调用。
+- `worker_committed`：child 完成同一 worker 的原子
+  candidate/output-receipt/job/digest commit 后写 marker 并被 hard-kill。
+  parent 重开后确认 commit 已可见；recovery 返回 `Processed=0`，extractor
+  调用为 0，candidate/output receipt 均保持 1，不重复抽取或写入。
+
+marker 仅保存 session/receipt/digest/job ID、generation 与阶段，不保存
+transcript、候选正文、凭证、Authorization header、完整上游响应或 secret ref。
+测试只使用临时目录，没有修改真实 SQLite 实例数据或 suspension 状态。
+
+本轮证据：
+
+```text
+go test ./internal/memoryruntime -run '^TestE2ESQLiteCaptureWorkerHardKillRecovery$' -count=1 -v
+go test ./internal/memoryruntime -run '^TestE2ESQLiteCaptureWorkerHardKillRecovery$' -count=10
+go test -race ./internal/memoryruntime -run '^TestE2ESQLiteCaptureWorkerHardKillRecovery$' -count=1 -v
+go test ./internal/memoryruntime ./internal/memorystore -count=1
+go vet ./internal/memoryruntime
+```
+
+以上命令均通过。该证据关闭 claim 后未提交与原子 commit 后重启两个边界，但不覆盖
+extractor/provider 调用过程中断、跨 SQLite 并发 purge 与 worker commit 的全组合、
+分布式原子性、真实 Memory ConPTY/provider/auth、跨会话召回、全量性能/并发门禁、
+legacy backlog 盘点或 M5 shadow 运营验收；本轮仍不宣称生产验收通过。
+### 本轮增量记录：turn window purge fence（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把 durable-capture 提案视为已批准或已验收。
+
+补齐 `memory_turn_windows` 写入的 purge fence。此前 window 已具备
+generation/source-hash 条件更新，但迟到 worker 仍可能在 memory session purge
+提交后创建或刷新 window。本轮在同一个 memory SQLite 写事务内加入 tombstone 校验：
+
+- `EnsureTurnWindow` / `EnsureTurnWindowForGeneration` 在查询或插入 window 前检查
+  `memory_session_purges`，被 fence 的 incarnation 不能创建/刷新 window。
+- `CompleteTurnWindow`、`FailTurnWindow`、`MarkTurnWindowProcessing` 及其
+  generation-qualified 版本先解析 window 存储的 `project_key/session_id/
+  session_generation`，再执行同一 fence 检查后更新。
+- 正 generation 使用严格 `generation <= fenced_session_generation` 拒绝；
+  `state=fenced` 时一律拒绝，只有 tombstone 已完成且 generation 更大时才允许新
+  incarnation 继续。
+- generationless window 无法证明 incarnation，存在任何 session tombstone 后即被
+  拒绝。没有新增 session-ID 级 purge/fence，也没有按可复用 session ID 清理新的
+  incarnation。
+
+新增 `TestTurnWindowWritesRespectSessionPurgeFence`，覆盖：purged generation 的
+迟到创建、generationless ensure/complete/fail/mark 拒绝、legacy summary 不被迟到
+写入覆盖，以及 generation 2 在 generation 1 tombstone 后正常创建和完成。
+
+验证结果：
+
+```text
+go test ./internal/memorystore -run '^(TestTurnWindowWritesRespectSessionPurgeFence|TestGenerationQualifiedTurnWindowStateTransitionsFenceStaleWorker|TestPurgeSessionIsIdempotentAndAllowsNewIncarnation)$' -count=1
+go test -race ./internal/memorystore -run '^(TestTurnWindowWritesRespectSessionPurgeFence|TestGenerationQualifiedTurnWindowStateTransitionsFenceStaleWorker)$' -count=1
+go test ./internal/memorystore ./internal/memoryruntime -count=1
+go test -run '^$' ./internal/chat ./internal/memoryassembly ./internal/api/runtimeapi ./cmd/aicli/commands -count=1
+go vet ./internal/memorystore
+```
+
+以上均通过；测试只使用 `t.TempDir()` 临时 SQLite，未修改真实 SQLite 实例数据或
+suspension 状态。该增量关闭 canonical turn-window 写入的 purge tombstone 缺口，
+但仍不覆盖 generationless 历史窗口迁移、跨 SQLite 并发 purge 全组合、真实
+Memory ConPTY/provider/auth、跨会话召回、全量性能/并发门禁、legacy backlog 盘点
+或 M5 shadow 运营验收，因此仍不宣称生产验收通过。
+### 本轮增量记录：recall candidate lookup O(n²) 消除（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把局部分项基准写成完整性能门禁。
+
+retrieval 在候选排序后分别执行 kind diversification 和 token-budget loop；
+此前两处都通过 `recordByID(records, id)` 逐候选线性扫描完整 records slice，
+候选数增长时形成 O(candidates × records) 的重复查找。本轮改为一次构建
+`map[string]int`（record ID → slice index），两处共用 O(1) 查找：
+
+- 不再复制完整 `Record` 到索引，减少内存和分配；
+- diversification 的 kind 顺序与预算选择语义不变；
+- 查询无匹配候选时仍走原有 hard gate，不改变过滤条件或 trace 行为；
+- 没有新增 SQL、索引或 schema，不改变持久化状态。
+
+新增 `BenchmarkDiversifyRecallOrderLookup`，在本机 Windows/AMD Ryzen 7 5800H
+上以 2048 records/candidates、limit=10 对比索引实现与旧线性查找形态：
+
+```text
+indexed-16     2284    255039 ns/op    600738 B/op    11 allocs/op
+linear-16        21  29138510 ns/op    491525 B/op     2 allocs/op
+```
+
+即该热点约 114× faster；这是微基准，不是端到端 retrieval p95 或生产容量结论。
+
+验证结果：
+
+```text
+go test ./internal/memorystore -run '^(TestSelectForInjectV2DropsNearDuplicateRecallRows|TestSelectForInjectV2DiversifiesRecallKinds|TestMemoryStorePinnedBudgetSurvivesSummaryFull)$' -count=1
+go test -race ./internal/memorystore -run '^(TestSelectForInjectV2DropsNearDuplicateRecallRows|TestSelectForInjectV2DiversifiesRecallKinds)$' -count=1
+go test ./internal/memorystore ./internal/memoryruntime -count=1
+go vet ./internal/memorystore
+```
+
+以上均通过；测试只使用 `t.TempDir()` 临时 SQLite，未修改真实 SQLite 实例数据或
+suspension 状态。完整 retrieval p95、并发/长读 SQLite 锁门禁、真实 Memory
+ConPTY/provider/auth、跨会话召回、legacy backlog 盘点和 M5 shadow 运营验收仍未
+完成，因此本轮仍不宣称生产验收通过。
+### 本轮增量记录：model-call job lease heartbeat（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把局部测试写成生产验收。
+
+此前 job 只在 claim 时写入 `lease_until/deadline_at`，没有运行期续租。默认
+5 分钟 lease 下，blocking provider/摘要调用可能超过 lease：worker 的最终 commit
+会被拒绝，恢复 worker 也可能在旧调用仍运行时重新 claim，造成重复模型调用。
+本轮补齐 owner/attempt-fenced heartbeat：
+
+- 新增 `Store.HeartbeatJobForWorkerAttempt`，只允许当前
+  `job_id + project_key + running + worker_id + attempt` 且原 lease 尚未过期时续租；
+  同时更新 `lease_until/deadline_at/heartbeat_at`。迟到或已 reassign 的 heartbeat
+  返回 `ErrJobLeaseLost`，不会复活过期 claim。
+- heartbeat 事务继续校验 project maintenance lease 与 session purge fence。
+- 新增 `withJobLeaseHeartbeat`：调用期间按 `lease/3` 续租，单次 heartbeat 超时 5s；
+  续租失败通过 cancel cause 取消模型 context，调用方在 commit 前 fail closed。
+- 已接入 receipt-backed phase1 worker、legacy session/window extraction、
+  byte-page extraction、window rollup、phase2 consolidation 与 stale-summary rebuild。
+  phase2 claim 现在显式使用配置 Lease，与 heartbeat 周期一致。
+- `TestJobHeartbeatExtendsLiveLeaseAndRejectsStaleAttempt` 覆盖成功续租、错误
+  worker/attempt 与过期 lease 拒绝；`TestWithJobLeaseHeartbeatCancelsWhenClaimIsReassigned`
+  覆盖 reassign 后取消模型调用；`TestRunPendingTurnCaptureReceiptsHeartbeatsSlowExtractionLease`
+  以 500ms 初始 lease 运行 1.2s extractor，验证仍能原子提交。
+
+验证结果：
+
+```text
+go test ./internal/memorystore ./internal/memoryruntime -count=1
+go test -race ./internal/memorystore -run '^TestJobHeartbeatExtendsLiveLeaseAndRejectsStaleAttempt$' -count=1
+go test -race ./internal/memoryruntime -run '^(TestWithJobLeaseHeartbeatCancelsWhenClaimIsReassigned|TestRunPendingTurnCaptureReceiptsHeartbeatsSlowExtractionLease)$' -count=1
+go vet ./internal/memorystore ./internal/memoryruntime
+```
+
+以上均通过；测试只使用 `t.TempDir()` 临时 SQLite，未修改真实 SQLite 实例数据或
+suspension 状态。该增量仍不覆盖真实 provider 长时阻断、网络层半开连接、跨进程
+reassign 压测、性能/并发门禁、Memory ConPTY/provider/auth、跨会话召回、legacy
+backlog 盘点和 M5 shadow 运营验收，因此不宣称生产验收通过。
+### 本轮增量记录：retrieval 评分与扫描热路径优化（2026-11-18）
+
+> 本节只追加实现、测试与本地基准证据，不改变本文对生产状态的判断；合成基准不等同于线上 p95。
+
+本轮新增 `BenchmarkSelectForInjectV2LargeActiveSet`，先暴露完整
+`SelectForInjectV2` 在 512/2048 个全匹配 active records 下的真实成本，再逐项消除：
+
+- selection 内部候选不再构造完整 `SearchHit/Note`（避免为每个候选复制 text/tags），
+  改为 `recordIndex + score`，排序、kind diversification 与预算循环直接访问同一
+  records slice；对应微基准从旧线性查找形态 ~27.9ms 降到 ~0.055ms。
+- `recallDedupKey` 改为单次 builder 规范化，省去重复 ToLower、Fields/Join 及
+  中间字符串。
+- `memoryredact.DetectSecret/Redact` 增加保守的 secret 关键词 fast reject；只有可能
+  命中时才执行 9 条权威正则。新增覆盖全部 9 条规则和 benign text 的表驱动测试，
+  不改变正则最终判定。
+- 非诊断 injection 使用 13 列轻量投影扫描；入选 Stable/Recall 记录再按 ID 批量
+  补全为完整 Record。补全时保留预算截断后的 Text，避免重新暴露超预算正文。
+  诊断路径和 GetRecord/详情路径继续读取完整记录。
+
+同一机器、2048 全匹配 records、limit=10、TokenBudget=600：
+
+```text
+优化前  512: 10.03ms/op, 2.81MB/op, 37003 allocs/op
+优化前 2048: 40.06ms/op, 13.27MB/op, 147661 allocs/op
+
+优化后  512:  3.76ms/op, 1.56MB/op, 13131 allocs/op
+优化后 2048: 15.00ms/op, 8.21MB/op, 50016 allocs/op
+```
+
+该合成场景的 2048 路径已低于文档暂定的本地检索 20ms M0 门槛，但仍不是端到端
+prompt/injection p95，也不是多进程/真实 SQLite 压测结论。
+
+验证通过：
+
+```text
+go test ./internal/memorystore ./internal/memoryruntime ./internal/memoryredact -count=1
+go test -race ./internal/memorystore -run '^(TestSelectForInjectV2HydratesSelectedRecordAndPreservesFittedText|TestSelectForInjectV2NoMatchKeepsEmptySelection|TestSelectForInjectV2DropsNearDuplicateRecallRows|TestSelectForInjectV2DiversifiesRecallKinds)$' -count=1
+go test -race ./internal/memoryredact -count=1
+go vet ./internal/memorystore
+```
+
+测试只使用 `t.TempDir()` 临时 SQLite；profile artifact 已清理，未修改真实 SQLite
+实例或 suspension 状态。完整 SQLite 并发/长读性能门禁、真实 provider/ConPTY、
+跨会话召回、legacy backlog 盘点和 M5 shadow 运营验收仍未完成，因此仍不宣称
+生产验收通过。
+### 本轮增量记录：全仓 Go 测试阻塞修复（2026-11-18）
+
+> 本节只追加修复与验证证据，不改变本文对生产状态的判断；“全仓 Go 测试绿”仍不等于真实产品验收。
+
+本轮先以 `go test -run '^$' ./...` 定位编译阻塞，再以
+`go test ./... -count=1` 收敛实际失败，修复内容：
+
+- `renderengine`：删除测试文件与生产代码重复的 `blankGrid`，改用生产 helper。
+- event contract：登记 `tool_loop.child_results_consumption_failed`（0 通道，保持
+  原投递行为），同步 `runtimeobserve` 已知类型目录，并运行 `contractgen` 更新前端
+  `event-contract.ts`；生成物此前还落后多个已登记类型，本次一并收敛。
+- 配置写锁：`aicli-remote-tools init` 在目标配置写入前持
+  `agentconfig.LockConfigFileWrite`；`mcpmount` token/mount 快照在
+  `save`/`Save` 入口持同一路径锁，再执行原子替换。
+- SQLite 在线维护护栏：`storage prune-sessions` 的 CLI 帮助/错误文本从裸
+  `VACUUM` 改为“离线压缩”，实际压缩仍仅经 allowlisted `storage compact`。
+- auto-compaction 测试：确认 1280 token 预算处于 active-turn replay 估算边界，
+  会导致 req2 前提前 compaction、响应序列错位；按实测 1240 重新标定，连续
+  100 次保持“req1 存活、req2 后触发”的预期序列。
+- `storefile` 数据目录锁：释放时先把 canonical lock 目录原子 rename 到唯一
+  release 路径，再清理；避免 Windows 偶发 `RemoveAll` 失败把锁保留到 30s
+  stale 阈值后阻塞等待者。
+- `skillsapi` usage scope 测试：按现行 admin 授权契约配置 admin token；产品
+  端点权限语义未放宽。
+
+验证结果：
+
+```text
+go test -run '^$' ./...
+go test ./... -count=1
+go test ./internal/agent -count=3
+go test ./internal/agent -run '^(TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure|TestHeaderGuardExhaustionIsExplicitNotSilent)$' -count=20
+go test ./internal/connectors/storefile -run '^TestConcurrentOwnerClaimSingleWinner$' -count=100
+go test ./internal/memorystore -count=5
+go test ./internal/events -run '^TestRegisteredTypesAreKnownToObserveCatalog$' -count=1
+go test ./internal/sqliteutil -run '^TestNoOnlineDatabaseFileMaintenanceStatements$' -count=1
+go test ./internal/configwriteguard -run '^TestConfigFileWritesStayUnderSharedWriteLock$' -count=1
+go test ./pkg/skillsapi -run '^TestClient_UsageScopeSeparatesQuota$' -count=1
+npx tsc -b
+git diff --check
+```
+
+以上均通过。测试使用临时目录/SQLite fixture，未主动修改真实 SQLite 实例或
+suspension 状态。仍不宣称生产验收通过：真实 provider/ConPTY、跨会话召回、
+SQLite 多进程锁压测、legacy backlog 盘点与 M5 shadow 运营验收仍未完成。
+### 本轮增量记录：receipt-first 主路径缺口修复（2026-11-18）
+
+> 本节只追加实现与验证证据，不改变本文对生产状态的判断，也不把局部主路径测试写成生产验收。
+
+本轮逐段审计正常主路径
+`canonical terminal commit -> receipt -> materialize -> phase1_extract/v2 ->
+candidate/output receipt -> consolidation -> injection`，确认并修复两个缺口：
+
+- materialization 此前在 `MaterializeTurnCaptureReceipt*` 中只校验 generation
+  与 canonical range，未复用 worker 的 `TriggerSessionEnd` eligibility。disabled/
+  polluted session、subagent/ephemeral、workspace mismatch 与 rollout-age 仍会创建
+  pending digest/job，worker 又永远跳过，形成不可 claim 的队列毒化。
+  现在 materialization 使用同一 eligibility fence；ineligible receipt 不 ack、
+  不创建 job，进入 `deferred`（1h 重试）。generation 缺失或 session generation
+  不匹配同样 deferred，避免永久占据 captured 队首页。
+- `TurnDigest.Enabled=false` 时 host 仍注入 `TurnDigestSink`，actor 仍提交 canonical
+  receipt，但 sink 随后跳过 materialization，留下不可消费的 captured receipt。
+  现在 aicli 与 runtime-server 仅在 `TurnDigestEnabled=true` 时注入 sink；
+  `RecordTurnDigest` receipt 分支仍保留 defense-in-depth 检查，ineligible/
+  generation-mismatch 作为 skipped capture 返回 nil。
+
+新增/更新测试覆盖：
+
+- `TestMaterializeTurnCaptureReceiptSkipsIneligibleSessions`：session mode
+  disabled/polluted、missing generation、subagent、ephemeral、workspace
+  missing/mismatch、rollout age；
+- `TestRecordTurnDigestCaptureReceiptIneligibleIsSkipped`；
+- `TestMaterializeTurnCaptureReceiptsSkipsReusedSessionGeneration`：断言 stale
+  generation 变为 deferred，且不创建 job；
+- aicli `TestLocalTurnDigestSinkWiresBothActorPaths` 与 runtime-server
+  `TestSessionDepsWiresTurnDigestSinkOnlyWhenEnabled`：关闭 turn digest 时 sink=nil。
+
+验证通过：
+
+```text
+go test ./internal/memoryruntime ./internal/memoryassembly ./internal/api/runtimeapi -count=1
+go test -race ./internal/memoryruntime -run '^(TestMaterializeTurnCaptureReceiptSkipsIneligibleSessions|TestRecordTurnDigestCaptureReceiptIneligibleIsSkipped|TestMaterializeTurnCaptureReceiptsSkipsReusedSessionGeneration)$' -count=1
+go test ./cmd/aicli/commands -run '^TestLocalTurnDigestSinkWiresBothActorPaths$' -count=5
+go test ./... -count=1 -p=4
+```
+
+默认高并行度 `go test ./... -count=1` 仍可能在非主路径的 Windows 时序用例上
+偶发失败（llm header cleanup、maintenance lease、MSYS job object）；相关用例隔离
+重复通过，`-p=4` 全仓通过。测试只使用临时 SQLite/fixture，未主动修改真实 SQLite
+实例或 suspension 状态。真实 provider/ConPTY、跨会话召回、多进程 SQLite 压测、
+legacy backlog 与 M5 shadow 运营验收仍未完成，因此仍不宣称生产验收通过。

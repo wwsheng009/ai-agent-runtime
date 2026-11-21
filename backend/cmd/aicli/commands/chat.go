@@ -174,6 +174,10 @@ type ChatSession struct {
 	// Messages 是当前模型可见的 prompt 投影：持久化无损，条数不再受固定上限
 	// 约束；只有模型驱动的压缩（上下文窗口 × auto_compact_ratio）会改写它。
 	Messages []runtimetypes.Message
+	// pendingActorTurnID is the requested identity for the foreground actor
+	// submission. The actor may replace it with a durable suspended-turn ID;
+	// it is used only to keep error-path persistence aligned with that choice.
+	pendingActorTurnID string
 	// ResumeHistory 是恢复会话后用于展示的 canonical 完整转录
 	// （append-only session_messages 全量回放）。它与 Messages 严格分离：
 	// 模型上下文始终使用 Messages（可能已被压缩摘要改写），ResumeHistory

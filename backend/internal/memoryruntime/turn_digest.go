@@ -413,20 +413,31 @@ func (r *Runtime) runMaterializedTurnCapture(
 	if len(pages) == 0 {
 		return fail(fmt.Errorf("memoryruntime: turn capture range is empty"))
 	}
+	digestText, err := captureDigestText(transcript, r.Config)
+	if err != nil {
+		return fail(err)
+	}
 	extraction := ExtractionResult{}
-	for _, page := range pages {
-		part, extractErr := r.Extractor.Extract(ctx, session, page)
-		if extractErr != nil {
-			return fail(extractErr)
-		}
-		extraction.Candidates = append(extraction.Candidates, part.Candidates...)
-		extraction.Ignored = append(extraction.Ignored, part.Ignored...)
-		if strings.TrimSpace(part.Model) != "" {
-			extraction.Model = part.Model
-		}
-		extraction.Usage.PromptTokens += part.Usage.PromptTokens
-		extraction.Usage.CompletionTokens += part.Usage.CompletionTokens
-		extraction.Usage.TotalTokens += part.Usage.TotalTokens
+	extractErr := withJobLeaseHeartbeat(ctx, r.Store, r.Config.Lease, claimedJob,
+		func(heartbeatCtx context.Context) error {
+			for _, page := range pages {
+				part, pageErr := r.Extractor.Extract(heartbeatCtx, session, page)
+				if pageErr != nil {
+					return pageErr
+				}
+				extraction.Candidates = append(extraction.Candidates, part.Candidates...)
+				extraction.Ignored = append(extraction.Ignored, part.Ignored...)
+				if strings.TrimSpace(part.Model) != "" {
+					extraction.Model = part.Model
+				}
+				extraction.Usage.PromptTokens += part.Usage.PromptTokens
+				extraction.Usage.CompletionTokens += part.Usage.CompletionTokens
+				extraction.Usage.TotalTokens += part.Usage.TotalTokens
+			}
+			return nil
+		})
+	if extractErr != nil {
+		return fail(extractErr)
 	}
 	now = r.now()
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
@@ -452,7 +463,7 @@ func (r *Runtime) runMaterializedTurnCapture(
 	}
 	commitCtx, commitCancel := memoryJobCommitContext(ctx)
 	defer commitCancel()
-	inserted, err := r.Store.CommitTurnCaptureExtraction(commitCtx, claimedJob.ID,
+	inserted, err := r.Store.CommitTurnCaptureExtractionWithDigestText(commitCtx, claimedJob.ID,
 		claimedJob.WorkerID, claimedJob.Attempt, memorystore.TurnCapture{
 			ID:                 receipt.ID,
 			ProjectKey:         projectKey,
@@ -470,7 +481,7 @@ func (r *Runtime) runMaterializedTurnCapture(
 			Steps:              receipt.Steps,
 			UsageJSON:          receipt.UsageJSON,
 			CreatedAt:          receipt.CreatedAt,
-		}, digest.ID, outputHash, candidates)
+		}, digest.ID, outputHash, digestText, candidates)
 	if err != nil {
 		return fail(err)
 	}

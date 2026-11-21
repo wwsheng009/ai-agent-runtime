@@ -190,7 +190,7 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 			break
 		}
 	}
-	window, sourceChanged, err := r.Store.EnsureTurnWindow(ctx, memorystore.TurnWindow{
+	window, sourceChanged, err := r.Store.EnsureTurnWindowForGeneration(ctx, memorystore.TurnWindow{
 		Scope:             memorystore.ScopeProject,
 		ProjectKey:        r.Config.ProjectKey,
 		SessionID:         session.ID,
@@ -265,7 +265,7 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		cleanupCtx, cancel := memoryJobCleanupContext(ctx)
 		var windowErr error
 		if failWindow {
-			windowErr = r.Store.FailTurnWindow(cleanupCtx, window.ID, safeMemoryErrorText(cause))
+			windowErr = r.Store.FailTurnWindowForGeneration(cleanupCtx, window.ID, session.SessionGeneration, window.SourceHash, safeMemoryErrorText(cause))
 		}
 		jobErr := r.Store.FailJobForWorker(cleanupCtx, jobID, workerID, safeMemoryErrorText(cause), now.Add(retryBackoff(claimed[0].Attempt)))
 		cancel()
@@ -289,17 +289,23 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 		}
 		return result
 	}
-	if err := r.Store.MarkTurnWindowProcessing(ctx, window.ID); err != nil {
+	if err := r.Store.MarkTurnWindowProcessingForGeneration(ctx, window.ID, session.SessionGeneration, window.SourceHash); err != nil {
 		return failClaimed(err, false)
 	}
-	summary, summarizeErr := r.WindowSummarizer.SummarizeWindow(ctx, WindowSummaryInput{
-		Session:        session,
-		WindowID:       window.ID,
-		WindowIndex:    windowIndex,
-		StartDigestSeq: startDigestSeq,
-		EndDigestSeq:   endDigestSeq,
-		Digests:        digests,
-	})
+	var summary WindowSummary
+	summarizeErr := withJobLeaseHeartbeat(ctx, r.Store, r.Config.Lease, claimed[0],
+		func(heartbeatCtx context.Context) error {
+			var heartbeatErr error
+			summary, heartbeatErr = r.WindowSummarizer.SummarizeWindow(heartbeatCtx, WindowSummaryInput{
+				Session:        session,
+				WindowID:       window.ID,
+				WindowIndex:    windowIndex,
+				StartDigestSeq: startDigestSeq,
+				EndDigestSeq:   endDigestSeq,
+				Digests:        digests,
+			})
+			return heartbeatErr
+		})
 	if summarizeErr != nil {
 		return failClaimed(summarizeErr, true)
 	}
@@ -320,7 +326,7 @@ func (r *Runtime) rollupOneWindow(ctx context.Context, session SessionRef, diges
 	}
 	commitCtx, commitCancel := memoryJobCommitContext(ctx)
 	defer commitCancel()
-	window, err = r.Store.CompleteTurnWindow(commitCtx, window.ID, memorystore.TurnWindowSummary{
+	window, err = r.Store.CompleteTurnWindowForGeneration(commitCtx, window.ID, session.SessionGeneration, window.SourceHash, memorystore.TurnWindowSummary{
 		Text:         cleanSummary.Text,
 		Model:        cleanSummary.Model,
 		UsageJSON:    windowUsageJSON(cleanSummary.Usage),

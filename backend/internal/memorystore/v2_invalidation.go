@@ -21,7 +21,8 @@ type SessionRangeInvalidation struct {
 	MessageIDs       []string
 	TurnIDs          []string
 	// SessionGeneration scopes invalidation to one canonical session
-	// incarnation. Nil preserves the legacy session-wide behavior.
+	// incarnation. It must be positive; generationless range invalidation is
+	// unsafe when a canonical session ID can be reused.
 	SessionGeneration *int64
 	// CutoffAt is the event time used to avoid invalidating new rows that
 	// re-used a canonical seq after the rewind. Zero disables the time bound.
@@ -79,6 +80,9 @@ func (s *Store) InvalidateSessionRange(ctx context.Context, sessionID string, in
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return result, nil
+	}
+	if inv.SessionGeneration == nil || *inv.SessionGeneration <= 0 {
+		return result, fmt.Errorf("memorystore: positive session generation required for range invalidation")
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {

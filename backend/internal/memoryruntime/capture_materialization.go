@@ -11,7 +11,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 )
 
-var errCaptureReceiptGenerationMismatch = errors.New("memoryruntime: capture receipt belongs to a different session generation")
+var (
+	errCaptureReceiptGenerationMismatch = errors.New("memoryruntime: capture receipt belongs to a different session generation")
+	errCaptureReceiptIneligible         = errors.New("memoryruntime: capture receipt is not eligible for materialization")
+)
+
+const captureIneligibleRetryDelay = time.Hour
 
 // MaterializeTurnCaptureReceipts drains the canonical capture outbox without
 // invoking the extractor. Each receipt is acknowledged only after the memory
@@ -39,11 +44,9 @@ func (r *Runtime) MaterializeTurnCaptureReceipts(ctx context.Context, limit int)
 		if err := ctx.Err(); err != nil {
 			return materialized, err
 		}
-		if receipt.SessionGeneration <= 0 {
-			continue
-		}
 		ok, err := r.materializeTurnCaptureReceipt(ctx, source, receipt)
-		if errors.Is(err, errCaptureReceiptGenerationMismatch) {
+		if errors.Is(err, errCaptureReceiptGenerationMismatch) ||
+			errors.Is(err, errCaptureReceiptIneligible) {
 			continue
 		}
 		if err != nil {
@@ -122,9 +125,6 @@ func (r *Runtime) materializeTurnCaptureReceiptsForSession(
 		if strings.TrimSpace(receipt.SessionID) != strings.TrimSpace(sessionID) {
 			continue
 		}
-		if receipt.SessionGeneration <= 0 {
-			continue
-		}
 		if generation != nil && receipt.SessionGeneration != *generation {
 			continue
 		}
@@ -132,7 +132,8 @@ func (r *Runtime) materializeTurnCaptureReceiptsForSession(
 			return materialized, err
 		}
 		ok, err := r.materializeTurnCaptureReceipt(ctx, source, receipt)
-		if errors.Is(err, errCaptureReceiptGenerationMismatch) {
+		if errors.Is(err, errCaptureReceiptGenerationMismatch) ||
+			errors.Is(err, errCaptureReceiptIneligible) {
 			continue
 		}
 		if err != nil {
@@ -160,9 +161,6 @@ func (r *Runtime) MaterializeTurnCaptureReceipt(ctx context.Context, receiptID s
 	if err != nil {
 		return fmt.Errorf("memoryruntime: read capture receipt %s: %w", receiptID, err)
 	}
-	if receipt.SessionGeneration <= 0 {
-		return fmt.Errorf("memoryruntime: capture receipt %s has no positive session generation", receiptID)
-	}
 	_, err = r.materializeTurnCaptureReceipt(ctx, source, receipt)
 	return err
 }
@@ -176,14 +174,34 @@ func (r *Runtime) materializeTurnCaptureReceipt(
 		return false, nil
 	}
 	if receipt.SessionGeneration <= 0 {
-		return false, fmt.Errorf("memoryruntime: capture receipt %s has no positive session generation", receipt.ID)
+		if err := r.deferCaptureReceipt(ctx, source, receipt, "missing_session_generation"); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: missing_session_generation", errCaptureReceiptIneligible)
 	}
 	session, err := r.findSession(ctx, receipt.SessionID)
 	if err != nil {
 		return false, fmt.Errorf("memoryruntime: read current session generation for capture receipt %s: %w", receipt.ID, err)
 	}
 	if session.SessionGeneration <= 0 || session.SessionGeneration != receipt.SessionGeneration {
-		return false, errCaptureReceiptGenerationMismatch
+		if err := r.deferCaptureReceipt(ctx, source, receipt,
+			fmt.Sprintf("session_generation_mismatch receipt=%d canonical=%d",
+				receipt.SessionGeneration, session.SessionGeneration)); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: session_generation_mismatch", errCaptureReceiptGenerationMismatch)
+	}
+	if ok, reason := r.eligible(ctx, session, TriggerSessionEnd); !ok {
+		if reason == "session_mode_error" {
+			err := fmt.Errorf("memoryruntime: capture receipt %s session mode is unavailable", receipt.ID)
+			r.recordDigestFailed(err)
+			return false, err
+		}
+		r.recordDigestSkipped("capture_" + reason)
+		if err := r.deferCaptureReceipt(ctx, source, receipt, "capture_"+reason); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: %s", errCaptureReceiptIneligible, reason)
 	}
 	if err := source.ValidateTurnCaptureReceipt(ctx, receipt); err != nil {
 		retryAt := r.now().Add(captureRetryDelay(receipt.AttemptCount))
@@ -227,6 +245,19 @@ func (r *Runtime) materializeTurnCaptureReceipt(
 		return false, fmt.Errorf("memoryruntime: acknowledge capture receipt %s: %w", receipt.ID, err)
 	}
 	return true, nil
+}
+
+func (r *Runtime) deferCaptureReceipt(
+	ctx context.Context,
+	source TurnCaptureReceiptSource,
+	receipt chat.TurnCaptureReceipt,
+	reason string,
+) error {
+	retryAt := r.now().Add(captureIneligibleRetryDelay)
+	if err := source.DeferTurnCaptureReceipt(ctx, receipt.ID, reason, retryAt); err != nil {
+		return fmt.Errorf("memoryruntime: defer capture receipt %s: %w", receipt.ID, err)
+	}
+	return nil
 }
 
 func captureRetryDelay(attempt int) time.Duration {

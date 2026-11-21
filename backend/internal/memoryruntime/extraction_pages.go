@@ -128,7 +128,13 @@ func (r *Runtime) runExtractionPage(ctx context.Context, trigger Trigger, sessio
 	fail := func(cause error) (RunResult, error) {
 		return result, r.failExtractionJob(ctx, claimed[0], cause)
 	}
-	extraction, err := r.Extractor.Extract(ctx, session, page)
+	var extraction ExtractionResult
+	err = withJobLeaseHeartbeat(ctx, r.Store, r.Config.Lease, claimed[0],
+		func(heartbeatCtx context.Context) error {
+			var extractErr error
+			extraction, extractErr = r.Extractor.Extract(heartbeatCtx, session, page)
+			return extractErr
+		})
 	if err != nil {
 		return fail(err)
 	}

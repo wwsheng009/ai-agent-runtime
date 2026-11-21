@@ -70,13 +70,21 @@ func TestMemoryStageReasoningConfigRoundTrip(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal([]byte(`
 memory:
   generation:
+    provider: extract-provider
+    model: extract-model
     reasoningEffort: max
     turnDigest:
       reasoningEffort: low
   consolidation:
+    provider: summary-provider
+    model: summary-model
     reasoningEffort: medium
 `), cfg))
 	require.NoError(t, ValidateMemoryConfig(&cfg.Memory))
+	require.Equal(t, "extract-provider", cfg.Memory.Generation.Provider)
+	require.Equal(t, "extract-model", cfg.Memory.Generation.Model)
+	require.Equal(t, "summary-provider", cfg.Memory.Consolidation.Provider)
+	require.Equal(t, "summary-model", cfg.Memory.Consolidation.Model)
 	require.Equal(t, "max", cfg.Memory.Generation.ReasoningEffort)
 	require.Equal(t, "low", cfg.Memory.Generation.TurnDigest.ReasoningEffort)
 	require.Equal(t, "medium", cfg.Memory.Consolidation.ReasoningEffort)
@@ -84,6 +92,10 @@ memory:
 	require.NoError(t, err)
 	var roundTrip MemoryConfig
 	require.NoError(t, json.Unmarshal(raw, &roundTrip))
+	require.Equal(t, cfg.Memory.Generation.Provider, roundTrip.Generation.Provider)
+	require.Equal(t, cfg.Memory.Generation.Model, roundTrip.Generation.Model)
+	require.Equal(t, cfg.Memory.Consolidation.Provider, roundTrip.Consolidation.Provider)
+	require.Equal(t, cfg.Memory.Consolidation.Model, roundTrip.Consolidation.Model)
 	require.Equal(t, cfg.Memory.Generation.TurnDigest.ReasoningEffort, roundTrip.Generation.TurnDigest.ReasoningEffort)
 	require.Equal(t, cfg.Memory.Consolidation.ReasoningEffort, roundTrip.Consolidation.ReasoningEffort)
 }

@@ -646,6 +646,9 @@ type SubmitPromptOption struct {
 	// TriggerTurnAuto marks a prompt submitted by the trigger_turn drain, so
 	// the loop guard can tell automatic turns from explicit ones (P0-3b).
 	TriggerTurnAuto bool
+	// TurnIDSelected receives the actor-authoritative turn identity after
+	// suspension lookup and before the prompt is loaded or persisted.
+	TurnIDSelected func(string)
 }
 
 // turnInjection carries one-shot per-turn injections for a single prompt run.
@@ -677,6 +680,7 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		ReplaceHistory:     cloneRuntimeMessages(opt.ReplaceHistory),
 		TurnPinnedTools:    cloneRuntimeToolDefinitions(opt.TurnPinnedTools),
 		TriggerTurnAuto:    opt.TriggerTurnAuto,
+		TurnIDSelected:     opt.TurnIDSelected,
 		Reply:              reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
@@ -1550,6 +1554,9 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	a.noteRunTriggerOrigin(cmd.TriggerTurnAuto)
 	// 挂起态（§6.12）收到 steer/新输入 ⇒ 起"同一 turn 的新 episode"（AC-P2-7a）。
 	turnID := a.nextTurnID(ctx)
+	if cmd.TurnIDSelected != nil {
+		cmd.TurnIDSelected(turnID)
+	}
 	episodeID := a.episodeIDForTurn(ctx, turnID)
 	run := a.claimSessionRun(turnID, nil, reply)
 	run.episodeID = episodeID
@@ -1593,6 +1600,13 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		}
 	}
 	appendedPrompt := false
+	// Only the CLI eager-persistence path may have a provisional trailing user
+	// row. Other actor callers must retain the existing turn identity when they
+	// submit identical text after a failed/incomplete prior turn.
+	promptIdentityRepaired := false
+	if cmd.TurnIDSelected != nil {
+		promptIdentityRepaired = repairTrailingUserPromptTurnID(session, preparedPrompt, turnID)
+	}
 	if shouldAppendUserPromptMessage(session.LastMessage(), preparedPrompt) {
 		// 回合身份对齐（2026-10-14）：user 消息落库前盖上本回合 turn_id，
 		// 让 durable 历史与 runtime 事件流共用同一身份空间（后续 assistant/tool
@@ -1608,7 +1622,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		}
 		appendedPrompt = true
 	}
-	if historyReplaced && !appendedPrompt {
+	if (historyReplaced && !appendedPrompt) || promptIdentityRepaired {
 		if err := a.persistSession(runCtx, session); err != nil {
 			a.releaseSessionRun(run)
 			acceptanceErr = err
@@ -2824,7 +2838,43 @@ func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtime
 	if last.Role != "user" || last.Content != prepared.Content {
 		return true
 	}
-	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
+	if llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last) {
+		return true
+	}
+	return false
+}
+
+// repairTrailingUserPromptTurnID repairs the CLI's eager user-row write after
+// actor admission has selected the authoritative turn. It only mutates the
+// trailing same-content user row, preserving the actor's durable suspension
+// precedence without duplicating a prompt.
+func repairTrailingUserPromptTurnID(session *Session, prepared *runtimetypes.Message, turnID string) bool {
+	if session == nil || prepared == nil || strings.TrimSpace(turnID) == "" {
+		return false
+	}
+	last := session.LastMessage()
+	if last == nil || last.Role != "user" || last.Content != prepared.Content ||
+		llm.MessageHasLocalInputImages(last) != llm.MessageHasLocalInputImages(prepared) {
+		return false
+	}
+	existing := strings.TrimSpace(runtimetypes.TurnID(*last))
+	if existing == strings.TrimSpace(turnID) {
+		return false
+	}
+	history := session.visibleHistory()
+	if len(history) == 0 {
+		return false
+	}
+	index := len(history) - 1
+	updated := history[index].Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = runtimetypes.NewMetadata()
+	}
+	// This repair intentionally replaces a provisional CLI ID. StampMessageTurnID
+	// only fills missing identities, which is not sufficient for this recovery.
+	updated.Metadata.Set(runtimetypes.MetadataKeyTurnID, strings.TrimSpace(turnID))
+	session.History[index] = *updated
+	return true
 }
 
 func shouldRollbackFailedPrompt(execErr error, result *agent.Result, resume bool, appendedPrompt bool) bool {

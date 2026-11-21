@@ -225,6 +225,11 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	releaseSubmitClaim := beginChatActorSubmitClaim(session)
 	defer releaseSubmitClaim()
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
+	if pendingTurnID := strings.TrimSpace(session.pendingActorTurnID); pendingTurnID != "" {
+		// Carry the CLI's requested turn identity into actor admission. The
+		// actor still gives a durable suspended turn precedence.
+		ctx = agent.WithTurnID(ctx, pendingTurnID)
+	}
 
 	actor, err := chatActorForSessionBounded(ctx, session)
 	if err != nil {
@@ -268,6 +273,16 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	submitOption := runtimechat.SubmitPromptOption{
 		ImagePaths:       session.ImagePaths,
 		ImageArtifactDir: chatSessionImageArtifactDir(session),
+	}
+	if session.pendingActorTurnID != "" {
+		submitOption.TurnIDSelected = func(turnID string) {
+			// SubmitPrompt invokes this after consulting durable suspension
+			// state. Persist the prompt only after this authoritative choice,
+			// so the actor's subsequent load observes the same turn identity.
+			turnID = strings.TrimSpace(turnID)
+			session.pendingActorTurnID = turnID
+			appendChatTurnUserMessageWithTurnID(session, prompt, turnID)
+		}
 	}
 	// `/skill` 默认路径的一次性 pin：消费即焚，只随本回合的 SubmitPromptOption
 	// 跨包传递（guide → 回合 system 消息；pinnedTools → 稳定工具面冻结后叠加）。

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestMemoryJobClaimLeaseAndComplete(t *testing.T) {
@@ -68,6 +70,51 @@ func TestMemoryJobClaimLeaseAndComplete(t *testing.T) {
 	if err != nil || job.Status != JobStatusSucceeded || job.LastSuccessWatermark != "hash-a" {
 		t.Fatalf("completed job = %+v, %v", job, err)
 	}
+}
+
+func TestJobHeartbeatExtendsLiveLeaseAndRejectsStaleAttempt(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	defer store.Close()
+	ctx := context.Background()
+
+	job, err := store.EnsureJob(ctx, MemoryJob{
+		Kind: "phase1_extract/v2", JobKey: "session:heartbeat:hash", MaxAttempts: 3,
+	})
+	require.NoError(t, err)
+	claimed, err := store.ClaimJobs(ctx, ClaimJobOptions{
+		WorkerID: "worker-heartbeat", Kind: "phase1_extract/v2", JobKey: job.JobKey,
+		ProjectKey: store.ProjectKey(), Limit: 1, Now: time.Now().UTC(),
+		Lease: 200 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	beforeLease := claimed[0].LeaseUntil
+
+	require.NoError(t, store.HeartbeatJobForWorkerAttempt(
+		ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt, 2*time.Second))
+	refreshed, err := store.getJobByKey(ctx, job.Kind, ScopeProject, store.ProjectKey(), job.JobKey)
+	require.NoError(t, err)
+	require.True(t, refreshed.LeaseUntil.After(beforeLease))
+	require.False(t, refreshed.HeartbeatAt.IsZero())
+	require.Equal(t, JobStatusRunning, refreshed.Status)
+
+	require.ErrorIs(t, store.HeartbeatJobForWorkerAttempt(
+		ctx, claimed[0].ID, "stale-worker", claimed[0].Attempt, time.Second),
+		ErrJobLeaseLost)
+	require.ErrorIs(t, store.HeartbeatJobForWorkerAttempt(
+		ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt+1, time.Second),
+		ErrJobLeaseLost)
+
+	expired := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+	_, err = store.db.ExecContext(ctx, `
+		UPDATE memory_jobs SET lease_until = ?, updated_at = ?
+		WHERE id = ? AND project_key = ?
+	`, expired, expired, claimed[0].ID, store.ProjectKey())
+	require.NoError(t, err)
+	require.ErrorIs(t, store.HeartbeatJobForWorkerAttempt(
+		ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt, time.Second),
+		ErrJobLeaseLost)
 }
 
 func TestMemoryJobRetryExhaustion(t *testing.T) {

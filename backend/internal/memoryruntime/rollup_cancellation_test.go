@@ -18,6 +18,7 @@ func (s cancelledWindowSummarizer) SummarizeWindow(ctx context.Context, _ Window
 
 func TestRollupCancellationPersistsFailureAndRecoversWithoutExtraction(t *testing.T) {
 	rt, source, store := newRecoveryRuntime(t, 2, 20)
+	source.session.SessionGeneration = 1
 	rt.Config.TurnDigestWindowSummaryEnabled = true
 	rt.Config.TurnDigestWindowTurns = 1
 	extractions := 0
@@ -26,7 +27,7 @@ func TestRollupCancellationPersistsFailureAndRecoversWithoutExtraction(t *testin
 		return ExtractionResult{}, nil
 	})
 	_, err := store.RecordTurnDigest(context.Background(), memorystore.TurnDigest{
-		SessionID: source.session.ID, TurnID: "rollup-cancel", Outcome: "success", MessageSeqEnd: 2,
+		SessionID: source.session.ID, SessionGeneration: 1, TurnID: "rollup-cancel", Outcome: "success", MessageSeqEnd: 2,
 		UserText: "preserve evidence", AssistantText: "canonical evidence preserved",
 	})
 	require.NoError(t, err)

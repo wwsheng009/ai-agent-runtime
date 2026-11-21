@@ -95,7 +95,7 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 	}
 	claimed, err := c.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
 		WorkerID: worker, Kind: "phase2_consolidate", JobKey: jobKey,
-		ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now,
+		ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now, Lease: c.Config.Lease,
 	})
 	if err != nil || len(claimed) == 0 {
 		return result, err
@@ -183,7 +183,20 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		return fail(err)
 	}
 	if summary == nil {
-		text, ids, tokens, model, metadata := c.buildPreparedSummary(ctx, input, reasonPhase2)
+		var text string
+		var ids []string
+		var tokens int
+		var model string
+		var metadata map[string]interface{}
+		heartbeatErr := withJobLeaseHeartbeat(ctx, c.Store, c.Config.Lease, claimed[0],
+			func(heartbeatCtx context.Context) error {
+				text, ids, tokens, model, metadata = c.buildPreparedSummary(
+					heartbeatCtx, input, reasonPhase2)
+				return nil
+			})
+		if heartbeatErr != nil {
+			return fail(heartbeatErr)
+		}
 		if strings.TrimSpace(text) == "" || len(ids) == 0 {
 			if err := completeJob(""); err != nil {
 				return fail(err)
@@ -235,7 +248,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 	for {
 		claimed, err := c.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
 			WorkerID: worker, Kind: "summary_rebuild",
-			ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now,
+			ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now, Lease: c.Config.Lease,
 		})
 		if err != nil {
 			return result, err
@@ -285,7 +298,20 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 			result.RebuildJobs++
 			continue
 		}
-		text, ids, tokens, model, metadata := c.buildSummary(ctx, summaryRecords, reasonSummaryRebuild)
+		var text string
+		var ids []string
+		var tokens int
+		var model string
+		var metadata map[string]interface{}
+		heartbeatErr := withJobLeaseHeartbeat(ctx, c.Store, c.Config.Lease, job,
+			func(heartbeatCtx context.Context) error {
+				text, ids, tokens, model, metadata = c.buildSummary(
+					heartbeatCtx, summaryRecords, reasonSummaryRebuild)
+				return nil
+			})
+		if heartbeatErr != nil {
+			return fail(heartbeatErr)
+		}
 		if strings.TrimSpace(text) == "" || len(ids) == 0 {
 			if err := complete(""); err != nil {
 				return fail(err)

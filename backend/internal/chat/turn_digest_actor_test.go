@@ -157,4 +157,12 @@ func TestSessionActorRecordsOneTurnDigestAtTerminalBoundary(t *testing.T) {
 	require.Equal(t, "success", digest.Outcome)
 	require.NotEmpty(t, digest.UserMessageID)
 	require.NotEmpty(t, digest.AssistantMessageID)
+	require.NotEmpty(t, digest.CaptureReceiptID)
+
+	receipts, err := storage.ListTurnCaptureReceiptsForSession(ctx, session.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, receipts, 1, "the terminal canonical write must materialize one capture receipt")
+	require.Equal(t, submit.result.TurnID, receipts[0].TurnID)
+	require.Equal(t, digest.CaptureReceiptID, receipts[0].ID)
+	require.Equal(t, "success", receipts[0].Outcome)
 }

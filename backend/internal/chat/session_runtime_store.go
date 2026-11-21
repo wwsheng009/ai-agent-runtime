@@ -2926,7 +2926,7 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 		seq, txErr = s.appendEventTx(attemptCtx, event, payloadJSON)
 		return txErr
 	})
-	elapsed := time.Since(start).Nanoseconds()
+	elapsed := elapsedNanoseconds(start)
 	counters := &s.appendCounters
 	counters.appends.Add(1)
 	counters.totalNs.Add(elapsed)
@@ -2977,7 +2977,7 @@ func (s *SQLiteRuntimeStore) appendEventTx(ctx context.Context, event runtimeeve
 		s.mu.Unlock()
 		return 0, fmt.Errorf("commit session event: %w", err)
 	}
-	s.appendCounters.lockHoldNs.Add(time.Since(txStart).Nanoseconds())
+	s.appendCounters.lockHoldNs.Add(elapsedNanoseconds(txStart))
 	s.mu.Unlock()
 	s.notifyEventWatchers(seq, event)
 	return seq, nil

@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,4 +125,63 @@ func TestSelectForInjectV2DiversifiesRecallKinds(t *testing.T) {
 	require.Len(t, selection.Recall, 2)
 	ids := []string{selection.Recall[0].ID, selection.Recall[1].ID}
 	require.Contains(t, ids, fact.ID, "kind diversity should surface a fact before a second same-kind decision")
+}
+
+func TestSelectForInjectV2NoMatchKeepsEmptySelection(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(Config{
+		ProjectRoot: t.TempDir(), Mode: "on", InjectionMode: "notes",
+		PinnedBudgetRatio: 0.2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	record, err := store.InsertCandidate(ctx, Candidate{
+		SessionID: "s1", Kind: "fact", Text: "unrelated deployment note",
+		Confidence: 0.9, SourceHash: "hash-no-match", SourceRevision: 1,
+	})
+	require.NoError(t, err)
+	_, err = store.PromoteCandidate(ctx, record.ID)
+	require.NoError(t, err)
+
+	selection, err := store.SelectForInjectV2(InjectOptions{
+		Query: "zzzz-unmatched-token", Limit: 5, TokenBudget: 600, SkipTrace: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, selection.CandidateCount)
+	require.Empty(t, selection.Recall)
+	require.Empty(t, selection.Dropped)
+}
+
+func TestSelectForInjectV2HydratesSelectedRecordAndPreservesFittedText(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(Config{
+		ProjectRoot: t.TempDir(), Mode: "on", InjectionMode: "notes",
+		PinnedBudgetRatio: 0.2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	original := "budgetprobe " + strings.Repeat("detail ", 80)
+	record, err := store.InsertCandidate(ctx, Candidate{
+		SessionID: "s1", Kind: "fact", Text: original, Confidence: 0.9,
+		SourceHash: "hash-hydration", SourceRevision: 1,
+		SourceRefs: []string{"source:hydration"}, Metadata: map[string]interface{}{"origin": "recall-test"},
+	})
+	require.NoError(t, err)
+	_, err = store.PromoteCandidate(ctx, record.ID)
+	require.NoError(t, err)
+
+	selection, err := store.SelectForInjectV2(InjectOptions{
+		Query: "budgetprobe", Limit: 1, TokenBudget: 50, SkipTrace: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, selection.Recall, 1)
+	selected := selection.Recall[0]
+	require.Equal(t, "recall-test", selected.Metadata["origin"],
+		"selected records must be hydrated from the authoritative row")
+	require.Contains(t, selected.SourceRefs, "source:hydration")
+	require.Less(t, len(selected.Text), len(original))
+	require.True(t, strings.HasSuffix(selected.Text, "…"),
+		"hydration must not undo the token-budget truncation")
 }

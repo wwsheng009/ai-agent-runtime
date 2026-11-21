@@ -12,15 +12,18 @@ This validates the host path that unit tests cannot prove:
   -> next session memory injection -> model recall
 
 Usage:
-  python backend/scripts/memory-conpty-e2e.py
-  python backend/scripts/memory-conpty-e2e.py --provider magpie \
+  python backend/scripts/memory-conpty-e2e.py --exe <freshly-built-aicli.exe>
+  python backend/scripts/memory-conpty-e2e.py --exe <freshly-built-aicli.exe> \
+    --provider magpie \
     --model auto/deepseek-v4.1-flash-1017 --reasoning max
 """
 import argparse
+import atexit
 import glob
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -158,51 +161,367 @@ def wait_for_exit(pty, timeout):
     return not pty.isalive()
 
 
-def memory_snapshot(db_path):
+def _empty_counts(*keys):
+    return {
+        "available": False,
+        "total": 0,
+        "by_" + "_".join(keys): {},
+        "error_present": False,
+    }
+
+
+_SAFE_LABELS = {
+    "state": {
+        "captured",
+        "materializing",
+        "materialized",
+        "deferred",
+        "failed",
+    },
+    "status": {
+        "pending",
+        "processing",
+        "done",
+        "failed",
+        "skipped",
+        "invalidated",
+        "candidate",
+        "active",
+        "superseded",
+        "expired",
+        "deleted",
+        "running",
+        "succeeded",
+    },
+    "rollup_status": {"pending", "done", "skipped", "failed"},
+    "kind": {
+        "fact",
+        "decision",
+        "preference",
+        "procedure",
+        "reference",
+        "correction",
+        "phase1_extract",
+        "phase1_extract/v2",
+        "phase1_rollup",
+        "phase2_consolidate",
+    },
+    "source_kind": {
+        "session_extract",
+        "turn_window",
+        "manual",
+        "import",
+        "correction",
+        "consolidation",
+        "agent",
+    },
+    "freshness_status": {"fresh", "stale", "unverified"},
+}
+
+
+def _safe_label(column, value):
+    label = "" if value is None else str(value).strip().lower()
+    return label if label in _SAFE_LABELS.get(column, set()) else "other"
+
+
+def _group_counts(con, table, *columns):
+    """Return only bounded counts; never return database errors or row data."""
+    result = _empty_counts(*columns)
+    try:
+        quoted = ", ".join(columns)
+        rows = con.execute(
+            f"select {quoted}, count(*) from {table} group by {quoted}"
+        )
+        groups = {}
+        for row in rows:
+            group = tuple(
+                _safe_label(column, value)
+                for column, value in zip(columns, row[:-1])
+            )
+            key = group[0] if len(group) == 1 else "|".join(group)
+            groups[key] = groups.get(key, 0) + int(row[-1])
+        result["available"] = True
+        result["total"] = sum(groups.values())
+        result["by_" + "_".join(columns)] = groups
+    except Exception:
+        result["error_present"] = True
+    return result
+
+
+def _count_query(con, query):
+    try:
+        return int(con.execute(query).fetchone()[0]), False
+    except Exception:
+        return 0, True
+
+
+def _find_session_database(session_dir):
+    """Find the effective session SQLite file without exposing its path."""
+    candidates = []
+    for pattern in ("*.sqlite", "*.sqlite3", "*.db"):
+        candidates.extend(
+            glob.glob(os.path.join(session_dir, "**", pattern), recursive=True)
+        )
+    candidates.sort(
+        key=lambda path: (
+            os.path.basename(path) not in ("session_history.sqlite", "sessions.sqlite"),
+            -os.path.getmtime(path) if os.path.exists(path) else 0,
+        )
+    )
+    for path in candidates:
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                found = con.execute(
+                    "select 1 from sqlite_master "
+                    "where type='table' and name='session_turn_capture_receipts'"
+                ).fetchone()
+                if found:
+                    return path
+            finally:
+                con.close()
+        except Exception:
+            continue
+    return ""
+
+
+def _canonical_capture_snapshot(session_dir):
+    result = {
+        "available": False,
+        "total": 0,
+        "by_state": {},
+        "materialized": 0,
+        "error_present": False,
+    }
+    db_path = _find_session_database(session_dir)
+    if not db_path:
+        return result
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            grouped = _group_counts(con, "session_turn_capture_receipts", "state")
+            result["available"] = grouped["available"]
+            result["total"] = grouped["total"]
+            result["by_state"] = grouped["by_state"]
+            result["materialized"] = result["by_state"].get("materialized", 0)
+            result["error_present"] = grouped["error_present"]
+        finally:
+            con.close()
+    except Exception:
+        result["error_present"] = True
+    return result
+
+
+def memory_snapshot(db_path, session_dir):
     snapshot = {
-        "db_path": db_path,
         "exists": os.path.exists(db_path),
         "schema_version": 0,
-        "digests": {},
-        "jobs": [],
-        "entries": [],
-        "summaries": [],
+        "canonical_capture_receipts": _canonical_capture_snapshot(session_dir),
+        "digests": _empty_counts("status"),
+        "digest_rollups": _empty_counts("rollup_status"),
+        "jobs": _empty_counts("kind", "status"),
+        "entries": _empty_counts("status", "kind"),
+        "sources": _empty_counts("source_kind"),
+        "windows": _empty_counts("status"),
+        "summaries": _empty_counts("status", "freshness_status"),
+        "capture_chain": {
+            "available": False,
+            "capture_backed_digests": 0,
+            "phase1_v2_succeeded": 0,
+            "phase1_legacy_succeeded": 0,
+            "output_receipts": 0,
+            "fully_linked": 0,
+            "capture_backed_sources": 0,
+            "capture_backed_entries": 0,
+            "capture_backed_windows": 0,
+            "capture_backed_window_summaries": 0,
+            "error_present": False,
+        },
     }
     if not snapshot["exists"]:
         return snapshot
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except Exception:
+        snapshot["error_present"] = True
+        return snapshot
     try:
         try:
             snapshot["schema_version"] = con.execute(
                 "select coalesce(max(version),0) from schema_migrations"
             ).fetchone()[0]
         except Exception:
-            pass
-        for status, count in con.execute(
-            "select status, count(*) from memory_turn_digests group by status"
-        ):
-            snapshot["digests"][status] = count
-        snapshot["jobs"] = [
-            dict(zip(("kind", "status", "attempt", "last_error"), row))
-            for row in con.execute(
-                "select kind, status, attempt, last_error from memory_jobs order by created_at"
-            )
-        ]
-        snapshot["entries"] = [
-            dict(zip(("id", "kind", "status", "text"), row))
-            for row in con.execute(
-                "select id, kind, status, text from memory_entries order by updated_at desc limit 20"
-            )
-        ]
-        snapshot["summaries"] = [
-            dict(zip(("id", "status", "freshness_status", "model"), row))
-            for row in con.execute(
-                "select id, status, freshness_status, model from memory_summaries "
-                "order by revision desc limit 5"
-            )
-        ]
+            snapshot["schema_version_error_present"] = True
+
+        snapshot["digests"] = _group_counts(con, "memory_turn_digests", "status")
+        snapshot["digest_rollups"] = _group_counts(
+            con, "memory_turn_digests", "rollup_status"
+        )
+        snapshot["jobs"] = _group_counts(con, "memory_jobs", "kind", "status")
+        snapshot["entries"] = _group_counts(
+            con, "memory_entries", "status", "kind"
+        )
+        snapshot["sources"] = _group_counts(con, "memory_sources", "source_kind")
+        snapshot["windows"] = _group_counts(con, "memory_turn_windows", "status")
+        snapshot["summaries"] = _group_counts(
+            con, "memory_summaries", "status", "freshness_status"
+        )
+
+        chain = snapshot["capture_chain"]
+        chain_queries = (
+            (
+                "capture_backed_digests",
+                "select count(*) from memory_turn_digests "
+                "where coalesce(capture_receipt_id, '') <> ''",
+            ),
+            (
+                "phase1_v2_succeeded",
+                "select count(*) from memory_turn_digests d "
+                "join memory_jobs j on j.id = d.process_job_id "
+                "where coalesce(d.capture_receipt_id, '') <> '' "
+                "  and d.status = 'done' "
+                "  and j.kind = 'phase1_extract/v2' and j.status = 'succeeded'",
+            ),
+            (
+                "phase1_legacy_succeeded",
+                "select count(*) from memory_jobs "
+                "where kind = 'phase1_extract' and status = 'succeeded'",
+            ),
+            (
+                "output_receipts",
+                "select count(*) from memory_turn_output_receipts o "
+                "join memory_turn_digests d on d.id = o.digest_id "
+                "join memory_jobs j on j.id = o.job_id "
+                "where coalesce(o.capture_receipt_id, '') <> '' "
+                "  and o.project_key = d.project_key "
+                "  and o.capture_receipt_id = d.capture_receipt_id "
+                "  and o.job_id = d.process_job_id "
+                "  and d.status = 'done' "
+                "  and j.kind = 'phase1_extract/v2' and j.status = 'succeeded'",
+            ),
+            (
+                "fully_linked",
+                "select count(*) from memory_turn_digests d "
+                "join memory_jobs j on j.id = d.process_job_id "
+                "join memory_turn_output_receipts o "
+                "  on o.project_key = d.project_key "
+                " and o.capture_receipt_id = d.capture_receipt_id "
+                " and o.digest_id = d.id "
+                " and o.job_id = j.id "
+                "where coalesce(d.capture_receipt_id, '') <> '' "
+                "  and d.status = 'done' "
+                "  and j.kind = 'phase1_extract/v2' "
+                "  and j.status = 'succeeded'",
+            ),
+            (
+                "capture_backed_sources",
+                "select count(*) from memory_sources s "
+                "join memory_entries e on e.id = s.memory_id "
+                "join memory_turn_digests d "
+                "  on d.session_id = s.session_id and d.turn_id = s.turn_id "
+                " and d.session_generation = s.source_session_generation "
+                " and d.source_revision = s.source_revision "
+                " and d.range_hash = s.source_hash and d.project_key = e.project_key "
+                "join memory_jobs j on j.id = d.process_job_id "
+                "join memory_turn_output_receipts o "
+                "  on o.digest_id = d.id and o.job_id = j.id "
+                " and o.capture_receipt_id = d.capture_receipt_id "
+                "where coalesce(d.capture_receipt_id, '') <> '' "
+                "  and d.status = 'done' and j.kind = 'phase1_extract/v2' "
+                "  and j.status = 'succeeded' "
+                "  and s.source_kind = 'session_extract' "
+                "  and e.source_kind = 'session_extract' "
+                "  and e.status in ('candidate', 'active') "
+                "  and coalesce(e.deleted_at, '') = ''",
+            ),
+            (
+                "capture_backed_entries",
+                "select count(distinct e.id) from memory_sources s "
+                "join memory_entries e on e.id = s.memory_id "
+                "join memory_turn_digests d "
+                "  on d.session_id = s.session_id and d.turn_id = s.turn_id "
+                " and d.session_generation = s.source_session_generation "
+                " and d.source_revision = s.source_revision "
+                " and d.range_hash = s.source_hash and d.project_key = e.project_key "
+                "join memory_jobs j on j.id = d.process_job_id "
+                "join memory_turn_output_receipts o "
+                "  on o.digest_id = d.id and o.job_id = j.id "
+                " and o.capture_receipt_id = d.capture_receipt_id "
+                "where coalesce(d.capture_receipt_id, '') <> '' "
+                "  and d.status = 'done' and j.kind = 'phase1_extract/v2' "
+                "  and j.status = 'succeeded' "
+                "  and s.source_kind = 'session_extract' "
+                "  and e.source_kind = 'session_extract' "
+                "  and e.status in ('candidate', 'active') "
+                "  and coalesce(e.deleted_at, '') = ''",
+            ),
+            (
+                "capture_backed_windows",
+                "select count(distinct w.window_seq) "
+                "from memory_turn_windows w "
+                "where w.status = 'done' and exists ("
+                "  select 1 from memory_turn_digests d "
+                "  where d.project_key = w.project_key "
+                "    and d.session_id = w.session_id "
+                "    and d.session_generation = w.session_generation "
+                "    and d.digest_seq between w.start_digest_seq and w.end_digest_seq "
+                "    and coalesce(d.capture_receipt_id, '') <> '' "
+                "    and d.status = 'done' and d.rollup_status = 'done' "
+                "    and d.rollup_window_id = w.id"
+                ")",
+            ),
+            (
+                "capture_backed_window_summaries",
+                "select count(distinct w.window_seq) "
+                "from memory_turn_windows w "
+                "where w.status = 'done' and trim(w.summary_text) <> '' and exists ("
+                "  select 1 from memory_turn_digests d "
+                "  where d.project_key = w.project_key "
+                "    and d.session_id = w.session_id "
+                "    and d.session_generation = w.session_generation "
+                "    and d.digest_seq between w.start_digest_seq and w.end_digest_seq "
+                "    and coalesce(d.capture_receipt_id, '') <> '' "
+                "    and d.status = 'done' and d.rollup_status = 'done' "
+                "    and d.rollup_window_id = w.id"
+                ")",
+            ),
+        )
+        chain["available"] = True
+        for key, query in chain_queries:
+            value, failed = _count_query(con, query)
+            chain[key] = value
+            chain["error_present"] = chain["error_present"] or failed
+        if chain["error_present"]:
+            chain["available"] = False
     finally:
         con.close()
+    return snapshot
+
+
+def capture_chain_ready(snapshot):
+    receipt = snapshot["canonical_capture_receipts"]
+    chain = snapshot["capture_chain"]
+    return (
+        receipt["available"]
+        and receipt["materialized"] > 0
+        and chain["available"]
+        and chain["capture_backed_digests"] > 0
+        and chain["phase1_v2_succeeded"] > 0
+        and chain["output_receipts"] > 0
+        and chain["fully_linked"] > 0
+        and chain["capture_backed_sources"] > 0
+        and chain["capture_backed_entries"] > 0
+        and chain["capture_backed_windows"] > 0
+        and chain["capture_backed_window_summaries"] > 0
+    )
+
+
+def wait_for_capture_chain(db_path, session_dir, timeout):
+    deadline = time.monotonic() + timeout
+    snapshot = memory_snapshot(db_path, session_dir)
+    while not capture_chain_ready(snapshot) and time.monotonic() < deadline:
+        time.sleep(0.5)
+        snapshot = memory_snapshot(db_path, session_dir)
     return snapshot
 
 
@@ -210,10 +529,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--exe",
-        default=os.environ.get(
-            "AICLI_MEMORY_CONPTY_EXE",
-            r"E:\projects\ai\ai-agent-runtime\backend\aicli.exe",
-        ),
+        default=os.environ.get("AICLI_MEMORY_CONPTY_EXE", ""),
     )
     ap.add_argument("--provider", default="magpie")
     ap.add_argument("--model", default="auto/deepseek-v4.1-flash-1017")
@@ -225,6 +541,9 @@ def main():
         help="Only run the first session (digest/extraction), skip cross-session recall.",
     )
     args = ap.parse_args()
+    if not args.exe or not os.path.isfile(args.exe):
+        print("[FAIL] provide --exe pointing to a freshly built executable")
+        return 2
 
     out_dir = os.path.join(
         r"E:\projects\ai\ai-agent-runtime\output\memory-conpty",
@@ -234,6 +553,11 @@ def main():
     workspace = tempfile.mkdtemp(prefix="aicli-memory-conpty-ws-")
     session_dir = tempfile.mkdtemp(prefix="aicli-memory-conpty-sessions-")
     log_dir = tempfile.mkdtemp(prefix="aicli-memory-conpty-logs-")
+    # Session/log artifacts may contain prompts, model output, or provider
+    # request bodies. They are only needed while this run is executing.
+    atexit.register(shutil.rmtree, workspace, ignore_errors=True)
+    atexit.register(shutil.rmtree, session_dir, ignore_errors=True)
+    atexit.register(shutil.rmtree, log_dir, ignore_errors=True)
     os.makedirs(os.path.join(workspace, ".aicli"), exist_ok=True)
     runtime_config = """memory:
   mode: on
@@ -246,7 +570,8 @@ def main():
       enabled: true
       storeText: true
       recoveryOnStartup: true
-      windowSummaryEnabled: false
+      windowSummaryEnabled: true
+      windowTurns: 1
       idleExtractMinutes: 1
   consolidation:
     enabled: true
@@ -259,10 +584,8 @@ def main():
 
     env = {**os.environ, "AICLI_FOLDER_TRUST": "1"}
     cmd = chat_command(args, session_dir, log_dir, PROMPT)
-    print("EXE:", args.exe)
+    print("EXE: configured")
     print("MODEL:", args.provider, args.model, args.reasoning)
-    print("WORKSPACE:", workspace)
-    print("COMMAND:", " ".join(cmd))
 
     pty = PtyProcess.spawn(cmd, cwd=workspace, dimensions=(50, 160), env=env)
     rec = PtyRecorder(pty)
@@ -292,9 +615,9 @@ def main():
     screen = rec.text()
     marker_seen = MARKER in screen
     db_path = os.path.join(workspace, ".aicli", "memory", "memory.db")
-    snapshot = memory_snapshot(db_path)
-    with open(os.path.join(out_dir, "screen-visible.txt"), "w", encoding="utf-8") as fh:
-        fh.write(screen)
+    snapshot = wait_for_capture_chain(
+        db_path, session_dir, max(0.0, min(args.timeout, 60.0))
+    )
     with open(os.path.join(out_dir, "memory-snapshot.json"), "w", encoding="utf-8") as fh:
         json.dump(snapshot, fh, ensure_ascii=False, indent=2)
 
@@ -333,12 +656,6 @@ def main():
             recall_clean_exit = False
 
         recall_screen = recall_rec.text()
-        with open(
-            os.path.join(out_dir, "screen-recall-visible.txt"),
-            "w",
-            encoding="utf-8",
-        ) as fh:
-            fh.write(recall_screen)
 
         recall_session_dir = find_session_dir(log_dir, RECALL_PROMPT)
         if not recall_session_dir:
@@ -368,7 +685,7 @@ def main():
         )
         recall_marker_seen = RECALL_MARKER in recall_screen
         recall_evidence = {
-            "session_dir": recall_session_dir,
+            "session_found": bool(recall_session_dir),
             "request_contains_injected_memory": injection_request_seen,
             "finalized": recall_finalized_seen,
             "clean_exit": recall_clean_exit,
@@ -390,7 +707,9 @@ def main():
         ) as fh:
             json.dump(recall_evidence, fh, ensure_ascii=False, indent=2)
 
-        snapshot = memory_snapshot(db_path)
+        snapshot = wait_for_capture_chain(
+            db_path, session_dir, max(0.0, min(args.timeout, 60.0))
+        )
         with open(
             os.path.join(out_dir, "memory-snapshot.json"),
             "w",
@@ -398,12 +717,10 @@ def main():
         ) as fh:
             json.dump(snapshot, fh, ensure_ascii=False, indent=2)
 
-    digest_total = sum(snapshot["digests"].values())
-    phase1_succeeded = any(
-        job["kind"] == "phase1_extract" and job["status"] == "succeeded"
-        for job in snapshot["jobs"]
-    )
-    entries = snapshot["entries"]
+    receipt = snapshot["canonical_capture_receipts"]
+    chain = snapshot["capture_chain"]
+    digest_total = snapshot["digests"]["total"]
+    entries_total = snapshot["entries"]["total"]
     checks = [
         ("real provider turn finished in ConPTY", turn_finished_seen),
         ("first session finalized before commands", finalized_seen),
@@ -411,8 +728,25 @@ def main():
         ("real provider turn reached ConPTY marker", marker_seen),
         ("/memory status rendered runtime/digest diagnostics", status_seen),
         ("turn digest rows were persisted", digest_total > 0),
-        ("phase1 extraction succeeded", phase1_succeeded or len(entries) > 0),
-        ("memory record/candidate exists", len(entries) > 0),
+        ("canonical capture receipt exists", receipt["available"] and receipt["total"] > 0),
+        ("canonical capture receipt was materialized", receipt["materialized"] > 0),
+        ("capture-chain evidence queries completed", chain["available"] and not chain["error_present"]),
+        ("capture-backed turn digest exists", chain["capture_backed_digests"] > 0),
+        (
+            "capture-backed phase1_extract/v2 succeeded (legacy ignored)",
+            chain["phase1_v2_succeeded"] > 0,
+        ),
+        (
+            "legacy phase1 is not being used as capture proof",
+            chain["phase1_v2_succeeded"] > 0,
+        ),
+        ("capture-backed turn output receipt exists", chain["output_receipts"] > 0),
+        ("digest/job/output receipt are fully linked", chain["fully_linked"] > 0),
+        ("capture-backed source/provenance exists", chain["capture_backed_sources"] > 0),
+        ("capture-backed memory entry/candidate exists", chain["capture_backed_entries"] > 0),
+        ("capture-backed turn window completed", chain["capture_backed_windows"] > 0),
+        ("capture-backed turn window summary exists", chain["capture_backed_window_summaries"] > 0),
+        ("memory entries were persisted", entries_total > 0),
     ]
     if not args.skip_recall:
         checks.extend(
@@ -430,12 +764,14 @@ def main():
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
         print(("[PASS] " if ok else "[FAIL] ") + name)
-    print("DIGESTS:", snapshot["digests"])
+    print("DIGESTS:", json.dumps(snapshot["digests"], ensure_ascii=False))
     print("JOBS:", json.dumps(snapshot["jobs"], ensure_ascii=False))
-    print("ENTRIES:", json.dumps(entries, ensure_ascii=False))
-    if not args.skip_recall:
-        print("RECALL SESSION:", recall_session_dir)
-    print("ARTIFACTS:", out_dir)
+    print("ENTRIES:", json.dumps(snapshot["entries"], ensure_ascii=False))
+    print("SOURCES:", json.dumps(snapshot["sources"], ensure_ascii=False))
+    print("WINDOWS:", json.dumps(snapshot["windows"], ensure_ascii=False))
+    print("SUMMARIES:", json.dumps(snapshot["summaries"], ensure_ascii=False))
+    print("CAPTURE_CHAIN:", json.dumps(chain, ensure_ascii=False))
+    print("ARTIFACTS:", os.path.basename(out_dir))
     print(("RESULT: PASS" if not failed else "RESULT: FAIL") + f" failed={failed}")
     return 0 if not failed else 1
 

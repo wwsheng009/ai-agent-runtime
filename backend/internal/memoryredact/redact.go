@@ -25,8 +25,39 @@ var rules = []rule{
 	{name: "env_secret_line", re: regexp.MustCompile(`(?im)^[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY)[A-Z0-9_]*\s*=.*$`)},
 }
 
+// secretHints is intentionally a superset of the literal fragments required by
+// every regexp rule. Most memory text does not contain any token-shaped hint,
+// so the selector can skip nine backtracking regexp scans. A hint hit still
+// goes through the authoritative regexps; this is only a fast reject.
+var secretHints = []string{
+	"sk-", "bearer",
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+	"akia", "-----begin",
+	"password", "passwd", "pwd",
+	"api_key", "apikey", "api-key",
+	"access_token", "accesstoken", "access-token",
+	"secret_key", "secretkey", "secret-key",
+	"token", "secret",
+}
+
+func maybeSecret(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, hint := range secretHints {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 // DetectSecret returns the first matching rule name, or "".
 func DetectSecret(text string) string {
+	if !maybeSecret(text) {
+		return ""
+	}
 	for _, candidate := range rules {
 		if candidate.re.MatchString(text) {
 			return candidate.name
@@ -37,6 +68,9 @@ func DetectSecret(text string) string {
 
 // Redact replaces secret-shaped spans and returns the rule names that fired.
 func Redact(text string) (string, []string) {
+	if !maybeSecret(text) {
+		return text, nil
+	}
 	matched := make([]string, 0, 1)
 	for _, candidate := range rules {
 		if !candidate.re.MatchString(text) {

@@ -3,6 +3,7 @@ package memoryruntime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,28 @@ type materializedCaptureSource struct {
 type paginatedMaterializedCaptureSource struct {
 	*materializedCaptureSource
 	receipts []chat.TurnCaptureReceipt
+}
+
+type blockingReceiptExtractor struct {
+	delay  time.Duration
+	result ExtractionResult
+	calls  int
+}
+
+func (e *blockingReceiptExtractor) Extract(
+	ctx context.Context,
+	_ SessionRef,
+	_ Transcript,
+) (ExtractionResult, error) {
+	e.calls++
+	timer := time.NewTimer(e.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return e.result, nil
+	case <-ctx.Done():
+		return ExtractionResult{}, ctx.Err()
+	}
 }
 
 func (s *paginatedMaterializedCaptureSource) ListMaterializedTurnCaptureReceiptsPage(
@@ -214,7 +237,8 @@ func TestMaterializeTurnCaptureReceiptsSkipsReusedSessionGeneration(t *testing.T
 	require.NoError(t, err)
 	require.Zero(t, materialized)
 	require.Equal(t, 0, source.markCalls, "a stale incarnation must not be acknowledged")
-	require.Equal(t, "captured", source.receipt.State)
+	require.Equal(t, "deferred", source.receipt.State)
+	require.NotZero(t, source.receipt.RetryAt)
 
 	status, err := store.Status(ctx)
 	require.NoError(t, err)
@@ -225,6 +249,11 @@ func TestMaterializeTurnCaptureReceiptsSkipsReusedSessionGeneration(t *testing.T
 func TestRunPendingTurnCaptureReceiptsCommitsOneTurnAtomically(t *testing.T) {
 	ctx := context.Background()
 	runtime, store, source, extractor, capture := newMaterializedCaptureRuntime(t, 0, true)
+	runtime.Config.TurnDigestStoreText = true
+	runtime.Config.TurnDigestWindowSummaryEnabled = true
+	runtime.Config.TurnDigestWindowTurns = 1
+	summarizer := &fakeWindowSummarizer{result: WindowSummary{Text: "captured window summary"}}
+	runtime.WindowSummarizer = summarizer
 	result, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerStartup)
 	require.NoError(t, err)
 	require.Equal(t, 1, result.Processed,
@@ -240,6 +269,9 @@ func TestRunPendingTurnCaptureReceiptsCommitsOneTurnAtomically(t *testing.T) {
 	digest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
 	require.NoError(t, err)
 	require.Equal(t, memorystore.TurnDigestDone, digest.Status)
+	require.Equal(t, "remember the decision", digest.UserText)
+	require.Equal(t, "use the durable capture path", digest.AssistantText)
+	require.False(t, digest.TextTruncated)
 	status, err := store.Status(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, status.ByStatus[string(memorystore.StatusCandidate)])
@@ -251,8 +283,13 @@ func TestRunPendingTurnCaptureReceiptsCommitsOneTurnAtomically(t *testing.T) {
 	require.Zero(t, result.Processed, "replay should skip the completed per-turn receipt")
 	require.Equal(t, 1, extractor.calls, "replay must not invoke the extractor again")
 
-	_, err = runtime.RunSessionEnd(ctx, capture.SessionID)
+	sessionEnd, err := runtime.RunSessionEnd(ctx, capture.SessionID)
 	require.NoError(t, err)
+	require.Equal(t, 1, sessionEnd.RolledUp)
+	require.Equal(t, 1, summarizer.calls)
+	require.Len(t, summarizer.inputs, 1)
+	require.Equal(t, "remember the decision", summarizer.inputs[0].Digests[0].UserText)
+	require.Equal(t, "use the durable capture path", summarizer.inputs[0].Digests[0].AssistantText)
 	require.Zero(t, source.readCalls, "session-end must not fall back to full-session extraction after canonical capture")
 	require.Equal(t, 1, extractor.calls, "session-end must not re-extract the canonical turn")
 
@@ -262,6 +299,70 @@ func TestRunPendingTurnCaptureReceiptsCommitsOneTurnAtomically(t *testing.T) {
 	require.Zero(t, source.readCalls, "disabling the turn digest feature must not make captured canonical turns eligible for fallback")
 
 	require.Equal(t, 1, status.Jobs[string(memorystore.JobStatusSucceeded)])
+}
+
+func TestRunPendingTurnCaptureReceiptsHeartbeatsSlowExtractionLease(t *testing.T) {
+	runtime, store, _, _, capture := newMaterializedCaptureRuntime(t, 0, true)
+	runtime.Config.Lease = 500 * time.Millisecond
+	extractor := &blockingReceiptExtractor{
+		delay: 1200 * time.Millisecond,
+		result: ExtractionResult{Model: "test-model", Candidates: []Candidate{{
+			Kind: "decision", Text: "long provider calls renew their job lease",
+			Confidence: 0.95, SourceMessageIDs: []string{"capture-assistant"},
+		}}},
+	}
+	runtime.Extractor = extractor
+
+	result, err := runtime.RunPendingTurnCaptureReceipts(context.Background(), TriggerSessionEnd)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Processed)
+	require.Equal(t, 1, extractor.calls)
+
+	digest, err := store.GetTurnDigestByCaptureReceipt(context.Background(), capture.ID)
+	require.NoError(t, err)
+	require.Equal(t, memorystore.TurnDigestDone, digest.Status)
+	status, err := store.Status(context.Background())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, status.Jobs[string(memorystore.JobStatusSucceeded)])
+	require.Equal(t, 1, status.ByStatus[string(memorystore.StatusCandidate)])
+}
+
+func TestCaptureBackedDigestStoresOnlyRedactedTextWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	runtime, store, source, _, capture := newMaterializedCaptureRuntime(t, 0, true)
+	secret := "sk-" + strings.Repeat("a", 60)
+	rawUserText := "keep the decision " + secret
+	rawAssistantText := "confirmed decision " + secret
+	source.fakeWindowSource.window.Messages[0].Content = rawUserText
+	source.fakeWindowSource.window.Messages[1].Content = rawAssistantText
+	runtime.Config.TurnDigestStoreText = true
+
+	result, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerSessionEnd)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Processed)
+	digest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
+	require.NoError(t, err)
+	expectedUserText, _ := RedactForPrompt(rawUserText)
+	expectedAssistantText, _ := RedactForPrompt(rawAssistantText)
+	require.Equal(t, expectedUserText, digest.UserText)
+	require.Equal(t, expectedAssistantText, digest.AssistantText)
+	if strings.Contains(digest.UserText, secret) || strings.Contains(digest.AssistantText, secret) {
+		t.Fatal("capture-backed digest persisted secret-shaped text")
+	}
+}
+
+func TestCaptureBackedDigestLeavesTextEmptyWhenDisabled(t *testing.T) {
+	ctx := context.Background()
+	runtime, store, _, _, capture := newMaterializedCaptureRuntime(t, 0, true)
+
+	result, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerSessionEnd)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Processed)
+	digest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)
+	require.NoError(t, err)
+	require.Empty(t, digest.UserText)
+	require.Empty(t, digest.AssistantText)
+	require.False(t, digest.TextTruncated)
 }
 
 func TestRunPendingTurnCaptureReceiptsPaginatesPastCompletedReceipts(t *testing.T) {
@@ -364,6 +465,101 @@ func TestMaterializeTurnCaptureReceiptRetriesCanonicalAcknowledgement(t *testing
 	require.EqualValues(t, 1, status.Jobs[string(memorystore.JobStatusPending)],
 		"ack retry must reuse the existing idempotent job")
 	require.Zero(t, status.Jobs[string(memorystore.JobStatusSucceeded)])
+}
+
+func TestMaterializeTurnCaptureReceiptSkipsIneligibleSessions(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, runtime *Runtime, source *materializedCaptureSource)
+	}{
+		{
+			name: "session_mode_disabled",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				runtime.Modes = fakeModes{source.receipt.SessionID: memorystore.SessionModeDisabled}
+			},
+		},
+		{
+			name: "missing_session_generation",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				source.receipt.SessionGeneration = 0
+			},
+		},
+		{
+			name: "session_mode_polluted",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				runtime.Modes = fakeModes{source.receipt.SessionID: memorystore.SessionModePolluted}
+			},
+		},
+		{
+			name: "subagent",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				runtime.Config.IncludeSubagents = false
+				source.fakeSource.sessions[0].IsSubagent = true
+			},
+		},
+		{
+			name: "ephemeral",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				source.fakeSource.sessions[0].Ephemeral = true
+			},
+		},
+		{
+			name: "workspace_missing",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				runtime.Config.RequireWorkspaceMatch = true
+				source.fakeSource.sessions[0].WorkspacePath = ""
+			},
+		},
+		{
+			name: "workspace_mismatch",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				runtime.Config.RequireWorkspaceMatch = true
+				source.fakeSource.sessions[0].WorkspacePath = "/other-workspace"
+			},
+		},
+		{
+			name: "rollout_age",
+			setup: func(t *testing.T, runtime *Runtime, source *materializedCaptureSource) {
+				source.fakeSource.sessions[0].LastActivityAt = runtime.now().Add(-31 * 24 * time.Hour)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, store, source, _, capture := newMaterializedCaptureRuntime(t, 0, false)
+			source.receipt.State = "captured"
+			test.setup(t, runtime, source)
+
+			err := runtime.MaterializeTurnCaptureReceipt(context.Background(), capture.ID)
+			require.ErrorIs(t, err, errCaptureReceiptIneligible)
+			require.Zero(t, source.markCalls,
+				"ineligible receipts must stay unacknowledged and be deferred")
+			require.Equal(t, "deferred", source.receipt.State)
+			require.NotZero(t, source.receipt.RetryAt)
+			status, err := store.Status(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, status.Jobs)
+			require.Empty(t, status.TurnDigests)
+		})
+	}
+}
+
+func TestRecordTurnDigestCaptureReceiptIneligibleIsSkipped(t *testing.T) {
+	runtime, store, source, _, capture := newMaterializedCaptureRuntime(t, 0, false)
+	source.receipt.State = "captured"
+	runtime.Modes = fakeModes{source.receipt.SessionID: memorystore.SessionModeDisabled}
+
+	err := runtime.RecordTurnDigest(context.Background(), chat.TurnDigest{
+		SessionID:        source.receipt.SessionID,
+		TurnID:           source.receipt.TurnID,
+		CaptureReceiptID: source.receipt.ID,
+	})
+	require.NoError(t, err, "an ineligible receipt is a skipped capture, not a failure")
+	require.Zero(t, source.markCalls)
+	require.Equal(t, "deferred", source.receipt.State)
+	digest, err := store.GetTurnDigestByCaptureReceipt(context.Background(), capture.ID)
+	require.Error(t, err)
+	require.Empty(t, digest.ID)
 }
 
 func TestMaterializeTurnCaptureReceiptDefersCanonicalValidationFailure(t *testing.T) {

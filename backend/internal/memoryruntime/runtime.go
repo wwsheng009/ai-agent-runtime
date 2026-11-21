@@ -266,7 +266,13 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 		result.Skipped = 1
 		return result, nil
 	}
-	extraction, err := r.Extractor.Extract(ctx, session, transcript)
+	var extraction ExtractionResult
+	err = withJobLeaseHeartbeat(ctx, r.Store, r.Config.Lease, claimed[0],
+		func(heartbeatCtx context.Context) error {
+			var extractErr error
+			extraction, extractErr = r.Extractor.Extract(heartbeatCtx, session, transcript)
+			return extractErr
+		})
 	if err != nil {
 		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}
@@ -487,7 +493,13 @@ func (r *Runtime) runSessionWindowPartWithJob(ctx context.Context, trigger Trigg
 		result.Skipped = 1
 		return result, nil
 	}
-	extraction, err := r.Extractor.Extract(ctx, session, transcript)
+	var extraction ExtractionResult
+	err = withJobLeaseHeartbeat(ctx, r.Store, r.Config.Lease, claimed[0],
+		func(heartbeatCtx context.Context) error {
+			var extractErr error
+			extraction, extractErr = r.Extractor.Extract(heartbeatCtx, session, transcript)
+			return extractErr
+		})
 	if err != nil {
 		return result, r.failExtractionJob(ctx, claimed[0], err)
 	}

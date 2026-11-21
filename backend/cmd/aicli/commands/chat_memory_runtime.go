@@ -55,7 +55,7 @@ func (h *localChatRuntimeHost) initializeMemoryRuntime(session *ChatSession) err
 // (legacy buildSessionActor and runtimehost.Deps). Keeping it here prevents the
 // unified executor path from silently dropping the memory outbox.
 func localTurnDigestSink(h *localChatRuntimeHost) runtimechat.TurnDigestSink {
-	if h == nil || h.MemoryRuntime == nil {
+	if h == nil || h.MemoryRuntime == nil || !h.MemoryRuntime.Config.TurnDigestEnabled {
 		return nil
 	}
 	return h.MemoryRuntime

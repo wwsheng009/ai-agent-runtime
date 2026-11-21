@@ -161,14 +161,29 @@ func TestSubmitPromptOnSuspendedTurnResumesSameTurnID(t *testing.T) {
 	ctx := context.Background()
 	record := h.seedSuspendedTurn(t, "turn_parked")
 
-	result, err := h.actor.SubmitPrompt(ctx, "steer: 先做 A 再做 B，别等子任务", nil)
+	var selectedTurnID string
+	ctx = agent.WithTurnID(ctx, "turn_cli_provisional")
+	result, err := h.actor.SubmitPrompt(ctx, "steer: 先做 A 再做 B，别等子任务", nil, SubmitPromptOption{
+		TurnIDSelected: func(turnID string) {
+			selectedTurnID = turnID
+		},
+	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
+	require.Equal(t, "turn_parked", selectedTurnID,
+		"the durable suspended turn must override the CLI provisional identity")
 	require.Equal(t, []string{"turn_parked"}, h.preparedTurnIDs,
 		"挂起态收到 steer 必须以同一 turn_id 起新 episode，而不是新开 turn")
-	require.True(t, historyContainsUserText(h.history(t), "steer: 先做 A 再做 B，别等子任务"),
-		"steer 文本必须成为该 episode 的用户输入")
+	var persistedPrompt bool
+	for _, message := range h.history(t) {
+		if message.Role == "user" && message.Content == "steer: 先做 A 再做 B，别等子任务" {
+			persistedPrompt = true
+			require.Equal(t, "turn_parked", runtimetypes.TurnID(message),
+				"the persisted user row must use the actor-selected turn identity")
+		}
+	}
+	require.True(t, persistedPrompt, "steer 文本必须成为该 episode 的用户输入")
 
 	state := h.actor.StateForInspection()
 	require.NotNil(t, state)

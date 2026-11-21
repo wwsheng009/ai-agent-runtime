@@ -21,14 +21,15 @@ func TestPreviousTurnDigestMessageSeqEndAfterBacktrack(t *testing.T) {
 			store, err := New(Config{Root: t.TempDir(), Mode: "on"})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = store.Close() })
+			generation := int64(1)
 
 			kept, err := store.RecordTurnDigest(ctx, TurnDigest{
-				SessionID: "session-backtrack", TurnID: "kept",
+				SessionID: "session-backtrack", SessionGeneration: generation, TurnID: "kept",
 				MessageSeqEnd: 300, Status: status,
 			})
 			require.NoError(t, err)
 			removed, err := store.RecordTurnDigest(ctx, TurnDigest{
-				SessionID: kept.SessionID, TurnID: "removed",
+				SessionID: kept.SessionID, SessionGeneration: generation, TurnID: "removed",
 				MessageSeqEnd: 500, Status: TurnDigestDone, RollupStatus: TurnDigestRollupDone,
 			})
 			require.NoError(t, err)
@@ -37,8 +38,9 @@ func TestPreviousTurnDigestMessageSeqEndAfterBacktrack(t *testing.T) {
 			require.EqualValues(t, 500, previousEnd)
 
 			result, err := store.InvalidateSessionRange(ctx, kept.SessionID, SessionRangeInvalidation{
-				CutoffMessageSeq: 300,
-				BeforeMessageSeq: 500,
+				CutoffMessageSeq:  300,
+				BeforeMessageSeq:  500,
+				SessionGeneration: &generation,
 			}, "backtrack")
 			require.NoError(t, err)
 			require.EqualValues(t, 1, result.Digests)
@@ -51,7 +53,7 @@ func TestPreviousTurnDigestMessageSeqEndAfterBacktrack(t *testing.T) {
 			require.Equal(t, status, surviving.Status, "retained coverage must survive in every live state")
 
 			next, err := store.RecordTurnDigest(ctx, TurnDigest{
-				SessionID: kept.SessionID, TurnID: "new-branch", MessageSeqEnd: 304,
+				SessionID: kept.SessionID, SessionGeneration: generation, TurnID: "new-branch", MessageSeqEnd: 304,
 			})
 			require.NoError(t, err)
 			require.Greater(t, next.DigestSeq, removed.DigestSeq)
@@ -60,7 +62,7 @@ func TestPreviousTurnDigestMessageSeqEndAfterBacktrack(t *testing.T) {
 			require.EqualValues(t, 300, previousEnd, "only the retained branch may advance the watermark")
 
 			window, _, err := store.EnsureTurnWindow(ctx, TurnWindow{
-				SessionID: next.SessionID, WindowIndex: 1,
+				SessionID: next.SessionID, SessionGeneration: generation, WindowIndex: 1,
 				StartDigestSeq: next.DigestSeq, EndDigestSeq: next.DigestSeq,
 				StartMessageSeq: previousEnd + 1, EndMessageSeq: next.MessageSeqEnd,
 				TurnCount: 1, SourceHash: TurnWindowHash([]TurnDigest{next}),

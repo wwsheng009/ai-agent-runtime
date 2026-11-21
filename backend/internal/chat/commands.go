@@ -33,6 +33,9 @@ type SubmitPrompt struct {
 	// /skill 不再填充；通道保留给未来经评审的回合级注入需求），只影响本次
 	// run，不写回会话级稳定工具面。
 	TurnPinnedTools []runtimetypes.ToolDefinition
+	// TurnIDSelected receives the actor-authoritative identity after durable
+	// suspension lookup and before the prompt is loaded or persisted.
+	TurnIDSelected func(string)
 	// TriggerTurnAuto marks a prompt submitted by the P0-3b trigger_turn drain.
 	TriggerTurnAuto bool
 	// Accepted is notified after the prompt has been appended to session history,

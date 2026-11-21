@@ -27,7 +27,7 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		EventBus:     h.getRuntimeEventBus(),
 		LLMRuntime:   h.llmRuntime,
 	}
-	if rt := h.MemoryRuntime(); rt != nil {
+	if rt := h.MemoryRuntime(); rt != nil && rt.Config.TurnDigestEnabled {
 		deps.TurnDigestSink = rt
 	}
 	// 会话执行租约：与宿主同源（owner kind = sessionActorLeaseOwnerKind，scope = sessionID）。

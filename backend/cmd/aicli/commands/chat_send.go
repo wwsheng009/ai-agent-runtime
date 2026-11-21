@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -79,15 +81,25 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	defer stopBusyInputCapture()
 	ensureChatSystemPromptMessage(session)
 	beginChatUserTurn(session, userMessage)
-	// 用户输入 prompt 时立即持久化该 turn 的用户消息，确保退出时不丢失最后 turn。
-	if strings.TrimSpace(userMessage) != "" {
-		appendChatTurnUserMessage(session, userMessage)
-	}
 	executor, err := ensureChatExecutor(session)
 	if err != nil {
+		// Executor 构造失败时 actor 尚未取得本回合身份，保留 CLI 的兜底
+		// 持久化，避免用户输入随构造错误丢失。
+		appendChatTurnUserMessage(session, userMessage)
 		logChatTurnFailureIfUnrecorded(session, userMessage, err)
 		flushChatSessionLog(session)
 		return "", err
+	}
+	actorExecutor := chatExecutorArmsWaitingAfterBeginRun(executor)
+	if actorExecutor {
+		// 为 actor 请求一个 turn identity，随提交 context 传入；actor 若发现
+		// durable suspension 会选旧 turn 并通过回调覆盖此 provisional ID。
+		session.pendingActorTurnID = chatActorTurnIDForPrompt(session, userMessage)
+		defer func() { session.pendingActorTurnID = "" }()
+		appendChatTurnUserMessageWithTurnID(session, userMessage, session.pendingActorTurnID)
+	} else if strings.TrimSpace(userMessage) != "" {
+		// 非 actor executor 保留既有输入时持久化语义。
+		appendChatTurnUserMessage(session, userMessage)
 	}
 	// P0-1（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md）：
 	// 进程内 actor executor 在 BeginRun 之后自行置位等待态（见
@@ -149,11 +161,13 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 			continueCancel()
 			if continueErr != nil {
 				reportGoalAutoContinuationWarning(session, continueErr)
+				persistFailedActorPromptIfNeeded(session, actorExecutor, userMessage)
 				return response, err
 			}
 			turnSucceeded = true
 			return response, nil
 		}
+		persistFailedActorPromptIfNeeded(session, actorExecutor, userMessage)
 		logChatTurnFailureIfUnrecorded(session, userMessage, err)
 		flushChatSessionLog(session)
 		return response, err
@@ -163,6 +177,28 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	}
 	turnSucceeded = true
 	return response, nil
+}
+
+func chatActorTurnIDForPrompt(session *ChatSession, userMessage string) string {
+	if session != nil && strings.TrimSpace(userMessage) != "" {
+		prepared := prepareChatTurnUserMessage(session, userMessage)
+		if chatTurnUserMessageMatchesLast(session, prepared) && len(session.Messages) > 0 {
+			// A resend of a still-pending trailing user prompt remains the same
+			// logical turn. This keeps an old durable prompt compatible with the
+			// actor's idempotent append path.
+			if existing := strings.TrimSpace(runtimetypes.TurnID(session.Messages[len(session.Messages)-1])); existing != "" {
+				return existing
+			}
+		}
+	}
+	return "turn_" + uuid.NewString()
+}
+
+func persistFailedActorPromptIfNeeded(session *ChatSession, actorExecutor bool, userMessage string) {
+	if !actorExecutor || session == nil || strings.TrimSpace(userMessage) == "" {
+		return
+	}
+	appendChatTurnUserMessageWithTurnID(session, userMessage, session.pendingActorTurnID)
 }
 
 // sendMessageWithImages runs one chat turn with additional explicit local image
@@ -335,6 +371,10 @@ func beginChatUserTurn(session *ChatSession, userMessage string) {
 // 与 actor 内部 shouldAppendUserPromptMessage 的去重语义一致：若最后一条消息
 // 已是内容相同的用户消息（如 executor 已追加过），则跳过，避免重复。
 func appendChatTurnUserMessage(session *ChatSession, userMessage string) {
+	appendChatTurnUserMessageWithTurnID(session, userMessage, "")
+}
+
+func appendChatTurnUserMessageWithTurnID(session *ChatSession, userMessage, turnID string) {
 	if session == nil || strings.TrimSpace(userMessage) == "" {
 		return
 	}
@@ -342,7 +382,45 @@ func appendChatTurnUserMessage(session *ChatSession, userMessage string) {
 	if prepared == nil {
 		return
 	}
+	if strings.TrimSpace(turnID) != "" {
+		runtimechat.StampMessageTurnID(prepared, turnID)
+	}
 	if chatTurnUserMessageMatchesLast(session, prepared) {
+		turnID = strings.TrimSpace(turnID)
+		if turnID == "" || len(session.Messages) == 0 {
+			return
+		}
+		lastIndex := len(session.Messages) - 1
+		lastTurnID := strings.TrimSpace(runtimetypes.TurnID(session.Messages[lastIndex]))
+		if lastTurnID == turnID {
+			return
+		}
+		// Actor admission may replace this provisional ID with the durable
+		// suspended-turn ID. Re-key the already persisted trailing prompt rather
+		// than appending a duplicate user row.
+		updated := *session.Messages[lastIndex].Clone()
+		if updated.Metadata == nil {
+			updated.Metadata = runtimetypes.NewMetadata()
+		}
+		updated.Metadata.Set(runtimetypes.MetadataKeyTurnID, turnID)
+		session.Messages[lastIndex] = updated
+
+		session.resumeHistoryMu.Lock()
+		if count := len(session.ResumeHistory); count > 0 {
+			resumeIndex := count - 1
+			resumeLast := session.ResumeHistory[resumeIndex]
+			if resumeLast.Role == "user" && resumeLast.Content == prepared.Content &&
+				runtimellm.MessageHasLocalInputImages(&resumeLast) == runtimellm.MessageHasLocalInputImages(prepared) {
+				resumeUpdated := *resumeLast.Clone()
+				if resumeUpdated.Metadata == nil {
+					resumeUpdated.Metadata = runtimetypes.NewMetadata()
+				}
+				resumeUpdated.Metadata.Set(runtimetypes.MetadataKeyTurnID, turnID)
+				session.ResumeHistory[resumeIndex] = resumeUpdated
+			}
+		}
+		session.resumeHistoryMu.Unlock()
+		warnIfChatSessionSyncFails(session, "send-prompt turn identity repair", syncRuntimeSessionFromChat(session))
 		return
 	}
 	appendRuntimeMessage(session, *prepared)

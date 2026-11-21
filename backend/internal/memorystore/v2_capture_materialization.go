@@ -42,6 +42,15 @@ type TurnCaptureMaterialization struct {
 	JobKey   string
 }
 
+// TurnCaptureDigestText is the bounded, redacted text projection that may be
+// stored alongside a capture-backed digest when the caller's text policy
+// permits it. It is committed atomically with extraction output.
+type TurnCaptureDigestText struct {
+	UserText      string
+	AssistantText string
+	TextTruncated bool
+}
+
 // MaterializeTurnCapture atomically creates the digest and its executable
 // phase-1 job. Replaying an unacknowledged canonical receipt reuses both rows.
 func (s *Store) MaterializeTurnCapture(ctx context.Context, capture TurnCapture) (TurnCaptureMaterialization, error) {
@@ -323,6 +332,35 @@ func (s *Store) CommitTurnCaptureExtraction(
 	digestID, outputHash string,
 	candidates []Candidate,
 ) (int, error) {
+	return s.commitTurnCaptureExtraction(ctx, jobID, workerID, claimAttempt, capture,
+		digestID, outputHash, TurnCaptureDigestText{}, candidates)
+}
+
+// CommitTurnCaptureExtractionWithDigestText commits extraction output and its
+// optional bounded digest text in the same transaction. The text must already
+// be redacted and truncated by the runtime.
+func (s *Store) CommitTurnCaptureExtractionWithDigestText(
+	ctx context.Context,
+	jobID, workerID string,
+	claimAttempt int,
+	capture TurnCapture,
+	digestID, outputHash string,
+	digestText TurnCaptureDigestText,
+	candidates []Candidate,
+) (int, error) {
+	return s.commitTurnCaptureExtraction(ctx, jobID, workerID, claimAttempt, capture,
+		digestID, outputHash, digestText, candidates)
+}
+
+func (s *Store) commitTurnCaptureExtraction(
+	ctx context.Context,
+	jobID, workerID string,
+	claimAttempt int,
+	capture TurnCapture,
+	digestID, outputHash string,
+	digestText TurnCaptureDigestText,
+	candidates []Candidate,
+) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("memorystore: store is nil")
 	}
@@ -506,12 +544,14 @@ WHERE id = ? AND status = 'running' AND worker_id = ? AND attempt = ? AND kind =
 	}
 	res, err = tx.ExecContext(ctx, `
 UPDATE memory_turn_digests
-SET status = 'done', process_job_id = ?, last_error = NULL,
+SET user_text = ?, assistant_text = ?, text_truncated = ?,
+    status = 'done', process_job_id = ?, last_error = NULL,
     processed_at = ?, updated_at = ?
 WHERE id = ? AND project_key = ? AND capture_receipt_id = ?
   AND source_revision = ? AND range_hash = ?
   AND status IN ('pending', 'processing')
-`, jobID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+`, digestText.UserText, digestText.AssistantText, boolInt(digestText.TextTruncated),
+		jobID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		digestID, capture.ProjectKey, capture.ID, capture.CanonicalRevision, capture.RangeHash)
 	if err != nil {
 		return 0, fmt.Errorf("memorystore: complete turn digest: %w", err)

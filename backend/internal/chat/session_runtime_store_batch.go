@@ -90,7 +90,7 @@ func (s *SQLiteRuntimeStore) AppendEvents(ctx context.Context, events []runtimee
 		seqs, txErr = s.appendEventsTx(attemptCtx, prepared)
 		return txErr
 	})
-	elapsed := time.Since(start).Nanoseconds()
+	elapsed := elapsedNanoseconds(start)
 	counters := &s.appendCounters
 	counters.batches.Add(1)
 	counters.batchedEvents.Add(int64(len(events)))
@@ -186,7 +186,7 @@ func (s *SQLiteRuntimeStore) appendEventsTx(ctx context.Context, prepared []prep
 		s.mu.Unlock()
 		return nil, fmt.Errorf("commit session event batch: %w", err)
 	}
-	s.appendCounters.batchLockHoldNs.Add(time.Since(txStart).Nanoseconds())
+	s.appendCounters.batchLockHoldNs.Add(elapsedNanoseconds(txStart))
 	s.mu.Unlock()
 
 	// 通知在提交后逐事件发出；非阻塞、可丢，durable 顺序由 seq 决定。
