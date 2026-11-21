@@ -39,6 +39,9 @@ const sorted = (values: readonly string[]) => [...values].sort();
 // §6.8 托管挂起新增 turn.suspended / turn.resumed）。注册表
 // 扩容新增双通道类型时本清单需同步，否则下面的互斥断言先失败（它正是这么用的）。
 const DUAL_CHANNEL_TAIL_TYPES = new Set<string>([
+  "parent.finalization.stable_sequence_retry",
+  "subagent.attempt.finished",
+  "subagent.attempt.started",
   "subagent.batch.canceled",
   "subagent.batch.failed",
   "subagent.batch.orphaned",
@@ -148,13 +151,14 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
     // 本名单由 13 → 28 条——锁的语义是「每次扩容都被显式复核」，不是「永远等于
     // Batch 2 当天的字面量」。2026-09-29 `559fd687`（LSP 观测域）登记
     // `lsp.request.finished`（A 通道 session_store 事件，前端观测面板已消费）后
-    // 为 31 条。
+    // 为 35 条（本轮补齐 goal.driver / parent.finalization / subagent.attempt）。
     expect(sorted([...RUNTIME_EVENT_TYPES])).toEqual([
       "agent.reclaimed",
       "approval_requested",
       "approval_resolved",
       "checkpoint_created",
       "context_reconciled",
+      "goal.driver.decision",
       "llm.prompt_cache.breaker_tripped",
       "llm.provider.health_opened",
       "lsp.request.finished",
@@ -164,6 +168,7 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "main_agent.route_disabled_for_turn",
       "main_agent.route_prediction_invalid",
       "main_agent.route_prediction_unresolvable",
+      "parent.finalization.stable_sequence_retry",
       "session.routing_changed",
       "session_compact_completed",
       "session_compact_failed",
@@ -172,6 +177,8 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "session_end",
       "session_interrupted",
       "session_start",
+      "subagent.attempt.finished",
+      "subagent.attempt.started",
       "subagent.batch.canceled",
       "subagent.batch.failed",
       "subagent.batch.orphaned",
@@ -188,6 +195,7 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "assistant.reasoning_delta",
       "assistant_delta",
       "assistant_reasoning",
+      "assistant_stream_reset",
     ]);
   });
 });
