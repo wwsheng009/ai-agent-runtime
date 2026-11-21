@@ -248,38 +248,39 @@ func buildKnownEventTypes() map[string]bool {
 	// internal/events/subagent_audit_events.go；其余类型是 internal/agent 里以裸
 	// 字面量发射、经 SA-G2 门禁强制登记的类型。
 	add(
-		"subagent.route.resolved",              // events.EventSubagentRouteResolved（agent/subagent_route_audit.go）
-		"subagent.batch.failed",                // events.EventSubagentBatchFailed（agent/subagent_batch_coordinator.go）
-		"subagent.batch.canceled",              // events.EventSubagentBatchCanceled
-		"subagent.batch.timed_out",             // events.EventSubagentBatchTimedOut
-		"subagent.batch.orphaned",              // events.EventSubagentBatchOrphaned
-		"subagent.suspension.unavailable",      // events.EventSubagentSuspensionUnavailable（agent/suspension_gate.go，I9 降级告警）
-		"subagent.attempt.started",             // events.EventSubagentAttemptStarted（agent/subagent_retry.go，§6.1-4）
-		"subagent.attempt.finished",            // events.EventSubagentAttemptFinished（agent/subagent_retry.go，§6.1-4）
-		"completion.requirement_recovery",      // agent/loop.go
-		"context.preflight.started",            // agent/loop.go
-		"context.preflight.compacted",          // agent/loop.go
-		"context.preflight.failed",             // agent/loop.go
-		"context.tool_schema.compacted",        // agent/loop.go
-		"context.tool_schema.frozen",           // agent/loop.go
-		"context.usage_over_budget",            // agent/loop.go
-		"hooks.stop_blocked",                   // agent/loop.go
-		"hooks.status",                         // agent/agent.go
-		"hooks.async_completed",                // agent/agent.go
-		"llm.max_output_tokens.escalated",      // agent/loop.go
-		"llm.prompt_cache.backoff_applied",     // agent/loop.go
-		"llm.reasoning_only.guardrail_hit",     // agent/loop.go
-		"llm.reasoning_only.recovered",         // agent/loop.go
-		"llm.retry.aggregated",                 // agent/loop.go
-		"patch.applied",                        // agent/scheduler.go
-		"patch.decision",                       // agent/orchestrator.go
-		"subagent.batch.created",               // agent/loop.go（批次创建里程碑）
-		"subagent.batch.circuit_open",          // agent/scheduler.go（熔断治理信号）
-		"subagent.denied",                      // agent/scheduler.go
-		"subagent.requires_write",              // agent/loop.go
-		"tool_loop.child_results_received",     // agent/loop.go（synthesis 子结果已进入父上下文）
-		"tool_loop.exploration_stall_observed", // agent/loop.go
-		"tool_loop.repeated_prompt_observed",   // agent/loop.go
+		"subagent.route.resolved",                    // events.EventSubagentRouteResolved（agent/subagent_route_audit.go）
+		"subagent.batch.failed",                      // events.EventSubagentBatchFailed（agent/subagent_batch_coordinator.go）
+		"subagent.batch.canceled",                    // events.EventSubagentBatchCanceled
+		"subagent.batch.timed_out",                   // events.EventSubagentBatchTimedOut
+		"subagent.batch.orphaned",                    // events.EventSubagentBatchOrphaned
+		"subagent.suspension.unavailable",            // events.EventSubagentSuspensionUnavailable（agent/suspension_gate.go，I9 降级告警）
+		"subagent.attempt.started",                   // events.EventSubagentAttemptStarted（agent/subagent_retry.go，§6.1-4）
+		"subagent.attempt.finished",                  // events.EventSubagentAttemptFinished（agent/subagent_retry.go，§6.1-4）
+		"completion.requirement_recovery",            // agent/loop.go
+		"context.preflight.started",                  // agent/loop.go
+		"context.preflight.compacted",                // agent/loop.go
+		"context.preflight.failed",                   // agent/loop.go
+		"context.tool_schema.compacted",              // agent/loop.go
+		"context.tool_schema.frozen",                 // agent/loop.go
+		"context.usage_over_budget",                  // agent/loop.go
+		"hooks.stop_blocked",                         // agent/loop.go
+		"hooks.status",                               // agent/agent.go
+		"hooks.async_completed",                      // agent/agent.go
+		"llm.max_output_tokens.escalated",            // agent/loop.go
+		"llm.prompt_cache.backoff_applied",           // agent/loop.go
+		"llm.reasoning_only.guardrail_hit",           // agent/loop.go
+		"llm.reasoning_only.recovered",               // agent/loop.go
+		"llm.retry.aggregated",                       // agent/loop.go
+		"patch.applied",                              // agent/scheduler.go
+		"patch.decision",                             // agent/orchestrator.go
+		"subagent.batch.created",                     // agent/loop.go（批次创建里程碑）
+		"subagent.batch.circuit_open",                // agent/scheduler.go（熔断治理信号）
+		"subagent.denied",                            // agent/scheduler.go
+		"subagent.requires_write",                    // agent/loop.go
+		"tool_loop.child_results_received",           // agent/loop.go（synthesis 子结果已进入父上下文）
+		"tool_loop.child_results_consumption_failed", // agent/loop.go（synthesis 结果消费标记失败）
+		"tool_loop.exploration_stall_observed",       // agent/loop.go
+		"tool_loop.repeated_prompt_observed",         // agent/loop.go
 	)
 
 	// 来源 10：会话级路由管理事件（见文件头说明）。常量定义在

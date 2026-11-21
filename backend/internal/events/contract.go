@@ -290,6 +290,7 @@ var runtimeEventContracts = []Contract{
 	{Type: "subagent.denied"},                                  // scheduler.go
 	{Type: "subagent.requires_write"},                          // loop.go
 	{Type: "tool_loop.child_results_received"},                 // loop.go（synthesis 子结果已进入父上下文）
+	{Type: "tool_loop.child_results_consumption_failed"},       // loop.go（synthesis 结果消费标记失败；当前无 chat 通道）
 	{Type: "tool_loop.exploration_stall_observed"},             // loop.go
 	{Type: "tool_loop.repeated_prompt_observed"},               // loop.go
 }

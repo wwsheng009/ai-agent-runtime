@@ -34,6 +34,7 @@ export type RuntimeEventType =
   | "assistant_delta"
   | "assistant_message"
   | "assistant_reasoning"
+  | "assistant_stream_reset"
   | "backtrack_finished"
   | "backtrack_started"
   | "checkpoint_created"
@@ -46,6 +47,7 @@ export type RuntimeEventType =
   | "context.tool_schema.frozen"
   | "context.usage_over_budget"
   | "context_reconciled"
+  | "goal.driver.decision"
   | "hooks.async_completed"
   | "hooks.status"
   | "hooks.stop_blocked"
@@ -79,6 +81,7 @@ export type RuntimeEventType =
   | "main_agent.route_disabled_for_turn"
   | "main_agent.route_prediction_invalid"
   | "main_agent.route_prediction_unresolvable"
+  | "parent.finalization.stable_sequence_retry"
   | "patch.applied"
   | "patch.decision"
   | "plan_archive_failed"
@@ -100,12 +103,15 @@ export type RuntimeEventType =
   | "session_end"
   | "session_interrupted"
   | "session_start"
+  | "subagent.attempt.finished"
+  | "subagent.attempt.started"
   | "subagent.batch.canceled"
   | "subagent.batch.circuit_open"
   | "subagent.batch.completed"
   | "subagent.batch.created"
   | "subagent.batch.failed"
   | "subagent.batch.orphaned"
+  | "subagent.batch.parked"
   | "subagent.batch.progress"
   | "subagent.batch.started"
   | "subagent.batch.timed_out"
@@ -117,6 +123,7 @@ export type RuntimeEventType =
   | "subagent.started"
   | "subagent.suspension.unavailable"
   | "subagent.task.completed"
+  | "subagent.task.parked"
   | "subagent.task.started"
   | "tool.completed"
   | "tool.denied"
@@ -127,6 +134,8 @@ export type RuntimeEventType =
   | "tool.requested"
   | "tool.surface_mismatch"
   | "tool_finished"
+  | "tool_loop.child_results_consumption_failed"
+  | "tool_loop.child_results_received"
   | "tool_loop.exploration_stall_observed"
   | "tool_loop.repeated_prompt_observed"
   | "tool_receipt_recorded"
@@ -151,6 +160,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "assistant_delta": ["session_store"],
   "assistant_message": [],
   "assistant_reasoning": ["session_store"],
+  "assistant_stream_reset": ["session_store"],
   "backtrack_finished": [],
   "backtrack_started": [],
   "checkpoint_created": ["session_store"],
@@ -163,6 +173,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "context.tool_schema.frozen": [],
   "context.usage_over_budget": [],
   "context_reconciled": ["session_store"],
+  "goal.driver.decision": ["session_store"],
   "hooks.async_completed": ["live_only"],
   "hooks.status": ["live_only"],
   "hooks.stop_blocked": [],
@@ -196,6 +207,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "main_agent.route_disabled_for_turn": ["session_store"],
   "main_agent.route_prediction_invalid": ["session_store"],
   "main_agent.route_prediction_unresolvable": ["session_store"],
+  "parent.finalization.stable_sequence_retry": ["session_store", "tail_only"],
   "patch.applied": [],
   "patch.decision": [],
   "plan_archive_failed": [],
@@ -217,12 +229,15 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "session_end": ["session_store"],
   "session_interrupted": ["session_store"],
   "session_start": ["session_store"],
+  "subagent.attempt.finished": ["session_store", "tail_only"],
+  "subagent.attempt.started": ["session_store", "tail_only"],
   "subagent.batch.canceled": ["session_store", "tail_only"],
   "subagent.batch.circuit_open": [],
   "subagent.batch.completed": ["tail_only"],
   "subagent.batch.created": [],
   "subagent.batch.failed": ["session_store", "tail_only"],
   "subagent.batch.orphaned": ["session_store", "tail_only"],
+  "subagent.batch.parked": ["tail_only"],
   "subagent.batch.progress": ["live_only"],
   "subagent.batch.started": ["tail_only"],
   "subagent.batch.timed_out": ["session_store", "tail_only"],
@@ -234,6 +249,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "subagent.started": ["tail_only"],
   "subagent.suspension.unavailable": ["session_store", "tail_only"],
   "subagent.task.completed": ["tail_only"],
+  "subagent.task.parked": ["tail_only"],
   "subagent.task.started": ["tail_only"],
   "tool.completed": ["session_store", "chat_bridge"],
   "tool.denied": [],
@@ -244,6 +260,8 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "tool.requested": ["session_store", "chat_bridge"],
   "tool.surface_mismatch": [],
   "tool_finished": [],
+  "tool_loop.child_results_consumption_failed": [],
+  "tool_loop.child_results_received": [],
   "tool_loop.exploration_stall_observed": [],
   "tool_loop.repeated_prompt_observed": [],
   "tool_receipt_recorded": [],
@@ -261,9 +279,11 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "assistant.reasoning",
   "assistant_delta",
   "assistant_reasoning",
+  "assistant_stream_reset",
   "checkpoint_created",
   "context.profile.injected",
   "context_reconciled",
+  "goal.driver.decision",
   "llm.prompt_cache.breaker_tripped",
   "llm.provider.health_opened",
   "lsp.request.finished",
@@ -273,6 +293,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "main_agent.route_disabled_for_turn",
   "main_agent.route_prediction_invalid",
   "main_agent.route_prediction_unresolvable",
+  "parent.finalization.stable_sequence_retry",
   "recall.performed",
   "session.routing_changed",
   "session_compact_completed",
@@ -282,6 +303,8 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "session_end",
   "session_interrupted",
   "session_start",
+  "subagent.attempt.finished",
+  "subagent.attempt.started",
   "subagent.batch.canceled",
   "subagent.batch.failed",
   "subagent.batch.orphaned",
@@ -312,10 +335,14 @@ export const RUNTIME_EVENT_CHAT_BRIDGE_TYPES: readonly RuntimeEventType[] = [
 ];
 
 export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
+  "parent.finalization.stable_sequence_retry",
+  "subagent.attempt.finished",
+  "subagent.attempt.started",
   "subagent.batch.canceled",
   "subagent.batch.completed",
   "subagent.batch.failed",
   "subagent.batch.orphaned",
+  "subagent.batch.parked",
   "subagent.batch.started",
   "subagent.batch.timed_out",
   "subagent.completed",
@@ -323,6 +350,7 @@ export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
   "subagent.started",
   "subagent.suspension.unavailable",
   "subagent.task.completed",
+  "subagent.task.parked",
   "subagent.task.started",
   "turn.resumed",
   "turn.suspended",
