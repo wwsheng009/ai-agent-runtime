@@ -147,6 +147,20 @@ func releaseDirLock(path, token string) {
 		// 锁已被窃取/易主：绝不删除他人的锁。
 		return
 	}
+	// Rename the canonical lock path out of the way first. A failed RemoveAll
+	// (common on Windows under transient AV/indexer handles) must not keep the
+	// canonical lock visible until StaleAfter and stall every waiter for 30s.
+	releasedPath := fmt.Sprintf("%s.release-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := os.Rename(path, releasedPath); err == nil {
+			_ = os.RemoveAll(releasedPath)
+			return
+		} else if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+	}
+	// Last-resort cleanup; the canonical path is already released if rename won.
 	_ = os.RemoveAll(path)
 }
 

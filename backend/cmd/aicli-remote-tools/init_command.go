@@ -194,6 +194,8 @@ func runInit(args []string) int {
 			return 1
 		}
 	}
+	unlock := agentconfig.LockConfigFileWrite(configPath)
+	defer unlock()
 	if err := os.WriteFile(configPath, encoded, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools init: write config: %v\n", err)
 		return 1

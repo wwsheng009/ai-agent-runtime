@@ -2911,7 +2911,10 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 			// req2_after=1791, 预算 1750）仅作历史参考。
 			// 2026-10-18: P2-1 的指针降级改变了模型可见 payload 大小，预算
 			// 1300 → 1280 重新标定（10 次重复稳定通过）。
-			"context_max_prompt_tokens":    1280,
+			// 2026-11-20: 1280 仍处于 active-turn replay 估算边界，部分运行会让
+			// req2 直接通过、完全不触发 session compaction。1240 在 100 次重复
+			// 中稳定保持“req1 存活、req2 后触发”的序列。
+			"context_max_prompt_tokens":    1240,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 // File names under the gateway data directory. Mounts and their tokens are
@@ -94,6 +96,11 @@ func (p *PersistentTokenStore) save() {
 	if p == nil || p.path == "" {
 		return
 	}
+	if dir := filepath.Dir(p.path); dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+	unlock := agentconfig.LockConfigFileWrite(p.path)
+	defer unlock()
 	data, err := json.MarshalIndent(tokenFileFormat{Version: fileVersion, Tokens: p.TokenStore.snapshot()}, "", "  ")
 	if err != nil {
 		return
@@ -187,6 +194,11 @@ func (p *PersistentRegistry) Save() error {
 	if p == nil || p.path == "" {
 		return nil
 	}
+	if dir := filepath.Dir(p.path); dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+	unlock := agentconfig.LockConfigFileWrite(p.path)
+	defer unlock()
 	data, err := json.MarshalIndent(registryFileFormat{Version: fileVersion, Mounts: p.Registry.List()}, "", "  ")
 	if err != nil {
 		return err

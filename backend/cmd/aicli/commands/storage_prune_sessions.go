@@ -93,9 +93,9 @@ background/schedule 清理过期会话。默认只预演，必须显式加 --app
 	cmd.Flags().Bool("apply", false, "实际删除；缺省只 dry-run")
 	cmd.Flags().Bool("fast", false, "跳过 orphan 全表扫描和逐表预计行数统计；需与 --apply 同用")
 	cmd.Flags().Bool("profile", false, "输出候选/保护/各库阶段耗时")
-	cmd.Flags().Bool("compact-after", false, "apply 成功后接着执行离线 VACUUM；无需再次预演")
-	cmd.Flags().Bool("compact-force", false, "VACUUM 时即使 freelist=0 也重建；仅 compact-after 生效")
-	cmd.Flags().Bool("compact-skip-integrity-check", false, "VACUUM 时跳过 quick_check；仅 compact-after 生效")
+	cmd.Flags().Bool("compact-after", false, "apply 成功后接着执行离线压缩；无需再次预演")
+	cmd.Flags().Bool("compact-force", false, "离线压缩时即使 freelist=0 也重建；仅 compact-after 生效")
+	cmd.Flags().Bool("compact-skip-integrity-check", false, "离线压缩时跳过 quick_check；仅 compact-after 生效")
 	cmd.Flags().Bool("include-orphans", true, "包含 history 已不存在、但其它库仍有的 orphan 会话")
 	cmd.Flags().Bool("include-team", false, "纳入 team store（teams/teammates 及团队历史）")
 	cmd.Flags().Bool("require-exclusive", false, "Windows 句柄级独占探测；任一库被其它进程打开时立即失败")
@@ -152,7 +152,7 @@ func runStoragePruneSessions(opts storagePruneSessionsOptions) int {
 		return statsExitUsage
 	}
 	if opts.compactAfter && !opts.apply {
-		fmt.Fprintln(opts.errOut, "参数错误：--compact-after 只在 --apply 成功后执行 VACUUM。")
+		fmt.Fprintln(opts.errOut, "参数错误：--compact-after 只在 --apply 成功后执行离线压缩。")
 		return statsExitUsage
 	}
 	paths := sessionpurge.Paths{}

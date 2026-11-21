@@ -26,20 +26,6 @@ func gridFromFeed(width, height int, stream string) [][]vt.Cell {
 	return g
 }
 
-func blankGrid(width, height int) [][]vt.Cell {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-	grid := make([][]vt.Cell, height)
-	for row := range grid {
-		grid[row] = make([]vt.Cell, width)
-	}
-	return grid
-}
-
 var cupPattern = regexp.MustCompile("\x1b\\[(\\d+);(\\d+)H")
 
 // cupRows returns the set of 1-based rows addressed by CUP in a diff.

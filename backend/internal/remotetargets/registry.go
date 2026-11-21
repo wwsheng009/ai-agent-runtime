@@ -467,9 +467,10 @@ func expandOne(serverName string, target Target) (mcpconfig.MCPConfig, []string,
 					fmt.Sprintf("target %q: remote.shell.envAllowlist is not applied to envd; envd only supports adding explicit envs",
 						serverName))
 			}
-			if strings.TrimSpace(shell.Program) != "" {
+			if strings.TrimSpace(shell.Program) != "" || strings.TrimSpace(shell.Path) != "" ||
+				len(shell.Prefer) > 0 {
 				warnings = append(warnings,
-					fmt.Sprintf("target %q: remote.shell.program is not applied to envd; envd executes commands via /bin/sh on the target",
+					fmt.Sprintf("target %q: remote.shell.program/path/prefer is not applied to envd; envd executes commands via /bin/sh on the target",
 						serverName))
 			}
 		}
