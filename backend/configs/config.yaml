@@ -512,35 +512,7 @@ providers:
             supported_models:
                 - sensenova-u1-fast
             timeout: 300s
-        bigmodel:
-            api_key: ${BIGMODEL_API_KEYS:-}
-            api_key_config:
-                enabled: true
-                fallback_mode: ${BIGMODEL_FALLBACK_MODE:-random}
-                max_retries_per_key: ${BIGMODEL_MAX_RETRIES_PER_KEY:-1}
-                selection_mode: ${BIGMODEL_KEY_SELECTION_MODE:-health_based}
-            api_path: /v1/messages
-            base_url: https://open.bigmodel.cn/api/anthropic
-            default_model: glm-5
-            enabled: true
-            forward_url: /v1/messages
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': glm-5
-            path_mappings: null
-            protocol: anthropic
-            support_types:
-                - anthropic
-                - openai
-                - codex
-            supported_models:
-                - glm-5
-                - glm-4.7
-                - glm-4-plus
-                - glm-4-air
-                - glm-4-flash
-            timeout: 300s
-            truncation_adapter: anthropic_local
+        bigmodel: null
         codex_cli_gpt:
             api_key: ${CODEX_CLI_API_KEYS}
             api_path: /responses
