@@ -92,6 +92,11 @@ func TestWriteDefaultConfigNeverOverwrites(t *testing.T) {
 	if !strings.Contains(body, "useAICLIConfig: true") || !strings.Contains(body, "path: /mcp") {
 		t.Fatalf("default config content:\n%s", body)
 	}
+	for _, want := range []string{"shell:", "autoDetect: true", "probeTimeout: 3s", "strictProbe: true"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("default config lacks %q:\n%s", want, body)
+		}
+	}
 	if strings.Contains(body, "workspace:") {
 		t.Fatalf("auto config must not pin a workspace:\n%s", body)
 	}

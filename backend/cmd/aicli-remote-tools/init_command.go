@@ -19,6 +19,7 @@ type initConfigFile struct {
 	Workspace string         `yaml:"workspace"`
 	Profile   string         `yaml:"profile,omitempty"`
 	HTTP      initHTTPConfig `yaml:"http"`
+	Shell     *initShell     `yaml:"shell,omitempty"`
 	Gateway   *initGateway   `yaml:"gateway,omitempty"`
 }
 
@@ -32,6 +33,12 @@ type initGateway struct {
 	UseAICLIConfig bool   `yaml:"useAICLIConfig"`
 	IdentityFile   string `yaml:"identityFile,omitempty"`
 	SelfName       string `yaml:"selfName,omitempty"`
+}
+
+type initShell struct {
+	AutoDetect   bool                 `yaml:"autoDetect"`
+	ProbeTimeout remotetools.Duration `yaml:"probeTimeout"`
+	StrictProbe  bool                 `yaml:"strictProbe"`
 }
 
 const initUsage = `aicli-remote-tools init - write a ready-to-run config
@@ -155,6 +162,14 @@ func runInit(args []string) int {
 			TokenFile: tokenPath,
 		},
 	}
+	shellDefaults := remotetools.DefaultShellConfig()
+	file.Shell = &initShell{
+		AutoDetect:  shellDefaults.AutoDetect != nil && *shellDefaults.AutoDetect,
+		StrictProbe: shellDefaults.StrictProbe != nil && *shellDefaults.StrictProbe,
+	}
+	if shellDefaults.ProbeTimeout != nil {
+		file.Shell.ProbeTimeout = *shellDefaults.ProbeTimeout
+	}
 	if wantGateway {
 		identityPath, identErr := remotetools.DefaultMountIdentityPath()
 		if identErr != nil {
@@ -187,6 +202,7 @@ func runInit(args []string) int {
 	fmt.Fprintf(os.Stdout, "wrote config: %s\n", configPath)
 	fmt.Fprintf(os.Stdout, "workspace:    %s\n", absWorkspace)
 	fmt.Fprintf(os.Stdout, "profile:      %s\n", file.Profile)
+	fmt.Fprintln(os.Stdout, "shell:        auto-detect (Windows: git-bash -> ... -> cmd)")
 	fmt.Fprintf(os.Stdout, "token file:   %s (%s)\n", tokenPath, tokenState)
 	if file.Gateway != nil {
 		fmt.Fprintln(os.Stdout, "gateway:      reuse aicli's persisted gateway.* (url detected)")

@@ -16,7 +16,11 @@ func TestRemoteShellPreservesNativeExitCode(t *testing.T) {
 		t.Skip("cmd.exe exit code fixture")
 	}
 	root := newTestWorkspace(t)
-	server, err := remotetools.NewServer(newOpsConfig(t, root, []string{"cmd"}), "dev")
+	cfg := newOpsConfig(t, root, []string{"cmd"})
+	// Keep this test about the native exit-code projection. A POSIX shell has
+	// its own `exit` semantics and `cmd /c` is not a portable fixture.
+	pinTestShell(t, cfg, "cmd")
+	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

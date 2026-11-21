@@ -2,64 +2,182 @@ package remotetools
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // resolveShell selects the shell used by shell and job_start.
 //
-// Empty configured means the same detection order the built-in shell tool uses:
-// Windows pwsh -> powershell -> cmd.exe; Unix $SHELL -> zsh -> bash -> sh.
-// A configured value is resolved once at startup so a typo is a startup error,
-// not a surprising failure on the first model tool call.
-func resolveShell(configured string) (runtimeexecutor.Shell, error) {
-	trimmed := strings.TrimSpace(configured)
-	if trimmed == "" {
-		shell := runtimeexecutor.DefaultUserShell()
-		if strings.TrimSpace(shell.Path) == "" || shell.Type == "" {
-			return runtimeexecutor.Shell{}, fmt.Errorf(
-				"no supported shell found; set shell.program or --shell (want pwsh, powershell, cmd, bash, zsh or sh)")
-		}
-		resolved, lookErr := exec.LookPath(shell.Path)
-		if lookErr == nil {
-			shell.Path = resolved
-			return shell, nil
-		}
-		// DefaultUserShell's Windows fallback is the bare name "cmd". If PATH
-		// is unusually empty, cmd.exe still lives in the system directory.
-		if shell.Type == runtimeexecutor.ShellTypeCmd && runtime.GOOS == "windows" {
-			if root := strings.TrimSpace(os.Getenv("SystemRoot")); root != "" {
-				candidate := filepath.Join(root, "System32", "cmd.exe")
-				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-					shell.Path = candidate
-					return shell, nil
-				}
-			}
-		}
-		return runtimeexecutor.Shell{}, fmt.Errorf(
-			"shell %q is not executable: %w", shell.Path, lookErr)
+// Selection is delegated to executor.ResolveShell, the same resolver used by
+// aicli/TUI and runtime-server. That gives the remote server the identical
+// Windows candidate chain (git-bash -> msys-bash -> busybox -> pwsh ->
+// powershell -> cmd), the same sentinel probe and the same WSL-stub guard
+// instead of a second, weaker detector.
+//
+// This is an explicit startup resolution, not CurrentShell: a remote-tools
+// process must resolve against the target machine's PATH/config and must not
+// inherit an unrelated aicli process-wide resolver.
+func resolveShell(cfg ShellConfig) (runtimeexecutor.Shell, error) {
+	resolution, err := resolveShellResolution(cfg)
+	if err != nil {
+		return runtimeexecutor.Shell{}, err
+	}
+	if resolution == nil || strings.TrimSpace(resolution.Shell.Path) == "" ||
+		resolution.Shell.Type == "" {
+		return runtimeexecutor.Shell{}, fmt.Errorf("no usable shell found; set shell.prefer/path/program or --shell")
+	}
+	return resolution.Shell, nil
+}
+
+// resolveShellResolution resolves the selector and keeps the candidate matrix
+// for doctor/startup diagnostics.
+func resolveShellResolution(cfg ShellConfig) (*runtimeexecutor.ShellResolution, error) {
+	selection, err := cfg.selectionConfig()
+	if err != nil {
+		return nil, err
+	}
+	resolution, err := runtimeexecutor.ResolveShell(selection)
+	if err != nil {
+		return resolution, fmt.Errorf("resolve shell selection: %w", err)
+	}
+	if resolution != nil {
+		// executor.ResolveShell memoizes the resolution pointer. Clone before
+		// filling a platform-specific ID so two servers cannot race on the same
+		// cached object.
+		cloned := *resolution
+		cloned.Candidates = append([]runtimeexecutor.ShellCandidateReport(nil), resolution.Candidates...)
+		ensureResolvedShellIdentity(&cloned.Shell)
+		resolution = &cloned
+	}
+	return resolution, nil
+}
+
+// ensureResolvedShellIdentity fills the stable candidate ID for platforms where
+// the legacy zero-config path in executor.ResolveShell returns a shell without
+// one (notably Unix). Doctor and metadata stay uniform across platforms.
+func ensureResolvedShellIdentity(shell *runtimeexecutor.Shell) {
+	if shell == nil || strings.TrimSpace(shell.ID) != "" {
+		return
+	}
+	base := strings.ToLower(strings.TrimSuffix(
+		filepath.Base(strings.ReplaceAll(strings.TrimSpace(shell.Path), `\`, "/")), ".exe"))
+	switch base {
+	case "bash":
+		shell.ID = runtimeexecutor.ShellIDBash
+	case "zsh":
+		shell.ID = runtimeexecutor.ShellIDZsh
+	case "sh":
+		shell.ID = runtimeexecutor.ShellIDSh
+	case "busybox":
+		shell.ID = runtimeexecutor.ShellIDBusybox
+	case "pwsh":
+		shell.ID = runtimeexecutor.ShellIDPwsh
+	case "powershell":
+		shell.ID = runtimeexecutor.ShellIDPowerShell
+	case "cmd":
+		shell.ID = runtimeexecutor.ShellIDCmd
+	}
+}
+
+// selectionConfig translates the remote-tools shell block to the shared
+// executor selector. Program is kept as a compatibility alias:
+//   - a stable candidate ID -> Prefer with exactly that candidate
+//   - any other value       -> Path (the historical --shell behavior)
+func (c ShellConfig) selectionConfig() (runtimeexecutor.ShellConfig, error) {
+	path := strings.TrimSpace(c.Path)
+	program := strings.TrimSpace(c.Program)
+	prefer := normalizedShellPrefer(c.Prefer)
+	if err := validateShellPrefer(prefer); err != nil {
+		return runtimeexecutor.ShellConfig{}, err
+	}
+	var probeTimeout time.Duration
+	if c.ProbeTimeout != nil {
+		probeTimeout = c.ProbeTimeout.Duration
+	}
+	if probeTimeout < 0 {
+		return runtimeexecutor.ShellConfig{}, fmt.Errorf("shell.probeTimeout must not be negative")
 	}
 
-	path, err := exec.LookPath(trimmed)
+	out := runtimeexecutor.ShellConfig{
+		AutoDetect:   c.AutoDetect,
+		Prefer:       nil,
+		Path:         "",
+		ProbeTimeout: probeTimeout,
+		StrictProbe:  c.StrictProbe,
+	}
+
+	if path != "" {
+		if program != "" && !strings.EqualFold(program, path) {
+			return runtimeexecutor.ShellConfig{}, fmt.Errorf(
+				"shell.path and shell.program are mutually exclusive")
+		}
+		if len(prefer) > 0 {
+			return runtimeexecutor.ShellConfig{}, fmt.Errorf(
+				"shell.path and shell.prefer are mutually exclusive")
+		}
+		out.Path = path
+		return out, nil
+	}
+
+	if program != "" {
+		if len(prefer) > 0 {
+			return runtimeexecutor.ShellConfig{}, fmt.Errorf(
+				"shell.program and shell.prefer are mutually exclusive")
+		}
+		if runtimeexecutor.IsKnownShellCandidateID(program) {
+			out.Prefer = []string{strings.ToLower(program)}
+			return out, nil
+		}
+		out.Path = program
+		return out, nil
+	}
+
+	out.Prefer = prefer
+	return out, nil
+}
+
+func normalizedShellPrefer(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		id := strings.ToLower(strings.TrimSpace(raw))
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func validateShellPrefer(prefer []string) error {
+	for _, id := range prefer {
+		if !runtimeexecutor.IsKnownShellCandidateID(id) {
+			return fmt.Errorf("shell.prefer: unknown candidate %q (want %s)",
+				id, strings.Join(runtimeexecutor.ShellCandidateIDs(), ", "))
+		}
+	}
+	return nil
+}
+
+// CandidateChain returns the ordered candidate IDs the shared resolver will
+// consider. It performs no location or probing; doctor uses it to show the
+// configured/default intent even when a candidate is absent.
+func (c ShellConfig) CandidateChain() ([]string, error) {
+	selection, err := c.selectionConfig()
 	if err != nil {
-		return runtimeexecutor.Shell{}, fmt.Errorf(
-			"shell %q not found: %w (set shell.program/--shell to an installed shell)", trimmed, err)
+		return nil, err
 	}
-	shellType := runtimeexecutor.DetectShellType(filepath.Base(path))
-	if shellType == "" {
-		return runtimeexecutor.Shell{}, fmt.Errorf(
-			"shell %q is not supported (want pwsh, powershell, cmd, bash, zsh or sh)", trimmed)
-	}
-	if shellType == runtimeexecutor.ShellTypeCmd && runtime.GOOS != "windows" {
-		return runtimeexecutor.Shell{}, fmt.Errorf(
-			"shell %q is cmd.exe, which is only available on Windows", trimmed)
-	}
-	return runtimeexecutor.Shell{Path: path, Type: shellType}, nil
+	return runtimeexecutor.ShellCandidateChain(selection), nil
 }
 
 // resolvedShellForConfig returns the shell chosen by Normalize, falling back to
@@ -68,7 +186,12 @@ func resolvedShellForConfig(cfg *Config) runtimeexecutor.Shell {
 	if cfg != nil && strings.TrimSpace(cfg.ResolvedShell.Path) != "" {
 		return cfg.ResolvedShell
 	}
-	if shell, err := resolveShell(""); err == nil {
+	if cfg != nil {
+		if shell, err := resolveShell(cfg.Shell); err == nil {
+			return shell
+		}
+	}
+	if shell, err := resolveShell(ShellConfig{}); err == nil {
 		return shell
 	}
 	return runtimeexecutor.DefaultUserShell()
@@ -127,10 +250,17 @@ func shellLabel(shell runtimeexecutor.Shell) string {
 	if name == "" {
 		return "unknown shell"
 	}
-	if shell.Type == "" {
+	id := strings.TrimSpace(shell.ID)
+	shellType := strings.TrimSpace(string(shell.Type))
+	switch {
+	case id != "" && shellType != "":
+		return fmt.Sprintf("%s [%s] (%s)", name, id, shellType)
+	case id != "":
+		return fmt.Sprintf("%s [%s]", name, id)
+	case shellType == "":
 		return name
 	}
-	return fmt.Sprintf("%s (%s)", name, shell.Type)
+	return fmt.Sprintf("%s (%s)", name, shellType)
 }
 
 // shellSyntaxHint tells the model which command language it is writing. It is

@@ -16,6 +16,7 @@ import (
 func TestRemoteShellCommandDiagnosticsDoNotChangeBody(t *testing.T) {
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"*"})
+	pinPowerShellTestShell(t, cfg)
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

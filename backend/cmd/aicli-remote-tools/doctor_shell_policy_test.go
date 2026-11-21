@@ -24,8 +24,14 @@ func TestDoctorShellPolicyReportsEffectiveGatesAndGuidance(t *testing.T) {
 	if report.CommandTimeout != "30s" {
 		t.Fatalf("command timeout = %q, want 30s", report.CommandTimeout)
 	}
-	if report.ShellResolved == "" || report.ShellType == "" {
+	if report.ShellResolved == "" || report.ShellType == "" || report.ShellID == "" {
 		t.Fatalf("doctor did not report the resolved shell: %+v", report)
+	}
+	if report.ShellDialect == "" || report.ShellSource == "" {
+		t.Fatalf("doctor did not report the shell dialect/source: %+v", report)
+	}
+	if len(report.ShellCandidates) == 0 {
+		t.Fatalf("doctor did not report the candidate chain: %+v", report)
 	}
 	if !report.ShellEnvInherit {
 		t.Fatalf("doctor shell env allowlist = %v, want inherited environment", report.ShellEnvAllowlist)

@@ -83,7 +83,9 @@ Workspace and tool surface:
   --tool-prefix <prefix>          Prefix every exposed tool name
   --target-name <name>            Label used in descriptions and audit records
   --description-style <style>     compact (default) | explicit
-  --shell <path>                  shell for shell/job_start (default: auto-detect)
+  --shell <id|path>               shell for shell/job_start (default: shared
+                                  auto-detect; Windows tries git-bash, msys-bash,
+                                  busybox, pwsh, powershell, cmd)
                                   shell is job-first; timeout_ms only bounds the wait
   --disable-env-inheritance       use the platform env baseline instead of the
                                   full target process environment
@@ -121,6 +123,8 @@ YAML mapping:
   --deny-command-pattern          shell.deniedCommandPatterns
   --deny-shell-metachars          shell.denyShellMetachars
   --disable-env-inheritance       shell.disableEnvInheritance
+  --shell                         shell.program (legacy selector alias; prefer
+                                  shell.prefer / shell.path in YAML)
 
 Optional tools and network:
   --optional-tools                optionalTools.enabled ("*" = all eligible)
@@ -165,7 +169,9 @@ envd backend (serve --stdio --backend envd):
 
 First-run behaviour:
   A bare 'serve' creates ~/.aicli/remote-tools/config.yaml + mcp.token on
-  first run and reuses aicli's persisted gateway.* when present.
+  first run and reuses aicli's persisted gateway.* when present. The generated
+  config includes shell defaults (autoDetect/probeTimeout/strictProbe), so the
+  shared Git Bash-first candidate chain works without editing it.
   --no-auto-init                  Skip creating the default config/token
   --no-gateway                    Ignore aicli's gateway config (stay local)
 
@@ -176,6 +182,8 @@ Examples:
   aicli-remote-tools init --workspace D:\work
 
   aicli-remote-tools serve --stdio --workspace /srv/app --tool-prefix remote_dev
+
+  aicli-remote-tools serve --shell git-bash --allow-command "*"
 
   aicli-remote-tools serve --http --workspace /srv/app \
     --allow-command git --allow-command "go test" \

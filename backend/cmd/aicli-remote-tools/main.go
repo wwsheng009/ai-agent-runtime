@@ -242,7 +242,7 @@ func newFlagSet(name string, flags *serveFlags) *flag.FlagSet {
 	fs.StringVar(&flags.networkDeniedHosts, "network-denied-hosts", "", "comma-separated outbound host denylist")
 	fs.StringVar(&flags.targetName, "target-name", "", "label for descriptions and audit")
 	fs.StringVar(&flags.descStyle, "description-style", "", "compact|explicit")
-	fs.StringVar(&flags.shell, "shell", "", "shell executable for shell/job_start (default: pwsh > powershell > cmd on Windows; $SHELL > zsh > bash > sh elsewhere)")
+	fs.StringVar(&flags.shell, "shell", "", "shell candidate ID or executable for shell/job_start (default: shared auto-detect; Windows git-bash > msys-bash > busybox > pwsh > powershell > cmd)")
 	fs.BoolVar(&flags.disableEnvInherit, "disable-env-inheritance", false, "use the platform env baseline instead of inheriting the full target process environment")
 	fs.IntVar(&flags.maxOutput, "max-output-bytes", 0, "model-visible output cap")
 	fs.IntVar(&flags.maxBytes, "max-bytes-per-call", 0, "per-call payload cap")
@@ -366,6 +366,10 @@ func loadConfig(flags *serveFlags) (*remotetools.Config, error) {
 	}
 	if flags.shell != "" {
 		cfg.Shell.Program = flags.shell
+		// --shell is the command-line override for the whole selector, not an
+		// extra candidate appended to a config file's chain.
+		cfg.Shell.Path = ""
+		cfg.Shell.Prefer = nil
 	}
 	if flags.disableEnvInherit {
 		cfg.Shell.DisableEnvInheritance = true
@@ -642,6 +646,15 @@ type doctorReport struct {
 	ShellProgram           string   `json:"shellProgram,omitempty"`
 	ShellResolved          string   `json:"shellResolved,omitempty"`
 	ShellType              string   `json:"shellType,omitempty"`
+	ShellID                string   `json:"shellId,omitempty"`
+	ShellDialect           string   `json:"shellDialect,omitempty"`
+	ShellSource            string   `json:"shellSource,omitempty"`
+	ShellVersion           string   `json:"shellVersion,omitempty"`
+	ShellPrefer            []string `json:"shellPrefer,omitempty"`
+	ShellCandidates        []string `json:"shellCandidates,omitempty"`
+	ShellAutoDetect        bool     `json:"shellAutoDetect"`
+	ShellStrictProbe       bool     `json:"shellStrictProbe"`
+	ShellProbeTimeout      string   `json:"shellProbeTimeout,omitempty"`
 	ShellEnvInherit        bool     `json:"shellEnvInherit"`
 	ShellEnvAllowlist      []string `json:"shellEnvAllowlist,omitempty"`
 	CommandTimeout         string   `json:"commandTimeout"`
@@ -721,11 +734,20 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 		DeniedCommandPatterns:  cfg.Shell.DeniedCommandPatterns,
 		DenyShellMetachars:     cfg.Shell.DenyShellMetachars,
 		ShellProgram:           cfg.Shell.Program,
+		ShellPrefer:            append([]string(nil), cfg.Shell.Prefer...),
+		ShellAutoDetect:        cfg.Shell.AutoDetect == nil || *cfg.Shell.AutoDetect,
+		ShellStrictProbe:       cfg.Shell.StrictProbe == nil || *cfg.Shell.StrictProbe,
+		ShellProbeTimeout:      effectiveShellProbeTimeout(cfg.Shell),
 		ShellEnvInherit:        cfg.Shell.EnvAllowlist == nil && !cfg.Shell.DisableEnvInheritance,
 		ShellEnvAllowlist:      append([]string(nil), cfg.Shell.EnvAllowlist...),
 		CommandTimeout:         cfg.Limits.CommandTimeout.Duration.String(),
 		HTTPListen:             cfg.HTTP.Listen,
 		HTTPAccessLog:          cfg.HTTP.AccessLog,
+	}
+	if cfg.Backend == remotetools.BackendLocal {
+		if chain, chainErr := cfg.Shell.CandidateChain(); chainErr == nil {
+			report.ShellCandidates = chain
+		}
 	}
 	report.Lints = policyLints(cfg)
 	report.Problems = []string{}
@@ -733,6 +755,10 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 	if cfg.Backend == remotetools.BackendLocal && cfg.ShellExposed() {
 		report.ShellResolved = cfg.ResolvedShell.Path
 		report.ShellType = string(cfg.ResolvedShell.Type)
+		report.ShellID = cfg.ResolvedShell.ID
+		report.ShellDialect = string(cfg.ResolvedShell.Dialect)
+		report.ShellSource = cfg.ResolvedShell.Source
+		report.ShellVersion = cfg.ResolvedShell.Version
 	}
 
 	if _, err := os.Stat(cfg.Workspace); err != nil {
@@ -825,6 +851,20 @@ func buildDoctorReport(cfg *remotetools.Config) doctorReport {
 	return report
 }
 
+// effectiveShellProbeTimeout mirrors executor.ShellConfig.EffectiveProbeTimeout
+// for the text/JSON report without importing the executor from the command
+// package just for one constant.
+func effectiveShellProbeTimeout(shell remotetools.ShellConfig) string {
+	timeout := time.Duration(0)
+	if shell.ProbeTimeout != nil {
+		timeout = shell.ProbeTimeout.Duration
+	}
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	return timeout.String()
+}
+
 func printDoctorReport(report doctorReport) {
 	metachars := "allow"
 	if report.DenyShellMetachars {
@@ -849,7 +889,15 @@ func printDoctorReport(report doctorReport) {
 	fmt.Fprintf(os.Stdout, "  shell metachars  : %s\n", metachars)
 	fmt.Fprintf(os.Stdout, "  shell            : %s\n", orDash(report.ShellResolved))
 	fmt.Fprintf(os.Stdout, "  shell type       : %s\n", orDash(report.ShellType))
+	fmt.Fprintf(os.Stdout, "  shell id         : %s\n", orDash(report.ShellID))
+	fmt.Fprintf(os.Stdout, "  shell dialect    : %s\n", orDash(report.ShellDialect))
+	fmt.Fprintf(os.Stdout, "  shell source     : %s\n", orDash(report.ShellSource))
+	fmt.Fprintf(os.Stdout, "  shell version    : %s\n", orDash(report.ShellVersion))
 	fmt.Fprintf(os.Stdout, "  shell program    : %s\n", orDash(report.ShellProgram))
+	fmt.Fprintf(os.Stdout, "  shell prefer     : %s\n", orDash(strings.Join(report.ShellPrefer, ", ")))
+	fmt.Fprintf(os.Stdout, "  shell candidates : %s\n", orDash(strings.Join(report.ShellCandidates, " -> ")))
+	fmt.Fprintf(os.Stdout, "  shell auto/strict: %t/%t (probe %s)\n",
+		report.ShellAutoDetect, report.ShellStrictProbe, orDash(report.ShellProbeTimeout))
 	fmt.Fprintf(os.Stdout, "  shell env        : %s\n", shellEnvSummary(report))
 	fmt.Fprintf(os.Stdout, "  command timeout  : %s\n", orDash(report.CommandTimeout))
 	fmt.Fprintf(os.Stdout, "  audit            : %s (writable=%v)\n", orDash(report.AuditPath), report.AuditWritable)

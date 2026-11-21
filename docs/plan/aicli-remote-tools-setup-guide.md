@@ -3,6 +3,8 @@
 目标：让本机 aicli 能通过 `remote_<x>__*` 工具操作另一台 Linux 主机。
 按顺序做完 §1–§4 就能用，§5 是排错，§6 是几种常见拓扑。
 
+> **2026-11-21 更新**：shell 选择已实现零配置默认值（`autoDetect: true`、`probeTimeout: 3s`、`strictProbe: true`），Windows 自动按 `git-bash → msys-bash → busybox → pwsh → powershell → cmd` 探测。下面的 `shell:` 示例只用于命令授权、环境收紧或显式覆盖候选顺序；`allowedCommands` 仍必须显式配置（fail-closed）。
+
 ---
 
 ## 0. 三个文件、两个角色

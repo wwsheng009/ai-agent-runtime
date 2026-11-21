@@ -260,7 +260,7 @@ func TestShellInheritsEnvWhenAllowlistOmitted(t *testing.T) {
 			t.Skip("host process has no LOCALAPPDATA")
 		}
 		body = callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
-			"command": "echo $env:LOCALAPPDATA",
+			"command": envEchoCommand(cfg.ResolvedShell.Type, "LOCALAPPDATA"),
 		})
 		if !strings.Contains(body, localAppData) {
 			t.Fatalf("default inheritance dropped LOCALAPPDATA: %q", body)

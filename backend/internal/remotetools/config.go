@@ -155,15 +155,31 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 	return d.Duration.String(), nil
 }
 
-// ShellConfig carries the command policy. The exec path is argv-based; this
-// policy is the explicit opt-in for allowing a shell at all.
+// ShellConfig carries both shell selection and command policy. The exec path is
+// argv-based; the policy is the explicit opt-in for allowing a shell at all.
 type ShellConfig struct {
-	// Program selects the shell executable used by shell and job_start. Empty
-	// auto-detects with the same priority as the built-in shell tool: Windows
-	// pwsh -> powershell -> cmd.exe; Unix $SHELL -> zsh -> bash -> sh. A
-	// configured value is resolved with exec.LookPath at startup and must be a
-	// supported shell (pwsh, powershell, cmd, bash, zsh or sh).
+	// Program is the legacy selector used by shell and job_start. It accepts
+	// either a supported shell executable/path or a stable candidate ID
+	// (git-bash, msys-bash, busybox, wsl, pwsh, powershell, cmd, bash, zsh, sh).
+	//
+	// New configurations should use Path/Prefer. Program remains supported so
+	// existing remote-tools configs and --shell invocations keep working.
 	Program string `yaml:"program,omitempty" json:"program,omitempty"`
+	// Path forces one shell binary, using the same semantics as runtime.yaml's
+	// shell.path. It still has to pass a startup probe.
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// Prefer is an ordered candidate chain using the stable IDs shared with
+	// runtime.yaml. A non-empty list replaces the platform default chain.
+	Prefer []string `yaml:"prefer,omitempty" json:"prefer,omitempty"`
+	// AutoDetect enables the platform default candidate chain when Path and
+	// Prefer are empty. Nil keeps the default (true).
+	AutoDetect *bool `yaml:"autoDetect,omitempty" json:"autoDetect,omitempty"`
+	// ProbeTimeout bounds one startup sentinel probe. Zero uses the executor
+	// default (3s).
+	ProbeTimeout *Duration `yaml:"probeTimeout,omitempty" json:"probeTimeout,omitempty"`
+	// StrictProbe fails startup when no candidate passes instead of falling back
+	// to the platform's last-resort shell. Nil keeps the default (true).
+	StrictProbe *bool `yaml:"strictProbe,omitempty" json:"strictProbe,omitempty"`
 	// AllowedCommands is an allowlist of argv prefixes. Empty means "deny all":
 	// a target that enables the shell tool must name what it permits.
 	AllowedCommands []string `yaml:"allowedCommands" json:"allowedCommands"`
@@ -280,7 +296,10 @@ func effectiveShellEnvAllowlist(configured []string, disableInheritance bool) []
 // turn pipes off. Set "denyShellMetachars: true" explicitly to refuse them.
 func (s *ShellConfig) UnmarshalYAML(value *yaml.Node) error {
 	type plain ShellConfig
-	decoded := plain{}
+	// Start from the explicit zero-config defaults. A partial shell block such
+	// as `shell: {allowedCommands: [git]}` must not erase the selection defaults
+	// merely because it omitted autoDetect/probeTimeout/strictProbe.
+	decoded := plain(DefaultShellConfig())
 	if err := value.Decode(&decoded); err != nil {
 		return err
 	}
@@ -417,16 +436,37 @@ type Config struct {
 	// is deliberately not serialized: a client sends the selector, the target
 	// resolves it against its own PATH.
 	ResolvedShell runtimeexecutor.Shell `yaml:"-" json:"-"`
-	HTTP          HTTPConfig            `yaml:"http" json:"http"`
-	Audit         AuditConfig           `yaml:"audit" json:"audit"`
-	Jobs          JobsConfig            `yaml:"jobs" json:"jobs"`
-	OptionalTools OptionalToolsConfig   `yaml:"optionalTools" json:"optionalTools"`
-	Network       NetworkConfig         `yaml:"network" json:"network"`
+	// ResolvedShellResolution keeps the full candidate matrix for doctor and
+	// startup diagnostics. It is runtime state and is not serialized.
+	ResolvedShellResolution *runtimeexecutor.ShellResolution `yaml:"-" json:"-"`
+	HTTP                    HTTPConfig                       `yaml:"http" json:"http"`
+	Audit                   AuditConfig                      `yaml:"audit" json:"audit"`
+	Jobs                    JobsConfig                       `yaml:"jobs" json:"jobs"`
+	OptionalTools           OptionalToolsConfig              `yaml:"optionalTools" json:"optionalTools"`
+	Network                 NetworkConfig                    `yaml:"network" json:"network"`
 	// Gateway publishes this server's MCP endpoint(s) through aicli-gateway
 	// (docs/gateway/16-mcp-mount-tunnel.md). Empty URL disables it.
 	Gateway GatewayConfig `yaml:"gateway" json:"gateway"`
 	// Artifacts stores full captures of folded tool output.
 	Artifacts ArtifactConfig `yaml:"artifacts" json:"artifacts"`
+}
+
+// DefaultShellConfig is the zero-config shell selection. It deliberately leaves
+// Prefer empty so executor.ResolveShell owns the platform candidate chain
+// (Windows: git-bash -> msys-bash -> busybox -> pwsh -> powershell -> cmd).
+//
+// The command policy is intentionally NOT defaulted here: AllowedCommands stays
+// nil, which keeps the remote shell fail-closed until an operator names what may
+// run. "Zero config" means no shell dialect setup, not an implicit allow-all.
+func DefaultShellConfig() ShellConfig {
+	autoDetect := true
+	strictProbe := true
+	probeTimeout := Duration{Duration: runtimeexecutor.DefaultShellProbeTimeout}
+	return ShellConfig{
+		AutoDetect:   &autoDetect,
+		ProbeTimeout: &probeTimeout,
+		StrictProbe:  &strictProbe,
+	}
 }
 
 // DefaultConfig returns the configuration a bare invocation would use.
@@ -456,7 +496,7 @@ func DefaultConfig() *Config {
 			MaxConcurrentCalls:   DefaultMaxConcurrentCalls,
 			MaxConcurrentStreams: DefaultMaxConcurrentStreams,
 		},
-		Shell: ShellConfig{},
+		Shell: DefaultShellConfig(),
 		HTTP: HTTPConfig{
 			Path:     "/mcp",
 			TokenEnv: "AICLI_REMOTE_TOKEN",
@@ -635,17 +675,30 @@ func (c *Config) Normalize() error {
 	c.Shell.AllowedCommandPatterns = normalizeCommandPatterns(c.Shell.AllowedCommandPatterns)
 	c.Shell.DeniedCommandPatterns = normalizeCommandPatterns(c.Shell.DeniedCommandPatterns)
 	c.Shell.Program = strings.TrimSpace(c.Shell.Program)
+	c.Shell.Path = strings.TrimSpace(c.Shell.Path)
+	c.Shell.Prefer = normalizedShellPrefer(c.Shell.Prefer)
 	c.Shell.EnvAllowlist = effectiveShellEnvAllowlist(c.Shell.EnvAllowlist, c.Shell.DisableEnvInheritance)
+	// Validate the selector even for envd, where it is ignored: a typo in
+	// shell.prefer should not sit silently in a target config forever.
+	if _, err := c.Shell.selectionConfig(); err != nil {
+		return err
+	}
 	if c.Backend == BackendLocal {
-		shell, err := resolveShell(c.Shell.Program)
+		resolution, err := resolveShellResolution(c.Shell)
 		if err != nil {
 			return err
 		}
-		c.ResolvedShell = shell
+		if resolution == nil || strings.TrimSpace(resolution.Shell.Path) == "" ||
+			resolution.Shell.Type == "" {
+			return fmt.Errorf("no usable shell found; set shell.prefer/path/program or --shell")
+		}
+		c.ResolvedShell = resolution.Shell
+		c.ResolvedShellResolution = resolution
 	} else {
 		// envd executes on the target through /bin/sh; the local bridge's shell
 		// selection must not leak into that backend's tool description.
 		c.ResolvedShell = runtimeexecutor.Shell{}
+		c.ResolvedShellResolution = nil
 	}
 	if c.TargetName == "" {
 		c.TargetName = filepath.Base(c.Workspace)

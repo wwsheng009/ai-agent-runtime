@@ -38,6 +38,9 @@ func TestRemoteShellPreservesQuotedPathOnWindows(t *testing.T) {
 	}
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"*"})
+	// The fixture is a .cmd path containing spaces. Pin a native Windows shell;
+	// MSYS rewrites embedded `/` switches and uses its own path grammar.
+	pinPowerShellTestShell(t, cfg)
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -95,10 +98,7 @@ func TestRemoteShellPowerShellCallOperatorHonorsAllowlistOnWindows(t *testing.T)
 	}
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"probe"})
-	if cfg.ResolvedShell.Type != runtimeexecutor.ShellTypePwsh &&
-		cfg.ResolvedShell.Type != runtimeexecutor.ShellTypePowerShell {
-		t.Skip("PowerShell is not the resolved Windows shell")
-	}
+	pinPowerShellTestShell(t, cfg)
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

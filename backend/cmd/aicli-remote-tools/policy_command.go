@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
@@ -77,7 +78,19 @@ func runPolicyTest(args []string) int {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools policy test: %v\n", err)
 		return 1
 	}
-	policy, err := remotetools.NewCommandPolicy(cfg.Shell, cfg.Limits.CommandTimeout.Duration)
+	resolvedShell := cfg.ResolvedShell
+	if cfg.Backend == remotetools.BackendEnvD {
+		// envd runs the command on the target through /bin/sh.
+		resolvedShell = runtimeexecutor.Shell{
+			Path: "/bin/sh",
+			Type: runtimeexecutor.ShellTypeSh,
+		}
+	}
+	policy, err := remotetools.NewCommandPolicyForShell(
+		cfg.Shell,
+		resolvedShell,
+		cfg.Limits.CommandTimeout.Duration,
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools policy test: %v\n", err)
 		return 1

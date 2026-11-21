@@ -28,7 +28,7 @@ func NewSandbox(cfg *Config, workspace *Workspace) (*Sandbox, error) {
 	if cfg == nil || workspace == nil {
 		return nil, fmt.Errorf("config and workspace are required")
 	}
-	commands, err := NewCommandPolicy(cfg.Shell, cfg.Limits.CommandTimeout.Duration)
+	commands, err := NewCommandPolicyForShell(cfg.Shell, cfg.ResolvedShell, cfg.Limits.CommandTimeout.Duration)
 	if err != nil {
 		return nil, err
 	}

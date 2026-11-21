@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/envdclient"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -155,7 +156,13 @@ func newEnvDBackend(cfg *Config) (*envdBackend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("envd backend: %w", err)
 	}
-	commands, err := NewCommandPolicy(cfg.Shell, timeout)
+	// envd always executes through /bin/sh on the target, regardless of the
+	// bridge's local shell selection. Pass that identity explicitly so the
+	// backslash/metachar gate matches the language that will run the command.
+	commands, err := NewCommandPolicyForShell(cfg.Shell, runtimeexecutor.Shell{
+		Path: "/bin/sh",
+		Type: runtimeexecutor.ShellTypeSh,
+	}, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("envd backend: invalid command policy: %w", err)
 	}
@@ -166,8 +173,9 @@ func newEnvDBackend(cfg *Config) (*envdBackend, error) {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell is visible but no allowlist is configured; shell and pty_start will refuse every command (fail-closed); %s\n",
 			ShellPolicyEnableHint())
 	}
-	if strings.TrimSpace(cfg.Shell.Program) != "" {
-		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell.program is ignored for the envd backend; envd executes via /bin/sh on the target\n")
+	if strings.TrimSpace(cfg.Shell.Program) != "" || strings.TrimSpace(cfg.Shell.Path) != "" ||
+		len(cfg.Shell.Prefer) > 0 {
+		fmt.Fprintf(os.Stderr, "aicli-remote-tools: warning: shell.program/path/prefer is ignored for the envd backend; envd executes via /bin/sh on the target\n")
 	}
 	extra := make([]string, 0, len(cfg.AllowedRoots))
 	for _, root := range cfg.AllowedRoots {

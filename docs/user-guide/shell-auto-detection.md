@@ -3,6 +3,8 @@
 > 适用程序：`aicli`、`runtime-server` 及其内置工具执行链。
 > 结论：**当前版本默认开启 shell 自动检测，不需要额外配置。**
 
+> `aicli-remote-tools` 的本地后端也复用同一套 `executor.ResolveShell` 候选链与哨兵探针；远端 `envd` 后端仍固定 `/bin/sh`。remote-tools 不读取 `runtime.yaml`，但代码和首次生成配置都自带 `autoDetect: true` / `probeTimeout: 3s` / `strictProbe: true` 默认值，因此无需任何 shell 配置即可使用 Git Bash；需要相同顺序时再在它自己的 `shell.prefer` / `shell.path` 中显式配置。
+
 本文说明 agent 执行本地 shell 命令时如何选择 shell、如何确认当前生效值，以及什么时候需要手动配置 `runtime.yaml` 的 `shell:` 段。
 
 > 源码环境中的 `aicli` 命令等价于在 `backend/` 目录执行 `go run ./cmd/aicli`。已安装发行版的用户直接使用 `aicli`。

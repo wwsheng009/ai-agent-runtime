@@ -388,6 +388,9 @@ func TestJobStartPreservesQuotedPathOnWindows(t *testing.T) {
 	}
 	root := newTestWorkspace(t)
 	cfg := newJobsConfig(t, root, []string{"*"})
+	// The fixture is a .cmd path containing spaces; use a native Windows shell
+	// instead of letting MSYS rewrite the command line.
+	pinPowerShellTestShell(t, cfg)
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

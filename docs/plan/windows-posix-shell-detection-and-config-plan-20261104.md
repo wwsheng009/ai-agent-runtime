@@ -785,6 +785,8 @@ if c.Backend == BackendLocal {
 
 > `DefaultUserShell()` 保持今天的语义不变；新增独立的 `ResolveShell(cfg ShellConfig)` 供 agent 主链使用。两者互不影响，回滚互不牵连。
 
+> **2026-11-21 补充**：`aicli-remote-tools` 的**本地后端**已主动接入同一个 `executor.ResolveShell`，不再调用 `DefaultUserShell()`。它现在支持 `shell.prefer` / `shell.path` / `shell.autoDetect` / `shell.probeTimeout` / `shell.strictProbe`，默认 Windows 链与 TUI 一致（`git-bash → msys-bash → busybox → pwsh → powershell → cmd`）。`DefaultUserShell()` 本身仍未改变优先级；`envd` 后端继续固定 `/bin/sh`，不受影响。
+
 ### 16.4 对 §7 落点清单的增补
 
 | # | 文件 | 改动 |

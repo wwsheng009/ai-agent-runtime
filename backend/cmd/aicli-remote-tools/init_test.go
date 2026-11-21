@@ -17,6 +17,11 @@ type initDoc struct {
 		Path      string `yaml:"path"`
 		TokenFile string `yaml:"tokenFile"`
 	} `yaml:"http"`
+	Shell *struct {
+		AutoDetect   bool   `yaml:"autoDetect"`
+		ProbeTimeout string `yaml:"probeTimeout"`
+		StrictProbe  bool   `yaml:"strictProbe"`
+	} `yaml:"shell"`
 	Gateway *struct {
 		UseAICLIConfig bool   `yaml:"useAICLIConfig"`
 		IdentityFile   string `yaml:"identityFile"`
@@ -68,6 +73,10 @@ func TestInitWritesConfigAndToken(t *testing.T) {
 	}
 	if doc.Profile != "all" {
 		t.Fatalf("profile = %q", doc.Profile)
+	}
+	if doc.Shell == nil || !doc.Shell.AutoDetect || !doc.Shell.StrictProbe ||
+		doc.Shell.ProbeTimeout != "3s" {
+		t.Fatalf("shell defaults = %+v", doc.Shell)
 	}
 }
 

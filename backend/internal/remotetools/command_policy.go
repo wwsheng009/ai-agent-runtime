@@ -38,6 +38,18 @@ type CommandPolicy struct {
 // returned value is safe to call on a nil receiver, which lets a caller treat a
 // missing policy as "shell disabled" without a second branch.
 func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy, error) {
+	return NewCommandPolicyForShell(shell, runtimeexecutor.Shell{}, timeout)
+}
+
+// NewCommandPolicyForShell builds the command policy with the shell that will
+// actually execute the command.
+//
+// The metacharacter gate depends on the target language: in bash/zsh/sh a
+// backslash escapes the following byte, while in PowerShell/cmd it does not.
+// Passing only ShellConfig.Program was wrong after auto-detection started
+// selecting git-bash, because Program is empty in that case. Local callers pass
+// cfg.ResolvedShell; envd passes its fixed /bin/sh identity.
+func NewCommandPolicyForShell(shell ShellConfig, resolved runtimeexecutor.Shell, timeout time.Duration) (*CommandPolicy, error) {
 	if err := validateCommandPatterns("shell.allowedCommandPatterns", shell.AllowedCommandPatterns); err != nil {
 		return nil, err
 	}
@@ -62,8 +74,24 @@ func NewCommandPolicy(shell ShellConfig, timeout time.Duration) (*CommandPolicy,
 		shell:           shell,
 		timeout:         timeout,
 		inheritEnv:      !shell.DisableEnvInheritance && shell.EnvAllowlist == nil,
-		posixEscapes:    shellHonorsBackslashEscapes(shell.Program),
+		posixEscapes:    commandPolicyPosixEscapes(shell, resolved),
 	}, nil
+}
+
+// commandPolicyPosixEscapes prefers the resolved shell identity. The legacy
+// Program fallback keeps callers that validate a config without resolving it on
+// the historical behavior.
+func commandPolicyPosixEscapes(shell ShellConfig, resolved runtimeexecutor.Shell) bool {
+	switch resolved.Type {
+	case runtimeexecutor.ShellTypeBash, runtimeexecutor.ShellTypeZsh, runtimeexecutor.ShellTypeSh:
+		return true
+	case runtimeexecutor.ShellTypePwsh, runtimeexecutor.ShellTypePowerShell, runtimeexecutor.ShellTypeCmd:
+		return false
+	}
+	if strings.TrimSpace(resolved.Path) != "" {
+		return shellHonorsBackslashEscapes(resolved.Path)
+	}
+	return shellHonorsBackslashEscapes(shell.Program)
 }
 
 // shellHonorsBackslashEscapes reports whether the resolved shell treats a
@@ -83,8 +111,9 @@ func shellHonorsBackslashEscapes(program string) bool {
 	case "pwsh", "powershell", "cmd":
 		return false
 	case "":
-		// Auto-detect: the built-in resolution prefers a POSIX shell off Windows
-		// and pwsh/powershell/cmd on Windows.
+		// No selector at all: callers that have not resolved a shell yet must not
+		// assume POSIX escaping on Windows. Git Bash, when installed, is resolved
+		// explicitly and reaches the switch in commandPolicyPosixEscapes instead.
 		return runtime.GOOS != "windows"
 	default:
 		return false

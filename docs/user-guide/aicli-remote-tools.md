@@ -132,6 +132,24 @@ targetName: srv            # 描述与审计里显示的名字
 descriptionStyle: explicit # 描述里带 [remote:srv]，模型不会误认成本地文件
 ```
 
+### 3.1.1 配置文件位置与优先级
+
+不带 `--config` 时的查找顺序：
+
+1. `--config-b64 <base64-json>`
+2. `--config <file>`
+3. `<当前工作目录>/.aicli/remote-tools/config.yaml`
+4. `~/.aicli/remote-tools/config.yaml`
+5. 内置默认值
+
+Windows 上第 4 项通常是：
+
+```text
+C:\Users\<用户名>\.aicli\remote-tools\config.yaml
+```
+
+注意：项目级路径按**启动时的当前工作目录**计算，`--workspace` 不参与配置文件查找。首次运行 `serve` 会自动生成用户级配置；`aicli-remote-tools init` 默认写到同一位置，也可用 `--config` 指定。token 是独立文件，通常是 `~/.aicli/remote-tools/mcp.token`，不要写进 YAML。
+
 ### 3.2 HTTP 常驻服务
 
 ```bash
@@ -570,7 +588,7 @@ remote_srv__shell {"workdir":"/etc"}      → PATH_DENIED
 remote_srv__shell {"command":"cat /etc/hostname"} → 成功
 ```
 
-原因是 `shell` 真正执行的是 `sh -c "<command>"`（Windows 为启动时解析的 shell，通常 `pwsh`/`powershell`，回退 `cmd.exe /c`），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 开启时只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数；该项**默认关闭**，因此管道等组合默认可用，需要收紧时请显式设为 `true`。
+原因是 `shell` 真正执行的是启动时解析出的 shell（Unix 通常 `sh -c "<command>"`；Windows 按 `git-bash → msys-bash → busybox → pwsh → powershell → cmd` 自动探测），进程以服务账号身份运行，拥有该账号的全部文件权限。`denyShellMetachars` 开启时只拦截 `; && || |`、反引号、`$(`、`>`、`<` 和换行，不拦截路径参数；该项**默认关闭**，因此管道等组合默认可用，需要收紧时请显式设为 `true`。
 
 **如果要求"命令也只能访问 workspace"**，必须使用 OS 级隔离，而不是再加一层 agent 配置：
 
@@ -717,25 +735,60 @@ deny rules       : -
 | 输出上限 | 256 KiB（`limits.maxOutputBytes`）；超限折叠中间并明确标注 |
 | 完整输出 | 配置 `artifacts.root` 后归档，返回 `artifact_id` 可翻页 |
 | 进程组 | 独立进程组；调用取消 / server 关闭时收敛整棵进程树 |
-| shell | 启动时解析：Windows `pwsh` → `powershell` → `cmd.exe`；Unix `$SHELL` → `zsh` → `bash` → `sh` |
+| shell | 启动时复用 aicli/TUI 的 `executor.ResolveShell` 候选链：Windows `git-bash` → `msys-bash` → `busybox` → `pwsh` → `powershell` → `cmd`；Unix `$SHELL` → `zsh` → `bash` → `sh` |
 | 失败结果 | 保留真实退出码，并把 stderr/命令正文随错误一起返回；promoted 不是错误 |
 | 空输出 | 退出码 0 且无输出时明确返回 `Command completed successfully with no output.` |
 | 大输出 | 未配置 `artifacts.root` 时中间部分不保留，并在提示中要求配置 |
 | 环境变量 | 默认继承目标进程完整环境（Windows 为系统变量与用户变量的并集，凭证类名称过滤）；可用 `envAllowlist` 收紧或 `disableEnvInheritance` 关闭 |
 | 工作目录 | 必须是 jail 内的已存在目录 |
 
-Windows 目标不再固定使用 `cmd.exe`。启动时按 `pwsh` → `powershell` → `cmd.exe` 的顺序探测一次，选中结果同时用于 `shell` 和 `job_start`，并写入工具描述。也可以显式指定：
+Windows 目标不再固定使用 `cmd.exe` 或 PowerShell。remote-tools 启动时调用与 aicli/TUI 相同的 `executor.ResolveShell`：按 `git-bash` → `msys-bash` → `busybox` → `pwsh` → `powershell` → `cmd` 的顺序逐个定位并执行哨兵探针，选中第一个真正可用的 shell。结果同时用于 `shell`、`job_start` 和工具描述，不会出现“描述是 PowerShell、实际跑 bash”的漂移。
+
+不写任何 shell 配置也能工作。代码默认值等价于：
 
 ```yaml
 shell:
-  program: pwsh        # 或 C:\Program Files\PowerShell\7\pwsh.exe
+  autoDetect: true
+  probeTimeout: 3s
+  strictProbe: true
+```
+
+`prefer` 为空时使用平台候选链，因此升级后新增的候选仍会自动生效。首次运行自动生成的配置和 `init` 生成的配置都会写入上面这组默认值。注意：`allowedCommands` **不会**有默认值，shell 仍然 fail-closed；零配置只省略 shell 选择，不等于默认放行所有命令。
+
+显式指定候选项：
+
+```yaml
+shell:
+  prefer: [git-bash, pwsh, cmd]   # 只按这个顺序探测，不自动追加默认链
 ```
 
 ```bash
-aicli-remote-tools serve --http --shell pwsh
+aicli-remote-tools serve --http --shell git-bash
 ```
 
-指定值在启动时用 `exec.LookPath` 解析；找不到或不是受支持的 shell（`pwsh`/`powershell`/`cmd`/`bash`/`zsh`/`sh`）会直接启动失败。`doctor` 会显示解析后的 `shell`、`shell type` 和 `shell program`。
+也可以强制一个可执行文件（仍会执行探针验证）：
+
+```yaml
+shell:
+  path: C:\Program Files\Git\bin\bash.exe
+```
+
+可选字段与 `runtime.yaml` 的 `shell:` 语义一致：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `prefer` | 空 | 稳定候选 ID 顺序；非空时完全替代默认链 |
+| `path` | 空 | 强制一个 shell 二进制，仍必须通过探针 |
+| `program` | 空 | 兼容旧配置：候选 ID 或可执行文件；新配置优先用 `prefer` / `path` |
+| `autoDetect` | `true` | 未配置 `path` / `prefer` / `program` 时是否使用默认链 |
+| `probeTimeout` | `3s` | 单个候选的哨兵探针超时 |
+| `strictProbe` | `true` | 所有候选失败时启动失败，而不是静默回退到其他方言 |
+
+支持的候选 ID：`git-bash`、`msys-bash`、`busybox`、`wsl`、`pwsh`、`powershell`、`cmd`、`bash`、`zsh`、`sh`。WSL 不在默认链中，需要时在 `prefer` 里显式写入。
+
+> remote-tools 不自动读取 aicli 的 `.aicli/runtime.yaml`：目标机上的服务应有自己的显式配置。希望和本机 TUI 完全一致时，把相同的 `shell.prefer` / `shell.path` 复制到 remote-tools 配置即可。
+
+`doctor` 会显示解析后的路径、`shell id`、`shell type`、`shell dialect`、`source`、版本、候选链和探针超时；`doctor --json` 对应 `shellId` / `shellDialect` / `shellSource` / `shellCandidates` 等字段。
 
 工具描述会按实际 shell 动态生成语法提示：PowerShell 提示 `Get-Location` / `Select-Object`，cmd 提示 `%VAR%` / `cd`，POSIX 提示 `$VAR` / `pwd`。输出侧复用内置 shell 的硬化：`NO_COLOR=1`、`TERM=dumb`、清空 `COLORTERM`/`CLICOLOR`、`PAGER=cat`，PowerShell 使用 `-NoProfile -NonInteractive` 并注入 UTF-8 输出前缀。
 
@@ -768,7 +821,7 @@ Windows 含空格的路径必须整体加引号；PowerShell 下调用这类外�
 ```
 
 > `envAllowlist` 只作用于本地 `aicli-remote-tools` 后端；`envd` 后端由目标机 daemon 决定环境，不会应用此列表。
-> `shell.program` / `--shell` 同样只作用于本地后端；`envd` 固定通过目标机的 `/bin/sh -c` 执行。
+> `shell.prefer` / `shell.path` / `shell.program` / `--shell` 同样只作用于本地后端；`envd` 固定通过目标机的 `/bin/sh -c` 执行。
 
 ### 7.4 常见错误
 
@@ -1118,7 +1171,8 @@ remoteTargets:
 | `COMMAND_DENIED: no allowedCommands configured` | `profile: ops` 但 allowlist 为空 | 显式配置 allowlist（fail-closed） |
 | 裸命令找不到（`'git' is not recognized` / `command not found`） | 显式配置了 `envAllowlist: []`，或目标机自身没有 PATH | 删除显式空列表以恢复完整继承，或加入 `PATH`、`PATHEXT`、`HOME` 等 |
 | 含空格路径报 `'C:\Program' is not recognized` | 路径没有整体加引号，或 PowerShell 下漏了 `&` | cmd：`"C:\Program Files\...\git.exe" --version`；PowerShell：`& "C:\Program Files\...\git.exe" --version` |
-| `doctor` 显示 shell 是 `cmd.exe` | 未安装 `pwsh`/`powershell`，或显式 `--shell cmd` | 安装 PowerShell 7；或确认 `--shell` / `shell.program` 指向可用 shell |
+| `doctor` 显示 shell 是 `cmd.exe` | 目标机没有可用的 Git Bash / MSYS2 / busybox / PowerShell，或显式指定了 `cmd` | 安装 Git for Windows / PowerShell 7；或用 `shell.prefer` / `shell.path` / `--shell` 指向可用 shell |
+| `doctor` 显示 `shellResolved` 为 Git Bash，但命令仍按 PowerShell 语法写 | 默认链已选中 `git-bash`（`posix-full`） | 改用 `$VAR`、`pwd`、`git status` 等 POSIX 写法；需要强制 PowerShell 时设 `shell.prefer: [pwsh]` |
 | 失败时只看到 `exit status 1` | 运行的是旧版服务，或错误投影仍丢弃正文 | 重新构建并重启服务；新版会保留真实退出码和 stderr |
 | 写命令成功但没有回显 | cmdlet 本身没有 stdout | 看到 `Command completed successfully with no output.` 即为成功；仍建议用 `Test-Path` 复核关键写操作 |
 | 输出里的 `common\tenantctx` 显示成 tab | 可能是请求侧把单反斜杠当成 JSON 转义，或客户端对 `TextContent` 文本做了二次解码；服务端未损坏原始字节 | 看 `metadata.command_has_tab` / `command_has_backslash` / `command_escaped`：TAB 在命令里 = 请求侧；命令有反斜杠而正文是 tab = 响应侧客户端。用原始 MCP 响应或 HTTP 抓包核对；不要服务端二次转义 |

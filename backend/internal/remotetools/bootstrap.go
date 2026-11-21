@@ -84,6 +84,11 @@ type defaultConfigDocument struct {
 	HTTP struct {
 		Path string `yaml:"path"`
 	} `yaml:"http"`
+	Shell struct {
+		AutoDetect   bool     `yaml:"autoDetect"`
+		ProbeTimeout Duration `yaml:"probeTimeout"`
+		StrictProbe  bool     `yaml:"strictProbe"`
+	} `yaml:"shell"`
 	Gateway *struct {
 		UseAICLIConfig bool `yaml:"useAICLIConfig"`
 	} `yaml:"gateway,omitempty"`
@@ -99,6 +104,12 @@ func WriteDefaultConfig(path string, useAICLIConfig bool) error {
 	}
 	var document defaultConfigDocument
 	document.HTTP.Path = "/mcp"
+	shellDefaults := DefaultShellConfig()
+	document.Shell.AutoDetect = shellDefaults.AutoDetect != nil && *shellDefaults.AutoDetect
+	document.Shell.StrictProbe = shellDefaults.StrictProbe != nil && *shellDefaults.StrictProbe
+	if shellDefaults.ProbeTimeout != nil {
+		document.Shell.ProbeTimeout = *shellDefaults.ProbeTimeout
+	}
 	if useAICLIConfig {
 		document.Gateway = &struct {
 			UseAICLIConfig bool `yaml:"useAICLIConfig"`

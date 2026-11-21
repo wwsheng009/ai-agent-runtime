@@ -137,7 +137,11 @@ func TestShellDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 		want = resolved
 	}
 	if runtime.GOOS == "windows" {
-		if !strings.EqualFold(got, want) {
+		// Git Bash prints `pwd -W` with forward slashes; PowerShell/cmd use
+		// backslashes. Compare the native form so the assertion is about the cwd,
+		// not the selected shell's path spelling.
+		gotNative := filepath.Clean(filepath.FromSlash(strings.ReplaceAll(got, `\`, "/")))
+		if !strings.EqualFold(gotNative, want) {
 			t.Fatalf("default workdir = %q, want %q", got, want)
 		}
 		return
@@ -194,7 +198,9 @@ func TestJobStartDefaultWorkdirFollowsNarrowedRoots(t *testing.T) {
 	}
 	found := strings.Contains(output, want)
 	if runtime.GOOS == "windows" {
-		found = strings.Contains(strings.ToLower(output), strings.ToLower(want))
+		normalizedOutput := strings.ToLower(filepath.ToSlash(output))
+		normalizedWant := strings.ToLower(filepath.ToSlash(want))
+		found = strings.Contains(normalizedOutput, normalizedWant)
 	}
 	if !found {
 		t.Fatalf("job default workdir = %s, want %q", output, want)

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
@@ -22,6 +23,59 @@ func TestNormalizeResolvesShellAtStartup(t *testing.T) {
 	}
 }
 
+func TestNormalizeHonorsPreferAndReportsResolution(t *testing.T) {
+	preferred := runtimeexecutor.ShellIDSh
+	if runtime.GOOS == "windows" {
+		preferred = runtimeexecutor.ShellIDCmd
+	}
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.Prefer = []string{preferred}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if cfg.ResolvedShell.ID != preferred {
+		t.Fatalf("resolved shell = %+v, want preferred %q", cfg.ResolvedShell, preferred)
+	}
+	if cfg.ResolvedShellResolution == nil || cfg.ResolvedShellResolution.Shell.ID != preferred {
+		t.Fatalf("resolution matrix = %+v, want preferred %q", cfg.ResolvedShellResolution, preferred)
+	}
+}
+
+func TestNormalizeRejectsUnknownPrefer(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.Prefer = []string{"aicli-no-such-candidate"}
+	if err := cfg.Normalize(); err == nil {
+		t.Fatal("expected Normalize to reject an unknown shell.prefer candidate")
+	}
+}
+
+func TestNormalizeAutoDetectFalseFailsWithoutSelector(t *testing.T) {
+	disabled := false
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.AutoDetect = &disabled
+	if err := cfg.Normalize(); err == nil {
+		t.Fatal("expected autoDetect=false without path/prefer to fail")
+	}
+}
+
+func TestNormalizeStrictProbeFalseKeepsFallback(t *testing.T) {
+	disabled := false
+	permissive := false
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.Shell.AutoDetect = &disabled
+	cfg.Shell.StrictProbe = &permissive
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if strings.TrimSpace(cfg.ResolvedShell.Path) == "" {
+		t.Fatalf("permissive resolution returned no fallback shell: %+v", cfg.ResolvedShell)
+	}
+}
+
 func TestResolveShellUsesConfiguredProgram(t *testing.T) {
 	program := "sh"
 	wantType := runtimeexecutor.ShellTypeSh
@@ -29,7 +83,7 @@ func TestResolveShellUsesConfiguredProgram(t *testing.T) {
 		program = "cmd"
 		wantType = runtimeexecutor.ShellTypeCmd
 	}
-	shell, err := resolveShell(program)
+	shell, err := resolveShell(ShellConfig{Program: program})
 	if err != nil {
 		t.Fatalf("resolveShell(%q): %v", program, err)
 	}
@@ -42,7 +96,7 @@ func TestResolveShellUsesConfiguredProgram(t *testing.T) {
 }
 
 func TestResolveShellRejectsUnknownProgram(t *testing.T) {
-	if _, err := resolveShell("aicli-no-such-shell-xyz"); err == nil {
+	if _, err := resolveShell(ShellConfig{Program: "aicli-no-such-shell-xyz"}); err == nil {
 		t.Fatal("expected an unknown shell to fail at startup")
 	}
 }
@@ -52,8 +106,88 @@ func TestResolveShellRejectsUnsupportedExecutable(t *testing.T) {
 	if err != nil {
 		t.Skipf("os.Executable: %v", err)
 	}
-	if _, err := resolveShell(exe); err == nil {
+	if _, err := resolveShell(ShellConfig{Path: exe}); err == nil {
 		t.Fatalf("expected %q to be rejected as an unsupported shell", filepath.Base(exe))
+	}
+}
+
+func TestResolveShellUsesSharedAutoDetectChain(t *testing.T) {
+	want, err := runtimeexecutor.ResolveShell(runtimeexecutor.ShellConfig{})
+	if err != nil {
+		t.Fatalf("executor.ResolveShell: %v", err)
+	}
+	got, err := resolveShell(ShellConfig{})
+	if err != nil {
+		t.Fatalf("resolveShell: %v", err)
+	}
+	wantShell := want.Shell
+	ensureResolvedShellIdentity(&wantShell)
+	if got.ID != wantShell.ID || got.Path != wantShell.Path || got.Type != wantShell.Type {
+		t.Fatalf("remote-tools shell = %+v, want shared resolver %+v", got, wantShell)
+	}
+}
+
+func TestResolveShellAcceptsCandidateIDAsProgram(t *testing.T) {
+	if _, err := runtimeexecutor.ResolveShell(runtimeexecutor.ShellConfig{
+		Prefer: []string{runtimeexecutor.ShellIDGitBash},
+	}); err != nil {
+		t.Skipf("git-bash is not available: %v", err)
+	}
+	shell, err := resolveShell(ShellConfig{Program: runtimeexecutor.ShellIDGitBash})
+	if err != nil {
+		t.Fatalf("resolveShell(git-bash): %v", err)
+	}
+	if shell.ID != runtimeexecutor.ShellIDGitBash || shell.Type != runtimeexecutor.ShellTypeBash {
+		t.Fatalf("resolved shell = %+v, want git-bash/bash", shell)
+	}
+}
+
+func TestResolveShellRejectsUnknownPrefer(t *testing.T) {
+	if _, err := resolveShell(ShellConfig{Prefer: []string{"aicli-no-such-candidate"}}); err == nil {
+		t.Fatal("expected an unknown shell.prefer candidate to fail")
+	}
+}
+
+func TestResolveShellRejectsConflictingSelectors(t *testing.T) {
+	if _, err := resolveShell(ShellConfig{
+		Path:   "cmd",
+		Prefer: []string{runtimeexecutor.ShellIDCmd},
+	}); err == nil {
+		t.Fatal("expected shell.path + shell.prefer to be rejected")
+	}
+	if _, err := resolveShell(ShellConfig{
+		Program: "cmd",
+		Prefer:  []string{runtimeexecutor.ShellIDCmd},
+	}); err == nil {
+		t.Fatal("expected shell.program + shell.prefer to be rejected")
+	}
+}
+
+func TestCommandPolicyUsesResolvedShellDialect(t *testing.T) {
+	base := ShellConfig{
+		AllowedCommands:    []string{"*"},
+		DenyShellMetachars: true,
+	}
+	bashPolicy, err := NewCommandPolicyForShell(base, runtimeexecutor.Shell{
+		Path: "bash",
+		Type: runtimeexecutor.ShellTypeBash,
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("bash policy: %v", err)
+	}
+	if rule, err := bashPolicy.CheckCommand(`echo a\;b`); err != nil {
+		t.Fatalf("bash should treat \\; as a literal semicolon: %v (rule %s)", err, rule)
+	}
+
+	psPolicy, err := NewCommandPolicyForShell(base, runtimeexecutor.Shell{
+		Path: "pwsh",
+		Type: runtimeexecutor.ShellTypePwsh,
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("powershell policy: %v", err)
+	}
+	if _, err := psPolicy.CheckCommand(`echo a\;b`); err == nil {
+		t.Fatal("PowerShell must reject the escaped semicolon as a real separator")
 	}
 }
 
@@ -133,12 +267,15 @@ func TestWindowsShellRawCmdLineQuotesShellPath(t *testing.T) {
 }
 
 func TestPowerShellInvocationPreservesRealExitCode(t *testing.T) {
-	shell, err := resolveShell("")
+	// The production default is now the shared auto-detect chain (git-bash on
+	// this class of Windows host), so pin PowerShell explicitly to keep this
+	// regression covered.
+	shell, err := resolveShell(ShellConfig{Prefer: []string{runtimeexecutor.ShellIDPwsh}})
 	if err != nil {
-		t.Fatalf("resolveShell: %v", err)
+		shell, err = resolveShell(ShellConfig{Prefer: []string{runtimeexecutor.ShellIDPowerShell}})
 	}
-	if shell.Type != runtimeexecutor.ShellTypePwsh && shell.Type != runtimeexecutor.ShellTypePowerShell {
-		t.Skip("PowerShell is not the resolved shell")
+	if err != nil {
+		t.Skipf("PowerShell is not available: %v", err)
 	}
 	cases := []struct {
 		name    string

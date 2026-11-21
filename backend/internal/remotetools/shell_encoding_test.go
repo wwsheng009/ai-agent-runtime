@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
@@ -15,10 +14,7 @@ import (
 func TestRemoteShellPreservesUTF8Output(t *testing.T) {
 	root := newTestWorkspace(t)
 	cfg := newOpsConfig(t, root, []string{"echo"})
-	if cfg.ResolvedShell.Type != runtimeexecutor.ShellTypePwsh &&
-		cfg.ResolvedShell.Type != runtimeexecutor.ShellTypePowerShell {
-		t.Skipf("UTF-8 regression only applies to PowerShell, got %q", cfg.ResolvedShell.Type)
-	}
+	pinPowerShellTestShell(t, cfg)
 
 	server, err := remotetools.NewServer(cfg, "dev")
 	if err != nil {

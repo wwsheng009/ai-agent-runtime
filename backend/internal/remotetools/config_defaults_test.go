@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeDefaultsArtifactsRootToWorkspaceAICLIDir(t *testing.T) {
@@ -109,6 +111,57 @@ func TestNormalizeShellEnvAllowlistDefaultsToInheritedEnvironment(t *testing.T) 
 	}
 	if cfg.Shell.DisableEnvInheritance {
 		t.Fatal("default disableEnvInheritance = true, want false")
+	}
+}
+
+func TestDefaultConfigShellDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Shell.AutoDetect == nil || !*cfg.Shell.AutoDetect {
+		t.Fatalf("default autoDetect = %+v, want true", cfg.Shell.AutoDetect)
+	}
+	if cfg.Shell.StrictProbe == nil || !*cfg.Shell.StrictProbe {
+		t.Fatalf("default strictProbe = %+v, want true", cfg.Shell.StrictProbe)
+	}
+	if cfg.Shell.ProbeTimeout == nil || cfg.Shell.ProbeTimeout.Duration != 3*time.Second {
+		t.Fatalf("default probeTimeout = %+v, want 3s", cfg.Shell.ProbeTimeout)
+	}
+	if len(cfg.Shell.Prefer) != 0 {
+		t.Fatalf("default prefer = %v, want the shared resolver chain", cfg.Shell.Prefer)
+	}
+	if len(cfg.Shell.AllowedCommands) != 0 {
+		t.Fatalf("default allowedCommands = %v, want fail-closed", cfg.Shell.AllowedCommands)
+	}
+}
+
+func TestLoadConfigFileReadsShellPrefer(t *testing.T) {
+	preferred := "sh"
+	if runtime.GOOS == "windows" {
+		preferred = "cmd"
+	}
+	path := filepath.Join(t.TempDir(), "remote.yaml")
+	payload := fmt.Sprintf("workspace: %s\nshell:\n  prefer: [%s]\n  probeTimeout: 2s\n",
+		filepath.ToSlash(t.TempDir()), preferred)
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if cfg.ResolvedShell.ID != preferred {
+		t.Fatalf("resolved shell = %+v, want preferred %q", cfg.ResolvedShell, preferred)
+	}
+	if cfg.Shell.ProbeTimeout == nil || cfg.Shell.ProbeTimeout.Duration != 2*time.Second {
+		t.Fatalf("probeTimeout = %+v, want 2s", cfg.Shell.ProbeTimeout)
+	}
+	if cfg.Shell.AutoDetect == nil || !*cfg.Shell.AutoDetect {
+		t.Fatalf("autoDetect = %+v, want the default true", cfg.Shell.AutoDetect)
+	}
+	if cfg.Shell.StrictProbe == nil || !*cfg.Shell.StrictProbe {
+		t.Fatalf("strictProbe = %+v, want the default true", cfg.Shell.StrictProbe)
 	}
 }
 

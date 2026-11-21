@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
 
@@ -37,11 +38,18 @@ func TestRemoteShellPreservesBackslashPathsInOutput(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	command := `echo common\tenantctx ` + strings.Repeat("A", 2000)
+	literal := `common\tenantctx`
+	command := `echo ` + literal + ` ` + strings.Repeat("A", 2000)
+	switch cfg.ResolvedShell.Type {
+	case runtimeexecutor.ShellTypeBash, runtimeexecutor.ShellTypeZsh, runtimeexecutor.ShellTypeSh:
+		// POSIX echo interprets the backslash; quote it so this test still checks
+		// byte preservation instead of the host shell's escape rules.
+		command = `echo '` + literal + `' ` + strings.Repeat("A", 2000)
+	}
 	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
 		"command": command,
 	})
-	if !strings.Contains(body, `common\tenantctx`) {
+	if !strings.Contains(body, literal) {
 		t.Fatalf("backslash path was altered: %q", body)
 	}
 	if strings.Contains(body, "common\ttenantctx") {
