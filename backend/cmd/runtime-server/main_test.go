@@ -160,3 +160,20 @@ func TestBuildSkillsMCPManager_ExposesLocalToolkitWithoutExternalMCP(t *testing.
 		t.Fatalf("expected local grep tool without MCP name, got %+v", readTool)
 	}
 }
+
+func TestResolveRuntimeServerAccessToken(t *testing.T) {
+	t.Setenv("SERVER_ACCESS_TOKEN", "")
+	cfg := &config.Config{Server: config.ServerConfig{AccessToken: " config-secret "}}
+	if got := resolveRuntimeServerAccessToken(cfg); got != "config-secret" {
+		t.Fatalf("config token = %q, want config-secret", got)
+	}
+
+	t.Setenv("SERVER_ACCESS_TOKEN", " env-secret ")
+	if got := resolveRuntimeServerAccessToken(cfg); got != "env-secret" {
+		t.Fatalf("env token = %q, want env-secret", got)
+	}
+
+	if got := normalizeRuntimeServerAccessToken("${SERVER_ACCESS_TOKEN:-}"); got != "" {
+		t.Fatalf("unresolved placeholder = %q, want empty", got)
+	}
+}

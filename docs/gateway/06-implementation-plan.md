@@ -197,7 +197,7 @@ cmd/aicli/                        # --gateway/--gateway-token；启动 agent
 ```
 
 - 配置段 `gateway`（与 `aicli` 同源）。
-- **本地控制 API**：`/api/runtime/gateway/{status,connect,disconnect,reconnect,config}`（回环/admin token，写操作返回更新后状态，**不回传 token 明文**）。
+- **控制 API**：`/api/runtime/gateway/{status,connect,disconnect,reconnect,config}`（admin token / admin role，来源地址不参与授权；写操作返回更新后状态，**不回传 token 明文**）。
 - **前端入口**：设置页 "Gateway"（`gateway-settings-page.tsx`，接入 `settings-dialog.tsx` 的 `activeSection`）：状态 + 连接/断开/重连 + 配置；过渡态禁用按钮。
 
 ### 6.3 `aicli-gateway`（新）

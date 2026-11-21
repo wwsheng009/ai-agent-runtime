@@ -88,13 +88,18 @@ owner 登录按"**先观察、再挑战、后阻断**"的**分级风控**处理�
 - 轮换：支持生成新令牌并设置旧令牌宽限期。
 - 绑定（可选）：令牌可绑定 `node_id` / 期望 `kind`，防止令牌被用于注册成别的主体。
 
-### 2.3 L3 本机回环令牌（保持不变）
+### 2.3 L3 本机回环令牌与非本地访问 token
 
 - `aicli` 微前端：`X-AICLI-Token`（或 `?token=`）；回环请求免令牌、非回环需令牌。
-- `runtime-server`：`X-Skills-Admin-Token` / `Bearer`，回环放行。
-- agent 转发时以本机回环身份请求，并注入对应令牌（从本地进程内存读取，不落网关）。
-- **为什么可行**：agent 就在本机，请求从 `127.0.0.1` 发出，Host/Origin 校验自然通过；
-  令牌由 agent 注入而非浏览器，攻击面不扩大。
+- `runtime-server`：`/api/*` 回环直连免 token；非 loopback 直连必须携带
+  `Authorization: Bearer <server.access_token>` 或 `X-AICLI-Access-Token`。
+- 非本地浏览器通过 `/api/runtime/auth/access/login` 换取 HttpOnly 会话 Cookie。
+- gateway agent 经回环转发时注入 `X-AICLI-Gateway-Token`（注册设备令牌），
+  runtime-server 据此信任已注册 gateway 路径；外部入口仍由 gateway 的 owner 会话或
+  `--access-token` Bearer 保护。运行管理面的细分 admin token 暂不在此层校验，
+  后续统一并入外部访问 token 方案（见 [19](./19-remote-access-token.md)）。
+- **为什么仍需凭证**：非 loopback 地址不能被当作本机身份；直连伪造 `X-Forwarded-For`
+  也不能获得回环身份。
 
 ---
 
@@ -133,7 +138,7 @@ owner 登录按"**先观察、再挑战、后阻断**"的**分级风控**处理�
 | 类别 | 处理 |
 |------|------|
 | Hop-by-hop（`Connection`、`Keep-Alive`、`Transfer-Encoding`、`Upgrade`、`Proxy-*`、`TE`、`Trailer`） | 剥离，不转发 |
-| 网关内部头（`X-Gateway-*`） | 进入网关时剥离（防注入），仅在网关→agent 的受控注入中使用 |
+| 网关内部头（`X-Gateway-*`、`X-AICLI-Gateway-Token`） | 进入网关时剥离（防注入），仅在网关→agent 的受控注入中使用 |
 | `Cookie` | **不下发**给本地（浏览器 Cookie 属于网关）；本地若需要会话选择用 `X-Gateway-Session` 或查询串 |
 | `Authorization` | 剥离浏览器侧的（owner 用 Cookie）；本地令牌由 agent 注入 |
 | `Host` | agent 转发时改写为本地回环 Host（`127.0.0.1:<port>`），保证本机 Host 校验通过 |
@@ -192,12 +197,13 @@ owner 登录按"**先观察、再挑战、后阻断**"的**分级风控**处理�
 | `aicli` Origin 校验（同源） | agent 不携带浏览器 Origin 或设为回环 | ✅ 通过 |
 | `aicli` 写令牌 `X-AICLI-Token` | agent 注入 | ✅ 通过；浏览器/网关无令牌 |
 | `aicli` 非回环 cookie 导航 | 网关场景走回环转发，不触发 | ✅ 不影响 |
-| `runtime-server` 回环放行 / admin token | agent 以回环转发并注入 token | ✅ 通过 |
-| `runtime-server` scope resolver（JWT/api key） | 网关不注入这些；沿用回环 identity | ✅ 通过（单用户场景足够） |
+| `runtime-server` 非本地访问 | 非回环 `/api/*` 必须 Bearer token；loopback 免 token | ✅ 通过 |
+| `runtime-server` scope resolver（JWT/api key） | 网关不注入这些；管理面按 token / role 判定 | ✅ 通过 |
 | `mesh` 令牌披露面收窄 | 网关控制台不显示任何本机令牌 | ✅ 一致 |
 
-> **重要**：不得为了网关而放宽本机校验（例如把 Host 校验改成允许任意来源）。网关的价值正是
-> 让本地保持"只信任回环"，把公网信任问题收敛到网关一层。
+> **重要**：不得为了网关而放宽本机校验（例如把 Host 校验改成允许任意来源）。`aicli` 本机
+> Web 面继续依赖监听边界与写令牌；`runtime-server` 对非回环来源必须要求访问 token。
+> 本机反向代理必须自行完成外部鉴权，否则 loopback 转发会被视为本机进程。
 
 ---
 

@@ -244,7 +244,7 @@ export function RequestAnalysisPanel({ adminToken }: { adminToken: string }) {
         </Button>
       </div>
 
-      {!adminToken.trim() || forbidden ? (
+      {forbidden ? (
         <p
           role="status"
           className="mt-3 rounded-panel border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2 text-xs leading-5 text-analytics-warning"

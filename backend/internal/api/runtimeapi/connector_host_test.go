@@ -12,15 +12,18 @@ func connectorRequest(remoteAddr string) *http.Request {
 	return req
 }
 
-func TestAuthorizeConnectorAdminAllowsLoopback(t *testing.T) {
+func TestAuthorizeConnectorAdminDeniesLoopbackWithoutToken(t *testing.T) {
 	handler := NewHandler(nil, nil, nil)
-	if err := handler.AuthorizeConnectorAdmin(connectorRequest("127.0.0.1:12345")); err != nil {
-		t.Fatalf("loopback should be allowed: %v", err)
+	handler.SetAdminAuthRequired(true)
+	handler.SetAdminToken(runtimeAdminTestToken)
+	if err := handler.AuthorizeConnectorAdmin(connectorRequest("127.0.0.1:12345")); err == nil {
+		t.Fatal("loopback request without an admin token should be denied")
 	}
 }
 
 func TestAuthorizeConnectorAdminDeniesRemoteWithoutToken(t *testing.T) {
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
 	if err := handler.AuthorizeConnectorAdmin(connectorRequest("203.0.113.7:443")); err == nil {
 		t.Fatal("remote request without admin token should be denied")
 	}
@@ -28,6 +31,7 @@ func TestAuthorizeConnectorAdminDeniesRemoteWithoutToken(t *testing.T) {
 
 func TestAuthorizeConnectorAdminAcceptsAdminToken(t *testing.T) {
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("secret-token")
 	req := connectorRequest("203.0.113.7:443")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")

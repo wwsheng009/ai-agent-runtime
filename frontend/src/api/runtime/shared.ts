@@ -54,15 +54,40 @@ export function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
 
+function getInjectedRuntimeBase() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const injected = (window as unknown as { __RUNTIME_BASE__?: unknown })
+    .__RUNTIME_BASE__;
+  return typeof injected === "string" ? injected.trim() : "";
+}
+
+/**
+ * Returns the runtime server's reverse-proxy mount path for client-side
+ * routing. This deliberately ignores VITE_API_BASE_URL: that value may point
+ * at a different API origin and is not a browser-router basename.
+ */
+export function getRuntimeRouterBasename() {
+  const injected = getInjectedRuntimeBase();
+  if (!injected.startsWith("/")) {
+    return "";
+  }
+  return trimTrailingSlash(injected);
+}
+
+/** Adds the injected runtime-server mount prefix to an absolute app route. */
+export function buildRuntimePagePath(pathname: string) {
+  const routePath = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  return `${getRuntimeRouterBasename()}${routePath}`;
+}
+
 export function getRuntimeBaseUrl() {
   // Injected by runtime-server when the SPA is served under a reverse-proxy
   // mount (gateway /n/{node}/): every API call must carry the same prefix.
-  if (typeof window !== "undefined") {
-    const injected = (window as unknown as { __RUNTIME_BASE__?: string })
-      .__RUNTIME_BASE__;
-    if (injected && injected.trim()) {
-      return trimTrailingSlash(injected.trim());
-    }
+  const injected = getInjectedRuntimeBase();
+  if (injected) {
+    return trimTrailingSlash(injected);
   }
   const configured = import.meta.env.VITE_API_BASE_URL;
   if (configured && configured.trim()) {
@@ -295,7 +320,16 @@ async function performRuntimeJsonFetch<T>(
   const response = await fetch(input, effectiveInit);
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
-    throw new RuntimeApiError(response.status, payload);
+    const error = new RuntimeApiError(response.status, payload);
+    if (
+      response.status === 401 &&
+      readErrorEnvelope(payload).code === "API_UNAUTHORIZED" &&
+      typeof window !== "undefined" &&
+      !input.includes("/api/runtime/auth/access/")
+    ) {
+      window.dispatchEvent(new Event("runtime:access-unauthorized"));
+    }
+    throw error;
   }
   return (await response.json()) as T;
 }

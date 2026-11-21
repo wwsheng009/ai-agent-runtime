@@ -40,6 +40,8 @@ func newSessionRoutingTestHandler(t *testing.T) (*Handler, *chat.SessionManager,
 	t.Setenv("USERPROFILE", home)
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminAuthRequired(true)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
 	t.Cleanup(sessionManager.Stop)
 	handler.SetSessionManager(sessionManager)
@@ -49,7 +51,7 @@ func newSessionRoutingTestHandler(t *testing.T) (*Handler, *chat.SessionManager,
 	return handler, sessionManager, router
 }
 
-func doSessionRoutingRequest(t *testing.T, router *mux.Router, method, sessionID, body string, loopback bool) *httptest.ResponseRecorder {
+func doSessionRoutingRequest(t *testing.T, router *mux.Router, method, sessionID, body string, authorized bool) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body == "" {
@@ -59,10 +61,9 @@ func doSessionRoutingRequest(t *testing.T, router *mux.Router, method, sessionID
 	}
 	req := httptest.NewRequest(method, "/api/runtime/sessions/"+sessionID+"/routing", reader)
 	req.Header.Set("Content-Type", "application/json")
-	if loopback {
-		req.RemoteAddr = "127.0.0.1:54321"
-	} else {
-		req.RemoteAddr = "203.0.113.7:54321"
+	req.RemoteAddr = "203.0.113.7:54321"
+	if authorized {
+		addRuntimeAdminTestToken(req)
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -149,7 +150,7 @@ func TestSessionRoutingChildSessionConflict(t *testing.T) {
 	assert.Empty(t, sessionRoutingOverrideRaw(stored))
 }
 
-// U-10：非回环且无 token 的 PATCH 被拒（与既有会话写端点同级）。
+// U-10：无管理令牌的 PATCH 被拒（来源地址不参与授权）。
 func TestSessionRoutingPatchUnauthorized(t *testing.T) {
 	_, sessionManager, router := newSessionRoutingTestHandler(t)
 	session, err := sessionManager.Create(context.Background(), "user-routing-unauthorized")
@@ -174,6 +175,7 @@ func TestUpdateSessionRejectsRoutingContextKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/sessions/"+session.ID, bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "127.0.0.1:54321"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -311,6 +313,8 @@ func TestSessionRoutingConfigLayerWriteRefreshesSnapshot(t *testing.T) {
 func newSessionRoutingTestHandlerWithStorage(t *testing.T, storage chat.SessionStorage) (*Handler, *chat.SessionManager, *mux.Router) {
 	t.Helper()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminAuthRequired(true)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	sessionManager := chat.NewSessionManager(storage, nil)
 	t.Cleanup(sessionManager.Stop)
 	handler.SetSessionManager(sessionManager)

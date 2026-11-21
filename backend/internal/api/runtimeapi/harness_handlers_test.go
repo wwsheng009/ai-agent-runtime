@@ -18,6 +18,7 @@ import (
 func newHarnessTestRouter(t *testing.T) (*Handler, *mux.Router) {
 	t.Helper()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	return handler, router

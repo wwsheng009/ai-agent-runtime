@@ -453,6 +453,12 @@ func runServe(args []string) int {
 	defer app.close()
 
 	addr := resolveListenAddr(cfg, opts.ListenAddr)
+	if !isLoopbackAddr(addr) && strings.TrimSpace(app.accessToken) == "" {
+		logger.Warn("runtime-server is listening on a non-loopback address without server.access_token; all non-loopback /api/* requests will be rejected",
+			logger.String("listen", addr),
+			logger.String("hint", "set SERVER_ACCESS_TOKEN or server.access_token, or listen on 127.0.0.1 and use the gateway for remote access"),
+		)
+	}
 	// 网关接入：监听地址确定后，把本机回环地址告诉 agent（反向代理目标）。
 	app.setGatewayForward(addr)
 	listener, err := net.Listen("tcp", addr)
@@ -1047,9 +1053,10 @@ func runtimeServerHealthURL(listenAddr string) (string, bool) {
 }
 
 type runtimeServerApp struct {
-	router         *mux.Router
+	router         http.Handler
 	handler        *runtimeapi.Handler
 	cfg            *config.Config
+	accessToken    string
 	skillsCfg      *config.SkillsRuntimeConfig
 	runtimeManager *runtimecfg.RuntimeManager
 	bootstrap      *runtimebootstrap.Manager
@@ -1493,6 +1500,18 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	router := mux.NewRouter()
 	router.UseEncodedPath()
 	router.HandleFunc("/healthz", runtimeInfoHandler).Methods(http.MethodGet)
+	// 非本地访问统一 token：登录/状态/登出端点必须在 SPA catch-all 之前注册。
+	accessToken := resolveRuntimeServerAccessToken(cfg)
+	accessGuard := runtimeapi.NewRuntimeAccessGuard(accessToken)
+	if gatewayCfg := runtimeServerGatewayResolveConfig(cfg); gatewayCfg.Token != "" {
+		// gateway agent 已用设备令牌注册；它在回环转发时注入该令牌，作为
+		// “请求来自已注册 gateway”的显式凭证，使 gateway 路径无需再输入
+		// runtime access token。浏览器永远看不到这个设备令牌。
+		accessGuard.SetGatewayTrustToken(gatewayCfg.Token)
+	}
+	router.HandleFunc(runtimeapi.AccessStatusPath, accessGuard.Status).Methods(http.MethodGet)
+	router.HandleFunc(runtimeapi.AccessLoginPath, accessGuard.Login).Methods(http.MethodPost)
+	router.HandleFunc(runtimeapi.AccessLogoutPath, accessGuard.Logout).Methods(http.MethodPost)
 	runtimeRouter := handler.RegisterRoutes(router)
 	// 右侧栏「文件」面板（P0–P2）：/fs/roots|list|stat|preview|download + /fs/upload/*。
 	// 追加式注册：不改变既有 /fs/read-file 等端点的语义；服务未注入时模块内统一 503 降级。
@@ -1532,6 +1551,11 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
 	}
 
+	// 本地回环（本机 UI / gateway agent）免 token；直接来自非 loopback 的
+	// /api/* 必须携带 server.access_token 或登录后的 HttpOnly cookie。
+	// gateway 远程入口由 gateway 自身 owner 会话 / access token 鉴权后经回环转发。
+	protectedRouter := accessGuard.Middleware(router)
+
 	// Phase 1 交付 6：workspace 解析之后、app 对外提供服务之前接入知识层。
 	// mode=off（默认）时不建库不建锁；失败只 warn，不让启动失败。
 	knowledgeActivation := bootRuntimeServerKnowledge(runtimeConfig, runtimeManager.GetFilePath())
@@ -1552,9 +1576,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	gatewayController := startRuntimeServerGateway(handler, cfg)
 
 	return &runtimeServerApp{
-		router:              router,
+		router:              protectedRouter,
 		handler:             handler,
 		cfg:                 cfg,
+		accessToken:         accessToken,
 		skillsCfg:           skillsCfg,
 		runtimeManager:      runtimeManager,
 		bootstrap:           bootstrapManager,
@@ -1568,6 +1593,26 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		connectorService:    connectorService,
 		memoryRuntimeCancel: memoryRuntimeCancel,
 	}, nil
+}
+
+func resolveRuntimeServerAccessToken(cfg *config.Config) string {
+	token := ""
+	if cfg != nil {
+		token = strings.TrimSpace(cfg.Server.AccessToken)
+	}
+	if env := strings.TrimSpace(os.Getenv("SERVER_ACCESS_TOKEN")); env != "" {
+		token = env
+	}
+	return normalizeRuntimeServerAccessToken(token)
+}
+
+func normalizeRuntimeServerAccessToken(raw string) string {
+	token := strings.TrimSpace(raw)
+	// 防御未展开的 YAML 占位符：绝不能把模板字符串当成公开默认口令。
+	if strings.HasPrefix(token, "${") && strings.HasSuffix(token, "}") {
+		return ""
+	}
+	return token
 }
 
 func resolvePathFromConfigFile(configFile, target string) string {

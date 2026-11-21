@@ -99,7 +99,7 @@
 2. **认证失败不重连**：`auth_invalid` → `error` 且停止重连（防风暴）；UI/TUI 提示重新签发令牌。
 3. **令牌脱敏**：控制 API 与前端只暴露 `token_hint`；配置写入 `token` 省略=保持原值。
 4. **幂等与串行**：`Connect/Disconnect/Reconnect` 内部互斥；重复点击/重复调用不产生多条隧道。
-5. **本地 owner only**：控制面仅 TUI 或本机 runtime-server（回环/admin token）；网关侧无反向强制连接入口。
+5. **凭证保护**：控制面仅 TUI 或携带 admin token / admin role 的 runtime-server；环回来源不自动放行，网关侧无反向强制连接入口。
 6. **降级**：网关不可用时本地功能零影响；命令/接口给出明确提示而非报错崩溃。
 7. **忙时安全**：只读子命令（`status/url`）允许忙时；写类子命令不得被队列静默延迟。
 

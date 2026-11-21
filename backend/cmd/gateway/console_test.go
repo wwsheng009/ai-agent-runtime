@@ -95,6 +95,8 @@ func TestConsoleGatewaySessionDeepLink(t *testing.T) {
 		"function handleUnauthorized(",
 		"function handleAuthResponse(",
 		"function authHeartbeat(",
+		"function gatewayLoginNextPath(",
+		`window.location.assign(next)`,
 	} {
 		if !strings.Contains(app, needle) {
 			t.Fatalf("app.js is missing %q", needle)

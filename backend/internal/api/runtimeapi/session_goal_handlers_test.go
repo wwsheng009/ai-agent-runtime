@@ -19,6 +19,8 @@ import (
 func newSessionGoalAPIHarness(t *testing.T) (*Handler, *chat.SessionManager, *chat.Session) {
 	t.Helper()
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
 	t.Cleanup(sessionManager.Stop)
 	handler.SetSessionManager(sessionManager)
@@ -27,14 +29,13 @@ func newSessionGoalAPIHarness(t *testing.T) (*Handler, *chat.SessionManager, *ch
 	return handler, sessionManager, session
 }
 
-// callSessionGoalAPI 直接调用 handler（不经路由表），RemoteAddr 默认回环以通过
-// 会话写端点授权（回环 / admin token / admin role）。
+// callSessionGoalAPI 直接调用 handler（不经路由表），并显式携带测试管理令牌。
 func callSessionGoalAPI(t *testing.T, handler *Handler, method, sessionID, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	return callSessionGoalAPIFrom(t, handler, method, sessionID, body, "127.0.0.1:43210")
+	return callSessionGoalAPIFrom(t, handler, method, sessionID, body, "127.0.0.1:43210", true)
 }
 
-func callSessionGoalAPIFrom(t *testing.T, handler *Handler, method, sessionID, body, remoteAddr string) *httptest.ResponseRecorder {
+func callSessionGoalAPIFrom(t *testing.T, handler *Handler, method, sessionID, body, remoteAddr string, authorized bool) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader io.Reader
 	if strings.TrimSpace(body) != "" {
@@ -42,6 +43,9 @@ func callSessionGoalAPIFrom(t *testing.T, handler *Handler, method, sessionID, b
 	}
 	req := httptest.NewRequest(method, "/api/runtime/sessions/"+sessionID+"/goal", reader)
 	req.RemoteAddr = remoteAddr
+	if authorized {
+		addRuntimeAdminTestToken(req)
+	}
 	req = mux.SetURLVars(req, map[string]string{"id": sessionID})
 	rec := httptest.NewRecorder()
 	if method == http.MethodGet {
@@ -217,15 +221,15 @@ func TestSessionGoalAPI_BudgetLimitedResumeNeedsRaise(t *testing.T) {
 }
 
 // TestSessionGoalAPI_WriteRequiresAuthorization：写端点沿用会话写授权
-// （回环 / admin token / admin role），非回环无凭证 = 403；GET 只读不受影响。
+// （admin token / admin role），无凭证 = 403（来源地址不影响结果）；GET 只读不受影响。
 func TestSessionGoalAPI_WriteRequiresAuthorization(t *testing.T) {
 	handler, _, session := newSessionGoalAPIHarness(t)
 	id := session.ID
 
-	rec := callSessionGoalAPIFrom(t, handler, http.MethodPost, id, `{"action":"set","objective":"x"}`, "203.0.113.7:5555")
+	rec := callSessionGoalAPIFrom(t, handler, http.MethodPost, id, `{"action":"set","objective":"x"}`, "203.0.113.7:5555", false)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	rec = callSessionGoalAPIFrom(t, handler, http.MethodGet, id, "", "203.0.113.7:5555")
+	rec = callSessionGoalAPIFrom(t, handler, http.MethodGet, id, "", "203.0.113.7:5555", false)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -239,6 +243,7 @@ func TestSessionGoalAPI_RoutesRegistered(t *testing.T) {
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/goal", nil)
 	getReq.RemoteAddr = "127.0.0.1:43210"
+	addRuntimeAdminTestToken(getReq)
 	getRec := httptest.NewRecorder()
 	router.ServeHTTP(getRec, getReq)
 	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
@@ -248,6 +253,7 @@ func TestSessionGoalAPI_RoutesRegistered(t *testing.T) {
 		strings.NewReader(`{"action":"set","objective":"route smoke"}`))
 	postReq.RemoteAddr = "127.0.0.1:43210"
 	postReq.Header.Set("Content-Type", "application/json")
+	addRuntimeAdminTestToken(postReq)
 	postRec := httptest.NewRecorder()
 	router.ServeHTTP(postRec, postReq)
 	require.Equal(t, http.StatusOK, postRec.Code, postRec.Body.String())

@@ -610,10 +610,14 @@ func configSubagentRouting(cfg *agentconfig.Config) *agentconfig.AICLISubagentRo
 	return cfg.AICLI.Subagents.Routing
 }
 
-// authorizeSessionRoutingWrite 与既有会话写端点同级（M4：回环 / admin token / admin role）。
+// authorizeSessionRoutingWrite 默认放行（临时策略）；显式开启 admin 鉴权后按
+// admin token / admin role 校验。来源地址不参与授权。
 func (h *Handler) authorizeSessionRoutingWrite(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
 		return nil
 	}
-	return errors.New(errors.ErrAgentPermission, "session routing endpoints require loopback access, valid admin token, or admin role")
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "session routing endpoints require a valid admin token or admin role")
 }

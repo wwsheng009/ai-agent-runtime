@@ -145,6 +145,60 @@ func (o *Owner) RequireSession(next http.Handler) http.Handler {
 	})
 }
 
+// RequireSessionOrToken accepts either a valid owner session cookie or the
+// configured static bearer token. It is used by the public node proxy so
+// programmatic clients (which have no browser cookie) can authenticate while
+// the console keeps using the owner session.
+//
+// If the owner is disabled and no static token is configured, requests pass
+// through (legacy loopback/dev behavior). If a static token is configured it
+// is always required, even when owner auth is disabled.
+func (o *Owner) RequireSessionOrToken(staticToken string, next http.Handler) http.Handler {
+	staticToken = strings.TrimSpace(staticToken)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o.AuthorizeSessionOrToken(r, staticToken) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="aicli-gateway"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+}
+
+// AuthorizeSessionOrToken reports whether the request carries a valid owner
+// session cookie or the configured static bearer token. A disabled owner with
+// no configured token passes (legacy loopback/dev behavior).
+func (o *Owner) AuthorizeSessionOrToken(r *http.Request, staticToken string) bool {
+	staticToken = strings.TrimSpace(staticToken)
+	if r == nil {
+		return false
+	}
+	if o != nil && o.Enabled() {
+		if cookie, err := r.Cookie(CookieName); err == nil && o.Valid(cookie.Value) {
+			return true
+		}
+	}
+	if staticToken != "" && bearerTokenMatches(r, staticToken) {
+		return true
+	}
+	return staticToken == "" && (o == nil || !o.Enabled())
+}
+
+func bearerTokenMatches(r *http.Request, expected string) bool {
+	if r == nil || expected == "" {
+		return false
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return false
+	}
+	token := strings.TrimSpace(auth[len("Bearer "):])
+	if token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+}
+
 // SessionCookie builds the session cookie for a token.
 func SessionCookie(token string, ttl time.Duration, secure bool) *http.Cookie {
 	if ttl <= 0 {

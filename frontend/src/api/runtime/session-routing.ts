@@ -6,7 +6,7 @@
 //
 // 写入路径：`target_layer` 决定落盘位置（session=会话记录覆盖 / workspace=
 // 工作区 chat-prefs.yaml / config=全局配置），config 层需 `confirm=true` 二次确认。
-// 后端鉴权：回环地址、admin token 或 admin 角色（authorizeSessionRoutingWrite）。
+// 后端鉴权：admin token 或 admin 角色（authorizeSessionRoutingWrite）；来源地址不参与授权。
 
 import type {
   RoutingLevelSummary,

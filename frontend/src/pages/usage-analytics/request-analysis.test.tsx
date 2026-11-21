@@ -99,14 +99,14 @@ describe("RequestAnalysisPanel", () => {
     delete (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(entry: string) {
+  async function render(entry: string, adminToken = "admin-secret") {
     await act(async () => {
       root.render(
         <MemoryRouter initialEntries={[entry]}>
           <Routes>
             <Route
               path="/usage"
-              element={<RequestAnalysisPanel adminToken="admin-secret" />}
+              element={<RequestAnalysisPanel adminToken={adminToken} />}
             />
           </Routes>
         </MemoryRouter>,
@@ -147,6 +147,13 @@ describe("RequestAnalysisPanel", () => {
     expect(container.textContent).toContain("失败 1 条");
     expect(container.textContent).toContain("req-failure-low-cache");
     expect(container.textContent).toContain("缓存率 < 50%");
+  });
+
+  it("does not require an admin token when the backend is open", async () => {
+    await render("/usage?view=requests", "");
+
+    expect(container.textContent).not.toContain("填入 Admin Token");
+    expect(container.textContent).toContain("req-success");
   });
 
   it("passes an explicit inclusive cache-rate range to the backend", async () => {

@@ -40,6 +40,7 @@ import {
   buildRuntimeProfileUrl,
   jsonRequestInit,
   runtimeProfilesUrl,
+  withRuntimeProfileAdminToken,
 } from "./url";
 export async function createRuntimeProfile(request: RuntimeProfileCreateRequest) {
   const payload = await fetchRuntimeJson<unknown>(
@@ -77,7 +78,7 @@ export async function deleteRuntimeProfile(ref: string, options?: { force?: bool
     buildRuntimeUrlWithQuery(`/api/runtime/profiles/${encodeURIComponent(ref)}`, {
       force: options?.force ? "true" : undefined,
     }),
-    { method: "DELETE" },
+    withRuntimeProfileAdminToken({ method: "DELETE" }),
   );
   const record = asRecord(payload) ?? {};
   return {

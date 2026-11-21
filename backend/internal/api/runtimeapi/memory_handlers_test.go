@@ -29,6 +29,7 @@ func newMemoryTestRouter(t *testing.T, workspace string) (*Handler, *mux.Router)
 	cfg.Memory.Mode = "on"
 	cfg.Memory.Injection.Enabled = true
 	handler.SetRuntimeConfig(cfg, "")
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("memory-admin")
 	return handler, router
 }

@@ -163,17 +163,22 @@ type Handler struct {
 	embeddingHotReloadSyncAttached bool
 	searchTelemetry                *searchTelemetry
 	searchAdminToken               string
-	searchReindexCooldown          time.Duration
-	searchReindexMu                sync.Mutex
-	lastSearchReindexAt            time.Time
-	workspaceScanMu                sync.Mutex
-	workspaceScanCache             map[string]*workspaceScanCacheEntry
-	mutationPolicyMu               sync.RWMutex
-	mutationPolicy                 MutationPolicy
-	usagePolicyMu                  sync.RWMutex
-	usagePolicy                    UsagePolicy
-	usageTracker                   *usageTracker
-	usageLedgerStore               UsageLedgerStore
+	// adminAuthRequired 控制运行管理面是否仍按 admin token / admin role 分流。
+	// 临时策略（2026-11-21）：默认关闭，workspace 用户可使用全部运行时管理/
+	// 观测能力；外部访问的统一 token 方案落地后再在此接线，避免各 handler
+	// 各自要求 token 导致"能进工作区但部分功能 403"。
+	adminAuthRequired     atomic.Bool
+	searchReindexCooldown time.Duration
+	searchReindexMu       sync.Mutex
+	lastSearchReindexAt   time.Time
+	workspaceScanMu       sync.Mutex
+	workspaceScanCache    map[string]*workspaceScanCacheEntry
+	mutationPolicyMu      sync.RWMutex
+	mutationPolicy        MutationPolicy
+	usagePolicyMu         sync.RWMutex
+	usagePolicy           UsagePolicy
+	usageTracker          *usageTracker
+	usageLedgerStore      UsageLedgerStore
 	// usageLedgerUnavailableReason 记录「配置启用了账本但 store 初始化失败」的原因，
 	// 由启动期降级路径写入（见 cmd/runtime-server）。用于让 ledger 接口返回可排障的 503，
 	// 而不是把它伪装成「未配置」。
@@ -819,12 +824,30 @@ func (h *Handler) SetEmbeddingRouter(router *skill.SemanticEmbeddingRouter) {
 	h.attachEmbeddingHotReloadSync()
 }
 
-// SetSearchAdminToken 设置搜索运维接口的管理员令牌
+// SetSearchAdminToken 设置搜索运维接口的管理员令牌（仅在
+// SetAdminAuthRequired(true) 的 legacy 模式下参与鉴权）。
 func (h *Handler) SetSearchAdminToken(token string) {
 	h.searchAdminToken = strings.TrimSpace(token)
 }
 
-// SetAdminToken 设置 skills 管理接口的管理员令牌
+// SetAdminAuthRequired 切换运行管理面的 admin token / admin role 强校验。
+//
+// 默认 false：临时取消运行管理面 token 阻断，避免 workspace 用户只被部分
+// 功能挡在 403。后续统一外部访问 token 方案应在这里接入，而不是恢复为各
+// handler 分散校验。
+func (h *Handler) SetAdminAuthRequired(required bool) {
+	if h == nil {
+		return
+	}
+	h.adminAuthRequired.Store(required)
+}
+
+func (h *Handler) adminAuthRequiredEnabled() bool {
+	return h != nil && h.adminAuthRequired.Load()
+}
+
+// SetAdminToken 设置 skills 管理接口的管理员令牌（仅在
+// SetAdminAuthRequired(true) 的 legacy 模式下参与鉴权）。
 func (h *Handler) SetAdminToken(token string) {
 	h.SetSearchAdminToken(token)
 }
@@ -7672,24 +7695,33 @@ func (h *Handler) recordSearchReindex(status string) {
 }
 
 func (h *Handler) authorizeSearchAdmin(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
 		return nil
 	}
-	return errors.New(errors.ErrAgentPermission, "search admin endpoints require loopback access, valid admin token, or admin role")
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "search admin endpoints require a valid admin token or admin role")
 }
 
 func (h *Handler) authorizeUsageAdmin(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
 		return nil
 	}
-	return errors.New(errors.ErrAgentPermission, "usage admin endpoints require loopback access, valid admin token, or admin role")
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "usage admin endpoints require a valid admin token or admin role")
 }
 
 func (h *Handler) authorizeSkillMutation(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
 		return nil
 	}
-	return errors.New(errors.ErrAgentPermission, "skill mutation endpoints require loopback access, valid admin token, or admin role")
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "skill mutation endpoints require a valid admin token or admin role")
 }
 
 func (h *Handler) enforceMutationActionPolicy(action string, r *http.Request) error {
@@ -7742,8 +7774,8 @@ func (h *Handler) searchAdminAccessMode(r *http.Request) string {
 		return "token"
 	case h.hasTrustedAdminRole(r):
 		return "role"
-	case isLoopbackRequest(r):
-		return "loopback"
+	case !h.adminAuthRequiredEnabled():
+		return "open"
 	default:
 		return "denied"
 	}
@@ -7755,8 +7787,8 @@ func (h *Handler) skillMutationAccessMode(r *http.Request) string {
 		return "token"
 	case h.hasTrustedAdminRole(r):
 		return "role"
-	case isLoopbackRequest(r):
-		return "loopback"
+	case !h.adminAuthRequiredEnabled():
+		return "open"
 	default:
 		return "denied"
 	}
@@ -8930,20 +8962,12 @@ func (h *Handler) hasValidSearchAdminToken(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
-func isLoopbackRequest(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	return isLoopbackIP(requestRemoteIP(r))
-}
-
 // requestRemoteIP 返回请求来源 IP。安全口径（Fix-S1）：转发头
 // （X-Forwarded-For / X-Real-IP）仅在直连对端（r.RemoteAddr）本身是环回时
 // 才被采纳——本机反代（本进程只监听环回，前置代理同机）场景保留原有行为；
 // 远程直连伪造 "X-Forwarded-For: 127.0.0.1" 不再能把自己伪装成环回请求，
-// 从而无法绕过 isLoopbackRequest 背后的 skills/连接器管理面鉴权。
-// 取舍：远程反代部署将因此回落到 token / 可信角色鉴权（管理面仍可用，
-// 只是不再把远程反代的来源 IP 视为环回）。
+// 从而无法伪造来源身份。管理面鉴权不依赖该判断：默认临时放行；显式开启
+// admin 鉴权后，无论来源地址如何都必须提供有效 admin token 或可信 admin role。
 func requestRemoteIP(r *http.Request) string {
 	if r == nil {
 		return ""
@@ -13225,7 +13249,7 @@ func (h *Handler) resolveGrantedSkillPermissions(r *http.Request) []string {
 	if r == nil {
 		return nil
 	}
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
 		return []string{"*"}
 	}
 

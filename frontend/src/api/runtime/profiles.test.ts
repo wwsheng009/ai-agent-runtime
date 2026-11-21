@@ -27,6 +27,7 @@ import {
   updateRuntimeProfile,
   validateRuntimeProfile,
 } from "@/api/runtime/profiles";
+import { adminTokenStorageKey } from "@/lib/admin-token";
 import { isRuntimeApiErrorCode, readErrorEnvelope, RuntimeApiError } from "@/api/runtime/shared";
 import { CREATE_PAYLOAD, ENCODED_REF, REF, VIEW_PAYLOAD } from "./profiles.test-fixtures";
 
@@ -55,6 +56,7 @@ describe("runtime profiles 客户端", () => {
 
   beforeEach(() => {
     globalThis.fetch = originalFetch;
+    window.localStorage.removeItem(adminTokenStorageKey);
   });
 
   afterEach(() => {
@@ -67,6 +69,27 @@ describe("runtime profiles 客户端", () => {
     expect(buildRuntimeProfileApplyUrl(REF)).toBe(
       `/api/runtime/profiles/${ENCODED_REF}/apply`,
     );
+  });
+
+  it("profile 管理请求携带本地 admin token", async () => {
+    const token = "profile-admin-token";
+    const calls: RequestInit[] = [];
+    window.localStorage.setItem(adminTokenStorageKey, token);
+    mockFetch(async (input, init) => {
+      calls.push(init ?? {});
+      return String(input).endsWith("/profiles")
+        ? jsonResponse({ profiles: [], count: 0 })
+        : jsonResponse({});
+    });
+
+    await listRuntimeProfiles();
+    await deleteRuntimeProfile(REF);
+
+    expect(calls).toHaveLength(2);
+    for (const init of calls) {
+      const headers = new Headers(init.headers);
+      expect(headers.get("X-Skills-Admin-Token")).toBe(token);
+    }
   });
 
   it("列表归一化：snake_case → camelCase；valid/writable 缺省即合法可写", async () => {

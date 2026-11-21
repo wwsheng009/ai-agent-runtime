@@ -10,7 +10,7 @@
 // 语义与 CLI `/goal` 一一对应（校验与状态机在服务端 internal/goal，前端不重算）：
 //   * `applied=false` 表示合并策略按守卫保留了原状态（如 complete 终态、预算未提高的
 //     budget_limited）——调用方必须如实呈现 message，不得当成成功。
-//   * 写端点要求回环 / admin token / admin role；被拒时抛 RuntimeApiError(403)。
+//   * 写端点要求 admin token / admin role；来源地址不参与授权，被拒时抛 RuntimeApiError(403)。
 //
 // 载荷形状与工具结果**同构**，因此解析复用 lib/session-goal/derive 的
 // `parseSessionGoalEnvelope`（单一解析器，避免两条路径漂移）。

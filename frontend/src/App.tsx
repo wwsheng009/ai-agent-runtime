@@ -1,6 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { getRuntimeRouterBasename } from "@/api/runtime/shared";
+import { AccessGate } from "@/components/access/access-gate";
 import { RouteErrorBoundary } from "@/components/errors/boundaries";
 import { RetryableLazyRoute } from "@/components/errors/retryable-lazy-route";
 import { StartupReadySignal } from "@/components/startup/startup-ready-signal";
@@ -51,9 +53,10 @@ const aboutRoute = "/about";
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={getRuntimeRouterBasename() || "/"}>
       <RouteErrorBoundary>
-        <Routes>
+        <AccessGate>
+          <Routes>
           <Route
             path="/"
             element={<Navigate to={defaultWorkspaceRoute} replace />}
@@ -195,7 +198,8 @@ export default function App() {
             path="*"
             element={<Navigate to={defaultWorkspaceRoute} replace />}
           />
-        </Routes>
+          </Routes>
+        </AccessGate>
       </RouteErrorBoundary>
       <StartupReadySignal />
     </BrowserRouter>

@@ -107,7 +107,7 @@ func (h *Handler) UpdateSessionGoal(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session manager not configured"))
 		return
 	}
-	// 与既有会话写端点同级（回环 / admin token / admin role）。
+	// 与既有会话写端点同级（admin token / admin role）；来源地址不参与授权。
 	if err := h.authorizeSessionRoutingWrite(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
 		return

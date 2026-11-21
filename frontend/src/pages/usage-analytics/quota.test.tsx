@@ -284,6 +284,15 @@ describe("UsageQuotaPanel", () => {
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
   });
 
+  it("后端未要求 admin token 时，空 token 不显示补 token 提示", async () => {
+    render("");
+    await flush();
+
+    expect(container.textContent).not.toContain("填入 Admin Token");
+    expect(container.textContent).toContain("用量与配额");
+    expect(container.textContent).toContain("Token 账本");
+  });
+
   it("账本 503 已启用但初始化失败时，说明「不可用 + 原因」而非「未配置」", async () => {
     getUsageLedgerMock.mockRejectedValue(
       httpError(

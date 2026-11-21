@@ -1337,10 +1337,13 @@ func (h *Handler) openMemoryStore(workspace string) (*memorystore.Store, error) 
 }
 
 func (h *Handler) authorizeMemoryAdmin(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
 		return nil
 	}
-	return errors.New(errors.ErrAgentPermission, "memory admin endpoints require loopback access, valid admin token, or admin role")
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "memory admin endpoints require a valid admin token or admin role")
 }
 
 func memoryRecordToDTO(record memorystore.Record) memoryRecordDTO {

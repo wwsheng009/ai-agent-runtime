@@ -18,7 +18,7 @@ import (
 // §3.2 / §4.2）所需的两个进程内入口：
 //
 //  1. AuthorizeConnectorAdmin：管理面 `/api/connectors*` 的鉴权口径，与 skills
-//     管理面一致（admin token / 可信角色 / 环回访问），供宿主挂载
+//     管理面一致（admin token / 可信角色），供宿主挂载
 //     internal/connectors/restapi 时注入；
 //  2. SubmitConnectorPrompt：把一条 IM 消息投递进既有会话（复用
 //     /sessions/{id}/runtime/commands 的 submit_prompt 执行路径），并把
@@ -68,9 +68,9 @@ var connectorDeltaEventTypes = []string{"assistant_delta", "assistant.delta"}
 // connectorDeltaPayloadKeys 是增量文本在事件载荷中的候选键。
 var connectorDeltaPayloadKeys = []string{"delta", "text", "content"}
 
-// AuthorizeConnectorAdmin 是连接器管理面的统一鉴权口径：与 skills 管理面相同
-// （admin token / 可信角色 / 环回访问）。宿主挂载 restapi.NewRouter 时注入；
-// 返回 nil 表示放行。
+// AuthorizeConnectorAdmin 是连接器管理面的统一鉴权口径。临时策略默认放行
+// （SetAdminAuthRequired(false)）；显式开启后按 admin token / 可信角色校验，
+// 来源地址不参与授权。宿主挂载 restapi.NewRouter 时注入，返回 nil 表示放行。
 func (h *Handler) AuthorizeConnectorAdmin(r *http.Request) error {
 	if h == nil {
 		return errors.New(errors.ErrAgentPermission, "connector admin unavailable: handler is nil")

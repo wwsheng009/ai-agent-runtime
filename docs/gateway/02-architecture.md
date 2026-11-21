@@ -282,7 +282,8 @@ Cookie 天然按域隔离。代价是 DNS 通配符与证书。作为 Phase 2+ �
 - **共享接口**：`internal/gateway/agent.Controller`（`Connect`/`Disconnect`/`Reconnect`/`Status`）。
 
 **语义**：`disconnect` 是**运行态**（置 `operator_disconnected`，抑制自动重连，**不改配置**）；
-`enable`/`disable` 才写配置影响下次启动。控制面仅本机 owner 可触发（TUI / 回环或 admin token），
+`enable`/`disable` 才写配置影响下次启动。控制面由 TUI 或携带 admin token / admin role 的
+runtime-server 触发（环回来源不自动放行），
 网关侧**没有**反向强制连接的入口。
 
 ---

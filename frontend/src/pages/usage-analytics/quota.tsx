@@ -182,7 +182,7 @@ export function UsageQuotaPanel({ adminToken }: { adminToken: string }) {
         </div>
       </div>
 
-      {!adminToken.trim() || isUsageQuotaAdminForbidden(statsError) ? (
+      {isUsageQuotaAdminForbidden(statsError) ? (
         <p
           role="status"
           className="mt-3 rounded-panel border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2 text-xs leading-5 text-analytics-warning"

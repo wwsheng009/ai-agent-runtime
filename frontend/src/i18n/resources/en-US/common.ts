@@ -82,4 +82,21 @@ export const enCommon = {
     enabled: "Enabled",
     disabled: "Disabled",
   },
+  access: {
+    loading: "Checking access…",
+    title: "Remote access",
+    description:
+      "This is a non-loopback request. Enter the access token configured on the server.",
+    tokenLabel: "Access token",
+    tokenPlaceholder: "server.access_token",
+    submit: "Continue",
+    submitting: "Verifying…",
+    required: "Enter an access token.",
+    invalid: "Invalid token. Try again.",
+    notConfigured:
+      "Remote access is disabled because server.access_token is not configured.",
+    loadFailed: "Failed to read the access status.",
+    retry: "Retry",
+    localHint: "Local loopback access does not require a token.",
+  },
 } satisfies DeepStringShape<typeof zhCommon>;

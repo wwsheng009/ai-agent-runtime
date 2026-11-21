@@ -28,6 +28,7 @@ import {
   buildRuntimeProfileValidateUrl,
   jsonRequestInit,
   runtimeProfilesUrl,
+  withRuntimeProfileAdminToken,
 } from "./url";
 /**
  * 列表查询。`workspace` 可选（Batch 14）：给出时后端附带 D29 工作区信任上下文
@@ -38,12 +39,16 @@ export async function listRuntimeProfiles(options: { workspace?: string } = {}) 
   const workspace = options.workspace?.trim() || "";
   const payload = await fetchRuntimeJson<RuntimeProfileListResponse>(
     workspace ? buildRuntimeProfilesListUrl({ workspace }) : runtimeProfilesUrl,
+    withRuntimeProfileAdminToken(),
   );
   return normalizeProfileListResponse(payload);
 }
 
 export async function getRuntimeProfile(ref: string) {
-  const payload = await fetchRuntimeJson<RuntimeProfileView>(buildRuntimeProfileUrl(ref));
+  const payload = await fetchRuntimeJson<RuntimeProfileView>(
+    buildRuntimeProfileUrl(ref),
+    withRuntimeProfileAdminToken(),
+  );
   return normalizeProfileView(payload);
 }
 
@@ -91,7 +96,10 @@ export async function previewRuntimeProfile(
 }
 
 export async function listRuntimeProfileReferences(ref: string) {
-  const payload = await fetchRuntimeJson<unknown>(buildRuntimeProfileReferencesUrl(ref));
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeProfileReferencesUrl(ref),
+    withRuntimeProfileAdminToken(),
+  );
   const normalized = normalizeReferences(payload);
   if (!normalized) {
     throw new Error("invalid runtime profile references payload: object expected");

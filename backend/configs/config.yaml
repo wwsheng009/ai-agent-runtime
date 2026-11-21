@@ -1254,6 +1254,9 @@ routing:
 server:
     admin_host: ${SERVER_ADMIN_HOST:-127.0.0.1}
     admin_port: ${SERVER_ADMIN_PORT:-8101}
+    # 非本地（非 loopback）访问 /api/* 的 Bearer token；空值 = 拒绝所有非本地 API。
+    # 可由环境变量 SERVER_ACCESS_TOKEN 覆盖。修改后需重启 runtime-server。
+    access_token: ""
     development: ${SERVER_DEVELOPMENT:-true}
     graceful_stop: true
     host: ${SERVER_HOST:-0.0.0.0}

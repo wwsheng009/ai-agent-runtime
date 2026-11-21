@@ -4041,6 +4041,7 @@ func TestSearchSkills_AutoFallsBackToEmbedding(t *testing.T) {
 	require.NoError(t, embeddingRouter.IndexSkills())
 
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetEmbeddingRouter(embeddingRouter)
 
 	router := mux.NewRouter()
@@ -4182,6 +4183,7 @@ func TestGetRuntimeStatus_RequiresAdmin(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("secret-token")
 	runtimeCfg := runtimecfg.DefaultRuntimeConfig()
 	runtimeCfg.Catalog.Backend = "sqlite"
@@ -4853,6 +4855,7 @@ func TestGetSearchStats_TracksModesAndEmbeddingUsage(t *testing.T) {
 	require.NoError(t, embeddingRouter.IndexSkills())
 
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetEmbeddingRouter(embeddingRouter)
 
 	router := mux.NewRouter()
@@ -4865,6 +4868,7 @@ func TestGetSearchStats_TracksModesAndEmbeddingUsage(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search/stats", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -4903,6 +4907,7 @@ func TestReindexSearchIndex_RebuildsEmbeddingIndex(t *testing.T) {
 	require.NoError(t, embeddingRouter.IndexSkills())
 
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetEmbeddingRouter(embeddingRouter)
 
 	router := mux.NewRouter()
@@ -4910,6 +4915,7 @@ func TestReindexSearchIndex_RebuildsEmbeddingIndex(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4927,6 +4933,7 @@ func TestGetSearchStats_RequiresAdminToken(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminAuthRequired(true)
 	handler.SetSearchAdminToken("secret-token")
 
 	router := mux.NewRouter()
@@ -4962,6 +4969,7 @@ func TestGetSearchStats_RequiresAdminToken(t *testing.T) {
 
 func TestPreviewPromptLayout_RequiresAdminToken(t *testing.T) {
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminAuthRequired(true)
 	handler.SetSearchAdminToken("secret-token")
 
 	router := mux.NewRouter()
@@ -5001,6 +5009,7 @@ agents:
 	writeProfileFile(filepath.Join(workspaceRoot, "AGENTS.md"), "Stay within the workspace boundary.")
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetProfileSupport(ProfileSupportConfig{
 		Registry: profilesys.NewRegistry(""),
 	})
@@ -5011,6 +5020,7 @@ agents:
 	body := fmt.Sprintf(`{"profile":%q,"provider":"codex","workspace_path":%q,"messages":[{"role":"user","content":"hi"}]}`, profileRoot, workspaceRoot)
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/debug/prompt-layout", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:9000"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -5053,6 +5063,7 @@ func TestReindexSearchIndex_CooldownReturnsRateLimit(t *testing.T) {
 	require.NoError(t, embeddingRouter.IndexSkills())
 
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetEmbeddingRouter(embeddingRouter)
 	handler.SetSearchReindexCooldown(time.Hour)
 
@@ -5061,12 +5072,14 @@ func TestReindexSearchIndex_CooldownReturnsRateLimit(t *testing.T) {
 
 	firstReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	firstReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(firstReq)
 	firstRec := httptest.NewRecorder()
 	router.ServeHTTP(firstRec, firstReq)
 	require.Equal(t, http.StatusOK, firstRec.Code)
 
 	secondReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	secondReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(secondReq)
 	secondRec := httptest.NewRecorder()
 	router.ServeHTTP(secondRec, secondReq)
 	require.Equal(t, http.StatusTooManyRequests, secondRec.Code)
@@ -5080,14 +5093,14 @@ func TestReindexSearchIndex_CooldownReturnsRateLimit(t *testing.T) {
 	rateLimitedCounter := observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSearchAdminActions, map[string]string{
 		observability.LabelAction:     "search_reindex",
 		observability.LabelOutcome:    "rate_limited",
-		observability.LabelAccessMode: "loopback",
+		observability.LabelAccessMode: "token",
 	})
 	assert.Equal(t, float64(1), rateLimitedCounter.Get())
 
 	reindexRunsCounter := observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSearchReindexRuns, map[string]string{
 		observability.LabelAction:     "search_reindex",
 		observability.LabelOutcome:    "success",
-		observability.LabelAccessMode: "loopback",
+		observability.LabelAccessMode: "token",
 	})
 	assert.Equal(t, float64(1), reindexRunsCounter.Get())
 }
@@ -5654,6 +5667,7 @@ func TestHotReloadEndpoints_Lifecycle(t *testing.T) {
 	registry := skill.NewRegistry(mcpManager)
 	loader := skill.NewLoader(mcpManager)
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	skillDir := t.TempDir()
 	loader.SetSkillDir(skillDir)
@@ -5673,6 +5687,7 @@ tools: ["echo_tool"]
 
 	startReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(`{"dir":"`+strings.ReplaceAll(skillDir, "\\", "\\\\")+`"}`)))
 	startReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(startReq)
 	startRec := httptest.NewRecorder()
 	router.ServeHTTP(startRec, startReq)
 	require.Equal(t, http.StatusOK, startRec.Code)
@@ -5702,6 +5717,7 @@ tools: ["echo_tool"]
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/hot-reload/stats", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -5719,6 +5735,7 @@ tools: ["echo_tool"]
 
 	reloadReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/reload", nil)
 	reloadReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(reloadReq)
 	reloadRec := httptest.NewRecorder()
 	router.ServeHTTP(reloadRec, reloadReq)
 	require.Equal(t, http.StatusOK, reloadRec.Code)
@@ -5734,6 +5751,7 @@ tools: ["echo_tool"]
 
 	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(stopReq)
 	stopRec := httptest.NewRecorder()
 	router.ServeHTTP(stopRec, stopReq)
 	require.Equal(t, http.StatusOK, stopRec.Code)
@@ -5852,6 +5870,7 @@ func TestHotReloadEndpoints_StartWithMultipleDirs(t *testing.T) {
 	registry := skill.NewRegistry(mcpManager)
 	loader := skill.NewLoader(mcpManager)
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	systemDir := t.TempDir()
 	extraDir := t.TempDir()
@@ -5880,6 +5899,7 @@ tools: ["echo_tool"]
 	body := fmt.Sprintf(`{"dirs":["%s","%s"]}`, strings.ReplaceAll(systemDir, "\\", "\\\\"), strings.ReplaceAll(extraDir, "\\", "\\\\"))
 	startReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(body)))
 	startReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(startReq)
 	startRec := httptest.NewRecorder()
 	router.ServeHTTP(startRec, startReq)
 	require.Equal(t, http.StatusOK, startRec.Code)
@@ -5895,6 +5915,7 @@ tools: ["echo_tool"]
 
 	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(stopReq)
 	stopRec := httptest.NewRecorder()
 	router.ServeHTTP(stopRec, stopReq)
 	require.Equal(t, http.StatusOK, stopRec.Code)
@@ -6009,6 +6030,7 @@ func TestCreateSkill_AssignsRuntimeSource(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	body := `{
 		"name":"runtime-skill",
@@ -6017,6 +6039,7 @@ func TestCreateSkill_AssignsRuntimeSource(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -6031,6 +6054,7 @@ func TestCreateSkill_PublishesSkillsChangedEventAndListRuntimeEvents(t *testing.
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -6042,12 +6066,14 @@ func TestCreateSkill_PublishesSkillsChangedEventAndListRuntimeEvents(t *testing.
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	eventsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/events?event_type=skills.changed&limit=10", nil)
 	eventsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(eventsReq)
 	eventsRec := httptest.NewRecorder()
 	router.ServeHTTP(eventsRec, eventsReq)
 	require.Equal(t, http.StatusOK, eventsRec.Code)
@@ -6077,6 +6103,7 @@ func TestCreateSkill_PersistsToExternalDir(t *testing.T) {
 	externalDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir, externalDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	body := `{
 		"name":"persisted-skill",
@@ -6085,6 +6112,7 @@ func TestCreateSkill_PersistsToExternalDir(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -6106,6 +6134,7 @@ func TestCreateSkill_PersistsPromptToCompanionMarkdown(t *testing.T) {
 	externalDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir, externalDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	body := `{
 		"name":"persisted-prompt-skill",
@@ -6116,6 +6145,7 @@ func TestCreateSkill_PersistsPromptToCompanionMarkdown(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -6146,6 +6176,7 @@ func TestCreateSkill_RejectsPersistToSystemDir(t *testing.T) {
 	systemDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	body := `{
 		"name":"invalid-persist",
@@ -6154,6 +6185,7 @@ func TestCreateSkill_RejectsPersistToSystemDir(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true&target_dir="+systemDir, bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
@@ -6270,6 +6302,7 @@ func TestReloadSkills_LoadsConfiguredDirs(t *testing.T) {
 	externalDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir, externalDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	require.NoError(t, os.WriteFile(filepath.Join(systemDir, "system.yaml"), []byte(`name: reload-system
 description: system
@@ -6292,6 +6325,7 @@ tools: ["echo_tool"]
 
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -6343,6 +6377,7 @@ func TestReloadSkills_UsesRequestDirs(t *testing.T) {
 	registry := skill.NewRegistry(mcpManager)
 	loader := skill.NewLoader(mcpManager)
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	systemDir := t.TempDir()
 	externalDir := t.TempDir()
@@ -6368,6 +6403,7 @@ tools: ["echo_tool"]
 	body := fmt.Sprintf(`{"dirs":["%s","%s"]}`, strings.ReplaceAll(systemDir, "\\", "\\\\"), strings.ReplaceAll(externalDir, "\\", "\\\\"))
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -6380,6 +6416,7 @@ func TestCreateSkill_RequiresAdminToken(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminAuthRequired(true)
 	handler.SetSearchAdminToken("secret-token")
 
 	body := `{
@@ -6424,6 +6461,7 @@ func TestReloadSkills_RequiresAdminToken(t *testing.T) {
 	skillDir := t.TempDir()
 	loader.SetSkillDir(skillDir)
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminAuthRequired(true)
 	handler.SetSearchAdminToken("secret-token")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
@@ -6718,6 +6756,7 @@ func TestUpdateSkill_PersistsBackToExistingExternalSource(t *testing.T) {
 	externalDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir, externalDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	sourceDir := filepath.Join(externalDir, "persisted-skill")
 	require.NoError(t, os.MkdirAll(sourceDir, 0o755))
@@ -6738,6 +6777,7 @@ func TestUpdateSkill_PersistsBackToExistingExternalSource(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPut, "/api/runtime/skills/persisted-skill", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	req = mux.SetURLVars(req, map[string]string{"name": "persisted-skill"})
 	rec := httptest.NewRecorder()
 	handler.UpdateSkill(rec, req)
@@ -6752,6 +6792,7 @@ func TestDeleteSkill_DeleteFileRemovesExternalManifest(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	sourceDir := t.TempDir()
 	sourcePath := filepath.Join(sourceDir, "skill.yaml")
@@ -6770,6 +6811,7 @@ func TestDeleteSkill_DeleteFileRemovesExternalManifest(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/runtime/skills/deletable-skill?delete_file=true", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	req = mux.SetURLVars(req, map[string]string{"name": "deletable-skill"})
 	rec := httptest.NewRecorder()
 	handler.DeleteSkill(rec, req)
@@ -6785,6 +6827,7 @@ func TestDeleteSkill_DeleteFileRejectsSystemSkill(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	require.NoError(t, registry.Register(&skill.Skill{
 		Name:        "system-skill",
@@ -6796,6 +6839,7 @@ func TestDeleteSkill_DeleteFileRejectsSystemSkill(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/runtime/skills/system-skill?delete_file=true", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	req = mux.SetURLVars(req, map[string]string{"name": "system-skill"})
 	rec := httptest.NewRecorder()
 	handler.DeleteSkill(rec, req)
@@ -6807,6 +6851,7 @@ func TestCreateSkill_ReadOnlyPolicyBlocksMutation(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetMutationPolicy(MutationPolicy{ReadOnly: true})
 
 	body := `{
@@ -6816,6 +6861,7 @@ func TestCreateSkill_ReadOnlyPolicyBlocksMutation(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -6825,7 +6871,7 @@ func TestCreateSkill_ReadOnlyPolicyBlocksMutation(t *testing.T) {
 	disabledCounter := observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSkillMutationActions, map[string]string{
 		observability.LabelAction:     skillMutationActionCreate,
 		observability.LabelOutcome:    "disabled",
-		observability.LabelAccessMode: "loopback",
+		observability.LabelAccessMode: "token",
 	})
 	assert.Equal(t, float64(1), disabledCounter.Get())
 }
@@ -6836,6 +6882,7 @@ func TestCreateSkill_PersistDisabledBlocksPersist(t *testing.T) {
 	loader := skill.NewLoader(mcpManager)
 	loader.SetSkillDirs([]string{t.TempDir(), t.TempDir()})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetMutationPolicy(MutationPolicy{DisablePersist: true})
 
 	body := `{
@@ -6845,6 +6892,7 @@ func TestCreateSkill_PersistDisabledBlocksPersist(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -6856,11 +6904,13 @@ func TestImportSkills_DisabledByPolicy(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetMutationPolicy(MutationPolicy{DisableImport: true})
 
 	body := `{"skills":[{"name":"imported-skill","description":"blocked import","triggers":[{"type":"keyword","values":["import"],"weight":1}]}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/import", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.ImportSkills(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -6875,10 +6925,12 @@ func TestImportSkills_PersistsToExternalDirWithPromptCompanion(t *testing.T) {
 	externalDir := t.TempDir()
 	loader.SetSkillDirs([]string{systemDir, externalDir})
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	body := `{"skills":[{"name":"imported-persisted-skill","description":"persisted import","systemPrompt":"You are imported.","userPrompt":"Return imported.","triggers":[{"type":"keyword","values":["import"],"weight":1}]}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/import?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.ImportSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -6909,10 +6961,12 @@ func TestReloadSkills_DisabledByPolicy(t *testing.T) {
 	loader := skill.NewLoader(mcpManager)
 	loader.SetSkillDir(t.TempDir())
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetMutationPolicy(MutationPolicy{DisableReloadOps: true})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -6924,11 +6978,13 @@ func TestHotReloadStart_DisabledByPolicy(t *testing.T) {
 	registry := skill.NewRegistry(mcpManager)
 	loader := skill.NewLoader(mcpManager)
 	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetMutationPolicy(MutationPolicy{DisableHotReload: true})
 
 	body := fmt.Sprintf(`{"dir":"%s"}`, strings.ReplaceAll(t.TempDir(), "\\", "\\\\"))
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	handler.StartHotReload(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -6988,6 +7044,7 @@ func TestExecuteSkill_RequestQuotaExceeded(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{
 		TrackingEnabled:    true,
 		QuotaEnabled:       true,
@@ -7010,6 +7067,7 @@ func TestExecuteSkill_RequestQuotaExceeded(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=quota-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7026,6 +7084,7 @@ func TestAgentChat_TokenQuotaExceeded(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{
 		TrackingEnabled:  true,
 		QuotaEnabled:     true,
@@ -7051,6 +7110,7 @@ func TestAgentChat_TokenQuotaExceeded(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=token-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7074,6 +7134,7 @@ func TestUsageStats_ResetUser(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 
 	router := mux.NewRouter()
@@ -7086,6 +7147,7 @@ func TestUsageStats_ResetUser(t *testing.T) {
 
 	resetReq := httptest.NewRequest(http.MethodPost, "/api/runtime/usage/reset", bytes.NewReader([]byte(`{"user_id":"usage-user"}`)))
 	resetReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(resetReq)
 	resetRec := httptest.NewRecorder()
 	router.ServeHTTP(resetRec, resetReq)
 	require.Equal(t, http.StatusOK, resetRec.Code)
@@ -7093,6 +7155,7 @@ func TestUsageStats_ResetUser(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=usage-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7155,6 +7218,7 @@ func TestGetUsageStats_FiltersByTenantProjectScope(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 
 	router := mux.NewRouter()
@@ -7172,6 +7236,7 @@ func TestGetUsageStats_FiltersByTenantProjectScope(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=scope-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7192,6 +7257,7 @@ func TestGetUsageStats_ResolvesQuotaPolicyPrecedence(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	tenantLimit := 2
 	projectLimit := 1
@@ -7217,6 +7283,7 @@ func TestGetUsageStats_ResolvesQuotaPolicyPrecedence(t *testing.T) {
 	checkQuota := func(path string) map[string]interface{} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		addRuntimeAdminTestToken(req)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -7246,12 +7313,14 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/policy", nil)
 	getReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(getReq)
 	getRec := httptest.NewRecorder()
 	router.ServeHTTP(getRec, getReq)
 	require.Equal(t, http.StatusOK, getRec.Code)
@@ -7272,6 +7341,7 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	}`)
 	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/usage/policy", bytes.NewReader(updateBody))
 	updateReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(updateReq)
 	updateRec := httptest.NewRecorder()
 	router.ServeHTTP(updateRec, updateReq)
 	require.Equal(t, http.StatusOK, updateRec.Code)
@@ -7286,6 +7356,7 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7297,12 +7368,14 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/usage/policy", bytes.NewReader([]byte(`{"level":"user","key":"tenant-a/project-a/alice"}`)))
 	deleteReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(deleteReq)
 	deleteRec := httptest.NewRecorder()
 	router.ServeHTTP(deleteRec, deleteReq)
 	require.Equal(t, http.StatusOK, deleteRec.Code)
 
 	statsReq2 := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
 	statsReq2.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq2)
 	statsRec2 := httptest.NewRecorder()
 	router.ServeHTTP(statsRec2, statsReq2)
 	require.Equal(t, http.StatusOK, statsRec2.Code)
@@ -7326,6 +7399,7 @@ func TestGetUsageLedger_ReturnsPersistedRecords(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 	handler.SetUsageLedgerStore(&testUsageLedgerStore{})
 
@@ -7339,6 +7413,7 @@ func TestGetUsageLedger_ReturnsPersistedRecords(t *testing.T) {
 
 	ledgerReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger?tenant_id=tenant-a&project_id=project-a&user_id=alice&entrypoint=execute&skill=ledger-skill", nil)
 	ledgerReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(ledgerReq)
 	ledgerRec := httptest.NewRecorder()
 	router.ServeHTTP(ledgerRec, ledgerReq)
 	require.Equal(t, http.StatusOK, ledgerRec.Code)
@@ -7371,6 +7446,7 @@ func TestExecuteSkill_ResolvesScopeFromHeaders(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 	handler.SetScopeResolverConfig(ScopeResolverConfig{
 		Enabled:        true,
@@ -7392,6 +7468,7 @@ func TestExecuteSkill_ResolvesScopeFromHeaders(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-header&project_id=project-header&user_id=user-header", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7415,6 +7492,7 @@ func TestExecuteSkill_ResolvesScopeFromAPIKeyBinding(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 	handler.SetScopeResolverConfig(ScopeResolverConfig{
 		Enabled: true,
@@ -7434,6 +7512,7 @@ func TestExecuteSkill_ResolvesScopeFromAPIKeyBinding(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-api&project_id=project-api&user_id=user-api", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7457,6 +7536,7 @@ func TestExecuteSkill_ResolvesScopeFromJWTClaims(t *testing.T) {
 	}))
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetUsagePolicy(UsagePolicy{TrackingEnabled: true})
 	handler.SetScopeResolverConfig(ScopeResolverConfig{
 		Enabled:          true,
@@ -7486,6 +7566,7 @@ func TestExecuteSkill_ResolvesScopeFromJWTClaims(t *testing.T) {
 
 	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-jwt&project_id=project-jwt&user_id=user-jwt", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(statsReq)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
@@ -7519,12 +7600,14 @@ func TestGetUsageLedger_ServiceUnavailableDistinguishesDisabledFromBroken(t *tes
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
 	disabledReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger", nil)
 	disabledReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(disabledReq)
 	disabledRec := httptest.NewRecorder()
 	router.ServeHTTP(disabledRec, disabledReq)
 	require.Equal(t, http.StatusServiceUnavailable, disabledRec.Code)
@@ -7536,6 +7619,7 @@ func TestGetUsageLedger_ServiceUnavailableDistinguishesDisabledFromBroken(t *tes
 
 	brokenReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger", nil)
 	brokenReq.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(brokenReq)
 	brokenRec := httptest.NewRecorder()
 	router.ServeHTTP(brokenRec, brokenReq)
 

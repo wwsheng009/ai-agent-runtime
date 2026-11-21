@@ -97,3 +97,62 @@ func TestCookieHelpers(t *testing.T) {
 		t.Fatalf("clear cookie max age = %d, want -1", clear.MaxAge)
 	}
 }
+
+func TestRequireSessionOrTokenAcceptsBearerToken(t *testing.T) {
+	owner, err := NewOwner("pw", time.Minute)
+	if err != nil {
+		t.Fatalf("NewOwner: %v", err)
+	}
+	handler := owner.RequireSessionOrToken("gw-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/n/node/api/runtime/status", nil)
+	req.Header.Set("Authorization", "Bearer gw-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid bearer token should pass, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/n/node/api/runtime/status", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong bearer token = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireSessionOrTokenStillAcceptsOwnerCookie(t *testing.T) {
+	owner, err := NewOwner("pw", time.Minute)
+	if err != nil {
+		t.Fatalf("NewOwner: %v", err)
+	}
+	handler := owner.RequireSessionOrToken("gw-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	token, _ := owner.Issue()
+	req := httptest.NewRequest(http.MethodGet, "/n/node/", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid owner cookie should pass, got %d", rec.Code)
+	}
+}
+
+func TestRequireSessionOrTokenRequiresTokenWhenOwnerDisabled(t *testing.T) {
+	owner, err := NewOwner("", 0)
+	if err != nil {
+		t.Fatalf("NewOwner: %v", err)
+	}
+	handler := owner.RequireSessionOrToken("gw-secret", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/n/node/", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token with disabled owner = %d, want 401", rec.Code)
+	}
+}

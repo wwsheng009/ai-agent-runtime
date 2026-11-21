@@ -40,12 +40,18 @@ const lspBaselineFixture = `{"type":"lsp.request.finished","session_id":"s1","ti
 // 端点的数据面现在读库（不再回扫 chat-logs），所以测试也必须造库里的数据 ——
 // 继续写 JSONL 再指望端点读到它，测的就不是生产链路了。
 func newLSPBaselineTestRouter(t *testing.T, fixture string) *mux.Router {
+	return newLSPBaselineTestRouterWithAdminRequired(t, fixture, false)
+}
+
+func newLSPBaselineTestRouterWithAdminRequired(t *testing.T, fixture string, adminRequired bool) *mux.Router {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "usage_analytics.sqlite")
 	seedLSPBaselineDB(t, dbPath, fixture)
 	t.Cleanup(detachUsageAnalyticsService)
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminAuthRequired(adminRequired)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.usageAnalyticsDBPath = dbPath
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -157,9 +163,10 @@ func TestAnalyticsLSPBaselineWindowAndParams(t *testing.T) {
 	}
 }
 
-// TestAnalyticsLSPBaselineRequiresAdmin 验证非回环且无令牌时 403。
+// TestAnalyticsLSPBaselineRequiresAdmin 验证 legacy（显式开启）模式下
+// 非回环且无令牌时 403。
 func TestAnalyticsLSPBaselineRequiresAdmin(t *testing.T) {
-	router := newLSPBaselineTestRouter(t, lspBaselineFixture)
+	router := newLSPBaselineTestRouterWithAdminRequired(t, lspBaselineFixture, true)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/lsp/baseline", nil)
 	req.RemoteAddr = "192.0.2.9:4321"

@@ -191,18 +191,19 @@ func TestHandleStreamOpenBindsMountTarget(t *testing.T) {
 
 func TestCopyForwardRequestHeadersDropsInternalHeaders(t *testing.T) {
 	src := map[string][]string{
-		"Authorization": {"Bearer amt_external"},
-		"Cookie":        {"session=1"},
-		"Host":          {"gw.example.com"},
-		"X-AICLI-Mount": {"k7f3qz2a"},
-		"X-AICLI-Token": {"local-write-token"},
-		"Content-Type":  {"application/json"},
-		"Accept":        {"application/json, text/event-stream"},
+		"Authorization":        {"Bearer amt_external"},
+		"Cookie":               {"session=1"},
+		"Host":                 {"gw.example.com"},
+		"X-AICLI-Mount":        {"k7f3qz2a"},
+		"X-AICLI-Token":        {"local-write-token"},
+		"X-Skills-Admin-Token": {"caller-admin-token"},
+		"Content-Type":         {"application/json"},
+		"Accept":               {"application/json, text/event-stream"},
 	}
 	dst := http.Header{}
 	copyForwardRequestHeaders(dst, src)
 
-	for _, dropped := range []string{"Authorization", "Cookie", "Host", "X-AICLI-Mount", "X-AICLI-Token"} {
+	for _, dropped := range []string{"Authorization", "Cookie", "Host", "X-AICLI-Mount", "X-AICLI-Token", "X-Skills-Admin-Token"} {
 		if got := dst.Get(dropped); got != "" {
 			t.Fatalf("%s leaked through: %q", dropped, got)
 		}
@@ -214,6 +215,7 @@ func TestCopyForwardRequestHeadersDropsInternalHeaders(t *testing.T) {
 		t.Fatalf("Accept was dropped")
 	}
 }
+
 // TestDefaultForwardClientPoolsLoopbackConnections pins the local pool width:
 // the stock http.Transport keeps only two idle connections per host, which
 // throttles bursts of tool calls through one tunnel.

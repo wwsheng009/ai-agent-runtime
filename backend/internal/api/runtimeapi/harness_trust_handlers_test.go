@@ -54,7 +54,7 @@ func TestHarnessTrustClosesProfileSuppressionLoop(t *testing.T) {
 	require.True(t, entry.PromptSuppressed, "project profile prompts must be flagged as suppressed")
 	require.NotEmpty(t, entry.PromptSuppressionReason)
 
-	// 3) 一键信任（显式确认后的写动作；回环来源通过写授权）。
+	// 3) 一键信任（显式确认后的写动作；请求携带测试管理令牌）。
 	grant := harnessTrustTestServe(t, router, http.MethodPost, "/api/runtime/harness/trust", map[string]any{
 		"workspace_path": workspace,
 		"action":         "grant",
@@ -93,8 +93,7 @@ func TestHarnessTrustRejectsDestructiveAction(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 }
 
-// harnessTrustTestServe 发起一次回环来源的请求（写端点因此通过
-// authorizeProfileWrite；GET 侧与既有 harness 用例同形）。
+// harnessTrustTestServe 发起一次携带测试管理令牌的请求。
 func harnessTrustTestServe(t *testing.T, router *mux.Router, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader io.Reader
@@ -105,6 +104,7 @@ func harnessTrustTestServe(t *testing.T, router *mux.Router, method, path string
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.RemoteAddr = "127.0.0.1:34567"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec

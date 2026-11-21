@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"strings"
 	"time"
 
@@ -22,6 +23,16 @@ type ForwardConfig struct {
 	// LocalToken, when set, is injected as X-AICLI-Token. The local write token
 	// never leaves the machine; it is added here, not by the gateway.
 	LocalToken string
+	// AnalyticsAdminToken, when set by a runtime-server host, is injected as
+	// X-Skills-Admin-Token only for read-only runtime analytics endpoints. It
+	// stays in node-local memory and is never sent through the tunnel protocol.
+	AnalyticsAdminToken string `json:"-"`
+	// GatewayToken is the gateway device registration token. The agent injects
+	// it as X-AICLI-Gateway-Token on the local loopback hop so runtime-server
+	// can recognize a request that arrived through the registered gateway path
+	// and skip the user-facing runtime access token. It never crosses the
+	// tunnel and is never serialized.
+	GatewayToken string `json:"-"`
 	// Mounts maps gateway mount slugs to local MCP endpoints
 	// (docs/gateway/16-mcp-mount-tunnel.md). A stream carrying X-AICLI-Mount
 	// resolves here instead of LocalBaseURL; an unknown slug fails closed.
@@ -65,6 +76,8 @@ type MountForward struct {
 // mountHeader carries the mount slug inside the tunnel. The gateway overwrites
 // any client-supplied value, exactly like X-Forwarded-Prefix.
 const mountHeader = "X-AICLI-Mount"
+
+const gatewayTrustHeader = "X-AICLI-Gateway-Token"
 
 // defaultForwardTimeout bounds one forwarded call for the default target.
 const defaultForwardTimeout = 5 * time.Minute
@@ -297,6 +310,11 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 		return
 	}
 	copyForwardRequestHeaders(req.Header, in.open.Headers)
+	if in.target.mount == "" {
+		if token := strings.TrimSpace(c.forward.GatewayToken); token != "" {
+			req.Header.Set(gatewayTrustHeader, token)
+		}
+	}
 	if in.target.headerName != "" && in.target.headerValue != "" {
 		req.Header.Set(in.target.headerName, in.target.headerValue)
 	} else if in.target.mount == "" {
@@ -305,6 +323,17 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 		token := strings.TrimSpace(c.forward.LocalToken)
 		if token != "" {
 			req.Header.Set("X-AICLI-Token", token)
+		}
+	}
+	injectedAnalyticsAdminToken := false
+	if in.target.mount == "" &&
+		shouldInjectAnalyticsAdminToken(req.Method, in.target.path) {
+		if token := strings.TrimSpace(c.forward.AnalyticsAdminToken); token != "" {
+			// Caller-supplied admin credentials are stripped by
+			// copyForwardRequestHeaders; the node's configured credential is
+			// authoritative for this exact read-only namespace.
+			req.Header.Set("X-Skills-Admin-Token", token)
+			injectedAnalyticsAdminToken = true
 		}
 	}
 	// Rewrite Origin/Referer to the local service origin: the browser speaks to
@@ -318,6 +347,17 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 	client := c.forward.Client
 	if client == nil {
 		client = defaultForwardClient
+	}
+	if injectedAnalyticsAdminToken {
+		// Never carry a node-local admin credential across an HTTP redirect. A
+		// local service could otherwise redirect the request to another origin,
+		// and custom headers are not automatically treated as sensitive by
+		// net/http's cross-host redirect policy.
+		noRedirectClient := *client
+		noRedirectClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &noRedirectClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -356,7 +396,7 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 func (c *wsConn) writeResponseHeaders(id uint32, resp *http.Response) error {
 	headers := make(map[string][]string, len(resp.Header))
 	for key, values := range resp.Header {
-		if isHopByHopHeader(key) {
+		if isHopByHopHeader(key) || isLocalCredentialHeader(key) {
 			continue
 		}
 		headers[key] = values
@@ -611,6 +651,53 @@ func isHopByHopHeader(name string) bool {
 	return hopByHopHeaders[strings.ToLower(strings.TrimSpace(name))]
 }
 
+// shouldInjectAnalyticsAdminToken is deliberately a small allowlist, not a
+// namespace-wide proxy privilege. It mirrors the read-only GET routes registered
+// by runtimeapi.Handler.RegisterRoutes. The URL query is irrelevant to route
+// selection; non-canonical/escaped paths fail closed.
+func shouldInjectAnalyticsAdminToken(method, requestPath string) bool {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method != http.MethodGet {
+		return false
+	}
+	path, _, _ := strings.Cut(requestPath, "?")
+	if path == "" || strings.ContainsAny(path, "%\\#") || pathpkg.Clean(path) != path {
+		return false
+	}
+	const prefix = "/api/runtime/analytics/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	route := strings.TrimPrefix(path, prefix)
+	switch route {
+	case "sessions", "overview", "summary", "dimensions", "requests",
+		"tools", "subagents", "errors", "routing", "routing/events",
+		"lsp/baseline":
+		return true
+	}
+
+	segments := strings.Split(route, "/")
+	for _, segment := range segments {
+		if segment == "" {
+			return false
+		}
+	}
+	switch {
+	case len(segments) == 2 && segments[0] == "sessions":
+		// GET /analytics/sessions/{id}
+		return true
+	case len(segments) == 3 && segments[0] == "sessions" &&
+		(segments[2] == "usage" || segments[2] == "turns"):
+		// GET /analytics/sessions/{id}/usage|turns
+		return true
+	case len(segments) == 2 && segments[0] == "tools":
+		// GET /analytics/tools/{tool}
+		return true
+	default:
+		return false
+	}
+}
+
 // copyForwardRequestHeaders copies request headers, dropping hop-by-hop and
 // credential headers (the browser never controls the local token).
 func copyForwardRequestHeaders(dst http.Header, src map[string][]string) {
@@ -630,7 +717,18 @@ func copyForwardRequestHeaders(dst http.Header, src map[string][]string) {
 // credentials; X-AICLI-Token is injected locally for the default target only.
 func isInternalForwardHeader(lower string) bool {
 	switch lower {
-	case "host", "authorization", "cookie", "x-aicli-mount", "x-aicli-token":
+	case "host", "authorization", "cookie", "x-aicli-mount", "x-aicli-token", "x-aicli-access-token", "x-aicli-gateway-token", "x-skills-admin-token":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLocalCredentialHeader prevents node-local credentials from being reflected
+// in response headers even if an upstream handler accidentally echoes them.
+func isLocalCredentialHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "x-aicli-token", "x-aicli-access-token", "x-aicli-gateway-token", "x-skills-admin-token":
 		return true
 	default:
 		return false

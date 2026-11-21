@@ -1873,6 +1873,7 @@ userPrompt: "search customer orders in sap"
 
 func TestClient_UsageScopeSeparatesQuota(t *testing.T) {
 	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+		handler.SetAdminToken("secret-token")
 		handler.SetUsagePolicy(runtimeapi.UsagePolicy{
 			TrackingEnabled:    true,
 			QuotaEnabled:       true,
@@ -1880,7 +1881,7 @@ func TestClient_UsageScopeSeparatesQuota(t *testing.T) {
 		})
 	})
 
-	client := NewClient(server.URL)
+	client := NewClient(server.URL, WithAdminToken("secret-token"))
 	ctx := context.Background()
 
 	_, err := client.ExecuteSkill(ctx, "echo-skill", ExecuteSkillRequest{

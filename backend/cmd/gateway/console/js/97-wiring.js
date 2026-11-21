@@ -3,7 +3,7 @@
 // 共享面：S = 可变状态（原单文件闭包里的顶层 var），G = 函数注册表（原顶层 function）。
 // 本模块只依赖 ./runtime.js，不 import 其它功能模块——模块求值顺序 = 入口 import 顺序，
 // 与原单文件的顶层语句顺序一致。
-import { S, G } from "./runtime.js?v=103";
+import { S, G } from "./runtime.js?v=105";
 
 Object.assign(G, {
   doLogout: doLogout,
@@ -53,6 +53,13 @@ Object.assign(G, {
         return;
       }
       passwordEl.value = "";
+      var next = gatewayLoginNextPath();
+      if (next) {
+        // Node proxy navigation was interrupted by the owner login gate:
+        // return to the original /n/{node}/... URL. The cookie is already set.
+        window.location.assign(next);
+        return;
+      }
       G.applyRoute();
       G.loadNodes();
       G.loadDevices();
@@ -60,6 +67,19 @@ Object.assign(G, {
       fail("登录失败：无法连接网关，请确认服务正在运行");
     });
   });
+
+  function gatewayLoginNextPath() {
+    var next = "";
+    try {
+      next = new URLSearchParams(window.location.search).get("next") || "";
+    } catch (e) {
+      return "";
+    }
+    if (!next || next.charAt(0) !== "/") { return ""; }
+    if (next.charAt(1) === "/" || next.charAt(1) === "\\") { return ""; }
+    if (next.indexOf("\\") >= 0) { return ""; }
+    return next;
+  }
 
   function doLogout() {
     if (G.notifyPolicyIsDirty()) {

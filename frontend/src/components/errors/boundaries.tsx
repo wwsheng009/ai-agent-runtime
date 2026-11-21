@@ -5,6 +5,7 @@
 import { useCallback, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { buildRuntimePagePath } from "@/api/runtime/shared";
 import { isChunkLoadError, isChunkLoadFailure } from "@/lib/lazy-retry";
 
 import { ErrorBoundary } from "./error-boundary";
@@ -19,7 +20,7 @@ function describeError(error: unknown): string | undefined {
 
 function navigateHome(): void {
   if (typeof window !== "undefined") {
-    window.location.assign("/");
+    window.location.assign(buildRuntimePagePath("/"));
   }
 }
 

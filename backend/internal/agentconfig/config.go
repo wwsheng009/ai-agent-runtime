@@ -1201,6 +1201,10 @@ type ServerConfig struct {
 	Host        string `yaml:"host" mapstructure:"host"`
 	Port        int    `yaml:"port" mapstructure:"port"`
 	Development bool   `yaml:"development" mapstructure:"development"`
+	// AccessToken is the shared token required for non-loopback runtime API
+	// access. Loopback (local UI / gateway agent) remains token-free. Empty
+	// means non-loopback API access is denied (fail closed).
+	AccessToken string `yaml:"access_token" mapstructure:"access_token"`
 }
 
 // TruncationConfig holds context truncation settings.

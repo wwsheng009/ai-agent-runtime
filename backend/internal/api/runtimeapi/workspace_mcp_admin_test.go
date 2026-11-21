@@ -109,6 +109,7 @@ func newWorkspaceMCPAdminEndpointTestHandler(
 
 	actorBuilds := 0
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("workspace-admin-test-token")
 	handler.SetMutationPolicy(MutationPolicy{})
 

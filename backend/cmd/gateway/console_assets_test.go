@@ -84,6 +84,8 @@ func TestConsoleMCPViewAndSessionOverflowMenu(t *testing.T) {
 		"function positionSessionMenu",
 		"isActionableAttention",
 		"function sessionDiagnostics",
+		"function sessionOpenTarget",
+		`base + "workspace/sessions/" + encodeURIComponent(sessionID)`,
 		"function autoSelectFirstSession",
 		"function notifyCollectQuietRows",
 		"function renderNotifyQuietRows",

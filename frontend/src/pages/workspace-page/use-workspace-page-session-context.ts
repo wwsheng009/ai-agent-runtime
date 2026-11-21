@@ -1,7 +1,7 @@
 // P0-2：workspace-page.tsx（原 517 非空行）机械拆分「会话数据与选择」区块——仅搬迁不改逻辑。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
@@ -18,6 +18,7 @@ import {
 import { createRuntimeDeltaCoordinator } from "@/lib/workspace-thread-state";
 
 export function useWorkspacePageSessionContext() {
+  const navigate = useNavigate();
   const runtimeClient = useRuntimeClientIdentity();
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const runtimeDeltaCoordinator = useMemo(
@@ -31,7 +32,7 @@ export function useWorkspacePageSessionContext() {
     }
 
     resetStoredRuntimeClientId(window.localStorage);
-    window.location.assign("/workspace/chats/new");
+    navigate("/workspace/chats/new");
   }
 
   const {

@@ -153,7 +153,7 @@ gateway: error
 
 | 方法 | 路径 | 用途 | 认证 |
 |------|------|------|------|
-| `GET` | `/api/runtime/gateway/status` | 状态（state/node_id/url/console_url/heartbeat/last_error/reconnects/sessions/mode） | 回环或 admin token |
+| `GET` | `/api/runtime/gateway/status` | 状态（state/node_id/url/console_url/heartbeat/last_error/reconnects/sessions/mode） | admin token 或 admin role |
 | `POST` | `/api/runtime/gateway/connect` | 手动连接（可带 `{url?, token?}` 临时覆盖） | 同上（写） |
 | `POST` | `/api/runtime/gateway/disconnect` | 手动断开（运行态，抑制自动重连） | 同上（写） |
 | `POST` | `/api/runtime/gateway/reconnect` | 重连 | 同上（写） |
@@ -165,7 +165,7 @@ gateway: error
 - 写操作返回**更新后的 status**，前端据此刷新；
 - 错误沿用统一信封 `{"error":{"code","message"}}`；`token` 永不回传明文（只给 `token_hint`）；
 - 运行态 `disconnect` 不改配置；`auto_connect=false` 等价于持久 `disable`（写配置）；
-- 控制 API 仅本机可用（回环放行 / admin token），与现有配置写入口同级（见 [04](./04-security.md) §7）。
+- 控制 API 需要 admin token 或 admin role（来源地址不参与授权），与现有配置写入口同级（见 [04](./04-security.md) §7）。
 
 ### 6.2 前端入口
 
@@ -232,7 +232,7 @@ type Controller interface {
 
 | 风险 | 缓解 |
 |------|------|
-| 谁可以触发连/断 | 仅**本机 owner**：TUI 命令、或 runtime-server 回环/admin token 控制 API；网关侧无反向"强制连接"入口 |
+| 谁可以触发连/断 | TUI 命令、或携带 admin token / admin role 的 runtime-server 控制 API；环回来源不再自动放行，网关侧无反向"强制连接"入口 |
 | 令牌泄露 | 控制 API 不回传 token 明文；`/gateway token` 不默认提供；配置写按现有敏感项处理（env/密钥管理优先） |
 | 误操作 | `disconnect` 只影响运行态、可一键 `connect` 恢复；`disable` 才是持久化且需显式确认 |
 | 重连风暴 | 手动断开置 `operator_disconnected` 抑制自动重连；认证失败不重连 |

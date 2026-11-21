@@ -23,7 +23,11 @@ import {
   readNumber,
   readStringArray,
 } from "./normalize";
-import { buildRuntimeProfileExportUrl, buildRuntimeProfileImportUrl } from "./url";
+import {
+  buildRuntimeProfileExportUrl,
+  buildRuntimeProfileImportUrl,
+  withRuntimeProfileAdminToken,
+} from "./url";
 
 /** 响应头里的十进制计数：缺失/非数字一律 0，不猜。 */
 function headerCount(value: string | null) {
@@ -40,7 +44,10 @@ function bundleFilename(disposition: string | null, ref: string) {
 
 /** 导出 profile 目录为 zip（只读语义：后端不写盘、不碰会话与配置）。 */
 export async function exportRuntimeProfile(ref: string): Promise<RuntimeProfileExportBundle> {
-  const response = await fetch(buildRuntimeProfileExportUrl(ref), { method: "POST" });
+  const response = await fetch(
+    buildRuntimeProfileExportUrl(ref),
+    withRuntimeProfileAdminToken({ method: "POST" }),
+  );
   if (!response.ok) {
     throw new RuntimeApiError(response.status, await parseErrorPayload(response));
   }
@@ -101,11 +108,11 @@ export async function importRuntimeProfile(
     layer: options?.layer,
     dryRun: options?.dryRun,
   });
-  const init: RequestInit = {
+  const init: RequestInit = withRuntimeProfileAdminToken({
     method: "POST",
     headers: { "Content-Type": "application/zip" },
     body: bundle,
-  };
+  });
   try {
     return normalizeImportReport(await fetchRuntimeJson<unknown>(url, init), options?.dryRun === true);
   } catch (error) {

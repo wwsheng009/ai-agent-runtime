@@ -2,7 +2,8 @@
 // 端点由 backend/internal/connectors/restapi 提供，runtime-server 挂载为 /api/connectors*：
 // GET/POST /connectors、GET /schema、GET/PATCH/DELETE /{id}、
 // POST /{id}/reload|test|takeover|actions、GET /{id}/logs、GET /bindings。
-// 鉴权：X-Skills-Admin-Token / Bearer / 环回直连；归一化纪律：核心结构缺失
+// 鉴权：X-Skills-Admin-Token / Bearer / 可信 admin role；来源地址不参与授权。
+// 归一化纪律：核心结构缺失
 // 抛错不降级；enabled 缺省 false；密钥只透传 secret_keys 字段名。
 
 import type {

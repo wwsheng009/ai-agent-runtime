@@ -267,7 +267,7 @@ func (h *Handler) GetHarnessTrust(w http.ResponseWriter, r *http.Request) {
 //
 // 只支持 grant：撤销信任会让项目级配置整体失效，属于破坏性操作，不在本次 UX
 // 闭环内（需要时走 CLI `/trust` 面，避免 UI 误触）。授予信任是权限提升动作，
-// 因此与 profile 写端点同级授权（回环 / admin token / admin role）。
+// 因此与 profile 写端点同级授权（admin token / admin role）。
 func (h *Handler) UpdateHarnessTrust(w http.ResponseWriter, r *http.Request) {
 	var req harnessTrustRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {

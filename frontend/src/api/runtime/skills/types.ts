@@ -19,6 +19,6 @@ export type RuntimeSkillSearchModeInput = "auto" | "lexical" | "semantic";
 
 export type SkillMutationRequestOptions = {
   signal?: AbortSignal;
-  /** 管理令牌；空串即不发送鉴权头（后端按 loopback/role 判定）。 */
+  /** 管理令牌；空串即不发送鉴权头（后端按 token/role 判定，来源地址不参与授权）。 */
   adminToken?: string;
 };

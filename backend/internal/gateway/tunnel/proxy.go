@@ -91,9 +91,9 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 	headers := make(map[string][]string, len(r.Header)+1)
 	for key, values := range r.Header {
 		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "x-aicli-mount", "x-aicli-token":
+		case "x-aicli-mount", "x-aicli-token", "x-aicli-access-token", "x-aicli-gateway-token", "x-skills-admin-token":
 			// Agent-owned headers: a caller must never be able to select the
-			// mount (or inject the local write token) directly.
+			// mount or inject a node-local credential directly.
 			continue
 		}
 		headers[key] = values

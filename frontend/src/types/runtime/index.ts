@@ -27,3 +27,4 @@ export * from "./provider-ops";
 export * from "./cache";
 export * from "./profiles";
 export * from "./connectors";
+export * from "./access";

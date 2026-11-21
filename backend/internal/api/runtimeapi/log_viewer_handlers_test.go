@@ -33,6 +33,7 @@ func TestGetRuntimeLogs_ReturnsFilteredEntries(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/runtime/logs?limit=2&level=error&query=trace_2", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -78,6 +79,7 @@ func TestStreamRuntimeLogs_EmitsReadyAndLogEvents(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/runtime/logs/stream?after=0&poll_ms=25", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
+	addRuntimeAdminTestToken(req)
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
 	req = req.WithContext(ctx)
@@ -113,7 +115,9 @@ func TestStreamRuntimeLogs_EmitsReadyAndLogEvents(t *testing.T) {
 func newRuntimeLogTestHandler() *Handler {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
-	return NewHandler(registry, nil, mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken(runtimeAdminTestToken)
+	return handler
 }
 
 func writeRuntimeLogLines(path string, lines ...string) error {

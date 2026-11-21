@@ -26,8 +26,8 @@ import (
 //   - 错误映射 observeHTTPStatus：disabled/unauthorized→403、session not
 //     found→404、cursor expired→410、invalid→400、resource exceeded→429。
 //
-// 鉴权：这些端点只监听 127.0.0.1 loopback，等价于服务端 authorizeUsageAdmin
-// 对 loopback 请求的放行，无需额外 token。
+// 鉴权：这些端点只挂载在 127.0.0.1 loopback 进程内 HTTP 服务器上，依赖监听边界；
+// 这不代表 runtime-server 管理面授权——服务端管理端点不再因 loopback 来源放行。
 // ============================================================================
 
 // ChatDebugObservePrefix 返回本地 observe 端点的版本化路由前缀。

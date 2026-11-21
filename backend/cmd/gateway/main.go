@@ -234,6 +234,8 @@ and exit 0.
 	fmt.Fprint(out, `
 Safety: a non-loopback --listen with no --owner-password and no device tokens
 is refused at startup; pass --allow-unprotected to accept that risk explicitly.
+--access-token protects /n/ node proxy access (as a Bearer alternative to the
+owner session); it does not replace the owner password for the console itself.
  
  Exit codes: 0 clean run or graceful shutdown; 1 runtime failure; 2 usage error.
  Docs: docs/gateway/14-implementation-record.md (run), 10-runbook.md (operate).
@@ -252,6 +254,7 @@ func run() int {
 		publicBaseURL   = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
 		serverVersion   = flag.String("server-version", version, "server version reported in WELCOME")
 		deviceToken     = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
+		accessToken     = flag.String("access-token", "", "bearer token accepted as an alternative to the owner session for /n/ node proxy access (prefer --config; env AICLI_GATEWAY_ACCESS_TOKEN)")
 		heartbeatSec    = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
 		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
 		tlsKey          = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
@@ -321,6 +324,11 @@ func run() int {
 		return 1
 	}
 	secure := *tlsCert != ""
+	gatewayAccessToken := strings.TrimSpace(*accessToken)
+	if gatewayAccessToken == "" {
+		gatewayAccessToken = strings.TrimSpace(os.Getenv("AICLI_GATEWAY_ACCESS_TOKEN"))
+	}
+	gatewayAccessToken = normalizeGatewayAccessToken(gatewayAccessToken)
 
 	owner, err := auth.NewOwner(*ownerPassword, *sessionTTL)
 	if err != nil {
@@ -1012,7 +1020,7 @@ func run() int {
 		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()), pushSubscriptionCount(pushManager), mounts.registry.Count(), mounts.registry.CountLive())
 	})
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
-	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	nodeProxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics.proxy.Add(1)
 		nodeID := mux.Vars(r)["node_id"]
 		path := strings.TrimPrefix(r.URL.Path, "/n/"+nodeID)
@@ -1020,7 +1028,8 @@ func run() int {
 			path = "/"
 		}
 		server.ServeProxy(w, r, nodeID, path)
-	}))))
+	})
+	router.PathPrefix("/n/{node_id}/").Handler(limited(gatewayNodeProxyAuth(owner, gatewayAccessToken, nodeProxy)))
 	// MCP mounts: public endpoints authenticated by a mount token, never by the
 	// owner cookie. They intentionally bypass owner.RequireSession so
 	// programmatic MCP clients (which have no cookie) can call them; a disabled
@@ -1190,6 +1199,47 @@ func deviceAuth(store *device.Store, staticToken string) func(*http.Request) err
 		}
 		return fmt.Errorf("invalid device token")
 	}
+}
+
+func normalizeGatewayAccessToken(raw string) string {
+	token := strings.TrimSpace(raw)
+	// 防御：配置模板里的未展开占位符绝不能变成公开默认口令。
+	if strings.HasPrefix(token, "${") && strings.HasSuffix(token, "}") {
+		return ""
+	}
+	return token
+}
+
+// gatewayNodeProxyAuth protects the node reverse proxy. Browser navigation
+// without an owner session is redirected to the console login page with a
+// return path; API clients keep receiving a JSON-free 401 and can use Bearer
+// access tokens. This is what makes gateway access "login once, no runtime
+// token": after login the browser has the owner cookie and the local agent
+// forwards the request over loopback.
+func gatewayNodeProxyAuth(owner *auth.Owner, staticToken string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if owner.AuthorizeSessionOrToken(r, staticToken) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if owner != nil && owner.Enabled() && wantsHTMLNavigation(r) {
+			nextPath := r.URL.RequestURI()
+			http.Redirect(w, r, "/?next="+url.QueryEscape(nextPath), http.StatusFound)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="aicli-gateway"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	})
+}
+
+func wantsHTMLNavigation(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

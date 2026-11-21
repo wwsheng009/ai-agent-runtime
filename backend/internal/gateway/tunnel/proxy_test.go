@@ -178,6 +178,32 @@ func TestProxyForwardsPrefixHeader(t *testing.T) {
 	}
 }
 
+func TestProxyStripsNodeLocalAccessTokenHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Access-Token", r.Header.Get("X-AICLI-Access-Token"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	dialAgent(t, server, "node-access-token", upstream.URL)
+
+	proxy := startProxy(t, server, "node-access-token")
+	req, err := http.NewRequest(http.MethodGet, proxy.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-AICLI-Access-Token", "caller-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-Seen-Access-Token"); got != "" {
+		t.Fatalf("caller X-AICLI-Access-Token reached upstream: %q", got)
+	}
+}
+
 func testRegisterFunc(nodeID string) func() wire.Register {
 	return func() wire.Register {
 		return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop", Routes: []string{"/"}}

@@ -50,6 +50,7 @@ func (h *profilesAPIHarness) rawDo(t *testing.T, method, path string, body []byt
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:34567"
 	req.Header.Set("Content-Type", "application/zip")
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	h.router.ServeHTTP(rec, req)
 	return rec

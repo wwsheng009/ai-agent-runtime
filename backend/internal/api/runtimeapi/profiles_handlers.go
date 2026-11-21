@@ -38,7 +38,7 @@ import (
 //	DELETE /api/runtime/profiles/{ref}              删除（引用检查 + ?force=true）
 //	GET    /api/runtime/profiles/{ref}/references   只读：列出可枚举的引用
 //
-// 权限：读端点与 `/mcps` 同级（回环 / admin token / admin role）；写端点显式声明
+// 权限：读端点与 `/mcps` 同级（admin token / admin role）；写端点显式声明
 // 同一策略（authorizeProfileWrite）。写回**只动 profile 目录**，唯一例外是
 // `default` 端点写 `profiles.default_profile`（走 agentconfig 的配置写锁与分层写路由）。
 // export 为只读；import 先物化到临时目录跑同一 validate、再原子 rename 落位，

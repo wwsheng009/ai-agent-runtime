@@ -98,13 +98,17 @@ type runtimeProfileTarget struct {
 	Layer  string
 }
 
-// authorizeProfileWrite 与既有会话/技能写端点同级（M4：回环 / admin token / admin role）。
+// authorizeProfileWrite 默认放行（临时策略）；显式开启 admin 鉴权后按
+// admin token / admin role 校验。来源地址不参与授权。
 func (h *Handler) authorizeProfileWrite(r *http.Request) error {
-	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+	if !h.adminAuthRequiredEnabled() {
+		return nil
+	}
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) {
 		return nil
 	}
 	return errors.New(errors.ErrAgentPermission,
-		"profile write endpoints require loopback access, valid admin token, or admin role")
+		"profile write endpoints require a valid admin token or admin role")
 }
 
 // profileConfigSnapshot 返回宿主 aicli 配置里的 profiles 节（可能为 nil）。

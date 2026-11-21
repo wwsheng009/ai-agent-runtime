@@ -28,6 +28,29 @@ func (s staticSessionMeta) SessionMeta(sessionID string) (usageanalytics.Session
 	return meta, ok
 }
 
+// TestAnalyticsEndpointsOpenWithoutAdminToken 锁定临时策略：workspace 用户
+// 不带 admin token 也能读取用量分析与失败模式，不再出现“部分功能 403”。
+func TestAnalyticsEndpointsOpenWithoutAdminToken(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage_analytics.sqlite")
+	handler := newRuntimeLogTestHandler()
+	handler.SetUsageAnalyticsDBPath(dbPath)
+	t.Cleanup(detachUsageAnalyticsService)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	for _, target := range []string{
+		"/api/runtime/analytics/overview?limit=1",
+		"/api/runtime/analytics/errors?top=10",
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "203.0.113.7:4567"
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", target, rec.Body.String())
+	}
+}
+
 // TestAnalyticsHandlersReadFromUsageDB 验证 /api/runtime/analytics/* 全部读
 // usage_analytics.sqlite（由 runtime EventBus 实时写入），不再扫描 chat-logs。
 func TestAnalyticsHandlersReadFromUsageDB(t *testing.T) {
@@ -83,6 +106,7 @@ func TestAnalyticsHandlersReadFromUsageDB(t *testing.T) {
 	get := func(target string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		req.RemoteAddr = "127.0.0.1:4321"
+		addRuntimeAdminTestToken(req)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
@@ -187,6 +211,7 @@ func TestParseAnalyticsQueryTreatsDateEndAsInclusiveDay(t *testing.T) {
 func getAnalyticsResponse(router *mux.Router, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.RemoteAddr = "127.0.0.1:4321"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec

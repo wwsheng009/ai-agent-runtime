@@ -47,6 +47,8 @@ func newProfilesAPIHarness(t *testing.T) *profilesAPIHarness {
 	configPath := filepath.Join(tmp, "config.yaml")
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminAuthRequired(true)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetAICLIConfig(&agentconfig.Config{ConfigFilePath: configPath})
 	handler.SetProfileSupport(ProfileSupportConfig{Registry: profilesys.NewRegistry(root)})
 
@@ -56,7 +58,7 @@ func newProfilesAPIHarness(t *testing.T) *profilesAPIHarness {
 	return &profilesAPIHarness{router: router, handler: handler, root: root, config: configPath, layerBase: root}
 }
 
-// do 发起一次 API 调用（回环来源，写端点因此通过 authorizeProfileWrite）。
+// do 发起一次 API 调用，并显式携带测试管理令牌。
 func (h *profilesAPIHarness) do(t *testing.T, method, path string, body interface{}) (*httptest.ResponseRecorder, map[string]interface{}) {
 	t.Helper()
 	var reader io.Reader
@@ -67,6 +69,7 @@ func (h *profilesAPIHarness) do(t *testing.T, method, path string, body interfac
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.RemoteAddr = "127.0.0.1:34567"
+	addRuntimeAdminTestToken(req)
 	rec := httptest.NewRecorder()
 	h.router.ServeHTTP(rec, req)
 
@@ -406,7 +409,7 @@ func TestRuntimeProfilesAPI_SetDefaultAndNotImplementedBoundaries(t *testing.T) 
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	// 非回环来源的写请求 → 403（M4 门控）
+	// 无管理令牌的写请求 → 403（来源地址不参与授权）
 	req := httptest.NewRequest(http.MethodPost, "/api/runtime/profiles", strings.NewReader(`{"name":"x"}`))
 	req.RemoteAddr = "203.0.113.9:40000"
 	rec2 := httptest.NewRecorder()

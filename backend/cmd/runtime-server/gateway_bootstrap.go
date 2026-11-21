@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+	"github.com/wwsheng009/ai-agent-runtime/internal/webui"
 )
 
 // runtimeServerGatewayConnectTimeout bounds the startup auto-connect attempt.
@@ -112,10 +113,11 @@ func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
 // and the reverse-proxy route allowlist are set here. forward reports the live
 // loopback forwarding target: until it exists the node advertises no proxy
 // routes (fail closed, gateway → 403) instead of accepting requests it cannot
-// serve. A nil provider keeps the historical unconditional allowlist.
+// serve. A nil provider keeps the route allowlist independent of forwarding
+// readiness.
 func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wire.SessionSummary, forward func() gatewayagent.ForwardConfig) gatewayagent.RegisterFunc {
 	return func() wire.Register {
-		routes := []string{"/api/runtime", "/api/agent", "/healthz", "/"}
+		routes := runtimeServerGatewayRoutes(webui.Available())
 		if forward != nil {
 			if strings.TrimRight(strings.TrimSpace(forward().LocalBaseURL), "/") == "" {
 				routes = nil
@@ -136,6 +138,18 @@ func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wir
 	}
 }
 
+// runtimeServerGatewayRoutes advertises the root path only when this binary
+// actually embeds the runtime-server SPA. Without an embedded index.html, "/"
+// falls back to runtimeInfoHandler and returns health JSON; exposing that path
+// as the node's Web UI makes the gateway console open JSON instead of a page.
+func runtimeServerGatewayRoutes(webUIAvailable bool) []string {
+	routes := []string{"/api/runtime", "/api/agent", "/healthz"}
+	if webUIAvailable {
+		routes = append(routes, "/")
+	}
+	return routes
+}
+
 // setGatewayForward points the gateway agent at this server's loopback address
 // once it is listening, so reverse-proxied requests reach the local API/SPA.
 // Called from runServe after the listen address is resolved.
@@ -150,8 +164,18 @@ func (a *runtimeServerApp) setGatewayForward(addr string) {
 	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
 		host = "127.0.0.1"
 	}
+	adminToken := ""
+	if a.skillsCfg != nil {
+		adminToken = strings.TrimSpace(a.skillsCfg.AdminToken)
+	}
+	gatewayToken := ""
+	if a.cfg != nil {
+		gatewayToken = runtimeServerGatewayResolveConfig(a.cfg).Token
+	}
 	a.gatewayController.SetForward(gatewayagent.ForwardConfig{
-		LocalBaseURL: "http://" + net.JoinHostPort(host, port),
+		LocalBaseURL:        "http://" + net.JoinHostPort(host, port),
+		AnalyticsAdminToken: adminToken,
+		GatewayToken:        gatewayToken,
 	})
 	// Apply immediately to a live connection (the auto-connect may have run
 	// before the address was known).

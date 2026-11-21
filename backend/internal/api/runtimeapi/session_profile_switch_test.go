@@ -26,6 +26,7 @@ import (
 func newProfileSwitchTestHandler(t *testing.T) (*Handler, *llm.LLMRuntime, *testLLMProvider) {
 	t.Helper()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAdminToken(runtimeAdminTestToken)
 	handler.SetProfileSupport(ProfileSupportConfig{Registry: profilesys.NewRegistry("")})
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
 	t.Cleanup(sessionManager.Stop)

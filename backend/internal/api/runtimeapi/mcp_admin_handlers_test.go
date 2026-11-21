@@ -83,6 +83,7 @@ func (f *fakeMCPAdminService) ConfigDiagnostics() *mcpadmin.ConfigDiagnostics {
 func newMCPAdminTestHandler(t *testing.T, service mcpadmin.AdminService, policy MutationPolicy) *mux.Router {
 	t.Helper()
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("secret-token")
 	handler.SetMutationPolicy(policy)
 	handler.SetMCPAdminService(service)
@@ -243,6 +244,7 @@ func TestReloadRuntimeMCPs_DisableReloadOpsForbidden(t *testing.T) {
 func TestListRuntimeMCPs_Unauthorized(t *testing.T) {
 	service := &fakeMCPAdminService{}
 	handler := NewHandler(nil, nil, nil)
+	handler.SetAdminAuthRequired(true)
 	handler.SetAdminToken("secret-token")
 	handler.SetMCPAdminService(service)
 	router := mux.NewRouter()

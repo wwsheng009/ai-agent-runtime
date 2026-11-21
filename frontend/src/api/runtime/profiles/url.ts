@@ -6,7 +6,26 @@
 // 本文件只构造 URL 与请求体，不发请求；端点实现见 queries.ts / mutations.ts。
 
 import { buildRuntimeUrl, buildRuntimeUrlWithQuery } from "../shared";
+import { readAdminToken } from "@/lib/admin-token";
+
 export const runtimeProfilesUrl = buildRuntimeUrl("/api/runtime/profiles");
+
+const runtimeAdminTokenHeader = "X-Skills-Admin-Token";
+
+/**
+ * Runtime profile management endpoints require an explicit admin credential.
+ * Source IP is not used for authorization, so every profile request from the
+ * web app carries the same locally configured token as other admin surfaces.
+ */
+export function withRuntimeProfileAdminToken(init?: RequestInit): RequestInit {
+  const token = readAdminToken();
+  if (!token) {
+    return init ?? {};
+  }
+  const headers = new Headers(init?.headers);
+  headers.set(runtimeAdminTokenHeader, token);
+  return { ...(init ?? {}), headers };
+}
 
 /**
  * 列表端点带 workspace 时（Batch 14），后端附带 D29 工作区信任上下文与逐条
@@ -73,8 +92,9 @@ export function buildRuntimeProfileImportUrl(query: {
   });
 }
 
-export const jsonRequestInit = (method: string, body: unknown): RequestInit => ({
-  method,
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body),
-});
+export const jsonRequestInit = (method: string, body: unknown): RequestInit =>
+  withRuntimeProfileAdminToken({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
