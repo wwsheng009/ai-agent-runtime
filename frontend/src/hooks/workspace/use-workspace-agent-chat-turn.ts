@@ -1,13 +1,7 @@
-import {
-  startTransition,
-  type Dispatch,
-  type SetStateAction,
-  useEffect,
-} from "react";
+import { startTransition, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useAppSettings } from "@/core/settings";
-import { type Thread } from "@/data/mock";
 import { createConnectTimeoutGuard } from "@/hooks/workspace/agent-chat-turn/connect-timeout";
 import { createTurnFinalizer } from "@/hooks/workspace/agent-chat-turn/finalize-turn";
 import { maybeShowDesktopNotification } from "@/hooks/workspace/agent-chat-turn/notifications";
@@ -36,11 +30,10 @@ import {
   useRuntimeSkillCatalog,
 } from "@/hooks/workspace/use-runtime-skill-catalog";
 import {
-  type TrajectoryStore,
-} from "@/hooks/workspace/use-trajectory-snapshot";
-import {
   useOwnedTrajectoryStore,
 } from "@/hooks/workspace/use-trajectory-store-pool";
+import type { WorkspaceAgentChatTurnOptions } from "@/hooks/workspace/agent-chat-turn/workspace-agent-chat-turn-options";
+import { stopRespondingTurn } from "@/hooks/workspace/stop-responding";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   streamAgentChat,
@@ -48,33 +41,13 @@ import {
 } from "@/lib/runtime-api";
 import { isSseIdleTimeoutError } from "@/api/runtime/sse";
 import { getSessionLeaseConflictTitle } from "@/api/runtime/shared";
-import { requestSessionTurnInterrupt } from "@/api/runtime/session-turn-control";
 import { normalizeSessionId } from "@/lib/session-id";
 import { hasVisibleText } from "@/lib/chat-view/visible-text";
-import type { TrajectoryStorePool } from "@/lib/trajectory/store-pool";
 import {
   createStreamingAssistantMessage,
   getErrorMessage,
   upsertArtifact,
-  type RuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
-
-type WorkspaceAgentChatTurnOptions = {
-  deltaCoordinator?: RuntimeDeltaCoordinator;
-  onSessionTouched?: () => void;
-  pendingPermissionMode?: string;
-  pendingPermissionModeConfirm?: boolean;
-  pendingProfileRef?: string;
-  selectedThread: Thread | undefined;
-  setSelectedArtifactId: (artifactId: string | null) => void;
-  setThreads: Dispatch<SetStateAction<Thread[]>>;
-  /** 页面级池化 store（Batch 1）；缺省由本 hook 自持单实例（旧行为）。 */
-  trajectoryStore?: TrajectoryStore;
-  /** 页面级池：回合按**发起会话**的键取 store（后台/草稿回合不写进选中会话）。 */
-  trajectoryStorePool?: TrajectoryStorePool;
-  userId?: string;
-  workspacePath?: string;
-};
 
 export {
   resolveChatTurnWorkspacePath,
@@ -491,15 +464,7 @@ export function useWorkspaceAgentChatTurn({
   }
 
   function stopResponding() {
-    // 建议 3（后端 cancel 契约）：abort 只让本地 UI 收尾，服务端 detached 回合仍在跑，
-    // 因此带回合身份投递 interrupt（best-effort，失败不阻塞本地停止）。
-    // 按**选中会话**定位：停止按钮只作用于当前会话，后台会话的回合不受影响。
-    const entry = turnRegistry.getSnapshot(selectedTurnKey).entry;
-    void requestSessionTurnInterrupt(
-      entry?.turnState.currentSessionId,
-      entry ? (entry.activeTurnId ?? entry.turnId) : null,
-    );
-    entry?.controller.abort();
+    stopRespondingTurn(turnRegistry, selectedTurnKey);
   }
 
   return {
