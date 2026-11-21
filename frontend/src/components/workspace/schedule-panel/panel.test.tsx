@@ -4,9 +4,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeScheduleTask } from "@/types/runtime";
-
 import { SchedulePanel } from "./panel";
+import { scheduleController, task } from "./panel-test-support";
 
 const { useScheduleTasksMock } = vi.hoisted(() => ({
   useScheduleTasksMock: vi.fn(),
@@ -20,20 +19,6 @@ type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };
 
-function task(overrides: Partial<RuntimeScheduleTask> = {}): RuntimeScheduleTask {
-  return {
-    id: "task-1",
-    kind: "every",
-    title: "Ping",
-    prompt: "ping",
-    scheduledAt: "2099-10-11T12:05:00Z",
-    everySeconds: 300,
-    sessionId: "session-1",
-    status: "active",
-    ...overrides,
-  };
-}
-
 describe("SchedulePanel actions", () => {
   let container: HTMLDivElement;
   let root: Root | null;
@@ -44,22 +29,7 @@ describe("SchedulePanel actions", () => {
     root = createRoot(container);
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
 
-    const noop = vi.fn();
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: noop,
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: noop,
-      removeTask: vi.fn(),
-      saveTask: vi.fn(),
-      savingId: "",
-      tasks: [],
-    });
+    useScheduleTasksMock.mockReturnValue(scheduleController());
   });
 
   afterEach(() => {
@@ -138,21 +108,9 @@ describe("SchedulePanel actions", () => {
   it("任务行提供编辑、暂停/恢复动作并复用表单对话框", async () => {
     const controlTask = vi.fn().mockResolvedValue({ ok: true });
     const saveTask = vi.fn().mockResolvedValue({ ok: true });
-    useScheduleTasksMock.mockReturnValue({
-      controlTask,
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask,
-      savingId: "",
-      tasks: [task()],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({ controlTask, saveTask, tasks: [task()] }),
+    );
 
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
@@ -214,21 +172,13 @@ describe("SchedulePanel actions", () => {
       document.querySelector('[data-testid="schedule-edit-dialog"]'),
     ).toBeNull();
 
-    useScheduleTasksMock.mockReturnValue({
-      controlTask,
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask,
-      savingId: "",
-      tasks: [task({ status: "paused" })],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({
+        controlTask,
+        saveTask,
+        tasks: [task({ status: "paused" })],
+      }),
+    );
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
     });
@@ -248,21 +198,9 @@ describe("SchedulePanel actions", () => {
 
   it("任务行提供查看作业历史的入口并回传目标任务", () => {
     const onViewHistory = vi.fn();
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [task()],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({ tasks: [task()] }),
+    );
 
     act(() => {
       root?.render(
@@ -289,21 +227,9 @@ describe("SchedulePanel actions", () => {
 
   it("展示关联会话并提供打开会话入口", () => {
     const onOpenSession = vi.fn();
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [task()],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({ tasks: [task()] }),
+    );
 
     act(() => {
       root?.render(
@@ -329,21 +255,7 @@ describe("SchedulePanel actions", () => {
   });
 
   it("仅右侧栏宿主显式开启时显示全局自动化入口", () => {
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [],
-    });
+    useScheduleTasksMock.mockReturnValue(scheduleController());
 
     act(() => {
       root?.render(
@@ -366,21 +278,12 @@ describe("SchedulePanel actions", () => {
 
   it("未运行任务可重新启用且仍显示编辑入口", async () => {
     const controlTask = vi.fn().mockResolvedValue({ ok: true });
-    useScheduleTasksMock.mockReturnValue({
-      controlTask,
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [task({ status: "inactive" })],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({
+        controlTask,
+        tasks: [task({ status: "inactive" })],
+      }),
+    );
 
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
@@ -405,21 +308,9 @@ describe("SchedulePanel actions", () => {
   it("删除等待窗口可撤销，撤销后不会调用删除接口", () => {
     vi.useFakeTimers();
     const removeTask = vi.fn().mockResolvedValue({ ok: true });
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask,
-      saveTask: vi.fn(),
-      savingId: "",
-      tasks: [task()],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({ removeTask, tasks: [task()] }),
+    );
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
     });
@@ -448,29 +339,19 @@ describe("SchedulePanel actions", () => {
   });
 
   it("阻塞任务显示可操作的本地化错误，而不泄露内部英文原因", () => {
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [
-        task({
-          status: "blocked",
-          targetKind: "headless",
-          sessionId: "",
-          lastError: "no headless executor configured",
-          lastErrorCode: "headless_executor_unavailable",
-        }),
-      ],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({
+        tasks: [
+          task({
+            status: "blocked",
+            targetKind: "headless",
+            sessionId: "",
+            lastError: "no headless executor configured",
+            lastErrorCode: "headless_executor_unavailable",
+          }),
+        ],
+      }),
+    );
 
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
@@ -484,32 +365,24 @@ describe("SchedulePanel actions", () => {
 
   it("投递死信进入需要处理分区，展示最近尝试并可重试无会话任务", async () => {
     const controlTask = vi.fn().mockResolvedValue({ ok: true });
-    useScheduleTasksMock.mockReturnValue({
-      controlTask,
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: null,
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [
-        task({
-          scheduledAt: "2026-11-19T05:01:11.789Z",
-          status: "blocked",
-          targetKind: "headless",
-          sessionId: "",
-          createdBySessionId: undefined,
-          lastError: "schedulehost: all delivery stages failed: peer(L2): unreachable",
-          lastErrorCode: "delivery_failed",
-          lastAttemptAt: "2026-11-19T05:06:13.000Z",
-        }),
-      ],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({
+        controlTask,
+        tasks: [
+          task({
+            scheduledAt: "2026-11-19T05:01:11.789Z",
+            status: "blocked",
+            targetKind: "headless",
+            sessionId: "",
+            createdBySessionId: undefined,
+            lastError:
+              "schedulehost: all delivery stages failed: peer(L2): unreachable",
+            lastErrorCode: "delivery_failed",
+            lastAttemptAt: "2026-11-19T05:06:13.000Z",
+          }),
+        ],
+      }),
+    );
 
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);
@@ -533,21 +406,9 @@ describe("SchedulePanel actions", () => {
   });
 
   it("目录加载错误显示本地化兜底而不展示后端原始错误", () => {
-    useScheduleTasksMock.mockReturnValue({
-      controlTask: vi.fn(),
-      controllingAction: null,
-      controllingId: "",
-      createTask: vi.fn().mockResolvedValue({ ok: true }),
-      creating: false,
-      deletingId: "",
-      error: "request_failed",
-      loading: false,
-      refresh: vi.fn(),
-      removeTask: vi.fn(),
-      saveTask: vi.fn().mockResolvedValue({ ok: true }),
-      savingId: "",
-      tasks: [],
-    });
+    useScheduleTasksMock.mockReturnValue(
+      scheduleController({ error: "request_failed" }),
+    );
 
     act(() => {
       root?.render(<SchedulePanel sessionId="session-1" />);

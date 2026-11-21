@@ -6,28 +6,15 @@
 // 数据由 hook `useScheduleTasks` 提供（面板只渲染与转发动作）。
 // P0-2 机械拆分：子组件/表单纯函数已拆至 ./schedule-panel/*，仅搬迁不改语义。
 
-import {
-  CalendarClockIcon,
-  ExternalLinkIcon,
-  PlusIcon,
-  RefreshCwIcon,
-} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { fetchScheduleJobRuns } from "@/api/runtime/schedule";
-import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
 import { splitScheduleTasks } from "@/components/workspace/schedule-panel-shared";
 import {
   useScheduleTasks,
   type ScheduleTasksController,
 } from "@/hooks/workspace/use-schedule-tasks";
-import { cn } from "@/lib/utils";
-import type {
-  RuntimeScheduleJobRun,
-  RuntimeScheduleTask,
-} from "@/types/runtime";
+import type { RuntimeScheduleTask } from "@/types/runtime";
 
 import {
   createRequestFrom,
@@ -39,7 +26,10 @@ import {
 } from "./form-state";
 import type { CreateFormState, ScheduleFormErrors } from "./form-state";
 import { ScheduleFormDialog } from "./form-dialog";
-import { ScheduleTaskRow } from "./task-row";
+import { SchedulePanelHeader } from "./panel-header";
+import { SchedulePanelNotices } from "./panel-notices";
+import { ScheduleTaskSections } from "./panel-task-sections";
+import { useSchedulePanelRunHistory } from "./use-panel-run-history";
 
 const scheduleInputErrorKeys: Record<string, string> = {
   invalid_prompt: "panels.schedule.createErrorCode.invalid_prompt",
@@ -134,9 +124,8 @@ export function SchedulePanel({
     {},
   );
   // J3：运行历史（按需拉取；展开即取一次，折叠不丢缓存）。
-  const [expandedRunId, setExpandedRunId] = useState("");
-  const [runsByTask, setRunsByTask] = useState<Record<string, RuntimeScheduleJobRun[]>>({});
-  const [runsStatus, setRunsStatus] = useState<Record<string, "loading" | "error">>({});
+  const { expandedRunId, runsByTask, runsStatus, toggleRuns } =
+    useSchedulePanelRunHistory(tasks);
 
   const outcomeMessage = useCallback(
     (outcome: { code?: string; message: string }) => {
@@ -178,35 +167,6 @@ export function SchedulePanel({
       if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
     },
     [],
-  );
-
-  const toggleRuns = useCallback(
-    async (taskId: string) => {
-      if (expandedRunId === taskId) {
-        setExpandedRunId("");
-        return;
-      }
-      setExpandedRunId(taskId);
-      if (runsByTask[taskId]) {
-        return;
-      }
-      setRunsStatus((prev) => ({ ...prev, [taskId]: "loading" }));
-      try {
-        const task = tasks.find((candidate) => candidate.id === taskId);
-        const ownerSessionId =
-          task?.sessionId?.trim() || task?.createdBySessionId?.trim() || undefined;
-        const response = await fetchScheduleJobRuns(ownerSessionId, taskId, 20);
-        setRunsByTask((prev) => ({ ...prev, [taskId]: response.runs }));
-        setRunsStatus((prev) => {
-          const next = { ...prev };
-          delete next[taskId];
-          return next;
-        });
-      } catch {
-        setRunsStatus((prev) => ({ ...prev, [taskId]: "error" }));
-      }
-    },
-    [expandedRunId, runsByTask, tasks],
   );
 
   const visibleTasks = useMemo(
@@ -465,91 +425,24 @@ export function SchedulePanel({
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <CalendarClockIcon className="size-4" />
-          <h2 className="text-sm font-semibold">
-            {t("panels.schedule.title")}
-          </h2>
-          {visibleTasks.length > 0 && (
-            <Badge>{visibleTasks.length}</Badge>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            aria-expanded={createForm !== null}
-            aria-haspopup="dialog"
-            onClick={openCreate}
-            size="sm"
-            variant="secondary"
-          >
-            <PlusIcon aria-hidden="true" className="size-4" />
-            {t("panels.schedule.create")}
-          </Button>
-          <Button
-            aria-label={t("panels.schedule.refresh")}
-            disabled={loading}
-            onClick={refresh}
-            size="icon"
-            variant="ghost"
-          >
-            <RefreshCwIcon
-              aria-hidden="true"
-              className={cn("size-4", loading && "animate-spin")}
-            />
-          </Button>
-          {showGlobalAutomationLink ? (
-            <a
-              aria-label={t("panels.schedule.openGlobalAutomation")}
-              className={cn(buttonVariants({ variant: "ghost", size: "icon" }))}
-              data-testid="schedule-global-automation"
-              href="/automation"
-              title={t("panels.schedule.openGlobalAutomation")}
-            >
-              <ExternalLinkIcon aria-hidden="true" className="size-4" />
-            </a>
-          ) : null}
-        </div>
-      </div>
+      <SchedulePanelHeader
+        createOpen={createForm !== null}
+        loading={loading}
+        onCreate={openCreate}
+        onRefresh={refresh}
+        showGlobalAutomationLink={showGlobalAutomationLink}
+        taskCount={visibleTasks.length}
+      />
 
-      {notice && (
-        <p
-          aria-live="polite"
-          className="rounded border border-border px-2 py-1 text-xs text-muted-foreground"
-          role="status"
-        >
-          {notice}
-        </p>
-      )}
-      {pendingDelete ? (
-        <p
-          aria-live="polite"
-          className="flex items-center justify-between gap-2 rounded border border-border px-2 py-1 text-xs text-muted-foreground"
-          role="status"
-        >
-          <span>
-            {t(
-              pendingDeleteCommitting
-                ? "panels.schedule.deleting"
-                : "panels.schedule.deleteUndoPending",
-              pendingDeleteCommitting ? undefined : { seconds: "5" },
-            )}
-          </span>
-          {!pendingDeleteCommitting ? (
-            <Button onClick={undoDelete} size="sm" variant="ghost">
-              {t("panels.schedule.undoDelete")}
-            </Button>
-          ) : null}
-        </p>
-      ) : null}
-      {error && (
-        <p
-          className="rounded border border-destructive/40 px-2 py-1 text-xs text-destructive"
-          role="alert"
-        >
-          {outcomeMessage({ code: error, message: "" })}
-        </p>
-      )}
+      <SchedulePanelNotices
+        errorMessage={
+          error ? outcomeMessage({ code: error, message: "" }) : null
+        }
+        notice={notice}
+        onUndoDelete={undoDelete}
+        pendingDelete={pendingDelete}
+        pendingDeleteCommitting={pendingDeleteCommitting}
+      />
 
       {visibleTasks.length === 0 && !loading ? (
         <p className="text-sm text-muted-foreground">
@@ -557,66 +450,38 @@ export function SchedulePanel({
         </p>
       ) : null}
 
-      {active.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-xs font-medium uppercase text-muted-foreground">
-            {t("panels.schedule.activeSection")}
-          </h3>
-          <ul className="space-y-2">
-            {active.map((task) => (
-              <ScheduleTaskRow key={task.id} live={true} task={task} {...rowProps} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {paused.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-xs font-medium uppercase text-muted-foreground">
-            {t("panels.schedule.pausedSection")}
-          </h3>
-          <ul className="space-y-2">
-            {paused.map((task) => (
-              <ScheduleTaskRow key={task.id} live={false} task={task} {...rowProps} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {inactive.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-xs font-medium uppercase text-muted-foreground">
-            {t("panels.schedule.inactiveSection")}
-          </h3>
-          <ul className="space-y-2">
-            {inactive.map((task) => (
-              <ScheduleTaskRow key={task.id} live={false} task={task} {...rowProps} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {blocked.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-xs font-medium uppercase text-destructive">
-            {t("panels.schedule.blockedSection")}
-          </h3>
-          <ul className="space-y-2">
-            {blocked.map((task) => (
-              <ScheduleTaskRow key={task.id} live={false} task={task} {...rowProps} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {failed.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-xs font-medium uppercase text-destructive">
-            {t("panels.schedule.failedSection")}
-          </h3>
-          <ul className="space-y-2">
-            {failed.map((task) => (
-              <ScheduleTaskRow key={task.id} live={false} task={task} {...rowProps} />
-            ))}
-          </ul>
-        </section>
-      )}
+      <ScheduleTaskSections
+        groups={[
+          {
+            live: true,
+            tasks: active,
+            title: t("panels.schedule.activeSection"),
+          },
+          {
+            live: false,
+            tasks: paused,
+            title: t("panels.schedule.pausedSection"),
+          },
+          {
+            live: false,
+            tasks: inactive,
+            title: t("panels.schedule.inactiveSection"),
+          },
+          {
+            destructive: true,
+            live: false,
+            tasks: blocked,
+            title: t("panels.schedule.blockedSection"),
+          },
+          {
+            destructive: true,
+            live: false,
+            tasks: failed,
+            title: t("panels.schedule.failedSection"),
+          },
+        ]}
+        rowProps={rowProps}
+      />
 
       {createForm ? (
         <ScheduleFormDialog
