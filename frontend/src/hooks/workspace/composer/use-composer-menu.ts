@@ -1,14 +1,10 @@
 // P1-4 子片 3：Composer 触发菜单的 owner hook。
 // 三入口同源：`/`（命令）、`@`（引用）、`+` 按钮（全部）共用同一份菜单模型与派发路径。
+//
+// 公开类型在 use-composer-menu-types.ts，键盘子 hook 在 use-composer-menu-keyboard.ts；
+// 本文件保留状态机、菜单快照派生、补全与命令派发，并作为公开 barrel 保持既有 import 路径。
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   classifyComposerSubmit,
@@ -16,21 +12,14 @@ import {
   findComposerCommand,
   parseComposerCommandLine,
   type ComposerCommand,
-  type ComposerCommandDefinition,
   type ComposerSubmitClassification,
 } from "@/lib/composer-commands";
 import {
   buildComposerMenu,
   clampComposerMenuActive,
   findComposerMenuItem,
-  moveComposerMenuActive,
-  resolveComposerMenuTab,
   type ComposerCommandOptionsSource,
-  type ComposerMenuLevel,
   type ComposerMenuMode,
-  type ComposerMenuSnapshot,
-  type ComposerReferenceGroup,
-  type ComposerWorkspaceSelection,
 } from "@/lib/composer-menu";
 import {
   applyComposerSkillMentionInsertion,
@@ -38,81 +27,27 @@ import {
   composerReferenceText,
   composerSkillMentionText,
   detectComposerTrigger,
-  type ComposerTrigger,
 } from "@/lib/composer-trigger";
-import {
-  isSkillMentionCaretEcho,
-  resolveSkillMentionTabExtension,
-} from "@/lib/composer-skill-mentions";
+import { isSkillMentionCaretEcho } from "@/lib/composer-skill-mentions";
 
 import { useComposerCaretInsertion } from "./use-composer-caret-insertion";
+import { useComposerMenuKeyboard } from "./use-composer-menu-keyboard";
+import {
+  INITIAL_COMPOSER_MENU_STATE,
+  type ComposerMenuInternalState,
+} from "./use-composer-menu-state";
+import type {
+  ComposerMenuController,
+  ComposerMenuNotice,
+  ComposerMenuState,
+  UseComposerMenuOptions,
+} from "./use-composer-menu-types";
 
-export type ComposerMenuNotice =
-  | { kind: "unknown-command"; name: string }
-  | { kind: "incomplete-command" }
-  | { kind: "no-executor"; name: string };
-
-export type UseComposerMenuOptions = {
-  value: string;
-  /** 命令定义（hook 内部注册；非法名/冲突在此 fail loudly）。 */
-  commands: readonly ComposerCommandDefinition[];
-  referenceGroups: readonly ComposerReferenceGroup[];
-  /** `$` 技能提及候选分组（仅 `skills` 模式消费）。 */
-  skillGroups?: readonly ComposerReferenceGroup[];
-  hasAttachAction: boolean;
-  /** 已本地化的「添加附件」文案（模型层不持文案）。 */
-  attachLabel: string;
-  /** 新会话工作区选择；选择动作不写入草稿。 */
-  workspaceSelection?: ComposerWorkspaceSelection;
-  onWorkspaceSelect?: (directoryId: string | null) => void;
-  onValueChange: (next: string, caret: number) => void;
-  onAttachRequest: () => void;
-  /**
-   * 菜单可见状态回调：宿主据此决定是否拉取 `@` 引用候选数据
-   * （菜单关闭/未打开时不得触发网络请求）。用 effect 收敛，避免渲染期调 setState。
-   */
-  onMenuStateChange?: (state: ComposerMenuState) => void;
-  /** 返回 true 表示命令已被处理；否则给出「暂未接入执行器」提示，绝不降级为 prompt。 */
-  onCommand?: (
-    command: ComposerCommand,
-    args: string,
-    source: "pick" | "submit",
-  ) => boolean | void;
-};
-
-export type ComposerMenuState = {
-  open: boolean;
-  mode: ComposerMenuMode;
-  /** `@` 后的查询串（manual/命令模式为空串）。 */
-  query: string;
-};
-
-export type ComposerMenuController = {
-  open: boolean;
-  snapshot: ComposerMenuSnapshot;
-  activeId: string | null;
-  activeDescendantId: string | null;
-  listboxId: string;
-  notice: ComposerMenuNotice | null;
-  /** 当前草稿是命令行（行首 `/`）——不会作为普通消息发送。 */
-  commandLine: boolean;
-  handleValueChange: (next: string, caret: number) => void;
-  handleCaretChange: (caret: number) => void;
-  handleKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
-  selectItem: (itemId: string | null) => void;
-  hoverItem: (itemId: string) => void;
-  backToRoot: () => void;
-  openFromButton: () => void;
-  close: () => void;
-  dismissNotice: () => void;
-  classifySubmit: () => ComposerSubmitClassification;
-  /** 提交被阻塞时登记提示（组件在提交路径调用）。 */
-  reportBlocked: (classification: ComposerSubmitClassification) => void;
-  dispatchCommand: (
-    command: ComposerCommand,
-    args: string,
-    source: "pick" | "submit",
-  ) => boolean;
+export type {
+  ComposerMenuController,
+  ComposerMenuNotice,
+  ComposerMenuState,
+  UseComposerMenuOptions,
 };
 
 export const COMPOSER_MENU_LISTBOX_ID = "composer-command-menu";
@@ -120,22 +55,6 @@ export const COMPOSER_MENU_LISTBOX_ID = "composer-command-menu";
 export function composerMenuItemDomId(itemId: string): string {
   return `composer-menu-option-${itemId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
-
-type MenuState = {
-  manual: boolean;
-  trigger: ComposerTrigger | null;
-  dismissedKey: string | null;
-  level: ComposerMenuLevel;
-  activeId: string | null;
-};
-
-const INITIAL_MENU_STATE: MenuState = {
-  manual: false,
-  trigger: null,
-  dismissedKey: null,
-  level: { kind: "root" },
-  activeId: null,
-};
 
 export function useComposerMenu({
   value,
@@ -151,7 +70,9 @@ export function useComposerMenu({
   onMenuStateChange,
   onCommand,
 }: UseComposerMenuOptions): ComposerMenuController {
-  const [state, setState] = useState<MenuState>(INITIAL_MENU_STATE);
+  const [state, setState] = useState<ComposerMenuInternalState>(
+    INITIAL_COMPOSER_MENU_STATE,
+  );
   const [notice, setNotice] = useState<ComposerMenuNotice | null>(null);
   // `+`（manual）菜单的插入点：无触发 token 时技能/引用按最近光标落 token。
   const { rememberCaret, insertAtCaret } = useComposerCaretInsertion({
@@ -476,136 +397,22 @@ export function useComposerMenu({
     ],
   );
 
-  const handleKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>): boolean => {
-      if (!open) {
-        return false;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (state.level.kind === "group") {
-          backToRoot();
-        } else {
-          close();
-        }
-        return true;
-      }
-      if (event.key === "ArrowLeft" && state.level.kind === "group") {
-        event.preventDefault();
-        backToRoot();
-        return true;
-      }
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        const delta = event.key === "ArrowDown" ? 1 : -1;
-        setState((previous) => ({
-          ...previous,
-          activeId: moveComposerMenuActive(snapshot.items, activeId, delta),
-        }));
-        return true;
-      }
-      if (event.key === "ArrowRight") {
-        const item = findComposerMenuItem(snapshot.items, activeId);
-        if (!item || item.level !== "launcher") {
-          return false;
-        }
-        event.preventDefault();
-        setState((previous) => ({
-          ...previous,
-          level: { kind: "group", groupId: item.groupId },
-          activeId: null,
-        }));
-        return true;
-      }
-      if (event.key === "Tab") {
-        // `$` 多候选：Tab 先加深公共前缀（不落空格、菜单保持打开），与 TUI 一致
-        // （前缀子集判定在 lib）；唯一候选/不可再加深时回落到通用 pick。
-        if (state.trigger?.kind === "skill") {
-          const extension = resolveSkillMentionTabExtension(
-            value,
-            state.trigger,
-            snapshot.items,
-          );
-          if (extension) {
-            event.preventDefault();
-            pendingStaleCaretGuardRef.current = {
-              tokenStart: state.trigger.start,
-              query: extension.trigger.query,
-            };
-            onValueChange(extension.value, extension.caret);
-            setState((previous) => ({
-              ...previous,
-              trigger: extension.trigger,
-            }));
-            return true;
-          }
-        }
-        const intent = resolveComposerMenuTab(snapshot.items, activeId);
-        if (intent === "pass") {
-          return false;
-        }
-        event.preventDefault();
-        if (intent === "drill") {
-          const item = findComposerMenuItem(snapshot.items, activeId);
-          if (item) {
-            setState((previous) => ({
-              ...previous,
-              level: { kind: "group", groupId: item.groupId },
-              activeId: null,
-            }));
-          }
-          return true;
-        }
-        selectItem(activeId);
-        return true;
-      }
-      if (
-        event.key === "Enter" &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey
-      ) {
-        if (snapshot.items.length === 0) {
-          // 命令行绝不静默降级：无候选时 Enter 阻塞提交并提示，而不是当普通消息发送。
-          if (state.trigger?.kind === "slash") {
-            event.preventDefault();
-            setNotice(
-              query.length === 0
-                ? { kind: "incomplete-command" }
-                : { kind: "unknown-command", name: query },
-            );
-            return true;
-          }
-          // `@` 引用同语义：候选为空（加载中/无命中/失败）时不得把半截 token 当普通消息发出；
-          // 用户可先 Esc 关闭菜单再提交（此时 open=false，不进本分支）。
-          if (state.trigger?.kind === "reference") {
-            event.preventDefault();
-            return true;
-          }
-          // `$` 提及例外：未知技能名是合法普通文本（对齐 TUI/Codex「未命中不报错」），
-          // 空候选时放行提交，绝不把 `$foo` 当成必须修复的引用。
-          return false;
-        }
-        event.preventDefault();
-        selectItem(activeId);
-        return true;
-      }
-      return false;
-    },
-    [
-      activeId,
-      backToRoot,
-      close,
-      onValueChange,
-      open,
-      query,
-      selectItem,
-      snapshot.items,
-      state.level.kind,
-      state.trigger,
-      value,
-    ],
-  );
+  const handleKeyDown = useComposerMenuKeyboard({
+    open,
+    query,
+    value,
+    activeId,
+    snapshot,
+    trigger: state.trigger,
+    levelKind: state.level.kind,
+    backToRoot,
+    close,
+    selectItem,
+    onValueChange,
+    pendingStaleCaretGuardRef,
+    setState,
+    setNotice,
+  });
 
   const reportBlocked = useCallback(
     (classification: ComposerSubmitClassification) => {

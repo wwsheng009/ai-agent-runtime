@@ -285,12 +285,29 @@ describe("ComposerProfileControl", () => {
     ).toBeNull();
   });
 
-  it("reports catalog load failure without faking candidates", async () => {
-    await render({ catalog: null, catalogError: "network down" });
+  it("keeps the current value visible when the profile catalog fails", async () => {
+    await render({
+      catalog: null,
+      catalogError: "profile 目录不可用",
+      profileName: undefined,
+      profileRef: "",
+    });
 
-    expect(
-      container.querySelector("[data-composer-profile-error]"),
-    ).not.toBeNull();
+    const visibleValue = trigger()?.querySelector<HTMLElement>("span.flex-1");
+    const catalogError = container.querySelector(
+      "[data-composer-profile-error]",
+    );
+
+    expect(visibleValue?.textContent).toBe("默认");
+    expect(visibleValue?.className).toContain("min-w-[3.5rem]");
+    expect(trigger()?.title).toContain("默认");
+    expect(trigger()?.title).toContain("profile 目录不可用");
+    expect(catalogError?.getAttribute("aria-label")).toContain(
+      "profile 目录不可用",
+    );
+    expect(catalogError?.getAttribute("title")).toContain(
+      "profile 目录不可用",
+    );
     expect(onSwitch).not.toHaveBeenCalled();
   });
 

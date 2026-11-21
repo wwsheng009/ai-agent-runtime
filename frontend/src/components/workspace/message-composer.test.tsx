@@ -1,63 +1,29 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageComposer } from "./message-composer";
-import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
+import {
+  composerTestContainer,
+  createAttachmentsStub,
+  createComposerTestProps,
+  installComposerTestLifecycle,
+  renderComposerElement,
+  type ComposerTestProps,
+} from "./message-composer-test-support";
 import { createComposerAttachment } from "@/lib/composer-attachments";
 import {
   readComposerTextareaMetrics,
   resolveComposerTextareaLayout,
 } from "@/lib/composer-textarea";
 
-type ReactActEnvironmentGlobal = typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT?: boolean;
-};
-
-function createAttachmentsStub(
-  overrides: Partial<ComposerAttachmentsController> = {},
-): ComposerAttachmentsController {
-  const attachments = overrides.attachments ?? [];
-  return {
-    attachments,
-    isDragOver: false,
-    rejectedCount: 0,
-    uploadingCount: attachments.filter((item) => item.status === "uploading").length,
-    uploadedCount: attachments.filter((item) => item.status === "uploaded").length,
-    unsettledCount: attachments.filter((item) => item.status !== "uploaded").length,
-    uploadedPaths: attachments
-      .filter((item) => item.status === "uploaded" && item.remotePath)
-      .map((item) => item.remotePath as string),
-    addFiles: vi.fn(),
-    removeAttachment: vi.fn(),
-    retryAttachment: vi.fn(),
-    clearAttachments: vi.fn(),
-    acknowledgeRejections: vi.fn(),
-    ...overrides,
-  };
-}
-
 describe("MessageComposer", () => {
+  installComposerTestLifecycle();
+
   let container: HTMLDivElement;
-  let root: Root | null;
 
   beforeEach(() => {
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
-  afterEach(() => {
-    if (root) {
-      act(() => root?.unmount());
-    }
-    container.remove();
-    document.body.innerHTML = "";
-    Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
-    delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
+    container = composerTestContainer();
   });
 
   // jsdom 无排版：直接桩住 scrollHeight，验证组件的「度量 → 布局 → 样式」接线。
@@ -69,35 +35,14 @@ describe("MessageComposer", () => {
   }
 
   function renderComposer(
-    overrides: Partial<React.ComponentProps<typeof MessageComposer>> = {},
+    overrides: Partial<ComposerTestProps> = {},
   ) {
-    const props: React.ComponentProps<typeof MessageComposer> = {
+    const props = createComposerTestProps({
       attachments: createAttachmentsStub(),
-      density: "comfortable",
-      draft: "",
-      hasSession: false,
-      isNewThread: true,
-      isResponding: false,
-      modelOptions: ["model-a"],
-      onDraftChange: vi.fn(),
-      onModelChange: vi.fn(),
-      onProviderChange: vi.fn(),
-      onReasoningEffortChange: vi.fn(),
-      onStop: vi.fn(),
-      onSubmit: vi.fn(),
-      providerOptions: ["provider-a"],
-      reasoningEffortDefault: "",
-      reasoningEffortError: null,
-      reasoningEffortOptions: [],
-      runtimeModelsError: null,
-      runtimeModelsLoading: false,
-      selectedModel: "model-a",
-      selectedProvider: "provider-a",
-      selectedReasoningEffort: "",
       ...overrides,
-    };
+    });
 
-    act(() => root?.render(<MessageComposer {...props} />));
+    renderComposerElement(props);
     return props;
   }
 
@@ -394,6 +339,11 @@ describe("MessageComposer", () => {
     act(() => {
       container
         .querySelector("button[data-composer-menu-trigger]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector("[data-composer-menu-launcher='actions']")
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     act(() => {

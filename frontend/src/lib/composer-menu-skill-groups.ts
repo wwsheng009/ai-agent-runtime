@@ -4,12 +4,12 @@
 //
 // 与 composer-menu.ts 分址的原因：菜单模型受 500 非空行门禁约束，技能分组
 // 构建器（leaf）连同通用排序工具一并在此维护；本模块只依赖
-// composer-menu 的类型（type-only import，无运行时循环依赖）。
+// composer-menu-types 的类型（type-only import，无运行时循环依赖）。
 
 import type {
   ComposerMenuGroup,
   ComposerReferenceGroup,
-} from "@/lib/composer-menu";
+} from "@/lib/composer-menu-types";
 
 export const COMPOSER_MENU_MAX_ITEMS_PER_GROUP = 8;
 

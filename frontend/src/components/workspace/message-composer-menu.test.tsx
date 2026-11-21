@@ -1,160 +1,28 @@
 // @vitest-environment jsdom
 
-import { act, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageComposer } from "./message-composer";
-import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
-import { type ComposerCommandDefinition } from "@/lib/composer-commands";
-import { type ComposerReferenceGroup } from "@/lib/composer-menu";
-
-type ReactActEnvironmentGlobal = typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT?: boolean;
-};
-
-const COMMANDS: readonly ComposerCommandDefinition[] = [
-  { name: "export", kind: "action" },
-  { name: "model", kind: "popupSelect" },
-];
-
-const REFERENCE_GROUPS: readonly ComposerReferenceGroup[] = [
-  {
-    id: "artifacts",
-    label: "文件",
-    items: [
-      { id: "a1", label: "app.tsx", insertText: "src/app.tsx" },
-      { id: "a2", label: "report.md", insertText: "reports/report.md" },
-    ],
-  },
-];
-
-function createAttachmentsStub(
-  overrides: Partial<ComposerAttachmentsController> = {},
-): ComposerAttachmentsController {
-  const attachments = overrides.attachments ?? [];
-  return {
-    attachments,
-    isDragOver: false,
-    rejectedCount: 0,
-    uploadingCount: attachments.filter((item) => item.status === "uploading")
-      .length,
-    uploadedCount: attachments.filter((item) => item.status === "uploaded")
-      .length,
-    unsettledCount: attachments.filter((item) => item.status !== "uploaded")
-      .length,
-    uploadedPaths: [],
-    addFiles: vi.fn(),
-    removeAttachment: vi.fn(),
-    retryAttachment: vi.fn(),
-    clearAttachments: vi.fn(),
-    acknowledgeRejections: vi.fn(),
-    ...overrides,
-  };
-}
+import {
+  menu,
+  press,
+  renderComposer,
+  textarea,
+  typeText,
+} from "./message-composer-menu-test-support";
+import {
+  composerTestContainer,
+  installComposerTestLifecycle,
+} from "./message-composer-test-support";
 
 describe("MessageComposer trigger menu", () => {
+  installComposerTestLifecycle();
+
   let container: HTMLDivElement;
-  let root: Root | null;
 
   beforeEach(() => {
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    container = composerTestContainer();
   });
-
-  afterEach(() => {
-    if (root) {
-      act(() => root?.unmount());
-    }
-    container.remove();
-    document.body.innerHTML = "";
-    delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
-  });
-
-  function renderComposer(
-    overrides: Partial<React.ComponentProps<typeof MessageComposer>> = {},
-  ) {
-    const props: React.ComponentProps<typeof MessageComposer> = {
-      attachments: createAttachmentsStub(),
-      commands: COMMANDS,
-      density: "comfortable",
-      draft: "",
-      hasSession: true,
-      isResponding: false,
-      modelOptions: ["model-a"],
-      onDraftChange: vi.fn(),
-      onModelChange: vi.fn(),
-      onProviderChange: vi.fn(),
-      onReasoningEffortChange: vi.fn(),
-      onStop: vi.fn(),
-      onSubmit: vi.fn(),
-      providerOptions: ["provider-a"],
-      reasoningEffortDefault: "",
-      reasoningEffortError: null,
-      reasoningEffortOptions: [],
-      referenceGroups: REFERENCE_GROUPS,
-      runtimeModelsError: null,
-      runtimeModelsLoading: false,
-      selectedModel: "model-a",
-      selectedProvider: "provider-a",
-      selectedReasoningEffort: "",
-      ...overrides,
-    };
-
-    act(() => root?.render(<ComposerHarness props={props} />));
-    return props;
-  }
-
-  // 受控宿主：草稿更新回灌成 props，模拟真实页面（否则 hook 的 value 与 DOM 脱节）。
-  function ComposerHarness({
-    props,
-  }: {
-    props: React.ComponentProps<typeof MessageComposer>;
-  }) {
-    const [draft, setDraft] = useState(props.draft);
-    return (
-      <MessageComposer
-        {...props}
-        draft={draft}
-        onDraftChange={(next) => {
-          props.onDraftChange(next);
-          setDraft(next);
-        }}
-      />
-    );
-  }
-
-  function textarea(): HTMLTextAreaElement {
-    return container.querySelector("textarea") as HTMLTextAreaElement;
-  }
-
-  function menu(): HTMLElement | null {
-    return container.querySelector("[data-composer-menu]");
-  }
-
-  function type(value: string) {
-    const element = textarea();
-    const setter = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
-      "value",
-    )?.set;
-    act(() => {
-      setter?.call(element, value);
-      element.setSelectionRange(value.length, value.length);
-      element.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    return element;
-  }
-
-  function press(key: string) {
-    act(() => {
-      textarea().dispatchEvent(
-        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-      );
-    });
-  }
 
   it("opens category launchers from the + button and drills into each leaf group", () => {
     renderComposer();
@@ -341,7 +209,7 @@ describe("MessageComposer trigger menu", () => {
     const onDraftChange = vi.fn();
     renderComposer({ onDraftChange });
 
-    const element = type("@");
+    const element = typeText("@");
     expect(menu()).not.toBeNull();
     expect(element.getAttribute("aria-expanded")).toBe("true");
     expect(element.getAttribute("aria-activedescendant")).toBeTruthy();
@@ -360,7 +228,7 @@ describe("MessageComposer trigger menu", () => {
 
   it("filters reference candidates by the typed query", () => {
     renderComposer();
-    type("@app");
+    typeText("@app");
 
     const options = container.querySelectorAll(
       "[data-composer-reference-option]",
@@ -383,7 +251,7 @@ describe("MessageComposer trigger menu", () => {
       query: "",
     });
 
-    type("@app");
+    typeText("@app");
     expect(onMenuStateChange).toHaveBeenLastCalledWith({
       open: true,
       mode: "references",
@@ -413,7 +281,7 @@ describe("MessageComposer trigger menu", () => {
 
   it("blocks Enter when the @ menu has no candidates (no fallback to raw token)", () => {
     renderComposer();
-    type("@zzz");
+    typeText("@zzz");
 
     const event = new KeyboardEvent("keydown", {
       key: "Enter",
@@ -443,7 +311,7 @@ describe("MessageComposer trigger menu", () => {
         },
       ],
     });
-    type("@");
+    typeText("@");
     press("Enter");
 
     const note = container.querySelector(
@@ -468,309 +336,12 @@ describe("MessageComposer trigger menu", () => {
         },
       ],
     });
-    type("@");
+    typeText("@");
     press("Enter");
 
     const footer = container.querySelector(
       "[data-composer-menu-group-truncated='workspace-files']",
     );
     expect(footer?.textContent).toBe("结果已截断，继续输入以缩小范围");
-  });
-
-  it("drills into a popupSelect command's own options and dispatches the picked value", () => {
-    const onCommand = vi.fn(
-      (
-        command: { name: string; kind: string },
-        args: string,
-        source: "pick" | "submit",
-      ) => {
-        void command;
-        void args;
-        void source;
-        return true;
-      },
-    );
-    const onDraftChange = vi.fn();
-    renderComposer({
-      commands: [
-        {
-          name: "model",
-          kind: "popupSelect",
-          options: [
-            {
-              value: "deepseek-chat",
-              label: "deepseek-chat",
-              description: "deepseek",
-            },
-            { value: "gpt-5", label: "gpt-5", description: "openai" },
-          ],
-        },
-      ],
-      onCommand,
-      onDraftChange,
-    });
-
-    type("/model");
-    // 真实打字每次按键都会带着 keydown/keyup，React 的选区追踪据此对齐；
-    // 这里的 `type()` 用原生 setter 伪造输入，补一次无副作用按键等价对齐，
-    // 否则 Enter 会额外触发一次 onSelect（选区陈旧）把候选层打回根层。
-    press("Shift");
-    // 第一层只有命令本身：Enter 先补全命令名并展开专属候选，而不是直接执行。
-    press("Enter");
-    expect(onCommand).not.toHaveBeenCalled();
-    expect(
-      container.querySelectorAll("[data-composer-command-option-value]"),
-    ).toHaveLength(2);
-
-    // 候选层：方向键虚拟高亮 + Enter 点选即派发（source=pick），命令行清空。
-    press("ArrowDown");
-    press("Enter");
-    expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onCommand.mock.calls[0][0]).toMatchObject({
-      name: "model",
-      kind: "popupSelect",
-    });
-    expect(onCommand.mock.calls[0][1]).toBe("gpt-5");
-    expect(onCommand.mock.calls[0][2]).toBe("pick");
-    expect(onDraftChange).toHaveBeenLastCalledWith("");
-    expect(menu()).toBeNull();
-  });
-
-  it("blocks sending an unknown command line and surfaces the reason", () => {
-    const onSubmit = vi.fn();
-    renderComposer({ draft: "/nope", onSubmit });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onSubmit).not.toHaveBeenCalled();
-    const notice = container.querySelector(
-      "[data-composer-command-notice='unknown-command']",
-    );
-    expect(notice).not.toBeNull();
-    expect(notice?.textContent).toContain("/nope");
-
-    act(() =>
-      (
-        container.querySelector(
-          "[data-composer-command-notice-dismiss]",
-        ) as HTMLButtonElement
-      ).click(),
-    );
-    expect(
-      container.querySelector("[data-composer-command-notice]"),
-    ).toBeNull();
-  });
-
-  it("dispatches a known command to the host instead of sending a prompt", () => {
-    const onSubmit = vi.fn();
-    const onCommand = vi.fn(
-      (
-        command: { name: string; kind: string },
-        args: string,
-        source: "pick" | "submit",
-      ) => {
-        void command;
-        void args;
-        void source;
-        return true;
-      },
-    );
-    renderComposer({
-      commands: COMMANDS,
-      draft: "/export --json",
-      onSubmit,
-      onCommand,
-    });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onCommand.mock.calls[0][0]).toMatchObject({
-      name: "export",
-      kind: "action",
-    });
-    expect(onCommand.mock.calls[0][1]).toBe("--json");
-    expect(onCommand.mock.calls[0][2]).toBe("submit");
-  });
-
-  it("reports a command without executor instead of silently sending it", () => {
-    const onSubmit = vi.fn();
-    renderComposer({ draft: "/export", onSubmit });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onSubmit).not.toHaveBeenCalled();
-    expect(
-      container.querySelector("[data-composer-command-notice='no-executor']"),
-    ).not.toBeNull();
-  });
-
-  it("clears the command line once the host claims the command", () => {
-    const onDraftChange = vi.fn();
-    const onCommand = vi.fn(() => true);
-    renderComposer({
-      commands: COMMANDS,
-      draft: "/export",
-      onCommand,
-      onDraftChange,
-    });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onDraftChange).toHaveBeenLastCalledWith("");
-  });
-
-  it("keeps the command line as a draft when the host does not claim it", () => {
-    const onDraftChange = vi.fn();
-    renderComposer({
-      commands: COMMANDS,
-      draft: "/export",
-      onCommand: () => false,
-      onDraftChange,
-    });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onDraftChange).not.toHaveBeenCalled();
-    expect(
-      container.querySelector("[data-composer-command-notice='no-executor']"),
-    ).not.toBeNull();
-  });
-
-  it("keeps plain prose flowing to the normal submit path", () => {
-    const onSubmit = vi.fn();
-    renderComposer({ draft: "hello world", onSubmit });
-
-    const submit = container.querySelector(
-      'button[title*="Ctrl/Cmd"]',
-    ) as HTMLButtonElement;
-    act(() => submit.click());
-
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(
-      container.querySelector("[data-composer-command-notice]"),
-    ).toBeNull();
-  });
-
-  const SKILL_GROUPS: readonly ComposerReferenceGroup[] = [
-    {
-      id: "skills",
-      label: "技能",
-      items: [
-        {
-          id: "brand",
-          label: "brand",
-          insertText: "brand",
-          description: "design",
-        },
-        { id: "docx", label: "docx", insertText: "docx", description: "docs" },
-      ],
-      emptyText: "未找到匹配技能",
-    },
-  ];
-
-  it("opens the skill list on $ and completes the picked skill with a trailing space", () => {
-    const onDraftChange = vi.fn();
-    renderComposer({ skillGroups: SKILL_GROUPS, onDraftChange });
-
-    type("$");
-    expect(menu()).not.toBeNull();
-    const options = Array.from(
-      container.querySelectorAll("[data-composer-skill-option]"),
-    );
-    expect(
-      options.map((option) =>
-        option.getAttribute("data-composer-skill-option"),
-      ),
-    ).toEqual(["brand", "docx"]);
-    // 技能名必须完整展示：不得省略号截断（必要时折行），描述限宽为次级信息。
-    const label = options[0].querySelector("span");
-    expect(label?.className).toContain("break-all");
-    expect(label?.className).not.toContain("truncate");
-    const description = options[0].querySelectorAll("span")[1];
-    expect(description?.className).toContain("max-w-[40%]");
-    expect(description?.className).toContain("truncate");
-
-    type("$br");
-    expect(
-      Array.from(
-        container.querySelectorAll("[data-composer-skill-option]"),
-      ).map((option) => option.getAttribute("data-composer-skill-option")),
-    ).toEqual(["brand"]);
-
-    press("Enter");
-    expect(onDraftChange).toHaveBeenLastCalledWith("$brand ");
-    expect(menu()).toBeNull();
-  });
-
-  it("supports multiple skill mentions in one draft", () => {
-    const onDraftChange = vi.fn();
-    renderComposer({ skillGroups: SKILL_GROUPS, onDraftChange });
-
-    type("$br");
-    press("Enter");
-    expect(onDraftChange).toHaveBeenLastCalledWith("$brand ");
-
-    // 受控 harness 已回灌 "$brand "；第二个提及沿用同一条补全路径。
-    type("$brand 按照 $do");
-    press("Enter");
-    expect(onDraftChange).toHaveBeenLastCalledWith("$brand 按照 $docx ");
-  });
-
-  it("reports skills mode to the host so file fetches stay off", () => {
-    const onMenuStateChange = vi.fn();
-    renderComposer({ skillGroups: SKILL_GROUPS, onMenuStateChange });
-
-    type("$do");
-    expect(onMenuStateChange).toHaveBeenLastCalledWith({
-      open: true,
-      mode: "skills",
-      query: "do",
-    });
-  });
-
-  it("keeps unmatched skill tokens as plain text instead of blocking Enter", () => {
-    renderComposer({ skillGroups: SKILL_GROUPS });
-    type("$zzz");
-
-    expect(container.querySelector("[data-composer-menu]")).not.toBeNull();
-    const note = container.querySelector(
-      "[data-composer-menu-group-note='skills']",
-    );
-    expect(note?.textContent).toBe("未找到匹配技能");
-
-    const event = new KeyboardEvent("keydown", {
-      key: "Enter",
-      bubbles: true,
-      cancelable: true,
-    });
-    act(() => {
-      textarea().dispatchEvent(event);
-    });
-    // 未命中技能是合法普通文本（对齐 TUI「未命中不报错」）：Enter 不被拦截。
-    expect(event.defaultPrevented).toBe(false);
-  });
-
-  it("does not open the skill menu inside inline code", () => {
-    renderComposer({ skillGroups: SKILL_GROUPS });
-    type("bash `$br");
-    expect(menu()).toBeNull();
   });
 });

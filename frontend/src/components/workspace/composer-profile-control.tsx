@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AlertTriangleIcon } from "lucide-react";
 
 import type { SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import { useComposerSurface } from "@/components/workspace/composer-surface-store";
@@ -133,6 +134,16 @@ export function ComposerProfileControl({
   const busy = pendingRef.length > 0;
   const disabled =
     !switchSupported || busy || catalogLoading || (options.length === 0 && currentRef.length === 0);
+  const currentValueLabel = currentLabel || t("composer.profile.unbound");
+  const controlTitle = [
+    t("composer.profile.controlTitle"),
+    currentValueLabel,
+    catalogError
+      ? `${t("composer.profile.catalogError")}: ${catalogError}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const handleSelect = (nextRef: string) => {
     if (nextRef === currentRef || busy) {
@@ -171,11 +182,11 @@ export function ComposerProfileControl({
 
   return (
     <div
-      className="flex min-w-0 shrink items-center gap-1.5"
-      title={t("composer.profile.controlTitle")}
+      className="flex min-w-0 shrink-0 items-center gap-1.5"
+      title={controlTitle}
     >
       <Select
-        className="min-w-0 shrink"
+        className="min-w-0 shrink-0"
         ariaLabel={t("composer.profile.controlLabel")}
         open={surface.open}
         onOpenChange={(next) => {
@@ -193,8 +204,10 @@ export function ComposerProfileControl({
         side="top"
         align="end"
         size="sm"
+        title={controlTitle}
         triggerPrefix={t("composer.profile.controlLabel")}
-        triggerClassName="h-8 w-[clamp(7rem,12vw,9rem)] min-w-0 max-w-full rounded-field px-2 py-0 text-sm leading-none normal-case tracking-normal"
+        triggerValueClassName="min-w-[3.5rem]"
+        triggerClassName="h-8 w-[clamp(9rem,12vw,10rem)] min-w-[9rem] max-w-full rounded-field px-1.5 py-0 text-sm leading-none normal-case tracking-normal disabled:opacity-80"
         menuClassName="max-w-[16rem]"
         optionClassName="text-base"
       />
@@ -204,25 +217,41 @@ export function ComposerProfileControl({
         data-composer-profile-pending={pendingRef || undefined}
         className="sr-only"
       >
-        {currentLabel || t("composer.profile.unbound")}
+        {currentValueLabel}
       </span>
       {busy ? (
-        <span data-composer-profile-busy className="text-muted-foreground">
+        <span
+          data-composer-profile-busy
+          className="min-w-0 truncate whitespace-nowrap text-muted-foreground"
+        >
           {t("composer.profile.pending")}
         </span>
       ) : null}
       {error ? (
-        <span data-composer-profile-error className="text-accent-gold" title={error}>
+        <span
+          data-composer-profile-error
+          className="min-w-0 truncate whitespace-nowrap text-accent-gold"
+          title={error}
+        >
           {t("composer.profile.switchFailed")}
         </span>
       ) : null}
       {!busy && !error && catalogError ? (
-        <span data-composer-profile-error className="text-accent-gold">
-          {t("composer.profile.catalogError")}
+        <span
+          data-composer-profile-error
+          className="inline-flex size-4 shrink-0 items-center justify-center text-accent-gold"
+          title={`${t("composer.profile.catalogError")}: ${catalogError}`}
+          aria-label={`${t("composer.profile.catalogError")}: ${catalogError}`}
+          role="img"
+        >
+          <AlertTriangleIcon size={13} aria-hidden="true" />
         </span>
       ) : null}
       {!busy && !error && !catalogError && catalog !== null && !switchSupported ? (
-        <span data-composer-profile-unsupported className="text-muted-foreground">
+        <span
+          data-composer-profile-unsupported
+          className="min-w-0 truncate whitespace-nowrap text-muted-foreground"
+        >
           {t("composer.profile.unsupported")}
         </span>
       ) : null}

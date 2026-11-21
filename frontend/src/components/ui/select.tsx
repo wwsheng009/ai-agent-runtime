@@ -48,6 +48,7 @@ type SelectProps = {
   /** Inline visible field name; keeps toolbar controls self-identifying without an outside label. */
   triggerPrefix?: ReactNode;
   triggerPrefixClassName?: string;
+  triggerValueClassName?: string;
   align?: "start" | "end" | "auto";
   side?: "top" | "bottom";
   className?: string;
@@ -115,6 +116,7 @@ export function Select({
   disabled = false,
   triggerPrefix,
   triggerPrefixClassName,
+  triggerValueClassName,
   align = "start",
   side = "bottom",
   className,
@@ -490,7 +492,9 @@ export function Select({
               {triggerPrefix}
             </span>
           ) : null}
-          <span className="min-w-0 flex-1 truncate">{triggerLabel}</span>
+          <span className={cn("min-w-0 flex-1 truncate", triggerValueClassName)}>
+            {triggerLabel}
+          </span>
           <ChevronDownIcon
             size={14}
             className={cn(

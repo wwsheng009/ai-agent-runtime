@@ -27,10 +27,10 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ComposerModelPanelSurface } from "@/components/workspace/composer-model-panel-surface";
+import { ComposerModelPanelTrigger } from "@/components/workspace/composer-model-panel-trigger";
 import { useComposerSurface } from "@/components/workspace/composer-surface-store";
 import {
   resolvePopoverPosition,
@@ -51,7 +51,6 @@ import {
   type ComposerModelPanelView,
 } from "@/lib/composer/model-panel-model";
 import { isOptionFilterEmpty } from "@/lib/composer/model-panel-option-filter";
-import { cn } from "@/lib/utils";
 
 export type ComposerModelPanelProps = {
   disabled?: boolean;
@@ -448,22 +447,11 @@ export function ComposerModelPanel({
   return (
     <>
       <div ref={rootRef} className="flex min-w-0 w-full">
-        <button
-          ref={triggerRef}
-          type="button"
-          aria-label={`${t("composer.modelPanel.trigger")}: ${triggerLabel}`}
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          aria-controls={open ? panelId : undefined}
-          data-composer-model-panel-trigger
+        <ComposerModelPanelTrigger
           disabled={disabled}
-          title={
-            disabled && disabledReason
-              ? disabledReason
-              : hasPending
-                ? `${triggerLabel} · ${reselectHint}`
-                : triggerLabel
-          }
+          disabledReason={disabledReason}
+          hasPending={hasPending}
+          modelLabel={modelLabel}
           onClick={(event) => {
             event.stopPropagation();
             if (openedByPointerDownRef.current) {
@@ -474,6 +462,14 @@ export function ComposerModelPanel({
               closePanel();
               return;
             }
+            openPanel();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+              return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
             openPanel();
           }}
           onPointerDown={(event) => {
@@ -489,95 +485,14 @@ export function ComposerModelPanel({
             openedByPointerDownRef.current = true;
             openPanel();
           }}
-          onKeyDown={(event) => {
-            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
-              return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            openPanel();
-          }}
-          className={cn(
-            "inline-flex h-8 min-h-8 min-w-0 w-full max-w-none items-center gap-1.5 rounded-field border border-border",
-            "bg-surface-soft px-2 py-0 text-left text-base leading-none text-muted-foreground outline-none transition",
-            "normal-case tracking-normal",
-            "hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-            "active:scale-[0.98] active:border-border-strong active:bg-surface-soft-hover",
-            "disabled:cursor-not-allowed disabled:opacity-60",
-          )}
-          data-composer-model-panel-open={open ? "true" : undefined}
-        >
-          <SlidersHorizontalIcon size={13} aria-hidden="true" className="shrink-0" />
-          <span className="shrink-0 text-muted-foreground app-text-9 uppercase tracking-[0.08em]">
-            {t("composer.model")}
-          </span>
-          <span
-            className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap"
-            data-composer-model-panel-summary
-          >
-            {modelLabel ? (
-              <span
-                className="min-w-0 flex-[1_1_auto] truncate"
-                data-composer-model-value
-                title={modelLabel}
-              >
-                {modelLabel}
-              </span>
-            ) : null}
-            {modelLabel && reasoningSummaryLabel ? (
-              <span aria-hidden="true" className="shrink-0">
-                {" · "}
-              </span>
-            ) : null}
-            {reasoningSummaryLabel ? (
-              <span
-                className="shrink-0"
-                data-composer-model-reasoning
-                title={reasoningSummaryLabel}
-              >
-                {reasoningSummaryLabel}
-              </span>
-            ) : null}
-            {providerLabel ? (
-              <>
-                {modelLabel || reasoningSummaryLabel ? (
-                  <span
-                    aria-hidden="true"
-                    className="hidden shrink-0 2xl:inline"
-                  >
-                    {" · "}
-                  </span>
-                ) : null}
-                <span
-                  className={cn(
-                    "min-w-0 max-w-[8rem] shrink-[2] truncate text-muted-foreground",
-                    modelLabel ? "hidden 2xl:inline" : "inline",
-                  )}
-                  data-composer-model-provider
-                  title={providerLabel}
-                >
-                  {providerLabel}
-                </span>
-              </>
-            ) : null}
-          </span>
-          {/* 面板关着也要能看出「换了供应商、还欠一次确认」。 */}
-          {hasPending ? (
-            <span
-              data-composer-model-panel-pending
-              aria-hidden="true"
-              className="size-1.5 shrink-0 rounded-full bg-amber-300/70"
-            />
-          ) : null}
-          <ChevronDownIcon
-            size={12}
-            aria-hidden="true"
-            className={cn(
-              "shrink-0 transition-transform duration-150",
-              open ? "rotate-180" : "rotate-0",
-            )}
-          />
-        </button>
+          open={open}
+          panelId={panelId}
+          providerLabel={providerLabel}
+          reasoningSummaryLabel={reasoningSummaryLabel}
+          reselectHint={reselectHint}
+          triggerLabel={triggerLabel}
+          triggerRef={triggerRef}
+        />
       </div>
       {panel && typeof document !== "undefined" && document.body
         ? createPortal(panel, document.body)

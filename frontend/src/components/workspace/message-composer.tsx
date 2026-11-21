@@ -1,4 +1,4 @@
-import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
+import { PlusIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, useId } from "react";
 
 import {
@@ -11,8 +11,8 @@ import { ComposerModelPanel } from "@/components/workspace/composer-model-panel"
 import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
 import { ComposerSurfaceProvider } from "@/components/workspace/composer-surface-context";
 import { useComposerSurface } from "@/components/workspace/composer-surface-store";
+import { ComposerTrailingActions } from "@/components/workspace/composer-trailing-actions";
 import { type MessageComposerProps } from "@/components/workspace/message-composer-types";
-import { Button } from "@/components/ui/button";
 import { useComposerMenu } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerMenuArbitration } from "@/hooks/workspace/composer/use-composer-menu-arbitration";
 import { type ComposerCommandDefinition } from "@/lib/composer-commands";
@@ -471,47 +471,18 @@ function MessageComposerSurface({
               </>
             ) : null}
           </div>
-          <div
-            className="flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-2"
-            data-composer-trailing-actions
-          >
-            {profileControl ? (
-              <div className="min-w-0 flex-[0_1_10rem]">{profileControl}</div>
-            ) : null}
-            {contextUsageControl ? (
-              <div className="min-w-0 flex-[0_1_auto]">
-                {contextUsageControl}
-              </div>
-            ) : null}
-            <Button
-              variant="secondary"
-              size="icon"
-              aria-label={submitButtonLabel}
-              aria-describedby={
-                submitDisabled ? submitDisabledHintId : undefined
-              }
-              title={submitButtonTitle}
-              className={
-                isResponding
-                  ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
-                  : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover disabled:border-2 disabled:border-dashed disabled:border-border-strong disabled:bg-surface-soft-hover disabled:text-foreground disabled:opacity-100"
-              }
-              onClick={isResponding ? handleStop : handleSubmit}
-              disabled={submitDisabled}
-            >
-              {isResponding ? (
-                <SquareIcon size={14} />
-              ) : (
-                <ArrowUpIcon size={16} strokeWidth={2.5} />
-              )}
-              <span className="sr-only">{submitButtonLabel}</span>
-            </Button>
-            {submitDisabled ? (
-              <span id={submitDisabledHintId} className="sr-only">
-                {submitDisabledHint}
-              </span>
-            ) : null}
-          </div>
+          <ComposerTrailingActions
+            contextUsageControl={contextUsageControl}
+            isResponding={isResponding}
+            onSubmit={handleSubmit}
+            onStop={handleStop}
+            profileControl={profileControl}
+            submitButtonLabel={submitButtonLabel}
+            submitButtonTitle={submitButtonTitle}
+            submitDisabled={submitDisabled}
+            submitDisabledHint={submitDisabledHint}
+            submitDisabledHintId={submitDisabledHintId}
+          />
         </div>
       </div>
       {menu.open ? (
