@@ -44,11 +44,15 @@ func (s *Store) RepairMissingJobDeadlines(
 			DryRun: opts.DryRun,
 			Items:  make([]JobDeadlineRepairItem, 0, limit),
 		}
-		txOptions := sqliteutil.WriteTxOptions
+		var (
+			tx    *sql.Tx
+			txErr error
+		)
 		if opts.DryRun {
-			txOptions = &sql.TxOptions{ReadOnly: true}
+			tx, txErr = sqliteutil.BeginReadTx(runCtx, db)
+		} else {
+			tx, txErr = db.BeginTx(runCtx, sqliteutil.WriteTxOptions)
 		}
-		tx, txErr := db.BeginTx(runCtx, txOptions)
 		if txErr != nil {
 			return fmt.Errorf("memorystore: begin job deadline repair: %w", txErr)
 		}

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 const (
@@ -98,7 +99,7 @@ func (s *Store) RecordExtractionDiagnostics(ctx context.Context, diagnostics []E
 	if err != nil {
 		return err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("memorystore: begin extraction diagnostics: %w", err)
 	}

@@ -126,6 +126,20 @@ func applyOne(ctx context.Context, db *sql.DB, mig Migration) error {
 	if err != nil {
 		return fmt.Errorf("begin migration %d: %w", mig.Version, err)
 	}
+	// Re-check under the IMMEDIATE write lock. Another process may have applied
+	// this migration while we were waiting for the lock after loadApplied ran.
+	// Migration SQL is not necessarily idempotent (ALTER TABLE ADD COLUMN), so
+	// executing it twice would fail even though the schema is already correct.
+	var applied int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE version = ?`, mig.Version).Scan(&applied)
+	switch {
+	case err == nil:
+		_ = tx.Rollback()
+		return nil
+	case !errors.Is(err, sql.ErrNoRows):
+		_ = tx.Rollback()
+		return fmt.Errorf("check migration %d (%s): %w", mig.Version, mig.Name, err)
+	}
 	if _, err := tx.ExecContext(ctx, mig.UpSQL); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("apply migration %d (%s): %w", mig.Version, mig.Name, err)

@@ -396,7 +396,7 @@ func (s *Store) GetActiveCore(ctx context.Context, scopeKind Scope, scopeKey str
 	if err != nil {
 		return CoreMemory{}, err
 	}
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := sqliteutil.BeginReadTx(ctx, db)
 	if err != nil {
 		return CoreMemory{}, fmt.Errorf("memorystore: begin active core source validation: %w", err)
 	}
@@ -404,9 +404,11 @@ func (s *Store) GetActiveCore(ctx context.Context, scopeKind Scope, scopeKey str
 	if err := validateCoreSourcesTx(ctx, tx, s.cfg.ProjectKey, core.SourceIDs); err != nil {
 		return CoreMemory{}, fmt.Errorf("%w: %v", ErrCoreSourceIneligible, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return CoreMemory{}, fmt.Errorf("memorystore: finish active core source validation: %w", err)
-	}
+	// Rollback (via the deferred call above) is the correct finish for this
+	// validation-only read, so there is no read-only COMMIT to attempt.
+	// sqliteutil.ReadTxOptions also avoids the win7compat v0.22 driver's broken
+	// read-only COMMIT/ROLLBACK reset, which would otherwise poison the pooled
+	// connection with query_only mode.
 	return core, nil
 }
 

@@ -91,7 +91,8 @@ func TestConcurrentMaintenanceLeaseAcquiresHaveSingleWinner(t *testing.T) {
 	close(start)
 	first, second := <-results, <-results
 	if first.err != nil || second.err != nil {
-		t.Fatalf("concurrent acquire errors: %+v / %+v", first, second)
+		t.Fatalf("concurrent acquire errors: first=%T(%#v) second=%T(%#v)",
+			first.err, first.err, second.err, second.err)
 	}
 	if first.acquired == second.acquired {
 		t.Fatalf("expected exactly one owner, got %+v / %+v", first, second)

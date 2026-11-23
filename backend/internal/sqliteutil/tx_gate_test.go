@@ -20,7 +20,8 @@ import (
 // IMMEDIATE）。白名单会自校验：对应包目录必须真的出现 `_txlock` 注入，防止
 // 清单腐烂（例如将来有人删掉 DSN 注入）。
 //
-// 纯只读事务不在本门禁的范围：请改用读写分离的读连接，或在此登记并写明理由。
+// 纯只读事务不在本门禁的范围：请改用 sqliteutil.BeginReadTx（或显式传入
+// sqliteutil.ReadTxOptions），并在调用点说明只读语义。
 func TestWriteTransactionsUseImmediateOptions(t *testing.T) {
 	root := filepath.Join("..", "..")
 	allowlist := map[string]string{
@@ -40,6 +41,7 @@ func TestWriteTransactionsUseImmediateOptions(t *testing.T) {
 	require.True(t, isDeferredBeginTx("tx, err := db.BeginTx(ctx, nil)"))
 	require.True(t, isDeferredBeginTx("tx, err := conn.BeginTx(ctx, nil)"))
 	require.False(t, isDeferredBeginTx("tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)"))
+	require.False(t, isDeferredBeginTx("tx, err := db.BeginTx(ctx, sqliteutil.ReadTxOptions)"))
 	require.False(t, isDeferredBeginTx("// tx, err := db.BeginTx(ctx, nil)"))
 
 	var violations []string
@@ -89,7 +91,7 @@ func TestWriteTransactionsUseImmediateOptions(t *testing.T) {
 	}
 
 	require.Empty(t, violations,
-		"以下写事务未使用 sqliteutil.WriteTxOptions（deferred 读后写会触发 SQLITE_BUSY_SNAPSHOT/517）：\n%s\n若为只读事务请在门禁白名单登记理由。",
+		"以下写事务未使用 sqliteutil.WriteTxOptions（deferred 读后写会触发 SQLITE_BUSY_SNAPSHOT/517）：\n%s\n若为只读事务请改用 sqliteutil.BeginReadTx。",
 		strings.Join(violations, "\n"))
 }
 
@@ -97,6 +99,9 @@ func TestWriteTransactionsUseImmediateOptions(t *testing.T) {
 func isDeferredBeginTx(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "//") {
+		return false
+	}
+	if strings.Contains(line, "ReadTxOptions") {
 		return false
 	}
 	return strings.Contains(line, "BeginTx(") && !strings.Contains(line, "WriteTxOptions")

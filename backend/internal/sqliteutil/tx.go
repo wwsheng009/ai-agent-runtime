@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	sqlite3 "github.com/ncruces/go-sqlite3"
@@ -27,6 +28,16 @@ import (
 //
 //	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 var WriteTxOptions = &sql.TxOptions{Isolation: sql.LevelSerializable}
+
+// BeginReadTx opens a transaction for validation/read-only work. Use this
+// instead of db.BeginTx(ctx, ReadTxOptions) at call sites so the repository
+// transaction gate can distinguish deliberate reads from deferred writes.
+func BeginReadTx(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	if db == nil {
+		return nil, fmt.Errorf("sqlite read transaction: database is nil")
+	}
+	return db.BeginTx(ctx, ReadTxOptions)
+}
 
 // WriteRetries is the default number of total attempts (first try + retries)
 // performed by RetryWriteTx.

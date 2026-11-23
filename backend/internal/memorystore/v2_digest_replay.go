@@ -143,11 +143,12 @@ func (s *Store) replayDigest(
 		reason = "operator replay"
 	}
 
-	txOptions := sqliteutil.WriteTxOptions
+	var tx *sql.Tx
 	if dryRun {
-		txOptions = &sql.TxOptions{ReadOnly: true}
+		tx, err = sqliteutil.BeginReadTx(ctx, db)
+	} else {
+		tx, err = db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	}
-	tx, err := db.BeginTx(ctx, txOptions)
 	if err != nil {
 		return DigestReplayResult{}, fmt.Errorf("memorystore: begin digest replay: %w", err)
 	}
