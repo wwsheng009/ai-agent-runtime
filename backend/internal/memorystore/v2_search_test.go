@@ -76,9 +76,38 @@ func TestSearchRecordsSupportsLegacyJSONLMode(t *testing.T) {
 
 	result, err := store.SearchRecords(context.Background(), RecordSearchQuery{Text: "worktree", Limit: 10})
 	require.NoError(t, err)
-	require.Equal(t, "like_fallback", result.Backend)
+	require.Equal(t, "legacy_jsonl", result.Backend)
 	require.NotEmpty(t, result.Items)
 	require.Equal(t, note.ID, result.Items[0].Record.ID)
+}
+
+func TestSearchRecordsReportsFallbackWhenFTSHasNoMatch(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Append(AppendNoteOptions{Text: "alpha beta gamma"})
+	require.NoError(t, err)
+	requireMemoryFTS(t, store)
+
+	result, err := store.SearchRecords(context.Background(), RecordSearchQuery{Text: "zzzz-no-match", Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, result.Items)
+	require.Equal(t, "like_fallback", result.Backend,
+		"an FTS miss that falls through to LIKE must not be labelled fts5")
+}
+
+func TestSearchRecordsReportsRecentForEmptyQuery(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	note, err := store.Append(AppendNoteOptions{Text: "recent memory marker"})
+	require.NoError(t, err)
+
+	result, err := store.SearchRecords(context.Background(), RecordSearchQuery{Limit: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Items)
+	require.Equal(t, note.ID, result.Items[0].Record.ID)
+	require.Equal(t, "recent", result.Backend)
 }
 
 func recordIDs(records []Record) []string {

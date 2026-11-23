@@ -424,6 +424,10 @@ type RecordPage struct {
 	Items      []Record
 	NextCursor string
 	Count      int
+	// SearchBackend reports how this page was retrieved: fts5, like_fallback,
+	// recent, as_of or legacy_jsonl. ListRecords fills it so CLI/HTTP/tool
+	// diagnostics do not have to guess from query length.
+	SearchBackend string
 }
 
 type RecordPatch struct {

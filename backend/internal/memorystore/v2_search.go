@@ -63,14 +63,13 @@ func (s *Store) SearchRecords(ctx context.Context, query RecordSearchQuery) (Rec
 	if err != nil {
 		return RecordSearchPage{}, err
 	}
-	backend := "recent"
-	switch {
-	case query.AsOf != nil:
-		backend = "as_of"
-	case filter.Query != "":
-		backend = "like_fallback"
-		if s.ftsEnabled && len([]rune(filter.Query)) >= 3 {
-			backend = "fts5"
+	backend := page.SearchBackend
+	if backend == "" {
+		backend = "recent"
+		if query.AsOf != nil {
+			backend = "as_of"
+		} else if filter.Query != "" {
+			backend = "like_fallback"
 		}
 	}
 	items := make([]RecordSearchHit, 0, len(page.Items))

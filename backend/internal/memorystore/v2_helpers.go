@@ -629,10 +629,18 @@ func (s *Store) SelectForInjectV2(opts InjectOptions) (Selection, error) {
 
 func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPage, error) {
 	if filter.AsOf != nil {
-		return s.ListRecordsAsOf(ctx, filter, *filter.AsOf)
+		page, err := s.ListRecordsAsOf(ctx, filter, *filter.AsOf)
+		if err == nil {
+			page.SearchBackend = "as_of"
+		}
+		return page, err
 	}
 	if !s.v2Configured() {
-		return s.listRecordsLegacy(filter)
+		page, err := s.listRecordsLegacy(filter)
+		if err == nil {
+			page.SearchBackend = "legacy_jsonl"
+		}
+		return page, err
 	}
 	db, err := s.ensureV2()
 	if err != nil {
@@ -655,6 +663,7 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 	if query := strings.TrimSpace(filter.Query); query != "" && s.ftsEnabled {
 		page, ftsErr := s.listRecordsFTS(ctx, db, filter, limit, offset)
 		if ftsErr == nil && page.Count > 0 {
+			page.SearchBackend = "fts5"
 			return page, nil
 		}
 		// No match, a short trigram query, or an FTS failure falls through to
@@ -742,7 +751,11 @@ ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`
 		items = items[:limit]
 		next = strconv.Itoa(offset + limit)
 	}
-	return RecordPage{Items: items, NextCursor: next, Count: len(items)}, nil
+	backend := "recent"
+	if strings.TrimSpace(filter.Query) != "" {
+		backend = "like_fallback"
+	}
+	return RecordPage{Items: items, NextCursor: next, Count: len(items), SearchBackend: backend}, nil
 }
 
 func (s *Store) GetRecord(ctx context.Context, id string) (Record, error) {
