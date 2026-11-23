@@ -854,12 +854,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			if !valid {
 				return CommandResult{}, false, nil
 			}
-			hits, err := store.Search(memorystore.SearchOptions{Query: query, SourceKind: sourceKind, Limit: 8})
+			result, err := store.SearchRecords(context.Background(), memorystore.RecordSearchQuery{
+				Text: query, SourceKind: sourceKind, Limit: 8,
+			})
 			if err != nil {
 				return CommandResult{}, false, nil
 			}
 			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatMemorySearchDocument(hits, query, sourceKind)}},
+				Blocks: []RenderBlock{{Document: buildChatMemorySearchDocument(result.Items, query, sourceKind)}},
 				Action: CommandContinue,
 			}, true, nil
 		case "show":

@@ -103,28 +103,32 @@ func handleMemoryCommand(session *ChatSession, command string) bool {
 			fmt.Println("用法: /memory search <query> [--source-kind <kind>]")
 			return false
 		}
-		hits, err := store.Search(memorystore.SearchOptions{Query: query, SourceKind: sourceKind, Limit: 8})
+		result, err := store.SearchRecords(context.Background(), memorystore.RecordSearchQuery{
+			Text: query, SourceKind: sourceKind, Limit: 8,
+		})
 		if err != nil {
 			fmt.Printf("错误: 搜索项目记忆失败: %v\n", err)
 			return false
 		}
-		if len(hits) == 0 {
+		if len(result.Items) == 0 {
 			fmt.Printf("未找到与 %q 匹配的项目记忆。\n", query)
 			return false
 		}
 		if sourceKind == "" {
-			fmt.Printf("项目记忆搜索 %q → %d 条:\n", query, len(hits))
+			fmt.Printf("项目记忆搜索 %q → %d 条:\n", query, len(result.Items))
 		} else {
 			fmt.Printf("项目记忆搜索 %q（source_kind=%s）→ %d 条:\n",
-				query, safeMemorySourceKindLabel(sourceKind), len(hits))
+				query, safeMemorySourceKindLabel(sourceKind), len(result.Items))
 		}
-		for i, hit := range hits {
+		for i, hit := range result.Items {
+			record := hit.Record
 			sourceLabel := ""
-			if source := safeMemorySourceKindLabel(hit.Note.Source); source != "" && !strings.EqualFold(source, "manual") {
+			if source := safeMemorySourceKindLabel(record.SourceKind); source != "" && !strings.EqualFold(source, "manual") {
 				sourceLabel = " source=" + source
 			}
-			fmt.Printf("%d. score=%.2f id=%s%s\n   %s\n",
-				i+1, hit.Score, hit.Note.ID, sourceLabel, summarizeMemoryNote(hit.Note.Text, 200))
+			fmt.Printf("%d. id=%s%s match=%s\n   %s\n",
+				i+1, record.ID, sourceLabel, safeMemorySourceKindLabel(hit.MatchSource),
+				summarizeMemoryNote(record.Text, 200))
 		}
 		return false
 

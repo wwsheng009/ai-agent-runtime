@@ -122,6 +122,7 @@ type memoryRecordListResponse struct {
 	Count         int               `json:"count"`
 	NextCursor    string            `json:"next_cursor,omitempty"`
 	AsOf          string            `json:"as_of,omitempty"`
+	SearchBackend string            `json:"search_backend,omitempty"`
 }
 
 type memoryRecordVersionDTO struct {
@@ -504,12 +505,11 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "archived memory requires admin authorization"))
 		return
 	}
-	filter := memorystore.RecordFilter{
-		Scope:           memorystore.Scope(strings.TrimSpace(r.URL.Query().Get("scope"))),
+	query := memorystore.RecordSearchQuery{
 		Status:          memorystore.Status(strings.ToLower(status)),
 		Kind:            strings.TrimSpace(r.URL.Query().Get("kind")),
 		Tag:             strings.TrimSpace(r.URL.Query().Get("tag")),
-		Query:           firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("q")), strings.TrimSpace(r.URL.Query().Get("query"))),
+		Text:            firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("q")), strings.TrimSpace(r.URL.Query().Get("query"))),
 		SourceKind:      strings.TrimSpace(r.URL.Query().Get("source_kind")),
 		SourceSessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
 		IncludeArchived: includeArchived,
@@ -517,7 +517,7 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		Cursor:          cursor,
 		AsOf:            asOf,
 	}
-	page, err := store.ListRecords(r.Context(), filter)
+	page, err := store.SearchRecords(r.Context(), query)
 	if err != nil {
 		h.writeError(w, http.StatusServiceUnavailable, err)
 		return
@@ -527,7 +527,8 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "deleted memory requires admin authorization"))
 		return
 	}
-	for _, record := range page.Items {
+	for _, hit := range page.Items {
+		record := hit.Record
 		if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
 			continue
 		}
@@ -535,6 +536,7 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	h.writeJSON(w, http.StatusOK, memoryRecordListResponse{
 		WorkspacePath: workspace, Items: items, Count: len(items), NextCursor: page.NextCursor,
+		SearchBackend: page.Backend,
 		AsOf: func() string {
 			if asOf == nil {
 				return ""

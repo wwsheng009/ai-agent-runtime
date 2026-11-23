@@ -227,7 +227,7 @@ func buildChatMemoryListDocument(notes []memorystore.Note, limit int, root strin
 
 // buildChatMemorySearchDocument renders /memory search output. A zero-hit
 // search renders the legacy "未找到" line as the successful result.
-func buildChatMemorySearchDocument(hits []memorystore.SearchHit, query string, sourceKinds ...string) render.Document {
+func buildChatMemorySearchDocument(hits []memorystore.RecordSearchHit, query string, sourceKinds ...string) render.Document {
 	if len(hits) == 0 {
 		return render.SingleLineDoc(render.TextSpan(fmt.Sprintf("未找到与 %q 匹配的项目记忆。", query)))
 	}
@@ -238,14 +238,16 @@ func buildChatMemorySearchDocument(hits []memorystore.SearchHit, query string, s
 	}
 	lines := []string{title}
 	for i, hit := range hits {
-		sourceKind := safeMemorySourceKindLabel(hit.Note.Source)
+		record := hit.Record
+		sourceKind := safeMemorySourceKindLabel(record.SourceKind)
 		sourceLabel := ""
 		if sourceKind != "" && !strings.EqualFold(sourceKind, "manual") {
 			sourceLabel = " source=" + sourceKind
 		}
 		lines = append(lines,
-			fmt.Sprintf("%d. score=%.2f id=%s%s", i+1, hit.Score, hit.Note.ID, sourceLabel),
-			"   "+summarizeMemoryNote(hit.Note.Text, 200),
+			fmt.Sprintf("%d. id=%s%s match=%s", i+1, record.ID, sourceLabel,
+				safeMemorySourceKindLabel(hit.MatchSource)),
+			"   "+summarizeMemoryNote(record.Text, 200),
 		)
 	}
 	return textLinesDocument(lines)

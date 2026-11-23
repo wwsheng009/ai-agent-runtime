@@ -174,22 +174,28 @@ func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, param
 	if status != string(memorystore.StatusActive) && status != string(memorystore.StatusCandidate) {
 		return memoryToolError(fmt.Errorf("agent memory_search only exposes active or candidate records")), nil
 	}
-	page, err := store.ListRecords(ctx, memorystore.RecordFilter{
+	result, err := store.SearchRecords(ctx, memorystore.RecordSearchQuery{
 		Status:     memorystore.Status(status),
 		Kind:       strings.TrimSpace(memoryStringParam(params, "kind")),
 		Tag:        strings.TrimSpace(memoryStringParam(params, "tag")),
-		Query:      strings.TrimSpace(memoryStringParam(params, "query")),
+		Text:       strings.TrimSpace(memoryStringParam(params, "query")),
 		SourceKind: strings.TrimSpace(memoryStringParam(params, "source_kind")),
 		Limit:      limit,
 	})
 	if err != nil {
 		return memoryToolError(err), nil
 	}
-	page.Items = agentVisibleMemoryRecords(page.Items)
-	page.Count = len(page.Items)
+	records := make([]memorystore.Record, 0, len(result.Items))
+	for _, hit := range result.Items {
+		records = append(records, hit.Record)
+	}
+	records = agentVisibleMemoryRecords(records)
 	return memoryToolJSON(map[string]interface{}{
-		"items": page.Items, "count": page.Count, "next_cursor": page.NextCursor,
-		"diagnostics": map[string]interface{}{"query": memoryStringParam(params, "query"), "limit": limit},
+		"items": records, "count": len(records), "next_cursor": result.NextCursor,
+		"diagnostics": map[string]interface{}{
+			"query": memoryStringParam(params, "query"), "limit": limit,
+			"search_backend": result.Backend,
+		},
 	}), nil
 }
 
