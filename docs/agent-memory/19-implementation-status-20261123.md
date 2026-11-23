@@ -10,7 +10,7 @@
 
 - G3（记录版本、回滚、时间点查询）与 G3.5（Core Memory）已有代码和测试，并已提交到 `main`（`8513f579`/`a9c7a461`/`eb413e1f`）；
 - G0 代码闭环基本落地，但 **G0-5 真实 dogfood 恢复未执行**；
-- G1 检索实现已提交：`sqlitedriver` 自动注册 FTS5 扩展（`!win7compat`），FTS 索引/同步/LIKE fallback 落在 `8ddd48c1`；统一 `SearchQuery`/BM25 与 CLI/HTTP/tool 一致性尚未完成；
+- G1 检索基础已提交：FTS5 driver（`91972cb5`）、FTS 索引/同步/LIKE fallback（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）；注入候选裁剪与基准尚未提交；
 - G2、G4、G5 未实施；
 - API/CLI 定向测试后续在宿主资源恢复后通过；FTS driver 扩展与 FTS 实现均已提交并通过测试。
 
@@ -36,7 +36,7 @@
 |---|---|---|---|
 | Memory v2 主干 | ✅ 可用 | `memorystore` + `memoryruntime` + `memoryassembly` + `contextmgr` + API/CLI/Web；capture receipt → extract → consolidate → summary → inject → usage/citation | 属于既有项目级能力，不等于参考设计全量验收 |
 | G0 运行时闭环 | 🟡 代码/临时库证据已落地 | `16` §19.1–19.10：status、backlog 诊断、job operator、replay-preview、deadline repair、active-session capture | **G0-5 未执行**：未对真实 backlog 做只读分类、dry-run 与受控恢复；无真实 `memory_entries > 0`、v2 job succeeded、跨会话注入证据 |
-| G1 检索基础 | 🟡 部分实施（FTS5 已落地） | `sqlitedriver/register_fts5.go` 自动注册 FTS5（`!win7compat`）；`8ddd48c1` 提交 `v2_fts.go`、FTS 索引/同步/fallback 与测试；`TestFTS5CapabilityProbe` 返回 `fts_available` | 仍无统一 `SearchQuery`/BM25 与 CLI/HTTP/tool 一致性证据；不能宣称 G1 关闭 |
+| G1 检索基础 | 🟡 部分实施（FTS5 + 统一检索） | `91972cb5` FTS5 driver；`8ddd48c1` FTS 索引/同步/BM25/fallback；`c8acdc30` `SearchRecords` 统一 HTTP/CLI/tool；证据见 `21` | 注入候选裁剪未提交、无 10k/100k 基准；多 status/kind/tags 与 G2 scope 未接；不能宣称 G1 关闭 |
 | G2 Scope 隔离 | ❌ 未实施 | `v2_schema.go` 无 tenant/owner/agent/task 列；`v2_types.go:16-18` 仅 `project/user/profile` Scope | 仅 project 级硬过滤；无跨 tenant/user/agent/task 负向隔离测试 |
 | G3 版本/回滚/时间 | ✅ 代码级实现（已提交 `8513f579`） | migration v20 `memory_versions`（append-only trigger）、v21 purge guard；`v2_versions.go:243/303/514`：`ListRecordVersionsPage`、`ListRecordsAsOf`、`RollbackRecord`；HTTP `/memory/records/{id}/versions`、`/rollback`；CLI `/memory history|versions`、`/memory rollback`；`v2_versions_test.go` 覆盖回滚、并发 revision、temporal as-of、purge fence | 证据见 `20`；门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制 |
 | G3.5 Core Memory + 预算 | 🟡 部分实施（已提交 `8513f579`/`a9c7a461`） | migration v22 `memory_core`（单 active partial index）、v23 `memory_core_usage`；`v2_core.go`；只读工具 `memory_core_get`；HTTP `/memory/core`、`/memory/cores`、`/memory/core/rebuild`、`/memory/core/usage`；CLI `/memory core`；selector Core 注入 + 分类预算最小切片 | 见 `18` §未完成：Core 与 summary/pinned 去重与失效、usage 的 session-generation purge、独立运行态状态面、task/procedure/reference prompt 分区、1k–2.5k Core 预算校准均未完成 |
@@ -49,8 +49,8 @@
 
 | 项 | 观测值 |
 |---|---|
-| memory 提交 | `8513f579` G0–G3.5 capabilities；`a9c7a461` Core citation/预算选项；`eb413e1f` onboarding preset |
-| `main` HEAD | `8ddd48c1`（FTS 提交；另有后续 docs 提交） |
+| memory 提交 | `8513f579` G0–G3.5 capabilities；`a9c7a461` Core citation/预算选项；`eb413e1f` onboarding preset；`91972cb5` FTS5 driver；`8ddd48c1` FTS 索引；`c8acdc30` 统一检索；`0bfb0450` CLI 测试 |
+| `main` HEAD | `0bfb0450`（统一检索测试；另有后续 docs 提交） |
 | `git status --short` | 约 160 项，均为未提交的 team/workspace/suspension/analytics/前端及少量后续 memory 修正 |
 | 已提交 memory 变更 | 首批 98 文件 `+17678 / −530`，另有 Core citation 4 文件与 onboarding 3 文件 |
 | 仍留在工作区的 memory 变更 | 20:00 后对 `v2_core.go`/`v2_digest_replay.go`/`v2_job_deadline_repair.go`/`v2_status_test.go`/`v2_evidence.go`/`v2_maintenance_lease_test.go` 等文件的继续编辑 |
@@ -120,6 +120,14 @@ ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  1.054s
 
 go test ./internal/memorystore -count=1
 ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  30.546s
+
+go test ./internal/memorystore -run 'TestSearchRecords' -count=1
+ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  0.528s
+
+go test ./internal/api/runtimeapi \
+  -run 'TestMemoryAPIRecordsLifecycleAndStatus|TestMemoryAPIRecordsSourceKindFilter|TestMemoryStatus' \
+  -count=1
+ok  github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi  2.404s
 ```
 
 关键包构建通过：memorystore/runtime/assembly、contextmgr、config、runtimeapi、toolkit/tools、tools、policy、commands、agent、`cmd/aicli`、`cmd/runtime-server`。
@@ -156,7 +164,7 @@ ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  30.546s
 ## 7. 建议执行顺序
 
 1. **已完成**：G3/G3.5 提交、Core citation、onboarding、证据文档与 API/CLI/tool 定向验证。
-2. **G1 收尾**：FTS 索引与 driver 已提交；下一步补统一 `SearchQuery`/BM25、CLI/HTTP/tool 一致性与质量证据。
+2. **G1 收尾**：FTS 索引、driver 与 `SearchRecords` 统一检索已提交；下一步提交注入候选裁剪、补 10k/100k 基准、多 status/kind/tags 与三端同一 corpus 证据。
 3. **G2 优先于 G4/G5**：scope/tenant/owner/agent/task 列、backfill、fail-closed 读写与负向测试。
 4. **G0-5**：先只读诊断 + `replay-preview` + `jobDeadlineRepair` dry-run，备份后再受控恢复。
 5. **后续 memory 修正**：把 20:00 后对 `v2_core.go`/`v2_digest_replay.go`/`v2_job_deadline_repair.go` 等工作区改动与 FTS 改造分开提交。

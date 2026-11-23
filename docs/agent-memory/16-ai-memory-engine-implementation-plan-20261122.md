@@ -5,6 +5,8 @@
 > 定位：`15` 是缺口规格和验收口径；本文件是施工计划，只回答“按什么顺序改、改哪些文件、每步如何测试、何时可以关闭门禁”。
 >
 > 执行原则：**不再重复审计 `15` 已确认的缺口，不再以计划、分析或子任务状态替代代码和测试证据。** 每个工作包必须落到代码、迁移、测试或可复现的运维证据。
+>
+> 执行更新（2026-11-23）：G1-0 的 FTS5 阻断已通过 `ncruces/go-sqlite3/ext/fts5` + `sqlite3.AutoExtension` 解决；`memory_entries_fts`、BM25 搜索、HTTP/CLI/tool 统一路径、pinned/manual + FTS top-K 注入候选已落地。`win7compat` 仍保留 LIKE fallback。G1 剩余评测/性能证据，G0-5 backlog 尚未关闭。
 
 ## 0. 实施口径
 
@@ -2105,4 +2107,4 @@ ok   github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands
 - G3 代码与测试已落地，但门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制；
 - G3.5 仍按 `18` 的未完成清单保持部分实施；
 - G0-5 仍未执行，真实 dogfood 库未读取/恢复；
-- G1-0 driver 能力已解决（`sqlitedriver/register_fts5.go` 在主线自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 索引与同步已提交（`8ddd48c1`），统一 `SearchQuery`/BM25 与质量证据待补，G1 仍未关闭。
+- G1-0 driver 能力已解决（`sqlitedriver/register_fts5.go` 在主线自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 索引/同步/BM25（`8ddd48c1`）与统一 `SearchRecords`（`c8acdc30`）已提交；注入候选裁剪、基准与质量证据待补，G1 仍未关闭。

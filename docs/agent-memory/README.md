@@ -4,7 +4,7 @@
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/`）。
 > 2026-11-18 追加：统一执行核 `TurnDigestSink` 接线修复；真实 ConPTY 双会话 E2E PASS，覆盖 digest → phase1 → phase2 → 跨会话注入/召回（见 `14-runtime-gap-audit-and-fix-20261117.md`）。
 > 2026-11-22 追加：按 `references/AI_Agent_Memory_Engine_Design.md` v1.0 完成参考设计层缺口审查；结论是当前实现为项目级 Memory v2，尚未覆盖 FTS5/混合检索、Dreaming Patch、版本回滚、完整 scope、Temporal/Trust/评测等（见 `15-ai-memory-engine-design-gap-audit-20261122.md`）。
-> 2026-11-23 追加：G3 记录版本/回滚与 G3.5 Core 已提交（`8513f579`/`a9c7a461`/`eb413e1f`）；FTS5 索引与 driver 已落地（`91972cb5`/`8ddd48c1`），统一 SearchQuery/BM25 待补。当前状态快照见 `19-implementation-status-20261123.md`。G0-5、G1–G5 门禁仍未关闭。
+> 2026-11-23 追加：G3 记录版本/回滚与 G3.5 Core 已提交（`8513f579`/`a9c7a461`/`eb413e1f`）；FTS5 索引/driver 与统一 `SearchRecords` 已落地（`91972cb5`/`8ddd48c1`/`c8acdc30`）；注入候选裁剪与多值过滤待补。当前状态快照见 `19-implementation-status-20261123.md`。G0-5、G1–G5 门禁仍未关闭。
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
 
@@ -85,6 +85,7 @@ canonical chat turn commit
 | [18-g35-core-read-surface-evidence-20261123.md](./18-g35-core-read-surface-evidence-20261123.md) | G3.5 Core 读取/管理面：只读工具、HTTP/CLI、重建 job、selector 注入、分类预算最小切片与独立 usage ledger | 部分实施；已提交；G3.5 仍未关闭 |
 | [19-implementation-status-20261123.md](./19-implementation-status-20261123.md) | 2026-11-23 实施状态快照：G0–G5 门禁矩阵、提交状态、测试证据与文档一致性缺口 | **当前状态**（G3/G3.5 已提交；G1 blocked；G0-5/G2/G4/G5 未关闭） |
 | [20-g3-record-versions-evidence-20261123.md](./20-g3-record-versions-evidence-20261123.md) | G3 记录版本、回滚与 as-of 查询证据：schema v20/v21、版本写入接入、rollback 语义、API/CLI/tool 与定向测试 | 代码级主体通过并已提交；FTS/G2 tenant/G4 高风险 supersede 依赖未关闭 |
+| [21-g1-fts-and-search-evidence-20261123.md](./21-g1-fts-and-search-evidence-20261123.md) | G1 FTS5 与统一检索证据：driver 注册、FTS 索引/同步/BM25、SearchRecords 三端统一、测试与退出条件对照 | FTS/统一检索已提交；注入裁剪、基准与多值/G2 scope 未关闭 |
 
 > `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
 
