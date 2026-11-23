@@ -680,27 +680,63 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 	if !filter.IncludeArchived {
 		where = append(where, "archived = 0")
 	}
-	if filter.Status != "" {
-		where = append(where, "status = ?")
-		args = append(args, string(filter.Status))
+	statuses := make([]Status, 0, len(filter.Statuses)+1)
+	for _, status := range filter.Statuses {
+		if status = Status(strings.TrimSpace(string(status))); status != "" {
+			statuses = append(statuses, status)
+		}
+	}
+	if len(statuses) == 0 && filter.Status != "" {
+		statuses = append(statuses, filter.Status)
+	}
+	includesActive := len(statuses) == 0
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			if status == StatusActive {
+				includesActive = true
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, string(status))
+		}
+		where = append(where, "status IN ("+strings.Join(placeholders, ", ")+")")
 	} else {
 		where = append(where, "status = 'active'")
+		includesActive = true
 	}
-	if filter.Status == "" || filter.Status == StatusActive {
+	if includesActive {
 		where = append(where, "(valid_until IS NULL OR valid_until = '' OR valid_until > ?)")
 		args = append(args, now.Format(time.RFC3339Nano))
 	}
-	if filter.Kind != "" {
-		where = append(where, "kind = ?")
-		args = append(args, filter.Kind)
+	kinds := make([]string, 0, len(filter.Kinds)+1)
+	for _, kind := range filter.Kinds {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			kinds = append(kinds, kind)
+		}
+	}
+	if len(kinds) == 0 && strings.TrimSpace(filter.Kind) != "" {
+		kinds = append(kinds, strings.TrimSpace(filter.Kind))
+	}
+	if len(kinds) > 0 {
+		placeholders := make([]string, 0, len(kinds))
+		for _, kind := range kinds {
+			placeholders = append(placeholders, "?")
+			args = append(args, kind)
+		}
+		where = append(where, "kind IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if sourceKind := strings.ToLower(strings.TrimSpace(filter.SourceKind)); sourceKind != "" {
 		where = append(where, "LOWER(source_kind) = ?")
 		args = append(args, sourceKind)
 	}
-	if strings.TrimSpace(filter.Tag) != "" {
-		where = append(where, "LOWER(tags_json) LIKE ?")
-		args = append(args, "%\""+strings.ToLower(strings.TrimSpace(filter.Tag))+"\"%")
+	if tags := normalizeTags(append(append([]string(nil), filter.Tags...), filter.Tag)); len(tags) > 0 {
+		for _, tag := range tags {
+			where = append(where, `EXISTS (
+  SELECT 1 FROM json_each(memory_entries.tags_json)
+  WHERE LOWER(CAST(value AS TEXT)) = ?
+)`)
+			args = append(args, tag)
+		}
 	}
 	if strings.TrimSpace(filter.Query) != "" {
 		where = append(where, "(LOWER(text) LIKE ? OR LOWER(tags_json) LIKE ?)")
@@ -756,6 +792,25 @@ ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`
 		backend = "like_fallback"
 	}
 	return RecordPage{Items: items, NextCursor: next, Count: len(items), SearchBackend: backend}, nil
+}
+
+func recordHasAllTags(record Record, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	have := make(map[string]struct{}, len(record.Tags))
+	for _, tag := range record.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag != "" {
+			have[tag] = struct{}{}
+		}
+	}
+	for _, tag := range required {
+		if _, ok := have[tag]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) GetRecord(ctx context.Context, id string) (Record, error) {
@@ -816,16 +871,42 @@ func (s *Store) listRecordsLegacy(filter RecordFilter) (RecordPage, error) {
 	}
 	query := strings.ToLower(strings.TrimSpace(filter.Query))
 	tag := strings.ToLower(strings.TrimSpace(filter.Tag))
+	statuses := make(map[Status]struct{}, len(filter.Statuses)+1)
+	for _, status := range filter.Statuses {
+		if status = Status(strings.TrimSpace(string(status))); status != "" {
+			statuses[status] = struct{}{}
+		}
+	}
+	if len(statuses) == 0 && filter.Status != "" {
+		statuses[filter.Status] = struct{}{}
+	}
+	kinds := make(map[string]struct{}, len(filter.Kinds)+1)
+	for _, kind := range filter.Kinds {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			kinds[kind] = struct{}{}
+		}
+	}
+	if len(kinds) == 0 && strings.TrimSpace(filter.Kind) != "" {
+		kinds[strings.TrimSpace(filter.Kind)] = struct{}{}
+	}
+	requiredTags := normalizeTags(append(append([]string(nil), filter.Tags...), tag))
 	items := make([]Record, 0, len(notes))
 	for _, note := range notes {
 		record := legacyNoteToRecord(note, s.cfg.ProjectKey)
 		if record.Archived && !filter.IncludeArchived {
 			continue
 		}
-		if filter.Status != "" && record.Status != filter.Status {
-			continue
+		if len(statuses) > 0 {
+			if _, ok := statuses[record.Status]; !ok {
+				continue
+			}
 		}
-		if filter.Kind != "" && record.Kind != filter.Kind {
+		if len(kinds) > 0 {
+			if _, ok := kinds[record.Kind]; !ok {
+				continue
+			}
+		}
+		if len(requiredTags) > 0 && !recordHasAllTags(record, requiredTags) {
 			continue
 		}
 		if sourceKind := strings.ToLower(strings.TrimSpace(filter.SourceKind)); sourceKind != "" &&
@@ -833,9 +914,6 @@ func (s *Store) listRecordsLegacy(filter RecordFilter) (RecordPage, error) {
 			continue
 		}
 		if filter.PinnedOnly && !record.Pinned {
-			continue
-		}
-		if tag != "" && !strings.Contains(strings.ToLower(strings.Join(record.Tags, " ")), tag) {
 			continue
 		}
 		if query != "" && !strings.Contains(strings.ToLower(record.Text+" "+strings.Join(record.Tags, " ")), query) {

@@ -13,8 +13,11 @@ import (
 type RecordSearchQuery struct {
 	Text                    string
 	Status                  Status
+	Statuses                []Status
 	Kind                    string
+	Kinds                   []string
 	Tag                     string
+	Tags                    []string
 	SourceKind              string
 	SourceSessionID         string
 	SourceSessionGeneration *int64
@@ -47,8 +50,11 @@ type RecordSearchPage struct {
 func (s *Store) SearchRecords(ctx context.Context, query RecordSearchQuery) (RecordSearchPage, error) {
 	filter := RecordFilter{
 		Status:                  query.Status,
+		Statuses:                query.Statuses,
 		Kind:                    query.Kind,
+		Kinds:                   query.Kinds,
 		Tag:                     query.Tag,
+		Tags:                    query.Tags,
 		Query:                   strings.TrimSpace(query.Text),
 		SourceKind:              query.SourceKind,
 		SourceSessionID:         query.SourceSessionID,

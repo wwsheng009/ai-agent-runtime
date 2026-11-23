@@ -402,8 +402,11 @@ type RecordFilter struct {
 	Scope                   Scope
 	ProjectKey              string
 	Status                  Status
+	Statuses                []Status
 	Kind                    string
+	Kinds                   []string
 	Tag                     string
+	Tags                    []string
 	Query                   string
 	SourceKind              string
 	SourceSessionID         string
