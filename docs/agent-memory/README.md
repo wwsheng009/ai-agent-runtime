@@ -4,7 +4,7 @@
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/`）。
 > 2026-11-18 追加：统一执行核 `TurnDigestSink` 接线修复；真实 ConPTY 双会话 E2E PASS，覆盖 digest → phase1 → phase2 → 跨会话注入/召回（见 `14-runtime-gap-audit-and-fix-20261117.md`）。
 > 2026-11-22 追加：按 `references/AI_Agent_Memory_Engine_Design.md` v1.0 完成参考设计层缺口审查；结论是当前实现为项目级 Memory v2，尚未覆盖 FTS5/混合检索、Dreaming Patch、版本回滚、完整 scope、Temporal/Trust/评测等（见 `15-ai-memory-engine-design-gap-audit-20261122.md`）。
-> 2026-11-23 追加：G3 记录版本/回滚与 G3.5 Core 已提交（`8513f579`/`a9c7a461`/`eb413e1f`）；G1-0 FTS5 driver 已解锁（FTS 代码未提交）。当前状态快照见 `19-implementation-status-20261123.md`。G0-5、G1–G5 门禁仍未关闭。
+> 2026-11-23 追加：G3 记录版本/回滚与 G3.5 Core 已提交（`8513f579`/`a9c7a461`/`eb413e1f`）；FTS5 索引与 driver 已落地（`d05145f6`/`8ddd48c1`），统一 SearchQuery/BM25 待补。当前状态快照见 `19-implementation-status-20261123.md`。G0-5、G1–G5 门禁仍未关闭。
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
 
