@@ -485,3 +485,61 @@ func TestMemoryToolsRecentWhyAndWhyNot(t *testing.T) {
 		t.Fatalf("memory_why_not = %+v, %v", whyNot, err)
 	}
 }
+func TestMemorySearchMultiValueFilters(t *testing.T) {
+	cfg := memoryToolTestConfig(t)
+	ctx := toolctx.WithSessionID(context.Background(), "session-multi-search")
+	add := NewMemoryAddTool(cfg)
+	addNote := func(text, kind string, tags []interface{}) string {
+		t.Helper()
+		result, err := add.Execute(ctx, map[string]interface{}{
+			"text": text, "kind": kind, "tags": tags,
+		})
+		if err != nil || !result.Success {
+			t.Fatalf("memory_add = %+v, %v", result, err)
+		}
+		var note struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(result.Content), &note); err != nil || note.ID == "" {
+			t.Fatalf("memory_add content = %q, %v", result.Content, err)
+		}
+		return note.ID
+	}
+	first := addNote("multi value alpha beta reference", "reference", []interface{}{"alpha", "beta"})
+	second := addNote("multi value beta gamma decision", "decision", []interface{}{"beta", "gamma"})
+
+	search := NewMemorySearchTool(cfg)
+	result, err := search.Execute(ctx, map[string]interface{}{
+		"statuses": []interface{}{"active"},
+		"kinds":    []interface{}{"reference", "decision"},
+		"tags":     []interface{}{"beta"},
+	})
+	if err != nil || !result.Success ||
+		!strings.Contains(result.Content, first) || !strings.Contains(result.Content, second) {
+		t.Fatalf("multi-value memory_search = %+v, %v", result, err)
+	}
+
+	result, err = search.Execute(ctx, map[string]interface{}{
+		"tags":     []interface{}{"alpha", "beta"},
+		"statuses": []interface{}{"active", "candidate"},
+	})
+	if err != nil || !result.Success ||
+		!strings.Contains(result.Content, first) || strings.Contains(result.Content, second) {
+		t.Fatalf("all-tags memory_search = %+v, %v", result, err)
+	}
+
+	result, err = search.Execute(ctx, map[string]interface{}{
+		"kinds": "reference,decision",
+	})
+	if err != nil || !result.Success ||
+		!strings.Contains(result.Content, first) || !strings.Contains(result.Content, second) {
+		t.Fatalf("comma kinds memory_search = %+v, %v", result, err)
+	}
+
+	result, err = search.Execute(ctx, map[string]interface{}{
+		"statuses": []interface{}{"deleted"},
+	})
+	if err != nil || result.Success {
+		t.Fatalf("invalid statuses memory_search = %+v, %v", result, err)
+	}
+}

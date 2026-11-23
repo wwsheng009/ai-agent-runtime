@@ -167,17 +167,38 @@ func (t *memoryTool) openStore() (*memorystore.Store, error) {
 
 func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	limit := memoryBoundedIntParam(params, "limit", 20, 100)
-	status := strings.ToLower(strings.TrimSpace(memoryStringParam(params, "status")))
-	if status == "" {
-		status = string(memorystore.StatusActive)
+	statuses := memoryStringSliceParam(params, "statuses")
+	if len(statuses) == 0 {
+		status := strings.ToLower(strings.TrimSpace(memoryStringParam(params, "status")))
+		if status == "" {
+			status = string(memorystore.StatusActive)
+		}
+		statuses = []string{status}
 	}
-	if status != string(memorystore.StatusActive) && status != string(memorystore.StatusCandidate) {
-		return memoryToolError(fmt.Errorf("agent memory_search only exposes active or candidate records")), nil
+	normalizedStatuses := make([]memorystore.Status, 0, len(statuses))
+	for _, status := range statuses {
+		status = strings.ToLower(strings.TrimSpace(status))
+		if status != string(memorystore.StatusActive) && status != string(memorystore.StatusCandidate) {
+			return memoryToolError(fmt.Errorf("agent memory_search only exposes active or candidate records")), nil
+		}
+		normalizedStatuses = append(normalizedStatuses, memorystore.Status(status))
+	}
+	kinds := memoryStringSliceParam(params, "kinds")
+	if len(kinds) == 0 {
+		if kind := strings.TrimSpace(memoryStringParam(params, "kind")); kind != "" {
+			kinds = []string{kind}
+		}
+	}
+	tags := memoryStringSliceParam(params, "tags")
+	if len(tags) == 0 {
+		if tag := strings.TrimSpace(memoryStringParam(params, "tag")); tag != "" {
+			tags = []string{tag}
+		}
 	}
 	result, err := store.SearchRecords(ctx, memorystore.RecordSearchQuery{
-		Status:     memorystore.Status(status),
-		Kind:       strings.TrimSpace(memoryStringParam(params, "kind")),
-		Tag:        strings.TrimSpace(memoryStringParam(params, "tag")),
+		Statuses:   normalizedStatuses,
+		Kinds:      kinds,
+		Tags:       tags,
 		Text:       strings.TrimSpace(memoryStringParam(params, "query")),
 		SourceKind: strings.TrimSpace(memoryStringParam(params, "source_kind")),
 		Limit:      limit,
@@ -194,7 +215,8 @@ func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, param
 		"items": records, "count": len(records), "next_cursor": result.NextCursor,
 		"diagnostics": map[string]interface{}{
 			"query": memoryStringParam(params, "query"), "limit": limit,
-			"search_backend": result.Backend,
+			"search_backend": result.Backend, "statuses": statuses,
+			"kinds": kinds, "tags": tags,
 		},
 	}), nil
 }
@@ -774,6 +796,15 @@ func memoryBoundedIntParam(params map[string]interface{}, key string, fallback, 
 }
 
 func memoryStringSliceParam(params map[string]interface{}, key string) []string {
+	if text, ok := params[key].(string); ok {
+		out := make([]string, 0, 4)
+		for _, value := range strings.Split(text, ",") {
+			if value = strings.TrimSpace(value); value != "" {
+				out = append(out, value)
+			}
+		}
+		return out
+	}
 	raw, ok := params[key].([]interface{})
 	if !ok {
 		if values, ok := params[key].([]string); ok {

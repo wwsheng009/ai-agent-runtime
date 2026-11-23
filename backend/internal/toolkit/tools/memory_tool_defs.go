@@ -7,13 +7,16 @@ import (
 
 func NewMemorySearchTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 	return newMemoryTool(cfg, "search", "memory_search",
-		"Search project memory by query, kind, tag, or status. Read-only and bounded.",
+		"Search project memory by query, kinds, tags, or statuses. Read-only and bounded.",
 		memorySchema(map[string]interface{}{
 			"query":       memoryStringProp("Search query."),
 			"kind":        memoryStringProp("Optional memory kind filter."),
 			"tag":         memoryStringProp("Optional tag filter."),
+			"kinds":       memoryStringArrayProp("Optional memory kind filters (all values are OR)."),
+			"tags":        memoryStringArrayProp("Optional tag filters (all tags must match)."),
 			"source_kind": memoryStringProp("Optional provenance filter, such as manual or session_extract."),
 			"status":      memoryEnumProp("Optional status filter (agent surface).", "active", "candidate"),
+			"statuses":    memoryStringArrayProp("Optional status filters (agent surface: active/candidate)."),
 			"limit":       memoryIntProp("Maximum results (default 20, max 100).", 1, 100),
 		}), false)
 }
