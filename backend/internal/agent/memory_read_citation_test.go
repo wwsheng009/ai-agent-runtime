@@ -19,3 +19,14 @@ func TestRecordMemoryReadIDsCollectsOnlySuccessfulReads(t *testing.T) {
 	loop.resetMemoryReadIDs()
 	require.Empty(t, loop.memoryReadIDsSnapshot())
 }
+
+func TestCoreContextIDIsNotAddedToOrdinaryMemoryIDs(t *testing.T) {
+	metadata := map[string]interface{}{
+		"project_core_id":      "core_reviewed",
+		"project_memory_ids":   []string{"mem_record"},
+		"memory_ids":           []interface{}{"mem_recall"},
+		"project_core_version": int64(3),
+	}
+	require.Equal(t, []string{"core_reviewed"}, coreIDsFromContextMetadata(metadata))
+	require.Equal(t, []string{"mem_record", "mem_recall"}, memoryIDsFromContextMetadata(metadata))
+}

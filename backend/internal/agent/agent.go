@@ -1381,6 +1381,34 @@ func memoryConfigFromOptions(options map[string]interface{}, base memorystore.Co
 	if ratio, ok := contextOptionFloat(options, "memory_pinned_budget_ratio"); ok {
 		base.PinnedBudgetRatio = ratio
 	}
+	categoryBudgets := &base.CategoryBudgets
+	for _, key := range []string{
+		"memory_injection_budget_core",
+		"memory_injection_budget_task",
+		"memory_injection_budget_retrieved",
+		"memory_injection_budget_procedure",
+		"memory_injection_budget_reference",
+	} {
+		if _, ok := options[key]; ok {
+			base.CategoryBudgetsEnabled = true
+			break
+		}
+	}
+	if ratio, ok := contextOptionFloatValue(options, "memory_injection_budget_core"); ok {
+		categoryBudgets.Core = ratio
+	}
+	if ratio, ok := contextOptionFloatValue(options, "memory_injection_budget_task"); ok {
+		categoryBudgets.Task = ratio
+	}
+	if ratio, ok := contextOptionFloatValue(options, "memory_injection_budget_retrieved"); ok {
+		categoryBudgets.Retrieved = ratio
+	}
+	if ratio, ok := contextOptionFloatValue(options, "memory_injection_budget_procedure"); ok {
+		categoryBudgets.Procedure = ratio
+	}
+	if ratio, ok := contextOptionFloatValue(options, "memory_injection_budget_reference"); ok {
+		categoryBudgets.Reference = ratio
+	}
 	if stageSplit, ok := options["memory_stage_split"].(bool); ok {
 		base.DisableStageSplit = !stageSplit
 	}
@@ -1512,6 +1540,28 @@ func contextOptionFloat(options map[string]interface{}, key string) (float64, bo
 		return float64(value), value > 0
 	case int64:
 		return float64(value), value > 0
+	default:
+		return 0, false
+	}
+}
+
+// contextOptionFloatValue accepts zero because category budget 0 is an explicit
+// way to reserve no budget for a category.
+func contextOptionFloatValue(options map[string]interface{}, key string) (float64, bool) {
+	if len(options) == 0 {
+		return 0, false
+	}
+	switch value := options[key].(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	case int64:
+		return float64(value), true
 	default:
 		return 0, false
 	}

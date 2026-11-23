@@ -2543,6 +2543,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	managedHistory := history
 	promptPrefixRewritten := false
 	contextMemoryIDs := []string{}
+	contextCoreIDs := []string{}
 	var projectMemoryStore *memorystore.Store
 	countTokens := func(messages []types.Message) int {
 		if loop == nil || loop.llmRuntime == nil {
@@ -2593,6 +2594,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		})
 		managedHistory = built.Messages
 		contextMemoryIDs = memoryIDsFromContextMetadata(built.Metadata)
+		contextCoreIDs = coreIDsFromContextMetadata(built.Metadata)
 		promptPrefixRewritten = promptHistoryPrefixChanged(history, managedHistory)
 		action.Metadata = map[string]interface{}{
 			"context": built.Metadata,
@@ -3354,13 +3356,15 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if response != nil && strings.TrimSpace(response.Content) != "" {
 		readMemoryIDs := loop.memoryReadIDsSnapshot()
 		citationAllowedIDs := append(append([]string(nil), contextMemoryIDs...), readMemoryIDs...)
+		citationAllowedIDs = append(citationAllowedIDs, contextCoreIDs...)
 		if len(response.ToolCalls) == 0 && projectMemoryStore != nil && projectMemoryStore.V2InjectionEnabled() &&
-			(len(contextMemoryIDs) > 0 || len(readMemoryIDs) > 0) &&
+			(len(contextMemoryIDs) > 0 || len(readMemoryIDs) > 0 || len(contextCoreIDs) > 0) &&
 			answerExposureEnabled(loop.agent.config.Options) {
 			exposure, exposureErr := projectMemoryStore.RecordAnswerExposure(ctx, memorystore.AnswerExposureInput{
 				Answer: response.Content, SessionID: sessionID,
 				TurnID: firstNonEmptyTrimmed(TurnIDFromContext(ctx), traceID), MessageID: llmRequestID,
 				InjectedIDs:       contextMemoryIDs,
+				CoreInjectedIDs:   contextCoreIDs,
 				ReadIDs:           readMemoryIDs,
 				ReadUsageRecorded: true,
 			})
@@ -3630,6 +3634,17 @@ func memoryIDsFromContextMetadata(metadata map[string]interface{}) []string {
 		}
 	}
 	return ids
+}
+
+func coreIDsFromContextMetadata(metadata map[string]interface{}) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	id := strings.TrimSpace(stringValue(metadata["project_core_id"]))
+	if id == "" {
+		return nil
+	}
+	return []string{id}
 }
 
 func (loop *ReActLoop) resetMemoryReadIDs() {
