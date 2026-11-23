@@ -2090,3 +2090,19 @@ ok   github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands
 ```
 
 上述命令只使用 `t.TempDir()` SQLite fixture；真实 `.aicli/memory/memory.db` 本轮未读取、未修改、未清理、未 reset。该修复仍不能关闭 G0-5：真实 backlog 的只读分类、dry-run 结果和受控恢复尚未执行；G1–G5 仍未实施，G1 仍受当前 Go SQLite driver 缺少 FTS5 阻断。
+### 19.11 2026-11-23 状态更新
+
+本节不重写 2026-11-22 的执行记录，只记录之后的代码落地情况；当前状态以 `19-implementation-status-20261123.md` 和 `20-g3-record-versions-evidence-20261123.md` 为准。
+
+已提交到 `main`：
+
+- `8513f579`：G0–G3.5 memory capabilities（capture replay、job operator/deadline repair、versions v20/v21、Core v22/v23、budget/usage、API/CLI）。
+- `a9c7a461`：Core answer citation 与 `memory_injection_budget_*` 选项。
+- `eb413e1f`：`aicli onboarding memory` preset。
+
+状态边界：
+
+- G3 代码与测试已落地，但门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制；
+- G3.5 仍按 `18` 的未完成清单保持部分实施；
+- G0-5 仍未执行，真实 dogfood 库未读取/恢复；
+- G1 仍因当前 Go SQLite driver 缺少 FTS5 而 blocked；工作区中的 FTS 改造尚未收敛，相关测试当前失败，不能据此关闭 G1。
