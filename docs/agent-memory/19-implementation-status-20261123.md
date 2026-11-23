@@ -9,7 +9,7 @@
 关键事实：
 
 - G3（记录版本、回滚、时间点查询）与 G3.5（Core Memory）已有代码和测试，并已提交到 `main`（`8513f579`/`a9c7a461`/`eb413e1f`）；
-- G0 代码闭环基本落地，但 **G0-5 真实 dogfood 恢复未执行**；
+- G0 代码闭环基本落地，**G0-5 已完成真实库只读诊断但未执行修复**：101 条 pending digest、8 条 pending job 缺 deadline、76 条 failed v2 job、schema v23；
 - G1 检索基础已提交：FTS5 driver（`91972cb5`）、FTS 索引/同步/BM25/fallback（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）、有界注入候选（`22c4d03a`）、候选查询索引（`72b275ce`）、store-level 多值过滤（`0443f6ad`）与 `memory_search` 多值接线（`5d972874`）；1k/10k/100k 性能基准已记录，HTTP/CLI 多值接线与质量证据待补；
 - G2 scope 隔离主要实现已提交（`a4fca327`）；jobs/digests/summaries/export/import/purge/audit 与 runtime-server 多 workspace 证据仍待补；G4/G5 未实施；
 - API/CLI 定向测试此前在宿主资源恢复后通过；本次当前工作区 API 重跑被未提交的 `internal/supervision` 签名漂移阻塞；FTS driver 扩展与 FTS 实现均已提交并通过 memory 包测试。
@@ -35,7 +35,7 @@
 | 门禁 | 状态 | 代码/文档证据 | 未关闭原因 |
 |---|---|---|---|
 | Memory v2 主干 | ✅ 可用 | `memorystore` + `memoryruntime` + `memoryassembly` + `contextmgr` + API/CLI/Web；capture receipt → extract → consolidate → summary → inject → usage/citation | 属于既有项目级能力，不等于参考设计全量验收 |
-| G0 运行时闭环 | 🟡 代码/临时库证据已落地 | `16` §19.1–19.10：status、backlog 诊断、job operator、replay-preview、deadline repair、active-session capture | **G0-5 未执行**：未对真实 backlog 做只读分类、dry-run 与受控恢复；无真实 `memory_entries > 0`、v2 job succeeded、跨会话注入证据 |
+| G0 运行时闭环 | 🟡 代码/临时库证据已落地，真实库只读诊断完成 | `16` §19.1–19.10；证据见 `23`：schema v23、entries 75（active 4/candidate 71）、pending digest 101（31 sessions）、pending v2 job 8（全部缺 deadline）、failed v2 76（deadline 54/invalid 14/other 8） | 尚未 dry-run/repair/migrate 真实库；无恢复后的 v2 succeeded 与新会话注入证据；G0-5 未关闭 |
 | G1 检索基础 | 🟡 部分实施（FTS5 + 统一检索 + 有界注入） | `91972cb5` FTS5 driver；`8ddd48c1` FTS 索引/同步/BM25/fallback；`c8acdc30` `SearchRecords`；`22c4d03a` 有界注入候选；`72b275ce` 候选查询索引；`2404cd83` 实际 backend label；`0443f6ad` store-level 多值过滤；`5d972874` tool 多值；win7compat 全量通过；证据见 `21` | v25 后 1k/10k/100k 候选查询为 `2.61/2.94/9.54 ms/op`，覆盖索引且无临时 B-tree；仍缺 HTTP/CLI 多值接线与三端同一 corpus 证据；不能宣称 G1 关闭 |
 | G2 Scope 隔离 | 🟡 部分实施（已提交 `a4fca327`） | migration v24 scope 列/索引/backfill；`v2_scope.go` ScopeContext/grants/fail-closed visibility；list/search/FTS/usage/versions/governance/API 接入；7 个 scope 测试；证据见 `22` | jobs/digests/summaries/export/import/purge/audit 未逐一证明；runtime-server 多 workspace 证据未记录；不能宣称 G2 关闭 |
 | G3 版本/回滚/时间 | ✅ 代码级实现（已提交 `8513f579`） | migration v20 `memory_versions`（append-only trigger）、v21 purge guard；`v2_versions.go:243/303/514`：`ListRecordVersionsPage`、`ListRecordsAsOf`、`RollbackRecord`；HTTP `/memory/records/{id}/versions`、`/rollback`；CLI `/memory history|versions`、`/memory rollback`；`v2_versions_test.go` 覆盖回滚、并发 revision、temporal as-of、purge fence | 证据见 `20`；门禁仍受 G1 检索验收、G2 尚未关闭的运营面、G4 高风险 supersede 依赖限制 |
@@ -207,7 +207,7 @@ FAIL（当前未提交的 internal/supervision 签名漂移导致编译失败，
 1. **已完成**：G3/G3.5 提交、Core citation、onboarding、证据文档与 API/CLI/tool 定向验证。
 2. **G1 收尾**：FTS 索引、driver、`SearchRecords`、有界注入候选、v25 查询索引、1k/10k/100k 基准、实际 backend label、store-level 多值过滤、tool 多值与 win7compat 验证已完成；下一步补 HTTP/CLI 多值接线与三端同一 corpus 证据。
 3. **G2 收尾**：主要 scope 列/backfill/fail-closed 读写与负向测试已提交；下一步补 jobs/digests/summaries/export/import/purge/audit 的 scope 审计与 runtime-server 多 workspace 证据。
-4. **G0-5**：先只读诊断 + `replay-preview` + `jobDeadlineRepair` dry-run，备份后再受控恢复。
+4. **G0-5**：真实库只读诊断已完成（`23`）；下一步备份并在副本上演练 v24/v25 migration、`replay-preview`、`jobDeadlineRepair` dry-run，再受控恢复。
 5. **文档/工作区收尾**：提交本文件 `19` 与 `21` 的 follow-up，并将 supervision/team/agent 等并发改动分开处理；`16/20/22/README` 已在 `d11ee26c` 提交，v25 已在 `72b275ce` 提交。
 
 ---
