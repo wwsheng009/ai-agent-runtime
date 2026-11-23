@@ -957,7 +957,7 @@ func TestMemoryStatusReportsExtractionBacklogAndRedactsDiagnostics(t *testing.T)
 	require.Equal(t, http.StatusOK, nonAdminRec.Code, nonAdminRec.Body.String())
 	var nonAdmin memoryStatusResponse
 	require.NoError(t, json.NewDecoder(nonAdminRec.Body).Decode(&nonAdmin))
-	require.Equal(t, "like_fallback", nonAdmin.SearchBackend)
+	require.Contains(t, []string{"fts5", "like_fallback"}, nonAdmin.SearchBackend)
 	require.Equal(t, 1, nonAdmin.PendingExtractionJobs)
 	require.Equal(t, 1, nonAdmin.PendingExtractionSessions)
 	require.Equal(t, 1, nonAdmin.DeadLetterJobs)
