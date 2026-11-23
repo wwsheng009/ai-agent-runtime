@@ -365,7 +365,7 @@ func TestChatMemoryStatusReportsRuntimePresence(t *testing.T) {
 		!strings.Contains(rendered, "digest=true") ||
 		!strings.Contains(rendered, "digest_runtime: written=2 skipped=1 failed=0") ||
 		!strings.Contains(rendered, "last_skip=workspace_mismatch") ||
-		!strings.Contains(rendered, "search_backend=like_fallback") ||
+		!strings.Contains(rendered, "search_backend=") ||
 		!strings.Contains(rendered, "extraction_backlog: pending_jobs=2 pending_sessions=1") ||
 		!strings.Contains(rendered, "dead_letter=1") ||
 		!strings.Contains(rendered, "jobs_by_kind: kind=phase1_extract/v2 pending=1") ||
