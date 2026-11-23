@@ -24,7 +24,7 @@ import (
 // 权限/安全类（/permission-mode set、/yolo、/trust grant、/grants revoke、
 // /approval-reuse set）与控制面类（/supervision ack|resolve|control、
 // /agents approve|deny|answer|send|followup|cleanup）保持 Deferred——不在运行中
-// 改安全策略/控制面。next-call 类（/plan enter|exit|approve、/attach add|clear|remove）
+// 改安全策略/控制面。next-call 类（/plan on|off|enter|exit|approve、/attach add|clear|remove）
 // 会影响当前 turn 的下一次调用，live 类（/skills enable|disable）会热刷新函数面，
 // 均不纳入。/routing on|off|reset|save 保持 Deferred：会话层写入虽复用
 // refreshLocalRuntimeAfterSelection（next-turn 安全），但同一子命令可经

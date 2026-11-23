@@ -27,15 +27,15 @@ var chatPlanArtifactStore *planstore.Store
 //
 //	/plan                          show status
 //	/plan status                   show status
-//	/plan enter [path]             enter plan mode (optional plan path)
-//	/plan on [path]                alias of enter
+//	/plan on [path]                enter the read-only planning mode
+//	/plan off                      exit it and restore the previous permission mode
+//	/plan enter [path]             compatibility spelling for /plan on
 //	/plan exit <decision> [notes]  exit with approve|request_changes|quit
 //	/plan approve [notes]          exit approve
 //	/plan request_changes [notes]  exit request_changes (stay in plan)
 //	/plan comment <Lx[-Ly]> <正文> 留一条行级评论；/plan comments 查看
 //	/plan quit [notes]             exit quit
 //	/plan review                   show the plan revision and verdict hints
-//	/plan off                      alias of exit quit
 func handlePlanCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		_ = renderChatCommandResult(session, executeStructuredPlanCommand(session, command), false)
@@ -107,7 +107,7 @@ func handlePlanCommand(session *ChatSession, command string) bool {
 			)
 			return false
 		}
-		fmt.Println("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
+		fmt.Println("用法: /plan [status|on [path]|off|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
 		return false
 	}
 }
@@ -162,7 +162,7 @@ func executeStructuredPlanCommand(session *ChatSession, command string) CommandR
 			}
 			return planModeMutationCommandResult(result, formatPlanModeEntered(result.State, false))
 		}
-		return commandTextResult("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
+		return commandTextResult("用法: /plan [status|on [path]|off|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
 	}
 }
 

@@ -38,6 +38,33 @@ func newPlanCommandSession(mode runtimepolicy.Mode) *ChatSession {
 	}
 }
 
+func TestPlanCommandCatalogUsesOnOffAsReadOnlyWorkflowEntryPoints(t *testing.T) {
+	var spec *chatSlashCommandSpec
+	specs := chatSlashCommandCatalog()
+	for index := range specs {
+		if specs[index].Name == "/plan" {
+			spec = &specs[index]
+			break
+		}
+	}
+	if spec == nil {
+		t.Fatal("expected /plan command in slash catalog")
+	}
+	if !strings.Contains(spec.Usage, "on [path]") || !strings.Contains(spec.Usage, "off") {
+		t.Fatalf("catalog usage must advertise /plan on|off, got %q", spec.Usage)
+	}
+	argSummary := map[string]string{}
+	for _, arg := range spec.Args {
+		argSummary[arg.Token] = arg.Summary
+	}
+	if !strings.Contains(argSummary["on"], "只读") {
+		t.Fatalf("catalog must explain /plan on as the read-only workflow, got %q", argSummary["on"])
+	}
+	if !strings.Contains(argSummary["off"], "恢复") {
+		t.Fatalf("catalog must explain /plan off restores the previous mode, got %q", argSummary["off"])
+	}
+}
+
 func TestHandlePlanCommand_EnterExitStatus(t *testing.T) {
 	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
@@ -142,10 +169,10 @@ func TestHandlePlanCommand_QuitRestoresPreviousMode(t *testing.T) {
 	}
 
 	quitOut := captureStdout(t, func() {
-		_ = handlePlanCommand(session, "/plan quit not now")
+		_ = handlePlanCommand(session, "/plan off not now")
 	})
 	if !strings.Contains(quitOut, "已退出 plan mode") {
-		t.Fatalf("expected quit confirmation, got %q", quitOut)
+		t.Fatalf("expected /plan off confirmation, got %q", quitOut)
 	}
 	state = loadChatPlanMode(session)
 	if planmode.IsActive(state) {
@@ -156,6 +183,42 @@ func TestHandlePlanCommand_QuitRestoresPreviousMode(t *testing.T) {
 	}
 	if session.PermissionMode != runtimepolicy.ModeAcceptEdits {
 		t.Fatalf("expected restored accept_edits after quit, got %s", session.PermissionMode)
+	}
+}
+
+func TestExecuteStructuredPlanCommandOnOffRestoresPreviousMode(t *testing.T) {
+	withPlanArtifactStore(t)
+	for _, previousMode := range []runtimepolicy.Mode{
+		runtimepolicy.ModeDefault,
+		runtimepolicy.ModeAcceptEdits,
+		runtimepolicy.ModeBypassPermissions,
+	} {
+		t.Run(string(previousMode), func(t *testing.T) {
+			session := newPlanCommandSession(previousMode)
+			session.RuntimeSession.ID += "-" + string(previousMode)
+
+			on := executeStructuredPlanCommand(session, "/plan on")
+			if on.Action != CommandContinue {
+				t.Fatalf("plan on should continue, got action=%v", on.Action)
+			}
+			if session.PermissionMode != runtimepolicy.ModePlan {
+				t.Fatalf("expected plan mode after /plan on, got %s", session.PermissionMode)
+			}
+			if !planmode.IsActive(loadChatPlanMode(session)) {
+				t.Fatal("expected plan state active after /plan on")
+			}
+
+			off := executeStructuredPlanCommand(session, "/plan off")
+			if off.Action != CommandContinue {
+				t.Fatalf("plan off should continue, got action=%v", off.Action)
+			}
+			if planmode.IsActive(loadChatPlanMode(session)) {
+				t.Fatal("expected plan state inactive after /plan off")
+			}
+			if session.PermissionMode != previousMode {
+				t.Fatalf("expected /plan off to restore %s, got %s", previousMode, session.PermissionMode)
+			}
+		})
 	}
 }
 

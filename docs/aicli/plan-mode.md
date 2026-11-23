@@ -24,8 +24,8 @@
 
 补充约定：
 
-- **durable plan 状态与裸权限模式是两层**：`/plan enter` / `enter_plan_mode` 会登记计划路径、写白名单、previous mode 与评审记录；`/mode plan` 只把 permission-mode 设为 `plan`（写白名单走默认计划文件）。
-- **离开 plan 会收口（运行时/HTTP 路径）**：通过运行时或 `POST /api/runtime/sessions/{id}/permission-mode` 从 plan 切到其他权限模式时，会以 `quit` 关闭持久 plan 状态（并归档），避免「界面显示 plan 生效、实际已不再施加写白名单」的分叉。本地 CLI 的 `/mode` 只更新 permission-mode 字段、不清理持久 plan 状态，请用 `/plan quit`（或 `/plan approve` / `/plan request_changes`）显式收口。
+- **durable plan 状态与裸权限模式是两层**：`/plan on`（兼容 `/plan enter`）/ `enter_plan_mode` 会登记计划路径、写白名单、previous mode 与评审记录；`/mode plan` 只把 permission-mode 设为 `plan`（写白名单走默认计划文件）。需要切换 TUI 的只读规划工作流时，优先记 `/plan on` 与 `/plan off`。
+- **离开 plan 会收口（运行时/HTTP 路径）**：通过运行时或 `POST /api/runtime/sessions/{id}/permission-mode` 从 plan 切到其他权限模式时，会以 `quit` 关闭持久 plan 状态（并归档），避免「界面显示 plan 生效、实际已不再施加写白名单」的分叉。本地 CLI 的 `/mode` 只更新 permission-mode 字段、不清理持久 plan 状态，请用 `/plan off`（或 `/plan approve` / `/plan request_changes`）显式收口。
 - 权限模式取值只有四个：`default`、`accept_edits`、`plan`、`bypass_permissions`（无 `yolo` 字面值，`--yolo` 等价于 `bypass_permissions`）。
 
 ---
@@ -39,13 +39,14 @@
 | 命令 | 行为 |
 |------|------|
 | `/plan`、`/plan status` | 显示状态：plan mode active/inactive、当前 permission-mode、plan path、write allow、previous mode、entered at、last exit decision、notes、pending exit request。两者完全等价（`/plan status <多余参数>` 同样只打印状态） |
-| `/plan enter [path]` | 进入 plan 模式；省略 `path` 时使用默认计划文件 `plan.md`。已处于 active 时重复进入会保留最初的 previous mode、只刷新计划路径 |
-| `/plan on [path]`、`/plan start [path]` | `enter` 的别名 |
+| **`/plan on [path]`** | 推荐的只读规划模式入口；省略 `path` 时使用默认计划文件 `plan.md`。普通项目写操作会被拒绝，只允许写入计划白名单。已处于 active 时重复进入会保留最初的 previous mode、只刷新计划路径 |
+| **`/plan off`** | 推荐的只读规划模式出口；等价于 `quit`，关闭 plan 状态并恢复进入前的 permission-mode |
+| `/plan enter [path]`、`/plan start [path]` | `/plan on` 的兼容别名 |
 | `/plan exit <approve\|request_changes\|quit> [notes]` | 按决策退出或保留；缺决策时打印用法；非法决策直接报错（`approve\|request_changes\|quit`）。决策 token 也接受别名：`approved/yes/y`、`request-changes/changes/revise`、`cancel/abort/no/n` |
 | `/plan approve [notes]`、`/plan approved / yes / y [notes]` | 批准计划并退出 plan 模式，随后按 §1 的规则恢复模式 |
 | `/plan request_changes <notes>`、`/plan request-changes / changes / revise <notes>` | **不退出**：保持 plan 模式，把 notes 记为待交付评审反馈。交互式（统一 TTY 与纯文本 REPL）下会**立刻起一轮修订**（§4 第 4 条）；脚本 / JSON 下留待下一回合一次性送达模型 |
-| `/plan quit [notes]`、`/plan cancel / abort / off / no / n [notes]` | 关闭 plan 模式且不执行计划（归档状态为 `not_implemented`） |
-| `/plan review`（别名 `/plan show`） | 打印当前计划正文、状态、轮次与三种裁决入口；plan 未生效时提示改用 `/plan enter` 或 `/plans` |
+| `/plan quit [notes]`、`/plan cancel / abort / no / n [notes]` | 关闭 plan 模式且不执行计划（归档状态为 `not_implemented`）；`/plan off` 是不带备注的简洁入口 |
+| `/plan review`（别名 `/plan show`） | 打印当前计划正文、状态、轮次与三种裁决入口；plan 未生效时提示改用 `/plan on` 或 `/plans` |
 | `/plan <看起来像路径的 token>` | 直接以该路径进入 plan 模式（识别规则：`.md`/`.txt` 后缀，或含 `/`、`\` 等路径分隔符；无扩展名的裸词会打印用法） |
 
 说明：
@@ -86,10 +87,10 @@
 |------|------|
 | `/mode` | 显示当前 permission-mode；plan 生效期间统一显示为 `plan` |
 | `/mode default` / `/mode accept_edits` / `/mode bypass_permissions` | 切换权限模式；切到 `bypass_permissions` 需要二次确认 |
-| `/mode plan` | 只设置裸 permission-mode（不登记计划路径 / 写白名单 / previous mode）。需要完整 plan 生命周期请用 `/plan enter` |
+| `/mode plan` | 只设置裸 permission-mode（不登记计划路径 / 写白名单 / previous mode）。需要完整只读规划工作流请用 `/plan on` |
 | `/mode <其他值>` | 报错，提示可选值 `default\|accept_edits\|plan\|bypass_permissions` |
 
-从 plan 切到其他模式时，**运行时/HTTP 路径**会以 `quit` 收口持久 plan 状态并归档（`backend/internal/chat/permission_mode.go`）；本地 CLI 的 `/mode` 只更新 permission-mode 字段（切换后 durable plan 状态仍然生效，`/plan status` 会继续显示 plan），需要显式 `/plan quit`。HTTP 侧的 `POST /api/runtime/sessions/{id}/permission-mode` 只允许「切出」plan，切向 plan 会返回提示改走 `/api/runtime/sessions/{id}/plan`（`permission_mode_handlers.go`）。
+从 plan 切到其他模式时，**运行时/HTTP 路径**会以 `quit` 收口持久 plan 状态并归档（`backend/internal/chat/permission_mode.go`）；本地 CLI 的 `/mode` 只更新 permission-mode 字段（切换后 durable plan 状态仍然生效，`/plan status` 会继续显示 plan），需要显式 `/plan off`。HTTP 侧的 `POST /api/runtime/sessions/{id}/permission-mode` 只允许「切出」plan，切向 plan 会返回提示改走 `/api/runtime/sessions/{id}/plan`（`permission_mode_handlers.go`）。
 
 ---
 

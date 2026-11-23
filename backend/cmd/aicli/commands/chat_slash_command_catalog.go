@@ -752,12 +752,14 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/plan",
-			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]",
-			Summary:     "进入/退出 plan mode，或查看计划写路径状态",
+			Usage:       "/plan [status|on [path]|off|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]",
+			Summary:     "用 /plan on|off 切换只读规划模式，或查看计划写路径状态",
 			Group:       string(chatSlashCommandGroupPermission),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "status", Summary: "查看 plan mode 状态"},
+				{Token: "on", Summary: "进入只读规划模式（可选指定计划文件）"},
+				{Token: "off", Summary: "退出只读规划模式并恢复之前的权限模式"},
 				{Token: "enter", Summary: "进入 plan mode"},
 				{Token: "exit", Summary: "退出 plan mode"},
 				{Token: "approve", Summary: "批准计划并退出"},

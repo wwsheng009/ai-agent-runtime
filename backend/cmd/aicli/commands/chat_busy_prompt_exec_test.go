@@ -46,7 +46,9 @@ func TestChatBusyPolicyPromptFirstBatch(t *testing.T) {
 		"/add-dir add":    chatBusyPolicyScreen,
 		"/memory add":     chatBusyPolicyScreen,
 		// 不纳入：next-call / live / §4.5 路由写入 / 需参数
-		"/plan enter":             chatBusyPolicyDeferred,
+		"/plan on":                chatBusyPolicyDeferred,
+		"/plan off":               chatBusyPolicyDeferred,
+		"/plan enter":             chatBusyPolicyDeferred, // compatibility spelling
 		"/attach add":             chatBusyPolicyDeferred,
 		"/skills enable":          chatBusyPolicyDeferred,
 		"/routing on":             chatBusyPolicyDeferred,
