@@ -2,13 +2,16 @@
 
 ## 状态
 
-**G3 主体代码级实现完成，定向测试通过；代码尚未提交，G3 门禁不能关闭。**
+**G3 主体代码级实现完成，定向测试通过；代码已提交到隔离分支，G3 门禁仍不能关闭。**
+
+> 2026-11-23 追加：实现已提交到分支 `memory/g0-g35-20261123`，主工作区因并发编辑尚未合并。提交：
+> `8513f579`（G0–G3.5 memory capabilities）、`a9c7a461`（Core citation 与预算选项）、`eb413e1f`（onboarding preset）。
 
 本轮只读取/验证工作区代码与临时 SQLite fixture，未访问、迁移或修改真实 `.aicli/memory/memory.db`。
 
 不能关闭 G3 的原因：
 
-1. 变更未提交，无法形成可追溯交付；
+1. 变更仅存在于隔离分支，主分支尚未合并；
 2. `memory_versions` 使用 `record_json` 快照存储，缺少计划 §6.1 中的 `tenant_id`、独立 `kind/status/title/text/summary/tags_json/metadata_json` 列和 tenant 索引（tenant 依赖 G2）；
 3. FTS 同步未实现（G1 因 driver 缺少 FTS5 而 blocked）；
 4. 高风险自动 supersede 的“不静默覆盖”审计/门禁未在本切片验证（G3-5/G4 边界）；
