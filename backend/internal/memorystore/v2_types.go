@@ -453,10 +453,9 @@ type StatusReport struct {
 	RecoveredDigestSessions       int64                     `json:"recovered_digest_sessions,omitempty"`
 	Fallback                      bool                      `json:"fallback"`
 	FallbackReason                string                    `json:"fallback_reason,omitempty"`
-	// SearchBackend is deliberately explicit even before FTS5 is available:
-	// "legacy_jsonl" describes Mode=off and "like_fallback" describes the
-	// current v2 bounded keyword implementation.  A future FTS implementation
-	// may return "fts5" without changing the status contract.
+	// SearchBackend reports the active retrieval implementation:
+	// "legacy_jsonl" for Mode=off, "fts5" when the memory index is available,
+	// and "like_fallback" on builds where the optional FTS5 module is absent.
 	SearchBackend              string          `json:"search_backend,omitempty"`
 	ExtractionJobCounts        map[string]int  `json:"extraction_job_counts,omitempty"`
 	PendingExtractionJobs      int             `json:"pending_extraction_jobs,omitempty"`

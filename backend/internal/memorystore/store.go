@@ -122,7 +122,11 @@ type Store struct {
 	v2Mu   sync.Mutex
 	db     *sql.DB
 	v2Err  error
-	closed bool
+	// ftsEnabled records whether the current memory DB has a usable FTS5
+	// external-content index. It is initialized once under v2Mu.
+	ftsEnabled bool
+	ftsErr     error
+	closed     bool
 }
 
 // ResolveRoot picks the durable memory directory.

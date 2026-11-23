@@ -652,6 +652,15 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 			offset = 0
 		}
 	}
+	if query := strings.TrimSpace(filter.Query); query != "" && s.ftsEnabled {
+		page, ftsErr := s.listRecordsFTS(ctx, db, filter, limit, offset)
+		if ftsErr == nil && page.Count > 0 {
+			return page, nil
+		}
+		// No match, a short trigram query, or an FTS failure falls through to
+		// the bounded LIKE path below. The fallback keeps recall for short
+		// CJK tokens and non-FTS builds.
+	}
 	args := []interface{}{string(ScopeProject), s.cfg.ProjectKey}
 	where := []string{"scope = ?", "project_key = ?"}
 	if !filter.IncludeArchived {
@@ -1299,6 +1308,9 @@ func (s *Store) Status(ctx context.Context) (StatusReport, error) {
 		return report, err
 	}
 	report.SearchBackend = "like_fallback"
+	if s.ftsEnabled {
+		report.SearchBackend = "fts5"
+	}
 	var version int
 	_ = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version)
 	report.SchemaVersion = version

@@ -6,9 +6,11 @@ import (
 	"testing"
 )
 
-// TestFTS5CapabilityProbe checks the same SQLite driver used by memory v2
-// against a temporary database only. Search remains LIKE-backed until the
-// memory-specific FTS index and query path are implemented.
+// TestFTS5CapabilityProbe reports whether the SQLite driver used by memory v2
+// exposes FTS5. It intentionally accepts both outcomes: mainline registers the
+// optional extension, win7compat's embedded build may provide it natively, and
+// other profiles may lack it entirely. The memory-specific index and LIKE
+// fallback are covered by v2_fts_test.go and the store search tests.
 func TestFTS5CapabilityProbe(t *testing.T) {
 	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
 	if err != nil {

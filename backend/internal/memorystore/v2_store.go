@@ -121,6 +121,10 @@ func (s *Store) ensureV2() (*sql.DB, error) {
 		s.v2Err = err
 		return nil, fmt.Errorf("%w: %v", errV2Unavailable, s.v2Err)
 	}
+	ftsEnabled, ftsErr := ensureMemoryFTS(context.Background(), db)
+	_ = ftsErr // FTS is a derived index; its absence must not block the main DB.
+	s.ftsEnabled = ftsEnabled
+	s.ftsErr = ftsErr
 	if _, err := s.migrateNotesV2(context.Background(), db); err != nil {
 		_ = db.Close()
 		s.v2Err = err
@@ -572,6 +576,11 @@ WHERE scope = ? AND project_key = ? AND status = 'active' AND archived = 0`
 
 func (s *Store) searchV2(opts SearchOptions) ([]SearchHit, error) {
 	query := strings.TrimSpace(opts.Query)
+	if query != "" {
+		if hits, err := s.searchV2FTS(context.Background(), opts); err == nil && len(hits) > 0 {
+			return hits, nil
+		}
+	}
 	notes, err := s.listV2WithOptions(ListOptions{SourceKind: opts.SourceKind})
 	if err != nil {
 		return nil, err
