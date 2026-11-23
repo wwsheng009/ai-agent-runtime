@@ -2105,4 +2105,4 @@ ok   github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands
 - G3 代码与测试已落地，但门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制；
 - G3.5 仍按 `18` 的未完成清单保持部分实施；
 - G0-5 仍未执行，真实 dogfood 库未读取/恢复；
-- G1 仍因当前 Go SQLite driver 缺少 FTS5 而 blocked；工作区中的 FTS 改造尚未收敛，相关测试当前失败，不能据此关闭 G1。
+- G1-0 driver 能力已解决（`sqliteutil` 自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 代码仍在工作区未提交，统一 `SearchQuery`/BM25 与质量证据待补，G1 仍未关闭。

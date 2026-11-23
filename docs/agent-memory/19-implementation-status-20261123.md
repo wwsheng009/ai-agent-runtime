@@ -10,9 +10,9 @@
 
 - G3（记录版本、回滚、时间点查询）与 G3.5（Core Memory）已有代码和测试，并已提交到 `main`（`8513f579`/`a9c7a461`/`eb413e1f`）；
 - G0 代码闭环基本落地，但 **G0-5 真实 dogfood 恢复未执行**；
-- G1 仍因 SQLite driver 缺少 FTS5 而 **blocked**；
+- G1-0 driver 能力已解决：`sqliteutil` 自动注册 ncruces FTS5 扩展，`TestFTS5CapabilityProbe` 现在返回 `fts_available`；FTS 检索代码仍在工作区未提交，统一 SearchQuery/BM25 尚未完成；
 - G2、G4、G5 未实施；
-- API/CLI 定向测试后续在宿主资源恢复后通过；FTS 相关测试仍因 driver 缺少 FTS5 而失败（G1 blocked）。
+- API/CLI 定向测试后续在宿主资源恢复后通过；FTS driver 扩展注册后 `TestMemoryFTS*` 也已通过，但 FTS 代码本身尚未提交。
 
 ---
 
@@ -36,7 +36,7 @@
 |---|---|---|---|
 | Memory v2 主干 | ✅ 可用 | `memorystore` + `memoryruntime` + `memoryassembly` + `contextmgr` + API/CLI/Web；capture receipt → extract → consolidate → summary → inject → usage/citation | 属于既有项目级能力，不等于参考设计全量验收 |
 | G0 运行时闭环 | 🟡 代码/临时库证据已落地 | `16` §19.1–19.10：status、backlog 诊断、job operator、replay-preview、deadline repair、active-session capture | **G0-5 未执行**：未对真实 backlog 做只读分类、dry-run 与受控恢复；无真实 `memory_entries > 0`、v2 job succeeded、跨会话注入证据 |
-| G1 检索基础 | ⛔ blocked | `v2_fts_capability_test.go` 实测 `no such module: fts5`；当前为 `like_fallback` | driver 能力阻断；无 FTS 虚拟表、无统一 `SearchQuery`/BM25，不能以 LIKE 降级宣称关闭 |
+| G1 检索基础 | 🟡 部分实施（driver 已解锁） | `sqliteutil/fts5_auto.go` 自动注册 FTS5；`TestFTS5CapabilityProbe` 返回 `fts_available`；工作区已有 `v2_fts.go` 与 FTS 同步测试（3 项通过） | FTS 代码未提交；仍无统一 `SearchQuery`/BM25 与 CLI/HTTP/tool 一致性证据；不能宣称 G1 关闭 |
 | G2 Scope 隔离 | ❌ 未实施 | `v2_schema.go` 无 tenant/owner/agent/task 列；`v2_types.go:16-18` 仅 `project/user/profile` Scope | 仅 project 级硬过滤；无跨 tenant/user/agent/task 负向隔离测试 |
 | G3 版本/回滚/时间 | ✅ 代码级实现（已提交 `8513f579`） | migration v20 `memory_versions`（append-only trigger）、v21 purge guard；`v2_versions.go:243/303/514`：`ListRecordVersionsPage`、`ListRecordsAsOf`、`RollbackRecord`；HTTP `/memory/records/{id}/versions`、`/rollback`；CLI `/memory history|versions`、`/memory rollback`；`v2_versions_test.go` 覆盖回滚、并发 revision、temporal as-of、purge fence | 证据见 `20`；门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制 |
 | G3.5 Core Memory + 预算 | 🟡 部分实施（已提交 `8513f579`/`a9c7a461`） | migration v22 `memory_core`（单 active partial index）、v23 `memory_core_usage`；`v2_core.go`；只读工具 `memory_core_get`；HTTP `/memory/core`、`/memory/cores`、`/memory/core/rebuild`、`/memory/core/usage`；CLI `/memory core`；selector Core 注入 + 分类预算最小切片 | 见 `18` §未完成：Core 与 summary/pinned 去重与失效、usage 的 session-generation purge、独立运行态状态面、task/procedure/reference prompt 分区、1k–2.5k Core 预算校准均未完成 |
@@ -53,7 +53,7 @@
 | `main` HEAD | `28f2a2b1`（含上述提交与证据文档） |
 | `git status --short` | 154 项，均为未提交的 FTS/team/workspace/suspension/analytics/前端等后续工作 |
 | 已提交 memory 变更 | 首批 98 文件 `+17678 / −530`，另有 Core citation 4 文件与 onboarding 3 文件 |
-| 仍留在工作区的 memory 变更 | `v2_fts.go`/`v2_fts_test.go`、FTS 对 `store.go`/`v2_helpers.go`/`v2_store.go` 的集成，以及 20:00 后对 `v2_core.go`/`v2_digest_replay.go`/`v2_job_deadline_repair.go`/`v2_status_test.go` 等文件的继续编辑 |
+| 仍留在工作区的 memory 变更 | `v2_fts.go`/`v2_fts_test.go`、FTS 对 `store.go`/`v2_helpers.go`/`v2_store.go` 的集成（driver 已解锁、测试已通过），以及 20:00 后对 `v2_core.go`/`v2_digest_replay.go`/`v2_job_deadline_repair.go`/`v2_status_test.go` 等文件的继续编辑 |
 | 文档状态 | `15/16/17/18/19/20` 与 `references/` 已提交；`README.md` 索引已更新 |
 
 结论：G3/G3.5 已有可追溯提交；主工作区剩余的 memory 差异属于并发进行中的 FTS/G1 与少量后续修正，不代表已提交能力丢失。
@@ -110,11 +110,21 @@ ok  github.com/wwsheng009/ai-agent-runtime/internal/agent  0.282s
 
 go test ./cmd/aicli/commands -run 'TestMemoryOnboarding|TestOnboarding' -count=1 -vet=off
 ok  github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands  0.356s
+
+go test ./internal/memorystore -run 'TestMemoryFTS|TestFTS5CapabilityProbe' -count=1 -v
+fts_available
+--- PASS: TestMemoryFTSExactIdentifierAndCJKRSearch
+--- PASS: TestMemoryFTSStaysSynchronizedAcrossUpdateDeleteAndReopen
+--- PASS: TestMemoryFTSFallsBackForShortQueries
+ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  1.054s
+
+go test ./internal/memorystore -count=1
+ok  github.com/wwsheng009/ai-agent-runtime/internal/memorystore  30.546s
 ```
 
 关键包构建通过：memorystore/runtime/assembly、contextmgr、config、runtimeapi、toolkit/tools、tools、policy、commands、agent、`cmd/aicli`、`cmd/runtime-server`。
 
-判定的边界：上述结果仅覆盖临时 SQLite fixture 与已提交能力；FTS 测试仍因 `no such module: fts5` 失败，G1 不因这些通过而关闭。
+判定的边界：上述结果仅覆盖临时 SQLite fixture；FTS 代码仍在工作区、未提交，统一 `SearchQuery`/BM25 与 G1 验收仍未完成，因此 G1 不因测试通过而关闭。
 
 真实 `.aicli/memory/memory.db` 本轮未读取、未修改。`15` §1.4 的 37 条 pending digest、13 条 pending `phase1_extract/v2`、`memory_entries=0` 仍是 2026-11-22 的历史快照。
 
@@ -135,8 +145,8 @@ ok  github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands  0.356s
 
 | 风险 | 影响 |
 |---|---|
-| 工作区仍在进行 FTS/G1 改造 | `v2_fts_test.go` 当前失败；若直接合并会引入不稳定测试 |
-| G1 driver 阻断 | FTS/BM25 无法落地；检索质量与参考设计差距长期存在 |
+| 工作区 FTS 代码未提交 | driver 已解锁且测试通过，但代码仍可能与后续编辑一起变动 |
+| G1 检索语义未完成 | 统一 `SearchQuery`/BM25、CLI/HTTP/tool 一致性尚未验收 |
 | G0-5 未执行 | 无法证明真实库 backlog 可恢复、自动记忆可注入 |
 | 宿主分页文件不足 | 大包集成测试偶发编译/链接失败；需分步、限并发验证 |
 | 主工作区并发编辑 | 提交/合并需避开正在修改的 FTS 与 team/agent 文件 |
@@ -146,7 +156,7 @@ ok  github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands  0.356s
 ## 7. 建议执行顺序
 
 1. **已完成**：G3/G3.5 提交、Core citation、onboarding、证据文档与 API/CLI/tool 定向验证。
-2. **G1 决策**：先收敛工作区中的 FTS 实现与 driver 能力；启用 FTS5 或正式接受 `like_fallback`。未决策前 G1 保持 blocked。
+2. **G1 落地**：driver 能力已解决；下一步提交 FTS 实现，并补统一 `SearchQuery`/BM25、CLI/HTTP/tool 一致性与质量证据。
 3. **G2 优先于 G4/G5**：scope/tenant/owner/agent/task 列、backfill、fail-closed 读写与负向测试。
 4. **G0-5**：先只读诊断 + `replay-preview` + `jobDeadlineRepair` dry-run，备份后再受控恢复。
 5. **后续 memory 修正**：把 20:00 后对 `v2_core.go`/`v2_digest_replay.go`/`v2_job_deadline_repair.go` 等工作区改动与 FTS 改造分开提交。
@@ -167,7 +177,7 @@ go test ./internal/toolkit/tools -run 'TestMemory' -count=1
 go test ./internal/tools -run 'TestMemory' -count=1
 ```
 
-注意：工作区若保留正在开发的 FTS 实现，`go test ./internal/memorystore` 会因 driver 缺少 FTS5 而失败；这是 G1 未关闭的预期状态，不应通过删除测试或伪装 LIKE 关闭。
+注意：`sqliteutil` 已自动注册 FTS5，`TestFTS5CapabilityProbe` 返回 `fts_available`；FTS 代码仍未提交，G1 的检索语义与质量证据仍待补。
 
 ```text
 git -C <repo> status --short
