@@ -86,8 +86,12 @@ func TestStoreStatusExtractionBacklog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if report.SearchBackend != "like_fallback" {
-		t.Fatalf("SearchBackend = %q, want explicit LIKE fallback", report.SearchBackend)
+	wantBackend := "like_fallback"
+	if store.ftsEnabled {
+		wantBackend = "fts5"
+	}
+	if report.SearchBackend != wantBackend {
+		t.Fatalf("SearchBackend = %q, want %q", report.SearchBackend, wantBackend)
 	}
 	if report.PendingExtractionJobs != 2 || report.PendingExtractionSessions != 1 {
 		t.Fatalf("pending extraction counts = jobs:%d sessions:%d, want 2/1",
