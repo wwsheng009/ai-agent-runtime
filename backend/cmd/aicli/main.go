@@ -452,6 +452,7 @@ func main() {
 
 	// init 子命令
 	rootCmd.AddCommand(commands.NewInitCommand())
+	rootCmd.AddCommand(commands.NewOnboardingCommand())
 
 	// uninstall 子命令
 	rootCmd.AddCommand(commands.NewUninstallCommand())
