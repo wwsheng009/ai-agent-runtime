@@ -11,13 +11,16 @@
 - `c8acdc30`：`memorystore.SearchRecords` 统一 HTTP、CLI `/memory search`、`memory_search` 工具。
 - `0bfb0450`：CLI status 测试接受 FTS5 backend。
 - `22c4d03a`：注入候选改为 pinned（100）+ manual（100）+ FTS/recent（200）的有界集合，替换全量 active 扫描。
+- `72b275ce`：migration v25 为 recent/pinned/source_kind 候选查询增加 covering index。
+- `2404cd83`：`RecordPage.SearchBackend` 记录实际检索路径（fts5/like_fallback/recent/as_of/legacy_jsonl），FTS 无结果降级到 LIKE 时不再误标为 fts5。
+- `0443f6ad`：`RecordSearchQuery`/`RecordFilter` 支持多 status/kind/tags；SQL 使用 IN 与 `json_each` 全标签匹配，legacy JSONL 同样生效。
 
 未关闭原因：
 
-1. 注入候选裁剪已提交并有 450 条记录的功能测试，但还没有 10k/100k 基准证据；
-2. 统一 SearchQuery 目前仍是单 status/kind/tag；多状态、多 kind/tags 结构化过滤与 G2 scope 字段尚未接入；
+1. 注入候选裁剪已提交并有 450/1k/10k/100k 证据；
+2. 统一 SearchRecords 目前仍是单 status/kind/tag；多状态、多 kind/tags 结构化过滤尚未接入（G2 scope 字段已落地）；
 3. CLI/HTTP/tool 使用同一 store 方法已通过定向测试，但还没有一个跨三端同一 corpus 的端到端证据包；
-4. win7compat 构建使用 pinned driver 的内嵌 FTS5，需要单独构建验证。
+4. 三端同一 corpus 的端到端质量证据仍缺；win7compat 已用独立 modfile/tag 验证。
 
 ---
 
@@ -44,7 +47,7 @@ func init() { sqlite3.AutoExtension(fts5.Register) }
 - 首次创建或 trigger 缺失时执行 `rebuild`；
 - FTS5 不可用时删除 FTS 对象，普通写入继续使用 LIKE fallback；
 - 文本查询使用 `MATCH ?` + `ORDER BY bm25(...)`，短于 3 rune 或 FTS 失败时回落到有界 LIKE；
-- `Status().SearchBackend` 返回 `fts5` 或 `like_fallback`。
+- `Status().SearchBackend` 返回数据库能力；`RecordPage.SearchBackend` 返回本次查询实际路径（`fts5`/`like_fallback`/`recent`/`as_of`/`legacy_jsonl`）。
 
 ### 1.3 统一检索入口
 
@@ -133,11 +136,27 @@ go test ./internal/memorystore \
 规模基准（`-benchtime=5x`，wall time，seed 不计时）：
 
 ```text
-BenchmarkSelectForInjectV2BoundedCandidates/records-1000-2   5   4.05 ms/op   CandidateCount <= 300
-BenchmarkSelectForInjectV2BoundedCandidates/records-10000-2  5  35.22 ms/op   CandidateCount <= 300
+BenchmarkSelectForInjectV2BoundedCandidates/records-1000-2   5   2.61 ms/op   CandidateCount <= 300
+BenchmarkSelectForInjectV2BoundedCandidates/records-10000-2  5   2.94 ms/op   CandidateCount <= 300
+BenchmarkSelectForInjectV2BoundedCandidates/records-100000-2 1   9.54 ms/op   CandidateCount <= 300
 ```
 
-结论：候选数量已被限制在 300 内，但加载延迟仍随 active corpus 近线性增长（1k→10k 约 8.7x），说明 pinned/manual 查询仍可能走表扫描。G1-3 的“候选数量有界”已达成，“延迟不随全表线性增长”尚未达成，需要 pinned/source_kind 组合索引或 SQL 计划复核。
+`EXPLAIN QUERY PLAN` 确认 pinned/manual/recent 均使用 covering index，且不再需要 `USE TEMP B-TREE FOR ORDER BY`。1k→10k 从 4.05→35.22 ms 降到 2.61→2.94 ms（约 1.13x）；10k→100k 为 2.94→9.54 ms（10x 语料约 3.2x），候选数量始终 <=300，已明显低于全表线性增长。
+
+### 2.5 win7compat 验证
+
+```text
+go test -modfile=go.win7.mod -tags win7compat ./internal/memorystore \
+  -run 'TestFTS5CapabilityProbe|TestMemoryFTS' -count=1 -v
+fts_available
+TestMemoryFTSWin7CompatHandlesDriverCapability  PASS
+ok  internal/memorystore  4.234s
+
+go test -modfile=go.win7.mod -tags win7compat ./internal/memorystore -count=1
+ok  internal/memorystore  133.976s
+```
+
+win7compat 不走 `ext/fts5` 注册，而由 pinned driver 的内嵌 Wasm SQLite 提供 FTS5；探针和全量 memorystore 测试均通过。
 
 关键包构建通过：memorystore、runtimeapi、toolkit/tools、commands。
 `cmd/aicli` / `cmd/runtime-server` 的完整构建当前受主工作区未完成的 supervision/team 改动阻塞，不属于本切片。
@@ -153,16 +172,15 @@ BenchmarkSelectForInjectV2BoundedCandidates/records-10000-2  5  35.22 ms/op   Ca
 | `memory_search`/HTTP/CLI 使用同一检索 | ✅ | 均调用 `SearchRecords`；定向测试通过 |
 | 自动抽取记忆在 CLI/HTTP/tool 可见 | ✅ | 现有 source-kind/active 测试通过 |
 | 精确标识符/CJK/路径/函数名/版本号 | ✅（store 层） | `TestMemoryFTSExactIdentifierAndCJKRSearch` |
-| 注入路径不全表加载 + 基准 | 🟡 | 候选数有界（<=300）且有 1k/10k 基准；延迟仍近线性（4.05→35.22 ms/op），需索引/计划优化；100k 未跑 |
-| 多 status/kind/tags 与 scope 过滤 | ❌ | 当前 SearchQuery 仍单值；G2 未实施 |
+| 注入路径不全表加载 + 基准 | ✅ | 候选数有界（<=300），1k/10k/100k 为 2.61/2.94/9.54 ms/op，covering index + 无临时排序 |
+| 多 status/kind/tags 与 scope 过滤 | 🟡 | G2 scope 已落地；store-level 多值已提交，HTTP/CLI/tool 的多值参数尚未接线 |
 | 三端同一 corpus 端到端证据 | 🟡 | 定向测试通过；尚无单一 corpus 证据包 |
 
 ---
 
 ## 4. 后续
 
-1. 优化 pinned/manual 候选查询的索引/计划，使 10k corpus 延迟不再近线性；补 100k 与 why-not 截断证据；
-2. 扩展多 status/kind/tags 结构化过滤，接入 G2 scope；
+1. 补 why-not 截断证据；
+2. 将多 status/kind/tags 接到 HTTP/CLI/tool 参数（store-level 已完成）；
 3. 建立 CLI/HTTP/tool 同一 corpus 的端到端测试；
-4. 补 win7compat 构建验证；
-5. 上述完成后才可关闭 G1。
+4. 上述完成后才可关闭 G1。
