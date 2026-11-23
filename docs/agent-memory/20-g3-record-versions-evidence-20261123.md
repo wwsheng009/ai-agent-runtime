@@ -2,19 +2,19 @@
 
 ## 状态
 
-**G3 主体代码级实现完成，定向测试通过；代码已提交到隔离分支，G3 门禁仍不能关闭。**
+**G3 主体代码级实现完成，定向测试通过；代码已提交并合入 `main`，G3 门禁仍不能关闭。**
 
-> 2026-11-23 追加：实现已提交到分支 `memory/g0-g35-20261123`，主工作区因并发编辑尚未合并。提交：
+> 2026-11-23 追加：实现已提交到分支 `memory/g0-g35-20261123` 并合入 `main`。提交：
 > `8513f579`（G0–G3.5 memory capabilities）、`a9c7a461`（Core citation 与预算选项）、`eb413e1f`（onboarding preset）。
-> 后续 `d05145f6`（FTS5 driver 注册）与 `8ddd48c1`（FTS 索引/同步）已合入 `main`。
+> 后续 `91972cb5`（FTS5 driver 注册，`!win7compat`）与 `8ddd48c1`（FTS 索引/同步）已合入 `main`。
 
 本轮只读取/验证工作区代码与临时 SQLite fixture，未访问、迁移或修改真实 `.aicli/memory/memory.db`。
 
 不能关闭 G3 的原因：
 
-1. 变更仅存在于隔离分支，主分支尚未合并；
+1. G3 门禁仍受 G1 统一检索、G2 tenant、G4 高风险 supersede 依赖限制；
 2. `memory_versions` 使用 `record_json` 快照存储，缺少计划 §6.1 中的 `tenant_id`、独立 `kind/status/title/text/summary/tags_json/metadata_json` 列和 tenant 索引（tenant 依赖 G2）；
-3. FTS 索引已落地（`d05145f6`/`8ddd48c1`，trigger 同步），但 G1 的统一 `SearchQuery`/BM25 与质量验收仍未完成；
+3. FTS 索引已落地（`91972cb5`/`8ddd48c1`，trigger 同步），但 G1 的统一 `SearchQuery`/BM25 与质量验收仍未完成；
 4. 高风险自动 supersede 的“不静默覆盖”审计/门禁未在本切片验证（G3-5/G4 边界）；
 5. G3 退出条件中的 summary/usage 全链路同步未完整覆盖。
 
