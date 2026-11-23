@@ -2106,5 +2106,59 @@ ok   github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands
 
 - G3 代码与测试已落地，但门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制；
 - G3.5 仍按 `18` 的未完成清单保持部分实施；
+- G2 scope 隔离的 schema v24、ScopeContext/grants/fail-closed visibility、主要读写/API 路径已提交（`a4fca327`）；jobs/digests/summaries/export/import/purge/audit 与多 workspace 证据待补，G2 仍未关闭；
 - G0-5 仍未执行，真实 dogfood 库未读取/恢复；
 - G1-0 driver 能力已解决（`sqlitedriver/register_fts5.go` 在主线自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 索引/同步/BM25（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）与有界注入候选（`22c4d03a`）已提交；1k/10k 基准显示延迟仍近线性，需索引优化；多值/G2 scope 与 100k 待补，G1 仍未关闭。
+
+### 19.12 G2 scope 基础层（2026-11-23）
+
+本轮把 G2 从“未实施”推进到“基础层已落地、上层运营面仍部分未接入”。没有声称 G2 关闭。
+
+已实施：
+
+- `memory_entries` 增加 `tenant_id`、`owner_id`、`agent_id`、`task_id`、`scope_kind`、`scope_key`；`memory_jobs`、`memory_summaries`、`memory_turn_digests`、`memory_usage`、`memory_events`、`memory_recall_traces`、`memory_suppressions`、`memory_turn_output_receipts`、`memory_versions`、`memory_core`、`memory_core_usage` 增加 tenant/scope 快照列；migration 为 v24；
+- 增加 `memory_scope_grants`，支持 read/write/admin grant、过期时间、撤销时间和 project/tenant 约束；跨 tenant grant/查询 fail closed；
+- 新增 `ScopeContext`、`WithMemoryScope`、统一可见性 SQL 构造器；可见链为 `project + 当前 user/agent/session/task + 未过期 grant`，且永远限定同一 tenant/project；
+- 新写入按 scope 计算 content hash，相同文本在 alice/bob 或不同 task 下不再发生唯一键碰撞；
+- `GetRecord`、`ListRecords`、`SearchRecords`、FTS5 检索、注入候选/诊断、Update/Delete/Restore/Revalidate、ExportJSONL 已接入 scope 可见性；`SelectForInjectV2` 支持显式 `InjectOptions.Scope`；
+- HTTP records list/get/create 支持 admin 显式 `tenant_id`、`owner_id`、`agent_id`、`scope_session_id`、`task_id`；DTO 返回 scope 字段；
+- 幂等 backfill 在 migration 后修复空 `scope_key`，旧 project 行回填为 `scope_kind='project'`、`scope_key=project_key`。
+
+新增测试覆盖：
+
+- 同 project 不同 user 隔离、相同文本跨 user 共存；
+- 跨 agent/session/task 隔离；
+- tenant mismatch 与缺少 project context fail closed；
+- read grant 可见但不可写、write grant 可写、revoke 后不可见、过期 grant 不可见；
+- FTS/注入路径按调用方 scope 链选择，不泄露其他 user；
+- v24 schema/backfill 修复。
+
+本轮实际验证（`backend`）：
+
+```text
+go test ./internal/memorystore -count=1
+ok
+
+go test ./internal/api/runtimeapi -run 'TestMemory|TestCoreMemory|TestMemoryRecord|TestMemoryScope' -count=1
+ok
+
+go test ./internal/memoryruntime ./internal/memoryassembly -count=1
+ok
+
+go test ./cmd/aicli/commands -run 'TestMemory|TestStructuredMemory|TestChatMemory' -count=1
+ok
+
+go test ./internal/toolkit/tools -run 'TestMemory' -count=1
+ok
+
+go test ./internal/tools -run 'TestMemory' -count=1
+ok
+```
+
+仍未完成：
+
+- `memory_jobs` / `memory_turn_digests` / `memory_summaries` / `memory_events` 的查询与写入尚未全部切到统一 scope filter；`memory_usage` 与 recall trace 已接入 scope 读写/快照，schema 快照列已覆盖其余表，但运营查询仍需逐条接入；
+- runtime-server 仍只有单 workspace memory runtime registry，G2-4 多 workspace 路由未完成；
+- CLI/tool 调用面尚未传 `ScopeContext`；当前用户身份接入 API 显式 admin 参数，不等于完整 tenant/user/agent/task 全链路；
+- export/import 尚无 scope manifest，import 仍拒绝非 project scope；
+- 真实 `.aicli/memory/memory.db` 尚未执行 v24 migration；本轮只使用临时 SQLite fixture 验证。

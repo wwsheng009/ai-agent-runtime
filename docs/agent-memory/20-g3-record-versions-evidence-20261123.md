@@ -7,14 +7,15 @@
 > 2026-11-23 追加：实现已提交到分支 `memory/g0-g35-20261123` 并合入 `main`。提交：
 > `8513f579`（G0–G3.5 memory capabilities）、`a9c7a461`（Core citation 与预算选项）、`eb413e1f`（onboarding preset）。
 > 后续 `91972cb5`（FTS5 driver 注册，`!win7compat`）与 `8ddd48c1`（FTS 索引/同步）已合入 `main`。
+> `a4fca327`（G2 schema v24 scope 列/索引/backfill）也已合入，版本快照补齐 tenant/owner/agent/task/scope 字段。
 
 本轮只读取/验证工作区代码与临时 SQLite fixture，未访问、迁移或修改真实 `.aicli/memory/memory.db`。
 
 不能关闭 G3 的原因：
 
-1. G3 门禁仍受 G1 统一检索、G2 tenant、G4 高风险 supersede 依赖限制；
-2. `memory_versions` 使用 `record_json` 快照存储，缺少计划 §6.1 中的 `tenant_id`、独立 `kind/status/title/text/summary/tags_json/metadata_json` 列和 tenant 索引（tenant 依赖 G2）；
-3. FTS 索引已落地（`91972cb5`/`8ddd48c1`，trigger 同步），但 G1 的统一 `SearchQuery`/BM25 与质量验收仍未完成；
+1. G3 门禁仍受 G4 高风险 supersede 依赖限制；G1 FTS/BM25 与 G2 tenant/scope 已落地；
+2. `memory_versions` 使用 `record_json` 快照存储；tenant/owner/agent/task/scope 列已由 migration v24 补齐，但仍没有计划 §6.1 的全套独立字段列；
+3. FTS 索引与统一 `SearchRecords` 已落地，trigger 同步覆盖版本/rollback 写入；G1 的 100k 基准与多值检索仍未完成；
 4. 高风险自动 supersede 的“不静默覆盖”审计/门禁未在本切片验证（G3-5/G4 边界）；
 5. G3 退出条件中的 summary/usage 全链路同步未完整覆盖。
 
@@ -186,8 +187,8 @@ gofmt -l <G3 related memory/API/CLI files>
 | create/update/correct/supersede/delete/restore 版本测试 | ✅ | `TestRecordVersionsCoverDeleteRestoreCorrectionAndSupersede` |
 | 历史查询 store 层按 `as_of` 返回 | ✅ | `ListRecordsAsOf` + 3 个测试 |
 | 高风险自动 supersede 不静默发生 | ❌ 未验证 | 依赖 G4 冲突审计/人工 correction 边界 |
-| FTS/summary/usage 与版本操作同步 | 🟡 | FTS 由 `memory_entries` trigger 自动同步；summary 仅 rollback successor 失效路径覆盖；usage 未联动 |
-| schema 与计划 §6.1 一致 | 🟡 | 采用 `record_json` 快照；无 `tenant_id` 和独立列/索引（tenant 依赖 G2） |
+| FTS/summary/usage 与版本操作同步 | 🟡 | FTS 由 trigger 自动同步；summary 仅 rollback successor 失效路径覆盖；usage 未联动 |
+| schema 与计划 §6.1 一致 | 🟡 | 采用 `record_json` 快照；v24 已补 tenant/owner/agent/task/scope 列，但仍无独立 kind/status/title/text/summary 列 |
 
 结论：**G3 代码主体可用，但 G3 门禁不能关闭，也不能在文档中标记为已交付。**
 
