@@ -870,18 +870,30 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			if ids := metadataStrings(plan.Stable.Metadata, "memory_ids"); len(ids) > 0 {
 				result.Metadata["project_memory_ids"] = append([]string(nil), ids...)
 			}
+			if coreID := plan.Stable.Metadata.GetString("project_core_id", ""); coreID != "" {
+				result.Metadata["project_core_injected"] = true
+				result.Metadata["project_core_id"] = coreID
+				result.Metadata["project_core_version"] = metadataInt64(plan.Stable.Metadata, "project_core_version")
+				if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
+					metrics["core_injected"] = true
+				}
+			}
 			if metrics, ok := layerMetrics["project_memory"].(map[string]interface{}); ok {
 				metrics["injected"] = true
 				metrics["count"] = plan.Stable.Metadata.GetInt("project_memory_count", 0)
 				metrics["memory_version"] = plan.V2
 			}
-			m.emitEvent("context.project_memory.injected", input.TraceID, input.SessionID, map[string]interface{}{
+			injectedPayload := map[string]interface{}{
 				"task_id": input.TaskID,
 				"query":   input.Goal,
 				"count":   plan.Stable.Metadata.GetInt("project_memory_count", 0),
 				"ids":     metadataStrings(plan.Stable.Metadata, "memory_ids"),
 				"version": 2,
-			})
+			}
+			if coreID := plan.Stable.Metadata.GetString("project_core_id", ""); coreID != "" {
+				injectedPayload["core_id"] = coreID
+			}
+			m.emitEvent("context.project_memory.injected", input.TraceID, input.SessionID, injectedPayload)
 		}
 		projectMemoryRecall = plan.Recall
 	}

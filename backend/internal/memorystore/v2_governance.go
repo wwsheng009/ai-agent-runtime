@@ -40,21 +40,40 @@ func (s *Store) RevalidateRecord(ctx context.Context, id string) (Record, error)
 		return Record{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
+		return Record{}, err
+	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
+		return Record{}, err
+	}
+	nextRevalidate := nullableTime(record.RevalidateAfter)
+	if !record.RevalidateAfter.IsZero() && !record.RevalidateAfter.After(now) {
+		// An explicit revalidation consumes a due one-shot deadline. The next
+		// extraction/revalidation cycle may install a new source deadline;
+		// avoid immediately marking the just-verified row stale again.
+		nextRevalidate = nil
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET freshness_status = 'fresh', last_verified_at = ?, stale_reason = NULL,
-    revision = revision + 1, updated_at = ?
+    revalidate_after = ?, revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
+`, now.Format(time.RFC3339Nano), nextRevalidate, now.Format(time.RFC3339Nano),
+		record.ID, s.cfg.ProjectKey, record.Revision)
 	if err != nil {
 		return Record{}, err
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", record.ID)
 	}
-	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "revalidated", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, "revalidated", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "explicit_revalidate",
-	}); err != nil {
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+		"admin", "explicit revalidation", "update", eventID); err != nil {
 		return Record{}, err
 	}
 	if err := s.markSummariesStaleForRecordTx(ctx, tx, record.ID, "record_revalidated"); err != nil {
@@ -84,12 +103,21 @@ func (s *Store) RestoreRecord(ctx context.Context, id string) (Record, error) {
 		return Record{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
+		return Record{}, err
+	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
+		return Record{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
-UPDATE memory_entries
-SET status = 'active', deleted_at = NULL, freshness_status = 'fresh',
-    last_verified_at = ?, revision = revision + 1, updated_at = ?
+	UPDATE memory_entries
+	SET status = 'active', deleted_at = NULL, freshness_status = 'fresh',
+	    last_verified_at = ?, revalidate_after = NULL, stale_reason = NULL,
+	    valid_from = ?, valid_until = NULL,
+	    revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ? AND revision = ? AND status = 'deleted'
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
+`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
 	if err != nil {
 		return Record{}, err
 	}
@@ -102,9 +130,17 @@ WHERE source_memory_id = ? AND project_key = ? AND reason = 'deleted'
 `, record.ID, s.cfg.ProjectKey); err != nil {
 		return Record{}, err
 	}
-	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "restored", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, "restored", "admin", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "explicit_restore",
-	}); err != nil {
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+		"admin", "explicit restore", "restore", eventID); err != nil {
+		return Record{}, err
+	}
+	if err := s.markSummariesStaleForRecordTx(ctx, tx, record.ID, "record_restored"); err != nil {
 		return Record{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -237,17 +273,26 @@ ORDER BY revalidate_after ASC, id ASC
 		return 0, err
 	}
 	for _, item := range stale {
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET freshness_status = 'stale', stale_reason = 'revalidate_due',
     revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ?
-`, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey); err != nil {
+`, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey)
+		if err != nil {
 			return 0, err
 		}
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", item.session, item.revision+1, map[string]interface{}{
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			continue
+		}
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", item.session, item.revision+1, map[string]interface{}{
 			"reason": "revalidate_due",
-		}); err != nil {
+		})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+			"system:memory_freshness", "revalidate due", "update", eventID); err != nil {
 			return 0, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, "freshness_sweep"); err != nil {
@@ -321,8 +366,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json
-FROM memory_entries WHERE project_key = ? ORDER BY created_at
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+ FROM memory_entries WHERE project_key = ? ORDER BY created_at
 `, s.cfg.ProjectKey)
 	if err != nil {
 		return "", err
@@ -342,6 +387,34 @@ FROM memory_entries WHERE project_key = ? ORDER BY created_at
 		return "", err
 	}
 	_ = rows.Close()
+	versionRows, err := db.QueryContext(ctx, `
+SELECT id, memory_id, version, project_key, scope_kind, scope_key, record_json,
+       changed_by, change_reason, change_type, COALESCE(source_event_id, ''),
+       valid_from, valid_until, created_at
+FROM memory_versions
+WHERE project_key = ?
+ORDER BY memory_id, version
+`, s.cfg.ProjectKey)
+	if err != nil {
+		return "", err
+	}
+	for versionRows.Next() {
+		version, scanErr := scanRecordVersion(versionRows)
+		if scanErr != nil {
+			_ = versionRows.Close()
+			return "", scanErr
+		}
+		line, _ := json.Marshal(map[string]interface{}{"type": "version", "version": version})
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	if err := versionRows.Err(); err != nil {
+		_ = versionRows.Close()
+		return "", err
+	}
+	if err := versionRows.Close(); err != nil {
+		return "", err
+	}
 	summaries, err := s.ListSummaries(ctx, 1000)
 	if err != nil {
 		return "", err
@@ -370,8 +443,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json
-FROM memory_entries WHERE project_key = ? ORDER BY created_at, id
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+ FROM memory_entries WHERE project_key = ? ORDER BY created_at, id
 `, s.cfg.ProjectKey)
 	if err != nil {
 		return "", err
@@ -426,6 +499,8 @@ func (s *Store) Reset(ctx context.Context) error {
 		{`DELETE FROM memory_usage
 		  WHERE project_key = ?
 		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)`, []interface{}{projectKey, projectKey}},
+		{`DELETE FROM memory_core_usage
+		  WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_recall_traces WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_suppressions WHERE project_key = ?`, []interface{}{projectKey}},
 		{`DELETE FROM memory_session_modes WHERE project_key = ?`, []interface{}{projectKey}},
@@ -440,12 +515,17 @@ func (s *Store) Reset(ctx context.Context) error {
 		     OR memory_id IN (SELECT id FROM memory_entries WHERE project_key = ?)
 		     OR memory_id IN (SELECT id FROM memory_summaries WHERE project_key = ?)`, []interface{}{projectKey, projectKey, projectKey}},
 		{`DELETE FROM memory_summaries WHERE project_key = ?`, []interface{}{projectKey}},
-		{`DELETE FROM memory_entries WHERE project_key = ?`, []interface{}{projectKey}},
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
 			return err
 		}
+	}
+	if err := purgeRecordVersionsForProjectTx(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE project_key = ?`, projectKey); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err

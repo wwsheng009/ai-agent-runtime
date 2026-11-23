@@ -66,6 +66,15 @@ WHERE project_key = ? AND use_kind = 'injected_only' AND used_at < ?
 			return result, err
 		}
 		result.Exposures, _ = res.RowsAffected()
+		res, err = tx.ExecContext(ctx, `
+DELETE FROM memory_core_usage
+WHERE project_key = ? AND use_kind = 'injected_only' AND used_at < ?
+`, s.cfg.ProjectKey, cutoff)
+		if err != nil {
+			return result, err
+		}
+		coreExposures, _ := res.RowsAffected()
+		result.Exposures += coreExposures
 	}
 	if err := tx.Commit(); err != nil {
 		return result, err
@@ -140,22 +149,68 @@ WHERE project_key = ? AND source_kind != 'manual'
 		if err := rows.Close(); err != nil {
 			return result, err
 		}
+		type reclassTarget struct {
+			id, session string
+			revision    int64
+		}
 		for _, kind := range kinds {
 			kind = strings.ToLower(strings.TrimSpace(kind))
 			if kind == "" {
 				continue
 			}
 			class := policy.Classes.ClassForKind(kind)
-			res, err := tx.ExecContext(ctx, `
-UPDATE memory_entries
-SET retention_class = ?
-WHERE project_key = ? AND kind = ? AND source_kind != 'manual' AND retention_class != ?
-`, class, s.cfg.ProjectKey, kind, class)
+			rows, err := tx.QueryContext(ctx, `
+SELECT id, COALESCE(source_session_id, ''), revision
+FROM memory_entries
+WHERE project_key = ? AND kind = ? AND source_kind != 'manual'
+  AND retention_class != ?
+ORDER BY id
+`, s.cfg.ProjectKey, kind, class)
 			if err != nil {
 				return result, err
 			}
-			affected, _ := res.RowsAffected()
-			result.Reclassified += affected
+			var targets []reclassTarget
+			for rows.Next() {
+				var item reclassTarget
+				if err := rows.Scan(&item.id, &item.session, &item.revision); err != nil {
+					_ = rows.Close()
+					return result, err
+				}
+				targets = append(targets, item)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return result, err
+			}
+			if err := rows.Close(); err != nil {
+				return result, err
+			}
+			for _, item := range targets {
+				res, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET retention_class = ?, revision = revision + 1, updated_at = ?
+WHERE id = ? AND project_key = ? AND revision = ?
+  AND source_kind != 'manual' AND retention_class != ?
+`, class, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey, item.revision, class)
+				if err != nil {
+					return result, err
+				}
+				affected, _ := res.RowsAffected()
+				if affected == 0 {
+					continue
+				}
+				result.Reclassified += affected
+				eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id,
+					"retention_reclassified", "system", item.session, item.revision+1,
+					map[string]interface{}{"retention_class": class})
+				if err != nil {
+					return result, err
+				}
+				if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+					"system:retention", "retention class reclassified", "retention", eventID); err != nil {
+					return result, err
+				}
+			}
 		}
 	}
 
@@ -260,6 +315,16 @@ WHERE memory_id IN (
 `, s.cfg.ProjectKey, cutoff); err != nil {
 			return result, err
 		}
+		if err := purgeRecordVersionsTx(ctx, tx, s.cfg.ProjectKey, `
+DELETE FROM memory_versions
+WHERE project_key = ? AND memory_id IN (
+    SELECT id FROM memory_entries
+    WHERE project_key = ? AND status = 'deleted' AND deleted_at IS NOT NULL
+      AND deleted_at != '' AND deleted_at < ?
+)
+`, s.cfg.ProjectKey, s.cfg.ProjectKey, cutoff); err != nil {
+			return result, err
+		}
 		res, err := tx.ExecContext(ctx, `
 DELETE FROM memory_entries
 WHERE project_key = ? AND status = 'deleted' AND deleted_at IS NOT NULL
@@ -289,6 +354,15 @@ WHERE project_key = ? AND used_at < ?
 			return result, err
 		}
 		result.UsageDeleted, _ = res.RowsAffected()
+		res, err = tx.ExecContext(ctx, `
+DELETE FROM memory_core_usage
+WHERE project_key = ? AND used_at < ?
+`, s.cfg.ProjectKey, cutoff)
+		if err != nil {
+			return result, err
+		}
+		coreUsageDeleted, _ := res.RowsAffected()
+		result.UsageDeleted += coreUsageDeleted
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -342,9 +416,10 @@ func (s *Store) expireRetentionRowsFromRows(ctx context.Context, tx *sql.Tx, row
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'expired', freshness_status = 'stale', stale_reason = ?,
-    revision = revision + 1, updated_at = ?
+    valid_until = ?, revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ? AND revision = ? AND status IN ('candidate', 'active')
-`, staleReason, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey, item.revision)
+`, staleReason, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+			item.id, s.cfg.ProjectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
@@ -353,8 +428,13 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status IN ('candidate', 'a
 			continue
 		}
 		expired++
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "expired", "system",
-			item.session, item.revision+1, map[string]interface{}{"reason": reason}); err != nil {
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id, "expired", "system",
+			item.session, item.revision+1, map[string]interface{}{"reason": reason})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+			"system:retention", "retention "+reason, "update", eventID); err != nil {
 			return 0, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, "retention_"+reason); err != nil {

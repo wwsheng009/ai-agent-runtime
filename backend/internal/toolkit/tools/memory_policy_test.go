@@ -23,11 +23,14 @@ func TestMemoryToolsPolicyMatchesDefinitionMetadata(t *testing.T) {
 		{NewMemorySessionContextTool(nil), false},
 		{NewMemoryRecentTool(nil), false},
 		{NewMemoryStatsTool(nil), false},
+		{NewMemoryCoreGetTool(nil), false},
 		{NewMemoryWhyTool(nil), false},
 		{NewMemoryWhyNotTool(nil), false},
 		{NewMemoryAddTool(nil), true},
+		{NewMemoryPinTool(nil), true},
 		{NewMemoryCorrectTool(nil), true},
 		{NewMemoryForgetTool(nil), true},
+		{NewMemoryRollbackTool(nil), true},
 	} {
 		t.Run(tc.tool.Name(), func(t *testing.T) {
 			name := tc.tool.Name()

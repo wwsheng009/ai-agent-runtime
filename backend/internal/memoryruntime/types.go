@@ -7,6 +7,7 @@ package memoryruntime
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -21,11 +22,23 @@ const (
 	TriggerStartup    Trigger = "startup"
 	TriggerBoth       Trigger = "both"
 	TriggerManual     Trigger = "manual"
+	// TriggerTurnThreshold is an active-session trigger. It is driven only by
+	// durable canonical capture receipts; it must never infer completed turns
+	// from a live transcript or streaming event.
+	TriggerTurnThreshold Trigger = "turn_threshold"
+	// TriggerTaskCompletion is the reserved G4 lifecycle hook. The hook accepts
+	// only a durable task terminal event and may consume already-frozen capture
+	// ranges, but it does not create/promote Episode memories by itself.
+	TriggerTaskCompletion Trigger = "task_completion"
 )
 
 type Config struct {
-	Mode                       string
-	GenerationDisabled         bool
+	Mode               string
+	GenerationDisabled bool
+	// GenerationTrigger is copied from memory.generation.trigger. Keeping the
+	// normalized value on the runtime lets post-commit hooks make the same
+	// decision as the host scheduler without importing the config package.
+	GenerationTrigger          string
 	Workspace                  string
 	ProjectKey                 string
 	IncludeSubagents           bool
@@ -46,15 +59,21 @@ type Config struct {
 	MaxConsolidationUnusedDays int
 	MinCandidateConfidence     float64
 	SummaryTokenBudget         int
-	CitationEnabled            bool
-	ExposureSampling           float64
-	Lease                      time.Duration
-	WorkerID                   string
-	ExtractionModel            string
-	ExtractionProvider         string
-	ExtractionReasoningEffort  string
-	ConsolidationModel         string
-	ConsolidationProvider      string
+	// CoreRebuildTokenBudget and the two source limits keep automatic Core
+	// generation bounded independently from project-summary consolidation.
+	// Core rebuild only creates reviewable candidates; it never activates one.
+	CoreRebuildTokenBudget    int
+	CoreRebuildMaxRecords     int
+	CoreRebuildMaxUsageRows   int
+	CitationEnabled           bool
+	ExposureSampling          float64
+	Lease                     time.Duration
+	WorkerID                  string
+	ExtractionModel           string
+	ExtractionProvider        string
+	ExtractionReasoningEffort string
+	ConsolidationModel        string
+	ConsolidationProvider     string
 	// Empty stage overrides inherit ExtractionReasoningEffort.
 	ConsolidationReasoningEffort string
 	WindowSummaryReasoningEffort string
@@ -96,6 +115,7 @@ func (c Config) normalized() Config {
 	if c.Mode == "" {
 		c.Mode = "off"
 	}
+	c.GenerationTrigger = strings.ToLower(strings.TrimSpace(c.GenerationTrigger))
 	if c.MaxSessionsPerRun <= 0 {
 		c.MaxSessionsPerRun = 2
 	}
@@ -131,6 +151,15 @@ func (c Config) normalized() Config {
 	}
 	if c.SummaryTokenBudget <= 0 {
 		c.SummaryTokenBudget = 800
+	}
+	if c.CoreRebuildTokenBudget <= 0 {
+		c.CoreRebuildTokenBudget = 1200
+	}
+	if c.CoreRebuildMaxRecords <= 0 {
+		c.CoreRebuildMaxRecords = 32
+	}
+	if c.CoreRebuildMaxUsageRows <= 0 {
+		c.CoreRebuildMaxUsageRows = 200
 	}
 	if c.ConsolidationInterval <= 0 {
 		c.ConsolidationInterval = 24 * time.Hour
@@ -237,8 +266,9 @@ type Candidate struct {
 }
 
 type IgnoredCandidate struct {
-	Reason  string
-	Summary string
+	Reason           string
+	Summary          string
+	SourceMessageIDs []string
 }
 
 type TokenUsage struct {
@@ -275,6 +305,46 @@ type ProjectSummaryGenerator interface {
 
 type Extractor interface {
 	Extract(ctx context.Context, session SessionRef, transcript Transcript) (ExtractionResult, error)
+}
+
+// TaskCompletionEvent is the narrow memory-runtime boundary for a durable
+// AgentControl/team task terminal event. SourceEventID is required so an
+// in-memory notification cannot be mistaken for a durable completion. The
+// memory runtime intentionally keeps this payload bounded and does not depend
+// on the team package. Episode persistence is deliberately outside this G0
+// hook until the G4 schema/patch pipeline exists.
+type TaskCompletionEvent struct {
+	TenantID          string
+	ProjectKey        string
+	SessionID         string
+	TaskID            string
+	Outcome           string
+	Problem           string
+	Actions           []string
+	Result            string
+	FailureReason     string
+	SourceEventIDs    []string
+	SourceEventID     string
+	Durable           bool
+	TeamID            string
+	ResultRef         string
+	SessionGeneration int64
+	StartedAt         time.Time
+	EndedAt           time.Time
+	Timestamp         time.Time
+}
+
+// TaskCompletionConsumer is the future G4 Episode boundary. Implementations
+// must durably enqueue or persist the bounded event and may not infer task
+// completion from a transcript.
+type TaskCompletionConsumer interface {
+	ConsumeTaskCompletion(context.Context, TaskCompletionEvent) error
+}
+
+type TaskCompletionResult struct {
+	Trigger  Trigger
+	Accepted bool
+	Reason   string
 }
 
 type SessionSource interface {

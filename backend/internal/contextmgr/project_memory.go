@@ -116,6 +116,10 @@ func buildMemoryRecallQuery(input BuildInput) string {
 
 func buildStableMemoryMessage(selection memorystore.Selection) *types.Message {
 	var lines []string
+	if selection.Core != nil && strings.TrimSpace(selection.Core.Content) != "" {
+		lines = append(lines, fmt.Sprintf("[reviewed project core v%d] %s",
+			selection.Core.Version, strings.TrimSpace(selection.Core.Content)))
+	}
 	if selection.Summary != nil && strings.TrimSpace(selection.Summary.Text) != "" {
 		lines = append(lines, strings.TrimSpace(selection.Summary.Text))
 	}
@@ -136,7 +140,15 @@ func buildStableMemoryMessage(selection memorystore.Selection) *types.Message {
 	message.Metadata["context_stage"] = "project_memory"
 	message.Metadata["memory_version"] = 2
 	message.Metadata["memory_block_kind"] = string(memorystore.BlockStable)
-	message.Metadata["project_memory_count"] = len(selection.Stable)
+	memoryCount := len(selection.Stable)
+	if selection.Core != nil && strings.TrimSpace(selection.Core.Content) != "" {
+		memoryCount++
+		message.Metadata["project_core_id"] = selection.Core.ID
+		message.Metadata["project_core_version"] = selection.Core.Version
+		message.Metadata["project_core_source_ids"] = append([]string(nil), selection.Core.SourceIDs...)
+		message.Metadata["project_memory_token_estimate"] = selection.TokenEstimate
+	}
+	message.Metadata["project_memory_count"] = memoryCount
 	if selection.Summary != nil {
 		message.Metadata["memory_revision"] = selection.Summary.Revision
 		if len(selection.Summary.RecordIDs) > 0 {

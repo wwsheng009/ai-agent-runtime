@@ -117,6 +117,10 @@ func ShouldRegisterMemoryCorrectTool(runtimeConfig *runtimecfg.RuntimeConfig) bo
 	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Tools.AllowCorrect
 }
 
+func ShouldRegisterMemoryRollbackTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Tools.AllowRollback
+}
+
 func ShouldRegisterMemoryAddTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
 	return ShouldRegisterMemoryTools(runtimeConfig) && runtimeConfig.Memory.Manual.Enabled
 }
@@ -164,9 +168,13 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 	{Canonical: "memory_session_context", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemorySessionContextTool(cfg) }},
 	{Canonical: "memory_recent", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryRecentTool(cfg) }},
 	{Canonical: "memory_stats", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryStatsTool(cfg) }},
+	{Canonical: "memory_core_get", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryCoreGetTool(cfg) }},
 	{Canonical: "memory_add", Condition: ShouldRegisterMemoryAddTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryAddTool(cfg) }},
+	{Canonical: "memory_pin", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryPinTool(cfg) }},
 	{Canonical: "memory_correct", Condition: ShouldRegisterMemoryCorrectTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryCorrectTool(cfg) }},
 	{Canonical: "memory_forget", Condition: ShouldRegisterMemoryForgetTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryForgetTool(cfg) }},
 	{Canonical: "memory_why", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryWhyTool(cfg) }},
 	{Canonical: "memory_why_not", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryWhyNotTool(cfg) }},
+	{Canonical: "memory_history", Condition: ShouldRegisterMemoryTools, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryHistoryTool(cfg) }},
+	{Canonical: "memory_rollback", Condition: ShouldRegisterMemoryRollbackTool, New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMemoryRollbackTool(cfg) }},
 }

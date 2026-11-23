@@ -116,6 +116,31 @@ func (h *Handler) MemoryRuntime() *memoryruntime.Runtime {
 	return h.memoryRuntime
 }
 
+// SetMemoryRuntimeBootError publishes a bounded diagnostic for a configured
+// Memory runtime that failed to initialize. The detail is redacted here and
+// the status endpoint still restricts it to admins.
+func (h *Handler) SetMemoryRuntimeBootError(err error) {
+	if h == nil {
+		return
+	}
+	message := ""
+	if err != nil {
+		message = sanitizeMemoryDiagnosticText(err.Error())
+	}
+	h.memoryRuntimeMu.Lock()
+	h.memoryRuntimeBootError = message
+	h.memoryRuntimeMu.Unlock()
+}
+
+func (h *Handler) MemoryRuntimeBootError() string {
+	if h == nil {
+		return ""
+	}
+	h.memoryRuntimeMu.RLock()
+	defer h.memoryRuntimeMu.RUnlock()
+	return h.memoryRuntimeBootError
+}
+
 // BindMemoryDigestInvalidation prevents pending turn digests and existing
 // session-derived memory records from being reused after compaction/backtrack
 // changed the canonical transcript. It returns an unsubscribe function.
@@ -332,4 +357,33 @@ func (h *Handler) RebuildMemorySummariesForWorkspace(ctx context.Context, worksp
 		consolidator.Config = memoryruntime.WithLLMProjectSummarizer(consolidator.Config, h.llmRuntime)
 	}
 	return consolidator.RebuildStaleSummaries(ctx)
+}
+
+// RebuildMemoryCoreForWorkspace runs one bounded, operator-triggered Core
+// rebuild using the active runtime configuration. The store method only
+// creates a reviewable candidate; it never activates or replaces the active
+// Core.
+func (h *Handler) RebuildMemoryCoreForWorkspace(ctx context.Context, workspace string) (memoryruntime.CoreRebuildResult, error) {
+	store, err := h.openMemoryStore(workspace)
+	if err != nil {
+		return memoryruntime.CoreRebuildResult{}, err
+	}
+	defer store.Close()
+
+	mode := "off"
+	core := runtimecfg.MemoryCoreConfig{}
+	if h.runtimeConfig != nil {
+		mode = strings.ToLower(strings.TrimSpace(h.runtimeConfig.Memory.Mode))
+		core = h.runtimeConfig.Memory.Core
+	}
+	cfg := memoryruntime.Config{
+		Mode:                    mode,
+		ProjectKey:              store.ProjectKey(),
+		CoreRebuildMaxRecords:   core.Rebuild.MaxRecords,
+		CoreRebuildMaxUsageRows: core.Rebuild.MaxUsageRows,
+		CoreRebuildTokenBudget:  core.Rebuild.TokenBudget,
+		MaxAttempts:             3,
+		WorkerID:                fmt.Sprintf("runtime-server-core-%d", os.Getpid()),
+	}
+	return memoryruntime.NewCoreRebuilder(store, cfg).Run(ctx)
 }

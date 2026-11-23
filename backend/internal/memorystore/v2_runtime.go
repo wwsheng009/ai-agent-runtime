@@ -40,6 +40,9 @@ func (s *Store) EnsureJob(ctx context.Context, job MemoryJob) (MemoryJob, error)
 	if job.Status == "" {
 		job.Status = JobStatusPending
 	}
+	if job.Priority == 0 {
+		job.Priority = DefaultJobPriority(job.Kind)
+	}
 	if job.Kind == "phase1_extract/v2" && !job.RepairOnly {
 		// A receipt-backed v2 job is only executable when its complete source
 		// identity is present.  Keep malformed rows out of the claim path
@@ -64,6 +67,9 @@ func (s *Store) EnsureJob(ctx context.Context, job MemoryJob) (MemoryJob, error)
 	}
 	if job.UpdatedAt.IsZero() {
 		job.UpdatedAt = now
+	}
+	if job.DeadlineAt.IsZero() {
+		job.DeadlineAt = now.Add(DefaultMemoryJobTimeout)
 	}
 	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
@@ -104,6 +110,88 @@ ON CONFLICT(kind, scope, project_key, job_key) DO NOTHING
 	return s.getJobByKey(ctx, job.Kind, job.Scope, job.ProjectKey, job.JobKey)
 }
 
+// EnqueueCoreRebuild coalesces manual rebuild requests to one project-scoped
+// job. A pending request is expedited, a live running request is preserved,
+// and a terminal request is reset for a new bounded attempt window.
+func (s *Store) EnqueueCoreRebuild(ctx context.Context, maxAttempts int) (MemoryJob, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return MemoryJob{}, err
+	}
+	projectKey := strings.TrimSpace(s.cfg.ProjectKey)
+	if projectKey == "" {
+		return MemoryJob{}, fmt.Errorf("memorystore: core rebuild requires a project key")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+	if maxAttempts > 10 {
+		maxAttempts = 10
+	}
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	deadlineText := now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano)
+	const kind = "core_rebuild"
+	const jobKeyPrefix = "project:"
+	jobKey := jobKeyPrefix + projectKey
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return MemoryJob{}, fmt.Errorf("memorystore: begin enqueue core rebuild: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
+		return MemoryJob{}, err
+	}
+	if err := checkJobPurgeFenceIdentityTx(ctx, tx, projectKey, kind, jobKey, "", 0, ""); err != nil {
+		return MemoryJob{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO memory_jobs (
+    id, kind, job_key, scope, project_key, status, priority, attempt,
+    max_attempts, created_at, updated_at, deadline_at
+) VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, ?, ?)
+ON CONFLICT(kind, scope, project_key, job_key) DO UPDATE SET
+    status = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN 'pending' ELSE memory_jobs.status END,
+    worker_id = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN NULL ELSE memory_jobs.worker_id END,
+    lease_until = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN NULL ELSE memory_jobs.lease_until END,
+    attempt = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN 0 ELSE memory_jobs.attempt END,
+    max_attempts = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN excluded.max_attempts ELSE memory_jobs.max_attempts END,
+    retry_at = NULL,
+    finished_at = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN NULL ELSE memory_jobs.finished_at END,
+    last_error = CASE
+        WHEN memory_jobs.status IN ('succeeded', 'failed', 'cancelled', 'dead_letter')
+        THEN NULL ELSE memory_jobs.last_error END,
+    last_success_watermark = CASE
+        WHEN memory_jobs.status = 'succeeded'
+        THEN NULL ELSE memory_jobs.last_success_watermark END,
+    deadline_at = CASE
+        WHEN memory_jobs.status = 'running'
+        THEN memory_jobs.deadline_at ELSE excluded.deadline_at END,
+    updated_at = excluded.updated_at
+WHERE memory_jobs.status IN ('pending', 'succeeded', 'failed', 'cancelled', 'dead_letter')
+`, "job_"+uuid.NewString(), kind, jobKey, string(ScopeProject), projectKey,
+		JobPriorityCoreRebuild, maxAttempts, nowText, nowText, deadlineText)
+	if err != nil {
+		return MemoryJob{}, fmt.Errorf("memorystore: enqueue core rebuild: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryJob{}, fmt.Errorf("memorystore: commit enqueue core rebuild: %w", err)
+	}
+	return s.getJobByKey(ctx, kind, ScopeProject, projectKey, jobKey)
+}
+
 func (s *Store) getJobByKey(ctx context.Context, kind string, scope Scope, projectKey, jobKey string) (MemoryJob, error) {
 	db, err := s.ensureV2()
 	if err != nil {
@@ -122,6 +210,36 @@ SELECT id, kind, job_key, scope, project_key, status, priority,
        COALESCE(dead_letter_reason, ''), repair_only
 FROM memory_jobs WHERE kind = ? AND scope = ? AND project_key = ? AND job_key = ?
 `, kind, string(scope), projectKey, jobKey)
+	return scanMemoryJobRow(row)
+}
+
+// GetJob returns one job in the current project by its durable id. Runtime
+// workers use this after a claim to surface the persisted attempt/status
+// without reaching into Store internals. Project scoping is intentional:
+// job ids are not an authorization boundary and must never cross projects.
+func (s *Store) GetJob(ctx context.Context, id string) (MemoryJob, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return MemoryJob{}, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return MemoryJob{}, fmt.Errorf("memorystore: job id is required")
+	}
+	row := db.QueryRowContext(ctx, `
+ SELECT id, kind, job_key, scope, project_key, status, priority,
+        COALESCE(worker_id, ''), COALESCE(lease_until, ''), attempt, max_attempts,
+        COALESCE(retry_at, ''), COALESCE(started_at, ''), COALESCE(finished_at, ''),
+        COALESCE(last_error, ''), COALESCE(input_watermark, ''),
+        COALESCE(last_success_watermark, ''), created_at, updated_at,
+        COALESCE(session_id, ''), session_generation, COALESCE(capture_receipt_id, ''),
+        source_start_seq, source_end_seq, source_revision, COALESCE(source_hash, ''),
+        COALESCE(available_at, ''), COALESCE(deadline_at, ''), COALESCE(heartbeat_at, ''),
+        COALESCE(deferred_until, ''), COALESCE(dead_letter_at, ''),
+        COALESCE(dead_letter_reason, ''), repair_only
+ FROM memory_jobs
+ WHERE id = ? AND project_key = ?
+ `, id, s.cfg.ProjectKey)
 	return scanMemoryJobRow(row)
 }
 
@@ -159,17 +277,52 @@ func (s *Store) ClaimJobs(ctx context.Context, opts ClaimJobOptions) ([]MemoryJo
 	if err := validateMaintenanceLeaseTx(ctx, tx, projectKey); err != nil {
 		return nil, err
 	}
+	// A lease expiry is normally recoverable, but once the claim's deadline
+	// has also elapsed the worker missed its bounded execution window. Keep
+	// that outcome durable instead of silently returning it to pending forever.
+	// The attempt fence still makes this safe when a replacement worker races
+	// with the reclaim transaction.
+	nowText := now.Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
-SET status = 'pending', worker_id = NULL, lease_until = NULL,
-    deadline_at = NULL, heartbeat_at = NULL, updated_at = ?
+SET status = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+        THEN CASE WHEN attempt >= max_attempts THEN 'dead_letter' ELSE 'failed' END
+        ELSE 'pending'
+    END,
+    worker_id = NULL,
+    lease_until = NULL,
+    heartbeat_at = NULL,
+    retry_at = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+        THEN NULL ELSE retry_at END,
+    finished_at = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+        THEN ? ELSE finished_at END,
+    dead_letter_at = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+             AND attempt >= max_attempts
+        THEN ? ELSE dead_letter_at END,
+    dead_letter_reason = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+             AND attempt >= max_attempts
+        THEN 'job deadline exceeded' ELSE dead_letter_reason END,
+    last_error = CASE
+        WHEN deadline_at IS NOT NULL AND deadline_at != '' AND deadline_at <= ?
+        THEN 'job deadline exceeded' ELSE last_error END,
+    updated_at = ?
 WHERE project_key = ? AND status = 'running'
   AND lease_until IS NOT NULL AND lease_until != '' AND lease_until <= ?
-`, now.Format(time.RFC3339Nano), projectKey, now.Format(time.RFC3339Nano)); err != nil {
+	`, nowText, nowText, nowText, nowText,
+		nowText, nowText, nowText, nowText, nowText, projectKey, nowText); err != nil {
 		return nil, fmt.Errorf("memorystore: reclaim expired jobs: %w", err)
 	}
 	args := []interface{}{string(JobStatusPending), now.Format(time.RFC3339Nano), projectKey}
-	where := []string{"status = ?", "(retry_at IS NULL OR retry_at = '' OR retry_at <= ?)", "project_key = ?"}
+	where := []string{
+		"status = ?",
+		"(retry_at IS NULL OR retry_at = '' OR retry_at <= ?)",
+		"project_key = ?",
+	}
 	if strings.TrimSpace(opts.Kind) != "" {
 		where = append(where, "kind = ?")
 		args = append(args, strings.TrimSpace(opts.Kind))
@@ -234,15 +387,55 @@ WHERE id = ? AND status = 'pending'
 			}
 			return nil, err
 		}
+		// Historical rows created before deadline_at existed must remain
+		// claimable. Grant one bounded execution window from this claim instead
+		// of retroactively failing them from created_at. An already persisted
+		// expired deadline remains terminal below, and a retry of a legacy row
+		// receives a fresh bounded window with its new attempt.
+		if job.DeadlineAt.IsZero() {
+			job.DeadlineAt = now.Add(DefaultMemoryJobTimeout)
+		}
+		if !job.DeadlineAt.IsZero() && !job.DeadlineAt.After(now) {
+			nextStatus := JobStatusFailed
+			if job.Attempt >= job.MaxAttempts {
+				nextStatus = JobStatusDeadLetter
+			}
+			nowText := now.Format(time.RFC3339Nano)
+			deadLetterAt := ""
+			deadLetterReason := ""
+			if nextStatus == JobStatusDeadLetter {
+				deadLetterAt = nowText
+				deadLetterReason = "job deadline exceeded"
+			}
+			res, updateErr := tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = ?, deadline_at = ?, worker_id = NULL, lease_until = NULL, retry_at = NULL,
+    deferred_until = NULL, finished_at = ?, dead_letter_at = NULLIF(?, ''),
+    dead_letter_reason = NULLIF(?, ''), last_error = ?, updated_at = ?
+WHERE id = ? AND project_key = ? AND status = 'pending'
+`, string(nextStatus), job.DeadlineAt.UTC().Format(time.RFC3339Nano),
+				nowText, deadLetterAt, deadLetterReason,
+				"job deadline exceeded", nowText, job.ID, projectKey)
+			if updateErr != nil {
+				return nil, fmt.Errorf("memorystore: expire pending job %s: %w", job.ID, updateErr)
+			}
+			if affected, affectedErr := res.RowsAffected(); affectedErr != nil {
+				return nil, affectedErr
+			} else if affected == 1 {
+				continue
+			}
+		}
 		leaseUntil := now.Add(lease).UTC().Format(time.RFC3339Nano)
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
-SET status = 'running', worker_id = ?, lease_until = ?, attempt = attempt + 1,
+SET status = 'running', deadline_at = COALESCE(NULLIF(deadline_at, ''), ?),
+    worker_id = ?, lease_until = ?, attempt = attempt + 1,
     started_at = COALESCE(started_at, ?), heartbeat_at = ?,
-    deadline_at = ?, updated_at = ?
+    updated_at = ?
 WHERE id = ? AND status = 'pending'
-`, strings.TrimSpace(opts.WorkerID), leaseUntil, now.Format(time.RFC3339Nano),
-			now.Format(time.RFC3339Nano), leaseUntil, now.Format(time.RFC3339Nano), job.ID)
+`, job.DeadlineAt.UTC().Format(time.RFC3339Nano),
+			strings.TrimSpace(opts.WorkerID), leaseUntil, now.Format(time.RFC3339Nano),
+			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), job.ID)
 		if err != nil {
 			return nil, fmt.Errorf("memorystore: claim job %s: %w", job.ID, err)
 		}
@@ -254,7 +447,6 @@ WHERE id = ? AND status = 'pending'
 		job.WorkerID = strings.TrimSpace(opts.WorkerID)
 		job.LeaseUntil = now.Add(lease).UTC()
 		job.HeartbeatAt = now
-		job.DeadlineAt = now.Add(lease).UTC()
 		job.Attempt++
 		job.UpdatedAt = now
 		claimed = append(claimed, job)
@@ -299,12 +491,13 @@ func (s *Store) HeartbeatJobForWorkerAttempt(
 	nowText := now.Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_jobs
-SET lease_until = ?, deadline_at = ?, heartbeat_at = ?, updated_at = ?
+SET lease_until = ?, heartbeat_at = ?, updated_at = ?
 WHERE id = ? AND project_key = ? AND status = 'running'
   AND worker_id = ? AND attempt = ?
   AND lease_until IS NOT NULL AND lease_until != '' AND lease_until > ?
-`, leaseUntil.Format(time.RFC3339Nano), leaseUntil.Format(time.RFC3339Nano),
-		nowText, nowText, id, s.cfg.ProjectKey, workerID, attempt, nowText)
+  AND (deadline_at IS NULL OR deadline_at = '' OR deadline_at > ?)
+`, leaseUntil.Format(time.RFC3339Nano), nowText, nowText,
+		id, s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
 	if err != nil {
 		return fmt.Errorf("memorystore: heartbeat job %s: %w", id, err)
 	}
@@ -382,6 +575,60 @@ WHERE id = ? AND project_key = ? AND status = 'running' AND worker_id = ?
 		return fmt.Errorf("memorystore: job %s is no longer owned by worker %s", id, workerID)
 	}
 	return tx.Commit()
+}
+
+// CompleteJobForWorkerAttempt completes a live claim only when both worker
+// identity and claim attempt still match. Workers that need a strict fence
+// should use this instead of the compatibility method above.
+func (s *Store) CompleteJobForWorkerAttempt(
+	ctx context.Context,
+	id, workerID string,
+	attempt int,
+	watermark string,
+) error {
+	db, err := s.ensureV2()
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	workerID = strings.TrimSpace(workerID)
+	if id == "" || workerID == "" || attempt <= 0 {
+		return fmt.Errorf("memorystore: complete job requires job, worker and positive attempt")
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return fmt.Errorf("memorystore: begin complete job attempt: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateMaintenanceLeaseTx(ctx, tx, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	if err := checkJobPurgeFenceByIDTx(ctx, tx, id, s.cfg.ProjectKey); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx, `
+UPDATE memory_jobs
+SET status = 'succeeded', worker_id = NULL, lease_until = NULL,
+    deadline_at = NULL, heartbeat_at = NULL, finished_at = ?,
+    last_success_watermark = ?, updated_at = ?
+WHERE id = ? AND project_key = ? AND status = 'running'
+  AND worker_id = ? AND attempt = ?
+  AND COALESCE(lease_until, '') > ? AND COALESCE(deadline_at, '') > ?
+`, nowText, nullableString(watermark), nowText,
+		id, s.cfg.ProjectKey, workerID, attempt, nowText, nowText)
+	if err != nil {
+		return fmt.Errorf("memorystore: complete job attempt: %w", err)
+	}
+	if affected, _ := res.RowsAffected(); affected != 1 {
+		return fmt.Errorf("%w: job=%s worker=%s attempt=%d",
+			ErrJobLeaseLost, id, workerID, attempt)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memorystore: commit complete job attempt: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) FailJob(ctx context.Context, id, errText string, retryAt time.Time) error {
@@ -555,6 +802,10 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		Kind:                    kind,
 		Status:                  StatusCandidate,
 		Text:                    text,
+		Title:                   strings.TrimSpace(candidate.Title),
+		Summary:                 strings.TrimSpace(candidate.Summary),
+		CanonicalID:             strings.TrimSpace(candidate.CanonicalID),
+		Archived:                candidate.Archived,
 		NormalizedText:          normalizeMemoryText(text),
 		Tags:                    normalizeTags(candidate.Tags),
 		Confidence:              candidate.Confidence,
@@ -562,6 +813,9 @@ func (s *Store) InsertCandidate(ctx context.Context, candidate Candidate) (Recor
 		Pinned:                  false,
 		RetentionClass:          firstNonEmpty(candidate.RetentionClass, "standard"),
 		SourceKind:              sourceKind,
+		SourceType:              candidate.SourceType,
+		SourceTrust:             candidate.SourceTrust,
+		SourceQuote:             candidate.SourceQuote,
 		SourceSessionID:         strings.TrimSpace(candidate.SessionID),
 		SourceSessionGeneration: candidate.SessionGeneration,
 		SourceTurnID:            strings.TrimSpace(candidate.TurnID),
@@ -621,20 +875,30 @@ func (s *Store) PromoteCandidate(ctx context.Context, id string) (Record, error)
 	if err := validateMaintenanceLeaseTx(ctx, tx, record.ProjectKey); err != nil {
 		return Record{}, err
 	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
+		return Record{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
-SET status = 'active', revision = revision + 1, updated_at = ?
+SET status = 'active', valid_from = ?, valid_until = NULL,
+    revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ? AND revision = ? AND status = 'candidate'
-`, now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
+`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		record.ID, s.cfg.ProjectKey, record.Revision)
 	if err != nil {
 		return Record{}, err
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: candidate %s changed concurrently", record.ID)
 	}
-	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "promoted", "consolidation", record.SourceSessionID, record.Revision+1, map[string]interface{}{
+	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, "promoted", "consolidation", record.SourceSessionID, record.Revision+1, map[string]interface{}{
 		"reason": "phase2_consolidation",
-	}); err != nil {
+	})
+	if err != nil {
+		return Record{}, err
+	}
+	if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey,
+		"consolidation", "phase2 consolidation", "promote", eventID); err != nil {
 		return Record{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -676,32 +940,113 @@ func (s *Store) SupersedeRecord(ctx context.Context, id, supersededBy, reason st
 	if err := validateMaintenanceLeaseTx(ctx, tx, loser.ProjectKey); err != nil {
 		return Record{}, err
 	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, loser); err != nil {
+		return Record{}, err
+	}
+	if err := checkRecordSessionPurgeFenceTx(ctx, tx, winner); err != nil {
+		return Record{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
-SET status = 'superseded', revision = revision + 1, updated_at = ?
+SET status = 'superseded', superseded_by = ?, valid_until = ?, revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
-`, now.Format(time.RFC3339Nano), loser.ID, s.cfg.ProjectKey, loser.Revision)
+`, winner.ID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		loser.ID, s.cfg.ProjectKey, loser.Revision)
 	if err != nil {
 		return Record{}, err
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return Record{}, fmt.Errorf("memorystore: record %s changed concurrently", loser.ID)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	winnerUpdate, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
-SET supersedes_id = ?
+SET supersedes_id = ?, revision = revision + 1, updated_at = ?
 WHERE id = ? AND project_key = ?
+  AND revision = ? AND status = 'active'
   AND (supersedes_id IS NULL OR supersedes_id = '')
-`, loser.ID, winner.ID, s.cfg.ProjectKey); err != nil {
+`, loser.ID, now.Format(time.RFC3339Nano), winner.ID, s.cfg.ProjectKey, winner.Revision)
+	if err != nil {
 		return Record{}, err
 	}
-	if err := insertEventTx(ctx, tx, loser.ProjectKey, loser.ID, "superseded", "consolidation", loser.SourceSessionID, loser.Revision+1, map[string]interface{}{
-		"reason": strings.TrimSpace(reason), "superseded_by": winner.ID,
-	}); err != nil {
+	winnerChanged, _ := winnerUpdate.RowsAffected()
+	if winnerChanged == 0 {
+		// An existing canonical link is retained, but a stale winner revision
+		// must still fail closed instead of silently proceeding.
+		var currentRevision int64
+		if err := tx.QueryRowContext(ctx, `
+SELECT revision FROM memory_entries WHERE id = ? AND project_key = ?
+`, winner.ID, s.cfg.ProjectKey).Scan(&currentRevision); err != nil {
+			return Record{}, err
+		}
+		if currentRevision != winner.Revision {
+			return Record{}, fmt.Errorf("memorystore: winner %s changed concurrently", winner.ID)
+		}
+	}
+	reason = firstNonEmpty(strings.TrimSpace(reason), "superseded")
+	loserVersion := loser.Revision + 1
+	winnerVersion := winner.Revision
+	if winnerChanged > 0 {
+		winnerVersion++
+	}
+	audit := map[string]interface{}{
+		"change_type":    "supersede",
+		"reason":         reason,
+		"old_record_id":  loser.ID,
+		"old_version":    loserVersion,
+		"new_record_id":  winner.ID,
+		"new_version":    winnerVersion,
+		"old_confidence": loser.Confidence,
+		"new_confidence": winner.Confidence,
+		"old_source_ids": conflictAuditParticipant(loser, loserVersion)["source_ids"],
+		"new_source_ids": conflictAuditParticipant(winner, winnerVersion)["source_ids"],
+		"old_record":     conflictAuditParticipant(loser, loserVersion),
+		"new_record":     conflictAuditParticipant(winner, winnerVersion),
+		"superseded_by":  winner.ID,
+	}
+	loserEventID, err := insertEventIDTx(ctx, tx, loser.ProjectKey, loser.ID, "superseded", "consolidation", loser.SourceSessionID, loser.Revision+1, map[string]interface{}{
+		"reason": reason, "superseded_by": winner.ID,
+		"change_type": "supersede", "old_record_id": loser.ID,
+		"old_version": loserVersion, "new_record_id": winner.ID,
+		"new_version": winnerVersion, "old_confidence": loser.Confidence,
+		"new_confidence": winner.Confidence,
+		"old_source_ids": audit["old_source_ids"],
+		"new_source_ids": audit["new_source_ids"],
+		"old_record":     audit["old_record"],
+		"new_record":     audit["new_record"],
+	})
+	if err != nil {
 		return Record{}, err
+	}
+	if err := appendCurrentRecordVersionTx(ctx, tx, loser.ID, loser.ProjectKey,
+		"consolidation", firstNonEmpty(reason, "superseded"), "supersede", loserEventID); err != nil {
+		return Record{}, err
+	}
+	if winnerChanged > 0 {
+		winnerEventID, err := insertEventIDTx(ctx, tx, winner.ProjectKey, winner.ID, "supersedes_linked", "consolidation", winner.SourceSessionID, winner.Revision+1, map[string]interface{}{
+			"supersedes_id": loser.ID, "change_type": "supersede",
+			"old_record_id": loser.ID, "old_version": loserVersion,
+			"new_record_id": winner.ID, "new_version": winnerVersion,
+			"old_confidence": loser.Confidence, "new_confidence": winner.Confidence,
+			"old_source_ids": audit["old_source_ids"],
+			"new_source_ids": audit["new_source_ids"],
+			"old_record":     audit["old_record"],
+			"new_record":     audit["new_record"],
+		})
+		if err != nil {
+			return Record{}, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, winner.ID, winner.ProjectKey,
+			"consolidation", "supersede link recorded", "supersede", winnerEventID); err != nil {
+			return Record{}, err
+		}
 	}
 	if err := s.markSummariesStaleForRecordTx(ctx, tx, loser.ID, "record_superseded"); err != nil {
 		return Record{}, err
+	}
+	if winnerChanged > 0 {
+		if err := s.markSummariesStaleForRecordTx(ctx, tx, winner.ID, "supersede_link_recorded"); err != nil {
+			return Record{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Record{}, err
@@ -713,6 +1058,9 @@ WHERE id = ? AND project_key = ?
 // same session as a revalidation. Without this, the content-hash unique index
 // would keep the old candidate stale forever after a source/hash change.
 func (s *Store) reviveCandidate(ctx context.Context, db *sql.DB, record Record) (Record, bool, error) {
+	if err := validateRecordMetadata(&record); err != nil {
+		return Record{}, false, err
+	}
 	var existingID, existingSession string
 	var existingGeneration, existingRevision int64
 	err := db.QueryRowContext(ctx, `
@@ -749,10 +1097,13 @@ func (s *Store) reviveCandidate(ctx context.Context, db *sql.DB, record Record) 
 UPDATE memory_entries
 SET freshness_status = 'fresh', stale_reason = NULL, last_verified_at = ?,
     revalidate_after = ?, updated_at = ?, revision = revision + 1,
-    confidence = CASE WHEN confidence < ? THEN ? ELSE confidence END
-WHERE id = ? AND revision = ?
+    confidence = CASE WHEN confidence < ? THEN ? ELSE confidence END,
+    title = ?, summary = ?, canonical_id = ?, superseded_by = ?, archived = ?
+ WHERE id = ? AND project_key = ? AND revision = ?
 `, now.Format(time.RFC3339Nano), nullableTime(record.RevalidateAfter),
-		now.Format(time.RFC3339Nano), record.Confidence, record.Confidence, existingID, existingRevision)
+		now.Format(time.RFC3339Nano), record.Confidence, record.Confidence,
+		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
+		existingID, record.ProjectKey, existingRevision)
 	if err != nil {
 		return Record{}, false, err
 	}
@@ -764,9 +1115,14 @@ WHERE id = ? AND revision = ?
 	if err := insertSourceTx(ctx, tx, record, record.SourceSessionID); err != nil {
 		return Record{}, false, err
 	}
-	if err := insertEventTx(ctx, tx, record.ProjectKey, existingID, "revalidated", "agent", record.SourceSessionID, record.Revision, map[string]interface{}{
+	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, existingID, "revalidated", "agent", record.SourceSessionID, record.Revision, map[string]interface{}{
 		"reason": "same_session_reextract",
-	}); err != nil {
+	})
+	if err != nil {
+		return Record{}, false, err
+	}
+	if err := appendCurrentRecordVersionTx(ctx, tx, existingID, record.ProjectKey,
+		"agent", "same-session re-extraction", "update", eventID); err != nil {
 		return Record{}, false, err
 	}
 	if err := s.markSummariesStaleForRecordTx(ctx, tx, existingID, "candidate_revalidated"); err != nil {
@@ -890,17 +1246,23 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
-    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, item.revision)
+    revision = revision + 1, updated_at = ?
+ WHERE id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, projectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
 		if affected, _ := res.RowsAffected(); affected == 0 {
 			continue
 		}
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
 			"reason": reason,
-		}); err != nil {
+		})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
+			"system:source_invalidation", reason, "update", eventID); err != nil {
 			return 0, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, reason); err != nil {
@@ -980,17 +1342,23 @@ WHERE e.project_key = ? AND e.source_session_id = ?
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
-    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, item.revision)
+    revision = revision + 1, updated_at = ?
+ WHERE id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, projectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
 		if affected, _ := res.RowsAffected(); affected == 0 {
 			continue
 		}
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
 			"reason": reason,
-		}); err != nil {
+		})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, projectKey,
+			"system:source_invalidation", reason, "update", eventID); err != nil {
 			return 0, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, reason); err != nil {

@@ -9,11 +9,12 @@ func NewMemorySearchTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 	return newMemoryTool(cfg, "search", "memory_search",
 		"Search project memory by query, kind, tag, or status. Read-only and bounded.",
 		memorySchema(map[string]interface{}{
-			"query":  memoryStringProp("Search query."),
-			"kind":   memoryStringProp("Optional memory kind filter."),
-			"tag":    memoryStringProp("Optional tag filter."),
-			"status": memoryEnumProp("Optional status filter (agent surface).", "active", "candidate"),
-			"limit":  memoryIntProp("Maximum results (default 20, max 100).", 1, 100),
+			"query":       memoryStringProp("Search query."),
+			"kind":        memoryStringProp("Optional memory kind filter."),
+			"tag":         memoryStringProp("Optional tag filter."),
+			"source_kind": memoryStringProp("Optional provenance filter, such as manual or session_extract."),
+			"status":      memoryEnumProp("Optional status filter (agent surface).", "active", "candidate"),
+			"limit":       memoryIntProp("Maximum results (default 20, max 100).", 1, 100),
 		}), false)
 }
 
@@ -49,15 +50,33 @@ func NewMemoryStatsTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 		memorySchema(map[string]interface{}{}), false)
 }
 
+func NewMemoryCoreGetTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "core_get", "memory_core_get",
+		"Read the active, reviewed project Core Memory. Returns no candidate or archived content.",
+		memorySchema(map[string]interface{}{}), false)
+}
+
 func NewMemoryAddTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 	return newMemoryTool(cfg, "add", "memory_add",
 		"Add an explicit manual project memory. Use only when the user explicitly asks to remember something.",
 		memorySchema(map[string]interface{}{
-			"text":   memoryStringProp("Memory text to persist."),
-			"kind":   memoryStringProp("Optional kind: preference/decision/fact/workflow/pitfall/reference/open_question."),
-			"tags":   memoryStringArrayProp("Optional tags."),
-			"pinned": memoryBoolProp("Pin this memory so it is always injected first."),
+			"text":         memoryStringProp("Memory text to persist."),
+			"title":        memoryStringProp("Optional short memory title."),
+			"summary":      memoryStringProp("Optional bounded memory summary."),
+			"canonical_id": memoryStringProp("Optional stable canonical identity shared by revisions."),
+			"kind":         memoryStringProp("Optional kind: preference/decision/fact/workflow/pitfall/reference/open_question."),
+			"tags":         memoryStringArrayProp("Optional tags."),
+			"pinned":       memoryBoolProp("Pin this memory so it is always injected first."),
 		}, "text"), true)
+}
+
+func NewMemoryPinTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "pin", "memory_pin",
+		"Pin or unpin one project memory so it participates in the stable injection budget.",
+		memorySchema(map[string]interface{}{
+			"id":     memoryStringProp("Memory id."),
+			"pinned": memoryBoolProp("Whether to pin the record; defaults to true."),
+		}, "id"), true)
 }
 
 func NewMemoryCorrectTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
@@ -94,6 +113,28 @@ func NewMemoryWhyNotTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
 			"limit":        memoryIntProp("Maximum selected records (default 5, max 20).", 1, 20),
 			"token_budget": memoryIntProp("Optional token budget (max 4000).", 1, 4000),
 		}, "query"), false)
+}
+
+func NewMemoryHistoryTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "history", "memory_history",
+		"Read a bounded, safe revision history for one agent-visible project memory owned by the current session.",
+		memorySchema(map[string]interface{}{
+			"id":    memoryStringProp("Memory id."),
+			"limit": memoryIntProp("Maximum history revisions (default 50, max 100).", 1, 100),
+		}, "id"), false)
+}
+
+func NewMemoryRollbackTool(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	return newMemoryTool(cfg, "rollback", "memory_rollback",
+		"Restore one historical revision of a non-sensitive project memory owned by the current session. Disabled unless memory.tools.allowRollback is enabled; requires confirm=true and the current expected_revision. Set revert_supersede=true only when the superseding successor is also owned by this session and non-sensitive.",
+		memorySchema(map[string]interface{}{
+			"id":                memoryStringProp("Memory id."),
+			"target_version":    memoryIntProp("Historical version to restore.", 1, 9007199254740991),
+			"expected_revision": memoryIntProp("Current revision; prevents overwriting concurrent changes.", 1, 9007199254740991),
+			"reason":            memoryStringProp("Audited reason for the rollback; do not include secrets."),
+			"confirm":           memoryBoolProp("Must be true to confirm the rollback."),
+			"revert_supersede":  memoryBoolProp("Explicitly invalidate the current superseding successor; both records must be current-session-owned and non-sensitive."),
+		}, "id", "target_version", "expected_revision", "reason", "confirm"), true)
 }
 
 func memorySchema(properties map[string]interface{}, required ...string) map[string]interface{} {

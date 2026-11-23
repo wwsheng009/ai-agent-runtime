@@ -90,11 +90,28 @@ memory:
     maxUnusedDays: 30
     summaryTokenBudget: 800
     intervalHours: 24
+  core:
+    # Core rebuild 只生成待审核 candidate，不会自动激活；上限用于避免
+    # 手工/API/后台触发占用过多 SQLite/内存。后台 scheduler 默认关闭，
+    # 需要显式 enabled=true 才会按 interval 周期运行。
+    rebuild:
+      enabled: false
+      interval: 24h
+      maxRecords: 32
+      maxUsageRows: 200
+      tokenBudget: 1200
   injection:
     enabled: true
     mode: notes          # notes | hybrid | summary
     maxItems: 5
     tokenBudget: 600
+    extendedPreset: false # 显式开启后使用 5k 级预算；默认保持 600
+    budgets:
+      core: 0.20
+      task: 0.15
+      retrieved: 0.40
+      procedure: 0.15
+      reference: 0.10
     pinnedBudgetRatio: 0.20
     stageSplit: true
     recallTrace:
@@ -141,6 +158,7 @@ memory:
     enabled: false           # 只读检索工具也需显式开启
     allowForget: false       # memory_forget 默认关闭
     allowCorrect: false      # memory_correct 需用户明确纠正意图
+    allowRollback: false     # memory_rollback 默认关闭；仅允许当前 session 的非敏感记录
 
 images:
   cacheMaxAge: 1h

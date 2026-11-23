@@ -283,9 +283,13 @@ INSERT INTO memory_suppressions (
 	if _, err := store.GetRecord(ctx, record.ID); err == nil {
 		t.Fatalf("tombstone should be physically deleted")
 	}
-	var sources, liveSuppressions, recentUsage int
+	var sources, versions, liveSuppressions, recentUsage int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(1) FROM memory_sources WHERE memory_id = ?`, record.ID).Scan(&sources))
 	require.Zero(t, sources)
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM memory_versions WHERE project_key = ? AND memory_id = ?
+`, store.ProjectKey(), record.ID).Scan(&versions))
+	require.Zero(t, versions, "tombstone retention must erase its immutable snapshots")
 	require.NoError(t, db.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_suppressions WHERE project_key = ? AND source_memory_id = ? AND reason = 'deleted'
 `, store.ProjectKey(), record.ID).Scan(&liveSuppressions))
@@ -325,6 +329,15 @@ func TestSweepLifecycleReclassifiesDerivedKindsFromConfig(t *testing.T) {
 	record, err = store.GetRecord(ctx, record.ID)
 	require.NoError(t, err)
 	require.Equal(t, "permanent", record.RetentionClass)
+	require.Equal(t, int64(2), record.Revision, "retention reclassification is a semantic record revision")
+	versions, err := store.ListRecordVersions(ctx, record.ID)
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	require.Equal(t, int64(1), versions[0].Version)
+	require.Equal(t, "standard", versions[0].Record.RetentionClass)
+	require.Equal(t, int64(2), versions[1].Version)
+	require.Equal(t, "permanent", versions[1].Record.RetentionClass)
+	require.Equal(t, "retention", versions[1].ChangeType)
 	unlisted, err = store.GetRecord(ctx, unlisted.ID)
 	require.NoError(t, err)
 	require.Equal(t, "standard", unlisted.RetentionClass)

@@ -250,6 +250,16 @@ func (s *Store) PurgeSessionWithGenerations(
 	if err := enqueueSessionPurgeSummaryRebuilds(ctx, tx, projectKey, sessionID, sessionGeneration); err != nil {
 		return 0, fmt.Errorf("memorystore: enqueue session summary rebuild: %w", err)
 	}
+	if err := purgeRecordVersionsTx(ctx, tx, projectKey, `
+DELETE FROM memory_versions
+WHERE project_key = ? AND memory_id IN (
+  SELECT id FROM memory_entries
+  WHERE project_key = ? AND source_session_id = ?
+    AND source_session_generation = ?
+)
+`, projectKey, projectKey, sessionID, sessionGeneration); err != nil {
+		return 0, fmt.Errorf("memorystore: purge session versions: %w", err)
+	}
 	var deleted int64
 	for _, statement := range statements {
 		res, execErr := tx.ExecContext(ctx, statement.query, statement.args...)

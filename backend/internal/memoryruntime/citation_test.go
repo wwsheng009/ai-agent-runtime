@@ -130,3 +130,84 @@ func TestRecordAnswerExposureAcceptsReadIDsWithoutDoubleCounting(t *testing.T) {
 	require.Len(t, usage, 1)
 	require.Equal(t, memorystore.UsageCited, usage[0].UseKind)
 }
+
+func TestRecordAnswerExposureRoutesCoreCitationsToCoreLedger(t *testing.T) {
+	ctx := context.Background()
+	store, err := memorystore.New(memorystore.Config{
+		Root: t.TempDir(), Mode: "on", ProjectKey: "citation-core",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	source, err := store.Append(memorystore.AppendNoteOptions{
+		Text: "A source record for the reviewed Core.",
+	})
+	require.NoError(t, err)
+	candidate, err := store.CreateCoreCandidate(ctx, memorystore.CoreMemoryCandidateOptions{
+		Content:   "Core citations have a dedicated usage ledger.",
+		SourceIDs: []string{source.ID},
+	})
+	require.NoError(t, err)
+	core, err := store.ActivateCore(ctx, candidate.ID, "admin:citation-test")
+	require.NoError(t, err)
+
+	citedRecord, err := store.Append(memorystore.AppendNoteOptions{
+		Text: "The ordinary memory entry can be cited.",
+	})
+	require.NoError(t, err)
+	uncitedRecord, err := store.Append(memorystore.AppendNoteOptions{
+		Text: "The ordinary memory entry can remain uncited.",
+	})
+	require.NoError(t, err)
+	answer := "Answer\n<agent-memory-citation>" +
+		"<entry id=\"" + citedRecord.ID + "\" />" +
+		"<entry id=\"" + core.ID + "\" />" +
+		"</agent-memory-citation>"
+	result, err := RecordAnswerExposure(ctx, store, AnswerExposureInput{
+		Answer: answer, SessionID: "session-citation", TurnID: "turn-citation",
+		InjectedIDs:     []string{citedRecord.ID, uncitedRecord.ID},
+		CoreInjectedIDs: []string{core.ID},
+	})
+	require.NoError(t, err)
+	require.Empty(t, result.Invalid)
+	require.ElementsMatch(t, []string{citedRecord.ID, core.ID}, result.Cited)
+
+	ordinaryCited, err := store.GetRecord(ctx, citedRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, ordinaryCited.UseCount)
+	ordinaryUncited, err := store.GetRecord(ctx, uncitedRecord.ID)
+	require.NoError(t, err)
+	require.Zero(t, ordinaryUncited.UseCount)
+	ordinaryRows, err := store.ListUsage(ctx, memorystore.UsageFilter{
+		MemoryID: citedRecord.ID, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, ordinaryRows, 1)
+	require.Equal(t, memorystore.UsageCited, ordinaryRows[0].UseKind)
+
+	coreRows, err := store.ListCoreUsage(ctx, memorystore.CoreUsageFilter{
+		CoreID: core.ID, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, coreRows, 1)
+	require.Equal(t, memorystore.UsageCited, coreRows[0].UseKind)
+
+	ordinaryCoreRows, err := store.ListUsage(ctx, memorystore.UsageFilter{
+		MemoryID: core.ID, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Empty(t, ordinaryCoreRows)
+
+	_, err = RecordAnswerExposure(ctx, store, AnswerExposureInput{
+		Answer:    "Answer\n<agent-memory-citation><entry id=\"" + core.ID + "\" />",
+		SessionID: "session-citation", TurnID: "turn-malformed",
+		CoreInjectedIDs: []string{core.ID},
+	})
+	require.NoError(t, err)
+	coreRows, err = store.ListCoreUsage(ctx, memorystore.CoreUsageFilter{
+		CoreID: core.ID, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, coreRows, 2)
+	require.Equal(t, memorystore.UsageInjectedOnly, coreRows[0].UseKind)
+}

@@ -128,21 +128,31 @@ func (r *Runtime) RunPendingTurnDigestsForSession(ctx context.Context, trigger T
 // legacy session recovery it may process a completed range from an active
 // session, but it never reads beyond the receipt's closed interval.
 func (r *Runtime) RunPendingTurnCaptureReceipts(ctx context.Context, trigger Trigger) (RunResult, error) {
-	return r.runPendingTurnCaptureReceipts(ctx, trigger, "")
+	return r.runPendingTurnCaptureReceipts(ctx, trigger, "", 0)
 }
 
-func (r *Runtime) runPendingTurnCaptureReceipts(ctx context.Context, trigger Trigger, onlySession string) (RunResult, error) {
-	return r.runPendingTurnCaptureReceiptsGeneration(ctx, trigger, onlySession, nil)
+// RunPendingTurnCaptureReceiptsBounded drains at most limit eligible receipts.
+// A non-positive limit preserves the runtime's configured per-run bound.
+func (r *Runtime) RunPendingTurnCaptureReceiptsBounded(
+	ctx context.Context, trigger Trigger, limit int,
+) (RunResult, error) {
+	return r.runPendingTurnCaptureReceipts(ctx, trigger, "", limit)
+}
+
+func (r *Runtime) runPendingTurnCaptureReceipts(
+	ctx context.Context, trigger Trigger, onlySession string, maxWork int,
+) (RunResult, error) {
+	return r.runPendingTurnCaptureReceiptsGeneration(ctx, trigger, onlySession, nil, maxWork)
 }
 
 func (r *Runtime) runPendingTurnCaptureReceiptsForGeneration(
 	ctx context.Context, trigger Trigger, onlySession string, generation int64,
 ) (RunResult, error) {
-	return r.runPendingTurnCaptureReceiptsGeneration(ctx, trigger, onlySession, &generation)
+	return r.runPendingTurnCaptureReceiptsGeneration(ctx, trigger, onlySession, &generation, 0)
 }
 
 func (r *Runtime) runPendingTurnCaptureReceiptsGeneration(
-	ctx context.Context, trigger Trigger, onlySession string, generation *int64,
+	ctx context.Context, trigger Trigger, onlySession string, generation *int64, maxWork int,
 ) (RunResult, error) {
 	result := RunResult{Trigger: trigger}
 	if r == nil || r.Store == nil || !r.enabled() || r.Config.GenerationDisabled ||
@@ -171,6 +181,13 @@ func (r *Runtime) runPendingTurnCaptureReceiptsGeneration(
 	pageLimit := r.Config.TurnDigestMaxDigestsPerRun
 	if pageLimit <= 0 {
 		pageLimit = 200
+	}
+	workLimit := pageLimit
+	if maxWork > 0 {
+		workLimit = maxWork
+		if pageLimit > maxWork {
+			pageLimit = maxWork
+		}
 	}
 	var after *chat.TurnCaptureReceipt
 	workItems := 0
@@ -210,6 +227,9 @@ func (r *Runtime) runPendingTurnCaptureReceiptsGeneration(
 			break
 		}
 		for _, receipt := range receipts {
+			if workItems >= workLimit {
+				break
+			}
 			if onlySession != "" && receipt.SessionID != onlySession {
 				continue
 			}
@@ -297,7 +317,7 @@ func (r *Runtime) runPendingTurnCaptureReceiptsGeneration(
 		if generation != nil {
 			canContinue = generationPaginated
 		}
-		if !canContinue || len(receipts) < pageLimit || workItems >= pageLimit {
+		if !canContinue || len(receipts) < pageLimit || workItems >= workLimit {
 			break
 		}
 		last := receipts[len(receipts)-1]
@@ -382,12 +402,9 @@ func (r *Runtime) runMaterializedTurnCapture(
 	if !ok {
 		return fail(fmt.Errorf("memoryruntime: turn capture receipt validator unavailable"))
 	}
-	transcript, err := windowSource.ReadTranscriptWindow(ctx, session,
-		int(receipt.MessageSeqStart), int(receipt.MessageSeqEnd), r.Config.MaxSourceMessages)
+	transcript, err := readTranscriptRange(ctx, windowSource, session,
+		receipt.MessageSeqStart, receipt.MessageSeqEnd, r.Config.MaxSourceMessages)
 	if err != nil {
-		return fail(err)
-	}
-	if err := verifyTranscriptCoverage(transcript, receipt.MessageSeqStart, receipt.MessageSeqEnd); err != nil {
 		return fail(err)
 	}
 	// Revalidate after reading the range. The canonical source validates both
@@ -463,7 +480,7 @@ func (r *Runtime) runMaterializedTurnCapture(
 	}
 	commitCtx, commitCancel := memoryJobCommitContext(ctx)
 	defer commitCancel()
-	inserted, err := r.Store.CommitTurnCaptureExtractionWithDigestText(commitCtx, claimedJob.ID,
+	inserted, err := r.Store.CommitTurnCaptureExtractionWithDiagnostics(commitCtx, claimedJob.ID,
 		claimedJob.WorkerID, claimedJob.Attempt, memorystore.TurnCapture{
 			ID:                 receipt.ID,
 			ProjectKey:         projectKey,
@@ -481,7 +498,10 @@ func (r *Runtime) runMaterializedTurnCapture(
 			Steps:              receipt.Steps,
 			UsageJSON:          receipt.UsageJSON,
 			CreatedAt:          receipt.CreatedAt,
-		}, digest.ID, outputHash, digestText, candidates)
+		}, digest.ID, outputHash, digestText, candidates, extractionDiagnostics(
+			claimedJob.ID, projectKey, session, transcript, receipt.TurnID,
+			extraction, reasons, now,
+		))
 	if err != nil {
 		return fail(err)
 	}

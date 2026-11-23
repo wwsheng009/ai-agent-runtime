@@ -179,6 +179,79 @@ func TestRuntimeWritesCandidatesAndSkipsSecretSourceLess(t *testing.T) {
 	if page.Items[0].SourceKind != "session_extract" || page.Items[0].Status != memorystore.StatusCandidate {
 		t.Fatalf("unexpected candidate: %+v", page.Items[0])
 	}
+	sources, err := store.ListRecordSources(context.Background(), page.Items[0].ID)
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("record sources = %d, %v", len(sources), err)
+	}
+	if sources[0].Quote == page.Items[0].Text || !strings.Contains(sources[0].Quote, "use append-only memory writes") {
+		t.Fatalf("source quote did not come from transcript: %+v", sources[0])
+	}
+	if sources[0].SourceType != "transcript_message" {
+		t.Fatalf("unexpected source type: %+v", sources[0])
+	}
+}
+
+func TestRuntimePersistsEvidenceAndIgnoredDiagnostics(t *testing.T) {
+	transcript := validTranscript("s-evidence", "hash-evidence")
+	transcript.Messages[1].Content = "The original decision was to use append-only memory writes; api_key=supersecretvalue123"
+	source := &fakeSource{
+		sessions: []SessionRef{{ID: "s-evidence", WorkspacePath: "/workspace"}},
+		transcripts: map[string]Transcript{
+			"s-evidence": transcript,
+		},
+	}
+	extractor := &fakeExtractor{result: ExtractionResult{
+		Candidates: []Candidate{{
+			Kind: "decision", Text: "Persist extracted decision separately from evidence.",
+			Confidence: 0.9, SourceMessageIDs: []string{"msg-2"},
+		}},
+		Ignored: []IgnoredCandidate{{
+			Reason: "low relevance", Summary: "api_key=supersecretvalue123 was not retained",
+			SourceMessageIDs: []string{"msg-1", "not-in-transcript"},
+		}},
+	}}
+	runtime, store := newRuntimeForTest(t, "shadow", source, extractor)
+	result, err := runtime.RunSession(context.Background(), TriggerManual, "s-evidence")
+	if err != nil || result.Candidates != 1 {
+		t.Fatalf("RunSession = %+v, %v", result, err)
+	}
+
+	records, err := store.ListRecords(context.Background(), memorystore.RecordFilter{
+		Status: memorystore.StatusCandidate, Limit: 10,
+	})
+	if err != nil || records.Count != 1 {
+		t.Fatalf("candidate records = %+v, %v", records, err)
+	}
+	sources, err := store.ListRecordSources(context.Background(), records.Items[0].ID)
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("record sources = %+v, %v", sources, err)
+	}
+	if sources[0].Quote == records.Items[0].Text ||
+		!strings.Contains(sources[0].Quote, "original decision") ||
+		!strings.Contains(sources[0].Quote, "REDACTED") ||
+		strings.Contains(sources[0].Quote, "supersecretvalue123") {
+		t.Fatalf("source quote was not distinct and redacted: %+v", sources[0])
+	}
+	if sources[0].SourceTrust != "unverified" {
+		t.Fatalf("unexpected trust label: %+v", sources[0])
+	}
+
+	jobs, err := store.ListJobs(context.Background(), 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("extraction jobs = %+v, %v", jobs, err)
+	}
+	diagnostics, err := store.ListExtractionDiagnostics(context.Background(), jobs[0].ID, 10)
+	if err != nil || len(diagnostics) != 1 {
+		t.Fatalf("extraction diagnostics = %+v, %v", diagnostics, err)
+	}
+	if diagnostics[0].Reason != "low_relevance" ||
+		!strings.Contains(diagnostics[0].Summary, "REDACTED") ||
+		strings.Contains(diagnostics[0].Summary, "supersecretvalue123") {
+		t.Fatalf("unsafe extraction diagnostic: %+v", diagnostics[0])
+	}
+	if len(diagnostics[0].SourceIDs) != 1 || diagnostics[0].SourceIDs[0] != "msg-1" {
+		t.Fatalf("diagnostic source IDs were not restricted to canonical messages: %+v", diagnostics[0])
+	}
 }
 
 func TestRuntimeSameSourceIsIdempotent(t *testing.T) {

@@ -301,6 +301,58 @@ func TestRunPendingTurnCaptureReceiptsCommitsOneTurnAtomically(t *testing.T) {
 	require.Equal(t, 1, status.Jobs[string(memorystore.JobStatusSucceeded)])
 }
 
+func TestRunPendingTurnCaptureReceiptsReadsRangesLargerThanOnePage(t *testing.T) {
+	ctx := context.Background()
+	runtime, store, source, extractor, _ := newMaterializedCaptureRuntime(t, 0, false)
+
+	const messageCount = 216
+	messages := make([]TranscriptMessage, 0, messageCount)
+	for seq := 1; seq <= messageCount; seq++ {
+		messages = append(messages, TranscriptMessage{
+			ID: fmt.Sprintf("capture-message-%d", seq), Seq: seq,
+			Role: "assistant", Content: fmt.Sprintf("canonical message %d", seq),
+		})
+	}
+	source.fakeSource.sessions[0].CanonicalCount = messageCount
+	source.fakeWindowSource.window = Transcript{
+		SessionID: source.receipt.SessionID, Revision: messageCount, Messages: messages,
+	}
+	source.receipt.MessageSeqStart = 1
+	source.receipt.MessageSeqEnd = messageCount
+	source.receipt.CanonicalRevision = messageCount
+	source.receipt.RangeHash = "canonical-216-message-range"
+
+	capture := memorystore.TurnCapture{
+		ID: source.receipt.ID, ProjectKey: store.ProjectKey(),
+		SessionID: source.receipt.SessionID, SessionGeneration: source.receipt.SessionGeneration,
+		TurnID: source.receipt.TurnID, MessageSeqStart: source.receipt.MessageSeqStart,
+		MessageSeqEnd: source.receipt.MessageSeqEnd, CanonicalRevision: source.receipt.CanonicalRevision,
+		RangeHash: source.receipt.RangeHash, CreatedAt: source.receipt.CreatedAt,
+	}
+	_, err := store.MaterializeTurnCapture(ctx, capture)
+	require.NoError(t, err)
+	extractor.result.Candidates = []Candidate{{
+		Kind: "decision", Text: "remember the last message", Confidence: 0.95,
+		SourceMessageIDs: []string{"capture-message-216"},
+	}}
+	runtime.Config.MaxSourceMessages = 200
+
+	result, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerStartup)
+	require.NoError(t, err)
+	require.Empty(t, result.Errors)
+	require.Equal(t, 1, result.Processed)
+	require.Equal(t, 2, source.windowCalls, "216 canonical messages must be read as 200 + 16")
+	require.Equal(t, 1, extractor.calls, "all bounded pages should feed one validated turn extraction")
+
+	digest, err := store.GetTurnDigestByCaptureReceipt(ctx, capture.ID)
+	require.NoError(t, err)
+	require.Equal(t, memorystore.TurnDigestDone, digest.Status)
+	jobs, err := store.ListJobs(ctx, 20)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	require.Equal(t, memorystore.JobStatusSucceeded, jobs[0].Status)
+}
+
 func TestRunPendingTurnCaptureReceiptsHeartbeatsSlowExtractionLease(t *testing.T) {
 	runtime, store, _, _, capture := newMaterializedCaptureRuntime(t, 0, true)
 	runtime.Config.Lease = 500 * time.Millisecond
@@ -397,15 +449,19 @@ func TestRunPendingTurnCaptureReceiptsPaginatesPastCompletedReceipts(t *testing.
 		receipts:                  receipts,
 	}
 
-	firstRun, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerStartup)
+	firstRun, err := runtime.RunPendingTurnCaptureReceiptsBounded(ctx, TriggerStartup, 1)
 	require.NoError(t, err)
-	require.Equal(t, 2, firstRun.Processed, "first recovery run: %+v", firstRun)
-	require.Equal(t, 2, extractor.calls)
+	require.Equal(t, 1, firstRun.Processed, "bounded recovery run: %+v", firstRun)
+	require.Equal(t, 1, extractor.calls, "configured work batch must cap the first drain")
 
-	secondRun, err := runtime.RunPendingTurnCaptureReceipts(ctx, TriggerIdle)
+	secondRun, err := runtime.RunPendingTurnCaptureReceiptsBounded(ctx, TriggerIdle, 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, secondRun.Processed,
-		"recovery must continue beyond the first page of already-completed receipts")
+		"bounded recovery must page past the completed receipt without exceeding its limit")
+	require.Equal(t, 2, extractor.calls)
+	thirdRun, err := runtime.RunPendingTurnCaptureReceiptsBounded(ctx, TriggerIdle, 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, thirdRun.Processed)
 	require.Equal(t, 3, extractor.calls)
 	for _, capture := range captures {
 		digest, err := store.GetTurnDigestByTurn(ctx, capture.SessionID, capture.TurnID)

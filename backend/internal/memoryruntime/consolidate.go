@@ -80,7 +80,8 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 	jobKey := "project:" + c.Store.ProjectKey() + ":" + now.Truncate(interval).Format("200601021504")
 	job, err := c.Store.EnsureJob(ctx, memorystore.MemoryJob{
 		Kind: "phase2_consolidate", JobKey: jobKey, ProjectKey: c.Store.ProjectKey(),
-		MaxAttempts: c.Config.MaxAttempts,
+		MaxAttempts: c.Config.MaxAttempts, CreatedAt: now,
+		DeadlineAt: now.Add(memorystore.DefaultMemoryJobTimeout),
 	})
 	if err != nil {
 		return result, err
@@ -157,18 +158,25 @@ func (c *Consolidator) runPhase2(ctx context.Context) (ConsolidationResult, erro
 		}
 		return active[i].UpdatedAt.After(active[j].UpdatedAt)
 	})
-	active, supersessions, ambiguous := resolveConflicts(active)
+	active, supersessions, conflicts := resolveConflictsDetailed(active)
 	for _, resolution := range supersessions {
 		if _, err := c.Store.SupersedeRecord(ctx, resolution.loserID, resolution.winnerID, "consolidation_priority"); err != nil {
 			return fail(err)
 		}
 	}
 	result.Superseded = len(supersessions)
-	if len(ambiguous) > 0 {
-		if err := c.Store.MarkConflictOpenQuestion(ctx, ambiguous, "same_priority_conflict"); err != nil {
+	if len(conflicts) > 0 {
+		pairs := make([]memorystore.ConflictReviewPair, 0, len(conflicts))
+		for _, conflict := range conflicts {
+			pairs = append(pairs, memorystore.ConflictReviewPair{
+				PreferredID: conflict.preferred.ID,
+				CompetingID: conflict.competing.ID,
+			})
+		}
+		if err := c.Store.MarkConflictReview(ctx, pairs, "conflict_requires_review"); err != nil {
 			return fail(err)
 		}
-		result.OpenQuestions = len(uniqueRecordIDs(ambiguous))
+		result.OpenQuestions = len(uniqueRecordIDs(conflictRecordIDs(conflicts)))
 	}
 	if len(active) == 0 {
 		if err := completeJob(""); err != nil {
@@ -237,7 +245,11 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 	if mode != "shadow" && mode != "on" || c.Config.ConsolidationDisabled {
 		return result, nil
 	}
-	now := c.now()
+	// Summary rebuild jobs are enqueued by the store using wall-clock
+	// timestamps. Claim/lease/deadline checks must use that same clock even
+	// when the consolidator's injected clock is being advanced to test cycle
+	// and freshness behavior.
+	claimNow := time.Now().UTC()
 	worker := strings.TrimSpace(c.WorkerID)
 	if worker == "" {
 		worker = "memoryconsolidator"
@@ -248,7 +260,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 	for {
 		claimed, err := c.Store.ClaimJobs(ctx, memorystore.ClaimJobOptions{
 			WorkerID: worker, Kind: "summary_rebuild",
-			ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: now, Lease: c.Config.Lease,
+			ProjectKey: c.Store.ProjectKey(), Limit: 1, Now: claimNow, Lease: c.Config.Lease,
 		})
 		if err != nil {
 			return result, err
@@ -259,7 +271,7 @@ func (c *Consolidator) RebuildStaleSummaries(ctx context.Context) (Consolidation
 		job := claimed[0]
 		fail := func(cause error) (ConsolidationResult, error) {
 			safeCause := safeMemoryError(cause)
-			if persistErr := failMemoryJobForWorker(ctx, c.Store, job.ID, job.WorkerID, safeMemoryErrorText(safeCause), now.Add(retryBackoff(job.Attempt))); persistErr != nil {
+			if persistErr := failMemoryJobForWorker(ctx, c.Store, job.ID, job.WorkerID, safeMemoryErrorText(safeCause), claimNow.Add(retryBackoff(job.Attempt))); persistErr != nil {
 				return result, errors.Join(safeCause, persistErr)
 			}
 			return result, safeCause
@@ -705,7 +717,17 @@ type memorySupersession struct {
 	winnerID string
 }
 
+type memoryConflictPair struct {
+	preferred memorystore.Record
+	competing memorystore.Record
+}
+
 func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []memorySupersession, []string) {
+	active, superseded, conflicts := resolveConflictsDetailed(records)
+	return active, superseded, conflictRecordIDs(conflicts)
+}
+
+func resolveConflictsDetailed(records []memorystore.Record) ([]memorystore.Record, []memorySupersession, []memoryConflictPair) {
 	groups := map[string][]memorystore.Record{}
 	for _, record := range records {
 		subject := conflictSubjectKey(record)
@@ -715,7 +737,7 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 		groups[subject] = append(groups[subject], record)
 	}
 	superseded := make([]memorySupersession, 0)
-	ambiguous := make([]string, 0)
+	conflicts := make([]memoryConflictPair, 0)
 	drop := make(map[string]struct{})
 	for _, group := range groups {
 		if len(group) < 2 {
@@ -732,7 +754,11 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 		topPriority := conflictPriority(top)
 		for _, record := range group[1:] {
 			if conflictPriority(record) == topPriority {
-				ambiguous = append(ambiguous, top.ID, record.ID)
+				conflicts = append(conflicts, memoryConflictPair{preferred: top, competing: record})
+			}
+			if conflictPriority(record) < topPriority && requiresConflictReview(top, record) {
+				conflicts = append(conflicts, memoryConflictPair{preferred: top, competing: record})
+				continue
 			}
 			if record.Pinned || strings.EqualFold(record.SourceKind, "manual") {
 				continue
@@ -746,7 +772,7 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 		}
 	}
 	if len(superseded) == 0 {
-		return records, nil, ambiguous
+		return records, nil, conflicts
 	}
 	out := make([]memorystore.Record, 0, len(records)-len(superseded))
 	for _, record := range records {
@@ -755,7 +781,30 @@ func resolveConflicts(records []memorystore.Record) ([]memorystore.Record, []mem
 		}
 		out = append(out, record)
 	}
-	return out, superseded, ambiguous
+	return out, superseded, conflicts
+}
+
+func conflictRecordIDs(conflicts []memoryConflictPair) []string {
+	ids := make([]string, 0, len(conflicts)*2)
+	for _, conflict := range conflicts {
+		ids = append(ids, conflict.preferred.ID, conflict.competing.ID)
+	}
+	return ids
+}
+
+func requiresConflictReview(left, right memorystore.Record) bool {
+	if left.Confidence >= 0.8 && right.Confidence >= 0.8 &&
+		!strings.EqualFold(left.SourceKind, "manual") &&
+		!strings.EqualFold(right.SourceKind, "manual") {
+		return true
+	}
+	for _, kind := range []string{left.Kind, right.Kind} {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "policy", "procedure":
+			return true
+		}
+	}
+	return left.Scope != right.Scope || left.ProjectKey != right.ProjectKey
 }
 
 // Only a terminal scalar assignment to a known setting provides enough evidence

@@ -143,6 +143,11 @@ func (r *Runtime) runExtractionPage(ctx context.Context, trigger Trigger, sessio
 	candidates, reasons := r.validateCandidates(extraction, page, r.now())
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
+	if err := r.Store.RecordExtractionDiagnostics(commitCtx, extractionDiagnostics(
+		claimed[0].ID, r.Config.ProjectKey, session, page, sourceWindow, extraction, reasons, r.now(),
+	)); err != nil {
+		return fail(err)
+	}
 	if sourceWindow == "" {
 		result.Stale, err = r.Store.MarkSessionSourceChanged(commitCtx, session.ID, r.Config.ProjectKey, source.Hash, source.Revision)
 	} else {

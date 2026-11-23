@@ -51,8 +51,15 @@ func BuildFromRuntimeConfig(opts BuildOptions) (*memoryruntime.Runtime, error) {
 	memoryCfg := opts.RuntimeConfig.Memory
 	store, err := memorystore.New(memorystore.Config{
 		ProjectRoot: workspace, Mode: mode, StorePath: memoryCfg.StorePath,
-		InjectionMode:            memoryCfg.Injection.Mode,
-		PinnedBudgetRatio:        memoryCfg.Injection.PinnedBudgetRatio,
+		InjectionMode:          memoryCfg.Injection.Mode,
+		PinnedBudgetRatio:      memoryCfg.Injection.PinnedBudgetRatio,
+		CategoryBudgetsEnabled: true,
+		CategoryBudgets: memorystore.InjectionCategoryBudgets{
+			Core: memoryCfg.Injection.Budgets.Core, Task: memoryCfg.Injection.Budgets.Task,
+			Retrieved: memoryCfg.Injection.Budgets.Retrieved,
+			Procedure: memoryCfg.Injection.Budgets.Procedure,
+			Reference: memoryCfg.Injection.Budgets.Reference,
+		},
 		DisableStageSplit:        !memoryCfg.Injection.StageSplit,
 		DisableInjection:         !memoryCfg.Injection.Enabled,
 		DisableManual:            !memoryCfg.Manual.Enabled,
@@ -71,7 +78,8 @@ func BuildFromRuntimeConfig(opts BuildOptions) (*memoryruntime.Runtime, error) {
 	generation := memoryCfg.Generation
 	cfg := memoryruntime.Config{
 		Mode: mode, GenerationDisabled: !generation.Enabled,
-		Workspace: workspace, ProjectKey: store.ProjectKey(),
+		GenerationTrigger: strings.ToLower(strings.TrimSpace(generation.Trigger)),
+		Workspace:         workspace, ProjectKey: store.ProjectKey(),
 		IncludeSubagents: generation.IncludeSubagents, RequireWorkspaceMatch: true,
 		MinIdle:                        time.Duration(generation.MinIdleHours) * time.Hour,
 		MaxSessionsPerRun:              generation.MaxSessionsPerRun,
@@ -83,6 +91,9 @@ func BuildFromRuntimeConfig(opts BuildOptions) (*memoryruntime.Runtime, error) {
 		MaxConsolidationRecords:        memoryCfg.Consolidation.MaxRecords,
 		MaxConsolidationUnusedDays:     memoryCfg.Consolidation.MaxUnusedDays,
 		SummaryTokenBudget:             memoryCfg.Consolidation.SummaryTokenBudget,
+		CoreRebuildMaxRecords:          memoryCfg.Core.Rebuild.MaxRecords,
+		CoreRebuildMaxUsageRows:        memoryCfg.Core.Rebuild.MaxUsageRows,
+		CoreRebuildTokenBudget:         memoryCfg.Core.Rebuild.TokenBudget,
 		ExtractionProvider:             generation.Provider,
 		ConsolidationModel:             memoryCfg.Consolidation.Model,
 		ConsolidationProvider:          memoryCfg.Consolidation.Provider,

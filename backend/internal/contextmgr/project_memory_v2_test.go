@@ -2,6 +2,7 @@ package contextmgr
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -72,6 +73,54 @@ func TestBuildProjectMemoryStableAndRecallSplit(t *testing.T) {
 	require.True(t, result.Metadata["memory_version"] == 2)
 	require.Contains(t, store.lastOptions.Query, "memory injection")
 	require.Contains(t, store.lastOptions.Query, "implement memory")
+}
+
+func TestBuildProjectMemoryCorePrecedesSummaryAndKeepsCoreIDSeparate(t *testing.T) {
+	store := &fakeProjectMemoryV2Store{selection: memorystore.Selection{
+		Core: &memorystore.CoreMemory{
+			ID: "core_1", Version: 3, Content: "Keep the project memory boundary stable.",
+			SourceIDs: []string{"mem_evidence"},
+		},
+		Summary: &memorystore.Summary{
+			ID: "sum_1", Revision: 4, Text: "Project summary follows core.",
+			RecordIDs: []string{"mem_summary_source"},
+		},
+		Stable: []memorystore.Record{{
+			ID: "mem_pinned", Kind: "decision", Text: "Preserve pinned decisions.", Pinned: true,
+		}},
+		IDs: []string{"core_1", "mem_summary_source", "mem_pinned"},
+	}}
+	manager := NewManager(DefaultBudget(), nil)
+	manager.ProjectMemory = store
+
+	result := manager.Build(context.Background(), BuildInput{
+		TraceID: "turn-core", SessionID: "session-core", Goal: "continue memory work",
+		History:     []types.Message{*types.NewSystemMessage("system"), *types.NewUserMessage("continue")},
+		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+	})
+	var stable *types.Message
+	for i := range result.Messages {
+		if result.Messages[i].Metadata.GetString("context_stage", "") == "project_memory" {
+			stable = &result.Messages[i]
+			break
+		}
+	}
+	require.NotNil(t, stable)
+	coreAt := strings.Index(stable.Content, "[reviewed project core v3]")
+	summaryAt := strings.Index(stable.Content, "Project summary follows core.")
+	pinnedAt := strings.Index(stable.Content, "Preserve pinned decisions.")
+	require.NotEqual(t, -1, coreAt)
+	require.Less(t, coreAt, summaryAt)
+	require.Less(t, summaryAt, pinnedAt)
+	require.Equal(t, "core_1", stable.Metadata.GetString("project_core_id", ""))
+	require.Equal(t, true, result.Metadata["project_core_injected"])
+	require.Equal(t, "core_1", result.Metadata["project_core_id"])
+	require.Equal(t, 2, stable.Metadata.GetInt("project_memory_count", 0))
+	require.Equal(t, []string{"mem_summary_source", "mem_pinned"},
+		metadataStrings(stable.Metadata, "memory_ids"),
+		"the synthetic core id must not enter the memory_entries citation/usage id set")
+	require.Equal(t, []string{"mem_evidence"},
+		metadataStrings(stable.Metadata, "project_core_source_ids"))
 }
 
 func TestBuildProjectMemoryGroupInjectedOncePerTurn(t *testing.T) {

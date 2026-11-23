@@ -358,6 +358,37 @@ func TestResolveConflictsPreservesPriorityAndProtection(t *testing.T) {
 			},
 		},
 		{
+			name: "high confidence reversal requires review",
+			prepare: func(_, newer *memorystore.Record) {
+				newer.Kind = "correction"
+			},
+			ambiguous: true,
+		},
+		{
+			name: "policy reversal requires review",
+			prepare: func(old, newer *memorystore.Record) {
+				old.Kind = "policy"
+				newer.Kind = "correction"
+			},
+			ambiguous: true,
+		},
+		{
+			name: "procedure reversal requires review",
+			prepare: func(old, newer *memorystore.Record) {
+				old.Kind = "procedure"
+				newer.Kind = "correction"
+			},
+			ambiguous: true,
+		},
+		{
+			name: "cross scope reversal requires review",
+			prepare: func(_, newer *memorystore.Record) {
+				newer.Kind = "correction"
+				newer.Scope = memorystore.ScopeUser
+			},
+			ambiguous: true,
+		},
+		{
 			name: "manual cannot automatically discard pinned derived memory",
 			prepare: func(old, newer *memorystore.Record) {
 				old.Pinned = true

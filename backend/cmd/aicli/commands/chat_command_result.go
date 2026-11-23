@@ -817,6 +817,8 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		}
 		verb, rest := splitFirstToken(arg)
 		switch strings.ToLower(verb) {
+		case "core":
+			return executeChatMemoryCoreCommand(store, rest, session), true, nil
 		case "add", "note", "flush", "remember":
 			text := strings.TrimSpace(rest)
 			if text == "" {
@@ -835,34 +837,29 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Action: CommandContinue,
 			}, true, nil
 		case "list", "ls", "recent":
-			limit := 10
-			if token := strings.TrimSpace(rest); token != "" {
-				if n, err := strconv.Atoi(firstToken(token)); err == nil && n > 0 {
-					limit = n
-				}
+			limit, sourceKind, valid := parseChatMemoryListArgs(rest)
+			if !valid {
+				return CommandResult{}, false, nil
 			}
-			if limit > 200 {
-				limit = 200
-			}
-			notes, err := store.List(limit)
+			notes, err := store.ListWithOptions(memorystore.ListOptions{Limit: limit, SourceKind: sourceKind})
 			if err != nil {
 				return CommandResult{}, false, nil
 			}
 			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatMemoryListDocument(notes, limit, store.Root())}},
+				Blocks: []RenderBlock{{Document: buildChatMemoryListDocument(notes, limit, store.Root(), sourceKind)}},
 				Action: CommandContinue,
 			}, true, nil
 		case "search", "find", "query":
-			query := strings.TrimSpace(rest)
-			if query == "" {
+			query, sourceKind, valid := parseChatMemorySearchArgs(rest)
+			if !valid {
 				return CommandResult{}, false, nil
 			}
-			hits, err := store.Search(memorystore.SearchOptions{Query: query, Limit: 8})
+			hits, err := store.Search(memorystore.SearchOptions{Query: query, SourceKind: sourceKind, Limit: 8})
 			if err != nil {
 				return CommandResult{}, false, nil
 			}
 			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatMemorySearchDocument(hits, query)}},
+				Blocks: []RenderBlock{{Document: buildChatMemorySearchDocument(hits, query, sourceKind)}},
 				Action: CommandContinue,
 			}, true, nil
 		case "show":
@@ -876,6 +873,41 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			return CommandResult{
 				Blocks: []RenderBlock{{Document: buildChatMemoryRecordDocument(record)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "history", "versions":
+			id, valid := parseChatMemoryHistoryArgs(rest)
+			if !valid {
+				return commandTextResult("用法: /memory history <id>"), true, nil
+			}
+			if store.Mode() == "off" {
+				return commandTextResult("错误: memory history 需要启用 v2 memory mode"), true, nil
+			}
+			versions, historyMore, historyErr := store.ListRecordVersionsPage(context.Background(), id, 100)
+			if historyErr != nil {
+				return commandTextResult("错误: 无法读取 memory history（记录不存在或历史不可用；内部诊断已隐藏）"), true, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryHistoryDocument(id, versions, historyMore)}},
+				Action: CommandContinue,
+			}, true, nil
+		case "rollback":
+			args, valid := parseChatMemoryRollbackArgs(rest)
+			if !valid {
+				return commandTextResult("用法: /memory rollback <id> <version> --expected-revision <n> --reason <text> --yes [--revert-supersede]"), true, nil
+			}
+			if store.Mode() == "off" {
+				return commandTextResult("错误: memory rollback 需要启用 v2 memory mode"), true, nil
+			}
+			record, rollbackErr := store.RollbackRecord(context.Background(), args.ID, memorystore.RecordRollbackOptions{
+				TargetVersion: args.TargetVersion, ExpectedRevision: args.ExpectedRevision,
+				Reason: args.Reason, ChangedBy: "local_cli", RevertSupersede: args.RevertSupersede,
+			})
+			if rollbackErr != nil {
+				return commandTextResult(chatMemoryRollbackErrorMessage(rollbackErr)), true, nil
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatMemoryRollbackDocument(record)}},
 				Action: CommandContinue,
 			}, true, nil
 		case "revalidate":
@@ -910,8 +942,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			if query == "" || store.Mode() == "off" {
 				return CommandResult{}, false, nil
 			}
+			limit, tokenBudget := chatMemoryInjectionDiagnosticsBudget(session)
 			selection, err := store.DiagnoseInjection(memorystore.InjectOptions{
-				Query: query, Limit: 8, TokenBudget: 600, SessionID: chatSessionID(session),
+				Query: query, Limit: limit, TokenBudget: tokenBudget, SessionID: chatSessionID(session),
 				SkipTrace: true,
 			})
 			if err != nil {
@@ -977,6 +1010,146 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			if store.Mode() == "off" {
 				return CommandResult{}, false, nil
 			}
+			jobVerb, jobArgs := splitFirstToken(rest)
+			if strings.EqualFold(jobVerb, "replay-preview") ||
+				strings.EqualFold(jobVerb, "replay_preview") {
+				limit := 100
+				if token := strings.TrimSpace(firstToken(jobArgs)); token != "" {
+					n, parseErr := strconv.Atoi(token)
+					if parseErr != nil || n <= 0 {
+						return commandTextResult("用法: /memory jobs replay-preview [limit 1..500]"), true, nil
+					}
+					limit = n
+				}
+				if limit > 500 {
+					limit = 500
+				}
+				host := localChatRuntimeHostOf(session)
+				if host == nil || host.MemoryRuntime == nil || host.MemoryRuntime.Store == nil {
+					return commandTextResult("错误: digest recovery preview 需要已绑定的 memory runtime"), true, nil
+				}
+				if host.MemoryRuntime.Store.ProjectKey() != store.ProjectKey() {
+					return commandTextResult("错误: digest recovery preview 的 workspace 不匹配"), true, nil
+				}
+				report, reportErr := host.MemoryRuntime.PreviewDigestReplayRecovery(
+					context.Background(), limit,
+				)
+				if reportErr != nil {
+					// Keep provider/source/database details out of the CLI
+					// operator surface; the runtime has already classified
+					// safe per-digest outcomes for successful reports.
+					return commandTextResult("错误: digest recovery preview 不可用（内部诊断已隐藏）"), true, nil
+				}
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: buildChatMemoryDigestReplayDocument(report)}},
+					Action: CommandContinue,
+				}, true, nil
+			}
+			if strings.EqualFold(jobVerb, "replay") {
+				id, options := splitFirstToken(jobArgs)
+				reason, valid := parseMemoryJobOperatorOptions(options)
+				if id == "" || !valid || !hasExactCommandFlag(options, "--yes") {
+					return commandTextResult("用法: /memory jobs replay <digest-id> --yes [--reason <text>]"), true, nil
+				}
+				host := localChatRuntimeHostOf(session)
+				if host == nil || host.MemoryRuntime == nil || host.MemoryRuntime.Store == nil {
+					return commandTextResult("错误: digest replay 需要已绑定的 memory runtime"), true, nil
+				}
+				if host.MemoryRuntime.Store.ProjectKey() != store.ProjectKey() {
+					return commandTextResult("错误: digest replay 的 workspace 不匹配"), true, nil
+				}
+				result, replayErr := host.MemoryRuntime.ReplayDigest(context.Background(), id, reason)
+				if replayErr != nil {
+					message := "digest replay 失败（内部诊断已隐藏）"
+					switch {
+					case errors.Is(replayErr, memorystore.ErrDigestNotFound):
+						message = "digest 不存在"
+					case errors.Is(replayErr, memorystore.ErrDigestReplayIneligible),
+						errors.Is(replayErr, memorystore.ErrJobConflict),
+						errors.Is(replayErr, memorystore.ErrSessionPurgeGenerationMismatch):
+						message = "digest 当前不可重放"
+					}
+					return commandTextResult("错误: " + message), true, nil
+				}
+				if result.Classification != memorystore.DigestReplayApplied &&
+					result.Classification != memorystore.DigestReplayAlreadyQueued &&
+					result.Classification != memorystore.DigestReplayAlreadyProcessed {
+					return commandTextResult("提示: digest 未重放 classification=" + string(result.Classification) +
+						" reason=" + result.Reason), true, nil
+				}
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: buildChatMemoryDigestReplayResultDocument(result)}},
+					Action: CommandContinue,
+				}, true, nil
+			}
+			if strings.EqualFold(jobVerb, "deadline-repair") ||
+				strings.EqualFold(jobVerb, "deadline_repair") {
+				limit, apply, reason, valid := parseMemoryJobDeadlineRepairOptions(jobArgs)
+				if !valid || (apply && !hasExactCommandFlag(jobArgs, "--yes")) {
+					return commandTextResult(
+						"用法: /memory jobs deadline-repair [limit 1..500] [--apply --yes] [--reason <text>]",
+					), true, nil
+				}
+				if !apply {
+					plan, planErr := store.PlanMissingJobDeadlines(context.Background(), limit)
+					if planErr != nil {
+						return commandTextResult("错误: deadline repair 预览不可用（内部诊断已隐藏）"), true, nil
+					}
+					return CommandResult{
+						Blocks: []RenderBlock{{Document: buildChatMemoryJobDeadlineRepairDocument(plan)}},
+						Action: CommandContinue,
+					}, true, nil
+				}
+				lease, acquired, leaseErr := store.AcquireMaintenanceLease(
+					context.Background(),
+					fmt.Sprintf("operator-deadline-repair-%d", time.Now().UnixNano()),
+					"operator", 2*time.Minute,
+				)
+				if leaseErr != nil {
+					return commandTextResult("错误: deadline repair 执行不可用（内部诊断已隐藏）"), true, nil
+				}
+				if !acquired {
+					return commandTextResult("错误: memory maintenance 正忙，请稍后重试"), true, nil
+				}
+				ownedCtx := memorystore.WithMaintenanceLease(context.Background(), lease)
+				result, repairErr := store.RepairMissingJobDeadlines(ownedCtx,
+					memorystore.JobDeadlineRepairOptions{Limit: limit, Reason: reason})
+				releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				releaseErr := store.ReleaseMaintenanceLease(releaseCtx, lease)
+				cancel()
+				if repairErr != nil || releaseErr != nil {
+					return commandTextResult("错误: deadline repair 执行失败（内部诊断已隐藏）"), true, nil
+				}
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: buildChatMemoryJobDeadlineRepairDocument(result)}},
+					Action: CommandContinue,
+				}, true, nil
+			}
+			if strings.EqualFold(jobVerb, "retry") || strings.EqualFold(jobVerb, "dead-letter") {
+				action := strings.ToLower(jobVerb)
+				id, options := splitFirstToken(jobArgs)
+				reason, valid := parseMemoryJobOperatorOptions(options)
+				if id == "" || !valid || !hasExactCommandFlag(options, "--yes") {
+					return commandTextResult("用法: /memory jobs " + action + " <id> --yes [--reason <text>]"), true, nil
+				}
+				var opErr error
+				if action == "retry" {
+					opErr = store.RequeueJob(context.Background(), id, reason)
+				} else {
+					opErr = store.DeadLetterJob(context.Background(), id, reason)
+				}
+				if opErr != nil {
+					message := "操作失败（内部错误已隐藏）"
+					switch {
+					case errors.Is(opErr, memorystore.ErrJobConflict):
+						message = "操作冲突：任务状态已变化或不允许此操作"
+					case errors.Is(opErr, memorystore.ErrJobNotFound):
+						message = "任务不存在"
+					}
+					return commandTextResult("错误: " + message), true, nil
+				}
+				return commandTextResult("提示: memory job 操作已完成 id=" + id + " action=" + action), true, nil
+			}
 			limit := 20
 			if token := strings.TrimSpace(firstToken(rest)); token != "" {
 				if n, err := strconv.Atoi(token); err == nil && n > 0 {
@@ -987,8 +1160,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			if err != nil {
 				return CommandResult{}, false, nil
 			}
+			summary, summaryErr := store.SummarizeJobs(context.Background())
+			if summaryErr != nil {
+				return CommandResult{
+					Blocks: []RenderBlock{{Document: buildChatMemoryJobsSummaryDocument(jobs, nil)}},
+					Action: CommandContinue,
+				}, true, nil
+			}
 			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatMemoryJobsDocument(jobs)}},
+				Blocks: []RenderBlock{{Document: buildChatMemoryJobsSummaryDocument(jobs, &summary)}},
 				Action: CommandContinue,
 			}, true, nil
 		case "consolidate":
@@ -1181,6 +1361,90 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 
 	return CommandResult{}, false, nil
+}
+
+func parseMemoryJobOperatorOptions(options string) (string, bool) {
+	fields := strings.Fields(options)
+	reason := ""
+	for i := 0; i < len(fields); i++ {
+		switch fields[i] {
+		case "--yes":
+			// Confirmation is checked separately with exact-token matching.
+		case "--reason":
+			if i+1 >= len(fields) || reason != "" {
+				return "", false
+			}
+			i++
+			reason = fields[i]
+			if len(reason) > 256 {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+	}
+	return reason, true
+}
+
+func parseMemoryJobDeadlineRepairOptions(options string) (limit int, apply bool, reason string, valid bool) {
+	limit = 100
+	fields := strings.Fields(options)
+	seenLimit := false
+	seenApply := false
+	seenDryRun := false
+	for index := 0; index < len(fields); index++ {
+		token := fields[index]
+		switch {
+		case strings.EqualFold(token, "--yes"):
+			continue
+		case strings.EqualFold(token, "--apply"):
+			if seenDryRun {
+				return 0, false, "", false
+			}
+			apply = true
+			seenApply = true
+		case strings.EqualFold(token, "--dry-run"), strings.EqualFold(token, "--dry_run"):
+			if seenApply {
+				return 0, false, "", false
+			}
+			seenDryRun = true
+			apply = false
+		case strings.EqualFold(token, "--limit"):
+			if seenLimit || index+1 >= len(fields) {
+				return 0, false, "", false
+			}
+			index++
+			n, err := strconv.Atoi(fields[index])
+			if err != nil || n <= 0 {
+				return 0, false, "", false
+			}
+			limit = n
+			seenLimit = true
+		case strings.EqualFold(token, "--reason"):
+			if index+1 >= len(fields) || reason != "" {
+				return 0, false, "", false
+			}
+			index++
+			reason = fields[index]
+			if len(reason) > 256 {
+				return 0, false, "", false
+			}
+		default:
+			if seenLimit {
+				return 0, false, "", false
+			}
+			n, err := strconv.Atoi(token)
+			if err != nil || n <= 0 {
+				return 0, false, "", false
+			}
+			limit = n
+			seenLimit = true
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	return limit, apply, reason, true
 }
 
 func hasExactCommandFlag(args, flag string) bool {

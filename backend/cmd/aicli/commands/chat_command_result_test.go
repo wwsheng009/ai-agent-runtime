@@ -1130,8 +1130,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_login_command.go", Func: "method PromptSecret", Kind: "fmt.Print", Count: 1},
 		{File: "chat_login_command.go", Func: "method PromptText", Kind: "fmt.Print", Count: 2},
 		{File: "chat_login_command.go", Func: "refreshLoginSessionIfNeeded", Kind: "fmt.Print", Count: 3},
-		{File: "chat_memory_command.go", Func: "handleMemoryCommand", Kind: "fmt.Print", Count: 15},
-		{File: "chat_memory_command.go", Func: "printProjectMemoryStatus", Kind: "fmt.Print", Count: 8},
+		// Source-kind validation adds one explicit usage writer to list and
+		// search, while status now includes the memory diagnostics block.
+		{File: "chat_memory_command.go", Func: "handleMemoryCommand", Kind: "fmt.Print", Count: 17},
+		{File: "chat_memory_command.go", Func: "printProjectMemoryStatus", Kind: "fmt.Print", Count: 9},
 		{File: "chat_model_command.go", Func: "executeModelCommand", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_model_command.go", Func: "persistModelCommandPreferences", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_model_command.go", Func: "printModelCommandMappingNotice", Kind: "fmt.Print", Count: 1},

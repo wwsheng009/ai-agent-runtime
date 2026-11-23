@@ -800,9 +800,201 @@ CREATE INDEX idx_memory_turn_windows_status
   ON memory_turn_windows(project_key, status, window_seq);
 `,
 		},
+		{
+			Version: 17,
+			Name:    "memory_v17_operator_job_audit",
+			UpSQL: `
+CREATE TABLE memory_job_operator_audit (
+    id TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    previous_status TEXT NOT NULL,
+    new_status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_memory_job_operator_audit_project_created
+  ON memory_job_operator_audit(project_key, created_at DESC);
+`,
+		},
+		{
+			Version: 18,
+			Name:    "memory_v18_evidence_and_extraction_diagnostics",
+			UpSQL: `
+ALTER TABLE memory_sources
+  ADD COLUMN source_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_sources
+  ADD COLUMN source_trust TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX idx_memory_sources_type_trust
+  ON memory_sources(memory_id, source_type, source_trust, created_at DESC);
+
+CREATE TABLE memory_extraction_diagnostics (
+    id                  TEXT PRIMARY KEY,
+    project_key         TEXT NOT NULL,
+    job_id              TEXT NOT NULL,
+    session_id          TEXT NOT NULL DEFAULT '',
+    session_generation  INTEGER NOT NULL DEFAULT 0,
+    turn_id             TEXT NOT NULL DEFAULT '',
+    reason              TEXT NOT NULL,
+    summary             TEXT NOT NULL DEFAULT '',
+    source_ids_json     TEXT NOT NULL DEFAULT '[]',
+    created_at          TEXT NOT NULL
+);
+CREATE INDEX idx_memory_extraction_diagnostics_job
+  ON memory_extraction_diagnostics(project_key, job_id, created_at DESC);
+CREATE INDEX idx_memory_extraction_diagnostics_session
+  ON memory_extraction_diagnostics(project_key, session_id, created_at DESC);
+CREATE UNIQUE INDEX idx_memory_extraction_diagnostics_identity
+  ON memory_extraction_diagnostics(project_key, job_id, reason, summary, source_ids_json);
+`,
+		},
+		{
+			Version: 19,
+			Name:    "memory_v19_record_metadata",
+			UpSQL: `
+ALTER TABLE memory_entries
+  ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries
+  ADD COLUMN summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries
+  ADD COLUMN canonical_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries
+  ADD COLUMN superseded_by TEXT;
+ALTER TABLE memory_entries
+  ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+
+UPDATE memory_entries
+SET canonical_id = id
+WHERE canonical_id = '';
+
+CREATE INDEX idx_memory_entries_canonical
+  ON memory_entries(project_key, canonical_id, archived, updated_at DESC);
+CREATE INDEX idx_memory_entries_archived
+  ON memory_entries(project_key, archived, status, updated_at DESC);
+`,
+		},
+		{
+			Version: 20,
+			Name:    "memory_v20_record_versions",
+			UpSQL: `
+CREATE TABLE memory_versions (
+    id              TEXT PRIMARY KEY,
+    memory_id       TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    project_key     TEXT NOT NULL DEFAULT '',
+    scope_kind      TEXT NOT NULL DEFAULT 'project',
+    scope_key       TEXT NOT NULL DEFAULT '',
+    record_json     TEXT NOT NULL,
+    changed_by      TEXT NOT NULL,
+    change_reason   TEXT NOT NULL,
+    change_type     TEXT NOT NULL,
+    source_event_id TEXT,
+    valid_from      TEXT,
+    valid_until     TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE(memory_id, version)
+);
+CREATE INDEX idx_memory_versions_record
+  ON memory_versions(memory_id, version DESC);
+CREATE INDEX idx_memory_versions_project_created
+  ON memory_versions(project_key, created_at DESC);
+CREATE TRIGGER memory_versions_no_update
+BEFORE UPDATE ON memory_versions
+BEGIN
+  SELECT RAISE(ABORT, 'memory_versions is append-only');
+END;
+CREATE TRIGGER memory_versions_no_delete
+BEFORE DELETE ON memory_versions
+BEGIN
+  SELECT RAISE(ABORT, 'memory_versions is append-only');
+END;
+`,
+		},
+		{
+			Version: 21,
+			Name:    "memory_v21_record_version_purge_guard",
+			UpSQL: `
+CREATE TABLE memory_version_purge_guards (
+    project_key TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL
+);
+DROP TRIGGER IF EXISTS memory_versions_no_delete;
+CREATE TRIGGER memory_versions_no_delete
+BEFORE DELETE ON memory_versions
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM memory_version_purge_guards
+    WHERE project_key = OLD.project_key
+)
+BEGIN
+  SELECT RAISE(ABORT, 'memory_versions is append-only');
+END;
+`,
+		},
+		{
+			Version: 22,
+			Name:    "memory_v22_core_memory",
+			UpSQL: `
+CREATE TABLE memory_core (
+    id              TEXT PRIMARY KEY,
+    project_key     TEXT NOT NULL DEFAULT '',
+    scope_kind      TEXT NOT NULL DEFAULT 'project',
+    scope_key       TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL,
+    version         INTEGER NOT NULL DEFAULT 1,
+    token_estimate  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'candidate',
+    source_ids_json TEXT NOT NULL DEFAULT '[]',
+    generated_by    TEXT NOT NULL DEFAULT '',
+    approved_by     TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(project_key, scope_kind, scope_key, version)
+);
+
+CREATE UNIQUE INDEX memory_core_one_active
+  ON memory_core(project_key, scope_kind, scope_key)
+  WHERE status = 'active';
+
+CREATE INDEX idx_memory_core_scope_status
+  ON memory_core(project_key, scope_kind, scope_key, status, version DESC);
+
+CREATE INDEX idx_memory_core_project_updated
+  ON memory_core(project_key, updated_at DESC);
+`,
+		},
+		{
+			Version: 23,
+			Name:    "memory_v23_core_usage",
+			UpSQL: `
+CREATE TABLE memory_core_usage (
+    id           TEXT PRIMARY KEY,
+    project_key  TEXT NOT NULL DEFAULT '',
+    core_id      TEXT NOT NULL,
+    core_version INTEGER NOT NULL DEFAULT 0,
+    session_id   TEXT NOT NULL,
+    turn_id      TEXT,
+    message_id   TEXT,
+    used_at      TEXT NOT NULL,
+    use_kind     TEXT NOT NULL
+);
+
+CREATE INDEX idx_memory_core_usage_core
+  ON memory_core_usage(project_key, core_id, used_at DESC);
+
+CREATE INDEX idx_memory_core_usage_session
+  ON memory_core_usage(project_key, session_id, used_at DESC);
+`,
+		},
 	}
 	if err := migrate.Apply(ctx, db, migrations); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)
+	}
+	if err := backfillRecordVersionBaselines(ctx, db); err != nil {
+		return fmt.Errorf("memory v2 record version baseline: %w", err)
 	}
 	// 04 §3.6 contract: expose the generic migration ledger under the memory
 	// name for status/readiness queries. The write ledger remains

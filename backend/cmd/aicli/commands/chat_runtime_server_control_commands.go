@@ -427,14 +427,41 @@ func executeRemoteMemoryCommand(session *ChatSession, command string) CommandRes
 			return commandErrorResult(fmt.Errorf("写入 server memory 失败: %w", err))
 		}
 		return commandTextResult(remoteJSONText(response))
+	case "list", "ls", "recent", "records":
+		rest, sourceKind, valid := parseChatMemorySourceKindOption(strings.Join(args[1:], " "))
+		if !valid {
+			return commandErrorResult(fmt.Errorf("用法: /memory list [n] [--source-kind <kind>]"))
+		}
+		limit := 20
+		if token := strings.TrimSpace(firstToken(strings.Join(rest, " "))); token != "" {
+			if n, parseErr := strconv.Atoi(token); parseErr == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(limit))
+		if sourceKind != "" {
+			values.Set("source_kind", sourceKind)
+		}
+		var response map[string]interface{}
+		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodGet, "/api/runtime/memory/records", values.Encode(), nil, &response); err != nil {
+			return commandErrorResult(fmt.Errorf("读取 server memory 失败: %w", err))
+		}
+		return commandTextResult(remoteJSONText(response))
 	case "search", "find", "query":
-		query := strings.TrimSpace(strings.Join(args[1:], " "))
-		if query == "" {
-			return commandErrorResult(fmt.Errorf("用法: /memory search <query>"))
+		query, sourceKind, valid := parseChatMemorySearchArgs(strings.Join(args[1:], " "))
+		if !valid {
+			return commandErrorResult(fmt.Errorf("用法: /memory search <query> [--source-kind <kind>]"))
 		}
 		values := url.Values{}
 		values.Set("q", query)
 		values.Set("limit", "20")
+		if sourceKind != "" {
+			values.Set("source_kind", sourceKind)
+		}
 		var response map[string]interface{}
 		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodGet, "/api/runtime/memory/records", values.Encode(), nil, &response); err != nil {
 			return commandErrorResult(fmt.Errorf("搜索 server memory 失败: %w", err))
@@ -476,6 +503,8 @@ func executeRemoteMemoryCommand(session *ChatSession, command string) CommandRes
 			return commandErrorResult(fmt.Errorf("server memory consolidate 失败: %w", err))
 		}
 		return commandTextResult(remoteJSONText(response))
+	case "jobs":
+		return executeRemoteMemoryJobsCommand(session, caller, args[1:])
 	case "rebuild", "rebuild-summaries":
 		var response map[string]interface{}
 		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodPost, "/api/runtime/memory/summaries/rebuild", "", map[string]interface{}{}, &response); err != nil {
@@ -496,19 +525,6 @@ func executeRemoteMemoryCommand(session *ChatSession, command string) CommandRes
 			return commandErrorResult(fmt.Errorf("设置 server memory session mode 失败: %w", err))
 		}
 		return commandTextResult(remoteJSONText(response))
-	case "list", "records":
-		values := url.Values{}
-		values.Set("limit", "20")
-		if len(args) > 1 {
-			if _, parseErr := strconv.Atoi(args[1]); parseErr == nil {
-				values.Set("limit", args[1])
-			}
-		}
-		var response map[string]interface{}
-		if _, err := caller.doRuntimeServerJSON(context.Background(), session, http.MethodGet, "/api/runtime/memory/records", values.Encode(), nil, &response); err != nil {
-			return commandErrorResult(fmt.Errorf("读取 server memory records 失败: %w", err))
-		}
-		return commandTextResult(remoteJSONText(response))
 	case "why-not":
 		values := url.Values{}
 		if len(args) > 1 {
@@ -521,6 +537,88 @@ func executeRemoteMemoryCommand(session *ChatSession, command string) CommandRes
 		return commandTextResult(remoteJSONText(response))
 	default:
 		return commandErrorResult(fmt.Errorf("runtime-server 模式未接入 /memory %s；已显式拒绝，未访问本地项目记忆", sub))
+	}
+}
+
+func executeRemoteMemoryJobsCommand(
+	session *ChatSession,
+	caller runtimeServerControlCaller,
+	args []string,
+) CommandResult {
+	if len(args) == 0 {
+		return commandErrorResult(fmt.Errorf(
+			"用法: /memory jobs replay-preview [limit] | replay <digest-id> --yes [--reason <text>] | deadline-repair [limit] [--apply --yes]",
+		))
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	switch sub {
+	case "replay-preview", "replay_preview":
+		limit := 100
+		if len(args) > 1 {
+			n, err := strconv.Atoi(strings.TrimSpace(args[1]))
+			if err != nil || n <= 0 {
+				return commandErrorResult(fmt.Errorf("用法: /memory jobs replay-preview [limit 1..500]"))
+			}
+			limit = n
+		}
+		if limit > 500 {
+			limit = 500
+		}
+		values := url.Values{}
+		values.Set("limit", strconv.Itoa(limit))
+		var response map[string]interface{}
+		if _, err := caller.doRuntimeServerJSON(
+			context.Background(), session, http.MethodGet,
+			"/api/runtime/memory/digests/replay-preview", values.Encode(), nil, &response,
+		); err != nil {
+			return commandErrorResult(fmt.Errorf("读取 server memory replay preview 失败: %w", err))
+		}
+		return commandTextResult(remoteJSONText(response))
+	case "replay":
+		if len(args) < 2 {
+			return commandErrorResult(fmt.Errorf("用法: /memory jobs replay <digest-id> --yes [--reason <text>]"))
+		}
+		id := strings.TrimSpace(args[1])
+		options := strings.Join(args[2:], " ")
+		reason, valid := parseMemoryJobOperatorOptions(options)
+		if id == "" || !valid || !hasExactCommandFlag(options, "--yes") {
+			return commandErrorResult(fmt.Errorf("用法: /memory jobs replay <digest-id> --yes [--reason <text>]"))
+		}
+		body := map[string]interface{}{"reason": reason}
+		var response map[string]interface{}
+		path := "/api/runtime/memory/digests/" + url.PathEscape(id) + "/replay"
+		if _, err := caller.doRuntimeServerJSON(
+			context.Background(), session, http.MethodPost, path, "", body, &response,
+		); err != nil {
+			return commandErrorResult(fmt.Errorf("server memory digest replay 失败: %w", err))
+		}
+		return commandTextResult(remoteJSONText(response))
+	case "deadline-repair", "deadline_repair":
+		limit, apply, reason, valid := parseMemoryJobDeadlineRepairOptions(strings.Join(args[1:], " "))
+		if !valid || (apply && !hasExactCommandFlag(strings.Join(args[1:], " "), "--yes")) {
+			return commandErrorResult(fmt.Errorf(
+				"用法: /memory jobs deadline-repair [limit 1..500] [--apply --yes] [--reason <text>]",
+			))
+		}
+		body := map[string]interface{}{
+			"limit": limit,
+			"apply": apply,
+		}
+		if reason != "" {
+			body["reason"] = reason
+		}
+		var response map[string]interface{}
+		if _, err := caller.doRuntimeServerJSON(
+			context.Background(), session, http.MethodPost,
+			"/api/runtime/memory/jobs/deadline-repair", "", body, &response,
+		); err != nil {
+			return commandErrorResult(fmt.Errorf("server memory deadline repair 失败: %w", err))
+		}
+		return commandTextResult(remoteJSONText(response))
+	default:
+		return commandErrorResult(fmt.Errorf(
+			"runtime-server 模式未接入 /memory jobs %s；已显式拒绝，未访问本地项目记忆", sub,
+		))
 	}
 }
 

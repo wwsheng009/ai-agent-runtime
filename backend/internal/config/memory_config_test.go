@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -19,6 +20,12 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, 2, cfg.Memory.Generation.MaxSessionsPerRun)
 	require.Equal(t, 20, cfg.Memory.Generation.MaxRecordsPerSession)
 	require.True(t, cfg.Memory.Generation.TurnDigest.Enabled)
+	require.True(t, cfg.Memory.Maintenance.CaptureExtraction.Enabled)
+	require.Equal(t, 50, cfg.Memory.Maintenance.CaptureExtraction.BatchSize)
+	require.Equal(t, 5*time.Minute, cfg.Memory.Maintenance.CaptureExtraction.Interval)
+	require.False(t, cfg.Memory.Maintenance.JobDeadlineRepair.Enabled)
+	require.Equal(t, 100, cfg.Memory.Maintenance.JobDeadlineRepair.BatchSize)
+	require.Equal(t, 30*time.Minute, cfg.Memory.Maintenance.JobDeadlineRepair.Interval)
 	require.True(t, cfg.Memory.Generation.TurnDigest.StoreText)
 	require.True(t, cfg.Memory.Generation.TurnDigest.RecoveryOnStartup)
 	require.Equal(t, 7, cfg.Memory.Generation.TurnDigest.RetentionDays)
@@ -35,8 +42,18 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.Equal(t, 256, cfg.Memory.Consolidation.MaxRecords)
 	require.Equal(t, 800, cfg.Memory.Consolidation.SummaryTokenBudget)
 	require.Equal(t, 24, cfg.Memory.Consolidation.IntervalHours)
+	require.False(t, cfg.Memory.Core.Rebuild.Enabled)
+	require.Equal(t, 24*time.Hour, cfg.Memory.Core.Rebuild.Interval)
+	require.Equal(t, 32, cfg.Memory.Core.Rebuild.MaxRecords)
+	require.Equal(t, 200, cfg.Memory.Core.Rebuild.MaxUsageRows)
+	require.Equal(t, 1200, cfg.Memory.Core.Rebuild.TokenBudget)
 	require.True(t, cfg.Memory.Injection.Enabled)
 	require.Equal(t, "notes", cfg.Memory.Injection.Mode)
+	require.Equal(t, 600, cfg.Memory.Injection.EffectiveTokenBudget())
+	require.False(t, cfg.Memory.Injection.ExtendedPreset)
+	require.Equal(t, MemoryInjectionBudgets{
+		Core: 0.20, Task: 0.15, Retrieved: 0.40, Procedure: 0.15, Reference: 0.10,
+	}, cfg.Memory.Injection.Budgets)
 	require.Equal(t, 0.20, cfg.Memory.Injection.PinnedBudgetRatio)
 	require.True(t, cfg.Memory.Injection.StageSplit)
 	require.False(t, cfg.Memory.Injection.RecallTrace.Enabled)
@@ -62,7 +79,21 @@ func TestMemoryConfigDefaultsOff(t *testing.T) {
 	require.True(t, cfg.Memory.Redaction.DropOnSecret)
 	require.False(t, cfg.Memory.Tools.Enabled)
 	require.False(t, cfg.Memory.Tools.AllowForget)
+	require.False(t, cfg.Memory.Tools.AllowRollback)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
+}
+
+func TestMemoryRollbackToolConfigExplicitOptIn(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.NoError(t, yaml.Unmarshal([]byte(`
+memory:
+  mode: on
+  tools:
+    enabled: true
+    allowRollback: true
+`), cfg))
+	require.True(t, cfg.Memory.Tools.Enabled)
+	require.True(t, cfg.Memory.Tools.AllowRollback)
 }
 
 func TestMemoryStageReasoningConfigRoundTrip(t *testing.T) {
@@ -79,6 +110,21 @@ memory:
     provider: summary-provider
     model: summary-model
     reasoningEffort: medium
+  core:
+    rebuild:
+      enabled: true
+      interval: 6h
+      maxRecords: 48
+      maxUsageRows: 250
+      tokenBudget: 1600
+  injection:
+    extendedPreset: true
+    budgets:
+      core: 0.25
+      task: 0.15
+      retrieved: 0.35
+      procedure: 0.15
+      reference: 0.10
 `), cfg))
 	require.NoError(t, ValidateMemoryConfig(&cfg.Memory))
 	require.Equal(t, "extract-provider", cfg.Memory.Generation.Provider)
@@ -88,6 +134,16 @@ memory:
 	require.Equal(t, "max", cfg.Memory.Generation.ReasoningEffort)
 	require.Equal(t, "low", cfg.Memory.Generation.TurnDigest.ReasoningEffort)
 	require.Equal(t, "medium", cfg.Memory.Consolidation.ReasoningEffort)
+	require.True(t, cfg.Memory.Core.Rebuild.Enabled)
+	require.Equal(t, 6*time.Hour, cfg.Memory.Core.Rebuild.Interval)
+	require.Equal(t, 48, cfg.Memory.Core.Rebuild.MaxRecords)
+	require.Equal(t, 250, cfg.Memory.Core.Rebuild.MaxUsageRows)
+	require.Equal(t, 1600, cfg.Memory.Core.Rebuild.TokenBudget)
+	require.True(t, cfg.Memory.Injection.ExtendedPreset)
+	require.Equal(t, 5000, cfg.Memory.Injection.EffectiveTokenBudget())
+	require.Equal(t, MemoryInjectionBudgets{
+		Core: 0.25, Task: 0.15, Retrieved: 0.35, Procedure: 0.15, Reference: 0.10,
+	}, cfg.Memory.Injection.Budgets)
 	raw, err := json.Marshal(cfg.Memory)
 	require.NoError(t, err)
 	var roundTrip MemoryConfig
@@ -98,6 +154,8 @@ memory:
 	require.Equal(t, cfg.Memory.Consolidation.Model, roundTrip.Consolidation.Model)
 	require.Equal(t, cfg.Memory.Generation.TurnDigest.ReasoningEffort, roundTrip.Generation.TurnDigest.ReasoningEffort)
 	require.Equal(t, cfg.Memory.Consolidation.ReasoningEffort, roundTrip.Consolidation.ReasoningEffort)
+	require.Equal(t, cfg.Memory.Core.Rebuild, roundTrip.Core.Rebuild)
+	require.Equal(t, cfg.Memory.Injection.Budgets, roundTrip.Injection.Budgets)
 }
 
 func TestMemoryConfigValidation(t *testing.T) {
@@ -112,6 +170,13 @@ func TestMemoryConfigValidation(t *testing.T) {
 		{"invalid scope", func(c *MemoryConfig) { c.Scope = "global" }, false},
 		{"invalid injection mode", func(c *MemoryConfig) { c.Injection.Mode = "semantic" }, false},
 		{"invalid generation trigger", func(c *MemoryConfig) { c.Generation.Trigger = "always" }, false},
+		{"valid reserved trigger", func(c *MemoryConfig) { c.Generation.Trigger = "turn_threshold" }, true},
+		{"negative extraction batch", func(c *MemoryConfig) { c.Maintenance.CaptureExtraction.BatchSize = -1 }, false},
+		{"oversized extraction batch", func(c *MemoryConfig) { c.Maintenance.CaptureExtraction.BatchSize = 1001 }, false},
+		{"negative extraction interval", func(c *MemoryConfig) { c.Maintenance.CaptureExtraction.Interval = -time.Second }, false},
+		{"negative job deadline repair batch", func(c *MemoryConfig) { c.Maintenance.JobDeadlineRepair.BatchSize = -1 }, false},
+		{"oversized job deadline repair batch", func(c *MemoryConfig) { c.Maintenance.JobDeadlineRepair.BatchSize = 501 }, false},
+		{"negative job deadline repair interval", func(c *MemoryConfig) { c.Maintenance.JobDeadlineRepair.Interval = -time.Second }, false},
 		{"negative min idle", func(c *MemoryConfig) { c.Generation.MinIdleHours = -1 }, false},
 		{"negative max sessions", func(c *MemoryConfig) { c.Generation.MaxSessionsPerRun = -1 }, false},
 		{"negative max rollout", func(c *MemoryConfig) { c.Generation.MaxRolloutAgeDays = -1 }, false},
@@ -124,8 +189,21 @@ func TestMemoryConfigValidation(t *testing.T) {
 		{"negative consolidation unused days", func(c *MemoryConfig) { c.Consolidation.MaxUnusedDays = -1 }, false},
 		{"negative summary budget", func(c *MemoryConfig) { c.Consolidation.SummaryTokenBudget = -1 }, false},
 		{"negative consolidation interval", func(c *MemoryConfig) { c.Consolidation.IntervalHours = -1 }, false},
+		{"negative core rebuild interval", func(c *MemoryConfig) { c.Core.Rebuild.Interval = -time.Second }, false},
+		{"negative core rebuild records", func(c *MemoryConfig) { c.Core.Rebuild.MaxRecords = -1 }, false},
+		{"oversized core rebuild records", func(c *MemoryConfig) { c.Core.Rebuild.MaxRecords = 65 }, false},
+		{"oversized core usage rows", func(c *MemoryConfig) { c.Core.Rebuild.MaxUsageRows = 501 }, false},
+		{"oversized core token budget", func(c *MemoryConfig) { c.Core.Rebuild.TokenBudget = 4001 }, false},
 		{"negative max items", func(c *MemoryConfig) { c.Injection.MaxItems = -1 }, false},
 		{"negative token budget", func(c *MemoryConfig) { c.Injection.TokenBudget = -1 }, false},
+		{"oversized token budget", func(c *MemoryConfig) { c.Injection.TokenBudget = MaxMemoryInjectionTokenBudget + 1 }, false},
+		{"negative category budget", func(c *MemoryConfig) { c.Injection.Budgets.Core = -0.1 }, false},
+		{"category budget above one", func(c *MemoryConfig) { c.Injection.Budgets.Core = 1.1 }, false},
+		{"category budgets sum above one", func(c *MemoryConfig) {
+			c.Injection.Budgets = MemoryInjectionBudgets{
+				Core: 0.3, Task: 0.2, Retrieved: 0.3, Procedure: 0.2, Reference: 0.1,
+			}
+		}, false},
 		{"ratio too high", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = 1.1 }, false},
 		{"ratio negative", func(c *MemoryConfig) { c.Injection.PinnedBudgetRatio = -0.1 }, false},
 		{"recall trace sampling too high", func(c *MemoryConfig) { c.Injection.RecallTrace.SampleRate = 1.1 }, false},

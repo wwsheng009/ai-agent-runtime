@@ -71,6 +71,19 @@ func TestConfigNormalizesTurnDigestSchedulingDefaults(t *testing.T) {
 	require.Equal(t, 30, cfg.TurnDigestWindowRetentionDays)
 }
 
+func TestMaintenanceStatsAreObservable(t *testing.T) {
+	rt := &Runtime{Clock: func() time.Time {
+		return time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	}}
+	rt.RecordMaintenanceStage("capture_materialization", "ok")
+	rt.RecordMaintenanceSkip("generation_disabled")
+	stats := rt.DigestStats()
+	require.Equal(t, "capture_materialization", stats.LastMaintenanceStage)
+	require.Equal(t, "ok", stats.LastMaintenanceResult)
+	require.Equal(t, "generation_disabled", stats.LastSkipReason)
+	require.Equal(t, time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC), stats.LastMaintenanceAt)
+}
+
 func TestRunPendingTurnDigestsProcessesEligibleSession(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	transcript := validTranscript("s1", "hash-a")

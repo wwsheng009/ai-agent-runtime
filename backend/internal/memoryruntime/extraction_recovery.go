@@ -51,6 +51,68 @@ func verifyTranscriptCoverage(transcript Transcript, startSeq, endSeq int64) err
 	return nil
 }
 
+// readTranscriptRange reads a complete canonical range in bounded pages.
+// TranscriptWindowSource deliberately returns at most maxMessages, even when
+// the requested range is larger.  Callers that need the complete range must
+// page explicitly rather than asking for a large range and treating the first
+// page as complete.
+func readTranscriptRange(
+	ctx context.Context,
+	source TranscriptWindowSource,
+	session SessionRef,
+	startSeq, endSeq int64,
+	maxMessages int,
+) (Transcript, error) {
+	if source == nil {
+		return Transcript{}, fmt.Errorf("memoryruntime: transcript window source is nil")
+	}
+	if startSeq <= 0 {
+		startSeq = 1
+	}
+	if endSeq < startSeq {
+		return Transcript{}, fmt.Errorf("memoryruntime: invalid canonical range %d-%d", startSeq, endSeq)
+	}
+	if maxMessages <= 0 {
+		maxMessages = 200
+	}
+
+	var combined Transcript
+	messages := make([]TranscriptMessage, 0, endSeq-startSeq+1)
+	for first := startSeq; first <= endSeq; {
+		last := first + int64(maxMessages) - 1
+		if last < first || last > endSeq {
+			last = endSeq
+		}
+		page, err := source.ReadTranscriptWindow(ctx, session, int(first), int(last), maxMessages)
+		if err != nil {
+			return Transcript{}, err
+		}
+		if err := verifyTranscriptCoverage(page, first, last); err != nil {
+			return Transcript{}, err
+		}
+		if len(messages) == 0 {
+			combined = page
+		}
+		messages = append(messages, page.Messages...)
+		if last == endSeq {
+			break
+		}
+		first = last + 1
+	}
+	combined.SessionID = firstNonEmptyString(combined.SessionID, session.ID)
+	combined.WorkspacePath = firstNonEmptyString(combined.WorkspacePath, session.WorkspacePath)
+	combined.Messages = messages
+	combined.Hash = TranscriptHash(messages)
+	return combined, nil
+}
+
+func firstNonEmptyString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
 func completeTranscriptResult(result *RunResult, transcript Transcript) {
 	result.Completed = true
 	result.SourceHash = transcript.Hash

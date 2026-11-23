@@ -44,7 +44,7 @@ func TestPurgeSessionIsIdempotentAndAllowsNewIncarnation(t *testing.T) {
 	if _, err := store.MaterializeTurnCapture(ctx, first); err != nil {
 		t.Fatalf("materialize first capture: %v", err)
 	}
-	if _, err := store.InsertCandidate(ctx, Candidate{
+	derived, err := store.InsertCandidate(ctx, Candidate{
 		ProjectKey:        store.ProjectKey(),
 		SessionID:         first.SessionID,
 		SessionGeneration: first.SessionGeneration,
@@ -54,8 +54,23 @@ func TestPurgeSessionIsIdempotentAndAllowsNewIncarnation(t *testing.T) {
 		Confidence:        0.9,
 		SourceHash:        first.RangeHash,
 		SourceRevision:    first.CanonicalRevision,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("insert derived candidate: %v", err)
+	}
+	neighbor, err := store.InsertCandidate(ctx, Candidate{
+		ProjectKey:        store.ProjectKey(),
+		SessionID:         "neighbor-session",
+		SessionGeneration: 1,
+		TurnID:            "neighbor-turn",
+		Kind:              "reference",
+		Text:              "preserve neighboring session history",
+		Confidence:        0.9,
+		SourceHash:        "neighbor-range",
+		SourceRevision:    1,
+	})
+	if err != nil {
+		t.Fatalf("insert neighboring session candidate: %v", err)
 	}
 	page, err := store.ListRecords(ctx, RecordFilter{Limit: 10, Status: StatusCandidate, SourceSessionID: first.SessionID})
 	if err != nil || len(page.Items) != 1 {
@@ -214,6 +229,35 @@ func TestPurgeSessionIsIdempotentAndAllowsNewIncarnation(t *testing.T) {
 	}
 	if foreignSources != 1 {
 		t.Fatalf("foreign-project source rows after purge=%d, want 1", foreignSources)
+	}
+	var purgedVersions, foreignVersions int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM memory_versions
+		WHERE project_key = ? AND memory_id = ?
+	`, store.ProjectKey(), derived.ID).Scan(&purgedVersions); err != nil {
+		t.Fatalf("count purged versions: %v", err)
+	}
+	if purgedVersions != 0 {
+		t.Fatalf("purged session versions remaining=%d, want 0", purgedVersions)
+	}
+	var neighboringVersions int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM memory_versions
+		WHERE project_key = ? AND memory_id = ?
+	`, store.ProjectKey(), neighbor.ID).Scan(&neighboringVersions); err != nil {
+		t.Fatalf("count neighboring versions: %v", err)
+	}
+	if neighboringVersions != 1 {
+		t.Fatalf("neighboring session versions after purge=%d, want 1", neighboringVersions)
+	}
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM memory_versions
+		WHERE project_key = ? AND memory_id = ?
+	`, otherProject.ProjectKey(), foreign.ID).Scan(&foreignVersions); err != nil {
+		t.Fatalf("count foreign-project versions: %v", err)
+	}
+	if foreignVersions != 1 {
+		t.Fatalf("foreign-project versions after purge=%d, want 1", foreignVersions)
 	}
 
 	if _, err := store.MaterializeTurnCapture(ctx, first); !errors.Is(err, ErrSessionPurgeGenerationMismatch) {

@@ -9,14 +9,41 @@ import (
 // intentionally process-local: it answers "did this host actually enqueue
 // digests?" rather than "what is the store's historical total?".
 type DigestStats struct {
-	Written        int64     `json:"written"`
-	Skipped        int64     `json:"skipped"`
-	Failed         int64     `json:"failed"`
-	LastWrittenAt  time.Time `json:"last_written_at,omitempty"`
-	LastSkippedAt  time.Time `json:"last_skipped_at,omitempty"`
-	LastSkipReason string    `json:"last_skip_reason,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	LastErrorAt    time.Time `json:"last_error_at,omitempty"`
+	Written               int64     `json:"written"`
+	Skipped               int64     `json:"skipped"`
+	Failed                int64     `json:"failed"`
+	LastWrittenAt         time.Time `json:"last_written_at,omitempty"`
+	LastSkippedAt         time.Time `json:"last_skipped_at,omitempty"`
+	LastSkipReason        string    `json:"last_skip_reason,omitempty"`
+	LastMaintenanceAt     time.Time `json:"last_maintenance_at,omitempty"`
+	LastMaintenanceStage  string    `json:"last_maintenance_stage,omitempty"`
+	LastMaintenanceResult string    `json:"last_maintenance_result,omitempty"`
+	LastError             string    `json:"last_error,omitempty"`
+	LastErrorAt           time.Time `json:"last_error_at,omitempty"`
+}
+
+// RecordMaintenanceStage records the latest bounded maintenance stage outcome.
+// Result is deliberately a short, non-sensitive summary supplied by the caller.
+func (r *Runtime) RecordMaintenanceStage(stage, result string) {
+	if r == nil {
+		return
+	}
+	r.digestStatsMu.Lock()
+	defer r.digestStatsMu.Unlock()
+	r.digestStats.LastMaintenanceAt = r.now()
+	r.digestStats.LastMaintenanceStage = strings.TrimSpace(stage)
+	r.digestStats.LastMaintenanceResult = strings.TrimSpace(result)
+}
+
+// RecordMaintenanceSkip records why the maintenance scheduler skipped work.
+func (r *Runtime) RecordMaintenanceSkip(reason string) {
+	if r == nil {
+		return
+	}
+	r.digestStatsMu.Lock()
+	defer r.digestStatsMu.Unlock()
+	r.digestStats.LastSkipReason = strings.TrimSpace(reason)
+	r.digestStats.LastSkippedAt = r.now()
 }
 
 func (r *Runtime) DigestStats() DigestStats {

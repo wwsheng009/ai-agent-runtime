@@ -44,12 +44,16 @@ const (
 
 // Note is one durable project memory entry.
 type Note struct {
-	ID        string    `json:"id"`
-	Text      string    `json:"text"`
-	Tags      []string  `json:"tags,omitempty"`
-	Source    string    `json:"source,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	Text        string    `json:"text"`
+	Title       string    `json:"title,omitempty"`
+	Summary     string    `json:"summary,omitempty"`
+	CanonicalID string    `json:"canonical_id,omitempty"`
+	Tags        []string  `json:"tags,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	SessionID   string    `json:"session_id,omitempty"`
+	Archived    bool      `json:"archived,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // SearchHit is a ranked note match.
@@ -79,10 +83,12 @@ type Config struct {
 	DisableManual bool
 	// DisableInjection turns off v2 stable/recall injection without disabling
 	// manual storage.
-	DisableInjection  bool
-	InjectionMode     string
-	DisableStageSplit bool
-	PinnedBudgetRatio float64
+	DisableInjection       bool
+	InjectionMode          string
+	DisableStageSplit      bool
+	PinnedBudgetRatio      float64
+	CategoryBudgetsEnabled bool
+	CategoryBudgets        InjectionCategoryBudgets
 	// RecallTraceEnabled/SampleRate gate diagnostic recall traces. The default
 	// runtime config keeps traces off until an operator opts in.
 	RecallTraceEnabled    bool
@@ -176,16 +182,20 @@ func (s *Store) Path() string {
 
 // AppendNoteOptions configures Append.
 type AppendNoteOptions struct {
-	Text      string
-	Tags      []string
-	Source    string
-	SessionID string
+	Text        string
+	Title       string
+	Summary     string
+	CanonicalID string
+	Tags        []string
+	Source      string
+	SessionID   string
 	// M1 manual mapping. Zero values map to reference/manual/active/fresh.
 	Kind   string
 	Scope  string
 	Pinned *bool
 	// ID optional; generated when empty.
-	ID string
+	ID       string
+	Archived bool
 	// CreatedAt optional; defaults to now UTC.
 	CreatedAt time.Time
 }
@@ -223,18 +233,25 @@ func (s *Store) appendLegacy(opts AppendNoteOptions) (Note, error) {
 	}
 
 	note := Note{
-		ID:        strings.TrimSpace(opts.ID),
-		Text:      text,
-		Tags:      normalizeTags(opts.Tags),
-		Source:    strings.TrimSpace(opts.Source),
-		SessionID: strings.TrimSpace(opts.SessionID),
-		CreatedAt: opts.CreatedAt.UTC(),
+		ID:          strings.TrimSpace(opts.ID),
+		Text:        text,
+		Title:       strings.TrimSpace(opts.Title),
+		Summary:     strings.TrimSpace(opts.Summary),
+		CanonicalID: strings.TrimSpace(opts.CanonicalID),
+		Tags:        normalizeTags(opts.Tags),
+		Source:      strings.TrimSpace(opts.Source),
+		SessionID:   strings.TrimSpace(opts.SessionID),
+		Archived:    opts.Archived,
+		CreatedAt:   opts.CreatedAt.UTC(),
 	}
 	if note.CreatedAt.IsZero() {
 		note.CreatedAt = time.Now().UTC()
 	}
 	if note.ID == "" {
 		note.ID = newNoteID(note)
+	}
+	if note.CanonicalID == "" {
+		note.CanonicalID = note.ID
 	}
 	if note.Source == "" {
 		note.Source = "manual"
@@ -262,10 +279,27 @@ func (s *Store) appendLegacy(opts AppendNoteOptions) (Note, error) {
 	return note, nil
 }
 
-// List loads notes newest-first. limit <= 0 returns all.
+// ListOptions configures the durable note list. An empty SourceKind includes
+// every active v2 record; callers may set it to narrow the result to one
+// provenance class such as "manual" or "session_extract".
+type ListOptions struct {
+	Limit      int
+	SourceKind string
+}
+
+// List loads notes newest-first. limit <= 0 returns all. The default list is
+// intentionally not restricted to manual notes: automatic session-extracted
+// records are durable project memory too.
 func (s *Store) List(limit int) ([]Note, error) {
+	return s.ListWithOptions(ListOptions{Limit: limit})
+}
+
+// ListWithOptions loads active notes newest-first, optionally filtered by
+// source kind. The filter is additive and keeps the legacy List(limit) API
+// compatible while allowing CLI/API callers to request a provenance subset.
+func (s *Store) ListWithOptions(opts ListOptions) ([]Note, error) {
 	if s != nil && s.v2Configured() {
-		notes, err := s.listV2(limit)
+		notes, err := s.listV2WithOptions(opts)
 		if err == nil {
 			return notes, nil
 		}
@@ -273,26 +307,45 @@ func (s *Store) List(limit int) ([]Note, error) {
 			return nil, err
 		}
 	}
-	return s.listLegacy(limit)
+	return s.listLegacyWithOptions(opts)
 }
 
+// listLegacy is retained as a small internal compatibility wrapper for
+// callers that only need the historical limit argument.
 func (s *Store) listLegacy(limit int) ([]Note, error) {
+	return s.listLegacyWithOptions(ListOptions{Limit: limit})
+}
+
+func (s *Store) listLegacyWithOptions(opts ListOptions) ([]Note, error) {
 	notes, err := s.loadAll()
 	if err != nil {
 		return nil, err
 	}
+	sourceKind := strings.ToLower(strings.TrimSpace(opts.SourceKind))
+	filtered := notes[:0]
+	for _, note := range notes {
+		if note.Archived {
+			continue
+		}
+		if sourceKind != "" && strings.ToLower(strings.TrimSpace(note.Source)) != sourceKind {
+			continue
+		}
+		filtered = append(filtered, note)
+	}
+	notes = filtered
 	sort.SliceStable(notes, func(i, j int) bool {
 		return notes[i].CreatedAt.After(notes[j].CreatedAt)
 	})
-	if limit > 0 && len(notes) > limit {
-		notes = notes[:limit]
+	if opts.Limit > 0 && len(notes) > opts.Limit {
+		notes = notes[:opts.Limit]
 	}
 	return notes, nil
 }
 
 // SearchOptions configures keyword search.
 type SearchOptions struct {
-	Query string
+	Query      string
+	SourceKind string
 	// Tags optional filter: note must include all listed tags (case-insensitive).
 	Tags  []string
 	Limit int
@@ -327,6 +380,13 @@ func (s *Store) searchLegacy(opts SearchOptions) ([]SearchHit, error) {
 
 	hits := make([]SearchHit, 0, len(notes))
 	for _, note := range notes {
+		if note.Archived {
+			continue
+		}
+		if sourceKind := strings.ToLower(strings.TrimSpace(opts.SourceKind)); sourceKind != "" &&
+			strings.ToLower(strings.TrimSpace(note.Source)) != sourceKind {
+			continue
+		}
 		if !noteHasAllTags(note, tagFilter) {
 			continue
 		}

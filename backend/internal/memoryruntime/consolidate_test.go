@@ -372,4 +372,25 @@ func TestConsolidatorPreservesSamePriorityAmbiguity(t *testing.T) {
 	if err != nil || active.Count != 2 {
 		t.Fatalf("active records = %+v, %v", active, err)
 	}
+	events, err := store.ListEvents(context.Background(), 20)
+	require.NoError(t, err)
+	conflictEvents := make([]memorystore.AuditEvent, 0, 2)
+	for _, event := range events {
+		if event.EventType == "memory_conflict" {
+			conflictEvents = append(conflictEvents, event)
+		}
+	}
+	require.Len(t, conflictEvents, 2)
+	for _, event := range conflictEvents {
+		require.Equal(t, "conflict_requires_review", event.Payload["reason"])
+		preferred, ok := event.Payload["preferred"].(map[string]interface{})
+		require.True(t, ok)
+		competing, ok := event.Payload["competing"].(map[string]interface{})
+		require.True(t, ok)
+		require.NotEqual(t, preferred["memory_id"], competing["memory_id"])
+		require.NotZero(t, preferred["version"])
+		require.NotZero(t, competing["version"])
+		require.NotEmpty(t, preferred["source_ids"])
+		require.NotEmpty(t, competing["source_ids"])
+	}
 }

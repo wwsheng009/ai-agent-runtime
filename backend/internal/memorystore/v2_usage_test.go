@@ -35,6 +35,10 @@ func TestMemoryStoreExposureDoesNotCountAsUse(t *testing.T) {
 	if record.UseCount != 0 || !record.LastUsedAt.IsZero() {
 		t.Fatalf("injected_only must not increment usage: %+v", record)
 	}
+	versions, err := store.ListRecordVersions(context.Background(), note.ID)
+	if err != nil || len(versions) != 1 || versions[0].Version != record.Revision {
+		t.Fatalf("injected_only must not create a record revision: versions=%+v err=%v", versions, err)
+	}
 	usage, err := store.ListUsage(context.Background(), UsageFilter{MemoryID: note.ID, Limit: 10})
 	if err != nil || len(usage) != 1 || usage[0].UseKind != UsageInjectedOnly {
 		t.Fatalf("usage = %+v, %v", usage, err)
@@ -68,5 +72,12 @@ func TestMemoryStoreCitedIncrementsUseCount(t *testing.T) {
 	}
 	if record.UseCount != 1 || !record.LastUsedAt.Equal(at) {
 		t.Fatalf("cited record usage = %+v", record)
+	}
+	versions, err := store.ListRecordVersions(context.Background(), note.ID)
+	if err != nil || len(versions) != 1 || versions[0].Version != record.Revision {
+		t.Fatalf("usage telemetry must not create a record revision: versions=%+v err=%v", versions, err)
+	}
+	if versions[0].Record.UseCount != 0 {
+		t.Fatalf("baseline snapshot's usage counters must remain historical metadata, got use_count=%d", versions[0].Record.UseCount)
 	}
 }

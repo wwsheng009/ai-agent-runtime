@@ -150,6 +150,7 @@ type Handler struct {
 	sessionManager           *chat.SessionManager
 	memoryRuntimeMu          sync.RWMutex
 	memoryRuntime            *memoryruntime.Runtime
+	memoryRuntimeBootError   string
 	memorySessionEndCtx      context.Context
 	memorySessionEndCancel   context.CancelFunc
 	memorySessionEndClosing  bool
@@ -1335,7 +1336,15 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/status", h.GetMemoryStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/records", h.ListMemoryRecords).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/why-not", h.GetMemoryWhyNot).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/core", h.GetMemoryCore).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/core/rebuild", h.RebuildMemoryCore).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/cores", h.ListMemoryCores).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/cores/{id}/activate", h.ActivateMemoryCore).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/cores/{id}/archive", h.ArchiveMemoryCore).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/records", h.CreateMemoryRecord).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/records/{id}/sources", h.ListMemoryRecordSources).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records/{id}/versions", h.ListMemoryRecordVersions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/records/{id}/rollback", h.RollbackMemoryRecord).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.GetMemoryRecord).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.PatchMemoryRecord).Methods(http.MethodPatch)
 	runtimeRouter.HandleFunc("/memory/records/{id}", h.DeleteMemoryRecord).Methods(http.MethodDelete)
@@ -1345,12 +1354,20 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/memory/sessions/{id}/context", h.GetMemorySessionContext).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/recall-traces", h.ListMemoryRecallTraces).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/jobs", h.ListMemoryJobs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/jobs/summary", h.SummarizeMemoryJobs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/extraction-diagnostics", h.ListMemoryExtractionDiagnostics).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/jobs/deadline-repair", h.RepairMemoryJobDeadlines).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/digests/replay-preview", h.PreviewMemoryDigestReplay).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/digests/{id}/replay", h.ReplayMemoryDigest).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/jobs/{id}/retry", h.RetryMemoryJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/memory/jobs/{id}/dead-letter", h.DeadLetterMemoryJob).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/extract", h.ExtractMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/summaries", h.ListMemorySummaries).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/summaries/rebuild", h.RebuildMemorySummaries).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/summaries/{id}/activate", h.ActivateMemorySummary).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/consolidate", h.ConsolidateMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/memory/usage", h.ListMemoryUsage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/memory/core/usage", h.ListMemoryCoreUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/metrics", h.GetMemoryMetrics).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/freshness", h.GetMemoryFreshness).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/memory/freshness/sweep", h.SweepMemoryFreshness).Methods(http.MethodPost)

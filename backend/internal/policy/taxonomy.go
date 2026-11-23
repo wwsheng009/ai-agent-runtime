@@ -102,11 +102,15 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"memory_session_context": {Name: "memory_session_context", Kind: types.ToolKindRead, ReadOnly: true},
 	"memory_recent":          {Name: "memory_recent", Kind: types.ToolKindRead, ReadOnly: true},
 	"memory_stats":           {Name: "memory_stats", Kind: types.ToolKindRead, ReadOnly: true},
+	"memory_core_get":        {Name: "memory_core_get", Kind: types.ToolKindRead, ReadOnly: true},
 	"memory_why":             {Name: "memory_why", Kind: types.ToolKindRead, ReadOnly: true},
 	"memory_why_not":         {Name: "memory_why_not", Kind: types.ToolKindSearch, ReadOnly: true},
+	"memory_history":         {Name: "memory_history", Kind: types.ToolKindRead, ReadOnly: true},
 	"memory_add":             {Name: "memory_add", Kind: types.ToolKindEdit},
+	"memory_pin":             {Name: "memory_pin", Kind: types.ToolKindEdit},
 	"memory_correct":         {Name: "memory_correct", Kind: types.ToolKindEdit},
 	"memory_forget":          {Name: "memory_forget", Kind: types.ToolKindEdit},
+	"memory_rollback":        {Name: "memory_rollback", Kind: types.ToolKindEdit},
 	// 符号索引（code.*）：条件注册的 workspace 本地索引读取，随 grep 语义归 read
 	// 组（toolregistry/registry.go 的 GroupRead）。它们既无本表行、也没有
 	// DefinitionMetadata，能力只能由名字子串决定 —— "code_search" 命中

@@ -20,6 +20,7 @@ type Runtime struct {
 	Source           SessionSource
 	Extractor        Extractor
 	WindowSummarizer WindowSummarizer
+	TaskCompletions  TaskCompletionConsumer
 	Modes            SessionModeReader
 	Config           Config
 	Clock            func() time.Time
@@ -31,6 +32,8 @@ type Runtime struct {
 	digestStatsMu sync.Mutex
 	digestStats   DigestStats
 }
+
+const maxSourceEvidenceQuoteRunes = 1200
 
 func New(store *memorystore.Store, source SessionSource, extractor Extractor, modes SessionModeReader, cfg Config) *Runtime {
 	return &Runtime{
@@ -281,6 +284,11 @@ func (r *Runtime) RunSession(ctx context.Context, trigger Trigger, sessionID str
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
+	if err := r.Store.RecordExtractionDiagnostics(commitCtx, extractionDiagnostics(
+		claimed[0].ID, r.Config.ProjectKey, session, transcript, "", extraction, reasons, now,
+	)); err != nil {
+		return result, r.failExtractionJob(ctx, claimed[0], err)
+	}
 	stale, err := r.Store.MarkSessionSourceChanged(commitCtx, session.ID, r.Config.ProjectKey, transcript.Hash, transcript.Revision)
 	if err != nil {
 		return result, r.failExtractionJob(ctx, claimed[0], err)
@@ -505,10 +513,15 @@ func (r *Runtime) runSessionWindowPartWithJob(ctx context.Context, trigger Trigg
 	}
 	commitCtx, commitCancel := memoryJobCommitContext(ctx)
 	defer commitCancel()
+	windowID := fmt.Sprintf("%d-%d", startSeq, endSeq)
 	candidates, reasons := r.validateCandidates(extraction, transcript, now)
 	result.Skipped += len(reasons)
 	result.Ignored = append(result.Ignored, reasons...)
-	windowID := fmt.Sprintf("%d-%d", startSeq, endSeq)
+	if err := r.Store.RecordExtractionDiagnostics(commitCtx, extractionDiagnostics(
+		claimed[0].ID, r.Config.ProjectKey, session, transcript, windowID, extraction, reasons, now,
+	)); err != nil {
+		return result, r.failExtractionJob(ctx, claimed[0], err)
+	}
 	for index := range candidates {
 		candidates[index].SourceWindow = windowID
 	}
@@ -689,6 +702,9 @@ func (r *Runtime) validateCandidates(extraction ExtractionResult, transcript Tra
 			Sensitivity: firstNonEmpty(candidate.Sensitivity, "internal"),
 			SourceHash:  transcript.Hash, SourceRevision: transcript.Revision,
 			SourceUpdatedAt: transcript.UpdatedAt, SourceMessageIDs: sourceIDs,
+			SourceType:      "transcript_message",
+			SourceTrust:     "unverified",
+			SourceQuote:     sourceEvidenceQuote(sourceIDs, transcript.Messages),
 			RetentionClass:  r.retentionClassForKind(kind),
 			RevalidateAfter: r.revalidateAfterForKind(kind, now),
 			Model:           firstNonEmpty(extraction.Model, r.Config.ExtractionModel),
@@ -700,6 +716,99 @@ func (r *Runtime) validateCandidates(extraction ExtractionResult, transcript Tra
 		})
 	}
 	return out, reasons
+}
+
+// sourceEvidenceQuote derives evidence from the already bounded canonical
+// transcript. Extractor-provided text is intentionally not used: the memory
+// sentence and the evidence snippet must remain distinguishable and the quote
+// must not become an unbounded second copy of model output.
+func sourceEvidenceQuote(ids []string, messages []TranscriptMessage) string {
+	selected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		selected[strings.TrimSpace(id)] = struct{}{}
+	}
+	var b strings.Builder
+	for _, message := range messages {
+		id := strings.TrimSpace(message.ID)
+		if _, ok := selected[id]; !ok {
+			continue
+		}
+		content, _ := RedactForPrompt(strings.TrimSpace(message.Content))
+		content = strings.TrimSpace(content)
+		if content == "" {
+			continue
+		}
+		piece := "[" + id + "] " + content
+		if b.Len() > 0 {
+			piece = "\n" + piece
+		}
+		remaining := maxSourceEvidenceQuoteRunes - utf8.RuneCountInString(b.String())
+		if remaining <= 0 {
+			break
+		}
+		piece = truncateRunes(piece, remaining)
+		b.WriteString(piece)
+		if utf8.RuneCountInString(b.String()) >= maxSourceEvidenceQuoteRunes {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func extractionDiagnostics(
+	jobID, projectKey string,
+	session SessionRef,
+	transcript Transcript,
+	turnID string,
+	extraction ExtractionResult,
+	validationReasons []string,
+	now time.Time,
+) []memorystore.ExtractionDiagnostic {
+	validIDs := make(map[string]struct{}, len(transcript.Messages))
+	for _, message := range transcript.Messages {
+		if id := strings.TrimSpace(message.ID); id != "" {
+			validIDs[id] = struct{}{}
+		}
+	}
+	diagnostics := make([]memorystore.ExtractionDiagnostic, 0,
+		len(extraction.Ignored)+len(validationReasons))
+	appendDiagnostic := func(reason, summary string, sourceIDs []string) {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			reason = "unspecified"
+		}
+		validSourceIDs := make([]string, 0, len(sourceIDs))
+		for _, id := range sourceIDs {
+			id = strings.TrimSpace(id)
+			if _, ok := validIDs[id]; ok {
+				validSourceIDs = append(validSourceIDs, id)
+			}
+		}
+		diagnostics = append(diagnostics, memorystore.ExtractionDiagnostic{
+			ProjectKey: projectKey, JobID: jobID, SessionID: session.ID,
+			SessionGeneration: session.SessionGeneration, TurnID: turnID,
+			Reason: reason, Summary: summary, SourceIDs: validSourceIDs,
+			CreatedAt: now.UTC(),
+		})
+	}
+	for _, ignored := range extraction.Ignored {
+		appendDiagnostic(ignored.Reason, ignored.Summary, ignored.SourceMessageIDs)
+	}
+	for _, reason := range validationReasons {
+		appendDiagnostic(reason, "", nil)
+	}
+	return diagnostics
+}
+
+func truncateRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
 }
 
 func (r *Runtime) workerID() string {

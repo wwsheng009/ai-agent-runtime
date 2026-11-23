@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +10,61 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestEnqueueCoreRebuildCoalescesRunningAndRequeuesTerminalJob(t *testing.T) {
+	ctx := context.Background()
+	store, err := New(Config{
+		Root: t.TempDir(), Mode: "on", ProjectKey: "core-job-project",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	first, err := store.EnqueueCoreRebuild(ctx, 99)
+	require.NoError(t, err)
+	require.Equal(t, "core_rebuild", first.Kind)
+	require.Equal(t, "project:"+store.ProjectKey(), first.JobKey)
+	require.Equal(t, JobPriorityCoreRebuild, first.Priority)
+	require.Equal(t, 10, first.MaxAttempts, "enqueue must clamp the retry budget")
+
+	second, err := store.EnqueueCoreRebuild(ctx, 3)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, second.ID)
+	require.Equal(t, JobStatusPending, second.Status)
+	require.Equal(t, 10, second.MaxAttempts, "a pending request keeps its existing retry budget")
+
+	claimed, err := store.ClaimJobs(ctx, ClaimJobOptions{
+		WorkerID: "core-worker", Kind: "core_rebuild",
+		JobKey: first.JobKey, ProjectKey: store.ProjectKey(),
+		Limit: 1, Lease: time.Minute, Now: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.Equal(t, JobStatusRunning, claimed[0].Status)
+
+	running, err := store.EnqueueCoreRebuild(ctx, 4)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, running.ID)
+	require.Equal(t, JobStatusRunning, running.Status)
+	require.Equal(t, claimed[0].WorkerID, running.WorkerID)
+	require.Equal(t, claimed[0].Attempt, running.Attempt)
+
+	require.NoError(t, store.CompleteJobForWorkerAttempt(
+		ctx, claimed[0].ID, claimed[0].WorkerID, claimed[0].Attempt, "core-v1:test",
+	))
+	succeeded, err := store.GetJob(ctx, first.ID)
+	require.NoError(t, err)
+	require.Equal(t, JobStatusSucceeded, succeeded.Status)
+	require.Equal(t, "core-v1:test", succeeded.LastSuccessWatermark)
+
+	requeued, err := store.EnqueueCoreRebuild(ctx, 4)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, requeued.ID)
+	require.Equal(t, JobStatusPending, requeued.Status)
+	require.Equal(t, 0, requeued.Attempt)
+	require.Equal(t, 4, requeued.MaxAttempts)
+	require.Empty(t, requeued.WorkerID)
+	require.Empty(t, requeued.LastSuccessWatermark)
+}
 
 func TestMemoryJobClaimLeaseAndComplete(t *testing.T) {
 	root := t.TempDir()
@@ -189,6 +245,50 @@ func TestMemoryJobClaimIsProjectScopedAndBounded(t *testing.T) {
 	jobs, err := p2.ListJobs(context.Background(), 1_000_000)
 	if err != nil || len(jobs) != 1 || jobs[0].JobKey != "p2-job" {
 		t.Fatalf("p2 ListJobs = %+v, %v", jobs, err)
+	}
+}
+
+func TestMemoryJobGetJobIsProjectScopedAndValidatesID(t *testing.T) {
+	ctx := context.Background()
+	sharedDB := filepath.Join(t.TempDir(), "shared-jobs.db")
+	projectA, err := New(Config{
+		ProjectRoot: t.TempDir(), StorePath: sharedDB, ProjectKey: "get-job-project-a", Mode: "on",
+	})
+	if err != nil {
+		t.Fatalf("project A New: %v", err)
+	}
+	defer projectA.Close()
+	projectB, err := New(Config{
+		ProjectRoot: t.TempDir(), StorePath: sharedDB, ProjectKey: "get-job-project-b", Mode: "on",
+	})
+	if err != nil {
+		t.Fatalf("project B New: %v", err)
+	}
+	defer projectB.Close()
+
+	created, err := projectA.EnsureJob(ctx, MemoryJob{
+		Kind: "phase1_extract", JobKey: "project-a-job",
+	})
+	if err != nil {
+		t.Fatalf("EnsureJob: %v", err)
+	}
+
+	got, err := projectA.GetJob(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetJob in owning project: %v", err)
+	}
+	if got.ID != created.ID || got.ProjectKey != projectA.ProjectKey() ||
+		got.JobKey != created.JobKey || got.Status != created.Status {
+		t.Fatalf("GetJob = %+v, want created project A job %+v", got, created)
+	}
+	if _, err := projectB.GetJob(ctx, created.ID); err != sql.ErrNoRows {
+		t.Fatalf("GetJob from foreign project error = %v, want sql.ErrNoRows", err)
+	}
+	if _, err := projectA.GetJob(ctx, "missing-job"); err != sql.ErrNoRows {
+		t.Fatalf("GetJob missing id error = %v, want sql.ErrNoRows", err)
+	}
+	if _, err := projectA.GetJob(ctx, " "); err == nil {
+		t.Fatal("GetJob with blank id succeeded, want validation error")
 	}
 }
 

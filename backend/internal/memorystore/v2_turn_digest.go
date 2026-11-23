@@ -91,6 +91,16 @@ type TurnDigestSession struct {
 	MaxSeq     int64
 }
 
+// PendingTurnCaptureSession summarizes canonical receipt-backed work for one
+// session incarnation. It is used by active-session turn-threshold scheduling;
+// legacy digests are intentionally excluded.
+type PendingTurnCaptureSession struct {
+	ProjectKey        string
+	SessionID         string
+	SessionGeneration int64
+	Pending           int
+}
+
 // RecordTurnDigest inserts or updates a turn digest. A changed digest hash
 // resets the row to pending; identical content preserves done/processing/
 // invalidated state so retries do not re-open a completed turn.
@@ -330,6 +340,29 @@ func (s *Store) GetTurnDigestByCaptureReceipt(ctx context.Context, receiptID str
 FROM memory_turn_digests
 WHERE project_key = ? AND capture_receipt_id = ?
 `, s.cfg.ProjectKey, strings.TrimSpace(receiptID))
+	return scanTurnDigest(row)
+}
+
+// GetTurnDigestByID resolves one project-scoped durable digest identity.
+func (s *Store) GetTurnDigestByID(ctx context.Context, digestID string) (TurnDigest, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return TurnDigest{}, err
+	}
+	row := db.QueryRowContext(ctx, `
+SELECT digest_seq, id, scope, project_key, session_id, session_generation, turn_id,
+       COALESCE(trace_id, ''), COALESCE(parent_session_id, ''), COALESCE(agent_type, ''),
+       COALESCE(user_message_id, ''), COALESCE(assistant_message_id, ''),
+       message_seq_start, message_seq_end, COALESCE(capture_receipt_id, ''),
+       source_revision, COALESCE(range_hash, ''), COALESCE(enqueued_at, ''),
+       user_text, assistant_text, text_truncated, outcome, steps,
+       usage_json, metadata_json, digest_hash, digest_revision, status,
+       COALESCE(process_job_id, ''), COALESCE(last_error, ''),
+       rollup_status, COALESCE(rollup_window_id, ''),
+       COALESCE(rolled_up_at, ''), created_at, updated_at, COALESCE(processed_at, '')
+FROM memory_turn_digests
+WHERE project_key = ? AND id = ?
+`, s.cfg.ProjectKey, strings.TrimSpace(digestID))
 	return scanTurnDigest(row)
 }
 
@@ -805,6 +838,43 @@ func (s *Store) CountPendingTurnDigests(ctx context.Context, projectKey string) 
 SELECT COUNT(1) FROM memory_turn_digests WHERE project_key = ? AND status = 'pending'
 `, strings.TrimSpace(projectKey)).Scan(&count)
 	return count, err
+}
+
+// ListPendingTurnCaptureSessions returns a bounded oldest-first list of
+// session-generation groups with pending canonical capture digests.
+func (s *Store) ListPendingTurnCaptureSessions(ctx context.Context, minPending, limit int) ([]PendingTurnCaptureSession, error) {
+	db, err := s.ensureV2()
+	if err != nil {
+		return nil, err
+	}
+	if minPending <= 0 {
+		minPending = 1
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT project_key, session_id, session_generation, COUNT(1)
+FROM memory_turn_digests
+WHERE project_key = ? AND capture_receipt_id <> '' AND status = 'pending'
+GROUP BY project_key, session_id, session_generation
+HAVING COUNT(1) >= ?
+ORDER BY MIN(digest_seq) ASC, session_id ASC, session_generation ASC
+LIMIT ?
+`, s.cfg.ProjectKey, minPending, limit)
+	if err != nil {
+		return nil, fmt.Errorf("memorystore: list pending turn capture sessions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]PendingTurnCaptureSession, 0, limit)
+	for rows.Next() {
+		var item PendingTurnCaptureSession
+		if err := rows.Scan(&item.ProjectKey, &item.SessionID, &item.SessionGeneration, &item.Pending); err != nil {
+			return nil, fmt.Errorf("memorystore: scan pending turn capture session: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // PruneTurnDigests deletes terminal digest rows older than before for the

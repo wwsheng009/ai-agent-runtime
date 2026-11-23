@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
@@ -20,6 +21,7 @@ import (
 type ImportResult struct {
 	Scanned   int      `json:"scanned"`
 	Imported  int      `json:"imported"`
+	Versions  int      `json:"versions"`
 	Summaries int      `json:"summaries"`
 	Skipped   int      `json:"skipped"`
 	Corrupt   int      `json:"corrupt"`
@@ -30,11 +32,13 @@ type ImportResult struct {
 type importEnvelope struct {
 	Type    string          `json:"type"`
 	Record  json.RawMessage `json:"record"`
+	Version json.RawMessage `json:"version"`
 	Summary json.RawMessage `json:"summary"`
 }
 
 type parsedImport struct {
 	records   []Record
+	versions  []RecordVersion
 	summaries []Summary
 }
 
@@ -60,6 +64,29 @@ func (s *Store) ImportJSONL(ctx context.Context, body []byte, dryRun bool) (Impo
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
+	importedRecordIDs := make(map[string]struct{}, len(parsed.records))
+	versionIDsByMemory := make(map[string]map[int64]struct{}, len(parsed.versions))
+	normalizedVersions := make([]RecordVersion, 0, len(parsed.versions))
+	for _, rawVersion := range parsed.versions {
+		version, normalizeErr := s.normalizeImportedVersion(rawVersion, now)
+		if normalizeErr != nil {
+			result.Corrupt++
+			addImportError(&result, normalizeErr)
+			continue
+		}
+		normalizedVersions = append(normalizedVersions, version)
+		if versionIDsByMemory[version.MemoryID] == nil {
+			versionIDsByMemory[version.MemoryID] = make(map[int64]struct{})
+		}
+		if _, duplicate := versionIDsByMemory[version.MemoryID][version.Version]; duplicate {
+			result.Corrupt++
+			addImportError(&result, fmt.Errorf("memorystore: duplicate imported version %s/%d",
+				version.MemoryID, version.Version))
+			normalizedVersions = normalizedVersions[:len(normalizedVersions)-1]
+			continue
+		}
+		versionIDsByMemory[version.MemoryID][version.Version] = struct{}{}
+	}
 	for _, raw := range parsed.records {
 		record, normalizeErr := s.normalizeImportedRecord(raw, now)
 		if normalizeErr != nil {
@@ -77,7 +104,13 @@ SELECT COUNT(1) FROM memory_entries WHERE id = ? AND project_key = ?
 			result.Skipped++
 			continue
 		}
-		if err := s.insertRecordSQLTx(ctx, tx, record, "admin", record.SourceSessionID); err != nil {
+		historyVersions := versionIDsByMemory[record.ID]
+		_, hasHistory := historyVersions[record.Revision]
+		if err := s.insertRecordSQLTxWithOptions(ctx, tx, record, "admin", record.SourceSessionID, recordInsertOptions{
+			eventType:     "imported",
+			changeType:    "import",
+			appendVersion: !hasHistory,
+		}); err != nil {
 			if isDuplicateMemoryError(err) || isSuppressedMemoryError(err) || isSecretMemoryError(err) {
 				result.Skipped++
 				if isSecretMemoryError(err) {
@@ -97,12 +130,38 @@ INSERT OR IGNORE INTO memory_suppressions (
 				return result, err
 			}
 		}
-		if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "imported", "admin", record.SourceSessionID, record.Revision, map[string]interface{}{
-			"source_kind": record.SourceKind,
-		}); err != nil {
+		result.Imported++
+		importedRecordIDs[record.ID] = struct{}{}
+		if !hasHistory {
+			result.Versions++
+		}
+	}
+	for _, version := range normalizedVersions {
+		if _, ok := importedRecordIDs[version.MemoryID]; !ok {
+			continue
+		}
+		recordJSON, marshalErr := json.Marshal(version.Record)
+		if marshalErr != nil {
+			return result, fmt.Errorf("memorystore: marshal imported version %s/%d: %w",
+				version.MemoryID, version.Version, marshalErr)
+		}
+		res, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO memory_versions (
+    id, memory_id, version, project_key, scope_kind, scope_key, record_json,
+    changed_by, change_reason, change_type, source_event_id, valid_from,
+    valid_until, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, version.ID, version.MemoryID, version.Version, version.ProjectKey,
+			string(version.ScopeKind), version.ScopeKey, string(recordJSON),
+			version.ChangedBy, version.ChangeReason, version.ChangeType,
+			nullableString(version.SourceEventID), nullableTime(version.ValidFrom),
+			nullableTime(version.ValidUntil), version.CreatedAt.UTC().Format(time.RFC3339Nano))
+		if err != nil {
 			return result, err
 		}
-		result.Imported++
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			result.Versions++
+		}
 	}
 	if dryRun {
 		return result, nil
@@ -153,6 +212,14 @@ func parseImportJSONL(body []byte, result ImportResult) (parsedImport, ImportRes
 				continue
 			}
 			parsed.records = append(parsed.records, record)
+		case "version":
+			var version RecordVersion
+			if err := json.Unmarshal(envelope.Version, &version); err != nil {
+				result.Corrupt++
+				addImportError(&result, fmt.Errorf("line %d: invalid version", lineNo))
+				continue
+			}
+			parsed.versions = append(parsed.versions, version)
 		case "summary":
 			var summary Summary
 			if err := json.Unmarshal(envelope.Summary, &summary); err != nil {
@@ -254,8 +321,21 @@ func (s *Store) normalizeImportedRecord(record Record, now time.Time) (Record, e
 		if record.DeletedAt.IsZero() {
 			record.DeletedAt = now
 		}
+		if record.ValidUntil.IsZero() {
+			record.ValidUntil = record.DeletedAt
+		}
 	} else {
 		record.DeletedAt = time.Time{}
+	}
+	switch record.Status {
+	case StatusActive, StatusCandidate:
+		// Active/candidate records may carry a finite fact-validity boundary.
+		// Preserve it during backup restore instead of silently widening the
+		// interval; current listing and injection apply the boundary.
+	case StatusSuperseded, StatusExpired:
+		if record.ValidUntil.IsZero() {
+			record.ValidUntil = record.UpdatedAt
+		}
 	}
 	if record.Metadata == nil {
 		record.Metadata = map[string]interface{}{}
@@ -264,6 +344,145 @@ func (s *Store) normalizeImportedRecord(record Record, now time.Time) (Record, e
 		record.Metadata["imported_at"] = now.Format(time.RFC3339Nano)
 	}
 	return record, nil
+}
+
+func (s *Store) normalizeImportedVersion(version RecordVersion, now time.Time) (RecordVersion, error) {
+	if strings.TrimSpace(version.MemoryID) == "" || version.Version <= 0 {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version identity is required")
+	}
+	if strings.TrimSpace(version.ID) == "" {
+		version.ID = "mver_" + uuid.NewString()
+	}
+	record := version.Record
+	if record.ID == "" {
+		record.ID = version.MemoryID
+	}
+	if record.ID != version.MemoryID {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d has mismatched record id",
+			version.MemoryID, version.Version)
+	}
+	sourceProjectKey := firstNonEmpty(strings.TrimSpace(version.ProjectKey), strings.TrimSpace(record.ProjectKey))
+	if sourceProjectKey != "" && sourceProjectKey != s.cfg.ProjectKey {
+		if record.Metadata == nil {
+			record.Metadata = map[string]interface{}{}
+		}
+		record.Metadata["imported_from_project_key"] = sourceProjectKey
+	}
+	record.ProjectKey = s.cfg.ProjectKey
+	if record.Scope == "" {
+		record.Scope = ScopeProject
+	}
+	if record.Scope != ScopeProject || (version.ScopeKind != "" && version.ScopeKind != ScopeProject) {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d must use project scope",
+			version.MemoryID, version.Version)
+	}
+	record.Text = strings.TrimSpace(record.Text)
+	if record.Text == "" {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d text is required",
+			version.MemoryID, version.Version)
+	}
+	record.Kind = strings.TrimSpace(record.Kind)
+	if record.Kind == "" {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d kind is required",
+			version.MemoryID, version.Version)
+	}
+	if record.Status == "" {
+		record.Status = StatusActive
+	}
+	switch record.Status {
+	case StatusCandidate, StatusActive, StatusSuperseded, StatusDeleted, StatusExpired:
+	default:
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d has invalid status %q",
+			version.MemoryID, version.Version, record.Status)
+	}
+	switch record.Freshness {
+	case FreshnessFresh, FreshnessStale, FreshnessUnverified:
+	default:
+		if record.Freshness == "" {
+			record.Freshness = FreshnessFresh
+		} else {
+			return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d has invalid freshness %q",
+				version.MemoryID, version.Version, record.Freshness)
+		}
+	}
+	if record.Confidence < 0 || record.Confidence > 1 {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d confidence is out of range",
+			version.MemoryID, version.Version)
+	}
+	if memoryredact.DetectSecret(record.Text) != "" ||
+		memoryredact.DetectSecret(record.SourceQuote) != "" {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d contains secret-shaped content",
+			version.MemoryID, version.Version)
+	}
+	record.NormalizedText = normalizeMemoryText(record.Text)
+	record.ContentHash = memoryContentHash(string(record.Scope), record.ProjectKey, record.Kind, record.Text)
+	record.Tags = normalizeTags(record.Tags)
+	record.Sensitivity = normalizeSensitivity(record.Sensitivity)
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = record.CreatedAt
+	}
+	if record.ValidFrom.IsZero() {
+		record.ValidFrom = record.CreatedAt
+	}
+	if record.Status == StatusDeleted {
+		if record.DeletedAt.IsZero() {
+			record.DeletedAt = record.UpdatedAt
+		}
+		if record.ValidUntil.IsZero() {
+			record.ValidUntil = record.DeletedAt
+		}
+	} else {
+		record.DeletedAt = time.Time{}
+	}
+	switch record.Status {
+	case StatusActive, StatusCandidate:
+		// Preserve an explicitly bounded active/candidate historical interval.
+	case StatusSuperseded, StatusExpired:
+		if record.ValidUntil.IsZero() {
+			record.ValidUntil = record.UpdatedAt
+		}
+	}
+	if record.Revision != 0 && record.Revision != version.Version {
+		return RecordVersion{}, fmt.Errorf("memorystore: imported version %s/%d has mismatched revision %d",
+			version.MemoryID, version.Version, record.Revision)
+	}
+	record.Revision = version.Version
+	if err := validateRecordMetadata(&record); err != nil {
+		return RecordVersion{}, err
+	}
+	if record.Metadata == nil {
+		record.Metadata = map[string]interface{}{}
+	}
+	changedBy := strings.TrimSpace(version.ChangedBy)
+	if changedBy == "" {
+		changedBy = "admin:import"
+	}
+	changeReason := strings.TrimSpace(version.ChangeReason)
+	if changeReason == "" {
+		changeReason = "imported history"
+	}
+	changeType := strings.TrimSpace(version.ChangeType)
+	if changeType == "" {
+		changeType = "import"
+	}
+	createdAt := version.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = record.UpdatedAt
+	}
+	version.ProjectKey = s.cfg.ProjectKey
+	version.ScopeKind = ScopeProject
+	version.ScopeKey = s.cfg.ProjectKey
+	version.Record = record
+	version.ChangedBy = changedBy
+	version.ChangeReason = changeReason
+	version.ChangeType = changeType
+	version.ValidFrom = record.ValidFrom
+	version.ValidUntil = record.ValidUntil
+	version.CreatedAt = createdAt
+	return version, nil
 }
 
 func (s *Store) importSummary(ctx context.Context, summary Summary) (bool, error) {

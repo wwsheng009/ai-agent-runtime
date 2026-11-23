@@ -12,6 +12,7 @@ import (
 )
 
 var ErrMaintenanceLeaseLost = errors.New("memorystore: maintenance lease is no longer owned")
+var ErrMaintenanceLeaseBusy = errors.New("memorystore: maintenance lease is owned by another runtime")
 
 // MaintenanceLease identifies one project-maintenance owner incarnation.
 // FencingToken is monotonically increased whenever an expired lease is taken

@@ -17,9 +17,10 @@ func ParseMemoryCitations(answer string, allowedIDs []string) CitationResult {
 }
 
 // RecordAnswerExposure applies the citation contract without blocking the
-// answer path. Cited/read ids increment use_count; all other allowed injected
-// ids are recorded as injected_only exposure. When parsing fails, every
-// injected id is recorded as injected_only.
+// answer path. Ordinary cited/read ids update ordinary memory usage; Core IDs
+// are routed to their dedicated usage ledger. Other allowed injected ids are
+// recorded as injected_only exposure. When parsing fails, every injected ID is
+// recorded as injected_only.
 func RecordAnswerExposure(ctx context.Context, store *memorystore.Store, input AnswerExposureInput) (CitationResult, error) {
 	if store == nil {
 		return CitationResult{CleanText: input.Answer}, nil

@@ -2,10 +2,15 @@ package tools
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memoryredact"
@@ -21,6 +26,30 @@ type memoryTool struct {
 	cfg       *runtimecfg.RuntimeConfig
 	operation string
 	write     bool
+}
+
+type memoryHistoryRecordView struct {
+	ID         string             `json:"id"`
+	Kind       string             `json:"kind"`
+	Status     memorystore.Status `json:"status"`
+	Text       string             `json:"text"`
+	Title      string             `json:"title,omitempty"`
+	Summary    string             `json:"summary,omitempty"`
+	Revision   int64              `json:"revision"`
+	ValidFrom  time.Time          `json:"valid_from,omitempty"`
+	ValidUntil time.Time          `json:"valid_until,omitempty"`
+	Archived   bool               `json:"archived"`
+}
+
+type memoryHistoryVersionView struct {
+	Version      int64                   `json:"version"`
+	ChangedBy    string                  `json:"changed_by"`
+	ChangeReason string                  `json:"change_reason"`
+	ChangeType   string                  `json:"change_type"`
+	ValidFrom    time.Time               `json:"valid_from,omitempty"`
+	ValidUntil   time.Time               `json:"valid_until,omitempty"`
+	CreatedAt    time.Time               `json:"created_at"`
+	Record       memoryHistoryRecordView `json:"record"`
 }
 
 func newMemoryTool(cfg *runtimecfg.RuntimeConfig, operation, name, description string, parameters map[string]interface{}, write bool) *memoryTool {
@@ -50,6 +79,9 @@ func (t *memoryTool) DefinitionMetadata() map[string]interface{} {
 }
 
 func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if t.operation == "rollback" && !memoryRollbackToolEnabled(t.cfg) {
+		return memoryToolError(fmt.Errorf("memory_rollback is disabled; enable memory.mode=on, memory.tools.enabled, and memory.tools.allowRollback")), nil
+	}
 	store, err := t.openStore()
 	if err != nil {
 		return memoryToolError(err), nil
@@ -73,8 +105,12 @@ func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{})
 			return memoryToolError(err), nil
 		}
 		return memoryToolJSON(report), nil
+	case "core_get":
+		return t.coreGet(ctx, store)
 	case "add":
 		return t.add(ctx, store, params)
+	case "pin":
+		return t.pin(ctx, store, params)
 	case "correct":
 		return t.correct(ctx, store, params)
 	case "forget":
@@ -83,6 +119,10 @@ func (t *memoryTool) Execute(ctx context.Context, params map[string]interface{})
 		return t.why(ctx, store, params)
 	case "why_not":
 		return t.whyNot(ctx, store, params)
+	case "history":
+		return t.history(ctx, store, params)
+	case "rollback":
+		return t.rollback(ctx, store, params)
 	default:
 		return memoryToolError(fmt.Errorf("unsupported memory operation %q", t.operation)), nil
 	}
@@ -135,11 +175,12 @@ func (t *memoryTool) search(ctx context.Context, store *memorystore.Store, param
 		return memoryToolError(fmt.Errorf("agent memory_search only exposes active or candidate records")), nil
 	}
 	page, err := store.ListRecords(ctx, memorystore.RecordFilter{
-		Status: memorystore.Status(status),
-		Kind:   strings.TrimSpace(memoryStringParam(params, "kind")),
-		Tag:    strings.TrimSpace(memoryStringParam(params, "tag")),
-		Query:  strings.TrimSpace(memoryStringParam(params, "query")),
-		Limit:  limit,
+		Status:     memorystore.Status(status),
+		Kind:       strings.TrimSpace(memoryStringParam(params, "kind")),
+		Tag:        strings.TrimSpace(memoryStringParam(params, "tag")),
+		Query:      strings.TrimSpace(memoryStringParam(params, "query")),
+		SourceKind: strings.TrimSpace(memoryStringParam(params, "source_kind")),
+		Limit:      limit,
 	})
 	if err != nil {
 		return memoryToolError(err), nil
@@ -161,14 +202,8 @@ func (t *memoryTool) read(ctx context.Context, store *memorystore.Store, params 
 	if err != nil {
 		return memoryToolError(err), nil
 	}
-	if record.Sensitivity == "private" {
-		return memoryToolError(fmt.Errorf("private memory requires admin authorization")), nil
-	}
-	if memoryredact.DetectSecret(record.Text) != "" {
-		return memoryToolError(fmt.Errorf("secret-shaped memory is not readable through agent tools")), nil
-	}
-	if record.Status == memorystore.StatusDeleted {
-		return memoryToolError(fmt.Errorf("deleted memory is not readable through agent tools")), nil
+	if visibilityErr := agentMemoryVisibilityError(record); visibilityErr != nil {
+		return memoryToolError(visibilityErr), nil
 	}
 	usage, _ := store.ListUsage(ctx, memorystore.UsageFilter{MemoryID: id, Limit: 20})
 	if sessionID := strings.TrimSpace(toolctx.SessionID(ctx)); sessionID != "" {
@@ -214,6 +249,26 @@ func (t *memoryTool) recent(ctx context.Context, store *memorystore.Store, param
 	return memoryToolJSON(map[string]interface{}{"items": page.Items, "count": page.Count}), nil
 }
 
+func (t *memoryTool) coreGet(ctx context.Context, store *memorystore.Store) (*toolkit.ToolResult, error) {
+	core, err := store.GetCore(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return memoryToolJSON(map[string]interface{}{"core": nil, "status": "not_found"}), nil
+	}
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	if sessionID := strings.TrimSpace(toolctx.SessionID(ctx)); sessionID != "" {
+		// Usage is telemetry only. A transient write failure must not turn a
+		// successful read of reviewed Core into a failed tool call.
+		_, _ = store.RecordCoreExposure(ctx, memorystore.CoreExposure{
+			CoreIDs: []string{core.ID}, SessionID: sessionID,
+			TurnID: toolctx.TurnID(ctx), MessageID: toolctx.ToolCallID(ctx),
+			UseKind: memorystore.UsageRead,
+		})
+	}
+	return memoryToolJSON(map[string]interface{}{"core": core, "status": memorystore.CoreStatusActive}), nil
+}
+
 func (t *memoryTool) add(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	text := strings.TrimSpace(memoryStringParam(params, "text"))
 	if text == "" {
@@ -224,13 +279,38 @@ func (t *memoryTool) add(ctx context.Context, store *memorystore.Store, params m
 		pinned = &value
 	}
 	note, err := store.Append(memorystore.AppendNoteOptions{
-		Text: text, Kind: memoryStringParam(params, "kind"), Tags: memoryStringSliceParam(params, "tags"),
+		Text: text, Title: memoryStringParam(params, "title"), Summary: memoryStringParam(params, "summary"),
+		CanonicalID: memoryStringParam(params, "canonical_id"),
+		Kind:        memoryStringParam(params, "kind"), Tags: memoryStringSliceParam(params, "tags"),
 		Pinned: pinned, Source: "manual", SessionID: strings.TrimSpace(toolctx.SessionID(ctx)),
 	})
 	if err != nil {
 		return memoryToolError(err), nil
 	}
 	return memoryToolJSON(note), nil
+}
+
+func (t *memoryTool) pin(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	id := strings.TrimSpace(memoryStringParam(params, "id"))
+	if id == "" {
+		return memoryToolError(fmt.Errorf("id is required")), nil
+	}
+	record, err := store.GetRecord(ctx, id)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	if visibilityErr := agentMemoryVisibilityError(record); visibilityErr != nil {
+		return memoryToolError(visibilityErr), nil
+	}
+	pinned := true
+	if value, ok := params["pinned"].(bool); ok {
+		pinned = value
+	}
+	record, err = store.UpdateRecord(ctx, id, memorystore.RecordPatch{Pinned: &pinned})
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(record), nil
 }
 
 func (t *memoryTool) correct(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
@@ -276,14 +356,8 @@ func (t *memoryTool) why(ctx context.Context, store *memorystore.Store, params m
 	if err != nil {
 		return memoryToolError(err), nil
 	}
-	if record.Sensitivity == "private" {
-		return memoryToolError(fmt.Errorf("private memory requires admin authorization")), nil
-	}
-	if memoryredact.DetectSecret(record.Text) != "" {
-		return memoryToolError(fmt.Errorf("secret-shaped memory is not readable through agent tools")), nil
-	}
-	if record.Status == memorystore.StatusDeleted {
-		return memoryToolError(fmt.Errorf("deleted memory is not readable through agent tools")), nil
+	if visibilityErr := agentMemoryVisibilityError(record); visibilityErr != nil {
+		return memoryToolError(visibilityErr), nil
 	}
 	usage, _ := store.ListUsage(ctx, memorystore.UsageFilter{MemoryID: id, Limit: 50})
 	return memoryToolJSON(map[string]interface{}{"record": record, "usage": usage}), nil
@@ -299,11 +373,215 @@ func (t *memoryTool) whyNot(ctx context.Context, store *memorystore.Store, param
 	if err != nil {
 		return memoryToolError(err), nil
 	}
+	dropped := make([]memorystore.DroppedRecord, 0, len(selection.Dropped))
+	for _, item := range selection.Dropped {
+		if item.Reason == "archived" {
+			continue
+		}
+		dropped = append(dropped, item)
+	}
 	return memoryToolJSON(map[string]interface{}{
 		"selected_ids": selection.IDs, "recall_count": len(selection.Recall),
 		"summary_revision": selection.Revision, "token_estimate": selection.TokenEstimate,
-		"dropped": selection.Dropped,
+		"dropped": dropped,
 	}), nil
+}
+
+func (t *memoryTool) history(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	id := strings.TrimSpace(memoryStringParam(params, "id"))
+	if id == "" {
+		return memoryToolError(fmt.Errorf("id is required")), nil
+	}
+	current, err := store.GetRecord(ctx, id)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	if visibilityErr := agentMemoryVisibilityError(current); visibilityErr != nil {
+		return memoryToolError(visibilityErr), nil
+	}
+	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if sessionID == "" {
+		return memoryToolError(fmt.Errorf("memory history requires an active session")), nil
+	}
+	if sourceSessionID := strings.TrimSpace(current.SourceSessionID); sourceSessionID != "" && sourceSessionID != sessionID {
+		return memoryToolError(fmt.Errorf("cross-session memory history requires admin authorization")), nil
+	}
+	limit := memoryBoundedIntParam(params, "limit", 50, 100)
+	versions, hasMore, err := store.ListRecordVersionsPage(ctx, id, limit)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	views := make([]memoryHistoryVersionView, 0, len(versions))
+	for _, version := range versions {
+		record := version.Record
+		if version.MemoryID != id || version.ProjectKey != store.ProjectKey() ||
+			version.ScopeKind != memorystore.ScopeProject ||
+			record.ID != id || record.Revision != version.Version ||
+			record.ProjectKey != store.ProjectKey() || record.Scope != memorystore.ScopeProject {
+			return memoryToolError(fmt.Errorf("inconsistent record history")), nil
+		}
+		if sourceSessionID := strings.TrimSpace(record.SourceSessionID); sourceSessionID != "" && sourceSessionID != sessionID {
+			return memoryToolError(fmt.Errorf("cross-session memory history requires admin authorization")), nil
+		}
+		if record.Sensitivity == "private" || record.Archived ||
+			record.Status == memorystore.StatusDeleted ||
+			memoryredact.DetectSecret(record.Text) != "" {
+			return memoryToolError(fmt.Errorf("historical memory contains restricted content")), nil
+		}
+		views = append(views, memoryHistoryVersionView{
+			Version: version.Version, ChangedBy: memoryHistorySafeText(version.ChangedBy, 120),
+			ChangeReason: memoryHistorySafeText(version.ChangeReason, 500),
+			ChangeType:   memoryHistorySafeText(version.ChangeType, 80),
+			ValidFrom:    version.ValidFrom, ValidUntil: version.ValidUntil, CreatedAt: version.CreatedAt,
+			Record: memoryHistoryRecordView{
+				ID: memoryHistorySafeText(record.ID, 120), Kind: memoryHistorySafeText(record.Kind, 80), Status: record.Status,
+				Text: memoryHistorySafeText(record.Text, 2000), Title: memoryHistorySafeText(record.Title, 200),
+				Summary: memoryHistorySafeText(record.Summary, 500), Revision: record.Revision,
+				ValidFrom: record.ValidFrom, ValidUntil: record.ValidUntil, Archived: record.Archived,
+			},
+		})
+	}
+	return memoryToolJSON(map[string]interface{}{
+		"id": memoryHistorySafeText(id, 120), "versions": views, "count": len(views), "has_more": hasMore,
+	}), nil
+}
+
+func (t *memoryTool) rollback(ctx context.Context, store *memorystore.Store, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if !memoryRollbackToolEnabled(t.cfg) {
+		return memoryToolError(fmt.Errorf("memory_rollback is disabled; enable memory.mode=on, memory.tools.enabled, and memory.tools.allowRollback")), nil
+	}
+	confirm, _ := params["confirm"].(bool)
+	if !confirm {
+		return memoryToolError(fmt.Errorf("memory_rollback requires confirm=true")), nil
+	}
+	id := strings.TrimSpace(memoryStringParam(params, "id"))
+	if id == "" {
+		return memoryToolError(fmt.Errorf("id is required")), nil
+	}
+	targetVersion, err := memoryRequiredInt64Param(params, "target_version")
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	expectedRevision, err := memoryRequiredInt64Param(params, "expected_revision")
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	reason := strings.TrimSpace(memoryStringParam(params, "reason"))
+	if reason == "" {
+		return memoryToolError(fmt.Errorf("reason is required")), nil
+	}
+	revertSupersede, _ := params["revert_supersede"].(bool)
+	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if sessionID == "" {
+		return memoryToolError(fmt.Errorf("memory rollback requires an active session")), nil
+	}
+
+	current, err := store.GetRecord(ctx, id)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	if visibilityErr := agentMemoryVisibilityError(current); visibilityErr != nil {
+		return memoryToolError(visibilityErr), nil
+	}
+	if memoryRecordContainsSecret(current) {
+		return memoryToolError(fmt.Errorf("memory rollback is not allowed for secret-shaped content")), nil
+	}
+	if current.ProjectKey != store.ProjectKey() || current.Scope != memorystore.ScopeProject {
+		return memoryToolError(fmt.Errorf("memory rollback is limited to the current project")), nil
+	}
+	if sourceSessionID := strings.TrimSpace(current.SourceSessionID); sourceSessionID != sessionID {
+		return memoryToolError(fmt.Errorf("memory rollback requires a record owned by the current session")), nil
+	}
+
+	versions, err := store.ListRecordVersions(ctx, id)
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	var target *memorystore.RecordVersion
+	for index := range versions {
+		if versions[index].Version == targetVersion {
+			target = &versions[index]
+			break
+		}
+	}
+	if target == nil {
+		return memoryToolError(fmt.Errorf("memory rollback target version %d was not found", targetVersion)), nil
+	}
+	if target.Record.ID != id || target.MemoryID != id ||
+		target.Record.Revision != target.Version || target.Record.ProjectKey != store.ProjectKey() ||
+		target.Record.Scope != memorystore.ScopeProject ||
+		target.ProjectKey != store.ProjectKey() || target.ScopeKind != memorystore.ScopeProject {
+		return memoryToolError(fmt.Errorf("inconsistent record history")), nil
+	}
+	if visibilityErr := agentMemoryVisibilityError(target.Record); visibilityErr != nil {
+		return memoryToolError(fmt.Errorf("memory rollback target is not agent-visible: %w", visibilityErr)), nil
+	}
+	if memoryRecordContainsSecret(target.Record) {
+		return memoryToolError(fmt.Errorf("memory rollback target contains secret-shaped content")), nil
+	}
+	if sourceSessionID := strings.TrimSpace(target.Record.SourceSessionID); sourceSessionID != sessionID {
+		return memoryToolError(fmt.Errorf("memory rollback target requires current-session ownership")), nil
+	}
+	if revertSupersede && current.Status == memorystore.StatusSuperseded &&
+		target.Record.Status == memorystore.StatusActive {
+		successorID := strings.TrimSpace(current.SupersededBy)
+		if successorID == "" {
+			return memoryToolError(fmt.Errorf("memory rollback cannot revert supersession without a successor")), nil
+		}
+		successor, err := store.GetRecord(ctx, successorID)
+		if err != nil {
+			return memoryToolError(fmt.Errorf("memory rollback successor is unavailable: %w", err)), nil
+		}
+		if successor.ProjectKey != store.ProjectKey() || successor.Scope != memorystore.ScopeProject ||
+			successor.SupersedesID != current.ID || successor.Status != memorystore.StatusActive {
+			return memoryToolError(fmt.Errorf("memory rollback successor changed; rollback it separately first")), nil
+		}
+		if visibilityErr := agentMemoryVisibilityError(successor); visibilityErr != nil {
+			return memoryToolError(fmt.Errorf("memory rollback successor is not agent-visible: %w", visibilityErr)), nil
+		}
+		if memoryRecordContainsSecret(successor) {
+			return memoryToolError(fmt.Errorf("memory rollback successor contains secret-shaped content")), nil
+		}
+		if sourceSessionID := strings.TrimSpace(successor.SourceSessionID); sourceSessionID != sessionID {
+			return memoryToolError(fmt.Errorf("memory rollback successor requires current-session ownership")), nil
+		}
+	}
+
+	restored, err := store.RollbackRecord(ctx, id, memorystore.RecordRollbackOptions{
+		TargetVersion:    targetVersion,
+		ExpectedRevision: expectedRevision,
+		Reason:           reason,
+		ChangedBy:        "agent_tool",
+		RevertSupersede:  revertSupersede,
+	})
+	if err != nil {
+		return memoryToolError(err), nil
+	}
+	return memoryToolJSON(map[string]interface{}{
+		"ok": true, "id": restored.ID, "revision": restored.Revision, "status": restored.Status,
+	}), nil
+}
+
+func memoryRollbackToolEnabled(cfg *runtimecfg.RuntimeConfig) bool {
+	return cfg != nil && cfg.Memory.Tools.Enabled && cfg.Memory.Tools.AllowRollback &&
+		strings.EqualFold(strings.TrimSpace(cfg.Memory.Mode), "on")
+}
+
+func memoryRecordContainsSecret(record memorystore.Record) bool {
+	fields := []string{record.Text, record.Title, record.Summary, strings.Join(record.Tags, " ")}
+	if len(record.Metadata) > 0 {
+		metadata, err := json.Marshal(record.Metadata)
+		if err != nil {
+			return true
+		}
+		fields = append(fields, string(metadata))
+	}
+	for _, field := range fields {
+		if memoryredact.DetectSecret(field) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func memoryToolJSON(value interface{}) *toolkit.ToolResult {
@@ -314,15 +592,43 @@ func memoryToolJSON(value interface{}) *toolkit.ToolResult {
 	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: string(body)}
 }
 
+func memoryHistorySafeText(value string, maxRunes int) string {
+	value, _ = memoryredact.Redact(strings.TrimSpace(value))
+	value = strings.Join(strings.Fields(value), " ")
+	if maxRunes > 0 {
+		runes := []rune(value)
+		if len(runes) > maxRunes {
+			value = string(runes[:maxRunes-1]) + "…"
+		}
+	}
+	return value
+}
+
 func agentVisibleMemoryRecords(records []memorystore.Record) []memorystore.Record {
 	out := make([]memorystore.Record, 0, len(records))
 	for _, record := range records {
-		if record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "" {
+		if record.Sensitivity == "private" || record.Archived || memoryredact.DetectSecret(record.Text) != "" {
 			continue
 		}
 		out = append(out, record)
 	}
 	return out
+}
+
+func agentMemoryVisibilityError(record memorystore.Record) error {
+	if record.Sensitivity == "private" {
+		return fmt.Errorf("private memory requires admin authorization")
+	}
+	if memoryredact.DetectSecret(record.Text) != "" {
+		return fmt.Errorf("secret-shaped memory is not readable through agent tools")
+	}
+	if record.Status == memorystore.StatusDeleted {
+		return fmt.Errorf("deleted memory is not readable through agent tools")
+	}
+	if record.Archived {
+		return fmt.Errorf("archived memory is not readable through agent tools")
+	}
+	return nil
 }
 
 func memoryToolError(err error) *toolkit.ToolResult {
@@ -363,6 +669,91 @@ func memoryIntParam(params map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+func memoryRequiredInt64Param(params map[string]interface{}, key string) (int64, error) {
+	value, ok := params[key]
+	if !ok || value == nil {
+		return 0, fmt.Errorf("%s is required", key)
+	}
+	switch value := value.(type) {
+	case int:
+		if value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case int8:
+		if value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case int16:
+		if value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case int32:
+		if value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case int64:
+		if value <= 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return value, nil
+	case uint:
+		if value == 0 || uint64(value) > math.MaxInt64 {
+			return 0, fmt.Errorf("%s must be a positive int64", key)
+		}
+		return int64(value), nil
+	case uint8:
+		if value == 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case uint16:
+		if value == 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case uint32:
+		if value == 0 {
+			return 0, fmt.Errorf("%s must be positive", key)
+		}
+		return int64(value), nil
+	case uint64:
+		if value == 0 || value > math.MaxInt64 {
+			return 0, fmt.Errorf("%s must be a positive int64", key)
+		}
+		return int64(value), nil
+	case float32:
+		return memoryFloat64ToInt64(key, float64(value))
+	case float64:
+		return memoryFloat64ToInt64(key, value)
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("%s must be a positive integer", key)
+		}
+		return parsed, nil
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("%s must be a positive integer", key)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+}
+
+func memoryFloat64ToInt64(key string, value float64) (int64, error) {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) ||
+		math.Trunc(value) != value || value > 9007199254740991 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return int64(value), nil
 }
 
 func memoryBoundedIntParam(params map[string]interface{}, key string, fallback, max int) int {

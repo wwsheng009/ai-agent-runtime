@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -22,6 +23,8 @@ var (
 	errV2Unavailable = errors.New("memorystore: v2 backend unavailable")
 	errMemoryClosed  = errors.New("memorystore: store is closed")
 )
+
+const maxMemorySourceQuoteRunes = 1200
 
 func normalizeConfig(cfg Config) Config {
 	cfg.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
@@ -40,6 +43,7 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.PinnedBudgetRatio > 1 {
 		cfg.PinnedBudgetRatio = 1
 	}
+	cfg.CategoryBudgets = cfg.CategoryBudgets.normalized()
 	if cfg.RecallTraceSampleRate <= 0 {
 		cfg.RecallTraceSampleRate = 0.01
 	}
@@ -234,15 +238,22 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 		source = "manual"
 	}
 	note := Note{
-		ID:        strings.TrimSpace(opts.ID),
-		Text:      text,
-		Tags:      tags,
-		Source:    source,
-		SessionID: strings.TrimSpace(opts.SessionID),
-		CreatedAt: now,
+		ID:          strings.TrimSpace(opts.ID),
+		Text:        text,
+		Title:       strings.TrimSpace(opts.Title),
+		Summary:     strings.TrimSpace(opts.Summary),
+		CanonicalID: strings.TrimSpace(opts.CanonicalID),
+		Tags:        tags,
+		Source:      source,
+		SessionID:   strings.TrimSpace(opts.SessionID),
+		Archived:    opts.Archived,
+		CreatedAt:   now,
 	}
 	if note.ID == "" {
 		note.ID = newNoteID(note)
+	}
+	if note.CanonicalID == "" {
+		note.CanonicalID = note.ID
 	}
 	record := Record{
 		ID:              note.ID,
@@ -251,6 +262,10 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 		Kind:            kind,
 		Status:          StatusActive,
 		Text:            text,
+		Title:           note.Title,
+		Summary:         note.Summary,
+		CanonicalID:     note.CanonicalID,
+		Archived:        note.Archived,
 		NormalizedText:  normalizeMemoryText(text),
 		Tags:            tags,
 		Confidence:      1.0,
@@ -292,6 +307,22 @@ func (s *Store) insertRecordTx(ctx context.Context, db *sql.DB, record Record, a
 }
 
 func (s *Store) insertRecordSQLTx(ctx context.Context, tx *sql.Tx, record Record, actor, sessionID string) error {
+	return s.insertRecordSQLTxWithOptions(ctx, tx, record, actor, sessionID, recordInsertOptions{})
+}
+
+type recordInsertOptions struct {
+	eventType     string
+	changeType    string
+	appendVersion bool
+}
+
+func (s *Store) insertRecordSQLTxWithOptions(
+	ctx context.Context,
+	tx *sql.Tx,
+	record Record,
+	actor, sessionID string,
+	options recordInsertOptions,
+) error {
 	if record.Status == "" {
 		record.Status = StatusActive
 	}
@@ -302,11 +333,17 @@ func (s *Store) insertRecordSQLTx(ctx context.Context, tx *sql.Tx, record Record
 		record.Revision = 1
 	}
 	record.Sensitivity = normalizeSensitivity(record.Sensitivity)
+	if err := validateRecordMetadata(&record); err != nil {
+		return err
+	}
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = record.CreatedAt
+	}
+	if record.ValidFrom.IsZero() {
+		record.ValidFrom = record.CreatedAt
 	}
 	var suppressed int
 	if err := tx.QueryRowContext(ctx, `
@@ -322,18 +359,26 @@ WHERE scope = ? AND project_key = ? AND content_hash = ?
 	if rule := memoryredact.DetectSecret(record.Text); rule != "" {
 		return fmt.Errorf("memorystore: refusing to store secret-shaped content (%s)", rule)
 	}
+	record.SourceQuote = strings.TrimSpace(record.SourceQuote)
+	if utf8.RuneCountInString(record.SourceQuote) > maxMemorySourceQuoteRunes {
+		return fmt.Errorf("memorystore: source evidence quote exceeds %d runes", maxMemorySourceQuoteRunes)
+	}
+	if rule := memoryredact.DetectSecret(record.SourceQuote); rule != "" {
+		return fmt.Errorf("memorystore: refusing to store secret-shaped source evidence (%s)", rule)
+	}
 	tagsJSON, _ := json.Marshal(record.Tags)
 	refsJSON, _ := json.Marshal(record.SourceRefs)
 	metadataJSON, _ := json.Marshal(record.Metadata)
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO memory_entries (
     id, scope, project_key, kind, status, text, normalized_text, tags_json,
-    confidence, sensitivity, pinned, retention_class, source_kind,
+	    confidence, sensitivity, pinned, retention_class, source_kind,
 	    source_session_id, source_session_generation, source_turn_id, source_refs_json, content_hash,
     supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
     valid_from, valid_until, freshness_status, last_verified_at,
-    revalidate_after, stale_reason, deleted_at, metadata_json
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    revalidate_after, stale_reason, deleted_at, metadata_json,
+    title, summary, canonical_id, superseded_by, archived
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.ID, string(record.Scope), record.ProjectKey, record.Kind, string(record.Status),
 		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence, record.Sensitivity,
@@ -346,6 +391,7 @@ INSERT INTO memory_entries (
 		string(record.Freshness), nullableTime(record.LastVerifiedAt),
 		nullableTime(record.RevalidateAfter), nullableString(record.StaleReason),
 		nullableTime(record.DeletedAt), string(metadataJSON),
+		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
 	)
 	if err != nil {
 		if isUniqueConstraint(err) {
@@ -356,10 +402,50 @@ INSERT INTO memory_entries (
 	if err := insertSourceTx(ctx, tx, record, sessionID); err != nil {
 		return err
 	}
-	if err := insertEventTx(ctx, tx, record.ProjectKey, record.ID, "created", actor, sessionID, record.Revision, map[string]interface{}{
+	eventType := strings.TrimSpace(options.eventType)
+	if eventType == "" {
+		eventType = "created"
+	}
+	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, eventType, actor, sessionID, record.Revision, map[string]interface{}{
 		"kind": record.Kind, "source_kind": record.SourceKind,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
+	}
+	if options.appendVersion || (options.eventType == "" && options.changeType == "") {
+		changeType := strings.TrimSpace(options.changeType)
+		if changeType == "" {
+			changeType = "create"
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, record.ID, record.ProjectKey, actor, "record created", changeType, eventID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRecordMetadata(record *Record) error {
+	if record == nil {
+		return fmt.Errorf("memorystore: record metadata is nil")
+	}
+	record.Title = strings.TrimSpace(record.Title)
+	record.Summary = strings.TrimSpace(record.Summary)
+	record.CanonicalID = strings.TrimSpace(record.CanonicalID)
+	record.SupersededBy = strings.TrimSpace(record.SupersededBy)
+	if record.CanonicalID == "" {
+		record.CanonicalID = record.ID
+	}
+	if len([]rune(record.Title)) > 200 {
+		return fmt.Errorf("memorystore: record title exceeds 200 runes")
+	}
+	if len([]rune(record.Summary)) > 4000 {
+		return fmt.Errorf("memorystore: record summary exceeds 4000 runes")
+	}
+	if len([]rune(record.CanonicalID)) > 200 {
+		return fmt.Errorf("memorystore: canonical id exceeds 200 runes")
+	}
+	if len([]rune(record.SupersededBy)) > 200 {
+		return fmt.Errorf("memorystore: superseded_by exceeds 200 runes")
 	}
 	return nil
 }
@@ -379,50 +465,81 @@ func insertSourceTx(ctx context.Context, tx *sql.Tx, record Record, sessionID st
 	if sourceObservedAt.IsZero() {
 		sourceObservedAt = time.Now().UTC()
 	}
+	sourceType := strings.TrimSpace(record.SourceType)
+	if sourceType == "" {
+		switch strings.ToLower(strings.TrimSpace(record.SourceKind)) {
+		case "manual":
+			sourceType = "manual"
+		case "turn_window":
+			sourceType = "turn_window_summary"
+		default:
+			sourceType = "transcript"
+		}
+	}
+	sourceTrust := strings.TrimSpace(record.SourceTrust)
+	if sourceTrust == "" {
+		sourceTrust = "unverified"
+	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_sources (
 	    id, memory_id, source_kind, source_id, session_id, source_session_generation, turn_id,
     source_window, message_ids_json, artifact_refs_json, fact_refs_json, knowledge_refs_json,
-    source_hash, source_revision, source_updated_at, source_observed_at, quote, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?)
+    source_hash, source_revision, source_updated_at, source_observed_at, quote,
+    source_type, source_trust, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sourceID, record.ID, record.SourceKind, record.ID, nullableString(record.SourceSessionID),
 		record.SourceSessionGeneration, nullableString(record.SourceTurnID), nullableString(record.SourceWindow), string(messageIDs), sourceHash,
 		nullableInt64(record.SourceRevision),
 		sourceUpdatedAt.UTC().Format(time.RFC3339Nano),
-		sourceObservedAt.UTC().Format(time.RFC3339Nano), record.Text, nowText()); err != nil {
+		sourceObservedAt.UTC().Format(time.RFC3339Nano), nullableString(record.SourceQuote),
+		sourceType, sourceTrust, nowText()); err != nil {
 		return fmt.Errorf("memorystore: insert source: %w", err)
 	}
 	return nil
 }
 
 func insertEventTx(ctx context.Context, tx *sql.Tx, projectKey, memoryID, eventType, actor, sessionID string, revision int64, payload map[string]interface{}) error {
+	_, err := insertEventIDTx(ctx, tx, projectKey, memoryID, eventType, actor, sessionID, revision, payload)
+	return err
+}
+
+func insertEventIDTx(ctx context.Context, tx *sql.Tx, projectKey, memoryID, eventType, actor, sessionID string, revision int64, payload map[string]interface{}) (string, error) {
 	body, _ := json.Marshal(payload)
+	eventID := "evt_" + uuid.NewString()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_events (id, project_key, memory_id, event_type, actor, session_id, revision, payload_json, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, "evt_"+uuid.NewString(), projectKey, memoryID, eventType, actor, nullableString(sessionID), revision, string(body), nowText()); err != nil {
-		return fmt.Errorf("memorystore: insert event: %w", err)
+`, eventID, projectKey, memoryID, eventType, actor, nullableString(sessionID), revision, string(body), nowText()); err != nil {
+		return "", fmt.Errorf("memorystore: insert event: %w", err)
 	}
-	return nil
+	return eventID, nil
 }
 
 func (s *Store) listV2(limit int) ([]Note, error) {
+	return s.listV2WithOptions(ListOptions{Limit: limit})
+}
+
+func (s *Store) listV2WithOptions(opts ListOptions) ([]Note, error) {
 	db, err := s.ensureV2()
 	if err != nil {
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 0
-	}
 	query := `
-SELECT id, text, tags_json, source_kind, source_session_id, created_at
+SELECT id, text, tags_json, source_kind, source_session_id, created_at,
+       title, summary, canonical_id, archived
 FROM memory_entries
-WHERE scope = ? AND project_key = ? AND status = 'active' AND source_kind = 'manual'
-ORDER BY updated_at DESC, id DESC`
+WHERE scope = ? AND project_key = ? AND status = 'active' AND archived = 0`
 	args := []interface{}{string(ScopeProject), s.cfg.ProjectKey}
-	if limit > 0 {
+	if sourceKind := strings.ToLower(strings.TrimSpace(opts.SourceKind)); sourceKind != "" {
+		query += " AND LOWER(source_kind) = ?"
+		args = append(args, sourceKind)
+	}
+	// Keep the query construction above easy to audit: source filtering is
+	// parameterized and the stable ordering remains identical for all callers.
+	query += "\nORDER BY updated_at DESC, id DESC"
+	if opts.Limit > 0 {
 		query += " LIMIT ?"
-		args = append(args, limit)
+		args = append(args, opts.Limit)
 	}
 	rows, err := db.QueryContext(context.Background(), query, args...)
 	if err != nil {
@@ -433,12 +550,19 @@ ORDER BY updated_at DESC, id DESC`
 	for rows.Next() {
 		var (
 			id, text, tagsJSON, sourceKind, sessionID sql.NullString
+			title, summary, canonicalID               sql.NullString
 			createdAt                                 string
+			archived                                  int
 		)
-		if err := rows.Scan(&id, &text, &tagsJSON, &sourceKind, &sessionID, &createdAt); err != nil {
+		if err := rows.Scan(&id, &text, &tagsJSON, &sourceKind, &sessionID, &createdAt,
+			&title, &summary, &canonicalID, &archived); err != nil {
 			return nil, err
 		}
-		note := Note{ID: id.String, Text: text.String, Source: sourceKind.String, SessionID: sessionID.String}
+		note := Note{
+			ID: id.String, Text: text.String, Source: sourceKind.String, SessionID: sessionID.String,
+			Title: title.String, Summary: summary.String, CanonicalID: canonicalID.String,
+			Archived: archived != 0,
+		}
 		_ = json.Unmarshal([]byte(tagsJSON.String), &note.Tags)
 		note.CreatedAt = parseTime(createdAt)
 		notes = append(notes, note)
@@ -447,7 +571,8 @@ ORDER BY updated_at DESC, id DESC`
 }
 
 func (s *Store) searchV2(opts SearchOptions) ([]SearchHit, error) {
-	notes, err := s.listV2(0)
+	query := strings.TrimSpace(opts.Query)
+	notes, err := s.listV2WithOptions(ListOptions{SourceKind: opts.SourceKind})
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +581,6 @@ func (s *Store) searchV2(opts SearchOptions) ([]SearchHit, error) {
 		limit = DefaultSearchLimit
 	}
 	requiredTags := normalizeTags(opts.Tags)
-	query := strings.TrimSpace(opts.Query)
 	tokens := tokenize(query)
 	hits := make([]SearchHit, 0, len(notes))
 	for _, note := range notes {
@@ -544,55 +668,149 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		candidateCount = len(diagnosticRecords)
 	}
 	selection := Selection{CandidateCount: candidateCount, Dropped: initialDropped}
+	categoryBudgetsEnabled := s.cfg.CategoryBudgetsEnabled || s.cfg.CategoryBudgets.enabled()
+	if categoryBudgetsEnabled {
+		selection.CategoryBudget = s.cfg.CategoryBudgets.allocation(budget)
+		selection.CategoryUsed = map[string]int{
+			InjectionCategoryCore: 0, InjectionCategoryTask: 0,
+			InjectionCategoryRetrieved: 0, InjectionCategoryProcedure: 0,
+			InjectionCategoryReference: 0,
+		}
+	}
+	categoryRemaining := func(category string) int {
+		if !categoryBudgetsEnabled {
+			return budget
+		}
+		remaining := selection.CategoryBudget[category] - selection.CategoryUsed[category]
+		if remaining < 0 {
+			return 0
+		}
+		return remaining
+	}
+	coreUsed := 0
+	if core, coreErr := s.GetCore(context.Background()); coreErr == nil {
+		// Core is the highest-priority stable item, but it must still fit inside
+		// the caller's project-memory budget. Keep reviewed content intact rather
+		// than truncating it into a potentially misleading partial assertion.
+		coreText := fmt.Sprintf("[reviewed project core v%d] %s",
+			core.Version, strings.TrimSpace(core.Content))
+		coreCost := EstimateTokens(coreText)
+		coreCap := budget
+		if categoryBudgetsEnabled && selection.CategoryBudget[InjectionCategoryCore] < coreCap {
+			coreCap = selection.CategoryBudget[InjectionCategoryCore]
+		}
+		if coreCost <= coreCap {
+			selection.Core = &core
+			coreUsed = coreCost
+			if categoryBudgetsEnabled {
+				selection.CategoryUsed[InjectionCategoryCore] += coreCost
+			}
+		} else {
+			dropped := DroppedRecord{ID: core.ID, Reason: "core_budget"}
+			if categoryBudgetsEnabled {
+				dropped.Category = InjectionCategoryCore
+			}
+			selection.Dropped = append(selection.Dropped, dropped)
+		}
+	} else if !errors.Is(coreErr, sql.ErrNoRows) &&
+		!errors.Is(coreErr, ErrCoreSourceIneligible) {
+		return Selection{}, coreErr
+	}
 	pinnedBudget := int(float64(budget) * s.cfg.PinnedBudgetRatio)
+	if available := budget - coreUsed; pinnedBudget > available {
+		pinnedBudget = available
+	}
 	pinnedUsed := 0
 	stableIDs := map[string]struct{}{}
 	for _, record := range records {
 		if !record.Pinned && strings.ToLower(record.SourceKind) != "manual" {
 			continue
 		}
+		category := injectionCategoryForRecord(record)
 		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
-		if cost > pinnedBudget-pinnedUsed {
+		available := pinnedBudget - pinnedUsed
+		if categoryCap := categoryRemaining(category); categoryBudgetsEnabled && categoryCap < available {
+			available = categoryCap
+		}
+		if cost > available {
 			if len(selection.Stable) == 0 {
-				if fitted, ok := fitRecordToBudget(record, pinnedBudget); ok {
+				if fitted, ok := fitRecordToBudget(record, available); ok {
 					record = fitted
 					cost = EstimateTokens(record.Text) + memoryRecordTokenOverhead
 				} else {
-					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
+					reason := "pinned_budget"
+					if categoryBudgetsEnabled && categoryRemaining(category) < pinnedBudget-pinnedUsed {
+						reason = "category_budget"
+					}
+					dropped := DroppedRecord{ID: record.ID, Reason: reason}
+					if reason == "category_budget" {
+						dropped.Category = category
+					}
+					selection.Dropped = append(selection.Dropped, dropped)
 					continue
 				}
 			} else {
-				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "pinned_budget"})
+				reason := "pinned_budget"
+				if categoryBudgetsEnabled && categoryRemaining(category) < pinnedBudget-pinnedUsed {
+					reason = "category_budget"
+				}
+				dropped := DroppedRecord{ID: record.ID, Reason: reason}
+				if reason == "category_budget" {
+					dropped.Category = category
+				}
+				selection.Dropped = append(selection.Dropped, dropped)
 				continue
 			}
 		}
 		selection.Stable = append(selection.Stable, record)
 		stableIDs[record.ID] = struct{}{}
 		pinnedUsed += cost
+		if categoryBudgetsEnabled {
+			selection.CategoryUsed[category] += cost
+		}
 	}
 	summaryUsed := 0
 	if supportsSummary {
 		if summary, err := s.loadGatedActiveSummary(context.Background(), db, now); err == nil && summary != nil {
 			summary.TokenEstimate = EstimateTokens(summary.Text)
 			summaryCost := summary.TokenEstimate
-			summaryCap := budget
+			summaryCap := budget - coreUsed - pinnedUsed
+			if categoryBudgetsEnabled && categoryRemaining(InjectionCategoryRetrieved) < summaryCap {
+				summaryCap = categoryRemaining(InjectionCategoryRetrieved)
+			}
+			if summaryCap < 0 {
+				summaryCap = 0
+			}
 			switch mode {
 			case "summary":
 				if len(selection.Stable) > 0 {
-					summaryCap = budget * 80 / 100
+					if modeCap := budget * 80 / 100; summaryCap > modeCap {
+						summaryCap = modeCap
+					}
 				}
 			case "hybrid":
-				summaryCap = budget * 50 / 100
+				if modeCap := budget * 50 / 100; summaryCap > modeCap {
+					summaryCap = modeCap
+				}
 			}
-			if summaryCost <= summaryCap && summaryCost+pinnedUsed <= budget {
+			if summaryCost <= summaryCap &&
+				summaryCost+coreUsed+pinnedUsed <= budget {
 				selection.Summary = summary
 				selection.Revision = summary.Revision
 				summaryUsed = summaryCost
+				if categoryBudgetsEnabled {
+					selection.CategoryUsed[InjectionCategoryRetrieved] += summaryCost
+				}
 				for _, id := range summary.RecordIDs {
 					stableIDs[id] = struct{}{}
 				}
 			} else {
-				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: summary.ID, Reason: "summary_budget"})
+				dropped := DroppedRecord{ID: summary.ID, Reason: "summary_budget"}
+				if categoryBudgetsEnabled && summaryCost > categoryRemaining(InjectionCategoryRetrieved) {
+					dropped.Reason = "category_budget"
+					dropped.Category = InjectionCategoryRetrieved
+				}
+				selection.Dropped = append(selection.Dropped, dropped)
 			}
 		}
 	}
@@ -608,8 +826,35 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		}
 		candidates = append(candidates, recallCandidate{recordIndex: recordIndex, score: score})
 	}
+	if categoryBudgetsEnabled {
+		candidateCategories := make(map[string]bool, len(candidates))
+		if supportsRecall {
+			for _, candidate := range candidates {
+				if candidate.recordIndex >= 0 && candidate.recordIndex < len(records) {
+					candidateCategories[injectionCategoryForRecord(records[candidate.recordIndex])] = true
+				}
+			}
+		}
+		for _, category := range []string{
+			InjectionCategoryCore, InjectionCategoryTask,
+			InjectionCategoryProcedure, InjectionCategoryReference,
+		} {
+			// A category with no selectable candidate releases its unused
+			// allocation to retrieved. Existing use (for example a pinned task
+			// item or active Core) remains charged to the original category.
+			if category != InjectionCategoryCore && candidateCategories[category] {
+				continue
+			}
+			unused := selection.CategoryBudget[category] - selection.CategoryUsed[category]
+			if unused > 0 {
+				selection.CategoryBudget[InjectionCategoryRetrieved] += unused
+				selection.CategoryBudget[category] = selection.CategoryUsed[category]
+			}
+		}
+	}
 	if !supportsRecall {
-		selection.TokenEstimate = summaryUsed + pinnedUsed
+		selection.TokenEstimate = coreUsed + summaryUsed + pinnedUsed
+		selection.IDs = appendCoreSelectionID(selection.IDs, selection.Core)
 		selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
 		if !diagnostic {
 			if err := s.hydrateSelectionRecords(context.Background(), db, &selection); err != nil {
@@ -633,7 +878,10 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		return candidates[i].score > candidates[j].score
 	})
 	candidates = diversifyRecallOrder(candidates, records, limit)
-	remaining := budget - summaryUsed - pinnedUsed
+	if categoryBudgetsEnabled {
+		candidates = prioritizeRecallCandidates(candidates, records)
+	}
+	remaining := budget - coreUsed - summaryUsed - pinnedUsed
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -656,32 +904,66 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 			seenDuplicates[key] = struct{}{}
 		}
 		if len(selection.Recall) >= limit {
-			selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
+			dropped := DroppedRecord{ID: record.ID, Reason: "memory_budget"}
+			if categoryBudgetsEnabled {
+				dropped.Category = injectionCategoryForRecord(record)
+			}
+			selection.Dropped = append(selection.Dropped, dropped)
 			continue
 		}
+		category := injectionCategoryForRecord(record)
 		cost := EstimateTokens(record.Text) + memoryRecordTokenOverhead
 		perRecordCap := remaining
-		if recallCap < perRecordCap {
-			perRecordCap = recallCap
+		recallRemaining := recallCap - recallUsed
+		if recallRemaining < perRecordCap {
+			perRecordCap = recallRemaining
 		}
-		if cost > perRecordCap-recallUsed {
+		categoryLimited := false
+		if categoryBudgetsEnabled {
+			categoryCap := categoryRemaining(category)
+			if categoryCap < perRecordCap {
+				perRecordCap = categoryCap
+				categoryLimited = true
+			}
+		}
+		if cost > perRecordCap {
 			if len(selection.Recall) == 0 {
 				if fitted, ok := fitRecordToBudget(record, perRecordCap); ok {
 					record = fitted
 					cost = EstimateTokens(record.Text) + memoryRecordTokenOverhead
 				} else {
-					selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
+					reason := "memory_budget"
+					if categoryLimited {
+						reason = "category_budget"
+					}
+					dropped := DroppedRecord{ID: record.ID, Reason: reason}
+					if categoryBudgetsEnabled {
+						dropped.Category = category
+					}
+					selection.Dropped = append(selection.Dropped, dropped)
 					continue
 				}
 			} else {
-				selection.Dropped = append(selection.Dropped, DroppedRecord{ID: record.ID, Reason: "memory_budget"})
+				reason := "memory_budget"
+				if categoryLimited {
+					reason = "category_budget"
+				}
+				dropped := DroppedRecord{ID: record.ID, Reason: reason}
+				if categoryBudgetsEnabled {
+					dropped.Category = category
+				}
+				selection.Dropped = append(selection.Dropped, dropped)
 				continue
 			}
 		}
 		selection.Recall = append(selection.Recall, record)
 		recallUsed += cost
+		if categoryBudgetsEnabled {
+			selection.CategoryUsed[category] += cost
+		}
 	}
-	selection.TokenEstimate = summaryUsed + pinnedUsed + recallUsed
+	selection.TokenEstimate = coreUsed + summaryUsed + pinnedUsed + recallUsed
+	selection.IDs = appendCoreSelectionID(selection.IDs, selection.Core)
 	selection.IDs = appendSelectionIDs(selection.IDs, selection.Stable, selection.Summary)
 	for _, record := range selection.Recall {
 		selection.IDs = append(selection.IDs, record.ID)
@@ -712,8 +994,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json
-FROM memory_entries
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+ FROM memory_entries
 WHERE scope = ? AND project_key = ?
 ORDER BY pinned DESC, use_count DESC, updated_at DESC, id ASC
 LIMIT ?
@@ -743,6 +1025,8 @@ func (s *Store) classifyInjectableRecords(ctx context.Context, db *sql.DB, recor
 	for _, record := range records {
 		reason := ""
 		switch {
+		case record.Archived:
+			reason = "archived"
 		case !record.DeletedAt.IsZero():
 			reason = "deleted"
 		case record.Status != StatusActive:
@@ -828,6 +1112,14 @@ func appendSelectionIDs(ids []string, stable []Record, summary *Summary) []strin
 	return uniqueStrings(ids)
 }
 
+func appendCoreSelectionID(ids []string, core *CoreMemory) []string {
+	if core == nil {
+		return ids
+	}
+	ids = append(ids, core.ID)
+	return uniqueStrings(ids)
+}
+
 func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.Time) ([]Record, error) {
 	freshnessPredicate := "freshness_status = 'fresh'"
 	if s.cfg.StaleBehavior == "warn" {
@@ -844,6 +1136,7 @@ SELECT id, kind, text, normalized_text, tags_json, confidence, pinned,
 FROM memory_entries
 WHERE scope = ? AND project_key = ? AND status = 'active' AND `+freshnessPredicate+`
   AND sensitivity != 'private'
+  AND archived = 0
   AND (deleted_at IS NULL OR deleted_at = '')
   AND (valid_until IS NULL OR valid_until = '' OR valid_until > ?)
 ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
@@ -943,8 +1236,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json
-FROM memory_entries
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+ FROM memory_entries
 WHERE scope = ? AND project_key = ? AND id IN (`+strings.Join(placeholders, ", ")+`)
 `, args...)
 	if err != nil {

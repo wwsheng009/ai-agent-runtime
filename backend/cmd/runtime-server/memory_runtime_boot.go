@@ -17,12 +17,14 @@ func startRuntimeServerMemoryRuntime(ctx context.Context, handler *runtimeapi.Ha
 	if handler == nil || cfg == nil {
 		return nil, nil
 	}
+	handler.SetMemoryRuntimeBootError(nil)
 	mode := strings.ToLower(strings.TrimSpace(cfg.Memory.Mode))
 	if mode != "shadow" && mode != "on" {
 		return nil, nil
 	}
 	rt, err := handler.EnableMemoryRuntime()
 	if err != nil {
+		handler.SetMemoryRuntimeBootError(err)
 		return nil, err
 	}
 	if rt == nil {

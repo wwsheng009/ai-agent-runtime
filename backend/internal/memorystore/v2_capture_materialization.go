@@ -206,14 +206,14 @@ INSERT OR IGNORE INTO memory_jobs (
     id, kind, job_key, scope, project_key, status, priority, attempt,
     max_attempts, retry_at, last_error, input_watermark, created_at, updated_at,
     session_id, session_generation, capture_receipt_id, source_start_seq,
-    source_end_seq, source_revision, source_hash, available_at, repair_only
-) VALUES (?, 'phase1_extract/v2', ?, 'project', ?, 'pending', 0, 0, 3,
-           NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-`, jobID, jobKey, capture.ProjectKey, capture.ID,
+    source_end_seq, source_revision, source_hash, available_at, deadline_at, repair_only
+ ) VALUES (?, 'phase1_extract/v2', ?, 'project', ?, 'pending', ?, 0, 3,
+            NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+ `, jobID, jobKey, capture.ProjectKey, JobPriorityPhase1ExtractV2, capture.ID,
 		capture.CreatedAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		capture.SessionID, capture.SessionGeneration, capture.ID, capture.MessageSeqStart,
 		capture.MessageSeqEnd, capture.CanonicalRevision, capture.RangeHash,
-		now.Format(time.RFC3339Nano)); err != nil {
+		now.Format(time.RFC3339Nano), now.Add(DefaultMemoryJobTimeout).Format(time.RFC3339Nano)); err != nil {
 		return TurnCaptureMaterialization{}, fmt.Errorf("memorystore: materialize turn job: %w", err)
 	}
 	if err := tx.QueryRowContext(ctx, `
@@ -292,6 +292,10 @@ func candidateRecord(candidate Candidate) (Record, error) {
 		Kind:                    kind,
 		Status:                  StatusCandidate,
 		Text:                    text,
+		Title:                   strings.TrimSpace(candidate.Title),
+		Summary:                 strings.TrimSpace(candidate.Summary),
+		CanonicalID:             strings.TrimSpace(candidate.CanonicalID),
+		Archived:                candidate.Archived,
 		NormalizedText:          normalizeMemoryText(text),
 		Tags:                    normalizeTags(candidate.Tags),
 		Confidence:              candidate.Confidence,
@@ -299,6 +303,9 @@ func candidateRecord(candidate Candidate) (Record, error) {
 		Pinned:                  false,
 		RetentionClass:          firstNonEmpty(candidate.RetentionClass, "standard"),
 		SourceKind:              firstNonEmpty(candidate.SourceKind, "session_extract"),
+		SourceType:              candidate.SourceType,
+		SourceTrust:             candidate.SourceTrust,
+		SourceQuote:             candidate.SourceQuote,
 		SourceSessionID:         strings.TrimSpace(candidate.SessionID),
 		SourceSessionGeneration: candidate.SessionGeneration,
 		SourceTurnID:            strings.TrimSpace(candidate.TurnID),
@@ -333,7 +340,7 @@ func (s *Store) CommitTurnCaptureExtraction(
 	candidates []Candidate,
 ) (int, error) {
 	return s.commitTurnCaptureExtraction(ctx, jobID, workerID, claimAttempt, capture,
-		digestID, outputHash, TurnCaptureDigestText{}, candidates)
+		digestID, outputHash, TurnCaptureDigestText{}, candidates, nil)
 }
 
 // CommitTurnCaptureExtractionWithDigestText commits extraction output and its
@@ -349,7 +356,24 @@ func (s *Store) CommitTurnCaptureExtractionWithDigestText(
 	candidates []Candidate,
 ) (int, error) {
 	return s.commitTurnCaptureExtraction(ctx, jobID, workerID, claimAttempt, capture,
-		digestID, outputHash, digestText, candidates)
+		digestID, outputHash, digestText, candidates, nil)
+}
+
+// CommitTurnCaptureExtractionWithDiagnostics commits bounded ignored-candidate
+// diagnostics atomically with candidates, output receipt, digest completion,
+// and job success.
+func (s *Store) CommitTurnCaptureExtractionWithDiagnostics(
+	ctx context.Context,
+	jobID, workerID string,
+	claimAttempt int,
+	capture TurnCapture,
+	digestID, outputHash string,
+	digestText TurnCaptureDigestText,
+	candidates []Candidate,
+	diagnostics []ExtractionDiagnostic,
+) (int, error) {
+	return s.commitTurnCaptureExtraction(ctx, jobID, workerID, claimAttempt, capture,
+		digestID, outputHash, digestText, candidates, diagnostics)
 }
 
 func (s *Store) commitTurnCaptureExtraction(
@@ -360,6 +384,7 @@ func (s *Store) commitTurnCaptureExtraction(
 	digestID, outputHash string,
 	digestText TurnCaptureDigestText,
 	candidates []Candidate,
+	diagnostics []ExtractionDiagnostic,
 ) (int, error) {
 	if s == nil {
 		return 0, fmt.Errorf("memorystore: store is nil")
@@ -517,6 +542,9 @@ func (s *Store) commitTurnCaptureExtraction(
 			return 0, err
 		}
 		inserted++
+	}
+	if err := insertExtractionDiagnosticsTx(ctx, tx, capture.ProjectKey, diagnostics); err != nil {
+		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_turn_output_receipts (

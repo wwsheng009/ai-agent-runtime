@@ -210,8 +210,9 @@ WHERE window_seq IN (`+placeholders+`) AND status != 'invalidated'`+windowScope+
 	for memoryID, revision := range affectedMemories {
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
-    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
-`, reason, now, memoryID, revision)
+    revision = revision + 1, updated_at = ?
+ WHERE id = ? AND project_key = ? AND revision = ?
+`, reason, now, memoryID, s.cfg.ProjectKey, revision)
 		if err != nil {
 			return result, err
 		}
@@ -219,12 +220,17 @@ UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
 			continue
 		}
 		result.Memories++
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, memoryID, "stale_marked", "system", sessionID, revision+1, map[string]interface{}{
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, memoryID, "stale_marked", "system", sessionID, revision+1, map[string]interface{}{
 			"reason":                 reason,
 			"canonical_cutoff_seq":   cutoff,
 			"canonical_before_seq":   before,
 			"affected_message_count": len(affectedMessageIDs),
-		}); err != nil {
+		})
+		if err != nil {
+			return result, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, memoryID, s.cfg.ProjectKey,
+			"system:invalidation", reason, "update", eventID); err != nil {
 			return result, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, memoryID, reason); err != nil {

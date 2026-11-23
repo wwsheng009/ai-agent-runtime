@@ -836,18 +836,24 @@ WHERE e.project_key = ? AND e.source_session_id = ? AND e.source_kind = 'turn_wi
 	for _, item := range stale {
 		res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET freshness_status = 'stale', stale_reason = ?,
-    revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?
-`, reason, now.Format(time.RFC3339Nano), item.id, item.revision)
+    revision = revision + 1, updated_at = ?
+ WHERE id = ? AND project_key = ? AND revision = ?
+`, reason, now.Format(time.RFC3339Nano), item.id, s.cfg.ProjectKey, item.revision)
 		if err != nil {
 			return 0, err
 		}
 		if affected, _ := res.RowsAffected(); affected == 0 {
 			continue
 		}
-		if err := insertEventTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
+		eventID, err := insertEventIDTx(ctx, tx, s.cfg.ProjectKey, item.id, "stale_marked", "system", sessionID, item.revision+1, map[string]interface{}{
 			"reason":        reason,
 			"source_window": sourceWindow,
-		}); err != nil {
+		})
+		if err != nil {
+			return 0, err
+		}
+		if err := appendCurrentRecordVersionTx(ctx, tx, item.id, s.cfg.ProjectKey,
+			"system:turn_window", reason, "update", eventID); err != nil {
 			return 0, err
 		}
 		if err := s.markSummariesStaleForRecordTx(ctx, tx, item.id, reason); err != nil {

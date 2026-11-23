@@ -120,12 +120,34 @@ type MemoryConfig struct {
 	Manual        MemoryManualConfig        `yaml:"manual" json:"manual"`
 	Generation    MemoryGenerationConfig    `yaml:"generation" json:"generation"`
 	Consolidation MemoryConsolidationConfig `yaml:"consolidation" json:"consolidation"`
+	Core          MemoryCoreConfig          `yaml:"core" json:"core"`
 	Injection     MemoryInjectionConfig     `yaml:"injection" json:"injection"`
 	Feedback      MemoryFeedbackConfig      `yaml:"feedback" json:"feedback"`
 	Retention     MemoryRetentionConfig     `yaml:"retention" json:"retention"`
 	Freshness     MemoryFreshnessConfig     `yaml:"freshness" json:"freshness"`
 	Redaction     MemoryRedactionConfig     `yaml:"redaction" json:"redaction"`
 	Tools         MemoryToolsConfig         `yaml:"tools" json:"tools"`
+	Maintenance   MemoryMaintenanceConfig   `yaml:"maintenance" json:"maintenance"`
+}
+
+type MemoryMaintenanceConfig struct {
+	CaptureExtraction MemoryCaptureExtractionConfig `yaml:"captureExtraction" json:"captureExtraction"`
+	JobDeadlineRepair MemoryJobDeadlineRepairConfig `yaml:"jobDeadlineRepair" json:"jobDeadlineRepair"`
+}
+
+type MemoryCaptureExtractionConfig struct {
+	Enabled   bool          `yaml:"enabled" json:"enabled"`
+	BatchSize int           `yaml:"batchSize" json:"batchSize"`
+	Interval  time.Duration `yaml:"interval" json:"interval"`
+}
+
+// MemoryJobDeadlineRepairConfig opts into bounded automatic repair of
+// historical non-terminal jobs that predate persisted absolute deadlines.
+// It is disabled by default; enabling it in runtime config is the explicit opt-in for periodic state changes.
+type MemoryJobDeadlineRepairConfig struct {
+	Enabled   bool          `yaml:"enabled" json:"enabled"`
+	BatchSize int           `yaml:"batchSize" json:"batchSize"`
+	Interval  time.Duration `yaml:"interval" json:"interval"`
 }
 
 type MemoryManualConfig struct {
@@ -184,14 +206,61 @@ type MemoryConsolidationConfig struct {
 	IntervalHours      int    `yaml:"intervalHours" json:"intervalHours"`
 }
 
+// MemoryCoreConfig controls bounded Core candidate rebuilds. Rebuild does not
+// activate a candidate; operators still have to review it explicitly. The
+// scheduler is opt-in so enabling memory v2 does not create periodic Core
+// candidates unless an operator explicitly enables it.
+type MemoryCoreConfig struct {
+	Rebuild MemoryCoreRebuildConfig `yaml:"rebuild" json:"rebuild"`
+}
+
+type MemoryCoreRebuildConfig struct {
+	Enabled      bool          `yaml:"enabled" json:"enabled"`
+	Interval     time.Duration `yaml:"interval" json:"interval"`
+	MaxRecords   int           `yaml:"maxRecords" json:"maxRecords"`
+	MaxUsageRows int           `yaml:"maxUsageRows" json:"maxUsageRows"`
+	TokenBudget  int           `yaml:"tokenBudget" json:"tokenBudget"`
+}
+
 type MemoryInjectionConfig struct {
 	Enabled           bool                    `yaml:"enabled" json:"enabled"`
 	Mode              string                  `yaml:"mode" json:"mode"`
 	MaxItems          int                     `yaml:"maxItems" json:"maxItems"`
 	TokenBudget       int                     `yaml:"tokenBudget" json:"tokenBudget"`
+	ExtendedPreset    bool                    `yaml:"extendedPreset" json:"extendedPreset"`
+	Budgets           MemoryInjectionBudgets  `yaml:"budgets" json:"budgets"`
 	PinnedBudgetRatio float64                 `yaml:"pinnedBudgetRatio" json:"pinnedBudgetRatio"`
 	StageSplit        bool                    `yaml:"stageSplit" json:"stageSplit"`
 	RecallTrace       MemoryRecallTraceConfig `yaml:"recallTrace" json:"recallTrace"`
+}
+
+// MemoryInjectionBudgets are fractional hard caps within the total project
+// memory injection budget. Any unallocated fraction is assigned to retrieved.
+type MemoryInjectionBudgets struct {
+	Core      float64 `yaml:"core" json:"core"`
+	Task      float64 `yaml:"task" json:"task"`
+	Retrieved float64 `yaml:"retrieved" json:"retrieved"`
+	Procedure float64 `yaml:"procedure" json:"procedure"`
+	Reference float64 `yaml:"reference" json:"reference"`
+}
+
+const (
+	DefaultMemoryInjectionTokenBudget  = 600
+	ExtendedMemoryInjectionTokenBudget = 5000
+	MaxMemoryInjectionTokenBudget      = 12000
+)
+
+// EffectiveTokenBudget preserves the 600-token standard preset. Extended mode
+// opts into a larger floor while still honoring an explicitly larger budget.
+func (c MemoryInjectionConfig) EffectiveTokenBudget() int {
+	budget := c.TokenBudget
+	if budget <= 0 {
+		budget = DefaultMemoryInjectionTokenBudget
+	}
+	if c.ExtendedPreset && budget < ExtendedMemoryInjectionTokenBudget {
+		return ExtendedMemoryInjectionTokenBudget
+	}
+	return budget
 }
 
 type MemoryRecallTraceConfig struct {
@@ -249,9 +318,10 @@ type MemoryRedactionConfig struct {
 }
 
 type MemoryToolsConfig struct {
-	Enabled      bool `yaml:"enabled" json:"enabled"`
-	AllowForget  bool `yaml:"allowForget" json:"allowForget"`
-	AllowCorrect bool `yaml:"allowCorrect" json:"allowCorrect"`
+	Enabled       bool `yaml:"enabled" json:"enabled"`
+	AllowForget   bool `yaml:"allowForget" json:"allowForget"`
+	AllowCorrect  bool `yaml:"allowCorrect" json:"allowCorrect"`
+	AllowRollback bool `yaml:"allowRollback" json:"allowRollback"`
 }
 
 // agents.singleWriterMode values: "enforce" (default) keeps the process-wide
@@ -1256,11 +1326,21 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				Enabled: true, MaxRecords: 256, MaxUnusedDays: 30,
 				SummaryTokenBudget: 800, IntervalHours: 24,
 			},
+			Core: MemoryCoreConfig{
+				Rebuild: MemoryCoreRebuildConfig{
+					Enabled: false, Interval: 24 * time.Hour,
+					MaxRecords: 32, MaxUsageRows: 200, TokenBudget: 1200,
+				},
+			},
 			Injection: MemoryInjectionConfig{
-				Enabled:           true,
-				Mode:              "notes",
-				MaxItems:          5,
-				TokenBudget:       600,
+				Enabled:     true,
+				Mode:        "notes",
+				MaxItems:    5,
+				TokenBudget: DefaultMemoryInjectionTokenBudget,
+				Budgets: MemoryInjectionBudgets{
+					Core: 0.20, Task: 0.15, Retrieved: 0.40,
+					Procedure: 0.15, Reference: 0.10,
+				},
 				PinnedBudgetRatio: 0.20,
 				StageSplit:        true,
 				RecallTrace: MemoryRecallTraceConfig{
@@ -1299,7 +1379,17 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				},
 			},
 			Redaction: MemoryRedactionConfig{Enabled: true, DropOnSecret: true},
-			Tools:     MemoryToolsConfig{Enabled: false, AllowForget: false, AllowCorrect: false},
+			Tools: MemoryToolsConfig{
+				Enabled: false, AllowForget: false, AllowCorrect: false, AllowRollback: false,
+			},
+			Maintenance: MemoryMaintenanceConfig{
+				CaptureExtraction: MemoryCaptureExtractionConfig{
+					Enabled: true, BatchSize: 50, Interval: 5 * time.Minute,
+				},
+				JobDeadlineRepair: MemoryJobDeadlineRepairConfig{
+					Enabled: false, BatchSize: 100, Interval: 30 * time.Minute,
+				},
+			},
 		},
 	}
 }
@@ -1736,9 +1826,23 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 		return errors.New(errors.ErrValidationFailed, "memory.injection.mode must be summary, hybrid, or notes")
 	}
 	switch strings.ToLower(strings.TrimSpace(config.Generation.Trigger)) {
-	case "", "idle", "session_end", "both", "manual":
+	case "", "idle", "session_end", "both", "manual", "turn_threshold", "task_completion":
 	default:
-		return errors.New(errors.ErrValidationFailed, "memory.generation.trigger must be idle, session_end, both, or manual")
+		return errors.New(errors.ErrValidationFailed, "memory.generation.trigger must be idle, session_end, both, manual, turn_threshold, or task_completion")
+	}
+	capture := config.Maintenance.CaptureExtraction
+	if capture.BatchSize < 0 || capture.BatchSize > 1000 {
+		return errors.New(errors.ErrValidationFailed, "memory.maintenance.captureExtraction.batchSize must be between 0 and 1000")
+	}
+	if capture.Interval < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.maintenance.captureExtraction.interval cannot be negative")
+	}
+	deadlineRepair := config.Maintenance.JobDeadlineRepair
+	if deadlineRepair.BatchSize < 0 || deadlineRepair.BatchSize > 500 {
+		return errors.New(errors.ErrValidationFailed, "memory.maintenance.jobDeadlineRepair.batchSize must be between 0 and 500")
+	}
+	if deadlineRepair.Interval < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.maintenance.jobDeadlineRepair.interval cannot be negative")
 	}
 	if config.Generation.MinIdleHours < 0 || config.Generation.MaxSessionsPerRun < 0 ||
 		config.Generation.MaxRolloutAgeDays < 0 || config.Generation.MaxRecordsPerSession < 0 {
@@ -1756,8 +1860,31 @@ func ValidateMemoryConfig(config *MemoryConfig) error {
 		config.Consolidation.SummaryTokenBudget < 0 || config.Consolidation.IntervalHours < 0 {
 		return errors.New(errors.ErrValidationFailed, "memory.consolidation limits cannot be negative")
 	}
-	if config.Injection.MaxItems < 0 || config.Injection.TokenBudget < 0 {
-		return errors.New(errors.ErrValidationFailed, "memory.injection limits cannot be negative")
+	coreRebuild := config.Core.Rebuild
+	if coreRebuild.Interval < 0 ||
+		coreRebuild.MaxRecords < 0 || coreRebuild.MaxRecords > 64 ||
+		coreRebuild.MaxUsageRows < 0 || coreRebuild.MaxUsageRows > 500 ||
+		coreRebuild.TokenBudget < 0 || coreRebuild.TokenBudget > 4000 {
+		return errors.New(errors.ErrValidationFailed, "memory.core.rebuild limits exceed safe bounds")
+	}
+	if config.Injection.MaxItems < 0 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection.maxItems cannot be negative")
+	}
+	if config.Injection.TokenBudget < 0 ||
+		config.Injection.TokenBudget > MaxMemoryInjectionTokenBudget {
+		return errors.New(errors.ErrValidationFailed, "memory.injection token budget must be between 0 and 12000")
+	}
+	budgets := config.Injection.Budgets
+	budgetRatios := []float64{budgets.Core, budgets.Task, budgets.Retrieved, budgets.Procedure, budgets.Reference}
+	budgetRatioSum := 0.0
+	for _, ratio := range budgetRatios {
+		if ratio < 0 || ratio > 1 {
+			return errors.New(errors.ErrValidationFailed, "memory.injection.budgets ratios must be between 0 and 1")
+		}
+		budgetRatioSum += ratio
+	}
+	if budgetRatioSum > 1.0000001 {
+		return errors.New(errors.ErrValidationFailed, "memory.injection.budgets ratios cannot sum to more than 1")
 	}
 	if config.Injection.PinnedBudgetRatio < 0 || config.Injection.PinnedBudgetRatio > 1 {
 		return errors.New(errors.ErrValidationFailed, "memory.injection.pinnedBudgetRatio must be between 0 and 1")
