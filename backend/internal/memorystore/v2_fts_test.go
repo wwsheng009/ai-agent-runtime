@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -137,4 +138,30 @@ func TestMemoryFTSFallsBackForShortQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, hits)
 	require.Equal(t, note.ID, hits[0].Note.ID)
+}
+
+func TestInjectionUsesBoundedCandidatesWithPinnedAndFTSTopK(t *testing.T) {
+	store, err := New(Config{Root: t.TempDir(), Mode: "on"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	pinned := true
+	pinnedNote, err := store.Append(AppendNoteOptions{
+		Text: "unrelated pinned project invariant", Pinned: &pinned,
+	})
+	require.NoError(t, err)
+
+	for i := 0; i < 450; i++ {
+		seedActiveDerivedMemory(t, store, fmt.Sprintf("unrelated filler memory %04d", i), "fact")
+	}
+	needle := seedActiveDerivedMemory(t, store, "unique injection needle E_INJECTION_TARGET", "fact")
+
+	selection, err := store.SelectForInjectV2(InjectOptions{
+		Query: "E_INJECTION_TARGET", Limit: 5, TokenBudget: 4000, SessionID: "bounded-injection",
+	})
+	require.NoError(t, err)
+	require.Contains(t, selection.IDs, needle.ID)
+	require.Contains(t, selection.IDs, pinnedNote.ID, "pinned stable floor must survive candidate pruning")
+	require.LessOrEqual(t, selection.CandidateCount, 300,
+		"injection must not load the entire active corpus (got %d candidates)", selection.CandidateCount)
 }

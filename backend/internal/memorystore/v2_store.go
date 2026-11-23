@@ -661,7 +661,7 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 			return Selection{}, err
 		}
 	} else {
-		records, err = s.loadInjectableRecords(context.Background(), db, now)
+		records, err = s.loadInjectableCandidates(context.Background(), db, opts, now)
 		if err != nil {
 			return Selection{}, err
 		}
@@ -1167,6 +1167,81 @@ ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+const (
+	// Injection remains bounded even when the project has thousands of active
+	// records. Pinned/manual items are loaded first as a stable-prefix floor;
+	// query recall is then served by the FTS index (or a bounded recent list
+	// when the query is empty).
+	maxInjectablePinnedCandidates = 100
+	maxInjectableManualCandidates = 100
+	maxInjectableRecallCandidates = 200
+)
+
+func (s *Store) loadInjectableCandidates(
+	ctx context.Context, db *sql.DB, opts InjectOptions, now time.Time,
+) ([]Record, error) {
+	_ = db // ListRecords resolves the same bounded, project-scoped database.
+	pinned, err := s.ListRecords(ctx, RecordFilter{
+		Status: StatusActive, PinnedOnly: true, Limit: maxInjectablePinnedCandidates,
+	})
+	if err != nil {
+		return nil, err
+	}
+	manual, err := s.ListRecords(ctx, RecordFilter{
+		Status: StatusActive, SourceKind: "manual", Limit: maxInjectableManualCandidates,
+	})
+	if err != nil {
+		return nil, err
+	}
+	recallFilter := RecordFilter{
+		Status: StatusActive, Limit: maxInjectableRecallCandidates,
+	}
+	if query := strings.TrimSpace(opts.Query); query != "" {
+		recallFilter.Query = query
+	}
+	recall, err := s.ListRecords(ctx, recallFilter)
+	if err != nil {
+		return nil, err
+	}
+
+	merged := make([]Record, 0, len(pinned.Items)+len(manual.Items)+len(recall.Items))
+	seen := make(map[string]struct{}, len(merged))
+	appendRecords := func(items []Record) {
+		for _, record := range items {
+			if _, exists := seen[record.ID]; exists {
+				continue
+			}
+			seen[record.ID] = struct{}{}
+			merged = append(merged, record)
+		}
+	}
+	// Preserve the stable-prefix order that the previous full scan exposed:
+	// pinned first, then manual records, then query/recent recall candidates.
+	sort.SliceStable(pinned.Items, func(i, j int) bool {
+		left, right := pinned.Items[i], pinned.Items[j]
+		if left.UseCount != right.UseCount {
+			return left.UseCount > right.UseCount
+		}
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+	sort.SliceStable(manual.Items, func(i, j int) bool {
+		left, right := manual.Items[i], manual.Items[j]
+		if left.UseCount != right.UseCount {
+			return left.UseCount > right.UseCount
+		}
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+	appendRecords(pinned.Items)
+	appendRecords(manual.Items)
+	appendRecords(recall.Items)
+
+	eligible, _, err := s.classifyInjectableRecords(ctx, db, merged, now)
+	if err != nil {
+		return nil, err
+	}
+	return eligible, nil
 }
 
 // scanInjectableRecord is the bounded projection used by the per-turn recall

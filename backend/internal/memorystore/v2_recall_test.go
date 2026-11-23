@@ -148,7 +148,8 @@ func TestSelectForInjectV2NoMatchKeepsEmptySelection(t *testing.T) {
 		Query: "zzzz-unmatched-token", Limit: 5, TokenBudget: 600, SkipTrace: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, 1, selection.CandidateCount)
+	require.Zero(t, selection.CandidateCount,
+		"bounded candidate loading must not scan unrelated active records")
 	require.Empty(t, selection.Recall)
 	require.Empty(t, selection.Dropped)
 }
