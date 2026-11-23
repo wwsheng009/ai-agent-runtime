@@ -3,6 +3,8 @@
 > 状态：**方案基线 + M1/M2/M3/M4 core 已实施（含 Web why-not/pin/restore/reset）；M4 正式 E2E/证据包与 M5 shadow 运营待完成**
 > 2026-11-11 追加：Turn Digest Phase 1 core + 窗口化读取 + per-window stale + L0→L1→L2 rollup + canonical range invalidation 已实现；真实 E2E / shadow 待补（见 `patches/`）。
 > 2026-11-18 追加：统一执行核 `TurnDigestSink` 接线修复；真实 ConPTY 双会话 E2E PASS，覆盖 digest → phase1 → phase2 → 跨会话注入/召回（见 `14-runtime-gap-audit-and-fix-20261117.md`）。
+> 2026-11-22 追加：按 `references/AI_Agent_Memory_Engine_Design.md` v1.0 完成参考设计层缺口审查；结论是当前实现为项目级 Memory v2，尚未覆盖 FTS5/混合检索、Dreaming Patch、版本回滚、完整 scope、Temporal/Trust/评测等（见 `15-ai-memory-engine-design-gap-audit-20261122.md`）。
+> 2026-11-23 追加：G3 记录版本/回滚与 G3.5 Core 已落在工作区（未提交）；当前状态快照见 `19-implementation-status-20261123.md`。G0-5、G1–G5 门禁仍未关闭。
 > 基线：`ai-agent-runtime` `main@9abf08fb`，2026-10-22  
 > 目标：参考 Codex 的 memory 能力，为本项目设计可落地的跨会话 Agent 长期记忆系统。
 
@@ -77,6 +79,12 @@ canonical chat turn commit
 | [12-hermes-agent-memory-system-analysis.md](./12-hermes-agent-memory-system-analysis.md) | Hermes Agent 记忆系统架构与实现分析：短期压缩、内置长期记忆、外部 Provider、会话检索与借鉴边界 | 完成（外部方案分析，Docs Only） |
 | [13-memory-injection-and-learning-update-plan.md](./13-memory-injection-and-learning-update-plan.md) | Agent Memory v2 读路径注入与写路径学习更新闭环方案：请求注入、缓存契约、抽取/Consolidation、freshness/usage/suppression；含闭环/效率/更新召回整体审查 | 方案 + 审查（v1.1 已回写 03/04/05/06/09；M1/M2/M3/M4 core 与 Web 审计面已实施，M4 证据包与 M5 运营待执行） |
 | [14-runtime-gap-audit-and-fix-20261117.md](./14-runtime-gap-audit-and-fix-20261117.md) | 运行时缺口审查：多 workspace DB 证据、Turn Digest 断点、host 生命周期/超时/恢复问题与本次修复记录 | 第三轮优化 + 统一执行核 TurnDigestSink 修复完成；真实 ConPTY 双会话 E2E PASS；崩溃后 stale-active digest 恢复仍待设计 |
+| [15-ai-memory-engine-design-gap-audit-20261122.md](./15-ai-memory-engine-design-gap-audit-20261122.md) | 按 `references/AI_Agent_Memory_Engine_Design.md` v1.0 审查当前 AI Memory 实现：功能覆盖、P0/P1/P2 缺口、MVP 验收对照、运行时积压证据与补齐路线图 | 完成（2026-11-22 静态审查 + 定向测试；运行时积压与 G0–G5 门禁待关闭） |
+| [16-ai-memory-engine-implementation-plan-20261122.md](./16-ai-memory-engine-implementation-plan-20261122.md) | 按 `15` 的 17 个缺口制定施工计划：G0–G5 工作包、schema/API/工具/CLI 文件落点、测试矩阵、迁移/回滚、证据与执行顺序 | 方案完成，待执行（G0 status 可观测性已有部分代码；FTS5 driver 能力为 G1 阻断门） |
+| [17-g35-core-memory-foundation-evidence-20261123.md](./17-g35-core-memory-foundation-evidence-20261123.md) | G3.5 Core Memory 基础切片：migration v22、候选来源资格、显式审核激活、归档与审计事件 | 部分实施；G3.5 未关闭（未提交） |
+| [18-g35-core-read-surface-evidence-20261123.md](./18-g35-core-read-surface-evidence-20261123.md) | G3.5 Core 读取/管理面：只读工具、HTTP/CLI、重建 job、selector 注入、分类预算最小切片与独立 usage ledger | 部分实施；G3.5 未关闭（未提交） |
+| [19-implementation-status-20261123.md](./19-implementation-status-20261123.md) | 2026-11-23 实施状态快照：G0–G5 门禁矩阵、工作区未提交状态、测试证据与文档一致性缺口 | **当前状态**（G3 工作区实现未提交；G1 blocked；G0-5/G2/G4/G5 未关闭） |
+| [20-g3-record-versions-evidence-20261123.md](./20-g3-record-versions-evidence-20261123.md) | G3 记录版本、回滚与 as-of 查询证据：schema v20/v21、版本写入接入、rollback 语义、API/CLI/tool 与定向测试 | 代码级主体通过；**未提交**；FTS/G2 tenant/G4 高风险 supersede 依赖未关闭 |
 
 > `12/13` 是外部对照与落地细化；`13` v1.1 已回写 `03/04/05/06/09`。
 

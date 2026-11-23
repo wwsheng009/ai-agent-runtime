@@ -972,6 +972,7 @@ memory:
     enabled: false
     allowForget: false   # forget 默认只走用户显式命令/管理 API
     allowCorrect: false
+    allowRollback: false # rollback 默认关闭；仅允许当前 session 的非敏感记录
 
   retention:
     enabled: false       # 默认关闭；显式开启后才执行生命周期淘汰
@@ -1016,7 +1017,7 @@ memory:
 | `injection.enabled/mode/maxItems/tokenBudget/pinnedBudgetRatio/stageSplit` | 已实现并接入 context budget |
 | `injection.recallTrace.enabled/sampleRate/retentionDays` | 已实现；retention 由 memory maintenance ticker 定时清理 |
 | `feedback.citationEnabled/exposureSampling/exposureRetentionDays` | 已实现；仅清理 `injected_only` exposure；cited/read usage 由 `retention.auditDays` 管理 |
-| `tools.enabled/allowForget/allowCorrect` | 已实现；`manual.enabled=false` 时不注册 `memory_add` |
+| `tools.enabled/allowForget/allowCorrect/allowRollback` | 已实现；`manual.enabled=false` 时不注册 `memory_add`；`memory_rollback` 还要求显式确认、expected revision、当前 session 所有权和非敏感历史；`revert_supersede` 仅在 successor 同属当前 session 且仍为非敏感 active 记录时放行 |
 | `freshness.enabled/staleBehavior/defaultTtlDays/perKind` | 已实现并生效；`warn` 仅允许 preference/workflow/pitfall/open_question 的 stale 记录注入，fact/reference/decision 永不 warn 注入；summary gate 仍只接受 fresh items |
 | `retention.enabled/candidateDays/ephemeralDays/deletedDays/auditDays/maxRecords/classes` | 已实现；默认 `enabled=false` 防止升级隐式淘汰。candidate/active 超期标记 `expired`，tombstone 到期物理清理；events/usage 按 `auditDays` 清理；live suppression 不自动删除；`maxRecords` 只淘汰非 pinned/permanent/manual |
 | `redaction.enabled/dropOnSecret` | 已实现；默认 true/true。`dropOnSecret=false` 时先脱敏再保留；关闭 redaction 是显式信任边界选择 |
@@ -1042,8 +1043,14 @@ Schema v7 为 `memory_events` 和 `memory_usage` 增加 `project_key`，使审�
 | `GET` | `/api/runtime/memory/status` | mode、scope、DB path、摘要 revision、freshness 统计、job 状态、`turn_digests` / `turn_windows` 状态计数、oldest pending age、pending sessions、backlog batches、recovered sessions |
 | `GET` | `/api/runtime/memory/records` | filter by scope/status/kind/tag/query，分页有界 |
 | `GET` | `/api/runtime/memory/why-not?q=...` | 召回诊断：选中项、过滤原因、预算与 token 估算（管理端） |
+| `GET` | `/api/runtime/memory/core` | 只读当前已审核 active project Core；读取时重新验证来源 |
+| `GET` | `/api/runtime/memory/cores?status=...` | 管理端查看 candidate/active/stale/archived Core 版本 |
+| `POST` | `/api/runtime/memory/cores/{id}/activate` | 管理端显式审核激活 candidate；服务端写入 approver |
+| `POST` | `/api/runtime/memory/cores/{id}/archive` | 管理端归档 Core 版本并保留审计历史 |
 | `POST` | `/api/runtime/memory/records` | 用户显式新增 manual record |
 | `GET` | `/api/runtime/memory/records/{id}` | 详情、来源、revision、usage |
+| `GET` | `/api/runtime/memory/records/{id}/sources` | 管理端读取来源类型、信任标签、消息 ID 与有界脱敏证据 quote |
+| `GET` | `/api/runtime/memory/extraction-diagnostics?job_id=...&limit=...` | 管理端读取有界、脱敏的 ignored-candidate 原因；不包含 prompt/provider 原始错误 |
 | `POST` | `/api/runtime/memory/records/{id}/revalidate` | 显式回源校验，更新 freshness |
 | `GET` | `/api/runtime/memory/sessions/{id}/context` | 只读会话因果链/证据摘要 |
 | `PATCH` | `/api/runtime/memory/records/{id}` | 用户纠正文本/标签/状态 |
@@ -1076,6 +1083,8 @@ Schema v7 为 `memory_events` 和 `memory_usage` 增加 `project_key`，使审�
 - `records/{id}/revalidate` 与 `freshness/sweep` 必须经过管理员/本机授权；
 - delete/reset 必须要求显式确认字段或管理员权限；
 - `usage`、`metrics`、`jobs`、`recall-traces`、`why-not`、`audit`、`export`、`import` 同样要求管理员/本机授权；
+- `records/{id}/sources` 与 `extraction-diagnostics` 遵循同一 memory-admin 授权策略；普通记录详情不带证据 quote；
+- Core 管理（`cores` list/activate/archive）只允许 memory-admin；激活/读取都会重新验证来源，来源失效时 fail closed；
 - `private` 或 tombstone 记录的非管理端读取返回 403；列表默认不返回 `private` 记录；
 - restore 只允许恢复 tombstone；若记录已物理清理，返回冲突并要求走导出导入恢复；
 - 返回的 note text 仍经过脱敏展示；
@@ -1094,6 +1103,17 @@ Schema v7 为 `memory_events` 和 `memory_usage` 增加 `project_key`，使审�
 /memory list [n]
 /memory search <query>
 ```
+
+顶层 runtime preset（不写入 agent `config.yaml`，只增量更新 `runtime.yaml`）：
+
+```text
+aicli onboarding memory [--dry-run] [--mode off|shadow|on] [--force] [--runtime-config <path>]
+```
+
+`off` 是 onboarding 默认模式，不启用自动生成或 prompt 注入；需要先观察自动生成链路时可用
+`shadow`，确认安全边界后再用 `on` 开启注入。首次执行可先用
+`--dry-run` 预览；若 preset 涉及字段已有不同值，必须显式 `--force` 才覆盖这些字段。
+Preset 不写 provider/model/API key、不启用 memory tools，也不直接创建或修改 memory.db。
 
 扩展：
 
@@ -1155,7 +1175,7 @@ Schema v7 为 `memory_events` 和 `memory_usage` 增加 `project_key`，使审�
 
 - `summary` 模式推荐开启只读工具，否则摘要必须自足；
 - `hybrid`/`notes` 不依赖工具，但仍推荐只读工具用于按需查看来源；
-- 写工具独立于 `tools.enabled`，还需要 `allowForget` / `allowCorrect` 和用户显式意图。
+- 写工具独立于 `tools.enabled`，还需要 `allowForget` / `allowCorrect` / `allowRollback` 和用户显式意图；rollback 额外要求显式确认、expected revision、当前 session 所有权和非敏感历史，连带撤销 supersede 还要验证 successor。
 
 ## 10. Prompt 与引用契约
 
