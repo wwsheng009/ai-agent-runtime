@@ -85,6 +85,12 @@ type memoryStatusResponse struct {
 type memoryRecordDTO struct {
 	ID              string                    `json:"id"`
 	Scope           string                    `json:"scope"`
+	ScopeKind       string                    `json:"scope_kind,omitempty"`
+	ScopeKey        string                    `json:"scope_key,omitempty"`
+	TenantID        string                    `json:"tenant_id,omitempty"`
+	OwnerID         string                    `json:"owner_id,omitempty"`
+	AgentID         string                    `json:"agent_id,omitempty"`
+	TaskID          string                    `json:"task_id,omitempty"`
 	Kind            string                    `json:"kind"`
 	Status          string                    `json:"status"`
 	Text            string                    `json:"text"`
@@ -168,6 +174,12 @@ type memoryRecordCreateRequest struct {
 	Pinned        *bool    `json:"pinned"`
 	Source        string   `json:"source"`
 	SessionID     string   `json:"session_id"`
+	TenantID      string   `json:"tenant_id"`
+	OwnerID       string   `json:"owner_id"`
+	AgentID       string   `json:"agent_id"`
+	TaskID        string   `json:"task_id"`
+	ScopeKind     string   `json:"scope_kind"`
+	ScopeKey      string   `json:"scope_key"`
 }
 
 type memoryRecordPatchRequest struct {
@@ -517,7 +529,7 @@ func (h *Handler) ListMemoryRecords(w http.ResponseWriter, r *http.Request) {
 		Cursor:          cursor,
 		AsOf:            asOf,
 	}
-	page, err := store.SearchRecords(r.Context(), query)
+	page, err := store.SearchRecords(h.memoryRequestContext(r, canViewPrivate), query)
 	if err != nil {
 		h.writeError(w, http.StatusServiceUnavailable, err)
 		return
@@ -594,9 +606,11 @@ func (h *Handler) GetMemoryWhyNot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer store.Close()
+	scope, _ := memorystore.MemoryScopeFromContext(h.memoryRequestContext(r, true))
 	selection, err := store.DiagnoseInjection(memorystore.InjectOptions{
 		Query: query, Limit: limit, TokenBudget: budget,
 		SessionID: strings.TrimSpace(r.URL.Query().Get("session_id")),
+		Scope:     scope,
 		SkipTrace: true,
 	})
 	if err != nil {
@@ -915,16 +929,26 @@ func (h *Handler) CreateMemoryRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer store.Close()
-	note, err := store.Append(memorystore.AppendNoteOptions{
+	writeScope := memorystore.ScopeContext{
+		TenantID:  strings.TrimSpace(req.TenantID),
+		OwnerID:   strings.TrimSpace(req.OwnerID),
+		AgentID:   strings.TrimSpace(req.AgentID),
+		SessionID: strings.TrimSpace(req.SessionID),
+		TaskID:    strings.TrimSpace(req.TaskID),
+	}
+	writeCtx := memorystore.WithMemoryScope(r.Context(), writeScope)
+	note, err := store.AppendWithContext(writeCtx, memorystore.AppendNoteOptions{
 		Text: req.Text, Title: req.Title, Summary: req.Summary, CanonicalID: req.CanonicalID,
 		Tags: req.Tags, Kind: req.Kind, Pinned: req.Pinned,
 		Source: req.Source, SessionID: req.SessionID,
+		ScopeKind: req.ScopeKind, ScopeKey: req.ScopeKey,
+		TenantID: req.TenantID, OwnerID: req.OwnerID, AgentID: req.AgentID, TaskID: req.TaskID,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
-	if record, err := store.GetRecord(r.Context(), note.ID); err == nil {
+	if record, err := store.GetRecord(writeCtx, note.ID); err == nil {
 		h.writeJSON(w, http.StatusOK, memoryRecordToDTO(record))
 		return
 	}
@@ -1033,12 +1057,13 @@ func (h *Handler) GetMemoryRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer store.Close()
-	record, err := store.GetRecord(r.Context(), mux.Vars(r)["id"])
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
+	record, err := store.GetRecord(h.memoryRequestContext(r, canViewPrivate), mux.Vars(r)["id"])
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "memory record not found"))
 		return
 	}
-	if h.authorizeMemoryAdmin(r) != nil &&
+	if !canViewPrivate &&
 		(record.Sensitivity == "private" || record.Status == memorystore.StatusDeleted ||
 			record.Archived || memoryredact.DetectSecret(record.Text) != "") {
 		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission, "private/deleted/archived memory requires admin authorization"))
@@ -1290,7 +1315,8 @@ func (h *Handler) GetMemorySessionContext(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer store.Close()
-	page, err := store.ListRecords(r.Context(), memorystore.RecordFilter{
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
+	page, err := store.ListRecords(h.memoryRequestContext(r, canViewPrivate), memorystore.RecordFilter{
 		SourceSessionID: mux.Vars(r)["id"], Limit: 50,
 	})
 	if err != nil {
@@ -1298,7 +1324,6 @@ func (h *Handler) GetMemorySessionContext(w http.ResponseWriter, r *http.Request
 		return
 	}
 	items := make([]memoryRecordDTO, 0, len(page.Items))
-	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
 	for _, record := range page.Items {
 		if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
 			continue
@@ -2012,13 +2037,13 @@ func (h *Handler) GetMemoryFreshness(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	page, err := store.ListRecords(r.Context(), memorystore.RecordFilter{Status: memorystore.StatusActive, Limit: 200})
+	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
+	page, err := store.ListRecords(h.memoryRequestContext(r, canViewPrivate), memorystore.RecordFilter{Status: memorystore.StatusActive, Limit: 200})
 	if err != nil {
 		h.writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
 	items := make([]memoryRecordDTO, 0)
-	canViewPrivate := h.authorizeMemoryAdmin(r) == nil
 	for _, record := range page.Items {
 		if record.Freshness != memorystore.FreshnessFresh {
 			if !canViewPrivate && (record.Sensitivity == "private" || memoryredact.DetectSecret(record.Text) != "") {
@@ -2353,9 +2378,27 @@ func (h *Handler) authorizeMemoryAdmin(r *http.Request) error {
 	return errors.New(errors.ErrAgentPermission, "memory admin endpoints require a valid admin token or admin role")
 }
 
+// memoryRequestContext binds the caller identity used by scoped memory reads.
+// Explicit scope selectors are admin-only. Without an explicit selector the
+// store keeps its legacy project scope, which is the single-tenant default.
+func (h *Handler) memoryRequestContext(r *http.Request, allowExplicit bool) context.Context {
+	scope := memorystore.ScopeContext{}
+	if allowExplicit && r != nil {
+		query := r.URL.Query()
+		scope.TenantID = strings.TrimSpace(query.Get("tenant_id"))
+		scope.OwnerID = strings.TrimSpace(query.Get("owner_id"))
+		scope.AgentID = strings.TrimSpace(query.Get("agent_id"))
+		scope.SessionID = strings.TrimSpace(query.Get("scope_session_id"))
+		scope.TaskID = strings.TrimSpace(query.Get("task_id"))
+	}
+	return memorystore.WithMemoryScope(r.Context(), scope)
+}
+
 func memoryRecordToDTO(record memorystore.Record) memoryRecordDTO {
 	return memoryRecordDTO{
 		ID: record.ID, Scope: string(record.Scope), Kind: record.Kind, Status: string(record.Status),
+		ScopeKind: string(record.ScopeKind), ScopeKey: record.ScopeKey,
+		TenantID: record.TenantID, OwnerID: record.OwnerID, AgentID: record.AgentID, TaskID: record.TaskID,
 		Text: record.Text, Title: record.Title, Summary: record.Summary, CanonicalID: record.CanonicalID,
 		SupersededBy: record.SupersededBy, Archived: record.Archived,
 		Tags: append([]string(nil), record.Tags...), Confidence: record.Confidence,

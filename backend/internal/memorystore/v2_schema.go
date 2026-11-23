@@ -989,9 +989,153 @@ CREATE INDEX idx_memory_core_usage_session
   ON memory_core_usage(project_key, session_id, used_at DESC);
 `,
 		},
+		{
+			Version: 24,
+			Name:    "memory_v24_scope_isolation",
+			UpSQL: `
+ALTER TABLE memory_entries ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_entries ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_entries ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_events ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_events ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_events ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_usage ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_usage ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_usage ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_suppressions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_suppressions ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_suppressions ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_suppressions ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_suppressions ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_suppressions ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_recall_traces ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_recall_traces ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_recall_traces ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_recall_traces ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_recall_traces ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_recall_traces ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_jobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_jobs ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_jobs ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_summaries ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_summaries ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_summaries ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_summaries ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_summaries ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_summaries ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_turn_digests ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_digests ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_turn_digests ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_turn_output_receipts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_output_receipts ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_output_receipts ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_turn_output_receipts ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_turn_output_receipts ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_versions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_versions ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_versions ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_versions ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_versions ADD COLUMN source_session_id TEXT;
+
+ALTER TABLE memory_core ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE memory_core_usage ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core_usage ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core_usage ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core_usage ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memory_core_usage ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'project';
+ALTER TABLE memory_core_usage ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+
+UPDATE memory_entries SET scope_key = project_key
+WHERE (scope_key = '' OR scope_key IS NULL)
+  AND LOWER(scope) NOT IN ('user', 'profile', 'agent', 'session', 'task');
+UPDATE memory_events SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_usage SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_suppressions SET scope_key = project_key
+WHERE (scope_key = '' OR scope_key IS NULL)
+  AND LOWER(scope) NOT IN ('user', 'profile', 'agent', 'session', 'task');
+UPDATE memory_recall_traces SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_jobs SET scope_key = project_key
+WHERE (scope_key = '' OR scope_key IS NULL)
+  AND LOWER(scope) NOT IN ('user', 'profile', 'agent', 'session', 'task');
+UPDATE memory_summaries SET scope_key = project_key
+WHERE (scope_key = '' OR scope_key IS NULL)
+  AND LOWER(scope) NOT IN ('user', 'profile', 'agent', 'session', 'task');
+UPDATE memory_turn_digests SET scope_key = project_key
+WHERE (scope_key = '' OR scope_key IS NULL)
+  AND LOWER(scope) NOT IN ('user', 'profile', 'agent', 'session', 'task');
+UPDATE memory_turn_output_receipts SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_versions SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_core SET scope_key = project_key WHERE scope_key = '';
+UPDATE memory_core_usage SET scope_key = project_key WHERE scope_key = '';
+
+CREATE INDEX idx_memory_entries_tenant_scope
+  ON memory_entries(tenant_id, scope_kind, scope_key, status, updated_at DESC);
+CREATE INDEX idx_memory_entries_tenant_owner_agent
+  ON memory_entries(tenant_id, project_key, owner_id, agent_id, status);
+CREATE INDEX idx_memory_entries_tenant_task
+  ON memory_entries(tenant_id, task_id, status);
+CREATE INDEX idx_memory_entries_tenant_session
+  ON memory_entries(tenant_id, source_session_id, status);
+
+CREATE INDEX idx_memory_events_tenant_scope
+  ON memory_events(tenant_id, scope_kind, scope_key, created_at DESC);
+CREATE INDEX idx_memory_usage_tenant_scope
+  ON memory_usage(tenant_id, scope_kind, scope_key, used_at DESC);
+CREATE INDEX idx_memory_jobs_tenant_scope
+  ON memory_jobs(tenant_id, scope_kind, scope_key, status, priority DESC);
+CREATE INDEX idx_memory_summaries_tenant_scope
+  ON memory_summaries(tenant_id, scope_kind, scope_key, summary_kind, status);
+CREATE INDEX idx_memory_turn_digests_tenant_scope
+  ON memory_turn_digests(tenant_id, scope_kind, scope_key, status, digest_seq);
+
+CREATE TABLE memory_scope_grants (
+    id           TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL DEFAULT '',
+    project_key  TEXT NOT NULL DEFAULT '',
+    grantor_id   TEXT NOT NULL,
+    grantee_type TEXT NOT NULL,
+    grantee_id   TEXT NOT NULL,
+    scope_kind   TEXT NOT NULL,
+    scope_key    TEXT NOT NULL,
+    permission   TEXT NOT NULL,
+    expires_at   TEXT,
+    created_at   TEXT NOT NULL,
+    revoked_at   TEXT
+);
+CREATE INDEX idx_memory_scope_grants_lookup
+  ON memory_scope_grants(tenant_id, project_key, grantee_type, grantee_id, scope_kind, scope_key);
+CREATE INDEX idx_memory_scope_grants_scope
+  ON memory_scope_grants(tenant_id, project_key, scope_kind, scope_key, permission);
+`,
+		},
 	}
 	if err := migrate.Apply(ctx, db, migrations); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)
+	}
+	if err := backfillMemoryScopeColumns(ctx, db); err != nil {
+		return fmt.Errorf("memory v2 scope backfill: %w", err)
 	}
 	if err := backfillRecordVersionBaselines(ctx, db); err != nil {
 		return fmt.Errorf("memory v2 record version baseline: %w", err)

@@ -68,6 +68,7 @@ func normalizeConfig(cfg Config) Config {
 			cfg.ProjectKey = ResolveProjectKey(projectRoot)
 		}
 	}
+	cfg.Scope.ProjectKey = firstNonEmpty(cfg.Scope.ProjectKey, cfg.ProjectKey)
 	return cfg
 }
 
@@ -211,8 +212,12 @@ func (s *Store) MemoryStageSplitEnabled() bool {
 	return s != nil && !s.cfg.DisableStageSplit
 }
 
-func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
+func (s *Store) appendV2(ctx context.Context, opts AppendNoteOptions) (Note, error) {
 	db, err := s.ensureV2()
+	if err != nil {
+		return Note{}, err
+	}
+	resolvedScope, err := s.resolveScopeContext(ctx)
 	if err != nil {
 		return Note{}, err
 	}
@@ -228,9 +233,49 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 	if kind == "" {
 		kind = "reference"
 	}
-	scope := strings.ToLower(strings.TrimSpace(string(opts.Scope)))
-	if scope == "" {
-		scope = string(ScopeProject)
+	scopeKind := normalizeScopeKind(Scope(firstNonEmpty(opts.ScopeKind, opts.Scope)))
+	if scopeKind == "" {
+		scopeKind = normalizeScopeKind(resolvedScope.Scope)
+	}
+	if scopeKind == "" {
+		scopeKind = ScopeProject
+	}
+	if !validMemoryScopeKind(scopeKind) {
+		return Note{}, fmt.Errorf("memorystore: invalid scope kind %q", scopeKind)
+	}
+	tenantID := firstNonEmpty(opts.TenantID, resolvedScope.TenantID)
+	ownerID := firstNonEmpty(opts.OwnerID, resolvedScope.OwnerID)
+	agentID := firstNonEmpty(opts.AgentID, resolvedScope.AgentID)
+	taskID := firstNonEmpty(opts.TaskID, resolvedScope.TaskID)
+	sessionID := firstNonEmpty(opts.SessionID, resolvedScope.SessionID)
+	scopeKey := strings.TrimSpace(opts.ScopeKey)
+	switch scopeKind {
+	case ScopeProject:
+		scopeKey = s.cfg.ProjectKey
+	case ScopeUser, ScopeProfile:
+		ownerID = firstNonEmpty(ownerID, scopeKey)
+		scopeKey = firstNonEmpty(scopeKey, ownerID)
+		if ownerID == "" {
+			return Note{}, fmt.Errorf("memorystore: user scope requires owner id")
+		}
+	case ScopeAgent:
+		agentID = firstNonEmpty(agentID, scopeKey)
+		scopeKey = firstNonEmpty(scopeKey, agentID)
+		if agentID == "" {
+			return Note{}, fmt.Errorf("memorystore: agent scope requires agent id")
+		}
+	case ScopeSession:
+		sessionID = firstNonEmpty(sessionID, scopeKey)
+		scopeKey = firstNonEmpty(scopeKey, sessionID)
+		if sessionID == "" {
+			return Note{}, fmt.Errorf("memorystore: session scope requires session id")
+		}
+	case ScopeTask:
+		taskID = firstNonEmpty(taskID, scopeKey)
+		scopeKey = firstNonEmpty(scopeKey, taskID)
+		if taskID == "" {
+			return Note{}, fmt.Errorf("memorystore: task scope requires task id")
+		}
 	}
 	pinned := true
 	if opts.Pinned != nil {
@@ -249,7 +294,7 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 		CanonicalID: strings.TrimSpace(opts.CanonicalID),
 		Tags:        tags,
 		Source:      source,
-		SessionID:   strings.TrimSpace(opts.SessionID),
+		SessionID:   sessionID,
 		Archived:    opts.Archived,
 		CreatedAt:   now,
 	}
@@ -261,7 +306,13 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 	}
 	record := Record{
 		ID:              note.ID,
-		Scope:           Scope(scope),
+		Scope:           scopeKind,
+		ScopeKind:       scopeKind,
+		ScopeKey:        scopeKey,
+		TenantID:        tenantID,
+		OwnerID:         ownerID,
+		AgentID:         agentID,
+		TaskID:          taskID,
 		ProjectKey:      s.cfg.ProjectKey,
 		Kind:            kind,
 		Status:          StatusActive,
@@ -279,14 +330,13 @@ func (s *Store) appendV2(opts AppendNoteOptions) (Note, error) {
 		SourceKind:      "manual",
 		SourceSessionID: note.SessionID,
 		SourceRefs:      []string{"manual:" + note.ID},
-		ContentHash:     memoryContentHash(scope, s.cfg.ProjectKey, kind, text),
 		Revision:        1,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Freshness:       FreshnessFresh,
 		LastVerifiedAt:  now,
 	}
-	if err := s.insertRecordTx(context.Background(), db, record, "user", note.SessionID); err != nil {
+	if err := s.insertRecordTx(ctx, db, record, "user", note.SessionID); err != nil {
 		return Note{}, err
 	}
 	return note, nil
@@ -349,6 +399,9 @@ func (s *Store) insertRecordSQLTxWithOptions(
 	if record.ValidFrom.IsZero() {
 		record.ValidFrom = record.CreatedAt
 	}
+	if err := s.normalizeRecordScope(ctx, &record); err != nil {
+		return err
+	}
 	var suppressed int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(1) FROM memory_suppressions
@@ -381,8 +434,9 @@ INSERT INTO memory_entries (
     supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
     valid_from, valid_until, freshness_status, last_verified_at,
     revalidate_after, stale_reason, deleted_at, metadata_json,
-    title, summary, canonical_id, superseded_by, archived
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    title, summary, canonical_id, superseded_by, archived,
+    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.ID, string(record.Scope), record.ProjectKey, record.Kind, string(record.Status),
 		record.Text, record.NormalizedText, string(tagsJSON), record.Confidence, record.Sensitivity,
@@ -396,6 +450,7 @@ INSERT INTO memory_entries (
 		nullableTime(record.RevalidateAfter), nullableString(record.StaleReason),
 		nullableTime(record.DeletedAt), string(metadataJSON),
 		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
+		record.TenantID, record.OwnerID, record.AgentID, record.TaskID, string(record.ScopeKind), record.ScopeKey,
 	)
 	if err != nil {
 		if isUniqueConstraint(err) {
@@ -528,12 +583,16 @@ func (s *Store) listV2WithOptions(opts ListOptions) ([]Note, error) {
 	if err != nil {
 		return nil, err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(context.Background(), "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	query := `
 SELECT id, text, tags_json, source_kind, source_session_id, created_at,
        title, summary, canonical_id, archived
 FROM memory_entries
-WHERE scope = ? AND project_key = ? AND status = 'active' AND archived = 0`
-	args := []interface{}{string(ScopeProject), s.cfg.ProjectKey}
+WHERE ` + scopePredicate + ` AND status = 'active' AND archived = 0`
+	args := append([]interface{}(nil), scopeArgs...)
 	if sourceKind := strings.ToLower(strings.TrimSpace(opts.SourceKind)); sourceKind != "" {
 		query += " AND LOWER(source_kind) = ?"
 		args = append(args, sourceKind)
@@ -634,6 +693,11 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 	if err != nil {
 		return Selection{}, err
 	}
+	ctx := context.Background()
+	if opts.Scope.TenantID != "" || opts.Scope.ProjectKey != "" || opts.Scope.OwnerID != "" ||
+		opts.Scope.AgentID != "" || opts.Scope.SessionID != "" || opts.Scope.TaskID != "" || opts.Scope.Scope != "" {
+		ctx = WithMemoryScope(ctx, opts.Scope)
+	}
 	budget := opts.TokenBudget
 	if budget <= 0 {
 		budget = DefaultTokenBudget
@@ -652,16 +716,16 @@ func (s *Store) selectForInjectV2Internal(opts InjectOptions, diagnostic bool) (
 		initialDropped    []DroppedRecord
 	)
 	if diagnostic {
-		diagnosticRecords, err = s.loadRecordsForInjectionDiagnostics(context.Background(), db, 500)
+		diagnosticRecords, err = s.loadRecordsForInjectionDiagnostics(ctx, db, 500)
 		if err != nil {
 			return Selection{}, err
 		}
-		records, initialDropped, err = s.classifyInjectableRecords(context.Background(), db, diagnosticRecords, now)
+		records, initialDropped, err = s.classifyInjectableRecords(ctx, db, diagnosticRecords, now)
 		if err != nil {
 			return Selection{}, err
 		}
 	} else {
-		records, err = s.loadInjectableCandidates(context.Background(), db, opts, now)
+		records, err = s.loadInjectableCandidates(ctx, db, opts, now)
 		if err != nil {
 			return Selection{}, err
 		}
@@ -996,6 +1060,12 @@ func (s *Store) loadRecordsForInjectionDiagnostics(ctx context.Context, db *sql.
 	if limit <= 0 {
 		limit = 500
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	args := append([]interface{}(nil), scopeArgs...)
+	args = append(args, limit)
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
@@ -1003,12 +1073,13 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
  FROM memory_entries
-WHERE scope = ? AND project_key = ?
+WHERE `+scopePredicate+`
 ORDER BY pinned DESC, use_count DESC, updated_at DESC, id ASC
 LIMIT ?
-`, string(ScopeProject), s.cfg.ProjectKey, limit)
+`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,19 +1209,25 @@ func (s *Store) loadInjectableRecords(ctx context.Context, db *sql.DB, now time.
 		freshnessPredicate = `(freshness_status = 'fresh' OR
   (freshness_status = 'stale' AND kind IN ('preference', 'workflow', 'pitfall', 'open_question')))`
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, now)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]interface{}(nil), scopeArgs...)
+	args = append(args, now.UTC().Format(time.RFC3339Nano))
 	rows, err := db.QueryContext(ctx, `
 SELECT id, kind, text, normalized_text, tags_json, confidence, pinned,
        source_kind, source_session_id, created_at, updated_at, last_used_at,
        use_count
 FROM memory_entries
-WHERE scope = ? AND project_key = ? AND status = 'active' AND `+freshnessPredicate+`
+WHERE `+scopePredicate+` AND status = 'active' AND `+freshnessPredicate+`
   AND sensitivity != 'private'
   AND archived = 0
   AND (deleted_at IS NULL OR deleted_at = '')
   AND (valid_until IS NULL OR valid_until = '' OR valid_until > ?)
 ORDER BY pinned DESC, CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END,
          use_count DESC, updated_at DESC
-`, string(ScopeProject), s.cfg.ProjectKey, now.UTC().Format(time.RFC3339Nano))
+`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1306,9 +1383,13 @@ func (s *Store) hydrateSelectionRecords(
 	if len(ids) == 0 {
 		return nil
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return err
+	}
 	placeholders := make([]string, len(ids))
-	args := make([]interface{}, 0, len(ids)+2)
-	args = append(args, string(ScopeProject), s.cfg.ProjectKey)
+	args := make([]interface{}, 0, len(ids)+len(scopeArgs))
+	args = append(args, scopeArgs...)
 	for index, id := range ids {
 		placeholders[index] = "?"
 		args = append(args, id)
@@ -1320,9 +1401,10 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
  FROM memory_entries
-WHERE scope = ? AND project_key = ? AND id IN (`+strings.Join(placeholders, ", ")+`)
+WHERE `+scopePredicate+` AND id IN (`+strings.Join(placeholders, ", ")+`)
 `, args...)
 	if err != nil {
 		return err

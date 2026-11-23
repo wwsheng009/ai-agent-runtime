@@ -661,8 +661,13 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 		// the bounded LIKE path below. The fallback keeps recall for short
 		// CJK tokens and non-FTS builds.
 	}
-	args := []interface{}{string(ScopeProject), s.cfg.ProjectKey}
-	where := []string{"scope = ?", "project_key = ?"}
+	now := time.Now().UTC()
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, now)
+	if err != nil {
+		return RecordPage{}, err
+	}
+	args := append([]interface{}(nil), scopeArgs...)
+	where := []string{scopePredicate}
 	if !filter.IncludeArchived {
 		where = append(where, "archived = 0")
 	}
@@ -674,7 +679,7 @@ func (s *Store) ListRecords(ctx context.Context, filter RecordFilter) (RecordPag
 	}
 	if filter.Status == "" || filter.Status == StatusActive {
 		where = append(where, "(valid_until IS NULL OR valid_until = '' OR valid_until > ?)")
-		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
+		args = append(args, now.Format(time.RFC3339Nano))
 	}
 	if filter.Kind != "" {
 		where = append(where, "kind = ?")
@@ -711,7 +716,8 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
  FROM memory_entries WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit+1, offset)
@@ -756,6 +762,11 @@ func (s *Store) GetRecord(ctx context.Context, id string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return Record{}, err
+	}
+	args := append([]interface{}{strings.TrimSpace(id)}, scopeArgs...)
 	row := db.QueryRowContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
@@ -763,9 +774,10 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
- FROM memory_entries WHERE id = ? AND project_key = ?
-`, strings.TrimSpace(id), s.cfg.ProjectKey)
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+ FROM memory_entries WHERE id = ? AND `+scopePredicate+`
+ `, args...)
 	record, err := scanRecordColumns(row)
 	if err != nil {
 		return Record{}, err
@@ -865,6 +877,8 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		lastVerifiedAt, revalidateAfter             sql.NullString
 		deletedAt, metadataJSON                     sql.NullString
 		title, summary, canonicalID, supersededBy   sql.NullString
+		tenantID, ownerID, agentID, taskID          sql.NullString
+		scopeKind, scopeKey                         sql.NullString
 		confidence                                  float64
 		sensitivity                                 sql.NullString
 		pinned                                      int
@@ -878,11 +892,14 @@ func scanRecordColumns(row rowScanner) (Record, error) {
 		&createdAt, &updatedAt, &lastUsedAt, &useCount, &validFrom, &validUntil,
 		&freshness, &lastVerifiedAt, &revalidateAfter, &staleReason, &deletedAt,
 		&metadataJSON, &title, &summary, &canonicalID, &supersededBy, &archived,
+		&tenantID, &ownerID, &agentID, &taskID, &scopeKind, &scopeKey,
 	); err != nil {
 		return Record{}, err
 	}
 	record = Record{
-		ID: id.String, Scope: Scope(scope.String), ProjectKey: projectKey.String,
+		ID: id.String, Scope: Scope(scope.String), ScopeKind: Scope(scopeKind.String),
+		ScopeKey: scopeKey.String, TenantID: tenantID.String, OwnerID: ownerID.String,
+		AgentID: agentID.String, TaskID: taskID.String, ProjectKey: projectKey.String,
 		Kind: kind.String, Status: Status(status.String), Text: text.String,
 		Title: title.String, Summary: summary.String, CanonicalID: canonicalID.String,
 		SupersededBy: supersededBy.String, Archived: archived != 0,
@@ -930,7 +947,7 @@ func (s *Store) UpdateRecord(ctx context.Context, id string, patch RecordPatch) 
 		semanticChange = semanticChange || text != record.Text
 		record.Text = text
 		record.NormalizedText = normalizeMemoryText(text)
-		record.ContentHash = memoryContentHash(string(record.Scope), record.ProjectKey, record.Kind, text)
+		record.ContentHash = memoryRecordContentHash(record)
 	}
 	if patch.Title != nil {
 		title := strings.TrimSpace(*patch.Title)
@@ -1012,19 +1029,30 @@ func (s *Store) UpdateRecord(ctx context.Context, id string, patch RecordPatch) 
 	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
 		return Record{}, err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionWrite, now)
+	if err != nil {
+		return Record{}, err
+	}
+	writeArgs := make([]interface{}, 0, 3+len(scopeArgs))
+	writeArgs = append(writeArgs, record.ID)
+	writeArgs = append(writeArgs, scopeArgs...)
+	writeArgs = append(writeArgs, expectedRevision, string(expectedStatus))
+	execArgs := []interface{}{
+		record.Text, record.NormalizedText, string(tagsJSON), boolInt(record.Pinned),
+		string(record.Status), record.ContentHash, record.Revision,
+		record.UpdatedAt.UTC().Format(time.RFC3339Nano), string(metadataJSON),
+		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
+		nullableTime(record.ValidFrom), nullableTime(record.ValidUntil),
+	}
+	execArgs = append(execArgs, writeArgs...)
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET text = ?, normalized_text = ?, tags_json = ?, pinned = ?, status = ?,
     content_hash = ?, revision = ?, updated_at = ?, metadata_json = ?,
     title = ?, summary = ?, canonical_id = ?, superseded_by = ?, archived = ?,
     valid_from = ?, valid_until = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
-`, record.Text, record.NormalizedText, string(tagsJSON), boolInt(record.Pinned),
-		string(record.Status), record.ContentHash, record.Revision,
-		record.UpdatedAt.UTC().Format(time.RFC3339Nano), string(metadataJSON),
-		record.Title, record.Summary, record.CanonicalID, nullableString(record.SupersededBy), boolInt(record.Archived),
-		nullableTime(record.ValidFrom), nullableTime(record.ValidUntil),
-		record.ID, s.cfg.ProjectKey, expectedRevision, string(expectedStatus))
+WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = ?
+`, execArgs...)
 	if err != nil {
 		return Record{}, err
 	}
@@ -1191,14 +1219,22 @@ func (s *Store) DeleteRecord(ctx context.Context, id string) error {
 	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
 		return err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionWrite, now)
+	if err != nil {
+		return err
+	}
+	deleteArgs := []interface{}{
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		record.ID,
+	}
+	deleteArgs = append(deleteArgs, scopeArgs...)
+	deleteArgs = append(deleteArgs, record.Revision, string(record.Status))
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'deleted', deleted_at = ?, valid_until = ?,
     revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey,
-		record.Revision, string(record.Status))
+WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = ?
+`, deleteArgs...)
 	if err != nil {
 		return err
 	}
@@ -1207,9 +1243,11 @@ WHERE id = ? AND project_key = ? AND revision = ? AND status = ?
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_suppressions (
-    id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json
-) VALUES (?, ?, ?, ?, 'deleted', ?, ?, '{}')
-`, "sup_"+uuid.NewString(), string(record.Scope), record.ProjectKey, record.ContentHash, record.ID, nowText()); err != nil {
+    id, scope, project_key, content_hash, reason, source_memory_id, created_at, metadata_json,
+    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, 'deleted', ?, ?, '{}', ?, ?, ?, ?, ?, ?)
+`, "sup_"+uuid.NewString(), string(record.Scope), record.ProjectKey, record.ContentHash, record.ID, nowText(),
+		record.TenantID, record.OwnerID, record.AgentID, record.TaskID, string(record.ScopeKind), record.ScopeKey); err != nil {
 		return err
 	}
 	eventID, err := insertEventIDTx(ctx, tx, record.ProjectKey, record.ID, "deleted", "user", record.SourceSessionID, record.Revision+1, map[string]interface{}{"reason": "manual_delete"})
@@ -1603,15 +1641,38 @@ func (s *Store) recordRecallTrace(opts InjectOptions, selection Selection) error
 	if runes := []rune(preview); len(runes) > 160 {
 		preview = string(runes[:160]) + "…"
 	}
+	traceScope, err := normalizeScopeContext(opts.Scope, s.defaultScopeContext())
+	if err != nil {
+		return err
+	}
+	traceKind := normalizeScopeKind(traceScope.Scope)
+	if traceKind == "" {
+		traceKind = ScopeProject
+	}
+	traceKey := traceScope.ProjectKey
+	switch traceKind {
+	case ScopeUser, ScopeProfile:
+		traceKey = firstNonEmpty(traceScope.OwnerID, traceScope.ProjectKey)
+	case ScopeAgent:
+		traceKey = firstNonEmpty(traceScope.AgentID, traceScope.ProjectKey)
+	case ScopeSession:
+		traceKey = firstNonEmpty(traceScope.SessionID, traceScope.ProjectKey)
+	case ScopeTask:
+		traceKey = firstNonEmpty(traceScope.TaskID, traceScope.ProjectKey)
+	}
 	_, err = db.ExecContext(context.Background(), `
 INSERT INTO memory_recall_traces (
     id, session_id, turn_id, project_key, query_hash, query_preview,
     summary_revision, candidate_count, filtered_count, selected_ids_json,
-    dropped_json, token_estimate, token_budget, budget_source, injected, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'contextmgr', ?, ?)
+    dropped_json, token_estimate, token_budget, budget_source, injected, created_at,
+    tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'contextmgr', ?, ?,
+	          ?, ?, ?, ?, ?, ?)
 `, "trace_"+uuid.NewString(), strings.TrimSpace(opts.SessionID), nullableString(opts.TurnID),
 		s.cfg.ProjectKey, hex.EncodeToString(sum[:]), preview, selection.Revision,
 		selection.CandidateCount, selection.FilteredCount, string(selected),
-		string(dropped), selection.TokenEstimate, budget, boolInt(len(selection.IDs) > 0), nowText())
+		string(dropped), selection.TokenEstimate, budget, boolInt(len(selection.IDs) > 0), nowText(),
+		traceScope.TenantID, traceScope.OwnerID, traceScope.AgentID, traceScope.TaskID,
+		string(traceKind), traceKey)
 	return err
 }

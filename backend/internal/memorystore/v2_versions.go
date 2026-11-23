@@ -22,7 +22,8 @@ confidence, sensitivity, pinned, retention_class, source_kind, source_session_id
 source_session_generation, source_turn_id, source_refs_json, content_hash,
 supersedes_id, revision, created_at, updated_at, last_used_at, use_count,
 valid_from, valid_until, freshness_status, last_verified_at, revalidate_after,
-stale_reason, deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
+ stale_reason, deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+ tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
 `
 
 // RecordVersion is an immutable snapshot of a memory entry at one revision.
@@ -97,16 +98,28 @@ ORDER BY e.project_key, e.id
 			return fmt.Errorf("marshal baseline for %s: %w", record.ID, err)
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
+		scopeKind := record.ScopeKind
+		if normalizeScopeKind(scopeKind) == "" {
+			scopeKind = normalizeScopeKind(record.Scope)
+		}
+		if normalizeScopeKind(scopeKind) == "" {
+			scopeKind = ScopeProject
+		}
+		scopeKey := record.ScopeKey
+		if scopeKey == "" {
+			scopeKey = record.ProjectKey
+		}
 		_, err = tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO memory_versions (
     id, memory_id, version, project_key, scope_kind, scope_key, record_json,
     changed_by, change_reason, change_type, source_event_id, valid_from,
-    valid_until, created_at
+    valid_until, created_at, tenant_id, owner_id, agent_id, task_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'schema_migration', 'baseline snapshot',
-          'baseline', NULL, ?, ?, ?)
+          'baseline', NULL, ?, ?, ?, ?, ?, ?, ?)
 `, "mver_"+uuid.NewString(), record.ID, record.Revision, record.ProjectKey,
-			string(record.Scope), record.ProjectKey, string(body),
-			nullableTime(record.ValidFrom), nullableTime(record.ValidUntil), now)
+			string(scopeKind), scopeKey, string(body),
+			nullableTime(record.ValidFrom), nullableTime(record.ValidUntil), now,
+			record.TenantID, record.OwnerID, record.AgentID, record.TaskID)
 		if err != nil {
 			return fmt.Errorf("insert baseline for %s: %w", record.ID, err)
 		}
@@ -155,12 +168,16 @@ func appendRecordVersionTx(
 INSERT INTO memory_versions (
     id, memory_id, version, project_key, scope_kind, scope_key, record_json,
     changed_by, change_reason, change_type, source_event_id, valid_from,
-    valid_until, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    valid_until, created_at, tenant_id, owner_id, agent_id, task_id,
+    source_session_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, "mver_"+uuid.NewString(), record.ID, record.Revision, record.ProjectKey,
-		string(record.Scope), record.ProjectKey, string(body), changedBy, reason,
+		string(firstNonEmpty(string(record.ScopeKind), string(record.Scope))),
+		firstNonEmpty(record.ScopeKey, record.ProjectKey), string(body), changedBy, reason,
 		changeType, nullableString(sourceEventID), nullableTime(record.ValidFrom),
-		nullableTime(record.ValidUntil), createdAt.UTC().Format(time.RFC3339Nano))
+		nullableTime(record.ValidUntil), createdAt.UTC().Format(time.RFC3339Nano),
+		record.TenantID, record.OwnerID, record.AgentID, record.TaskID,
+		nullableString(record.SourceSessionID))
 	if err != nil {
 		return fmt.Errorf("memorystore: append record version %s/%d: %w", record.ID, record.Revision, err)
 	}
@@ -633,7 +650,7 @@ SELECT status FROM memory_entries WHERE id = ? AND project_key = ?
 		}
 	}
 	restored.NormalizedText = normalizeMemoryText(restored.Text)
-	restored.ContentHash = memoryContentHash(string(restored.Scope), restored.ProjectKey, restored.Kind, restored.Text)
+	restored.ContentHash = memoryRecordContentHash(restored)
 	restored.Sensitivity = normalizeSensitivity(restored.Sensitivity)
 	if err := validateRecordMetadata(&restored); err != nil {
 		return Record{}, err

@@ -36,7 +36,8 @@ e.source_session_generation, e.source_turn_id, e.source_refs_json, e.content_has
 e.supersedes_id, e.revision, e.created_at, e.updated_at, e.last_used_at, e.use_count,
 e.valid_from, e.valid_until, e.freshness_status, e.last_verified_at, e.revalidate_after,
 e.stale_reason, e.deleted_at, e.metadata_json, e.title, e.summary, e.canonical_id,
-e.superseded_by, e.archived`
+e.superseded_by, e.archived, e.tenant_id, e.owner_id, e.agent_id, e.task_id,
+e.scope_kind, e.scope_key`
 )
 
 var memoryFTSTriggerSQL = []string{
@@ -177,14 +178,18 @@ func (s *Store) searchV2FTS(ctx context.Context, opts SearchOptions) ([]SearchHi
 		queryLimit = 200
 	}
 
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "e", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
 	sqlQuery := `
 SELECT e.id, e.text, e.tags_json, e.source_kind, e.source_session_id, e.created_at,
        e.title, e.summary, e.canonical_id, e.archived, bm25(memory_entries_fts)
 FROM memory_entries_fts
 JOIN memory_entries e ON e.rowid = memory_entries_fts.rowid
 WHERE memory_entries_fts MATCH ?
-  AND e.scope = ? AND e.project_key = ? AND e.status = 'active' AND e.archived = 0`
-	args := []interface{}{query, string(ScopeProject), s.cfg.ProjectKey}
+  AND ` + scopePredicate + ` AND e.status = 'active' AND e.archived = 0`
+	args := append([]interface{}{query}, scopeArgs...)
 	if sourceKind := strings.ToLower(strings.TrimSpace(opts.SourceKind)); sourceKind != "" {
 		sqlQuery += " AND LOWER(e.source_kind) = ?"
 		args = append(args, sourceKind)
@@ -245,12 +250,13 @@ func (s *Store) listRecordsFTS(
 	if match == "" {
 		return RecordPage{}, nil
 	}
-	where := []string{
-		"memory_entries_fts MATCH ?",
-		"e.scope = ?",
-		"e.project_key = ?",
+	now := time.Now().UTC()
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "e", ScopePermissionRead, now)
+	if err != nil {
+		return RecordPage{}, err
 	}
-	args := []interface{}{match, string(ScopeProject), s.cfg.ProjectKey}
+	where := []string{"memory_entries_fts MATCH ?", scopePredicate}
+	args := append([]interface{}{match}, scopeArgs...)
 	if !filter.IncludeArchived {
 		where = append(where, "e.archived = 0")
 	}
@@ -262,7 +268,7 @@ func (s *Store) listRecordsFTS(
 	}
 	if filter.Status == "" || filter.Status == StatusActive {
 		where = append(where, "(e.valid_until IS NULL OR e.valid_until = '' OR e.valid_until > ?)")
-		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
+		args = append(args, now.Format(time.RFC3339Nano))
 	}
 	if filter.Kind != "" {
 		where = append(where, "e.kind = ?")

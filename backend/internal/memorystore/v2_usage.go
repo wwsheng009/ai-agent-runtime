@@ -87,30 +87,41 @@ func (s *Store) RecordExposure(ctx context.Context, exposure Exposure) (Exposure
 	}
 	defer func() { _ = tx.Rollback() }()
 	useCounts := kind == UsageCited || kind == UsageRead
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, usedAt)
+	if err != nil {
+		return result, err
+	}
 	for _, id := range ids {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(1) FROM memory_entries WHERE id = ? AND project_key = ?
-`, id, s.cfg.ProjectKey).Scan(&exists); err != nil {
-			return result, err
-		}
-		if exists == 0 {
+		var tenantID, scopeKind, scopeKey string
+		lookupArgs := append([]interface{}{id}, scopeArgs...)
+		err := tx.QueryRowContext(ctx, `
+SELECT tenant_id, scope_kind, scope_key
+FROM memory_entries WHERE id = ? AND `+scopePredicate+`
+`, lookupArgs...).Scan(&tenantID, &scopeKind, &scopeKey)
+		if err == sql.ErrNoRows {
 			result.Skipped++
 			continue
 		}
+		if err != nil {
+			return result, err
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_usage (id, project_key, memory_id, session_id, turn_id, message_id, used_at, use_kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO memory_usage (
+    id, project_key, memory_id, session_id, turn_id, message_id, used_at, use_kind,
+    tenant_id, scope_kind, scope_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, "usage_"+uuid.NewString(), s.cfg.ProjectKey, id, sessionID, nullableString(exposure.TurnID),
-			nullableString(exposure.MessageID), usedAt.Format(time.RFC3339Nano), string(kind)); err != nil {
+			nullableString(exposure.MessageID), usedAt.Format(time.RFC3339Nano), string(kind),
+			tenantID, scopeKind, scopeKey); err != nil {
 			return result, err
 		}
 		result.Recorded++
 		if useCounts {
+			updateArgs := append([]interface{}{usedAt.Format(time.RFC3339Nano), id}, scopeArgs...)
 			if _, err := tx.ExecContext(ctx, `
 UPDATE memory_entries SET use_count = use_count + 1, last_used_at = ?
-WHERE id = ? AND project_key = ?
-`, usedAt.Format(time.RFC3339Nano), id, s.cfg.ProjectKey); err != nil {
+WHERE id = ? AND `+scopePredicate+`
+`, updateArgs...); err != nil {
 				return result, err
 			}
 			result.UseCounted++
@@ -134,8 +145,12 @@ func (s *Store) ListUsage(ctx context.Context, filter UsageFilter) ([]UsageRecor
 	if limit > 500 {
 		limit = 500
 	}
-	where := []string{"e.project_key = ?"}
-	args := []interface{}{s.cfg.ProjectKey}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "e", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	where := []string{scopePredicate}
+	args := append([]interface{}(nil), scopeArgs...)
 	if id := strings.TrimSpace(filter.MemoryID); id != "" {
 		where = append(where, "u.memory_id = ?")
 		args = append(args, id)

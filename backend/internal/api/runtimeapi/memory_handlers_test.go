@@ -1903,3 +1903,62 @@ func TestMemoryAPIEvidenceAndExtractionDiagnosticsAreAdminOnly(t *testing.T) {
 	require.Equal(t, 1, diagnosticsResponse.Count)
 	require.Equal(t, "ignored_schema", diagnosticsResponse.Items[0].Reason)
 }
+func TestMemoryAPIRecordsScopeIsolation(t *testing.T) {
+	workspace := t.TempDir()
+	_, router := newMemoryTestRouter(t, workspace)
+
+	create := func(owner, text string) memoryRecordDTO {
+		t.Helper()
+		body := fmt.Sprintf(`{"text":%q,"kind":"reference","scope_kind":"user","owner_id":%q}`, text, owner)
+		req := httptest.NewRequest(http.MethodPost, "/api/runtime/memory/records", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var record memoryRecordDTO
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&record))
+		require.Equal(t, "user", record.ScopeKind)
+		require.Equal(t, owner, record.OwnerID)
+		return record
+	}
+
+	alice := create("alice", "alice API scoped marker")
+	bob := create("bob", "bob API scoped marker")
+
+	list := func(owner string) []memoryRecordDTO {
+		t.Helper()
+		target := "/api/runtime/memory/records?status=active"
+		if owner != "" {
+			target += "&owner_id=" + url.QueryEscape(owner)
+		}
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var response memoryRecordListResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&response))
+		return response.Items
+	}
+
+	require.Empty(t, list(""))
+	aliceItems := list("alice")
+	require.Len(t, aliceItems, 1)
+	require.Equal(t, alice.ID, aliceItems[0].ID)
+	bobItems := list("bob")
+	require.Len(t, bobItems, 1)
+	require.Equal(t, bob.ID, bobItems[0].ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records/"+alice.ID+"?owner_id=alice", nil)
+	req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/memory/records/"+alice.ID+"?owner_id=bob", nil)
+	req.Header.Set("X-Skills-Admin-Token", "memory-admin")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}

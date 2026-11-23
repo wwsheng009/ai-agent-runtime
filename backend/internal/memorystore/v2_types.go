@@ -16,6 +16,9 @@ const (
 	ScopeProject Scope = "project"
 	ScopeUser    Scope = "user"
 	ScopeProfile Scope = "profile"
+	ScopeAgent   Scope = "agent"
+	ScopeSession Scope = "session"
+	ScopeTask    Scope = "task"
 )
 
 type Status string
@@ -116,6 +119,12 @@ const (
 type Record struct {
 	ID             string   `json:"id"`
 	Scope          Scope    `json:"scope"`
+	ScopeKind      Scope    `json:"scope_kind,omitempty"`
+	ScopeKey       string   `json:"scope_key,omitempty"`
+	TenantID       string   `json:"tenant_id,omitempty"`
+	OwnerID        string   `json:"owner_id,omitempty"`
+	AgentID        string   `json:"agent_id,omitempty"`
+	TaskID         string   `json:"task_id,omitempty"`
 	ProjectKey     string   `json:"project_key"`
 	Kind           string   `json:"kind"`
 	Status         Status   `json:"status"`

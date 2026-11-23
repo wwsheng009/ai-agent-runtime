@@ -53,13 +53,21 @@ func (s *Store) RevalidateRecord(ctx context.Context, id string) (Record, error)
 		// avoid immediately marking the just-verified row stale again.
 		nextRevalidate = nil
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionWrite, now)
+	if err != nil {
+		return Record{}, err
+	}
+	revalidateArgs := []interface{}{
+		now.Format(time.RFC3339Nano), nextRevalidate, now.Format(time.RFC3339Nano), record.ID,
+	}
+	revalidateArgs = append(revalidateArgs, scopeArgs...)
+	revalidateArgs = append(revalidateArgs, record.Revision)
 	res, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET freshness_status = 'fresh', last_verified_at = ?, stale_reason = NULL,
     revalidate_after = ?, revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = 'active'
-`, now.Format(time.RFC3339Nano), nextRevalidate, now.Format(time.RFC3339Nano),
-		record.ID, s.cfg.ProjectKey, record.Revision)
+WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = 'active'
+`, revalidateArgs...)
 	if err != nil {
 		return Record{}, err
 	}
@@ -109,15 +117,24 @@ func (s *Store) RestoreRecord(ctx context.Context, id string) (Record, error) {
 	if err := checkRecordSessionPurgeFenceTx(ctx, tx, record); err != nil {
 		return Record{}, err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionWrite, now)
+	if err != nil {
+		return Record{}, err
+	}
+	restoreArgs := []interface{}{
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		record.ID,
+	}
+	restoreArgs = append(restoreArgs, scopeArgs...)
+	restoreArgs = append(restoreArgs, record.Revision)
 	res, err := tx.ExecContext(ctx, `
 	UPDATE memory_entries
 	SET status = 'active', deleted_at = NULL, freshness_status = 'fresh',
 	    last_verified_at = ?, revalidate_after = NULL, stale_reason = NULL,
 	    valid_from = ?, valid_until = NULL,
 	    revision = revision + 1, updated_at = ?
-WHERE id = ? AND project_key = ? AND revision = ? AND status = 'deleted'
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), record.ID, s.cfg.ProjectKey, record.Revision)
+WHERE id = ? AND `+scopePredicate+` AND revision = ? AND status = 'deleted'
+`, restoreArgs...)
 	if err != nil {
 		return Record{}, err
 	}
@@ -359,6 +376,11 @@ func (s *Store) ExportJSONL(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
+	entryArgs := append([]interface{}(nil), scopeArgs...)
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
@@ -366,9 +388,10 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
- FROM memory_entries WHERE project_key = ? ORDER BY created_at
-`, s.cfg.ProjectKey)
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+ FROM memory_entries WHERE `+scopePredicate+` ORDER BY created_at
+`, entryArgs...)
 	if err != nil {
 		return "", err
 	}
@@ -387,14 +410,18 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
 		return "", err
 	}
 	_ = rows.Close()
+	versionPredicate, versionArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
 	versionRows, err := db.QueryContext(ctx, `
 SELECT id, memory_id, version, project_key, scope_kind, scope_key, record_json,
        changed_by, change_reason, change_type, COALESCE(source_event_id, ''),
        valid_from, valid_until, created_at
 FROM memory_versions
-WHERE project_key = ?
+WHERE `+versionPredicate+`
 ORDER BY memory_id, version
-`, s.cfg.ProjectKey)
+`, versionArgs...)
 	if err != nil {
 		return "", err
 	}
@@ -436,6 +463,10 @@ func (s *Store) ExportMarkdown(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	scopePredicate, scopeArgs, err := s.memoryScopeVisibility(ctx, "", ScopePermissionRead, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
 	rows, err := db.QueryContext(ctx, `
 SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        confidence, sensitivity, pinned, retention_class, source_kind, source_session_id,
@@ -443,9 +474,10 @@ SELECT id, scope, project_key, kind, status, text, normalized_text, tags_json,
        source_turn_id, source_refs_json, content_hash, supersedes_id, revision,
        created_at, updated_at, last_used_at, use_count, valid_from, valid_until,
        freshness_status, last_verified_at, revalidate_after, stale_reason,
-       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived
- FROM memory_entries WHERE project_key = ? ORDER BY created_at, id
-`, s.cfg.ProjectKey)
+       deleted_at, metadata_json, title, summary, canonical_id, superseded_by, archived,
+       tenant_id, owner_id, agent_id, task_id, scope_kind, scope_key
+ FROM memory_entries WHERE `+scopePredicate+` ORDER BY created_at, id
+`, scopeArgs...)
 	if err != nil {
 		return "", err
 	}

@@ -10,6 +10,7 @@ package memorystore
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
@@ -78,6 +79,10 @@ type Config struct {
 	Mode       string
 	StorePath  string
 	ProjectKey string
+	// Scope is the store's default caller identity. Empty values keep the
+	// legacy project-only behavior; ProjectKey is filled from StorePath/root
+	// when omitted.
+	Scope ScopeContext
 
 	// DisableManual keeps the existing manual note path closed when v2 is on.
 	DisableManual bool
@@ -197,6 +202,14 @@ type AppendNoteOptions struct {
 	Kind   string
 	Scope  string
 	Pinned *bool
+	// Scope identity for user/agent/session/task records. Empty fields fall
+	// back to the store's configured ScopeContext.
+	TenantID  string
+	OwnerID   string
+	AgentID   string
+	TaskID    string
+	ScopeKind string
+	ScopeKey  string
 	// ID optional; generated when empty.
 	ID       string
 	Archived bool
@@ -204,8 +217,14 @@ type AppendNoteOptions struct {
 	CreatedAt time.Time
 }
 
-// Append writes one note to durable storage.
+// Append writes one note to durable storage using the store's default scope.
 func (s *Store) Append(opts AppendNoteOptions) (Note, error) {
+	return s.AppendWithContext(context.Background(), opts)
+}
+
+// AppendWithContext writes one note under an explicit caller scope. In Mode=off
+// the scope is advisory and the legacy JSONL behavior is unchanged.
+func (s *Store) AppendWithContext(ctx context.Context, opts AppendNoteOptions) (Note, error) {
 	if s == nil {
 		return Note{}, fmt.Errorf("memorystore: store is nil")
 	}
@@ -216,7 +235,7 @@ func (s *Store) Append(opts AppendNoteOptions) (Note, error) {
 		return Note{}, fmt.Errorf("memorystore: refusing to store secret-shaped content (%s)", rule)
 	}
 	if s != nil && s.v2Configured() {
-		note, err := s.appendV2(opts)
+		note, err := s.appendV2(ctx, opts)
 		if err == nil {
 			return note, nil
 		}
@@ -419,12 +438,15 @@ func (s *Store) searchLegacy(opts SearchOptions) ([]SearchHit, error) {
 
 // InjectOptions configures context injection selection.
 type InjectOptions struct {
-	Query         string
-	Limit         int
-	TokenBudget   int
-	SessionID     string
-	TurnID        string
-	ProjectKey    string
+	Query       string
+	Limit       int
+	TokenBudget int
+	SessionID   string
+	TurnID      string
+	ProjectKey  string
+	// Scope optionally selects the caller visibility chain for this injection
+	// pass. Empty keeps the store's default project scope.
+	Scope         ScopeContext
 	Mode          string
 	InjectionMode string
 	Now           time.Time
