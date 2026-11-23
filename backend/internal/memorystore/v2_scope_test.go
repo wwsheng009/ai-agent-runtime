@@ -277,7 +277,7 @@ func TestMemoryScopeSchemaAndBackfillRepair(t *testing.T) {
 	store := newScopedTestStore(t, "scope-backfill", "")
 	version, err := store.SchemaVersion()
 	require.NoError(t, err)
-	require.Equal(t, 24, version)
+	require.Equal(t, 25, version)
 
 	record, err := store.Append(AppendNoteOptions{Text: "backfill marker"})
 	require.NoError(t, err)

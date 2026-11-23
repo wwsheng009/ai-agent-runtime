@@ -1130,6 +1130,18 @@ CREATE INDEX idx_memory_scope_grants_scope
   ON memory_scope_grants(tenant_id, project_key, scope_kind, scope_key, permission);
 `,
 		},
+		{
+			Version: 25,
+			Name:    "memory_v25_injection_candidate_indexes",
+			UpSQL: `
+CREATE INDEX idx_memory_entries_scope_recent
+  ON memory_entries(tenant_id, project_key, scope_kind, scope_key, status, updated_at DESC, id DESC);
+CREATE INDEX idx_memory_entries_scope_pinned
+  ON memory_entries(tenant_id, project_key, scope_kind, scope_key, status, pinned, updated_at DESC, id DESC);
+CREATE INDEX idx_memory_entries_scope_source_kind
+  ON memory_entries(tenant_id, project_key, scope_kind, scope_key, status, LOWER(source_kind), updated_at DESC, id DESC);
+`,
+		},
 	}
 	if err := migrate.Apply(ctx, db, migrations); err != nil {
 		return fmt.Errorf("memory v2 schema: %w", err)

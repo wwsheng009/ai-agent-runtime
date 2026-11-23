@@ -104,7 +104,7 @@ func TestCoreMemoryCandidateActivationAndArchive(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	version, err := store.SchemaVersion()
 	require.NoError(t, err)
-	require.Equal(t, 24, version)
+	require.Equal(t, 25, version)
 
 	source, err := store.Append(AppendNoteOptions{
 		Text: "The runtime keeps memory writes behind a durable receipt.",
