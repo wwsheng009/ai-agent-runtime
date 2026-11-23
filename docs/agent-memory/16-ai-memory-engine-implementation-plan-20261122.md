@@ -2107,4 +2107,4 @@ ok   github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands
 - G3 代码与测试已落地，但门禁仍受 G1 FTS 同步、G2 tenant、G4 高风险 supersede 依赖限制；
 - G3.5 仍按 `18` 的未完成清单保持部分实施；
 - G0-5 仍未执行，真实 dogfood 库未读取/恢复；
-- G1-0 driver 能力已解决（`sqlitedriver/register_fts5.go` 在主线自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 索引/同步/BM25（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）与有界注入候选（`22c4d03a`）已提交；基准与多值/G2 scope 待补，G1 仍未关闭。
+- G1-0 driver 能力已解决（`sqlitedriver/register_fts5.go` 在主线自动注册 ncruces FTS5 扩展，探针返回 `fts_available`）；FTS 索引/同步/BM25（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）与有界注入候选（`22c4d03a`）已提交；1k/10k 基准显示延迟仍近线性，需索引优化；多值/G2 scope 与 100k 待补，G1 仍未关闭。

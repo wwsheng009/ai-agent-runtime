@@ -130,6 +130,15 @@ go test ./internal/memorystore \
 
 测试覆盖 450 条无关 active 记录 + 1 条 query needle + pinned 记录；选区保留 pinned/needle，`CandidateCount <= 300`。
 
+规模基准（`-benchtime=5x`，wall time，seed 不计时）：
+
+```text
+BenchmarkSelectForInjectV2BoundedCandidates/records-1000-2   5   4.05 ms/op   CandidateCount <= 300
+BenchmarkSelectForInjectV2BoundedCandidates/records-10000-2  5  35.22 ms/op   CandidateCount <= 300
+```
+
+结论：候选数量已被限制在 300 内，但加载延迟仍随 active corpus 近线性增长（1k→10k 约 8.7x），说明 pinned/manual 查询仍可能走表扫描。G1-3 的“候选数量有界”已达成，“延迟不随全表线性增长”尚未达成，需要 pinned/source_kind 组合索引或 SQL 计划复核。
+
 关键包构建通过：memorystore、runtimeapi、toolkit/tools、commands。
 `cmd/aicli` / `cmd/runtime-server` 的完整构建当前受主工作区未完成的 supervision/team 改动阻塞，不属于本切片。
 
@@ -144,7 +153,7 @@ go test ./internal/memorystore \
 | `memory_search`/HTTP/CLI 使用同一检索 | ✅ | 均调用 `SearchRecords`；定向测试通过 |
 | 自动抽取记忆在 CLI/HTTP/tool 可见 | ✅ | 现有 source-kind/active 测试通过 |
 | 精确标识符/CJK/路径/函数名/版本号 | ✅（store 层） | `TestMemoryFTSExactIdentifierAndCJKRSearch` |
-| 注入路径不全表加载 + 基准 | 🟡 | `loadInjectableCandidates` 已提交，450 条记录测试通过；缺 10k/100k 基准 |
+| 注入路径不全表加载 + 基准 | 🟡 | 候选数有界（<=300）且有 1k/10k 基准；延迟仍近线性（4.05→35.22 ms/op），需索引/计划优化；100k 未跑 |
 | 多 status/kind/tags 与 scope 过滤 | ❌ | 当前 SearchQuery 仍单值；G2 未实施 |
 | 三端同一 corpus 端到端证据 | 🟡 | 定向测试通过；尚无单一 corpus 证据包 |
 
@@ -152,7 +161,7 @@ go test ./internal/memorystore \
 
 ## 4. 后续
 
-1. 补 10k/100k benchmark 与 why-not 截断证据；
+1. 优化 pinned/manual 候选查询的索引/计划，使 10k corpus 延迟不再近线性；补 100k 与 why-not 截断证据；
 2. 扩展多 status/kind/tags 结构化过滤，接入 G2 scope；
 3. 建立 CLI/HTTP/tool 同一 corpus 的端到端测试；
 4. 补 win7compat 构建验证；
