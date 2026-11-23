@@ -10,7 +10,7 @@
 
 - G3（记录版本、回滚、时间点查询）与 G3.5（Core Memory）已有代码和测试，并已提交到 `main`（`8513f579`/`a9c7a461`/`eb413e1f`）；
 - G0 代码闭环基本落地，但 **G0-5 真实 dogfood 恢复未执行**；
-- G1 检索基础已提交：FTS5 driver（`91972cb5`）、FTS 索引/同步/BM25/fallback（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）、有界注入候选（`22c4d03a`）、候选查询索引（`72b275ce`）、多值过滤（`0443f6ad`）；1k/10k/100k 性能基准已记录，HTTP/CLI/tool 多值接线与质量证据待补；
+- G1 检索基础已提交：FTS5 driver（`91972cb5`）、FTS 索引/同步/BM25/fallback（`8ddd48c1`）、统一 `SearchRecords`（`c8acdc30`）、有界注入候选（`22c4d03a`）、候选查询索引（`72b275ce`）、store-level 多值过滤（`0443f6ad`）与 `memory_search` 多值接线（`5d972874`）；1k/10k/100k 性能基准已记录，HTTP/CLI 多值接线与质量证据待补；
 - G2 scope 隔离主要实现已提交（`a4fca327`）；jobs/digests/summaries/export/import/purge/audit 与 runtime-server 多 workspace 证据仍待补；G4/G5 未实施；
 - API/CLI 定向测试此前在宿主资源恢复后通过；本次当前工作区 API 重跑被未提交的 `internal/supervision` 签名漂移阻塞；FTS driver 扩展与 FTS 实现均已提交并通过 memory 包测试。
 
@@ -36,7 +36,7 @@
 |---|---|---|---|
 | Memory v2 主干 | ✅ 可用 | `memorystore` + `memoryruntime` + `memoryassembly` + `contextmgr` + API/CLI/Web；capture receipt → extract → consolidate → summary → inject → usage/citation | 属于既有项目级能力，不等于参考设计全量验收 |
 | G0 运行时闭环 | 🟡 代码/临时库证据已落地 | `16` §19.1–19.10：status、backlog 诊断、job operator、replay-preview、deadline repair、active-session capture | **G0-5 未执行**：未对真实 backlog 做只读分类、dry-run 与受控恢复；无真实 `memory_entries > 0`、v2 job succeeded、跨会话注入证据 |
-| G1 检索基础 | 🟡 部分实施（FTS5 + 统一检索 + 有界注入） | `91972cb5` FTS5 driver；`8ddd48c1` FTS 索引/同步/BM25/fallback；`c8acdc30` `SearchRecords` 统一 HTTP/CLI/tool；`22c4d03a` 有界注入候选；`72b275ce` 候选查询索引；`2404cd83` 实际 backend label；`0443f6ad` store-level 多值过滤；win7compat 全量 memorystore 通过；证据见 `21` | v25 后 1k/10k/100k 候选查询为 `2.61/2.94/9.54 ms/op`，覆盖索引且无临时 B-tree；仍缺 HTTP/CLI/tool 多值接线与三端同一 corpus 证据；不能宣称 G1 关闭 |
+| G1 检索基础 | 🟡 部分实施（FTS5 + 统一检索 + 有界注入） | `91972cb5` FTS5 driver；`8ddd48c1` FTS 索引/同步/BM25/fallback；`c8acdc30` `SearchRecords`；`22c4d03a` 有界注入候选；`72b275ce` 候选查询索引；`2404cd83` 实际 backend label；`0443f6ad` store-level 多值过滤；`5d972874` tool 多值；win7compat 全量通过；证据见 `21` | v25 后 1k/10k/100k 候选查询为 `2.61/2.94/9.54 ms/op`，覆盖索引且无临时 B-tree；仍缺 HTTP/CLI 多值接线与三端同一 corpus 证据；不能宣称 G1 关闭 |
 | G2 Scope 隔离 | 🟡 部分实施（已提交 `a4fca327`） | migration v24 scope 列/索引/backfill；`v2_scope.go` ScopeContext/grants/fail-closed visibility；list/search/FTS/usage/versions/governance/API 接入；7 个 scope 测试；证据见 `22` | jobs/digests/summaries/export/import/purge/audit 未逐一证明；runtime-server 多 workspace 证据未记录；不能宣称 G2 关闭 |
 | G3 版本/回滚/时间 | ✅ 代码级实现（已提交 `8513f579`） | migration v20 `memory_versions`（append-only trigger）、v21 purge guard；`v2_versions.go:243/303/514`：`ListRecordVersionsPage`、`ListRecordsAsOf`、`RollbackRecord`；HTTP `/memory/records/{id}/versions`、`/rollback`；CLI `/memory history|versions`、`/memory rollback`；`v2_versions_test.go` 覆盖回滚、并发 revision、temporal as-of、purge fence | 证据见 `20`；门禁仍受 G1 检索验收、G2 尚未关闭的运营面、G4 高风险 supersede 依赖限制 |
 | G3.5 Core Memory + 预算 | 🟡 部分实施（已提交 `8513f579`/`a9c7a461`） | migration v22 `memory_core`（单 active partial index）、v23 `memory_core_usage`；`v2_core.go`；只读工具 `memory_core_get`；HTTP `/memory/core`、`/memory/cores`、`/memory/core/rebuild`、`/memory/core/usage`；CLI `/memory core`；selector Core 注入 + 分类预算最小切片 | 见 `18` §未完成：Core 与 summary/pinned 去重与失效、usage 的 session-generation purge、独立运行态状态面、task/procedure/reference prompt 分区、1k–2.5k Core 预算校准均未完成 |
@@ -49,8 +49,8 @@
 
 | 项 | 观测值 |
 |---|---|
-| memory 提交 | `8513f579` G0–G3.5 capabilities；`a9c7a461` Core citation/预算选项；`eb413e1f` onboarding preset；`91972cb5` FTS5 driver；`8ddd48c1` FTS 索引；`c8acdc30` 统一检索；`22c4d03a` 有界注入候选；`a4fca327` G2 scope 隔离；`72b275ce` v25 候选查询索引；`2404cd83` 实际 backend label；`0443f6ad` store-level 多值过滤；`0bfb0450` CLI 测试 |
-| `main` HEAD | `0443f6ad`（store-level 多值过滤；v25 在 `72b275ce`，G2 证据在 `d11ee26c`） |
+| memory 提交 | `8513f579` G0–G3.5 capabilities；`a9c7a461` Core citation/预算选项；`eb413e1f` onboarding preset；`91972cb5` FTS5 driver；`8ddd48c1` FTS 索引；`c8acdc30` 统一检索；`22c4d03a` 有界注入候选；`a4fca327` G2 scope 隔离；`72b275ce` v25 候选查询索引；`2404cd83` 实际 backend label；`0443f6ad` store-level 多值过滤；`5d972874` tool 多值过滤；`0bfb0450` CLI 测试 |
+| `main` HEAD | `5d972874`（tool 多值过滤；v25 在 `72b275ce`，G2 证据在 `d11ee26c`） |
 | `git status --short` | 约 150 项（本轮复核期间；主要为 team/workspace/suspension/analytics/前端、supervision 及文档工作区改动；并发编辑持续变化，应以实时命令结果为准） |
 | 已提交 memory 变更 | 首批 98 文件 `+17678 / −530`，另有 Core citation 4 文件与 onboarding 3 文件 |
 | memory 工作区状态 | G2 scope 代码已随 `a4fca327`、v25 候选查询索引已随 `72b275ce` 提交；当前未见 `backend/internal/memorystore` 的未提交跟踪改动 |
@@ -155,7 +155,7 @@ ok  github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi  2.404s
 
 先前快照中关键包曾构建通过：memorystore/runtime/assembly、contextmgr、config、runtimeapi、toolkit/tools、tools、policy、commands、agent、`cmd/aicli`、`cmd/runtime-server`；本次当前工作区 API 重跑未进入测试阶段，先被未提交的 `internal/supervision` 签名漂移阻塞。
 
-判定的边界：上述结果仅覆盖临时 SQLite fixture；FTS driver、索引/同步、BM25 排序、LIKE fallback、统一 `RecordSearchQuery`/`SearchRecords`、store-level 多值过滤、win7compat 全量测试、1k/10k/100k 基准与实际 backend label 均已提交/验证，但 HTTP/CLI/tool 多值接线、三端同一 corpus 质量证据仍不足，因此 G1 不因测试通过而关闭。
+判定的边界：上述结果仅覆盖临时 SQLite fixture；FTS driver、索引/同步、BM25 排序、LIKE fallback、统一 `RecordSearchQuery`/`SearchRecords`、store-level 多值过滤、tool 多值接线、win7compat 全量测试、1k/10k/100k 基准与实际 backend label 均已提交/验证，但 HTTP/CLI 多值接线、三端同一 corpus 质量证据仍不足，因此 G1 不因测试通过而关闭。
 
 本次核对在当时的 `HEAD=72b275ce`（G2 代码基线为 `a4fca327`，v25 索引已提交）追加验证；当前 `HEAD` 已推进到 `0443f6ad`。
 
@@ -194,7 +194,7 @@ FAIL（当前未提交的 internal/supervision 签名漂移导致编译失败，
 
 | 风险 | 影响 |
 |---|---|
-| G1 检索验收未完成 | `RecordSearchQuery`/`SearchRecords`、FTS5/BM25、CLI/HTTP/tool 单值统一入口、store-level 多值过滤、win7compat 全量测试、1k/10k/100k 基准与实际 backend label 已存在；仍缺 HTTP/CLI/tool 多值接线、三端同一 corpus 质量证据 |
+| G1 检索验收未完成 | `RecordSearchQuery`/`SearchRecords`、FTS5/BM25、CLI/HTTP/tool 单值统一入口、store-level 与 tool 多值过滤、win7compat 全量测试、1k/10k/100k 基准与实际 backend label 已存在；仍缺 HTTP/CLI 多值接线、三端同一 corpus 质量证据 |
 | FTS 索引是派生数据 | 迁移/重建/损坏恢复需依赖 store 的 ensure/rebuild 逻辑，不能当作事实源 |
 | G0-5 未执行 | 无法证明真实库 backlog 可恢复、自动记忆可注入 |
 | 宿主分页文件不足 | 大包集成测试偶发编译/链接失败；需分步、限并发验证 |
@@ -205,7 +205,7 @@ FAIL（当前未提交的 internal/supervision 签名漂移导致编译失败，
 ## 7. 建议执行顺序
 
 1. **已完成**：G3/G3.5 提交、Core citation、onboarding、证据文档与 API/CLI/tool 定向验证。
-2. **G1 收尾**：FTS 索引、driver、`SearchRecords`、有界注入候选、v25 查询索引、1k/10k/100k 基准、实际 backend label、store-level 多值过滤与 win7compat 验证已完成；下一步补 HTTP/CLI/tool 多值接线与三端同一 corpus 证据。
+2. **G1 收尾**：FTS 索引、driver、`SearchRecords`、有界注入候选、v25 查询索引、1k/10k/100k 基准、实际 backend label、store-level 多值过滤、tool 多值与 win7compat 验证已完成；下一步补 HTTP/CLI 多值接线与三端同一 corpus 证据。
 3. **G2 收尾**：主要 scope 列/backfill/fail-closed 读写与负向测试已提交；下一步补 jobs/digests/summaries/export/import/purge/audit 的 scope 审计与 runtime-server 多 workspace 证据。
 4. **G0-5**：先只读诊断 + `replay-preview` + `jobDeadlineRepair` dry-run，备份后再受控恢复。
 5. **文档/工作区收尾**：提交本文件 `19` 与 `21` 的 follow-up，并将 supervision/team/agent 等并发改动分开处理；`16/20/22/README` 已在 `d11ee26c` 提交，v25 已在 `72b275ce` 提交。

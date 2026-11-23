@@ -14,6 +14,7 @@
 - `72b275ce`：migration v25 为 recent/pinned/source_kind 候选查询增加 covering index。
 - `2404cd83`：`RecordPage.SearchBackend` 记录实际检索路径（fts5/like_fallback/recent/as_of/legacy_jsonl），FTS 无结果降级到 LIKE 时不再误标为 fts5。
 - `0443f6ad`：`RecordSearchQuery`/`RecordFilter` 支持多 status/kind/tags；SQL 使用 IN 与 `json_each` 全标签匹配，legacy JSONL 同样生效。
+- `5d972874`：`memory_search` 工具接线多值 statuses/kinds/tags（数组或逗号分隔）。
 
 未关闭原因：
 
@@ -173,7 +174,7 @@ win7compat 不走 `ext/fts5` 注册，而由 pinned driver 的内嵌 Wasm SQLite
 | 自动抽取记忆在 CLI/HTTP/tool 可见 | ✅ | 现有 source-kind/active 测试通过 |
 | 精确标识符/CJK/路径/函数名/版本号 | ✅（store 层） | `TestMemoryFTSExactIdentifierAndCJKRSearch` |
 | 注入路径不全表加载 + 基准 | ✅ | 候选数有界（<=300），1k/10k/100k 为 2.61/2.94/9.54 ms/op，covering index + 无临时排序 |
-| 多 status/kind/tags 与 scope 过滤 | 🟡 | G2 scope 已落地；store-level 多值已提交，HTTP/CLI/tool 的多值参数尚未接线 |
+| 多 status/kind/tags 与 scope 过滤 | 🟡 | G2 scope 已落地；store-level 多值与 `memory_search` 工具已接线，HTTP/CLI 多值参数尚未接线 |
 | 三端同一 corpus 端到端证据 | 🟡 | 定向测试通过；尚无单一 corpus 证据包 |
 
 ---
@@ -181,6 +182,6 @@ win7compat 不走 `ext/fts5` 注册，而由 pinned driver 的内嵌 Wasm SQLite
 ## 4. 后续
 
 1. 补 why-not 截断证据；
-2. 将多 status/kind/tags 接到 HTTP/CLI/tool 参数（store-level 已完成）；
+2. 将多 status/kind/tags 接到 HTTP/CLI 参数（store-level 与 tool 已完成）；
 3. 建立 CLI/HTTP/tool 同一 corpus 的端到端测试；
 4. 上述完成后才可关闭 G1。
