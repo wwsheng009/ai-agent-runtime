@@ -34,6 +34,7 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 		Source:              SourceParentInherit,
 		Warnings:            append([]string(nil), task.Warnings...),
 	}
+	reasoningExplicit := false
 
 	difficulty, difficultySource, difficultyWarnings, err := resolveDifficulty(r.Config, task)
 	if err != nil {
@@ -46,13 +47,19 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 
 	profile, source, ok := routeProfileForTask(r.Config, task, difficulty)
 	if ok {
+		if ProfileReasoningEffort(profile) != "" {
+			reasoningExplicit = true
+		}
 		if err := r.applyRouteProfile(&decision, profile, source, difficulty); err != nil {
 			return RouteDecision{}, err
 		}
 	}
 
 	r.applyExplicitOverrides(&decision, task)
-	if err := r.finalizeDecision(parent, &decision); err != nil {
+	if effort := NormalizeReasoningEffort(task.ReasoningEffort); effort != "" && AllowExplicitReasoningOverride(r.Config) {
+		reasoningExplicit = true
+	}
+	if err := r.finalizeDecision(parent, &decision, reasoningExplicit); err != nil {
 		return RouteDecision{}, err
 	}
 	return decision, nil
@@ -72,6 +79,7 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) (RouteDe
 		Source:              SourceDisabled,
 		Warnings:            append([]string(nil), task.Warnings...),
 	}
+	reasoningExplicit := false
 	if difficulty, ok := NormalizeDifficulty(task.Difficulty); ok {
 		decision.Difficulty = difficulty
 		decision.DifficultySource = "explicit"
@@ -104,6 +112,7 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) (RouteDe
 		if AllowExplicitReasoningOverride(r.Config) {
 			decision.ReasoningEffort = effort
 			decision.Source = SourceExplicitOverride
+			reasoningExplicit = true
 		} else {
 			decision.Warnings = append(decision.Warnings, "explicit_reasoning_override_denied")
 		}
@@ -114,7 +123,7 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) (RouteDe
 	if task.Timeout > 0 {
 		decision.Timeout = task.Timeout
 	}
-	if err := r.applyReasoningCompatibility(&decision); err != nil {
+	if err := r.applyReasoningCompatibility(&decision, reasoningExplicit); err != nil {
 		return RouteDecision{}, err
 	}
 	return decision, nil
@@ -493,7 +502,7 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func (r Resolver) finalizeDecision(parent ParentDefaults, decision *RouteDecision) error {
+func (r Resolver) finalizeDecision(parent ParentDefaults, decision *RouteDecision, reasoningExplicit bool) error {
 	inherit := InheritParentWhenMissing(r.Config)
 	if strings.TrimSpace(decision.Provider) == "" {
 		if inherit {
@@ -546,7 +555,7 @@ func (r Resolver) finalizeDecision(parent ParentDefaults, decision *RouteDecisio
 		return err
 	}
 
-	if err := r.applyReasoningCompatibility(decision); err != nil {
+	if err := r.applyReasoningCompatibility(decision, reasoningExplicit); err != nil {
 		return err
 	}
 	return nil
@@ -581,8 +590,16 @@ func (r Resolver) validateResolvedModel(parent ParentDefaults, decision *RouteDe
 	return fmt.Errorf("subagent route model unavailable: %s/%s", provider, model)
 }
 
-func (r Resolver) applyReasoningCompatibility(decision *RouteDecision) error {
+func (r Resolver) applyReasoningCompatibility(decision *RouteDecision, reasoningExplicit bool) error {
 	if !ValidateModelCapabilities(r.Config) || r.Catalog == nil || decision == nil || decision.ReasoningEffort == "" {
+		return nil
+	}
+	// Inherited reasoning is already live-proven by the parent request. Static
+	// model cards can lag the provider (a model may accept reasoning even when
+	// declared reasoning_model=false), so only an explicitly selected child
+	// effort is subject to the compatibility policy. Otherwise a child using
+	// the same provider/model/effort as its parent would silently lose it.
+	if !reasoningExplicit {
 		return nil
 	}
 	supported, known := r.Catalog.SupportsReasoningEffort(decision.Provider, decision.Model, decision.ReasoningEffort)

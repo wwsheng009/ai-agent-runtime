@@ -110,6 +110,80 @@ func TestResolver_DisabledPreservesLegacyModelOverride(t *testing.T) {
 	assert.Equal(t, 1024, decision.MaxTokens)
 }
 
+// Regression: a child that inherits the parent's reasoning effort must not be
+// filtered by a stale/incorrect static model card. This is the real-world
+// mdkj/gpt-6.1-terra case: the provider accepts reasoning=max (the parent sends
+// it), while the model card still says reasoning_model=false. The child request
+// used to lose the inherited effort before reaching the adapter.
+func TestResolver_DisabledInheritsParentReasoningDespiteUnsupportedCatalog(t *testing.T) {
+	resolver := Resolver{
+		Catalog: testCatalog{
+			efforts: map[string]map[string]bool{
+				"mdkj/gpt-6.1-terra": {"low": true},
+			},
+		},
+	}
+	decision, err := resolver.Resolve(ParentDefaults{
+		Provider:        "mdkj",
+		Model:           "gpt-6.1-terra",
+		ReasoningEffort: "max",
+	}, TaskHint{})
+	require.NoError(t, err)
+	assert.Equal(t, "max", decision.ReasoningEffort)
+	assert.NotContains(t, decision.Warnings, "reasoning_effort_unsupported_ignored")
+}
+
+// Explicit child reasoning must still go through the compatibility policy even
+// on the routing-disabled path; only inherited values are exempt.
+func TestResolver_DisabledExplicitReasoningStillHonorsCatalog(t *testing.T) {
+	resolver := Resolver{
+		Config: &agentconfig.AICLISubagentRoutingConfig{
+			AllowExplicitReasoningOverride: true,
+		},
+		Catalog: testCatalog{
+			efforts: map[string]map[string]bool{
+				"mdkj/gpt-6.1-terra": {"low": true},
+			},
+		},
+	}
+	decision, err := resolver.Resolve(ParentDefaults{
+		Provider:        "mdkj",
+		Model:           "gpt-6.1-terra",
+		ReasoningEffort: "max",
+	}, TaskHint{ReasoningEffort: "high"})
+	require.NoError(t, err)
+	assert.Equal(t, "", decision.ReasoningEffort)
+	assert.Contains(t, decision.Warnings, "reasoning_effort_unsupported_ignored")
+}
+
+// Same inheritance rule on the routed path: when a profile changes only the
+// provider/model and leaves reasoning unset, the parent effort is inherited and
+// must not be statically filtered.
+func TestResolver_EnabledInheritsParentReasoningDespiteUnsupportedCatalog(t *testing.T) {
+	enabled := true
+	resolver := Resolver{
+		Config: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				DifficultyNormal: {Provider: "mdkj", Model: "gpt-6.1-terra"},
+			},
+		},
+		Catalog: testCatalog{
+			efforts: map[string]map[string]bool{
+				"mdkj/gpt-6.1-terra": {"low": true},
+			},
+		},
+	}
+	decision, err := resolver.Resolve(ParentDefaults{
+		Provider:        "parent-provider",
+		Model:           "parent-model",
+		ReasoningEffort: "max",
+	}, TaskHint{Difficulty: DifficultyNormal})
+	require.NoError(t, err)
+	assert.Equal(t, "max", decision.ReasoningEffort)
+	assert.NotContains(t, decision.Warnings, "reasoning_effort_unsupported_ignored")
+}
+
 func TestResolver_PreservesTaskWarnings(t *testing.T) {
 	resolver := Resolver{}
 	decision, err := resolver.Resolve(ParentDefaults{

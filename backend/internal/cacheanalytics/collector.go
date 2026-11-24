@@ -34,20 +34,24 @@ const DefaultMaxRequestsPerSession = 1000
 
 // inflightRequest 已开始未终态的请求登记（§6.2 输入事件）。
 type inflightRequest struct {
-	sessionID         string
-	parentSessionID   string
-	rootSessionID     string
-	subagentID        string
-	traceID           string
-	turnID            string
-	step              int
-	provider          string
-	model             string
-	stream            bool
-	startedAt         time.Time
-	cacheEpoch        int
-	promptCacheKey    string
-	promptFingerprint string
+	sessionID       string
+	parentSessionID string
+	rootSessionID   string
+	subagentID      string
+	traceID         string
+	turnID          string
+	step            int
+	provider        string
+	model           string
+	// requestedReasoningEffort / reasoningEffort 来自 llm.request.started：
+	// 前者是 loop 配置值，后者是实际构造进 LLMRequest 的 effort。
+	requestedReasoningEffort string
+	reasoningEffort          string
+	stream                   bool
+	startedAt                time.Time
+	cacheEpoch               int
+	promptCacheKey           string
+	promptFingerprint        string
 	// fork 前缀审计（P2-1' G3）：started 载荷携带，终态时随记录落库。
 	forkPrefixPreserved    *bool
 	forkSnapshotMessages   int
@@ -214,20 +218,22 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 		startedAt = c.now()
 	}
 	inflight := &inflightRequest{
-		sessionID:         sessionID,
-		parentSessionID:   payloadString(payload, "parent_session_id"),
-		rootSessionID:     payloadString(payload, "root_session_id"),
-		subagentID:        payloadString(payload, "subagent_id"),
-		traceID:           traceID,
-		turnID:            turnID,
-		step:              payloadInt(payload, "step"),
-		provider:          payloadString(payload, "provider"),
-		model:             payloadString(payload, "model"),
-		stream:            payloadString(payload, "stream_id") != "",
-		startedAt:         startedAt,
-		cacheEpoch:        payloadInt(payload, "prompt_cache_epoch"),
-		promptCacheKey:    payloadString(payload, "prompt_cache_key"),
-		promptFingerprint: payloadString(payload, "prompt_fingerprint"),
+		sessionID:                sessionID,
+		parentSessionID:          payloadString(payload, "parent_session_id"),
+		rootSessionID:            payloadString(payload, "root_session_id"),
+		subagentID:               payloadString(payload, "subagent_id"),
+		traceID:                  traceID,
+		turnID:                   turnID,
+		step:                     payloadInt(payload, "step"),
+		provider:                 payloadString(payload, "provider"),
+		model:                    payloadString(payload, "model"),
+		requestedReasoningEffort: payloadString(payload, "requested_reasoning_effort"),
+		reasoningEffort:          payloadString(payload, "reasoning_effort"),
+		stream:                   payloadString(payload, "stream_id") != "",
+		startedAt:                startedAt,
+		cacheEpoch:               payloadInt(payload, "prompt_cache_epoch"),
+		promptCacheKey:           payloadString(payload, "prompt_cache_key"),
+		promptFingerprint:        payloadString(payload, "prompt_fingerprint"),
 	}
 	// fork 前缀审计（P2-1' G3）：仅当 started 载荷带有该键时记录
 	//（nil 指针 = 非 fork 首请求，避免把"未观测"与 false 混为一谈）。
@@ -300,33 +306,35 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 
 	finishedAt := now
 	record := BuildTerminalRecord(TerminalRecordInput{
-		LLMRequestID:           llmRequestID,
-		SessionID:              inflight.sessionID,
-		ParentSessionID:        inflight.parentSessionID,
-		RootSessionID:          inflight.rootSessionID,
-		SubagentID:             inflight.subagentID,
-		TraceID:                inflight.traceID,
-		TurnID:                 inflight.turnID,
-		Step:                   inflight.step,
-		Provider:               inflight.provider,
-		Model:                  inflight.model,
-		Stream:                 inflight.stream,
-		Attempt:                1,
-		StartedAt:              inflight.startedAt,
-		FinishedAt:             finishedAt,
-		CacheEpoch:             inflight.cacheEpoch,
-		PromptCacheKey:         inflight.promptCacheKey,
-		PromptFingerprint:      inflight.promptFingerprint,
-		Payload:                payload,
-		ForkPrefixPreserved:    inflight.forkPrefixPreserved,
-		ForkSnapshotMessages:   inflight.forkSnapshotMessages,
-		ForkSnapshotTokens:     inflight.forkSnapshotTokens,
-		ForkPrefixKeptMessages: inflight.forkPrefixKeptMessages,
-		ContextMode:            inflight.contextMode,
-		ForkSnapshotHash:       inflight.forkSnapshotHash,
-		ParentPromptCacheKey:   inflight.parentPromptCacheKey,
-		CacheLineageMode:       inflight.cacheLineageMode,
-		TaskAttempt:            inflight.taskAttempt,
+		LLMRequestID:             llmRequestID,
+		SessionID:                inflight.sessionID,
+		ParentSessionID:          inflight.parentSessionID,
+		RootSessionID:            inflight.rootSessionID,
+		SubagentID:               inflight.subagentID,
+		TraceID:                  inflight.traceID,
+		TurnID:                   inflight.turnID,
+		Step:                     inflight.step,
+		Provider:                 inflight.provider,
+		Model:                    inflight.model,
+		RequestedReasoningEffort: inflight.requestedReasoningEffort,
+		ReasoningEffort:          inflight.reasoningEffort,
+		Stream:                   inflight.stream,
+		Attempt:                  1,
+		StartedAt:                inflight.startedAt,
+		FinishedAt:               finishedAt,
+		CacheEpoch:               inflight.cacheEpoch,
+		PromptCacheKey:           inflight.promptCacheKey,
+		PromptFingerprint:        inflight.promptFingerprint,
+		Payload:                  payload,
+		ForkPrefixPreserved:      inflight.forkPrefixPreserved,
+		ForkSnapshotMessages:     inflight.forkSnapshotMessages,
+		ForkSnapshotTokens:       inflight.forkSnapshotTokens,
+		ForkPrefixKeptMessages:   inflight.forkPrefixKeptMessages,
+		ContextMode:              inflight.contextMode,
+		ForkSnapshotHash:         inflight.forkSnapshotHash,
+		ParentPromptCacheKey:     inflight.parentPromptCacheKey,
+		CacheLineageMode:         inflight.cacheLineageMode,
+		TaskAttempt:              inflight.taskAttempt,
 	})
 	c.projector.append(&record)
 	c.publishRecordFinished(&record)
@@ -474,27 +482,29 @@ func (c *Collector) onSessionTerminal(event runtimeevents.Event) {
 		inflight := orphan.inflight
 		finishedAt := now
 		record := &CacheRequestRecord{
-			SchemaVersion:     SchemaVersion,
-			LLMRequestID:      orphan.id,
-			SessionID:         inflight.sessionID,
-			ParentSessionID:   inflight.parentSessionID,
-			RootSessionID:     inflight.rootSessionID,
-			SubagentID:        inflight.subagentID,
-			TraceID:           inflight.traceID,
-			TurnID:            inflight.turnID,
-			Step:              inflight.step,
-			Provider:          inflight.provider,
-			Model:             inflight.model,
-			Stream:            inflight.stream,
-			StartedAt:         inflight.startedAt,
-			FinishedAt:        &finishedAt,
-			DurationMS:        finishedAt.Sub(inflight.startedAt).Milliseconds(),
-			Status:            RequestStatusError,
-			ErrorCategory:     errorCategoryInterrupted,
-			CacheStatus:       CacheStatusError,
-			CacheEpoch:        inflight.cacheEpoch,
-			PromptCacheKey:    inflight.promptCacheKey,
-			PromptFingerprint: inflight.promptFingerprint,
+			SchemaVersion:            SchemaVersion,
+			LLMRequestID:             orphan.id,
+			SessionID:                inflight.sessionID,
+			ParentSessionID:          inflight.parentSessionID,
+			RootSessionID:            inflight.rootSessionID,
+			SubagentID:               inflight.subagentID,
+			TraceID:                  inflight.traceID,
+			TurnID:                   inflight.turnID,
+			Step:                     inflight.step,
+			Provider:                 inflight.provider,
+			Model:                    inflight.model,
+			RequestedReasoningEffort: inflight.requestedReasoningEffort,
+			ReasoningEffort:          inflight.reasoningEffort,
+			Stream:                   inflight.stream,
+			StartedAt:                inflight.startedAt,
+			FinishedAt:               &finishedAt,
+			DurationMS:               finishedAt.Sub(inflight.startedAt).Milliseconds(),
+			Status:                   RequestStatusError,
+			ErrorCategory:            errorCategoryInterrupted,
+			CacheStatus:              CacheStatusError,
+			CacheEpoch:               inflight.cacheEpoch,
+			PromptCacheKey:           inflight.promptCacheKey,
+			PromptFingerprint:        inflight.promptFingerprint,
 		}
 		c.projector.append(record)
 		c.persistRecord(record)

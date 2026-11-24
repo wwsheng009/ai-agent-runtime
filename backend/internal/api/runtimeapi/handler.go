@@ -9546,6 +9546,12 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		"model":         model,
 		"message_count": len(messages),
 	}
+	// 缓存页的 reasoning effort 观测：此路径直接把同一个值写入 LLMRequest，
+	// requested/effective 保持一致（additive 字段，旧读取方忽略即可）。
+	if requestedReasoning := strings.TrimSpace(reasoningEffort); requestedReasoning != "" {
+		requestPayload["requested_reasoning_effort"] = requestedReasoning
+		requestPayload["reasoning_effort"] = requestedReasoning
+	}
 	if promptLayoutPreview != "" {
 		requestPayload["prompt_layout_summary"] = promptLayoutPreview
 	}

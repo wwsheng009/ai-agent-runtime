@@ -26,7 +26,11 @@ type TerminalRecordInput struct {
 	Step            int
 	Provider        string
 	Model           string
-	Stream          bool
+	// RequestedReasoningEffort / ReasoningEffort 来自 llm.request.started：
+	// 前者是 loop 配置值，后者是实际进入 LLMRequest 的值（空串 = 未设置）。
+	RequestedReasoningEffort string
+	ReasoningEffort          string
+	Stream                   bool
 	// Attempt 重试次数；Collector 终态路径置 1，会话终止兜底路径保持 0（与 v1 一致）。
 	Attempt int
 	// StartedAt 来自 llm.request.started 事件（缺失时回退到终态时刻）。
@@ -72,25 +76,27 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 		rootSessionID = firstNonEmptyString(parentSessionID, in.SessionID)
 	}
 	record := CacheRequestRecord{
-		SchemaVersion:     SchemaVersion,
-		LLMRequestID:      in.LLMRequestID,
-		SessionID:         in.SessionID,
-		ParentSessionID:   parentSessionID,
-		RootSessionID:     rootSessionID,
-		SubagentID:        firstNonEmptyString(in.SubagentID, payloadString(payload, "subagent_id")),
-		TraceID:           in.TraceID,
-		TurnID:            in.TurnID,
-		Step:              in.Step,
-		Provider:          in.Provider,
-		Model:             in.Model,
-		Stream:            in.Stream,
-		Attempt:           in.Attempt,
-		StartedAt:         in.StartedAt,
-		FinishedAt:        &finishedAt,
-		DurationMS:        finishedAt.Sub(in.StartedAt).Milliseconds(),
-		CacheEpoch:        in.CacheEpoch,
-		PromptCacheKey:    in.PromptCacheKey,
-		PromptFingerprint: in.PromptFingerprint,
+		SchemaVersion:            SchemaVersion,
+		LLMRequestID:             in.LLMRequestID,
+		SessionID:                in.SessionID,
+		ParentSessionID:          parentSessionID,
+		RootSessionID:            rootSessionID,
+		SubagentID:               firstNonEmptyString(in.SubagentID, payloadString(payload, "subagent_id")),
+		TraceID:                  in.TraceID,
+		TurnID:                   in.TurnID,
+		Step:                     in.Step,
+		Provider:                 in.Provider,
+		Model:                    in.Model,
+		RequestedReasoningEffort: firstNonEmptyString(in.RequestedReasoningEffort, payloadString(payload, "requested_reasoning_effort")),
+		ReasoningEffort:          firstNonEmptyString(in.ReasoningEffort, payloadString(payload, "reasoning_effort")),
+		Stream:                   in.Stream,
+		Attempt:                  in.Attempt,
+		StartedAt:                in.StartedAt,
+		FinishedAt:               &finishedAt,
+		DurationMS:               finishedAt.Sub(in.StartedAt).Milliseconds(),
+		CacheEpoch:               in.CacheEpoch,
+		PromptCacheKey:           in.PromptCacheKey,
+		PromptFingerprint:        in.PromptFingerprint,
 	}
 	record.ForkPrefixPreserved = in.ForkPrefixPreserved
 	record.ForkSnapshotMessages = in.ForkSnapshotMessages

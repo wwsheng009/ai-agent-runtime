@@ -133,6 +133,8 @@ globalThis.fetch = function (input) {
       started_at: "2026-01-01T00:00:00Z",
       provider: "openai",
       model: "gpt-4o",
+      requested_reasoning_effort: "max",
+      reasoning_effort: (offset + i) % 2 === 0 ? "max" : "",
       status: "success",
       cache_status: "hit",
       usage: {},
@@ -168,6 +170,9 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(document.getElementById("cache-filter-model").innerHTML.indexOf('value="claude-sonnet"') >= 0, "model 应为会话级下拉选项");
   assert.match(requestsEl.innerHTML, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}/, "时间列应显示完整本地日期时间");
   assert.ok(document.getElementById("cache-filter-timezone").textContent.length > 0, "时间筛选应显示本地时区标识");
+  assert.ok(requestsEl.innerHTML.indexOf(">reasoning effort<") >= 0, "应显示 reasoning effort 列");
+  assert.ok(requestsEl.innerHTML.indexOf(">max<") >= 0, "应显示实际 reasoning effort");
+  assert.ok(requestsEl.innerHTML.indexOf("未发送") >= 0, "requested 存在但 effective 为空时应显示未发送");
 
   requestsEl.querySelector('[data-cache-page="next"]').dispatch("click");
   await tick();

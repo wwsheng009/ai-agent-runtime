@@ -151,6 +151,27 @@ function statusLabel(status) {
   }
 }
 
+// reasoningEffortLabel 缓存页只展示请求实际带上的 effort：
+//   - 有 effective 值：直接显示；
+//   - 只有 requested 值：说明配置了但请求未发送，显示"未发送"；
+//   - 两者都没有："-"（历史记录或未配置）。
+function reasoningEffortLabel(record) {
+  var effective = String(record && record.reasoning_effort || "").trim();
+  var requested = String(record && record.requested_reasoning_effort || "").trim();
+  if (effective) { return effective; }
+  if (requested) { return "未发送"; }
+  return "-";
+}
+
+function renderReasoningEffortCell(record) {
+  var effective = String(record && record.reasoning_effort || "").trim();
+  var requested = String(record && record.requested_reasoning_effort || "").trim();
+  var label = reasoningEffortLabel(record);
+  if (!requested || requested === effective) { return esc(label); }
+  var title = "requested: " + requested + " · effective: " + (effective || "未发送");
+  return '<span title="' + esc(title) + '">' + esc(label) + "</span>";
+}
+
 export function loadCacheAnalytics(force) {
   // 首次进入、强制刷新，或已渲染数据属于其他会话（切换会话发生在页签后台时
   // 由 syncCacheSession 记录）才拉取；同一会话内重复切页签不重复发请求。
@@ -611,6 +632,7 @@ function renderRequestsTable(requests, result) {
     rows += '<tr class="cache-row" data-request-id="' + esc(r.llm_request_id) + '">'
       + "<td>" + esc(fmtTime(r.started_at)) + "</td>"
       + "<td>" + esc((r.provider || "-") + "/" + (r.model || "-")) + "</td>"
+      + "<td>" + renderReasoningEffortCell(r) + "</td>"
       + "<td>" + esc(String(r.step || "-")) + "</td>"
       + "<td>" + renderChildSessionCell(r) + "</td>"
       + "<td>" + esc(r.status || "-") + "</td>"
@@ -626,11 +648,12 @@ function renderRequestsTable(requests, result) {
       + "</tr>";
   }
   return '<table class="cache-table"><thead><tr>'
-    + "<th>时间（本地）</th><th>provider/model</th><th>step</th><th>子会话</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
+    + "<th>时间（本地）</th><th>provider/model</th><th>reasoning effort</th><th>step</th><th>子会话</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + renderRequestPagination(result)
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
     + '<div class="cache-hint">「子会话」列标注该请求由子代理（subagent_spawn / subagent_spawn_batch）产生，鼠标悬停可看完整子会话与子代理 ID。</div>'
+    + '<div class="cache-hint">「reasoning effort」列显示本次请求实际发送的 effort；若配置了 requested effort 但请求未携带，显示「未发送」。</div>'
     + '<div class="cache-hint">首字/耗时显示"未采集"表示该请求没有观测到（非流式请求、历史记录或首个增量前失败），不代表 0ms。</div>'
     + '<div id="cache-request-detail"></div>';
 }
@@ -733,6 +756,10 @@ function renderRequestDetail(record) {
   lines.push(kv("trace_id", record.trace_id));
   lines.push(kv("turn_id", record.turn_id));
   lines.push(kv("step", record.step));
+  lines.push(kv("reasoning effort", reasoningEffortLabel(record)));
+  if (record.requested_reasoning_effort && record.requested_reasoning_effort !== record.reasoning_effort) {
+    lines.push(kv("requested reasoning effort", record.requested_reasoning_effort));
+  }
   lines.push(kv("状态", record.status + (record.error_category ? " (" + record.error_category + ")" : "")));
   lines.push(kv("缓存状态", statusLabel(record.cache_status)));
   lines.push(kv("cache_epoch", record.cache_epoch));

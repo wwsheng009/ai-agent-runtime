@@ -91,20 +91,24 @@ type SessionLineageLookup interface {
 
 // inflightRequest 已开始未终态的请求登记（会话终止时兜底为 interrupted）。
 type inflightRequest struct {
-	sessionID         string
-	parentSessionID   string
-	rootSessionID     string
-	subagentID        string
-	traceID           string
-	turnID            string
-	step              int
-	provider          string
-	model             string
-	stream            bool
-	startedAt         time.Time
-	cacheEpoch        int
-	promptCacheKey    string
-	promptFingerprint string
+	sessionID       string
+	parentSessionID string
+	rootSessionID   string
+	subagentID      string
+	traceID         string
+	turnID          string
+	step            int
+	provider        string
+	model           string
+	// requestedReasoningEffort / reasoningEffort 来自 llm.request.started：
+	// 前者是 loop 配置值，后者是实际构造进 LLMRequest 的 effort。
+	requestedReasoningEffort string
+	reasoningEffort          string
+	stream                   bool
+	startedAt                time.Time
+	cacheEpoch               int
+	promptCacheKey           string
+	promptFingerprint        string
 }
 
 // collector 订阅 runtime EventBus 并实时 UPSERT 分析库。
@@ -264,20 +268,22 @@ func (c *collector) onRequestStarted(event runtimeevents.Event) {
 		startedAt = c.now()
 	}
 	inflight := &inflightRequest{
-		sessionID:         sessionID,
-		parentSessionID:   lineage.ParentSessionID,
-		rootSessionID:     lineage.RootSessionID,
-		subagentID:        lineage.SubagentID,
-		traceID:           traceID,
-		turnID:            payloadString(payload, "logical_turn_id", "turn_id"),
-		step:              payloadInt(payload, "step"),
-		provider:          payloadString(payload, "provider"),
-		model:             payloadString(payload, "model"),
-		stream:            payloadString(payload, "stream_id") != "",
-		startedAt:         startedAt,
-		cacheEpoch:        payloadInt(payload, "prompt_cache_epoch"),
-		promptCacheKey:    payloadString(payload, "prompt_cache_key"),
-		promptFingerprint: payloadString(payload, "prompt_fingerprint"),
+		sessionID:                sessionID,
+		parentSessionID:          lineage.ParentSessionID,
+		rootSessionID:            lineage.RootSessionID,
+		subagentID:               lineage.SubagentID,
+		traceID:                  traceID,
+		turnID:                   payloadString(payload, "logical_turn_id", "turn_id"),
+		step:                     payloadInt(payload, "step"),
+		provider:                 payloadString(payload, "provider"),
+		model:                    payloadString(payload, "model"),
+		requestedReasoningEffort: payloadString(payload, "requested_reasoning_effort"),
+		reasoningEffort:          payloadString(payload, "reasoning_effort"),
+		stream:                   payloadString(payload, "stream_id") != "",
+		startedAt:                startedAt,
+		cacheEpoch:               payloadInt(payload, "prompt_cache_epoch"),
+		promptCacheKey:           payloadString(payload, "prompt_cache_key"),
+		promptFingerprint:        payloadString(payload, "prompt_fingerprint"),
 	}
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
@@ -346,24 +352,26 @@ func (c *collector) onRequestFinished(event runtimeevents.Event) {
 
 	finishedAt := now
 	record := cacheanalytics.BuildTerminalRecord(cacheanalytics.TerminalRecordInput{
-		LLMRequestID:      llmRequestID,
-		SessionID:         inflight.sessionID,
-		ParentSessionID:   inflight.parentSessionID,
-		RootSessionID:     inflight.rootSessionID,
-		SubagentID:        inflight.subagentID,
-		TraceID:           inflight.traceID,
-		TurnID:            inflight.turnID,
-		Step:              inflight.step,
-		Provider:          inflight.provider,
-		Model:             inflight.model,
-		Stream:            inflight.stream,
-		Attempt:           1,
-		StartedAt:         inflight.startedAt,
-		FinishedAt:        finishedAt,
-		CacheEpoch:        inflight.cacheEpoch,
-		PromptCacheKey:    inflight.promptCacheKey,
-		PromptFingerprint: inflight.promptFingerprint,
-		Payload:           payload,
+		LLMRequestID:             llmRequestID,
+		SessionID:                inflight.sessionID,
+		ParentSessionID:          inflight.parentSessionID,
+		RootSessionID:            inflight.rootSessionID,
+		SubagentID:               inflight.subagentID,
+		TraceID:                  inflight.traceID,
+		TurnID:                   inflight.turnID,
+		Step:                     inflight.step,
+		Provider:                 inflight.provider,
+		Model:                    inflight.model,
+		RequestedReasoningEffort: inflight.requestedReasoningEffort,
+		ReasoningEffort:          inflight.reasoningEffort,
+		Stream:                   inflight.stream,
+		Attempt:                  1,
+		StartedAt:                inflight.startedAt,
+		FinishedAt:               finishedAt,
+		CacheEpoch:               inflight.cacheEpoch,
+		PromptCacheKey:           inflight.promptCacheKey,
+		PromptFingerprint:        inflight.promptFingerprint,
+		Payload:                  payload,
 	})
 	c.persistRequestTerminal(record, c.sessionLineageMeta(record.SessionID, SessionMeta{
 		Provider: record.Provider,
@@ -417,23 +425,25 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 		inflight := orphan.inflight
 		finishedAt := now
 		record := cacheanalytics.BuildTerminalRecord(cacheanalytics.TerminalRecordInput{
-			LLMRequestID:      orphan.id,
-			SessionID:         inflight.sessionID,
-			ParentSessionID:   inflight.parentSessionID,
-			RootSessionID:     inflight.rootSessionID,
-			SubagentID:        inflight.subagentID,
-			TraceID:           inflight.traceID,
-			TurnID:            inflight.turnID,
-			Step:              inflight.step,
-			Provider:          inflight.provider,
-			Model:             inflight.model,
-			Stream:            inflight.stream,
-			StartedAt:         inflight.startedAt,
-			FinishedAt:        finishedAt,
-			CacheEpoch:        inflight.cacheEpoch,
-			PromptCacheKey:    inflight.promptCacheKey,
-			PromptFingerprint: inflight.promptFingerprint,
-			Interrupted:       true,
+			LLMRequestID:             orphan.id,
+			SessionID:                inflight.sessionID,
+			ParentSessionID:          inflight.parentSessionID,
+			RootSessionID:            inflight.rootSessionID,
+			SubagentID:               inflight.subagentID,
+			TraceID:                  inflight.traceID,
+			TurnID:                   inflight.turnID,
+			Step:                     inflight.step,
+			Provider:                 inflight.provider,
+			Model:                    inflight.model,
+			RequestedReasoningEffort: inflight.requestedReasoningEffort,
+			ReasoningEffort:          inflight.reasoningEffort,
+			Stream:                   inflight.stream,
+			StartedAt:                inflight.startedAt,
+			FinishedAt:               finishedAt,
+			CacheEpoch:               inflight.cacheEpoch,
+			PromptCacheKey:           inflight.promptCacheKey,
+			PromptFingerprint:        inflight.promptFingerprint,
+			Interrupted:              true,
 		})
 		c.persistRequestTerminal(record, c.sessionLineageMeta(record.SessionID, SessionMeta{}, SessionLineage{
 			ParentSessionID: inflight.parentSessionID,

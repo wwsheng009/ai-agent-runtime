@@ -205,6 +205,8 @@ backend/internal/cacheanalytics/
   "step": 3,                                // ReAct 步骤序号
   "provider": "anthropic",
   "model": "claude-...",
+  "requested_reasoning_effort": "max",      // loop 配置值（downgrade 前）
+  "reasoning_effort": "max",                // 实际构造进 LLMRequest 的值；空串 = 未发送
   "stream": true,
   "status": "success",                      // success | error | retrying
   "attempt": 1,                             // 重试序号（同一 llm_request_id 多 attempt 时取最终成功 attempt，明细另列）
@@ -661,6 +663,7 @@ sqlite 持久化回放、离线 `LogFileSource`（chataloganalytics 集成）、
 | llm_request_id | observe Correlation 同源；事件载荷 request id |
 | trace_id / turn_id / step | `llm.request.started/finished` 载荷（turn 字段名为 `logical_turn_id`，见 §5.1 命名勘误） |
 | provider / model / stream | 请求开始事件 |
+| requested_reasoning_effort / reasoning_effort | `llm.request.started` 载荷：前者是 loop 配置值，后者是实际进入 `LLMRequest` 的值（additive，历史记录为空） |
 | usage.* | 载荷 `usage_prompt_tokens` / `usage_completion_tokens` / `usage_cached_tokens` / `usage_cache_read_tokens` / `usage_cache_creation_tokens` / `usage_uncached_input_tokens` / `usage_cache_read_reported`（`internal/agent/loop.go:1838-1853`、`internal/chat/actor.go:4680-4706`） |
 | cache_hit_ratio / cache_status | Collector 统一计算（语义对齐 `loop.go:1854-1865`，扩展 write 档） |
 | cache_epoch / prompt_cache_key | 载荷 `prompt_cache_epoch` / `prompt_cache_key`（`loop.go:1393-1394`） |

@@ -135,20 +135,25 @@ type CacheRequestRecord struct {
 	// 等于 SessionID；子代理请求的 RootSessionID 指向根会话，父会话视图据此
 	// 展开全部后代。旧记录缺省为空，读取方按
 	// COALESCE(NULLIF(root_session_id,''), session_id) 降级为旧口径。
-	ParentSessionID string     `json:"parent_session_id,omitempty"`
-	RootSessionID   string     `json:"root_session_id,omitempty"`
-	SubagentID      string     `json:"subagent_id,omitempty"`
-	TraceID         string     `json:"trace_id,omitempty"`
-	TurnID          string     `json:"turn_id,omitempty"`
-	Step            int        `json:"step,omitempty"`
-	Provider        string     `json:"provider,omitempty"`
-	Model           string     `json:"model,omitempty"`
-	Stream          bool       `json:"stream,omitempty"`
-	Status          string     `json:"status"`
-	Attempt         int        `json:"attempt,omitempty"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	DurationMS      int64      `json:"duration_ms,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	RootSessionID   string `json:"root_session_id,omitempty"`
+	SubagentID      string `json:"subagent_id,omitempty"`
+	TraceID         string `json:"trace_id,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
+	Step            int    `json:"step,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	// RequestedReasoningEffort 是本次请求下发到 loop 的配置值（downgrade 前）；
+	// ReasoningEffort 是实际构造进 LLMRequest 的 effort。二者分开记录，便于在
+	// 缓存页直接看出"配置了 effort 但子请求未带上"这类链路丢失。
+	RequestedReasoningEffort string     `json:"requested_reasoning_effort,omitempty"`
+	ReasoningEffort          string     `json:"reasoning_effort,omitempty"`
+	Stream                   bool       `json:"stream,omitempty"`
+	Status                   string     `json:"status"`
+	Attempt                  int        `json:"attempt,omitempty"`
+	StartedAt                time.Time  `json:"started_at"`
+	FinishedAt               *time.Time `json:"finished_at,omitempty"`
+	DurationMS               int64      `json:"duration_ms,omitempty"`
 	// FirstTokenMS 首字时间（TTFT）：从本次尝试发起（llm.request.started）到
 	// 第一个流式增量（文本/思考/图片进度）到达的毫秒数。仅流式请求可观测；
 	// 0 表示未采集（非流式、历史记录或首个增量前就失败），前端必须显示

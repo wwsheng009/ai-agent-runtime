@@ -2969,6 +2969,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"prompt_cache_epoch": requestCacheEpoch,
 		"prompt_cache_key":   requestCacheKey,
 	}
+	// reasoning effort 观测：requested 是 loop 配置值，reasoning_effort 是
+	// 实际构造进 LLMRequest 的值（remembered downgrade 后可能为空）。两者随
+	// started 载荷进入 cacheanalytics / usageanalytics，缓存页据实际值展示；
+	// 分开记录可区分"未配置"与"配置了但未发送"。
+	if requested := strings.TrimSpace(loop.config.ReasoningEffort); requested != "" {
+		requestPayload["requested_reasoning_effort"] = requested
+	}
+	if effective := strings.TrimSpace(req.ReasoningEffort); effective != "" {
+		requestPayload["reasoning_effort"] = effective
+	}
 	// 父链归属（子代理运行由调度器经 loopRunOptions 注入）：随 llm.request.*
 	// 载荷落库，父会话统计据此把子代理请求归集到 root 会话。
 	if lineage := loop.runLineage; lineage.ParentSessionID != "" {

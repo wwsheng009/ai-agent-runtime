@@ -482,3 +482,28 @@ func TestUnderscoreAliasEventsAccepted(t *testing.T) {
 		t.Fatalf("expected not_reported, got %s", record.CacheStatus)
 	}
 }
+
+// TestCollectorCarriesReasoningEffortFromStartedPayload 锁定 started 载荷中的
+// requested/effective reasoning effort 进入缓存请求记录（缓存页展示来源）。
+func TestCollectorCarriesReasoningEffortFromStartedPayload(t *testing.T) {
+	bus, service := attachTest(t, 100)
+	src := service.Source()
+
+	publishStarted(bus, "s-effort", "req-effort", map[string]interface{}{
+		"requested_reasoning_effort": "max",
+		"reasoning_effort":           "high",
+	})
+	publishFinished(bus, "s-effort", "req-effort", true, map[string]interface{}{
+		"usage_prompt_tokens":     10,
+		"usage_completion_tokens": 1,
+		"usage_total_tokens":      11,
+	})
+
+	record, err := src.Request("s-effort", "req-effort")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if record.RequestedReasoningEffort != "max" || record.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q/%q, want max/high", record.RequestedReasoningEffort, record.ReasoningEffort)
+	}
+}
